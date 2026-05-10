@@ -492,15 +492,15 @@ func enableApp(id string) error {
 		}
 	}
 
-	state.Enabled = append(state.Enabled, id)
-	tmpl.Enabled = true
-	saveState()
-
-	// Bring up just this app's services
+	// Bring up just this app's services. Only record the enable if compose
+	// succeeds — otherwise the UI would show a running app that never started.
 	if err := composeUp(tmpl); err != nil {
 		return fmt.Errorf("compose up failed: %w", err)
 	}
 
+	state.Enabled = append(state.Enabled, id)
+	tmpl.Enabled = true
+	saveState()
 	return nil
 }
 
