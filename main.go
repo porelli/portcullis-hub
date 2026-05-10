@@ -118,7 +118,7 @@ type AppState struct {
 // Template is a discovered template with its source info.
 type Template struct {
 	ID       string   `json:"id"`
-	Source   string   `json:"source"` // "local" or repo name
+	Source   string   `json:"source"` // name of the source (template repo) this came from
 	Manifest Manifest `json:"manifest"`
 	Path     string   `json:"-"` // filesystem path
 	Enabled  bool     `json:"enabled"`
@@ -270,11 +270,9 @@ func discoverTemplates() {
 
 	templates = nil
 
-	// Local templates
-	localDir := filepath.Join(projectDir, "templates")
-	discoverFrom(localDir, "local")
-
-	// Remote repo templates
+	// Templates come exclusively from configured sources (git repos).
+	// The default source (porelli/portcullis-templates) is auto-added on first
+	// startup by autoLoadDefaultTemplates() — see DEFAULT_TEMPLATES_URL.
 	for _, src := range state.Sources {
 		if src.Path != "" {
 			discoverFrom(src.Path, src.Name)
@@ -868,6 +866,9 @@ func addSource(name, url string) error {
 }
 
 func removeSource(name string) error {
+	if name == "portcullis" {
+		return fmt.Errorf("cannot remove the default template source")
+	}
 	stateMu.Lock()
 	defer stateMu.Unlock()
 

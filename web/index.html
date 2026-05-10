@@ -191,7 +191,7 @@
               {{if .Enabled}}<span class="status-dot" data-status-id="{{.ID}}" title="Checking..."></span>{{end}}
               <span class="app-icon">{{.Manifest.Icon}}</span>
               <span class="app-name">{{.Manifest.Name}}</span>
-              <span class="app-source {{if eq .Source "local"}}badge-builtin{{else}}badge-community{{end}}">{{.Source}}</span>
+              <span class="app-source {{if eq .Source "portcullis"}}badge-builtin{{else}}badge-community{{end}}">{{.Source}}</span>
             </div>
             <div class="app-desc">{{.Manifest.Description}}</div>
             <div class="app-auth">
@@ -271,30 +271,24 @@
 
     <!-- Sources Tab -->
     <div class="tab-content" id="tab-sources">
-      <div class="category-title" style="margin-bottom: 1rem;">Built-in</div>
-      <div class="source-item">
-        <div class="source-info">
-          <div class="source-name">local</div>
-          <div class="source-url">templates/ directory (built-in templates)</div>
-        </div>
-      </div>
-
-      <div class="category-title" style="margin-top: 2rem; margin-bottom: 1rem;">Community / Private Repositories</div>
+      <div class="category-title" style="margin-bottom: 1rem;">Template Repositories</div>
 
       <div class="sources-list" id="sources-list">
         {{range .Sources}}
         <div class="source-item" data-name="{{.Name}}">
           <div class="source-info">
-            <div class="source-name">{{.Name}}</div>
+            <div class="source-name">{{.Name}}{{if eq .Name "portcullis"}} <span style="font-size: 0.6875rem; color: #3b82f6; margin-left: 0.5rem;">default</span>{{end}}</div>
             <div class="source-url">{{.URL}}</div>
           </div>
           <div class="source-actions">
+            {{if ne .Name "portcullis"}}
             <button class="btn btn-danger" onclick="removeSource('{{.Name}}')">Remove</button>
+            {{end}}
           </div>
         </div>
         {{end}}
         {{if not .Sources}}
-        <div class="empty" id="no-sources">No external template sources added yet.</div>
+        <div class="empty" id="no-sources">No template sources configured.</div>
         {{end}}
       </div>
 
