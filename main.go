@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -52,6 +53,23 @@ type Setting struct {
 	Target      *SettingTarget `yaml:"target" json:"target"`
 }
 
+// Port is a host port binding declared by a manifest. The Hub checks these
+// for collisions at enable-time and emits the effective bindings into the
+// per-app compose override so users can rebind or disable them from the UI.
+type Port struct {
+	Key             string `yaml:"key" json:"key"`
+	Label           string `yaml:"label" json:"label"`
+	Description     string `yaml:"description" json:"description"`
+	Container       int    `yaml:"container" json:"container"`
+	Protocol        string `yaml:"protocol" json:"protocol"` // tcp, udp
+	Default         int    `yaml:"default" json:"default"`
+	Bind            string `yaml:"bind" json:"bind"` // default "0.0.0.0"
+	Required        bool   `yaml:"required" json:"required"`
+	Service         string `yaml:"service" json:"service"`
+	NetworkModeHost bool   `yaml:"network_mode_host" json:"network_mode_host"`
+	Range           string `yaml:"range" json:"range"` // e.g. "49152-65535" (coturn media relays)
+}
+
 // ContainerStatus holds Docker container state info.
 type ContainerStatus struct {
 	Name   string `json:"name"`
@@ -66,9 +84,9 @@ type Manifest struct {
 	Icon        string            `yaml:"icon" json:"icon"`
 	Category    string            `yaml:"category" json:"category"`
 	Tags        []string          `yaml:"tags" json:"tags"`
-	Conflicts   []string          `yaml:"conflicts" json:"conflicts"`
 	Auth        Auth              `yaml:"auth" json:"auth"`
 	Settings    []Setting         `yaml:"settings" json:"settings"`
+	Ports       []Port            `yaml:"ports" json:"ports"`
 	Env         []EnvVar          `yaml:"env" json:"env"`
 	Clients     []KeycloakClient  `yaml:"keycloak_clients" json:"keycloak_clients"`
 	ConfigFiles []ConfigFile      `yaml:"config_files" json:"config_files"`
@@ -435,13 +453,9 @@ func enableApp(id string) error {
 		return fmt.Errorf("template not found: %s", id)
 	}
 
-	// Check conflicts
-	for _, conflict := range tmpl.Manifest.Conflicts {
-		for _, enabled := range state.Enabled {
-			if enabled == conflict {
-				return fmt.Errorf("%s conflicts with enabled app %s", id, conflict)
-			}
-		}
+	// Check for host port collisions with already-enabled apps.
+	if err := checkPortCollisions(tmpl); err != nil {
+		return err
 	}
 
 	// Check if already enabled
@@ -454,6 +468,11 @@ func enableApp(id string) error {
 	// Generate per-app .env file
 	if err := generateAppEnv(tmpl); err != nil {
 		return fmt.Errorf("env setup failed: %w", err)
+	}
+
+	// Write compose override (ports + volume mounts) from current settings.
+	if err := generateComposeOverride(tmpl, state.Settings[tmpl.ID]); err != nil {
+		return fmt.Errorf("override write failed: %w", err)
 	}
 
 	// Copy config files
@@ -528,6 +547,145 @@ func findTemplate(id string) *Template {
 	return nil
 }
 
+// portBinding is the effective (resolved) binding for one declared port after
+// applying user overrides from state.Settings.
+type portBinding struct {
+	AppID           string
+	Key             string
+	Bind            string
+	Port            int
+	Protocol        string
+	NetworkModeHost bool
+	RangeStart      int
+	RangeEnd        int
+}
+
+// resolvePortBindings returns the effective bindings for an app given the
+// current state.Settings. Caller MUST hold stateMu (read or write).
+func resolvePortBindings(tmpl *Template) []portBinding {
+	values := state.Settings[tmpl.ID]
+	out := make([]portBinding, 0, len(tmpl.Manifest.Ports))
+	for _, p := range tmpl.Manifest.Ports {
+		proto := strings.ToLower(p.Protocol)
+		if proto == "" {
+			proto = "tcp"
+		}
+		bind := p.Bind
+		if v, ok := values[p.Key+"_BIND"]; ok && v != "" {
+			bind = v
+		}
+		if bind == "" {
+			bind = "0.0.0.0"
+		}
+		pb := portBinding{
+			AppID:           tmpl.ID,
+			Key:             p.Key,
+			Bind:            bind,
+			Protocol:        proto,
+			NetworkModeHost: p.NetworkModeHost,
+		}
+		// Port ranges (e.g. coturn media relays) — not user-configurable.
+		if p.Range != "" {
+			if a, b, ok := parsePortRange(p.Range); ok {
+				pb.RangeStart, pb.RangeEnd = a, b
+				out = append(out, pb)
+				continue
+			}
+		}
+		port := p.Default
+		if v, ok := values[p.Key]; ok {
+			if v == "" && !p.Required {
+				continue // user disabled this port
+			}
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				port = n
+			}
+		}
+		if port <= 0 {
+			continue
+		}
+		pb.Port = port
+		out = append(out, pb)
+	}
+	return out
+}
+
+func parsePortRange(s string) (int, int, bool) {
+	parts := strings.SplitN(s, "-", 2)
+	if len(parts) != 2 {
+		return 0, 0, false
+	}
+	a, err1 := strconv.Atoi(strings.TrimSpace(parts[0]))
+	b, err2 := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if err1 != nil || err2 != nil || a <= 0 || b < a {
+		return 0, 0, false
+	}
+	return a, b, true
+}
+
+// bindsOverlap returns true if two bind addresses could conflict on the host.
+// 0.0.0.0 claims every interface, so it conflicts with any other bind.
+func bindsOverlap(a, b string) bool {
+	if a == b {
+		return true
+	}
+	if a == "0.0.0.0" || b == "0.0.0.0" {
+		return true
+	}
+	return false
+}
+
+// portOverlap returns true if two bindings claim overlapping (port|range, protocol).
+func portOverlap(a, b portBinding) bool {
+	if a.Protocol != b.Protocol {
+		return false
+	}
+	if !bindsOverlap(a.Bind, b.Bind) {
+		return false
+	}
+	aStart, aEnd := a.Port, a.Port
+	if a.RangeEnd > 0 {
+		aStart, aEnd = a.RangeStart, a.RangeEnd
+	}
+	bStart, bEnd := b.Port, b.Port
+	if b.RangeEnd > 0 {
+		bStart, bEnd = b.RangeStart, b.RangeEnd
+	}
+	return aStart <= bEnd && bStart <= aEnd
+}
+
+// checkPortCollisions refuses enable if the candidate's ports overlap with any
+// already-enabled app's ports. Caller MUST hold stateMu.
+func checkPortCollisions(tmpl *Template) error {
+	candidate := resolvePortBindings(tmpl)
+	if len(candidate) == 0 {
+		return nil
+	}
+	for _, enabledID := range state.Enabled {
+		if enabledID == tmpl.ID {
+			continue
+		}
+		other := findTemplate(enabledID)
+		if other == nil {
+			continue
+		}
+		existing := resolvePortBindings(other)
+		for _, c := range candidate {
+			for _, e := range existing {
+				if !portOverlap(c, e) {
+					continue
+				}
+				portDesc := fmt.Sprintf("%d/%s", c.Port, c.Protocol)
+				if c.RangeEnd > 0 {
+					portDesc = fmt.Sprintf("%d-%d/%s", c.RangeStart, c.RangeEnd, c.Protocol)
+				}
+				return fmt.Errorf("port %s already claimed by enabled app %s — change %s in its settings to free it", portDesc, enabledID, e.Key)
+			}
+		}
+	}
+	return nil
+}
+
 // ── Compose management ───────────────────────────────────
 
 func appProjectName(tmpl *Template) string {
@@ -586,7 +744,9 @@ func composeDown(tmpl *Template) error {
 	return cmd.Run()
 }
 
-// generateComposeOverride writes a compose override file with user-configured volume mounts.
+// generateComposeOverride writes a compose override file with user-configured
+// volume mounts and port bindings. Port ranges and network_mode: host entries
+// are declared in the base compose.yml, not the override.
 func generateComposeOverride(tmpl *Template, values map[string]string) error {
 	overridePath := appOverridePath(tmpl)
 	serviceMounts := make(map[string][]string)
@@ -600,16 +760,71 @@ func generateComposeOverride(tmpl *Template, values map[string]string) error {
 			serviceMounts[s.Target.Service] = append(serviceMounts[s.Target.Service], mount)
 		}
 	}
-	if len(serviceMounts) == 0 {
+
+	servicePorts := make(map[string][]string)
+	for _, p := range tmpl.Manifest.Ports {
+		if p.Service == "" || p.NetworkModeHost || p.Range != "" {
+			continue
+		}
+		proto := strings.ToLower(p.Protocol)
+		if proto == "" {
+			proto = "tcp"
+		}
+		bind := p.Bind
+		if v, ok := values[p.Key+"_BIND"]; ok && v != "" {
+			bind = v
+		}
+		if bind == "" {
+			bind = "0.0.0.0"
+		}
+		host := p.Default
+		if v, ok := values[p.Key]; ok {
+			if v == "" && !p.Required {
+				continue
+			}
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				host = n
+			}
+		}
+		if host <= 0 || p.Container <= 0 {
+			continue
+		}
+		entry := fmt.Sprintf("\"%s:%d:%d/%s\"", bind, host, p.Container, proto)
+		servicePorts[p.Service] = append(servicePorts[p.Service], entry)
+	}
+
+	services := make(map[string]bool)
+	for svc := range serviceMounts {
+		services[svc] = true
+	}
+	for svc := range servicePorts {
+		services[svc] = true
+	}
+	if len(services) == 0 {
 		os.Remove(overridePath)
 		return nil
 	}
+	svcNames := make([]string, 0, len(services))
+	for svc := range services {
+		svcNames = append(svcNames, svc)
+	}
+	sort.Strings(svcNames)
+
 	var buf strings.Builder
 	buf.WriteString("# Auto-generated by Portcullis Hub -- do not edit\nservices:\n")
-	for svc, mounts := range serviceMounts {
-		buf.WriteString(fmt.Sprintf("  %s:\n    volumes:\n", svc))
-		for _, m := range mounts {
-			buf.WriteString(fmt.Sprintf("      - %s\n", m))
+	for _, svc := range svcNames {
+		buf.WriteString(fmt.Sprintf("  %s:\n", svc))
+		if mounts := serviceMounts[svc]; len(mounts) > 0 {
+			buf.WriteString("    volumes:\n")
+			for _, m := range mounts {
+				buf.WriteString(fmt.Sprintf("      - %s\n", m))
+			}
+		}
+		if ports := servicePorts[svc]; len(ports) > 0 {
+			buf.WriteString("    ports:\n")
+			for _, p := range ports {
+				buf.WriteString(fmt.Sprintf("      - %s\n", p))
+			}
 		}
 	}
 	return os.WriteFile(overridePath, []byte(buf.String()), 0644)
@@ -1101,13 +1316,45 @@ func handleTemplateSettings(w http.ResponseWriter, r *http.Request) {
 		stateMu.RUnlock()
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"definitions": tmpl.Manifest.Settings,
+			"ports":       tmpl.Manifest.Ports,
 			"values":      values,
 		})
 	case http.MethodPut:
 		var values map[string]string
 		json.NewDecoder(r.Body).Decode(&values)
+		// Validate declared ports: numeric, in range, or empty (only if optional).
+		for _, p := range tmpl.Manifest.Ports {
+			v, ok := values[p.Key]
+			if !ok {
+				continue
+			}
+			if v == "" {
+				if p.Required {
+					http.Error(w, fmt.Sprintf("port %s is required", p.Key), 400)
+					return
+				}
+				continue
+			}
+			n, err := strconv.Atoi(v)
+			if err != nil || n < 1 || n > 65535 {
+				http.Error(w, fmt.Sprintf("port %s must be 1-65535", p.Key), 400)
+				return
+			}
+		}
 		stateMu.Lock()
+		prev := state.Settings[id]
 		state.Settings[id] = values
+		// Re-check port collisions if this app is currently enabled.
+		var collisionErr error
+		if tmpl.Enabled {
+			collisionErr = checkPortCollisions(tmpl)
+		}
+		if collisionErr != nil {
+			state.Settings[id] = prev
+			stateMu.Unlock()
+			http.Error(w, collisionErr.Error(), 409)
+			return
+		}
 		saveState()
 		stateMu.Unlock()
 		// Write text/boolean/select settings to per-app .env

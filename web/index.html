@@ -34,7 +34,6 @@
     .app-card:hover { transform: translateY(-1px); border-color: #334155; }
     .app-card.enabled { border-color: #22c55e33; }
     .app-card.expanded { border-color: #3b82f6; }
-    .app-card.conflict { opacity: 0.5; }
     .app-header { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.75rem; }
     .app-icon { font-size: 1.75rem; }
     .app-name { font-size: 1.125rem; font-weight: 600; }
@@ -61,7 +60,6 @@
     .app-url { font-size: 0.8125rem; color: #3b82f6; text-decoration: none; display: block; margin-bottom: 0.25rem; }
     .app-url:hover { text-decoration: underline; }
     .app-footer { display: flex; justify-content: space-between; align-items: center; }
-    .app-conflicts { font-size: 0.75rem; color: #f59e0b; }
 
     /* Toggle button */
     .toggle { padding: 0.5rem 1.25rem; border: none; border-radius: 0.375rem; font-size: 0.875rem; font-weight: 500; cursor: pointer; transition: all 0.2s; }
@@ -94,6 +92,25 @@
     .settings-form input:focus, .settings-form select:focus { outline: none; border-color: #3b82f6; }
     .settings-form input::placeholder { color: #475569; }
     .settings-empty { color: #64748b; font-size: 0.875rem; }
+    .settings-form input[type="number"] { width: 100%; padding: 0.5rem 0.75rem; background: #0f172a; border: 1px solid #334155; border-radius: 0.375rem; color: #e2e8f0; font-size: 0.875rem; font-family: inherit; }
+
+    /* Ports */
+    .ports-section { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid #1e293b; }
+    .ports-title { font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: #64748b; margin-bottom: 0.75rem; }
+    .port-row { padding: 0.75rem; background: #0f172a; border: 1px solid #1e293b; border-radius: 0.5rem; margin-bottom: 0.5rem; }
+    .port-meta { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.25rem; }
+    .port-label { font-size: 0.875rem; font-weight: 500; }
+    .port-container { font-size: 0.75rem; color: #64748b; margin-left: auto; }
+    .port-badge { font-size: 0.65rem; padding: 0.125rem 0.375rem; border-radius: 0.25rem; font-weight: 600; letter-spacing: 0.03em; }
+    .port-badge.port-tcp { background: #3b82f622; color: #3b82f6; border: 1px solid #3b82f644; }
+    .port-badge.port-udp { background: #a855f722; color: #a855f7; border: 1px solid #a855f744; }
+    .port-badge.port-host { background: #f59e0b22; color: #f59e0b; border: 1px solid #f59e0b44; }
+    .port-badge.port-range { background: #64748b22; color: #94a3b8; border: 1px solid #64748b44; font-family: monospace; }
+    .port-inputs { display: grid; grid-template-columns: 1fr 120px auto; gap: 0.5rem; margin-top: 0.375rem; }
+    .port-inputs .port-bind { font-family: monospace; }
+    .port-inputs .port-host { font-family: monospace; text-align: center; }
+    .port-hint { display: block; margin-top: 0.25rem; color: #64748b; font-size: 0.7rem; }
+    .port-locked { display: block; margin-top: 0.25rem; color: #94a3b8; font-style: italic; }
     .auth-notes { color: #94a3b8; font-size: 0.8125rem; background: #0f172a; padding: 0.75rem 1rem; border-radius: 0.5rem; margin-bottom: 1rem; border-left: 3px solid #3b82f6; }
 
     /* Status list */
@@ -186,7 +203,7 @@
         <div class="category-title">{{$category}}</div>
         <div class="apps">
           {{range $apps}}
-          <div class="app-card {{if .Enabled}}enabled{{end}}" data-id="{{.ID}}" data-conflicts="{{range .Manifest.Conflicts}}{{.}},{{end}}" onclick="toggleDetail('{{.ID}}', event)">
+          <div class="app-card {{if .Enabled}}enabled{{end}}" data-id="{{.ID}}" onclick="toggleDetail('{{.ID}}', event)">
             <div class="app-header">
               {{if .Enabled}}<span class="status-dot" data-status-id="{{.ID}}" title="Checking..."></span>{{end}}
               <span class="app-icon">{{.Manifest.Icon}}</span>
@@ -225,11 +242,7 @@
             </div>
             {{end}}
             <div class="app-footer">
-              {{if .Manifest.Conflicts}}
-              <span class="app-conflicts">Conflicts: {{range $i, $c := .Manifest.Conflicts}}{{if $i}}, {{end}}{{$c}}{{end}}</span>
-              {{else}}
               <span></span>
-              {{end}}
               {{if .Enabled}}
               <button class="toggle disable" onclick="toggleApp('{{.ID}}', false, event)">Disable</button>
               {{else}}
@@ -402,12 +415,14 @@
       const container = document.getElementById('detail-settings-' + id);
       try {
         const data = await apiGet('/api/templates/settings/' + id);
-        if (!data.definitions || data.definitions.length === 0) {
+        const hasSettings = data.definitions && data.definitions.length > 0;
+        const hasPorts = data.ports && data.ports.length > 0;
+        if (!hasSettings && !hasPorts) {
           container.innerHTML = '<p class="settings-empty">No configurable settings for this app.</p>';
           return;
         }
         let html = '<form class="settings-form" onsubmit="saveSettings(event, \'' + id + '\')">';
-        for (const s of data.definitions) {
+        for (const s of (data.definitions || [])) {
           const val = (data.values && data.values[s.key]) || s.default || '';
           html += '<div class="form-group">';
           html += '<label>' + escapeHtml(s.label) + '</label>';
@@ -426,11 +441,54 @@
           }
           html += '</div>';
         }
+        if (hasPorts) {
+          html += '<div class="ports-section"><div class="ports-title">Host Ports</div>';
+          for (const p of data.ports) {
+            const proto = (p.protocol || 'tcp').toLowerCase();
+            const bindKey = p.key + '_BIND';
+            const vals = data.values || {};
+            const hostVal = (p.key in vals) ? vals[p.key] : String(p.default || '');
+            const bindVal = vals[bindKey] || p.bind || '0.0.0.0';
+            const isRange = !!p.range;
+            const isHostNet = !!p.network_mode_host;
+            const locked = isRange || isHostNet;
+            html += '<div class="port-row">';
+            html += '<div class="port-meta">';
+            html += '<span class="port-label">' + escapeHtml(p.label || p.key) + '</span>';
+            html += '<span class="port-badge port-' + proto + '">' + proto.toUpperCase() + '</span>';
+            if (isHostNet) html += '<span class="port-badge port-host">host net</span>';
+            if (isRange) html += '<span class="port-badge port-range">' + escapeHtml(p.range) + '</span>';
+            html += '<span class="port-container">&rarr; :' + (p.container || '') + '</span>';
+            html += '</div>';
+            if (p.description) html += '<small>' + escapeHtml(p.description) + '</small>';
+            if (locked) {
+              html += '<small class="port-locked">This port is fixed by the app and cannot be rebound.</small>';
+            } else {
+              html += '<div class="port-inputs">';
+              html += '<input type="text" name="' + bindKey + '" value="' + escapeHtml(bindVal) + '" placeholder="0.0.0.0" class="port-bind">';
+              html += '<input type="number" name="' + p.key + '" value="' + escapeHtml(hostVal) + '" min="1" max="65535" placeholder="' + (p.required ? 'required' : 'disabled') + '" class="port-host">';
+              html += '<button type="button" class="btn btn-sm" onclick="resetPort(this, \'' + p.key + '\', ' + (p.default || 0) + ', \'' + escapeHtml(p.bind || '0.0.0.0') + '\')">Reset</button>';
+              html += '</div>';
+              if (!p.required) html += '<small class="port-hint">Leave host port empty to disable this binding.</small>';
+            }
+            html += '</div>';
+          }
+          html += '</div>';
+        }
         html += '<button type="submit" class="btn btn-primary btn-sm">Save Settings</button></form>';
         container.innerHTML = html;
       } catch (e) {
         container.innerHTML = '<p class="settings-empty">Failed to load settings.</p>';
       }
+    }
+
+    function resetPort(btn, key, defPort, defBind) {
+      const form = btn.closest('form');
+      if (!form) return;
+      const host = form.elements[key];
+      const bind = form.elements[key + '_BIND'];
+      if (host) host.value = defPort ? String(defPort) : '';
+      if (bind) bind.value = defBind || '0.0.0.0';
     }
 
     async function saveSettings(e, id) {
@@ -439,13 +497,13 @@
       const form = e.target;
       const values = {};
       for (const el of form.elements) {
-        if (el.name) values[el.name] = el.value;
+        if (el.name) values[el.name] = el.value.trim();
       }
       try {
         await apiPut('/api/templates/settings/' + id, values);
         showToast('Settings saved. App will restart if running.', 'success');
       } catch (err) {
-        showToast('Failed to save: ' + err.message, 'error');
+        showToast(err.message || 'Failed to save settings', 'error');
       }
     }
 
@@ -737,18 +795,6 @@
       } catch (e) { showToast(e.message, 'error'); }
     }
 
-    // ── Conflict marking ──────────────────────────────────
-    document.querySelectorAll('.app-card.enabled').forEach(card => {
-      const conflicts = card.dataset.conflicts.split(',').filter(Boolean);
-      conflicts.forEach(c => {
-        const cc = document.querySelector(`[data-id="${c}"]`);
-        if (cc && !cc.classList.contains('enabled')) {
-          cc.classList.add('conflict');
-          const btn = cc.querySelector('.toggle');
-          if (btn) { btn.disabled = true; btn.title = 'Conflicts with ' + card.dataset.id; }
-        }
-      });
-    });
   </script>
 </body>
 </html>
