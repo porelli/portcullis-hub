@@ -113,6 +113,16 @@
     .port-locked { display: block; margin-top: 0.25rem; color: #94a3b8; font-style: italic; }
     .auth-notes { color: #94a3b8; font-size: 0.8125rem; background: #0f172a; padding: 0.75rem 1rem; border-radius: 0.5rem; margin-bottom: 1rem; border-left: 3px solid #3b82f6; }
 
+    /* Access policy */
+    .policy-section { padding: 0.875rem 1rem; background: #0f172a; border: 1px solid #1e293b; border-radius: 0.5rem; margin-bottom: 1rem; }
+    .policy-title { display: flex; align-items: center; justify-content: space-between; font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: #64748b; margin-bottom: 0.5rem; }
+    .policy-score { font-size: 0.6875rem; font-weight: 600; color: #22c55e; background: #22c55e22; border: 1px solid #22c55e44; padding: 0.125rem 0.5rem; border-radius: 9999px; text-transform: none; letter-spacing: 0; }
+    .policy-factor { display: flex; align-items: center; gap: 0.5rem; font-size: 0.875rem; padding: 0.25rem 0; cursor: pointer; }
+    .policy-factor input[type="checkbox"] { accent-color: #3b82f6; }
+    .policy-op { display: flex; gap: 1rem; margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px dashed #1e293b; font-size: 0.8125rem; }
+    .policy-op label { cursor: pointer; }
+    .policy-inherit { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px dashed #1e293b; font-size: 0.8125rem; color: #94a3b8; cursor: pointer; }
+
     /* Status list */
     .status-list { display: flex; flex-direction: column; gap: 0.5rem; }
     .status-row { display: flex; align-items: center; gap: 0.75rem; background: #0f172a; padding: 0.625rem 1rem; border-radius: 0.375rem; font-size: 0.8125rem; }
@@ -194,6 +204,7 @@
     <div class="tabs">
       <div class="tab active" data-tab="catalog">App Catalog</div>
       <div class="tab" data-tab="sources">Template Sources</div>
+      <div class="tab" data-tab="settings">Settings</div>
     </div>
 
     <!-- Catalog Tab -->
@@ -322,6 +333,17 @@
         <span style="color: #64748b; font-size: 0.8125rem; margin-left: 0.75rem;">Pull latest from all repositories</span>
       </div>
     </div>
+
+    <!-- Settings Tab -->
+    <div class="tab-content" id="tab-settings">
+      <div class="category-title" style="margin-bottom: 1rem;">Default access policy</div>
+      <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
+        Applies to every app that hasn't set its own policy. Forward-auth apps fall back to this
+        default at the Keycloak layer; per-app overrides are enforced by <code style="background: #0f172a; padding: 0.125rem 0.375rem; border-radius: 0.25rem;">group-gate</code>
+        reading the <code style="background: #0f172a; padding: 0.125rem 0.375rem; border-radius: 0.25rem;">acr</code> / <code style="background: #0f172a; padding: 0.125rem 0.375rem; border-radius: 0.25rem;">amr</code> claims from the access token.
+      </p>
+      <div id="global-policy-form"></div>
+    </div>
   </div>
 
   <div class="toast" id="toast"></div>
@@ -334,6 +356,7 @@
         document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
         tab.classList.add('active');
         document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
+        if (tab.dataset.tab === 'settings') loadGlobalSettings();
       });
     });
 
@@ -411,17 +434,67 @@
     }
 
     // ── Settings ──────────────────────────────────────────
+    const POLICY_FACTORS = [
+      { key: 'mtls', label: 'mTLS (client certificate)' },
+      { key: 'webauthn', label: 'WebAuthn (hardware key)' },
+      { key: 'password', label: 'Username + password' }
+    ];
+
+    function policyDescription(p) {
+      if (!p || !p.factors || p.factors.length === 0) return 'Public (no authentication)';
+      if (p.factors.length === 1) return p.factors[0];
+      const op = p.op === 'all' ? 'all of' : 'any of';
+      return op + ' ' + p.factors.join(', ');
+    }
+
+    function renderPolicyBlock(idPrefix, current, effective, defaultPolicy, safetyScore) {
+      const selected = new Set((current && current.factors) || effective.factors || []);
+      const isOverride = current !== null && current !== undefined;
+      let html = '<div class="policy-section">';
+      html += '<div class="policy-title">Access policy';
+      if (safetyScore !== undefined) html += '<span class="policy-score" title="Safety score (0 public · 1 pwd · 2 hwk · 3 mtls · +0.5 per extra required factor)">score ' + Number(safetyScore).toFixed(1) + '</span>';
+      html += '</div>';
+      for (const f of POLICY_FACTORS) {
+        const checked = selected.has(f.key) ? ' checked' : '';
+        html += '<label class="policy-factor"><input type="checkbox" name="' + idPrefix + '-factor" value="' + f.key + '"' + checked + '> ' + escapeHtml(f.label) + '</label>';
+      }
+      const op = (current && current.op) || effective.op || 'any';
+      html += '<div class="policy-op" data-prefix="' + idPrefix + '">';
+      html += '<label><input type="radio" name="' + idPrefix + '-op" value="all"' + (op === 'all' ? ' checked' : '') + '> Require all checked</label>';
+      html += '<label><input type="radio" name="' + idPrefix + '-op" value="any"' + (op !== 'all' ? ' checked' : '') + '> Any of checked</label>';
+      html += '</div>';
+      if (defaultPolicy && idPrefix !== 'global') {
+        html += '<label class="policy-inherit"><input type="checkbox" name="' + idPrefix + '-inherit"' + (isOverride ? '' : ' checked') + '> Inherit global default (' + escapeHtml(policyDescription(defaultPolicy)) + ')</label>';
+      }
+      html += '</div>';
+      return html;
+    }
+
+    function collectPolicy(form, idPrefix) {
+      // Returns { inherit: bool, policy: {factors, op} }
+      const inheritEl = form.querySelector('input[name="' + idPrefix + '-inherit"]');
+      if (inheritEl && inheritEl.checked) return { inherit: true, policy: null };
+      const factors = [];
+      form.querySelectorAll('input[name="' + idPrefix + '-factor"]:checked').forEach(el => factors.push(el.value));
+      const opEl = form.querySelector('input[name="' + idPrefix + '-op"]:checked');
+      const op = opEl ? opEl.value : 'any';
+      return { inherit: false, policy: { factors, op: factors.length > 1 ? op : '' } };
+    }
+
     async function loadSettings(id) {
       const container = document.getElementById('detail-settings-' + id);
       try {
         const data = await apiGet('/api/templates/settings/' + id);
         const hasSettings = data.definitions && data.definitions.length > 0;
         const hasPorts = data.ports && data.ports.length > 0;
+        // Access policy always rendered — every app gets a policy knob.
+        let html = '<form class="settings-form" onsubmit="saveSettings(event, \'' + id + '\')">';
+        html += renderPolicyBlock(id, data.auth_policy, data.effective_policy || {factors:[], op:''}, data.default_policy, data.safety_score);
         if (!hasSettings && !hasPorts) {
-          container.innerHTML = '<p class="settings-empty">No configurable settings for this app.</p>';
+          html += '<button type="submit" class="btn btn-primary btn-sm">Save</button></form>';
+          container.innerHTML = html;
           return;
         }
-        let html = '<form class="settings-form" onsubmit="saveSettings(event, \'' + id + '\')">';
         for (const s of (data.definitions || [])) {
           const val = (data.values && data.values[s.key]) || s.default || '';
           html += '<div class="form-group">';
@@ -495,15 +568,54 @@
       e.preventDefault();
       e.stopPropagation();
       const form = e.target;
-      const values = {};
+      const payload = {};
+      // Non-policy fields (text inputs, selects, port inputs, etc.)
+      const policySuffixes = [id + '-factor', id + '-op', id + '-inherit'];
       for (const el of form.elements) {
-        if (el.name) values[el.name] = el.value.trim();
+        if (!el.name) continue;
+        if (policySuffixes.includes(el.name)) continue;
+        payload[el.name] = el.value.trim();
+      }
+      const { inherit, policy } = collectPolicy(form, id);
+      if (inherit) {
+        payload._auth_policy_inherit = 'true';
+      } else {
+        payload._auth_policy = policy;
       }
       try {
-        await apiPut('/api/templates/settings/' + id, values);
-        showToast('Settings saved. App will restart if running.', 'success');
+        await apiPut('/api/templates/settings/' + id, payload);
+        showToast('Saved. App will restart if running.', 'success');
+        // Re-render so the new effective policy + score show.
+        loadSettings(id);
       } catch (err) {
         showToast(err.message || 'Failed to save settings', 'error');
+      }
+    }
+
+    async function loadGlobalSettings() {
+      const container = document.getElementById('global-policy-form');
+      try {
+        const data = await apiGet('/api/settings');
+        const dp = data.default_auth_policy || { factors: [], op: '' };
+        let html = '<form class="settings-form" onsubmit="saveGlobalSettings(event)">';
+        html += renderPolicyBlock('global', dp, dp, null, data.default_safety_score);
+        html += '<button type="submit" class="btn btn-primary btn-sm">Save default</button></form>';
+        container.innerHTML = html;
+      } catch (err) {
+        container.innerHTML = '<p class="settings-empty">Failed to load settings.</p>';
+      }
+    }
+
+    async function saveGlobalSettings(e) {
+      e.preventDefault();
+      const form = e.target;
+      const { policy } = collectPolicy(form, 'global');
+      try {
+        await apiPut('/api/settings', { default_auth_policy: policy });
+        showToast('Default policy saved.', 'success');
+        loadGlobalSettings();
+      } catch (err) {
+        showToast(err.message || 'Failed to save default', 'error');
       }
     }
 

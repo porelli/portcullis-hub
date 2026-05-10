@@ -125,12 +125,22 @@ type Source struct {
 	Path string `json:"path" yaml:"path"` // local path after clone
 }
 
+// AuthPolicy is a per-app (or global default) authentication requirement.
+// Factors is a subset of {"mtls","webauthn","password"}. Op is "any" or "all"
+// (ignored when len(Factors) <= 1). An empty Factors list means public.
+type AuthPolicy struct {
+	Factors []string `json:"factors" yaml:"factors"`
+	Op      string   `json:"op" yaml:"op"`
+}
+
 // AppState tracks which apps are enabled and their settings.
 type AppState struct {
-	Enabled        []string                     `json:"enabled" yaml:"enabled"`
-	Sources        []Source                     `json:"sources" yaml:"sources"`
-	Settings       map[string]map[string]string `json:"settings" yaml:"settings"`
-	MigrateVersion int                          `json:"migrate_version" yaml:"migrate_version"`
+	Enabled         []string                     `json:"enabled" yaml:"enabled"`
+	Sources         []Source                     `json:"sources" yaml:"sources"`
+	Settings        map[string]map[string]string `json:"settings" yaml:"settings"`
+	AuthPolicies    map[string]AuthPolicy        `json:"auth_policies" yaml:"auth_policies"`
+	DefaultPolicy   AuthPolicy                   `json:"default_auth_policy" yaml:"default_auth_policy"`
+	MigrateVersion  int                          `json:"migrate_version" yaml:"migrate_version"`
 }
 
 // Template is a discovered template with its source info.
@@ -227,6 +237,12 @@ func main() {
 	discoverTemplates()
 	migrateToIsolatedStacks()
 
+	// Seed the group-gate policy file so first-request enforcement has a
+	// valid document to read even on a brand-new deployment.
+	if err := writeGroupGatePolicy(); err != nil {
+		log.Printf("auth-policy: initial group-gate policy write failed: %v", err)
+	}
+
 	mux := http.NewServeMux()
 
 	// Pages
@@ -241,6 +257,7 @@ func main() {
 	mux.HandleFunc("/api/sources/remove", handleRemoveSource)
 	mux.HandleFunc("/api/sources/sync", handleSyncSources)
 	mux.HandleFunc("/api/status", handleStatus)
+	mux.HandleFunc("/api/settings", handleSettings)
 	mux.HandleFunc("/api/templates/settings/", handleTemplateSettings)
 	mux.HandleFunc("/api/templates/status/", handleTemplateStatus)
 	mux.HandleFunc("/api/templates/logs/", handleTemplateLogs)
@@ -266,12 +283,18 @@ func statePath() string {
 func loadState() {
 	data, err := os.ReadFile(statePath())
 	if err != nil {
-		state = AppState{Settings: make(map[string]map[string]string)}
+		state = AppState{
+			Settings:     make(map[string]map[string]string),
+			AuthPolicies: make(map[string]AuthPolicy),
+		}
 		return
 	}
 	yaml.Unmarshal(data, &state)
 	if state.Settings == nil {
 		state.Settings = make(map[string]map[string]string)
+	}
+	if state.AuthPolicies == nil {
+		state.AuthPolicies = make(map[string]AuthPolicy)
 	}
 }
 
@@ -686,6 +709,293 @@ func checkPortCollisions(tmpl *Template) error {
 	return nil
 }
 
+// ── Auth policies (mTLS / WebAuthn / Password, AND / OR) ─
+
+// Mapping of factor name to (LoA level, amr claim value, acr claim value).
+var factorLoA = map[string]int{"password": 1, "webauthn": 2, "mtls": 3}
+var factorACR = map[string]string{"password": "pwd", "webauthn": "hwk", "mtls": "mtls"}
+
+// resolvePolicy returns the effective policy for an app: the per-app override
+// if set, else the global default, else an empty (public) policy. Caller must
+// hold stateMu (read or write).
+func resolvePolicy(appID string) AuthPolicy {
+	if p, ok := state.AuthPolicies[appID]; ok {
+		return p
+	}
+	return state.DefaultPolicy
+}
+
+// normalizePolicy trims and lower-cases factor names, drops unknown values,
+// and normalizes the op field (forces "" when ≤1 factor, forces "any" otherwise
+// when missing).
+func normalizePolicy(p AuthPolicy) AuthPolicy {
+	out := AuthPolicy{}
+	seen := map[string]bool{}
+	for _, f := range p.Factors {
+		f = strings.ToLower(strings.TrimSpace(f))
+		if _, ok := factorLoA[f]; !ok {
+			continue
+		}
+		if seen[f] {
+			continue
+		}
+		seen[f] = true
+		out.Factors = append(out.Factors, f)
+	}
+	sort.Strings(out.Factors)
+	if len(out.Factors) <= 1 {
+		out.Op = ""
+	} else {
+		op := strings.ToLower(strings.TrimSpace(p.Op))
+		if op != "all" {
+			op = "any"
+		}
+		out.Op = op
+	}
+	return out
+}
+
+// policyToLoA returns the Level of Authentication a client should request to
+// satisfy the policy. 0 for public; min-factor-LoA for "any"; max-factor-LoA
+// for "all" (the strongest path).
+func policyToLoA(p AuthPolicy) int {
+	if len(p.Factors) == 0 {
+		return 0
+	}
+	if p.Op == "all" {
+		max := 0
+		for _, f := range p.Factors {
+			if l, ok := factorLoA[f]; ok && l > max {
+				max = l
+			}
+		}
+		return max
+	}
+	// "any" or single factor
+	min := 0
+	for _, f := range p.Factors {
+		if l, ok := factorLoA[f]; ok && (min == 0 || l < min) {
+			min = l
+		}
+	}
+	return min
+}
+
+// policyACR returns the acr string an OIDC client should request via
+// default.acr.values to prompt Keycloak for the right LoA step-up.
+func policyACR(p AuthPolicy) string {
+	loa := policyToLoA(p)
+	switch loa {
+	case 1:
+		return "pwd"
+	case 2:
+		return "hwk"
+	case 3:
+		return "mtls"
+	}
+	return "public"
+}
+
+// tierForPolicy returns the Traefik TLS options tier for an app based on its
+// policy. "protected@file" requires a cert at TLS handshake and is used when
+// every allowed login path goes through mTLS (i.e. "all of ... mtls" or
+// "single mtls factor"). Otherwise "authaware@file" accepts connections with
+// or without a cert and lets Keycloak or group-gate handle enforcement.
+func tierForPolicy(p AuthPolicy) string {
+	if len(p.Factors) == 0 {
+		return "public@file"
+	}
+	hasMTLS := false
+	for _, f := range p.Factors {
+		if f == "mtls" {
+			hasMTLS = true
+		}
+	}
+	if !hasMTLS {
+		return "authaware@file"
+	}
+	// mTLS is one of the allowed factors.
+	if p.Op == "all" || len(p.Factors) == 1 {
+		return "protected@file"
+	}
+	// mTLS is optional (any-of multiple) — tolerate cert-less connections.
+	return "authaware@file"
+}
+
+// safetyScore is a cosmetic float surfaced in the UI.
+func safetyScore(p AuthPolicy) float64 {
+	loa := float64(policyToLoA(p))
+	if len(p.Factors) <= 1 || p.Op != "all" {
+		return loa
+	}
+	return loa + 0.5*float64(len(p.Factors)-1)
+}
+
+// writeGroupGatePolicy serializes the current per-app auth policies and the
+// global default to the JSON file that group-gate reads. Atomic write via
+// temp-file + rename so group-gate never sees a partial document.
+func writeGroupGatePolicy() error {
+	doc := map[string]interface{}{
+		"policies": state.AuthPolicies,
+		"default":  state.DefaultPolicy,
+	}
+	payload, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return err
+	}
+	policyDir := dataDir
+	target := filepath.Join(policyDir, "group-gate-policy.json")
+	tmp := target + ".tmp"
+	if err := os.WriteFile(tmp, payload, 0644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, target)
+}
+
+// updateClientAcrLoAMap pushes a new default.acr.values to a Keycloak client
+// so its own authorize requests include the needed acr_values, triggering
+// step-up if the session doesn't already meet the level.
+func updateClientAcrLoAMap(clientID, acrValue string) error {
+	keycloakURL := os.Getenv("KEYCLOAK_URL")
+	if keycloakURL == "" {
+		keycloakURL = "http://keycloak:8080"
+	}
+
+	// Admin token
+	tokenCmd := exec.Command("curl", "-sk",
+		keycloakURL+"/realms/master/protocol/openid-connect/token",
+		"-d", "client_id=admin-cli",
+		"-d", "username="+os.Getenv("KEYCLOAK_ADMIN"),
+		"-d", "password="+os.Getenv("KEYCLOAK_ADMIN_PASSWORD"),
+		"-d", "grant_type=password")
+	out, err := tokenCmd.Output()
+	if err != nil {
+		return fmt.Errorf("keycloak auth failed: %w", err)
+	}
+	var tokenResp map[string]interface{}
+	json.Unmarshal(out, &tokenResp)
+	token, _ := tokenResp["access_token"].(string)
+	if token == "" {
+		return fmt.Errorf("no access token from keycloak")
+	}
+
+	// Find the internal UUID for this clientId
+	listCmd := exec.Command("curl", "-sk",
+		keycloakURL+"/admin/realms/portcullis/clients?clientId="+clientID,
+		"-H", "Authorization: Bearer "+token)
+	out, err = listCmd.Output()
+	if err != nil {
+		return fmt.Errorf("client lookup failed: %w", err)
+	}
+	var clients []map[string]interface{}
+	if err := json.Unmarshal(out, &clients); err != nil || len(clients) == 0 {
+		return fmt.Errorf("client %s not found in keycloak", clientID)
+	}
+	uuid, _ := clients[0]["id"].(string)
+	if uuid == "" {
+		return fmt.Errorf("client %s has no uuid", clientID)
+	}
+	existing := clients[0]
+
+	attrs, _ := existing["attributes"].(map[string]interface{})
+	if attrs == nil {
+		attrs = map[string]interface{}{}
+	}
+	attrs["default.acr.values"] = acrValue
+	existing["attributes"] = attrs
+
+	scopes, _ := existing["defaultClientScopes"].([]interface{})
+	hasACR := false
+	for _, s := range scopes {
+		if s == "acr" {
+			hasACR = true
+			break
+		}
+	}
+	if !hasACR {
+		scopes = append(scopes, "acr")
+	}
+	existing["defaultClientScopes"] = scopes
+
+	payload, _ := json.Marshal(existing)
+	putCmd := exec.Command("curl", "-sk", "-o", "/dev/null", "-w", "%{http_code}",
+		"-X", "PUT",
+		keycloakURL+"/admin/realms/portcullis/clients/"+uuid,
+		"-H", "Authorization: Bearer "+token,
+		"-H", "Content-Type: application/json",
+		"-d", string(payload))
+	out, err = putCmd.Output()
+	if err != nil {
+		return fmt.Errorf("client update failed: %w", err)
+	}
+	code := strings.TrimSpace(string(out))
+	if code != "204" {
+		return fmt.Errorf("client %s update: unexpected HTTP %s", clientID, code)
+	}
+	return nil
+}
+
+// composeRoutersByService returns, for each service in the base compose.yml,
+// the Traefik router names declared under its labels. Handles the common
+// 2-space-per-level indentation used throughout the templates.
+func composeRoutersByService(tmpl *Template) map[string][]string {
+	composePath := filepath.Join(tmpl.Path, "compose.yml")
+	data, err := os.ReadFile(composePath)
+	if err != nil {
+		return nil
+	}
+
+	out := map[string][]string{}
+	seen := map[string]map[string]bool{}
+	var currentService string
+
+	for _, line := range strings.Split(string(data), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		// Service header: two-space indent, ends with ":" and no further nesting.
+		if strings.HasPrefix(line, "  ") && !strings.HasPrefix(line, "   ") && strings.HasSuffix(trimmed, ":") {
+			name := strings.TrimSuffix(trimmed, ":")
+			// Only accept bare identifiers as service names (skip labels like "environment:")
+			if !strings.ContainsAny(name, " \t") {
+				currentService = name
+				if _, ok := out[name]; !ok {
+					seen[name] = map[string]bool{}
+				}
+				continue
+			}
+		}
+		if currentService == "" {
+			continue
+		}
+		idx := strings.Index(line, "traefik.http.routers.")
+		if idx < 0 {
+			continue
+		}
+		rest := line[idx+len("traefik.http.routers."):]
+		dot := strings.Index(rest, ".")
+		if dot <= 0 {
+			continue
+		}
+		router := rest[:dot]
+		if router == "" || seen[currentService][router] {
+			continue
+		}
+		seen[currentService][router] = true
+		out[currentService] = append(out[currentService], router)
+	}
+
+	// Top-level keys like "volumes:", "networks:" accidentally match the
+	// service-header heuristic. Drop any that didn't accumulate router labels.
+	for svc, routers := range out {
+		if len(routers) == 0 {
+			delete(out, svc)
+		}
+	}
+	return out
+}
+
 // ── Compose management ───────────────────────────────────
 
 func appProjectName(tmpl *Template) string {
@@ -793,11 +1103,24 @@ func generateComposeOverride(tmpl *Template, values map[string]string) error {
 		servicePorts[p.Service] = append(servicePorts[p.Service], entry)
 	}
 
+	// Traefik per-router tls.options labels driven by the app's auth policy.
+	// The policy determines the tier:
+	//   - Public (no factors)                 → public@file
+	//   - Any path allows mTLS (all-mtls, or  → protected@file (require cert at TLS)
+	//     single-mTLS-factor)
+	//   - Otherwise                           → authaware@file (cert tolerated)
+	policy := resolvePolicy(tmpl.ID)
+	tier := tierForPolicy(policy)
+	serviceRouterLabels := composeRoutersByService(tmpl)
+
 	services := make(map[string]bool)
 	for svc := range serviceMounts {
 		services[svc] = true
 	}
 	for svc := range servicePorts {
+		services[svc] = true
+	}
+	for svc := range serviceRouterLabels {
 		services[svc] = true
 	}
 	if len(services) == 0 {
@@ -824,6 +1147,12 @@ func generateComposeOverride(tmpl *Template, values map[string]string) error {
 			buf.WriteString("    ports:\n")
 			for _, p := range ports {
 				buf.WriteString(fmt.Sprintf("      - %s\n", p))
+			}
+		}
+		if routers := serviceRouterLabels[svc]; len(routers) > 0 {
+			buf.WriteString("    labels:\n")
+			for _, r := range routers {
+				buf.WriteString(fmt.Sprintf("      traefik.http.routers.%s.tls.options: %s\n", r, tier))
 			}
 		}
 	}
@@ -1014,17 +1343,26 @@ func registerKeycloakClient(client KeycloakClient, tmpl *Template) error {
 		return fmt.Errorf("no access token from keycloak")
 	}
 
+	// Policy-driven Keycloak client attributes: surface the app's acr to
+	// Keycloak via default.acr.values so step-up fires for the right LoA,
+	// and include the "acr" client scope so the acr/amr claims land in tokens.
+	acrValue := policyACR(resolvePolicy(tmpl.ID))
+
 	// Register client
 	payload, _ := json.Marshal(map[string]interface{}{
 		"clientId":                client.ClientID,
-		"name":                   client.Name,
-		"enabled":                true,
-		"protocol":               "openid-connect",
-		"publicClient":           false,
-		"secret":                 secretVal,
-		"redirectUris":           redirectURIs,
-		"standardFlowEnabled":    true,
+		"name":                    client.Name,
+		"enabled":                 true,
+		"protocol":                "openid-connect",
+		"publicClient":            false,
+		"secret":                  secretVal,
+		"redirectUris":            redirectURIs,
+		"standardFlowEnabled":     true,
 		"directAccessGrantsEnabled": false,
+		"attributes": map[string]string{
+			"default.acr.values": acrValue,
+		},
+		"defaultClientScopes": []string{"openid", "profile", "email", "acr"},
 	})
 
 	cmd = exec.Command("curl", "-sk", "-o", "/dev/null", "-w", "%{http_code}",
@@ -1313,15 +1651,63 @@ func handleTemplateSettings(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		stateMu.RLock()
 		values := state.Settings[id]
+		override, hasOverride := state.AuthPolicies[id]
+		effective := resolvePolicy(id)
+		defaultPolicy := state.DefaultPolicy
 		stateMu.RUnlock()
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"definitions": tmpl.Manifest.Settings,
-			"ports":       tmpl.Manifest.Ports,
-			"values":      values,
-		})
+		resp := map[string]interface{}{
+			"definitions":      tmpl.Manifest.Settings,
+			"ports":            tmpl.Manifest.Ports,
+			"values":           values,
+			"effective_policy": effective,
+			"default_policy":   defaultPolicy,
+			"safety_score":     safetyScore(effective),
+		}
+		if hasOverride {
+			resp["auth_policy"] = override
+		}
+		json.NewEncoder(w).Encode(resp)
 	case http.MethodPut:
-		var values map[string]string
-		json.NewDecoder(r.Body).Decode(&values)
+		// Request body accepts the existing key=value settings map plus two
+		// reserved keys: _auth_policy (a JSON object) and _auth_policy_inherit
+		// ("true" clears the per-app override and falls back to the default).
+		var raw map[string]interface{}
+		json.NewDecoder(r.Body).Decode(&raw)
+		var policyUpdate *AuthPolicy
+		var policyInherit bool
+		if v, ok := raw["_auth_policy_inherit"]; ok {
+			switch tv := v.(type) {
+			case bool:
+				policyInherit = tv
+			case string:
+				policyInherit = tv == "true"
+			}
+			delete(raw, "_auth_policy_inherit")
+		}
+		if v, ok := raw["_auth_policy"]; ok && v != nil {
+			if m, ok := v.(map[string]interface{}); ok {
+				p := AuthPolicy{}
+				if fs, ok := m["factors"].([]interface{}); ok {
+					for _, f := range fs {
+						if s, ok := f.(string); ok {
+							p.Factors = append(p.Factors, s)
+						}
+					}
+				}
+				if s, ok := m["op"].(string); ok {
+					p.Op = s
+				}
+				norm := normalizePolicy(p)
+				policyUpdate = &norm
+			}
+			delete(raw, "_auth_policy")
+		}
+		values := make(map[string]string, len(raw))
+		for k, v := range raw {
+			if s, ok := v.(string); ok {
+				values[k] = s
+			}
+		}
 		// Validate declared ports: numeric, in range, or empty (only if optional).
 		for _, p := range tmpl.Manifest.Ports {
 			v, ok := values[p.Key]
@@ -1355,8 +1741,27 @@ func handleTemplateSettings(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, collisionErr.Error(), 409)
 			return
 		}
+
+		// Apply auth-policy update alongside the settings save so a single UI
+		// submission is one atomic state change.
+		policyChanged := false
+		if policyInherit {
+			if _, had := state.AuthPolicies[id]; had {
+				delete(state.AuthPolicies, id)
+				policyChanged = true
+			}
+		} else if policyUpdate != nil {
+			if state.AuthPolicies == nil {
+				state.AuthPolicies = map[string]AuthPolicy{}
+			}
+			state.AuthPolicies[id] = *policyUpdate
+			policyChanged = true
+		}
+
 		saveState()
+		effective := resolvePolicy(id)
 		stateMu.Unlock()
+
 		// Write text/boolean/select settings to per-app .env
 		for _, s := range tmpl.Manifest.Settings {
 			if (s.Type == "text" || s.Type == "boolean" || s.Type == "select") && values[s.Key] != "" {
@@ -1364,11 +1769,61 @@ func handleTemplateSettings(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		generateComposeOverride(tmpl, values)
+
+		if policyChanged {
+			if err := writeGroupGatePolicy(); err != nil {
+				log.Printf("auth-policy: failed to write group-gate policy file: %v", err)
+			}
+			// Push default.acr.values to any Keycloak clients this app owns.
+			acr := policyACR(effective)
+			for _, client := range tmpl.Manifest.Clients {
+				if err := updateClientAcrLoAMap(client.ClientID, acr); err != nil {
+					log.Printf("auth-policy: keycloak client %s update failed: %v", client.ClientID, err)
+				}
+			}
+		}
+
 		if tmpl.Enabled {
 			go func() {
 				composeDown(tmpl)
 				composeUp(tmpl)
 			}()
+		}
+		json.NewEncoder(w).Encode(map[string]string{"status": "saved"})
+	default:
+		http.Error(w, "GET or PUT only", 405)
+	}
+}
+
+// handleSettings exposes Hub-global settings — today just the default auth
+// policy. GET returns it; PUT accepts {factors, op} and writes through to the
+// group-gate policy file.
+func handleSettings(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	switch r.Method {
+	case http.MethodGet:
+		stateMu.RLock()
+		dp := state.DefaultPolicy
+		stateMu.RUnlock()
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"default_auth_policy": dp,
+			"default_safety_score": safetyScore(dp),
+		})
+	case http.MethodPut:
+		var req struct {
+			DefaultAuthPolicy *AuthPolicy `json:"default_auth_policy"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.DefaultAuthPolicy == nil {
+			http.Error(w, "expected {default_auth_policy: {factors, op}}", 400)
+			return
+		}
+		norm := normalizePolicy(*req.DefaultAuthPolicy)
+		stateMu.Lock()
+		state.DefaultPolicy = norm
+		saveState()
+		stateMu.Unlock()
+		if err := writeGroupGatePolicy(); err != nil {
+			log.Printf("settings: failed to write group-gate policy file: %v", err)
 		}
 		json.NewEncoder(w).Encode(map[string]string{"status": "saved"})
 	default:
