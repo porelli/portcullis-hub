@@ -654,14 +654,16 @@ func generateAppEnv(tmpl *Template) error {
 		}
 	}
 
-	// Include user settings
-	stateMu.RLock()
+	// Include user settings.
+	// NOTE: Caller MUST already hold stateMu (write or read). Do NOT RLock here —
+	// Go's sync.RWMutex does not support lock upgrade; if the caller holds a
+	// write lock (e.g. enableApp), attempting RLock on the same goroutine
+	// deadlocks the entire Hub.
 	if settings, ok := state.Settings[tmpl.ID]; ok {
 		for k, v := range settings {
 			vars[k] = v
 		}
 	}
-	stateMu.RUnlock()
 
 	// Also pull any ${VAR} references from compose that might come from core .env
 	coreEnv := readEnvFile(filepath.Join(projectDir, ".env"))
@@ -948,8 +950,14 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 		user = resolveUsername(user)
 	}
 
+	portalName := os.Getenv("PORTAL_DISPLAY_NAME")
+	if portalName == "" {
+		portalName = "Portcullis"
+	}
+
 	data := map[string]interface{}{
 		"Domain":     domain,
+		"PortalName": portalName,
 		"Templates":  templates,
 		"Categories": categories,
 		"Sources":    state.Sources,
