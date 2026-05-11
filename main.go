@@ -258,6 +258,8 @@ func main() {
 	mux.HandleFunc("/api/sources/sync", handleSyncSources)
 	mux.HandleFunc("/api/status", handleStatus)
 	mux.HandleFunc("/api/settings", handleSettings)
+	mux.HandleFunc("/api/users", handleUsers)
+	mux.HandleFunc("/api/users/", handleUserActions)
 	mux.HandleFunc("/api/templates/settings/", handleTemplateSettings)
 	mux.HandleFunc("/api/templates/status/", handleTemplateStatus)
 	mux.HandleFunc("/api/templates/logs/", handleTemplateLogs)
@@ -850,6 +852,108 @@ func writeGroupGatePolicy() error {
 		return err
 	}
 	return os.Rename(tmp, target)
+}
+
+// keycloakAdminToken fetches a short-lived admin access token by password
+// grant against the master realm. The caller is responsible for using it in
+// the same goroutine (tokens expire in ~60s by default).
+func keycloakAdminToken() (string, string, error) {
+	keycloakURL := os.Getenv("KEYCLOAK_URL")
+	if keycloakURL == "" {
+		keycloakURL = "http://keycloak:8080"
+	}
+	cmd := exec.Command("curl", "-sk",
+		keycloakURL+"/realms/master/protocol/openid-connect/token",
+		"-d", "client_id=admin-cli",
+		"-d", "username="+os.Getenv("KEYCLOAK_ADMIN"),
+		"-d", "password="+os.Getenv("KEYCLOAK_ADMIN_PASSWORD"),
+		"-d", "grant_type=password")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", "", fmt.Errorf("keycloak auth failed: %w", err)
+	}
+	var tr map[string]interface{}
+	if err := json.Unmarshal(out, &tr); err != nil {
+		return "", "", fmt.Errorf("keycloak auth response parse: %w", err)
+	}
+	tok, _ := tr["access_token"].(string)
+	if tok == "" {
+		return "", "", fmt.Errorf("no access token from keycloak")
+	}
+	return keycloakURL, tok, nil
+}
+
+// listRealmUsers returns usernames in the Portcullis realm (up to 1000). Used
+// by the Hub's enrollment-trigger UI to populate the user dropdown.
+type keycloakUser struct {
+	ID              string   `json:"id"`
+	Username        string   `json:"username"`
+	Email           string   `json:"email"`
+	Enabled         bool     `json:"enabled"`
+	RequiredActions []string `json:"requiredActions"`
+}
+
+func listRealmUsers() ([]keycloakUser, error) {
+	kcURL, tok, err := keycloakAdminToken()
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.Command("curl", "-sk",
+		kcURL+"/admin/realms/portcullis/users?max=1000&briefRepresentation=false",
+		"-H", "Authorization: Bearer "+tok)
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("list users: %w", err)
+	}
+	var users []keycloakUser
+	if err := json.Unmarshal(out, &users); err != nil {
+		return nil, fmt.Errorf("parse users: %w", err)
+	}
+	return users, nil
+}
+
+// setUserRequiredActions replaces the Keycloak user's requiredActions array.
+// Passing an empty slice clears pending actions; passing
+// ["webauthn-register-passwordless"] forces the user to enroll a key on next
+// login before the LoA-2+ subflows can succeed.
+func setUserRequiredActions(userID string, actions []string) error {
+	kcURL, tok, err := keycloakAdminToken()
+	if err != nil {
+		return err
+	}
+	getCmd := exec.Command("curl", "-sk",
+		kcURL+"/admin/realms/portcullis/users/"+userID,
+		"-H", "Authorization: Bearer "+tok)
+	raw, err := getCmd.Output()
+	if err != nil {
+		return fmt.Errorf("get user: %w", err)
+	}
+	var user map[string]interface{}
+	if err := json.Unmarshal(raw, &user); err != nil {
+		return fmt.Errorf("parse user: %w", err)
+	}
+	// Marshal []string as JSON array — Keycloak is strict about this being
+	// a JSON array of strings, not a comma-joined value.
+	if actions == nil {
+		actions = []string{}
+	}
+	user["requiredActions"] = actions
+	payload, _ := json.Marshal(user)
+	putCmd := exec.Command("curl", "-sk", "-o", "/dev/null", "-w", "%{http_code}",
+		"-X", "PUT",
+		kcURL+"/admin/realms/portcullis/users/"+userID,
+		"-H", "Authorization: Bearer "+tok,
+		"-H", "Content-Type: application/json",
+		"-d", string(payload))
+	out, err := putCmd.Output()
+	if err != nil {
+		return fmt.Errorf("update user: %w", err)
+	}
+	code := strings.TrimSpace(string(out))
+	if code != "204" {
+		return fmt.Errorf("user %s required-actions update: HTTP %s", userID, code)
+	}
+	return nil
 }
 
 // updateClientAcrLoAMap pushes a new default.acr.values to a Keycloak client
@@ -1829,6 +1933,64 @@ func handleSettings(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "GET or PUT only", 405)
 	}
+}
+
+// handleUsers lists users in the Keycloak realm so the admin UI can pick
+// one to push a required action onto.
+func handleUsers(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET only", 405)
+		return
+	}
+	users, err := listRealmUsers()
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(users)
+}
+
+// handleUserActions replaces a user's requiredActions. Today the only
+// action the UI surfaces is webauthn-register-passwordless.
+func handleUserActions(w http.ResponseWriter, r *http.Request) {
+	// Path shape: /api/users/{id}/required-actions
+	path := strings.TrimPrefix(r.URL.Path, "/api/users/")
+	parts := strings.SplitN(path, "/", 2)
+	if len(parts) != 2 || parts[1] != "required-actions" {
+		http.NotFound(w, r)
+		return
+	}
+	userID := parts[0]
+	if r.Method != http.MethodPut {
+		http.Error(w, "PUT only", 405)
+		return
+	}
+	var req struct {
+		Actions []string `json:"actions"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "expected {actions: [...]}", 400)
+		return
+	}
+	// Allowlist to prevent arbitrary action injection.
+	allowed := map[string]bool{
+		"webauthn-register-passwordless": true,
+		"webauthn-register":              true,
+		"UPDATE_PASSWORD":                true,
+	}
+	clean := make([]string, 0, len(req.Actions))
+	for _, a := range req.Actions {
+		if allowed[a] {
+			clean = append(clean, a)
+		}
+	}
+	if err := setUserRequiredActions(userID, clean); err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"status": "saved", "actions": clean})
 }
 
 // composeServices reads the compose.yml and returns the list of service names.
