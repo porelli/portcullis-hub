@@ -26,6 +26,10 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+          # Module + build cache, keyed on go.sum. PR runs only save to their
+          # own PR-ref scope, which main and other PRs can't read.
+          cache: true
+          cache-dependency-path: go.sum
 
       - name: gofmt
         run: |
@@ -101,8 +105,12 @@ jobs:
           annotations: ${{ steps.meta.outputs.annotations }}
           provenance: mode=max
           sbom: true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # Layer cache. Only pushes to main write it (mode=max: every stage,
+          # both platforms, under one content-addressed scope); PRs and tags
+          # only read it. PR-written caches would never be read by main, and
+          # tag-ref caches aren't readable from any other ref.
+          cache-from: type=gha,scope=image-main
+          cache-to: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') && 'type=gha,scope=image-main,mode=max' || '' }}
 
       - name: Install cosign
         if: env.PUSH == 'true'
