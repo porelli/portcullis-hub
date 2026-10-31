@@ -38,8 +38,8 @@ type PublishedApp struct {
 	// PublicSubdomains / PublicPaths are the app's public exceptions at
 	// publish time ({token} kept, never the tokens); empty when no public
 	// router was generated.
-	PublicSubdomains []string `json:"public_subdomains,omitempty" yaml:"public_subdomains,omitempty"`
-	PublicPaths      []string `json:"public_paths,omitempty" yaml:"public_paths,omitempty"`
+	PublicSubdomains []string            `json:"public_subdomains,omitempty" yaml:"public_subdomains,omitempty"`
+	Public           *policy.PublicEntry `json:"public,omitempty" yaml:"public,omitempty"`
 }
 
 // AppState tracks which apps are enabled and their settings.

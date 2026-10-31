@@ -45,9 +45,9 @@ type PublicAccess struct {
 	// stripped on the public router like those two.
 	CredentialHeaders []string `yaml:"credential_headers" json:"credential_headers,omitempty"`
 	// CredentialCookies / CredentialQuery are cookies and query parameters
-	// the app logs a user in with (session, remember-me, API key). Requests
-	// carrying one never match the public router (the rule excludes them),
-	// so they go through the app's gated router.
+	// the app logs a user in with (session, remember-me, API key). Core's
+	// public guard refuses requests carrying one (names normalised like
+	// PHP), with CredentialHeaders, Authorization and Proxy-Authorization.
 	CredentialCookies []string `yaml:"credential_cookies" json:"credential_cookies,omitempty"`
 	CredentialQuery   []string `yaml:"credential_query" json:"credential_query,omitempty"`
 	// StaticExtensions adds file extensions to the ones supporting paths

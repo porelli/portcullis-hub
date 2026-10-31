@@ -243,7 +243,7 @@ func (h *Hub) snapshot(t *templates.Template) state.PublishedApp {
 	}
 	if pub := h.publicLocked(t, t.Public); pub.Active() {
 		p.PublicSubdomains = append([]string(nil), t.Public.Subdomains...)
-		p.PublicPaths = pub.Published
+		p.Public = publicEntry(&t.Manifest, pub.Published)
 	}
 	return p
 }
@@ -363,7 +363,7 @@ func (h *Hub) WritePolicy() error {
 			AdminPaths:  t.Manifest.Auth.AdminPaths,
 		}
 		if pub := h.publicLocked(t, t.Public); pub.Active() {
-			app.PublicSubdomains, app.PublicPaths = t.Public.Subdomains, pub.Published
+			app.PublicSubdomains, app.Public = t.Public.Subdomains, publicEntry(&t.Manifest, pub.Published)
 		}
 		apps = append(apps, app)
 	}
@@ -388,7 +388,7 @@ func (h *Hub) WritePolicy() error {
 				// The containers keep the public router they were started
 				// with: keep showing it.
 				PublicSubdomains: snap.PublicSubdomains,
-				PublicPaths:      snap.PublicPaths,
+				Public:           snap.Public,
 			})
 			continue
 		}

@@ -8,8 +8,10 @@ import (
 	"github.com/portcullis/hub/internal/fsutil"
 )
 
-// FileVersion is the policy-file format version (contract §4).
-const FileVersion = 2
+// FileVersion is the policy-file format version (contract §4). Version 3
+// adds public_paths entries for core's public guard, which serves only
+// version 3: the Hub and core must be upgraded together.
+const FileVersion = 3
 
 // CoreSubdomains are owned by the core stack (group-gate-map.conf); templates
 // may never publish policies, groups or path groups for them.
@@ -28,10 +30,29 @@ type Document struct {
 	Policies   map[string]AuthPolicy  `json:"policies"`
 	Groups     map[string]string      `json:"groups"`
 	PathGroups map[string][]PathGroup `json:"path_groups"`
-	// PublicPaths lists, per subdomain, the path prefixes an app serves
-	// without forward-auth/group-gate (public exceptions that are on).
-	// Informational: those requests never reach group-gate.
-	PublicPaths map[string][]string `json:"public_paths"`
+	// PublicPaths is, per subdomain, the public exception core's public
+	// guard enforces on the Hub's public router (forward-auth and the group
+	// check don't run there). Listed share tokens stay "{token}".
+	PublicPaths map[string]PublicEntry `json:"public_paths"`
+}
+
+// PublicPath is one pattern core's public guard allows: Match is "prefix"
+// (segment boundary), "exact" or "static" (static files below Path); a
+// "{token}" segment matches one segment TokenPattern accepts.
+type PublicPath struct {
+	Path  string `json:"path"`
+	Match string `json:"match"`
+}
+
+// PublicEntry is a subdomain's public exception for core's public guard:
+// what is public, and which credentials it must refuse there.
+type PublicEntry struct {
+	Paths             []PublicPath `json:"paths"`
+	TokenPattern      string       `json:"token_pattern,omitempty"`
+	StaticExtensions  []string     `json:"static_extensions"`
+	CredentialHeaders []string     `json:"credential_headers"`
+	CredentialCookies []string     `json:"credential_cookies"`
+	CredentialQuery   []string     `json:"credential_query"`
 }
 
 // DenyGroup is published as the required group of subdomains the Hub knows
@@ -53,9 +74,10 @@ type App struct {
 	AccessGroup string
 	AdminGroup  string
 	AdminPaths  []string
-	// PublicSubdomains / PublicPaths: the app's public exceptions, when on.
+	// PublicSubdomains / Public: the app's public exception, when a public
+	// router exists.
 	PublicSubdomains []string
-	PublicPaths      []string
+	Public           *PublicEntry
 }
 
 // Stricter reports whether a is strictly stricter than b: higher LoA first,
@@ -95,7 +117,7 @@ func Build(apps []App, perApp map[string]AuthPolicy, def AuthPolicy) Document {
 		Policies:    map[string]AuthPolicy{},
 		Groups:      map[string]string{},
 		PathGroups:  map[string][]PathGroup{},
-		PublicPaths: map[string][]string{},
+		PublicPaths: map[string]PublicEntry{},
 	}
 	sorted := append([]App(nil), apps...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
@@ -156,26 +178,20 @@ func Build(apps []App, perApp map[string]AuthPolicy, def AuthPolicy) Document {
 		}
 	}
 	for _, a := range sorted {
-		if !a.Enabled || a.Deny || len(a.PublicPaths) == 0 {
+		if !a.Enabled || a.Deny || a.Public == nil {
 			continue
 		}
 		for _, sub := range a.PublicSubdomains {
 			if CoreSubdomains[sub] {
 				continue
 			}
-			set := map[string]bool{}
-			for _, p := range doc.PublicPaths[sub] {
-				set[p] = true
+			if _, taken := doc.PublicPaths[sub]; taken {
+				// Only one public router per host can exist (one owner
+				// per subdomain); keep the lowest template ID's.
+				log.Printf("auth-policy: subdomain %q has public exceptions from several apps — keeping the first (%s ignored)", sub, a.ID)
+				continue
 			}
-			for _, p := range a.PublicPaths {
-				set[p] = true
-			}
-			merged := make([]string, 0, len(set))
-			for p := range set {
-				merged = append(merged, p)
-			}
-			sort.Strings(merged)
-			doc.PublicPaths[sub] = merged
+			doc.PublicPaths[sub] = *a.Public
 		}
 	}
 	for _, a := range sorted {

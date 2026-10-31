@@ -33,7 +33,7 @@ func TestBuild(t *testing.T) {
 	}
 	doc := Build(apps, perApp, webauthn)
 
-	if doc.Version != 2 {
+	if doc.Version != 3 {
 		t.Errorf("version = %d", doc.Version)
 	}
 	if !reflect.DeepEqual(doc.Default, webauthn) {
@@ -159,10 +159,10 @@ func TestWrite(t *testing.T) {
 	if err := json.Unmarshal(data, &raw); err != nil {
 		t.Fatal(err)
 	}
-	if raw["version"] != float64(2) {
+	if raw["version"] != float64(3) {
 		t.Errorf("version = %v", raw["version"])
 	}
-	for _, k := range []string{"policies", "groups", "path_groups"} {
+	for _, k := range []string{"policies", "groups", "path_groups", "public_paths"} {
 		if _, ok := raw[k].(map[string]interface{}); !ok {
 			t.Errorf("%s must be an object, got %T", k, raw[k])
 		}
@@ -197,20 +197,30 @@ func TestBuildDeny(t *testing.T) {
 }
 
 func TestBuildPublicPaths(t *testing.T) {
+	cloud := &PublicEntry{Paths: []PublicPath{{"/s/{token}", "prefix"}, {"/dist", "static"}}, TokenPattern: "^[a-z]+$",
+		StaticExtensions: []string{"css"}, CredentialHeaders: []string{"Authorization"}, CredentialCookies: []string{"nc_token"}, CredentialQuery: []string{}}
 	apps := []App{
-		{ID: "cloud", Enabled: true, Subdomains: []string{"cloud"}, PublicSubdomains: []string{"cloud"}, PublicPaths: []string{"/s/{token}", "/dist"}},
+		{ID: "cloud", Enabled: true, Subdomains: []string{"cloud"}, PublicSubdomains: []string{"cloud"}, Public: cloud},
+		{ID: "dup", Enabled: true, Subdomains: []string{"cloud"}, PublicSubdomains: []string{"cloud"}, Public: &PublicEntry{Paths: []PublicPath{{"/x", "prefix"}}}},
 		{ID: "off", Enabled: true, Subdomains: []string{"off"}},
-		{ID: "core", Enabled: true, Subdomains: []string{"hub"}, PublicSubdomains: []string{"hub"}, PublicPaths: []string{"/x"}},
-		{ID: "gone", Enabled: true, Deny: true, Subdomains: []string{"gone"}, PublicSubdomains: []string{"gone"}, PublicPaths: []string{"/y"}},
+		{ID: "core", Enabled: true, Subdomains: []string{"hub"}, PublicSubdomains: []string{"hub"}, Public: cloud},
+		{ID: "gone", Enabled: true, Deny: true, Subdomains: []string{"gone"}, PublicSubdomains: []string{"gone"}, Public: cloud},
 	}
 	doc := Build(apps, nil, InitialDefault())
-	if len(doc.PublicPaths) != 1 || strings.Join(doc.PublicPaths["cloud"], ",") != "/dist,/s/{token}" {
-		t.Errorf("public_paths = %v", doc.PublicPaths)
+	if doc.Version != 3 || len(doc.PublicPaths) != 1 || !reflect.DeepEqual(doc.PublicPaths["cloud"], *cloud) {
+		t.Errorf("public_paths = %+v (version %d)", doc.PublicPaths, doc.Version)
 	}
 	if doc.Groups["gone"] != DenyGroup {
 		t.Errorf("deny app lost its deny group: %v", doc.Groups)
 	}
-	raw, _ := json.Marshal(Build(nil, nil, InitialDefault()))
+	raw, _ := json.Marshal(doc)
+	for _, want := range []string{`"version":3`, `"paths":[{"path":"/s/{token}","match":"prefix"},{"path":"/dist","match":"static"}]`,
+		`"credential_cookies":["nc_token"]`, `"credential_query":[]`} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("policy file lacks %s: %s", want, raw)
+		}
+	}
+	raw, _ = json.Marshal(Build(nil, nil, InitialDefault()))
 	if !strings.Contains(string(raw), `"public_paths":{}`) {
 		t.Errorf("empty public_paths not published as {}: %s", raw)
 	}

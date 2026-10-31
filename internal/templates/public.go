@@ -208,9 +208,6 @@ func ValidatePublicAccess(a *Auth) error {
 		if !cookieNameRe.MatchString(q) {
 			return fmt.Errorf("auth.public_access.credential_query: %q is not a parameter name ([A-Za-z0-9_.-], max 64)", q)
 		}
-		if strings.Count(q, "_")+strings.Count(q, ".") > MaxCredentialSeparators {
-			return fmt.Errorf("auth.public_access.credential_query: %q has more than %d '_' / '.'", q, MaxCredentialSeparators)
-		}
 	}
 	for _, e := range pa.StaticExtensions {
 		if !extRe.MatchString(e) || scriptExtensions[e] {
@@ -578,74 +575,14 @@ func (pa *PublicAccess) Extensions() []string {
 	return sortedKeys(set)
 }
 
-// querySeparators are what PHP turns into "_" in query keys ("+" already
-// arrives as " ": Go and PHP both decode it, and percent-encoding).
-var querySeparators = []string{"_", ".", " ", "["}
-
-// MaxCredentialSeparators caps "_" / "." in a credential_query name: each
-// one multiplies the excluded key spellings by len(querySeparators).
-const MaxCredentialSeparators = 3
-
-// queryKeyVariants lists the decoded query keys an app that mangles names
-// like PHP reads as name: every "_" / "." may arrive as any separator.
-// Traefik's QueryRegexp matches decoded keys exactly.
-func queryKeyVariants(name string) []string {
-	out := []string{""}
-	for _, c := range name {
-		var next []string
-		alts := []string{string(c)}
-		if c == '_' || c == '.' {
-			alts = querySeparators
-		}
-		for _, o := range out {
-			for _, a := range alts {
-				next = append(next, o+a)
-			}
-		}
-		out = next
-	}
-	sort.Strings(out)
-	return out
-}
-
-// cookieRegexp matches a Cookie header value that sets one of names,
-// loosely and case-insensitively (fail closed): any character may be
-// percent-encoded, and "_" / "." also match "_", ".", " ", "+" and "[" (PHP
-// decodes "+" to a space and turns " ", "." and "[" into "_" in names).
-func cookieRegexp(names []string) string {
-	alts := make([]string, 0, len(names))
-	for _, n := range names {
-		var b strings.Builder
-		for _, c := range n {
-			if c == '_' || c == '.' {
-				b.WriteString(`(?:[_. +\[]|%[0-9a-f]{2})`)
-			} else {
-				b.WriteString(`(?:` + regexp.QuoteMeta(string(c)) + `|%[0-9a-f]{2})`)
-			}
-		}
-		alts = append(alts, b.String())
-	}
-	return `(?i)(?:^|[;,])\s*(?:` + strings.Join(alts, "|") + `)\s*=`
-}
-
 // Rule is the public router's Traefik rule for the routed entries: the
 // plan's hosts, and per entry Path(`p`) || PathPrefix(`p/`) (segment
-// boundary), Path(`p`) (exact) or PathRegexp (static files). Requests
-// carrying the app's credential cookies or query parameters are excluded:
-// they fall through to the app's gated router.
+// boundary), Path(`p`) (exact) or PathRegexp (static files). Credentials
+// are refused by core's public guard, not by the rule.
 func (pl *PublicPlan) Rule(routed []string, pa *PublicAccess) string {
 	exts := StaticExtensions
-	var excl []string
 	if pa != nil {
 		exts = pa.Extensions()
-		if len(pa.CredentialCookies) > 0 {
-			excl = append(excl, "!HeaderRegexp(`Cookie`, `"+cookieRegexp(pa.CredentialCookies)+"`)")
-		}
-		for _, q := range pa.CredentialQuery {
-			for _, v := range queryKeyVariants(q) {
-				excl = append(excl, "!QueryRegexp(`"+v+"`, `.*`)")
-			}
-		}
 	}
 	hosts := make([]string, len(pl.HostArgs))
 	for i, h := range pl.HostArgs {
@@ -666,9 +603,22 @@ func (pl *PublicPlan) Rule(routed []string, pa *PublicAccess) string {
 			paths = append(paths, "Path(`"+e+"`)", "PathPrefix(`"+e+"/`)")
 		}
 	}
-	rule := host + " && (" + strings.Join(paths, " || ") + ")"
-	for _, e := range excl {
-		rule += " && " + e
+	return host + " && (" + strings.Join(paths, " || ") + ")"
+}
+
+// GuardPaths turns encoded routed / published entries into the guard's
+// {path, match} patterns (match: prefix, exact or static).
+func GuardPaths(entries []string) [][2]string {
+	out := make([][2]string, 0, len(entries))
+	for _, e := range entries {
+		switch {
+		case strings.HasPrefix(e, routedExact):
+			out = append(out, [2]string{e[1:], "exact"})
+		case strings.HasPrefix(e, routedStatic):
+			out = append(out, [2]string{e[1:], "static"})
+		default:
+			out = append(out, [2]string{e, "prefix"})
+		}
 	}
-	return rule
+	return out
 }

@@ -114,7 +114,7 @@ func TestPublicListedTokens(t *testing.T) {
 		"customrequestheaders.Authorization: \"\"",
 		"customrequestheaders.Proxy-Authorization: \"\"",
 		"portcullis-public-cloud.entrypoints: websecure",
-		"portcullis-public-cloud.middlewares: portcullis-public-strip-cloud@docker,rate-limit@file,security-headers@file",
+		"portcullis-public-cloud.middlewares: portcullis-public-guard@docker,portcullis-public-strip-cloud@docker,rate-limit@file,security-headers@file",
 		"portcullis-public-cloud.service: \"cloud\"",
 		"traefik.http.middlewares.portcullis-public-strip-cloud.headers.customrequestheaders.X-Forwarded-User: \"\"",
 		"traefik.http.middlewares.portcullis-public-strip-cloud.headers.customrequestheaders.X-Auth-Request-Email: \"\"",
@@ -140,15 +140,16 @@ func TestPublicListedTokens(t *testing.T) {
 	}
 
 	doc := readPolicy(t, f)
-	if strings.Join(doc.PublicPaths["cloud"], ",") != "/s/{token},~/dist" {
-		t.Errorf("public_paths = %v", doc.PublicPaths)
+	if e := doc.PublicPaths["cloud"]; guardPathsOf(e) != "prefix:/s/{token},static:/dist" || e.TokenPattern != "^[A-Za-z0-9-]{1,32}$" ||
+		strings.Join(e.CredentialHeaders, ",") != "Authorization,Proxy-Authorization" || doc.Version != 3 {
+		t.Errorf("public_paths = %+v", doc.PublicPaths)
 	}
 	raw, _ := os.ReadFile(filepath.Join(f.data, "group-gate-policy.json"))
 	if strings.Contains(string(raw), "AbC123") {
 		t.Error("share token leaked into the policy file")
 	}
 	st, _ := state.Load(filepath.Join(f.data, "state.yaml"))
-	if strings.Join(st.PublicTokens["cloud"], ",") != "AbC123,Zz9" || strings.Join(st.Published["cloud"].PublicPaths, ",") != "/s/{token},~/dist" ||
+	if strings.Join(st.PublicTokens["cloud"], ",") != "AbC123,Zz9" || st.Published["cloud"].Public == nil || guardPathsOf(*st.Published["cloud"].Public) != "prefix:/s/{token},static:/dist" ||
 		strings.Join(st.Published["cloud"].PublicSubdomains, ",") != "cloud" {
 		t.Errorf("state tokens %v snapshot %+v", st.PublicTokens, st.Published["cloud"])
 	}
@@ -241,7 +242,7 @@ func TestPublicSnapshotWhenTemplateMissing(t *testing.T) {
 		t.Fatal(err)
 	}
 	doc := readPolicy(t, f)
-	if doc.Groups["cloud"] != "users_cloud" || strings.Join(doc.PublicPaths["cloud"], ",") != "/apps/text,/s,~/dist" {
+	if doc.Groups["cloud"] != "users_cloud" || guardPathsOf(doc.PublicPaths["cloud"]) != "prefix:/apps/text,prefix:/s,static:/dist" {
 		t.Errorf("snapshot not enforced: groups %v public %v", doc.Groups, doc.PublicPaths)
 	}
 }
@@ -289,9 +290,11 @@ func TestPublicDrift(t *testing.T) {
 		t.Errorf("unexpected drift for identical labels: %+v", d)
 	}
 	for name, edit := range map[string]func(map[string]string){
-		"no public router":  func(l map[string]string) { delete(l, rule) },
-		"widened regexp":    func(l map[string]string) { l[rule] = strings.Replace(l[rule], "(avif|css|", "(php|avif|css|", 1) },
-		"dropped exclusion": func(l map[string]string) { l[rule] = l[rule][:strings.Index(l[rule], " && !HeaderRegexp")] },
+		"no public router": func(l map[string]string) { delete(l, rule) },
+		"widened regexp":   func(l map[string]string) { l[rule] = strings.Replace(l[rule], "(avif|css|", "(php|avif|css|", 1) },
+		"missing guard": func(l map[string]string) {
+			l["traefik.http.routers.portcullis-public-cloud.middlewares"] = "portcullis-public-strip-cloud@docker,rate-limit@file,security-headers@file"
+		},
 		"missing middleware": func(l map[string]string) {
 			l["traefik.http.routers.portcullis-public-cloud.middlewares"] = "rate-limit@file"
 		},
@@ -409,21 +412,32 @@ func TestPublicInvalidStoredTokensNotRouted(t *testing.T) {
 	}
 }
 
-func TestPublicCredentialExclusions(t *testing.T) {
+func TestPublicGuardAndCredentials(t *testing.T) {
 	f := newCloudFixture(t)
-	writeFile(t, filepath.Join(f.src, "cloud", "manifest.yaml"), strings.Replace(cloudManifest, "    paths:\n", "    credential_cookies: [nc_token]\n    credential_query: [apiKey]\n    paths:\n", 1))
+	writeFile(t, filepath.Join(f.src, "cloud", "manifest.yaml"), strings.Replace(cloudManifest, "    paths:\n", "    credential_headers: [X-Api-Key]\n    credential_cookies: [nc_token]\n    credential_query: [apiKey]\n    paths:\n", 1))
 	f.h.Discover()
 	if err := f.h.Enable("cloud"); err != nil {
 		t.Fatal(err)
 	}
 	save(t, f, SettingsUpdate{PublicMode: strp("all")})
 	ov := readOverride(t, f, "cloud")
-	// Requests with the app's login cookie or API-key parameter never match
-	// the public router; they fall through to the gated one.
-	if !strings.Contains(ov, "&& !HeaderRegexp(`Cookie`, `(?i)") || !strings.Contains(ov, "&& !QueryRegexp(`apiKey`, `.*`)") {
-		t.Errorf("exclusions missing:\n%s", ov)
+	// Core's guard runs first (it must see Authorization before the strip).
+	if !strings.Contains(ov, "portcullis-public-cloud.middlewares: portcullis-public-guard@docker,portcullis-public-strip-cloud@docker,rate-limit@file,security-headers@file") ||
+		strings.Contains(ov, "HeaderRegexp") || strings.Contains(ov, "QueryRegexp") {
+		t.Errorf("override:\n%s", ov)
 	}
-	if v, _ := f.h.AppSettings("cloud"); !v.PublicAccess.Active || v.PublicAccess.Blocked != "" {
-		t.Errorf("view = %+v", v.PublicAccess)
+	e := readPolicy(t, f).PublicPaths["cloud"]
+	if strings.Join(e.CredentialHeaders, ",") != "Authorization,Proxy-Authorization,X-Api-Key" || strings.Join(e.CredentialCookies, ",") != "nc_token" ||
+		strings.Join(e.CredentialQuery, ",") != "apiKey" || !strings.Contains(strings.Join(e.StaticExtensions, ","), "woff2") {
+		t.Errorf("guard entry = %+v", e)
 	}
+}
+
+// guardPathsOf renders a public entry's paths as match:path, comma-joined.
+func guardPathsOf(e policy.PublicEntry) string {
+	var out []string
+	for _, p := range e.Paths {
+		out = append(out, p.Match+":"+p.Path)
+	}
+	return strings.Join(out, ",")
 }

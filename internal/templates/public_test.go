@@ -372,44 +372,24 @@ func TestPublicCredentialValidation(t *testing.T) {
 	}
 }
 
-func TestCredentialExclusions(t *testing.T) {
-	re := regexp.MustCompile(cookieRegexp([]string{"nc_token", "grafana_session"}))
-	for c, want := range map[string]bool{
-		"nc_token=x": true, "a=1; nc_token=x": true, "a=1;nc_token = x": true, "nc.token=x": true, "nc token=x": true,
-		"nc[token=x": true, "nc+token=x": true, "nc%2Btoken=x": true, "nc%2btoken=x": true, "nc%20token=x": true, "NC.TOKEN=x": true,
-		"Nc+ToKeN=x": true, "nc%5Ftoken=x": true, "%6Ec_token=x": true, "NC_TOKEN=x": true, "grafana_session=abc": true,
-		"xnc_token=1": false, "nc_tokens=1": false, "foo=nc_token": false, "ocabc=1; nc_username=u": false,
-	} {
-		if got := re.MatchString(c); got != want {
-			t.Errorf("cookie %q excluded = %v, want %v", c, got, want)
-		}
-	}
+func TestRuleHasNoCredentialMatchers(t *testing.T) {
 	routes, _ := ParseRoutes([]byte(publicCompose))
-	pa := &PublicAccess{Service: "app", CredentialCookies: []string{"nc_token"}, CredentialQuery: []string{"apiKey"}, Paths: []PublicPath{pp("/share")}}
+	pa := &PublicAccess{Service: "app", CredentialCookies: []string{"nc_token"}, CredentialQuery: []string{"apiKey"}, Paths: []PublicPath{pp("/share"),
+		{Prefix: "/dist", Description: "d", Supporting: true}, {Prefix: "/icon", Description: "d", Exact: true, Justification: "j"}}}
 	m := &Manifest{Auth: Auth{Method: "forward-auth", PublicAccess: pa}}
 	if err := ValidatePublicAccess(&m.Auth); err != nil {
 		t.Fatal(err)
 	}
 	plan, _ := PlanPublic(m, routes)
 	routed, _ := plan.Effective(ModeAll, nil)
-	rule := plan.Rule(routed, pa)
-	if !strings.Contains(rule, " && !HeaderRegexp(`Cookie`, `(?i)") || !strings.HasSuffix(rule, " && !QueryRegexp(`apiKey`, `.*`)") {
+	// Credentials are core's public guard's job: the rule only routes paths.
+	if rule := plan.Rule(routed, pa); strings.Contains(rule, "HeaderRegexp") || strings.Contains(rule, "QueryRegexp") {
 		t.Errorf("rule = %s", rule)
 	}
-	if got := strings.Join(queryKeyVariants("a_b.c"), "|"); strings.Count(got, "|") != 15 || !strings.Contains(got, "a b[c") || !strings.Contains(got, "a.b_c") {
-		t.Errorf("query variants = %q", got)
+	if got := GuardPaths(routed); len(got) != 3 || got[0] != [2]string{"/share", "prefix"} || got[1] != [2]string{"/icon", "exact"} || got[2] != [2]string{"/dist", "static"} {
+		t.Errorf("guard paths = %v", got)
 	}
-	pa.CredentialQuery = []string{"auth_token"}
-	if r := plan.Rule(routed, pa); !strings.Contains(r, "!QueryRegexp(`auth token`, `.*`)") || !strings.Contains(r, "!QueryRegexp(`auth[token`, `.*`)") ||
-		!strings.Contains(r, "!QueryRegexp(`auth.token`, `.*`)") || !strings.Contains(r, "!QueryRegexp(`auth_token`, `.*`)") {
-		t.Errorf("rule = %s", rule)
-	}
-	if hosts, err := ParseRule(rule); err != nil || len(hosts) != 1 {
-		t.Errorf("rule with exclusions: %v %v", hosts, err)
-	}
-	for _, q := range []string{"a b", "a_b_c_d_e"} {
-		if ValidatePublicAccess(&Auth{Method: "forward-auth", PublicAccess: &PublicAccess{CredentialQuery: []string{q}, Paths: []PublicPath{pp("/s")}}}) == nil {
-			t.Errorf("credential_query %q accepted", q)
-		}
+	if ValidatePublicAccess(&Auth{Method: "forward-auth", PublicAccess: &PublicAccess{CredentialQuery: []string{"a b"}, Paths: []PublicPath{pp("/s")}}}) == nil {
+		t.Error("bad credential_query accepted")
 	}
 }

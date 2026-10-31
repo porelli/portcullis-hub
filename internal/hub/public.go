@@ -21,6 +21,32 @@ import (
 // uses Basic auth optionally, browsers use the share session).
 var credentialHeaders = []string{"Authorization", "Proxy-Authorization"}
 
+// PublicGuardMiddleware is core's forwardAuth (group-gate /public-guard):
+// it allows only the paths published in the policy file's public_paths
+// and refuses requests carrying any credential the app accepts. It runs
+// first, so it sees Authorization before the strip middleware removes it.
+const PublicGuardMiddleware = "portcullis-public-guard@docker"
+
+// publicEntry is what core's public guard enforces for the app (published
+// entries keep {token}).
+func publicEntry(m *templates.Manifest, published []string) *policy.PublicEntry {
+	pa := m.Auth.PublicAccess
+	e := &policy.PublicEntry{
+		TokenPattern:      pa.TokenPattern,
+		StaticExtensions:  pa.Extensions(),
+		CredentialHeaders: append(append([]string(nil), credentialHeaders...), pa.CredentialHeaders...),
+		CredentialCookies: append([]string{}, pa.CredentialCookies...),
+		CredentialQuery:   append([]string{}, pa.CredentialQuery...),
+	}
+	for _, gp := range templates.GuardPaths(published) {
+		e.Paths = append(e.Paths, policy.PublicPath{Path: gp[0], Match: gp[1]})
+	}
+	if !pa.HasTokenPaths() {
+		e.TokenPattern = ""
+	}
+	return e
+}
+
 // coreIdentityHeaders are always deleted from requests on the public
 // router: it has no forward-auth, so nothing else removes client-supplied
 // copies. They are core's forward-auth authResponseHeaders and Remote-*;
@@ -151,7 +177,7 @@ func publicLabels(id string, m *templates.Manifest, plan *templates.PublicPlan, 
 		r + `.tls: "true"`,
 		r + ".tls.options: " + tier,
 		r + fmt.Sprintf(`.priority: "%d"`, plan.Priority),
-		r + ".middlewares: " + mw + "@docker,rate-limit@file,security-headers@file",
+		r + ".middlewares: " + PublicGuardMiddleware + "," + mw + "@docker,rate-limit@file,security-headers@file",
 	}
 	if plan.TraefikService != "" {
 		lines = append(lines, r+".service: "+q(plan.TraefikService))
