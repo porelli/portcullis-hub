@@ -24,6 +24,8 @@ type AppSettingsView struct {
 	DefaultPolicy   policy.AuthPolicy   `json:"default_policy"`
 	SafetyScore     float64             `json:"safety_score"`
 	AuthPolicy      *policy.AuthPolicy  `json:"auth_policy,omitempty"`
+	// PublicAccess is set when the manifest declares auth.public_access.
+	PublicAccess *PublicAccessView `json:"public_access,omitempty"`
 }
 
 // AppSettings returns an app's settings and policy.
@@ -46,6 +48,7 @@ func (h *Hub) AppSettings(id string) (*AppSettingsView, error) {
 	if p, ok := h.st.AuthPolicies[id]; ok {
 		v.AuthPolicy = &p
 	}
+	v.PublicAccess = h.publicViewLocked(t, eff)
 	return v, nil
 }
 
@@ -93,6 +96,11 @@ type SettingsUpdate struct {
 	Values  map[string]string
 	Policy  *policy.AuthPolicy // nil = unchanged; normalised by SaveSettings
 	Inherit bool               // drop the per-app policy override
+	// Public exceptions (auth.public_access); nil = unchanged.
+	PublicAccess        *bool     // the admin's on/off choice
+	PublicAccessDefault bool      // forget the choice: template default applies
+	PublicMode          *string   // "all", "listed", "" = template default
+	PublicTokens        *[]string // listed shares: share URLs or bare tokens
 }
 
 // SaveSettings validates and stores an app's settings (and optionally its
@@ -125,6 +133,16 @@ func (h *Hub) SaveSettings(id string, u SettingsUpdate) error {
 			h.mu.Unlock()
 			return err
 		}
+	}
+	publicChanged, err := h.applyPublicUpdateLocked(t, u)
+	if err != nil {
+		if hadPrev {
+			h.st.Settings[id] = prev
+		} else {
+			delete(h.st.Settings, id)
+		}
+		h.mu.Unlock()
+		return err
 	}
 	policyChanged := false
 	if u.Inherit {
@@ -160,8 +178,10 @@ func (h *Hub) SaveSettings(id string, u SettingsUpdate) error {
 		}
 	}
 
-	if policyChanged {
+	if policyChanged || publicChanged {
 		h.writePolicyLogged()
+	}
+	if policyChanged {
 		if h.idp != nil {
 			acr := policy.ACR(effective)
 			for _, c := range t.Manifest.Clients {
@@ -290,6 +310,10 @@ func (h *Hub) SaveComposeFiles(id, compose, override string) error {
 	if sub := coreSubdomain(routes.Subdomains); sub != "" {
 		return statusErr(400, "compose.yml routes core subdomain %q", sub)
 	}
+	public, err := templates.PlanPublic(&t.Manifest, routes)
+	if err != nil {
+		return statusErr(400, "%v", err)
+	}
 	h.mu.Lock()
 	if live := h.findLocked(id); live != nil && live.Enabled {
 		cand := *live
@@ -306,6 +330,7 @@ func (h *Hub) SaveComposeFiles(id, compose, override string) error {
 	h.mu.Lock()
 	if live := h.findLocked(id); live != nil {
 		live.Subdomains = routes.Subdomains
+		live.Public = public
 	}
 	if h.refreshPublishedLocked() {
 		h.saveLocked()

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"html/template"
 	"io/fs"
 	"log"
@@ -375,8 +376,10 @@ func (s *Server) handleTemplateSettings(w http.ResponseWriter, r *http.Request) 
 }
 
 // parseSettingsUpdate splits the settings PUT body: string values are
-// settings, plus two reserved keys — _auth_policy ({factors, op}) and
-// _auth_policy_inherit (true/"true" drops the per-app override).
+// settings, plus reserved keys — _auth_policy ({factors, op}),
+// _auth_policy_inherit (true/"true" drops the per-app override),
+// _public_access (true/false/"default"), _public_mode ("all"/"listed"/""
+// for the template default) and _public_tokens (share URLs or tokens).
 func parseSettingsUpdate(raw map[string]interface{}) (hub.SettingsUpdate, error) {
 	var u hub.SettingsUpdate
 	if v, ok := raw["_auth_policy_inherit"]; ok {
@@ -405,6 +408,51 @@ func parseSettingsUpdate(raw map[string]interface{}) (hub.SettingsUpdate, error)
 		}
 	}
 	delete(raw, "_auth_policy")
+	if v, ok := raw["_public_access"]; ok {
+		// true / false: the admin's choice; "default": back to the
+		// template's enabled_by_default.
+		switch tv := v.(type) {
+		case bool:
+			u.PublicAccess = &tv
+		case string:
+			switch tv {
+			case "true", "false":
+				on := tv == "true"
+				u.PublicAccess = &on
+			case "default":
+				u.PublicAccessDefault = true
+			default:
+				return u, fmt.Errorf("_public_access must be true, false or \"default\"")
+			}
+		default:
+			return u, fmt.Errorf("_public_access must be true, false or \"default\"")
+		}
+		delete(raw, "_public_access")
+	}
+	if v, ok := raw["_public_mode"]; ok {
+		m, isStr := v.(string)
+		if !isStr {
+			return u, fmt.Errorf("_public_mode must be a string")
+		}
+		u.PublicMode = &m
+		delete(raw, "_public_mode")
+	}
+	if v, ok := raw["_public_tokens"]; ok {
+		list, isList := v.([]interface{})
+		if !isList {
+			return u, fmt.Errorf("_public_tokens must be a list of share URLs or tokens")
+		}
+		toks := make([]string, 0, len(list))
+		for _, item := range list {
+			s, isStr := item.(string)
+			if !isStr {
+				return u, fmt.Errorf("_public_tokens must be a list of share URLs or tokens")
+			}
+			toks = append(toks, s)
+		}
+		u.PublicTokens = &toks
+		delete(raw, "_public_tokens")
+	}
 	u.Values = make(map[string]string, len(raw))
 	for k, v := range raw {
 		if s, ok := v.(string); ok {

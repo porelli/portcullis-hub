@@ -121,6 +121,13 @@
     .policy-factor input[type="checkbox"] { accent-color: #3b82f6; }
     .policy-op { display: flex; gap: 1rem; margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px dashed #1e293b; font-size: 0.8125rem; }
     .policy-op label { cursor: pointer; }
+    .public-section { padding: 0.875rem 1rem; background: #0f172a; border: 1px solid #f59e0b55; border-radius: 0.5rem; margin-bottom: 1rem; font-size: 0.8125rem; }
+    .public-section ul { margin: 0.25rem 0 0.5rem 1.25rem; color: #94a3b8; }
+    .public-section code { font-family: 'SF Mono', 'Fira Code', monospace; color: #e2e8f0; }
+    .public-warn { color: #f59e0b; margin: 0.5rem 0; }
+    .public-danger { color: #ef4444; margin: 0.5rem 0; }
+    .public-token { display: flex; align-items: center; gap: 0.5rem; padding: 0.125rem 0; }
+    .public-section textarea { width: 100%; min-height: 3.5rem; background: #1e293b; border: 1px solid #334155; border-radius: 0.375rem; color: #e2e8f0; font-family: 'SF Mono', monospace; font-size: 0.75rem; padding: 0.375rem 0.5rem; }
     .policy-inherit { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px dashed #1e293b; font-size: 0.8125rem; color: #94a3b8; cursor: pointer; }
 
     /* Users list */
@@ -510,6 +517,70 @@
       return { inherit: false, policy: { factors, op: factors.length > 1 ? op : '' } };
     }
 
+    // ── Public exceptions (auth.public_access) ────────────
+    function renderPublicBlock(id, pa) {
+      if (!pa) return '';
+      const listed = pa.mode === 'listed';
+      let html = '<div class="public-section" data-public-id="' + escapeHtml(id) + '">';
+      html += '<div class="policy-title">Public exceptions</div>';
+      if (pa.description) html += '<div>' + escapeHtml(pa.description) + '</div>';
+      html += '<div class="public-danger">Requests to these paths skip Portcullis entirely: no forward-auth, no group-gate, no hardware key. Anyone on the internet can reach them; only the app\'s own checks (share token, share password, expiry) apply.</div>';
+      html += '<ul>';
+      for (const p of (pa.paths || [])) {
+        const kind = p.supporting ? 'supporting, always opened' : (p.prefix.indexOf('{token}') >= 0 ? 'per share' : 'all shares only');
+        html += '<li><code>' + escapeHtml(p.prefix) + '</code> — ' + escapeHtml(p.description) + ' <em>(' + kind + (p.broad ? ', broad' : '') + ')</em></li>';
+      }
+      html += '</ul>';
+      if (pa.policy_tier !== pa.tier_when_active) {
+        html += '<div class="public-warn">This app\'s policy requires a client certificate at the TLS handshake (' + escapeHtml(pa.policy_tier) + '). While a public path is open, ALL of its routers use ' + escapeHtml(pa.tier_when_active) + ' instead (Traefik picks TLS options per host).';
+        if (pa.method === 'native-oidc') {
+          html += ' This is a native-OIDC app: mTLS is then only enforced at login (Keycloak acr), not on each request.';
+        } else {
+          html += ' group-gate still requires a valid, unrevoked client certificate matching the user on every gated request.';
+        }
+        if (pa.ungated_routers && pa.ungated_routers.length) {
+          html += ' Routers without group-gate lose the handshake check: ' + pa.ungated_routers.map(escapeHtml).join(', ') + '.';
+        }
+        html += '</div>';
+      }
+      html += '<label class="policy-factor"><input type="checkbox" name="__pub_on"' + (pa.enabled ? ' checked' : '') + '> Allow public exceptions</label>';
+      html += '<label class="policy-inherit"><input type="checkbox" name="__pub_default"' + (pa.explicit ? '' : ' checked') + '> Use the template default (' + (pa.enabled_by_default ? 'on' : 'off') + ')</label>';
+      if (pa.listed_possible) {
+        html += '<div class="policy-op">';
+        html += '<label><input type="radio" name="__pub_mode" value="listed"' + (listed ? ' checked' : '') + '> Only listed shares</label>';
+        html += '<label><input type="radio" name="__pub_mode" value="all"' + (!listed ? ' checked' : '') + '> All shares</label>';
+        html += '</div>';
+        html += '<div>Listed shares (' + (pa.tokens || []).length + '/' + pa.max_tokens + '):</div>';
+        for (const tok of (pa.tokens || [])) {
+          html += '<div class="public-token"><code>' + escapeHtml(tok) + '</code><input type="hidden" name="__pub_token" value="' + escapeHtml(tok) + '"><button type="button" class="btn btn-sm btn-danger" onclick="this.parentElement.remove()">Remove</button></div>';
+        }
+        html += '<textarea name="__pub_new" placeholder="Paste share URLs or tokens, one per line"></textarea>';
+        html += '<small>Tokens must match <code>' + escapeHtml(pa.token_pattern || '') + '</code>. With no listed share nothing is opened.</small>';
+      }
+      html += '<div>' + (pa.active ? 'Active: ' + (pa.published || []).map(p => '<code>' + escapeHtml(p) + '</code>').join(', ') + ' on ' + (pa.subdomains || []).map(escapeHtml).join(', ') : 'No public router is generated.') + '</div>';
+      if (pa.error) html += '<div class="public-danger">' + escapeHtml(pa.error) + '</div>';
+      html += '</div>';
+      return html;
+    }
+
+    function collectPublic(form, payload) {
+      const box = form.querySelector('.public-section');
+      if (!box) return;
+      const def = form.querySelector('input[name="__pub_default"]');
+      const on = form.querySelector('input[name="__pub_on"]');
+      payload._public_access = (def && def.checked) ? 'default' : !!(on && on.checked);
+      const mode = form.querySelector('input[name="__pub_mode"]:checked');
+      if (mode) payload._public_mode = mode.value;
+      if (form.querySelector('textarea[name="__pub_new"]')) {
+        const toks = [];
+        form.querySelectorAll('input[name="__pub_token"]').forEach(el => toks.push(el.value));
+        for (const line of form.querySelector('textarea[name="__pub_new"]').value.split('\n')) {
+          if (line.trim()) toks.push(line.trim());
+        }
+        payload._public_tokens = toks;
+      }
+    }
+
     async function loadSettings(id) {
       const container = document.getElementById('detail-settings-' + id);
       try {
@@ -519,6 +590,7 @@
         // Access policy always rendered — every app gets a policy knob.
         let html = '<form class="settings-form" onsubmit="saveSettings(event, \'' + id + '\')">';
         html += renderPolicyBlock(id, data.auth_policy, data.effective_policy || {factors:[], op:''}, data.default_policy, data.safety_score);
+        html += renderPublicBlock(id, data.public_access);
         if (!hasSettings && !hasPorts) {
           html += '<button type="submit" class="btn btn-primary btn-sm">Save</button></form>';
           container.innerHTML = html;
@@ -602,7 +674,7 @@
       const policySuffixes = [id + '-factor', id + '-op', id + '-inherit'];
       for (const el of form.elements) {
         if (!el.name) continue;
-        if (policySuffixes.includes(el.name)) continue;
+        if (policySuffixes.includes(el.name) || el.name.startsWith('__pub_')) continue;
         payload[el.name] = el.value.trim();
       }
       const { inherit, policy } = collectPolicy(form, id);
@@ -611,6 +683,7 @@
       } else {
         payload._auth_policy = policy;
       }
+      collectPublic(form, payload);
       try {
         await apiPut('/api/templates/settings/' + id, payload);
         showToast('Saved. App will restart if running.', 'success');
@@ -757,6 +830,7 @@
     // ── Drift (enabled apps vs. running containers) ───────
     const DRIFT_ACTIONS = {
       start:   { label: 'Start', cls: 'btn-primary', confirm: null },
+      apply:   { label: 'Apply settings', cls: 'btn-primary', confirm: 'Regenerate the override of %s and recreate its containers?' },
       disable: { label: 'Disable', cls: 'btn-danger', confirm: 'Disable %s and remove its containers?' },
       stop:    { label: 'Stop & remove', cls: 'btn-danger', confirm: 'Stop and remove the containers of %s?' },
       adopt:   { label: 'Enable', cls: 'btn-secondary', confirm: 'Mark %s as enabled (runs compose up)?' },

@@ -15,8 +15,8 @@ import (
 )
 
 // generateOverrideLocked writes the per-app compose override: user volume
-// mounts, port bindings, and per-router Traefik tls.options labels driven by
-// the app's auth policy. Port ranges and network_mode: host ports stay in the
+// mounts, port bindings, per-router Traefik tls.options labels driven by
+// the app's auth policy, and the public-exception router when it is on. Port ranges and network_mode: host ports stay in the
 // base compose.yml. Caller must hold mu.
 func (h *Hub) generateOverrideLocked(t *templates.Template, values map[string]string) error {
 	overridePath := h.overridePath(t.ID)
@@ -73,12 +73,26 @@ func (h *Hub) generateOverrideLocked(t *templates.Template, values map[string]st
 		servicePorts[p.Service] = append(servicePorts[p.Service], fmt.Sprintf("\"%s:%d:%d/%s\"", hostIP, host, p.Container, proto))
 	}
 
-	tier := policy.Tier(h.st.ResolvePolicy(t.ID))
 	routes, err := templates.ParseRoutes(t.ReadCompose())
 	if err != nil {
 		return err
 	}
 	serviceRouters := routes.Routers
+	// Public exceptions: plan from the compose file being deployed, not
+	// the catalog copy (Expert edits).
+	plan, err := templates.PlanPublic(&t.Manifest, routes)
+	if err != nil {
+		return err
+	}
+	pub := h.publicLocked(t, plan)
+	// One tier for every router of the app's hosts (policy.HostTier).
+	tier := policy.HostTier(h.st.ResolvePolicy(t.ID), pub.Active())
+	var publicLines []string
+	if pub.Active() {
+		if publicLines, err = publicLabels(t.ID, plan, pub.Routed, tier); err != nil {
+			return err
+		}
+	}
 
 	services := map[string]bool{}
 	for svc := range serviceMounts {
@@ -120,6 +134,11 @@ func (h *Hub) generateOverrideLocked(t *templates.Template, values map[string]st
 			b.WriteString("    labels:\n")
 			for _, r := range routers {
 				fmt.Fprintf(&b, "      traefik.http.routers.%s.tls.options: %s\n", r, tier)
+			}
+			if plan != nil && svc == plan.Service {
+				for _, l := range publicLines {
+					fmt.Fprintf(&b, "      %s\n", l)
+				}
 			}
 		}
 	}

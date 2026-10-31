@@ -2,6 +2,7 @@ package hub
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"reflect"
 	"sort"
@@ -25,6 +26,9 @@ const (
 	DriftLeftovers DriftKind = "stopped_not_enabled"
 	// DriftTemplateMissing: enabled, but no (valid) template provides it.
 	DriftTemplateMissing DriftKind = "template_missing"
+	// DriftPublicAccess: the running containers' public-exception router
+	// (paths, or its presence) differs from what the Hub's settings want.
+	DriftPublicAccess DriftKind = "public_access_mismatch"
 )
 
 // Drift actions accepted by ResolveDrift.
@@ -33,6 +37,7 @@ const (
 	ActionDisable = "disable" // mark disabled and compose down
 	ActionStop    = "stop"    // compose down a project that is not enabled
 	ActionAdopt   = "adopt"   // enable an app whose containers already run
+	ActionApply   = "apply"   // regenerate the override and compose up
 )
 
 // Drift is one mismatch.
@@ -55,9 +60,10 @@ type DriftReport struct {
 
 type projectCount struct{ running, total int }
 
-// computeDrift compares enabled apps with project container counts. busy
-// apps (mid-operation) are skipped.
-func computeDrift(enabled, known, snapshot map[string]bool, counts map[string]projectCount, busy func(string) bool) []Drift {
+// computeDrift compares enabled apps with project container counts, and the
+// public-exception prefixes running containers route (havePublic) with what
+// the Hub wants (wantPublic). busy apps (mid-operation) are skipped.
+func computeDrift(enabled, known, snapshot map[string]bool, counts map[string]projectCount, wantPublic, havePublic map[string][]string, busy func(string) bool) []Drift {
 	var out []Drift
 	ids := map[string]bool{}
 	for id := range enabled {
@@ -98,6 +104,9 @@ func computeDrift(enabled, known, snapshot map[string]bool, counts map[string]pr
 		case !enabled[id] && c.running > 0:
 			d.Kind = DriftNotEnabled
 			d.Message = "running but not enabled"
+			if len(havePublic[id]) > 0 {
+				d.Message += " — its public-exception router bypasses forward-auth"
+			}
 			d.Actions = []string{ActionStop}
 			if known[id] {
 				d.Actions = append(d.Actions, ActionAdopt)
@@ -106,12 +115,23 @@ func computeDrift(enabled, known, snapshot map[string]bool, counts map[string]pr
 			d.Kind = DriftLeftovers
 			d.Message = "stopped containers left behind by an app that is not enabled"
 			d.Actions = []string{ActionStop}
+		case enabled[id] && !equalStrings(wantPublic[id], havePublic[id]):
+			d.Kind = DriftPublicAccess
+			d.Message = fmt.Sprintf("public exceptions differ: running %s, Hub settings %s — apply recreates the containers", describePublic(havePublic[id]), describePublic(wantPublic[id]))
+			d.Actions = []string{ActionApply, ActionDisable}
 		default:
 			continue
 		}
 		out = append(out, d)
 	}
 	return out
+}
+
+func describePublic(prefixes []string) string {
+	if len(prefixes) == 0 {
+		return "off"
+	}
+	return fmt.Sprintf("%d path(s)", len(prefixes))
 }
 
 // Reconcile checks state against Docker once, stores and returns the report.
@@ -131,6 +151,7 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 	}
 	counts := map[string]projectCount{}
 	routed := map[string]map[string]bool{}
+	havePublic := map[string][]string{}
 	for _, c := range cs {
 		p := c.Project()
 		if !strings.HasPrefix(p, ProjectPrefix) || c.Labels[docker.LabelOneoff] == "True" {
@@ -155,6 +176,9 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 		pc.total++
 		if c.State == "running" || c.State == "restarting" {
 			pc.running++
+			if rule, ok := c.Labels["traefik.http.routers."+PublicRouterName(id)+".rule"]; ok {
+				havePublic[id] = mergeSorted(havePublic[id], templates.RuntimePublicPrefixes(rule))
+			}
 		}
 		counts[id] = pc
 	}
@@ -164,15 +188,22 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 		enabled[id] = true
 	}
 	known := map[string]bool{}
-	for _, t := range h.templates {
+	wantPublic := map[string][]string{}
+	for i := range h.templates {
+		t := &h.templates[i]
 		known[t.ID] = true
+		if enabled[t.ID] {
+			if pub := h.publicLocked(t, t.Public); pub.Active() {
+				wantPublic[t.ID] = pub.Routed
+			}
+		}
 	}
 	snapshot := map[string]bool{}
 	for id := range h.st.Published {
 		snapshot[id] = true
 	}
 	h.mu.RUnlock()
-	rep.Items = computeDrift(enabled, known, snapshot, counts, h.appBusy)
+	rep.Items = computeDrift(enabled, known, snapshot, counts, wantPublic, havePublic, h.appBusy)
 
 	runtime := map[string][]string{}
 	for id, set := range routed {
@@ -319,6 +350,28 @@ func (h *Hub) ResolveDrift(id, action string) error {
 			return statusErr(400, "no template for %s — it can only be stopped", id)
 		}
 		return h.Enable(id)
+	case ActionApply:
+		unlock, err := h.lockApp(id)
+		if err != nil {
+			return err
+		}
+		defer unlock()
+		h.mu.Lock()
+		live := h.findLocked(id)
+		if live == nil || !live.Enabled {
+			h.mu.Unlock()
+			return statusErr(400, "%s is not an enabled app with a template", id)
+		}
+		t := *live
+		err = h.generateOverrideLocked(&t, h.st.Settings[id])
+		h.mu.Unlock()
+		if err != nil {
+			return statusErr(500, "override generation failed: %v", err)
+		}
+		if err := h.composeUp(&t); err != nil {
+			return statusErr(500, "compose up failed: %v", err)
+		}
+		return nil
 	case ActionStart:
 		unlock, err := h.lockApp(id)
 		if err != nil {
@@ -349,4 +402,21 @@ func (h *Hub) ResolveDrift(id, action string) error {
 	default:
 		return statusErr(400, "unknown action %q", action)
 	}
+}
+
+// mergeSorted returns the sorted union of two sorted string lists.
+func mergeSorted(a, b []string) []string {
+	set := map[string]bool{}
+	for _, s := range a {
+		set[s] = true
+	}
+	for _, s := range b {
+		set[s] = true
+	}
+	out := make([]string, 0, len(set))
+	for s := range set {
+		out = append(out, s)
+	}
+	sort.Strings(out)
+	return out
 }

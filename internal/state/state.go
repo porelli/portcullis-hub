@@ -35,6 +35,11 @@ type PublishedApp struct {
 	// Policy is the app's own policy override at publish time; nil means it
 	// inherits the (current) global default.
 	Policy *policy.AuthPolicy `json:"policy,omitempty" yaml:"policy,omitempty"`
+	// PublicSubdomains / PublicPaths are the app's public exceptions at
+	// publish time ({token} kept, never the tokens); empty when no public
+	// router was generated.
+	PublicSubdomains []string `json:"public_subdomains,omitempty" yaml:"public_subdomains,omitempty"`
+	PublicPaths      []string `json:"public_paths,omitempty" yaml:"public_paths,omitempty"`
 }
 
 // AppState tracks which apps are enabled and their settings.
@@ -49,6 +54,16 @@ type AppState struct {
 	DefaultPolicy *policy.AuthPolicy `json:"default_auth_policy,omitempty" yaml:"default_auth_policy,omitempty"`
 	// Published holds the last known group-gate config per enabled app.
 	Published map[string]PublishedApp `json:"published" yaml:"published"`
+	// PublicAccess is the admin's explicit choice for an app's public
+	// exceptions (auth.public_access). No entry = the template's
+	// enabled_by_default applies, including after it changes on sync.
+	PublicAccess map[string]bool `json:"public_access,omitempty" yaml:"public_access,omitempty"`
+	// PublicMode is the admin's explicit mode ("all" / "listed"); no entry
+	// = the template's default_mode.
+	PublicMode map[string]string `json:"public_mode,omitempty" yaml:"public_mode,omitempty"`
+	// PublicTokens are the share tokens opened in listed mode (secrets:
+	// state.yaml is 0600; the policy file only shows {token}).
+	PublicTokens map[string][]string `json:"public_tokens,omitempty" yaml:"public_tokens,omitempty"`
 }
 
 // New returns an empty state with initialised maps.
@@ -67,6 +82,15 @@ func (s *AppState) init() {
 	}
 	if s.Published == nil {
 		s.Published = make(map[string]PublishedApp)
+	}
+	if s.PublicAccess == nil {
+		s.PublicAccess = make(map[string]bool)
+	}
+	if s.PublicMode == nil {
+		s.PublicMode = make(map[string]string)
+	}
+	if s.PublicTokens == nil {
+		s.PublicTokens = make(map[string][]string)
 	}
 }
 

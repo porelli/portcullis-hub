@@ -227,6 +227,7 @@ func (h *Hub) Discover() {
 }
 
 // snapshot captures what an enabled template publishes to group-gate.
+// Caller must hold mu.
 func (h *Hub) snapshot(t *templates.Template) state.PublishedApp {
 	a := t.Manifest.Auth
 	p := state.PublishedApp{
@@ -239,6 +240,10 @@ func (h *Hub) snapshot(t *templates.Template) state.PublishedApp {
 	if ov, ok := h.st.AuthPolicies[t.ID]; ok {
 		ov.Factors = append([]string(nil), ov.Factors...)
 		p.Policy = &ov
+	}
+	if pub := h.publicLocked(t, t.Public); pub.Active() {
+		p.PublicSubdomains = append([]string(nil), t.Public.Subdomains...)
+		p.PublicPaths = pub.Published
 	}
 	return p
 }
@@ -348,7 +353,7 @@ func (h *Hub) WritePolicy() error {
 			continue
 		}
 		covered[t.ID] = true
-		apps = append(apps, policy.App{
+		app := policy.App{
 			ID:          t.ID,
 			Enabled:     true,
 			Subdomains:  t.Subdomains,
@@ -356,7 +361,11 @@ func (h *Hub) WritePolicy() error {
 			AccessGroup: t.Manifest.Auth.AccessGroup,
 			AdminGroup:  t.Manifest.Auth.AdminGroup,
 			AdminPaths:  t.Manifest.Auth.AdminPaths,
-		})
+		}
+		if pub := h.publicLocked(t, t.Public); pub.Active() {
+			app.PublicSubdomains, app.PublicPaths = t.Public.Subdomains, pub.Published
+		}
+		apps = append(apps, app)
 	}
 	for _, id := range h.st.Enabled {
 		if covered[id] {
@@ -376,6 +385,10 @@ func (h *Hub) WritePolicy() error {
 				AccessGroup: snap.AccessGroup,
 				AdminGroup:  snap.AdminGroup,
 				AdminPaths:  snap.AdminPaths,
+				// The containers keep the public router they were started
+				// with: keep showing it.
+				PublicSubdomains: snap.PublicSubdomains,
+				PublicPaths:      snap.PublicPaths,
 			})
 			continue
 		}

@@ -164,3 +164,22 @@ func TestParseSettingsUpdate(t *testing.T) {
 		t.Errorf("values = %v", u.Values)
 	}
 }
+
+func TestParseSettingsUpdatePublic(t *testing.T) {
+	u, err := parseSettingsUpdate(map[string]interface{}{
+		"_public_access": false, "_public_mode": "listed", "_public_tokens": []interface{}{"https://x/s/abc", "def"}, "K": "v",
+	})
+	if err != nil || u.PublicAccess == nil || *u.PublicAccess || *u.PublicMode != "listed" || len(*u.PublicTokens) != 2 || u.Values["K"] != "v" || len(u.Values) != 1 {
+		t.Errorf("u = %+v, %v", u, err)
+	}
+	if u, err := parseSettingsUpdate(map[string]interface{}{"_public_access": "default"}); err != nil || !u.PublicAccessDefault || u.PublicAccess != nil {
+		t.Errorf("default: %+v %v", u, err)
+	}
+	for _, raw := range []map[string]interface{}{
+		{"_public_access": "maybe"}, {"_public_access": 1.0}, {"_public_mode": true}, {"_public_tokens": "abc"}, {"_public_tokens": []interface{}{1.0}},
+	} {
+		if _, err := parseSettingsUpdate(raw); err == nil {
+			t.Errorf("accepted %v", raw)
+		}
+	}
+}

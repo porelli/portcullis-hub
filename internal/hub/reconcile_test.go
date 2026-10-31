@@ -20,7 +20,7 @@ func TestComputeDrift(t *testing.T) {
 		"stranger": {running: 1, total: 1},
 		"leftover": {running: 0, total: 1},
 	}
-	got := computeDrift(enabled, known, map[string]bool{"gone": true}, counts, func(id string) bool { return id == "busy" })
+	got := computeDrift(enabled, known, map[string]bool{"gone": true}, counts, nil, nil, func(id string) bool { return id == "busy" })
 	type row struct {
 		id      string
 		kind    DriftKind
