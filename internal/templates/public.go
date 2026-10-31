@@ -640,35 +640,3 @@ func (pl *PublicPlan) Rule(routed []string, pa *PublicAccess) string {
 	}
 	return rule
 }
-
-// RuntimePublicPrefixes decodes a running public router's rule into the
-// encoded entries Effective produces, sorted.
-func RuntimePublicPrefixes(rule string) []string {
-	prefixes, exacts := map[string]bool{}, map[string]bool{}
-	set := map[string]bool{}
-	for _, m := range runtimePrefixRe.FindAllStringSubmatch(rule, -1) {
-		prefixes[strings.TrimRight(m[1], "/")] = true
-	}
-	for _, m := range runtimePathRe.FindAllStringSubmatch(rule, -1) {
-		exacts[m[1]] = true
-	}
-	for _, m := range runtimeRegexpRe.FindAllStringSubmatch(rule, -1) {
-		set[routedStatic+strings.ReplaceAll(m[1], `\`, "")] = true
-	}
-	for p := range prefixes {
-		set[p] = true
-	}
-	for p := range exacts {
-		if !prefixes[p] {
-			set[routedExact+p] = true
-		}
-	}
-	return sortedKeys(set)
-}
-
-var (
-	runtimePathRe   = regexp.MustCompile("(?i)\\bPath\\([`\"]([^`\"]*)[`\"]\\)")
-	runtimeRegexpRe = regexp.MustCompile("(?i)PathRegexp\\([`\"]\\^([^(`\"]*)\\(")
-)
-
-var runtimePrefixRe = regexp.MustCompile("(?i)PathPrefix\\([`\"]([^`\"]*)[`\"]\\)")

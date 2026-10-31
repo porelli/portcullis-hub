@@ -60,10 +60,13 @@ type DriftReport struct {
 
 type projectCount struct{ running, total int }
 
-// computeDrift compares enabled apps with project container counts, and the
-// public-exception prefixes running containers route (havePublic) with what
-// the Hub wants (wantPublic). busy apps (mid-operation) are skipped.
-func computeDrift(enabled, known, snapshot map[string]bool, counts map[string]projectCount, wantPublic, havePublic map[string][]string, blockedPublic map[string]string, busy func(string) bool) []Drift {
+// computeDrift compares enabled apps with project container counts.
+// exposureDiff describes, per app, how the running containers' exposure
+// labels (tier, public router) differ from what the Hub generates now;
+// havePublic marks projects whose running containers carry a public
+// router; blockedPublic explains stored public choices that can't be
+// applied. busy apps (mid-operation) are skipped.
+func computeDrift(enabled, known, snapshot map[string]bool, counts map[string]projectCount, exposureDiff map[string]string, havePublic map[string]bool, blockedPublic map[string]string, busy func(string) bool) []Drift {
 	var out []Drift
 	ids := map[string]bool{}
 	for id := range enabled {
@@ -104,7 +107,7 @@ func computeDrift(enabled, known, snapshot map[string]bool, counts map[string]pr
 		case !enabled[id] && c.running > 0:
 			d.Kind = DriftNotEnabled
 			d.Message = "running but not enabled"
-			if len(havePublic[id]) > 0 {
+			if havePublic[id] {
 				d.Message += " — its public-exception router bypasses forward-auth"
 			}
 			d.Actions = []string{ActionStop}
@@ -115,9 +118,9 @@ func computeDrift(enabled, known, snapshot map[string]bool, counts map[string]pr
 			d.Kind = DriftLeftovers
 			d.Message = "stopped containers left behind by an app that is not enabled"
 			d.Actions = []string{ActionStop}
-		case enabled[id] && !equalStrings(wantPublic[id], havePublic[id]):
+		case enabled[id] && exposureDiff[id] != "":
 			d.Kind = DriftPublicAccess
-			d.Message = fmt.Sprintf("public exceptions differ: running %s, Hub settings %s — apply recreates the containers", describePublic(havePublic[id]), describePublic(wantPublic[id]))
+			d.Message = "public exposure differs from the Hub's settings (" + exposureDiff[id] + ") — re-apply or disable"
 			if b := blockedPublic[id]; b != "" {
 				d.Message = b + "; " + d.Message
 			}
@@ -132,13 +135,6 @@ func computeDrift(enabled, known, snapshot map[string]bool, counts map[string]pr
 		out = append(out, d)
 	}
 	return out
-}
-
-func describePublic(prefixes []string) string {
-	if len(prefixes) == 0 {
-		return "off"
-	}
-	return fmt.Sprintf("%d path(s)", len(prefixes))
 }
 
 // Reconcile checks state against Docker once, stores and returns the report.
@@ -158,7 +154,12 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 	}
 	counts := map[string]projectCount{}
 	routed := map[string]map[string]bool{}
-	havePublic := map[string][]string{}
+	havePublic := map[string]bool{}
+	type running struct {
+		id, service string
+		labels      map[string]string
+	}
+	var live []running
 	for _, c := range cs {
 		p := c.Project()
 		if !strings.HasPrefix(p, ProjectPrefix) || c.Labels[docker.LabelOneoff] == "True" {
@@ -183,9 +184,10 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 		pc.total++
 		if c.State == "running" || c.State == "restarting" {
 			pc.running++
-			if rule, ok := c.Labels["traefik.http.routers."+PublicRouterName(id)+".rule"]; ok {
-				havePublic[id] = mergeSorted(havePublic[id], templates.RuntimePublicPrefixes(rule))
+			if _, ok := c.Labels["traefik.http.routers."+PublicRouterName(id)+".rule"]; ok {
+				havePublic[id] = true
 			}
+			live = append(live, running{id, c.Labels[docker.LabelService], c.Labels})
 		}
 		counts[id] = pc
 	}
@@ -195,18 +197,20 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 		enabled[id] = true
 	}
 	known := map[string]bool{}
-	wantPublic := map[string][]string{}
 	blockedPublic := map[string]string{}
+	desired := map[string]map[string]map[string]string{}
 	for i := range h.templates {
 		t := &h.templates[i]
 		known[t.ID] = true
 		if enabled[t.ID] {
 			pub := h.publicLocked(t, t.Public)
-			if pub.Active() {
-				wantPublic[t.ID] = pub.Routed
-			}
 			if pub.Enabled && pub.Blocked != "" {
 				blockedPublic[t.ID] = pub.Blocked
+			}
+			if d, err := h.desiredRouteLabelsLocked(t); err == nil {
+				desired[t.ID] = d
+			} else {
+				log.Printf("reconcile: %s: cannot render its labels: %v", t.ID, err)
 			}
 		}
 	}
@@ -215,7 +219,21 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 		snapshot[id] = true
 	}
 	h.mu.RUnlock()
-	rep.Items = computeDrift(enabled, known, snapshot, counts, wantPublic, havePublic, blockedPublic, h.appBusy)
+	// Exposure drift: every exposure label (tier, public router, strip
+	// middleware) of each running container must equal what the Hub would
+	// generate now — a widened rule, a dropped exclusion, a missing
+	// middleware or a stale router all count.
+	exposureDiff := map[string]string{}
+	for _, c := range live {
+		want, ok := desired[c.id]
+		if !ok {
+			continue
+		}
+		if d := diffExposure(c.id, want[c.service], c.labels); d != "" && exposureDiff[c.id] == "" {
+			exposureDiff[c.id] = c.service + ": " + d
+		}
+	}
+	rep.Items = computeDrift(enabled, known, snapshot, counts, exposureDiff, havePublic, blockedPublic, h.appBusy)
 
 	runtime := map[string][]string{}
 	for id, set := range routed {
@@ -416,19 +434,37 @@ func (h *Hub) ResolveDrift(id, action string) error {
 	}
 }
 
-// mergeSorted returns the sorted union of two sorted string lists.
-func mergeSorted(a, b []string) []string {
-	set := map[string]bool{}
-	for _, s := range a {
-		set[s] = true
+// diffExposure compares a running container's exposure labels with the
+// wanted ones and names the first few that differ ("" = equal).
+func diffExposure(id string, want, have map[string]string) string {
+	keys := map[string]bool{}
+	for k := range want {
+		keys[k] = true
 	}
-	for _, s := range b {
-		set[s] = true
+	for k := range have {
+		if exposureLabel(id, k) {
+			keys[k] = true
+		}
 	}
-	out := make([]string, 0, len(set))
-	for s := range set {
-		out = append(out, s)
+	var diff []string
+	for k := range keys {
+		w, wok := want[k]
+		g, gok := have[k]
+		switch {
+		case wok && !gok:
+			diff = append(diff, "missing "+strings.TrimPrefix(k, "traefik.http."))
+		case !wok && gok:
+			diff = append(diff, "unexpected "+strings.TrimPrefix(k, "traefik.http."))
+		case w != g:
+			diff = append(diff, "changed "+strings.TrimPrefix(k, "traefik.http."))
+		}
 	}
-	sort.Strings(out)
-	return out
+	if len(diff) == 0 {
+		return ""
+	}
+	sort.Strings(diff)
+	if len(diff) > 3 {
+		diff = append(diff[:3], fmt.Sprintf("+%d more", len(diff)-3))
+	}
+	return strings.Join(diff, ", ")
 }

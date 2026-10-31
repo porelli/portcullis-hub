@@ -246,30 +246,70 @@ func TestPublicSnapshotWhenTemplateMissing(t *testing.T) {
 	}
 }
 
+// runningAs returns a running container of the cloud project whose labels
+// are exactly what the Hub would generate now, after edit.
+func runningAs(t *testing.T, f *fixture, edit func(map[string]string)) docker.Container {
+	t.Helper()
+	f.h.mu.RLock()
+	want, err := f.h.desiredRouteLabelsLocked(f.h.findLocked("cloud"))
+	f.h.mu.RUnlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := container("c1", "portcullis-cloud", "cloud", "running")
+	for k, v := range want["cloud"] {
+		c.Labels[k] = v
+	}
+	if edit != nil {
+		edit(c.Labels)
+	}
+	return c
+}
+
+func publicDrift(t *testing.T, f *fixture, c docker.Container) *Drift {
+	t.Helper()
+	f.engine.containers = []docker.Container{c}
+	return driftFor(f.h.Reconcile(context.Background()), "cloud")
+}
+
 func TestPublicDrift(t *testing.T) {
 	f := newCloudFixture(t)
+	writeFile(t, filepath.Join(f.src, "cloud", "manifest.yaml"), strings.Replace(cloudManifest, "    paths:\n", "    credential_cookies: [nc_token]\n    paths:\n", 1))
+	f.h.Discover()
 	save(t, f, SettingsUpdate{PublicMode: strp("all")})
 	if err := f.h.Enable("cloud"); err != nil {
 		t.Fatal(err)
 	}
-	c := container("c1", "portcullis-cloud", "cloud", "running")
-	f.engine.containers = []docker.Container{c}
-	// Running without the public router while the Hub wants it.
-	rep := f.h.Reconcile(context.Background())
-	d := driftFor(rep, "cloud")
-	if d == nil || d.Kind != DriftPublicAccess || d.Actions[0] != ActionApply {
-		t.Fatalf("drift = %+v", rep.Items)
+	rule := "traefik.http.routers.portcullis-public-cloud.rule"
+	exact := runningAs(t, f, nil)
+	if !strings.Contains(exact.Labels[rule], "Host(`cloud.example.org`)") || strings.Contains(exact.Labels[rule], "$$") {
+		t.Fatalf("desired labels not expanded like compose: %s", exact.Labels[rule])
 	}
-	// Running with exactly the wanted router: no drift.
-	c.Labels["traefik.http.routers.portcullis-public-cloud.rule"] = "Host(`cloud.example.org`) && (Path(`/apps/text`) || PathPrefix(`/apps/text/`) || Path(`/s`) || PathPrefix(`/s/`) || PathRegexp(`^/dist(/[A-Za-z0-9_~@+-]+)*/[A-Za-z0-9_~@+-][A-Za-z0-9._~@+-]*\\.(css|js)$`))"
-	f.engine.containers = []docker.Container{c}
-	if d := driftFor(f.h.Reconcile(context.Background()), "cloud"); d != nil {
-		t.Errorf("unexpected drift %+v", d)
+	if d := publicDrift(t, f, exact); d != nil {
+		t.Errorf("unexpected drift for identical labels: %+v", d)
 	}
-	// Admin turns it off but the containers still route it.
-	f.runner.upErr = nil
+	for name, edit := range map[string]func(map[string]string){
+		"no public router":  func(l map[string]string) { delete(l, rule) },
+		"widened regexp":    func(l map[string]string) { l[rule] = strings.Replace(l[rule], "(avif|css|", "(php|avif|css|", 1) },
+		"dropped exclusion": func(l map[string]string) { l[rule] = l[rule][:strings.Index(l[rule], " && !HeaderRegexp")] },
+		"missing middleware": func(l map[string]string) {
+			l["traefik.http.routers.portcullis-public-cloud.middlewares"] = "rate-limit@file"
+		},
+		"missing strip": func(l map[string]string) {
+			delete(l, "traefik.http.middlewares.portcullis-public-strip-cloud.headers.customrequestheaders.Authorization")
+		},
+		"other tier":        func(l map[string]string) { l["traefik.http.routers.cloud.tls.options"] = "public@file" },
+		"extra stale label": func(l map[string]string) { l["traefik.http.routers.portcullis-public-cloud.service"] = "other" },
+	} {
+		d := publicDrift(t, f, runningAs(t, f, edit))
+		if d == nil || d.Kind != DriftPublicAccess || d.Actions[0] != ActionApply || !strings.Contains(d.Message, "public exposure differs") {
+			t.Errorf("%s: drift = %+v", name, d)
+		}
+	}
+	// Admin turns it off while the containers still route it: unexpected
+	// labels; apply recreates.
 	save(t, f, SettingsUpdate{PublicAccess: boolp(false)})
-	if d := driftFor(f.h.Reconcile(context.Background()), "cloud"); d == nil || d.Kind != DriftPublicAccess {
+	if d := publicDrift(t, f, exact); d == nil || d.Kind != DriftPublicAccess || !strings.Contains(d.Message, "unexpected") {
 		t.Errorf("stale public router not reported: %+v", d)
 	}
 	n := len(f.runner.Calls())
@@ -281,8 +321,7 @@ func TestPublicDrift(t *testing.T) {
 	}
 	// A not-enabled project still routing a public router says so.
 	f.h.Disable("cloud")
-	f.engine.containers = []docker.Container{c}
-	if d := driftFor(f.h.Reconcile(context.Background()), "cloud"); d == nil || d.Kind != DriftNotEnabled || !strings.Contains(d.Message, "bypasses forward-auth") {
+	if d := publicDrift(t, f, exact); d == nil || d.Kind != DriftNotEnabled || !strings.Contains(d.Message, "bypasses forward-auth") {
 		t.Errorf("running_not_enabled with public router = %+v", d)
 	}
 }
@@ -339,8 +378,7 @@ func TestPublicFailClosedOnUnsupportedStoredMode(t *testing.T) {
 	if v.PublicAccess == nil || v.PublicAccess.Blocked == "" || v.PublicAccess.Active {
 		t.Errorf("view = %+v", v.PublicAccess)
 	}
-	f.engine.containers = []docker.Container{container("c1", "portcullis-cloud", "cloud", "running")}
-	if d := driftFor(f.h.Reconcile(context.Background()), "cloud"); d == nil || d.Kind != DriftPublicAccess || !strings.Contains(d.Message, "confirm a mode") {
+	if d := publicDrift(t, f, runningAs(t, f, nil)); d == nil || d.Kind != DriftPublicAccess || !strings.Contains(d.Message, "confirm a mode") {
 		t.Errorf("blocked state not reported as drift: %+v", d)
 	}
 	// Confirming a mode clears it.

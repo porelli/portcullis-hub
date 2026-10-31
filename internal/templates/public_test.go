@@ -215,9 +215,6 @@ func TestPlanPublic(t *testing.T) {
 	if !strings.Contains(rule, "Path(`/s/tokA`) || PathPrefix(`/s/tokA/`)") {
 		t.Errorf("rule lacks segment-boundary matchers: %s", rule)
 	}
-	if got := RuntimePublicPrefixes(strings.ReplaceAll(rule, "${PORTCULLIS_DOMAIN:-portcullis.local}", "example.org")); strings.Join(got, ",") != strings.Join(routed, ",") {
-		t.Errorf("RuntimePublicPrefixes = %v", got)
-	}
 
 	// Overlap with another router's path matcher.
 	m.Auth.PublicAccess.Paths = append(m.Auth.PublicAccess.Paths, pp("/login/x"))
@@ -310,7 +307,7 @@ func TestStaticRegexp(t *testing.T) {
 	}
 }
 
-func TestPublicExactAndRuntimeDecode(t *testing.T) {
+func TestPublicExact(t *testing.T) {
 	routes, _ := ParseRoutes([]byte(publicCompose))
 	m := &Manifest{Auth: Auth{Method: "forward-auth", PublicAccess: &PublicAccess{Service: "app", Paths: []PublicPath{
 		pp("/share"),
@@ -336,9 +333,6 @@ func TestPublicExactAndRuntimeDecode(t *testing.T) {
 	}
 	if _, err := ParseRule(rule); err != nil {
 		t.Errorf("rule does not parse: %v", err)
-	}
-	if got := RuntimePublicPrefixes(rule); strings.Join(got, ",") != strings.Join(routed, ",") {
-		t.Errorf("runtime decode = %v, want %v", got, routed)
 	}
 	// Listed mode keeps supporting (static and exact) entries only.
 	if r, _ := plan.Effective(ModeListed, []string{"x"}); strings.Join(r, ",") != "=/core/mimeicon,~/core/css" {

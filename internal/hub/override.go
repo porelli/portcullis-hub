@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -73,26 +74,11 @@ func (h *Hub) generateOverrideLocked(t *templates.Template, values map[string]st
 		servicePorts[p.Service] = append(servicePorts[p.Service], fmt.Sprintf("\"%s:%d:%d/%s\"", hostIP, host, p.Container, proto))
 	}
 
-	routes, err := templates.ParseRoutes(t.ReadCompose())
+	rl, err := h.routeLabelsLocked(t)
 	if err != nil {
 		return err
 	}
-	serviceRouters := routes.Routers
-	// Public exceptions: plan from the compose file being deployed, not
-	// the catalog copy (Expert edits).
-	plan, err := templates.PlanPublic(&t.Manifest, routes)
-	if err != nil {
-		return err
-	}
-	pub := h.publicLocked(t, plan)
-	// One tier for every router of the app's hosts (policy.HostTier).
-	tier := policy.HostTier(h.st.ResolvePolicy(t.ID), pub.Active())
-	var publicLines []string
-	if pub.Active() {
-		if publicLines, err = publicLabels(t.ID, &t.Manifest, plan, pub.Routed, tier); err != nil {
-			return err
-		}
-	}
+	serviceRouters, plan, tier, publicLines := rl.routes.Routers, rl.plan, rl.tier, rl.public
 
 	services := map[string]bool{}
 	for svc := range serviceMounts {
@@ -143,4 +129,85 @@ func (h *Hub) generateOverrideLocked(t *templates.Template, values map[string]st
 		}
 	}
 	return fsutil.WriteFileAtomic(overridePath, []byte(b.String()), 0600)
+}
+
+// routeLabels is the Traefik part of an app's override.
+type routeLabels struct {
+	routes *templates.Routes
+	plan   *templates.PublicPlan // nil without public_access
+	tier   string                // TLS options of every router of the app
+	public []string              // public router + strip middleware lines ("key: value"), on plan.Service
+}
+
+// routeLabelsLocked computes the tier and public-router labels from the
+// compose file being deployed (not the catalog copy: Expert edits) and
+// state. Caller must hold mu.
+func (h *Hub) routeLabelsLocked(t *templates.Template) (*routeLabels, error) {
+	routes, err := templates.ParseRoutes(t.ReadCompose())
+	if err != nil {
+		return nil, err
+	}
+	plan, err := templates.PlanPublic(&t.Manifest, routes)
+	if err != nil {
+		return nil, err
+	}
+	pub := h.publicLocked(t, plan)
+	rl := &routeLabels{routes: routes, plan: plan, tier: policy.HostTier(h.st.ResolvePolicy(t.ID), pub.Active())}
+	if pub.Active() {
+		if rl.public, err = publicLabels(t.ID, &t.Manifest, plan, pub.Routed, rl.tier); err != nil {
+			return nil, err
+		}
+	}
+	return rl, nil
+}
+
+// desiredRouteLabelsLocked returns, per compose service, the Traefik
+// labels the Hub's override sets that decide exposure: every router's
+// tls.options and the public router / strip middleware, with values as the
+// running container will carry them (PORTCULLIS_DOMAIN expanded, "$$" ->
+// "$"). Caller must hold mu.
+func (h *Hub) desiredRouteLabelsLocked(t *templates.Template) (map[string]map[string]string, error) {
+	rl, err := h.routeLabelsLocked(t)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]map[string]string{}
+	for svc, routers := range rl.routes.Routers {
+		m := map[string]string{}
+		for _, r := range routers {
+			m["traefik.http.routers."+r+".tls.options"] = rl.tier
+		}
+		out[svc] = m
+	}
+	if rl.plan != nil {
+		for _, l := range rl.public {
+			k, v, _ := strings.Cut(l, ": ")
+			if strings.HasPrefix(v, `"`) {
+				var s string
+				if err := json.Unmarshal([]byte(v), &s); err != nil {
+					return nil, err
+				}
+				v = s
+			}
+			out[rl.plan.Service][k] = expandComposeValue(v, h.cfg.Domain)
+		}
+	}
+	return out, nil
+}
+
+var domainVarRe = regexp.MustCompile(`\$\{PORTCULLIS_DOMAIN(?:(?::?[-?])[^${}]*)?\}`)
+
+// expandComposeValue does what compose does to a Hub-generated label value:
+// ${PORTCULLIS_DOMAIN...} becomes the domain, "$$" becomes "$".
+func expandComposeValue(v, domain string) string {
+	v = domainVarRe.ReplaceAllLiteralString(v, domain)
+	return strings.ReplaceAll(v, "$$", "$")
+}
+
+// exposureLabel reports whether a label key decides an app's exposure:
+// a router's tls.options, or anything of its public router / middleware.
+func exposureLabel(id, k string) bool {
+	return strings.HasPrefix(k, "traefik.http.routers."+PublicRouterName(id)+".") ||
+		strings.HasPrefix(k, "traefik.http.middlewares."+PublicStripMiddleware(id)+".") ||
+		(strings.HasPrefix(k, "traefik.http.routers.") && strings.HasSuffix(k, ".tls.options"))
 }
