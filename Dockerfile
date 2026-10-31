@@ -4,10 +4,17 @@ FROM --platform=$BUILDPLATFORM golang:1.27-alpine@sha256:d200d2dd76b03a99b52651f
 ARG TARGETOS
 ARG TARGETARCH
 WORKDIR /src
+# Module download sits in its own layer keyed on go.mod/go.sum, so source
+# edits don't invalidate it. The cache mounts keep the module and build caches
+# across builds on the same builder (local rebuilds); they are not part of the
+# image and are not exported to the CI layer cache.
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /hub ./cmd/hub
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /hub ./cmd/hub
 
 # alpine:3.24
 FROM alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
