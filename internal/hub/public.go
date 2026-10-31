@@ -16,11 +16,16 @@ import (
 // exception is on, which shares are listed and which TLS tier the host
 // gets. A template can't ship a router that skips forward-auth.
 
+// credentialHeaders are always deleted on the public router (the app's
+// share endpoints work without them: e.g. Nextcloud's public WebDAV only
+// uses Basic auth optionally, browsers use the share session).
+var credentialHeaders = []string{"Authorization", "Proxy-Authorization"}
+
 // coreIdentityHeaders are always deleted from requests on the public
 // router: it has no forward-auth, so nothing else removes client-supplied
-// copies. They are core's forward-auth authResponseHeaders (minus
-// Authorization: public WebDAV and share APIs use it) and Remote-*. The
-// template's auth.identity_headers are added (required for header-auth).
+// copies. They are core's forward-auth authResponseHeaders and Remote-*;
+// the template's auth.identity_headers are added (required for
+// header-auth), and credentialHeaders.
 var coreIdentityHeaders = []string{
 	"Remote-Email", "Remote-Groups", "Remote-Name", "Remote-User",
 	"X-Auth-Request-Access-Token", "X-Auth-Request-Email", "X-Auth-Request-Groups",
@@ -35,7 +40,15 @@ var coreIdentityHeaders = []string{
 // (aliasHeadersStrategy=delete); this does not rely on it.
 func publicStripHeaders(m *templates.Manifest) []string {
 	set := map[string]bool{}
-	for _, h := range append(append([]string(nil), coreIdentityHeaders...), m.Auth.IdentityHeaders...) {
+	hs := append(append([]string(nil), coreIdentityHeaders...), m.Auth.IdentityHeaders...)
+	// Credentials the app would log a user in with: a stolen password or
+	// API key must not get past the gateway's hardware-key requirement on
+	// the public paths.
+	hs = append(hs, credentialHeaders...)
+	if pa := m.Auth.PublicAccess; pa != nil {
+		hs = append(hs, pa.CredentialHeaders...)
+	}
+	for _, h := range hs {
 		set[http.CanonicalHeaderKey(h)] = true
 		set[strings.ReplaceAll(http.CanonicalHeaderKey(h), "-", "_")] = true
 	}
@@ -117,7 +130,7 @@ func (h *Hub) publicLocked(t *templates.Template, plan *templates.PublicPlan) pu
 // publicLabels renders the public router and its strip middleware as
 // override label lines (4-space indented under the service's labels).
 func publicLabels(id string, m *templates.Manifest, plan *templates.PublicPlan, routed []string, tier string) ([]string, error) {
-	rule := plan.Rule(routed)
+	rule := plan.Rule(routed, m.Auth.PublicAccess)
 	// Self-check: the router must stay inside the hosts the Hub knows.
 	if _, err := templates.ParseRule(rule); err != nil {
 		return nil, fmt.Errorf("public router rule: %w", err)
@@ -130,8 +143,10 @@ func publicLabels(id string, m *templates.Manifest, plan *templates.PublicPlan, 
 		return strings.TrimSpace(b.String())
 	}
 	r, mw := "traefik.http.routers."+PublicRouterName(id), PublicStripMiddleware(id)
+	// The static-file regexps end in "$": write compose's escaped "$$" so
+	// it is never read as interpolation (prefixes can't contain "$").
 	lines := []string{
-		r + ".rule: " + q(rule),
+		r + ".rule: " + q(strings.ReplaceAll(rule, "$`)", "$$`)")),
 		r + ".entrypoints: websecure",
 		r + `.tls: "true"`,
 		r + ".tls.options: " + tier,
@@ -149,21 +164,23 @@ func publicLabels(id string, m *templates.Manifest, plan *templates.PublicPlan, 
 
 // PublicAccessView is the settings payload for auth.public_access.
 type PublicAccessView struct {
-	Description      string                 `json:"description"`
-	Paths            []templates.PublicPath `json:"paths"`
-	EnabledByDefault bool                   `json:"enabled_by_default"`
-	DefaultMode      string                 `json:"default_mode"`
-	TokenPattern     string                 `json:"token_pattern,omitempty"`
-	ListedPossible   bool                   `json:"listed_possible"`
-	MaxTokens        int                    `json:"max_tokens"`
-	Enabled          bool                   `json:"enabled"`
-	Explicit         bool                   `json:"explicit"`
-	Mode             string                 `json:"mode"`
-	Tokens           []string               `json:"tokens"`
-	Active           bool                   `json:"active"`
-	Published        []string               `json:"published"`
-	Method           string                 `json:"method"`
-	Subdomains       []string               `json:"subdomains"`
+	Description       string                 `json:"description"`
+	Paths             []templates.PublicPath `json:"paths"`
+	EnabledByDefault  bool                   `json:"enabled_by_default"`
+	DefaultMode       string                 `json:"default_mode"`
+	TokenPattern      string                 `json:"token_pattern,omitempty"`
+	CredentialCookies []string               `json:"credential_cookies,omitempty"`
+	CredentialQuery   []string               `json:"credential_query,omitempty"`
+	ListedPossible    bool                   `json:"listed_possible"`
+	MaxTokens         int                    `json:"max_tokens"`
+	Enabled           bool                   `json:"enabled"`
+	Explicit          bool                   `json:"explicit"`
+	Mode              string                 `json:"mode"`
+	Tokens            []string               `json:"tokens"`
+	Active            bool                   `json:"active"`
+	Published         []string               `json:"published"`
+	Method            string                 `json:"method"`
+	Subdomains        []string               `json:"subdomains"`
 	// PolicyTier is the TLS tier the policy alone gives; TierWhenActive
 	// what all of the app's routers get while the public router exists.
 	PolicyTier     string `json:"policy_tier"`
@@ -185,7 +202,7 @@ func (h *Hub) publicViewLocked(t *templates.Template, eff policy.AuthPolicy) *Pu
 	ps := h.publicLocked(t, t.Public)
 	v := &PublicAccessView{
 		Description: pa.Description, Paths: pa.Paths, EnabledByDefault: pa.EnabledByDefault,
-		DefaultMode: pa.Mode(), TokenPattern: pa.TokenPattern, ListedPossible: pa.HasTokenPaths(),
+		DefaultMode: pa.Mode(), TokenPattern: pa.TokenPattern, CredentialCookies: pa.CredentialCookies, CredentialQuery: pa.CredentialQuery, ListedPossible: pa.HasTokenPaths(),
 		MaxTokens: templates.MaxPublicTokens, Enabled: ps.Enabled, Explicit: ps.Explicit, Mode: ps.Mode,
 		Tokens: ps.Tokens, Active: ps.Active(), Published: ps.Published, Method: t.Manifest.Auth.Method,
 		PolicyTier: policy.Tier(eff), TierWhenActive: policy.HostTier(eff, true),

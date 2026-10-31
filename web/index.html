@@ -525,9 +525,11 @@
       html += '<div class="policy-title">Public exceptions</div>';
       if (pa.description) html += '<div>' + escapeHtml(pa.description) + '</div>';
       html += '<div class="public-danger">Requests to these paths skip Portcullis entirely: no forward-auth, no group-gate, no hardware key. Anyone on the internet can reach them; only the app\'s own checks (share token, share password, expiry) apply.</div>';
+      html += '<div>On these paths the Hub strips Authorization, Proxy-Authorization and identity headers' + ((pa.credential_cookies || []).length ? ', and requests carrying the app\'s login cookies (' + pa.credential_cookies.map(escapeHtml).join(', ') + ') stay behind the gateway' : '') + ((pa.credential_query || []).length ? ', as do requests with ' + pa.credential_query.map(escapeHtml).join(', ') + ' in the query' : '') + ', so app logins can\'t bypass the hardware key.</div>';
       html += '<ul>';
       for (const p of (pa.paths || [])) {
-        const kind = p.supporting ? 'supporting, always opened' : (p.prefix.indexOf('{token}') >= 0 ? 'per share' : 'all shares only');
+        let kind = p.prefix.indexOf('{token}') >= 0 ? 'per share' : (p.supporting ? 'supporting, always opened' : 'all shares only');
+        kind += p.exact ? ', this exact path only' : (p.supporting ? ', static files only' : '');
         html += '<li><code>' + escapeHtml(p.prefix) + '</code> — ' + escapeHtml(p.description) + ' <em>(' + kind + (p.broad ? ', broad' : '') + ')</em></li>';
       }
       html += '</ul>';
