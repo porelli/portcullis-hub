@@ -15,6 +15,11 @@ type AuthPolicy struct {
 	Op      string   `json:"op" yaml:"op"`
 }
 
+// InitialDefault is the global default until an admin sets one: this is a
+// hardware-key gateway, so fresh installs require WebAuthn (routers get
+// authaware@file and step up to LoA 2).
+func InitialDefault() AuthPolicy { return AuthPolicy{Factors: []string{"webauthn"}} }
+
 var factorLoA = map[string]int{"password": 1, "webauthn": 2, "mtls": 3}
 
 // Normalize trims and lower-cases factor names, drops unknown/duplicate

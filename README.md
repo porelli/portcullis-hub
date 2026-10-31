@@ -49,6 +49,10 @@ The core Portcullis stack runs the Hub; you don't need to run it standalone.
 | `KEYCLOAK_URL`, `KEYCLOAK_ADMIN`, `KEYCLOAK_ADMIN_PASSWORD` | Keycloak admin API | `http://keycloak:8080` |
 | `LLDAP_HTTP_URL`, `LLDAP_ADMIN_USER`, `LLDAP_ADMIN_PASSWORD` | LLDAP (username shown in the header) | `http://lldap:17170`, `admin` |
 
+### Default access policy
+
+Until an admin saves a global default under **Settings**, every app that has no policy of its own requires **WebAuthn** (hardware key). Its routers get `authaware@file`, and Keycloak steps up to LoA 2. You can still choose a public default explicitly. That choice is stored and honoured; it is not the same as "never set".
+
 ### Runtime user and permissions
 
 The image runs as **uid/gid 10001** (non-root). It doesn't need the Docker socket: it talks to its socket proxy over TCP (`DOCKER_HOST=tcp://socket-proxy-hub:2375`). The paths it writes must be writable by 10001:

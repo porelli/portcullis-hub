@@ -60,7 +60,7 @@ func TestSaveRoundTrip(t *testing.T) {
 	s.Sources = []Source{{Name: "portcullis", URL: "https://x", Path: "/data/repos/portcullis"}}
 	s.Settings["a"] = map[string]string{"K": "v"}
 	s.AuthPolicies["a"] = policy.AuthPolicy{Factors: []string{"mtls"}}
-	s.DefaultPolicy = policy.AuthPolicy{Factors: []string{"webauthn"}}
+	s.SetDefault(policy.AuthPolicy{Factors: []string{"password"}})
 	if err := s.Save(p); err != nil {
 		t.Fatal(err)
 	}
@@ -81,11 +81,50 @@ func TestSaveRoundTrip(t *testing.T) {
 	if p := got.ResolvePolicy("a"); p.Factors[0] != "mtls" {
 		t.Errorf("per-app policy = %+v", p)
 	}
-	if p := got.ResolvePolicy("other"); p.Factors[0] != "webauthn" {
+	if p := got.ResolvePolicy("other"); p.Factors[0] != "password" {
 		t.Errorf("default policy = %+v", p)
 	}
 	entries, _ := os.ReadDir(dir)
 	if len(entries) != 1 {
 		t.Errorf("temp files left: %d", len(entries))
+	}
+}
+
+func TestDefaultPolicyUnsetVsPublic(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "state.yaml")
+
+	// Fresh install: hardware keys by default.
+	s, _ := Load(p)
+	if d := s.Default(); strings.Join(d.Factors, ",") != "webauthn" {
+		t.Errorf("fresh default = %+v", d)
+	}
+	// A file that never set a default behaves the same.
+	os.WriteFile(p, []byte("enabled: []\n"), 0600)
+	s, _ = Load(p)
+	if d := s.Default(); strings.Join(d.Factors, ",") != "webauthn" {
+		t.Errorf("unset default = %+v", d)
+	}
+	if err := s.Save(p); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(p); strings.Contains(string(b), "default_auth_policy") {
+		t.Errorf("unset default persisted:\n%s", b)
+	}
+
+	// An explicitly saved public default survives a round trip.
+	s.SetDefault(policy.AuthPolicy{})
+	if err := s.Save(p); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.DefaultPolicy == nil {
+		t.Fatal("explicit public default lost")
+	}
+	if d := s.Default(); d.Factors == nil || len(d.Factors) != 0 || s.ResolvePolicy("x").Factors == nil {
+		t.Errorf("explicit public default = %+v", d)
 	}
 }

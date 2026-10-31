@@ -392,7 +392,7 @@ func (h *Hub) WritePolicy() error {
 			apps = append(apps, policy.App{ID: id, Enabled: true, Deny: true, Subdomains: subs})
 		}
 	}
-	doc := policy.Build(apps, perApp, h.st.DefaultPolicy)
+	doc := policy.Build(apps, perApp, h.st.Default())
 	h.mu.RUnlock()
 	return policy.Write(h.policyPath(), doc)
 }

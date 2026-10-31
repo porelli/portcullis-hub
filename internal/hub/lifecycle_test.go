@@ -83,7 +83,7 @@ func TestEnable(t *testing.T) {
 
 	// Override: port binding + TLS tier label.
 	ov, _ := os.ReadFile(filepath.Join(f.data, "overrides", "grafana.override.yml"))
-	if !strings.Contains(string(ov), `"0.0.0.0:3300:3000/tcp"`) || !strings.Contains(string(ov), "traefik.http.routers.grafana.tls.options: public@file") {
+	if !strings.Contains(string(ov), `"0.0.0.0:3300:3000/tcp"`) || !strings.Contains(string(ov), "traefik.http.routers.grafana.tls.options: authaware@file") {
 		t.Errorf("override =\n%s", ov)
 	}
 
@@ -120,7 +120,7 @@ func TestEnableRegistersClients(t *testing.T) {
 		t.Fatal(err)
 	}
 	secret := readEnvFile(filepath.Join(f.data, "env", "other.env"))["OTHER_SECRET"]
-	if len(f.idp.registered) != 1 || f.idp.registered[0] != "other:other:public:"+secret+":other.example.org" || secret == "" {
+	if len(f.idp.registered) != 1 || f.idp.registered[0] != "other:other:hwk:"+secret+":other.example.org" || secret == "" {
 		t.Errorf("registered = %v (secret %q)", f.idp.registered, secret)
 	}
 }
@@ -516,6 +516,42 @@ func TestRoutingValidation(t *testing.T) {
 	f.h.Enable("grafana")
 	if doc := readPolicy(t, f); doc.Groups["dash"] != "users_grafana" || doc.Groups["grafana"] != "" {
 		t.Errorf("groups = %v", doc.Groups)
+	}
+}
+
+// Fresh installs default to WebAuthn; an explicitly chosen public default
+// is honoured (and differs from "never set").
+func TestInitialDefaultPolicy(t *testing.T) {
+	f := newFixture(t)
+	doc := readPolicy(t, f)
+	if strings.Join(doc.Default.Factors, ",") != "webauthn" {
+		t.Errorf("fresh default = %+v", doc.Default)
+	}
+	if d := f.h.DefaultPolicy(); strings.Join(d.Factors, ",") != "webauthn" {
+		t.Errorf("DefaultPolicy() = %+v", d)
+	}
+	if !f.h.SetDefaultPolicy(policy.AuthPolicy{}) {
+		t.Fatal("public default not detected as a change")
+	}
+	f.h.Wait()
+	raw, _ := os.ReadFile(filepath.Join(f.data, "group-gate-policy.json"))
+	if !strings.Contains(string(raw), `"factors": []`) {
+		t.Errorf("explicit public default not published as []:\n%s", raw)
+	}
+	if err := f.h.Enable("grafana"); err != nil {
+		t.Fatal(err)
+	}
+	ov, _ := os.ReadFile(filepath.Join(f.data, "overrides", "grafana.override.yml"))
+	if !strings.Contains(string(ov), "tls.options: public@file") {
+		t.Errorf("explicit public default not applied:\n%s", ov)
+	}
+	// Survives a restart.
+	h2, err := New(f.h.cfg, f.runner, f.engine, f.idp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := h2.DefaultPolicy(); len(d.Factors) != 0 {
+		t.Errorf("after restart default = %+v", d)
 	}
 }
 

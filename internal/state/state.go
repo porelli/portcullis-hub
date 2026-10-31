@@ -39,11 +39,14 @@ type PublishedApp struct {
 
 // AppState tracks which apps are enabled and their settings.
 type AppState struct {
-	Enabled       []string                     `json:"enabled" yaml:"enabled"`
-	Sources       []Source                     `json:"sources" yaml:"sources"`
-	Settings      map[string]map[string]string `json:"settings" yaml:"settings"`
-	AuthPolicies  map[string]policy.AuthPolicy `json:"auth_policies" yaml:"auth_policies"`
-	DefaultPolicy policy.AuthPolicy            `json:"default_auth_policy" yaml:"default_auth_policy"`
+	Enabled      []string                     `json:"enabled" yaml:"enabled"`
+	Sources      []Source                     `json:"sources" yaml:"sources"`
+	Settings     map[string]map[string]string `json:"settings" yaml:"settings"`
+	AuthPolicies map[string]policy.AuthPolicy `json:"auth_policies" yaml:"auth_policies"`
+	// DefaultPolicy is the admin-chosen global default; nil = never set,
+	// which means policy.InitialDefault. An explicitly saved empty policy
+	// (public) is a non-nil pointer and is honoured.
+	DefaultPolicy *policy.AuthPolicy `json:"default_auth_policy,omitempty" yaml:"default_auth_policy,omitempty"`
 	// Published holds the last known group-gate config per enabled app.
 	Published map[string]PublishedApp `json:"published" yaml:"published"`
 }
@@ -130,5 +133,22 @@ func (s *AppState) ResolvePolicy(appID string) policy.AuthPolicy {
 	if p, ok := s.AuthPolicies[appID]; ok {
 		return p
 	}
-	return s.DefaultPolicy
+	return s.Default()
+}
+
+// Default returns the effective global default policy.
+func (s *AppState) Default() policy.AuthPolicy {
+	if s.DefaultPolicy == nil {
+		return policy.InitialDefault()
+	}
+	p := *s.DefaultPolicy
+	if p.Factors == nil {
+		p.Factors = []string{} // explicit public: publish [] (public), not null
+	}
+	return p
+}
+
+// SetDefault stores an explicit global default (may be public).
+func (s *AppState) SetDefault(p policy.AuthPolicy) {
+	s.DefaultPolicy = &p
 }

@@ -40,7 +40,7 @@ func (h *Hub) AppSettings(id string) (*AppSettingsView, error) {
 		Ports:           t.Manifest.Ports,
 		Values:          h.st.Settings[id],
 		EffectivePolicy: eff,
-		DefaultPolicy:   h.st.DefaultPolicy,
+		DefaultPolicy:   h.st.Default(),
 		SafetyScore:     policy.SafetyScore(eff),
 	}
 	if p, ok := h.st.AuthPolicies[id]; ok {
@@ -182,7 +182,7 @@ func (h *Hub) SaveSettings(id string, u SettingsUpdate) error {
 func (h *Hub) DefaultPolicy() policy.AuthPolicy {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	return h.st.DefaultPolicy
+	return h.st.Default()
 }
 
 // SetDefaultPolicy stores a new global default and, if it changed,
@@ -190,8 +190,8 @@ func (h *Hub) DefaultPolicy() policy.AuthPolicy {
 func (h *Hub) SetDefaultPolicy(p policy.AuthPolicy) bool {
 	norm := policy.Normalize(p)
 	h.mu.Lock()
-	changed := !policy.Same(h.st.DefaultPolicy, norm)
-	h.st.DefaultPolicy = norm
+	changed := !policy.Same(h.st.Default(), norm)
+	h.st.SetDefault(norm)
 	h.saveLocked()
 	h.mu.Unlock()
 	if !changed {
@@ -233,7 +233,7 @@ func (h *Hub) applyDefaultPolicy() {
 			jobs = append(jobs, job{t: *t, restart: changed})
 		}
 	}
-	acr := policy.ACR(h.st.DefaultPolicy)
+	acr := policy.ACR(h.st.Default())
 	h.mu.Unlock()
 
 	for _, j := range jobs {
