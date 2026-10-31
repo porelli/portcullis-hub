@@ -175,6 +175,16 @@
 
     .empty { text-align: center; padding: 3rem; color: #64748b; }
 
+    /* Drift (state vs. Docker) */
+    .drift { display: none; background: #f59e0b11; border: 1px solid #f59e0b55; border-radius: 0.75rem; padding: 1rem 1.25rem; margin-bottom: 2rem; }
+    .drift.visible { display: block; }
+    .drift-title { font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: #f59e0b; margin-bottom: 0.5rem; display: flex; justify-content: space-between; align-items: center; }
+    .drift-item { display: flex; align-items: center; gap: 0.75rem; padding: 0.5rem 0; border-top: 1px dashed #f59e0b33; font-size: 0.875rem; }
+    .drift-item:first-of-type { border-top: none; }
+    .drift-id { font-family: 'SF Mono', 'Fira Code', monospace; font-weight: 600; }
+    .drift-msg { color: #94a3b8; flex: 1; }
+    .drift-error { color: #ef4444; font-size: 0.8125rem; }
+
     /* Expert mode */
     .expert-section { margin-bottom: 1.5rem; }
     .expert-section-title { font-size: 0.8125rem; font-weight: 600; margin-bottom: 0.5rem; display: flex; align-items: center; gap: 0.5rem; }
@@ -217,6 +227,7 @@
 
     <!-- Catalog Tab -->
     <div class="tab-content active" id="tab-catalog">
+      <div class="drift" id="drift"></div>
       {{range $category, $apps := .Categories}}
       <div class="category">
         <div class="category-title">{{$category}}</div>
@@ -743,6 +754,59 @@
     pollStatuses();
     setInterval(pollStatuses, 15000);
 
+    // ── Drift (enabled apps vs. running containers) ───────
+    const DRIFT_ACTIONS = {
+      start:   { label: 'Start', cls: 'btn-primary', confirm: null },
+      disable: { label: 'Disable', cls: 'btn-danger', confirm: 'Disable %s and remove its containers?' },
+      stop:    { label: 'Stop & remove', cls: 'btn-danger', confirm: 'Stop and remove the containers of %s?' },
+      adopt:   { label: 'Enable', cls: 'btn-secondary', confirm: 'Mark %s as enabled (runs compose up)?' },
+    };
+
+    function renderDrift(report) {
+      const box = document.getElementById('drift');
+      const items = (report && report.items) || [];
+      if (!items.length && !(report && report.error)) { box.classList.remove('visible'); box.innerHTML = ''; return; }
+      let html = '<div class="drift-title"><span>State drift</span>' +
+        '<button class="btn btn-secondary btn-sm" onclick="checkDrift()">Re-check</button></div>';
+      if (report.error) html += '<div class="drift-error">Docker unreachable: ' + escapeHtml(report.error) + '</div>';
+      for (const d of items) {
+        html += '<div class="drift-item"><span class="drift-id">' + escapeHtml(d.id) + '</span>';
+        html += '<span class="drift-msg">' + escapeHtml(d.message) + ' &middot; ' + d.running + '/' + d.total + ' running</span>';
+        for (const a of (d.actions || [])) {
+          const meta = DRIFT_ACTIONS[a];
+          if (!meta) continue;
+          html += '<button class="btn btn-sm ' + meta.cls + '" data-drift-id="' + escapeHtml(d.id) + '" data-drift-action="' + escapeHtml(a) + '">' + escapeHtml(meta.label) + '</button>';
+        }
+        html += '</div>';
+      }
+      box.innerHTML = html;
+      box.classList.add('visible');
+      box.querySelectorAll('[data-drift-action]').forEach(btn => btn.addEventListener('click', () => resolveDrift(btn)));
+    }
+
+    async function loadDrift() {
+      try { renderDrift(await apiGet('/api/drift')); } catch (e) { /* ignore */ }
+    }
+    async function checkDrift() {
+      try { renderDrift(await apiPost('/api/drift', {})); } catch (e) { showToast(e.message, 'error'); }
+    }
+    async function resolveDrift(btn) {
+      const id = btn.dataset.driftId, action = btn.dataset.driftAction;
+      const meta = DRIFT_ACTIONS[action];
+      if (meta.confirm && !confirm(meta.confirm.replace('%s', id))) return;
+      btn.classList.add('loading');
+      try {
+        await apiPost('/api/drift/resolve', { id, action });
+        showToast(id + ': ' + meta.label.toLowerCase() + ' done', 'success');
+        setTimeout(() => location.reload(), 500);
+      } catch (e) {
+        showToast(e.message, 'error');
+        btn.classList.remove('loading');
+      }
+    }
+    loadDrift();
+    setInterval(loadDrift, 15000);
+
     // ── Logs ──────────────────────────────────────────────
     async function loadLogs(id, lines) {
       const container = document.getElementById('detail-logs-' + id);
@@ -926,6 +990,7 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ service: svc, command: cmd }),
         });
+        if (!res.ok) throw new Error(await res.text());
         const data = await res.json();
         if (data.output) output.textContent += data.output;
         if (data.exitCode !== 0) output.textContent += '[exit ' + data.exitCode + ']\n';
