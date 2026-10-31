@@ -50,6 +50,11 @@ func Discover(dir, source, domain string) []Template {
 			log.Printf("Skipping template %s: %v", e.Name(), err)
 			continue
 		}
+		public, err := PlanPublic(&m, routes)
+		if err != nil {
+			log.Printf("Skipping template %s: %v", e.Name(), err)
+			continue
+		}
 		for i := range m.URLs {
 			m.URLs[i].URL = strings.ReplaceAll(m.URLs[i].URL, "{{DOMAIN}}", domain)
 		}
@@ -59,6 +64,7 @@ func Discover(dir, source, domain string) []Template {
 			Manifest:   m,
 			Path:       filepath.Join(dir, e.Name()),
 			Subdomains: routes.Subdomains,
+			Public:     public,
 		})
 	}
 	return out

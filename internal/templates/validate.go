@@ -78,7 +78,7 @@ func ValidateManifest(m *Manifest) error {
 		}
 		a.AdminPaths[i] = norm
 	}
-	return nil
+	return ValidatePublicAccess(a)
 }
 
 // ValidateAdminPath checks a path prefix from auth.admin_paths and returns it

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -15,7 +16,9 @@ import (
 // policy and no group (fail open).
 
 var (
-	routerLabelRe = regexp.MustCompile(`^traefik\.(http|tcp|udp)\.routers\.([^.]+)\.(.+)$`)
+	routerLabelRe     = regexp.MustCompile(`^traefik\.(http|tcp|udp)\.routers\.([^.]+)\.(.+)$`)
+	middlewareLabelRe = regexp.MustCompile(`^traefik\.(?:http|tcp)\.middlewares\.([^.]+)\.`)
+	serviceLabelRe    = regexp.MustCompile(`^traefik\.http\.services\.([^.]+)\.`)
 	// hostArgRe is the only accepted Host() argument: a literal DNS label
 	// followed by the core domain variable (optionally with a default).
 	hostArgRe = regexp.MustCompile(`^(?i)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)\.\$\{PORTCULLIS_DOMAIN(?:(?::?[-?])[^${}]*)?\}$`)
@@ -29,7 +32,49 @@ type Routes struct {
 	Subdomains []string
 	// Routers maps service → HTTP router names (sorted).
 	Routers map[string][]string
+	// Info holds each HTTP router's parsed labels, by router name.
+	Info map[string]*RouterInfo
+	// TraefikServices maps compose service → Traefik HTTP services its
+	// labels define (sorted).
+	TraefikServices map[string][]string
 }
+
+// RouterInfo is what the Hub needs to know about one HTTP router.
+type RouterInfo struct {
+	Service string // compose service carrying the labels
+	Rule    string
+	// HostArgs are the Host() arguments as written, e.g.
+	// "cloud.${PORTCULLIS_DOMAIN:-portcullis.local}".
+	HostArgs   []string
+	Subdomains []string
+	// Paths are the rule's Path()/PathPrefix() matchers.
+	Paths       []RulePath
+	Priority    int // explicit priority label; 0 = Traefik's default
+	HasPriority bool
+	// TraefikService is the router's explicit service label ("" = none).
+	TraefikService string
+	Middlewares    []string
+}
+
+// RulePath is a Path (exact) or PathPrefix matcher argument.
+type RulePath struct {
+	Prefix bool
+	Value  string
+}
+
+// Gated reports whether the router runs group-gate (portcullis-groups).
+func (ri *RouterInfo) Gated() bool {
+	for _, m := range ri.Middlewares {
+		if m == "portcullis-groups@docker" {
+			return true
+		}
+	}
+	return false
+}
+
+// ReservedPrefix is reserved for Hub-generated Traefik routers and
+// middlewares (public_access); templates may not define names with it.
+const ReservedPrefix = "portcullis-public-"
 
 // ParseRoutes extracts Traefik routing from a compose file and validates it:
 //   - every HTTP router has a rule, and every way the rule can match is
@@ -49,7 +94,7 @@ func ParseRoutes(compose []byte) (*Routes, error) {
 	if err := yaml.Unmarshal(compose, &doc); err != nil {
 		return nil, fmt.Errorf("compose.yml: %w", err)
 	}
-	r := &Routes{Routers: map[string][]string{}}
+	r := &Routes{Routers: map[string][]string{}, Info: map[string]*RouterInfo{}, TraefikServices: map[string][]string{}}
 	subs := map[string]bool{}
 	names := make([]string, 0, len(doc.Services))
 	for name := range doc.Services {
@@ -64,12 +109,23 @@ func ParseRoutes(compose []byte) (*Routes, error) {
 		type router struct {
 			rule    string
 			hasRule bool
+			info    RouterInfo
 		}
 		httpRouters := map[string]*router{}
+		tsvcs := map[string]bool{}
 		for k, v := range labels {
+			if m := middlewareLabelRe.FindStringSubmatch(k); m != nil && strings.HasPrefix(m[1], ReservedPrefix) {
+				return nil, fmt.Errorf("service %s: middleware name %s is reserved for the Hub (prefix %s)", svc, m[1], ReservedPrefix)
+			}
+			if m := serviceLabelRe.FindStringSubmatch(k); m != nil {
+				tsvcs[m[1]] = true
+			}
 			m := routerLabelRe.FindStringSubmatch(k)
 			if m == nil {
 				continue
+			}
+			if strings.HasPrefix(m[2], ReservedPrefix) {
+				return nil, fmt.Errorf("service %s: router name %s is reserved for the Hub (prefix %s)", svc, m[2], ReservedPrefix)
 			}
 			proto, name, attr := m[1], m[2], m[3]
 			switch proto {
@@ -86,9 +142,31 @@ func ParseRoutes(compose []byte) (*Routes, error) {
 				rt = &router{}
 				httpRouters[name] = rt
 			}
-			if attr == "rule" {
+			switch attr {
+			case "rule":
 				rt.rule, rt.hasRule = v, true
+			case "priority":
+				n, err := strconv.Atoi(strings.TrimSpace(v))
+				if err != nil {
+					return nil, fmt.Errorf("service %s: router %s: priority %q is not an integer", svc, name, v)
+				}
+				rt.info.Priority, rt.info.HasPriority = n, true
+			case "service":
+				rt.info.TraefikService = strings.TrimSpace(v)
+			case "middlewares":
+				for _, mw := range strings.Split(v, ",") {
+					if mw = strings.TrimSpace(mw); mw != "" {
+						rt.info.Middlewares = append(rt.info.Middlewares, mw)
+					}
+				}
 			}
+		}
+		for name := range tsvcs {
+			r.TraefikServices[svc] = append(r.TraefikServices[svc], name)
+		}
+		sort.Strings(r.TraefikServices[svc])
+		if len(r.TraefikServices[svc]) == 0 {
+			delete(r.TraefikServices, svc)
 		}
 		if len(httpRouters) == 0 && strings.EqualFold(strings.TrimSpace(labels["traefik.enable"]), "true") {
 			// Unless the service only has TCP/UDP routers.
@@ -112,13 +190,17 @@ func ParseRoutes(compose []byte) (*Routes, error) {
 			if !rt.hasRule {
 				return nil, fmt.Errorf("service %s: router %s has no rule (Traefik would apply its default rule)", svc, name)
 			}
-			hosts, err := ParseRule(rt.rule)
+			p, err := parseRule(rt.rule)
 			if err != nil {
 				return nil, fmt.Errorf("service %s: router %s: %w", svc, name, err)
 			}
-			for _, h := range hosts {
+			for _, h := range p.hosts {
 				subs[h] = true
 			}
+			info := rt.info
+			info.Service, info.Rule = svc, rt.rule
+			info.HostArgs, info.Subdomains, info.Paths = p.hostArgs, p.hosts, p.paths
+			r.Info[name] = &info
 		}
 		if len(rnames) > 0 {
 			r.Routers[svc] = rnames
@@ -162,9 +244,11 @@ func labelMap(v interface{}) (map[string]string, error) {
 // ── rule parser ──────────────────────────────────────────
 
 type ruleParser struct {
-	s     string
-	pos   int
-	hosts []string
+	s        string
+	pos      int
+	hosts    []string
+	hostArgs []string
+	paths    []RulePath
 }
 
 // ParseRule validates a Traefik HTTP router rule and returns the (lowercase)
@@ -177,6 +261,14 @@ type ruleParser struct {
 // The rule must be host-restricted: an OR is restricted iff every branch
 // is, an AND iff any operand is, a negation never is.
 func ParseRule(rule string) ([]string, error) {
+	p, err := parseRule(rule)
+	if err != nil {
+		return nil, err
+	}
+	return p.hosts, nil
+}
+
+func parseRule(rule string) (*ruleParser, error) {
 	p := &ruleParser{s: rule}
 	restricted, err := p.expr()
 	if err != nil {
@@ -189,7 +281,7 @@ func ParseRule(rule string) ([]string, error) {
 	if !restricted {
 		return nil, fmt.Errorf("rule %q can match requests for any host — restrict every branch with Host(`<sub>.${PORTCULLIS_DOMAIN}`)", rule)
 	}
-	return p.hosts, nil
+	return p, nil
 }
 
 func (p *ruleParser) skipSpace() {
@@ -283,7 +375,14 @@ func (p *ruleParser) factor() (bool, error) {
 	if forbiddenMatchers[lname] {
 		return false, fmt.Errorf("rule %q: %s() is not allowed — use Host(`<sub>.${PORTCULLIS_DOMAIN}`)", p.s, name)
 	}
-	if lname != "host" {
+	switch lname {
+	case "path", "pathprefix":
+		for _, a := range args {
+			p.paths = append(p.paths, RulePath{Prefix: lname == "pathprefix", Value: a})
+		}
+		return false, nil
+	case "host":
+	default:
 		return false, nil
 	}
 	if len(args) == 0 {
@@ -295,6 +394,7 @@ func (p *ruleParser) factor() (bool, error) {
 			return false, fmt.Errorf("rule %q: host %q must be a literal <sub>.${PORTCULLIS_DOMAIN}", p.s, a)
 		}
 		p.hosts = append(p.hosts, strings.ToLower(m[1]))
+		p.hostArgs = append(p.hostArgs, a)
 	}
 	return true, nil
 }

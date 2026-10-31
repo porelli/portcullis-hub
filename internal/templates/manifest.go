@@ -14,7 +14,46 @@ type Auth struct {
 	// AdminPaths are URL path prefixes that additionally require AdminGroup
 	// (published to group-gate as path_groups).
 	AdminPaths []string `yaml:"admin_paths" json:"admin_paths,omitempty"`
-	Notes      string   `yaml:"notes" json:"notes"`
+	// PublicAccess declares path prefixes the app serves to anonymous
+	// visitors (share links). Off unless enabled (template default, then the
+	// admin's choice in the Hub).
+	PublicAccess *PublicAccess `yaml:"public_access" json:"public_access,omitempty"`
+	Notes        string        `yaml:"notes" json:"notes"`
+}
+
+// PublicAccess is auth.public_access: when enabled, the Hub adds a Traefik
+// router for Paths that bypasses forward-auth and group-gate (see
+// PlanPublic).
+type PublicAccess struct {
+	// EnabledByDefault is the setting until an admin chooses in the Hub.
+	EnabledByDefault bool   `yaml:"enabled_by_default" json:"enabled_by_default"`
+	Description      string `yaml:"description" json:"description"`
+	// DefaultMode is "listed" (only shares whose tokens an admin lists in
+	// the Hub) or "all" (every share). Unset: "listed" if any path has a
+	// {token} placeholder, else "all".
+	DefaultMode string `yaml:"default_mode" json:"default_mode,omitempty"`
+	// TokenPattern is an anchored regular expression every listed share
+	// token must match. Required iff a path contains {token}.
+	TokenPattern string `yaml:"token_pattern" json:"token_pattern,omitempty"`
+	// Service is the compose service the public router targets; default:
+	// the only service with HTTP routers.
+	Service string       `yaml:"service" json:"service,omitempty"`
+	Paths   []PublicPath `yaml:"paths" json:"paths"`
+}
+
+// PublicPath is one anonymous-access path prefix (segment-boundary match).
+// A prefix may contain one {token} segment (a share's token): in "listed"
+// mode it is opened once per listed token, in "all" mode up to the segment
+// before {token}. Supporting paths (static assets, l10n, ...) carry no token
+// and are open in both modes; other token-free paths only in "all" mode.
+type PublicPath struct {
+	Prefix      string `yaml:"prefix" json:"prefix"`
+	Description string `yaml:"description" json:"description"`
+	Supporting  bool   `yaml:"supporting" json:"supporting,omitempty"`
+	// Broad must be set (with a Justification) for prefixes on the
+	// broad-prefix list, e.g. /api or /index.php.
+	Broad         bool   `yaml:"broad" json:"broad,omitempty"`
+	Justification string `yaml:"justification" json:"justification,omitempty"`
 }
 
 // SettingTarget maps a setting to a compose service volume mount.
@@ -117,4 +156,6 @@ type Template struct {
 	Enabled  bool     `json:"enabled"`
 	// Subdomains routed by the template's Traefik rules (see ParseRoutes).
 	Subdomains []string `json:"subdomains"`
+	// Public is the routing plan for auth.public_access (nil if none).
+	Public *PublicPlan `json:"-"`
 }
