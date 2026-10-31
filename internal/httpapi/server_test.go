@@ -96,6 +96,21 @@ func TestServerAuth(t *testing.T) {
 	if r.StatusCode != 200 || !strings.Contains(b, "Demo &lt;b&gt;") || strings.Contains(b, "Demo <b>") {
 		t.Errorf("index = %d, escaped name missing", r.StatusCode)
 	}
+
+	// The badge shows X-Forwarded-User (the LLDAP username) as-is, escaped.
+	req, _ := http.NewRequest("GET", srv.URL+"/", nil)
+	req.Header.Set(ProxySecretHeader, testSecret)
+	req.Header.Set("X-Forwarded-User", "alice<x>")
+	req.Header.Set("X-Forwarded-Email", "alice@example.org")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !strings.Contains(string(page), "Authenticated as <strong>alice&lt;x&gt;</strong>") {
+		t.Error("username badge missing or unescaped")
+	}
 }
 
 func TestServerRoutes(t *testing.T) {

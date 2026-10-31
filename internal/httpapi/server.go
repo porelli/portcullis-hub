@@ -25,16 +25,10 @@ type Users interface {
 	SetRequiredActions(ctx context.Context, userID string, actions []string) error
 }
 
-// UsernameResolver maps a forward-auth email to a display username.
-type UsernameResolver interface {
-	ResolveUsername(ctx context.Context, email string) string
-}
-
 // Server holds the HTTP handlers' dependencies.
 type Server struct {
 	Hub        *hub.Hub
 	Users      Users
-	Resolver   UsernameResolver
 	PortalName string
 	Secret     string // HUB_PROXY_SECRET
 	Web        fs.FS  // contains index.html
@@ -143,10 +137,10 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	// Core's group-gate passes the LLDAP username in X-Forwarded-User
+	// (and the email in X-Forwarded-Email); the proxy secret guarantees
+	// the request came through Traefik. html/template escapes it.
 	user := r.Header.Get("X-Forwarded-User")
-	if user != "" && s.Resolver != nil {
-		user = s.Resolver.ResolveUsername(r.Context(), user)
-	}
 	ts := s.Hub.Templates()
 	categories := make(map[string][]templates.Template)
 	for _, t := range ts {

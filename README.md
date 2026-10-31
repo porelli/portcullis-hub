@@ -9,6 +9,7 @@ Web management UI for [Portcullis](https://github.com/porelli/portcullis) — th
 - Per-app settings (media folders, ports, options) and access policy (mTLS / WebAuthn / password, any/all)
 - Container status, logs and a container shell via the Docker Engine API
 - Drift detection: flags apps that are enabled but not running, or running but not enabled, and offers explicit fixes
+- Shows the signed-in LLDAP username from `X-Forwarded-User` (set by core's group-gate)
 - Writes the group-gate policy file (v2: policies, groups and admin `path_groups` per subdomain)
 - Expert mode: compose editor, env vars
 - Template marketplace: add community template repos
@@ -47,7 +48,6 @@ The core Portcullis stack runs the Hub; you don't need to run it standalone.
 | `PORTAL_DISPLAY_NAME` | Name shown in the header | `Portcullis` |
 | `DEFAULT_TEMPLATES_URL` | Git URL cloned as source `portcullis` on first start | _(none)_ |
 | `KEYCLOAK_URL`, `KEYCLOAK_ADMIN`, `KEYCLOAK_ADMIN_PASSWORD` | Keycloak admin API | `http://keycloak:8080` |
-| `LLDAP_HTTP_URL`, `LLDAP_ADMIN_USER`, `LLDAP_ADMIN_PASSWORD` | LLDAP (username shown in the header) | `http://lldap:17170`, `admin` |
 
 ### Default access policy
 

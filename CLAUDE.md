@@ -15,7 +15,7 @@ Web management UI for Portcullis. Go binary with an embedded single-page UI, pub
 | `internal/state` | `state.yaml` load/save (atomic; corrupt file = refuse to start) |
 | `internal/compose` | `docker compose` CLI wrapper — **up/down only**, behind the `Runner` interface |
 | `internal/docker` | Engine API client over `DOCKER_HOST` (net/http): containers, logs (stream demux), exec, events |
-| `internal/keycloak`, `internal/lldap` | Admin API clients (net/http) |
+| `internal/keycloak` | Keycloak admin API client (net/http) |
 | `internal/httpapi` | Handlers, proxy-secret middleware, CSRF guard |
 | `internal/fsutil` | Atomic writes, path confinement |
 | `web/` | `index.html` (vanilla JS) + `web.go` embed |

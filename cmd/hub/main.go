@@ -18,7 +18,6 @@ import (
 	"github.com/portcullis/hub/internal/httpapi"
 	"github.com/portcullis/hub/internal/hub"
 	"github.com/portcullis/hub/internal/keycloak"
-	"github.com/portcullis/hub/internal/lldap"
 	"github.com/portcullis/hub/web"
 )
 
@@ -67,7 +66,6 @@ func main() {
 	srv := &httpapi.Server{
 		Hub:        h,
 		Users:      kc,
-		Resolver:   lldap.New(env("LLDAP_HTTP_URL", "http://lldap:17170"), env("LLDAP_ADMIN_USER", "admin"), os.Getenv("LLDAP_ADMIN_PASSWORD")),
 		PortalName: os.Getenv("PORTAL_DISPLAY_NAME"),
 		Secret:     secret,
 		Web:        web.FS,
