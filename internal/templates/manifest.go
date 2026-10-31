@@ -40,6 +40,19 @@ type PublicAccess struct {
 	// TokenPattern is an anchored regular expression every listed share
 	// token must match. Required iff a path contains {token}.
 	TokenPattern string `yaml:"token_pattern" json:"token_pattern,omitempty"`
+	// CredentialHeaders are request headers the app logs a user in with
+	// besides Authorization / Proxy-Authorization (e.g. Immich x-api-key):
+	// stripped on the public router like those two.
+	CredentialHeaders []string `yaml:"credential_headers" json:"credential_headers,omitempty"`
+	// CredentialCookies / CredentialQuery are cookies and query parameters
+	// the app logs a user in with (session, remember-me, API key). Requests
+	// carrying one never match the public router (the rule excludes them),
+	// so they go through the app's gated router.
+	CredentialCookies []string `yaml:"credential_cookies" json:"credential_cookies,omitempty"`
+	CredentialQuery   []string `yaml:"credential_query" json:"credential_query,omitempty"`
+	// StaticExtensions adds file extensions to the ones supporting paths
+	// may serve (StaticExtensions in public.go).
+	StaticExtensions []string `yaml:"static_extensions" json:"static_extensions,omitempty"`
 	// Service is the compose service the public router targets; default:
 	// the only service with HTTP routers.
 	Service string       `yaml:"service" json:"service,omitempty"`
@@ -54,9 +67,15 @@ type PublicAccess struct {
 type PublicPath struct {
 	Prefix      string `yaml:"prefix" json:"prefix"`
 	Description string `yaml:"description" json:"description"`
-	Supporting  bool   `yaml:"supporting" json:"supporting,omitempty"`
+	// Supporting: token-free, opened in both modes, and only for static
+	// files (StaticExtensions) unless Exact.
+	Supporting bool `yaml:"supporting" json:"supporting,omitempty"`
+	// Exact opens only the path itself (Path, no subpaths); for single app
+	// routes a share page needs. Requires a justification.
+	Exact bool `yaml:"exact" json:"exact,omitempty"`
 	// Broad must be set (with a Justification) for prefixes on the
-	// broad-prefix list, e.g. /api or /index.php.
+	// broad-prefix list, e.g. /api or /index.php. Justification is also
+	// required for Exact.
 	Broad         bool   `yaml:"broad" json:"broad,omitempty"`
 	Justification string `yaml:"justification" json:"justification,omitempty"`
 }

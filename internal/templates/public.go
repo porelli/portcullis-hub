@@ -60,6 +60,23 @@ var (
 // gate to skip.
 var publicMethods = map[string]bool{"forward-auth": true, "header-auth": true, "native-oidc": true}
 
+// StaticExtensions are the file extensions supporting paths serve by
+// default; templates may add more in static_extensions (never script
+// extensions). Supporting paths are matched as static files only: a
+// PathRegexp of dot-free directory segments and a file name ending in one
+// of these extensions, so no PATH_INFO trick (x.php/y.js) and no
+// extension-less app route matches.
+var StaticExtensions = []string{"avif", "css", "eot", "gif", "ico", "jpeg", "jpg", "js", "map", "mjs", "otf", "png", "svg", "ttf", "webp", "woff", "woff2"}
+
+var (
+	extRe = regexp.MustCompile(`^[a-z0-9]{1,8}$`)
+	// scriptExtensions can never be static_extensions.
+	scriptExtensions = map[string]bool{"php": true, "php3": true, "php4": true, "php5": true, "php7": true, "php8": true, "phtml": true,
+		"phar": true, "pht": true, "phps": true, "cgi": true, "fcgi": true, "pl": true, "py": true, "rb": true, "sh": true,
+		"asp": true, "aspx": true, "jsp": true, "jspx": true, "shtml": true, "htaccess": true, "exe": true, "dll": true}
+	cookieNameRe = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
+)
+
 // headerNameRe constrains auth.identity_headers (they become label keys).
 var headerNameRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9-]{0,63}$`)
 
@@ -179,6 +196,24 @@ func ValidatePublicAccess(a *Auth) error {
 	if HasControlChars(pa.Description) || len(pa.Description) > 500 {
 		return fmt.Errorf("auth.public_access.description must be one line of at most 500 characters")
 	}
+	if err := ValidateIdentityHeaders(pa.CredentialHeaders); err != nil {
+		return fmt.Errorf("auth.public_access.credential_headers: %w", err)
+	}
+	for _, c := range pa.CredentialCookies {
+		if !cookieNameRe.MatchString(c) {
+			return fmt.Errorf("auth.public_access.credential_cookies: %q is not a cookie name ([A-Za-z0-9_.-], max 64)", c)
+		}
+	}
+	for _, q := range pa.CredentialQuery {
+		if !cookieNameRe.MatchString(q) {
+			return fmt.Errorf("auth.public_access.credential_query: %q is not a parameter name ([A-Za-z0-9_.-], max 64)", q)
+		}
+	}
+	for _, e := range pa.StaticExtensions {
+		if !extRe.MatchString(e) || scriptExtensions[e] {
+			return fmt.Errorf("auth.public_access.static_extensions: %q is not allowed (lowercase [a-z0-9]{1,8}, no script extensions)", e)
+		}
+	}
 	if pa.Service != "" && !serviceNameRe.MatchString(pa.Service) {
 		return fmt.Errorf("auth.public_access.service %q is not a compose service name", pa.Service)
 	}
@@ -205,6 +240,14 @@ func ValidatePublicAccess(a *Auth) error {
 		if tokenised && pp.Supporting {
 			return fmt.Errorf("auth.public_access.paths[%d]: %s has a %s, so it can't be supporting", i, norm, TokenPlaceholder)
 		}
+		if pp.Exact {
+			if tokenised {
+				return fmt.Errorf("auth.public_access.paths[%d]: %s has a %s, so it can't be exact", i, norm, TokenPlaceholder)
+			}
+			if strings.TrimSpace(pp.Justification) == "" {
+				return fmt.Errorf("auth.public_access.paths[%d]: exact path %s needs a justification (which app route, why the share page needs it)", i, norm)
+			}
+		}
 		shareable = shareable || !pp.Supporting
 		// Everything below is checked on what "all" mode opens: a {token}
 		// prefix up to the token segment.
@@ -220,7 +263,12 @@ func ValidatePublicAccess(a *Auth) error {
 				return fmt.Errorf("auth.public_access.paths[%d]: %s overlaps %s, which can never be public", i, norm, f)
 			}
 		}
-		if IsBroadPublicPrefix(base) {
+		if pp.Exact {
+			// One path, no subpaths: the broad list does not apply.
+			if pp.Broad {
+				return fmt.Errorf("auth.public_access.paths[%d]: broad: true on exact path %s", i, norm)
+			}
+		} else if IsBroadPublicPrefix(base) {
 			if !pp.Broad || strings.TrimSpace(pp.Justification) == "" {
 				return fmt.Errorf("auth.public_access.paths[%d]: %s is a broad prefix (whole API / front controller); narrow it, or set broad: true with a justification", i, base)
 			}
@@ -460,8 +508,16 @@ func (pl *PublicPlan) HasTokenPaths() bool {
 	return false
 }
 
+// Routed entries are encoded by kind: "p" = segment-boundary prefix
+// (Path(p) || PathPrefix(p/)), "=p" = exact Path(p), "~p" = static files
+// under p (PathRegexp). See Rule.
+const (
+	routedExact  = "="
+	routedStatic = "~"
+)
+
 // Effective returns what the public router opens for a mode and the
-// listed tokens: routed are the literal prefixes for the Traefik rule,
+// listed tokens: routed are the encoded entries for the Traefik rule,
 // published the same with {token} kept (for the policy file and the UI:
 // share tokens are secrets). Both are sorted. In listed mode without
 // tokens nothing is opened (no router at all).
@@ -472,17 +528,24 @@ func (pl *PublicPlan) Effective(mode string, tokens []string) (routed, published
 	}
 	for _, pp := range pl.Paths {
 		tokenised := strings.Contains(pp.Prefix, TokenPlaceholder)
+		enc := pp.Prefix
 		switch {
-		case mode != ModeListed:
+		case pp.Exact:
+			enc = routedExact + pp.Prefix
+		case pp.Supporting:
+			enc = routedStatic + pp.Prefix
+		}
+		switch {
+		case tokenised && mode != ModeListed:
 			b := tokenBase(pp.Prefix)
 			rs[b], ps[b] = true, true
-		case pp.Supporting:
-			rs[pp.Prefix], ps[pp.Prefix] = true, true
 		case tokenised:
 			for _, tok := range tokens {
 				rs[strings.Replace(pp.Prefix, TokenPlaceholder, tok, 1)] = true
 			}
 			ps[pp.Prefix] = true
+		case pp.Supporting || mode != ModeListed:
+			rs[enc], ps[enc] = true, true
 		}
 	}
 	return sortedKeys(rs), sortedKeys(ps)
@@ -497,10 +560,61 @@ func sortedKeys(m map[string]bool) []string {
 	return out
 }
 
-// Rule is the public router's Traefik rule for the routed prefixes: the
-// plan's hosts, and each prefix as Path(`p`) || PathPrefix(`p/`) (segment
-// boundary).
-func (pl *PublicPlan) Rule(routed []string) string {
+// staticRegexp matches static files under prefix: dot-free directory
+// segments, then a file name with one of exts.
+func staticRegexp(prefix string, exts []string) string {
+	return "^" + regexp.QuoteMeta(prefix) + "(/[A-Za-z0-9_~@+-]+)*/[A-Za-z0-9_~@+-][A-Za-z0-9._~@+-]*\\.(" + strings.Join(exts, "|") + ")$"
+}
+
+// Extensions returns the static extensions for the app's supporting paths.
+func (pa *PublicAccess) Extensions() []string {
+	set := map[string]bool{}
+	for _, e := range StaticExtensions {
+		set[e] = true
+	}
+	for _, e := range pa.StaticExtensions {
+		set[e] = true
+	}
+	return sortedKeys(set)
+}
+
+// cookieRegexp matches a Cookie header value that sets one of names,
+// loosely and case-insensitively (fail closed): any character may be
+// percent-encoded, and "_" also matches ".", " " and "[" (PHP turns those
+// into "_" in cookie names).
+func cookieRegexp(names []string) string {
+	alts := make([]string, 0, len(names))
+	for _, n := range names {
+		var b strings.Builder
+		for _, c := range n {
+			if c == '_' || c == '.' {
+				b.WriteString(`(?:[_. \[]|%[0-9a-f]{2})`)
+			} else {
+				b.WriteString(`(?:` + regexp.QuoteMeta(string(c)) + `|%[0-9a-f]{2})`)
+			}
+		}
+		alts = append(alts, b.String())
+	}
+	return `(?i)(?:^|[;,])\s*(?:` + strings.Join(alts, "|") + `)\s*=`
+}
+
+// Rule is the public router's Traefik rule for the routed entries: the
+// plan's hosts, and per entry Path(`p`) || PathPrefix(`p/`) (segment
+// boundary), Path(`p`) (exact) or PathRegexp (static files). Requests
+// carrying the app's credential cookies or query parameters are excluded:
+// they fall through to the app's gated router.
+func (pl *PublicPlan) Rule(routed []string, pa *PublicAccess) string {
+	exts := StaticExtensions
+	var excl []string
+	if pa != nil {
+		exts = pa.Extensions()
+		if len(pa.CredentialCookies) > 0 {
+			excl = append(excl, "!HeaderRegexp(`Cookie`, `"+cookieRegexp(pa.CredentialCookies)+"`)")
+		}
+		for _, q := range pa.CredentialQuery {
+			excl = append(excl, "!QueryRegexp(`"+q+"`, `.*`)")
+		}
+	}
 	hosts := make([]string, len(pl.HostArgs))
 	for i, h := range pl.HostArgs {
 		hosts[i] = "Host(`" + h + "`)"
@@ -510,20 +624,51 @@ func (pl *PublicPlan) Rule(routed []string) string {
 		host = "(" + strings.Join(hosts, " || ") + ")"
 	}
 	paths := make([]string, 0, 2*len(routed))
-	for _, p := range routed {
-		paths = append(paths, "Path(`"+p+"`)", "PathPrefix(`"+p+"/`)")
+	for _, e := range routed {
+		switch {
+		case strings.HasPrefix(e, routedExact):
+			paths = append(paths, "Path(`"+e[1:]+"`)")
+		case strings.HasPrefix(e, routedStatic):
+			paths = append(paths, "PathRegexp(`"+staticRegexp(e[1:], exts)+"`)")
+		default:
+			paths = append(paths, "Path(`"+e+"`)", "PathPrefix(`"+e+"/`)")
+		}
 	}
-	return host + " && (" + strings.Join(paths, " || ") + ")"
+	rule := host + " && (" + strings.Join(paths, " || ") + ")"
+	for _, e := range excl {
+		rule += " && " + e
+	}
+	return rule
 }
 
-// RuntimePublicPrefixes extracts the prefixes of a running public router's
-// rule (the PathPrefix(`p/`) arguments, trailing "/" removed), sorted.
+// RuntimePublicPrefixes decodes a running public router's rule into the
+// encoded entries Effective produces, sorted.
 func RuntimePublicPrefixes(rule string) []string {
+	prefixes, exacts := map[string]bool{}, map[string]bool{}
 	set := map[string]bool{}
 	for _, m := range runtimePrefixRe.FindAllStringSubmatch(rule, -1) {
-		set[strings.TrimRight(m[1], "/")] = true
+		prefixes[strings.TrimRight(m[1], "/")] = true
+	}
+	for _, m := range runtimePathRe.FindAllStringSubmatch(rule, -1) {
+		exacts[m[1]] = true
+	}
+	for _, m := range runtimeRegexpRe.FindAllStringSubmatch(rule, -1) {
+		set[routedStatic+strings.ReplaceAll(m[1], `\`, "")] = true
+	}
+	for p := range prefixes {
+		set[p] = true
+	}
+	for p := range exacts {
+		if !prefixes[p] {
+			set[routedExact+p] = true
+		}
 	}
 	return sortedKeys(set)
 }
+
+var (
+	runtimePathRe   = regexp.MustCompile("(?i)\\bPath\\([`\"]([^`\"]*)[`\"]\\)")
+	runtimeRegexpRe = regexp.MustCompile("(?i)PathRegexp\\([`\"]\\^([^(`\"]*)\\(")
+)
 
 var runtimePrefixRe = regexp.MustCompile("(?i)PathPrefix\\([`\"]([^`\"]*)[`\"]\\)")

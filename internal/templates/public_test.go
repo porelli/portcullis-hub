@@ -1,6 +1,7 @@
 package templates
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 
@@ -193,20 +194,20 @@ func TestPlanPublic(t *testing.T) {
 	}
 
 	routed, published := plan.Effective(ModeAll, []string{"ignored"})
-	if strings.Join(routed, ",") != "/apps/text,/dist,/index.php/s,/public.php/dav/files,/s" || strings.Join(published, ",") != strings.Join(routed, ",") {
+	if strings.Join(routed, ",") != "/apps/text,/index.php/s,/public.php/dav/files,/s,~/dist" || strings.Join(published, ",") != strings.Join(routed, ",") {
 		t.Errorf("all: routed %v published %v", routed, published)
 	}
 	if r, p := plan.Effective(ModeListed, nil); r != nil || p != nil {
 		t.Errorf("listed without tokens opens %v %v", r, p)
 	}
 	routed, published = plan.Effective(ModeListed, []string{"tokA", "tokB"})
-	if strings.Join(routed, ",") != "/dist,/index.php/s/tokA,/index.php/s/tokB,/public.php/dav/files/tokA,/public.php/dav/files/tokB,/s/tokA,/s/tokB" {
+	if strings.Join(routed, ",") != "/index.php/s/tokA,/index.php/s/tokB,/public.php/dav/files/tokA,/public.php/dav/files/tokB,/s/tokA,/s/tokB,~/dist" {
 		t.Errorf("listed routed = %v", routed)
 	}
-	if strings.Join(published, ",") != "/dist,/index.php/s/{token},/public.php/dav/files/{token},/s/{token}" {
+	if strings.Join(published, ",") != "/index.php/s/{token},/public.php/dav/files/{token},/s/{token},~/dist" {
 		t.Errorf("listed published = %v (must not leak tokens)", published)
 	}
-	rule := plan.Rule(routed)
+	rule := plan.Rule(routed, nil)
 	hosts, err := ParseRule(rule)
 	if err != nil || strings.Join(hosts, ",") != "cloud" {
 		t.Errorf("rule %q: %v %v", rule, hosts, err)
@@ -293,5 +294,108 @@ func TestIdentityHeaders(t *testing.T) {
 		if ValidateIdentityHeaders(hs) == nil {
 			t.Errorf("identity_headers %q accepted", hs)
 		}
+	}
+}
+
+func TestStaticRegexp(t *testing.T) {
+	re := regexp.MustCompile(staticRegexp("/dist", StaticExtensions))
+	for p, want := range map[string]bool{
+		"/dist/a.js": true, "/dist/x/y-z.min.css": true, "/dist/core/img/a.svg": true, "/dist/f.woff2": true,
+		"/dist": false, "/dist/": false, "/dist/a": false, "/dist/a.php": false, "/dist/a.php/b.js": false,
+		"/dist/x.y/b.js": false, "/distx/a.js": false, "/dist/.js": false, "/dist/a.js/": false, "/dist/a.json": false,
+	} {
+		if got := re.MatchString(p); got != want {
+			t.Errorf("static %s = %v, want %v", p, got, want)
+		}
+	}
+}
+
+func TestPublicExactAndRuntimeDecode(t *testing.T) {
+	routes, _ := ParseRoutes([]byte(publicCompose))
+	m := &Manifest{Auth: Auth{Method: "forward-auth", PublicAccess: &PublicAccess{Service: "app", Paths: []PublicPath{
+		pp("/share"),
+		{Prefix: "/core/mimeicon", Description: "d", Supporting: true, Exact: true, Justification: "public icon route"},
+		{Prefix: "/core/css", Description: "d", Supporting: true},
+		{Prefix: "/api/server/config", Description: "d", Exact: true, Justification: "boot config"},
+	}}}}
+	if err := ValidatePublicAccess(&m.Auth); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := PlanPublic(m, routes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	routed, _ := plan.Effective(ModeAll, nil)
+	if strings.Join(routed, ",") != "/share,=/api/server/config,=/core/mimeicon,~/core/css" {
+		t.Fatalf("routed = %v", routed)
+	}
+	rule := plan.Rule(routed, m.Auth.PublicAccess)
+	if !strings.Contains(rule, "Path(`/core/mimeicon`)") || strings.Contains(rule, "PathPrefix(`/core/mimeicon/`)") ||
+		!strings.Contains(rule, "PathRegexp(`^/core/css(") {
+		t.Errorf("rule = %s", rule)
+	}
+	if _, err := ParseRule(rule); err != nil {
+		t.Errorf("rule does not parse: %v", err)
+	}
+	if got := RuntimePublicPrefixes(rule); strings.Join(got, ",") != strings.Join(routed, ",") {
+		t.Errorf("runtime decode = %v, want %v", got, routed)
+	}
+	// Listed mode keeps supporting (static and exact) entries only.
+	if r, _ := plan.Effective(ModeListed, []string{"x"}); strings.Join(r, ",") != "=/core/mimeicon,~/core/css" {
+		t.Errorf("listed = %v", r)
+	}
+}
+
+func TestPublicCredentialValidation(t *testing.T) {
+	for name, a := range map[string]*Auth{
+		"exact without justification": publicAuth("forward-auth", PublicPath{Prefix: "/x", Description: "d", Exact: true}),
+		"exact token":                 {Method: "forward-auth", PublicAccess: &PublicAccess{TokenPattern: "^[a-z]+$", Paths: []PublicPath{{Prefix: "/s/{token}", Description: "d", Exact: true, Justification: "j"}}}},
+		"php extension":               {Method: "forward-auth", PublicAccess: &PublicAccess{StaticExtensions: []string{"php"}, Paths: []PublicPath{pp("/s")}}},
+		"bad extension":               {Method: "forward-auth", PublicAccess: &PublicAccess{StaticExtensions: []string{".js"}, Paths: []PublicPath{pp("/s")}}},
+		"bad cookie":                  {Method: "forward-auth", PublicAccess: &PublicAccess{CredentialCookies: []string{"a b"}, Paths: []PublicPath{pp("/s")}}},
+		"bad header":                  {Method: "forward-auth", PublicAccess: &PublicAccess{CredentialHeaders: []string{"x_api"}, Paths: []PublicPath{pp("/s")}}},
+	} {
+		if ValidatePublicAccess(a) == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	ok := &Auth{Method: "forward-auth", PublicAccess: &PublicAccess{StaticExtensions: []string{"json", "html"}, CredentialCookies: []string{"nc_token"},
+		CredentialHeaders: []string{"X-Api-Key"}, Paths: []PublicPath{pp("/s"), {Prefix: "/api", Description: "d", Exact: true, Justification: "single route"}}}}
+	if err := ValidatePublicAccess(ok); err != nil {
+		t.Errorf("valid credentials/exact rejected: %v", err)
+	}
+	if e := ok.PublicAccess.Extensions(); !strings.Contains(strings.Join(e, ","), "json") || !strings.Contains(strings.Join(e, ","), "woff2") {
+		t.Errorf("extensions = %v", e)
+	}
+}
+
+func TestCredentialExclusions(t *testing.T) {
+	re := regexp.MustCompile(cookieRegexp([]string{"nc_token", "grafana_session"}))
+	for c, want := range map[string]bool{
+		"nc_token=x": true, "a=1; nc_token=x": true, "a=1;nc_token = x": true, "nc.token=x": true, "nc token=x": true,
+		"nc[token=x": true, "nc%5Ftoken=x": true, "%6Ec_token=x": true, "NC_TOKEN=x": true, "grafana_session=abc": true,
+		"xnc_token=1": false, "nc_tokens=1": false, "foo=nc_token": false, "ocabc=1; nc_username=u": false,
+	} {
+		if got := re.MatchString(c); got != want {
+			t.Errorf("cookie %q excluded = %v, want %v", c, got, want)
+		}
+	}
+	routes, _ := ParseRoutes([]byte(publicCompose))
+	pa := &PublicAccess{Service: "app", CredentialCookies: []string{"nc_token"}, CredentialQuery: []string{"apiKey"}, Paths: []PublicPath{pp("/share")}}
+	m := &Manifest{Auth: Auth{Method: "forward-auth", PublicAccess: pa}}
+	if err := ValidatePublicAccess(&m.Auth); err != nil {
+		t.Fatal(err)
+	}
+	plan, _ := PlanPublic(m, routes)
+	routed, _ := plan.Effective(ModeAll, nil)
+	rule := plan.Rule(routed, pa)
+	if !strings.Contains(rule, " && !HeaderRegexp(`Cookie`, `(?i)") || !strings.HasSuffix(rule, " && !QueryRegexp(`apiKey`, `.*`)") {
+		t.Errorf("rule = %s", rule)
+	}
+	if hosts, err := ParseRule(rule); err != nil || len(hosts) != 1 {
+		t.Errorf("rule with exclusions: %v %v", hosts, err)
+	}
+	if ValidatePublicAccess(&Auth{Method: "forward-auth", PublicAccess: &PublicAccess{CredentialQuery: []string{"a b"}, Paths: []PublicPath{pp("/s")}}}) == nil {
+		t.Error("bad credential_query accepted")
 	}
 }
