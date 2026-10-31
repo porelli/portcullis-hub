@@ -280,9 +280,32 @@ func (h *Hub) SaveComposeFiles(id, compose, override string) error {
 			return statusErr(400, "Invalid override YAML: %v", err)
 		}
 	}
+	// Routing must stay fully visible to group-gate (see ParseRoutes).
+	routes, err := templates.ParseRoutes([]byte(compose))
+	if err != nil {
+		return statusErr(400, "%v", err)
+	}
+	if sub := coreSubdomain(routes.Subdomains); sub != "" {
+		return statusErr(400, "compose.yml routes core subdomain %q", sub)
+	}
+	h.mu.Lock()
+	if live := h.findLocked(id); live != nil && live.Enabled {
+		cand := *live
+		cand.Subdomains = routes.Subdomains
+		if err := h.checkSubdomainCollisionsLocked(&cand); err != nil {
+			h.mu.Unlock()
+			return err
+		}
+	}
+	h.mu.Unlock()
 	if err := fsutil.WriteFileAtomic(t.ComposePath(), []byte(compose), 0644); err != nil {
 		return statusErr(500, "Failed to write: %v", err)
 	}
+	h.mu.Lock()
+	if live := h.findLocked(id); live != nil {
+		live.Subdomains = routes.Subdomains
+	}
+	h.mu.Unlock()
 	if override != "" {
 		if err := fsutil.WriteFileAtomic(h.overridePath(id), []byte(override), 0600); err != nil {
 			return statusErr(500, "Failed to write override: %v", err)

@@ -27,31 +27,12 @@ volumes:
     name: portcullis_data
 `
 
-func TestSubdomains(t *testing.T) {
-	got := Subdomains([]byte(sampleCompose))
-	want := []string{"api", "git"}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("Subdomains = %v, want %v", got, want)
-	}
-	if Subdomains([]byte("Host(`x.example.com`)")) != nil {
-		t.Error("hard-coded domains must not be picked up")
-	}
-}
-
 func TestServices(t *testing.T) {
 	if got := Services([]byte(sampleCompose)); !reflect.DeepEqual(got, []string{"db", "other", "web"}) {
 		t.Errorf("Services = %v", got)
 	}
 	if got := Services([]byte("::not yaml")); got != nil {
 		t.Errorf("Services(invalid) = %v", got)
-	}
-}
-
-func TestRoutersByService(t *testing.T) {
-	got := RoutersByService([]byte(sampleCompose))
-	want := map[string][]string{"web": {"web", "web-api"}, "other": {"other"}}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("RoutersByService = %v, want %v", got, want)
 	}
 }
 

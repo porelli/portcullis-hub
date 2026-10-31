@@ -90,7 +90,12 @@ func (h *Hub) clientSpec(t *templates.Template, c templates.KeycloakClient, acr 
 			}
 		}
 	}
+	hosts := make([]string, 0, len(t.Subdomains))
+	for _, sub := range t.Subdomains {
+		hosts = append(hosts, sub+"."+h.cfg.Domain)
+	}
 	return keycloak.ClientSpec{
+		AllowedHosts: hosts,
 		ClientID:     c.ClientID,
 		Name:         c.Name,
 		Secret:       secret,
@@ -123,6 +128,10 @@ func (h *Hub) Enable(id string) error {
 		return nil
 	}
 	if err := h.checkPortCollisionsLocked(&tmpl); err != nil {
+		h.mu.Unlock()
+		return err
+	}
+	if err := h.checkSubdomainCollisionsLocked(&tmpl); err != nil {
 		h.mu.Unlock()
 		return err
 	}
@@ -161,6 +170,32 @@ func (h *Hub) Enable(id string) error {
 	h.mu.Unlock()
 	h.writePolicyLogged()
 	h.TriggerReconcile()
+	return nil
+}
+
+// checkSubdomainCollisionsLocked refuses to enable a template that routes a
+// subdomain another enabled app already routes: group-gate keys policies,
+// groups and path groups by subdomain, so the two would share (and fight
+// over) one entry. Caller must hold mu.
+func (h *Hub) checkSubdomainCollisionsLocked(t *templates.Template) error {
+	mine := map[string]bool{}
+	for _, s := range t.Subdomains {
+		mine[s] = true
+	}
+	for _, id := range h.st.Enabled {
+		if id == t.ID {
+			continue
+		}
+		other := h.findLocked(id)
+		if other == nil {
+			continue
+		}
+		for _, s := range other.Subdomains {
+			if mine[s] {
+				return statusErr(409, "subdomain %s.%s is already routed by enabled app %s", s, h.cfg.Domain, id)
+			}
+		}
+	}
 	return nil
 }
 

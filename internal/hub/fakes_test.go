@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -180,7 +181,7 @@ type fakeIdP struct {
 func (f *fakeIdP) RegisterClient(ctx context.Context, s keycloak.ClientSpec) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.registered = append(f.registered, fmt.Sprintf("%s:%s:%s:%s", s.ClientID, s.TemplateID, s.ACR, s.Secret))
+	f.registered = append(f.registered, fmt.Sprintf("%s:%s:%s:%s:%s", s.ClientID, s.TemplateID, s.ACR, s.Secret, strings.Join(s.AllowedHosts, ",")))
 	return nil
 }
 

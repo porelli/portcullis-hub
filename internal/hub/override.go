@@ -74,7 +74,11 @@ func (h *Hub) generateOverrideLocked(t *templates.Template, values map[string]st
 	}
 
 	tier := policy.Tier(h.st.ResolvePolicy(t.ID))
-	serviceRouters := templates.RoutersByService(t.ReadCompose())
+	routes, err := templates.ParseRoutes(t.ReadCompose())
+	if err != nil {
+		return err
+	}
+	serviceRouters := routes.Routers
 
 	services := map[string]bool{}
 	for svc := range serviceMounts {

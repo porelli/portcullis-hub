@@ -120,7 +120,7 @@ func TestEnableRegistersClients(t *testing.T) {
 		t.Fatal(err)
 	}
 	secret := readEnvFile(filepath.Join(f.data, "env", "other.env"))["OTHER_SECRET"]
-	if len(f.idp.registered) != 1 || f.idp.registered[0] != "other:other:public:"+secret || secret == "" {
+	if len(f.idp.registered) != 1 || f.idp.registered[0] != "other:other:public:"+secret+":other.example.org" || secret == "" {
 		t.Errorf("registered = %v (secret %q)", f.idp.registered, secret)
 	}
 }
@@ -443,8 +443,15 @@ func TestSaveSettingsValidation(t *testing.T) {
 		!strings.Contains(string(ov), "tls.options: protected@file") {
 		t.Errorf("override =\n%s", ov)
 	}
+	// Not enabled: nothing is published (group-gate keys by subdomain).
+	if doc := readPolicy(t, f); len(doc.Policies) != 0 {
+		t.Errorf("policy file = %+v", doc.Policies)
+	}
+	if err := f.h.Enable("grafana"); err != nil {
+		t.Fatal(err)
+	}
 	doc := readPolicy(t, f)
-	if p := doc.Policies["grafana"]; p.Op != "all" {
+	if p := doc.Policies["grafana"]; p.Op != "all" || len(doc.Policies) != 1 {
 		t.Errorf("policy file = %+v", doc.Policies)
 	}
 	// Inherit drops the override.
@@ -456,6 +463,58 @@ func TestSaveSettingsValidation(t *testing.T) {
 	}
 	if _, ok := readPolicy(t, f).Policies["grafana"]; ok {
 		t.Error("policy file still has the override")
+	}
+}
+
+func TestSubdomainCollision(t *testing.T) {
+	f := newFixture(t)
+	writeFile(t, filepath.Join(f.src, "clash", "manifest.yaml"), "name: Clash\n")
+	writeFile(t, filepath.Join(f.src, "clash", "compose.yml"), "services:\n  c:\n    labels:\n      traefik.http.routers.c.rule: Host(`GRAFANA.${PORTCULLIS_DOMAIN}`) && PathPrefix(`/x`)\n")
+	f.h.Discover()
+	if err := f.h.Enable("grafana"); err != nil {
+		t.Fatal(err)
+	}
+	err := f.h.Enable("clash")
+	if statusOf(err) != 409 || !strings.Contains(err.Error(), "grafana.example.org") {
+		t.Errorf("err = %v", err)
+	}
+	// Expert-mode edits can't introduce a collision either.
+	err = f.h.SaveComposeFiles("other", "services:\n  web:\n    labels:\n      traefik.http.routers.o.rule: Host(`grafana.${PORTCULLIS_DOMAIN}`)\n", "")
+	if err != nil {
+		t.Fatalf("disabled app may route anything until enabled: %v", err)
+	}
+	if err := f.h.Enable("other"); statusOf(err) != 409 {
+		t.Errorf("enable after edit: %v", err)
+	}
+}
+
+func TestRoutingValidation(t *testing.T) {
+	f := newFixture(t)
+	// Templates routing core subdomains or unresolvable hosts are skipped.
+	writeFile(t, filepath.Join(f.src, "evil", "manifest.yaml"), "name: Evil\n")
+	writeFile(t, filepath.Join(f.src, "evil", "compose.yml"), "services:\n  e:\n    labels:\n      traefik.http.routers.e.rule: Host(`hub.${PORTCULLIS_DOMAIN}`)\n")
+	writeFile(t, filepath.Join(f.src, "sneaky", "manifest.yaml"), "name: Sneaky\n")
+	writeFile(t, filepath.Join(f.src, "sneaky", "compose.yml"), "services:\n  e:\n    labels:\n      traefik.http.routers.e.rule: Host(`s.${PORTCULLIS_DOMAIN}`) || Host(`s.example.com`)\n")
+	f.h.Discover()
+	if f.h.Template("evil") != nil || f.h.Template("sneaky") != nil {
+		t.Error("unsafe templates loaded")
+	}
+	for name, c := range map[string]string{
+		"regexp": "services:\n  g:\n    labels:\n      traefik.http.routers.g.rule: HostRegexp(`.+`)\n",
+		"core":   "services:\n  g:\n    labels:\n      traefik.http.routers.g.rule: Host(`auth.${PORTCULLIS_DOMAIN}`)\n",
+		"any":    "services:\n  g:\n    labels:\n      traefik.http.routers.g.rule: PathPrefix(`/`)\n",
+	} {
+		if err := f.h.SaveComposeFiles("grafana", c, ""); statusOf(err) != 400 {
+			t.Errorf("%s: SaveComposeFiles = %v", name, err)
+		}
+	}
+	// A valid edit updates the routed subdomains used for the policy file.
+	if err := f.h.SaveComposeFiles("grafana", "services:\n  grafana:\n    labels:\n      traefik.http.routers.g.rule: Host(`dash.${PORTCULLIS_DOMAIN}`)\n", ""); err != nil {
+		t.Fatal(err)
+	}
+	f.h.Enable("grafana")
+	if doc := readPolicy(t, f); doc.Groups["dash"] != "users_grafana" || doc.Groups["grafana"] != "" {
+		t.Errorf("groups = %v", doc.Groups)
 	}
 }
 

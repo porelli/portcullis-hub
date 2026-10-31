@@ -40,14 +40,25 @@ func Discover(dir, source, domain string) []Template {
 			log.Printf("Skipping template %s: %v", e.Name(), err)
 			continue
 		}
+		compose, err := os.ReadFile(filepath.Join(dir, e.Name(), "compose.yml"))
+		if err != nil {
+			log.Printf("Skipping template %s: no compose.yml: %v", e.Name(), err)
+			continue
+		}
+		routes, err := ParseRoutes(compose)
+		if err != nil {
+			log.Printf("Skipping template %s: %v", e.Name(), err)
+			continue
+		}
 		for i := range m.URLs {
 			m.URLs[i].URL = strings.ReplaceAll(m.URLs[i].URL, "{{DOMAIN}}", domain)
 		}
 		out = append(out, Template{
-			ID:       e.Name(),
-			Source:   source,
-			Manifest: m,
-			Path:     filepath.Join(dir, e.Name()),
+			ID:         e.Name(),
+			Source:     source,
+			Manifest:   m,
+			Path:       filepath.Join(dir, e.Name()),
+			Subdomains: routes.Subdomains,
 		})
 	}
 	return out

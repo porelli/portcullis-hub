@@ -30,8 +30,7 @@ type Document struct {
 	PathGroups map[string][]PathGroup `json:"path_groups"`
 }
 
-// App is the per-template input to Build: only enabled apps should be passed
-// with Enabled=true; disabled ones publish nothing but their ID-keyed policy.
+// App is the per-template input to Build.
 type App struct {
 	ID          string
 	Enabled     bool
@@ -42,73 +41,121 @@ type App struct {
 	AdminPaths  []string
 }
 
+// Stricter reports whether a is strictly stricter than b: higher LoA first,
+// then "all" over "any"; at equal op, more required factors ("all") or fewer
+// accepted alternatives ("any"/single). A non-public policy is always
+// stricter than a public one.
+func Stricter(a, b AuthPolicy) bool {
+	if la, lb := LoA(a), LoA(b); la != lb {
+		return la > lb
+	}
+	aAll, bAll := a.Op == "all" && len(a.Factors) > 1, b.Op == "all" && len(b.Factors) > 1
+	if aAll != bAll {
+		return aAll
+	}
+	if aAll {
+		return len(a.Factors) > len(b.Factors)
+	}
+	return len(a.Factors) < len(b.Factors) && len(a.Factors) > 0
+}
+
 // Build assembles the policy document.
 //
-// group-gate keys everything by request subdomain while the Hub keys
-// policies by template ID; the two differ for many apps (gitlab → git, …).
-// So every per-app policy is written under the template ID *and* under each
-// subdomain the (enabled) template routes. Core subdomains are never
-// published.
+// group-gate looks policies, groups and path groups up by request subdomain
+// only, so only enabled templates publish entries, and only under the
+// subdomains they route (never under their template ID: an ID can equal
+// another app's subdomain). Core subdomains are never published.
+//
+// The Hub refuses to enable two templates that route the same subdomain; if
+// it happens anyway (state edited by hand, compose changed on disk) the
+// writer stays deterministic and fails towards the stricter outcome: the
+// stricter effective policy wins, path groups are merged, and the access
+// group of the lowest template ID wins. Each collision is logged.
 func Build(apps []App, perApp map[string]AuthPolicy, def AuthPolicy) Document {
 	doc := Document{
 		Version:    FileVersion,
 		Default:    def,
-		Policies:   make(map[string]AuthPolicy, len(perApp)),
+		Policies:   map[string]AuthPolicy{},
 		Groups:     map[string]string{},
 		PathGroups: map[string][]PathGroup{},
 	}
-	for id, p := range perApp {
-		if !CoreSubdomains[id] {
-			doc.Policies[id] = p
-		}
-	}
-	// Deterministic order so collisions between templates resolve the same
-	// way every time.
 	sorted := append([]App(nil), apps...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
+
+	type claim struct {
+		app      string
+		policy   AuthPolicy
+		override bool
+	}
+	claims := map[string][]claim{}
+	groupOwner := map[string]string{}
 	for _, a := range sorted {
 		if !a.Enabled {
 			continue
 		}
-		var subs []string
+		p, override := perApp[a.ID]
+		if !override {
+			p = def
+		}
 		for _, sub := range a.Subdomains {
 			if CoreSubdomains[sub] {
-				log.Printf("auth-policy: template %s routes core subdomain %q — ignored for policies/groups", a.ID, sub)
+				log.Printf("auth-policy: template %s routes core subdomain %q — ignored", a.ID, sub)
 				continue
 			}
-			subs = append(subs, sub)
-		}
-		if p, ok := perApp[a.ID]; ok {
-			for _, sub := range subs {
-				if _, taken := doc.Policies[sub]; !taken {
-					doc.Policies[sub] = p
+			claims[sub] = append(claims[sub], claim{a.ID, p, override})
+
+			// Only apps that opt into group-based access get a required
+			// group; for the others access_group is informational.
+			if a.GroupAccess && a.AccessGroup != "" {
+				if owner, taken := groupOwner[sub]; taken {
+					if doc.Groups[sub] != a.AccessGroup {
+						log.Printf("auth-policy: subdomain %q is routed by %s and %s — keeping group %q of %s", sub, owner, a.ID, doc.Groups[sub], owner)
+					}
+				} else {
+					groupOwner[sub] = a.ID
+					doc.Groups[sub] = a.AccessGroup
 				}
 			}
-		}
-		// Only apps that opt into group-based access get a required group;
-		// for the others access_group is informational.
-		if a.GroupAccess && a.AccessGroup != "" {
-			for _, sub := range subs {
-				doc.Groups[sub] = a.AccessGroup
-			}
-		}
-		if a.AdminGroup != "" && len(a.AdminPaths) > 0 {
-			for _, sub := range subs {
-				seen := map[string]bool{}
+			if a.AdminGroup != "" && len(a.AdminPaths) > 0 {
+				have := map[string]string{}
 				for _, pg := range doc.PathGroups[sub] {
-					seen[pg.Prefix] = true
+					have[pg.Prefix] = pg.Group
 				}
 				for _, prefix := range a.AdminPaths {
-					if seen[prefix] {
+					if g, ok := have[prefix]; ok {
+						if g != a.AdminGroup {
+							log.Printf("auth-policy: subdomain %q path %q claimed with groups %q and %q — keeping %q", sub, prefix, g, a.AdminGroup, g)
+						}
 						continue
 					}
-					seen[prefix] = true
+					have[prefix] = a.AdminGroup
 					doc.PathGroups[sub] = append(doc.PathGroups[sub], PathGroup{Prefix: prefix, Group: a.AdminGroup})
 				}
 				sort.Slice(doc.PathGroups[sub], func(i, j int) bool {
 					return doc.PathGroups[sub][i].Prefix < doc.PathGroups[sub][j].Prefix
 				})
 			}
+		}
+	}
+	for sub, cs := range claims {
+		anyOverride := false
+		best := cs[0]
+		for _, c := range cs {
+			anyOverride = anyOverride || c.override
+			if Stricter(c.policy, best.policy) {
+				best = c
+			}
+		}
+		if len(cs) > 1 {
+			ids := make([]string, len(cs))
+			for i, c := range cs {
+				ids[i] = c.app
+			}
+			log.Printf("auth-policy: subdomain %q is routed by %v — publishing the strictest policy (of %s)", sub, ids, best.app)
+		}
+		// Apps without an override inherit "default" in group-gate already.
+		if anyOverride {
+			doc.Policies[sub] = best.policy
 		}
 	}
 	return doc

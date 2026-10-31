@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -15,7 +16,7 @@ func TestBuild(t *testing.T) {
 		{ID: "gitlab", Enabled: true, Subdomains: []string{"git", "registry"}, GroupAccess: true, AccessGroup: "users_gitlab",
 			AdminGroup: "admin_gitlab", AdminPaths: []string{"/admin", "/-/admin"}},
 		{ID: "grafana", Enabled: true, Subdomains: []string{"grafana"}, GroupAccess: false, AccessGroup: "users_grafana"},
-		// Disabled: publishes neither subdomain policies nor groups.
+		// Disabled: publishes nothing at all.
 		{ID: "jellyfin", Enabled: false, Subdomains: []string{"media"}, GroupAccess: true, AccessGroup: "users_jellyfin",
 			AdminGroup: "admin_jellyfin", AdminPaths: []string{"/admin"}},
 		// Tries to claim core subdomains.
@@ -27,10 +28,8 @@ func TestBuild(t *testing.T) {
 	perApp := map[string]AuthPolicy{
 		"gitlab":   mtls,
 		"jellyfin": webauthn,
-		"evil":     AuthPolicy{},
-		"hub":      AuthPolicy{}, // core key must be dropped
-		// Explicit subdomain-keyed policy wins over the template alias.
-		"registry": webauthn,
+		"evil":     {},
+		"hub":      {},
 	}
 	doc := Build(apps, perApp, webauthn)
 
@@ -40,11 +39,9 @@ func TestBuild(t *testing.T) {
 	if !reflect.DeepEqual(doc.Default, webauthn) {
 		t.Errorf("default = %+v", doc.Default)
 	}
-	wantPolicies := map[string]AuthPolicy{
-		"gitlab": mtls, "git": mtls, "registry": webauthn,
-		"jellyfin": webauthn, // ID key stays even when disabled
-		"evil":     {},
-	}
+	// Subdomain keys of enabled apps with an override only — no template-ID
+	// keys, nothing for disabled apps, nothing for core subdomains.
+	wantPolicies := map[string]AuthPolicy{"git": mtls, "registry": mtls, "evil": {}}
 	if !reflect.DeepEqual(doc.Policies, wantPolicies) {
 		t.Errorf("policies = %+v\nwant %+v", doc.Policies, wantPolicies)
 	}
@@ -70,13 +67,76 @@ func TestBuild(t *testing.T) {
 	}
 }
 
-func TestBuildDeterministicCollision(t *testing.T) {
-	a := App{ID: "a", Enabled: true, Subdomains: []string{"shared"}, GroupAccess: true, AccessGroup: "ga"}
-	b := App{ID: "b", Enabled: true, Subdomains: []string{"shared"}, GroupAccess: true, AccessGroup: "gb"}
-	d1 := Build([]App{a, b}, nil, AuthPolicy{})
-	d2 := Build([]App{b, a}, nil, AuthPolicy{})
-	if d1.Groups["shared"] != d2.Groups["shared"] {
-		t.Errorf("collision depends on input order: %v vs %v", d1.Groups, d2.Groups)
+// A template whose ID equals another app's subdomain must not be able to
+// publish its (weaker) policy for that subdomain.
+func TestBuildIDIsNotAKey(t *testing.T) {
+	apps := []App{
+		{ID: "vaultwarden", Enabled: true, Subdomains: []string{"passwords"}},
+		{ID: "passwords", Enabled: true, Subdomains: []string{"pw-other"}},
+	}
+	doc := Build(apps, map[string]AuthPolicy{
+		"vaultwarden": {Factors: []string{"mtls"}},
+		"passwords":   {}, // public
+	}, AuthPolicy{Factors: []string{"webauthn"}})
+	if p := doc.Policies["passwords"]; strings.Join(p.Factors, ",") != "mtls" {
+		t.Errorf("passwords = %+v, want vaultwarden's mtls policy", p)
+	}
+	if p, ok := doc.Policies["pw-other"]; !ok || len(p.Factors) != 0 {
+		t.Errorf("pw-other = %+v, %v", p, ok)
+	}
+	if _, ok := doc.Policies["vaultwarden"]; ok {
+		t.Error("template ID published as a key")
+	}
+}
+
+func TestBuildCollisions(t *testing.T) {
+	webauthn := AuthPolicy{Factors: []string{"webauthn"}}
+	a := App{ID: "a", Enabled: true, Subdomains: []string{"shared"}, GroupAccess: true, AccessGroup: "ga", AdminGroup: "aa", AdminPaths: []string{"/admin", "/x"}}
+	b := App{ID: "b", Enabled: true, Subdomains: []string{"shared"}, GroupAccess: true, AccessGroup: "gb", AdminGroup: "ab", AdminPaths: []string{"/admin", "/y"}}
+	for _, order := range [][]App{{a, b}, {b, a}} {
+		// a is public by override, b inherits the webauthn default: the
+		// stricter (inherited) policy is published.
+		doc := Build(order, map[string]AuthPolicy{"a": {}}, webauthn)
+		if p := doc.Policies["shared"]; strings.Join(p.Factors, ",") != "webauthn" {
+			t.Errorf("policy = %+v", p)
+		}
+		if doc.Groups["shared"] != "ga" {
+			t.Errorf("group = %q (lowest ID must win)", doc.Groups["shared"])
+		}
+		want := []PathGroup{{"/admin", "aa"}, {"/x", "aa"}, {"/y", "ab"}}
+		if !reflect.DeepEqual(doc.PathGroups["shared"], want) {
+			t.Errorf("path groups = %+v", doc.PathGroups["shared"])
+		}
+	}
+	// Two overrides: all-of beats any-of at the same LoA, higher LoA wins.
+	anyOf := AuthPolicy{Factors: []string{"mtls", "webauthn"}, Op: "any"}
+	allOf := AuthPolicy{Factors: []string{"password", "webauthn"}, Op: "all"}
+	doc := Build([]App{a, b}, map[string]AuthPolicy{"a": anyOf, "b": allOf}, AuthPolicy{})
+	if p := doc.Policies["shared"]; p.Op != "all" {
+		t.Errorf("policy = %+v, want all-of", p)
+	}
+	doc = Build([]App{a, b}, map[string]AuthPolicy{"a": {Factors: []string{"mtls"}}, "b": allOf}, AuthPolicy{})
+	if p := doc.Policies["shared"]; strings.Join(p.Factors, ",") != "mtls" {
+		t.Errorf("policy = %+v, want mtls", p)
+	}
+}
+
+func TestStricter(t *testing.T) {
+	pub := AuthPolicy{}
+	pwd := AuthPolicy{Factors: []string{"password"}}
+	hwk := AuthPolicy{Factors: []string{"webauthn"}}
+	any2 := AuthPolicy{Factors: []string{"password", "webauthn"}, Op: "any"}
+	all2 := AuthPolicy{Factors: []string{"password", "webauthn"}, Op: "all"}
+	for _, c := range []struct {
+		a, b AuthPolicy
+		want bool
+	}{
+		{pwd, pub, true}, {pub, pwd, false}, {hwk, pwd, true}, {all2, hwk, true}, {hwk, all2, false},
+		{all2, any2, true}, {any2, pwd, false}, {pwd, any2, true}, {hwk, hwk, false}, {pub, pub, false},
+	} {
+		if got := Stricter(c.a, c.b); got != c.want {
+			t.Errorf("Stricter(%+v, %+v) = %v", c.a, c.b, got)
+		}
 	}
 }
 

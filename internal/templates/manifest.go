@@ -104,4 +104,6 @@ type Template struct {
 	Manifest Manifest `json:"manifest"`
 	Path     string   `json:"-"` // filesystem path
 	Enabled  bool     `json:"enabled"`
+	// Subdomains routed by the template's Traefik rules (see ParseRoutes).
+	Subdomains []string `json:"subdomains"`
 }

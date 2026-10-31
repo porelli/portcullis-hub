@@ -186,6 +186,10 @@ func (h *Hub) Discover() {
 			log.Printf("Skipping template %s from source %s: ID already provided by another source", t.ID, t.Source)
 			continue
 		}
+		if sub := coreSubdomain(t.Subdomains); sub != "" {
+			log.Printf("Skipping template %s: it routes core subdomain %q", t.ID, sub)
+			continue
+		}
 		seen[t.ID] = true
 		t.Enabled = h.st.IsEnabled(t.ID)
 		uniq = append(uniq, t)
@@ -270,7 +274,7 @@ func (h *Hub) WritePolicy() error {
 			AdminPaths:  t.Manifest.Auth.AdminPaths,
 		}
 		if t.Enabled {
-			a.Subdomains = templates.Subdomains(t.ReadCompose())
+			a.Subdomains = t.Subdomains
 		}
 		apps = append(apps, a)
 	}
@@ -281,6 +285,15 @@ func (h *Hub) WritePolicy() error {
 	doc := policy.Build(apps, perApp, h.st.DefaultPolicy)
 	h.mu.RUnlock()
 	return policy.Write(h.policyPath(), doc)
+}
+
+func coreSubdomain(subs []string) string {
+	for _, s := range subs {
+		if policy.CoreSubdomains[s] {
+			return s
+		}
+	}
+	return ""
 }
 
 func (h *Hub) writePolicyLogged() {
