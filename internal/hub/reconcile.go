@@ -63,7 +63,7 @@ type projectCount struct{ running, total int }
 // computeDrift compares enabled apps with project container counts, and the
 // public-exception prefixes running containers route (havePublic) with what
 // the Hub wants (wantPublic). busy apps (mid-operation) are skipped.
-func computeDrift(enabled, known, snapshot map[string]bool, counts map[string]projectCount, wantPublic, havePublic map[string][]string, busy func(string) bool) []Drift {
+func computeDrift(enabled, known, snapshot map[string]bool, counts map[string]projectCount, wantPublic, havePublic map[string][]string, blockedPublic map[string]string, busy func(string) bool) []Drift {
 	var out []Drift
 	ids := map[string]bool{}
 	for id := range enabled {
@@ -118,7 +118,14 @@ func computeDrift(enabled, known, snapshot map[string]bool, counts map[string]pr
 		case enabled[id] && !equalStrings(wantPublic[id], havePublic[id]):
 			d.Kind = DriftPublicAccess
 			d.Message = fmt.Sprintf("public exceptions differ: running %s, Hub settings %s — apply recreates the containers", describePublic(havePublic[id]), describePublic(wantPublic[id]))
+			if b := blockedPublic[id]; b != "" {
+				d.Message = b + "; " + d.Message
+			}
 			d.Actions = []string{ActionApply, ActionDisable}
+		case enabled[id] && blockedPublic[id] != "":
+			d.Kind = DriftPublicAccess
+			d.Message = blockedPublic[id] + " (in the app's settings)"
+			d.Actions = []string{}
 		default:
 			continue
 		}
@@ -189,12 +196,17 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 	}
 	known := map[string]bool{}
 	wantPublic := map[string][]string{}
+	blockedPublic := map[string]string{}
 	for i := range h.templates {
 		t := &h.templates[i]
 		known[t.ID] = true
 		if enabled[t.ID] {
-			if pub := h.publicLocked(t, t.Public); pub.Active() {
+			pub := h.publicLocked(t, t.Public)
+			if pub.Active() {
 				wantPublic[t.ID] = pub.Routed
+			}
+			if pub.Enabled && pub.Blocked != "" {
+				blockedPublic[t.ID] = pub.Blocked
 			}
 		}
 	}
@@ -203,7 +215,7 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 		snapshot[id] = true
 	}
 	h.mu.RUnlock()
-	rep.Items = computeDrift(enabled, known, snapshot, counts, wantPublic, havePublic, h.appBusy)
+	rep.Items = computeDrift(enabled, known, snapshot, counts, wantPublic, havePublic, blockedPublic, h.appBusy)
 
 	runtime := map[string][]string{}
 	for id, set := range routed {

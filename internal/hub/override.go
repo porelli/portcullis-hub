@@ -89,7 +89,7 @@ func (h *Hub) generateOverrideLocked(t *templates.Template, values map[string]st
 	tier := policy.HostTier(h.st.ResolvePolicy(t.ID), pub.Active())
 	var publicLines []string
 	if pub.Active() {
-		if publicLines, err = publicLabels(t.ID, plan, pub.Routed, tier); err != nil {
+		if publicLines, err = publicLabels(t.ID, &t.Manifest, plan, pub.Routed, tier); err != nil {
 			return err
 		}
 	}

@@ -3,6 +3,7 @@ package hub
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"sort"
 	"strings"
 
@@ -15,18 +16,35 @@ import (
 // exception is on, which shares are listed and which TLS tier the host
 // gets. A template can't ship a router that skips forward-auth.
 
-// publicStripHeaders are deleted from requests on the public router. It
-// has no forward-auth, so nothing else removes client-supplied identity
-// headers, and header-auth apps trust them from Traefik's address. The
-// list covers core's authResponseHeaders (minus Authorization: public
-// WebDAV and share APIs use it) and common header-auth names.
-var publicStripHeaders = []string{
+// coreIdentityHeaders are always deleted from requests on the public
+// router: it has no forward-auth, so nothing else removes client-supplied
+// copies. They are core's forward-auth authResponseHeaders (minus
+// Authorization: public WebDAV and share APIs use it) and Remote-*. The
+// template's auth.identity_headers are added (required for header-auth).
+var coreIdentityHeaders = []string{
 	"Remote-Email", "Remote-Groups", "Remote-Name", "Remote-User",
 	"X-Auth-Request-Access-Token", "X-Auth-Request-Email", "X-Auth-Request-Groups",
 	"X-Auth-Request-Preferred-Username", "X-Auth-Request-User",
 	"X-Forwarded-Access-Token", "X-Forwarded-Email", "X-Forwarded-Groups",
 	"X-Forwarded-Preferred-Username", "X-Forwarded-User",
-	"X-Remote-User", "X-Webauth-Email", "X-Webauth-User",
+}
+
+// publicStripHeaders returns the headers deleted on an app's public router,
+// each also in its underscore form (X_Forwarded_User): some servers read
+// "_" as "-". Core's entrypoints also delete such aliases
+// (aliasHeadersStrategy=delete); this does not rely on it.
+func publicStripHeaders(m *templates.Manifest) []string {
+	set := map[string]bool{}
+	for _, h := range append(append([]string(nil), coreIdentityHeaders...), m.Auth.IdentityHeaders...) {
+		set[http.CanonicalHeaderKey(h)] = true
+		set[strings.ReplaceAll(http.CanonicalHeaderKey(h), "-", "_")] = true
+	}
+	out := make([]string, 0, len(set))
+	for h := range set {
+		out = append(out, h)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // PublicRouterName is the Traefik router the Hub adds for an app's public
@@ -42,7 +60,11 @@ type publicState struct {
 	Enabled  bool // the toggle (admin choice, else template default)
 	Explicit bool // the admin chose
 	Mode     string
-	Tokens   []string
+	Tokens   []string // listed tokens valid for the template
+	// InvalidTokens are stored tokens the template no longer accepts.
+	InvalidTokens []string
+	// Blocked explains why a stored choice opens nothing.
+	Blocked string
 	// Routed are the literal prefixes of the public router, Published the
 	// same with {token} kept. Empty: no public router.
 	Routed, Published []string
@@ -62,11 +84,27 @@ func (h *Hub) publicLocked(t *templates.Template, plan *templates.PublicPlan) pu
 	if on, ok := h.st.PublicAccess[t.ID]; ok {
 		ps.Enabled, ps.Explicit = on, true
 	}
-	if m, ok := h.st.PublicMode[t.ID]; ok && (m == templates.ModeAll || (m == templates.ModeListed && pa.HasTokenPaths())) {
+	// Fail closed: a stored choice the template no longer supports opens
+	// nothing (never a wider mode) until an admin confirms a mode.
+	if m, ok := h.st.PublicMode[t.ID]; ok {
 		ps.Mode = m
+		switch {
+		case m == templates.ModeListed && !pa.HasTokenPaths():
+			ps.Blocked = "public exception disabled: the template no longer supports per-share listing; confirm a mode"
+		case m != templates.ModeListed && m != templates.ModeAll:
+			ps.Blocked = fmt.Sprintf("public exception disabled: stored mode %q is unknown; confirm a mode", m)
+		}
 	}
-	ps.Tokens = append([]string(nil), h.st.PublicTokens[t.ID]...)
-	if ps.Enabled && plan != nil {
+	// Listed tokens the template's token_pattern no longer accepts are not
+	// routed (narrower is safe) and are shown in the settings.
+	for _, tok := range h.st.PublicTokens[t.ID] {
+		if got, err := templates.ExtractToken(pa, tok); err == nil && got == tok {
+			ps.Tokens = append(ps.Tokens, tok)
+		} else {
+			ps.InvalidTokens = append(ps.InvalidTokens, tok)
+		}
+	}
+	if ps.Enabled && plan != nil && ps.Blocked == "" {
 		tokens := ps.Tokens
 		if ps.Mode != templates.ModeListed {
 			tokens = nil
@@ -78,7 +116,7 @@ func (h *Hub) publicLocked(t *templates.Template, plan *templates.PublicPlan) pu
 
 // publicLabels renders the public router and its strip middleware as
 // override label lines (4-space indented under the service's labels).
-func publicLabels(id string, plan *templates.PublicPlan, routed []string, tier string) ([]string, error) {
+func publicLabels(id string, m *templates.Manifest, plan *templates.PublicPlan, routed []string, tier string) ([]string, error) {
 	rule := plan.Rule(routed)
 	// Self-check: the router must stay inside the hosts the Hub knows.
 	if _, err := templates.ParseRule(rule); err != nil {
@@ -103,7 +141,7 @@ func publicLabels(id string, plan *templates.PublicPlan, routed []string, tier s
 	if plan.TraefikService != "" {
 		lines = append(lines, r+".service: "+q(plan.TraefikService))
 	}
-	for _, hdr := range publicStripHeaders {
+	for _, hdr := range publicStripHeaders(m) {
 		lines = append(lines, "traefik.http.middlewares."+mw+".headers.customrequestheaders."+hdr+`: ""`)
 	}
 	return lines, nil
@@ -133,6 +171,8 @@ type PublicAccessView struct {
 	// UngatedRouters have no group-gate: with the tier downgraded, nothing
 	// checks a client cert on their requests (native-OIDC: only at login).
 	UngatedRouters []string `json:"ungated_routers"`
+	InvalidTokens  []string `json:"invalid_tokens,omitempty"`
+	Blocked        string   `json:"blocked,omitempty"`
 	Error          string   `json:"error,omitempty"`
 }
 
@@ -149,7 +189,7 @@ func (h *Hub) publicViewLocked(t *templates.Template, eff policy.AuthPolicy) *Pu
 		MaxTokens: templates.MaxPublicTokens, Enabled: ps.Enabled, Explicit: ps.Explicit, Mode: ps.Mode,
 		Tokens: ps.Tokens, Active: ps.Active(), Published: ps.Published, Method: t.Manifest.Auth.Method,
 		PolicyTier: policy.Tier(eff), TierWhenActive: policy.HostTier(eff, true),
-		UngatedRouters: []string{},
+		UngatedRouters: []string{}, InvalidTokens: ps.InvalidTokens, Blocked: ps.Blocked,
 	}
 	if v.Tokens == nil {
 		v.Tokens = []string{}
@@ -257,12 +297,17 @@ func (h *Hub) applyPublicUpdateLocked(t *templates.Template, u SettingsUpdate) (
 			h.st.PublicTokens[t.ID] = tokens
 		}
 	}
+	// Any public-access choice pins the mode it was made under, so a later
+	// template default_mode change can't widen it.
+	if _, ok := h.st.PublicMode[t.ID]; !ok && (u.PublicAccess != nil || u.PublicTokens != nil) {
+		h.st.PublicMode[t.ID] = before.Mode
+	}
 	after := h.publicLocked(t, t.Public)
 	if after.Active() && t.Public == nil {
 		restore()
 		return false, statusErr(400, "public exceptions of %s can't be routed", t.ID)
 	}
-	return !equalStrings(before.Routed, after.Routed) || before.Enabled != after.Enabled ||
+	return !equalStrings(before.Routed, after.Routed) || before.Enabled != after.Enabled || before.Blocked != after.Blocked ||
 		before.Explicit != after.Explicit || before.Mode != after.Mode || !equalStrings(before.Tokens, after.Tokens), nil
 }
 

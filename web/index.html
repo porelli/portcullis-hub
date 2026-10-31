@@ -558,6 +558,8 @@
         html += '<small>Tokens must match <code>' + escapeHtml(pa.token_pattern || '') + '</code>. With no listed share nothing is opened.</small>';
       }
       html += '<div>' + (pa.active ? 'Active: ' + (pa.published || []).map(p => '<code>' + escapeHtml(p) + '</code>').join(', ') + ' on ' + (pa.subdomains || []).map(escapeHtml).join(', ') : 'No public router is generated.') + '</div>';
+      if (pa.blocked) html += '<div class="public-danger">' + escapeHtml(pa.blocked) + '</div>';
+      if (pa.invalid_tokens && pa.invalid_tokens.length) html += '<div class="public-warn">Not opened (no longer valid for this template): ' + pa.invalid_tokens.map(t => '<code>' + escapeHtml(t) + '</code>').join(', ') + '. Saving removes them.</div>';
       if (pa.error) html += '<div class="public-danger">' + escapeHtml(pa.error) + '</div>';
       html += '</div>';
       return html;

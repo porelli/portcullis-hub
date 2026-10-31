@@ -292,3 +292,73 @@ func TestPublicExpertComposeOverlap(t *testing.T) {
 		t.Errorf("compose whose router overlaps a public path accepted: %v", err)
 	}
 }
+
+func TestPublicStripHeaders(t *testing.T) {
+	m := &templates.Manifest{Auth: templates.Auth{IdentityHeaders: []string{"x-webauth-user"}}}
+	got := strings.Join(publicStripHeaders(m), ",")
+	for _, want := range []string{"X-Forwarded-User", "X_Forwarded_User", "X-Auth-Request-Email", "Remote-User", "X-Webauth-User", "X_Webauth_User"} {
+		if !strings.Contains(","+got+",", ","+want+",") {
+			t.Errorf("strip list lacks %s: %s", want, got)
+		}
+	}
+	if strings.Contains(got, "Authorization") {
+		t.Error("Authorization must reach public share endpoints")
+	}
+}
+
+func TestPublicFailClosedOnUnsupportedStoredMode(t *testing.T) {
+	f := newCloudFixture(t)
+	if err := f.h.Enable("cloud"); err != nil {
+		t.Fatal(err)
+	}
+	save(t, f, SettingsUpdate{PublicTokens: listp("AbC123")})
+	st, _ := state.Load(filepath.Join(f.data, "state.yaml"))
+	if st.PublicMode["cloud"] != "listed" {
+		t.Fatalf("mode not pinned on save: %v", st.PublicMode)
+	}
+	// The template drops per-share paths and defaults to all: the pinned
+	// listed choice must open nothing, not every share.
+	noToken := strings.NewReplacer(`token_pattern: '^[A-Za-z0-9-]{1,32}$'`, "", `"/s/{token}"`, "/s").Replace(cloudManifest)
+	writeFile(t, filepath.Join(f.src, "cloud", "manifest.yaml"), noToken)
+	f.h.Discover()
+	if err := f.h.ResolveDrift("cloud", ActionApply); err != nil {
+		t.Fatal(err)
+	}
+	if ov := readOverride(t, f, "cloud"); strings.Contains(ov, "portcullis-public") {
+		t.Errorf("unsupported stored mode widened to a public router:\n%s", ov)
+	}
+	v, _ := f.h.AppSettings("cloud")
+	if v.PublicAccess == nil || v.PublicAccess.Blocked == "" || v.PublicAccess.Active {
+		t.Errorf("view = %+v", v.PublicAccess)
+	}
+	f.engine.containers = []docker.Container{container("c1", "portcullis-cloud", "cloud", "running")}
+	if d := driftFor(f.h.Reconcile(context.Background()), "cloud"); d == nil || d.Kind != DriftPublicAccess || !strings.Contains(d.Message, "confirm a mode") {
+		t.Errorf("blocked state not reported as drift: %+v", d)
+	}
+	// Confirming a mode clears it.
+	save(t, f, SettingsUpdate{PublicMode: strp("all")})
+	if v, _ := f.h.AppSettings("cloud"); v.PublicAccess.Blocked != "" || !v.PublicAccess.Active {
+		t.Errorf("after confirming: %+v", v.PublicAccess)
+	}
+}
+
+func TestPublicInvalidStoredTokensNotRouted(t *testing.T) {
+	f := newCloudFixture(t)
+	if err := f.h.Enable("cloud"); err != nil {
+		t.Fatal(err)
+	}
+	save(t, f, SettingsUpdate{PublicTokens: listp("AbC123", "abc")})
+	// token_pattern tightened: only lowercase accepted now.
+	writeFile(t, filepath.Join(f.src, "cloud", "manifest.yaml"), strings.Replace(cloudManifest, "^[A-Za-z0-9-]{1,32}$", "^[a-z]{1,32}$", 1))
+	f.h.Discover()
+	if err := f.h.ResolveDrift("cloud", ActionApply); err != nil {
+		t.Fatal(err)
+	}
+	ov := readOverride(t, f, "cloud")
+	if strings.Contains(ov, "AbC123") || !strings.Contains(ov, "Path(`/s/abc`)") {
+		t.Errorf("override:\n%s", ov)
+	}
+	if v, _ := f.h.AppSettings("cloud"); strings.Join(v.PublicAccess.InvalidTokens, ",") != "AbC123" {
+		t.Errorf("invalid tokens = %v", v.PublicAccess.InvalidTokens)
+	}
+}
