@@ -309,7 +309,7 @@ func (c *Client) UpdateClientACR(ctx context.Context, s ClientSpec) error {
 		return err
 	}
 	if !MayReconcile(existing, s.TemplateID, s.AllowedHosts) {
-		return fmt.Errorf("client %s is not owned by template %s", s.ClientID, s.TemplateID)
+		return &ConflictError{ClientID: s.ClientID, TemplateID: s.TemplateID, Owner: ownerOf(existing)}
 	}
 	withACR(existing, s.ACR)
 	if err := c.putClient(ctx, tok, existing); err != nil {
@@ -377,6 +377,30 @@ func MayReconcile(existing map[string]interface{}, id string, allowedHosts []str
 	return true
 }
 
+// ConflictError means a client with the requested clientId already exists
+// and the template may not take it over (see MayReconcile).
+type ConflictError struct {
+	ClientID   string
+	TemplateID string
+	Owner      string // owning template tag, "" if untagged
+}
+
+func (e *ConflictError) Error() string {
+	owner := "it is not tagged as Hub-managed and does not point only at this app's hosts"
+	if e.Owner != "" {
+		owner = "it belongs to template " + e.Owner
+	}
+	return fmt.Sprintf("Keycloak client %q already exists and %s — refusing to let template %s take it over; delete or rename that client in Keycloak, or change client_id in the template", e.ClientID, owner, e.TemplateID)
+}
+
+func ownerOf(client map[string]interface{}) string {
+	if attrs, ok := client["attributes"].(map[string]interface{}); ok {
+		o, _ := attrs[OwnerAttr].(string)
+		return o
+	}
+	return ""
+}
+
 // ClientSpec is what the Hub wants a template's OIDC client to look like.
 type ClientSpec struct {
 	ClientID     string
@@ -394,7 +418,7 @@ type ClientSpec struct {
 // it, reconciles) an OIDC client.
 func (c *Client) RegisterClient(ctx context.Context, s ClientSpec) error {
 	if protectedClients[s.ClientID] {
-		return fmt.Errorf("client %s is reserved", s.ClientID)
+		return &ConflictError{ClientID: s.ClientID, TemplateID: s.TemplateID, Owner: "core"}
 	}
 	tok, err := c.token(ctx)
 	if err != nil {
@@ -437,8 +461,7 @@ func (c *Client) RegisterClient(ctx context.Context, s ClientSpec) error {
 			return err
 		}
 		if !MayReconcile(existing, s.TemplateID, s.AllowedHosts) {
-			log.Printf("Keycloak client %s already exists and is not owned by template %s — left untouched", s.ClientID, s.TemplateID)
-			return nil
+			return &ConflictError{ClientID: s.ClientID, TemplateID: s.TemplateID, Owner: ownerOf(existing)}
 		}
 		attrs, _ := existing["attributes"].(map[string]interface{})
 		if attrs == nil {

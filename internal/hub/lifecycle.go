@@ -2,6 +2,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -151,7 +152,14 @@ func (h *Hub) Enable(id string) error {
 	// Phase 2 (no mu): network / docker work that may take minutes.
 	if h.idp != nil {
 		for _, c := range tmpl.Manifest.Clients {
-			if err := h.idp.RegisterClient(context.Background(), h.clientSpec(&tmpl, c, acr)); err != nil {
+			err := h.idp.RegisterClient(context.Background(), h.clientSpec(&tmpl, c, acr))
+			var conflict *keycloak.ConflictError
+			switch {
+			case errors.As(err, &conflict):
+				// Fail closed: never start an app wired to a client it
+				// doesn't own (its secret/redirects would be someone else's).
+				return &StatusError{Status: 409, Err: err}
+			case err != nil:
 				log.Printf("Warning: failed to register client %s: %v", c.ClientID, err)
 			}
 		}

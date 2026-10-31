@@ -3,6 +3,7 @@ package keycloak
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -148,11 +149,16 @@ func TestRegisterClient(t *testing.T) {
 
 	// Exists and owned by another template: left untouched.
 	fk.existing = map[string]interface{}{"id": "u1", "clientId": "app", "attributes": map[string]interface{}{OwnerAttr: "other"}}
-	if err := c.RegisterClient(ctx, spec); err != nil || len(fk.puts) != 0 {
-		t.Errorf("foreign client modified: %v %v", err, fk.puts)
+	var ce *ConflictError
+	if err := c.RegisterClient(ctx, spec); !errors.As(err, &ce) || ce.Owner != "other" || len(fk.puts) != 0 {
+		t.Errorf("foreign client: err %v, puts %v", err, fk.puts)
 	}
-	if err := c.UpdateClientACR(ctx, spec); err == nil || len(fk.puts) != 0 {
+	if err := c.UpdateClientACR(ctx, spec); !errors.As(err, &ce) || len(fk.puts) != 0 {
 		t.Errorf("UpdateClientACR on foreign client: %v", err)
+	}
+	fk.existing = map[string]interface{}{"id": "u0", "clientId": "app", "redirectUris": []interface{}{"https://evil.example.com/cb"}}
+	if err := c.RegisterClient(ctx, spec); !errors.As(err, &ce) || ce.Owner != "" || !strings.Contains(err.Error(), "not tagged") || len(fk.puts) != 0 {
+		t.Errorf("untagged foreign client: %v", err)
 	}
 
 	// Exists and owned: secret, URIs, acr reconciled; tag kept; missing
@@ -182,8 +188,8 @@ func TestRegisterClient(t *testing.T) {
 		t.Errorf("create with groups scope: %v, attached %v", err, fk.attached)
 	}
 
-	if err := c.RegisterClient(ctx, ClientSpec{ClientID: "admin-cli", TemplateID: "app"}); err == nil {
-		t.Error("protected client accepted")
+	if err := c.RegisterClient(ctx, ClientSpec{ClientID: "admin-cli", TemplateID: "app"}); !errors.As(err, &ce) {
+		t.Errorf("protected client: %v", err)
 	}
 	bad := New(srv.URL, "admin", "wrong")
 	if err := bad.RegisterClient(ctx, spec); err == nil {

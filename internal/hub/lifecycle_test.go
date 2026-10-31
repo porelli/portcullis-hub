@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
@@ -122,6 +123,23 @@ func TestEnableRegistersClients(t *testing.T) {
 	secret := readEnvFile(filepath.Join(f.data, "env", "other.env"))["OTHER_SECRET"]
 	if len(f.idp.registered) != 1 || f.idp.registered[0] != "other:other:hwk:"+secret+":other.example.org" || secret == "" {
 		t.Errorf("registered = %v (secret %q)", f.idp.registered, secret)
+	}
+}
+
+func TestEnableClientConflict(t *testing.T) {
+	f := newFixture(t)
+	f.idp.registerErr = &keycloak.ConflictError{ClientID: "other", TemplateID: "other", Owner: "someone"}
+	err := f.h.Enable("other")
+	if statusOf(err) != 409 || !strings.Contains(err.Error(), `client "other"`) {
+		t.Fatalf("err = %v", err)
+	}
+	if f.h.IsEnabled("other") || len(f.runner.Calls()) != 0 {
+		t.Errorf("app started despite the conflict: %v", f.runner.Calls())
+	}
+	// Other Keycloak errors (e.g. outage) still only warn.
+	f.idp.registerErr = errors.New("connection refused")
+	if err := f.h.Enable("other"); err != nil {
+		t.Errorf("transient keycloak error blocked enable: %v", err)
 	}
 }
 

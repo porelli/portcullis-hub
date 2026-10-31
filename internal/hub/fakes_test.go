@@ -173,14 +173,18 @@ func container(id, project, service, st string) docker.Container {
 
 // fakeIdP records client registrations.
 type fakeIdP struct {
-	mu         sync.Mutex
-	registered []string
-	updated    []string
+	registerErr error
+	mu          sync.Mutex
+	registered  []string
+	updated     []string
 }
 
 func (f *fakeIdP) RegisterClient(ctx context.Context, s keycloak.ClientSpec) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.registerErr != nil {
+		return f.registerErr
+	}
 	f.registered = append(f.registered, fmt.Sprintf("%s:%s:%s:%s:%s", s.ClientID, s.TemplateID, s.ACR, s.Secret, strings.Join(s.AllowedHosts, ",")))
 	return nil
 }
