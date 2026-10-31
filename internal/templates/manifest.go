@@ -18,7 +18,12 @@ type Auth struct {
 	// visitors (share links). Off unless enabled (template default, then the
 	// admin's choice in the Hub).
 	PublicAccess *PublicAccess `yaml:"public_access" json:"public_access,omitempty"`
-	Notes        string        `yaml:"notes" json:"notes"`
+	// IdentityHeaders are the request headers a header-auth app reads the
+	// user from (e.g. X-Forwarded-User). Required for header-auth apps with
+	// public_access: the public router has no forward-auth, so the Hub
+	// strips them (and the core identity headers) itself.
+	IdentityHeaders []string `yaml:"identity_headers" json:"identity_headers,omitempty"`
+	Notes           string   `yaml:"notes" json:"notes"`
 }
 
 // PublicAccess is auth.public_access: when enabled, the Hub adds a Traefik

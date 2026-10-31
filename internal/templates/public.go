@@ -60,6 +60,24 @@ var (
 // gate to skip.
 var publicMethods = map[string]bool{"forward-auth": true, "header-auth": true, "native-oidc": true}
 
+// headerNameRe constrains auth.identity_headers (they become label keys).
+var headerNameRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9-]{0,63}$`)
+
+// ValidateIdentityHeaders checks auth.identity_headers.
+func ValidateIdentityHeaders(hs []string) error {
+	seen := map[string]bool{}
+	for _, h := range hs {
+		if !headerNameRe.MatchString(h) {
+			return fmt.Errorf("auth.identity_headers: %q is not a header name (letters, digits, -)", h)
+		}
+		if seen[strings.ToLower(h)] {
+			return fmt.Errorf("auth.identity_headers: duplicate %q", h)
+		}
+		seen[strings.ToLower(h)] = true
+	}
+	return nil
+}
+
 // NormalizePublicPrefix validates a public_access prefix (optionally with
 // one whole-segment {token}) and returns it without its trailing "/".
 func NormalizePublicPrefix(p string) (string, error) {
@@ -154,6 +172,9 @@ func ValidatePublicAccess(a *Auth) error {
 	}
 	if !publicMethods[a.Method] {
 		return fmt.Errorf("auth.public_access needs auth.method forward-auth, header-auth or native-oidc (got %q)", a.Method)
+	}
+	if a.Method == "header-auth" && len(a.IdentityHeaders) == 0 {
+		return fmt.Errorf("auth.public_access on a header-auth app needs auth.identity_headers (the headers the app trusts), so the Hub can strip them on public paths")
 	}
 	if HasControlChars(pa.Description) || len(pa.Description) > 500 {
 		return fmt.Errorf("auth.public_access.description must be one line of at most 500 characters")
@@ -402,6 +423,9 @@ func PlanPublic(m *Manifest, r *Routes) (*PublicPlan, error) {
 		}
 		if !shared {
 			continue
+		}
+		if len(ri.Opaque) > 0 {
+			return nil, fmt.Errorf("auth.public_access: router %s uses %s; the Hub can't tell whether public paths overlap it — use Path/PathPrefix only on the app's hosts", name, strings.Join(ri.Opaque, ", "))
 		}
 		for _, rp := range ri.Paths {
 			for _, pp := range plan.Paths {

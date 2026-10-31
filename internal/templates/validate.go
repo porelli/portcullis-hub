@@ -78,6 +78,9 @@ func ValidateManifest(m *Manifest) error {
 		}
 		a.AdminPaths[i] = norm
 	}
+	if err := ValidateIdentityHeaders(a.IdentityHeaders); err != nil {
+		return err
+	}
 	return ValidatePublicAccess(a)
 }
 

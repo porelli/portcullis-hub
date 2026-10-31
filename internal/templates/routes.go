@@ -48,7 +48,10 @@ type RouterInfo struct {
 	HostArgs   []string
 	Subdomains []string
 	// Paths are the rule's Path()/PathPrefix() matchers.
-	Paths       []RulePath
+	Paths []RulePath
+	// Opaque are matchers no path-overlap reasoning is possible for
+	// (PathRegexp, unknown matchers, negated path/host matchers).
+	Opaque      []string
 	Priority    int // explicit priority label; 0 = Traefik's default
 	HasPriority bool
 	// TraefikService is the router's explicit service label ("" = none).
@@ -199,7 +202,7 @@ func ParseRoutes(compose []byte) (*Routes, error) {
 			}
 			info := rt.info
 			info.Service, info.Rule = svc, rt.rule
-			info.HostArgs, info.Subdomains, info.Paths = p.hostArgs, p.hosts, p.paths
+			info.HostArgs, info.Subdomains, info.Paths, info.Opaque = p.hostArgs, p.hosts, p.paths, p.opaque
 			r.Info[name] = &info
 		}
 		if len(rnames) > 0 {
@@ -249,6 +252,10 @@ type ruleParser struct {
 	hosts    []string
 	hostArgs []string
 	paths    []RulePath
+	// opaque lists matchers the public-path overlap check can't reason
+	// about (PathRegexp, unknown matchers, negated Path/PathPrefix/Host).
+	opaque  []string
+	negated int
 }
 
 // ParseRule validates a Traefik HTTP router rule and returns the (lowercase)
@@ -329,7 +336,10 @@ func (p *ruleParser) term() (bool, error) {
 
 func (p *ruleParser) factor() (bool, error) {
 	if p.consume("!") {
-		if _, err := p.factor(); err != nil {
+		p.negated++
+		_, err := p.factor()
+		p.negated--
+		if err != nil {
 			return false, err
 		}
 		return false, nil
@@ -377,12 +387,26 @@ func (p *ruleParser) factor() (bool, error) {
 	}
 	switch lname {
 	case "path", "pathprefix":
+		if p.negated > 0 {
+			// A negated path matcher covers every other path: no overlap
+			// reasoning is possible.
+			p.opaque = append(p.opaque, "!"+name+"()")
+		}
 		for _, a := range args {
 			p.paths = append(p.paths, RulePath{Prefix: lname == "pathprefix", Value: a})
 		}
 		return false, nil
 	case "host":
+		if p.negated > 0 {
+			p.opaque = append(p.opaque, "!"+name+"()")
+		}
+	case "method", "header", "headerregexp", "query", "queryregexp", "clientip":
+		// Narrow the request further; never widen which paths match.
+		return false, nil
 	default:
+		// PathRegexp and anything unknown: the overlap check for public
+		// paths can't reason about it (fail closed in PlanPublic).
+		p.opaque = append(p.opaque, name+"()")
 		return false, nil
 	}
 	if len(args) == 0 {

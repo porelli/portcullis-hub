@@ -249,3 +249,49 @@ func TestParseRoutesReservedNames(t *testing.T) {
 		}
 	}
 }
+
+func TestPlanPublicOpaqueMatchers(t *testing.T) {
+	m := &Manifest{Auth: Auth{Method: "forward-auth", PublicAccess: &PublicAccess{Paths: []PublicPath{pp("/share")}}}}
+	for _, extra := range []string{
+		"PathRegexp(`^/share/.*`)",
+		"!PathPrefix(`/x`)",
+		"!Host(`a.${PORTCULLIS_DOMAIN}`)",
+		"FutureMatcher(`x`)",
+	} {
+		c := "services:\n  a:\n    labels:\n" +
+			"      traefik.http.routers.a.rule: Host(`a.${PORTCULLIS_DOMAIN}`)\n" +
+			"      traefik.http.routers.b.rule: Host(`a.${PORTCULLIS_DOMAIN}`) && " + extra + "\n"
+		routes, err := ParseRoutes([]byte(c))
+		if err != nil {
+			t.Fatalf("%s: %v", extra, err)
+		}
+		if _, err := PlanPublic(m, routes); err == nil || !strings.Contains(err.Error(), "can't tell") {
+			t.Errorf("%s: public plan not refused: %v", extra, err)
+		}
+	}
+	// Matchers that only narrow (Method, Header, Query, ClientIP) are fine.
+	c := "services:\n  a:\n    labels:\n      traefik.http.routers.a.rule: Host(`a.${PORTCULLIS_DOMAIN}`) && Method(`GET`) && Header(`X`, `y`) && Query(`q`, `1`) && ClientIP(`10.0.0.0/8`)\n"
+	routes, err := ParseRoutes([]byte(c))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := PlanPublic(m, routes); err != nil {
+		t.Errorf("narrowing matchers refused: %v", err)
+	}
+}
+
+func TestIdentityHeaders(t *testing.T) {
+	a := publicAuth("header-auth", pp("/share"))
+	if err := ValidatePublicAccess(a); err == nil || !strings.Contains(err.Error(), "identity_headers") {
+		t.Errorf("header-auth without identity_headers: %v", err)
+	}
+	a.IdentityHeaders = []string{"X-Forwarded-User"}
+	if err := ValidatePublicAccess(a); err != nil {
+		t.Error(err)
+	}
+	for _, hs := range [][]string{{"X_User"}, {"X User"}, {"X-A", "x-a"}, {""}, {"X:Y"}} {
+		if ValidateIdentityHeaders(hs) == nil {
+			t.Errorf("identity_headers %q accepted", hs)
+		}
+	}
+}
