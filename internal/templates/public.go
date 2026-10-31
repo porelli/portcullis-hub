@@ -208,6 +208,9 @@ func ValidatePublicAccess(a *Auth) error {
 		if !cookieNameRe.MatchString(q) {
 			return fmt.Errorf("auth.public_access.credential_query: %q is not a parameter name ([A-Za-z0-9_.-], max 64)", q)
 		}
+		if strings.Count(q, "_")+strings.Count(q, ".") > MaxCredentialSeparators {
+			return fmt.Errorf("auth.public_access.credential_query: %q has more than %d '_' / '.'", q, MaxCredentialSeparators)
+		}
 	}
 	for _, e := range pa.StaticExtensions {
 		if !extRe.MatchString(e) || scriptExtensions[e] {
@@ -263,12 +266,9 @@ func ValidatePublicAccess(a *Auth) error {
 				return fmt.Errorf("auth.public_access.paths[%d]: %s overlaps %s, which can never be public", i, norm, f)
 			}
 		}
-		if pp.Exact {
-			// One path, no subpaths: the broad list does not apply.
-			if pp.Broad {
-				return fmt.Errorf("auth.public_access.paths[%d]: broad: true on exact path %s", i, norm)
-			}
-		} else if IsBroadPublicPrefix(base) {
+		// Exact paths too: /index.php exact is still the whole front
+		// controller (PATH_INFO, query routing).
+		if IsBroadPublicPrefix(base) {
 			if !pp.Broad || strings.TrimSpace(pp.Justification) == "" {
 				return fmt.Errorf("auth.public_access.paths[%d]: %s is a broad prefix (whole API / front controller); narrow it, or set broad: true with a justification", i, base)
 			}
@@ -578,17 +578,47 @@ func (pa *PublicAccess) Extensions() []string {
 	return sortedKeys(set)
 }
 
+// querySeparators are what PHP turns into "_" in query keys ("+" already
+// arrives as " ": Go and PHP both decode it, and percent-encoding).
+var querySeparators = []string{"_", ".", " ", "["}
+
+// MaxCredentialSeparators caps "_" / "." in a credential_query name: each
+// one multiplies the excluded key spellings by len(querySeparators).
+const MaxCredentialSeparators = 3
+
+// queryKeyVariants lists the decoded query keys an app that mangles names
+// like PHP reads as name: every "_" / "." may arrive as any separator.
+// Traefik's QueryRegexp matches decoded keys exactly.
+func queryKeyVariants(name string) []string {
+	out := []string{""}
+	for _, c := range name {
+		var next []string
+		alts := []string{string(c)}
+		if c == '_' || c == '.' {
+			alts = querySeparators
+		}
+		for _, o := range out {
+			for _, a := range alts {
+				next = append(next, o+a)
+			}
+		}
+		out = next
+	}
+	sort.Strings(out)
+	return out
+}
+
 // cookieRegexp matches a Cookie header value that sets one of names,
 // loosely and case-insensitively (fail closed): any character may be
-// percent-encoded, and "_" also matches ".", " " and "[" (PHP turns those
-// into "_" in cookie names).
+// percent-encoded, and "_" / "." also match "_", ".", " ", "+" and "[" (PHP
+// decodes "+" to a space and turns " ", "." and "[" into "_" in names).
 func cookieRegexp(names []string) string {
 	alts := make([]string, 0, len(names))
 	for _, n := range names {
 		var b strings.Builder
 		for _, c := range n {
 			if c == '_' || c == '.' {
-				b.WriteString(`(?:[_. \[]|%[0-9a-f]{2})`)
+				b.WriteString(`(?:[_. +\[]|%[0-9a-f]{2})`)
 			} else {
 				b.WriteString(`(?:` + regexp.QuoteMeta(string(c)) + `|%[0-9a-f]{2})`)
 			}
@@ -612,7 +642,9 @@ func (pl *PublicPlan) Rule(routed []string, pa *PublicAccess) string {
 			excl = append(excl, "!HeaderRegexp(`Cookie`, `"+cookieRegexp(pa.CredentialCookies)+"`)")
 		}
 		for _, q := range pa.CredentialQuery {
-			excl = append(excl, "!QueryRegexp(`"+q+"`, `.*`)")
+			for _, v := range queryKeyVariants(q) {
+				excl = append(excl, "!QueryRegexp(`"+v+"`, `.*`)")
+			}
 		}
 	}
 	hosts := make([]string, len(pl.HostArgs))
