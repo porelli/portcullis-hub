@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"log"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -56,7 +57,7 @@ type projectCount struct{ running, total int }
 
 // computeDrift compares enabled apps with project container counts. busy
 // apps (mid-operation) are skipped.
-func computeDrift(enabled map[string]bool, known map[string]bool, counts map[string]projectCount, busy func(string) bool) []Drift {
+func computeDrift(enabled, known, snapshot map[string]bool, counts map[string]projectCount, busy func(string) bool) []Drift {
 	var out []Drift
 	ids := map[string]bool{}
 	for id := range enabled {
@@ -79,7 +80,11 @@ func computeDrift(enabled map[string]bool, known map[string]bool, counts map[str
 		switch {
 		case enabled[id] && !known[id]:
 			d.Kind = DriftTemplateMissing
-			d.Message = "enabled, but no valid template provides it any more"
+			if snapshot[id] {
+				d.Message = "template missing — still enforced from last known config"
+			} else {
+				d.Message = "template missing and no known config — access to its subdomains is denied"
+			}
 			d.Actions = []string{ActionDisable}
 		case enabled[id] && c.running == 0:
 			d.Kind = DriftNotRunning
@@ -125,6 +130,7 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 		return h.storeDrift(rep)
 	}
 	counts := map[string]projectCount{}
+	routed := map[string]map[string]bool{}
 	for _, c := range cs {
 		p := c.Project()
 		if !strings.HasPrefix(p, ProjectPrefix) || c.Labels[docker.LabelOneoff] == "True" {
@@ -133,6 +139,17 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 		id := strings.TrimPrefix(p, ProjectPrefix)
 		if !templates.ValidID(id) {
 			continue
+		}
+		if routed[id] == nil {
+			routed[id] = map[string]bool{}
+		}
+		for k, v := range c.Labels {
+			if !strings.HasPrefix(k, "traefik.http.routers.") || !strings.HasSuffix(k, ".rule") {
+				continue
+			}
+			for _, sub := range templates.RuntimeSubdomains(v, h.cfg.Domain) {
+				routed[id][sub] = true
+			}
 		}
 		pc := counts[id]
 		pc.total++
@@ -150,8 +167,31 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 	for _, t := range h.templates {
 		known[t.ID] = true
 	}
+	snapshot := map[string]bool{}
+	for id := range h.st.Published {
+		snapshot[id] = true
+	}
 	h.mu.RUnlock()
-	rep.Items = computeDrift(enabled, known, counts, h.appBusy)
+	rep.Items = computeDrift(enabled, known, snapshot, counts, h.appBusy)
+
+	runtime := map[string][]string{}
+	for id, set := range routed {
+		var subs []string
+		for s := range set {
+			subs = append(subs, s)
+		}
+		sort.Strings(subs)
+		if len(subs) > 0 {
+			runtime[id] = subs
+		}
+	}
+	h.driftMu.Lock()
+	routesChanged := !reflect.DeepEqual(runtime, h.runtimeSubs) && !(len(runtime) == 0 && len(h.runtimeSubs) == 0)
+	h.runtimeSubs = runtime
+	h.driftMu.Unlock()
+	if routesChanged {
+		h.writePolicyLogged()
+	}
 	return h.storeDrift(rep)
 }
 

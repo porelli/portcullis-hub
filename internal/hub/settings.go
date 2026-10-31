@@ -136,6 +136,7 @@ func (h *Hub) SaveSettings(id string, u SettingsUpdate) error {
 		h.st.AuthPolicies[id] = policy.Normalize(*u.Policy)
 		policyChanged = true
 	}
+	h.refreshPublishedLocked()
 	h.saveLocked()
 	effective := h.st.ResolvePolicy(id)
 	// The override reads state (policy → TLS tier): render under the lock.
@@ -305,6 +306,9 @@ func (h *Hub) SaveComposeFiles(id, compose, override string) error {
 	h.mu.Lock()
 	if live := h.findLocked(id); live != nil {
 		live.Subdomains = routes.Subdomains
+	}
+	if h.refreshPublishedLocked() {
+		h.saveLocked()
 	}
 	h.mu.Unlock()
 	if override != "" {

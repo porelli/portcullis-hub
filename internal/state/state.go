@@ -21,6 +21,22 @@ type Source struct {
 	Path string `json:"path" yaml:"path"` // local path after clone
 }
 
+// PublishedApp is the last known routing/authorization config of an enabled
+// app, as published to group-gate. If the app's template later stops
+// loading (source removed, sync broke it, validation tightened) while its
+// containers keep running, the Hub keeps enforcing this snapshot instead of
+// silently dropping the app's entries (which would fail open).
+type PublishedApp struct {
+	Subdomains  []string `json:"subdomains" yaml:"subdomains"`
+	GroupAccess bool     `json:"group_access" yaml:"group_access"`
+	AccessGroup string   `json:"access_group,omitempty" yaml:"access_group,omitempty"`
+	AdminGroup  string   `json:"admin_group,omitempty" yaml:"admin_group,omitempty"`
+	AdminPaths  []string `json:"admin_paths,omitempty" yaml:"admin_paths,omitempty"`
+	// Policy is the app's own policy override at publish time; nil means it
+	// inherits the (current) global default.
+	Policy *policy.AuthPolicy `json:"policy,omitempty" yaml:"policy,omitempty"`
+}
+
 // AppState tracks which apps are enabled and their settings.
 type AppState struct {
 	Enabled       []string                     `json:"enabled" yaml:"enabled"`
@@ -28,6 +44,8 @@ type AppState struct {
 	Settings      map[string]map[string]string `json:"settings" yaml:"settings"`
 	AuthPolicies  map[string]policy.AuthPolicy `json:"auth_policies" yaml:"auth_policies"`
 	DefaultPolicy policy.AuthPolicy            `json:"default_auth_policy" yaml:"default_auth_policy"`
+	// Published holds the last known group-gate config per enabled app.
+	Published map[string]PublishedApp `json:"published" yaml:"published"`
 }
 
 // New returns an empty state with initialised maps.
@@ -43,6 +61,9 @@ func (s *AppState) init() {
 	}
 	if s.AuthPolicies == nil {
 		s.AuthPolicies = make(map[string]policy.AuthPolicy)
+	}
+	if s.Published == nil {
+		s.Published = make(map[string]PublishedApp)
 	}
 }
 

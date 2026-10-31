@@ -29,6 +29,7 @@ Web management UI for Portcullis. Go binary with an embedded single-page UI, pub
 - Every request except `GET /healthz` needs `X-Portcullis-Proxy-Secret` == `HUB_PROXY_SECRET` (≥ 32 chars, or the Hub won't start).
 - group-gate keys policies, groups and path groups **by subdomain only**. Templates whose Traefik rules the Hub can't fully resolve to `<sub>.${PORTCULLIS_DOMAIN}` hosts are rejected; two enabled apps may not route the same subdomain.
 - Never hold `Hub.mu` across docker/network calls; lifecycle ops take the per-app lock (`lockApp`).
+- Fail closed: `state.yaml` `published` keeps each enabled app's last published config; the policy writer falls back to it when the template is missing, and denies (`policy.DenyGroup`) subdomains of running app projects it has no config for.
 - Reconcile reports drift, it never fixes it; actions are explicit (`/api/drift/resolve`).
 - No migration/back-compat code: there are no installs to upgrade from.
 - Frontend is vanilla JS in `web/index.html` — no build step, no npm. Escape everything with `escapeHtml`.

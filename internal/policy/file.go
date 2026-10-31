@@ -30,10 +30,20 @@ type Document struct {
 	PathGroups map[string][]PathGroup `json:"path_groups"`
 }
 
+// DenyGroup is published as the required group of subdomains the Hub knows
+// are routed but cannot attribute a config to. group-gate matches groups
+// exactly and no user is a member of this group, so every request is
+// denied. Never create an LLDAP group with this name.
+const DenyGroup = "__portcullis_deny__"
+
 // App is the per-template input to Build.
 type App struct {
-	ID          string
-	Enabled     bool
+	ID      string
+	Enabled bool
+	// Deny marks an app whose subdomains are known (e.g. from running
+	// containers' labels) but whose config is not: its subdomains get
+	// DenyGroup unless an enabled app with a known config claims them.
+	Deny        bool
 	Subdomains  []string
 	GroupAccess bool
 	AccessGroup string
@@ -90,7 +100,7 @@ func Build(apps []App, perApp map[string]AuthPolicy, def AuthPolicy) Document {
 	claims := map[string][]claim{}
 	groupOwner := map[string]string{}
 	for _, a := range sorted {
-		if !a.Enabled {
+		if !a.Enabled || a.Deny {
 			continue
 		}
 		p, override := perApp[a.ID]
@@ -135,6 +145,23 @@ func Build(apps []App, perApp map[string]AuthPolicy, def AuthPolicy) Document {
 					return doc.PathGroups[sub][i].Prefix < doc.PathGroups[sub][j].Prefix
 				})
 			}
+		}
+	}
+	for _, a := range sorted {
+		if !a.Deny {
+			continue
+		}
+		for _, sub := range a.Subdomains {
+			if CoreSubdomains[sub] {
+				continue
+			}
+			if _, claimed := claims[sub]; claimed {
+				continue
+			}
+			if doc.Groups[sub] != DenyGroup {
+				log.Printf("auth-policy: DENYING ALL ACCESS to %q (app %s has running containers but no known config)", sub, a.ID)
+			}
+			doc.Groups[sub] = DenyGroup
 		}
 	}
 	for sub, cs := range claims {

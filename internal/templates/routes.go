@@ -320,3 +320,27 @@ func (p *ruleParser) str() (string, error) {
 func isAlnum(c byte) bool {
 	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9'
 }
+
+var (
+	runtimeHostRe = regexp.MustCompile(`(?i)\bHost\(([^)]*)\)`)
+	quotedRe      = regexp.MustCompile("[`\"]([^`\"]*)[`\"]")
+	dnsLabelRe    = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
+)
+
+// RuntimeSubdomains extracts, leniently, the subdomains of domain that a
+// running container's (already variable-substituted) Traefik rule routes:
+// every Host() argument of the form <label>.<domain>. Used to fail closed
+// for apps the Hub has no config for, so it errs towards finding hosts.
+func RuntimeSubdomains(rule, domain string) []string {
+	domain = strings.ToLower(strings.TrimSuffix(domain, "."))
+	var out []string
+	for _, m := range runtimeHostRe.FindAllStringSubmatch(rule, -1) {
+		for _, q := range quotedRe.FindAllStringSubmatch(m[1], -1) {
+			h := strings.ToLower(strings.TrimSuffix(q[1], "."))
+			if label, ok := strings.CutSuffix(h, "."+domain); ok && dnsLabelRe.MatchString(label) {
+				out = append(out, label)
+			}
+		}
+	}
+	return out
+}

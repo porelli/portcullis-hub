@@ -141,3 +141,10 @@ func TestRealTemplates(t *testing.T) {
 	}
 	t.Logf("%d templates loaded", len(ids))
 }
+
+func TestRuntimeSubdomains(t *testing.T) {
+	got := RuntimeSubdomains("Host(`A.example.org`, `b.example.org.`) || (Host(\"c.example.org\") && PathPrefix(`/x`)) || HostRegexp(`d.example.org`) || Host(`e.other.org`) || Host(`f.g.example.org`)", "example.org")
+	if strings.Join(got, ",") != "a,b,c" {
+		t.Errorf("RuntimeSubdomains = %v", got)
+	}
+}

@@ -166,6 +166,7 @@ func (h *Hub) Enable(id string) error {
 	if t := h.findLocked(id); t != nil {
 		t.Enabled = true
 	}
+	h.refreshPublishedLocked()
 	h.saveLocked()
 	h.mu.Unlock()
 	h.writePolicyLogged()
@@ -259,6 +260,7 @@ func (h *Hub) disableLocked(id string) error {
 	if t := h.findLocked(id); t != nil {
 		t.Enabled = false
 	}
+	h.refreshPublishedLocked()
 	h.saveLocked()
 	h.mu.Unlock()
 	h.writePolicyLogged()

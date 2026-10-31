@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"time"
 
@@ -85,10 +86,13 @@ type Hub struct {
 	policyWriteMu   sync.Mutex
 	defaultPolicyMu sync.Mutex
 
-	driftMu  sync.Mutex
-	drift    DriftReport
-	driftKey map[string]string
-	kick     chan struct{}
+	driftMu sync.Mutex
+	drift   DriftReport
+	// runtimeSubs: subdomains routed by each app project's containers (from
+	// their Traefik labels), as last seen by Reconcile.
+	runtimeSubs map[string][]string
+	driftKey    map[string]string
+	kick        chan struct{}
 }
 
 // New loads state from cfg.DataDir and prepares the data directories. It
@@ -217,6 +221,53 @@ func (h *Hub) Discover() {
 	}
 	templates.Sort(uniq)
 	h.templates = uniq
+	if h.refreshPublishedLocked() {
+		h.saveLocked()
+	}
+}
+
+// snapshot captures what an enabled template publishes to group-gate.
+func (h *Hub) snapshot(t *templates.Template) state.PublishedApp {
+	a := t.Manifest.Auth
+	p := state.PublishedApp{
+		Subdomains:  append([]string(nil), t.Subdomains...),
+		GroupAccess: a.GroupAccess,
+		AccessGroup: a.AccessGroup,
+		AdminGroup:  a.AdminGroup,
+		AdminPaths:  append([]string(nil), a.AdminPaths...),
+	}
+	if ov, ok := h.st.AuthPolicies[t.ID]; ok {
+		ov.Factors = append([]string(nil), ov.Factors...)
+		p.Policy = &ov
+	}
+	return p
+}
+
+// refreshPublishedLocked brings state.Published in line with the catalog:
+// enabled apps whose template loads get a fresh snapshot, apps that are no
+// longer enabled lose theirs, and enabled apps whose template is missing
+// keep their last known one. Returns whether anything changed. Caller must
+// hold mu (write).
+func (h *Hub) refreshPublishedLocked() bool {
+	changed := false
+	for id := range h.st.Published {
+		if !h.st.IsEnabled(id) {
+			delete(h.st.Published, id)
+			changed = true
+		}
+	}
+	for _, id := range h.st.Enabled {
+		t := h.findLocked(id)
+		if t == nil {
+			continue
+		}
+		snap := h.snapshot(t)
+		if old, ok := h.st.Published[id]; !ok || !reflect.DeepEqual(old, snap) {
+			h.st.Published[id] = snap
+			changed = true
+		}
+	}
+	return changed
 }
 
 // findLocked returns a pointer into the catalog. Caller must hold mu.
@@ -277,26 +328,69 @@ func (h *Hub) WritePolicy() error {
 	// newer one (a stale file could drop groups and fail open).
 	h.policyWriteMu.Lock()
 	defer h.policyWriteMu.Unlock()
+	h.driftMu.Lock()
+	runtime := make(map[string][]string, len(h.runtimeSubs))
+	for id, subs := range h.runtimeSubs {
+		runtime[id] = subs
+	}
+	h.driftMu.Unlock()
+
 	h.mu.RLock()
+	perApp := make(map[string]policy.AuthPolicy, len(h.st.AuthPolicies))
+	for k, v := range h.st.AuthPolicies {
+		perApp[k] = v
+	}
 	apps := make([]policy.App, 0, len(h.templates))
+	covered := map[string]bool{}
 	for i := range h.templates {
 		t := &h.templates[i]
-		a := policy.App{
+		if !t.Enabled {
+			continue
+		}
+		covered[t.ID] = true
+		apps = append(apps, policy.App{
 			ID:          t.ID,
-			Enabled:     t.Enabled,
+			Enabled:     true,
+			Subdomains:  t.Subdomains,
 			GroupAccess: t.Manifest.Auth.GroupAccess,
 			AccessGroup: t.Manifest.Auth.AccessGroup,
 			AdminGroup:  t.Manifest.Auth.AdminGroup,
 			AdminPaths:  t.Manifest.Auth.AdminPaths,
-		}
-		if t.Enabled {
-			a.Subdomains = t.Subdomains
-		}
-		apps = append(apps, a)
+		})
 	}
-	perApp := make(map[string]policy.AuthPolicy, len(h.st.AuthPolicies))
-	for k, v := range h.st.AuthPolicies {
-		perApp[k] = v
+	for _, id := range h.st.Enabled {
+		if covered[id] {
+			continue
+		}
+		covered[id] = true
+		if snap, ok := h.st.Published[id]; ok {
+			log.Printf("auth-policy: WARNING: template for enabled app %s is missing — still enforcing its last known config (subdomains %v)", id, snap.Subdomains)
+			if _, ok := perApp[id]; !ok && snap.Policy != nil {
+				perApp[id] = *snap.Policy
+			}
+			apps = append(apps, policy.App{
+				ID:          id,
+				Enabled:     true,
+				Subdomains:  snap.Subdomains,
+				GroupAccess: snap.GroupAccess,
+				AccessGroup: snap.AccessGroup,
+				AdminGroup:  snap.AdminGroup,
+				AdminPaths:  snap.AdminPaths,
+			})
+			continue
+		}
+		if subs := runtime[id]; len(subs) > 0 {
+			apps = append(apps, policy.App{ID: id, Enabled: true, Deny: true, Subdomains: subs})
+		} else {
+			log.Printf("auth-policy: WARNING: enabled app %s has neither a template nor a last known config, and no routed subdomains are known yet — cannot publish a deny entry", id)
+		}
+	}
+	// Running app projects that are not enabled (drift) are routed by
+	// Traefik but have no config: deny their subdomains too.
+	for id, subs := range runtime {
+		if !covered[id] && len(subs) > 0 {
+			apps = append(apps, policy.App{ID: id, Enabled: true, Deny: true, Subdomains: subs})
+		}
 	}
 	doc := policy.Build(apps, perApp, h.st.DefaultPolicy)
 	h.mu.RUnlock()

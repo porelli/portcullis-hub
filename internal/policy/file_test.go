@@ -178,3 +178,20 @@ func TestWrite(t *testing.T) {
 		t.Errorf("temp files left behind: %d entries", len(entries))
 	}
 }
+
+func TestBuildDeny(t *testing.T) {
+	apps := []App{
+		{ID: "live", Enabled: true, Subdomains: []string{"shared"}},
+		{ID: "ghost", Enabled: true, Deny: true, Subdomains: []string{"shared", "ghost", "hub"}},
+	}
+	doc := Build(apps, nil, AuthPolicy{})
+	if doc.Groups["ghost"] != DenyGroup {
+		t.Errorf("ghost = %q", doc.Groups["ghost"])
+	}
+	if _, ok := doc.Groups["shared"]; ok {
+		t.Error("deny overrode a subdomain claimed by a live app")
+	}
+	if _, ok := doc.Groups["hub"]; ok {
+		t.Error("core subdomain published")
+	}
+}
