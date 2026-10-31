@@ -114,6 +114,23 @@ func Tier(p AuthPolicy) string {
 	return "authaware@file"
 }
 
+// HostTier is the TLS options for every router of an app. Traefik selects
+// TLS options per SNI host, so all routers of a host must share one tier
+// (on a mismatch Traefik falls back to its default options and answers 421
+// Misdirected Request). With public exceptions on, anonymous visitors must
+// complete the handshake without a client cert, so a policy that would
+// require one at the handshake ("protected@file") gets "authaware@file"
+// for ALL of the app's routers. mTLS then stays enforced per request by
+// group-gate's mTLS binding on gated routers; native-OIDC routers (no
+// group-gate) only enforce it at login, through the Keycloak acr.
+func HostTier(p AuthPolicy, publicExceptions bool) string {
+	t := Tier(p)
+	if publicExceptions && t == "protected@file" {
+		return "authaware@file"
+	}
+	return t
+}
+
 // SafetyScore is a cosmetic number surfaced in the UI.
 func SafetyScore(p AuthPolicy) float64 {
 	loa := float64(LoA(p))

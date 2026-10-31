@@ -195,3 +195,23 @@ func TestBuildDeny(t *testing.T) {
 		t.Error("core subdomain published")
 	}
 }
+
+func TestBuildPublicPaths(t *testing.T) {
+	apps := []App{
+		{ID: "cloud", Enabled: true, Subdomains: []string{"cloud"}, PublicSubdomains: []string{"cloud"}, PublicPaths: []string{"/s/{token}", "/dist"}},
+		{ID: "off", Enabled: true, Subdomains: []string{"off"}},
+		{ID: "core", Enabled: true, Subdomains: []string{"hub"}, PublicSubdomains: []string{"hub"}, PublicPaths: []string{"/x"}},
+		{ID: "gone", Enabled: true, Deny: true, Subdomains: []string{"gone"}, PublicSubdomains: []string{"gone"}, PublicPaths: []string{"/y"}},
+	}
+	doc := Build(apps, nil, InitialDefault())
+	if len(doc.PublicPaths) != 1 || strings.Join(doc.PublicPaths["cloud"], ",") != "/dist,/s/{token}" {
+		t.Errorf("public_paths = %v", doc.PublicPaths)
+	}
+	if doc.Groups["gone"] != DenyGroup {
+		t.Errorf("deny app lost its deny group: %v", doc.Groups)
+	}
+	raw, _ := json.Marshal(Build(nil, nil, InitialDefault()))
+	if !strings.Contains(string(raw), `"public_paths":{}`) {
+		t.Errorf("empty public_paths not published as {}: %s", raw)
+	}
+}

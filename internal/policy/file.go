@@ -28,6 +28,10 @@ type Document struct {
 	Policies   map[string]AuthPolicy  `json:"policies"`
 	Groups     map[string]string      `json:"groups"`
 	PathGroups map[string][]PathGroup `json:"path_groups"`
+	// PublicPaths lists, per subdomain, the path prefixes an app serves
+	// without forward-auth/group-gate (public exceptions that are on).
+	// Informational: those requests never reach group-gate.
+	PublicPaths map[string][]string `json:"public_paths"`
 }
 
 // DenyGroup is published as the required group of subdomains the Hub knows
@@ -49,6 +53,9 @@ type App struct {
 	AccessGroup string
 	AdminGroup  string
 	AdminPaths  []string
+	// PublicSubdomains / PublicPaths: the app's public exceptions, when on.
+	PublicSubdomains []string
+	PublicPaths      []string
 }
 
 // Stricter reports whether a is strictly stricter than b: higher LoA first,
@@ -83,11 +90,12 @@ func Stricter(a, b AuthPolicy) bool {
 // group of the lowest template ID wins. Each collision is logged.
 func Build(apps []App, perApp map[string]AuthPolicy, def AuthPolicy) Document {
 	doc := Document{
-		Version:    FileVersion,
-		Default:    def,
-		Policies:   map[string]AuthPolicy{},
-		Groups:     map[string]string{},
-		PathGroups: map[string][]PathGroup{},
+		Version:     FileVersion,
+		Default:     def,
+		Policies:    map[string]AuthPolicy{},
+		Groups:      map[string]string{},
+		PathGroups:  map[string][]PathGroup{},
+		PublicPaths: map[string][]string{},
 	}
 	sorted := append([]App(nil), apps...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
@@ -145,6 +153,29 @@ func Build(apps []App, perApp map[string]AuthPolicy, def AuthPolicy) Document {
 					return doc.PathGroups[sub][i].Prefix < doc.PathGroups[sub][j].Prefix
 				})
 			}
+		}
+	}
+	for _, a := range sorted {
+		if !a.Enabled || a.Deny || len(a.PublicPaths) == 0 {
+			continue
+		}
+		for _, sub := range a.PublicSubdomains {
+			if CoreSubdomains[sub] {
+				continue
+			}
+			set := map[string]bool{}
+			for _, p := range doc.PublicPaths[sub] {
+				set[p] = true
+			}
+			for _, p := range a.PublicPaths {
+				set[p] = true
+			}
+			merged := make([]string, 0, len(set))
+			for p := range set {
+				merged = append(merged, p)
+			}
+			sort.Strings(merged)
+			doc.PublicPaths[sub] = merged
 		}
 	}
 	for _, a := range sorted {

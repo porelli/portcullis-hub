@@ -56,3 +56,24 @@ func TestLoAACRTier(t *testing.T) {
 		t.Error("Same is wrong")
 	}
 }
+
+func TestHostTier(t *testing.T) {
+	cases := []struct {
+		p            AuthPolicy
+		public, want string
+	}{
+		{AuthPolicy{Factors: []string{"mtls"}}, "authaware@file", "protected@file"},
+		{AuthPolicy{Factors: []string{"mtls", "webauthn"}, Op: "all"}, "authaware@file", "protected@file"},
+		{AuthPolicy{Factors: []string{"mtls", "webauthn"}, Op: "any"}, "authaware@file", "authaware@file"},
+		{AuthPolicy{Factors: []string{"webauthn"}}, "authaware@file", "authaware@file"},
+		{AuthPolicy{}, "public@file", "public@file"},
+	}
+	for _, c := range cases {
+		if got := HostTier(c.p, false); got != c.want {
+			t.Errorf("HostTier(%v, false) = %s, want %s", c.p, got, c.want)
+		}
+		if got := HostTier(c.p, true); got != c.public {
+			t.Errorf("HostTier(%v, true) = %s, want %s", c.p, got, c.public)
+		}
+	}
+}
