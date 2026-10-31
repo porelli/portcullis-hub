@@ -6,7 +6,7 @@ Web management UI for Portcullis. Go binary with embedded HTML, published as `gh
 
 ## Architecture
 
-- Single Go binary (`main.go` ~1200 lines) with embedded `web/index.html`
+- Single Go binary (`main.go` ~2600 lines) with embedded `web/index.html`
 - Manages app templates via Docker Compose (per-app isolated projects)
 - Auto-clones default templates from `porelli/portcullis-templates` on first startup
 - Per-app .env files stored in Hub data volume

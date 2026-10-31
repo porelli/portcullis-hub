@@ -411,8 +411,12 @@
     async function apiPut(url, body) { return (await apiCall(url, 'PUT', body)).json(); }
     async function apiGet(url) { return (await apiCall(url, 'GET')).json(); }
 
+    // Escapes for both element content and quoted attribute values.
+    // (The textContent/innerHTML trick does NOT escape quotes.)
     function escapeHtml(s) {
-      const d = document.createElement('div'); d.textContent = s; return d.innerHTML;
+      return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
     }
 
     // ── Detail panel ──────────────────────────────────────
@@ -524,7 +528,7 @@
             html += '</select>';
           } else {
             const ph = s.type === 'path' ? '/path/on/host (e.g., /mnt/media/movies)' : '';
-            html += '<input type="text" name="' + s.key + '" value="' + escapeHtml(val) + '" placeholder="' + ph + '">';
+            html += '<input type="text" name="' + escapeHtml(s.key) + '" value="' + escapeHtml(val) + '" placeholder="' + ph + '">';
           }
           html += '</div>';
         }
@@ -552,8 +556,8 @@
               html += '<small class="port-locked">This port is fixed by the app and cannot be rebound.</small>';
             } else {
               html += '<div class="port-inputs">';
-              html += '<input type="text" name="' + bindKey + '" value="' + escapeHtml(bindVal) + '" placeholder="0.0.0.0" class="port-bind">';
-              html += '<input type="number" name="' + p.key + '" value="' + escapeHtml(hostVal) + '" min="1" max="65535" placeholder="' + (p.required ? 'required' : 'disabled') + '" class="port-host">';
+              html += '<input type="text" name="' + escapeHtml(bindKey) + '" value="' + escapeHtml(bindVal) + '" placeholder="0.0.0.0" class="port-bind">';
+              html += '<input type="number" name="' + escapeHtml(p.key) + '" value="' + escapeHtml(hostVal) + '" min="1" max="65535" placeholder="' + (p.required ? 'required' : 'disabled') + '" class="port-host">';
               html += '<button type="button" class="btn btn-sm" onclick="resetPort(this, \'' + p.key + '\', ' + (p.default || 0) + ', \'' + escapeHtml(p.bind || '0.0.0.0') + '\')">Reset</button>';
               html += '</div>';
               if (!p.required) html += '<small class="port-hint">Leave host port empty to disable this binding.</small>';

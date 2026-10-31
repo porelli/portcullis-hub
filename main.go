@@ -1,22 +1,30 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"crypto/rand"
 	"embed"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"io"
 	"log"
+	"mime"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -79,18 +87,18 @@ type ContainerStatus struct {
 
 // Manifest describes an app template.
 type Manifest struct {
-	Name        string            `yaml:"name" json:"name"`
-	Description string            `yaml:"description" json:"description"`
-	Icon        string            `yaml:"icon" json:"icon"`
-	Category    string            `yaml:"category" json:"category"`
-	Tags        []string          `yaml:"tags" json:"tags"`
-	Auth        Auth              `yaml:"auth" json:"auth"`
-	Settings    []Setting         `yaml:"settings" json:"settings"`
-	Ports       []Port            `yaml:"ports" json:"ports"`
-	Env         []EnvVar          `yaml:"env" json:"env"`
-	Clients     []KeycloakClient  `yaml:"keycloak_clients" json:"keycloak_clients"`
-	ConfigFiles []ConfigFile      `yaml:"config_files" json:"config_files"`
-	URLs        []AppURL          `yaml:"urls" json:"urls"`
+	Name        string           `yaml:"name" json:"name"`
+	Description string           `yaml:"description" json:"description"`
+	Icon        string           `yaml:"icon" json:"icon"`
+	Category    string           `yaml:"category" json:"category"`
+	Tags        []string         `yaml:"tags" json:"tags"`
+	Auth        Auth             `yaml:"auth" json:"auth"`
+	Settings    []Setting        `yaml:"settings" json:"settings"`
+	Ports       []Port           `yaml:"ports" json:"ports"`
+	Env         []EnvVar         `yaml:"env" json:"env"`
+	Clients     []KeycloakClient `yaml:"keycloak_clients" json:"keycloak_clients"`
+	ConfigFiles []ConfigFile     `yaml:"config_files" json:"config_files"`
+	URLs        []AppURL         `yaml:"urls" json:"urls"`
 }
 
 type EnvVar struct {
@@ -135,12 +143,12 @@ type AuthPolicy struct {
 
 // AppState tracks which apps are enabled and their settings.
 type AppState struct {
-	Enabled         []string                     `json:"enabled" yaml:"enabled"`
-	Sources         []Source                     `json:"sources" yaml:"sources"`
-	Settings        map[string]map[string]string `json:"settings" yaml:"settings"`
-	AuthPolicies    map[string]AuthPolicy        `json:"auth_policies" yaml:"auth_policies"`
-	DefaultPolicy   AuthPolicy                   `json:"default_auth_policy" yaml:"default_auth_policy"`
-	MigrateVersion  int                          `json:"migrate_version" yaml:"migrate_version"`
+	Enabled        []string                     `json:"enabled" yaml:"enabled"`
+	Sources        []Source                     `json:"sources" yaml:"sources"`
+	Settings       map[string]map[string]string `json:"settings" yaml:"settings"`
+	AuthPolicies   map[string]AuthPolicy        `json:"auth_policies" yaml:"auth_policies"`
+	DefaultPolicy  AuthPolicy                   `json:"default_auth_policy" yaml:"default_auth_policy"`
+	MigrateVersion int                          `json:"migrate_version" yaml:"migrate_version"`
 }
 
 // Template is a discovered template with its source info.
@@ -161,39 +169,167 @@ var (
 	stateMu        sync.RWMutex
 	domain         string
 	lldapURL       string
-	lldapUser       string
+	lldapUser      string
 	lldapPass      string
 )
+
+// ── Limits, validation and shared clients ───────────────
+
+const (
+	composeUpTimeout    = 15 * time.Minute // includes image pulls
+	composeDownTimeout  = 5 * time.Minute
+	composeQueryTimeout = 30 * time.Second // ps / logs
+	execTimeout         = 15 * time.Minute
+	gitTimeout          = 5 * time.Minute
+	maxBodyBytes        = 1 << 20
+)
+
+var (
+	// Template / source identifiers end up in file paths, compose project
+	// names, URLs and HTML attributes — keep them boring.
+	idRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
+	// Setting / port / env keys become .env keys.
+	envKeyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,127}$`)
+	// Keycloak user IDs are UUIDs.
+	uuidRe = regexp.MustCompile(`^[0-9a-fA-F-]{1,64}$`)
+	// Subdomain routed by a template: Host(`<sub>.${PORTCULLIS_DOMAIN...}`).
+	hostRuleRe = regexp.MustCompile("Host\\(`([A-Za-z0-9-]+)\\.\\$\\{PORTCULLIS_DOMAIN")
+
+	// All outbound HTTP (Keycloak admin API, LLDAP) goes through this client
+	// so nothing can hang the Hub indefinitely.
+	httpClient = &http.Client{Timeout: 20 * time.Second}
+)
+
+// newCmd builds a command bound to ctx with a hard timeout. WaitDelay makes
+// sure Wait returns even if a killed child left pipes open.
+func newCmd(ctx context.Context, timeout time.Duration, name string, args ...string) (*exec.Cmd, context.CancelFunc) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.WaitDelay = 5 * time.Second
+	return cmd, cancel
+}
+
+// hasControlChars reports whether s contains newlines or other control
+// characters — such values would inject extra lines into .env / YAML files.
+func hasControlChars(s string) bool {
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
+// within reports whether path p is inside (or equal to) base.
+func within(base, p string) bool {
+	rel, err := filepath.Rel(base, p)
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
+}
+
+// writeFileAtomic writes via temp file + rename so readers never observe a
+// partially written file and a crash can't truncate the original.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // no-op after a successful rename
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
+}
+
+// decodeJSON decodes a size-limited JSON request body, writing a 400 on error.
+func decodeJSON(w http.ResponseWriter, r *http.Request, v interface{}) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
+		http.Error(w, "invalid JSON body: "+err.Error(), 400)
+		return false
+	}
+	return true
+}
+
+// csrfGuard rejects cross-origin state-changing requests. The Hub sits behind
+// forward-auth with a SameSite=Lax cookie scoped to the parent domain, so any
+// sibling app subdomain counts as same-site — cookies alone don't stop a
+// malicious page on another app from POSTing here. CrossOriginProtection uses
+// Sec-Fetch-Site / Origin; additionally require a JSON body so plain HTML
+// forms (which can't set Content-Type: application/json) are refused.
+func csrfGuard(next http.Handler) http.Handler {
+	cop := http.NewCrossOriginProtection()
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet, http.MethodHead, http.MethodOptions:
+		default:
+			mt, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
+			if mt != "application/json" {
+				http.Error(w, "Content-Type must be application/json", http.StatusUnsupportedMediaType)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+	return cop.Handler(inner)
+}
 
 // resolveUsername converts an email (from forward-auth) to an LLDAP username.
 func resolveUsername(email string) string {
 	if lldapPass == "" || !strings.Contains(email, "@") {
 		return email
 	}
-	// Get LLDAP auth token
-	loginBody := fmt.Sprintf(`{"username":"%s","password":"%s"}`, lldapUser, lldapPass)
-	resp, err := http.Post(lldapURL+"/auth/simple/login", "application/json", strings.NewReader(loginBody))
-	if err != nil || resp.StatusCode != 200 {
+	loginBody, _ := json.Marshal(map[string]string{"username": lldapUser, "password": lldapPass})
+	resp, err := httpClient.Post(lldapURL+"/auth/simple/login", "application/json", bytes.NewReader(loginBody))
+	if err != nil {
 		return email
 	}
 	defer resp.Body.Close()
-	var tokenResp struct{ Token string `json:"token"` }
+	if resp.StatusCode != 200 {
+		return email
+	}
+	var tokenResp struct {
+		Token string `json:"token"`
+	}
 	if json.NewDecoder(resp.Body).Decode(&tokenResp) != nil || tokenResp.Token == "" {
 		return email
 	}
-	// Query for user by email
-	query := fmt.Sprintf(`{"query":"{users(filters:{eq:{field:\"email\",value:\"%s\"}}){id}}"}`, email)
-	req, _ := http.NewRequest("POST", lldapURL+"/api/graphql", strings.NewReader(query))
+	// Pass the email as a GraphQL variable — never splice it into the query.
+	query, _ := json.Marshal(map[string]interface{}{
+		"query":     `query($email: String!) { users(filters: {eq: {field: "email", value: $email}}) { id } }`,
+		"variables": map[string]string{"email": email},
+	})
+	req, _ := http.NewRequest("POST", lldapURL+"/api/graphql", bytes.NewReader(query))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+tokenResp.Token)
-	resp2, err := http.DefaultClient.Do(req)
-	if err != nil || resp2.StatusCode != 200 {
+	resp2, err := httpClient.Do(req)
+	if err != nil {
 		return email
 	}
 	defer resp2.Body.Close()
+	if resp2.StatusCode != 200 {
+		return email
+	}
 	var gqlResp struct {
 		Data struct {
-			Users []struct{ ID string `json:"id"` } `json:"users"`
+			Users []struct {
+				ID string `json:"id"`
+			} `json:"users"`
 		} `json:"data"`
 	}
 	if json.NewDecoder(resp2.Body).Decode(&gqlResp) != nil || len(gqlResp.Data.Users) == 0 {
@@ -272,8 +408,13 @@ func main() {
 	mux.HandleFunc("/static/", handleStatic)
 
 	addr := ":8888"
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           csrfGuard(mux),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
 	log.Printf("Hub listening on %s (domain: %s)", addr, domain)
-	log.Fatal(http.ListenAndServe(addr, mux))
+	log.Fatal(srv.ListenAndServe())
 }
 
 // ── State persistence ────────────────────────────────────
@@ -285,13 +426,23 @@ func statePath() string {
 func loadState() {
 	data, err := os.ReadFile(statePath())
 	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			log.Fatalf("cannot read %s: %v", statePath(), err)
+		}
 		state = AppState{
 			Settings:     make(map[string]map[string]string),
 			AuthPolicies: make(map[string]AuthPolicy),
 		}
 		return
 	}
-	yaml.Unmarshal(data, &state)
+	// Refuse to start on a corrupt state file: continuing with empty state
+	// would overwrite it on the next save and lose every enabled app/source.
+	if len(bytes.TrimSpace(data)) == 0 {
+		log.Fatalf("%s is empty (interrupted write?) — restore it from backup or delete it to start fresh", statePath())
+	}
+	if err := yaml.Unmarshal(data, &state); err != nil {
+		log.Fatalf("corrupt %s (%v) — fix or move it aside, then restart", statePath(), err)
+	}
 	if state.Settings == nil {
 		state.Settings = make(map[string]map[string]string)
 	}
@@ -300,9 +451,16 @@ func loadState() {
 	}
 }
 
+// saveState persists state atomically. Caller must hold stateMu.
 func saveState() {
-	data, _ := yaml.Marshal(&state)
-	os.WriteFile(statePath(), data, 0644)
+	data, err := yaml.Marshal(&state)
+	if err != nil {
+		log.Printf("ERROR: marshal state: %v", err)
+		return
+	}
+	if err := writeFileAtomic(statePath(), data, 0600); err != nil {
+		log.Printf("ERROR: save state: %v", err)
+	}
 }
 
 // ── Template discovery ───────────────────────────────────
@@ -327,8 +485,15 @@ func discoverTemplates() {
 	for _, id := range state.Enabled {
 		enabledSet[id] = true
 	}
+	found := make(map[string]bool, len(templates))
 	for i := range templates {
 		templates[i].Enabled = enabledSet[templates[i].ID]
+		found[templates[i].ID] = true
+	}
+	for id := range enabledSet {
+		if !found[id] {
+			log.Printf("WARNING: enabled app %s has no (valid) template any more — its containers keep running; disable it to stop them", id)
+		}
 	}
 
 	sort.Slice(templates, func(i, j int) bool {
@@ -353,9 +518,17 @@ func discoverFrom(dir, source string) {
 		if err != nil {
 			continue
 		}
+		if !idRe.MatchString(e.Name()) {
+			log.Printf("Skipping template %q: directory name must match %s", e.Name(), idRe)
+			continue
+		}
 		var m Manifest
 		if err := yaml.Unmarshal(data, &m); err != nil {
 			log.Printf("Bad manifest in %s: %v", manifestPath, err)
+			continue
+		}
+		if err := validateManifest(&m); err != nil {
+			log.Printf("Skipping template %s: %v", e.Name(), err)
 			continue
 		}
 		// Substitute {{DOMAIN}} in app URLs
@@ -369,6 +542,58 @@ func discoverFrom(dir, source string) {
 			Path:     filepath.Join(dir, e.Name()),
 		})
 	}
+}
+
+// validateManifest rejects manifests whose keys/values would be unsafe to
+// splice into .env files, compose overrides or the UI's HTML.
+func validateManifest(m *Manifest) error {
+	for _, st := range m.Settings {
+		if !envKeyRe.MatchString(st.Key) {
+			return fmt.Errorf("invalid setting key %q", st.Key)
+		}
+		if hasControlChars(st.Default) {
+			return fmt.Errorf("setting %s: default contains control characters", st.Key)
+		}
+	}
+	for _, p := range m.Ports {
+		if !envKeyRe.MatchString(p.Key) {
+			return fmt.Errorf("invalid port key %q", p.Key)
+		}
+		if p.Bind != "" && net.ParseIP(p.Bind) == nil {
+			return fmt.Errorf("port %s: bind %q is not an IP address", p.Key, p.Bind)
+		}
+	}
+	for _, v := range m.Env {
+		if !envKeyRe.MatchString(v.Key) {
+			return fmt.Errorf("invalid env key %q", v.Key)
+		}
+	}
+	for _, c := range m.Clients {
+		if c.SecretEnv != "" && !envKeyRe.MatchString(c.SecretEnv) {
+			return fmt.Errorf("client %s: invalid secret_env %q", c.ClientID, c.SecretEnv)
+		}
+	}
+	return nil
+}
+
+// templateSubdomains returns the lowercase subdomains a template routes via
+// Traefik Host() rules in its compose.yml.
+func templateSubdomains(tmpl *Template) []string {
+	data, err := os.ReadFile(filepath.Join(tmpl.Path, "compose.yml"))
+	if err != nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, m := range hostRuleRe.FindAllStringSubmatch(string(data), -1) {
+		sub := strings.ToLower(m[1])
+		if !seen[sub] {
+			seen[sub] = true
+			out = append(out, sub)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // ── Auto-load default templates ──────────────────────────
@@ -438,13 +663,14 @@ func migrateToIsolatedStacks() {
 		envFile := appEnvPath(tmpl)
 		oldArgs := []string{"compose", "-p", "portcullis", "-f", composePath,
 			"--project-directory", projectHostDir, "--env-file", envFile, "down"}
-		cmd := exec.Command("docker", oldArgs...)
+		cmd, cancel := newCmd(context.Background(), composeDownTimeout, "docker", oldArgs...)
 		cmd.Env = append(os.Environ(), "COMPOSE_IGNORE_ORPHANS=true")
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
 			log.Printf("Migration: old stack down for %s: %v (may already be stopped)", id, err)
 		}
+		cancel()
 
 		// Start under new isolated project name
 		if err := composeUp(tmpl); err != nil {
@@ -463,111 +689,179 @@ func migrateToIsolatedStacks() {
 
 // ── Enable / Disable ─────────────────────────────────────
 
-func enableApp(id string) error {
-	stateMu.Lock()
-	defer stateMu.Unlock()
+// appOps serialises lifecycle operations per app (enable/disable/restart) so
+// the slow parts can run without holding the global stateMu.
+var appOps sync.Map
 
-	var tmpl *Template
-	for i := range templates {
-		if templates[i].ID == id {
-			tmpl = &templates[i]
-			break
+func lockApp(id string) (func(), error) {
+	if _, busy := appOps.LoadOrStore(id, struct{}{}); busy {
+		return nil, fmt.Errorf("another operation on %s is in progress — try again shortly", id)
+	}
+	return func() { appOps.Delete(id) }, nil
+}
+
+func isEnabled(id string) bool {
+	for _, e := range state.Enabled {
+		if e == id {
+			return true
 		}
 	}
-	if tmpl == nil {
-		return fmt.Errorf("template not found: %s", id)
-	}
+	return false
+}
 
-	// Check for host port collisions with already-enabled apps.
-	if err := checkPortCollisions(tmpl); err != nil {
+func enableApp(id string) error {
+	unlock, err := lockApp(id)
+	if err != nil {
 		return err
 	}
+	defer unlock()
 
-	// Check if already enabled
-	for _, enabled := range state.Enabled {
-		if enabled == id {
-			return nil
-		}
+	// Phase 1 (under lock): validate and write local files. Everything here is
+	// fast filesystem work that needs a consistent view of state.
+	stateMu.Lock()
+	t := findTemplate(id)
+	if t == nil {
+		stateMu.Unlock()
+		return fmt.Errorf("template not found: %s", id)
 	}
-
-	// Generate per-app .env file
-	if err := generateAppEnv(tmpl); err != nil {
+	tmpl := *t // work on a copy; the templates slice may be replaced meanwhile
+	if isEnabled(id) {
+		stateMu.Unlock()
+		return nil
+	}
+	if err := checkPortCollisions(&tmpl); err != nil {
+		stateMu.Unlock()
+		return err
+	}
+	if err := generateAppEnv(&tmpl); err != nil {
+		stateMu.Unlock()
 		return fmt.Errorf("env setup failed: %w", err)
 	}
-
-	// Write compose override (ports + volume mounts) from current settings.
-	if err := generateComposeOverride(tmpl, state.Settings[tmpl.ID]); err != nil {
+	if err := generateComposeOverride(&tmpl, state.Settings[tmpl.ID]); err != nil {
+		stateMu.Unlock()
 		return fmt.Errorf("override write failed: %w", err)
 	}
+	acr := policyACR(resolvePolicy(tmpl.ID))
+	stateMu.Unlock()
 
-	// Copy config files
+	// Copy config files — both ends must stay inside their trees, and the
+	// core .env / compose files are off limits.
 	for _, cf := range tmpl.Manifest.ConfigFiles {
 		src := filepath.Join(tmpl.Path, cf.Src)
 		dest := filepath.Join(projectDir, cf.Dest)
+		if !within(tmpl.Path, src) || !within(projectDir, dest) || dest == projectDir ||
+			filepath.Dir(dest) == filepath.Clean(projectDir) {
+			log.Printf("Warning: refusing config_files entry %s → %s for %s (outside allowed paths)", cf.Src, cf.Dest, id)
+			continue
+		}
 		os.MkdirAll(filepath.Dir(dest), 0755)
 		if err := copyFile(src, dest); err != nil {
 			log.Printf("Warning: failed to copy %s → %s: %v", src, dest, err)
 		}
 	}
 
-	// Register Keycloak clients
+	// Phase 2 (no lock): network / docker work that may take minutes.
 	for _, client := range tmpl.Manifest.Clients {
-		if err := registerKeycloakClient(client, tmpl); err != nil {
+		if err := registerKeycloakClient(client, &tmpl, acr); err != nil {
 			log.Printf("Warning: failed to register client %s: %v", client.ClientID, err)
 		}
 	}
-
-	// Bring up just this app's services. Only record the enable if compose
-	// succeeds — otherwise the UI would show a running app that never started.
-	if err := composeUp(tmpl); err != nil {
+	// Only record the enable if compose succeeds — otherwise the UI would show
+	// a running app that never started.
+	if err := composeUp(&tmpl); err != nil {
 		return fmt.Errorf("compose up failed: %w", err)
 	}
 
-	state.Enabled = append(state.Enabled, id)
-	tmpl.Enabled = true
+	// Phase 3 (under lock): commit.
+	stateMu.Lock()
+	if !isEnabled(id) {
+		state.Enabled = append(state.Enabled, id)
+	}
+	if t := findTemplate(id); t != nil {
+		t.Enabled = true
+	}
 	saveState()
+	stateMu.Unlock()
+	if err := writeGroupGatePolicy(); err != nil {
+		log.Printf("auth-policy: group-gate policy write failed: %v", err)
+	}
 	return nil
 }
 
 func disableApp(id string) error {
-	stateMu.Lock()
-	defer stateMu.Unlock()
-
-	found := false
-	newEnabled := make([]string, 0, len(state.Enabled))
-	for _, enabled := range state.Enabled {
-		if enabled == id {
-			found = true
-			continue
-		}
-		newEnabled = append(newEnabled, enabled)
+	unlock, err := lockApp(id)
+	if err != nil {
+		return err
 	}
-	if !found {
+	defer unlock()
+
+	stateMu.RLock()
+	enabled := isEnabled(id)
+	var tmpl *Template
+	if t := findTemplate(id); t != nil {
+		c := *t
+		tmpl = &c
+	}
+	stateMu.RUnlock()
+	if !enabled {
 		return fmt.Errorf("app not enabled: %s", id)
 	}
 
-	state.Enabled = newEnabled
-	for i := range templates {
-		if templates[i].ID == id {
-			templates[i].Enabled = false
-			break
+	// Stop first; only mark disabled once the containers are actually gone,
+	// otherwise a failed down leaves orphans the UI can no longer stop. If
+	// the template is gone (source removed, now fails validation) or its
+	// compose file is broken, fall back to stopping by project name.
+	var downErr error
+	if tmpl != nil {
+		downErr = composeDown(tmpl)
+	}
+	if tmpl == nil || downErr != nil {
+		if err := composeDownByProject(id); err != nil {
+			if downErr == nil {
+				downErr = err
+			}
+			return fmt.Errorf("compose down failed (app left enabled, retry): %w", downErr)
 		}
 	}
-	saveState()
 
-	// Stop the app's services
-	tmpl := findTemplate(id)
-	if tmpl != nil {
-		return composeDown(tmpl)
+	stateMu.Lock()
+	newEnabled := make([]string, 0, len(state.Enabled))
+	for _, e := range state.Enabled {
+		if e != id {
+			newEnabled = append(newEnabled, e)
+		}
+	}
+	state.Enabled = newEnabled
+	if t := findTemplate(id); t != nil {
+		t.Enabled = false
+	}
+	saveState()
+	stateMu.Unlock()
+	if err := writeGroupGatePolicy(); err != nil {
+		log.Printf("auth-policy: group-gate policy write failed: %v", err)
 	}
 	return nil
 }
 
+// findTemplate returns a pointer into the templates slice. Caller must hold
+// stateMu; use getTemplate from handlers.
 func findTemplate(id string) *Template {
 	for i := range templates {
 		if templates[i].ID == id {
 			return &templates[i]
 		}
+	}
+	return nil
+}
+
+// getTemplate returns a copy of a template, safe to use without holding
+// stateMu (discoverTemplates may replace the slice at any time).
+func getTemplate(id string) *Template {
+	stateMu.RLock()
+	defer stateMu.RUnlock()
+	if t := findTemplate(id); t != nil {
+		c := *t
+		return &c
 	}
 	return nil
 }
@@ -833,58 +1127,161 @@ func safetyScore(p AuthPolicy) float64 {
 	return loa + 0.5*float64(len(p.Factors)-1)
 }
 
-// writeGroupGatePolicy serializes the current per-app auth policies and the
-// global default to the JSON file that group-gate reads. Atomic write via
-// temp-file + rename so group-gate never sees a partial document.
+// writeGroupGatePolicy serializes the per-app auth policies, the global
+// default and the access groups of enabled templates to the JSON file that
+// group-gate reads. Takes stateMu itself — callers must NOT hold it.
+//
+// group-gate keys everything by the request's subdomain, while the Hub keys
+// policies by template ID; the two differ for many apps (gitlab → git,
+// vaultwarden → passwords, …). So every per-app policy is written under the
+// template ID *and* under each subdomain the template routes.
+//
+// Atomic write via temp-file + rename so group-gate never sees a partial
+// document.
+var policyWriteMu sync.Mutex
+
+// coreSubdomains are owned by the core stack; templates may never publish
+// policies or groups for them.
+var coreSubdomains = map[string]bool{"auth": true, "traefik": true, "hub": true, "directory": true, "enroll": true}
+
 func writeGroupGatePolicy() error {
-	doc := map[string]interface{}{
-		"policies": state.AuthPolicies,
-		"default":  state.DefaultPolicy,
+	// Serialise snapshot → rename so an older snapshot can never overwrite a
+	// newer one (a stale file could drop groups and fail open).
+	policyWriteMu.Lock()
+	defer policyWriteMu.Unlock()
+	stateMu.RLock()
+	policies := make(map[string]AuthPolicy, len(state.AuthPolicies))
+	for id, p := range state.AuthPolicies {
+		if !coreSubdomains[id] {
+			policies[id] = p
+		}
 	}
+	groups := map[string]string{}
+	for i := range templates {
+		t := &templates[i]
+		if !t.Enabled {
+			continue // only live apps publish subdomain entries
+		}
+		var subs []string
+		for _, sub := range templateSubdomains(t) {
+			if coreSubdomains[sub] {
+				log.Printf("auth-policy: template %s routes core subdomain %q — ignored for policies/groups", t.ID, sub)
+				continue
+			}
+			subs = append(subs, sub)
+		}
+		if p, ok := state.AuthPolicies[t.ID]; ok {
+			for _, sub := range subs {
+				if _, taken := policies[sub]; !taken {
+					policies[sub] = p
+				}
+			}
+		}
+		// Only apps that opt into group-based access (group_access: true)
+		// get a required group; for the others access_group is informational.
+		if t.Manifest.Auth.GroupAccess && t.Manifest.Auth.AccessGroup != "" {
+			for _, sub := range subs {
+				groups[sub] = t.Manifest.Auth.AccessGroup
+			}
+		}
+	}
+	doc := map[string]interface{}{
+		"policies": policies,
+		"default":  state.DefaultPolicy,
+		"groups":   groups,
+	}
+	stateMu.RUnlock()
+
 	payload, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
 		return err
 	}
-	policyDir := dataDir
-	target := filepath.Join(policyDir, "group-gate-policy.json")
-	tmp := target + ".tmp"
-	if err := os.WriteFile(tmp, payload, 0644); err != nil {
-		return err
+	// 0644: group-gate reads this from a read-only mount as another user.
+	return writeFileAtomic(filepath.Join(dataDir, "group-gate-policy.json"), payload, 0644)
+}
+
+// ── Keycloak admin API (net/http, no curl) ───────────────
+//
+// Using net/http instead of shelling out to curl keeps the admin password and
+// bearer tokens out of process arguments (visible in `ps` on the host), gives
+// every call a timeout, and verifies TLS if KEYCLOAK_URL is ever https.
+
+func keycloakBaseURL() string {
+	if u := os.Getenv("KEYCLOAK_URL"); u != "" {
+		return strings.TrimRight(u, "/")
 	}
-	return os.Rename(tmp, target)
+	return "http://keycloak:8080"
 }
 
 // keycloakAdminToken fetches a short-lived admin access token by password
-// grant against the master realm. The caller is responsible for using it in
-// the same goroutine (tokens expire in ~60s by default).
+// grant against the master realm (tokens expire in ~60s by default).
 func keycloakAdminToken() (string, string, error) {
-	keycloakURL := os.Getenv("KEYCLOAK_URL")
-	if keycloakURL == "" {
-		keycloakURL = "http://keycloak:8080"
+	kcURL := keycloakBaseURL()
+	form := url.Values{
+		"client_id":  {"admin-cli"},
+		"username":   {os.Getenv("KEYCLOAK_ADMIN")},
+		"password":   {os.Getenv("KEYCLOAK_ADMIN_PASSWORD")},
+		"grant_type": {"password"},
 	}
-	cmd := exec.Command("curl", "-sk",
-		keycloakURL+"/realms/master/protocol/openid-connect/token",
-		"-d", "client_id=admin-cli",
-		"-d", "username="+os.Getenv("KEYCLOAK_ADMIN"),
-		"-d", "password="+os.Getenv("KEYCLOAK_ADMIN_PASSWORD"),
-		"-d", "grant_type=password")
-	out, err := cmd.Output()
+	resp, err := httpClient.PostForm(kcURL+"/realms/master/protocol/openid-connect/token", form)
 	if err != nil {
 		return "", "", fmt.Errorf("keycloak auth failed: %w", err)
 	}
-	var tr map[string]interface{}
-	if err := json.Unmarshal(out, &tr); err != nil {
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return "", "", fmt.Errorf("keycloak auth failed: HTTP %d", resp.StatusCode)
+	}
+	var tr struct {
+		AccessToken string `json:"access_token"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxBodyBytes)).Decode(&tr); err != nil {
 		return "", "", fmt.Errorf("keycloak auth response parse: %w", err)
 	}
-	tok, _ := tr["access_token"].(string)
-	if tok == "" {
+	if tr.AccessToken == "" {
 		return "", "", fmt.Errorf("no access token from keycloak")
 	}
-	return keycloakURL, tok, nil
+	return kcURL, tr.AccessToken, nil
 }
 
-// listRealmUsers returns usernames in the Portcullis realm (up to 1000). Used
-// by the Hub's enrollment-trigger UI to populate the user dropdown.
+// kcDo performs an authenticated admin API call. body (if non-nil) is sent as
+// JSON; out (if non-nil) receives the decoded 2xx response. Returns the HTTP
+// status code.
+func kcDo(method, fullURL, token string, body, out interface{}) (int, error) {
+	var rdr io.Reader
+	if body != nil {
+		b, err := json.Marshal(body)
+		if err != nil {
+			return 0, err
+		}
+		rdr = bytes.NewReader(b)
+	}
+	req, err := http.NewRequest(method, fullURL, rdr)
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+	if err != nil {
+		return resp.StatusCode, err
+	}
+	if out != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		if err := json.Unmarshal(data, out); err != nil {
+			return resp.StatusCode, fmt.Errorf("parse response: %w", err)
+		}
+	}
+	return resp.StatusCode, nil
+}
+
+// listRealmUsers returns users in the Portcullis realm (up to 1000). Used by
+// the Hub's enrollment-trigger UI to populate the user dropdown.
 type keycloakUser struct {
 	ID              string   `json:"id"`
 	Username        string   `json:"username"`
@@ -898,18 +1295,22 @@ func listRealmUsers() ([]keycloakUser, error) {
 	if err != nil {
 		return nil, err
 	}
-	cmd := exec.Command("curl", "-sk",
-		kcURL+"/admin/realms/portcullis/users?max=1000&briefRepresentation=false",
-		"-H", "Authorization: Bearer "+tok)
-	out, err := cmd.Output()
+	var users []keycloakUser
+	code, err := kcDo("GET", kcURL+"/admin/realms/portcullis/users?max=1000&briefRepresentation=false", tok, nil, &users)
 	if err != nil {
 		return nil, fmt.Errorf("list users: %w", err)
 	}
-	var users []keycloakUser
-	if err := json.Unmarshal(out, &users); err != nil {
-		return nil, fmt.Errorf("parse users: %w", err)
+	if code != 200 {
+		return nil, fmt.Errorf("list users: HTTP %d", code)
 	}
-	return users, nil
+	// IDs are spliced into onclick handlers in the UI; drop anything odd.
+	out := users[:0]
+	for _, u := range users {
+		if uuidRe.MatchString(u.ID) {
+			out = append(out, u)
+		}
+	}
+	return out, nil
 }
 
 // setUserRequiredActions replaces the Keycloak user's requiredActions array.
@@ -917,41 +1318,83 @@ func listRealmUsers() ([]keycloakUser, error) {
 // ["webauthn-register-passwordless"] forces the user to enroll a key on next
 // login before the LoA-2+ subflows can succeed.
 func setUserRequiredActions(userID string, actions []string) error {
+	if !uuidRe.MatchString(userID) {
+		return fmt.Errorf("invalid user id")
+	}
 	kcURL, tok, err := keycloakAdminToken()
 	if err != nil {
 		return err
 	}
-	getCmd := exec.Command("curl", "-sk",
-		kcURL+"/admin/realms/portcullis/users/"+userID,
-		"-H", "Authorization: Bearer "+tok)
-	raw, err := getCmd.Output()
+	userURL := kcURL + "/admin/realms/portcullis/users/" + url.PathEscape(userID)
+	var user map[string]interface{}
+	code, err := kcDo("GET", userURL, tok, nil, &user)
 	if err != nil {
 		return fmt.Errorf("get user: %w", err)
 	}
-	var user map[string]interface{}
-	if err := json.Unmarshal(raw, &user); err != nil {
-		return fmt.Errorf("parse user: %w", err)
+	if code != 200 {
+		return fmt.Errorf("get user: HTTP %d", code)
 	}
-	// Marshal []string as JSON array — Keycloak is strict about this being
-	// a JSON array of strings, not a comma-joined value.
+	// Keycloak is strict about this being a JSON array of strings.
 	if actions == nil {
 		actions = []string{}
 	}
 	user["requiredActions"] = actions
-	payload, _ := json.Marshal(user)
-	putCmd := exec.Command("curl", "-sk", "-o", "/dev/null", "-w", "%{http_code}",
-		"-X", "PUT",
-		kcURL+"/admin/realms/portcullis/users/"+userID,
-		"-H", "Authorization: Bearer "+tok,
-		"-H", "Content-Type: application/json",
-		"-d", string(payload))
-	out, err := putCmd.Output()
+	code, err = kcDo("PUT", userURL, tok, user, nil)
 	if err != nil {
 		return fmt.Errorf("update user: %w", err)
 	}
-	code := strings.TrimSpace(string(out))
-	if code != "204" {
-		return fmt.Errorf("user %s required-actions update: HTTP %s", userID, code)
+	if code != 204 {
+		return fmt.Errorf("user %s required-actions update: HTTP %d", userID, code)
+	}
+	return nil
+}
+
+// findKeycloakClient looks up a client representation by clientId.
+func findKeycloakClient(kcURL, token, clientID string) (map[string]interface{}, error) {
+	var clients []map[string]interface{}
+	code, err := kcDo("GET", kcURL+"/admin/realms/portcullis/clients?clientId="+url.QueryEscape(clientID), token, nil, &clients)
+	if err != nil {
+		return nil, fmt.Errorf("client lookup failed: %w", err)
+	}
+	if code != 200 {
+		return nil, fmt.Errorf("client lookup: HTTP %d", code)
+	}
+	for _, c := range clients {
+		if c["clientId"] == clientID {
+			if id, _ := c["id"].(string); id != "" {
+				return c, nil
+			}
+		}
+	}
+	return nil, fmt.Errorf("client %s not found in keycloak", clientID)
+}
+
+// withACR sets default.acr.values and makes sure the "acr" default client
+// scope is present on a client representation.
+func withACR(client map[string]interface{}, acrValue string) {
+	attrs, _ := client["attributes"].(map[string]interface{})
+	if attrs == nil {
+		attrs = map[string]interface{}{}
+	}
+	attrs["default.acr.values"] = acrValue
+	client["attributes"] = attrs
+	scopes, _ := client["defaultClientScopes"].([]interface{})
+	for _, sc := range scopes {
+		if sc == "acr" {
+			return
+		}
+	}
+	client["defaultClientScopes"] = append(scopes, "acr")
+}
+
+func putKeycloakClient(kcURL, token string, client map[string]interface{}) error {
+	uuid, _ := client["id"].(string)
+	code, err := kcDo("PUT", kcURL+"/admin/realms/portcullis/clients/"+url.PathEscape(uuid), token, client, nil)
+	if err != nil {
+		return fmt.Errorf("client update failed: %w", err)
+	}
+	if code != 204 {
+		return fmt.Errorf("client %v update: unexpected HTTP %d", client["clientId"], code)
 	}
 	return nil
 }
@@ -960,83 +1403,16 @@ func setUserRequiredActions(userID string, actions []string) error {
 // so its own authorize requests include the needed acr_values, triggering
 // step-up if the session doesn't already meet the level.
 func updateClientAcrLoAMap(clientID, acrValue string) error {
-	keycloakURL := os.Getenv("KEYCLOAK_URL")
-	if keycloakURL == "" {
-		keycloakURL = "http://keycloak:8080"
-	}
-
-	// Admin token
-	tokenCmd := exec.Command("curl", "-sk",
-		keycloakURL+"/realms/master/protocol/openid-connect/token",
-		"-d", "client_id=admin-cli",
-		"-d", "username="+os.Getenv("KEYCLOAK_ADMIN"),
-		"-d", "password="+os.Getenv("KEYCLOAK_ADMIN_PASSWORD"),
-		"-d", "grant_type=password")
-	out, err := tokenCmd.Output()
+	kcURL, token, err := keycloakAdminToken()
 	if err != nil {
-		return fmt.Errorf("keycloak auth failed: %w", err)
+		return err
 	}
-	var tokenResp map[string]interface{}
-	json.Unmarshal(out, &tokenResp)
-	token, _ := tokenResp["access_token"].(string)
-	if token == "" {
-		return fmt.Errorf("no access token from keycloak")
-	}
-
-	// Find the internal UUID for this clientId
-	listCmd := exec.Command("curl", "-sk",
-		keycloakURL+"/admin/realms/portcullis/clients?clientId="+clientID,
-		"-H", "Authorization: Bearer "+token)
-	out, err = listCmd.Output()
+	existing, err := findKeycloakClient(kcURL, token, clientID)
 	if err != nil {
-		return fmt.Errorf("client lookup failed: %w", err)
+		return err
 	}
-	var clients []map[string]interface{}
-	if err := json.Unmarshal(out, &clients); err != nil || len(clients) == 0 {
-		return fmt.Errorf("client %s not found in keycloak", clientID)
-	}
-	uuid, _ := clients[0]["id"].(string)
-	if uuid == "" {
-		return fmt.Errorf("client %s has no uuid", clientID)
-	}
-	existing := clients[0]
-
-	attrs, _ := existing["attributes"].(map[string]interface{})
-	if attrs == nil {
-		attrs = map[string]interface{}{}
-	}
-	attrs["default.acr.values"] = acrValue
-	existing["attributes"] = attrs
-
-	scopes, _ := existing["defaultClientScopes"].([]interface{})
-	hasACR := false
-	for _, s := range scopes {
-		if s == "acr" {
-			hasACR = true
-			break
-		}
-	}
-	if !hasACR {
-		scopes = append(scopes, "acr")
-	}
-	existing["defaultClientScopes"] = scopes
-
-	payload, _ := json.Marshal(existing)
-	putCmd := exec.Command("curl", "-sk", "-o", "/dev/null", "-w", "%{http_code}",
-		"-X", "PUT",
-		keycloakURL+"/admin/realms/portcullis/clients/"+uuid,
-		"-H", "Authorization: Bearer "+token,
-		"-H", "Content-Type: application/json",
-		"-d", string(payload))
-	out, err = putCmd.Output()
-	if err != nil {
-		return fmt.Errorf("client update failed: %w", err)
-	}
-	code := strings.TrimSpace(string(out))
-	if code != "204" {
-		return fmt.Errorf("client %s update: unexpected HTTP %s", clientID, code)
-	}
-	return nil
+	withACR(existing, acrValue)
+	return putKeycloakClient(kcURL, token, existing)
 }
 
 // composeRoutersByService returns, for each service in the base compose.yml,
@@ -1137,12 +1513,84 @@ func composeUp(tmpl *Template) error {
 	if _, err := os.Stat(composePath); err != nil {
 		return nil
 	}
+	if err := syncTemplateFiles(tmpl); err != nil {
+		return fmt.Errorf("sync template files: %w", err)
+	}
 	args := append(composeBaseArgs(tmpl), "up", "-d", "--no-deps")
-	cmd := exec.Command("docker", args...)
+	cmd, cancel := newCmd(context.Background(), composeUpTimeout, "docker", args...)
+	defer cancel()
 	cmd.Env = append(os.Environ(), "COMPOSE_IGNORE_ORPHANS=true")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+// syncTemplateFiles publishes a template's support files (config templates,
+// entrypoint scripts) to <project>/templates/<id>/ so that relative bind
+// mounts like ./templates/<id>/setup.sh resolve on the HOST: compose runs
+// with --project-directory = the core checkout on the host, while the
+// template itself lives in the Hub's data volume, which the host daemon
+// can't address by path. Core mounts ./templates read-write for this.
+//
+// The copy is staged next to the target and swapped in by rename, so a
+// running container never sees a half-written directory.
+func syncTemplateFiles(tmpl *Template) error {
+	root := filepath.Join(projectDir, "templates")
+	if err := os.MkdirAll(root, 0755); err != nil {
+		return err
+	}
+	dest := filepath.Join(root, tmpl.ID)
+	stage, err := os.MkdirTemp(root, "."+tmpl.ID+".stage-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(stage)
+	if err := os.Chmod(stage, 0755); err != nil {
+		return err
+	}
+	err = filepath.WalkDir(tmpl.Path, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(tmpl.Path, path)
+		if rel == "." {
+			return nil
+		}
+		if d.Name() == ".git" {
+			return filepath.SkipDir
+		}
+		target := filepath.Join(stage, rel)
+		switch {
+		case d.IsDir():
+			return os.MkdirAll(target, 0755)
+		case d.Type().IsRegular():
+			info, err := d.Info()
+			if err != nil {
+				return err
+			}
+			if err := copyFile(path, target); err != nil {
+				return err
+			}
+			return os.Chmod(target, info.Mode().Perm())
+		default:
+			return nil // skip symlinks/devices: never follow out of the template
+		}
+	})
+	if err != nil {
+		return err
+	}
+	old := dest + ".old"
+	os.RemoveAll(old)
+	if _, err := os.Stat(dest); err == nil {
+		if err := os.Rename(dest, old); err != nil {
+			return err
+		}
+	}
+	if err := os.Rename(stage, dest); err != nil {
+		os.Rename(old, dest) // best-effort rollback
+		return err
+	}
+	return os.RemoveAll(old)
 }
 
 func composeDown(tmpl *Template) error {
@@ -1151,8 +1599,19 @@ func composeDown(tmpl *Template) error {
 		return nil
 	}
 	args := append(composeBaseArgs(tmpl), "down")
-	cmd := exec.Command("docker", args...)
+	cmd, cancel := newCmd(context.Background(), composeDownTimeout, "docker", args...)
+	defer cancel()
 	cmd.Env = append(os.Environ(), "COMPOSE_IGNORE_ORPHANS=true")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+// composeDownByProject stops an app using only its project name — works even
+// without the template's compose file.
+func composeDownByProject(id string) error {
+	cmd, cancel := newCmd(context.Background(), composeDownTimeout, "docker", "compose", "-p", "portcullis-"+id, "down")
+	defer cancel()
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
@@ -1170,7 +1629,13 @@ func generateComposeOverride(tmpl *Template, values map[string]string) error {
 			continue
 		}
 		if s.Type == "path" {
-			mount := fmt.Sprintf("%s:%s", val, s.Target.Mount)
+			if err := validatePathSetting(val); err != nil {
+				return fmt.Errorf("setting %s: %w", s.Key, err)
+			}
+			// JSON string == valid YAML double-quoted scalar: safe for
+			// spaces, quotes and '#'.
+			mountJSON, _ := json.Marshal(val + ":" + s.Target.Mount)
+			mount := string(mountJSON)
 			serviceMounts[s.Target.Service] = append(serviceMounts[s.Target.Service], mount)
 		}
 	}
@@ -1191,6 +1656,9 @@ func generateComposeOverride(tmpl *Template, values map[string]string) error {
 		if bind == "" {
 			bind = "0.0.0.0"
 		}
+		if net.ParseIP(bind) == nil {
+			return fmt.Errorf("port %s: bind %q is not an IP address", p.Key, bind)
+		}
 		host := p.Default
 		if v, ok := values[p.Key]; ok {
 			if v == "" && !p.Required {
@@ -1203,7 +1671,11 @@ func generateComposeOverride(tmpl *Template, values map[string]string) error {
 		if host <= 0 || p.Container <= 0 {
 			continue
 		}
-		entry := fmt.Sprintf("\"%s:%d:%d/%s\"", bind, host, p.Container, proto)
+		hostIP := bind
+		if strings.Contains(bind, ":") { // IPv6 needs brackets in compose port syntax
+			hostIP = "[" + bind + "]"
+		}
+		entry := fmt.Sprintf("\"%s:%d:%d/%s\"", hostIP, host, p.Container, proto)
 		servicePorts[p.Service] = append(servicePorts[p.Service], entry)
 	}
 
@@ -1260,7 +1732,17 @@ func generateComposeOverride(tmpl *Template, values map[string]string) error {
 			}
 		}
 	}
-	return os.WriteFile(overridePath, []byte(buf.String()), 0644)
+	return writeFileAtomic(overridePath, []byte(buf.String()), 0600)
+}
+
+// validatePathSetting checks a host path destined for a "<host>:<container>"
+// volume entry in the override YAML.
+func validatePathSetting(v string) error {
+	// ":" would be parsed by compose as host:container[:mode].
+	if hasControlChars(v) || strings.Contains(v, ":") {
+		return fmt.Errorf("path %q may not contain ':' or control characters", v)
+	}
+	return nil
 }
 
 // ── Env var management ───────────────────────────────────
@@ -1336,7 +1818,8 @@ func generateAppEnv(tmpl *Template) error {
 	for _, k := range keys {
 		lines = append(lines, fmt.Sprintf("%s=%s", k, vars[k]))
 	}
-	return os.WriteFile(envFile, []byte(strings.Join(lines, "\n")+"\n"), 0644)
+	// 0600: contains generated secrets.
+	return writeFileAtomic(envFile, []byte(strings.Join(lines, "\n")+"\n"), 0600)
 }
 
 // readEnvFile parses a .env file into a map.
@@ -1394,26 +1877,64 @@ func ensureEnvVars(vars []EnvVar) error {
 
 // ── Keycloak client registration ─────────────────────────
 
-func registerKeycloakClient(client KeycloakClient, tmpl *Template) error {
+// hubOwnerAttr marks Keycloak clients created by the Hub with the template
+// that owns them, so a template can only ever reconcile its own client.
+const hubOwnerAttr = "portcullis.hub.template"
+
+// protectedClients are core/built-in clients no template may touch.
+var protectedClients = map[string]bool{
+	"portcullis-forward-auth": true, "admin-cli": true, "account": true, "account-console": true,
+	"broker": true, "realm-management": true, "security-admin-console": true,
+}
+
+// hubMayReconcile decides whether an existing client (409 on create) may be
+// updated for template id. Tagged clients must carry this template's tag.
+// Untagged clients (created before tagging existed) are adopted only if every
+// existing redirect URI points at a host the template itself declares.
+func hubMayReconcile(existing map[string]interface{}, id string, wantURIs []string) bool {
+	cid, _ := existing["clientId"].(string)
+	if protectedClients[cid] {
+		return false
+	}
+	if attrs, ok := existing["attributes"].(map[string]interface{}); ok {
+		if owner, ok := attrs[hubOwnerAttr].(string); ok && owner != "" {
+			return owner == id
+		}
+	}
+	hosts := map[string]bool{}
+	for _, u := range wantURIs {
+		if pu, err := url.Parse(u); err == nil && pu.Host != "" {
+			hosts[strings.ToLower(pu.Host)] = true
+		}
+	}
+	if len(hosts) == 0 {
+		return false
+	}
+	existingURIs, _ := existing["redirectUris"].([]interface{})
+	for _, raw := range existingURIs {
+		str, _ := raw.(string)
+		pu, err := url.Parse(str)
+		if err != nil || !hosts[strings.ToLower(pu.Host)] {
+			return false
+		}
+	}
+	return true
+}
+
+// registerKeycloakClient creates (or, if it already exists, reconciles) the
+// app's OIDC client. acrValue is the policy-derived default.acr.values.
+func registerKeycloakClient(client KeycloakClient, tmpl *Template, acrValue string) error {
 	// Read secret from per-app .env first, then fall back to core .env
 	secretVal := ""
-	for _, envPath := range []string{appEnvPath(tmpl), filepath.Join(projectDir, ".env")} {
-		data, err := os.ReadFile(envPath)
-		if err != nil {
-			continue
-		}
-		for _, line := range strings.Split(string(data), "\n") {
-			if strings.HasPrefix(line, client.SecretEnv+"=") {
-				secretVal = strings.TrimPrefix(line, client.SecretEnv+"=")
+	if client.SecretEnv != "" {
+		for _, envPath := range []string{appEnvPath(tmpl), filepath.Join(projectDir, ".env")} {
+			if v := readEnvFile(envPath)[client.SecretEnv]; v != "" {
+				secretVal = v
 				break
 			}
 		}
-		if secretVal != "" {
-			break
-		}
 	}
 
-	// Build redirect URI list
 	var redirectURIs []string
 	if len(client.RedirectURIs) > 0 {
 		for _, uri := range client.RedirectURIs {
@@ -1423,102 +1944,134 @@ func registerKeycloakClient(client KeycloakClient, tmpl *Template) error {
 		redirectURIs = []string{strings.ReplaceAll(client.RedirectURI, "{{DOMAIN}}", domain)}
 	}
 
-	keycloakURL := os.Getenv("KEYCLOAK_URL")
-	if keycloakURL == "" {
-		keycloakURL = "http://keycloak:8080"
-	}
-
-	// Get admin token
-	cmd := exec.Command("curl", "-sk",
-		keycloakURL+"/realms/master/protocol/openid-connect/token",
-		"-d", "client_id=admin-cli",
-		"-d", "username="+os.Getenv("KEYCLOAK_ADMIN"),
-		"-d", "password="+os.Getenv("KEYCLOAK_ADMIN_PASSWORD"),
-		"-d", "grant_type=password")
-	out, err := cmd.Output()
+	kcURL, token, err := keycloakAdminToken()
 	if err != nil {
-		return fmt.Errorf("keycloak auth failed: %w", err)
+		return err
 	}
 
-	var tokenResp map[string]interface{}
-	json.Unmarshal(out, &tokenResp)
-	token, _ := tokenResp["access_token"].(string)
-	if token == "" {
-		return fmt.Errorf("no access token from keycloak")
-	}
-
-	// Policy-driven Keycloak client attributes: surface the app's acr to
-	// Keycloak via default.acr.values so step-up fires for the right LoA,
-	// and include the "acr" client scope so the acr/amr claims land in tokens.
-	acrValue := policyACR(resolvePolicy(tmpl.ID))
-
-	// Register client
-	payload, _ := json.Marshal(map[string]interface{}{
-		"clientId":                client.ClientID,
-		"name":                    client.Name,
-		"enabled":                 true,
-		"protocol":                "openid-connect",
-		"publicClient":            false,
-		"secret":                  secretVal,
-		"redirectUris":            redirectURIs,
-		"standardFlowEnabled":     true,
+	// Policy-driven client attributes: surface the app's acr to Keycloak via
+	// default.acr.values so step-up fires for the right LoA, and include the
+	// "acr" client scope so the acr/amr claims land in tokens.
+	rep := map[string]interface{}{
+		"clientId":                  client.ClientID,
+		"name":                      client.Name,
+		"enabled":                   true,
+		"protocol":                  "openid-connect",
+		"publicClient":              false,
+		"secret":                    secretVal,
+		"redirectUris":              redirectURIs,
+		"standardFlowEnabled":       true,
 		"directAccessGrantsEnabled": false,
 		"attributes": map[string]string{
 			"default.acr.values": acrValue,
+			hubOwnerAttr:         tmpl.ID,
 		},
 		"defaultClientScopes": []string{"openid", "profile", "email", "acr"},
-	})
-
-	cmd = exec.Command("curl", "-sk", "-o", "/dev/null", "-w", "%{http_code}",
-		keycloakURL+"/admin/realms/portcullis/clients",
-		"-H", "Authorization: Bearer "+token,
-		"-H", "Content-Type: application/json",
-		"-d", string(payload))
-	out, err = cmd.Output()
+	}
+	code, err := kcDo("POST", kcURL+"/admin/realms/portcullis/clients", token, rep, nil)
 	if err != nil {
 		return fmt.Errorf("client registration failed: %w", err)
 	}
-
-	code := strings.TrimSpace(string(out))
-	if code != "201" && code != "409" {
-		return fmt.Errorf("unexpected response: %s", code)
+	switch code {
+	case 201:
+		log.Printf("Registered Keycloak client %s", client.ClientID)
+		return nil
+	case 409:
+		// Already exists (re-enable, or env regenerated). Reconcile secret,
+		// redirect URIs and ACR so the app's .env and Keycloak agree —
+		// otherwise logins fail with "invalid client credentials".
+		existing, err := findKeycloakClient(kcURL, token, client.ClientID)
+		if err != nil {
+			return err
+		}
+		if !hubMayReconcile(existing, tmpl.ID, redirectURIs) {
+			log.Printf("Keycloak client %s already exists and is not owned by template %s — left untouched", client.ClientID, tmpl.ID)
+			return nil
+		}
+		attrs, _ := existing["attributes"].(map[string]interface{})
+		if attrs == nil {
+			attrs = map[string]interface{}{}
+		}
+		attrs[hubOwnerAttr] = tmpl.ID
+		existing["attributes"] = attrs
+		if secretVal != "" {
+			existing["secret"] = secretVal
+		}
+		if len(redirectURIs) > 0 {
+			existing["redirectUris"] = redirectURIs
+		}
+		withACR(existing, acrValue)
+		if err := putKeycloakClient(kcURL, token, existing); err != nil {
+			return err
+		}
+		log.Printf("Updated existing Keycloak client %s", client.ClientID)
+		return nil
+	default:
+		return fmt.Errorf("client %s registration: unexpected HTTP %d", client.ClientID, code)
 	}
-	log.Printf("Registered Keycloak client %s (HTTP %s)", client.ClientID, code)
-	return nil
 }
 
 // ── Source management ────────────────────────────────────
 
-func addSource(name, url string) error {
-	stateMu.Lock()
-	defer stateMu.Unlock()
+var (
+	sourceNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
+	sourceURLRe  = regexp.MustCompile(`^(https?://[^\s]+|ssh://[^\s]+|[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:[^\s]+)$`)
+)
 
+var sourceOps sync.Map
+
+func addSource(name, repoURL string) error {
+	if !sourceNameRe.MatchString(name) {
+		return fmt.Errorf("invalid source name (use lowercase letters, digits, - and _)")
+	}
+	if !sourceURLRe.MatchString(repoURL) {
+		return fmt.Errorf("invalid source URL (https://, http://, ssh:// or user@host:path)")
+	}
+
+	stateMu.RLock()
 	for _, s := range state.Sources {
 		if s.Name == name {
+			stateMu.RUnlock()
 			return fmt.Errorf("source already exists: %s", name)
 		}
 	}
+	stateMu.RUnlock()
+
+	if _, busy := sourceOps.LoadOrStore(name, struct{}{}); busy {
+		return fmt.Errorf("source %s is already being added", name)
+	}
+	defer sourceOps.Delete(name)
 
 	repoDir := filepath.Join(dataDir, "repos", name)
-	cmd := exec.Command("git", "clone", "--depth=1", url, repoDir)
+	if _, err := os.Stat(repoDir); err == nil {
+		return fmt.Errorf("directory for source %s already exists", name)
+	}
+	// Clone without holding the lock — a slow network must not freeze the Hub.
+	// "--" stops a URL starting with "-" from being parsed as an option.
+	cmd, cancel := newCmd(context.Background(), gitTimeout, "git", "clone", "--depth=1", "--", repoURL, repoDir)
+	defer cancel()
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
+		os.RemoveAll(repoDir)
 		return fmt.Errorf("git clone failed: %w", err)
 	}
 
-	state.Sources = append(state.Sources, Source{
-		Name: name,
-		URL:  url,
-		Path: repoDir,
-	})
-	saveState()
-
-	// Re-discover templates
-	stateMu.Unlock()
-	discoverTemplates()
 	stateMu.Lock()
+	for _, s := range state.Sources {
+		if s.Name == name { // lost a race with a concurrent add
+			stateMu.Unlock()
+			return fmt.Errorf("source already exists: %s", name)
+		}
+	}
+	state.Sources = append(state.Sources, Source{Name: name, URL: repoURL, Path: repoDir})
+	saveState()
+	stateMu.Unlock()
 
+	discoverTemplates()
+	if err := writeGroupGatePolicy(); err != nil {
+		log.Printf("auth-policy: group-gate policy write failed: %v", err)
+	}
 	return nil
 }
 
@@ -1526,41 +2079,50 @@ func removeSource(name string) error {
 	if name == "portcullis" {
 		return fmt.Errorf("cannot remove the default template source")
 	}
-	stateMu.Lock()
-	defer stateMu.Unlock()
 
-	found := false
-	newSources := make([]Source, 0)
-	for _, s := range state.Sources {
-		if s.Name == name {
-			found = true
-			os.RemoveAll(s.Path)
-			continue
+	stateMu.RLock()
+	var src *Source
+	for i := range state.Sources {
+		if state.Sources[i].Name == name {
+			c := state.Sources[i]
+			src = &c
 		}
-		newSources = append(newSources, s)
 	}
-	if !found {
+	var running []Template
+	for _, id := range state.Enabled {
+		if t := findTemplate(id); t != nil && t.Source == name {
+			running = append(running, *t)
+		}
+	}
+	stateMu.RUnlock()
+	if src == nil {
 		return fmt.Errorf("source not found: %s", name)
 	}
 
-	// Disable any apps from this source
-	newEnabled := make([]string, 0)
-	for _, id := range state.Enabled {
-		tmpl := findTemplate(id)
-		if tmpl != nil && tmpl.Source == name {
-			continue
+	// Stop this source's apps while their compose files still exist —
+	// deleting the repo first would orphan the containers.
+	for i := range running {
+		if err := disableApp(running[i].ID); err != nil {
+			return fmt.Errorf("could not stop %s before removing source: %w", running[i].ID, err)
 		}
-		newEnabled = append(newEnabled, id)
 	}
-	state.Enabled = newEnabled
+
+	stateMu.Lock()
+	newSources := make([]Source, 0, len(state.Sources))
+	for _, s := range state.Sources {
+		if s.Name != name {
+			newSources = append(newSources, s)
+		}
+	}
 	state.Sources = newSources
 	saveState()
-
 	stateMu.Unlock()
-	discoverTemplates()
-	stateMu.Lock()
 
-	return nil
+	if src.Path != "" && within(filepath.Join(dataDir, "repos"), src.Path) {
+		os.RemoveAll(src.Path)
+	}
+	discoverTemplates()
+	return writeGroupGatePolicy()
 }
 
 func syncSources() error {
@@ -1569,14 +2131,27 @@ func syncSources() error {
 	copy(sources, state.Sources)
 	stateMu.RUnlock()
 
+	var failed []string
 	for _, s := range sources {
-		if s.Path != "" {
-			cmd := exec.Command("git", "-C", s.Path, "pull", "--ff-only")
-			cmd.Run()
+		if s.Path == "" {
+			continue
+		}
+		cmd, cancel := newCmd(context.Background(), gitTimeout, "git", "-C", s.Path, "pull", "--ff-only")
+		out, err := cmd.CombinedOutput()
+		cancel()
+		if err != nil {
+			log.Printf("sync %s: %v: %s", s.Name, err, strings.TrimSpace(string(out)))
+			failed = append(failed, s.Name)
 		}
 	}
 
 	discoverTemplates()
+	if err := writeGroupGatePolicy(); err != nil {
+		log.Printf("auth-policy: group-gate policy write failed: %v", err)
+	}
+	if len(failed) > 0 {
+		return fmt.Errorf("sync failed for: %s (local edits from Expert mode block fast-forward pulls; see hub logs)", strings.Join(failed, ", "))
+	}
 	return nil
 }
 
@@ -1594,6 +2169,12 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Network lookup first, without holding stateMu.
+	user := r.Header.Get("X-Forwarded-User")
+	if user != "" {
+		user = resolveUsername(user)
+	}
+
 	stateMu.RLock()
 	defer stateMu.RUnlock()
 
@@ -1601,11 +2182,6 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 	categories := make(map[string][]Template)
 	for _, t := range templates {
 		categories[t.Manifest.Category] = append(categories[t.Manifest.Category], t)
-	}
-
-	user := r.Header.Get("X-Forwarded-User")
-	if user != "" {
-		user = resolveUsername(user)
 	}
 
 	portalName := os.Getenv("PORTAL_DISPLAY_NAME")
@@ -1639,7 +2215,9 @@ func handleEnable(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ID string `json:"id"`
 	}
-	json.NewDecoder(r.Body).Decode(&req)
+	if !decodeJSON(w, r, &req) {
+		return
+	}
 
 	if err := enableApp(req.ID); err != nil {
 		http.Error(w, err.Error(), 400)
@@ -1657,7 +2235,9 @@ func handleDisable(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ID string `json:"id"`
 	}
-	json.NewDecoder(r.Body).Decode(&req)
+	if !decodeJSON(w, r, &req) {
+		return
+	}
 
 	if err := disableApp(req.ID); err != nil {
 		http.Error(w, err.Error(), 400)
@@ -1683,7 +2263,9 @@ func handleAddSource(w http.ResponseWriter, r *http.Request) {
 		Name string `json:"name"`
 		URL  string `json:"url"`
 	}
-	json.NewDecoder(r.Body).Decode(&req)
+	if !decodeJSON(w, r, &req) {
+		return
+	}
 
 	if req.Name == "" || req.URL == "" {
 		http.Error(w, "name and url required", 400)
@@ -1706,7 +2288,9 @@ func handleRemoveSource(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Name string `json:"name"`
 	}
-	json.NewDecoder(r.Body).Decode(&req)
+	if !decodeJSON(w, r, &req) {
+		return
+	}
 
 	if err := removeSource(req.Name); err != nil {
 		http.Error(w, err.Error(), 400)
@@ -1744,7 +2328,7 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 
 func handleTemplateSettings(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimPrefix(r.URL.Path, "/api/templates/settings/")
-	tmpl := findTemplate(id)
+	tmpl := getTemplate(id)
 	if tmpl == nil {
 		http.NotFound(w, r)
 		return
@@ -1776,7 +2360,9 @@ func handleTemplateSettings(w http.ResponseWriter, r *http.Request) {
 		// reserved keys: _auth_policy (a JSON object) and _auth_policy_inherit
 		// ("true" clears the per-app override and falls back to the default).
 		var raw map[string]interface{}
-		json.NewDecoder(r.Body).Decode(&raw)
+		if !decodeJSON(w, r, &raw) {
+			return
+		}
 		var policyUpdate *AuthPolicy
 		var policyInherit bool
 		if v, ok := raw["_auth_policy_inherit"]; ok {
@@ -1812,8 +2398,33 @@ func handleTemplateSettings(w http.ResponseWriter, r *http.Request) {
 				values[k] = s
 			}
 		}
-		// Validate declared ports: numeric, in range, or empty (only if optional).
+		// Every key/value ends up in the per-app .env and possibly the
+		// compose override: no odd keys, no newlines.
+		for k, v := range values {
+			if !envKeyRe.MatchString(k) {
+				http.Error(w, fmt.Sprintf("invalid setting key %q", k), 400)
+				return
+			}
+			if hasControlChars(v) {
+				http.Error(w, fmt.Sprintf("setting %s contains control characters", k), 400)
+				return
+			}
+		}
+		for _, st := range tmpl.Manifest.Settings {
+			if v := values[st.Key]; v != "" && st.Type == "path" {
+				if err := validatePathSetting(v); err != nil {
+					http.Error(w, fmt.Sprintf("setting %s: %v", st.Key, err), 400)
+					return
+				}
+			}
+		}
+		// Validate declared ports: numeric, in range, or empty (only if
+		// optional); bind addresses must be IPs.
 		for _, p := range tmpl.Manifest.Ports {
+			if b := values[p.Key+"_BIND"]; b != "" && net.ParseIP(b) == nil {
+				http.Error(w, fmt.Sprintf("bind address for %s must be an IP address", p.Key), 400)
+				return
+			}
 			v, ok := values[p.Key]
 			if !ok {
 				continue
@@ -1834,16 +2445,16 @@ func handleTemplateSettings(w http.ResponseWriter, r *http.Request) {
 		stateMu.Lock()
 		prev := state.Settings[id]
 		state.Settings[id] = values
+		live := findTemplate(id)
+		enabled := live != nil && live.Enabled
 		// Re-check port collisions if this app is currently enabled.
-		var collisionErr error
-		if tmpl.Enabled {
-			collisionErr = checkPortCollisions(tmpl)
-		}
-		if collisionErr != nil {
-			state.Settings[id] = prev
-			stateMu.Unlock()
-			http.Error(w, collisionErr.Error(), 409)
-			return
+		if enabled {
+			if err := checkPortCollisions(tmpl); err != nil {
+				state.Settings[id] = prev
+				stateMu.Unlock()
+				http.Error(w, err.Error(), 409)
+				return
+			}
 		}
 
 		// Apply auth-policy update alongside the settings save so a single UI
@@ -1864,15 +2475,29 @@ func handleTemplateSettings(w http.ResponseWriter, r *http.Request) {
 
 		saveState()
 		effective := resolvePolicy(id)
+		// The override reads state (policy → TLS tier), so render it while
+		// still holding the lock.
+		overrideErr := generateComposeOverride(tmpl, values)
 		stateMu.Unlock()
+		if overrideErr != nil {
+			http.Error(w, "settings saved but override generation failed: "+overrideErr.Error(), 500)
+			return
+		}
 
-		// Write text/boolean/select settings to per-app .env
-		for _, s := range tmpl.Manifest.Settings {
-			if (s.Type == "text" || s.Type == "boolean" || s.Type == "select") && values[s.Key] != "" {
-				setEnvVar(appEnvPath(tmpl), s.Key, values[s.Key])
+		// Write text/boolean/select settings to the per-app .env — including
+		// empty values, so clearing a field actually clears it.
+		envPath := appEnvPath(tmpl)
+		for _, st := range tmpl.Manifest.Settings {
+			if st.Type != "text" && st.Type != "boolean" && st.Type != "select" {
+				continue
+			}
+			if v, ok := values[st.Key]; ok {
+				if err := setEnvVar(envPath, st.Key, v); err != nil {
+					http.Error(w, "failed to write env: "+err.Error(), 500)
+					return
+				}
 			}
 		}
-		generateComposeOverride(tmpl, values)
 
 		if policyChanged {
 			if err := writeGroupGatePolicy(); err != nil {
@@ -1887,15 +2512,90 @@ func handleTemplateSettings(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		if tmpl.Enabled {
-			go func() {
-				composeDown(tmpl)
-				composeUp(tmpl)
-			}()
+		if enabled {
+			go restartApp(*tmpl)
 		}
 		json.NewEncoder(w).Encode(map[string]string{"status": "saved"})
 	default:
 		http.Error(w, "GET or PUT only", 405)
+	}
+}
+
+func samePolicy(a, b AuthPolicy) bool {
+	return a.Op == b.Op && strings.Join(a.Factors, ",") == strings.Join(b.Factors, ",")
+}
+
+// restartApp recreates an app's containers so new env/override/labels take
+// effect. Runs in the background; serialised with other ops on the same app.
+func restartApp(tmpl Template) {
+	// Wait for any in-flight op on this app instead of dropping the restart —
+	// the in-flight op may have read the old env/override. compose reads the
+	// files at run time, so a queued restart always applies the latest ones.
+	deadline := time.Now().Add(composeUpTimeout + composeDownTimeout)
+	var unlock func()
+	for {
+		u, err := lockApp(tmpl.ID)
+		if err == nil {
+			unlock = u
+			break
+		}
+		if time.Now().After(deadline) {
+			log.Printf("restart %s gave up: %v", tmpl.ID, err)
+			return
+		}
+		time.Sleep(2 * time.Second)
+	}
+	defer unlock()
+	if err := composeDown(&tmpl); err != nil {
+		log.Printf("restart %s: compose down failed: %v", tmpl.ID, err)
+	}
+	if err := composeUp(&tmpl); err != nil {
+		log.Printf("restart %s: compose up failed: %v", tmpl.ID, err)
+	}
+}
+
+// applyDefaultPolicy propagates a changed global default to every enabled
+// app that inherits it: regenerate overrides (Traefik TLS tier), push the
+// Keycloak acr, and recreate the containers so the new labels apply.
+var defaultPolicyMu sync.Mutex
+
+func applyDefaultPolicy() {
+	defaultPolicyMu.Lock()
+	defer defaultPolicyMu.Unlock()
+	stateMu.Lock()
+	var affected []Template
+	for _, id := range state.Enabled {
+		if _, override := state.AuthPolicies[id]; override {
+			continue
+		}
+		t := findTemplate(id)
+		if t == nil {
+			continue
+		}
+		before, _ := os.ReadFile(appOverridePath(t))
+		if err := generateComposeOverride(t, state.Settings[id]); err != nil {
+			log.Printf("default-policy: override for %s failed: %v", id, err)
+			continue
+		}
+		after, _ := os.ReadFile(appOverridePath(t))
+		if !bytes.Equal(before, after) {
+			affected = append(affected, *t) // TLS tier changed → needs recreate
+		} else if len(t.Manifest.Clients) > 0 {
+			affected = append(affected, Template{ID: t.ID, Manifest: t.Manifest}) // acr only
+		}
+	}
+	acr := policyACR(state.DefaultPolicy)
+	stateMu.Unlock()
+
+	for _, t := range affected {
+		for _, client := range t.Manifest.Clients {
+			if err := updateClientAcrLoAMap(client.ClientID, acr); err != nil {
+				log.Printf("default-policy: keycloak client %s update failed: %v", client.ClientID, err)
+			}
+		}
+		if t.Path != "" {
+			restartApp(t)
+		}
 	}
 }
 
@@ -1910,25 +2610,34 @@ func handleSettings(w http.ResponseWriter, r *http.Request) {
 		dp := state.DefaultPolicy
 		stateMu.RUnlock()
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"default_auth_policy": dp,
+			"default_auth_policy":  dp,
 			"default_safety_score": safetyScore(dp),
 		})
 	case http.MethodPut:
 		var req struct {
 			DefaultAuthPolicy *AuthPolicy `json:"default_auth_policy"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.DefaultAuthPolicy == nil {
+		if !decodeJSON(w, r, &req) {
+			return
+		}
+		if req.DefaultAuthPolicy == nil {
 			http.Error(w, "expected {default_auth_policy: {factors, op}}", 400)
 			return
 		}
 		norm := normalizePolicy(*req.DefaultAuthPolicy)
 		stateMu.Lock()
+		changed := !samePolicy(state.DefaultPolicy, norm)
 		state.DefaultPolicy = norm
 		saveState()
 		stateMu.Unlock()
+		if !changed {
+			json.NewEncoder(w).Encode(map[string]string{"status": "unchanged"})
+			return
+		}
 		if err := writeGroupGatePolicy(); err != nil {
 			log.Printf("settings: failed to write group-gate policy file: %v", err)
 		}
+		go applyDefaultPolicy()
 		json.NewEncoder(w).Encode(map[string]string{"status": "saved"})
 	default:
 		http.Error(w, "GET or PUT only", 405)
@@ -1969,8 +2678,7 @@ func handleUserActions(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Actions []string `json:"actions"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "expected {actions: [...]}", 400)
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	// Allowlist to prevent arbitrary action injection.
@@ -2016,7 +2724,7 @@ func composeServices(tmpl *Template) []string {
 
 func handleTemplateStatus(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimPrefix(r.URL.Path, "/api/templates/status/")
-	tmpl := findTemplate(id)
+	tmpl := getTemplate(id)
 	if tmpl == nil {
 		http.NotFound(w, r)
 		return
@@ -2025,7 +2733,8 @@ func handleTemplateStatus(w http.ResponseWriter, r *http.Request) {
 	services := composeServices(tmpl)
 	args := append(composeBaseArgs(tmpl), "ps", "--format", "json")
 	args = append(args, services...)
-	cmd := exec.Command("docker", args...)
+	cmd, cancel := newCmd(r.Context(), composeQueryTimeout, "docker", args...)
+	defer cancel()
 	cmd.Env = append(os.Environ(), "COMPOSE_IGNORE_ORPHANS=true")
 	out, err := cmd.Output()
 	w.Header().Set("Content-Type", "application/json")
@@ -2053,7 +2762,7 @@ func handleTemplateStatus(w http.ResponseWriter, r *http.Request) {
 
 func handleTemplateLogs(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimPrefix(r.URL.Path, "/api/templates/logs/")
-	tmpl := findTemplate(id)
+	tmpl := getTemplate(id)
 	if tmpl == nil {
 		http.NotFound(w, r)
 		return
@@ -2062,18 +2771,35 @@ func handleTemplateLogs(w http.ResponseWriter, r *http.Request) {
 	if lines == "" {
 		lines = "200"
 	}
-	service := r.URL.Query().Get("service")
-	args := append(composeBaseArgs(tmpl), "logs", "--tail", lines, "--no-color")
-	if service != "" {
-		args = append(args, service)
-	} else {
-		// Only show logs for services defined in this app's compose file
-		args = append(args, composeServices(tmpl)...)
+	if n, err := strconv.Atoi(lines); err != nil || n < 1 || n > 10000 {
+		http.Error(w, "lines must be 1-10000", 400)
+		return
 	}
-	cmd := exec.Command("docker", args...)
+	services := composeServices(tmpl)
+	// Only services from this app's compose file — and never anything that
+	// could be parsed as a flag (e.g. service=-f would follow forever).
+	if service := r.URL.Query().Get("service"); service != "" {
+		valid := false
+		for _, svc := range services {
+			if svc == service {
+				valid = true
+				break
+			}
+		}
+		if !valid {
+			http.Error(w, "invalid service", 400)
+			return
+		}
+		services = []string{service}
+	}
+	args := append(composeBaseArgs(tmpl), "logs", "--tail", lines, "--no-color", "--")
+	args = append(args, services...)
+	cmd, cancel := newCmd(r.Context(), composeQueryTimeout, "docker", args...)
+	defer cancel()
 	cmd.Env = append(os.Environ(), "COMPOSE_IGNORE_ORPHANS=true")
 	out, _ := cmd.CombinedOutput()
-	w.Header().Set("Content-Type", "text/plain")
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Write(out)
 }
 
@@ -2081,7 +2807,7 @@ func handleTemplateLogs(w http.ResponseWriter, r *http.Request) {
 
 func handleTemplateCompose(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimPrefix(r.URL.Path, "/api/templates/compose/")
-	tmpl := findTemplate(id)
+	tmpl := getTemplate(id)
 	if tmpl == nil {
 		http.NotFound(w, r)
 		return
@@ -2108,22 +2834,37 @@ func handleTemplateCompose(w http.ResponseWriter, r *http.Request) {
 			Compose  string `json:"compose"`
 			Override string `json:"override"`
 		}
-		json.NewDecoder(r.Body).Decode(&req)
-		// Validate YAML
+		if !decodeJSON(w, r, &req) {
+			return
+		}
+		// Validate both documents before writing anything.
 		var check interface{}
 		if err := yaml.Unmarshal([]byte(req.Compose), &check); err != nil {
 			http.Error(w, "Invalid YAML: "+err.Error(), 400)
 			return
 		}
-		if err := os.WriteFile(composePath, []byte(req.Compose), 0644); err != nil {
+		if req.Override != "" {
+			if err := yaml.Unmarshal([]byte(req.Override), &check); err != nil {
+				http.Error(w, "Invalid override YAML: "+err.Error(), 400)
+				return
+			}
+		}
+		if err := writeFileAtomic(composePath, []byte(req.Compose), 0644); err != nil {
 			http.Error(w, "Failed to write: "+err.Error(), 500)
 			return
 		}
 		overridePath := appOverridePath(tmpl)
 		if req.Override != "" {
-			os.WriteFile(overridePath, []byte(req.Override), 0644)
+			if err := writeFileAtomic(overridePath, []byte(req.Override), 0600); err != nil {
+				http.Error(w, "Failed to write override: "+err.Error(), 500)
+				return
+			}
 		} else {
 			os.Remove(overridePath)
+		}
+		// Host() rules may have changed → refresh subdomain policy/groups.
+		if err := writeGroupGatePolicy(); err != nil {
+			log.Printf("auth-policy: group-gate policy write failed: %v", err)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "saved"})
@@ -2134,7 +2875,7 @@ func handleTemplateCompose(w http.ResponseWriter, r *http.Request) {
 
 func handleTemplateEnv(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimPrefix(r.URL.Path, "/api/templates/env/")
-	tmpl := findTemplate(id)
+	tmpl := getTemplate(id)
 	if tmpl == nil {
 		http.NotFound(w, r)
 		return
@@ -2164,9 +2905,20 @@ func handleTemplateEnv(w http.ResponseWriter, r *http.Request) {
 		})
 	case http.MethodPut:
 		var req map[string]string
-		json.NewDecoder(r.Body).Decode(&req)
+		if !decodeJSON(w, r, &req) {
+			return
+		}
 		for key, val := range req {
-			setEnvVar(appEnv, key, val)
+			if !envKeyRe.MatchString(key) || hasControlChars(val) {
+				http.Error(w, fmt.Sprintf("invalid variable %q (keys: [A-Za-z_][A-Za-z0-9_]*, values: no newlines)", key), 400)
+				return
+			}
+		}
+		for key, val := range req {
+			if err := setEnvVar(appEnv, key, val); err != nil {
+				http.Error(w, "failed to write env: "+err.Error(), 500)
+				return
+			}
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "saved"})
@@ -2201,7 +2953,7 @@ func handleTemplateExec(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := strings.TrimPrefix(r.URL.Path, "/api/templates/exec/")
-	tmpl := findTemplate(id)
+	tmpl := getTemplate(id)
 	if tmpl == nil {
 		http.NotFound(w, r)
 		return
@@ -2210,7 +2962,9 @@ func handleTemplateExec(w http.ResponseWriter, r *http.Request) {
 		Service string `json:"service"`
 		Command string `json:"command"`
 	}
-	json.NewDecoder(r.Body).Decode(&req)
+	if !decodeJSON(w, r, &req) {
+		return
+	}
 	if req.Service == "" || req.Command == "" {
 		http.Error(w, "service and command required", 400)
 		return
@@ -2229,9 +2983,17 @@ func handleTemplateExec(w http.ResponseWriter, r *http.Request) {
 	}
 	// Execute: docker compose exec <service> <shell> -c <command>
 	args := append(composeBaseArgs(tmpl), "exec", "-T", req.Service, "/bin/sh", "-c", req.Command)
-	cmd := exec.Command("docker", args...)
+	// Bounded: the docker CLI is killed on timeout or when the browser goes
+	// away. Note this does not kill the process inside the container.
+	ctx, cancelCtx := context.WithTimeout(r.Context(), execTimeout)
+	defer cancelCtx()
+	cmd, cancel := newCmd(ctx, execTimeout, "docker", args...)
+	defer cancel()
 	cmd.Env = append(os.Environ(), "COMPOSE_IGNORE_ORPHANS=true")
 	out, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		out = append(out, []byte(fmt.Sprintf("\n[hub: command timed out after %s]\n", execTimeout))...)
+	}
 	exitCode := 0
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
@@ -2253,7 +3015,7 @@ func handleTemplateRestart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := strings.TrimPrefix(r.URL.Path, "/api/templates/restart/")
-	tmpl := findTemplate(id)
+	tmpl := getTemplate(id)
 	if tmpl == nil {
 		http.NotFound(w, r)
 		return
@@ -2262,10 +3024,7 @@ func handleTemplateRestart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "app not enabled", 400)
 		return
 	}
-	go func() {
-		composeDown(tmpl)
-		composeUp(tmpl)
-	}()
+	go restartApp(*tmpl)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "restarting"})
 }
@@ -2286,8 +3045,11 @@ func handleStatic(w http.ResponseWriter, r *http.Request) {
 }
 
 // setEnvVar updates or appends a key=value in the given .env file.
-func setEnvVar(envFile, key, value string) {
-	data, _ := os.ReadFile(envFile)
+func setEnvVar(envFile, key, value string) error {
+	data, err := os.ReadFile(envFile)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
 	lines := strings.Split(string(data), "\n")
 	found := false
 	for i, line := range lines {
@@ -2300,7 +3062,7 @@ func setEnvVar(envFile, key, value string) {
 	if !found {
 		lines = append(lines, key+"="+value)
 	}
-	os.WriteFile(envFile, []byte(strings.Join(lines, "\n")), 0644)
+	return writeFileAtomic(envFile, []byte(strings.Join(lines, "\n")), 0600)
 }
 
 // ── Helpers ──────────────────────────────────────────────
