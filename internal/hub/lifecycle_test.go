@@ -124,6 +124,10 @@ func TestEnableRegistersClients(t *testing.T) {
 	if len(f.idp.registered) != 1 || f.idp.registered[0] != "other:other:hwk:"+secret+":other.example.org" || secret == "" {
 		t.Errorf("registered = %v (secret %q)", f.idp.registered, secret)
 	}
+	// email_verified_claim: false reaches Keycloak as OmitEmailVerified.
+	if len(f.idp.specs) != 1 || !f.idp.specs[0].OmitEmailVerified {
+		t.Errorf("specs = %+v, want OmitEmailVerified", f.idp.specs)
+	}
 }
 
 func TestEnableClientConflict(t *testing.T) {

@@ -103,6 +103,9 @@ func (h *Hub) clientSpec(t *templates.Template, c templates.KeycloakClient, acr 
 		RedirectURIs: h.redirectURIs(c),
 		TemplateID:   t.ID,
 		ACR:          acr,
+		// Most apps get the realm's email scope; email_verified_claim: false
+		// swaps it for email-unverified.
+		OmitEmailVerified: !c.SendsEmailVerified(),
 	}
 }
 

@@ -40,6 +40,21 @@ var protectedClients = map[string]bool{
 // to roles.
 var DefaultScopes = []string{"acr", "groups"}
 
+// EmailUnverifiedScope is the realm client scope (maintained by core's
+// `portcullis keycloak configure`) that carries the email claim but no
+// email_verified. Clients with ClientSpec.OmitEmailVerified get it instead
+// of the built-in "email" scope; the two are mutually exclusive.
+const EmailUnverifiedScope = "email-unverified"
+
+// emailScopes returns the email scope a client must have and the one it
+// must not have.
+func (s ClientSpec) emailScopes() (want, drop string) {
+	if s.OmitEmailVerified {
+		return EmailUnverifiedScope, "email"
+	}
+	return "email", EmailUnverifiedScope
+}
+
 // uuidRe: Keycloak user IDs are UUIDs (they are spliced into UI handlers).
 var uuidRe = regexp.MustCompile(`^[0-9a-fA-F-]{1,64}$`)
 
@@ -228,26 +243,34 @@ func withACR(client map[string]interface{}, acrValue string) {
 	client["attributes"] = attrs
 }
 
-// ensureDefaultScopes attaches DefaultScopes to an existing client. Keycloak
-// ignores defaultClientScopes in a client PUT, so scopes go through the
-// dedicated sub-resource. A scope missing from the realm is logged, not
-// fatal (the client still works, just without that claim).
-func (c *Client) ensureDefaultScopes(ctx context.Context, token string, client map[string]interface{}) error {
-	have := map[string]bool{}
-	if scopes, ok := client["defaultClientScopes"].([]interface{}); ok {
-		for _, sc := range scopes {
-			if s, ok := sc.(string); ok {
-				have[s] = true
+// ensureDefaultScopes attaches DefaultScopes and the spec's email scope to
+// an existing client and detaches the other email scope (default or
+// optional). Keycloak ignores defaultClientScopes in a client PUT, so scopes
+// go through the dedicated sub-resources. A missing acr/groups/email scope
+// is logged, not fatal (the client still works, just without that claim);
+// a missing email-unverified scope is an error and leaves "email" attached,
+// since the app asked not to see email_verified.
+func (c *Client) ensureDefaultScopes(ctx context.Context, token string, client map[string]interface{}, s ClientSpec) error {
+	names := func(key string) map[string]bool {
+		out := map[string]bool{}
+		if scopes, ok := client[key].([]interface{}); ok {
+			for _, sc := range scopes {
+				if n, ok := sc.(string); ok {
+					out[n] = true
+				}
 			}
 		}
+		return out
 	}
+	haveDefault, haveOptional := names("defaultClientScopes"), names("optionalClientScopes")
+	wantEmail, dropEmail := s.emailScopes()
 	var missing []string
-	for _, name := range DefaultScopes {
-		if !have[name] {
+	for _, name := range append(append([]string{}, DefaultScopes...), wantEmail) {
+		if !haveDefault[name] {
 			missing = append(missing, name)
 		}
 	}
-	if len(missing) == 0 {
+	if len(missing) == 0 && !haveDefault[dropEmail] && !haveOptional[dropEmail] {
 		return nil
 	}
 	var realmScopes []struct {
@@ -266,18 +289,38 @@ func (c *Client) ensureDefaultScopes(ctx context.Context, token string, client m
 		ids[sc.Name] = sc.ID
 	}
 	clientUUID, _ := client["id"].(string)
+	scopePath := func(kind, id string) string {
+		return realmPath("/clients/" + url.PathEscape(clientUUID) + "/" + kind + "-client-scopes/" + url.PathEscape(id))
+	}
 	for _, name := range missing {
 		id := ids[name]
 		if id == "" {
-			log.Printf("Keycloak realm has no %q client scope — client %v will not get that claim (run `portcullis init`)", name, client["clientId"])
+			if name == EmailUnverifiedScope {
+				return fmt.Errorf("client %v: the Keycloak realm has no %q client scope (run `portcullis keycloak configure`); keeping its current email scope", client["clientId"], name)
+			}
+			log.Printf("Keycloak realm has no %q client scope — client %v will not get that claim (run `portcullis keycloak configure`)", name, client["clientId"])
 			continue
 		}
-		code, err := c.do(ctx, "PUT", realmPath("/clients/"+url.PathEscape(clientUUID)+"/default-client-scopes/"+url.PathEscape(id)), token, nil, nil)
+		code, err := c.do(ctx, "PUT", scopePath("default", id), token, nil, nil)
 		if err != nil {
 			return fmt.Errorf("attach scope %s: %w", name, err)
 		}
 		if code != 204 {
 			return fmt.Errorf("attach scope %s: HTTP %d", name, code)
+		}
+	}
+	// Detach only after the replacement is attached.
+	for kind, have := range map[string]bool{"default": haveDefault[dropEmail], "optional": haveOptional[dropEmail]} {
+		id := ids[dropEmail]
+		if !have || id == "" {
+			continue
+		}
+		code, err := c.do(ctx, "DELETE", scopePath(kind, id), token, nil, nil)
+		if err != nil {
+			return fmt.Errorf("detach %s scope %s: %w", kind, dropEmail, err)
+		}
+		if code != 204 {
+			return fmt.Errorf("detach %s scope %s: HTTP %d", kind, dropEmail, code)
 		}
 	}
 	return nil
@@ -315,7 +358,7 @@ func (c *Client) UpdateClientACR(ctx context.Context, s ClientSpec) error {
 	if err := c.putClient(ctx, tok, existing); err != nil {
 		return err
 	}
-	return c.ensureDefaultScopes(ctx, tok, existing)
+	return c.ensureDefaultScopes(ctx, tok, existing, s)
 }
 
 // MayReconcile decides whether an existing client may be updated for
@@ -412,6 +455,9 @@ type ClientSpec struct {
 	// AllowedHosts are the template's own hosts (<sub>.<domain>); an
 	// untagged existing client is only adopted if it points solely there.
 	AllowedHosts []string
+	// OmitEmailVerified attaches EmailUnverifiedScope instead of "email"
+	// (manifest keycloak_clients[].email_verified_claim: false).
+	OmitEmailVerified bool
 }
 
 // RegisterClient creates (or, if it already exists and the template owns
@@ -424,6 +470,7 @@ func (c *Client) RegisterClient(ctx context.Context, s ClientSpec) error {
 	if err != nil {
 		return err
 	}
+	wantEmail, _ := s.emailScopes()
 	rep := map[string]interface{}{
 		"clientId":                  s.ClientID,
 		"name":                      s.Name,
@@ -438,7 +485,7 @@ func (c *Client) RegisterClient(ctx context.Context, s ClientSpec) error {
 			"default.acr.values": s.ACR,
 			OwnerAttr:            s.TemplateID,
 		},
-		"defaultClientScopes": append([]string{"openid", "profile", "email"}, DefaultScopes...),
+		"defaultClientScopes": append([]string{"openid", "profile", wantEmail}, DefaultScopes...),
 	}
 	code, err := c.do(ctx, "POST", realmPath("/clients"), tok, rep, nil)
 	if err != nil {
@@ -452,7 +499,7 @@ func (c *Client) RegisterClient(ctx context.Context, s ClientSpec) error {
 		if err != nil {
 			return err
 		}
-		return c.ensureDefaultScopes(ctx, tok, created)
+		return c.ensureDefaultScopes(ctx, tok, created, s)
 	case 409:
 		// Already exists: reconcile secret, redirect URIs and ACR so the
 		// app's .env and Keycloak agree.
@@ -480,7 +527,7 @@ func (c *Client) RegisterClient(ctx context.Context, s ClientSpec) error {
 			return err
 		}
 		log.Printf("Updated existing Keycloak client %s", s.ClientID)
-		return c.ensureDefaultScopes(ctx, tok, existing)
+		return c.ensureDefaultScopes(ctx, tok, existing, s)
 	default:
 		return fmt.Errorf("client %s registration: unexpected HTTP %d", s.ClientID, code)
 	}

@@ -70,6 +70,7 @@ type fakeKeycloak struct {
 	// realm scopes (name → id) and attached scope PUTs ("client/scopeId")
 	scopes   map[string]string
 	attached []string
+	detached []string // "client/kind/scopeId"
 }
 
 func (f *fakeKeycloak) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -99,7 +100,7 @@ func (f *fakeKeycloak) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// Keycloak drops scope names the realm doesn't have.
 		var kept []interface{}
 		for _, sc := range rep["defaultClientScopes"].([]interface{}) {
-			if sc != "groups" || f.scopes["groups"] != "" {
+			if (sc != "groups" && sc != EmailUnverifiedScope) || f.scopes[sc.(string)] != "" {
 				kept = append(kept, sc)
 			}
 		}
@@ -114,6 +115,10 @@ func (f *fakeKeycloak) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			out = append(out, map[string]string{"name": n, "id": id})
 		}
 		json.NewEncoder(w).Encode(out)
+	case r.Method == "DELETE" && strings.Contains(r.URL.Path, "-client-scopes/"):
+		parts := strings.Split(r.URL.Path, "/")
+		f.detached = append(f.detached, parts[5]+"/"+strings.TrimSuffix(parts[6], "-client-scopes")+"/"+parts[7])
+		w.WriteHeader(204)
 	case r.Method == "PUT" && strings.Contains(r.URL.Path, "/default-client-scopes/"):
 		parts := strings.Split(r.URL.Path, "/")
 		f.attached = append(f.attached, parts[5]+"/"+parts[7])
@@ -197,5 +202,81 @@ func TestRegisterClient(t *testing.T) {
 	}
 	if err := c.SetRequiredActions(ctx, "../../x", nil); err == nil {
 		t.Error("invalid user id accepted")
+	}
+}
+
+func TestRegisterClientEmailUnverified(t *testing.T) {
+	fk := &fakeKeycloak{}
+	srv := httptest.NewServer(fk)
+	defer srv.Close()
+	c := New(srv.URL, "admin", "pw")
+	ctx := context.Background()
+	spec := ClientSpec{ClientID: "vw", Secret: "s", RedirectURIs: []string{"https://vw.example.org/cb"}, TemplateID: "vw", ACR: "pwd",
+		AllowedHosts: []string{"vw.example.org"}, OmitEmailVerified: true}
+	all := map[string]string{"acr": "s-acr", "groups": "s-groups", "email": "s-email", EmailUnverifiedScope: "s-eu"}
+
+	// Create: email-unverified instead of email, nothing to fix afterwards.
+	fk.scopes = all
+	if err := c.RegisterClient(ctx, spec); err != nil {
+		t.Fatal(err)
+	}
+	if got := fmt.Sprint(fk.created["defaultClientScopes"]); got != "[openid profile email-unverified acr groups]" {
+		t.Errorf("create scopes = %s", got)
+	}
+	if len(fk.attached)+len(fk.detached) != 0 {
+		t.Errorf("create: attached %v, detached %v", fk.attached, fk.detached)
+	}
+
+	// Reconcile an owned client that still has email (default and
+	// optional): attach email-unverified first, then detach email.
+	fk.existing = map[string]interface{}{"id": "u1", "clientId": "vw", "attributes": map[string]interface{}{OwnerAttr: "vw"},
+		"defaultClientScopes": []interface{}{"profile", "email", "acr", "groups"}, "optionalClientScopes": []interface{}{"email"}}
+	if err := c.RegisterClient(ctx, spec); err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(fk.attached) != "[u1/s-eu]" || len(fk.detached) != 2 || !strings.Contains(fmt.Sprint(fk.detached), "u1/default/s-email") || !strings.Contains(fmt.Sprint(fk.detached), "u1/optional/s-email") {
+		t.Errorf("reconcile: attached %v, detached %v", fk.attached, fk.detached)
+	}
+
+	// The ACR push reconciles scopes too.
+	fk.attached, fk.detached = nil, nil
+	if err := c.UpdateClientACR(ctx, spec); err != nil || fmt.Sprint(fk.attached) != "[u1/s-eu]" || len(fk.detached) != 2 {
+		t.Errorf("UpdateClientACR: %v, attached %v, detached %v", err, fk.attached, fk.detached)
+	}
+
+	// Already right: no scope calls.
+	fk.existing["defaultClientScopes"] = []interface{}{"profile", EmailUnverifiedScope, "acr", "groups"}
+	delete(fk.existing, "optionalClientScopes")
+	fk.attached, fk.detached = nil, nil
+	if err := c.RegisterClient(ctx, spec); err != nil || len(fk.attached)+len(fk.detached) != 0 {
+		t.Errorf("settled: %v, attached %v, detached %v", err, fk.attached, fk.detached)
+	}
+
+	// Back to the default: email returns, email-unverified goes.
+	def := spec
+	def.OmitEmailVerified = false
+	if err := c.RegisterClient(ctx, def); err != nil || fmt.Sprint(fk.attached) != "[u1/s-email]" || fmt.Sprint(fk.detached) != "[u1/default/s-eu]" {
+		t.Errorf("default again: %v, attached %v, detached %v", err, fk.attached, fk.detached)
+	}
+
+	// Realm without email-unverified (core not configured): error, and the
+	// client keeps its email scope.
+	fk.scopes = map[string]string{"acr": "s-acr", "groups": "s-groups", "email": "s-email"}
+	fk.existing["defaultClientScopes"] = []interface{}{"profile", "email", "acr", "groups"}
+	fk.attached, fk.detached = nil, nil
+	if err := c.RegisterClient(ctx, spec); err == nil || !strings.Contains(err.Error(), "keycloak configure") || len(fk.detached) != 0 {
+		t.Errorf("missing scope: %v, detached %v", err, fk.detached)
+	}
+
+	// Foreign client: never touched, whatever the email setting.
+	fk.existing = map[string]interface{}{"id": "u2", "clientId": "vw", "attributes": map[string]interface{}{OwnerAttr: "other"},
+		"defaultClientScopes": []interface{}{"email"}}
+	fk.attached, fk.detached, fk.puts = nil, nil, nil
+	var ce *ConflictError
+	if err := c.RegisterClient(ctx, spec); !errors.As(err, &ce) || len(fk.attached)+len(fk.detached)+len(fk.puts) != 0 {
+		t.Errorf("foreign client: %v, attached %v, detached %v", err, fk.attached, fk.detached)
+	}
+	if err := c.UpdateClientACR(ctx, spec); !errors.As(err, &ce) || len(fk.attached)+len(fk.detached) != 0 {
+		t.Errorf("UpdateClientACR foreign: %v", err)
 	}
 }

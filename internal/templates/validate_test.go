@@ -3,6 +3,8 @@ package templates
 import (
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestValidID(t *testing.T) {
@@ -100,6 +102,33 @@ func TestValidateManifest(t *testing.T) {
 		mut(&m)
 		if err := ValidateManifest(&m); err == nil {
 			t.Errorf("%s: invalid manifest accepted", name)
+		}
+	}
+}
+
+func TestKeycloakClientEmailVerifiedClaim(t *testing.T) {
+	cases := map[string]bool{
+		"":                            true,
+		"email_verified_claim: true":  true,
+		"email_verified_claim: false": false,
+		"email_verified_claim: null":  true,
+		"email_verified_claim: ~":     true,
+	}
+	for line, want := range cases {
+		var m Manifest
+		doc := "keycloak_clients:\n  - client_id: app\n    " + line + "\n"
+		if err := yaml.Unmarshal([]byte(doc), &m); err != nil {
+			t.Fatalf("%q: %v", line, err)
+		}
+		if got := m.Clients[0].SendsEmailVerified(); got != want {
+			t.Errorf("%q: SendsEmailVerified = %v, want %v", line, got, want)
+		}
+	}
+	// Not a boolean: the manifest fails to load (Discover skips it).
+	for _, line := range []string{`email_verified_claim: "false"`, "email_verified_claim: [false]", "email_verified_claim: 0"} {
+		var m Manifest
+		if err := yaml.Unmarshal([]byte("keycloak_clients:\n  - client_id: app\n    "+line+"\n"), &m); err == nil {
+			t.Errorf("%q accepted", line)
 		}
 	}
 }

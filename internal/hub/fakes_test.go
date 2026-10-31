@@ -177,6 +177,7 @@ type fakeIdP struct {
 	mu          sync.Mutex
 	registered  []string
 	updated     []string
+	specs       []keycloak.ClientSpec
 }
 
 func (f *fakeIdP) RegisterClient(ctx context.Context, s keycloak.ClientSpec) error {
@@ -185,6 +186,7 @@ func (f *fakeIdP) RegisterClient(ctx context.Context, s keycloak.ClientSpec) err
 	if f.registerErr != nil {
 		return f.registerErr
 	}
+	f.specs = append(f.specs, s)
 	f.registered = append(f.registered, fmt.Sprintf("%s:%s:%s:%s:%s", s.ClientID, s.TemplateID, s.ACR, s.Secret, strings.Join(s.AllowedHosts, ",")))
 	return nil
 }
@@ -234,6 +236,7 @@ keycloak_clients:
   - client_id: other
     secret_env: OTHER_SECRET
     redirect_uri: https://other.{{DOMAIN}}/cb
+    email_verified_claim: false
 env:
   - key: OTHER_SECRET
     generate: random

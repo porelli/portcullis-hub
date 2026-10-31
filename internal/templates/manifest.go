@@ -67,6 +67,17 @@ type KeycloakClient struct {
 	RedirectURI  string   `yaml:"redirect_uri" json:"redirect_uri"`
 	RedirectURIs []string `yaml:"redirect_uris" json:"redirect_uris"`
 	Name         string   `yaml:"name" json:"name"`
+	// EmailVerifiedClaim false swaps the realm's "email" client scope for
+	// "email-unverified" (email claim, no email_verified), for apps that
+	// refuse email_verified=false but accept the claim being absent.
+	// Unset means true.
+	EmailVerifiedClaim *bool `yaml:"email_verified_claim" json:"email_verified_claim,omitempty"`
+}
+
+// SendsEmailVerified reports whether the client gets the email_verified
+// claim (the default).
+func (c KeycloakClient) SendsEmailVerified() bool {
+	return c.EmailVerifiedClaim == nil || *c.EmailVerifiedClaim
 }
 
 // ConfigFile is copied from the template into the core checkout on enable.
