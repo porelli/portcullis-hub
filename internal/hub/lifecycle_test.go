@@ -500,9 +500,10 @@ func TestRoutingValidation(t *testing.T) {
 		t.Error("unsafe templates loaded")
 	}
 	for name, c := range map[string]string{
-		"regexp": "services:\n  g:\n    labels:\n      traefik.http.routers.g.rule: HostRegexp(`.+`)\n",
-		"core":   "services:\n  g:\n    labels:\n      traefik.http.routers.g.rule: Host(`auth.${PORTCULLIS_DOMAIN}`)\n",
-		"any":    "services:\n  g:\n    labels:\n      traefik.http.routers.g.rule: PathPrefix(`/`)\n",
+		"regexp":  "services:\n  g:\n    labels:\n      traefik.http.routers.g.rule: HostRegexp(`.+`)\n",
+		"core":    "services:\n  g:\n    labels:\n      traefik.http.routers.g.rule: Host(`auth.${PORTCULLIS_DOMAIN}`)\n",
+		"metrics": "services:\n  g:\n    labels:\n      traefik.http.routers.g.rule: Host(`metrics.${PORTCULLIS_DOMAIN}`)\n",
+		"any":     "services:\n  g:\n    labels:\n      traefik.http.routers.g.rule: PathPrefix(`/`)\n",
 	} {
 		if err := f.h.SaveComposeFiles("grafana", c, ""); statusOf(err) != 400 {
 			t.Errorf("%s: SaveComposeFiles = %v", name, err)
