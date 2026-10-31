@@ -34,6 +34,12 @@ var protectedClients = map[string]bool{
 	"broker": true, "realm-management": true, "security-admin-console": true,
 }
 
+// DefaultScopes are attached to every client the Hub manages: "acr" puts
+// acr/amr in tokens (step-up), "groups" (created by `portcullis init`, claim
+// "groups", group names without path) lets apps map users_<app>/admin_<app>
+// to roles.
+var DefaultScopes = []string{"acr", "groups"}
+
 // uuidRe: Keycloak user IDs are UUIDs (they are spliced into UI handlers).
 var uuidRe = regexp.MustCompile(`^[0-9a-fA-F-]{1,64}$`)
 
@@ -212,8 +218,7 @@ func (c *Client) findClient(ctx context.Context, token, clientID string) (map[st
 	return nil, fmt.Errorf("client %s not found in keycloak", clientID)
 }
 
-// withACR sets default.acr.values and makes sure the "acr" default client
-// scope is present on a client representation.
+// withACR sets default.acr.values on a client representation.
 func withACR(client map[string]interface{}, acrValue string) {
 	attrs, _ := client["attributes"].(map[string]interface{})
 	if attrs == nil {
@@ -221,13 +226,61 @@ func withACR(client map[string]interface{}, acrValue string) {
 	}
 	attrs["default.acr.values"] = acrValue
 	client["attributes"] = attrs
-	scopes, _ := client["defaultClientScopes"].([]interface{})
-	for _, sc := range scopes {
-		if sc == "acr" {
-			return
+}
+
+// ensureDefaultScopes attaches DefaultScopes to an existing client. Keycloak
+// ignores defaultClientScopes in a client PUT, so scopes go through the
+// dedicated sub-resource. A scope missing from the realm is logged, not
+// fatal (the client still works, just without that claim).
+func (c *Client) ensureDefaultScopes(ctx context.Context, token string, client map[string]interface{}) error {
+	have := map[string]bool{}
+	if scopes, ok := client["defaultClientScopes"].([]interface{}); ok {
+		for _, sc := range scopes {
+			if s, ok := sc.(string); ok {
+				have[s] = true
+			}
 		}
 	}
-	client["defaultClientScopes"] = append(scopes, "acr")
+	var missing []string
+	for _, name := range DefaultScopes {
+		if !have[name] {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	var realmScopes []struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	}
+	code, err := c.do(ctx, "GET", realmPath("/client-scopes"), token, nil, &realmScopes)
+	if err != nil {
+		return fmt.Errorf("list client scopes: %w", err)
+	}
+	if code != 200 {
+		return fmt.Errorf("list client scopes: HTTP %d", code)
+	}
+	ids := map[string]string{}
+	for _, sc := range realmScopes {
+		ids[sc.Name] = sc.ID
+	}
+	clientUUID, _ := client["id"].(string)
+	for _, name := range missing {
+		id := ids[name]
+		if id == "" {
+			log.Printf("Keycloak realm has no %q client scope — client %v will not get that claim (run `portcullis init`)", name, client["clientId"])
+			continue
+		}
+		code, err := c.do(ctx, "PUT", realmPath("/clients/"+url.PathEscape(clientUUID)+"/default-client-scopes/"+url.PathEscape(id)), token, nil, nil)
+		if err != nil {
+			return fmt.Errorf("attach scope %s: %w", name, err)
+		}
+		if code != 204 {
+			return fmt.Errorf("attach scope %s: HTTP %d", name, code)
+		}
+	}
+	return nil
 }
 
 func (c *Client) putClient(ctx context.Context, token string, client map[string]interface{}) error {
@@ -255,18 +308,24 @@ func (c *Client) UpdateClientACR(ctx context.Context, s ClientSpec) error {
 	if err != nil {
 		return err
 	}
-	if !MayReconcile(existing, s.TemplateID, s.RedirectURIs) {
+	if !MayReconcile(existing, s.TemplateID, s.AllowedHosts) {
 		return fmt.Errorf("client %s is not owned by template %s", s.ClientID, s.TemplateID)
 	}
 	withACR(existing, s.ACR)
-	return c.putClient(ctx, tok, existing)
+	if err := c.putClient(ctx, tok, existing); err != nil {
+		return err
+	}
+	return c.ensureDefaultScopes(ctx, tok, existing)
 }
 
 // MayReconcile decides whether an existing client may be updated for
 // template id. Tagged clients must carry this template's tag. Untagged
-// clients are adopted only if every existing redirect URI points at a host
-// the template itself declares (wantURIs).
-func MayReconcile(existing map[string]interface{}, id string, wantURIs []string) bool {
+// clients are adopted only if they demonstrably belong to the template:
+// they have at least one redirect URI, and every redirect URI and web
+// origin is a plain https/http URL (no wildcards) whose host is one of
+// allowedHosts (the template's own <sub>.<domain> hosts). Anything else —
+// including an untagged client with no redirect URIs at all — fails closed.
+func MayReconcile(existing map[string]interface{}, id string, allowedHosts []string) bool {
 	cid, _ := existing["clientId"].(string)
 	if protectedClients[cid] {
 		return false
@@ -276,21 +335,43 @@ func MayReconcile(existing map[string]interface{}, id string, wantURIs []string)
 			return owner == id
 		}
 	}
-	hosts := map[string]bool{}
-	for _, u := range wantURIs {
-		if pu, err := url.Parse(u); err == nil && pu.Host != "" {
-			hosts[strings.ToLower(pu.Host)] = true
+	allowed := map[string]bool{}
+	for _, h := range allowedHosts {
+		if h != "" {
+			allowed[strings.ToLower(h)] = true
 		}
 	}
-	if len(hosts) == 0 {
+	if len(allowed) == 0 {
 		return false
 	}
-	existingURIs, _ := existing["redirectUris"].([]interface{})
-	for _, raw := range existingURIs {
-		s, _ := raw.(string)
-		pu, err := url.Parse(s)
-		if err != nil || !hosts[strings.ToLower(pu.Host)] {
+	ownURL := func(raw interface{}) bool {
+		s, ok := raw.(string)
+		if !ok || s == "" || strings.Contains(s, "*") {
 			return false
+		}
+		u, err := url.Parse(s)
+		if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.User != nil {
+			return false
+		}
+		return allowed[strings.ToLower(u.Hostname())]
+	}
+	redirects, _ := existing["redirectUris"].([]interface{})
+	if len(redirects) == 0 {
+		return false
+	}
+	for _, raw := range redirects {
+		if !ownURL(raw) {
+			return false
+		}
+	}
+	if origins, ok := existing["webOrigins"].([]interface{}); ok {
+		for _, raw := range origins {
+			if raw == "+" { // "same as the redirect URIs"
+				continue
+			}
+			if !ownURL(raw) {
+				return false
+			}
 		}
 	}
 	return true
@@ -304,6 +385,9 @@ type ClientSpec struct {
 	RedirectURIs []string
 	TemplateID   string
 	ACR          string
+	// AllowedHosts are the template's own hosts (<sub>.<domain>); an
+	// untagged existing client is only adopted if it points solely there.
+	AllowedHosts []string
 }
 
 // RegisterClient creates (or, if it already exists and the template owns
@@ -330,7 +414,7 @@ func (c *Client) RegisterClient(ctx context.Context, s ClientSpec) error {
 			"default.acr.values": s.ACR,
 			OwnerAttr:            s.TemplateID,
 		},
-		"defaultClientScopes": []string{"openid", "profile", "email", "acr"},
+		"defaultClientScopes": append([]string{"openid", "profile", "email"}, DefaultScopes...),
 	}
 	code, err := c.do(ctx, "POST", realmPath("/clients"), tok, rep, nil)
 	if err != nil {
@@ -339,7 +423,12 @@ func (c *Client) RegisterClient(ctx context.Context, s ClientSpec) error {
 	switch code {
 	case 201:
 		log.Printf("Registered Keycloak client %s", s.ClientID)
-		return nil
+		// Keycloak silently drops unknown scope names on create; verify.
+		created, err := c.findClient(ctx, tok, s.ClientID)
+		if err != nil {
+			return err
+		}
+		return c.ensureDefaultScopes(ctx, tok, created)
 	case 409:
 		// Already exists: reconcile secret, redirect URIs and ACR so the
 		// app's .env and Keycloak agree.
@@ -347,7 +436,7 @@ func (c *Client) RegisterClient(ctx context.Context, s ClientSpec) error {
 		if err != nil {
 			return err
 		}
-		if !MayReconcile(existing, s.TemplateID, s.RedirectURIs) {
+		if !MayReconcile(existing, s.TemplateID, s.AllowedHosts) {
 			log.Printf("Keycloak client %s already exists and is not owned by template %s — left untouched", s.ClientID, s.TemplateID)
 			return nil
 		}
@@ -368,7 +457,7 @@ func (c *Client) RegisterClient(ctx context.Context, s ClientSpec) error {
 			return err
 		}
 		log.Printf("Updated existing Keycloak client %s", s.ClientID)
-		return nil
+		return c.ensureDefaultScopes(ctx, tok, existing)
 	default:
 		return fmt.Errorf("client %s registration: unexpected HTTP %d", s.ClientID, code)
 	}
