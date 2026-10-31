@@ -171,7 +171,8 @@ func (h *Hub) SaveSettings(id string, u SettingsUpdate) error {
 		}
 	}
 	if enabled {
-		go h.Restart(*t)
+		tmpl := *t
+		h.goBackground(func() { h.Restart(tmpl) })
 	}
 	return nil
 }
@@ -196,7 +197,7 @@ func (h *Hub) SetDefaultPolicy(p policy.AuthPolicy) bool {
 		return false
 	}
 	h.writePolicyLogged()
-	go h.applyDefaultPolicy()
+	h.goBackground(h.applyDefaultPolicy)
 	return true
 }
 

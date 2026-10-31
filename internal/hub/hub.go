@@ -78,6 +78,10 @@ type Hub struct {
 	// lockPoll is how often a queued restart retries the app lock.
 	lockPoll time.Duration
 
+	// bg tracks background lifecycle work (queued restarts, default-policy
+	// propagation) so callers can wait for it.
+	bg sync.WaitGroup
+
 	policyWriteMu   sync.Mutex
 	defaultPolicyMu sync.Mutex
 
@@ -126,6 +130,18 @@ func (h *Hub) Init() {
 	if err := h.WritePolicy(); err != nil {
 		log.Printf("auth-policy: initial group-gate policy write failed: %v", err)
 	}
+}
+
+// Wait blocks until queued background restarts and policy propagation
+// have finished.
+func (h *Hub) Wait() { h.bg.Wait() }
+
+func (h *Hub) goBackground(fn func()) {
+	h.bg.Add(1)
+	go func() {
+		defer h.bg.Done()
+		fn()
+	}()
 }
 
 // Domain returns the configured base domain.

@@ -292,6 +292,9 @@ func newFixture(t *testing.T) *fixture {
 	}
 	h.lockPoll = 5 * time.Millisecond
 	h.Init()
+	// Runs before t.TempDir's cleanup (LIFO): no background restart may
+	// still be writing into the temp dirs.
+	t.Cleanup(h.Wait)
 	f.h = h
 	return f
 }

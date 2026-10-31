@@ -40,6 +40,7 @@ func newServer(t *testing.T) *httptest.Server {
 		t.Fatal(err)
 	}
 	h.Init()
+	t.Cleanup(h.Wait)
 	s := &Server{Hub: h, Secret: testSecret, Web: web.FS}
 	handler, err := s.Handler()
 	if err != nil {

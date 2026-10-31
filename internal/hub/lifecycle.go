@@ -308,6 +308,7 @@ func (h *Hub) RestartAsync(id string) error {
 	if !t.Enabled {
 		return statusErr(400, "app not enabled")
 	}
-	go h.Restart(*t)
+	tmpl := *t
+	h.goBackground(func() { h.Restart(tmpl) })
 	return nil
 }
