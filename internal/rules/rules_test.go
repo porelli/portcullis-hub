@@ -707,3 +707,115 @@ func TestParseFormatRoundTripAdditional(t *testing.T) {
 		})
 	}
 }
+
+func TestEvalFormatPanicSafety(t *testing.T) {
+	// Test that Eval and Format don't panic on invalid expressions
+	dir := &Directory{
+		People: map[string]Person{
+			"alice": {
+				User: "alice",
+				Attrs: map[string][]string{
+					"city": {"Milan"},
+				},
+			},
+		},
+		ManagerField: "manager",
+	}
+
+	tests := []struct {
+		name string
+		expr *Expr
+	}{
+		{
+			name: "nil expression",
+			expr: nil,
+		},
+		{
+			name: "is with no values",
+			expr: &Expr{
+				Op:    OpIs,
+				Field: "city",
+			},
+		},
+		{
+			name: "is_not with no values",
+			expr: &Expr{
+				Op:    OpIsNot,
+				Field: "city",
+			},
+		},
+		{
+			name: "reports_to with no values",
+			expr: &Expr{
+				Op:    OpReportsTo,
+				Field: "manager",
+			},
+		},
+		{
+			name: "all with nil item",
+			expr: &Expr{
+				Op:    OpAll,
+				Items: []*Expr{nil},
+			},
+		},
+		{
+			name: "any with nil item",
+			expr: &Expr{
+				Op:    OpAny,
+				Items: []*Expr{nil},
+			},
+		},
+		{
+			name: "unknown operation",
+			expr: &Expr{
+				Op:    "unknown",
+				Field: "city",
+			},
+		},
+		{
+			name: "in with no values",
+			expr: &Expr{
+				Op:    OpIn,
+				Field: "city",
+			},
+		},
+		{
+			name: "all with empty items",
+			expr: &Expr{
+				Op:    OpAll,
+				Items: []*Expr{},
+			},
+		},
+		{
+			name: "any with empty items",
+			expr: &Expr{
+				Op:    OpAny,
+				Items: []*Expr{},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Test that Format doesn't panic
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("Format() panicked: %v", r)
+				}
+			}()
+			result := Format(tt.expr)
+			// Format should return empty string for invalid
+			if tt.expr == nil || tt.expr.Op == "unknown" || len(tt.expr.Values) == 0 && (tt.expr.Op == OpIs || tt.expr.Op == OpIsNot || tt.expr.Op == OpReportsTo) {
+				if result != "" {
+					t.Errorf("Format() = %q, want empty string for invalid", result)
+				}
+			}
+
+			// Test that Eval doesn't panic and returns false (fail closed)
+			evalResult := Eval(tt.expr, "alice", dir)
+			if evalResult {
+				t.Errorf("Eval() = true, want false (fail closed) for invalid expression")
+			}
+		})
+	}
+}

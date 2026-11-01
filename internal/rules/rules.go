@@ -57,6 +57,9 @@ func formatExpr(e *Expr, inAnd bool) string {
 	case OpAll: // and
 		var parts []string
 		for _, item := range e.Items {
+			if item == nil {
+				return "" // Invalid, fail safely
+			}
 			parts = append(parts, formatExpr(item, true))
 		}
 		result = joinWithSep(parts, " and ")
@@ -64,6 +67,9 @@ func formatExpr(e *Expr, inAnd bool) string {
 	case OpAny: // or
 		var parts []string
 		for _, item := range e.Items {
+			if item == nil {
+				return "" // Invalid, fail safely
+			}
 			parts = append(parts, formatExpr(item, false))
 		}
 		result = joinWithSep(parts, " or ")
@@ -145,8 +151,12 @@ func joinWithSep(parts []string, sep string) string {
 // Eval evaluates an expression against a user in the directory.
 // All value comparisons are case-insensitive.
 // Returns false for users not in the directory, regardless of Not flags (fail closed).
+// Does not panic on invalid expressions (returns false; callers should Validate first).
 func Eval(e *Expr, user string, d *Directory) bool {
-	// Fail closed: unknown users don't match anything, even negations
+	// Fail closed: nil expression or unknown users don't match anything
+	if e == nil {
+		return false
+	}
 	if _, exists := d.People[user]; !exists {
 		return false
 	}
@@ -162,22 +172,34 @@ func evalExpr(e *Expr, user string, d *Directory) bool {
 
 	switch e.Op {
 	case OpAll:
+		// Fail closed on invalid
+		if len(e.Items) == 0 {
+			return false
+		}
 		for _, item := range e.Items {
-			if !Eval(item, user, d) {
+			if item == nil || !Eval(item, user, d) {
 				return false
 			}
 		}
 		return true
 
 	case OpAny:
+		// Fail closed on invalid
+		if len(e.Items) == 0 {
+			return false
+		}
 		for _, item := range e.Items {
-			if Eval(item, user, d) {
+			if item != nil && Eval(item, user, d) {
 				return true
 			}
 		}
 		return false
 
 	case OpIs:
+		// Fail closed: need exactly 1 value
+		if len(e.Values) != 1 {
+			return false
+		}
 		values := person.Attrs[e.Field]
 		for _, v := range values {
 			if strings.EqualFold(v, e.Values[0]) {
@@ -187,6 +209,10 @@ func evalExpr(e *Expr, user string, d *Directory) bool {
 		return false
 
 	case OpIsNot:
+		// Fail closed: need exactly 1 value
+		if len(e.Values) != 1 {
+			return false
+		}
 		values := person.Attrs[e.Field]
 		for _, v := range values {
 			if strings.EqualFold(v, e.Values[0]) {
@@ -196,6 +222,10 @@ func evalExpr(e *Expr, user string, d *Directory) bool {
 		return true
 
 	case OpIn:
+		// Fail closed: need at least 1 value
+		if len(e.Values) == 0 {
+			return false
+		}
 		values := person.Attrs[e.Field]
 		for _, v := range values {
 			for _, target := range e.Values {
@@ -211,7 +241,8 @@ func evalExpr(e *Expr, user string, d *Directory) bool {
 		return len(values) == 0
 
 	case OpReportsTo:
-		if d.ManagerField == "" {
+		// Fail closed: need exactly 1 value
+		if d.ManagerField == "" || len(e.Values) != 1 {
 			return false
 		}
 		target := e.Values[0]
@@ -260,6 +291,7 @@ func evalExpr(e *Expr, user string, d *Directory) bool {
 		return false
 
 	default:
+		// Unknown operation, fail closed
 		return false
 	}
 }
