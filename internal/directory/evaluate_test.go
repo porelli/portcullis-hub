@@ -428,7 +428,7 @@ func TestRunEvaluatorKick(t *testing.T) {
 	// A detail change outside a mutation waits for the next tick; any
 	// mutation kicks an evaluation.
 	setCity(t, e, "carol", "Rome")
-	if err := e.svc.CreateGroup(ctx, asRoot, "other"); err != nil {
+	if err := deleteErr(e.svc.CreateGroup(ctx, asRoot, "other")); err != nil {
 		t.Fatal(err)
 	}
 	waitMembers(t, e, "milan", "bob")

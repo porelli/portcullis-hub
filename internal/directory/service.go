@@ -1434,10 +1434,77 @@ func (s *Service) SendInvite(ctx context.Context, c *Caller, username string) (*
 
 // ── groups ────────────────────────────────────────────────
 
-// CreateGroup creates a group.
-func (s *Service) CreateGroup(ctx context.Context, c *Caller, name string) error {
+// purgeGroup drops everything directory.yaml says about group (its rule,
+// exceptions and expiries, its grace entries and every permission granted
+// to it), so a group created later with that name inherits nothing.
+// fold: match the name case-insensitively. Returns what went, sorted.
+func purgeGroup(cfg *Config, group string, fold bool) []string {
+	same := func(n string) bool { return n == group || (fold && strings.EqualFold(n, group)) }
+	var out []string
+	for name, gc := range cfg.Groups {
+		if !same(name) {
+			continue
+		}
+		switch {
+		case gc == nil || (gc.Rule == nil && len(gc.Exceptions) == 0 && len(gc.Expiry) == 0):
+			out = append(out, "empty entry of "+name)
+		default:
+			if gc.Rule != nil {
+				out = append(out, "rule of "+name)
+			}
+			if len(gc.Exceptions) > 0 {
+				out = append(out, fmt.Sprintf("%d exception(s) of %s", len(gc.Exceptions), name))
+			}
+			if len(gc.Expiry) > 0 {
+				out = append(out, fmt.Sprintf("%d expiry(ies) of %s", len(gc.Expiry), name))
+			}
+		}
+		delete(cfg.Groups, name)
+	}
+	kept := cfg.Grace[:0:0]
+	for _, g := range cfg.Grace {
+		if same(g.Group) {
+			out = append(out, "grace of "+g.User+" in "+g.Group)
+		} else {
+			kept = append(kept, g)
+		}
+	}
+	cfg.Grace = kept
+	for p, g := range cfg.Permissions {
+		if g != "" && same(g) {
+			delete(cfg.Permissions, p)
+			out = append(out, "permission "+p)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// logoutAll ends the Keycloak sessions of users (so a removed membership
+// stops working at the next token refresh, contract §9.6); failures are
+// warnings. Never call it with s.mu held.
+func (s *Service) logoutAll(ctx context.Context, users []string, res *Result) {
+	if s.KC == nil {
+		if len(users) > 0 {
+			res.Warnings = append(res.Warnings, "Keycloak admin API not configured: "+strings.Join(users, ", ")+" not signed out (their sessions end on their own)")
+		}
+		return
+	}
+	for _, u := range users {
+		if err := s.KC.LogoutUser(ctx, u); err != nil {
+			res.Warnings = append(res.Warnings, fmt.Sprintf("signing %s out of Keycloak failed (their current sessions keep the old groups until they end): %v", u, err))
+		}
+	}
+}
+
+// CreateGroup creates a group. An admin's new group starts clean: leftovers
+// in directory.yaml for that name (a group deleted outside the Hub) are
+// purged first and listed in a warning.
+func (s *Service) CreateGroup(ctx context.Context, c *Caller, name string) (*Result, error) {
+	res := newResult()
 	name = strings.TrimSpace(name)
-	return s.run(ctx, c, permAdmin, "group.create", name, nil, func() error {
+	detail := ""
+	err := s.run(ctx, c, permAdmin, "group.create", name, &detail, func() error {
 		if !lldap.ValidGroupName(name) {
 			return invalid("invalid group name: 1-128 letters, digits, '_', '.' or '-', starting with a letter or digit")
 		}
@@ -1453,14 +1520,36 @@ func (s *Service) CreateGroup(ctx context.Context, c *Caller, name string) error
 				return refuse("group %q already exists", existing)
 			}
 		}
+		if s.Store != nil {
+			cfg, err := s.loadConfig()
+			if err != nil {
+				return err
+			}
+			if purged := purgeGroup(cfg, name, true); len(purged) > 0 {
+				if err := s.saveConfig(cfg); err != nil {
+					return err
+				}
+				detail = "purged=" + strings.Join(purged, ",")
+				res.Warnings = append(res.Warnings, fmt.Sprintf("purged leftovers of an earlier group %s from directory.yaml: %s", name, strings.Join(purged, ", ")))
+			}
+		}
 		_, err = s.LLDAP.CreateGroup(ctx, name)
 		return err
 	})
+	return res, err
 }
 
-// DeleteGroup deletes a group. confirm must repeat the name.
-func (s *Service) DeleteGroup(ctx context.Context, c *Caller, name, confirm string) error {
-	return s.run(ctx, c, permAdmin, "group.delete", name, nil, func() error {
+// DeleteGroup deletes a group. confirm must repeat the name. The LLDAP
+// delete comes first (a failure changes nothing); then its rule,
+// exceptions, expiries, grace entries and permission grants go from
+// directory.yaml (a failure there is a warning; CreateGroup purges them
+// before the name is used again), and its former members are signed out of
+// Keycloak.
+func (s *Service) DeleteGroup(ctx context.Context, c *Caller, name, confirm string) (*Result, error) {
+	res := newResult()
+	detail := ""
+	var logout []string
+	err := s.run(ctx, c, permAdmin, "group.delete", name, &detail, func() error {
 		if confirm != name {
 			return invalid("type the group name to confirm")
 		}
@@ -1475,8 +1564,39 @@ func (s *Service) DeleteGroup(ctx context.Context, c *Caller, name, confirm stri
 		if err != nil {
 			return err
 		}
-		return s.LLDAP.DeleteGroup(ctx, g.ID)
+		if err := s.LLDAP.DeleteGroup(ctx, g.ID); err != nil {
+			return err
+		}
+		for _, m := range g.Members() {
+			if !s.protectedAccount(m) {
+				logout = append(logout, m)
+			}
+		}
+		sort.Strings(logout)
+		if s.Store != nil {
+			cfg, err := s.loadConfig()
+			if err == nil {
+				if purged := purgeGroup(cfg, name, false); len(purged) > 0 {
+					if err = s.saveConfig(cfg); err == nil {
+						detail = "purged=" + strings.Join(purged, ",")
+					}
+				}
+			}
+			if err != nil {
+				detail = "purge=FAILED"
+				res.Warnings = append(res.Warnings, fmt.Sprintf("%s was deleted, but removing its rule, exceptions and permissions from directory.yaml failed (they are purged when a group with this name is created again): %v", name, err))
+			}
+		}
+		if len(logout) > 0 {
+			detail = strings.TrimSpace(detail + " logout=" + strings.Join(logout, ","))
+		}
+		return nil
 	})
+	if err != nil {
+		return res, err
+	}
+	s.logoutAll(ctx, logout, res)
+	return res, nil
 }
 
 // AddMember adds username to group.
@@ -1517,9 +1637,14 @@ func (s *Service) AddMember(ctx context.Context, c *Caller, group, username stri
 	})
 }
 
-// RemoveMember removes username from group.
-func (s *Service) RemoveMember(ctx context.Context, c *Caller, group, username string) error {
-	return s.run(ctx, c, permAdmin, "group.remove_member", group, &username, func() error {
+// RemoveMember removes username from group, drops their expiry there and
+// their grace entry (a later re-add starts clean), and signs them out of
+// Keycloak so the removal takes effect at the next token refresh.
+func (s *Service) RemoveMember(ctx context.Context, c *Caller, group, username string) (*Result, error) {
+	res := newResult()
+	detail := username
+	var removed string
+	err := s.run(ctx, c, permAdmin, "group.remove_member", group, &detail, func() error {
 		if err := s.checkTarget(username); err != nil {
 			return err
 		}
@@ -1535,11 +1660,7 @@ func (s *Service) RemoveMember(ctx context.Context, c *Caller, group, username s
 		if err != nil {
 			return err
 		}
-		member := false
-		for _, m := range g.Members() {
-			member = member || strings.EqualFold(m, u.ID)
-		}
-		if !member {
+		if !memberOf(g, u.ID) {
 			return notFound("%s is not a member of %s", u.ID, group)
 		}
 		if group == lldap.AdminGroup {
@@ -1550,6 +1671,38 @@ func (s *Service) RemoveMember(ctx context.Context, c *Caller, group, username s
 				return err
 			}
 		}
-		return s.LLDAP.RemoveUserFromGroup(ctx, u.ID, g.ID)
+		if err := s.LLDAP.RemoveUserFromGroup(ctx, u.ID, g.ID); err != nil {
+			return err
+		}
+		removed = u.ID
+		if s.Store != nil {
+			cfg, err := s.loadConfig()
+			if err == nil {
+				changed := cfg.clearGrace(group, u.ID)
+				if gc := cfg.Groups[group]; gc != nil {
+					for k := range gc.Expiry {
+						if strings.EqualFold(k, u.ID) {
+							delete(gc.Expiry, k)
+							changed = true
+						}
+					}
+					tidy(cfg, group)
+				}
+				if changed {
+					if err = s.saveConfig(cfg); err == nil {
+						detail += " expiry_dropped=true"
+					}
+				}
+			}
+			if err != nil {
+				res.Warnings = append(res.Warnings, fmt.Sprintf("%s was removed from %s, but dropping their expiry there in directory.yaml failed (a re-add may inherit it): %v", u.ID, group, err))
+			}
+		}
+		return nil
 	})
+	if err != nil {
+		return res, err
+	}
+	s.logoutAll(ctx, []string{removed}, res)
+	return res, nil
 }

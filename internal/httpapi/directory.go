@@ -374,11 +374,12 @@ func (s *Server) handleCreateGroup(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.Directory.CreateGroup(r.Context(), c, req.Name); err != nil {
+	res, err := s.Directory.CreateGroup(r.Context(), c, req.Name)
+	if err != nil {
 		dirErr(w, err)
 		return
 	}
-	writeJSON(w, map[string]string{"status": "created"})
+	writeJSON(w, map[string]interface{}{"status": "created", "warnings": res.Warnings})
 }
 
 func (s *Server) handleDeleteGroup(w http.ResponseWriter, r *http.Request) {
@@ -393,11 +394,12 @@ func (s *Server) handleDeleteGroup(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.Directory.DeleteGroup(r.Context(), c, r.PathValue("group"), req.Confirm); err != nil {
+	res, err := s.Directory.DeleteGroup(r.Context(), c, r.PathValue("group"), req.Confirm)
+	if err != nil {
 		dirErr(w, err)
 		return
 	}
-	writeJSON(w, map[string]string{"status": "deleted"})
+	writeJSON(w, map[string]interface{}{"status": "deleted", "warnings": res.Warnings})
 }
 
 func (s *Server) handleAddMember(w http.ResponseWriter, r *http.Request) {
@@ -433,11 +435,12 @@ func (s *Server) handleRemoveMember(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.Directory.RemoveMember(r.Context(), c, r.PathValue("group"), r.PathValue("username")); err != nil {
+	res, err := s.Directory.RemoveMember(r.Context(), c, r.PathValue("group"), r.PathValue("username"))
+	if err != nil {
 		dirErr(w, err)
 		return
 	}
-	writeJSON(w, map[string]string{"status": "removed"})
+	writeJSON(w, map[string]interface{}{"status": "removed", "warnings": res.Warnings})
 }
 
 // handlePortalApps serves the landing portal's app list (contract §10),

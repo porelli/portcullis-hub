@@ -160,9 +160,9 @@ func TestDelegateCannotEscalate(t *testing.T) {
 		"RemoveStaleKeycloakUser": e.svc.RemoveStaleKeycloakUser(ctx, hera, "ghost", "ghost"),
 		"AddMember":               e.svc.AddMember(ctx, hera, "hr_editors", "bob"),
 		"AddMember (admin)":       e.svc.AddMember(ctx, hera, "lldap_admin", "hera"),
-		"RemoveMember":            e.svc.RemoveMember(ctx, hera, "hr_editors", "eddie"),
-		"CreateGroup":             e.svc.CreateGroup(ctx, hera, "new_group"),
-		"DeleteGroup":             e.svc.DeleteGroup(ctx, hera, "hr_editors", "hr_editors"),
+		"RemoveMember":            deleteErr(e.svc.RemoveMember(ctx, hera, "hr_editors", "eddie")),
+		"CreateGroup":             deleteErr(e.svc.CreateGroup(ctx, hera, "new_group")),
+		"DeleteGroup":             deleteErr(e.svc.DeleteGroup(ctx, hera, "hr_editors", "hr_editors")),
 		"CreateField":             e.svc.CreateField(ctx, hera, directory.Field{Name: "department", Label: "Department", Kind: directory.FieldKindText}),
 		"UpdateField":             e.svc.UpdateField(ctx, hera, directory.Field{Name: "department", Label: "Dept"}),
 		"DeleteField":             e.svc.DeleteField(ctx, hera, "department", "department"),
@@ -409,7 +409,7 @@ func TestDemotedAdminRefused(t *testing.T) {
 	if err := e.svc.UpdateUser(ctx, bea, "bob", nil, strptr("X")); status(err) != 403 {
 		t.Errorf("demoted admin = %v", err)
 	}
-	if err := e.svc.CreateGroup(ctx, bea, "g"); status(err) != 403 || e.ll.HasGroup("g") {
+	if err := deleteErr(e.svc.CreateGroup(ctx, bea, "g")); status(err) != 403 || e.ll.HasGroup("g") {
 		t.Errorf("demoted admin creates a group = %v", err)
 	}
 }

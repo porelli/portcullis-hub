@@ -159,7 +159,7 @@ func TestOverview(t *testing.T) {
 	if err != nil || ov.Available || !strings.Contains(ov.Reason, "not configured") {
 		t.Errorf("unconfigured = %+v, %v", ov, err)
 	}
-	if err := e.svc.CreateGroup(ctx, asRoot, "x"); status(err) != 503 {
+	if err := deleteErr(e.svc.CreateGroup(ctx, asRoot, "x")); status(err) != 503 {
 		t.Errorf("mutation while unconfigured = %v", err)
 	}
 }
@@ -267,12 +267,12 @@ func TestGuardrails(t *testing.T) {
 	_, err = e.svc.SetPassword(ctx, asRoot, "admin", "", true, "")
 	check("password core admin", err, 409)
 	check("update service", e.svc.UpdateUser(ctx, asRoot, "portcullis-hub", nil, strptr("x")), 409)
-	check("remove service from admin", e.svc.RemoveMember(ctx, asRoot, "lldap_admin", "portcullis-hub"), 409)
+	check("remove service from admin", deleteErr(e.svc.RemoveMember(ctx, asRoot, "lldap_admin", "portcullis-hub")), 409)
 	check("add service to group", e.svc.AddMember(ctx, asRoot, "lldap_password_manager", "portcullis-hub"), 409)
-	check("remove core admin", e.svc.RemoveMember(ctx, asRoot, "lldap_admin", "admin"), 409)
-	check("remove self", e.svc.RemoveMember(ctx, asRoot, "lldap_admin", "root"), 409)
-	check("delete builtin group", e.svc.DeleteGroup(ctx, asRoot, "lldap_admin", "lldap_admin"), 409)
-	check("create lldap_ group", e.svc.CreateGroup(ctx, asRoot, "lldap_x"), 400)
+	check("remove core admin", deleteErr(e.svc.RemoveMember(ctx, asRoot, "lldap_admin", "admin")), 409)
+	check("remove self", deleteErr(e.svc.RemoveMember(ctx, asRoot, "lldap_admin", "root")), 409)
+	check("delete builtin group", deleteErr(e.svc.DeleteGroup(ctx, asRoot, "lldap_admin", "lldap_admin")), 409)
+	check("create lldap_ group", deleteErr(e.svc.CreateGroup(ctx, asRoot, "lldap_x")), 400)
 	check("passkeys service", e.svc.RequirePasskey(ctx, asRoot, "portcullis-hub"), 409)
 	_, err = e.svc.SendInvite(ctx, asRoot, "portcullis-hub")
 	check("invite service", err, 409)
@@ -281,11 +281,11 @@ func TestGuardrails(t *testing.T) {
 	// removing root works only while admin is still a member. The service
 	// account (an lldap_admin member, not human) then tries to remove solo.
 	check("add solo", e.svc.AddMember(ctx, asRoot, "lldap_admin", "solo"), 0)
-	check("remove root by solo", e.svc.RemoveMember(ctx, asAdmin("solo"), "lldap_admin", "root"), 0)
+	check("remove root by solo", deleteErr(e.svc.RemoveMember(ctx, asAdmin("solo"), "lldap_admin", "root")), 0)
 	// Simulate admin having been dropped from lldap_admin elsewhere (LLDAP UI).
 	e.ll.RemoveMember("lldap_admin", "admin")
 	check("last human by delete", deleteErr(e.svc.DeleteUser(ctx, asAdmin("portcullis-hub"), "solo", "solo")), 409)
-	check("last human by removal", e.svc.RemoveMember(ctx, asAdmin("portcullis-hub"), "lldap_admin", "solo"), 409)
+	check("last human by removal", deleteErr(e.svc.RemoveMember(ctx, asAdmin("portcullis-hub"), "lldap_admin", "solo")), 409)
 	if m := e.ll.GroupMembers("lldap_admin"); len(m) != 2 {
 		t.Errorf("lldap_admin = %v", m)
 	}
@@ -362,13 +362,13 @@ func TestUserLifecycle(t *testing.T) {
 
 func TestGroups(t *testing.T) {
 	e := newEnv(t)
-	if err := e.svc.CreateGroup(ctx, asRoot, "users_app"); err != nil {
+	if err := deleteErr(e.svc.CreateGroup(ctx, asRoot, "users_app")); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.svc.CreateGroup(ctx, asRoot, "USERS_APP"); status(err) != 409 {
+	if err := deleteErr(e.svc.CreateGroup(ctx, asRoot, "USERS_APP")); status(err) != 409 {
 		t.Errorf("case-duplicate = %v", err)
 	}
-	if err := e.svc.CreateGroup(ctx, asRoot, "bad name"); status(err) != 400 {
+	if err := deleteErr(e.svc.CreateGroup(ctx, asRoot, "bad name")); status(err) != 400 {
 		t.Errorf("bad name = %v", err)
 	}
 	if err := e.svc.AddMember(ctx, asRoot, "users_app", "alice"); err != nil {
@@ -377,16 +377,16 @@ func TestGroups(t *testing.T) {
 	if err := e.svc.AddMember(ctx, asRoot, "users_app", "alice"); status(err) != 409 {
 		t.Errorf("duplicate member = %v", err)
 	}
-	if err := e.svc.RemoveMember(ctx, asRoot, "users_app", "alice"); err != nil {
+	if err := deleteErr(e.svc.RemoveMember(ctx, asRoot, "users_app", "alice")); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.svc.RemoveMember(ctx, asRoot, "users_app", "alice"); status(err) != 404 {
+	if err := deleteErr(e.svc.RemoveMember(ctx, asRoot, "users_app", "alice")); status(err) != 404 {
 		t.Errorf("not a member = %v", err)
 	}
-	if err := e.svc.DeleteGroup(ctx, asRoot, "users_app", "users"); status(err) != 400 {
+	if err := deleteErr(e.svc.DeleteGroup(ctx, asRoot, "users_app", "users")); status(err) != 400 {
 		t.Errorf("bad confirm = %v", err)
 	}
-	if err := e.svc.DeleteGroup(ctx, asRoot, "users_app", "users_app"); err != nil || e.ll.HasGroup("users_app") {
+	if err := deleteErr(e.svc.DeleteGroup(ctx, asRoot, "users_app", "users_app")); err != nil || e.ll.HasGroup("users_app") {
 		t.Errorf("delete: %v", err)
 	}
 }
@@ -452,7 +452,7 @@ func userOps(s *directory.Service, c *directory.Caller, target string) map[strin
 		"ClearActions":            func() error { return s.ClearActions(ctx, c, target) },
 		"RemovePasskeys":          func() error { return r(s.RemovePasskeys(ctx, c, target, target, true)) },
 		"AddMember":               func() error { return s.AddMember(ctx, c, "users_app", target) },
-		"RemoveMember":            func() error { return s.RemoveMember(ctx, c, "lldap_admin", target) },
+		"RemoveMember":            func() error { return deleteErr(s.RemoveMember(ctx, c, "lldap_admin", target)) },
 		"RemoveStaleKeycloakUser": func() error { return s.RemoveStaleKeycloakUser(ctx, c, target, target) },
 		"AddException": func() error {
 			return s.AddException(ctx, c, "users_app", directory.Exception{User: target, Reason: "x", Include: true})
