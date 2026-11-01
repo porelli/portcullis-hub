@@ -6,12 +6,15 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/go-ldap/ldap/v3"
 	"github.com/portcullis/hub/internal/lldap"
 	"github.com/portcullis/hub/internal/lldap/lldaptest"
 )
@@ -129,8 +132,11 @@ func TestWrongPasswordNoSecretInError(t *testing.T) {
 	if err == nil || strings.Contains(err.Error(), wrong) {
 		t.Errorf("err = %v", err)
 	}
-	if err := c.SetPassword(context.Background(), "admin", "NewPassword-123"); err == nil || strings.Contains(err.Error(), wrong) || strings.Contains(err.Error(), "NewPassword") {
+	if err := c.SetPassword(context.Background(), "admin", "NewPassword-123"); !ldap.IsErrorWithCode(err, ldap.LDAPResultInvalidCredentials) || strings.Contains(err.Error(), wrong) || strings.Contains(err.Error(), "NewPassword") {
 		t.Errorf("SetPassword with bad bind = %v", err)
+	}
+	if f.Password("admin") != "adminpass" {
+		t.Error("password changed after a failed bind")
 	}
 }
 
@@ -145,8 +151,7 @@ func TestSetPassword(t *testing.T) {
 		t.Errorf("password not set")
 	}
 	f.FailPassword = 50
-	var re *lldap.ResultError
-	if err := c.SetPassword(ctx, "bob", "another-password"); !errors.As(err, &re) || re.Code != 50 || strings.Contains(err.Error(), "another-password") {
+	if err := c.SetPassword(ctx, "bob", "another-password"); !ldap.IsErrorWithCode(err, 50) || strings.Contains(err.Error(), "another-password") {
 		t.Errorf("failure = %v", err)
 	}
 	if err := c.SetPassword(ctx, "nobody", "a-long-new-password"); err == nil {
@@ -441,5 +446,40 @@ func TestUpdateUserEmailAtomicity(t *testing.T) {
 	// Verify email was NOT changed in fake's internal state.
 	if f.Users["dave"]["email"] != originalEmail {
 		t.Errorf("after failed op: email = %s, want %s (email should not have changed)", f.Users["dave"]["email"], originalEmail)
+	}
+}
+
+// TestSetPasswordSilentServer: an LDAP server that accepts the connection but
+// never answers must not hang the Hub (Timeout and ctx both bound it).
+func TestSetPasswordSilentServer(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			defer c.Close() // read nothing, answer nothing
+		}
+	}()
+	f := lldaptest.New(t, "portcullis-hub", svcPass)
+	c := lldap.New(f.HTTP.URL, "ldap://"+l.Addr().String(), f.BaseDN, writeCreds(t, "portcullis-hub", svcPass))
+	c.Timeout = 300 * time.Millisecond
+	start := time.Now()
+	if err := c.SetPassword(context.Background(), "admin", "NewPassword-123"); err == nil || strings.Contains(err.Error(), "NewPassword") {
+		t.Errorf("silent server (timeout) = %v", err)
+	}
+	c.Timeout = time.Minute
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	if err := c.SetPassword(ctx, "admin", "NewPassword-123"); err == nil {
+		t.Error("silent server (ctx) succeeded")
+	}
+	if d := time.Since(start); d > 10*time.Second {
+		t.Errorf("took %v", d)
 	}
 }

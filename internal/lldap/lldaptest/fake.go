@@ -1,14 +1,13 @@
 // Package lldaptest is an in-memory LLDAP fake for tests: the HTTP login /
-// refresh / GraphQL endpoints the Hub uses, and an LDAP listener that
-// understands simple bind and the Password Modify extended operation.
+// refresh / GraphQL endpoints the Hub uses, and an LDAP listener
+// (vjeantet/ldapserver) that understands simple bind and the RFC 3062
+// Password Modify extended operation, as LLDAP's does.
 package lldaptest
 
 import (
-	"bufio"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +16,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	ber "github.com/go-asn1-ber/asn1-ber"
+	"github.com/vjeantet/ldapserver"
 )
 
 // Group is a fake group.
@@ -82,13 +84,19 @@ func New(t *testing.T, service, servicePass string) *Server {
 	s.AddUser(service, "hub@example.org", "Hub", servicePass, "lldap_admin")
 	s.HTTP = httptest.NewServer(http.HandlerFunc(s.serveHTTP))
 	t.Cleanup(s.HTTP.Close)
+
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	s.LDAP = l
-	t.Cleanup(func() { l.Close() })
-	go s.serveLDAP()
+	quietLDAPLogger.Do(func() { ldapserver.Logger = ldapserver.DiscardingLogger })
+	srv := ldapserver.NewServerWithHandlerSource(s)
+	sl := &startedListener{Listener: l, started: make(chan struct{})}
+	served := make(chan struct{})
+	go func() { defer close(served); _ = srv.Serve(sl) }()
+	<-sl.started
+	t.Cleanup(func() { srv.Stop(); <-served })
 	return s
 }
 
@@ -459,60 +467,26 @@ func (s *Server) graphql(caller, q string, vars map[string]interface{}) (interfa
 
 // ── LDAP ──────────────────────────────────────────────────
 
-func readTLV(r *bufio.Reader) (byte, []byte, error) {
-	tag, err := r.ReadByte()
-	if err != nil {
-		return 0, nil, err
-	}
-	l, err := r.ReadByte()
-	if err != nil {
-		return 0, nil, err
-	}
-	n := int(l)
-	if l&0x80 != 0 {
-		n = 0
-		for i := 0; i < int(l&0x7f); i++ {
-			b, _ := r.ReadByte()
-			n = n<<8 | int(b)
-		}
-	}
-	v := make([]byte, n)
-	_, err = io.ReadFull(r, v)
-	return tag, v, err
+// quietLDAPLogger silences ldapserver's package-level logger (once: it is a
+// global, so setting it per test would race).
+var quietLDAPLogger sync.Once
+
+// startedListener signals the first Accept. ldapserver's Serve stores the
+// listener without synchronisation and Stop reads it, so Stop may only be
+// called once Serve is accepting (else the race detector fires).
+type startedListener struct {
+	net.Listener
+	once    sync.Once
+	started chan struct{}
 }
 
-func split(b []byte) (byte, []byte, []byte) {
-	if len(b) < 2 {
-		return 0, nil, nil
-	}
-	tag, l := b[0], int(b[1])
-	b = b[2:]
-	if l&0x80 != 0 {
-		k := l & 0x7f
-		l = 0
-		for i := 0; i < k; i++ {
-			l = l<<8 | int(b[i])
-		}
-		b = b[k:]
-	}
-	if l > len(b) {
-		return 0, nil, nil
-	}
-	return tag, b[:l], b[l:]
+func (l *startedListener) Accept() (net.Conn, error) {
+	l.once.Do(func() { close(l.started) })
+	return l.Listener.Accept()
 }
 
-func enc(tag byte, v []byte) []byte {
-	if len(v) < 0x80 {
-		return append([]byte{tag, byte(len(v))}, v...)
-	}
-	return append([]byte{tag, 0x82, byte(len(v) >> 8), byte(len(v))}, v...)
-}
-
-func result(id int, op byte, code int, msg string) []byte {
-	body := append(enc(0x0a, []byte{byte(code)}), enc(0x04, nil)...)
-	body = append(body, enc(0x04, []byte(msg))...)
-	return enc(0x30, append(enc(0x02, []byte{byte(id)}), enc(op, body)...))
-}
+// passwdModifyOID is the RFC 3062 Password Modify extended operation.
+const passwdModifyOID = "1.3.6.1.4.1.4203.1.11.1"
 
 func (s *Server) uidOf(dn string) (string, bool) {
 	dn = strings.ToLower(dn)
@@ -523,93 +497,91 @@ func (s *Server) uidOf(dn string) (string, bool) {
 	return strings.TrimSuffix(strings.TrimPrefix(dn, "uid="), suffix), true
 }
 
-func (s *Server) serveLDAP() {
-	for {
-		c, err := s.LDAP.Accept()
-		if err != nil {
-			return
-		}
-		go s.ldapConn(c)
-	}
+// ldapConn is one LDAP connection; bound is the user of its last good bind.
+type ldapConn struct {
+	s     *Server
+	bound string // guarded by s.mu (requests run on their own goroutines)
+	mux   *ldapserver.RouteMux
 }
 
-func (s *Server) ldapConn(c net.Conn) {
-	defer c.Close()
-	r := bufio.NewReader(c)
-	bound := ""
-	for {
-		tag, msg, err := readTLV(r)
-		if err != nil || tag != 0x30 {
+// GetHandler gives every connection its own bind state
+// (ldapserver.HandlerSource).
+func (s *Server) GetHandler() ldapserver.Handler {
+	c := &ldapConn{s: s, mux: ldapserver.NewRouteMux()}
+	c.mux.Bind(c.bind)
+	c.mux.Extended(c.passwordModify).RequestName(passwdModifyOID)
+	c.mux.Extended(func(w ldapserver.ResponseWriter, _ *ldapserver.Message) {
+		res := ldapserver.NewExtendedResponse(ldapserver.LDAPResultProtocolError)
+		res.SetDiagnosticMessage("unsupported")
+		w.Write(res)
+	})
+	c.mux.NotFound(func(w ldapserver.ResponseWriter, _ *ldapserver.Message) {
+		w.Write(ldapserver.NewResponse(ldapserver.LDAPResultUnwillingToPerform))
+	})
+	return c
+}
+
+func (c *ldapConn) ServeLDAP(w ldapserver.ResponseWriter, m *ldapserver.Message) {
+	c.mux.ServeLDAP(w, m)
+}
+
+func (c *ldapConn) bind(w ldapserver.ResponseWriter, m *ldapserver.Message) {
+	r := m.GetBindRequest()
+	s := c.s
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	uid, ok := s.uidOf(string(r.Name()))
+	if r.AuthenticationChoice() != "simple" || !ok || s.Passwords[uid] == "" || s.Passwords[uid] != string(r.AuthenticationSimple()) {
+		c.bound = ""
+		w.Write(ldapserver.NewBindResponse(ldapserver.LDAPResultInvalidCredentials))
+		return
+	}
+	c.bound = uid
+	w.Write(ldapserver.NewBindResponse(ldapserver.LDAPResultSuccess))
+}
+
+// passwordModify decodes the PasswdModifyRequestValue
+// (SEQUENCE { userIdentity [0], oldPasswd [1], newPasswd [2] }, all optional).
+func (c *ldapConn) passwordModify(w ldapserver.ResponseWriter, m *ldapserver.Message) {
+	reply := func(code int, msg string) {
+		res := ldapserver.NewExtendedResponse(code)
+		res.SetDiagnosticMessage(msg)
+		w.Write(res)
+	}
+	var userDN, newPw string
+	req := m.GetExtendedRequest()
+	if v := req.RequestValue(); v != nil {
+		p, err := ber.DecodePacketErr([]byte(*v))
+		if err != nil {
+			reply(ldapserver.LDAPResultProtocolError, "bad request value")
 			return
 		}
-		_, idb, rest := split(msg)
-		id := 0
-		for _, b := range idb {
-			id = id<<8 | int(b)
+		for _, f := range p.Children {
+			switch f.Tag {
+			case 0:
+				userDN = f.Data.String()
+			case 2:
+				newPw = f.Data.String()
+			}
 		}
-		opTag, op, _ := split(rest)
-		switch opTag {
-		case 0x60: // bind
-			_, _, op = split(op) // version
-			_, dn, op := split(op)
-			_, pw, _ := split(op)
-			uid, ok := s.uidOf(string(dn))
-			s.mu.Lock()
-			good := ok && s.Passwords[uid] == string(pw) && s.Passwords[uid] != ""
-			s.mu.Unlock()
-			if !good {
-				c.Write(result(id, 0x61, 49, "")) // invalidCredentials
-				continue
-			}
-			bound = uid
-			c.Write(result(id, 0x61, 0, ""))
-		case 0x77: // extended
-			_, oid, op := split(op)
-			_, val, _ := split(op)
-			if string(oid) != "1.3.6.1.4.1.4203.1.11.1" {
-				c.Write(result(id, 0x78, 2, "unsupported"))
-				continue
-			}
-			_, seq, _ := split(val)
-			var userDN, newPw string
-			for len(seq) > 0 {
-				var t byte
-				var v []byte
-				t, v, seq = split(seq)
-				switch t {
-				case 0x80:
-					userDN = string(v)
-				case 0x82:
-					newPw = string(v)
-				case 0:
-					seq = nil
-				}
-			}
-			s.mu.Lock()
-			uid, ok := s.uidOf(userDN)
-			_, exists := s.Users[uid]
-			switch {
-			case bound == "" || !s.Groups[1].Members[bound]:
-				s.mu.Unlock()
-				c.Write(result(id, 0x78, 50, "insufficient access"))
-			case s.FailPassword != 0:
-				code := s.FailPassword
-				s.FailPassword = 0
-				s.mu.Unlock()
-				c.Write(result(id, 0x78, code, "simulated failure"))
-			case !ok || !exists || newPw == "":
-				s.mu.Unlock()
-				c.Write(result(id, 0x78, 34, "invalid DN"))
-			default:
-				s.Passwords[uid] = newPw
-				s.Mutations = append(s.Mutations, "password "+uid)
-				s.mu.Unlock()
-				c.Write(result(id, 0x78, 0, ""))
-			}
-		case 0x42: // unbind
-			return
-		default:
-			return
-		}
+	}
+	s := c.s
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	uid, ok := s.uidOf(userDN)
+	_, exists := s.Users[uid]
+	switch {
+	case c.bound == "" || !s.Groups[1].Members[c.bound]:
+		reply(ldapserver.LDAPResultInsufficientAccessRights, "insufficient access")
+	case s.FailPassword != 0:
+		code := s.FailPassword
+		s.FailPassword = 0
+		reply(code, "simulated failure")
+	case !ok || !exists || newPw == "":
+		reply(ldapserver.LDAPResultInvalidDNSyntax, "invalid DN")
+	default:
+		s.Passwords[uid] = newPw
+		s.Mutations = append(s.Mutations, "password "+uid)
+		reply(ldapserver.LDAPResultSuccess, "")
 	}
 }

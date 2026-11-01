@@ -1,28 +1,33 @@
-// Package lldap is a small LLDAP client (net/http + a minimal LDAP codec,
-// stdlib only) for user and group management (integration contract §9).
+// Package lldap is a small LLDAP client (net/http + go-ldap/ldap) for user
+// and group management (integration contract §9).
 //
 // Users and groups go through LLDAP's GraphQL API (/api/graphql) with a JWT
 // from /auth/simple/login; passwords through the LDAP Password Modify
-// extended operation (see ldap.go). The client logs in as the dedicated
-// service account whose username and password core mounts as files, re-read
-// on every login so a rotated password needs no restart. Secrets are never
-// logged and never appear in errors.
+// extended operation (RFC 3062) using go-ldap/ldap. The client logs in as the
+// dedicated service account whose username and password core mounts as files,
+// re-read on every login so a rotated password needs no restart. Secrets are
+// never logged and never appear in errors.
 package lldap
 
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/go-ldap/ldap/v3"
 )
 
 // DefaultCredentialsDir is where core mounts the service account (§9).
@@ -416,7 +421,7 @@ func (c *Client) UserDN(user string) string {
 }
 
 // SetPassword sets a user's password through the LDAP Password Modify
-// extended operation, bound as the service account.
+// extended operation (RFC 3062), bound as the service account.
 func (c *Client) SetPassword(ctx context.Context, user, password string) error {
 	if !ValidUsername(user) {
 		return fmt.Errorf("invalid username")
@@ -428,7 +433,63 @@ func (c *Client) SetPassword(ctx context.Context, user, password string) error {
 	if err != nil {
 		return err
 	}
+
 	return ldapPasswordModify(ctx, c.LDAPURL, c.Timeout, c.UserDN(strings.ToLower(svc)), svcPass, c.UserDN(user), password)
+}
+
+// Password changes go over LDAP, not HTTP: LLDAP stores passwords with
+// OPAQUE, and its HTTP endpoints (/auth/opaque/register/*) expect the client
+// half of the OPAQUE registration, which the Hub can't do. LLDAP's LDAP
+// server implements the RFC 3062 Password Modify extended operation and runs
+// the OPAQUE registration server-side (lldap v0.6.3
+// crates/ldap/src/password.rs); members of lldap_admin may change any user's
+// password that way.
+//
+// ldapPasswordModify binds as bindDN and sets userDN's password. The whole
+// exchange (dial, bind, extended op) is bounded by timeout and by ctx, so a
+// silent server can't hang the caller.
+func ldapPasswordModify(ctx context.Context, rawURL string, timeout time.Duration, bindDN, bindPassword, userDN, newPassword string) error {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("invalid LLDAP LDAP URL: %w", err)
+	}
+	if u.Scheme != "ldap" && u.Scheme != "ldaps" {
+		return fmt.Errorf("LLDAP LDAP URL must be ldap:// or ldaps://, got %q", u.Scheme)
+	}
+	if timeout <= 0 {
+		timeout = 20 * time.Second
+	}
+	deadline := time.Now().Add(timeout)
+	if dl, ok := ctx.Deadline(); ok && dl.Before(deadline) {
+		deadline = dl
+	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("ldap: connect: %w", err)
+	}
+	conn, err := ldap.DialURL(rawURL,
+		ldap.DialWithDialer(&net.Dialer{Timeout: timeout, Deadline: deadline}),
+		ldap.DialWithTLSConfig(&tls.Config{ServerName: u.Hostname(), MinVersion: tls.VersionTLS12}))
+	if err != nil {
+		return fmt.Errorf("ldap: connect: %w", err)
+	}
+	defer conn.Close()
+	// Per-request timeout (go-ldap's default is none), and close the
+	// connection (failing the pending request) when ctx is cancelled.
+	conn.SetTimeout(time.Until(deadline))
+	defer context.AfterFunc(ctx, func() { conn.Close() })()
+
+	if err := conn.Bind(bindDN, bindPassword); err != nil {
+		// Never echo the server message for binds: keep it short.
+		var le *ldap.Error
+		if errors.As(err, &le) && le.ResultCode != ldap.ErrorNetwork {
+			return &ldap.Error{ResultCode: le.ResultCode, Err: fmt.Errorf("ldap bind: result %d", le.ResultCode)}
+		}
+		return fmt.Errorf("ldap bind: %w", err)
+	}
+	if _, err := conn.PasswordModify(ldap.NewPasswordModifyRequest(userDN, "", newPassword)); err != nil {
+		return fmt.Errorf("ldap password modify: %w", err)
+	}
+	return nil
 }
 
 // UserAttributes returns the non-hardcoded user attributes from the schema.
