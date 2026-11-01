@@ -4,12 +4,13 @@ import (
 	"bytes"
 	"context"
 	"io"
-	"net/http"
-	"net/url"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/moby/moby/api/pkg/stdcopy"
+	"github.com/moby/moby/client"
 )
 
 // maxLogBytes bounds what is read per container.
@@ -23,27 +24,18 @@ func (c *Client) Logs(ctx context.Context, id string, tail int, timestamps bool)
 	if err != nil {
 		return nil, err
 	}
-	q := url.Values{
-		"stdout": {"1"},
-		"stderr": {"1"},
-		"tail":   {strconv.Itoa(tail)},
-	}
-	if timestamps {
-		q.Set("timestamps", "1")
-	}
-	resp, err := c.do(ctx, c.stream, http.MethodGet, "/containers/"+url.PathEscape(id)+"/logs", q, nil)
+	rc, err := c.api.ContainerLogs(ctx, id, client.ContainerLogsOptions{
+		ShowStdout: true, ShowStderr: true, Tail: strconv.Itoa(tail), Timestamps: timestamps})
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer rc.Close()
 	out := &limitedBuffer{max: maxLogBytes}
-	body := io.Reader(resp.Body)
-	// Non-TTY output is always multiplexed (API >= 1.42 also says so in
-	// Content-Type); TTY output is raw.
-	if !tty || resp.Header.Get("Content-Type") == "application/vnd.docker.multiplexed-stream" {
-		err = Demux(body, out, out)
+	// Non-TTY output is multiplexed; TTY output is raw.
+	if tty {
+		_, err = io.Copy(out, rc)
 	} else {
-		_, err = io.Copy(out, body)
+		_, err = stdcopy.StdCopy(out, out, rc)
 	}
 	return out.buf, err
 }

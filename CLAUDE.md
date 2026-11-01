@@ -14,7 +14,7 @@ Web management UI for Portcullis. Go binary with an embedded single-page UI, pub
 | `internal/policy` | Auth-policy model (LoA/ACR/TLS tier), per-method capabilities (`CapabilityFor`, `Resolve`, `Check`) and group-gate policy file v3 (`Build`, `Write`) |
 | `internal/state` | `state.yaml` load/save (atomic; corrupt file = refuse to start) |
 | `internal/compose` | `docker compose` CLI wrapper — **up/down only**, behind the `Runner` interface; failures are `*compose.Error` with the output tail (8 KiB) |
-| `internal/docker` | Engine API client over `DOCKER_HOST` (net/http): containers, logs (stream demux), exec, events |
+| `internal/docker` | Engine API client over `DOCKER_HOST` on the official SDK (`moby/moby/client`, API version negotiated over `/_ping`): containers, logs (`stdcopy` demux), exec (hijacked attach), events |
 | `internal/keycloak` | Keycloak admin API client on `Nerzal/gocloak` (master admin token; clients + client scopes, users: lazy LDAP import, required actions, credentials/passkeys, sessions, delete; LDAP federation lookup); one raw PUT on gocloak's request builder (user update, so an empty `requiredActions` is sent); `kctest` = in-memory HTTP fake |
 | `internal/lldap` | LLDAP client: GraphQL via `hasura/go-graphql-client` (`/api/graphql`, JWT from `/auth/simple/login`, refresh/re-login on 401) + `go-ldap` Password Modify extended op (passwords; dial/request bounded by `Timeout` and ctx); credentials from files; `lldaptest` = in-memory fake (HTTP + LDAP on `vjeantet/ldapserver`) |
 | `internal/invite` | Client for core's one-time invite API (contract §9.4) |
@@ -25,9 +25,9 @@ Web management UI for Portcullis. Go binary with an embedded single-page UI, pub
 
 ## Critical Rules
 
-- Dependencies: prefer mature, pinned libraries over hand-rolled code (Dependabot-tracked); no web framework needed for the SPA. In use: `gopkg.in/yaml.v3`, `alecthomas/participle/v2` (rule parser), `go-ldap/ldap/v3` (Password Modify), `hasura/go-graphql-client` (LLDAP GraphQL), `Nerzal/gocloak/v14` (Keycloak admin API); tests only: `vjeantet/ldapserver` (LDAP fake).
+- Dependencies: prefer mature, pinned libraries over hand-rolled code (Dependabot-tracked); no web framework needed for the SPA. In use: `gopkg.in/yaml.v3`, `alecthomas/participle/v2` (rule parser), `go-ldap/ldap/v3` (Password Modify), `hasura/go-graphql-client` (LLDAP GraphQL), `Nerzal/gocloak/v14` (Keycloak admin API), `moby/moby/client` + `moby/moby/api` (Docker Engine API); tests only: `vjeantet/ldapserver` (LDAP fake).
 - Run `go vet ./... && go test -race ./...` and `gofmt -l .` after every change; CI runs the same.
-- Docker: everything read-only (status, logs, exec, events) goes through `internal/docker`; the `docker compose` CLI is used only for `up`/`down` (compose has no API). Both use `DOCKER_HOST` (the Hub's socket proxy, `tcp://socket-proxy-hub:2375`).
+- Docker: everything read-only (status, logs, exec, events) goes through the Engine API via the official SDK in `internal/docker`; the `docker compose` CLI is used only for `up`/`down` (compose has no API). Both use `DOCKER_HOST` (the Hub's socket proxy, `tcp://socket-proxy-hub:2375`).
 - `--project-directory` must be the HOST path (`PROJECT_HOST_DIR`) so the daemon resolves bind mounts.
 - Every request except `GET /healthz` needs `X-Portcullis-Proxy-Secret` == `HUB_PROXY_SECRET` (≥ 32 chars, or the Hub won't start).
 - group-gate keys policies, groups and path groups **by subdomain only**. Templates whose Traefik rules the Hub can't fully resolve to `<sub>.${PORTCULLIS_DOMAIN}` hosts are rejected; two enabled apps may not route the same subdomain.

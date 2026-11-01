@@ -1,6 +1,7 @@
 package docker
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/binary"
@@ -12,11 +13,48 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/moby/moby/api/pkg/stdcopy"
 )
+
+// Stream ids of the multiplexed (non-TTY) format.
+const (
+	Stdout = byte(stdcopy.Stdout)
+	Stderr = byte(stdcopy.Stderr)
+)
+
+// apiVersion matches the /v1.NN prefix the SDK puts on every path but
+// /_ping (it negotiates the version over /_ping first; these fakes don't
+// answer it, so the SDK falls back to its maximum version).
+var apiVersion = regexp.MustCompile(`^/v[0-9]+\.[0-9]+/`)
+
+func unversioned(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.URL.Path = apiVersion.ReplaceAllString(r.URL.Path, "/")
+		h.ServeHTTP(w, r)
+	})
+}
+
+// hijack answers an exec start the way the daemon does (101, then the
+// raw multiplexed stream on the connection).
+// It reads the request body first, like the daemon: closing a socket with
+// unread input makes the kernel send RST, which can drop the output.
+func hijack(t *testing.T, w http.ResponseWriter, r *http.Request) (net.Conn, *bufio.ReadWriter) {
+	io.Copy(io.Discard, r.Body)
+	conn, rw, err := w.(http.Hijacker).Hijack()
+	if err != nil {
+		t.Error(err)
+		return nil, nil
+	}
+	rw.WriteString("HTTP/1.1 101 UPGRADED\r\nContent-Type: application/vnd.docker.raw-stream\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n")
+	rw.Flush()
+	return conn, rw
+}
 
 func frame(stream byte, s string) []byte {
 	h := make([]byte, 8)
@@ -27,7 +65,7 @@ func frame(stream byte, s string) []byte {
 
 func newTestClient(t *testing.T, h http.Handler) *Client {
 	t.Helper()
-	srv := httptest.NewServer(h)
+	srv := httptest.NewServer(unversioned(h))
 	t.Cleanup(srv.Close)
 	c, err := New("tcp://" + srv.Listener.Addr().String())
 	if err != nil {
@@ -49,48 +87,6 @@ func TestNew(t *testing.T) {
 	}
 }
 
-func TestDemux(t *testing.T) {
-	var in bytes.Buffer
-	in.Write(frame(Stdout, "out1\n"))
-	in.Write(frame(Stderr, "err1\n"))
-	in.Write(frame(Stdout, ""))
-	in.Write(frame(Stdout, "out2\n"))
-	var out, errb bytes.Buffer
-	if err := Demux(&in, &out, &errb); err != nil {
-		t.Fatal(err)
-	}
-	if out.String() != "out1\nout2\n" || errb.String() != "err1\n" {
-		t.Errorf("stdout=%q stderr=%q", out.String(), errb.String())
-	}
-
-	// Combined into one writer keeps frame order.
-	in.Reset()
-	in.Write(frame(Stdout, "a"))
-	in.Write(frame(Stderr, "b"))
-	in.Write(frame(Stdout, "c"))
-	var all bytes.Buffer
-	if err := Demux(&in, &all, &all); err != nil || all.String() != "abc" {
-		t.Errorf("combined = %q, %v", all.String(), err)
-	}
-
-	// nil writers discard.
-	if err := Demux(bytes.NewReader(frame(Stderr, "x")), nil, nil); err != nil {
-		t.Error(err)
-	}
-
-	bad := map[string][]byte{
-		"truncated header":  frame(Stdout, "ok")[:5],
-		"truncated payload": frame(Stdout, "hello")[:10],
-		"unknown stream":    frame(7, "x"),
-		"oversized frame":   {1, 0, 0, 0, 0xff, 0xff, 0xff, 0xff},
-	}
-	for name, b := range bad {
-		if err := Demux(bytes.NewReader(b), io.Discard, io.Discard); err == nil {
-			t.Errorf("%s: expected error", name)
-		}
-	}
-}
-
 func TestListContainers(t *testing.T) {
 	var gotFilters string
 	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -106,8 +102,8 @@ func TestListContainers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var f map[string][]string
-	if err := json.Unmarshal([]byte(gotFilters), &f); err != nil || f["label"][0] != "com.docker.compose.project=portcullis-grafana" {
+	var f map[string]map[string]bool
+	if err := json.Unmarshal([]byte(gotFilters), &f); err != nil || len(f["label"]) != 1 || !f["label"]["com.docker.compose.project=portcullis-grafana"] {
 		t.Errorf("filters = %q", gotFilters)
 	}
 	if len(cs) != 1 || cs[0].Name() != "portcullis-grafana-grafana-1" || cs[0].Project() != "portcullis-grafana" || cs[0].Service() != "grafana" || cs[0].State != "running" {
@@ -221,9 +217,14 @@ func TestExec(t *testing.T) {
 			fmt.Fprint(w, `{"Id":"e1"}`)
 		case r.Method == "POST" && r.URL.Path == "/exec/e1/start":
 			atomic.StoreInt32(&started, 1)
-			w.Header().Set("Content-Type", "application/vnd.docker.raw-stream")
-			w.Write(frame(Stdout, "hello\n"))
-			w.Write(frame(Stderr, "warn\n"))
+			conn, rw := hijack(t, w, r)
+			if conn == nil {
+				return
+			}
+			rw.Write(frame(Stdout, "hello\n"))
+			rw.Write(frame(Stderr, "warn\n"))
+			rw.Flush()
+			conn.Close()
 		case r.URL.Path == "/exec/e1/json":
 			fmt.Fprint(w, `{"Running":false,"ExitCode":3}`)
 		default:
@@ -250,11 +251,18 @@ func TestExecTimeout(t *testing.T) {
 		case "/containers/c1/exec":
 			fmt.Fprint(w, `{"Id":"e1"}`)
 		case "/exec/e1/start":
-			w.Write(frame(Stdout, "partial\n"))
-			w.(http.Flusher).Flush()
+			conn, rw := hijack(t, w, r)
+			if conn == nil {
+				return
+			}
+			defer conn.Close()
+			rw.Write(frame(Stdout, "partial\n"))
+			rw.Flush()
+			closed := make(chan struct{})
+			go func() { io.Copy(io.Discard, conn); close(closed) }() // returns when the client hangs up
 			select {
 			case <-release:
-			case <-r.Context().Done():
+			case <-closed:
 			}
 		default:
 			http.NotFound(w, r)
@@ -296,6 +304,10 @@ func TestEvents(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	blocking := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/events" { // the SDK's HEAD /_ping must not block
+			http.NotFound(w, r)
+			return
+		}
 		w.WriteHeader(200)
 		w.(http.Flusher).Flush()
 		<-r.Context().Done()

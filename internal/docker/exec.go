@@ -2,12 +2,11 @@ package docker
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
-	"net/url"
 	"time"
+
+	"github.com/moby/moby/api/pkg/stdcopy"
+	"github.com/moby/moby/client"
 )
 
 // maxExecOutput bounds captured exec output.
@@ -29,37 +28,26 @@ func (c *Client) Exec(ctx context.Context, id string, cmd []string, timeout time
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	var created struct {
-		ID string `json:"Id"`
-	}
-	resp, err := c.do(ctx, c.http, http.MethodPost, "/containers/"+url.PathEscape(id)+"/exec", nil, map[string]interface{}{
-		"AttachStdin":  false,
-		"AttachStdout": true,
-		"AttachStderr": true,
-		"Tty":          false,
-		"Cmd":          cmd,
-	})
+	created, err := c.api.ExecCreate(ctx, id, client.ExecCreateOptions{AttachStdout: true, AttachStderr: true, Cmd: cmd})
 	if err != nil {
 		return nil, fmt.Errorf("exec create: %w", err)
 	}
-	err = json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&created)
-	resp.Body.Close()
-	if err != nil || created.ID == "" {
-		return nil, fmt.Errorf("exec create: bad response: %v", err)
+	if created.ID == "" {
+		return nil, fmt.Errorf("exec create: bad response: no exec id")
 	}
-
-	// Without an Upgrade header the daemon answers 200 and streams the
-	// multiplexed output until the process exits, then closes.
-	resp, err = c.do(ctx, c.stream, http.MethodPost, "/exec/"+url.PathEscape(created.ID)+"/start", nil, map[string]interface{}{
-		"Detach": false,
-		"Tty":    false,
-	})
+	att, err := c.api.ExecAttach(ctx, created.ID, client.ExecAttachOptions{})
 	if err != nil {
+		if ctx.Err() != nil {
+			return &ExecResult{ExitCode: -1, TimedOut: ctx.Err() == context.DeadlineExceeded}, nil
+		}
 		return nil, fmt.Errorf("exec start: %w", err)
 	}
+	// The hijacked connection ignores ctx once set up: close it on expiry.
+	stop := context.AfterFunc(ctx, att.Close)
 	out := &limitedBuffer{max: maxExecOutput}
-	streamErr := Demux(resp.Body, out, out)
-	resp.Body.Close()
+	_, streamErr := stdcopy.StdCopy(out, out, att.Reader)
+	stop()
+	att.Close()
 
 	res := &ExecResult{Output: out.buf, ExitCode: -1, Truncated: out.truncated}
 	if ctx.Err() != nil {
@@ -69,11 +57,8 @@ func (c *Client) Exec(ctx context.Context, id string, cmd []string, timeout time
 	if streamErr != nil {
 		return res, fmt.Errorf("exec stream: %w", streamErr)
 	}
-	var info struct {
-		Running  bool `json:"Running"`
-		ExitCode int  `json:"ExitCode"`
-	}
-	if err := c.getJSON(ctx, "/exec/"+url.PathEscape(created.ID)+"/json", nil, &info); err != nil {
+	info, err := c.api.ExecInspect(ctx, created.ID, client.ExecInspectOptions{})
+	if err != nil {
 		return res, fmt.Errorf("exec inspect: %w", err)
 	}
 	if !info.Running {

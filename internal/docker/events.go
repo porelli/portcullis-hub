@@ -2,9 +2,8 @@ package docker
 
 import (
 	"context"
-	"encoding/json"
-	"net/http"
-	"net/url"
+
+	"github.com/moby/moby/client"
 )
 
 // Event is the subset of an Engine API event the Hub uses.
@@ -20,26 +19,22 @@ type Event struct {
 
 // Events streams events matching f until ctx is cancelled or the connection
 // drops; fn is called for each event. It returns the terminating error
-// (ctx.Err() on cancellation).
+// (ctx.Err() on cancellation, io.EOF when the daemon ends the stream).
 func (c *Client) Events(ctx context.Context, f Filters, fn func(Event)) error {
-	q := url.Values{}
-	if len(f) > 0 {
-		q.Set("filters", f.encode())
-	}
-	resp, err := c.do(ctx, c.stream, http.MethodGet, "/events", q, nil)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	dec := json.NewDecoder(resp.Body)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel() // stops the SDK's reader goroutine
+	res := c.api.Events(ctx, client.EventsListOptions{Filters: f.sdk()})
 	for {
-		var ev Event
-		if err := dec.Decode(&ev); err != nil {
+		select {
+		case m := <-res.Messages:
+			ev := Event{Type: string(m.Type), Action: string(m.Action), TimeNano: m.TimeNano}
+			ev.Actor.ID, ev.Actor.Attributes = m.Actor.ID, m.Actor.Attributes
+			fn(ev)
+		case err := <-res.Err:
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
 			return err
 		}
-		fn(ev)
 	}
 }
