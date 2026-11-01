@@ -454,6 +454,14 @@ func userOps(s *directory.Service, c *directory.Caller, target string) map[strin
 		"AddMember":               func() error { return s.AddMember(ctx, c, "users_app", target) },
 		"RemoveMember":            func() error { return s.RemoveMember(ctx, c, "lldap_admin", target) },
 		"RemoveStaleKeycloakUser": func() error { return s.RemoveStaleKeycloakUser(ctx, c, target, target) },
+		"AddException": func() error {
+			return s.AddException(ctx, c, "users_app", directory.Exception{User: target, Reason: "x", Include: true})
+		},
+		"RemoveException": func() error { return s.RemoveException(ctx, c, "users_app", target) },
+		"SetMemberExpiry": func() error {
+			until := time.Now().Add(time.Hour)
+			return s.SetMemberExpiry(ctx, c, "users_app", target, &until)
+		},
 	}
 }
 
@@ -461,7 +469,11 @@ func userOps(s *directory.Service, c *directory.Caller, target string) map[strin
 // evaluator (Evaluate, RunEvaluator) targets nobody: it leaves protected
 // accounts alone, see TestProtectedAccountsNeverRuleMembers. The group
 // and field operations are admin-only (TestDelegateCannotEscalate).
-var nonUserOps = map[string]bool{"Overview": true, "Recent": true, "CallerFor": true, "CreateGroup": true, "DeleteGroup": true, "CreateField": true, "UpdateField": true, "DeleteField": true, "Evaluate": true, "RunEvaluator": true, "Desired": true, "DesiredFromLLDAP": true, "Pending": true}
+var nonUserOps = map[string]bool{"Overview": true, "Recent": true, "CallerFor": true, "CreateGroup": true, "DeleteGroup": true, "CreateField": true, "UpdateField": true, "DeleteField": true, "Evaluate": true, "RunEvaluator": true, "Desired": true, "DesiredFromLLDAP": true, "Pending": true,
+	// Group config: admin-only; ConvertApply's keep list can only name
+	// non-protected members (TestConvertKeepsAsExceptions), PreviewRule
+	// changes nothing and never lists protected accounts.
+	"SetGroupRule": true, "ConvertPreview": true, "ConvertApply": true, "SetPermission": true, "PreviewRule": true}
 
 func TestProtectedAccountsParity(t *testing.T) {
 	e := newEnv(t)

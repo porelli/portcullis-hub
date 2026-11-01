@@ -315,32 +315,13 @@ func (s *Service) DeleteField(ctx context.Context, c *Caller, name, confirm stri
 func (s *Service) guardedFields(cfg *Config) map[string]string {
 	guarded := make(map[string]string)
 
-	// Collect guarding groups
-	guardingGroups := make(map[string]bool)
-
-	// 1. Protected/admin groups
-	for name := range s.adminGroups() {
-		guardingGroups[name] = true
-	}
-
-	// 2. Permission groups
-	for _, groupName := range cfg.Permissions {
-		guardingGroups[groupName] = true
-	}
-
-	// 3. App admin groups
-	if s.Apps != nil {
-		for _, app := range s.Apps() {
-			if app.AdminGroup != "" {
-				guardingGroups[app.AdminGroup] = true
-			}
-		}
-	}
+	// Guarding groups: administrator, permission and app admin groups.
+	guardingGroups := s.guardingGroups(cfg)
 
 	// Find fields used by guarding groups that have rules
 	for groupName := range guardingGroups {
-		gc, ok := cfg.Groups[groupName]
-		if !ok || gc.Rule == nil {
+		gc := cfg.Groups[groupName]
+		if gc == nil || gc.Rule == nil {
 			continue
 		}
 		for _, field := range rules.Fields(gc.Rule) {

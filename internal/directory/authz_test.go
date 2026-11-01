@@ -10,6 +10,7 @@ import (
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/keycloak/kctest"
+	"github.com/portcullis/hub/internal/rules"
 )
 
 // delegateEnv: hr_editors (edit_details), hr_inviters (invite) and
@@ -98,6 +99,7 @@ func TestDelegateCannotEscalate(t *testing.T) {
 		}
 	}
 	r := func(_ *directory.Result, err error) error { return err }
+	r2 := func(_ *directory.ConvertPreview, err error) error { return err }
 
 	check("editor edits self", e.svc.UpdateUser(ctx, eddie, "eddie", nil, strptr("Boss")))
 	check("editor edits another editor", e.svc.UpdateUser(ctx, eddie, "edna", nil, strptr("X")))
@@ -149,6 +151,13 @@ func TestDelegateCannotEscalate(t *testing.T) {
 		"CreateField":             e.svc.CreateField(ctx, hera, directory.Field{Name: "department", Label: "Department", Kind: directory.FieldKindText}),
 		"UpdateField":             e.svc.UpdateField(ctx, hera, directory.Field{Name: "department", Label: "Dept"}),
 		"DeleteField":             e.svc.DeleteField(ctx, hera, "department", "department"),
+		"SetGroupRule":            e.svc.SetGroupRule(ctx, hera, "hr_editors", nil),
+		"ConvertPreview":          r2(e.svc.ConvertPreview(ctx, hera, "hr_editors", &rules.Expr{Op: rules.OpEmpty, Field: "department"})),
+		"ConvertApply":            e.svc.ConvertApply(ctx, hera, "hr_editors", &rules.Expr{Op: rules.OpEmpty, Field: "department"}, nil),
+		"AddException":            e.svc.AddException(ctx, hera, "hr_editors", directory.Exception{User: "bob", Reason: "x", Include: true}),
+		"RemoveException":         e.svc.RemoveException(ctx, hera, "hr_editors", "bob"),
+		"SetMemberExpiry":         e.svc.SetMemberExpiry(ctx, hera, "hr_editors", "eddie", nil),
+		"SetPermission":           e.svc.SetPermission(ctx, hera, directory.PermEditDetails, ""),
 	}
 	for name, err := range adminOnly {
 		check(name, err)
