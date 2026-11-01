@@ -2,6 +2,8 @@
 
 Web management UI for [Portcullis](https://github.com/porelli/portcullis) — the self-hosted YubiKey authentication gateway.
 
+**Documentation: <https://porelli.github.io/portcullis-docs/>** — the Hub is covered in [Hub Management](https://porelli.github.io/portcullis-docs/operations/hub/), [Groups & Access Control](https://porelli.github.io/portcullis-docs/operations/groups/) and [Authentication Policies](https://porelli.github.io/portcullis-docs/operations/auth-policies/); the interfaces with core and templates in [Integration Contracts](https://porelli.github.io/portcullis-docs/guides/integration-contracts/).
+
 ## Features
 
 - App catalog with auth badges (SSO, Group Access, Group Admin)
