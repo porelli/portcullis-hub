@@ -289,3 +289,42 @@ func TestAddUserAttributeFlags(t *testing.T) {
 		}
 	}
 }
+
+func TestSetUserAttributesValidation(t *testing.T) {
+	c, f := newClient(t)
+	ctx := context.Background()
+	f.AddUser("bob", "bob@example.org", "Bob", "")
+	// Unknown attribute: error and no value stored.
+	err := c.SetUserAttributes(ctx, "bob", map[string][]string{"unknown_field": {"value"}}, nil)
+	if err == nil {
+		t.Fatal("setting unknown attribute succeeded")
+	}
+	var ge *lldap.GraphQLError
+	if !errors.As(err, &ge) || !strings.Contains(err.Error(), "schema") {
+		t.Errorf("error = %v, want GraphQLError mentioning schema", err)
+	}
+	// Verify no value was stored.
+	users, _ := c.ListUsers(ctx)
+	var bob *lldap.User
+	for i := range users {
+		if users[i].ID == "bob" {
+			bob = &users[i]
+		}
+	}
+	if bob == nil || len(bob.Attributes) != 0 {
+		t.Errorf("bob.Attributes = %+v, want empty (unknown attr rejected)", bob.Attributes)
+	}
+	// Add a single-valued attribute to schema.
+	if err := c.AddUserAttribute(ctx, "office", false); err != nil {
+		t.Fatal(err)
+	}
+	// Multiple values for single-valued attribute: error.
+	err = c.SetUserAttributes(ctx, "bob", map[string][]string{"office": {"NYC", "LON"}}, nil)
+	if err == nil || !strings.Contains(err.Error(), "not a list") {
+		t.Errorf("multi-value for single attr = %v, want error about 'not a list'", err)
+	}
+	// Single value: accepted.
+	if err := c.SetUserAttributes(ctx, "bob", map[string][]string{"office": {"NYC"}}, nil); err != nil {
+		t.Errorf("single value for single attr failed: %v", err)
+	}
+}

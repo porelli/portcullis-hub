@@ -332,11 +332,20 @@ func (s *Server) graphql(caller, q string, vars map[string]interface{}) (interfa
 			for _, item := range insert {
 				attr := item.(map[string]interface{})
 				name := str(attr["name"])
+				// Validate: attribute must be in schema.
+				schema, exists := s.UserAttributeSchema[name]
+				if !exists {
+					return nil, fmt.Errorf("Attribute %s must be declared in the schema first", name)
+				}
 				values := []string{}
 				if valArr, ok := attr["value"].([]interface{}); ok {
 					for _, v := range valArr {
 						values = append(values, str(v))
 					}
+				}
+				// Validate: non-list attributes need exactly 1 value.
+				if !schema.IsList && len(values) != 1 {
+					return nil, fmt.Errorf("Attribute %s is not a list but got %d values", name, len(values))
 				}
 				s.UserAttributeValues[id][name] = values
 			}
