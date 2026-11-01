@@ -462,6 +462,7 @@ func userOps(s *directory.Service, c *directory.Caller, target string) map[strin
 			until := time.Now().Add(time.Hour)
 			return s.SetMemberExpiry(ctx, c, "users_app", target, &until)
 		},
+		"SetDetails": func() error { return s.SetDetails(ctx, c, target, map[string][]string{}) },
 	}
 }
 
@@ -473,11 +474,19 @@ var nonUserOps = map[string]bool{"Overview": true, "Recent": true, "CallerFor": 
 	// Group config: admin-only; ConvertApply's keep list can only name
 	// non-protected members (TestConvertKeepsAsExceptions), PreviewRule
 	// changes nothing and never lists protected accounts.
-	"SetGroupRule": true, "ConvertPreview": true, "ConvertApply": true, "SetPermission": true, "PreviewRule": true}
+	"SetGroupRule": true, "ConvertPreview": true, "ConvertApply": true, "SetPermission": true, "PreviewRule": true,
+	// CSV import: ImportReview is read-only; ImportApply operates on multiple rows and reuses CreateUser/DeleteUser/SetDetails which each check targets.
+	"ParseCSV": true, "ImportReview": true, "ImportApply": true}
 
 func TestProtectedAccountsParity(t *testing.T) {
 	e := newEnv(t)
 	e.ll.AddGroup("users_app", "admin", "portcullis-hub")
+	// Set up Store early so SetDetails can work
+	e.svc.Store = &directory.Store{Path: filepath.Join(t.TempDir(), "directory.yaml")}
+	cfg, _ := e.svc.Store.Load()
+	if err := e.svc.Store.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
 	ops := userOps(e.svc, asRoot, "x")
 	typ := reflect.TypeOf(e.svc)
 	for i := 0; i < typ.NumMethod(); i++ {
@@ -506,8 +515,7 @@ func TestProtectedAccountsParity(t *testing.T) {
 	// A delegate holding every permission: every user-targeting operation
 	// refuses (403) the protected accounts, administrators, members of
 	// permission groups and the delegate themselves.
-	e.svc.Store = &directory.Store{Path: filepath.Join(t.TempDir(), "directory.yaml")}
-	cfg, _ := e.svc.Store.Load()
+	cfg, _ = e.svc.Store.Load()
 	cfg.Permissions = map[string]string{directory.PermEditDetails: "hr_edit", directory.PermInvite: "hr_invite", directory.PermRemove: "hr_remove"}
 	if err := e.svc.Store.Save(cfg); err != nil {
 		t.Fatal(err)
