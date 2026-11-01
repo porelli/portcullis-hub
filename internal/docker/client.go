@@ -35,8 +35,8 @@ const (
 
 // requestTimeout bounds the non-streaming calls (list, inspect, ping, exec
 // create/inspect); logs, exec output and events are bounded by the
-// caller's context instead.
-const requestTimeout = 30 * time.Second
+// caller's context instead. A var for tests.
+var requestTimeout = 30 * time.Second
 
 // Client talks to one Docker daemon.
 type Client struct {

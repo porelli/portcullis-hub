@@ -23,12 +23,15 @@ type ExecResult struct {
 // Exec runs cmd in container id (no TTY, no stdin) and returns combined
 // stdout+stderr. The call is bounded by timeout and ctx; on expiry the
 // stream is closed, but — as with `docker exec` — the process inside the
-// container is not killed.
+// container is not killed. Creating and inspecting the exec are each also
+// bounded by requestTimeout (a hung daemon call never waits for timeout).
 func (c *Client) Exec(ctx context.Context, id string, cmd []string, timeout time.Duration) (*ExecResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	created, err := c.api.ExecCreate(ctx, id, client.ExecCreateOptions{AttachStdout: true, AttachStderr: true, Cmd: cmd})
+	cctx, ccancel := context.WithTimeout(ctx, requestTimeout)
+	created, err := c.api.ExecCreate(cctx, id, client.ExecCreateOptions{AttachStdout: true, AttachStderr: true, Cmd: cmd})
+	ccancel()
 	if err != nil {
 		return nil, fmt.Errorf("exec create: %w", err)
 	}
@@ -57,7 +60,9 @@ func (c *Client) Exec(ctx context.Context, id string, cmd []string, timeout time
 	if streamErr != nil {
 		return res, fmt.Errorf("exec stream: %w", streamErr)
 	}
-	info, err := c.api.ExecInspect(ctx, created.ID, client.ExecInspectOptions{})
+	ictx, icancel := context.WithTimeout(ctx, requestTimeout)
+	info, err := c.api.ExecInspect(ictx, created.ID, client.ExecInspectOptions{})
+	icancel()
 	if err != nil {
 		return res, fmt.Errorf("exec inspect: %w", err)
 	}

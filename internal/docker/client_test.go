@@ -354,3 +354,49 @@ func TestUnixSocket(t *testing.T) {
 		t.Errorf("ping over unix socket: %v", err)
 	}
 }
+
+// A daemon that hangs on exec create or inspect: each call gives up after
+// requestTimeout, well before the exec timeout.
+func TestExecCreateInspectTimeout(t *testing.T) {
+	old := requestTimeout
+	requestTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { requestTimeout = old })
+	release := make(chan struct{})
+	defer close(release)
+	var hangOn atomic.Value
+	hangOn.Store("")
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == hangOn.Load().(string) {
+			select {
+			case <-release:
+			case <-r.Context().Done():
+			}
+			return
+		}
+		switch r.URL.Path {
+		case "/containers/c1/exec":
+			fmt.Fprint(w, `{"Id":"e1"}`)
+		case "/exec/e1/start":
+			conn, rw := hijack(t, w, r)
+			if conn == nil {
+				return
+			}
+			rw.Write(frame(Stdout, "ok\n"))
+			rw.Flush()
+			conn.Close()
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	for _, path := range []string{"/containers/c1/exec", "/exec/e1/json"} {
+		hangOn.Store(path)
+		start := time.Now()
+		_, err := c.Exec(context.Background(), "c1", []string{"true"}, time.Minute)
+		if err == nil {
+			t.Errorf("%s hanging: no error", path)
+		}
+		if d := time.Since(start); d > 5*time.Second {
+			t.Errorf("%s hanging: took %s", path, d)
+		}
+	}
+}
