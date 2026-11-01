@@ -121,6 +121,7 @@
     .policy-factor input[type="checkbox"] { accent-color: #3b82f6; }
     .policy-op { display: flex; gap: 1rem; margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px dashed #1e293b; font-size: 0.8125rem; }
     .policy-op label { cursor: pointer; }
+    .policy-op[hidden] { display: none; }
     .public-section { padding: 0.875rem 1rem; background: #0f172a; border: 1px solid #f59e0b55; border-radius: 0.5rem; margin-bottom: 1rem; font-size: 0.8125rem; }
     .public-section ul { margin: 0.25rem 0 0.5rem 1.25rem; color: #94a3b8; }
     .public-section code { font-family: 'SF Mono', 'Fira Code', monospace; color: #e2e8f0; }
@@ -634,9 +635,11 @@
       return html;
     }
 
+    // While inheriting, the radios are hidden: disabled radios render the
+    // same checked or not, and the "Effective:" line already states any/all.
     function opRadios(idPrefix, op, enabled) {
       const dis = enabled ? '' : ' disabled';
-      let html = '<div class="policy-op" data-prefix="' + idPrefix + '">';
+      let html = '<div class="policy-op" data-prefix="' + idPrefix + '"' + (enabled ? '' : ' hidden') + '>';
       html += '<label><input type="radio" name="' + idPrefix + '-op" value="all"' + (op === 'all' ? ' checked' : '') + dis + '> Require all checked</label>';
       html += '<label><input type="radio" name="' + idPrefix + '-op" value="any"' + (op !== 'all' ? ' checked' : '') + dis + '> Any of checked</label>';
       html += '</div>';
@@ -691,6 +694,8 @@
         if (inherit) r.checked = r.value === (el.dataset.effOp === 'all' ? 'all' : 'any');
         r.disabled = inherit;
       });
+      const opBox = box.querySelector('.policy-op[data-prefix="' + id + '"]');
+      if (opBox) opBox.hidden = inherit;
     }
 
     // Sign-in of apps with their own login (auth.native_login).
