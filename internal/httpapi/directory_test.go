@@ -104,7 +104,8 @@ func TestDirectoryAPI(t *testing.T) {
 	}
 	var ov directory.Overview
 	json.Unmarshal([]byte(b), &ov)
-	if !ov.Available || ov.Me != "root" || len(ov.Suggestions) != 2 {
+	// The test catalog's apps aren't enabled, so nothing is suggested.
+	if !ov.Available || ov.Me != "root" || len(ov.Suggestions) != 0 {
 		t.Errorf("overview = %+v", ov)
 	}
 

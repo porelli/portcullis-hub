@@ -139,8 +139,9 @@ func TestOverview(t *testing.T) {
 	if byName["portcullis-hub"].Protected != "service" || byName["admin"].Protected != "core-admin" {
 		t.Error("protection flags")
 	}
-	// users_app exists; admin_app and users_other are suggested, enabled first.
-	if len(ov.Suggestions) != 2 || ov.Suggestions[0].Group != "admin_app" || !ov.Suggestions[0].Enabled || ov.Suggestions[1].Group != "users_other" {
+	// users_app exists; only admin_app is suggested: "other" isn't enabled,
+	// so its group users_other must not be.
+	if len(ov.Suggestions) != 1 || ov.Suggestions[0].Group != "admin_app" || !ov.Suggestions[0].Enabled {
 		t.Errorf("suggestions = %+v", ov.Suggestions)
 	}
 	for _, g := range ov.Groups {

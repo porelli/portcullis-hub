@@ -181,7 +181,7 @@ type GroupView struct {
 	UsedBy  []string `json:"used_by"`         // app ids referencing it
 }
 
-// Suggestion is a template group that doesn't exist yet.
+// Suggestion is a group of an ENABLED app that doesn't exist yet.
 type Suggestion struct {
 	Group   string `json:"group"`
 	App     string `json:"app"`
@@ -302,8 +302,13 @@ func (s *Service) Overview(ctx context.Context, me string) (*Overview, error) {
 		ov.Groups = append(ov.Groups, gv)
 	}
 	sort.Slice(ov.Groups, func(i, j int) bool { return ov.Groups[i].Name < ov.Groups[j].Name })
+	// Suggest only groups of apps that are enabled: templates you don't use
+	// have no business in the directory.
 	seen := map[string]bool{}
 	for _, a := range apps {
+		if !a.Enabled {
+			continue
+		}
 		for _, c := range []struct{ group, kind string }{{a.AccessGroup, "access"}, {a.AdminGroup, "admin"}} {
 			if c.group == "" || have[c.group] || seen[c.group] || !lldap.ValidGroupName(c.group) {
 				continue

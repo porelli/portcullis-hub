@@ -1080,7 +1080,7 @@
     function renderGroups() {
       let s = '';
       if ((dir.suggestions || []).length) {
-        s = '<div class="group-card"><div class="category-title" style="margin-bottom:0.5rem">Groups your templates use that don\'t exist yet</div>';
+        s = '<div class="group-card"><div class="category-title" style="margin-bottom:0.5rem">Groups your enabled apps need that don\'t exist yet</div>';
         for (const g of dir.suggestions) {
           s += '<div class="suggestion"><code>' + escapeHtml(g.group) + '</code><span class="meta">' + escapeHtml(g.kind) + ' group of ' +
             escapeHtml(g.app_name || g.app) + (g.enabled ? ' (enabled)' : '') + '</span>' +
