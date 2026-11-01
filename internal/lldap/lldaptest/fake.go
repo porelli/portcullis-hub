@@ -309,12 +309,6 @@ func (s *Server) graphql(caller, q string, vars map[string]interface{}) (interfa
 		if !ok {
 			return nil, fmt.Errorf("no such user")
 		}
-		if v, ok := in["email"]; ok {
-			u["email"] = str(v)
-		}
-		if v, ok := in["displayName"]; ok {
-			u["displayName"] = str(v)
-		}
 		// Validate insertAttributes BEFORE mutating anything.
 		var validatedInserts []struct {
 			name   string
@@ -346,6 +340,13 @@ func (s *Server) graphql(caller, q string, vars map[string]interface{}) (interfa
 			}
 		}
 		// All validations passed. Now apply changes atomically.
+		// Apply email/displayName updates.
+		if v, ok := in["email"]; ok {
+			u["email"] = str(v)
+		}
+		if v, ok := in["displayName"]; ok {
+			u["displayName"] = str(v)
+		}
 		// Handle removeAttributes first (as the real LLDAP does).
 		if remove, ok := in["removeAttributes"].([]interface{}); ok {
 			if s.UserAttributeValues[id] == nil {

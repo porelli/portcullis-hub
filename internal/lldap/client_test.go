@@ -1,8 +1,12 @@
 package lldap_test
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -370,5 +374,72 @@ func TestSetUserAttributesAtomic(t *testing.T) {
 	}
 	if carol == nil || len(carol.Attributes["city"]) != 1 || carol.Attributes["city"][0] != "Milan" {
 		t.Errorf("after failed op: carol.city = %v, want [Milan] (remove should not have applied)", carol.Attributes["city"])
+	}
+}
+
+func TestUpdateUserEmailAtomicity(t *testing.T) {
+	c, f := newClient(t)
+	ctx := context.Background()
+	// Add an attribute schema so we can test invalid inserts.
+	if err := c.AddUserAttribute(ctx, "department", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.CreateUser(ctx, "dave", "dave@example.org", "Dave"); err != nil {
+		t.Fatal(err)
+	}
+	users, _ := c.ListUsers(ctx)
+	var dave *lldap.User
+	for i := range users {
+		if users[i].ID == "dave" {
+			dave = &users[i]
+		}
+	}
+	originalEmail := dave.Email
+	// Send raw GraphQL mutation combining email update + invalid attribute.
+	// First, get a token for authentication.
+	_, err := c.ListUsers(ctx) // This will authenticate and get a token
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Now craft a raw request to test the fake's updateUser atomicity.
+	payload := map[string]interface{}{
+		"query": `mutation($user: UpdateUserInput!) { updateUser(user: $user) { ok } }`,
+		"variables": map[string]interface{}{
+			"user": map[string]interface{}{
+				"id":    "dave",
+				"email": "dave.new@example.org",
+				"insertAttributes": []map[string]interface{}{
+					{"name": "invalid_attr", "value": []string{"x"}},
+				},
+			},
+		},
+	}
+	body, _ := json.Marshal(payload)
+	req, _ := http.NewRequest("POST", f.HTTP.URL+"/api/graphql", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	// Get token from a login request.
+	loginPayload, _ := json.Marshal(map[string]string{"username": "portcullis-hub", "password": svcPass})
+	loginReq, _ := http.NewRequest("POST", f.HTTP.URL+"/auth/simple/login", bytes.NewReader(loginPayload))
+	loginReq.Header.Set("Content-Type", "application/json")
+	loginResp, _ := http.DefaultClient.Do(loginReq)
+	loginBody, _ := io.ReadAll(loginResp.Body)
+	loginResp.Body.Close()
+	var loginResult struct{ Token string }
+	json.Unmarshal(loginBody, &loginResult)
+	req.Header.Set("Authorization", "Bearer "+loginResult.Token)
+	// Execute the mutation.
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	respBody, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	// Check response indicates error about schema.
+	if !strings.Contains(string(respBody), "schema") {
+		t.Errorf("response = %s, want error about schema", string(respBody))
+	}
+	// Verify email was NOT changed in fake's internal state.
+	if f.Users["dave"]["email"] != originalEmail {
+		t.Errorf("after failed op: email = %s, want %s (email should not have changed)", f.Users["dave"]["email"], originalEmail)
 	}
 }
