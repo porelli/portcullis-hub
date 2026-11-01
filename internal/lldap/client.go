@@ -1,5 +1,5 @@
-// Package lldap is a small LLDAP client (net/http + go-ldap/ldap) for user
-// and group management (integration contract §9).
+// Package lldap is a small LLDAP client (hasura/go-graphql-client +
+// go-ldap/ldap) for user and group management (integration contract §9).
 //
 // Users and groups go through LLDAP's GraphQL API (/api/graphql) with a JWT
 // from /auth/simple/login; passwords through the LDAP Password Modify
@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/go-ldap/ldap/v3"
+	"github.com/hasura/go-graphql-client"
 )
 
 // DefaultCredentialsDir is where core mounts the service account (§9).
@@ -224,45 +225,55 @@ type GraphQLError struct{ Messages []string }
 
 func (e *GraphQLError) Error() string { return "lldap: " + strings.Join(e.Messages, "; ") }
 
+// limitDoer bounds every GraphQL response body to maxResponse (the library
+// reads bodies whole).
+type limitDoer struct{ c *http.Client }
+
+func (d limitDoer) Do(req *http.Request) (*http.Response, error) {
+	resp, err := d.c.Do(req)
+	if err == nil && resp.Body != nil {
+		resp.Body = struct {
+			io.Reader
+			io.Closer
+		}{io.LimitReader(resp.Body, maxResponse), resp.Body}
+	}
+	return resp, err
+}
+
 // graphql runs one query; a 401 triggers a single re-login and retry.
 func (c *Client) graphql(ctx context.Context, query string, vars map[string]interface{}, out interface{}) error {
-	body := map[string]interface{}{"query": query}
-	if vars != nil {
-		body["variables"] = vars
-	}
 	for attempt := 0; attempt < 2; attempt++ {
 		tok, err := c.currentToken(ctx, attempt > 0)
 		if err != nil {
 			return err
 		}
-		resp, data, err := c.postJSON(ctx, "/api/graphql", http.Header{"Authorization": {"Bearer " + tok}}, body)
+		gc := graphql.NewClient(c.HTTPURL+"/api/graphql", limitDoer{c.HTTP}).
+			WithRequestModifier(func(r *http.Request) { r.Header.Set("Authorization", "Bearer "+tok) })
+		data, err := gc.ExecRaw(ctx, query, vars)
 		if err != nil {
-			return fmt.Errorf("lldap graphql: %w", err)
-		}
-		if resp.StatusCode == http.StatusUnauthorized && attempt == 0 {
-			continue
-		}
-		if resp.StatusCode != 200 {
-			return fmt.Errorf("lldap graphql: HTTP %d", resp.StatusCode)
-		}
-		var gr struct {
-			Data   json.RawMessage `json:"data"`
-			Errors []struct {
-				Message string `json:"message"`
-			} `json:"errors"`
-		}
-		if err := json.Unmarshal(data, &gr); err != nil {
-			return fmt.Errorf("lldap graphql: parse response: %w", err)
-		}
-		if len(gr.Errors) > 0 {
+			var ne graphql.NetworkError
+			if errors.As(err, &ne) {
+				if ne.StatusCode() == http.StatusUnauthorized && attempt == 0 {
+					continue
+				}
+				return fmt.Errorf("lldap graphql: HTTP %d", ne.StatusCode())
+			}
+			var ges graphql.Errors
+			if !errors.As(err, &ges) || len(ges) == 0 {
+				return fmt.Errorf("lldap graphql: %w", err)
+			}
 			ge := &GraphQLError{}
-			for _, e := range gr.Errors {
+			for _, e := range ges {
+				if inner := e.Unwrap(); inner != nil {
+					// Transport / decode failure, not a server-reported error.
+					return fmt.Errorf("lldap graphql: %w", inner)
+				}
 				ge.Messages = append(ge.Messages, e.Message)
 			}
 			return ge
 		}
 		if out != nil {
-			if err := json.Unmarshal(gr.Data, out); err != nil {
+			if err := json.Unmarshal(data, out); err != nil {
 				return fmt.Errorf("lldap graphql: parse data: %w", err)
 			}
 		}

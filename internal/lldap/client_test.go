@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -481,5 +482,34 @@ func TestSetPasswordSilentServer(t *testing.T) {
 	}
 	if d := time.Since(start); d > 10*time.Second {
 		t.Errorf("took %v", d)
+	}
+}
+
+// TestGraphQLHTTPErrors: non-200 GraphQL responses become "HTTP <code>"
+// without echoing the body, and oversized bodies are cut at maxResponse.
+func TestGraphQLHTTPErrors(t *testing.T) {
+	f := lldaptest.New(t, "portcullis-hub", svcPass)
+	mode := "500"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/graphql" {
+			f.HTTP.Config.Handler.ServeHTTP(w, r) // login on the fake
+			return
+		}
+		if mode == "500" {
+			http.Error(w, "boom secret-body", 500)
+			return
+		}
+		w.Write([]byte(`{"data":{"groups":[],"pad":"`))
+		w.Write(bytes.Repeat([]byte("x"), 17<<20))
+		w.Write([]byte(`"}}`))
+	}))
+	defer srv.Close()
+	c := lldap.New(srv.URL, f.LDAPURL(), f.BaseDN, writeCreds(t, "portcullis-hub", svcPass))
+	if _, err := c.ListGroups(context.Background()); err == nil || err.Error() != "lldap graphql: HTTP 500" {
+		t.Errorf("500 = %v", err)
+	}
+	mode = "huge"
+	if _, err := c.ListGroups(context.Background()); err == nil || len(err.Error()) > 1024 {
+		t.Errorf("oversized response accepted or echoed: %.200v", err)
 	}
 }
