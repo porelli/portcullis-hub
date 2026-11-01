@@ -266,6 +266,12 @@ func (c *Client) graphql(ctx context.Context, query string, vars map[string]inte
 	return fmt.Errorf("lldap graphql: unauthorized")
 }
 
+// Attribute is a custom user attribute from the schema.
+type Attribute struct {
+	Name   string
+	IsList bool
+}
+
 // GroupRef is a group as listed on a user.
 type GroupRef struct {
 	ID          int    `json:"id"`
@@ -274,11 +280,12 @@ type GroupRef struct {
 
 // User is an LLDAP user.
 type User struct {
-	ID           string     `json:"id"`
-	Email        string     `json:"email"`
-	DisplayName  string     `json:"displayName"`
-	CreationDate string     `json:"creationDate"`
-	Groups       []GroupRef `json:"groups"`
+	ID           string              `json:"id"`
+	Email        string              `json:"email"`
+	DisplayName  string              `json:"displayName"`
+	CreationDate string              `json:"creationDate"`
+	Groups       []GroupRef          `json:"groups"`
+	Attributes   map[string][]string `json:"-"` // custom attributes only
 }
 
 // Group is an LLDAP group with its members' ids.
@@ -300,13 +307,46 @@ func (g Group) Members() []string {
 	return out
 }
 
-// ListUsers returns every user with their groups.
+// ListUsers returns every user with their groups and custom attributes.
 func (c *Client) ListUsers(ctx context.Context) ([]User, error) {
-	var out struct {
-		Users []User `json:"users"`
+	var resp struct {
+		Users []struct {
+			ID           string     `json:"id"`
+			Email        string     `json:"email"`
+			DisplayName  string     `json:"displayName"`
+			CreationDate string     `json:"creationDate"`
+			Groups       []GroupRef `json:"groups"`
+			Attributes   []struct {
+				Name   string   `json:"name"`
+				Value  []string `json:"value"`
+				Schema struct {
+					IsHardcoded bool `json:"isHardcoded"`
+				} `json:"schema"`
+			} `json:"attributes"`
+		} `json:"users"`
 	}
-	err := c.graphql(ctx, `query { users { id email displayName creationDate groups { id displayName } } }`, nil, &out)
-	return out.Users, err
+	err := c.graphql(ctx, `query { users { id email displayName creationDate groups { id displayName } attributes { name value schema { isHardcoded } } } }`, nil, &resp)
+	if err != nil {
+		return nil, err
+	}
+	users := make([]User, 0, len(resp.Users))
+	for _, u := range resp.Users {
+		user := User{
+			ID:           u.ID,
+			Email:        u.Email,
+			DisplayName:  u.DisplayName,
+			CreationDate: u.CreationDate,
+			Groups:       u.Groups,
+			Attributes:   map[string][]string{},
+		}
+		for _, a := range u.Attributes {
+			if !a.Schema.IsHardcoded {
+				user.Attributes[a.Name] = a.Value
+			}
+		}
+		users = append(users, user)
+	}
+	return users, nil
 }
 
 // ListGroups returns every group with its members.
@@ -389,4 +429,65 @@ func (c *Client) SetPassword(ctx context.Context, user, password string) error {
 		return err
 	}
 	return ldapPasswordModify(ctx, c.LDAPURL, c.Timeout, c.UserDN(strings.ToLower(svc)), svcPass, c.UserDN(user), password)
+}
+
+// UserAttributes returns the non-hardcoded user attributes from the schema.
+func (c *Client) UserAttributes(ctx context.Context) ([]Attribute, error) {
+	var out struct {
+		Schema struct {
+			UserSchema struct {
+				Attributes []struct {
+					Name        string `json:"name"`
+					IsList      bool   `json:"isList"`
+					IsHardcoded bool   `json:"isHardcoded"`
+				} `json:"attributes"`
+			} `json:"userSchema"`
+		} `json:"schema"`
+	}
+	err := c.graphql(ctx, `query { schema { userSchema { attributes { name isList isHardcoded } } } }`, nil, &out)
+	if err != nil {
+		return nil, err
+	}
+	var attrs []Attribute
+	for _, a := range out.Schema.UserSchema.Attributes {
+		if !a.IsHardcoded {
+			attrs = append(attrs, Attribute{Name: a.Name, IsList: a.IsList})
+		}
+	}
+	return attrs, nil
+}
+
+// AddUserAttribute adds a custom user attribute to the schema (STRING type, visible, not editable).
+func (c *Client) AddUserAttribute(ctx context.Context, name string, isList bool) error {
+	vars := map[string]interface{}{
+		"name":          name,
+		"attributeType": "STRING",
+		"isList":        isList,
+		"isVisible":     true,
+		"isEditable":    false,
+	}
+	return c.graphql(ctx, `mutation($name: String!, $attributeType: AttributeType!, $isList: Boolean!, $isVisible: Boolean!, $isEditable: Boolean!) { addUserAttribute(name: $name, attributeType: $attributeType, isList: $isList, isVisible: $isVisible, isEditable: $isEditable) { ok } }`, vars, nil)
+}
+
+// DeleteUserAttribute deletes a custom user attribute from the schema.
+func (c *Client) DeleteUserAttribute(ctx context.Context, name string) error {
+	return c.graphql(ctx, `mutation($name: String!) { deleteUserAttribute(name: $name) { ok } }`, map[string]interface{}{"name": name}, nil)
+}
+
+// SetUserAttributes sets or removes custom attributes on a user.
+// set maps attribute names to their values (as string slices, even for single-valued attributes).
+// remove lists attribute names to delete.
+func (c *Client) SetUserAttributes(ctx context.Context, user string, set map[string][]string, remove []string) error {
+	in := map[string]interface{}{"id": user}
+	if len(set) > 0 {
+		var insert []map[string]interface{}
+		for name, values := range set {
+			insert = append(insert, map[string]interface{}{"name": name, "value": values})
+		}
+		in["insertAttributes"] = insert
+	}
+	if len(remove) > 0 {
+		in["removeAttributes"] = remove
+	}
+	return c.graphql(ctx, `mutation($user: UpdateUserInput!) { updateUser(user: $user) { ok } }`, map[string]interface{}{"user": in}, nil)
 }

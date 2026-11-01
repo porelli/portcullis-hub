@@ -189,3 +189,103 @@ func TestValidation(t *testing.T) {
 		t.Error("group validation")
 	}
 }
+
+func TestUserAttributesRoundTrip(t *testing.T) {
+	c, f := newClient(t)
+	ctx := context.Background()
+	f.AddUser("anna", "anna@example.org", "Anna", "")
+	// Add custom attributes to the schema.
+	if err := c.AddUserAttribute(ctx, "city", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.AddUserAttribute(ctx, "languages", true); err != nil {
+		t.Fatal(err)
+	}
+	// Set attributes on anna.
+	if err := c.SetUserAttributes(ctx, "anna", map[string][]string{"city": {"Milan"}, "languages": {"it", "en"}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	// ListUsers returns them.
+	users, err := c.ListUsers(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var anna *lldap.User
+	for i := range users {
+		if users[i].ID == "anna" {
+			anna = &users[i]
+		}
+	}
+	if anna == nil {
+		t.Fatal("anna not found")
+	}
+	if len(anna.Attributes) != 2 {
+		t.Fatalf("attributes = %+v, want 2 entries", anna.Attributes)
+	}
+	if len(anna.Attributes["city"]) != 1 || anna.Attributes["city"][0] != "Milan" {
+		t.Errorf("city = %v", anna.Attributes["city"])
+	}
+	if len(anna.Attributes["languages"]) != 2 || anna.Attributes["languages"][0] != "it" || anna.Attributes["languages"][1] != "en" {
+		t.Errorf("languages = %v", anna.Attributes["languages"])
+	}
+	// Remove city.
+	if err := c.SetUserAttributes(ctx, "anna", nil, []string{"city"}); err != nil {
+		t.Fatal(err)
+	}
+	users, err = c.ListUsers(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range users {
+		if users[i].ID == "anna" {
+			anna = &users[i]
+		}
+	}
+	if len(anna.Attributes) != 1 || anna.Attributes["city"] != nil {
+		t.Errorf("after remove: attributes = %+v", anna.Attributes)
+	}
+	if len(anna.Attributes["languages"]) != 2 {
+		t.Errorf("languages after remove = %v", anna.Attributes["languages"])
+	}
+}
+
+func TestAddUserAttributeFlags(t *testing.T) {
+	c, f := newClient(t)
+	ctx := context.Background()
+	if err := c.AddUserAttribute(ctx, "department", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.AddUserAttribute(ctx, "tags", true); err != nil {
+		t.Fatal(err)
+	}
+	// Check the fake recorded the correct flags.
+	attrs, err := c.UserAttributes(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var department, tags *lldap.Attribute
+	for i := range attrs {
+		switch attrs[i].Name {
+		case "department":
+			department = &attrs[i]
+		case "tags":
+			tags = &attrs[i]
+		}
+	}
+	if department == nil || department.IsList {
+		t.Errorf("department = %+v", department)
+	}
+	if tags == nil || !tags.IsList {
+		t.Errorf("tags = %+v", tags)
+	}
+	// The fake should have recorded attributeType=STRING, isVisible=true, isEditable=false.
+	if len(f.UserAttributeSchema) != 2 {
+		t.Fatalf("schema = %+v", f.UserAttributeSchema)
+	}
+	for _, name := range []string{"department", "tags"} {
+		s := f.UserAttributeSchema[name]
+		if s.AttributeType != "STRING" || !s.IsVisible || s.IsEditable {
+			t.Errorf("%s schema = %+v, want STRING/visible/not-editable", name, s)
+		}
+	}
+}

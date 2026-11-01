@@ -48,6 +48,10 @@ type Directory interface {
 	AddUserToGroup(ctx context.Context, user string, group int) error
 	RemoveUserFromGroup(ctx context.Context, user string, group int) error
 	SetPassword(ctx context.Context, user, password string) error
+	UserAttributes(ctx context.Context) ([]lldap.Attribute, error)
+	AddUserAttribute(ctx context.Context, name string, isList bool) error
+	DeleteUserAttribute(ctx context.Context, name string) error
+	SetUserAttributes(ctx context.Context, user string, set map[string][]string, remove []string) error
 }
 
 // Keycloak is the Keycloak side (implemented by *keycloak.Client).

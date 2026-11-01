@@ -26,6 +26,14 @@ type Group struct {
 	Members map[string]bool
 }
 
+// AttributeSchema records how an attribute was defined.
+type AttributeSchema struct {
+	AttributeType string
+	IsList        bool
+	IsVisible     bool
+	IsEditable    bool
+}
+
 // Server is the fake.
 type Server struct {
 	HTTP   *httptest.Server
@@ -46,8 +54,10 @@ type Server struct {
 	ExpireTokens bool
 	// FailPassword makes the next password modify fail with this code
 	// (set it between requests, not concurrently with them).
-	FailPassword int
-	Mutations    []string
+	FailPassword        int
+	Mutations           []string
+	UserAttributeSchema map[string]AttributeSchema     // name → schema
+	UserAttributeValues map[string]map[string][]string // user id → attribute name → values
 }
 
 // New starts a fake with users admin and the service account (both in
@@ -55,13 +65,15 @@ type Server struct {
 func New(t *testing.T, service, servicePass string) *Server {
 	t.Helper()
 	s := &Server{
-		BaseDN:    "dc=example,dc=org",
-		Users:     map[string]map[string]string{},
-		Passwords: map[string]string{},
-		Groups:    map[int]*Group{},
-		nextGroup: 4,
-		tokens:    map[string]string{},
-		refresh:   map[string]string{},
+		BaseDN:              "dc=example,dc=org",
+		Users:               map[string]map[string]string{},
+		Passwords:           map[string]string{},
+		Groups:              map[int]*Group{},
+		nextGroup:           4,
+		tokens:              map[string]string{},
+		refresh:             map[string]string{},
+		UserAttributeSchema: map[string]AttributeSchema{},
+		UserAttributeValues: map[string]map[string][]string{},
 	}
 	s.Groups[1] = &Group{ID: 1, Name: "lldap_admin", Members: map[string]bool{}}
 	s.Groups[2] = &Group{ID: 2, Name: "lldap_password_manager", Members: map[string]bool{}}
@@ -244,6 +256,40 @@ func str(v interface{}) string { s, _ := v.(string); return s }
 func (s *Server) graphql(caller, q string, vars map[string]interface{}) (interface{}, error) {
 	op := func(name string) bool { return strings.Contains(q, name+"(") || strings.Contains(q, "{ "+name+" {") }
 	switch {
+	case op("schema"):
+		var attrs []map[string]interface{}
+		for name, schema := range s.UserAttributeSchema {
+			attrs = append(attrs, map[string]interface{}{
+				"name":        name,
+				"isList":      schema.IsList,
+				"isHardcoded": false,
+			})
+		}
+		return map[string]interface{}{
+			"schema": map[string]interface{}{
+				"userSchema": map[string]interface{}{
+					"attributes": attrs,
+				},
+			},
+		}, nil
+	case op("addUserAttribute"):
+		name := str(vars["name"])
+		s.UserAttributeSchema[name] = AttributeSchema{
+			AttributeType: str(vars["attributeType"]),
+			IsList:        vars["isList"].(bool),
+			IsVisible:     vars["isVisible"].(bool),
+			IsEditable:    vars["isEditable"].(bool),
+		}
+		s.Mutations = append(s.Mutations, "addUserAttribute "+name)
+		return map[string]interface{}{"addUserAttribute": map[string]bool{"ok": true}}, nil
+	case op("deleteUserAttribute"):
+		name := str(vars["name"])
+		delete(s.UserAttributeSchema, name)
+		for _, userAttrs := range s.UserAttributeValues {
+			delete(userAttrs, name)
+		}
+		s.Mutations = append(s.Mutations, "deleteUserAttribute "+name)
+		return map[string]interface{}{"deleteUserAttribute": map[string]bool{"ok": true}}, nil
 	case op("createUser"):
 		in, _ := vars["user"].(map[string]interface{})
 		id := strings.ToLower(str(in["id"]))
@@ -258,7 +304,8 @@ func (s *Server) graphql(caller, q string, vars map[string]interface{}) (interfa
 		return map[string]interface{}{"createUser": map[string]string{"id": id}}, nil
 	case op("updateUser"):
 		in, _ := vars["user"].(map[string]interface{})
-		u, ok := s.Users[str(in["id"])]
+		id := str(in["id"])
+		u, ok := s.Users[id]
 		if !ok {
 			return nil, fmt.Errorf("no such user")
 		}
@@ -268,7 +315,33 @@ func (s *Server) graphql(caller, q string, vars map[string]interface{}) (interfa
 		if v, ok := in["displayName"]; ok {
 			u["displayName"] = str(v)
 		}
-		s.Mutations = append(s.Mutations, "updateUser "+str(in["id"]))
+		// Handle removeAttributes first (as the real LLDAP does).
+		if remove, ok := in["removeAttributes"].([]interface{}); ok {
+			if s.UserAttributeValues[id] == nil {
+				s.UserAttributeValues[id] = map[string][]string{}
+			}
+			for _, name := range remove {
+				delete(s.UserAttributeValues[id], str(name))
+			}
+		}
+		// Handle insertAttributes (set or update).
+		if insert, ok := in["insertAttributes"].([]interface{}); ok {
+			if s.UserAttributeValues[id] == nil {
+				s.UserAttributeValues[id] = map[string][]string{}
+			}
+			for _, item := range insert {
+				attr := item.(map[string]interface{})
+				name := str(attr["name"])
+				values := []string{}
+				if valArr, ok := attr["value"].([]interface{}); ok {
+					for _, v := range valArr {
+						values = append(values, str(v))
+					}
+				}
+				s.UserAttributeValues[id][name] = values
+			}
+		}
+		s.Mutations = append(s.Mutations, "updateUser "+id)
 		return map[string]interface{}{"updateUser": map[string]bool{"ok": true}}, nil
 	case op("deleteUser"):
 		id := str(vars["id"])
@@ -324,8 +397,26 @@ func (s *Server) graphql(caller, q string, vars map[string]interface{}) (interfa
 		out := []map[string]interface{}{}
 		for _, id := range ids {
 			u := s.Users[id]
-			out = append(out, map[string]interface{}{"id": id, "email": u["email"], "displayName": u["displayName"],
-				"creationDate": "2026-01-01T00:00:00+00:00", "groups": s.userGroups(id)})
+			userAttrs := []map[string]interface{}{}
+			if s.UserAttributeValues[id] != nil {
+				for name, values := range s.UserAttributeValues[id] {
+					userAttrs = append(userAttrs, map[string]interface{}{
+						"name":  name,
+						"value": values,
+						"schema": map[string]interface{}{
+							"isHardcoded": false,
+						},
+					})
+				}
+			}
+			out = append(out, map[string]interface{}{
+				"id":           id,
+				"email":        u["email"],
+				"displayName":  u["displayName"],
+				"creationDate": "2026-01-01T00:00:00+00:00",
+				"groups":       s.userGroups(id),
+				"attributes":   userAttrs,
+			})
 		}
 		return map[string]interface{}{"users": out}, nil
 	case op("groups"):
