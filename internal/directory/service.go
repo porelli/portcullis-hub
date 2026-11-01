@@ -102,6 +102,11 @@ type Service struct {
 	Store *Store
 
 	mu sync.Mutex
+	// ruleState: each rule group's membership (lowercase) after the last
+	// evaluation, to tell outside changes from rule changes. Guarded by mu.
+	ruleState map[string]map[string]bool
+	kickOnce  sync.Once
+	kickCh    chan struct{}
 }
 
 // Error carries an HTTP status for the API layer.
@@ -544,6 +549,7 @@ func (s *Service) run(actor, action, target string, detail *string, fn func() er
 	if strings.TrimSpace(actor) == "" {
 		return &Error{Status: http.StatusForbidden, Msg: "no signed-in user (X-Forwarded-User) — refusing an unattributable change"}
 	}
+	defer s.kick() // re-evaluate rule groups after every mutation
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	err := s.LLDAP.Available()

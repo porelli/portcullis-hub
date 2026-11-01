@@ -452,8 +452,10 @@ func userOps(s *directory.Service, target string) map[string]func() error {
 	}
 }
 
-// nonUserOps are the exported methods that don't change a user.
-var nonUserOps = map[string]bool{"Overview": true, "Recent": true, "CreateGroup": true, "DeleteGroup": true, "CreateField": true, "UpdateField": true, "DeleteField": true}
+// nonUserOps are the exported methods that don't change a user. The
+// evaluator (Evaluate, RunEvaluator) targets nobody: it leaves protected
+// accounts alone, see TestProtectedAccountsNeverRuleMembers.
+var nonUserOps = map[string]bool{"Overview": true, "Recent": true, "CreateGroup": true, "DeleteGroup": true, "CreateField": true, "UpdateField": true, "DeleteField": true, "Evaluate": true, "RunEvaluator": true, "Desired": true, "DesiredFromLLDAP": true, "Pending": true}
 
 func TestProtectedAccountsParity(t *testing.T) {
 	e := newEnv(t)

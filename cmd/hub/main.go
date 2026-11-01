@@ -114,6 +114,11 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go h.RunReconciler(ctx)
+	if dir.Store != nil && ll.Available() == nil {
+		// Rule groups, exceptions and expiries -> LLDAP membership: every
+		// minute (expiries) and after each directory mutation.
+		go dir.RunEvaluator(ctx, time.Minute)
+	}
 
 	addr := env("HUB_LISTEN_ADDR", ":8888")
 	httpSrv := &http.Server{
