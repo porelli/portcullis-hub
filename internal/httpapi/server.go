@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,24 +11,18 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/hub"
-	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/templates"
 )
 
 const maxBodyBytes = 1 << 20
 
-// Users manages realm users (implemented by *keycloak.Client).
-type Users interface {
-	ListUsers(ctx context.Context) ([]keycloak.User, error)
-	SetRequiredActions(ctx context.Context, userID string, actions []string) error
-}
-
 // Server holds the HTTP handlers' dependencies.
 type Server struct {
 	Hub        *hub.Hub
-	Users      Users
+	Directory  *directory.Service // users & groups (nil: page disabled)
 	PortalName string
 	Secret     string // HUB_PROXY_SECRET
 	Web        fs.FS  // contains index.html
@@ -67,8 +60,7 @@ func (s *Server) Handler() (http.Handler, error) {
 	mux.HandleFunc("/api/drift", s.handleDrift)
 	mux.HandleFunc("/api/drift/resolve", s.handleDriftResolve)
 	mux.HandleFunc("/api/settings", s.handleSettings)
-	mux.HandleFunc("/api/users", s.handleUsers)
-	mux.HandleFunc("/api/users/", s.handleUserActions)
+	s.registerDirectory(mux)
 	return ProxySecret(s.Secret, CSRF(mux)), nil
 }
 
@@ -489,64 +481,6 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "GET or PUT only", http.StatusMethodNotAllowed)
 	}
-}
-
-// ── users ────────────────────────────────────────────────
-
-// allowedActions limits what the UI can push onto a user.
-var allowedActions = map[string]bool{
-	"webauthn-register-passwordless": true,
-	"webauthn-register":              true,
-	"UPDATE_PASSWORD":                true,
-}
-
-func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
-	if !methodIs(w, r, http.MethodGet) {
-		return
-	}
-	if s.Users == nil {
-		http.Error(w, "user management not configured", http.StatusServiceUnavailable)
-		return
-	}
-	users, err := s.Users.ListUsers(r.Context())
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, users)
-}
-
-func (s *Server) handleUserActions(w http.ResponseWriter, r *http.Request) {
-	// /api/users/{id}/required-actions
-	parts := strings.SplitN(strings.TrimPrefix(r.URL.Path, "/api/users/"), "/", 2)
-	if len(parts) != 2 || parts[1] != "required-actions" || !keycloak.ValidUserID(parts[0]) {
-		http.NotFound(w, r)
-		return
-	}
-	if !methodIs(w, r, http.MethodPut) {
-		return
-	}
-	var req struct {
-		Actions []string `json:"actions"`
-	}
-	if !decodeJSON(w, r, &req) {
-		return
-	}
-	clean := make([]string, 0, len(req.Actions))
-	for _, a := range req.Actions {
-		if allowedActions[a] {
-			clean = append(clean, a)
-		}
-	}
-	if s.Users == nil {
-		http.Error(w, "user management not configured", http.StatusServiceUnavailable)
-		return
-	}
-	if err := s.Users.SetRequiredActions(r.Context(), parts[0], clean); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, map[string]interface{}{"status": "saved", "actions": clean})
 }
 
 // ── runtime (Engine API) ─────────────────────────────────

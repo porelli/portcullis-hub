@@ -9,7 +9,9 @@ Web management UI for [Portcullis](https://github.com/porelli/portcullis) — th
 - Per-app settings (media folders, ports, options) and access policy (mTLS / WebAuthn / password, any/all)
 - Container status, logs and a container shell via the Docker Engine API
 - Drift detection: flags apps that are enabled but not running, or running but not enabled, and offers explicit fixes
+- Users & groups: create users with a one-time invite link (they register a passkey and are signed in; password as an advanced fallback), edit, delete, reset passkeys, set passwords; groups with members and one-click creation of the groups templates use; guardrails and an audit log. Shows each user's Keycloak state (imported, passkeys, pending actions)
 - Shows the signed-in LLDAP username from `X-Forwarded-User` (set by core's group-gate)
+- Writes `portal-apps.json` (enabled apps, URLs, required group) for core's landing portal
 - Writes the group-gate policy file (v2: policies, groups and admin `path_groups` per subdomain)
 - Expert mode: compose editor, env vars
 - Template marketplace: add community template repos
@@ -48,6 +50,12 @@ The core Portcullis stack runs the Hub; you don't need to run it standalone.
 | `PORTAL_DISPLAY_NAME` | Name shown in the header | `Portcullis` |
 | `DEFAULT_TEMPLATES_URL` | Git URL cloned as source `portcullis` on first start | _(none)_ |
 | `KEYCLOAK_URL`, `KEYCLOAK_ADMIN`, `KEYCLOAK_ADMIN_PASSWORD` | Keycloak admin API | `http://keycloak:8080` |
+| `HUB_LLDAP_CREDENTIALS_DIR` | Directory with the LLDAP service account's `username` and `password` files (mounted read-only by core). Missing: the Users page is disabled | `/run/portcullis/lldap` |
+| `LLDAP_HTTP_URL` | LLDAP HTTP API (GraphQL) | `http://lldap:17170` |
+| `LLDAP_LDAP_URL` | LLDAP LDAP endpoint, used only to set passwords (`ldap://` or `ldaps://`) | `ldap://lldap:3890` |
+| `LLDAP_BASE_DN` | LLDAP base DN | `dc=portcullis,dc=local` |
+| `HUB_INVITE_API_URL` | Core's invite API | `http://enroll:8444/internal/invites` |
+| `HUB_INVITE_SECRET_FILE` | Shared secret for the invite API (≥ 32 chars). Missing: only the password fallback works | `/run/portcullis/invite/secret` |
 
 ### Default access policy
 
@@ -66,6 +74,8 @@ The image runs as **uid/gid 10001** (non-root). It doesn't need the Docker socke
 - `GET /healthz` returns `200 ok` and needs no secret (use it for container health checks).
 - `GET /api/drift` returns the latest reconcile report. `POST /api/drift` re-checks now.
 - `POST /api/drift/resolve` takes `{"id", "action"}`, where `action` is `start`, `disable`, `stop` or `adopt`.
+- `GET /api/directory` lists users, groups and group suggestions; `/api/directory/users[/{username}[/password|/invite|/require-passkey|/clear-actions|/remove-passkeys]]`, `/api/directory/groups[/{group}[/members[/{username}]]]` change them; `GET /api/directory/audit` returns the last 100 audit entries (`$HUB_DATA_DIR/audit.jsonl`).
+- `GET /api/portal/apps` returns the same document as `portal-apps.json`.
 
 ## Development
 

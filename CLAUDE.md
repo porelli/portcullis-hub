@@ -15,8 +15,11 @@ Web management UI for Portcullis. Go binary with an embedded single-page UI, pub
 | `internal/state` | `state.yaml` load/save (atomic; corrupt file = refuse to start) |
 | `internal/compose` | `docker compose` CLI wrapper — **up/down only**, behind the `Runner` interface |
 | `internal/docker` | Engine API client over `DOCKER_HOST` (net/http): containers, logs (stream demux), exec, events |
-| `internal/keycloak` | Keycloak admin API client (net/http) |
-| `internal/httpapi` | Handlers, proxy-secret middleware, CSRF guard |
+| `internal/keycloak` | Keycloak admin API client (net/http): clients, and users (lazy LDAP import, required actions, passkeys, sessions); `kctest` = in-memory fake |
+| `internal/lldap` | LLDAP client: GraphQL (`/api/graphql`, JWT from `/auth/simple/login`, refresh/re-login on 401) + minimal LDAP codec for the Password Modify extended op (passwords); credentials from files; `lldaptest` = in-memory fake (HTTP + LDAP) |
+| `internal/invite` | Client for core's one-time invite API (contract §9.4) |
+| `internal/directory` | Users & groups service: guardrails, onboarding (invite / password fallback), audit log (`audit.jsonl`) |
+| `internal/httpapi` | Handlers (`directory.go`: `/api/directory/*`, `/api/portal/apps`), proxy-secret middleware, CSRF guard |
 | `internal/fsutil` | Atomic writes, path confinement |
 | `web/` | `index.html` (vanilla JS) + `web.go` embed |
 
@@ -35,6 +38,9 @@ Web management UI for Portcullis. Go binary with an embedded single-page UI, pub
 - Frontend is vanilla JS in `web/index.html` — no build step, no npm. Escape everything with `escapeHtml`.
 - Templates come from git sources (`state.yaml` `sources`), not the local filesystem.
 - The image runs as uid/gid 10001; `/data` and the host's `<core>/templates` must be writable by it.
+- Users & groups (contract §9): LLDAP credentials come only from files (`HUB_LLDAP_CREDENTIALS_DIR`), never env vars; without them the Users page is disabled and nothing else changes. Passwords are set over LDAP (Password Modify ext op) because LLDAP's HTTP password flow is client-side OPAQUE. Never log, audit or put in errors a password, token or invite link. Guardrails live in `internal/directory` (service account untouchable; core `admin` never deleted / re-passworded / dropped from `lldap_admin`; no self-delete; last human `lldap_admin` member stays) and every mutation is audited with the `X-Forwarded-User` actor (refused without one).
+- Onboarding is a one-time invite link by default (core's invite API); passwords are an advanced fallback.
+- `portal-apps.json` (contract §10) is written with the policy file; keep both in `WritePolicy`.
 - Pin GitHub Actions by full commit SHA (`# vX.Y.Z` comment) and base images by digest.
 
 ## Related Repos

@@ -14,10 +14,13 @@ import (
 	"time"
 
 	"github.com/portcullis/hub/internal/compose"
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/httpapi"
 	"github.com/portcullis/hub/internal/hub"
+	"github.com/portcullis/hub/internal/invite"
 	"github.com/portcullis/hub/internal/keycloak"
+	"github.com/portcullis/hub/internal/lldap"
 	"github.com/portcullis/hub/web"
 )
 
@@ -63,9 +66,33 @@ func main() {
 	}
 	h.Init()
 
+	// User & group management (contract §9). Credentials are files core
+	// mounts read-only, never env vars; without them the Users page says so
+	// and the rest of the Hub works as before.
+	ll := lldap.New(
+		env("LLDAP_HTTP_URL", "http://lldap:17170"),
+		env("LLDAP_LDAP_URL", "ldap://lldap:3890"),
+		env("LLDAP_BASE_DN", "dc=portcullis,dc=local"),
+		env("HUB_LLDAP_CREDENTIALS_DIR", lldap.DefaultCredentialsDir),
+	)
+	if err := ll.Available(); err != nil {
+		log.Printf("users & groups disabled: %v", err)
+	}
+	invites := invite.New(env("HUB_INVITE_API_URL", invite.DefaultAPIURL), env("HUB_INVITE_SECRET_FILE", invite.DefaultSecretFile))
+	if err := invites.Available(); err != nil {
+		log.Printf("invite links disabled (password fallback only): %v", err)
+	}
+	dir := &directory.Service{
+		LLDAP:   ll,
+		KC:      kc,
+		Invites: invites,
+		Audit:   &directory.AuditLog{Path: filepath.Join(cfg.DataDir, "audit.jsonl")},
+		Apps:    h.DirectoryApps,
+	}
+
 	srv := &httpapi.Server{
 		Hub:        h,
-		Users:      kc,
+		Directory:  dir,
 		PortalName: os.Getenv("PORTAL_DISPLAY_NAME"),
 		Secret:     secret,
 		Web:        web.FS,

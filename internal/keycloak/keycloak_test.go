@@ -200,7 +200,7 @@ func TestRegisterClient(t *testing.T) {
 	if err := bad.RegisterClient(ctx, spec); err == nil {
 		t.Error("bad credentials accepted")
 	}
-	if err := c.SetRequiredActions(ctx, "../../x", nil); err == nil {
+	if err := c.DeleteUserByID(ctx, "../../x"); err == nil {
 		t.Error("invalid user id accepted")
 	}
 }

@@ -138,6 +138,53 @@
     .user-actions { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
     .user-action-pill { font-size: 0.6875rem; padding: 0.125rem 0.5rem; border-radius: 9999px; background: #f59e0b22; color: #f59e0b; border: 1px solid #f59e0b44; }
 
+    /* Users & groups */
+    .dir-section { margin-bottom: 2.5rem; }
+    .dir-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem; }
+    .dir-head .category-title { margin-bottom: 0; }
+    .dir-note { color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem; }
+    .dir-warn { background: #f59e0b11; border: 1px solid #f59e0b55; color: #f59e0b; border-radius: 0.5rem; padding: 0.75rem 1rem; font-size: 0.8125rem; margin-bottom: 1rem; }
+    .dir-off { background: #1e293b; border: 1px solid #334155; border-radius: 0.75rem; padding: 1.5rem; color: #94a3b8; font-size: 0.875rem; }
+    .dir-off code, .dir-note code { background: #0f172a; padding: 0.125rem 0.375rem; border-radius: 0.25rem; }
+    .dir-form { background: #1e293b; border: 1px solid #334155; border-radius: 0.75rem; padding: 1.25rem; margin-bottom: 1rem; display: none; }
+    .dir-form.visible { display: block; }
+    .dir-form .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 0.75rem; margin-bottom: 0.75rem; }
+    .dir-form label { display: block; font-size: 0.75rem; color: #94a3b8; margin-bottom: 0.25rem; }
+    .dir-form input[type="text"], .dir-form input[type="email"], .dir-form input[type="password"] { width: 100%; padding: 0.5rem 0.75rem; background: #0f172a; border: 1px solid #334155; border-radius: 0.375rem; color: #e2e8f0; font-size: 0.875rem; }
+    .dir-form input:focus { outline: none; border-color: #3b82f6; }
+    .dir-form details { margin: 0.75rem 0; font-size: 0.8125rem; color: #94a3b8; }
+    .dir-form summary { cursor: pointer; }
+    .dir-checks { display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; font-size: 0.8125rem; margin-bottom: 0.75rem; }
+    .dir-checks label { display: flex; align-items: center; gap: 0.375rem; color: #e2e8f0; font-size: 0.8125rem; margin: 0; cursor: pointer; }
+    .dir-secret { display: none; background: #22c55e11; border: 1px solid #22c55e55; border-radius: 0.75rem; padding: 1rem 1.25rem; margin-bottom: 1rem; }
+    .dir-secret.visible { display: block; }
+    .dir-secret-title { font-size: 0.8125rem; font-weight: 600; color: #22c55e; margin-bottom: 0.5rem; }
+    .dir-secret-row { display: flex; gap: 0.5rem; align-items: center; }
+    .dir-secret-row input { flex: 1; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.8125rem; padding: 0.5rem 0.75rem; background: #0f172a; border: 1px solid #334155; border-radius: 0.375rem; color: #e2e8f0; }
+    .dir-secret-meta { color: #94a3b8; font-size: 0.75rem; margin-top: 0.5rem; }
+    .dir-table { width: 100%; border-collapse: collapse; font-size: 0.8125rem; }
+    .dir-table th { text-align: left; font-size: 0.6875rem; text-transform: uppercase; letter-spacing: 0.05em; color: #64748b; padding: 0.5rem; border-bottom: 1px solid #334155; }
+    .dir-table td { padding: 0.625rem 0.5rem; border-bottom: 1px solid #1e293b; vertical-align: top; }
+    .dir-table .muted { color: #64748b; font-size: 0.75rem; }
+    .pill { display: inline-block; font-size: 0.6875rem; padding: 0.0625rem 0.5rem; border-radius: 9999px; background: #0f172a; color: #94a3b8; border: 1px solid #334155; margin: 0 0.25rem 0.25rem 0; white-space: nowrap; }
+    .pill.ok { background: #22c55e22; color: #22c55e; border-color: #22c55e44; }
+    .pill.warn { background: #f59e0b22; color: #f59e0b; border-color: #f59e0b44; }
+    .pill.bad { background: #ef444422; color: #ef4444; border-color: #ef444444; }
+    .pill.info { background: #3b82f622; color: #3b82f6; border-color: #3b82f644; }
+    .pill button { background: none; border: none; color: inherit; cursor: pointer; margin-left: 0.25rem; font-size: 0.75rem; }
+    .dir-actions { display: flex; flex-wrap: wrap; gap: 0.25rem; }
+    .dir-actions .btn { padding: 0.25rem 0.5rem; font-size: 0.75rem; }
+    .group-card { background: #1e293b; border-radius: 0.5rem; padding: 0.875rem 1rem; margin-bottom: 0.5rem; }
+    .group-card-head { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.5rem; }
+    .group-card-head .name { font-weight: 600; font-family: 'SF Mono', 'Fira Code', monospace; }
+    .group-card-head .meta { color: #64748b; font-size: 0.75rem; flex: 1; }
+    .group-add { display: flex; gap: 0.5rem; margin-top: 0.375rem; }
+    .group-add select { background: #0f172a; border: 1px solid #334155; color: #e2e8f0; padding: 0.25rem 0.5rem; border-radius: 0.375rem; font-size: 0.75rem; }
+    .suggestion { display: flex; align-items: center; gap: 0.75rem; padding: 0.375rem 0; font-size: 0.8125rem; border-top: 1px dashed #334155; }
+    .suggestion:first-of-type { border-top: none; }
+    .suggestion code { font-family: 'SF Mono', 'Fira Code', monospace; }
+    .suggestion .meta { color: #64748b; flex: 1; }
+
     /* Status list */
     .status-list { display: flex; flex-direction: column; gap: 0.5rem; }
     .status-row { display: flex; align-items: center; gap: 0.75rem; background: #0f172a; padding: 0.625rem 1rem; border-radius: 0.375rem; font-size: 0.8125rem; }
@@ -228,6 +275,7 @@
 
     <div class="tabs">
       <div class="tab active" data-tab="catalog">App Catalog</div>
+      <div class="tab" data-tab="users">Users &amp; Groups</div>
       <div class="tab" data-tab="sources">Template Sources</div>
       <div class="tab" data-tab="settings">Settings</div>
     </div>
@@ -319,6 +367,78 @@
       {{end}}
     </div>
 
+    <!-- Users & Groups Tab -->
+    <div class="tab-content" id="tab-users">
+      <div id="dir-off" class="dir-off" style="display: none;"></div>
+      <div id="dir-main" style="display: none;">
+        <div id="dir-warnings"></div>
+
+        <div class="dir-secret" id="dir-secret">
+          <div class="dir-secret-title" id="dir-secret-title"></div>
+          <div class="dir-secret-row">
+            <input type="text" id="dir-secret-value" readonly>
+            <button class="btn btn-primary btn-sm" data-act="copy-secret">Copy</button>
+            <button class="btn btn-secondary btn-sm" data-act="hide-secret">Done</button>
+          </div>
+          <div class="dir-secret-meta" id="dir-secret-meta"></div>
+        </div>
+
+        <div class="dir-section">
+          <div class="dir-head">
+            <div class="category-title">Users</div>
+            <button class="btn btn-primary btn-sm" data-act="toggle-create">New user</button>
+          </div>
+          <div class="dir-form" id="dir-create">
+            <div class="grid">
+              <div><label for="nu-username">Username</label><input type="text" id="nu-username" autocomplete="off" placeholder="lowercase, e.g. alice"></div>
+              <div><label for="nu-email">Email</label><input type="email" id="nu-email" autocomplete="off"></div>
+              <div><label for="nu-display">Display name</label><input type="text" id="nu-display" autocomplete="off"></div>
+            </div>
+            <label>Groups</label>
+            <div class="dir-checks" id="nu-groups"></div>
+            <p class="dir-note" style="margin-bottom: 0.5rem;">The new user gets a one-time invite link: they open it, register their security key, and they're signed in. No password.</p>
+            <details id="nu-advanced">
+              <summary>Advanced: use a password instead of an invite</summary>
+              <div style="margin-top: 0.75rem;">
+                <div class="dir-checks">
+                  <label><input type="checkbox" id="nu-use-password"> Onboard with a password</label>
+                </div>
+                <div class="dir-checks">
+                  <label><input type="radio" name="nu-pwmode" value="generate" checked> Generate a strong password (shown once)</label>
+                  <label><input type="radio" name="nu-pwmode" value="set"> Set one</label>
+                </div>
+                <div style="max-width: 320px; margin-bottom: 0.75rem;"><input type="password" id="nu-password" autocomplete="new-password" placeholder="at least 12 characters"></div>
+                <div class="dir-checks">
+                  <label><input type="checkbox" id="nu-require-passkey" checked> Require passkey registration at first login</label>
+                </div>
+              </div>
+            </details>
+            <button class="btn btn-primary btn-sm" data-act="create-user">Create user</button>
+            <button class="btn btn-secondary btn-sm" data-act="toggle-create">Cancel</button>
+          </div>
+          <div id="dir-users"></div>
+        </div>
+
+        <div class="dir-section">
+          <div class="dir-head"><div class="category-title">Groups</div></div>
+          <div class="form-row" style="max-width: 520px;">
+            <input type="text" id="ng-name" placeholder="New group, e.g. users_myapp">
+            <button class="btn btn-primary btn-sm" data-act="create-group">Create group</button>
+          </div>
+          <div id="dir-suggestions"></div>
+          <div id="dir-groups"></div>
+        </div>
+
+        <div class="dir-section">
+          <div class="dir-head">
+            <div class="category-title">Audit log (last 100 changes)</div>
+            <button class="btn btn-secondary btn-sm" data-act="reload">Refresh</button>
+          </div>
+          <div id="dir-audit"></div>
+        </div>
+      </div>
+    </div>
+
     <!-- Sources Tab -->
     <div class="tab-content" id="tab-sources">
       <div class="category-title" style="margin-bottom: 1rem;">Template Repositories</div>
@@ -370,11 +490,6 @@
       </p>
       <div id="global-policy-form"></div>
 
-      <div class="category-title" style="margin: 2rem 0 1rem;">Users</div>
-      <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
-        Push a required action onto a user's next login — e.g. ask them to enroll a hardware security key so they can satisfy a stricter access policy.
-      </p>
-      <div id="users-list"></div>
     </div>
   </div>
 
@@ -388,7 +503,8 @@
         document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
         tab.classList.add('active');
         document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
-        if (tab.dataset.tab === 'settings') { loadGlobalSettings(); loadUsers(); }
+        if (tab.dataset.tab === 'settings') loadGlobalSettings();
+        if (tab.dataset.tab === 'users') loadDirectory();
       });
     });
 
@@ -725,61 +841,312 @@
       }
     }
 
-    async function loadUsers() {
-      const container = document.getElementById('users-list');
-      if (!container) return;
-      container.innerHTML = '<p class="settings-empty">Loading users...</p>';
+    // ── Users & groups (LLDAP + Keycloak, contract §9) ────
+    // User-controlled strings are always escaped and never spliced into
+    // inline handlers: buttons carry escaped data-* attributes and one
+    // delegated listener reads them back.
+    let dir = null;
+
+    async function apiDelete(url, body) { return (await apiCall(url, 'DELETE', body || {})).json(); }
+    const enc = encodeURIComponent;
+
+    function fmtDate(s) {
+      if (!s) return '';
+      const d = new Date(s);
+      return isNaN(d) ? s : d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+    }
+    function fmtTime(s) {
+      const d = new Date(s);
+      return isNaN(d) ? String(s || '') : d.toLocaleString();
+    }
+
+    async function loadDirectory() {
+      const off = document.getElementById('dir-off');
+      const main = document.getElementById('dir-main');
       try {
-        const users = await apiGet('/api/users');
-        if (!users.length) {
-          container.innerHTML = '<p class="settings-empty">No users found.</p>';
+        dir = await apiGet('/api/directory');
+      } catch (err) {
+        main.style.display = 'none';
+        off.style.display = 'block';
+        off.innerHTML = 'Failed to load users: ' + escapeHtml(err.message || 'unknown error');
+        return;
+      }
+      if (!dir.available) {
+        main.style.display = 'none';
+        off.style.display = 'block';
+        off.innerHTML = '<b>User management is disabled.</b> The Hub has no LLDAP service account: core mounts its credentials as ' +
+          '<code>username</code> and <code>password</code> files (default <code>/run/portcullis/lldap/</code>). Run <code>./portcullis up</code> ' +
+          'on a core version that provides them. The LLDAP web UI still works.<br><span style="color:#64748b">' + escapeHtml(dir.reason) + '</span>';
+        return;
+      }
+      off.style.display = 'none';
+      main.style.display = 'block';
+      let warn = '';
+      if (dir.keycloak_error) warn += '<div class="dir-warn">Keycloak status unavailable: ' + escapeHtml(dir.keycloak_error) + '</div>';
+      if (dir.invites_error) warn += '<div class="dir-warn">Invite links unavailable (' + escapeHtml(dir.invites_error) + '). New users need the password fallback under Advanced.</div>';
+      document.getElementById('dir-warnings').innerHTML = warn;
+      renderUsers();
+      renderGroups();
+      renderCreateGroups();
+      loadAudit();
+    }
+
+    function userStatus(u) {
+      const kc = u.keycloak;
+      if (!kc) return '<span class="pill">Keycloak unknown</span>';
+      if (!kc.imported) return '<span class="pill" title="LDAP users are imported into Keycloak at first sign-in">not in Keycloak yet</span>';
+      let h = kc.passkeys > 0
+        ? '<span class="pill ok">' + escapeHtml(kc.passkeys) + ' passkey' + (kc.passkeys === 1 ? '' : 's') + '</span>'
+        : '<span class="pill warn">no passkey</span>';
+      if (!kc.enabled) h += '<span class="pill bad">disabled in Keycloak</span>';
+      for (const a of kc.required_actions || []) h += '<span class="pill warn" title="pending required action">' + escapeHtml(a) + '</span>';
+      return h;
+    }
+
+    function btn(act, user, label, cls) {
+      return '<button class="btn ' + (cls || 'btn-secondary') + '" data-act="' + act + '" data-user="' + escapeHtml(user) + '">' + label + '</button>';
+    }
+
+    function renderUsers() {
+      const users = dir.users || [];
+      if (!users.length) { document.getElementById('dir-users').innerHTML = '<p class="settings-empty">No users.</p>'; return; }
+      let h = '<table class="dir-table"><thead><tr><th>User</th><th>Groups</th><th>Sign-in</th><th>Created</th><th></th></tr></thead><tbody>';
+      for (const u of users) {
+        h += '<tr><td><b>' + escapeHtml(u.username) + '</b>';
+        if (u.self) h += ' <span class="pill info">you</span>';
+        if (u.protected === 'service') h += ' <span class="pill" title="The Hub\'s own LLDAP account (read-only here)">Hub service account</span>';
+        if (u.protected === 'core-admin') h += ' <span class="pill" title="Core\'s LLDAP admin: Keycloak and enroll bind as it">core admin</span>';
+        h += '<div class="muted">' + escapeHtml(u.display_name) + (u.display_name && u.email ? ' · ' : '') + escapeHtml(u.email) + '</div></td>';
+        h += '<td>' + (u.groups || []).map(g => '<span class="pill' + (g === 'lldap_admin' ? ' info' : '') + '">' + escapeHtml(g) + '</span>').join('') + '</td>';
+        h += '<td>' + userStatus(u) + '</td>';
+        h += '<td class="muted">' + escapeHtml(fmtDate(u.created)) + '</td><td>';
+        if (u.protected !== 'service') {
+          const kc = u.keycloak;
+          h += '<div class="dir-actions">';
+          h += btn('edit-user', u.username, 'Edit');
+          h += btn('invite', u.username, 'Send new invite', 'btn-primary');
+          if (!kc || !(kc.required_actions || []).includes('webauthn-register-passwordless')) h += btn('require-passkey', u.username, 'Require passkey');
+          if (kc && (kc.required_actions || []).length) h += btn('clear-actions', u.username, 'Clear pending');
+          h += btn('reset-passkeys', u.username, 'Reset passkeys', 'btn-danger');
+          if (u.protected !== 'core-admin') h += btn('password', u.username, 'Password…', 'btn-danger');
+          if (u.protected !== 'core-admin' && !u.self) h += btn('delete-user', u.username, 'Delete', 'btn-danger');
+          h += '</div>';
+        }
+        h += '</td></tr>';
+      }
+      document.getElementById('dir-users').innerHTML = h + '</tbody></table>';
+    }
+
+    function renderCreateGroups() {
+      const box = document.getElementById('nu-groups');
+      const groups = (dir.groups || []).filter(g => !g.builtin || g.name === 'lldap_admin');
+      box.innerHTML = groups.length ? groups.map(g =>
+        '<label><input type="checkbox" value="' + escapeHtml(g.name) + '"> ' + escapeHtml(g.name) + '</label>').join('') :
+        '<span class="muted">No groups yet.</span>';
+    }
+
+    function renderGroups() {
+      let s = '';
+      if ((dir.suggestions || []).length) {
+        s = '<div class="group-card"><div class="category-title" style="margin-bottom:0.5rem">Groups your templates use that don\'t exist yet</div>';
+        for (const g of dir.suggestions) {
+          s += '<div class="suggestion"><code>' + escapeHtml(g.group) + '</code><span class="meta">' + escapeHtml(g.kind) + ' group of ' +
+            escapeHtml(g.app_name || g.app) + (g.enabled ? ' (enabled)' : '') + '</span>' +
+            '<button class="btn btn-primary btn-sm" data-act="create-suggested" data-group="' + escapeHtml(g.group) + '">Create</button></div>';
+        }
+        s += '</div>';
+      }
+      document.getElementById('dir-suggestions').innerHTML = s;
+      const users = (dir.users || []).filter(u => u.protected !== 'service').map(u => u.username);
+      let h = '';
+      for (const g of dir.groups || []) {
+        const members = g.members || [];
+        h += '<div class="group-card"><div class="group-card-head"><span class="name">' + escapeHtml(g.name) + '</span>';
+        h += '<span class="meta">' + members.length + ' member' + (members.length === 1 ? '' : 's');
+        if (g.builtin) h += ' · built-in';
+        if ((g.used_by || []).length) h += ' · used by ' + g.used_by.map(escapeHtml).join(', ');
+        h += '</span>';
+        if (!g.builtin) h += '<button class="btn btn-danger btn-sm" data-act="delete-group" data-group="' + escapeHtml(g.name) + '">Delete</button>';
+        h += '</div><div>';
+        for (const m of members) {
+          // The backend refuses these too; don't offer them.
+          const locked = m === dir.service_user || (g.name === 'lldap_admin' && (m === 'admin' || m === dir.me));
+          h += '<span class="pill">' + escapeHtml(m) + (locked ? '' :
+            '<button title="Remove from group" data-act="remove-member" data-group="' + escapeHtml(g.name) + '" data-user="' + escapeHtml(m) + '">&times;</button>') + '</span>';
+        }
+        const candidates = users.filter(u => !members.includes(u));
+        if (candidates.length) {
+          h += '<div class="group-add"><select>' + candidates.map(u => '<option value="' + escapeHtml(u) + '">' + escapeHtml(u) + '</option>').join('') +
+            '</select><button class="btn btn-secondary btn-sm" data-act="add-member" data-group="' + escapeHtml(g.name) + '">Add member</button></div>';
+        }
+        h += '</div></div>';
+      }
+      document.getElementById('dir-groups').innerHTML = h;
+    }
+
+    async function loadAudit() {
+      const box = document.getElementById('dir-audit');
+      try {
+        const entries = await apiGet('/api/directory/audit');
+        if (!entries.length) { box.innerHTML = '<p class="settings-empty">No changes yet.</p>'; return; }
+        let h = '<table class="dir-table"><thead><tr><th>Time</th><th>Who</th><th>Action</th><th>Target</th><th>Result</th></tr></thead><tbody>';
+        for (const e of entries) {
+          const cls = e.result === 'ok' ? 'ok' : (e.result === 'refused' ? 'warn' : 'bad');
+          h += '<tr><td class="muted">' + escapeHtml(fmtTime(e.time)) + '</td><td>' + escapeHtml(e.actor) + '</td><td>' + escapeHtml(e.action) +
+            (e.detail ? '<div class="muted">' + escapeHtml(e.detail) + '</div>' : '') + '</td><td>' + escapeHtml(e.target) + '</td>' +
+            '<td><span class="pill ' + cls + '">' + escapeHtml(e.result) + '</span>' + (e.error ? '<div class="muted">' + escapeHtml(e.error) + '</div>' : '') + '</td></tr>';
+        }
+        box.innerHTML = h + '</tbody></table>';
+      } catch (err) {
+        box.innerHTML = '<p class="settings-empty">Failed to load the audit log: ' + escapeHtml(err.message || '') + '</p>';
+      }
+    }
+
+    // Shows an invite link or password exactly once; never stored.
+    function showSecret(res, who) {
+      const panel = document.getElementById('dir-secret');
+      const title = document.getElementById('dir-secret-title');
+      const value = document.getElementById('dir-secret-value');
+      const meta = document.getElementById('dir-secret-meta');
+      if (res && res.invite) {
+        title.textContent = 'One-time invite link for ' + who + ' — send it to them now';
+        value.value = res.invite.url;
+        meta.textContent = 'Expires ' + fmtTime(res.invite.expires_at) + '. It works once and replaces any earlier invite. It won\'t be shown again.';
+      } else if (res && res.password) {
+        title.textContent = 'Password for ' + who + ' — copy it now';
+        value.value = res.password;
+        meta.textContent = 'It won\'t be shown again.';
+      } else {
+        return;
+      }
+      panel.classList.add('visible');
+      panel.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+    function hideSecret() {
+      document.getElementById('dir-secret-value').value = '';
+      document.getElementById('dir-secret').classList.remove('visible');
+    }
+    function showWarnings(res) {
+      if (res && res.warnings && res.warnings.length) showToast(res.warnings.join(' · '), 'error');
+    }
+
+    async function dirAction(fn, okMsg) {
+      try {
+        const res = await fn();
+        if (okMsg) showToast(okMsg, 'success');
+        showWarnings(res);
+        await loadDirectory();
+        return res;
+      } catch (err) {
+        showToast(err.message || 'Failed', 'error');
+        return null;
+      }
+    }
+
+    function typed(what, name) {
+      const v = prompt(what + '\n\nType "' + name + '" to confirm:');
+      if (v === null) return false;
+      if (v !== name) { showToast('Confirmation did not match — nothing changed.', 'error'); return false; }
+      return true;
+    }
+
+    async function createUser() {
+      const username = document.getElementById('nu-username').value.trim();
+      const usePw = document.getElementById('nu-use-password').checked;
+      const body = {
+        username,
+        email: document.getElementById('nu-email').value.trim(),
+        display_name: document.getElementById('nu-display').value.trim(),
+        groups: Array.from(document.querySelectorAll('#nu-groups input:checked')).map(i => i.value),
+        onboarding: usePw ? 'password' : 'invite',
+      };
+      if (usePw) {
+        body.generate_password = document.querySelector('input[name="nu-pwmode"]:checked').value === 'generate';
+        if (!body.generate_password) body.password = document.getElementById('nu-password').value;
+        body.require_passkey = document.getElementById('nu-require-passkey').checked;
+      }
+      const res = await dirAction(() => apiPost('/api/directory/users', body), 'User ' + username + ' created');
+      if (res) {
+        document.getElementById('dir-create').classList.remove('visible');
+        ['nu-username', 'nu-email', 'nu-display', 'nu-password'].forEach(id => document.getElementById(id).value = '');
+        document.getElementById('nu-use-password').checked = false;
+        document.getElementById('nu-advanced').open = false;
+        showSecret(res, username);
+      }
+    }
+
+    document.getElementById('tab-users').addEventListener('click', async (e) => {
+      const b = e.target.closest('[data-act]');
+      if (!b) return;
+      const act = b.dataset.act, user = b.dataset.user || '', group = b.dataset.group || '';
+      const u = (dir && dir.users || []).find(x => x.username === user);
+      const path = '/api/directory/users/' + enc(user);
+      switch (act) {
+        case 'reload': return loadDirectory();
+        case 'toggle-create': return document.getElementById('dir-create').classList.toggle('visible');
+        case 'create-user': return createUser();
+        case 'copy-secret': {
+          const v = document.getElementById('dir-secret-value');
+          try { await navigator.clipboard.writeText(v.value); showToast('Copied', 'success'); }
+          catch (_) { v.select(); document.execCommand('copy'); showToast('Copied', 'success'); }
           return;
         }
-        users.sort((a, b) => (a.username || '').localeCompare(b.username || ''));
-        let html = '<div class="users-table">';
-        for (const u of users) {
-          const actions = u.requiredActions || [];
-          const hasWebAuthn = actions.includes('webauthn-register-passwordless');
-          html += '<div class="user-row">';
-          html += '<div class="user-info"><b>' + escapeHtml(u.username) + '</b>';
-          if (u.email) html += '<span class="user-email">' + escapeHtml(u.email) + '</span>';
-          html += '</div>';
-          html += '<div class="user-actions">';
-          if (actions.length) {
-            html += '<span class="user-action-pill">Pending: ' + actions.map(escapeHtml).join(', ') + '</span>';
-            html += '<button class="btn btn-sm" onclick="clearUserActions(\'' + u.id + '\')">Clear</button>';
-          }
-          if (!hasWebAuthn) {
-            html += '<button class="btn btn-sm btn-primary" onclick="requireWebAuthn(\'' + u.id + '\')">Require WebAuthn enrollment</button>';
-          }
-          html += '</div></div>';
+        case 'hide-secret': return hideSecret();
+        case 'edit-user': {
+          const email = prompt('Email for ' + user + ':', u ? u.email : '');
+          if (email === null) return;
+          const name = prompt('Display name for ' + user + ':', u ? u.display_name : '');
+          if (name === null) return;
+          return dirAction(() => apiPut(path, { email: email.trim(), display_name: name.trim() }), 'Saved');
         }
-        html += '</div>';
-        container.innerHTML = html;
-      } catch (err) {
-        container.innerHTML = '<p class="settings-empty">Failed to load users: ' + escapeHtml(err.message || 'unknown error') + '</p>';
+        case 'invite': {
+          if (!confirm('Create a new one-time invite link for ' + user + '? Earlier unused invites stop working.')) return;
+          const res = await dirAction(() => apiPost(path + '/invite', {}), null);
+          return showSecret(res, user);
+        }
+        case 'require-passkey':
+          return dirAction(() => apiPost(path + '/require-passkey', {}), user + ' will be asked to register a passkey at next sign-in');
+        case 'clear-actions':
+          return dirAction(() => apiPost(path + '/clear-actions', {}), 'Cleared pending actions');
+        case 'reset-passkeys': {
+          if (!typed('Remove ALL passkeys of ' + user + ', sign them out everywhere and create a new invite link so they can register a new key.', user)) return;
+          const res = await dirAction(() => apiPost(path + '/remove-passkeys', { confirm: user, invite: !dir.invites_error }), 'Passkeys removed');
+          if (res) showToast(res.count + ' passkey(s) removed', 'success');
+          return showSecret(res, user);
+        }
+        case 'password': {
+          const choice = prompt('Fallback: set a password for ' + user + ' (signs them out).\n\nLeave empty to generate a strong one, or type the new password (at least 12 characters):', '');
+          if (choice === null) return;
+          const res = await dirAction(() => apiPost(path + '/password', choice === '' ? { generate: true } : { password: choice }), 'Password changed');
+          return showSecret(res, user);
+        }
+        case 'delete-user':
+          if (!typed('Delete user ' + user + ' from LLDAP and Keycloak. This cannot be undone.', user)) return;
+          return dirAction(() => apiDelete(path, { confirm: user }), 'Deleted ' + user);
+        case 'create-group':
+        case 'create-suggested': {
+          const input = document.getElementById('ng-name');
+          const name = act === 'create-group' ? input.value.trim() : group;
+          if (!name) return;
+          const res = await dirAction(() => apiPost('/api/directory/groups', { name }), 'Group ' + name + ' created');
+          if (res && act === 'create-group') input.value = '';
+          return;
+        }
+        case 'delete-group':
+          if (!typed('Delete group ' + group + '. Members lose whatever access it grants.', group)) return;
+          return dirAction(() => apiDelete('/api/directory/groups/' + enc(group), { confirm: group }), 'Deleted ' + group);
+        case 'add-member': {
+          const sel = b.parentElement.querySelector('select');
+          const who = sel ? sel.value : '';
+          if (!who) return;
+          if (group === 'lldap_admin' && !confirm('Make ' + who + ' a full administrator (lldap_admin)?')) return;
+          return dirAction(() => apiPost('/api/directory/groups/' + enc(group) + '/members', { username: who }), who + ' added to ' + group);
+        }
+        case 'remove-member':
+          if (!confirm('Remove ' + user + ' from ' + group + '?')) return;
+          return dirAction(() => apiDelete('/api/directory/groups/' + enc(group) + '/members/' + enc(user)), user + ' removed from ' + group);
       }
-    }
-
-    async function requireWebAuthn(id) {
-      try {
-        await apiPut('/api/users/' + id + '/required-actions', { actions: ['webauthn-register-passwordless'] });
-        showToast('User will be prompted to register a key on next login.', 'success');
-        loadUsers();
-      } catch (err) {
-        showToast(err.message || 'Failed to set required action', 'error');
-      }
-    }
-
-    async function clearUserActions(id) {
-      try {
-        await apiPut('/api/users/' + id + '/required-actions', { actions: [] });
-        showToast('Cleared pending actions for user.', 'success');
-        loadUsers();
-      } catch (err) {
-        showToast(err.message || 'Failed to clear required actions', 'error');
-      }
-    }
+    });
 
     // ── Container status ──────────────────────────────────
     async function loadStatus(id) {

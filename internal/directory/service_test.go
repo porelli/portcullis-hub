@@ -1,0 +1,417 @@
+package directory_test
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/invite"
+	"github.com/portcullis/hub/internal/keycloak"
+	"github.com/portcullis/hub/internal/keycloak/kctest"
+	"github.com/portcullis/hub/internal/lldap"
+	"github.com/portcullis/hub/internal/lldap/lldaptest"
+)
+
+const svcPass = "service-password-0123456789"
+const inviteSecret = "invite-shared-secret-0123456789abcdef"
+
+type env struct {
+	svc     *directory.Service
+	ll      *lldaptest.Server
+	kc      *kctest.Server
+	audit   string
+	invites *fakeInvites
+}
+
+// fakeInvites is core's invite API (contract §9.4).
+type fakeInvites struct {
+	mu    sync.Mutex
+	srv   *httptest.Server
+	users []string
+	fail  bool
+}
+
+func newInvites(t *testing.T) *fakeInvites {
+	f := &fakeInvites{}
+	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if r.Method != "POST" || r.Header.Get("Authorization") != "Bearer "+inviteSecret || r.Header.Get("Content-Type") != "application/json" {
+			w.WriteHeader(401)
+			return
+		}
+		if f.fail {
+			w.WriteHeader(500)
+			json.NewEncoder(w).Encode(map[string]string{"error": "boom"})
+			return
+		}
+		var req struct{ Username string }
+		json.NewDecoder(r.Body).Decode(&req)
+		f.users = append(f.users, req.Username)
+		w.WriteHeader(201)
+		json.NewEncoder(w).Encode(map[string]interface{}{"url": "https://enroll.example.org/invite/tok-" + req.Username, "expires_at": time.Now().Add(72 * time.Hour).UTC()})
+	}))
+	t.Cleanup(f.srv.Close)
+	return f
+}
+
+func newEnv(t *testing.T) *env {
+	t.Helper()
+	ll := lldaptest.New(t, "portcullis-hub", svcPass)
+	ll.AddUser("root", "root@example.org", "Root", "rootpass-123456", "lldap_admin")
+	ll.AddUser("alice", "alice@example.org", "Alice", "alicepass-12345")
+	credDir := t.TempDir()
+	os.WriteFile(filepath.Join(credDir, "username"), []byte("portcullis-hub\n"), 0600)
+	os.WriteFile(filepath.Join(credDir, "password"), []byte(svcPass+"\n"), 0600)
+	kc := kctest.New(t)
+	kc.Importable = ll.HasUser
+	inv := newInvites(t)
+	secretFile := filepath.Join(t.TempDir(), "secret")
+	os.WriteFile(secretFile, []byte(inviteSecret+"\n"), 0600)
+	audit := filepath.Join(t.TempDir(), "audit.jsonl")
+	svc := &directory.Service{
+		LLDAP:   lldap.New(ll.HTTP.URL, ll.LDAPURL(), ll.BaseDN, credDir),
+		KC:      keycloak.New(kc.HTTP.URL, "admin", "admin"),
+		Invites: invite.New(inv.srv.URL, secretFile),
+		Audit:   &directory.AuditLog{Path: audit},
+		Apps: func() []directory.App {
+			return []directory.App{{ID: "app", Name: "App", Enabled: true, AccessGroup: "users_app", AdminGroup: "admin_app"}, {ID: "other", Name: "Other", AccessGroup: "users_other"}}
+		},
+	}
+	return &env{svc: svc, ll: ll, kc: kc, audit: audit, invites: inv}
+}
+
+func status(err error) int {
+	var de *directory.Error
+	if errors.As(err, &de) {
+		return de.Status
+	}
+	if err != nil {
+		return 500
+	}
+	return 0
+}
+
+var ctx = context.Background()
+
+func TestOverview(t *testing.T) {
+	e := newEnv(t)
+	e.kc.Import("alice", kctest.Credential{ID: "w", Type: "webauthn-passwordless"})
+	e.ll.AddGroup("users_app", "alice")
+	ov, err := e.svc.Overview(ctx, "root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ov.Available || ov.ServiceUser != "portcullis-hub" || ov.KeycloakError != "" || ov.InvitesError != "" {
+		t.Fatalf("ov = %+v", ov)
+	}
+	byName := map[string]directory.UserView{}
+	for _, u := range ov.Users {
+		byName[u.Username] = u
+	}
+	if a := byName["alice"]; a.Keycloak == nil || !a.Keycloak.Imported || a.Keycloak.Passkeys != 1 || len(a.Groups) != 1 {
+		t.Errorf("alice = %+v %+v", a, a.Keycloak)
+	}
+	if r := byName["root"]; !r.Self || r.Keycloak.Imported {
+		t.Errorf("root = %+v", r)
+	}
+	if byName["portcullis-hub"].Protected != "service" || byName["admin"].Protected != "core-admin" {
+		t.Error("protection flags")
+	}
+	// users_app exists; admin_app and users_other are suggested, enabled first.
+	if len(ov.Suggestions) != 2 || ov.Suggestions[0].Group != "admin_app" || !ov.Suggestions[0].Enabled || ov.Suggestions[1].Group != "users_other" {
+		t.Errorf("suggestions = %+v", ov.Suggestions)
+	}
+	for _, g := range ov.Groups {
+		if g.Name == "users_app" && (len(g.UsedBy) != 1 || g.UsedBy[0] != "app") {
+			t.Errorf("used_by = %v", g.UsedBy)
+		}
+		if g.Name == "lldap_admin" && !g.Builtin {
+			t.Error("lldap_admin not builtin")
+		}
+	}
+
+	// Unconfigured: not an error, the page says why.
+	e.svc.LLDAP = lldap.New("", "", "", filepath.Join(t.TempDir(), "none"))
+	ov, err = e.svc.Overview(ctx, "root")
+	if err != nil || ov.Available || !strings.Contains(ov.Reason, "not configured") {
+		t.Errorf("unconfigured = %+v, %v", ov, err)
+	}
+	if err := e.svc.CreateGroup(ctx, "root", "x"); status(err) != 503 {
+		t.Errorf("mutation while unconfigured = %v", err)
+	}
+}
+
+func TestCreateUserInvite(t *testing.T) {
+	e := newEnv(t)
+	e.ll.AddGroup("users_app")
+	res, err := e.svc.CreateUser(ctx, "root", directory.CreateRequest{Username: "dave", Email: "dave@example.org", DisplayName: "Dave", Groups: []string{"users_app"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Invite == nil || !strings.HasPrefix(res.Invite.URL, "https://enroll.example.org/invite/") || res.Password != "" || len(res.Warnings) != 0 {
+		t.Fatalf("res = %+v", res)
+	}
+	if !e.ll.HasUser("dave") || e.ll.Password("dave") != "" {
+		t.Error("invite user must exist without a password")
+	}
+	if m := e.ll.GroupMembers("users_app"); len(m) != 1 || m[0] != "dave" {
+		t.Errorf("members = %v", m)
+	}
+	// Pre-imported into Keycloak, no required action (the invite registers the key).
+	if u := e.kc.Get("dave"); u == nil || len(u.RequiredActions) != 0 {
+		t.Errorf("kc dave = %+v", u)
+	}
+	// Invites unavailable: refuse before creating anything.
+	e.svc.Invites = invite.New(e.invites.srv.URL, filepath.Join(t.TempDir(), "missing"))
+	if _, err := e.svc.CreateUser(ctx, "root", directory.CreateRequest{Username: "erin", Email: "erin@example.org"}); status(err) != 503 || e.ll.HasUser("erin") {
+		t.Errorf("no invites = %v", err)
+	}
+}
+
+func TestCreateUserPassword(t *testing.T) {
+	e := newEnv(t)
+	res, err := e.svc.CreateUser(ctx, "root", directory.CreateRequest{Username: "frank", Email: "frank@example.org", Onboarding: "password", Generate: true, RequirePasskey: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Password) < 20 || e.ll.Password("frank") != res.Password || res.Invite != nil {
+		t.Errorf("generated password not set: %+v", res)
+	}
+	if u := e.kc.Get("frank"); u == nil || len(u.RequiredActions) != 1 || u.RequiredActions[0] != keycloak.PasskeyAction {
+		t.Errorf("kc frank = %+v", u)
+	}
+	res, err = e.svc.CreateUser(ctx, "root", directory.CreateRequest{Username: "gina", Email: "gina@example.org", Onboarding: "password", Password: "admin-chosen-pw"})
+	if err != nil || res.Password != "" || e.ll.Password("gina") != "admin-chosen-pw" {
+		t.Errorf("provided password: %+v %v", res, err)
+	}
+	// LDAP failure rolls the user back.
+	e.ll.FailPassword = 53
+	if _, err := e.svc.CreateUser(ctx, "root", directory.CreateRequest{Username: "hank", Email: "hank@example.org", Onboarding: "password", Generate: true}); err == nil || e.ll.HasUser("hank") {
+		t.Errorf("rollback: %v, exists=%v", err, e.ll.HasUser("hank"))
+	}
+}
+
+func TestCreateUserValidation(t *testing.T) {
+	e := newEnv(t)
+	cases := []struct {
+		req  directory.CreateRequest
+		want int
+	}{
+		{directory.CreateRequest{Username: "Bad Name", Email: "x@example.org"}, 400},
+		{directory.CreateRequest{Username: "portcullis-hub", Email: "x@example.org"}, 400},
+		{directory.CreateRequest{Username: "admin", Email: "x@example.org"}, 400},
+		{directory.CreateRequest{Username: "ok", Email: "not-an-email"}, 400},
+		{directory.CreateRequest{Username: "ok", Email: "x@example.org", DisplayName: "a\nb"}, 400},
+		{directory.CreateRequest{Username: "ok", Email: "x@example.org", Onboarding: "password", Password: "short"}, 400},
+		{directory.CreateRequest{Username: "ok", Email: "x@example.org", Onboarding: "magic"}, 400},
+		{directory.CreateRequest{Username: "ok", Email: "x@example.org", Groups: []string{"nope"}}, 400},
+		{directory.CreateRequest{Username: "alice", Email: "x@example.org"}, 409},
+	}
+	for _, c := range cases {
+		if _, err := e.svc.CreateUser(ctx, "root", c.req); status(err) != c.want {
+			t.Errorf("%+v: %v, want %d", c.req, err, c.want)
+		}
+	}
+	if e.ll.HasUser("ok") {
+		t.Error("invalid request created a user")
+	}
+	if _, err := e.svc.CreateUser(ctx, "", directory.CreateRequest{Username: "ok", Email: "x@example.org"}); status(err) != 403 {
+		t.Errorf("no actor = %v", err)
+	}
+}
+
+func TestGuardrails(t *testing.T) {
+	e := newEnv(t)
+	// root is the only human lldap_admin member besides core's admin.
+	e.ll.AddUser("solo", "solo@example.org", "", "solopass-123456")
+
+	check := func(name string, err error, want int) {
+		t.Helper()
+		if status(err) != want {
+			t.Errorf("%s: %v (status %d), want %d", name, err, status(err), want)
+		}
+	}
+	_, err := e.svc.DeleteUser(ctx, "root", "portcullis-hub", "portcullis-hub")
+	check("delete service", err, 409)
+	_, err = e.svc.DeleteUser(ctx, "root", "admin", "admin")
+	check("delete core admin", err, 409)
+	_, err = e.svc.DeleteUser(ctx, "root", "root", "root")
+	check("delete self", err, 409)
+	_, err = e.svc.DeleteUser(ctx, "root", "alice", "alic")
+	check("bad confirm", err, 400)
+	_, err = e.svc.SetPassword(ctx, "root", "portcullis-hub", "", true)
+	check("password service", err, 409)
+	_, err = e.svc.SetPassword(ctx, "root", "admin", "", true)
+	check("password core admin", err, 409)
+	check("update service", e.svc.UpdateUser(ctx, "root", "portcullis-hub", nil, strptr("x")), 409)
+	check("remove service from admin", e.svc.RemoveMember(ctx, "root", "lldap_admin", "portcullis-hub"), 409)
+	check("add service to group", e.svc.AddMember(ctx, "root", "lldap_password_manager", "portcullis-hub"), 409)
+	check("remove core admin", e.svc.RemoveMember(ctx, "root", "lldap_admin", "admin"), 409)
+	check("remove self", e.svc.RemoveMember(ctx, "root", "lldap_admin", "root"), 409)
+	check("delete builtin group", e.svc.DeleteGroup(ctx, "root", "lldap_admin", "lldap_admin"), 409)
+	check("create lldap_ group", e.svc.CreateGroup(ctx, "root", "lldap_x"), 400)
+	check("passkeys service", e.svc.RequirePasskey(ctx, "root", "portcullis-hub"), 409)
+	_, err = e.svc.SendInvite(ctx, "root", "portcullis-hub")
+	check("invite service", err, 409)
+
+	// Last human admin: admin + root are humans; another admin (solo)
+	// removing root works only while admin is still a member.
+	e.ll.AddUser("solo2", "s2@example.org", "", "x-password-123")
+	check("add solo", e.svc.AddMember(ctx, "root", "lldap_admin", "solo"), 0)
+	check("remove root by solo", e.svc.RemoveMember(ctx, "solo", "lldap_admin", "root"), 0)
+	// Simulate admin having been dropped from lldap_admin elsewhere (LLDAP UI).
+	e.ll.RemoveMember("lldap_admin", "admin")
+	check("last human by delete", deleteErr(e.svc.DeleteUser(ctx, "solo2", "solo", "solo")), 409)
+	check("last human by removal", e.svc.RemoveMember(ctx, "solo2", "lldap_admin", "solo"), 409)
+	if m := e.ll.GroupMembers("lldap_admin"); len(m) != 2 {
+		t.Errorf("lldap_admin = %v", m)
+	}
+	check("missing user", e.svc.AddMember(ctx, "root", "lldap_admin", "ghost"), 404)
+	check("missing group", e.svc.AddMember(ctx, "root", "ghosts", "alice"), 404)
+}
+
+func deleteErr(_ *directory.Result, err error) error { return err }
+
+func strptr(s string) *string { return &s }
+
+func TestUserLifecycle(t *testing.T) {
+	e := newEnv(t)
+	e.kc.Import("alice", kctest.Credential{ID: "w", Type: "webauthn"})
+
+	if err := e.svc.UpdateUser(ctx, "root", "alice", strptr("new@example.org"), strptr("Alice N")); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.svc.UpdateUser(ctx, "root", "alice", strptr("bad"), nil); status(err) != 400 {
+		t.Errorf("bad email = %v", err)
+	}
+	res, err := e.svc.SetPassword(ctx, "root", "alice", "", true)
+	if err != nil || len(res.Password) < 20 || e.ll.Password("alice") != res.Password {
+		t.Fatalf("reset: %+v %v", res, err)
+	}
+	if e.kc.Get("alice").Sessions != 0 {
+		t.Error("password reset should sign the user out")
+	}
+	if _, err := e.svc.SetPassword(ctx, "root", "alice", "tiny", false); status(err) != 400 {
+		t.Errorf("short password = %v", err)
+	}
+	if res, err := e.svc.SetPassword(ctx, "root", "alice", "an-admin-chosen-one", false); err != nil || res.Password != "" || e.ll.Password("alice") != "an-admin-chosen-one" {
+		t.Errorf("set: %+v %v", res, err)
+	}
+
+	res, err = e.svc.RemovePasskeys(ctx, "root", "alice", "alice", true)
+	if err != nil || res.Count != 1 || res.Invite == nil {
+		t.Fatalf("reset passkeys: %+v %v", res, err)
+	}
+	if u := e.kc.Get("alice"); len(u.Credentials) != 0 || len(u.RequiredActions) != 0 {
+		t.Errorf("after reset+invite: %+v", u)
+	}
+	if _, err := e.svc.RemovePasskeys(ctx, "root", "alice", "nope", false); status(err) != 400 {
+		t.Errorf("bad confirm = %v", err)
+	}
+	if res, err := e.svc.RemovePasskeys(ctx, "root", "alice", "alice", false); err != nil || len(e.kc.Get("alice").RequiredActions) != 1 || res.Invite != nil {
+		t.Errorf("remove w/o invite: %+v %v", res, err)
+	}
+	if err := e.svc.ClearActions(ctx, "root", "alice"); err != nil || len(e.kc.Get("alice").RequiredActions) != 0 {
+		t.Errorf("clear: %v", err)
+	}
+	// RequirePasskey on a user Keycloak hasn't imported yet imports them.
+	e.ll.AddUser("ivy", "ivy@example.org", "", "")
+	if err := e.svc.RequirePasskey(ctx, "root", "ivy"); err != nil || e.kc.Get("ivy") == nil {
+		t.Errorf("require on unimported: %v", err)
+	}
+	inv, err := e.svc.SendInvite(ctx, "root", "ivy")
+	if err != nil || inv.Invite == nil {
+		t.Errorf("invite: %+v %v", inv, err)
+	}
+	e.invites.fail = true
+	if _, err := e.svc.SendInvite(ctx, "root", "ivy"); err == nil || !strings.Contains(err.Error(), "boom") {
+		t.Errorf("invite failure = %v", err)
+	}
+
+	dres, err := e.svc.DeleteUser(ctx, "root", "alice", "alice")
+	if err != nil || len(dres.Warnings) != 0 {
+		t.Fatalf("delete: %+v %v", dres, err)
+	}
+	if e.ll.HasUser("alice") || e.kc.Get("alice") != nil {
+		t.Error("alice should be gone from LLDAP and Keycloak")
+	}
+}
+
+func TestGroups(t *testing.T) {
+	e := newEnv(t)
+	if err := e.svc.CreateGroup(ctx, "root", "users_app"); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.svc.CreateGroup(ctx, "root", "USERS_APP"); status(err) != 409 {
+		t.Errorf("case-duplicate = %v", err)
+	}
+	if err := e.svc.CreateGroup(ctx, "root", "bad name"); status(err) != 400 {
+		t.Errorf("bad name = %v", err)
+	}
+	if err := e.svc.AddMember(ctx, "root", "users_app", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.svc.AddMember(ctx, "root", "users_app", "alice"); status(err) != 409 {
+		t.Errorf("duplicate member = %v", err)
+	}
+	if err := e.svc.RemoveMember(ctx, "root", "users_app", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.svc.RemoveMember(ctx, "root", "users_app", "alice"); status(err) != 404 {
+		t.Errorf("not a member = %v", err)
+	}
+	if err := e.svc.DeleteGroup(ctx, "root", "users_app", "users"); status(err) != 400 {
+		t.Errorf("bad confirm = %v", err)
+	}
+	if err := e.svc.DeleteGroup(ctx, "root", "users_app", "users_app"); err != nil || e.ll.HasGroup("users_app") {
+		t.Errorf("delete: %v", err)
+	}
+}
+
+func TestAudit(t *testing.T) {
+	e := newEnv(t)
+	res, err := e.svc.CreateUser(ctx, "root", directory.CreateRequest{Username: "jack", Email: "jack@example.org", Onboarding: "password", Generate: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pw2, err := e.svc.SetPassword(ctx, "root", "jack", "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.svc.SetPassword(ctx, "root", "jack", "admin-provided-secret", false)
+	e.svc.DeleteUser(ctx, "root", "root", "root") // refused
+	inv, _ := e.svc.SendInvite(ctx, "root", "jack")
+
+	raw, _ := os.ReadFile(e.audit)
+	for _, secret := range []string{res.Password, pw2.Password, "admin-provided-secret", svcPass, inviteSecret, inv.Invite.URL} {
+		if strings.Contains(string(raw), secret) {
+			t.Errorf("audit log contains a secret: %q", secret)
+		}
+	}
+	if st, _ := os.Stat(e.audit); st.Mode().Perm() != 0600 {
+		t.Errorf("audit mode = %v", st.Mode())
+	}
+	entries, err := e.svc.Recent(100)
+	if err != nil || len(entries) != 5 {
+		t.Fatalf("entries = %d, %v", len(entries), err)
+	}
+	if entries[0].Action != "user.invite" || entries[1].Result != "refused" || entries[1].Actor != "root" || entries[4].Action != "user.create" || entries[4].Target != "jack" {
+		t.Errorf("entries = %+v", entries)
+	}
+	for i := 0; i < 150; i++ {
+		e.svc.Audit.Append(directory.AuditEntry{Actor: "x", Action: "test", Target: "t", Result: "ok"})
+	}
+	if entries, _ := e.svc.Recent(100); len(entries) != 100 {
+		t.Errorf("recent = %d", len(entries))
+	}
+}

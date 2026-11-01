@@ -1,0 +1,886 @@
+// Package directory is the Hub's user and group management (integration
+// contract §9): LLDAP users/groups and passwords through internal/lldap,
+// the Keycloak side (import, required actions, passkeys, sessions) through
+// internal/keycloak, guardrails, and an append-only audit log.
+package directory
+
+import (
+	"context"
+	"crypto/rand"
+	"errors"
+	"fmt"
+	"net/http"
+	"sort"
+	"strings"
+	"sync"
+	"unicode"
+
+	"github.com/portcullis/hub/internal/invite"
+	"github.com/portcullis/hub/internal/keycloak"
+	"github.com/portcullis/hub/internal/lldap"
+)
+
+// CoreAdmin is LLDAP's bootstrap admin (core sets LLDAP_LDAP_USER_DN=admin).
+// Keycloak's LDAP federation and enroll bind as it with LLDAP_ADMIN_PASSWORD,
+// so the Hub never deletes it, changes its password or drops it from
+// lldap_admin.
+const CoreAdmin = "admin"
+
+// DefaultServiceUser is the Hub's own LLDAP account (§9).
+const DefaultServiceUser = "portcullis-hub"
+
+// builtinGroups are LLDAP's own groups; the Hub never deletes them.
+var builtinGroups = map[string]bool{lldap.AdminGroup: true, "lldap_password_manager": true, "lldap_strict_readonly": true}
+
+// Directory is the LLDAP side (implemented by *lldap.Client).
+type Directory interface {
+	Available() error
+	ServiceUser() string
+	ListUsers(ctx context.Context) ([]lldap.User, error)
+	ListGroups(ctx context.Context) ([]lldap.Group, error)
+	CreateUser(ctx context.Context, id, email, displayName string) error
+	UpdateUser(ctx context.Context, id string, email, displayName *string) error
+	DeleteUser(ctx context.Context, id string) error
+	CreateGroup(ctx context.Context, name string) (int, error)
+	DeleteGroup(ctx context.Context, id int) error
+	AddUserToGroup(ctx context.Context, user string, group int) error
+	RemoveUserFromGroup(ctx context.Context, user string, group int) error
+	SetPassword(ctx context.Context, user, password string) error
+}
+
+// Keycloak is the Keycloak side (implemented by *keycloak.Client).
+type Keycloak interface {
+	UserStatuses(ctx context.Context) (map[string]keycloak.UserStatus, error)
+	ImportUser(ctx context.Context, username string) (string, error)
+	RequirePasskey(ctx context.Context, username string) error
+	SetUserRequiredActions(ctx context.Context, username string, actions []string) error
+	RemovePasskeys(ctx context.Context, username string, requireNew bool) (int, error)
+	LogoutUser(ctx context.Context, username string) error
+	DeleteUserByID(ctx context.Context, id string) error
+}
+
+// Inviter creates one-time onboarding links (implemented by *invite.Client).
+type Inviter interface {
+	Available() error
+	Create(ctx context.Context, username string) (*invite.Invite, error)
+}
+
+// App is what the service needs to know about a template.
+type App struct {
+	ID, Name                string
+	Enabled                 bool
+	AccessGroup, AdminGroup string
+}
+
+// Service implements the user/group operations. Mutations are serialised
+// so guardrail checks and the change can't interleave with another change.
+type Service struct {
+	LLDAP Directory
+	KC    Keycloak // nil: Keycloak features unavailable
+	// Invites: nil or unavailable means only the password fallback works.
+	Invites Inviter
+	Audit   *AuditLog
+	Apps    func() []App
+
+	mu sync.Mutex
+}
+
+// Error carries an HTTP status for the API layer.
+type Error struct {
+	Status int
+	Msg    string
+}
+
+func (e *Error) Error() string { return e.Msg }
+
+func refuse(format string, a ...interface{}) error {
+	return &Error{Status: http.StatusConflict, Msg: fmt.Sprintf(format, a...)}
+}
+func invalid(format string, a ...interface{}) error {
+	return &Error{Status: http.StatusBadRequest, Msg: fmt.Sprintf(format, a...)}
+}
+func notFound(format string, a ...interface{}) error {
+	return &Error{Status: http.StatusNotFound, Msg: fmt.Sprintf(format, a...)}
+}
+
+// ── read side ─────────────────────────────────────────────
+
+// KeycloakView is a user's Keycloak state.
+type KeycloakView struct {
+	Imported        bool     `json:"imported"`
+	Enabled         bool     `json:"enabled"`
+	RequiredActions []string `json:"required_actions"`
+	Passkeys        int      `json:"passkeys"`
+}
+
+// UserView is one row of the users table.
+type UserView struct {
+	Username    string        `json:"username"`
+	Email       string        `json:"email"`
+	DisplayName string        `json:"display_name"`
+	Created     string        `json:"created"`
+	Groups      []string      `json:"groups"`
+	Keycloak    *KeycloakView `json:"keycloak"` // nil: Keycloak unreachable
+	// Protected: "service" (the Hub's account, read-only), "core-admin"
+	// (no delete / password / lldap_admin removal) or "".
+	Protected string `json:"protected,omitempty"`
+	Self      bool   `json:"self,omitempty"`
+}
+
+// GroupView is one group.
+type GroupView struct {
+	Name    string   `json:"name"`
+	Created string   `json:"created"`
+	Members []string `json:"members"`
+	Builtin bool     `json:"builtin,omitempty"`
+	UsedBy  []string `json:"used_by"` // app ids referencing it
+}
+
+// Suggestion is a template group that doesn't exist yet.
+type Suggestion struct {
+	Group   string `json:"group"`
+	App     string `json:"app"`
+	AppName string `json:"app_name"`
+	Kind    string `json:"kind"` // "access" or "admin"
+	Enabled bool   `json:"enabled"`
+}
+
+// Overview is GET /api/directory.
+type Overview struct {
+	Available     bool         `json:"available"`
+	Reason        string       `json:"reason,omitempty"`
+	Me            string       `json:"me"`
+	ServiceUser   string       `json:"service_user"`
+	Users         []UserView   `json:"users"`
+	Groups        []GroupView  `json:"groups"`
+	Suggestions   []Suggestion `json:"suggestions"`
+	KeycloakError string       `json:"keycloak_error,omitempty"`
+	// InvitesError is set when invite links can't be created.
+	InvitesError string `json:"invites_error,omitempty"`
+}
+
+func (s *Service) serviceUser() string {
+	if u := s.LLDAP.ServiceUser(); u != "" {
+		return u
+	}
+	return DefaultServiceUser
+}
+
+func (s *Service) protection(user string) string {
+	switch strings.ToLower(user) {
+	case s.serviceUser():
+		return "service"
+	case CoreAdmin:
+		return "core-admin"
+	}
+	return ""
+}
+
+// Overview lists users, groups and suggestions. An unconfigured LLDAP is
+// not an error: Available is false and Reason says why.
+func (s *Service) Overview(ctx context.Context, me string) (*Overview, error) {
+	ov := &Overview{Me: me, Users: []UserView{}, Groups: []GroupView{}, Suggestions: []Suggestion{}}
+	if err := s.LLDAP.Available(); err != nil {
+		ov.Reason = err.Error()
+		return ov, nil
+	}
+	ov.Available = true
+	ov.ServiceUser = s.serviceUser()
+	if err := s.invitesAvailable(); err != nil {
+		ov.InvitesError = err.Error()
+	}
+	users, err := s.LLDAP.ListUsers(ctx)
+	if err != nil {
+		return nil, &Error{Status: http.StatusBadGateway, Msg: err.Error()}
+	}
+	groups, err := s.LLDAP.ListGroups(ctx)
+	if err != nil {
+		return nil, &Error{Status: http.StatusBadGateway, Msg: err.Error()}
+	}
+	var kc map[string]keycloak.UserStatus
+	if s.KC == nil {
+		ov.KeycloakError = "Keycloak admin API not configured"
+	} else if kc, err = s.KC.UserStatuses(ctx); err != nil {
+		ov.KeycloakError = err.Error()
+	}
+	for _, u := range users {
+		v := UserView{Username: u.ID, Email: u.Email, DisplayName: u.DisplayName, Created: u.CreationDate, Groups: []string{},
+			Protected: s.protection(u.ID), Self: me != "" && strings.EqualFold(me, u.ID)}
+		for _, g := range u.Groups {
+			v.Groups = append(v.Groups, g.DisplayName)
+		}
+		sort.Strings(v.Groups)
+		if kc != nil {
+			st, ok := kc[strings.ToLower(u.ID)]
+			v.Keycloak = &KeycloakView{Imported: ok, Enabled: st.Enabled, RequiredActions: st.RequiredActions, Passkeys: st.Passkeys}
+			if v.Keycloak.RequiredActions == nil {
+				v.Keycloak.RequiredActions = []string{}
+			}
+		}
+		ov.Users = append(ov.Users, v)
+	}
+	sort.Slice(ov.Users, func(i, j int) bool { return ov.Users[i].Username < ov.Users[j].Username })
+
+	var apps []App
+	if s.Apps != nil {
+		apps = s.Apps()
+	}
+	have := map[string]bool{}
+	for _, g := range groups {
+		gv := GroupView{Name: g.DisplayName, Created: g.CreationDate, Members: g.Members(), Builtin: builtinGroups[g.DisplayName], UsedBy: []string{}}
+		sort.Strings(gv.Members)
+		for _, a := range apps {
+			if a.AccessGroup == g.DisplayName || a.AdminGroup == g.DisplayName {
+				gv.UsedBy = append(gv.UsedBy, a.ID)
+			}
+		}
+		have[g.DisplayName] = true
+		ov.Groups = append(ov.Groups, gv)
+	}
+	sort.Slice(ov.Groups, func(i, j int) bool { return ov.Groups[i].Name < ov.Groups[j].Name })
+	seen := map[string]bool{}
+	for _, a := range apps {
+		for _, c := range []struct{ group, kind string }{{a.AccessGroup, "access"}, {a.AdminGroup, "admin"}} {
+			if c.group == "" || have[c.group] || seen[c.group] || !lldap.ValidGroupName(c.group) {
+				continue
+			}
+			seen[c.group] = true
+			ov.Suggestions = append(ov.Suggestions, Suggestion{Group: c.group, App: a.ID, AppName: a.Name, Kind: c.kind, Enabled: a.Enabled})
+		}
+	}
+	sort.Slice(ov.Suggestions, func(i, j int) bool {
+		a, b := ov.Suggestions[i], ov.Suggestions[j]
+		if a.Enabled != b.Enabled {
+			return a.Enabled
+		}
+		return a.Group < b.Group
+	})
+	return ov, nil
+}
+
+// Recent returns the last n audit entries, newest first.
+func (s *Service) Recent(n int) ([]AuditEntry, error) {
+	if s.Audit == nil {
+		return []AuditEntry{}, nil
+	}
+	return s.Audit.Recent(n)
+}
+
+// ── mutation plumbing ─────────────────────────────────────
+
+// snapshot is the directory state guardrails are checked against.
+type snapshot struct {
+	users  map[string]lldap.User // by lowercase id
+	groups map[string]lldap.Group
+}
+
+func (s *Service) load(ctx context.Context) (*snapshot, error) {
+	users, err := s.LLDAP.ListUsers(ctx)
+	if err != nil {
+		return nil, &Error{Status: http.StatusBadGateway, Msg: err.Error()}
+	}
+	groups, err := s.LLDAP.ListGroups(ctx)
+	if err != nil {
+		return nil, &Error{Status: http.StatusBadGateway, Msg: err.Error()}
+	}
+	sn := &snapshot{users: map[string]lldap.User{}, groups: map[string]lldap.Group{}}
+	for _, u := range users {
+		sn.users[strings.ToLower(u.ID)] = u
+	}
+	for _, g := range groups {
+		sn.groups[g.DisplayName] = g
+	}
+	return sn, nil
+}
+
+func (sn *snapshot) user(name string) (lldap.User, error) {
+	u, ok := sn.users[strings.ToLower(name)]
+	if !ok {
+		return u, notFound("no such user %q", name)
+	}
+	return u, nil
+}
+
+func (sn *snapshot) group(name string) (lldap.Group, error) {
+	g, ok := sn.groups[name]
+	if !ok {
+		return g, notFound("no such group %q", name)
+	}
+	return g, nil
+}
+
+// humanAdmins are lldap_admin members other than the service account.
+func (s *Service) humanAdmins(sn *snapshot) []string {
+	var out []string
+	for _, m := range sn.groups[lldap.AdminGroup].Members() {
+		if !strings.EqualFold(m, s.serviceUser()) {
+			out = append(out, strings.ToLower(m))
+		}
+	}
+	return out
+}
+
+// checkNotLastAdmin refuses if user is the only human lldap_admin member.
+func (s *Service) checkNotLastAdmin(sn *snapshot, user string) error {
+	admins := s.humanAdmins(sn)
+	for _, a := range admins {
+		if a == strings.ToLower(user) && len(admins) == 1 {
+			return refuse("%s is the last remaining %s member; add another administrator first", user, lldap.AdminGroup)
+		}
+	}
+	return nil
+}
+
+func (s *Service) checkNotService(user string) error {
+	if strings.EqualFold(user, s.serviceUser()) {
+		return refuse("%s is the Hub's own service account and can't be changed here", s.serviceUser())
+	}
+	return nil
+}
+
+func clip(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, s)
+	if len(s) > 128 {
+		return s[:128] + "…"
+	}
+	return s
+}
+
+// run serialises a mutation, checks the actor and availability, and
+// writes the audit entry.
+func (s *Service) run(actor, action, target string, detail *string, fn func() error) error {
+	if strings.TrimSpace(actor) == "" {
+		return &Error{Status: http.StatusForbidden, Msg: "no signed-in user (X-Forwarded-User) — refusing an unattributable change"}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	err := s.LLDAP.Available()
+	if err != nil {
+		err = &Error{Status: http.StatusServiceUnavailable, Msg: err.Error()}
+	} else {
+		err = fn()
+	}
+	if s.Audit != nil {
+		e := AuditEntry{Actor: clip(actor), Action: action, Target: clip(target), Result: "ok"}
+		if detail != nil {
+			e.Detail = clip(*detail)
+		}
+		var de *Error
+		switch {
+		case errors.As(err, &de) && de.Status < 500:
+			e.Result, e.Error = "refused", clip(err.Error())
+		case err != nil:
+			e.Result, e.Error = "error", clip(err.Error())
+		}
+		if aerr := s.Audit.Append(e); aerr != nil && err == nil {
+			// The change happened; say the audit write failed.
+			return fmt.Errorf("%s done, but writing the audit log failed: %v", action, aerr)
+		}
+	}
+	return err
+}
+
+// GeneratePassword returns a random password (26 base32 chars, 130 bits).
+func GeneratePassword() string { return rand.Text() }
+
+// ── users ─────────────────────────────────────────────────
+
+// Onboarding modes.
+const (
+	OnboardInvite   = "invite"   // one-time link: register a passkey, signed in
+	OnboardPassword = "password" // fallback: the admin hands over a password
+)
+
+// CreateRequest is POST /api/directory/users.
+type CreateRequest struct {
+	Username    string   `json:"username"`
+	Email       string   `json:"email"`
+	DisplayName string   `json:"display_name"`
+	Groups      []string `json:"groups"`
+	// Onboarding is "invite" (default) or "password". The password fields
+	// apply only to "password".
+	Onboarding     string `json:"onboarding"`
+	Password       string `json:"password"`          // used if !Generate
+	Generate       bool   `json:"generate_password"` // show a random one once
+	RequirePasskey bool   `json:"require_passkey"`   // add the registration action
+}
+
+// Result reports a one-time invite or generated password (shown once) and
+// partial failures.
+type Result struct {
+	Invite   *invite.Invite `json:"invite,omitempty"`
+	Password string         `json:"password,omitempty"`
+	Warnings []string       `json:"warnings"`
+	Count    int            `json:"count,omitempty"`
+}
+
+func (s *Service) invitesAvailable() error {
+	if s.Invites == nil {
+		return invite.ErrNotConfigured
+	}
+	return s.Invites.Available()
+}
+
+// newInvite asks core for a link; caller holds s.mu.
+func (s *Service) newInvite(ctx context.Context, username string) (*invite.Invite, error) {
+	if err := s.invitesAvailable(); err != nil {
+		return nil, &Error{Status: http.StatusServiceUnavailable, Msg: err.Error()}
+	}
+	return s.Invites.Create(ctx, username)
+}
+
+func newResult() *Result { return &Result{Warnings: []string{}} }
+
+// CreateUser creates a user and onboards them: by default with a one-time
+// invite link (no password at all), or — fallback — with a password and
+// optionally the passkey registration action.
+func (s *Service) CreateUser(ctx context.Context, actor string, req CreateRequest) (*Result, error) {
+	res := newResult()
+	req.Username = strings.TrimSpace(req.Username)
+	req.Email = strings.TrimSpace(req.Email)
+	req.DisplayName = strings.TrimSpace(req.DisplayName)
+	if req.Onboarding == "" {
+		req.Onboarding = OnboardInvite
+	}
+	detail := fmt.Sprintf("onboarding=%s email=%s groups=%s", req.Onboarding, req.Email, strings.Join(req.Groups, ","))
+	if req.Onboarding == OnboardPassword {
+		detail += fmt.Sprintf(" require_passkey=%v generated_password=%v", req.RequirePasskey, req.Generate)
+	}
+	err := s.run(actor, "user.create", req.Username, &detail, func() error {
+		switch {
+		case !lldap.ValidUsername(req.Username):
+			return invalid("invalid username: use 1-64 lowercase letters, digits, '.', '_' or '-', starting with a letter or digit")
+		case strings.EqualFold(req.Username, s.serviceUser()) || req.Username == CoreAdmin || req.Username == DefaultServiceUser:
+			return invalid("%q is reserved", req.Username)
+		case !lldap.ValidEmail(req.Email):
+			return invalid("invalid email address")
+		case !lldap.ValidDisplayName(req.DisplayName):
+			return invalid("display name: at most 128 printable characters")
+		}
+		pw := ""
+		switch req.Onboarding {
+		case OnboardInvite:
+			if err := s.invitesAvailable(); err != nil {
+				return &Error{Status: http.StatusServiceUnavailable, Msg: "can't create invite links (" + err.Error() + "); use the password fallback"}
+			}
+		case OnboardPassword:
+			pw = req.Password
+			if req.Generate {
+				pw = GeneratePassword()
+			} else if !lldap.ValidPassword(pw) {
+				return invalid("password must be %d-%d characters without control characters", lldap.MinPasswordLen, lldap.MaxPasswordLen)
+			}
+		default:
+			return invalid("onboarding must be %q or %q", OnboardInvite, OnboardPassword)
+		}
+		sn, err := s.load(ctx)
+		if err != nil {
+			return err
+		}
+		if _, ok := sn.users[req.Username]; ok {
+			return refuse("user %q already exists", req.Username)
+		}
+		var groupIDs []int
+		for _, name := range req.Groups {
+			g, err := sn.group(name)
+			if err != nil {
+				return invalid("no such group %q", name)
+			}
+			groupIDs = append(groupIDs, g.ID)
+		}
+		if err := s.LLDAP.CreateUser(ctx, req.Username, req.Email, req.DisplayName); err != nil {
+			return err
+		}
+		if pw != "" {
+			if err := s.LLDAP.SetPassword(ctx, req.Username, pw); err != nil {
+				// Don't leave a half-created account behind.
+				if derr := s.LLDAP.DeleteUser(ctx, req.Username); derr != nil {
+					return fmt.Errorf("setting the password failed (%v) and removing the new user failed too (%v): delete %s in LLDAP", err, derr, req.Username)
+				}
+				return fmt.Errorf("setting the password failed, user not created: %v", err)
+			}
+		}
+		for i, id := range groupIDs {
+			if err := s.LLDAP.AddUserToGroup(ctx, req.Username, id); err != nil {
+				res.Warnings = append(res.Warnings, fmt.Sprintf("adding to %s failed: %v", req.Groups[i], err))
+			}
+		}
+		// Import into Keycloak now (LDAP users are otherwise imported on
+		// first login) so the invite redemption / required action has a
+		// Keycloak user to work on.
+		switch {
+		case s.KC == nil:
+			res.Warnings = append(res.Warnings, "Keycloak admin API not configured: user not pre-imported")
+		case req.Onboarding == OnboardPassword && req.RequirePasskey:
+			if err := s.KC.RequirePasskey(ctx, req.Username); err != nil {
+				res.Warnings = append(res.Warnings, fmt.Sprintf("requiring passkey registration failed (retry with \"Require passkey\"): %v", err))
+			}
+		default:
+			if _, err := s.KC.ImportUser(ctx, req.Username); err != nil {
+				res.Warnings = append(res.Warnings, fmt.Sprintf("pre-importing into Keycloak failed (it happens on first use instead): %v", err))
+			}
+		}
+		if req.Onboarding == OnboardInvite {
+			inv, err := s.Invites.Create(ctx, req.Username)
+			if err != nil {
+				res.Warnings = append(res.Warnings, fmt.Sprintf("the user was created but the invite failed (use \"Send new invite\"): %v", err))
+			} else {
+				res.Invite = inv
+			}
+		}
+		if req.Generate {
+			res.Password = pw
+		}
+		return nil
+	})
+	return res, err
+}
+
+// UpdateUser changes email and/or display name (nil = unchanged).
+func (s *Service) UpdateUser(ctx context.Context, actor, username string, email, displayName *string) error {
+	detail := ""
+	if email != nil {
+		*email = strings.TrimSpace(*email)
+		detail += "email=" + *email + " "
+	}
+	if displayName != nil {
+		*displayName = strings.TrimSpace(*displayName)
+		detail += "display_name=" + *displayName
+	}
+	return s.run(actor, "user.update", username, &detail, func() error {
+		if err := s.checkNotService(username); err != nil {
+			return err
+		}
+		if email == nil && displayName == nil {
+			return invalid("nothing to change")
+		}
+		if email != nil && !lldap.ValidEmail(*email) {
+			return invalid("invalid email address")
+		}
+		if displayName != nil && !lldap.ValidDisplayName(*displayName) {
+			return invalid("display name: at most 128 printable characters")
+		}
+		sn, err := s.load(ctx)
+		if err != nil {
+			return err
+		}
+		u, err := sn.user(username)
+		if err != nil {
+			return err
+		}
+		return s.LLDAP.UpdateUser(ctx, u.ID, email, displayName)
+	})
+}
+
+// DeleteUser deletes a user from LLDAP and Keycloak. confirm must repeat
+// the username.
+func (s *Service) DeleteUser(ctx context.Context, actor, username, confirm string) (*Result, error) {
+	res := newResult()
+	err := s.run(actor, "user.delete", username, nil, func() error {
+		if confirm != username {
+			return invalid("type the username to confirm")
+		}
+		if err := s.checkNotService(username); err != nil {
+			return err
+		}
+		if strings.EqualFold(username, CoreAdmin) {
+			return refuse("%s is core's LLDAP admin (Keycloak and enroll bind as it) and can't be deleted", CoreAdmin)
+		}
+		if strings.EqualFold(username, actor) {
+			return refuse("you can't delete yourself")
+		}
+		sn, err := s.load(ctx)
+		if err != nil {
+			return err
+		}
+		u, err := sn.user(username)
+		if err != nil {
+			return err
+		}
+		if err := s.checkNotLastAdmin(sn, u.ID); err != nil {
+			return err
+		}
+		kcID := ""
+		if s.KC != nil {
+			id, err := s.KC.ImportUser(ctx, u.ID)
+			switch {
+			case err == nil:
+				kcID = id
+			case !errors.Is(err, keycloak.ErrUserNotFound):
+				res.Warnings = append(res.Warnings, fmt.Sprintf("Keycloak lookup failed; its copy of the user (and sessions) may remain until the next LDAP sync: %v", err))
+			}
+		}
+		if err := s.LLDAP.DeleteUser(ctx, u.ID); err != nil {
+			return err
+		}
+		if kcID != "" {
+			if err := s.KC.DeleteUserByID(ctx, kcID); err != nil {
+				res.Warnings = append(res.Warnings, fmt.Sprintf("deleting the Keycloak copy failed: %v", err))
+			}
+		}
+		return nil
+	})
+	return res, err
+}
+
+// SetPassword sets (or generates) a user's password and ends their
+// Keycloak sessions.
+func (s *Service) SetPassword(ctx context.Context, actor, username, password string, generate bool) (*Result, error) {
+	res := newResult()
+	detail := fmt.Sprintf("generated=%v", generate)
+	err := s.run(actor, "user.password", username, &detail, func() error {
+		if err := s.checkNotService(username); err != nil {
+			return err
+		}
+		if strings.EqualFold(username, CoreAdmin) {
+			return refuse("%s's password is LLDAP_ADMIN_PASSWORD (Keycloak and enroll bind with it); change it with the core CLI", CoreAdmin)
+		}
+		if !generate && !lldap.ValidPassword(password) {
+			return invalid("password must be %d-%d characters without control characters", lldap.MinPasswordLen, lldap.MaxPasswordLen)
+		}
+		sn, err := s.load(ctx)
+		if err != nil {
+			return err
+		}
+		u, err := sn.user(username)
+		if err != nil {
+			return err
+		}
+		if !lldap.ValidUsername(u.ID) {
+			return refuse("username %q can't be used in an LDAP DN; change this password in the LLDAP UI", u.ID)
+		}
+		if generate {
+			password = GeneratePassword()
+		}
+		if err := s.LLDAP.SetPassword(ctx, u.ID, password); err != nil {
+			return err
+		}
+		if s.KC != nil {
+			if err := s.KC.LogoutUser(ctx, u.ID); err != nil {
+				res.Warnings = append(res.Warnings, fmt.Sprintf("signing the user out of Keycloak failed: %v", err))
+			}
+		}
+		if generate {
+			res.Password = password
+		}
+		return nil
+	})
+	return res, err
+}
+
+func (s *Service) kcTarget(ctx context.Context, username string) (string, error) {
+	if s.KC == nil {
+		return "", &Error{Status: http.StatusServiceUnavailable, Msg: "Keycloak admin API not configured"}
+	}
+	if err := s.checkNotService(username); err != nil {
+		return "", err
+	}
+	sn, err := s.load(ctx)
+	if err != nil {
+		return "", err
+	}
+	u, err := sn.user(username)
+	return u.ID, err
+}
+
+// RequirePasskey adds the passkey registration action (importing the
+// user into Keycloak first if needed).
+func (s *Service) RequirePasskey(ctx context.Context, actor, username string) error {
+	return s.run(actor, "user.require_passkey", username, nil, func() error {
+		id, err := s.kcTarget(ctx, username)
+		if err != nil {
+			return err
+		}
+		return s.KC.RequirePasskey(ctx, id)
+	})
+}
+
+// ClearActions removes every pending required action.
+func (s *Service) ClearActions(ctx context.Context, actor, username string) error {
+	return s.run(actor, "user.clear_actions", username, nil, func() error {
+		id, err := s.kcTarget(ctx, username)
+		if err != nil {
+			return err
+		}
+		return s.KC.SetUserRequiredActions(ctx, id, nil)
+	})
+}
+
+// RemovePasskeys deletes the user's WebAuthn credentials and signs them
+// out. With withInvite it then creates a new invite link (the invite
+// registers the new passkey); otherwise it adds the passkey registration
+// action for the next (password) login. confirm must repeat the username.
+func (s *Service) RemovePasskeys(ctx context.Context, actor, username, confirm string, withInvite bool) (*Result, error) {
+	res := newResult()
+	detail := fmt.Sprintf("new_invite=%v", withInvite)
+	err := s.run(actor, "user.remove_passkeys", username, &detail, func() error {
+		if confirm != username {
+			return invalid("type the username to confirm")
+		}
+		id, err := s.kcTarget(ctx, username)
+		if err != nil {
+			return err
+		}
+		if withInvite {
+			if err := s.invitesAvailable(); err != nil {
+				return &Error{Status: http.StatusServiceUnavailable, Msg: err.Error()}
+			}
+		}
+		n, err := s.KC.RemovePasskeys(ctx, id, !withInvite)
+		res.Count = n
+		if err != nil {
+			return err
+		}
+		if withInvite {
+			inv, err := s.newInvite(ctx, id)
+			if err != nil {
+				return fmt.Errorf("passkeys removed (%d), but creating the invite failed (use \"Send new invite\"): %w", n, err)
+			}
+			res.Invite = inv
+		}
+		return nil
+	})
+	return res, err
+}
+
+// SendInvite creates a new one-time invite link (earlier unredeemed ones
+// stop working, core side).
+func (s *Service) SendInvite(ctx context.Context, actor, username string) (*Result, error) {
+	res := newResult()
+	err := s.run(actor, "user.invite", username, nil, func() error {
+		if err := s.checkNotService(username); err != nil {
+			return err
+		}
+		sn, err := s.load(ctx)
+		if err != nil {
+			return err
+		}
+		u, err := sn.user(username)
+		if err != nil {
+			return err
+		}
+		inv, err := s.newInvite(ctx, u.ID)
+		res.Invite = inv
+		return err
+	})
+	return res, err
+}
+
+// ── groups ────────────────────────────────────────────────
+
+// CreateGroup creates a group.
+func (s *Service) CreateGroup(ctx context.Context, actor, name string) error {
+	name = strings.TrimSpace(name)
+	return s.run(actor, "group.create", name, nil, func() error {
+		if !lldap.ValidGroupName(name) {
+			return invalid("invalid group name: 1-128 letters, digits, '_', '.' or '-', starting with a letter or digit")
+		}
+		if strings.HasPrefix(strings.ToLower(name), "lldap_") {
+			return invalid("lldap_* names are reserved for LLDAP's built-in groups")
+		}
+		sn, err := s.load(ctx)
+		if err != nil {
+			return err
+		}
+		for existing := range sn.groups {
+			if strings.EqualFold(existing, name) {
+				return refuse("group %q already exists", existing)
+			}
+		}
+		_, err = s.LLDAP.CreateGroup(ctx, name)
+		return err
+	})
+}
+
+// DeleteGroup deletes a group. confirm must repeat the name.
+func (s *Service) DeleteGroup(ctx context.Context, actor, name, confirm string) error {
+	return s.run(actor, "group.delete", name, nil, func() error {
+		if confirm != name {
+			return invalid("type the group name to confirm")
+		}
+		if builtinGroups[name] {
+			return refuse("%s is a built-in LLDAP group", name)
+		}
+		sn, err := s.load(ctx)
+		if err != nil {
+			return err
+		}
+		g, err := sn.group(name)
+		if err != nil {
+			return err
+		}
+		return s.LLDAP.DeleteGroup(ctx, g.ID)
+	})
+}
+
+// AddMember adds username to group.
+func (s *Service) AddMember(ctx context.Context, actor, group, username string) error {
+	return s.run(actor, "group.add_member", group, &username, func() error {
+		if err := s.checkNotService(username); err != nil {
+			return err
+		}
+		sn, err := s.load(ctx)
+		if err != nil {
+			return err
+		}
+		g, err := sn.group(group)
+		if err != nil {
+			return err
+		}
+		u, err := sn.user(username)
+		if err != nil {
+			return err
+		}
+		for _, m := range g.Members() {
+			if strings.EqualFold(m, u.ID) {
+				return refuse("%s is already a member of %s", u.ID, group)
+			}
+		}
+		return s.LLDAP.AddUserToGroup(ctx, u.ID, g.ID)
+	})
+}
+
+// RemoveMember removes username from group.
+func (s *Service) RemoveMember(ctx context.Context, actor, group, username string) error {
+	return s.run(actor, "group.remove_member", group, &username, func() error {
+		if err := s.checkNotService(username); err != nil {
+			return err
+		}
+		sn, err := s.load(ctx)
+		if err != nil {
+			return err
+		}
+		g, err := sn.group(group)
+		if err != nil {
+			return err
+		}
+		u, err := sn.user(username)
+		if err != nil {
+			return err
+		}
+		member := false
+		for _, m := range g.Members() {
+			member = member || strings.EqualFold(m, u.ID)
+		}
+		if !member {
+			return notFound("%s is not a member of %s", u.ID, group)
+		}
+		if group == lldap.AdminGroup {
+			switch {
+			case strings.EqualFold(u.ID, CoreAdmin):
+				return refuse("%s must stay in %s (Keycloak and enroll rely on it)", CoreAdmin, lldap.AdminGroup)
+			case strings.EqualFold(u.ID, actor):
+				return refuse("you can't remove yourself from %s", lldap.AdminGroup)
+			}
+			if err := s.checkNotLastAdmin(sn, u.ID); err != nil {
+				return err
+			}
+		}
+		return s.LLDAP.RemoveUserFromGroup(ctx, u.ID, g.ID)
+	})
+}

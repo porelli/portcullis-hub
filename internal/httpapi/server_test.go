@@ -134,8 +134,10 @@ func TestServerRoutes(t *testing.T) {
 		{"GET", "/api/drift", "", 200},
 		{"PUT", "/api/settings", `{}`, 400},
 		{"PUT", "/api/settings", `{"default_auth_policy":{"factors":["webauthn"]}}`, 200},
-		{"GET", "/api/users", "", 503},
-		{"PUT", "/api/users/not-a-uuid!/required-actions", `{"actions":[]}`, 404},
+		{"GET", "/api/directory", "", 503}, // no directory service in this test
+		{"POST", "/api/directory/users", `{}`, 503},
+		{"GET", "/api/directory/users", "", 404}, // wrong method falls through to "/"
+		{"GET", "/api/portal/apps", "", 200},
 		{"POST", "/api/templates/disable", `{"id":"demo"}`, 200},
 		{"POST", "/api/templates/disable", `{"id":"demo"}`, 400},
 		{"GET", "/nope", "", 404},
