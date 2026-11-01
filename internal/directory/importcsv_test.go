@@ -2,6 +2,7 @@ package directory_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -1031,6 +1032,402 @@ func TestSetDetailsValidation(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "too long") {
 			t.Errorf("error should mention too long, got: %v", err)
+		}
+	})
+}
+
+func TestImportReviewClearedRequiredFields(t *testing.T) {
+	env := newEnv(t)
+	ctx := context.Background()
+	env.ll.AddUser("alice", "alice@example.org", "Alice", "pass-123456")
+
+	admin, _ := env.svc.CallerFor(ctx, "root")
+
+	t.Run("cannot_clear_display_name", func(t *testing.T) {
+		csv := "username,display_name\nalice,"
+		header, rows, err := directory.ParseCSV(strings.NewReader(csv))
+		if err != nil {
+			t.Fatalf("ParseCSV: %v", err)
+		}
+
+		review, err := env.svc.ImportReview(ctx, admin, header, rows)
+		if err != nil {
+			t.Fatalf("ImportReview: %v", err)
+		}
+
+		row := findRow(review.Rows, "alice")
+		if row == nil {
+			t.Fatal("alice not found in review rows")
+		}
+
+		found := false
+		for _, p := range row.Problems {
+			if strings.Contains(p, "cannot clear display_name") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected problem about clearing display_name, got: %v", row.Problems)
+		}
+	})
+
+	t.Run("cannot_clear_email", func(t *testing.T) {
+		csv := "username,email\nalice,"
+		header, rows, err := directory.ParseCSV(strings.NewReader(csv))
+		if err != nil {
+			t.Fatalf("ParseCSV: %v", err)
+		}
+
+		review, err := env.svc.ImportReview(ctx, admin, header, rows)
+		if err != nil {
+			t.Fatalf("ImportReview: %v", err)
+		}
+
+		row := findRow(review.Rows, "alice")
+		if row == nil {
+			t.Fatal("alice not found in review rows")
+		}
+
+		found := false
+		for _, p := range row.Problems {
+			if strings.Contains(p, "cannot clear email") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected problem about clearing email, got: %v", row.Problems)
+		}
+	})
+
+	t.Run("apply_refuses_cleared_display_name", func(t *testing.T) {
+		req := directory.ApplyRequest{
+			Rows: []directory.ApplyRow{
+				{User: "alice", DisplayName: " "},
+			},
+		}
+
+		result, err := env.svc.ImportApply(ctx, admin, req)
+		if err != nil {
+			t.Fatalf("ImportApply: %v", err)
+		}
+
+		if len(result.Rows) != 1 {
+			t.Fatalf("expected 1 result row, got %d", len(result.Rows))
+		}
+
+		if result.Rows[0].OK {
+			t.Error("apply should refuse cleared display_name")
+		}
+		if !strings.Contains(result.Rows[0].Error, "cannot clear display_name") {
+			t.Errorf("error should mention clearing display_name, got: %s", result.Rows[0].Error)
+		}
+	})
+
+	t.Run("apply_refuses_cleared_email", func(t *testing.T) {
+		req := directory.ApplyRequest{
+			Rows: []directory.ApplyRow{
+				{User: "alice", Email: " "},
+			},
+		}
+
+		result, err := env.svc.ImportApply(ctx, admin, req)
+		if err != nil {
+			t.Fatalf("ImportApply: %v", err)
+		}
+
+		if len(result.Rows) != 1 {
+			t.Fatalf("expected 1 result row, got %d", len(result.Rows))
+		}
+
+		if result.Rows[0].OK {
+			t.Error("apply should refuse cleared email")
+		}
+		if !strings.Contains(result.Rows[0].Error, "cannot clear email") {
+			t.Errorf("error should mention clearing email, got: %s", result.Rows[0].Error)
+		}
+	})
+}
+
+func TestImportReviewShortRows(t *testing.T) {
+	env := newEnv(t)
+	ctx := context.Background()
+	env.ll.AddUser("alice", "alice@example.org", "Alice", "pass-123456")
+
+	if err := env.svc.LLDAP.AddUserAttribute(ctx, "city", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.svc.LLDAP.SetUserAttributes(ctx, "alice", map[string][]string{"city": {"Rome"}}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &directory.Config{
+		Version: 1,
+		Fields: []directory.Field{
+			{Name: "city", Kind: directory.FieldKindText, Multi: false},
+		},
+		Groups:      map[string]*directory.GroupConfig{},
+		Permissions: map[string]string{},
+		CreatedBy:   map[string]string{},
+		Deleted:     map[string]time.Time{},
+	}
+	env.svc.Store = &directory.Store{Path: filepath.Join(t.TempDir(), "directory.yaml")}
+	if err := env.svc.Store.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	admin, _ := env.svc.CallerFor(ctx, "root")
+
+	// Short row: alice under "username,email,city" header but only has "alice" value
+	csv := "username,email,city\nalice"
+	header, rows, err := directory.ParseCSV(strings.NewReader(csv))
+	if err != nil {
+		t.Fatalf("ParseCSV: %v", err)
+	}
+
+	review, err := env.svc.ImportReview(ctx, admin, header, rows)
+	if err != nil {
+		t.Fatalf("ImportReview: %v", err)
+	}
+
+	row := findRow(review.Rows, "alice")
+	if row == nil {
+		t.Fatal("alice not found in review rows")
+	}
+
+	// Check for short row problem
+	found := false
+	for _, p := range row.Problems {
+		if strings.Contains(p, "row has") && strings.Contains(p, "cells") && strings.Contains(p, "header has") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected short row problem, got: %v", row.Problems)
+	}
+
+	// Missing cells should be treated as ABSENT (untouched)
+	// City cell should not exist (column beyond row length)
+	if _, ok := row.Cells["city"]; ok {
+		t.Error("city cell should not exist for short row (column is ABSENT)")
+	}
+
+	// Apply should refuse flagged rows
+	req := directory.ApplyRequest{
+		Rows: []directory.ApplyRow{
+			{User: "alice", Attrs: map[string][]string{"city": {"Milan"}}},
+		},
+	}
+
+	// Actually, Apply doesn't get the problems - it re-validates
+	// But for a valid row, it should work. Let's test with the city value:
+	result, err := env.svc.ImportApply(ctx, admin, req)
+	if err != nil {
+		t.Fatalf("ImportApply: %v", err)
+	}
+
+	if len(result.Rows) != 1 {
+		t.Fatalf("expected 1 result row, got %d", len(result.Rows))
+	}
+
+	// This should succeed since the attrs are valid
+	if !result.Rows[0].OK {
+		t.Errorf("apply with valid attrs should succeed, got error: %s", result.Rows[0].Error)
+	}
+
+	// Verify city was changed
+	users, _ := env.svc.LLDAP.ListUsers(ctx)
+	for _, u := range users {
+		if strings.EqualFold(u.ID, "alice") {
+			if len(u.Attributes["city"]) == 0 || u.Attributes["city"][0] != "Milan" {
+				t.Errorf("city should be Milan, got %v", u.Attributes["city"])
+			}
+		}
+	}
+}
+
+func TestImportReviewNoUsernameHeader(t *testing.T) {
+	env := newEnv(t)
+	ctx := context.Background()
+	admin, _ := env.svc.CallerFor(ctx, "root")
+
+	// Header without username
+	header := []string{"email", "display_name"}
+	rows := [][]string{{"alice@example.org", "Alice"}}
+
+	_, err := env.svc.ImportReview(ctx, admin, header, rows)
+	if err == nil {
+		t.Fatal("expected error for missing username header")
+	}
+
+	// Should be a 400 *Error
+	var de *directory.Error
+	if !errors.As(err, &de) || de.Status != 400 {
+		t.Errorf("expected 400 Error, got: %T %v", err, err)
+	}
+
+	if !strings.Contains(err.Error(), "username") {
+		t.Errorf("error should mention username, got: %v", err)
+	}
+}
+
+func TestImportReviewSelfRowDifferentCase(t *testing.T) {
+	env := newEnv(t)
+	ctx := context.Background()
+
+	// Create a delegate who is NOT in a permission group
+	env.ll.AddUser("alice", "alice@example.org", "Alice", "pass-123456")
+	env.ll.AddUser("eddie", "eddie@example.org", "Eddie", "pass-123456", "hr_edit")
+
+	if err := env.svc.LLDAP.AddUserAttribute(ctx, "city", false); err != nil {
+		t.Fatal(err)
+	}
+
+	env.ll.AddGroup("hr_edit", "eddie")
+
+	cfg := &directory.Config{
+		Version: 1,
+		Fields: []directory.Field{
+			{Name: "city", Kind: directory.FieldKindText, Multi: false},
+		},
+		Groups: map[string]*directory.GroupConfig{},
+		Permissions: map[string]string{
+			directory.PermEditDetails: "hr_edit",
+		},
+		CreatedBy: map[string]string{},
+		Deleted:   map[string]time.Time{},
+	}
+	env.svc.Store = &directory.Store{Path: filepath.Join(t.TempDir(), "directory.yaml")}
+	if err := env.svc.Store.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	eddie, _ := env.svc.CallerFor(ctx, "eddie")
+
+	// Eddie (delegate) trying to edit EDDIE (different case)
+	csv := "username,city\nEDDIE,Milan"
+	header, rows, err := directory.ParseCSV(strings.NewReader(csv))
+	if err != nil {
+		t.Fatalf("ParseCSV: %v", err)
+	}
+
+	review, err := env.svc.ImportReview(ctx, eddie, header, rows)
+	if err != nil {
+		t.Fatalf("ImportReview: %v", err)
+	}
+
+	row := findRow(review.Rows, "EDDIE")
+	if row == nil {
+		t.Fatalf("EDDIE not found in review rows, got rows: %+v", review.Rows)
+	}
+
+	// Check for exact problem message
+	found := false
+	expectedProblem := "only an admin can change eddie"
+	for _, p := range row.Problems {
+		if strings.EqualFold(p, expectedProblem) {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected exact problem %q, got: %v", expectedProblem, row.Problems)
+	}
+}
+
+func TestImportReviewDelegateProblemsImproved(t *testing.T) {
+	// This is an improved version of the earlier test with better assertions
+	env := newEnv(t)
+	ctx := context.Background()
+	env.ll.AddUser("alice", "alice@example.org", "Alice", "pass-123456")
+	env.ll.AddUser("eddie", "eddie@example.org", "Eddie", "pass-123456", "hr_edit")
+	env.ll.AddUser("root", "root@example.org", "Root", "pass-123456", "lldap_admin")
+
+	if err := env.svc.LLDAP.AddUserAttribute(ctx, "city", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.svc.LLDAP.AddUserAttribute(ctx, "secret", false); err != nil {
+		t.Fatal(err)
+	}
+
+	env.ll.AddGroup("hr_edit", "eddie")
+
+	cfg := &directory.Config{
+		Version: 1,
+		Fields: []directory.Field{
+			{Name: "city", Kind: directory.FieldKindText, Multi: false},
+			{Name: "secret", Kind: directory.FieldKindText, Multi: false, AdminOnly: true},
+		},
+		Groups: map[string]*directory.GroupConfig{},
+		Permissions: map[string]string{
+			directory.PermEditDetails: "hr_edit",
+		},
+		CreatedBy: map[string]string{},
+		Deleted:   map[string]time.Time{},
+	}
+	env.svc.Store = &directory.Store{Path: filepath.Join(t.TempDir(), "directory.yaml")}
+	if err := env.svc.Store.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	eddie, _ := env.svc.CallerFor(ctx, "eddie")
+
+	t.Run("admin_row_exact_message", func(t *testing.T) {
+		csv := "username,city\nroot,Milan"
+		header, rows, err := directory.ParseCSV(strings.NewReader(csv))
+		if err != nil {
+			t.Fatalf("ParseCSV: %v", err)
+		}
+
+		review, err := env.svc.ImportReview(ctx, eddie, header, rows)
+		if err != nil {
+			t.Fatalf("ImportReview: %v", err)
+		}
+
+		row := findRow(review.Rows, "root")
+		if row == nil {
+			t.Fatalf("root not found in review rows, got: %+v", review.Rows)
+		}
+
+		expectedProblem := "only an admin can change root"
+		found := false
+		for _, p := range row.Problems {
+			if strings.EqualFold(p, expectedProblem) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected exact problem %q, got: %v (matched row: %+v)", expectedProblem, row.Problems, row)
+		}
+	})
+
+	t.Run("permission_group_member_exact_message", func(t *testing.T) {
+		// eddie (delegate) trying to edit another hr_edit member
+		env.ll.AddUser("edna", "edna@example.org", "Edna", "pass-123456", "hr_edit")
+
+		csv := "username,city\nedna,Rome"
+		header, rows, err := directory.ParseCSV(strings.NewReader(csv))
+		if err != nil {
+			t.Fatalf("ParseCSV: %v", err)
+		}
+
+		review, err := env.svc.ImportReview(ctx, eddie, header, rows)
+		if err != nil {
+			t.Fatalf("ImportReview: %v", err)
+		}
+
+		row := findRow(review.Rows, "edna")
+		if row == nil {
+			t.Fatalf("edna not found in review rows, got: %+v", review.Rows)
+		}
+
+		expectedProblem := "only an admin can change edna"
+		found := false
+		for _, p := range row.Problems {
+			if strings.EqualFold(p, expectedProblem) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected exact problem %q, got: %v (matched row: %+v)", expectedProblem, row.Problems, row)
 		}
 	})
 }

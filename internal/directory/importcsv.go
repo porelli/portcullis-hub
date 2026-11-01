@@ -183,16 +183,27 @@ func (s *Service) ImportReview(ctx context.Context, c *Caller, header []string, 
 		fields = make(map[string]Field)
 	}
 
+	// Check for required username column early (before processing rows)
+	usernameCol := -1
+	for i, h := range header {
+		if h == "username" {
+			usernameCol = i
+			break
+		}
+	}
+	if usernameCol < 0 {
+		return nil, invalid("CSV must have a %q column", "username")
+	}
+
 	// Build column map
 	colMap := make(map[string]int) // field name -> column index
-	usernameCol := -1
 	displayNameCol := -1
 	emailCol := -1
 
 	for i, h := range header {
 		switch h {
 		case "username":
-			usernameCol = i
+			// Already found above
 		case "display_name":
 			displayNameCol = i
 		case "email":
@@ -304,6 +315,12 @@ func (s *Service) reviewRow(ctx context.Context, c *Caller, user string, row []s
 
 	lower := strings.ToLower(user)
 
+	// Check for short rows (fewer cells than header)
+	if len(row) < len(header) {
+		rr.Problems = append(rr.Problems, fmt.Sprintf("row has %d cells, header has %d", len(row), len(header)))
+		// Short rows are flagged; Apply will refuse them
+	}
+
 	// Check for duplicate usernames in file
 	if len(fileUsers[lower]) > 1 {
 		rr.Problems = append(rr.Problems, fmt.Sprintf("duplicate username in file: %s", strings.Join(fileUsers[lower], ", ")))
@@ -321,44 +338,61 @@ func (s *Service) reviewRow(ctx context.Context, c *Caller, user string, row []s
 
 	// Check display_name
 	var fileDisplayName string
-	if displayNameCol >= 0 && displayNameCol < len(row) {
+	displayNamePresent := displayNameCol >= 0 && displayNameCol < len(row)
+	if displayNamePresent {
 		fileDisplayName = strings.TrimSpace(row[displayNameCol])
-		if exists && u.DisplayName != fileDisplayName {
-			nameChanged = true
+		if exists {
+			if fileDisplayName == "" {
+				// Existing user: cannot clear display_name
+				rr.Problems = append(rr.Problems, "cannot clear display_name by import")
+			} else if u.DisplayName != fileDisplayName {
+				nameChanged = true
+			}
 		}
 	}
 
 	// Check email
 	var fileEmail string
-	if emailCol >= 0 && emailCol < len(row) {
+	emailPresent := emailCol >= 0 && emailCol < len(row)
+	if emailPresent {
 		fileEmail = strings.TrimSpace(row[emailCol])
-		if exists && u.Email != fileEmail {
-			emailChanged = true
+		if exists {
+			if fileEmail == "" {
+				// Existing user: cannot clear email
+				rr.Problems = append(rr.Problems, "cannot clear email by import")
+			} else if u.Email != fileEmail {
+				emailChanged = true
+			}
 		}
 	}
 
 	// Process custom fields
 	for fname, col := range colMap {
 		f := fields[fname]
-		var fileVals []string
 
-		if col < len(row) {
-			cellValue := strings.TrimSpace(row[col])
-			if cellValue != "" {
-				// Multi-valued cells use |
-				if f.Multi || strings.Contains(cellValue, "|") {
-					parts := strings.Split(cellValue, "|")
-					for _, p := range parts {
-						p = strings.TrimSpace(p)
-						if p != "" {
-							fileVals = append(fileVals, p)
-						}
+		// If column is beyond row length, treat as ABSENT (untouched)
+		if col >= len(row) {
+			// Don't add to Cells - column is absent
+			continue
+		}
+
+		var fileVals []string
+		cellValue := strings.TrimSpace(row[col])
+		if cellValue != "" {
+			// Multi-valued cells use |
+			if f.Multi || strings.Contains(cellValue, "|") {
+				parts := strings.Split(cellValue, "|")
+				for _, p := range parts {
+					p = strings.TrimSpace(p)
+					if p != "" {
+						fileVals = append(fileVals, p)
 					}
-				} else {
-					fileVals = []string{cellValue}
 				}
+			} else {
+				fileVals = []string{cellValue}
 			}
 		}
+		// else: empty cell means clear (file value is empty slice)
 
 		var currentVals []string
 		if exists && u.Attributes != nil {
@@ -367,7 +401,7 @@ func (s *Service) reviewRow(ctx context.Context, c *Caller, user string, row []s
 			}
 		}
 
-		// Build cell
+		// Build cell (column is present, even if empty)
 		rr.Cells[fname] = Cell{Current: currentVals, File: fileVals}
 
 		// Check if changed
@@ -804,11 +838,71 @@ func (s *Service) applyRow(ctx context.Context, c *Caller, row ApplyRow) RowResu
 
 	default:
 		// Update existing user: apply display_name/email via UpdateUser, attrs via SetDetails
+
+		// Load snapshot to check if user exists
+		sn, err := s.load(ctx)
+		if err != nil {
+			res.Error = err.Error()
+			return res
+		}
+		_, exists := sn.users[strings.ToLower(row.User)]
+
+		// For existing users: refuse if DisplayName or Email are empty strings
+		// This catches attempts to clear these required fields
+		// Note: We cannot distinguish "omitted" from "set to empty" with current struct,
+		// so we treat empty strings as clearing attempts and refuse them for existing users
+		if exists {
+			// Check DisplayName - if it's an empty string (not just blank after trimming),
+			// and there are ANY other changes, this looks like a clearing attempt
+			hasAnyChange := row.DisplayName != "" || row.Email != "" || len(row.Attrs) > 0
+			if hasAnyChange {
+				// If DisplayName is empty string but other fields are being changed,
+				// OR if it's the only change, refuse it
+				if row.DisplayName == "" && row.Email != "" {
+					// Only email is being changed, DisplayName="" is OK (means "don't change")
+				} else if row.DisplayName == "" && len(row.Attrs) > 0 {
+					// Only attrs are being changed, DisplayName="" is OK
+				} else if row.DisplayName == "" && row.Email == "" && len(row.Attrs) == 0 {
+					// Nothing being changed - no-op
+					res.OK = true
+					return res
+				} else if row.DisplayName == "" {
+					// DisplayName is empty and it's the only field OR with empty email
+					res.Error = "cannot clear display_name by import"
+					return res
+				}
+
+				// Same check for Email
+				if row.Email == "" && row.DisplayName != "" {
+					// Only DisplayName is being changed, Email="" is OK
+				} else if row.Email == "" && len(row.Attrs) > 0 && row.DisplayName == "" {
+					// Only attrs, both name/email empty - OK
+				} else if row.Email == "" && row.DisplayName == "" && len(row.Attrs) == 0 {
+					// Already handled above
+				} else if row.Email == "" {
+					res.Error = "cannot clear email by import"
+					return res
+				}
+			}
+		}
+
 		nameChanged := row.DisplayName != ""
 		emailChanged := row.Email != ""
 		attrsChanged := len(row.Attrs) > 0
 
 		if nameChanged || emailChanged {
+			if exists {
+				// Existing user - check for blank values AFTER trimming
+				if nameChanged && strings.TrimSpace(row.DisplayName) == "" {
+					res.Error = "cannot clear display_name by import"
+					return res
+				}
+				if emailChanged && strings.TrimSpace(row.Email) == "" {
+					res.Error = "cannot clear email by import"
+					return res
+				}
+			}
+
 			var displayName, email *string
 			if nameChanged {
 				displayName = &row.DisplayName

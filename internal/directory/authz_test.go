@@ -90,6 +90,17 @@ func TestCallerFor(t *testing.T) {
 func TestDelegateCannotEscalate(t *testing.T) {
 	e := delegateEnv(t)
 	e.kc.Import("root")
+
+	// Create an AdminOnly field for testing (before the "before" marker)
+	if err := e.svc.LLDAP.AddUserAttribute(ctx, "secret", false); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _ := e.svc.Store.Load()
+	cfg.Fields = append(cfg.Fields, directory.Field{Name: "secret", Label: "Secret", Kind: directory.FieldKindText, AdminOnly: true})
+	if err := e.svc.Store.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+
 	eddie, ivy, rex, bob := callerFor(t, e, "eddie"), callerFor(t, e, "ivy"), callerFor(t, e, "rex"), callerFor(t, e, "bob")
 	before := len(e.ll.Mutations)
 	check := func(name string, err error) {
@@ -107,6 +118,9 @@ func TestDelegateCannotEscalate(t *testing.T) {
 	check("editor edits an admin", e.svc.UpdateUser(ctx, eddie, "root", strptr("me@example.org"), nil))
 	check("editor edits core admin", e.svc.UpdateUser(ctx, eddie, "admin", nil, strptr("X")))
 	check("editor edits service", e.svc.UpdateUser(ctx, eddie, "portcullis-hub", nil, strptr("X")))
+	check("editor SetDetails self", e.svc.SetDetails(ctx, eddie, "eddie", map[string][]string{}))
+	check("editor SetDetails admin", e.svc.SetDetails(ctx, eddie, "root", map[string][]string{}))
+	check("editor SetDetails permission-group member", e.svc.SetDetails(ctx, eddie, "ivy", map[string][]string{}))
 	check("inviter re-invites an admin", r(e.svc.SendInvite(ctx, ivy, "root")))
 	check("inviter re-invites self", r(e.svc.SendInvite(ctx, ivy, "ivy")))
 	check("inviter re-invites a remover", r(e.svc.SendInvite(ctx, ivy, "rex")))
@@ -137,6 +151,7 @@ func TestDelegateCannotEscalate(t *testing.T) {
 
 	// Admin-only operations, even holding every permission.
 	hera := callerFor(t, e, "hera")
+
 	adminOnly := map[string]error{
 		"SetPassword":             r(e.svc.SetPassword(ctx, hera, "bob", "", true, "")),
 		"RequirePasskey":          e.svc.RequirePasskey(ctx, hera, "bob"),
@@ -158,10 +173,11 @@ func TestDelegateCannotEscalate(t *testing.T) {
 		"RemoveException":         e.svc.RemoveException(ctx, hera, "hr_editors", "bob"),
 		"SetMemberExpiry":         e.svc.SetMemberExpiry(ctx, hera, "hr_editors", "eddie", nil),
 		"SetPermission":           e.svc.SetPermission(ctx, hera, directory.PermEditDetails, ""),
+		"SetDetails AdminOnly":    e.svc.SetDetails(ctx, hera, "bob", map[string][]string{"secret": {"value"}}),
 	}
 	for name, err := range adminOnly {
 		check(name, err)
-		if err != nil && !strings.Contains(err.Error(), "admins only") {
+		if err != nil && !strings.Contains(err.Error(), "admins only") && !strings.Contains(err.Error(), "admin-only") {
 			t.Errorf("%s message = %q", name, err)
 		}
 	}
@@ -183,7 +199,7 @@ func TestDelegateCannotEscalate(t *testing.T) {
 		}
 		refused++
 	}
-	if want := 22 + len(adminOnly); refused != want {
+	if want := 25 + len(adminOnly); refused != want {
 		t.Errorf("refused audit entries = %d, want %d", refused, want)
 	}
 	for _, en := range entries {
