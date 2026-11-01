@@ -93,21 +93,24 @@ func (s *Service) ruleGroupAllowed(name string, admin map[string]bool) bool {
 }
 
 // addsBlocked: a guarding group (administrator, permission or app admin
-// group) whose rule uses a field delegates can edit gets no additions —
-// editing that field must never grant rights. It can happen when a group
-// becomes guarding after its rule was set (e.g. an app enabled later with
-// it as admin_group). Removals still apply. Returns the reason ("" if
-// not blocked).
+// group) whose rule uses a field delegates can edit, or matches a person
+// with no details at all (matchesEmpty: every new account), gets no
+// additions — editing that field or creating an account must never grant
+// rights. It can happen when a group becomes guarding after its rule was
+// set (e.g. an app enabled later with it as admin_group). Removals still
+// apply. Returns the reason ("" if not blocked).
 func (s *Service) addsBlocked(cfg *Config, guarding map[string]string, name string, gc *GroupConfig) string {
 	why, ok := guarding[name]
 	if !ok || gc == nil || gc.Rule == nil {
 		return ""
 	}
-	bad := nonAdminOnly(cfg, gc.Rule)
-	if len(bad) == 0 {
-		return ""
+	if bad := nonAdminOnly(cfg, gc.Rule); len(bad) > 0 {
+		return fmt.Sprintf("%s is %s but its rule uses fields that aren't admin-only (%s): nobody is added until the rule uses only admin-only fields", name, why, strings.Join(bad, ", "))
 	}
-	return fmt.Sprintf("%s is %s but its rule uses fields that aren't admin-only (%s): nobody is added until the rule uses only admin-only fields", name, why, strings.Join(bad, ", "))
+	if matchesEmpty(cfg, gc.Rule) {
+		return fmt.Sprintf("%s is %s but its rule matches a person with no details at all (e.g. a new account): nobody is added until the rule no longer does", name, why)
+	}
+	return ""
 }
 
 // groupEval is the computed state of one rule group.

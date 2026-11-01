@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/keycloak/kctest"
@@ -44,5 +45,42 @@ func TestSignOutDespiteAuditFailure(t *testing.T) {
 	}
 	if e.kc.Get("carol").Sessions != 0 {
 		t.Error("DeleteGroup: former member not signed out after the audit write failed")
+	}
+}
+
+// A rule group whose rule matches an empty person that later becomes a
+// guarding group (an app enabled with it as admin_group) gets no
+// additions; the evaluator reports it every run and Desired agrees.
+func TestEvaluatorBlocksEmptyMatchInNewGuardingGroup(t *testing.T) {
+	e := guardEnv(t)
+	if err := e.svc.CreateField(ctx, asRoot, directory.Field{Name: "dept", Label: "Dept", Kind: directory.FieldKindText, AdminOnly: true}); err != nil {
+		t.Fatal(err)
+	}
+	e.ll.AddGroup("leads")
+	if err := e.svc.ConvertApply(ctx, asRoot, "leads", mustRule(t, `not dept = "X"`), nil); err != nil {
+		t.Fatal(err)
+	}
+	evaluate(t, e, time.Now().UTC())
+	wantMembers(t, e, "leads", "alice", "bob", "carol", "dave", "root")
+
+	apps := e.svc.Apps
+	e.svc.Apps = func() []directory.App {
+		return append(apps(), directory.App{ID: "late", Name: "Late", Enabled: true, AccessGroup: "users_late", AdminGroup: "leads"})
+	}
+	e.ll.AddUser("erin", "erin@example.org", "Erin", "") // a new, empty account
+	for run := 0; run < 2; run++ {
+		rep := evaluate(t, e, time.Now().UTC())
+		wantMembers(t, e, "leads", "alice", "bob", "carol", "dave", "root")
+		found := false
+		for _, er := range rep.Errors {
+			found = found || (strings.Contains(er, "leads") && strings.Contains(er, "no details"))
+		}
+		if !found {
+			t.Errorf("run %d: errors = %v", run, rep.Errors)
+		}
+	}
+	cfg, _ := e.svc.Store.Load()
+	if d, _ := e.svc.DesiredFromLLDAP(ctx, cfg, time.Now().UTC()); d["leads"]["erin"] {
+		t.Errorf("Desired adds erin to leads: %v", d["leads"])
 	}
 }
