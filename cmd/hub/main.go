@@ -89,6 +89,7 @@ func main() {
 		Invites: invites,
 		Audit:   &directory.AuditLog{Path: filepath.Join(cfg.DataDir, "audit.jsonl")},
 		Apps:    h.DirectoryApps,
+		Store:   &directory.Store{Path: filepath.Join(cfg.DataDir, "directory.yaml")},
 		// Same administrator groups core's invite API refuses (§9.4),
 		// re-read on use so a map edit needs no restart.
 		AdminGroups: func() map[string]bool {

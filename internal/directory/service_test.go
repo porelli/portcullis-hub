@@ -453,7 +453,7 @@ func userOps(s *directory.Service, target string) map[string]func() error {
 }
 
 // nonUserOps are the exported methods that don't change a user.
-var nonUserOps = map[string]bool{"Overview": true, "Recent": true, "CreateGroup": true, "DeleteGroup": true}
+var nonUserOps = map[string]bool{"Overview": true, "Recent": true, "CreateGroup": true, "DeleteGroup": true, "CreateField": true, "UpdateField": true, "DeleteField": true}
 
 func TestProtectedAccountsParity(t *testing.T) {
 	e := newEnv(t)

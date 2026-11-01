@@ -97,6 +97,9 @@ type Service struct {
 	// DefaultKeycloakTimeout); past it the page renders without the
 	// statuses still missing.
 	KeycloakTimeout time.Duration
+	// Store for directory.yaml (custom fields, rules, etc.); nil: field
+	// operations return 503.
+	Store *Store
 
 	mu sync.Mutex
 }
@@ -171,8 +174,9 @@ type UserView struct {
 	Self      bool   `json:"self,omitempty"`
 	// Admin: member of an administrator group (AdminGroups). No invites
 	// from the Hub (core refuses them); recover with ServerInvite.
-	Admin        bool   `json:"admin,omitempty"`
-	ServerInvite string `json:"server_invite,omitempty"`
+	Admin        bool                `json:"admin,omitempty"`
+	ServerInvite string              `json:"server_invite,omitempty"`
+	Attrs        map[string][]string `json:"attrs,omitempty"` // custom attributes that are defined fields
 }
 
 // GroupView is one group.
@@ -202,6 +206,7 @@ type Overview struct {
 	Users         []UserView   `json:"users"`
 	Groups        []GroupView  `json:"groups"`
 	Suggestions   []Suggestion `json:"suggestions"`
+	Fields        []Field      `json:"fields"` // custom fields, sorted by name
 	KeycloakError string       `json:"keycloak_error,omitempty"`
 	// StaleKeycloak lists Keycloak copies of users LLDAP no longer has
 	// (RemoveStaleKeycloakUser removes them).
@@ -240,6 +245,32 @@ func (s *Service) Overview(ctx context.Context, me string) (*Overview, error) {
 	if err := s.invitesAvailable(); err != nil {
 		ov.InvitesError = err.Error()
 	}
+
+	// Load fields from Store if available
+	var cfg *Config
+	var fieldNames map[string]bool
+	ov.Fields = []Field{}
+	if s.Store != nil {
+		var err error
+		cfg, err = s.Store.Load()
+		if err != nil {
+			// Non-fatal: field definitions are optional
+			cfg = nil
+		}
+		if cfg != nil {
+			ov.Fields = make([]Field, len(cfg.Fields))
+			copy(ov.Fields, cfg.Fields)
+			sort.Slice(ov.Fields, func(i, j int) bool {
+				return ov.Fields[i].Name < ov.Fields[j].Name
+			})
+			// Track which fields are defined
+			fieldNames = make(map[string]bool)
+			for _, f := range cfg.Fields {
+				fieldNames[f.Name] = true
+			}
+		}
+	}
+
 	users, err := s.LLDAP.ListUsers(ctx)
 	if err != nil {
 		return nil, &Error{Status: http.StatusBadGateway, Msg: err.Error()}
@@ -254,12 +285,20 @@ func (s *Service) Overview(ctx context.Context, me string) (*Overview, error) {
 	for _, u := range users {
 		inLLDAP[strings.ToLower(u.ID)] = true
 		v := UserView{Username: u.ID, Email: u.Email, DisplayName: u.DisplayName, Created: u.CreationDate, Groups: []string{},
-			Protected: s.protection(u.ID), Self: me != "" && strings.EqualFold(me, u.ID)}
+			Protected: s.protection(u.ID), Self: me != "" && strings.EqualFold(me, u.ID), Attrs: map[string][]string{}}
 		for _, g := range u.Groups {
 			v.Groups = append(v.Groups, g.DisplayName)
 			v.Admin = v.Admin || admins[g.DisplayName]
 		}
 		sort.Strings(v.Groups)
+		// Populate Attrs with only defined fields
+		if fieldNames != nil && len(u.Attributes) > 0 {
+			for name, values := range u.Attributes {
+				if fieldNames[name] {
+					v.Attrs[name] = values
+				}
+			}
+		}
 		if v.Admin && v.Protected != "service" {
 			v.ServerInvite = "./portcullis invite " + u.ID
 		}

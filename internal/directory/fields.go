@@ -1,0 +1,346 @@
+package directory
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"regexp"
+	"sort"
+	"strings"
+
+	"github.com/portcullis/hub/internal/rules"
+)
+
+// LLDAP built-in attributes that can't be used as field names.
+var lldapBuiltins = map[string]bool{
+	"mail": true, "uid": true, "display_name": true, "first_name": true,
+	"last_name": true, "avatar": true, "creation_date": true, "uuid": true, "user_id": true,
+}
+
+// fieldNameRe matches valid field names: ^[a-z][a-z0-9_]{0,30}$
+var fieldNameRe = regexp.MustCompile(`^[a-z][a-z0-9_]{0,30}$`)
+
+// CreateField creates a custom field. ShareWithApps defaults to true if omitted.
+// admin only (Task 6)
+func (s *Service) CreateField(ctx context.Context, actor string, f Field) error {
+	f.Name = strings.TrimSpace(f.Name)
+	f.Label = strings.TrimSpace(f.Label)
+	detail := fmt.Sprintf("kind=%s multi=%v admin_only=%v", f.Kind, f.Multi, f.AdminOnly)
+	return s.run(actor, "field.create", f.Name, &detail, func() error {
+		if s.Store == nil {
+			return &Error{Status: http.StatusServiceUnavailable, Msg: "custom fields not configured"}
+		}
+		if !fieldNameRe.MatchString(f.Name) {
+			return invalid("invalid field name: use lowercase letters, digits, '_', 1-31 characters, starting with a letter")
+		}
+		if lldapBuiltins[f.Name] {
+			return refuse("field name %q is reserved (LLDAP built-in attribute)", f.Name)
+		}
+		if f.Label == "" {
+			return invalid("label is required")
+		}
+		if len(f.Label) > 64 {
+			return invalid("label must be at most 64 characters")
+		}
+		if f.Kind != FieldKindText && f.Kind != FieldKindList && f.Kind != FieldKindPerson {
+			return invalid("kind must be %q, %q or %q", FieldKindText, FieldKindList, FieldKindPerson)
+		}
+		if f.Kind == FieldKindPerson && f.Multi {
+			return invalid("person fields cannot be multi-valued")
+		}
+		if f.Kind == FieldKindList {
+			if err := validateListValues(f.Values); err != nil {
+				return err
+			}
+		}
+
+		// Check for duplicates in directory.yaml
+		cfg, err := s.Store.Load()
+		if err != nil {
+			return fmt.Errorf("load directory.yaml: %w", err)
+		}
+		for _, existing := range cfg.Fields {
+			if existing.Name == f.Name {
+				return refuse("field %q already exists", f.Name)
+			}
+		}
+
+		// Check if attribute already exists in LLDAP
+		attrs, err := s.LLDAP.UserAttributes(ctx)
+		if err != nil {
+			return &Error{Status: http.StatusBadGateway, Msg: err.Error()}
+		}
+		for _, a := range attrs {
+			if a.Name == f.Name {
+				return refuse("LLDAP attribute %q already exists", f.Name)
+			}
+		}
+
+		// Create in LLDAP first
+		isList := f.Kind == FieldKindList && f.Multi
+		if err := s.LLDAP.AddUserAttribute(ctx, f.Name, isList); err != nil {
+			return &Error{Status: http.StatusBadGateway, Msg: fmt.Sprintf("creating LLDAP attribute: %v", err)}
+		}
+
+		// Then save to directory.yaml
+		cfg.Fields = append(cfg.Fields, f)
+		if err := s.Store.Save(cfg); err != nil {
+			// Best-effort rollback: delete the LLDAP attribute
+			if derr := s.LLDAP.DeleteUserAttribute(ctx, f.Name); derr != nil {
+				return fmt.Errorf("saving directory.yaml failed (%v) and rolling back the LLDAP attribute failed (%v): manually delete attribute %q in LLDAP", err, derr, f.Name)
+			}
+			return fmt.Errorf("save directory.yaml: %w", err)
+		}
+		return nil
+	})
+}
+
+// UpdateField updates a field's mutable properties (Label, Values, ShareWithApps, AdminOnly).
+// Kind and Multi are immutable.
+// admin only (Task 6)
+func (s *Service) UpdateField(ctx context.Context, actor string, f Field) error {
+	f.Name = strings.TrimSpace(f.Name)
+	f.Label = strings.TrimSpace(f.Label)
+	detail := ""
+	return s.run(actor, "field.update", f.Name, &detail, func() error {
+		if s.Store == nil {
+			return &Error{Status: http.StatusServiceUnavailable, Msg: "custom fields not configured"}
+		}
+		if f.Label == "" {
+			return invalid("label is required")
+		}
+		if len(f.Label) > 64 {
+			return invalid("label must be at most 64 characters")
+		}
+		if f.Kind == FieldKindList {
+			if err := validateListValues(f.Values); err != nil {
+				return err
+			}
+		}
+
+		cfg, err := s.Store.Load()
+		if err != nil {
+			return fmt.Errorf("load directory.yaml: %w", err)
+		}
+
+		// Find existing field
+		idx := -1
+		var existing Field
+		for i, field := range cfg.Fields {
+			if field.Name == f.Name {
+				idx = i
+				existing = field
+				break
+			}
+		}
+		if idx == -1 {
+			return notFound("field %q not found", f.Name)
+		}
+
+		// Check Kind and Multi are unchanged
+		if existing.Kind != f.Kind {
+			return invalid("field kind cannot be changed (was %q)", existing.Kind)
+		}
+		if existing.Multi != f.Multi {
+			return invalid("field multi cannot be changed (was %v)", existing.Multi)
+		}
+
+		// Check if turning off AdminOnly while field is guarded
+		if existing.AdminOnly && !f.AdminOnly {
+			guarded := s.guardedFields(cfg)
+			if group, ok := guarded[f.Name]; ok {
+				return refuse("cannot turn off admin-only: field is used by %s (a protected/permission/app-admin group)", group)
+			}
+		}
+
+		// Check if removing list values that are in use
+		if f.Kind == FieldKindList && len(existing.Values) > len(f.Values) {
+			removed := make(map[string]bool)
+			kept := make(map[string]bool)
+			for _, v := range f.Values {
+				kept[strings.ToLower(v)] = true
+			}
+			for _, v := range existing.Values {
+				if !kept[strings.ToLower(v)] {
+					removed[strings.ToLower(v)] = true
+				}
+			}
+			if len(removed) > 0 {
+				// Check if any removed value is used in rules
+				var usingGroups []string
+				for groupName, gc := range cfg.Groups {
+					if gc.Rule == nil {
+						continue
+					}
+					// Check if rule references this field
+					if !containsString(rules.Fields(gc.Rule), f.Name) {
+						continue
+					}
+					// Check if rule uses any removed value
+					if usesRemovedValue(gc.Rule, f.Name, removed) {
+						usingGroups = append(usingGroups, groupName)
+					}
+				}
+				if len(usingGroups) > 0 {
+					sort.Strings(usingGroups)
+					return refuse("cannot remove list values: used in rules of %s", strings.Join(usingGroups, ", "))
+				}
+			}
+		}
+
+		// Update
+		cfg.Fields[idx] = f
+		if err := s.Store.Save(cfg); err != nil {
+			return fmt.Errorf("save directory.yaml: %w", err)
+		}
+		return nil
+	})
+}
+
+// DeleteField deletes a field. confirm must equal the field name.
+// admin only (Task 6)
+func (s *Service) DeleteField(ctx context.Context, actor, name, confirm string) error {
+	name = strings.TrimSpace(name)
+	confirm = strings.TrimSpace(confirm)
+	return s.run(actor, "field.delete", name, nil, func() error {
+		if s.Store == nil {
+			return &Error{Status: http.StatusServiceUnavailable, Msg: "custom fields not configured"}
+		}
+		if confirm != name {
+			return invalid("type the field name to confirm")
+		}
+
+		cfg, err := s.Store.Load()
+		if err != nil {
+			return fmt.Errorf("load directory.yaml: %w", err)
+		}
+
+		// Find field
+		idx := -1
+		for i, field := range cfg.Fields {
+			if field.Name == name {
+				idx = i
+				break
+			}
+		}
+		if idx == -1 {
+			return notFound("field %q not found", name)
+		}
+
+		// Check if field is used in any rule
+		var usingGroups []string
+		for groupName, gc := range cfg.Groups {
+			if gc.Rule != nil && containsString(rules.Fields(gc.Rule), name) {
+				usingGroups = append(usingGroups, groupName)
+			}
+		}
+		if len(usingGroups) > 0 {
+			sort.Strings(usingGroups)
+			return refuse("field is used in rules of %s", strings.Join(usingGroups, ", "))
+		}
+
+		// Delete from directory.yaml first
+		cfg.Fields = append(cfg.Fields[:idx], cfg.Fields[idx+1:]...)
+		if err := s.Store.Save(cfg); err != nil {
+			return fmt.Errorf("save directory.yaml: %w", err)
+		}
+
+		// Then delete from LLDAP (deleting the attribute drops all values)
+		if err := s.LLDAP.DeleteUserAttribute(ctx, name); err != nil {
+			return &Error{Status: http.StatusBadGateway, Msg: fmt.Sprintf("deleting LLDAP attribute: %v", err)}
+		}
+
+		return nil
+	})
+}
+
+// guardedFields returns a map of field → group name for fields that are referenced
+// by rules of protected groups (admin groups), permission groups, or app admin groups.
+// These fields must remain admin-only.
+func (s *Service) guardedFields(cfg *Config) map[string]string {
+	guarded := make(map[string]string)
+
+	// Collect guarding groups
+	guardingGroups := make(map[string]bool)
+
+	// 1. Protected/admin groups
+	for name := range s.adminGroups() {
+		guardingGroups[name] = true
+	}
+
+	// 2. Permission groups
+	for _, groupName := range cfg.Permissions {
+		guardingGroups[groupName] = true
+	}
+
+	// 3. App admin groups
+	if s.Apps != nil {
+		for _, app := range s.Apps() {
+			if app.AdminGroup != "" {
+				guardingGroups[app.AdminGroup] = true
+			}
+		}
+	}
+
+	// Find fields used by guarding groups that have rules
+	for groupName := range guardingGroups {
+		gc, ok := cfg.Groups[groupName]
+		if !ok || gc.Rule == nil {
+			continue
+		}
+		for _, field := range rules.Fields(gc.Rule) {
+			if _, already := guarded[field]; !already {
+				guarded[field] = groupName
+			}
+		}
+	}
+
+	return guarded
+}
+
+// validateListValues checks that list values are non-empty, trimmed, and unique (case-insensitive).
+func validateListValues(values []string) error {
+	seen := make(map[string]string) // lowercase -> original
+	for i, v := range values {
+		trimmed := strings.TrimSpace(v)
+		if trimmed == "" {
+			return invalid("list values must not be empty or blank")
+		}
+		if trimmed != v {
+			values[i] = trimmed
+		}
+		lower := strings.ToLower(trimmed)
+		if orig, ok := seen[lower]; ok {
+			return invalid("duplicate list value: %q and %q (case-insensitive)", orig, trimmed)
+		}
+		seen[lower] = trimmed
+	}
+	return nil
+}
+
+// containsString reports whether slice contains s.
+func containsString(slice []string, s string) bool {
+	for _, v := range slice {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
+// usesRemovedValue checks if a rule uses any of the removed values (case-insensitive).
+func usesRemovedValue(e *rules.Expr, fieldName string, removed map[string]bool) bool {
+	if e.Field == fieldName {
+		for _, v := range e.Values {
+			if removed[strings.ToLower(v)] {
+				return true
+			}
+		}
+	}
+	for _, item := range e.Items {
+		if usesRemovedValue(item, fieldName, removed) {
+			return true
+		}
+	}
+	return false
+}
