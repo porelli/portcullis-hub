@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 	"unicode"
 
 	"github.com/portcullis/hub/internal/invite"
@@ -52,6 +53,7 @@ type Directory interface {
 // Keycloak is the Keycloak side (implemented by *keycloak.Client).
 type Keycloak interface {
 	UserStatuses(ctx context.Context) (map[string]keycloak.UserStatus, error)
+	ListedUser(ctx context.Context, username string) (*keycloak.UserStatus, error)
 	ImportUser(ctx context.Context, username string) (string, error)
 	RequirePasskey(ctx context.Context, username string) error
 	SetUserRequiredActions(ctx context.Context, username string, actions []string) error
@@ -87,6 +89,10 @@ type Service struct {
 	// confirmation before handing over their sign-in. nil: lldap_admin and
 	// lldap_password_manager (see ProtectedGroups).
 	AdminGroups func() map[string]bool
+	// KeycloakTimeout bounds the Keycloak part of Overview (0:
+	// DefaultKeycloakTimeout); past it the page renders without the
+	// statuses still missing.
+	KeycloakTimeout time.Duration
 
 	mu sync.Mutex
 }
@@ -123,12 +129,28 @@ func recoverMsg(user string) string {
 	return "administrators are recovered from the server: ./portcullis invite " + user
 }
 
-// KeycloakView is a user's Keycloak state.
+// DefaultKeycloakTimeout bounds the Keycloak part of Overview.
+const DefaultKeycloakTimeout = 15 * time.Second
+
+// KeycloakView is a user's Keycloak state. Imported false: Keycloak has
+// no copy yet (LDAP users are imported at first sign-in).
 type KeycloakView struct {
 	Imported        bool     `json:"imported"`
 	Enabled         bool     `json:"enabled"`
 	RequiredActions []string `json:"required_actions"`
 	Passkeys        int      `json:"passkeys"`
+	// Error: this user's status couldn't be read (Passkeys unknown); the
+	// other rows are unaffected.
+	Error string `json:"error,omitempty"`
+}
+
+// StaleRecord is a Keycloak user imported from the LDAP federation whose
+// LLDAP entry no longer exists (deleted outside the Hub). Keycloak keeps
+// the copy and typically answers 404/500 for it.
+type StaleRecord struct {
+	Username string `json:"username"`
+	ID       string `json:"id"`
+	Reason   string `json:"reason"`
 }
 
 // UserView is one row of the users table.
@@ -178,6 +200,9 @@ type Overview struct {
 	Groups        []GroupView  `json:"groups"`
 	Suggestions   []Suggestion `json:"suggestions"`
 	KeycloakError string       `json:"keycloak_error,omitempty"`
+	// StaleKeycloak lists Keycloak copies of users LLDAP no longer has
+	// (RemoveStaleKeycloakUser removes them).
+	StaleKeycloak []StaleRecord `json:"stale_keycloak"`
 	// InvitesError is set when invite links can't be created.
 	InvitesError string `json:"invites_error,omitempty"`
 }
@@ -202,7 +227,7 @@ func (s *Service) protection(user string) string {
 // Overview lists users, groups and suggestions. An unconfigured LLDAP is
 // not an error: Available is false and Reason says why.
 func (s *Service) Overview(ctx context.Context, me string) (*Overview, error) {
-	ov := &Overview{Me: me, Users: []UserView{}, Groups: []GroupView{}, Suggestions: []Suggestion{}}
+	ov := &Overview{Me: me, Users: []UserView{}, Groups: []GroupView{}, Suggestions: []Suggestion{}, StaleKeycloak: []StaleRecord{}}
 	if err := s.LLDAP.Available(); err != nil {
 		ov.Reason = err.Error()
 		return ov, nil
@@ -220,14 +245,11 @@ func (s *Service) Overview(ctx context.Context, me string) (*Overview, error) {
 	if err != nil {
 		return nil, &Error{Status: http.StatusBadGateway, Msg: err.Error()}
 	}
-	var kc map[string]keycloak.UserStatus
-	if s.KC == nil {
-		ov.KeycloakError = "Keycloak admin API not configured"
-	} else if kc, err = s.KC.UserStatuses(ctx); err != nil {
-		ov.KeycloakError = err.Error()
-	}
+	kc := s.keycloakStatuses(ctx, ov)
 	admins := s.adminGroups()
+	inLLDAP := map[string]bool{}
 	for _, u := range users {
+		inLLDAP[strings.ToLower(u.ID)] = true
 		v := UserView{Username: u.ID, Email: u.Email, DisplayName: u.DisplayName, Created: u.CreationDate, Groups: []string{},
 			Protected: s.protection(u.ID), Self: me != "" && strings.EqualFold(me, u.ID)}
 		for _, g := range u.Groups {
@@ -239,16 +261,28 @@ func (s *Service) Overview(ctx context.Context, me string) (*Overview, error) {
 			v.ServerInvite = "./portcullis invite " + u.ID
 		}
 		// The service account is excluded from Keycloak's federation: no
-		// Keycloak status to show.
+		// Keycloak status to show. A user missing from kc was never
+		// imported (not signed in yet): Imported false, no error.
 		if kc != nil && v.Protected != "service" {
 			st, ok := kc[strings.ToLower(u.ID)]
-			v.Keycloak = &KeycloakView{Imported: ok, Enabled: st.Enabled, RequiredActions: st.RequiredActions, Passkeys: st.Passkeys}
+			v.Keycloak = &KeycloakView{Imported: ok, Enabled: st.Enabled, RequiredActions: st.RequiredActions, Passkeys: st.Passkeys, Error: st.Error}
 			if v.Keycloak.RequiredActions == nil {
 				v.Keycloak.RequiredActions = []string{}
 			}
 		}
 		ov.Users = append(ov.Users, v)
 	}
+	for name, st := range kc {
+		if !st.LDAPFederated || inLLDAP[name] || s.checkTarget(name) != nil {
+			continue
+		}
+		reason := "imported from LDAP, but LLDAP has no such user"
+		if st.Error != "" {
+			reason += " (Keycloak: " + st.Error + ")"
+		}
+		ov.StaleKeycloak = append(ov.StaleKeycloak, StaleRecord{Username: st.Username, ID: st.ID, Reason: reason})
+	}
+	sort.Slice(ov.StaleKeycloak, func(i, j int) bool { return ov.StaleKeycloak[i].Username < ov.StaleKeycloak[j].Username })
 	sort.Slice(ov.Users, func(i, j int) bool { return ov.Users[i].Username < ov.Users[j].Username })
 
 	var apps []App
@@ -286,6 +320,32 @@ func (s *Service) Overview(ctx context.Context, me string) (*Overview, error) {
 		return a.Group < b.Group
 	})
 	return ov, nil
+}
+
+// keycloakStatuses fetches every Keycloak user's status within the
+// Keycloak timeout. Realm-level failures (Keycloak down) set the one
+// banner, ov.KeycloakError, and return nil; per-user failures stay in the
+// user's status.
+func (s *Service) keycloakStatuses(ctx context.Context, ov *Overview) map[string]keycloak.UserStatus {
+	if s.KC == nil {
+		ov.KeycloakError = "Keycloak admin API not configured"
+		return nil
+	}
+	d := s.KeycloakTimeout
+	if d <= 0 {
+		d = DefaultKeycloakTimeout
+	}
+	kctx, cancel := context.WithTimeout(ctx, d)
+	defer cancel()
+	kc, err := s.KC.UserStatuses(kctx)
+	switch {
+	case err != nil:
+		ov.KeycloakError = err.Error()
+		return nil
+	case kctx.Err() != nil:
+		ov.KeycloakError = fmt.Sprintf("Keycloak didn't answer within %s: some users' status is missing", d)
+	}
+	return kc
 }
 
 // Recent returns the last n audit entries, newest first.
@@ -679,9 +739,13 @@ func (s *Service) UpdateUser(ctx context.Context, actor, username string, email,
 
 // DeleteUser deletes a user from LLDAP and Keycloak. confirm must repeat
 // the username.
+// The audit detail records what happened to the Keycloak copy; a failure
+// there is a warning (the user is gone from LLDAP either way) and the copy
+// then shows up under the stale Keycloak records.
 func (s *Service) DeleteUser(ctx context.Context, actor, username, confirm string) (*Result, error) {
 	res := newResult()
-	err := s.run(actor, "user.delete", username, nil, func() error {
+	detail := ""
+	err := s.run(actor, "user.delete", username, &detail, func() error {
 		if confirm != username {
 			return invalid("type the username to confirm")
 		}
@@ -703,26 +767,78 @@ func (s *Service) DeleteUser(ctx context.Context, actor, username, confirm strin
 			return err
 		}
 		kcID := ""
-		if s.KC != nil {
+		kcErr := ""
+		if s.KC == nil {
+			detail = "keycloak_copy=unknown (Keycloak admin API not configured)"
+		} else {
 			id, err := s.KC.ImportUser(ctx, u.ID)
 			switch {
 			case err == nil:
 				kcID = id
-			case !errors.Is(err, keycloak.ErrUserNotFound):
-				res.Warnings = append(res.Warnings, fmt.Sprintf("Keycloak lookup failed; its copy of the user (and sessions) may remain until the next LDAP sync: %v", err))
+			case errors.Is(err, keycloak.ErrUserNotFound):
+				detail = "keycloak_copy=none"
+			default:
+				kcErr = "lookup: " + err.Error()
 			}
 		}
 		if err := s.LLDAP.DeleteUser(ctx, u.ID); err != nil {
+			detail = ""
 			return err
 		}
 		if kcID != "" {
 			if err := s.KC.DeleteUserByID(ctx, kcID); err != nil {
-				res.Warnings = append(res.Warnings, fmt.Sprintf("deleting the Keycloak copy failed: %v", err))
+				kcErr = "delete: " + err.Error()
+			} else {
+				detail = "keycloak_copy=removed"
 			}
+		}
+		if kcErr != "" {
+			detail = "keycloak_copy=FAILED " + kcErr
+			res.Warnings = append(res.Warnings, fmt.Sprintf("%s was deleted from LLDAP, but removing the Keycloak copy failed (%s); it is listed under \"Stale Keycloak records\" — remove it there", u.ID, kcErr))
 		}
 		return nil
 	})
 	return res, err
+}
+
+// RemoveStaleKeycloakUser deletes the Keycloak copy of a user that was
+// imported from the LDAP federation but no longer exists in LLDAP (see
+// Overview.StaleKeycloak). confirm must repeat the username. Refused for
+// the protected accounts, for anyone LLDAP still has, and for Keycloak
+// users not linked to the LDAP federation. Keycloak's federation is
+// READ_ONLY, so this never touches LLDAP.
+func (s *Service) RemoveStaleKeycloakUser(ctx context.Context, actor, username, confirm string) error {
+	detail := ""
+	return s.run(actor, "keycloak.remove_stale", username, &detail, func() error {
+		if err := s.checkTarget(username); err != nil {
+			return err
+		}
+		if confirm != username {
+			return invalid("type the username to confirm")
+		}
+		if s.KC == nil {
+			return &Error{Status: http.StatusServiceUnavailable, Msg: "Keycloak admin API not configured"}
+		}
+		sn, err := s.load(ctx)
+		if err != nil {
+			return err
+		}
+		if _, err := sn.user(username); err == nil {
+			return refuse("%s exists in LLDAP: not a stale record (delete the user instead)", username)
+		}
+		st, err := s.KC.ListedUser(ctx, username)
+		if err != nil {
+			return &Error{Status: http.StatusBadGateway, Msg: err.Error()}
+		}
+		if st == nil {
+			return notFound("Keycloak has no user %q", username)
+		}
+		detail = "keycloak_id=" + st.ID
+		if !st.LDAPFederated {
+			return refuse("%s is not linked to the LDAP federation (a Keycloak-local user): manage it in the Keycloak admin console", username)
+		}
+		return s.KC.DeleteUserByID(ctx, st.ID)
+	})
 }
 
 // SetPassword sets (or generates) a user's password and ends their

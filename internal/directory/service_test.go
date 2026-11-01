@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -437,15 +438,16 @@ func userOps(s *directory.Service, target string) map[string]func() error {
 		"CreateUser": func() error {
 			return r(s.CreateUser(ctx, "root", directory.CreateRequest{Username: target, Email: "x@example.org"}))
 		},
-		"UpdateUser":     func() error { return s.UpdateUser(ctx, "root", target, strptr("x@example.org"), nil) },
-		"DeleteUser":     func() error { return r(s.DeleteUser(ctx, "root", target, target)) },
-		"SetPassword":    func() error { return r(s.SetPassword(ctx, "root", target, "", true, target)) },
-		"SendInvite":     func() error { return r(s.SendInvite(ctx, "root", target)) },
-		"RequirePasskey": func() error { return s.RequirePasskey(ctx, "root", target) },
-		"ClearActions":   func() error { return s.ClearActions(ctx, "root", target) },
-		"RemovePasskeys": func() error { return r(s.RemovePasskeys(ctx, "root", target, target, true)) },
-		"AddMember":      func() error { return s.AddMember(ctx, "root", "users_app", target) },
-		"RemoveMember":   func() error { return s.RemoveMember(ctx, "root", "lldap_admin", target) },
+		"UpdateUser":              func() error { return s.UpdateUser(ctx, "root", target, strptr("x@example.org"), nil) },
+		"DeleteUser":              func() error { return r(s.DeleteUser(ctx, "root", target, target)) },
+		"SetPassword":             func() error { return r(s.SetPassword(ctx, "root", target, "", true, target)) },
+		"SendInvite":              func() error { return r(s.SendInvite(ctx, "root", target)) },
+		"RequirePasskey":          func() error { return s.RequirePasskey(ctx, "root", target) },
+		"ClearActions":            func() error { return s.ClearActions(ctx, "root", target) },
+		"RemovePasskeys":          func() error { return r(s.RemovePasskeys(ctx, "root", target, target, true)) },
+		"AddMember":               func() error { return s.AddMember(ctx, "root", "users_app", target) },
+		"RemoveMember":            func() error { return s.RemoveMember(ctx, "root", "lldap_admin", target) },
+		"RemoveStaleKeycloakUser": func() error { return s.RemoveStaleKeycloakUser(ctx, "root", target, target) },
 	}
 }
 
@@ -589,5 +591,192 @@ func TestAdministrators(t *testing.T) {
 	// Refused password, confirmed password, refused reset+invite, confirmed reset.
 	if flagged != 4 {
 		t.Errorf("flagged = %d", flagged)
+	}
+}
+
+func usersByName(ov *directory.Overview) map[string]directory.UserView {
+	m := map[string]directory.UserView{}
+	for _, u := range ov.Users {
+		m[u.Username] = u
+	}
+	return m
+}
+
+// One user's credentials lookup failing (Keycloak answers 500 or 404 for
+// a federated user whose LDAP entry is gone) degrades only that row.
+func TestOverviewOneBrokenUser(t *testing.T) {
+	for _, code := range []int{500, 404} {
+		e := newEnv(t)
+		e.ll.AddUser("bob", "bob@example.org", "", "")
+		e.kc.Import("alice", kctest.Credential{ID: "w", Type: "webauthn"})
+		e.kc.Import("bob")
+		e.kc.Update("bob", func(u *kctest.User) { u.CredentialsStatus = code })
+		ov, err := e.svc.Overview(ctx, "root")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ov.KeycloakError != "" {
+			t.Errorf("%d: banner for one broken user: %q", code, ov.KeycloakError)
+		}
+		u := usersByName(ov)
+		if a := u["alice"].Keycloak; a == nil || a.Error != "" || a.Passkeys != 1 {
+			t.Errorf("%d: alice = %+v", code, a)
+		}
+		if b := u["bob"].Keycloak; b == nil || !b.Imported || !strings.Contains(b.Error, fmt.Sprintf("HTTP %d", code)) {
+			t.Errorf("%d: bob = %+v", code, b)
+		}
+		if r := u["root"].Keycloak; r == nil || r.Imported || r.Error != "" {
+			t.Errorf("%d: root = %+v", code, r)
+		}
+		if len(ov.StaleKeycloak) != 0 {
+			t.Errorf("%d: bob is in LLDAP, not stale: %+v", code, ov.StaleKeycloak)
+		}
+	}
+}
+
+// A user LLDAP has but Keycloak never imported: "not signed in yet", no
+// error anywhere.
+func TestOverviewNeverImported(t *testing.T) {
+	e := newEnv(t)
+	ov, err := e.svc.Overview(ctx, "root")
+	if err != nil || ov.KeycloakError != "" {
+		t.Fatalf("ov = %+v, %v", ov, err)
+	}
+	a := usersByName(ov)["alice"].Keycloak
+	if a == nil || a.Imported || a.Error != "" || a.RequiredActions == nil {
+		t.Errorf("alice = %+v", a)
+	}
+	if e.kc.Get("alice") != nil {
+		t.Error("Overview must not import users")
+	}
+}
+
+func TestOverviewKeycloakDown(t *testing.T) {
+	e := newEnv(t)
+	e.kc.Import("alice")
+	e.kc.SetDown(true)
+	ov, err := e.svc.Overview(ctx, "root")
+	if err != nil {
+		t.Fatalf("Keycloak down must not fail the page: %v", err)
+	}
+	if ov.KeycloakError == "" || len(ov.Users) == 0 {
+		t.Errorf("ov = %+v", ov)
+	}
+	for _, u := range ov.Users {
+		if u.Keycloak != nil {
+			t.Errorf("%s: per-row status despite the outage: %+v", u.Username, u.Keycloak)
+		}
+	}
+}
+
+// slowKC never answers the credential lookups within the timeout.
+type slowKC struct{ directory.Keycloak }
+
+func (slowKC) UserStatuses(ctx context.Context) (map[string]keycloak.UserStatus, error) {
+	<-ctx.Done()
+	return map[string]keycloak.UserStatus{"alice": {Username: "alice", Error: ctx.Err().Error()}}, nil
+}
+
+func TestOverviewKeycloakTimeout(t *testing.T) {
+	e := newEnv(t)
+	e.svc.KC = slowKC{}
+	e.svc.KeycloakTimeout = 50 * time.Millisecond
+	start := time.Now()
+	ov, err := e.svc.Overview(ctx, "root")
+	if err != nil || time.Since(start) > 5*time.Second {
+		t.Fatalf("ov = %+v, %v", ov, err)
+	}
+	if !strings.Contains(ov.KeycloakError, "didn't answer") {
+		t.Errorf("banner = %q", ov.KeycloakError)
+	}
+	if a := usersByName(ov)["alice"].Keycloak; a == nil || a.Error == "" {
+		t.Errorf("alice = %+v", a)
+	}
+}
+
+func TestStaleKeycloakRecords(t *testing.T) {
+	e := newEnv(t)
+	e.kc.Import("alice")
+	e.kc.Import("e2ecert") // LLDAP entry deleted outside the Hub
+	e.kc.Update("e2ecert", func(u *kctest.User) { u.CredentialsStatus = 500 })
+	e.kc.Import("kclocal") // a Keycloak-local user, not federated
+	e.kc.Update("kclocal", func(u *kctest.User) { u.FederationLink = "" })
+
+	ov, err := e.svc.Overview(ctx, "root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ov.KeycloakError != "" {
+		t.Errorf("banner = %q", ov.KeycloakError)
+	}
+	if len(ov.StaleKeycloak) != 1 || ov.StaleKeycloak[0].Username != "e2ecert" || !strings.Contains(ov.StaleKeycloak[0].Reason, "HTTP 500") {
+		t.Fatalf("stale = %+v", ov.StaleKeycloak)
+	}
+	if a := usersByName(ov)["alice"].Keycloak; a == nil || a.Error != "" {
+		t.Errorf("alice = %+v", a)
+	}
+
+	check := func(name string, err error, want int) {
+		t.Helper()
+		if got := status(err); got != want {
+			t.Errorf("%s = %v (status %d), want %d", name, err, got, want)
+		}
+	}
+	check("no confirm", e.svc.RemoveStaleKeycloakUser(ctx, "root", "e2ecert", "nope"), 400)
+	check("no actor", e.svc.RemoveStaleKeycloakUser(ctx, "", "e2ecert", "e2ecert"), 403)
+	check("exists in LLDAP", e.svc.RemoveStaleKeycloakUser(ctx, "root", "alice", "alice"), 409)
+	check("not federated", e.svc.RemoveStaleKeycloakUser(ctx, "root", "kclocal", "kclocal"), 409)
+	check("unknown", e.svc.RemoveStaleKeycloakUser(ctx, "root", "ghost", "ghost"), 404)
+	e.kc.Import("admin")
+	check("core admin", e.svc.RemoveStaleKeycloakUser(ctx, "root", "admin", "admin"), 409)
+	check("service account", e.svc.RemoveStaleKeycloakUser(ctx, "root", "portcullis-hub", "portcullis-hub"), 409)
+	if e.kc.Get("alice") == nil || e.kc.Get("kclocal") == nil || e.kc.Get("admin") == nil || e.kc.Get("e2ecert") == nil {
+		t.Fatal("a refused removal deleted something")
+	}
+
+	check("remove", e.svc.RemoveStaleKeycloakUser(ctx, "root", "e2ecert", "e2ecert"), 0)
+	if e.kc.Get("e2ecert") != nil {
+		t.Error("stale record still in Keycloak")
+	}
+	entries, _ := e.svc.Recent(1)
+	if len(entries) != 1 || entries[0].Action != "keycloak.remove_stale" || entries[0].Target != "e2ecert" || entries[0].Result != "ok" || !strings.Contains(entries[0].Detail, "keycloak_id=") {
+		t.Errorf("audit = %+v", entries)
+	}
+	if ov, _ := e.svc.Overview(ctx, "root"); len(ov.StaleKeycloak) != 0 {
+		t.Errorf("stale after removal = %+v", ov.StaleKeycloak)
+	}
+}
+
+// Deleting a user removes the Keycloak copy; if that fails the result
+// warns, the audit entry says so, and the copy is listed as stale.
+func TestDeleteUserKeycloakCopy(t *testing.T) {
+	e := newEnv(t)
+	e.ll.AddUser("bob", "bob@example.org", "", "")
+	e.ll.AddUser("carl", "carl@example.org", "", "")
+	e.kc.Import("bob")
+	e.kc.Import("carl")
+
+	res, err := e.svc.DeleteUser(ctx, "root", "bob", "bob")
+	if err != nil || len(res.Warnings) != 0 || e.kc.Get("bob") != nil {
+		t.Fatalf("delete bob: %+v %v", res, err)
+	}
+	entries, _ := e.svc.Recent(1)
+	if entries[0].Detail != "keycloak_copy=removed" {
+		t.Errorf("audit = %+v", entries[0])
+	}
+
+	e.kc.SetDeleteStatus(500)
+	res, err = e.svc.DeleteUser(ctx, "root", "carl", "carl")
+	if err != nil || len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], "Stale Keycloak records") {
+		t.Fatalf("delete carl: %+v %v", res, err)
+	}
+	entries, _ = e.svc.Recent(1)
+	if !strings.Contains(entries[0].Detail, "keycloak_copy=FAILED") {
+		t.Errorf("audit = %+v", entries[0])
+	}
+	e.kc.SetDeleteStatus(0)
+	ov, _ := e.svc.Overview(ctx, "root")
+	if len(ov.StaleKeycloak) != 1 || ov.StaleKeycloak[0].Username != "carl" {
+		t.Errorf("stale = %+v", ov.StaleKeycloak)
 	}
 }

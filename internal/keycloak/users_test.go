@@ -67,3 +67,51 @@ func TestUserManagement(t *testing.T) {
 		t.Errorf("delete missing = %v", err)
 	}
 }
+
+func TestUserStatusesPerUserErrors(t *testing.T) {
+	f := kctest.New(t)
+	f.Import("alice", kctest.Credential{ID: "w1", Type: "webauthn"})
+	f.Import("stale")
+	f.Import("gone")
+	f.Import("local")
+	f.Update("stale", func(u *kctest.User) { u.CredentialsStatus = 500 })
+	f.Update("gone", func(u *kctest.User) { u.CredentialsStatus = 404 })
+	f.Update("local", func(u *kctest.User) { u.FederationLink = "" })
+	c := keycloak.New(f.HTTP.URL, "admin", "admin")
+	ctx := context.Background()
+
+	st, err := c.UserStatuses(ctx)
+	if err != nil {
+		t.Fatalf("one broken user must not fail the whole list: %v", err)
+	}
+	if a := st["alice"]; a.Error != "" || a.Passkeys != 1 || !a.LDAPFederated {
+		t.Errorf("alice = %+v", a)
+	}
+	if s := st["stale"]; s.ErrorStatus != 500 || s.Error != "list credentials: HTTP 500" || !s.LDAPFederated {
+		t.Errorf("stale = %+v", s)
+	}
+	if g := st["gone"]; g.ErrorStatus != 404 {
+		t.Errorf("gone = %+v", g)
+	}
+	if l := st["local"]; l.LDAPFederated || l.Error != "" {
+		t.Errorf("local = %+v", l)
+	}
+
+	// ListedUser reads the list only: no credentials, no LDAP import.
+	u, err := c.ListedUser(ctx, "STALE")
+	if err != nil || u == nil || u.Username != "stale" || !u.LDAPFederated {
+		t.Errorf("ListedUser(stale) = %+v, %v", u, err)
+	}
+	if u, err := c.ListedUser(ctx, "nobody"); err != nil || u != nil {
+		t.Errorf("ListedUser(nobody) = %+v, %v", u, err)
+	}
+
+	// An outage is a realm-level error.
+	f.SetDown(true)
+	if _, err := c.UserStatuses(ctx); err == nil {
+		t.Error("Keycloak down: want an error")
+	}
+	if _, err := c.ListedUser(ctx, "stale"); err == nil {
+		t.Error("ListedUser with Keycloak down: want an error")
+	}
+}

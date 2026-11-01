@@ -29,13 +29,27 @@ type User struct {
 	RequiredActions []string
 	Credentials     []Credential
 	Sessions        int
+	// FederationLink: LDAPProviderID for users imported from LDAP (the
+	// default), "" for local users.
+	FederationLink string
+	// CredentialsStatus, if non-zero, is the HTTP status GET
+	// /users/{id}/credentials answers (Keycloak gives 404 or 500 for a
+	// federated user whose LDAP entry is gone).
+	CredentialsStatus int
 }
+
+// LDAPProviderID is the id of the fake's LDAP user storage provider.
+const LDAPProviderID = "ldap-provider-1"
 
 // Server is the fake.
 type Server struct {
 	HTTP *httptest.Server
 	// Importable reports whether LDAP has username (nil: nobody).
 	Importable func(username string) bool
+	// Down makes every request answer 503 (Keycloak outage).
+	Down bool
+	// DeleteStatus, if non-zero, is what DELETE /users/{id} answers.
+	DeleteStatus int
 
 	mu     sync.Mutex
 	Users  map[string]*User // by username
@@ -62,7 +76,7 @@ func (s *Server) Import(username string, creds ...Credential) *User {
 }
 
 func (s *Server) importLocked(username string, creds ...Credential) *User {
-	u := &User{ID: fmt.Sprintf("00000000-0000-0000-0000-%012d", s.nextID), Username: username, Enabled: true, RequiredActions: []string{}, Credentials: creds, Sessions: 1}
+	u := &User{ID: fmt.Sprintf("00000000-0000-0000-0000-%012d", s.nextID), Username: username, Enabled: true, RequiredActions: []string{}, Credentials: creds, Sessions: 1, FederationLink: LDAPProviderID}
 	s.nextID++
 	s.Users[username] = u
 	return u
@@ -80,6 +94,29 @@ func (s *Server) Get(username string) *User {
 	return &c
 }
 
+// Update changes an imported user in place (no-op if absent).
+func (s *Server) Update(username string, fn func(*User)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if u, ok := s.Users[username]; ok {
+		fn(u)
+	}
+}
+
+// SetDown switches the outage simulation.
+func (s *Server) SetDown(down bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Down = down
+}
+
+// SetDeleteStatus makes DELETE /users/{id} answer code (0: normal).
+func (s *Server) SetDeleteStatus(code int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.DeleteStatus = code
+}
+
 func (s *Server) byID(id string) *User {
 	for _, u := range s.Users {
 		if u.ID == id {
@@ -90,13 +127,17 @@ func (s *Server) byID(id string) *User {
 }
 
 func rep(u *User) map[string]interface{} {
-	return map[string]interface{}{"id": u.ID, "username": u.Username, "enabled": u.Enabled, "requiredActions": u.RequiredActions, "attributes": map[string]interface{}{"LDAP_ID": []string{u.Username}}}
+	return map[string]interface{}{"id": u.ID, "username": u.Username, "enabled": u.Enabled, "requiredActions": u.RequiredActions, "federationLink": u.FederationLink, "attributes": map[string]interface{}{"LDAP_ID": []string{u.Username}}}
 }
 
 func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.Calls = append(s.Calls, r.Method+" "+r.URL.Path)
+	if s.Down {
+		w.WriteHeader(503)
+		return
+	}
 	if r.URL.Path == "/realms/master/protocol/openid-connect/token" {
 		r.ParseForm()
 		if r.PostForm.Get("username") != "admin" || r.PostForm.Get("password") != "admin" {
@@ -108,6 +149,14 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Header.Get("Authorization") != "Bearer tok" {
 		w.WriteHeader(401)
+		return
+	}
+	if r.URL.Path == "/admin/realms/portcullis/components" && r.Method == "GET" {
+		out := []map[string]string{}
+		if r.URL.Query().Get("type") == "org.keycloak.storage.UserStorageProvider" {
+			out = append(out, map[string]string{"id": LDAPProviderID, "providerId": "ldap", "name": "lldap"})
+		}
+		json.NewEncoder(w).Encode(out)
 		return
 	}
 	if !strings.HasPrefix(r.URL.Path, prefix) {
@@ -163,9 +212,17 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 			}
 			w.WriteHeader(204)
 		case len(parts) == 1 && r.Method == "DELETE":
+			if s.DeleteStatus != 0 {
+				w.WriteHeader(s.DeleteStatus)
+				return
+			}
 			delete(s.Users, u.Username)
 			w.WriteHeader(204)
 		case len(parts) == 2 && parts[1] == "credentials" && r.Method == "GET":
+			if u.CredentialsStatus != 0 {
+				w.WriteHeader(u.CredentialsStatus)
+				return
+			}
 			json.NewEncoder(w).Encode(append([]Credential{}, u.Credentials...))
 		case len(parts) == 3 && parts[1] == "credentials" && r.Method == "DELETE":
 			kept := []Credential{}

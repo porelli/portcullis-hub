@@ -109,6 +109,8 @@ func TestDirectoryAPI(t *testing.T) {
 	}
 
 	ll.AddUser("ops", "ops@example.org", "", "ops-password-123", "lldap_admin")
+	kc.Import("ghost") // a stale federated copy: LLDAP has no ghost
+	kc.Import("ops")
 	cases := []struct {
 		user, method, path, body string
 		want                     int
@@ -136,13 +138,16 @@ func TestDirectoryAPI(t *testing.T) {
 		{"root", "POST", "/api/directory/users/ops/remove-passkeys", `{"confirm":"ops","invite":true}`, 409},
 		{"root", "POST", "/api/directory/users/ops/password", `{"generate":true}`, 400},
 		{"root", "POST", "/api/directory/users/ops/password", `{"generate":true,"confirm":"ops"}`, 200},
+		{"root", "DELETE", "/api/directory/keycloak-stale/ops", `{"confirm":"ops"}`, 409}, // in LLDAP
+		{"root", "DELETE", "/api/directory/keycloak-stale/ghost", `{"confirm":"x"}`, 400},
+		{"root", "DELETE", "/api/directory/keycloak-stale/ghost", `{"confirm":"ghost"}`, 200},
 	}
 	for _, c := range cases {
 		if r, b := doAs(t, srv, c.user, c.method, c.path, c.body); r.StatusCode != c.want {
 			t.Errorf("%s %s = %d (%s), want %d", c.method, c.path, r.StatusCode, strings.TrimSpace(b), c.want)
 		}
 	}
-	if ll.HasUser("kim") || ll.HasGroup("users_demo") || kc.Get("kim") != nil {
+	if ll.HasUser("kim") || ll.HasGroup("users_demo") || kc.Get("kim") != nil || kc.Get("ghost") != nil || kc.Get("ops") == nil {
 		t.Error("cleanup did not reach LLDAP / Keycloak")
 	}
 

@@ -22,6 +22,7 @@ func (s *Server) registerDirectory(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/directory/users/{username}/require-passkey", s.handleRequirePasskey)
 	mux.HandleFunc("POST /api/directory/users/{username}/clear-actions", s.handleClearActions)
 	mux.HandleFunc("POST /api/directory/users/{username}/remove-passkeys", s.handleRemovePasskeys)
+	mux.HandleFunc("DELETE /api/directory/keycloak-stale/{username}", s.handleRemoveStale)
 	mux.HandleFunc("POST /api/directory/groups", s.handleCreateGroup)
 	mux.HandleFunc("DELETE /api/directory/groups/{group}", s.handleDeleteGroup)
 	mux.HandleFunc("POST /api/directory/groups/{group}/members", s.handleAddMember)
@@ -132,6 +133,22 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, res)
+}
+
+// handleRemoveStale deletes the Keycloak copy of a user LLDAP no longer has.
+func (s *Server) handleRemoveStale(w http.ResponseWriter, r *http.Request) {
+	if !s.dirReady(w) {
+		return
+	}
+	var req confirmBody
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if err := s.Directory.RemoveStaleKeycloakUser(r.Context(), actor(r), r.PathValue("username"), req.Confirm); err != nil {
+		dirErr(w, err)
+		return
+	}
+	writeJSON(w, map[string]string{"status": "removed"})
 }
 
 func (s *Server) handleSetPassword(w http.ResponseWriter, r *http.Request) {

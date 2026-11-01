@@ -419,6 +419,12 @@
           <div id="dir-users"></div>
         </div>
 
+        <div class="dir-section" id="dir-stale-section" style="display:none">
+          <div class="dir-head"><div class="category-title">Stale Keycloak records</div></div>
+          <p class="muted">Keycloak copies of users imported from LLDAP whose LLDAP entry no longer exists (deleted outside the Hub). They can't sign in; removing the copy only deletes it from Keycloak.</p>
+          <div id="dir-stale"></div>
+        </div>
+
         <div class="dir-section">
           <div class="dir-head"><div class="category-title">Groups</div></div>
           <div class="form-row" style="max-width: 520px;">
@@ -886,6 +892,7 @@
       if (dir.invites_error) warn += '<div class="dir-warn">Invite links unavailable (' + escapeHtml(dir.invites_error) + '). New users need the password fallback under Advanced.</div>';
       document.getElementById('dir-warnings').innerHTML = warn;
       renderUsers();
+      renderStale();
       renderGroups();
       renderCreateGroups();
       loadAudit();
@@ -895,8 +902,10 @@
       if (u.protected === 'service') return '<span class="muted">service account (not in Keycloak)</span>';
       const kc = u.keycloak;
       if (!kc) return '<span class="pill">Keycloak unknown</span>';
-      if (!kc.imported) return '<span class="pill" title="LDAP users are imported into Keycloak at first sign-in">not in Keycloak yet</span>';
-      let h = kc.passkeys > 0
+      if (!kc.imported) return '<span class="pill" title="LDAP users are imported into Keycloak at first sign-in">not signed in yet</span>';
+      let h = kc.error
+        ? '<span class="pill bad" title="' + escapeHtml(kc.error) + '">Keycloak status unavailable</span><div class="muted">' + escapeHtml(kc.error) + '</div>'
+        : kc.passkeys > 0
         ? '<span class="pill ok">' + escapeHtml(kc.passkeys) + ' passkey' + (kc.passkeys === 1 ? '' : 's') + '</span>'
         : '<span class="pill warn">no passkey</span>';
       if (!kc.enabled) h += '<span class="pill bad">disabled in Keycloak</span>';
@@ -939,6 +948,18 @@
         h += '</td></tr>';
       }
       document.getElementById('dir-users').innerHTML = h + '</tbody></table>';
+    }
+
+    function renderStale() {
+      const stale = dir.stale_keycloak || [];
+      document.getElementById('dir-stale-section').style.display = stale.length ? 'block' : 'none';
+      if (!stale.length) { document.getElementById('dir-stale').innerHTML = ''; return; }
+      let h = '<table class="dir-table"><thead><tr><th>Keycloak user</th><th>Why</th><th></th></tr></thead><tbody>';
+      for (const r of stale) {
+        h += '<tr><td><b>' + escapeHtml(r.username) + '</b><div class="muted">' + escapeHtml(r.id) + '</div></td><td class="muted">' + escapeHtml(r.reason) +
+          '</td><td><div class="dir-actions">' + btn('remove-stale', r.username, 'Remove', 'btn-danger') + '</div></td></tr>';
+      }
+      document.getElementById('dir-stale').innerHTML = h + '</tbody></table>';
     }
 
     function renderCreateGroups() {
@@ -1150,6 +1171,9 @@
         case 'delete-user':
           if (!typed('Delete user ' + user + ' from LLDAP and Keycloak. This cannot be undone.', user)) return;
           return dirAction(() => apiDelete(path, { confirm: user }), 'Deleted ' + user);
+        case 'remove-stale':
+          if (!typed('Remove the stale Keycloak copy of ' + user + ' (LLDAP no longer has this user). This only deletes it from Keycloak.', user)) return;
+          return dirAction(() => apiDelete('/api/directory/keycloak-stale/' + enc(user), { confirm: user }), 'Removed the Keycloak copy of ' + user);
         case 'create-group':
         case 'create-suggested': {
           const input = document.getElementById('ng-name');

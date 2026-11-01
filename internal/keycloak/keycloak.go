@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -158,6 +159,9 @@ type User struct {
 	Email           string   `json:"email"`
 	Enabled         bool     `json:"enabled"`
 	RequiredActions []string `json:"requiredActions"`
+	// FederationLink is the id of the user storage provider (the LDAP
+	// federation) the user was imported from; "" for local users.
+	FederationLink string `json:"federationLink"`
 }
 
 func (c *Client) findClient(ctx context.Context, token, clientID string) (map[string]interface{}, error) {
@@ -494,12 +498,28 @@ type UserStatus struct {
 	Enabled         bool     `json:"enabled"`
 	RequiredActions []string `json:"required_actions"`
 	Passkeys        int      `json:"passkeys"`
+	// LDAPFederated: imported from the realm's LDAP federation (LLDAP).
+	LDAPFederated bool `json:"ldap_federated"`
+	// Error is set when this user's credentials couldn't be read (Passkeys
+	// is then unknown). Keycloak answers 404 or 500 for a federated user
+	// whose LDAP entry is gone; ErrorStatus is that HTTP status (0: not an
+	// HTTP error, e.g. a timeout).
+	Error       string `json:"error,omitempty"`
+	ErrorStatus int    `json:"error_status,omitempty"`
 }
 
 type credential struct {
 	ID   string `json:"id"`
 	Type string `json:"type"`
 }
+
+// HTTPError is an unexpected admin API status.
+type HTTPError struct {
+	Op     string
+	Status int
+}
+
+func (e *HTTPError) Error() string { return fmt.Sprintf("%s: HTTP %d", e.Op, e.Status) }
 
 func (c *Client) credentials(ctx context.Context, tok, userID string) ([]credential, error) {
 	var creds []credential
@@ -508,32 +528,81 @@ func (c *Client) credentials(ctx context.Context, tok, userID string) ([]credent
 		return nil, fmt.Errorf("list credentials: %w", err)
 	}
 	if code != 200 {
-		return nil, fmt.Errorf("list credentials: HTTP %d", code)
+		return nil, &HTTPError{Op: "list credentials", Status: code}
 	}
 	return creds, nil
 }
 
-// UserStatuses returns every user already in Keycloak (LDAP users are
-// imported lazily, on first login or lookup), keyed by lowercase username,
-// with their passkey count. One token, at most 8 credential lookups at once.
-func (c *Client) UserStatuses(ctx context.Context) (map[string]UserStatus, error) {
-	tok, err := c.token(ctx)
-	if err != nil {
-		return nil, err
-	}
+// StatusConcurrency bounds the parallel credential lookups of UserStatuses.
+const StatusConcurrency = 8
+
+func (c *Client) listUsers(ctx context.Context, tok string) ([]User, error) {
 	var users []User
 	code, err := c.do(ctx, "GET", realmPath("/users?max=1000&briefRepresentation=false"), tok, nil, &users)
 	if err != nil {
 		return nil, fmt.Errorf("list users: %w", err)
 	}
 	if code != 200 {
-		return nil, fmt.Errorf("list users: HTTP %d", code)
+		return nil, &HTTPError{Op: "list users", Status: code}
+	}
+	return users, nil
+}
+
+// ldapProviders returns the ids of the realm's LDAP user storage providers.
+func (c *Client) ldapProviders(ctx context.Context, tok string) (map[string]bool, error) {
+	var comps []struct {
+		ID         string `json:"id"`
+		ProviderID string `json:"providerId"`
+	}
+	code, err := c.do(ctx, "GET", realmPath("/components?type=org.keycloak.storage.UserStorageProvider"), tok, nil, &comps)
+	if err != nil {
+		return nil, fmt.Errorf("list user federation: %w", err)
+	}
+	if code != 200 {
+		return nil, &HTTPError{Op: "list user federation", Status: code}
+	}
+	out := map[string]bool{}
+	for _, cp := range comps {
+		if cp.ProviderID == "ldap" && cp.ID != "" {
+			out[cp.ID] = true
+		}
+	}
+	return out, nil
+}
+
+func statusOf(u User, ldap map[string]bool) UserStatus {
+	acts := u.RequiredActions
+	if acts == nil {
+		acts = []string{}
+	}
+	return UserStatus{ID: u.ID, Username: u.Username, Enabled: u.Enabled, RequiredActions: acts,
+		LDAPFederated: u.FederationLink != "" && ldap[u.FederationLink]}
+}
+
+// UserStatuses returns every user already in Keycloak (LDAP users are
+// imported lazily, on first login or lookup), keyed by lowercase username,
+// with their passkey count. One token, at most StatusConcurrency
+// credential lookups at once. The error is realm-level only (auth, user
+// list, federation list: Keycloak is down); a failed credential lookup
+// marks just that user (UserStatus.Error), so one broken record never
+// hides everybody's status.
+func (c *Client) UserStatuses(ctx context.Context) (map[string]UserStatus, error) {
+	tok, err := c.token(ctx)
+	if err != nil {
+		return nil, err
+	}
+	users, err := c.listUsers(ctx, tok)
+	if err != nil {
+		return nil, err
+	}
+	ldap, err := c.ldapProviders(ctx, tok)
+	if err != nil {
+		return nil, err
 	}
 	out := make(map[string]UserStatus, len(users))
 	var mu sync.Mutex
 	var wg sync.WaitGroup
-	var firstErr error
-	sem := make(chan struct{}, 8)
+	sem := make(chan struct{}, StatusConcurrency)
 	for _, u := range users {
 		if !ValidUserID(u.ID) {
 			continue
@@ -541,29 +610,60 @@ func (c *Client) UserStatuses(ctx context.Context) (map[string]UserStatus, error
 		wg.Add(1)
 		go func(u User) {
 			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			creds, err := c.credentials(ctx, tok, u.ID)
-			n := 0
+			st := statusOf(u, ldap)
+			var creds []credential
+			var err error
+			select {
+			case sem <- struct{}{}:
+				creds, err = c.credentials(ctx, tok, u.ID)
+				<-sem
+			case <-ctx.Done():
+				err = fmt.Errorf("list credentials: %w", ctx.Err())
+			}
+			if err != nil {
+				st.Error = err.Error()
+				var he *HTTPError
+				if errors.As(err, &he) {
+					st.ErrorStatus = he.Status
+				}
+			}
 			for _, cr := range creds {
 				if passkeyTypes[cr.Type] {
-					n++
+					st.Passkeys++
 				}
 			}
 			mu.Lock()
-			defer mu.Unlock()
-			if err != nil && firstErr == nil {
-				firstErr = err
-			}
-			acts := u.RequiredActions
-			if acts == nil {
-				acts = []string{}
-			}
-			out[strings.ToLower(u.Username)] = UserStatus{ID: u.ID, Username: u.Username, Enabled: u.Enabled, RequiredActions: acts, Passkeys: n}
+			out[strings.ToLower(u.Username)] = st
+			mu.Unlock()
 		}(u)
 	}
 	wg.Wait()
-	return out, firstErr
+	return out, nil
+}
+
+// ListedUser returns username's record as Keycloak's user list has it
+// (no LDAP lookup or import, no credentials), or nil if Keycloak has no
+// such user. It works for federated users whose LDAP entry is gone.
+func (c *Client) ListedUser(ctx context.Context, username string) (*UserStatus, error) {
+	tok, err := c.token(ctx)
+	if err != nil {
+		return nil, err
+	}
+	users, err := c.listUsers(ctx, tok)
+	if err != nil {
+		return nil, err
+	}
+	ldap, err := c.ldapProviders(ctx, tok)
+	if err != nil {
+		return nil, err
+	}
+	for _, u := range users {
+		if strings.EqualFold(u.Username, username) && ValidUserID(u.ID) {
+			st := statusOf(u, ldap)
+			return &st, nil
+		}
+	}
+	return nil, nil
 }
 
 // findUser looks a user up by exact username. For an LDAP-federated realm
