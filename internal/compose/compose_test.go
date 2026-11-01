@@ -92,8 +92,10 @@ func TestCLIErrorCarriesOutput(t *testing.T) {
 	if !strings.Contains(err.Error(), "exit status 1: Error response from daemon: failed to bind") {
 		t.Errorf("message = %q", err.Error())
 	}
-	// Bounded: only the tail is kept.
-	c, _ = stub(t, "i=0; while [ $i -lt 3000 ]; do echo \"line $i of noise\"; i=$((i+1)); done; echo 'the cause' >&2; exit 2\n")
+	// Bounded: only the tail is kept. One stream, as docker compose writes
+	// its progress and errors to stderr (stdout/stderr are separate pipes,
+	// so their relative order isn't deterministic).
+	c, _ = stub(t, "exec >&2; i=0; while [ $i -lt 3000 ]; do echo \"line $i of noise\"; i=$((i+1)); done; echo 'the cause'; exit 2\n")
 	err = c.Down(context.Background(), Project{Name: "x"})
 	if !errors.As(err, &ce) || len(ce.Output) > OutputTail+8 || !strings.HasSuffix(ce.Output, "the cause\n") || !strings.HasPrefix(ce.Output, "[…]\nline ") {
 		t.Errorf("tail = %d bytes, %q…", len(ce.Output), ce.Output[:40])
