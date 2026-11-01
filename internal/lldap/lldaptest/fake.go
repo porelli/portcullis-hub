@@ -315,20 +315,12 @@ func (s *Server) graphql(caller, q string, vars map[string]interface{}) (interfa
 		if v, ok := in["displayName"]; ok {
 			u["displayName"] = str(v)
 		}
-		// Handle removeAttributes first (as the real LLDAP does).
-		if remove, ok := in["removeAttributes"].([]interface{}); ok {
-			if s.UserAttributeValues[id] == nil {
-				s.UserAttributeValues[id] = map[string][]string{}
-			}
-			for _, name := range remove {
-				delete(s.UserAttributeValues[id], str(name))
-			}
+		// Validate insertAttributes BEFORE mutating anything.
+		var validatedInserts []struct {
+			name   string
+			values []string
 		}
-		// Handle insertAttributes (set or update).
 		if insert, ok := in["insertAttributes"].([]interface{}); ok {
-			if s.UserAttributeValues[id] == nil {
-				s.UserAttributeValues[id] = map[string][]string{}
-			}
 			for _, item := range insert {
 				attr := item.(map[string]interface{})
 				name := str(attr["name"])
@@ -347,7 +339,29 @@ func (s *Server) graphql(caller, q string, vars map[string]interface{}) (interfa
 				if !schema.IsList && len(values) != 1 {
 					return nil, fmt.Errorf("Attribute %s is not a list but got %d values", name, len(values))
 				}
-				s.UserAttributeValues[id][name] = values
+				validatedInserts = append(validatedInserts, struct {
+					name   string
+					values []string
+				}{name, values})
+			}
+		}
+		// All validations passed. Now apply changes atomically.
+		// Handle removeAttributes first (as the real LLDAP does).
+		if remove, ok := in["removeAttributes"].([]interface{}); ok {
+			if s.UserAttributeValues[id] == nil {
+				s.UserAttributeValues[id] = map[string][]string{}
+			}
+			for _, name := range remove {
+				delete(s.UserAttributeValues[id], str(name))
+			}
+		}
+		// Handle insertAttributes (set or update).
+		if len(validatedInserts) > 0 {
+			if s.UserAttributeValues[id] == nil {
+				s.UserAttributeValues[id] = map[string][]string{}
+			}
+			for _, vi := range validatedInserts {
+				s.UserAttributeValues[id][vi.name] = vi.values
 			}
 		}
 		s.Mutations = append(s.Mutations, "updateUser "+id)

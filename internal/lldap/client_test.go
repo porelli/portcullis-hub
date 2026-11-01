@@ -328,3 +328,47 @@ func TestSetUserAttributesValidation(t *testing.T) {
 		t.Errorf("single value for single attr failed: %v", err)
 	}
 }
+
+func TestSetUserAttributesAtomic(t *testing.T) {
+	c, _ := newClient(t)
+	ctx := context.Background()
+	// Set up: user with city attribute.
+	if err := c.AddUserAttribute(ctx, "city", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.CreateUser(ctx, "carol", "carol@example.org", "Carol"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.SetUserAttributes(ctx, "carol", map[string][]string{"city": {"Milan"}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	// Verify city is set.
+	users, _ := c.ListUsers(ctx)
+	var carol *lldap.User
+	for i := range users {
+		if users[i].ID == "carol" {
+			carol = &users[i]
+		}
+	}
+	if carol == nil || len(carol.Attributes["city"]) != 1 || carol.Attributes["city"][0] != "Milan" {
+		t.Fatalf("setup failed: carol.city = %v", carol.Attributes["city"])
+	}
+	// Attempt: valid remove (city) + invalid insert (bogus attribute).
+	err := c.SetUserAttributes(ctx, "carol", map[string][]string{"bogus": {"value"}}, []string{"city"})
+	if err == nil {
+		t.Fatal("operation with invalid insert succeeded")
+	}
+	if !strings.Contains(err.Error(), "schema") {
+		t.Errorf("error = %v, want mention of schema", err)
+	}
+	// Verify atomicity: city should still be Milan (remove was NOT applied).
+	users, _ = c.ListUsers(ctx)
+	for i := range users {
+		if users[i].ID == "carol" {
+			carol = &users[i]
+		}
+	}
+	if carol == nil || len(carol.Attributes["city"]) != 1 || carol.Attributes["city"][0] != "Milan" {
+		t.Errorf("after failed op: carol.city = %v, want [Milan] (remove should not have applied)", carol.Attributes["city"])
+	}
+}
