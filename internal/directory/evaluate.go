@@ -242,6 +242,12 @@ func (s *Service) Pending(cfg *Config, now time.Time) []Expiring {
 			out = append(out, Expiring{User: strings.ToLower(g.User), Group: g.Group, At: g.At.UTC()})
 		}
 	}
+	sortExpiring(out)
+	return out
+}
+
+// sortExpiring sorts by (At, Group, User).
+func sortExpiring(out []Expiring) {
 	sort.Slice(out, func(i, j int) bool {
 		a, b := out[i], out[j]
 		if !a.At.Equal(b.At) {
@@ -252,7 +258,6 @@ func (s *Service) Pending(cfg *Config, now time.Time) []Expiring {
 		}
 		return a.User < b.User
 	})
-	return out
 }
 
 // Evaluate turns rule groups, exceptions and expiries into LLDAP group
@@ -602,38 +607,48 @@ func (s *Service) Publish(ctx context.Context, now time.Time) (*Published, error
 	return out, nil
 }
 
-// publishedExpiring is Pending without the end of an "added" exception
-// whose user the group's rule matches anyway: the evaluator keeps them in
-// the group by rule, so the end must not deny them (rule groups the
-// evaluator manages only; elsewhere the rule is ignored).
+// publishedExpiring is Pending, except for the end of an "added"
+// exception whose user stays in the group by rule anyway: the user is a
+// current member of the LLDAP group, the rule matches them and they are in
+// the evaluator's real desired set (a managed rule group whose adds aren't
+// blocked, not a delegate-created account in a guarding group). Only those
+// exception ends are dropped; manual expiries and grace entries are always
+// published (fail closed).
 func (s *Service) publishedExpiring(cfg *Config, sn *snapshot, now time.Time) []Expiring {
-	all := s.Pending(cfg, now)
+	desired := s.Desired(cfg, sn, now)
+	guarding := s.guardingGroups(cfg)
 	d := ruleDirectory(cfg, sn)
-	admin := s.adminGroups()
-	byRule := map[string]map[string]bool{}
+	out := []Expiring{}
 	for name, gc := range cfg.Groups {
-		if gc == nil || gc.Rule == nil || len(gc.Exceptions) == 0 || !s.ruleGroupAllowed(name, admin) {
+		if gc == nil {
 			continue
 		}
-		if _, ok := sn.groups[name]; !ok {
-			continue
+		for u, at := range gc.Expiry {
+			out = append(out, Expiring{User: strings.ToLower(u), Group: name, At: at.UTC()})
 		}
-		ge := s.evalGroup(gc, d, sn, now)
-		keep := map[string]bool{}
-		for u := range ge.matched {
-			if !ge.exclude[u] {
-				keep[u] = true
+		g, exists := sn.groups[name]
+		var ge *groupEval
+		if gc.Rule != nil && exists && desired[name] != nil && s.addsBlocked(cfg, guarding, name, gc) == "" {
+			ge = s.evalGroup(gc, d, sn, now)
+		}
+		_, guards := guarding[name]
+		for _, ex := range gc.Exceptions {
+			if !ex.Include || ex.Until == nil {
+				continue
 			}
+			u := strings.ToLower(ex.User)
+			if ge != nil && ge.matched[u] && desired[name][u] && memberOf(g, u) && !(guards && createdByDelegate(cfg, u)) {
+				continue // kept by rule: the end doesn't end the membership
+			}
+			out = append(out, Expiring{User: u, Group: name, At: ex.Until.UTC()})
 		}
-		byRule[name] = keep
 	}
-	out := all[:0:0]
-	for _, x := range all {
-		if byRule[x.Group][x.User] {
-			continue
+	for _, g := range cfg.Grace {
+		if g.Until.After(now) {
+			out = append(out, Expiring{User: strings.ToLower(g.User), Group: g.Group, At: g.At.UTC()})
 		}
-		out = append(out, x)
 	}
+	sortExpiring(out)
 	return out
 }
 

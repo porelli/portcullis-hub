@@ -323,3 +323,101 @@ func TestPublishSkipsIncludeEndOfRuleMatch(t *testing.T) {
 		t.Errorf("skipped group's exception end not published: %+v", pub.Expiring)
 	}
 }
+
+func expiringHas(pub *directory.Published, group, user string) bool {
+	for _, x := range pub.Expiring {
+		if x.Group == group && x.User == user {
+			return true
+		}
+	}
+	return false
+}
+
+// Security review of M4: only an "added" exception's end is ever dropped,
+// and only for a current member in the evaluator's real desired set; grace
+// entries and manual expiries are always published.
+func TestPublishSuppressesOnlyKeptExceptionEnds(t *testing.T) {
+	e, store := evalEnv(t)
+	until := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
+	now := time.Now().UTC()
+	inc := func(u string) directory.Exception {
+		return directory.Exception{User: u, Reason: "x", By: "root", Include: true, Until: &until, At: now}
+	}
+	setRule(t, store, "milan", `city = "Milan"`, inc("bob"), inc("carol"))
+	evaluate(t, e, now)
+	wantMembers(t, e, "milan", "bob", "carol")
+
+	// carol matches but is not a member right now: published.
+	e.ll.RemoveMember("milan", "carol")
+	pub, err := e.svc.Publish(ctx, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if expiringHas(pub, "milan", "bob") || !expiringHas(pub, "milan", "carol") {
+		t.Errorf("member+desired bob suppressed, non-member carol published: %+v", pub.Expiring)
+	}
+
+	// A grace entry and a manual expiry of the rule-matching member bob
+	// are always published.
+	cfg, _ := store.Load()
+	cfg.Grace = append(cfg.Grace, directory.GraceEntry{User: "bob", Group: "milan", At: now.Add(-time.Minute), Until: now.Add(5 * time.Minute)})
+	if err := store.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	pub, _ = e.svc.Publish(ctx, now)
+	n := 0
+	for _, x := range pub.Expiring {
+		if x.Group == "milan" && x.User == "bob" {
+			n++
+			if !x.At.Equal(now.Add(-time.Minute).UTC()) {
+				t.Errorf("bob entry = %+v, want only the grace one", x)
+			}
+		}
+	}
+	if n != 1 {
+		t.Errorf("grace entry of bob: %d entries in %+v", n, pub.Expiring)
+	}
+	cfg, _ = store.Load()
+	cfg.Grace = nil
+	cfg.Groups["milan"].Expiry = map[string]time.Time{"bob": until}
+	if err := store.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if pub, _ = e.svc.Publish(ctx, now); !expiringHas(pub, "milan", "bob") {
+		t.Errorf("manual expiry of bob suppressed: %+v", pub.Expiring)
+	}
+
+	// Adds blocked (a permission group whose rule uses a delegate-editable
+	// field): not suppressed.
+	e.ll.AddGroup("hr", "bob")
+	cfg, _ = store.Load()
+	delete(cfg.Groups, "milan")
+	cfg.Permissions[directory.PermEditDetails] = "hr"
+	if err := store.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	setRule(t, store, "hr", `city = "Milan"`, inc("bob"))
+	if pub, _ = e.svc.Publish(ctx, now); !expiringHas(pub, "hr", "bob") {
+		t.Errorf("adds-blocked group's exception end suppressed: %+v", pub.Expiring)
+	}
+
+	// A delegate-created member of a guarding group: not suppressed.
+	if err := e.svc.CreateField(ctx, asRoot, directory.Field{Name: "office", Label: "Office", Kind: directory.FieldKindText, AdminOnly: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.svc.LLDAP.SetUserAttributes(ctx, "bob", map[string][]string{"office": {"HQ"}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	setRule(t, store, "hr", `office = "HQ"`, inc("bob"))
+	if pub, _ = e.svc.Publish(ctx, now); expiringHas(pub, "hr", "bob") {
+		t.Errorf("admin-only guarding rule, member+desired: should be suppressed: %+v", pub.Expiring)
+	}
+	cfg, _ = store.Load()
+	cfg.CreatedBy["bob"] = "ivy"
+	if err := store.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if pub, _ = e.svc.Publish(ctx, now); !expiringHas(pub, "hr", "bob") {
+		t.Errorf("delegate-created member of a guarding group suppressed: %+v", pub.Expiring)
+	}
+}
