@@ -62,6 +62,7 @@ type Keycloak interface {
 	RequirePasskey(ctx context.Context, username string) error
 	SetUserRequiredActions(ctx context.Context, username string, actions []string) error
 	RemovePasskeys(ctx context.Context, username string, requireNew bool) (int, error)
+	PasskeyCount(ctx context.Context, username string) (int, error)
 	LogoutUser(ctx context.Context, username string) error
 	DeleteUserByID(ctx context.Context, id string) error
 }
@@ -689,6 +690,33 @@ func (s *Service) CreateUser(ctx context.Context, c *Caller, req CreateRequest) 
 		if _, ok := sn.users[req.Username]; ok {
 			return refuse("user %q already exists", req.Username)
 		}
+		if other := emailTaken(sn, req.Email, ""); other != "" {
+			return refuse("email %s is already used by %s", req.Email, other)
+		}
+		var cfg *Config
+		if s.Store != nil {
+			if cfg, err = s.Store.Load(); err != nil {
+				if !c.Admin {
+					return &Error{Status: http.StatusServiceUnavailable, Msg: "directory.yaml: " + err.Error()}
+				}
+				res.Warnings = append(res.Warnings, "directory.yaml couldn't be read ("+err.Error()+"): a tombstone for this name, if any, is kept")
+				cfg = nil
+			}
+		}
+		if !c.Admin {
+			if cfg == nil {
+				return forbidden("not allowed: directory.yaml not configured")
+			}
+			if _, ok := cfg.Deleted[req.Username]; ok {
+				return refuse("%s was deleted; an admin must re-create it", req.Username)
+			}
+			if g := namedInGroups(cfg, req.Username); g != "" {
+				return refuse("%s is still named in the exceptions or expiries of %s; an admin must re-create it", req.Username, g)
+			}
+			if err := s.checkKeyless(ctx, c, req.Username); err != nil {
+				return err
+			}
+		}
 		var groupIDs []int
 		admin := false
 		admins := s.adminGroups()
@@ -707,6 +735,23 @@ func (s *Service) CreateUser(ctx context.Context, c *Caller, req CreateRequest) 
 		}
 		if err := s.LLDAP.CreateUser(ctx, req.Username, req.Email, req.DisplayName); err != nil {
 			return err
+		}
+		if cfg != nil {
+			changed := false
+			if at, ok := cfg.Deleted[req.Username]; ok { // admins only (refused above)
+				delete(cfg.Deleted, req.Username)
+				changed = true
+				res.Warnings = append(res.Warnings, fmt.Sprintf("an earlier %s was deleted on %s; this is a new account", req.Username, at.Format(time.RFC3339)))
+			}
+			if !c.Admin {
+				cfg.CreatedBy[req.Username] = c.User
+				changed = true
+			}
+			if changed {
+				if err := s.Store.Save(cfg); err != nil {
+					res.Warnings = append(res.Warnings, "saving directory.yaml failed: "+err.Error())
+				}
+			}
 		}
 		if pw != "" {
 			if err := s.LLDAP.SetPassword(ctx, req.Username, pw); err != nil {
@@ -794,6 +839,11 @@ func (s *Service) UpdateUser(ctx context.Context, c *Caller, username string, em
 		if err != nil {
 			return err
 		}
+		if email != nil {
+			if other := emailTaken(sn, *email, u.ID); other != "" {
+				return refuse("email %s is already used by %s", *email, other)
+			}
+		}
 		return s.LLDAP.UpdateUser(ctx, u.ID, email, displayName)
 	})
 }
@@ -827,6 +877,13 @@ func (s *Service) DeleteUser(ctx context.Context, c *Caller, username, confirm s
 		if err := s.checkNotLastAdmin(sn, u.ID); err != nil {
 			return err
 		}
+		// Load directory.yaml first: the tombstone must be written.
+		var cfg *Config
+		if s.Store != nil {
+			if cfg, err = s.Store.Load(); err != nil {
+				return &Error{Status: http.StatusServiceUnavailable, Msg: "directory.yaml: " + err.Error()}
+			}
+		}
 		kcID := ""
 		kcErr := ""
 		if s.KC == nil {
@@ -856,6 +913,13 @@ func (s *Service) DeleteUser(ctx context.Context, c *Caller, username, confirm s
 		if kcErr != "" {
 			detail = "keycloak_copy=FAILED " + kcErr
 			res.Warnings = append(res.Warnings, fmt.Sprintf("%s was deleted from LLDAP, but removing the Keycloak copy failed (%s); it is listed under \"Stale Keycloak records\" — remove it there", u.ID, kcErr))
+		}
+		if cfg != nil {
+			forgetUser(cfg, u.ID, time.Now())
+			if err := s.Store.Save(cfg); err != nil {
+				detail += " tombstone=FAILED"
+				res.Warnings = append(res.Warnings, fmt.Sprintf("%s was deleted, but saving directory.yaml (tombstone, exceptions, expiries) failed: %v", u.ID, err))
+			}
 		}
 		return nil
 	})
@@ -1051,6 +1115,9 @@ func (s *Service) SendInvite(ctx context.Context, c *Caller, username string) (*
 			return err
 		}
 		if err := s.checkInvitable(sn, u.ID); err != nil {
+			return err
+		}
+		if err := s.checkKeyless(ctx, c, u.ID); err != nil {
 			return err
 		}
 		inv, err := s.newInvite(ctx, u.ID)

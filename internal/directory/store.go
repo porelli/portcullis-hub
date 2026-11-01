@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -56,6 +57,9 @@ type Config struct {
 	Groups      map[string]*GroupConfig `yaml:"groups"`
 	Permissions map[string]string       `yaml:"permissions"` // "edit_details"|"invite"|"remove" -> group name
 	CreatedBy   map[string]string       `yaml:"created_by"`  // username -> delegate who invited them
+	// Deleted: tombstones of deleted users (lowercase username -> when,
+	// UTC). Delegates can't re-create these names; an admin can.
+	Deleted map[string]time.Time `yaml:"deleted,omitempty"`
 }
 
 // Store provides load/save for directory.yaml.
@@ -77,6 +81,7 @@ func (s *Store) Load() (*Config, error) {
 				Groups:      map[string]*GroupConfig{},
 				Permissions: map[string]string{},
 				CreatedBy:   map[string]string{},
+				Deleted:     map[string]time.Time{},
 			}, nil
 		}
 		return nil, fmt.Errorf("read %s: %w", s.Path, err)
@@ -94,6 +99,7 @@ func (s *Store) Load() (*Config, error) {
 		Groups      map[string]*rawGroupConfig `yaml:"groups"`
 		Permissions map[string]string          `yaml:"permissions"`
 		CreatedBy   map[string]string          `yaml:"created_by"`
+		Deleted     map[string]time.Time       `yaml:"deleted,omitempty"`
 	}
 
 	var raw rawConfig
@@ -127,6 +133,7 @@ func (s *Store) Load() (*Config, error) {
 	if cfg.CreatedBy == nil {
 		cfg.CreatedBy = map[string]string{}
 	}
+	cfg.Deleted = normDeleted(raw.Deleted)
 
 	// Parse rules and normalize times
 	for groupName, rawGC := range raw.Groups {
@@ -183,6 +190,7 @@ func (s *Store) Save(cfg *Config) error {
 		Groups      map[string]*rawGroupConfig `yaml:"groups"`
 		Permissions map[string]string          `yaml:"permissions"`
 		CreatedBy   map[string]string          `yaml:"created_by"`
+		Deleted     map[string]time.Time       `yaml:"deleted,omitempty"`
 	}
 
 	raw := rawConfig{
@@ -191,6 +199,7 @@ func (s *Store) Save(cfg *Config) error {
 		Groups:      make(map[string]*rawGroupConfig),
 		Permissions: cfg.Permissions,
 		CreatedBy:   cfg.CreatedBy,
+		Deleted:     normDeleted(cfg.Deleted),
 	}
 
 	// Convert groups and normalize times
@@ -240,4 +249,13 @@ func (s *Store) Save(cfg *Config) error {
 	}
 
 	return nil
+}
+
+// normDeleted returns tombstones with lowercase keys and UTC times.
+func normDeleted(in map[string]time.Time) map[string]time.Time {
+	out := make(map[string]time.Time, len(in))
+	for user, at := range in {
+		out[strings.ToLower(user)] = at.UTC()
+	}
+	return out
 }

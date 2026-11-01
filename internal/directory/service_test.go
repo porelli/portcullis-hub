@@ -278,19 +278,19 @@ func TestGuardrails(t *testing.T) {
 	check("invite service", err, 409)
 
 	// Last human admin: admin + root are humans; another admin (solo)
-	// removing root works only while admin is still a member.
-	e.ll.AddUser("solo2", "s2@example.org", "", "x-password-123")
+	// removing root works only while admin is still a member. The service
+	// account (an lldap_admin member, not human) then tries to remove solo.
 	check("add solo", e.svc.AddMember(ctx, asRoot, "lldap_admin", "solo"), 0)
 	check("remove root by solo", e.svc.RemoveMember(ctx, asAdmin("solo"), "lldap_admin", "root"), 0)
 	// Simulate admin having been dropped from lldap_admin elsewhere (LLDAP UI).
 	e.ll.RemoveMember("lldap_admin", "admin")
-	check("last human by delete", deleteErr(e.svc.DeleteUser(ctx, asAdmin("solo2"), "solo", "solo")), 409)
-	check("last human by removal", e.svc.RemoveMember(ctx, asAdmin("solo2"), "lldap_admin", "solo"), 409)
+	check("last human by delete", deleteErr(e.svc.DeleteUser(ctx, asAdmin("portcullis-hub"), "solo", "solo")), 409)
+	check("last human by removal", e.svc.RemoveMember(ctx, asAdmin("portcullis-hub"), "lldap_admin", "solo"), 409)
 	if m := e.ll.GroupMembers("lldap_admin"); len(m) != 2 {
 		t.Errorf("lldap_admin = %v", m)
 	}
-	check("missing user", e.svc.AddMember(ctx, asRoot, "lldap_admin", "ghost"), 404)
-	check("missing group", e.svc.AddMember(ctx, asRoot, "ghosts", "alice"), 404)
+	check("missing user", e.svc.AddMember(ctx, asAdmin("solo"), "lldap_admin", "ghost"), 404)
+	check("missing group", e.svc.AddMember(ctx, asAdmin("solo"), "ghosts", "alice"), 404)
 }
 
 func deleteErr(_ *directory.Result, err error) error { return err }

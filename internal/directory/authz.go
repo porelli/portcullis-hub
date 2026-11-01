@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/portcullis/hub/internal/lldap"
 )
@@ -87,10 +88,18 @@ func (s *Service) CallerFor(ctx context.Context, user string) (*Caller, error) {
 }
 
 // gate is the authorization step of every mutation (called by run, inside
-// the audited section). Admins pass without loading anything, so their
-// behaviour is unchanged; delegates are checked against a fresh snapshot.
+// the lock and the audited section). The Caller was resolved before the
+// lock, so admin membership and delegated permissions are re-checked
+// against a fresh snapshot (a just-demoted admin is refused).
 func (s *Service) gate(ctx context.Context, c *Caller, perm, target string) error {
 	if c.Admin {
+		sn, err := s.load(ctx)
+		if err != nil {
+			return err
+		}
+		if !memberOf(sn.groups[lldap.AdminGroup], c.User) {
+			return forbidden("not allowed: admins only (%s is no longer in %s)", c.User, lldap.AdminGroup)
+		}
 		return nil
 	}
 	if perm == permAdmin || !c.Perms[perm] {
@@ -154,4 +163,82 @@ func (s *Service) checkDelegateTarget(c *Caller, target string, sn *snapshot, cf
 		}
 	}
 	return nil
+}
+
+// checkKeyless: a delegate may invite only someone without a passkey —
+// an invite for an account that already has one would hand the delegate
+// a working sign-in to it. Keycloak missing or failing refuses (fail
+// closed). Admins aren't limited.
+func (s *Service) checkKeyless(ctx context.Context, c *Caller, user string) error {
+	if c.Admin {
+		return nil
+	}
+	if s.KC == nil {
+		return forbidden("not allowed: Keycloak admin API not configured, so %s's passkeys can't be checked; ask an administrator", user)
+	}
+	n, err := s.KC.PasskeyCount(ctx, user)
+	if err != nil {
+		return forbidden("not allowed: couldn't check %s's passkeys (%v); ask an administrator", user, err)
+	}
+	if n > 0 {
+		return forbidden("not allowed: %s already has a passkey; only an administrator can send them an invite", user)
+	}
+	return nil
+}
+
+// namedInGroups returns a group whose exceptions or expiries name user
+// ("" if none).
+func namedInGroups(cfg *Config, user string) string {
+	for name, gc := range cfg.Groups {
+		for _, ex := range gc.Exceptions {
+			if strings.EqualFold(ex.User, user) {
+				return name
+			}
+		}
+		for u := range gc.Expiry {
+			if strings.EqualFold(u, user) {
+				return name
+			}
+		}
+	}
+	return ""
+}
+
+// forgetUser records a deleted user's tombstone and drops them from every
+// group's exceptions and expiries and from CreatedBy, so a new account
+// with the same name inherits nothing.
+func forgetUser(cfg *Config, user string, now time.Time) {
+	if cfg.Deleted == nil {
+		cfg.Deleted = map[string]time.Time{}
+	}
+	cfg.Deleted[strings.ToLower(user)] = now.UTC()
+	for _, gc := range cfg.Groups {
+		kept := gc.Exceptions[:0]
+		for _, ex := range gc.Exceptions {
+			if !strings.EqualFold(ex.User, user) {
+				kept = append(kept, ex)
+			}
+		}
+		gc.Exceptions = kept
+		for u := range gc.Expiry {
+			if strings.EqualFold(u, user) {
+				delete(gc.Expiry, u)
+			}
+		}
+	}
+	for u := range cfg.CreatedBy {
+		if strings.EqualFold(u, user) {
+			delete(cfg.CreatedBy, u)
+		}
+	}
+}
+
+// emailTaken returns the user (other than self) whose email is email.
+func emailTaken(sn *snapshot, email, self string) string {
+	for _, u := range sn.users {
+		if !strings.EqualFold(u.ID, self) && strings.EqualFold(strings.TrimSpace(u.Email), strings.TrimSpace(email)) {
+			return u.ID
+		}
+	}
+	return ""
 }

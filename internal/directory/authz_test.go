@@ -4,8 +4,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/keycloak/kctest"
 )
 
 // delegateEnv: hr_editors (edit_details), hr_inviters (invite) and
@@ -215,5 +217,149 @@ func TestDelegateAllowed(t *testing.T) {
 	}
 	if len(entries) != 4 || entries[3].Actor != "eddie" || entries[2].Actor != "ivy" || entries[0].Actor != "rex" {
 		t.Errorf("entries = %+v", entries)
+	}
+}
+
+// TestDelegateInviteKeyless: delegates only invite people with no passkey
+// (an invite would hand them a working account); Keycloak trouble fails
+// closed. Admins are unaffected.
+func TestDelegateInviteKeyless(t *testing.T) {
+	e := delegateEnv(t)
+	ivy := callerFor(t, e, "ivy")
+	e.kc.Import("bob", kctest.Credential{ID: "w", Type: "webauthn-passwordless"})
+	e.ll.AddUser("carl", "carl@example.org", "", "")
+	e.kc.Import("carl", kctest.Credential{ID: "p", Type: "password"})
+	e.ll.AddUser("dina", "dina@example.org", "", "") // not in Keycloak yet
+	e.kc.Import("stale", kctest.Credential{ID: "w2", Type: "webauthn"})
+	r := func(_ *directory.Result, err error) error { return err }
+
+	if err := r(e.svc.SendInvite(ctx, ivy, "bob")); status(err) != 403 {
+		t.Errorf("delegate re-invites a user with a passkey = %v", err)
+	}
+	if err := r(e.svc.CreateUser(ctx, ivy, directory.CreateRequest{Username: "stale", Email: "stale@example.org"})); status(err) != 403 || e.ll.HasUser("stale") {
+		t.Errorf("delegate creates over a Keycloak copy with a passkey = %v", err)
+	}
+	if err := r(e.svc.SendInvite(ctx, ivy, "carl")); err != nil {
+		t.Errorf("delegate invites carl (password only) = %v", err)
+	}
+	if err := r(e.svc.SendInvite(ctx, ivy, "dina")); err != nil {
+		t.Errorf("delegate invites dina (not in Keycloak) = %v", err)
+	}
+	if err := r(e.svc.SendInvite(ctx, asRoot, "bob")); err != nil {
+		t.Errorf("admin re-invites bob = %v", err)
+	}
+	e.kc.SetDown(true)
+	if err := r(e.svc.SendInvite(ctx, ivy, "carl")); status(err) != 403 {
+		t.Errorf("Keycloak down = %v", err)
+	}
+	if err := r(e.svc.CreateUser(ctx, ivy, directory.CreateRequest{Username: "erin", Email: "erin@example.org"})); status(err) != 403 || e.ll.HasUser("erin") {
+		t.Errorf("Keycloak down, create = %v", err)
+	}
+	e.kc.SetDown(false)
+	e.svc.KC = nil
+	if err := r(e.svc.SendInvite(ctx, ivy, "carl")); status(err) != 403 {
+		t.Errorf("no Keycloak = %v", err)
+	}
+	entries, _ := e.svc.Recent(100)
+	refused := 0
+	for _, en := range entries {
+		if en.Result == "refused" {
+			refused++
+		}
+	}
+	if refused != 5 {
+		t.Errorf("refused entries = %d, want 5: %+v", refused, entries)
+	}
+}
+
+func TestUniqueEmails(t *testing.T) {
+	e := delegateEnv(t)
+	r := func(_ *directory.Result, err error) error { return err }
+	if err := r(e.svc.CreateUser(ctx, asRoot, directory.CreateRequest{Username: "alice2", Email: " ALICE@example.org "})); status(err) != 409 || e.ll.HasUser("alice2") {
+		t.Errorf("admin create with a used email = %v", err)
+	}
+	if err := r(e.svc.CreateUser(ctx, callerFor(t, e, "ivy"), directory.CreateRequest{Username: "alice3", Email: "alice@example.org"})); status(err) != 409 {
+		t.Errorf("delegate create with a used email = %v", err)
+	}
+	if err := e.svc.UpdateUser(ctx, asRoot, "bob", strptr("Alice@Example.org"), nil); status(err) != 409 {
+		t.Errorf("admin update to a used email = %v", err)
+	}
+	if err := e.svc.UpdateUser(ctx, callerFor(t, e, "eddie"), "bob", strptr("alice@example.org"), nil); status(err) != 409 {
+		t.Errorf("delegate update to a used email = %v", err)
+	}
+	if err := e.svc.UpdateUser(ctx, asRoot, "bob", strptr("BOB@example.org"), nil); err != nil {
+		t.Errorf("own email, new case = %v", err)
+	}
+}
+
+func TestTombstones(t *testing.T) {
+	e := delegateEnv(t)
+	cfg, _ := e.svc.Store.Load()
+	at := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	cfg.Groups["milan"] = &directory.GroupConfig{
+		Exceptions: []directory.Exception{{User: "Bob", Reason: "x", By: "root", Include: true, At: at}, {User: "dora", Reason: "y", By: "root", Include: true, At: at}},
+		Expiry:     map[string]time.Time{"bob": at, "carl": at},
+	}
+	cfg.CreatedBy = map[string]string{"bob": "ivy"}
+	if err := e.svc.Store.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	ivy := callerFor(t, e, "ivy")
+	if _, err := e.svc.DeleteUser(ctx, callerFor(t, e, "rex"), "bob", "bob"); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _ = e.svc.Store.Load()
+	if _, ok := cfg.Deleted["bob"]; !ok {
+		t.Errorf("no tombstone: %v", cfg.Deleted)
+	}
+	g := cfg.Groups["milan"]
+	if len(g.Exceptions) != 1 || g.Exceptions[0].User != "dora" || len(g.Expiry) != 1 || cfg.CreatedBy["bob"] != "" {
+		t.Errorf("not purged: %+v %v", g, cfg.CreatedBy)
+	}
+
+	_, err := e.svc.CreateUser(ctx, ivy, directory.CreateRequest{Username: "bob", Email: "bob2@example.org"})
+	if status(err) != 409 || !strings.Contains(err.Error(), "was deleted; an admin must re-create it") || e.ll.HasUser("bob") {
+		t.Errorf("delegate re-creates bob = %v", err)
+	}
+	if _, err := e.svc.CreateUser(ctx, ivy, directory.CreateRequest{Username: "dora", Email: "dora@example.org"}); status(err) != 409 || e.ll.HasUser("dora") {
+		t.Errorf("delegate creates a name in exceptions = %v", err)
+	}
+	if _, err := e.svc.CreateUser(ctx, ivy, directory.CreateRequest{Username: "carl", Email: "carl@example.org"}); status(err) != 409 || e.ll.HasUser("carl") {
+		t.Errorf("delegate creates a name in expiry = %v", err)
+	}
+	res, err := e.svc.CreateUser(ctx, asRoot, directory.CreateRequest{Username: "bob", Email: "bob2@example.org"})
+	if err != nil || len(res.Warnings) == 0 || !strings.Contains(strings.Join(res.Warnings, " "), "deleted") {
+		t.Fatalf("admin re-creates bob = %+v %v", res, err)
+	}
+	cfg, _ = e.svc.Store.Load()
+	if _, ok := cfg.Deleted["bob"]; ok {
+		t.Error("tombstone kept after an admin re-created bob")
+	}
+}
+
+func TestDemotedAdminRefused(t *testing.T) {
+	e := delegateEnv(t)
+	e.ll.AddUser("bea", "bea@example.org", "", "", "lldap_admin")
+	bea := callerFor(t, e, "bea")
+	e.ll.RemoveMember("lldap_admin", "bea")
+	if err := e.svc.UpdateUser(ctx, bea, "bob", nil, strptr("X")); status(err) != 403 {
+		t.Errorf("demoted admin = %v", err)
+	}
+	if err := e.svc.CreateGroup(ctx, bea, "g"); status(err) != 403 || e.ll.HasGroup("g") {
+		t.Errorf("demoted admin creates a group = %v", err)
+	}
+}
+
+func TestCreatedBy(t *testing.T) {
+	e := delegateEnv(t)
+	if _, err := e.svc.CreateUser(ctx, callerFor(t, e, "ivy"), directory.CreateRequest{Username: "nina", Email: "nina@example.org"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.CreateUser(ctx, asRoot, directory.CreateRequest{Username: "omar", Email: "omar@example.org"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _ := e.svc.Store.Load()
+	if cfg.CreatedBy["nina"] != "ivy" || cfg.CreatedBy["omar"] != "" {
+		t.Errorf("created_by = %v", cfg.CreatedBy)
 	}
 }

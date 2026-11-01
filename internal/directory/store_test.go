@@ -72,6 +72,7 @@ func TestStoreRoundTrip(t *testing.T) {
 		CreatedBy: map[string]string{
 			"alice": "bob",
 		},
+		Deleted: map[string]time.Time{"carol": exceptionTime},
 	}
 
 	// Save
@@ -106,6 +107,7 @@ func TestStoreMissingIsEmpty(t *testing.T) {
 		Groups:      map[string]*GroupConfig{},
 		Permissions: map[string]string{},
 		CreatedBy:   map[string]string{},
+		Deleted:     map[string]time.Time{},
 	}
 
 	if !reflect.DeepEqual(cfg, expected) {
@@ -364,5 +366,25 @@ func TestStoreSaveFailsWhenParentMissing(t *testing.T) {
 	err := store.Save(cfg)
 	if err == nil {
 		t.Fatal("Save should fail when parent directory doesn't exist")
+	}
+}
+
+func TestStoreDeletedTombstones(t *testing.T) {
+	store := &Store{Path: filepath.Join(t.TempDir(), "directory.yaml")}
+	cfg, _ := store.Load()
+	cfg.Deleted = map[string]time.Time{"Bob": time.Date(2026, 11, 1, 13, 0, 0, 0, time.FixedZone("CET", 3600))}
+	if err := store.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if at, ok := got.Deleted["bob"]; !ok || at.Location() != time.UTC || !at.Equal(time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)) || len(got.Deleted) != 1 {
+		t.Errorf("deleted = %v", got.Deleted)
+	}
+	empty := &Store{Path: filepath.Join(t.TempDir(), "directory.yaml")}
+	if c, _ := empty.Load(); c.Deleted == nil {
+		t.Error("missing file: Deleted is nil")
 	}
 }
