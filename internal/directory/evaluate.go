@@ -351,10 +351,16 @@ func (s *Service) evaluateLocked(ctx context.Context, now time.Time) (*EvalRepor
 
 		if !s.ruleGroupAllowed(name, admin) {
 			rep.Errors = append(rep.Errors, fmt.Sprintf("%s is a built-in or administrator group and can't be rule-based; rule ignored", name))
+			if pruneSkipped(rep, name, gc, now) {
+				dirty = true
+			}
 			continue
 		}
 		if !exists {
 			rep.Errors = append(rep.Errors, fmt.Sprintf("rule group %s does not exist in LLDAP; create it first", name))
+			if pruneSkipped(rep, name, gc, now) {
+				dirty = true
+			}
 			continue
 		}
 
@@ -453,6 +459,30 @@ func (s *Service) evaluateLocked(ctx context.Context, now time.Time) (*EvalRepor
 		}
 	}
 	return rep, removed, nil
+}
+
+// pruneSkipped drops the expired exceptions of a rule group the evaluator
+// skips (no removal is attempted there, so an expired "added" exception
+// would otherwise stay published, and denying, forever). No grace entry;
+// each pruned one is reported in rep.Errors.
+func pruneSkipped(rep *EvalReport, name string, gc *GroupConfig, now time.Time) bool {
+	kept := []Exception{}
+	for _, ex := range gc.Exceptions {
+		if ex.Until != nil && expired(*ex.Until, now) {
+			kind := "kept out"
+			if ex.Include {
+				kind = "added"
+			}
+			rep.Errors = append(rep.Errors, fmt.Sprintf("%s: expired %q exception of %s dropped without changing membership (group skipped)", name, kind, ex.User))
+			continue
+		}
+		kept = append(kept, ex)
+	}
+	if len(kept) == len(gc.Exceptions) {
+		return false
+	}
+	gc.Exceptions = kept
+	return true
 }
 
 // changed calls OnChange. Never call it with s.mu held.

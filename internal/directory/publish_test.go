@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -275,5 +276,69 @@ func TestPublishKeepsPastExpiry(t *testing.T) {
 	}
 	if got := fmt.Sprint(pub.Expiring); got != fmt.Sprint([]directory.Expiring{{User: "dave", Group: "contractors", At: past}}) {
 		t.Errorf("expiring = %s", got)
+	}
+}
+
+// Rule groups the evaluator skips still drop expired exceptions, so a past
+// entry isn't published (and denying) forever.
+func TestSkippedRuleGroupPrunesExpired(t *testing.T) {
+	until := t0
+	t.Run("became admin group", func(t *testing.T) {
+		e, store := evalEnv(t)
+		setRule(t, store, "milan", `city = "Milan"`,
+			directory.Exception{User: "dave", Reason: "temp", By: "root", Include: true, Until: &until, At: t0.Add(-time.Hour)})
+		evaluate(t, e, t0.Add(-time.Second))
+		if !memberIn(e, "milan", "dave") {
+			t.Fatal("setup: dave not added")
+		}
+		base := e.svc.AdminGroups
+		e.svc.AdminGroups = func() map[string]bool { m := base(); m["milan"] = true; return m }
+		rep := evaluate(t, e, t0.Add(time.Second))
+		if !strings.Contains(strings.Join(rep.Errors, "\n"), `expired "added" exception of dave dropped`) {
+			t.Errorf("errors = %v", rep.Errors)
+		}
+		if got := pendingAt(t, e, store, t0.Add(time.Second)); got != "[]" {
+			t.Errorf("pending = %s", got)
+		}
+		if g := graceOf(t, store); len(g) != 0 {
+			t.Errorf("grace = %+v", g)
+		}
+	})
+	t.Run("missing in LLDAP", func(t *testing.T) {
+		e, store := evalEnv(t)
+		later := t0.Add(time.Hour)
+		setRule(t, store, "ghost", `city = "Milan"`,
+			directory.Exception{User: "dave", Reason: "temp", By: "root", Include: true, Until: &until, At: t0.Add(-time.Hour)},
+			directory.Exception{User: "bob", Reason: "temp", By: "root", Include: true, Until: &later, At: t0.Add(-time.Hour)})
+		evaluate(t, e, t0.Add(time.Second))
+		if got := pendingAt(t, e, store, t0.Add(time.Second)); got != fmt.Sprint([]directory.Expiring{{User: "bob", Group: "ghost", At: later}}) {
+			t.Errorf("pending = %s", got)
+		}
+	})
+}
+
+// CreateUser's group adds end the new account's grace entries; DeleteUser
+// purges the deleted account's.
+func TestCreateDeleteUserGrace(t *testing.T) {
+	e, store := evalEnv(t)
+	e.ll.AddGroup("temps")
+	seedGrace(t, store, "zed", "temps")
+	if _, err := e.svc.CreateUser(ctx, asRoot, directory.CreateRequest{Username: "zed", Email: "zed@example.org", Groups: []string{"temps"},
+		Onboarding: directory.OnboardPassword, Generate: true}); err != nil {
+		t.Fatal(err)
+	}
+	if !memberIn(e, "temps", "zed") {
+		t.Fatal("zed not added")
+	}
+	wantGraceOnlyOther(t, store, "CreateUser")
+
+	seedGrace(t, store, "dave", "milan")
+	if _, err := e.svc.DeleteUser(ctx, asRoot, "dave", "dave"); err != nil {
+		t.Fatal(err)
+	}
+	for _, g := range graceOf(t, store) {
+		if g.User == "dave" {
+			t.Errorf("grace of deleted user kept: %+v", g)
+		}
 	}
 }

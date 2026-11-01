@@ -209,8 +209,8 @@ func namedInGroups(cfg *Config, user string) string {
 	return ""
 }
 
-// purgeUser drops user from every group's exceptions and expiries and
-// from CreatedBy, so an account with that name inherits nothing; it
+// purgeUser drops user from every group's exceptions and expiries, from
+// CreatedBy and from Grace, so an account with that name inherits nothing; it
 // returns what was removed (for warnings and audit), sorted.
 func purgeUser(cfg *Config, user string) []string {
 	var out []string
@@ -240,6 +240,15 @@ func purgeUser(cfg *Config, user string) []string {
 			out = append(out, "created_by")
 		}
 	}
+	kept := cfg.Grace[:0:0]
+	for _, g := range cfg.Grace {
+		if strings.EqualFold(g.User, user) {
+			out = append(out, "grace in "+g.Group)
+		} else {
+			kept = append(kept, g)
+		}
+	}
+	cfg.Grace = kept
 	sort.Strings(out)
 	return out
 }

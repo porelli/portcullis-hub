@@ -805,9 +805,17 @@ func (s *Service) CreateUser(ctx context.Context, c *Caller, req CreateRequest) 
 				return fmt.Errorf("setting the password failed, user not created: %v", err)
 			}
 		}
+		graceCleared := false
 		for i, id := range groupIDs {
 			if err := s.LLDAP.AddUserToGroup(ctx, req.Username, id); err != nil {
 				res.Warnings = append(res.Warnings, fmt.Sprintf("adding to %s failed: %v", req.Groups[i], err))
+			} else if cfg != nil && cfg.clearGrace(req.Groups[i], req.Username) {
+				graceCleared = true // granted again
+			}
+		}
+		if graceCleared {
+			if err := s.Store.Save(cfg); err != nil {
+				res.Warnings = append(res.Warnings, fmt.Sprintf("clearing the grace entries of %s in directory.yaml failed (they keep denying for up to %s): %v", req.Username, GracePeriod, err))
 			}
 		}
 		// Import into Keycloak now (LDAP users are otherwise imported on
