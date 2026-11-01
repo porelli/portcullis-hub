@@ -406,8 +406,14 @@ func (h *Hub) WritePolicy() error {
 		}
 	}
 	doc := policy.Build(apps, perApp, h.st.Default())
+	portal := h.portalLocked()
 	h.mu.RUnlock()
-	return policy.Write(h.policyPath(), doc)
+	if err := policy.Write(h.policyPath(), doc); err != nil {
+		return err
+	}
+	// The landing portal's app list (contract §10) changes exactly when
+	// the policy does: enable, disable, template sync.
+	return writePortal(h.portalPath(), portal)
 }
 
 func coreSubdomain(subs []string) string {
