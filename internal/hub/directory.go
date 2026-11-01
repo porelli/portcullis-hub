@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"os"
 	"sort"
@@ -20,7 +21,7 @@ import (
 type DirectoryState func(ctx context.Context) ([]policy.Expiring, *policy.UserAttributesDocument, error)
 
 // directoryStateTimeout bounds one DirectoryState call.
-const directoryStateTimeout = 30 * time.Second
+const directoryStateTimeout = 10 * time.Second
 
 // SetDirectory wires the directory into the Hub: state feeds WritePolicy,
 // attrSync (Keycloak attribute mappers, may be nil) runs after each
@@ -56,14 +57,31 @@ func (h *Hub) publishedExpiring() []policy.Expiring {
 	var doc struct {
 		Expiring []policy.Expiring `json:"expiring"`
 	}
-	if b, err := os.ReadFile(h.policyPath()); err == nil && json.Unmarshal(b, &doc) == nil && doc.Expiring != nil {
-		return doc.Expiring
+	b, err := os.ReadFile(h.policyPath())
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return []policy.Expiring{}
+	case err != nil:
+		log.Printf("auth-policy: ERROR: cannot read the previous policy file to keep its membership expiries (%v) — publishing NONE until the directory is readable again", err)
+		return []policy.Expiring{}
 	}
-	return []policy.Expiring{}
+	if err := json.Unmarshal(b, &doc); err != nil {
+		log.Printf("auth-policy: ERROR: the previous policy file is corrupt (%v) — its membership expiries are lost; publishing NONE until the directory is readable again", err)
+		return []policy.Expiring{}
+	}
+	if doc.Expiring == nil {
+		return []policy.Expiring{}
+	}
+	return normalizeExpiring(doc.Expiring)
 }
 
-// normalizeExpiring keeps one entry per (user, group): the earliest. Sorted
-// by (at, group, user); never nil.
+// epoch replaces an unparseable expiry time: already past, so group-gate
+// denies the membership (fail closed).
+var epoch = time.Unix(0, 0).UTC()
+
+// normalizeExpiring keeps one entry per (user, group): the earliest. An
+// unparseable at is logged and published as the Unix epoch (denies).
+// Sorted by (at, group, user); never nil.
 func normalizeExpiring(in []policy.Expiring) []policy.Expiring {
 	type key struct{ user, group string }
 	earliest := map[key]policy.Expiring{}
@@ -71,7 +89,9 @@ func normalizeExpiring(in []policy.Expiring) []policy.Expiring {
 	for _, e := range in {
 		t, err := time.Parse(time.RFC3339, e.At)
 		if err != nil {
-			continue // never written by DirectoryStateOf
+			log.Printf("auth-policy: WARNING: expiry of %s in %s has an invalid time %q — publishing it as already expired", e.User, e.Group, e.At)
+			t = epoch
+			e.At = epoch.Format(time.RFC3339)
 		}
 		k := key{e.User, e.Group}
 		if old, ok := at[k]; !ok || t.Before(old) {
@@ -132,19 +152,28 @@ const (
 	attrSyncTimeout       = 2 * time.Minute
 )
 
-// RunDirectorySync writes the policy and syncs the attribute mappers once
-// at start and after each TriggerDirectorySync (debounced), until ctx is
-// done. A failed mapper sync is logged and retried after a minute; it
-// never holds up the policy write.
+// RunDirectorySync writes the policy once at start and after each
+// TriggerDirectorySync (debounced), until ctx is done; each write is
+// followed by an attribute-mapper sync in a separate loop, so a slow
+// Keycloak never delays a policy write. A failed mapper sync is logged
+// and retried after a minute.
 func (h *Hub) RunDirectorySync(ctx context.Context) {
-	var retry <-chan time.Time
+	attrKick := make(chan struct{}, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.runAttrSync(ctx, attrKick)
+	}()
+	defer func() { <-done }()
 	for {
-		h.syncDirectory(ctx, &retry)
+		h.writePolicyLogged()
+		select {
+		case attrKick <- struct{}{}:
+		default:
+		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-retry:
-			retry = nil
 		case <-h.dirKick:
 			select {
 			case <-ctx.Done():
@@ -159,20 +188,29 @@ func (h *Hub) RunDirectorySync(ctx context.Context) {
 	}
 }
 
-func (h *Hub) syncDirectory(ctx context.Context, retry *<-chan time.Time) {
-	h.writePolicyLogged()
-	h.policyWriteMu.Lock()
-	sync := h.attrSync
-	h.policyWriteMu.Unlock()
-	if sync == nil {
-		return
-	}
-	sctx, cancel := context.WithTimeout(ctx, attrSyncTimeout)
-	defer cancel()
-	if err := sync(sctx); err != nil {
-		if ctx.Err() == nil {
+// runAttrSync runs attrSync on each kick (coalesced) and on retry.
+func (h *Hub) runAttrSync(ctx context.Context, kick <-chan struct{}) {
+	var retry <-chan time.Time
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-kick:
+		case <-retry:
+		}
+		retry = nil
+		h.policyWriteMu.Lock()
+		sync := h.attrSync
+		h.policyWriteMu.Unlock()
+		if sync == nil {
+			continue
+		}
+		sctx, cancel := context.WithTimeout(ctx, attrSyncTimeout)
+		err := sync(sctx)
+		cancel()
+		if err != nil && ctx.Err() == nil {
 			log.Printf("keycloak: attribute mapper sync failed (retrying in %s): %v", directorySyncRetry, err)
-			*retry = time.After(directorySyncRetry)
+			retry = time.After(directorySyncRetry)
 		}
 	}
 }

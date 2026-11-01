@@ -60,6 +60,56 @@ type Config struct {
 	// Deleted: tombstones of deleted users (lowercase username -> when,
 	// UTC). Delegates can't re-create these names; an admin can.
 	Deleted map[string]time.Time `yaml:"deleted,omitempty"`
+	// Grace: memberships the evaluator removed on expiry, still published
+	// in the policy file's expiring list until Until (contract §4) so a
+	// token issued before the removal can't use them. Dropped when Until
+	// passes or the membership is granted again.
+	Grace []GraceEntry `yaml:"grace,omitempty"`
+}
+
+// GraceEntry is one removed-on-expiry membership still published.
+type GraceEntry struct {
+	User  string    `yaml:"user"` // lowercase
+	Group string    `yaml:"group"`
+	At    time.Time `yaml:"at"`    // the expiry that ended it (UTC)
+	Until time.Time `yaml:"until"` // published until (UTC)
+}
+
+// GracePeriod is how long a removed-on-expiry membership stays published.
+const GracePeriod = 10 * time.Minute
+
+// addGrace records (user, group) as removed on expiry at, until now +
+// GracePeriod, replacing an older entry for the same membership.
+func (cfg *Config) addGrace(user, group string, at, now time.Time) {
+	cfg.clearGrace(group, user)
+	cfg.Grace = append(cfg.Grace, GraceEntry{User: strings.ToLower(user), Group: group, At: at.UTC(), Until: now.Add(GracePeriod).UTC()})
+}
+
+// clearGrace drops the grace entry of (user, group); reports whether
+// there was one. Called whenever the membership is granted again.
+func (cfg *Config) clearGrace(group, user string) bool {
+	kept := cfg.Grace[:0:0]
+	for _, g := range cfg.Grace {
+		if g.Group != group || !strings.EqualFold(g.User, user) {
+			kept = append(kept, g)
+		}
+	}
+	found := len(kept) != len(cfg.Grace)
+	cfg.Grace = kept
+	return found
+}
+
+// dropEndedGrace drops grace entries whose Until is <= now.
+func (cfg *Config) dropEndedGrace(now time.Time) bool {
+	kept := cfg.Grace[:0:0]
+	for _, g := range cfg.Grace {
+		if g.Until.After(now) {
+			kept = append(kept, g)
+		}
+	}
+	found := len(kept) != len(cfg.Grace)
+	cfg.Grace = kept
+	return found
 }
 
 // Store provides load/save for directory.yaml.
@@ -100,6 +150,7 @@ func (s *Store) Load() (*Config, error) {
 		Permissions map[string]string          `yaml:"permissions"`
 		CreatedBy   map[string]string          `yaml:"created_by"`
 		Deleted     map[string]time.Time       `yaml:"deleted,omitempty"`
+		Grace       []GraceEntry               `yaml:"grace,omitempty"`
 	}
 
 	var raw rawConfig
@@ -134,6 +185,7 @@ func (s *Store) Load() (*Config, error) {
 		cfg.CreatedBy = map[string]string{}
 	}
 	cfg.Deleted = normDeleted(raw.Deleted)
+	cfg.Grace = normGrace(raw.Grace)
 
 	// Parse rules and normalize times
 	for groupName, rawGC := range raw.Groups {
@@ -191,6 +243,7 @@ func (s *Store) Save(cfg *Config) error {
 		Permissions map[string]string          `yaml:"permissions"`
 		CreatedBy   map[string]string          `yaml:"created_by"`
 		Deleted     map[string]time.Time       `yaml:"deleted,omitempty"`
+		Grace       []GraceEntry               `yaml:"grace,omitempty"`
 	}
 
 	raw := rawConfig{
@@ -200,6 +253,7 @@ func (s *Store) Save(cfg *Config) error {
 		Permissions: cfg.Permissions,
 		CreatedBy:   cfg.CreatedBy,
 		Deleted:     normDeleted(cfg.Deleted),
+		Grace:       normGrace(cfg.Grace),
 	}
 
 	// Convert groups and normalize times
@@ -252,6 +306,18 @@ func (s *Store) Save(cfg *Config) error {
 	}
 
 	return nil
+}
+
+// normGrace returns grace entries with lowercase users and UTC times.
+func normGrace(in []GraceEntry) []GraceEntry {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]GraceEntry, 0, len(in))
+	for _, g := range in {
+		out = append(out, GraceEntry{User: strings.ToLower(g.User), Group: g.Group, At: g.At.UTC(), Until: g.Until.UTC()})
+	}
+	return out
 }
 
 // normDeleted returns tombstones with lowercase keys and UTC times.

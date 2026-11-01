@@ -593,6 +593,25 @@ func (s *Service) run(ctx context.Context, c *Caller, perm, action, target strin
 	return err
 }
 
+// clearGrace drops the grace entry of a membership just granted again
+// (no store: nothing to clear). Caller holds s.mu.
+func (s *Service) clearGrace(group, user string) error {
+	if s.Store == nil {
+		return nil
+	}
+	cfg, err := s.loadConfig()
+	if err != nil {
+		return fmt.Errorf("%s added to %s, but directory.yaml could not be read to end its grace entry (it keeps denying for up to %s): %w", user, group, GracePeriod, err)
+	}
+	if !cfg.clearGrace(group, user) {
+		return nil
+	}
+	if err := s.saveConfig(cfg); err != nil {
+		return fmt.Errorf("%s added to %s, but its grace entry could not be cleared (it keeps denying for up to %s): %w", user, group, GracePeriod, err)
+	}
+	return nil
+}
+
 // GeneratePassword returns a random password (26 base32 chars, 130 bits).
 func GeneratePassword() string { return rand.Text() }
 
@@ -1256,7 +1275,10 @@ func (s *Service) AddMember(ctx context.Context, c *Caller, group, username stri
 				return refuse("%s is already a member of %s", u.ID, group)
 			}
 		}
-		return s.LLDAP.AddUserToGroup(ctx, u.ID, g.ID)
+		if err := s.LLDAP.AddUserToGroup(ctx, u.ID, g.ID); err != nil {
+			return err
+		}
+		return s.clearGrace(group, u.ID)
 	})
 }
 

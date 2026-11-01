@@ -259,7 +259,8 @@ func (c *Client) ensureAttributesScope(ctx context.Context, tok string, want map
 }
 
 // attachAttributesScope makes the scope a default client scope of every
-// Hub-registered client (tagged with OwnerAttr).
+// Hub-registered client (tagged with OwnerAttr). A client that has it as an
+// optional scope gets it moved (Keycloak refuses a scope that is both).
 func (c *Client) attachAttributesScope(ctx context.Context, tok, scopeID string) []error {
 	g := c.api()
 	clients, err := g.GetClients(ctx, tok, Realm, gocloak.GetClientsParams{})
@@ -274,11 +275,27 @@ func (c *Client) attachAttributesScope(ctx context.Context, tok, scopeID string)
 		if containsName(cl.DefaultClientScopes, AttributesScope) {
 			continue
 		}
-		if err := g.AddDefaultScopeToClient(ctx, tok, Realm, url.PathEscape(str(cl.ID)), url.PathEscape(scopeID)); err != nil {
-			errs = append(errs, opErr("attach scope "+AttributesScope+" to client "+str(cl.ClientID), err))
+		if err := c.moveToDefault(ctx, tok, cl, AttributesScope, scopeID); err != nil {
+			errs = append(errs, err)
 		}
 	}
 	return errs
+}
+
+// moveToDefault attaches scope (id scopeID) as a default client scope of
+// cl, detaching it as an optional one first if needed.
+func (c *Client) moveToDefault(ctx context.Context, tok string, cl *gocloak.Client, name, scopeID string) error {
+	g := c.api()
+	cid, sid := url.PathEscape(str(cl.ID)), url.PathEscape(scopeID)
+	if containsName(cl.OptionalClientScopes, name) {
+		if err := g.RemoveOptionalScopeFromClient(ctx, tok, Realm, cid, sid); err != nil {
+			return opErr("detach optional scope "+name+" from client "+str(cl.ClientID), err)
+		}
+	}
+	if err := g.AddDefaultScopeToClient(ctx, tok, Realm, cid, sid); err != nil {
+		return opErr("attach scope "+name+" to client "+str(cl.ClientID), err)
+	}
+	return nil
 }
 
 // scopeID returns the id of the realm client scope name ("" if absent).

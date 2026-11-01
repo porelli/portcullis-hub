@@ -381,9 +381,16 @@ func TestPending(t *testing.T) {
 			{User: "dave", Include: true},
 			{User: "eve", Include: false, Until: &later},
 		}},
+	}, Grace: []directory.GraceEntry{
+		{User: "frank", Group: "temps", At: t0.Add(-time.Minute), Until: t0.Add(time.Minute)},
+		{User: "gina", Group: "temps", At: t0.Add(-time.Hour), Until: t0}, // ended
 	}}
 	got := e.svc.Pending(cfg, t0)
+	// Past entries stay (their removal hasn't succeeded yet).
 	want := []directory.Expiring{
+		{User: "frank", Group: "temps", At: t0.Add(-time.Minute)},
+		{User: "carol", Group: "contractors", At: t0},
+		{User: "carol", Group: "milan", At: t0},
 		{User: "bob", Group: "contractors", At: later},
 		{User: "alice", Group: "milan", At: later},
 		{User: "dave", Group: "contractors", At: t0.Add(2 * time.Hour)},

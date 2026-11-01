@@ -179,9 +179,13 @@ func (s *Service) Desired(cfg *Config, sn *snapshot, now time.Time) map[string]m
 	return out
 }
 
-// Pending lists every membership that is still to expire: manual-group
-// expiries and "added" exceptions with an end date, sorted by (At, Group,
-// User), usernames lowercase.
+// Pending lists every membership end recorded in directory.yaml — manual
+// group expiries and "added" exceptions with an end date, past or future
+// (a past one is still there because its removal hasn't succeeded yet;
+// group-gate denies it either way) — plus the grace entries of memberships
+// already removed on expiry whose grace hasn't ended at now. Sorted by (At,
+// Group, User), usernames lowercase; a membership may appear twice (the
+// Hub keeps the earliest).
 func (s *Service) Pending(cfg *Config, now time.Time) []Expiring {
 	out := []Expiring{}
 	for name, gc := range cfg.Groups {
@@ -189,14 +193,17 @@ func (s *Service) Pending(cfg *Config, now time.Time) []Expiring {
 			continue
 		}
 		for u, at := range gc.Expiry {
-			if !expired(at, now) {
-				out = append(out, Expiring{User: strings.ToLower(u), Group: name, At: at.UTC()})
-			}
+			out = append(out, Expiring{User: strings.ToLower(u), Group: name, At: at.UTC()})
 		}
 		for _, ex := range gc.Exceptions {
-			if ex.Include && ex.Until != nil && !expired(*ex.Until, now) {
+			if ex.Include && ex.Until != nil {
 				out = append(out, Expiring{User: strings.ToLower(ex.User), Group: name, At: ex.Until.UTC()})
 			}
+		}
+	}
+	for _, g := range cfg.Grace {
+		if g.Until.After(now) {
+			out = append(out, Expiring{User: strings.ToLower(g.User), Group: g.Group, At: g.At.UTC()})
 		}
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -260,6 +267,7 @@ func (s *Service) evaluateLocked(ctx context.Context, now time.Time) (*EvalRepor
 	admin := s.adminGroups()
 	guarding := s.guardingGroups(cfg)
 	newState := map[string]map[string]bool{} // replaces s.ruleState: only current rule groups
+	dirty := cfg.dropEndedGrace(now)
 
 	names := make([]string, 0, len(cfg.Groups))
 	for name := range cfg.Groups {
@@ -267,7 +275,6 @@ func (s *Service) evaluateLocked(ctx context.Context, now time.Time) (*EvalRepor
 	}
 	sort.Strings(names)
 
-	dirty := false
 	var removed []string
 	seenRemoved := map[string]bool{}
 	apply := func(group string, gid int, id string, add bool, cause string) bool {
@@ -327,10 +334,14 @@ func (s *Service) evaluateLocked(ctx context.Context, now time.Time) (*EvalRepor
 						}
 					}
 				}
-				if member != "" && !s.protectedAccount(member) {
+				protected := member != "" && s.protectedAccount(member)
+				if member != "" && !protected {
 					if !apply(name, g.ID, member, false, CauseMembershipExpire) {
-						continue // keep the entry: retried next run
+						continue // keep the entry (still published): retried next run
 					}
+				}
+				if !protected {
+					cfg.addGrace(u, name, gc.Expiry[u], now)
 				}
 				delete(gc.Expiry, u)
 				dirty = true
@@ -348,10 +359,6 @@ func (s *Service) evaluateLocked(ctx context.Context, now time.Time) (*EvalRepor
 		}
 
 		ge := s.evalGroup(gc, d, sn, now)
-		if len(ge.kept) != len(gc.Exceptions) {
-			gc.Exceptions = ge.kept
-			dirty = true
-		}
 		last := s.ruleState[name]
 		current := map[string]string{} // lowercase -> LLDAP id
 		for _, m := range g.Members() {
@@ -392,6 +399,9 @@ func (s *Service) evaluateLocked(ctx context.Context, now time.Time) (*EvalRepor
 			}
 			if apply(name, g.ID, sn.users[u].ID, true, cause) {
 				state[u] = true
+				if cfg.clearGrace(name, u) {
+					dirty = true
+				}
 			}
 		}
 		for _, u := range dels {
@@ -407,6 +417,29 @@ func (s *Service) evaluateLocked(ctx context.Context, now time.Time) (*EvalRepor
 			if apply(name, g.ID, current[u], false, cause) {
 				delete(state, u)
 			}
+		}
+		// Expired "added" exceptions go only once the membership is gone
+		// (a failed removal keeps the entry, so it stays published), or
+		// when the rule itself grants it.
+		exs := ge.kept
+		for _, ex := range gc.Exceptions {
+			u := strings.ToLower(ex.User)
+			if !ex.Include || ex.Until == nil || !expired(*ex.Until, now) {
+				continue
+			}
+			switch {
+			case ge.desired[u] || s.protectedAccount(u):
+				// Still a member by rule (or never touched): nothing to publish.
+			case state[u]:
+				exs = append(exs, ex) // removal failed or blocked: retried next run
+				continue
+			default:
+				cfg.addGrace(u, name, *ex.Until, now)
+			}
+		}
+		if len(exs) != len(gc.Exceptions) {
+			gc.Exceptions = exs
+			dirty = true
 		}
 		newState[name] = state
 	}

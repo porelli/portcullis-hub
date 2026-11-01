@@ -56,10 +56,19 @@ type Server struct {
 	ExpireTokens bool
 	// FailPassword makes the next password modify fail with this code
 	// (set it between requests, not concurrently with them).
-	FailPassword        int
+	FailPassword int
+	// FailRemove makes removeUserFromGroup fail while set (see SetFailRemove).
+	FailRemove          bool
 	Mutations           []string
 	UserAttributeSchema map[string]AttributeSchema     // name → schema
 	UserAttributeValues map[string]map[string][]string // user id → attribute name → values
+}
+
+// SetFailRemove makes every removeUserFromGroup fail (true) or work.
+func (s *Server) SetFailRemove(fail bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.FailRemove = fail
 }
 
 // New starts a fake with users admin and the service account (both in
@@ -416,6 +425,9 @@ func (s *Server) graphql(caller, q string, vars map[string]interface{}) (interfa
 		}
 		if str(vars["u"]) == caller && g.ID == 1 {
 			return nil, fmt.Errorf("Cannot remove admin rights for current user")
+		}
+		if s.FailRemove {
+			return nil, fmt.Errorf("simulated removal failure")
 		}
 		delete(g.Members, str(vars["u"]))
 		s.Mutations = append(s.Mutations, "removeUserFromGroup "+str(vars["u"])+" "+g.Name)

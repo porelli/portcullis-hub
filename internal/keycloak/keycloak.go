@@ -251,6 +251,12 @@ func (c *Client) ensureDefaultScopes(ctx context.Context, token string, client *
 			log.Printf("Keycloak realm has no %q client scope — client %v will not get that claim (run `portcullis keycloak configure`)", name, clientID)
 			continue
 		}
+		if haveOptional[name] {
+			// Keycloak refuses a scope that is both: move it.
+			if err := g.RemoveOptionalScopeFromClient(ctx, token, Realm, clientUUID, url.PathEscape(id)); err != nil {
+				return opErr("detach optional scope "+name, err)
+			}
+		}
 		if err := g.AddDefaultScopeToClient(ctx, token, Realm, clientUUID, url.PathEscape(id)); err != nil {
 			return opErr("attach scope "+name, err)
 		}

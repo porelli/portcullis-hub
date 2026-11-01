@@ -142,3 +142,25 @@ func TestEnsureAttributeMappersPartialFailure(t *testing.T) {
 		t.Error("outage: no error")
 	}
 }
+
+// A Hub client with the scope as optional gets it moved to default, once.
+func TestAttributesScopeMovedFromOptional(t *testing.T) {
+	f := kctest.New(t)
+	c := keycloak.New(f.HTTP.URL, "admin", "admin")
+	ctx := context.Background()
+	id := f.AddClient("app", map[string]string{keycloak.OwnerAttr: "app"}, "openid")
+	f.SetOptionalScopes(id, keycloak.AttributesScope, "offline_access")
+	if err := c.EnsureAttributeMappers(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := fmt.Sprint(f.ClientScopes(id), f.OptionalScopes(id)); got != "[openid portcullis-attributes] [offline_access]" {
+		t.Errorf("scopes = %s", got)
+	}
+	puts := f.CountCalls("PUT /admin/realms/portcullis/clients/")
+	if err := c.EnsureAttributeMappers(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	if n := f.CountCalls("PUT /admin/realms/portcullis/clients/"); n != puts {
+		t.Errorf("second run attached again (%d -> %d)", puts, n)
+	}
+}

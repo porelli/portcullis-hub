@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/rules"
 )
 
 // Publish: pending expiries, shared fields only, every user but the
@@ -86,5 +87,193 @@ func TestPublishAndOnChange(t *testing.T) {
 	}
 	if _, err := e.svc.Publish(ctx, time.Now()); err == nil {
 		t.Error("corrupt directory.yaml published")
+	}
+}
+
+func graceOf(t *testing.T, store *directory.Store) []directory.GraceEntry {
+	t.Helper()
+	cfg, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cfg.Grace
+}
+
+func pendingAt(t *testing.T, e *env, store *directory.Store, now time.Time) string {
+	t.Helper()
+	cfg, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fmt.Sprint(e.svc.Pending(cfg, now))
+}
+
+// A failed removal keeps the expired entry (so it stays published and
+// group-gate keeps denying); a successful one prunes it into a grace entry
+// published for GracePeriod, then dropped.
+func TestExpiryRemovalFailureAndGrace(t *testing.T) {
+	for _, kind := range []string{"manual", "exception"} {
+		t.Run(kind, func(t *testing.T) {
+			e, store := evalEnv(t)
+			group := "contractors"
+			if kind == "manual" {
+				e.ll.AddGroup(group, "dave")
+				cfg, _ := store.Load()
+				cfg.Groups[group] = &directory.GroupConfig{Expiry: map[string]time.Time{"dave": t0}}
+				if err := store.Save(cfg); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				group = "milan"
+				until := t0
+				setRule(t, store, group, `city = "Milan"`,
+					directory.Exception{User: "dave", Reason: "temp", By: "root", Include: true, Until: &until, At: t0.Add(-time.Hour)})
+				evaluate(t, e, t0.Add(-time.Second))
+			}
+			if !memberIn(e, group, "dave") {
+				t.Fatal("setup: dave not a member")
+			}
+			want := fmt.Sprint([]directory.Expiring{{User: "dave", Group: group, At: t0}})
+
+			e.ll.SetFailRemove(true)
+			rep := evaluate(t, e, t0.Add(time.Second))
+			if len(rep.Errors) == 0 || !memberIn(e, group, "dave") {
+				t.Fatalf("removal did not fail: %+v", rep)
+			}
+			if got := pendingAt(t, e, store, t0.Add(time.Second)); got != want {
+				t.Errorf("after failed removal: pending = %s, want %s", got, want)
+			}
+			if g := graceOf(t, store); len(g) != 0 {
+				t.Errorf("grace before removal: %+v", g)
+			}
+
+			e.ll.SetFailRemove(false)
+			pruned := t0.Add(time.Minute)
+			evaluate(t, e, pruned)
+			if memberIn(e, group, "dave") {
+				t.Fatal("dave still a member")
+			}
+			cfg, _ := store.Load()
+			if gc := cfg.Groups[group]; gc != nil && (len(gc.Expiry) != 0 || len(gc.Exceptions) != 0) {
+				t.Errorf("entry not pruned: %+v", gc)
+			}
+			if g := graceOf(t, store); len(g) != 1 || g[0].User != "dave" || g[0].Group != group || !g[0].At.Equal(t0) || !g[0].Until.Equal(pruned.Add(directory.GracePeriod)) {
+				t.Errorf("grace = %+v", g)
+			}
+			if got := pendingAt(t, e, store, pruned.Add(5*time.Minute)); got != want {
+				t.Errorf("during grace: pending = %s", got)
+			}
+
+			evaluate(t, e, pruned.Add(directory.GracePeriod))
+			if g := graceOf(t, store); len(g) != 0 {
+				t.Errorf("grace not dropped: %+v", g)
+			}
+			if got := pendingAt(t, e, store, pruned.Add(directory.GracePeriod)); got != "[]" {
+				t.Errorf("after grace: pending = %s", got)
+			}
+		})
+	}
+}
+
+func memberIn(e *env, group, user string) bool {
+	for _, m := range e.ll.GroupMembers(group) {
+		if m == user {
+			return true
+		}
+	}
+	return false
+}
+
+func seedGrace(t *testing.T, store *directory.Store, user, group string) {
+	t.Helper()
+	cfg, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Grace = append(cfg.Grace, directory.GraceEntry{User: user, Group: group, At: t0, Until: time.Now().Add(time.Hour)},
+		directory.GraceEntry{User: "other", Group: group, At: t0, Until: time.Now().Add(time.Hour)})
+	if err := store.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func wantGraceOnlyOther(t *testing.T, store *directory.Store, label string) {
+	t.Helper()
+	if g := graceOf(t, store); len(g) != 1 || g[0].User != "other" {
+		t.Errorf("%s: grace = %+v", label, g)
+	}
+}
+
+// Granting the membership again, by any path, ends its grace entry.
+func TestRegrantClearsGrace(t *testing.T) {
+	future := time.Now().Add(48 * time.Hour)
+	t.Run("AddMember", func(t *testing.T) {
+		e, store := evalEnv(t)
+		e.ll.AddGroup("temps")
+		seedGrace(t, store, "dave", "temps")
+		if err := e.svc.AddMember(ctx, asRoot, "temps", "dave"); err != nil {
+			t.Fatal(err)
+		}
+		wantGraceOnlyOther(t, store, "AddMember")
+	})
+	t.Run("SetMemberExpiry", func(t *testing.T) {
+		e, store := evalEnv(t)
+		e.ll.AddGroup("temps", "dave")
+		seedGrace(t, store, "dave", "temps")
+		if err := e.svc.SetMemberExpiry(ctx, asRoot, "temps", "dave", &future); err != nil {
+			t.Fatal(err)
+		}
+		wantGraceOnlyOther(t, store, "SetMemberExpiry")
+	})
+	t.Run("AddException", func(t *testing.T) {
+		e, store := evalEnv(t)
+		setRule(t, store, "milan", `city = "Milan"`)
+		seedGrace(t, store, "dave", "milan")
+		if err := e.svc.AddException(ctx, asRoot, "milan", directory.Exception{User: "dave", Reason: "back", Include: true, Until: &future}); err != nil {
+			t.Fatal(err)
+		}
+		wantGraceOnlyOther(t, store, "AddException")
+	})
+	t.Run("rule match", func(t *testing.T) {
+		e, store := evalEnv(t)
+		setRule(t, store, "milan", `city = "Milan"`)
+		seedGrace(t, store, "bob", "milan")
+		evaluate(t, e, time.Now())
+		if !memberIn(e, "milan", "bob") {
+			t.Fatal("bob not added")
+		}
+		wantGraceOnlyOther(t, store, "rule match")
+	})
+	t.Run("ConvertApply keep", func(t *testing.T) {
+		e, store := evalEnv(t)
+		e.ll.AddGroup("temps", "dave")
+		seedGrace(t, store, "dave", "temps")
+		rule, err := rules.Parse(`city = "Milan"`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := e.svc.ConvertApply(ctx, asRoot, "temps", rule, []string{"dave"}); err != nil {
+			t.Fatal(err)
+		}
+		wantGraceOnlyOther(t, store, "ConvertApply")
+	})
+}
+
+// A past expiry whose removal failed is still published by Publish.
+func TestPublishKeepsPastExpiry(t *testing.T) {
+	e, store := evalEnv(t)
+	e.ll.AddGroup("contractors", "dave")
+	cfg, _ := store.Load()
+	past := time.Now().Add(-time.Hour).UTC().Truncate(time.Second)
+	cfg.Groups["contractors"] = &directory.GroupConfig{Expiry: map[string]time.Time{"dave": past}}
+	if err := store.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	pub, err := e.svc.Publish(ctx, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fmt.Sprint(pub.Expiring); got != fmt.Sprint([]directory.Expiring{{User: "dave", Group: "contractors", At: past}}) {
+		t.Errorf("expiring = %s", got)
 	}
 }

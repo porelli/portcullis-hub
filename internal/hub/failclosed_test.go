@@ -295,3 +295,62 @@ func TestRunDirectorySync(t *testing.T) {
 	cancel()
 	<-done
 }
+
+// A slow Keycloak never holds up policy writes.
+func TestDirectorySyncSlowKeycloak(t *testing.T) {
+	f := newFixture(t)
+	var states atomic.Int32
+	release := make(chan struct{})
+	f.h.SetDirectory(func(context.Context) ([]policy.Expiring, *policy.UserAttributesDocument, error) {
+		states.Add(1)
+		return nil, nil, nil
+	}, func(ctx context.Context) error {
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return nil
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { f.h.RunDirectorySync(ctx); close(done) }()
+	for i := 0; i < 3; i++ {
+		want := int32(i + 1)
+		for j := 0; j < 500 && states.Load() < want; j++ {
+			time.Sleep(10 * time.Millisecond)
+		}
+		if states.Load() < want {
+			t.Fatalf("policy write %d blocked behind the mapper sync", want)
+		}
+		f.h.TriggerDirectorySync()
+	}
+	close(release)
+	cancel()
+	<-done
+}
+
+// Unparseable times publish as already expired; never dropped.
+func TestNormalizeExpiringBadTime(t *testing.T) {
+	got := normalizeExpiring([]policy.Expiring{{User: "a", Group: "g", At: "soon"}, {User: "b", Group: "g", At: "2030-01-01T00:00:00Z"}})
+	want := []policy.Expiring{{User: "a", Group: "g", At: "1970-01-01T00:00:00Z"}, {User: "b", Group: "g", At: "2030-01-01T00:00:00Z"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %+v", got)
+	}
+}
+
+// After a restart with a corrupt policy file and a failing directory,
+// there is nothing to keep: [] (logged), never a crash.
+func TestPublishedExpiringCorruptFile(t *testing.T) {
+	f := newFixture(t)
+	if err := os.WriteFile(filepath.Join(f.data, "group-gate-policy.json"), []byte("{not json"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	h2, err := New(f.h.cfg, f.runner, f.engine, f.idp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(h2.Wait)
+	if got := h2.publishedExpiring(); got == nil || len(got) != 0 {
+		t.Errorf("got %#v", got)
+	}
+}

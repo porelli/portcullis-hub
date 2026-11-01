@@ -315,6 +315,7 @@ func (s *Service) ConvertApply(ctx context.Context, c *Caller, group string, rul
 			}
 			exs = append(exs, ex)
 			kept = append(kept, id)
+			cfg.clearGrace(group, id) // granted again
 		}
 		sort.Strings(kept)
 		cfg.Groups[group] = &GroupConfig{Rule: rule, Exceptions: exs}
@@ -447,6 +448,9 @@ func (s *Service) AddException(ctx context.Context, c *Caller, group string, e E
 			}
 		}
 		gc.Exceptions = append(exs, e)
+		if e.Include {
+			cfg.clearGrace(group, u.ID) // granted again
+		}
 		return s.saveConfig(cfg)
 	})
 }
@@ -542,6 +546,7 @@ func (s *Service) SetMemberExpiry(ctx context.Context, c *Caller, group, user st
 			}
 			gc.Expiry[u.ID] = until.UTC()
 		}
+		cfg.clearGrace(group, u.ID) // a current member: any grace is stale
 		tidy(cfg, group)
 		return s.saveConfig(cfg)
 	})

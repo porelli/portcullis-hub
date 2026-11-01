@@ -72,10 +72,11 @@ type ClientScope struct {
 
 // Client is a fake OIDC client.
 type Client struct {
-	ID                  string            `json:"id"`
-	ClientID            string            `json:"clientId"`
-	Attributes          map[string]string `json:"attributes"`
-	DefaultClientScopes []string          `json:"defaultClientScopes"`
+	ID                   string            `json:"id"`
+	ClientID             string            `json:"clientId"`
+	Attributes           map[string]string `json:"attributes"`
+	DefaultClientScopes  []string          `json:"defaultClientScopes"`
+	OptionalClientScopes []string          `json:"optionalClientScopes"`
 }
 
 // Server is the fake.
@@ -175,6 +176,28 @@ func (s *Server) AddClient(clientID string, attrs map[string]string, scopes ...s
 	}
 	s.Clients[id] = &Client{ID: id, ClientID: clientID, Attributes: attrs, DefaultClientScopes: append([]string{}, scopes...)}
 	return id
+}
+
+// SetOptionalScopes sets a client's optional client scope names.
+func (s *Server) SetOptionalScopes(id string, names ...string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if c := s.Clients[id]; c != nil {
+		c.OptionalClientScopes = append([]string{}, names...)
+	}
+}
+
+// OptionalScopes returns a client's optional client scope names (sorted).
+func (s *Server) OptionalScopes(id string) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c := s.Clients[id]
+	if c == nil {
+		return nil
+	}
+	out := append([]string{}, c.OptionalClientScopes...)
+	sort.Strings(out)
+	return out
 }
 
 // ClientScopes returns a client's default client scope names (sorted).
@@ -544,6 +567,12 @@ func (s *Server) serveClients(w http.ResponseWriter, r *http.Request) {
 			http.NotFound(w, r)
 			return
 		}
+		for _, n := range c.OptionalClientScopes {
+			if n == sc.Name {
+				w.WriteHeader(409) // Keycloak: already linked as optional
+				return
+			}
+		}
 		for _, n := range c.DefaultClientScopes {
 			if n == sc.Name {
 				w.WriteHeader(204)
@@ -551,6 +580,20 @@ func (s *Server) serveClients(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		c.DefaultClientScopes = append(c.DefaultClientScopes, sc.Name)
+		w.WriteHeader(204)
+	case len(parts) == 3 && parts[1] == "optional-client-scopes" && r.Method == "DELETE":
+		c, sc := s.Clients[parts[0]], s.Scopes[parts[2]]
+		if c == nil || sc == nil {
+			http.NotFound(w, r)
+			return
+		}
+		kept := []string{}
+		for _, n := range c.OptionalClientScopes {
+			if n != sc.Name {
+				kept = append(kept, n)
+			}
+		}
+		c.OptionalClientScopes = kept
 		w.WriteHeader(204)
 	default:
 		http.NotFound(w, r)
