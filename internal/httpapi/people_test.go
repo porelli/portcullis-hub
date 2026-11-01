@@ -497,3 +497,34 @@ func TestCoreSubdomainsHasPeople(t *testing.T) {
 		t.Error("people is not a core subdomain")
 	}
 }
+
+// TestDirectoryAssetsServed: both listeners serve the directory UI's
+// embedded assets, and both pages load them (the Hub's Users & Groups tab
+// no longer carries its own copy of the code).
+func TestDirectoryAssetsServed(t *testing.T) {
+	e := newPeopleEnv(t)
+	for _, srv := range []*httptest.Server{e.hub, e.people} {
+		for path, ct := range map[string]string{"/static/directory.js": "text/javascript", "/static/directory.css": "text/css"} {
+			r, b := doAs(t, srv, "bob", "GET", path, "")
+			if r.StatusCode != 200 || !strings.HasPrefix(r.Header.Get("Content-Type"), ct) || r.Header.Get("X-Content-Type-Options") != "nosniff" || len(b) < 1000 {
+				t.Errorf("%s %s = %d %q (%d bytes)", srv.URL, path, r.StatusCode, r.Header.Get("Content-Type"), len(b))
+			}
+		}
+	}
+	for _, c := range []struct {
+		srv  *httptest.Server
+		page string
+	}{{e.hub, "hub index"}, {e.people, "people page"}} {
+		_, b := doAs(t, c.srv, "root", "GET", "/", "")
+		if !strings.Contains(b, `src="/static/directory.js"`) || !strings.Contains(b, `href="/static/directory.css"`) {
+			t.Errorf("%s does not load directory.js/css", c.page)
+		}
+	}
+	_, b := doAs(t, e.hub, "root", "GET", "/", "")
+	if strings.Contains(b, "function renderUsers") || strings.Contains(b, "dir-users") {
+		t.Error("the hub index still carries the old inline Users & Groups code")
+	}
+	if !strings.Contains(b, `data-tab="users"`) {
+		t.Error("the hub index lost its Users & Groups tab (#users deep link)")
+	}
+}

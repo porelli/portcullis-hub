@@ -231,10 +231,12 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 	}
 	switch {
 	case strings.HasSuffix(path, ".css"):
-		w.Header().Set("Content-Type", "text/css")
+		w.Header().Set("Content-Type", "text/css; charset=utf-8")
 	case strings.HasSuffix(path, ".js"):
-		w.Header().Set("Content-Type", "application/javascript")
+		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
 	}
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "no-cache")
 	w.Write(data)
 }
 

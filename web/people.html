@@ -4,10 +4,41 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>People</title>
+<link rel="stylesheet" href="/static/directory.css">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #e2e8f0; line-height: 1.6; }
+  .container { max-width: 1200px; margin: 0 auto; padding: 2rem; }
+  header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem; padding-bottom: 1rem; border-bottom: 1px solid #1e293b; }
+  h1 { font-size: 1.5rem; color: #f1f5f9; }
+  h1 span { color: #3b82f6; }
+  .user-badge { background: #1e293b; padding: 0.5rem 1rem; border-radius: 0.5rem; font-size: 0.875rem; }
+  .user-badge strong { color: #3b82f6; }
+  .pd p, .pd ul { margin: 0; }
+  .pd p + p { margin-top: 0.25rem; }
+</style>
 </head>
 <body>
-<!-- Placeholder shell of the people listener (people.<domain>); the
-     directory UI (directory.js / directory.css) replaces this. -->
-<main id="people">People</main>
+<!-- The people listener (people.<domain>): People, Groups, Org chart (and
+     Setup for admins). No app or catalog UI here; the API decides what
+     each signed-in user may see and do. -->
+<div class="container">
+  <header>
+    <h1><span>&#9906;</span> People</h1>
+    <div class="user-badge" id="who" hidden>Signed in as <strong id="who-name"></strong></div>
+  </header>
+  <main id="people"><noscript>This page needs JavaScript.</noscript></main>
+</div>
+<script src="/static/directory.js"></script>
+<script>
+  PortcullisDirectory.show(document.getElementById('people'), {
+    listener: 'people',
+    hashTabs: true,
+    onUser: function (name) {
+      document.getElementById('who-name').textContent = name;
+      document.getElementById('who').hidden = !name;
+    },
+  });
+</script>
 </body>
 </html>
