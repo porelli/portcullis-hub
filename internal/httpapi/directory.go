@@ -141,11 +141,12 @@ func (s *Server) handleSetPassword(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Generate bool   `json:"generate"`
 		Password string `json:"password"`
+		Confirm  string `json:"confirm"` // required for another lldap_admin member
 	}
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	res, err := s.Directory.SetPassword(r.Context(), actor(r), r.PathValue("username"), req.Password, req.Generate)
+	res, err := s.Directory.SetPassword(r.Context(), actor(r), r.PathValue("username"), req.Password, req.Generate, req.Confirm)
 	if err != nil {
 		dirErr(w, err)
 		return
@@ -158,11 +159,11 @@ func (s *Server) handleInvite(w http.ResponseWriter, r *http.Request) {
 	if !s.dirReady(w) {
 		return
 	}
-	var req struct{}
+	var req confirmBody // confirm: required for another lldap_admin member
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	res, err := s.Directory.SendInvite(r.Context(), actor(r), r.PathValue("username"))
+	res, err := s.Directory.SendInvite(r.Context(), actor(r), r.PathValue("username"), req.Confirm)
 	if err != nil {
 		dirErr(w, err)
 		return

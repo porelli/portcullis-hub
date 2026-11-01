@@ -108,6 +108,7 @@ func TestDirectoryAPI(t *testing.T) {
 		t.Errorf("overview = %+v", ov)
 	}
 
+	ll.AddUser("ops", "ops@example.org", "", "ops-password-123", "lldap_admin")
 	cases := []struct {
 		user, method, path, body string
 		want                     int
@@ -130,6 +131,10 @@ func TestDirectoryAPI(t *testing.T) {
 		{"root", "DELETE", "/api/directory/users/kim", `{"confirm":"kim"}`, 200},
 		{"root", "DELETE", "/api/directory/groups/users_demo", `{"confirm":"users_demo"}`, 200},
 		{"root", "GET", "/api/directory/audit", "", 200},
+		{"root", "POST", "/api/directory/users/admin/invite", `{"confirm":"admin"}`, 409},
+		{"root", "POST", "/api/directory/users/ops/invite", `{}`, 400},
+		{"root", "POST", "/api/directory/users/ops/password", `{"generate":true}`, 400},
+		{"root", "POST", "/api/directory/users/ops/invite", `{"confirm":"ops"}`, 200},
 	}
 	for _, c := range cases {
 		if r, b := doAs(t, srv, c.user, c.method, c.path, c.body); r.StatusCode != c.want {

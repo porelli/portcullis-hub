@@ -915,12 +915,12 @@
         h += '<tr><td><b>' + escapeHtml(u.username) + '</b>';
         if (u.self) h += ' <span class="pill info">you</span>';
         if (u.protected === 'service') h += ' <span class="pill" title="The Hub\'s own LLDAP account (read-only here)">Hub service account</span>';
-        if (u.protected === 'core-admin') h += ' <span class="pill" title="Core\'s LLDAP admin: Keycloak and enroll bind as it">core admin</span>';
+        if (u.protected === 'core-admin') h += ' <span class="pill" title="Bootstrap LLDAP admin: Keycloak and enroll bind as it. Managed from the server only (./portcullis invite admin)">bootstrap admin (server-managed)</span>';
         h += '<div class="muted">' + escapeHtml(u.display_name) + (u.display_name && u.email ? ' · ' : '') + escapeHtml(u.email) + '</div></td>';
         h += '<td>' + (u.groups || []).map(g => '<span class="pill' + (g === 'lldap_admin' ? ' info' : '') + '">' + escapeHtml(g) + '</span>').join('') + '</td>';
         h += '<td>' + userStatus(u) + '</td>';
         h += '<td class="muted">' + escapeHtml(fmtDate(u.created)) + '</td><td>';
-        if (u.protected !== 'service') {
+        if (!u.protected) {
           const kc = u.keycloak;
           h += '<div class="dir-actions">';
           h += btn('edit-user', u.username, 'Edit');
@@ -928,8 +928,8 @@
           if (!kc || !(kc.required_actions || []).includes('webauthn-register-passwordless')) h += btn('require-passkey', u.username, 'Require passkey');
           if (kc && (kc.required_actions || []).length) h += btn('clear-actions', u.username, 'Clear pending');
           h += btn('reset-passkeys', u.username, 'Reset passkeys', 'btn-danger');
-          if (u.protected !== 'core-admin') h += btn('password', u.username, 'Password…', 'btn-danger');
-          if (u.protected !== 'core-admin' && !u.self) h += btn('delete-user', u.username, 'Delete', 'btn-danger');
+          h += btn('password', u.username, 'Password…', 'btn-danger');
+          if (!u.self) h += btn('delete-user', u.username, 'Delete', 'btn-danger');
           h += '</div>';
         }
         h += '</td></tr>';
@@ -957,7 +957,7 @@
         s += '</div>';
       }
       document.getElementById('dir-suggestions').innerHTML = s;
-      const users = (dir.users || []).filter(u => u.protected !== 'service').map(u => u.username);
+      const users = (dir.users || []).filter(u => !u.protected).map(u => u.username);
       let h = '';
       for (const g of dir.groups || []) {
         const members = g.members || [];
@@ -970,7 +970,7 @@
         h += '</div><div>';
         for (const m of members) {
           // The backend refuses these too; don't offer them.
-          const locked = m === dir.service_user || (g.name === 'lldap_admin' && (m === 'admin' || m === dir.me));
+          const locked = m === dir.service_user || m === 'admin' || (g.name === 'lldap_admin' && m === dir.me);
           h += '<span class="pill">' + escapeHtml(m) + (locked ? '' :
             '<button title="Remove from group" data-act="remove-member" data-group="' + escapeHtml(g.name) + '" data-user="' + escapeHtml(m) + '">&times;</button>') + '</span>';
         }
@@ -1043,6 +1043,9 @@
       }
     }
 
+    // Another lldap_admin member: invites / passwords need the name typed.
+    function otherAdmin(u) { return !!u && !u.self && (u.groups || []).includes('lldap_admin'); }
+
     function typed(what, name) {
       const v = prompt(what + '\n\nType "' + name + '" to confirm:');
       if (v === null) return false;
@@ -1100,8 +1103,13 @@
           return dirAction(() => apiPut(path, { email: email.trim(), display_name: name.trim() }), 'Saved');
         }
         case 'invite': {
-          if (!confirm('Create a new one-time invite link for ' + user + '? Earlier unused invites stop working.')) return;
-          const res = await dirAction(() => apiPost(path + '/invite', {}), null);
+          const msg = 'Create a new one-time invite link for ' + user + '? Whoever opens it can register a key and sign in as ' + user + '. Earlier unused invites stop working.';
+          let body = {};
+          if (otherAdmin(u)) {
+            if (!typed(msg + '\n\n' + user + ' is an ADMINISTRATOR (lldap_admin).', user)) return;
+            body = { confirm: user };
+          } else if (!confirm(msg)) return;
+          const res = await dirAction(() => apiPost(path + '/invite', body), null);
           return showSecret(res, user);
         }
         case 'require-passkey':
@@ -1117,7 +1125,12 @@
         case 'password': {
           const choice = prompt('Fallback: set a password for ' + user + ' (signs them out).\n\nLeave empty to generate a strong one, or type the new password (at least 12 characters):', '');
           if (choice === null) return;
-          const res = await dirAction(() => apiPost(path + '/password', choice === '' ? { generate: true } : { password: choice }), 'Password changed');
+          const body = choice === '' ? { generate: true } : { password: choice };
+          if (otherAdmin(u)) {
+            if (!typed(user + ' is an ADMINISTRATOR (lldap_admin): you are about to take over their password.', user)) return;
+            body.confirm = user;
+          }
+          const res = await dirAction(() => apiPost(path + '/password', body), 'Password changed');
           return showSecret(res, user);
         }
         case 'delete-user':

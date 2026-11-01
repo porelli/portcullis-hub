@@ -22,8 +22,9 @@ import (
 
 // CoreAdmin is LLDAP's bootstrap admin (core sets LLDAP_LDAP_USER_DN=admin).
 // Keycloak's LDAP federation and enroll bind as it with LLDAP_ADMIN_PASSWORD,
-// so the Hub never deletes it, changes its password or drops it from
-// lldap_admin.
+// and whoever gets an invite or passkey reset for it owns the root account,
+// so the Hub never changes it in any way: it is managed (and recovered)
+// from the server only.
 const CoreAdmin = "admin"
 
 // DefaultServiceUser is the Hub's own LLDAP account (§9).
@@ -331,9 +332,39 @@ func (s *Service) checkNotLastAdmin(sn *snapshot, user string) error {
 	return nil
 }
 
-func (s *Service) checkNotService(user string) error {
-	if strings.EqualFold(user, s.serviceUser()) {
-		return refuse("%s is the Hub's own service account and can't be changed here", s.serviceUser())
+// checkTarget refuses every change to the service account and the
+// bootstrap admin. Every operation that targets a user calls it first.
+func (s *Service) checkTarget(user string) error {
+	switch {
+	case strings.EqualFold(user, s.serviceUser()) || strings.EqualFold(user, DefaultServiceUser):
+		return refuse("%s is the Hub's own service account and can't be changed here", user)
+	case strings.EqualFold(user, CoreAdmin):
+		return refuse("%s is the bootstrap LLDAP admin (Keycloak and enroll bind as it) and can't be changed from the Hub; the bootstrap admin is recovered from the server: ./portcullis invite admin", CoreAdmin)
+	}
+	return nil
+}
+
+// isAdmin reports whether user is in lldap_admin.
+func isAdmin(sn *snapshot, user string) bool {
+	for _, m := range sn.groups[lldap.AdminGroup].Members() {
+		if strings.EqualFold(m, user) {
+			return true
+		}
+	}
+	return false
+}
+
+// checkAdminTakeover: handing a sign-in credential (invite link,
+// password) for ANOTHER lldap_admin member to the acting admin is an
+// account takeover between equals — allowed, but only with the target's
+// name typed again, and flagged in the audit entry.
+func checkAdminTakeover(sn *snapshot, actor, user, confirm string, detail *string) error {
+	if !isAdmin(sn, user) || strings.EqualFold(actor, user) {
+		return nil
+	}
+	*detail = strings.TrimSpace(*detail + " target_is_lldap_admin=true")
+	if confirm != user {
+		return invalid("%s is an administrator (%s): type the username to confirm", user, lldap.AdminGroup)
 	}
 	return nil
 }
@@ -553,7 +584,7 @@ func (s *Service) UpdateUser(ctx context.Context, actor, username string, email,
 		detail += "display_name=" + *displayName
 	}
 	return s.run(actor, "user.update", username, &detail, func() error {
-		if err := s.checkNotService(username); err != nil {
+		if err := s.checkTarget(username); err != nil {
 			return err
 		}
 		if email == nil && displayName == nil {
@@ -585,11 +616,8 @@ func (s *Service) DeleteUser(ctx context.Context, actor, username, confirm strin
 		if confirm != username {
 			return invalid("type the username to confirm")
 		}
-		if err := s.checkNotService(username); err != nil {
+		if err := s.checkTarget(username); err != nil {
 			return err
-		}
-		if strings.EqualFold(username, CoreAdmin) {
-			return refuse("%s is core's LLDAP admin (Keycloak and enroll bind as it) and can't be deleted", CoreAdmin)
 		}
 		if strings.EqualFold(username, actor) {
 			return refuse("you can't delete yourself")
@@ -630,15 +658,14 @@ func (s *Service) DeleteUser(ctx context.Context, actor, username, confirm strin
 
 // SetPassword sets (or generates) a user's password and ends their
 // Keycloak sessions.
-func (s *Service) SetPassword(ctx context.Context, actor, username, password string, generate bool) (*Result, error) {
+// confirm must repeat the username if the target is another lldap_admin
+// member.
+func (s *Service) SetPassword(ctx context.Context, actor, username, password string, generate bool, confirm string) (*Result, error) {
 	res := newResult()
 	detail := fmt.Sprintf("generated=%v", generate)
 	err := s.run(actor, "user.password", username, &detail, func() error {
-		if err := s.checkNotService(username); err != nil {
+		if err := s.checkTarget(username); err != nil {
 			return err
-		}
-		if strings.EqualFold(username, CoreAdmin) {
-			return refuse("%s's password is LLDAP_ADMIN_PASSWORD (Keycloak and enroll bind with it); change it with the core CLI", CoreAdmin)
 		}
 		if !generate && !lldap.ValidPassword(password) {
 			return invalid("password must be %d-%d characters without control characters", lldap.MinPasswordLen, lldap.MaxPasswordLen)
@@ -649,6 +676,9 @@ func (s *Service) SetPassword(ctx context.Context, actor, username, password str
 		}
 		u, err := sn.user(username)
 		if err != nil {
+			return err
+		}
+		if err := checkAdminTakeover(sn, actor, u.ID, confirm, &detail); err != nil {
 			return err
 		}
 		if !lldap.ValidUsername(u.ID) {
@@ -673,26 +703,26 @@ func (s *Service) SetPassword(ctx context.Context, actor, username, password str
 	return res, err
 }
 
-func (s *Service) kcTarget(ctx context.Context, username string) (string, error) {
-	if s.KC == nil {
-		return "", &Error{Status: http.StatusServiceUnavailable, Msg: "Keycloak admin API not configured"}
+func (s *Service) kcTarget(ctx context.Context, username string) (string, *snapshot, error) {
+	if err := s.checkTarget(username); err != nil {
+		return "", nil, err
 	}
-	if err := s.checkNotService(username); err != nil {
-		return "", err
+	if s.KC == nil {
+		return "", nil, &Error{Status: http.StatusServiceUnavailable, Msg: "Keycloak admin API not configured"}
 	}
 	sn, err := s.load(ctx)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	u, err := sn.user(username)
-	return u.ID, err
+	return u.ID, sn, err
 }
 
 // RequirePasskey adds the passkey registration action (importing the
 // user into Keycloak first if needed).
 func (s *Service) RequirePasskey(ctx context.Context, actor, username string) error {
 	return s.run(actor, "user.require_passkey", username, nil, func() error {
-		id, err := s.kcTarget(ctx, username)
+		id, _, err := s.kcTarget(ctx, username)
 		if err != nil {
 			return err
 		}
@@ -703,7 +733,7 @@ func (s *Service) RequirePasskey(ctx context.Context, actor, username string) er
 // ClearActions removes every pending required action.
 func (s *Service) ClearActions(ctx context.Context, actor, username string) error {
 	return s.run(actor, "user.clear_actions", username, nil, func() error {
-		id, err := s.kcTarget(ctx, username)
+		id, _, err := s.kcTarget(ctx, username)
 		if err != nil {
 			return err
 		}
@@ -719,12 +749,16 @@ func (s *Service) RemovePasskeys(ctx context.Context, actor, username, confirm s
 	res := newResult()
 	detail := fmt.Sprintf("new_invite=%v", withInvite)
 	err := s.run(actor, "user.remove_passkeys", username, &detail, func() error {
-		if confirm != username {
-			return invalid("type the username to confirm")
-		}
-		id, err := s.kcTarget(ctx, username)
+		id, sn, err := s.kcTarget(ctx, username)
 		if err != nil {
 			return err
+		}
+		// Always confirmed; flagged in the audit entry for another admin.
+		if err := checkAdminTakeover(sn, actor, id, confirm, &detail); err != nil {
+			return err
+		}
+		if confirm != username {
+			return invalid("type the username to confirm")
 		}
 		if withInvite {
 			if err := s.invitesAvailable(); err != nil {
@@ -749,11 +783,13 @@ func (s *Service) RemovePasskeys(ctx context.Context, actor, username, confirm s
 }
 
 // SendInvite creates a new one-time invite link (earlier unredeemed ones
-// stop working, core side).
-func (s *Service) SendInvite(ctx context.Context, actor, username string) (*Result, error) {
+// stop working, core side). confirm must repeat the username if the target
+// is another lldap_admin member.
+func (s *Service) SendInvite(ctx context.Context, actor, username, confirm string) (*Result, error) {
 	res := newResult()
-	err := s.run(actor, "user.invite", username, nil, func() error {
-		if err := s.checkNotService(username); err != nil {
+	detail := ""
+	err := s.run(actor, "user.invite", username, &detail, func() error {
+		if err := s.checkTarget(username); err != nil {
 			return err
 		}
 		sn, err := s.load(ctx)
@@ -762,6 +798,9 @@ func (s *Service) SendInvite(ctx context.Context, actor, username string) (*Resu
 		}
 		u, err := sn.user(username)
 		if err != nil {
+			return err
+		}
+		if err := checkAdminTakeover(sn, actor, u.ID, confirm, &detail); err != nil {
 			return err
 		}
 		inv, err := s.newInvite(ctx, u.ID)
@@ -821,7 +860,7 @@ func (s *Service) DeleteGroup(ctx context.Context, actor, name, confirm string) 
 // AddMember adds username to group.
 func (s *Service) AddMember(ctx context.Context, actor, group, username string) error {
 	return s.run(actor, "group.add_member", group, &username, func() error {
-		if err := s.checkNotService(username); err != nil {
+		if err := s.checkTarget(username); err != nil {
 			return err
 		}
 		sn, err := s.load(ctx)
@@ -848,7 +887,7 @@ func (s *Service) AddMember(ctx context.Context, actor, group, username string) 
 // RemoveMember removes username from group.
 func (s *Service) RemoveMember(ctx context.Context, actor, group, username string) error {
 	return s.run(actor, "group.remove_member", group, &username, func() error {
-		if err := s.checkNotService(username); err != nil {
+		if err := s.checkTarget(username); err != nil {
 			return err
 		}
 		sn, err := s.load(ctx)
@@ -871,10 +910,7 @@ func (s *Service) RemoveMember(ctx context.Context, actor, group, username strin
 			return notFound("%s is not a member of %s", u.ID, group)
 		}
 		if group == lldap.AdminGroup {
-			switch {
-			case strings.EqualFold(u.ID, CoreAdmin):
-				return refuse("%s must stay in %s (Keycloak and enroll rely on it)", CoreAdmin, lldap.AdminGroup)
-			case strings.EqualFold(u.ID, actor):
+			if strings.EqualFold(u.ID, actor) {
 				return refuse("you can't remove yourself from %s", lldap.AdminGroup)
 			}
 			if err := s.checkNotLastAdmin(sn, u.ID); err != nil {
