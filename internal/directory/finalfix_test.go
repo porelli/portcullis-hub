@@ -286,3 +286,40 @@ func TestDeleteUserListsReferences(t *testing.T) {
 		t.Errorf("unreferenced delete: %+v %v", res, err)
 	}
 }
+
+// M4: an "added" exception with an end isn't published while the group's
+// rule matches the user anyway (they stay by rule); it is once they stop
+// matching.
+func TestPublishSkipsIncludeEndOfRuleMatch(t *testing.T) {
+	e, store := evalEnv(t)
+	until := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
+	now := time.Now().UTC()
+	setRule(t, store, "milan", `city = "Milan"`,
+		directory.Exception{User: "bob", Reason: "x", By: "root", Include: true, Until: &until, At: now},
+		directory.Exception{User: "dave", Reason: "x", By: "root", Include: true, Until: &until, At: now})
+	evaluate(t, e, now)
+	pub, err := e.svc.Publish(ctx, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pub.Expiring) != 1 || pub.Expiring[0].User != "dave" {
+		t.Errorf("expiring = %+v, want only dave", pub.Expiring)
+	}
+	setCity(t, e, "bob", "Rome")
+	pub, _ = e.svc.Publish(ctx, now)
+	if len(pub.Expiring) != 2 {
+		t.Errorf("expiring after bob moved = %+v", pub.Expiring)
+	}
+	// Rule groups the evaluator skips (an administrator group) keep it.
+	setRule(t, store, "lldap_password_manager", `city = "Milan"`,
+		directory.Exception{User: "carol", Reason: "x", By: "root", Include: true, Until: &until, At: now})
+	e.ll.AddGroup("lldap_password_manager", "carol")
+	pub, _ = e.svc.Publish(ctx, now)
+	found := false
+	for _, x := range pub.Expiring {
+		found = found || (x.User == "carol" && x.Group == "lldap_password_manager")
+	}
+	if !found {
+		t.Errorf("skipped group's exception end not published: %+v", pub.Expiring)
+	}
+}

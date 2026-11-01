@@ -538,7 +538,8 @@ func (s *Service) changed() {
 // Published is what the Hub publishes from the directory for group-gate
 // (contract §4 expiring, §4.1 user attributes) and Keycloak (§9.6).
 type Published struct {
-	// Expiring: Pending at the time of the call.
+	// Expiring: Pending at the time of the call, without the ends of "added"
+	// exceptions the rule grants anyway (publishedExpiring).
 	Expiring []Expiring
 	// Fields: the fields shared with apps (ShareWithApps), sorted by name.
 	Fields []Field
@@ -582,7 +583,7 @@ func (s *Service) Publish(ctx context.Context, now time.Time) (*Published, error
 	if err != nil {
 		return nil, err
 	}
-	out := &Published{Expiring: s.Pending(cfg, now), Fields: sharedFields(cfg), Users: map[string]map[string][]string{}}
+	out := &Published{Expiring: s.publishedExpiring(cfg, sn, now), Fields: sharedFields(cfg), Users: map[string]map[string][]string{}}
 	svc := strings.ToLower(s.serviceUser())
 	for id, u := range sn.users {
 		if id == svc {
@@ -599,6 +600,41 @@ func (s *Service) Publish(ctx context.Context, now time.Time) (*Published, error
 		}
 	}
 	return out, nil
+}
+
+// publishedExpiring is Pending without the end of an "added" exception
+// whose user the group's rule matches anyway: the evaluator keeps them in
+// the group by rule, so the end must not deny them (rule groups the
+// evaluator manages only; elsewhere the rule is ignored).
+func (s *Service) publishedExpiring(cfg *Config, sn *snapshot, now time.Time) []Expiring {
+	all := s.Pending(cfg, now)
+	d := ruleDirectory(cfg, sn)
+	admin := s.adminGroups()
+	byRule := map[string]map[string]bool{}
+	for name, gc := range cfg.Groups {
+		if gc == nil || gc.Rule == nil || len(gc.Exceptions) == 0 || !s.ruleGroupAllowed(name, admin) {
+			continue
+		}
+		if _, ok := sn.groups[name]; !ok {
+			continue
+		}
+		ge := s.evalGroup(gc, d, sn, now)
+		keep := map[string]bool{}
+		for u := range ge.matched {
+			if !ge.exclude[u] {
+				keep[u] = true
+			}
+		}
+		byRule[name] = keep
+	}
+	out := all[:0:0]
+	for _, x := range all {
+		if byRule[x.Group][x.User] {
+			continue
+		}
+		out = append(out, x)
+	}
+	return out
 }
 
 // kickChan is the coalesced trigger of RunEvaluator.
