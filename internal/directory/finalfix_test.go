@@ -65,7 +65,7 @@ func TestDeleteGroupPurgesConfig(t *testing.T) {
 	if e.kc.Get("bob").Sessions != 0 {
 		t.Error("former member still has Keycloak sessions")
 	}
-	if a := newestAudit(t, e, "group.delete"); !strings.Contains(a.Detail, "purged=") || !strings.Contains(a.Detail, "rule of milan") || !strings.Contains(a.Detail, "logout=bob,carol,dave") {
+	if a := newestAudit(t, e, "group.delete"); !strings.Contains(a.Detail, "purged=") || !strings.Contains(a.Detail, "rule of milan") || !strings.Contains(a.Detail, "sign_out=bob,carol,dave") {
 		t.Errorf("audit = %+v", a)
 	}
 

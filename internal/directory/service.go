@@ -1607,14 +1607,16 @@ func (s *Service) DeleteGroup(ctx context.Context, c *Caller, name, confirm stri
 			}
 		}
 		if len(logout) > 0 {
-			detail = strings.TrimSpace(detail + " logout=" + strings.Join(logout, ","))
+			detail = strings.TrimSpace(detail + " sign_out=" + strings.Join(logout, ","))
 		}
 		return nil
 	})
+	// logout is set only once the LLDAP delete succeeded: sign the former
+	// members out even if writing the audit entry failed afterwards.
+	s.logoutAll(ctx, logout, res)
 	if err != nil {
 		return res, err
 	}
-	s.logoutAll(ctx, logout, res)
 	return res, nil
 }
 
@@ -1719,9 +1721,13 @@ func (s *Service) RemoveMember(ctx context.Context, c *Caller, group, username s
 		}
 		return nil
 	})
+	// removed is set only once the LLDAP removal succeeded: sign them out
+	// even if writing the audit entry failed afterwards.
+	if removed != "" {
+		s.logoutAll(ctx, []string{removed}, res)
+	}
 	if err != nil {
 		return res, err
 	}
-	s.logoutAll(ctx, []string{removed}, res)
 	return res, nil
 }
