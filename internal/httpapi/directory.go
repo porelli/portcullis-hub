@@ -32,6 +32,17 @@ func (s *Server) registerDirectory(mux *http.ServeMux) {
 
 func actor(r *http.Request) string { return r.Header.Get("X-Forwarded-User") }
 
+// caller resolves the request's Caller (who, admin, delegated
+// permissions) once per request; on failure it has written the response.
+func (s *Server) caller(w http.ResponseWriter, r *http.Request) (*directory.Caller, bool) {
+	c, err := s.Directory.CallerFor(r.Context(), actor(r))
+	if err != nil {
+		dirErr(w, err)
+		return nil, false
+	}
+	return c, true
+}
+
 // dirErr maps directory errors to statuses; never echoes secrets (the
 // service never puts them in errors).
 func dirErr(w http.ResponseWriter, err error) {
@@ -88,7 +99,11 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	res, err := s.Directory.CreateUser(r.Context(), actor(r), req)
+	c, ok := s.caller(w, r)
+	if !ok {
+		return
+	}
+	res, err := s.Directory.CreateUser(r.Context(), c, req)
 	if err != nil {
 		dirErr(w, err)
 		return
@@ -108,7 +123,11 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if err := s.Directory.UpdateUser(r.Context(), actor(r), r.PathValue("username"), req.Email, req.DisplayName); err != nil {
+	c, ok := s.caller(w, r)
+	if !ok {
+		return
+	}
+	if err := s.Directory.UpdateUser(r.Context(), c, r.PathValue("username"), req.Email, req.DisplayName); err != nil {
 		dirErr(w, err)
 		return
 	}
@@ -127,7 +146,11 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	res, err := s.Directory.DeleteUser(r.Context(), actor(r), r.PathValue("username"), req.Confirm)
+	c, ok := s.caller(w, r)
+	if !ok {
+		return
+	}
+	res, err := s.Directory.DeleteUser(r.Context(), c, r.PathValue("username"), req.Confirm)
 	if err != nil {
 		dirErr(w, err)
 		return
@@ -144,7 +167,11 @@ func (s *Server) handleRemoveStale(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if err := s.Directory.RemoveStaleKeycloakUser(r.Context(), actor(r), r.PathValue("username"), req.Confirm); err != nil {
+	c, ok := s.caller(w, r)
+	if !ok {
+		return
+	}
+	if err := s.Directory.RemoveStaleKeycloakUser(r.Context(), c, r.PathValue("username"), req.Confirm); err != nil {
 		dirErr(w, err)
 		return
 	}
@@ -163,7 +190,11 @@ func (s *Server) handleSetPassword(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	res, err := s.Directory.SetPassword(r.Context(), actor(r), r.PathValue("username"), req.Password, req.Generate, req.Confirm)
+	c, ok := s.caller(w, r)
+	if !ok {
+		return
+	}
+	res, err := s.Directory.SetPassword(r.Context(), c, r.PathValue("username"), req.Password, req.Generate, req.Confirm)
 	if err != nil {
 		dirErr(w, err)
 		return
@@ -180,7 +211,11 @@ func (s *Server) handleInvite(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	res, err := s.Directory.SendInvite(r.Context(), actor(r), r.PathValue("username"))
+	c, ok := s.caller(w, r)
+	if !ok {
+		return
+	}
+	res, err := s.Directory.SendInvite(r.Context(), c, r.PathValue("username"))
 	if err != nil {
 		dirErr(w, err)
 		return
@@ -197,7 +232,11 @@ func (s *Server) handleRequirePasskey(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if err := s.Directory.RequirePasskey(r.Context(), actor(r), r.PathValue("username")); err != nil {
+	c, ok := s.caller(w, r)
+	if !ok {
+		return
+	}
+	if err := s.Directory.RequirePasskey(r.Context(), c, r.PathValue("username")); err != nil {
 		dirErr(w, err)
 		return
 	}
@@ -212,7 +251,11 @@ func (s *Server) handleClearActions(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if err := s.Directory.ClearActions(r.Context(), actor(r), r.PathValue("username")); err != nil {
+	c, ok := s.caller(w, r)
+	if !ok {
+		return
+	}
+	if err := s.Directory.ClearActions(r.Context(), c, r.PathValue("username")); err != nil {
 		dirErr(w, err)
 		return
 	}
@@ -230,7 +273,11 @@ func (s *Server) handleRemovePasskeys(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	res, err := s.Directory.RemovePasskeys(r.Context(), actor(r), r.PathValue("username"), req.Confirm, req.Invite)
+	c, ok := s.caller(w, r)
+	if !ok {
+		return
+	}
+	res, err := s.Directory.RemovePasskeys(r.Context(), c, r.PathValue("username"), req.Confirm, req.Invite)
 	if err != nil {
 		dirErr(w, err)
 		return
@@ -249,7 +296,11 @@ func (s *Server) handleCreateGroup(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if err := s.Directory.CreateGroup(r.Context(), actor(r), req.Name); err != nil {
+	c, ok := s.caller(w, r)
+	if !ok {
+		return
+	}
+	if err := s.Directory.CreateGroup(r.Context(), c, req.Name); err != nil {
 		dirErr(w, err)
 		return
 	}
@@ -264,7 +315,11 @@ func (s *Server) handleDeleteGroup(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if err := s.Directory.DeleteGroup(r.Context(), actor(r), r.PathValue("group"), req.Confirm); err != nil {
+	c, ok := s.caller(w, r)
+	if !ok {
+		return
+	}
+	if err := s.Directory.DeleteGroup(r.Context(), c, r.PathValue("group"), req.Confirm); err != nil {
 		dirErr(w, err)
 		return
 	}
@@ -281,7 +336,11 @@ func (s *Server) handleAddMember(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if err := s.Directory.AddMember(r.Context(), actor(r), r.PathValue("group"), req.Username); err != nil {
+	c, ok := s.caller(w, r)
+	if !ok {
+		return
+	}
+	if err := s.Directory.AddMember(r.Context(), c, r.PathValue("group"), req.Username); err != nil {
 		dirErr(w, err)
 		return
 	}
@@ -296,7 +355,11 @@ func (s *Server) handleRemoveMember(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if err := s.Directory.RemoveMember(r.Context(), actor(r), r.PathValue("group"), r.PathValue("username")); err != nil {
+	c, ok := s.caller(w, r)
+	if !ok {
+		return
+	}
+	if err := s.Directory.RemoveMember(r.Context(), c, r.PathValue("group"), r.PathValue("username")); err != nil {
 		dirErr(w, err)
 		return
 	}

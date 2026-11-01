@@ -22,12 +22,12 @@ var lldapBuiltins = map[string]bool{
 var fieldNameRe = regexp.MustCompile(`^[a-z][a-z0-9_]{0,30}$`)
 
 // CreateField creates a custom field.
-// admin only (Task 6)
-func (s *Service) CreateField(ctx context.Context, actor string, f Field) error {
+// Admins only.
+func (s *Service) CreateField(ctx context.Context, c *Caller, f Field) error {
 	f.Name = strings.TrimSpace(f.Name)
 	f.Label = strings.TrimSpace(f.Label)
 	detail := fmt.Sprintf("kind=%s multi=%v admin_only=%v", f.Kind, f.Multi, f.AdminOnly)
-	return s.run(actor, "field.create", f.Name, &detail, func() error {
+	return s.run(ctx, c, permAdmin, "field.create", f.Name, &detail, func() error {
 		if s.Store == nil {
 			return &Error{Status: http.StatusServiceUnavailable, Msg: "custom fields not configured"}
 		}
@@ -105,13 +105,13 @@ func (s *Service) CreateField(ctx context.Context, actor string, f Field) error 
 
 // UpdateField updates a field's mutable properties (Label, Values, ShareWithApps, AdminOnly).
 // Kind and Multi are immutable.
-// admin only (Task 6)
-func (s *Service) UpdateField(ctx context.Context, actor string, f Field) error {
+// Admins only.
+func (s *Service) UpdateField(ctx context.Context, c *Caller, f Field) error {
 	f.Name = strings.TrimSpace(f.Name)
 	f.Label = strings.TrimSpace(f.Label)
 	var changes []string
 	detail := ""
-	return s.run(actor, "field.update", f.Name, &detail, func() error {
+	return s.run(ctx, c, permAdmin, "field.update", f.Name, &detail, func() error {
 		if s.Store == nil {
 			return &Error{Status: http.StatusServiceUnavailable, Msg: "custom fields not configured"}
 		}
@@ -253,11 +253,11 @@ func (s *Service) UpdateField(ctx context.Context, actor string, f Field) error 
 }
 
 // DeleteField deletes a field. confirm must equal the field name.
-// admin only (Task 6)
-func (s *Service) DeleteField(ctx context.Context, actor, name, confirm string) error {
+// Admins only.
+func (s *Service) DeleteField(ctx context.Context, c *Caller, name, confirm string) error {
 	name = strings.TrimSpace(name)
 	confirm = strings.TrimSpace(confirm)
-	return s.run(actor, "field.delete", name, nil, func() error {
+	return s.run(ctx, c, permAdmin, "field.delete", name, nil, func() error {
 		if s.Store == nil {
 			return &Error{Status: http.StatusServiceUnavailable, Msg: "custom fields not configured"}
 		}

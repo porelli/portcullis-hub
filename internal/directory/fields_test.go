@@ -25,7 +25,7 @@ func TestCreateFieldCreatesLLDAPAttribute(t *testing.T) {
 		AdminOnly:     false,
 	}
 
-	if err := e.svc.CreateField(ctx, "root", f); err != nil {
+	if err := e.svc.CreateField(ctx, asRoot, f); err != nil {
 		t.Fatalf("CreateField: %v", err)
 	}
 
@@ -92,7 +92,7 @@ func TestFieldNameRules(t *testing.T) {
 			Label: "Test Field",
 			Kind:  directory.FieldKindText,
 		}
-		err := e.svc.CreateField(ctx, "root", f)
+		err := e.svc.CreateField(ctx, asRoot, f)
 		if tt.wantError == "" {
 			if err != nil {
 				t.Errorf("CreateField(%q): unexpected error: %v", tt.name, err)
@@ -119,7 +119,7 @@ func TestDeleteFieldInUseRefused(t *testing.T) {
 		Kind:   directory.FieldKindList,
 		Values: []string{"Milan", "London"},
 	}
-	if err := e.svc.CreateField(ctx, "root", f); err != nil {
+	if err := e.svc.CreateField(ctx, asRoot, f); err != nil {
 		t.Fatal(err)
 	}
 
@@ -139,7 +139,7 @@ func TestDeleteFieldInUseRefused(t *testing.T) {
 	}
 
 	// Try to delete the field
-	err := e.svc.DeleteField(ctx, "root", "location", "location")
+	err := e.svc.DeleteField(ctx, asRoot, "location", "location")
 	if err == nil {
 		t.Fatal("DeleteField: expected error, got nil")
 	}
@@ -163,7 +163,7 @@ func TestAdminOnlyLockedWhileGuarding(t *testing.T) {
 		Kind:      directory.FieldKindText,
 		AdminOnly: true,
 	}
-	if err := e.svc.CreateField(ctx, "root", f); err != nil {
+	if err := e.svc.CreateField(ctx, asRoot, f); err != nil {
 		t.Fatal(err)
 	}
 
@@ -185,7 +185,7 @@ func TestAdminOnlyLockedWhileGuarding(t *testing.T) {
 
 	// Try to turn off AdminOnly
 	f.AdminOnly = false
-	err := e.svc.UpdateField(ctx, "root", f)
+	err := e.svc.UpdateField(ctx, asRoot, f)
 	if err == nil {
 		t.Fatal("UpdateField: expected error, got nil")
 	}
@@ -209,7 +209,7 @@ func TestRemoveListValueInUseRefused(t *testing.T) {
 		Kind:   directory.FieldKindList,
 		Values: []string{"NYC", "SF", "Austin"},
 	}
-	if err := e.svc.CreateField(ctx, "root", f); err != nil {
+	if err := e.svc.CreateField(ctx, asRoot, f); err != nil {
 		t.Fatal(err)
 	}
 
@@ -230,7 +230,7 @@ func TestRemoveListValueInUseRefused(t *testing.T) {
 
 	// Try to remove SF
 	f.Values = []string{"NYC", "Austin"}
-	err := e.svc.UpdateField(ctx, "root", f)
+	err := e.svc.UpdateField(ctx, asRoot, f)
 	if err == nil {
 		t.Fatal("UpdateField: expected error, got nil")
 	}
@@ -248,14 +248,14 @@ func TestFieldMutationsAreAudited(t *testing.T) {
 
 	// Create
 	f := directory.Field{Name: "dept", Label: "Department", Kind: directory.FieldKindText}
-	e.svc.CreateField(ctx, "root", f)
+	e.svc.CreateField(ctx, asRoot, f)
 
 	// Update
 	f.Label = "Department Name"
-	e.svc.UpdateField(ctx, "root", f)
+	e.svc.UpdateField(ctx, asRoot, f)
 
 	// Delete
-	e.svc.DeleteField(ctx, "root", "dept", "dept")
+	e.svc.DeleteField(ctx, asRoot, "dept", "dept")
 
 	entries, _ := e.svc.Recent(10)
 	if len(entries) < 3 {
@@ -275,20 +275,20 @@ func TestKindAndMultiImmutable(t *testing.T) {
 	e.svc.Store = &directory.Store{Path: filepath.Join(t.TempDir(), "directory.yaml")}
 
 	f := directory.Field{Name: "dept", Label: "Department", Kind: directory.FieldKindText, Multi: false}
-	if err := e.svc.CreateField(ctx, "root", f); err != nil {
+	if err := e.svc.CreateField(ctx, asRoot, f); err != nil {
 		t.Fatal(err)
 	}
 
 	// Try to change Kind
 	f.Kind = directory.FieldKindList
-	if err := e.svc.UpdateField(ctx, "root", f); err == nil || status(err) != 400 {
+	if err := e.svc.UpdateField(ctx, asRoot, f); err == nil || status(err) != 400 {
 		t.Errorf("changing Kind: want 400, got %v", err)
 	}
 
 	// Try to change Multi
 	f.Kind = directory.FieldKindText
 	f.Multi = true
-	if err := e.svc.UpdateField(ctx, "root", f); err == nil || status(err) != 400 {
+	if err := e.svc.UpdateField(ctx, asRoot, f); err == nil || status(err) != 400 {
 		t.Errorf("changing Multi: want 400, got %v", err)
 	}
 }
@@ -303,7 +303,7 @@ func TestMultiRefusedForPerson(t *testing.T) {
 		Kind:  directory.FieldKindPerson,
 		Multi: true,
 	}
-	err := e.svc.CreateField(ctx, "root", f)
+	err := e.svc.CreateField(ctx, asRoot, f)
 	if err == nil {
 		t.Fatal("CreateField with Multi person: expected error, got nil")
 	}
@@ -335,13 +335,13 @@ func TestListValueValidation(t *testing.T) {
 			Kind:   directory.FieldKindList,
 			Values: tt.values,
 		}
-		err := e.svc.CreateField(ctx, "root", f)
+		err := e.svc.CreateField(ctx, asRoot, f)
 		if tt.want == "" {
 			if err != nil {
 				t.Errorf("%s: unexpected error: %v", tt.name, err)
 			}
 			// Clean up for next test
-			e.svc.DeleteField(ctx, "root", "dept", "dept")
+			e.svc.DeleteField(ctx, asRoot, "dept", "dept")
 		} else {
 			if err == nil {
 				t.Errorf("%s: expected error containing %q, got nil", tt.name, tt.want)
@@ -369,14 +369,14 @@ func TestFieldLabelRequired(t *testing.T) {
 
 	for _, tt := range tests {
 		f := directory.Field{Name: "test", Label: tt.label, Kind: directory.FieldKindText}
-		err := e.svc.CreateField(ctx, "root", f)
+		err := e.svc.CreateField(ctx, asRoot, f)
 		if tt.valid && err != nil {
 			t.Errorf("Label %q: unexpected error: %v", tt.label, err)
 		} else if !tt.valid && err == nil {
 			t.Errorf("Label %q: expected error, got nil", tt.label)
 		}
 		if err == nil {
-			e.svc.DeleteField(ctx, "root", "test", "test")
+			e.svc.DeleteField(ctx, asRoot, "test", "test")
 		}
 	}
 }
@@ -386,12 +386,12 @@ func TestCreateFieldDuplicateRefused(t *testing.T) {
 	e.svc.Store = &directory.Store{Path: filepath.Join(t.TempDir(), "directory.yaml")}
 
 	f := directory.Field{Name: "dept", Label: "Department", Kind: directory.FieldKindText}
-	if err := e.svc.CreateField(ctx, "root", f); err != nil {
+	if err := e.svc.CreateField(ctx, asRoot, f); err != nil {
 		t.Fatal(err)
 	}
 
 	// Try to create again
-	err := e.svc.CreateField(ctx, "root", f)
+	err := e.svc.CreateField(ctx, asRoot, f)
 	if err == nil {
 		t.Fatal("CreateField duplicate: expected error, got nil")
 	}
@@ -405,18 +405,18 @@ func TestDeleteFieldConfirmRequired(t *testing.T) {
 	e.svc.Store = &directory.Store{Path: filepath.Join(t.TempDir(), "directory.yaml")}
 
 	f := directory.Field{Name: "dept", Label: "Department", Kind: directory.FieldKindText}
-	if err := e.svc.CreateField(ctx, "root", f); err != nil {
+	if err := e.svc.CreateField(ctx, asRoot, f); err != nil {
 		t.Fatal(err)
 	}
 
 	// Wrong confirm
-	err := e.svc.DeleteField(ctx, "root", "dept", "wrong")
+	err := e.svc.DeleteField(ctx, asRoot, "dept", "wrong")
 	if err == nil || status(err) != 400 {
 		t.Errorf("DeleteField with wrong confirm: want 400, got %v", err)
 	}
 
 	// Correct confirm
-	if err := e.svc.DeleteField(ctx, "root", "dept", "dept"); err != nil {
+	if err := e.svc.DeleteField(ctx, asRoot, "dept", "dept"); err != nil {
 		t.Errorf("DeleteField with correct confirm: %v", err)
 	}
 }
@@ -426,7 +426,7 @@ func TestNilStoreReturns503(t *testing.T) {
 	e.svc.Store = nil
 
 	f := directory.Field{Name: "dept", Label: "Department", Kind: directory.FieldKindText}
-	err := e.svc.CreateField(ctx, "root", f)
+	err := e.svc.CreateField(ctx, asRoot, f)
 	if status(err) != 503 {
 		t.Errorf("CreateField with nil Store: status = %d, want 503", status(err))
 	}
@@ -445,7 +445,7 @@ func TestTextFieldMultiCreatesListAttribute(t *testing.T) {
 		Kind:  directory.FieldKindText,
 		Multi: true,
 	}
-	if err := e.svc.CreateField(ctx, "root", f); err != nil {
+	if err := e.svc.CreateField(ctx, asRoot, f); err != nil {
 		t.Fatal(err)
 	}
 
@@ -469,7 +469,7 @@ func TestListFieldMultiFalseCreatesNonListAttribute(t *testing.T) {
 		Values: []string{"NYC", "SF"},
 		Multi:  false,
 	}
-	if err := e.svc.CreateField(ctx, "root", f); err != nil {
+	if err := e.svc.CreateField(ctx, asRoot, f); err != nil {
 		t.Fatal(err)
 	}
 
@@ -493,7 +493,7 @@ func TestRemoveListValueRefusedWhenUsed(t *testing.T) {
 		Kind:   directory.FieldKindList,
 		Values: []string{"NYC", "SF", "Austin"},
 	}
-	if err := e.svc.CreateField(ctx, "root", f); err != nil {
+	if err := e.svc.CreateField(ctx, asRoot, f); err != nil {
 		t.Fatal(err)
 	}
 
@@ -512,7 +512,7 @@ func TestRemoveListValueRefusedWhenUsed(t *testing.T) {
 
 	// Try to replace SF with LA
 	f.Values = []string{"NYC", "LA", "Austin"}
-	err := e.svc.UpdateField(ctx, "root", f)
+	err := e.svc.UpdateField(ctx, asRoot, f)
 	if err == nil {
 		t.Fatal("UpdateField removing used value: expected error, got nil")
 	}
@@ -531,14 +531,14 @@ func TestLabelLengthCountsRunes(t *testing.T) {
 	// 64 runes with accents (more than 64 bytes)
 	label64 := strings.Repeat("é", 64)
 	f := directory.Field{Name: "test64", Label: label64, Kind: directory.FieldKindText}
-	if err := e.svc.CreateField(ctx, "root", f); err != nil {
+	if err := e.svc.CreateField(ctx, asRoot, f); err != nil {
 		t.Errorf("64-rune label: unexpected error: %v", err)
 	}
 
 	// 65 runes
 	label65 := strings.Repeat("é", 65)
 	f2 := directory.Field{Name: "test65", Label: label65, Kind: directory.FieldKindText}
-	if err := e.svc.CreateField(ctx, "root", f2); err == nil {
+	if err := e.svc.CreateField(ctx, asRoot, f2); err == nil {
 		t.Error("65-rune label: expected error, got nil")
 	}
 }
@@ -554,7 +554,7 @@ func TestNonListKindsRefuseValues(t *testing.T) {
 		Kind:   directory.FieldKindText,
 		Values: []string{"Engineering"},
 	}
-	err := e.svc.CreateField(ctx, "root", f)
+	err := e.svc.CreateField(ctx, asRoot, f)
 	if err == nil || status(err) != 400 {
 		t.Errorf("text field with Values: want 400, got %v", err)
 	}
@@ -566,7 +566,7 @@ func TestNonListKindsRefuseValues(t *testing.T) {
 		Kind:   directory.FieldKindPerson,
 		Values: []string{"alice"},
 	}
-	err2 := e.svc.CreateField(ctx, "root", f2)
+	err2 := e.svc.CreateField(ctx, asRoot, f2)
 	if err2 == nil || status(err2) != 400 {
 		t.Errorf("person field with Values: want 400, got %v", err2)
 	}
@@ -577,7 +577,7 @@ func TestBuiltinFieldName400(t *testing.T) {
 	e.svc.Store = &directory.Store{Path: filepath.Join(t.TempDir(), "directory.yaml")}
 
 	f := directory.Field{Name: "mail", Label: "Email", Kind: directory.FieldKindText}
-	err := e.svc.CreateField(ctx, "root", f)
+	err := e.svc.CreateField(ctx, asRoot, f)
 	if status(err) != 400 {
 		t.Errorf("built-in field name: status = %d, want 400", status(err))
 	}
@@ -596,14 +596,14 @@ func TestUpdateFieldAuditDetail(t *testing.T) {
 		AdminOnly:     false,
 		ShareWithApps: true,
 	}
-	e.svc.CreateField(ctx, "root", f)
+	e.svc.CreateField(ctx, asRoot, f)
 
 	// Update multiple properties
 	f.Label = "Department Name"
 	f.AdminOnly = true
 	f.ShareWithApps = false
 	f.Values = []string{"Eng", "Sales", "HR"}
-	e.svc.UpdateField(ctx, "root", f)
+	e.svc.UpdateField(ctx, asRoot, f)
 
 	entries, _ := e.svc.Recent(10)
 	if len(entries) < 2 {

@@ -24,7 +24,7 @@ func evalEnv(t *testing.T) (*env, *directory.Store) {
 		{Name: "city", Label: "City", Kind: directory.FieldKindText},
 		{Name: "manager", Label: "Manager", Kind: directory.FieldKindPerson},
 	} {
-		if err := e.svc.CreateField(ctx, "root", f); err != nil {
+		if err := e.svc.CreateField(ctx, asRoot, f); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -421,7 +421,7 @@ func TestRunEvaluatorKick(t *testing.T) {
 	// A detail change outside a mutation waits for the next tick; any
 	// mutation kicks an evaluation.
 	setCity(t, e, "carol", "Rome")
-	if err := e.svc.CreateGroup(ctx, "root", "other"); err != nil {
+	if err := e.svc.CreateGroup(ctx, asRoot, "other"); err != nil {
 		t.Fatal(err)
 	}
 	waitMembers(t, e, "milan", "bob")

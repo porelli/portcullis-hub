@@ -159,7 +159,7 @@ func TestOverview(t *testing.T) {
 	if err != nil || ov.Available || !strings.Contains(ov.Reason, "not configured") {
 		t.Errorf("unconfigured = %+v, %v", ov, err)
 	}
-	if err := e.svc.CreateGroup(ctx, "root", "x"); status(err) != 503 {
+	if err := e.svc.CreateGroup(ctx, asRoot, "x"); status(err) != 503 {
 		t.Errorf("mutation while unconfigured = %v", err)
 	}
 }
@@ -167,7 +167,7 @@ func TestOverview(t *testing.T) {
 func TestCreateUserInvite(t *testing.T) {
 	e := newEnv(t)
 	e.ll.AddGroup("users_app")
-	res, err := e.svc.CreateUser(ctx, "root", directory.CreateRequest{Username: "dave", Email: "dave@example.org", DisplayName: "Dave", Groups: []string{"users_app"}})
+	res, err := e.svc.CreateUser(ctx, asRoot, directory.CreateRequest{Username: "dave", Email: "dave@example.org", DisplayName: "Dave", Groups: []string{"users_app"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,14 +186,14 @@ func TestCreateUserInvite(t *testing.T) {
 	}
 	// Invites unavailable: refuse before creating anything.
 	e.svc.Invites = invite.New(e.invites.srv.URL, filepath.Join(t.TempDir(), "missing"))
-	if _, err := e.svc.CreateUser(ctx, "root", directory.CreateRequest{Username: "erin", Email: "erin@example.org"}); status(err) != 503 || e.ll.HasUser("erin") {
+	if _, err := e.svc.CreateUser(ctx, asRoot, directory.CreateRequest{Username: "erin", Email: "erin@example.org"}); status(err) != 503 || e.ll.HasUser("erin") {
 		t.Errorf("no invites = %v", err)
 	}
 }
 
 func TestCreateUserPassword(t *testing.T) {
 	e := newEnv(t)
-	res, err := e.svc.CreateUser(ctx, "root", directory.CreateRequest{Username: "frank", Email: "frank@example.org", Onboarding: "password", Generate: true, RequirePasskey: true})
+	res, err := e.svc.CreateUser(ctx, asRoot, directory.CreateRequest{Username: "frank", Email: "frank@example.org", Onboarding: "password", Generate: true, RequirePasskey: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,13 +203,13 @@ func TestCreateUserPassword(t *testing.T) {
 	if u := e.kc.Get("frank"); u == nil || len(u.RequiredActions) != 1 || u.RequiredActions[0] != keycloak.PasskeyAction {
 		t.Errorf("kc frank = %+v", u)
 	}
-	res, err = e.svc.CreateUser(ctx, "root", directory.CreateRequest{Username: "gina", Email: "gina@example.org", Onboarding: "password", Password: "admin-chosen-pw"})
+	res, err = e.svc.CreateUser(ctx, asRoot, directory.CreateRequest{Username: "gina", Email: "gina@example.org", Onboarding: "password", Password: "admin-chosen-pw"})
 	if err != nil || res.Password != "" || e.ll.Password("gina") != "admin-chosen-pw" {
 		t.Errorf("provided password: %+v %v", res, err)
 	}
 	// LDAP failure rolls the user back.
 	e.ll.FailPassword = 53
-	if _, err := e.svc.CreateUser(ctx, "root", directory.CreateRequest{Username: "hank", Email: "hank@example.org", Onboarding: "password", Generate: true}); err == nil || e.ll.HasUser("hank") {
+	if _, err := e.svc.CreateUser(ctx, asRoot, directory.CreateRequest{Username: "hank", Email: "hank@example.org", Onboarding: "password", Generate: true}); err == nil || e.ll.HasUser("hank") {
 		t.Errorf("rollback: %v, exists=%v", err, e.ll.HasUser("hank"))
 	}
 }
@@ -231,14 +231,14 @@ func TestCreateUserValidation(t *testing.T) {
 		{directory.CreateRequest{Username: "alice", Email: "x@example.org"}, 409},
 	}
 	for _, c := range cases {
-		if _, err := e.svc.CreateUser(ctx, "root", c.req); status(err) != c.want {
+		if _, err := e.svc.CreateUser(ctx, asRoot, c.req); status(err) != c.want {
 			t.Errorf("%+v: %v, want %d", c.req, err, c.want)
 		}
 	}
 	if e.ll.HasUser("ok") {
 		t.Error("invalid request created a user")
 	}
-	if _, err := e.svc.CreateUser(ctx, "", directory.CreateRequest{Username: "ok", Email: "x@example.org"}); status(err) != 403 {
+	if _, err := e.svc.CreateUser(ctx, &directory.Caller{}, directory.CreateRequest{Username: "ok", Email: "x@example.org"}); status(err) != 403 {
 		t.Errorf("no actor = %v", err)
 	}
 }
@@ -254,43 +254,43 @@ func TestGuardrails(t *testing.T) {
 			t.Errorf("%s: %v (status %d), want %d", name, err, status(err), want)
 		}
 	}
-	_, err := e.svc.DeleteUser(ctx, "root", "portcullis-hub", "portcullis-hub")
+	_, err := e.svc.DeleteUser(ctx, asRoot, "portcullis-hub", "portcullis-hub")
 	check("delete service", err, 409)
-	_, err = e.svc.DeleteUser(ctx, "root", "admin", "admin")
+	_, err = e.svc.DeleteUser(ctx, asRoot, "admin", "admin")
 	check("delete core admin", err, 409)
-	_, err = e.svc.DeleteUser(ctx, "root", "root", "root")
+	_, err = e.svc.DeleteUser(ctx, asRoot, "root", "root")
 	check("delete self", err, 409)
-	_, err = e.svc.DeleteUser(ctx, "root", "alice", "alic")
+	_, err = e.svc.DeleteUser(ctx, asRoot, "alice", "alic")
 	check("bad confirm", err, 400)
-	_, err = e.svc.SetPassword(ctx, "root", "portcullis-hub", "", true, "")
+	_, err = e.svc.SetPassword(ctx, asRoot, "portcullis-hub", "", true, "")
 	check("password service", err, 409)
-	_, err = e.svc.SetPassword(ctx, "root", "admin", "", true, "")
+	_, err = e.svc.SetPassword(ctx, asRoot, "admin", "", true, "")
 	check("password core admin", err, 409)
-	check("update service", e.svc.UpdateUser(ctx, "root", "portcullis-hub", nil, strptr("x")), 409)
-	check("remove service from admin", e.svc.RemoveMember(ctx, "root", "lldap_admin", "portcullis-hub"), 409)
-	check("add service to group", e.svc.AddMember(ctx, "root", "lldap_password_manager", "portcullis-hub"), 409)
-	check("remove core admin", e.svc.RemoveMember(ctx, "root", "lldap_admin", "admin"), 409)
-	check("remove self", e.svc.RemoveMember(ctx, "root", "lldap_admin", "root"), 409)
-	check("delete builtin group", e.svc.DeleteGroup(ctx, "root", "lldap_admin", "lldap_admin"), 409)
-	check("create lldap_ group", e.svc.CreateGroup(ctx, "root", "lldap_x"), 400)
-	check("passkeys service", e.svc.RequirePasskey(ctx, "root", "portcullis-hub"), 409)
-	_, err = e.svc.SendInvite(ctx, "root", "portcullis-hub")
+	check("update service", e.svc.UpdateUser(ctx, asRoot, "portcullis-hub", nil, strptr("x")), 409)
+	check("remove service from admin", e.svc.RemoveMember(ctx, asRoot, "lldap_admin", "portcullis-hub"), 409)
+	check("add service to group", e.svc.AddMember(ctx, asRoot, "lldap_password_manager", "portcullis-hub"), 409)
+	check("remove core admin", e.svc.RemoveMember(ctx, asRoot, "lldap_admin", "admin"), 409)
+	check("remove self", e.svc.RemoveMember(ctx, asRoot, "lldap_admin", "root"), 409)
+	check("delete builtin group", e.svc.DeleteGroup(ctx, asRoot, "lldap_admin", "lldap_admin"), 409)
+	check("create lldap_ group", e.svc.CreateGroup(ctx, asRoot, "lldap_x"), 400)
+	check("passkeys service", e.svc.RequirePasskey(ctx, asRoot, "portcullis-hub"), 409)
+	_, err = e.svc.SendInvite(ctx, asRoot, "portcullis-hub")
 	check("invite service", err, 409)
 
 	// Last human admin: admin + root are humans; another admin (solo)
 	// removing root works only while admin is still a member.
 	e.ll.AddUser("solo2", "s2@example.org", "", "x-password-123")
-	check("add solo", e.svc.AddMember(ctx, "root", "lldap_admin", "solo"), 0)
-	check("remove root by solo", e.svc.RemoveMember(ctx, "solo", "lldap_admin", "root"), 0)
+	check("add solo", e.svc.AddMember(ctx, asRoot, "lldap_admin", "solo"), 0)
+	check("remove root by solo", e.svc.RemoveMember(ctx, asAdmin("solo"), "lldap_admin", "root"), 0)
 	// Simulate admin having been dropped from lldap_admin elsewhere (LLDAP UI).
 	e.ll.RemoveMember("lldap_admin", "admin")
-	check("last human by delete", deleteErr(e.svc.DeleteUser(ctx, "solo2", "solo", "solo")), 409)
-	check("last human by removal", e.svc.RemoveMember(ctx, "solo2", "lldap_admin", "solo"), 409)
+	check("last human by delete", deleteErr(e.svc.DeleteUser(ctx, asAdmin("solo2"), "solo", "solo")), 409)
+	check("last human by removal", e.svc.RemoveMember(ctx, asAdmin("solo2"), "lldap_admin", "solo"), 409)
 	if m := e.ll.GroupMembers("lldap_admin"); len(m) != 2 {
 		t.Errorf("lldap_admin = %v", m)
 	}
-	check("missing user", e.svc.AddMember(ctx, "root", "lldap_admin", "ghost"), 404)
-	check("missing group", e.svc.AddMember(ctx, "root", "ghosts", "alice"), 404)
+	check("missing user", e.svc.AddMember(ctx, asRoot, "lldap_admin", "ghost"), 404)
+	check("missing group", e.svc.AddMember(ctx, asRoot, "ghosts", "alice"), 404)
 }
 
 func deleteErr(_ *directory.Result, err error) error { return err }
@@ -301,57 +301,57 @@ func TestUserLifecycle(t *testing.T) {
 	e := newEnv(t)
 	e.kc.Import("alice", kctest.Credential{ID: "w", Type: "webauthn"})
 
-	if err := e.svc.UpdateUser(ctx, "root", "alice", strptr("new@example.org"), strptr("Alice N")); err != nil {
+	if err := e.svc.UpdateUser(ctx, asRoot, "alice", strptr("new@example.org"), strptr("Alice N")); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.svc.UpdateUser(ctx, "root", "alice", strptr("bad"), nil); status(err) != 400 {
+	if err := e.svc.UpdateUser(ctx, asRoot, "alice", strptr("bad"), nil); status(err) != 400 {
 		t.Errorf("bad email = %v", err)
 	}
-	res, err := e.svc.SetPassword(ctx, "root", "alice", "", true, "")
+	res, err := e.svc.SetPassword(ctx, asRoot, "alice", "", true, "")
 	if err != nil || len(res.Password) < 20 || e.ll.Password("alice") != res.Password {
 		t.Fatalf("reset: %+v %v", res, err)
 	}
 	if e.kc.Get("alice").Sessions != 0 {
 		t.Error("password reset should sign the user out")
 	}
-	if _, err := e.svc.SetPassword(ctx, "root", "alice", "tiny", false, ""); status(err) != 400 {
+	if _, err := e.svc.SetPassword(ctx, asRoot, "alice", "tiny", false, ""); status(err) != 400 {
 		t.Errorf("short password = %v", err)
 	}
-	if res, err := e.svc.SetPassword(ctx, "root", "alice", "an-admin-chosen-one", false, ""); err != nil || res.Password != "" || e.ll.Password("alice") != "an-admin-chosen-one" {
+	if res, err := e.svc.SetPassword(ctx, asRoot, "alice", "an-admin-chosen-one", false, ""); err != nil || res.Password != "" || e.ll.Password("alice") != "an-admin-chosen-one" {
 		t.Errorf("set: %+v %v", res, err)
 	}
 
-	res, err = e.svc.RemovePasskeys(ctx, "root", "alice", "alice", true)
+	res, err = e.svc.RemovePasskeys(ctx, asRoot, "alice", "alice", true)
 	if err != nil || res.Count != 1 || res.Invite == nil {
 		t.Fatalf("reset passkeys: %+v %v", res, err)
 	}
 	if u := e.kc.Get("alice"); len(u.Credentials) != 0 || len(u.RequiredActions) != 0 {
 		t.Errorf("after reset+invite: %+v", u)
 	}
-	if _, err := e.svc.RemovePasskeys(ctx, "root", "alice", "nope", false); status(err) != 400 {
+	if _, err := e.svc.RemovePasskeys(ctx, asRoot, "alice", "nope", false); status(err) != 400 {
 		t.Errorf("bad confirm = %v", err)
 	}
-	if res, err := e.svc.RemovePasskeys(ctx, "root", "alice", "alice", false); err != nil || len(e.kc.Get("alice").RequiredActions) != 1 || res.Invite != nil {
+	if res, err := e.svc.RemovePasskeys(ctx, asRoot, "alice", "alice", false); err != nil || len(e.kc.Get("alice").RequiredActions) != 1 || res.Invite != nil {
 		t.Errorf("remove w/o invite: %+v %v", res, err)
 	}
-	if err := e.svc.ClearActions(ctx, "root", "alice"); err != nil || len(e.kc.Get("alice").RequiredActions) != 0 {
+	if err := e.svc.ClearActions(ctx, asRoot, "alice"); err != nil || len(e.kc.Get("alice").RequiredActions) != 0 {
 		t.Errorf("clear: %v", err)
 	}
 	// RequirePasskey on a user Keycloak hasn't imported yet imports them.
 	e.ll.AddUser("ivy", "ivy@example.org", "", "")
-	if err := e.svc.RequirePasskey(ctx, "root", "ivy"); err != nil || e.kc.Get("ivy") == nil {
+	if err := e.svc.RequirePasskey(ctx, asRoot, "ivy"); err != nil || e.kc.Get("ivy") == nil {
 		t.Errorf("require on unimported: %v", err)
 	}
-	inv, err := e.svc.SendInvite(ctx, "root", "ivy")
+	inv, err := e.svc.SendInvite(ctx, asRoot, "ivy")
 	if err != nil || inv.Invite == nil {
 		t.Errorf("invite: %+v %v", inv, err)
 	}
 	e.invites.fail = true
-	if _, err := e.svc.SendInvite(ctx, "root", "ivy"); err == nil || !strings.Contains(err.Error(), "boom") {
+	if _, err := e.svc.SendInvite(ctx, asRoot, "ivy"); err == nil || !strings.Contains(err.Error(), "boom") {
 		t.Errorf("invite failure = %v", err)
 	}
 
-	dres, err := e.svc.DeleteUser(ctx, "root", "alice", "alice")
+	dres, err := e.svc.DeleteUser(ctx, asRoot, "alice", "alice")
 	if err != nil || len(dres.Warnings) != 0 {
 		t.Fatalf("delete: %+v %v", dres, err)
 	}
@@ -362,48 +362,48 @@ func TestUserLifecycle(t *testing.T) {
 
 func TestGroups(t *testing.T) {
 	e := newEnv(t)
-	if err := e.svc.CreateGroup(ctx, "root", "users_app"); err != nil {
+	if err := e.svc.CreateGroup(ctx, asRoot, "users_app"); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.svc.CreateGroup(ctx, "root", "USERS_APP"); status(err) != 409 {
+	if err := e.svc.CreateGroup(ctx, asRoot, "USERS_APP"); status(err) != 409 {
 		t.Errorf("case-duplicate = %v", err)
 	}
-	if err := e.svc.CreateGroup(ctx, "root", "bad name"); status(err) != 400 {
+	if err := e.svc.CreateGroup(ctx, asRoot, "bad name"); status(err) != 400 {
 		t.Errorf("bad name = %v", err)
 	}
-	if err := e.svc.AddMember(ctx, "root", "users_app", "alice"); err != nil {
+	if err := e.svc.AddMember(ctx, asRoot, "users_app", "alice"); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.svc.AddMember(ctx, "root", "users_app", "alice"); status(err) != 409 {
+	if err := e.svc.AddMember(ctx, asRoot, "users_app", "alice"); status(err) != 409 {
 		t.Errorf("duplicate member = %v", err)
 	}
-	if err := e.svc.RemoveMember(ctx, "root", "users_app", "alice"); err != nil {
+	if err := e.svc.RemoveMember(ctx, asRoot, "users_app", "alice"); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.svc.RemoveMember(ctx, "root", "users_app", "alice"); status(err) != 404 {
+	if err := e.svc.RemoveMember(ctx, asRoot, "users_app", "alice"); status(err) != 404 {
 		t.Errorf("not a member = %v", err)
 	}
-	if err := e.svc.DeleteGroup(ctx, "root", "users_app", "users"); status(err) != 400 {
+	if err := e.svc.DeleteGroup(ctx, asRoot, "users_app", "users"); status(err) != 400 {
 		t.Errorf("bad confirm = %v", err)
 	}
-	if err := e.svc.DeleteGroup(ctx, "root", "users_app", "users_app"); err != nil || e.ll.HasGroup("users_app") {
+	if err := e.svc.DeleteGroup(ctx, asRoot, "users_app", "users_app"); err != nil || e.ll.HasGroup("users_app") {
 		t.Errorf("delete: %v", err)
 	}
 }
 
 func TestAudit(t *testing.T) {
 	e := newEnv(t)
-	res, err := e.svc.CreateUser(ctx, "root", directory.CreateRequest{Username: "jack", Email: "jack@example.org", Onboarding: "password", Generate: true})
+	res, err := e.svc.CreateUser(ctx, asRoot, directory.CreateRequest{Username: "jack", Email: "jack@example.org", Onboarding: "password", Generate: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	pw2, err := e.svc.SetPassword(ctx, "root", "jack", "", true, "")
+	pw2, err := e.svc.SetPassword(ctx, asRoot, "jack", "", true, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	e.svc.SetPassword(ctx, "root", "jack", "admin-provided-secret", false, "")
-	e.svc.DeleteUser(ctx, "root", "root", "root") // refused
-	inv, _ := e.svc.SendInvite(ctx, "root", "jack")
+	e.svc.SetPassword(ctx, asRoot, "jack", "admin-provided-secret", false, "")
+	e.svc.DeleteUser(ctx, asRoot, "root", "root") // refused
+	inv, _ := e.svc.SendInvite(ctx, asRoot, "jack")
 
 	raw, _ := os.ReadFile(e.audit)
 	for _, secret := range []string{res.Password, pw2.Password, "admin-provided-secret", svcPass, inviteSecret, inv.Invite.URL} {
@@ -430,37 +430,43 @@ func TestAudit(t *testing.T) {
 }
 
 // userOps is every Service method that changes a user, called on target.
+// asRoot is the test administrator (root is an lldap_admin member).
+var asRoot = &directory.Caller{User: "root", Admin: true}
+
+func asAdmin(user string) *directory.Caller { return &directory.Caller{User: user, Admin: true} }
+
 // TestProtectedAccountsParity fails when a new mutating method appears
 // that isn't listed here (or in nonUserOps), so no operation can skip
-// checkTarget.
-func userOps(s *directory.Service, target string) map[string]func() error {
+// checkTarget or the delegate checks.
+func userOps(s *directory.Service, c *directory.Caller, target string) map[string]func() error {
 	r := func(_ *directory.Result, err error) error { return err }
 	return map[string]func() error{
 		"CreateUser": func() error {
-			return r(s.CreateUser(ctx, "root", directory.CreateRequest{Username: target, Email: "x@example.org"}))
+			return r(s.CreateUser(ctx, c, directory.CreateRequest{Username: target, Email: "x@example.org"}))
 		},
-		"UpdateUser":              func() error { return s.UpdateUser(ctx, "root", target, strptr("x@example.org"), nil) },
-		"DeleteUser":              func() error { return r(s.DeleteUser(ctx, "root", target, target)) },
-		"SetPassword":             func() error { return r(s.SetPassword(ctx, "root", target, "", true, target)) },
-		"SendInvite":              func() error { return r(s.SendInvite(ctx, "root", target)) },
-		"RequirePasskey":          func() error { return s.RequirePasskey(ctx, "root", target) },
-		"ClearActions":            func() error { return s.ClearActions(ctx, "root", target) },
-		"RemovePasskeys":          func() error { return r(s.RemovePasskeys(ctx, "root", target, target, true)) },
-		"AddMember":               func() error { return s.AddMember(ctx, "root", "users_app", target) },
-		"RemoveMember":            func() error { return s.RemoveMember(ctx, "root", "lldap_admin", target) },
-		"RemoveStaleKeycloakUser": func() error { return s.RemoveStaleKeycloakUser(ctx, "root", target, target) },
+		"UpdateUser":              func() error { return s.UpdateUser(ctx, c, target, strptr("x@example.org"), nil) },
+		"DeleteUser":              func() error { return r(s.DeleteUser(ctx, c, target, target)) },
+		"SetPassword":             func() error { return r(s.SetPassword(ctx, c, target, "", true, target)) },
+		"SendInvite":              func() error { return r(s.SendInvite(ctx, c, target)) },
+		"RequirePasskey":          func() error { return s.RequirePasskey(ctx, c, target) },
+		"ClearActions":            func() error { return s.ClearActions(ctx, c, target) },
+		"RemovePasskeys":          func() error { return r(s.RemovePasskeys(ctx, c, target, target, true)) },
+		"AddMember":               func() error { return s.AddMember(ctx, c, "users_app", target) },
+		"RemoveMember":            func() error { return s.RemoveMember(ctx, c, "lldap_admin", target) },
+		"RemoveStaleKeycloakUser": func() error { return s.RemoveStaleKeycloakUser(ctx, c, target, target) },
 	}
 }
 
 // nonUserOps are the exported methods that don't change a user. The
 // evaluator (Evaluate, RunEvaluator) targets nobody: it leaves protected
-// accounts alone, see TestProtectedAccountsNeverRuleMembers.
-var nonUserOps = map[string]bool{"Overview": true, "Recent": true, "CreateGroup": true, "DeleteGroup": true, "CreateField": true, "UpdateField": true, "DeleteField": true, "Evaluate": true, "RunEvaluator": true, "Desired": true, "DesiredFromLLDAP": true, "Pending": true}
+// accounts alone, see TestProtectedAccountsNeverRuleMembers. The group
+// and field operations are admin-only (TestDelegateCannotEscalate).
+var nonUserOps = map[string]bool{"Overview": true, "Recent": true, "CallerFor": true, "CreateGroup": true, "DeleteGroup": true, "CreateField": true, "UpdateField": true, "DeleteField": true, "Evaluate": true, "RunEvaluator": true, "Desired": true, "DesiredFromLLDAP": true, "Pending": true}
 
 func TestProtectedAccountsParity(t *testing.T) {
 	e := newEnv(t)
 	e.ll.AddGroup("users_app", "admin", "portcullis-hub")
-	ops := userOps(e.svc, "x")
+	ops := userOps(e.svc, asRoot, "x")
 	typ := reflect.TypeOf(e.svc)
 	for i := 0; i < typ.NumMethod(); i++ {
 		name := typ.Method(i).Name
@@ -470,13 +476,50 @@ func TestProtectedAccountsParity(t *testing.T) {
 	}
 	before := len(e.ll.Mutations)
 	for _, target := range []string{directory.CoreAdmin, "portcullis-hub"} {
-		for name, op := range userOps(e.svc, target) {
+		for name, op := range userOps(e.svc, asRoot, target) {
 			err := op()
 			if st := status(err); st != 409 && !(name == "CreateUser" && st == 400) {
 				t.Errorf("%s(%s) = %v (status %d), want refusal", name, target, err, st)
 			}
 			if target == directory.CoreAdmin && name != "CreateUser" && !strings.Contains(err.Error(), "./portcullis invite admin") {
 				t.Errorf("%s(admin) message = %q", name, err)
+			}
+		}
+	}
+
+	if got := e.ll.Mutations[before:]; len(got) != 0 {
+		t.Errorf("protected accounts were changed by an admin: %v", got)
+	}
+
+	// A delegate holding every permission: every user-targeting operation
+	// refuses (403) the protected accounts, administrators, members of
+	// permission groups and the delegate themselves.
+	e.svc.Store = &directory.Store{Path: filepath.Join(t.TempDir(), "directory.yaml")}
+	cfg, _ := e.svc.Store.Load()
+	cfg.Permissions = map[string]string{directory.PermEditDetails: "hr_edit", directory.PermInvite: "hr_invite", directory.PermRemove: "hr_remove"}
+	if err := e.svc.Store.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	e.ll.AddGroup("hr_edit")
+	e.ll.AddGroup("hr_invite")
+	e.ll.AddGroup("hr_remove")
+	e.ll.AddGroup("ops_admins")
+	e.ll.AddGroup("lldap_password_manager")
+	e.ll.AddUser("hera", "hera@example.org", "", "", "hr_edit", "hr_invite", "hr_remove")
+	e.ll.AddUser("inv", "inv@example.org", "", "", "hr_invite")
+	e.ll.AddUser("otto", "otto@example.org", "", "", "ops_admins")
+	e.ll.AddUser("pm", "pm@example.org", "", "", "lldap_password_manager")
+	e.kc.Import("root")
+	e.kc.Import("inv")
+	hera, err := e.svc.CallerFor(ctx, "hera")
+	if err != nil || hera.Admin || len(hera.Perms) != 3 {
+		t.Fatalf("hera = %+v %v", hera, err)
+	}
+	before = len(e.ll.Mutations)
+	for _, target := range []string{directory.CoreAdmin, "portcullis-hub", "root", "otto", "pm", "inv", "hera", "HERA"} {
+		for name, op := range userOps(e.svc, hera, target) {
+			if err := op(); status(err) != 403 {
+				t.Errorf("delegate %s(%s) = %v (status %d), want 403", name, target, err, status(err))
 			}
 		}
 	}
@@ -538,36 +581,36 @@ func TestAdministrators(t *testing.T) {
 
 	// No invites for administrators, yourself included; core isn't asked.
 	for _, who := range []string{"bea", "otto", "xena", "root"} {
-		_, err := e.svc.SendInvite(ctx, "root", who)
+		_, err := e.svc.SendInvite(ctx, asRoot, who)
 		if status(err) != 409 || !strings.Contains(err.Error(), "administrators are recovered from the server: ./portcullis invite "+who) {
 			t.Errorf("invite %s = %v", who, err)
 		}
 	}
 	// Reset passkeys → new invite is refused before anything is removed.
-	if _, err := e.svc.RemovePasskeys(ctx, "root", "bea", "bea", true); status(err) != 409 || len(e.kc.Get("bea").Credentials) != 1 {
+	if _, err := e.svc.RemovePasskeys(ctx, asRoot, "bea", "bea", true); status(err) != 409 || len(e.kc.Get("bea").Credentials) != 1 {
 		t.Errorf("reset+invite for admin = %v, creds %v", err, e.kc.Get("bea").Credentials)
 	}
 	if len(e.invites.users) != 0 {
 		t.Fatalf("core was asked for admin invites: %v", e.invites.users)
 	}
 	// Password and passkey reset for another admin: typed confirmation.
-	if _, err := e.svc.SetPassword(ctx, "root", "bea", "", true, "be"); status(err) != 400 || e.ll.Password("bea") != "bea-password-123" {
+	if _, err := e.svc.SetPassword(ctx, asRoot, "bea", "", true, "be"); status(err) != 400 || e.ll.Password("bea") != "bea-password-123" {
 		t.Errorf("password for another admin without confirm = %v", err)
 	}
-	if _, err := e.svc.SetPassword(ctx, "root", "otto", "", true, "otto"); err != nil {
+	if _, err := e.svc.SetPassword(ctx, asRoot, "otto", "", true, "otto"); err != nil {
 		t.Errorf("confirmed password = %v", err)
 	}
-	if _, err := e.svc.RemovePasskeys(ctx, "root", "bea", "bea", false); err != nil || len(e.kc.Get("bea").Credentials) != 0 {
+	if _, err := e.svc.RemovePasskeys(ctx, asRoot, "bea", "bea", false); err != nil || len(e.kc.Get("bea").Credentials) != 0 {
 		t.Errorf("confirmed reset = %v", err)
 	}
 	// Creating an administrator in invite mode: created, no invite, server hint.
-	res, err := e.svc.CreateUser(ctx, "root", directory.CreateRequest{Username: "nora", Email: "nora@example.org", Groups: []string{"ops_admins"}})
+	res, err := e.svc.CreateUser(ctx, asRoot, directory.CreateRequest{Username: "nora", Email: "nora@example.org", Groups: []string{"ops_admins"}})
 	if err != nil || res.Invite != nil || res.ServerInvite != "./portcullis invite nora" || !e.ll.HasUser("nora") || len(e.invites.users) != 0 {
 		t.Errorf("create admin = %+v %v", res, err)
 	}
 	// ... even when invites aren't configured at all.
 	e.svc.Invites = nil
-	if res, err := e.svc.CreateUser(ctx, "root", directory.CreateRequest{Username: "nils", Email: "nils@example.org", Groups: []string{"lldap_admin"}}); err != nil || res.ServerInvite == "" {
+	if res, err := e.svc.CreateUser(ctx, asRoot, directory.CreateRequest{Username: "nils", Email: "nils@example.org", Groups: []string{"lldap_admin"}}); err != nil || res.ServerInvite == "" {
 		t.Errorf("create admin without invites = %+v %v", res, err)
 	}
 	e.svc.Invites = invite.New(e.invites.srv.URL, e.secretFile)
@@ -576,10 +619,10 @@ func TestAdministrators(t *testing.T) {
 	e.invites.mu.Lock()
 	e.invites.refuse = map[string]bool{"alice": true, "zed": true}
 	e.invites.mu.Unlock()
-	if _, err := e.svc.SendInvite(ctx, "root", "alice"); status(err) != 409 || !strings.Contains(err.Error(), "./portcullis invite alice") || !strings.Contains(err.Error(), "user is an administrator") {
+	if _, err := e.svc.SendInvite(ctx, asRoot, "alice"); status(err) != 409 || !strings.Contains(err.Error(), "./portcullis invite alice") || !strings.Contains(err.Error(), "user is an administrator") {
 		t.Errorf("core 409 = %v", err)
 	}
-	res, err = e.svc.CreateUser(ctx, "root", directory.CreateRequest{Username: "zed", Email: "zed@example.org"})
+	res, err = e.svc.CreateUser(ctx, asRoot, directory.CreateRequest{Username: "zed", Email: "zed@example.org"})
 	if err != nil || res.Invite != nil || res.ServerInvite != "./portcullis invite zed" || len(res.Warnings) != 1 {
 		t.Errorf("create with core 409 = %+v %v", res, err)
 	}
@@ -725,19 +768,19 @@ func TestStaleKeycloakRecords(t *testing.T) {
 			t.Errorf("%s = %v (status %d), want %d", name, err, got, want)
 		}
 	}
-	check("no confirm", e.svc.RemoveStaleKeycloakUser(ctx, "root", "e2ecert", "nope"), 400)
-	check("no actor", e.svc.RemoveStaleKeycloakUser(ctx, "", "e2ecert", "e2ecert"), 403)
-	check("exists in LLDAP", e.svc.RemoveStaleKeycloakUser(ctx, "root", "alice", "alice"), 409)
-	check("not federated", e.svc.RemoveStaleKeycloakUser(ctx, "root", "kclocal", "kclocal"), 409)
-	check("unknown", e.svc.RemoveStaleKeycloakUser(ctx, "root", "ghost", "ghost"), 404)
+	check("no confirm", e.svc.RemoveStaleKeycloakUser(ctx, asRoot, "e2ecert", "nope"), 400)
+	check("no actor", e.svc.RemoveStaleKeycloakUser(ctx, &directory.Caller{}, "e2ecert", "e2ecert"), 403)
+	check("exists in LLDAP", e.svc.RemoveStaleKeycloakUser(ctx, asRoot, "alice", "alice"), 409)
+	check("not federated", e.svc.RemoveStaleKeycloakUser(ctx, asRoot, "kclocal", "kclocal"), 409)
+	check("unknown", e.svc.RemoveStaleKeycloakUser(ctx, asRoot, "ghost", "ghost"), 404)
 	e.kc.Import("admin")
-	check("core admin", e.svc.RemoveStaleKeycloakUser(ctx, "root", "admin", "admin"), 409)
-	check("service account", e.svc.RemoveStaleKeycloakUser(ctx, "root", "portcullis-hub", "portcullis-hub"), 409)
+	check("core admin", e.svc.RemoveStaleKeycloakUser(ctx, asRoot, "admin", "admin"), 409)
+	check("service account", e.svc.RemoveStaleKeycloakUser(ctx, asRoot, "portcullis-hub", "portcullis-hub"), 409)
 	if e.kc.Get("alice") == nil || e.kc.Get("kclocal") == nil || e.kc.Get("admin") == nil || e.kc.Get("e2ecert") == nil {
 		t.Fatal("a refused removal deleted something")
 	}
 
-	check("remove", e.svc.RemoveStaleKeycloakUser(ctx, "root", "e2ecert", "e2ecert"), 0)
+	check("remove", e.svc.RemoveStaleKeycloakUser(ctx, asRoot, "e2ecert", "e2ecert"), 0)
 	if e.kc.Get("e2ecert") != nil {
 		t.Error("stale record still in Keycloak")
 	}
@@ -759,7 +802,7 @@ func TestDeleteUserKeycloakCopy(t *testing.T) {
 	e.kc.Import("bob")
 	e.kc.Import("carl")
 
-	res, err := e.svc.DeleteUser(ctx, "root", "bob", "bob")
+	res, err := e.svc.DeleteUser(ctx, asRoot, "bob", "bob")
 	if err != nil || len(res.Warnings) != 0 || e.kc.Get("bob") != nil {
 		t.Fatalf("delete bob: %+v %v", res, err)
 	}
@@ -769,7 +812,7 @@ func TestDeleteUserKeycloakCopy(t *testing.T) {
 	}
 
 	e.kc.SetDeleteStatus(500)
-	res, err = e.svc.DeleteUser(ctx, "root", "carl", "carl")
+	res, err = e.svc.DeleteUser(ctx, asRoot, "carl", "carl")
 	if err != nil || len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], "Stale Keycloak records") {
 		t.Fatalf("delete carl: %+v %v", res, err)
 	}

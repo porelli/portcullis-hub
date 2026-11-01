@@ -27,6 +27,12 @@ var _ compose.Runner = nopRunner{}
 
 func newDirServer(t *testing.T) (*httptest.Server, *lldaptest.Server, *kctest.Server) {
 	t.Helper()
+	return newDirServerWith(t, nil)
+}
+
+// newDirServerWith lets the caller adjust the directory service first.
+func newDirServerWith(t *testing.T, adjust func(*directory.Service)) (*httptest.Server, *lldaptest.Server, *kctest.Server) {
+	t.Helper()
 	root := t.TempDir()
 	src := filepath.Join(root, "src", "demo")
 	os.MkdirAll(src, 0755)
@@ -69,6 +75,9 @@ func newDirServer(t *testing.T) (*httptest.Server, *lldaptest.Server, *kctest.Se
 		Audit:   &directory.AuditLog{Path: filepath.Join(data, "audit.jsonl")},
 		Apps:    h.DirectoryApps,
 	}}
+	if adjust != nil {
+		adjust(s.Directory)
+	}
 	handler, err := s.Handler()
 	if err != nil {
 		t.Fatal(err)
@@ -191,6 +200,55 @@ func TestDirectoryAPI(t *testing.T) {
 	json.Unmarshal([]byte(b), &audit)
 	if len(audit) < 15 || audit[0].Action != "user.password" || strings.Contains(b, res.Password) {
 		t.Errorf("audit = %d entries", len(audit))
+	}
+}
+
+// TestDirectoryDelegates: the Caller is built per request from
+// X-Forwarded-User; delegates get their permissions and nothing more.
+func TestDirectoryDelegates(t *testing.T) {
+	srv, ll, _ := newDirServerWith(t, func(d *directory.Service) {
+		d.Store = &directory.Store{Path: filepath.Join(t.TempDir(), "directory.yaml")}
+		cfg, _ := d.Store.Load()
+		cfg.Permissions = map[string]string{directory.PermEditDetails: "hr", directory.PermInvite: "hr"}
+		if err := d.Store.Save(cfg); err != nil {
+			t.Fatal(err)
+		}
+	})
+	ll.AddGroup("hr")
+	ll.AddGroup("users_demo")
+	ll.AddUser("hilda", "hilda@example.org", "Hilda", "", "hr")
+	ll.AddUser("bob", "bob@example.org", "Bob", "")
+	cases := []struct {
+		user, method, path, body string
+		want                     int
+	}{
+		{"hilda", "PUT", "/api/directory/users/bob", `{"display_name":"Robert"}`, 200},
+		{"hilda", "PUT", "/api/directory/users/hilda", `{"display_name":"Boss"}`, 403},
+		{"hilda", "PUT", "/api/directory/users/root", `{"display_name":"X"}`, 403},
+		{"hilda", "POST", "/api/directory/users", `{"username":"nina","email":"nina@example.org"}`, 200},
+		{"hilda", "POST", "/api/directory/users", `{"username":"otto","email":"otto@example.org","groups":["users_demo"]}`, 400},
+		{"hilda", "POST", "/api/directory/users", `{"username":"otto","email":"otto@example.org","onboarding":"password","generate_password":true}`, 403},
+		{"hilda", "POST", "/api/directory/users/bob/invite", `{}`, 200},
+		{"hilda", "DELETE", "/api/directory/users/bob", `{"confirm":"bob"}`, 403},
+		{"hilda", "POST", "/api/directory/users/bob/password", `{"generate":true}`, 403},
+		{"hilda", "POST", "/api/directory/groups/users_demo/members", `{"username":"bob"}`, 403},
+		{"hilda", "POST", "/api/directory/groups/hr/members", `{"username":"bob"}`, 403},
+		{"hilda", "POST", "/api/directory/groups", `{"name":"mine"}`, 403},
+		{"bob", "PUT", "/api/directory/users/nina", `{"display_name":"X"}`, 403},
+		{"stranger", "POST", "/api/directory/users", `{"username":"zed","email":"zed@example.org"}`, 403},
+		{"", "PUT", "/api/directory/users/bob", `{"display_name":"X"}`, 403},
+		{"root", "DELETE", "/api/directory/users/nina", `{"confirm":"nina"}`, 200},
+	}
+	for _, c := range cases {
+		if r, b := doAs(t, srv, c.user, c.method, c.path, c.body); r.StatusCode != c.want {
+			t.Errorf("%s %s %s = %d (%s), want %d", c.user, c.method, c.path, r.StatusCode, strings.TrimSpace(b), c.want)
+		}
+	}
+	if m := ll.GroupMembers("users_demo"); len(m) != 0 {
+		t.Errorf("users_demo = %v", m)
+	}
+	if m := ll.GroupMembers("hr"); len(m) != 1 {
+		t.Errorf("hr = %v", m)
 	}
 }
 

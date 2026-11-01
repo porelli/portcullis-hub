@@ -543,11 +543,12 @@ func clip(s string) string {
 	return s
 }
 
-// run serialises a mutation, checks the actor and availability, and
-// writes the audit entry.
-func (s *Service) run(actor, action, target string, detail *string, fn func() error) error {
-	if strings.TrimSpace(actor) == "" {
-		return &Error{Status: http.StatusForbidden, Msg: "no signed-in user (X-Forwarded-User) — refusing an unattributable change"}
+// run serialises a mutation, checks the caller, availability and the
+// caller's permission perm on target (gate; "admin" = admins only), and
+// writes the audit entry — refusals included.
+func (s *Service) run(ctx context.Context, c *Caller, perm, action, target string, detail *string, fn func() error) error {
+	if c == nil || strings.TrimSpace(c.User) == "" {
+		return errNoActor()
 	}
 	defer s.kick() // re-evaluate rule groups after every mutation
 	s.mu.Lock()
@@ -555,11 +556,11 @@ func (s *Service) run(actor, action, target string, detail *string, fn func() er
 	err := s.LLDAP.Available()
 	if err != nil {
 		err = &Error{Status: http.StatusServiceUnavailable, Msg: err.Error()}
-	} else {
+	} else if err = s.gate(ctx, c, perm, target); err == nil {
 		err = fn()
 	}
 	if s.Audit != nil {
-		e := AuditEntry{Actor: clip(actor), Action: action, Target: clip(target), Result: "ok"}
+		e := AuditEntry{Actor: clip(c.User), Action: action, Target: clip(target), Result: "ok"}
 		if detail != nil {
 			e.Detail = clip(*detail)
 		}
@@ -635,7 +636,7 @@ func newResult() *Result { return &Result{Warnings: []string{}} }
 // CreateUser creates a user and onboards them: by default with a one-time
 // invite link (no password at all), or — fallback — with a password and
 // optionally the passkey registration action.
-func (s *Service) CreateUser(ctx context.Context, actor string, req CreateRequest) (*Result, error) {
+func (s *Service) CreateUser(ctx context.Context, c *Caller, req CreateRequest) (*Result, error) {
 	res := newResult()
 	req.Username = strings.TrimSpace(req.Username)
 	req.Email = strings.TrimSpace(req.Email)
@@ -647,7 +648,7 @@ func (s *Service) CreateUser(ctx context.Context, actor string, req CreateReques
 	if req.Onboarding == OnboardPassword {
 		detail += fmt.Sprintf(" require_passkey=%v generated_password=%v", req.RequirePasskey, req.Generate)
 	}
-	err := s.run(actor, "user.create", req.Username, &detail, func() error {
+	err := s.run(ctx, c, PermInvite, "user.create", req.Username, &detail, func() error {
 		switch {
 		case !lldap.ValidUsername(req.Username):
 			return invalid("invalid username: use 1-64 lowercase letters, digits, '.', '_' or '-', starting with a letter or digit")
@@ -657,6 +658,16 @@ func (s *Service) CreateUser(ctx context.Context, actor string, req CreateReques
 			return invalid("invalid email address")
 		case !lldap.ValidDisplayName(req.DisplayName):
 			return invalid("display name: at most 128 printable characters")
+		}
+		if !c.Admin {
+			// Delegates onboard by invite only, into no group: group
+			// membership is admins only (rule groups do the rest).
+			if len(req.Groups) > 0 {
+				return invalid("groups can only be set by an administrator")
+			}
+			if req.Onboarding != OnboardInvite {
+				return forbidden("not allowed: delegates onboard with an invite link (password onboarding: admins only)")
+			}
 		}
 		pw := ""
 		switch req.Onboarding {
@@ -752,7 +763,7 @@ func (s *Service) CreateUser(ctx context.Context, actor string, req CreateReques
 }
 
 // UpdateUser changes email and/or display name (nil = unchanged).
-func (s *Service) UpdateUser(ctx context.Context, actor, username string, email, displayName *string) error {
+func (s *Service) UpdateUser(ctx context.Context, c *Caller, username string, email, displayName *string) error {
 	detail := ""
 	if email != nil {
 		*email = strings.TrimSpace(*email)
@@ -762,7 +773,7 @@ func (s *Service) UpdateUser(ctx context.Context, actor, username string, email,
 		*displayName = strings.TrimSpace(*displayName)
 		detail += "display_name=" + *displayName
 	}
-	return s.run(actor, "user.update", username, &detail, func() error {
+	return s.run(ctx, c, PermEditDetails, "user.update", username, &detail, func() error {
 		if err := s.checkTarget(username); err != nil {
 			return err
 		}
@@ -792,17 +803,17 @@ func (s *Service) UpdateUser(ctx context.Context, actor, username string, email,
 // The audit detail records what happened to the Keycloak copy; a failure
 // there is a warning (the user is gone from LLDAP either way) and the copy
 // then shows up under the stale Keycloak records.
-func (s *Service) DeleteUser(ctx context.Context, actor, username, confirm string) (*Result, error) {
+func (s *Service) DeleteUser(ctx context.Context, c *Caller, username, confirm string) (*Result, error) {
 	res := newResult()
 	detail := ""
-	err := s.run(actor, "user.delete", username, &detail, func() error {
+	err := s.run(ctx, c, PermRemove, "user.delete", username, &detail, func() error {
 		if confirm != username {
 			return invalid("type the username to confirm")
 		}
 		if err := s.checkTarget(username); err != nil {
 			return err
 		}
-		if strings.EqualFold(username, actor) {
+		if strings.EqualFold(username, c.User) {
 			return refuse("you can't delete yourself")
 		}
 		sn, err := s.load(ctx)
@@ -857,9 +868,9 @@ func (s *Service) DeleteUser(ctx context.Context, actor, username, confirm strin
 // the protected accounts, for anyone LLDAP still has, and for Keycloak
 // users not linked to the LDAP federation. Keycloak's federation is
 // READ_ONLY, so this never touches LLDAP.
-func (s *Service) RemoveStaleKeycloakUser(ctx context.Context, actor, username, confirm string) error {
+func (s *Service) RemoveStaleKeycloakUser(ctx context.Context, c *Caller, username, confirm string) error {
 	detail := ""
-	return s.run(actor, "keycloak.remove_stale", username, &detail, func() error {
+	return s.run(ctx, c, permAdmin, "keycloak.remove_stale", username, &detail, func() error {
 		if err := s.checkTarget(username); err != nil {
 			return err
 		}
@@ -895,10 +906,10 @@ func (s *Service) RemoveStaleKeycloakUser(ctx context.Context, actor, username, 
 // Keycloak sessions.
 // confirm must repeat the username if the target is another lldap_admin
 // member.
-func (s *Service) SetPassword(ctx context.Context, actor, username, password string, generate bool, confirm string) (*Result, error) {
+func (s *Service) SetPassword(ctx context.Context, c *Caller, username, password string, generate bool, confirm string) (*Result, error) {
 	res := newResult()
 	detail := fmt.Sprintf("generated=%v", generate)
-	err := s.run(actor, "user.password", username, &detail, func() error {
+	err := s.run(ctx, c, permAdmin, "user.password", username, &detail, func() error {
 		if err := s.checkTarget(username); err != nil {
 			return err
 		}
@@ -913,7 +924,7 @@ func (s *Service) SetPassword(ctx context.Context, actor, username, password str
 		if err != nil {
 			return err
 		}
-		if err := s.checkAdminTakeover(sn, actor, u.ID, confirm, &detail); err != nil {
+		if err := s.checkAdminTakeover(sn, c.User, u.ID, confirm, &detail); err != nil {
 			return err
 		}
 		if !lldap.ValidUsername(u.ID) {
@@ -955,8 +966,8 @@ func (s *Service) kcTarget(ctx context.Context, username string) (string, *snaps
 
 // RequirePasskey adds the passkey registration action (importing the
 // user into Keycloak first if needed).
-func (s *Service) RequirePasskey(ctx context.Context, actor, username string) error {
-	return s.run(actor, "user.require_passkey", username, nil, func() error {
+func (s *Service) RequirePasskey(ctx context.Context, c *Caller, username string) error {
+	return s.run(ctx, c, permAdmin, "user.require_passkey", username, nil, func() error {
 		id, _, err := s.kcTarget(ctx, username)
 		if err != nil {
 			return err
@@ -966,8 +977,8 @@ func (s *Service) RequirePasskey(ctx context.Context, actor, username string) er
 }
 
 // ClearActions removes every pending required action.
-func (s *Service) ClearActions(ctx context.Context, actor, username string) error {
-	return s.run(actor, "user.clear_actions", username, nil, func() error {
+func (s *Service) ClearActions(ctx context.Context, c *Caller, username string) error {
+	return s.run(ctx, c, permAdmin, "user.clear_actions", username, nil, func() error {
 		id, _, err := s.kcTarget(ctx, username)
 		if err != nil {
 			return err
@@ -980,16 +991,16 @@ func (s *Service) ClearActions(ctx context.Context, actor, username string) erro
 // out. With withInvite it then creates a new invite link (the invite
 // registers the new passkey); otherwise it adds the passkey registration
 // action for the next (password) login. confirm must repeat the username.
-func (s *Service) RemovePasskeys(ctx context.Context, actor, username, confirm string, withInvite bool) (*Result, error) {
+func (s *Service) RemovePasskeys(ctx context.Context, c *Caller, username, confirm string, withInvite bool) (*Result, error) {
 	res := newResult()
 	detail := fmt.Sprintf("new_invite=%v", withInvite)
-	err := s.run(actor, "user.remove_passkeys", username, &detail, func() error {
+	err := s.run(ctx, c, permAdmin, "user.remove_passkeys", username, &detail, func() error {
 		id, sn, err := s.kcTarget(ctx, username)
 		if err != nil {
 			return err
 		}
 		// Always confirmed; flagged in the audit entry for another admin.
-		if err := s.checkAdminTakeover(sn, actor, id, confirm, &detail); err != nil {
+		if err := s.checkAdminTakeover(sn, c.User, id, confirm, &detail); err != nil {
 			return err
 		}
 		if confirm != username {
@@ -1025,9 +1036,9 @@ func (s *Service) RemovePasskeys(ctx context.Context, actor, username, confirm s
 // SendInvite creates a new one-time invite link (earlier unredeemed ones
 // stop working, core side). Administrators are refused: core won't invite
 // them, they're recovered from the server.
-func (s *Service) SendInvite(ctx context.Context, actor, username string) (*Result, error) {
+func (s *Service) SendInvite(ctx context.Context, c *Caller, username string) (*Result, error) {
 	res := newResult()
-	err := s.run(actor, "user.invite", username, nil, func() error {
+	err := s.run(ctx, c, PermInvite, "user.invite", username, nil, func() error {
 		if err := s.checkTarget(username); err != nil {
 			return err
 		}
@@ -1052,9 +1063,9 @@ func (s *Service) SendInvite(ctx context.Context, actor, username string) (*Resu
 // ── groups ────────────────────────────────────────────────
 
 // CreateGroup creates a group.
-func (s *Service) CreateGroup(ctx context.Context, actor, name string) error {
+func (s *Service) CreateGroup(ctx context.Context, c *Caller, name string) error {
 	name = strings.TrimSpace(name)
-	return s.run(actor, "group.create", name, nil, func() error {
+	return s.run(ctx, c, permAdmin, "group.create", name, nil, func() error {
 		if !lldap.ValidGroupName(name) {
 			return invalid("invalid group name: 1-128 letters, digits, '_', '.' or '-', starting with a letter or digit")
 		}
@@ -1076,8 +1087,8 @@ func (s *Service) CreateGroup(ctx context.Context, actor, name string) error {
 }
 
 // DeleteGroup deletes a group. confirm must repeat the name.
-func (s *Service) DeleteGroup(ctx context.Context, actor, name, confirm string) error {
-	return s.run(actor, "group.delete", name, nil, func() error {
+func (s *Service) DeleteGroup(ctx context.Context, c *Caller, name, confirm string) error {
+	return s.run(ctx, c, permAdmin, "group.delete", name, nil, func() error {
 		if confirm != name {
 			return invalid("type the group name to confirm")
 		}
@@ -1097,8 +1108,8 @@ func (s *Service) DeleteGroup(ctx context.Context, actor, name, confirm string) 
 }
 
 // AddMember adds username to group.
-func (s *Service) AddMember(ctx context.Context, actor, group, username string) error {
-	return s.run(actor, "group.add_member", group, &username, func() error {
+func (s *Service) AddMember(ctx context.Context, c *Caller, group, username string) error {
+	return s.run(ctx, c, permAdmin, "group.add_member", group, &username, func() error {
 		if err := s.checkTarget(username); err != nil {
 			return err
 		}
@@ -1124,8 +1135,8 @@ func (s *Service) AddMember(ctx context.Context, actor, group, username string) 
 }
 
 // RemoveMember removes username from group.
-func (s *Service) RemoveMember(ctx context.Context, actor, group, username string) error {
-	return s.run(actor, "group.remove_member", group, &username, func() error {
+func (s *Service) RemoveMember(ctx context.Context, c *Caller, group, username string) error {
+	return s.run(ctx, c, permAdmin, "group.remove_member", group, &username, func() error {
 		if err := s.checkTarget(username); err != nil {
 			return err
 		}
@@ -1149,7 +1160,7 @@ func (s *Service) RemoveMember(ctx context.Context, actor, group, username strin
 			return notFound("%s is not a member of %s", u.ID, group)
 		}
 		if group == lldap.AdminGroup {
-			if strings.EqualFold(u.ID, actor) {
+			if strings.EqualFold(u.ID, c.User) {
 				return refuse("you can't remove yourself from %s", lldap.AdminGroup)
 			}
 			if err := s.checkNotLastAdmin(sn, u.ID); err != nil {
