@@ -1,17 +1,16 @@
-// Package keycloak is a small Keycloak admin-API client (net/http only).
+// Package keycloak is the Hub's Keycloak admin-API client, built on
+// github.com/Nerzal/gocloak (HTTP via resty over a net/http client).
 //
-// Using net/http instead of shelling out to curl keeps the admin password
-// and bearer tokens out of process arguments, gives every call a timeout,
-// and verifies TLS if the URL is ever https.
+// Talking HTTP instead of shelling out to kcadm/curl keeps the admin
+// password and bearer tokens out of process arguments, gives every call a
+// timeout, and verifies TLS if the URL is ever https.
 package keycloak
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -19,6 +18,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Nerzal/gocloak/v14"
+	"github.com/go-resty/resty/v2"
 )
 
 // Realm is the Portcullis realm the Hub manages.
@@ -63,12 +65,15 @@ var uuidRe = regexp.MustCompile(`^[0-9a-fA-F-]{1,64}$`)
 // ValidUserID reports whether id looks like a Keycloak user ID.
 func ValidUserID(id string) bool { return uuidRe.MatchString(id) }
 
-// Client is a Keycloak admin client.
+// Client is a Keycloak admin client. The fields are read on first use.
 type Client struct {
 	BaseURL   string
 	AdminUser string
 	AdminPass string
 	HTTP      *http.Client
+
+	once sync.Once
+	gc   *gocloak.GoCloak
 }
 
 // New returns a client with a 20s per-request timeout.
@@ -81,76 +86,79 @@ func New(baseURL, user, pass string) *Client {
 	}
 }
 
+// api returns the gocloak client over c.HTTP (bodies capped at maxBody).
+func (c *Client) api() *gocloak.GoCloak {
+	c.once.Do(func() {
+		hc := c.HTTP
+		if hc == nil {
+			hc = &http.Client{Timeout: 20 * time.Second}
+		}
+		rc := resty.NewWithClient(hc).SetResponseBodyLimit(maxBody).SetDisableWarn(true).SetLogger(quietLogger{})
+		// The admin API only speaks JSON; parse it as such even when a
+		// proxy (or a test fake) leaves out the Content-Type.
+		rc.OnBeforeRequest(func(_ *resty.Client, r *resty.Request) error {
+			r.ForceContentType("application/json")
+			return nil
+		})
+		c.gc = gocloak.NewClient(c.BaseURL)
+		c.gc.SetRestyClient(rc)
+	})
+	return c.gc
+}
+
+// quietLogger drops resty's own log lines (unparsable error bodies during
+// an outage, ...): failures are returned as errors, and nothing about a
+// request may reach the log on its own.
+type quietLogger struct{}
+
+func (quietLogger) Errorf(string, ...interface{}) {}
+func (quietLogger) Warnf(string, ...interface{})  {}
+func (quietLogger) Debugf(string, ...interface{}) {}
+
+// HTTPError is an unexpected admin API status.
+type HTTPError struct {
+	Op     string
+	Status int
+}
+
+func (e *HTTPError) Error() string { return fmt.Sprintf("%s: HTTP %d", e.Op, e.Status) }
+
+// statusCode is the HTTP status of a gocloak error (0: not an HTTP error).
+func statusCode(err error) int {
+	var ae *gocloak.APIError
+	if errors.As(err, &ae) {
+		return ae.Code
+	}
+	return 0
+}
+
+// opErr turns a gocloak error into "op: HTTP n" (*HTTPError, response body
+// dropped) or "op: <transport error>".
+func opErr(op string, err error) error {
+	if code := statusCode(err); code != 0 {
+		return &HTTPError{Op: op, Status: code}
+	}
+	return fmt.Errorf("%s: %w", op, err)
+}
+
+func str(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
+}
+
 // token fetches a short-lived admin access token (password grant, master realm).
 func (c *Client) token(ctx context.Context) (string, error) {
-	form := url.Values{
-		"client_id":  {"admin-cli"},
-		"username":   {c.AdminUser},
-		"password":   {c.AdminPass},
-		"grant_type": {"password"},
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/realms/master/protocol/openid-connect/token", strings.NewReader(form.Encode()))
+	jwt, err := c.api().LoginAdmin(ctx, c.AdminUser, c.AdminPass, "master")
 	if err != nil {
-		return "", err
+		return "", opErr("keycloak auth failed", err)
 	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	resp, err := c.HTTP.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("keycloak auth failed: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("keycloak auth failed: HTTP %d", resp.StatusCode)
-	}
-	var tr struct {
-		AccessToken string `json:"access_token"`
-	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&tr); err != nil {
-		return "", fmt.Errorf("keycloak auth response parse: %w", err)
-	}
-	if tr.AccessToken == "" {
+	if jwt.AccessToken == "" {
 		return "", fmt.Errorf("no access token from keycloak")
 	}
-	return tr.AccessToken, nil
+	return jwt.AccessToken, nil
 }
-
-// do performs an authenticated admin API call. body (if non-nil) is sent as
-// JSON; out (if non-nil) receives the decoded 2xx response.
-func (c *Client) do(ctx context.Context, method, path, token string, body, out interface{}) (int, error) {
-	var rdr io.Reader
-	if body != nil {
-		b, err := json.Marshal(body)
-		if err != nil {
-			return 0, err
-		}
-		rdr = bytes.NewReader(b)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, c.BaseURL+path, rdr)
-	if err != nil {
-		return 0, err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	resp, err := c.HTTP.Do(req)
-	if err != nil {
-		return 0, err
-	}
-	defer resp.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
-	if err != nil {
-		return resp.StatusCode, err
-	}
-	if out != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		if err := json.Unmarshal(data, out); err != nil {
-			return resp.StatusCode, fmt.Errorf("parse response: %w", err)
-		}
-	}
-	return resp.StatusCode, nil
-}
-
-func realmPath(rest string) string { return "/admin/realms/" + Realm + rest }
 
 // User is the subset of a Keycloak user representation the UI shows.
 type User struct {
@@ -164,33 +172,30 @@ type User struct {
 	FederationLink string `json:"federationLink"`
 }
 
-func (c *Client) findClient(ctx context.Context, token, clientID string) (map[string]interface{}, error) {
-	var clients []map[string]interface{}
-	code, err := c.do(ctx, "GET", realmPath("/clients?clientId="+url.QueryEscape(clientID)), token, nil, &clients)
+func userOf(u *gocloak.User) User {
+	return User{ID: str(u.ID), Username: str(u.Username), Email: str(u.Email), Enabled: u.Enabled != nil && *u.Enabled,
+		RequiredActions: u.RequiredActions, FederationLink: str(u.FederationLink)}
+}
+
+func (c *Client) findClient(ctx context.Context, token, clientID string) (*gocloak.Client, error) {
+	clients, err := c.api().GetClients(ctx, token, Realm, gocloak.GetClientsParams{ClientID: &clientID})
 	if err != nil {
-		return nil, fmt.Errorf("client lookup failed: %w", err)
-	}
-	if code != 200 {
-		return nil, fmt.Errorf("client lookup: HTTP %d", code)
+		return nil, opErr("client lookup", err)
 	}
 	for _, cl := range clients {
-		if cl["clientId"] == clientID {
-			if id, _ := cl["id"].(string); id != "" {
-				return cl, nil
-			}
+		if cl != nil && str(cl.ClientID) == clientID && str(cl.ID) != "" {
+			return cl, nil
 		}
 	}
 	return nil, fmt.Errorf("client %s not found in keycloak", clientID)
 }
 
 // withACR sets default.acr.values on a client representation.
-func withACR(client map[string]interface{}, acrValue string) {
-	attrs, _ := client["attributes"].(map[string]interface{})
-	if attrs == nil {
-		attrs = map[string]interface{}{}
+func withACR(client *gocloak.Client, acrValue string) {
+	if client.Attributes == nil {
+		client.Attributes = map[string]string{}
 	}
-	attrs["default.acr.values"] = acrValue
-	client["attributes"] = attrs
+	client.Attributes["default.acr.values"] = acrValue
 }
 
 // ensureDefaultScopes attaches DefaultScopes and the spec's email scope to
@@ -200,19 +205,15 @@ func withACR(client map[string]interface{}, acrValue string) {
 // is logged, not fatal (the client still works, just without that claim);
 // a missing email-unverified scope is an error and leaves "email" attached,
 // since the app asked not to see email_verified.
-func (c *Client) ensureDefaultScopes(ctx context.Context, token string, client map[string]interface{}, s ClientSpec) error {
-	names := func(key string) map[string]bool {
+func (c *Client) ensureDefaultScopes(ctx context.Context, token string, client *gocloak.Client, s ClientSpec) error {
+	set := func(names []string) map[string]bool {
 		out := map[string]bool{}
-		if scopes, ok := client[key].([]interface{}); ok {
-			for _, sc := range scopes {
-				if n, ok := sc.(string); ok {
-					out[n] = true
-				}
-			}
+		for _, n := range names {
+			out[n] = true
 		}
 		return out
 	}
-	haveDefault, haveOptional := names("defaultClientScopes"), names("optionalClientScopes")
+	haveDefault, haveOptional := set(client.DefaultClientScopes), set(client.OptionalClientScopes)
 	wantEmail, dropEmail := s.emailScopes()
 	var missing []string
 	for _, name := range append(append([]string{}, DefaultScopes...), wantEmail) {
@@ -223,67 +224,55 @@ func (c *Client) ensureDefaultScopes(ctx context.Context, token string, client m
 	if len(missing) == 0 && !haveDefault[dropEmail] && !haveOptional[dropEmail] {
 		return nil
 	}
-	var realmScopes []struct {
-		ID   string `json:"id"`
-		Name string `json:"name"`
-	}
-	code, err := c.do(ctx, "GET", realmPath("/client-scopes"), token, nil, &realmScopes)
+	g := c.api()
+	realmScopes, err := g.GetClientScopes(ctx, token, Realm)
 	if err != nil {
-		return fmt.Errorf("list client scopes: %w", err)
-	}
-	if code != 200 {
-		return fmt.Errorf("list client scopes: HTTP %d", code)
+		return opErr("list client scopes", err)
 	}
 	ids := map[string]string{}
 	for _, sc := range realmScopes {
-		ids[sc.Name] = sc.ID
+		if sc != nil {
+			ids[str(sc.Name)] = str(sc.ID)
+		}
 	}
-	clientUUID, _ := client["id"].(string)
-	scopePath := func(kind, id string) string {
-		return realmPath("/clients/" + url.PathEscape(clientUUID) + "/" + kind + "-client-scopes/" + url.PathEscape(id))
-	}
+	clientUUID, clientID := url.PathEscape(str(client.ID)), str(client.ClientID)
 	for _, name := range missing {
 		id := ids[name]
 		if id == "" {
 			if name == EmailUnverifiedScope {
-				return fmt.Errorf("client %v: the Keycloak realm has no %q client scope (run `portcullis keycloak configure`); keeping its current email scope", client["clientId"], name)
+				return fmt.Errorf("client %v: the Keycloak realm has no %q client scope (run `portcullis keycloak configure`); keeping its current email scope", clientID, name)
 			}
-			log.Printf("Keycloak realm has no %q client scope — client %v will not get that claim (run `portcullis keycloak configure`)", name, client["clientId"])
+			log.Printf("Keycloak realm has no %q client scope — client %v will not get that claim (run `portcullis keycloak configure`)", name, clientID)
 			continue
 		}
-		code, err := c.do(ctx, "PUT", scopePath("default", id), token, nil, nil)
-		if err != nil {
-			return fmt.Errorf("attach scope %s: %w", name, err)
-		}
-		if code != 204 {
-			return fmt.Errorf("attach scope %s: HTTP %d", name, code)
+		if err := g.AddDefaultScopeToClient(ctx, token, Realm, clientUUID, url.PathEscape(id)); err != nil {
+			return opErr("attach scope "+name, err)
 		}
 	}
 	// Detach only after the replacement is attached.
-	for kind, have := range map[string]bool{"default": haveDefault[dropEmail], "optional": haveOptional[dropEmail]} {
-		id := ids[dropEmail]
-		if !have || id == "" {
-			continue
+	id := url.PathEscape(ids[dropEmail])
+	if id == "" {
+		return nil
+	}
+	if haveDefault[dropEmail] {
+		if err := g.RemoveDefaultScopeFromClient(ctx, token, Realm, clientUUID, id); err != nil {
+			return opErr("detach default scope "+dropEmail, err)
 		}
-		code, err := c.do(ctx, "DELETE", scopePath(kind, id), token, nil, nil)
-		if err != nil {
-			return fmt.Errorf("detach %s scope %s: %w", kind, dropEmail, err)
-		}
-		if code != 204 {
-			return fmt.Errorf("detach %s scope %s: HTTP %d", kind, dropEmail, code)
+	}
+	if haveOptional[dropEmail] {
+		if err := g.RemoveOptionalScopeFromClient(ctx, token, Realm, clientUUID, id); err != nil {
+			return opErr("detach optional scope "+dropEmail, err)
 		}
 	}
 	return nil
 }
 
-func (c *Client) putClient(ctx context.Context, token string, client map[string]interface{}) error {
-	id, _ := client["id"].(string)
-	code, err := c.do(ctx, "PUT", realmPath("/clients/"+url.PathEscape(id)), token, client, nil)
-	if err != nil {
+func (c *Client) putClient(ctx context.Context, token string, client *gocloak.Client) error {
+	if err := c.api().UpdateClient(ctx, token, Realm, *client); err != nil {
+		if code := statusCode(err); code != 0 {
+			return fmt.Errorf("client %v update: unexpected HTTP %d", str(client.ClientID), code)
+		}
 		return fmt.Errorf("client update failed: %w", err)
-	}
-	if code != 204 {
-		return fmt.Errorf("client %v update: unexpected HTTP %d", client["clientId"], code)
 	}
 	return nil
 }
@@ -301,8 +290,8 @@ func (c *Client) UpdateClientACR(ctx context.Context, s ClientSpec) error {
 	if err != nil {
 		return err
 	}
-	if !MayReconcile(existing, s.TemplateID, s.AllowedHosts) {
-		return &ConflictError{ClientID: s.ClientID, TemplateID: s.TemplateID, Owner: ownerOf(existing)}
+	if !mayReconcile(existing, s.TemplateID, s.AllowedHosts) {
+		return &ConflictError{ClientID: s.ClientID, TemplateID: s.TemplateID, Owner: existing.Attributes[OwnerAttr]}
 	}
 	withACR(existing, s.ACR)
 	if err := c.putClient(ctx, tok, existing); err != nil {
@@ -317,16 +306,26 @@ func (c *Client) UpdateClientACR(ctx context.Context, s ClientSpec) error {
 // they have at least one redirect URI, and every redirect URI and web
 // origin is a plain https/http URL (no wildcards) whose host is one of
 // allowedHosts (the template's own <sub>.<domain> hosts). Anything else —
-// including an untagged client with no redirect URIs at all — fails closed.
+// including an untagged client with no redirect URIs at all, or a
+// representation that doesn't parse — fails closed.
 func MayReconcile(existing map[string]interface{}, id string, allowedHosts []string) bool {
-	cid, _ := existing["clientId"].(string)
-	if protectedClients[cid] {
+	b, err := json.Marshal(existing)
+	if err != nil {
 		return false
 	}
-	if attrs, ok := existing["attributes"].(map[string]interface{}); ok {
-		if owner, ok := attrs[OwnerAttr].(string); ok && owner != "" {
-			return owner == id
-		}
+	var cl gocloak.Client
+	if err := json.Unmarshal(b, &cl); err != nil {
+		return false
+	}
+	return mayReconcile(&cl, id, allowedHosts)
+}
+
+func mayReconcile(existing *gocloak.Client, id string, allowedHosts []string) bool {
+	if protectedClients[str(existing.ClientID)] {
+		return false
+	}
+	if owner := existing.Attributes[OwnerAttr]; owner != "" {
+		return owner == id
 	}
 	allowed := map[string]bool{}
 	for _, h := range allowedHosts {
@@ -337,9 +336,8 @@ func MayReconcile(existing map[string]interface{}, id string, allowedHosts []str
 	if len(allowed) == 0 {
 		return false
 	}
-	ownURL := func(raw interface{}) bool {
-		s, ok := raw.(string)
-		if !ok || s == "" || strings.Contains(s, "*") {
+	ownURL := func(s string) bool {
+		if s == "" || strings.Contains(s, "*") {
 			return false
 		}
 		u, err := url.Parse(s)
@@ -348,23 +346,20 @@ func MayReconcile(existing map[string]interface{}, id string, allowedHosts []str
 		}
 		return allowed[strings.ToLower(u.Hostname())]
 	}
-	redirects, _ := existing["redirectUris"].([]interface{})
-	if len(redirects) == 0 {
+	if len(existing.RedirectURIs) == 0 {
 		return false
 	}
-	for _, raw := range redirects {
+	for _, raw := range existing.RedirectURIs {
 		if !ownURL(raw) {
 			return false
 		}
 	}
-	if origins, ok := existing["webOrigins"].([]interface{}); ok {
-		for _, raw := range origins {
-			if raw == "+" { // "same as the redirect URIs"
-				continue
-			}
-			if !ownURL(raw) {
-				return false
-			}
+	for _, raw := range existing.WebOrigins {
+		if raw == "+" { // "same as the redirect URIs"
+			continue
+		}
+		if !ownURL(raw) {
+			return false
 		}
 	}
 	return true
@@ -384,14 +379,6 @@ func (e *ConflictError) Error() string {
 		owner = "it belongs to template " + e.Owner
 	}
 	return fmt.Sprintf("Keycloak client %q already exists and %s — refusing to let template %s take it over; delete or rename that client in Keycloak, or change client_id in the template", e.ClientID, owner, e.TemplateID)
-}
-
-func ownerOf(client map[string]interface{}) string {
-	if attrs, ok := client["attributes"].(map[string]interface{}); ok {
-		o, _ := attrs[OwnerAttr].(string)
-		return o
-	}
-	return ""
 }
 
 // ClientSpec is what the Hub wants a template's OIDC client to look like.
@@ -421,28 +408,25 @@ func (c *Client) RegisterClient(ctx context.Context, s ClientSpec) error {
 		return err
 	}
 	wantEmail, _ := s.emailScopes()
-	rep := map[string]interface{}{
-		"clientId":                  s.ClientID,
-		"name":                      s.Name,
-		"enabled":                   true,
-		"protocol":                  "openid-connect",
-		"publicClient":              false,
-		"secret":                    s.Secret,
-		"redirectUris":              s.RedirectURIs,
-		"standardFlowEnabled":       true,
-		"directAccessGrantsEnabled": false,
-		"attributes": map[string]string{
+	rep := gocloak.Client{
+		ClientID:                  gocloak.StringP(s.ClientID),
+		Name:                      gocloak.StringP(s.Name),
+		Enabled:                   gocloak.BoolP(true),
+		Protocol:                  gocloak.StringP("openid-connect"),
+		PublicClient:              gocloak.BoolP(false),
+		Secret:                    gocloak.StringP(s.Secret),
+		RedirectURIs:              s.RedirectURIs,
+		StandardFlowEnabled:       gocloak.BoolP(true),
+		DirectAccessGrantsEnabled: gocloak.BoolP(false),
+		Attributes: map[string]string{
 			"default.acr.values": s.ACR,
 			OwnerAttr:            s.TemplateID,
 		},
-		"defaultClientScopes": append([]string{"openid", "profile", wantEmail}, DefaultScopes...),
+		DefaultClientScopes: append([]string{"openid", "profile", wantEmail}, DefaultScopes...),
 	}
-	code, err := c.do(ctx, "POST", realmPath("/clients"), tok, rep, nil)
-	if err != nil {
-		return fmt.Errorf("client registration failed: %w", err)
-	}
-	switch code {
-	case 201:
+	_, err = c.api().CreateClient(ctx, tok, Realm, rep)
+	switch code := statusCode(err); {
+	case err == nil:
 		log.Printf("Registered Keycloak client %s", s.ClientID)
 		// Keycloak silently drops unknown scope names on create; verify.
 		created, err := c.findClient(ctx, tok, s.ClientID)
@@ -450,27 +434,25 @@ func (c *Client) RegisterClient(ctx context.Context, s ClientSpec) error {
 			return err
 		}
 		return c.ensureDefaultScopes(ctx, tok, created, s)
-	case 409:
+	case code == http.StatusConflict:
 		// Already exists: reconcile secret, redirect URIs and ACR so the
 		// app's .env and Keycloak agree.
 		existing, err := c.findClient(ctx, tok, s.ClientID)
 		if err != nil {
 			return err
 		}
-		if !MayReconcile(existing, s.TemplateID, s.AllowedHosts) {
-			return &ConflictError{ClientID: s.ClientID, TemplateID: s.TemplateID, Owner: ownerOf(existing)}
+		if !mayReconcile(existing, s.TemplateID, s.AllowedHosts) {
+			return &ConflictError{ClientID: s.ClientID, TemplateID: s.TemplateID, Owner: existing.Attributes[OwnerAttr]}
 		}
-		attrs, _ := existing["attributes"].(map[string]interface{})
-		if attrs == nil {
-			attrs = map[string]interface{}{}
+		if existing.Attributes == nil {
+			existing.Attributes = map[string]string{}
 		}
-		attrs[OwnerAttr] = s.TemplateID
-		existing["attributes"] = attrs
+		existing.Attributes[OwnerAttr] = s.TemplateID
 		if s.Secret != "" {
-			existing["secret"] = s.Secret
+			existing.Secret = gocloak.StringP(s.Secret)
 		}
 		if len(s.RedirectURIs) > 0 {
-			existing["redirectUris"] = s.RedirectURIs
+			existing.RedirectURIs = s.RedirectURIs
 		}
 		withACR(existing, s.ACR)
 		if err := c.putClient(ctx, tok, existing); err != nil {
@@ -478,8 +460,10 @@ func (c *Client) RegisterClient(ctx context.Context, s ClientSpec) error {
 		}
 		log.Printf("Updated existing Keycloak client %s", s.ClientID)
 		return c.ensureDefaultScopes(ctx, tok, existing, s)
-	default:
+	case code != 0:
 		return fmt.Errorf("client %s registration: unexpected HTTP %d", s.ClientID, code)
+	default:
+		return fmt.Errorf("client registration failed: %w", err)
 	}
 }
 
@@ -509,62 +493,51 @@ type UserStatus struct {
 }
 
 type credential struct {
-	ID   string `json:"id"`
-	Type string `json:"type"`
+	ID   string
+	Type string
 }
-
-// HTTPError is an unexpected admin API status.
-type HTTPError struct {
-	Op     string
-	Status int
-}
-
-func (e *HTTPError) Error() string { return fmt.Sprintf("%s: HTTP %d", e.Op, e.Status) }
 
 func (c *Client) credentials(ctx context.Context, tok, userID string) ([]credential, error) {
-	var creds []credential
-	code, err := c.do(ctx, "GET", realmPath("/users/"+url.PathEscape(userID)+"/credentials"), tok, nil, &creds)
+	creds, err := c.api().GetCredentials(ctx, tok, Realm, url.PathEscape(userID))
 	if err != nil {
-		return nil, fmt.Errorf("list credentials: %w", err)
+		return nil, opErr("list credentials", err)
 	}
-	if code != 200 {
-		return nil, &HTTPError{Op: "list credentials", Status: code}
+	out := make([]credential, 0, len(creds))
+	for _, cr := range creds {
+		if cr != nil {
+			out = append(out, credential{ID: str(cr.ID), Type: str(cr.Type)})
+		}
 	}
-	return creds, nil
+	return out, nil
 }
 
 // StatusConcurrency bounds the parallel credential lookups of UserStatuses.
 const StatusConcurrency = 8
 
 func (c *Client) listUsers(ctx context.Context, tok string) ([]User, error) {
-	var users []User
-	code, err := c.do(ctx, "GET", realmPath("/users?max=1000&briefRepresentation=false"), tok, nil, &users)
+	users, err := c.api().GetUsers(ctx, tok, Realm, gocloak.GetUsersParams{Max: gocloak.IntP(1000), BriefRepresentation: gocloak.BoolP(false)})
 	if err != nil {
-		return nil, fmt.Errorf("list users: %w", err)
+		return nil, opErr("list users", err)
 	}
-	if code != 200 {
-		return nil, &HTTPError{Op: "list users", Status: code}
+	out := make([]User, 0, len(users))
+	for _, u := range users {
+		if u != nil {
+			out = append(out, userOf(u))
+		}
 	}
-	return users, nil
+	return out, nil
 }
 
 // ldapProviders returns the ids of the realm's LDAP user storage providers.
 func (c *Client) ldapProviders(ctx context.Context, tok string) (map[string]bool, error) {
-	var comps []struct {
-		ID         string `json:"id"`
-		ProviderID string `json:"providerId"`
-	}
-	code, err := c.do(ctx, "GET", realmPath("/components?type=org.keycloak.storage.UserStorageProvider"), tok, nil, &comps)
+	comps, err := c.api().GetComponentsWithParams(ctx, tok, Realm, gocloak.GetComponentsParams{ProviderType: gocloak.StringP("org.keycloak.storage.UserStorageProvider")})
 	if err != nil {
-		return nil, fmt.Errorf("list user federation: %w", err)
-	}
-	if code != 200 {
-		return nil, &HTTPError{Op: "list user federation", Status: code}
+		return nil, opErr("list user federation", err)
 	}
 	out := map[string]bool{}
 	for _, cp := range comps {
-		if cp.ProviderID == "ldap" && cp.ID != "" {
-			out[cp.ID] = true
+		if cp != nil && str(cp.ProviderID) == "ldap" && str(cp.ID) != "" {
+			out[str(cp.ID)] = true
 		}
 	}
 	return out, nil
@@ -669,19 +642,14 @@ func (c *Client) ListedUser(ctx context.Context, username string) (*UserStatus, 
 // findUser looks a user up by exact username. For an LDAP-federated realm
 // this also imports the user from LDAP if Keycloak hasn't seen them yet.
 // Returns nil, nil if there is no such user.
-func (c *Client) findUser(ctx context.Context, tok, username string) (map[string]interface{}, error) {
-	var users []map[string]interface{}
-	code, err := c.do(ctx, "GET", realmPath("/users?exact=true&briefRepresentation=false&username="+url.QueryEscape(username)), tok, nil, &users)
+func (c *Client) findUser(ctx context.Context, tok, username string) (*gocloak.User, error) {
+	users, err := c.api().GetUsers(ctx, tok, Realm, gocloak.GetUsersParams{
+		Username: gocloak.StringP(username), Exact: gocloak.BoolP(true), BriefRepresentation: gocloak.BoolP(false)})
 	if err != nil {
-		return nil, fmt.Errorf("find user: %w", err)
-	}
-	if code != 200 {
-		return nil, fmt.Errorf("find user: HTTP %d", code)
+		return nil, opErr("find user", err)
 	}
 	for _, u := range users {
-		name, _ := u["username"].(string)
-		id, _ := u["id"].(string)
-		if strings.EqualFold(name, username) && ValidUserID(id) {
+		if u != nil && strings.EqualFold(str(u.Username), username) && ValidUserID(str(u.ID)) {
 			return u, nil
 		}
 	}
@@ -692,7 +660,7 @@ func (c *Client) findUser(ctx context.Context, tok, username string) (map[string
 var ErrUserNotFound = fmt.Errorf("user not found in Keycloak")
 
 // importUser returns the user's representation, importing it from LDAP.
-func (c *Client) importUser(ctx context.Context, tok, username string) (map[string]interface{}, error) {
+func (c *Client) importUser(ctx context.Context, tok, username string) (*gocloak.User, error) {
 	u, err := c.findUser(ctx, tok, username)
 	if err != nil {
 		return nil, err
@@ -703,28 +671,30 @@ func (c *Client) importUser(ctx context.Context, tok, username string) (map[stri
 	return u, nil
 }
 
-func (c *Client) putUser(ctx context.Context, tok string, user map[string]interface{}) error {
-	id, _ := user["id"].(string)
-	code, err := c.do(ctx, "PUT", realmPath("/users/"+url.PathEscape(id)), tok, user, nil)
+// userUpdate is a user PUT body that always carries requiredActions:
+// gocloak.User tags it omitempty, so an empty list (clearing every action)
+// would be dropped and Keycloak would keep the old ones.
+type userUpdate struct {
+	gocloak.User
+	RequiredActions []string `json:"requiredActions"`
+}
+
+// putUser updates a user. Raw request (on gocloak's resty request builder)
+// instead of gocloak.UpdateUser because of the omitempty above.
+func (c *Client) putUser(ctx context.Context, tok string, user *gocloak.User) error {
+	body := userUpdate{User: *user, RequiredActions: user.RequiredActions}
+	if body.RequiredActions == nil {
+		body.RequiredActions = []string{}
+	}
+	resp, err := c.api().GetRequestWithBearerAuth(ctx, tok).SetBody(body).
+		Put(c.BaseURL + "/admin/realms/" + Realm + "/users/" + url.PathEscape(str(user.ID)))
 	if err != nil {
 		return fmt.Errorf("update user: %w", err)
 	}
-	if code != 204 {
-		return fmt.Errorf("update user: HTTP %d", code)
+	if resp.IsError() {
+		return &HTTPError{Op: "update user", Status: resp.StatusCode()}
 	}
 	return nil
-}
-
-func actionsOf(user map[string]interface{}) []string {
-	out := []string{}
-	if list, ok := user["requiredActions"].([]interface{}); ok {
-		for _, a := range list {
-			if s, ok := a.(string); ok {
-				out = append(out, s)
-			}
-		}
-	}
-	return out
 }
 
 // ImportUser makes sure Keycloak has imported username from LDAP and
@@ -738,8 +708,7 @@ func (c *Client) ImportUser(ctx context.Context, username string) (string, error
 	if err != nil {
 		return "", err
 	}
-	id, _ := u["id"].(string)
-	return id, nil
+	return str(u.ID), nil
 }
 
 // SetUserRequiredActions imports username if needed and replaces its
@@ -756,7 +725,7 @@ func (c *Client) SetUserRequiredActions(ctx context.Context, username string, ac
 	if actions == nil {
 		actions = []string{}
 	}
-	u["requiredActions"] = actions
+	u.RequiredActions = actions
 	return c.putUser(ctx, tok, u)
 }
 
@@ -771,17 +740,16 @@ func (c *Client) RequirePasskey(ctx context.Context, username string) error {
 	if err != nil {
 		return err
 	}
-	return c.addActionLocked(ctx, tok, u, PasskeyAction)
+	return c.addAction(ctx, tok, u, PasskeyAction)
 }
 
-func (c *Client) addActionLocked(ctx context.Context, tok string, u map[string]interface{}, action string) error {
-	acts := actionsOf(u)
-	for _, a := range acts {
+func (c *Client) addAction(ctx context.Context, tok string, u *gocloak.User, action string) error {
+	for _, a := range u.RequiredActions {
 		if a == action {
 			return nil
 		}
 	}
-	u["requiredActions"] = append(acts, action)
+	u.RequiredActions = append(append([]string{}, u.RequiredActions...), action)
 	return c.putUser(ctx, tok, u)
 }
 
@@ -798,8 +766,7 @@ func (c *Client) CredentialCount(ctx context.Context, username string) (int, err
 	if err != nil || u == nil {
 		return 0, err
 	}
-	id, _ := u["id"].(string)
-	creds, err := c.credentials(ctx, tok, id)
+	creds, err := c.credentials(ctx, tok, str(u.ID))
 	if err != nil {
 		return 0, err
 	}
@@ -818,7 +785,7 @@ func (c *Client) RemovePasskeys(ctx context.Context, username string, requireNew
 	if err != nil {
 		return 0, err
 	}
-	id, _ := u["id"].(string)
+	id := str(u.ID)
 	creds, err := c.credentials(ctx, tok, id)
 	if err != nil {
 		return 0, err
@@ -828,17 +795,14 @@ func (c *Client) RemovePasskeys(ctx context.Context, username string, requireNew
 		if !passkeyTypes[cr.Type] {
 			continue
 		}
-		code, err := c.do(ctx, "DELETE", realmPath("/users/"+url.PathEscape(id)+"/credentials/"+url.PathEscape(cr.ID)), tok, nil, nil)
-		if err != nil {
-			return n, fmt.Errorf("delete credential: %w", err)
-		}
-		if code != 204 && code != 404 {
-			return n, fmt.Errorf("delete credential: HTTP %d", code)
+		err := c.api().DeleteCredentials(ctx, tok, Realm, url.PathEscape(id), url.PathEscape(cr.ID))
+		if err != nil && statusCode(err) != http.StatusNotFound {
+			return n, opErr("delete credential", err)
 		}
 		n++
 	}
 	if requireNew {
-		if err := c.addActionLocked(ctx, tok, u, PasskeyAction); err != nil {
+		if err := c.addAction(ctx, tok, u, PasskeyAction); err != nil {
 			return n, err
 		}
 	}
@@ -846,12 +810,8 @@ func (c *Client) RemovePasskeys(ctx context.Context, username string, requireNew
 }
 
 func (c *Client) logout(ctx context.Context, tok, id string) error {
-	code, err := c.do(ctx, "POST", realmPath("/users/"+url.PathEscape(id)+"/logout"), tok, nil, nil)
-	if err != nil {
-		return fmt.Errorf("sign out user: %w", err)
-	}
-	if code != 204 && code != 200 {
-		return fmt.Errorf("sign out user: HTTP %d", code)
+	if err := c.api().LogoutAllSessions(ctx, tok, Realm, url.PathEscape(id)); err != nil {
+		return opErr("sign out user", err)
 	}
 	return nil
 }
@@ -867,8 +827,7 @@ func (c *Client) LogoutUser(ctx context.Context, username string) error {
 	if err != nil || u == nil {
 		return err
 	}
-	id, _ := u["id"].(string)
-	return c.logout(ctx, tok, id)
+	return c.logout(ctx, tok, str(u.ID))
 }
 
 // DeleteUserByID removes a user from Keycloak's database (and its
@@ -882,12 +841,8 @@ func (c *Client) DeleteUserByID(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	code, err := c.do(ctx, "DELETE", realmPath("/users/"+url.PathEscape(id)), tok, nil, nil)
-	if err != nil {
-		return fmt.Errorf("delete user: %w", err)
-	}
-	if code != 204 && code != 404 {
-		return fmt.Errorf("delete user: HTTP %d", code)
+	if err := c.api().DeleteUser(ctx, tok, Realm, url.PathEscape(id)); err != nil && statusCode(err) != http.StatusNotFound {
+		return opErr("delete user", err)
 	}
 	return nil
 }

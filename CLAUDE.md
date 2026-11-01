@@ -15,7 +15,7 @@ Web management UI for Portcullis. Go binary with an embedded single-page UI, pub
 | `internal/state` | `state.yaml` load/save (atomic; corrupt file = refuse to start) |
 | `internal/compose` | `docker compose` CLI wrapper — **up/down only**, behind the `Runner` interface; failures are `*compose.Error` with the output tail (8 KiB) |
 | `internal/docker` | Engine API client over `DOCKER_HOST` (net/http): containers, logs (stream demux), exec, events |
-| `internal/keycloak` | Keycloak admin API client (net/http): clients, and users (lazy LDAP import, required actions, passkeys, sessions); `kctest` = in-memory fake |
+| `internal/keycloak` | Keycloak admin API client on `Nerzal/gocloak` (master admin token; clients + client scopes, users: lazy LDAP import, required actions, credentials/passkeys, sessions, delete; LDAP federation lookup); one raw PUT on gocloak's request builder (user update, so an empty `requiredActions` is sent); `kctest` = in-memory HTTP fake |
 | `internal/lldap` | LLDAP client: GraphQL via `hasura/go-graphql-client` (`/api/graphql`, JWT from `/auth/simple/login`, refresh/re-login on 401) + `go-ldap` Password Modify extended op (passwords; dial/request bounded by `Timeout` and ctx); credentials from files; `lldaptest` = in-memory fake (HTTP + LDAP on `vjeantet/ldapserver`) |
 | `internal/invite` | Client for core's one-time invite API (contract §9.4) |
 | `internal/directory` | Users & groups service: guardrails, onboarding (invite / password fallback), audit log (`audit.jsonl`) |
@@ -25,7 +25,7 @@ Web management UI for Portcullis. Go binary with an embedded single-page UI, pub
 
 ## Critical Rules
 
-- Dependencies: prefer mature, pinned libraries over hand-rolled code (Dependabot-tracked); no web framework needed for the SPA. In use: `gopkg.in/yaml.v3`, `alecthomas/participle/v2` (rule parser), `go-ldap/ldap/v3` (Password Modify), `hasura/go-graphql-client` (LLDAP GraphQL); tests only: `vjeantet/ldapserver` (LDAP fake).
+- Dependencies: prefer mature, pinned libraries over hand-rolled code (Dependabot-tracked); no web framework needed for the SPA. In use: `gopkg.in/yaml.v3`, `alecthomas/participle/v2` (rule parser), `go-ldap/ldap/v3` (Password Modify), `hasura/go-graphql-client` (LLDAP GraphQL), `Nerzal/gocloak/v14` (Keycloak admin API); tests only: `vjeantet/ldapserver` (LDAP fake).
 - Run `go vet ./... && go test -race ./...` and `gofmt -l .` after every change; CI runs the same.
 - Docker: everything read-only (status, logs, exec, events) goes through `internal/docker`; the `docker compose` CLI is used only for `up`/`down` (compose has no API). Both use `DOCKER_HOST` (the Hub's socket proxy, `tcp://socket-proxy-hub:2375`).
 - `--project-directory` must be the HOST path (`PROJECT_HOST_DIR`) so the daemon resolves bind mounts.
