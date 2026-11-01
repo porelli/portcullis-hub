@@ -33,6 +33,20 @@ func newDirServer(t *testing.T) (*httptest.Server, *lldaptest.Server, *kctest.Se
 // newDirServerWith lets the caller adjust the directory service first.
 func newDirServerWith(t *testing.T, adjust func(*directory.Service)) (*httptest.Server, *lldaptest.Server, *kctest.Server) {
 	t.Helper()
+	s, ll, kc := newDirFixture(t, adjust)
+	handler, err := s.Handler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(handler)
+	t.Cleanup(srv.Close)
+	return srv, ll, kc
+}
+
+// newDirFixture is the Server behind newDirServerWith (and the people
+// listener tests).
+func newDirFixture(t *testing.T, adjust func(*directory.Service)) (*Server, *lldaptest.Server, *kctest.Server) {
+	t.Helper()
 	root := t.TempDir()
 	src := filepath.Join(root, "src", "demo")
 	os.MkdirAll(src, 0755)
@@ -78,13 +92,7 @@ func newDirServerWith(t *testing.T, adjust func(*directory.Service)) (*httptest.
 	if adjust != nil {
 		adjust(s.Directory)
 	}
-	handler, err := s.Handler()
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := httptest.NewServer(handler)
-	t.Cleanup(srv.Close)
-	return srv, ll, kc
+	return s, ll, kc
 }
 
 func doAs(t *testing.T, srv *httptest.Server, user, method, path, body string) (*http.Response, string) {

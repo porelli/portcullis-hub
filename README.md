@@ -44,7 +44,8 @@ The core Portcullis stack runs the Hub; you don't need to run it standalone.
 | `PROJECT_DIR` | Container path to the core checkout | `/project` |
 | `PROJECT_HOST_DIR` | Host path of the same checkout (for bind mounts) | same as `PROJECT_DIR` |
 | `HUB_DATA_DIR` | Writable data directory | `$PROJECT_DIR/.hub` |
-| `HUB_LISTEN_ADDR` | Listen address | `:8888` |
+| `HUB_LISTEN_ADDR` | Listen address (hub.<domain>, admins) | `:8888` |
+| `HUB_PEOPLE_ADDR` | People listener (people.<domain>, any signed-in user: directory UI and API only) | `:8889` |
 | `HUB_RECONCILE_INTERVAL` | Periodic drift check (Go duration, ≥ 5s); Docker events also trigger it | `1m` |
 | `PORTCULLIS_DOMAIN` | Domain for all services | `portcullis.local` |
 | `PORTAL_DISPLAY_NAME` | Name shown in the header | `Portcullis` |

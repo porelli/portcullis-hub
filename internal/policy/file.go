@@ -15,7 +15,7 @@ const FileVersion = 4
 
 // CoreSubdomains are owned by the core stack (group-gate-map.conf); templates
 // may never publish policies, groups or path groups for them.
-var CoreSubdomains = map[string]bool{"auth": true, "traefik": true, "hub": true, "directory": true, "enroll": true, "metrics": true}
+var CoreSubdomains = map[string]bool{"auth": true, "traefik": true, "hub": true, "directory": true, "enroll": true, "metrics": true, "people": true}
 
 // PathGroup requires Group for request paths under Prefix.
 type PathGroup struct {

@@ -65,7 +65,8 @@ func ProxySecret(secret string, next http.Handler) http.Handler {
 // any sibling app subdomain counts as same-site — cookies alone don't stop a
 // malicious page on another app from POSTing here. CrossOriginProtection
 // uses Sec-Fetch-Site / Origin; additionally a JSON body is required so
-// plain HTML forms (which can't send application/json) are refused.
+// plain HTML forms (which can't send application/json) are refused — except
+// the read-only CSV upload of the import review (multipart).
 func CSRF(next http.Handler) http.Handler {
 	cop := http.NewCrossOriginProtection()
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -73,7 +74,11 @@ func CSRF(next http.Handler) http.Handler {
 		case http.MethodGet, http.MethodHead, http.MethodOptions:
 		default:
 			mt, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
-			if mt != "application/json" {
+			// The CSV upload of the import review is multipart; the review
+			// changes nothing (apply is JSON) and the cross-origin check
+			// above still applies.
+			upload := mt == "multipart/form-data" && r.Method == http.MethodPost && r.URL.Path == "/api/directory/import/review"
+			if mt != "application/json" && !upload {
 				http.Error(w, "Content-Type must be application/json", http.StatusUnsupportedMediaType)
 				return
 			}

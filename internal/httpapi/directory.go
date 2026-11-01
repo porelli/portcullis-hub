@@ -27,7 +27,22 @@ func (s *Server) registerDirectory(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/directory/groups/{group}", s.handleDeleteGroup)
 	mux.HandleFunc("POST /api/directory/groups/{group}/members", s.handleAddMember)
 	mux.HandleFunc("DELETE /api/directory/groups/{group}/members/{username}", s.handleRemoveMember)
-	mux.HandleFunc("GET /api/portal/apps", s.handlePortalApps)
+
+	mux.HandleFunc("GET /api/directory/me", s.handleMe)
+	mux.HandleFunc("POST /api/directory/fields", s.handleCreateField)
+	mux.HandleFunc("PUT /api/directory/fields/{name}", s.handleUpdateField)
+	mux.HandleFunc("DELETE /api/directory/fields/{name}", s.handleDeleteField)
+	mux.HandleFunc("PUT /api/directory/users/{username}/details", s.handleSetDetails)
+	mux.HandleFunc("POST /api/directory/rules/preview", s.handleRulePreview)
+	mux.HandleFunc("PUT /api/directory/groups/{group}/rule", s.handleSetGroupRule)
+	mux.HandleFunc("POST /api/directory/groups/{group}/convert-preview", s.handleConvertPreview)
+	mux.HandleFunc("POST /api/directory/groups/{group}/convert", s.handleConvert)
+	mux.HandleFunc("POST /api/directory/groups/{group}/exceptions", s.handleAddException)
+	mux.HandleFunc("DELETE /api/directory/groups/{group}/exceptions/{username}", s.handleRemoveException)
+	mux.HandleFunc("PUT /api/directory/groups/{group}/members/{username}/expiry", s.handleSetExpiry)
+	mux.HandleFunc("PUT /api/directory/permissions/{perm}", s.handleSetPermission)
+	mux.HandleFunc(importReviewPath, s.handleImportReview)
+	mux.HandleFunc("POST /api/directory/import/apply", s.handleImportApply)
 }
 
 func actor(r *http.Request) string { return r.Header.Get("X-Forwarded-User") }
@@ -65,11 +80,23 @@ func (s *Server) dirReady(w http.ResponseWriter) bool {
 // noStore: responses can carry a one-time password or invite link.
 func noStore(w http.ResponseWriter) { w.Header().Set("Cache-Control", "no-store") }
 
+// handleDirectory: any signed-in caller; what they see depends on who
+// they are (directory.OverviewFor). Without LLDAP the page only says why.
 func (s *Server) handleDirectory(w http.ResponseWriter, r *http.Request) {
 	if !s.dirReady(w) {
 		return
 	}
-	ov, err := s.Directory.Overview(r.Context(), actor(r))
+	var ov *directory.Overview
+	var err error
+	if s.Directory.LLDAP.Available() != nil {
+		ov, err = s.Directory.Overview(r.Context(), actor(r)) // Available false + Reason, no data
+	} else {
+		c, ok := s.caller(w, r)
+		if !ok {
+			return
+		}
+		ov, err = s.Directory.OverviewFor(r.Context(), c)
+	}
 	if err != nil {
 		dirErr(w, err)
 		return
@@ -78,8 +105,17 @@ func (s *Server) handleDirectory(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, ov)
 }
 
+// handleAudit: administrators only.
 func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 	if !s.dirReady(w) {
+		return
+	}
+	c, ok := s.caller(w, r)
+	if !ok {
+		return
+	}
+	if !c.Admin {
+		http.Error(w, "not allowed: admins only", http.StatusForbidden)
 		return
 	}
 	entries, err := s.Directory.Recent(100)

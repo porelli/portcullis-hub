@@ -12,7 +12,8 @@ import (
 // (contract §9.4) — the same set core's enroll computes: lldap_admin,
 // lldap_password_manager, extra (INVITE_PROTECTED_GROUPS, space or comma
 // separated) and the group of every core subdomain in group-gate-map.conf
-// (the consoles: auth, traefik, hub, directory, enroll, metrics). A missing
+// (the consoles: auth, traefik, hub, directory, enroll, metrics; people
+// is "*", any signed-in user, and adds no group). A missing
 // map file leaves the built-in groups and extra.
 func ProtectedGroups(extra, mapFile string) map[string]bool {
 	set := map[string]bool{lldap.AdminGroup: true, "lldap_password_manager": true}
@@ -29,8 +30,9 @@ func ProtectedGroups(extra, mapFile string) map[string]bool {
 			continue
 		}
 		k, v, ok := strings.Cut(line, "=")
-		if ok && policy.CoreSubdomains[strings.ToLower(strings.TrimSpace(k))] && strings.TrimSpace(v) != "" {
-			set[strings.TrimSpace(v)] = true
+		// "*" (people: any signed-in user, contract §5.1) is no group.
+		if v = strings.TrimSpace(v); ok && policy.CoreSubdomains[strings.ToLower(strings.TrimSpace(k))] && v != "" && v != "*" {
+			set[v] = true
 		}
 	}
 	return set

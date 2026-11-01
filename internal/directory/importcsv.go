@@ -76,19 +76,30 @@ func ParseCSV(r io.Reader) (header []string, rows [][]string, err error) {
 	if len(records) == 0 {
 		return nil, nil, invalid("CSV file is empty")
 	}
+	return NormalizeImport(records[0], records[1:])
+}
 
-	// Check limits
-	if len(records) > maxCSVRows+1 { // +1 for header
+// NormalizeImport checks an import's size (at most 10,000 rows and 64
+// columns), lowercases and trims the header and requires a unique
+// "username" column. ParseCSV ends with it; the API calls it for rows the
+// UI sends back for a fresh review.
+func NormalizeImport(head []string, rows [][]string) (header []string, out [][]string, err error) {
+	if len(rows) > maxCSVRows {
 		return nil, nil, invalid("CSV file has too many rows (max %d)", maxCSVRows)
 	}
-	if len(records[0]) > maxCSVColumns {
+	if len(head) > maxCSVColumns {
 		return nil, nil, invalid("CSV file has too many columns (max %d)", maxCSVColumns)
+	}
+	for _, r := range rows {
+		if len(r) > maxCSVColumns {
+			return nil, nil, invalid("CSV row has too many columns (max %d)", maxCSVColumns)
+		}
 	}
 
 	// Normalize header (lowercase, trim)
-	header = make([]string, len(records[0]))
+	header = make([]string, len(head))
 	seen := make(map[string]bool)
-	for i, h := range records[0] {
+	for i, h := range head {
 		h = strings.TrimSpace(h)
 		h = strings.ToLower(h)
 		header[i] = h
@@ -97,21 +108,12 @@ func ParseCSV(r io.Reader) (header []string, rows [][]string, err error) {
 		}
 		seen[h] = true
 	}
-
-	// Check for required username column
-	hasUsername := false
-	for _, h := range header {
-		if h == "username" {
-			hasUsername = true
-			break
-		}
-	}
-	if !hasUsername {
+	if !seen["username"] {
 		return nil, nil, invalid("CSV must have a %q column", "username")
 	}
-
-	// Return rows (skip header)
-	rows = records[1:]
+	if rows == nil {
+		rows = [][]string{}
+	}
 	return header, rows, nil
 }
 

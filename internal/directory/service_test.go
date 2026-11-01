@@ -470,11 +470,11 @@ func userOps(s *directory.Service, c *directory.Caller, target string) map[strin
 // evaluator (Evaluate, RunEvaluator) targets nobody: it leaves protected
 // accounts alone, see TestProtectedAccountsNeverRuleMembers. The group
 // and field operations are admin-only (TestDelegateCannotEscalate).
-var nonUserOps = map[string]bool{"Overview": true, "Recent": true, "CallerFor": true, "CreateGroup": true, "DeleteGroup": true, "CreateField": true, "UpdateField": true, "DeleteField": true, "Evaluate": true, "RunEvaluator": true, "Desired": true, "DesiredFromLLDAP": true, "Pending": true,
+var nonUserOps = map[string]bool{"Overview": true, "OverviewFor": true, "Recent": true, "CallerFor": true, "CreateGroup": true, "DeleteGroup": true, "CreateField": true, "UpdateField": true, "DeleteField": true, "Evaluate": true, "RunEvaluator": true, "Desired": true, "DesiredFromLLDAP": true, "Pending": true,
 	// Group config: admin-only; ConvertApply's keep list can only name
 	// non-protected members (TestConvertKeepsAsExceptions), PreviewRule
 	// changes nothing and never lists protected accounts.
-	"SetGroupRule": true, "ConvertPreview": true, "ConvertApply": true, "SetPermission": true, "PreviewRule": true,
+	"SetGroupRule": true, "ConvertPreview": true, "ConvertApply": true, "ConvertApplyReviewed": true, "SetPermission": true, "PreviewRule": true,
 	// CSV import: ImportReview is read-only; ImportApply operates on multiple rows and reuses CreateUser/DeleteUser/SetDetails which each check targets.
 	"ImportReview": true, "ImportApply": true,
 	// Read-only views for the Hub's publishing (policy expiring, user attributes).
@@ -555,14 +555,14 @@ func TestProtectedAccountsParity(t *testing.T) {
 
 func TestProtectedGroups(t *testing.T) {
 	f := filepath.Join(t.TempDir(), "map.conf")
-	os.WriteFile(f, []byte("# comment\nhub=lldap_admin\nmetrics=ops\nMETRICS2=x\nwiki=users_wiki\ntraefik=\nenroll = enrollers\n"), 0644)
+	os.WriteFile(f, []byte("# comment\nhub=lldap_admin\nmetrics=ops\nMETRICS2=x\nwiki=users_wiki\ntraefik=\nenroll = enrollers\npeople=*\n"), 0644)
 	got := directory.ProtectedGroups("a, b c", f)
 	for _, g := range []string{"lldap_admin", "lldap_password_manager", "a", "b", "c", "ops", "enrollers"} {
 		if !got[g] {
 			t.Errorf("missing %s in %v", g, got)
 		}
 	}
-	if got["users_wiki"] || got["x"] || got[""] {
+	if got["users_wiki"] || got["x"] || got[""] || got["*"] { // people=*: any signed-in user, no group
 		t.Errorf("app groups must not be protected: %v", got)
 	}
 	if got := directory.ProtectedGroups("", filepath.Join(t.TempDir(), "none")); len(got) != 2 {

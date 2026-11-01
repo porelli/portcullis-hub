@@ -491,6 +491,7 @@ func pruneSkipped(rep *EvalReport, name string, gc *GroupConfig, now time.Time, 
 
 // changed calls OnChange. Never call it with s.mu held.
 func (s *Service) changed() {
+	s.invalidatePreview()
 	if s.OnChange != nil {
 		s.OnChange()
 	}
@@ -570,6 +571,7 @@ func (s *Service) kickChan() chan struct{} {
 
 // kick requests an evaluation soon (non-blocking, coalesced).
 func (s *Service) kick() {
+	s.invalidatePreview()
 	select {
 	case s.kickChan() <- struct{}{}:
 	default:

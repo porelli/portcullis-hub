@@ -19,9 +19,9 @@ Web management UI for Portcullis. Go binary with an embedded single-page UI, pub
 | `internal/lldap` | LLDAP client: GraphQL via `hasura/go-graphql-client` (`/api/graphql`, JWT from `/auth/simple/login`, refresh/re-login on 401) + `go-ldap` Password Modify extended op (passwords; dial/request bounded by `Timeout` and ctx); credentials from files; `lldaptest` = in-memory fake (HTTP + LDAP on `vjeantet/ldapserver`) |
 | `internal/invite` | Client for core's one-time invite API (contract §9.4) |
 | `internal/directory` | Users & groups service: guardrails, onboarding (invite / password fallback), audit log (`audit.jsonl`) |
-| `internal/httpapi` | Handlers (`directory.go`: `/api/directory/*`, `/api/portal/apps`), proxy-secret middleware, CSRF guard |
+| `internal/httpapi` | Handlers (`directory.go` + `people.go`: `/api/directory/*`; `/api/portal/apps`), proxy-secret middleware, CSRF guard; `Handler` (hub listener) and `PeopleHandler` (people listener: `/healthz`, `people.html`, `/static/*.js|*.css`, the directory API only) |
 | `internal/fsutil` | Atomic writes, path confinement |
-| `web/` | `index.html` (vanilla JS) + `web.go` embed |
+| `web/` | `index.html` (vanilla JS), `people.html` (people listener) + `web.go` embed |
 
 ## Critical Rules
 
@@ -30,6 +30,7 @@ Web management UI for Portcullis. Go binary with an embedded single-page UI, pub
 - Docker: everything read-only (status, logs, exec, events) goes through the Engine API via the official SDK in `internal/docker`; the `docker compose` CLI is used only for `up`/`down` (compose has no API). Both use `DOCKER_HOST` (the Hub's socket proxy, `tcp://socket-proxy-hub:2375`).
 - `--project-directory` must be the HOST path (`PROJECT_HOST_DIR`) so the daemon resolves bind mounts.
 - Every request except `GET /healthz` needs `X-Portcullis-Proxy-Secret` == `HUB_PROXY_SECRET` (≥ 32 chars, or the Hub won't start).
+- Two listeners, same middleware chain: `HUB_LISTEN_ADDR` (`:8888`, hub.<domain>, admins only — enforced by core) and `HUB_PEOPLE_ADDR` (`:8889`, people.<domain>, any signed-in user, contract §5.1). The people listener registers only the directory API, `/healthz` and the people page — never app, policy, drift, compose, settings, sources or template routes (`TestPeopleListenerHasNoAppRoutes`). `GET /api/directory` is `OverviewFor(caller)`: non-admins get no Keycloak/passkey state, stale Keycloak records, invite internals or suggestions; `/api/directory/audit` is admins only. The only non-JSON mutation is the multipart CSV upload of the read-only `POST /api/directory/import/review` (CSRF exemption, 5 MB → 413).
 - group-gate keys policies, groups and path groups **by subdomain only**. Templates whose Traefik rules the Hub can't fully resolve to `<sub>.${PORTCULLIS_DOMAIN}` hosts are rejected; two enabled apps may not route the same subdomain.
 - Never hold `Hub.mu` across docker/network calls; lifecycle ops take the per-app lock (`lockApp`).
 - Fail closed: `state.yaml` `published` keeps each enabled app's last published config; the policy writer falls back to it when the template is missing, and denies (`policy.DenyGroup`) subdomains of running app projects it has no config for.

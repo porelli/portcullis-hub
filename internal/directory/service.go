@@ -19,6 +19,7 @@ import (
 	"github.com/portcullis/hub/internal/invite"
 	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/lldap"
+	"github.com/portcullis/hub/internal/rules"
 )
 
 // CoreAdmin is LLDAP's bootstrap admin (core sets LLDAP_LDAP_USER_DN=admin).
@@ -114,6 +115,10 @@ type Service struct {
 	ruleState map[string]map[string]bool
 	kickOnce  sync.Once
 	kickCh    chan struct{}
+	// The snapshot PreviewRule shares for previewTTL (previewSnapshot).
+	previewMu sync.Mutex
+	previewSn *snapshot
+	previewAt time.Time
 }
 
 // Error carries an HTTP status for the API layer.
@@ -179,7 +184,7 @@ type UserView struct {
 	DisplayName string        `json:"display_name"`
 	Created     string        `json:"created"`
 	Groups      []string      `json:"groups"`
-	Keycloak    *KeycloakView `json:"keycloak"` // nil: Keycloak unreachable
+	Keycloak    *KeycloakView `json:"keycloak,omitempty"` // nil: Keycloak unreachable (or not an admin's view)
 	// Protected: "service" (the Hub's account) or "core-admin" (the
 	// bootstrap admin): both read-only here. "" otherwise.
 	Protected string `json:"protected,omitempty"`
@@ -189,6 +194,43 @@ type UserView struct {
 	Admin        bool                `json:"admin,omitempty"`
 	ServerInvite string              `json:"server_invite,omitempty"`
 	Attrs        map[string][]string `json:"attrs,omitempty"` // custom attributes that are defined fields
+	// Memberships: one per group in Groups, with how it is held.
+	Memberships []Membership `json:"memberships"`
+	// CreatedBy: the delegate who invited this account (until an admin
+	// takes it over), so rule memberships can say "account created by X".
+	CreatedBy string `json:"created_by,omitempty"`
+}
+
+// How a membership is held (Membership.How).
+const (
+	HowManual    = "manual"    // added by hand (manual group), or a rule group member the rule doesn't (yet) explain
+	HowRule      = "rule"      // the group's rule matches
+	HowException = "exception" // an active "added" exception of a rule group
+)
+
+// Membership is one group of a user and how they are in it.
+type Membership struct {
+	Group  string     `json:"group"`
+	How    string     `json:"how"`              // manual | rule | exception
+	Reason string     `json:"reason,omitempty"` // exception: its reason
+	Until  *time.Time `json:"until,omitempty"`  // manual expiry or exception end (UTC)
+}
+
+// RuleView is a rule group's rule, as canonical text and as a tree.
+type RuleView struct {
+	Text string      `json:"text"`
+	Expr *rules.Expr `json:"expr"`
+}
+
+// ExceptionView is one exception of a rule group.
+type ExceptionView struct {
+	User    string     `json:"user"`
+	Reason  string     `json:"reason"`
+	By      string     `json:"by"`
+	Include bool       `json:"include"` // true: added; false: kept out
+	Until   *time.Time `json:"until"`   // nil: permanent
+	At      time.Time  `json:"at"`
+	Expired bool       `json:"expired,omitempty"`
 }
 
 // GroupView is one group.
@@ -199,6 +241,15 @@ type GroupView struct {
 	Builtin bool     `json:"builtin,omitempty"`
 	Admin   bool     `json:"admin,omitempty"` // an administrator group
 	UsedBy  []string `json:"used_by"`         // app ids referencing it
+	// RuleAllowed: may become rule-based (not built-in, not an
+	// administrator group).
+	RuleAllowed bool                 `json:"rule_allowed"`
+	Rule        *RuleView            `json:"rule"` // nil: manual group
+	Exceptions  []ExceptionView      `json:"exceptions"`
+	Expiry      map[string]time.Time `json:"expiry"` // manual groups: username -> until (UTC)
+	// AddsBlocked: why the evaluator adds nobody to this guarding group
+	// ("" if it does), see addsBlocked.
+	AddsBlocked string `json:"adds_blocked,omitempty"`
 }
 
 // Suggestion is a group of an ENABLED app that doesn't exist yet.
@@ -223,9 +274,19 @@ type Overview struct {
 	KeycloakError string       `json:"keycloak_error,omitempty"`
 	// StaleKeycloak lists Keycloak copies of users LLDAP no longer has
 	// (RemoveStaleKeycloakUser removes them).
-	StaleKeycloak []StaleRecord `json:"stale_keycloak"`
-	// InvitesError is set when invite links can't be created.
+	StaleKeycloak []StaleRecord `json:"stale_keycloak,omitempty"`
+	// InvitesError is set when invite links can't be created (admins only).
 	InvitesError string `json:"invites_error,omitempty"`
+	// InvitesAvailable: invite links can be created.
+	InvitesAvailable bool `json:"invites_available"`
+	// Admin and Perms describe the caller (Me): admins hold every
+	// delegated permission.
+	Admin bool     `json:"admin"`
+	Perms []string `json:"perms"`
+	// Permissions: delegated permission -> group (directory.yaml).
+	Permissions map[string]string `json:"permissions"`
+	// Cycles: manager loops in the org chart (usernames).
+	Cycles [][]string `json:"cycles"`
 }
 
 func (s *Service) serviceUser() string {
@@ -245,10 +306,31 @@ func (s *Service) protection(user string) string {
 	return ""
 }
 
-// Overview lists users, groups and suggestions. An unconfigured LLDAP is
-// not an error: Available is false and Reason says why.
+// Overview lists users, groups and suggestions: the administrator's
+// view (everything). An unconfigured LLDAP is not an error: Available is
+// false and Reason says why.
 func (s *Service) Overview(ctx context.Context, me string) (*Overview, error) {
-	ov := &Overview{Me: me, Users: []UserView{}, Groups: []GroupView{}, Suggestions: []Suggestion{}, StaleKeycloak: []StaleRecord{}}
+	return s.overview(ctx, me, nil)
+}
+
+// OverviewFor is GET /api/directory for c: administrators get everything
+// (Overview); anyone else gets people, groups, fields, rules, exceptions,
+// permissions and the org chart's cycles, but no Keycloak or passkey
+// state, no stale Keycloak records, no invite internals and no setup
+// suggestions (contract §9.6: everyone signed in sees everyone's fields).
+func (s *Service) OverviewFor(ctx context.Context, c *Caller) (*Overview, error) {
+	if c == nil || strings.TrimSpace(c.User) == "" {
+		return nil, errNoActor()
+	}
+	return s.overview(ctx, c.User, c)
+}
+
+// overview builds the Overview; c nil = the full (administrator) view
+// with Admin/Perms computed for me, otherwise the view c may see.
+func (s *Service) overview(ctx context.Context, me string, c *Caller) (*Overview, error) {
+	full := c == nil || c.Admin
+	ov := &Overview{Me: me, Users: []UserView{}, Groups: []GroupView{}, Suggestions: []Suggestion{}, StaleKeycloak: []StaleRecord{},
+		Fields: []Field{}, Permissions: map[string]string{}, Cycles: [][]string{}, Perms: []string{}}
 	if err := s.LLDAP.Available(); err != nil {
 		ov.Reason = err.Error()
 		return ov, nil
@@ -256,18 +338,24 @@ func (s *Service) Overview(ctx context.Context, me string) (*Overview, error) {
 	ov.Available = true
 	ov.ServiceUser = s.serviceUser()
 	if err := s.invitesAvailable(); err != nil {
-		ov.InvitesError = err.Error()
+		if full {
+			ov.InvitesError = err.Error()
+		}
+	} else {
+		ov.InvitesAvailable = true
 	}
 
 	// Load fields from Store if available
 	var cfg *Config
 	var fieldNames map[string]bool
-	ov.Fields = []Field{}
 	if s.Store != nil {
 		var err error
 		cfg, err = s.Store.Load()
 		if err != nil {
-			ov.FieldsError = err.Error()
+			ov.FieldsError = "directory.yaml could not be read"
+			if full {
+				ov.FieldsError = err.Error()
+			}
 			cfg = nil
 		}
 		if cfg != nil {
@@ -281,6 +369,11 @@ func (s *Service) Overview(ctx context.Context, me string) (*Overview, error) {
 			for _, f := range cfg.Fields {
 				fieldNames[f.Name] = true
 			}
+			for p, g := range cfg.Permissions {
+				if g != "" && containsString(delegatedPerms, p) {
+					ov.Permissions[p] = g
+				}
+			}
 		}
 	}
 
@@ -292,13 +385,36 @@ func (s *Service) Overview(ctx context.Context, me string) (*Overview, error) {
 	if err != nil {
 		return nil, &Error{Status: http.StatusBadGateway, Msg: err.Error()}
 	}
-	kc := s.keycloakStatuses(ctx, ov)
+	sn := snapshotOf(users, groups)
+	if c != nil {
+		ov.Admin = c.Admin
+		for p, ok := range c.Perms {
+			if ok {
+				ov.Perms = append(ov.Perms, p)
+			}
+		}
+	} else if me != "" {
+		ov.Admin = memberOf(sn.groups[lldap.AdminGroup], me)
+		for p, g := range ov.Permissions {
+			if grp, ok := sn.groups[g]; ok && memberOf(grp, me) {
+				ov.Perms = append(ov.Perms, p)
+			}
+		}
+	}
+	if ov.Admin {
+		ov.Perms = append([]string{}, delegatedPerms...) // admins hold every permission
+	}
+	sort.Strings(ov.Perms)
+	var kc map[string]keycloak.UserStatus
+	if full {
+		kc = s.keycloakStatuses(ctx, ov)
+	}
 	admins := s.adminGroups()
 	inLLDAP := map[string]bool{}
 	for _, u := range users {
 		inLLDAP[strings.ToLower(u.ID)] = true
 		v := UserView{Username: u.ID, Email: u.Email, DisplayName: u.DisplayName, Created: u.CreationDate, Groups: []string{},
-			Protected: s.protection(u.ID), Self: me != "" && strings.EqualFold(me, u.ID), Attrs: map[string][]string{}}
+			Protected: s.protection(u.ID), Self: me != "" && strings.EqualFold(me, u.ID), Attrs: map[string][]string{}, Memberships: []Membership{}}
 		for _, g := range u.Groups {
 			v.Groups = append(v.Groups, g.DisplayName)
 			v.Admin = v.Admin || admins[g.DisplayName]
@@ -312,7 +428,14 @@ func (s *Service) Overview(ctx context.Context, me string) (*Overview, error) {
 				}
 			}
 		}
-		if v.Admin && v.Protected != "service" {
+		if cfg != nil {
+			for k, by := range cfg.CreatedBy {
+				if strings.EqualFold(k, u.ID) {
+					v.CreatedBy = by
+				}
+			}
+		}
+		if full && v.Admin && v.Protected != "service" {
 			v.ServerInvite = "./portcullis invite " + u.ID
 		}
 		// The service account is excluded from Keycloak's federation: no
@@ -346,7 +469,8 @@ func (s *Service) Overview(ctx context.Context, me string) (*Overview, error) {
 	}
 	have := map[string]bool{}
 	for _, g := range groups {
-		gv := GroupView{Name: g.DisplayName, Created: g.CreationDate, Members: g.Members(), Builtin: builtinGroups[g.DisplayName], Admin: admins[g.DisplayName], UsedBy: []string{}}
+		gv := GroupView{Name: g.DisplayName, Created: g.CreationDate, Members: g.Members(), Builtin: builtinGroups[g.DisplayName], Admin: admins[g.DisplayName], UsedBy: []string{},
+			RuleAllowed: s.ruleGroupAllowed(g.DisplayName, admins), Exceptions: []ExceptionView{}, Expiry: map[string]time.Time{}}
 		sort.Strings(gv.Members)
 		for _, a := range apps {
 			if a.AccessGroup == g.DisplayName || a.AdminGroup == g.DisplayName {
@@ -357,6 +481,12 @@ func (s *Service) Overview(ctx context.Context, me string) (*Overview, error) {
 		ov.Groups = append(ov.Groups, gv)
 	}
 	sort.Slice(ov.Groups, func(i, j int) bool { return ov.Groups[i].Name < ov.Groups[j].Name })
+	if cfg != nil {
+		s.addGroupConfig(ov, cfg, sn, admins, time.Now().UTC())
+	}
+	if !full {
+		return ov, nil
+	}
 	// Suggest only groups of apps that are enabled: templates you don't use
 	// have no business in the directory.
 	seen := map[string]bool{}
@@ -376,6 +506,76 @@ func (s *Service) Overview(ctx context.Context, me string) (*Overview, error) {
 		return ov.Suggestions[i].Group < ov.Suggestions[j].Group
 	})
 	return ov, nil
+}
+
+// addGroupConfig adds what directory.yaml says about groups to ov: each
+// group's rule, exceptions and expiries, every user's memberships with
+// how they hold them, and the manager cycles of the org chart.
+func (s *Service) addGroupConfig(ov *Overview, cfg *Config, sn *snapshot, admins map[string]bool, now time.Time) {
+	d := ruleDirectory(cfg, sn)
+	if cy := rules.Cycles(d); cy != nil {
+		for _, c := range cy {
+			ids := make([]string, len(c))
+			for i, u := range c {
+				ids[i] = u
+				if su, ok := sn.users[strings.ToLower(u)]; ok {
+					ids[i] = su.ID
+				}
+			}
+			ov.Cycles = append(ov.Cycles, ids)
+		}
+	}
+	guarding := s.guardingGroups(cfg)
+	evals := map[string]*groupEval{}
+	for i := range ov.Groups {
+		gv := &ov.Groups[i]
+		gc := cfg.Groups[gv.Name]
+		if gc == nil {
+			continue
+		}
+		if gc.Rule != nil {
+			gv.Rule = &RuleView{Text: rules.Format(gc.Rule), Expr: gc.Rule}
+			gv.AddsBlocked = s.addsBlocked(cfg, guarding, gv.Name, gc)
+			if s.ruleGroupAllowed(gv.Name, admins) {
+				evals[gv.Name] = s.evalGroup(gc, d, sn, now)
+			}
+		}
+		for _, ex := range gc.Exceptions {
+			gv.Exceptions = append(gv.Exceptions, ExceptionView{User: ex.User, Reason: ex.Reason, By: ex.By, Include: ex.Include, Until: ex.Until, At: ex.At,
+				Expired: ex.Until != nil && expired(*ex.Until, now)})
+		}
+		for u, at := range gc.Expiry {
+			gv.Expiry[u] = at.UTC()
+		}
+	}
+	for i := range ov.Users {
+		uv := &ov.Users[i]
+		id := strings.ToLower(uv.Username)
+		for _, g := range uv.Groups {
+			m := Membership{Group: g, How: HowManual}
+			if ge := evals[g]; ge != nil {
+				switch {
+				case ge.include[id]:
+					m.How = HowException
+					for _, ex := range ge.kept {
+						if ex.Include && strings.EqualFold(ex.User, id) {
+							m.Reason, m.Until = ex.Reason, ex.Until
+						}
+					}
+				case ge.matched[id]:
+					m.How = HowRule
+				}
+			} else if gc := cfg.Groups[g]; gc != nil && gc.Rule == nil {
+				for u, at := range gc.Expiry {
+					if strings.EqualFold(u, id) {
+						until := at.UTC()
+						m.Until = &until
+					}
+				}
+			}
+			uv.Memberships = append(uv.Memberships, m)
+		}
+	}
 }
 
 // keycloakStatuses fetches every Keycloak user's status within the
@@ -429,6 +629,10 @@ func (s *Service) load(ctx context.Context) (*snapshot, error) {
 	if err != nil {
 		return nil, &Error{Status: http.StatusBadGateway, Msg: err.Error()}
 	}
+	return snapshotOf(users, groups), nil
+}
+
+func snapshotOf(users []lldap.User, groups []lldap.Group) *snapshot {
 	sn := &snapshot{users: map[string]lldap.User{}, groups: map[string]lldap.Group{}}
 	for _, u := range users {
 		sn.users[strings.ToLower(u.ID)] = u
@@ -436,7 +640,7 @@ func (s *Service) load(ctx context.Context) (*snapshot, error) {
 	for _, g := range groups {
 		sn.groups[g.DisplayName] = g
 	}
-	return sn, nil
+	return sn
 }
 
 func (sn *snapshot) user(name string) (lldap.User, error) {

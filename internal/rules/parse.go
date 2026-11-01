@@ -350,3 +350,13 @@ func unescapeString(s string) string {
 
 	return result.String()
 }
+
+// ErrorColumn returns the 1-based column of a Parse error (0 if err is
+// not one), so the rule editor can point at it.
+func ErrorColumn(err error) int {
+	var pe *parseError
+	if errors.As(err, &pe) {
+		return pe.col
+	}
+	return 0
+}

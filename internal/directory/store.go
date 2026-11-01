@@ -24,13 +24,13 @@ const (
 
 // Field represents a custom user field.
 type Field struct {
-	Name          string    `yaml:"name"`
-	Label         string    `yaml:"label"`
-	Kind          FieldKind `yaml:"kind"`
-	Values        []string  `yaml:"values,omitempty"`          // list kind: allowed values, in order
-	Multi         bool      `yaml:"multi,omitempty"`           // text and list kinds: allow multiple values; person: must be false
-	ShareWithApps bool      `yaml:"share_with_apps,omitempty"` // expose to apps via headers/claims
-	AdminOnly     bool      `yaml:"admin_only,omitempty"`      // only admins can edit
+	Name          string    `yaml:"name" json:"name"`
+	Label         string    `yaml:"label" json:"label"`
+	Kind          FieldKind `yaml:"kind" json:"kind"`
+	Values        []string  `yaml:"values,omitempty" json:"values"`                   // list kind: allowed values, in order
+	Multi         bool      `yaml:"multi,omitempty" json:"multi"`                     // text and list kinds: allow multiple values; person: must be false
+	ShareWithApps bool      `yaml:"share_with_apps,omitempty" json:"share_with_apps"` // expose to apps via headers/claims
+	AdminOnly     bool      `yaml:"admin_only,omitempty" json:"admin_only"`           // only admins can edit
 }
 
 // Exception represents a rule exception for a user.

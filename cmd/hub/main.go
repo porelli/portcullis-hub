@@ -128,6 +128,12 @@ func main() {
 	if err != nil {
 		log.Fatalf("ui: %v", err)
 	}
+	// people.<domain> (contract §5.1): the directory UI and API only, for
+	// every signed-in user; same proxy secret and CSRF guard.
+	peopleHandler, err := srv.PeopleHandler()
+	if err != nil {
+		log.Fatalf("people ui: %v", err)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -140,20 +146,34 @@ func main() {
 	}
 
 	addr := env("HUB_LISTEN_ADDR", ":8888")
-	httpSrv := &http.Server{
-		Addr:              addr,
-		Handler:           handler,
-		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout:       2 * time.Minute,
-	}
+	peopleAddr := env("HUB_PEOPLE_ADDR", ":8889")
+	servers := []*http.Server{newHTTPServer(addr, handler), newHTTPServer(peopleAddr, peopleHandler)}
 	go func() {
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		httpSrv.Shutdown(shutdown)
+		for _, s := range servers {
+			s.Shutdown(shutdown)
+		}
 	}()
-	log.Printf("Hub listening on %s (domain: %s, docker: %s)", addr, cfg.Domain, dockerHost)
-	if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		log.Fatal(err)
+	log.Printf("Hub listening on %s, people on %s (domain: %s, docker: %s)", addr, peopleAddr, cfg.Domain, dockerHost)
+	errc := make(chan error, len(servers))
+	for _, s := range servers {
+		go func() { errc <- s.ListenAndServe() }()
+	}
+	for range servers {
+		if err := <-errc; err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatal(err)
+		}
+	}
+}
+
+// newHTTPServer: both listeners use the same timeouts.
+func newHTTPServer(addr string, h http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           h,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       2 * time.Minute,
 	}
 }

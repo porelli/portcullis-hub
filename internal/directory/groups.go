@@ -23,7 +23,31 @@ const maxReasonRunes = 500
 // members the rule matches whose manual expiry would be dropped (they
 // then stay by rule, without an end).
 type ConvertPreview struct {
-	Matching, KeptAsException, Joining, ExpiryDropped []string
+	Matching        []string `json:"matching"`
+	KeptAsException []string `json:"kept_as_exception"`
+	Joining         []string `json:"joining"`
+	ExpiryDropped   []string `json:"expiry_dropped"`
+}
+
+// sameAs: p and q list the same people as kept, joining and expiry
+// dropped (case-insensitive, any order). Matching is implied by them.
+func (p *ConvertPreview) sameAs(q *ConvertPreview) bool {
+	eq := func(a, b []string) bool {
+		set := map[string]int{}
+		for _, x := range a {
+			set[strings.ToLower(x)]++
+		}
+		for _, x := range b {
+			set[strings.ToLower(x)]--
+		}
+		for _, n := range set {
+			if n != 0 {
+				return false
+			}
+		}
+		return true
+	}
+	return eq(p.KeptAsException, q.KeptAsException) && eq(p.Joining, q.Joining) && eq(p.ExpiryDropped, q.ExpiryDropped)
 }
 
 func errNoStore() error {
@@ -276,6 +300,14 @@ func (s *Service) ConvertPreview(ctx context.Context, c *Caller, group string, r
 // any manual expiry; the evaluator then removes the other non-matching
 // members. Admins only.
 func (s *Service) ConvertApply(ctx context.Context, c *Caller, group string, rule *rules.Expr, keep []string) error {
+	return s.ConvertApplyReviewed(ctx, c, group, rule, keep, nil)
+}
+
+// ConvertApplyReviewed is ConvertApply after a review: if reviewed is not
+// nil and the preview computed now (inside the lock) differs from it in
+// who is kept, who joins or whose expiry is dropped, nothing changes and
+// the error is a 409 (the admin must review again).
+func (s *Service) ConvertApplyReviewed(ctx context.Context, c *Caller, group string, rule *rules.Expr, keep []string, reviewed *ConvertPreview) error {
 	detail := "convert rule=" + rules.Format(rule)
 	return s.run(ctx, c, permAdmin, "group.rule", group, &detail, func() error {
 		cfg, sn, g, err := s.convertCheck(ctx, group, rule)
@@ -283,6 +315,10 @@ func (s *Service) ConvertApply(ctx context.Context, c *Caller, group string, rul
 			return err
 		}
 		p := s.preview(cfg, sn, g, rule)
+		if reviewed != nil && !p.sameAs(reviewed) {
+			detail += " (stale review)"
+			return refuse("%s changed since the review: review the conversion again", group)
+		}
 		offered := map[string]string{}
 		for _, u := range p.KeptAsException {
 			offered[strings.ToLower(u)] = u
@@ -609,9 +645,37 @@ func (s *Service) PreviewRule(ctx context.Context, c *Caller, rule *rules.Expr) 
 	if err := checkRule(cfg, rule); err != nil {
 		return nil, err
 	}
-	sn, err := s.load(ctx)
+	sn, err := s.previewSnapshot(ctx)
 	if err != nil {
 		return nil, err
 	}
 	return idsOf(sn, s.matching(cfg, sn, rule)), nil
+}
+
+// previewTTL: PreviewRule reuses one LLDAP snapshot for this long (the
+// rule editor previews as the admin types); any mutation or evaluation
+// change drops it (invalidatePreview).
+const previewTTL = 2 * time.Second
+
+// previewSnapshot returns the shared preview snapshot, loading a new one
+// when it is older than previewTTL or was invalidated.
+func (s *Service) previewSnapshot(ctx context.Context) (*snapshot, error) {
+	s.previewMu.Lock()
+	defer s.previewMu.Unlock()
+	if s.previewSn != nil && time.Since(s.previewAt) < previewTTL {
+		return s.previewSn, nil
+	}
+	sn, err := s.load(ctx)
+	if err != nil {
+		return nil, err
+	}
+	s.previewSn, s.previewAt = sn, time.Now()
+	return sn, nil
+}
+
+// invalidatePreview drops the preview snapshot.
+func (s *Service) invalidatePreview() {
+	s.previewMu.Lock()
+	s.previewSn = nil
+	s.previewMu.Unlock()
 }

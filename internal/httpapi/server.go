@@ -64,6 +64,23 @@ func (s *Server) Handler() (http.Handler, error) {
 	mux.HandleFunc("/api/drift", s.handleDrift)
 	mux.HandleFunc("/api/drift/resolve", s.handleDriftResolve)
 	mux.HandleFunc("/api/settings", s.handleSettings)
+	mux.HandleFunc("GET /api/portal/apps", s.handlePortalApps)
+	s.registerDirectory(mux)
+	return ProxySecret(s.Secret, CSRF(mux)), nil
+}
+
+// PeopleHandler is the people listener (contract §5.1, people.<domain>,
+// any signed-in user): the same chain as Handler (proxy secret → CSRF),
+// but only /healthz, the people page and the directory API. No app,
+// policy, drift, compose, settings, sources or template routes.
+func (s *Server) PeopleHandler() (http.Handler, error) {
+	if _, err := fs.Stat(s.Web, "people.html"); err != nil {
+		return nil, err
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", s.handleHealthz)
+	mux.HandleFunc("/", s.handlePeoplePage)
+	mux.HandleFunc("/static/", s.handlePeopleStatic)
 	s.registerDirectory(mux)
 	return ProxySecret(s.Secret, CSRF(mux)), nil
 }
@@ -175,6 +192,34 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	}); err != nil {
 		log.Printf("render index: %v", err)
 	}
+}
+
+// handlePeoplePage serves people.html (static: the page asks the API who
+// the caller is).
+func (s *Server) handlePeoplePage(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+	data, err := fs.ReadFile(s.Web, "people.html")
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Write(data)
+}
+
+// handlePeopleStatic serves only the .js and .css assets on the people
+// listener (not the Hub's index.html template).
+func (s *Server) handlePeopleStatic(w http.ResponseWriter, r *http.Request) {
+	p := strings.TrimPrefix(r.URL.Path, "/static/")
+	if !strings.HasSuffix(p, ".js") && !strings.HasSuffix(p, ".css") {
+		http.NotFound(w, r)
+		return
+	}
+	s.handleStatic(w, r)
 }
 
 func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
