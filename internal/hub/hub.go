@@ -101,6 +101,13 @@ type Hub struct {
 	// ops: each app's last lifecycle operation (mirrors <data>/ops).
 	opsMu sync.Mutex
 	ops   map[string]OpRecord
+
+	// Directory publishing (SetDirectory). lastExpiring is the expiring
+	// list last written (guarded by policyWriteMu; nil: not yet known).
+	dirState     DirectoryState
+	attrSync     func(ctx context.Context) error
+	lastExpiring []policy.Expiring
+	dirKick      chan struct{}
 }
 
 // New loads state from cfg.DataDir and prepares the data directories. It
@@ -129,6 +136,7 @@ func New(cfg Config, runner compose.Runner, engine Engine, idp IdP) (*Hub, error
 		idp:       idp,
 		lockPoll:  2 * time.Second,
 		kick:      make(chan struct{}, 1),
+		dirKick:   make(chan struct{}, 1),
 		driftKey:  map[string]string{},
 	}
 	st, err := state.Load(h.statePath())
@@ -167,6 +175,7 @@ func (h *Hub) Domain() string { return h.cfg.Domain }
 
 func (h *Hub) statePath() string        { return filepath.Join(h.cfg.DataDir, "state.yaml") }
 func (h *Hub) policyPath() string       { return filepath.Join(h.cfg.DataDir, "group-gate-policy.json") }
+func (h *Hub) attributesPath() string   { return filepath.Join(h.cfg.DataDir, policy.UserAttributesFile) }
 func (h *Hub) envPath(id string) string { return filepath.Join(h.cfg.DataDir, "env", id+".env") }
 func (h *Hub) overridePath(id string) string {
 	return filepath.Join(h.cfg.DataDir, "overrides", id+".override.yml")
@@ -355,6 +364,8 @@ func (h *Hub) WritePolicy() error {
 	// newer one (a stale file could drop groups and fail open).
 	h.policyWriteMu.Lock()
 	defer h.policyWriteMu.Unlock()
+	// Directory state first: it is network I/O, never under h.mu.
+	expiring, attrs, keepAttrs := h.directoryState()
 	h.driftMu.Lock()
 	runtime := make(map[string][]string, len(h.runtimeSubs))
 	for id, subs := range h.runtimeSubs {
@@ -428,14 +439,29 @@ func (h *Hub) WritePolicy() error {
 		}
 	}
 	doc := policy.Build(apps, perApp, h.st.Default())
+	doc.Expiring = expiring
 	portal := h.portalLocked()
 	h.mu.RUnlock()
 	if err := policy.Write(h.policyPath(), doc); err != nil {
 		return err
 	}
+	h.lastExpiring = expiring
+	var errs []error
+	switch {
+	case keepAttrs:
+	case attrs == nil:
+		if err := os.Remove(h.attributesPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, err)
+		}
+	default:
+		if err := policy.WriteUserAttributes(h.attributesPath(), *attrs); err != nil {
+			errs = append(errs, err)
+		}
+	}
 	// The landing portal's app list (contract §10) changes exactly when
 	// the policy does: enable, disable, template sync.
-	return writePortal(h.portalPath(), portal)
+	errs = append(errs, writePortal(h.portalPath(), portal))
+	return errors.Join(errs...)
 }
 
 func coreSubdomain(subs []string) string {

@@ -37,6 +37,7 @@ type EvalReport struct {
 	Changes []Change
 	Cycles  [][]string // manager cycles (for the UI to flag)
 	Errors  []string   // per-group / per-change problems; the run continued
+	pruned  bool       // expired entries were dropped from directory.yaml
 }
 
 // Expiring is a membership that ends at At (manual-group expiry or an
@@ -226,6 +227,9 @@ func (s *Service) Evaluate(ctx context.Context, now time.Time) (*EvalReport, err
 	if err != nil {
 		return nil, err
 	}
+	if len(rep.Changes) > 0 || rep.pruned {
+		s.changed()
+	}
 	// Keycloak only after releasing s.mu.
 	if s.KC != nil {
 		for _, u := range removed {
@@ -411,9 +415,84 @@ func (s *Service) evaluateLocked(ctx context.Context, now time.Time) (*EvalRepor
 	if dirty {
 		if err := s.Store.Save(cfg); err != nil {
 			rep.Errors = append(rep.Errors, fmt.Sprintf("save %s: %v", s.Store.Path, err))
+		} else {
+			rep.pruned = true
 		}
 	}
 	return rep, removed, nil
+}
+
+// changed calls OnChange. Never call it with s.mu held.
+func (s *Service) changed() {
+	if s.OnChange != nil {
+		s.OnChange()
+	}
+}
+
+// Published is what the Hub publishes from the directory for group-gate
+// (contract §4 expiring, §4.1 user attributes) and Keycloak (§9.6).
+type Published struct {
+	// Expiring: Pending at the time of the call.
+	Expiring []Expiring
+	// Fields: the fields shared with apps (ShareWithApps), sorted by name.
+	Fields []Field
+	// Users: every LLDAP user except the service account (lowercase), with
+	// their values of the shared fields only (users without any omitted).
+	Users map[string]map[string][]string
+}
+
+// SharedFields returns the fields shared with apps, sorted by name.
+func (s *Service) SharedFields() ([]Field, error) {
+	cfg, err := s.loadConfig()
+	if err != nil {
+		return nil, err
+	}
+	return sharedFields(cfg), nil
+}
+
+func sharedFields(cfg *Config) []Field {
+	out := []Field{}
+	for _, f := range cfg.Fields {
+		if f.ShareWithApps {
+			out = append(out, f)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// Publish reads directory.yaml and LLDAP and returns what the Hub
+// publishes. Any failure is an error: the caller keeps what it published
+// last (fail closed) rather than publishing a partial view.
+func (s *Service) Publish(ctx context.Context, now time.Time) (*Published, error) {
+	cfg, err := s.loadConfig()
+	if err != nil {
+		return nil, err
+	}
+	if err := s.LLDAP.Available(); err != nil {
+		return nil, &Error{Status: http.StatusServiceUnavailable, Msg: err.Error()}
+	}
+	sn, err := s.load(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := &Published{Expiring: s.Pending(cfg, now), Fields: sharedFields(cfg), Users: map[string]map[string][]string{}}
+	svc := strings.ToLower(s.serviceUser())
+	for id, u := range sn.users {
+		if id == svc {
+			continue
+		}
+		vals := map[string][]string{}
+		for _, f := range out.Fields {
+			if v := u.Attributes[f.Name]; len(v) > 0 {
+				vals[f.Name] = append([]string{}, v...)
+			}
+		}
+		if len(vals) > 0 {
+			out.Users[id] = vals
+		}
+	}
+	return out, nil
 }
 
 // kickChan is the coalesced trigger of RunEvaluator.

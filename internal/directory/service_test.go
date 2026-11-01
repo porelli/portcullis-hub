@@ -476,7 +476,9 @@ var nonUserOps = map[string]bool{"Overview": true, "Recent": true, "CallerFor": 
 	// changes nothing and never lists protected accounts.
 	"SetGroupRule": true, "ConvertPreview": true, "ConvertApply": true, "SetPermission": true, "PreviewRule": true,
 	// CSV import: ImportReview is read-only; ImportApply operates on multiple rows and reuses CreateUser/DeleteUser/SetDetails which each check targets.
-	"ImportReview": true, "ImportApply": true}
+	"ImportReview": true, "ImportApply": true,
+	// Read-only views for the Hub's publishing (policy expiring, user attributes).
+	"Publish": true, "SharedFields": true}
 
 func TestProtectedAccountsParity(t *testing.T) {
 	e := newEnv(t)

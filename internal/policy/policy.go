@@ -1,6 +1,6 @@
 // Package policy holds the auth-policy model (factors + AND/OR), what each
 // auth method can enforce of it, and builds the group-gate policy file
-// (contract §4, version 3).
+// (contract §4, version 4).
 package policy
 
 import (

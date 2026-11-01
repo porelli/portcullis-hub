@@ -65,7 +65,6 @@ func main() {
 	if err != nil {
 		log.Fatalf("refusing to start: %v", err)
 	}
-	h.Init()
 
 	// User & group management (contract §9). Credentials are files core
 	// mounts read-only, never env vars; without them the Users page says so
@@ -96,7 +95,26 @@ func main() {
 			return directory.ProtectedGroups(os.Getenv("INVITE_PROTECTED_GROUPS"),
 				env("HUB_GATE_MAP_FILE", filepath.Join(projectDir, "group-gate", "group-gate-map.conf")))
 		},
+		// Expiries, user attributes and Keycloak mappers follow every
+		// directory change (coalesced in the Hub's background sync).
+		OnChange: h.TriggerDirectorySync,
 	}
+	// The policy file's expiring list and user-attributes.json come from
+	// the directory (contract §4, §4.1); shared fields become Keycloak
+	// attr_<field> claims (§9.6). Keycloak failures are logged and retried,
+	// never blocking the policy write.
+	h.SetDirectory(hub.DirectoryStateOf(dir), func(ctx context.Context) error {
+		shared, err := dir.SharedFields()
+		if err != nil {
+			return err // never remove mappers because directory.yaml is unreadable
+		}
+		fields := make([]keycloak.AttrField, 0, len(shared))
+		for _, f := range shared {
+			fields = append(fields, keycloak.AttrField{Name: f.Name, Multi: f.Multi})
+		}
+		return kc.EnsureAttributeMappers(ctx, fields)
+	})
+	h.Init()
 
 	srv := &httpapi.Server{
 		Hub:        h,
@@ -114,6 +132,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go h.RunReconciler(ctx)
+	go h.RunDirectorySync(ctx)
 	if dir.Store != nil && ll.Available() == nil {
 		// Rule groups, exceptions and expiries -> LLDAP membership: every
 		// minute (expiries) and after each directory mutation.

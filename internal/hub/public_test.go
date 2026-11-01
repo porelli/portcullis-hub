@@ -141,7 +141,7 @@ func TestPublicListedTokens(t *testing.T) {
 
 	doc := readPolicy(t, f)
 	if e := doc.PublicPaths["cloud"]; guardPathsOf(e) != "prefix:/s/{token},static:/dist" || e.TokenPattern != "^[A-Za-z0-9-]{1,32}$" ||
-		strings.Join(e.CredentialHeaders, ",") != "Authorization,Proxy-Authorization" || doc.Version != 3 {
+		strings.Join(e.CredentialHeaders, ",") != "Authorization,Proxy-Authorization" || doc.Version != policy.FileVersion {
 		t.Errorf("public_paths = %+v", doc.PublicPaths)
 	}
 	raw, _ := os.ReadFile(filepath.Join(f.data, "group-gate-policy.json"))

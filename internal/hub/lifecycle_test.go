@@ -44,7 +44,7 @@ func statusOf(err error) int {
 func TestInitWritesPolicy(t *testing.T) {
 	f := newFixture(t)
 	doc := readPolicy(t, f)
-	if doc.Version != 3 || len(doc.Groups) != 0 || len(doc.PathGroups) != 0 {
+	if doc.Version != policy.FileVersion || len(doc.Groups) != 0 || len(doc.PathGroups) != 0 {
 		t.Errorf("initial policy = %+v", doc)
 	}
 	if n := len(f.h.Templates()); n != 2 {

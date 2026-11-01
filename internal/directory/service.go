@@ -101,6 +101,12 @@ type Service struct {
 	// Store for directory.yaml (custom fields, rules, etc.); nil: field
 	// operations return 503.
 	Store *Store
+	// OnChange, if set, is called (outside the service lock) after every
+	// successful mutation and every evaluation that changed a membership
+	// or pruned directory.yaml, so the Hub republishes expiries and user
+	// attributes (contract §4, §4.1) and the Keycloak mappers (§9.6). It
+	// must not block: the Hub coalesces calls into one background sync.
+	OnChange func()
 
 	mu sync.Mutex
 	// ruleState: each rule group's membership (lowercase) after the last
@@ -552,6 +558,12 @@ func (s *Service) run(ctx context.Context, c *Caller, perm, action, target strin
 		return errNoActor()
 	}
 	defer s.kick() // re-evaluate rule groups after every mutation
+	done := false
+	defer func() {
+		if done {
+			s.changed() // runs after the unlock below
+		}
+	}()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	err := s.LLDAP.Available()
@@ -559,6 +571,7 @@ func (s *Service) run(ctx context.Context, c *Caller, perm, action, target strin
 		err = &Error{Status: http.StatusServiceUnavailable, Msg: err.Error()}
 	} else if err = s.gate(ctx, c, perm, target); err == nil {
 		err = fn()
+		done = err == nil
 	}
 	if s.Audit != nil {
 		e := AuditEntry{Actor: clip(c.User), Action: action, Target: clip(target), Result: "ok"}

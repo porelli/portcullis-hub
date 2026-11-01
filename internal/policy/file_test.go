@@ -33,7 +33,7 @@ func TestBuild(t *testing.T) {
 	}
 	doc := Build(apps, perApp, webauthn)
 
-	if doc.Version != 3 {
+	if doc.Version != 4 {
 		t.Errorf("version = %d", doc.Version)
 	}
 	if !reflect.DeepEqual(doc.Default, webauthn) {
@@ -159,7 +159,7 @@ func TestWrite(t *testing.T) {
 	if err := json.Unmarshal(data, &raw); err != nil {
 		t.Fatal(err)
 	}
-	if raw["version"] != float64(3) {
+	if raw["version"] != float64(4) {
 		t.Errorf("version = %v", raw["version"])
 	}
 	for _, k := range []string{"policies", "groups", "path_groups", "public_paths"} {
@@ -207,14 +207,14 @@ func TestBuildPublicPaths(t *testing.T) {
 		{ID: "gone", Enabled: true, Deny: true, Subdomains: []string{"gone"}, PublicSubdomains: []string{"gone"}, Public: cloud},
 	}
 	doc := Build(apps, nil, InitialDefault())
-	if doc.Version != 3 || len(doc.PublicPaths) != 1 || !reflect.DeepEqual(doc.PublicPaths["cloud"], *cloud) {
+	if doc.Version != 4 || len(doc.PublicPaths) != 1 || !reflect.DeepEqual(doc.PublicPaths["cloud"], *cloud) {
 		t.Errorf("public_paths = %+v (version %d)", doc.PublicPaths, doc.Version)
 	}
 	if doc.Groups["gone"] != DenyGroup {
 		t.Errorf("deny app lost its deny group: %v", doc.Groups)
 	}
 	raw, _ := json.Marshal(doc)
-	for _, want := range []string{`"version":3`, `"paths":[{"path":"/s/{token}","match":"prefix"},{"path":"/dist","match":"static"}]`,
+	for _, want := range []string{`"version":4`, `"paths":[{"path":"/s/{token}","match":"prefix"},{"path":"/dist","match":"static"}]`,
 		`"credential_cookies":["nc_token"]`, `"credential_query":[]`} {
 		if !strings.Contains(string(raw), want) {
 			t.Errorf("policy file lacks %s: %s", want, raw)
@@ -223,5 +223,64 @@ func TestBuildPublicPaths(t *testing.T) {
 	raw, _ = json.Marshal(Build(nil, nil, InitialDefault()))
 	if !strings.Contains(string(raw), `"public_paths":{}`) {
 		t.Errorf("empty public_paths not published as {}: %s", raw)
+	}
+}
+
+func TestPolicyFileV4Expiring(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "policy.json")
+
+	exp1 := Expiring{User: "jsmith", Group: "contractors", At: "2027-03-31T23:59:59Z"}
+	exp2 := Expiring{User: "alee", Group: "temporary", At: "2027-06-30T23:59:59Z"}
+
+	doc := Document{
+		Version:     FileVersion,
+		Default:     AuthPolicy{Factors: []string{"webauthn"}},
+		Policies:    map[string]AuthPolicy{},
+		Groups:      map[string]string{"app": "users"},
+		PathGroups:  map[string][]PathGroup{},
+		PublicPaths: map[string]PublicEntry{},
+		Expiring:    []Expiring{exp1, exp2},
+	}
+
+	if err := Write(path, doc); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatal(err)
+	}
+
+	if parsed["version"] != float64(4) {
+		t.Errorf("version = %v, want 4", parsed["version"])
+	}
+
+	expiring, ok := parsed["expiring"].([]interface{})
+	if !ok {
+		t.Fatalf("expiring missing or not an array: %T", parsed["expiring"])
+	}
+	if len(expiring) != 2 {
+		t.Fatalf("expiring length = %d, want 2", len(expiring))
+	}
+
+	e1 := expiring[0].(map[string]interface{})
+	if e1["user"] != "jsmith" || e1["group"] != "contractors" || e1["at"] != "2027-03-31T23:59:59Z" {
+		t.Errorf("expiring[0] = %+v", e1)
+	}
+
+	// Empty expiring array should still be present
+	doc.Expiring = []Expiring{}
+	if err := Write(path, doc); err != nil {
+		t.Fatal(err)
+	}
+	data, _ = os.ReadFile(path)
+	if !strings.Contains(string(data), `"expiring": []`) {
+		t.Errorf("empty expiring array not serialized: %s", string(data))
 	}
 }

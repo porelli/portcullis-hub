@@ -8,10 +8,10 @@ import (
 	"github.com/portcullis/hub/internal/fsutil"
 )
 
-// FileVersion is the policy-file format version (contract §4). Version 3
-// adds public_paths entries for core's public guard, which serves only
-// version 3: the Hub and core must be upgraded together.
-const FileVersion = 3
+// FileVersion is the policy-file format version (contract §4). Version 4
+// adds the expiring array for membership expiry enforcement. group-gate
+// serves only version 4: the Hub and core must be upgraded together.
+const FileVersion = 4
 
 // CoreSubdomains are owned by the core stack (group-gate-map.conf); templates
 // may never publish policies, groups or path groups for them.
@@ -21,6 +21,16 @@ var CoreSubdomains = map[string]bool{"auth": true, "traefik": true, "hub": true,
 type PathGroup struct {
 	Prefix string `json:"prefix"`
 	Group  string `json:"group"`
+}
+
+// Expiring is a membership that ends at At (manual-group expiry or an
+// "added" exception with an end date). Usernames are lowercase; timestamps
+// are RFC 3339 in UTC. The Hub writes at most one entry per (user, group)
+// pair: the earliest At when multiple expiries exist.
+type Expiring struct {
+	User  string `json:"user"`
+	Group string `json:"group"`
+	At    string `json:"at"` // RFC 3339 UTC timestamp
 }
 
 // Document is the JSON written for group-gate.
@@ -34,6 +44,9 @@ type Document struct {
 	// guard enforces on the Hub's public router (forward-auth and the group
 	// check don't run there). Listed share tokens stay "{token}".
 	PublicPaths map[string]PublicEntry `json:"public_paths"`
+	// Expiring lists pending membership expiries for group-gate to enforce
+	// strictly, even when the Hub is down. Version 4+.
+	Expiring []Expiring `json:"expiring"`
 }
 
 // PublicPath is one pattern core's public guard allows: Match is "prefix"
@@ -118,6 +131,7 @@ func Build(apps []App, perApp map[string]AuthPolicy, def AuthPolicy) Document {
 		Groups:      map[string]string{},
 		PathGroups:  map[string][]PathGroup{},
 		PublicPaths: map[string]PublicEntry{},
+		Expiring:    []Expiring{},
 	}
 	sorted := append([]App(nil), apps...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
