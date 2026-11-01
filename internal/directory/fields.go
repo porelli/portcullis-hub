@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/portcullis/hub/internal/rules"
 )
@@ -20,7 +21,7 @@ var lldapBuiltins = map[string]bool{
 // fieldNameRe matches valid field names: ^[a-z][a-z0-9_]{0,30}$
 var fieldNameRe = regexp.MustCompile(`^[a-z][a-z0-9_]{0,30}$`)
 
-// CreateField creates a custom field. ShareWithApps defaults to true if omitted.
+// CreateField creates a custom field.
 // admin only (Task 6)
 func (s *Service) CreateField(ctx context.Context, actor string, f Field) error {
 	f.Name = strings.TrimSpace(f.Name)
@@ -34,12 +35,12 @@ func (s *Service) CreateField(ctx context.Context, actor string, f Field) error 
 			return invalid("invalid field name: use lowercase letters, digits, '_', 1-31 characters, starting with a letter")
 		}
 		if lldapBuiltins[f.Name] {
-			return refuse("field name %q is reserved (LLDAP built-in attribute)", f.Name)
+			return invalid("field name %q is reserved (LLDAP built-in attribute)", f.Name)
 		}
 		if f.Label == "" {
 			return invalid("label is required")
 		}
-		if len(f.Label) > 64 {
+		if utf8.RuneCountInString(f.Label) > 64 {
 			return invalid("label must be at most 64 characters")
 		}
 		if f.Kind != FieldKindText && f.Kind != FieldKindList && f.Kind != FieldKindPerson {
@@ -49,8 +50,15 @@ func (s *Service) CreateField(ctx context.Context, actor string, f Field) error 
 			return invalid("person fields cannot be multi-valued")
 		}
 		if f.Kind == FieldKindList {
-			if err := validateListValues(f.Values); err != nil {
+			trimmed, err := validateListValues(f.Values)
+			if err != nil {
 				return err
+			}
+			f.Values = trimmed
+		} else {
+			// Non-list kinds must have empty Values
+			if len(f.Values) > 0 {
+				return invalid("%s fields must not have values", f.Kind)
 			}
 		}
 
@@ -77,7 +85,7 @@ func (s *Service) CreateField(ctx context.Context, actor string, f Field) error 
 		}
 
 		// Create in LLDAP first
-		isList := f.Kind == FieldKindList && f.Multi
+		isList := f.Multi
 		if err := s.LLDAP.AddUserAttribute(ctx, f.Name, isList); err != nil {
 			return &Error{Status: http.StatusBadGateway, Msg: fmt.Sprintf("creating LLDAP attribute: %v", err)}
 		}
@@ -101,6 +109,7 @@ func (s *Service) CreateField(ctx context.Context, actor string, f Field) error 
 func (s *Service) UpdateField(ctx context.Context, actor string, f Field) error {
 	f.Name = strings.TrimSpace(f.Name)
 	f.Label = strings.TrimSpace(f.Label)
+	var changes []string
 	detail := ""
 	return s.run(actor, "field.update", f.Name, &detail, func() error {
 		if s.Store == nil {
@@ -109,12 +118,19 @@ func (s *Service) UpdateField(ctx context.Context, actor string, f Field) error 
 		if f.Label == "" {
 			return invalid("label is required")
 		}
-		if len(f.Label) > 64 {
+		if utf8.RuneCountInString(f.Label) > 64 {
 			return invalid("label must be at most 64 characters")
 		}
 		if f.Kind == FieldKindList {
-			if err := validateListValues(f.Values); err != nil {
+			trimmed, err := validateListValues(f.Values)
+			if err != nil {
 				return err
+			}
+			f.Values = trimmed
+		} else {
+			// Non-list kinds must have empty Values
+			if len(f.Values) > 0 {
+				return invalid("%s fields must not have values", f.Kind)
 			}
 		}
 
@@ -145,6 +161,17 @@ func (s *Service) UpdateField(ctx context.Context, actor string, f Field) error 
 			return invalid("field multi cannot be changed (was %v)", existing.Multi)
 		}
 
+		// Track changes
+		if existing.Label != f.Label {
+			changes = append(changes, "label")
+		}
+		if existing.AdminOnly != f.AdminOnly {
+			changes = append(changes, fmt.Sprintf("admin_only=%v", f.AdminOnly))
+		}
+		if existing.ShareWithApps != f.ShareWithApps {
+			changes = append(changes, fmt.Sprintf("share_with_apps=%v", f.ShareWithApps))
+		}
+
 		// Check if turning off AdminOnly while field is guarded
 		if existing.AdminOnly && !f.AdminOnly {
 			guarded := s.guardedFields(cfg)
@@ -153,8 +180,8 @@ func (s *Service) UpdateField(ctx context.Context, actor string, f Field) error 
 			}
 		}
 
-		// Check if removing list values that are in use
-		if f.Kind == FieldKindList && len(existing.Values) > len(f.Values) {
+		// Check if removing list values that are in use (always compute for list kinds)
+		if f.Kind == FieldKindList {
 			removed := make(map[string]bool)
 			kept := make(map[string]bool)
 			for _, v := range f.Values {
@@ -165,8 +192,33 @@ func (s *Service) UpdateField(ctx context.Context, actor string, f Field) error 
 					removed[strings.ToLower(v)] = true
 				}
 			}
+			// Track added/removed values
+			if len(removed) > 0 || len(kept) > len(existing.Values) {
+				var added []string
+				existingSet := make(map[string]bool)
+				for _, v := range existing.Values {
+					existingSet[strings.ToLower(v)] = true
+				}
+				for _, v := range f.Values {
+					if !existingSet[strings.ToLower(v)] {
+						added = append(added, v)
+					}
+				}
+				if len(added) > 0 {
+					changes = append(changes, fmt.Sprintf("values+%v", added))
+				}
+				if len(removed) > 0 {
+					var removedList []string
+					for k := range removed {
+						removedList = append(removedList, k)
+					}
+					sort.Strings(removedList)
+					changes = append(changes, fmt.Sprintf("values-%v", removedList))
+				}
+			}
+
+			// Check if any removed value is used in rules
 			if len(removed) > 0 {
-				// Check if any removed value is used in rules
 				var usingGroups []string
 				for groupName, gc := range cfg.Groups {
 					if gc.Rule == nil {
@@ -192,6 +244,9 @@ func (s *Service) UpdateField(ctx context.Context, actor string, f Field) error 
 		cfg.Fields[idx] = f
 		if err := s.Store.Save(cfg); err != nil {
 			return fmt.Errorf("save directory.yaml: %w", err)
+		}
+		if len(changes) > 0 {
+			detail = strings.Join(changes, " ")
 		}
 		return nil
 	})
@@ -247,7 +302,7 @@ func (s *Service) DeleteField(ctx context.Context, actor, name, confirm string) 
 
 		// Then delete from LLDAP (deleting the attribute drops all values)
 		if err := s.LLDAP.DeleteUserAttribute(ctx, name); err != nil {
-			return &Error{Status: http.StatusBadGateway, Msg: fmt.Sprintf("deleting LLDAP attribute: %v", err)}
+			return &Error{Status: http.StatusBadGateway, Msg: fmt.Sprintf("deleting LLDAP attribute failed (%v): the LLDAP attribute %q is left behind and must be removed (portcullis lldap-ui) before re-creating the field", err, name)}
 		}
 
 		return nil
@@ -299,23 +354,23 @@ func (s *Service) guardedFields(cfg *Config) map[string]string {
 }
 
 // validateListValues checks that list values are non-empty, trimmed, and unique (case-insensitive).
-func validateListValues(values []string) error {
+// Returns a new slice with trimmed values (does not mutate the input).
+func validateListValues(values []string) ([]string, error) {
 	seen := make(map[string]string) // lowercase -> original
+	result := make([]string, len(values))
 	for i, v := range values {
 		trimmed := strings.TrimSpace(v)
 		if trimmed == "" {
-			return invalid("list values must not be empty or blank")
-		}
-		if trimmed != v {
-			values[i] = trimmed
+			return nil, invalid("list values must not be empty or blank")
 		}
 		lower := strings.ToLower(trimmed)
 		if orig, ok := seen[lower]; ok {
-			return invalid("duplicate list value: %q and %q (case-insensitive)", orig, trimmed)
+			return nil, invalid("duplicate list value: %q and %q (case-insensitive)", orig, trimmed)
 		}
 		seen[lower] = trimmed
+		result[i] = trimmed
 	}
-	return nil
+	return result, nil
 }
 
 // containsString reports whether slice contains s.

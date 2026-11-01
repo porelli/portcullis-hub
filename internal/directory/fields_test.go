@@ -1,6 +1,7 @@
 package directory_test
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -428,5 +429,213 @@ func TestNilStoreReturns503(t *testing.T) {
 	err := e.svc.CreateField(ctx, "root", f)
 	if status(err) != 503 {
 		t.Errorf("CreateField with nil Store: status = %d, want 503", status(err))
+	}
+}
+
+// Fix round 1 tests
+
+func TestTextFieldMultiCreatesListAttribute(t *testing.T) {
+	e := newEnv(t)
+	e.svc.Store = &directory.Store{Path: filepath.Join(t.TempDir(), "directory.yaml")}
+
+	// Text field with Multi=true
+	f := directory.Field{
+		Name:  "tags",
+		Label: "Tags",
+		Kind:  directory.FieldKindText,
+		Multi: true,
+	}
+	if err := e.svc.CreateField(ctx, "root", f); err != nil {
+		t.Fatal(err)
+	}
+
+	attrs, _ := e.svc.LLDAP.UserAttributes(ctx)
+	for _, a := range attrs {
+		if a.Name == "tags" && !a.IsList {
+			t.Errorf("text field with Multi=true: isList = %v, want true", a.IsList)
+		}
+	}
+}
+
+func TestListFieldMultiFalseCreatesNonListAttribute(t *testing.T) {
+	e := newEnv(t)
+	e.svc.Store = &directory.Store{Path: filepath.Join(t.TempDir(), "directory.yaml")}
+
+	// List field with Multi=false
+	f := directory.Field{
+		Name:   "office",
+		Label:  "Office",
+		Kind:   directory.FieldKindList,
+		Values: []string{"NYC", "SF"},
+		Multi:  false,
+	}
+	if err := e.svc.CreateField(ctx, "root", f); err != nil {
+		t.Fatal(err)
+	}
+
+	attrs, _ := e.svc.LLDAP.UserAttributes(ctx)
+	for _, a := range attrs {
+		if a.Name == "office" && a.IsList {
+			t.Errorf("list field with Multi=false: isList = %v, want false", a.IsList)
+		}
+	}
+}
+
+func TestRemoveListValueRefusedWhenUsed(t *testing.T) {
+	e := newEnv(t)
+	store := &directory.Store{Path: filepath.Join(t.TempDir(), "directory.yaml")}
+	e.svc.Store = store
+
+	// Create field with NYC, SF, Austin
+	f := directory.Field{
+		Name:   "office",
+		Label:  "Office",
+		Kind:   directory.FieldKindList,
+		Values: []string{"NYC", "SF", "Austin"},
+	}
+	if err := e.svc.CreateField(ctx, "root", f); err != nil {
+		t.Fatal(err)
+	}
+
+	// Use SF in a rule
+	cfg, _ := store.Load()
+	cfg.Groups = map[string]*directory.GroupConfig{
+		"sf_team": {
+			Rule: &rules.Expr{
+				Op:     rules.OpIs,
+				Field:  "office",
+				Values: []string{"SF"},
+			},
+		},
+	}
+	store.Save(cfg)
+
+	// Try to replace SF with LA
+	f.Values = []string{"NYC", "LA", "Austin"}
+	err := e.svc.UpdateField(ctx, "root", f)
+	if err == nil {
+		t.Fatal("UpdateField removing used value: expected error, got nil")
+	}
+	if status(err) != 409 {
+		t.Errorf("status = %d, want 409", status(err))
+	}
+	if !strings.Contains(err.Error(), "sf_team") {
+		t.Errorf("error should list group using value: %v", err)
+	}
+}
+
+func TestLabelLengthCountsRunes(t *testing.T) {
+	e := newEnv(t)
+	e.svc.Store = &directory.Store{Path: filepath.Join(t.TempDir(), "directory.yaml")}
+
+	// 64 runes with accents (more than 64 bytes)
+	label64 := strings.Repeat("é", 64)
+	f := directory.Field{Name: "test64", Label: label64, Kind: directory.FieldKindText}
+	if err := e.svc.CreateField(ctx, "root", f); err != nil {
+		t.Errorf("64-rune label: unexpected error: %v", err)
+	}
+
+	// 65 runes
+	label65 := strings.Repeat("é", 65)
+	f2 := directory.Field{Name: "test65", Label: label65, Kind: directory.FieldKindText}
+	if err := e.svc.CreateField(ctx, "root", f2); err == nil {
+		t.Error("65-rune label: expected error, got nil")
+	}
+}
+
+func TestNonListKindsRefuseValues(t *testing.T) {
+	e := newEnv(t)
+	e.svc.Store = &directory.Store{Path: filepath.Join(t.TempDir(), "directory.yaml")}
+
+	// Text with Values
+	f := directory.Field{
+		Name:   "dept",
+		Label:  "Department",
+		Kind:   directory.FieldKindText,
+		Values: []string{"Engineering"},
+	}
+	err := e.svc.CreateField(ctx, "root", f)
+	if err == nil || status(err) != 400 {
+		t.Errorf("text field with Values: want 400, got %v", err)
+	}
+
+	// Person with Values
+	f2 := directory.Field{
+		Name:   "manager",
+		Label:  "Manager",
+		Kind:   directory.FieldKindPerson,
+		Values: []string{"alice"},
+	}
+	err2 := e.svc.CreateField(ctx, "root", f2)
+	if err2 == nil || status(err2) != 400 {
+		t.Errorf("person field with Values: want 400, got %v", err2)
+	}
+}
+
+func TestBuiltinFieldName400(t *testing.T) {
+	e := newEnv(t)
+	e.svc.Store = &directory.Store{Path: filepath.Join(t.TempDir(), "directory.yaml")}
+
+	f := directory.Field{Name: "mail", Label: "Email", Kind: directory.FieldKindText}
+	err := e.svc.CreateField(ctx, "root", f)
+	if status(err) != 400 {
+		t.Errorf("built-in field name: status = %d, want 400", status(err))
+	}
+}
+
+func TestUpdateFieldAuditDetail(t *testing.T) {
+	e := newEnv(t)
+	e.svc.Store = &directory.Store{Path: filepath.Join(t.TempDir(), "directory.yaml")}
+
+	// Create
+	f := directory.Field{
+		Name:          "dept",
+		Label:         "Department",
+		Kind:          directory.FieldKindList,
+		Values:        []string{"Eng", "Sales"},
+		AdminOnly:     false,
+		ShareWithApps: true,
+	}
+	e.svc.CreateField(ctx, "root", f)
+
+	// Update multiple properties
+	f.Label = "Department Name"
+	f.AdminOnly = true
+	f.ShareWithApps = false
+	f.Values = []string{"Eng", "Sales", "HR"}
+	e.svc.UpdateField(ctx, "root", f)
+
+	entries, _ := e.svc.Recent(10)
+	if len(entries) < 2 {
+		t.Fatal("no audit entries")
+	}
+	detail := entries[0].Detail
+	if !strings.Contains(detail, "label") {
+		t.Errorf("audit detail should mention label change: %q", detail)
+	}
+	if !strings.Contains(detail, "admin_only=true") {
+		t.Errorf("audit detail should mention admin_only change: %q", detail)
+	}
+	if !strings.Contains(detail, "share_with_apps=false") {
+		t.Errorf("audit detail should mention share_with_apps change: %q", detail)
+	}
+	if !strings.Contains(detail, "values+") {
+		t.Errorf("audit detail should mention added values: %q", detail)
+	}
+}
+
+func TestOverviewFieldsError(t *testing.T) {
+	e := newEnv(t)
+	// Point to a corrupt yaml
+	badPath := filepath.Join(t.TempDir(), "directory.yaml")
+	os.WriteFile(badPath, []byte("version: 1\nfields: [not valid yaml"), 0600)
+	e.svc.Store = &directory.Store{Path: badPath}
+
+	ov, err := e.svc.Overview(ctx, "root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ov.FieldsError == "" {
+		t.Error("Overview with corrupt directory.yaml: FieldsError should be set")
 	}
 }

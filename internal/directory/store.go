@@ -27,7 +27,7 @@ type Field struct {
 	Label         string    `yaml:"label"`
 	Kind          FieldKind `yaml:"kind"`
 	Values        []string  `yaml:"values,omitempty"`          // list kind: allowed values, in order
-	Multi         bool      `yaml:"multi,omitempty"`           // list kind: allow multiple values
+	Multi         bool      `yaml:"multi,omitempty"`           // text and list kinds: allow multiple values; person: must be false
 	ShareWithApps bool      `yaml:"share_with_apps,omitempty"` // expose to apps via headers/claims
 	AdminOnly     bool      `yaml:"admin_only,omitempty"`      // only admins can edit
 }

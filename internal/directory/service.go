@@ -206,7 +206,8 @@ type Overview struct {
 	Users         []UserView   `json:"users"`
 	Groups        []GroupView  `json:"groups"`
 	Suggestions   []Suggestion `json:"suggestions"`
-	Fields        []Field      `json:"fields"` // custom fields, sorted by name
+	Fields        []Field      `json:"fields"`                 // custom fields, sorted by name
+	FieldsError   string       `json:"fields_error,omitempty"` // set when loading directory.yaml fails
 	KeycloakError string       `json:"keycloak_error,omitempty"`
 	// StaleKeycloak lists Keycloak copies of users LLDAP no longer has
 	// (RemoveStaleKeycloakUser removes them).
@@ -254,7 +255,7 @@ func (s *Service) Overview(ctx context.Context, me string) (*Overview, error) {
 		var err error
 		cfg, err = s.Store.Load()
 		if err != nil {
-			// Non-fatal: field definitions are optional
+			ov.FieldsError = err.Error()
 			cfg = nil
 		}
 		if cfg != nil {
