@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 )
@@ -82,15 +84,18 @@ func (s *Service) SetDetails(ctx context.Context, c *Caller, user string, attrs 
 
 			switch f.Kind {
 			case FieldKindList:
-				// Build allowed set (case-insensitive)
-				allowed := make(map[string]bool)
+				// Matched case-insensitively, stored as the defined value
+				// (rules compare list values exactly).
+				canon := make(map[string]string)
 				for _, v := range f.Values {
-					allowed[strings.ToLower(v)] = true
+					canon[strings.ToLower(v)] = v
 				}
-				for _, v := range trimmed {
-					if !allowed[strings.ToLower(v)] {
+				for i, v := range trimmed {
+					c, ok := canon[strings.ToLower(v)]
+					if !ok {
 						return invalid("field %s: %q is not one of the allowed values", name, v)
 					}
+					trimmed[i] = c
 				}
 			case FieldKindPerson:
 				// Must be existing username
@@ -127,7 +132,40 @@ func (s *Service) SetDetails(ctx context.Context, c *Caller, user string, attrs 
 				set[name] = vals
 			}
 		}
+		if u, ok := sn.users[strings.ToLower(user)]; ok {
+			detail += changeDetail(u.Attributes, trimmedAttrs)
+		}
 
 		return s.LLDAP.SetUserAttributes(ctx, user, set, remove)
 	})
+}
+
+// maxAuditValue bounds one field value in the audit detail (bytes).
+const maxAuditValue = 64
+
+// changeDetail is " field=old→new" for every field in set whose values
+// differ from old (sorted by field; values clipped; "" = none, several
+// values joined with '|').
+func changeDetail(old, set map[string][]string) string {
+	names := make([]string, 0, len(set))
+	for n := range set {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	fmtVals := func(vs []string) string {
+		out := make([]string, len(vs))
+		for i, v := range vs {
+			out[i] = clipN(v, maxAuditValue)
+		}
+		return strconv.Quote(strings.Join(out, "|"))
+	}
+	var b strings.Builder
+	for _, n := range names {
+		before, after := old[n], set[n]
+		if slices.Equal(before, after) {
+			continue
+		}
+		fmt.Fprintf(&b, " %s=%s→%s", n, fmtVals(before), fmtVals(after))
+	}
+	return b.String()
 }

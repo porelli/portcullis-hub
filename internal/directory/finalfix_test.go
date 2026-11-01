@@ -223,3 +223,42 @@ func TestEvaluatorSkipsDelegateCreatedInGuardingGroups(t *testing.T) {
 	evaluate(t, e, time.Now().UTC())
 	wantMembers(t, e, "admin_app", "nina")
 }
+
+// Triage (a) + I6: a list value is stored as the field's defined value
+// whatever its case; the audit detail records old→new per changed field.
+func TestSetDetailsCanonicalListValueAndAudit(t *testing.T) {
+	e, _ := evalEnv(t)
+	if err := e.svc.CreateField(ctx, asRoot, directory.Field{Name: "team", Label: "Team", Kind: directory.FieldKindList, Values: []string{"Sales", "R&D"}}); err != nil {
+		t.Fatal(err)
+	}
+	long := strings.Repeat("x", 200)
+	if err := e.svc.SetDetails(ctx, asRoot, "bob", map[string][]string{"team": {"sALES"}, "city": {long}, "manager": {"carol"}}); err != nil {
+		t.Fatal(err)
+	}
+	users, _ := e.svc.LLDAP.ListUsers(ctx)
+	for _, u := range users {
+		if u.ID == "bob" && (len(u.Attributes["team"]) != 1 || u.Attributes["team"][0] != "Sales") {
+			t.Errorf("team = %v, want [Sales]", u.Attributes["team"])
+		}
+	}
+	a := newestAudit(t, e, "user.details")
+	for _, want := range []string{`team=""→"Sales"`, `city="Milan"→"xxxx`, `manager=""→"carol"`, "…"} {
+		if !strings.Contains(a.Detail, want) {
+			t.Errorf("audit detail %q lacks %q", a.Detail, want)
+		}
+	}
+	if strings.Contains(a.Detail, long) {
+		t.Error("long value not clipped in the audit detail")
+	}
+	// The rule on the canonical value matches.
+	if got, err := e.svc.PreviewRule(ctx, asRoot, mustRule(t, `team = "Sales"`)); err != nil || len(got) != 1 || got[0] != "bob" {
+		t.Errorf("PreviewRule = %v %v", got, err)
+	}
+	// Unchanged fields aren't listed.
+	if err := e.svc.SetDetails(ctx, asRoot, "bob", map[string][]string{"team": {"Sales"}, "city": {"Rome"}}); err != nil {
+		t.Fatal(err)
+	}
+	if a := newestAudit(t, e, "user.details"); strings.Contains(a.Detail, "team=") || !strings.Contains(a.Detail, `city="xxx`) || !strings.Contains(a.Detail, `→"Rome"`) {
+		t.Errorf("audit detail = %q", a.Detail)
+	}
+}

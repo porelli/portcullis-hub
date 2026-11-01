@@ -741,17 +741,31 @@ func inviteErr(user string, err error) error {
 	return err
 }
 
-func clip(s string) string {
+func clip(s string) string { return clipN(s, 128) }
+
+// maxAuditDetail bounds an audit entry's detail (bytes).
+const maxAuditDetail = 2048
+
+// clipN drops control characters and cuts s to at most n bytes (on a rune
+// boundary), marking a cut with "…".
+func clipN(s string, n int) string {
 	s = strings.Map(func(r rune) rune {
 		if unicode.IsControl(r) {
 			return -1
 		}
 		return r
 	}, s)
-	if len(s) > 128 {
-		return s[:128] + "…"
+	if len(s) <= n {
+		return s
 	}
-	return s
+	cut := 0
+	for i := range s {
+		if i > n {
+			break
+		}
+		cut = i
+	}
+	return s[:cut] + "…"
 }
 
 // run serialises a mutation, checks the caller, availability and the
@@ -780,7 +794,7 @@ func (s *Service) run(ctx context.Context, c *Caller, perm, action, target strin
 	if s.Audit != nil {
 		e := AuditEntry{Actor: clip(c.User), Action: action, Target: clip(target), Result: "ok"}
 		if detail != nil {
-			e.Detail = clip(*detail)
+			e.Detail = clipN(*detail, maxAuditDetail)
 		}
 		var de *Error
 		switch {
