@@ -172,6 +172,17 @@ CI if it asserts hostnames.
 - [ ] **Step 3:** run `python3 tests/validate.py` and the templates unit
   tests → pass. Commit `templates: contract v2 (hostname variables, instances)`.
 
+### Task 2b: Best upstream sign-in for every template (user request 2026-11-02)
+
+**Files:** `nextcloud/`, `wiki/`, `dokuwiki/`, `pihole/`, `adguard/` (compose, manifest, init/config files), `tests/apps/*.sh`; docs: regenerate `docs/apps/*` with `scripts/generate-app-docs.py`.
+
+**Input:** the audit at `.superpowers/sdd/2026-11-02-app-instances-domains/templates-auth-audit.md` (hub repo workspace), plus the controller's additions in the ledger.
+
+- [ ] **Step 1:** switch Nextcloud to `native-oidc` (user_oidc: preferred_username identity, group mapping, admin group, auto-provisioning; disable password login except a break-glass admin) and Wiki.js to `native-oidc`.
+- [ ] **Step 2:** DokuWiki: `header-auth` through a maintained plugin trusting `X-Forwarded-User` only from Traefik's IP, or OIDC if no safe plugin exists. Justify the choice with upstream links.
+- [ ] **Step 3:** Pi-hole and AdGuard Home: remove the second login behind the gateway where upstream allows it safely (check API access, DNS-over-HTTPS and admin endpoints); otherwise document why the app password stays.
+- [ ] **Step 4:** update the per-app tests (`tests/apps/<app>.sh`) and the validator expectations, run the templates CI checks locally, regenerate the docs app pages, and commit to both repos.
+
 ## Phase 2 — Hub instances
 
 ### Task 3: Instance model + lifecycle
