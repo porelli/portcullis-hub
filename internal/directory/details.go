@@ -42,80 +42,9 @@ func (s *Service) SetDetails(ctx context.Context, c *Caller, user string, attrs 
 			return err
 		}
 
-		// Build field map
-		fields := make(map[string]Field)
-		for _, f := range cfg.Fields {
-			fields[f.Name] = f
-		}
-
-		// Trim and validate all attrs first
-		trimmedAttrs := make(map[string][]string)
-		for name, vals := range attrs {
-			f, ok := fields[name]
-			if !ok {
-				return invalid("unknown field: %s", name)
-			}
-
-			// AdminOnly check
-			if f.AdminOnly && !c.Admin {
-				return forbidden("field %s is admin-only", name)
-			}
-
-			// Empty value list = remove (allowed)
-			if len(vals) == 0 {
-				trimmedAttrs[name] = []string{}
-				continue
-			}
-
-			// Trim values and refuse empty strings
-			trimmed := make([]string, 0, len(vals))
-			for _, v := range vals {
-				v = strings.TrimSpace(v)
-				if v == "" {
-					return invalid("field %s: empty values not allowed", name)
-				}
-				trimmed = append(trimmed, v)
-			}
-
-			// Validate by kind
-			if !f.Multi && len(trimmed) > 1 {
-				return invalid("field %s is single-valued (got %d values)", name, len(trimmed))
-			}
-
-			switch f.Kind {
-			case FieldKindList:
-				// Matched case-insensitively, stored as the defined value:
-				// rules compare case-insensitively anyway, but apps
-				// (attr_* claims, X-Forwarded-Attr-* headers) compare
-				// exactly and must see the defined spelling.
-				canon := make(map[string]string)
-				for _, v := range f.Values {
-					canon[strings.ToLower(v)] = v
-				}
-				for i, v := range trimmed {
-					c, ok := canon[strings.ToLower(v)]
-					if !ok {
-						return invalid("field %s: %q is not one of the allowed values", name, v)
-					}
-					trimmed[i] = c
-				}
-			case FieldKindPerson:
-				// Must be existing username
-				for _, v := range trimmed {
-					if _, ok := sn.users[strings.ToLower(v)]; !ok {
-						return invalid("field %s: %q is not a known user", name, v)
-					}
-				}
-			case FieldKindText:
-				// Check length
-				for _, v := range trimmed {
-					if utf8.RuneCountInString(v) > maxTextRunes {
-						return invalid("field %s: value is too long (max %d characters)", name, maxTextRunes)
-					}
-				}
-			}
-
-			trimmedAttrs[name] = trimmed
+		trimmedAttrs, err := checkDetails(c, cfg, sn, attrs)
+		if err != nil {
+			return err
 		}
 
 		// Check target (protected accounts)
@@ -140,6 +69,90 @@ func (s *Service) SetDetails(ctx context.Context, c *Caller, user string, attrs 
 
 		return s.LLDAP.SetUserAttributes(ctx, user, set, remove)
 	})
+}
+
+// checkDetails validates attrs as SetDetails does (known fields, admin-only
+// fields for admins only, values trimmed and non-empty, single-valued,
+// list values canonicalised, person values existing users, text length)
+// and returns them trimmed; an empty list means "remove". Caller holds
+// s.mu.
+func checkDetails(c *Caller, cfg *Config, sn *snapshot, attrs map[string][]string) (map[string][]string, error) {
+	// Build field map
+	fields := make(map[string]Field)
+	for _, f := range cfg.Fields {
+		fields[f.Name] = f
+	}
+
+	// Trim and validate all attrs first
+	trimmedAttrs := make(map[string][]string)
+	for name, vals := range attrs {
+		f, ok := fields[name]
+		if !ok {
+			return nil, invalid("unknown field: %s", name)
+		}
+
+		// AdminOnly check
+		if f.AdminOnly && !c.Admin {
+			return nil, forbidden("field %s is admin-only", name)
+		}
+
+		// Empty value list = remove (allowed)
+		if len(vals) == 0 {
+			trimmedAttrs[name] = []string{}
+			continue
+		}
+
+		// Trim values and refuse empty strings
+		trimmed := make([]string, 0, len(vals))
+		for _, v := range vals {
+			v = strings.TrimSpace(v)
+			if v == "" {
+				return nil, invalid("field %s: empty values not allowed", name)
+			}
+			trimmed = append(trimmed, v)
+		}
+
+		// Validate by kind
+		if !f.Multi && len(trimmed) > 1 {
+			return nil, invalid("field %s is single-valued (got %d values)", name, len(trimmed))
+		}
+
+		switch f.Kind {
+		case FieldKindList:
+			// Matched case-insensitively, stored as the defined value:
+			// rules compare case-insensitively anyway, but apps
+			// (attr_* claims, X-Forwarded-Attr-* headers) compare
+			// exactly and must see the defined spelling.
+			canon := make(map[string]string)
+			for _, v := range f.Values {
+				canon[strings.ToLower(v)] = v
+			}
+			for i, v := range trimmed {
+				c, ok := canon[strings.ToLower(v)]
+				if !ok {
+					return nil, invalid("field %s: %q is not one of the allowed values", name, v)
+				}
+				trimmed[i] = c
+			}
+		case FieldKindPerson:
+			// Must be existing username
+			for _, v := range trimmed {
+				if _, ok := sn.users[strings.ToLower(v)]; !ok {
+					return nil, invalid("field %s: %q is not a known user", name, v)
+				}
+			}
+		case FieldKindText:
+			// Check length
+			for _, v := range trimmed {
+				if utf8.RuneCountInString(v) > maxTextRunes {
+					return nil, invalid("field %s: value is too long (max %d characters)", name, maxTextRunes)
+				}
+			}
+		}
+
+		trimmedAttrs[name] = trimmed
+	}
+	return trimmedAttrs, nil
 }
 
 // maxAuditValue bounds one field value in the audit detail (bytes).

@@ -868,6 +868,11 @@ type CreateRequest struct {
 	Password       string `json:"password"`          // used if !Generate
 	Generate       bool   `json:"generate_password"` // show a random one once
 	RequirePasskey bool   `json:"require_passkey"`   // add the registration action
+	// Attrs are custom field values written in the same locked run, right
+	// after the LLDAP user is created (validated as SetDetails does; a
+	// delegate also needs edit_details). Set by ImportApply; not part of
+	// the HTTP API.
+	Attrs map[string][]string `json:"-"`
 }
 
 // Result reports a one-time invite or generated password (shown once) and
@@ -968,6 +973,13 @@ func (s *Service) CreateUser(ctx context.Context, c *Caller, req CreateRequest) 
 				cfg = nil
 			}
 		}
+		// Validated before anything is written.
+		var attrs map[string][]string
+		if len(req.Attrs) > 0 {
+			if attrs, err = s.createAttrs(c, cfg, sn, req.Attrs); err != nil {
+				return err
+			}
+		}
 		if c.Admin && cfg != nil {
 			// Leftovers of an earlier account with this name (deleted here
 			// or outside the Hub) don't carry over.
@@ -1011,6 +1023,16 @@ func (s *Service) CreateUser(ctx context.Context, c *Caller, req CreateRequest) 
 		}
 		if err := s.LLDAP.CreateUser(ctx, req.Username, req.Email, req.DisplayName); err != nil {
 			return err
+		}
+		if len(attrs) > 0 {
+			if err := s.LLDAP.SetUserAttributes(ctx, req.Username, attrs, nil); err != nil {
+				// Don't leave an account without its details behind.
+				if derr := s.LLDAP.DeleteUser(ctx, req.Username); derr != nil {
+					return fmt.Errorf("setting the details failed (%v) and removing the new user failed too (%v): delete %s in LLDAP", err, derr, req.Username)
+				}
+				return fmt.Errorf("setting the details failed, user not created: %v", err)
+			}
+			detail += changeDetail(nil, attrs)
 		}
 		if cfg != nil {
 			changed := false
@@ -1089,6 +1111,32 @@ func (s *Service) CreateUser(ctx context.Context, c *Caller, req CreateRequest) 
 		return nil
 	})
 	return res, err
+}
+
+// createAttrs validates a new account's custom field values (CreateUser
+// with Attrs): directory.yaml is needed, a delegate also needs
+// edit_details (re-checked against sn, as gate does), then checkDetails.
+// Returns the non-empty values to set. Caller holds s.mu.
+func (s *Service) createAttrs(c *Caller, cfg *Config, sn *snapshot, in map[string][]string) (map[string][]string, error) {
+	if s.Store == nil || cfg == nil {
+		return nil, &Error{Status: http.StatusServiceUnavailable, Msg: "custom fields not configured or directory.yaml unreadable"}
+	}
+	if !c.Admin {
+		if g, ok := sn.groups[cfg.Permissions[PermEditDetails]]; !c.Perms[PermEditDetails] || !ok || !memberOf(g, c.User) {
+			return nil, forbidden("not allowed: setting details on a new account needs %s", PermEditDetails)
+		}
+	}
+	checked, err := checkDetails(c, cfg, sn, in)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string][]string{}
+	for name, vals := range checked {
+		if len(vals) > 0 {
+			out[name] = vals
+		}
+	}
+	return out, nil
 }
 
 // UpdateUser changes email and/or display name (nil = unchanged).

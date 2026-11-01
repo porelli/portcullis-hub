@@ -760,12 +760,10 @@ func (s *Service) ImportApply(ctx context.Context, c *Caller, req ApplyRequest) 
 }
 
 // applyState is what ImportApply's rows share for their pre-checks: one
-// snapshot (reloaded only after a row created or removed someone) and one
-// directory.yaml read. The reused operations still re-check everything
-// inside their own lock.
+// snapshot (reloaded only after a row created or removed someone). The
+// reused operations still re-check everything inside their own lock.
 type applyState struct {
-	sn  *snapshot
-	cfg *Config
+	sn *snapshot
 }
 
 func (st *applyState) snapshot(ctx context.Context, s *Service) (*snapshot, error) {
@@ -779,101 +777,21 @@ func (st *applyState) snapshot(ctx context.Context, s *Service) (*snapshot, erro
 	return st.sn, nil
 }
 
-func (st *applyState) config(s *Service) (*Config, error) {
-	if st.cfg == nil {
-		cfg, err := s.Store.Load()
-		if err != nil {
-			return nil, err
-		}
-		st.cfg = cfg
-	}
-	return st.cfg, nil
-}
-
 func (s *Service) applyRow(ctx context.Context, c *Caller, row ApplyRow, st *applyState) RowResult {
 	res := RowResult{User: row.User}
 
 	switch {
 	case row.Create:
-		// Validate attrs BEFORE creating the user
-		if len(row.Attrs) > 0 {
-			if s.Store == nil {
-				res.Error = "custom fields not configured"
-				return res
-			}
-			cfg, err := st.config(s)
-			if err != nil {
-				res.Error = "directory.yaml: " + err.Error()
-				return res
-			}
-
-			// Check edit_details permission for attrs
-			if !c.Admin && !c.Perms[PermEditDetails] {
-				res.Error = "creating users with custom fields requires both invite and edit_details permissions"
-				return res
-			}
-
-			// Validate attrs using the same logic as SetDetails
-			fields := make(map[string]Field)
-			for _, f := range cfg.Fields {
-				fields[f.Name] = f
-			}
-
-			sn, err := st.snapshot(ctx, s)
-			if err != nil {
-				res.Error = err.Error()
-				return res
-			}
-
-			for name, vals := range row.Attrs {
-				f, ok := fields[name]
-				if !ok {
-					res.Error = fmt.Sprintf("unknown field: %s", name)
-					return res
-				}
-
-				if f.AdminOnly && !c.Admin {
-					res.Error = fmt.Sprintf("field %s is admin-only", name)
-					return res
-				}
-
-				if len(vals) == 0 {
-					continue
-				}
-
-				if !f.Multi && len(vals) > 1 {
-					res.Error = fmt.Sprintf("field %s is single-valued (got %d values)", name, len(vals))
-					return res
-				}
-
-				// Trim and validate values
-				trimmed := make([]string, 0, len(vals))
-				for _, v := range vals {
-					v = strings.TrimSpace(v)
-					if v == "" {
-						res.Error = fmt.Sprintf("field %s: empty values not allowed", name)
-						return res
-					}
-					trimmed = append(trimmed, v)
-				}
-
-				problems := s.validateFieldValues(f, trimmed, sn)
-				if len(problems) > 0 {
-					res.Error = fmt.Sprintf("field %s: %s", name, problems[0])
-					return res
-				}
-
-				row.Attrs[name] = trimmed
-			}
-		}
-
-		// Create new user via CreateUser
+		// One operation: CreateUser validates the attributes (as SetDetails
+		// does; a delegate also needs edit_details) before creating and
+		// writes them in the same locked run.
 		createReq := CreateRequest{
 			Username:    row.User,
 			Email:       row.Email,
 			DisplayName: row.DisplayName,
 			Groups:      []string{},
 			Onboarding:  OnboardInvite,
+			Attrs:       row.Attrs,
 		}
 		createRes, err := s.CreateUser(ctx, c, createReq)
 		if err != nil {
@@ -883,15 +801,6 @@ func (s *Service) applyRow(ctx context.Context, c *Caller, row ApplyRow, st *app
 		st.sn = nil // someone new: later rows see them
 		res.OK = true
 		res.Invite = createRes.Invite
-
-		// If there are attributes to set, apply them
-		if len(row.Attrs) > 0 {
-			if err := s.SetDetails(ctx, c, row.User, row.Attrs); err != nil {
-				res.Error = fmt.Sprintf("created but setting attributes failed: %v", err)
-				res.OK = false
-				return res
-			}
-		}
 
 	case row.Remove:
 		// Remove user via DeleteUser
