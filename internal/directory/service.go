@@ -1207,8 +1207,13 @@ func (s *Service) DeleteUser(ctx context.Context, c *Caller, username, confirm s
 		}
 		if s.Store != nil {
 			cfg, err := s.Store.Load()
-			if err == nil && len(purgeUser(cfg, u.ID)) > 0 {
-				err = s.Store.Save(cfg)
+			if err == nil {
+				if refs := referencesTo(cfg, sn, u.ID); len(refs) > 0 {
+					res.Warnings = append(res.Warnings, fmt.Sprintf("%s is still named in: %s — update these", u.ID, strings.Join(refs, ", ")))
+				}
+				if len(purgeUser(cfg, u.ID)) > 0 {
+					err = s.Store.Save(cfg)
+				}
 			}
 			if err != nil {
 				detail = strings.TrimSpace(detail + " purge=FAILED")

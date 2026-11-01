@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/portcullis/hub/internal/lldap"
+	"github.com/portcullis/hub/internal/rules"
 )
 
 // Delegated permissions (Config.Permissions maps each to a group). Holders
@@ -289,4 +290,56 @@ func emailTaken(sn *snapshot, email, self string) string {
 		}
 	}
 	return ""
+}
+
+// referencesTo lists what still names user after the account is gone:
+// other people whose person fields hold user, and rules that name user in
+// reports-to or in a person-field comparison (they now match nobody
+// through user). Sorted; for the delete warning.
+func referencesTo(cfg *Config, sn *snapshot, user string) []string {
+	person := map[string]bool{}
+	for _, f := range cfg.Fields {
+		if f.Kind == FieldKindPerson {
+			person[f.Name] = true
+		}
+	}
+	var out []string
+	for _, u := range sn.users {
+		if strings.EqualFold(u.ID, user) {
+			continue
+		}
+		for name := range person {
+			for _, v := range u.Attributes[name] {
+				if strings.EqualFold(v, user) {
+					out = append(out, fmt.Sprintf("%s of %s", name, u.ID))
+				}
+			}
+		}
+	}
+	for name, gc := range cfg.Groups {
+		if gc == nil || gc.Rule == nil {
+			continue
+		}
+		var names func(e *rules.Expr) bool
+		names = func(e *rules.Expr) bool {
+			if e.Op == rules.OpReportsTo || person[e.Field] {
+				for _, v := range e.Values {
+					if strings.EqualFold(v, user) {
+						return true
+					}
+				}
+			}
+			for _, it := range e.Items {
+				if names(it) {
+					return true
+				}
+			}
+			return false
+		}
+		if names(gc.Rule) {
+			out = append(out, "rule of "+name)
+		}
+	}
+	sort.Strings(out)
+	return out
 }

@@ -262,3 +262,27 @@ func TestSetDetailsCanonicalListValueAndAudit(t *testing.T) {
 		t.Errorf("audit detail = %q", a.Detail)
 	}
 }
+
+// M2: deleting a user warns about the people whose person fields still
+// name them and the rules that name them (reports-to).
+func TestDeleteUserListsReferences(t *testing.T) {
+	e, store := evalEnv(t)
+	if err := e.svc.SetDetails(ctx, asRoot, "bob", map[string][]string{"manager": {"dave"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.svc.SetDetails(ctx, asRoot, "carol", map[string][]string{"manager": {"Dave"}}); err != nil {
+		t.Fatal(err)
+	}
+	setRule(t, store, "milan", `manager reports-to "dave"`)
+	res, err := e.svc.DeleteUser(ctx, asRoot, "dave", "dave")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], "manager of bob, manager of carol, rule of milan") {
+		t.Errorf("warnings = %v", res.Warnings)
+	}
+	res, err = e.svc.DeleteUser(ctx, asRoot, "alice", "alice")
+	if err != nil || len(res.Warnings) != 0 {
+		t.Errorf("unreferenced delete: %+v %v", res, err)
+	}
+}
