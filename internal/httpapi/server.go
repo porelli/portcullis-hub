@@ -21,8 +21,11 @@ const maxBodyBytes = 1 << 20
 
 // Server holds the HTTP handlers' dependencies.
 type Server struct {
-	Hub        *hub.Hub
-	Directory  *directory.Service // users & groups (nil: page disabled)
+	Hub       *hub.Hub
+	Directory *directory.Service // users & groups (nil: page disabled)
+	// Audit is the Hub's audit log (audit.jsonl), shared with Directory:
+	// app sign-in mode changes and custom override saves go here too.
+	Audit      *directory.AuditLog
 	PortalName string
 	Secret     string // HUB_PROXY_SECRET
 	Web        fs.FS  // contains index.html
@@ -52,6 +55,7 @@ func (s *Server) Handler() (http.Handler, error) {
 	mux.HandleFunc("/api/templates/env/", s.handleTemplateEnv)
 	mux.HandleFunc("/api/templates/exec/", s.handleTemplateExec)
 	mux.HandleFunc("/api/templates/restart/", s.handleTemplateRestart)
+	mux.HandleFunc("/api/templates/lastop/", s.handleTemplateLastOp)
 	mux.HandleFunc("/api/sources", s.handleSources)
 	mux.HandleFunc("/api/sources/add", s.handleAddSource)
 	mux.HandleFunc("/api/sources/remove", s.handleRemoveSource)
@@ -72,6 +76,8 @@ func writeJSON(w http.ResponseWriter, v interface{}) {
 }
 
 // writeErr maps hub errors to HTTP statuses; def is used for plain errors.
+// A failed lifecycle operation (*hub.OpError) is answered as JSON
+// {error, op, output, hint, rolled_back}: compose's output is the cause.
 func writeErr(w http.ResponseWriter, err error, def int) {
 	code := def
 	var se *hub.StatusError
@@ -81,6 +87,20 @@ func writeErr(w http.ResponseWriter, err error, def int) {
 		code = se.Status
 	case errors.As(err, &busy):
 		code = http.StatusConflict
+	}
+	var oe *hub.OpError
+	if errors.As(err, &oe) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.WriteHeader(code)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":       oe.Record.Error,
+			"op":          oe.Record.Op,
+			"output":      oe.Record.Output,
+			"hint":        oe.Record.Hint,
+			"rolled_back": oe.Record.RolledBack,
+		})
+		return
 	}
 	http.Error(w, err.Error(), code)
 }
@@ -150,6 +170,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		"Templates":  ts,
 		"Categories": categories,
 		"Sources":    s.Hub.Sources(),
+		"Failed":     s.Hub.FailedOps(), // app ID → op, last operation failed
 		"User":       user,
 	}); err != nil {
 		log.Printf("render index: %v", err)
@@ -228,11 +249,28 @@ func (s *Server) handleTemplateRestart(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.Hub.RestartAsync(id); err != nil {
-		writeErr(w, err, http.StatusBadRequest)
+	if err := s.Hub.RestartApp(id); err != nil {
+		writeErr(w, err, http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, map[string]string{"status": "restarting"})
+	writeJSON(w, map[string]string{"status": "restarted"})
+}
+
+// handleTemplateLastOp returns the app's last lifecycle operation (JSON
+// null if none) — also for apps that are not enabled (a failed enable).
+func (s *Server) handleTemplateLastOp(w http.ResponseWriter, r *http.Request) {
+	if !methodIs(w, r, http.MethodGet) {
+		return
+	}
+	id, ok := appID(w, r, "/api/templates/lastop/")
+	if !ok {
+		return
+	}
+	if s.Hub.Template(id) == nil {
+		http.NotFound(w, r)
+		return
+	}
+	writeJSON(w, s.Hub.LastOp(id))
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -376,9 +414,6 @@ func (s *Server) handleTemplateSettings(w http.ResponseWriter, r *http.Request) 
 // mode in the Hub's audit log: switching to the app's own login removes
 // Portcullis from in front of it.
 func (s *Server) auditSignIn(r *http.Request, id, before, want string, err error) {
-	if s.Directory == nil || s.Directory.Audit == nil {
-		return
-	}
 	e := directory.AuditEntry{
 		Actor:  r.Header.Get("X-Forwarded-User"),
 		Action: "app.sign_in",
@@ -389,6 +424,19 @@ func (s *Server) auditSignIn(r *http.Request, id, before, want string, err error
 	if want == hub.SignInNative {
 		e.Detail += " (app's own login only: no Portcullis sign-in)"
 	}
+	s.audit(e, err)
+}
+
+// audit appends e (Result from err) to the Hub's audit log.
+func (s *Server) audit(e directory.AuditEntry, err error) {
+	l := s.Audit
+	if l == nil && s.Directory != nil {
+		l = s.Directory.Audit
+	}
+	if l == nil {
+		return
+	}
+	e.Result = "ok"
 	if err != nil {
 		e.Result, e.Error = "error", err.Error()
 		var se *hub.StatusError
@@ -396,7 +444,7 @@ func (s *Server) auditSignIn(r *http.Request, id, before, want string, err error
 			e.Result = "refused"
 		}
 	}
-	if aerr := s.Directory.Audit.Append(e); aerr != nil {
+	if aerr := l.Append(e); aerr != nil {
 		log.Printf("audit: %v", aerr)
 	}
 }
@@ -599,6 +647,11 @@ func (s *Server) handleTemplateExec(w http.ResponseWriter, r *http.Request) {
 
 // ── expert mode ──────────────────────────────────────────
 
+// handleTemplateCompose: GET returns the three compose layers (template
+// compose.yml and Hub override read-only, the custom override editable);
+// PUT {user_override} validates and stores the custom override ("" removes
+// it) — it applies on the next restart. Saves are audited
+// (app.compose_override), never with the content (it may hold env values).
 func (s *Server) handleTemplateCompose(w http.ResponseWriter, r *http.Request) {
 	id, ok := appID(w, r, "/api/templates/compose/")
 	if !ok {
@@ -606,25 +659,36 @@ func (s *Server) handleTemplateCompose(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		c, o, err := s.Hub.ComposeFiles(id)
+		v, err := s.Hub.ComposeFiles(id)
 		if err != nil {
 			writeErr(w, err, http.StatusInternalServerError)
 			return
 		}
-		writeJSON(w, map[string]string{"compose": c, "override": o})
+		writeJSON(w, v)
 	case http.MethodPut:
 		var req struct {
-			Compose  string `json:"compose"`
-			Override string `json:"override"`
+			UserOverride *string `json:"user_override"`
 		}
 		if !decodeJSON(w, r, &req) {
 			return
 		}
-		if err := s.Hub.SaveComposeFiles(id, req.Compose, req.Override); err != nil {
+		if req.UserOverride == nil {
+			http.Error(w, "expected {user_override: \"…\"} (the template's compose.yml and the Hub override are read-only)", http.StatusBadRequest)
+			return
+		}
+		restart, detail, err := s.Hub.SaveUserOverride(id, *req.UserOverride)
+		if !errors.Is(err, hub.ErrNotFound) {
+			s.audit(directory.AuditEntry{Actor: r.Header.Get("X-Forwarded-User"), Action: "app.compose_override", Target: id, Detail: detail}, err)
+		}
+		if err != nil {
 			writeErr(w, err, http.StatusInternalServerError)
 			return
 		}
-		writeJSON(w, map[string]string{"status": "saved"})
+		status := "saved"
+		if detail == "removed" {
+			status = "removed"
+		}
+		writeJSON(w, map[string]interface{}{"status": status, "restart_required": restart})
 	default:
 		http.Error(w, "GET or PUT only", http.StatusMethodNotAllowed)
 	}

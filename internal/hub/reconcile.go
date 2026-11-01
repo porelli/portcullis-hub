@@ -394,29 +394,9 @@ func (h *Hub) ResolveDrift(id, action string) error {
 			return statusErr(400, "no template for %s — it can only be stopped", id)
 		}
 		return h.Enable(id)
-	case ActionApply:
-		unlock, err := h.lockApp(id)
-		if err != nil {
-			return err
-		}
-		defer unlock()
-		h.mu.Lock()
-		live := h.findLocked(id)
-		if live == nil || !live.Enabled {
-			h.mu.Unlock()
-			return statusErr(400, "%s is not an enabled app with a template", id)
-		}
-		t := *live
-		err = h.generateOverrideLocked(&t, h.st.Settings[id])
-		h.mu.Unlock()
-		if err != nil {
-			return statusErr(500, "override generation failed: %v", err)
-		}
-		if err := h.composeUp(&t); err != nil {
-			return statusErr(500, "compose up failed: %v", err)
-		}
-		return nil
-	case ActionStart:
+	case ActionApply, ActionStart:
+		// apply and start are the same compose up (it always regenerates
+		// the override); they differ in what the drift said.
 		unlock, err := h.lockApp(id)
 		if err != nil {
 			return err
@@ -426,10 +406,15 @@ func (h *Hub) ResolveDrift(id, action string) error {
 		if t == nil || !t.Enabled {
 			return statusErr(400, "%s is not an enabled app with a template", id)
 		}
-		if err := h.composeUp(t); err != nil {
-			return statusErr(500, "compose up failed: %v", err)
+		op := OpStart
+		if action == ActionApply {
+			op = OpApply
 		}
-		return nil
+		err = h.composeUp(t)
+		if composeFailed(err) {
+			err = statusErr500Wrap("compose up failed", err)
+		}
+		return h.finishOp(id, op, err, false)
 	case ActionStop:
 		unlock, err := h.lockApp(id)
 		if err != nil {
@@ -439,13 +424,20 @@ func (h *Hub) ResolveDrift(id, action string) error {
 		if h.IsEnabled(id) {
 			return statusErr(400, "%s is enabled — use disable instead", id)
 		}
-		if err := h.compose.DownByName(context.Background(), projectName(id)); err != nil {
-			return statusErr(500, "compose down failed: %v", err)
+		err = h.compose.DownByName(context.Background(), projectName(id))
+		if err != nil {
+			err = statusErr500Wrap("compose down failed", err)
 		}
-		return nil
+		return h.finishOp(id, OpStop, err, false)
 	default:
 		return statusErr(400, "unknown action %q", action)
 	}
+}
+
+// statusErr500Wrap wraps a compose error as a 500, keeping it unwrappable
+// (its output goes into the op record).
+func statusErr500Wrap(msg string, err error) error {
+	return &StatusError{Status: 500, Err: fmt.Errorf("%s: %w", msg, err)}
 }
 
 // diffExposure compares a running container's exposure labels with the

@@ -8,9 +8,6 @@ import (
 	"os"
 	"strconv"
 
-	"gopkg.in/yaml.v3"
-
-	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
@@ -390,83 +387,7 @@ func (h *Hub) applyDefaultPolicy() {
 	}
 }
 
-// ── Expert mode ──────────────────────────────────────────
-
-// ComposeFiles returns an app's compose.yml and generated override.
-func (h *Hub) ComposeFiles(id string) (compose, override string, err error) {
-	t := h.Template(id)
-	if t == nil {
-		return "", "", ErrNotFound
-	}
-	data, err := os.ReadFile(t.ComposePath())
-	if err != nil {
-		return "", "", statusErr(404, "compose.yml not found")
-	}
-	ov, _ := os.ReadFile(h.overridePath(id))
-	return string(data), string(ov), nil
-}
-
-// SaveComposeFiles replaces an app's compose.yml (and override; "" removes
-// it) after checking both parse as YAML.
-func (h *Hub) SaveComposeFiles(id, compose, override string) error {
-	t := h.Template(id)
-	if t == nil {
-		return ErrNotFound
-	}
-	var check interface{}
-	if err := yaml.Unmarshal([]byte(compose), &check); err != nil {
-		return statusErr(400, "Invalid YAML: %v", err)
-	}
-	if override != "" {
-		if err := yaml.Unmarshal([]byte(override), &check); err != nil {
-			return statusErr(400, "Invalid override YAML: %v", err)
-		}
-	}
-	// Routing must stay fully visible to group-gate (see ParseRoutes).
-	routes, err := templates.ParseRoutes([]byte(compose))
-	if err != nil {
-		return statusErr(400, "%v", err)
-	}
-	if sub := coreSubdomain(routes.Subdomains); sub != "" {
-		return statusErr(400, "compose.yml routes core subdomain %q", sub)
-	}
-	public, err := templates.PlanPublic(&t.Manifest, routes)
-	if err != nil {
-		return statusErr(400, "%v", err)
-	}
-	h.mu.Lock()
-	if live := h.findLocked(id); live != nil && live.Enabled {
-		cand := *live
-		cand.Subdomains = routes.Subdomains
-		if err := h.checkSubdomainCollisionsLocked(&cand); err != nil {
-			h.mu.Unlock()
-			return err
-		}
-	}
-	h.mu.Unlock()
-	if err := fsutil.WriteFileAtomic(t.ComposePath(), []byte(compose), 0644); err != nil {
-		return statusErr(500, "Failed to write: %v", err)
-	}
-	h.mu.Lock()
-	if live := h.findLocked(id); live != nil {
-		live.Subdomains = routes.Subdomains
-		live.Public = public
-	}
-	if h.refreshPublishedLocked() {
-		h.saveLocked()
-	}
-	h.mu.Unlock()
-	if override != "" {
-		if err := fsutil.WriteFileAtomic(h.overridePath(id), []byte(override), 0600); err != nil {
-			return statusErr(500, "Failed to write override: %v", err)
-		}
-	} else {
-		os.Remove(h.overridePath(id))
-	}
-	// Host() rules may have changed → refresh subdomain policy/groups.
-	h.writePolicyLogged()
-	return nil
-}
+// ── Expert mode (compose layers: useroverride.go) ─────────
 
 // Env returns an app's .env variables and compose service names.
 func (h *Hub) Env(id string) (map[string]string, []string, error) {

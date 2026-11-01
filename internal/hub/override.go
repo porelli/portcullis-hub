@@ -21,9 +21,23 @@ import (
 // their own login (Portcullis sign-in added, or the template's own chain
 // for "own login only"), and the public-exception router when it is on.
 // Port ranges and network_mode: host ports stay in the base compose.yml.
-// Caller must hold mu.
+// It is always regenerated (never hand-edited); the admin's own additions
+// go in the custom override (useroverride.go). Caller must hold mu.
 func (h *Hub) generateOverrideLocked(t *templates.Template, values map[string]string) error {
-	overridePath := h.overridePath(t.ID)
+	content, err := h.renderOverrideLocked(t, values)
+	if err != nil {
+		return err
+	}
+	if content == "" {
+		os.Remove(h.overridePath(t.ID))
+		return nil
+	}
+	return fsutil.WriteFileAtomic(h.overridePath(t.ID), []byte(content), 0600)
+}
+
+// renderOverrideLocked returns the Hub override's content ("" = none
+// needed). Caller must hold mu.
+func (h *Hub) renderOverrideLocked(t *templates.Template, values map[string]string) (string, error) {
 	serviceMounts := make(map[string][]string)
 	for _, s := range t.Manifest.Settings {
 		val := values[s.Key]
@@ -31,7 +45,7 @@ func (h *Hub) generateOverrideLocked(t *templates.Template, values map[string]st
 			continue
 		}
 		if err := templates.ValidatePathSetting(val); err != nil {
-			return fmt.Errorf("setting %s: %w", s.Key, err)
+			return "", fmt.Errorf("setting %s: %w", s.Key, err)
 		}
 		// JSON string == valid YAML double-quoted scalar: safe for spaces,
 		// quotes and '#'.
@@ -56,7 +70,7 @@ func (h *Hub) generateOverrideLocked(t *templates.Template, values map[string]st
 			bind = "0.0.0.0"
 		}
 		if net.ParseIP(bind) == nil {
-			return fmt.Errorf("port %s: bind %q is not an IP address", p.Key, bind)
+			return "", fmt.Errorf("port %s: bind %q is not an IP address", p.Key, bind)
 		}
 		host := p.Default
 		if v, ok := values[p.Key]; ok {
@@ -79,7 +93,7 @@ func (h *Hub) generateOverrideLocked(t *templates.Template, values map[string]st
 
 	rl, err := h.routeLabelsLocked(t)
 	if err != nil {
-		return err
+		return "", err
 	}
 	serviceRouters, plan, tier, publicLines := rl.routes.Routers, rl.plan, rl.tier, rl.public
 
@@ -94,8 +108,7 @@ func (h *Hub) generateOverrideLocked(t *templates.Template, values map[string]st
 		services[svc] = true
 	}
 	if len(services) == 0 {
-		os.Remove(overridePath)
-		return nil
+		return "", nil
 	}
 	names := make([]string, 0, len(services))
 	for svc := range services {
@@ -134,7 +147,7 @@ func (h *Hub) generateOverrideLocked(t *templates.Template, values map[string]st
 			}
 		}
 	}
-	return fsutil.WriteFileAtomic(overridePath, []byte(b.String()), 0600)
+	return b.String(), nil
 }
 
 // routeLabels is the Traefik part of an app's override.
@@ -150,8 +163,9 @@ type routeLabels struct {
 }
 
 // routeLabelsLocked computes the tier and public-router labels from the
-// compose file being deployed (not the catalog copy: Expert edits) and
-// state. Caller must hold mu.
+// template's compose file and state. The custom override can't change any
+// of this: it may not set traefik.* labels or network attachments.
+// Caller must hold mu.
 func (h *Hub) routeLabelsLocked(t *templates.Template) (*routeLabels, error) {
 	routes, err := templates.ParseRoutes(t.ReadCompose())
 	if err != nil {

@@ -334,11 +334,11 @@ func TestRestartWaitsForLock(t *testing.T) {
 	if len(f.runner.Calls()) != n {
 		t.Errorf("restart of disabled app ran: %v", f.runner.Calls()[n:])
 	}
-	if err := f.h.RestartAsync("grafana"); statusOf(err) != 400 {
-		t.Errorf("RestartAsync(disabled) = %v", err)
+	if err := f.h.RestartApp("grafana"); statusOf(err) != 400 {
+		t.Errorf("RestartApp(disabled) = %v", err)
 	}
-	if err := f.h.RestartAsync("nope"); statusOf(err) != http.StatusNotFound {
-		t.Errorf("RestartAsync(unknown) = %v", err)
+	if err := f.h.RestartApp("nope"); statusOf(err) != http.StatusNotFound {
+		t.Errorf("RestartApp(unknown) = %v", err)
 	}
 }
 
@@ -500,11 +500,9 @@ func TestSubdomainCollision(t *testing.T) {
 	if statusOf(err) != 409 || !strings.Contains(err.Error(), "grafana.example.org") {
 		t.Errorf("err = %v", err)
 	}
-	// Expert-mode edits can't introduce a collision either.
-	err = f.h.SaveComposeFiles("other", "services:\n  web:\n    labels:\n      traefik.http.routers.o.rule: Host(`grafana.${PORTCULLIS_DOMAIN}`)\n", "")
-	if err != nil {
-		t.Fatalf("disabled app may route anything until enabled: %v", err)
-	}
+	// A template update can't introduce a collision either.
+	writeFile(t, filepath.Join(f.src, "other", "compose.yml"), "services:\n  web:\n    labels:\n      traefik.http.routers.o.rule: Host(`grafana.${PORTCULLIS_DOMAIN}`)\n")
+	f.h.Discover()
 	if err := f.h.Enable("other"); statusOf(err) != 409 {
 		t.Errorf("enable after edit: %v", err)
 	}
@@ -527,14 +525,16 @@ func TestRoutingValidation(t *testing.T) {
 		"metrics": "services:\n  g:\n    labels:\n      traefik.http.routers.g.rule: Host(`metrics.${PORTCULLIS_DOMAIN}`)\n",
 		"any":     "services:\n  g:\n    labels:\n      traefik.http.routers.g.rule: PathPrefix(`/`)\n",
 	} {
-		if err := f.h.SaveComposeFiles("grafana", c, ""); statusOf(err) != 400 {
-			t.Errorf("%s: SaveComposeFiles = %v", name, err)
+		writeFile(t, filepath.Join(f.src, "bad", "manifest.yaml"), "name: Bad\n")
+		writeFile(t, filepath.Join(f.src, "bad", "compose.yml"), c)
+		f.h.Discover()
+		if f.h.Template("bad") != nil {
+			t.Errorf("%s: template loaded", name)
 		}
 	}
-	// A valid edit updates the routed subdomains used for the policy file.
-	if err := f.h.SaveComposeFiles("grafana", "services:\n  grafana:\n    labels:\n      traefik.http.routers.g.rule: Host(`dash.${PORTCULLIS_DOMAIN}`)\n", ""); err != nil {
-		t.Fatal(err)
-	}
+	// A template update changes the routed subdomains used for the policy file.
+	writeFile(t, filepath.Join(f.src, "grafana", "compose.yml"), "services:\n  grafana:\n    labels:\n      traefik.http.routers.g.rule: Host(`dash.${PORTCULLIS_DOMAIN}`)\n")
+	f.h.Discover()
 	f.h.Enable("grafana")
 	if doc := readPolicy(t, f); doc.Groups["dash"] != "users_grafana" || doc.Groups["grafana"] != "" {
 		t.Errorf("groups = %v", doc.Groups)
@@ -636,12 +636,6 @@ func TestDefaultPolicy(t *testing.T) {
 
 func TestExpertFiles(t *testing.T) {
 	f := newFixture(t)
-	if err := f.h.SaveComposeFiles("grafana", "services: [unclosed", ""); statusOf(err) != 400 {
-		t.Errorf("invalid compose accepted: %v", err)
-	}
-	if err := f.h.SaveComposeFiles("grafana", "services: {}\n", "x: [y"); statusOf(err) != 400 {
-		t.Errorf("invalid override accepted: %v", err)
-	}
 	if err := f.h.SaveEnv("grafana", map[string]string{"A": "1\nB=2"}); statusOf(err) != 400 {
 		t.Errorf("newline in env accepted: %v", err)
 	}

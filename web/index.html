@@ -269,6 +269,26 @@
     .terminal-input select { background: #0f172a; border: 1px solid #334155; color: #e2e8f0; padding: 0.375rem; border-radius: 0.25rem; font-size: 0.75rem; }
     .terminal-input input { flex: 1; background: transparent; border: none; color: #22c55e; font-family: inherit; font-size: inherit; outline: none; }
     .terminal-prompt { color: #3b82f6; }
+    .code-view { max-height: 350px; margin: 0; color: #cbd5e1; }
+    .expert-section-title .ro { color: #64748b; font-size: 0.75rem; font-weight: 400; }
+    .override-rules { font-size: 0.75rem; color: #94a3b8; margin: 0.5rem 0; }
+    .override-rules summary { cursor: pointer; color: #64748b; }
+    .override-rules ul { margin: 0.375rem 0 0 1.25rem; }
+
+    /* Lifecycle failures (compose output) */
+    .auth-badge.op-failed { background: #ef444422; color: #ef4444; border: 1px solid #ef444444; }
+    .op-banner { display: none; background: #ef444411; border: 1px solid #ef444455; border-radius: 0.5rem; padding: 0.625rem 0.875rem; margin-bottom: 0.75rem; font-size: 0.8125rem; color: #fca5a5; }
+    .op-banner.visible { display: block; }
+    .op-banner a { color: #93c5fd; cursor: pointer; }
+    .op-record { margin-bottom: 1rem; }
+    .op-record-head { font-size: 0.8125rem; margin-bottom: 0.375rem; display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+    .op-msg { font-size: 0.8125rem; color: #fca5a5; margin-bottom: 0.5rem; white-space: pre-wrap; word-break: break-word; }
+    .op-hint { font-size: 0.8125rem; color: #fde68a; background: #f59e0b11; border: 1px solid #f59e0b44; border-radius: 0.375rem; padding: 0.5rem 0.75rem; margin-bottom: 0.5rem; }
+    .op-modal { display: none; position: fixed; inset: 0; background: #020617cc; z-index: 200; align-items: center; justify-content: center; padding: 1rem; }
+    .op-modal.visible { display: flex; }
+    .op-modal-box { background: #1e293b; border: 1px solid #ef444466; border-radius: 0.75rem; padding: 1.25rem 1.5rem; width: min(900px, 100%); max-height: 90vh; overflow-y: auto; }
+    .op-modal-title { font-weight: 600; margin-bottom: 0.75rem; color: #ef4444; }
+    .op-modal-actions { display: flex; gap: 0.5rem; justify-content: flex-end; margin-top: 0.75rem; }
   </style>
 </head>
 <body>
@@ -305,6 +325,7 @@
               <span class="app-source {{if eq .Source "portcullis"}}badge-builtin{{else}}badge-community{{end}}">{{.Source}}</span>
             </div>
             <div class="app-desc">{{.Manifest.Description}}</div>
+            {{with index $.Failed .ID}}<div class="app-auth"><span class="auth-badge op-failed" title="Open the app for the error and compose output">last {{.}} failed</span></div>{{end}}
             <div class="app-auth">
               {{if .Manifest.Auth.Method}}
                 {{if eq (printf "%v" .Manifest.Auth.SSO) "true"}}
@@ -353,10 +374,13 @@
             {{if .Manifest.Auth.Notes}}
             <div class="auth-notes">{{.Manifest.Auth.Notes}}</div>
             {{end}}
+            <div class="op-banner" id="op-banner-{{.ID}}"></div>
             <div class="detail-tabs">
               <span class="detail-tab active" data-dtab="settings" data-app="{{.ID}}">Settings</span>
               {{if .Enabled}}
               <span class="detail-tab" data-dtab="status" data-app="{{.ID}}">Status</span>
+              {{end}}
+              {{if or .Enabled (index $.Failed .ID)}}
               <span class="detail-tab" data-dtab="logs" data-app="{{.ID}}">Logs</span>
               {{end}}
               <span class="detail-tab" data-dtab="expert" data-app="{{.ID}}">Expert</span>
@@ -512,6 +536,15 @@
 
   <div class="toast" id="toast"></div>
 
+  <!-- Failed lifecycle operation: message, hint, compose output -->
+  <div class="op-modal" id="op-modal" onclick="if (event.target === this) closeOpError()">
+    <div class="op-modal-box">
+      <div class="op-modal-title" id="op-modal-title"></div>
+      <div id="op-modal-body"></div>
+      <div class="op-modal-actions" id="op-modal-actions"></div>
+    </div>
+  </div>
+
   <script>
     // ── Tab switching ─────────────────────────────────────
     document.querySelectorAll('.tab').forEach(tab => {
@@ -555,8 +588,22 @@
       const opts = { method, headers: { 'Content-Type': 'application/json' } };
       if (body !== undefined) opts.body = JSON.stringify(body);
       const res = await fetch(url, opts);
-      if (!res.ok) throw new Error(await res.text());
+      if (!res.ok) throw await apiError(res);
       return res;
+    }
+
+    // Failed lifecycle operations answer JSON {error, op, output, hint,
+    // rolled_back}; everything else plain text.
+    async function apiError(res) {
+      if ((res.headers.get('Content-Type') || '').includes('application/json')) {
+        try {
+          const j = await res.json();
+          const err = new Error(j.error || ('HTTP ' + res.status));
+          Object.assign(err, { op: j.op, output: j.output || '', hint: j.hint || '', rolled_back: !!j.rolled_back });
+          return err;
+        } catch (e) { /* fall through */ }
+      }
+      return new Error((await res.text()).trim() || ('HTTP ' + res.status));
     }
     async function apiPost(url, body) { return (await apiCall(url, 'POST', body)).json(); }
     async function apiPut(url, body) { return (await apiCall(url, 'PUT', body)).json(); }
@@ -591,6 +638,7 @@
       card.classList.add('expanded');
       panel.classList.add('visible');
       loadSettings(id);
+      loadOpBanner(id);
     }
 
     function closeDetail(e) {
@@ -1405,36 +1453,112 @@
         showToast(id + ': ' + meta.label.toLowerCase() + ' done', 'success');
         setTimeout(() => location.reload(), 500);
       } catch (e) {
-        showToast(e.message, 'error');
+        reportError(id, e);
         btn.classList.remove('loading');
       }
     }
     loadDrift();
     setInterval(loadDrift, 15000);
 
+    // ── Last operation (failed enable/restart/…: compose output) ──
+    function renderOpRecord(id, r, withTitle) {
+      if (!r) return '';
+      let h = '<div class="op-record">';
+      if (withTitle !== false) {
+        h += '<div class="op-record-head"><strong>Last operation: ' + escapeHtml(r.op) + '</strong>' +
+          '<span class="pill ' + (r.ok ? 'ok' : 'bad') + '">' + (r.ok ? 'ok' : 'failed') + '</span>' +
+          (r.rolled_back ? '<span class="pill info" title="compose down: containers and network removed, volumes kept">rolled back</span>' : '') +
+          '<span class="settings-empty">' + escapeHtml(fmtTime(r.at)) + '</span></div>';
+      }
+      if (r.error) h += '<div class="op-msg">' + escapeHtml(r.error) + '</div>';
+      if (r.hint) {
+        h += '<div class="op-hint">' + escapeHtml(r.hint) +
+          ' <button class="btn btn-secondary btn-sm" onclick="event.stopPropagation(); openAppSettings(\'' + escapeHtml(id) + '\', true)">Open Settings</button></div>';
+      }
+      if (r.output) h += '<pre class="log-viewer op-output">' + escapeHtml(r.output) + '</pre>';
+      return h + '</div>';
+    }
+
+    function showOpError(id, err) {
+      document.getElementById('op-modal-title').textContent = id + ': ' + (err.op || 'operation') + ' failed';
+      document.getElementById('op-modal-body').innerHTML = renderOpRecord(id, {
+        op: err.op, ok: false, error: err.message, hint: err.hint, output: err.output, rolled_back: err.rolled_back,
+      }, false);
+      document.getElementById('op-modal-actions').innerHTML =
+        '<button class="btn btn-secondary btn-sm" onclick="closeOpError()">Close</button>';
+      const out = document.querySelector('#op-modal .op-output');
+      if (out) out.scrollTop = out.scrollHeight;
+      opModalReload = err.op === 'enable'; // the card gains its failure badge / Logs tab
+      document.getElementById('op-modal').classList.add('visible');
+    }
+    let opModalReload = false;
+    function closeOpError() {
+      document.getElementById('op-modal').classList.remove('visible');
+      if (opModalReload) location.reload();
+    }
+
+    // Errors with compose output or a hint get the dialog, others a toast.
+    function reportError(id, err, prefix) {
+      if (err && (err.output || err.hint)) showOpError(id, err);
+      else showToast((prefix || '') + (err && err.message || err), 'error');
+    }
+
+    // Opens an app's Settings (e.g. from a port hint), scrolled to its ports.
+    function openAppSettings(id, ports) {
+      document.getElementById('op-modal').classList.remove('visible');
+      opModalReload = false;
+      if (openDetailId !== id) {
+        document.querySelector('.app-card[data-id="' + CSS.escape(id) + '"]')?.click();
+      }
+      document.querySelector('.detail-tab[data-dtab="settings"][data-app="' + CSS.escape(id) + '"]')?.click();
+      if (ports) {
+        setTimeout(() => {
+          const el = document.querySelector('#detail-settings-' + CSS.escape(id) + ' .ports-section') || document.getElementById('detail-' + id);
+          el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }, 400);
+      }
+    }
+
+    async function loadOpBanner(id) {
+      const el = document.getElementById('op-banner-' + id);
+      if (!el) return;
+      try {
+        const r = await apiGet('/api/templates/lastop/' + id);
+        if (r && !r.ok) {
+          el.innerHTML = 'Last ' + escapeHtml(r.op) + ' failed (' + escapeHtml(fmtTime(r.at)) + '): ' + escapeHtml(r.error) +
+            ' <a onclick="event.stopPropagation(); showLogsTab(\'' + escapeHtml(id) + '\')">Details</a>';
+          el.classList.add('visible');
+        } else {
+          el.classList.remove('visible');
+        }
+      } catch (e) { el.classList.remove('visible'); }
+    }
+    function showLogsTab(id) {
+      document.querySelector('.detail-tab[data-dtab="logs"][data-app="' + CSS.escape(id) + '"]')?.click();
+    }
+
     // ── Logs ──────────────────────────────────────────────
     async function loadLogs(id, lines) {
       const container = document.getElementById('detail-logs-' + id);
       lines = lines || '200';
       container.innerHTML = '<p class="settings-empty">Loading logs...</p>';
-      try {
-        const res = await fetch('/api/templates/logs/' + id + '?lines=' + lines);
-        const text = await res.text();
-        container.innerHTML =
-          '<div class="log-controls">' +
-            '<button class="btn btn-secondary btn-sm" onclick="event.stopPropagation(); loadLogs(\'' + id + '\')">Refresh</button>' +
-            '<select onchange="event.stopPropagation(); loadLogs(\'' + id + '\', this.value)">' +
-              '<option value="100"' + (lines==='100'?' selected':'') + '>100 lines</option>' +
-              '<option value="200"' + (lines==='200'?' selected':'') + '>200 lines</option>' +
-              '<option value="500"' + (lines==='500'?' selected':'') + '>500 lines</option>' +
-            '</select>' +
-          '</div>' +
-          '<pre class="log-viewer">' + escapeHtml(text || 'No logs available.') + '</pre>';
-        const viewer = container.querySelector('.log-viewer');
-        if (viewer) viewer.scrollTop = viewer.scrollHeight;
-      } catch (e) {
-        container.innerHTML = '<p class="settings-empty">Failed to load logs.</p>';
-      }
+      const [op, logs] = await Promise.all([
+        apiGet('/api/templates/lastop/' + id).catch(() => null),
+        fetch('/api/templates/logs/' + id + '?lines=' + lines).then(async r => ({ ok: r.ok, text: await r.text() })).catch(e => ({ ok: false, text: e.message })),
+      ]);
+      container.innerHTML =
+        renderOpRecord(id, op) +
+        '<div class="log-controls">' +
+          '<button class="btn btn-secondary btn-sm" onclick="event.stopPropagation(); loadLogs(\'' + id + '\')">Refresh</button>' +
+          '<select onchange="event.stopPropagation(); loadLogs(\'' + id + '\', this.value)">' +
+            '<option value="100"' + (lines==='100'?' selected':'') + '>100 lines</option>' +
+            '<option value="200"' + (lines==='200'?' selected':'') + '>200 lines</option>' +
+            '<option value="500"' + (lines==='500'?' selected':'') + '>500 lines</option>' +
+          '</select>' +
+        '</div>' +
+        (logs.ok ? '<pre class="log-viewer container-logs">' + escapeHtml(logs.text || 'No container logs (the app has no containers).') + '</pre>'
+                 : '<p class="settings-empty">Failed to load container logs: ' + escapeHtml(logs.text) + '</p>');
+      container.querySelectorAll('.log-viewer').forEach(v => { v.scrollTop = v.scrollHeight; });
     }
 
     // ── Expert mode ────────────────────────────────────────
@@ -1449,21 +1573,36 @@
         const services = envData.services || [];
         let html = '';
 
-        // Compose editor
-        html += '<div class="expert-section">';
-        html += '<div class="expert-section-title">compose.yml <span class="warn">Changes require restart</span></div>';
-        html += '<textarea class="code-editor" id="expert-compose-' + id + '" spellcheck="false">' + escapeHtml(composeData.compose || '') + '</textarea>';
-        html += '<div class="expert-actions">';
-        html += '<button class="btn btn-primary btn-sm" onclick="event.stopPropagation(); saveCompose(\'' + id + '\')">Save compose.yml</button>';
-        html += '<button class="btn btn-secondary btn-sm" onclick="event.stopPropagation(); restartApp(\'' + id + '\')">Restart App</button>';
-        html += '<span class="saved-msg" id="compose-saved-' + id + '">Saved</span>';
-        html += '</div></div>';
+        // Three layers, passed to compose in this order (later wins).
+        html += '<div class="expert-section"><div class="settings-empty">docker compose ' +
+          (composeData.files || []).map(f => '-f ' + escapeHtml(f)).join(' ') + '</div></div>';
 
-        // Override editor
         html += '<div class="expert-section">';
-        html += '<div class="expert-section-title">compose.hub-override.yml <span class="warn">Auto-generated from Settings; edits here override</span></div>';
-        html += '<textarea class="code-editor" id="expert-override-' + id + '" style="min-height:80px" spellcheck="false">' + escapeHtml(composeData.override || '') + '</textarea>';
+        html += '<div class="expert-section-title">1. compose.yml <span class="ro">template — read-only (from the template source; updated by Sync)</span></div>';
+        html += '<pre class="log-viewer code-view">' + escapeHtml(composeData.compose || '') + '</pre>';
         html += '</div>';
+
+        html += '<div class="expert-section">';
+        html += '<div class="expert-section-title">2. Hub override <span class="ro">generated from Settings — read-only, regenerated before every start</span></div>';
+        if (composeData.hub_override_error) {
+          html += '<p class="op-msg">Cannot render: ' + escapeHtml(composeData.hub_override_error) + '</p>';
+        }
+        html += '<pre class="log-viewer code-view">' + escapeHtml(composeData.hub_override || '# (nothing: no Settings need an override)') + '</pre>';
+        html += '</div>';
+
+        html += '<div class="expert-section">';
+        html += '<div class="expert-section-title">3. Custom override <span class="warn">yours — applied last, kept across template updates; restart to apply</span></div>';
+        html += '<details class="override-rules"><summary>What a custom override may contain</summary><ul>' +
+          (composeData.rules || []).map(r => '<li>' + escapeHtml(r) + '</li>').join('') + '</ul></details>';
+        html += '<textarea class="code-editor" id="expert-user-override-' + id + '" spellcheck="false" placeholder="services:\n  ' +
+          escapeHtml(services[0] || 'app') + ':\n    environment:\n      LOG_LEVEL: debug">' + escapeHtml(composeData.user_override || '') + '</textarea>';
+        html += '<div class="expert-actions">';
+        html += '<button class="btn btn-primary btn-sm" onclick="event.stopPropagation(); saveUserOverride(\'' + id + '\')">Save override</button>';
+        if (composeData.enabled) {
+          html += '<button class="btn btn-secondary btn-sm" id="restart-btn-' + id + '" onclick="event.stopPropagation(); restartApp(\'' + id + '\', this)">Restart app</button>';
+        }
+        html += '<span class="saved-msg" id="override-saved-' + id + '"></span>';
+        html += '</div></div>';
 
         // Env vars
         html += '<div class="expert-section">';
@@ -1522,16 +1661,19 @@
       }
     }
 
-    async function saveCompose(id) {
-      const compose = document.getElementById('expert-compose-' + id).value;
-      const override = document.getElementById('expert-override-' + id).value;
+    async function saveUserOverride(id) {
+      const user_override = document.getElementById('expert-user-override-' + id).value;
+      const msg = document.getElementById('override-saved-' + id);
       try {
-        await apiPut('/api/templates/compose/' + id, { compose, override });
-        const msg = document.getElementById('compose-saved-' + id);
+        const r = await apiPut('/api/templates/compose/' + id, { user_override });
+        msg.style.color = '';
+        msg.textContent = (r.status === 'removed' ? 'Removed' : 'Saved') + (r.restart_required ? ' — restart to apply' : ' — applies when the app is enabled');
         msg.classList.add('show');
-        setTimeout(() => msg.classList.remove('show'), 2000);
       } catch (e) {
-        showToast('Save failed: ' + e.message, 'error');
+        // Stays until the next save: the reason matters.
+        msg.style.color = '#ef4444';
+        msg.textContent = 'Not saved: ' + e.message;
+        msg.classList.add('show');
       }
     }
 
@@ -1572,12 +1714,16 @@
       showToast('Added ' + key + '. Click "Save Env Vars" to persist.', 'success');
     }
 
-    async function restartApp(id) {
+    async function restartApp(id, btn) {
+      if (btn) { btn.classList.add('loading'); btn.textContent = 'Restarting...'; }
       try {
         await apiPost('/api/templates/restart/' + id, {});
-        showToast(id + ' restarting...', 'success');
+        showToast(id + ' restarted', 'success');
       } catch (e) {
-        showToast('Restart failed: ' + e.message, 'error');
+        reportError(id, e, 'Restart failed: ');
+      } finally {
+        if (btn) { btn.classList.remove('loading'); btn.textContent = 'Restart app'; }
+        loadOpBanner(id);
       }
     }
 
@@ -1618,7 +1764,7 @@
         showToast(`${id} ${enable ? 'enabled' : 'disabled'}`, 'success');
         setTimeout(() => location.reload(), 500);
       } catch (err) {
-        showToast(err.message, 'error');
+        reportError(id, err);
         btn.classList.remove('loading');
         btn.textContent = enable ? 'Enable' : 'Disable';
       }

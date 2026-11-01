@@ -99,6 +99,7 @@ func main() {
 	srv := &httpapi.Server{
 		Hub:        h,
 		Directory:  dir,
+		Audit:      dir.Audit,
 		PortalName: os.Getenv("PORTAL_DISPLAY_NAME"),
 		Secret:     secret,
 		Web:        web.FS,

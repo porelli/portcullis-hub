@@ -2,6 +2,7 @@ package compose
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -51,8 +52,8 @@ func TestCLI(t *testing.T) {
 	out := string(b)
 	for _, want := range []string{
 		"compose -p portcullis-app -f /c.yml up -d --no-deps",
-		"compose -p portcullis-app -f /c.yml down",
-		"compose -p portcullis-app down",
+		"compose -p portcullis-app -f /c.yml down --remove-orphans",
+		"compose -p portcullis-app down --remove-orphans",
 		"DOCKER_HOST=tcp://socket-proxy-hub:2375 ORPHANS=true",
 	} {
 		if !strings.Contains(out, want) {
@@ -75,5 +76,26 @@ func TestCLIErrorsAndTimeout(t *testing.T) {
 	}
 	if time.Since(start) > 10*time.Second {
 		t.Error("timeout not enforced")
+	}
+}
+
+func TestCLIErrorCarriesOutput(t *testing.T) {
+	c, _ := stub(t, "echo ' Container x  Creating'\necho 'Error response from daemon: failed to bind host port 0.0.0.0:53/tcp: address already in use' >&2\nexit 1\n")
+	err := c.Up(context.Background(), Project{Name: "x"})
+	var ce *Error
+	if !errors.As(err, &ce) {
+		t.Fatalf("err = %T %v", err, err)
+	}
+	if ce.Command != "up" || !strings.Contains(ce.Output, "Creating") || !strings.Contains(ce.Output, "address already in use") {
+		t.Errorf("error = %+v", ce)
+	}
+	if !strings.Contains(err.Error(), "exit status 1: Error response from daemon: failed to bind") {
+		t.Errorf("message = %q", err.Error())
+	}
+	// Bounded: only the tail is kept.
+	c, _ = stub(t, "i=0; while [ $i -lt 3000 ]; do echo \"line $i of noise\"; i=$((i+1)); done; echo 'the cause' >&2; exit 2\n")
+	err = c.Down(context.Background(), Project{Name: "x"})
+	if !errors.As(err, &ce) || len(ce.Output) > OutputTail+8 || !strings.HasSuffix(ce.Output, "the cause\n") || !strings.HasPrefix(ce.Output, "[…]\nline ") {
+		t.Errorf("tail = %d bytes, %q…", len(ce.Output), ce.Output[:40])
 	}
 }

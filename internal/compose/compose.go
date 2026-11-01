@@ -5,12 +5,96 @@ package compose
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"strings"
+	"sync"
 	"time"
 )
+
+// OutputTail is how much of a failed invocation's combined stdout/stderr
+// an Error keeps (the end: compose prints the cause last).
+const OutputTail = 8 << 10
+
+// Error is a failed compose invocation. Output is the tail of what compose
+// printed — the actual cause ("failed to bind host port …: address already
+// in use"); the exit status alone says nothing.
+type Error struct {
+	Command string // "up", "down"
+	Err     error  // exit status, timeout, …
+	Output  string
+}
+
+func (e *Error) Error() string {
+	msg := "docker compose " + e.Command + ": " + e.Err.Error()
+	if l := LastLine(e.Output); l != "" {
+		msg += ": " + l
+	}
+	return msg
+}
+
+func (e *Error) Unwrap() error { return e.Err }
+
+// LastLine returns the line of s that most likely names the cause (clipped):
+// the last one mentioning an error, else the last non-empty one.
+func LastLine(s string) string {
+	lines := strings.Split(strings.TrimSpace(s), "\n")
+	pick := ""
+	for i := len(lines) - 1; i >= 0; i-- {
+		l := strings.TrimSpace(lines[i])
+		if l == "" {
+			continue
+		}
+		if pick == "" {
+			pick = l
+		}
+		if strings.Contains(strings.ToLower(l), "error") {
+			pick = l
+			break
+		}
+	}
+	if len(pick) > 300 {
+		pick = pick[:300] + "…"
+	}
+	return pick
+}
+
+// tail keeps the last max bytes written to it (stdout and stderr are
+// copied by separate goroutines: locked).
+type tail struct {
+	mu  sync.Mutex
+	max int
+	buf []byte
+	cut bool
+}
+
+func (t *tail) Write(p []byte) (int, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.buf = append(t.buf, p...)
+	if over := len(t.buf) - t.max; over > 0 {
+		t.buf = append(t.buf[:0], t.buf[over:]...)
+		t.cut = true
+	}
+	return len(p), nil
+}
+
+func (t *tail) String() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	s := string(t.buf)
+	if t.cut {
+		// Drop the partial first line.
+		if i := strings.IndexByte(s, '\n'); i >= 0 {
+			s = s[i+1:]
+		}
+		s = "[…]\n" + s
+	}
+	return s
+}
 
 // Project identifies one compose project invocation.
 type Project struct {
@@ -67,7 +151,7 @@ func Args(p Project, sub ...string) []string {
 	return append(args, sub...)
 }
 
-func (c *CLI) run(ctx context.Context, timeout time.Duration, args []string) error {
+func (c *CLI) run(ctx context.Context, timeout time.Duration, sub string, args []string) error {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	bin := c.Binary
@@ -81,27 +165,38 @@ func (c *CLI) run(ctx context.Context, timeout time.Duration, args []string) err
 	if c.DockerHost != "" {
 		cmd.Env = append(cmd.Env, "DOCKER_HOST="+c.DockerHost)
 	}
-	cmd.Stdout, cmd.Stderr = c.Stdout, c.Stderr
+	// The Hub's own log keeps the full output; the tail goes into the error.
+	out := &tail{max: OutputTail}
+	cmd.Stdout = io.MultiWriter(orDiscard(c.Stdout), out)
+	cmd.Stderr = io.MultiWriter(orDiscard(c.Stderr), out)
 	if err := cmd.Run(); err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			return fmt.Errorf("docker %s: timed out after %s", args[len(args)-1], timeout)
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			err = fmt.Errorf("timed out after %s", timeout)
 		}
-		return err
+		return &Error{Command: sub, Err: err, Output: out.String()}
 	}
 	return nil
 }
 
+func orDiscard(w io.Writer) io.Writer {
+	if w == nil {
+		return io.Discard
+	}
+	return w
+}
+
 // Up runs `up -d --no-deps`.
 func (c *CLI) Up(ctx context.Context, p Project) error {
-	return c.run(ctx, c.UpTimeout, Args(p, "up", "-d", "--no-deps"))
+	return c.run(ctx, c.UpTimeout, "up", Args(p, "up", "-d", "--no-deps"))
 }
 
-// Down runs `down`.
+// Down runs `down --remove-orphans` (volumes are kept): containers of
+// services no longer in the files (e.g. a dropped custom override) go too.
 func (c *CLI) Down(ctx context.Context, p Project) error {
-	return c.run(ctx, c.DownTimeout, Args(p, "down"))
+	return c.run(ctx, c.DownTimeout, "down", Args(p, "down", "--remove-orphans"))
 }
 
-// DownByName runs `compose -p <name> down`.
+// DownByName runs `compose -p <name> down --remove-orphans`.
 func (c *CLI) DownByName(ctx context.Context, name string) error {
-	return c.run(ctx, c.DownTimeout, []string{"compose", "-p", name, "down"})
+	return c.run(ctx, c.DownTimeout, "down", []string{"compose", "-p", name, "down", "--remove-orphans"})
 }

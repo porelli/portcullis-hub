@@ -9,11 +9,11 @@ Web management UI for Portcullis. Go binary with an embedded single-page UI, pub
 | Path | Purpose |
 |------|---------|
 | `cmd/hub` | `main`: env config, wiring, HTTP server, reconcile loop |
-| `internal/hub` | App core: catalog, enable/disable/restart (per-app lock), env + override generation, sources, policy-file writer, runtime (status/logs/exec), drift reconcile |
+| `internal/hub` | App core: catalog, enable/disable/restart (per-app lock), env + override generation, custom override validation (`useroverride.go`), per-app last-operation records (`ops.go`), sources, policy-file writer, runtime (status/logs/exec), drift reconcile |
 | `internal/templates` | Manifest types, discovery + validation, strict Traefik rule parsing (`ParseRoutes`), template file sync to `/project/templates/<id>` |
 | `internal/policy` | Auth-policy model (LoA/ACR/TLS tier), per-method capabilities (`CapabilityFor`, `Resolve`, `Check`) and group-gate policy file v3 (`Build`, `Write`) |
 | `internal/state` | `state.yaml` load/save (atomic; corrupt file = refuse to start) |
-| `internal/compose` | `docker compose` CLI wrapper — **up/down only**, behind the `Runner` interface |
+| `internal/compose` | `docker compose` CLI wrapper — **up/down only**, behind the `Runner` interface; failures are `*compose.Error` with the output tail (8 KiB) |
 | `internal/docker` | Engine API client over `DOCKER_HOST` (net/http): containers, logs (stream demux), exec, events |
 | `internal/keycloak` | Keycloak admin API client (net/http): clients, and users (lazy LDAP import, required actions, passkeys, sessions); `kctest` = in-memory fake |
 | `internal/lldap` | LLDAP client: GraphQL (`/api/graphql`, JWT from `/auth/simple/login`, refresh/re-login on 401) + minimal LDAP codec for the Password Modify extended op (passwords); credentials from files; `lldaptest` = in-memory fake (HTTP + LDAP) |
@@ -34,6 +34,8 @@ Web management UI for Portcullis. Go binary with an embedded single-page UI, pub
 - Never hold `Hub.mu` across docker/network calls; lifecycle ops take the per-app lock (`lockApp`).
 - Fail closed: `state.yaml` `published` keeps each enabled app's last published config; the policy writer falls back to it when the template is missing, and denies (`policy.DenyGroup`) subdomains of running app projects it has no config for.
 - Reconcile reports drift, it never fixes it; actions are explicit (`/api/drift/resolve`).
+- Lifecycle ops record their outcome in `<data>/ops/<id>.json` (`finishOp`; secret-looking env values redacted) and fail as `*hub.OpError` → JSON `{error, op, output, hint, rolled_back}`. A failed enable compose up is rolled back (`down --remove-orphans`, volumes kept): no half-created project may stay behind to trip the deny/drift.
+- Compose files, in order: template `compose.yml` (read-only, never written by the Hub), Hub override `<data>/overrides/<id>.override.yml` (always regenerated in `composeUp`), custom override `<data>/overrides/<id>.user.yml` (Expert; validated on save and before every up). The custom override may never set `traefik.*`/`com.docker.compose.*` labels, networks, namespaces, privileges or unsafe mounts (`useroverride.go` allowlist) — routing is computed from the template alone, so it must stay that way; its host ports count in the port checks.
 - No migration/back-compat code: there are no installs to upgrade from.
 - Frontend is vanilla JS in `web/index.html` — no build step, no npm. Escape everything with `escapeHtml`.
 - Templates come from git sources (`state.yaml` `sources`), not the local filesystem.

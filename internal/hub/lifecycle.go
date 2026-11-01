@@ -36,7 +36,9 @@ func (h *Hub) appBusy(id string) bool {
 	return busy
 }
 
-// project builds the compose invocation for a template.
+// project builds the compose invocation for a template: the template's
+// compose.yml, the Hub's generated override, then the admin's custom
+// override (Expert mode) — later files win.
 func (h *Hub) project(t *templates.Template) compose.Project {
 	p := compose.Project{
 		Name:       projectName(t.ID),
@@ -44,20 +46,40 @@ func (h *Hub) project(t *templates.Template) compose.Project {
 		ProjectDir: h.cfg.ProjectHostDir,
 		EnvFile:    h.envPath(t.ID),
 	}
-	if _, err := os.Stat(h.overridePath(t.ID)); err == nil {
-		p.Files = append(p.Files, h.overridePath(t.ID))
+	for _, f := range []string{h.overridePath(t.ID), h.userOverridePath(t.ID)} {
+		if _, err := os.Stat(f); err == nil {
+			p.Files = append(p.Files, f)
+		}
 	}
 	return p
 }
 
+// composeUp regenerates the Hub override, re-checks the custom override
+// against the template as it is now, syncs the template's files and runs
+// compose up. Failures before compose are *StatusError; anything else
+// came from compose (it may have created containers).
 func (h *Hub) composeUp(t *templates.Template) error {
 	if _, err := os.Stat(t.ComposePath()); err != nil {
 		return nil
 	}
-	if err := templates.SyncFiles(t, h.templatesRoot()); err != nil {
-		return fmt.Errorf("sync template files: %w", err)
+	h.mu.Lock()
+	live := t
+	if l := h.findLocked(t.ID); l != nil {
+		c := *l
+		live = &c
 	}
-	return h.compose.Up(context.Background(), h.project(t))
+	err := h.generateOverrideLocked(live, h.st.Settings[t.ID])
+	h.mu.Unlock()
+	if err != nil {
+		return statusErr(500, "override generation failed: %v", err)
+	}
+	if err := h.checkUserOverride(live); err != nil {
+		return err
+	}
+	if err := templates.SyncFiles(live, h.templatesRoot()); err != nil {
+		return statusErr(500, "sync template files: %v", err)
+	}
+	return h.compose.Up(context.Background(), h.project(live))
 }
 
 func (h *Hub) composeDown(t *templates.Template) error {
@@ -65,6 +87,23 @@ func (h *Hub) composeDown(t *templates.Template) error {
 		return nil
 	}
 	return h.compose.Down(context.Background(), h.project(t))
+}
+
+// rollbackUp removes what a failed compose up left behind (containers,
+// network; volumes are kept), by project name if the files don't work.
+func (h *Hub) rollbackUp(t *templates.Template) error {
+	err := h.compose.Down(context.Background(), h.project(t))
+	if err != nil && h.compose.DownByName(context.Background(), projectName(t.ID)) == nil {
+		return nil
+	}
+	return err
+}
+
+// composeFailed reports whether err came from compose itself rather than
+// from the Hub's checks before it.
+func composeFailed(err error) bool {
+	var se *StatusError
+	return err != nil && !errors.As(err, &se)
 }
 
 // redirectURIs expands {{DOMAIN}} in a client's redirect URIs.
@@ -110,13 +149,20 @@ func (h *Hub) clientSpec(t *templates.Template, c templates.KeycloakClient, acr 
 }
 
 // Enable writes the app's env/override, registers its OIDC clients and runs
-// compose up. The app is recorded as enabled only if compose succeeds.
+// compose up. The app is recorded as enabled only if compose succeeds; a
+// failed compose up is rolled back (compose down) so no half-created
+// project stays behind. The outcome is recorded (LastOp).
 func (h *Hub) Enable(id string) error {
 	unlock, err := h.lockApp(id)
 	if err != nil {
 		return err
 	}
 	defer unlock()
+	rolledBack, err := h.enableLocked(id)
+	return h.finishOp(id, OpEnable, err, rolledBack)
+}
+
+func (h *Hub) enableLocked(id string) (rolledBack bool, err error) {
 
 	// Phase 1 (under mu): validate and write local files — fast filesystem
 	// work that needs a consistent view of state.
@@ -124,28 +170,28 @@ func (h *Hub) Enable(id string) error {
 	t := h.findLocked(id)
 	if t == nil {
 		h.mu.Unlock()
-		return statusErr(400, "template not found: %s", id)
+		return false, statusErr(400, "template not found: %s", id)
 	}
 	tmpl := *t // the catalog slice may be replaced meanwhile
 	if h.st.IsEnabled(id) {
 		h.mu.Unlock()
-		return nil
+		return false, nil
 	}
 	if err := h.checkPortCollisionsLocked(&tmpl); err != nil {
 		h.mu.Unlock()
-		return err
+		return false, err
 	}
 	if err := h.checkSubdomainCollisionsLocked(&tmpl); err != nil {
 		h.mu.Unlock()
-		return err
+		return false, err
 	}
 	if err := h.generateAppEnvLocked(&tmpl); err != nil {
 		h.mu.Unlock()
-		return fmt.Errorf("env setup failed: %w", err)
+		return false, statusErr(500, "env setup failed: %v", err)
 	}
 	if err := h.generateOverrideLocked(&tmpl, h.st.Settings[tmpl.ID]); err != nil {
 		h.mu.Unlock()
-		return fmt.Errorf("override write failed: %w", err)
+		return false, statusErr(500, "override write failed: %v", err)
 	}
 	acr := policy.ACR(h.effectivePolicyLocked(&tmpl))
 	h.mu.Unlock()
@@ -161,14 +207,21 @@ func (h *Hub) Enable(id string) error {
 			case errors.As(err, &conflict):
 				// Fail closed: never start an app wired to a client it
 				// doesn't own (its secret/redirects would be someone else's).
-				return &StatusError{Status: 409, Err: err}
+				return false, &StatusError{Status: 409, Err: err}
 			case err != nil:
 				log.Printf("Warning: failed to register client %s: %v", c.ClientID, err)
 			}
 		}
 	}
 	if err := h.composeUp(&tmpl); err != nil {
-		return fmt.Errorf("compose up failed: %w", err)
+		if !composeFailed(err) {
+			return false, err
+		}
+		defer h.TriggerReconcile()
+		if rbErr := h.rollbackUp(&tmpl); rbErr != nil {
+			return false, &StatusError{Status: 500, Err: fmt.Errorf("compose up failed: %w — rolling back (compose down) failed too: %v; stop the leftovers from the drift banner", err, rbErr)}
+		}
+		return true, &StatusError{Status: 500, Err: fmt.Errorf("compose up failed: %w — rolled back: its containers and network were removed (volumes kept), the app stays disabled", err)}
 	}
 
 	// Phase 3 (under mu): commit.
@@ -182,7 +235,7 @@ func (h *Hub) Enable(id string) error {
 	h.mu.Unlock()
 	h.writePolicyLogged()
 	h.TriggerReconcile()
-	return nil
+	return false, nil
 }
 
 // checkSubdomainCollisionsLocked refuses to enable a template that routes a
@@ -239,7 +292,7 @@ func (h *Hub) Disable(id string) error {
 		return err
 	}
 	defer unlock()
-	return h.disableLocked(id)
+	return h.finishOp(id, OpDisable, h.disableLocked(id), false)
 }
 
 func (h *Hub) disableLocked(id string) error {
@@ -283,7 +336,7 @@ func (h *Hub) disableLocked(id string) error {
 // and labels take effect. It waits for any in-flight operation on the app
 // instead of dropping the restart: that operation may have read the old
 // files, and compose reads them at run time, so a queued restart always
-// applies the latest ones.
+// applies the latest ones. The outcome is recorded (LastOp).
 func (h *Hub) Restart(t templates.Template) {
 	deadline := time.Now().Add(20 * time.Minute)
 	var unlock func()
@@ -303,17 +356,18 @@ func (h *Hub) Restart(t templates.Template) {
 	if !h.IsEnabled(t.ID) {
 		return // disabled while we waited
 	}
-	if err := h.composeDown(&t); err != nil {
-		log.Printf("restart %s: compose down failed: %v", t.ID, err)
-	}
-	if err := h.composeUp(&t); err != nil {
-		log.Printf("restart %s: compose up failed: %v", t.ID, err)
-	}
+	h.finishOp(t.ID, OpRestart, h.restartLocked(&t), false)
 	h.TriggerReconcile()
 }
 
-// RestartAsync validates and queues a restart.
-func (h *Hub) RestartAsync(id string) error {
+// RestartApp restarts an enabled app now and returns the outcome (the API's
+// Restart button: its error carries compose's output).
+func (h *Hub) RestartApp(id string) error {
+	unlock, err := h.lockApp(id)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	t := h.Template(id)
 	if t == nil {
 		return ErrNotFound
@@ -321,7 +375,25 @@ func (h *Hub) RestartAsync(id string) error {
 	if !t.Enabled {
 		return statusErr(400, "app not enabled")
 	}
-	tmpl := *t
-	h.goBackground(func() { h.Restart(tmpl) })
+	defer h.TriggerReconcile()
+	return h.finishOp(id, OpRestart, h.restartLocked(t), false)
+}
+
+func (h *Hub) restartLocked(t *templates.Template) error {
+	// Refuse before stopping anything: an override that no longer fits
+	// the template would leave the app down.
+	if err := h.checkUserOverride(t); err != nil {
+		return err
+	}
+	downErr := h.composeDown(t)
+	if err := h.composeUp(t); err != nil {
+		if composeFailed(err) {
+			return fmt.Errorf("compose up failed: %w", err)
+		}
+		return err
+	}
+	if downErr != nil {
+		return fmt.Errorf("compose down failed (the containers may not have been recreated): %w", downErr)
+	}
 	return nil
 }

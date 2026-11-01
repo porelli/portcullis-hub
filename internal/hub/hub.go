@@ -93,6 +93,10 @@ type Hub struct {
 	runtimeSubs map[string][]string
 	driftKey    map[string]string
 	kick        chan struct{}
+
+	// ops: each app's last lifecycle operation (mirrors <data>/ops).
+	opsMu sync.Mutex
+	ops   map[string]OpRecord
 }
 
 // New loads state from cfg.DataDir and prepares the data directories. It
@@ -104,7 +108,7 @@ func New(cfg Config, runner compose.Runner, engine Engine, idp IdP) (*Hub, error
 	if cfg.ReconcileInterval <= 0 {
 		cfg.ReconcileInterval = time.Minute
 	}
-	for _, d := range []string{cfg.DataDir, filepath.Join(cfg.DataDir, "repos"), filepath.Join(cfg.DataDir, "env"), filepath.Join(cfg.DataDir, "overrides")} {
+	for _, d := range []string{cfg.DataDir, filepath.Join(cfg.DataDir, "repos"), filepath.Join(cfg.DataDir, "env"), filepath.Join(cfg.DataDir, "overrides"), filepath.Join(cfg.DataDir, "ops")} {
 		if err := os.MkdirAll(d, 0755); err != nil {
 			return nil, err
 		}
@@ -123,6 +127,7 @@ func New(cfg Config, runner compose.Runner, engine Engine, idp IdP) (*Hub, error
 		return nil, err
 	}
 	h.st = st
+	h.loadOps()
 	return h, nil
 }
 
@@ -156,6 +161,12 @@ func (h *Hub) policyPath() string       { return filepath.Join(h.cfg.DataDir, "g
 func (h *Hub) envPath(id string) string { return filepath.Join(h.cfg.DataDir, "env", id+".env") }
 func (h *Hub) overridePath(id string) string {
 	return filepath.Join(h.cfg.DataDir, "overrides", id+".override.yml")
+}
+
+// userOverridePath is the app's custom override (Expert mode): kept by the
+// Hub, outside the template clone, so template syncs never touch it.
+func (h *Hub) userOverridePath(id string) string {
+	return filepath.Join(h.cfg.DataDir, "overrides", id+".user.yml")
 }
 func (h *Hub) templatesRoot() string { return filepath.Join(h.cfg.ProjectDir, "templates") }
 func projectName(id string) string   { return ProjectPrefix + id }

@@ -92,9 +92,8 @@ func TestMissingTemplateEnforcesSnapshot(t *testing.T) {
 func TestSnapshotTracksLiveTemplate(t *testing.T) {
 	f := newFixture(t)
 	f.h.Enable("grafana")
-	if err := f.h.SaveComposeFiles("grafana", "services:\n  grafana:\n    labels:\n      traefik.http.routers.g.rule: Host(`dash.${PORTCULLIS_DOMAIN}`)\n", ""); err != nil {
-		t.Fatal(err)
-	}
+	writeFile(t, filepath.Join(f.src, "grafana", "compose.yml"), "services:\n  grafana:\n    labels:\n      traefik.http.routers.g.rule: Host(`dash.${PORTCULLIS_DOMAIN}`)\n")
+	f.h.Discover()
 	st, _ := state.Load(filepath.Join(f.data, "state.yaml"))
 	if s := st.Published["grafana"].Subdomains; strings.Join(s, ",") != "dash" {
 		t.Errorf("snapshot subdomains = %v", s)

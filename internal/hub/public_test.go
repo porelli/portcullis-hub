@@ -332,8 +332,10 @@ func TestPublicDrift(t *testing.T) {
 func TestPublicExpertComposeOverlap(t *testing.T) {
 	f := newCloudFixture(t)
 	bad := strings.Replace(cloudCompose, "PathPrefix(`/login`)", "PathPrefix(`/s`)", 1)
-	if err := f.h.SaveComposeFiles("cloud", bad, ""); statusOf(err) != 400 {
-		t.Errorf("compose whose router overlaps a public path accepted: %v", err)
+	writeFile(t, filepath.Join(f.src, "cloud", "compose.yml"), bad)
+	f.h.Discover()
+	if f.h.Template("cloud") != nil {
+		t.Error("compose whose router overlaps a public path accepted")
 	}
 }
 

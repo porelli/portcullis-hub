@@ -33,6 +33,9 @@ type fakeRunner struct {
 	gate    chan struct{}
 	entered chan string
 	delay   time.Duration
+	// onDown runs on a successful Down/DownByName (e.g. the fake engine
+	// forgets the project's containers).
+	onDown func(project string)
 }
 
 func newFakeRunner() *fakeRunner { return &fakeRunner{active: map[string]int{}} }
@@ -75,13 +78,25 @@ func (f *fakeRunner) Down(ctx context.Context, p compose.Project) error {
 	if f.delay > 0 {
 		time.Sleep(f.delay)
 	}
+	if f.downErr == nil && f.onDown != nil {
+		f.onDown(p.Name)
+	}
 	return f.downErr
 }
 
 func (f *fakeRunner) DownByName(ctx context.Context, name string) error {
 	f.begin("downbyname", name, compose.Project{Name: name})
 	defer f.end(name)
+	if f.byNameErr == nil && f.onDown != nil {
+		f.onDown(name)
+	}
 	return f.byNameErr
+}
+
+func (f *fakeRunner) Projects() []compose.Project {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]compose.Project(nil), f.projects...)
 }
 
 func (f *fakeRunner) Calls() []string {
