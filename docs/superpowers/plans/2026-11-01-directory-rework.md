@@ -30,7 +30,7 @@ fields reaching apps. All of it is served to every signed-in user on
 
 ## Global Constraints
 
-- **Hub dependencies:** stdlib + `gopkg.in/yaml.v3` only. No JS build step.
+- **Dependencies:** prefer mature, pinned libraries over hand-rolled code (user request 2026-11-01; Phase A2). No JS build step.
   Escape every interpolation with `escapeHtml`.
 - **Checks after every Hub change:** `go vet ./... && go test -race ./...`
   and `gofmt -l .` (empty).
@@ -478,6 +478,46 @@ func Cycles(d *Directory) [][]string          // manager cycles, each sorted
   (required), `display_name`, `email`, then field names.
 - [ ] **Step 4:** run → PASS.
 - [ ] **Step 5:** commit `directory: details editing and CSV import review`.
+
+---
+
+## Phase A2 — libraries over hand-rolled code (user request 2026-11-01)
+
+The user lifted the Hub's "stdlib + yaml.v3 only" rule and chose: use libraries
+for new code AND replace existing hand-rolled pieces where a mature library
+exists. Every new module: latest stable release, pinned in `go.mod`/`go.sum`
+(Python: pinned in a requirements file with hashes), license compatible
+(MIT/BSD/Apache-2.0/MPL-2.0), actively maintained. Dependabot `gomod`/`pip`
+already covers updates. Public behaviour and every existing test stay
+unchanged unless a test only exercised the removed hand-rolled internals.
+Executed before Phase B so Tasks 10–12 build on the libraries.
+
+### Task 15: Hub — rule parser, LDAP, GraphQL on libraries
+
+**Files:** `internal/rules/parse.go` (rewrite), `internal/lldap/ldap.go` (remove), `internal/lldap/client.go`, `internal/lldap/lldaptest/fake.go`, `go.mod`, `go.sum`, `CLAUDE.md` (dependency rule), tests as needed.
+
+**Interfaces:** unchanged — `rules.Parse/Format/Eval/Validate/Fields/Cycles`; `lldap.Client` methods; `lldaptest.Server` helpers.
+
+- [ ] **Step 1:** rules: replace the hand-written lexer/parser with `github.com/alecthomas/participle/v2` (grammar as in Task 3, keywords case-insensitive, `\"`/`\\` escapes, 1-based column in errors from participle's positions); convert the participle AST to `*rules.Expr`; keep `Format`, `Eval`, `Validate` (domain logic). Every existing `internal/rules` test passes unchanged.
+- [ ] **Step 2:** LDAP: replace the minimal BER codec (`internal/lldap/ldap.go`) with `github.com/go-ldap/ldap/v3` (bind + Password Modify extended op, RFC 3062). The fake's LDAP side: use `github.com/jimlambrt/gldap` (maintained LDAP server library) instead of the hand-rolled TLV server in `lldaptest`.
+- [ ] **Step 3:** GraphQL: use `github.com/hasura/go-graphql-client` (or `github.com/Khan/genqlient` if it gives typed queries with less code — pick one, justify in the report) for LLDAP's `/api/graphql`, keeping the JWT login/refresh behaviour.
+- [ ] **Step 4:** Update `CLAUDE.md`: replace "stdlib + `gopkg.in/yaml.v3` only" with "prefer mature, pinned libraries over hand-rolled code (Dependabot-tracked); no web framework needed for the SPA". Run `go vet ./... && go test -race ./... && gofmt -l .`; commit `deps: participle, go-ldap, gldap, graphql client replace hand-rolled code`.
+
+### Task 16: Hub — Keycloak and Docker clients on libraries
+
+**Files:** `internal/keycloak/*.go`, `internal/keycloak/kctest/*`, `internal/docker/*.go`, callers, `go.mod`, `go.sum`, `CLAUDE.md` (Docker rule wording).
+
+- [ ] **Step 1:** Keycloak: implement `internal/keycloak` on `github.com/Nerzal/gocloak/v13` (token, clients, client scopes, users, credentials, required actions, logout, components). Keep the package's exported API so callers don't change; `kctest` keeps working (it's an HTTP fake — gocloak talks HTTP to it).
+- [ ] **Step 2:** Docker: implement `internal/docker` on the official Engine SDK (`github.com/moby/moby/client` if published as its own module at the current release, else `github.com/docker/docker/client`), using `stdcopy` for log/exec demux and the SDK's events stream. Keep `DOCKER_HOST` (socket proxy) and the read-only usage rule; `docker compose` CLI stays for up/down. Keep the package's exported API.
+- [ ] **Step 3:** Update the CLAUDE.md Docker rule ("Engine API through the official SDK in `internal/docker`"). Run vet/race/gofmt; commit `deps: gocloak and Docker SDK replace hand-rolled clients`.
+
+### Task 17: Core — group-gate and enroll on libraries
+
+**Files (core repo):** `group-gate/group-gate.py`, `group-gate/requirements.txt` (new, pinned with hashes), group-gate image build (Dockerfile or compose), `enroll/*.go`, `enroll/go.mod`, `CLAUDE.md`, `tests/test_group_gate.py`.
+
+- [ ] **Step 1:** group-gate: replace the hand-rolled DER/CRL parser (`_der_tlv`, `_der_children`, `_der_time`, `parse_crl*`) and certificate parsing (`leaf_cert_cn`, serial extraction) with `cryptography` (x509 CRL + certificate loading); replace `decode_jwt_payload` with `PyJWT` decoding (signature verification stays out of scope only if group-gate never trusted the token for authz — keep today's semantics and say so in the report). Keep the PHP-name normalisation (domain-specific). If group-gate currently runs on a stock python image with no install step, add a minimal pinned build (digest-pinned base, `pip install --require-hashes`), keeping the hardening baseline (non-root 10003, read-only FS).
+- [ ] **Step 2:** enroll: audit for hand-rolled protocol/codec code; replace with libraries where a mature one exists (e.g. Vault API client `github.com/hashicorp/vault/api`, OIDC `github.com/coreos/go-oidc/v3` + `golang.org/x/oauth2`) — list each replacement and anything kept with the reason.
+- [ ] **Step 3:** Run `python3 -m pytest -q tests/`, `bash tests/test_cli.sh`, `cd enroll && go test ./...`, shellcheck; update CLAUDE.md; commit `deps: cryptography/PyJWT in group-gate, libraries in enroll`.
 
 ---
 
