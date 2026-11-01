@@ -819,3 +819,99 @@ func TestEvalFormatPanicSafety(t *testing.T) {
 		})
 	}
 }
+
+func TestEvalNotOnInvalid(t *testing.T) {
+	// Test that Not on invalid expressions still returns false (fail closed)
+	dir := &Directory{
+		People: map[string]Person{
+			"alice": {
+				User: "alice",
+				Attrs: map[string][]string{
+					"city": {"Milan"},
+				},
+			},
+		},
+		ManagerField: "manager",
+	}
+
+	tests := []struct {
+		name string
+		expr *Expr
+	}{
+		{
+			name: "is with Not and no values",
+			expr: &Expr{
+				Op:    OpIs,
+				Field: "city",
+				Not:   true,
+			},
+		},
+		{
+			name: "reports_to with Not and no values",
+			expr: &Expr{
+				Op:    OpReportsTo,
+				Field: "manager",
+				Not:   true,
+			},
+		},
+		{
+			name: "all with Not and nil item",
+			expr: &Expr{
+				Op:    OpAll,
+				Items: []*Expr{nil},
+				Not:   true,
+			},
+		},
+		{
+			name: "any with Not and invalid nested op",
+			expr: &Expr{
+				Op: OpAny,
+				Items: []*Expr{
+					{Op: "bogus", Field: "city"},
+				},
+				Not: true,
+			},
+		},
+		{
+			name: "unknown op with Not",
+			expr: &Expr{
+				Op:    "unknown",
+				Field: "city",
+				Not:   true,
+			},
+		},
+		{
+			name: "is_not with Not and no values",
+			expr: &Expr{
+				Op:    OpIsNot,
+				Field: "city",
+				Not:   true,
+			},
+		},
+		{
+			name: "in with Not and no values",
+			expr: &Expr{
+				Op:    OpIn,
+				Field: "city",
+				Not:   true,
+			},
+		},
+		{
+			name: "all with Not and empty items",
+			expr: &Expr{
+				Op:    OpAll,
+				Items: []*Expr{},
+				Not:   true,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := Eval(tt.expr, "alice", dir)
+			if result {
+				t.Errorf("Eval() = true, want false (fail closed even with Not on invalid expression)")
+			}
+		})
+	}
+}

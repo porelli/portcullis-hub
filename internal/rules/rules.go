@@ -152,11 +152,13 @@ func joinWithSep(parts []string, sep string) string {
 // All value comparisons are case-insensitive.
 // Returns false for users not in the directory, regardless of Not flags (fail closed).
 // Does not panic on invalid expressions (returns false; callers should Validate first).
+// Validates the entire expression tree before evaluation to prevent Not from inverting invalid expressions.
 func Eval(e *Expr, user string, d *Directory) bool {
-	// Fail closed: nil expression or unknown users don't match anything
-	if e == nil {
+	// Fail closed: validate entire tree first to prevent Not from inverting invalid expressions
+	if err := Validate(e); err != nil {
 		return false
 	}
+	// Fail closed: unknown users don't match anything
 	if _, exists := d.People[user]; !exists {
 		return false
 	}
@@ -363,6 +365,9 @@ func validateExpr(e *Expr, depth int, nodeCount *int) error {
 			return fmt.Errorf("operation %q must not have Values", e.Op)
 		}
 		for _, item := range e.Items {
+			if item == nil {
+				return fmt.Errorf("operation %q has nil item", e.Op)
+			}
 			if err := validateExpr(item, depth+1, nodeCount); err != nil {
 				return err
 			}
