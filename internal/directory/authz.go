@@ -192,6 +192,9 @@ func (s *Service) checkKeyless(ctx context.Context, c *Caller, user string) erro
 // ("" if none).
 func namedInGroups(cfg *Config, user string) string {
 	for name, gc := range cfg.Groups {
+		if gc == nil {
+			continue
+		}
 		for _, ex := range gc.Exceptions {
 			if strings.EqualFold(ex.User, user) {
 				return name
@@ -212,6 +215,9 @@ func namedInGroups(cfg *Config, user string) string {
 func purgeUser(cfg *Config, user string) []string {
 	var out []string
 	for name, gc := range cfg.Groups {
+		if gc == nil {
+			continue
+		}
 		kept := gc.Exceptions[:0]
 		for _, ex := range gc.Exceptions {
 			if strings.EqualFold(ex.User, user) {

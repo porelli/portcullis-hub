@@ -204,6 +204,9 @@ func (s *Store) Save(cfg *Config) error {
 
 	// Convert groups and normalize times
 	for groupName, gc := range cfg.Groups {
+		if gc == nil {
+			continue
+		}
 		rawGC := &rawGroupConfig{
 			Exceptions: make([]Exception, len(gc.Exceptions)),
 			Expiry:     make(map[string]time.Time),

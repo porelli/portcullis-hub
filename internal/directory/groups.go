@@ -19,9 +19,11 @@ const maxReasonRunes = 500
 // ConvertPreview is the review step of turning a manual group into a
 // rule group: who the rule matches, which current members don't match
 // (offered to stay as "added" exceptions) and who would join. Usernames
-// as in LLDAP, sorted; protected accounts never appear.
+// as in LLDAP, sorted; protected accounts never appear. ExpiryDropped:
+// members the rule matches whose manual expiry would be dropped (they
+// then stay by rule, without an end).
 type ConvertPreview struct {
-	Matching, KeptAsException, Joining []string
+	Matching, KeptAsException, Joining, ExpiryDropped []string
 }
 
 func errNoStore() error {
@@ -199,10 +201,20 @@ func (s *Service) preview(cfg *Config, sn *snapshot, g lldap.Group, rule *rules.
 			}
 		}
 	}
-	kept, joining := map[string]bool{}, map[string]bool{}
+	kept, joining, dropped := map[string]bool{}, map[string]bool{}, map[string]bool{}
+	var expiry map[string]time.Time
+	if gc := cfg.Groups[g.DisplayName]; gc != nil {
+		expiry = gc.Expiry
+	}
 	for u := range members {
 		if !matched[u] {
 			kept[u] = true
+			continue
+		}
+		for k := range expiry {
+			if strings.EqualFold(k, u) {
+				dropped[u] = true
+			}
 		}
 	}
 	for u := range matched {
@@ -210,7 +222,7 @@ func (s *Service) preview(cfg *Config, sn *snapshot, g lldap.Group, rule *rules.
 			joining[u] = true
 		}
 	}
-	return &ConvertPreview{Matching: idsOf(sn, matched), KeptAsException: idsOf(sn, kept), Joining: idsOf(sn, joining)}
+	return &ConvertPreview{Matching: idsOf(sn, matched), KeptAsException: idsOf(sn, kept), Joining: idsOf(sn, joining), ExpiryDropped: idsOf(sn, dropped)}
 }
 
 // convertCheck loads what ConvertPreview and ConvertApply need and
@@ -307,6 +319,9 @@ func (s *Service) ConvertApply(ctx context.Context, c *Caller, group string, rul
 		sort.Strings(kept)
 		cfg.Groups[group] = &GroupConfig{Rule: rule, Exceptions: exs}
 		detail += " keep=" + strings.Join(kept, ",")
+		if len(p.ExpiryDropped) > 0 {
+			detail += " dropped_expiry=" + strings.Join(p.ExpiryDropped, ",")
+		}
 		return s.saveConfig(cfg)
 	})
 }
@@ -332,7 +347,8 @@ func (s *Service) SetGroupRule(ctx context.Context, c *Caller, group string, rul
 		if err != nil {
 			return err
 		}
-		if _, err := sn.group(group); err != nil {
+		g, err := sn.group(group)
+		if err != nil {
 			return err
 		}
 		if rule == nil {
@@ -340,10 +356,29 @@ func (s *Service) SetGroupRule(ctx context.Context, c *Caller, group string, rul
 				detail = "manual (unchanged)"
 				return nil
 			}
-			if n := len(cfg.Groups[group].Exceptions); n > 0 {
+			gc := cfg.Groups[group]
+			if n := len(gc.Exceptions); n > 0 {
 				detail += fmt.Sprintf(" dropped_exceptions=%d", n)
 			}
-			cfg.Groups[group].Rule = nil
+			// Temporary access stays temporary: an active "added"
+			// exception with an end becomes the member's manual expiry.
+			now := time.Now().UTC()
+			var kept []string
+			for _, ex := range gc.Exceptions {
+				if !ex.Include || ex.Until == nil || expired(*ex.Until, now) || !memberOf(g, ex.User) {
+					continue
+				}
+				if gc.Expiry == nil {
+					gc.Expiry = map[string]time.Time{}
+				}
+				gc.Expiry[ex.User] = ex.Until.UTC()
+				kept = append(kept, ex.User+"@"+formatUntil(ex.Until))
+			}
+			if len(kept) > 0 {
+				sort.Strings(kept)
+				detail += " expiry=" + strings.Join(kept, ",")
+			}
+			gc.Rule = nil
 			cfg.Groups[group].Exceptions = nil
 			tidy(cfg, group)
 			return s.saveConfig(cfg)

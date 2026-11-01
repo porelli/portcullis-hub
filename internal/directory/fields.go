@@ -221,7 +221,7 @@ func (s *Service) UpdateField(ctx context.Context, c *Caller, f Field) error {
 			if len(removed) > 0 {
 				var usingGroups []string
 				for groupName, gc := range cfg.Groups {
-					if gc.Rule == nil {
+					if gc == nil || gc.Rule == nil {
 						continue
 					}
 					// Check if rule references this field
@@ -285,7 +285,7 @@ func (s *Service) DeleteField(ctx context.Context, c *Caller, name, confirm stri
 		// Check if field is used in any rule
 		var usingGroups []string
 		for groupName, gc := range cfg.Groups {
-			if gc.Rule != nil && containsString(rules.Fields(gc.Rule), name) {
+			if gc != nil && gc.Rule != nil && containsString(rules.Fields(gc.Rule), name) {
 				usingGroups = append(usingGroups, groupName)
 			}
 		}

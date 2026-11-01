@@ -57,7 +57,7 @@ func TestConvertKeepsAsExceptions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := &directory.ConvertPreview{Matching: []string{"bob", "carol"}, KeptAsException: []string{"alice", "dave"}, Joining: []string{"carol"}}
+	want := &directory.ConvertPreview{Matching: []string{"bob", "carol"}, KeptAsException: []string{"alice", "dave"}, Joining: []string{"carol"}, ExpiryDropped: []string{}}
 	if !reflect.DeepEqual(p, want) {
 		t.Errorf("preview = %+v, want %+v", p, want)
 	}
@@ -400,5 +400,122 @@ func TestPreviewRule(t *testing.T) {
 		if strings.Contains(a.Action, "preview") {
 			t.Errorf("preview audited: %+v", a)
 		}
+	}
+}
+
+func TestManualAgainKeepsTemporaryAccess(t *testing.T) {
+	e, store := evalEnv(t)
+	if err := e.svc.ConvertApply(ctx, asRoot, "milan", mustRule(t, `city = "Milan"`), nil); err != nil {
+		t.Fatal(err)
+	}
+	soon := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
+	e.ll.AddUser("zed", "zed@example.org", "Zed", "")
+	for _, ex := range []directory.Exception{
+		{User: "dave", Reason: "temp", Include: true, Until: &soon},    // member: becomes expiry
+		{User: "zed", Reason: "temp", Include: true, Until: &soon},     // removed below: no expiry
+		{User: "carol", Reason: "leave", Include: false, Until: &soon}, // kept out: no expiry
+	} {
+		if err := e.svc.AddException(ctx, asRoot, "milan", ex); err != nil {
+			t.Fatal(err)
+		}
+	}
+	evaluate(t, e, time.Now().UTC())
+	e.ll.RemoveMember("milan", "zed")
+	if err := e.svc.SetGroupRule(ctx, asRoot, "milan", nil); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _ := store.Load()
+	gc := cfg.Groups["milan"]
+	if gc == nil || gc.Rule != nil || len(gc.Exceptions) != 0 {
+		t.Fatalf("group = %+v", gc)
+	}
+	if len(gc.Expiry) != 1 || !gc.Expiry["dave"].Equal(soon) {
+		t.Errorf("expiry = %+v", gc.Expiry)
+	}
+	if a := newestAudit(t, e, "group.rule"); !strings.Contains(a.Detail, "expiry=dave@") || !strings.Contains(a.Detail, "dropped_exceptions=3") {
+		t.Errorf("audit = %+v", a)
+	}
+	// The expiry is enforced on the now-manual group.
+	evaluate(t, e, soon)
+	wantMembers(t, e, "milan", "bob")
+}
+
+func TestEvaluatorBlocksAddsToGuardingGroupOnEditableField(t *testing.T) {
+	e, _ := evalEnv(t)
+	if err := e.svc.ConvertApply(ctx, asRoot, "milan", mustRule(t, `city = "Milan"`), nil); err != nil {
+		t.Fatal(err)
+	}
+	evaluate(t, e, time.Now().UTC())
+	wantMembers(t, e, "milan", "bob", "carol")
+	// An app enabled later uses milan as its admin group.
+	e.svc.Apps = func() []directory.App {
+		return []directory.App{{ID: "late", Name: "Late", Enabled: true, AccessGroup: "users_late", AdminGroup: "milan"}}
+	}
+	setCity(t, e, "dave", "Milan") // would join
+	setCity(t, e, "carol", "Rome") // leaves: removals still apply
+	for i := 0; i < 2; i++ {
+		rep := evaluate(t, e, time.Now().UTC())
+		wantMembers(t, e, "milan", "bob")
+		found := false
+		for _, msg := range rep.Errors {
+			found = found || (strings.Contains(msg, "milan") && strings.Contains(msg, "city") && strings.Contains(msg, "admin group of app late"))
+		}
+		if !found {
+			t.Errorf("run %d: errors = %v", i, rep.Errors)
+		}
+	}
+	cfg, _ := e.svc.Store.Load()
+	got, err := e.svc.DesiredFromLLDAP(ctx, cfg, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got["milan"], map[string]bool{"bob": true}) {
+		t.Errorf("desired = %v", got["milan"])
+	}
+}
+
+func TestConvertReportsDroppedExpiry(t *testing.T) {
+	e, _ := evalEnv(t)
+	e.ll.AddGroup("office", "bob", "dave")
+	until := time.Now().Add(time.Hour)
+	for _, u := range []string{"bob", "dave"} {
+		if err := e.svc.SetMemberExpiry(ctx, asRoot, "office", u, &until); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rule := mustRule(t, `city = "Milan"`)
+	p, err := e.svc.ConvertPreview(ctx, asRoot, "office", rule)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(p.ExpiryDropped, []string{"bob"}) {
+		t.Errorf("ExpiryDropped = %v", p.ExpiryDropped)
+	}
+	if err := e.svc.ConvertApply(ctx, asRoot, "office", rule, []string{"dave"}); err != nil {
+		t.Fatal(err)
+	}
+	if a := newestAudit(t, e, "group.rule"); !strings.Contains(a.Detail, "dropped_expiry=bob") {
+		t.Errorf("audit = %+v", a)
+	}
+}
+
+func TestNilGroupConfigEntry(t *testing.T) {
+	e, store := evalEnv(t)
+	if err := e.svc.CreateField(ctx, asRoot, directory.Field{Name: "site", Label: "Site", Kind: directory.FieldKindList, Values: []string{"a", "b"}}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _ := store.Load()
+	cfg.Groups["ghost"] = nil
+	if err := store.Save(cfg); err != nil {
+		t.Fatalf("Save with a nil group entry: %v", err)
+	}
+	if err := e.svc.UpdateField(ctx, asRoot, directory.Field{Name: "site", Label: "Site", Kind: directory.FieldKindList, Values: []string{"a"}}); err != nil {
+		t.Errorf("UpdateField: %v", err)
+	}
+	if err := e.svc.DeleteField(ctx, asRoot, "site", "site"); err != nil {
+		t.Errorf("DeleteField: %v", err)
+	}
+	if _, err := e.svc.DesiredFromLLDAP(ctx, &directory.Config{Groups: map[string]*directory.GroupConfig{"ghost": nil}}, time.Now()); err != nil {
+		t.Errorf("Desired: %v", err)
 	}
 }

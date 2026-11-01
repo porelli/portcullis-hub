@@ -90,6 +90,24 @@ func (s *Service) ruleGroupAllowed(name string, admin map[string]bool) bool {
 	return !builtinGroups[name] && !admin[name]
 }
 
+// addsBlocked: a guarding group (administrator, permission or app admin
+// group) whose rule uses a field delegates can edit gets no additions —
+// editing that field must never grant rights. It can happen when a group
+// becomes guarding after its rule was set (e.g. an app enabled later with
+// it as admin_group). Removals still apply. Returns the reason ("" if
+// not blocked).
+func (s *Service) addsBlocked(cfg *Config, guarding map[string]string, name string, gc *GroupConfig) string {
+	why, ok := guarding[name]
+	if !ok || gc == nil || gc.Rule == nil {
+		return ""
+	}
+	bad := nonAdminOnly(cfg, gc.Rule)
+	if len(bad) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%s is %s but its rule uses fields that aren't admin-only (%s): nobody is added until the rule uses only admin-only fields", name, why, strings.Join(bad, ", "))
+}
+
 // groupEval is the computed state of one rule group.
 type groupEval struct {
 	desired     map[string]bool // lowercase usernames
@@ -140,12 +158,22 @@ func (s *Service) evalGroup(gc *GroupConfig, d *rules.Directory, sn *snapshot, n
 func (s *Service) Desired(cfg *Config, sn *snapshot, now time.Time) map[string]map[string]bool {
 	d := ruleDirectory(cfg, sn)
 	admin := s.adminGroups()
+	guarding := s.guardingGroups(cfg)
 	out := map[string]map[string]bool{}
 	for name, gc := range cfg.Groups {
 		if gc == nil || gc.Rule == nil || !s.ruleGroupAllowed(name, admin) {
 			continue
 		}
-		out[name] = s.evalGroup(gc, d, sn, now).desired
+		desired := s.evalGroup(gc, d, sn, now).desired
+		if s.addsBlocked(cfg, guarding, name, gc) != "" {
+			// Removals only: keep just the current members.
+			for u := range desired {
+				if !memberOf(sn.groups[name], u) {
+					delete(desired, u)
+				}
+			}
+		}
+		out[name] = desired
 	}
 	return out
 }
@@ -226,6 +254,7 @@ func (s *Service) evaluateLocked(ctx context.Context, now time.Time) (*EvalRepor
 		rep.Cycles = c
 	}
 	admin := s.adminGroups()
+	guarding := s.guardingGroups(cfg)
 	newState := map[string]map[string]bool{} // replaces s.ruleState: only current rule groups
 
 	names := make([]string, 0, len(cfg.Groups))
@@ -335,6 +364,10 @@ func (s *Service) evaluateLocked(ctx context.Context, now time.Time) (*EvalRepor
 			if !ge.desired[u] && !s.protectedAccount(u) {
 				dels = append(dels, u)
 			}
+		}
+		if why := s.addsBlocked(cfg, guarding, name, gc); why != "" {
+			rep.Errors = append(rep.Errors, why)
+			adds = nil
 		}
 		sort.Strings(adds)
 		sort.Strings(dels)
