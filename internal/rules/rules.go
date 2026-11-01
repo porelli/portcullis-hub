@@ -1,6 +1,7 @@
 package rules
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 )
@@ -39,8 +40,13 @@ type Directory struct {
 	ManagerField string            // field name for manager; "" = no reports_to
 }
 
-// Format returns the canonical text representation of an expression
+// Format returns the canonical text representation of an expression.
+// Returns empty string for invalid expressions (callers should Validate first).
+// Does not panic on invalid expressions.
 func Format(e *Expr) string {
+	if e == nil {
+		return ""
+	}
 	return formatExpr(e, false)
 }
 
@@ -67,9 +73,15 @@ func formatExpr(e *Expr, inAnd bool) string {
 		}
 
 	case OpIs:
+		if len(e.Values) == 0 {
+			return ""
+		}
 		result = e.Field + " = " + quoteString(e.Values[0])
 
 	case OpIsNot:
+		if len(e.Values) == 0 {
+			return ""
+		}
 		result = e.Field + " != " + quoteString(e.Values[0])
 
 	case OpIn:
@@ -83,7 +95,12 @@ func formatExpr(e *Expr, inAnd bool) string {
 		result = e.Field + " is empty"
 
 	case OpReportsTo:
+		if len(e.Values) == 0 {
+			return ""
+		}
 		result = e.Field + " reports-to " + quoteString(e.Values[0])
+	default:
+		return ""
 	}
 
 	if e.Not {
@@ -125,8 +142,14 @@ func joinWithSep(parts []string, sep string) string {
 	return sb.String()
 }
 
-// Eval evaluates an expression against a user in the directory
+// Eval evaluates an expression against a user in the directory.
+// All value comparisons are case-insensitive.
+// Returns false for users not in the directory, regardless of Not flags (fail closed).
 func Eval(e *Expr, user string, d *Directory) bool {
+	// Fail closed: unknown users don't match anything, even negations
+	if _, exists := d.People[user]; !exists {
+		return false
+	}
 	result := evalExpr(e, user, d)
 	if e.Not {
 		return !result
@@ -135,10 +158,7 @@ func Eval(e *Expr, user string, d *Directory) bool {
 }
 
 func evalExpr(e *Expr, user string, d *Directory) bool {
-	person, exists := d.People[user]
-	if !exists {
-		return false
-	}
+	person := d.People[user]
 
 	switch e.Op {
 	case OpAll:
@@ -195,26 +215,37 @@ func evalExpr(e *Expr, user string, d *Directory) bool {
 			return false
 		}
 		target := e.Values[0]
-		// Start from user's manager
+		// User never reports to themselves
+		if strings.EqualFold(user, target) {
+			return false
+		}
+		// Start from user's manager (direct or indirect)
 		managers := person.Attrs[d.ManagerField]
 		if len(managers) == 0 {
 			return false
 		}
 		current := managers[0]
 		visited := make(map[string]bool)
+		// Prevent cycles reaching back to the evaluated user
+		visited[strings.ToLower(user)] = true
 		steps := 0
 		maxSteps := len(d.People)
 
-		// Walk up the manager chain (starting from manager's manager)
-		// Direct manager doesn't count as reports-to
+		// Walk up the manager chain (direct and indirect managers)
 		for steps < maxSteps {
-			if visited[current] {
-				// Cycle detected, stop
+			// Check if we reached the target (direct or indirect manager)
+			if strings.EqualFold(current, target) {
+				return true
+			}
+
+			currentLower := strings.ToLower(current)
+			if visited[currentLower] {
+				// Cycle detected (or reached back to user), stop
 				break
 			}
-			visited[current] = true
+			visited[currentLower] = true
 
-			// Move to next manager first (skip direct manager)
+			// Move to next manager
 			if p, ok := d.People[current]; ok {
 				nextManagers := p.Attrs[d.ManagerField]
 				if len(nextManagers) == 0 {
@@ -224,12 +255,6 @@ func evalExpr(e *Expr, user string, d *Directory) bool {
 			} else {
 				break
 			}
-
-			// Now check if we reached the target (indirect manager)
-			if strings.EqualFold(current, target) {
-				return true
-			}
-
 			steps++
 		}
 		return false
@@ -258,6 +283,122 @@ func collectFields(e *Expr, seen map[string]bool) {
 	for _, item := range e.Items {
 		collectFields(item, seen)
 	}
+}
+
+// Validate checks if an expression is valid.
+// Returns an error if the expression violates any constraints:
+// - Unknown operation
+// - Invalid field names (must match ^[a-z][a-z0-9_]{0,30}$)
+// - Wrong value counts per operation
+// - Items on non-compound operations
+// - Nesting depth exceeds 16
+// - Total nodes exceed 256
+// - Values longer than 256 bytes or containing control characters
+func Validate(e *Expr) error {
+	if e == nil {
+		return fmt.Errorf("expression is nil")
+	}
+	nodeCount := 0
+	return validateExpr(e, 0, &nodeCount)
+}
+
+func validateExpr(e *Expr, depth int, nodeCount *int) error {
+	if depth > 16 {
+		return fmt.Errorf("nesting depth exceeds 16")
+	}
+	*nodeCount++
+	if *nodeCount > 256 {
+		return fmt.Errorf("total nodes exceed 256")
+	}
+
+	// Check operation is known
+	switch e.Op {
+	case OpAll, OpAny, OpIs, OpIsNot, OpIn, OpEmpty, OpReportsTo:
+		// valid
+	default:
+		return fmt.Errorf("unknown operation: %q", e.Op)
+	}
+
+	// Compound operations (all/any)
+	if e.Op == OpAll || e.Op == OpAny {
+		if len(e.Items) == 0 {
+			return fmt.Errorf("operation %q requires non-empty Items", e.Op)
+		}
+		if e.Field != "" {
+			return fmt.Errorf("operation %q must not have Field", e.Op)
+		}
+		if len(e.Values) > 0 {
+			return fmt.Errorf("operation %q must not have Values", e.Op)
+		}
+		for _, item := range e.Items {
+			if err := validateExpr(item, depth+1, nodeCount); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	// Condition operations
+	if len(e.Items) > 0 {
+		return fmt.Errorf("operation %q must not have Items", e.Op)
+	}
+
+	// Validate field name
+	if !isValidFieldName(e.Field) {
+		return fmt.Errorf("invalid field name: %q", e.Field)
+	}
+
+	// Check value counts and content per operation
+	switch e.Op {
+	case OpIs, OpIsNot:
+		if len(e.Values) != 1 {
+			return fmt.Errorf("operation %q requires exactly 1 value, got %d", e.Op, len(e.Values))
+		}
+	case OpIn:
+		if len(e.Values) < 1 {
+			return fmt.Errorf("operation %q requires at least 1 value, got %d", e.Op, len(e.Values))
+		}
+	case OpEmpty:
+		if len(e.Values) != 0 {
+			return fmt.Errorf("operation %q requires 0 values, got %d", e.Op, len(e.Values))
+		}
+	case OpReportsTo:
+		if len(e.Values) != 1 {
+			return fmt.Errorf("operation %q requires exactly 1 value, got %d", e.Op, len(e.Values))
+		}
+	}
+
+	// Validate values
+	for _, v := range e.Values {
+		if len(v) > 256 {
+			return fmt.Errorf("value exceeds 256 bytes")
+		}
+		for _, r := range v {
+			if r < 32 && r != '\t' && r != '\n' && r != '\r' {
+				return fmt.Errorf("value contains control character")
+			}
+		}
+	}
+
+	return nil
+}
+
+func isValidFieldName(name string) bool {
+	if len(name) == 0 || len(name) > 31 {
+		return false
+	}
+	for i, r := range name {
+		if i == 0 {
+			if r < 'a' || r > 'z' {
+				return false
+			}
+		} else {
+			if !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_') {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // Cycles detects manager cycles in the directory

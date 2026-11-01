@@ -309,9 +309,9 @@ func TestReportsTo(t *testing.T) {
 		rule     string
 		expected bool
 	}{
-		{"c", `manager reports-to "a"`, true},
-		{"c", `manager reports-to "b"`, false}, // b is direct manager, not indirect
-		{"b", `manager reports-to "a"`, false}, // a is direct manager, not indirect
+		{"c", `manager reports-to "a"`, true},  // indirect manager
+		{"c", `manager reports-to "b"`, true},  // direct manager (directly or indirectly)
+		{"b", `manager reports-to "a"`, true},  // direct manager (directly or indirectly)
 		{"a", `manager reports-to "a"`, false}, // user never their own report
 		{"a", `manager reports-to "b"`, false}, // a has no manager
 	}
@@ -351,14 +351,22 @@ func TestReportsToCycle(t *testing.T) {
 	}
 
 	// Test that reports-to terminates with cycles
-	expr, err := Parse(`manager reports-to "b"`)
+	// a reports-to b should be true (b is a's direct manager)
+	exprB, err := Parse(`manager reports-to "b"`)
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}
+	if !Eval(exprB, "a", dir) {
+		t.Errorf("Eval(a, reports-to b) should be true (direct manager)")
+	}
 
-	// a reports-to b should be true (b is a's manager's manager in the cycle)
-	if !Eval(expr, "a", dir) {
-		t.Errorf("Eval(a, reports-to b) should be true")
+	// a reports-to a should be false (never report to self)
+	exprA, err := Parse(`manager reports-to "a"`)
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	if Eval(exprA, "a", dir) {
+		t.Errorf("Eval(a, reports-to a) should be false (never self)")
 	}
 
 	// Test Cycles function
@@ -422,6 +430,279 @@ func TestFields(t *testing.T) {
 			fields := Fields(expr)
 			if !reflect.DeepEqual(fields, tt.expected) {
 				t.Errorf("Fields(%q) = %v, want %v", tt.rule, fields, tt.expected)
+			}
+		})
+	}
+}
+
+func TestEvalUnknownUser(t *testing.T) {
+	// Test that unknown users return false even with Not flags (fail closed)
+	dir := &Directory{
+		People: map[string]Person{
+			"alice": {
+				User: "alice",
+				Attrs: map[string][]string{
+					"department": {"HR"},
+				},
+			},
+		},
+		ManagerField: "manager",
+	}
+
+	tests := []struct {
+		name string
+		rule string
+	}{
+		{"positive condition", `department = "HR"`},
+		{"negation", `not department = "HR"`},
+		{"double negation", `not not department = "HR"`},
+		{"is empty", `department is empty`},
+		{"not is empty", `not department is empty`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			expr, err := Parse(tt.rule)
+			if err != nil {
+				t.Fatalf("Parse(%q) failed: %v", tt.rule, err)
+			}
+			// Unknown user must return false regardless of Not flags
+			if Eval(expr, "unknown", dir) {
+				t.Errorf("Eval(%q, unknown) should be false (fail closed)", tt.rule)
+			}
+		})
+	}
+}
+
+func TestValidate(t *testing.T) {
+	tests := []struct {
+		name    string
+		expr    *Expr
+		wantErr bool
+	}{
+		{
+			name:    "nil expression",
+			expr:    nil,
+			wantErr: true,
+		},
+		{
+			name: "unknown op",
+			expr: &Expr{
+				Op:    "unknown",
+				Field: "city",
+			},
+			wantErr: true,
+		},
+		{
+			name: "invalid field name - uppercase",
+			expr: &Expr{
+				Op:     OpIs,
+				Field:  "City",
+				Values: []string{"Milan"},
+			},
+			wantErr: true,
+		},
+		{
+			name: "invalid field name - starts with digit",
+			expr: &Expr{
+				Op:     OpIs,
+				Field:  "9city",
+				Values: []string{"Milan"},
+			},
+			wantErr: true,
+		},
+		{
+			name: "invalid field name - too long",
+			expr: &Expr{
+				Op:     OpIs,
+				Field:  "this_field_name_is_way_too_long_for_validation",
+				Values: []string{"Milan"},
+			},
+			wantErr: true,
+		},
+		{
+			name: "is with wrong value count",
+			expr: &Expr{
+				Op:     OpIs,
+				Field:  "city",
+				Values: []string{"Milan", "Turin"},
+			},
+			wantErr: true,
+		},
+		{
+			name: "is_not with no values",
+			expr: &Expr{
+				Op:     OpIsNot,
+				Field:  "city",
+				Values: []string{},
+			},
+			wantErr: true,
+		},
+		{
+			name: "in with no values",
+			expr: &Expr{
+				Op:     OpIn,
+				Field:  "city",
+				Values: []string{},
+			},
+			wantErr: true,
+		},
+		{
+			name: "empty with values",
+			expr: &Expr{
+				Op:     OpEmpty,
+				Field:  "city",
+				Values: []string{"Milan"},
+			},
+			wantErr: true,
+		},
+		{
+			name: "reports_to with wrong value count",
+			expr: &Expr{
+				Op:     OpReportsTo,
+				Field:  "manager",
+				Values: []string{"alice", "bob"},
+			},
+			wantErr: true,
+		},
+		{
+			name: "all with empty items",
+			expr: &Expr{
+				Op:    OpAll,
+				Items: []*Expr{},
+			},
+			wantErr: true,
+		},
+		{
+			name: "any with field",
+			expr: &Expr{
+				Op:    OpAny,
+				Field: "city",
+				Items: []*Expr{
+					{Op: OpIs, Field: "city", Values: []string{"Milan"}},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "condition with items",
+			expr: &Expr{
+				Op:     OpIs,
+				Field:  "city",
+				Values: []string{"Milan"},
+				Items: []*Expr{
+					{Op: OpIs, Field: "dept", Values: []string{"Sales"}},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "value too long",
+			expr: &Expr{
+				Op:     OpIs,
+				Field:  "city",
+				Values: []string{strings.Repeat("a", 257)},
+			},
+			wantErr: true,
+		},
+		{
+			name: "value with control character",
+			expr: &Expr{
+				Op:     OpIs,
+				Field:  "city",
+				Values: []string{"Milan\x00"},
+			},
+			wantErr: true,
+		},
+		{
+			name: "valid simple",
+			expr: &Expr{
+				Op:     OpIs,
+				Field:  "city",
+				Values: []string{"Milan"},
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid compound",
+			expr: &Expr{
+				Op: OpAll,
+				Items: []*Expr{
+					{Op: OpIs, Field: "city", Values: []string{"Milan"}},
+					{Op: OpIsNot, Field: "department", Values: []string{"HR"}},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid with underscore and digits",
+			expr: &Expr{
+				Op:     OpIs,
+				Field:  "cost_center_2",
+				Values: []string{"CC123"},
+			},
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := Validate(tt.expr)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateDepthAndNodes(t *testing.T) {
+	// Test depth limit
+	deepExpr := &Expr{Op: OpIs, Field: "city", Values: []string{"Milan"}}
+	for i := 0; i < 17; i++ {
+		deepExpr = &Expr{Op: OpAll, Items: []*Expr{deepExpr}}
+	}
+	if err := Validate(deepExpr); err == nil {
+		t.Error("Validate() should fail for depth > 16")
+	}
+
+	// Test node count limit
+	manyItems := make([]*Expr, 257)
+	for i := 0; i < 257; i++ {
+		manyItems[i] = &Expr{Op: OpIs, Field: "city", Values: []string{"Milan"}}
+	}
+	largeExpr := &Expr{Op: OpAll, Items: manyItems}
+	if err := Validate(largeExpr); err == nil {
+		t.Error("Validate() should fail for > 256 total nodes")
+	}
+}
+
+func TestParseFormatRoundTripAdditional(t *testing.T) {
+	tests := []struct {
+		name      string
+		text      string
+		canonical string
+	}{
+		{
+			name:      "negated compound",
+			text:      `not (city = "Milan" and department = "Sales")`,
+			canonical: `not (city = "Milan" and department = "Sales")`,
+		},
+		{
+			name:      "double negation",
+			text:      `not not city = "Milan"`,
+			canonical: `city = "Milan"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			expr, err := Parse(tt.text)
+			if err != nil {
+				t.Fatalf("Parse(%q) failed: %v", tt.text, err)
+			}
+			formatted := Format(expr)
+			if formatted != tt.canonical {
+				t.Errorf("Format(Parse(%q)) = %q, want %q", tt.text, formatted, tt.canonical)
 			}
 		})
 	}

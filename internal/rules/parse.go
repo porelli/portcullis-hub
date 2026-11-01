@@ -219,7 +219,8 @@ func (p *parser) expect(typ tokenType) error {
 	return p.advance()
 }
 
-// Parse parses a rule text into an expression tree
+// Parse parses a rule text into an expression tree.
+// Returns only validated expressions.
 func Parse(text string) (*Expr, error) {
 	if strings.TrimSpace(text) == "" {
 		return nil, &parseError{1, "empty input"}
@@ -234,6 +235,10 @@ func Parse(text string) (*Expr, error) {
 	}
 	if p.tok.typ != tokEOF {
 		return nil, &parseError{p.tok.col, "unexpected input after expression"}
+	}
+	// Validate the parsed expression
+	if err := Validate(expr); err != nil {
+		return nil, &parseError{1, err.Error()}
 	}
 	return expr, nil
 }
@@ -299,6 +304,7 @@ func (p *parser) parseUnary() (*Expr, error) {
 		if err != nil {
 			return nil, err
 		}
+		// Toggle Not flag - double negation cancels out
 		expr.Not = !expr.Not
 		return expr, nil
 	}
