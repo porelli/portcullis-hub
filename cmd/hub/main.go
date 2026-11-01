@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -29,6 +30,18 @@ func env(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// openDirectoryStore returns the store of directory.yaml under dataDir
+// after loading it once: a corrupt file (or an unknown version) is an
+// error, so the Hub refuses to start rather than run without its rules,
+// exceptions, expiries and permissions. A missing file is fine (empty).
+func openDirectoryStore(dataDir string) (*directory.Store, error) {
+	st := &directory.Store{Path: filepath.Join(dataDir, "directory.yaml")}
+	if _, err := st.Load(); err != nil {
+		return nil, fmt.Errorf("directory.yaml is unreadable (fix or restore it; the Hub won't run without its rules and expiries): %w", err)
+	}
+	return st, nil
 }
 
 func main() {
@@ -82,13 +95,17 @@ func main() {
 	if err := invites.Available(); err != nil {
 		log.Printf("invite links disabled (password fallback only): %v", err)
 	}
+	dirStore, err := openDirectoryStore(cfg.DataDir)
+	if err != nil {
+		log.Fatalf("refusing to start: %v", err)
+	}
 	dir := &directory.Service{
 		LLDAP:   ll,
 		KC:      kc,
 		Invites: invites,
 		Audit:   &directory.AuditLog{Path: filepath.Join(cfg.DataDir, "audit.jsonl")},
 		Apps:    h.DirectoryApps,
-		Store:   &directory.Store{Path: filepath.Join(cfg.DataDir, "directory.yaml")},
+		Store:   dirStore,
 		// Same administrator groups core's invite API refuses (§9.4),
 		// re-read on use so a map edit needs no restart.
 		AdminGroups: func() map[string]bool {
