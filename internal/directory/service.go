@@ -62,7 +62,7 @@ type Keycloak interface {
 	RequirePasskey(ctx context.Context, username string) error
 	SetUserRequiredActions(ctx context.Context, username string, actions []string) error
 	RemovePasskeys(ctx context.Context, username string, requireNew bool) (int, error)
-	PasskeyCount(ctx context.Context, username string) (int, error)
+	CredentialCount(ctx context.Context, username string) (int, error)
 	LogoutUser(ctx context.Context, username string) error
 	DeleteUserByID(ctx context.Context, id string) error
 }
@@ -877,11 +877,17 @@ func (s *Service) DeleteUser(ctx context.Context, c *Caller, username, confirm s
 		if err := s.checkNotLastAdmin(sn, u.ID); err != nil {
 			return err
 		}
-		// Load directory.yaml first: the tombstone must be written.
-		var cfg *Config
+		// Tombstone first: if it can't be saved, nothing is deleted. If
+		// the LLDAP delete then fails, the tombstone stays (harmless for a
+		// name that still exists).
 		if s.Store != nil {
-			if cfg, err = s.Store.Load(); err != nil {
-				return &Error{Status: http.StatusServiceUnavailable, Msg: "directory.yaml: " + err.Error()}
+			cfg, err := s.Store.Load()
+			if err == nil {
+				forgetUser(cfg, u.ID, time.Now())
+				err = s.Store.Save(cfg)
+			}
+			if err != nil {
+				return &Error{Status: http.StatusServiceUnavailable, Msg: "directory.yaml (tombstone): " + err.Error()}
 			}
 		}
 		kcID := ""
@@ -913,13 +919,6 @@ func (s *Service) DeleteUser(ctx context.Context, c *Caller, username, confirm s
 		if kcErr != "" {
 			detail = "keycloak_copy=FAILED " + kcErr
 			res.Warnings = append(res.Warnings, fmt.Sprintf("%s was deleted from LLDAP, but removing the Keycloak copy failed (%s); it is listed under \"Stale Keycloak records\" — remove it there", u.ID, kcErr))
-		}
-		if cfg != nil {
-			forgetUser(cfg, u.ID, time.Now())
-			if err := s.Store.Save(cfg); err != nil {
-				detail += " tombstone=FAILED"
-				res.Warnings = append(res.Warnings, fmt.Sprintf("%s was deleted, but saving directory.yaml (tombstone, exceptions, expiries) failed: %v", u.ID, err))
-			}
 		}
 		return nil
 	})
@@ -1117,8 +1116,21 @@ func (s *Service) SendInvite(ctx context.Context, c *Caller, username string) (*
 		if err := s.checkInvitable(sn, u.ID); err != nil {
 			return err
 		}
-		if err := s.checkKeyless(ctx, c, u.ID); err != nil {
-			return err
+		if !c.Admin {
+			// Delegates re-invite only accounts a delegate created that
+			// have no credential yet (see checkKeyless).
+			cfg := &Config{}
+			if s.Store != nil {
+				if cfg, err = s.Store.Load(); err != nil {
+					return &Error{Status: http.StatusServiceUnavailable, Msg: "directory.yaml: " + err.Error()}
+				}
+			}
+			if cfg.CreatedBy[strings.ToLower(u.ID)] == "" {
+				return forbidden("not allowed: only an admin can re-invite %s", u.ID)
+			}
+			if err := s.checkKeyless(ctx, c, u.ID); err != nil {
+				return err
+			}
 		}
 		inv, err := s.newInvite(ctx, u.ID)
 		res.Invite = inv

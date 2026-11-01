@@ -228,7 +228,8 @@ func TestDirectoryDelegates(t *testing.T) {
 		{"hilda", "POST", "/api/directory/users", `{"username":"nina","email":"nina@example.org"}`, 200},
 		{"hilda", "POST", "/api/directory/users", `{"username":"otto","email":"otto@example.org","groups":["users_demo"]}`, 400},
 		{"hilda", "POST", "/api/directory/users", `{"username":"otto","email":"otto@example.org","onboarding":"password","generate_password":true}`, 403},
-		{"hilda", "POST", "/api/directory/users/bob/invite", `{}`, 200},
+		{"hilda", "POST", "/api/directory/users/bob/invite", `{}`, 403},  // not created by a delegate
+		{"hilda", "POST", "/api/directory/users/nina/invite", `{}`, 200}, // hilda created nina; no credentials yet
 		{"hilda", "DELETE", "/api/directory/users/bob", `{"confirm":"bob"}`, 403},
 		{"hilda", "POST", "/api/directory/users/bob/password", `{"generate":true}`, 403},
 		{"hilda", "POST", "/api/directory/groups/users_demo/members", `{"username":"bob"}`, 403},

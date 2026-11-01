@@ -785,10 +785,11 @@ func (c *Client) addActionLocked(ctx context.Context, tok string, u map[string]i
 	return c.putUser(ctx, tok, u)
 }
 
-// PasskeyCount returns how many WebAuthn credentials username has; 0 for
-// a user Keycloak doesn't know (an LDAP user may be imported by the
-// lookup). A failed lookup is an error, never 0.
-func (c *Client) PasskeyCount(ctx context.Context, username string) (int, error) {
+// CredentialCount returns how many credentials of any type (password,
+// OTP, WebAuthn, ...) username has; 0 for a user Keycloak doesn't know (an
+// LDAP user may be imported by the lookup). A failed lookup is an error,
+// never 0.
+func (c *Client) CredentialCount(ctx context.Context, username string) (int, error) {
 	tok, err := c.token(ctx)
 	if err != nil {
 		return 0, err
@@ -802,13 +803,7 @@ func (c *Client) PasskeyCount(ctx context.Context, username string) (int, error)
 	if err != nil {
 		return 0, err
 	}
-	n := 0
-	for _, cr := range creds {
-		if passkeyTypes[cr.Type] {
-			n++
-		}
-	}
-	return n, nil
+	return len(creds), nil
 }
 
 // RemovePasskeys deletes every WebAuthn credential of username, adds

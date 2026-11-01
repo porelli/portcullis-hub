@@ -165,23 +165,25 @@ func (s *Service) checkDelegateTarget(c *Caller, target string, sn *snapshot, cf
 	return nil
 }
 
-// checkKeyless: a delegate may invite only someone without a passkey —
-// an invite for an account that already has one would hand the delegate
-// a working sign-in to it. Keycloak missing or failing refuses (fail
-// closed). Admins aren't limited.
+// checkKeyless: a delegate may invite only someone with no Keycloak
+// credential of any type (password, OTP, passkey, ...) — an invite for an
+// account that can already sign in would hand the delegate that account.
+// Keycloak missing or failing refuses (fail closed). Admins aren't
+// limited. Client certificates aren't Keycloak credentials: see the
+// CLAUDE.md permissions rule.
 func (s *Service) checkKeyless(ctx context.Context, c *Caller, user string) error {
 	if c.Admin {
 		return nil
 	}
 	if s.KC == nil {
-		return forbidden("not allowed: Keycloak admin API not configured, so %s's passkeys can't be checked; ask an administrator", user)
+		return forbidden("not allowed: Keycloak admin API not configured, so %s's credentials can't be checked; ask an administrator", user)
 	}
-	n, err := s.KC.PasskeyCount(ctx, user)
+	n, err := s.KC.CredentialCount(ctx, user)
 	if err != nil {
-		return forbidden("not allowed: couldn't check %s's passkeys (%v); ask an administrator", user, err)
+		return forbidden("not allowed: couldn't check %s's credentials (%v); ask an administrator", user, err)
 	}
 	if n > 0 {
-		return forbidden("not allowed: %s already has a passkey; only an administrator can send them an invite", user)
+		return forbidden("not allowed: %s already has sign-in credentials; only an admin can send them an invite", user)
 	}
 	return nil
 }

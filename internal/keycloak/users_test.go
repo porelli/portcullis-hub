@@ -116,23 +116,25 @@ func TestUserStatusesPerUserErrors(t *testing.T) {
 	}
 }
 
-func TestPasskeyCount(t *testing.T) {
+func TestCredentialCount(t *testing.T) {
 	f := kctest.New(t)
 	f.Import("alice", kctest.Credential{ID: "p1", Type: "password"}, kctest.Credential{ID: "w1", Type: "webauthn-passwordless"}, kctest.Credential{ID: "w2", Type: "webauthn"})
 	f.Import("bob", kctest.Credential{ID: "p2", Type: "password"})
+	f.Import("olga", kctest.Credential{ID: "o", Type: "otp"})
+	f.Import("nora")
 	f.Import("gone").CredentialsStatus = 500
 	c := keycloak.New(f.HTTP.URL, "admin", "admin")
 	ctx := context.Background()
-	for user, want := range map[string]int{"alice": 2, "bob": 0, "nobody": 0} {
-		if n, err := c.PasskeyCount(ctx, user); err != nil || n != want {
-			t.Errorf("PasskeyCount(%s) = %d, %v; want %d", user, n, err, want)
+	for user, want := range map[string]int{"alice": 3, "bob": 1, "olga": 1, "nora": 0, "nobody": 0} {
+		if n, err := c.CredentialCount(ctx, user); err != nil || n != want {
+			t.Errorf("CredentialCount(%s) = %d, %v; want %d", user, n, err, want)
 		}
 	}
-	if _, err := c.PasskeyCount(ctx, "gone"); err == nil {
+	if _, err := c.CredentialCount(ctx, "gone"); err == nil {
 		t.Error("credential lookup failure not reported")
 	}
 	f.SetDown(true)
-	if _, err := c.PasskeyCount(ctx, "bob"); err == nil {
+	if _, err := c.CredentialCount(ctx, "bob"); err == nil {
 		t.Error("outage not reported")
 	}
 }

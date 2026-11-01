@@ -200,8 +200,8 @@ func TestDelegateAllowed(t *testing.T) {
 			}
 		}
 	}
-	if res, err := e.svc.SendInvite(ctx, ivy, "bob"); err != nil || res.Invite == nil {
-		t.Errorf("inviter re-invites bob: %v", err)
+	if res, err := e.svc.SendInvite(ctx, ivy, "nina"); err != nil || res.Invite == nil {
+		t.Errorf("inviter re-invites nina (delegate-created, no credentials): %v", err)
 	}
 	if _, err := e.svc.DeleteUser(ctx, rex, "nina", "nina"); err != nil {
 		t.Errorf("remover removes nina: %v", err)
@@ -220,55 +220,78 @@ func TestDelegateAllowed(t *testing.T) {
 	}
 }
 
-// TestDelegateInviteKeyless: delegates only invite people with no passkey
-// (an invite would hand them a working account); Keycloak trouble fails
-// closed. Admins are unaffected.
+// TestDelegateInviteKeyless: delegates re-invite only accounts a delegate
+// created that have no Keycloak credential of any kind (an invite would
+// hand them a working account); Keycloak trouble fails closed. Admins are
+// unaffected.
 func TestDelegateInviteKeyless(t *testing.T) {
 	e := delegateEnv(t)
 	ivy := callerFor(t, e, "ivy")
-	e.kc.Import("bob", kctest.Credential{ID: "w", Type: "webauthn-passwordless"})
 	e.ll.AddUser("carl", "carl@example.org", "", "")
+	e.ll.AddUser("olga", "olga@example.org", "", "")
+	e.ll.AddUser("dina", "dina@example.org", "", "")
+	e.ll.AddUser("nora", "nora@example.org", "", "")
+	e.kc.Import("bob", kctest.Credential{ID: "w", Type: "webauthn-passwordless"})
 	e.kc.Import("carl", kctest.Credential{ID: "p", Type: "password"})
-	e.ll.AddUser("dina", "dina@example.org", "", "") // not in Keycloak yet
-	e.kc.Import("stale", kctest.Credential{ID: "w2", Type: "webauthn"})
+	e.kc.Import("olga", kctest.Credential{ID: "o", Type: "otp"})
+	e.kc.Import("nora")
+	e.kc.Import("stale", kctest.Credential{ID: "c", Type: "otp"})
+	cfg, _ := e.svc.Store.Load()
+	for _, u := range []string{"bob", "carl", "olga", "dina"} { // not nora: admin-created
+		cfg.CreatedBy[u] = "ivy"
+	}
+	if err := e.svc.Store.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
 	r := func(_ *directory.Result, err error) error { return err }
+	refusedWant := 0
+	refused := func(name string, err error) {
+		t.Helper()
+		refusedWant++
+		if status(err) != 403 {
+			t.Errorf("%s = %v (status %d), want 403", name, err, status(err))
+		}
+	}
 
-	if err := r(e.svc.SendInvite(ctx, ivy, "bob")); status(err) != 403 {
-		t.Errorf("delegate re-invites a user with a passkey = %v", err)
+	refused("passkey", r(e.svc.SendInvite(ctx, ivy, "bob")))
+	refused("password credential", r(e.svc.SendInvite(ctx, ivy, "carl")))
+	refused("otp credential", r(e.svc.SendInvite(ctx, ivy, "olga")))
+	err := r(e.svc.SendInvite(ctx, ivy, "nora"))
+	refused("admin-created, no credentials", err)
+	if err == nil || !strings.Contains(err.Error(), "only an admin can re-invite nora") {
+		t.Errorf("message = %v", err)
 	}
-	if err := r(e.svc.CreateUser(ctx, ivy, directory.CreateRequest{Username: "stale", Email: "stale@example.org"})); status(err) != 403 || e.ll.HasUser("stale") {
-		t.Errorf("delegate creates over a Keycloak copy with a passkey = %v", err)
-	}
-	if err := r(e.svc.SendInvite(ctx, ivy, "carl")); err != nil {
-		t.Errorf("delegate invites carl (password only) = %v", err)
+	refused("create over a Keycloak copy with a credential", r(e.svc.CreateUser(ctx, ivy, directory.CreateRequest{Username: "stale", Email: "stale@example.org"})))
+	if e.ll.HasUser("stale") {
+		t.Error("stale created")
 	}
 	if err := r(e.svc.SendInvite(ctx, ivy, "dina")); err != nil {
-		t.Errorf("delegate invites dina (not in Keycloak) = %v", err)
+		t.Errorf("delegate-created, no credentials = %v", err)
 	}
 	if err := r(e.svc.SendInvite(ctx, asRoot, "bob")); err != nil {
 		t.Errorf("admin re-invites bob = %v", err)
 	}
-	e.kc.SetDown(true)
-	if err := r(e.svc.SendInvite(ctx, ivy, "carl")); status(err) != 403 {
-		t.Errorf("Keycloak down = %v", err)
+	if err := r(e.svc.SendInvite(ctx, asRoot, "nora")); err != nil {
+		t.Errorf("admin re-invites nora = %v", err)
 	}
-	if err := r(e.svc.CreateUser(ctx, ivy, directory.CreateRequest{Username: "erin", Email: "erin@example.org"})); status(err) != 403 || e.ll.HasUser("erin") {
-		t.Errorf("Keycloak down, create = %v", err)
+	e.kc.SetDown(true)
+	refused("Keycloak down", r(e.svc.SendInvite(ctx, ivy, "dina")))
+	refused("Keycloak down, create", r(e.svc.CreateUser(ctx, ivy, directory.CreateRequest{Username: "erin", Email: "erin@example.org"})))
+	if e.ll.HasUser("erin") {
+		t.Error("erin created")
 	}
 	e.kc.SetDown(false)
 	e.svc.KC = nil
-	if err := r(e.svc.SendInvite(ctx, ivy, "carl")); status(err) != 403 {
-		t.Errorf("no Keycloak = %v", err)
-	}
+	refused("no Keycloak", r(e.svc.SendInvite(ctx, ivy, "dina")))
 	entries, _ := e.svc.Recent(100)
-	refused := 0
+	n := 0
 	for _, en := range entries {
 		if en.Result == "refused" {
-			refused++
+			n++
 		}
 	}
-	if refused != 5 {
-		t.Errorf("refused entries = %d, want 5: %+v", refused, entries)
+	if n != refusedWant {
+		t.Errorf("refused entries = %d, want %d: %+v", n, refusedWant, entries)
 	}
 }
 
@@ -334,6 +357,20 @@ func TestTombstones(t *testing.T) {
 	cfg, _ = e.svc.Store.Load()
 	if _, ok := cfg.Deleted["bob"]; ok {
 		t.Error("tombstone kept after an admin re-created bob")
+	}
+}
+
+// TestDeleteTombstoneFirst: the tombstone is saved before LLDAP is
+// touched; if it can't be, nothing is deleted.
+func TestDeleteTombstoneFirst(t *testing.T) {
+	e := delegateEnv(t)
+	e.svc.Store = &directory.Store{Path: filepath.Join(t.TempDir(), "missing-dir", "directory.yaml")}
+	if _, err := e.svc.DeleteUser(ctx, asRoot, "bob", "bob"); status(err) != 503 || !e.ll.HasUser("bob") {
+		t.Errorf("delete with an unwritable directory.yaml = %v (bob exists: %v)", err, e.ll.HasUser("bob"))
+	}
+	entries, _ := e.svc.Recent(1)
+	if len(entries) != 1 || entries[0].Action != "user.delete" || entries[0].Result == "ok" {
+		t.Errorf("audit = %+v", entries)
 	}
 }
 
