@@ -47,53 +47,6 @@ type GroupConfig struct {
 	Rule       *rules.Expr          `yaml:"-"`                    // nil = manual group
 	Exceptions []Exception          `yaml:"exceptions,omitempty"` // rule groups only
 	Expiry     map[string]time.Time `yaml:"expiry,omitempty"`     // manual groups: username -> until
-	ruleText   string               `yaml:"rule,omitempty"`       // internal: rule as text
-}
-
-// MarshalYAML customizes YAML encoding to serialize Rule as text.
-func (gc *GroupConfig) MarshalYAML() (interface{}, error) {
-	type Alias GroupConfig
-	aux := struct {
-		*Alias
-		RuleText string `yaml:"rule,omitempty"`
-	}{
-		Alias: (*Alias)(gc),
-	}
-
-	if gc.Rule != nil {
-		text := rules.Format(gc.Rule)
-		if text == "" {
-			return nil, fmt.Errorf("rule failed to format")
-		}
-		aux.RuleText = text
-	}
-
-	return &aux, nil
-}
-
-// UnmarshalYAML customizes YAML decoding to parse Rule from text.
-func (gc *GroupConfig) UnmarshalYAML(node *yaml.Node) error {
-	type Alias GroupConfig
-	aux := struct {
-		*Alias
-		RuleText string `yaml:"rule,omitempty"`
-	}{
-		Alias: (*Alias)(gc),
-	}
-
-	if err := node.Decode(&aux); err != nil {
-		return err
-	}
-
-	if aux.RuleText != "" {
-		expr, err := rules.Parse(aux.RuleText)
-		if err != nil {
-			return fmt.Errorf("parse rule: %w", err)
-		}
-		gc.Rule = expr
-	}
-
-	return nil
 }
 
 // Config represents the directory configuration.
@@ -129,24 +82,44 @@ func (s *Store) Load() (*Config, error) {
 		return nil, fmt.Errorf("read %s: %w", s.Path, err)
 	}
 
-	var cfg Config
+	// Decode into raw intermediate structs with KnownFields(true)
+	type rawGroupConfig struct {
+		RuleText   string               `yaml:"rule,omitempty"`
+		Exceptions []Exception          `yaml:"exceptions,omitempty"`
+		Expiry     map[string]time.Time `yaml:"expiry,omitempty"`
+	}
+	type rawConfig struct {
+		Version     int                        `yaml:"version"`
+		Fields      []Field                    `yaml:"fields"`
+		Groups      map[string]*rawGroupConfig `yaml:"groups"`
+		Permissions map[string]string          `yaml:"permissions"`
+		CreatedBy   map[string]string          `yaml:"created_by"`
+	}
+
+	var raw rawConfig
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
-	if err := dec.Decode(&cfg); err != nil {
+	if err := dec.Decode(&raw); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", s.Path, err)
 	}
 
 	// Check version
-	if cfg.Version != 1 {
-		return nil, fmt.Errorf("unsupported version: %d", cfg.Version)
+	if raw.Version != 1 {
+		return nil, fmt.Errorf("unsupported version: %d", raw.Version)
+	}
+
+	// Convert raw to real config
+	cfg := &Config{
+		Version:     raw.Version,
+		Fields:      raw.Fields,
+		Groups:      make(map[string]*GroupConfig),
+		Permissions: raw.Permissions,
+		CreatedBy:   raw.CreatedBy,
 	}
 
 	// Initialize nil maps
 	if cfg.Fields == nil {
 		cfg.Fields = []Field{}
-	}
-	if cfg.Groups == nil {
-		cfg.Groups = map[string]*GroupConfig{}
 	}
 	if cfg.Permissions == nil {
 		cfg.Permissions = map[string]string{}
@@ -155,35 +128,109 @@ func (s *Store) Load() (*Config, error) {
 		cfg.CreatedBy = map[string]string{}
 	}
 
-	// Validate parsed rules
-	for groupName, gc := range cfg.Groups {
-		if gc.Rule != nil {
-			// Validate the parsed rule
-			if err := rules.Validate(gc.Rule); err != nil {
-				return nil, fmt.Errorf("invalid rule for group %q in %s: %w", groupName, s.Path, err)
+	// Parse rules and normalize times
+	for groupName, rawGC := range raw.Groups {
+		gc := &GroupConfig{
+			Exceptions: rawGC.Exceptions,
+			Expiry:     rawGC.Expiry,
+		}
+
+		// Parse rule if present
+		if rawGC.RuleText != "" {
+			expr, err := rules.Parse(rawGC.RuleText)
+			if err != nil {
+				return nil, fmt.Errorf("%s: group %q: rule: %w", s.Path, groupName, err)
+			}
+			if err := rules.Validate(expr); err != nil {
+				return nil, fmt.Errorf("%s: group %q: rule: %w", s.Path, groupName, err)
+			}
+			gc.Rule = expr
+		}
+
+		// Normalize exception times to UTC
+		for i := range gc.Exceptions {
+			gc.Exceptions[i].At = gc.Exceptions[i].At.UTC()
+			if gc.Exceptions[i].Until != nil {
+				utc := gc.Exceptions[i].Until.UTC()
+				gc.Exceptions[i].Until = &utc
 			}
 		}
+
+		// Normalize expiry times to UTC
+		if gc.Expiry != nil {
+			for user, t := range gc.Expiry {
+				gc.Expiry[user] = t.UTC()
+			}
+		}
+
+		cfg.Groups[groupName] = gc
 	}
 
-	return &cfg, nil
+	return cfg, nil
 }
 
 // Save writes the directory configuration to disk atomically.
 func (s *Store) Save(cfg *Config) error {
-	// Validate rules before saving
+	// Convert to raw config with normalized times and rule text
+	type rawGroupConfig struct {
+		RuleText   string               `yaml:"rule,omitempty"`
+		Exceptions []Exception          `yaml:"exceptions,omitempty"`
+		Expiry     map[string]time.Time `yaml:"expiry,omitempty"`
+	}
+	type rawConfig struct {
+		Version     int                        `yaml:"version"`
+		Fields      []Field                    `yaml:"fields"`
+		Groups      map[string]*rawGroupConfig `yaml:"groups"`
+		Permissions map[string]string          `yaml:"permissions"`
+		CreatedBy   map[string]string          `yaml:"created_by"`
+	}
+
+	raw := rawConfig{
+		Version:     cfg.Version,
+		Fields:      cfg.Fields,
+		Groups:      make(map[string]*rawGroupConfig),
+		Permissions: cfg.Permissions,
+		CreatedBy:   cfg.CreatedBy,
+	}
+
+	// Convert groups and normalize times
 	for groupName, gc := range cfg.Groups {
+		rawGC := &rawGroupConfig{
+			Exceptions: make([]Exception, len(gc.Exceptions)),
+			Expiry:     make(map[string]time.Time),
+		}
+
+		// Format rule if present
 		if gc.Rule != nil {
 			if err := rules.Validate(gc.Rule); err != nil {
 				return fmt.Errorf("invalid rule for group %q: %w", groupName, err)
 			}
-			// Check that Format produces non-empty output
-			if rules.Format(gc.Rule) == "" {
+			text := rules.Format(gc.Rule)
+			if text == "" {
 				return fmt.Errorf("rule for group %q cannot be formatted", groupName)
 			}
+			rawGC.RuleText = text
 		}
+
+		// Normalize exception times to UTC
+		for i, exc := range gc.Exceptions {
+			rawGC.Exceptions[i] = exc
+			rawGC.Exceptions[i].At = exc.At.UTC()
+			if exc.Until != nil {
+				utc := exc.Until.UTC()
+				rawGC.Exceptions[i].Until = &utc
+			}
+		}
+
+		// Normalize expiry times to UTC
+		for user, t := range gc.Expiry {
+			rawGC.Expiry[user] = t.UTC()
+		}
+
+		raw.Groups[groupName] = rawGC
 	}
 
-	data, err := yaml.Marshal(cfg)
+	data, err := yaml.Marshal(raw)
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)
 	}

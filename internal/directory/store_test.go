@@ -167,3 +167,202 @@ func anySubstring(s, substr string) bool {
 	}
 	return false
 }
+
+func TestStoreUnknownKeyRefuses(t *testing.T) {
+	tests := []struct {
+		name string
+		yaml string
+		want string // substring that should appear in error
+	}{
+		{
+			name: "unknown key under group",
+			yaml: `version: 1
+groups:
+  sales:
+    exceptionsss:
+      - user: alice
+`,
+			want: "exceptionsss",
+		},
+		{
+			name: "unknown key under exception",
+			yaml: `version: 1
+groups:
+  sales:
+    exceptions:
+      - user: alice
+        reasonnn: "typo"
+        by: bob
+        include: false
+        at: 2026-11-01T12:00:00Z
+`,
+			want: "reasonnn",
+		},
+		{
+			name: "unknown key under field",
+			yaml: `version: 1
+fields:
+  - name: department
+    label: Department
+    kindd: text
+`,
+			want: "kindd",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "test.yaml")
+			store := &Store{Path: path}
+
+			if err := os.WriteFile(path, []byte(tt.yaml), 0600); err != nil {
+				t.Fatalf("failed to write file: %v", err)
+			}
+
+			_, err := store.Load()
+			if err == nil {
+				t.Fatal("Load should fail on unknown key")
+			}
+
+			if !contains(err.Error(), tt.want) {
+				t.Errorf("error should mention %q, got: %v", tt.want, err)
+			}
+		})
+	}
+}
+
+func TestStoreTimesNormalizedToUTC(t *testing.T) {
+	dir := t.TempDir()
+	store := &Store{Path: filepath.Join(dir, "directory.yaml")}
+
+	// Create times in non-UTC zone
+	cet := time.FixedZone("CET", 3600)
+	expiryTime := time.Date(2027, 3, 31, 1, 0, 0, 0, cet)     // 01:00 CET = 00:00 UTC
+	exceptionTime := time.Date(2026, 11, 1, 13, 0, 0, 0, cet) // 13:00 CET = 12:00 UTC
+
+	ruleExpr, err := rules.Parse(`department = "Sales"`)
+	if err != nil {
+		t.Fatalf("failed to parse rule: %v", err)
+	}
+
+	cfg := &Config{
+		Version: 1,
+		Fields:  []Field{},
+		Groups: map[string]*GroupConfig{
+			"sales": {
+				Rule: ruleExpr,
+				Exceptions: []Exception{
+					{
+						User:    "alice",
+						Reason:  "test",
+						By:      "bob",
+						Include: false,
+						Until:   &expiryTime,
+						At:      exceptionTime,
+					},
+				},
+			},
+			"manual": {
+				Rule: nil,
+				Expiry: map[string]time.Time{
+					"charlie": expiryTime,
+				},
+			},
+		},
+		Permissions: map[string]string{},
+		CreatedBy:   map[string]string{},
+	}
+
+	// Save
+	if err := store.Save(cfg); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+
+	// Check that saved file contains Z timestamps
+	data, err := os.ReadFile(store.Path)
+	if err != nil {
+		t.Fatalf("failed to read saved file: %v", err)
+	}
+
+	content := string(data)
+	if !contains(content, "Z") {
+		t.Errorf("saved file should contain Z (UTC) timestamps, got:\n%s", content)
+	}
+
+	// Load and verify times are UTC
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+
+	// Check exception times
+	if len(loaded.Groups["sales"].Exceptions) != 1 {
+		t.Fatal("expected 1 exception")
+	}
+	exc := loaded.Groups["sales"].Exceptions[0]
+	if exc.At.Location() != time.UTC {
+		t.Errorf("exception At should be UTC, got %v", exc.At.Location())
+	}
+	if exc.Until.Location() != time.UTC {
+		t.Errorf("exception Until should be UTC, got %v", exc.Until.Location())
+	}
+
+	// Check expiry times
+	expiry := loaded.Groups["manual"].Expiry["charlie"]
+	if expiry.Location() != time.UTC {
+		t.Errorf("expiry should be UTC, got %v", expiry.Location())
+	}
+}
+
+func TestStoreRuleParseErrorIncludesGroupAndPath(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.yaml")
+	store := &Store{Path: path}
+
+	// Write YAML with invalid rule
+	yaml := `version: 1
+groups:
+  sales:
+    rule: "invalid rule syntax!!!"
+`
+	if err := os.WriteFile(path, []byte(yaml), 0600); err != nil {
+		t.Fatalf("failed to write file: %v", err)
+	}
+
+	_, err := store.Load()
+	if err == nil {
+		t.Fatal("Load should fail on invalid rule")
+	}
+
+	// Error should mention path, group name, and "rule"
+	errStr := err.Error()
+	if !contains(errStr, path) {
+		t.Errorf("error should mention path %q, got: %v", path, err)
+	}
+	if !contains(errStr, "sales") {
+		t.Errorf("error should mention group name %q, got: %v", "sales", err)
+	}
+	if !contains(errStr, "rule") {
+		t.Errorf("error should mention %q, got: %v", "rule", err)
+	}
+}
+
+func TestStoreSaveFailsWhenParentMissing(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "nonexistent", "directory.yaml")
+	store := &Store{Path: path}
+
+	cfg := &Config{
+		Version:     1,
+		Fields:      []Field{},
+		Groups:      map[string]*GroupConfig{},
+		Permissions: map[string]string{},
+		CreatedBy:   map[string]string{},
+	}
+
+	err := store.Save(cfg)
+	if err == nil {
+		t.Fatal("Save should fail when parent directory doesn't exist")
+	}
+}
