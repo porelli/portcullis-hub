@@ -1274,15 +1274,16 @@ func TestImportReviewSelfRowDifferentCase(t *testing.T) {
 	env := newEnv(t)
 	ctx := context.Background()
 
-	// Create a delegate who is NOT in a permission group
+	// eddie holds edit_details but is in NO permission group (a Caller
+	// resolved before he left hr_edit): the only reason to refuse his own
+	// row is that it is his own. alice, an ordinary user, is the control.
 	env.ll.AddUser("alice", "alice@example.org", "Alice", "pass-123456")
-	env.ll.AddUser("eddie", "eddie@example.org", "Eddie", "pass-123456", "hr_edit")
+	env.ll.AddUser("eddie", "eddie@example.org", "Eddie", "pass-123456")
+	env.ll.AddGroup("hr_edit")
 
 	if err := env.svc.LLDAP.AddUserAttribute(ctx, "city", false); err != nil {
 		t.Fatal(err)
 	}
-
-	env.ll.AddGroup("hr_edit", "eddie")
 
 	cfg := &directory.Config{
 		Version: 1,
@@ -1300,11 +1301,13 @@ func TestImportReviewSelfRowDifferentCase(t *testing.T) {
 	if err := env.svc.Store.Save(cfg); err != nil {
 		t.Fatal(err)
 	}
-
-	eddie, _ := env.svc.CallerFor(ctx, "eddie")
+	if got := env.ll.GroupMembers("hr_edit"); len(got) != 0 {
+		t.Fatalf("hr_edit members = %v, want none", got)
+	}
+	eddie := &directory.Caller{User: "eddie", Perms: map[string]bool{directory.PermEditDetails: true}}
 
 	// Eddie (delegate) trying to edit EDDIE (different case)
-	csv := "username,city\nEDDIE,Milan"
+	csv := "username,city\nEDDIE,Milan\nalice,Milan"
 	header, rows, err := directory.ParseCSV(strings.NewReader(csv))
 	if err != nil {
 		t.Fatalf("ParseCSV: %v", err)
@@ -1319,8 +1322,6 @@ func TestImportReviewSelfRowDifferentCase(t *testing.T) {
 	if row == nil {
 		t.Fatalf("EDDIE not found in review rows, got rows: %+v", review.Rows)
 	}
-
-	// Check for exact problem message
 	found := false
 	expectedProblem := "only an admin can change eddie"
 	for _, p := range row.Problems {
@@ -1330,6 +1331,9 @@ func TestImportReviewSelfRowDifferentCase(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected exact problem %q, got: %v", expectedProblem, row.Problems)
+	}
+	if ctl := findRow(review.Rows, "alice"); ctl == nil || len(ctl.Problems) != 0 {
+		t.Errorf("control row alice = %+v, want no problems (the refusal must come from the self target)", ctl)
 	}
 }
 
