@@ -18,8 +18,18 @@ var lldapBuiltins = map[string]bool{
 	"last_name": true, "avatar": true, "creation_date": true, "uuid": true, "user_id": true,
 }
 
-// fieldNameRe matches valid field names: ^[a-z][a-z0-9_]{0,30}$
-var fieldNameRe = regexp.MustCompile(`^[a-z][a-z0-9_]{0,30}$`)
+// fieldNameRe matches valid field names (contract §4.1): lowercase
+// letters and digits, starting with a letter, '_' only between two of them
+// (no leading, trailing or doubled '_'), so the header mapping ('_' → '-')
+// is injective and always gives a valid header name. Length: maxFieldName.
+var fieldNameRe = regexp.MustCompile(`^[a-z][a-z0-9]*(_[a-z0-9]+)*$`)
+
+// maxFieldName bounds a field name's length.
+const maxFieldName = 31
+
+func validFieldName(name string) bool {
+	return len(name) <= maxFieldName && fieldNameRe.MatchString(name)
+}
 
 // CreateField creates a custom field.
 // Admins only.
@@ -31,8 +41,8 @@ func (s *Service) CreateField(ctx context.Context, c *Caller, f Field) error {
 		if s.Store == nil {
 			return &Error{Status: http.StatusServiceUnavailable, Msg: "custom fields not configured"}
 		}
-		if !fieldNameRe.MatchString(f.Name) {
-			return invalid("invalid field name: use lowercase letters, digits, '_', 1-31 characters, starting with a letter")
+		if !validFieldName(f.Name) {
+			return invalid("invalid field name: 1-31 lowercase letters and digits, starting with a letter; '_' only between two of them (not at the end, not doubled)")
 		}
 		if lldapBuiltins[f.Name] {
 			return invalid("field name %q is reserved (LLDAP built-in attribute)", f.Name)

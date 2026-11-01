@@ -82,6 +82,12 @@ func TestFieldNameRules(t *testing.T) {
 		{"a-b", "invalid field name"},
 		{"", "invalid field name"},
 		{"a_very_long_name_that_exceeds_the_31_char_limit", "invalid field name"},
+		{"dept_", "invalid field name"},
+		{"a__b", "invalid field name"},
+		{"_a", "invalid field name"},
+		{"abcdefghij_abcdefghij_abcdefghij", "invalid field name"}, // 32
+		{"abcdefghij_abcdefghij_abcdefghi", ""},                    // 31
+		{"a1_b2", ""},
 		{"department", ""},  // valid
 		{"cost_center", ""}, // valid
 	}
