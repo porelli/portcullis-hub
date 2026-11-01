@@ -1464,3 +1464,31 @@ func TestImportApplyRefusedUpFront(t *testing.T) {
 		t.Errorf("cancelled apply = %+v %v", res, err)
 	}
 }
+
+// TestParseCSVUndoesExportNeutraliser: the UI's CSV download prefixes ' to
+// cells a spreadsheet would run as a formula; uploading that file again
+// drops exactly that one ' (and nothing else).
+func TestParseCSVUndoesExportNeutraliser(t *testing.T) {
+	in := "\"username\",\"display_name\",\"skills\"\r\n" +
+		"\"bob\",\"'=HYPERLINK(\"\"x\"\")\",\"'-1|'+2\"\r\n" +
+		"\"carl\",\"'@home\",\"'\tq\"\r\n" +
+		"\"dan\",\"O'Brien\",\"'quoted\"\r\n" +
+		"\"eve\",\"''=twice\",\"'\"\r\n"
+	_, rows, err := directory.ParseCSV(strings.NewReader(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := [][]string{
+		{"bob", `=HYPERLINK("x")`, "-1|'+2"}, // only the cell's leading ' goes
+		{"carl", "@home", "\tq"},
+		{"dan", "O'Brien", "'quoted"},
+		{"eve", "''=twice", "'"}, // a ' not followed by = + - @ tab CR stays
+	}
+	for i := range want {
+		for j := range want[i] {
+			if rows[i][j] != want[i][j] {
+				t.Errorf("row %d col %d = %q, want %q", i, j, rows[i][j], want[i][j])
+			}
+		}
+	}
+}

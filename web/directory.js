@@ -888,6 +888,11 @@
     }
     this.render();
     this.changed();
+    // The re-render replaced the control: put the focus back on it.
+    let sel = '[data-re="' + kind + '"][data-path="' + path + '"]';
+    if (kind === 'inval') sel += '[value="' + CSS.escape(t.value) + '"]';
+    const again = this.el.querySelector(sel);
+    if (again) again.focus();
   };
   RuleEditor.prototype.onClick = function (e) {
     if (e.target.matches('textarea[data-re="text"]')) { this.renderSuggest(); return; }
@@ -1042,7 +1047,7 @@
   function groupCard(g, admin) {
     const open = openGroups.has(g.name);
     const members = g.members || [];
-    const bodyId = 'pd-g-' + g.name.replace(/[^a-z0-9_-]/gi, '_');
+    const bodyId = uid('pd-g-');
     let h = '<div class="pd-group' + (open ? ' open' : '') + '"><button type="button" class="pd-group-head" data-act="toggle-group" data-group="' + esc(g.name) + '" aria-expanded="' + (open ? 'true' : 'false') + '" aria-controls="' + esc(bodyId) + '">' +
       '<span class="pd-caret" aria-hidden="true">' + (open ? '▾' : '▸') + '</span><span class="pd-mono pd-gname">' + esc(g.name) + '</span>';
     h += g.rule ? '<span class="pd-rulebadge" title="Rule-based: membership is computed">⚡ <code>' + esc(g.rule.text) + '</code></span>' : '<span class="pd-pill">Manual</span>';
@@ -1457,24 +1462,29 @@
     renderPeople();
     root.querySelector('.pd-import').scrollIntoView({ block: 'start' });
   }
+  // reReview posts the edited rows for a fresh review. Edits are local
+  // and win: a response is used only if no edit happened since its request
+  // (imp.seq bumps on every edit) and the rows it reviewed are still the
+  // current ones; the server's rows never replace the table.
   const reReview = debounce(async () => {
     if (!imp) return;
-    const seq = ++imp.seq;
+    const mine = imp;
+    const seq = mine.seq;
+    const sent = JSON.stringify(mine.rows);
+    let r = null, error = '';
     try {
-      const r = await api('POST', '/api/directory/import/review', { header: imp.header, rows: imp.rows });
-      if (!imp || seq !== imp.seq) return;
-      imp.header = r.header;
-      imp.rows = r.rows;
-      imp.review = r.review;
-      imp.error = '';
+      r = await api('POST', '/api/directory/import/review', { header: mine.header, rows: JSON.parse(sent) });
     } catch (err) {
-      if (!imp || seq !== imp.seq) return;
-      imp.error = errText(err);
+      error = errText(err);
     }
-    imp.pending = false;
+    if (imp !== mine || seq !== mine.seq || JSON.stringify(mine.rows) !== sent) return; // stale: a newer review follows
+    if (r) mine.review = r.review;
+    mine.error = error;
+    mine.pending = false;
     renderImport(true);
   }, 400);
   function importChanged() {
+    imp.seq++;
     imp.pending = true;
     reReview();
     renderImportFooter();
@@ -1519,7 +1529,9 @@
     const st = importStats();
     let h = '<div class="pd-imp-head"><h3 class="pd-h3">Import review: ' + esc(imp.file) + '</h3><p>' +
       esc(st.new + ' new · ' + st.changed + ' changed · ' + st.missing + ' not in file · ' + st.same + ' unchanged' + (imp.show.same ? '' : ' (hidden)')) + '</p>' +
-      '<p class="pd-muted">Uploading changed nothing yet. Edit any cell; ↺ keeps what Portcullis has. Multiple values: separate them with |.</p></div>';
+      '<p class="pd-muted">Uploading changed nothing yet. Edit any cell; ↺ keeps what Portcullis has. Multiple values: separate them with |. ' +
+      'An empty cell clears a field, but email and display name can\'t be cleared by import (leave them as they are). ' +
+      'A leading \' before =, +, -, @ (as in the CSV this page downloads) is dropped on upload.</p></div>';
     if ((rev.unknown_columns || []).length) h += '<div class="pd-warn">Ignored columns (not a field): ' + rev.unknown_columns.map(esc).join(', ') + '</div>';
     if (imp.error) h += '<div class="pd-warn" role="alert">' + esc(imp.error) + '</div>';
     h += '<div class="pd-toolbar" role="group" aria-label="Show rows"><span>Show:</span>';

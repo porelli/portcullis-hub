@@ -76,7 +76,23 @@ func ParseCSV(r io.Reader) (header []string, rows [][]string, err error) {
 	if len(records) == 0 {
 		return nil, nil, invalid("CSV file is empty")
 	}
+	for _, rec := range records {
+		for i, cell := range rec {
+			rec[i] = unneutralize(cell)
+		}
+	}
 	return NormalizeImport(records[0], records[1:])
+}
+
+// unneutralize undoes the formula-injection guard of the UI's CSV export
+// (web/directory.js csvCell): a cell it wrote as '=…, '+…, '-…, '@…, or '
+// before a tab or CR, loses that one leading ', so a downloaded review
+// imports back unchanged. Any other leading ' is data and stays.
+func unneutralize(cell string) string {
+	if len(cell) >= 2 && cell[0] == '\'' && strings.IndexByte("=+-@\t\r", cell[1]) >= 0 {
+		return cell[1:]
+	}
+	return cell
 }
 
 // NormalizeImport checks an import's size (at most 10,000 rows and 64
