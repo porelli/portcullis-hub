@@ -555,7 +555,14 @@
         document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
         if (tab.dataset.tab === 'settings') loadGlobalSettings();
         if (tab.dataset.tab === 'users') loadDirectory();
+        history.replaceState(null, '', tab.dataset.tab === 'catalog' ? location.pathname : '#' + tab.dataset.tab);
       });
+    });
+    // Deep links: hub.<domain>/#users (directory.<domain> redirects there).
+    window.addEventListener('load', () => {
+      const t = location.hash.slice(1);
+      const tab = t && document.querySelector('.tab[data-tab="' + CSS.escape(t) + '"]');
+      if (tab) tab.click();
     });
 
     // Detail tab switching
