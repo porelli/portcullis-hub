@@ -541,16 +541,34 @@ func TestRoutingValidation(t *testing.T) {
 	}
 }
 
-// Fresh installs default to WebAuthn; an explicitly chosen public default
-// is honoured (and differs from "never set").
+// Fresh installs default to a YubiKey by either method (client cert or
+// passkey); an explicitly chosen public default is honoured (and differs
+// from "never set").
 func TestInitialDefaultPolicy(t *testing.T) {
 	f := newFixture(t)
 	doc := readPolicy(t, f)
-	if strings.Join(doc.Default.Factors, ",") != "webauthn" {
+	if strings.Join(doc.Default.Factors, ",") != "mtls,webauthn" || doc.Default.Op != "any" {
 		t.Errorf("fresh default = %+v", doc.Default)
 	}
-	if d := f.h.DefaultPolicy(); strings.Join(d.Factors, ",") != "webauthn" {
+	if d := f.h.DefaultPolicy(); strings.Join(d.Factors, ",") != "mtls,webauthn" || d.Op != "any" {
 		t.Errorf("DefaultPolicy() = %+v", d)
+	}
+	// Apps that inherit it: cert optional at the handshake, Keycloak
+	// steps up to hwk (the lower of the two LoAs).
+	if err := f.h.Enable("other"); err != nil {
+		t.Fatal(err)
+	}
+	if ov, _ := os.ReadFile(filepath.Join(f.data, "overrides", "other.override.yml")); !strings.Contains(string(ov), "tls.options: authaware@file") {
+		t.Errorf("inherited default tier:\n%s", ov)
+	}
+	f.idp.mu.Lock()
+	acr := f.idp.specs[len(f.idp.specs)-1].ACR
+	f.idp.mu.Unlock()
+	if acr != "hwk" {
+		t.Errorf("inherited default acr = %q, want hwk", acr)
+	}
+	if err := f.h.Disable("other"); err != nil {
+		t.Fatal(err)
 	}
 	if !f.h.SetDefaultPolicy(policy.AuthPolicy{}) {
 		t.Fatal("public default not detected as a change")

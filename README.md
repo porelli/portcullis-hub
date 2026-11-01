@@ -61,7 +61,7 @@ The core Portcullis stack runs the Hub; you don't need to run it standalone.
 
 ### Default access policy
 
-Until an admin saves a global default under **Settings**, every app that has no policy of its own requires **WebAuthn** (hardware key). Its routers get `authaware@file`, and Keycloak steps up to LoA 2. You can still choose a public default explicitly. That choice is stored and honoured; it is not the same as "never set".
+Until an admin saves a global default under **Settings**, every app that has no policy of its own requires a **YubiKey by either method**: a client certificate (mTLS) **or** a passkey (WebAuthn), i.e. `{factors: [mtls, webauthn], op: any}`. Its routers get `authaware@file` (certificate optional at the handshake), and Keycloak steps up to at least LoA 2 (`hwk`); a certificate sign-in (`mtls`, LoA 3) satisfies it too. You can still choose a public default explicitly. That choice is stored and honoured; it is not the same as "never set".
 
 ### Runtime user and permissions
 

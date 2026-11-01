@@ -94,15 +94,15 @@ func TestDefaultPolicyUnsetVsPublic(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "state.yaml")
 
-	// Fresh install: hardware keys by default.
+	// Fresh install: a YubiKey by either method (client cert or passkey).
 	s, _ := Load(p)
-	if d := s.Default(); strings.Join(d.Factors, ",") != "webauthn" {
+	if d := s.Default(); strings.Join(d.Factors, ",") != "mtls,webauthn" || d.Op != "any" {
 		t.Errorf("fresh default = %+v", d)
 	}
 	// A file that never set a default behaves the same.
 	os.WriteFile(p, []byte("enabled: []\n"), 0600)
 	s, _ = Load(p)
-	if d := s.Default(); strings.Join(d.Factors, ",") != "webauthn" {
+	if d := s.Default(); strings.Join(d.Factors, ",") != "mtls,webauthn" || d.Op != "any" {
 		t.Errorf("unset default = %+v", d)
 	}
 	if err := s.Save(p); err != nil {

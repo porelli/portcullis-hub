@@ -16,9 +16,16 @@ type AuthPolicy struct {
 }
 
 // InitialDefault is the global default until an admin sets one: this is a
-// hardware-key gateway, so fresh installs require WebAuthn (routers get
-// authaware@file and step up to LoA 2).
-func InitialDefault() AuthPolicy { return AuthPolicy{Factors: []string{"webauthn"}} }
+// hardware-key gateway, so fresh installs require a YubiKey — either
+// method: a client certificate (mtls, LoA 3) or a passkey (webauthn,
+// LoA 2). group-gate matches factors via amr, so a webauthn-only default
+// would turn away users who signed in with their certificate. "any" makes
+// Keycloak step up to the lower LoA (hwk), and with a non-mtls alternative
+// the routers get authaware@file (cert optional at the handshake).
+// Normalised (sorted factors, op "any") as the Hub writes it.
+func InitialDefault() AuthPolicy {
+	return AuthPolicy{Factors: []string{"mtls", "webauthn"}, Op: "any"}
+}
 
 var factorLoA = map[string]int{"password": 1, "webauthn": 2, "mtls": 3}
 

@@ -77,3 +77,15 @@ func TestHostTier(t *testing.T) {
 		}
 	}
 }
+
+// The unset default accepts either YubiKey method and must keep deriving
+// the values core relies on.
+func TestInitialDefault(t *testing.T) {
+	d := InitialDefault()
+	if !Same(Normalize(d), d) {
+		t.Errorf("InitialDefault not normalised: %+v vs %+v", d, Normalize(d))
+	}
+	if ACR(d) != "hwk" || LoA(d) != 2 || Tier(d) != "authaware@file" || HostTier(d, true) != "authaware@file" || SafetyScore(d) != 2 {
+		t.Errorf("acr=%s loa=%d tier=%s score=%v", ACR(d), LoA(d), Tier(d), SafetyScore(d))
+	}
+}
