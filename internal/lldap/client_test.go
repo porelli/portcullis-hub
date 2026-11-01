@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	ber "github.com/go-asn1-ber/asn1-ber"
 	"github.com/go-ldap/ldap/v3"
 	"github.com/portcullis/hub/internal/lldap"
 	"github.com/portcullis/hub/internal/lldap/lldaptest"
@@ -509,7 +510,68 @@ func TestGraphQLHTTPErrors(t *testing.T) {
 		t.Errorf("500 = %v", err)
 	}
 	mode = "huge"
-	if _, err := c.ListGroups(context.Background()); err == nil || len(err.Error()) > 1024 {
+	if _, err := c.ListGroups(context.Background()); err == nil || err.Error() != "lldap graphql: response too large" {
 		t.Errorf("oversized response accepted or echoed: %.200v", err)
+	}
+}
+
+// TestSetPasswordOneDeadline: a server that answers the bind late and then
+// never answers the Password Modify must fail within ONE Timeout overall
+// (not one per request), and the client still sends an Unbind.
+func TestSetPasswordOneDeadline(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	unbound := make(chan bool, 1)
+	go func() {
+		c, err := l.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		sawUnbind := false
+		defer func() { unbound <- sawUnbind }()
+		for {
+			p, err := ber.ReadPacket(c)
+			if err != nil || len(p.Children) < 2 {
+				return
+			}
+			id := p.Children[0].Value
+			switch p.Children[1].Tag {
+			case ldap.ApplicationBindRequest:
+				time.Sleep(700 * time.Millisecond)
+				resp := ber.Encode(ber.ClassUniversal, ber.TypeConstructed, ber.TagSequence, nil, "")
+				resp.AppendChild(ber.NewInteger(ber.ClassUniversal, ber.TypePrimitive, ber.TagInteger, id, ""))
+				br := ber.Encode(ber.ClassApplication, ber.TypeConstructed, ldap.ApplicationBindResponse, nil, "")
+				br.AppendChild(ber.NewInteger(ber.ClassUniversal, ber.TypePrimitive, ber.TagEnumerated, 0, ""))
+				br.AppendChild(ber.NewString(ber.ClassUniversal, ber.TypePrimitive, ber.TagOctetString, "", ""))
+				br.AppendChild(ber.NewString(ber.ClassUniversal, ber.TypePrimitive, ber.TagOctetString, "", ""))
+				resp.AppendChild(br)
+				c.Write(resp.Bytes())
+			case ldap.ApplicationUnbindRequest:
+				sawUnbind = true
+				return
+			} // extended request: never answered
+		}
+	}()
+	f := lldaptest.New(t, "portcullis-hub", svcPass)
+	c := lldap.New(f.HTTP.URL, "ldap://"+l.Addr().String(), f.BaseDN, writeCreds(t, "portcullis-hub", svcPass))
+	c.Timeout = time.Second
+	start := time.Now()
+	if err := c.SetPassword(context.Background(), "admin", "NewPassword-123"); err == nil || strings.Contains(err.Error(), "NewPassword") {
+		t.Errorf("stalled password modify = %v", err)
+	}
+	if d := time.Since(start); d > 1500*time.Millisecond {
+		t.Errorf("took %v, want about one Timeout (1s)", d)
+	}
+	select {
+	case saw := <-unbound:
+		if !saw {
+			t.Error("no Unbind sent before close")
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("server never saw the connection end")
 	}
 }

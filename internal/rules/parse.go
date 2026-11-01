@@ -1,6 +1,7 @@
 package rules
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -81,26 +82,167 @@ var parser = participle.MustBuild[grammar](
 	participle.UseLookahead(2),
 )
 
+// Input limits, checked before participle runs: its recursive descent has no
+// depth limit, so a deep enough nesting would overflow the stack (fatal, not
+// recoverable). Validate's own limits (depth 16) apply afterwards.
+const (
+	maxRuleLen   = 8 << 10
+	maxScanDepth = 64
+)
+
+// scanDepth returns the 0-based offset where the nesting of parens plus
+// pending `not` prefixes first exceeds maxScanDepth, or -1. Strings are
+// skipped (an unterminated one is left to the lexer).
+func scanDepth(text string) int {
+	var stack []int // pending nots at each open paren
+	pending, parens, nots := 0, 0, 0
+	for i := 0; i < len(text); {
+		c := text[i]
+		switch {
+		case c == '"':
+			i++
+			for i < len(text) && text[i] != '"' {
+				if text[i] == '\\' {
+					i++
+				}
+				i++
+			}
+			i++
+			pending = 0
+			continue
+		case c == '(':
+			stack = append(stack, pending)
+			parens++
+			nots += pending
+			pending = 0
+		case c == ')':
+			if len(stack) > 0 {
+				nots -= stack[len(stack)-1]
+				stack = stack[:len(stack)-1]
+				parens--
+			}
+			pending = 0
+		case isIdentStart(c):
+			j := i
+			for j < len(text) && isIdentPart(text[j]) {
+				j++
+			}
+			if strings.EqualFold(text[i:j], "not") {
+				pending++
+			} else {
+				pending = 0
+			}
+			if parens+nots+pending > maxScanDepth {
+				return i
+			}
+			i = j
+			continue
+		case c == ' ' || c == '\t' || c == '\n' || c == '\r':
+		default:
+			pending = 0
+		}
+		if parens+nots+pending > maxScanDepth {
+			return i
+		}
+		i++
+	}
+	return -1
+}
+
+func isIdentStart(c byte) bool {
+	return c == '_' || (c|0x20 >= 'a' && c|0x20 <= 'z')
+}
+
+func isIdentPart(c byte) bool { return isIdentStart(c) || c == '-' || (c >= '0' && c <= '9') }
+
+// excerpt quotes at most 20 bytes of input for an error message.
+func excerpt(s string) string {
+	if len(s) > 20 {
+		s = s[:20] + "…"
+	}
+	return fmt.Sprintf("%q", s)
+}
+
+// friendlyExpect turns participle's expectation into words.
+var friendlyExpect = strings.NewReplacer("<string>", "string value", "<ident>", "field name",
+	"OrExpr", "a condition", "AndExpr", "a condition", "UnaryExpr", "a condition", "CondExpr", "a condition")
+
+// parseErrorFor maps a participle error to a short message with a 1-based
+// column (byte offset + 1 across the whole text, as the old parser).
+func parseErrorFor(text string, err error) *parseError {
+	var perr participle.Error
+	if !errors.As(err, &perr) {
+		return &parseError{1, "invalid rule"}
+	}
+	off := perr.Position().Offset
+	if off < 0 || off > len(text) {
+		off = 0
+	}
+	col := off + 1
+	var cerr interface{ Unwrap() error }
+	if errors.As(err, &cerr) && cerr.Unwrap() != nil && strings.HasPrefix(perr.Message(), "failed to capture") {
+		return &parseError{col, cerr.Unwrap().Error()} // our own Capture message
+	}
+	var lerr *lexer.Error
+	if errors.As(err, &lerr) {
+		rest := text[off:]
+		if strings.HasPrefix(rest, `"`) {
+			for i := 1; i < len(rest); i++ {
+				if rest[i] == '\\' {
+					if i+1 < len(rest) && rest[i+1] != '"' && rest[i+1] != '\\' {
+						return &parseError{off + i + 1, "invalid escape sequence (only \\\" and \\\\)"}
+					}
+					i++
+					continue
+				}
+				if rest[i] == '"' {
+					break
+				}
+			}
+			return &parseError{col, "unterminated string"}
+		}
+		r := rest
+		if r == "" {
+			return &parseError{col, "unexpected end of input"}
+		}
+		return &parseError{col, "unexpected character " + excerpt(r[:1])}
+	}
+	var uerr *participle.UnexpectedTokenError
+	if errors.As(err, &uerr) {
+		msg := "unexpected " + excerpt(uerr.Unexpected.Value)
+		if uerr.Unexpected.EOF() {
+			msg = "unexpected end of input"
+		}
+		if m := perr.Message(); strings.HasSuffix(m, ")") {
+			if i := strings.LastIndex(m, " (expected "); i >= 0 {
+				exp := friendlyExpect.Replace(m[i+len(" (expected ") : len(m)-1])
+				if len(exp) > 40 {
+					exp = exp[:40] + "…"
+				}
+				msg += ", expected " + exp
+			}
+		}
+		return &parseError{col, msg}
+	}
+	return &parseError{col, "invalid rule"}
+}
+
 // Parse parses a rule text into an expression tree.
 // Returns only validated expressions.
 func Parse(text string) (*Expr, error) {
 	if strings.TrimSpace(text) == "" {
 		return nil, &parseError{1, "empty input"}
 	}
+	if len(text) > maxRuleLen {
+		return nil, &parseError{maxRuleLen + 1, fmt.Sprintf("rule longer than %d bytes", maxRuleLen)}
+	}
+	if off := scanDepth(text); off >= 0 {
+		return nil, &parseError{off + 1, fmt.Sprintf("nesting deeper than %d", maxScanDepth)}
+	}
 
 	g, err := parser.ParseString("", text)
 	if err != nil {
-		// Convert participle error to parseError with column
-		if perr, ok := err.(participle.Error); ok {
-			col := perr.Position().Column
-			if col == 0 {
-				col = 1
-			}
-			msg := perr.Message()
-			msg = strings.Replace(msg, "unexpected token", "unexpected input", 1)
-			return nil, &parseError{col, msg}
-		}
-		return nil, &parseError{1, err.Error()}
+		return nil, parseErrorFor(text, err)
 	}
 
 	if g.Expr == nil {

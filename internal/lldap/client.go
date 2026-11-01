@@ -225,20 +225,44 @@ type GraphQLError struct{ Messages []string }
 
 func (e *GraphQLError) Error() string { return "lldap: " + strings.Join(e.Messages, "; ") }
 
+// errResponseTooLarge is returned when a GraphQL response exceeds maxResponse.
+var errResponseTooLarge = errors.New("response too large")
+
 // limitDoer bounds every GraphQL response body to maxResponse (the library
-// reads bodies whole).
+// reads bodies whole); reading past it fails with errResponseTooLarge.
 type limitDoer struct{ c *http.Client }
 
 func (d limitDoer) Do(req *http.Request) (*http.Response, error) {
 	resp, err := d.c.Do(req)
 	if err == nil && resp.Body != nil {
-		resp.Body = struct {
-			io.Reader
-			io.Closer
-		}{io.LimitReader(resp.Body, maxResponse), resp.Body}
+		resp.Body = &limitBody{rc: resp.Body, left: maxResponse}
 	}
 	return resp, err
 }
+
+type limitBody struct {
+	rc   io.ReadCloser
+	left int64
+}
+
+func (b *limitBody) Read(p []byte) (int, error) {
+	if b.left <= 0 {
+		// One byte more tells "exactly at the limit" from "over it".
+		var one [1]byte
+		if n, _ := b.rc.Read(one[:]); n > 0 {
+			return 0, errResponseTooLarge
+		}
+		return b.rc.Read(p)
+	}
+	if int64(len(p)) > b.left {
+		p = p[:b.left]
+	}
+	n, err := b.rc.Read(p)
+	b.left -= int64(n)
+	return n, err
+}
+
+func (b *limitBody) Close() error { return b.rc.Close() }
 
 // graphql runs one query; a 401 triggers a single re-login and retry.
 func (c *Client) graphql(ctx context.Context, query string, vars map[string]interface{}, out interface{}) error {
@@ -264,7 +288,9 @@ func (c *Client) graphql(ctx context.Context, query string, vars map[string]inte
 			}
 			ge := &GraphQLError{}
 			for _, e := range ges {
-				if inner := e.Unwrap(); inner != nil {
+				if inner := e.Unwrap(); errors.Is(inner, errResponseTooLarge) {
+					return fmt.Errorf("lldap graphql: %w", errResponseTooLarge)
+				} else if inner != nil {
 					// Transport / decode failure, not a server-reported error.
 					return fmt.Errorf("lldap graphql: %w", inner)
 				}
@@ -483,10 +509,24 @@ func ldapPasswordModify(ctx context.Context, rawURL string, timeout time.Duratio
 	if err != nil {
 		return fmt.Errorf("ldap: connect: %w", err)
 	}
-	defer conn.Close()
-	// Per-request timeout (go-ldap's default is none), and close the
-	// connection (failing the pending request) when ctx is cancelled.
-	conn.SetTimeout(time.Until(deadline))
+	defer func() {
+		_ = conn.Unbind() // best effort; Close tears the connection down anyway
+		conn.Close()
+	}()
+	// Per-request timeout (go-ldap's default is none; <= 0 also means none,
+	// hence the check), and close the connection (failing the pending
+	// request) when ctx is cancelled.
+	setTimeout := func() error {
+		left := time.Until(deadline)
+		if left <= 0 {
+			return fmt.Errorf("ldap: %w", context.DeadlineExceeded)
+		}
+		conn.SetTimeout(left)
+		return nil
+	}
+	if err := setTimeout(); err != nil {
+		return err
+	}
 	defer context.AfterFunc(ctx, func() { conn.Close() })()
 
 	if err := conn.Bind(bindDN, bindPassword); err != nil {
@@ -496,6 +536,10 @@ func ldapPasswordModify(ctx context.Context, rawURL string, timeout time.Duratio
 			return &ldap.Error{ResultCode: le.ResultCode, Err: fmt.Errorf("ldap bind: result %d", le.ResultCode)}
 		}
 		return fmt.Errorf("ldap bind: %w", err)
+	}
+	// Same overall deadline for the extended op (SetTimeout is per request).
+	if err := setTimeout(); err != nil {
+		return err
 	}
 	if _, err := conn.PasswordModify(ldap.NewPasswordModifyRequest(userDN, "", newPassword)); err != nil {
 		return fmt.Errorf("ldap password modify: %w", err)
