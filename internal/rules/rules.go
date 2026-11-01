@@ -328,12 +328,19 @@ func collectFields(e *Expr, seen map[string]bool) {
 // - Nesting depth exceeds 16
 // - Total nodes exceed 256
 // - Values longer than 256 bytes or containing control characters
+// - Format text longer than maxRuleLen (so Parse(Format(e)) always works)
 func Validate(e *Expr) error {
 	if e == nil {
 		return fmt.Errorf("expression is nil")
 	}
 	nodeCount := 0
-	return validateExpr(e, 0, &nodeCount)
+	if err := validateExpr(e, 0, &nodeCount); err != nil {
+		return err
+	}
+	if n := len(Format(e)); n > maxRuleLen {
+		return fmt.Errorf("rule too long: %d bytes, max %d", n, maxRuleLen)
+	}
+	return nil
 }
 
 func validateExpr(e *Expr, depth int, nodeCount *int) error {

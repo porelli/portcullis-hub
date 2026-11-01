@@ -91,3 +91,46 @@ func TestParseErrorMessages(t *testing.T) {
 		t.Errorf("long input echoed: %v", err)
 	}
 }
+
+// TestValidateFormatLength: Validate refuses an Expr whose Format exceeds
+// the Parse cap, and anything it accepts round-trips through Parse.
+func TestValidateFormatLength(t *testing.T) {
+	block := func(n, valueLen int) *Expr {
+		e := &Expr{Op: OpAll}
+		for i := 0; i < n; i++ {
+			e.Items = append(e.Items, &Expr{Op: OpIs, Field: fmt.Sprintf("field%05d", i), Values: []string{strings.Repeat("v", valueLen)}})
+		}
+		return e
+	}
+	big := block(255, 20) // 255 × len(`field00000 = "vvv…"`) + " and " ≈ 9.4 KiB
+	err := Validate(big)
+	if err == nil || !strings.Contains(err.Error(), "rule too long:") || !strings.Contains(err.Error(), "max 8192") {
+		t.Fatalf("Validate(255 conditions) = %v, want rule too long", err)
+	}
+	// Largest n that still fits, then the value length that fills it up.
+	var e *Expr
+	for n := 255; n > 0; n-- {
+		if e = block(n, 20); len(Format(e)) <= maxRuleLen {
+			break
+		}
+	}
+	last := e.Items[len(e.Items)-1]
+	last.Values[0] += strings.Repeat("w", maxRuleLen-len(Format(e)))
+	if got := len(Format(e)); got != maxRuleLen {
+		t.Fatalf("setup: Format length %d, want %d", got, maxRuleLen)
+	}
+	if err := Validate(e); err != nil {
+		t.Fatalf("Validate(at limit) = %v", err)
+	}
+	back, err := Parse(Format(e))
+	if err != nil {
+		t.Fatalf("Parse(Format(e)) = %v", err)
+	}
+	if Format(back) != Format(e) {
+		t.Error("round trip changed the rule")
+	}
+	last.Values[0] += "w" // one byte over
+	if err := Validate(e); err == nil || !strings.Contains(err.Error(), "rule too long: 8193 bytes, max 8192") {
+		t.Errorf("Validate(limit+1) = %v", err)
+	}
+}
