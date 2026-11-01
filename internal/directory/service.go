@@ -703,6 +703,17 @@ func (s *Service) CreateUser(ctx context.Context, c *Caller, req CreateRequest) 
 				cfg = nil
 			}
 		}
+		if c.Admin && cfg != nil {
+			// Leftovers of an earlier account with this name (deleted here
+			// or outside the Hub) don't carry over.
+			if purged := purgeUser(cfg, req.Username); len(purged) > 0 {
+				if err := s.Store.Save(cfg); err != nil {
+					return &Error{Status: http.StatusServiceUnavailable, Msg: "directory.yaml: " + err.Error()}
+				}
+				res.Warnings = append(res.Warnings, fmt.Sprintf("purged leftovers naming %s from an earlier account: %s", req.Username, strings.Join(purged, ", ")))
+				detail += " purged=" + strings.Join(purged, ",")
+			}
+		}
 		if !c.Admin {
 			if cfg == nil {
 				return forbidden("not allowed: directory.yaml not configured")
@@ -879,11 +890,12 @@ func (s *Service) DeleteUser(ctx context.Context, c *Caller, username, confirm s
 		}
 		// Tombstone first: if it can't be saved, nothing is deleted. If
 		// the LLDAP delete then fails, the tombstone stays (harmless for a
-		// name that still exists).
+		// name that still exists). Exceptions, expiries and created_by are
+		// purged only after the delete succeeded (below).
 		if s.Store != nil {
 			cfg, err := s.Store.Load()
 			if err == nil {
-				forgetUser(cfg, u.ID, time.Now())
+				cfg.Deleted[strings.ToLower(u.ID)] = time.Now().UTC()
 				err = s.Store.Save(cfg)
 			}
 			if err != nil {
@@ -919,6 +931,16 @@ func (s *Service) DeleteUser(ctx context.Context, c *Caller, username, confirm s
 		if kcErr != "" {
 			detail = "keycloak_copy=FAILED " + kcErr
 			res.Warnings = append(res.Warnings, fmt.Sprintf("%s was deleted from LLDAP, but removing the Keycloak copy failed (%s); it is listed under \"Stale Keycloak records\" — remove it there", u.ID, kcErr))
+		}
+		if s.Store != nil {
+			cfg, err := s.Store.Load()
+			if err == nil && len(purgeUser(cfg, u.ID)) > 0 {
+				err = s.Store.Save(cfg)
+			}
+			if err != nil {
+				detail = strings.TrimSpace(detail + " purge=FAILED")
+				res.Warnings = append(res.Warnings, fmt.Sprintf("%s was deleted, but removing them from exceptions, expiries and created_by in directory.yaml failed: %v", u.ID, err))
+			}
 		}
 		return nil
 	})
@@ -993,6 +1015,9 @@ func (s *Service) SetPassword(ctx context.Context, c *Caller, username, password
 		if !lldap.ValidUsername(u.ID) {
 			return refuse("username %q can't be used in an LDAP DN; change this password in the LLDAP UI", u.ID)
 		}
+		if err := s.clearCreatedBy(c, u.ID); err != nil {
+			return err
+		}
 		if generate {
 			password = GeneratePassword()
 		}
@@ -1033,6 +1058,9 @@ func (s *Service) RequirePasskey(ctx context.Context, c *Caller, username string
 	return s.run(ctx, c, permAdmin, "user.require_passkey", username, nil, func() error {
 		id, _, err := s.kcTarget(ctx, username)
 		if err != nil {
+			return err
+		}
+		if err := s.clearCreatedBy(c, id); err != nil {
 			return err
 		}
 		return s.KC.RequirePasskey(ctx, id)
@@ -1079,6 +1107,9 @@ func (s *Service) RemovePasskeys(ctx context.Context, c *Caller, username, confi
 				return &Error{Status: http.StatusServiceUnavailable, Msg: err.Error()}
 			}
 		}
+		if err := s.clearCreatedBy(c, id); err != nil {
+			return err
+		}
 		n, err := s.KC.RemovePasskeys(ctx, id, !withInvite)
 		res.Count = n
 		if err != nil {
@@ -1114,6 +1145,9 @@ func (s *Service) SendInvite(ctx context.Context, c *Caller, username string) (*
 			return err
 		}
 		if err := s.checkInvitable(sn, u.ID); err != nil {
+			return err
+		}
+		if err := s.clearCreatedBy(c, u.ID); err != nil {
 			return err
 		}
 		if !c.Admin {

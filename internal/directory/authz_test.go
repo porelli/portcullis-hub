@@ -1,6 +1,8 @@
 package directory_test
 
 import (
+	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -398,5 +400,134 @@ func TestCreatedBy(t *testing.T) {
 	cfg, _ := e.svc.Store.Load()
 	if cfg.CreatedBy["nina"] != "ivy" || cfg.CreatedBy["omar"] != "" {
 		t.Errorf("created_by = %v", cfg.CreatedBy)
+	}
+}
+
+// failDelete is an LLDAP whose DeleteUser fails.
+type failDelete struct{ directory.Directory }
+
+func (failDelete) DeleteUser(context.Context, string) error {
+	return errors.New("simulated LLDAP failure")
+}
+
+// TestDeletePurgeAfterSuccess: only the tombstone is written before the
+// LLDAP delete; exceptions, expiries and created_by go only once the
+// delete succeeded, so a failed delete leaves the person's exclusions in
+// force.
+func TestDeletePurgeAfterSuccess(t *testing.T) {
+	e, store := evalEnv(t)
+	t0 := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	setRule(t, store, "milan", `city = "Milan"`, directory.Exception{User: "bob", Reason: "moved", By: "root", Include: false, At: t0})
+	cfg, _ := store.Load()
+	cfg.Groups["team"] = &directory.GroupConfig{Expiry: map[string]time.Time{"bob": t0.Add(240 * time.Hour)}}
+	cfg.CreatedBy["bob"] = "ivy"
+	if err := store.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	real := e.svc.LLDAP
+	e.svc.LLDAP = failDelete{real}
+	if _, err := e.svc.DeleteUser(ctx, asRoot, "bob", "bob"); err == nil || !e.ll.HasUser("bob") {
+		t.Fatalf("failed delete = %v (bob exists: %v)", err, e.ll.HasUser("bob"))
+	}
+	cfg, _ = store.Load()
+	if ex := cfg.Groups["milan"].Exceptions; len(ex) != 1 || ex[0].User != "bob" {
+		t.Errorf("exceptions after a failed delete = %+v", ex)
+	}
+	if len(cfg.Groups["team"].Expiry) != 1 || cfg.CreatedBy["bob"] != "ivy" {
+		t.Errorf("expiry/created_by after a failed delete = %v %v", cfg.Groups["team"].Expiry, cfg.CreatedBy)
+	}
+	if _, ok := cfg.Deleted["bob"]; !ok {
+		t.Error("tombstone not written before the delete")
+	}
+	evaluate(t, e, t0)
+	wantMembers(t, e, "milan", "carol")
+
+	e.svc.LLDAP = real
+	if _, err := e.svc.DeleteUser(ctx, asRoot, "bob", "bob"); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _ = store.Load()
+	if len(cfg.Groups["milan"].Exceptions) != 0 || len(cfg.Groups["team"].Expiry) != 0 || cfg.CreatedBy["bob"] != "" {
+		t.Errorf("not purged after delete: %+v %v %v", cfg.Groups["milan"].Exceptions, cfg.Groups["team"].Expiry, cfg.CreatedBy)
+	}
+	if _, ok := cfg.Deleted["bob"]; !ok {
+		t.Error("tombstone missing after delete")
+	}
+}
+
+// TestAdminCreatePurgesLeftovers: a name deleted outside the Hub can still
+// be named in exceptions, expiries and created_by; an admin creating it
+// starts clean, and is told.
+func TestAdminCreatePurgesLeftovers(t *testing.T) {
+	e := delegateEnv(t)
+	t0 := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	cfg, _ := e.svc.Store.Load()
+	cfg.Groups["milan"] = &directory.GroupConfig{Exceptions: []directory.Exception{{User: "Zoe", Reason: "x", By: "root", Include: true, At: t0}, {User: "bob", Reason: "y", By: "root", Include: true, At: t0}}}
+	cfg.Groups["team"] = &directory.GroupConfig{Expiry: map[string]time.Time{"zoe": t0}}
+	cfg.CreatedBy["zoe"] = "ivy"
+	if err := e.svc.Store.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	res, err := e.svc.CreateUser(ctx, asRoot, directory.CreateRequest{Username: "zoe", Email: "zoe@example.org"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := strings.Join(res.Warnings, " ")
+	if !strings.Contains(w, "milan") || !strings.Contains(w, "team") || !strings.Contains(w, "created_by") {
+		t.Errorf("warnings = %v", res.Warnings)
+	}
+	cfg, _ = e.svc.Store.Load()
+	if ex := cfg.Groups["milan"].Exceptions; len(ex) != 1 || ex[0].User != "bob" {
+		t.Errorf("exceptions = %+v", ex)
+	}
+	if len(cfg.Groups["team"].Expiry) != 0 || cfg.CreatedBy["zoe"] != "" {
+		t.Errorf("leftovers = %v %v", cfg.Groups["team"].Expiry, cfg.CreatedBy)
+	}
+	res, err = e.svc.CreateUser(ctx, asRoot, directory.CreateRequest{Username: "yuri", Email: "yuri@example.org"})
+	if err != nil || strings.Contains(strings.Join(res.Warnings, " "), "purged") {
+		t.Errorf("clean create = %+v %v", res, err)
+	}
+}
+
+// TestAdminCredentialActionClearsCreatedBy: once an admin acts on an
+// account's sign-in, delegates can no longer re-invite it.
+func TestAdminCredentialActionClearsCreatedBy(t *testing.T) {
+	e := delegateEnv(t)
+	ivy := callerFor(t, e, "ivy")
+	r := func(_ *directory.Result, err error) error { return err }
+	actions := map[string]func(user string) error{
+		"SetPassword":    func(u string) error { return r(e.svc.SetPassword(ctx, asRoot, u, "", true, "")) },
+		"SendInvite":     func(u string) error { return r(e.svc.SendInvite(ctx, asRoot, u)) },
+		"RemovePasskeys": func(u string) error { return r(e.svc.RemovePasskeys(ctx, asRoot, u, u, false)) },
+		"RequirePasskey": func(u string) error { return e.svc.RequirePasskey(ctx, asRoot, u) },
+	}
+	for name, act := range actions {
+		user := "n-" + strings.ToLower(name)
+		if _, err := e.svc.CreateUser(ctx, ivy, directory.CreateRequest{Username: user, Email: user + "@example.org"}); err != nil {
+			t.Fatal(err)
+		}
+		if cfg, _ := e.svc.Store.Load(); cfg.CreatedBy[user] != "ivy" {
+			t.Fatalf("%s: created_by = %v", name, cfg.CreatedBy)
+		}
+		if err := act(user); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if cfg, _ := e.svc.Store.Load(); cfg.CreatedBy[user] != "" {
+			t.Errorf("%s kept created_by", name)
+		}
+		e.kc.Update(user, func(u *kctest.User) { u.Credentials = nil }) // no Keycloak credential left either
+		if err := r(e.svc.SendInvite(ctx, ivy, user)); status(err) != 403 {
+			t.Errorf("after %s, delegate re-invite = %v", name, err)
+		}
+	}
+	// A delegate's own re-invite keeps created_by.
+	if _, err := e.svc.CreateUser(ctx, ivy, directory.CreateRequest{Username: "kept", Email: "kept@example.org"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r(e.svc.SendInvite(ctx, ivy, "kept")); err != nil {
+		t.Fatal(err)
+	}
+	if cfg, _ := e.svc.Store.Load(); cfg.CreatedBy["kept"] != "ivy" {
+		t.Error("delegate re-invite cleared created_by")
 	}
 }

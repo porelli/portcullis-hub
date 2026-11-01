@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
-	"time"
 
 	"github.com/portcullis/hub/internal/lldap"
 )
@@ -206,18 +206,17 @@ func namedInGroups(cfg *Config, user string) string {
 	return ""
 }
 
-// forgetUser records a deleted user's tombstone and drops them from every
-// group's exceptions and expiries and from CreatedBy, so a new account
-// with the same name inherits nothing.
-func forgetUser(cfg *Config, user string, now time.Time) {
-	if cfg.Deleted == nil {
-		cfg.Deleted = map[string]time.Time{}
-	}
-	cfg.Deleted[strings.ToLower(user)] = now.UTC()
-	for _, gc := range cfg.Groups {
+// purgeUser drops user from every group's exceptions and expiries and
+// from CreatedBy, so an account with that name inherits nothing; it
+// returns what was removed (for warnings and audit), sorted.
+func purgeUser(cfg *Config, user string) []string {
+	var out []string
+	for name, gc := range cfg.Groups {
 		kept := gc.Exceptions[:0]
 		for _, ex := range gc.Exceptions {
-			if !strings.EqualFold(ex.User, user) {
+			if strings.EqualFold(ex.User, user) {
+				out = append(out, "exception in "+name)
+			} else {
 				kept = append(kept, ex)
 			}
 		}
@@ -225,14 +224,46 @@ func forgetUser(cfg *Config, user string, now time.Time) {
 		for u := range gc.Expiry {
 			if strings.EqualFold(u, user) {
 				delete(gc.Expiry, u)
+				out = append(out, "expiry in "+name)
 			}
 		}
 	}
 	for u := range cfg.CreatedBy {
 		if strings.EqualFold(u, user) {
 			delete(cfg.CreatedBy, u)
+			out = append(out, "created_by")
 		}
 	}
+	sort.Strings(out)
+	return out
+}
+
+// clearCreatedBy: an admin acted on user's sign-in (password, invite,
+// passkeys), so the account is no longer "created by a delegate, never
+// used" and delegates can't re-invite it any more. Saved before the
+// action (fail closed: 503 if it can't be). Store nil or delegates: no-op.
+func (s *Service) clearCreatedBy(c *Caller, user string) error {
+	if !c.Admin || s.Store == nil {
+		return nil
+	}
+	cfg, err := s.Store.Load()
+	if err == nil {
+		found := false
+		for u := range cfg.CreatedBy {
+			if strings.EqualFold(u, user) {
+				delete(cfg.CreatedBy, u)
+				found = true
+			}
+		}
+		if !found {
+			return nil
+		}
+		err = s.Store.Save(cfg)
+	}
+	if err != nil {
+		return &Error{Status: http.StatusServiceUnavailable, Msg: "directory.yaml (created_by): " + err.Error()}
+	}
+	return nil
 }
 
 // emailTaken returns the user (other than self) whose email is email.
