@@ -84,8 +84,10 @@ func (s *Service) SetDetails(ctx context.Context, c *Caller, user string, attrs 
 
 			switch f.Kind {
 			case FieldKindList:
-				// Matched case-insensitively, stored as the defined value
-				// (rules compare list values exactly).
+				// Matched case-insensitively, stored as the defined value:
+				// rules compare case-insensitively anyway, but apps
+				// (attr_* claims, X-Forwarded-Attr-* headers) compare
+				// exactly and must see the defined spelling.
 				canon := make(map[string]string)
 				for _, v := range f.Values {
 					canon[strings.ToLower(v)] = v
