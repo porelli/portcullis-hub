@@ -23,14 +23,14 @@ const (
 )
 
 // ParseCSV parses a CSV file and returns the header and rows.
-// It detects the separator (comma or semicolon) from the header line,
+// It detects the separator (comma or semicolon) from the header line (counting outside quotes),
 // handles BOM, CRLF, and quoted newlines.
 // Refuses files > 10,000 rows or > 64 columns.
 func ParseCSV(r io.Reader) (header []string, rows [][]string, err error) {
-	// Read all data (limited by HTTP layer to 5 MB)
+	// Read all data (limited by HTTP layer, but also check here)
 	data, err := io.ReadAll(io.LimitReader(r, maxCSVBytes+1))
 	if err != nil {
-		return nil, nil, fmt.Errorf("read CSV: %w", err)
+		return nil, nil, invalid("read CSV: %v", err)
 	}
 	if len(data) > maxCSVBytes {
 		return nil, nil, invalid("CSV file too large (max 5 MB)")
@@ -39,13 +39,26 @@ func ParseCSV(r io.Reader) (header []string, rows [][]string, err error) {
 	// Strip BOM if present
 	data = bytes.TrimPrefix(data, []byte{0xef, 0xbb, 0xbf})
 
-	// Detect separator from first line
+	// Detect separator from first line, counting only outside quotes
 	separator := ','
 	firstLine := data
 	if idx := bytes.IndexByte(data, '\n'); idx >= 0 {
 		firstLine = data[:idx]
 	}
-	if bytes.Count(firstLine, []byte{';'}) > bytes.Count(firstLine, []byte{','}) {
+	commas, semicolons := 0, 0
+	inQuote := false
+	for _, b := range firstLine {
+		if b == '"' {
+			inQuote = !inQuote
+		} else if !inQuote {
+			if b == ',' {
+				commas++
+			} else if b == ';' {
+				semicolons++
+			}
+		}
+	}
+	if semicolons > commas {
 		separator = ';'
 	}
 
@@ -53,6 +66,7 @@ func ParseCSV(r io.Reader) (header []string, rows [][]string, err error) {
 	reader := csv.NewReader(bytes.NewReader(data))
 	reader.Comma = separator
 	reader.TrimLeadingSpace = true
+	reader.FieldsPerRecord = -1 // allow ragged rows
 
 	records, err := reader.ReadAll()
 	if err != nil {
@@ -125,6 +139,7 @@ type Review struct {
 // ImportReview reads the CSV data and returns a review of the changes.
 // It requires edit_details OR invite OR remove permission.
 // Rows are marked with problems that the caller couldn't apply.
+// Missing rows are unticked by default (ticking a Remove row is the confirmation).
 func (s *Service) ImportReview(ctx context.Context, c *Caller, header []string, rows [][]string) (*Review, error) {
 	// Authorization: edit_details OR invite OR remove (any)
 	hasAnyPerm := c.Admin || c.Perms[PermEditDetails] || c.Perms[PermInvite] || c.Perms[PermRemove]
@@ -195,23 +210,46 @@ func (s *Service) ImportReview(ctx context.Context, c *Caller, header []string, 
 	// Track usernames in the file (case-insensitive) to detect duplicates
 	fileUsers := make(map[string][]string) // lowercase -> original usernames
 	for _, row := range rows {
-		if usernameCol >= 0 && usernameCol < len(row) {
+		if usernameCol < len(row) {
 			user := strings.TrimSpace(row[usernameCol])
-			lower := strings.ToLower(user)
-			fileUsers[lower] = append(fileUsers[lower], user)
+			if user != "" {
+				lower := strings.ToLower(user)
+				fileUsers[lower] = append(fileUsers[lower], user)
+			}
 		}
 	}
 
 	// Process each row in the file
 	for _, row := range rows {
-		if usernameCol >= 0 && usernameCol < len(row) {
+		if usernameCol < len(row) {
 			user := strings.TrimSpace(row[usernameCol])
+			if user == "" {
+				// Empty username row: add problem
+				rr := ReviewRow{
+					User:     "(empty)",
+					Status:   "new",
+					Cells:    make(map[string]Cell),
+					Problems: []string{"username is required"},
+				}
+				review.Rows = append(review.Rows, rr)
+				continue
+			}
 			rr := s.reviewRow(ctx, c, user, row, header, colMap, displayNameCol, emailCol, sn, cfg, fields, fileUsers)
+			review.Rows = append(review.Rows, rr)
+		} else {
+			// Short row (no username cell)
+			rr := ReviewRow{
+				User:     "(missing)",
+				Status:   "new",
+				Cells:    make(map[string]Cell),
+				Problems: []string{"row is too short (no username column)"},
+			}
 			review.Rows = append(review.Rows, rr)
 		}
 	}
 
 	// Add "missing" rows: users in LLDAP but not in the file
+	missingUsers := []string{}
 	for user := range sn.users {
 		lower := strings.ToLower(user)
 		if _, inFile := fileUsers[lower]; !inFile {
@@ -219,27 +257,39 @@ func (s *Service) ImportReview(ctx context.Context, c *Caller, header []string, 
 			if s.checkTarget(user) != nil {
 				continue
 			}
-			rr := ReviewRow{
-				User:     user,
-				Status:   "missing",
-				Cells:    make(map[string]Cell),
-				Problems: []string{},
-			}
-			// Fill current values
-			u := sn.users[lower]
-			for fname := range fields {
-				if vals, ok := u.Attributes[fname]; ok {
-					rr.Cells[fname] = Cell{Current: vals, File: nil}
-				}
-			}
-			review.Rows = append(review.Rows, rr)
+			missingUsers = append(missingUsers, user)
 		}
 	}
-
-	// Compute Effect on rule groups
-	if cfg != nil {
-		review.Effect = s.computeEffect(ctx, cfg, sn, review.Rows, time.Now())
+	sort.Strings(missingUsers)
+	for _, user := range missingUsers {
+		lower := strings.ToLower(user)
+		rr := ReviewRow{
+			User:     user,
+			Status:   "missing",
+			Cells:    make(map[string]Cell),
+			Problems: []string{},
+		}
+		// Fill current values
+		u := sn.users[lower]
+		for fname := range fields {
+			if vals, ok := u.Attributes[fname]; ok {
+				rr.Cells[fname] = Cell{Current: vals, File: nil}
+			}
+		}
+		// Check remove permission and delegate target
+		if !c.Admin && !c.Perms[PermRemove] {
+			rr.Problems = append(rr.Problems, "removing users requires the remove permission")
+		}
+		if !c.Admin {
+			if err := s.checkDelegateTarget(c, user, sn, cfg); err != nil {
+				rr.Problems = append(rr.Problems, fmt.Sprintf("only an admin can change %s", user))
+			}
+		}
+		review.Rows = append(review.Rows, rr)
 	}
+
+	// Compute Effect on rule groups (exclude missing rows by default)
+	review.Effect = s.computeEffect(ctx, cfg, sn, review.Rows, time.Now(), false)
 
 	return review, nil
 }
@@ -264,19 +314,26 @@ func (s *Service) reviewRow(ctx context.Context, c *Caller, user string, row []s
 		rr.Status = "same" // will be changed to "changed" if differences found
 	}
 
-	changed := false
+	// Determine what changes this row would make
+	nameChanged := false
+	emailChanged := false
+	attrsChanged := false
 
-	// Check display_name and email
+	// Check display_name
+	var fileDisplayName string
 	if displayNameCol >= 0 && displayNameCol < len(row) {
-		fileVal := strings.TrimSpace(row[displayNameCol])
-		if exists && u.DisplayName != fileVal {
-			changed = true
+		fileDisplayName = strings.TrimSpace(row[displayNameCol])
+		if exists && u.DisplayName != fileDisplayName {
+			nameChanged = true
 		}
 	}
+
+	// Check email
+	var fileEmail string
 	if emailCol >= 0 && emailCol < len(row) {
-		fileVal := strings.TrimSpace(row[emailCol])
-		if exists && u.Email != fileVal {
-			changed = true
+		fileEmail = strings.TrimSpace(row[emailCol])
+		if exists && u.Email != fileEmail {
+			emailChanged = true
 		}
 	}
 
@@ -315,7 +372,7 @@ func (s *Service) reviewRow(ctx context.Context, c *Caller, user string, row []s
 
 		// Check if changed
 		if !stringSliceEqual(currentVals, fileVals) {
-			changed = true
+			attrsChanged = true
 		}
 
 		// Validate file values
@@ -324,32 +381,58 @@ func (s *Service) reviewRow(ctx context.Context, c *Caller, user string, row []s
 			rr.Problems = append(rr.Problems, fmt.Sprintf("field %s: %s", fname, p))
 		}
 
-		// Check permission for AdminOnly fields
-		if f.AdminOnly && !c.Admin && len(fileVals) > 0 {
-			rr.Problems = append(rr.Problems, fmt.Sprintf("field %s is admin-only", fname))
+		// Check permission for AdminOnly fields if changed or emptied
+		if f.AdminOnly && !c.Admin && !stringSliceEqual(currentVals, fileVals) {
+			if len(fileVals) == 0 {
+				rr.Problems = append(rr.Problems, fmt.Sprintf("field %s is admin-only (cannot be emptied by a delegate)", fname))
+			} else {
+				rr.Problems = append(rr.Problems, fmt.Sprintf("field %s is admin-only", fname))
+			}
 		}
 	}
 
-	if exists && changed {
-		rr.Status = "changed"
-	}
+	changed := nameChanged || emailChanged || attrsChanged
 
-	// Check if caller can target this user (for delegates)
-	if !c.Admin {
-		if err := s.checkDelegateTarget(c, user, sn, cfg); err != nil {
-			rr.Problems = append(rr.Problems, fmt.Sprintf("only an admin can change %s", user))
+	if exists {
+		if changed {
+			rr.Status = "changed"
 		}
-	}
 
-	// New user validation
-	if !exists {
+		// For changed rows, check permissions based on what changed
+		if changed && rr.Status != "same" {
+			// Display name or email change requires edit_details
+			if (nameChanged || emailChanged) && !c.Admin && !c.Perms[PermEditDetails] {
+				rr.Problems = append(rr.Problems, "changing display_name or email requires the edit_details permission")
+			}
+
+			// Attribute changes require edit_details
+			if attrsChanged && !c.Admin && !c.Perms[PermEditDetails] {
+				rr.Problems = append(rr.Problems, "changing custom fields requires the edit_details permission")
+			}
+
+			// Delegate target check for changed rows
+			if !c.Admin {
+				if err := s.checkDelegateTarget(c, user, sn, cfg); err != nil {
+					rr.Problems = append(rr.Problems, fmt.Sprintf("only an admin can change %s", user))
+				}
+			}
+		}
+	} else {
+		// New user validation
+		rr.Status = "new"
+
 		// Check invite permission
 		if !c.Admin && !c.Perms[PermInvite] {
 			rr.Problems = append(rr.Problems, "creating new users requires the invite permission")
 		}
 
+		// If new user has attrs, also needs edit_details
+		if attrsChanged && !c.Admin && !c.Perms[PermEditDetails] {
+			rr.Problems = append(rr.Problems, "creating users with custom fields requires both invite and edit_details permissions")
+		}
+
 		// Check for tombstone (delegates)
-		if !c.Admin && cfg != nil {
+		if !c.Admin {
 			if _, deleted := cfg.Deleted[lower]; deleted {
 				rr.Problems = append(rr.Problems, fmt.Sprintf("%s was deleted; an admin must re-create it", user))
 			}
@@ -377,11 +460,6 @@ func (s *Service) reviewRow(ctx context.Context, c *Caller, user string, row []s
 		} else {
 			rr.Problems = append(rr.Problems, "email is required for new users")
 		}
-	}
-
-	// Missing user - check remove permission
-	if rr.Status == "missing" && !c.Admin && !c.Perms[PermRemove] {
-		rr.Problems = append(rr.Problems, "removing users requires the remove permission")
 	}
 
 	return rr
@@ -416,6 +494,12 @@ func (s *Service) validateFieldValues(f Field, vals []string, sn *snapshot) []st
 				problems = append(problems, fmt.Sprintf("%q is not a known user", v))
 			}
 		}
+	case FieldKindText:
+		for _, v := range vals {
+			if utf8.RuneCountInString(v) > maxTextRunes {
+				problems = append(problems, fmt.Sprintf("%q is too long (max %d characters)", v, maxTextRunes))
+			}
+		}
 	}
 
 	return problems
@@ -440,9 +524,9 @@ func stringSliceEqual(a, b []string) bool {
 	return true
 }
 
-func (s *Service) computeEffect(ctx context.Context, cfg *Config, sn *snapshot, rows []ReviewRow, now time.Time) map[string][2]int {
+func (s *Service) computeEffect(ctx context.Context, cfg *Config, sn *snapshot, rows []ReviewRow, now time.Time, includeRemovals bool) map[string][2]int {
 	// Build a hypothetical snapshot with the changes applied
-	hypothetical := s.applyChangesToSnapshot(sn, rows, cfg)
+	hypothetical := s.applyChangesToSnapshot(sn, rows, cfg, includeRemovals)
 
 	// Compute desired membership before and after
 	before := s.Desired(cfg, sn, now)
@@ -484,7 +568,7 @@ func (s *Service) computeEffect(ctx context.Context, cfg *Config, sn *snapshot, 
 	return effect
 }
 
-func (s *Service) applyChangesToSnapshot(sn *snapshot, rows []ReviewRow, cfg *Config) *snapshot {
+func (s *Service) applyChangesToSnapshot(sn *snapshot, rows []ReviewRow, cfg *Config, includeRemovals bool) *snapshot {
 	// Create a copy of the snapshot
 	hyp := &snapshot{
 		users:  make(map[string]lldap.User),
@@ -552,8 +636,10 @@ func (s *Service) applyChangesToSnapshot(sn *snapshot, rows []ReviewRow, cfg *Co
 			}
 
 		case "missing":
-			// Remove user
-			delete(hyp.users, lower)
+			// Remove user only if includeRemovals is true
+			if includeRemovals {
+				delete(hyp.users, lower)
+			}
 		}
 	}
 
@@ -564,10 +650,10 @@ func (s *Service) applyChangesToSnapshot(sn *snapshot, rows []ReviewRow, cfg *Co
 type ApplyRow struct {
 	User        string              `json:"user"`
 	Create      bool                `json:"create"`       // create new user
-	Remove      bool                `json:"remove"`       // remove user
+	Remove      bool                `json:"remove"`       // remove user (ticking a Remove row is the confirmation)
 	Attrs       map[string][]string `json:"attrs"`        // attributes to set
-	DisplayName string              `json:"display_name"` // for create
-	Email       string              `json:"email"`        // for create
+	DisplayName string              `json:"display_name"` // for create or update
+	Email       string              `json:"email"`        // for create or update
 }
 
 // RowResult is the result of applying one row.
@@ -590,8 +676,8 @@ type ApplyResult struct {
 
 // ImportApply applies the import changes. Each row is re-validated.
 // Creates use CreateUser (with invite), removes use DeleteUser, and
-// attribute updates use SetUserAttributes. Per-row results are returned,
-// so partial failures are reported without rollback.
+// attribute updates use SetDetails. Display name/email updates use UpdateUser.
+// Per-row results are returned, so partial failures are reported without rollback.
 func (s *Service) ImportApply(ctx context.Context, c *Caller, req ApplyRequest) (*ApplyResult, error) {
 	result := &ApplyResult{Rows: make([]RowResult, len(req.Rows))}
 
@@ -607,6 +693,78 @@ func (s *Service) applyRow(ctx context.Context, c *Caller, row ApplyRow) RowResu
 
 	switch {
 	case row.Create:
+		// Validate attrs BEFORE creating the user
+		if len(row.Attrs) > 0 {
+			if s.Store == nil {
+				res.Error = "custom fields not configured"
+				return res
+			}
+			cfg, err := s.Store.Load()
+			if err != nil {
+				res.Error = "directory.yaml: " + err.Error()
+				return res
+			}
+
+			// Check edit_details permission for attrs
+			if !c.Admin && !c.Perms[PermEditDetails] {
+				res.Error = "creating users with custom fields requires both invite and edit_details permissions"
+				return res
+			}
+
+			// Validate attrs using the same logic as SetDetails
+			fields := make(map[string]Field)
+			for _, f := range cfg.Fields {
+				fields[f.Name] = f
+			}
+
+			sn, err := s.load(ctx)
+			if err != nil {
+				res.Error = err.Error()
+				return res
+			}
+
+			for name, vals := range row.Attrs {
+				f, ok := fields[name]
+				if !ok {
+					res.Error = fmt.Sprintf("unknown field: %s", name)
+					return res
+				}
+
+				if f.AdminOnly && !c.Admin {
+					res.Error = fmt.Sprintf("field %s is admin-only", name)
+					return res
+				}
+
+				if len(vals) == 0 {
+					continue
+				}
+
+				if !f.Multi && len(vals) > 1 {
+					res.Error = fmt.Sprintf("field %s is single-valued (got %d values)", name, len(vals))
+					return res
+				}
+
+				// Trim and validate values
+				trimmed := make([]string, 0, len(vals))
+				for _, v := range vals {
+					v = strings.TrimSpace(v)
+					if v == "" {
+						res.Error = fmt.Sprintf("field %s: empty values not allowed", name)
+						return res
+					}
+					trimmed = append(trimmed, v)
+				}
+
+				problems := s.validateFieldValues(f, trimmed, sn)
+				if len(problems) > 0 {
+					res.Error = fmt.Sprintf("field %s: %s", name, problems[0])
+					return res
+				}
+
+				row.Attrs[name] = trimmed
+			}
+		}
+
 		// Create new user via CreateUser
 		createReq := CreateRequest{
 			Username:    row.User,
@@ -645,13 +803,37 @@ func (s *Service) applyRow(ctx context.Context, c *Caller, row ApplyRow) RowResu
 		}
 
 	default:
-		// Update attributes via SetDetails
-		if len(row.Attrs) > 0 {
-			if err := s.SetDetails(ctx, c, row.User, row.Attrs); err != nil {
+		// Update existing user: apply display_name/email via UpdateUser, attrs via SetDetails
+		nameChanged := row.DisplayName != ""
+		emailChanged := row.Email != ""
+		attrsChanged := len(row.Attrs) > 0
+
+		if nameChanged || emailChanged {
+			var displayName, email *string
+			if nameChanged {
+				displayName = &row.DisplayName
+			}
+			if emailChanged {
+				email = &row.Email
+			}
+			if err := s.UpdateUser(ctx, c, row.User, email, displayName); err != nil {
 				res.Error = err.Error()
 				return res
 			}
 		}
+
+		if attrsChanged {
+			if err := s.SetDetails(ctx, c, row.User, row.Attrs); err != nil {
+				if nameChanged || emailChanged {
+					res.Error = fmt.Sprintf("display_name/email updated but setting attributes failed: %v", err)
+					res.OK = false
+				} else {
+					res.Error = err.Error()
+				}
+				return res
+			}
+		}
+
 		res.OK = true
 	}
 

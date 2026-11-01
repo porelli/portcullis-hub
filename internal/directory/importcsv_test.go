@@ -2,6 +2,7 @@ package directory_test
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -10,6 +11,15 @@ import (
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/rules"
 )
+
+func findRow(rows []directory.ReviewRow, username string) *directory.ReviewRow {
+	for i := range rows {
+		if strings.EqualFold(rows[i].User, username) {
+			return &rows[i]
+		}
+	}
+	return nil
+}
 
 func TestParseCSVExcelVariants(t *testing.T) {
 	// All these variants should parse to the same rows
@@ -408,4 +418,619 @@ func TestImportApplyRevalidates(t *testing.T) {
 	if !strings.Contains(result.Rows[1].Error, "city") {
 		t.Errorf("bob error should mention city, got: %s", result.Rows[1].Error)
 	}
+}
+
+func TestParseCSVLimits(t *testing.T) {
+	t.Run("too_many_rows", func(t *testing.T) {
+		// Generate 10,001 rows + header
+		var sb strings.Builder
+		sb.WriteString("username\n")
+		for i := 0; i <= 10000; i++ {
+			sb.WriteString(fmt.Sprintf("user%d\n", i))
+		}
+		_, _, err := directory.ParseCSV(strings.NewReader(sb.String()))
+		if err == nil {
+			t.Fatal("expected error for too many rows")
+		}
+		if !strings.Contains(err.Error(), "too many rows") {
+			t.Errorf("error should mention too many rows, got: %v", err)
+		}
+	})
+
+	t.Run("too_many_columns", func(t *testing.T) {
+		// Generate 65 columns
+		var sb strings.Builder
+		for i := 0; i < 65; i++ {
+			if i > 0 {
+				sb.WriteString(",")
+			}
+			sb.WriteString(fmt.Sprintf("col%d", i))
+		}
+		sb.WriteString("\n")
+		_, _, err := directory.ParseCSV(strings.NewReader(sb.String()))
+		if err == nil {
+			t.Fatal("expected error for too many columns")
+		}
+		if !strings.Contains(err.Error(), "too many columns") {
+			t.Errorf("error should mention too many columns, got: %v", err)
+		}
+	})
+
+	t.Run("duplicate_header", func(t *testing.T) {
+		csv := "username,email,username\nalice,alice@example.org,alice"
+		_, _, err := directory.ParseCSV(strings.NewReader(csv))
+		if err == nil {
+			t.Fatal("expected error for duplicate header")
+		}
+		if !strings.Contains(strings.ToLower(err.Error()), "duplicate") {
+			t.Errorf("error should mention duplicate, got: %v", err)
+		}
+	})
+}
+
+func TestImportReviewEmptyCellVsAbsentColumn(t *testing.T) {
+	env := newEnv(t)
+	ctx := context.Background()
+	env.ll.AddUser("alice", "alice@example.org", "Alice", "pass-123456")
+
+	if err := env.svc.LLDAP.AddUserAttribute(ctx, "city", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.svc.LLDAP.AddUserAttribute(ctx, "department", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.svc.LLDAP.SetUserAttributes(ctx, "alice", map[string][]string{
+		"city":       {"Rome"},
+		"department": {"Sales"},
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &directory.Config{
+		Version: 1,
+		Fields: []directory.Field{
+			{Name: "city", Kind: directory.FieldKindText, Multi: false},
+			{Name: "department", Kind: directory.FieldKindText, Multi: false},
+		},
+		Groups:      map[string]*directory.GroupConfig{},
+		Permissions: map[string]string{},
+		CreatedBy:   map[string]string{},
+		Deleted:     map[string]time.Time{},
+	}
+	env.svc.Store = &directory.Store{Path: filepath.Join(t.TempDir(), "directory.yaml")}
+	if err := env.svc.Store.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	admin, _ := env.svc.CallerFor(ctx, "root")
+
+	// CSV with city column empty, no department column
+	csv := "username,city\nalice,"
+	header, rows, err := directory.ParseCSV(strings.NewReader(csv))
+	if err != nil {
+		t.Fatalf("ParseCSV: %v", err)
+	}
+
+	review, err := env.svc.ImportReview(ctx, admin, header, rows)
+	if err != nil {
+		t.Fatalf("ImportReview: %v", err)
+	}
+
+	row := findRow(review.Rows, "alice")
+	if row == nil {
+		t.Fatal("alice not found in review rows")
+	}
+
+	// City column is present but empty → file value should be empty (clear)
+	if cityCell, ok := row.Cells["city"]; ok {
+		if len(cityCell.File) != 0 {
+			t.Errorf("city file value should be empty (clearing), got %v", cityCell.File)
+		}
+		if len(cityCell.Current) == 0 || cityCell.Current[0] != "Rome" {
+			t.Errorf("city current value should be Rome, got %v", cityCell.Current)
+		}
+	} else {
+		t.Error("city cell not found")
+	}
+
+	// Department column absent → cell won't be in Cells map at all (untouched)
+	// This is expected behavior - absent columns don't create cells
+	if _, ok := row.Cells["department"]; ok {
+		t.Error("department cell should not exist when column is absent")
+	}
+}
+
+func TestImportApplyDisplayNameChange(t *testing.T) {
+	env := newEnv(t)
+	ctx := context.Background()
+	env.ll.AddUser("alice", "alice@example.org", "Alice Old", "pass-123456")
+
+	admin, _ := env.svc.CallerFor(ctx, "root")
+
+	// Apply display_name change
+	req := directory.ApplyRequest{
+		Rows: []directory.ApplyRow{
+			{User: "alice", DisplayName: "Alice New"},
+		},
+	}
+
+	result, err := env.svc.ImportApply(ctx, admin, req)
+	if err != nil {
+		t.Fatalf("ImportApply: %v", err)
+	}
+
+	if len(result.Rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(result.Rows))
+	}
+
+	if !result.Rows[0].OK {
+		t.Errorf("apply should succeed, got error: %s", result.Rows[0].Error)
+	}
+
+	// Verify the change was applied
+	users, err := env.svc.LLDAP.ListUsers(ctx)
+	if err != nil {
+		t.Fatalf("ListUsers: %v", err)
+	}
+
+	found := false
+	for _, u := range users {
+		if strings.EqualFold(u.ID, "alice") {
+			if u.DisplayName != "Alice New" {
+				t.Errorf("display_name: got %q, want %q", u.DisplayName, "Alice New")
+			}
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("alice not found after apply")
+	}
+}
+
+func TestImportReviewDelegateProblems(t *testing.T) {
+	env := newEnv(t)
+	ctx := context.Background()
+	env.ll.AddUser("alice", "alice@example.org", "Alice", "pass-123456")
+	env.ll.AddUser("hera", "hera@example.org", "Hera", "pass-123456", "hr_edit")
+	env.ll.AddUser("inv", "inv@example.org", "Inv", "pass-123456", "hr_invite")
+	env.ll.AddUser("otto", "otto@example.org", "Otto", "pass-123456", "ops_admins")
+	env.ll.AddUser("pm", "pm@example.org", "PM", "pass-123456", "lldap_password_manager")
+
+	if err := env.svc.LLDAP.AddUserAttribute(ctx, "city", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.svc.LLDAP.AddUserAttribute(ctx, "secret", false); err != nil {
+		t.Fatal(err)
+	}
+
+	env.ll.AddGroup("hr_edit", "hera")
+	env.ll.AddGroup("hr_invite", "inv")
+	env.ll.AddGroup("hr_remove")
+	env.ll.AddGroup("ops_admins", "otto")
+
+	cfg := &directory.Config{
+		Version: 1,
+		Fields: []directory.Field{
+			{Name: "city", Kind: directory.FieldKindText, Multi: false},
+			{Name: "secret", Kind: directory.FieldKindText, Multi: false, AdminOnly: true},
+		},
+		Groups: map[string]*directory.GroupConfig{},
+		Permissions: map[string]string{
+			directory.PermEditDetails: "hr_edit",
+			directory.PermInvite:      "hr_invite",
+			directory.PermRemove:      "hr_remove",
+		},
+		CreatedBy: map[string]string{},
+		Deleted:   map[string]time.Time{},
+	}
+	env.svc.Store = &directory.Store{Path: filepath.Join(t.TempDir(), "directory.yaml")}
+	if err := env.svc.Store.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("no_permission_403", func(t *testing.T) {
+		// User with no permissions
+		nobody, _ := env.svc.CallerFor(ctx, "alice")
+
+		csv := "username,display_name\nalice,Alice New"
+		header, rows, err := directory.ParseCSV(strings.NewReader(csv))
+		if err != nil {
+			t.Fatalf("ParseCSV: %v", err)
+		}
+
+		_, err = env.svc.ImportReview(ctx, nobody, header, rows)
+		if err == nil {
+			t.Fatal("expected 403 error")
+		}
+		if !strings.Contains(err.Error(), "not allowed") {
+			t.Errorf("expected 'not allowed' error, got: %v", err)
+		}
+	})
+
+	t.Run("invite_only_sees_edit_details_problems", func(t *testing.T) {
+		invOnly, _ := env.svc.CallerFor(ctx, "inv")
+
+		// Changed row requires edit_details
+		csv := "username,display_name\nalice,Alice New"
+		header, rows, err := directory.ParseCSV(strings.NewReader(csv))
+		if err != nil {
+			t.Fatalf("ParseCSV: %v", err)
+		}
+
+		review, err := env.svc.ImportReview(ctx, invOnly, header, rows)
+		if err != nil {
+			t.Fatalf("ImportReview: %v", err)
+		}
+
+		row := findRow(review.Rows, "alice")
+		if row == nil {
+			t.Fatal("alice not found in review rows")
+		}
+		found := false
+		for _, p := range row.Problems {
+			if strings.Contains(p, "edit_details") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected edit_details problem, got: %v", review.Rows[0].Problems)
+		}
+	})
+
+	t.Run("self_row_different_case", func(t *testing.T) {
+		hera, _ := env.svc.CallerFor(ctx, "hera")
+
+		// Hera trying to edit HERA (different case)
+		csv := "username,city\nHERA,Milan"
+		header, rows, err := directory.ParseCSV(strings.NewReader(csv))
+		if err != nil {
+			t.Fatalf("ParseCSV: %v", err)
+		}
+
+		review, err := env.svc.ImportReview(ctx, hera, header, rows)
+		if err != nil {
+			t.Fatalf("ImportReview: %v", err)
+		}
+
+		row := findRow(review.Rows, "hera")
+		if row == nil {
+			t.Fatal("hera not found in review rows")
+		}
+		found := false
+		for _, p := range row.Problems {
+			if strings.Contains(strings.ToLower(p), "admin") && strings.Contains(strings.ToLower(p), "hera") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected problem about self-targeting, got: %v", review.Rows[0].Problems)
+		}
+	})
+
+	t.Run("admin_and_permission_group_members", func(t *testing.T) {
+		hera, _ := env.svc.CallerFor(ctx, "hera")
+
+		// Trying to edit root (admin), otto (ops_admins), pm (lldap_password_manager), inv (hr_invite member)
+		csv := "username,city\nroot,Milan\notto,Rome\npm,Naples\ninv,Florence"
+		header, rows, err := directory.ParseCSV(strings.NewReader(csv))
+		if err != nil {
+			t.Fatalf("ParseCSV: %v", err)
+		}
+
+		review, err := env.svc.ImportReview(ctx, hera, header, rows)
+		if err != nil {
+			t.Fatalf("ImportReview: %v", err)
+		}
+
+		// All should have problems
+		// Check specific rows we care about: root, otto, pm, inv
+		for _, username := range []string{"root", "otto", "pm", "inv"} {
+			row := findRow(review.Rows, username)
+			if row == nil {
+				t.Errorf("%s not found in review", username)
+				continue
+			}
+			if len(row.Problems) == 0 {
+				t.Errorf("%s should have problems (delegate cannot target admins/permission-group members)", username)
+			}
+			found := false
+			for _, p := range row.Problems {
+				if strings.Contains(strings.ToLower(p), "admin") {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("%s: expected admin-related problem, got: %v", username, row.Problems)
+			}
+		}
+	})
+
+	t.Run("admin_only_field_edited", func(t *testing.T) {
+		hera, _ := env.svc.CallerFor(ctx, "hera")
+
+		// Trying to edit AdminOnly field
+		csv := "username,secret\nalice,topsecret"
+		header, rows, err := directory.ParseCSV(strings.NewReader(csv))
+		if err != nil {
+			t.Fatalf("ParseCSV: %v", err)
+		}
+
+		review, err := env.svc.ImportReview(ctx, hera, header, rows)
+		if err != nil {
+			t.Fatalf("ImportReview: %v", err)
+		}
+
+		row := findRow(review.Rows, "alice")
+		if row == nil {
+			t.Fatal("alice not found in review rows")
+		}
+		found := false
+		for _, p := range row.Problems {
+			if strings.Contains(p, "secret") && strings.Contains(p, "admin-only") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected admin-only problem, got: %v", review.Rows[0].Problems)
+		}
+	})
+
+	t.Run("admin_only_field_emptied", func(t *testing.T) {
+		// Set a value first
+		if err := env.svc.LLDAP.SetUserAttributes(ctx, "alice", map[string][]string{"secret": {"value"}}, nil); err != nil {
+			t.Fatal(err)
+		}
+
+		hera, _ := env.svc.CallerFor(ctx, "hera")
+
+		// Trying to empty AdminOnly field
+		csv := "username,secret\nalice,"
+		header, rows, err := directory.ParseCSV(strings.NewReader(csv))
+		if err != nil {
+			t.Fatalf("ParseCSV: %v", err)
+		}
+
+		review, err := env.svc.ImportReview(ctx, hera, header, rows)
+		if err != nil {
+			t.Fatalf("ImportReview: %v", err)
+		}
+
+		row := findRow(review.Rows, "alice")
+		if row == nil {
+			t.Fatal("alice not found in review rows")
+		}
+		found := false
+		for _, p := range row.Problems {
+			if strings.Contains(p, "secret") && strings.Contains(p, "admin-only") && strings.Contains(p, "emptied") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected admin-only emptied problem, got: %v", review.Rows[0].Problems)
+		}
+	})
+}
+
+func TestImportReviewUnchangedRowsNoProblems(t *testing.T) {
+	env := newEnv(t)
+	ctx := context.Background()
+	env.ll.AddUser("alice", "alice@example.org", "Alice", "pass-123456")
+
+	if err := env.svc.LLDAP.AddUserAttribute(ctx, "city", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.svc.LLDAP.SetUserAttributes(ctx, "alice", map[string][]string{"city": {"Rome"}}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &directory.Config{
+		Version: 1,
+		Fields: []directory.Field{
+			{Name: "city", Kind: directory.FieldKindText, Multi: false},
+		},
+		Groups:      map[string]*directory.GroupConfig{},
+		Permissions: map[string]string{},
+		CreatedBy:   map[string]string{},
+		Deleted:     map[string]time.Time{},
+	}
+	env.svc.Store = &directory.Store{Path: filepath.Join(t.TempDir(), "directory.yaml")}
+	if err := env.svc.Store.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	// Delegate with no edit_details permission
+	env.ll.AddUser("inv", "inv@example.org", "Inv", "pass-123456", "hr_invite")
+	env.ll.AddGroup("hr_invite", "inv")
+	cfg.Permissions = map[string]string{directory.PermInvite: "hr_invite"}
+	if err := env.svc.Store.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	invOnly, _ := env.svc.CallerFor(ctx, "inv")
+
+	// Unchanged row (same values)
+	csv := "username,display_name,email,city\nalice,Alice,alice@example.org,Rome"
+	header, rows, err := directory.ParseCSV(strings.NewReader(csv))
+	if err != nil {
+		t.Fatalf("ParseCSV: %v", err)
+	}
+
+	review, err := env.svc.ImportReview(ctx, invOnly, header, rows)
+	if err != nil {
+		t.Fatalf("ImportReview: %v", err)
+	}
+
+	row := findRow(review.Rows, "alice")
+	if row == nil {
+		t.Fatal("alice not found in review rows")
+	}
+
+	if row.Status != "same" {
+		t.Errorf("status: got %q, want %q", review.Rows[0].Status, "same")
+	}
+
+	// Unchanged rows should have NO permission problems
+	if len(row.Problems) > 0 {
+		t.Errorf("unchanged row should have no problems, got: %v", row.Problems)
+	}
+}
+
+func TestParseCSVEmptyUsernameAndShortRows(t *testing.T) {
+	t.Run("empty_username", func(t *testing.T) {
+		csv := "username,email\n,alice@example.org"
+		header, rows, err := directory.ParseCSV(strings.NewReader(csv))
+		if err != nil {
+			t.Fatalf("ParseCSV: %v", err)
+		}
+
+		env := newEnv(t)
+		admin, _ := env.svc.CallerFor(context.Background(), "root")
+
+		review, err := env.svc.ImportReview(context.Background(), admin, header, rows)
+		if err != nil {
+			t.Fatalf("ImportReview: %v", err)
+		}
+
+		// Empty username rows get "(empty)" as username
+		var emptyRow *directory.ReviewRow
+		for i := range review.Rows {
+			if review.Rows[i].User == "(empty)" {
+				emptyRow = &review.Rows[i]
+				break
+			}
+		}
+		if emptyRow == nil {
+			t.Fatal("empty username row not found")
+		}
+		found := false
+		for _, p := range emptyRow.Problems {
+			if strings.Contains(strings.ToLower(p), "username") && strings.Contains(strings.ToLower(p), "required") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected username required problem, got: %v", review.Rows[0].Problems)
+		}
+	})
+
+	t.Run("short_row", func(t *testing.T) {
+		// Row with fewer columns than header
+		csv := "username,email,city\nalice"
+		header, rows, err := directory.ParseCSV(strings.NewReader(csv))
+		if err != nil {
+			t.Fatalf("ParseCSV: %v", err)
+		}
+
+		env := newEnv(t)
+		env.ll.AddUser("alice", "alice@example.org", "Alice", "pass-123456")
+
+		if err := env.svc.LLDAP.AddUserAttribute(context.Background(), "city", false); err != nil {
+			t.Fatal(err)
+		}
+
+		cfg := &directory.Config{
+			Version: 1,
+			Fields: []directory.Field{
+				{Name: "city", Kind: directory.FieldKindText, Multi: false},
+			},
+			Groups:      map[string]*directory.GroupConfig{},
+			Permissions: map[string]string{},
+			CreatedBy:   map[string]string{},
+			Deleted:     map[string]time.Time{},
+		}
+		env.svc.Store = &directory.Store{Path: filepath.Join(t.TempDir(), "directory.yaml")}
+		if err := env.svc.Store.Save(cfg); err != nil {
+			t.Fatal(err)
+		}
+
+		admin, _ := env.svc.CallerFor(context.Background(), "root")
+
+		review, err := env.svc.ImportReview(context.Background(), admin, header, rows)
+		if err != nil {
+			t.Fatalf("ImportReview: %v", err)
+		}
+
+		// Short rows are handled gracefully (bounds-checked)
+		// The row should process but show missing email
+		row := findRow(review.Rows, "alice")
+		if row == nil {
+			t.Fatal("alice not found in review rows")
+		}
+	})
+}
+
+func TestSetDetailsValidation(t *testing.T) {
+	env := newEnv(t)
+	ctx := context.Background()
+	env.ll.AddUser("alice", "alice@example.org", "Alice", "pass-123456")
+
+	if err := env.svc.LLDAP.AddUserAttribute(ctx, "city", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.svc.LLDAP.AddUserAttribute(ctx, "bio", false); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &directory.Config{
+		Version: 1,
+		Fields: []directory.Field{
+			{Name: "city", Kind: directory.FieldKindText, Multi: false},
+			{Name: "bio", Kind: directory.FieldKindText, Multi: false},
+		},
+		Groups:      map[string]*directory.GroupConfig{},
+		Permissions: map[string]string{},
+		CreatedBy:   map[string]string{},
+		Deleted:     map[string]time.Time{},
+	}
+	env.svc.Store = &directory.Store{Path: filepath.Join(t.TempDir(), "directory.yaml")}
+	if err := env.svc.Store.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	admin, _ := env.svc.CallerFor(ctx, "root")
+
+	t.Run("trims_values", func(t *testing.T) {
+		err := env.svc.SetDetails(ctx, admin, "alice", map[string][]string{
+			"city": {"  Rome  "},
+		})
+		if err != nil {
+			t.Fatalf("SetDetails: %v", err)
+		}
+
+		// Verify trimmed value was set
+		users, _ := env.svc.LLDAP.ListUsers(ctx)
+		for _, u := range users {
+			if strings.EqualFold(u.ID, "alice") {
+				if u.Attributes["city"][0] != "Rome" {
+					t.Errorf("value should be trimmed to 'Rome', got %q", u.Attributes["city"][0])
+				}
+			}
+		}
+	})
+
+	t.Run("refuses_empty_string", func(t *testing.T) {
+		err := env.svc.SetDetails(ctx, admin, "alice", map[string][]string{
+			"city": {""},
+		})
+		if err == nil {
+			t.Fatal("expected error for empty string value")
+		}
+		if !strings.Contains(err.Error(), "empty") {
+			t.Errorf("error should mention empty, got: %v", err)
+		}
+	})
+
+	t.Run("refuses_text_over_1024_runes", func(t *testing.T) {
+		longText := strings.Repeat("a", 1025)
+		err := env.svc.SetDetails(ctx, admin, "alice", map[string][]string{
+			"bio": {longText},
+		})
+		if err == nil {
+			t.Fatal("expected error for text over 1024 runes")
+		}
+		if !strings.Contains(err.Error(), "too long") {
+			t.Errorf("error should mention too long, got: %v", err)
+		}
+	})
 }
