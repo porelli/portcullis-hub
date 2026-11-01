@@ -103,12 +103,13 @@ how strong an app's setup is.
    - Existing certificates have no marker and count as hardware: they were
      issued only via the YubiKey CLI.
 4. **Limits.**
-   - A file certificate is valid for `CLIENT_CERT_TTL` (default 720 h).
-   - At most 5 active file certificates per user.
+   - A file certificate is valid for `CLIENT_CERT_TTL` (default 720 h). Admin specifies the limit, user can select anything up to the limit
+   - At most X active file certificates per user. As per admin configured
    - Revoking your own needs the same fresh touch; admins revoke anyone's.
+   - Where these are set (controller's call): Hub Settings → Certificates & sign-ins, admins only, audited. Defaults: maximum lifetime 720 h, at most 5 active file certificates per person, sign-in history kept 90 days. The maximum lifetime can't exceed core's `CLIENT_CERT_TTL` (the server-side ceiling enforced by `enroll`); the Hub passes the configured limits with each issuing request and `enroll` re-checks them. The retention applies to both sources: the Hub sets Keycloak's event expiration through the admin API and prunes the group-gate sign-in log to the same window.
 5. **Login history source: Keycloak events.**
    - Enable stored login events (`LOGIN`, `LOGIN_ERROR`, `CODE_TO_TOKEN`,
-     `LOGOUT`), with 90 days' retention, configured by `keycloak configure`.
+     `LOGOUT`), with X days' retention, configured by `keycloak configure`. As per admin configured
    - The Hub reads them through the admin API (gocloak).
    - The methods come from the session's full amr list (all factors, not just
      the last) plus the cert marker for certificates; step-up events are LOGIN
