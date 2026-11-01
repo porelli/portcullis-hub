@@ -279,34 +279,104 @@ func TestPublishKeepsPastExpiry(t *testing.T) {
 	}
 }
 
-// Rule groups the evaluator skips still drop expired exceptions, so a past
-// entry isn't published (and denying) forever.
-func TestSkippedRuleGroupPrunesExpired(t *testing.T) {
+// Rule groups the evaluator skips: an expired "added" exception of a
+// current member stays (published, denying) and is reported every run
+// until they are removed or an admin re-adds them; everything else
+// expired is dropped.
+func TestSkippedRuleGroupExpiredExceptions(t *testing.T) {
 	until := t0
-	t.Run("became admin group", func(t *testing.T) {
+	later := t0.Add(time.Hour)
+	skippedEnv := func(t *testing.T) (*env, *directory.Store) {
 		e, store := evalEnv(t)
 		setRule(t, store, "milan", `city = "Milan"`,
-			directory.Exception{User: "dave", Reason: "temp", By: "root", Include: true, Until: &until, At: t0.Add(-time.Hour)})
+			directory.Exception{User: "dave", Reason: "temp", By: "root", Include: true, Until: &until, At: t0.Add(-time.Hour)},
+			directory.Exception{User: "carol", Reason: "leave", By: "root", Include: false, Until: &until, At: t0.Add(-time.Hour)},
+			directory.Exception{User: "bob", Reason: "temp", By: "root", Include: true, Until: &later, At: t0.Add(-time.Hour)})
 		evaluate(t, e, t0.Add(-time.Second))
 		if !memberIn(e, "milan", "dave") {
 			t.Fatal("setup: dave not added")
 		}
 		base := e.svc.AdminGroups
 		e.svc.AdminGroups = func() map[string]bool { m := base(); m["milan"] = true; return m }
-		rep := evaluate(t, e, t0.Add(time.Second))
-		if !strings.Contains(strings.Join(rep.Errors, "\n"), `expired "added" exception of dave dropped`) {
-			t.Errorf("errors = %v", rep.Errors)
+		return e, store
+	}
+	daveExpired := fmt.Sprint([]directory.Expiring{{User: "dave", Group: "milan", At: t0}, {User: "bob", Group: "milan", At: later}})
+	bobOnly := fmt.Sprint([]directory.Expiring{{User: "bob", Group: "milan", At: later}})
+	exceptionsOf := func(t *testing.T, store *directory.Store) string {
+		cfg, _ := store.Load()
+		var out []string
+		for _, ex := range cfg.Groups["milan"].Exceptions {
+			out = append(out, ex.User)
 		}
-		if got := pendingAt(t, e, store, t0.Add(time.Second)); got != "[]" {
+		return strings.Join(out, ",")
+	}
+
+	t.Run("still member: kept and reported", func(t *testing.T) {
+		e, store := skippedEnv(t)
+		for i := 0; i < 2; i++ {
+			rep := evaluate(t, e, t0.Add(time.Duration(i+1)*time.Second))
+			if !strings.Contains(strings.Join(rep.Errors, "\n"), "milan: dave's temporary access expired but the evaluator doesn't manage this group") {
+				t.Errorf("run %d: errors = %v", i, rep.Errors)
+			}
+			if got := pendingAt(t, e, store, t0.Add(time.Second)); got != daveExpired {
+				t.Errorf("run %d: pending = %s", i, got)
+			}
+		}
+		// Expired "kept out" exception dropped, future one kept.
+		if got := exceptionsOf(t, store); got != "dave,bob" {
+			t.Errorf("exceptions = %s", got)
+		}
+		if !memberIn(e, "milan", "dave") {
+			t.Error("skipped group's membership changed")
+		}
+	})
+	t.Run("removed from group: dropped", func(t *testing.T) {
+		e, store := skippedEnv(t)
+		evaluate(t, e, t0.Add(time.Second))
+		e.ll.RemoveMember("milan", "dave")
+		evaluate(t, e, t0.Add(2*time.Second))
+		if got := pendingAt(t, e, store, t0.Add(2*time.Second)); got != bobOnly {
 			t.Errorf("pending = %s", got)
 		}
 		if g := graceOf(t, store); len(g) != 0 {
 			t.Errorf("grace = %+v", g)
 		}
 	})
-	t.Run("missing in LLDAP", func(t *testing.T) {
+	t.Run("admin re-adds: dropped", func(t *testing.T) {
+		e, store := skippedEnv(t)
+		// The time check uses the wall clock: make the exception past now.
+		cfg, _ := store.Load()
+		past := time.Now().Add(-time.Minute)
+		cfg.Groups["milan"].Exceptions[0].Until = &past
+		if err := store.Save(cfg); err != nil {
+			t.Fatal(err)
+		}
+		if err := e.svc.AddMember(ctx, asRoot, "milan", "dave"); err != nil {
+			t.Fatal(err)
+		}
+		if got := exceptionsOf(t, store); strings.Contains(got, "dave") || !memberIn(e, "milan", "dave") {
+			t.Errorf("after re-add: exceptions %s, member %v", got, memberIn(e, "milan", "dave"))
+		}
+		// Nothing left to confirm: a second re-add is "already a member".
+		if err := e.svc.AddMember(ctx, asRoot, "milan", "dave"); status(err) != 409 {
+			t.Errorf("second re-add: %v", err)
+		}
+		// Not a member, expired exception: AddMember adds and drops it.
+		cfg, _ = store.Load()
+		cfg.Groups["milan"].Exceptions = append(cfg.Groups["milan"].Exceptions,
+			directory.Exception{User: "alice", Reason: "temp", By: "root", Include: true, Until: &past, At: t0.Add(-time.Hour)})
+		if err := store.Save(cfg); err != nil {
+			t.Fatal(err)
+		}
+		if err := e.svc.AddMember(ctx, asRoot, "milan", "alice"); err != nil {
+			t.Fatal(err)
+		}
+		if got := exceptionsOf(t, store); strings.Contains(got, "alice") || !memberIn(e, "milan", "alice") {
+			t.Errorf("after add: exceptions %s", got)
+		}
+	})
+	t.Run("missing in LLDAP: pruned", func(t *testing.T) {
 		e, store := evalEnv(t)
-		later := t0.Add(time.Hour)
 		setRule(t, store, "ghost", `city = "Milan"`,
 			directory.Exception{User: "dave", Reason: "temp", By: "root", Include: true, Until: &until, At: t0.Add(-time.Hour)},
 			directory.Exception{User: "bob", Reason: "temp", By: "root", Include: true, Until: &later, At: t0.Add(-time.Hour)})

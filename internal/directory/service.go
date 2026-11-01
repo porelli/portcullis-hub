@@ -593,23 +593,38 @@ func (s *Service) run(ctx context.Context, c *Caller, perm, action, target strin
 	return err
 }
 
-// clearGrace drops the grace entry of a membership just granted again
-// (no store: nothing to clear). Caller holds s.mu.
-func (s *Service) clearGrace(group, user string) error {
+// regranted records an admin's explicit (re-)add of user to group: its
+// grace entry and its expired exceptions in that group (kept while the
+// evaluator doesn't manage the group, see pruneSkipped) go, so access is
+// restored; reports whether anything went. No store: nothing to do.
+// Caller holds s.mu.
+func (s *Service) regranted(group, user string, now time.Time) (bool, error) {
 	if s.Store == nil {
-		return nil
+		return false, nil
 	}
 	cfg, err := s.loadConfig()
 	if err != nil {
-		return fmt.Errorf("%s added to %s, but directory.yaml could not be read to end its grace entry (it keeps denying for up to %s): %w", user, group, GracePeriod, err)
+		return false, fmt.Errorf("%s added to %s, but directory.yaml could not be read to end its earlier expiry (it may keep denying): %w", user, group, err)
 	}
-	if !cfg.clearGrace(group, user) {
-		return nil
+	changed := cfg.clearGrace(group, user)
+	if gc := cfg.Groups[group]; gc != nil {
+		kept := []Exception{}
+		for _, ex := range gc.Exceptions {
+			if strings.EqualFold(ex.User, user) && ex.Until != nil && expired(*ex.Until, now) {
+				changed = true
+				continue
+			}
+			kept = append(kept, ex)
+		}
+		gc.Exceptions = kept
+	}
+	if !changed {
+		return false, nil
 	}
 	if err := s.saveConfig(cfg); err != nil {
-		return fmt.Errorf("%s added to %s, but its grace entry could not be cleared (it keeps denying for up to %s): %w", user, group, GracePeriod, err)
+		return false, fmt.Errorf("%s added to %s, but its earlier expiry could not be cleared in directory.yaml (it may keep denying): %w", user, group, err)
 	}
-	return nil
+	return true, nil
 }
 
 // GeneratePassword returns a random password (26 base32 chars, 130 bits).
@@ -1278,15 +1293,23 @@ func (s *Service) AddMember(ctx context.Context, c *Caller, group, username stri
 		if err != nil {
 			return err
 		}
-		for _, m := range g.Members() {
-			if strings.EqualFold(m, u.ID) {
+		if memberOf(g, u.ID) {
+			// Re-adding a member whose temporary access expired (in a group
+			// the evaluator doesn't manage) confirms the membership.
+			changed, err := s.regranted(group, u.ID, time.Now())
+			if err != nil {
+				return err
+			}
+			if !changed {
 				return refuse("%s is already a member of %s", u.ID, group)
 			}
+			return nil
 		}
 		if err := s.LLDAP.AddUserToGroup(ctx, u.ID, g.ID); err != nil {
 			return err
 		}
-		return s.clearGrace(group, u.ID)
+		_, err = s.regranted(group, u.ID, time.Now())
+		return err
 	})
 }
 

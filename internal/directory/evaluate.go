@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/portcullis/hub/internal/lldap"
 	"github.com/portcullis/hub/internal/rules"
 )
 
@@ -351,14 +352,14 @@ func (s *Service) evaluateLocked(ctx context.Context, now time.Time) (*EvalRepor
 
 		if !s.ruleGroupAllowed(name, admin) {
 			rep.Errors = append(rep.Errors, fmt.Sprintf("%s is a built-in or administrator group and can't be rule-based; rule ignored", name))
-			if pruneSkipped(rep, name, gc, now) {
+			if pruneSkipped(rep, name, gc, now, g, exists) {
 				dirty = true
 			}
 			continue
 		}
 		if !exists {
 			rep.Errors = append(rep.Errors, fmt.Sprintf("rule group %s does not exist in LLDAP; create it first", name))
-			if pruneSkipped(rep, name, gc, now) {
+			if pruneSkipped(rep, name, gc, now, g, exists) {
 				dirty = true
 			}
 			continue
@@ -461,22 +462,25 @@ func (s *Service) evaluateLocked(ctx context.Context, now time.Time) (*EvalRepor
 	return rep, removed, nil
 }
 
-// pruneSkipped drops the expired exceptions of a rule group the evaluator
-// skips (no removal is attempted there, so an expired "added" exception
-// would otherwise stay published, and denying, forever). No grace entry;
-// each pruned one is reported in rep.Errors.
-func pruneSkipped(rep *EvalReport, name string, gc *GroupConfig, now time.Time) bool {
+// pruneSkipped handles the expired exceptions of a rule group the
+// evaluator skips (it changes no membership there). An expired "added"
+// exception of a user who is still a member of the existing LLDAP group is
+// kept, so it stays published and group-gate keeps denying, and reported
+// every run; it goes once they are no longer a member (or an admin re-adds
+// them explicitly: AddMember). Other expired exceptions are dropped: those
+// of non-members, "kept out" ones, and all of a group missing in LLDAP
+// (nobody is a member). No grace entries.
+func pruneSkipped(rep *EvalReport, name string, gc *GroupConfig, now time.Time, g lldap.Group, exists bool) bool {
 	kept := []Exception{}
 	for _, ex := range gc.Exceptions {
-		if ex.Until != nil && expired(*ex.Until, now) {
-			kind := "kept out"
-			if ex.Include {
-				kind = "added"
-			}
-			rep.Errors = append(rep.Errors, fmt.Sprintf("%s: expired %q exception of %s dropped without changing membership (group skipped)", name, kind, ex.User))
+		if ex.Until == nil || !expired(*ex.Until, now) {
+			kept = append(kept, ex)
 			continue
 		}
-		kept = append(kept, ex)
+		if ex.Include && exists && memberOf(g, ex.User) {
+			rep.Errors = append(rep.Errors, fmt.Sprintf("%s: %s's temporary access expired but the evaluator doesn't manage this group; remove them or re-add them explicitly", name, ex.User))
+			kept = append(kept, ex)
+		}
 	}
 	if len(kept) == len(gc.Exceptions) {
 		return false
