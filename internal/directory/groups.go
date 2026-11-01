@@ -168,8 +168,25 @@ func (s *Service) checkRuleFor(cfg *Config, group string, rule *rules.Expr) erro
 		if bad := nonAdminOnly(cfg, rule); len(bad) > 0 {
 			return refuse("%s is %s: its rule may use only admin-only fields, not %s", group, why, strings.Join(bad, ", "))
 		}
+		if matchesEmpty(cfg, rule) {
+			return refuse("%s is %s: its rule must not match a person with no details at all (e.g. a new account), but %s does", group, why, rules.Format(rule))
+		}
 	}
 	return nil
+}
+
+// matchesEmpty reports whether rule matches a person with no field values
+// at all (and no manager) — every brand-new account. A guarding group's
+// rule must not: anyone who can create an account would grant rights.
+func matchesEmpty(cfg *Config, rule *rules.Expr) bool {
+	const nobody = "\x00empty"
+	d := &rules.Directory{People: map[string]rules.Person{nobody: {User: nobody, Attrs: map[string][]string{}}}}
+	for _, f := range cfg.Fields {
+		if f.Name == "manager" && f.Kind == FieldKindPerson {
+			d.ManagerField = "manager"
+		}
+	}
+	return rules.Eval(rule, nobody, d)
 }
 
 // ruleBased reports whether cfg makes group a rule group.
@@ -622,6 +639,9 @@ func (s *Service) SetPermission(ctx context.Context, c *Caller, perm, group stri
 		if ruleBased(cfg, group) {
 			if bad := nonAdminOnly(cfg, cfg.Groups[group].Rule); len(bad) > 0 {
 				return refuse("%s's rule uses fields that aren't admin-only (%s): a permission group's rule may use only admin-only fields", group, strings.Join(bad, ", "))
+			}
+			if matchesEmpty(cfg, cfg.Groups[group].Rule) {
+				return refuse("%s's rule matches a person with no details at all (e.g. a new account): a permission group's rule must not", group)
 			}
 		}
 		cfg.Permissions[perm] = group

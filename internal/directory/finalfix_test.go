@@ -150,3 +150,76 @@ func TestRemoveMemberLogsOutAndDropsExpiry(t *testing.T) {
 	}
 	wantMembers(t, e, "office", "bob")
 }
+
+// I1(a): a guarding group's rule must not match a person with no details
+// (every brand-new account).
+func TestGuardingRuleMustNotMatchEmpty(t *testing.T) {
+	e := guardEnv(t)
+	e.ll.AddGroup("admin_app") // app "app"'s admin group
+	e.ll.AddGroup("hr")
+	e.ll.AddGroup("team")
+	for _, r := range []string{`office is empty`, `not office = "HQ"`, `office = "HQ" or office is empty`} {
+		_, err := e.svc.ConvertPreview(ctx, asRoot, "admin_app", mustRule(t, r))
+		wantStatus(t, "ConvertPreview "+r, err, 409)
+		err = e.svc.ConvertApply(ctx, asRoot, "admin_app", mustRule(t, r), nil)
+		wantStatus(t, "ConvertApply "+r, err, 409)
+		if err == nil || !strings.Contains(err.Error(), "no details") {
+			t.Errorf("message = %v", err)
+		}
+		wantStatus(t, "ConvertApplyReviewed "+r, e.svc.ConvertApplyReviewed(ctx, asRoot, "admin_app", mustRule(t, r), nil, &directory.ConvertPreview{}), 409)
+	}
+	if err := e.svc.ConvertApply(ctx, asRoot, "admin_app", mustRule(t, `office = "HQ"`), nil); err != nil {
+		t.Fatal(err)
+	}
+	wantStatus(t, "SetGroupRule empty", e.svc.SetGroupRule(ctx, asRoot, "admin_app", mustRule(t, `not office = "Branch"`)), 409)
+
+	// Permission groups too, and a grant to a rule group matching empty.
+	if err := e.svc.SetPermission(ctx, asRoot, directory.PermEditDetails, "hr"); err != nil {
+		t.Fatal(err)
+	}
+	wantStatus(t, "ConvertApply hr", e.svc.ConvertApply(ctx, asRoot, "hr", mustRule(t, `office is empty`), nil), 409)
+	if err := e.svc.ConvertApply(ctx, asRoot, "team", mustRule(t, `office is empty`), nil); err != nil {
+		t.Fatal(err) // an ordinary group may
+	}
+	wantStatus(t, "SetPermission team", e.svc.SetPermission(ctx, asRoot, directory.PermRemove, "team"), 409)
+}
+
+// I1(b): the evaluator never adds a delegate-created account to a guarding
+// group; once an admin acts on the account (clearing created_by) it does.
+func TestEvaluatorSkipsDelegateCreatedInGuardingGroups(t *testing.T) {
+	e := guardEnv(t)
+	e.ll.AddGroup("admin_app")
+	e.ll.AddGroup("hq")
+	e.ll.AddUser("nina", "nina@example.org", "", "")
+	if err := e.svc.LLDAP.SetUserAttributes(ctx, "nina", map[string][]string{"office": {"HQ"}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _ := e.svc.Store.Load()
+	cfg.CreatedBy["nina"] = "ivy"
+	if err := e.svc.Store.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	for _, g := range []string{"admin_app", "hq"} {
+		if err := e.svc.ConvertApply(ctx, asRoot, g, mustRule(t, `office = "HQ"`), nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rep := evaluate(t, e, time.Now().UTC())
+	wantMembers(t, e, "admin_app")
+	wantMembers(t, e, "hq", "nina") // not guarding: added
+	found := false
+	for _, er := range rep.Errors {
+		found = found || (strings.Contains(er, "admin_app") && strings.Contains(er, "nina") && strings.Contains(er, "delegate"))
+	}
+	if !found {
+		t.Errorf("errors = %v", rep.Errors)
+	}
+	if d, _ := e.svc.DesiredFromLLDAP(ctx, cfg, time.Now().UTC()); d["admin_app"]["nina"] {
+		t.Errorf("Desired adds nina to admin_app: %v", d["admin_app"])
+	}
+	if _, err := e.svc.SetPassword(ctx, asRoot, "nina", "", true, ""); err != nil {
+		t.Fatal(err)
+	}
+	evaluate(t, e, time.Now().UTC())
+	wantMembers(t, e, "admin_app", "nina")
+}

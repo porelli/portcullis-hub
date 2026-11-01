@@ -175,9 +175,44 @@ func (s *Service) Desired(cfg *Config, sn *snapshot, now time.Time) map[string]m
 				}
 			}
 		}
+		if _, ok := guarding[name]; ok {
+			for u := range desired {
+				if createdByDelegate(cfg, u) && !memberOf(sn.groups[name], u) {
+					delete(desired, u)
+				}
+			}
+		}
 		out[name] = desired
 	}
 	return out
+}
+
+// createdByDelegate: user's account was created by a delegate and no admin
+// has taken it over yet (Config.CreatedBy; an admin credential action
+// clears it).
+func createdByDelegate(cfg *Config, user string) bool {
+	for u, by := range cfg.CreatedBy {
+		if by != "" && strings.EqualFold(u, user) {
+			return true
+		}
+	}
+	return false
+}
+
+// dropDelegateCreated removes from adds (lowercase usernames) the accounts
+// a delegate created: the evaluator never adds them to a guarding group
+// (administrator, permission or app admin group) until an admin has acted
+// on the account. Each one is reported.
+func dropDelegateCreated(rep *EvalReport, cfg *Config, sn *snapshot, name, why string, adds []string) []string {
+	kept := adds[:0:0]
+	for _, u := range adds {
+		if createdByDelegate(cfg, u) {
+			rep.Errors = append(rep.Errors, fmt.Sprintf("%s is %s: %s was created by a delegate and isn't added until an admin acts on the account (password, invite, passkeys)", name, why, sn.users[u].ID))
+			continue
+		}
+		kept = append(kept, u)
+	}
+	return kept
 }
 
 // Pending lists every membership end recorded in directory.yaml — manual
@@ -386,6 +421,9 @@ func (s *Service) evaluateLocked(ctx context.Context, now time.Time) (*EvalRepor
 		if why := s.addsBlocked(cfg, guarding, name, gc); why != "" {
 			rep.Errors = append(rep.Errors, why)
 			adds = nil
+		}
+		if why, ok := guarding[name]; ok {
+			adds = dropDelegateCreated(rep, cfg, sn, name, why, adds)
 		}
 		sort.Strings(adds)
 		sort.Strings(dels)
