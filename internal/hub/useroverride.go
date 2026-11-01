@@ -74,15 +74,62 @@ var overrideDenied = map[string]string{
 	"isolation":           "a different isolation technology changes the container's isolation",
 }
 
-// Bind-mount sources that are refused (the path or anything under it).
-var deniedMountRoots = []string{"/proc", "/sys", "/dev", "/etc", "/boot", "/root", "/run", "/var/run",
-	"/var/lib/docker", "/var/lib/containerd", "/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64"}
+// DefaultOverrideBindRoots are the host directories a custom override may
+// bind-mount from when HUB_OVERRIDE_BIND_ROOTS is unset.
+var DefaultOverrideBindRoots = []string{"/srv", "/mnt", "/media"}
 
-// Files under denied roots that are fine to mount (read-only time zone).
-var allowedMountFiles = map[string]bool{"/etc/localtime": true, "/etc/timezone": true}
+// systemRoots may never be (or be inside) a bind root.
+var systemRoots = []string{"/proc", "/sys", "/dev", "/etc", "/boot", "/root", "/run", "/var/run", "/var/lib",
+	"/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/tmp", "/var/tmp"}
 
-// sensitiveHostPaths may not be mounted, nor any directory containing them.
+// sensitiveHostPaths may not lie inside a bind root.
 var sensitiveHostPaths = []string{"/var/run/docker.sock", "/run/docker.sock", "/var/lib/docker", "/run/containerd", "/var/lib/containerd"}
+
+// ParseBindRoots validates HUB_OVERRIDE_BIND_ROOTS (colon-separated absolute
+// paths; "" = the defaults). coreHostDir is the core checkout on the host:
+// a root may neither contain it nor lie inside it.
+func ParseBindRoots(v, coreHostDir string) ([]string, error) {
+	raw := DefaultOverrideBindRoots
+	if strings.TrimSpace(v) != "" {
+		raw = strings.Split(v, ":")
+	}
+	var out []string
+	for _, r := range raw {
+		r = strings.TrimSpace(r)
+		if !strings.HasPrefix(r, "/") || strings.Contains(r, "$") || HasDotDot(r) {
+			return nil, fmt.Errorf("HUB_OVERRIDE_BIND_ROOTS: %q must be an absolute path without \"..\" or variables", r)
+		}
+		c := path.Clean(r)
+		if c == "/" {
+			return nil, fmt.Errorf("HUB_OVERRIDE_BIND_ROOTS: the host's root directory can't be a bind root")
+		}
+		for _, sys := range systemRoots {
+			if pathUnder(c, sys) || pathUnder(sys, c) {
+				return nil, fmt.Errorf("HUB_OVERRIDE_BIND_ROOTS: %s is (or contains) the system path %s", c, sys)
+			}
+		}
+		for _, s := range sensitiveHostPaths {
+			if pathUnder(s, c) {
+				return nil, fmt.Errorf("HUB_OVERRIDE_BIND_ROOTS: %s contains %s", c, s)
+			}
+		}
+		if core := path.Clean(coreHostDir); coreHostDir != "" && (pathUnder(core, c) || pathUnder(c, core)) {
+			return nil, fmt.Errorf("HUB_OVERRIDE_BIND_ROOTS: %s overlaps the Portcullis core checkout %s", c, core)
+		}
+		out = append(out, c)
+	}
+	return out, nil
+}
+
+// HasDotDot reports whether p has a ".." segment.
+func HasDotDot(p string) bool {
+	for _, seg := range strings.Split(p, "/") {
+		if seg == ".." {
+			return true
+		}
+	}
+	return false
+}
 
 var volumeNameRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
 
@@ -92,10 +139,11 @@ var OverrideRules = []string{
 	"Services: only ones the template defines; allowed keys: " + strings.Join(sortedKeys(overrideServiceKeys), ", ") + ".",
 	"Refused: privileged, cap_add, devices, security_opt, network_mode, networks, pid, ipc, uts, userns_mode, sysctls, volumes_from, extends, env_file, build, links, profiles, deploy and anything else not listed.",
 	"Labels: no traefik.* (routers, rules, middlewares, TLS options — group-gate and the Hub's override depend on them) and no com.docker.compose.*.",
-	"Volumes: named volumes, bind mounts of absolute host paths, or ./templates/<app>/…; not the Docker/containerd socket or state, /, /proc, /sys, /dev, /etc (except /etc/localtime, /etc/timezone), /boot, /root, /run, /usr, /bin, /lib…, nor the core checkout (or a directory containing any of them); no variables in sources.",
+	"Volumes: named volumes, ./templates/<app>/…, or bind mounts of absolute paths under the allowed roots (HUB_OVERRIDE_BIND_ROOTS, default /srv, /mnt, /media); everything else is refused. No \"..\", no sockets. Symlinks on the host are not resolved: what lives under the roots is the operator's responsibility.",
 	"Ports: literal host ports only; they are checked against the other enabled apps' ports.",
 	"Top-level volumes: only labels (no driver, driver_opts, external or name). Top-level networks: only networks the template declares and doesn't mark external, with labels, driver_opts, enable_ipv6, ipam.",
 	"No YAML tags (!reset, !override): they could strip the template's labels or networks.",
+	"No variables: every key and value is checked for \"$\" (compose would interpolate it after the Hub's checks); write $$ for a literal dollar sign.",
 }
 
 func sortedKeys(m map[string]bool) []string {
@@ -123,6 +171,9 @@ func (h *Hub) parseUserOverride(t *templates.Template, data []byte) (*parsedOver
 		return nil, nil
 	}
 	if err := checkTags(&root); err != nil {
+		return nil, err
+	}
+	if err := checkNoInterpolation(&root); err != nil {
 		return nil, err
 	}
 	var doc map[string]interface{}
@@ -204,6 +255,26 @@ func checkTags(n *yaml.Node) error {
 	}
 	for _, c := range n.Content {
 		if err := checkTags(c); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// checkNoInterpolation refuses any unescaped "$" in a key or value: compose
+// interpolates ${VAR} everywhere, so "${T}raefik.enable" would pass the
+// label check and become traefik.enable afterwards. "$$" is compose's
+// literal dollar sign.
+func checkNoInterpolation(n *yaml.Node) error {
+	if n.Kind == yaml.ScalarNode && strings.Contains(strings.ReplaceAll(n.Value, "$$", ""), "$") {
+		v := n.Value
+		if len(v) > 60 {
+			v = v[:60] + "…"
+		}
+		return fmt.Errorf("line %d: %q: variables are not allowed (compose would interpolate them after the Hub's checks); write $$ for a literal $", n.Line, v)
+	}
+	for _, c := range n.Content {
+		if err := checkNoInterpolation(c); err != nil {
 			return err
 		}
 	}
@@ -396,10 +467,8 @@ func (h *Hub) checkMountSource(id, src, typ string) error {
 	if strings.HasPrefix(src, "~") {
 		return fmt.Errorf("volume source %q: use an absolute path", src)
 	}
-	for _, seg := range strings.Split(src, "/") {
-		if seg == ".." {
-			return fmt.Errorf("volume source %q: \"..\" segments are not allowed", src)
-		}
+	if HasDotDot(src) {
+		return fmt.Errorf("volume source %q: \"..\" segments are not allowed", src)
 	}
 	if !strings.HasPrefix(src, "/") {
 		rel := path.Clean(src)
@@ -412,27 +481,15 @@ func (h *Hub) checkMountSource(id, src, typ string) error {
 	if p == "/" {
 		return fmt.Errorf("volume source %q: the host's root directory is not allowed", src)
 	}
-	if allowedMountFiles[p] {
-		return nil
+	if strings.HasSuffix(p, ".sock") {
+		return fmt.Errorf("volume source %s: sockets are not allowed", src)
 	}
-	if strings.HasSuffix(p, ".sock") || strings.Contains(p, "docker.sock") {
-		return fmt.Errorf("volume source %s: sockets (the Docker socket above all) are not allowed", src)
-	}
-	for _, r := range deniedMountRoots {
+	for _, r := range h.bindRoots {
 		if pathUnder(p, r) {
-			return fmt.Errorf("volume source %s: host system paths under %s are not allowed", src, r)
+			return nil
 		}
 	}
-	core := path.Clean(h.cfg.ProjectHostDir)
-	if pathUnder(p, core+"/templates/"+id) {
-		return nil
-	}
-	for _, s := range append([]string{core}, sensitiveHostPaths...) {
-		if pathUnder(s, p) || pathUnder(p, s) {
-			return fmt.Errorf("volume source %s: it exposes %s (Docker state or the Portcullis core checkout)", src, s)
-		}
-	}
-	return nil
+	return fmt.Errorf("volume source %s: bind mounts must be under %s (HUB_OVERRIDE_BIND_ROOTS) or ./templates/%s/", src, strings.Join(h.bindRoots, ", "), id)
 }
 
 // pathUnder reports whether clean absolute path p is root or inside it.

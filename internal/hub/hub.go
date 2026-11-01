@@ -43,6 +43,9 @@ type Config struct {
 	DefaultTemplatesURL string
 	// ReconcileInterval is the periodic drift check (default 60s).
 	ReconcileInterval time.Duration
+	// OverrideBindRoots is HUB_OVERRIDE_BIND_ROOTS: host directories custom
+	// overrides may bind-mount from ("" = /srv:/mnt:/media).
+	OverrideBindRoots string
 }
 
 // Engine is the part of the Docker Engine API the Hub uses.
@@ -93,6 +96,7 @@ type Hub struct {
 	runtimeSubs map[string][]string
 	driftKey    map[string]string
 	kick        chan struct{}
+	bindRoots   []string // validated OverrideBindRoots
 
 	// ops: each app's last lifecycle operation (mirrors <data>/ops).
 	opsMu sync.Mutex
@@ -113,14 +117,19 @@ func New(cfg Config, runner compose.Runner, engine Engine, idp IdP) (*Hub, error
 			return nil, err
 		}
 	}
+	roots, err := ParseBindRoots(cfg.OverrideBindRoots, cfg.ProjectHostDir)
+	if err != nil {
+		return nil, err
+	}
 	h := &Hub{
-		cfg:      cfg,
-		compose:  runner,
-		engine:   engine,
-		idp:      idp,
-		lockPoll: 2 * time.Second,
-		kick:     make(chan struct{}, 1),
-		driftKey: map[string]string{},
+		bindRoots: roots,
+		cfg:       cfg,
+		compose:   runner,
+		engine:    engine,
+		idp:       idp,
+		lockPoll:  2 * time.Second,
+		kick:      make(chan struct{}, 1),
+		driftKey:  map[string]string{},
 	}
 	st, err := state.Load(h.statePath())
 	if err != nil {

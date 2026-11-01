@@ -44,6 +44,7 @@ func main() {
 		DataDir:             env("HUB_DATA_DIR", filepath.Join(projectDir, ".hub")),
 		Domain:              env("PORTCULLIS_DOMAIN", "portcullis.local"),
 		DefaultTemplatesURL: os.Getenv("DEFAULT_TEMPLATES_URL"),
+		OverrideBindRoots:   os.Getenv("HUB_OVERRIDE_BIND_ROOTS"),
 	}
 	if v := os.Getenv("HUB_RECONCILE_INTERVAL"); v != "" {
 		d, err := time.ParseDuration(v)

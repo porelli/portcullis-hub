@@ -72,13 +72,13 @@ func TestUserOverrideValidation(t *testing.T) {
 	good := svc(`    image: grafana/grafana:11.0.0
     environment:
       GF_LOG_LEVEL: debug
+      PRICE: "costs $$5"
     labels:
       com.example.backup: "true"
     volumes:
       - /srv/grafana/plugins:/var/lib/grafana/plugins
-      - /etc/localtime:/etc/localtime:ro
       - ./templates/grafana/extra.ini:/etc/grafana/extra.ini:ro
-      - /host/project/templates/grafana/conf:/conf:ro
+      - /srv:/srv-all:ro
       - plugins:/plugins
       - type: bind
         source: /mnt/media
@@ -224,5 +224,22 @@ func TestUserOverrideRevalidatedOnUp(t *testing.T) {
 	// The override itself is kept: it survives template syncs.
 	if _, err := os.Stat(f.h.userOverridePath("other")); err != nil {
 		t.Error(err)
+	}
+}
+
+func TestParseBindRoots(t *testing.T) {
+	if r, err := ParseBindRoots("", "/opt/portcullis"); err != nil || strings.Join(r, ":") != "/srv:/mnt:/media" {
+		t.Errorf("default = %v %v", r, err)
+	}
+	if r, err := ParseBindRoots("/data/media/:/srv", "/opt/portcullis"); err != nil || strings.Join(r, ":") != "/data/media:/srv" {
+		t.Errorf("custom = %v %v", r, err)
+	}
+	for _, bad := range []string{"/", "//", "/./", "relative", "/etc", "/etc/x", "/var", "/var/lib/docker", "/usr/local", "/srv/../etc", "/opt", "/opt/portcullis/secrets", "/run", "$HOME", "/srv:"} {
+		if _, err := ParseBindRoots(bad, "/opt/portcullis"); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+	if _, err := New(Config{DataDir: t.TempDir(), OverrideBindRoots: "/"}, nil, nil, nil); err == nil {
+		t.Error("New accepted / as a bind root")
 	}
 }
