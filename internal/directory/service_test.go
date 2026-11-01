@@ -848,3 +848,19 @@ func TestDeleteUserKeycloakCopy(t *testing.T) {
 		t.Errorf("stale = %+v", ov.StaleKeycloak)
 	}
 }
+
+// Live E2E B1: Keycloak removes the federated copy, then answers 500. The
+// Hub looks the id up again: gone = removed, no warning.
+func TestDeleteUserKeycloak500AfterDelete(t *testing.T) {
+	e := newEnv(t)
+	e.ll.AddUser("bob", "bob@example.org", "", "")
+	e.kc.Import("bob")
+	e.kc.SetDeleteStatusAfter(500)
+	res, err := e.svc.DeleteUser(ctx, asRoot, "bob", "bob")
+	if err != nil || len(res.Warnings) != 0 || e.kc.Get("bob") != nil {
+		t.Fatalf("delete bob: %+v %v", res, err)
+	}
+	if entries, _ := e.svc.Recent(1); entries[0].Detail != "keycloak_copy=removed" {
+		t.Errorf("audit = %+v", entries[0])
+	}
+}

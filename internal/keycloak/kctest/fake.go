@@ -88,6 +88,10 @@ type Server struct {
 	Down bool
 	// DeleteStatus, if non-zero, is what DELETE /users/{id} answers.
 	DeleteStatus int
+	// DeleteStatusAfter, if non-zero, is what DELETE /users/{id} answers
+	// AFTER deleting the user (Keycloak's federated delete that removes the
+	// copy and then fails on an optimistic lock).
+	DeleteStatusAfter int
 
 	mu     sync.Mutex
 	Users  map[string]*User // by username
@@ -164,6 +168,14 @@ func (s *Server) SetDeleteStatus(code int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.DeleteStatus = code
+}
+
+// SetDeleteStatusAfter makes DELETE /users/{id} delete the user and then
+// answer code (0: normal).
+func (s *Server) SetDeleteStatusAfter(code int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.DeleteStatusAfter = code
 }
 
 // AddClient adds a client (attrs may be nil) and returns its id.
@@ -389,6 +401,10 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			delete(s.Users, u.Username)
+			if s.DeleteStatusAfter != 0 {
+				w.WriteHeader(s.DeleteStatusAfter)
+				return
+			}
 			w.WriteHeader(204)
 		case len(parts) == 2 && parts[1] == "credentials" && r.Method == "GET":
 			if u.CredentialsStatus != 0 {

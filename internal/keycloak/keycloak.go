@@ -853,8 +853,17 @@ func (c *Client) DeleteUserByID(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	if err := c.api().DeleteUser(ctx, tok, Realm, url.PathEscape(id)); err != nil && statusCode(err) != http.StatusNotFound {
-		return opErr("delete user", err)
+	err = c.api().DeleteUser(ctx, tok, Realm, url.PathEscape(id))
+	switch code := statusCode(err); {
+	case err == nil || code == http.StatusNotFound:
+		return nil
+	case code >= 500:
+		// Deleting a federated user, Keycloak removes its copy and can then
+		// fail on an optimistic lock (HTTP 500): look the id up again; gone
+		// = removed.
+		if _, gerr := c.api().GetUserByID(ctx, tok, Realm, url.PathEscape(id)); statusCode(gerr) == http.StatusNotFound {
+			return nil
+		}
 	}
-	return nil
+	return opErr("delete user", err)
 }

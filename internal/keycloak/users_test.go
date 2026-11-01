@@ -3,6 +3,7 @@ package keycloak_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/portcullis/hub/internal/keycloak"
@@ -136,5 +137,25 @@ func TestCredentialCount(t *testing.T) {
 	f.SetDown(true)
 	if _, err := c.CredentialCount(ctx, "bob"); err == nil {
 		t.Error("outage not reported")
+	}
+}
+
+// Keycloak deletes a federated user's copy and then answers 500 (optimistic
+// lock, live E2E B1): the id is looked up again and "not found" = removed.
+// A 500 that left the user in place stays an error.
+func TestDeleteUserByID5xxButGone(t *testing.T) {
+	f := kctest.New(t)
+	f.Import("bob")
+	f.Import("carl")
+	c := keycloak.New(f.HTTP.URL, "admin", "admin")
+	ctx := context.Background()
+	f.SetDeleteStatusAfter(500)
+	if err := c.DeleteUserByID(ctx, f.Get("bob").ID); err != nil || f.Get("bob") != nil {
+		t.Errorf("delete then 500: %v (bob %+v)", err, f.Get("bob"))
+	}
+	f.SetDeleteStatusAfter(0)
+	f.SetDeleteStatus(500)
+	if err := c.DeleteUserByID(ctx, f.Get("carl").ID); err == nil || !strings.Contains(err.Error(), "500") {
+		t.Errorf("500 and still there = %v", err)
 	}
 }
