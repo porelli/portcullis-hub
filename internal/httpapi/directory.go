@@ -1,7 +1,9 @@
 package httpapi
 
 import (
+	"context"
 	"errors"
+	"log"
 	"net/http"
 
 	"github.com/portcullis/hub/internal/directory"
@@ -52,11 +54,31 @@ func actor(r *http.Request) string { return r.Header.Get("X-Forwarded-User") }
 func (s *Server) caller(w http.ResponseWriter, r *http.Request) (*directory.Caller, bool) {
 	c, err := s.Directory.CallerFor(r.Context(), actor(r))
 	if err != nil {
+		// On the people listener (any signed-in user) an unavailable
+		// directory is reported generically; the detail is logged.
+		var de *directory.Error
+		if isPeople(r) && (!errors.As(err, &de) || de.Status >= 500) {
+			log.Printf("people: resolve caller: %v", err)
+			http.Error(w, directory.GenericUnavailable, http.StatusServiceUnavailable)
+			return nil, false
+		}
 		dirErr(w, err)
 		return nil, false
 	}
 	return c, true
 }
+
+type peopleKey struct{}
+
+// markPeople tags requests of the people listener.
+func markPeople(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), peopleKey{}, true)))
+	})
+}
+
+// isPeople: the request came in on the people listener.
+func isPeople(r *http.Request) bool { v, _ := r.Context().Value(peopleKey{}).(bool); return v }
 
 // dirErr maps directory errors to statuses; never echoes secrets (the
 // service never puts them in errors).
@@ -80,29 +102,45 @@ func (s *Server) dirReady(w http.ResponseWriter) bool {
 // noStore: responses can carry a one-time password or invite link.
 func noStore(w http.ResponseWriter) { w.Header().Set("Cache-Control", "no-store") }
 
-// handleDirectory: any signed-in caller; what they see depends on who
-// they are (directory.OverviewFor). Without LLDAP the page only says why.
+// handleDirectory: any signed-in caller. Admins get the full Overview;
+// anyone else the allow-listed PeopleOverview. Without LLDAP the page only
+// says why — generically on the people listener (the detail is logged).
 func (s *Server) handleDirectory(w http.ResponseWriter, r *http.Request) {
 	if !s.dirReady(w) {
 		return
 	}
-	var ov *directory.Overview
-	var err error
-	if s.Directory.LLDAP.Available() != nil {
-		ov, err = s.Directory.Overview(r.Context(), actor(r)) // Available false + Reason, no data
-	} else {
-		c, ok := s.caller(w, r)
-		if !ok {
+	if err := s.Directory.LLDAP.Available(); err != nil {
+		ov, oerr := s.Directory.Overview(r.Context(), actor(r)) // Available false + Reason, no data
+		if oerr != nil {
+			dirErr(w, oerr)
 			return
 		}
-		ov, err = s.Directory.OverviewFor(r.Context(), c)
+		noStore(w)
+		if isPeople(r) {
+			log.Printf("people: directory unavailable: %v", err)
+			writeJSON(w, directory.PeopleViewOf(ov))
+			return
+		}
+		writeJSON(w, ov)
+		return
+	}
+	c, ok := s.caller(w, r)
+	if !ok {
+		return
+	}
+	var out interface{}
+	var err error
+	if c.Admin {
+		out, err = s.Directory.OverviewFor(r.Context(), c)
+	} else {
+		out, err = s.Directory.PeopleOverview(r.Context(), c)
 	}
 	if err != nil {
 		dirErr(w, err)
 		return
 	}
 	noStore(w)
-	writeJSON(w, ov)
+	writeJSON(w, out)
 }
 
 // handleAudit: administrators only.

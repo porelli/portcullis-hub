@@ -1431,3 +1431,36 @@ func TestImportReviewDelegateProblemsImproved(t *testing.T) {
 		}
 	})
 }
+
+// TestImportApplyRefusedUpFront: a caller without any import permission
+// is refused before LLDAP or the audit is touched; oversized requests
+// too; a cancelled request stops between rows.
+func TestImportApplyRefusedUpFront(t *testing.T) {
+	e := newEnv(t)
+	e.svc.Store = &directory.Store{Path: filepath.Join(t.TempDir(), "directory.yaml")}
+	before := len(e.ll.Mutations)
+	plain := &directory.Caller{User: "alice", Perms: map[string]bool{}}
+	req := directory.ApplyRequest{Rows: []directory.ApplyRow{{User: "bob", Create: true, Email: "bob@example.org"}, {User: "alice", Remove: true}}}
+	if _, err := e.svc.ImportApply(ctx, plain, req); status(err) != 403 {
+		t.Fatalf("plain apply = %v (status %d), want 403", err, status(err))
+	}
+	if _, err := e.svc.ImportApply(ctx, nil, req); status(err) != 403 {
+		t.Errorf("nil caller = %v", err)
+	}
+	if entries, _ := e.svc.Recent(100); len(entries) != 0 {
+		t.Errorf("refused apply was audited: %+v", entries)
+	}
+	if len(e.ll.Mutations) != before || e.ll.HasUser("bob") {
+		t.Error("refused apply reached LLDAP")
+	}
+	big := directory.ApplyRequest{Rows: make([]directory.ApplyRow, 10001)}
+	if _, err := e.svc.ImportApply(ctx, asRoot, big); status(err) != 400 {
+		t.Errorf("10001 rows = %v, want 400", err)
+	}
+	cctx, cancel := context.WithCancel(ctx)
+	cancel()
+	res, err := e.svc.ImportApply(cctx, asRoot, req)
+	if err != nil || len(res.Rows) != 2 || res.Rows[0].OK || !strings.Contains(res.Rows[1].Error, "cancelled") || e.ll.HasUser("bob") {
+		t.Errorf("cancelled apply = %+v %v", res, err)
+	}
+}

@@ -82,7 +82,7 @@ func (s *Server) PeopleHandler() (http.Handler, error) {
 	mux.HandleFunc("/", s.handlePeoplePage)
 	mux.HandleFunc("/static/", s.handlePeopleStatic)
 	s.registerDirectory(mux)
-	return ProxySecret(s.Secret, CSRF(mux)), nil
+	return ProxySecret(s.Secret, CSRF(markPeople(mux))), nil
 }
 
 // ── helpers ──────────────────────────────────────────────

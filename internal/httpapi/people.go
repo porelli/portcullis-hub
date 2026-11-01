@@ -8,6 +8,7 @@ import (
 	"mime"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/portcullis/hub/internal/directory"
@@ -89,7 +90,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 
 // fieldBody: omitted values are nil. Create: share_with_apps defaults to
 // true (contract §9.6), the rest to their zero value. Update: omitted
-// values keep the field's current ones.
+// values keep the field's current ones (directory.FieldPatch).
 type fieldBody struct {
 	Name          *string              `json:"name"`
 	Label         *string              `json:"label"`
@@ -142,7 +143,16 @@ func (s *Server) handleCreateField(w http.ResponseWriter, r *http.Request) {
 		dirErr(w, err)
 		return
 	}
-	writeJSON(w, map[string]interface{}{"status": "created", "field": f})
+	out := map[string]interface{}{"status": "created"}
+	// The field as stored (normalised by CreateField).
+	if cfg, err := s.Directory.Store.Load(); err == nil {
+		for _, sf := range cfg.Fields {
+			if sf.Name == strings.TrimSpace(f.Name) {
+				out["field"] = sf
+			}
+		}
+	}
+	writeJSON(w, out)
 }
 
 func (s *Server) handleUpdateField(w http.ResponseWriter, r *http.Request) {
@@ -157,26 +167,14 @@ func (s *Server) handleUpdateField(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	name := r.PathValue("name")
-	// Start from the current definition so a partial body changes only
-	// what it names (UpdateField re-reads and checks everything).
-	cur := directory.Field{Name: name}
-	if s.Directory.Store != nil {
-		if cfg, err := s.Directory.Store.Load(); err == nil {
-			for _, f := range cfg.Fields {
-				if f.Name == name {
-					cur = f
-				}
-			}
-		}
-	}
-	req.Name = nil // the path names the field
-	f := req.apply(cur)
-	if err := s.Directory.UpdateField(r.Context(), c, f); err != nil {
+	// Merged with the stored field inside the service's lock.
+	f, err := s.Directory.PatchField(r.Context(), c, r.PathValue("name"), directory.FieldPatch{
+		Label: req.Label, Kind: req.Kind, Values: req.Values, Multi: req.Multi, ShareWithApps: req.ShareWithApps, AdminOnly: req.AdminOnly})
+	if err != nil {
 		dirErr(w, err)
 		return
 	}
-	statusJSON(w, "saved")
+	writeJSON(w, map[string]interface{}{"status": "saved", "field": f})
 }
 
 func (s *Server) handleDeleteField(w http.ResponseWriter, r *http.Request) {
@@ -487,6 +485,15 @@ func (s *Server) handleImportReview(w http.ResponseWriter, r *http.Request) {
 	if !s.dirReady(w) {
 		return
 	}
+	// Who and whether first: nothing is read for a caller who can't import.
+	c, ok := s.caller(w, r)
+	if !ok {
+		return
+	}
+	if !c.CanImport() {
+		http.Error(w, "not allowed: needs edit_details, invite or remove", http.StatusForbidden)
+		return
+	}
 	var header []string
 	var rows [][]string
 	mt, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
@@ -508,10 +515,6 @@ func (s *Server) handleImportReview(w http.ResponseWriter, r *http.Request) {
 			dirErr(w, err)
 			return
 		}
-	}
-	c, ok := s.caller(w, r)
-	if !ok {
-		return
 	}
 	rev, err := s.Directory.ImportReview(r.Context(), c, header, rows)
 	if err != nil {
@@ -576,12 +579,16 @@ func (s *Server) handleImportApply(w http.ResponseWriter, r *http.Request) {
 	if !s.dirReady(w) {
 		return
 	}
-	var req directory.ApplyRequest
-	if !decodeLarge(w, r, maxImportJSON, &req) {
-		return
-	}
 	c, ok := s.caller(w, r)
 	if !ok {
+		return
+	}
+	if !c.CanImport() {
+		http.Error(w, "not allowed: needs edit_details, invite or remove", http.StatusForbidden)
+		return
+	}
+	var req directory.ApplyRequest
+	if !decodeLarge(w, r, maxImportJSON, &req) {
 		return
 	}
 	res, err := s.Directory.ImportApply(r.Context(), c, req)

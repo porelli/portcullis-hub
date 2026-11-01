@@ -8,12 +8,15 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/lldap"
 	"github.com/portcullis/hub/internal/lldap/lldaptest"
 	"github.com/portcullis/hub/internal/policy"
 )
@@ -139,6 +142,7 @@ func TestPeopleListenerReadForEveryone(t *testing.T) {
 			t.Errorf("non-admin overview carries %s: %s", bad, b)
 		}
 	}
+	assertNonAdminKeys(t, b)
 	var ov directory.Overview
 	if err := json.Unmarshal([]byte(b), &ov); err != nil {
 		t.Fatal(err)
@@ -195,13 +199,71 @@ func TestPeopleListenerReadForEveryone(t *testing.T) {
 	mustDo(t, e.people, "bob", "PUT", "/api/directory/permissions/invite", `{"group":"eng"}`, 403)
 }
 
+// keySet returns the sorted keys of a JSON object.
+func keySet(t *testing.T, raw json.RawMessage) string {
+	t.Helper()
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("not an object: %s", raw)
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return strings.Join(keys, ",")
+}
+
+// assertNonAdminKeys pins the EXACT keys of bob's (non-admin) view — the
+// top level, bob, the rule group eng and the field department (all
+// omitempty keys either set or absent as asserted): a new field anywhere
+// in the Overview must be allowed here on purpose.
+func assertNonAdminKeys(t *testing.T, body string) {
+	t.Helper()
+	var top struct {
+		Users, Groups, Fields []json.RawMessage
+	}
+	json.Unmarshal([]byte(body), &top)
+	pick := func(list []json.RawMessage, key, name string) json.RawMessage {
+		for _, raw := range list {
+			var m map[string]interface{}
+			json.Unmarshal(raw, &m)
+			if m[key] == name {
+				return raw
+			}
+		}
+		t.Fatalf("no %s %q in %s", key, name, body)
+		return nil
+	}
+	for _, c := range []struct {
+		what string
+		raw  json.RawMessage
+		want string
+	}{
+		{"top", json.RawMessage(body), "admin,available,cycles,fields,groups,invites_available,me,permissions,perms,service_user,users"},
+		{"users[bob] (self)", pick(top.Users, "username", "bob"), "attrs,created,display_name,email,groups,memberships,self,username"},
+		{"groups[eng]", pick(top.Groups, "name", "eng"), "created,exceptions,expiry,members,name,rule,rule_allowed,used_by"},
+		{"fields[0] (department)", pick(top.Fields, "name", "department"), "admin_only,kind,label,multi,name,share_with_apps,values"},
+	} {
+		if got := keySet(t, c.raw); got != c.want {
+			t.Errorf("%s keys = %s, want %s", c.what, got, c.want)
+		}
+	}
+}
+
 func TestFieldRoutes(t *testing.T) {
 	e := newPeopleEnv(t)
 	p := e.people
-	mustDo(t, p, "root", "POST", "/api/directory/fields", `{"name":"office","label":"Office","kind":"text"}`, 200)
+	b := mustDo(t, p, "root", "POST", "/api/directory/fields", `{"name":" office ","label":"  Office ","kind":"text"}`, 200)
+	if !strings.Contains(b, `"field":{"name":"office","label":"Office","kind":"text","values":null,"multi":false,"share_with_apps":true,"admin_only":false}`) {
+		t.Errorf("create = %s (want the stored, normalised field)", b)
+	}
 	mustDo(t, p, "root", "POST", "/api/directory/fields", `{"name":"mail","label":"Mail","kind":"text"}`, 400)
 	// A partial update keeps the rest (kind, multi, share_with_apps).
-	mustDo(t, p, "root", "PUT", "/api/directory/fields/office", `{"label":"Office location"}`, 200)
+	b = mustDo(t, p, "root", "PUT", "/api/directory/fields/office", `{"label":"Office location"}`, 200)
+	if !strings.Contains(b, `"label":"Office location"`) || !strings.Contains(b, `"share_with_apps":true`) {
+		t.Errorf("update = %s", b)
+	}
 	cfg, _ := e.s.Directory.Store.Load()
 	if f := cfg.Fields[0]; f.Label != "Office location" || !f.ShareWithApps || f.Kind != directory.FieldKindText {
 		t.Errorf("field = %+v", f)
@@ -369,10 +431,15 @@ func TestImportReviewUploadLimit(t *testing.T) {
 	if fx := out.Review.Effect["eng"]; fx != [2]int{0, 1} { // bob leaves (carl is in already, as an exception)
 		t.Errorf("effect = %v", out.Review.Effect)
 	}
-	// Plain users can't review an import.
+	// Plain users can't review an import: refused before the body is read
+	// (403, not 413).
 	if r, _ := upload(t, e.people, "bob", []byte("username\nbob\n")); r.StatusCode != 403 {
 		t.Errorf("plain user upload = %d", r.StatusCode)
 	}
+	if r, _ := upload(t, e.people, "bob", big); r.StatusCode != 403 {
+		t.Errorf("plain user 6 MB upload = %d, want 403", r.StatusCode)
+	}
+	mustDo(t, e.people, "bob", "POST", "/api/directory/import/review", `not json`, 403)
 	// Re-review of edited rows (JSON): the effect follows the edits.
 	body, _ := json.Marshal(map[string]interface{}{"header": out.Header, "rows": [][]string{{"bob", "Eng"}, {"carl", "Eng"}}})
 	b = mustDo(t, e.people, "root", "POST", "/api/directory/import/review", string(body), 200)
@@ -383,10 +450,45 @@ func TestImportReviewUploadLimit(t *testing.T) {
 	}
 	mustDo(t, e.people, "root", "POST", "/api/directory/import/review", `{"header":["department"],"rows":[]}`, 400)
 
+	// A plain user's apply: 403, nothing audited.
+	auditLines := func() int {
+		data, _ := os.ReadFile(e.s.Directory.Audit.Path)
+		return strings.Count(string(data), "\n")
+	}
+	n := auditLines()
+	mustDo(t, e.people, "bob", "POST", "/api/directory/import/apply", `{"rows":[{"user":"carl","remove":true}]}`, 403)
+	if auditLines() != n || !e.ll.HasUser("carl") {
+		t.Error("a plain user's apply was audited or applied")
+	}
+
 	// Apply.
 	r, b = doAs(t, e.people, "root", "POST", "/api/directory/import/apply", `{"rows":[{"user":"carl","attrs":{"department":["Eng"]}}]}`)
 	if r.StatusCode != 200 || !strings.Contains(b, `"ok":true`) || r.Header.Get("Cache-Control") != "no-store" {
 		t.Errorf("apply = %d %s", r.StatusCode, b)
+	}
+}
+
+// TestPeopleDirectoryUnavailable: without LLDAP the people listener says
+// so generically; the hub listener (admins) keeps the detail.
+func TestPeopleDirectoryUnavailable(t *testing.T) {
+	s, _, _ := newDirFixture(t, func(d *directory.Service) {
+		d.LLDAP = lldap.New("http://127.0.0.1:1", "ldap://127.0.0.1:1", "dc=x", filepath.Join(t.TempDir(), "missing"))
+	})
+	h, _ := s.Handler()
+	p, _ := s.PeopleHandler()
+	hub, people := httptest.NewServer(h), httptest.NewServer(p)
+	t.Cleanup(hub.Close)
+	t.Cleanup(people.Close)
+	b := mustDo(t, people, "bob", "GET", "/api/directory", "", 200)
+	if !strings.Contains(b, `"reason":"`+directory.GenericUnavailable+`"`) || strings.Contains(b, "missing") {
+		t.Errorf("people overview = %s", b)
+	}
+	b = mustDo(t, hub, "root", "GET", "/api/directory", "", 200)
+	if !strings.Contains(b, `"available":false`) || !strings.Contains(b, "missing") {
+		t.Errorf("hub overview = %s", b)
+	}
+	if b := mustDo(t, people, "bob", "GET", "/api/directory/me", "", 503); strings.TrimSpace(b) != directory.GenericUnavailable {
+		t.Errorf("people me = %q", b)
 	}
 }
 

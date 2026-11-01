@@ -470,7 +470,7 @@ func userOps(s *directory.Service, c *directory.Caller, target string) map[strin
 // evaluator (Evaluate, RunEvaluator) targets nobody: it leaves protected
 // accounts alone, see TestProtectedAccountsNeverRuleMembers. The group
 // and field operations are admin-only (TestDelegateCannotEscalate).
-var nonUserOps = map[string]bool{"Overview": true, "OverviewFor": true, "Recent": true, "CallerFor": true, "CreateGroup": true, "DeleteGroup": true, "CreateField": true, "UpdateField": true, "DeleteField": true, "Evaluate": true, "RunEvaluator": true, "Desired": true, "DesiredFromLLDAP": true, "Pending": true,
+var nonUserOps = map[string]bool{"Overview": true, "OverviewFor": true, "Recent": true, "CallerFor": true, "CreateGroup": true, "DeleteGroup": true, "CreateField": true, "UpdateField": true, "PatchField": true, "PeopleOverview": true, "DeleteField": true, "Evaluate": true, "RunEvaluator": true, "Desired": true, "DesiredFromLLDAP": true, "Pending": true,
 	// Group config: admin-only; ConvertApply's keep list can only name
 	// non-protected members (TestConvertKeepsAsExceptions), PreviewRule
 	// changes nothing and never lists protected accounts.

@@ -144,8 +144,7 @@ type Review struct {
 // Missing rows are unticked by default (ticking a Remove row is the confirmation).
 func (s *Service) ImportReview(ctx context.Context, c *Caller, header []string, rows [][]string) (*Review, error) {
 	// Authorization: edit_details OR invite OR remove (any)
-	hasAnyPerm := c.Admin || c.Perms[PermEditDetails] || c.Perms[PermInvite] || c.Perms[PermRemove]
-	if !hasAnyPerm {
+	if !c.CanImport() {
 		return nil, forbidden("not allowed: needs %s, %s or %s", PermEditDetails, PermInvite, PermRemove)
 	}
 
@@ -714,17 +713,68 @@ type ApplyResult struct {
 // Creates use CreateUser (with invite), removes use DeleteUser, and
 // attribute updates use SetDetails. Display name/email updates use UpdateUser.
 // Per-row results are returned, so partial failures are reported without rollback.
+//
+// Refused up front, before LLDAP or the audit is touched, unless the
+// caller is an admin or holds edit_details, invite or remove (403), or
+// with more than 10,000 rows (400). A cancelled request stops between
+// rows (the rest are reported as not applied).
 func (s *Service) ImportApply(ctx context.Context, c *Caller, req ApplyRequest) (*ApplyResult, error) {
+	if c == nil || strings.TrimSpace(c.User) == "" {
+		return nil, errNoActor()
+	}
+	if !c.CanImport() {
+		return nil, forbidden("not allowed: needs %s, %s or %s", PermEditDetails, PermInvite, PermRemove)
+	}
+	if len(req.Rows) > maxCSVRows {
+		return nil, invalid("too many rows (max %d)", maxCSVRows)
+	}
 	result := &ApplyResult{Rows: make([]RowResult, len(req.Rows))}
-
+	st := &applyState{}
 	for i, row := range req.Rows {
-		result.Rows[i] = s.applyRow(ctx, c, row)
+		if err := ctx.Err(); err != nil {
+			for j := i; j < len(req.Rows); j++ {
+				result.Rows[j] = RowResult{User: req.Rows[j].User, Error: "not applied: request cancelled"}
+			}
+			break
+		}
+		result.Rows[i] = s.applyRow(ctx, c, row, st)
 	}
 
 	return result, nil
 }
 
-func (s *Service) applyRow(ctx context.Context, c *Caller, row ApplyRow) RowResult {
+// applyState is what ImportApply's rows share for their pre-checks: one
+// snapshot (reloaded only after a row created or removed someone) and one
+// directory.yaml read. The reused operations still re-check everything
+// inside their own lock.
+type applyState struct {
+	sn  *snapshot
+	cfg *Config
+}
+
+func (st *applyState) snapshot(ctx context.Context, s *Service) (*snapshot, error) {
+	if st.sn == nil {
+		sn, err := s.load(ctx)
+		if err != nil {
+			return nil, err
+		}
+		st.sn = sn
+	}
+	return st.sn, nil
+}
+
+func (st *applyState) config(s *Service) (*Config, error) {
+	if st.cfg == nil {
+		cfg, err := s.Store.Load()
+		if err != nil {
+			return nil, err
+		}
+		st.cfg = cfg
+	}
+	return st.cfg, nil
+}
+
+func (s *Service) applyRow(ctx context.Context, c *Caller, row ApplyRow, st *applyState) RowResult {
 	res := RowResult{User: row.User}
 
 	switch {
@@ -735,7 +785,7 @@ func (s *Service) applyRow(ctx context.Context, c *Caller, row ApplyRow) RowResu
 				res.Error = "custom fields not configured"
 				return res
 			}
-			cfg, err := s.Store.Load()
+			cfg, err := st.config(s)
 			if err != nil {
 				res.Error = "directory.yaml: " + err.Error()
 				return res
@@ -753,7 +803,7 @@ func (s *Service) applyRow(ctx context.Context, c *Caller, row ApplyRow) RowResu
 				fields[f.Name] = f
 			}
 
-			sn, err := s.load(ctx)
+			sn, err := st.snapshot(ctx, s)
 			if err != nil {
 				res.Error = err.Error()
 				return res
@@ -814,6 +864,7 @@ func (s *Service) applyRow(ctx context.Context, c *Caller, row ApplyRow) RowResu
 			res.Error = err.Error()
 			return res
 		}
+		st.sn = nil // someone new: later rows see them
 		res.OK = true
 		res.Invite = createRes.Invite
 
@@ -833,6 +884,7 @@ func (s *Service) applyRow(ctx context.Context, c *Caller, row ApplyRow) RowResu
 			res.Error = err.Error()
 			return res
 		}
+		st.sn = nil
 		res.OK = true
 		if len(delRes.Warnings) > 0 {
 			res.Error = "warnings: " + strings.Join(delRes.Warnings, "; ")
@@ -841,8 +893,8 @@ func (s *Service) applyRow(ctx context.Context, c *Caller, row ApplyRow) RowResu
 	default:
 		// Update existing user: apply display_name/email via UpdateUser, attrs via SetDetails
 
-		// Load snapshot to check if user exists
-		sn, err := s.load(ctx)
+		// Snapshot to check if user exists
+		sn, err := st.snapshot(ctx, s)
 		if err != nil {
 			res.Error = err.Error()
 			return res

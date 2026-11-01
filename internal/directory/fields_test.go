@@ -639,3 +639,42 @@ func TestOverviewFieldsError(t *testing.T) {
 		t.Error("Overview with corrupt directory.yaml: FieldsError should be set")
 	}
 }
+
+// TestPatchFieldMerges: patches merge with the stored field inside the
+// lock, so concurrent partial updates don't undo each other.
+func TestPatchFieldMerges(t *testing.T) {
+	e := newEnv(t)
+	e.svc.Store = &directory.Store{Path: filepath.Join(t.TempDir(), "directory.yaml")}
+	if err := e.svc.CreateField(ctx, asRoot, directory.Field{Name: "office", Label: " Office ", Kind: directory.FieldKindList, Values: []string{" Rome ", "Milan"}}); err != nil {
+		t.Fatal(err)
+	}
+	label, yes := "Office location", true
+	done := make(chan error, 2)
+	go func() {
+		_, err := e.svc.PatchField(ctx, asRoot, "office", directory.FieldPatch{Label: &label})
+		done <- err
+	}()
+	go func() {
+		_, err := e.svc.PatchField(ctx, asRoot, "office", directory.FieldPatch{AdminOnly: &yes})
+		done <- err
+	}()
+	for i := 0; i < 2; i++ {
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+	}
+	f, err := e.svc.PatchField(ctx, asRoot, "office", directory.FieldPatch{Values: []string{"Rome", "Milan", " Naples "}})
+	if err != nil || f.Label != label || !f.AdminOnly || strings.Join(f.Values, ",") != "Rome,Milan,Naples" || f.Kind != directory.FieldKindList {
+		t.Errorf("patched = %+v %v", f, err)
+	}
+	kind := directory.FieldKindText
+	if _, err := e.svc.PatchField(ctx, asRoot, "office", directory.FieldPatch{Kind: &kind}); status(err) != 400 {
+		t.Errorf("kind change = %v", err)
+	}
+	if _, err := e.svc.PatchField(ctx, asRoot, "nope", directory.FieldPatch{Label: &label}); status(err) != 404 {
+		t.Errorf("unknown = %v", err)
+	}
+	if _, err := e.svc.PatchField(ctx, &directory.Caller{User: "alice"}, "office", directory.FieldPatch{Label: &label}); status(err) != 403 {
+		t.Errorf("non-admin = %v", err)
+	}
+}

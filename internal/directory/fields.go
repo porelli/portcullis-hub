@@ -103,18 +103,82 @@ func (s *Service) CreateField(ctx context.Context, c *Caller, f Field) error {
 	})
 }
 
-// UpdateField updates a field's mutable properties (Label, Values, ShareWithApps, AdminOnly).
-// Kind and Multi are immutable.
+// FieldPatch changes some of a field's properties; nil = keep. Kind and
+// Multi are immutable: if set they must equal the field's.
+type FieldPatch struct {
+	Label         *string
+	Kind          *FieldKind
+	Values        []string // nil = keep; empty non-nil = no values
+	Multi         *bool
+	ShareWithApps *bool
+	AdminOnly     *bool
+}
+
+// UpdateField replaces a field's mutable properties (Label, Values,
+// ShareWithApps, AdminOnly) with f's. Kind and Multi are immutable.
 // Admins only.
 func (s *Service) UpdateField(ctx context.Context, c *Caller, f Field) error {
-	f.Name = strings.TrimSpace(f.Name)
-	f.Label = strings.TrimSpace(f.Label)
+	values := f.Values
+	if values == nil {
+		values = []string{}
+	}
+	_, err := s.PatchField(ctx, c, f.Name, FieldPatch{Label: &f.Label, Kind: &f.Kind, Values: values, Multi: &f.Multi, ShareWithApps: &f.ShareWithApps, AdminOnly: &f.AdminOnly})
+	return err
+}
+
+// PatchField applies p to the field name, merged with the stored field
+// inside the lock (concurrent patches don't undo each other), and returns
+// the field as stored. Admins only.
+func (s *Service) PatchField(ctx context.Context, c *Caller, name string, p FieldPatch) (*Field, error) {
+	name = strings.TrimSpace(name)
 	var changes []string
 	detail := ""
-	return s.run(ctx, c, permAdmin, "field.update", f.Name, &detail, func() error {
+	var stored *Field
+	err := s.run(ctx, c, permAdmin, "field.update", name, &detail, func() error {
 		if s.Store == nil {
 			return &Error{Status: http.StatusServiceUnavailable, Msg: "custom fields not configured"}
 		}
+		cfg, err := s.Store.Load()
+		if err != nil {
+			return fmt.Errorf("load directory.yaml: %w", err)
+		}
+
+		// Find existing field
+		idx := -1
+		var existing Field
+		for i, field := range cfg.Fields {
+			if field.Name == name {
+				idx = i
+				existing = field
+				break
+			}
+		}
+		if idx == -1 {
+			return notFound("field %q not found", name)
+		}
+
+		// Kind and Multi are immutable
+		if p.Kind != nil && existing.Kind != *p.Kind {
+			return invalid("field kind cannot be changed (was %q)", existing.Kind)
+		}
+		if p.Multi != nil && existing.Multi != *p.Multi {
+			return invalid("field multi cannot be changed (was %v)", existing.Multi)
+		}
+		f := existing
+		f.Values = append([]string(nil), existing.Values...)
+		if p.Label != nil {
+			f.Label = *p.Label
+		}
+		if p.Values != nil {
+			f.Values = p.Values
+		}
+		if p.ShareWithApps != nil {
+			f.ShareWithApps = *p.ShareWithApps
+		}
+		if p.AdminOnly != nil {
+			f.AdminOnly = *p.AdminOnly
+		}
+		f.Label = strings.TrimSpace(f.Label)
 		if f.Label == "" {
 			return invalid("label is required")
 		}
@@ -127,38 +191,11 @@ func (s *Service) UpdateField(ctx context.Context, c *Caller, f Field) error {
 				return err
 			}
 			f.Values = trimmed
-		} else {
+		} else if len(f.Values) > 0 {
 			// Non-list kinds must have empty Values
-			if len(f.Values) > 0 {
-				return invalid("%s fields must not have values", f.Kind)
-			}
-		}
-
-		cfg, err := s.Store.Load()
-		if err != nil {
-			return fmt.Errorf("load directory.yaml: %w", err)
-		}
-
-		// Find existing field
-		idx := -1
-		var existing Field
-		for i, field := range cfg.Fields {
-			if field.Name == f.Name {
-				idx = i
-				existing = field
-				break
-			}
-		}
-		if idx == -1 {
-			return notFound("field %q not found", f.Name)
-		}
-
-		// Check Kind and Multi are unchanged
-		if existing.Kind != f.Kind {
-			return invalid("field kind cannot be changed (was %q)", existing.Kind)
-		}
-		if existing.Multi != f.Multi {
-			return invalid("field multi cannot be changed (was %v)", existing.Multi)
+			return invalid("%s fields must not have values", f.Kind)
+		} else {
+			f.Values = nil
 		}
 
 		// Track changes
@@ -248,8 +285,13 @@ func (s *Service) UpdateField(ctx context.Context, c *Caller, f Field) error {
 		if len(changes) > 0 {
 			detail = strings.Join(changes, " ")
 		}
+		stored = &f
 		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
+	return stored, nil
 }
 
 // DeleteField deletes a field. confirm must equal the field name.
