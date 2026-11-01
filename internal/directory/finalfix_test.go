@@ -173,6 +173,18 @@ func TestGuardingRuleMustNotMatchEmpty(t *testing.T) {
 	}
 	wantStatus(t, "SetGroupRule empty", e.svc.SetGroupRule(ctx, asRoot, "admin_app", mustRule(t, `not office = "Branch"`)), 409)
 
+	// reports-to: an empty person has no manager, so "reports-to" doesn't
+	// match them and "not reports-to" does. (manager is a person field;
+	// admin-only so a guarding rule may use it.)
+	adminOnly := true
+	if _, err := e.svc.PatchField(ctx, asRoot, "manager", directory.FieldPatch{AdminOnly: &adminOnly}); err != nil {
+		t.Fatal(err)
+	}
+	wantStatus(t, "SetGroupRule not reports-to", e.svc.SetGroupRule(ctx, asRoot, "admin_app", mustRule(t, `not manager reports-to "anna"`)), 409)
+	if err := e.svc.SetGroupRule(ctx, asRoot, "admin_app", mustRule(t, `manager reports-to "anna"`)); err != nil {
+		t.Errorf("SetGroupRule reports-to: %v", err)
+	}
+
 	// Permission groups too, and a grant to a rule group matching empty.
 	if err := e.svc.SetPermission(ctx, asRoot, directory.PermEditDetails, "hr"); err != nil {
 		t.Fatal(err)
