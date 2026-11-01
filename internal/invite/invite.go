@@ -26,6 +26,19 @@ const (
 // ErrNotConfigured means the shared secret file is missing or empty.
 var ErrNotConfigured = errors.New("invite API not configured")
 
+// APIError is a non-2xx answer from core's invite API.
+type APIError struct {
+	Status  int
+	Message string // core's {"error"}, truncated; may be empty
+}
+
+func (e *APIError) Error() string {
+	if e.Message != "" {
+		return fmt.Sprintf("invite API: HTTP %d: %s", e.Status, e.Message)
+	}
+	return fmt.Sprintf("invite API: HTTP %d", e.Status)
+}
+
 // Invite is a one-time link.
 type Invite struct {
 	URL       string    `json:"url"`
@@ -101,10 +114,7 @@ func (c *Client) Create(ctx context.Context, username string) (*Invite, error) {
 		if len(msg) > 200 {
 			msg = msg[:200]
 		}
-		if msg != "" {
-			return nil, fmt.Errorf("invite API: HTTP %d: %s", resp.StatusCode, msg)
-		}
-		return nil, fmt.Errorf("invite API: HTTP %d", resp.StatusCode)
+		return nil, &APIError{Status: resp.StatusCode, Message: msg}
 	}
 	var inv Invite
 	if err := json.Unmarshal(data, &inv); err != nil {

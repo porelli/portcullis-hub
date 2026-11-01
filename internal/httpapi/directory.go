@@ -141,7 +141,7 @@ func (s *Server) handleSetPassword(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Generate bool   `json:"generate"`
 		Password string `json:"password"`
-		Confirm  string `json:"confirm"` // required for another lldap_admin member
+		Confirm  string `json:"confirm"` // required for another administrator
 	}
 	if !decodeJSON(w, r, &req) {
 		return
@@ -159,11 +159,11 @@ func (s *Server) handleInvite(w http.ResponseWriter, r *http.Request) {
 	if !s.dirReady(w) {
 		return
 	}
-	var req confirmBody // confirm: required for another lldap_admin member
+	var req struct{}
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	res, err := s.Directory.SendInvite(r.Context(), actor(r), r.PathValue("username"), req.Confirm)
+	res, err := s.Directory.SendInvite(r.Context(), actor(r), r.PathValue("username"))
 	if err != nil {
 		dirErr(w, err)
 		return

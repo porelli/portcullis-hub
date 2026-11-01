@@ -132,9 +132,10 @@ func TestDirectoryAPI(t *testing.T) {
 		{"root", "DELETE", "/api/directory/groups/users_demo", `{"confirm":"users_demo"}`, 200},
 		{"root", "GET", "/api/directory/audit", "", 200},
 		{"root", "POST", "/api/directory/users/admin/invite", `{"confirm":"admin"}`, 409},
-		{"root", "POST", "/api/directory/users/ops/invite", `{}`, 400},
+		{"root", "POST", "/api/directory/users/ops/invite", `{}`, 409}, // administrators: server-side only
+		{"root", "POST", "/api/directory/users/ops/remove-passkeys", `{"confirm":"ops","invite":true}`, 409},
 		{"root", "POST", "/api/directory/users/ops/password", `{"generate":true}`, 400},
-		{"root", "POST", "/api/directory/users/ops/invite", `{"confirm":"ops"}`, 200},
+		{"root", "POST", "/api/directory/users/ops/password", `{"generate":true,"confirm":"ops"}`, 200},
 	}
 	for _, c := range cases {
 		if r, b := doAs(t, srv, c.user, c.method, c.path, c.body); r.StatusCode != c.want {
@@ -143,6 +144,10 @@ func TestDirectoryAPI(t *testing.T) {
 	}
 	if ll.HasUser("kim") || ll.HasGroup("users_demo") || kc.Get("kim") != nil {
 		t.Error("cleanup did not reach LLDAP / Keycloak")
+	}
+
+	if _, b := doAs(t, srv, "root", "POST", "/api/directory/users/ops/invite", `{}`); !strings.Contains(b, "administrators are recovered from the server: ./portcullis invite ops") {
+		t.Errorf("admin invite message = %q", b)
 	}
 
 	// Password reset response: generated once, not cached.

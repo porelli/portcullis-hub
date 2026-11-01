@@ -26,19 +26,21 @@ const svcPass = "service-password-0123456789"
 const inviteSecret = "invite-shared-secret-0123456789abcdef"
 
 type env struct {
-	svc     *directory.Service
-	ll      *lldaptest.Server
-	kc      *kctest.Server
-	audit   string
-	invites *fakeInvites
+	secretFile string
+	svc        *directory.Service
+	ll         *lldaptest.Server
+	kc         *kctest.Server
+	audit      string
+	invites    *fakeInvites
 }
 
 // fakeInvites is core's invite API (contract §9.4).
 type fakeInvites struct {
-	mu    sync.Mutex
-	srv   *httptest.Server
-	users []string
-	fail  bool
+	mu     sync.Mutex
+	srv    *httptest.Server
+	users  []string
+	fail   bool
+	refuse map[string]bool // core answers 409 for these
 }
 
 func newInvites(t *testing.T) *fakeInvites {
@@ -57,6 +59,11 @@ func newInvites(t *testing.T) *fakeInvites {
 		}
 		var req struct{ Username string }
 		json.NewDecoder(r.Body).Decode(&req)
+		if f.refuse[req.Username] {
+			w.WriteHeader(409)
+			json.NewEncoder(w).Encode(map[string]string{"error": "user is an administrator"})
+			return
+		}
 		f.users = append(f.users, req.Username)
 		w.WriteHeader(201)
 		json.NewEncoder(w).Encode(map[string]interface{}{"url": "https://enroll.example.org/invite/tok-" + req.Username, "expires_at": time.Now().Add(72 * time.Hour).UTC()})
@@ -79,16 +86,19 @@ func newEnv(t *testing.T) *env {
 	secretFile := filepath.Join(t.TempDir(), "secret")
 	os.WriteFile(secretFile, []byte(inviteSecret+"\n"), 0600)
 	audit := filepath.Join(t.TempDir(), "audit.jsonl")
+	gateMap := filepath.Join(t.TempDir(), "group-gate-map.conf")
+	os.WriteFile(gateMap, []byte("# core\nauth=lldap_admin\nmetrics = ops_admins\ngrafana=users_grafana\n"), 0644)
 	svc := &directory.Service{
-		LLDAP:   lldap.New(ll.HTTP.URL, ll.LDAPURL(), ll.BaseDN, credDir),
-		KC:      keycloak.New(kc.HTTP.URL, "admin", "admin"),
-		Invites: invite.New(inv.srv.URL, secretFile),
-		Audit:   &directory.AuditLog{Path: audit},
+		LLDAP:       lldap.New(ll.HTTP.URL, ll.LDAPURL(), ll.BaseDN, credDir),
+		KC:          keycloak.New(kc.HTTP.URL, "admin", "admin"),
+		Invites:     invite.New(inv.srv.URL, secretFile),
+		Audit:       &directory.AuditLog{Path: audit},
+		AdminGroups: func() map[string]bool { return directory.ProtectedGroups("extra_admins", gateMap) },
 		Apps: func() []directory.App {
 			return []directory.App{{ID: "app", Name: "App", Enabled: true, AccessGroup: "users_app", AdminGroup: "admin_app"}, {ID: "other", Name: "Other", AccessGroup: "users_other"}}
 		},
 	}
-	return &env{svc: svc, ll: ll, kc: kc, audit: audit, invites: inv}
+	return &env{svc: svc, ll: ll, kc: kc, audit: audit, invites: inv, secretFile: secretFile}
 }
 
 func status(err error) int {
@@ -262,7 +272,7 @@ func TestGuardrails(t *testing.T) {
 	check("delete builtin group", e.svc.DeleteGroup(ctx, "root", "lldap_admin", "lldap_admin"), 409)
 	check("create lldap_ group", e.svc.CreateGroup(ctx, "root", "lldap_x"), 400)
 	check("passkeys service", e.svc.RequirePasskey(ctx, "root", "portcullis-hub"), 409)
-	_, err = e.svc.SendInvite(ctx, "root", "portcullis-hub", "")
+	_, err = e.svc.SendInvite(ctx, "root", "portcullis-hub")
 	check("invite service", err, 409)
 
 	// Last human admin: admin + root are humans; another admin (solo)
@@ -330,12 +340,12 @@ func TestUserLifecycle(t *testing.T) {
 	if err := e.svc.RequirePasskey(ctx, "root", "ivy"); err != nil || e.kc.Get("ivy") == nil {
 		t.Errorf("require on unimported: %v", err)
 	}
-	inv, err := e.svc.SendInvite(ctx, "root", "ivy", "")
+	inv, err := e.svc.SendInvite(ctx, "root", "ivy")
 	if err != nil || inv.Invite == nil {
 		t.Errorf("invite: %+v %v", inv, err)
 	}
 	e.invites.fail = true
-	if _, err := e.svc.SendInvite(ctx, "root", "ivy", ""); err == nil || !strings.Contains(err.Error(), "boom") {
+	if _, err := e.svc.SendInvite(ctx, "root", "ivy"); err == nil || !strings.Contains(err.Error(), "boom") {
 		t.Errorf("invite failure = %v", err)
 	}
 
@@ -391,7 +401,7 @@ func TestAudit(t *testing.T) {
 	}
 	e.svc.SetPassword(ctx, "root", "jack", "admin-provided-secret", false, "")
 	e.svc.DeleteUser(ctx, "root", "root", "root") // refused
-	inv, _ := e.svc.SendInvite(ctx, "root", "jack", "")
+	inv, _ := e.svc.SendInvite(ctx, "root", "jack")
 
 	raw, _ := os.ReadFile(e.audit)
 	for _, secret := range []string{res.Password, pw2.Password, "admin-provided-secret", svcPass, inviteSecret, inv.Invite.URL} {
@@ -430,7 +440,7 @@ func userOps(s *directory.Service, target string) map[string]func() error {
 		"UpdateUser":     func() error { return s.UpdateUser(ctx, "root", target, strptr("x@example.org"), nil) },
 		"DeleteUser":     func() error { return r(s.DeleteUser(ctx, "root", target, target)) },
 		"SetPassword":    func() error { return r(s.SetPassword(ctx, "root", target, "", true, target)) },
-		"SendInvite":     func() error { return r(s.SendInvite(ctx, "root", target, target)) },
+		"SendInvite":     func() error { return r(s.SendInvite(ctx, "root", target)) },
 		"RequirePasskey": func() error { return s.RequirePasskey(ctx, "root", target) },
 		"ClearActions":   func() error { return s.ClearActions(ctx, "root", target) },
 		"RemovePasskeys": func() error { return r(s.RemovePasskeys(ctx, "root", target, target, true)) },
@@ -473,45 +483,111 @@ func TestProtectedAccountsParity(t *testing.T) {
 	}
 }
 
-func TestAdminTakeoverNeedsConfirmation(t *testing.T) {
+func TestProtectedGroups(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "map.conf")
+	os.WriteFile(f, []byte("# comment\nhub=lldap_admin\nmetrics=ops\nMETRICS2=x\nwiki=users_wiki\ntraefik=\nenroll = enrollers\n"), 0644)
+	got := directory.ProtectedGroups("a, b c", f)
+	for _, g := range []string{"lldap_admin", "lldap_password_manager", "a", "b", "c", "ops", "enrollers"} {
+		if !got[g] {
+			t.Errorf("missing %s in %v", g, got)
+		}
+	}
+	if got["users_wiki"] || got["x"] || got[""] {
+		t.Errorf("app groups must not be protected: %v", got)
+	}
+	if got := directory.ProtectedGroups("", filepath.Join(t.TempDir(), "none")); len(got) != 2 {
+		t.Errorf("no map file = %v", got)
+	}
+}
+
+func TestAdministrators(t *testing.T) {
 	e := newEnv(t)
 	e.ll.AddUser("bea", "bea@example.org", "", "bea-password-123", "lldap_admin")
+	e.ll.AddGroup("ops_admins")
+	e.ll.AddGroup("extra_admins")
+	e.ll.AddUser("otto", "otto@example.org", "", "", "ops_admins")
+	e.ll.AddUser("xena", "xena@example.org", "", "", "extra_admins")
 	e.kc.Import("bea", kctest.Credential{ID: "w", Type: "webauthn"})
 
-	if _, err := e.svc.SendInvite(ctx, "root", "bea", ""); status(err) != 400 {
-		t.Errorf("invite for another admin without confirm = %v", err)
+	ov, err := e.svc.Overview(ctx, "root")
+	if err != nil {
+		t.Fatal(err)
 	}
+	for _, u := range ov.Users {
+		wantAdmin := map[string]bool{"admin": true, "bea": true, "otto": true, "xena": true, "root": true, "portcullis-hub": true}[u.Username]
+		if u.Admin != wantAdmin {
+			t.Errorf("%s admin = %v", u.Username, u.Admin)
+		}
+		if u.Username == "bea" && u.ServerInvite != "./portcullis invite bea" {
+			t.Errorf("bea server invite = %q", u.ServerInvite)
+		}
+		if u.Username == "portcullis-hub" && (u.Keycloak != nil || u.ServerInvite != "") {
+			t.Errorf("service account shows keycloak/invite: %+v", u)
+		}
+	}
+	for _, g := range ov.Groups {
+		if want := g.Name == "lldap_admin" || g.Name == "lldap_password_manager" || g.Name == "ops_admins" || g.Name == "extra_admins"; g.Admin != want {
+			t.Errorf("group %s admin = %v", g.Name, g.Admin)
+		}
+	}
+
+	// No invites for administrators, yourself included; core isn't asked.
+	for _, who := range []string{"bea", "otto", "xena", "root"} {
+		_, err := e.svc.SendInvite(ctx, "root", who)
+		if status(err) != 409 || !strings.Contains(err.Error(), "administrators are recovered from the server: ./portcullis invite "+who) {
+			t.Errorf("invite %s = %v", who, err)
+		}
+	}
+	// Reset passkeys → new invite is refused before anything is removed.
+	if _, err := e.svc.RemovePasskeys(ctx, "root", "bea", "bea", true); status(err) != 409 || len(e.kc.Get("bea").Credentials) != 1 {
+		t.Errorf("reset+invite for admin = %v, creds %v", err, e.kc.Get("bea").Credentials)
+	}
+	if len(e.invites.users) != 0 {
+		t.Fatalf("core was asked for admin invites: %v", e.invites.users)
+	}
+	// Password and passkey reset for another admin: typed confirmation.
 	if _, err := e.svc.SetPassword(ctx, "root", "bea", "", true, "be"); status(err) != 400 || e.ll.Password("bea") != "bea-password-123" {
 		t.Errorf("password for another admin without confirm = %v", err)
 	}
-	if len(e.invites.users) != 0 {
-		t.Fatal("invite created without confirmation")
+	if _, err := e.svc.SetPassword(ctx, "root", "otto", "", true, "otto"); err != nil {
+		t.Errorf("confirmed password = %v", err)
 	}
-	if res, err := e.svc.SendInvite(ctx, "root", "bea", "bea"); err != nil || res.Invite == nil {
-		t.Errorf("confirmed invite = %v", err)
-	}
-	if _, err := e.svc.RemovePasskeys(ctx, "root", "bea", "bea", true); err != nil {
+	if _, err := e.svc.RemovePasskeys(ctx, "root", "bea", "bea", false); err != nil || len(e.kc.Get("bea").Credentials) != 0 {
 		t.Errorf("confirmed reset = %v", err)
 	}
-	// Your own invite, and non-admins, need no confirmation.
-	if _, err := e.svc.SendInvite(ctx, "root", "root", ""); err != nil {
-		t.Errorf("self invite = %v", err)
+	// Creating an administrator in invite mode: created, no invite, server hint.
+	res, err := e.svc.CreateUser(ctx, "root", directory.CreateRequest{Username: "nora", Email: "nora@example.org", Groups: []string{"ops_admins"}})
+	if err != nil || res.Invite != nil || res.ServerInvite != "./portcullis invite nora" || !e.ll.HasUser("nora") || len(e.invites.users) != 0 {
+		t.Errorf("create admin = %+v %v", res, err)
 	}
-	if _, err := e.svc.SendInvite(ctx, "root", "alice", ""); err != nil {
-		t.Errorf("non-admin invite = %v", err)
+	// ... even when invites aren't configured at all.
+	e.svc.Invites = nil
+	if res, err := e.svc.CreateUser(ctx, "root", directory.CreateRequest{Username: "nils", Email: "nils@example.org", Groups: []string{"lldap_admin"}}); err != nil || res.ServerInvite == "" {
+		t.Errorf("create admin without invites = %+v %v", res, err)
 	}
-	entries, _ := e.svc.Recent(10)
+	e.svc.Invites = invite.New(e.invites.srv.URL, e.secretFile)
+
+	// Core's own 409 (it knows groups the Hub doesn't) is handled the same way.
+	e.invites.mu.Lock()
+	e.invites.refuse = map[string]bool{"alice": true, "zed": true}
+	e.invites.mu.Unlock()
+	if _, err := e.svc.SendInvite(ctx, "root", "alice"); status(err) != 409 || !strings.Contains(err.Error(), "./portcullis invite alice") || !strings.Contains(err.Error(), "user is an administrator") {
+		t.Errorf("core 409 = %v", err)
+	}
+	res, err = e.svc.CreateUser(ctx, "root", directory.CreateRequest{Username: "zed", Email: "zed@example.org"})
+	if err != nil || res.Invite != nil || res.ServerInvite != "./portcullis invite zed" || len(res.Warnings) != 1 {
+		t.Errorf("create with core 409 = %+v %v", res, err)
+	}
+
 	flagged := 0
+	entries, _ := e.svc.Recent(100)
 	for _, en := range entries {
 		if strings.Contains(en.Detail, "target_is_lldap_admin=true") {
-			if en.Target != "bea" {
-				t.Errorf("flagged wrong target: %+v", en)
-			}
 			flagged++
 		}
 	}
-	// Two refusals + confirmed invite + confirmed reset.
+	// Refused password, confirmed password, refused reset+invite, confirmed reset.
 	if flagged != 4 {
-		t.Errorf("flagged = %d, entries = %+v", flagged, entries)
+		t.Errorf("flagged = %d", flagged)
 	}
 }

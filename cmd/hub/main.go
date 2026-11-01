@@ -88,6 +88,12 @@ func main() {
 		Invites: invites,
 		Audit:   &directory.AuditLog{Path: filepath.Join(cfg.DataDir, "audit.jsonl")},
 		Apps:    h.DirectoryApps,
+		// Same administrator groups core's invite API refuses (§9.4),
+		// re-read on use so a map edit needs no restart.
+		AdminGroups: func() map[string]bool {
+			return directory.ProtectedGroups(os.Getenv("INVITE_PROTECTED_GROUPS"),
+				env("HUB_GATE_MAP_FILE", filepath.Join(projectDir, "group-gate", "group-gate-map.conf")))
+		},
 	}
 
 	srv := &httpapi.Server{

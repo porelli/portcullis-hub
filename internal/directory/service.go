@@ -82,6 +82,11 @@ type Service struct {
 	Invites Inviter
 	Audit   *AuditLog
 	Apps    func() []App
+	// AdminGroups returns the groups whose members are administrators:
+	// core refuses to invite them (§9.4) and the Hub asks for a typed
+	// confirmation before handing over their sign-in. nil: lldap_admin and
+	// lldap_password_manager (see ProtectedGroups).
+	AdminGroups func() map[string]bool
 
 	mu sync.Mutex
 }
@@ -106,6 +111,18 @@ func notFound(format string, a ...interface{}) error {
 
 // ── read side ─────────────────────────────────────────────
 
+func (s *Service) adminGroups() map[string]bool {
+	if s.AdminGroups != nil {
+		return s.AdminGroups()
+	}
+	return ProtectedGroups("", "")
+}
+
+// recoverMsg is shown wherever an administrator would need an invite.
+func recoverMsg(user string) string {
+	return "administrators are recovered from the server: ./portcullis invite " + user
+}
+
 // KeycloakView is a user's Keycloak state.
 type KeycloakView struct {
 	Imported        bool     `json:"imported"`
@@ -122,10 +139,14 @@ type UserView struct {
 	Created     string        `json:"created"`
 	Groups      []string      `json:"groups"`
 	Keycloak    *KeycloakView `json:"keycloak"` // nil: Keycloak unreachable
-	// Protected: "service" (the Hub's account, read-only), "core-admin"
-	// (no delete / password / lldap_admin removal) or "".
+	// Protected: "service" (the Hub's account) or "core-admin" (the
+	// bootstrap admin): both read-only here. "" otherwise.
 	Protected string `json:"protected,omitempty"`
 	Self      bool   `json:"self,omitempty"`
+	// Admin: member of an administrator group (AdminGroups). No invites
+	// from the Hub (core refuses them); recover with ServerInvite.
+	Admin        bool   `json:"admin,omitempty"`
+	ServerInvite string `json:"server_invite,omitempty"`
 }
 
 // GroupView is one group.
@@ -134,7 +155,8 @@ type GroupView struct {
 	Created string   `json:"created"`
 	Members []string `json:"members"`
 	Builtin bool     `json:"builtin,omitempty"`
-	UsedBy  []string `json:"used_by"` // app ids referencing it
+	Admin   bool     `json:"admin,omitempty"` // an administrator group
+	UsedBy  []string `json:"used_by"`         // app ids referencing it
 }
 
 // Suggestion is a template group that doesn't exist yet.
@@ -204,14 +226,21 @@ func (s *Service) Overview(ctx context.Context, me string) (*Overview, error) {
 	} else if kc, err = s.KC.UserStatuses(ctx); err != nil {
 		ov.KeycloakError = err.Error()
 	}
+	admins := s.adminGroups()
 	for _, u := range users {
 		v := UserView{Username: u.ID, Email: u.Email, DisplayName: u.DisplayName, Created: u.CreationDate, Groups: []string{},
 			Protected: s.protection(u.ID), Self: me != "" && strings.EqualFold(me, u.ID)}
 		for _, g := range u.Groups {
 			v.Groups = append(v.Groups, g.DisplayName)
+			v.Admin = v.Admin || admins[g.DisplayName]
 		}
 		sort.Strings(v.Groups)
-		if kc != nil {
+		if v.Admin && v.Protected != "service" {
+			v.ServerInvite = "./portcullis invite " + u.ID
+		}
+		// The service account is excluded from Keycloak's federation: no
+		// Keycloak status to show.
+		if kc != nil && v.Protected != "service" {
 			st, ok := kc[strings.ToLower(u.ID)]
 			v.Keycloak = &KeycloakView{Imported: ok, Enabled: st.Enabled, RequiredActions: st.RequiredActions, Passkeys: st.Passkeys}
 			if v.Keycloak.RequiredActions == nil {
@@ -228,7 +257,7 @@ func (s *Service) Overview(ctx context.Context, me string) (*Overview, error) {
 	}
 	have := map[string]bool{}
 	for _, g := range groups {
-		gv := GroupView{Name: g.DisplayName, Created: g.CreationDate, Members: g.Members(), Builtin: builtinGroups[g.DisplayName], UsedBy: []string{}}
+		gv := GroupView{Name: g.DisplayName, Created: g.CreationDate, Members: g.Members(), Builtin: builtinGroups[g.DisplayName], Admin: admins[g.DisplayName], UsedBy: []string{}}
 		sort.Strings(gv.Members)
 		for _, a := range apps {
 			if a.AccessGroup == g.DisplayName || a.AdminGroup == g.DisplayName {
@@ -344,29 +373,52 @@ func (s *Service) checkTarget(user string) error {
 	return nil
 }
 
-// isAdmin reports whether user is in lldap_admin.
-func isAdmin(sn *snapshot, user string) bool {
-	for _, m := range sn.groups[lldap.AdminGroup].Members() {
-		if strings.EqualFold(m, user) {
-			return true
+// isAdmin reports whether user is in an administrator group.
+func (s *Service) isAdmin(sn *snapshot, user string) bool {
+	for name := range s.adminGroups() {
+		for _, m := range sn.groups[name].Members() {
+			if strings.EqualFold(m, user) {
+				return true
+			}
 		}
 	}
 	return false
 }
 
-// checkAdminTakeover: handing a sign-in credential (invite link,
-// password) for ANOTHER lldap_admin member to the acting admin is an
-// account takeover between equals — allowed, but only with the target's
-// name typed again, and flagged in the audit entry.
-func checkAdminTakeover(sn *snapshot, actor, user, confirm string, detail *string) error {
-	if !isAdmin(sn, user) || strings.EqualFold(actor, user) {
+// checkAdminTakeover: a password or passkey reset for ANOTHER
+// administrator hands the acting admin that account — allowed, but only
+// with the target's name typed again, and flagged in the audit entry.
+func (s *Service) checkAdminTakeover(sn *snapshot, actor, user, confirm string, detail *string) error {
+	if !s.isAdmin(sn, user) || strings.EqualFold(actor, user) {
 		return nil
 	}
 	*detail = strings.TrimSpace(*detail + " target_is_lldap_admin=true")
 	if confirm != user {
-		return invalid("%s is an administrator (%s): type the username to confirm", user, lldap.AdminGroup)
+		return invalid("%s is an administrator: type the username to confirm", user)
 	}
 	return nil
+}
+
+// checkInvitable: core refuses invites for administrators (§9.4), so
+// the Hub doesn't ask — not even for the acting admin themselves.
+func (s *Service) checkInvitable(sn *snapshot, user string) error {
+	if s.isAdmin(sn, user) {
+		return refuse("%s is an administrator; %s", user, recoverMsg(user))
+	}
+	return nil
+}
+
+// inviteErr turns core's 409 into the server-side recovery message.
+func inviteErr(user string, err error) error {
+	var ae *invite.APIError
+	if errors.As(err, &ae) && ae.Status == http.StatusConflict {
+		msg := recoverMsg(user)
+		if ae.Message != "" {
+			msg = ae.Message + " — " + msg
+		}
+		return refuse("invite refused by core: %s", msg)
+	}
+	return err
 }
 
 func clip(s string) string {
@@ -446,8 +498,10 @@ type CreateRequest struct {
 type Result struct {
 	Invite   *invite.Invite `json:"invite,omitempty"`
 	Password string         `json:"password,omitempty"`
-	Warnings []string       `json:"warnings"`
-	Count    int            `json:"count,omitempty"`
+	// ServerInvite: run this on the server to onboard an administrator.
+	ServerInvite string   `json:"server_invite,omitempty"`
+	Warnings     []string `json:"warnings"`
+	Count        int      `json:"count,omitempty"`
 }
 
 func (s *Service) invitesAvailable() error {
@@ -462,7 +516,8 @@ func (s *Service) newInvite(ctx context.Context, username string) (*invite.Invit
 	if err := s.invitesAvailable(); err != nil {
 		return nil, &Error{Status: http.StatusServiceUnavailable, Msg: err.Error()}
 	}
-	return s.Invites.Create(ctx, username)
+	inv, err := s.Invites.Create(ctx, username)
+	return inv, inviteErr(username, err)
 }
 
 func newResult() *Result { return &Result{Warnings: []string{}} }
@@ -495,10 +550,7 @@ func (s *Service) CreateUser(ctx context.Context, actor string, req CreateReques
 		}
 		pw := ""
 		switch req.Onboarding {
-		case OnboardInvite:
-			if err := s.invitesAvailable(); err != nil {
-				return &Error{Status: http.StatusServiceUnavailable, Msg: "can't create invite links (" + err.Error() + "); use the password fallback"}
-			}
+		case OnboardInvite: // availability checked below, once the groups are known
 		case OnboardPassword:
 			pw = req.Password
 			if req.Generate {
@@ -517,12 +569,20 @@ func (s *Service) CreateUser(ctx context.Context, actor string, req CreateReques
 			return refuse("user %q already exists", req.Username)
 		}
 		var groupIDs []int
+		admin := false
+		admins := s.adminGroups()
 		for _, name := range req.Groups {
 			g, err := sn.group(name)
 			if err != nil {
 				return invalid("no such group %q", name)
 			}
 			groupIDs = append(groupIDs, g.ID)
+			admin = admin || admins[name]
+		}
+		if req.Onboarding == OnboardInvite && !admin {
+			if err := s.invitesAvailable(); err != nil {
+				return &Error{Status: http.StatusServiceUnavailable, Msg: "can't create invite links (" + err.Error() + "); use the password fallback"}
+			}
 		}
 		if err := s.LLDAP.CreateUser(ctx, req.Username, req.Email, req.DisplayName); err != nil {
 			return err
@@ -556,10 +616,19 @@ func (s *Service) CreateUser(ctx context.Context, actor string, req CreateReques
 				res.Warnings = append(res.Warnings, fmt.Sprintf("pre-importing into Keycloak failed (it happens on first use instead): %v", err))
 			}
 		}
-		if req.Onboarding == OnboardInvite {
-			inv, err := s.Invites.Create(ctx, req.Username)
+		switch {
+		case req.Onboarding == OnboardInvite && admin:
+			// Core refuses invites for administrators.
+			res.ServerInvite = "./portcullis invite " + req.Username
+			res.Warnings = append(res.Warnings, req.Username+" is an administrator: "+recoverMsg(req.Username))
+		case req.Onboarding == OnboardInvite:
+			inv, err := s.newInvite(ctx, req.Username)
 			if err != nil {
 				res.Warnings = append(res.Warnings, fmt.Sprintf("the user was created but the invite failed (use \"Send new invite\"): %v", err))
+				var de *Error
+				if errors.As(err, &de) && de.Status == http.StatusConflict {
+					res.ServerInvite = "./portcullis invite " + req.Username
+				}
 			} else {
 				res.Invite = inv
 			}
@@ -678,7 +747,7 @@ func (s *Service) SetPassword(ctx context.Context, actor, username, password str
 		if err != nil {
 			return err
 		}
-		if err := checkAdminTakeover(sn, actor, u.ID, confirm, &detail); err != nil {
+		if err := s.checkAdminTakeover(sn, actor, u.ID, confirm, &detail); err != nil {
 			return err
 		}
 		if !lldap.ValidUsername(u.ID) {
@@ -754,13 +823,18 @@ func (s *Service) RemovePasskeys(ctx context.Context, actor, username, confirm s
 			return err
 		}
 		// Always confirmed; flagged in the audit entry for another admin.
-		if err := checkAdminTakeover(sn, actor, id, confirm, &detail); err != nil {
+		if err := s.checkAdminTakeover(sn, actor, id, confirm, &detail); err != nil {
 			return err
 		}
 		if confirm != username {
 			return invalid("type the username to confirm")
 		}
 		if withInvite {
+			// Check before removing anything: an administrator would be
+			// left without passkeys and without an invite.
+			if err := s.checkInvitable(sn, id); err != nil {
+				return err
+			}
 			if err := s.invitesAvailable(); err != nil {
 				return &Error{Status: http.StatusServiceUnavailable, Msg: err.Error()}
 			}
@@ -783,12 +857,11 @@ func (s *Service) RemovePasskeys(ctx context.Context, actor, username, confirm s
 }
 
 // SendInvite creates a new one-time invite link (earlier unredeemed ones
-// stop working, core side). confirm must repeat the username if the target
-// is another lldap_admin member.
-func (s *Service) SendInvite(ctx context.Context, actor, username, confirm string) (*Result, error) {
+// stop working, core side). Administrators are refused: core won't invite
+// them, they're recovered from the server.
+func (s *Service) SendInvite(ctx context.Context, actor, username string) (*Result, error) {
 	res := newResult()
-	detail := ""
-	err := s.run(actor, "user.invite", username, &detail, func() error {
+	err := s.run(actor, "user.invite", username, nil, func() error {
 		if err := s.checkTarget(username); err != nil {
 			return err
 		}
@@ -800,7 +873,7 @@ func (s *Service) SendInvite(ctx context.Context, actor, username, confirm strin
 		if err != nil {
 			return err
 		}
-		if err := checkAdminTakeover(sn, actor, u.ID, confirm, &detail); err != nil {
+		if err := s.checkInvitable(sn, u.ID); err != nil {
 			return err
 		}
 		inv, err := s.newInvite(ctx, u.ID)

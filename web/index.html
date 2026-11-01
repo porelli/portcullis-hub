@@ -892,6 +892,7 @@
     }
 
     function userStatus(u) {
+      if (u.protected === 'service') return '<span class="muted">service account (not in Keycloak)</span>';
       const kc = u.keycloak;
       if (!kc) return '<span class="pill">Keycloak unknown</span>';
       if (!kc.imported) return '<span class="pill" title="LDAP users are imported into Keycloak at first sign-in">not in Keycloak yet</span>';
@@ -916,7 +917,10 @@
         if (u.self) h += ' <span class="pill info">you</span>';
         if (u.protected === 'service') h += ' <span class="pill" title="The Hub\'s own LLDAP account (read-only here)">Hub service account</span>';
         if (u.protected === 'core-admin') h += ' <span class="pill" title="Bootstrap LLDAP admin: Keycloak and enroll bind as it. Managed from the server only (./portcullis invite admin)">bootstrap admin (server-managed)</span>';
-        h += '<div class="muted">' + escapeHtml(u.display_name) + (u.display_name && u.email ? ' · ' : '') + escapeHtml(u.email) + '</div></td>';
+        if (u.admin && u.protected !== 'service') h += ' <span class="pill info" title="Member of an administrator group: no invites from the Hub">administrator</span>';
+        h += '<div class="muted">' + escapeHtml(u.display_name) + (u.display_name && u.email ? ' · ' : '') + escapeHtml(u.email) + '</div>';
+        if (u.server_invite && !u.protected) h += '<div class="muted" title="Administrators are invited and recovered from the server">recover on the server: <code>' + escapeHtml(u.server_invite) + '</code></div>';
+        h += '</td>';
         h += '<td>' + (u.groups || []).map(g => '<span class="pill' + (g === 'lldap_admin' ? ' info' : '') + '">' + escapeHtml(g) + '</span>').join('') + '</td>';
         h += '<td>' + userStatus(u) + '</td>';
         h += '<td class="muted">' + escapeHtml(fmtDate(u.created)) + '</td><td>';
@@ -924,7 +928,7 @@
           const kc = u.keycloak;
           h += '<div class="dir-actions">';
           h += btn('edit-user', u.username, 'Edit');
-          h += btn('invite', u.username, 'Send new invite', 'btn-primary');
+          if (!u.admin) h += btn('invite', u.username, 'Send new invite', 'btn-primary');
           if (!kc || !(kc.required_actions || []).includes('webauthn-register-passwordless')) h += btn('require-passkey', u.username, 'Require passkey');
           if (kc && (kc.required_actions || []).length) h += btn('clear-actions', u.username, 'Clear pending');
           h += btn('reset-passkeys', u.username, 'Reset passkeys', 'btn-danger');
@@ -941,7 +945,8 @@
       const box = document.getElementById('nu-groups');
       const groups = (dir.groups || []).filter(g => !g.builtin || g.name === 'lldap_admin');
       box.innerHTML = groups.length ? groups.map(g =>
-        '<label><input type="checkbox" value="' + escapeHtml(g.name) + '"> ' + escapeHtml(g.name) + '</label>').join('') :
+        '<label' + (g.admin ? ' title="Administrator group: the user is onboarded from the server (./portcullis invite), not with an invite link"' : '') +
+        '><input type="checkbox" value="' + escapeHtml(g.name) + '"> ' + escapeHtml(g.name) + (g.admin ? ' <span class="pill info">admin</span>' : '') + '</label>').join('') :
         '<span class="muted">No groups yet.</span>';
     }
 
@@ -964,6 +969,7 @@
         h += '<div class="group-card"><div class="group-card-head"><span class="name">' + escapeHtml(g.name) + '</span>';
         h += '<span class="meta">' + members.length + ' member' + (members.length === 1 ? '' : 's');
         if (g.builtin) h += ' · built-in';
+        if (g.admin) h += ' · administrator group';
         if ((g.used_by || []).length) h += ' · used by ' + g.used_by.map(escapeHtml).join(', ');
         h += '</span>';
         if (!g.builtin) h += '<button class="btn btn-danger btn-sm" data-act="delete-group" data-group="' + escapeHtml(g.name) + '">Delete</button>';
@@ -1012,6 +1018,10 @@
         title.textContent = 'One-time invite link for ' + who + ' — send it to them now';
         value.value = res.invite.url;
         meta.textContent = 'Expires ' + fmtTime(res.invite.expires_at) + '. It works once and replaces any earlier invite. It won\'t be shown again.';
+      } else if (res && res.server_invite) {
+        title.textContent = who + ' is an administrator — onboard or recover them on the server';
+        value.value = res.server_invite;
+        meta.textContent = 'Administrators get their invite link on the server, not through the Hub. Run this command there.';
       } else if (res && res.password) {
         title.textContent = 'Password for ' + who + ' — copy it now';
         value.value = res.password;
@@ -1043,8 +1053,9 @@
       }
     }
 
-    // Another lldap_admin member: invites / passwords need the name typed.
-    function otherAdmin(u) { return !!u && !u.self && (u.groups || []).includes('lldap_admin'); }
+    // Another administrator: password / passkey resets need the name typed
+    // (passkey resets always do).
+    function otherAdmin(u) { return !!u && !u.self && !!u.admin; }
 
     function typed(what, name) {
       const v = prompt(what + '\n\nType "' + name + '" to confirm:');
@@ -1103,13 +1114,8 @@
           return dirAction(() => apiPut(path, { email: email.trim(), display_name: name.trim() }), 'Saved');
         }
         case 'invite': {
-          const msg = 'Create a new one-time invite link for ' + user + '? Whoever opens it can register a key and sign in as ' + user + '. Earlier unused invites stop working.';
-          let body = {};
-          if (otherAdmin(u)) {
-            if (!typed(msg + '\n\n' + user + ' is an ADMINISTRATOR (lldap_admin).', user)) return;
-            body = { confirm: user };
-          } else if (!confirm(msg)) return;
-          const res = await dirAction(() => apiPost(path + '/invite', body), null);
+          if (!confirm('Create a new one-time invite link for ' + user + '? Whoever opens it can register a key and sign in as ' + user + '. Earlier unused invites stop working.')) return;
+          const res = await dirAction(() => apiPost(path + '/invite', {}), null);
           return showSecret(res, user);
         }
         case 'require-passkey':
@@ -1117,9 +1123,17 @@
         case 'clear-actions':
           return dirAction(() => apiPost(path + '/clear-actions', {}), 'Cleared pending actions');
         case 'reset-passkeys': {
-          if (!typed('Remove ALL passkeys of ' + user + ', sign them out everywhere and create a new invite link so they can register a new key.', user)) return;
-          const res = await dirAction(() => apiPost(path + '/remove-passkeys', { confirm: user, invite: !dir.invites_error }), 'Passkeys removed');
+          // Administrators get no invite from the Hub: recover them on the server.
+          const withInvite = !!u && !u.admin && !dir.invites_error;
+          const what = withInvite
+            ? 'Remove ALL passkeys of ' + user + ', sign them out everywhere and create a new invite link so they can register a new key.'
+            : 'Remove ALL passkeys of ' + user + ' and sign them out everywhere.' + (u && u.admin
+              ? ' ' + user + ' is an ADMINISTRATOR: they get no invite from the Hub — recover them on the server with ' + (u.server_invite || './portcullis invite ' + user) + '.'
+              : ' They must register a new key at their next sign-in.');
+          if (!typed(what, user)) return;
+          const res = await dirAction(() => apiPost(path + '/remove-passkeys', { confirm: user, invite: withInvite }), 'Passkeys removed');
           if (res) showToast(res.count + ' passkey(s) removed', 'success');
+          if (res && !withInvite && u && u.admin) return showSecret({ server_invite: u.server_invite || './portcullis invite ' + user }, user);
           return showSecret(res, user);
         }
         case 'password': {
@@ -1127,7 +1141,7 @@
           if (choice === null) return;
           const body = choice === '' ? { generate: true } : { password: choice };
           if (otherAdmin(u)) {
-            if (!typed(user + ' is an ADMINISTRATOR (lldap_admin): you are about to take over their password.', user)) return;
+            if (!typed(user + ' is an ADMINISTRATOR: you are about to take over their password.', user)) return;
             body.confirm = user;
           }
           const res = await dirAction(() => apiPost(path + '/password', body), 'Password changed');
@@ -1152,7 +1166,8 @@
           const sel = b.parentElement.querySelector('select');
           const who = sel ? sel.value : '';
           if (!who) return;
-          if (group === 'lldap_admin' && !confirm('Make ' + who + ' a full administrator (lldap_admin)?')) return;
+          const ga = (dir.groups || []).find(x => x.name === group);
+          if (ga && ga.admin && !confirm('Make ' + who + ' an administrator (' + group + ')? Administrators can no longer be invited from the Hub; they are recovered from the server.')) return;
           return dirAction(() => apiPost('/api/directory/groups/' + enc(group) + '/members', { username: who }), who + ' added to ' + group);
         }
         case 'remove-member':

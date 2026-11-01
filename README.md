@@ -9,7 +9,7 @@ Web management UI for [Portcullis](https://github.com/porelli/portcullis) — th
 - Per-app settings (media folders, ports, options) and access policy (mTLS / WebAuthn / password, any/all)
 - Container status, logs and a container shell via the Docker Engine API
 - Drift detection: flags apps that are enabled but not running, or running but not enabled, and offers explicit fixes
-- Users & groups: create users with a one-time invite link (they register a passkey and are signed in; password as an advanced fallback), edit, delete, reset passkeys, set passwords; groups with members and one-click creation of the groups templates use; guardrails and an audit log. Shows each user's Keycloak state (imported, passkeys, pending actions)
+- Users & groups: create users with a one-time invite link (administrators — `lldap_admin`, `lldap_password_manager`, console groups — are onboarded and recovered on the server with `./portcullis invite <user>`) (they register a passkey and are signed in; password as an advanced fallback), edit, delete, reset passkeys, set passwords; groups with members and one-click creation of the groups templates use; guardrails and an audit log. Shows each user's Keycloak state (imported, passkeys, pending actions)
 - Shows the signed-in LLDAP username from `X-Forwarded-User` (set by core's group-gate)
 - Writes `portal-apps.json` (enabled apps, URLs, required group) for core's landing portal
 - Writes the group-gate policy file (v2: policies, groups and admin `path_groups` per subdomain)
@@ -56,6 +56,8 @@ The core Portcullis stack runs the Hub; you don't need to run it standalone.
 | `LLDAP_BASE_DN` | LLDAP base DN | `dc=portcullis,dc=local` |
 | `HUB_INVITE_API_URL` | Core's invite API | `http://enroll:8444/internal/invites` |
 | `HUB_INVITE_SECRET_FILE` | Shared secret for the invite API (≥ 32 chars). Missing: only the password fallback works | `/run/portcullis/invite/secret` |
+| `HUB_GATE_MAP_FILE` | group-gate's map; the groups of its core subdomains (consoles) are administrator groups | `$PROJECT_DIR/group-gate/group-gate-map.conf` |
+| `INVITE_PROTECTED_GROUPS` | Extra administrator groups (space/comma separated), same value as core's enroll | _(none)_ |
 
 ### Default access policy
 
