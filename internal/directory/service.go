@@ -187,7 +187,6 @@ type Suggestion struct {
 	App     string `json:"app"`
 	AppName string `json:"app_name"`
 	Kind    string `json:"kind"` // "access" or "admin"
-	Enabled bool   `json:"enabled"`
 }
 
 // Overview is GET /api/directory.
@@ -314,15 +313,11 @@ func (s *Service) Overview(ctx context.Context, me string) (*Overview, error) {
 				continue
 			}
 			seen[c.group] = true
-			ov.Suggestions = append(ov.Suggestions, Suggestion{Group: c.group, App: a.ID, AppName: a.Name, Kind: c.kind, Enabled: a.Enabled})
+			ov.Suggestions = append(ov.Suggestions, Suggestion{Group: c.group, App: a.ID, AppName: a.Name, Kind: c.kind})
 		}
 	}
 	sort.Slice(ov.Suggestions, func(i, j int) bool {
-		a, b := ov.Suggestions[i], ov.Suggestions[j]
-		if a.Enabled != b.Enabled {
-			return a.Enabled
-		}
-		return a.Group < b.Group
+		return ov.Suggestions[i].Group < ov.Suggestions[j].Group
 	})
 	return ov, nil
 }

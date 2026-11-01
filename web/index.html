@@ -1080,10 +1080,12 @@
     function renderGroups() {
       let s = '';
       if ((dir.suggestions || []).length) {
-        s = '<div class="group-card"><div class="category-title" style="margin-bottom:0.5rem">Groups your enabled apps need that don\'t exist yet</div>';
+        s = '<div class="group-card"><div class="category-title" style="margin-bottom:0.5rem">Missing groups</div>' +
+          '<p class="muted" style="margin:0 0 0.5rem">Apps you enabled grant access through a group that doesn\'t exist yet, so nobody can use them until you create it and add members.</p>';
         for (const g of dir.suggestions) {
-          s += '<div class="suggestion"><code>' + escapeHtml(g.group) + '</code><span class="meta">' + escapeHtml(g.kind) + ' group of ' +
-            escapeHtml(g.app_name || g.app) + (g.enabled ? ' (enabled)' : '') + '</span>' +
+          const app = escapeHtml(g.app_name || g.app);
+          s += '<div class="suggestion"><code>' + escapeHtml(g.group) + '</code><span class="meta">' +
+            (g.kind === 'admin' ? 'Members become ' + app + ' administrators' : 'Members can sign in to ' + app) + '</span>' +
             '<button class="btn btn-primary btn-sm" data-act="create-suggested" data-group="' + escapeHtml(g.group) + '">Create</button></div>';
         }
         s += '</div>';

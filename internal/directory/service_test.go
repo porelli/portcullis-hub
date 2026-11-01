@@ -141,7 +141,7 @@ func TestOverview(t *testing.T) {
 	}
 	// users_app exists; only admin_app is suggested: "other" isn't enabled,
 	// so its group users_other must not be.
-	if len(ov.Suggestions) != 1 || ov.Suggestions[0].Group != "admin_app" || !ov.Suggestions[0].Enabled {
+	if len(ov.Suggestions) != 1 || ov.Suggestions[0].Group != "admin_app" {
 		t.Errorf("suggestions = %+v", ov.Suggestions)
 	}
 	for _, g := range ov.Groups {
