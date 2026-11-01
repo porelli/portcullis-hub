@@ -41,8 +41,9 @@ var protectedClients = map[string]bool{
 // DefaultScopes are attached to every client the Hub manages: "acr" puts
 // acr/amr in tokens (step-up), "groups" (created by `portcullis init`, claim
 // "groups", group names without path) lets apps map users_<app>/admin_<app>
-// to roles.
-var DefaultScopes = []string{"acr", "groups"}
+// to roles, AttributesScope (created by EnsureAttributeMappers) carries the
+// attr_<field> claims of shared custom fields.
+var DefaultScopes = []string{"acr", "groups", AttributesScope}
 
 // EmailUnverifiedScope is the realm client scope (maintained by core's
 // `portcullis keycloak configure`) that carries the email claim but no
@@ -241,6 +242,11 @@ func (c *Client) ensureDefaultScopes(ctx context.Context, token string, client *
 		if id == "" {
 			if name == EmailUnverifiedScope {
 				return fmt.Errorf("client %v: the Keycloak realm has no %q client scope (run `portcullis keycloak configure`); keeping its current email scope", clientID, name)
+			}
+			if name == AttributesScope {
+				// Created by the next EnsureAttributeMappers, which also
+				// attaches it to every Hub-registered client.
+				continue
 			}
 			log.Printf("Keycloak realm has no %q client scope — client %v will not get that claim (run `portcullis keycloak configure`)", name, clientID)
 			continue

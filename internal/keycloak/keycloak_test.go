@@ -100,7 +100,7 @@ func (f *fakeKeycloak) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// Keycloak drops scope names the realm doesn't have.
 		var kept []interface{}
 		for _, sc := range rep["defaultClientScopes"].([]interface{}) {
-			if (sc != "groups" && sc != EmailUnverifiedScope) || f.scopes[sc.(string)] != "" {
+			if (sc != "groups" && sc != EmailUnverifiedScope && sc != AttributesScope) || f.scopes[sc.(string)] != "" {
 				kept = append(kept, sc)
 			}
 		}
@@ -144,7 +144,7 @@ func TestRegisterClient(t *testing.T) {
 	if err := c.RegisterClient(ctx, spec); err != nil || fk.posts != 1 {
 		t.Fatalf("create: %v (posts %d)", err, fk.posts)
 	}
-	if got := fmt.Sprint(fk.created["defaultClientScopes"]); got != "[openid profile email acr groups]" {
+	if got := fmt.Sprint(fk.created["defaultClientScopes"]); got != "[openid profile email acr groups portcullis-attributes]" {
 		t.Errorf("create scopes = %s", got)
 	}
 	// The realm has no groups scope yet: create succeeds, nothing attached.
@@ -220,7 +220,7 @@ func TestRegisterClientEmailUnverified(t *testing.T) {
 	if err := c.RegisterClient(ctx, spec); err != nil {
 		t.Fatal(err)
 	}
-	if got := fmt.Sprint(fk.created["defaultClientScopes"]); got != "[openid profile email-unverified acr groups]" {
+	if got := fmt.Sprint(fk.created["defaultClientScopes"]); got != "[openid profile email-unverified acr groups portcullis-attributes]" {
 		t.Errorf("create scopes = %s", got)
 	}
 	if len(fk.attached)+len(fk.detached) != 0 {
