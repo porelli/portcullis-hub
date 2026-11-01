@@ -140,6 +140,13 @@ how strong an app's setup is.
      person.
    - Policy editors show the score live as the policy changes.
 
+8. **Builder-check rulings (supersede call 3 where they differ).**
+   - **Separate issuing CA for file certificates** (`pki_file` intermediate under the same root); YubiKey certificates stay on `pki_int`. "Hardware key only" = trust only `pki_int` — a new Traefik TLS option for mtls-capability apps, Keycloak's X.509 step checks the issuer, group-gate derives `key=hardware|file` from the issuer. No marker/back-compat logic: existing certificates are `pki_int` = hardware. Both CAs' CRLs/delta CRLs are enforced as today.
+   - **File certificates never reach `hwk` on their own**: Keycloak maps a `pki_file` X.509 login to a new acr `file` at LoA 1 (below `hwk`); the default policy therefore asks for a passkey on top; only policies that explicitly accept file certificates request LoA 1 for them. `acr.loa.map`, group-gate's `ACR_TO_LOA`, step-up and the oauth2-proxy acr allow-list are updated together (contract change).
+   - **Fresh authentication** = a fresh Keycloak sign-in with a passkey or a `pki_int` certificate (never a file certificate), verified by the issuing service on a new ID token (`auth_time` within 5 minutes, `amr`), through its own Keycloak client — not the shared forward-auth session.
+   - **Login history**: successes are recorded by group-gate the first time it sees a session (`sid`): user, time, every factor (amr + certificate kind), resulting score, app host, IP, user agent → an append-only log the Hub reads (90 days); failures come from Keycloak `LOGIN_ERROR` events (IP, error; browser shown as unknown). Step-ups appear when an existing session gains a factor.
+   - **Renewal keeps the kind**: `enroll /self` renews a certificate on the CA that issued it. Admin `/api/sign` (CLI path) issues hardware certificates without attestation (trusted path; attestation is a possible later addition).
+
 ## Left to the builder
 
 - The enroll API shape (bearer secret like the invite API), the PKCS#12
