@@ -128,6 +128,14 @@
     .public-danger { color: #ef4444; margin: 0.5rem 0; }
     .public-token { display: flex; align-items: center; gap: 0.5rem; padding: 0.125rem 0; }
     .public-section textarea { width: 100%; min-height: 3.5rem; background: #1e293b; border: 1px solid #334155; border-radius: 0.375rem; color: #e2e8f0; font-family: 'SF Mono', monospace; font-size: 0.75rem; padding: 0.375rem 0.5rem; }
+    .policy-factor.disabled { opacity: 0.5; cursor: not-allowed; }
+    .policy-section .public-danger, .policy-section .public-warn { font-size: 0.8125rem; }
+    .policy-factor em { color: #64748b; font-size: 0.75rem; }
+    .policy-own { font-size: 0.875rem; color: #e2e8f0; margin-bottom: 0.25rem; }
+    .policy-effective { margin-top: 0.5rem; font-size: 0.8125rem; color: #94a3b8; }
+    .policy-effective code, .policy-section small code { font-family: 'SF Mono', 'Fira Code', monospace; color: #e2e8f0; }
+    .policy-notes { margin: 0.375rem 0 0 1.25rem; font-size: 0.75rem; color: #94a3b8; }
+    .policy-section small { display: block; font-size: 0.75rem; color: #64748b; margin: 0 0 0.25rem 1.5rem; }
     .policy-inherit { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px dashed #1e293b; font-size: 0.8125rem; color: #94a3b8; cursor: pointer; }
 
     /* Users list */
@@ -490,9 +498,11 @@
     <div class="tab-content" id="tab-settings">
       <div class="category-title" style="margin-bottom: 1rem;">Default access policy</div>
       <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
-        Applies to every app that hasn't set its own policy. Forward-auth apps fall back to this
-        default at the Keycloak layer; per-app overrides are enforced by <code style="background: #0f172a; padding: 0.125rem 0.375rem; border-radius: 0.25rem;">group-gate</code>
-        reading the <code style="background: #0f172a; padding: 0.125rem 0.375rem; border-radius: 0.25rem;">acr</code> / <code style="background: #0f172a; padding: 0.125rem 0.375rem; border-radius: 0.25rem;">amr</code> claims from the access token.
+        Applies to every app that hasn't set its own policy. Each app enforces what its auth method can:
+        forward-auth and header-auth apps on every request (<code style="background: #0f172a; padding: 0.125rem 0.375rem; border-radius: 0.25rem;">group-gate</code>
+        reads the <code style="background: #0f172a; padding: 0.125rem 0.375rem; border-radius: 0.25rem;">acr</code> / <code style="background: #0f172a; padding: 0.125rem 0.375rem; border-radius: 0.25rem;">amr</code> claims and binds the client certificate),
+        native-OIDC apps at login (Keycloak acr), mTLS-only apps at the TLS handshake. Apps that handle their own sign-in have no policy.
+        An app's settings show its effective policy.
       </p>
       <div id="global-policy-form"></div>
 
@@ -592,48 +602,130 @@
     }
 
     // ── Settings ──────────────────────────────────────────
+    // Password sign-in no longer exists (passkey or client certificate
+    // only): it is never offered.
     const POLICY_FACTORS = [
       { key: 'mtls', label: 'mTLS (client certificate)' },
-      { key: 'webauthn', label: 'WebAuthn (hardware key)' },
-      { key: 'password', label: 'Username + password' }
+      { key: 'webauthn', label: 'WebAuthn (passkey / hardware key)' }
     ];
+    const FACTOR_SHORT = { mtls: 'mTLS', webauthn: 'WebAuthn' };
 
     function policyDescription(p) {
-      if (!p || !p.factors || p.factors.length === 0) return 'Public (no authentication)';
-      if (p.factors.length === 1) return p.factors[0];
-      const op = p.op === 'all' ? 'all of' : 'any of';
-      return op + ' ' + p.factors.join(', ');
+      if (!p || !p.factors || p.factors.length === 0) return 'public (no sign-in factor)';
+      const names = p.factors.map(f => FACTOR_SHORT[f] || f);
+      if (names.length === 1) return names[0];
+      return names.join(p.op === 'all' ? ' and ' : ' or ');
     }
 
-    function renderPolicyBlock(idPrefix, current, effective, defaultPolicy, safetyScore) {
-      const selected = new Set((current && current.factors) || effective.factors || []);
-      const isOverride = current !== null && current !== undefined;
-      let html = '<div class="policy-section">';
-      html += '<div class="policy-title">Access policy';
-      if (safetyScore !== undefined) html += '<span class="policy-score" title="Safety score (0 public · 1 pwd · 2 hwk · 3 mtls · +0.5 per extra required factor)">score ' + Number(safetyScore).toFixed(1) + '</span>';
-      html += '</div>';
+    function scoreBadge(score) {
+      if (score === undefined) return '';
+      return '<span class="policy-score" title="Safety score (0 public · 2 passkey · 3 client certificate · +0.5 per extra required factor)">score ' + Number(score).toFixed(1) + '</span>';
+    }
+
+    function factorBoxes(idPrefix, selected, enabled, supported) {
+      let html = '';
       for (const f of POLICY_FACTORS) {
-        const checked = selected.has(f.key) ? ' checked' : '';
-        html += '<label class="policy-factor"><input type="checkbox" name="' + idPrefix + '-factor" value="' + f.key + '"' + checked + '> ' + escapeHtml(f.label) + '</label>';
+        const sup = !supported || supported.has(f.key);
+        const on = enabled && sup;
+        html += '<label class="policy-factor' + (on ? '' : ' disabled') + '"><input type="checkbox" name="' + idPrefix + '-factor" value="' + f.key + '"' +
+          (selected.has(f.key) ? ' checked' : '') + (on ? '' : ' disabled') + (sup ? '' : ' data-unsupported="1"') + '> ' + escapeHtml(f.label) +
+          (sup ? '' : ' <em>— this app can\'t enforce it</em>') + '</label>';
       }
-      const op = (current && current.op) || effective.op || 'any';
-      html += '<div class="policy-op" data-prefix="' + idPrefix + '">';
-      html += '<label><input type="radio" name="' + idPrefix + '-op" value="all"' + (op === 'all' ? ' checked' : '') + '> Require all checked</label>';
-      html += '<label><input type="radio" name="' + idPrefix + '-op" value="any"' + (op !== 'all' ? ' checked' : '') + '> Any of checked</label>';
-      html += '</div>';
-      if (defaultPolicy && idPrefix !== 'global') {
-        html += '<label class="policy-inherit"><input type="checkbox" name="' + idPrefix + '-inherit"' + (isOverride ? '' : ' checked') + '> Inherit global default (' + escapeHtml(policyDescription(defaultPolicy)) + ')</label>';
-      }
+      return html;
+    }
+
+    function opRadios(idPrefix, op, enabled) {
+      const dis = enabled ? '' : ' disabled';
+      let html = '<div class="policy-op" data-prefix="' + idPrefix + '">';
+      html += '<label><input type="radio" name="' + idPrefix + '-op" value="all"' + (op === 'all' ? ' checked' : '') + dis + '> Require all checked</label>';
+      html += '<label><input type="radio" name="' + idPrefix + '-op" value="any"' + (op !== 'all' ? ' checked' : '') + dis + '> Any of checked</label>';
       html += '</div>';
       return html;
     }
 
+    function policyNotes(notes) {
+      if (!notes || !notes.length) return '';
+      return '<ul class="policy-notes">' + notes.map(n => '<li>' + escapeHtml(n) + '</li>').join('') + '</ul>';
+    }
+
+    // Per-app access policy, capability-aware: only factors the app's auth
+    // method can enforce are selectable; while inheriting, the boxes show
+    // the EFFECTIVE policy (global default ∩ supported) and are disabled.
+    function renderAppPolicy(id, d) {
+      const cap = d.capability || { factors: [], enforcement: 'none' };
+      let html = '<div class="policy-section" data-policy-id="' + escapeHtml(id) + '">';
+      html += '<div class="policy-title">Access policy' + scoreBadge(cap.enforcement === 'none' ? undefined : d.safety_score) + '</div>';
+      if (cap.enforcement === 'none') {
+        html += '<div class="policy-own">This app handles its own sign-in.</div>';
+        html += '<small>Portcullis doesn\'t sign users in for it, so no access policy applies and none can be set.</small>';
+        html += factorBoxes(id, new Set(), false, null);
+        html += '<input type="hidden" name="' + id + '-none" value="1"></div>';
+        return html;
+      }
+      const supported = new Set(cap.factors || []);
+      const inherits = !d.auth_policy;
+      const eff = d.effective_policy || { factors: [], op: '' };
+      const shown = inherits ? eff : d.auth_policy;
+      html += factorBoxes(id, new Set(shown.factors || []), !inherits, supported);
+      html += opRadios(id, shown.op || 'any', !inherits);
+      html += '<label class="policy-inherit"><input type="checkbox" name="' + id + '-inherit"' + (inherits ? ' checked' : '') +
+        ' data-eff-factors="' + escapeHtml((eff.factors || []).join(',')) + '" data-eff-op="' + escapeHtml(eff.op || 'any') + '"' +
+        ' onchange="togglePolicyInherit(this, \'' + id + '\')"> Inherit global default (' + escapeHtml(policyDescription(d.default_policy)) + ')</label>';
+      html += '<div class="policy-effective">Effective: <strong>' + escapeHtml(policyDescription(eff)) + '</strong> · TLS tier <code>' + escapeHtml(d.tier || '') + '</code></div>';
+      html += policyNotes(d.policy_notes);
+      html += '</div>';
+      return html;
+    }
+
+    function togglePolicyInherit(el, id) {
+      const box = el.closest('.policy-section');
+      const inherit = el.checked;
+      const eff = new Set((el.dataset.effFactors || '').split(',').filter(Boolean));
+      box.querySelectorAll('input[name="' + id + '-factor"]').forEach(cb => {
+        const sup = !cb.dataset.unsupported;
+        if (inherit) cb.checked = eff.has(cb.value);
+        cb.disabled = inherit || !sup;
+        cb.closest('label').classList.toggle('disabled', cb.disabled);
+      });
+      box.querySelectorAll('input[name="' + id + '-op"]').forEach(r => {
+        if (inherit) r.checked = r.value === (el.dataset.effOp === 'all' ? 'all' : 'any');
+        r.disabled = inherit;
+      });
+    }
+
+    // Sign-in of apps with their own login (auth.native_login).
+    function renderSignIn(id, si) {
+      if (!si) return '';
+      const native = si.mode === 'native';
+      let html = '<div class="policy-section">';
+      html += '<div class="policy-title">Sign-in</div>';
+      html += '<label class="policy-factor"><input type="radio" name="__signin" value="gateway"' + (native ? '' : ' checked') + ' onchange="toggleSignIn(this)"> Portcullis sign-in, then the app\'s own login</label>';
+      html += '<small>' + (si.access_group ? 'Members of <code>' + escapeHtml(si.access_group) + '</code> only' : 'Any signed-in user') + ' reach the app\'s login page; the access policy below applies on every request.</small>';
+      html += '<label class="policy-factor' + (si.allow_without_gateway ? '' : ' disabled') + '"><input type="radio" name="__signin" value="native"' + (native ? ' checked' : '') + (si.allow_without_gateway ? '' : ' disabled') + ' onchange="toggleSignIn(this)"> App\'s own login only (no Portcullis)' + (si.allow_without_gateway ? '' : ' <em>— not allowed by this template</em>') + '</label>';
+      if (si.note) html += '<small>' + escapeHtml(si.note) + '</small>';
+      html += '<div class="public-danger signin-warn"' + (native ? '' : ' hidden') + '>No Portcullis in front of this app: no forward-auth, no group-gate, no hardware key. Anyone on the internet reaches the app\'s own login page (TLS tier <code>public@file</code>); only the app\'s own accounts protect it.</div>';
+      html += '<div class="public-warn signin-pending" hidden>Save to apply: the access policy below follows the sign-in mode after saving.</div>';
+      if (si.blocked) html += '<div class="public-warn">' + escapeHtml(si.blocked) + '</div>';
+      html += '</div>';
+      return html;
+    }
+
+    function toggleSignIn(el) {
+      const box = el.closest('.policy-section');
+      box.querySelector('.signin-warn').hidden = el.value !== 'native';
+      box.querySelector('.signin-pending').hidden = false;
+    }
+
+    // Returns { skip } (no policy to send), { inherit: true } or
+    // { inherit: false, policy: {factors, op} }.
     function collectPolicy(form, idPrefix) {
-      // Returns { inherit: bool, policy: {factors, op} }
+      if (form.querySelector('input[name="' + idPrefix + '-none"]')) return { skip: true };
+      const signIn = form.querySelector('input[name="__signin"]:checked');
+      if (signIn && signIn.value === 'native') return { skip: true };
       const inheritEl = form.querySelector('input[name="' + idPrefix + '-inherit"]');
       if (inheritEl && inheritEl.checked) return { inherit: true, policy: null };
       const factors = [];
-      form.querySelectorAll('input[name="' + idPrefix + '-factor"]:checked').forEach(el => factors.push(el.value));
+      form.querySelectorAll('input[name="' + idPrefix + '-factor"]:checked').forEach(el => { if (!el.dataset.unsupported) factors.push(el.value); });
       const opEl = form.querySelector('input[name="' + idPrefix + '-op"]:checked');
       const op = opEl ? opEl.value : 'any';
       return { inherit: false, policy: { factors, op: factors.length > 1 ? op : '' } };
@@ -715,7 +807,8 @@
         const hasPorts = data.ports && data.ports.length > 0;
         // Access policy always rendered — every app gets a policy knob.
         let html = '<form class="settings-form" onsubmit="saveSettings(event, \'' + id + '\')">';
-        html += renderPolicyBlock(id, data.auth_policy, data.effective_policy || {factors:[], op:''}, data.default_policy, data.safety_score);
+        html += renderSignIn(id, data.sign_in);
+        html += renderAppPolicy(id, data);
         html += renderPublicBlock(id, data.public_access);
         if (!hasSettings && !hasPorts) {
           html += '<button type="submit" class="btn btn-primary btn-sm">Save</button></form>';
@@ -797,14 +890,18 @@
       const form = e.target;
       const payload = {};
       // Non-policy fields (text inputs, selects, port inputs, etc.)
-      const policySuffixes = [id + '-factor', id + '-op', id + '-inherit'];
+      const policySuffixes = [id + '-factor', id + '-op', id + '-inherit', id + '-none'];
       for (const el of form.elements) {
         if (!el.name) continue;
-        if (policySuffixes.includes(el.name) || el.name.startsWith('__pub_')) continue;
+        if (policySuffixes.includes(el.name) || el.name.startsWith('__pub_') || el.name === '__signin') continue;
         payload[el.name] = el.value.trim();
       }
-      const { inherit, policy } = collectPolicy(form, id);
-      if (inherit) {
+      const signIn = form.querySelector('input[name="__signin"]:checked');
+      if (signIn) payload._sign_in = signIn.value;
+      const { skip, inherit, policy } = collectPolicy(form, id);
+      if (skip) {
+        // Nothing to enforce (own sign-in): leave the stored policy alone.
+      } else if (inherit) {
         payload._auth_policy_inherit = 'true';
       } else {
         payload._auth_policy = policy;
@@ -826,7 +923,11 @@
         const data = await apiGet('/api/settings');
         const dp = data.default_auth_policy || { factors: [], op: '' };
         let html = '<form class="settings-form" onsubmit="saveGlobalSettings(event)">';
-        html += renderPolicyBlock('global', dp, dp, null, data.default_safety_score);
+        html += '<div class="policy-section"><div class="policy-title">Access policy' + scoreBadge(data.default_safety_score) + '</div>';
+        html += factorBoxes('global', new Set(dp.factors || []), true, null);
+        html += opRadios('global', dp.op || 'any', true);
+        if (data.legacy_password) html += '<div class="public-warn">The stored default named "password", which is no longer a sign-in method; it was normalised to ' + escapeHtml(policyDescription(dp)) + '. Save to store it.</div>';
+        html += '</div>';
         html += '<button type="submit" class="btn btn-primary btn-sm">Save default</button></form>';
         container.innerHTML = html;
       } catch (err) {

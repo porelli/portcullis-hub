@@ -64,8 +64,8 @@ func writeTemplate(t *testing.T, dir, id, manifest string) {
 
 func TestDiscover(t *testing.T) {
 	dir := t.TempDir()
-	writeTemplate(t, dir, "good", "name: Good\ncategory: b\nurls:\n  - label: x\n    url: https://good.{{DOMAIN}}\nauth:\n  admin_group: admin_good\n  admin_paths: [/admin/]\n")
-	writeTemplate(t, dir, "alpha", "name: Alpha\ncategory: a\n")
+	writeTemplate(t, dir, "good", "name: Good\ncategory: b\nurls:\n  - label: x\n    url: https://good.{{DOMAIN}}\nauth:\n  method: forward-auth\n  admin_group: admin_good\n  admin_paths: [/admin/]\n")
+	writeTemplate(t, dir, "alpha", "name: Alpha\ncategory: a\nauth:\n  method: public\n")
 	writeTemplate(t, dir, "Bad_ID", "name: Bad\n")
 	writeTemplate(t, dir, "badkey", "name: X\nsettings:\n  - key: 'A=B'\n")
 	writeTemplate(t, dir, "badyaml", "name: [unclosed\n")

@@ -35,6 +35,9 @@ type PublishedApp struct {
 	// Policy is the app's own policy override at publish time; nil means it
 	// inherits the (current) global default.
 	Policy *policy.AuthPolicy `json:"policy,omitempty" yaml:"policy,omitempty"`
+	// NativeLoginOnly: the app ran with its own login only (no Portcullis
+	// sign-in on its routers, so GroupAccess is false) at publish time.
+	NativeLoginOnly bool `json:"native_login_only,omitempty" yaml:"native_login_only,omitempty"`
 	// PublicSubdomains / PublicPaths are the app's public exceptions at
 	// publish time ({token} kept, never the tokens); empty when no public
 	// router was generated.
@@ -64,7 +67,20 @@ type AppState struct {
 	// PublicTokens are the share tokens opened in listed mode (secrets:
 	// state.yaml is 0600; the policy file only shows {token}).
 	PublicTokens map[string][]string `json:"public_tokens,omitempty" yaml:"public_tokens,omitempty"`
+	// SignIn is the admin's sign-in choice for apps with their own login
+	// (auth.native_login): SignInNative = the app's own login only, no
+	// Portcullis in front. No entry = Portcullis sign-in, then the app's
+	// own login.
+	SignIn map[string]string `json:"sign_in,omitempty" yaml:"sign_in,omitempty"`
+
+	// LegacyPassword lists, after Load, the policies that named the removed
+	// "password" factor and were normalised ("" = the global default). Not
+	// persisted: the next save writes the normalised policies.
+	LegacyPassword map[string]bool `json:"-" yaml:"-"`
 }
+
+// SignInNative is the SignIn value for "the app's own login only".
+const SignInNative = "native"
 
 // New returns an empty state with initialised maps.
 func New() *AppState {
@@ -92,6 +108,35 @@ func (s *AppState) init() {
 	if s.PublicTokens == nil {
 		s.PublicTokens = make(map[string][]string)
 	}
+	if s.SignIn == nil {
+		s.SignIn = make(map[string]string)
+	}
+	if s.LegacyPassword == nil {
+		s.LegacyPassword = make(map[string]bool)
+	}
+}
+
+// normalizeLegacy rewrites stored policies that name the removed
+// "password" factor (policy.Normalize: never weaker) and remembers which.
+func (s *AppState) normalizeLegacy() {
+	if s.DefaultPolicy != nil && policy.LegacyPassword(*s.DefaultPolicy) {
+		p := policy.Normalize(*s.DefaultPolicy)
+		s.DefaultPolicy = &p
+		s.LegacyPassword[""] = true
+	}
+	for id, p := range s.AuthPolicies {
+		if policy.LegacyPassword(p) {
+			s.AuthPolicies[id] = policy.Normalize(p)
+			s.LegacyPassword[id] = true
+		}
+	}
+	for id, snap := range s.Published {
+		if snap.Policy != nil && policy.LegacyPassword(*snap.Policy) {
+			p := policy.Normalize(*snap.Policy)
+			snap.Policy = &p
+			s.Published[id] = snap
+		}
+	}
 }
 
 // Load reads the state file. A missing file yields empty state. An empty or
@@ -113,6 +158,7 @@ func Load(path string) (*AppState, error) {
 		return nil, fmt.Errorf("corrupt %s (%v) — fix or move it aside, then restart", path, err)
 	}
 	s.init()
+	s.normalizeLegacy()
 	return s, nil
 }
 

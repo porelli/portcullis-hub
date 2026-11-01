@@ -230,6 +230,8 @@ const grafanaCompose = "services:\n  grafana:\n    image: grafana\n    environme
 const otherManifest = `name: Other
 category: misc
 auth:
+  method: native-oidc
+  sso: true
   group_access: true
   access_group: users_other
 keycloak_clients:

@@ -72,7 +72,7 @@ func TestValidateManifest(t *testing.T) {
 			Ports:    []Port{{Key: "HTTP_PORT", Bind: "127.0.0.1"}},
 			Env:      []EnvVar{{Key: "SECRET", Generate: "random"}},
 			Clients:  []KeycloakClient{{ClientID: "app", SecretEnv: "APP_SECRET"}},
-			Auth:     Auth{AccessGroup: "users_app", AdminGroup: "admin_app", AdminPaths: []string{"/admin/", "/settings"}},
+			Auth:     Auth{Method: "forward-auth", AccessGroup: "users_app", AdminGroup: "admin_app", AdminPaths: []string{"/admin/", "/settings"}},
 		}
 	}
 	m := base()
@@ -81,6 +81,12 @@ func TestValidateManifest(t *testing.T) {
 	}
 	if got := m.Auth.AdminPaths; got[0] != "/admin" || got[1] != "/settings" {
 		t.Errorf("admin paths not normalised: %v", got)
+	}
+	m = base()
+	m.Auth.Method, m.Auth.SSO = "custom", false
+	m.Auth.NativeLogin = &NativeLogin{Supported: true, AllowWithoutGateway: true, Note: "Plex accounts"}
+	if err := ValidateManifest(&m); err != nil || !m.Auth.HasNativeLogin() {
+		t.Errorf("custom app with native_login rejected: %v", err)
 	}
 
 	cases := map[string]func(*Manifest){
@@ -96,6 +102,28 @@ func TestValidateManifest(t *testing.T) {
 		"admin path no slash":  func(m *Manifest) { m.Auth.AdminPaths = []string{"admin"} },
 		"admin path dotdot":    func(m *Manifest) { m.Auth.AdminPaths = []string{"/x/../admin"} },
 		"admin paths no group": func(m *Manifest) { m.Auth.AdminGroup = "" },
+		"no method":            func(m *Manifest) { m.Auth.Method = "" },
+		"unknown method":       func(m *Manifest) { m.Auth.Method = "saml" },
+		"native login on sso method": func(m *Manifest) {
+			m.Auth.SSO = false
+			m.Auth.NativeLogin = &NativeLogin{Supported: true}
+		},
+		"native login with sso": func(m *Manifest) {
+			m.Auth.Method, m.Auth.SSO = "custom", "partial"
+			m.Auth.NativeLogin = &NativeLogin{Supported: true}
+		},
+		"native login sso unset": func(m *Manifest) {
+			m.Auth.Method = "custom"
+			m.Auth.NativeLogin = &NativeLogin{Supported: true}
+		},
+		"without gateway, not supported": func(m *Manifest) {
+			m.Auth.Method, m.Auth.SSO = "custom", false
+			m.Auth.NativeLogin = &NativeLogin{AllowWithoutGateway: true}
+		},
+		"native login note ctl": func(m *Manifest) {
+			m.Auth.Method, m.Auth.SSO = "custom", false
+			m.Auth.NativeLogin = &NativeLogin{Supported: true, Note: "a\nb"}
+		},
 	}
 	for name, mut := range cases {
 		m := base()

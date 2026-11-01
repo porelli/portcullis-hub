@@ -12,20 +12,42 @@ import (
 
 	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/policy"
+	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
 )
 
 // AppSettingsView is the GET /api/templates/settings/<id> payload.
 type AppSettingsView struct {
-	Definitions     []templates.Setting `json:"definitions"`
-	Ports           []templates.Port    `json:"ports"`
-	Values          map[string]string   `json:"values"`
-	EffectivePolicy policy.AuthPolicy   `json:"effective_policy"`
-	DefaultPolicy   policy.AuthPolicy   `json:"default_policy"`
-	SafetyScore     float64             `json:"safety_score"`
-	AuthPolicy      *policy.AuthPolicy  `json:"auth_policy,omitempty"`
+	Definitions []templates.Setting `json:"definitions"`
+	Ports       []templates.Port    `json:"ports"`
+	Values      map[string]string   `json:"values"`
+	// EffectivePolicy is what applies: the configured policy (override or
+	// global default) intersected with what the app can enforce.
+	EffectivePolicy policy.AuthPolicy `json:"effective_policy"`
+	DefaultPolicy   policy.AuthPolicy `json:"default_policy"`
+	SafetyScore     float64           `json:"safety_score"`
+	// AuthPolicy is the app's override (nil: it inherits the default).
+	AuthPolicy *policy.AuthPolicy `json:"auth_policy,omitempty"`
+	// Method is the auth method as deployed (a custom app behind
+	// Portcullis sign-in is forward-auth); Capability what it can enforce.
+	Method      string            `json:"method"`
+	Capability  policy.Capability `json:"capability"`
+	Resolution  policy.Resolution `json:"resolution"`
+	PolicyNotes []string          `json:"policy_notes"`
+	Tier        string            `json:"tier"`
+	// SignIn is set for apps with their own login (auth.native_login).
+	SignIn *SignInView `json:"sign_in,omitempty"`
 	// PublicAccess is set when the manifest declares auth.public_access.
 	PublicAccess *PublicAccessView `json:"public_access,omitempty"`
+}
+
+// SignInView is the "Sign-in" setting of an app with its own login.
+type SignInView struct {
+	Mode                string `json:"mode"` // SignInGateway or SignInNative
+	AllowWithoutGateway bool   `json:"allow_without_gateway"`
+	Note                string `json:"note,omitempty"`
+	AccessGroup         string `json:"access_group,omitempty"` // "" = any signed-in user
+	Blocked             string `json:"blocked,omitempty"`
 }
 
 // AppSettings returns an app's settings and policy.
@@ -36,7 +58,13 @@ func (h *Hub) AppSettings(id string) (*AppSettingsView, error) {
 	}
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	eff := h.st.ResolvePolicy(id)
+	acc := h.accessLocked(t)
+	eff := acc.Resolved.Policy
+	legacy := h.st.LegacyPassword[id]
+	if acc.Inherits {
+		legacy = h.st.LegacyPassword[""]
+	}
+	pub := h.publicLocked(t, t.Public)
 	v := &AppSettingsView{
 		Definitions:     t.Manifest.Settings,
 		Ports:           t.Manifest.Ports,
@@ -44,12 +72,36 @@ func (h *Hub) AppSettings(id string) (*AppSettingsView, error) {
 		EffectivePolicy: eff,
 		DefaultPolicy:   h.st.Default(),
 		SafetyScore:     policy.SafetyScore(eff),
+		Method:          acc.Method,
+		Capability:      acc.Capability,
+		Resolution:      acc.Resolved,
+		PolicyNotes:     policyNotes(acc, legacy),
+		Tier:            policy.HostTier(eff, pub.Active()),
 	}
 	if p, ok := h.st.AuthPolicies[id]; ok {
 		v.AuthPolicy = &p
 	}
+	if acc.SignIn != "" {
+		nl := t.Manifest.Auth.NativeLogin
+		v.SignIn = &SignInView{Mode: acc.SignIn, AllowWithoutGateway: nl.AllowWithoutGateway, Note: nl.Note, Blocked: acc.Blocked}
+		if t.Manifest.Auth.GroupAccess {
+			v.SignIn.AccessGroup = t.Manifest.Auth.AccessGroup
+		}
+	}
 	v.PublicAccess = h.publicViewLocked(t, eff)
 	return v, nil
+}
+
+// SignInMode returns an app's sign-in mode ("" for apps without their own
+// login, or unknown apps).
+func (h *Hub) SignInMode(id string) string {
+	t := h.Template(id)
+	if t == nil {
+		return ""
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.accessLocked(t).SignIn
 }
 
 // ValidateSettings checks user-supplied settings against a manifest: every
@@ -101,6 +153,9 @@ type SettingsUpdate struct {
 	PublicAccessDefault bool      // forget the choice: template default applies
 	PublicMode          *string   // "all", "listed", "" = template default
 	PublicTokens        *[]string // listed shares: share URLs or bare tokens
+	// SignIn: SignInGateway or SignInNative (apps with auth.native_login);
+	// nil = unchanged.
+	SignIn *string
 }
 
 // SaveSettings validates and stores an app's settings (and optionally its
@@ -118,7 +173,46 @@ func (h *Hub) SaveSettings(id string, u SettingsUpdate) error {
 		return err
 	}
 
+	if u.SignIn != nil {
+		nl := t.Manifest.Auth.NativeLogin
+		switch {
+		case !t.Manifest.Auth.HasNativeLogin():
+			return statusErr(400, "this app has no sign-in choice (its template doesn't declare auth.native_login)")
+		case *u.SignIn == SignInNative && !nl.AllowWithoutGateway:
+			return statusErr(400, "this template doesn't allow the app's own login without Portcullis")
+		case *u.SignIn != SignInNative && *u.SignIn != SignInGateway:
+			return statusErr(400, "sign-in must be %q or %q", SignInGateway, SignInNative)
+		}
+	}
+
 	h.mu.Lock()
+	prevSignIn, hadSignIn := h.st.SignIn[id]
+	restoreSignIn := func() {
+		if hadSignIn {
+			h.st.SignIn[id] = prevSignIn
+		} else {
+			delete(h.st.SignIn, id)
+		}
+	}
+	signInChanged := false
+	if u.SignIn != nil {
+		before := h.accessLocked(t).SignIn
+		if *u.SignIn == SignInNative {
+			h.st.SignIn[id] = state.SignInNative
+		} else {
+			delete(h.st.SignIn, id)
+		}
+		signInChanged = h.accessLocked(t).SignIn != before
+	}
+	// The override is checked against what the app can enforce in its
+	// (new) sign-in mode.
+	if !u.Inherit && u.Policy != nil {
+		if msg := h.accessLocked(t).Capability.Check(*u.Policy); msg != "" {
+			restoreSignIn()
+			h.mu.Unlock()
+			return statusErr(400, "access policy: %s", msg)
+		}
+	}
 	prev, hadPrev := h.st.Settings[id]
 	h.st.Settings[id] = u.Values
 	live := h.findLocked(id)
@@ -130,6 +224,7 @@ func (h *Hub) SaveSettings(id string, u SettingsUpdate) error {
 			} else {
 				delete(h.st.Settings, id)
 			}
+			restoreSignIn()
 			h.mu.Unlock()
 			return err
 		}
@@ -141,6 +236,7 @@ func (h *Hub) SaveSettings(id string, u SettingsUpdate) error {
 		} else {
 			delete(h.st.Settings, id)
 		}
+		restoreSignIn()
 		h.mu.Unlock()
 		return err
 	}
@@ -154,9 +250,19 @@ func (h *Hub) SaveSettings(id string, u SettingsUpdate) error {
 		h.st.AuthPolicies[id] = policy.Normalize(*u.Policy)
 		policyChanged = true
 	}
+	if policyChanged {
+		delete(h.st.LegacyPassword, id)
+	}
+	if signInChanged {
+		if h.accessLocked(t).SignIn == SignInNative {
+			log.Printf("settings: WARNING: %s now uses the app's own login only — its routers have no Portcullis sign-in (TLS tier public@file)", id)
+		} else {
+			log.Printf("settings: %s: Portcullis sign-in, then the app's own login", id)
+		}
+	}
 	h.refreshPublishedLocked()
 	h.saveLocked()
-	effective := h.st.ResolvePolicy(id)
+	effective := h.effectivePolicyLocked(t)
 	// The override reads state (policy → TLS tier): render under the lock.
 	overrideErr := h.generateOverrideLocked(t, u.Values)
 	h.mu.Unlock()
@@ -178,7 +284,7 @@ func (h *Hub) SaveSettings(id string, u SettingsUpdate) error {
 		}
 	}
 
-	if policyChanged || publicChanged {
+	if policyChanged || publicChanged || signInChanged {
 		h.writePolicyLogged()
 	}
 	if policyChanged {
@@ -205,21 +311,35 @@ func (h *Hub) DefaultPolicy() policy.AuthPolicy {
 	return h.st.Default()
 }
 
-// SetDefaultPolicy stores a new global default and, if it changed,
-// propagates it in the background. Returns whether it changed.
-func (h *Hub) SetDefaultPolicy(p policy.AuthPolicy) bool {
+// DefaultPolicyLegacy reports whether the stored global default named the
+// removed "password" factor and was normalised on load.
+func (h *Hub) DefaultPolicyLegacy() bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.st.LegacyPassword[""]
+}
+
+// SetDefaultPolicy validates and stores a new global default and, if it
+// changed, propagates it in the background. Returns whether it changed.
+// The default may name any factor (each app enforces what it can of it),
+// but not the removed "password" or unknown ones.
+func (h *Hub) SetDefaultPolicy(p policy.AuthPolicy) (bool, error) {
+	if msg := policy.CapabilityFor("forward-auth").Check(p); msg != "" {
+		return false, statusErr(400, "default policy: %s", msg)
+	}
 	norm := policy.Normalize(p)
 	h.mu.Lock()
 	changed := !policy.Same(h.st.Default(), norm)
 	h.st.SetDefault(norm)
+	delete(h.st.LegacyPassword, "")
 	h.saveLocked()
 	h.mu.Unlock()
 	if !changed {
-		return false
+		return false, nil
 	}
 	h.writePolicyLogged()
 	h.goBackground(h.applyDefaultPolicy)
-	return true
+	return true, nil
 }
 
 // applyDefaultPolicy propagates a changed default to every enabled app that
@@ -231,6 +351,7 @@ func (h *Hub) applyDefaultPolicy() {
 	type job struct {
 		t       templates.Template
 		restart bool
+		acr     string
 	}
 	var jobs []job
 	h.mu.Lock()
@@ -250,16 +371,15 @@ func (h *Hub) applyDefaultPolicy() {
 		after, _ := os.ReadFile(h.overridePath(id))
 		changed := !bytes.Equal(before, after)
 		if changed || len(t.Manifest.Clients) > 0 {
-			jobs = append(jobs, job{t: *t, restart: changed})
+			jobs = append(jobs, job{t: *t, restart: changed, acr: policy.ACR(h.effectivePolicyLocked(t))})
 		}
 	}
-	acr := policy.ACR(h.st.Default())
 	h.mu.Unlock()
 
 	for _, j := range jobs {
 		if h.idp != nil {
 			for _, c := range j.t.Manifest.Clients {
-				if err := h.idp.UpdateClientACR(context.Background(), h.clientSpec(&j.t, c, acr)); err != nil {
+				if err := h.idp.UpdateClientACR(context.Background(), h.clientSpec(&j.t, c, j.acr)); err != nil {
 					log.Printf("default-policy: keycloak client %s update failed: %v", c.ClientID, err)
 				}
 			}

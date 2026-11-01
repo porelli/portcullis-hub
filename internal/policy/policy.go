@@ -1,5 +1,6 @@
-// Package policy holds the auth-policy model (factors + AND/OR) and builds
-// the group-gate policy file (contract §4, version 2).
+// Package policy holds the auth-policy model (factors + AND/OR), what each
+// auth method can enforce of it, and builds the group-gate policy file
+// (contract §4, version 3).
 package policy
 
 import (
@@ -8,8 +9,13 @@ import (
 )
 
 // AuthPolicy is a per-app (or global default) authentication requirement.
-// Factors is a subset of {"mtls","webauthn","password"}. Op is "any" or "all"
+// Factors is a subset of {"mtls","webauthn"}. Op is "any" or "all"
 // (ignored when len(Factors) <= 1). An empty Factors list means public.
+//
+// "password" is no factor any more: the realm's browser flow has no
+// password (its LoA 1 is a client cert or a passkey), and group-gate counts
+// every hwk/mtls session as having it. Stored policies naming it are
+// rewritten by Normalize (see LegacyPassword); the API refuses it.
 type AuthPolicy struct {
 	Factors []string `json:"factors" yaml:"factors"`
 	Op      string   `json:"op" yaml:"op"`
@@ -27,27 +33,65 @@ func InitialDefault() AuthPolicy {
 	return AuthPolicy{Factors: []string{"mtls", "webauthn"}, Op: "any"}
 }
 
-var factorLoA = map[string]int{"password": 1, "webauthn": 2, "mtls": 3}
+var factorLoA = map[string]int{"webauthn": 2, "mtls": 3}
+
+// Factors are the factors a policy may name, sorted.
+var Factors = []string{"mtls", "webauthn"}
+
+// LegacyFactorPassword is the factor older policies used for a password
+// sign-in, which no longer exists.
+const LegacyFactorPassword = "password"
+
+// KnownFactor reports whether f (normalised) is a factor.
+func KnownFactor(f string) bool {
+	_, ok := factorLoA[f]
+	return ok
+}
+
+func normFactor(f string) string { return strings.ToLower(strings.TrimSpace(f)) }
+
+// LegacyPassword reports whether p names the removed "password" factor.
+func LegacyPassword(p AuthPolicy) bool {
+	for _, f := range p.Factors {
+		if normFactor(f) == LegacyFactorPassword {
+			return true
+		}
+	}
+	return false
+}
 
 // Normalize trims and lower-cases factor names, drops unknown/duplicate
 // values, sorts them, and normalises op ("" for ≤1 factor, else "any" unless
 // "all").
+//
+// The legacy "password" factor is rewritten to what group-gate makes of it
+// (every hwk/mtls session counts as having it), never dropped into a weaker
+// policy: in "all" it is redundant and removed; as an alternative ("any",
+// or alone) it lets every session through, i.e. any of mtls, webauthn.
 func Normalize(p AuthPolicy) AuthPolicy {
 	out := AuthPolicy{}
 	seen := map[string]bool{}
+	password := false
 	for _, f := range p.Factors {
-		f = strings.ToLower(strings.TrimSpace(f))
+		f = normFactor(f)
+		if f == LegacyFactorPassword {
+			password = true
+			continue
+		}
 		if _, ok := factorLoA[f]; !ok || seen[f] {
 			continue
 		}
 		seen[f] = true
 		out.Factors = append(out.Factors, f)
 	}
+	op := strings.ToLower(strings.TrimSpace(p.Op))
+	if password && (op != "all" || len(out.Factors) == 0) {
+		return AuthPolicy{Factors: append([]string(nil), Factors...), Op: "any"}
+	}
 	sort.Strings(out.Factors)
 	if len(out.Factors) <= 1 {
 		out.Op = ""
 	} else {
-		op := strings.ToLower(strings.TrimSpace(p.Op))
 		if op != "all" {
 			op = "any"
 		}
@@ -89,8 +133,6 @@ func LoA(p AuthPolicy) int {
 // default.acr.values to prompt Keycloak for the right LoA step-up.
 func ACR(p AuthPolicy) string {
 	switch LoA(p) {
-	case 1:
-		return "pwd"
 	case 2:
 		return "hwk"
 	case 3:

@@ -45,7 +45,7 @@ func (h *Hub) portalLocked() PortalDocument {
 		m := t.Manifest
 		a := PortalApp{ID: t.ID, Name: m.Name, Description: m.Description, Icon: m.Icon, Category: m.Category,
 			URLs: append([]templates.AppURL{}, m.URLs...), AuthMethod: m.Auth.Method, AdminGroup: m.Auth.AdminGroup}
-		if m.Auth.GroupAccess {
+		if h.accessLocked(t).groupAccess(t) {
 			a.AccessGroup = m.Auth.AccessGroup
 		}
 		doc.Apps = append(doc.Apps, a)

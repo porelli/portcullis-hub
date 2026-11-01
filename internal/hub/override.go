@@ -17,8 +17,11 @@ import (
 
 // generateOverrideLocked writes the per-app compose override: user volume
 // mounts, port bindings, per-router Traefik tls.options labels driven by
-// the app's auth policy, and the public-exception router when it is on. Port ranges and network_mode: host ports stay in the
-// base compose.yml. Caller must hold mu.
+// the app's effective auth policy, the router middlewares of apps with
+// their own login (Portcullis sign-in added, or the template's own chain
+// for "own login only"), and the public-exception router when it is on.
+// Port ranges and network_mode: host ports stay in the base compose.yml.
+// Caller must hold mu.
 func (h *Hub) generateOverrideLocked(t *templates.Template, values map[string]string) error {
 	overridePath := h.overridePath(t.ID)
 	serviceMounts := make(map[string][]string)
@@ -120,6 +123,9 @@ func (h *Hub) generateOverrideLocked(t *templates.Template, values map[string]st
 			b.WriteString("    labels:\n")
 			for _, r := range routers {
 				fmt.Fprintf(&b, "      traefik.http.routers.%s.tls.options: %s\n", r, tier)
+				if mw, ok := rl.middlewares[r]; ok {
+					fmt.Fprintf(&b, "      traefik.http.routers.%s.middlewares: %s\n", r, mw)
+				}
 			}
 			if plan != nil && svc == plan.Service {
 				for _, l := range publicLines {
@@ -137,6 +143,10 @@ type routeLabels struct {
 	plan   *templates.PublicPlan // nil without public_access
 	tier   string                // TLS options of every router of the app
 	public []string              // public router + strip middleware lines ("key: value"), on plan.Service
+	// middlewares are the routers' middleware chains the Hub sets (apps
+	// with auth.native_login only); a router without an entry keeps the
+	// template's.
+	middlewares map[string]string
 }
 
 // routeLabelsLocked computes the tier and public-router labels from the
@@ -152,7 +162,20 @@ func (h *Hub) routeLabelsLocked(t *templates.Template) (*routeLabels, error) {
 		return nil, err
 	}
 	pub := h.publicLocked(t, plan)
-	rl := &routeLabels{routes: routes, plan: plan, tier: policy.HostTier(h.st.ResolvePolicy(t.ID), pub.Active())}
+	acc := h.accessLocked(t)
+	rl := &routeLabels{routes: routes, plan: plan, tier: policy.HostTier(acc.Resolved.Policy, pub.Active())}
+	if acc.SignIn != "" {
+		rl.middlewares = map[string]string{}
+		for name, ri := range routes.Info {
+			mw := nativeRouterMiddlewares(ri.Middlewares)
+			if acc.SignIn == SignInGateway {
+				mw = gatewayRouterMiddlewares(ri.Middlewares)
+			}
+			if mw != "" {
+				rl.middlewares[name] = mw
+			}
+		}
+	}
 	if pub.Active() {
 		if rl.public, err = publicLabels(t.ID, &t.Manifest, plan, pub.Routed, rl.tier); err != nil {
 			return nil, err
@@ -176,6 +199,9 @@ func (h *Hub) desiredRouteLabelsLocked(t *templates.Template) (map[string]map[st
 		m := map[string]string{}
 		for _, r := range routers {
 			m["traefik.http.routers."+r+".tls.options"] = rl.tier
+			if mw, ok := rl.middlewares[r]; ok {
+				m["traefik.http.routers."+r+".middlewares"] = mw
+			}
 		}
 		out[svc] = m
 	}
@@ -205,9 +231,11 @@ func expandComposeValue(v, domain string) string {
 }
 
 // exposureLabel reports whether a label key decides an app's exposure:
-// a router's tls.options, or anything of its public router / middleware.
-func exposureLabel(id, k string) bool {
+// a router's tls.options, anything of its public router / middleware and,
+// for apps whose sign-in the Hub sets (mw), every router's middlewares.
+func exposureLabel(id, k string, mw bool) bool {
 	return strings.HasPrefix(k, "traefik.http.routers."+PublicRouterName(id)+".") ||
+		(mw && strings.HasPrefix(k, "traefik.http.routers.") && strings.HasSuffix(k, ".middlewares")) ||
 		strings.HasPrefix(k, "traefik.http.middlewares."+PublicStripMiddleware(id)+".") ||
 		(strings.HasPrefix(k, "traefik.http.routers.") && strings.HasSuffix(k, ".tls.options"))
 }

@@ -123,16 +123,16 @@ func TestBuildCollisions(t *testing.T) {
 
 func TestStricter(t *testing.T) {
 	pub := AuthPolicy{}
-	pwd := AuthPolicy{Factors: []string{"password"}}
 	hwk := AuthPolicy{Factors: []string{"webauthn"}}
-	any2 := AuthPolicy{Factors: []string{"password", "webauthn"}, Op: "any"}
-	all2 := AuthPolicy{Factors: []string{"password", "webauthn"}, Op: "all"}
+	cert := AuthPolicy{Factors: []string{"mtls"}}
+	any2 := AuthPolicy{Factors: []string{"mtls", "webauthn"}, Op: "any"}
+	all2 := AuthPolicy{Factors: []string{"mtls", "webauthn"}, Op: "all"}
 	for _, c := range []struct {
 		a, b AuthPolicy
 		want bool
 	}{
-		{pwd, pub, true}, {pub, pwd, false}, {hwk, pwd, true}, {all2, hwk, true}, {hwk, all2, false},
-		{all2, any2, true}, {any2, pwd, false}, {pwd, any2, true}, {hwk, hwk, false}, {pub, pub, false},
+		{hwk, pub, true}, {pub, hwk, false}, {cert, hwk, true}, {all2, cert, true}, {cert, all2, false},
+		{all2, any2, true}, {any2, hwk, false}, {hwk, any2, true}, {hwk, hwk, false}, {pub, pub, false},
 	} {
 		if got := Stricter(c.a, c.b); got != c.want {
 			t.Errorf("Stricter(%+v, %+v) = %v", c.a, c.b, got)

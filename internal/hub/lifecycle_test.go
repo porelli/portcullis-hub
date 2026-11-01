@@ -490,7 +490,7 @@ func TestSaveSettingsValidation(t *testing.T) {
 
 func TestSubdomainCollision(t *testing.T) {
 	f := newFixture(t)
-	writeFile(t, filepath.Join(f.src, "clash", "manifest.yaml"), "name: Clash\n")
+	writeFile(t, filepath.Join(f.src, "clash", "manifest.yaml"), "name: Clash\nauth:\n  method: forward-auth\n")
 	writeFile(t, filepath.Join(f.src, "clash", "compose.yml"), "services:\n  c:\n    labels:\n      traefik.http.routers.c.rule: Host(`GRAFANA.${PORTCULLIS_DOMAIN}`) && PathPrefix(`/x`)\n")
 	f.h.Discover()
 	if err := f.h.Enable("grafana"); err != nil {
@@ -570,7 +570,7 @@ func TestInitialDefaultPolicy(t *testing.T) {
 	if err := f.h.Disable("other"); err != nil {
 		t.Fatal(err)
 	}
-	if !f.h.SetDefaultPolicy(policy.AuthPolicy{}) {
+	if ch, err := f.h.SetDefaultPolicy(policy.AuthPolicy{}); err != nil || !ch {
 		t.Fatal("public default not detected as a change")
 	}
 	f.h.Wait()
@@ -598,11 +598,16 @@ func TestInitialDefaultPolicy(t *testing.T) {
 func TestDefaultPolicy(t *testing.T) {
 	f := newFixture(t)
 	f.h.Enable("other")
-	if !f.h.SetDefaultPolicy(policy.AuthPolicy{Factors: []string{"mtls"}}) {
-		t.Fatal("change not detected")
+	if ch, err := f.h.SetDefaultPolicy(policy.AuthPolicy{Factors: []string{"mtls"}}); err != nil || !ch {
+		t.Fatal("change not detected", err)
 	}
-	if f.h.SetDefaultPolicy(policy.AuthPolicy{Factors: []string{" MTLS "}}) {
+	if ch, _ := f.h.SetDefaultPolicy(policy.AuthPolicy{Factors: []string{" MTLS "}}); ch {
 		t.Error("same policy reported as changed")
+	}
+	for _, bad := range [][]string{{"password"}, {"mtls", "sms"}} {
+		if _, err := f.h.SetDefaultPolicy(policy.AuthPolicy{Factors: bad}); statusOf(err) != 400 {
+			t.Errorf("default %v: err = %v", bad, err)
+		}
 	}
 	if d := readPolicy(t, f).Default; strings.Join(d.Factors, ",") != "mtls" {
 		t.Errorf("default = %+v", d)

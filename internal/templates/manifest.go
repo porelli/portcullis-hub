@@ -23,8 +23,29 @@ type Auth struct {
 	// public_access: the public router has no forward-auth, so the Hub
 	// strips them (and the core identity headers) itself.
 	IdentityHeaders []string `yaml:"identity_headers" json:"identity_headers,omitempty"`
-	Notes           string   `yaml:"notes" json:"notes"`
+	// NativeLogin declares that a custom app (no SSO) has its own login.
+	// The Hub then offers "Portcullis sign-in, then the app's own login"
+	// (default: its override adds forward-auth + group-gate) and, if
+	// AllowWithoutGateway, "the app's own login only" (no Portcullis).
+	NativeLogin *NativeLogin `yaml:"native_login" json:"native_login,omitempty"`
+	Notes       string       `yaml:"notes" json:"notes"`
 }
+
+// NativeLogin is auth.native_login (method custom only).
+type NativeLogin struct {
+	Supported bool `yaml:"supported" json:"supported"`
+	// AllowWithoutGateway lets an admin remove Portcullis from in front of
+	// the app (its routers then have no forward-auth, TLS tier public).
+	AllowWithoutGateway bool   `yaml:"allow_without_gateway" json:"allow_without_gateway"`
+	Note                string `yaml:"note" json:"note,omitempty"`
+}
+
+// HasNativeLogin reports whether the app has its own login the Hub can
+// put Portcullis sign-in in front of.
+func (a *Auth) HasNativeLogin() bool { return a.NativeLogin != nil && a.NativeLogin.Supported }
+
+// Methods are the accepted auth.method values.
+var Methods = map[string]bool{"native-oidc": true, "forward-auth": true, "header-auth": true, "mtls": true, "custom": true, "public": true}
 
 // PublicAccess is auth.public_access: when enabled, the Hub adds a Traefik
 // router for Paths that bypasses forward-auth and group-gate (see

@@ -60,7 +60,7 @@ func TestSaveRoundTrip(t *testing.T) {
 	s.Sources = []Source{{Name: "portcullis", URL: "https://x", Path: "/data/repos/portcullis"}}
 	s.Settings["a"] = map[string]string{"K": "v"}
 	s.AuthPolicies["a"] = policy.AuthPolicy{Factors: []string{"mtls"}}
-	s.SetDefault(policy.AuthPolicy{Factors: []string{"password"}})
+	s.SetDefault(policy.AuthPolicy{Factors: []string{"webauthn"}})
 	if err := s.Save(p); err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +81,7 @@ func TestSaveRoundTrip(t *testing.T) {
 	if p := got.ResolvePolicy("a"); p.Factors[0] != "mtls" {
 		t.Errorf("per-app policy = %+v", p)
 	}
-	if p := got.ResolvePolicy("other"); p.Factors[0] != "password" {
+	if p := got.ResolvePolicy("other"); p.Factors[0] != "webauthn" {
 		t.Errorf("default policy = %+v", p)
 	}
 	entries, _ := os.ReadDir(dir)
@@ -126,5 +126,44 @@ func TestDefaultPolicyUnsetVsPublic(t *testing.T) {
 	}
 	if d := s.Default(); d.Factors == nil || len(d.Factors) != 0 || s.ResolvePolicy("x").Factors == nil {
 		t.Errorf("explicit public default = %+v", d)
+	}
+}
+
+// Stored policies naming the removed "password" factor are normalised on
+// load (never into something weaker) and flagged for the UI.
+func TestLoadLegacyPassword(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "state.yaml")
+	os.WriteFile(p, []byte(`default_auth_policy: {factors: [password], op: ""}
+auth_policies:
+  a: {factors: [password, webauthn], op: all}
+  b: {factors: [mtls], op: ""}
+published:
+  a: {subdomains: [a], group_access: false, policy: {factors: [password, mtls], op: any}}
+sign_in: {plex: native}
+`), 0600)
+	s, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := s.Default(); strings.Join(d.Factors, ",") != "mtls,webauthn" || d.Op != "any" {
+		t.Errorf("default = %+v", d)
+	}
+	if a := s.AuthPolicies["a"]; strings.Join(a.Factors, ",") != "webauthn" {
+		t.Errorf("a = %+v", a)
+	}
+	if pp := s.Published["a"].Policy; pp == nil || strings.Join(pp.Factors, ",") != "mtls,webauthn" || pp.Op != "any" {
+		t.Errorf("published a = %+v", pp)
+	}
+	if !s.LegacyPassword[""] || !s.LegacyPassword["a"] || s.LegacyPassword["b"] {
+		t.Errorf("flags = %v", s.LegacyPassword)
+	}
+	if s.SignIn["plex"] != SignInNative {
+		t.Errorf("sign_in = %v", s.SignIn)
+	}
+	if err := s.Save(p); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(p); strings.Contains(string(b), "password") {
+		t.Errorf("saved state still names password:\n%s", b)
 	}
 }

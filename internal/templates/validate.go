@@ -62,6 +62,12 @@ func ValidateManifest(m *Manifest) error {
 		}
 	}
 	a := &m.Auth
+	if !Methods[a.Method] {
+		return fmt.Errorf("auth.method %q must be one of native-oidc, forward-auth, header-auth, mtls, custom, public", a.Method)
+	}
+	if err := validateNativeLogin(a); err != nil {
+		return err
+	}
 	if a.AccessGroup != "" && !groupRe.MatchString(a.AccessGroup) {
 		return fmt.Errorf("invalid auth.access_group %q", a.AccessGroup)
 	}
@@ -82,6 +88,28 @@ func ValidateManifest(m *Manifest) error {
 		return err
 	}
 	return ValidatePublicAccess(a)
+}
+
+// validateNativeLogin: auth.native_login is for apps without SSO (method
+// custom): an SSO app must never be offered a way around the gateway.
+func validateNativeLogin(a *Auth) error {
+	nl := a.NativeLogin
+	if nl == nil {
+		return nil
+	}
+	if a.Method != "custom" {
+		return fmt.Errorf("auth.native_login is only allowed with auth.method custom (got %q)", a.Method)
+	}
+	if b, ok := a.SSO.(bool); !ok || b {
+		return fmt.Errorf("auth.native_login requires auth.sso: false")
+	}
+	if !nl.Supported {
+		return fmt.Errorf("auth.native_login.supported must be true (omit native_login otherwise)")
+	}
+	if HasControlChars(nl.Note) {
+		return fmt.Errorf("auth.native_login.note contains control characters")
+	}
+	return nil
 }
 
 // ValidateAdminPath checks a path prefix from auth.admin_paths and returns it

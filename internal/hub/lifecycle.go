@@ -147,7 +147,7 @@ func (h *Hub) Enable(id string) error {
 		h.mu.Unlock()
 		return fmt.Errorf("override write failed: %w", err)
 	}
-	acr := policy.ACR(h.st.ResolvePolicy(tmpl.ID))
+	acr := policy.ACR(h.effectivePolicyLocked(&tmpl))
 	h.mu.Unlock()
 
 	h.copyConfigFiles(&tmpl)

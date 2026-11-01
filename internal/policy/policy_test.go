@@ -12,13 +12,24 @@ func TestNormalize(t *testing.T) {
 		{AuthPolicy{}, AuthPolicy{}},
 		{AuthPolicy{Factors: []string{" WebAuthn ", "bogus", "webauthn"}, Op: "all"}, AuthPolicy{Factors: []string{"webauthn"}, Op: ""}},
 		{AuthPolicy{Factors: []string{"webauthn", "mtls"}}, AuthPolicy{Factors: []string{"mtls", "webauthn"}, Op: "any"}},
-		{AuthPolicy{Factors: []string{"password", "mtls"}, Op: " ALL "}, AuthPolicy{Factors: []string{"mtls", "password"}, Op: "all"}},
-		{AuthPolicy{Factors: []string{"password", "mtls"}, Op: "xor"}, AuthPolicy{Factors: []string{"mtls", "password"}, Op: "any"}},
+		{AuthPolicy{Factors: []string{"MTLS", "webauthn"}, Op: " ALL "}, AuthPolicy{Factors: []string{"mtls", "webauthn"}, Op: "all"}},
+		{AuthPolicy{Factors: []string{"webauthn", "mtls"}, Op: "xor"}, AuthPolicy{Factors: []string{"mtls", "webauthn"}, Op: "any"}},
+		// Legacy "password": every hwk/mtls session satisfies it (group-gate),
+		// so it is redundant in "all" and an open alternative otherwise —
+		// never rewritten into something weaker (public).
+		{AuthPolicy{Factors: []string{"password", "mtls"}, Op: " ALL "}, AuthPolicy{Factors: []string{"mtls"}, Op: ""}},
+		{AuthPolicy{Factors: []string{"password", "mtls", "webauthn"}, Op: "all"}, AuthPolicy{Factors: []string{"mtls", "webauthn"}, Op: "all"}},
+		{AuthPolicy{Factors: []string{"password", "mtls"}, Op: "any"}, AuthPolicy{Factors: []string{"mtls", "webauthn"}, Op: "any"}},
+		{AuthPolicy{Factors: []string{"Password"}}, AuthPolicy{Factors: []string{"mtls", "webauthn"}, Op: "any"}},
+		{AuthPolicy{Factors: []string{"password"}, Op: "all"}, AuthPolicy{Factors: []string{"mtls", "webauthn"}, Op: "any"}},
 	}
 	for _, c := range cases {
 		if got := Normalize(c.in); !reflect.DeepEqual(got, c.want) {
 			t.Errorf("Normalize(%+v) = %+v, want %+v", c.in, got, c.want)
 		}
+	}
+	if !LegacyPassword(AuthPolicy{Factors: []string{" PASSWORD "}}) || LegacyPassword(InitialDefault()) {
+		t.Error("LegacyPassword is wrong")
 	}
 }
 
@@ -31,12 +42,10 @@ func TestLoAACRTier(t *testing.T) {
 		score float64
 	}{
 		{AuthPolicy{}, 0, "public", "public@file", 0},
-		{AuthPolicy{Factors: []string{"password"}}, 1, "pwd", "authaware@file", 1},
 		{AuthPolicy{Factors: []string{"webauthn"}}, 2, "hwk", "authaware@file", 2},
 		{AuthPolicy{Factors: []string{"mtls"}}, 3, "mtls", "protected@file", 3},
 		{AuthPolicy{Factors: []string{"mtls", "webauthn"}, Op: "any"}, 2, "hwk", "authaware@file", 2},
 		{AuthPolicy{Factors: []string{"mtls", "webauthn"}, Op: "all"}, 3, "mtls", "protected@file", 3.5},
-		{AuthPolicy{Factors: []string{"password", "webauthn"}, Op: "all"}, 2, "hwk", "authaware@file", 2.5},
 	}
 	for _, c := range cases {
 		if got := LoA(c.p); got != c.loa {

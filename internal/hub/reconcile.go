@@ -199,6 +199,8 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 	known := map[string]bool{}
 	blockedPublic := map[string]string{}
 	desired := map[string]map[string]map[string]string{}
+	signInSet := map[string]bool{} // the Hub sets the routers' middlewares
+	nativeOnly := map[string]bool{}
 	for i := range h.templates {
 		t := &h.templates[i]
 		known[t.ID] = true
@@ -206,6 +208,10 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 			pub := h.publicLocked(t, t.Public)
 			if pub.Enabled && pub.Blocked != "" {
 				blockedPublic[t.ID] = pub.Blocked
+			}
+			if acc := h.accessLocked(t); acc.SignIn != "" {
+				signInSet[t.ID] = true
+				nativeOnly[t.ID] = acc.SignIn == SignInNative
 			}
 			if d, err := h.desiredRouteLabelsLocked(t); err == nil {
 				desired[t.ID] = d
@@ -215,8 +221,11 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 		}
 	}
 	snapshot := map[string]bool{}
-	for id := range h.st.Published {
+	for id, snap := range h.st.Published {
 		snapshot[id] = true
+		if snap.NativeLoginOnly && !known[id] {
+			nativeOnly[id] = true
+		}
 	}
 	h.mu.RUnlock()
 	// Exposure drift: every exposure label (tier, public router, strip
@@ -229,11 +238,16 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 		if !ok {
 			continue
 		}
-		if d := diffExposure(c.id, want[c.service], c.labels); d != "" && exposureDiff[c.id] == "" {
+		if d := diffExposure(c.id, want[c.service], c.labels, signInSet[c.id]); d != "" && exposureDiff[c.id] == "" {
 			exposureDiff[c.id] = c.service + ": " + d
 		}
 	}
 	rep.Items = computeDrift(enabled, known, snapshot, counts, exposureDiff, havePublic, blockedPublic, h.appBusy)
+	for i := range rep.Items {
+		if d := &rep.Items[i]; nativeOnly[d.ID] && (d.Kind == DriftTemplateMissing || d.Kind == DriftPublicAccess) {
+			d.Message += " (configured for the app's own login only: no Portcullis sign-in in front of it)"
+		}
+	}
 
 	runtime := map[string][]string{}
 	for id, set := range routed {
@@ -436,13 +450,13 @@ func (h *Hub) ResolveDrift(id, action string) error {
 
 // diffExposure compares a running container's exposure labels with the
 // wanted ones and names the first few that differ ("" = equal).
-func diffExposure(id string, want, have map[string]string) string {
+func diffExposure(id string, want, have map[string]string, mw bool) string {
 	keys := map[string]bool{}
 	for k := range want {
 		keys[k] = true
 	}
 	for k := range have {
-		if exposureLabel(id, k) {
+		if exposureLabel(id, k, mw) {
 			keys[k] = true
 		}
 	}

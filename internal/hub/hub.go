@@ -230,12 +230,14 @@ func (h *Hub) Discover() {
 // Caller must hold mu.
 func (h *Hub) snapshot(t *templates.Template) state.PublishedApp {
 	a := t.Manifest.Auth
+	acc := h.accessLocked(t)
 	p := state.PublishedApp{
-		Subdomains:  append([]string(nil), t.Subdomains...),
-		GroupAccess: a.GroupAccess,
-		AccessGroup: a.AccessGroup,
-		AdminGroup:  a.AdminGroup,
-		AdminPaths:  append([]string(nil), a.AdminPaths...),
+		Subdomains:      append([]string(nil), t.Subdomains...),
+		GroupAccess:     acc.groupAccess(t),
+		NativeLoginOnly: acc.SignIn == SignInNative,
+		AccessGroup:     a.AccessGroup,
+		AdminGroup:      a.AdminGroup,
+		AdminPaths:      append([]string(nil), a.AdminPaths...),
 	}
 	if ov, ok := h.st.AuthPolicies[t.ID]; ok {
 		ov.Factors = append([]string(nil), ov.Factors...)
@@ -357,7 +359,7 @@ func (h *Hub) WritePolicy() error {
 			ID:          t.ID,
 			Enabled:     true,
 			Subdomains:  t.Subdomains,
-			GroupAccess: t.Manifest.Auth.GroupAccess,
+			GroupAccess: h.accessLocked(t).groupAccess(t),
 			AccessGroup: t.Manifest.Auth.AccessGroup,
 			AdminGroup:  t.Manifest.Auth.AdminGroup,
 			AdminPaths:  t.Manifest.Auth.AdminPaths,

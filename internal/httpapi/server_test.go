@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/portcullis/hub/internal/compose"
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/hub"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/web"
@@ -129,11 +130,15 @@ func TestServerRoutes(t *testing.T) {
 		{"GET", "/api/templates/settings/missing", "", 404},
 		{"PUT", "/api/templates/settings/demo", `{"bad key":"x"}`, 400},
 		{"PUT", "/api/templates/settings/demo", `{"_auth_policy":{"factors":["mtls"]}}`, 200},
+		{"PUT", "/api/templates/settings/demo", `{"_auth_policy":{"factors":["password"]}}`, 400},
+		{"PUT", "/api/templates/settings/demo", `{"_sign_in":"native"}`, 400},
+		{"PUT", "/api/templates/settings/demo", `{"_sign_in":true}`, 400},
 		{"GET", "/api/templates/status/demo", "", 502}, // no docker engine in this test
 		{"POST", "/api/drift/resolve", `{"id":"demo","action":"bogus"}`, 400},
 		{"GET", "/api/drift", "", 200},
 		{"PUT", "/api/settings", `{}`, 400},
 		{"PUT", "/api/settings", `{"default_auth_policy":{"factors":["webauthn"]}}`, 200},
+		{"PUT", "/api/settings", `{"default_auth_policy":{"factors":["password","mtls"]}}`, 400},
 		{"GET", "/api/directory", "", 503}, // no directory service in this test
 		{"POST", "/api/directory/users", `{}`, 503},
 		{"GET", "/api/directory/users", "", 404}, // wrong method falls through to "/"
@@ -164,6 +169,56 @@ func TestParseSettingsUpdate(t *testing.T) {
 	}
 	if len(u.Values) != 1 || u.Values["A"] != "1" {
 		t.Errorf("values = %v", u.Values)
+	}
+}
+
+// Switching an app to its own login only (no Portcullis) is audited with
+// the signed-in admin, refusals too.
+func TestSignInAudited(t *testing.T) {
+	root := t.TempDir()
+	src := filepath.Join(root, "src", "plex")
+	os.MkdirAll(src, 0755)
+	os.WriteFile(filepath.Join(src, "manifest.yaml"), []byte("name: Plex\nauth:\n  method: custom\n  sso: false\n  native_login: {supported: true, allow_without_gateway: true}\n"), 0644)
+	os.WriteFile(filepath.Join(src, "compose.yml"), []byte("services:\n  web:\n    image: x\n    labels:\n      traefik.http.routers.plex.rule: Host(`plex.${PORTCULLIS_DOMAIN}`)\n"), 0644)
+	data := filepath.Join(root, "data")
+	os.MkdirAll(data, 0755)
+	st := state.New()
+	st.Sources = []state.Source{{Name: "local", Path: filepath.Dir(src)}}
+	st.Save(filepath.Join(data, "state.yaml"))
+	h, err := hub.New(hub.Config{ProjectDir: filepath.Join(root, "project"), DataDir: data, Domain: "example.org"}, nopRunner{}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.Init()
+	t.Cleanup(h.Wait)
+	audit := &directory.AuditLog{Path: filepath.Join(data, "audit.jsonl")}
+	s := &Server{Hub: h, Directory: &directory.Service{Audit: audit}, Secret: testSecret, Web: web.FS}
+	handler, err := s.Handler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	put := func(body string) int {
+		req := httptest.NewRequest("PUT", "/api/templates/settings/plex", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(ProxySecretHeader, testSecret)
+		req.Header.Set("X-Forwarded-User", "alice")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	if c := put(`{"_sign_in":"native"}`); c != 200 {
+		t.Fatalf("native = %d", c)
+	}
+	if c := put(`{"_sign_in":"native"}`); c != 200 { // unchanged: not audited
+		t.Fatalf("native again = %d", c)
+	}
+	if c := put(`{"_sign_in":"gateway","_auth_policy":{"factors":["password"]}}`); c != 400 {
+		t.Fatalf("refused = %d", c)
+	}
+	es, _ := audit.Recent(10)
+	if len(es) != 2 || es[1].Actor != "alice" || es[1].Action != "app.sign_in" || es[1].Target != "plex" || es[1].Result != "ok" ||
+		!strings.Contains(es[1].Detail, "gateway -> native") || es[0].Result != "refused" {
+		t.Errorf("audit = %+v", es)
 	}
 }
 

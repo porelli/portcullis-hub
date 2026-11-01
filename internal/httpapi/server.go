@@ -357,7 +357,12 @@ func (s *Server) handleTemplateSettings(w http.ResponseWriter, r *http.Request) 
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		if err := s.Hub.SaveSettings(id, u); err != nil {
+		before := s.Hub.SignInMode(id)
+		err = s.Hub.SaveSettings(id, u)
+		if u.SignIn != nil && (err != nil || s.Hub.SignInMode(id) != before) {
+			s.auditSignIn(r, id, before, *u.SignIn, err)
+		}
+		if err != nil {
 			writeErr(w, err, http.StatusInternalServerError)
 			return
 		}
@@ -367,8 +372,38 @@ func (s *Server) handleTemplateSettings(w http.ResponseWriter, r *http.Request) 
 	}
 }
 
+// auditSignIn records a change (or refused change) of an app's sign-in
+// mode in the Hub's audit log: switching to the app's own login removes
+// Portcullis from in front of it.
+func (s *Server) auditSignIn(r *http.Request, id, before, want string, err error) {
+	if s.Directory == nil || s.Directory.Audit == nil {
+		return
+	}
+	e := directory.AuditEntry{
+		Actor:  r.Header.Get("X-Forwarded-User"),
+		Action: "app.sign_in",
+		Target: id,
+		Detail: before + " -> " + want,
+		Result: "ok",
+	}
+	if want == hub.SignInNative {
+		e.Detail += " (app's own login only: no Portcullis sign-in)"
+	}
+	if err != nil {
+		e.Result, e.Error = "error", err.Error()
+		var se *hub.StatusError
+		if errors.As(err, &se) && se.Status < 500 {
+			e.Result = "refused"
+		}
+	}
+	if aerr := s.Directory.Audit.Append(e); aerr != nil {
+		log.Printf("audit: %v", aerr)
+	}
+}
+
 // parseSettingsUpdate splits the settings PUT body: string values are
-// settings, plus reserved keys — _auth_policy ({factors, op}),
+// settings, plus reserved keys — _sign_in ("gateway"/"native", apps with
+// their own login), _auth_policy ({factors, op}),
 // _auth_policy_inherit (true/"true" drops the per-app override),
 // _public_access (true/false/"default"), _public_mode ("all"/"listed"/""
 // for the template default) and _public_tokens (share URLs or tokens).
@@ -400,6 +435,14 @@ func parseSettingsUpdate(raw map[string]interface{}) (hub.SettingsUpdate, error)
 		}
 	}
 	delete(raw, "_auth_policy")
+	if v, ok := raw["_sign_in"]; ok {
+		m, isStr := v.(string)
+		if !isStr {
+			return u, fmt.Errorf("_sign_in must be %q or %q", hub.SignInGateway, hub.SignInNative)
+		}
+		u.SignIn = &m
+		delete(raw, "_sign_in")
+	}
 	if v, ok := raw["_public_access"]; ok {
 		// true / false: the admin's choice; "default": back to the
 		// template's enabled_by_default.
@@ -461,6 +504,10 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]interface{}{
 			"default_auth_policy":  dp,
 			"default_safety_score": policy.SafetyScore(dp),
+			"factors":              policy.Factors,
+			// The stored default named the removed "password" factor and
+			// was normalised (shown as a note until saved).
+			"legacy_password": s.Hub.DefaultPolicyLegacy(),
 		})
 	case http.MethodPut:
 		var req struct {
@@ -473,7 +520,12 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "expected {default_auth_policy: {factors, op}}", http.StatusBadRequest)
 			return
 		}
-		if !s.Hub.SetDefaultPolicy(*req.DefaultAuthPolicy) {
+		changed, err := s.Hub.SetDefaultPolicy(*req.DefaultAuthPolicy)
+		if err != nil {
+			writeErr(w, err, http.StatusInternalServerError)
+			return
+		}
+		if !changed {
 			writeJSON(w, map[string]string{"status": "unchanged"})
 			return
 		}
