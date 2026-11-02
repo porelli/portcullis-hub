@@ -195,6 +195,9 @@ type fakeIdP struct {
 	specs       []keycloak.ClientSpec
 	hostUpdates []string // "<client>:<old uris> -> <new uris>"
 	callbacks   []string // "+add -remove"
+	// onCallbacks, if set, runs (once) at the start of the next
+	// UpdateForwardAuthCallbacks, without f.mu.
+	onCallbacks func()
 }
 
 func (f *fakeIdP) RegisterClient(ctx context.Context, s keycloak.ClientSpec) error {
@@ -223,6 +226,13 @@ func (f *fakeIdP) UpdateClientHosts(ctx context.Context, s keycloak.ClientSpec, 
 }
 
 func (f *fakeIdP) UpdateForwardAuthCallbacks(ctx context.Context, add, remove []string) error {
+	f.mu.Lock()
+	hook := f.onCallbacks
+	f.onCallbacks = nil
+	f.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if len(add)+len(remove) > 0 {

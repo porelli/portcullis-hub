@@ -1,6 +1,9 @@
 package hub
 
 import (
+	"errors"
+	"fmt"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -169,11 +172,12 @@ func TestHostCollisions(t *testing.T) {
 
 	// Accepted: normalised spelling; an enrolled, assignable domain (its
 	// apex and one label under it) is an extra-domain host.
-	for host, want := range map[string]string{
-		"  Dash-C.Example.ORG. ": "dash-c.example.org",
-		"team-c.example.net":     "team-c.example.net",
-		"g.team-c.example.net":   "g.team-c.example.net",
+	for _, c := range [][2]string{
+		{"  Dash-C.Example.ORG. ", "dash-c.example.org"},
+		{"team-c.example.net", "team-c.example.net"},
+		{"g.team-c.example.net", "g.team-c.example.net"},
 	} {
+		host, want := c[0], c[1]
 		if err := f.h.SetHosts("grafana-c", map[string]string{"grafana": host}, "alice"); err != nil {
 			t.Fatalf("host %q: %v", host, err)
 		}
@@ -457,5 +461,275 @@ func TestSetHostsDefaultInstance(t *testing.T) {
 	g := newFixture(t)
 	if err := g.h.SetHosts("grafana", map[string]string{"grafana": "dash.example.org"}, "alice"); statusOf(err) != 409 {
 		t.Errorf("legacy template: %v", err)
+	}
+}
+
+// v2 template whose default subdomain is team-a.
+const v2TeamManifest = `name: Team
+category: misc
+instances: multi
+auth:
+  method: forward-auth
+`
+
+const v2TeamCompose = "services:\n  web:\n    image: x\n    labels:\n" +
+	"      traefik.http.routers.team.rule: Host(`${PORTCULLIS_HOST_TEAM:-team-a.portcullis.local}`)\n"
+
+func TestHostRulesWhateverTheClassification(t *testing.T) {
+	f := newInstanceFixture(t, nil)
+	writeFile(t, filepath.Join(f.src, "team", "manifest.yaml"), v2TeamManifest)
+	writeFile(t, filepath.Join(f.src, "team", "compose.yml"), v2TeamCompose)
+	f.h.Discover()
+	if f.h.Template("team") == nil {
+		t.Fatal("team template not loaded")
+	}
+	doms := &fakeDomains{}
+	// team-a.<main> enrolled (allowed by §12.3), and a source that wrongly
+	// lists core hosts.
+	doms.set(Domain{Name: "team-a.example.org", State: DomainReady}, Domain{Name: "auth.example.org", State: DomainReady},
+		Domain{Name: "x.hub.example.org", State: DomainReady})
+	f.h.SetDomainSource(doms)
+	if err := f.h.CreateInstance("grafana", "grafana-c", nil); err != nil {
+		t.Fatal(err)
+	}
+	for host, why := range map[string]string{
+		"team-a.example.org":  "already used by instance team",
+		"auth.example.org":    "core hostname auth.example.org",
+		"x.auth.example.org":  "core hostname auth.example.org",
+		"x.hub.example.org":   "core hostname hub.example.org",
+		"a.x.hub.example.org": "core hostname hub.example.org",
+		"people.example.org":  "core hostname people.example.org",
+		"Team-A.Example.org.": "already used by instance team",
+	} {
+		err := f.h.SetHosts("grafana-c", map[string]string{"grafana": host}, "alice")
+		if statusOf(err) != 409 || !strings.Contains(err.Error(), why) {
+			t.Errorf("host %s: %v, want 409 %q", host, err, why)
+		}
+		if err := f.h.CreateInstance("grafana", "grafana-z", map[string]string{"grafana": host}); statusOf(err) != 409 {
+			t.Errorf("create on %s: %v", host, err)
+		}
+	}
+	// Moved away, the team template's default hostname stays reserved —
+	// also for an extra-domain host on the enrolled team-a.<main>.
+	if err := f.h.SetHosts("team", map[string]string{"team": "t.example.org"}, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.h.SetHosts("grafana-c", map[string]string{"grafana": "team-a.example.org"}, "alice"); statusOf(err) != 409 || !strings.Contains(err.Error(), "default hostname of template team") {
+		t.Errorf("reserved default on an enrolled apex: %v", err)
+	}
+	// Other names on the enrolled team-a.<main> are fine (extra hosts).
+	if err := f.h.SetHosts("grafana-c", map[string]string{"grafana": "g.team-a.example.org"}, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if v := f.h.Template("grafana-c"); len(v.ExtraHosts) != 1 || len(v.Subdomains) != 0 {
+		t.Errorf("view = %v %v", v.ExtraHosts, v.Subdomains)
+	}
+}
+
+// chatB returns an enabled chat-b (two Keycloak clients) on the fakeIdP.
+func chatB(t *testing.T) *fixture {
+	t.Helper()
+	f := newInstanceFixture(t, nil)
+	f.h.SetAudit(&fakeAudit{})
+	if err := f.h.CreateInstance("chat", "chat-b", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.h.Enable("chat-b"); err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
+func onDisk(t *testing.T, f *fixture, id string) string {
+	t.Helper()
+	st, err := state.Load(filepath.Join(f.data, "state.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return st.Instances[id].Hosts["chat"]
+}
+
+func TestSetHostsFileFailureBeforeCommit(t *testing.T) {
+	f := chatB(t)
+	envBefore, ovBefore := readFile(t, f.h.envPath("chat-b")), readFile(t, f.h.overridePath("chat-b"))
+	policyBefore := readFile(t, f.h.policyPath())
+	calls := len(f.runner.Calls())
+	envDir := filepath.Dir(f.h.envPath("chat-b"))
+	if err := os.Chmod(envDir, 0500); err != nil {
+		t.Fatal(err)
+	}
+	err := f.h.SetHosts("chat-b", map[string]string{"chat": "talk.example.org"}, "alice")
+	os.Chmod(envDir, 0755)
+	if statusOf(err) != 500 || !strings.Contains(err.Error(), "nothing changed") {
+		t.Fatalf("file failure: %v", err)
+	}
+	// Fully old: Keycloak moved back, state, files, policy untouched.
+	if got := strings.Join(f.idp.hostUpdates, " | "); got != "chat-b:https://chat-b.example.org/cb -> https://talk.example.org/cb | "+
+		"chat-b-chat-admin:https://chat-b.example.org/admin/cb -> https://talk.example.org/admin/cb | "+
+		"chat-b:https://talk.example.org/cb -> https://chat-b.example.org/cb | "+
+		"chat-b-chat-admin:https://talk.example.org/admin/cb -> https://chat-b.example.org/admin/cb" {
+		t.Errorf("Keycloak calls = %s", got)
+	}
+	if f.h.Template("chat-b").Hosts["chat"] != "chat-b.example.org" || onDisk(t, f, "chat-b") != "chat-b.example.org" {
+		t.Error("state changed")
+	}
+	if readFile(t, f.h.envPath("chat-b")) != envBefore || readFile(t, f.h.overridePath("chat-b")) != ovBefore || readFile(t, f.h.policyPath()) != policyBefore {
+		t.Error("files changed")
+	}
+	if len(f.runner.Calls()) != calls {
+		t.Error("restarted")
+	}
+}
+
+func TestSetHostsFailuresAfterCommit(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		breakIt func(f *fixture) (fix func())
+		want    string
+	}{
+		{"state save", func(f *fixture) func() {
+			p := filepath.Join(f.data, "state.yaml")
+			os.Remove(p)
+			os.Mkdir(p, 0755)
+			return func() { os.Remove(p) }
+		}, "state.yaml"},
+		{"policy write", func(f *fixture) func() {
+			p := f.h.policyPath()
+			os.Remove(p)
+			os.Mkdir(p, 0755)
+			return func() { os.Remove(p) }
+		}, "policy file"},
+		{"restart", func(f *fixture) func() {
+			f.runner.upErr = errors.New("boom")
+			return func() { f.runner.upErr = nil }
+		}, "boom"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := chatB(t)
+			fix := c.breakIt(f)
+			calls := len(f.runner.Calls())
+			err := f.h.SetHosts("chat-b", map[string]string{"chat": "talk.example.org"}, "alice")
+			var oe *OpError
+			if !errors.As(err, &oe) || oe.Record.Op != OpHosts || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("got %v", err)
+			}
+			// Committed: the new hostnames are in force, Keycloak is not
+			// moved back, and every later step still ran.
+			if len(f.idp.hostUpdates) != 2 {
+				t.Errorf("Keycloak calls = %v", f.idp.hostUpdates)
+			}
+			if f.h.Template("chat-b").Hosts["chat"] != "talk.example.org" || !strings.Contains(readFile(t, f.h.envPath("chat-b")), "PORTCULLIS_HOST_CHAT=talk.example.org") {
+				t.Error("not committed")
+			}
+			if after := strings.Join(f.runner.Calls()[calls:], " "); !strings.Contains(after, "up:portcullis-chat-b") {
+				t.Errorf("not restarted: %s", after)
+			}
+			if c.name != "policy write" {
+				if doc := readPolicy(t, f); doc.Groups["talk"] != "users_chat-b" {
+					t.Errorf("policy not written: %v", doc.Groups)
+				}
+			}
+			// The same hostnames again re-apply everything.
+			fix()
+			calls = len(f.runner.Calls())
+			if err := f.h.SetHosts("chat-b", map[string]string{"chat": "talk.example.org"}, "alice"); err != nil {
+				t.Fatalf("retry: %v", err)
+			}
+			if len(f.idp.hostUpdates) != 4 || !strings.Contains(strings.Join(f.runner.Calls()[calls:], " "), "up:portcullis-chat-b") {
+				t.Errorf("retry did not re-apply: Keycloak %v compose %v", f.idp.hostUpdates, f.runner.Calls()[calls:])
+			}
+			if onDisk(t, f, "chat-b") != "talk.example.org" || readPolicy(t, f).Groups["talk"] != "users_chat-b" {
+				t.Error("retry did not converge")
+			}
+			if lo := f.h.LastOp("chat-b"); lo == nil || !lo.OK || lo.Op != OpHosts {
+				t.Errorf("last op = %+v", lo)
+			}
+			// Now it is a no-op again.
+			calls = len(f.runner.Calls())
+			if err := f.h.SetHosts("chat-b", map[string]string{"chat": "talk.example.org"}, "alice"); err != nil || len(f.runner.Calls()) != calls || len(f.idp.hostUpdates) != 4 {
+				t.Errorf("no-op: %v", err)
+			}
+		})
+	}
+}
+
+func TestSetHostsLostRaceKeepsOthersCallbacks(t *testing.T) {
+	f := newInstanceFixture(t, nil)
+	doms := &fakeDomains{}
+	doms.set(Domain{Name: "team-b.example.org", State: DomainReady})
+	f.h.SetDomainSource(doms)
+	f.h.SetAudit(&fakeAudit{})
+	if err := f.h.CreateInstance("grafana", "grafana-b", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.h.Enable("grafana-b"); err != nil {
+		t.Fatal(err)
+	}
+	// While grafana-b's change is in Keycloak, grafana-x takes the host.
+	f.idp.mu.Lock()
+	f.idp.onCallbacks = func() {
+		if err := f.h.CreateInstance("grafana", "grafana-x", map[string]string{"grafana": "g.team-b.example.org"}); err != nil {
+			t.Error(err)
+		}
+	}
+	f.idp.mu.Unlock()
+	err := f.h.SetHosts("grafana-b", map[string]string{"grafana": "g.team-b.example.org"}, "alice")
+	if statusOf(err) != 409 {
+		t.Fatalf("lost race: %v", err)
+	}
+	// The callback was added, and is not removed: its host is grafana-x's.
+	if got := strings.Join(f.idp.callbacks, " | "); got != "+https://g.team-b.example.org/oauth2/callback -" {
+		t.Errorf("callbacks = %s", got)
+	}
+	if f.h.Template("grafana-b").Hosts["grafana"] != "grafana-b.example.org" {
+		t.Error("lost race changed hosts")
+	}
+	if lo := f.h.LastOp("grafana-b"); lo == nil || lo.Op != OpEnable {
+		t.Errorf("a refusal was recorded: %+v", lo)
+	}
+}
+
+func TestSetHostsConcurrentCallbacks(t *testing.T) {
+	kc := kctest.New(t)
+	idp := keycloak.New(kc.HTTP.URL, "admin", "admin")
+	f := newInstanceFixtureWith(t, nil, idp)
+	doms := &fakeDomains{}
+	doms.set(Domain{Name: "team-b.example.org", State: DomainReady})
+	f.h.SetDomainSource(doms)
+	fa := kc.AddClient(keycloak.ForwardAuthClient, nil)
+	kc.SetClientURIs(fa, []string{"https://auth.example.org/oauth2/callback"}, nil)
+	ids := []string{"grafana-b", "grafana-c", "grafana-d", "grafana-e"}
+	for i, id := range ids {
+		if err := f.h.CreateInstance("grafana", id, nil); err != nil {
+			t.Fatal(err)
+		}
+		f.h.SaveSettings(id, SettingsUpdate{Values: map[string]string{"GRAFANA_PORT": fmt.Sprint(4000 + i)}})
+		if err := f.h.Enable(id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.h.Wait()
+	var wg sync.WaitGroup
+	for _, id := range ids {
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			if err := f.h.SetHosts(id, map[string]string{"grafana": id + ".team-b.example.org"}, "alice"); err != nil {
+				t.Error(err)
+			}
+		}(id)
+	}
+	wg.Wait()
+	got := map[string]bool{}
+	for _, u := range kc.ClientByClientID(keycloak.ForwardAuthClient).RedirectURIs {
+		got[u] = true
+	}
+	for _, id := range ids {
+		if !got["https://"+id+".team-b.example.org/oauth2/callback"] {
+			t.Errorf("callback of %s lost: %v", id, got)
+		}
+	}
+	if !got["https://auth.example.org/oauth2/callback"] || len(got) != len(ids)+1 {
+		t.Errorf("callbacks = %v", got)
 	}
 }

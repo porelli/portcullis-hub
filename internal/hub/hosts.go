@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/state"
@@ -294,6 +295,17 @@ func (h *Hub) checkInstanceHostsLocked(v *templates.Template) error {
 			return statusErr(409, "hostname %s is a core hostname (the portal)", host)
 		}
 	}
+	// Every host, main or extra-domain, whatever its classification: never
+	// the main apex (above), never at or under a core host; the templates'
+	// reserved default hostnames are checked last (full hosts).
+	for _, r := range routers {
+		host := v.Hosts[r]
+		for sub := range policy.CoreSubdomains {
+			if c := sub + "." + main; host == c || strings.HasSuffix(host, "."+c) {
+				return statusErr(409, "hostname %s (host router %s) is at or under the core hostname %s", host, r, c)
+			}
+		}
+	}
 	mine := map[string]bool{}
 	for _, sub := range v.Subdomains {
 		if policy.CoreSubdomains[sub] {
@@ -349,8 +361,12 @@ func (h *Hub) checkInstanceHostsLocked(v *templates.Template) error {
 		if tt.ID == v.ID {
 			continue
 		}
-		if s := subClash(tt.Subdomains); s != "" {
-			return statusErr(409, "hostname %s.%s is the default hostname of template %s (source %s)", s, h.cfg.Domain, tt.ID, tt.Source)
+		// Compared as full hosts, so an extra-domain host such as an
+		// enrolled team-a.<main> can't take a template's team-a.<main>.
+		for _, s := range tt.Subdomains {
+			if r, ok := seen[s+"."+main]; ok {
+				return statusErr(409, "hostname %s.%s (host router %s) is the default hostname of template %s (source %s)", s, h.cfg.Domain, r, tt.ID, tt.Source)
+			}
 		}
 	}
 	return nil
@@ -435,6 +451,8 @@ type hostsChange struct {
 	cbAdd, cbRemove    []string          // portcullis-forward-auth callback URIs
 	allowed            []string          // old ∪ new hosts (untagged-client adoption)
 	oldHosts, newHosts map[string]string
+	// reapply: same hostnames, re-applied after a failed change.
+	reapply bool
 }
 
 type clientHosts struct {
@@ -467,17 +485,26 @@ func hostsDetail(old, new map[string]string) string {
 // hostname, every host router named). actor is the signed-in admin; the
 // change is audited as instance.update with the old and new hostnames.
 //
-// Order: (1) validate everything — hostnames, domains, collisions — and
-// refuse (400/409) before anything changes; (2) Keycloak: the instance's
-// clients' redirect URIs and web origins, then the portcullis-forward-auth
-// callbacks of its extra-domain hosts; a failure here undoes the Keycloak
-// steps already done and leaves the old hostnames in force (state, files
-// and policy untouched); (3) state, env, override, policy file and
-// portal-apps.json switch to the new hostnames together (the old ones
-// vanish at once); (4) an enabled instance is restarted. A failure in (4)
-// keeps the new hostnames (state is fully new) and is reported as an
-// OpError; retrying SetHosts (or Restart) reconciles. Steps (2)–(4)
-// record their outcome like a lifecycle operation (op "hosts").
+// Order, with one commit point (state saved):
+//  1. Validate everything — hostnames, domains, collisions — and refuse
+//     (400/409) before anything changes.
+//  2. Keycloak: the instance's clients' redirect URIs and web origins,
+//     then the portcullis-forward-auth callbacks of its extra-domain
+//     hosts. A failure undoes the Keycloak steps already done: the old
+//     hostnames stay fully in force.
+//  3. Under mu: re-check collisions (a lost race undoes step 2 and is a
+//     409), render env and override (a failure restores both files and
+//     undoes step 2), then record the new hostnames in state — the commit
+//     point.
+//  4. After the commit nothing is undone: the policy file and
+//     portal-apps.json are written (the old hostnames vanish at once) and
+//     an enabled instance is restarted. Any failure (state save, policy,
+//     restart) is reported as an OpError with the new hostnames in force.
+//
+// Steps 2–4 record their outcome as op "hosts". While that record is a
+// failure, SetHosts with the instance's current hostnames re-applies steps
+// 2–4 (Keycloak, files, policy, restart) instead of being a no-op, so
+// retrying the same change reconciles.
 func (h *Hub) SetHosts(instanceID string, hosts map[string]string, actor string) (err error) {
 	detail := ""
 	defer func() {
@@ -500,6 +527,9 @@ func (h *Hub) SetHosts(instanceID string, hosts map[string]string, actor string)
 	h.mu.Unlock()
 	if ch != nil {
 		detail = hostsDetail(ch.oldHosts, ch.newHosts)
+		if ch.reapply {
+			detail += " (re-applied after a failed change)"
+		}
 	}
 	if err != nil || ch == nil {
 		if err == nil {
@@ -513,25 +543,37 @@ func (h *Hub) SetHosts(instanceID string, hosts map[string]string, actor string)
 	}
 
 	h.mu.Lock()
-	view, err := h.commitHostsLocked(ch)
+	view, keep, saveErr, err := h.commitHostsLocked(ch)
 	h.mu.Unlock()
 	if err != nil {
-		h.revertKeycloakHosts(ch, len(ch.clients), true)
 		var se *StatusError
-		if errors.As(err, &se) && se.Status < 500 {
-			return err // lost a race to another change: a refusal
+		lostRace := errors.As(err, &se) && se.Status < 500
+		if lostRace {
+			log.Printf("instance %s: %v — undoing its Keycloak changes", instanceID, err)
+		}
+		h.revertKeycloakHosts(ch, len(ch.clients), true, keep)
+		if lostRace {
+			return err // a refusal, nothing changed
 		}
 		return h.finishOp(instanceID, OpHosts, err, false)
 	}
-	h.writePolicyLogged()
-	log.Printf("instance %s: %s", instanceID, detail)
 
-	var restartErr error
-	if ch.enabled {
-		restartErr = h.restartLocked(&view)
-		defer h.TriggerReconcile()
+	// Committed: from here on, report, never undo.
+	var errs []error
+	if saveErr != nil {
+		errs = append(errs, fmt.Errorf("saving state.yaml failed (the new hostnames are in force until the Hub restarts; retry the change): %w", saveErr))
 	}
-	return h.finishOp(instanceID, OpHosts, restartErr, false)
+	if perr := h.WritePolicy(); perr != nil {
+		errs = append(errs, fmt.Errorf("policy file write failed (retry the change): %w", perr))
+	}
+	log.Printf("instance %s: %s", instanceID, detail)
+	if ch.enabled {
+		defer h.TriggerReconcile()
+		if rerr := h.restartLocked(&view); rerr != nil {
+			errs = append(errs, rerr)
+		}
+	}
+	return h.finishOp(instanceID, OpHosts, errors.Join(errs...), false)
 }
 
 // planHostsLocked validates a hostname change; nil, nil = no change.
@@ -562,13 +604,19 @@ func (h *Hub) planHostsLocked(id string, hosts map[string]string) (*hostsChange,
 		return nil, err
 	}
 	view.Enabled = cur.Enabled
+	reapply := false
 	if reflect.DeepEqual(view.Hosts, cur.Hosts) {
-		return nil, nil
+		// Nothing to change, unless the last change failed part-way:
+		// then re-apply it (Keycloak, files, policy, restart).
+		if lo := h.LastOp(id); lo == nil || lo.Op != OpHosts || lo.OK {
+			return nil, nil
+		}
+		reapply = true
 	}
 	if err := h.checkInstanceHostsLocked(&view); err != nil {
 		return nil, err
 	}
-	ch := &hostsChange{id: id, old: *cur, new: view, enabled: h.st.IsEnabled(id),
+	ch := &hostsChange{id: id, old: *cur, new: view, enabled: h.st.IsEnabled(id), reapply: reapply,
 		toNew: map[string]string{}, toOld: map[string]string{},
 		oldHosts: copyMap(cur.Hosts), newHosts: copyMap(view.Hosts)}
 	allowed := map[string]bool{}
@@ -590,8 +638,12 @@ func (h *Hub) planHostsLocked(id string, hosts map[string]string) (*hostsChange,
 	oldCB, newCB := callbackURIs(h.signInExtraHostsLocked(cur)), callbackURIs(h.signInExtraHostsLocked(&view))
 	ch.cbRemove = minus(oldCB, newCB)
 	if ch.enabled {
-		// Callbacks exist while the instance runs (added on enable).
+		// Callbacks exist while the instance runs (added on enable); a
+		// re-apply makes sure every current one is there.
 		ch.cbAdd = minus(newCB, oldCB)
+		if reapply {
+			ch.cbAdd = newCB
+		}
 	}
 	return ch, nil
 }
@@ -622,7 +674,7 @@ func (h *Hub) applyKeycloakHosts(ch *hostsChange) error {
 			continue
 		}
 		if err != nil {
-			h.revertKeycloakHosts(ch, i, false)
+			h.revertKeycloakHosts(ch, i, false, nil)
 			status := 502
 			var conflict *keycloak.ConflictError
 			if errors.As(err, &conflict) {
@@ -632,21 +684,29 @@ func (h *Hub) applyKeycloakHosts(ch *hostsChange) error {
 		}
 	}
 	if err := h.idp.UpdateForwardAuthCallbacks(ctx, ch.cbAdd, ch.cbRemove); err != nil {
-		h.revertKeycloakHosts(ch, len(ch.clients), false)
+		h.revertKeycloakHosts(ch, len(ch.clients), false, nil)
 		return &StatusError{Status: 502, Err: fmt.Errorf("Keycloak client %s callbacks: %w — nothing changed, the old hostnames stay in force", keycloak.ForwardAuthClient, err)}
 	}
 	return nil
 }
 
 // revertKeycloakHosts moves the first n clients (and, if callbacks, the
-// forward-auth callbacks) back to the old hostnames, best effort.
-func (h *Hub) revertKeycloakHosts(ch *hostsChange, n int, callbacks bool) {
+// forward-auth callbacks) back to the old hostnames, best effort. keep
+// holds callback URIs not to remove (their host now belongs to another
+// instance).
+func (h *Hub) revertKeycloakHosts(ch *hostsChange, n int, callbacks bool, keep map[string]bool) {
 	if h.idp == nil {
 		return
 	}
 	ctx := context.Background()
 	if callbacks {
-		if err := h.idp.UpdateForwardAuthCallbacks(ctx, ch.cbRemove, ch.cbAdd); err != nil {
+		var drop []string
+		for _, u := range ch.cbAdd {
+			if !keep[u] {
+				drop = append(drop, u)
+			}
+		}
+		if err := h.idp.UpdateForwardAuthCallbacks(ctx, ch.cbRemove, drop); err != nil {
 			log.Printf("instance %s: undoing the %s callback change failed (retry the hostname change): %v", ch.id, keycloak.ForwardAuthClient, err)
 		}
 	}
@@ -658,25 +718,51 @@ func (h *Hub) revertKeycloakHosts(ch *hostsChange, n int, callbacks bool) {
 	}
 }
 
-// commitHostsLocked records the new hostnames and rewrites the instance's
-// files, after re-checking collisions (another instance may have taken a
-// host since planning). Returns the new view. Caller must hold mu (write).
-func (h *Hub) commitHostsLocked(ch *hostsChange) (templates.Template, error) {
+// commitHostsLocked re-checks the change (another instance may have taken
+// a host since planning), renders the instance's env and override for the
+// new hostnames (a failure restores both files) and then records the new
+// hostnames in state — the commit point. It returns the new view; keep
+// (on a lost race) holds the callback URIs whose host another instance
+// now holds; saveErr is a failed state.yaml write after the commit; err
+// means nothing was committed. Caller must hold mu (write).
+func (h *Hub) commitHostsLocked(ch *hostsChange) (view templates.Template, keep map[string]bool, saveErr, err error) {
 	cur := h.findLocked(ch.id)
 	t := (*templates.Template)(nil)
 	if cur != nil {
 		t = h.catalogLocked(cur.TemplateID)
 	}
 	if t == nil {
-		return templates.Template{}, statusErr(409, "instance %s changed meanwhile: retry", ch.id)
+		return view, nil, nil, statusErr(409, "instance %s changed meanwhile: retry", ch.id)
 	}
-	view, err := h.resolveHostsLocked(t, ch.id, ch.newHosts, ch.oldHosts)
+	if view, err = h.resolveHostsLocked(t, ch.id, ch.newHosts, ch.oldHosts); err == nil {
+		err = h.checkInstanceHostsLocked(&view)
+	}
 	if err != nil {
-		return templates.Template{}, err
+		keep = map[string]bool{}
+		for _, host := range ch.new.ExtraHosts {
+			if h.hostHeldByOtherLocked(host, ch.id) {
+				keep[keycloak.CallbackURI(host)] = true
+			}
+		}
+		return view, keep, nil, err
 	}
-	if err := h.checkInstanceHostsLocked(&view); err != nil {
-		return templates.Template{}, err
+	view.Enabled = cur.Enabled
+
+	// Files first, restorable: nothing is committed if they fail.
+	envPath, ovPath := h.envPath(ch.id), h.overridePath(ch.id)
+	restore := backupFiles(envPath, ovPath)
+	ferr := h.refreshInstanceEnvLocked(&view)
+	if ferr == nil && fileExists(ovPath) {
+		ferr = h.generateOverrideLocked(&view, h.st.Settings[ch.id])
 	}
+	if ferr != nil {
+		if rerr := restore(); rerr != nil {
+			log.Printf("instance %s: restoring env/override after a failed rewrite: %v", ch.id, rerr)
+		}
+		return view, nil, nil, statusErr500Wrap("env/override rewrite failed — nothing changed, the old hostnames stay in force", ferr)
+	}
+
+	// Commit.
 	e, ok := h.st.Instances[ch.id]
 	if !ok {
 		e = state.Instance{ID: ch.id, Template: t.ID}
@@ -689,21 +775,69 @@ func (h *Hub) commitHostsLocked(ch *hostsChange) (templates.Template, error) {
 	}
 	h.rebuildLocked()
 	h.refreshPublishedLocked()
-	h.saveLocked()
-	nv := h.findLocked(ch.id)
-	if nv == nil {
-		return templates.Template{}, statusErr(500, "instance %s has no view after the change", ch.id)
+	saveErr = h.st.Save(h.statePath())
+	if saveErr != nil {
+		log.Printf("ERROR: save state: %v", saveErr)
 	}
-	view = *nv
-	if err := h.refreshInstanceEnvLocked(&view); err != nil {
-		return view, statusErr500Wrap("env rewrite failed (retry the change)", err)
+	if nv := h.findLocked(ch.id); nv != nil {
+		view = *nv
 	}
-	if fileExists(h.overridePath(ch.id)) {
-		if err := h.generateOverrideLocked(&view, h.st.Settings[ch.id]); err != nil {
-			return view, statusErr500Wrap("override rewrite failed (retry the change)", err)
+	return view, nil, saveErr, nil
+}
+
+// hostHeldByOtherLocked reports whether an instance other than id has
+// host. Caller must hold mu.
+func (h *Hub) hostHeldByOtherLocked(host, id string) bool {
+	for i := range h.instances {
+		if h.instances[i].ID == id {
+			continue
+		}
+		for _, oh := range h.instances[i].Hosts {
+			if oh == host {
+				return true
+			}
 		}
 	}
-	return view, nil
+	for oid, e := range h.st.Instances {
+		if oid == id {
+			continue
+		}
+		for _, oh := range e.Hosts {
+			if NormalizeHost(oh) == host {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// backupFiles snapshots paths; the returned func puts them back (a file
+// that didn't exist is removed).
+func backupFiles(paths ...string) func() error {
+	type saved struct {
+		data []byte
+		ok   bool
+	}
+	old := make([]saved, len(paths))
+	for i, p := range paths {
+		if b, err := os.ReadFile(p); err == nil {
+			old[i] = saved{b, true}
+		}
+	}
+	return func() error {
+		var errs []error
+		for i, p := range paths {
+			if old[i].ok {
+				if cur, err := os.ReadFile(p); err == nil && string(cur) == string(old[i].data) {
+					continue
+				}
+				errs = append(errs, fsutil.WriteFileAtomic(p, old[i].data, 0600))
+			} else if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+				errs = append(errs, err)
+			}
+		}
+		return errors.Join(errs...)
+	}
 }
 
 func fileExists(p string) bool {

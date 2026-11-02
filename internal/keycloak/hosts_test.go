@@ -3,7 +3,10 @@ package keycloak_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/portcullis/hub/internal/keycloak"
@@ -57,5 +60,36 @@ func TestUpdateForwardAuthCallbacks(t *testing.T) {
 	}
 	if got := strings.Join(kc.ClientByClientID(keycloak.ForwardAuthClient).RedirectURIs, ","); got != "https://auth.example.org/oauth2/callback,https://g.team.org/oauth2/callback" {
 		t.Errorf("callbacks = %s", got)
+	}
+}
+
+func TestForwardAuthCallbacksConcurrent(t *testing.T) {
+	ctx := context.Background()
+	kc := kctest.New(t)
+	c := keycloak.New(kc.HTTP.URL, "admin", "admin")
+	id := kc.AddClient(keycloak.ForwardAuthClient, nil)
+	kc.SetClientURIs(id, []string{"https://auth.example.org/oauth2/callback"}, nil)
+	var wg sync.WaitGroup
+	want := []string{"https://auth.example.org/oauth2/callback"}
+	for i := 0; i < 2; i++ {
+		for j := 0; j < 10; j++ {
+			want = append(want, keycloak.CallbackURI(fmt.Sprintf("h%d-%d.team.org", i, j)))
+		}
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			for j := 0; j < 10; j++ {
+				if err := c.UpdateForwardAuthCallbacks(ctx, []string{keycloak.CallbackURI(fmt.Sprintf("h%d-%d.team.org", i, j))}, nil); err != nil {
+					t.Error(err)
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
+	got := kc.ClientByClientID(keycloak.ForwardAuthClient).RedirectURIs
+	sort.Strings(got)
+	sort.Strings(want)
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("lost updates:\n got %v\nwant %v", got, want)
 	}
 }

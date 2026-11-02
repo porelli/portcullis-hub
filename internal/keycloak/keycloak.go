@@ -75,6 +75,11 @@ type Client struct {
 
 	once sync.Once
 	gc   *gocloak.GoCloak
+	// faMu serialises read-modify-writes of ForwardAuthClient's redirect
+	// URIs: every instance's callbacks live in that one client, so two
+	// concurrent updates (SetHosts, Enable, Disable, Delete of different
+	// instances) must not lose each other's entries.
+	faMu sync.Mutex
 }
 
 // New returns a client with a 20s per-request timeout.
@@ -579,7 +584,9 @@ var callbackRe = regexp.MustCompile(`^https://([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])
 // UpdateForwardAuthCallbacks adds and removes extra-domain callback URIs
 // (https://<host>/oauth2/callback, exact) on ForwardAuthClient (contract
 // §5 "Callback redirect URIs"). Nothing else on that client is touched;
-// URIs of any other form are refused. Nothing to do = no call.
+// URIs of any other form are refused. Nothing to do = no call. The whole
+// read-modify-write holds c's forward-auth lock: share one Client between
+// all callers (the Hub does).
 func (c *Client) UpdateForwardAuthCallbacks(ctx context.Context, add, remove []string) error {
 	if len(add) == 0 && len(remove) == 0 {
 		return nil
@@ -589,6 +596,8 @@ func (c *Client) UpdateForwardAuthCallbacks(ctx context.Context, add, remove []s
 			return fmt.Errorf("%s: %q is not an extra-domain callback URI", ForwardAuthClient, u)
 		}
 	}
+	c.faMu.Lock()
+	defer c.faMu.Unlock()
 	tok, err := c.token(ctx)
 	if err != nil {
 		return err
