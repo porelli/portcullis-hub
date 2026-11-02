@@ -3,7 +3,8 @@
 // GET /users lists only imported users; an exact username search imports
 // the user if Importable says LDAP has them. It also keeps components (one
 // LDAP provider plus its mappers), client scopes with protocol mappers, and
-// clients with their default client scopes.
+// clients (create, update, redirect URIs, web origins) with their default
+// client scopes.
 package kctest
 
 import (
@@ -77,6 +78,10 @@ type Client struct {
 	Attributes           map[string]string `json:"attributes"`
 	DefaultClientScopes  []string          `json:"defaultClientScopes"`
 	OptionalClientScopes []string          `json:"optionalClientScopes"`
+	Name                 string            `json:"name,omitempty"`
+	Secret               string            `json:"secret,omitempty"`
+	RedirectURIs         []string          `json:"redirectUris"`
+	WebOrigins           []string          `json:"webOrigins"`
 }
 
 // Server is the fake.
@@ -188,6 +193,38 @@ func (s *Server) AddClient(clientID string, attrs map[string]string, scopes ...s
 	}
 	s.Clients[id] = &Client{ID: id, ClientID: clientID, Attributes: attrs, DefaultClientScopes: append([]string{}, scopes...)}
 	return id
+}
+
+// ClientByClientID returns a copy of the client with that clientId (nil:
+// none).
+func (s *Server) ClientByClientID(clientID string) *Client {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, c := range s.Clients {
+		if c.ClientID == clientID {
+			cp := *c
+			cp.RedirectURIs = append([]string(nil), c.RedirectURIs...)
+			cp.WebOrigins = append([]string(nil), c.WebOrigins...)
+			return &cp
+		}
+	}
+	return nil
+}
+
+// SetClientURIs sets a client's redirect URIs and web origins.
+func (s *Server) SetClientURIs(id string, redirects, origins []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if c := s.Clients[id]; c != nil {
+		c.RedirectURIs, c.WebOrigins = append([]string(nil), redirects...), append([]string(nil), origins...)
+	}
+}
+
+// SetFailPrefix sets FailPrefix under the fake's lock.
+func (s *Server) SetFailPrefix(p string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.FailPrefix = p
 }
 
 // SetOptionalScopes sets a client's optional client scope names.
@@ -577,6 +614,53 @@ func (s *Server) serveClients(w http.ResponseWriter, r *http.Request) {
 		}
 		sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 		json.NewEncoder(w).Encode(out)
+	case rest == "" && r.Method == "POST":
+		var c Client
+		if err := json.NewDecoder(r.Body).Decode(&c); err != nil || c.ClientID == "" {
+			w.WriteHeader(400)
+			return
+		}
+		for _, o := range s.Clients {
+			if o.ClientID == c.ClientID {
+				w.WriteHeader(409)
+				return
+			}
+		}
+		// Keycloak silently drops scope names the realm doesn't have.
+		known := map[string]bool{}
+		for _, sc := range s.Scopes {
+			known[sc.Name] = true
+		}
+		scopes := []string{}
+		for _, n := range c.DefaultClientScopes {
+			if known[n] {
+				scopes = append(scopes, n)
+			}
+		}
+		c.ID, c.DefaultClientScopes, c.OptionalClientScopes = s.newID("client"), scopes, nil
+		if c.Attributes == nil {
+			c.Attributes = map[string]string{}
+		}
+		s.Clients[c.ID] = &c
+		created(w, r, c.ID)
+	case len(parts) == 1 && r.Method == "PUT":
+		old := s.Clients[parts[0]]
+		if old == nil {
+			http.NotFound(w, r)
+			return
+		}
+		var c Client
+		if err := json.NewDecoder(r.Body).Decode(&c); err != nil || c.ClientID != old.ClientID {
+			w.WriteHeader(400)
+			return
+		}
+		// A client PUT ignores the scope lists (sub-resources do those).
+		c.ID, c.DefaultClientScopes, c.OptionalClientScopes = old.ID, old.DefaultClientScopes, old.OptionalClientScopes
+		if c.Attributes == nil {
+			c.Attributes = map[string]string{}
+		}
+		s.Clients[c.ID] = &c
+		w.WriteHeader(204)
 	case len(parts) == 3 && parts[1] == "default-client-scopes" && r.Method == "PUT":
 		c, sc := s.Clients[parts[0]], s.Scopes[parts[2]]
 		if c == nil || sc == nil {

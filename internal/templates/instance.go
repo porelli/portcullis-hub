@@ -122,12 +122,31 @@ func (t *Template) NamesFor(id string) InstanceNames {
 	return n
 }
 
+// HostnameRe is a valid hostname (contract §4): lowercase, at least two
+// labels, no port, no trailing dot, no wildcard; also at most 253
+// characters (ValidHostname).
+var HostnameRe = regexp.MustCompile(`^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+
+// ValidHostname reports whether h is a valid hostname (contract §4).
+func ValidHostname(h string) bool { return len(h) <= 253 && HostnameRe.MatchString(h) }
+
+// ValidLabel reports whether s is a single DNS label.
+func ValidLabel(s string) bool { return dnsLabelRe.MatchString(s) }
+
 // Instance returns the view of instance id of this template, with hosts
 // (host router → full hostname; nil = the defaults on domain) resolved:
 // subdomains, public plan, URLs, Keycloak clients, groups and instance
-// variables. Hostnames must be <label>.<domain> (the policy file keys by
-// subdomain).
+// variables. Hostnames must be <label>.<domain>.
 func (t *Template) Instance(id string, hosts map[string]string, domain string) (Template, error) {
+	return t.InstanceOn(id, hosts, domain, nil)
+}
+
+// InstanceOn is Instance where extra(host) reports the hosts that lie on
+// an enrolled domain (extra-domain hosts, contract §5): those need only
+// be valid hostnames (the caller checks the domain rules, §11.3), are
+// listed in ExtraHosts and have no subdomain. Every other host must be
+// <label>.<domain>.
+func (t *Template) InstanceOn(id string, hosts map[string]string, domain string, extra func(host string) bool) (Template, error) {
 	tid := t.TemplateID
 	if tid == "" {
 		tid = t.ID
@@ -137,13 +156,22 @@ func (t *Template) Instance(id string, hosts map[string]string, domain string) (
 	}
 	raw := t.rawManifest()
 	c := *t
-	c.ID, c.TemplateID, c.Instances, c.raw = id, tid, nil, raw
+	c.ID, c.TemplateID, c.Instances, c.raw, c.ExtraHosts = id, tid, nil, raw, nil
 	c.Hosts = make(map[string]string, len(hosts))
 	subMap := map[string]string{} // default subdomain → instance's
 	for r, sub := range t.HostRouters {
 		h := strings.ToLower(hosts[r])
 		if h == "" {
 			return c, fmt.Errorf("instance %s: no hostname for host router %s", id, r)
+		}
+		if extra != nil && extra(h) {
+			if !ValidHostname(h) {
+				return c, fmt.Errorf("instance %s: hostname %s of host router %s is not a valid hostname", id, h, r)
+			}
+			c.Hosts[r] = h
+			c.ExtraHosts = append(c.ExtraHosts, h)
+			subMap[sub] = "" // no subdomain: keyed by host only
+			continue
 		}
 		label, ok := strings.CutSuffix(h, "."+strings.ToLower(domain))
 		if !ok || !dnsLabelRe.MatchString(label) {
@@ -163,16 +191,21 @@ func (t *Template) Instance(id string, hosts map[string]string, domain string) (
 		}
 		return s
 	}
+	sort.Strings(c.ExtraHosts)
 	c.Subdomains = nil
 	for _, s := range t.Subdomains {
-		c.Subdomains = append(c.Subdomains, mapSub(s))
+		if v := mapSub(s); v != "" {
+			c.Subdomains = append(c.Subdomains, v)
+		}
 	}
 	sort.Strings(c.Subdomains)
 	if t.Public != nil {
 		p := *t.Public
 		p.Subdomains = nil
 		for _, s := range t.Public.Subdomains {
-			p.Subdomains = append(p.Subdomains, mapSub(s))
+			if v := mapSub(s); v != "" {
+				p.Subdomains = append(p.Subdomains, v)
+			}
 		}
 		c.Public = &p
 	}

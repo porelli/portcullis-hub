@@ -1,0 +1,712 @@
+package hub
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log"
+	"os"
+	"reflect"
+	"sort"
+	"strings"
+
+	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/keycloak"
+	"github.com/portcullis/hub/internal/policy"
+	"github.com/portcullis/hub/internal/state"
+	"github.com/portcullis/hub/internal/templates"
+)
+
+// Instance hostnames (contract §11.3): defaults, validation against the
+// main domain and the enrolled domains, collisions, and the live change
+// (SetHosts).
+
+// Domain is a domain instances may get hostnames on: the main domain or an
+// enrolled one (contract §12). State DomainReady = assignable (§12.3).
+type Domain struct {
+	Name  string
+	State string
+}
+
+// DomainReady is the state of an assignable domain (records OK, valid
+// certificate, §12.3).
+const DomainReady = "ready"
+
+// DomainSource lists the known domains. Every entry other than the main
+// domain is an enrolled domain: a host at or under one is an extra-domain
+// host (§5). Domains is called under the Hub's lock: it must return a
+// cached list (no network calls). Task 7's domains client provides it;
+// until then only the main domain exists.
+type DomainSource interface {
+	Domains() []Domain
+}
+
+// mainDomainOnly is the DomainSource with no enrolled domain.
+type mainDomainOnly struct{ name string }
+
+func (m mainDomainOnly) Domains() []Domain { return []Domain{{Name: m.name, State: DomainReady}} }
+
+// SetDomainSource replaces the domain list (call before serving).
+func (h *Hub) SetDomainSource(ds DomainSource) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if ds == nil {
+		ds = mainDomainOnly{h.cfg.Domain}
+	}
+	h.domains = ds
+	h.rebuildLocked()
+}
+
+// Auditor appends audit entries (the Hub's audit.jsonl, contract §9.5).
+type Auditor interface {
+	Append(e directory.AuditEntry) error
+}
+
+// SetAudit sets where instance operations are audited (§11.7).
+func (h *Hub) SetAudit(a Auditor) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.audit = a
+}
+
+// auditOp records an instance operation; Result from err as the API does
+// (a 4xx StatusError is "refused").
+func (h *Hub) auditOp(actor, action, target, detail string, err error) {
+	h.mu.RLock()
+	a := h.audit
+	h.mu.RUnlock()
+	if a == nil {
+		return
+	}
+	e := directory.AuditEntry{Actor: actor, Action: action, Target: target, Detail: detail, Result: "ok"}
+	if err != nil {
+		e.Result, e.Error = "error", err.Error()
+		var se *StatusError
+		if errors.As(err, &se) && se.Status < 500 {
+			e.Result = "refused"
+		}
+	}
+	if aerr := a.Append(e); aerr != nil {
+		log.Printf("audit: %v", aerr)
+	}
+}
+
+// NormalizeHost lowercases a hostname and drops surrounding space and one
+// trailing dot. Anything else (a port, a scheme) stays and fails
+// validation.
+func NormalizeHost(s string) string {
+	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(s)), ".")
+}
+
+// enrolledLocked returns the enrolled domains (every known domain except
+// the main one), normalised. Caller must hold mu.
+func (h *Hub) enrolledLocked() []Domain {
+	main := strings.ToLower(h.cfg.Domain)
+	var out []Domain
+	if h.domains == nil {
+		return nil
+	}
+	for _, d := range h.domains.Domains() {
+		n := NormalizeHost(d.Name)
+		if n == main || !templates.ValidHostname(n) {
+			continue
+		}
+		out = append(out, Domain{Name: n, State: d.State})
+	}
+	return out
+}
+
+// extraDomainOf returns the enrolled domain host is at or under.
+func extraDomainOf(host string, enrolled []Domain) (Domain, bool) {
+	for _, d := range enrolled {
+		if host == d.Name || strings.HasSuffix(host, "."+d.Name) {
+			return d, true
+		}
+	}
+	return Domain{}, false
+}
+
+// extraFunc reports the extra-domain hosts (at or under any enrolled
+// domain, assignable or not).
+func extraFunc(enrolled []Domain) func(string) bool {
+	if len(enrolled) == 0 {
+		return nil
+	}
+	return func(host string) bool {
+		_, ok := extraDomainOf(host, enrolled)
+		return ok
+	}
+}
+
+// placeHost checks host (normalised) against §11.3 "Valid hostnames": a
+// valid hostname that is an assignable enrolled domain <d> or <label>.<d>,
+// or, at or under no enrolled domain, <label>.<main domain>. keep: the
+// instance already has this host (a domain that stopped being assignable
+// keeps its hostnames, §12.3).
+func placeHost(router, host, main string, enrolled []Domain, keep bool) error {
+	if host == main {
+		return statusErr(409, "hostname %s is a core hostname (the portal)", host)
+	}
+	if !templates.ValidHostname(host) {
+		return statusErr(400, "hostname %q (host router %s) is not a valid hostname (lowercase labels, no scheme, port or wildcard, at most 253 characters)", host, router)
+	}
+	if d, ok := extraDomainOf(host, enrolled); ok {
+		if rest := strings.TrimSuffix(strings.TrimSuffix(host, d.Name), "."); rest != "" && !templates.ValidLabel(rest) {
+			return statusErr(400, "hostname %s (host router %s): only %s or <label>.%s — the domain's certificate covers one label", host, router, d.Name, d.Name)
+		}
+		if d.State != DomainReady && !keep {
+			return statusErr(409, "hostname %s (host router %s): domain %s is not assignable yet (state %q: its records or certificate are not ready)", host, router, d.Name, d.State)
+		}
+		return nil
+	}
+	label, ok := strings.CutSuffix(host, "."+main)
+	if !ok {
+		return statusErr(400, "hostname %s (host router %s) is neither <label>.%s nor on an enrolled domain", host, router, main)
+	}
+	if !templates.ValidLabel(label) {
+		return statusErr(400, "hostname %s (host router %s): only <label>.%s — deeper names need an enrolled domain", host, router, main)
+	}
+	return nil
+}
+
+// instanceSuffix is the id without a leading "<template>-" (§11.3).
+func instanceSuffix(templateID, id string) string {
+	if s, ok := strings.CutPrefix(id, templateID+"-"); ok && s != "" {
+		return s
+	}
+	return id
+}
+
+// defaultHost is the pre-filled hostname <sub>-<suffix>.<domain> (§11.3),
+// the suffix truncated so the label fits 63 characters (a trailing "-"
+// dropped); false if there's no room or the result isn't a valid hostname.
+func defaultHost(sub, suffix, domain string) (string, bool) {
+	if max := 63 - len(sub) - 1; len(suffix) > max {
+		if max < 1 {
+			return "", false
+		}
+		suffix = strings.TrimRight(suffix[:max], "-")
+		if suffix == "" {
+			return "", false
+		}
+	}
+	h := sub + "-" + suffix + "." + strings.ToLower(domain)
+	return h, templates.ValidHostname(h)
+}
+
+// defaultHostsFor are a new instance's pre-filled hostnames on domain
+// (§11.3). A host router without a valid default is an error naming it.
+func defaultHostsFor(t *templates.Template, id, domain string) (map[string]string, error) {
+	suffix := instanceSuffix(t.TemplateID, id)
+	out := map[string]string{}
+	for r, sub := range t.HostRouters {
+		h, ok := defaultHost(sub, suffix, domain)
+		if !ok {
+			return nil, statusErr(400, "host router %s: no valid default hostname for %s-%s.%s — give an explicit hostname", r, sub, suffix, domain)
+		}
+		out[r] = h
+	}
+	return out, nil
+}
+
+// DefaultHosts are instance instanceID's pre-filled hostnames on domain
+// ("" = the main domain): each host router's default subdomain plus
+// "-<suffix>" (§11.3), or the default subdomains themselves for the
+// default instance. Host routers with no valid default are left out (the
+// admin must give one); nil for an unknown template.
+func (h *Hub) DefaultHosts(templateID, instanceID, domain string) map[string]string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	t := h.catalogLocked(templateID)
+	if t == nil {
+		return nil
+	}
+	if domain == "" {
+		domain = h.cfg.Domain
+	}
+	domain = NormalizeHost(domain)
+	if instanceID == templateID {
+		return t.DefaultHosts(domain)
+	}
+	suffix := instanceSuffix(t.TemplateID, instanceID)
+	out := map[string]string{}
+	for r, sub := range t.HostRouters {
+		if host, ok := defaultHost(sub, suffix, domain); ok {
+			out[r] = host
+		}
+	}
+	return out
+}
+
+// resolveHostsLocked normalises hosts, checks each against the domain
+// rules (placeHost; current: the instance's hosts now) and returns the
+// instance view of t for id with them. Caller must hold mu.
+func (h *Hub) resolveHostsLocked(t *templates.Template, id string, hosts, current map[string]string) (templates.Template, error) {
+	enrolled := h.enrolledLocked()
+	main := strings.ToLower(h.cfg.Domain)
+	norm := make(map[string]string, len(hosts))
+	routers := make([]string, 0, len(hosts))
+	for r := range hosts {
+		routers = append(routers, r)
+	}
+	sort.Strings(routers)
+	for _, r := range routers {
+		if _, ok := t.HostRouters[r]; !ok {
+			return templates.Template{}, statusErr(400, "%s is not a host router of template %s", r, t.TemplateID)
+		}
+		host := NormalizeHost(hosts[r])
+		keep := false
+		for _, c := range current {
+			keep = keep || c == host
+		}
+		if err := placeHost(r, host, main, enrolled, keep); err != nil {
+			return templates.Template{}, err
+		}
+		norm[r] = host
+	}
+	view, err := t.InstanceOn(id, norm, h.cfg.Domain, extraFunc(enrolled))
+	if err != nil {
+		return templates.Template{}, statusErr(400, "%v", err)
+	}
+	return view, nil
+}
+
+// checkInstanceHostsLocked refuses (409) hostnames used twice by the
+// instance, a core host, or a hostname held by any other instance (enabled
+// or not, its template resolvable or not), by the published snapshot of a
+// default instance whose template is missing, or that is the default
+// hostname of any other template of any source. Caller must hold mu.
+func (h *Hub) checkInstanceHostsLocked(v *templates.Template) error {
+	main := strings.ToLower(h.cfg.Domain)
+	seen := map[string]string{}
+	routers := make([]string, 0, len(v.Hosts))
+	for r := range v.Hosts {
+		routers = append(routers, r)
+	}
+	sort.Strings(routers)
+	for _, r := range routers {
+		host := v.Hosts[r]
+		if o, ok := seen[host]; ok {
+			return statusErr(409, "hostname %s is used by host routers %s and %s", host, o, r)
+		}
+		seen[host] = r
+		if host == main {
+			return statusErr(409, "hostname %s is a core hostname (the portal)", host)
+		}
+	}
+	mine := map[string]bool{}
+	for _, sub := range v.Subdomains {
+		if policy.CoreSubdomains[sub] {
+			return statusErr(409, "hostname %s.%s is a core hostname", sub, h.cfg.Domain)
+		}
+		mine[sub] = true
+	}
+	subClash := func(subs []string) string {
+		for _, s := range subs {
+			if mine[s] {
+				return s
+			}
+		}
+		return ""
+	}
+	for i := range h.instances {
+		o := &h.instances[i]
+		if o.ID == v.ID {
+			continue
+		}
+		for _, oh := range o.Hosts {
+			if r, ok := seen[oh]; ok {
+				return statusErr(409, "hostname %s (host router %s) is already used by instance %s", oh, r, o.ID)
+			}
+		}
+		if s := subClash(o.Subdomains); s != "" {
+			return statusErr(409, "hostname %s.%s is already routed by instance %s", s, h.cfg.Domain, o.ID)
+		}
+	}
+	// Instances without a view (template missing, hosts no longer fit)
+	// keep their hostnames: their containers may still route them.
+	for id, e := range h.st.Instances {
+		if id == v.ID || h.findLocked(id) != nil {
+			continue
+		}
+		for _, oh := range e.Hosts {
+			if r, ok := seen[NormalizeHost(oh)]; ok {
+				return statusErr(409, "hostname %s (host router %s) is held by instance %s (its template is missing or broken)", oh, r, id)
+			}
+		}
+	}
+	for id, snap := range h.st.Published {
+		if id == v.ID || h.findLocked(id) != nil {
+			continue
+		}
+		if s := subClash(append(append([]string{}, snap.Subdomains...), snap.PublicSubdomains...)); s != "" {
+			return statusErr(409, "hostname %s.%s is still published for instance %s (its template is missing)", s, h.cfg.Domain, id)
+		}
+	}
+	// Templates from other sources and skipped duplicates route their
+	// default hostnames too, should they ever be enabled.
+	for _, tt := range h.allTemplates {
+		if tt.ID == v.ID {
+			continue
+		}
+		if s := subClash(tt.Subdomains); s != "" {
+			return statusErr(409, "hostname %s.%s is the default hostname of template %s (source %s)", s, h.cfg.Domain, tt.ID, tt.Source)
+		}
+	}
+	return nil
+}
+
+// signInExtraHostsLocked are t's extra-domain hosts that get a sign-in
+// router (§5): those a router uses portcullis-auth on, as rendered (the
+// native_login prepend included). Caller must hold mu.
+func (h *Hub) signInExtraHostsLocked(t *templates.Template) []string {
+	if len(t.ExtraHosts) == 0 {
+		return nil
+	}
+	extra := map[string]bool{}
+	for _, x := range t.ExtraHosts {
+		extra[x] = true
+	}
+	rl, err := h.routeLabelsLocked(t)
+	if err != nil {
+		// Unknown routing: keep every extra host's callback (an unused
+		// callback URI opens nothing).
+		return append([]string(nil), t.ExtraHosts...)
+	}
+	set := map[string]bool{}
+	for name, ri := range rl.routes.Info {
+		mws := ri.Middlewares
+		if m, ok := rl.middlewares[name]; ok {
+			mws = strings.Split(m, ",")
+		}
+		uses := false
+		for _, m := range mws {
+			uses = uses || strings.TrimSpace(m) == gatewayMiddlewares[0]
+		}
+		if !uses {
+			continue
+		}
+		for _, hv := range ri.HostVars {
+			if host := t.InstanceEnv[hv]; extra[host] {
+				set[host] = true
+			}
+		}
+	}
+	out := make([]string, 0, len(set))
+	for host := range set {
+		out = append(out, host)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func callbackURIs(hosts []string) []string {
+	out := make([]string, 0, len(hosts))
+	for _, host := range hosts {
+		out = append(out, keycloak.CallbackURI(host))
+	}
+	return out
+}
+
+// minus returns the entries of a not in b.
+func minus(a, b []string) []string {
+	drop := map[string]bool{}
+	for _, x := range b {
+		drop[x] = true
+	}
+	var out []string
+	for _, x := range a {
+		if !drop[x] {
+			out = append(out, x)
+		}
+	}
+	return out
+}
+
+// hostsChange is a validated hostname change, computed under mu and
+// applied without it.
+type hostsChange struct {
+	id       string
+	old, new templates.Template
+	enabled  bool
+	// clients: per manifest client, the redirect URIs before and after.
+	clients            []clientHosts
+	toNew, toOld       map[string]string // host → host, per host router
+	cbAdd, cbRemove    []string          // portcullis-forward-auth callback URIs
+	allowed            []string          // old ∪ new hosts (untagged-client adoption)
+	oldHosts, newHosts map[string]string
+}
+
+type clientHosts struct {
+	clientID         string
+	oldURIs, newURIs []string
+}
+
+// hostsDetail renders a change for the audit log: "r: old -> new, ...".
+func hostsDetail(old, new map[string]string) string {
+	keys := map[string]bool{}
+	for r := range old {
+		keys[r] = true
+	}
+	for r := range new {
+		keys[r] = true
+	}
+	rs := make([]string, 0, len(keys))
+	for r := range keys {
+		rs = append(rs, r)
+	}
+	sort.Strings(rs)
+	parts := make([]string, 0, len(rs))
+	for _, r := range rs {
+		parts = append(parts, fmt.Sprintf("%s: %s -> %s", r, old[r], new[r]))
+	}
+	return "hosts " + strings.Join(parts, ", ")
+}
+
+// SetHosts changes an instance's hostnames (contract §11.3; host router →
+// hostname, every host router named). actor is the signed-in admin; the
+// change is audited as instance.update with the old and new hostnames.
+//
+// Order: (1) validate everything — hostnames, domains, collisions — and
+// refuse (400/409) before anything changes; (2) Keycloak: the instance's
+// clients' redirect URIs and web origins, then the portcullis-forward-auth
+// callbacks of its extra-domain hosts; a failure here undoes the Keycloak
+// steps already done and leaves the old hostnames in force (state, files
+// and policy untouched); (3) state, env, override, policy file and
+// portal-apps.json switch to the new hostnames together (the old ones
+// vanish at once); (4) an enabled instance is restarted. A failure in (4)
+// keeps the new hostnames (state is fully new) and is reported as an
+// OpError; retrying SetHosts (or Restart) reconciles. Steps (2)–(4)
+// record their outcome like a lifecycle operation (op "hosts").
+func (h *Hub) SetHosts(instanceID string, hosts map[string]string, actor string) (err error) {
+	detail := ""
+	defer func() {
+		var busy ErrBusy
+		if !errors.As(err, &busy) {
+			h.auditOp(actor, "instance.update", instanceID, detail, err)
+		}
+	}()
+	if strings.TrimSpace(actor) == "" {
+		return statusErr(400, "no signed-in user to audit the change as")
+	}
+	unlock, err := h.lockApp(instanceID)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
+	h.mu.Lock()
+	ch, err := h.planHostsLocked(instanceID, hosts)
+	h.mu.Unlock()
+	if ch != nil {
+		detail = hostsDetail(ch.oldHosts, ch.newHosts)
+	}
+	if err != nil || ch == nil {
+		if err == nil {
+			detail = "hosts unchanged"
+		}
+		return err
+	}
+
+	if err := h.applyKeycloakHosts(ch); err != nil {
+		return h.finishOp(instanceID, OpHosts, err, false)
+	}
+
+	h.mu.Lock()
+	view, err := h.commitHostsLocked(ch)
+	h.mu.Unlock()
+	if err != nil {
+		h.revertKeycloakHosts(ch, len(ch.clients), true)
+		var se *StatusError
+		if errors.As(err, &se) && se.Status < 500 {
+			return err // lost a race to another change: a refusal
+		}
+		return h.finishOp(instanceID, OpHosts, err, false)
+	}
+	h.writePolicyLogged()
+	log.Printf("instance %s: %s", instanceID, detail)
+
+	var restartErr error
+	if ch.enabled {
+		restartErr = h.restartLocked(&view)
+		defer h.TriggerReconcile()
+	}
+	return h.finishOp(instanceID, OpHosts, restartErr, false)
+}
+
+// planHostsLocked validates a hostname change; nil, nil = no change.
+// Caller must hold mu.
+func (h *Hub) planHostsLocked(id string, hosts map[string]string) (*hostsChange, error) {
+	cur := h.findLocked(id)
+	if cur == nil {
+		if _, broken := h.brokenInstances[id]; broken {
+			return nil, statusErr(409, "instance %s can't be resolved (%s): fix its template first", id, h.brokenInstances[id])
+		}
+		return nil, statusErr(404, "instance not found: %s", id)
+	}
+	if e, ok := h.st.Instances[id]; ok && e.State == state.InstanceDeleting {
+		return nil, statusErr(409, "instance %s is being deleted", id)
+	}
+	if cur.HostForm == templates.FormLegacy {
+		return nil, statusErr(409, "template %s still uses ${PORTCULLIS_DOMAIN} rules: its hostnames are fixed", cur.TemplateID)
+	}
+	t := h.catalogLocked(cur.TemplateID)
+	if t == nil {
+		return nil, statusErr(409, "template %s is missing", cur.TemplateID)
+	}
+	if len(hosts) == 0 {
+		return nil, statusErr(400, "no hostnames given")
+	}
+	view, err := h.resolveHostsLocked(t, id, hosts, cur.Hosts)
+	if err != nil {
+		return nil, err
+	}
+	view.Enabled = cur.Enabled
+	if reflect.DeepEqual(view.Hosts, cur.Hosts) {
+		return nil, nil
+	}
+	if err := h.checkInstanceHostsLocked(&view); err != nil {
+		return nil, err
+	}
+	ch := &hostsChange{id: id, old: *cur, new: view, enabled: h.st.IsEnabled(id),
+		toNew: map[string]string{}, toOld: map[string]string{},
+		oldHosts: copyMap(cur.Hosts), newHosts: copyMap(view.Hosts)}
+	allowed := map[string]bool{}
+	for r, o := range cur.Hosts {
+		n := view.Hosts[r]
+		if o != n {
+			ch.toNew[o], ch.toOld[n] = n, o
+		}
+		allowed[o], allowed[n] = true, true
+	}
+	for x := range allowed {
+		ch.allowed = append(ch.allowed, x)
+	}
+	sort.Strings(ch.allowed)
+	for i, c := range view.Manifest.Clients {
+		ch.clients = append(ch.clients, clientHosts{clientID: c.ClientID,
+			oldURIs: h.redirectURIs(cur.Manifest.Clients[i]), newURIs: h.redirectURIs(c)})
+	}
+	oldCB, newCB := callbackURIs(h.signInExtraHostsLocked(cur)), callbackURIs(h.signInExtraHostsLocked(&view))
+	ch.cbRemove = minus(oldCB, newCB)
+	if ch.enabled {
+		// Callbacks exist while the instance runs (added on enable).
+		ch.cbAdd = minus(newCB, oldCB)
+	}
+	return ch, nil
+}
+
+func (ch *hostsChange) spec(i int, back bool) (keycloak.ClientSpec, []string, map[string]string) {
+	c := ch.clients[i]
+	s := keycloak.ClientSpec{ClientID: c.clientID, TemplateID: ch.id, AllowedHosts: ch.allowed, RedirectURIs: c.newURIs}
+	if back {
+		s.RedirectURIs = c.oldURIs
+		return s, c.newURIs, ch.toOld
+	}
+	return s, c.oldURIs, ch.toNew
+}
+
+// applyKeycloakHosts moves the instance's clients and the forward-auth
+// callbacks to the new hostnames; on failure it undoes what it did. A
+// client that doesn't exist yet (never enabled) is skipped: enable
+// registers it with the new hostnames.
+func (h *Hub) applyKeycloakHosts(ch *hostsChange) error {
+	if h.idp == nil {
+		return nil
+	}
+	ctx := context.Background()
+	for i := range ch.clients {
+		s, oldURIs, m := ch.spec(i, false)
+		err := h.idp.UpdateClientHosts(ctx, s, oldURIs, m)
+		if errors.Is(err, keycloak.ErrClientNotFound) {
+			continue
+		}
+		if err != nil {
+			h.revertKeycloakHosts(ch, i, false)
+			status := 502
+			var conflict *keycloak.ConflictError
+			if errors.As(err, &conflict) {
+				status = 409
+			}
+			return &StatusError{Status: status, Err: fmt.Errorf("Keycloak client %s: %w — nothing changed, the old hostnames stay in force", s.ClientID, err)}
+		}
+	}
+	if err := h.idp.UpdateForwardAuthCallbacks(ctx, ch.cbAdd, ch.cbRemove); err != nil {
+		h.revertKeycloakHosts(ch, len(ch.clients), false)
+		return &StatusError{Status: 502, Err: fmt.Errorf("Keycloak client %s callbacks: %w — nothing changed, the old hostnames stay in force", keycloak.ForwardAuthClient, err)}
+	}
+	return nil
+}
+
+// revertKeycloakHosts moves the first n clients (and, if callbacks, the
+// forward-auth callbacks) back to the old hostnames, best effort.
+func (h *Hub) revertKeycloakHosts(ch *hostsChange, n int, callbacks bool) {
+	if h.idp == nil {
+		return
+	}
+	ctx := context.Background()
+	if callbacks {
+		if err := h.idp.UpdateForwardAuthCallbacks(ctx, ch.cbRemove, ch.cbAdd); err != nil {
+			log.Printf("instance %s: undoing the %s callback change failed (retry the hostname change): %v", ch.id, keycloak.ForwardAuthClient, err)
+		}
+	}
+	for i := 0; i < n; i++ {
+		s, uris, m := ch.spec(i, true)
+		if err := h.idp.UpdateClientHosts(ctx, s, uris, m); err != nil && !errors.Is(err, keycloak.ErrClientNotFound) {
+			log.Printf("instance %s: undoing the hostname change on Keycloak client %s failed (retry the hostname change): %v", ch.id, s.ClientID, err)
+		}
+	}
+}
+
+// commitHostsLocked records the new hostnames and rewrites the instance's
+// files, after re-checking collisions (another instance may have taken a
+// host since planning). Returns the new view. Caller must hold mu (write).
+func (h *Hub) commitHostsLocked(ch *hostsChange) (templates.Template, error) {
+	cur := h.findLocked(ch.id)
+	t := (*templates.Template)(nil)
+	if cur != nil {
+		t = h.catalogLocked(cur.TemplateID)
+	}
+	if t == nil {
+		return templates.Template{}, statusErr(409, "instance %s changed meanwhile: retry", ch.id)
+	}
+	view, err := h.resolveHostsLocked(t, ch.id, ch.newHosts, ch.oldHosts)
+	if err != nil {
+		return templates.Template{}, err
+	}
+	if err := h.checkInstanceHostsLocked(&view); err != nil {
+		return templates.Template{}, err
+	}
+	e, ok := h.st.Instances[ch.id]
+	if !ok {
+		e = state.Instance{ID: ch.id, Template: t.ID}
+	}
+	e.Hosts = copyMap(view.Hosts)
+	if ch.id == t.ID && e.State == "" && reflect.DeepEqual(e.Hosts, t.DefaultHosts(h.cfg.Domain)) {
+		delete(h.st.Instances, ch.id) // the default instance needs no entry
+	} else {
+		h.st.Instances[ch.id] = e
+	}
+	h.rebuildLocked()
+	h.refreshPublishedLocked()
+	h.saveLocked()
+	nv := h.findLocked(ch.id)
+	if nv == nil {
+		return templates.Template{}, statusErr(500, "instance %s has no view after the change", ch.id)
+	}
+	view = *nv
+	if err := h.refreshInstanceEnvLocked(&view); err != nil {
+		return view, statusErr500Wrap("env rewrite failed (retry the change)", err)
+	}
+	if fileExists(h.overridePath(ch.id)) {
+		if err := h.generateOverrideLocked(&view, h.st.Settings[ch.id]); err != nil {
+			return view, statusErr500Wrap("override rewrite failed (retry the change)", err)
+		}
+	}
+	return view, nil
+}
+
+func fileExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
+}

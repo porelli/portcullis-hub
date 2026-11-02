@@ -188,8 +188,11 @@ func (c *Client) findClient(ctx context.Context, token, clientID string) (*goclo
 			return cl, nil
 		}
 	}
-	return nil, fmt.Errorf("client %s not found in keycloak", clientID)
+	return nil, fmt.Errorf("client %s: %w", clientID, ErrClientNotFound)
 }
+
+// ErrClientNotFound: no client with that clientId exists.
+var ErrClientNotFound = errors.New("client not found in keycloak")
 
 // withACR sets default.acr.values on a client representation.
 func withACR(client *gocloak.Client, acrValue string) {
@@ -477,6 +480,129 @@ func (c *Client) RegisterClient(ctx context.Context, s ClientSpec) error {
 	default:
 		return fmt.Errorf("client registration failed: %w", err)
 	}
+}
+
+// UpdateClientHosts rewrites an instance client after a hostname change
+// (contract §8, §11.3): it removes exactly oldURIs from the redirect URIs,
+// adds s.RedirectURIs (every other entry is kept), and moves each web
+// origin whose host is a key of hostMap (old host → new host) to the new
+// host, scheme and port kept ("+" and other origins untouched). Only a
+// client the instance may reconcile (MayReconcile with s.TemplateID and
+// s.AllowedHosts, which should hold the old and the new hosts) is
+// touched; a missing client is ErrClientNotFound.
+func (c *Client) UpdateClientHosts(ctx context.Context, s ClientSpec, oldURIs []string, hostMap map[string]string) error {
+	if protectedClients[s.ClientID] {
+		return &ConflictError{ClientID: s.ClientID, TemplateID: s.TemplateID, Owner: "core"}
+	}
+	tok, err := c.token(ctx)
+	if err != nil {
+		return err
+	}
+	existing, err := c.findClient(ctx, tok, s.ClientID)
+	if err != nil {
+		return err
+	}
+	if !mayReconcile(existing, s.TemplateID, s.AllowedHosts) {
+		return &ConflictError{ClientID: s.ClientID, TemplateID: s.TemplateID, Owner: existing.Attributes[OwnerAttr]}
+	}
+	existing.RedirectURIs = replaceEntries(existing.RedirectURIs, oldURIs, s.RedirectURIs)
+	if existing.WebOrigins != nil {
+		origins := make([]string, 0, len(existing.WebOrigins))
+		seen := map[string]bool{}
+		for _, o := range existing.WebOrigins {
+			o = moveOrigin(o, hostMap)
+			if !seen[o] {
+				seen[o] = true
+				origins = append(origins, o)
+			}
+		}
+		existing.WebOrigins = origins
+	}
+	if err := c.putClient(ctx, tok, existing); err != nil {
+		return err
+	}
+	log.Printf("Updated Keycloak client %s for new hostnames", s.ClientID)
+	return nil
+}
+
+// replaceEntries returns list without the entries of remove, then each
+// entry of add it doesn't hold yet (order kept, exact comparison).
+func replaceEntries(list, remove, add []string) []string {
+	drop := map[string]bool{}
+	for _, r := range remove {
+		drop[r] = true
+	}
+	out := []string{}
+	have := map[string]bool{}
+	for _, e := range list {
+		if !drop[e] && !have[e] {
+			out = append(out, e)
+			have[e] = true
+		}
+	}
+	for _, e := range add {
+		if !have[e] {
+			out = append(out, e)
+			have[e] = true
+		}
+	}
+	return out
+}
+
+// moveOrigin returns origin o with its host replaced by hostMap's entry
+// for it (o unchanged if it isn't a plain http(s) origin of a mapped host).
+func moveOrigin(o string, hostMap map[string]string) string {
+	u, err := url.Parse(o)
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.User != nil || (u.Path != "" && u.Path != "/") {
+		return o
+	}
+	to, ok := hostMap[strings.ToLower(u.Hostname())]
+	if !ok {
+		return o
+	}
+	if p := u.Port(); p != "" {
+		to += ":" + p
+	}
+	u.Host = to
+	return u.String()
+}
+
+// ForwardAuthClient is core's oauth2-proxy client, shared by forward-auth
+// and forward-auth-ext (contract §5).
+const ForwardAuthClient = "portcullis-forward-auth"
+
+// CallbackURI is an extra-domain host's sign-in callback (contract §5).
+func CallbackURI(host string) string { return "https://" + host + "/oauth2/callback" }
+
+var callbackRe = regexp.MustCompile(`^https://([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?/oauth2/callback$`)
+
+// UpdateForwardAuthCallbacks adds and removes extra-domain callback URIs
+// (https://<host>/oauth2/callback, exact) on ForwardAuthClient (contract
+// §5 "Callback redirect URIs"). Nothing else on that client is touched;
+// URIs of any other form are refused. Nothing to do = no call.
+func (c *Client) UpdateForwardAuthCallbacks(ctx context.Context, add, remove []string) error {
+	if len(add) == 0 && len(remove) == 0 {
+		return nil
+	}
+	for _, u := range append(append([]string{}, add...), remove...) {
+		if !callbackRe.MatchString(u) {
+			return fmt.Errorf("%s: %q is not an extra-domain callback URI", ForwardAuthClient, u)
+		}
+	}
+	tok, err := c.token(ctx)
+	if err != nil {
+		return err
+	}
+	existing, err := c.findClient(ctx, tok, ForwardAuthClient)
+	if err != nil {
+		return err
+	}
+	existing.RedirectURIs = replaceEntries(existing.RedirectURIs, remove, add)
+	if err := c.putClient(ctx, tok, existing); err != nil {
+		return err
+	}
+	log.Printf("Updated %s callbacks (+%d -%d)", ForwardAuthClient, len(add), len(remove))
+	return nil
 }
 
 // ── user management (contract §9) ────────────────────────

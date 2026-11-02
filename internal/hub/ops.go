@@ -24,6 +24,7 @@ const (
 	OpStart   = "start" // drift: compose up an enabled app
 	OpApply   = "apply" // drift: regenerate the override and compose up
 	OpStop    = "stop"  // drift: compose down a project that is not enabled
+	OpHosts   = "hosts" // hostname change (SetHosts): Keycloak, files, restart
 )
 
 // OpRecord is an app's last lifecycle operation, kept in

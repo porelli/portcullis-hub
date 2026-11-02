@@ -122,6 +122,8 @@ func main() {
 		// directory change (coalesced in the Hub's background sync).
 		OnChange: h.TriggerDirectorySync,
 	}
+	// Instance operations are audited in the same log (contract §11.7).
+	h.SetAudit(dir.Audit)
 	// The policy file's expiring list and user-attributes.json come from
 	// the directory (contract §4, §4.1); shared fields become Keycloak
 	// attr_<field> claims (§9.6). Keycloak failures are logged and retried,

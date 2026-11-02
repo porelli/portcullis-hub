@@ -60,6 +60,12 @@ type Engine interface {
 type IdP interface {
 	RegisterClient(ctx context.Context, s keycloak.ClientSpec) error
 	UpdateClientACR(ctx context.Context, s keycloak.ClientSpec) error
+	// UpdateClientHosts moves an instance client's redirect URIs and web
+	// origins to new hostnames (keycloak.Client.UpdateClientHosts).
+	UpdateClientHosts(ctx context.Context, s keycloak.ClientSpec, oldURIs []string, hostMap map[string]string) error
+	// UpdateForwardAuthCallbacks adds/removes extra-domain callback URIs
+	// on portcullis-forward-auth (contract §5).
+	UpdateForwardAuthCallbacks(ctx context.Context, add, remove []string) error
 }
 
 // Hub is the application core. All exported methods are safe for
@@ -69,6 +75,10 @@ type Hub struct {
 	compose compose.Runner
 	engine  Engine
 	idp     IdP
+	// domains lists the main and enrolled domains (hosts.go); audit
+	// receives instance operations (SetAudit). Both guarded by mu.
+	domains DomainSource
+	audit   Auditor
 
 	// mu guards st and templates. Never hold it across docker/network calls.
 	mu        sync.RWMutex
@@ -156,6 +166,7 @@ func New(cfg Config, runner compose.Runner, engine Engine, idp IdP) (*Hub, error
 		kick:      make(chan struct{}, 1),
 		dirKick:   make(chan struct{}, 1),
 		driftKey:  map[string]string{},
+		domains:   mainDomainOnly{cfg.Domain},
 	}
 	st, err := state.Load(h.statePath())
 	if err != nil {

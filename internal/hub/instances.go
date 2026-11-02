@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/portcullis/hub/internal/docker"
-	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
 )
@@ -50,6 +49,7 @@ type InstanceView struct {
 // and the catalog's enabled flags and instance lists. Caller must hold mu
 // (write).
 func (h *Hub) rebuildLocked() {
+	extra := extraFunc(h.enrolledLocked())
 	var out []templates.Template
 	byTemplate := map[string][]string{}
 	broken := map[string]string{}
@@ -59,7 +59,7 @@ func (h *Hub) rebuildLocked() {
 		if e, ok := h.st.Instances[t.ID]; ok && e.Template == t.ID && len(e.Hosts) > 0 {
 			hosts = e.Hosts
 		}
-		v, err := t.Instance(t.ID, hosts, h.cfg.Domain)
+		v, err := t.InstanceOn(t.ID, hosts, h.cfg.Domain, extra)
 		if err != nil {
 			log.Printf("instance %s: %v", t.ID, err)
 			broken[t.ID] = err.Error()
@@ -84,7 +84,7 @@ func (h *Hub) rebuildLocked() {
 			broken[id] = "template " + e.Template + " is missing"
 			continue
 		}
-		v, err := t.Instance(id, e.Hosts, h.cfg.Domain)
+		v, err := t.InstanceOn(id, e.Hosts, h.cfg.Domain, extra)
 		if err != nil {
 			// Kept (listed as error, enforced from its published snapshot)
 			// rather than dropped: its containers may still run.
@@ -191,33 +191,6 @@ func copyMap(m map[string]string) map[string]string {
 	return out
 }
 
-// instanceSuffix is the id without a leading "<template>-" (§11.3).
-func instanceSuffix(templateID, id string) string {
-	if s, ok := strings.CutPrefix(id, templateID+"-"); ok && s != "" {
-		return s
-	}
-	return id
-}
-
-// defaultHostsFor are a new instance's pre-filled hostnames on the main
-// domain (§11.3): each host router's default subdomain plus
-// "-<suffix>", the suffix truncated so the label fits 63 characters.
-func defaultHostsFor(t *templates.Template, id, domain string) (map[string]string, error) {
-	suffix := instanceSuffix(t.TemplateID, id)
-	out := map[string]string{}
-	for r, sub := range t.HostRouters {
-		s := suffix
-		if max := 63 - len(sub) - 1; len(s) > max {
-			if max < 1 {
-				return nil, statusErr(400, "host router %s: no room for an instance suffix on %s — give an explicit hostname", r, sub)
-			}
-			s = strings.TrimRight(s[:max], "-")
-		}
-		out[r] = sub + "-" + s + "." + domain
-	}
-	return out, nil
-}
-
 // CreateInstance creates instance id of a template without enabling it
 // (state "created", contract §11.1–11.3). hosts (host router → full
 // hostname) nil means the defaults on the main domain. Refused before
@@ -263,13 +236,9 @@ func (h *Hub) CreateInstance(templateID, id string, hosts map[string]string) err
 			return err
 		}
 	}
-	norm := map[string]string{}
-	for r, host := range hosts {
-		norm[r] = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
-	}
-	view, err := t.Instance(id, norm, h.cfg.Domain)
+	view, err := h.resolveHostsLocked(t, id, hosts, nil)
 	if err != nil {
-		return statusErr(400, "%v", err)
+		return err
 	}
 	if err := h.checkInstanceHostsLocked(&view); err != nil {
 		return err
@@ -433,53 +402,6 @@ func (h *Hub) claimCollision(t *templates.Template, byID map[string]*templates.T
 		return kind + " " + name + " of " + who
 	}
 	return ""
-}
-
-// checkInstanceHostsLocked refuses hostnames used twice by the instance,
-// by any other instance (enabled or not) or by core. Caller must hold mu.
-func (h *Hub) checkInstanceHostsLocked(v *templates.Template) error {
-	seen := map[string]string{}
-	for r, host := range v.Hosts {
-		if o, ok := seen[host]; ok {
-			return statusErr(409, "hostname %s is used by host routers %s and %s", host, o, r)
-		}
-		seen[host] = r
-	}
-	for _, sub := range v.Subdomains {
-		if policy.CoreSubdomains[sub] {
-			return statusErr(409, "hostname %s.%s is a core hostname", sub, h.cfg.Domain)
-		}
-	}
-	for i := range h.instances {
-		o := &h.instances[i]
-		if o.ID == v.ID {
-			continue
-		}
-		for _, oh := range o.Hosts {
-			if r, ok := seen[oh]; ok {
-				return statusErr(409, "hostname %s (host router %s) is already used by instance %s", oh, r, o.ID)
-			}
-		}
-		for _, s := range o.Subdomains {
-			for _, mine := range v.Subdomains {
-				if s == mine {
-					return statusErr(409, "hostname %s.%s is already routed by instance %s", s, h.cfg.Domain, o.ID)
-				}
-			}
-		}
-	}
-	// Templates from other sources and skipped duplicates route their
-	// default hostnames too, should they ever be enabled.
-	for _, tt := range h.allTemplates {
-		for _, s := range tt.Subdomains {
-			for _, mine := range v.Subdomains {
-				if s == mine {
-					return statusErr(409, "hostname %s.%s is the default hostname of template %s (source %s)", s, h.cfg.Domain, tt.ID, tt.Source)
-				}
-			}
-		}
-	}
-	return nil
 }
 
 // templateDir is the directory name of t's support files under

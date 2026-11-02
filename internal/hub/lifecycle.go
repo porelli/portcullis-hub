@@ -249,6 +249,7 @@ func (h *Hub) enableLocked(id string) (rolledBack bool, err error) {
 		return false, statusErr(500, "override write failed: %v", err)
 	}
 	acr := policy.ACR(h.effectivePolicyLocked(&tmpl))
+	callbacks := callbackURIs(h.signInExtraHostsLocked(&tmpl))
 	h.mu.Unlock()
 
 	h.copyConfigFiles(&tmpl)
@@ -266,6 +267,10 @@ func (h *Hub) enableLocked(id string) (rolledBack bool, err error) {
 			case err != nil:
 				log.Printf("Warning: failed to register client %s: %v", c.ClientID, err)
 			}
+		}
+		// Sign-in callbacks of its extra-domain hosts (contract §5).
+		if err := h.idp.UpdateForwardAuthCallbacks(context.Background(), callbacks, nil); err != nil {
+			return false, &StatusError{Status: 502, Err: fmt.Errorf("Keycloak %s callbacks: %w", keycloak.ForwardAuthClient, err)}
 		}
 	}
 	if err := h.composeUp(&tmpl); err != nil {

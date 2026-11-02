@@ -123,6 +123,13 @@ const singleCompose = "services:\n  disks:\n    image: x\n    labels:\n" +
 // set, prepares state.yaml before the Hub starts.
 func newInstanceFixture(t *testing.T, seed func(*state.AppState)) *fixture {
 	t.Helper()
+	return newInstanceFixtureWith(t, seed, nil)
+}
+
+// newInstanceFixtureWith is newInstanceFixture with idp as the Hub's IdP
+// (nil: the fakeIdP in f.idp).
+func newInstanceFixtureWith(t *testing.T, seed func(*state.AppState), idp IdP) *fixture {
+	t.Helper()
 	root := t.TempDir()
 	f := &fixture{
 		runner:  newFakeRunner(),
@@ -152,7 +159,10 @@ func newInstanceFixture(t *testing.T, seed func(*state.AppState)) *fixture {
 	if err := st.Save(filepath.Join(f.data, "state.yaml")); err != nil {
 		t.Fatal(err)
 	}
-	h, err := New(Config{ProjectDir: f.project, ProjectHostDir: "/host/project", DataDir: f.data, Domain: "example.org"}, f.runner, f.engine, f.idp)
+	if idp == nil {
+		idp = f.idp
+	}
+	h, err := New(Config{ProjectDir: f.project, ProjectHostDir: "/host/project", DataDir: f.data, Domain: "example.org"}, f.runner, f.engine, idp)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -435,8 +445,8 @@ func TestInstanceIDRules(t *testing.T) {
 		"grafana-b.example.org": "already used by instance grafana-b",
 		"grafana.example.org":   "already used by instance grafana",
 		"auth.example.org":      "core hostname",
-		"grafana.other.org":     "not <label>.example.org",
-		"a.b.example.org":       "not <label>.example.org",
+		"grafana.other.org":     "neither <label>.example.org nor on an enrolled domain",
+		"a.b.example.org":       "deeper names need an enrolled domain",
 	} {
 		err := f.h.CreateInstance("grafana", "grafana-d", map[string]string{"grafana": hosts})
 		if err == nil || !strings.Contains(err.Error(), why) {

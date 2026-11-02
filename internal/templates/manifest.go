@@ -231,6 +231,9 @@ type Template struct {
 	// Hosts maps each host router to the instance's full hostname (the
 	// default instance's in the catalog).
 	Hosts map[string]string `json:"hosts"`
+	// ExtraHosts are the hosts of Hosts on an enrolled domain (extra-domain
+	// hosts, contract §5), sorted; they have no entry in Subdomains.
+	ExtraHosts []string `json:"extra_hosts,omitempty"`
 	// Volumes are the compose file's top-level volume keys that aren't
 	// external (the Hub names them per instance, §11.2).
 	Volumes []string `json:"-"`

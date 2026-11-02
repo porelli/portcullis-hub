@@ -193,6 +193,8 @@ type fakeIdP struct {
 	registered  []string
 	updated     []string
 	specs       []keycloak.ClientSpec
+	hostUpdates []string // "<client>:<old uris> -> <new uris>"
+	callbacks   []string // "+add -remove"
 }
 
 func (f *fakeIdP) RegisterClient(ctx context.Context, s keycloak.ClientSpec) error {
@@ -210,6 +212,22 @@ func (f *fakeIdP) UpdateClientACR(ctx context.Context, s keycloak.ClientSpec) er
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.updated = append(f.updated, s.ClientID+":"+s.ACR)
+	return nil
+}
+
+func (f *fakeIdP) UpdateClientHosts(ctx context.Context, s keycloak.ClientSpec, oldURIs []string, hostMap map[string]string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.hostUpdates = append(f.hostUpdates, s.ClientID+":"+strings.Join(oldURIs, ",")+" -> "+strings.Join(s.RedirectURIs, ","))
+	return nil
+}
+
+func (f *fakeIdP) UpdateForwardAuthCallbacks(ctx context.Context, add, remove []string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(add)+len(remove) > 0 {
+		f.callbacks = append(f.callbacks, "+"+strings.Join(add, ",")+" -"+strings.Join(remove, ","))
+	}
 	return nil
 }
 
