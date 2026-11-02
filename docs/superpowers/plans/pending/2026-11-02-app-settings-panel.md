@@ -7,7 +7,9 @@ The Hub renders the panel, validates the values, resolves per-person values
 from LDAP groups with a "who gets what" preview, and delivers them through
 env, mounts, data files, hooks, per-client OIDC claims or per-host headers.
 It restarts only when a changed option needs it. People see their own
-values under My apps.
+values under My apps, and enter the values a template declares as theirs
+(`scope: person_entered`, spec call 32; first consumer: the Firefox Sync
+allowlist).
 
 **Architecture:**
 - **Pure core.** A new package `internal/settings` holds:
@@ -71,8 +73,8 @@ values under My apps.
     (`.github/actions/hub-image`).
   - Templates CI reads `.core-ref`. Set it to `settings` on the branch, and
     back to `main` before merging.
-- Work order: contract (T1) → core (T2) → Hub (T3–T15) → templates
-  (T16–T17) → e2e (T18) → docs (T19) → deploy (T20).
+- Work order: contract (T1) → core (T2) → Hub (T3–T15, then T15A) →
+  templates (T16–T17) → e2e (T18) → docs (T19) → deploy (T20).
 - Hub `TestRealTemplates*` stays red from T3 until templates T17 is pushed.
   So push hub, templates and core `settings` together at the end of
   Phase 6.
@@ -109,9 +111,17 @@ values under My apps.
   - `unlimited` is a distinct value (`settings.Unlimited{}`, stored as
     the string `unlimited`).
   - Sizes are shown in binary units (MiB/GiB/TiB, labelled so).
-- **Scopes** `instance` | `person` | `group`.
+- **Scopes** `instance` | `person` | `group` | `person_entered`.
   - `person` needs a `default` and at least one per-person delivery
     (claim, header, file, hook). Per-person env is refused.
+  - `person_entered` (spec call 32): each person enters their own value
+    on My apps. Types `string` `int` `bool` `enum` only; no `default`,
+    `required`, `resolve`, `group_values`, `privileged`, `requires` or
+    `self_visible: false`; `unique` (string/int) is across the people of
+    one instance; `admin_override` (default false) lets admins set a
+    value, and admins can always clear one. Deliveries: file/hook
+    (`entries` section), env (the joined list, `applies: restart`),
+    claim/header (own value).
 - **Resolution:**
   - `max`/`min` on int, size, duration, enum by option order;
   - `priority` on any type, the admin's row order;
@@ -131,6 +141,14 @@ values under My apps.
   - otherwise: every LLDAP user except the service account;
   - `sign_in: native`: empty;
   - admin, extra and core groups never widen it; public routes add nobody.
+  - **`person_entered` options** (call 32): the same population when the
+    routes carry Portcullis identity. When they don't (method `public`,
+    `custom` without Portcullis sign-in, `sign_in: native`), it is the
+    template's `access_group` members minus expired entries. The validator
+    requires an `access_group` on such templates.
+  - A person-entered value is delivered only while its holder is in the
+    population **and** their LLDAP uuid matches the stored one. Leaving
+    keeps the value stored, not delivered. Deleting the account deletes it.
 - **Privileged options** (call 9, 28):
   - per-group values only from manual groups, or from rule groups whose
     rules use admin-only fields only and don't match an empty person;
@@ -151,10 +169,17 @@ values under My apps.
   - Settings routes are on the Hub listener and are `adminOnly`;
     delegates get 403.
   - Audit actions: `settings.change` (instance/key, scope, group,
-    before → after; secrets: `replaced`/`generated`/`cleared`, actor) and
-    `settings.purge`.
-- **People listener:** exactly one app route, read-only and caller-only:
-  `GET /api/me/apps` (contract §5.1).
+    before → after; secrets: `replaced`/`generated`/`cleared`, actor),
+    `settings.purge`, and `settings.person_value` (target
+    `<instance>/<key>/<user>`, actor = the person, the admin or `hub`;
+    detail `set: a -> b` | `cleared` | `deleted` | `purged` |
+    `invalidated`, refusals `refused`).
+  - Exception: person-entered values (call 32) are written by the person
+    on the people listener, and by admins on the Hub listener.
+- **People listener:** caller-only app routes, exactly these
+  (contract §5.1): `GET /api/me/apps` (read-only), and `PUT` / `DELETE
+  /api/me/apps/{instance}/values/{key}` (the caller's own person-entered
+  value only; Task 15A).
 - **Claims** (call 12):
   - one Hub-owned LLDAP attribute per (instance, option): `ps_` + the
     first 12 hex of sha256(`<instance>\x00<key>`), STRING, not visible,
@@ -229,6 +254,15 @@ values under My apps.
      headers (generation check). The last committed save wins with no lost
      rows.
    - Pinned in Task 9 (`TestStaleDeliveryDoesNotOverwrite`).
+6. **Two people entering the same `unique` value at once,** or a person
+   who left the access group (call 32).
+   - Expected: exactly one save wins (the check and the write happen under
+     one `mu`); the other gets 409 without the holder's name. A value
+     stored by someone who left still blocks others, and is absent from
+     `entries` after the next membership delivery; a rejoin delivers it
+     again. An account re-created with the same name inherits nothing.
+   - Pinned in Task 15A (`TestEntryUniqueRace`, `TestLeaveRemovesFromDelivery`,
+     `TestRecreatedAccountInheritsNoEntry`).
 
 ---
 
@@ -293,7 +327,7 @@ Also `docs/guides/manifest-reference.md` (the `settings` section only).
     - host layout and modes (Global Constraints);
     - document `DataFileDoc` / `SecretsFileDoc`:
       ```json
-      {"version":1,"instance":"<id>","values":{"<key>":<rendered>},"people":{"<lowercase user>":{"<field>":<rendered>}},"groups":{"<key>":[{"group":"<name>","value":<rendered>}]}}
+      {"version":1,"instance":"<id>","values":{"<key>":<rendered>},"people":{"<lowercase user>":{"<field>":<rendered>}},"groups":{"<key>":[{"group":"<name>","value":<rendered>}]},"entries":{"<field>":[{"user":"<lowercase user>","value":<rendered>}]}}
       ```
       The secrets file is `{"version":1,"instance":"<id>","secrets":{"<key>":"<value>"}}`.
     - The reading service runs as root, or as uid/gid 10001
@@ -309,6 +343,13 @@ Also `docs/guides/manifest-reference.md` (the `settings` section only).
   - **13.10 Secrets:** call 18.
   - **13.11 Groups disappearing:** calls 19 and 29.
   - **13.12 Admin API:** the routes of Task 13, and the audit actions.
+  - **13.13 Person-entered values** (spec call 32): `scope:
+    person_entered`, its allowed types and refused fields, `unique`,
+    `admin_override`, the population rule (incl. the `access_group`
+    requirement for identity-less routes), the `applies` ↔ delivery
+    matching, leave/rejoin/delete, uuid binding, the `entries` data-file
+    section, the people and admin routes of Task 15A, and
+    `settings.person_value`.
 - [ ] **Step 2: §4.1 v2.**
   - `"version": 2` adds
     `"hosts": {"<full lowercase host>": {"<Header-Suffix>": {"<lowercase user>": "<value>"}}}`.
@@ -319,15 +360,19 @@ Also `docs/guides/manifest-reference.md` (the `settings` section only).
   - A host header replaces a same-named field header on that host.
   - v1 is refused, the same as a corrupt file (no attribute headers).
 - [ ] **Step 3: the other sections.**
-  - **§5.1:** `GET /api/me/apps` is the people listener's only app
-    route. Show the answer shape from Task 15 `MyApp`.
+  - **§5.1:** `GET /api/me/apps` is the people listener's only app read
+    route. Show the answer shape from Task 15 `MyApp` (with Task 15A's
+    `entries`). `PUT` / `DELETE /api/me/apps/{instance}/values/{key}`
+    write the caller's own person-entered value (Task 15A shapes and
+    status codes).
   - **§6:** exec gains stdin; `POST /containers/{id}/kill?signal=` is
     used (no socket-proxy change).
   - **§8:** "Setting claims" — the attribute and mapper names from Global
     Constraints, removed on instance delete.
   - **§9.6:** fields may not start with `ps_`. Privileged-option groups
     are guarding groups.
-  - **§11.5:** `instance.yaml` `settings` carries the typed settings.
+  - **§11.5:** `instance.yaml` `settings` carries the typed settings,
+    person-entered values included.
     `config/settings-secrets.json` holds the secret store. Restore drops
     rows whose group id no longer matches, with a warning.
   - **§1:** template contract v3 = MAJOR.
@@ -336,7 +381,7 @@ Also `docs/guides/manifest-reference.md` (the `settings` section only).
   type table.
 - [ ] **Step 5: verify and commit.** Run `zensical build --strict --clean`,
   then commit on `settings`:
-  `contracts: template contract v3 settings (§13), user-attributes v2, /api/me/apps`.
+  `contracts: template contract v3 settings (§13), user-attributes v2, /api/me/apps, person-entered values`.
 
 ## Phase 2 — core
 
@@ -454,6 +499,7 @@ type Option struct {
     ResolveChoices                       []string       `yaml:"resolve_choices"`
     GroupValues                          map[string]any `yaml:"group_values"`
     Privileged                           bool
+    AdminOverride                        bool           `yaml:"admin_override"` // person_entered only (call 32)
     SelfVisible                          *bool          `yaml:"self_visible"` // nil = true
     Requires                             []string
     Delivery                             Deliveries
@@ -511,7 +557,9 @@ const (TypeString="string"; TypeInt="int"; TypeSize="size"; TypeDuration="durati
     TypeEnum="enum"; TypeMultiEnum="multi_enum"; TypeList="list"; TypeTable="table"; TypePath="path"
     TypeSecret="secret"; TypeGroup="group"; TypeGroups="groups"; TypeUser="user"; TypeUsers="users"
     TypeFolder="folder"; TypePersonSecret="person_secret"; TypePersonID="person_id")
-const (ScopeInstance="instance"; ScopePerson="person"; ScopeGroup="group")
+const (ScopeInstance="instance"; ScopePerson="person"; ScopeGroup="group"; ScopePersonEntered="person_entered")
+var PersonEnteredTypes = map[string]bool{TypeString: true, TypeInt: true, TypeBool: true, TypeEnum: true}
+const PersonEnteredMaxLen = 256
 const (AppliesLive="live"; AppliesReload="reload"; AppliesNextSignIn="next_sign_in"
     AppliesNextRequest="next_request"; AppliesRestart="restart"; AppliesAccountCreation="account_creation")
 const (ResolveMax="max"; ResolveMin="min"; ResolvePriority="priority"; ResolveUnion="union"
@@ -592,6 +640,26 @@ func ValidateSettingsSpec(t *Template, compose []byte, routes *Routes, known fun
     instance `int` or `string` option.
   - `TestGenerateNoneRefused`: `env[].generate: none` is refused with
     the hint "declare a setting".
+  - `TestPersonEnteredRules` (spec call 32). The spec's Firefox Sync
+    block passes. Refused, each naming the option:
+    - a type outside `string`/`int`/`bool`/`enum` (`secret` with the hint
+      "a per-person credential is person_secret (project 3)");
+    - `default`, `required`, `resolve`, `resolve_choices`,
+      `group_values`, `privileged`, `requires` on it or naming it,
+      `self_visible: false`, `applies: account_creation`;
+    - a `string` with no `max_len`, `pattern` or `format`, or `max_len`
+      over `PersonEnteredMaxLen`;
+    - `unique` on `bool`/`enum`; `admin_override` on any other scope;
+    - an env delivery without `render.join`/`render.format: json`, or
+      without `applies: restart`;
+    - `applies` not matching the delivery: a file whose
+      `on_membership_change: restart` with `applies: live`; a hook
+      delivery without `applies: live` or without `membership_change` in
+      its `when`; a claim not `next_sign_in`; a header not
+      `next_request`;
+    - a template whose routes can run without Portcullis identity
+      (method `public` or `custom`, or `allow_without_gateway`) and that
+      declares no `auth.access_group`.
 - [ ] **Step 2: run.**
   `go test -race ./internal/templates/ -run 'TestOption|TestOld|TestReserved|TestPerson|TestResolve|TestEnvNames|TestClaim|TestHeader|TestFile|TestReload|TestGroupValues|TestPrivileged|TestRequires|TestWritesAs|TestGenerateNone'`
   → FAIL (undefined).
@@ -835,6 +903,13 @@ type InstanceSettings struct {
     Person  map[string]PersonSetting `yaml:"person,omitempty"`  // Task 8
     Groups  map[string][]GroupValue  `yaml:"groups,omitempty"`  // Task 8
     Secrets map[string]SecretMeta    `yaml:"secrets,omitempty"` // Task 7; never values
+    Entered map[string]map[string]EnteredValue `yaml:"entered,omitempty"` // Task 15A: key → lowercase user → value
+}
+type EnteredValue struct { // Task 15A (call 32)
+    Value     any       `yaml:"value"`            // canonical
+    UUID      string    `yaml:"uuid"`             // LLDAP user uuid at save
+    UpdatedAt time.Time `yaml:"updated_at"`
+    SetBy     string    `yaml:"set_by,omitempty"` // "" = the person; else the admin's username
 }
 type PersonSetting struct{ Default any `yaml:"default"`; Resolve string `yaml:"resolve,omitempty"`; Rows []GroupValue `yaml:"rows,omitempty"` }
 type GroupValue struct{ Group string `yaml:"group"`; GroupID int `yaml:"group_id"`; Value any `yaml:"value"` }
@@ -1187,7 +1262,9 @@ type DataFileDoc struct {
     Values   map[string]any            `json:"values"`
     People   map[string]map[string]any `json:"people"`
     Groups   map[string][]GroupRecordOut `json:"groups"`
+    Entries  map[string][]EntryOut     `json:"entries"` // Task 15A; always an object; per field, sorted by user
 }
+type EntryOut struct{ User string `json:"user"`; Value any `json:"value"` } // person-entered (call 32)
 type SecretsFileDoc struct{ Version int `json:"version"`; Instance string `json:"instance"`; Secrets map[string]string `json:"secrets"` }
 type HookInput struct {
     DataFileDoc
@@ -1515,6 +1592,7 @@ type SettingsPanel struct {
     Ports      map[string]string          `json:"ports"`
     Population struct{ Count int; Why string } `json:"population"`
     Deliveries DeliveryStatus             `json:"deliveries"`
+    Entries    map[string]EntriesView     `json:"entries"` // Task 15A; person_entered options only
 }
 type PersonPreview struct{ User, Display string; Reason settings.Reason }
 type OptionPreview struct {
@@ -1652,6 +1730,7 @@ type MyCredential struct { // empty list in project 1; project 3 fills it
 type MyApp struct {
     ID, Name, Icon, URL string
     Values      []MyValue      `json:"values"`
+    Entries     []MyEntry      `json:"entries"`     // Task 15A; always [] (never null)
     Credentials []MyCredential `json:"credentials"` // always [] (never null)
 }
 func (h *Hub) MyApps(ctx context.Context, user string) ([]MyApp, error)
@@ -1660,7 +1739,9 @@ func (h *Hub) MyApps(ctx context.Context, user string) ([]MyApp, error)
 - Answer: `GET /api/me/apps` → `{"apps": [MyApp…]}`.
   - Only enabled instances whose population contains the caller (who is
     lowercased).
-  - Only person-scope options with `self_visible` ≠ false.
+  - Only person-scope options with `self_visible` ≠ false. (Task 15A
+    adds `person_entered` options as `entries`, and lists an app whose
+    only per-person part is an entry.)
   - Never instance options, secrets, other people or `Others`.
   - LLDAP unavailable → 503 with a generic message.
 
@@ -1697,6 +1778,268 @@ func (h *Hub) MyApps(ctx context.Context, user string) ([]MyApp, error)
   → PASS.
 - [ ] **Step 6: commit.** `people: My apps (GET /api/me/apps, caller-only resolved values)`.
 
+### Task 15A: Person-entered values (state, scope, delivery, people + admin API, UI)
+
+User request of 2026-11-02 (spec call 32): "Can we provide an option for
+users to specify their Mozilla ID to allowlist?" Generic: no
+Firefox-specific code. The Firefox Sync conversion is in Task 17.
+
+**Files:**
+- `internal/state/state.go`: `InstanceSettings.Entered`, `EnteredValue`
+  (declared in Task 6's shape);
+- `internal/lldap/client.go` + `lldaptest`: `uuid` in the users query,
+  `User.UUID`;
+- `internal/directory/membership.go`: `Membership.UUIDs`;
+- `internal/directory/service.go`: `Service.UserDeleted`, called in
+  `DeleteUser` after the LLDAP delete succeeded, outside `s.mu`;
+- `internal/hub/entries.go` (new): store, validation, uniqueness,
+  population, purge, prune;
+- `internal/hub/population.go`: `entryPopulationLocked`;
+- `internal/hub/deliver.go`, `deliver_files.go`, `deliver_hooks.go`,
+  `deliver_claims.go`, `deliver_headers.go`, `env.go`: the `entries`
+  section, env list, own-value claims/headers;
+- `internal/hub/myapps.go`: `MyEntry`, apps with entries only;
+- `internal/hub/panel.go`: `EntriesView`;
+- `internal/hub/groupsettings.go`: `SettingsIncompatibilities` lists
+  dropped or invalidated entries;
+- `internal/hub/restore.go`: entries carried; restore-as copies them;
+- `internal/httpapi/people.go`: the two people routes;
+- `internal/httpapi/settings.go`: the two admin routes;
+- `internal/httpapi/people_test.go`: append to `peopleAppRoutes`;
+- `cmd/hub/main.go`: `dir.UserDeleted = h.PurgePersonValues`;
+- `web/myapps.js`, `web/settings.js`;
+- `internal/httpapi/harness_test.go`: a fixture with a person-entered
+  option;
+- tests: `internal/hub/entries_test.go`,
+  `internal/directory/membership_test.go`,
+  `internal/httpapi/entries_test.go`.
+- Fixture template `internal/hub/testdata/settings/entryapp/`:
+  - `auth: {method: custom, group_access: false, access_group: entryapp}`
+    (no Portcullis identity, like Firefox Sync);
+  - option `ext_id`: `string`, pattern `^[0-9a-f]{32}$`, `max_len: 32`,
+    `person_entered`, `unique`, `admin_override`, `applies: restart`,
+    file `ids`;
+  - option `nick`: `string`, `max_len: 20`, `person_entered`, hook
+    `apply`, `applies: live`;
+  - `files: [{name: ids, service: app, mount: /portcullis, on_membership_change: restart}]`;
+  - `hooks: [{name: apply, service: app, command: [/apply], when: [membership_change]}]`;
+  - a second fixture `entryenv/`: `ext_id` delivered by
+    `env: EXT_IDS`, `render: {join: ","}`, `applies: restart`.
+
+**Interfaces:**
+- Consumes:
+  - Task 3 `ScopePersonEntered`, `AdminOverride`, `PersonEnteredTypes`;
+  - Task 4 `Registry.Parse` / `Display` / `Render`;
+  - Task 8 `People.Membership`, `populationLocked`, `InPopulation`;
+  - Task 9 engine, `TriggerDelivery(id, TriggerMembership, false)`,
+    `DataFileDoc.Entries`;
+  - Task 13 panel and route registration;
+  - Task 15 `MyApp`, `peopleAppRoutes`.
+- Produces:
+```go
+// lldap
+// User gains UUID string `json:"uuid"`
+// directory
+// Membership gains UUIDs map[string]string // lowercase user → LLDAP uuid (service account excluded)
+// Service gains UserDeleted func(ctx context.Context, actor, name string) // after a successful DeleteUser, outside s.mu
+
+// hub
+type EntryInput struct { // what the person's input needs
+    Type    string                 `json:"type"`
+    Pattern string                 `json:"pattern,omitempty"`
+    Format  string                 `json:"format,omitempty"`
+    MinLen  *int                   `json:"min_len,omitempty"`
+    MaxLen  *int                   `json:"max_len,omitempty"`
+    Min     any                    `json:"min,omitempty"`
+    Max     any                    `json:"max,omitempty"`
+    Unit    string                 `json:"unit,omitempty"`
+    Choices []templates.EnumOption `json:"options,omitempty"`
+}
+type MyEntry struct {
+    Key         string     `json:"key"`
+    Label       string     `json:"label"`
+    Description string     `json:"description,omitempty"`
+    Applies     string     `json:"applies"`
+    Input       EntryInput `json:"input"`
+    Unique      bool       `json:"unique,omitempty"`
+    Value       any        `json:"value"`             // canonical; null = not set
+    Display     string     `json:"display,omitempty"`
+    SetByAdmin  bool       `json:"set_by_admin,omitempty"` // never the admin's name
+    UpdatedAt   *time.Time `json:"updated_at,omitempty"`
+}
+type EntryRow struct {
+    User      string    `json:"user"`
+    Value     any       `json:"value"`
+    Display   string    `json:"display"`
+    UpdatedAt time.Time `json:"updated_at"`
+    SetBy     string    `json:"set_by"`              // the person's name or the admin's
+    Delivered bool      `json:"delivered"`
+    Why       string    `json:"why,omitempty"`       // "no access" | "account changed"
+}
+type EntriesView struct {
+    Rows   []EntryRow `json:"rows"`    // every stored value, sorted by user
+    NotSet []string   `json:"not_set"` // population members without a value
+}
+func (h *Hub) SetPersonValue(ctx context.Context, instance, key, user string, raw json.RawMessage, actor string) (*MyEntry, error) // actor == user: self-service; else an admin (needs AdminOverride)
+func (h *Hub) ClearPersonValue(ctx context.Context, instance, key, user, actor string) error
+func (h *Hub) PurgePersonValues(ctx context.Context, actor, user string) []string // account deleted; audited `deleted`
+func (h *Hub) entryPopulationLocked(t *templates.Template, m *directory.Membership) Population
+func (h *Hub) deliveredEntriesLocked(t *templates.Template, key string, pop Population, uuids map[string]string) []settings.EntryOut
+```
+- **Order in `SetPersonValue`:**
+  1. outside `mu`: `People.Membership(ctx, now)`; an error → 503;
+  2. under `mu`: the instance is enabled, `key` is a `person_entered`
+     option, and `user` is in `entryPopulationLocked`, else 404 (one
+     answer for all three);
+  3. an admin actor without `AdminOverride` → 403;
+  4. `Registry.Parse` → 400 with the constraint;
+  5. `unique`: any other user's stored value equal in canonical form →
+     409 "already registered for <app> by another person" (the audit
+     names the holder);
+  6. store `{value, uuid: Membership.UUIDs[user], updated_at, set_by}`
+     and save `state.yaml`; an unchanged value stores nothing and audits
+     nothing;
+  7. audit `settings.person_value`;
+  8. outside `mu`: `TriggerDelivery(id, TriggerMembership, false)`.
+- **Routes:**
+  - people listener (caller from `X-Forwarded-User`, lowercased; CSRF
+    guard; `DisallowUnknownFields`; ≤ 4 KiB):
+    - `PUT /api/me/apps/{instance}/values/{key}` with `{"value": …}` →
+      200 `MyEntry`;
+    - `DELETE /api/me/apps/{instance}/values/{key}` → 204 (also when
+      nothing was set);
+  - Hub listener, `adminOnly`:
+    - `PUT /api/instances/{id}/settings/entries/{key}/{user}` with
+      `{"value": …}` → 200 `EntryRow`;
+    - `DELETE /api/instances/{id}/settings/entries/{key}/{user}` → 204.
+  - `peopleAppRoutes` becomes `{"GET /api/me/apps", "PUT
+    /api/me/apps/{instance}/values/{key}", "DELETE
+    /api/me/apps/{instance}/values/{key}"}`.
+- **Delivery** (Task 9's step 3, per option):
+  - delivered = population members whose stored `uuid` equals
+    `Membership.UUIDs[user]`, sorted by user, each value rendered;
+  - file/hook: `entries[<field>]`;
+  - env: `Render` of the delivered values' list with the option's
+    `render.join` / `format: json`; no usernames;
+  - claim/header: the person's own rendered value; others get none (the
+    attribute is cleared, the header absent);
+  - a stored value whose user is missing from `Membership.UUIDs`, or has
+    another uuid, is purged in the same run (audited `purged`, actor
+    `hub`), but only when `Membership` succeeded.
+
+- [ ] **Step 1: directory tests** (`membership_test.go`):
+  - `TestMembershipCarriesUUID`: the fake LLDAP's uuid appears in
+    `Membership.UUIDs`; the service account doesn't.
+  - `TestUserDeletedHook`: called with (actor, name) after the LLDAP
+    delete; not called when the delete fails.
+- [ ] **Step 2: hub tests** (`entries_test.go`, entryapp fixture; alice
+  and bob in `entryapp`, carol not):
+  - `TestSetOwnValue`: alice sets `ext_id` → stored with her uuid and
+    `set_by ""`; `MyApps(alice)` has the entry with `value`, `display`,
+    `input.pattern`, `unique: true`; audit `settings.person_value`,
+    target `entryapp/ext_id/alice`, actor `alice`, detail
+    `set: unset -> 0f1e…`.
+  - `TestEntryValidation`: `0F1E…` (upper case), 31 characters and a
+    control character → 400 naming the constraint; nothing stored; audited
+    `refused`.
+  - `TestEntryPopulationOnly`: carol → 404, and the same 404 for an
+    unknown key, an instance option's key and a disabled instance.
+    `MyApps(carol)` doesn't list entryapp.
+  - `TestEntryUnique`: bob sets alice's value → 409 whose text has no
+    `alice`; the audit entry names alice. Bob sets his own → OK.
+  - `TestEntryUniqueRace` (Review Focus 6): two concurrent saves of one
+    value by alice and bob → exactly one 200 and one 409, and one stored
+    value.
+  - `TestEntryUniqueCountsUndelivered`: alice leaves `entryapp`; bob
+    setting her value → still 409.
+  - `TestEntriesDataFile`: `ids.json` has
+    `entries.ext_id == [{user: alice, …}, {user: bob, …}]`, sorted, with
+    no `people.*.ext_id`; carol's stored value (inserted directly into
+    state) is absent.
+  - `TestLeaveRemovesFromDelivery` (Review Focus 6): alice leaves
+    `entryapp` → after the debounce (fake clock) `ids.json` lists only
+    bob, there is one restart, and alice's value is still in state
+    (`EntriesView` shows `delivered: false, why: "no access"`). She
+    rejoins → she is delivered again, with no re-entry.
+  - `TestEntryChangesDebounced`: five people saving within the window →
+    one delivery run and one restart.
+  - `TestEntryHook`: `nick` reaches the hook's stdin `entries.nick` with
+    trigger `membership_change`; no restart.
+  - `TestEntryEnvList` (entryenv fixture): `.env` has
+    `EXT_IDS='<alice's>,<bob's>'`; alice leaving rewrites it without her
+    and restarts once.
+  - `TestRecreatedAccountInheritsNoEntry` (Review Focus 6): alice is
+    deleted in the fake LLDAP and re-created (new uuid) → her old value is
+    not delivered from that moment; the next `Deliver` purges it, audited
+    `purged` with actor `hub`.
+  - `TestAccountDeletePurgesEntries`: `DeleteUser` through the directory
+    → alice's values are gone from every instance, audited `deleted` with
+    the admin actor, and delivery is triggered.
+  - `TestAdminOverrideAndClear`: an admin `PUT` with `admin_override` →
+    stored with `set_by: root`, and `MyApps(alice)` shows
+    `set_by_admin: true` without the admin's name. Without
+    `admin_override` (the `nick` option) → 403. An admin `DELETE` always
+    works. Uniqueness applies to the admin too.
+  - `TestClearOwnValue`: `ClearPersonValue` by alice → gone, audited
+    `cleared`, delivered without her.
+  - `TestEntriesInBackup`: a backup → restore round trip keeps
+    `Entered`; restore-as copies them; a restored value whose uuid no
+    longer matches is purged at the next delivery.
+  - `TestEntriesTemplateUpdate`: a tightened `pattern` drops the values
+    that no longer parse (audited `invalidated`); a newly `unique` option
+    with duplicates keeps the earliest `updated_at` only;
+    `SettingsIncompatibilities` lists both.
+  - `TestEntryDirectoryDown`: `Membership` fails → `PUT` is 503 and the
+    last delivered `ids.json` is kept.
+  - `TestPanelEntriesView`: rows for every stored value, with
+    `delivered` / `why`; `not_set` lists population members without one.
+    The preview of a draft (Task 13) doesn't touch entries.
+- [ ] **Step 3: httpapi tests** (`entries_test.go`):
+  - `TestPutOwnValueRoute`: `X-Forwarded-User: Alice` → alice's value;
+    200 `MyEntry`; an unknown body field → 400; a 5 KiB body → 413; no
+    CSRF header → refused as for the directory API.
+  - `TestOwnValueRoutesOnlyOnPeople`: both routes → 404 on the Hub
+    listener; the admin routes → 404 on the people listener.
+  - `TestAdminEntryRoutesAdminOnly`: a delegate → 403; a non-admin → 403.
+  - `TestPeopleListenerHasNoAppRoutes`: exactly the three
+    `peopleAppRoutes`.
+- [ ] **Step 4: run.**
+  `go test -race ./internal/directory/ ./internal/hub/ ./internal/httpapi/ -run 'TestMembershipCarriesUUID|TestUserDeletedHook|TestSetOwnValue|TestEntry|TestLeaveRemoves|TestRecreatedAccount|TestAccountDeletePurges|TestAdminOverride|TestClearOwnValue|TestEntries|TestPanelEntries|TestPutOwnValue|TestOwnValueRoutes|TestAdminEntryRoutes|TestPeopleListener'`
+  → FAIL.
+- [ ] **Step 5: implement.**
+  - The uniqueness check and the write happen in one `mu` section.
+  - The `Membership` call is outside `mu`. The population is re-checked
+    under `mu` against that snapshot.
+  - `PurgePersonValues` runs from `UserDeleted` and never holds `mu`
+    across a network call.
+- [ ] **Step 6: UI.**
+  - `web/myapps.js`: one row per entry with an input (`pattern`,
+    `maxlength`, `type=number` for int, a select for enum, a checkbox for
+    bool), Save and Clear, and a status line:
+    - "Not set";
+    - "Saved <date> · <applies text>", e.g. "picks it up within about a
+      minute (the app restarts)";
+    - "Set by an administrator on <date>";
+    - the 400 text, or the 409 "already registered … by another person".
+  - `web/settings.js`: per person-entered option, the "N of M people
+    with access have entered one" list with search, "Stored, not
+    delivered" with the reason, Clear, and Set/Edit only when
+    `admin_override`.
+  - Everything escaped; data-* attributes and delegated listeners only.
+- [ ] **Step 7: browser check** (harness, people and Hub listeners),
+  screenshots under `.superpowers/sdd/2026-11-02-app-settings-panel/`:
+  1. alice enters a value → "Saved"; a reload shows it;
+  2. bob enters the same value → the conflict message, without alice's
+     name;
+  3. the admin panel lists alice's value as delivered, and carol's
+     stored value as "no access";
+  4. the DOM of alice's My apps never contains bob's value.
+- [ ] **Step 8: verify.** `go vet ./... && go test -race ./... && gofmt -l .`
+  → PASS. Update CLAUDE.md (the people-listener rule: the three
+  `peopleAppRoutes`; the httpapi and hub rows).
+- [ ] **Step 9: commit.**
+  `hub+people: person-entered values (My apps input, unique, population-only delivery, audit)`.
+
 ## Phase 6 — templates
 
 ### Task 16: Schema + validator v3 (templates repo)
@@ -1720,7 +2063,9 @@ the reserved project 2/3 shapes), `tests/validate.py`
   - `test_size_default_canonical` (`"500GiB"` passes, `"500 gigs"` is
     refused);
   - `test_header_delivery_public_router_refused`;
-  - `test_env_delivery_hard_coded_refused`.
+  - `test_env_delivery_hard_coded_refused`;
+  - `test_person_entered_rules` (Task 3's `TestPersonEnteredRules`, case
+    for case, incl. the `access_group` requirement).
 - [ ] **Step 2: run.** `python3 tests/test_validate.py` → FAIL.
 - [ ] **Step 3: implement.**
   - Schema first; cross-checks in `check_settings`.
@@ -1784,6 +2129,27 @@ pilots:
     idempotently, and exits non-zero on any `occ` failure.
   - `tests/apps/nextcloud.sh` pipes a sample `HookInput` into it in the
     running container and asserts `occ config:app:get files default_quota`.
+- [ ] **Step 4a: Firefox Sync pilot** (spec call 32, example). Only if
+  `firefox-sync` is on the templates base (today it is on the
+  `tpl-sync-vikunja` branch `apps-sync-vikunja`); otherwise this step
+  goes with that branch once the base has contract v3.
+  - `auth.access_group: firefox_sync` (`group_access: false` and the
+    public routers stay).
+  - `mozilla_uid`: `string`, `^[0-9a-f]{32}$`, `min_len`/`max_len: 32`,
+    `person_entered`, `unique`, `admin_override`, `applies: restart`,
+    file `allowlist`.
+  - `FIREFOX_SYNC_ALLOWED_ACCOUNTS` → `extra_accounts`: an instance
+    `list` of the same pattern, `unique`, file `allowlist`.
+  - `files: [{name: allowlist, service: firefox-sync-init, mount: /portcullis, on_membership_change: restart}]`.
+  - `guard.sql` reads `/portcullis/allowlist.json` (psql `\set` from
+    the file, then `jsonb`) and installs the union of
+    `entries.mozilla_uid[].value` and `values.extra_accounts`. A missing
+    or unparsable file stops the start (fail closed).
+  - Update the notes ("Who can sync", "Identity"): members of the access
+    group enter their uid on My apps.
+  - `tests/apps/firefox-sync.sh`: a sample `allowlist.json` → only those
+    uids get a tokenserver row; a uid removed from the file loses its rows
+    at the next start.
 - [ ] **Step 5: verify.** Run `python3 tests/validate.py` (all templates)
   and `python3 tests/test_validate.py` → PASS. Run
   `tests/apps/immich.sh` (the config has `storageQuotaClaim`, `trash.days`
@@ -1842,6 +2208,15 @@ pilots:
   7. **People listener:** carol's `/api/me/apps` lists only her apps,
      with no other usernames in the body. `/api/instances/immich/settings`
      on people → 404.
+  8. **Person-entered values** (call 32; a fixture like Task 15A's
+     `entryapp`, or firefox-sync when Task 17 Step 4a ran):
+     - alice (in the access group) `PUT`s her id on people.<domain> →
+       after the debounce, the data file in the container lists it;
+     - bob `PUT`s the same id → 409, with no `alice` in the body;
+     - carol (not in the group) → 404;
+     - alice is removed from the group through the Hub → after the
+       debounce, the file no longer lists her and the app restarted once;
+       she is re-added → listed again.
 - [ ] **Step 2: run the job.** Run it on the `settings` branch
   (`workflow_dispatch`) until green. Keep the artifacts (screenshots,
   traces) on failure.
@@ -1852,11 +2227,12 @@ pilots:
 
 **Files:**
 - `docs/operations/hub.md`: "App settings": panel, per-group values,
-  resolution, who gets what, effects, secrets, deliveries status, retry;
+  resolution, who gets what, effects, secrets, deliveries status, retry,
+  person-entered values (what people see, clearing, admin override);
 - `docs/operations/groups.md`: privileged-option groups are guarding;
   groups deleted outside the Hub;
 - `docs/guides/adding-an-app.md`: declaring settings, files, hooks,
-  reload;
+  reload, person-entered options (the Firefox Sync example);
 - `docs/guides/manifest-reference.md`: the full `settings`, `files`,
   `hooks`, `reload` reference and validation list;
 - `docs/operations/testing.md`: `e2e-settings`;
@@ -1888,6 +2264,9 @@ pilots:
   3. A Nextcloud default-quota change applies live, with no restart (the
      container start time is unchanged).
   4. My apps shows only the caller's apps.
+  4a. If Firefox Sync is installed: a throwaway member enters a uid on My
+     apps; after the restart it is in the allowlist, and removing them
+     from the group takes it out at the next start.
   5. A secret is never in `docker logs portcullis-hub`, the audit or
      `state.yaml` (grep).
 - [ ] **Step 3: report** the results, and any upstream behaviour that
@@ -1926,6 +2305,16 @@ feature means registering it and removing it from that refusal.
   registered kind accepts it (project 3 `person_secret`).
 - **Reserved types:** `TypeFolder = "folder"`,
   `TypePersonSecret = "person_secret"`, `TypePersonID = "person_id"`.
+- **Scopes:** `ScopeInstance`, `ScopePerson`, `ScopeGroup`,
+  `ScopePersonEntered = "person_entered"` (implemented, Task 15A).
+  `Option.AdminOverride bool` (yaml `admin_override`) and
+  `Option.Unique` (person_entered: across people) belong to it.
+  `PersonEnteredTypes`, `PersonEnteredMaxLen = 256`.
+  - Project 3's `person_secret` is a *type* with no `scope`, so it never
+    combines with `person_entered`; keep it that way. The option keys
+    project 3 reserves (`hash`, `length`, `revoke_on_leave`,
+    `on_restore`, `pool`, `username`, `mount`) don't overlap
+    `admin_override`.
 - **Hook triggers.** `HookTriggers` is a `map[string]bool` holding
   `start`, `settings_change` and `membership_change`. Project 3 adds
   `credential_change` there, and adds the matching `hub.Trigger`.
@@ -1965,13 +2354,19 @@ feature means registering it and removing it from that refusal.
   - `DataFileDoc{Version, Instance, Values, People, Groups}`;
   - `SecretsFileDoc{Version, Instance, Secrets}`;
   - `HookInput{DataFileDoc; Trigger; Secrets}`;
-  - `GroupRecordOut{Group, Value}`.
+  - `GroupRecordOut{Group, Value}`;
+  - `DataFileDoc.Entries map[string][]EntryOut` with
+    `EntryOut{User, Value}` (person-entered values, delivered population
+    only). Project 3's `tsv` format (`EncodeTSV`) has to encode it too,
+    e.g. as tab-separated `entry <key> <user> <rendered>` lines.
 
   Project 3 adds a `Credentials` field to `HookInput`.
 
 **State (`internal/state`):**
 - `AppState.Settings map[string]InstanceSettings`.
-- `InstanceSettings{Ports, Values, Types, Person, Groups, Secrets}`.
+- `InstanceSettings{Ports, Values, Types, Person, Groups, Secrets, Entered}`.
+- `Entered map[string]map[string]EnteredValue` (key → lowercase user),
+  `EnteredValue{Value any; UUID string; UpdatedAt time.Time; SetBy string}`.
 - `PersonSetting{Default, Resolve, Rows []GroupValue}`.
 - `GroupValue{Group string; GroupID int; Value any}`.
 - `SecretMeta{UpdatedAt, Generated}`.
@@ -2002,6 +2397,17 @@ feature means registering it and removing it from that refusal.
     and `PrivilegeProblem(ctx, group) (string, error)`, set with
     `SetPeople`;
   - `(*Hub).PurgeGroupSettings(ctx, actor, name string, id int) []string`.
+  - `(*Hub).PurgePersonValues(ctx, actor, user string) []string`, wired to
+    `directory.Service.UserDeleted`.
+- Person-entered values (Task 15A):
+  - `(*Hub).SetPersonValue(ctx, instance, key, user string, raw json.RawMessage, actor string) (*MyEntry, error)`;
+  - `(*Hub).ClearPersonValue(ctx, instance, key, user, actor string) error`;
+  - `entryPopulationLocked(t, m) Population` (internal): call 27's
+    population, or the access group's members when the routes carry no
+    Portcullis identity.
+  - Changes are delivered as `TriggerMembership` (debounced). They never
+    use project 3's `credential_change` trigger, and credentials never
+    use this path.
 - Delivery:
   - `type Trigger string`: `TriggerStart`, `TriggerSave`,
     `TriggerMembership`, `TriggerRetry`;
@@ -2025,8 +2431,10 @@ feature means registering it and removing it from that refusal.
 
 **My apps (people listener, contract §5.1):**
 - `GET /api/me/apps` returns `{"apps": [MyApp]}`.
-- `MyApp{ID, Name, Icon, URL string; Values []MyValue; Credentials []MyCredential}`.
-  `Credentials` is always `[]` in project 1.
+- `MyApp{ID, Name, Icon, URL string; Values []MyValue; Entries []MyEntry; Credentials []MyCredential}`.
+  `Credentials` is always `[]` in project 1. `Entries` is always a list.
+- `MyEntry{Key, Label, Description, Applies string; Input EntryInput; Unique bool; Value any; Display string; SetByAdmin bool; UpdatedAt *time.Time}`,
+  `EntryInput{Type, Pattern, Format string; MinLen, MaxLen *int; Min, Max any; Unit string; Choices []templates.EnumOption}`.
 - `MyValue{Key, Label, Value, Applies string; Reason MyReason}`.
 - `MyReason{Source, Group string; Groups []string}`: the caller's own
   groups only.
@@ -2034,15 +2442,22 @@ feature means registering it and removing it from that refusal.
   with `MyInfoLine{Label, Value string}`.
 - `(*Hub).MyApps(ctx, user string) ([]MyApp, error)`.
 - The people-route allowlist is
-  `var peopleAppRoutes = []string{"GET /api/me/apps"}` in
-  `internal/httpapi/people_test.go`. Project 3 appends
+  `var peopleAppRoutes = []string{"GET /api/me/apps", "PUT /api/me/apps/{instance}/values/{key}", "DELETE /api/me/apps/{instance}/values/{key}"}`
+  in `internal/httpapi/people_test.go`. Project 3 appends
   `POST /api/me/apps/{instance}/credentials/{key}` and
-  `DELETE /api/me/apps/{instance}/credentials/{key}`.
-- UI: `web/myapps.js` renders `credentials[]` per app. Extra tabs go
-  through `PortcullisDirectory.show(el, {extraTabs: [{id, label, render}]})`.
+  `DELETE /api/me/apps/{instance}/credentials/{key}` (its plan's
+  three-entry list becomes five).
+- UI: `web/myapps.js` renders `entries[]` (input, save, clear, status)
+  and `credentials[]` per app. Extra tabs go through
+  `PortcullisDirectory.show(el, {extraTabs: [{id, label, render}]})`.
 
 **Directory (`internal/directory`):**
-- `Membership{Users map[string]map[string]int; Groups map[string]MemberGroup{ID int; Members []string}; Expired map[string]map[string]bool}`.
+- `Membership{Users map[string]map[string]int; Groups map[string]MemberGroup{ID int; Members []string}; Expired map[string]map[string]bool; UUIDs map[string]string}`.
+  - `UUIDs` (lowercase user → LLDAP uuid) and `lldap.User.UUID` are added
+    by Task 15A, with exactly the names project 3's Task 5 planned to
+    add. Project 3 consumes them instead of adding them.
+- `Service.UserDeleted func(ctx, actor, name string)`, called after a
+  successful `DeleteUser`, outside `s.mu`.
 - `(*Service).Membership(ctx, now)`.
 - `(*Service).PrivilegeProblem(ctx, group)`.
 - `App.PrivilegedGroups []string`: they become guarding groups.
@@ -2060,6 +2475,9 @@ feature means registering it and removing it from that refusal.
 - `GET|PUT /api/instances/{id}/settings`.
 - `POST /api/instances/{id}/settings/preview`.
 - `POST /api/instances/{id}/settings/retry`.
-- Audit actions: `settings.change`, `settings.purge`, `settings.retry`.
+- `PUT|DELETE /api/instances/{id}/settings/entries/{key}/{user}`
+  (person-entered values; `PUT` needs `admin_override`).
+- Audit actions: `settings.change`, `settings.purge`, `settings.retry`,
+  `settings.person_value`.
 - Project 3's admin credential routes sit beside these under
   `/api/instances/{id}/credentials`.
