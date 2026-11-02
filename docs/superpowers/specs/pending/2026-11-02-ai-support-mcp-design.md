@@ -21,18 +21,31 @@ People install many apps on Portcullis. They should be able to use those
 apps from an AI assistant, as themselves, without a support call.
 
 - An admin switches **AI support** on per app. The Hub then runs that app's
-  MCP companion (an MCP server for the app, declared by its template) and
-  publishes it at the app's own address, e.g.
-  `https://gitea.example.com/mcp`, behind the Portcullis gateway. There is
+  MCP companion and publishes it at the app's own address, e.g.
+  `https://gitea.example.com/mcp`, behind the Portcullis gateway. A
+  companion is always someone else's MCP server: the app's built-in one,
+  the upstream project's official server, or a vetted community server the
+  template pins. Portcullis doesn't write MCP servers for apps. There is
   no app-specific Hub code: everything an app needs is in its template.
+- Every template says in its manifest whether it has AI support:
+  `ai.mcp` names its companion, `ai.unsupported` gives the reason it has
+  none (optionally with an `alternative` the admin may evaluate). Nothing
+  is silently missing.
 - Every person who can use that app sees a **"Connect your AI"** card on
   `people.<domain>` with the URL to copy and step-by-step instructions for
   Claude desktop, Claude Code and other MCP clients.
 - One **"all my apps"** URL covers every app the person can use, so one
   setup is enough.
 - An **AI page** (`ai.<domain>`, a chat app template) lets people chat with
-  all their apps from the browser, using models from LiteLLM.
-- The Hub serves its own **Portcullis MCP**. For an admin it can do
+  all their apps from the browser, using the model providers the admin
+  configures: an installed LiteLLM, any OpenAI-compatible endpoint
+  (Ollama, vLLM, LocalAI, OpenRouter, …), the Anthropic API, Amazon
+  Bedrock, Azure OpenAI or anything else the chat front-end supports
+  natively. LiteLLM is one option, not a requirement.
+- The Hub serves its own **Portcullis MCP**, the only MCP server Portcullis
+  writes and maintains. It covers Portcullis and what Portcullis manages
+  (instances, users and groups, domains, settings, folders and the
+  doctor). For an admin it can do
   everything the admin can do in the Hub: explain, diagnose with the doctor,
   propose changes and apply them. For anyone else it covers only their own
   apps and settings, like the People page.
@@ -43,10 +56,14 @@ loses access when they lose access.
 
 ## Goals
 
-1. **Per-app AI support, declared by templates.** A template's `ai:` block
-   declares one or more MCP companions:
-   - which service runs it (a companion container, or the app itself when
-     the MCP server is built in);
+1. **Per-app AI support, declared by templates.** Every template has an
+   `ai:` block (call 11). It has exactly one of two forms:
+   `ai.unsupported` with the reason (optionally `ai.alternative`, a
+   community server the admin may evaluate), or `ai.mcp`, which declares
+   one or more MCP companions, each an upstream (built-in or official) or
+   vetted community server the template pins:
+   - which service runs it (a companion container running the upstream's
+     image, or the app itself when the MCP server is built in);
    - where it is published (a path on one of the instance's hostnames);
    - how the person's identity reaches it (identity mode, call 12);
    - which tools are writes and which need confirmation.
@@ -70,9 +87,16 @@ loses access when they lose access.
 4. **One "all my apps" endpoint.** `https://mcp.<domain>/mcp` merges every
    companion the person can use (plus their own Portcullis tools) into one
    MCP server. The tool list is computed per person.
-5. **The AI page.** A chat template (LibreChat, call 23) on `ai.<domain>`
-   signs people in through Keycloak, connects to the "all my apps"
-   endpoint as each person, and uses LiteLLM for models.
+5. **The AI page, with pluggable model providers.** A chat template
+   (LibreChat, call 23) on `ai.<domain>` signs people in through Keycloak
+   and connects to the "all my apps" endpoint as each person. Its models
+   come from the **model providers** the admin lists in Hub Settings → AI
+   (call 28): an installed LiteLLM instance, any OpenAI-compatible
+   endpoint, Anthropic, Amazon Bedrock, Azure OpenAI, OpenAI, Google —
+   whatever kinds the chat template declares it supports. Provider
+   credentials are write-only secrets. Each AI page instance offers the
+   providers the admin selects for it; giving groups different providers
+   means one AI page instance per audience (call 23).
 6. **The Portcullis MCP.** Served by the Hub at `https://hub.<domain>/mcp`
    (admins) and `https://people.<domain>/mcp` (everyone). Its tools mirror
    the Hub API, run through the same authorization code as the HTTP
@@ -100,10 +124,20 @@ loses access when they lose access.
 - **Agents without a person.** No `client_credentials` tokens, scheduled
   agents or service accounts acting on their own. Every MCP request has a
   signed-in person behind it.
-- **Hosting models.** LiteLLM (an existing template) is the model gateway;
-  this design only wires the AI page to it.
-- **Writing MCP servers for apps that have none.** Where no maintained
-  companion exists (call 31), the template has no `ai:` block yet.
+- **Hosting models, or requiring one gateway.** Models come from whatever
+  provider the admin configures (call 28). LiteLLM (an existing template)
+  is one option among them, not a dependency; nothing in the design
+  requires it.
+- **Writing MCP servers for apps.** Portcullis writes and maintains only
+  the Portcullis MCP (call 24), which covers Portcullis and what it
+  manages. It writes no per-app MCP server, adapter, wrapper, fork or
+  tool translation layer, in the templates or anywhere else. `mcp-gate`
+  and the aggregate (calls 4, 21) only proxy the tools an upstream server
+  defines; they never define app tools. Per-person token minting hooks
+  (call 13) are template glue that call the app's own CLI or API to create
+  or delete a credential; they are not MCP servers and never see tool
+  traffic. An app with no built-in, official or vetted community server
+  declares `ai.unsupported` with the reason (call 31).
 - **Per-tool allowlists edited by admins.** The template declares tool
   classes (write, confirm, never); admins choose read-only or read-write.
   A per-tool admin editor is left for later.
@@ -143,6 +177,16 @@ loses access when they lose access.
   memberships, path groups and the deny group keep applying.
 - **App-specific Hub code.** Minting a Gitea token, turning on Home
   Assistant's MCP integration: all of it lives in the template (hooks).
+  The same holds for model providers: the Hub knows provider kinds
+  generically and the chat template renders its own configuration.
+- **Portcullis-maintained app MCP servers.** A template that "adds AI
+  support" by shipping its own MCP server code, or an image Portcullis
+  builds, is refused in review (call 11). Templates point only at
+  upstream or vetted community servers.
+- **Provider credentials leaking.** A provider API key, a cloud access
+  key or a virtual key never appears in an API answer, `state.yaml`, a
+  log, the audit, an op record, the rendered chat configuration file or a
+  tool result (call 28).
 - **Silent failure.** A companion that won't start, a mint hook that fails
   or a revocation that doesn't complete is shown on the instance's AI tab
   with the reason. A revocation that failed in the app is retried and never
@@ -226,7 +270,13 @@ loses access when they lose access.
   and firefly-iii `header-auth`; mattermost `forward-auth`.
 - `litellm` exists (`instances: multi`, native-oidc admin UI; its
   OpenAI-compatible API has no forward-auth and is keyed by virtual keys,
-  `tpl-new/litellm/manifest.yaml`).
+  `tpl-new/litellm/manifest.yaml`). It is one possible model provider
+  for the AI page (call 28), not a prerequisite.
+- No template has an `ai:` block today; the 44 templates (40 in
+  `tpl-new`, plus homeassistant, oxicloud, mattermost in `tpl-ha-oxi`, and
+  vikunja in `tpl-sync-vikunja`) each get one (call 31). 15 of them are
+  ArtCraft browser apps (`*craft`, `craft-anything`: "running entirely in
+  the browser … files stay on your device").
 - The compose allowlist refuses `profiles`, `deploy` and others in
   templates (contract §3). The Hub's own override isn't bound by that
   list.
@@ -372,7 +422,12 @@ Keycloak bearer tokens; none of the surveyed companions relies on that
 ### Chat front-ends
 
 Sources: docs.openwebui.com/features/extensibility/mcp,
-librechat.ai/docs/configuration/librechat_yaml/object_structure/mcp_servers.
+librechat.ai/docs/configuration/librechat_yaml/object_structure/mcp_servers,
+…/object_structure/custom_endpoint, …/object_structure/azure_openai,
+…/object_structure/model_specs, …/object_structure/interface,
+librechat.ai/docs/configuration/pre_configured_ai,
+librechat.ai/docs/configuration/authentication/OAuth2-OIDC/keycloak,
+librechat.ai/docs/features/admin_panel (fetched 2026-11-02).
 
 - **Open WebUI** (≥ 0.6.31): native MCP over Streamable HTTP only (works
   with 2026-07-28); auth modes None, Bearer, Session, OAuth (reuse the SSO
@@ -386,7 +441,38 @@ librechat.ai/docs/configuration/librechat_yaml/object_structure/mcp_servers.
   `client_secret`, `scope`, PKCE; DCR when no client is given), per-user
   OAuth tokens ("Each user is prompted to authenticate"), callback
   `${DOMAIN_SERVER}/api/mcp/<server-name>/oauth/callback`, `oauthPrompt:
-  on_use`, OpenID login, custom OpenAI-compatible endpoints (LiteLLM).
+  on_use`, OpenID login.
+- **LibreChat model providers.**
+  - Pre-configured (native) endpoints: OpenAI, Anthropic, Google, AWS
+    Bedrock, Assistants, and Azure OpenAI (`endpoints.azureOpenAI` with a
+    `groups` list of deployments, "The list must contain at least one
+    group", each with its own `apiKey`). Each native endpoint is
+    configured once per LibreChat instance (Azure can hold several
+    deployment groups).
+  - Custom endpoints (`endpoints.custom[]`, any number): `name` (the
+    endpoint's title in the selector), `apiKey`, `baseURL`, `models`
+    (`default` list, optional `fetch`), optional `headers`. "Ollama,
+    Mistral AI, Openrouter, and a multitude of other third-party
+    services"; any OpenAI-compatible API (LiteLLM, vLLM, LocalAI) fits.
+  - `apiKey` and `baseURL` take a literal, an env reference (`${VAR}`,
+    "highly recommended") or `user_provided` (each person enters their own
+    key in LibreChat).
+- **LibreChat per-user or per-group model access.**
+  - `librechat.yaml` documents **no per-user, per-group or per-role
+    restriction** of endpoints or models. The only scoping is `tenantId`
+    (multi-tenant deployments). `modelSpecs.group` only arranges the
+    menu; `showInMenu: false` hides a spec but doesn't gate it.
+  - `OPENID_REQUIRED_ROLE` (with `…_TOKEN_KIND`, `…_PARAMETER_PATH`, e.g.
+    `realm_access.roles`) gates **sign-in** only.
+  - The **LibreChat Admin Panel** (a separate `admin-panel` service,
+    LibreChat ≥ 0.8.5) stores per-role, per-group and per-user overrides
+    of the same configuration ("a research group gets extra endpoints").
+    Its groups are created and managed inside LibreChat; no sync from
+    OpenID or LDAP groups is documented.
+  - Custom-endpoint `headers` can pass `{{LIBRECHAT_USER_ID}}`,
+    `{{LIBRECHAT_USER_EMAIL}}` or `{{LIBRECHAT_USER_ROLE}}` to an
+    auth-aware proxy, and with `models.fetch` such a proxy can "return
+    per-user model lists".
 
 ### MCP gateways
 
@@ -437,12 +523,49 @@ first; templates stay declarative; images pinned by digest.
   rights in each app; the AI page is a chat app template (Open WebUI or
   LibreChat) wired to the person's companions and to LiteLLM for models; a
   single "all my apps" connector URL so one setup covers everything.
+  (LiteLLM as the only model source is superseded by the 2026-11-02
+  decision below: model providers are pluggable.)
 - "We should also have our own MCP so that admins can get help configuring
   the app": a Portcullis MCP served by the Hub. "It should be fully
   featured": it can do everything the signed-in admin can do in the Hub
   (explain, diagnose via the doctor, propose AND apply changes), not just
   suggest. Ordinary users get only their own apps and settings (People-page
   scope).
+- **Pluggable model providers** (2026-11-02): "LiteLLM should be an
+  option; admins might provide different ways to access AI." So:
+  - the AI page's model access is admin-configured and pluggable; LiteLLM
+    (our template) is one option, not a requirement;
+  - Hub Settings → AI lists one or more model providers: an installed
+    LiteLLM instance, any OpenAI-compatible endpoint (Ollama, vLLM,
+    LocalAI, OpenRouter, …), the Anthropic API, Amazon Bedrock, Azure
+    OpenAI, and whatever else the chat front-end supports natively
+    (calls 23, 28);
+  - provider credentials are write-only secrets, handled like the domains
+    tokens;
+  - which groups may use a provider: per provider if the front-end
+    supports it, otherwise documented. LibreChat stays the front-end; it
+    has no per-group model restriction that follows Portcullis groups, so
+    groups get different providers through separate AI page instances,
+    each with its own access group (call 23).
+- **No Portcullis-written app MCPs; AI support declared in the manifest**
+  (2026-11-02): "We are not creating our own MCPs (unless for Portcullis
+  itself and what it manages). Apps that do not support it should have it
+  declared in the manifest (or use alternatives as you suggested)." So:
+  - Portcullis writes and maintains only the Portcullis MCP, covering what
+    it manages: instances, users and groups, domains, settings, folders
+    and the doctor (calls 24, 25);
+  - app companions are always upstream (built into the app, or the
+    project's official server) or a vetted community server the template
+    pins by digest;
+  - every template declares AI support explicitly: `ai.mcp` when
+    supported, `ai.unsupported: "<reason>"` otherwise; the validator
+    requires one or the other, so nothing is silently missing; an optional
+    `ai.alternative` points at a community server the admin may evaluate
+    (call 11);
+  - per-person token minting hooks stay as template-declared glue, not an
+    MCP (call 13);
+  - the survey and pilots list which templates get `ai.mcp` and which
+    `ai.unsupported`, with the reason (call 31).
 
 ## Calls made while drafting (check these)
 
@@ -729,10 +852,35 @@ AI page (LibreChat) ────────────────┤
       host; the companion's other paths are not reachable through it.
     - Confirmation pages (call 2) are browser pages with their own
       sign-in; a confirmation id is not a credential.
-11. **How templates declare companions (`ai:` block, contract v3).**
+11. **How templates declare AI support (`ai:` block, contract v3).**
     Generic, no per-app Hub code; reuses the settings spec's `hooks:` and
-    `applies`:
-    - `ai.companions[]`:
+    `applies`. *(User decision 2026-11-02.)*
+    - **Every template has an `ai:` block, in exactly one of two forms.**
+      The validator (Hub and `validate.py`) refuses a template with no
+      `ai:` block, with both forms, or with neither:
+      - `ai.mcp[]`: the template has AI support through one or more
+        companions (below);
+      - `ai.unsupported: "<reason>"`: one sentence shown to the admin on
+        the AI tab and in the catalog ("No maintained MCP server exists
+        for Paperless-ngx"). Optionally `ai.alternative: {name, source,
+        note}`: a community server the admin may evaluate on their own
+        (`source` a URL; `note` e.g. "community, 248★, last change Nov
+        2025, API token per person"). The Hub only displays it, never
+        installs it, and labels it "not vetted by Portcullis".
+    - **Companions are never Portcullis code.** A companion is the app's
+      built-in MCP server (`kind: builtin`), or a `kind: companion`
+      service running the upstream's published image (`upstream:
+      official`) or a vetted community server's published image
+      (`upstream: community`), pinned by digest. `source` (the project's
+      URL) is required for both. Templates can't build images (compose
+      `build` is already refused, contract §3), and template review
+      (CONTRIBUTING) refuses an MCP server, adapter, wrapper or fork
+      written for Portcullis, inside or outside the template repo.
+      "Vetted" means a template reviewer checked the project (maintained,
+      licence, multi-user identity that fits an identity mode in call 12,
+      no shared admin identity) and pinned a release; the template's docs
+      page records why.
+    - `ai.mcp[]` (one entry per companion):
       - `name` (`^[a-z][a-z0-9-]{0,30}$`, unique in the template), `label`;
       - `service`: the compose service that serves MCP. Either a companion
         service only for AI (`kind: companion`), which the Hub's override
@@ -751,8 +899,9 @@ AI page (LibreChat) ────────────────┤
         enforcement and the UI). Patterns are matched on the companion's
         own tool names;
       - `aggregate` (default true; forced false for `app_oauth`);
-      - `upstream: official|community` and `source` (URL), shown in the
-        Hub ("community-maintained companion");
+      - `upstream: official|community` and `source` (URL, required),
+        shown in the Hub ("community-maintained companion"); `builtin`
+        companions are `official`;
       - `protocol`: MCP versions the companion speaks (informational; the
         gate negotiates).
     - `ai.on_change`: an optional hook run with `{enabled, mode}` on stdin
@@ -764,7 +913,10 @@ AI page (LibreChat) ────────────────┤
       (`true|false`; `<COMPANION>` upper-cased, `-` → `_`),
       `PORTCULLIS_MCP_GATE_IP` (core's value),
       so a companion's flags can come from env with no hook.
-    - Validator (Hub and `validate.py`): the service exists; a
+    - Validator (Hub and `validate.py`): exactly one of `ai.mcp` and
+      `ai.unsupported` (a non-empty string ≤ 200 characters);
+      `ai.alternative` only with `ai.unsupported`; `ai.on_change` only
+      with `ai.mcp`; for each companion, `source` is set; the service exists; a
       `companion` service has no Traefik labels and doesn't join
       `portcullis-proxy` itself (the override adds it, with the alias
       `portcullis-mcp-<instance-id>-<companion>`; aliases with that prefix
@@ -772,6 +924,9 @@ AI page (LibreChat) ────────────────┤
       collide with another companion's; hooks named exist; an
       `app_oauth` companion is `builtin` and has a `revoke` hook; an
       `identity_headers` companion declares a `caller_secret` (call 12).
+    - A template with `ai.unsupported` has no AI tab switch: the tab shows
+      the reason and the alternative, and the instance never appears in
+      `mcp-gate.json` or a People card.
 12. **How the person's identity reaches each companion (identity modes).**
     The template picks one per companion:
     - **`app_token`** — a per-person app credential, minted by the Hub
@@ -783,8 +938,12 @@ AI page (LibreChat) ────────────────┤
       Nextcloud app passwords), `scopes` per mode (passed to the hook),
       and `revoke` hook. The credential exists only for this purpose
       (named `portcullis-ai-…` in the app), only for people who used AI on
-      that app, and never leaves Portcullis. Used by: Gitea, Nextcloud,
-      Mattermost, most community companions.
+      that app, and never leaves Portcullis. The `mint` and `revoke`
+      hooks are template glue: a short script that calls the app's own
+      CLI or API (e.g. `gitea admin user generate-access-token`) and prints
+      the result. They are not MCP servers, never receive tool traffic and
+      define no tools. Used by: Gitea, Nextcloud, Mattermost, most
+      community companions.
     - **`identity_headers`** — the gate sends `X-Forwarded-User`,
       `X-Forwarded-Email`, `X-Auth-Request-Groups` and the person's
       `X-Forwarded-Attr-*` headers (same values group-gate would send) and
@@ -1016,7 +1175,8 @@ AI page (LibreChat) ────────────────┤
       URLs are rendered from `GET /api/me/apps`, escaped, with copy
       buttons; the connector name is the instance label, lowercased and
       reduced to `[a-z0-9-]` for the Claude Code command.
-23. **The AI page: a LibreChat template, models from LiteLLM.**
+23. **The AI page: a LibreChat template, models from the admin's
+    providers.** *(Model access: user decision 2026-11-02.)*
     - Template `ai-chat` (`instances: multi`, default host `ai.<domain>`),
       LibreChat pinned by digest, with its MongoDB and Meilisearch
       services, native-oidc sign-in through a Keycloak client keyed on
@@ -1025,8 +1185,12 @@ AI page (LibreChat) ────────────────┤
       model endpoints are declared in `librechat.yaml`, which the template
       renders from Hub settings (declarative, no Hub code); Open WebUI
       adds MCP servers only through the admin UI and its OAuth tools can't
-      be model defaults. The builder may switch to Open WebUI if its
-      declarative configuration covers the same, with the same contract.
+      be model defaults. Pluggable providers don't change this: LibreChat
+      supports every provider kind the user named (native OpenAI,
+      Anthropic, Google, Bedrock, Azure OpenAI; custom endpoints for
+      LiteLLM and any OpenAI-compatible API), with keys as env references.
+      The builder may switch to Open WebUI if its declarative
+      configuration covers the same, with the same contract.
     - It declares a second Keycloak client entry with `ai_client: true`
       (new manifest flag): confidential, redirect
       `https://{{HOST_AI}}/api/mcp/portcullis/oauth/callback`, which the
@@ -1036,15 +1200,69 @@ AI page (LibreChat) ────────────────┤
       `oauth` with that client and `scope: mcp:all`, `oauthPrompt:
       on_start`. Each person connects once (consent), then it is silent
       while their Keycloak session or offline session lasts.
-    - Models: settings `litellm_url` (`string`, `format: url`) and
-      `litellm_key` (`secret`; a LiteLLM virtual key the admin creates in
-      LiteLLM with the models and budget they want) render a custom
-      OpenAI-compatible endpoint. LibreChat sends the person's id as
-      `user`, so LiteLLM's spend tracking is per person.
-    - The page shows, under the model picker, the provider LiteLLM routes
-      the chosen model to (from the model name; the admin's choice), so
-      people know where their app data goes.
-24. **The Portcullis MCP in the Hub.**
+    - **Models come from the providers in Hub Settings → AI** (call 28).
+      The template declares which provider kinds it can render and how
+      many of each:
+      `ai.chat.provider_kinds: {openai_compatible: many, litellm: many,
+      azure_openai: many, anthropic: one, openai: one, google: one,
+      bedrock: one}` (LibreChat: custom endpoints are a list, Azure has
+      deployment groups, the other native endpoints exist once per
+      instance). Each AI page instance has a Hub-rendered setting
+      `providers` (a multi-select of provider names whose kind the
+      template supports; default: every such provider; selecting two
+      `one`-kind providers of the same kind is a `400`).
+    - **Delivery, no provider-specific Hub code.** For the selected
+      providers the Hub writes the data file `ai-providers.json` (name,
+      label, kind, base URL, region, deployments, model list, `fetch`,
+      `credentials` mode; never a secret) and puts each secret in the
+      instance's env file only (0600) as
+      `PORTCULLIS_AI_PROVIDER_<NAME>_<FIELD>` (`<NAME>` upper-cased, `-`
+      → `_`; reserved variables, contract §3.1). The template's start hook
+      renders `librechat.yaml` from the data file: `litellm` and
+      `openai_compatible` become `endpoints.custom[]` entries (`name` =
+      the provider's label, `baseURL`, `models`), `azure_openai` an
+      `endpoints.azureOpenAI.groups[]` entry, the others LibreChat's
+      native endpoint variables. Every key is an env reference
+      (`apiKey: "${PORTCULLIS_AI_PROVIDER_ANTHROPIC_US_KEY}"`), so no
+      secret is ever written into `librechat.yaml`. A provider with
+      `credentials: per_person` renders `apiKey: user_provided`: each
+      person enters their own key in LibreChat and the Hub stores none.
+      A provider change re-renders and restarts the selected instances
+      (shown in the save preview).
+    - **Which groups may use a provider.** LibreChat has no per-group
+      model or endpoint restriction that follows Portcullis groups:
+      `librechat.yaml` has none (only `tenantId`), `OPENID_REQUIRED_ROLE`
+      gates sign-in only, and the Admin Panel's per-group overrides use
+      groups managed inside LibreChat, not LLDAP (Constraints, Chat
+      front-ends). So v1 restricts providers **per AI page instance**:
+      everyone who can open an instance can use every provider selected
+      for it. To give a group other providers, an admin adds another
+      `ai-chat` instance (`instances: multi`, e.g. `ai-research` on
+      `ai-research.<domain>`) with its own access group and provider
+      selection. Hub Settings → AI shows, per provider, the AI page
+      instances using it and their access groups ("Anthropic API (US):
+      ai (users_ai-chat, 41 people), ai-research (users_ai-research, 6)").
+      The admin guide documents this. The LibreChat Admin Panel isn't
+      shipped (a second admin sign-in and a second group list).
+    - **Per-person accounting** is the provider's business: for
+      LiteLLM, a virtual key per AI page instance gives per-instance
+      budgets; LibreChat's `user` value (its own user id, not the LLDAP
+      username — builder verifies what it sends) can be used for spend
+      tracking. Headers with `{{LIBRECHAT_USER_EMAIL}}` aren't used
+      (identity is never email).
+    - The endpoint selector shows each provider's admin-written label
+      (e.g. "Anthropic API (US)", "Ollama on the office GPU"), so people
+      know where their app data goes.
+    - Its own `ai:` block is `ai.unsupported: "The AI page itself: it is
+      an MCP client, not an app the AI drives"` next to `ai.chat` (the
+      validator allows `ai.chat` only with `ai.unsupported`).
+24. **The Portcullis MCP in the Hub.** *(User decision 2026-11-02: the
+    only MCP server Portcullis writes and maintains.)* Its scope is
+    Portcullis and what Portcullis manages: instances (lifecycle,
+    hostnames, settings, policy, backups, AI switches), users and groups,
+    domains, Hub settings, folders and the doctor, certificates. It has
+    no tools that act inside an app (no "create a Gitea issue"): app
+    actions go only through that app's upstream companion.
     - A third listener, `HUB_MCP_ADDR` (`:8890`), reachable only on the
       `portcullis` network (no Traefik router points at it). It requires
       `X-Portcullis-MCP-Secret` = `HUB_MCP_GATE_SECRET` (a file secret ≥ 32
@@ -1058,7 +1276,7 @@ AI page (LibreChat) ────────────────┤
       listener. No CSRF guard there (no browser can reach it), strict
       JSON-RPC bodies.
     - Built on the official MCP Go SDK server (Streamable HTTP, stateless,
-      2026-07-28 with 2025-11-25 fallback). Each tool is a thin adapter
+      2026-07-28 with 2025-11-25 fallback). Each tool is a thin Hub function
       that resolves the `directory.Caller` with `CallerFor` and calls the
       **same Hub / directory methods** the HTTP handlers call (not HTTP
       loopback), so authorization, guardrails, locks, errors and audit are
@@ -1092,7 +1310,7 @@ AI page (LibreChat) ────────────────┤
     | Users and groups | `directory_overview` R, `get_person` R, `create_person` W (invite by email; the link is never returned), `update_person` W, `set_details` W, `require_passkey` D, `remove_passkeys` D, `set_password` U, `delete_person` D, `create_group` W, `delete_group` D, `add_member` W, `remove_member` W, `set_member_expiry` W, `set_group_rule` W, `preview_rule` R, `add_exception` W, `remove_exception` W, `convert_group` W (preview + apply), `create_field` W, `update_field` W, `delete_field` D, `set_permission` W, `import_review` R, `import_apply` W, `audit_recent` R |
     | Doctor and folders (project 2) | `doctor_findings` R, `doctor_scan` W, `doctor_preview_fix` R, `doctor_apply_fix` W (D when the plan touches data), `doctor_mute` W, `list_folders` R, `folder_preview` R, `folder_apply` W |
     | Certificates (certificates spec) | `list_certificates` R, `revoke_certificate` D, `sign_in_history` R |
-    | AI | `ai_status` R, `set_ai_support` W, `set_ai_mode` W, `revoke_ai_access` D (one person or everyone, one instance), `ai_activity` R |
+    | AI | `ai_status` R, `set_ai_support` W, `set_ai_mode` W, `revoke_ai_access` D (one person or everyone, one instance), `ai_activity` R, `list_model_providers` R (secrets as `{set, updated_at}`), `save_model_provider` W (no secret fields), `set_model_provider_secret` U, `delete_model_provider` D |
     | Hub settings | `get_hub_settings` R, `save_hub_settings` W (AI settings included; turning the Portcullis admin MCP off is allowed, turning it on from MCP is not, since it would already be on) |
 
     People (`people.<domain>/mcp`, also in the aggregate as
@@ -1136,10 +1354,50 @@ AI page (LibreChat) ────────────────┤
       is on), for people on/off (default on).
     - Connection length (call 9), rate limits (call 18), allowed origins
       (call 6).
+    - **Model providers** *(user decision 2026-11-02)*: a list the AI page
+      instances draw from (call 23); empty on a new install (an AI page
+      with no provider shows "No model provider configured; ask your
+      administrator"). Each entry:
+      - `name` (`^[a-z][a-z0-9-]{0,30}$`, unique), `label` (shown to
+        people), `kind`, `models` (a list, or "fetch from the provider"
+        where the kind allows), `credentials: admin` (default) or
+        `per_person` (each person enters their own key in the chat app;
+        offered when the front-end supports it, LibreChat's
+        `user_provided`);
+      - per kind:
+        - `litellm`: pick an installed LiteLLM instance; the Hub fills in
+          its API URL; secret: a virtual key the admin creates in LiteLLM
+          with the models and budget they want;
+        - `openai_compatible`: base URL (Ollama, vLLM, LocalAI,
+          OpenRouter, Mistral, a LiteLLM not installed here, …); secret:
+          API key (optional: Ollama needs none);
+        - `anthropic`, `openai`, `google`: secret: API key; optional base
+          URL where the front-end allows one;
+        - `bedrock`: region; secrets: access key id and secret access
+          key;
+        - `azure_openai`: instance name (or base URL), API version,
+          deployments (deployment → model); secret: API key;
+      - kinds appear only when an installed chat template declares them
+        (`ai.chat.provider_kinds`); a new front-end that supports more
+        kinds brings them with it, and the Hub adds a kind (its field
+        list) without per-app code.
+    - **Provider secrets are write-only, like the domains tokens.**
+      Entered in `type=password` inputs, cleared on submit, never rendered
+      back: the API answers `{set, updated_at}` per secret field. Stored
+      in the Hub's secret store (as secret settings, settings spec), never
+      in `state.yaml`, logs, the audit, op records, errors or answers, and
+      written only into the env files of the AI page instances that
+      selected the provider (call 23). Replace or delete, never read
+      back. A provider in use can be deleted only after it is deselected
+      from every instance (`409` listing them).
+    - The data-egress note per provider: "What people send on the AI page,
+      and what their apps return to it, goes to <label>."
     - A reachability note: "Claude desktop and claude.ai connect from
       Anthropic's servers (160.79.104.0/21): `auth.<domain>` and every app
       host must be reachable from the internet."
-    - Audited `settings.ai`.
+    - Audited `settings.ai`; provider changes `ai.provider.add`,
+      `ai.provider.update`, `ai.provider.secret` (which field was
+      replaced, never the value), `ai.provider.delete`.
 29. **Instances, backups, restore, delete** (contract §11).
     - AI configuration (switch, mode per companion) is per instance, in
       `state.yaml`, and part of an instance backup like its settings.
@@ -1155,10 +1413,15 @@ AI page (LibreChat) ────────────────┤
     - The default instance and other instances get distinct resources
       (their own hosts) and scopes (`mcp:<instance-id>.<companion>`).
 30. **Contract changes (integration-contracts.md first).**
-    - §3 / §3.1: the `ai:` block, reserved variables, reserved names
-      (`portcullis-mcp-*` routers and aliases), the `scale: 0` rule for
-      companion services, `ai_client` on `keycloak_clients[]`. Template
-      contract v3 (with the settings spec's §13).
+    - §3 / §3.1: the `ai:` block, required in every template (`ai.mcp`
+      or `ai.unsupported`, optional `ai.alternative`, `ai.chat` with
+      `provider_kinds` for chat templates), the rule that companions are
+      upstream or vetted community images pinned by digest, reserved
+      variables (`PORTCULLIS_AI_*`, `PORTCULLIS_AI_PROVIDER_*`), the
+      `ai-providers.json` data file, reserved names (`portcullis-mcp-*`
+      routers and aliases), the `scale: 0` rule for companion services,
+      `ai_client` on `keycloak_clients[]`. Template contract v3 (with the
+      settings spec's §13).
     - §4: `mcp` is a core host. `mcp-gate.json` (format, fail-closed
       rules) next to the policy file; `mcp-credentials.json`.
     - §5: the `portcullis-mcp-…` router, MCP routes on `hub`, `people`,
@@ -1170,28 +1433,61 @@ AI page (LibreChat) ────────────────┤
     - §9.5: `via` and `client` in audit entries; the new actions
       (`ai.enable`, `ai.disable`, `ai.mode`, `ai.credential.mint`,
       `ai.credential.revoke`, `ai.connection.revoke`, `ai.confirm`,
-      `settings.ai`).
+      `settings.ai`, `ai.provider.*`).
     - §11: AI state per instance, backups without credentials, restore and
       delete steps above.
     - New section "AI support (MCP)" (numbered when written, after the
       sections projects 1–3 add): resources, token rules (call 6), identity
       modes and hook stdin/stdout formats, confirmation semantics, the
       gate ⇄ Hub internal API, the access-log format.
-31. **Companion conversions and pilots.**
+31. **AI declaration for every template, and the pilots.** *(User
+    decision 2026-11-02: no Portcullis-written app MCPs; every template
+    declares `ai.mcp` or `ai.unsupported`.)* Every template gets its `ai:`
+    block in the same change that makes the validator require it, so the
+    real-templates CI stays green.
 
-    | Template | Companion | Mode | Notes |
+    `ai.mcp` (upstream or vetted community companion):
+
+    | Template | Companion (upstream) | Identity mode | Notes |
     |---|---|---|---|
-    | gitea | `gitea-mcp` (official) | `app_token`, `token {credential}`, minted with `gitea admin user generate-access-token --raw` (read: `read:*` scopes; read-write: `write:*`), revoked through the API | **Pilot 1.** `confirm: [delete_*, "*:delete"]` per its consolidated `method` tools (builder maps names), read-only via `GITEA_READONLY` too |
-    | grafana | `mcp-grafana` (Grafana) | `identity_headers` + `caller_secret` (`--server-auth-token`), `GRAFANA_FORWARD_HEADERS=X-Forwarded-User` | **Pilot 2.** `--disable-write` in read-only; never `--allow-grafana-url-override`; `confirm` on delete tools |
-    | homeassistant | built-in MCP Server | `app_oauth` | **Pilot 3.** `on_change` hook turns the integration on/off and its "administrators only" option off; `revoke` hook per person |
-    | mattermost | built-in (agents plugin) | `app_token` (personal access token via `mmctl`) | after the pilots, if the plugin is in the template |
-    | nextcloud | `nextcloud-mcp-server` (community) | `app_token`, Basic with an app password (`occ user:auth-tokens:add`) | after the pilots |
-    | gitlab | built-in | builder verifies tier and auth first | later |
-    | paperless, immich, vikunja, jellyfin, firefly-iii | community only, small or stale | — | no `ai:` block until a maintained companion exists |
-    | ai-chat (new) | — | AI client | call 23 |
+    | gitea | `gitea-mcp` (official, gitea.com/gitea) | `app_token`, `token {credential}`, minted with `gitea admin user generate-access-token --raw` (read: `read:*` scopes; read-write: `write:*`), revoked through the API | **Pilot 1.** `confirm: [delete_*, "*:delete"]` per its consolidated `method` tools (builder maps names), read-only via `GITEA_READONLY` too |
+    | grafana | `mcp-grafana` (official, Grafana org) | `identity_headers` + `caller_secret` (`--server-auth-token`), `GRAFANA_FORWARD_HEADERS=X-Forwarded-User` | **Pilot 2.** `--disable-write` in read-only; never `--allow-grafana-url-override`; `confirm` on delete tools. If the builder can't make Grafana trust the headers from the companion only ("Left to the builder"), it becomes `ai.unsupported` with that reason |
+    | homeassistant | built-in MCP Server integration (official) | `app_oauth` | **Pilot 3.** `on_change` hook turns the integration on/off and its "administrators only" option off; `revoke` hook per person |
+    | mattermost | built-in to `mattermost-plugin-agents` (official) | `app_token` (personal access token via `mmctl`) | After the pilots. If the template doesn't ship the plugin, `ai.unsupported: "Needs the Mattermost Agents plugin, which this template doesn't install"` until it does |
+    | nextcloud | `cbcoutinho/nextcloud-mcp-server` (community, vetted: AGPL-3.0, ~5k commits, multi-user Basic pass-through) | `app_token`, Basic with an app password (`occ user:auth-tokens:add`) | After the pilots; `upstream: community` shown to the admin |
+    | gitlab | built-in MCP server (official) | builder verifies | Later. `ai.mcp` only if the builder verifies it works on the edition the template runs with per-person identity; otherwise `ai.unsupported` naming the missing tier or auth |
 
-    Community companions are allowed only pinned by digest, with
-    `upstream: community` shown to the admin.
+    `ai.unsupported` with an `alternative` (a community server exists but
+    isn't vetted: small, stale or no per-person identity that fits call
+    12):
+
+    | Template | Reason (shown to the admin) | `alternative` |
+    |---|---|---|
+    | paperless | No official MCP server; community servers are small and not vetted by Portcullis | `nloui/paperless-mcp` (248★, last change Nov 2025, API token) |
+    | immich | No official MCP server; community servers are small, and Immich has no way for an admin to issue an API key for another person | `barryw/ImmichMCP` (55★, API key) |
+    | vikunja | No official MCP server; community servers are not vetted by Portcullis | `democratize-technology/vikunja-mcp` (114★, API token) |
+    | jellyfin | No official MCP server; community servers are small and not vetted by Portcullis | `jaredtrent/jellyfin-mcp` (46★, API key) |
+    | firefly-iii | No official MCP server; community servers are not vetted by Portcullis | `etnperlong/firefly-iii-mcp` (91★, PAT or OAuth) |
+
+    `ai.unsupported` without an alternative:
+
+    | Template(s) | Reason |
+    |---|---|
+    | cadcraft, craft-anything, deckcraft, designcraft, effectcraft, figcraft, filmcraft, gridcraft, lightcraft, pdfcraft, photocraft, soundcraft, texturecraft, vectorcraft, wordcraft (ArtCraft) | Runs entirely in the browser; files stay on the person's device, so there is nothing on the server for an AI to reach |
+    | vaultwarden | A password vault: Portcullis never puts passwords or secrets in front of an AI model |
+    | litellm | A model gateway: add it as a model provider in Hub Settings → AI instead |
+    | ai-chat (new) | The AI page itself: it is an MCP client, not an app the AI drives (call 23) |
+    | docs | A public site with no signed-in person to act as |
+    | plex | Signs people in with Plex accounts, not Portcullis identities; no MCP server known |
+    | adguard, pihole | No MCP server known, and every member of the access group is a full administrator of the app (no per-person rights to act with) |
+    | headscale, netbird | No official MCP server; network control planes stay out of AI reach until one exists |
+    | actual-budget, cloudbeaver, dokuwiki, guacamole, kanboard, matrix, mealie, oxicloud, scrutiny, wiki | No official or vetted community MCP server known (surveyed 2026-11-02) |
+
+    The builder re-checks the "no server known" rows when writing the
+    blocks (a release may have added one) and records the reason on each
+    template's docs page. Moving a template from `ai.unsupported` to
+    `ai.mcp` later is a normal template update (shown in the update
+    preview); it never means Portcullis writes the server.
 32. **Testing.**
     - Unit: token validation matrix (wrong `aud`, two MCP audiences, wrong
       `azp`, expired, `none` alg, unknown `kid`, low `acr`, person not in
@@ -1205,6 +1501,17 @@ AI page (LibreChat) ────────────────┤
       list, like `TestProtectedAccountsParity`); non-admins get no admin
       tool; `TestPeopleListenerHasNoAppRoutes` gains exactly the call-22
       routes; audit entries carry `via` and `client`.
+    - Templates: the validator refuses a template without an `ai:` block,
+      with both `ai.mcp` and `ai.unsupported`, with an empty reason, with
+      `ai.alternative` next to `ai.mcp`, or with a companion lacking
+      `source`; `TestRealTemplates*` loads every real template's block.
+    - Providers: secret fields never appear in any API answer, the
+      audit, op records, `state.yaml`, `ai-providers.json` or the
+      rendered `librechat.yaml` (a test sets a marker secret and greps
+      every output, like `TestTokenNotEchoed`); two `one`-kind providers
+      of the same kind on one instance are a `400`; deleting a provider in
+      use is a `409`; an AI page instance gets only the providers selected
+      for it.
     - e2e (CI, real Keycloak 26.8.1, Traefik, gate): an MCP client
       (Go SDK) signs in with PKCE against `portcullis-ai-claude-code`,
       lists and calls Gitea tools as alice and sees only alice's repos;
@@ -1218,7 +1525,9 @@ AI page (LibreChat) ────────────────┤
       for a member of one.
     - Manual (documented checklist): Claude desktop custom connector with
       "Use your own OAuth client", Claude Code `claude mcp add` +
-      `/mcp`, the AI page.
+      `/mcp`, the AI page with at least two provider kinds (e.g. an
+      OpenAI-compatible Ollama and the Anthropic API) and with a LiteLLM
+      instance.
 
 ### Builder-check rulings
 
@@ -1298,7 +1607,7 @@ gets built. All are **Controller's call**.
 # gitea/manifest.yaml (excerpt)
 ai:
   on_change: ai-apply              # optional; here the env variables suffice
-  companions:
+  mcp:                             # the companions (upstream servers only)
     - name: gitea
       label: Gitea
       kind: companion
@@ -1379,7 +1688,7 @@ env:
   - key: MCP_GRAFANA_SERVER_TOKEN
     generate: random
 ai:
-  companions:
+  mcp:                             # the companions (upstream servers only)
     - name: grafana
       label: Grafana
       kind: companion
@@ -1387,6 +1696,7 @@ ai:
       port: 8000
       router: grafana
       upstream: official
+      source: https://github.com/grafana/mcp-grafana
       modes: [read_only, read_write]
       default_mode: read_only
       identity:
@@ -1402,7 +1712,7 @@ Home Assistant (its own OAuth server, abridged):
 ```yaml
 ai:
   on_change: mcp-integration       # turns HA's MCP Server integration on/off
-  companions:
+  mcp:                             # the companions (upstream servers only)
     - name: homeassistant
       label: Home Assistant
       kind: builtin
@@ -1411,11 +1721,66 @@ ai:
       path: /api/mcp
       router: homeassistant        # people connect to https://ha.example.com/api/mcp
       upstream: official
+      source: https://www.home-assistant.io/integrations/mcp_server/
       modes: [read_write]
       identity:
         mode: app_oauth
         revoke: mcp-revoke         # ends the person's HA tokens
       aggregate: false
+```
+
+Paperless-ngx (no vetted server; declared, not missing):
+
+```yaml
+ai:
+  unsupported: "No official MCP server; community servers are small and not vetted by Portcullis"
+  alternative:                     # displayed only, never installed by the Hub
+    name: paperless-mcp
+    source: https://github.com/nloui/paperless-mcp
+    note: "community, 248★, last change Nov 2025, API token per person"
+```
+
+An ArtCraft app:
+
+```yaml
+ai:
+  unsupported: "Runs entirely in the browser; files stay on the person's device, so there is nothing on the server for an AI to reach"
+```
+
+## Example: model providers and the AI page
+
+Hub Settings → AI → Model providers (as the API answers it; secrets are
+write-only):
+
+```json
+[
+  {"name": "litellm", "label": "LiteLLM (office)", "kind": "litellm",
+   "instance": "litellm", "models": {"fetch": true}, "credentials": "admin",
+   "secrets": {"key": {"set": true, "updated_at": "2026-11-02T10:00:00Z"}},
+   "used_by": [{"instance": "ai-chat", "group": "users_ai-chat"}]},
+  {"name": "ollama-gpu", "label": "Ollama on the office GPU", "kind": "openai_compatible",
+   "base_url": "http://gpu.lan:11434/v1", "models": {"list": ["llama3.3:70b", "qwen3:32b"]},
+   "credentials": "admin", "secrets": {"key": {"set": false}},
+   "used_by": [{"instance": "ai-chat", "group": "users_ai-chat"}]},
+  {"name": "anthropic-us", "label": "Anthropic API (US)", "kind": "anthropic",
+   "models": {"list": ["<model ids the admin lists>"]}, "credentials": "admin",
+   "secrets": {"key": {"set": true, "updated_at": "2026-11-02T10:05:00Z"}},
+   "used_by": [{"instance": "ai-research", "group": "users_ai-research"}]}
+]
+```
+
+The `ai-research` instance (6 people) selected `anthropic-us`; the default
+`ai-chat` instance (41 people) selected `litellm` and `ollama-gpu`. The
+`librechat.yaml` the hook renders for `ai-chat` holds only env
+references, e.g. for the custom endpoint:
+
+```yaml
+endpoints:
+  custom:
+    - name: "Ollama on the office GPU"
+      baseURL: "http://gpu.lan:11434/v1"
+      apiKey: "${PORTCULLIS_AI_PROVIDER_OLLAMA_GPU_KEY}"   # empty value: none needed
+      models: {default: ["llama3.3:70b", "qwen3:32b"], fetch: false}
 ```
 
 ## Example: the People page card
@@ -1561,15 +1926,22 @@ the other people-scope tools.
     and the realm's offline-session settings the Hub sets per AI client.
   - Hub env: `HUB_MCP_ADDR`, the gate secret file, the age recipient.
 - **Templates (`porelli/portcullis-templates`).** Schema and `validate.py`
-  for the `ai:` block, reserved names and variables, `ai_client`; the
-  conversions in call 31; the new `ai-chat` template; companion images
-  pinned by digest; template docs pages show "AI support" with the
-  companion and its upstream.
+  for the `ai:` block (required in every template: `ai.mcp` or
+  `ai.unsupported`), reserved names and variables, `ai_client`; an
+  `ai:` block for every template as listed in call 31; the new `ai-chat`
+  template (`ai.chat.provider_kinds`, the hook that renders
+  `librechat.yaml` from `ai-providers.json`); companion images are the
+  upstream's or a vetted community project's, pinned by digest, never
+  built for Portcullis (CONTRIBUTING gains the vetting checklist); template
+  docs pages show "AI support" with the companion and its upstream, or
+  the reason it has none and the alternative.
 - **Docs (`porelli/portcullis-docs`).** The contract changes (call 30)
   first; a user guide "Connect your AI" (the card's content, with
   screenshots); an admin guide "AI support" (switches, modes, identity
   modes, what is logged, the reachability note, prompt-injection
-  guidance); the template author guide for `ai:` and hooks.
+  guidance, model providers and how to give groups different providers
+  with separate AI page instances); the template author guide for `ai:`
+  (`mcp`, `unsupported`, `alternative`, `chat`) and hooks.
 - **App settings panel (project 1).** Reused: hooks with stdin and the
   `applies` levels, data files, the population rule (call 27 there),
   `GET /api/me/apps` (gains `ai`), secret handling. This project needs
@@ -1596,6 +1968,15 @@ the other people-scope tools.
 
 ## Left to the builder
 
+- LibreChat: the exact native-endpoint variables per provider kind
+  (Anthropic, OpenAI, Google, Bedrock) and whether each accepts a base URL;
+  whether Azure deployment groups and custom endpoints accept every value
+  as an env reference; what LibreChat sends as `user` to OpenAI-compatible
+  endpoints. If a kind can't take its secret from an env reference, the
+  template doesn't declare that kind.
+- The internal address the Hub fills in for a `litellm` provider (its
+  public API host, or a network the AI page instance shares with it,
+  within the template network rules).
 - Exact JSON shapes of `mcp-gate.json`, `mcp-credentials.json`, the
   access log and the gate ⇄ Hub internal API (within call 6/13/17/19
   rules), and the Hub admin API for AI (`GET/PUT /api/instances/{id}/ai`,
@@ -1632,4 +2013,8 @@ None. The four questions of the draft were settled: connection lifetime
 (call 33, a default the admin edits), certificate-only apps (call 8: no
 exception, standing rule), a separate AI group (call 14: no, approved
 playback), writes through "all my apps" (call 20: the same per-app mode,
-accepted "one setup covers everything").
+accepted "one setup covers everything"). The user's 2026-11-02 feedback
+settled model access (pluggable providers, calls 23 and 28; per-group
+access through AI page instances, since LibreChat has no per-group model
+restriction that follows Portcullis groups) and app MCPs (upstream or
+vetted community only, declared per template, calls 11 and 31).
