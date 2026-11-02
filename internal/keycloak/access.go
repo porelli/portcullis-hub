@@ -164,6 +164,7 @@ func (c *Client) EnsureClientAccess(ctx context.Context, s AccessSpec) error {
 	// Look the group up first (an LDAP sync imports it), but strip every
 	// other grant whether or not that worked.
 	group, gerr := c.findGroup(ctx, tok, s.Group)
+	lookupFailed := gerr != nil // transient: don't strip the real group's grant
 	if gerr == nil && group == nil {
 		if serr := c.syncLDAPGroups(ctx, tok); serr != nil {
 			gerr = fmt.Errorf("client %s: group %s not in Keycloak and the LDAP group sync failed: %w", s.ClientID, s.Group, serr)
@@ -175,9 +176,11 @@ func (c *Client) EnsureClientAccess(ctx context.Context, s AccessSpec) error {
 	if gerr == nil && group != nil {
 		keep = str(group.ID)
 	}
-	mapped, err := c.stripGroupGrants(ctx, tok, uuid, role, keep, s)
-	if err != nil {
-		return err
+	mapped := false
+	if !lookupFailed {
+		if mapped, err = c.stripGroupGrants(ctx, tok, uuid, role, keep, s); err != nil {
+			return err
+		}
 	}
 	if err := c.stripUserGrants(ctx, tok, uuid, role, s); err != nil {
 		return err
@@ -805,7 +808,7 @@ func (c *Client) lastExecution(ctx context.Context, tok, alias string) (*execRep
 	}
 	var last *execRep
 	for _, e := range execs {
-		if e != nil && (e.Level == nil || *e.Level == 0) && (last == nil || (e.Index != nil && last.Index != nil && *e.Index > *last.Index)) {
+		if e != nil && (e.Level == nil || *e.Level == 0) && (last == nil || later(e, last)) {
 			last = e
 		}
 	}
@@ -927,4 +930,13 @@ func (c *Client) deleteAccessFlows(ctx context.Context, tok, clientID, keep stri
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// later reports whether execution a sorts after b at the same level: by
+// priority when Keycloak returns it, else by index.
+func later(a, b *execRep) bool {
+	if a.Priority != nil && b.Priority != nil {
+		return *a.Priority > *b.Priority
+	}
+	return a.Index != nil && b.Index != nil && *a.Index > *b.Index
 }

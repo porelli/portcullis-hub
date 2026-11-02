@@ -44,6 +44,9 @@ func liveSetup(t *testing.T) (*liveEnv, *keycloak.Client) {
 	if base == "" {
 		t.Skip("PORTCULLIS_KEYCLOAK_LIVE_URL not set")
 	}
+	if os.Getenv("PORTCULLIS_KEYCLOAK_LIVE_WIPE") != keycloak.Realm {
+		t.Skip("this test deletes realm " + keycloak.Realm + ": set PORTCULLIS_KEYCLOAK_LIVE_WIPE=" + keycloak.Realm + " to confirm")
+	}
 	user, pass := os.Getenv("PORTCULLIS_KEYCLOAK_LIVE_ADMIN"), os.Getenv("PORTCULLIS_KEYCLOAK_LIVE_PASSWORD")
 	if user == "" {
 		user, pass = "admin", "admin"
