@@ -35,6 +35,24 @@ func HasControlChars(s string) bool {
 // splice into .env files, compose overrides, the group-gate policy file or
 // the UI's HTML.
 func ValidateManifest(m *Manifest) error {
+	switch m.Instances {
+	case "", InstancesSingle, InstancesMulti:
+	default:
+		return fmt.Errorf("instances %q must be multi or single", m.Instances)
+	}
+	for _, k := range manifestKeys(m) {
+		if ReservedVar(k) {
+			return fmt.Errorf("%s is an instance variable the Hub sets — a manifest may not declare it", k)
+		}
+	}
+	clientKeys := map[string]string{}
+	for _, c := range m.Clients {
+		k := VarSuffix(c.ClientID)
+		if o, ok := clientKeys[k]; ok {
+			return fmt.Errorf("keycloak clients %s and %s map to the same %s%s", o, c.ClientID, varClientIDPrefix, k)
+		}
+		clientKeys[k] = c.ClientID
+	}
 	for _, st := range m.Settings {
 		if !EnvKeyRe.MatchString(st.Key) {
 			return fmt.Errorf("invalid setting key %q", st.Key)
@@ -88,6 +106,21 @@ func ValidateManifest(m *Manifest) error {
 		return err
 	}
 	return ValidatePublicAccess(a)
+}
+
+// manifestKeys are the env, setting and port keys a manifest declares.
+func manifestKeys(m *Manifest) []string {
+	var ks []string
+	for _, v := range m.Env {
+		ks = append(ks, v.Key)
+	}
+	for _, s := range m.Settings {
+		ks = append(ks, s.Key)
+	}
+	for _, p := range m.Ports {
+		ks = append(ks, p.Key, p.Key+"_BIND")
+	}
+	return ks
 }
 
 // validateNativeLogin: auth.native_login is for apps without SSO (method

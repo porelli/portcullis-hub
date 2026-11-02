@@ -14,7 +14,10 @@ const PortalVersion = 1
 
 // PortalApp is one enabled app as the landing portal shows it.
 type PortalApp struct {
+	// ID is the instance id, Template the template id (both the template
+	// id for the default instance).
 	ID          string             `json:"id"`
+	Template    string             `json:"template"`
 	Name        string             `json:"name"`
 	Description string             `json:"description"`
 	Icon        string             `json:"icon"`
@@ -37,13 +40,13 @@ type PortalDocument struct {
 // a missing template has no name/URL to show). Caller holds h.mu (read).
 func (h *Hub) portalLocked() PortalDocument {
 	doc := PortalDocument{Version: PortalVersion, Apps: []PortalApp{}}
-	for i := range h.templates {
-		t := &h.templates[i]
+	for i := range h.instances {
+		t := &h.instances[i]
 		if !t.Enabled {
 			continue
 		}
 		m := t.Manifest
-		a := PortalApp{ID: t.ID, Name: m.Name, Description: m.Description, Icon: m.Icon, Category: m.Category,
+		a := PortalApp{ID: t.ID, Template: t.TemplateID, Name: instanceName(t), Description: m.Description, Icon: m.Icon, Category: m.Category,
 			URLs: append([]templates.AppURL{}, m.URLs...), AuthMethod: m.Auth.Method, AdminGroup: m.Auth.AdminGroup}
 		if h.accessLocked(t).groupAccess(t) {
 			a.AccessGroup = m.Auth.AccessGroup
@@ -69,4 +72,13 @@ func writePortal(path string, doc PortalDocument) error {
 		return err
 	}
 	return fsutil.WriteFileAtomic(path, append(b, '\n'), 0644)
+}
+
+// instanceName is the template's name, followed by " (<instance-id>)" for
+// instances other than the default one (contract §10).
+func instanceName(t *templates.Template) string {
+	if t.IsDefault() {
+		return t.Manifest.Name
+	}
+	return t.Manifest.Name + " (" + t.ID + ")"
 }

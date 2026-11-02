@@ -215,15 +215,15 @@ func (h *Hub) runAttrSync(ctx context.Context, kick <-chan struct{}) {
 	}
 }
 
-// DirectoryApps lists every template's groups for the Users page
+// DirectoryApps lists every instance's groups for the Users page
 // (group suggestions and "used by").
 func (h *Hub) DirectoryApps() []directory.App {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	out := make([]directory.App, 0, len(h.templates))
-	for i := range h.templates {
-		t := &h.templates[i]
-		out = append(out, directory.App{ID: t.ID, Name: t.Manifest.Name, Enabled: t.Enabled,
+	out := make([]directory.App, 0, len(h.instances))
+	for i := range h.instances {
+		t := &h.instances[i]
+		out = append(out, directory.App{ID: t.ID, Name: instanceName(t), Enabled: t.Enabled,
 			AccessGroup: t.Manifest.Auth.AccessGroup, AdminGroup: t.Manifest.Auth.AdminGroup})
 	}
 	return out

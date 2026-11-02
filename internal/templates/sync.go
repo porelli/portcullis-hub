@@ -18,15 +18,22 @@ import (
 // running container never sees a half-written directory. Symlinks and
 // special files are skipped (never follow out of the template); .git is
 // skipped.
+//
+// All instances of a template share this copy (contract §3): it lives
+// under the template id.
 func SyncFiles(t *Template, root string) error {
-	if !ValidID(t.ID) {
+	id := t.TemplateID
+	if id == "" {
+		id = t.ID
+	}
+	if !ValidID(id) {
 		return os.ErrInvalid
 	}
 	if err := os.MkdirAll(root, 0755); err != nil {
 		return err
 	}
-	dest := filepath.Join(root, t.ID)
-	stage, err := os.MkdirTemp(root, "."+t.ID+".stage-*")
+	dest := filepath.Join(root, id)
+	stage, err := os.MkdirTemp(root, "."+id+".stage-*")
 	if err != nil {
 		return err
 	}

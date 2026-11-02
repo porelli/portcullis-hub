@@ -135,6 +135,39 @@ func TestRealTemplates(t *testing.T) {
 		if len(tpl.Subdomains) == 0 {
 			t.Errorf("%s routes no subdomain", tpl.ID)
 		}
+		if tpl.HostForm != FormV2 || len(tpl.HostRouters) == 0 {
+			t.Errorf("%s: rule form %q, host routers %v (want contract v2)", tpl.ID, tpl.HostForm, tpl.HostRouters)
+		}
+		if !tpl.Manifest.Multi() {
+			continue
+		}
+		// A second instance resolves completely.
+		hosts := map[string]string{}
+		for r, sub := range tpl.HostRouters {
+			hosts[r] = sub + "-t.example.org"
+		}
+		v, err := tpl.Instance(tpl.ID+"-t", hosts, "example.org")
+		if err != nil {
+			t.Errorf("%s: %v", tpl.ID, err)
+			continue
+		}
+		for _, u := range v.Manifest.URLs {
+			if strings.Contains(u.URL, "{{") {
+				t.Errorf("%s: url %s not expanded", tpl.ID, u.URL)
+			}
+		}
+		for _, c := range v.Manifest.Clients {
+			for _, u := range append([]string{c.RedirectURI}, c.RedirectURIs...) {
+				if strings.Contains(u, "{{") || (strings.HasPrefix(u, "https://") && !strings.Contains(u, "-t.example.org")) {
+					t.Errorf("%s: client %s redirect %s", tpl.ID, c.ClientID, u)
+				}
+			}
+		}
+		for r := range tpl.HostRouters {
+			if v.InstanceEnv[tpl.HostVars[r]] != hosts[r] {
+				t.Errorf("%s: %s not in the instance env", tpl.ID, tpl.HostVars[r])
+			}
+		}
 	}
 	if strings.Join(ids, ",") != strings.Join(want, ",") {
 		t.Errorf("loaded %d/%d templates:\n got  %v\n want %v", len(ids), len(want), ids, want)

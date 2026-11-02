@@ -37,9 +37,19 @@ func resolvePortBindings(t *templates.Template, values map[string]string) []port
 			bind = "0.0.0.0"
 		}
 		pb := portBinding{AppID: t.ID, Key: p.Key, Bind: bind, Protocol: proto, NetworkModeHost: p.NetworkModeHost}
-		// Port ranges (e.g. coturn media relays) — not user-configurable.
+		// Port ranges (e.g. coturn media relays): the setting, else the
+		// manifest's range.
 		if p.Range != "" {
-			if a, b, ok := parsePortRange(p.Range); ok {
+			r := p.Range
+			if v, ok := values[p.Key]; ok {
+				if v == "" && !p.Required {
+					continue // disabled
+				}
+				if v != "" {
+					r = v
+				}
+			}
+			if a, b, ok := parsePortRange(r); ok {
 				pb.RangeStart, pb.RangeEnd = a, b
 				out = append(out, pb)
 				continue
@@ -70,7 +80,7 @@ func parsePortRange(s string) (int, int, bool) {
 	}
 	a, err1 := strconv.Atoi(strings.TrimSpace(parts[0]))
 	b, err2 := strconv.Atoi(strings.TrimSpace(parts[1]))
-	if err1 != nil || err2 != nil || a <= 0 || b < a {
+	if err1 != nil || err2 != nil || a <= 0 || b < a || b > 65535 {
 		return 0, 0, false
 	}
 	return a, b, true

@@ -340,7 +340,7 @@ func (h *Hub) checkOverrideService(t *templates.Template, name string, v interfa
 				return nil, fmt.Errorf("volumes must be a list")
 			}
 			for _, item := range list {
-				if err := h.checkOverrideVolume(t.ID, item); err != nil {
+				if err := h.checkOverrideVolume(templateDir(t), item); err != nil {
 					return nil, err
 				}
 			}

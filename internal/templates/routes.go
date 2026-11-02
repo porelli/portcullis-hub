@@ -19,10 +19,18 @@ var (
 	routerLabelRe     = regexp.MustCompile(`^traefik\.(http|tcp|udp)\.routers\.([^.]+)\.(.+)$`)
 	middlewareLabelRe = regexp.MustCompile(`^traefik\.(?:http|tcp)\.middlewares\.([^.]+)\.`)
 	serviceLabelRe    = regexp.MustCompile(`^traefik\.http\.services\.([^.]+)\.`)
-	// hostArgRe is the only accepted Host() argument: a literal DNS label
-	// followed by the core domain variable (optionally with a default).
+	// traefikNameRe matches every label defining a router, service or
+	// middleware (any protocol); group 1 is the name.
+	traefikNameRe = regexp.MustCompile(`^traefik\.(?:http|tcp|udp)\.(?:routers|services|middlewares)\.([^.]+)\.`)
+	// hostVarArgRe is the contract v2 Host() argument (§3.1): the host
+	// router's hostname variable with the default subdomain on
+	// portcullis.local, e.g. ${PORTCULLIS_HOST_GRAFANA:-grafana.portcullis.local}.
+	hostVarArgRe = regexp.MustCompile(`^\$\{(PORTCULLIS_HOST_[A-Z0-9_]+):-([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)\.portcullis\.local\}$`)
+	// hostArgRe is the conversion-period Host() argument (instances: single
+	// only): a literal DNS label followed by the core domain variable
+	// (optionally with a default).
 	hostArgRe = regexp.MustCompile(`^(?i)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)\.\$\{PORTCULLIS_DOMAIN(?:(?::?[-?])[^${}]*)?\}$`)
-	// Matchers that could route hosts outside "<label>.${PORTCULLIS_DOMAIN}".
+	// Matchers that could route hosts outside the template's own hosts.
 	forbiddenMatchers = map[string]bool{"hostregexp": true, "hostheader": true, "hostsni": true, "hostsniregexp": true}
 )
 
@@ -37,6 +45,35 @@ type Routes struct {
 	// TraefikServices maps compose service → Traefik HTTP services its
 	// labels define (sorted).
 	TraefikServices map[string][]string
+	// Form is the rule form of every router: FormV2
+	// (${PORTCULLIS_HOST_<ROUTER>:-<sub>.portcullis.local}) or FormLegacy
+	// (<sub>.${PORTCULLIS_DOMAIN}); "" without HTTP routers.
+	Form string
+	// HostRouters maps each host router (contract §3.1: the router whose
+	// rule is a Host() alone; legacy form: else the first router routing
+	// the subdomain) to its default subdomain.
+	HostRouters map[string]string
+	// HostVars maps each host router to its hostname variable
+	// (PORTCULLIS_HOST_<ROUTER>).
+	HostVars map[string]string
+	// Names are the Traefik router, service and middleware names the
+	// template's labels define (any protocol), for per-instance renaming.
+	Names map[string]bool
+}
+
+// Rule forms (Routes.Form).
+const (
+	FormV2     = "v2"
+	FormLegacy = "legacy"
+)
+
+// HostVar is the hostname variable of host router name (contract §3.1):
+// PORTCULLIS_HOST_ + the name upper-cased, "-" and "." as "_".
+func HostVar(router string) string { return "PORTCULLIS_HOST_" + VarSuffix(router) }
+
+// VarSuffix upper-cases s with "-" and "." turned into "_".
+func VarSuffix(s string) string {
+	return strings.NewReplacer("-", "_", ".", "_").Replace(strings.ToUpper(s))
 }
 
 // RouterInfo is what the Hub needs to know about one HTTP router.
@@ -47,6 +84,12 @@ type RouterInfo struct {
 	// "cloud.${PORTCULLIS_DOMAIN:-portcullis.local}".
 	HostArgs   []string
 	Subdomains []string
+	// HostVars are the hostname variables of the Host() arguments
+	// (parallel to HostArgs; "" in the legacy form).
+	HostVars []string
+	// HostOnly: the rule is a single Host() and nothing else (a host
+	// router, contract §3.1).
+	HostOnly bool
 	// Paths are the rule's Path()/PathPrefix() matchers.
 	Paths []RulePath
 	// Opaque are matchers no path-overlap reasoning is possible for
@@ -83,7 +126,13 @@ const ReservedPrefix = "portcullis-public-"
 //   - every HTTP router has a rule, and every way the rule can match is
 //     restricted by Host(); there must be no top-level "||" branch, negation
 //     or default rule that matches any host
-//   - every Host() argument is a literal `<label>.${PORTCULLIS_DOMAIN…}`
+//   - every Host() argument is `${PORTCULLIS_HOST_<ROUTER>:-<sub>.portcullis.local}`
+//     (contract v2) or a literal `<label>.${PORTCULLIS_DOMAIN…}` (legacy),
+//     one form for the whole file; every hostname variable belongs to a
+//     host router named after it, with one default per variable and one
+//     variable per default subdomain
+//   - Traefik router, service and middleware names contain no "_" (the
+//     per-instance prefix separator)
 //   - HostRegexp, HostHeader, HostSNI and HostSNIRegexp are rejected, as are
 //     TCP routers (they bypass forward-auth)
 //   - a traefik.enable=true service must declare an HTTP router (otherwise
@@ -97,7 +146,8 @@ func ParseRoutes(compose []byte) (*Routes, error) {
 	if err := yaml.Unmarshal(compose, &doc); err != nil {
 		return nil, fmt.Errorf("compose.yml: %w", err)
 	}
-	r := &Routes{Routers: map[string][]string{}, Info: map[string]*RouterInfo{}, TraefikServices: map[string][]string{}}
+	r := &Routes{Routers: map[string][]string{}, Info: map[string]*RouterInfo{}, TraefikServices: map[string][]string{},
+		HostRouters: map[string]string{}, HostVars: map[string]string{}, Names: map[string]bool{}}
 	subs := map[string]bool{}
 	names := make([]string, 0, len(doc.Services))
 	for name := range doc.Services {
@@ -117,6 +167,12 @@ func ParseRoutes(compose []byte) (*Routes, error) {
 		httpRouters := map[string]*router{}
 		tsvcs := map[string]bool{}
 		for k, v := range labels {
+			if m := traefikNameRe.FindStringSubmatch(k); m != nil {
+				if strings.Contains(m[1], "_") {
+					return nil, fmt.Errorf("service %s: Traefik name %s may not contain _ (reserved for the per-instance prefix)", svc, m[1])
+				}
+				r.Names[m[1]] = true
+			}
 			if m := middlewareLabelRe.FindStringSubmatch(k); m != nil && strings.HasPrefix(m[1], ReservedPrefix) {
 				return nil, fmt.Errorf("service %s: middleware name %s is reserved for the Hub (prefix %s)", svc, m[1], ReservedPrefix)
 			}
@@ -203,6 +259,8 @@ func ParseRoutes(compose []byte) (*Routes, error) {
 			info := rt.info
 			info.Service, info.Rule = svc, rt.rule
 			info.HostArgs, info.Subdomains, info.Paths, info.Opaque = p.hostArgs, p.hosts, p.paths, p.opaque
+			info.HostVars = p.hostVars
+			info.HostOnly = p.matchers == 1 && len(p.hostArgs) == 1 && p.negatedHost == 0
 			r.Info[name] = &info
 		}
 		if len(rnames) > 0 {
@@ -213,7 +271,103 @@ func ParseRoutes(compose []byte) (*Routes, error) {
 		r.Subdomains = append(r.Subdomains, s)
 	}
 	sort.Strings(r.Subdomains)
+	if err := r.resolveHostRouters(); err != nil {
+		return nil, err
+	}
 	return r, nil
+}
+
+// resolveHostRouters checks the rule form and finds the host routers.
+func (r *Routes) resolveHostRouters() error {
+	names := make([]string, 0, len(r.Info))
+	for name := range r.Info {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		for _, v := range r.Info[name].HostVars {
+			form := FormLegacy
+			if v != "" {
+				form = FormV2
+			}
+			if r.Form != "" && r.Form != form {
+				return fmt.Errorf("router %s: a template uses one rule form for all its routers — ${PORTCULLIS_HOST_<ROUTER>:-<sub>.portcullis.local} or (conversion period) <sub>.${PORTCULLIS_DOMAIN}, never both", name)
+			}
+			r.Form = form
+		}
+	}
+	if r.Form == FormV2 {
+		varSub := map[string]string{}    // variable → default subdomain
+		subVar := map[string]string{}    // default subdomain → variable
+		varRouter := map[string]string{} // variable → host router
+		for _, name := range names {
+			ri := r.Info[name]
+			for i, v := range ri.HostVars {
+				sub := ri.Subdomains[i]
+				if d, ok := varSub[v]; ok && d != sub {
+					return fmt.Errorf("router %s: %s is written with two defaults (%s and %s.portcullis.local)", name, v, d+".portcullis.local", sub)
+				}
+				if o, ok := subVar[sub]; ok && o != v {
+					return fmt.Errorf("router %s: hostname %s.portcullis.local has two hostname variables (%s, %s) — a hostname has one host router", name, sub, o, v)
+				}
+				varSub[v], subVar[sub] = sub, v
+			}
+			if !ri.HostOnly {
+				continue
+			}
+			v := ri.HostVars[0]
+			if want := HostVar(name); v != want {
+				return fmt.Errorf("router %s: a host router uses its own hostname variable %s, not %s", name, want, v)
+			}
+			if o, ok := varRouter[v]; ok {
+				return fmt.Errorf("routers %s and %s map to the same hostname variable %s", o, name, v)
+			}
+			varRouter[v] = name
+			r.HostRouters[name], r.HostVars[name] = ri.Subdomains[0], v
+		}
+		for v, sub := range varSub {
+			if varRouter[v] == "" {
+				return fmt.Errorf("hostname %s.portcullis.local (%s) has no host router — add a router whose rule is Host(`${%s:-%s.portcullis.local}`) alone", sub, v, v, sub)
+			}
+		}
+		return nil
+	}
+	// Legacy form: a host router per subdomain where one exists, else the
+	// first router routing it.
+	for _, sub := range r.Subdomains {
+		pick := ""
+		for _, name := range names {
+			ri := r.Info[name]
+			if ri.HostOnly && ri.Subdomains[0] == sub {
+				pick = name
+				break
+			}
+		}
+		if pick == "" {
+			for _, name := range names {
+				if contains(r.Info[name].Subdomains, sub) {
+					pick = name
+					break
+				}
+			}
+		}
+		if prev, ok := r.HostRouters[pick]; ok && prev != sub {
+			// One router routing several subdomains, none host-only: key
+			// the extra ones by subdomain.
+			pick = sub
+		}
+		r.HostRouters[pick], r.HostVars[pick] = sub, HostVar(pick)
+	}
+	return nil
+}
+
+func contains(list []string, s string) bool {
+	for _, x := range list {
+		if x == s {
+			return true
+		}
+	}
+	return false
 }
 
 // labelMap normalises compose labels (map or "k=v" list syntax).
@@ -254,8 +408,12 @@ type ruleParser struct {
 	paths    []RulePath
 	// opaque lists matchers the public-path overlap check can't reason
 	// about (PathRegexp, unknown matchers, negated Path/PathPrefix/Host).
-	opaque  []string
-	negated int
+	opaque   []string
+	negated  int
+	hostVars []string
+	// matchers counts every matcher; negatedHost the negated Host()s.
+	matchers    int
+	negatedHost int
 }
 
 // ParseRule validates a Traefik HTTP router rule and returns the (lowercase)
@@ -286,7 +444,7 @@ func parseRule(rule string) (*ruleParser, error) {
 		return nil, fmt.Errorf("rule %q: unexpected %q", rule, p.s[p.pos:])
 	}
 	if !restricted {
-		return nil, fmt.Errorf("rule %q can match requests for any host — restrict every branch with Host(`<sub>.${PORTCULLIS_DOMAIN}`)", rule)
+		return nil, fmt.Errorf("rule %q can match requests for any host — restrict every branch with Host(`${PORTCULLIS_HOST_<ROUTER>:-<sub>.portcullis.local}`)", rule)
 	}
 	return p, nil
 }
@@ -382,8 +540,9 @@ func (p *ruleParser) factor() (bool, error) {
 		args = append(args, a)
 	}
 	lname := strings.ToLower(name)
+	p.matchers++
 	if forbiddenMatchers[lname] {
-		return false, fmt.Errorf("rule %q: %s() is not allowed — use Host(`<sub>.${PORTCULLIS_DOMAIN}`)", p.s, name)
+		return false, fmt.Errorf("rule %q: %s() is not allowed — use Host(`${PORTCULLIS_HOST_<ROUTER>:-<sub>.portcullis.local}`)", p.s, name)
 	}
 	switch lname {
 	case "path", "pathprefix":
@@ -399,6 +558,7 @@ func (p *ruleParser) factor() (bool, error) {
 	case "host":
 		if p.negated > 0 {
 			p.opaque = append(p.opaque, "!"+name+"()")
+			p.negatedHost++
 		}
 	case "method", "header", "headerregexp", "query", "queryregexp", "clientip":
 		// Narrow the request further; never widen which paths match.
@@ -413,12 +573,19 @@ func (p *ruleParser) factor() (bool, error) {
 		return false, fmt.Errorf("rule %q: empty Host()", p.s)
 	}
 	for _, a := range args {
+		if m := hostVarArgRe.FindStringSubmatch(a); m != nil {
+			p.hosts = append(p.hosts, m[2])
+			p.hostArgs = append(p.hostArgs, a)
+			p.hostVars = append(p.hostVars, m[1])
+			continue
+		}
 		m := hostArgRe.FindStringSubmatch(a)
 		if m == nil {
-			return false, fmt.Errorf("rule %q: host %q must be a literal <sub>.${PORTCULLIS_DOMAIN}", p.s, a)
+			return false, fmt.Errorf("rule %q: host %q must be ${PORTCULLIS_HOST_<ROUTER>:-<sub>.portcullis.local}", p.s, a)
 		}
 		p.hosts = append(p.hosts, strings.ToLower(m[1]))
 		p.hostArgs = append(p.hostArgs, a)
+		p.hostVars = append(p.hostVars, "")
 	}
 	return true, nil
 }

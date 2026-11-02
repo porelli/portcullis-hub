@@ -74,7 +74,13 @@ func main() {
 	}
 	kc := keycloak.New(env("KEYCLOAK_URL", "http://keycloak:8080"), os.Getenv("KEYCLOAK_ADMIN"), os.Getenv("KEYCLOAK_ADMIN_PASSWORD"))
 
-	h, err := hub.New(cfg, compose.NewCLI(dockerHost), engine, kc)
+	cli := compose.NewCLI(dockerHost)
+	if v, err := cli.Version(context.Background()); err != nil {
+		log.Fatalf("refusing to start: %v", err)
+	} else if err := compose.CheckVersion(v); err != nil {
+		log.Fatalf("refusing to start: %v", err)
+	}
+	h, err := hub.New(cfg, cli, engine, kc)
 	if err != nil {
 		log.Fatalf("refusing to start: %v", err)
 	}

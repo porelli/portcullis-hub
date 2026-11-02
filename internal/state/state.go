@@ -45,9 +45,34 @@ type PublishedApp struct {
 	Public           *policy.PublicEntry `json:"public,omitempty" yaml:"public,omitempty"`
 }
 
+// Instance is an app instance other than a template's implicit default
+// one (contract §11): its template and hostnames (host router → full
+// hostname). Every other per-instance map of AppState (Enabled, Settings,
+// AuthPolicies, Published, Public*, SignIn) is keyed by its ID.
+type Instance struct {
+	ID       string            `json:"id" yaml:"id"`
+	Template string            `json:"template" yaml:"template"`
+	Hosts    map[string]string `json:"hosts" yaml:"hosts"`
+	// State is InstanceCreated until the instance is first enabled
+	// (InstanceDeleting during a guarded delete); "" otherwise.
+	State string `json:"state,omitempty" yaml:"state,omitempty"`
+}
+
+// Persisted instance states (Instance.State).
+const (
+	InstanceCreated  = "created"
+	InstanceDeleting = "deleting"
+)
+
 // AppState tracks which apps are enabled and their settings.
 type AppState struct {
-	Enabled      []string                     `json:"enabled" yaml:"enabled"`
+	// Enabled lists the enabled instance ids (a template id names its
+	// default instance).
+	Enabled []string `json:"enabled" yaml:"enabled"`
+	// Instances are the instances other than the implicit default ones,
+	// by id. The default instance of a template (id = template id) needs
+	// no entry: it uses the template's hostnames on the main domain.
+	Instances    map[string]Instance          `json:"instances,omitempty" yaml:"instances,omitempty"`
 	Sources      []Source                     `json:"sources" yaml:"sources"`
 	Settings     map[string]map[string]string `json:"settings" yaml:"settings"`
 	AuthPolicies map[string]policy.AuthPolicy `json:"auth_policies" yaml:"auth_policies"`
@@ -90,6 +115,9 @@ func New() *AppState {
 }
 
 func (s *AppState) init() {
+	if s.Instances == nil {
+		s.Instances = make(map[string]Instance)
+	}
 	if s.Settings == nil {
 		s.Settings = make(map[string]map[string]string)
 	}

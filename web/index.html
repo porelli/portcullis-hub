@@ -110,7 +110,6 @@
     .port-inputs .port-bind { font-family: monospace; }
     .port-inputs .port-host { font-family: monospace; text-align: center; }
     .port-hint { display: block; margin-top: 0.25rem; color: #64748b; font-size: 0.7rem; }
-    .port-locked { display: block; margin-top: 0.25rem; color: #94a3b8; font-style: italic; }
     .auth-notes { color: #94a3b8; font-size: 0.8125rem; background: #0f172a; padding: 0.75rem 1rem; border-radius: 0.5rem; margin-bottom: 1rem; border-left: 3px solid #3b82f6; }
 
     /* Access policy */
@@ -785,18 +784,28 @@
             const bindVal = vals[bindKey] || p.bind || '0.0.0.0';
             const isRange = !!p.range;
             const isHostNet = !!p.network_mode_host;
-            const locked = isRange || isHostNet;
+            const rangeVal = (p.key in vals) ? vals[p.key] : String(p.range || '');
             html += '<div class="port-row">';
             html += '<div class="port-meta">';
             html += '<span class="port-label">' + escapeHtml(p.label || p.key) + '</span>';
             html += '<span class="port-badge port-' + proto + '">' + proto.toUpperCase() + '</span>';
             if (isHostNet) html += '<span class="port-badge port-host">host net</span>';
-            if (isRange) html += '<span class="port-badge port-range">' + escapeHtml(p.range) + '</span>';
-            html += '<span class="port-container">&rarr; :' + (p.container || '') + '</span>';
+            if (isRange) html += '<span class="port-badge port-range">range</span>';
+            if (!isRange) html += '<span class="port-container">&rarr; :' + (p.container || '') + '</span>';
             html += '</div>';
             if (p.description) html += '<small>' + escapeHtml(p.description) + '</small>';
-            if (locked) {
-              html += '<small class="port-locked">This port is fixed by the app and cannot be rebound.</small>';
+            // Ports the app binds itself (host network, ranges) are
+            // per-instance settings too: a second instance picks free ones.
+            if (isRange) {
+              html += '<div class="port-inputs">';
+              html += '<input type="text" name="' + escapeHtml(p.key) + '" value="' + escapeHtml(rangeVal) + '" placeholder="' + escapeHtml(p.range) + '" pattern="[0-9]+-[0-9]+" class="port-host">';
+              html += '</div>';
+              html += '<small class="port-hint">low-high; the app binds these host ports itself.</small>';
+            } else if (isHostNet) {
+              html += '<div class="port-inputs">';
+              html += '<input type="number" name="' + escapeHtml(p.key) + '" value="' + escapeHtml(hostVal) + '" min="1" max="65535" placeholder="' + (p.required ? 'required' : 'disabled') + '" class="port-host">';
+              html += '</div>';
+              html += '<small class="port-hint">Host network: the app binds this host port itself.</small>';
             } else {
               html += '<div class="port-inputs">';
               html += '<input type="text" name="' + escapeHtml(bindKey) + '" value="' + escapeHtml(bindVal) + '" placeholder="0.0.0.0" class="port-bind">';

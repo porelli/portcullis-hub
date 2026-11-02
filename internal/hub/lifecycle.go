@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/policy"
+	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
 )
 
@@ -69,6 +71,9 @@ func (h *Hub) composeUp(t *templates.Template) error {
 		live = &c
 	}
 	err := h.generateOverrideLocked(live, h.st.Settings[t.ID])
+	if err == nil {
+		err = h.refreshInstanceEnvLocked(live)
+	}
 	h.mu.Unlock()
 	if err != nil {
 		return statusErr(500, "override generation failed: %v", err)
@@ -130,17 +135,18 @@ func (h *Hub) clientSpec(t *templates.Template, c templates.KeycloakClient, acr 
 			}
 		}
 	}
-	hosts := make([]string, 0, len(t.Subdomains))
-	for _, sub := range t.Subdomains {
-		hosts = append(hosts, sub+"."+h.cfg.Domain)
+	hosts := make([]string, 0, len(t.Hosts))
+	for _, host := range t.Hosts {
+		hosts = append(hosts, host)
 	}
+	sort.Strings(hosts)
 	return keycloak.ClientSpec{
 		AllowedHosts: hosts,
 		ClientID:     c.ClientID,
 		Name:         c.Name,
 		Secret:       secret,
 		RedirectURIs: h.redirectURIs(c),
-		TemplateID:   t.ID,
+		TemplateID:   t.ID, // the owner tag: the instance id (§11.2)
 		ACR:          acr,
 		// Most apps get the realm's email scope; email_verified_claim: false
 		// swaps it for email-unverified.
@@ -170,7 +176,7 @@ func (h *Hub) enableLocked(id string) (rolledBack bool, err error) {
 	t := h.findLocked(id)
 	if t == nil {
 		h.mu.Unlock()
-		return false, statusErr(400, "template not found: %s", id)
+		return false, statusErr(400, "app instance not found: %s", id)
 	}
 	tmpl := *t // the catalog slice may be replaced meanwhile
 	if h.st.IsEnabled(id) {
@@ -227,9 +233,11 @@ func (h *Hub) enableLocked(id string) (rolledBack bool, err error) {
 	// Phase 3 (under mu): commit.
 	h.mu.Lock()
 	h.st.SetEnabled(id, true)
-	if t := h.findLocked(id); t != nil {
-		t.Enabled = true
+	if e, ok := h.st.Instances[id]; ok && e.State == state.InstanceCreated {
+		e.State = ""
+		h.st.Instances[id] = e
 	}
+	h.rebuildLocked()
 	h.refreshPublishedLocked()
 	h.saveLocked()
 	h.mu.Unlock()
@@ -321,9 +329,7 @@ func (h *Hub) disableLocked(id string) error {
 	}
 	h.mu.Lock()
 	h.st.SetEnabled(id, false)
-	if t := h.findLocked(id); t != nil {
-		t.Enabled = false
-	}
+	h.rebuildLocked()
 	h.refreshPublishedLocked()
 	h.saveLocked()
 	h.mu.Unlock()

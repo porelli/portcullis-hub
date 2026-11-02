@@ -201,8 +201,8 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 	desired := map[string]map[string]map[string]string{}
 	signInSet := map[string]bool{} // the Hub sets the routers' middlewares
 	nativeOnly := map[string]bool{}
-	for i := range h.templates {
-		t := &h.templates[i]
+	for i := range h.instances {
+		t := &h.instances[i]
 		known[t.ID] = true
 		if enabled[t.ID] {
 			pub := h.publicLocked(t, t.Public)

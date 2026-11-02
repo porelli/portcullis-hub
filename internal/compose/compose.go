@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/mod/semver"
 )
 
 // OutputTail is how much of a failed invocation's combined stdout/stderr
@@ -199,4 +201,42 @@ func (c *CLI) Down(ctx context.Context, p Project) error {
 // DownByName runs `compose -p <name> down --remove-orphans`.
 func (c *CLI) DownByName(ctx context.Context, name string) error {
 	return c.run(ctx, c.DownTimeout, "down", []string{"compose", "-p", name, "down", "--remove-orphans"})
+}
+
+// MinVersion is the oldest docker compose the Hub works with: the Hub's
+// override replaces non-default instances' labels with the !override tag
+// (contract §3.1), which compose supports since 2.24.4.
+const MinVersion = "2.24.4"
+
+// Version returns `docker compose version --short` (e.g. "2.29.1").
+func (c *CLI) Version(ctx context.Context) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	bin := c.Binary
+	if bin == "" {
+		bin = "docker"
+	}
+	cmd := exec.CommandContext(ctx, bin, "compose", "version", "--short")
+	cmd.WaitDelay = 5 * time.Second
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("docker compose version: %w", err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// CheckVersion refuses a docker compose older than MinVersion (or a
+// version it can't read).
+func CheckVersion(v string) error {
+	// Builds like 2.24.4-desktop.1 are that release: compare the core only.
+	core, _, _ := strings.Cut(strings.TrimPrefix(strings.TrimSpace(v), "v"), "-")
+	core, _, _ = strings.Cut(core, "+")
+	sv := "v" + core
+	if !semver.IsValid(sv) {
+		return fmt.Errorf("cannot read the docker compose version %q (need %s or newer)", v, MinVersion)
+	}
+	if semver.Compare(sv, "v"+MinVersion) < 0 {
+		return fmt.Errorf("docker compose %s is too old: the Hub needs %s or newer (its overrides use the !override tag)", v, MinVersion)
+	}
+	return nil
 }

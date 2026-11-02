@@ -2,15 +2,15 @@
 
 ## Project Overview
 
-Web management UI for Portcullis. Go binary with an embedded single-page UI, published as `ghcr.io/porelli/portcullis-hub`. It manages one docker compose project per app (`portcullis-<app-id>`), writes the group-gate policy file and registers Keycloak OIDC clients. The cross-repo interfaces are defined in `portcullis-docs/docs/guides/integration-contracts.md` — change that page first.
+Web management UI for Portcullis. Go binary with an embedded single-page UI, published as `ghcr.io/porelli/portcullis-hub`. It manages one docker compose project per app instance (`portcullis-<instance-id>`; the default instance's id is the template id), writes the group-gate policy file and registers Keycloak OIDC clients. The cross-repo interfaces are defined in `portcullis-docs/docs/guides/integration-contracts.md` — change that page first.
 
 ## Layout
 
 | Path | Purpose |
 |------|---------|
 | `cmd/hub` | `main`: env config, wiring, HTTP server, reconcile loop |
-| `internal/hub` | App core: catalog, enable/disable/restart (per-app lock), env + override generation, custom override validation (`useroverride.go`), per-app last-operation records (`ops.go`), sources, policy-file writer, runtime (status/logs/exec), drift reconcile |
-| `internal/templates` | Manifest types, discovery + validation, strict Traefik rule parsing (`ParseRoutes`), template file sync to `/project/templates/<id>` |
+| `internal/hub` | App core: catalog, instances (`instances.go`: default instance implicit, `CreateInstance`, id/derived-name/host collision checks), enable/disable/restart (per-instance lock), env + override generation, custom override validation (`useroverride.go`), per-app last-operation records (`ops.go`), sources, policy-file writer, runtime (status/logs/exec), drift reconcile |
+| `internal/templates` | Manifest types, discovery + validation, strict Traefik rule parsing (`ParseRoutes`: contract v2 `${PORTCULLIS_HOST_<ROUTER>:-<sub>.portcullis.local}` form, host routers), instance views (`Template.Instance`, `NamesFor`), per-instance Traefik renaming (`RenameLabels`), template file sync to `/project/templates/<id>` |
 | `internal/policy` | Auth-policy model (LoA/ACR/TLS tier), per-method capabilities (`CapabilityFor`, `Resolve`, `Check`), group-gate policy file v4 (`Build`, `Write`; `expiring`) and `user-attributes.json` (`BuildUserAttributes`, contract §4.1) |
 | `internal/state` | `state.yaml` load/save (atomic; corrupt file = refuse to start) |
 | `internal/compose` | `docker compose` CLI wrapper — **up/down only**, behind the `Runner` interface; failures are `*compose.Error` with the output tail (8 KiB) |
@@ -31,7 +31,8 @@ Web management UI for Portcullis. Go binary with an embedded single-page UI, pub
 - `--project-directory` must be the HOST path (`PROJECT_HOST_DIR`) so the daemon resolves bind mounts.
 - Every request except `GET /healthz` needs `X-Portcullis-Proxy-Secret` == `HUB_PROXY_SECRET` (≥ 32 chars, or the Hub won't start).
 - Two listeners, same middleware chain: `HUB_LISTEN_ADDR` (`:8888`, hub.<domain>, admins only — enforced by core) and `HUB_PEOPLE_ADDR` (`:8889`, people.<domain>, any signed-in user, contract §5.1). The people listener registers only the directory API, `/healthz` and the people page — never app, policy, drift, compose, settings, sources or template routes (`TestPeopleListenerHasNoAppRoutes`). `GET /api/directory` is `OverviewFor(caller)`: non-admins get no Keycloak/passkey state, stale Keycloak records, invite internals or suggestions; `/api/directory/audit` is admins only. The only non-JSON mutation is the multipart CSV upload of the read-only `POST /api/directory/import/review` (CSRF exemption, 5 MB → 413).
-- group-gate keys policies, groups and path groups **by subdomain only**. Templates whose Traefik rules the Hub can't fully resolve to `<sub>.${PORTCULLIS_DOMAIN}` hosts are rejected; two enabled apps may not route the same subdomain.
+- group-gate keys policies, groups and path groups **by subdomain only** (policy v4; v5 keys by hostname). Templates whose Traefik rules the Hub can't fully resolve to the contract v2 form (or, `instances: single` only, `<sub>.${PORTCULLIS_DOMAIN}`) are rejected; two enabled apps may not route the same subdomain.
+- Instances (contract §11): everything per app (enabled, settings, policies, public access, sign-in, published, ops, env/override files, project) is keyed by **instance id**; a template id names its default instance, which keeps today's names and needs no `state.yaml` `instances` entry (no migration). In the Hub an instance is a `templates.Template` view with `ID` = instance id and `TemplateID` = template id; support files stay under `<core>/templates/<template-id>/`. The Hub override sets every volume's `name:` (`portcullis_<key>` / `portcullis_<id>-<key>`), and for non-default instances replaces each labelled service's labels (`labels: !override`, compose ≥ 2.24.4, checked at startup) with every template-defined Traefik name renamed `<id>_<name>`. The env always carries the instance variables (`PORTCULLIS_INSTANCE`, `PORTCULLIS_HOST_*`, …). Ports an app binds itself (`network_mode_host`, ranges) are per-instance settings written to the env and counted in the collision check.
 - Never hold `Hub.mu` across docker/network calls; lifecycle ops take the per-app lock (`lockApp`).
 - Fail closed: `state.yaml` `published` keeps each enabled app's last published config; the policy writer falls back to it when the template is missing, and denies (`policy.DenyGroup`) subdomains of running app projects it has no config for.
 - Reconcile reports drift, it never fixes it; actions are explicit (`/api/drift/resolve`).

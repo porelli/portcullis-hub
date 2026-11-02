@@ -73,7 +73,15 @@ type Hub struct {
 	// mu guards st and templates. Never hold it across docker/network calls.
 	mu        sync.RWMutex
 	st        *state.AppState
-	templates []templates.Template
+	templates []templates.Template // the catalog, by template id
+	// instances are the instance views (instances.go): the default
+	// instance of every catalog template plus state's instances.
+	instances []templates.Template
+	// allTemplates is every template discovered in any source (duplicates
+	// and skipped ones included): their default names are reserved
+	// (§11.1). templateIDs are their ids.
+	allTemplates []templates.Template
+	templateIDs  map[string]bool
 
 	// appOps serialises lifecycle operations per app so the slow parts can
 	// run without holding mu.
@@ -226,10 +234,15 @@ func (h *Hub) Discover() {
 			ts = append(ts, templates.Discover(src.Path, src.Name, h.cfg.Domain)...)
 		}
 	}
+	h.allTemplates = append([]templates.Template(nil), ts...)
+	h.templateIDs = map[string]bool{}
+	for _, t := range ts {
+		h.templateIDs[t.ID] = true
+	}
 	// The first source wins on duplicate IDs: two templates with the same
 	// ID would share a compose project, env file and policy keys.
 	seen := map[string]bool{}
-	uniq := ts[:0]
+	var uniq []templates.Template
 	for _, t := range ts {
 		if seen[t.ID] {
 			log.Printf("Skipping template %s from source %s: ID already provided by another source", t.ID, t.Source)
@@ -239,17 +252,21 @@ func (h *Hub) Discover() {
 			log.Printf("Skipping template %s: it routes core subdomain %q", t.ID, sub)
 			continue
 		}
-		seen[t.ID] = true
-		t.Enabled = h.st.IsEnabled(t.ID)
-		uniq = append(uniq, t)
-	}
-	for _, id := range h.st.Enabled {
-		if !seen[id] {
-			log.Printf("WARNING: enabled app %s has no (valid) template any more — its containers keep running; disable it to stop them", id)
+		if e, ok := h.st.Instances[t.ID]; ok && e.Template != t.ID {
+			log.Printf("Skipping template %s: its id is already an instance of %s", t.ID, e.Template)
+			continue
 		}
+		seen[t.ID] = true
+		uniq = append(uniq, t)
 	}
 	templates.Sort(uniq)
 	h.templates = uniq
+	h.rebuildLocked()
+	for _, id := range h.st.Enabled {
+		if h.findLocked(id) == nil {
+			log.Printf("WARNING: enabled app %s has no (valid) template any more — its containers keep running; disable it to stop them", id)
+		}
+	}
 	if h.refreshPublishedLocked() {
 		h.saveLocked()
 	}
@@ -306,17 +323,18 @@ func (h *Hub) refreshPublishedLocked() bool {
 	return changed
 }
 
-// findLocked returns a pointer into the catalog. Caller must hold mu.
+// findLocked returns a pointer into the instance views (by instance id;
+// a template id names its default instance). Caller must hold mu.
 func (h *Hub) findLocked(id string) *templates.Template {
-	for i := range h.templates {
-		if h.templates[i].ID == id {
-			return &h.templates[i]
+	for i := range h.instances {
+		if h.instances[i].ID == id {
+			return &h.instances[i]
 		}
 	}
 	return nil
 }
 
-// Template returns a copy of a template (nil if unknown).
+// Template returns a copy of an instance's view (nil if unknown).
 func (h *Hub) Template(id string) *templates.Template {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -378,10 +396,10 @@ func (h *Hub) WritePolicy() error {
 	for k, v := range h.st.AuthPolicies {
 		perApp[k] = v
 	}
-	apps := make([]policy.App, 0, len(h.templates))
+	apps := make([]policy.App, 0, len(h.instances))
 	covered := map[string]bool{}
-	for i := range h.templates {
-		t := &h.templates[i]
+	for i := range h.instances {
+		t := &h.instances[i]
 		if !t.Enabled {
 			continue
 		}

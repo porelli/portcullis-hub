@@ -133,6 +133,12 @@ func ValidateSettings(t *templates.Template, values map[string]string) error {
 			}
 			continue
 		}
+		if p.Range != "" {
+			if _, _, ok := parsePortRange(v); !ok {
+				return statusErr(400, "port range %s must be low-high within 1-65535", p.Key)
+			}
+			continue
+		}
 		if n, err := strconv.Atoi(v); err != nil || n < 1 || n > 65535 {
 			return statusErr(400, "port %s must be 1-65535", p.Key)
 		}
@@ -268,8 +274,14 @@ func (h *Hub) SaveSettings(id string, u SettingsUpdate) error {
 	}
 
 	// text/boolean/select settings go into the .env — including empty
-	// values, so clearing a field actually clears it.
+	// values, so clearing a field actually clears it — and so do the
+	// ports the app binds itself (network_mode: host, ranges).
 	envPath := h.envPath(id)
+	for k, v := range hostNetPortValues(t, u.Values) {
+		if err := setEnvVar(envPath, k, v); err != nil {
+			return statusErr(500, "failed to write env: %v", err)
+		}
+	}
 	for _, st := range t.Manifest.Settings {
 		if st.Type != "text" && st.Type != "boolean" && st.Type != "select" {
 			continue
@@ -406,6 +418,10 @@ func (h *Hub) SaveEnv(id string, vars map[string]string) error {
 	for k, v := range vars {
 		if !templates.EnvKeyRe.MatchString(k) || templates.HasControlChars(v) {
 			return statusErr(400, "invalid variable %q (keys: [A-Za-z_][A-Za-z0-9_]*, values: no newlines)", k)
+		}
+		// Routing, hostnames and names come from the Hub, never the env.
+		if templates.ReservedVar(k) || k == "PORTCULLIS_DOMAIN" {
+			return statusErr(400, "%s is set by the Hub", k)
 		}
 	}
 	for k, v := range vars {

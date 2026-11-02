@@ -178,8 +178,11 @@ type AppURL struct {
 
 // Manifest describes an app template.
 type Manifest struct {
-	Name        string           `yaml:"name" json:"name"`
-	Description string           `yaml:"description" json:"description"`
+	Name        string `yaml:"name" json:"name"`
+	Description string `yaml:"description" json:"description"`
+	// Instances is "multi" (any number of instances) or "single" (only the
+	// default instance; the default when unset). Contract §3.1.
+	Instances   string           `yaml:"instances" json:"instances"`
 	Icon        string           `yaml:"icon" json:"icon"`
 	Category    string           `yaml:"category" json:"category"`
 	Tags        []string         `yaml:"tags" json:"tags"`
@@ -192,15 +195,55 @@ type Manifest struct {
 	URLs        []AppURL         `yaml:"urls" json:"urls"`
 }
 
-// Template is a discovered template with its source info.
+// Instance modes (Manifest.Instances).
+const (
+	InstancesMulti  = "multi"
+	InstancesSingle = "single"
+)
+
+// Multi reports whether the template may run as several instances.
+func (m *Manifest) Multi() bool { return m.Instances == InstancesMulti }
+
+// Template is a discovered template with its source info. The Hub also
+// uses it for an instance (contract §11): a copy whose ID is the instance
+// id, with the instance's hosts and derived names resolved (Instance).
 type Template struct {
-	ID       string   `json:"id"`
-	Source   string   `json:"source"` // name of the source (template repo) this came from
-	Manifest Manifest `json:"manifest"`
-	Path     string   `json:"-"` // filesystem path
-	Enabled  bool     `json:"enabled"`
-	// Subdomains routed by the template's Traefik rules (see ParseRoutes).
+	// ID is the template id in the catalog, the instance id in an
+	// instance view (the default instance's id is the template id).
+	ID string `json:"id"`
+	// TemplateID is the template's id (= ID in the catalog).
+	TemplateID string   `json:"template"`
+	Source     string   `json:"source"` // name of the source (template repo) this came from
+	Manifest   Manifest `json:"manifest"`
+	Path       string   `json:"-"` // filesystem path
+	Enabled    bool     `json:"enabled"`
+	// Subdomains routed by the template's Traefik rules (see ParseRoutes);
+	// in an instance view, the instance's (main-domain labels).
 	Subdomains []string `json:"subdomains"`
 	// Public is the routing plan for auth.public_access (nil if none).
 	Public *PublicPlan `json:"-"`
+	// HostRouters maps each host router to its default subdomain
+	// (contract §3.1); HostVars to its hostname variable.
+	HostRouters map[string]string `json:"host_routers"`
+	HostVars    map[string]string `json:"-"`
+	// HostForm is the rule form (FormV2 or FormLegacy).
+	HostForm string `json:"host_form"`
+	// Hosts maps each host router to the instance's full hostname (the
+	// default instance's in the catalog).
+	Hosts map[string]string `json:"hosts"`
+	// Volumes are the compose file's top-level volume keys that aren't
+	// external (the Hub names them per instance, §11.2).
+	Volumes []string `json:"-"`
+	// Names are the Traefik names the template defines (Routes.Names).
+	Names map[string]bool `json:"-"`
+	// InstanceEnv are the instance variables (§3.1) of an instance view.
+	InstanceEnv map[string]string `json:"-"`
+	// Instances lists the template's instance ids (catalog only).
+	Instances []string `json:"instances"`
+	// raw is the manifest as written ({{HOST_*}} unexpanded); nil = Manifest.
+	raw *Manifest
 }
+
+// IsDefault reports whether t is (the catalog entry or) the default
+// instance of its template.
+func (t *Template) IsDefault() bool { return t.TemplateID == "" || t.ID == t.TemplateID }

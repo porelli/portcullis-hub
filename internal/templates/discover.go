@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -55,17 +54,37 @@ func Discover(dir, source, domain string) []Template {
 			log.Printf("Skipping template %s: %v", e.Name(), err)
 			continue
 		}
-		for i := range m.URLs {
-			m.URLs[i].URL = strings.ReplaceAll(m.URLs[i].URL, "{{DOMAIN}}", domain)
+		if err := checkVolumeNames(compose, m.Multi()); err != nil {
+			log.Printf("Skipping template %s: %v", e.Name(), err)
+			continue
 		}
-		out = append(out, Template{
-			ID:         e.Name(),
-			Source:     source,
-			Manifest:   m,
-			Path:       filepath.Join(dir, e.Name()),
-			Subdomains: routes.Subdomains,
-			Public:     public,
-		})
+		if err := checkInstanceRules(&m, routes); err != nil {
+			log.Printf("Skipping template %s: %v", e.Name(), err)
+			continue
+		}
+		raw := m
+		t := Template{
+			ID:          e.Name(),
+			TemplateID:  e.Name(),
+			Source:      source,
+			Manifest:    m,
+			Path:        filepath.Join(dir, e.Name()),
+			Subdomains:  routes.Subdomains,
+			Public:      public,
+			HostRouters: routes.HostRouters,
+			HostVars:    routes.HostVars,
+			HostForm:    routes.Form,
+			Volumes:     ComposeVolumes(compose),
+			Names:       routes.Names,
+			raw:         &raw,
+		}
+		// The catalog entry shows the default instance.
+		view, err := t.Instance(t.ID, nil, domain)
+		if err != nil {
+			log.Printf("Skipping template %s: %v", e.Name(), err)
+			continue
+		}
+		out = append(out, view)
 	}
 	return out
 }
