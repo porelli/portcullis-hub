@@ -16,7 +16,8 @@ import (
 
 // Core-owned names a template may not use (contract §3, §5, §12): the
 // extra-domain sign-in plumbing the Hub renders itself, core's networks,
-// and the DNS name of the domains service.
+// volumes and DNS names (service names, container names), and core's
+// Traefik objects.
 //
 // The checks run on the DECODED document (yaml.v3 resolves anchors,
 // aliases, merge keys, quoting and escapes), and every value that decides
@@ -38,9 +39,44 @@ var coreNetworks = map[string]bool{
 // extra-domain hosts itself.
 var reservedRefs = []string{"forward-auth-ext", "portcullis-auth-ext", "portcullis-oauth2-"}
 
-// reservedDNSNames: a container answering to one of these on a network it
-// shares with a core service could intercept that service's traffic.
-var reservedDNSNames = map[string]bool{"domains": true}
+// coreServices are the services of core's docker-compose.yml (all
+// profiles), coreVolumes its volume keys (Docker names
+// portcullis_<key>): both checked against a sibling core checkout by
+// TestCoreNamesComplete.
+var (
+	coreServices = set("socket-proxy-traefik", "socket-proxy-hub", "traefik", "postgres", "vault", "lldap", "keycloak",
+		"forward-auth", "forward-auth-ext", "group-gate", "hub", "enroll", "domains", "prometheus", "alertmanager", "blackbox",
+		"textfile-exporter", "grafana")
+	coreVolumes = set("postgres_data", "vault_data", "lldap_data", "hub_data", "traefik_acme", "domains_data",
+		"prometheus_data", "alertmanager_data", "grafana_data")
+	// coreDNSShared: core services whose name a template service may
+	// reuse. Nothing in core resolves "grafana" by DNS on a network a
+	// template can join (Traefik reaches core's monitoring Grafana by its
+	// container address; Grafana itself talks to Prometheus on
+	// monitoring), and the grafana template's service is named grafana.
+	coreDNSShared = set("grafana")
+	// coreContainerRe: compose's container names for core's services.
+	coreContainerRe = regexp.MustCompile(`^portcullis[-_](.+)[-_][0-9]+$`)
+)
+
+// reservedDNSName: a container answering to name (service name,
+// container_name, hostname, network alias) on a network it shares with a
+// core service could intercept that service's traffic — every core
+// service name (and its first DNS label, and compose's
+// portcullis-<service>-<n> container name) is reserved.
+func reservedDNSName(name string) bool {
+	n := strings.TrimSuffix(FoldKey(strings.TrimSpace(name)), ".")
+	first, _, _ := strings.Cut(n, ".")
+	for _, c := range []string{n, first} {
+		if coreServices[c] && !coreDNSShared[c] {
+			return true
+		}
+		if m := coreContainerRe.FindStringSubmatch(c); m != nil && coreServices[m[1]] {
+			return true
+		}
+	}
+	return false
+}
 
 func isCoreNetwork(name string) bool {
 	n := strings.ToLower(strings.TrimSpace(name))
@@ -168,7 +204,7 @@ func hostVarHostname(v string, hostVars map[string]string) error {
 	if !own {
 		return fmt.Errorf("hostname %q: %s is not a hostname variable of this template's host routers", v, m[1])
 	}
-	if def := m[2] + ".portcullis.local"; reservedDNSNames[m[2]] || reservedDNSNames[def] {
+	if def := m[2] + ".portcullis.local"; reservedDNSName(m[2]) {
 		return fmt.Errorf("hostname %q: the default %s is reserved", v, def)
 	}
 	return nil
@@ -177,8 +213,9 @@ func hostVarHostname(v string, hostVars map[string]string) error {
 // checkCoreRefs rejects a compose file that references the reserved
 // sign-in names, joins a core network (by name, external name or
 // network_mode container:), answers to a reserved DNS name (service name,
-// container_name, hostname, network alias), uses interpolation in any of
-// those, or uses `include` / `extends`.
+// container_name, hostname, network alias), uses a core volume, uses
+// interpolation in any of those, or uses `include` / `extends`; plus the
+// label checks (checkServiceLabels).
 func checkCoreRefs(compose []byte, hostVars map[string]string) error {
 	var node yaml.Node
 	if err := yaml.Unmarshal(compose, &node); err != nil {
@@ -273,6 +310,10 @@ func checkCoreRefs(compose []byte, hostVars map[string]string) error {
 		}
 	}
 
+	if err := checkCoreVolumes(doc["volumes"]); err != nil {
+		return err
+	}
+
 	svcs, err := asMap(doc["services"], "services")
 	if err != nil {
 		return err
@@ -282,15 +323,23 @@ func checkCoreRefs(compose []byte, hostVars map[string]string) error {
 		names = append(names, s)
 	}
 	sort.Strings(names)
+	pairs := map[string]map[string]string{}
 	for _, name := range names {
 		s, err := asMap(svcs[name], "service "+name)
 		if err != nil {
 			return err
 		}
+		if pairs[name], err = labelPairs(name, s["labels"]); err != nil {
+			return err
+		}
+	}
+	own := collectOwnNames(pairs)
+	for _, name := range names {
+		s, _ := asMap(svcs[name], "service "+name)
 		if _, ok := s["extends"]; ok {
 			return fmt.Errorf("service %s: extends is not allowed (it pulls in configuration the Hub can't check)", name)
 		}
-		if err := checkServiceLabels(name, s["labels"], hostVars); err != nil {
+		if err := checkServiceLabels(name, pairs[name], hostVars, own); err != nil {
 			return err
 		}
 		for _, field := range []string{"pid", "ipc"} {
@@ -325,8 +374,8 @@ func checkCoreRefs(compose []byte, hostVars map[string]string) error {
 		default:
 			return fmt.Errorf("service %s: volumes_from must be a list", name)
 		}
-		if reservedDNSNames[strings.ToLower(name)] {
-			return fmt.Errorf("service %s: the DNS name %q is reserved for core's domains service", name, name)
+		if reservedDNSName(name) {
+			return fmt.Errorf("service %s: the DNS name %q is core's (reserved)", name, name)
 		}
 		for _, field := range []string{"container_name", "hostname", "network_mode"} {
 			raw, present := s[field]
@@ -349,8 +398,8 @@ func checkCoreRefs(compose []byte, hostVars map[string]string) error {
 				return err
 			}
 			lv := strings.ToLower(strings.TrimSpace(v))
-			if field != "network_mode" && reservedDNSNames[lv] {
-				return fmt.Errorf("service %s: the DNS name %q is reserved for core's domains service", name, v)
+			if field != "network_mode" && reservedDNSName(v) {
+				return fmt.Errorf("service %s: %s: the DNS name %q is core's (reserved)", name, field, v)
 			}
 			if field == "network_mode" && strings.HasPrefix(lv, "container:") {
 				return fmt.Errorf("service %s: network_mode %s joins another container's network namespace", name, v)
@@ -396,8 +445,8 @@ func checkCoreRefs(compose []byte, hostVars map[string]string) error {
 						if err := literal("service "+name+": network "+net+": alias", a); err != nil {
 							return err
 						}
-						if reservedDNSNames[strings.ToLower(strings.TrimSpace(a))] {
-							return fmt.Errorf("service %s: network alias %q is reserved for core's domains service", name, a)
+						if reservedDNSName(a) {
+							return fmt.Errorf("service %s: network alias %q is core's DNS name (reserved)", name, a)
 						}
 					}
 				default:
@@ -412,15 +461,11 @@ func checkCoreRefs(compose []byte, hostVars map[string]string) error {
 	return nil
 }
 
-// checkServiceLabels: label keys and the values that name routers,
-// middlewares or services must be literals (compose interpolates after
-// the Hub's checks); the routing rule may use the host variables
-// (checked by ParseRoutes).
-func checkServiceLabels(svc string, labels interface{}, hostVars map[string]string) error {
+// labelPairs: a service's labels (mapping or KEY=VALUE list) as a map.
+func labelPairs(svc string, labels interface{}) (map[string]string, error) {
 	pairs := map[string]string{}
 	switch l := labels.(type) {
 	case nil:
-		return nil
 	case map[string]interface{}:
 		for k, v := range l {
 			switch tv := v.(type) {
@@ -436,14 +481,90 @@ func checkServiceLabels(svc string, labels interface{}, hostVars map[string]stri
 		for _, x := range l {
 			sv, ok := str(x)
 			if !ok {
-				return fmt.Errorf("service %s: labels entries must be strings", svc)
+				return nil, fmt.Errorf("service %s: labels entries must be strings", svc)
 			}
 			k, v, _ := strings.Cut(sv, "=")
 			pairs[k] = v
 		}
 	default:
-		return fmt.Errorf("service %s: labels must be a list or a mapping", svc)
+		return nil, fmt.Errorf("service %s: labels must be a list or a mapping", svc)
 	}
+	return pairs, nil
+}
+
+// checkCoreVolumes: no volume key of core's (a single template's and a
+// multi template's default instance's volumes are portcullis_<key>, core's
+// too: postgres_data would mount Keycloak's database), names are
+// literals, and no external volume is named portcullis* (core's or another
+// instance's data; an external volume without a name is its key).
+func checkCoreVolumes(raw interface{}) error {
+	vols, err := asMap(raw, "top-level volumes")
+	if err != nil {
+		return err
+	}
+	keys := make([]string, 0, len(vols))
+	for k := range vols {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if err := literal("volume key", k); err != nil {
+			return err
+		}
+		if coreVolumes[FoldKey(strings.TrimSpace(k))] {
+			return fmt.Errorf("volume %s is core's (portcullis_%s): templates may not use core's volume names", k, k)
+		}
+		v, err := asMap(vols[k], "volume "+k)
+		if err != nil {
+			return err
+		}
+		name, hasName := str(v["name"])
+		if v["name"] != nil && !hasName {
+			return fmt.Errorf("volume %s: name must be a string", k)
+		}
+		if err := literal("volume "+k+": name", name); err != nil {
+			return err
+		}
+		ext := false
+		switch e := v["external"].(type) {
+		case nil:
+		case bool:
+			ext = e
+		case map[string]interface{}:
+			ext = true
+			en, ok := str(e["name"])
+			if e["name"] != nil && !ok {
+				return fmt.Errorf("volume %s: external name must be a string", k)
+			}
+			if err := literal("volume "+k+": external name", en); err != nil {
+				return err
+			}
+			if en != "" {
+				name, hasName = en, true
+			}
+		default:
+			return fmt.Errorf("volume %s: external must be true, false or a mapping", k)
+		}
+		eff := name
+		if !hasName {
+			eff = k
+		}
+		fe := FoldKey(strings.TrimSpace(eff))
+		if coreVolumes[strings.TrimPrefix(fe, "portcullis_")] && strings.HasPrefix(fe, "portcullis_") {
+			return fmt.Errorf("volume %s is named %s, core's volume", k, eff)
+		}
+		if ext && strings.HasPrefix(fe, "portcullis") {
+			return fmt.Errorf("volume %s: external volume %s is core's or another instance's data (portcullis*)", k, eff)
+		}
+	}
+	return nil
+}
+
+// checkServiceLabels: label keys and the values that name routers,
+// middlewares or services must be literals (compose interpolates after
+// the Hub's checks); the routing rule may use the host variables
+// (checked by ParseRoutes).
+func checkServiceLabels(svc string, pairs map[string]string, hostVars map[string]string, own ownNames) error {
 	for k, v := range pairs {
 		// Label keys are ASCII: Traefik's label decoder matches with
 		// strings.EqualFold, which folds e.g. "ſ" (U+017F) to "s" and the
@@ -464,7 +585,7 @@ func checkServiceLabels(svc string, labels interface{}, hostVars map[string]stri
 		if err := checkTraefikKeyShape(svc, k); err != nil {
 			return err
 		}
-		if err := checkCoreReferences(svc, k, v); err != nil {
+		if err := checkCoreReferences(svc, k, v, own); err != nil {
 			return err
 		}
 		// Traefik label keys as ParseRoutes matches them (Traefik itself is
@@ -537,14 +658,17 @@ func FoldKey(s string) string {
 	}, s)
 }
 
-// Traefik label kinds and router attributes the Hub understands; any other
+// Traefik label kinds and attributes the Hub understands; any other
 // traefik.* key shape is refused (it could be something Traefik decodes
-// that ParseRoutes and the override never see).
+// that ParseRoutes and the override never see). Every comparison is on
+// the folded key (FoldKey): Traefik's decoder matches with EqualFold.
 var (
 	// HTTP only: templates never define TCP or UDP routing (none of the
 	// templates needs it, and it would bypass forward-auth, contract §4).
+	// No serverstransports: a transport can present files from Traefik's
+	// filesystem as client certificates and no template needs one.
 	traefikKinds = map[string]map[string]bool{
-		"http": {"routers": true, "services": true, "middlewares": true, "serverstransports": true},
+		"http": {"routers": true, "services": true, "middlewares": true},
 	}
 	// labelSegRe: every dot-separated segment of a traefik.* key. A stray
 	// "]" or "[" (or an empty segment) panics Traefik's label decoder and
@@ -564,18 +688,53 @@ var (
 			"portcullis-auth-ext", "portcullis-groups", "portcullis-public-guard", "portcullis-self"),
 		"services": set("enroll", "forward-auth", "forward-auth-ext", "grafana-metrics", "group-gate", "hub", "hub-people", "keycloak", "lldap"),
 	}
-	routerAttrRe = map[string]*regexp.Regexp{
-		"http": regexp.MustCompile(`^(rule|entrypoints|middlewares|service|priority|tls|tls\.options|tls\.certresolver|tls\.domains\[[0-9]+\]\.(main|sans)|observability\.(accesslogs|metrics|tracing))$`),
-		"tcp":  regexp.MustCompile(`^(rule|entrypoints|middlewares|service|priority|tls|tls\.passthrough|tls\.options|tls\.certresolver|tls\.domains\[[0-9]+\]\.(main|sans))$`),
-		"udp":  regexp.MustCompile(`^(entrypoints|service)$`),
+	routerAttrRe = regexp.MustCompile(`^(rule|entrypoints|middlewares|service|priority|tls|tls\.options|tls\.certresolver|tls\.domains\[[0-9]+\]\.(main|sans)|observability\.(accesslogs|metrics|tracing))$`)
+	// serviceAttrRe: a service is a load balancer over the labelled
+	// container itself (Traefik takes its address on the shared network) —
+	// never server(s).url (Traefik would proxy to any address it can
+	// reach: the socket proxies, the Hub, Keycloak as the trusted Traefik
+	// IP), a serverstransport, or a weighted / mirroring / failover
+	// service naming other services.
+	serviceAttrRe = regexp.MustCompile(`^loadbalancer\.(server\.(port|scheme)|passhostheader|responseforwarding\.flushinterval|` +
+		`sticky\.cookie(\.(name|secure|httponly|samesite|maxage|path))?|` +
+		`healthcheck\.(path|port|interval|unhealthyinterval|timeout|scheme|hostname|followredirects|method|status|mode|headers\.[a-z0-9_-]+))$`)
+	// middlewareAttrRe: the middleware types a template may define, each
+	// with its attributes ("" = the type alone, e.g. compress=true).
+	// Refused (not listed): forwardauth (Traefik would send requests to any
+	// address it reaches), errors (its service may be api@internal or a
+	// core service), plugin, basicauth / digestauth (usersfile reads
+	// Traefik's filesystem), passtlsclientcert, ratelimit / inflightreq
+	// redis.* (an address).
+	sourceCriterion  = `sourcecriterion\.(requesthost|requestheadername|ipstrategy\.(depth|excludedips|ipv6subnet))`
+	middlewareAttrRe = map[string]*regexp.Regexp{
+		"addprefix":        regexp.MustCompile(`^prefix$`),
+		"stripprefix":      regexp.MustCompile(`^(prefixes|forceslash)$`),
+		"stripprefixregex": regexp.MustCompile(`^regex$`),
+		"replacepath":      regexp.MustCompile(`^path$`),
+		"replacepathregex": regexp.MustCompile(`^(regex|replacement)$`),
+		"redirectregex":    regexp.MustCompile(`^(regex|replacement|permanent)$`),
+		"redirectscheme":   regexp.MustCompile(`^(scheme|port|permanent)$`),
+		"headers":          regexp.MustCompile(`^[a-z0-9_-]+(\[[0-9]+\])?(\.[a-z0-9_-]+)?$`),
+		"compress":         regexp.MustCompile(`^(|excludedcontenttypes|includedcontenttypes|minresponsebodybytes|encodings|defaultencoding)$`),
+		"contenttype":      regexp.MustCompile(`^(|autodetect)$`),
+		"chain":            regexp.MustCompile(`^middlewares$`),
+		"ratelimit":        regexp.MustCompile(`^(average|period|burst|` + sourceCriterion + `)$`),
+		"inflightreq":      regexp.MustCompile(`^(amount|` + sourceCriterion + `)$`),
+		"ipallowlist":      regexp.MustCompile(`^(sourcerange|rejectstatuscode|ipstrategy\.(depth|excludedips|ipv6subnet))$`),
+		"buffering":        regexp.MustCompile(`^(maxrequestbodybytes|memrequestbodybytes|maxresponsebodybytes|memresponsebodybytes|retryexpression)$`),
+		"retry":            regexp.MustCompile(`^(attempts|initialinterval)$`),
+		"circuitbreaker":   regexp.MustCompile(`^(expression|checkperiod|fallbackduration|recoveryduration|responsecode)$`),
+		"grpcweb":          regexp.MustCompile(`^alloworigins$`),
 	}
 )
 
 // checkTraefikKeyShape: traefik.enable, traefik.docker.network, or
-// traefik.<http|tcp|udp>.<kind>.<name>.<attr> with an exact kind and, for
-// routers, an allowlisted attribute.
+// traefik.http.<kind>.<name>.<attr> with an exact kind and an allowlisted
+// attribute (routers, services) or middleware type + attribute — all
+// compared on the folded key.
 func checkTraefikKeyShape(svc, k string) error {
-	switch k {
+	fk := FoldKey(k)
+	switch fk {
 	case "traefik.enable", "traefik.docker.network":
 		return nil
 	}
@@ -584,13 +743,13 @@ func checkTraefikKeyShape(svc, k string) error {
 			return fmt.Errorf("service %s: Traefik label %q: segment %q is not [A-Za-z0-9_-] (with an optional [n]) — it could crash Traefik's label decoder", svc, k, seg)
 		}
 	}
-	segs := strings.SplitN(k, ".", 5)
+	segs := strings.SplitN(fk, ".", 5)
 	if len(segs) < 5 || segs[0] != "traefik" {
 		return fmt.Errorf("service %s: Traefik label %q has an unsupported shape", svc, k)
 	}
 	kinds, ok := traefikKinds[segs[1]]
 	if !ok || !kinds[segs[2]] {
-		return fmt.Errorf("service %s: Traefik label %q: unsupported protocol or kind (only traefik.http.<routers|services|middlewares|serverstransports>; no TCP or UDP routing)", svc, k)
+		return fmt.Errorf("service %s: Traefik label %q: unsupported protocol or kind (only traefik.http.<routers|services|middlewares>; no TCP or UDP routing)", svc, k)
 	}
 	if !labelNameRe.MatchString(segs[3]) {
 		return fmt.Errorf("service %s: Traefik label %q: name %q must match %s", svc, k, segs[3], labelNameRe)
@@ -598,8 +757,25 @@ func checkTraefikKeyShape(svc, k string) error {
 	if coreTraefikNames[segs[2]][segs[3]] {
 		return fmt.Errorf("service %s: Traefik label %q: %s %q is core's (reserved)", svc, k, strings.TrimSuffix(segs[2], "s"), segs[3])
 	}
-	if segs[2] == "routers" && !routerAttrRe[segs[1]].MatchString(segs[4]) {
-		return fmt.Errorf("service %s: Traefik label %q: unsupported router attribute %q", svc, k, segs[4])
+	attr := segs[4]
+	switch segs[2] {
+	case "routers":
+		if !routerAttrRe.MatchString(attr) {
+			return fmt.Errorf("service %s: Traefik label %q: unsupported router attribute %q", svc, k, attr)
+		}
+	case "services":
+		if !serviceAttrRe.MatchString(attr) {
+			return fmt.Errorf("service %s: Traefik label %q: unsupported service attribute %q (a service balances over its own container: loadbalancer.server.port / scheme, passhostheader, sticky, healthcheck — never a server url)", svc, k, attr)
+		}
+	case "middlewares":
+		typ, rest, _ := strings.Cut(attr, ".")
+		re, ok := middlewareAttrRe[typ]
+		if !ok {
+			return fmt.Errorf("service %s: Traefik label %q: middleware type %q is not allowed in templates (no forwardauth, errors, plugin, basicauth, …)", svc, k, typ)
+		}
+		if !re.MatchString(rest) {
+			return fmt.Errorf("service %s: Traefik label %q: unsupported %s attribute %q", svc, k, typ, rest)
+		}
 	}
 	return nil
 }
@@ -671,27 +847,62 @@ func checkComposeKeys(doc map[string]interface{}) error {
 // (security-headers, rate-limit, client-headers, …) is for apps too.
 var appMiddlewares = set("portcullis-auth", "portcullis-groups")
 
-// checkCoreReferences: a router may not send its traffic to a core service
-// (`service: hub@docker` would route the template's host to the Hub,
-// Keycloak or LLDAP; `api@internal` is Traefik's dashboard), and no
-// router or chain may use a core @docker middleware other than the
-// gateway ones (`hub-proxy-secret@docker` injects the Hub's proxy secret).
-func checkCoreReferences(svc, k, v string) error {
+// chainLabelRe: a chain middleware's member list (folded key).
+var chainLabelRe = regexp.MustCompile(`^traefik\.http\.middlewares\.[^.]+\.chain\.middlewares$`)
+
+// ownNames are the Traefik services and middlewares a template's labels
+// define (folded), across all its compose services.
+type ownNames struct{ services, middlewares map[string]bool }
+
+func collectOwnNames(pairs map[string]map[string]string) ownNames {
+	own := ownNames{services: map[string]bool{}, middlewares: map[string]bool{}}
+	for _, l := range pairs {
+		for k := range l {
+			segs := strings.SplitN(FoldKey(strings.TrimSpace(k)), ".", 5)
+			if len(segs) == 5 && segs[0] == "traefik" && segs[1] == "http" {
+				switch segs[2] {
+				case "services":
+					own.services[segs[3]] = true
+				case "middlewares":
+					own.middlewares[segs[3]] = true
+				}
+			}
+		}
+	}
+	return own
+}
+
+// checkCoreReferences: a router sends its traffic only to a Traefik
+// service the template defines itself (@docker) — never to a core service
+// (`hub@docker` would route the template's host to the Hub, Keycloak or
+// LLDAP; `api@internal` is Traefik's dashboard), an @file one or another
+// app's — and routers and chains use only the template's own middlewares,
+// portcullis-auth@docker / portcullis-groups@docker and core's @file
+// middlewares (`hub-proxy-secret@docker` injects the Hub's proxy secret).
+// Keys are compared folded, references lowercased.
+func checkCoreReferences(svc, k, v string, own ownNames) error {
 	ref := func(s string) (base, provider string) {
-		base, provider, _ = strings.Cut(strings.TrimSpace(s), "@")
+		base, provider, _ = strings.Cut(strings.ToLower(strings.TrimSpace(s)), "@")
 		return base, provider
 	}
+	fk := FoldKey(strings.TrimSpace(k))
+	m := routerLabelRe.FindStringSubmatch(fk)
 	switch {
-	case routerLabelRe.MatchString(k) && strings.HasSuffix(k, ".service"):
+	case m != nil && m[3] == "service":
 		base, prov := ref(v)
-		if prov == "internal" || (prov == "" || prov == "docker") && coreTraefikNames["services"][base] || prov == "file" {
-			return fmt.Errorf("service %s: label %s: router service %q is core's", svc, k, v)
+		if (prov != "" && prov != "docker") || !own.services[base] || coreTraefikNames["services"][base] {
+			return fmt.Errorf("service %s: label %s: router service %q is not one this template defines (core's, @file, @internal and other apps' services are refused)", svc, k, v)
 		}
-	case routerLabelRe.MatchString(k) && strings.HasSuffix(k, ".middlewares"), strings.HasSuffix(k, ".chain.middlewares"):
-		for _, m := range strings.Split(v, ",") {
-			base, prov := ref(m)
-			if prov == "internal" || (prov == "" || prov == "docker") && coreTraefikNames["middlewares"][base] && !appMiddlewares[base] {
-				return fmt.Errorf("service %s: label %s: middleware %q is core's (apps may chain portcullis-auth@docker, portcullis-groups@docker and core's @file middlewares)", svc, k, strings.TrimSpace(m))
+	case m != nil && m[3] == "middlewares", chainLabelRe.MatchString(fk):
+		for _, mw := range strings.Split(v, ",") {
+			base, prov := ref(mw)
+			if base == "" && prov == "" {
+				continue
+			}
+			ok := prov == "file" && base != "" ||
+				(prov == "" || prov == "docker") && (appMiddlewares[base] || own.middlewares[base] && !coreTraefikNames["middlewares"][base])
+			if !ok {
+				return fmt.Errorf("service %s: label %s: middleware %q is not allowed (apps use their own middlewares, portcullis-auth@docker, portcullis-groups@docker and core's @file middlewares)", svc, k, strings.TrimSpace(mw))
 			}
 		}
 	}

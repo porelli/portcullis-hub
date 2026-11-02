@@ -2,11 +2,14 @@ package templates
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestCheckCoreRefs(t *testing.T) {
@@ -160,7 +163,7 @@ func TestCheckCoreRefsBypasses(t *testing.T) {
 		"services:\n  web:\n    labels:\n      traefik.http.middlewares.m.redirectregex.replacement: https://${PORTCULLIS_HOST_GITLAB:-git.portcullis.local}/admin\n      traefik.http.middlewares.m.redirectregex.regex: ^https://[^/]+/?$$\n",
 		"services:\n  web:\n    labels:\n      com.example.note: ${ANY}\n",
 		"services:\n  web:\n    labels:\n      traefik.http.middlewares.h.headers.customresponseheaders.X-App: grafana\n",
-		"services:\n  web:\n    labels:\n      traefik.http.routers.app.middlewares: client-headers@file,portcullis-auth@docker,portcullis-groups@docker,security-headers@file\n      traefik.http.routers.app.service: app\n",
+		"services:\n  web:\n    labels:\n      traefik.http.routers.app.middlewares: client-headers@file,portcullis-auth@docker,portcullis-groups@docker,security-headers@file\n      traefik.http.routers.app.service: app\n      traefik.http.services.app.loadbalancer.server.port: \"80\"\n",
 	}
 	for _, c := range ok {
 		if err := checkCoreRefs([]byte(c), hv); err != nil {
@@ -194,7 +197,7 @@ var unicodeBypasses = map[string]string{
 	"tcp service":       "traefik.tcp.services.t.loadbalancer.server.port: \"22\"",
 	"udp service":       "traefik.udp.services.u.loadbalancer.server.port: \"53\"",
 	"core middleware":   "traefik.http.middlewares.portcullis-groups.forwardauth.address: http://evil",
-	"core router":       "traefik.http.routers.keycloak.entrypoints: websecure",
+	"core router":       "traefik.http.routers.keycloak.rule: Host(`auth.${PORTCULLIS_DOMAIN}`)",
 	"core service":      "traefik.http.services.hub.loadbalancer.server.port: \"1\"",
 	"core public guard": "traefik.http.middlewares.portcullis-public-guard.forwardauth.address: http://evil",
 	// References to core objects.
@@ -206,6 +209,39 @@ var unicodeBypasses = map[string]string{
 	"middleware self bare":    "traefik.http.routers.app.middlewares: portcullis-self",
 	"chain proxy secret":      "traefik.http.middlewares.c.chain.middlewares: hub-proxy-secret@docker",
 	"middleware console":      "traefik.http.routers.app.middlewares: portcullis-auth-console@docker",
+	// Fix round 4: service and middleware attributes (allowlisted types and
+	// attributes, compared folded), references to anything not the
+	// template's own.
+	"service url":              "traefik.http.services.s.loadbalancer.server.url: http://socket-proxy-traefik:2375",
+	"servers url":              "traefik.http.services.s.loadbalancer.servers[0].url: http://hub:8888",
+	"service url case":         "traefik.http.services.s.loadBalancer.Server.URL: http://keycloak:8080",
+	"service url kelvin-free":  "traefik.http.services.s.LOADBALANCER.SERVER.URL: http://keycloak:8080",
+	"service transport":        "traefik.http.services.s.loadbalancer.serverstransport: t@file",
+	"service weighted":         "traefik.http.services.s.weighted.services[0].name: hub@docker",
+	"service mirroring":        "traefik.http.services.s.mirroring.service: hub@docker",
+	"service failover":         "traefik.http.services.s.failover.service: hub@docker",
+	"serverstransports kind":   "traefik.http.serverstransports.t.certificates[0].certfile: /etc/traefik/acme.json",
+	"chain case":               "traefik.http.middlewares.c.Chain.Middlewares: hub-proxy-secret@docker",
+	"chain upper":              "traefik.http.middlewares.c.CHAIN.MIDDLEWARES: hub-proxy-secret@docker",
+	"chain indexed":            "traefik.http.middlewares.c.chain.middlewares[0]: hub-proxy-secret@docker",
+	"chain other app":          "traefik.http.middlewares.c.chain.middlewares: other-app-mw@docker",
+	"chain internal":           "traefik.http.middlewares.c.chain.middlewares: x@internal",
+	"errors api":               "traefik.http.middlewares.e.errors.service: api@internal",
+	"errors hub":               "traefik.http.middlewares.e.errors.service: hub@docker",
+	"errors case":              "traefik.http.middlewares.e.Errors.Service: hub@docker",
+	"forwardauth":              "traefik.http.middlewares.f.forwardauth.address: http://socket-proxy-traefik:2375/containers/json",
+	"forwardauth case":         "traefik.http.middlewares.f.ForwardAuth.Address: http://hub:8888/",
+	"plugin":                   "traefik.http.middlewares.p.plugin.evil.url: http://hub:8888",
+	"basicauth usersfile":      "traefik.http.middlewares.b.basicauth.usersfile: /etc/traefik/acme.json",
+	"ratelimit redis":          "traefik.http.middlewares.r.ratelimit.redis.endpoints: hub:8888",
+	"passtlsclientcert":        "traefik.http.middlewares.p.passtlsclientcert.pem: \"true\"",
+	"unknown mw attribute":     "traefik.http.middlewares.r.redirectregex.foo: x",
+	"router service other app": "traefik.http.routers.app.service: other-app@docker",
+	"router service file":      "traefik.http.routers.app.service: app@file",
+	"router service case":      "traefik.http.routers.app.service: Hub@docker",
+	"router service undefined": "traefik.http.routers.app.service: nothere",
+	"router mw other app":      "traefik.http.routers.app.middlewares: portcullis-auth@docker,portcullis-groups@docker,other-app-mw@docker",
+	"router mw internal":       "traefik.http.routers.app.middlewares: portcullis-auth@docker,portcullis-groups@docker,x@internal",
 }
 
 func TestCheckCoreRefsUnicodeFolding(t *testing.T) {
@@ -239,24 +275,82 @@ func TestCheckCoreRefsUnicodeFolding(t *testing.T) {
 }
 
 // TestDiscoverRefusesBypasses: end to end, Discover loads none of the
-// bypass forms (control template loads).
+// bypass forms, each refused by the check it targets (not by a YAML
+// duplicate or a missing rule); the controls load.
 func TestDiscoverRefusesBypasses(t *testing.T) {
 	dir := t.TempDir()
 	manifest := "name: App\ncategory: test\nicon: x\nauth:\n  method: forward-auth\n"
-	compose := func(extra string) string {
-		return "services:\n  web:\n    image: x\n    networks: [portcullis-proxy]\n    labels:\n      traefik.enable: \"true\"\n" +
-			"      traefik.http.routers.app.rule: Host(`app.${PORTCULLIS_DOMAIN}`)\n" +
-			"      traefik.http.routers.app.middlewares: portcullis-auth@docker,portcullis-groups@docker\n" + extra +
-			"networks:\n  portcullis-proxy:\n    external: true\n"
+	baseLabels := [][2]string{
+		{"traefik.enable", "\"true\""},
+		{"traefik.http.routers.app.rule", "Host(`app.${PORTCULLIS_DOMAIN}`)"},
+		{"traefik.http.routers.app.middlewares", "portcullis-auth@docker,portcullis-groups@docker"},
 	}
-	writeTpl(t, dir, "control", manifest, compose(""))
+	// build: the control compose with label lines (a key already in the
+	// base replaces it), extra service keys, extra top-level YAML and the
+	// service's name.
+	build := func(svcName string, lines []string, svcExtra, top string) string {
+		labels := append([][2]string(nil), baseLabels...)
+		for _, l := range lines {
+			k, v, _ := strings.Cut(l, ": ")
+			replaced := false
+			for i := range labels {
+				if labels[i][0] == k {
+					labels[i][1], replaced = v, true
+				}
+			}
+			if !replaced {
+				labels = append(labels, [2]string{k, v})
+			}
+		}
+		var b strings.Builder
+		b.WriteString("services:\n  " + svcName + ":\n    image: x\n" + svcExtra + "    labels:\n")
+		for _, l := range labels {
+			b.WriteString("      " + l[0] + ": " + l[1] + "\n")
+		}
+		if !strings.Contains(svcExtra, "    networks:") {
+			b.WriteString("    networks: [portcullis-proxy]\n")
+		}
+		b.WriteString("networks:\n  portcullis-proxy:\n    external: true\n" + top)
+		return b.String()
+	}
+	compose := func(extra string) string {
+		if extra == "" {
+			return build("web", nil, "", "")
+		}
+		return build("web", []string{extra}, "", "")
+	}
+	// Controls: everything here is allowed and must load.
+	controls := map[string]string{
+		"control": compose(""),
+		"control-attrs": build("grafana", []string{
+			"traefik.http.routers.app.service: app",
+			"traefik.http.routers.app.middlewares: client-headers@file,portcullis-auth@docker,portcullis-groups@docker,c@docker,security-headers@file",
+			"traefik.http.services.app.loadbalancer.server.port: \"3000\"",
+			"traefik.http.services.app.loadbalancer.server.scheme: https",
+			"traefik.http.services.app.loadbalancer.passhostheader: \"true\"",
+			"traefik.http.services.app.loadbalancer.sticky.cookie.name: s",
+			"traefik.http.services.app.loadbalancer.healthcheck.path: /health",
+			"traefik.http.middlewares.c.chain.middlewares: h,z@docker,rate-limit@file",
+			"traefik.http.middlewares.h.headers.customRequestHeaders.X-App: grafana",
+			"traefik.http.middlewares.z.compress: \"true\"",
+			"traefik.http.middlewares.r.redirectregex.regex: ^https://[^/]+/?$$",
+			"traefik.http.middlewares.r.redirectregex.replacement: https://x.example.org/",
+			"traefik.http.middlewares.p.stripprefix.prefixes: /api",
+			"traefik.http.middlewares.i.ipallowlist.sourcerange: 10.0.0.0/8",
+			"traefik.http.middlewares.l.ratelimit.average: \"10\"",
+		}, "    volumes: [data:/data]\n    networks:\n      default: {}\n      portcullis-proxy:\n        aliases: [grafana-internal]\n",
+			"volumes:\n  data:\n    name: portcullis_data\n  shared:\n    external: true\n    name: media-library\n"),
+	}
+	for id, c := range controls {
+		writeTpl(t, dir, id, manifest, c)
+	}
 	i := 0
 	ids := map[string]string{}
 	for what, line := range unicodeBypasses {
 		id := fmt.Sprintf("bypass%d", i)
 		i++
 		ids[id] = what
-		writeTpl(t, dir, id, manifest, compose("      "+line+"\n"))
+		writeTpl(t, dir, id, manifest, compose(line))
 	}
 	writeTpl(t, dir, "tagged", manifest, strings.Replace(compose(""), "    labels:\n", "    labels: !override\n", 1))
 	ids["tagged"] = "!override tag"
@@ -268,21 +362,65 @@ func TestDiscoverRefusesBypasses(t *testing.T) {
 		"envfile":     "    env_file: ./x.env\n",
 		"build":       "    build: .\n",
 	} {
-		writeTpl(t, dir, id, manifest, strings.Replace(compose(""), "    image: x\n", "    image: x\n"+svcLine, 1))
+		writeTpl(t, dir, id, manifest, build("web", nil, svcLine, ""))
 		ids[id] = svcLine
 	}
 	writeTpl(t, dir, "toplevelsecrets", manifest, compose("")+"secrets:\n  s:\n    file: ./s\n")
 	ids["toplevelsecrets"] = "top-level secrets"
+	// Core volumes (fix round 4, I1).
+	for id, top := range map[string]string{
+		"vol-core-key":     "volumes:\n  postgres_data:\n    name: portcullis_postgres_data\n",
+		"vol-core-unnamed": "volumes:\n  hub_data: {}\n",
+		"vol-core-case":    "volumes:\n  Vault_Data: {}\n",
+		"vol-ext-name":     "volumes:\n  db:\n    external: true\n    name: portcullis_postgres_data\n",
+		"vol-ext-key":      "volumes:\n  portcullis_lldap_data:\n    external: true\n",
+		"vol-ext-legacy":   "volumes:\n  db:\n    external:\n      name: portcullis_traefik_acme\n",
+		"vol-ext-instance": "volumes:\n  db:\n    external: true\n    name: portcullis_other-data\n",
+		"vol-ext-var":      "volumes:\n  db:\n    external: true\n    name: ${V}\n",
+		"vol-named-other":  "volumes:\n  db:\n    name: portcullis_domains_data\n",
+	} {
+		writeTpl(t, dir, id, manifest, build("web", nil, "    volumes: [db:/x]\n", top))
+		ids[id] = top
+	}
+	// Core DNS names (fix round 4, I2).
+	for _, n := range []string{"hub", "keycloak", "forward-auth", "forward-auth-ext", "group-gate", "lldap", "vault", "postgres",
+		"socket-proxy-traefik", "socket-proxy-hub", "traefik", "domains", "enroll", "prometheus", "alertmanager"} {
+		id := "dns-svc-" + n
+		writeTpl(t, dir, id, manifest, build(n, nil, "", ""))
+		ids[id] = "service " + n
+	}
+	for id, svcExtra := range map[string]string{
+		"dns-alias":          "    networks:\n      portcullis-proxy:\n        aliases: [group-gate]\n",
+		"dns-alias-case":     "    networks:\n      portcullis-proxy:\n        aliases: [Keycloak]\n",
+		"dns-alias-dot":      "    networks:\n      portcullis-proxy:\n        aliases: [hub.]\n",
+		"dns-alias-sub":      "    networks:\n      portcullis-proxy:\n        aliases: [forward-auth.portcullis-proxy]\n",
+		"dns-container":      "    container_name: lldap\n",
+		"dns-container-core": "    container_name: portcullis-vault-1\n",
+		"dns-hostname":       "    hostname: socket-proxy-hub\n",
+	} {
+		writeTpl(t, dir, id, manifest, build("web", nil, svcExtra, ""))
+		ids[id] = svcExtra
+	}
+	var logs strings.Builder
+	log.SetOutput(&logs)
+	defer log.SetOutput(os.Stderr)
 	loaded := map[string]bool{}
 	for _, tp := range Discover(dir, "local", "example.org") {
 		loaded[tp.ID] = true
 	}
-	if !loaded["control"] {
-		t.Fatal("the control template didn't load")
+	for id := range controls {
+		if !loaded[id] {
+			t.Errorf("control %s didn't load:\n%s", id, logs.String())
+		}
 	}
 	for id, what := range ids {
 		if loaded[id] {
 			t.Errorf("%s (%s) loaded", id, what)
+		}
+	}
+	for _, l := range strings.Split(logs.String(), "\n") {
+		if strings.Contains(l, "already defined") || strings.Contains(l, "has no rule") || strings.Contains(l, "without an HTTP router") {
+			t.Errorf("refused for the wrong reason: %s", l)
 		}
 	}
 }
@@ -309,6 +447,67 @@ func TestCoreTraefikNamesComplete(t *testing.T) {
 			if m := re.FindStringSubmatch(k); m != nil && !coreTraefikNames[m[1]][m[2]] {
 				t.Errorf("core service %s defines %s %q, missing from coreTraefikNames", svc, m[1], m[2])
 			}
+		}
+	}
+}
+
+// TestCoreNamesComplete: coreServices and coreVolumes list every service
+// and volume key of core's docker-compose.yml, and every container_name /
+// network alias / hostname core sets is a reserved DNS name (sibling core
+// checkout; skipped without one).
+func TestCoreNamesComplete(t *testing.T) {
+	core := os.Getenv("PORTCULLIS_CORE_DIR")
+	if core == "" {
+		core = filepath.Join("..", "..", "..", "portcullis")
+	}
+	b, err := os.ReadFile(filepath.Join(core, "docker-compose.yml"))
+	if err != nil {
+		t.Skipf("no core checkout: %v", err)
+	}
+	var doc struct {
+		Services map[string]struct {
+			ContainerName string      `yaml:"container_name"`
+			Hostname      string      `yaml:"hostname"`
+			Networks      interface{} `yaml:"networks"`
+		} `yaml:"services"`
+		Volumes map[string]interface{} `yaml:"volumes"`
+	}
+	if err := yaml.Unmarshal(b, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.Services) == 0 || len(doc.Volumes) == 0 {
+		t.Fatal("core compose has no services or volumes")
+	}
+	for name, s := range doc.Services {
+		if !coreServices[name] {
+			t.Errorf("core service %s missing from coreServices", name)
+		}
+		if !coreDNSShared[name] && !reservedDNSName(name) {
+			t.Errorf("core service %s is not a reserved DNS name", name)
+		}
+		if !reservedDNSName("portcullis-" + name + "-1") {
+			t.Errorf("core container portcullis-%s-1 is not a reserved DNS name", name)
+		}
+		for _, n := range []string{s.ContainerName, s.Hostname} {
+			if n != "" && !reservedDNSName(n) {
+				t.Errorf("core service %s: name %s is not a reserved DNS name", name, n)
+			}
+		}
+		if nets, ok := s.Networks.(map[string]interface{}); ok {
+			for net, cfg := range nets {
+				c, _ := cfg.(map[string]interface{})
+				al, _ := c["aliases"].([]interface{})
+				for _, a := range al {
+					if as, _ := a.(string); !reservedDNSName(as) {
+						t.Errorf("core service %s: alias %v on %s is not a reserved DNS name", name, a, net)
+					}
+				}
+			}
+		}
+	}
+	for k := range doc.Volumes {
+		if !coreVolumes[k] {
+			t.Errorf("core volume %s missing from coreVolumes", k)
 		}
 	}
 }
