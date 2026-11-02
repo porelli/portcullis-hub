@@ -657,8 +657,8 @@ func (h *Hub) restoreInstanceAs(archive, newID, actor string, hosts map[string]s
 		}
 	}
 	// Host paths are shared, not copied: say so.
-	for _, st := range tmpl.Manifest.Settings {
-		if v := sb.cfg.Settings[st.Key]; st.Type == "path" && v != "" {
+	for _, st := range tmpl.Manifest.Options() {
+		if v := sb.cfg.Settings[st.Key]; st.Type == templates.TypePath && v != "" {
 			res.Warnings = append(res.Warnings, fmt.Sprintf("setting %s mounts host path %s, as instance %s did: the two instances share that directory unless you change it", st.Key, v, sb.m.Instance))
 		}
 	}

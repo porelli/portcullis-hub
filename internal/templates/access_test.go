@@ -14,7 +14,7 @@ func discoverOne(t *testing.T, manifest, compose string) []Template {
 	os.MkdirAll(filepath.Join(dir, "x"), 0755)
 	os.WriteFile(filepath.Join(dir, "x", "manifest.yaml"), []byte(manifest), 0644)
 	os.WriteFile(filepath.Join(dir, "x", "compose.yml"), []byte(compose), 0644)
-	return Discover(dir, "s", "example.org")
+	return Discover(dir, "s", "example.org", nil)
 }
 
 func TestAccessRoleEnforced(t *testing.T) {

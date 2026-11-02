@@ -832,16 +832,16 @@
           return;
         }
         for (const s of (data.definitions || [])) {
-          const val = (data.values && data.values[s.key]) || s.default || '';
+          const val = (data.values && data.values[s.key]) || (s.default == null ? '' : String(s.default));
           html += '<div class="form-group">';
           html += '<label>' + escapeHtml(s.label) + '</label>';
           if (s.description) html += '<small>' + escapeHtml(s.description) + '</small>';
-          if (s.type === 'boolean') {
-            html += '<select name="' + s.key + '"><option value="false"' + (val !== 'true' ? ' selected' : '') + '>No</option><option value="true"' + (val === 'true' ? ' selected' : '') + '>Yes</option></select>';
-          } else if (s.type === 'select') {
-            html += '<select name="' + s.key + '">';
+          if (s.type === 'bool') {
+            html += '<select name="' + escapeHtml(s.key) + '"><option value="false"' + (val !== 'true' ? ' selected' : '') + '>No</option><option value="true"' + (val === 'true' ? ' selected' : '') + '>Yes</option></select>';
+          } else if (s.type === 'enum') {
+            html += '<select name="' + escapeHtml(s.key) + '">';
             for (const opt of (s.options || [])) {
-              html += '<option value="' + escapeHtml(opt) + '"' + (val === opt ? ' selected' : '') + '>' + escapeHtml(opt) + '</option>';
+              html += '<option value="' + escapeHtml(opt.value) + '"' + (val === opt.value ? ' selected' : '') + '>' + escapeHtml(opt.label || opt.value) + '</option>';
             }
             html += '</select>';
           } else {

@@ -68,7 +68,7 @@ func TestValidateManifest(t *testing.T) {
 	base := func() Manifest {
 		return Manifest{
 			Name:     "App",
-			Settings: []Setting{{Key: "MEDIA", Default: "/mnt"}},
+			Settings: &SettingsSpec{Options: []Option{{Key: "media", Type: TypeString, Delivery: Deliveries{{Env: "MEDIA"}}}}},
 			Ports:    []Port{{Key: "HTTP_PORT", Bind: "127.0.0.1"}},
 			Env:      []EnvVar{{Key: "SECRET", Generate: "random"}},
 			Clients:  []KeycloakClient{{ClientID: "app", SecretEnv: "APP_SECRET"}},
@@ -90,9 +90,8 @@ func TestValidateManifest(t *testing.T) {
 	}
 
 	cases := map[string]func(*Manifest){
-		"setting key":          func(m *Manifest) { m.Settings[0].Key = "BAD-KEY" },
-		"setting key newline":  func(m *Manifest) { m.Settings[0].Key = "A\nB" },
-		"setting default ctl":  func(m *Manifest) { m.Settings[0].Default = "x\nEVIL=1" },
+		"setting env reserved": func(m *Manifest) { m.Settings.Options[0].Delivery[0].Env = VarInstance },
+		"env generate none":    func(m *Manifest) { m.Env[0].Generate = "none" },
 		"port key":             func(m *Manifest) { m.Ports[0].Key = "1PORT" },
 		"port bind":            func(m *Manifest) { m.Ports[0].Bind = "localhost" },
 		"env key":              func(m *Manifest) { m.Env[0].Key = "A=B" },

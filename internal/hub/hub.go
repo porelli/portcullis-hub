@@ -357,7 +357,7 @@ func (h *Hub) Discover() {
 	var ts []templates.Template
 	for _, src := range h.st.Sources {
 		if src.Path != "" {
-			ts = append(ts, templates.Discover(src.Path, src.Name, h.cfg.Domain)...)
+			ts = append(ts, templates.Discover(src.Path, src.Name, h.cfg.Domain, nil)...)
 		}
 	}
 	h.allTemplates = append([]templates.Template(nil), ts...)

@@ -1,6 +1,7 @@
 package templates
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -128,7 +129,7 @@ func TestRealTemplates(t *testing.T) {
 			want = append(want, e.Name())
 		}
 	}
-	got := Discover(dir, "portcullis", "example.org")
+	got := Discover(dir, "portcullis", "example.org", nil)
 	var ids []string
 	for _, tpl := range got {
 		ids = append(ids, tpl.ID)
@@ -170,7 +171,20 @@ func TestRealTemplates(t *testing.T) {
 		}
 	}
 	if strings.Join(ids, ",") != strings.Join(want, ",") {
-		t.Errorf("loaded %d/%d templates:\n got  %v\n want %v", len(ids), len(want), ids, want)
+		// Why each missing one is refused (contract v3 settings: the
+		// templates need converting until they are).
+		loaded := map[string]bool{}
+		for _, id := range ids {
+			loaded[id] = true
+		}
+		var why []string
+		for _, id := range want {
+			if !loaded[id] {
+				_, err := Load(dir, id, "portcullis", "example.org", nil)
+				why = append(why, fmt.Sprintf("  %s: %v", id, err))
+			}
+		}
+		t.Errorf("loaded %d/%d templates; refused:\n%s", len(ids), len(want), strings.Join(why, "\n"))
 	}
 	t.Logf("%d templates loaded", len(ids))
 }

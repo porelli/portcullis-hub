@@ -39,9 +39,9 @@ func (h *Hub) generateOverrideLocked(t *templates.Template, values map[string]st
 // needed). Caller must hold mu.
 func (h *Hub) renderOverrideLocked(t *templates.Template, values map[string]string) (string, error) {
 	serviceMounts := make(map[string][]string)
-	for _, s := range t.Manifest.Settings {
+	for _, s := range t.Manifest.Options() {
 		val := values[s.Key]
-		if val == "" || s.Target == nil || s.Target.Mount == "" || s.Type != "path" {
+		if val == "" || s.Target == nil || s.Target.Mount == "" || s.Type != templates.TypePath {
 			continue
 		}
 		if err := templates.ValidatePathSetting(val); err != nil {

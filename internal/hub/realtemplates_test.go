@@ -60,6 +60,19 @@ func TestRealTemplatesInstances(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.Discover()
+	// Every template must load: say why one doesn't (until the templates
+	// are converted to contract v3 settings, the v2 ones are refused).
+	loaded := map[string]bool{}
+	for _, c := range h.Templates() {
+		loaded[c.ID] = true
+	}
+	for _, e := range entries {
+		if _, err := os.Stat(filepath.Join(dir, e.Name(), "manifest.yaml")); err != nil || loaded[e.Name()] {
+			continue
+		}
+		_, err := templates.Load(dir, e.Name(), "portcullis", "example.org", nil)
+		t.Errorf("%s: not in the catalog: %v", e.Name(), err)
+	}
 	_, lookErr := exec.LookPath("docker")
 	haveCompose := lookErr == nil && exec.Command("docker", "compose", "version").Run() == nil
 	if !haveCompose {

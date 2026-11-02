@@ -72,7 +72,7 @@ func TestDiscover(t *testing.T) {
 	os.MkdirAll(filepath.Join(dir, "nomanifest"), 0755)
 	os.WriteFile(filepath.Join(dir, "file.txt"), nil, 0644)
 
-	ts := Discover(dir, "src", "example.org")
+	ts := Discover(dir, "src", "example.org", nil)
 	Sort(ts)
 	if len(ts) != 2 || ts[0].ID != "alpha" || ts[1].ID != "good" {
 		t.Fatalf("Discover = %+v", ts)
@@ -87,7 +87,7 @@ func TestDiscover(t *testing.T) {
 	if g.Manifest.Auth.AdminPaths[0] != "/admin" {
 		t.Errorf("admin path not normalised: %v", g.Manifest.Auth.AdminPaths)
 	}
-	if Discover(filepath.Join(dir, "missing"), "x", "d") != nil {
+	if Discover(filepath.Join(dir, "missing"), "x", "d", nil) != nil {
 		t.Error("missing dir should yield nil")
 	}
 }

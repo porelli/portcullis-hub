@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/policy"
@@ -17,9 +18,9 @@ import (
 
 // AppSettingsView is the GET /api/templates/settings/<id> payload.
 type AppSettingsView struct {
-	Definitions []templates.Setting `json:"definitions"`
-	Ports       []templates.Port    `json:"ports"`
-	Values      map[string]string   `json:"values"`
+	Definitions []templates.Option `json:"definitions"`
+	Ports       []templates.Port   `json:"ports"`
+	Values      map[string]string  `json:"values"`
 	// EffectivePolicy is what applies: the configured policy (override or
 	// global default) intersected with what the app can enforce.
 	EffectivePolicy policy.AuthPolicy `json:"effective_policy"`
@@ -65,7 +66,7 @@ func (h *Hub) AppSettings(id string) (*AppSettingsView, error) {
 	}
 	pub := h.publicLocked(t, t.Public)
 	v := &AppSettingsView{
-		Definitions:     t.Manifest.Settings,
+		Definitions:     t.Manifest.Options(),
 		Ports:           t.Manifest.Ports,
 		Values:          h.st.Settings[id],
 		EffectivePolicy: eff,
@@ -114,8 +115,8 @@ func ValidateSettings(t *templates.Template, values map[string]string) error {
 			return statusErr(400, "setting %s contains control characters", k)
 		}
 	}
-	for _, st := range t.Manifest.Settings {
-		if v := values[st.Key]; v != "" && st.Type == "path" {
+	for _, st := range t.Manifest.Options() {
+		if v := values[st.Key]; v != "" && st.Type == templates.TypePath {
 			if err := templates.ValidatePathSetting(v); err != nil {
 				return statusErr(400, "setting %s: %v", st.Key, err)
 			}
@@ -335,7 +336,7 @@ func (h *Hub) SaveSettings(id string, u SettingsUpdate) (retErr error) {
 		return statusErr(500, "settings saved but override generation failed: %v", overrideErr)
 	}
 
-	// text/boolean/select settings go into the .env — including empty
+	// Options with an env delivery go into the .env — including empty
 	// values, so clearing a field actually clears it — and so do the
 	// ports the app binds itself (network_mode: host, ranges).
 	envPath := h.envPath(id)
@@ -344,12 +345,13 @@ func (h *Hub) SaveSettings(id string, u SettingsUpdate) (retErr error) {
 			return statusErr(500, "failed to write env: %v", err)
 		}
 	}
-	for _, st := range t.Manifest.Settings {
-		if st.Type != "text" && st.Type != "boolean" && st.Type != "select" {
+	for _, st := range t.Manifest.Options() {
+		name := flatEnvName(&st)
+		if name == "" {
 			continue
 		}
 		if v, ok := u.Values[st.Key]; ok {
-			if err := setEnvVar(envPath, st.Key, v); err != nil {
+			if err := setEnvVar(envPath, name, v); err != nil {
 				return statusErr(500, "failed to write env: %v", err)
 			}
 		}
@@ -523,4 +525,37 @@ func (h *Hub) SaveEnv(id string, vars map[string]string) error {
 		}
 	}
 	return nil
+}
+
+// flatEnvName is the env variable option o's flat string value is written
+// to ("" = none: no env delivery, or an indexed one — typed values and
+// the other deliveries arrive with the settings engine).
+func flatEnvName(o *templates.Option) string {
+	n := o.EnvName()
+	if strings.HasSuffix(n, templates.IndexSuffix) {
+		return ""
+	}
+	return n
+}
+
+// settingsEnv maps stored settings to env variables: an option's value
+// goes to its env name (none: not in the env), any other key (ports and
+// their _BIND) as is.
+func settingsEnv(t *templates.Template, values map[string]string) map[string]string {
+	opts := map[string]*templates.Option{}
+	for i, o := range t.Manifest.Options() {
+		opts[o.Key] = &t.Manifest.Options()[i]
+	}
+	out := make(map[string]string, len(values))
+	for k, v := range values {
+		o, ok := opts[k]
+		if !ok {
+			out[k] = v
+			continue
+		}
+		if n := flatEnvName(o); n != "" {
+			out[n] = v
+		}
+	}
+	return out
 }

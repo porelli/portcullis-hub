@@ -47,7 +47,7 @@ func (h *Hub) generateAppEnvLocked(t *templates.Template) error {
 			vars[v.Key] = ""
 		}
 	}
-	for k, v := range h.st.Settings[t.ID] {
+	for k, v := range settingsEnv(t, h.st.Settings[t.ID]) {
 		vars[k] = v
 	}
 	// Ports the app binds itself (network_mode: host, ranges) reach it only

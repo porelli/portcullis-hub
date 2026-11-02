@@ -123,7 +123,7 @@ keycloak_clients:
 		"      traefik.http.routers.headscale.rule: Host(`${PORTCULLIS_HOST_HEADSCALE:-vpn.portcullis.local}`)\n"+
 		"      traefik.http.routers.headplane.rule: Host(`${PORTCULLIS_HOST_HEADPLANE:-vpn-admin.portcullis.local}`)\n"+
 		"    volumes: [hs-data:/d, ext:/e]\nvolumes:\n  hs-data: {}\n  ext:\n    external: true\n")
-	ts := Discover(dir, "s", "example.org")
+	ts := Discover(dir, "s", "example.org", nil)
 	if len(ts) != 1 {
 		t.Fatalf("discovered %d", len(ts))
 	}
@@ -224,7 +224,7 @@ func TestDiscoverInstanceRules(t *testing.T) {
 		os.MkdirAll(filepath.Join(dir, "x"), 0755)
 		os.WriteFile(filepath.Join(dir, "x", "manifest.yaml"), []byte(c[0]), 0644)
 		os.WriteFile(filepath.Join(dir, "x", "compose.yml"), []byte(c[1]), 0644)
-		if got := Discover(dir, "s", "example.org"); len(got) != 0 {
+		if got := Discover(dir, "s", "example.org", nil); len(got) != 0 {
 			t.Errorf("%s: loaded", name)
 		}
 	}
@@ -242,7 +242,7 @@ func TestDiscoverInstanceRules(t *testing.T) {
 		os.MkdirAll(filepath.Join(dir, "x"), 0755)
 		os.WriteFile(filepath.Join(dir, "x", "manifest.yaml"), []byte(c[0]), 0644)
 		os.WriteFile(filepath.Join(dir, "x", "compose.yml"), []byte(c[1]), 0644)
-		got := Discover(dir, "s", "example.org")
+		got := Discover(dir, "s", "example.org", nil)
 		if len(got) != 1 {
 			t.Errorf("%s: not loaded", name)
 			continue

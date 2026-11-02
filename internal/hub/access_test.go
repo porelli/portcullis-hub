@@ -145,10 +145,10 @@ func TestOverrideValidation(t *testing.T) {
 		}
 	}
 	// Refused before anything is stored, settings included.
-	if err := saveApp(t, f, "grafana", SettingsUpdate{Values: map[string]string{"GF_THEME": "light"}, Policy: &policy.AuthPolicy{Factors: []string{"password"}}}); statusOf(err) != 400 {
+	if err := saveApp(t, f, "grafana", SettingsUpdate{Values: map[string]string{"gf_theme": "light"}, Policy: &policy.AuthPolicy{Factors: []string{"password"}}}); statusOf(err) != 400 {
 		t.Fatal(err)
 	}
-	if v := view(t, f, "grafana"); v.Values["GF_THEME"] != "" {
+	if v := view(t, f, "grafana"); v.Values["gf_theme"] != "" {
 		t.Errorf("settings stored despite a refused policy: %v", v.Values)
 	}
 	for id, p := range map[string]policy.AuthPolicy{

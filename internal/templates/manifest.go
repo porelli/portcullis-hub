@@ -113,24 +113,6 @@ type PublicPath struct {
 	Justification string `yaml:"justification" json:"justification,omitempty"`
 }
 
-// SettingTarget maps a setting to a compose service volume mount.
-type SettingTarget struct {
-	Service string `yaml:"service" json:"service"`
-	Mount   string `yaml:"mount" json:"mount"`
-}
-
-// Setting is a user-configurable option defined in a manifest.
-type Setting struct {
-	Key         string         `yaml:"key" json:"key"`
-	Label       string         `yaml:"label" json:"label"`
-	Description string         `yaml:"description" json:"description"`
-	Type        string         `yaml:"type" json:"type"` // text, path, paths, boolean, select
-	Required    bool           `yaml:"required" json:"required"`
-	Default     string         `yaml:"default" json:"default"`
-	Options     []string       `yaml:"options" json:"options"`
-	Target      *SettingTarget `yaml:"target" json:"target"`
-}
-
 // Port is a host port binding declared by a manifest. The Hub checks these
 // for collisions at enable-time and emits the effective bindings into the
 // per-app compose override so users can rebind or disable them from the UI.
@@ -152,7 +134,7 @@ type Port struct {
 type EnvVar struct {
 	Key         string `yaml:"key" json:"key"`
 	Description string `yaml:"description" json:"description"`
-	Generate    string `yaml:"generate" json:"generate"` // "random", "none", ""
+	Generate    string `yaml:"generate" json:"generate"` // "random" or ""
 	Required    *bool  `yaml:"required" json:"required"`
 }
 
@@ -204,7 +186,7 @@ type Manifest struct {
 	Category    string           `yaml:"category" json:"category"`
 	Tags        []string         `yaml:"tags" json:"tags"`
 	Auth        Auth             `yaml:"auth" json:"auth"`
-	Settings    []Setting        `yaml:"settings" json:"settings"`
+	Settings    *SettingsSpec    `yaml:"settings" json:"settings,omitempty"`
 	Ports       []Port           `yaml:"ports" json:"ports"`
 	Env         []EnvVar         `yaml:"env" json:"env"`
 	Clients     []KeycloakClient `yaml:"keycloak_clients" json:"keycloak_clients"`
@@ -212,6 +194,10 @@ type Manifest struct {
 	URLs        []AppURL         `yaml:"urls" json:"urls"`
 	// Hosts are per-host-router properties (contract §3.1).
 	Hosts *HostsSpec `yaml:"hosts" json:"hosts,omitempty"`
+	// Files, Hooks and Reload are what settings deliveries name (§13.7, §13.8).
+	Files  []DataFile `yaml:"files" json:"files,omitempty"`
+	Hooks  []Hook     `yaml:"hooks" json:"hooks,omitempty"`
+	Reload *Reload    `yaml:"reload" json:"reload,omitempty"`
 }
 
 // HostsSpec is the manifest's hosts block.

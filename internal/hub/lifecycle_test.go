@@ -431,8 +431,8 @@ func TestSaveSettingsValidation(t *testing.T) {
 	f := newFixture(t)
 	bad := []map[string]string{
 		{"bad-key": "x"},
-		{"GF_THEME": "dark\nEVIL=1"},
-		{"MEDIA": "/a:/etc"},
+		{"gf_theme": "dark\nEVIL=1"},
+		{"media": "/a:/etc"},
 		{"GRAFANA_PORT": "70000"},
 		{"GRAFANA_PORT": "abc"},
 		{"GRAFANA_PORT_BIND": "localhost"},
@@ -447,7 +447,7 @@ func TestSaveSettingsValidation(t *testing.T) {
 	}
 
 	err := f.h.SaveSettings("grafana", SettingsUpdate{
-		Values: map[string]string{"GF_THEME": "light", "MEDIA": "/mnt/My Media", "GRAFANA_PORT": ""},
+		Values: map[string]string{"gf_theme": "light", "media": "/mnt/My Media", "GRAFANA_PORT": ""},
 		Policy: &policy.AuthPolicy{Factors: []string{"WEBAUTHN", "mtls"}, Op: "all"},
 	})
 	if err != nil {
@@ -533,7 +533,7 @@ func TestRoutingValidation(t *testing.T) {
 		}
 	}
 	// A template update changes the routed subdomains used for the policy file.
-	writeFile(t, filepath.Join(f.src, "grafana", "compose.yml"), "services:\n  web:\n    labels:\n      traefik.http.routers.g.rule: Host(`dash.${PORTCULLIS_DOMAIN}`)\n")
+	writeFile(t, filepath.Join(f.src, "grafana", "compose.yml"), "services:\n  web:\n    environment:\n      GF_THEME: ${GF_THEME:-dark}\n    labels:\n      traefik.http.routers.g.rule: Host(`dash.${PORTCULLIS_DOMAIN}`)\n")
 	f.h.Discover()
 	f.h.Enable("grafana")
 	if doc := readPolicy(t, f); doc.Groups["dash.example.org"] != "users_grafana" || doc.Groups["grafana.example.org"] != "" {

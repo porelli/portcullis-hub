@@ -1,6 +1,7 @@
 package templates
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -11,7 +12,9 @@ import (
 
 // Discover loads every valid template directly under dir. Invalid templates
 // are logged and skipped. {{DOMAIN}} in app URLs is replaced by domain.
-func Discover(dir, source, domain string) []Template {
+// known reports whether the Hub implements a settings type
+// (settings.Registry.Known); nil = BuiltinTypes.
+func Discover(dir, source, domain string, known func(typ string) bool) []Template {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil
@@ -21,92 +24,101 @@ func Discover(dir, source, domain string) []Template {
 		if !e.IsDir() {
 			continue
 		}
-		manifestPath := filepath.Join(dir, e.Name(), "manifest.yaml")
-		data, err := os.ReadFile(manifestPath)
-		if err != nil {
+		if _, err := os.Stat(filepath.Join(dir, e.Name(), "manifest.yaml")); err != nil {
 			continue
 		}
-		if !IDRe.MatchString(e.Name()) {
-			log.Printf("Skipping template %q: directory name must match %s", e.Name(), IDRe)
-			continue
-		}
-		if err := SingleDocument(data, "manifest.yaml"); err != nil {
-			log.Printf("Skipping template %s: %v", e.Name(), err)
-			continue
-		}
-		var m Manifest
-		if err := yaml.Unmarshal(data, &m); err != nil {
-			log.Printf("Bad manifest in %s: %v", manifestPath, err)
-			continue
-		}
-		if err := ValidateManifest(&m); err != nil {
-			log.Printf("Skipping template %s: %v", e.Name(), err)
-			continue
-		}
-		compose, err := os.ReadFile(filepath.Join(dir, e.Name(), "compose.yml"))
-		if err != nil {
-			log.Printf("Skipping template %s: no compose.yml: %v", e.Name(), err)
-			continue
-		}
-		// Before any parse: every check reads the first document only.
-		if err := SingleDocument(compose, "compose.yml"); err != nil {
-			log.Printf("Skipping template %s: %v", e.Name(), err)
-			continue
-		}
-		routes, err := ParseRoutes(compose)
+		t, err := Load(dir, e.Name(), source, domain, known)
 		if err != nil {
 			log.Printf("Skipping template %s: %v", e.Name(), err)
 			continue
 		}
-		public, err := PlanPublic(&m, routes)
-		if err != nil {
-			log.Printf("Skipping template %s: %v", e.Name(), err)
-			continue
-		}
-		if err := checkCoreRefs(compose, routes.HostVars); err != nil {
-			log.Printf("Skipping template %s: %v", e.Name(), err)
-			continue
-		}
-		if err := checkVolumeNames(compose, e.Name(), m.Multi()); err != nil {
-			log.Printf("Skipping template %s: %v", e.Name(), err)
-			continue
-		}
-		if err := checkInstanceRules(&m, routes); err != nil {
-			log.Printf("Skipping template %s: %v", e.Name(), err)
-			continue
-		}
-		services := Services(compose)
-		if c := CoreContainerClash(e.Name(), services); c != "" {
-			log.Printf("Skipping template %s: its container %s would be a core service's container name", e.Name(), c)
-			continue
-		}
-		raw := m
-		t := Template{
-			ID:           e.Name(),
-			TemplateID:   e.Name(),
-			Source:       source,
-			Manifest:     m,
-			Path:         filepath.Join(dir, e.Name()),
-			Subdomains:   routes.Subdomains,
-			Public:       public,
-			HostRouters:  routes.HostRouters,
-			HostVars:     routes.HostVars,
-			HostForm:     routes.Form,
-			Volumes:      ComposeVolumes(compose),
-			NamedVolumes: declaredVolumeNames(compose),
-			Services:     services,
-			Names:        routes.Names,
-			raw:          &raw,
-		}
-		// The catalog entry shows the default instance.
-		view, err := t.Instance(t.ID, nil, domain)
-		if err != nil {
-			log.Printf("Skipping template %s: %v", e.Name(), err)
-			continue
-		}
-		out = append(out, view)
+		out = append(out, t)
 	}
 	return out
+}
+
+// Load reads and validates the template in dir/name, as Discover does,
+// and returns its catalog entry or why it is refused.
+func Load(dir, name, source, domain string, known func(typ string) bool) (Template, error) {
+	p := filepath.Join(dir, name)
+	data, err := os.ReadFile(filepath.Join(p, "manifest.yaml"))
+	if err != nil {
+		return Template{}, err
+	}
+	compose, err := os.ReadFile(filepath.Join(p, "compose.yml"))
+	if err != nil {
+		compose = nil
+	}
+	return build(name, source, p, data, compose, domain, known)
+}
+
+// build validates a template from its manifest and compose file (nil =
+// missing) and returns its catalog entry (the default instance's view).
+func build(id, source, path string, data, compose []byte, domain string, known func(typ string) bool) (Template, error) {
+	if !IDRe.MatchString(id) {
+		return Template{}, fmt.Errorf("directory name must match %s", IDRe)
+	}
+	if err := SingleDocument(data, "manifest.yaml"); err != nil {
+		return Template{}, err
+	}
+	var m Manifest
+	if err := yaml.Unmarshal(data, &m); err != nil {
+		return Template{}, fmt.Errorf("bad manifest: %v", err)
+	}
+	if err := ValidateManifest(&m); err != nil {
+		return Template{}, err
+	}
+	if compose == nil {
+		return Template{}, fmt.Errorf("no compose.yml")
+	}
+	// Before any parse: every check reads the first document only.
+	if err := SingleDocument(compose, "compose.yml"); err != nil {
+		return Template{}, err
+	}
+	routes, err := ParseRoutes(compose)
+	if err != nil {
+		return Template{}, err
+	}
+	public, err := PlanPublic(&m, routes)
+	if err != nil {
+		return Template{}, err
+	}
+	if err := checkCoreRefs(compose, routes.HostVars); err != nil {
+		return Template{}, err
+	}
+	if err := checkVolumeNames(compose, id, m.Multi()); err != nil {
+		return Template{}, err
+	}
+	if err := checkInstanceRules(&m, routes); err != nil {
+		return Template{}, err
+	}
+	services := Services(compose)
+	if c := CoreContainerClash(id, services); c != "" {
+		return Template{}, fmt.Errorf("its container %s would be a core service's container name", c)
+	}
+	raw := m
+	t := Template{
+		ID:           id,
+		TemplateID:   id,
+		Source:       source,
+		Manifest:     m,
+		Path:         path,
+		Subdomains:   routes.Subdomains,
+		Public:       public,
+		HostRouters:  routes.HostRouters,
+		HostVars:     routes.HostVars,
+		HostForm:     routes.Form,
+		Volumes:      ComposeVolumes(compose),
+		NamedVolumes: declaredVolumeNames(compose),
+		Services:     services,
+		Names:        routes.Names,
+		raw:          &raw,
+	}
+	if err := ValidateSettingsSpec(&t, compose, routes, known); err != nil {
+		return Template{}, err
+	}
+	// The catalog entry shows the default instance.
+	return t.Instance(t.ID, nil, domain)
 }
 
 // Sort orders templates by category, then name (the catalog order).

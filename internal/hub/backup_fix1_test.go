@@ -395,7 +395,7 @@ func TestDeletingIsDisabled(t *testing.T) {
 // Minor 7: host paths aren't copied by a new-id restore: warned.
 func TestRestoreNewIDWarnsPathSettings(t *testing.T) {
 	m := strings.NewReplacer("grafana", "media", "Grafana", "Media", "GRAFANA", "MEDIA").Replace(v2GrafanaManifest) +
-		"settings:\n  - key: LIBRARY\n    type: path\n    target: {service: media, mount: /library}\n"
+		"settings:\n  options:\n    - {key: library, label: Library, type: path, target: {service: web, mount: /library}}\n"
 	c := strings.NewReplacer("grafana", "media", "GRAFANA", "MEDIA").Replace(v2GrafanaCompose)
 	f := newInstanceFixtureExtra(t, nil, nil, map[string][2]string{"media": {m, c}})
 	simulateCompose(f, 0)
@@ -405,7 +405,7 @@ func TestRestoreNewIDWarnsPathSettings(t *testing.T) {
 	if err := f.h.CreateInstance("media", "media-b", nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.h.SaveSettings("media-b", SettingsUpdate{Values: map[string]string{"LIBRARY": "/srv/library"}}); err != nil {
+	if err := f.h.SaveSettings("media-b", SettingsUpdate{Values: map[string]string{"library": "/srv/library"}}); err != nil {
 		t.Fatal(err)
 	}
 	entry, err := f.h.BackupInstance("media-b", "root")
@@ -416,7 +416,7 @@ func TestRestoreNewIDWarnsPathSettings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if w := strings.Join(res.Warnings, " "); !strings.Contains(w, "LIBRARY") || !strings.Contains(w, "/srv/library") {
+	if w := strings.Join(res.Warnings, " "); !strings.Contains(w, "library") || !strings.Contains(w, "/srv/library") {
 		t.Errorf("warnings = %v", res.Warnings)
 	}
 }

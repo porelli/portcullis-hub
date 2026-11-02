@@ -15,9 +15,9 @@ import (
 // 10c7211 (before instances) knew them. testdata/golden/ holds what that
 // commit generated for them (env secrets masked), produced by running this
 // fixture there in a temporary worktree.
-const goldenGrafanaManifest = "name: Grafana\ncategory: monitoring\nauth:\n  method: header-auth\n  group_access: true\n  access_group: users_grafana\n  admin_group: admin_grafana\n  admin_paths: [/admin/]\nenv:\n  - key: GF_SECRET\n    generate: random\nsettings:\n  - key: GF_THEME\n    type: select\n    options: [dark, light]\nports:\n  - key: GRAFANA_PORT\n    container: 3000\n    default: 3300\n    service: web\n"
+const goldenGrafanaManifest = "name: Grafana\ncategory: monitoring\nauth:\n  method: header-auth\n  group_access: true\n  access_group: users_grafana\n  admin_group: admin_grafana\n  admin_paths: [/admin/]\nenv:\n  - key: GF_SECRET\n    generate: random\nsettings:\n  options:\n    - key: gf_theme\n      label: Theme\n      type: enum\n      options: [{value: dark, label: Dark}, {value: light, label: Light}]\n      delivery: [{env: GF_THEME}]\nports:\n  - key: GRAFANA_PORT\n    container: 3000\n    default: 3300\n    service: web\n"
 
-const goldenGrafanaCompose = "services:\n  web:\n    image: grafana\n    environment:\n      GF_SERVER_ROOT_URL: https://grafana.${PORTCULLIS_DOMAIN:-portcullis.local}\n      CORE: ${CORE_VAR}\n    volumes:\n      - grafana-data:/var/lib/grafana\n    labels:\n      traefik.enable: \"true\"\n      traefik.http.routers.grafana.rule: Host(`grafana.${PORTCULLIS_DOMAIN:-portcullis.local}`)\n      traefik.http.routers.grafana.middlewares: portcullis-auth@docker,portcullis-groups@docker,security-headers@file\n      traefik.http.routers.grafana-api.rule: Host(`grafana.${PORTCULLIS_DOMAIN:-portcullis.local}`) && PathPrefix(`/api`)\n      traefik.http.services.grafana.loadbalancer.server.port: \"3000\"\nvolumes:\n  grafana-data:\n    name: portcullis_grafana-data\n"
+const goldenGrafanaCompose = "services:\n  web:\n    image: grafana\n    environment:\n      GF_THEME: ${GF_THEME:-dark}\n      GF_SERVER_ROOT_URL: https://grafana.${PORTCULLIS_DOMAIN:-portcullis.local}\n      CORE: ${CORE_VAR}\n    volumes:\n      - grafana-data:/var/lib/grafana\n    labels:\n      traefik.enable: \"true\"\n      traefik.http.routers.grafana.rule: Host(`grafana.${PORTCULLIS_DOMAIN:-portcullis.local}`)\n      traefik.http.routers.grafana.middlewares: portcullis-auth@docker,portcullis-groups@docker,security-headers@file\n      traefik.http.routers.grafana-api.rule: Host(`grafana.${PORTCULLIS_DOMAIN:-portcullis.local}`) && PathPrefix(`/api`)\n      traefik.http.services.grafana.loadbalancer.server.port: \"3000\"\nvolumes:\n  grafana-data:\n    name: portcullis_grafana-data\n"
 
 const goldenDisksManifest = "name: Disks\ncategory: monitoring\nauth:\n  method: forward-auth\nports:\n  - key: DISKS_PORT\n    container: 8080\n    default: 8090\n    service: disks\n"
 
@@ -53,7 +53,7 @@ func goldenRun(t *testing.T, v2 bool) (*fixture, map[string]string) {
 	st := state.New()
 	st.Sources = []state.Source{{Name: "local", Path: f.src}}
 	st.Enabled = []string{"grafana", "disks"}
-	st.Settings["grafana"] = map[string]string{"GRAFANA_PORT": "3301", "GF_THEME": "dark"}
+	st.Settings["grafana"] = map[string]string{"GRAFANA_PORT": "3301", "gf_theme": "dark"}
 	os.MkdirAll(f.data, 0755)
 	if err := st.Save(filepath.Join(f.data, "state.yaml")); err != nil {
 		t.Fatal(err)

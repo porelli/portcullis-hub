@@ -56,14 +56,6 @@ func ValidateManifest(m *Manifest) error {
 		}
 		clientKeys[k] = c.ClientID
 	}
-	for _, st := range m.Settings {
-		if !EnvKeyRe.MatchString(st.Key) {
-			return fmt.Errorf("invalid setting key %q", st.Key)
-		}
-		if HasControlChars(st.Default) {
-			return fmt.Errorf("setting %s: default contains control characters", st.Key)
-		}
-	}
 	for _, p := range m.Ports {
 		if !EnvKeyRe.MatchString(p.Key) {
 			return fmt.Errorf("invalid port key %q", p.Key)
@@ -75,6 +67,13 @@ func ValidateManifest(m *Manifest) error {
 	for _, v := range m.Env {
 		if !EnvKeyRe.MatchString(v.Key) {
 			return fmt.Errorf("invalid env key %q", v.Key)
+		}
+		switch v.Generate {
+		case "", "random":
+		case "none":
+			return fmt.Errorf("env %s: generate: none is template contract v2 — declare a setting for a value the admin enters (contract §13)", v.Key)
+		default:
+			return fmt.Errorf("env %s: generate %q must be random (or absent)", v.Key, v.Generate)
 		}
 	}
 	for _, c := range m.Clients {
@@ -127,14 +126,17 @@ func ValidateManifest(m *Manifest) error {
 	return ValidatePublicAccess(a)
 }
 
-// manifestKeys are the env, setting and port keys a manifest declares.
+// manifestKeys are the env names a manifest declares: env keys, the
+// settings' env deliveries and port keys.
 func manifestKeys(m *Manifest) []string {
 	var ks []string
 	for _, v := range m.Env {
 		ks = append(ks, v.Key)
 	}
-	for _, s := range m.Settings {
-		ks = append(ks, s.Key)
+	if m.Settings != nil {
+		for i := range m.Settings.Options {
+			ks = append(ks, m.Settings.Options[i].EnvNames()...)
+		}
 	}
 	for _, p := range m.Ports {
 		ks = append(ks, p.Key, p.Key+"_BIND")

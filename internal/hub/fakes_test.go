@@ -325,12 +325,16 @@ env:
   - key: GF_SECRET
     generate: random
 settings:
-  - key: GF_THEME
-    type: select
-    options: [dark, light]
-  - key: MEDIA
-    type: path
-    target: {service: web, mount: /media}
+  options:
+    - key: gf_theme
+      label: Theme
+      type: enum
+      options: [{value: dark, label: Dark}, {value: light, label: Light}]
+      delivery: [{env: GF_THEME}]
+    - key: media
+      label: Media
+      type: path
+      target: {service: web, mount: /media}
 ports:
   - key: GRAFANA_PORT
     container: 3000
@@ -338,7 +342,7 @@ ports:
     service: web
 `
 
-const grafanaCompose = "services:\n  web:\n    image: grafana\n    environment:\n      X: ${CORE_VAR}\n    labels:\n      traefik.http.routers.grafana.rule: Host(`grafana.${PORTCULLIS_DOMAIN:-x}`)\n      traefik.http.routers.grafana.entrypoints: websecure\n"
+const grafanaCompose = "services:\n  web:\n    image: grafana\n    environment:\n      X: ${CORE_VAR}\n      GF_THEME: ${GF_THEME:-dark}\n    labels:\n      traefik.http.routers.grafana.rule: Host(`grafana.${PORTCULLIS_DOMAIN:-x}`)\n      traefik.http.routers.grafana.entrypoints: websecure\n"
 
 const otherManifest = `name: Other
 category: misc
