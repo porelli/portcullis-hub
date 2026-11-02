@@ -1,6 +1,6 @@
 # App settings panel: template-declared settings, per-person and per-group values
 
-Status: draft for approval (2026-11-02)
+Status: approved (2026-11-02)
 
 Project 1 of 3 (1 settings panel → 2 shared folders + doctor → 3 file
 sharing: file-share passwords, Samba, Time Machine). Evidence base:

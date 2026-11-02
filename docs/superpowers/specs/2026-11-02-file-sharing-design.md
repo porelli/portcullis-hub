@@ -1,6 +1,6 @@
 # File sharing: file-share passwords, Samba and Time Machine
 
-Status: draft for approval (2026-11-02)
+Status: approved (2026-11-02)
 
 Project 3 of 3: (1) [app settings panel](2026-11-02-app-settings-panel-design.md)
 → (2) [shared folders + doctor](2026-11-02-shared-folders-doctor-design.md)

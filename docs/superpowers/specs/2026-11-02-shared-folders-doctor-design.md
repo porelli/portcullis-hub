@@ -1,6 +1,6 @@
 # Shared folders and the doctor
 
-Status: draft for approval (2026-11-02)
+Status: approved (2026-11-02)
 
 Project 2 of 3: (1) app settings panel → **(2) shared folders + doctor** →
 (3) file sharing (file-share passwords, Samba and Time Machine templates).
