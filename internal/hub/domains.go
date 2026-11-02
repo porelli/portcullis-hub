@@ -232,6 +232,16 @@ func (h *Hub) RefreshDomains(ctx context.Context) ([]domains.Domain, error) {
 	list = fromKnown(known)
 	h.mu.Lock()
 	h.domainsReachable = true
+	// A deleting mark whose name the service no longer lists is done.
+	for n := range h.domainsDeleting {
+		gone := true
+		for _, d := range known {
+			gone = gone && d.Name != n
+		}
+		if gone {
+			delete(h.domainsDeleting, n)
+		}
+	}
 	if h.domainsGen != gen {
 		// A domain operation committed while List was in flight: its
 		// result is newer than this list.
@@ -564,6 +574,15 @@ func (h *Hub) DeleteDomain(ctx context.Context, actor, name string) (warning str
 	warning, err = api.Delete(context.WithoutCancel(ctx), name)
 	var ae *domains.APIError
 	if err != nil && !(errors.As(err, &ae) && ae.Status == 404) {
+		if !errors.As(err, &ae) {
+			// No answer (timeout, connection lost): the service may have
+			// deleted it. Stay "deleting" (never assignable) and let the
+			// list decide: a refresh without the name clears the mark.
+			if _, rerr := h.RefreshDomains(context.WithoutCancel(ctx)); rerr != nil {
+				log.Printf("domains: refresh after an unanswered delete of %s: %v", name, rerr)
+			}
+			return "", &StatusError{Status: 502, Err: fmt.Errorf("deleting %s: no answer from the domains service (%v); it stays marked deleting until the service's list shows the outcome — retry the delete", name, err)}
+		}
 		h.mu.Lock()
 		delete(h.domainsDeleting, name)
 		h.domainsGen++

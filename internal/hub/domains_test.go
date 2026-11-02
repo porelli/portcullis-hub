@@ -521,3 +521,31 @@ func TestUnknownProviderRefused(t *testing.T) {
 	}
 	assertNoSecret(t, f, audit)
 }
+
+// TestDeleteNoAnswerStaysDeleting: without an answer the domain stays
+// marked deleting (not assignable) until the service's list shows the
+// outcome.
+func TestDeleteNoAnswerStaysDeleting(t *testing.T) {
+	f, api, _ := newDomainsFixture(t)
+	readyDomain(t, f, api, "team-b.example.net")
+	api.deleteHook = func() error { return fmt.Errorf("%w (timeout)", domains.ErrUnreachable) }
+	if _, err := f.h.DeleteDomain(context.Background(), "alice", "team-b.example.net"); statusOf(err) != 502 || !strings.Contains(err.Error(), "stays marked deleting") {
+		t.Fatalf("delete without answer = %v", err)
+	}
+	if err := f.h.CreateInstance("grafana", "grafana-e", map[string]string{"grafana": "grafana.team-b.example.net"}); statusOf(err) != 409 {
+		t.Fatalf("assignable after an unanswered delete: %v", err)
+	}
+	// The service did delete it: the next refresh clears the mark and the entry.
+	api.mu.Lock()
+	delete(api.list, "team-b.example.net")
+	api.mu.Unlock()
+	if _, err := f.h.RefreshDomains(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	f.h.mu.RLock()
+	marked := f.h.domainsDeleting["team-b.example.net"]
+	f.h.mu.RUnlock()
+	if marked || len(f.h.KnownDomains()) != 0 {
+		t.Fatalf("mark %v, known %v", marked, f.h.KnownDomains())
+	}
+}
