@@ -187,13 +187,14 @@ func main() {
 	// Keycloak drops its copy of a user deleted straight in LLDAP only when
 	// the user is looked up (removeInvalidUsersEnabled; its periodic LDAP
 	// sync never removes users): list them all periodically. Keycloak
-	// decides per user against LDAP; the Hub deletes nothing.
+	// decides per user against LDAP; the Hub deletes nothing. Guarded: an
+	// LLDAP that looks wrong (unreachable, admin or service account
+	// missing, user count dropped) pauses it (hub/usersweep.go).
+	h.SetUserSweep(ll, kc)
 	go runEvery(ctx, time.Minute, userRevalidateInterval, func() {
 		rctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 		defer cancel()
-		if _, err := kc.RevalidateUsers(rctx); err != nil && ctx.Err() == nil {
-			log.Printf("keycloak: user revalidation failed (next try in %s): %v", userRevalidateInterval, err)
-		}
+		h.RunUserSweep(rctx)
 	})
 	// SIGHUP syncs the template sources (core's `./portcullis upgrade`
 	// sends it and reads the outcome from <data>/source-sync.json).

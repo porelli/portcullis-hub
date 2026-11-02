@@ -28,6 +28,30 @@ func (s *Server) registerInstances(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/instances/{id}/op", s.handleInstanceOp)
 	mux.HandleFunc("GET /api/instances/missing-groups", s.handleMissingGroups)
 	mux.HandleFunc("POST /api/instances/missing-groups", s.handleCreateMissingGroups)
+	mux.HandleFunc("GET /api/keycloak/user-sweep", s.handleUserSweep)
+	mux.HandleFunc("POST /api/keycloak/user-sweep/resume", s.handleResumeUserSweep)
+}
+
+// handleUserSweep: the guarded stale-record cleanup's status (banner).
+func (s *Server) handleUserSweep(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, s.Hub.UserSweep())
+}
+
+// handleResumeUserSweep resumes a paused cleanup ({"confirm": "resume"}),
+// as the signed-in admin; audited.
+func (s *Server) handleResumeUserSweep(w http.ResponseWriter, r *http.Request) {
+	var b struct {
+		Confirm string `json:"confirm"`
+	}
+	if !decodeStrict(w, r, &b, `{"confirm": "resume"}`) {
+		return
+	}
+	st, err := s.Hub.ResumeUserSweep(r.Context(), actor(r), b.Confirm)
+	if err != nil {
+		writeErr(w, err, http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, st)
 }
 
 // handleMissingGroups lists the enabled instances whose access / admin

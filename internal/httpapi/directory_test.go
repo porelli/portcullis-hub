@@ -324,3 +324,28 @@ func TestEnableCreatesMissingGroups(t *testing.T) {
 		t.Errorf("create = %d %s", r.StatusCode, b)
 	}
 }
+
+// The cleanup banner's routes: status, and resume refused unless paused,
+// confirmed and by an admin (the Hub's guards; usersweep_test.go).
+func TestUserSweepRoutes(t *testing.T) {
+	s, ll, kc := newDirFixture(t, nil)
+	s.Hub.SetGroups(s.Directory)
+	s.Hub.SetUserSweep(lldap.New(ll.HTTP.URL, ll.LDAPURL(), ll.BaseDN, filepath.Join(t.TempDir(), "none")), keycloak.New(kc.HTTP.URL, "admin", "admin"))
+	handler, err := s.Handler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(handler)
+	t.Cleanup(srv.Close)
+	// LLDAP credentials missing: unreachable → skipped, not paused.
+	s.Hub.RunUserSweep(context.Background())
+	if r, b := doAs(t, srv, "root", "GET", "/api/keycloak/user-sweep", ""); r.StatusCode != 200 || !strings.Contains(b, `"configured":true`) || !strings.Contains(b, `"skipped":"LLDAP is unreachable`) {
+		t.Errorf("status = %d %s", r.StatusCode, b)
+	}
+	if r, b := doAs(t, srv, "root", "POST", "/api/keycloak/user-sweep/resume", `{"confirm":"resume"}`); r.StatusCode != 409 {
+		t.Errorf("resume when not paused = %d %s", r.StatusCode, b)
+	}
+	if r, _ := doAs(t, srv, "root", "POST", "/api/keycloak/user-sweep/resume", `{"confirm":"resume","x":1}`); r.StatusCode != 400 {
+		t.Errorf("unknown field = %d", r.StatusCode)
+	}
+}

@@ -299,6 +299,7 @@
     <div class="tab-content active" id="tab-catalog">
       <div class="drift" id="drift"></div>
       <div class="drift" id="missing-groups"></div>
+      <div class="drift" id="user-sweep"></div>
       <div id="instances-overview"></div>
       {{range $category, $apps := .Categories}}
       <div class="category">
@@ -1273,6 +1274,41 @@
     }
     loadMissingGroups();
     setInterval(loadMissingGroups, 60000);
+
+    // ── Guarded Keycloak stale-record cleanup ──────────────
+    // Paused when LLDAP looks wrong (admin / service account missing, user
+    // count dropped): nothing is removed from Keycloak until an admin
+    // checks LLDAP and resumes (typed confirm, audited).
+    function renderUserSweep(st) {
+      const box = document.getElementById('user-sweep');
+      if (!st || !st.configured || (!st.paused && !st.skipped)) { box.classList.remove('visible'); box.innerHTML = ''; return; }
+      let html = '<div class="drift-title"><span>LLDAP looks wrong — stale-record cleanup ' + (st.paused ? 'paused' : 'skipped') + '</span></div>';
+      html += '<div class="drift-item"><span class="drift-msg">' + escapeHtml(st.paused ? st.reason : st.skipped) +
+        ' &middot; Keycloak keeps every user meanwhile. Check LLDAP (restore it from a backup if it lost users) before resuming.</span></div>';
+      if (st.paused) {
+        html += '<div class="drift-item"><input type="text" id="user-sweep-confirm" placeholder="type resume" autocomplete="off">' +
+          '<button class="btn btn-danger btn-sm" data-user-sweep-resume="">Resume cleanup</button></div>';
+      }
+      box.innerHTML = html;
+      box.classList.add('visible');
+      const btn = box.querySelector('[data-user-sweep-resume]');
+      if (btn) btn.addEventListener('click', resumeUserSweep);
+    }
+    async function loadUserSweep() {
+      if (document.getElementById('user-sweep-confirm') === document.activeElement) return;
+      try { renderUserSweep(await apiGet('/api/keycloak/user-sweep')); } catch (e) { /* ignore */ }
+    }
+    async function resumeUserSweep(ev) {
+      const btn = ev.currentTarget;
+      const confirmText = (document.getElementById('user-sweep-confirm').value || '').trim();
+      btn.classList.add('loading');
+      try {
+        renderUserSweep(await apiPost('/api/keycloak/user-sweep/resume', { confirm: confirmText }));
+        showToast('Stale-record cleanup resumed', 'success');
+      } catch (e) { showToast(e.message, 'error'); btn.classList.remove('loading'); }
+    }
+    loadUserSweep();
+    setInterval(loadUserSweep, 60000);
 
     // ── Last operation (failed enable/restart/…: compose output) ──
     function renderOpRecord(id, r, withTitle) {

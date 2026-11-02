@@ -165,6 +165,8 @@ type Hub struct {
 	sourceSyncMu   sync.Mutex
 	sourceSyncStMu sync.Mutex
 	sourceSyncSt   *SourceSyncStatus
+	// sweep: the guarded Keycloak stale-record sweep (usersweep.go).
+	sweep *userSweep
 	// syncMu: per template id, a *sync.Mutex around its support-file sync
 	// (shared by all its instances).
 	syncMu sync.Map
