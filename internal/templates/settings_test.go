@@ -640,3 +640,43 @@ func TestInterpolationEscapes(t *testing.T) {
 		{"escaped only", hdrHead + opts("{key: theme, label: T, type: string}"), strings.Replace(hdrCompose, "THEME: ${THEME:-dark}", "THEME: $${THEME}", 1), "theme", "hard-codes"},
 	})
 }
+
+// Traefik names a container's service without labels
+// "<compose service>-portcullis-<id>": a template-defined name of that
+// shape would merge with it. Refused in ParseRoutes, every time.
+func TestAutoServiceNameRefused(t *testing.T) {
+	layout := "services:\n  web:\n    image: x\n    labels:\n" +
+		"      traefik.http.routers.side.rule: Host(`${PORTCULLIS_HOST_APP:-app.portcullis.local}`) && PathPrefix(`/side`)\n" +
+		"  init:\n    image: x\n    labels:\n" +
+		"      traefik.http.routers.app.rule: Host(`${PORTCULLIS_HOST_APP:-app.portcullis.local}`)\n" +
+		"      traefik.http.routers.app.middlewares: portcullis-auth@docker,portcullis-groups@docker\n" +
+		"      traefik.http.routers.app.service: web-portcullis-app\n" +
+		"      traefik.http.services.web-portcullis-app.loadbalancer.server.port: \"80\"\n"
+	for i := 0; i < 25; i++ {
+		_, err := build("app", "src", "", []byte(hdrHead+opts(personHeader)), []byte(layout), "example.org", nil)
+		if err == nil || !strings.Contains(err.Error(), "web-portcullis-app looks like an automatic service name") {
+			t.Fatalf("run %d: %v", i, err)
+		}
+	}
+	rule := ".rule: Host(`${PORTCULLIS_HOST_APP:-app.portcullis.local}`)\n"
+	for _, label := range []string{
+		"traefik.http.services.Web-Portcullis-App.loadbalancer.server.port: \"80\"\n",
+		"traefik.http.services.x-PORTCULLIS.loadbalancer.server.port: \"80\"\n",
+		"traefik.http.routers.a-portcullis-b" + rule,
+		"traefik.http.routers.A-Portcullis" + rule,
+		"TRAEFIK.HTTP.SERVICES.db-portcullis-x.loadbalancer.server.port: \"80\"\n",
+		"traefik.http.services.web-portculliſ-app.loadbalancer.server.port: \"80\"\n", // ſ folds to s
+	} {
+		c := "services:\n  web:\n    image: x\n    labels:\n      traefik.http.routers.app" + rule + "      " + label
+		if _, err := ParseRoutes([]byte(c)); err == nil || !strings.Contains(err.Error(), "automatic service name") {
+			t.Errorf("%q: %v", label, err)
+		}
+	}
+	for _, ok := range []string{"portcullis-auth", "portcullisapp", "my-portcullisx", "app"} {
+		c := "services:\n  web:\n    image: x\n    labels:\n      traefik.http.routers.app" + rule +
+			"      traefik.http.services." + ok + ".loadbalancer.server.port: \"80\"\n"
+		if _, err := ParseRoutes([]byte(c)); err != nil {
+			t.Errorf("%s refused: %v", ok, err)
+		}
+	}
+}

@@ -1471,12 +1471,15 @@ func (v *specCheck) routerTarget(ri *RouterInfo) (string, bool) {
 		return ri.Service, true
 	}
 	ts, prov, _ := strings.Cut(ts, "@")
-	if prov != "" && prov != "docker" {
+	if prov != "" && FoldKey(prov) != "docker" {
 		return "", false
 	}
+	// Traefik folds names: compare folded, as checkCoreReferences does.
 	for svc, names := range v.routes.TraefikServices {
-		if contains(names, ts) {
-			return svc, true
+		for _, n := range names {
+			if FoldKey(n) == FoldKey(ts) {
+				return svc, true
+			}
 		}
 	}
 	return "", false

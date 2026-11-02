@@ -118,6 +118,17 @@ func (ri *RouterInfo) Gated() bool {
 	return false
 }
 
+// routerServiceNameRe matches router and service labels (folded key);
+// group 1 is the name.
+var routerServiceNameRe = regexp.MustCompile(`^traefik\.(?:http|tcp|udp)\.(?:routers|services)\.([^.]+)\.`)
+
+// autoServiceLike reports whether a (folded) Traefik name could be the
+// automatic service name Traefik gives a container of project
+// portcullis-<id>: Normalize("<compose service>_portcullis-<id>").
+func autoServiceLike(name string) bool {
+	return strings.Contains(name, "-portcullis-") || strings.HasSuffix(name, "-portcullis")
+}
+
 // ReservedPrefix is reserved for Hub-generated Traefik routers and
 // middlewares (public_access); templates may not define names with it.
 const ReservedPrefix = "portcullis-public-"
@@ -174,6 +185,9 @@ func ParseRoutes(compose []byte) (*Routes, error) {
 					return nil, fmt.Errorf("service %s: Traefik name %s may not contain _ (reserved for the per-instance prefix)", svc, m[1])
 				}
 				r.Names[m[1]] = true
+			}
+			if m := routerServiceNameRe.FindStringSubmatch(FoldKey(k)); m != nil && autoServiceLike(m[1]) {
+				return nil, fmt.Errorf("service %s: Traefik name %s looks like an automatic service name (<compose service>-portcullis-<id>, which Traefik gives a container's routers without a service label) and would merge with it: names may not contain -portcullis- or end with -portcullis", svc, m[1])
 			}
 			if m := middlewareLabelRe.FindStringSubmatch(k); m != nil && strings.HasPrefix(m[1], ReservedPrefix) {
 				return nil, fmt.Errorf("service %s: middleware name %s is reserved for the Hub (prefix %s)", svc, m[1], ReservedPrefix)
