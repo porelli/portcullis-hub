@@ -30,6 +30,10 @@ func Discover(dir, source, domain string) []Template {
 			log.Printf("Skipping template %q: directory name must match %s", e.Name(), IDRe)
 			continue
 		}
+		if err := SingleDocument(data, "manifest.yaml"); err != nil {
+			log.Printf("Skipping template %s: %v", e.Name(), err)
+			continue
+		}
 		var m Manifest
 		if err := yaml.Unmarshal(data, &m); err != nil {
 			log.Printf("Bad manifest in %s: %v", manifestPath, err)
@@ -42,6 +46,11 @@ func Discover(dir, source, domain string) []Template {
 		compose, err := os.ReadFile(filepath.Join(dir, e.Name(), "compose.yml"))
 		if err != nil {
 			log.Printf("Skipping template %s: no compose.yml: %v", e.Name(), err)
+			continue
+		}
+		// Before any parse: every check reads the first document only.
+		if err := SingleDocument(compose, "compose.yml"); err != nil {
+			log.Printf("Skipping template %s: %v", e.Name(), err)
 			continue
 		}
 		routes, err := ParseRoutes(compose)

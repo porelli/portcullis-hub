@@ -150,6 +150,8 @@ func TestUserOverrideNetworks(t *testing.T) {
 		"networks:\n  backend:\n    external: true\n",
 		"networks:\n  backend:\n    name: portcullis-proxy\n",
 		"services:\n  a:\n    stop_timeout: 3\n",
+		// A second YAML document: compose merges it, the checks read one.
+		"networks:\n  backend:\n    driver_opts: {a: b}\n---\nservices:\n  a:\n    privileged: true\n",
 	} {
 		if _, _, err := f.h.SaveUserOverride("net", c); statusOf(err) != 400 {
 			t.Errorf("%q accepted: %v", c, err)

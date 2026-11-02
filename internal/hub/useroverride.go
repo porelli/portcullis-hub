@@ -163,6 +163,9 @@ type parsedOverride struct {
 // parseUserOverride validates a custom override against t's compose file.
 // Empty (or comment-only) content returns (nil, nil).
 func (h *Hub) parseUserOverride(t *templates.Template, data []byte) (*parsedOverride, error) {
+	if err := templates.SingleDocument(data, "the custom override"); err != nil {
+		return nil, err
+	}
 	var root yaml.Node
 	if err := yaml.Unmarshal(data, &root); err != nil {
 		return nil, fmt.Errorf("invalid YAML: %v", err)

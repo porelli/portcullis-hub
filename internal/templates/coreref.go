@@ -1,7 +1,11 @@
 package templates
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"io"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -39,6 +43,41 @@ var reservedDNSNames = map[string]bool{"domains": true}
 func isCoreNetwork(name string) bool {
 	n := strings.ToLower(strings.TrimSpace(name))
 	return coreNetworks[n] || coreNetworks[strings.TrimPrefix(n, "portcullis_")]
+}
+
+// SingleDocument refuses YAML with more than one non-empty document:
+// compose merges every document of a file, while yaml.Unmarshal (and so
+// every check here) reads only the first.
+func SingleDocument(b []byte, what string) error {
+	dec := yaml.NewDecoder(bytes.NewReader(b))
+	n := 0
+	for {
+		var node yaml.Node
+		err := dec.Decode(&node)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("%s: %w", what, err)
+		}
+		if len(node.Content) == 0 || (node.Content[0].Kind == yaml.ScalarNode && node.Content[0].Tag == "!!null") {
+			continue
+		}
+		if n++; n > 1 {
+			return fmt.Errorf("%s holds more than one YAML document (compose would merge them; the Hub checks one)", what)
+		}
+	}
+	return nil
+}
+
+// interpRe matches compose interpolations (after "$$" is removed).
+var interpRe = regexp.MustCompile(`\$\{[^}]*\}|\$[A-Za-z_][A-Za-z0-9_]*|\$`)
+
+// withoutInterp removes every interpolation from s: what remains is what
+// compose keeps literally, so a reserved name split by a variable
+// (portcullis-auth${U}-ext) is still found.
+func withoutInterp(s string) string {
+	return interpRe.ReplaceAllString(strings.ReplaceAll(s, "$$", ""), "")
 }
 
 // interpolated: s would be changed by compose's variable interpolation
@@ -152,9 +191,9 @@ func checkCoreRefs(compose []byte, hostVars map[string]string) error {
 		return fmt.Errorf("compose.yml: top-level include is not allowed (it pulls in files the Hub can't check)")
 	}
 	if err := walkStrings(doc, func(s string) error {
-		low := strings.ToLower(s)
+		low, bare := strings.ToLower(s), strings.ToLower(withoutInterp(s))
 		for _, r := range reservedRefs {
-			if strings.Contains(low, r) {
+			if strings.Contains(low, r) || strings.Contains(bare, r) {
 				return fmt.Errorf("compose.yml references %q: the extra-domain sign-in (forward-auth-ext, portcullis-auth-ext, portcullis-oauth2-*) is rendered by the Hub only", strings.TrimSuffix(r, "-"))
 			}
 		}
@@ -172,10 +211,15 @@ func checkCoreRefs(compose []byte, hostVars map[string]string) error {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
+	// shared: external or explicitly named networks (not project-scoped).
+	shared := map[string]bool{}
 	for _, k := range keys {
 		n, err := asMap(nets[k], "network "+k)
 		if err != nil {
 			return err
+		}
+		if n["name"] != nil || (n["external"] != nil && n["external"] != false) {
+			shared[k] = true
 		}
 		name, hasName := str(n["name"])
 		if hasName {
@@ -235,6 +279,41 @@ func checkCoreRefs(compose []byte, hostVars map[string]string) error {
 		if _, ok := s["extends"]; ok {
 			return fmt.Errorf("service %s: extends is not allowed (it pulls in configuration the Hub can't check)", name)
 		}
+		if err := checkServiceLabels(name, s["labels"]); err != nil {
+			return err
+		}
+		for _, field := range []string{"pid", "ipc"} {
+			if v, present := s[field]; present && v != nil {
+				sv, ok := str(v)
+				if !ok {
+					return fmt.Errorf("service %s: %s must be a string", name, field)
+				}
+				if err := literal("service "+name+": "+field, sv); err != nil {
+					return err
+				}
+				if strings.HasPrefix(strings.ToLower(strings.TrimSpace(sv)), "container:") {
+					return fmt.Errorf("service %s: %s %s joins another container's namespace", name, field, sv)
+				}
+			}
+		}
+		switch vf := s["volumes_from"].(type) {
+		case nil:
+		case []interface{}:
+			for _, x := range vf {
+				sv, ok := str(x)
+				if !ok {
+					return fmt.Errorf("service %s: volumes_from entries must be strings", name)
+				}
+				if err := literal("service "+name+": volumes_from", sv); err != nil {
+					return err
+				}
+				if strings.HasPrefix(strings.ToLower(strings.TrimSpace(sv)), "container:") {
+					return fmt.Errorf("service %s: volumes_from %s mounts another container's volumes", name, sv)
+				}
+			}
+		default:
+			return fmt.Errorf("service %s: volumes_from must be a list", name)
+		}
 		if reservedDNSNames[strings.ToLower(name)] {
 			return fmt.Errorf("service %s: the DNS name %q is reserved for core's domains service", name, name)
 		}
@@ -286,6 +365,15 @@ func checkCoreRefs(compose []byte, hostVars map[string]string) error {
 				if err != nil {
 					return err
 				}
+				// No fixed address on a network shared with core (e.g.
+				// portcullis-proxy, where header-auth apps trust Traefik's IP).
+				if shared[net] {
+					for _, f := range []string{"ipv4_address", "ipv6_address", "link_local_ips"} {
+						if _, ok := c[f]; ok {
+							return fmt.Errorf("service %s: network %s: %s is not allowed on a network shared with core", name, net, f)
+						}
+					}
+				}
 				switch al := c["aliases"].(type) {
 				case nil:
 				case []interface{}:
@@ -308,6 +396,56 @@ func checkCoreRefs(compose []byte, hostVars map[string]string) error {
 		case nil:
 		default:
 			return fmt.Errorf("service %s: networks must be a list or a mapping", name)
+		}
+	}
+	return nil
+}
+
+// checkServiceLabels: label keys and the values that name routers,
+// middlewares or services must be literals (compose interpolates after
+// the Hub's checks); the routing rule may use the host variables
+// (checked by ParseRoutes).
+func checkServiceLabels(svc string, labels interface{}) error {
+	pairs := map[string]string{}
+	switch l := labels.(type) {
+	case nil:
+		return nil
+	case map[string]interface{}:
+		for k, v := range l {
+			switch tv := v.(type) {
+			case string:
+				pairs[k] = tv
+			case nil:
+				pairs[k] = ""
+			default:
+				pairs[k] = fmt.Sprint(tv)
+			}
+		}
+	case []interface{}:
+		for _, x := range l {
+			sv, ok := str(x)
+			if !ok {
+				return fmt.Errorf("service %s: labels entries must be strings", svc)
+			}
+			k, v, _ := strings.Cut(sv, "=")
+			pairs[k] = v
+		}
+	default:
+		return fmt.Errorf("service %s: labels must be a list or a mapping", svc)
+	}
+	for k, v := range pairs {
+		if !strings.HasPrefix(strings.ToLower(k), "traefik.") {
+			continue
+		}
+		if err := literal("service "+svc+": label key", k); err != nil {
+			return err
+		}
+		lk := strings.ToLower(k)
+		if strings.HasSuffix(lk, ".middlewares") || strings.HasSuffix(lk, ".service") || strings.HasSuffix(lk, ".entrypoints") ||
+			strings.HasSuffix(lk, ".tls.options") || strings.HasSuffix(lk, ".tls.certresolver") {
+			if err := literal("service "+svc+": label "+k, v); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
