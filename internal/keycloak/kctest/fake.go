@@ -678,6 +678,13 @@ func (s *Server) serveClients(w http.ResponseWriter, r *http.Request) {
 		}
 		s.Clients[c.ID] = &c
 		created(w, r, c.ID)
+	case len(parts) == 1 && r.Method == "DELETE":
+		if s.Clients[parts[0]] == nil {
+			http.NotFound(w, r)
+			return
+		}
+		delete(s.Clients, parts[0])
+		w.WriteHeader(204)
 	case len(parts) == 1 && r.Method == "PUT":
 		old := s.Clients[parts[0]]
 		if old == nil {

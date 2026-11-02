@@ -1,0 +1,973 @@
+package hub
+
+import (
+	"archive/tar"
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"os"
+	"path"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strings"
+	"time"
+
+	"gopkg.in/yaml.v3"
+
+	"github.com/portcullis/hub/internal/docker"
+	"github.com/portcullis/hub/internal/fsutil"
+	"github.com/portcullis/hub/internal/policy"
+	"github.com/portcullis/hub/internal/state"
+	"github.com/portcullis/hub/internal/templates"
+)
+
+// Instance backups (contract §11.5): <data>/backups/<id>/<UTC>.tar, an
+// uncompressed tar of MANIFEST.json (first; sha256 of every other member),
+// config/instance.yaml, config/env, config/override.yml, config/user.yml
+// and volumes/<key>.tar (one inner tar per volume, as the daemon's archive
+// endpoint produces it: entries "data/…", numeric uid/gid, modes, mtimes).
+//
+// Volume I/O never runs a process: a helper container (HelperImage)
+// mounting only the volume, with no network, every capability dropped,
+// no-new-privileges and nobody's uid, is created but never started; the
+// daemon reads and writes the mounted volume itself (GET / PUT
+// /containers/{id}/archive). Both go through the Hub's socket proxy
+// (contract §6: containers, images, volumes and POST/PUT/DELETE — no
+// change needed).
+//
+// Consistency: a running instance is stopped (compose down, volumes kept)
+// while its volumes are copied, so databases (SQLite included) are copied
+// at rest. Templates have no manifest field marking database files: no
+// per-file online-backup step exists or is needed while the app is down.
+
+// HelperImage is the volume I/O helper's image: core's
+// PORTCULLIS_HELPER_IMAGE (scripts/lib/common.sh; TestHelperImageMatchesCore
+// keeps them equal), pinned by digest. It is only ever created, never
+// started, so its content never runs.
+const HelperImage = "alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a"
+
+// Backup reasons (MANIFEST.json "reason").
+const (
+	BackupManual  = "manual"
+	BackupDelete  = "delete"
+	BackupRestore = "restore"
+)
+
+const (
+	backupVersion   = 1
+	manifestMember  = "MANIFEST.json"
+	maxManifestSize = 1 << 20
+	maxConfigSize   = 16 << 20
+	backupTimeFmt   = "20060102T150405Z"
+	helperMount     = "/data"
+)
+
+// archiveRe is an archive name relative to <data>/backups.
+var archiveRe = regexp.MustCompile(`^([a-z0-9][a-z0-9_-]{0,63})/([0-9]{8}T[0-9]{6}Z)\.tar$`)
+
+// volumeKeyRe is a compose volume key.
+var volumeKeyRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$`)
+
+var sha256Re = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// BackupManifest is MANIFEST.json.
+type BackupManifest struct {
+	Version        int               `json:"version"`
+	Instance       string            `json:"instance"`
+	Template       string            `json:"template"`
+	TemplateCommit string            `json:"template_commit,omitempty"`
+	CreatedAt      time.Time         `json:"created_at"`
+	Reason         string            `json:"reason"`
+	Volumes        map[string]string `json:"volumes"`
+	Files          map[string]string `json:"files"`
+}
+
+// BackupEntry is one archive as GET /api/backups lists it (§11.7).
+type BackupEntry struct {
+	Archive        string    `json:"archive"`
+	Instance       string    `json:"instance"`
+	Template       string    `json:"template"`
+	CreatedAt      time.Time `json:"created_at"`
+	Reason         string    `json:"reason"`
+	Size           int64     `json:"size"`
+	InstanceExists bool      `json:"instance_exists"`
+}
+
+// instanceConfig is config/instance.yaml: the instance's state entry.
+type instanceConfig struct {
+	ID           string              `yaml:"id"`
+	Template     string              `yaml:"template"`
+	Default      bool                `yaml:"default"`
+	Hosts        map[string]string   `yaml:"hosts,omitempty"`
+	Enabled      bool                `yaml:"enabled"`
+	Settings     map[string]string   `yaml:"settings,omitempty"`
+	AuthPolicy   *policy.AuthPolicy  `yaml:"auth_policy,omitempty"`
+	PublicAccess *bool               `yaml:"public_access,omitempty"`
+	PublicMode   string              `yaml:"public_mode,omitempty"`
+	PublicTokens []string            `yaml:"public_tokens,omitempty"`
+	SignIn       string              `yaml:"sign_in,omitempty"`
+	Published    *state.PublishedApp `yaml:"published,omitempty"`
+}
+
+func (h *Hub) backupsDir() string { return filepath.Join(h.cfg.DataDir, "backups") }
+
+// target is an instance as backup / delete see it: its view when it
+// resolves, else what state remembers. Caller must hold mu.
+type target struct {
+	id, templateID string
+	view           *templates.Template // copy; nil = can't be resolved
+	enabled        bool
+	entry          state.Instance
+	inState        bool
+}
+
+func (h *Hub) targetLocked(id string) (*target, bool) {
+	tg := &target{id: id, enabled: h.st.IsEnabled(id)}
+	tg.entry, tg.inState = h.st.Instances[id]
+	if v := h.findLocked(id); v != nil {
+		c := *v
+		tg.view = &c
+		tg.templateID = v.TemplateID
+	} else if tg.inState {
+		tg.templateID = tg.entry.Template
+	} else {
+		tg.templateID = id
+	}
+	_, published := h.st.Published[id]
+	_, broken := h.brokenInstances[id]
+	return tg, tg.view != nil || tg.inState || tg.enabled || published || broken
+}
+
+// instanceConfigLocked is config/instance.yaml of tg. Caller must hold mu.
+func (h *Hub) instanceConfigLocked(tg *target) instanceConfig {
+	id := tg.id
+	c := instanceConfig{ID: id, Template: tg.templateID, Default: id == tg.templateID, Enabled: tg.enabled}
+	switch {
+	case tg.view != nil:
+		c.Hosts = copyMap(tg.view.Hosts)
+	case len(tg.entry.Hosts) > 0:
+		c.Hosts = copyMap(tg.entry.Hosts)
+	}
+	if s, ok := h.st.Settings[id]; ok {
+		c.Settings = copyMap(s)
+	}
+	if p, ok := h.st.AuthPolicies[id]; ok {
+		p.Factors = append([]string(nil), p.Factors...)
+		c.AuthPolicy = &p
+	}
+	if v, ok := h.st.PublicAccess[id]; ok {
+		c.PublicAccess = &v
+	}
+	c.PublicMode = h.st.PublicMode[id]
+	c.PublicTokens = append([]string(nil), h.st.PublicTokens[id]...)
+	c.SignIn = h.st.SignIn[id]
+	if p, ok := h.st.Published[id]; ok {
+		c.Published = &p
+	}
+	return c
+}
+
+// applyConfigLocked writes c's per-instance settings into state for id
+// (hostnames, enabled and published snapshot are not touched). Caller
+// must hold mu (write).
+func (h *Hub) applyConfigLocked(id string, c instanceConfig) {
+	if c.Settings != nil {
+		h.st.Settings[id] = copyMap(c.Settings)
+	} else {
+		delete(h.st.Settings, id)
+	}
+	if c.AuthPolicy != nil {
+		h.st.AuthPolicies[id] = *c.AuthPolicy
+	} else {
+		delete(h.st.AuthPolicies, id)
+	}
+	if c.PublicAccess != nil {
+		h.st.PublicAccess[id] = *c.PublicAccess
+	} else {
+		delete(h.st.PublicAccess, id)
+	}
+	if c.PublicMode != "" {
+		h.st.PublicMode[id] = c.PublicMode
+	} else {
+		delete(h.st.PublicMode, id)
+	}
+	if len(c.PublicTokens) > 0 {
+		h.st.PublicTokens[id] = append([]string(nil), c.PublicTokens...)
+	} else {
+		delete(h.st.PublicTokens, id)
+	}
+	if c.SignIn != "" {
+		h.st.SignIn[id] = c.SignIn
+	} else {
+		delete(h.st.SignIn, id)
+	}
+}
+
+// projectVolumes are the volumes compose created for instance id's
+// project, by volume key (compose labels them; external volumes aren't
+// the instance's and carry no label).
+func (h *Hub) projectVolumes(ctx context.Context, id string) (map[string]docker.Volume, error) {
+	vs, err := h.engine.ListVolumes(ctx, docker.Filters{"label": {docker.LabelProject + "=" + projectName(id)}})
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]docker.Volume{}
+	for _, v := range vs {
+		if v.Labels[docker.LabelProject] != projectName(id) {
+			continue
+		}
+		key := v.Labels[docker.LabelVolume]
+		if !volumeKeyRe.MatchString(key) {
+			return nil, fmt.Errorf("volume %s of %s has no valid %s label", v.Name, projectName(id), docker.LabelVolume)
+		}
+		if o, dup := out[key]; dup {
+			return nil, fmt.Errorf("volumes %s and %s both claim key %s of %s", o.Name, v.Name, key, projectName(id))
+		}
+		out[key] = v
+	}
+	return out, nil
+}
+
+// projectRunning reports whether any container of id's project runs.
+func (h *Hub) projectRunning(ctx context.Context, id string) (bool, error) {
+	cs, err := h.engine.ListContainers(ctx, docker.ProjectFilter(projectName(id)))
+	if err != nil {
+		return false, err
+	}
+	for _, c := range cs {
+		if c.Project() == projectName(id) && (c.State == "running" || c.State == "restarting" || c.State == "paused") {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// BackupInstance backs instance id up now (reason manual, §11.5): a
+// running instance is stopped while its volumes are copied and started
+// again. Audited as instance.backup. Errors: 404 unknown, 409 deleting /
+// busy / can't be restarted, 503 Docker unavailable, 500 otherwise (the
+// archive isn't written; a failed restart after a written backup is an
+// OpError that names the archive).
+func (h *Hub) BackupInstance(id, actor string) (entry *BackupEntry, err error) {
+	defer func() {
+		detail := ""
+		if entry != nil {
+			detail = "archive=" + entry.Archive
+		}
+		h.auditOp(actor, "instance.backup", id, detail, err)
+	}()
+	unlock, err := h.lockApp(id)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	h.mu.RLock()
+	e, ok := h.st.Instances[id]
+	h.mu.RUnlock()
+	if ok && e.State == state.InstanceDeleting {
+		return nil, statusErr(409, "instance %s is being deleted: its delete backup is %s", id, e.Backup)
+	}
+	return h.backupLocked(id, BackupManual, false)
+}
+
+// backupLocked writes a backup of id (caller holds its app lock). A
+// running instance is stopped first; it is started again afterwards
+// unless keepStopped (delete, restore) — after a failure always, so a
+// failed backup leaves the instance as it was.
+func (h *Hub) backupLocked(id, reason string, keepStopped bool) (*BackupEntry, error) {
+	ctx := context.Background()
+	h.mu.RLock()
+	tg, ok := h.targetLocked(id)
+	cfg := h.instanceConfigLocked(tg)
+	h.mu.RUnlock()
+	if !ok {
+		return nil, statusErr(404, "instance not found: %s", id)
+	}
+	if h.engine == nil {
+		return nil, statusErr(503, "Docker is not available: cannot back up %s", id)
+	}
+	vols, err := h.projectVolumes(ctx, id)
+	if err != nil {
+		return nil, statusErr(503, "cannot list the volumes of %s: %v", id, err)
+	}
+	running, err := h.projectRunning(ctx, id)
+	if err != nil {
+		return nil, statusErr(503, "cannot check whether %s runs: %v", id, err)
+	}
+	restart := running && tg.enabled
+	if restart && tg.view == nil && !keepStopped {
+		return nil, statusErr(409, "instance %s can't be resolved (its template is missing or no longer fits): it would not start again after the backup — delete it, or fix its template first", id)
+	}
+	if len(vols) > 0 {
+		if err := h.engine.EnsureImage(ctx, HelperImage); err != nil {
+			return nil, statusErr(503, "helper image %s: %v", HelperImage, err)
+		}
+	}
+
+	dir := filepath.Join(h.backupsDir(), id)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return nil, statusErr(500, "backup directory: %v", err)
+	}
+	os.Chmod(h.backupsDir(), 0700)
+	os.Chmod(dir, 0700)
+	stage, err := os.MkdirTemp(dir, ".staging-")
+	if err != nil {
+		return nil, statusErr(500, "backup staging: %v", err)
+	}
+	defer os.RemoveAll(stage)
+
+	m := &BackupManifest{Version: backupVersion, Instance: id, Template: tg.templateID, Reason: reason,
+		Volumes: map[string]string{}, Files: map[string]string{}}
+	if tg.view != nil {
+		m.TemplateCommit = templateCommit(tg.view.Path)
+	}
+	inst, err := yaml.Marshal(cfg)
+	if err != nil {
+		return nil, statusErr(500, "instance config: %v", err)
+	}
+	add := func(member string, data []byte) error {
+		p := filepath.Join(stage, filepath.FromSlash(member))
+		if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
+			return err
+		}
+		if err := os.WriteFile(p, data, 0600); err != nil {
+			return err
+		}
+		sum := sha256.Sum256(data)
+		m.Files[member] = hex.EncodeToString(sum[:])
+		return nil
+	}
+	if err := add("config/instance.yaml", inst); err != nil {
+		return nil, statusErr(500, "backup: %v", err)
+	}
+	for member, src := range map[string]string{"config/env": h.envPath(id), "config/override.yml": h.overridePath(id), "config/user.yml": h.userOverridePath(id)} {
+		data, err := os.ReadFile(src)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err == nil {
+			err = add(member, data)
+		}
+		if err != nil {
+			return nil, statusErr(500, "backup %s: %v", member, err)
+		}
+	}
+
+	if running {
+		if err := h.stopProject(tg); err != nil {
+			return nil, statusErr(500, "stopping %s for the backup failed (nothing was written): %v", id, err)
+		}
+	}
+	entry, err := h.writeBackup(ctx, id, dir, stage, m, vols)
+	if err != nil || (!keepStopped && restart) {
+		if restart {
+			if rerr := h.startAgain(tg.view); rerr != nil {
+				if err == nil {
+					err = fmt.Errorf("the backup %s was written, but starting %s again failed: %w", entry.Archive, id, rerr)
+				} else {
+					err = fmt.Errorf("%w — and starting %s again failed: %v", err, id, rerr)
+				}
+				return entry, h.finishOp(id, OpRestart, err, false)
+			}
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	log.Printf("instance %s: backup %s written (%s)", id, entry.Archive, reason)
+	return entry, nil
+}
+
+// stopProject stops tg's project (compose down, volumes kept), by name
+// when its files don't work.
+func (h *Hub) stopProject(tg *target) error {
+	var downErr error
+	if tg.view != nil {
+		downErr = h.composeDown(tg.view)
+		if downErr == nil {
+			return nil
+		}
+	}
+	if err := h.compose.DownByName(context.Background(), projectName(tg.id)); err != nil {
+		if downErr != nil {
+			return downErr
+		}
+		return err
+	}
+	return nil
+}
+
+// startAgain brings a stopped instance back up (rolled back if compose
+// fails, like enable).
+func (h *Hub) startAgain(t *templates.Template) error {
+	if t == nil {
+		return errors.New("its template can't be resolved")
+	}
+	if err := h.composeUp(t); err != nil {
+		if !composeFailed(err) {
+			return err
+		}
+		if rb := h.rollbackUp(t); rb != nil {
+			return fmt.Errorf("compose up failed: %w — rolling back failed too: %v", err, rb)
+		}
+		return fmt.Errorf("compose up failed: %w", err)
+	}
+	return nil
+}
+
+// writeBackup copies the volumes into stage and assembles the archive.
+func (h *Hub) writeBackup(ctx context.Context, id, dir, stage string, m *BackupManifest, vols map[string]docker.Volume) (*BackupEntry, error) {
+	keys := make([]string, 0, len(vols))
+	for k := range vols {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		member := "volumes/" + k + ".tar"
+		p := filepath.Join(stage, "volumes", k+".tar")
+		os.MkdirAll(filepath.Dir(p), 0700)
+		sum, err := h.copyVolumeOut(ctx, id, vols[k].Name, p)
+		if err != nil {
+			return nil, statusErr(500, "backup of volume %s failed (no archive written): %v", vols[k].Name, err)
+		}
+		m.Volumes[k] = vols[k].Name
+		m.Files[member] = sum
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	var final string
+	for i := 0; ; i++ {
+		final = filepath.Join(dir, now.Format(backupTimeFmt)+".tar")
+		if _, err := os.Lstat(final); errors.Is(err, os.ErrNotExist) {
+			break
+		}
+		if i > 120 {
+			return nil, statusErr(409, "a backup of %s was just written: try again", id)
+		}
+		now = now.Add(time.Second)
+	}
+	m.CreatedAt = now
+	if err := assembleArchive(final, stage, m); err != nil {
+		return nil, statusErr(500, "writing the backup archive failed: %v", err)
+	}
+	fi, err := os.Stat(final)
+	if err != nil {
+		return nil, statusErr(500, "backup archive: %v", err)
+	}
+	return &BackupEntry{Archive: id + "/" + filepath.Base(final), Instance: id, Template: m.Template,
+		CreatedAt: m.CreatedAt, Reason: m.Reason, Size: fi.Size(), InstanceExists: true}, nil
+}
+
+// assembleArchive writes final (via final.partial + rename): MANIFEST.json
+// first, then every member of m.Files from stage, sorted by path.
+func assembleArchive(final, stage string, m *BackupManifest) (err error) {
+	mj, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := final + ".partial"
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			f.Close()
+			os.Remove(tmp)
+		}
+	}()
+	tw := tar.NewWriter(f)
+	hdr := func(name string, size int64) *tar.Header {
+		return &tar.Header{Name: name, Mode: 0600, Size: size, ModTime: m.CreatedAt, Typeflag: tar.TypeReg,
+			Uid: os.Getuid(), Gid: os.Getgid(), Format: tar.FormatPAX}
+	}
+	if err := tw.WriteHeader(hdr(manifestMember, int64(len(mj)))); err != nil {
+		return err
+	}
+	if _, err := tw.Write(mj); err != nil {
+		return err
+	}
+	names := make([]string, 0, len(m.Files))
+	for n := range m.Files {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		src, err := os.Open(filepath.Join(stage, filepath.FromSlash(n)))
+		if err != nil {
+			return err
+		}
+		fi, err := src.Stat()
+		if err == nil {
+			err = tw.WriteHeader(hdr(n, fi.Size()))
+		}
+		if err == nil {
+			_, err = io.Copy(tw, src)
+		}
+		src.Close()
+		if err != nil {
+			return err
+		}
+	}
+	if err := tw.Close(); err != nil {
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, final); err != nil {
+		return err
+	}
+	if d, derr := os.Open(filepath.Dir(final)); derr == nil {
+		d.Sync()
+		d.Close()
+	}
+	return nil
+}
+
+// withHelper runs fn with a helper container mounting volume name at
+// helperMount (read-only for backups) and removes it afterwards.
+func (h *Hub) withHelper(ctx context.Context, id, name string, readOnly bool, fn func(helper string) error) error {
+	hid, err := h.engine.CreateHelper(ctx, docker.HelperSpec{Image: HelperImage, Volumes: map[string]string{name: helperMount}, ReadOnly: readOnly, Instance: id})
+	if err != nil {
+		return fmt.Errorf("helper container: %w", err)
+	}
+	defer func() {
+		if rerr := h.engine.RemoveContainer(context.WithoutCancel(ctx), hid); rerr != nil {
+			log.Printf("instance %s: removing helper container %s: %v", id, hid, rerr)
+		}
+	}()
+	return fn(hid)
+}
+
+// copyVolumeOut streams volume name into the file dst (an inner tar) and
+// returns its sha256; every entry is checked (checkVolumeEntry).
+func (h *Hub) copyVolumeOut(ctx context.Context, id, name, dst string) (string, error) {
+	var sum string
+	err := h.withHelper(ctx, id, name, true, func(hid string) error {
+		rc, err := h.engine.CopyFromContainer(ctx, hid, helperMount)
+		if err != nil {
+			return err
+		}
+		defer rc.Close()
+		f, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		hash := sha256.New()
+		tee := io.TeeReader(rc, io.MultiWriter(f, hash))
+		tr := tar.NewReader(tee)
+		for {
+			hdr, err := tr.Next()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return fmt.Errorf("reading the volume archive: %w", err)
+			}
+			if err := checkVolumeEntry(hdr); err != nil {
+				return err
+			}
+		}
+		if _, err := io.Copy(io.Discard, tee); err != nil {
+			return err
+		}
+		if err := f.Sync(); err != nil {
+			return err
+		}
+		sum = hex.EncodeToString(hash.Sum(nil))
+		return f.Close()
+	})
+	return sum, err
+}
+
+// checkVolumeEntry accepts the entries of a volume archive: under "data"
+// (the helper's mount, base name of the archived path), no "..", regular
+// files, directories, symlinks, hard links within the volume and FIFOs.
+func checkVolumeEntry(hdr *tar.Header) error {
+	inVolume := func(n string) bool {
+		c := path.Clean("/" + strings.TrimPrefix(n, "./"))
+		return (c == helperMount || strings.HasPrefix(c, helperMount+"/")) && !strings.Contains(n, "..")
+	}
+	if !inVolume(hdr.Name) {
+		return fmt.Errorf("volume archive entry %q is outside the volume", hdr.Name)
+	}
+	switch hdr.Typeflag {
+	case tar.TypeReg, tar.TypeDir, tar.TypeSymlink, tar.TypeFifo:
+	case tar.TypeLink:
+		if !inVolume(hdr.Linkname) {
+			return fmt.Errorf("volume archive entry %q links outside the volume", hdr.Name)
+		}
+	default:
+		return fmt.Errorf("volume archive entry %q has unsupported type %q", hdr.Name, hdr.Typeflag)
+	}
+	return nil
+}
+
+// templateCommit is the git commit of the template's checkout ("" if
+// unknown).
+func templateCommit(dir string) string {
+	if dir == "" {
+		return ""
+	}
+	out, err := runGit(10*time.Second, "-C", dir, "rev-parse", "HEAD")
+	if s := strings.TrimSpace(string(out)); err == nil && regexp.MustCompile(`^[0-9a-f]{40,64}$`).MatchString(s) {
+		return s
+	}
+	return ""
+}
+
+// ── listing ──────────────────────────────────────────────
+
+// ListBackups lists the archives under <data>/backups (instance "" =
+// every instance, deleted ones included), newest first (§11.7).
+// Unreadable archives are logged and left out.
+func (h *Hub) ListBackups(instance string) ([]BackupEntry, error) {
+	if instance != "" && !templates.ValidID(instance) {
+		return nil, statusErr(400, "invalid instance id %q", instance)
+	}
+	dirs, err := os.ReadDir(h.backupsDir())
+	if errors.Is(err, os.ErrNotExist) {
+		return []BackupEntry{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	out := []BackupEntry{}
+	for _, d := range dirs {
+		if !d.IsDir() || (instance != "" && d.Name() != instance) || !templates.ValidID(d.Name()) {
+			continue
+		}
+		files, err := os.ReadDir(filepath.Join(h.backupsDir(), d.Name()))
+		if err != nil {
+			log.Printf("backups: %v", err)
+			continue
+		}
+		for _, f := range files {
+			rel := d.Name() + "/" + f.Name()
+			if !f.Type().IsRegular() || !archiveRe.MatchString(rel) {
+				continue
+			}
+			p := filepath.Join(h.backupsDir(), d.Name(), f.Name())
+			m, err := readManifest(p)
+			if err != nil || m.Instance != d.Name() {
+				log.Printf("backups: %s is unreadable, not listed: %v", rel, err)
+				continue
+			}
+			fi, err := f.Info()
+			if err != nil {
+				continue
+			}
+			out = append(out, BackupEntry{Archive: rel, Instance: m.Instance, Template: m.Template, CreatedAt: m.CreatedAt, Reason: m.Reason, Size: fi.Size()})
+		}
+	}
+	h.mu.RLock()
+	for i := range out {
+		e, inState := h.st.Instances[out[i].Instance]
+		_, ok := h.targetLocked(out[i].Instance)
+		out[i].InstanceExists = ok && !(inState && e.State == state.InstanceDeleting)
+	}
+	h.mu.RUnlock()
+	sort.SliceStable(out, func(i, j int) bool {
+		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].CreatedAt.After(out[j].CreatedAt)
+		}
+		return out[i].Archive > out[j].Archive
+	})
+	return out, nil
+}
+
+// readManifest reads and validates the first member of an archive.
+func readManifest(p string) (*BackupManifest, error) {
+	f, err := os.Open(p)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	m, _, err := nextManifest(tar.NewReader(f))
+	return m, err
+}
+
+func nextManifest(tr *tar.Reader) (*BackupManifest, []byte, error) {
+	hdr, err := tr.Next()
+	if err != nil {
+		return nil, nil, fmt.Errorf("not a tar archive: %w", err)
+	}
+	if hdr.Name != manifestMember || hdr.Typeflag != tar.TypeReg || hdr.Size > maxManifestSize {
+		return nil, nil, fmt.Errorf("the first member must be %s (≤ 1 MiB)", manifestMember)
+	}
+	data, err := io.ReadAll(io.LimitReader(tr, maxManifestSize))
+	if err != nil {
+		return nil, nil, err
+	}
+	var m BackupManifest
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&m); err != nil {
+		return nil, nil, fmt.Errorf("%s: %w", manifestMember, err)
+	}
+	if err := m.validate(); err != nil {
+		return nil, nil, err
+	}
+	return &m, data, nil
+}
+
+// validate checks the manifest's shape (not the members).
+func (m *BackupManifest) validate() error {
+	if m.Version != backupVersion {
+		return fmt.Errorf("%s: unsupported version %d", manifestMember, m.Version)
+	}
+	if !templates.ValidID(m.Instance) || !templates.ValidID(m.Template) {
+		return fmt.Errorf("%s: invalid instance or template id", manifestMember)
+	}
+	switch m.Reason {
+	case BackupManual, BackupDelete, BackupRestore:
+	default:
+		return fmt.Errorf("%s: invalid reason %q", manifestMember, m.Reason)
+	}
+	if _, ok := m.Files["config/instance.yaml"]; !ok {
+		return fmt.Errorf("%s: config/instance.yaml is not listed", manifestMember)
+	}
+	for name, sum := range m.Files {
+		if !sha256Re.MatchString(sum) {
+			return fmt.Errorf("%s: bad sha256 for %s", manifestMember, name)
+		}
+		switch name {
+		case "config/instance.yaml", "config/env", "config/override.yml", "config/user.yml":
+			continue
+		}
+		key, ok := strings.CutPrefix(name, "volumes/")
+		key, ok2 := strings.CutSuffix(key, ".tar")
+		if !ok || !ok2 || !volumeKeyRe.MatchString(key) {
+			return fmt.Errorf("%s: unexpected member %q", manifestMember, name)
+		}
+		if _, ok := m.Volumes[key]; !ok {
+			return fmt.Errorf("%s: volume %s has no source volume name", manifestMember, key)
+		}
+	}
+	for key, name := range m.Volumes {
+		if _, ok := m.Files["volumes/"+key+".tar"]; !ok || !volumeKeyRe.MatchString(key) || name == "" {
+			return fmt.Errorf("%s: volume %s is not in the archive", manifestMember, key)
+		}
+	}
+	return nil
+}
+
+// ── verification and staging (restore) ────────────────────
+
+// staged is a verified archive unpacked under <data>/backups/.staging.
+type staged struct {
+	archive string
+	dir     string
+	m       *BackupManifest
+	cfg     instanceConfig
+	env     []byte            // nil: no config/env
+	user    []byte            // nil: no config/user.yml
+	volumes map[string]string // key → staged inner tar
+}
+
+func (s *staged) cleanup() {
+	if s != nil && s.dir != "" {
+		os.RemoveAll(s.dir)
+	}
+}
+
+// stageArchive verifies archive (relative to <data>/backups) before
+// anything is touched — MANIFEST.json first and valid, every member
+// listed exactly once with a matching sha256, nothing unlisted, every
+// volume archive's entries inside the volume, config/instance.yaml
+// naming the same instance and template — and unpacks it into a staging
+// directory. 400 bad name, 404 missing, 409 anything that doesn't verify.
+func (h *Hub) stageArchive(archive string) (*staged, error) {
+	mm := archiveRe.FindStringSubmatch(archive)
+	if mm == nil {
+		return nil, statusErr(400, "archive must be <instance-id>/<YYYYMMDDTHHMMSSZ>.tar, relative to the backups directory")
+	}
+	p := filepath.Join(h.backupsDir(), filepath.FromSlash(archive))
+	fi, err := os.Lstat(p)
+	if err != nil {
+		return nil, statusErr(404, "archive %s not found", archive)
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, statusErr(409, "archive %s is not a regular file", archive)
+	}
+	f, err := os.Open(p)
+	if err != nil {
+		return nil, statusErr(500, "archive %s: %v", archive, err)
+	}
+	defer f.Close()
+	tr := tar.NewReader(f)
+	m, _, err := nextManifest(tr)
+	if err != nil {
+		return nil, statusErr(409, "archive %s refused: %v", archive, err)
+	}
+	if m.Instance != mm[1] {
+		return nil, statusErr(409, "archive %s refused: its manifest names instance %s", archive, m.Instance)
+	}
+	root := filepath.Join(h.backupsDir(), ".staging")
+	if err := os.MkdirAll(root, 0700); err != nil {
+		return nil, statusErr(500, "staging: %v", err)
+	}
+	dir, err := os.MkdirTemp(root, "restore-")
+	if err != nil {
+		return nil, statusErr(500, "staging: %v", err)
+	}
+	s := &staged{archive: archive, dir: dir, m: m, volumes: map[string]string{}}
+	if err := s.unpack(tr); err != nil {
+		s.cleanup()
+		return nil, statusErr(409, "archive %s refused (nothing was changed): %v", archive, err)
+	}
+	return s, nil
+}
+
+func (s *staged) unpack(tr *tar.Reader) error {
+	seen := map[string]bool{}
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("corrupt archive: %w", err)
+		}
+		want, listed := s.m.Files[hdr.Name]
+		switch {
+		case !listed:
+			return fmt.Errorf("member %q is not listed in %s", hdr.Name, manifestMember)
+		case seen[hdr.Name]:
+			return fmt.Errorf("member %q appears twice", hdr.Name)
+		case hdr.Typeflag != tar.TypeReg:
+			return fmt.Errorf("member %q is not a regular file", hdr.Name)
+		case strings.HasPrefix(hdr.Name, "config/") && hdr.Size > maxConfigSize:
+			return fmt.Errorf("member %q is too large", hdr.Name)
+		}
+		seen[hdr.Name] = true
+		dst := filepath.Join(s.dir, fmt.Sprintf("m%d", len(seen)))
+		out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+		if err != nil {
+			return err
+		}
+		hash := sha256.New()
+		_, err = io.Copy(io.MultiWriter(out, hash), tr)
+		if cerr := out.Close(); err == nil {
+			err = cerr
+		}
+		if err != nil {
+			return fmt.Errorf("member %q: %w", hdr.Name, err)
+		}
+		if got := hex.EncodeToString(hash.Sum(nil)); got != want {
+			return fmt.Errorf("checksum mismatch for %s", hdr.Name)
+		}
+		if key, ok := strings.CutPrefix(hdr.Name, "volumes/"); ok {
+			s.volumes[strings.TrimSuffix(key, ".tar")] = dst
+			continue
+		}
+		data, err := os.ReadFile(dst)
+		if err != nil {
+			return err
+		}
+		switch hdr.Name {
+		case "config/instance.yaml":
+			dec := yaml.NewDecoder(bytes.NewReader(data))
+			dec.KnownFields(true)
+			if err := dec.Decode(&s.cfg); err != nil {
+				return fmt.Errorf("config/instance.yaml: %w", err)
+			}
+		case "config/env":
+			s.env = data
+		case "config/user.yml":
+			s.user = data
+		}
+	}
+	for name := range s.m.Files {
+		if !seen[name] {
+			return fmt.Errorf("member %s is missing", name)
+		}
+	}
+	if s.cfg.ID != s.m.Instance || s.cfg.Template != s.m.Template {
+		return fmt.Errorf("config/instance.yaml names %s of %s, the manifest %s of %s", s.cfg.ID, s.cfg.Template, s.m.Instance, s.m.Template)
+	}
+	for key, p := range s.volumes {
+		if err := checkVolumeArchive(p); err != nil {
+			return fmt.Errorf("volumes/%s.tar: %w", key, err)
+		}
+	}
+	return nil
+}
+
+func checkVolumeArchive(p string) error {
+	f, err := os.Open(p)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	tr := tar.NewReader(f)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if err := checkVolumeEntry(hdr); err != nil {
+			return err
+		}
+	}
+}
+
+// fillVolume makes volume name hold exactly the staged inner tar: an
+// existing volume is removed and created again with the same driver,
+// labels and options (only plain local volumes — checked before), a
+// missing one is created with labels; then the daemon extracts the tar
+// at "/" of a never-started helper mounting it at helperMount (owners,
+// modes, mtimes and the volume root's own metadata as archived).
+func (h *Hub) fillVolume(ctx context.Context, id string, v docker.Volume, existed bool, tarPath string) error {
+	if existed {
+		if err := h.engine.RemoveVolume(ctx, v.Name); err != nil && !docker.IsNotFound(err) {
+			return fmt.Errorf("emptying volume %s: %w", v.Name, err)
+		}
+	}
+	if err := h.engine.CreateVolume(ctx, v); err != nil {
+		return fmt.Errorf("creating volume %s: %w", v.Name, err)
+	}
+	return h.withHelper(ctx, id, v.Name, false, func(hid string) error {
+		f, err := os.Open(tarPath)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		if err := h.engine.CopyToContainer(ctx, hid, "/", f); err != nil {
+			return fmt.Errorf("restoring volume %s: %w", v.Name, err)
+		}
+		return nil
+	})
+}
+
+// plainVolume reports whether v can be emptied by removing and creating
+// it again (a local volume without driver options: no bind or NFS device
+// whose data would survive the remove).
+func plainVolume(v docker.Volume) bool {
+	return (v.Driver == "" || v.Driver == "local") && len(v.Options) == 0
+}
+
+// writeOrRemove writes data to p (0600), or removes p when data is nil.
+func writeOrRemove(p string, data []byte) error {
+	if data == nil {
+		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
+	return fsutil.WriteFileAtomic(p, data, 0600)
+}

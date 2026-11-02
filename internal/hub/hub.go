@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"maps"
 	"net/http"
@@ -58,6 +59,17 @@ type Engine interface {
 	Logs(ctx context.Context, id string, tail int, timestamps bool) ([]byte, error)
 	Exec(ctx context.Context, id string, cmd []string, timeout time.Duration) (*docker.ExecResult, error)
 	Events(ctx context.Context, f docker.Filters, fn func(docker.Event)) error
+	// Volumes and volume I/O (instance backups, guarded delete, the
+	// volume collision check; docker/volumes.go).
+	ListVolumes(ctx context.Context, f docker.Filters) ([]docker.Volume, error)
+	InspectVolume(ctx context.Context, name string) (docker.Volume, error)
+	CreateVolume(ctx context.Context, v docker.Volume) error
+	RemoveVolume(ctx context.Context, name string) error
+	EnsureImage(ctx context.Context, ref string) error
+	CreateHelper(ctx context.Context, s docker.HelperSpec) (string, error)
+	RemoveContainer(ctx context.Context, id string) error
+	CopyFromContainer(ctx context.Context, id, path string) (io.ReadCloser, error)
+	CopyToContainer(ctx context.Context, id, path string, content io.Reader) error
 }
 
 // IdP manages the OIDC clients templates declare.
@@ -74,6 +86,17 @@ type IdP interface {
 	// access role, group mapping and access flow (contract §8).
 	EnsureClientAccess(ctx context.Context, s keycloak.AccessSpec) error
 	RemoveClientAccess(ctx context.Context, clientID, owner string, allowedHosts []string) error
+	// DeleteClient deletes a client tagged with owner (guarded delete);
+	// missing = nil, anything else of someone else's = *ConflictError.
+	DeleteClient(ctx context.Context, clientID, owner string) error
+}
+
+// Groups manages app instances' LLDAP groups through the Users & Groups
+// guardrails (directory.Service: CreateGroup / DeleteGroup as actor,
+// audited there). Warnings are reported, not errors.
+type Groups interface {
+	CreateInstanceGroup(ctx context.Context, actor, name string) ([]string, error)
+	DeleteInstanceGroup(ctx context.Context, actor, name string) ([]string, error)
 }
 
 // Hub is the application core. All exported methods are safe for
@@ -87,6 +110,9 @@ type Hub struct {
 	// receives instance operations (SetAudit). Both guarded by mu.
 	domains DomainSource
 	audit   Auditor
+	// groups creates / deletes instance groups (SetGroups; nil = not
+	// available: a warning). Guarded by mu.
+	groups Groups
 	// domainsAPI is core's domains service (domains.go; nil = not
 	// configured); domainsReachable: its last call succeeded. Both guarded
 	// by mu. domainOpMu serialises enroll / token / delete (held across
@@ -307,12 +333,15 @@ func (h *Hub) Discover() {
 	// clients) an existing instance of another template already derives
 	// would share them: the instance was there first.
 	// Two templates' default instances may not share a volume or a Traefik
-	// name (defaultClaims): enabled ones claim first, then source order.
-	enabled := map[string]bool{}
-	for _, id := range h.st.Enabled {
-		enabled[id] = true
+	// name (defaultClaims): enabled ones claim first, then those whose
+	// default instance has any other state (settings, policies, ops
+	// record, …) — a disabled installed app keeps its names against a
+	// newcomer —, then source order.
+	tier := map[string]int{}
+	for _, t := range uniq {
+		tier[t.ID] = h.claimTierLocked(t.ID)
 	}
-	sort.SliceStable(uniq, func(i, j int) bool { return enabled[uniq[i].ID] && !enabled[uniq[j].ID] })
+	sort.SliceStable(uniq, func(i, j int) bool { return tier[uniq[i].ID] > tier[uniq[j].ID] })
 	// byID points into uniq: build it only after the sort, which moves the
 	// elements (pointers taken before would name the wrong templates).
 	byID := map[string]*templates.Template{}
@@ -351,6 +380,30 @@ func (h *Hub) Discover() {
 	}
 }
 
+// claimTierLocked ranks a template's default instance for Discover's
+// claims: 2 enabled, 1 any other state in state.yaml or an ops record, 0
+// none (a newcomer). Caller must hold mu.
+func (h *Hub) claimTierLocked(id string) int {
+	if h.st.IsEnabled(id) {
+		return 2
+	}
+	_, a := h.st.Settings[id]
+	_, b := h.st.AuthPolicies[id]
+	_, c := h.st.Published[id]
+	_, d := h.st.PublicAccess[id]
+	_, e := h.st.PublicMode[id]
+	_, f := h.st.PublicTokens[id]
+	_, g := h.st.SignIn[id]
+	_, i := h.st.Instances[id]
+	h.opsMu.Lock()
+	_, o := h.ops[id]
+	h.opsMu.Unlock()
+	if a || b || c || d || e || f || g || i || o {
+		return 1
+	}
+	return 0
+}
+
 // snapshot captures what an enabled instance publishes to group-gate (v5).
 // Caller must hold mu.
 func (h *Hub) snapshot(t *templates.Template) state.PublishedApp {
@@ -364,6 +417,10 @@ func (h *Hub) snapshot(t *templates.Template) state.PublishedApp {
 		AdminGroup:      a.AdminGroup,
 		AdminPaths:      append([]string(nil), a.AdminPaths...),
 	}
+	n := t.NamesFor(t.ID)
+	p.Traefik = append([]string(nil), n.Traefik...)
+	p.Volumes = slices.Sorted(maps.Values(n.Volumes))
+	p.Clients = append([]string(nil), n.Clients...)
 	if ov, ok := h.st.AuthPolicies[t.ID]; ok {
 		ov.Factors = append([]string(nil), ov.Factors...)
 		p.Policy = &ov

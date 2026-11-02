@@ -1,8 +1,10 @@
 // Package docker is the Hub's Docker Engine API client, a thin layer over
 // the official SDK (github.com/moby/moby/client) for DOCKER_HOST =
 // tcp://host:port or unix:///path. It covers only what the Hub needs:
-// container listing, logs, exec and events (all read-only; `docker
-// compose` does up/down).
+// container listing, logs, exec and events (`docker compose` does
+// up/down), plus instance backups (volumes.go): volume list / inspect /
+// create / remove and volume I/O through never-started helper containers
+// (the archive endpoints).
 //
 // The SDK negotiates the API version on first use (GET/HEAD /_ping, which
 // the Hub's socket proxy allows), so the Hub keeps working across Engine

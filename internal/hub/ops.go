@@ -22,10 +22,12 @@ const (
 	OpEnable  = "enable"
 	OpDisable = "disable"
 	OpRestart = "restart"
-	OpStart   = "start" // drift: compose up an enabled app
-	OpApply   = "apply" // drift: regenerate the override and compose up
-	OpStop    = "stop"  // drift: compose down a project that is not enabled
-	OpHosts   = "hosts" // hostname change (SetHosts): Keycloak, files, restart
+	OpStart   = "start"   // drift: compose up an enabled app
+	OpApply   = "apply"   // drift: regenerate the override and compose up
+	OpStop    = "stop"    // drift: compose down a project that is not enabled
+	OpHosts   = "hosts"   // hostname change (SetHosts): Keycloak, files, restart
+	OpDelete  = "delete"  // guarded delete (a failure leaves it "deleting": retry)
+	OpRestore = "restore" // restore from a backup (a failure puts the pre-restore backup back)
 )
 
 // OpRecord is an app's last lifecycle operation, kept in

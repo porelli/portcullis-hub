@@ -1,16 +1,21 @@
 package hub
 
 import (
+	"archive/tar"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/portcullis/hub/internal/compose"
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/keycloak"
@@ -146,6 +151,7 @@ type fakeEngine struct {
 	execCmd    []string
 	execID     string
 	execRes    *docker.ExecResult
+	ve         *volumeEngine
 }
 
 func (e *fakeEngine) ListContainers(ctx context.Context, f docker.Filters) ([]docker.Container, error) {
@@ -226,6 +232,18 @@ type fakeIdP struct {
 	onCallbacks func()
 	access      []string // "+<client>:<owner>:<group>" / "-<client>:<owner>"
 	accessErr   error
+	deleted     []string // "<client>:<owner>"
+	deleteErr   error
+}
+
+func (f *fakeIdP) DeleteClient(ctx context.Context, clientID, owner string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
+	f.deleted = append(f.deleted, clientID+":"+owner)
+	return nil
 }
 
 func (f *fakeIdP) EnsureClientAccess(ctx context.Context, s keycloak.AccessSpec) error {
@@ -397,4 +415,329 @@ func newFixture(t *testing.T) *fixture {
 	t.Cleanup(h.Wait)
 	f.h = h
 	return f
+}
+
+// ── fake volumes ─────────────────────────────────────────
+
+// fakeFile is one entry of a fake volume ("" = the volume root).
+type fakeFile struct {
+	Name     string
+	Dir      bool
+	Mode     int64
+	UID, GID int
+	Body     string
+}
+
+type fakeVolume struct {
+	docker.Volume
+	files map[string]fakeFile
+}
+
+// volumeEngine adds volumes and never-started helper containers to
+// fakeEngine (the archive endpoints as the daemon serves them).
+type volumeEngine struct {
+	vmu          sync.Mutex
+	volumes      map[string]*fakeVolume
+	helpers      map[string]docker.HelperSpec
+	helperLog    []docker.HelperSpec
+	removed      []string // helper ids removed
+	volRemoved   []string
+	images       []string
+	nextID       int
+	copyToErr    func(volume string) error
+	copyFromErr  func(volume string) error
+	removeVolErr func(name string) error
+	imageErr     error
+}
+
+func (e *fakeEngine) vol() *volumeEngine {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.ve == nil {
+		e.ve = &volumeEngine{volumes: map[string]*fakeVolume{}, helpers: map[string]docker.HelperSpec{}}
+	}
+	return e.ve
+}
+
+// addVolume creates a volume of project with files (root owned by uid).
+func (e *fakeEngine) addVolume(name, project, key string, uid int, files ...fakeFile) {
+	v := e.vol()
+	v.vmu.Lock()
+	defer v.vmu.Unlock()
+	fv := &fakeVolume{Volume: docker.Volume{Name: name, Driver: "local", Labels: map[string]string{}}, files: map[string]fakeFile{}}
+	if project != "" {
+		fv.Labels[docker.LabelProject] = project
+		fv.Labels[docker.LabelVolume] = key
+	}
+	fv.files[""] = fakeFile{Dir: true, Mode: 0755, UID: uid, GID: uid}
+	for _, f := range files {
+		fv.files[f.Name] = f
+	}
+	v.volumes[name] = fv
+}
+
+func (e *fakeEngine) volumeFiles(name string) map[string]fakeFile {
+	v := e.vol()
+	v.vmu.Lock()
+	defer v.vmu.Unlock()
+	fv := v.volumes[name]
+	if fv == nil {
+		return nil
+	}
+	out := map[string]fakeFile{}
+	for k, f := range fv.files {
+		out[k] = f
+	}
+	return out
+}
+
+func (e *fakeEngine) volumeNames() []string {
+	v := e.vol()
+	v.vmu.Lock()
+	defer v.vmu.Unlock()
+	var out []string
+	for n := range v.volumes {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
+}
+
+var errNoSuchVolume = cerrdefs.ErrNotFound.WithMessage("no such volume")
+
+func (e *fakeEngine) ListVolumes(ctx context.Context, f docker.Filters) ([]docker.Volume, error) {
+	v := e.vol()
+	v.vmu.Lock()
+	defer v.vmu.Unlock()
+	var out []docker.Volume
+	for _, fv := range v.volumes {
+		ok := true
+		for _, l := range f["label"] {
+			k, val, hasV := cut(l)
+			got, present := fv.Labels[k]
+			if !present || (hasV && got != val) {
+				ok = false
+			}
+		}
+		if ok {
+			out = append(out, fv.Volume)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+func (e *fakeEngine) InspectVolume(ctx context.Context, name string) (docker.Volume, error) {
+	v := e.vol()
+	v.vmu.Lock()
+	defer v.vmu.Unlock()
+	if fv := v.volumes[name]; fv != nil {
+		return fv.Volume, nil
+	}
+	return docker.Volume{}, errNoSuchVolume
+}
+
+func (e *fakeEngine) CreateVolume(ctx context.Context, vol docker.Volume) error {
+	v := e.vol()
+	v.vmu.Lock()
+	defer v.vmu.Unlock()
+	if v.volumes[vol.Name] != nil {
+		return nil // Docker: creating an existing volume is a no-op
+	}
+	if vol.Labels == nil {
+		vol.Labels = map[string]string{}
+	}
+	if vol.Driver == "" {
+		vol.Driver = "local"
+	}
+	v.volumes[vol.Name] = &fakeVolume{Volume: vol, files: map[string]fakeFile{"": {Dir: true, Mode: 0755}}}
+	return nil
+}
+
+func (e *fakeEngine) RemoveVolume(ctx context.Context, name string) error {
+	v := e.vol()
+	v.vmu.Lock()
+	defer v.vmu.Unlock()
+	if v.removeVolErr != nil {
+		if err := v.removeVolErr(name); err != nil {
+			return err
+		}
+	}
+	if v.volumes[name] == nil {
+		return errNoSuchVolume
+	}
+	for _, h := range v.helpers {
+		if _, used := h.Volumes[name]; used {
+			return errors.New("volume is in use")
+		}
+	}
+	delete(v.volumes, name)
+	v.volRemoved = append(v.volRemoved, name)
+	return nil
+}
+
+func (e *fakeEngine) EnsureImage(ctx context.Context, ref string) error {
+	v := e.vol()
+	v.vmu.Lock()
+	defer v.vmu.Unlock()
+	v.images = append(v.images, ref)
+	return v.imageErr
+}
+
+func (e *fakeEngine) CreateHelper(ctx context.Context, s docker.HelperSpec) (string, error) {
+	v := e.vol()
+	v.vmu.Lock()
+	defer v.vmu.Unlock()
+	for name := range s.Volumes {
+		if v.volumes[name] == nil {
+			// Docker would create it: the Hub must never rely on that.
+			return "", fmt.Errorf("helper mounts missing volume %s", name)
+		}
+	}
+	v.nextID++
+	id := fmt.Sprintf("helper-%d", v.nextID)
+	v.helpers[id] = s
+	v.helperLog = append(v.helperLog, s)
+	return id, nil
+}
+
+func (e *fakeEngine) RemoveContainer(ctx context.Context, id string) error {
+	v := e.vol()
+	v.vmu.Lock()
+	defer v.vmu.Unlock()
+	delete(v.helpers, id)
+	v.removed = append(v.removed, id)
+	return nil
+}
+
+// mountAt returns the volume helper id mounts at target.
+func (v *volumeEngine) mountAt(id, target string) (*fakeVolume, docker.HelperSpec, error) {
+	h, ok := v.helpers[id]
+	if !ok {
+		return nil, h, errors.New("no such container")
+	}
+	for name, tg := range h.Volumes {
+		if tg == target {
+			return v.volumes[name], h, nil
+		}
+	}
+	return nil, h, fmt.Errorf("nothing mounted at %s", target)
+}
+
+func (e *fakeEngine) CopyFromContainer(ctx context.Context, id, path string) (io.ReadCloser, error) {
+	v := e.vol()
+	v.vmu.Lock()
+	defer v.vmu.Unlock()
+	fv, _, err := v.mountAt(id, path)
+	if err != nil {
+		return nil, err
+	}
+	if v.copyFromErr != nil {
+		if err := v.copyFromErr(fv.Name); err != nil {
+			return nil, err
+		}
+	}
+	base := strings.TrimPrefix(path, "/")
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	names := make([]string, 0, len(fv.files))
+	for n := range fv.files {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		f := fv.files[n]
+		name := base
+		if n != "" {
+			name = base + "/" + n
+		}
+		hdr := &tar.Header{Name: name, Mode: f.Mode, Uid: f.UID, Gid: f.GID, ModTime: time.Unix(1700000000, 0)}
+		if f.Dir {
+			hdr.Typeflag, hdr.Name = tar.TypeDir, name+"/"
+		} else {
+			hdr.Typeflag, hdr.Size = tar.TypeReg, int64(len(f.Body))
+		}
+		tw.WriteHeader(hdr)
+		tw.Write([]byte(f.Body))
+	}
+	tw.Close()
+	return io.NopCloser(&buf), nil
+}
+
+func (e *fakeEngine) CopyToContainer(ctx context.Context, id, path string, content io.Reader) error {
+	data, err := io.ReadAll(content)
+	if err != nil {
+		return err
+	}
+	v := e.vol()
+	v.vmu.Lock()
+	defer v.vmu.Unlock()
+	h, ok := v.helpers[id]
+	if !ok {
+		return errors.New("no such container")
+	}
+	if path != "/" {
+		return fmt.Errorf("fake: extract at %s", path)
+	}
+	if h.ReadOnly {
+		return errors.New("container rootfs is marked read-only")
+	}
+	tr := tar.NewReader(bytes.NewReader(data))
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		name := strings.Trim(hdr.Name, "/")
+		top, rest, _ := strings.Cut(name, "/")
+		var fv *fakeVolume
+		for vn, tg := range h.Volumes {
+			if tg == "/"+top {
+				fv = v.volumes[vn]
+			}
+		}
+		if fv == nil {
+			return fmt.Errorf("fake: %s is outside the mounted volumes", hdr.Name)
+		}
+		if v.copyToErr != nil {
+			if err := v.copyToErr(fv.Name); err != nil {
+				return err
+			}
+		}
+		body, _ := io.ReadAll(tr)
+		fv.files[rest] = fakeFile{Name: rest, Dir: hdr.Typeflag == tar.TypeDir, Mode: hdr.Mode, UID: hdr.Uid, GID: hdr.Gid, Body: string(body)}
+	}
+}
+
+// fakeGroups records instance group operations.
+type fakeGroups struct {
+	mu     sync.Mutex
+	calls  []string // "+name:actor" / "-name:actor"
+	delErr error
+}
+
+func (g *fakeGroups) CreateInstanceGroup(ctx context.Context, actor, name string) ([]string, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.calls = append(g.calls, "+"+name+":"+actor)
+	return nil, nil
+}
+
+func (g *fakeGroups) DeleteInstanceGroup(ctx context.Context, actor, name string) ([]string, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.delErr != nil {
+		return nil, g.delErr
+	}
+	g.calls = append(g.calls, "-"+name+":"+actor)
+	return nil, nil
+}
+
+func (g *fakeGroups) Calls() []string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return append([]string(nil), g.calls...)
 }

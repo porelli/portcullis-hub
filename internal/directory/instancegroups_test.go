@@ -1,0 +1,49 @@
+package directory_test
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/portcullis/hub/internal/directory"
+)
+
+// TestInstanceGroups: an instance's groups are created and deleted through
+// the guarded group operations; protected and permission groups survive a
+// delete with a warning; missing groups are no error (retries).
+func TestInstanceGroups(t *testing.T) {
+	e, store := evalEnv(t)
+	cfg, _ := store.Load()
+	cfg.Permissions[directory.PermInvite] = "inviters"
+	if err := store.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	e.ll.AddGroup("inviters")
+	if w, err := e.svc.CreateInstanceGroup(ctx, "root", "users_grafana-b"); err != nil || len(w) != 0 || !e.ll.HasGroup("users_grafana-b") {
+		t.Fatalf("create: %v %v", w, err)
+	}
+	if w, err := e.svc.CreateInstanceGroup(ctx, "root", "users_grafana-b"); err != nil || len(w) != 1 || !strings.Contains(w[0], "already exists") {
+		t.Errorf("create existing: %v %v", w, err)
+	}
+	e.ll.AddGroup("admin_grafana-b", "alice")
+	if w, err := e.svc.DeleteInstanceGroup(ctx, "root", "admin_grafana-b"); err != nil || len(w) != 0 || e.ll.HasGroup("admin_grafana-b") {
+		t.Fatalf("delete: %v %v", w, err)
+	}
+	if a := newestAudit(t, e, "group.delete"); a.Actor != "root" || a.Target != "admin_grafana-b" || !strings.Contains(a.Detail, "sign_out=alice") {
+		t.Errorf("audit = %+v", a)
+	}
+	if w, err := e.svc.DeleteInstanceGroup(ctx, "root", "admin_grafana-b"); err != nil || len(w) != 0 {
+		t.Errorf("delete again: %v %v", w, err)
+	}
+	for _, g := range []string{"lldap_admin", "extra_admins", "ops_admins", "inviters"} {
+		e.ll.AddGroup(g)
+		w, err := e.svc.DeleteInstanceGroup(ctx, "root", g)
+		if err != nil || len(w) != 1 || !strings.Contains(w[0], "kept") || !e.ll.HasGroup(g) {
+			t.Errorf("%s: %v %v", g, w, err)
+		}
+	}
+	// Not an admin: refused like the Users & Groups page.
+	e.ll.AddGroup("users_x")
+	if _, err := e.svc.DeleteInstanceGroup(ctx, "alice", "users_x"); err == nil || !e.ll.HasGroup("users_x") {
+		t.Errorf("non-admin delete: %v", err)
+	}
+}

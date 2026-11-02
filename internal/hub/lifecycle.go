@@ -241,6 +241,10 @@ func (h *Hub) enableLocked(id string) (rolledBack bool, err error) {
 		return false, statusErr(400, "app instance not found: %s", id)
 	}
 	tmpl := *t // the catalog slice may be replaced meanwhile
+	if e, ok := h.st.Instances[id]; ok && e.State == state.InstanceDeleting {
+		h.mu.Unlock()
+		return false, statusErr(409, "instance %s is being deleted: delete it again to finish", id)
+	}
 	if h.st.IsEnabled(id) {
 		h.mu.Unlock()
 		return false, nil
@@ -407,6 +411,10 @@ func (h *Hub) disableLocked(id string) error {
 	h.saveLocked()
 	h.mu.Unlock()
 	h.writePolicyLogged()
+	// Its extra-domain sign-in callbacks go with it (enable adds them).
+	if tmpl != nil {
+		h.removeCallbacks(tmpl)
+	}
 	h.TriggerReconcile()
 	return nil
 }

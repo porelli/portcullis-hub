@@ -43,6 +43,13 @@ type PublishedApp struct {
 	// ({token} kept, never the tokens); empty when no public router was generated.
 	PublicHosts []string            `json:"public_hosts,omitempty" yaml:"public_hosts,omitempty"`
 	Public      *policy.PublicEntry `json:"public,omitempty" yaml:"public,omitempty"`
+	// Traefik, Volumes and Clients are the instance's Traefik names,
+	// volume names and Keycloak client ids at publish time (contract
+	// §11.1–11.2): an enabled instance whose template disappears keeps
+	// claiming them, and a guarded delete still finds its clients.
+	Traefik []string `json:"traefik,omitempty" yaml:"traefik,omitempty"`
+	Volumes []string `json:"volumes,omitempty" yaml:"volumes,omitempty"`
+	Clients []string `json:"clients,omitempty" yaml:"clients,omitempty"`
 }
 
 // KnownDomain is an enrolled domain as the domains service last reported
@@ -67,6 +74,9 @@ type Instance struct {
 	// State is InstanceCreated until the instance is first enabled
 	// (InstanceDeleting during a guarded delete); "" otherwise.
 	State string `json:"state,omitempty" yaml:"state,omitempty"`
+	// Backup is the archive a guarded delete took (relative to
+	// <data>/backups), recorded with InstanceDeleting: a retry keeps it.
+	Backup string `json:"backup,omitempty" yaml:"backup,omitempty"`
 }
 
 // Persisted instance states (Instance.State).

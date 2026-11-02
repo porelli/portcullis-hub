@@ -622,6 +622,36 @@ func moveURLHost(raw string, hostMap map[string]string) string {
 	return u.String()
 }
 
+// DeleteClient deletes the client clientID if it is tagged as owned by
+// owner (OwnerAttr; guarded delete, contract §11.4 step 4). A missing
+// client is nil (idempotent); an untagged client or one tagged with
+// another owner is a *ConflictError and is left alone; core's clients are
+// never deleted.
+func (c *Client) DeleteClient(ctx context.Context, clientID, owner string) error {
+	if protectedClients[clientID] || owner == "" {
+		return &ConflictError{ClientID: clientID, TemplateID: owner, Owner: "core"}
+	}
+	tok, err := c.token(ctx)
+	if err != nil {
+		return err
+	}
+	existing, err := c.findClient(ctx, tok, clientID)
+	if errors.Is(err, ErrClientNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if got := existing.Attributes[OwnerAttr]; got != owner {
+		return &ConflictError{ClientID: clientID, TemplateID: owner, Owner: got}
+	}
+	if err := c.api().DeleteClient(ctx, tok, Realm, url.PathEscape(str(existing.ID))); err != nil && statusCode(err) != http.StatusNotFound {
+		return opErr("delete client "+clientID, err)
+	}
+	log.Printf("Deleted Keycloak client %s", clientID)
+	return nil
+}
+
 // ForwardAuthClient is core's oauth2-proxy client, shared by forward-auth
 // and forward-auth-ext (contract §5).
 const ForwardAuthClient = "portcullis-forward-auth"

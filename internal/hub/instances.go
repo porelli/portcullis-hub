@@ -176,7 +176,11 @@ func (h *Hub) Instances() []InstanceView {
 		if !inState {
 			tid = id
 		}
-		out = append(out, InstanceView{ID: id, Template: tid, Default: id == tid, State: StateError, Error: reason,
+		st := StateError
+		if e.State == state.InstanceDeleting {
+			st = StateDeleting
+		}
+		out = append(out, InstanceView{ID: id, Template: tid, Default: id == tid, State: st, Error: reason,
 			Hosts: copyMap(e.Hosts), KeycloakClients: []string{}, Project: projectName(id)})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
@@ -214,6 +218,27 @@ func (h *Hub) CreateInstance(templateID, id string, hosts map[string]string) err
 		for _, c := range cs {
 			if c.Project() == projectName(id) {
 				return statusErr(409, "compose project %s already exists (stop and remove it first)", projectName(id))
+			}
+		}
+		// Nor may it adopt an existing volume: a deleted instance's
+		// leftover, or anything else's (§11.1).
+		h.mu.RLock()
+		var want map[string]string
+		if t := h.catalogLocked(templateID); t != nil {
+			want = t.NamesFor(id).Volumes
+		}
+		h.mu.RUnlock()
+		vs, err := h.engine.ListVolumes(context.Background(), nil)
+		if err != nil {
+			return statusErr(503, "cannot check for existing volumes: %v", err)
+		}
+		mine := map[string]bool{}
+		for _, n := range want {
+			mine[strings.ToLower(n)] = true
+		}
+		for _, v := range vs {
+			if mine[strings.ToLower(v.Name)] || v.Labels[docker.LabelProject] == projectName(id) {
+				return statusErr(409, "volume %s already exists (a leftover of a deleted instance or someone else's): remove it, or choose another instance id", v.Name)
 			}
 		}
 	}
@@ -344,6 +369,7 @@ func (h *Hub) reservationsLocked(lookup func(templateID string) *templates.Templ
 			continue
 		}
 		who += " (template " + e.Template + " missing)"
+		snapshotClaims(r, h.st.Published[id], who)
 		r.prefixes = append(r.prefixes,
 			struct{ prefix, who string }{"volume\x00portcullis_" + id + "-", who},
 			struct{ prefix, who string }{"Keycloak client\x00" + id + "-", who},
@@ -365,8 +391,24 @@ func (h *Hub) reservationsLocked(lookup func(templateID string) *templates.Templ
 		if snap.AdminGroup != "" {
 			claim("group", snap.AdminGroup, who)
 		}
+		snapshotClaims(r, snap, who)
 	}
 	return r
+}
+
+// snapshotClaims adds the volume, Keycloak client and Traefik names a
+// published snapshot records (an enabled instance whose template is
+// missing keeps them, §11.1).
+func snapshotClaims(r *reservations, snap state.PublishedApp, who string) {
+	for _, v := range snap.Volumes {
+		r.exact["volume\x00"+strings.ToLower(v)] = who
+	}
+	for _, c := range snap.Clients {
+		r.exact["Keycloak client\x00"+strings.ToLower(c)] = who
+	}
+	for _, n := range snap.Traefik {
+		r.exact[traefikClaim+"\x00"+strings.ToLower(n)] = who
+	}
 }
 
 // nameClaims are an instance's derived names as comparable claims
