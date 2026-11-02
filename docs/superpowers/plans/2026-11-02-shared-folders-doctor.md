@@ -43,7 +43,7 @@ previewed, audited one-click fixes where they are safe.
 **Spec:** `docs/superpowers/specs/2026-11-02-shared-folders-doctor-design.md` (hub repo)
 
 **Builds on:** project 1's plan
-`docs/superpowers/plans/pending/2026-11-02-app-settings-panel.md`, section
+`docs/superpowers/plans/2026-11-02-app-settings-panel.md`, section
 "Interfaces for later plans". This plan uses its names exactly
 (`templates.Option`, `templates.ReservedFeature`, `settings.Registry`,
 `settings.Mounter.HostPath`, `hub.FolderSource`/`SetFolderSource`,
