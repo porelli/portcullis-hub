@@ -86,6 +86,14 @@ func (h *Hub) composeUp(t *templates.Template) error {
 	if err := h.syncTemplateFiles(live); err != nil {
 		return statusErr(500, "sync template files: %v", err)
 	}
+	// Create without starting, inspect the labels (image LABELs merge in),
+	// only then start: an image-label router is never live.
+	if err := h.compose.Create(context.Background(), h.project(live)); err != nil {
+		return err
+	}
+	if p := h.imageLabelProblem(live); p != "" {
+		return h.refuseImageLabels(live, p, "was not started")
+	}
 	if err := h.compose.Up(context.Background(), h.project(live)); err != nil {
 		return err
 	}

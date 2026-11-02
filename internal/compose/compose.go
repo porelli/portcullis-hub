@@ -108,6 +108,9 @@ type Project struct {
 // Runner brings compose projects up and down. It is an interface so the
 // Hub's lifecycle/locking logic can be tested without Docker.
 type Runner interface {
+	// Create runs `up --no-start`: containers are created (labels set),
+	// none is started — the Hub inspects them before Up.
+	Create(ctx context.Context, p Project) error
 	Up(ctx context.Context, p Project) error
 	Down(ctx context.Context, p Project) error
 	// DownByName stops a project using only its name — works even when the
@@ -184,6 +187,12 @@ func orDiscard(w io.Writer) io.Writer {
 		return io.Discard
 	}
 	return w
+}
+
+// Create runs `up --no-start --no-deps` (still the up verb: the Hub's
+// compose CLI use stays up / down only).
+func (c *CLI) Create(ctx context.Context, p Project) error {
+	return c.run(ctx, c.UpTimeout, "up", Args(p, "up", "--no-start", "--no-deps"))
 }
 
 // Up runs `up -d --no-deps`.

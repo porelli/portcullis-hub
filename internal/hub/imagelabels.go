@@ -19,7 +19,9 @@ import (
 // compose up the Hub compares each container's traefik.* keys with the
 // keys compose was given (the template's labels and the Hub's override);
 // any other key takes the project down (volumes kept) and fails the
-// operation. Reconcile reports the same as drift.
+// operation. The check runs first on the containers `up --no-start`
+// created — before anything starts or Traefik could route it — and again
+// after the real up. Reconcile reports the same as drift.
 
 // expectedTraefikKeysLocked: per compose service, the traefik.* label keys
 // compose sets for t — the template's (default instance; a non-default
@@ -125,36 +127,46 @@ func extraTraefikKeys(want map[string]bool, have map[string]string) []string {
 	return out
 }
 
-// checkImageLabels runs after a successful compose up: a container with
-// traefik.* labels compose wasn't given (an image LABEL) takes the project
-// down (volumes kept) and fails the operation. Docker unreachable: fail
-// closed too.
-func (h *Hub) checkImageLabels(t *templates.Template) error {
+// imageLabelProblem: why t's containers (created or running) can't be
+// trusted with routing ("" = fine): a traefik.* label key compose wasn't
+// given (an image LABEL). Docker unreachable is a problem too (fail
+// closed).
+func (h *Hub) imageLabelProblem(t *templates.Template) string {
 	if h.engine == nil {
-		return nil
+		return ""
 	}
 	h.mu.RLock()
 	want, err := h.expectedTraefikKeysLocked(t)
 	h.mu.RUnlock()
-	ctx := context.Background()
-	var problem string
 	if err != nil {
-		problem = "the expected labels can't be computed: " + err.Error()
-	} else if cs, lerr := h.engine.ListContainers(ctx, docker.ProjectFilter(projectName(t.ID))); lerr != nil {
-		problem = "the containers' labels can't be checked: " + lerr.Error()
-	} else {
-		for _, c := range cs {
-			if extra := extraTraefikKeys(want[c.Service()], c.Labels); len(extra) > 0 {
-				problem = fmt.Sprintf("container %s (service %s) carries Traefik labels compose wasn't given — from its image's LABELs: %s", c.Name(), c.Service(), strings.Join(extra, ", "))
-				break
-			}
+		return "the expected labels can't be computed: " + err.Error()
+	}
+	cs, err := h.engine.ListContainers(context.Background(), docker.ProjectFilter(projectName(t.ID)))
+	if err != nil {
+		return "the containers' labels can't be checked: " + err.Error()
+	}
+	for _, c := range cs {
+		if extra := extraTraefikKeys(want[c.Service()], c.Labels); len(extra) > 0 {
+			return fmt.Sprintf("container %s (service %s) carries Traefik labels compose wasn't given — from its image's LABELs: %s", c.Name(), c.Service(), strings.Join(extra, ", "))
 		}
 	}
-	if problem == "" {
-		return nil
-	}
-	if derr := h.compose.Down(ctx, h.project(t)); derr != nil {
+	return ""
+}
+
+// refuseImageLabels takes the project down (volumes kept) and returns the
+// 409 for problem.
+func (h *Hub) refuseImageLabels(t *templates.Template, problem, when string) error {
+	if derr := h.compose.Down(context.Background(), h.project(t)); derr != nil {
 		problem += fmt.Sprintf(" (taking the project down failed too: %v)", derr)
 	}
-	return statusErr(409, "%s %s was stopped: %s. Use an image without traefik.* labels (or one the template's labels fully override)", "instance", t.ID, problem)
+	return statusErr(409, "instance %s %s: %s. Use an image without traefik.* labels (or one the template's labels fully override)", t.ID, when, problem)
+}
+
+// checkImageLabels is the post-up check (defence in depth: composeUp
+// already checked the created, not yet started, containers).
+func (h *Hub) checkImageLabels(t *templates.Template) error {
+	if p := h.imageLabelProblem(t); p != "" {
+		return h.refuseImageLabels(t, p, "was stopped")
+	}
+	return nil
 }

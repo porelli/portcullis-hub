@@ -20,14 +20,17 @@ import (
 // fakeRunner records compose calls and checks that no two operations on the
 // same project ever overlap.
 type fakeRunner struct {
-	mu        sync.Mutex
-	calls     []string
-	projects  []compose.Project
-	active    map[string]int
-	overlap   []string
-	upErr     error
-	downErr   error
-	byNameErr error
+	mu         sync.Mutex
+	calls      []string
+	projects   []compose.Project
+	active     map[string]int
+	overlap    []string
+	upErr      error
+	downErr    error
+	byNameErr  error
+	creates    []string
+	createHook func(project string)
+	upHook     func(project string) // runs inside Up (after begin)
 	// gate, if set, blocks Up until closed; entered receives the project
 	// name when Up starts.
 	gate    chan struct{}
@@ -57,9 +60,32 @@ func (f *fakeRunner) end(name string) {
 	f.mu.Unlock()
 }
 
+// Create (`up --no-start`) is recorded apart from calls (most tests check
+// the up/down sequence); createHook can change the fake engine's
+// containers as compose would.
+func (f *fakeRunner) Create(ctx context.Context, p compose.Project) error {
+	f.mu.Lock()
+	f.creates = append(f.creates, p.Name)
+	hook := f.createHook
+	f.mu.Unlock()
+	if hook != nil {
+		hook(p.Name)
+	}
+	return nil
+}
+
+func (f *fakeRunner) Creates() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.creates...)
+}
+
 func (f *fakeRunner) Up(ctx context.Context, p compose.Project) error {
 	f.begin("up", p.Name, p)
 	defer f.end(p.Name)
+	if f.upHook != nil {
+		f.upHook(p.Name)
+	}
 	if f.entered != nil {
 		f.entered <- p.Name
 	}

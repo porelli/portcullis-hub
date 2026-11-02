@@ -39,6 +39,9 @@ func stub(t *testing.T, script string) (*CLI, string) {
 func TestCLI(t *testing.T) {
 	c, log := stub(t, "exit 0\n")
 	p := Project{Name: "portcullis-app", Files: []string{"/c.yml"}}
+	if err := c.Create(context.Background(), p); err != nil {
+		t.Fatal(err)
+	}
 	if err := c.Up(context.Background(), p); err != nil {
 		t.Fatal(err)
 	}
@@ -51,6 +54,7 @@ func TestCLI(t *testing.T) {
 	b, _ := os.ReadFile(log)
 	out := string(b)
 	for _, want := range []string{
+		"compose -p portcullis-app -f /c.yml up --no-start --no-deps",
 		"compose -p portcullis-app -f /c.yml up -d --no-deps",
 		"compose -p portcullis-app -f /c.yml down --remove-orphans",
 		"compose -p portcullis-app down --remove-orphans",

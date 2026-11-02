@@ -20,9 +20,10 @@ import (
 
 type nopRunner struct{}
 
-func (nopRunner) Up(context.Context, compose.Project) error         { return nil }
-func (nopRunner) Down(context.Context, compose.Project) error       { return nil }
-func (nopRunner) DownByName(ctx context.Context, name string) error { return nil }
+func (nopRunner) Up(context.Context, compose.Project) error           { return nil }
+func (nopRunner) Down(context.Context, compose.Project) error         { return nil }
+func (nopRunner) DownByName(ctx context.Context, name string) error   { return nil }
+func (nopRunner) Create(ctx context.Context, p compose.Project) error { return nil }
 
 func newServer(t *testing.T) *httptest.Server {
 	t.Helper()
