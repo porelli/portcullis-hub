@@ -12,6 +12,7 @@ import (
 
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/state"
+	"github.com/portcullis/hub/internal/templates"
 )
 
 // Contract v2 templates (instances: multi), shaped like the real ones.
@@ -670,6 +671,26 @@ func TestSiblingsShareSupportFiles(t *testing.T) {
 	if err != nil || !os.SameFile(before, after) {
 		t.Fatalf("the running sibling's support dir was swapped although nothing changed (%v)", err)
 	}
+	// The published hash is recorded in the Hub's data dir, not in dest,
+	// and survives a restart of the Hub.
+	if rec := readFile(t, filepath.Join(f.data, "template-sync.json")); !strings.Contains(rec, `"grafana"`) {
+		t.Errorf("sync record = %s", rec)
+	}
+	h2, err := New(f.h.cfg, f.runner, f.engine, f.idp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h2.syncHashes["grafana"] == "" || h2.syncHashes["grafana"] != f.h.syncHashes["grafana"] {
+		t.Errorf("reloaded record = %v", h2.syncHashes)
+	}
+	// A file edited in the shared dir is put back on the next up.
+	writeFile(t, filepath.Join(dest, "conf", "app.ini"), "tampered\n")
+	if err := f.h.RestartApp("grafana"); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, filepath.Join(dest, "conf", "app.ini")); got != "[v1]\n" {
+		t.Errorf("tampered support file kept: %q", got)
+	}
 	// Changed content: two siblings sync concurrently, both succeed and the
 	// result is the new tree.
 	writeFile(t, filepath.Join(f.src, "grafana", "conf", "app.ini"), "[v2]\n")
@@ -781,5 +802,55 @@ func TestInstanceHostsVsOtherSources(t *testing.T) {
 	err := f.h.CreateInstance("grafana", "grafana-b", map[string]string{"grafana": "talk.example.org"})
 	if statusOf(err) != 409 || !strings.Contains(err.Error(), "template chat (source other)") {
 		t.Errorf("got %v", err)
+	}
+}
+
+// TestMissingTemplateKeepsReservations: an instance whose template
+// disappears keeps its names; a new template can't take them.
+func TestMissingTemplateKeepsReservations(t *testing.T) {
+	f := newInstanceFixture(t, nil)
+	if err := f.h.CreateInstance("grafana", "grafana-b", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.h.Enable("grafana"); err != nil {
+		t.Fatal(err)
+	}
+	os.RemoveAll(filepath.Join(f.src, "grafana"))
+	for id, c := range map[string][2]string{
+		"teamb": {"name: T\nauth:\n  method: forward-auth\n  group_access: true\n  access_group: users_grafana-b\n", "services:\n  s:\n    image: x\n"},
+		"store": {"name: S\ninstances: multi\nauth:\n  method: forward-auth\n", "services:\n  s:\n    image: x\nvolumes:\n  grafana-b-data: {}\n"},
+		"kc":    {"name: K\nauth:\n  method: native-oidc\nkeycloak_clients:\n  - client_id: grafana-b-x\n", "services:\n  s:\n    image: x\n"},
+		// The missing default instance's published groups too.
+		"ga":   {"name: G\nauth:\n  method: forward-auth\n  group_access: true\n  access_group: users_grafana\n", "services:\n  s:\n    image: x\n"},
+		"fine": {"name: F\nauth:\n  method: forward-auth\n", "services:\n  s:\n    image: x\n"},
+	} {
+		writeFile(t, filepath.Join(f.src, id, "manifest.yaml"), c[0])
+		writeFile(t, filepath.Join(f.src, id, "compose.yml"), c[1])
+	}
+	f.h.Discover()
+	for _, id := range []string{"teamb", "store", "kc", "ga"} {
+		if f.h.Template(id) != nil {
+			t.Errorf("%s took a name of grafana-b / grafana (template missing)", id)
+		}
+	}
+	if f.h.Template("fine") == nil {
+		t.Error("fine was skipped")
+	}
+	// New instances can't take them either: with its template gone,
+	// grafana-b's client pattern grafana-b-* stays reserved.
+	if err := f.h.CreateInstance("chat", "grafana-b-chat", nil); statusOf(err) != 409 || !strings.Contains(err.Error(), "template grafana missing") {
+		t.Errorf("grafana-b-chat: %v", err)
+	}
+	if err := f.h.CreateInstance("chat", "chat-c", nil); err != nil {
+		t.Errorf("unrelated id refused: %v", err)
+	}
+	f.h.mu.Lock()
+	r := f.h.reservationsLocked(func(tid string) *templates.Template { return f.h.catalogLocked(tid) }, "")
+	f.h.mu.Unlock()
+	for _, c := range []string{"project\x00portcullis-grafana-b", "group\x00users_grafana-b", "group\x00admin_grafana-b",
+		"Keycloak client\x00grafana-b", "volume\x00portcullis_grafana-b-anything", "project\x00portcullis-grafana", "group\x00users_grafana"} {
+		if _, who := r.match([]string{c}); who == "" {
+			t.Errorf("%q not reserved", c)
+		}
 	}
 }

@@ -299,26 +299,100 @@ func (h *Hub) checkInstanceNamesLocked(t *templates.Template, id string) error {
 	if h.templateIDs[id] || h.catalogLocked(id) != nil {
 		return statusErr(409, "instance id %s is a template id (the default instance of that template)", id)
 	}
-	taken := map[string]string{} // claim → owner
+	r := h.reservationsLocked(func(tid string) *templates.Template { return h.catalogLocked(tid) }, "")
 	for _, tt := range h.allTemplates {
 		for _, c := range nameClaims(tt.NamesFor(tt.ID)) {
-			taken[c] = "the default instance of " + tt.ID
+			r.exact[c] = "the default instance of " + tt.ID
 		}
 	}
-	for oid, e := range h.st.Instances {
-		if ot := h.catalogLocked(e.Template); ot != nil {
-			for _, c := range nameClaims(ot.NamesFor(oid)) {
-				taken[c] = "instance " + oid
+	if c, who := r.match(nameClaims(t.NamesFor(id))); who != "" {
+		kind, name, _ := strings.Cut(c, "\x00")
+		return statusErr(409, "instance id %s: its %s %s is already used by %s", id, kind, name, who)
+	}
+	return nil
+}
+
+// reservations are names existing instances hold: exact claims
+// (nameClaims form) and, for instances whose template can't be resolved,
+// prefixes of the names they may derive.
+type reservations struct {
+	exact    map[string]string // claim → owner
+	prefixes []struct{ prefix, who string }
+}
+
+// match returns the first claim (and its owner) that is reserved.
+func (r *reservations) match(claims []string) (string, string) {
+	for _, c := range claims {
+		if who, ok := r.exact[c]; ok {
+			return c, who
+		}
+		for _, p := range r.prefixes {
+			if strings.HasPrefix(c, p.prefix) {
+				return c, p.who
 			}
 		}
 	}
-	for _, c := range nameClaims(t.NamesFor(id)) {
-		if who, ok := taken[c]; ok {
-			kind, name, _ := strings.Cut(c, "\x00")
-			return statusErr(409, "instance id %s: its %s %s is already used by %s", id, kind, name, who)
+	return "", ""
+}
+
+// reservationsLocked collects the names every instance in state holds,
+// whether or not its template resolves (a missing template must not free
+// its instances' names, §11.1): for each non-default instance id, its
+// project, users_<id>, admin_<id> and client <id> always; its exact
+// derived names when lookup finds its template, else the patterns
+// portcullis_<id>-* (volumes) and <id>-* (further clients). Default
+// instances whose template is missing keep their project and the groups
+// of their published snapshot. Instances of skipTemplate (and its default
+// instance) are left out. Caller must hold mu.
+func (h *Hub) reservationsLocked(lookup func(templateID string) *templates.Template, skipTemplate string) *reservations {
+	r := &reservations{exact: map[string]string{}}
+	claim := func(kind, name, who string) {
+		r.exact[kind+"\x00"+strings.ToLower(name)] = who
+	}
+	ids := make([]string, 0, len(h.st.Instances))
+	for id := range h.st.Instances {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		e := h.st.Instances[id]
+		if id == e.Template || (skipTemplate != "" && e.Template == skipTemplate) {
+			continue
+		}
+		who := "instance " + id
+		claim("project", projectName(id), who)
+		claim("group", "users_"+id, who)
+		claim("group", "admin_"+id, who)
+		claim("Keycloak client", id, who)
+		if ot := lookup(e.Template); ot != nil {
+			for _, c := range nameClaims(ot.NamesFor(id)) {
+				r.exact[c] = who
+			}
+			continue
+		}
+		who += " (template " + e.Template + " missing)"
+		r.prefixes = append(r.prefixes,
+			struct{ prefix, who string }{"volume\x00portcullis_" + id + "-", who},
+			struct{ prefix, who string }{"Keycloak client\x00" + id + "-", who})
+	}
+	// Default instances whose template is gone: last known names.
+	for id, snap := range h.st.Published {
+		if id == skipTemplate || lookup(id) != nil {
+			continue
+		}
+		if e, ok := h.st.Instances[id]; ok && e.Template != id {
+			continue // a non-default instance: above
+		}
+		who := "the default instance of " + id + " (template missing)"
+		claim("project", projectName(id), who)
+		if snap.AccessGroup != "" {
+			claim("group", snap.AccessGroup, who)
+		}
+		if snap.AdminGroup != "" {
+			claim("group", snap.AdminGroup, who)
 		}
 	}
-	return nil
+	return r
 }
 
 // nameClaims are an instance's derived names as comparable claims
@@ -348,31 +422,15 @@ func nameClaims(n templates.InstanceNames) []string {
 	return out
 }
 
-// claimCollision reports (as "<kind> <name> of instance <id>")
-// whether template t's default instance would use a name an existing
-// instance of another template already derives. Caller must hold mu.
+// claimCollision reports (as "<kind> <name> of <owner>") whether template
+// t's default instance would use a name an existing instance of another
+// template holds (reservationsLocked; byID resolves templates discovered
+// now). Caller must hold mu.
 func (h *Hub) claimCollision(t *templates.Template, byID map[string]*templates.Template) string {
-	mine := map[string]bool{}
-	for _, c := range nameClaims(t.NamesFor(t.ID)) {
-		mine[c] = true
-	}
-	ids := make([]string, 0, len(h.st.Instances))
-	for id := range h.st.Instances {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	for _, id := range ids {
-		e := h.st.Instances[id]
-		ot := byID[e.Template]
-		if ot == nil || e.Template == t.ID || id == e.Template {
-			continue
-		}
-		for _, c := range nameClaims(ot.NamesFor(id)) {
-			if mine[c] {
-				kind, name, _ := strings.Cut(c, "\x00")
-				return kind + " " + name + " of instance " + id
-			}
-		}
+	r := h.reservationsLocked(func(tid string) *templates.Template { return byID[tid] }, t.ID)
+	if c, who := r.match(nameClaims(t.NamesFor(t.ID))); who != "" {
+		kind, name, _ := strings.Cut(c, "\x00")
+		return kind + " " + name + " of " + who
 	}
 	return ""
 }

@@ -37,13 +37,6 @@ func SyncFiles(t *Template, root string) error {
 		return err
 	}
 	dest := filepath.Join(root, id)
-	// Sibling instances share dest and may be running from it: leave it
-	// alone when it already holds exactly the template's files.
-	if src, err := treeHash(t.Path); err == nil {
-		if cur, err := treeHash(dest); err == nil && cur == src {
-			return nil
-		}
-	}
 	stage, err := os.MkdirTemp(root, "."+id+".stage-*")
 	if err != nil {
 		return err
@@ -98,6 +91,61 @@ func SyncFiles(t *Template, root string) error {
 		return err
 	}
 	return os.RemoveAll(old)
+}
+
+// SyncFilesIfChanged is SyncFiles for a dest sibling instances may be
+// running from: it leaves dest alone only if the template's tree hash
+// equals published (the hash the caller recorded, outside dest, when it
+// last published this template) and dest still holds exactly that: a
+// real directory (not a symlink) with no symlinks, special files or .git
+// entries, and the same tree hash. dest is writable by others, so nothing
+// in it is trusted on its own. Returns the hash to record.
+func SyncFilesIfChanged(t *Template, root, published string) (string, error) {
+	src, err := treeHash(t.Path)
+	if err != nil {
+		return "", err
+	}
+	id := t.TemplateID
+	if id == "" {
+		id = t.ID
+	}
+	if published != "" && src == published && ValidID(id) {
+		dest := filepath.Join(root, id)
+		if plainTree(dest) {
+			if cur, err := treeHash(dest); err == nil && cur == src {
+				return src, nil
+			}
+		}
+	}
+	if err := SyncFiles(t, root); err != nil {
+		return "", err
+	}
+	return src, nil
+}
+
+// plainTree reports whether dir is a real directory holding only
+// directories and regular files, none named .git.
+func plainTree(dir string) bool {
+	fi, err := os.Lstat(dir)
+	if err != nil || !fi.IsDir() {
+		return false
+	}
+	ok := true
+	err = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if path != dir && d.Name() == ".git" {
+			ok = false
+			return filepath.SkipAll
+		}
+		if !d.IsDir() && !d.Type().IsRegular() {
+			ok = false
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	return ok && err == nil
 }
 
 // treeHash hashes what SyncFiles copies of dir: every directory and

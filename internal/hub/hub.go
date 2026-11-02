@@ -93,6 +93,10 @@ type Hub struct {
 	// syncMu: per template id, a *sync.Mutex around its support-file sync
 	// (shared by all its instances).
 	syncMu sync.Map
+	// syncHashes: template dir → tree hash last published there
+	// (<data>/template-sync.json); guarded by syncHashMu.
+	syncHashMu sync.Mutex
+	syncHashes map[string]string
 	// lockPoll is how often a queued restart retries the app lock.
 	lockPoll time.Duration
 
@@ -159,6 +163,7 @@ func New(cfg Config, runner compose.Runner, engine Engine, idp IdP) (*Hub, error
 	}
 	h.st = st
 	h.loadOps()
+	h.loadSyncHashes()
 	return h, nil
 }
 

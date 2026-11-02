@@ -2,6 +2,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -95,7 +96,44 @@ func (h *Hub) syncTemplateFiles(t *templates.Template) error {
 	mu := m.(*sync.Mutex)
 	mu.Lock()
 	defer mu.Unlock()
-	return templates.SyncFiles(t, h.templatesRoot())
+	dir := templateDir(t)
+	h.syncHashMu.Lock()
+	last := h.syncHashes[dir]
+	h.syncHashMu.Unlock()
+	sum, err := templates.SyncFilesIfChanged(t, h.templatesRoot(), last)
+	if err != nil {
+		return err
+	}
+	if sum != last {
+		h.recordSyncHash(dir, sum)
+	}
+	return nil
+}
+
+func (h *Hub) syncHashPath() string { return filepath.Join(h.cfg.DataDir, "template-sync.json") }
+
+// loadSyncHashes reads the tree hashes the Hub last published per template
+// dir (kept in its data dir: <core>/templates is writable by others).
+// Unreadable = none known: every template is re-synced once.
+func (h *Hub) loadSyncHashes() {
+	h.syncHashes = map[string]string{}
+	if data, err := os.ReadFile(h.syncHashPath()); err == nil {
+		if err := json.Unmarshal(data, &h.syncHashes); err != nil {
+			log.Printf("template sync record unreadable (%v): re-syncing every template", err)
+			h.syncHashes = map[string]string{}
+		}
+	}
+}
+
+func (h *Hub) recordSyncHash(dir, sum string) {
+	h.syncHashMu.Lock()
+	defer h.syncHashMu.Unlock()
+	h.syncHashes[dir] = sum
+	data, _ := json.MarshalIndent(h.syncHashes, "", "  ")
+	if err := fsutil.WriteFileAtomic(h.syncHashPath(), data, 0600); err != nil {
+		// Only costs a re-sync next time.
+		log.Printf("template sync record: %v", err)
+	}
 }
 
 func (h *Hub) composeDown(t *templates.Template) error {

@@ -65,3 +65,83 @@ func TestSyncFiles(t *testing.T) {
 		t.Error("invalid id accepted")
 	}
 }
+
+func TestSyncFilesIfChanged(t *testing.T) {
+	root := t.TempDir()
+	src := filepath.Join(root, "src", "app")
+	os.MkdirAll(filepath.Join(src, "conf"), 0755)
+	os.WriteFile(filepath.Join(src, "conf", "a.ini"), []byte("a\n"), 0644)
+	out := filepath.Join(root, "out")
+	dest := filepath.Join(out, "app")
+	tpl := &Template{ID: "app-b", TemplateID: "app", Path: src}
+
+	sum, err := SyncFilesIfChanged(tpl, out, "")
+	if err != nil || sum == "" {
+		t.Fatalf("first sync: %q %v", sum, err)
+	}
+	stat := func() os.FileInfo {
+		fi, err := os.Lstat(dest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return fi
+	}
+	same := func(want bool, what string) {
+		t.Helper()
+		before := stat()
+		got, err := SyncFilesIfChanged(tpl, out, sum)
+		if err != nil || got != sum {
+			t.Fatalf("%s: %q %v", what, got, err)
+		}
+		if os.SameFile(before, stat()) != want {
+			t.Errorf("%s: swapped = %v, want %v", what, !want, want)
+		}
+		if b, err := os.ReadFile(filepath.Join(dest, "conf", "a.ini")); err != nil || string(b) != "a\n" {
+			t.Errorf("%s: content %q %v", what, b, err)
+		}
+		if fi, err := os.Lstat(dest); err != nil || !fi.IsDir() {
+			t.Errorf("%s: dest is not a real directory", what)
+		}
+	}
+	same(true, "unchanged")
+
+	// The recorded hash comes from the caller, never from dest.
+	before := stat()
+	if _, err := SyncFilesIfChanged(tpl, out, "stale"); err != nil {
+		t.Fatal(err)
+	}
+	if os.SameFile(before, stat()) {
+		t.Error("an identical dest was trusted without a matching recorded hash")
+	}
+	// A planted symlink forces a re-sync (and is gone afterwards).
+	os.Symlink("/etc/passwd", filepath.Join(dest, "conf", "evil"))
+	same(false, "symlink in dest")
+	if _, err := os.Lstat(filepath.Join(dest, "conf", "evil")); err == nil {
+		t.Error("planted symlink survived")
+	}
+	// An edited file with an unchanged source.
+	os.WriteFile(filepath.Join(dest, "conf", "a.ini"), []byte("evil\n"), 0644)
+	same(false, "edited file")
+	// A .git entry.
+	os.MkdirAll(filepath.Join(dest, ".git"), 0755)
+	same(false, ".git in dest")
+	// dest replaced by a symlink to a directory holding the same files.
+	elsewhere := filepath.Join(root, "elsewhere")
+	os.MkdirAll(filepath.Join(elsewhere, "conf"), 0755)
+	os.WriteFile(filepath.Join(elsewhere, "conf", "a.ini"), []byte("a\n"), 0644)
+	os.RemoveAll(dest)
+	os.Symlink(elsewhere, dest)
+	same(false, "dest is a symlink")
+	if _, err := os.Stat(filepath.Join(elsewhere, "conf", "a.ini")); err != nil {
+		t.Errorf("the symlink's target was touched: %v", err)
+	}
+	// A changed source re-syncs and returns the new hash.
+	os.WriteFile(filepath.Join(src, "conf", "a.ini"), []byte("b\n"), 0644)
+	got, err := SyncFilesIfChanged(tpl, out, sum)
+	if err != nil || got == sum {
+		t.Fatalf("changed source: %q %v", got, err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dest, "conf", "a.ini")); string(b) != "b\n" {
+		t.Errorf("content = %q", b)
+	}
+}
