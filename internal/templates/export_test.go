@@ -14,3 +14,10 @@ const (
 	HdrHead    = hdrHead
 	HdrCompose = hdrCompose
 )
+
+// SetInTest overrides the test-binary check (restore with the returned func).
+func SetInTest(f func() bool) (restore func()) {
+	old := inTest
+	inTest = f
+	return func() { inTest = old }
+}

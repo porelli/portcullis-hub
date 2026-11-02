@@ -216,3 +216,53 @@ func TestScalarCheckOption(t *testing.T) {
 		wantErr(t, NewRegistry().CheckOption(opt(t, s)), part)
 	}
 }
+
+// Fix round 1: formats accept only their declared form.
+func TestFormatsStrict(t *testing.T) {
+	cases := map[string]struct{ good, bad []string }{
+		"url": {
+			good: []string{"https://x", "http://app.example.com:8080/a/b?c=d", "https://x:1", "https://x:65535/"},
+			bad: []string{"https://x/a b", "https://x:99999", "https://x:0", "https://x:abc", "javascript://x",
+				"mqtt://broker", "ftp://x", "https://x/‮", "https://x/é", "https://", "//x", "HTTPS://x"},
+		},
+		"cidr": {
+			good: []string{"10.0.0.0/8", "192.168.1.0/24", "fd00::/8", "10.0.0.1/32"},
+			bad:  []string{"10.0.0.1/8", "fd00::1/8"},
+		},
+		"cron": {
+			good: []string{"*/5 * * * *", "@hourly", "0 3 * * 1-5"},
+			bad:  []string{"*/5  * * * *", " */5 * * * *", "*/5 * * * * ", "*/5\t* * * *"},
+		},
+		"iana_tz": {
+			good: []string{"Europe/Rome", "UTC", "America/Argentina/Buenos_Aires"},
+			bad:  []string{"Local", "", "../etc/passwd", "Europe/Rome/", "/Europe/Rome"},
+		},
+	}
+	for f, c := range cases {
+		o := opt(t, "type: string\nformat: "+f+"\n")
+		for _, s := range c.good {
+			if _, err := NewRegistry().Parse(o, s); err != nil {
+				t.Errorf("%s: %q refused: %v", f, s, err)
+			}
+		}
+		for _, s := range c.bad {
+			if _, err := NewRegistry().Parse(o, s); err == nil {
+				t.Errorf("%s: %q accepted", f, s)
+			}
+		}
+	}
+}
+
+// Fix round 1: every Unicode control character, the line / paragraph
+// separators and the bidi embedding / override / isolate characters are
+// refused.
+func TestControlCharsUnicode(t *testing.T) {
+	o := opt(t, "type: string\n")
+	for _, r := range []rune{0x00, 0x09, 0x0a, 0x1f, 0x7f, 0x80, 0x85, 0x9f, 0x2028, 0x2029,
+		0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x2066, 0x2067, 0x2068, 0x2069} {
+		refused(t, o, "a"+string(r)+"b", "control")
+	}
+	for _, s := range []string{"café", "日本", "a‍b"} {
+		mustParse(t, o, s)
+	}
+}

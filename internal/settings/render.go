@@ -150,8 +150,8 @@ func checkRender(o *templates.Option, r *templates.Render) error {
 		if !collection {
 			return fmt.Errorf("join is for list, multi_enum, groups and users options (and person_entered collections)")
 		}
-		if hasControl(*r.Join) {
-			return fmt.Errorf("join can't contain newlines or control characters")
+		if *r.Join == "" || hasControl(*r.Join) {
+			return fmt.Errorf("join must be a non-empty separator without newlines or control characters")
 		}
 		if r.Format != "" {
 			return fmt.Errorf("join and format exclude each other")
@@ -176,8 +176,8 @@ func Render(o *templates.Option, v Value, rd *templates.Render) (Rendered, error
 	if rd == nil {
 		rd = &templates.Render{}
 	}
-	if rd.Join != nil && hasControl(*rd.Join) {
-		return Rendered{}, fmt.Errorf("join can't contain a newline or control characters")
+	if rd.Join != nil && (*rd.Join == "" || hasControl(*rd.Join)) {
+		return Rendered{}, fmt.Errorf("join must be a non-empty separator without a newline or control characters")
 	}
 	var out Rendered
 	var err error

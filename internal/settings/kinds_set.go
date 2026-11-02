@@ -374,7 +374,14 @@ func (k nameKind) one(raw any) (string, error) {
 		if strings.Contains(s, "@") {
 			return "", fmt.Errorf("%q: want a username, not an email address", s)
 		}
-		// LLDAP user ids are lowercase.
+		// ASCII first: Unicode case folding maps K (Kelvin) to k and ſ
+		// to s, so a fold could alias another account. LLDAP user ids are
+		// lowercase.
+		for i := 0; i < len(s); i++ {
+			if s[i] >= 0x80 {
+				return "", fmt.Errorf("%q is not a valid username (ASCII only)", s)
+			}
+		}
 		u := strings.ToLower(s)
 		if !lldap.ValidUsername(u) {
 			return "", fmt.Errorf("%q is not a valid username", s)

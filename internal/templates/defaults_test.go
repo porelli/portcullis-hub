@@ -1,6 +1,7 @@
 package templates_test
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -48,5 +49,18 @@ func TestDefaultsCanonical(t *testing.T) {
 	// A type the registry reserves is refused through Discover's path too.
 	if err := build("{key: f, label: F, type: folder}"); err == nil || !strings.Contains(err.Error(), "shared folders (project 2)") {
 		t.Errorf("folder: %v", err)
+	}
+}
+
+// Fix round 1: outside a test binary a nil Kinds fails closed.
+func TestNilKindsRefusedInProduction(t *testing.T) {
+	restore := templates.SetInTest(func() bool { return false })
+	defer restore()
+	_, err := templates.BuildForTest("app", "src", "", manifestWith("{key: quota, label: Q, type: size, default: 500GiB, delivery: [{env: THEME}]}"), []byte(templates.HdrCompose), "example.org", nil)
+	if !errors.Is(err, templates.ErrNoKinds) {
+		t.Errorf("nil Kinds in production: %v", err)
+	}
+	if _, err := templates.BuildForTest("app", "src", "", manifestWith("{key: quota, label: Q, type: size, default: 500GiB, delivery: [{env: THEME}]}"), []byte(templates.HdrCompose), "example.org", settings.NewRegistry()); err != nil {
+		t.Errorf("with the registry: %v", err)
 	}
 }

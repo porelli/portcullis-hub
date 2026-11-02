@@ -12,8 +12,9 @@ import (
 
 // Discover loads every valid template directly under dir. Invalid templates
 // are logged and skipped. {{DOMAIN}} in app URLs is replaced by domain.
-// kinds is the Hub's settings type registry (settings.Registry); nil =
-// BuiltinTypes without type-specific checks (tests only).
+// kinds is the Hub's settings type registry (settings.Registry); nil is
+// allowed only in test binaries (otherwise every template with settings
+// is refused, ErrNoKinds).
 func Discover(dir, source, domain string, kinds Kinds) []Template {
 	entries, err := os.ReadDir(dir)
 	if err != nil {

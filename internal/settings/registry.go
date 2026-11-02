@@ -225,6 +225,9 @@ func onlyFields(o *templates.Option, allowed ...string) error {
 	return nil
 }
 
+// maxID bounds a writes_as uid / gid.
+const maxID = 1<<31 - 1
+
 // ResolveOwner resolves a path option's writes_as against the instance's
 // values: numbers as written, option references through their value (an
 // int, or a string holding a decimal number).
@@ -234,8 +237,8 @@ func ResolveOwner(o *templates.Option, instance map[string]Value) (uid, gid int,
 	}
 	one := func(what string, ref templates.OwnerRef) (int, error) {
 		if ref.Num != nil {
-			if *ref.Num < 0 {
-				return 0, fmt.Errorf("writes_as.%s must be non-negative", what)
+			if *ref.Num < 0 || *ref.Num > maxID {
+				return 0, fmt.Errorf("writes_as.%s = %d is not a valid id (0-%d)", what, *ref.Num, maxID)
 			}
 			return *ref.Num, nil
 		}
@@ -254,7 +257,7 @@ func ResolveOwner(o *templates.Option, instance map[string]Value) (uid, gid int,
 				return 0, fmt.Errorf("writes_as.%s: %s is not a number", what, ref.Key)
 			}
 		}
-		if n < 0 || n > 1<<31-1 {
+		if n < 0 || n > maxID {
 			return 0, fmt.Errorf("writes_as.%s: %s = %d is not a valid id", what, ref.Key, n)
 		}
 		return int(n), nil

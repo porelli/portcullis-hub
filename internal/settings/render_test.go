@@ -148,15 +148,16 @@ func TestRenderRefusesNewlinesAndOversize(t *testing.T) {
 
 func TestCheckOptionRenders(t *testing.T) {
 	bad := map[string]string{
-		"type: size\ndelivery: [{env: Q, render: {unit: days}}]\n":                       "unit",
-		"type: size\nallow_unlimited: true\ndelivery: [{env: Q, render: {unit: GiB}}]\n": "unlimited",
-		"type: size\ndelivery: [{env: Q, render: {unlimited: \"-1\"}}]\n":                "unlimited",
-		"type: int\nunit: days\ndelivery: [{env: Q, render: {unit: GiB}}]\n":             "unit",
-		"type: string\ndelivery: [{env: Q, render: {true: \"y\"}}]\n":                    "true",
-		"type: string\ndelivery: [{env: Q, render: {join: \"+\"}}]\n":                    "join",
-		"type: string\ndelivery: [{env: Q, render: {format: xml}}]\n":                    "format",
-		"type: duration\ndelivery: [{env: Q, render: {unit: GiB}}]\n":                    "unit",
-		"type: bool\ndelivery: [{env: Q, render: {integer: true}}]\n":                    "integer",
+		"type: size\ndelivery: [{env: Q, render: {unit: days}}]\n":                        "unit",
+		"type: size\nallow_unlimited: true\ndelivery: [{env: Q, render: {unit: GiB}}]\n":  "unlimited",
+		"type: size\ndelivery: [{env: Q, render: {unlimited: \"-1\"}}]\n":                 "unlimited",
+		"type: int\nunit: days\ndelivery: [{env: Q, render: {unit: GiB}}]\n":              "unit",
+		"type: string\ndelivery: [{env: Q, render: {true: \"y\"}}]\n":                     "true",
+		"type: string\ndelivery: [{env: Q, render: {join: \"+\"}}]\n":                     "join",
+		"type: string\ndelivery: [{env: Q, render: {format: xml}}]\n":                     "format",
+		"type: duration\ndelivery: [{env: Q, render: {unit: GiB}}]\n":                     "unit",
+		"type: bool\ndelivery: [{env: Q, render: {integer: true}}]\n":                     "integer",
+		"type: list\nitems: {type: string}\ndelivery: [{env: Q, render: {join: \"\"}}]\n": "join",
 	}
 	for s, part := range bad {
 		wantErr(t, NewRegistry().CheckOption(opt(t, s)), part)

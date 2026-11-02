@@ -5,6 +5,7 @@ import (
 	"net"
 	"regexp"
 	"strings"
+	"unicode"
 )
 
 var (
@@ -23,16 +24,20 @@ var (
 // ValidID reports whether s is an acceptable template / source identifier.
 func ValidID(s string) bool { return IDRe.MatchString(s) }
 
-// HasControlChars reports whether s contains newlines or other control
-// characters — such values would inject extra lines into .env / YAML files.
-func HasControlChars(s string) bool {
-	for _, r := range s {
-		if r < 0x20 || r == 0x7f {
-			return true
-		}
-	}
-	return false
+// IsControlRune reports whether r is a control character in the Hub's
+// sense: every Unicode Cc (C0, DEL, C1 — NEL included), the line and
+// paragraph separators U+2028 / U+2029, and the bidi embedding, override
+// and isolate characters U+202A–U+202E, U+2066–U+2069 (they reorder what
+// an admin reads in the panel, logs and files).
+func IsControlRune(r rune) bool {
+	return unicode.IsControl(r) || r == 0x2028 || r == 0x2029 ||
+		(r >= 0x202a && r <= 0x202e) || (r >= 0x2066 && r <= 0x2069)
 }
+
+// HasControlChars reports whether s contains newlines or other control
+// characters (IsControlRune) — such values would inject extra lines into
+// .env / YAML files.
+func HasControlChars(s string) bool { return strings.ContainsFunc(s, IsControlRune) }
 
 // ValidateManifest rejects manifests whose keys/values would be unsafe to
 // splice into .env files, compose overrides, the group-gate policy file or

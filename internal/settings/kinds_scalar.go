@@ -97,10 +97,9 @@ func cmpInt(a, b int64) int {
 	return 0
 }
 
-// hasControl: C0 controls and DEL (every newline form included).
-func hasControl(s string) bool {
-	return strings.ContainsFunc(s, func(r rune) bool { return r < 0x20 || r == 0x7f || r == 0x85 || r == 0x2028 || r == 0x2029 })
-}
+// hasControl: templates.IsControlRune (Unicode Cc, U+2028/9, bidi
+// controls) — one definition for manifests and values.
+func hasControl(s string) bool { return templates.HasControlChars(s) }
 
 // checkText is the rule every string value follows: valid UTF-8, no
 // control characters.

@@ -110,3 +110,18 @@ func TestResolveOwner(t *testing.T) {
 		t.Error("no writes_as must be an error")
 	}
 }
+
+// Fix round 1: numeric writes_as ids are capped like option references.
+func TestResolveOwnerNumericCap(t *testing.T) {
+	big := 1 << 31
+	o := opt(t, pathOpt)
+	o.WritesAs = &templates.Owner{UID: templates.OwnerRef{Num: &big}, GID: templates.OwnerRef{Num: &big}}
+	if _, _, err := ResolveOwner(o, nil); err == nil {
+		t.Error("uid 2^31 accepted")
+	}
+	max := 1<<31 - 1
+	o.WritesAs = &templates.Owner{UID: templates.OwnerRef{Num: &max}, GID: templates.OwnerRef{Num: &max}}
+	if uid, _, err := ResolveOwner(o, nil); err != nil || uid != max {
+		t.Errorf("uid 2^31-1: %d, %v", uid, err)
+	}
+}

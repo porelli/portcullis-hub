@@ -130,3 +130,13 @@ func TestUserGroupNames(t *testing.T) {
 		t.Errorf("Display = %q", got)
 	}
 }
+
+// Fix round 1: a username is ASCII before it is lowercased (the Kelvin
+// sign K lowercases to k).
+func TestUserASCIIBeforeFold(t *testing.T) {
+	u := opt(t, "type: user\n")
+	for _, s := range []string{"Kelvin", "alİce", "bobſ"} {
+		refused(t, u, s, "username")
+	}
+	refused(t, opt(t, "type: users\n"), []any{"Kelvin"}, "username")
+}

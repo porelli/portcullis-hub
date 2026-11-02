@@ -3,12 +3,14 @@ package templates
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+	"testing"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -628,21 +630,32 @@ type Kinds interface {
 // builtinKinds knows BuiltinTypes and checks nothing type-specific.
 type builtinKinds struct{}
 
-// nilKinds is what a nil Kinds means. The package's tests set it to the
-// real settings registry (export_test.go), so every fixture also passes
-// the type-specific checks.
+// nilKinds is what a nil Kinds means — in a test binary only. The
+// package's tests set it to the real settings registry (export_test.go),
+// so every fixture also passes the type-specific checks.
 var nilKinds Kinds = builtinKinds{}
+
+// inTest reports whether this is a test binary (a variable so the
+// production refusal can be tested).
+var inTest = testing.Testing
+
+// ErrNoKinds: a nil Kinds outside tests (fail closed: the type-specific
+// checks would be skipped).
+var ErrNoKinds = errors.New("settings: no type registry (templates.Kinds is nil)")
 
 func (builtinKinds) Known(typ string) bool     { return BuiltinTypes[typ] }
 func (builtinKinds) CheckOption(*Option) error { return nil }
 
 // ValidateSettingsSpec checks t's settings, files, hooks and reload
 // against its manifest, compose file and routes (contract §13). kinds is
-// the Hub's type registry (settings.Registry; nil = BuiltinTypes without
-// type-specific checks); a reserved type or field is refused with "<what>
+// the Hub's type registry (settings.Registry); nil is refused outside
+// test binaries (ErrNoKinds); a reserved type or field is refused with "<what>
 // needs <feature>", an unknown type as such.
 func ValidateSettingsSpec(t *Template, compose []byte, routes *Routes, kinds Kinds) error {
 	if kinds == nil {
+		if !inTest() {
+			return ErrNoKinds
+		}
 		kinds = nilKinds
 	}
 	m := &t.Manifest
@@ -1090,7 +1103,7 @@ func (v *specCheck) option(o *Option) error {
 	if o.Label == "" || len(o.Label) > 64 || HasControlChars(o.Label) {
 		return fmt.Errorf("label must be a single non-empty line of at most 64 characters")
 	}
-	if len(o.Description) > 500 || strings.ContainsFunc(o.Description, func(r rune) bool { return (r < 0x20 && r != '\n') || r == 0x7f }) {
+	if len(o.Description) > 500 || strings.ContainsFunc(o.Description, func(r rune) bool { return r != '\n' && IsControlRune(r) }) {
 		return fmt.Errorf("description must be at most 500 characters, without control characters")
 	}
 	if o.Section != "" && !contains(v.m.Settings.Sections, o.Section) {
