@@ -250,6 +250,19 @@ func (h *Hub) Enable(instanceID string) error // and Disable, RestartApp keyed b
 - [ ] **Step 2:** implement. Steps 3–4: verify and commit
   `hub: instance hostnames (defaults, collisions, live change)`.
 
+### Task 4b: Group enforcement for native-OIDC apps without app-side groups (security review 2026-11-02)
+
+**Why:** templates with `auth.method: native-oidc` and `group_access: false` (netbird, actual-budget, others — grep the manifests) let ANY Portcullis user sign in. With several instances that breaks "fully separate" (team B can open team A's instance).
+
+**Files:** `internal/keycloak` (per-client access role + authentication-flow binding), `internal/hub/lifecycle.go` (create/update/delete with the instance), contract §8 (docs), templates: the affected manifests declare `group_access: true` once the Hub enforces it, tests.
+
+- [ ] **Step 1: Tests (kctest).**
+  - `TestClientAccessRoleEnforced`: the instance's client gets a client role `access`. The instance's access group gets that role. The client's browser flow override is a Hub-managed flow `portcullis-client-access` that denies sign-in without the role, and also denies at token refresh.
+  - The role and group mapping are removed on instance delete.
+  - Idempotent across reconciles.
+- [ ] **Step 2:** implement with gocloak. Use Keycloak's built-in "Condition - user role" plus "Deny access" authenticators in a flow the Hub creates once. Raw calls only where gocloak lacks an endpoint. Then flip `group_access: true` on the affected templates (templates repo, local commit alongside Task 2).
+- [ ] **Step 3:** verify, then commit `keycloak: per-instance access role for native-oidc apps without app-side groups`.
+
 ### Task 5: Policy file v5 (Hub side)
 
 **Files:** `internal/policy/file.go`, `internal/hub/hub.go` (WritePolicy),
