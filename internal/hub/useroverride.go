@@ -249,20 +249,7 @@ func (h *Hub) parseUserOverride(t *templates.Template, data []byte) (*parsedOver
 
 // checkTags refuses YAML tags (compose's !reset / !override can remove
 // what the template set, e.g. its labels or networks).
-func checkTags(n *yaml.Node) error {
-	if n.Tag != "" && strings.HasPrefix(n.Tag, "!") && !strings.HasPrefix(n.Tag, "!!") {
-		return fmt.Errorf("line %d: YAML tag %s is not allowed (!reset / !override could strip the template's labels or networks)", n.Line, n.Tag)
-	}
-	if n.Style&yaml.TaggedStyle != 0 && !strings.HasPrefix(n.Tag, "!!") {
-		return fmt.Errorf("line %d: YAML tag %s is not allowed", n.Line, n.Tag)
-	}
-	for _, c := range n.Content {
-		if err := checkTags(c); err != nil {
-			return err
-		}
-	}
-	return nil
-}
+func checkTags(n *yaml.Node) error { return templates.CheckTags(n) }
 
 // checkNoInterpolation refuses any unescaped "$" in a key or value: compose
 // interpolates ${VAR} everywhere, so "${T}raefik.enable" would pass the
@@ -402,9 +389,11 @@ func checkOverrideLabels(v interface{}) error {
 		return fmt.Errorf("labels must be a mapping or a list")
 	}
 	for _, k := range keys {
-		lk := strings.ToLower(strings.TrimSpace(k))
+		// Folded like Traefik's (and compose's) case-insensitive matching:
+		// "traefiK" with a Kelvin sign is still traefik.
+		lk := templates.FoldKey(strings.TrimSpace(k))
 		switch {
-		case strings.HasPrefix(lk, "traefik."):
+		case strings.HasPrefix(lk, "traefik"):
 			return fmt.Errorf("label %s is not allowed: Traefik routing, middlewares and TLS options come from the template and the Hub (group-gate depends on them)", k)
 		case strings.HasPrefix(lk, "com.docker.compose."):
 			return fmt.Errorf("label %s is not allowed: the Hub identifies the app's containers by these", k)

@@ -1,6 +1,7 @@
 package templates
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -162,6 +163,88 @@ func TestCheckCoreRefsBypasses(t *testing.T) {
 	for _, c := range ok {
 		if err := checkCoreRefs([]byte(c), hv); err != nil {
 			t.Errorf("refused %q: %v", c, err)
+		}
+	}
+}
+
+// unicodeBypasses: label keys Traefik's case-insensitive (EqualFold)
+// decoder reads as routers / middlewares / TLS settings, and other key
+// shapes the Hub doesn't understand.
+var unicodeBypasses = map[string]string{
+	"routerſ":           "traefik.http.routerſ.evil.rule: Host(`auth.example.org`)",
+	"middlewareſ":       "traefik.http.routers.app.middlewareſ: security-headers@file",
+	"tlſ.options":       "traefik.http.routers.app.tlſ.options: public@file",
+	"ſervices":          "traefik.http.ſervices.app.loadbalancer.server.port: \"80\"",
+	"tcp routerſ":       "traefik.tcp.routerſ.evil.rule: HostSNI(`*`)",
+	"kelvin traefik":    "traefiK.http.routers.evil.rule: Host(`auth.example.org`)",
+	"unknown kind":      "traefik.http.routerz.evil.rule: Host(`a.b`)",
+	"unknown attribute": "traefik.http.routers.app.foo: bar",
+	"udp rule":          "traefik.udp.routers.u.rule: x",
+	"short key":         "traefik.http.routers: x",
+}
+
+func TestCheckCoreRefsUnicodeFolding(t *testing.T) {
+	base := "services:\n  web:\n    image: x\n    labels:\n      traefik.enable: \"true\"\n      traefik.http.routers.app.rule: Host(`${PORTCULLIS_HOST_APP:-app.portcullis.local}`)\n"
+	hv := map[string]string{"app": "PORTCULLIS_HOST_APP"}
+	if err := checkCoreRefs([]byte(base), hv); err != nil {
+		t.Fatalf("control refused: %v", err)
+	}
+	for what, line := range unicodeBypasses {
+		if err := checkCoreRefs([]byte(base+"      "+line+"\n"), hv); err == nil {
+			t.Errorf("%s: accepted", what)
+		}
+	}
+	// Folding before the reserved-name check (values).
+	if err := checkCoreRefs([]byte(base+"      traefik.http.routers.app.middlewares: portculliſ-auth-ext@docker\n"), hv); err == nil {
+		t.Error("a folded reserved name was accepted")
+	}
+	// Compose tags.
+	for _, c := range []string{
+		"services:\n  web:\n    labels: !reset {}\n",
+		"services:\n  web:\n    networks: !override [portcullis-proxy]\n",
+		"services:\n  web: !custom\n    image: x\n",
+	} {
+		if err := checkCoreRefs([]byte(c), hv); err == nil {
+			t.Errorf("%q: tag accepted", c)
+		}
+	}
+	if FoldKey("traefiK.http.routerſ") != "traefik.http.routers" {
+		t.Errorf("FoldKey = %q", FoldKey("traefiK.http.routerſ"))
+	}
+}
+
+// TestDiscoverRefusesBypasses: end to end, Discover loads none of the
+// bypass forms (control template loads).
+func TestDiscoverRefusesBypasses(t *testing.T) {
+	dir := t.TempDir()
+	manifest := "name: App\ncategory: test\nicon: x\nauth:\n  method: forward-auth\n"
+	compose := func(extra string) string {
+		return "services:\n  web:\n    image: x\n    networks: [portcullis-proxy]\n    labels:\n      traefik.enable: \"true\"\n" +
+			"      traefik.http.routers.app.rule: Host(`app.${PORTCULLIS_DOMAIN}`)\n" +
+			"      traefik.http.routers.app.middlewares: portcullis-auth@docker,portcullis-groups@docker\n" + extra +
+			"networks:\n  portcullis-proxy:\n    external: true\n"
+	}
+	writeTpl(t, dir, "control", manifest, compose(""))
+	i := 0
+	ids := map[string]string{}
+	for what, line := range unicodeBypasses {
+		id := fmt.Sprintf("bypass%d", i)
+		i++
+		ids[id] = what
+		writeTpl(t, dir, id, manifest, compose("      "+line+"\n"))
+	}
+	writeTpl(t, dir, "tagged", manifest, strings.Replace(compose(""), "    labels:\n", "    labels: !override\n", 1))
+	ids["tagged"] = "!override tag"
+	loaded := map[string]bool{}
+	for _, tp := range Discover(dir, "local", "example.org") {
+		loaded[tp.ID] = true
+	}
+	if !loaded["control"] {
+		t.Fatal("the control template didn't load")
+	}
+	for id, what := range ids {
+		if loaded[id] {
+			t.Errorf("%s (%s) loaded", id, what)
 		}
 	}
 }

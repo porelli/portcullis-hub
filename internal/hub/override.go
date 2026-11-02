@@ -367,6 +367,8 @@ func expandComposeValue(v, domain string, instanceEnv map[string]string) string 
 // a router's tls.options, anything of its public router / middleware and,
 // for apps whose sign-in the Hub sets (mw), every router's middlewares.
 func exposureLabel(id, k string, mw bool) bool {
+	// Folded like Traefik's decoder, so an odd-cased key counts too.
+	k = templates.FoldKey(k)
 	return strings.HasPrefix(k, "traefik.http.routers."+PublicRouterName(id)+".") ||
 		(mw && strings.HasPrefix(k, "traefik.http.routers.") && strings.HasSuffix(k, ".middlewares")) ||
 		strings.HasPrefix(k, "traefik.http.middlewares."+PublicStripMiddleware(id)+".") ||

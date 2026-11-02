@@ -174,7 +174,9 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 			routed[id] = map[string]bool{}
 		}
 		for k, v := range c.Labels {
-			if !strings.HasPrefix(k, "traefik.http.routers.") || !strings.HasSuffix(k, ".rule") {
+			// Folded like Traefik's decoder (case-insensitive, ſ → s): a
+			// container's rule is a rule whatever the key's case.
+			if fk := templates.FoldKey(k); !strings.HasPrefix(fk, "traefik.http.routers.") || !strings.HasSuffix(fk, ".rule") {
 				continue
 			}
 			hosts, unparsed := templates.RuntimeHosts(v)

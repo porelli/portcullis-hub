@@ -122,6 +122,10 @@ func TestDenyWithoutConfig(t *testing.T) {
 	ghost.Labels["traefik.http.routers.core.rule"] = "Host(`auth.example.org`)" // core: never published
 	orphan := container("o1", "portcullis-stray", "web", "running")
 	orphan.Labels["traefik.http.routers.stray.rule"] = "HostRegexp(`.+`) || Host(`stray.example.org`)"
+	// Keys Traefik's case-insensitive decoder reads as router rules (ſ
+	// folds to s, Kelvin to k, any case): their hosts are denied too.
+	orphan.Labels["traefik.http.routerſ.hidden.rule"] = "Host(`hidden.example.org`)"
+	orphan.Labels["Traefik.HTTP.Routers.upper.Rule"] = "Host(`upper.example.org`)"
 	// A running-but-not-enabled container that shares a live app's
 	// subdomain must not lock that app out.
 	shadow := container("s1", "portcullis-shadow", "web", "running")
@@ -131,7 +135,7 @@ func TestDenyWithoutConfig(t *testing.T) {
 
 	rep := f.h.Reconcile(context.Background())
 	doc := readPolicy(t, f)
-	for _, sub := range []string{"ghost.example.org", "ghost-api.example.org", "stray.example.org"} {
+	for _, sub := range []string{"ghost.example.org", "ghost-api.example.org", "stray.example.org", "hidden.example.org", "upper.example.org"} {
 		if doc.Groups[sub] != policy.DenyGroup {
 			t.Errorf("groups[%s] = %q, want deny", sub, doc.Groups[sub])
 		}

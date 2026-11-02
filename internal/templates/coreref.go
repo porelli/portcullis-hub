@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
 )
@@ -178,6 +180,13 @@ func hostVarHostname(v string, hostVars map[string]string) error {
 // container_name, hostname, network alias), uses interpolation in any of
 // those, or uses `include` / `extends`.
 func checkCoreRefs(compose []byte, hostVars map[string]string) error {
+	var node yaml.Node
+	if err := yaml.Unmarshal(compose, &node); err != nil {
+		return fmt.Errorf("compose.yml: %w", err)
+	}
+	if err := CheckTags(&node); err != nil {
+		return fmt.Errorf("compose.yml: %w", err)
+	}
 	var raw interface{}
 	if err := yaml.Unmarshal(compose, &raw); err != nil {
 		return fmt.Errorf("compose.yml: %w", err)
@@ -190,7 +199,7 @@ func checkCoreRefs(compose []byte, hostVars map[string]string) error {
 		return fmt.Errorf("compose.yml: top-level include is not allowed (it pulls in files the Hub can't check)")
 	}
 	if err := walkStrings(doc, func(s string) error {
-		low, bare := strings.ToLower(s), strings.ToLower(withoutInterp(s))
+		low, bare := FoldKey(s), FoldKey(withoutInterp(s))
 		for _, r := range reservedRefs {
 			if strings.Contains(low, r) || strings.Contains(bare, r) {
 				return fmt.Errorf("compose.yml references %q: the extra-domain sign-in (forward-auth-ext, portcullis-auth-ext, portcullis-oauth2-*) is rendered by the Hub only", strings.TrimSuffix(r, "-"))
@@ -433,6 +442,13 @@ func checkServiceLabels(svc string, labels interface{}, hostVars map[string]stri
 		return fmt.Errorf("service %s: labels must be a list or a mapping", svc)
 	}
 	for k, v := range pairs {
+		// Label keys are ASCII: Traefik's label decoder matches with
+		// strings.EqualFold, which folds e.g. "ſ" (U+017F) to "s" and the
+		// Kelvin sign to "k", so `routerſ` / `middlewareſ` / `tlſ` would be
+		// Traefik routers / middlewares / TLS settings the Hub never sees.
+		if !isASCII(k) {
+			return fmt.Errorf("service %s: label key %q has non-ASCII characters", svc, k)
+		}
 		// Every label key is a literal (a key like ${X:-traefik}.http… or
 		// traef${E}ik.… would dodge the prefix check below).
 		if err := literal("service "+svc+": label key", k); err != nil {
@@ -441,6 +457,9 @@ func checkServiceLabels(svc string, labels interface{}, hostVars map[string]stri
 		lk := strings.ToLower(strings.TrimSpace(k))
 		if !strings.HasPrefix(lk, "traefik") {
 			continue
+		}
+		if err := checkTraefikKeyShape(svc, k); err != nil {
+			return err
 		}
 		// Traefik label keys as ParseRoutes matches them (Traefik itself is
 		// case-insensitive, so `Traefik.http…`, ` traefik.http…` or a
@@ -484,4 +503,86 @@ func withoutOwnHostVars(v string, hostVars map[string]string) string {
 		}
 		return m
 	})
+}
+
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= utf8.RuneSelf {
+			return false
+		}
+	}
+	return true
+}
+
+// FoldKey lowercases s the way Traefik compares label key segments
+// (strings.EqualFold): every rune whose simple case-folding orbit holds an
+// ASCII letter becomes that letter, lowercased (ſ → s, K (Kelvin) → k).
+func FoldKey(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < utf8.RuneSelf {
+			return unicode.ToLower(r)
+		}
+		for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+			if f < utf8.RuneSelf {
+				return unicode.ToLower(f)
+			}
+		}
+		return r
+	}, s)
+}
+
+// Traefik label kinds and router attributes the Hub understands; any other
+// traefik.* key shape is refused (it could be something Traefik decodes
+// that ParseRoutes and the override never see).
+var (
+	traefikKinds = map[string]map[string]bool{
+		"http": {"routers": true, "services": true, "middlewares": true, "serverstransports": true},
+		"tcp":  {"routers": true, "services": true, "middlewares": true, "serverstransports": true},
+		"udp":  {"routers": true, "services": true},
+	}
+	routerAttrRe = map[string]*regexp.Regexp{
+		"http": regexp.MustCompile(`^(rule|entrypoints|middlewares|service|priority|tls|tls\.options|tls\.certresolver|tls\.domains\[[0-9]+\]\.(main|sans)|observability\.(accesslogs|metrics|tracing))$`),
+		"tcp":  regexp.MustCompile(`^(rule|entrypoints|middlewares|service|priority|tls|tls\.passthrough|tls\.options|tls\.certresolver|tls\.domains\[[0-9]+\]\.(main|sans))$`),
+		"udp":  regexp.MustCompile(`^(entrypoints|service)$`),
+	}
+)
+
+// checkTraefikKeyShape: traefik.enable, traefik.docker.network, or
+// traefik.<http|tcp|udp>.<kind>.<name>.<attr> with an exact kind and, for
+// routers, an allowlisted attribute.
+func checkTraefikKeyShape(svc, k string) error {
+	switch k {
+	case "traefik.enable", "traefik.docker.network":
+		return nil
+	}
+	segs := strings.SplitN(k, ".", 5)
+	if len(segs) < 5 || segs[0] != "traefik" {
+		return fmt.Errorf("service %s: Traefik label %q has an unsupported shape", svc, k)
+	}
+	kinds, ok := traefikKinds[segs[1]]
+	if !ok || !kinds[segs[2]] {
+		return fmt.Errorf("service %s: Traefik label %q: unsupported protocol or kind (http/tcp: routers, services, middlewares, serverstransports; udp: routers, services)", svc, k)
+	}
+	if segs[2] == "routers" && !routerAttrRe[segs[1]].MatchString(segs[4]) {
+		return fmt.Errorf("service %s: Traefik label %q: unsupported router attribute %q", svc, k, segs[4])
+	}
+	return nil
+}
+
+// CheckTags refuses explicit YAML tags other than the core "!!" ones:
+// compose's !reset / !override (and anything custom) could strip or replace
+// what the checks saw.
+func CheckTags(n *yaml.Node) error {
+	if n.Tag != "" && strings.HasPrefix(n.Tag, "!") && !strings.HasPrefix(n.Tag, "!!") {
+		return fmt.Errorf("line %d: YAML tag %s is not allowed (!reset / !override could strip labels or networks)", n.Line, n.Tag)
+	}
+	if n.Style&yaml.TaggedStyle != 0 && !strings.HasPrefix(n.Tag, "!!") {
+		return fmt.Errorf("line %d: YAML tag %s is not allowed", n.Line, n.Tag)
+	}
+	for _, c := range n.Content {
+		if err := CheckTags(c); err != nil {
+			return err
+		}
+	}
+	return nil
 }

@@ -245,3 +245,24 @@ func TestParseBindRoots(t *testing.T) {
 		t.Error("New accepted / as a bind root")
 	}
 }
+
+func TestUserOverrideFoldedTraefikLabel(t *testing.T) {
+	f := newFixture(t)
+	writeFile(t, filepath.Join(f.src, "net2", "manifest.yaml"), "name: Net\nauth:\n  method: forward-auth\n")
+	writeFile(t, filepath.Join(f.src, "net2", "compose.yml"), "services:\n  a:\n    image: x\n    labels:\n      traefik.http.routers.n.rule: Host(`net2.${PORTCULLIS_DOMAIN}`)\n")
+	f.h.Discover()
+	for _, c := range []string{
+		"services:\n  a:\n    labels:\n      traefiK.http.routers.n.middlewares: x\n", // Kelvin sign
+		"services:\n  a:\n    labels:\n      TRAEFIK.http.routers.n.middlewares: x\n",
+	} {
+		if _, _, err := f.h.SaveUserOverride("net2", c); statusOf(err) != 400 {
+			t.Errorf("%q accepted: %v", c, err)
+		}
+	}
+}
+
+func TestExposureLabelFolded(t *testing.T) {
+	if !exposureLabel("x", "traefik.http.routers.a.tlſ.options", false) || !exposureLabel("x", "Traefik.HTTP.Routers.a.Middlewares", true) {
+		t.Fatal("folded exposure keys not recognised")
+	}
+}
