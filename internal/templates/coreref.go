@@ -26,12 +26,9 @@ import (
 // refused outright. compose `include` and service `extends` pull in files
 // the Hub can't see and are refused too.
 
-// coreNetworks are core's networks (compose keys; their Docker names are
-// these or portcullis_<key>). Templates join only portcullis-proxy.
-var coreNetworks = map[string]bool{
-	"portcullis": true, "portcullis-auth": true, "portcullis-certs": true, "portcullis-domains": true,
-	"domains-egress": true, "socket-proxy-traefik": true, "socket-proxy-hub": true, "monitoring": true, "alerting": true,
-}
+// proxyNetwork is the only network a template shares with core (an
+// external placeholder for core's portcullis-proxy).
+const proxyNetwork = "portcullis-proxy"
 
 // reservedRefs may not appear in any key or value of a template's compose
 // file: the Hub renders portcullis-auth-ext and the
@@ -87,11 +84,6 @@ func CoreContainerClash(id string, services []string) string {
 		}
 	}
 	return ""
-}
-
-func isCoreNetwork(name string) bool {
-	n := strings.ToLower(strings.TrimSpace(name))
-	return coreNetworks[n] || coreNetworks[strings.TrimPrefix(n, "portcullis_")]
 }
 
 // SingleDocument refuses YAML with more than one document (empty ones
@@ -222,9 +214,9 @@ func hostVarHostname(v string, hostVars map[string]string) error {
 }
 
 // checkCoreRefs rejects a compose file that references the reserved
-// sign-in names, joins a core network (by name or external name), sets a
-// network_mode other than none / host / service:<own service>, names or
-// externalises networks.default, answers to a reserved DNS name (service
+// sign-in names, names or externalises any network but the portcullis-proxy
+// placeholder (core's, another instance's or a foreign one), sets a
+// network_mode other than none / host / service:<own service>, answers to a reserved DNS name (service
 // name, container_name, hostname, network alias) or to a gate upstream
 // name (-internal) off the default network, uses a core volume, uses
 // interpolation in any of those, or uses `include` / `extends`; plus the
@@ -272,67 +264,34 @@ func checkCoreRefs(compose []byte, hostVars map[string]string) error {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	// shared: external or explicitly named networks (not project-scoped).
+	// Every top-level network is the project's own (compose scopes it to
+	// portcullis-<instance>_<key>) except the portcullis-proxy placeholder:
+	// name: / external: anywhere else would join a core network, another
+	// instance's <project>_default (its ungated backends) or any foreign
+	// network by name. shared: the networks shared with core.
 	shared := map[string]bool{}
 	for _, k := range keys {
 		n, err := asMap(nets[k], "network "+k)
 		if err != nil {
 			return err
 		}
-		if n["name"] != nil || (n["external"] != nil && n["external"] != false) {
-			shared[k] = true
+		_, hasName := n["name"]
+		_, hasExt := n["external"]
+		if !hasName && !hasExt {
+			continue
 		}
-		name, hasName := str(n["name"])
+		if k != proxyNetwork {
+			return fmt.Errorf("network %s: name and external are allowed only on the %s placeholder (external: true) — every other network, default included, stays the project's own", k, proxyNetwork)
+		}
+		if ext, ok := n["external"].(bool); !ok || !ext {
+			return fmt.Errorf("network %s: must be external: true (core creates it; templates only attach)", k)
+		}
 		if hasName {
-			if err := literal("network "+k+": name", name); err != nil {
-				return err
-			}
-			if isCoreNetwork(name) {
-				return fmt.Errorf("network %s is named %s, a core network", k, name)
-			}
-		} else if n["name"] != nil {
-			return fmt.Errorf("network %s: name must be a string", k)
-		}
-		// The project's own default network stays project-scoped: a name or
-		// external mapping would share it (gated backends, -internal
-		// upstream names included) with portcullis-proxy or another
-		// instance's project.
-		if k == "default" {
-			if _, ok := n["name"]; ok {
-				return fmt.Errorf("network default: name is not allowed (the default network stays the project's own)")
-			}
-			if _, ok := n["external"]; ok {
-				return fmt.Errorf("network default: external is not allowed (the default network stays the project's own)")
+			if nm, ok := n["name"].(string); !ok || nm != proxyNetwork {
+				return fmt.Errorf("network %s: name must be %s or absent, not %v", k, proxyNetwork, n["name"])
 			}
 		}
-		ext := false
-		switch v := n["external"].(type) {
-		case bool:
-			ext = v
-		case string:
-			return fmt.Errorf("network %s: external must be true or false, not %q", k, v)
-		case nil:
-		case map[string]interface{}:
-			ext = true
-			en, ok := str(v["name"])
-			if v["name"] != nil && !ok {
-				return fmt.Errorf("network %s: external name must be a string", k)
-			}
-			if err := literal("network "+k+": external name", en); err != nil {
-				return err
-			}
-			if isCoreNetwork(en) {
-				return fmt.Errorf("network %s joins the core network %s", k, en)
-			}
-			if en != "" {
-				hasName = true
-			}
-		default:
-			return fmt.Errorf("network %s: external must be true, false or a mapping", k)
-		}
-		if ext && !hasName && isCoreNetwork(k) {
-			return fmt.Errorf("network %s is a core network (templates join only portcullis-proxy)", k)
-		}
+		shared[k] = true
 	}
 
 	if err := checkCoreVolumes(doc["volumes"]); err != nil {

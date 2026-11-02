@@ -509,6 +509,43 @@ func TestDiscoverRefusesBypasses(t *testing.T) {
 		writeTpl(t, dir, id, manifest, build("web", nil, "", top))
 		ids[id] = top
 	}
+	// Every other top-level network is project-scoped: name / external
+	// only on the portcullis-proxy placeholder.
+	for id, net := range map[string]string{
+		"net-other-default": "  backend:\n    name: portcullis-esphome_default\n",
+		"net-ext-foreign":   "  backend:\n    external: true\n    name: media-net\n",
+		"net-ext-plain":     "  backend:\n    external: true\n",
+		"net-ext-legacy":    "  backend:\n    external:\n      name: portcullis-gitea_default\n",
+		"net-ext-false":     "  backend:\n    external: false\n",
+		"net-name-null":     "  backend:\n    name: null\n",
+		"net-alias-proxy":   "  proxy:\n    external: true\n    name: portcullis-proxy\n",
+		"net-proxy-case":    "  Portcullis-Proxy:\n    external: true\n",
+		"net-proxy-renamed": "  portcullis-proxy2:\n    external: true\n    name: portcullis_portcullis\n",
+		"net-core-key":      "  monitoring:\n    external: true\n",
+	} {
+		writeTpl(t, dir, id, manifest, build("web", nil, "    networks: [default, portcullis-proxy, "+strings.TrimSuffix(strings.Fields(net)[0], ":")+"]\n", net))
+		ids[id] = net
+	}
+	// portcullis-proxy itself pointing elsewhere, or not external.
+	for id, proxy := range map[string]string{
+		"proxy-elsewhere":  "    external: true\n    name: portcullis-esphome_default\n",
+		"proxy-name-case":  "    external: true\n    name: Portcullis-Proxy\n",
+		"proxy-name-ws":    "    external: true\n    name: \" portcullis-proxy\"\n",
+		"proxy-ext-legacy": "    external:\n      name: portcullis\n",
+		"proxy-ext-string": "    external: \"true\"\n",
+		"proxy-name-only":  "    name: portcullis-proxy\n",
+		"proxy-ext-false":  "    external: false\n    name: portcullis-proxy\n",
+	} {
+		writeTpl(t, dir, id, manifest, strings.Replace(build("web", nil, "", ""), "  portcullis-proxy:\n    external: true\n", "  portcullis-proxy:\n"+proxy, 1))
+		ids[id] = proxy
+	}
+	for id, c := range map[string]string{
+		"net-ok-internal": build("web", nil, "    networks: [default, internal, portcullis-proxy]\n", "  internal: {}\n  monitoring:\n    driver: bridge\n"),
+		"net-ok-named":    strings.Replace(build("web", nil, "", ""), "    external: true\n", "    external: true\n    name: portcullis-proxy\n", 1),
+	} {
+		writeTpl(t, dir, id, manifest, c)
+		controls[id] = c
+	}
 	for id, top := range map[string]string{
 		"def-ok-empty":  "  default: {}\n",
 		"def-ok-driver": "  default:\n    driver: bridge\n",
