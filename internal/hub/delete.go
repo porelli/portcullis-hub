@@ -75,6 +75,9 @@ func (h *Hub) DeleteInstance(id, confirm, actor string) (res *DeleteResult, err 
 			return res, fmt.Errorf("the acting admin %q can't delete the instance's groups — nothing was deleted: %w", actor, err)
 		}
 	}
+	if tg.entry.State == state.InstanceRestoring {
+		res.Warnings = append(res.Warnings, fmt.Sprintf("%s had an unfinished restore: the delete backup holds its half-restored data; its data from before that restore is in the pre-restore backup %s", id, tg.entry.Backup))
+	}
 	if tg.entry.State == state.InstanceDeleting {
 		res.Backup = tg.entry.Backup
 	} else {

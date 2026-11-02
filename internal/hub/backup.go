@@ -14,6 +14,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -103,18 +104,21 @@ type BackupEntry struct {
 
 // instanceConfig is config/instance.yaml: the instance's state entry.
 type instanceConfig struct {
-	ID           string              `yaml:"id"`
-	Template     string              `yaml:"template"`
-	Default      bool                `yaml:"default"`
-	Hosts        map[string]string   `yaml:"hosts,omitempty"`
-	Enabled      bool                `yaml:"enabled"`
-	Settings     map[string]string   `yaml:"settings,omitempty"`
-	AuthPolicy   *policy.AuthPolicy  `yaml:"auth_policy,omitempty"`
-	PublicAccess *bool               `yaml:"public_access,omitempty"`
-	PublicMode   string              `yaml:"public_mode,omitempty"`
-	PublicTokens []string            `yaml:"public_tokens,omitempty"`
-	SignIn       string              `yaml:"sign_in,omitempty"`
-	Published    *state.PublishedApp `yaml:"published,omitempty"`
+	ID           string             `yaml:"id"`
+	Template     string             `yaml:"template"`
+	Default      bool               `yaml:"default"`
+	Hosts        map[string]string  `yaml:"hosts,omitempty"`
+	Enabled      bool               `yaml:"enabled"`
+	Settings     map[string]string  `yaml:"settings,omitempty"`
+	AuthPolicy   *policy.AuthPolicy `yaml:"auth_policy,omitempty"`
+	PublicAccess *bool              `yaml:"public_access,omitempty"`
+	PublicMode   string             `yaml:"public_mode,omitempty"`
+	PublicTokens []string           `yaml:"public_tokens,omitempty"`
+	SignIn       string             `yaml:"sign_in,omitempty"`
+	// State is the state entry's state ("created" for a never-enabled
+	// instance; a restore keeps it).
+	State     string              `yaml:"state,omitempty"`
+	Published *state.PublishedApp `yaml:"published,omitempty"`
 }
 
 func (h *Hub) backupsDir() string { return filepath.Join(h.cfg.DataDir, "backups") }
@@ -169,6 +173,9 @@ func (h *Hub) instanceConfigLocked(tg *target) instanceConfig {
 	c.PublicMode = h.st.PublicMode[id]
 	c.PublicTokens = append([]string(nil), h.st.PublicTokens[id]...)
 	c.SignIn = h.st.SignIn[id]
+	if tg.entry.State == state.InstanceCreated {
+		c.State = state.InstanceCreated
+	}
 	if p, ok := h.st.Published[id]; ok {
 		c.Published = &p
 	}
@@ -184,10 +191,15 @@ func (h *Hub) applyConfigLocked(id string, c instanceConfig) {
 	} else {
 		delete(h.st.Settings, id)
 	}
+	old, had := h.st.AuthPolicies[id]
 	if c.AuthPolicy != nil {
-		h.st.AuthPolicies[id] = *c.AuthPolicy
+		// Stored like SaveSettings stores it (never weaker).
+		h.st.AuthPolicies[id] = policy.Normalize(*c.AuthPolicy)
 	} else {
 		delete(h.st.AuthPolicies, id)
+	}
+	if now, has := h.st.AuthPolicies[id]; had != has || !reflect.DeepEqual(old, now) {
+		delete(h.st.LegacyPassword, id)
 	}
 	if c.PublicAccess != nil {
 		h.st.PublicAccess[id] = *c.PublicAccess

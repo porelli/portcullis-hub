@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/portcullis/hub/internal/docker"
+	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
 )
@@ -38,7 +39,13 @@ type volumePlan struct {
 // rules (configProblems): settings, sign-in mode, policy override, public
 // exceptions.
 func configProblem(t *templates.Template, c instanceConfig, archive string) error {
-	u := SettingsUpdate{Values: c.Settings, Policy: c.AuthPolicy, PublicAccess: c.PublicAccess}
+	u := SettingsUpdate{Values: c.Settings, PublicAccess: c.PublicAccess}
+	if c.AuthPolicy != nil {
+		// As state.yaml loads it (a legacy factor rewritten, never weaker)
+		// and as applyConfigLocked stores it.
+		n := policy.Normalize(*c.AuthPolicy)
+		u.Policy = &n
+	}
 	if u.Values == nil {
 		u.Values = map[string]string{}
 	}
@@ -103,7 +110,7 @@ func (h *Hub) RestoreInstance(id, archive, actor string) (res *RestoreResult, er
 		if err := h.recoverRestoreLocked(id, view, e.Backup); err != nil {
 			return res, err
 		}
-		if view, _, err = h.restoreTarget(id); err != nil {
+		if view, e, err = h.restoreTarget(id); err != nil {
 			return res, err
 		}
 	}
@@ -148,18 +155,28 @@ func (h *Hub) RestoreInstance(id, archive, actor string) (res *RestoreResult, er
 		}
 		return res, statusErr(500, "recording the restore failed — nothing was restored: %v", err)
 	}
+	// A never-enabled instance is "created" again afterwards.
+	keep := ""
+	if e.State == state.InstanceCreated {
+		keep = state.InstanceCreated
+	}
 	applyErr := h.applyRestore(id, sb, plan, wasEnabled)
 	if applyErr == nil {
-		h.clearRestoring(id)
+		if cerr := h.clearRestoring(id, keep); cerr != nil {
+			res.Warnings = append(res.Warnings, cerr.Error())
+		}
 		log.Printf("instance %s restored from %s (pre-restore backup %s)", id, archive, pre.Archive)
 		return res, h.finishOp(id, OpRestore, nil, false)
 	}
 	// Put the previous data back.
-	if rerr := h.rollbackRestore(id, view, pre.Archive, wasEnabled); rerr != nil {
+	rerr := h.stagedRollback(id, view, pre.Archive, wasEnabled)
+	if rerr != nil {
 		applyErr = fmt.Errorf("restore from %s failed: %w — putting the pre-restore backup %s back failed too: %v (it stays \"restoring\": restore again once the cause is fixed, the pre-restore backup is put back first)", archive, applyErr, pre.Archive, rerr)
 		return res, h.finishOp(id, OpRestore, applyErr, false)
 	}
-	h.clearRestoring(id)
+	if cerr := h.clearRestoring(id, keep); cerr != nil {
+		res.Warnings = append(res.Warnings, cerr.Error())
+	}
 	applyErr = fmt.Errorf("restore from %s failed: %w — the previous data was put back (pre-restore backup %s)", archive, applyErr, pre.Archive)
 	return res, h.finishOp(id, OpRestore, applyErr, true)
 }
@@ -218,47 +235,76 @@ func (h *Hub) markRestoring(id, preArchive string) error {
 	return nil
 }
 
-// clearRestoring ends state "restoring" (a default instance's entry that
-// only held it goes away).
-func (h *Hub) clearRestoring(id string) {
+// clearRestoring ends state "restoring": the entry gets state keep
+// ("created" for a never-enabled instance, else ""); a default
+// instance's entry that only held it goes away. A failed save is
+// returned as a warning (and logged loudly): the data is consistent, but
+// state.yaml still says "restoring" until the next save.
+func (h *Hub) clearRestoring(id, keep string) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	e, ok := h.st.Instances[id]
 	if !ok || e.State != state.InstanceRestoring {
-		return
+		return nil
 	}
-	e.State, e.Backup = "", ""
-	if e.Template == id && len(e.Hosts) == 0 {
+	e.State, e.Backup = keep, ""
+	if e.Template == id && len(e.Hosts) == 0 && keep == "" {
 		delete(h.st.Instances, id)
 	} else {
 		h.st.Instances[id] = e
 	}
 	h.rebuildLocked()
-	h.saveLocked()
+	if err := h.st.Save(h.statePath()); err != nil {
+		log.Printf("ERROR: instance %s: the restore completed but saving state.yaml failed (it still says \"restoring\" on disk: the next start rolls back to the pre-restore backup unless a later save succeeds): %v", id, err)
+		return fmt.Errorf("the restore of %s completed, but saving state.yaml failed (%v): until the next successful save, a Hub restart would roll it back to the pre-restore backup", id, err)
+	}
+	return nil
 }
 
 // recoverRestoreLocked rolls an interrupted restore of id back from its
-// pre-restore backup (verified like any archive), enabled again if it was
-// enabled when that backup was taken. Caller holds the app lock.
+// pre-restore backup, enabled again if it was enabled when that backup
+// was taken. The recorded archive must be this instance's own
+// pre-restore backup (its directory and manifest name id, its template
+// is the instance's, its reason is restore) and verify; anything else is
+// refused (409) and nothing is touched. Caller holds the app lock.
 func (h *Hub) recoverRestoreLocked(id string, view *templates.Template, preArchive string) error {
-	if preArchive == "" {
-		return statusErr(409, "instance %s has an unfinished restore without a recorded pre-restore backup: delete it or fix state.yaml", id)
-	}
-	pre, err := h.stageArchive(preArchive)
+	pre, err := h.stagePreRestore(id, view, preArchive)
 	if err != nil {
-		return fmt.Errorf("instance %s has an unfinished restore; its pre-restore backup %s can't be used: %w", id, preArchive, err)
+		return err
 	}
-	wasEnabled := pre.cfg.Enabled
-	pre.cleanup()
-	if err := h.rollbackRestore(id, view, preArchive, wasEnabled); err != nil {
+	defer pre.cleanup()
+	if err := h.rollbackStaged(id, view, pre, pre.cfg.Enabled); err != nil {
 		return h.finishOp(id, OpRestore, fmt.Errorf("rolling back the unfinished restore of %s from %s failed (it stays \"restoring\"): %w", id, preArchive, err), false)
 	}
-	h.clearRestoring(id)
+	keep := ""
+	if pre.cfg.State == state.InstanceCreated {
+		keep = state.InstanceCreated
+	}
+	if cerr := h.clearRestoring(id, keep); cerr != nil {
+		log.Printf("instance %s: %v", id, cerr)
+	}
 	log.Printf("instance %s: unfinished restore rolled back from %s", id, preArchive)
 	// Recorded (the ops record says what happened), not returned: the
 	// instance is consistent again.
 	_ = h.finishOp(id, OpRestore, fmt.Errorf("an unfinished restore of %s was rolled back from its pre-restore backup %s", id, preArchive), true)
 	return nil
+}
+
+// stagePreRestore verifies and stages preArchive as instance id's own
+// pre-restore backup.
+func (h *Hub) stagePreRestore(id string, view *templates.Template, preArchive string) (*staged, error) {
+	if mm := archiveRe.FindStringSubmatch(preArchive); mm == nil || mm[1] != id {
+		return nil, statusErr(409, "instance %s has an unfinished restore whose recorded pre-restore backup %q isn't one of its own archives: nothing was touched (fix state.yaml or delete the instance)", id, preArchive)
+	}
+	pre, err := h.stageArchive(preArchive)
+	if err != nil {
+		return nil, fmt.Errorf("instance %s has an unfinished restore; its pre-restore backup %s can't be used (nothing was touched): %w", id, preArchive, err)
+	}
+	if pre.m.Instance != id || pre.m.Template != view.TemplateID || pre.m.Reason != BackupRestore {
+		pre.cleanup()
+		return nil, statusErr(409, "instance %s has an unfinished restore whose recorded archive %s is not its pre-restore backup (instance %s, template %s, reason %s): nothing was touched", id, preArchive, pre.m.Instance, pre.m.Template, pre.m.Reason)
+	}
+	return pre, nil
 }
 
 // RecoverRestores rolls back every interrupted same-instance restore
@@ -397,19 +443,24 @@ func (h *Hub) applyRestore(id string, sb *staged, plan []volumePlan, wasEnabled 
 	return nil
 }
 
-// rollbackRestore puts the pre-restore backup back after a failed (or
-// interrupted) restore: its volumes, files and settings; the project's
-// volumes it doesn't have are emptied.
-func (h *Hub) rollbackRestore(id string, view *templates.Template, preArchive string, wasEnabled bool) error {
-	// A failed enable already rolled its compose up back; make sure.
-	if err := h.stopProject(&target{id: id, view: view}); err != nil {
-		return fmt.Errorf("compose down: %w", err)
-	}
-	pre, err := h.stageArchive(preArchive)
+// stagedRollback puts the pre-restore backup preArchive back after a
+// failed restore (verified as id's own first).
+func (h *Hub) stagedRollback(id string, view *templates.Template, preArchive string, wasEnabled bool) error {
+	pre, err := h.stagePreRestore(id, view, preArchive)
 	if err != nil {
 		return err
 	}
 	defer pre.cleanup()
+	return h.rollbackStaged(id, view, pre, wasEnabled)
+}
+
+// rollbackStaged puts a staged pre-restore backup back: its volumes,
+// files and settings; the project's volumes it doesn't have are emptied.
+func (h *Hub) rollbackStaged(id string, view *templates.Template, pre *staged, wasEnabled bool) error {
+	// A failed enable already rolled its compose up back; make sure.
+	if err := h.stopProject(&target{id: id, view: view}); err != nil {
+		return fmt.Errorf("compose down: %w", err)
+	}
 	plan, err := h.restorePlan(id, view, pre)
 	if err != nil {
 		return err

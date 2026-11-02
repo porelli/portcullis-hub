@@ -13,6 +13,7 @@ import (
 
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/state"
+	"github.com/portcullis/hub/internal/templates"
 )
 
 // rewriteMember replaces one member of an archive and its MANIFEST sum
@@ -422,4 +423,139 @@ func TestRestoreNewIDWarnsPathSettings(t *testing.T) {
 
 func helperSpecFor(vol string) docker.HelperSpec {
 	return docker.HelperSpec{Image: HelperImage, Volumes: map[string]string{vol: "/data"}, ReadOnly: true, Instance: "grafana-b"}
+}
+
+// Re-review N1: an interrupted restore whose recorded archive isn't the
+// instance's own pre-restore backup is refused; nothing is touched.
+func TestRecoverRefusesForeignArchive(t *testing.T) {
+	f, _, _ := grafanaB(t)
+	if err := f.h.CreateInstance("grafana", "grafana-c", nil); err != nil {
+		t.Fatal(err)
+	}
+	other, err := f.h.BackupInstance("grafana-c", "root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	own, err := f.h.BackupInstance("grafana-b", "root") // reason manual
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rec := range []string{other.Archive, own.Archive, "../x.tar"} {
+		f.h.mu.Lock()
+		e := f.h.st.Instances["grafana-b"]
+		e.State, e.Backup = state.InstanceRestoring, rec
+		f.h.st.Instances["grafana-b"] = e
+		f.h.saveLocked()
+		f.h.mu.Unlock()
+		putFiles(f, "portcullis_grafana-b-grafana-data", fakeFile{Name: "now", Body: "keep"})
+		n, hl := len(f.runner.Calls()), len(f.engine.vol().helperLog)
+		_, err := f.h.RestoreInstance("grafana-b", own.Archive, "root")
+		if statusOf(err) != 409 {
+			t.Errorf("recorded %s: %v", rec, err)
+		}
+		if len(f.runner.Calls()) != n || len(f.engine.vol().helperLog) != hl || f.engine.volumeFiles("portcullis_grafana-b-grafana-data")["now"].Body != "keep" {
+			t.Errorf("recorded %s: something was touched", rec)
+		}
+	}
+}
+
+// Re-review N2 + N4: a restored policy is stored normalised (the legacy
+// flag cleared when it changes), and a never-enabled instance stays
+// "created".
+func TestRestoreNormalisesPolicyKeepsCreated(t *testing.T) {
+	f := newInstanceFixture(t, nil)
+	simulateCompose(f, 0)
+	if err := f.h.CreateInstance("grafana", "grafana-b", nil); err != nil {
+		t.Fatal(err)
+	}
+	entry, err := f.h.BackupInstance("grafana-b", "root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := archivePath(f, entry.Archive)
+	_, data, _ := readArchive(t, p)
+	cfg := string(data["config/instance.yaml"])
+	if !strings.Contains(cfg, "state: created") {
+		t.Fatalf("instance.yaml lacks the created state:\n%s", cfg)
+	}
+	rewriteMember(t, p, "config/instance.yaml", []byte(cfg+"auth_policy:\n  factors: [password, webauthn]\n"))
+	f.h.mu.Lock()
+	f.h.st.LegacyPassword["grafana-b"] = true
+	f.h.mu.Unlock()
+	if _, err := f.h.RestoreInstance("grafana-b", entry.Archive, "root"); err != nil {
+		t.Fatal(err)
+	}
+	f.h.mu.RLock()
+	pol := f.h.st.AuthPolicies["grafana-b"]
+	legacy := f.h.st.LegacyPassword["grafana-b"]
+	e := f.h.st.Instances["grafana-b"]
+	f.h.mu.RUnlock()
+	if strings.Contains(strings.Join(pol.Factors, ","), "password") || legacy {
+		t.Errorf("policy %+v legacy %v", pol, legacy)
+	}
+	if e.State != state.InstanceCreated {
+		t.Errorf("state after restore = %q", e.State)
+	}
+	var st string
+	for _, v := range f.h.Instances() {
+		if v.ID == "grafana-b" {
+			st = v.State
+		}
+	}
+	if st != StateCreated {
+		t.Errorf("view state = %s", st)
+	}
+}
+
+// Re-review N2: turning on public exceptions that can't be routed is
+// refused by the shared checks.
+func TestConfigProblemsPublicRoutable(t *testing.T) {
+	f := newInstanceFixture(t, nil)
+	tmpl := *f.h.Template("grafana")
+	tmpl.Manifest.Auth.PublicAccess = &templates.PublicAccess{Description: "x"}
+	tmpl.Public = nil
+	on := true
+	if p := configProblems(&tmpl, SettingsUpdate{Values: map[string]string{}, PublicAccess: &on}, false); len(p) != 1 || !strings.Contains(p[0].Error(), "can't be routed") {
+		t.Errorf("problems = %v", p)
+	}
+}
+
+// Re-review N5: deleting an instance with an unfinished restore names
+// the pre-restore backup in its warnings.
+func TestDeleteRestoringWarns(t *testing.T) {
+	f, _, _ := grafanaB(t)
+	unlock, _ := f.h.lockApp("grafana-b")
+	pre, err := f.h.backupLocked("grafana-b", BackupRestore, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.h.markRestoring("grafana-b", pre.Archive)
+	unlock()
+	res, err := f.h.DeleteInstance("grafana-b", "grafana-b", "root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(res.Warnings, " "), pre.Archive) {
+		t.Errorf("warnings = %v", res.Warnings)
+	}
+}
+
+// Re-review N3: a failed save when the restoring record is cleared is a
+// loud warning, not a silent loss.
+func TestClearRestoringSaveFailureWarns(t *testing.T) {
+	f, _, _ := grafanaB(t)
+	f.h.markRestoring("grafana-b", "grafana-b/20260101T000000Z.tar")
+	os.Chmod(f.data, 0500)
+	t.Cleanup(func() { os.Chmod(f.data, 0755) })
+	err := f.h.clearRestoring("grafana-b", "")
+	os.Chmod(f.data, 0755)
+	if err == nil || !strings.Contains(err.Error(), "saving state.yaml failed") {
+		t.Errorf("clearRestoring with a failing save = %v", err)
+	}
+	f.h.mu.RLock()
+	e := f.h.st.Instances["grafana-b"]
+	f.h.mu.RUnlock()
+	if e.State != "" {
+		t.Errorf("in-memory state = %+v", e)
+	}
 }

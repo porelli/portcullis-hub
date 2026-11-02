@@ -364,6 +364,18 @@ func validatePublic(t *templates.Template, u SettingsUpdate) ([]string, error) {
 			return nil, statusErr(400, "public mode must be all or listed")
 		}
 	}
+	// Routable at all: turning exceptions on for a template whose public
+	// routers can't be generated (t.Public nil) opens nothing — refused.
+	// applyPublicUpdateLocked re-checks with the stored state.
+	if u.PublicAccess != nil && *u.PublicAccess && t.Public == nil {
+		mode := pa.Mode()
+		if u.PublicMode != nil && *u.PublicMode != "" {
+			mode = *u.PublicMode
+		}
+		if mode != templates.ModeListed || len(tokens) > 0 {
+			return nil, statusErr(400, "public exceptions of %s can't be routed", t.ID)
+		}
+	}
 	return tokens, nil
 }
 
