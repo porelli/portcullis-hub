@@ -104,7 +104,7 @@ auth:
   admin_group: admin_hs
 urls:
   - {label: a, url: "https://{{HOST_HEADSCALE}}/x"}
-  - {label: b, url: "https://{{HOST_HEADPLANE}}/admin"}
+  - {label: b, url: "https://{{HOST_HEADPLANE}}/admin and https://auth.{{DOMAIN}}"}
 keycloak_clients:
   - {client_id: headscale, redirect_uri: "https://{{HOST_HEADSCALE}}/oidc/callback"}
   - {client_id: headplane, redirect_uris: ["https://{{HOST_HEADPLANE}}/admin/oidc/callback"]}
@@ -129,7 +129,7 @@ keycloak_clients:
 		t.Errorf("view = %+v", v)
 	}
 	m := v.Manifest
-	if m.URLs[0].URL != "https://vpn-b.example.org/x" || m.URLs[1].URL != "https://vpn-admin-b.example.org/admin" {
+	if m.URLs[0].URL != "https://vpn-b.example.org/x" || m.URLs[1].URL != "https://vpn-admin-b.example.org/admin and https://auth.example.org" {
 		t.Errorf("urls = %+v", m.URLs)
 	}
 	if m.Clients[0].ClientID != "hs-b" || m.Clients[0].RedirectURI != "https://vpn-b.example.org/oidc/callback" ||
@@ -195,7 +195,17 @@ func TestDiscoverInstanceRules(t *testing.T) {
 			"services:\n  s:\n    labels:\n      traefik.http.routers.x.rule: Host(`${PORTCULLIS_HOST_X:-x.portcullis.local}`)\n"},
 		"multi {{DOMAIN}} redirect_uri": {"name: X\ninstances: multi\nauth:\n  method: native-oidc\n  group_access: true\n  access_group: users_x\nkeycloak_clients:\n  - {client_id: x, redirect_uri: \"https://x.{{DOMAIN}}/cb\"}\n",
 			"services:\n  s:\n    labels:\n      traefik.http.routers.x.rule: Host(`${PORTCULLIS_HOST_X:-x.portcullis.local}`)\n"},
-		"multi {{DOMAIN}} redirect_uris": {"name: X\ninstances: multi\nauth:\n  method: native-oidc\n  group_access: true\n  access_group: users_x\nkeycloak_clients:\n  - {client_id: x, redirect_uris: [\"https://{{HOST_X}}/cb\", \"https://auth.{{DOMAIN}}/cb\"]}\n",
+		"multi {{DOMAIN}} redirect_uris": {"name: X\ninstances: multi\nauth:\n  method: native-oidc\n  group_access: true\n  access_group: users_x\nkeycloak_clients:\n  - {client_id: x, redirect_uris: [\"https://{{HOST_X}}/cb\", \"https://x.{{DOMAIN}}/cb2\"]}\n",
+			"services:\n  s:\n    labels:\n      traefik.http.routers.x.rule: Host(`${PORTCULLIS_HOST_X:-x.portcullis.local}`)\n"},
+		"multi {{DOMAIN}} apex url": {"name: X\ninstances: multi\nauth:\n  method: native-oidc\n  group_access: true\n  access_group: users_x\nurls:\n  - {label: a, url: \"https://{{DOMAIN}}/\"}\n",
+			"services:\n  s:\n    labels:\n      traefik.http.routers.x.rule: Host(`${PORTCULLIS_HOST_X:-x.portcullis.local}`)\n"},
+		"multi {{DOMAIN}} non-core label url": {"name: X\ninstances: multi\nauth:\n  method: native-oidc\n  group_access: true\n  access_group: users_x\nurls:\n  - {label: a, url: \"https://vpn.{{DOMAIN}}\"}\n",
+			"services:\n  s:\n    labels:\n      traefik.http.routers.x.rule: Host(`${PORTCULLIS_HOST_X:-x.portcullis.local}`)\n"},
+		"multi {{DOMAIN}} under core url": {"name: X\ninstances: multi\nauth:\n  method: native-oidc\n  group_access: true\n  access_group: users_x\nurls:\n  - {label: a, url: \"https://x.auth.{{DOMAIN}}\"}\n",
+			"services:\n  s:\n    labels:\n      traefik.http.routers.x.rule: Host(`${PORTCULLIS_HOST_X:-x.portcullis.local}`)\n"},
+		"multi {{DOMAIN}} core prefix url": {"name: X\ninstances: multi\nauth:\n  method: native-oidc\n  group_access: true\n  access_group: users_x\nurls:\n  - {label: a, url: \"https://auth.{{DOMAIN}}.evil.org\"}\n",
+			"services:\n  s:\n    labels:\n      traefik.http.routers.x.rule: Host(`${PORTCULLIS_HOST_X:-x.portcullis.local}`)\n"},
+		"multi {{DOMAIN}} glued url": {"name: X\ninstances: multi\nauth:\n  method: native-oidc\n  group_access: true\n  access_group: users_x\nurls:\n  - {label: a, url: \"https://{{HOST_X}}.{{DOMAIN}}\"}\n",
 			"services:\n  s:\n    labels:\n      traefik.http.routers.x.rule: Host(`${PORTCULLIS_HOST_X:-x.portcullis.local}`)\n"},
 		"client key clash": {"name: X\nauth:\n  method: native-oidc\n  group_access: true\nkeycloak_clients:\n  - client_id: a-b\n  - client_id: a.b\n", "services:\n  s:\n    image: x\n"},
 	}
@@ -212,6 +222,8 @@ func TestDiscoverInstanceRules(t *testing.T) {
 	// may still use {{DOMAIN}} (the main domain).
 	for name, c := range map[string][2]string{
 		"multi host placeholders": {"name: X\ninstances: multi\nauth:\n  method: native-oidc\n  group_access: true\n  access_group: users_x\nurls:\n  - {label: a, url: \"https://{{HOST_X}}\"}\nkeycloak_clients:\n  - {client_id: x, redirect_uri: \"https://{{HOST_X}}/cb\", redirect_uris: [\"https://{{HOST_X}}/cb2\"]}\n",
+			"services:\n  s:\n    labels:\n      traefik.http.routers.x.rule: Host(`${PORTCULLIS_HOST_X:-x.portcullis.local}`)\n"},
+		"multi core links": {"name: X\ninstances: multi\nauth:\n  method: native-oidc\n  group_access: true\n  access_group: users_x\nurls:\n  - {label: a, url: \"https://{{HOST_X}}\"}\n  - {label: b, url: \"https://auth.{{DOMAIN}}/realms/portcullis/account and https://people.{{DOMAIN}}\"}\nkeycloak_clients:\n  - {client_id: x, redirect_uri: \"https://{{HOST_X}}/cb\", redirect_uris: [\"https://hub.{{DOMAIN}}/cb\"]}\n",
 			"services:\n  s:\n    labels:\n      traefik.http.routers.x.rule: Host(`${PORTCULLIS_HOST_X:-x.portcullis.local}`)\n"},
 		"single {{DOMAIN}}": {"name: X\ninstances: single\nauth:\n  method: native-oidc\n  group_access: true\n  access_group: users_x\nurls:\n  - {label: a, url: \"https://x.{{DOMAIN}}\"}\nkeycloak_clients:\n  - {client_id: x, redirect_uri: \"https://x.{{DOMAIN}}/cb\"}\n",
 			"services:\n  s:\n    labels:\n      traefik.http.routers.x.rule: Host(`${PORTCULLIS_HOST_X:-x.portcullis.local}`)\n"},

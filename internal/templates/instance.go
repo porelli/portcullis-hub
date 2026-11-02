@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/portcullis/hub/internal/policy"
 	"gopkg.in/yaml.v3"
 )
 
@@ -39,6 +40,13 @@ func ReservedVar(k string) bool {
 	}
 	return strings.HasPrefix(k, varHostPrefix) || strings.HasPrefix(k, varClientIDPrefix)
 }
+
+// domainUseRe matches a {{DOMAIN}} with the host characters before it
+// (group 1); hostCharRe is one host character.
+var (
+	domainUseRe = regexp.MustCompile(`([A-Za-z0-9.-]*)\{\{DOMAIN\}\}`)
+	hostCharRe  = regexp.MustCompile(`[A-Za-z0-9.-]`)
+)
 
 // placeholderRe matches {{HOST_<ROUTER>}} manifest placeholders.
 var placeholderRe = regexp.MustCompile(`\{\{HOST_([A-Z0-9_]+)\}\}`)
@@ -310,10 +318,18 @@ func checkInstanceRules(m *Manifest, r *Routes) error {
 	}
 	// A multi template writes its own hosts only as {{HOST_<ROUTER>}}
 	// (contract §3.1): {{DOMAIN}} would point every instance at the default
-	// instance's hostnames.
+	// instance's hostnames. It may name a core host only: exactly
+	// <core sub>.{{DOMAIN}} (never the apex, never another label).
 	noDomain := func(where, s string) error {
-		if m.Multi() && strings.Contains(s, "{{DOMAIN}}") {
-			return fmt.Errorf("%s: a multi template names its hosts as {{HOST_<ROUTER>}}, not with {{DOMAIN}}", where)
+		if !m.Multi() {
+			return nil
+		}
+		for _, mm := range domainUseRe.FindAllStringSubmatchIndex(s, -1) {
+			prefix, after := s[mm[2]:mm[3]], s[mm[1]:]
+			label, ok := strings.CutSuffix(prefix, ".")
+			if !ok || !policy.CoreSubdomains()[label] || (after != "" && hostCharRe.MatchString(after[:1])) {
+				return fmt.Errorf("%s: a multi template names its hosts as {{HOST_<ROUTER>}}; {{DOMAIN}} only in a core host (<core subdomain>.{{DOMAIN}}), not %q", where, s[mm[2]:mm[1]])
+			}
 		}
 		return nil
 	}
