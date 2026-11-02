@@ -545,14 +545,23 @@ brainstorm. The others were made while drafting this spec.
       - hashes absent from state, logs, op records, audit and backups (a
         `TestCredentialNotEchoed` in the style of `TestTokenNotEchoed`);
       - revoke-on-leave bypasses the debounce;
-      - restore voids credentials.
+      - restore voids credentials; a `secrets_epoch` mismatch voids all,
+        orphan hash files are deleted (call 25);
+      - the `username` rule refuses before the button and on the route
+        (call 27).
     - CI e2e with `smbclient`, against both templates:
       - the password works;
       - `-m SMB2`, NT1/NTLMv1 and unencrypted sessions are refused;
       - a client outside the Local networks is refused (test CIDR);
       - the `testparm` guard stops a tampered config;
-      - after a member is removed, login fails and the open session is
-        dropped within 10 s;
+      - after a member is removed through the Hub, login fails and the
+        open session is dropped within 10 s; removed directly in LLDAP,
+        within 75 s (call 23);
+      - a population member in neither readers nor writers can't open a
+        shared-folder share (call 26);
+      - an empty Local networks list keeps the container from starting
+        (call 28);
+      - the cap set has no `DAC_OVERRIDE`/`DAC_READ_SEARCH` (call 24);
       - a regenerated password works and the old one doesn't;
       - with no people there are no accounts (and no `timemachine` account);
       - a file written to a shared folder share is `<uid>:<folder gid>`.
@@ -561,6 +570,152 @@ brainstorm. The others were made while drafting this spec.
       - the 10 GiB limit is honoured;
       - discovery via the host's Avahi;
       - Finder access to Samba.
+
+Calls 23-29 settle the builder check (2026-11-02). They are all
+**Controller's calls**.
+
+23. **When the Hub sees a removal. No new watcher.** *(Controller's call.)*
+    - Today `Service.OnChange` fires only for the Hub's own mutations and
+      for evaluator changes (`internal/directory/evaluate.go:281`). The
+      directory sync loop runs every 10 min
+      (`internal/hub/directory.go:153`).
+    - **Hub-made changes** (RemoveMember, DeleteUser, DeleteGroup, instance
+      delete): revoke-on-leave runs from `OnChange` at once, with no
+      debounce (call 6). The SLA is the full "within seconds".
+    - **Rule-group removals**: the evaluator (every 60 s, contract §9.6)
+      calls `OnChange` when it removes someone. From then on it is
+      "within seconds".
+    - **Edits made directly in LLDAP** (the lldap UI or CLI: a member
+      removed, an account deleted): these are caught by a **credential
+      holder check** on the evaluator's existing 60 s tick. This is not a
+      new loop. Each tick reads the current members of every
+      `person_secret` instance's access group from LLDAP. Any credential
+      whose holder is no longer a member, or no longer exists, goes through
+      the same revoke-on-leave path as call 6. Worst case 60 s plus the
+      hook.
+    - If LLDAP can't be read, the check does nothing (it fails no open
+      session). The tick after that retries. Project 3's doctor canary
+      ("password active for someone without access") reports what it finds.
+      The anti-goal's "the Hub seeing the change" therefore means: at once
+      for Hub and evaluator changes, within 60 s for edits made outside the
+      Hub. The admin guide says that people should be managed through the
+      Hub.
+    - The e2e "dropped within 10 s" test removes the member through the
+      Hub. A second e2e test removes the member directly in LLDAP and
+      expects the drop within 75 s.
+24. **Who reads the secrets and data files in the container.**
+    *(Controller's call.)*
+    - The Hub's files stay as project 1 defines them: secrets 0600, data
+      files 0640, owner and group 10001 (the Hub can't chown, and doesn't
+      need to).
+    - `portcullis-sync` runs as root in the container. With
+      `cap_drop: [ALL]` it can't read those files directly. Instead it
+      reads them as uid/gid 10001, using a busybox `su`/`setpriv`-style
+      drop or a few lines in the script. It copies the hashes into a 0600
+      root-owned temp file in tmpfs, which `pdbedit` imports and which is
+      then deleted. This drop uses `SETUID`/`SETGID`, which smbd needs
+      anyway to act as each user.
+    - The cap set therefore gets **no** `DAC_OVERRIDE` or `DAC_READ_SEARCH`
+      for reading Hub files. CI asserts that the minimal cap set has
+      neither, unless smbd itself provably needs one. In that case the
+      builder records why, in the template and here.
+    - The host Avahi services directory (call 15) is written as container
+      root. It must be writable by root on the host (the
+      `/etc/avahi/services` default is root:root 0755, which works). The
+      path option's check says so when the directory isn't.
+25. **Secrets live outside every backup. A core restore voids them.**
+    *(Controller's call.)*
+    - The secrets location is a Hub-owned named volume, `hub_secrets`,
+      separate from `hub_data`. Core compose mounts it into the Hub (a
+      cross-repo change, contract first). The core backup copies
+      `hub_data` by name (`portcullis-docs/docs/operations/backups.md`
+      lists `hub_data`, `traefik_acme`, LLDAP), so `hub_secrets` is never
+      copied off the host. The backup doc and contract §11.5 say so
+      explicitly, and a core test asserts that the backup doesn't list it.
+    - App containers get `<instance>/<key>/` from it read-only (call 7).
+      The builder picks how: a volume subpath mount or the host path, as
+      project 1 does for data files.
+    - **Reconciling after a core restore.** The Hub writes a random
+      `secrets_epoch` into both `state.yaml` and the secrets volume. At
+      boot, and before every converge:
+      - epochs differ (state.yaml came from a core restore, or the volume
+        is new) → every credential of every instance is voided, as in
+        call 8 ("reset by a restore"). The volume is emptied and the new
+        epoch is written into both;
+      - metadata without a hash file → voided;
+      - a hash file without active metadata → deleted.
+    - Audited as `credential.void_restore` with the count only.
+26. **Who opens a shared-folder share.** *(Controller's call.)*
+    - Only members of its `readers` or `writers` groups, limited to the
+      instance's population: `valid users` = readers ∪ writers,
+      `write list` = writers. Fail closed. Other people of the instance
+      don't see or open the share.
+    - To share with everyone who has access, the admin picks the access
+      group `users_<id>` as a reader group.
+    - At least one group in `readers` or `writers` is required. An empty
+      row is refused on save.
+    - Groups whose members are not all in the population are allowed (an
+      LDAP group is often wider than the app). The panel warns: "3 members
+      of office_milan have no access to Samba and won't get this share."
+      The data file only ever holds population members
+      (`expand_members`).
+    - E2e asserts that a population member in neither group gets
+      `NT_STATUS_ACCESS_DENIED` on the share.
+27. **The username rule is a generic `person_secret` field.**
+    *(Controller's call.)*
+    - `person_secret` gains an optional
+      `username: {pattern: <regex>, reserved: [<names>], reason: <text>}`.
+      The template declares it, and the Hub checks it when it builds
+      My apps (`credentials[]` status `not available: <reason>`) and again
+      on the create route (409). The Hub has no Samba code; the values are
+      in the manifest. Schema and contract §13 entry added with the rest of
+      `person_secret`.
+    - Both templates declare `^[a-z_][a-z0-9_.-]{0,31}$` and the image's
+      own account names. A templates-repo test checks that the reserved
+      list covers every name in the image's `/etc/passwd`.
+    - Upper case doesn't arise: LLDAP user ids are case-insensitive and
+      lowercase, and the Hub already keys people by lowercase username
+      (project 1 call 14). Names are never folded or rewritten to make them
+      fit. A name that fails is refused with its reason.
+    - `portcullis-sync` checks the same rule again and skips (and reports)
+      a failing name. This is defence in depth, not the source of the rule.
+28. **Local networks always have a value. Empty fails closed.**
+    *(Controller's call; the default comes from project 2 call 13.)*
+    - Project 2 defaults Local networks to RFC 1918, IPv6 ULA and
+      `100.64.0.0/10`. `PORTCULLIS_LOCAL_NETWORKS` carries the configured
+      list, or that default when the admin never set one. A fresh install's
+      SMB therefore works on a LAN, a VPN or a tailnet.
+    - If the admin saves an empty list, `portcullis-sync` refuses to render
+      `hosts allow` (it never falls back to allow-all), the container
+      doesn't start, and the doctor shows a Problem: "Local networks is
+      empty; file sharing is off."
+    - The Docker bridge or gateway range is **not** added. The IPv4
+      default bridge (172.16/12) is already within RFC 1918. A custom
+      Local networks list that leaves it out only matters where the
+      userland proxy is used, and the builder documents that case
+      (call 14).
+    - `testparm` compares `hosts allow` with `PORTCULLIS_LOCAL_NETWORKS`
+      exactly.
+29. **Per-person trees: `runs_as.gid_from`, no folder gid.**
+    *(Controller's call; extends project 2 call 2.)*
+    - Time Machine storage and Samba homes are per-person trees, not
+      shared folders. Their `folder` block says
+      `runs_as: {uid_from: uid, gid_from: uid}`. `gid_from` is new, beside
+      `uid_from`, and means each person's private group equals their uid.
+    - Project 2 consequences:
+      - such a setting can't take a `folder:<id>` value (refused on save).
+        It gets no `PORTCULLIS_FOLDER_GID_<KEY>` and no setgid, group ACL
+        or mask fix;
+      - `joins_group` must be `template` with `gid_from`;
+      - the doctor expects each `<username>` directory at the top level to
+        be `<person uid>:<person uid>`, mode 0700. Otherwise it reports
+        call 13's "former account" finding (another uid) or a "wrong owner"
+        fix (right uid, wrong gid or mode: one click, chown/chmod of that
+        directory only, not recursive). Anything else at the top level is
+        Info;
+      - files inside a person's tree aren't checked (the person owns them).
+    - Shared-folder shares keep `{uid_from: uid, gid: folder}` and project
+      2's full model.
 
 ## Example: the template declaration
 
@@ -596,6 +751,9 @@ settings:
       mount: {service: timemachine, path: /portcullis/secrets}
       revoke_on_leave: true
       on_restore: void
+      username: {pattern: "^[a-z_][a-z0-9_.-]{0,31}$",        # call 27
+                 reserved: [root, nobody, timemachine, …],
+                 reason: "isn't a valid Samba and Unix name"}
       applies: live
       section: Access
     - key: uid
@@ -623,7 +781,7 @@ settings:
       target: {service: timemachine, mount: /opt}
       folder:
         access: write
-        runs_as: {uid_from: uid, gid: uid}   # private group per person
+        runs_as: {uid_from: uid, gid_from: uid}   # private group per person (call 29)
         joins_group: template
         checks:
           - {kind: filesystem, needs: [xattr], not: [nfs, cifs, fuse],
@@ -671,7 +829,7 @@ settings:
       label: Personal folders
       type: path
       target: {service: samba, mount: /homes}
-      folder: {access: write, runs_as: {uid_from: uid, gid: uid}, joins_group: template}
+      folder: {access: write, runs_as: {uid_from: uid, gid_from: uid}, joins_group: template}
     - key: shares
       label: Shared folders
       type: table
@@ -680,8 +838,8 @@ settings:
         - {key: name, type: string, pattern: "^[A-Za-z0-9][A-Za-z0-9 _-]{0,31}$"}
         - {key: folder, type: folder, mount: "/shares/{name}",
            runs_as: {uid_from: uid, gid: folder}, joins_group: template}
-        - {key: readers, type: groups}
-        - {key: writers, type: groups}
+        - {key: readers, type: groups}   # valid users = readers ∪ writers (call 26)
+        - {key: writers, type: groups}   # at least one group across both
       applies: restart                  # new mounts; group edits alone apply live
       delivery: [{file: {name: people, field: shares, render: {expand_members: true}}}]
 ```
@@ -763,8 +921,10 @@ Last sync: ok, 2 Nov 2026 14:03 (live, no restart)
   - the exposure finding and its Rebind fix.
 
   This project adds:
-  - `runs_as.uid_from` (call 16);
-  - `PORTCULLIS_LOCAL_NETWORKS` (call 14);
+  - `runs_as.uid_from` (call 16) and `runs_as.gid_from`, per-person trees
+    with no folder gid and their own doctor expectations (call 29);
+  - `PORTCULLIS_LOCAL_NETWORKS` (call 14), never empty (call 28);
+  - the credential holder check on the evaluator tick (call 23);
   - two doctor checks through project 2's internal check interface: "folder
     owned by a former account" (call 13) and "password active for someone
     without access" (should never fire; it is a canary for a failed
@@ -773,9 +933,14 @@ Last sync: ok, 2 Nov 2026 14:03 (live, no restart)
 - **Contract** (`integration-contracts.md` first):
   - §3: router-less `custom` templates, `PORTCULLIS_LOCAL_NETWORKS`;
   - §5.1: the people routes;
-  - §11.5: backups exclude `person_secret`;
-  - §13 (project 1): `person_secret`, `person_id` `pool`,
-    `credential_change`, the hook stdin `credentials` shape.
+  - §11.5: instance and core backups exclude `person_secret`; the
+    `hub_secrets` volume and the `secrets_epoch` restore rule (call 25);
+  - §13 (project 1): `person_secret` (with `username`, call 27),
+    `person_id` `pool`, `credential_change`, the hook stdin `credentials`
+    shape.
+- **Core** (`portcullis`): the `hub_secrets` volume mounted into the Hub
+  and left out of `./portcullis backup`, with a test, and the backups doc
+  (call 25).
 
 ## Left to the builder
 
