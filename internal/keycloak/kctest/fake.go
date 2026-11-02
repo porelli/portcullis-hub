@@ -103,6 +103,12 @@ type Server struct {
 	Importable func(username string) bool
 	// Down makes every request answer 503 (Keycloak outage).
 	Down bool
+	// RemoveInvalid: listing users drops the LDAP-linked ones Importable
+	// says LDAP no longer has (Keycloak's validation on lookup with the
+	// LDAP federation's removeInvalidUsersEnabled); LDAPDown makes that
+	// validation fail, which keeps them (Keycloak: unavailable, kept).
+	RemoveInvalid bool
+	LDAPDown      bool
 	// DeleteStatus, if non-zero, is what DELETE /users/{id} answers.
 	DeleteStatus int
 	// DeleteStatusAfter, if non-zero, is what DELETE /users/{id} answers
@@ -440,8 +446,23 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 				names = append(names, n)
 			}
 			sort.Strings(names)
+			first, max := 0, 100
+			fmt.Sscan(q.Get("first"), &first)
+			fmt.Sscan(q.Get("max"), &max)
+			if first > len(names) {
+				first = len(names)
+			}
+			names = names[first:]
+			if max >= 0 && len(names) > max {
+				names = names[:max]
+			}
 			for _, n := range names {
-				out = append(out, rep(s.Users[n]))
+				u := s.Users[n]
+				if s.RemoveInvalid && !s.LDAPDown && u.FederationLink == LDAPProviderID && (s.Importable == nil || !s.Importable(n)) {
+					delete(s.Users, n)
+					continue
+				}
+				out = append(out, rep(u))
 			}
 		}
 		json.NewEncoder(w).Encode(out)

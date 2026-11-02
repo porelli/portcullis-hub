@@ -26,6 +26,31 @@ func (s *Server) registerInstances(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/instances/{id}/restore", s.handleRestoreInstance)
 	mux.HandleFunc("POST /api/instances/restore", s.handleRestoreAs)
 	mux.HandleFunc("GET /api/instances/{id}/op", s.handleInstanceOp)
+	mux.HandleFunc("GET /api/instances/missing-groups", s.handleMissingGroups)
+	mux.HandleFunc("POST /api/instances/missing-groups", s.handleCreateMissingGroups)
+}
+
+// handleMissingGroups lists the enabled instances whose access / admin
+// groups are missing in LLDAP (the Apps page banner).
+func (s *Server) handleMissingGroups(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, s.Hub.MissingGroups(r.Context()))
+}
+
+// handleCreateMissingGroups creates them as the signed-in admin ({"ids":
+// [...]} or {} = every enabled instance), audited in Users & Groups.
+func (s *Server) handleCreateMissingGroups(w http.ResponseWriter, r *http.Request) {
+	var b struct {
+		IDs []string `json:"ids"`
+	}
+	if !decodeStrict(w, r, &b, `{"ids": ["<instance id>", ...]} (or {} for all)`) {
+		return
+	}
+	res, err := s.Hub.CreateMissingGroups(r.Context(), b.IDs, actor(r))
+	if err != nil {
+		writeErr(w, err, http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, map[string]interface{}{"results": res})
 }
 
 // decodeStrict decodes a small JSON body into v (unknown fields refused);

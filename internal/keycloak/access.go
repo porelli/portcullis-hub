@@ -194,7 +194,7 @@ func (c *Client) EnsureClientAccess(ctx context.Context, s AccessSpec) error {
 		return gerr
 	}
 	if group == nil {
-		return fmt.Errorf("client %s: group %s: %w (create it in Users & Groups; until then nobody can sign in)", s.ClientID, s.Group, ErrGroupNotFound)
+		return fmt.Errorf("client %s: group %s: %w (Hub → App Catalog: \"Create missing groups\", or create it in Users & Groups; until then nobody can sign in)", s.ClientID, s.Group, ErrGroupNotFound)
 	}
 	if !mapped {
 		if err := g.AddClientRolesToGroup(ctx, tok, Realm, url.PathEscape(uuid), url.PathEscape(str(group.ID)), []gocloak.Role{*role}); err != nil {

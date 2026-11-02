@@ -739,6 +739,25 @@ type fakeGroups struct {
 	// createWarn, if set, creates the group with a warning (purged
 	// leftovers).
 	createWarn func(name string) string
+	// existing: groups LLDAP has (MissingInstanceGroups; created ones
+	// are added); missingErr fails the check.
+	existing   map[string]bool
+	missingErr error
+}
+
+func (g *fakeGroups) MissingInstanceGroups(ctx context.Context, names []string) ([]string, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.missingErr != nil {
+		return nil, g.missingErr
+	}
+	var out []string
+	for _, n := range names {
+		if !g.existing[n] {
+			out = append(out, n)
+		}
+	}
+	return out, nil
 }
 
 func (g *fakeGroups) ResolveActor(ctx context.Context, actor string) error {
@@ -756,6 +775,10 @@ func (g *fakeGroups) CreateInstanceGroup(ctx context.Context, actor, name string
 		}
 	}
 	g.calls = append(g.calls, "+"+name+":"+actor)
+	if g.existing == nil {
+		g.existing = map[string]bool{}
+	}
+	g.existing[name] = true
 	if g.createWarn != nil {
 		if w := g.createWarn(name); w != "" {
 			return true, []string{w}, nil

@@ -46,6 +46,11 @@ func openDirectoryStore(dataDir string) (*directory.Store, error) {
 }
 
 func main() {
+	// SIGHUP = sync the template sources. Registered first: a SIGHUP that
+	// arrives during start-up waits (Go's default would end the process).
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+
 	secret := os.Getenv("HUB_PROXY_SECRET")
 	if err := httpapi.CheckSecret(secret); err != nil {
 		log.Fatalf("refusing to start: %v", err)
@@ -59,6 +64,9 @@ func main() {
 		Domain:              env("PORTCULLIS_DOMAIN", "portcullis.local"),
 		DefaultTemplatesURL: os.Getenv("DEFAULT_TEMPLATES_URL"),
 		OverrideBindRoots:   os.Getenv("HUB_OVERRIDE_BIND_ROOTS"),
+		// Template sources are fast-forwarded at every start (fail-safe:
+		// a failed pull keeps the previous checkout); "false" turns it off.
+		SyncSourcesAtStart: os.Getenv("HUB_SYNC_SOURCES_AT_START") != "false",
 	}
 	if v := os.Getenv("HUB_RECONCILE_INTERVAL"); v != "" {
 		d, err := time.ParseDuration(v)
@@ -176,6 +184,23 @@ func main() {
 	go h.RunReconciler(ctx)
 	go h.RunDirectorySync(ctx)
 	go h.RunDomainSync(ctx, 30*time.Second)
+	// Keycloak drops its copy of a user deleted straight in LLDAP only when
+	// the user is looked up (removeInvalidUsersEnabled; its periodic LDAP
+	// sync never removes users): list them all periodically. Keycloak
+	// decides per user against LDAP; the Hub deletes nothing.
+	go runEvery(ctx, time.Minute, userRevalidateInterval, func() {
+		rctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		defer cancel()
+		if _, err := kc.RevalidateUsers(rctx); err != nil && ctx.Err() == nil {
+			log.Printf("keycloak: user revalidation failed (next try in %s): %v", userRevalidateInterval, err)
+		}
+	})
+	// SIGHUP syncs the template sources (core's `./portcullis upgrade`
+	// sends it and reads the outcome from <data>/source-sync.json).
+	go runOnSignal(ctx, hup, func() {
+		st := h.SyncSourcesAs(hub.SyncSignal)
+		log.Printf("sources: sync on SIGHUP finished (ok=%t)", st.OK)
+	})
 	if dir.Store != nil && ll.Available() == nil {
 		// Rule groups, exceptions and expiries -> LLDAP membership: every
 		// minute (expiries) and after each directory mutation.
@@ -208,6 +233,38 @@ func main() {
 	// is marked interrupted at the next start.
 	if !h.WaitTimeout(shutdownWait) {
 		log.Printf("shutdown: background instance operations still running after %s — they are marked interrupted at the next start", shutdownWait)
+	}
+}
+
+// userRevalidateInterval: how often Keycloak's users are listed (each
+// one validated against LDAP).
+const userRevalidateInterval = 15 * time.Minute
+
+// runEvery runs fn after first, then every interval, until ctx ends.
+func runEvery(ctx context.Context, first, interval time.Duration, fn func()) {
+	t := time.NewTimer(first)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			fn()
+			t.Reset(interval)
+		}
+	}
+}
+
+// runOnSignal runs fn (one at a time) for each signal on ch until ctx
+// ends.
+func runOnSignal(ctx context.Context, ch <-chan os.Signal, fn func()) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ch:
+			fn()
+		}
 	}
 }
 

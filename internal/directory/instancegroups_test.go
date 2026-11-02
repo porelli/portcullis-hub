@@ -72,3 +72,17 @@ func TestInstanceGroups(t *testing.T) {
 		t.Errorf("non-admin delete: %v", err)
 	}
 }
+
+// MissingInstanceGroups: names that are no LLDAP group, case-insensitive,
+// deduplicated; read-only.
+func TestMissingInstanceGroups(t *testing.T) {
+	e := newEnv(t)
+	e.ll.AddGroup("users_grafana")
+	got, err := e.svc.MissingInstanceGroups(ctx, []string{"USERS_grafana", "admin_grafana", "admin_grafana", "", "users_x"})
+	if err != nil || strings.Join(got, ",") != "admin_grafana,users_x" {
+		t.Errorf("missing = %v %v", got, err)
+	}
+	if e.ll.HasGroup("admin_grafana") {
+		t.Error("the check created a group")
+	}
+}

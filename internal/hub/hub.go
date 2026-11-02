@@ -48,6 +48,10 @@ type Config struct {
 	DefaultTemplatesURL string
 	// ReconcileInterval is the periodic drift check (default 60s).
 	ReconcileInterval time.Duration
+	// SyncSourcesAtStart: Init fast-forwards the git sources before the
+	// first policy write (HUB_SYNC_SOURCES_AT_START, default on), so an
+	// upgraded Hub never judges a stale template checkout.
+	SyncSourcesAtStart bool
 	// OverrideBindRoots is HUB_OVERRIDE_BIND_ROOTS: host directories custom
 	// overrides may bind-mount from ("" = /srv:/mnt:/media).
 	OverrideBindRoots string
@@ -103,6 +107,9 @@ type IdP interface {
 type Groups interface {
 	ResolveActor(ctx context.Context, actor string) error
 	CreateInstanceGroup(ctx context.Context, actor, name string) (created bool, warnings []string, err error)
+	// MissingInstanceGroups returns the names that are no LLDAP group
+	// (read-only; an error: unknown, nothing is created).
+	MissingInstanceGroups(ctx context.Context, names []string) ([]string, error)
 	DeleteInstanceGroup(ctx context.Context, actor, name string) ([]string, error)
 }
 
@@ -153,6 +160,11 @@ type Hub struct {
 	// run without holding mu.
 	appOps    sync.Map
 	sourceOps sync.Map
+	// sourceSyncMu serialises source syncs; sourceSyncSt (guarded by
+	// sourceSyncStMu) is the last one's status (sources.go).
+	sourceSyncMu   sync.Mutex
+	sourceSyncStMu sync.Mutex
+	sourceSyncSt   *SourceSyncStatus
 	// syncMu: per template id, a *sync.Mutex around its support-file sync
 	// (shared by all its instances).
 	syncMu sync.Map
@@ -237,7 +249,8 @@ func New(cfg Config, runner compose.Runner, engine Engine, idp IdP) (*Hub, error
 }
 
 // Init removes backup / restore leftovers (SweepBackupLeftovers), clones
-// the default source on first run, discovers templates, rolls back
+// the default source on first run, discovers templates, syncs the git
+// sources (Config.SyncSourcesAtStart; fail-safe, sources.go), rolls back
 // interrupted restores in the background (RecoverRestores) and seeds the
 // group-gate policy file.
 func (h *Hub) Init() {
@@ -245,6 +258,15 @@ func (h *Hub) Init() {
 	h.SweepBackupLeftovers()
 	h.autoLoadDefaultTemplates()
 	h.Discover()
+	// Fresh templates before the first policy write: the policy file the
+	// previous run wrote keeps serving meanwhile. A failed pull keeps the
+	// checkout as it is (sources.go).
+	if h.cfg.SyncSourcesAtStart {
+		st := h.syncSources(SyncStartup, StartupSyncTimeout)
+		if !st.OK {
+			log.Printf("sources: start-up sync incomplete — the previous template versions are kept (see above)")
+		}
+	}
 	// Interrupted same-instance restores are rolled back (background).
 	h.RecoverRestores()
 	if err := h.WritePolicy(); err != nil {

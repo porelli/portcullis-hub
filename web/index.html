@@ -298,6 +298,7 @@
     <!-- Catalog Tab -->
     <div class="tab-content active" id="tab-catalog">
       <div class="drift" id="drift"></div>
+      <div class="drift" id="missing-groups"></div>
       <div id="instances-overview"></div>
       {{range $category, $apps := .Categories}}
       <div class="category">
@@ -432,7 +433,8 @@
 
       <div style="margin-top: 2rem;">
         <button class="btn btn-secondary" onclick="syncSources()">Sync All Sources</button>
-        <span style="color: #64748b; font-size: 0.8125rem; margin-left: 0.75rem;">Pull latest from all repositories</span>
+        <span style="color: #64748b; font-size: 0.8125rem; margin-left: 0.75rem;">Pull latest from all repositories (the Hub also syncs at every start and on <code>./portcullis upgrade</code>)</span>
+        <div id="source-sync-status" style="margin-top: 0.75rem; font-size: 0.8125rem; color: #94a3b8;"></div>
       </div>
     </div>
 
@@ -1219,6 +1221,59 @@
     loadDrift();
     setInterval(loadDrift, 15000);
 
+    // ── Missing instance groups (users_<id> / admin_<id>) ──
+    // Enabled apps whose access / admin group isn't in LLDAP: nobody can
+    // sign in until it exists. One click creates the instance's own
+    // groups as the signed-in admin (audited in Users & Groups); other
+    // names (shared groups) are only listed.
+    function renderMissingGroups(rep) {
+      const box = document.getElementById('missing-groups');
+      const items = (rep && rep.instances) || [];
+      if (!items.length) { box.classList.remove('visible'); box.innerHTML = ''; return; }
+      const creatable = items.some(m => (m.creatable || []).length);
+      let html = '<div class="drift-title"><span>Missing groups &middot; nobody can sign in to these apps</span>' +
+        (creatable ? '<button class="btn btn-primary btn-sm" data-create-groups="">Create missing groups</button>' : '') + '</div>';
+      for (const m of items) {
+        html += '<div class="drift-item"><span class="drift-id">' + escapeHtml(m.instance) + '</span><span class="drift-msg">';
+        if ((m.creatable || []).length) html += 'missing: ' + escapeHtml(m.creatable.join(', '));
+        if ((m.other || []).length) html += ((m.creatable || []).length ? ' &middot; ' : '') + 'missing (create in Users &amp; Groups): ' + escapeHtml(m.other.join(', '));
+        html += '</span>';
+        if ((m.creatable || []).length) html += '<button class="btn btn-secondary btn-sm" data-create-groups="' + escapeHtml(m.instance) + '">Create</button>';
+        html += '</div>';
+      }
+      box.innerHTML = html;
+      box.classList.add('visible');
+      box.querySelectorAll('[data-create-groups]').forEach(btn => btn.addEventListener('click', () => createMissingGroups(btn)));
+    }
+    async function loadMissingGroups() {
+      try { renderMissingGroups(await apiGet('/api/instances/missing-groups')); } catch (e) { /* ignore */ }
+    }
+    async function createMissingGroups(btn) {
+      const id = btn.dataset.createGroups;
+      btn.classList.add('loading');
+      try {
+        const res = await apiPost('/api/instances/missing-groups', id ? { ids: [id] } : {});
+        const made = [], problems = [];
+        for (const r of (res.results || [])) {
+          made.push(...(r.created || []));
+          if (r.error) problems.push(r.instance + ': ' + r.error);
+          problems.push(...(r.warnings || []));
+        }
+        showToast((made.length ? 'Created ' + made.join(', ') : 'No group created') + (problems.length ? ' — ' + problems.join('; ') : ''), problems.length ? 'error' : 'success');
+      } catch (e) { showToast(e.message, 'error'); }
+      btn.classList.remove('loading');
+      loadMissingGroups();
+    }
+    // An enable answers the groups it created and any warnings.
+    function enableNotice(id, res) {
+      const parts = [];
+      if (res && (res.groups_created || []).length) parts.push('created ' + res.groups_created.join(', '));
+      if (res && (res.warnings || []).length) parts.push(res.warnings.join('; '));
+      return id + ' enabled' + (parts.length ? ' — ' + parts.join(' — ') : '');
+    }
+    loadMissingGroups();
+    setInterval(loadMissingGroups, 60000);
+
     // ── Last operation (failed enable/restart/…: compose output) ──
     function renderOpRecord(id, r, withTitle) {
       if (!r) return '';
@@ -1519,9 +1574,9 @@
       btn.textContent = enable ? 'Enabling...' : 'Disabling...';
       try {
         const endpoint = enable ? '/api/templates/enable' : '/api/templates/disable';
-        await apiPost(endpoint, { id });
-        showToast(`${id} ${enable ? 'enabled' : 'disabled'}`, 'success');
-        setTimeout(() => location.reload(), 500);
+        const res = await apiPost(endpoint, { id });
+        showToast(enable ? enableNotice(id, res) : `${id} disabled`, enable && res && (res.warnings || []).length ? 'error' : 'success');
+        setTimeout(() => location.reload(), enable && res && ((res.warnings || []).length || (res.groups_created || []).length) ? 4000 : 500);
       } catch (err) {
         reportError(id, err);
         btn.classList.remove('loading');
@@ -1901,8 +1956,8 @@
       btn.classList.add('loading');
       btn.textContent = enable ? 'Enabling…' : 'Disabling…';
       try {
-        await apiPost(enable ? '/api/templates/enable' : '/api/templates/disable', { id });
-        showToast(id + (enable ? ' enabled' : ' disabled'), 'success');
+        const res = await apiPost(enable ? '/api/templates/enable' : '/api/templates/disable', { id });
+        showToast(enable ? enableNotice(id, res) : id + ' disabled', enable && res && (res.warnings || []).length ? 'error' : 'success');
         openInstance(id);
       } catch (err) {
         btn.classList.remove('loading');
@@ -2148,8 +2203,31 @@
         await apiPost('/api/sources/sync', {});
         showToast('All sources synced', 'success');
         setTimeout(() => location.reload(), 1000);
-      } catch (e) { showToast(e.message, 'error'); }
+      } catch (e) { showToast(e.message, 'error'); loadSourceSync(); }
     }
+    // Last sync (start-up, upgrade's SIGHUP or the button): per source
+    // ok / kept the previous version, and enabled apps still missing a
+    // template (denied until fixed).
+    async function loadSourceSync() {
+      const box = document.getElementById('source-sync-status');
+      if (!box) return;
+      let st;
+      try { st = (await apiGet('/api/sources/sync')).last; } catch (e) { return; }
+      if (!st) { box.innerHTML = ''; return; }
+      const when = st.finished_at || st.started_at;
+      let html = '<div>Last sync (' + escapeHtml(st.trigger) + '): ' + (st.running ? 'running…' :
+        (st.ok ? '<span style="color:#22c55e">ok</span>' : '<span style="color:#f59e0b">incomplete</span>')) +
+        ' &middot; ' + escapeHtml(new Date(when).toLocaleString()) + '</div>';
+      for (const r of (st.sources || [])) {
+        html += '<div>' + escapeHtml(r.name) + ': ' + (r.ok ? (r.updated ? 'updated to ' + escapeHtml((r.after || '').slice(0, 12)) : 'up to date') :
+          '<span style="color:#f59e0b">' + escapeHtml(r.error || 'failed') + '</span>') + '</div>';
+      }
+      if ((st.missing_templates || []).length) {
+        html += '<div style="color:#ef4444">Enabled apps without a valid template (denied until fixed): ' + escapeHtml(st.missing_templates.join(', ')) + '</div>';
+      }
+      box.innerHTML = html;
+    }
+    loadSourceSync();
 
   </script>
 </body>

@@ -278,11 +278,14 @@ func (s *Server) handleEnable(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid id", http.StatusBadRequest)
 		return
 	}
-	if err := s.Hub.Enable(req.ID); err != nil {
+	// Missing users_<id> / admin_<id> groups are created first, as the
+	// signed-in admin (audited in Users & Groups).
+	res, err := s.Hub.EnableAs(req.ID, actor(r))
+	if err != nil {
 		writeErr(w, err, http.StatusBadRequest)
 		return
 	}
-	writeJSON(w, map[string]string{"status": "enabled", "id": req.ID})
+	writeJSON(w, map[string]interface{}{"status": "enabled", "id": req.ID, "groups_created": res.GroupsCreated, "warnings": res.Warnings})
 }
 
 func (s *Server) handleDisable(w http.ResponseWriter, r *http.Request) {
@@ -424,7 +427,13 @@ func (s *Server) handleRemoveSource(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]string{"status": "removed", "name": req.Name})
 }
 
+// handleSyncSources: GET = the last sync's status (start-up, SIGHUP or
+// this endpoint; null before any), POST = sync now.
 func (s *Server) handleSyncSources(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		writeJSON(w, map[string]interface{}{"last": s.Hub.SourceSync()})
+		return
+	}
 	if !methodIs(w, r, http.MethodPost) {
 		return
 	}
@@ -432,7 +441,7 @@ func (s *Server) handleSyncSources(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err, http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, map[string]string{"status": "synced"})
+	writeJSON(w, map[string]interface{}{"status": "synced", "last": s.Hub.SourceSync()})
 }
 
 // ── settings ─────────────────────────────────────────────

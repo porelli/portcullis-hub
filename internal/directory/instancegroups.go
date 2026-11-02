@@ -122,3 +122,33 @@ func (s *Service) CreateInstanceGroup(ctx context.Context, actor, name string) (
 	}
 	return err == nil, warnings, err
 }
+
+// MissingInstanceGroups returns the names (in order, deduplicated) that
+// are no LLDAP group (compared case-insensitively). Read-only: the
+// Hub's "missing groups" check before an enable and on the Apps page.
+func (s *Service) MissingInstanceGroups(ctx context.Context, names []string) ([]string, error) {
+	if err := s.LLDAP.Available(); err != nil {
+		return nil, fmt.Errorf("users & groups is not available: %w", err)
+	}
+	groups, err := s.LLDAP.ListGroups(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("listing LLDAP groups: %w", err)
+	}
+	have := map[string]bool{}
+	for _, g := range groups {
+		have[strings.ToLower(g.DisplayName)] = true
+	}
+	var out []string
+	seen := map[string]bool{}
+	for _, n := range names {
+		k := strings.ToLower(n)
+		if n == "" || seen[k] {
+			continue
+		}
+		seen[k] = true
+		if !have[k] {
+			out = append(out, n)
+		}
+	}
+	return out, nil
+}

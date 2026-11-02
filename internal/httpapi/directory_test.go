@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -273,5 +274,53 @@ func TestPortalApps(t *testing.T) {
 	}
 	if doc.Version != 1 || len(doc.Apps) != 1 || doc.Apps[0].AccessGroup != "users_demo" || doc.Apps[0].URLs[0].URL != "https://demo.example.org" {
 		t.Errorf("portal = %+v", doc)
+	}
+}
+
+// Enable creates the instance's missing groups as the signed-in admin
+// through Users & Groups (audited there); the Apps banner lists groups
+// deleted later and creates them again.
+func TestEnableCreatesMissingGroups(t *testing.T) {
+	s, ll, _ := newDirFixture(t, nil)
+	s.Hub.SetGroups(s.Directory)
+	handler, err := s.Handler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(handler)
+	t.Cleanup(srv.Close)
+
+	r, b := doAs(t, srv, "root", "POST", "/api/templates/enable", `{"id":"demo"}`)
+	if r.StatusCode != 200 || !strings.Contains(b, `"groups_created":["users_demo","admin_demo"]`) {
+		t.Fatalf("enable = %d %s", r.StatusCode, b)
+	}
+	if !ll.HasGroup("users_demo") || !ll.HasGroup("admin_demo") {
+		t.Fatal("groups not created in LLDAP")
+	}
+	entries, _ := s.Directory.Recent(100)
+	n := 0
+	for _, e := range entries {
+		if e.Action == "group.create" && e.Actor == "root" && (e.Target == "users_demo" || e.Target == "admin_demo") {
+			n++
+		}
+	}
+	if n != 2 {
+		t.Errorf("group.create audit entries = %d: %+v", n, entries)
+	}
+	if r, b := doAs(t, srv, "root", "GET", "/api/instances/missing-groups", ""); r.StatusCode != 200 || !strings.Contains(b, `"instances":[]`) {
+		t.Errorf("missing = %d %s", r.StatusCode, b)
+	}
+	// Deleted straight in LLDAP.
+	if _, err := s.Directory.DeleteInstanceGroup(context.Background(), "root", "users_demo"); err != nil {
+		t.Fatal(err)
+	}
+	if r, b := doAs(t, srv, "root", "GET", "/api/instances/missing-groups", ""); r.StatusCode != 200 || !strings.Contains(b, `{"instance":"demo","creatable":["users_demo"]}`) {
+		t.Errorf("missing = %d %s", r.StatusCode, b)
+	}
+	if r, b := doAs(t, srv, "alice", "POST", "/api/instances/missing-groups", `{}`); r.StatusCode == 200 || ll.HasGroup("users_demo") {
+		t.Errorf("non-admin create = %d %s", r.StatusCode, b)
+	}
+	if r, b := doAs(t, srv, "root", "POST", "/api/instances/missing-groups", `{}`); r.StatusCode != 200 || !strings.Contains(b, `"created":["users_demo"]`) || !ll.HasGroup("users_demo") {
+		t.Errorf("create = %d %s", r.StatusCode, b)
 	}
 }
