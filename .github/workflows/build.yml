@@ -53,6 +53,13 @@ jobs:
       - name: go build
         run: go build -o /dev/null ./cmd/hub
 
+      # .github/automerge/automerge.sh (Dependabot auto-merge): fake gh +
+      # fixtures, no network.
+      - name: Dependabot auto-merge tests
+        run: |
+          shellcheck -S warning .github/automerge/*.sh
+          bash .github/automerge/test.sh
+
       # The real templates and core: every published template must load
       # with the Hub's rules (TestRealTemplates*), and the Hub's lists of
       # core names must match core (TestCore*Complete). The same-named

@@ -1,3 +1,7 @@
+# Merged by .github/workflows/dependabot-automerge.yml once Build and Push
+# passes (patch, minor, digest-only); majors get `major-update` and wait for a
+# manual merge; pre-releases are closed; red CI opens an `update-failed`
+# issue. Go and Actions skip pre-releases by default; docker needs the ranges.
 version: 2
 updates:
   - package-ecosystem: gomod
@@ -15,6 +19,13 @@ updates:
     groups:
       docker:
         patterns: ["*"]
+    # No pre-releases (golang 1.28rc1 = Gem 1.28.rc.1; Docker `versions` use Ruby Gem
+    # requirement syntax: ">= X.Y.a, < X.Y" is exactly X.Y's betas and rcs.
+    # Add the next minor when its pre-releases start; .github/automerge closes
+    # any pre-release PR that still gets through).
+    ignore:
+      - dependency-name: "golang"
+        versions: [">= 1.28.a, < 1.28", ">= 1.29.a, < 1.29", ">= 1.30.a, < 1.30"]
 
   - package-ecosystem: github-actions
     directory: /
