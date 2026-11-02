@@ -183,6 +183,42 @@ CI if it asserts hostnames.
 - [ ] **Step 3:** Pi-hole and AdGuard Home: remove the second login behind the gateway where upstream allows it safely (check API access, DNS-over-HTTPS and admin endpoints); otherwise document why the app password stays.
 - [ ] **Step 4:** update the per-app tests (`tests/apps/<app>.sh`) and the validator expectations, run the templates CI checks locally, regenerate the docs app pages, and commit to both repos.
 
+### Task 2c: Full per-app sign-in tests in templates CI (user request 2026-11-02)
+
+**Why:** today's `tests/apps/<app>.sh` mostly check config, start the app and probe its own login page. They don't prove that a real person can sign in through Portcullis and gets the right role. The user wants a full test per integrated app, run by GitHub Actions on every change, especially image version bumps (Dependabot PRs).
+
+**Files (templates):**
+- `tests/e2e/app_signin.py` (new; Playwright + a CDP virtual WebAuthn authenticator, like core's `tests/e2e`);
+- `tests/e2e/requirements.txt` (pinned with hashes);
+- a manifest `tests.signin` block in every template;
+- `schema/manifest.schema.json`, `tests/validate.py` (require the block for every template except `public`/`custom` ones, which declare why);
+- `.github/workflows/test-apps.yml` (run the e2e for every changed app after its existing test; also on Dependabot PRs; a `workflow_dispatch` input "all apps");
+- `CONTRIBUTING.md`;
+- docs `operations/testing.md` and `guides/adding-an-app.md`.
+
+**Manifest block (contract):**
+```yaml
+tests:
+  signin:
+    path: /                    # page to open on the app's main host
+    signed_in:                 # how to recognise a signed-in user (one of)
+      text: "{username}"       # visible text containing the username, or
+      json: {url: /api/user, field: login}   # an API returning the username
+    admin:                     # optional: how to recognise admin rights
+      json: {url: /api/user, field: isGrafanaAdmin, equals: true}
+```
+
+- [ ] **Step 1: Write the driver.** For each changed app, on the core stack the templates CI already boots, `app_signin.py`:
+  1. creates three LLDAP users, `member` (in the access group), `admin` (in the admin group) and `outsider` (in neither), through core's CLI, with setup links;
+  2. registers a passkey for each with the virtual authenticator;
+  3. opens the app host and completes the app's real sign-in (forward-auth / header-auth / native-oidc / saml);
+  4. asserts `signed_in` shows the right username for `member`, `admin` rights for `admin`, and that `outsider` is refused (403 from group-gate, or the app's own denial for native-oidc apps once Task 4b lands; until then mark it `expected_fail` with the reason);
+  5. checks there is no password field on the way, except the break-glass flows the manifest documents.
+  - Screenshots and traces are kept on failure.
+- [ ] **Step 2:** add `tests.signin` to all 22 templates and make the validator require it.
+- [ ] **Step 3:** wire it into `test-apps.yml` (changed apps; Dependabot PRs; dispatch "all"). Keep the existing per-app shell tests. Pin Playwright and its browser through the existing pip/Playwright cache.
+- [ ] **Step 4:** run it on the `contract-v2` branch via `workflow_dispatch` for every app. Fix what fails, or record a documented `expected_fail`, then commit.
+
 ## Phase 2 — Hub instances
 
 ### Task 3: Instance model + lifecycle
