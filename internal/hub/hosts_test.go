@@ -504,11 +504,17 @@ func TestHostRulesWhateverTheClassification(t *testing.T) {
 		"people.example.org":  "core hostname people.example.org",
 		"Team-A.Example.org.": "already used by instance team",
 	} {
-		err := f.h.SetHosts("grafana-c", map[string]string{"grafana": host}, "alice")
-		if statusOf(err) != 409 || !strings.Contains(err.Error(), why) {
-			t.Errorf("host %s: %v, want 409 %q", host, err, why)
+		// The source's bogus core-host "domains" are ignored (enrolledLocked),
+		// so hosts under them are plain too-deep main-domain names (400).
+		want := 409
+		if host == "x.auth.example.org" || host == "x.hub.example.org" || host == "a.x.hub.example.org" {
+			want, why = 400, "deeper names need an enrolled domain"
 		}
-		if err := f.h.CreateInstance("grafana", "grafana-z", map[string]string{"grafana": host}); statusOf(err) != 409 {
+		err := f.h.SetHosts("grafana-c", map[string]string{"grafana": host}, "alice")
+		if statusOf(err) != want || !strings.Contains(err.Error(), why) {
+			t.Errorf("host %s: %v, want %d %q", host, err, want, why)
+		}
+		if err := f.h.CreateInstance("grafana", "grafana-z", map[string]string{"grafana": host}); statusOf(err) != want {
 			t.Errorf("create on %s: %v", host, err)
 		}
 	}

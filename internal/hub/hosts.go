@@ -105,8 +105,11 @@ func (h *Hub) enrolledLocked() []Domain {
 	}
 	for _, d := range h.domains.Domains() {
 		n := NormalizeHost(d.Name)
-		if n == main || !templates.ValidHostname(n) {
+		if n == main {
 			continue
+		}
+		if domainNameProblem(n, main) != "" {
+			continue // validKnown logged it when the list arrived
 		}
 		out = append(out, Domain{Name: n, State: d.State})
 	}

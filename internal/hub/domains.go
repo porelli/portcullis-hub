@@ -61,6 +61,8 @@ func (k knownDomains) Domains() []Domain {
 	for _, d := range h.st.Domains {
 		st := d.State
 		switch {
+		case h.domainsDeleting[d.Name]:
+			st = "deleting"
 		case !h.domainsReachable:
 			st = DomainUnreachable
 		case knownAssignable(d, now):
@@ -85,6 +87,60 @@ func toKnown(list []domains.Domain) []state.KnownDomain {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
+}
+
+// validKnown drops (and logs) entries of the service's list that break the
+// enrollment rules (§12.2, §12.3): not a valid hostname, the main domain or
+// a parent of it, at or under a core host, or nested with another entry.
+// The Hub never trusts the list to be what it enrolled.
+func validKnown(main string, list []state.KnownDomain) []state.KnownDomain {
+	out := make([]state.KnownDomain, 0, len(list))
+	for _, d := range list {
+		if why := domainNameProblem(d.Name, main); why != "" {
+			log.Printf("domains: ignoring %q from the domains service: %s", d.Name, why)
+			continue
+		}
+		nested := ""
+		for _, o := range list {
+			if o.Name != d.Name && (strings.HasSuffix(d.Name, "."+o.Name) || strings.HasSuffix(o.Name, "."+d.Name)) {
+				nested = o.Name
+			}
+		}
+		if nested != "" {
+			log.Printf("domains: ignoring %q from the domains service: nested with %s", d.Name, nested)
+			continue
+		}
+		out = append(out, d)
+	}
+	return out
+}
+
+// domainNameProblem: why name can't be an enrolled domain ("" = fine).
+func domainNameProblem(name, main string) string {
+	main = strings.ToLower(main)
+	switch {
+	case !templates.ValidHostname(name):
+		return "not a valid hostname"
+	case name == main || strings.HasSuffix(main, "."+name):
+		return "the main domain or a parent of it"
+	}
+	for sub := range policy.CoreSubdomains() {
+		if c := sub + "." + main; name == c || strings.HasSuffix(name, "."+c) {
+			return "at or under the core host " + c
+		}
+	}
+	return ""
+}
+
+// providers the domains service supports (§12.2); anything else is a 400
+// before it is forwarded, logged or audited.
+var knownProviders = map[string]bool{"cloudflare": true, "porkbun": true, "route53": true, "digitalocean": true, "hetzner": true}
+
+func providerDetail(p string) string {
+	if knownProviders[p] {
+		return "provider " + p
+	}
+	return "provider (invalid)"
 }
 
 func fromKnown(list []state.KnownDomain) []domains.Domain {
@@ -164,14 +220,24 @@ func (h *Hub) RefreshDomains(ctx context.Context) ([]domains.Domain, error) {
 		h.setReachable(false)
 		return nil, &StatusError{Status: 503, Err: err}
 	}
+	h.mu.RLock()
+	gen := h.domainsGen
+	h.mu.RUnlock()
 	list, err := api.List(ctx)
 	if err != nil {
 		h.setReachable(false)
 		return nil, domainsErr(err)
 	}
-	known := toKnown(list)
+	known := validKnown(h.cfg.Domain, toKnown(list))
+	list = fromKnown(known)
 	h.mu.Lock()
 	h.domainsReachable = true
+	if h.domainsGen != gen {
+		// A domain operation committed while List was in flight: its
+		// result is newer than this list.
+		h.mu.Unlock()
+		return list, nil
+	}
 	namesChanged := !reflect.DeepEqual(knownNames(known), knownNames(h.st.Domains))
 	changed := !reflect.DeepEqual(known, h.st.Domains)
 	if changed {
@@ -262,7 +328,7 @@ func (h *Hub) knownHostsLocked(runtime map[string][]string) map[string]string {
 // a domain must not turn hosts the Hub already knows into extra-domain
 // hosts (e.g. team-a.<main> while a template defaults to subdomain team-a,
 // or x.team-a.<main> routed by an instance). Caller holds mu.
-func (h *Hub) checkEnrollLocked(name string, runtime map[string][]string) error {
+func (h *Hub) checkEnrollLocked(name string, runtime map[string][]string, self bool) error {
 	main := strings.ToLower(h.cfg.Domain)
 	if name == main || strings.HasSuffix(main, "."+name) {
 		return statusErr(400, "%s is the main domain or a parent of it: it can't be enrolled", name)
@@ -274,6 +340,9 @@ func (h *Hub) checkEnrollLocked(name string, runtime map[string][]string) error 
 		}
 	}
 	for _, d := range h.st.Domains {
+		if self && d.Name == name {
+			continue // the re-check after Enroll: a refresh may already list it
+		}
 		switch {
 		case d.Name == name:
 			return statusErr(409, "%s is already enrolled", name)
@@ -334,12 +403,15 @@ func (h *Hub) knownLocked(name string) bool {
 // them. Audited as domain.enroll (provider only).
 func (h *Hub) EnrollDomain(ctx context.Context, actor, name, provider string, creds map[string]string) (d domains.Domain, err error) {
 	name = NormalizeHost(name)
-	defer func() { h.auditOp(actor, "domain.enroll", name, "provider "+provider, err) }()
+	defer func() { h.auditOp(actor, "domain.enroll", name, providerDetail(provider), err) }()
 	if strings.TrimSpace(actor) == "" {
 		return d, statusErr(400, "no signed-in user to audit the change as")
 	}
 	if !templates.ValidHostname(name) {
 		return d, statusErr(400, "%q is not a valid hostname (lowercase labels, no scheme, port or wildcard)", name)
+	}
+	if !knownProviders[provider] {
+		return d, statusErr(400, "unknown provider (one of cloudflare, porkbun, route53, digitalocean, hetzner)")
 	}
 	h.domainOpMu.Lock()
 	defer h.domainOpMu.Unlock()
@@ -348,12 +420,15 @@ func (h *Hub) EnrollDomain(ctx context.Context, actor, name, provider string, cr
 	}
 	runtime := h.runtimeCopy()
 	h.mu.RLock()
-	err = h.checkEnrollLocked(name, runtime)
+	err = h.checkEnrollLocked(name, runtime, false)
 	api := h.domainsAPI
 	h.mu.RUnlock()
 	if err != nil {
 		return d, err
 	}
+	// Not cancelled with the request: once forwarded, the outcome must be
+	// recorded (or undone) whatever the client does.
+	ctx = context.WithoutCancel(ctx)
 	d, err = api.Enroll(ctx, name, provider, creds)
 	if err != nil {
 		return d, domainsErr(err)
@@ -362,14 +437,16 @@ func (h *Hub) EnrollDomain(ctx context.Context, actor, name, provider string, cr
 	// change). Undo the enrollment then.
 	runtime = h.runtimeCopy()
 	h.mu.Lock()
-	if cerr := h.checkEnrollLocked(name, runtime); cerr != nil {
+	if cerr := h.checkEnrollLocked(name, runtime, true); cerr != nil {
+		h.domainsGen++
 		h.mu.Unlock()
-		if _, derr := api.Delete(context.Background(), name); derr != nil {
+		if _, derr := api.Delete(ctx, name); derr != nil {
 			log.Printf("domains: undoing the enrollment of %s after a lost race failed: %v", name, derr)
 		}
 		return domains.Domain{}, cerr
 	}
 	h.upsertKnownLocked(d)
+	h.domainsGen++
 	h.saveLocked()
 	h.mu.Unlock()
 	if perr := h.WritePolicy(); perr != nil {
@@ -383,9 +460,12 @@ func (h *Hub) EnrollDomain(ctx context.Context, actor, name, provider string, cr
 // domain.token (provider only).
 func (h *Hub) ReplaceDomainToken(ctx context.Context, actor, name, provider string, creds map[string]string) (d domains.Domain, err error) {
 	name = NormalizeHost(name)
-	defer func() { h.auditOp(actor, "domain.token", name, "provider "+provider, err) }()
+	defer func() { h.auditOp(actor, "domain.token", name, providerDetail(provider), err) }()
 	if strings.TrimSpace(actor) == "" {
 		return d, statusErr(400, "no signed-in user to audit the change as")
+	}
+	if !knownProviders[provider] {
+		return d, statusErr(400, "unknown provider (one of cloudflare, porkbun, route53, digitalocean, hetzner)")
 	}
 	h.domainOpMu.Lock()
 	defer h.domainOpMu.Unlock()
@@ -398,11 +478,12 @@ func (h *Hub) ReplaceDomainToken(ctx context.Context, actor, name, provider stri
 	if !known {
 		return d, statusErr(404, "%s is not enrolled", name)
 	}
-	d, err = api.SetToken(ctx, name, provider, creds)
+	d, err = api.SetToken(context.WithoutCancel(ctx), name, provider, creds)
 	if err != nil {
 		return d, domainsErr(err)
 	}
 	h.mu.Lock()
+	h.domainsGen++
 	h.upsertKnownLocked(d)
 	h.saveLocked()
 	h.mu.Unlock()
@@ -461,26 +542,37 @@ func (h *Hub) DeleteDomain(ctx context.Context, actor, name string) (warning str
 	if _, err := h.RefreshDomains(ctx); err != nil {
 		return "", err
 	}
-	h.mu.RLock()
+	// Under one lock: check the users and mark the domain deleting (no
+	// longer assignable), so no instance can take a host on it between the
+	// check and the service call.
+	h.mu.Lock()
 	known, users, api := h.knownLocked(name), h.domainUsersLocked(name), h.domainsAPI
-	h.mu.RUnlock()
+	if known && len(users) == 0 {
+		if h.domainsDeleting == nil {
+			h.domainsDeleting = map[string]bool{}
+		}
+		h.domainsDeleting[name] = true
+		h.domainsGen++
+	}
+	h.mu.Unlock()
 	if !known {
 		return "", statusErr(404, "%s is not enrolled", name)
 	}
 	if len(users) > 0 {
 		return "", statusErr(409, "%s is used by instance(s) %s: move their hostnames or delete them first", name, strings.Join(users, ", "))
 	}
-	warning, err = api.Delete(ctx, name)
+	warning, err = api.Delete(context.WithoutCancel(ctx), name)
 	var ae *domains.APIError
 	if err != nil && !(errors.As(err, &ae) && ae.Status == 404) {
+		h.mu.Lock()
+		delete(h.domainsDeleting, name)
+		h.domainsGen++
+		h.mu.Unlock()
 		return "", domainsErr(err)
 	}
 	h.mu.Lock()
-	// An instance may have taken a host on it meanwhile: it keeps it, but
-	// the domain is gone either way (the service deleted it).
-	if late := h.domainUsersLocked(name); len(late) > 0 {
-		log.Printf("domains: %s was removed while instance(s) %s took a hostname on it", name, strings.Join(late, ", "))
-	}
+	delete(h.domainsDeleting, name)
+	h.domainsGen++
 	kept := h.st.Domains[:0]
 	for _, d := range h.st.Domains {
 		if d.Name != name {

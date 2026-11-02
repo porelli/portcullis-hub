@@ -91,7 +91,12 @@ type Hub struct {
 	// the service calls, never together with mu).
 	domainsAPI       DomainsAPI
 	domainsReachable bool
-	domainOpMu       sync.Mutex
+	// domainsDeleting: names a DeleteDomain is removing (not assignable
+	// meanwhile); domainsGen changes with every domain operation's commit,
+	// so a RefreshDomains that started before it drops its stale list.
+	domainsDeleting map[string]bool
+	domainsGen      uint64
+	domainOpMu      sync.Mutex
 
 	// mu guards st and templates. Never hold it across docker/network calls.
 	mu        sync.RWMutex

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/hub"
@@ -121,7 +122,21 @@ func writeErr(w http.ResponseWriter, err error, def int) {
 		})
 		return
 	}
-	http.Error(w, err.Error(), code)
+	// Errors that went through an op record were redacted, then clipped
+	// (finishOp); anything else is clipped here for display (nothing in it
+	// is redacted, so clipping can't let a redaction slip).
+	http.Error(w, clipMessage(err.Error(), 2000), code)
+}
+
+// clipMessage shortens s to at most n bytes on a rune boundary.
+func clipMessage(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n] + "…"
 }
 
 // decodeJSON decodes a size-limited JSON body, writing a 400 on error.

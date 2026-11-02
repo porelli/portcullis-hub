@@ -27,6 +27,11 @@ type fakeDomainsAPI struct {
 	deleted  []string
 	creds    []map[string]string // every credentials map received
 	warning  string
+	// Hooks (run without f.mu): listHook before List answers (with the
+	// list snapshot already taken), enrollHook / deleteHook inside the call.
+	listHook   func()
+	enrollHook func(ctx context.Context) error
+	deleteHook func() error
 }
 
 func newFakeDomainsAPI() *fakeDomainsAPI { return &fakeDomainsAPI{list: map[string]domains.Domain{}} }
@@ -35,19 +40,32 @@ func (f *fakeDomainsAPI) Available() error { return nil }
 
 func (f *fakeDomainsAPI) List(context.Context) ([]domains.Domain, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	if f.down {
+		f.mu.Unlock()
 		return nil, fmt.Errorf("%w (dial tcp: connection refused)", domains.ErrUnreachable)
 	}
 	out := []domains.Domain{}
 	for _, d := range f.list {
 		out = append(out, d)
 	}
+	hook := f.listHook
+	f.mu.Unlock()
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	if hook != nil {
+		hook()
+	}
 	return out, nil
 }
 
-func (f *fakeDomainsAPI) Enroll(_ context.Context, name, provider string, creds map[string]string) (domains.Domain, error) {
+func (f *fakeDomainsAPI) Enroll(ctx context.Context, name, provider string, creds map[string]string) (domains.Domain, error) {
+	if f.enrollHook != nil {
+		if err := f.enrollHook(ctx); err != nil {
+			return domains.Domain{}, err
+		}
+	}
+	if ctx.Err() != nil {
+		return domains.Domain{}, ctx.Err()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.down {
@@ -77,6 +95,11 @@ func (f *fakeDomainsAPI) SetToken(_ context.Context, name, provider string, cred
 }
 
 func (f *fakeDomainsAPI) Delete(_ context.Context, name string) (string, error) {
+	if f.deleteHook != nil {
+		if err := f.deleteHook(); err != nil {
+			return "", err
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if _, ok := f.list[name]; !ok {
@@ -364,4 +387,137 @@ func TestKnownDomainsSurviveRestart(t *testing.T) {
 	if _, err := h2.RefreshDomains(context.Background()); !errors.As(err, &se) || se.Status != 503 {
 		t.Fatalf("refresh = %v", err)
 	}
+}
+
+func readyDomain(t *testing.T, f *fixture, api *fakeDomainsAPI, name string) {
+	t.Helper()
+	if _, err := f.h.EnrollDomain(context.Background(), "alice", name, "cloudflare", creds()); err != nil {
+		t.Fatal(err)
+	}
+	api.set(name, true, time.Now().Add(60*24*time.Hour))
+	if _, err := f.h.RefreshDomains(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestDeleteMarksDeleting: while the service deletes, the domain is not
+// assignable (no host can slip in between the check and the delete); a
+// failed delete makes it assignable again.
+func TestDeleteMarksDeleting(t *testing.T) {
+	f, api, _ := newDomainsFixture(t)
+	readyDomain(t, f, api, "team-b.example.net")
+	inDelete, release := make(chan struct{}), make(chan error)
+	api.deleteHook = func() error { close(inDelete); return <-release }
+	done := make(chan error)
+	go func() { _, err := f.h.DeleteDomain(context.Background(), "alice", "team-b.example.net"); done <- err }()
+	<-inDelete
+	err := f.h.CreateInstance("grafana", "grafana-d", map[string]string{"grafana": "grafana.team-b.example.net"})
+	if statusOf(err) != 409 || !strings.Contains(err.Error(), "deleting") {
+		t.Fatalf("host on a domain being deleted: %v", err)
+	}
+	release <- &domains.APIError{Status: 500, Message: "boom"}
+	if err := <-done; statusOf(err) != 502 {
+		t.Fatalf("failed delete = %v", err)
+	}
+	api.deleteHook = nil
+	if err := f.h.CreateInstance("grafana", "grafana-d", map[string]string{"grafana": "grafana.team-b.example.net"}); err != nil {
+		t.Fatalf("after a failed delete the domain must be assignable again: %v", err)
+	}
+}
+
+// TestRefreshDropsStaleList: a List that started before an enrollment
+// committed can't drop the new domain from the known list.
+func TestRefreshDropsStaleList(t *testing.T) {
+	f, api, _ := newDomainsFixture(t)
+	listed, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	api.listHook = func() { once.Do(func() { close(listed); <-release }) }
+	done := make(chan struct{})
+	go func() { f.h.RefreshDomains(context.Background()); close(done) }()
+	<-listed // a background refresh holds the (empty) list
+	api.mu.Lock()
+	api.listHook = nil
+	api.mu.Unlock()
+	if _, err := f.h.EnrollDomain(context.Background(), "alice", "team-b.example.net", "cloudflare", creds()); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	<-done
+	if ds := f.h.KnownDomains(); len(ds) != 1 || ds[0].Name != "team-b.example.net" {
+		t.Fatalf("a stale refresh dropped the new domain: %v", ds)
+	}
+}
+
+// TestEnrollRecheckIgnoresOwnEntry: a refresh that lands between the
+// service's Enroll and the Hub's commit lists the new name already; the
+// re-check must not take that for a conflict (and undo the enrollment).
+// The service call isn't cancelled with the request either.
+func TestEnrollRecheckIgnoresOwnEntry(t *testing.T) {
+	f, api, _ := newDomainsFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	api.enrollHook = func(context.Context) error {
+		cancel() // the client went away
+		return nil
+	}
+	api.listHook = nil
+	d, err := f.h.EnrollDomain(ctx, "alice", "team-b.example.net", "cloudflare", creds())
+	if err != nil || d.Name != "team-b.example.net" {
+		t.Fatalf("enroll with a cancelled request = %+v, %v", d, err)
+	}
+	// The race itself: the known list already has the name (a refresh
+	// after the service's Enroll); the re-check skips it, the first check
+	// doesn't.
+	f2, api2, _ := newDomainsFixture(t)
+	// Simulate: the service already lists the domain and the Hub refreshed.
+	api2.list["team-c.example.net"] = domains.Domain{Name: "team-c.example.net", Provider: "cloudflare", State: "pending"}
+	f2.h.mu.Lock()
+	f2.h.st.Domains = append(f2.h.st.Domains, toKnown([]domains.Domain{api2.list["team-c.example.net"]})...)
+	runtime := map[string][]string{}
+	err = f2.h.checkEnrollLocked("team-c.example.net", runtime, true)
+	f2.h.mu.Unlock()
+	if err != nil {
+		t.Fatalf("re-check refused the name's own entry: %v", err)
+	}
+	f2.h.mu.Lock()
+	err = f2.h.checkEnrollLocked("team-c.example.net", runtime, false)
+	f2.h.mu.Unlock()
+	if statusOf(err) != 409 {
+		t.Fatalf("first check accepted an enrolled name: %v", err)
+	}
+}
+
+// TestServiceListValidated: entries breaking the enrollment rules are
+// ignored, whatever the service says.
+func TestServiceListValidated(t *testing.T) {
+	f, api, _ := newDomainsFixture(t)
+	for _, n := range []string{"auth.example.org", "x.hub.example.org", "example.org", "org.example.org.x", "nest.example.net", "a.nest.example.net", "ok.example.net", "Bad_Name.net"} {
+		api.list[n] = domains.Domain{Name: n, State: "ready"}
+	}
+	if _, err := f.h.RefreshDomains(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, d := range f.h.KnownDomains() {
+		got = append(got, d.Name)
+	}
+	if strings.Join(got, ",") != "ok.example.net,org.example.org.x" {
+		t.Fatalf("known = %v", got)
+	}
+	if doc := readPolicy(t, f); strings.Join(doc.ExtraDomains, ",") != "ok.example.net,org.example.org.x" {
+		t.Fatalf("extra_domains = %v", doc.ExtraDomains)
+	}
+}
+
+func TestUnknownProviderRefused(t *testing.T) {
+	f, api, audit := newDomainsFixture(t)
+	if _, err := f.h.EnrollDomain(context.Background(), "alice", "team-b.example.net", "evil\nprovider "+secretToken, creds()); statusOf(err) != 400 {
+		t.Fatalf("unknown provider: %v", err)
+	}
+	if len(api.enrolled) != 0 {
+		t.Fatal("forwarded")
+	}
+	if e := audit.last(); e.Detail != "provider (invalid)" {
+		t.Fatalf("audit detail %q", e.Detail)
+	}
+	assertNoSecret(t, f, audit)
 }
