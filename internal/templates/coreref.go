@@ -464,6 +464,9 @@ func checkServiceLabels(svc string, labels interface{}, hostVars map[string]stri
 		if err := checkTraefikKeyShape(svc, k); err != nil {
 			return err
 		}
+		if err := checkCoreReferences(svc, k, v); err != nil {
+			return err
+		}
 		// Traefik label keys as ParseRoutes matches them (Traefik itself is
 		// case-insensitive, so `Traefik.http…`, ` traefik.http…` or a
 		// `…Rule` would route unparsed): no surrounding whitespace, the
@@ -657,6 +660,38 @@ func checkComposeKeys(doc map[string]interface{}) error {
 		for k := range s {
 			if !serviceKeys[k] {
 				return fmt.Errorf("service %s: compose key %q is not allowed in templates (the Hub can't check what it does)", name, k)
+			}
+		}
+	}
+	return nil
+}
+
+// appMiddlewares are core's @docker middlewares a template may chain
+// (contract §5); every @file middleware of core's dynamic configuration
+// (security-headers, rate-limit, client-headers, …) is for apps too.
+var appMiddlewares = set("portcullis-auth", "portcullis-groups")
+
+// checkCoreReferences: a router may not send its traffic to a core service
+// (`service: hub@docker` would route the template's host to the Hub,
+// Keycloak or LLDAP; `api@internal` is Traefik's dashboard), and no
+// router or chain may use a core @docker middleware other than the
+// gateway ones (`hub-proxy-secret@docker` injects the Hub's proxy secret).
+func checkCoreReferences(svc, k, v string) error {
+	ref := func(s string) (base, provider string) {
+		base, provider, _ = strings.Cut(strings.TrimSpace(s), "@")
+		return base, provider
+	}
+	switch {
+	case routerLabelRe.MatchString(k) && strings.HasSuffix(k, ".service"):
+		base, prov := ref(v)
+		if prov == "internal" || (prov == "" || prov == "docker") && coreTraefikNames["services"][base] || prov == "file" {
+			return fmt.Errorf("service %s: label %s: router service %q is core's", svc, k, v)
+		}
+	case routerLabelRe.MatchString(k) && strings.HasSuffix(k, ".middlewares"), strings.HasSuffix(k, ".chain.middlewares"):
+		for _, m := range strings.Split(v, ",") {
+			base, prov := ref(m)
+			if prov == "internal" || (prov == "" || prov == "docker") && coreTraefikNames["middlewares"][base] && !appMiddlewares[base] {
+				return fmt.Errorf("service %s: label %s: middleware %q is core's (apps may chain portcullis-auth@docker, portcullis-groups@docker and core's @file middlewares)", svc, k, strings.TrimSpace(m))
 			}
 		}
 	}

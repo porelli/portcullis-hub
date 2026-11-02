@@ -160,6 +160,7 @@ func TestCheckCoreRefsBypasses(t *testing.T) {
 		"services:\n  web:\n    labels:\n      traefik.http.middlewares.m.redirectregex.replacement: https://${PORTCULLIS_HOST_GITLAB:-git.portcullis.local}/admin\n      traefik.http.middlewares.m.redirectregex.regex: ^https://[^/]+/?$$\n",
 		"services:\n  web:\n    labels:\n      com.example.note: ${ANY}\n",
 		"services:\n  web:\n    labels:\n      traefik.http.middlewares.h.headers.customresponseheaders.X-App: grafana\n",
+		"services:\n  web:\n    labels:\n      traefik.http.routers.app.middlewares: client-headers@file,portcullis-auth@docker,portcullis-groups@docker,security-headers@file\n      traefik.http.routers.app.service: app\n",
 	}
 	for _, c := range ok {
 		if err := checkCoreRefs([]byte(c), hv); err != nil {
@@ -196,6 +197,15 @@ var unicodeBypasses = map[string]string{
 	"core router":       "traefik.http.routers.keycloak.entrypoints: websecure",
 	"core service":      "traefik.http.services.hub.loadbalancer.server.port: \"1\"",
 	"core public guard": "traefik.http.middlewares.portcullis-public-guard.forwardauth.address: http://evil",
+	// References to core objects.
+	"service hub":             "traefik.http.routers.app.service: hub@docker",
+	"service keycloak bare":   "traefik.http.routers.app.service: keycloak",
+	"service lldap":           "traefik.http.routers.app.service: lldap@docker",
+	"service api@internal":    "traefik.http.routers.app.service: api@internal",
+	"middleware proxy secret": "traefik.http.routers.app.middlewares: portcullis-auth@docker,portcullis-groups@docker,hub-proxy-secret@docker",
+	"middleware self bare":    "traefik.http.routers.app.middlewares: portcullis-self",
+	"chain proxy secret":      "traefik.http.middlewares.c.chain.middlewares: hub-proxy-secret@docker",
+	"middleware console":      "traefik.http.routers.app.middlewares: portcullis-auth-console@docker",
 }
 
 func TestCheckCoreRefsUnicodeFolding(t *testing.T) {
