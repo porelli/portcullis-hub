@@ -730,6 +730,8 @@ type fakeGroups struct {
 	calls    []string // "+name:actor" / "-name:actor"
 	delErr   error
 	actorErr error
+	// createErr, if set, fails creating the named group.
+	createErr func(name string) error
 }
 
 func (g *fakeGroups) ResolveActor(ctx context.Context, actor string) error {
@@ -741,6 +743,11 @@ func (g *fakeGroups) ResolveActor(ctx context.Context, actor string) error {
 func (g *fakeGroups) CreateInstanceGroup(ctx context.Context, actor, name string) ([]string, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	if g.createErr != nil {
+		if err := g.createErr(name); err != nil {
+			return nil, err
+		}
+	}
 	g.calls = append(g.calls, "+"+name+":"+actor)
 	return nil, nil
 }

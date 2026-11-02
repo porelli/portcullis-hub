@@ -240,6 +240,40 @@
     .op-modal-box { background: #1e293b; border: 1px solid #ef444466; border-radius: 0.75rem; padding: 1.25rem 1.5rem; width: min(900px, 100%); max-height: 90vh; overflow-y: auto; }
     .op-modal-title { font-weight: 600; margin-bottom: 0.75rem; color: #ef4444; }
     .op-modal-actions { display: flex; gap: 0.5rem; justify-content: flex-end; margin-top: 0.75rem; }
+
+    /* App instances (contract §11) */
+    .app-instances { display: flex; flex-wrap: wrap; gap: 0.375rem; align-items: center; margin-bottom: 0.75rem; font-size: 0.75rem; }
+    .app-instances:empty { display: none; }
+    .inst-chip { background: #0f172a; border: 1px solid #334155; color: #e2e8f0; border-radius: 9999px; padding: 0.0625rem 0.25rem 0.0625rem 0.625rem; font-size: 0.75rem; cursor: pointer; font-family: 'SF Mono', 'Fira Code', monospace; }
+    .inst-chip:hover { border-color: #3b82f6; }
+    .inst-chip .pill { margin: 0 0 0 0.25rem; }
+    .inst-modal-box { border-color: #334155; width: min(960px, 100%); }
+    .inst-modal-head { display: flex; justify-content: space-between; align-items: center; gap: 0.75rem; margin-bottom: 0.75rem; }
+    .inst-modal-title { font-weight: 600; font-size: 1.0625rem; }
+    .inst-modal-title code { font-family: 'SF Mono', 'Fira Code', monospace; color: #93c5fd; }
+    .inst-section { background: #0f172a; border: 1px solid #1e293b; border-radius: 0.5rem; padding: 0.875rem 1rem; margin-bottom: 1rem; font-size: 0.8125rem; }
+    .inst-section h4 { font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: #64748b; margin-bottom: 0.5rem; }
+    .inst-facts { display: grid; grid-template-columns: max-content 1fr; gap: 0.25rem 1rem; }
+    .inst-facts dt { color: #64748b; }
+    .inst-facts code, .inst-table code, .inst-section p code { font-family: 'SF Mono', 'Fira Code', monospace; color: #e2e8f0; }
+    .host-row { display: grid; grid-template-columns: 9rem 1fr; gap: 0.5rem; align-items: center; margin-bottom: 0.5rem; }
+    .host-row label { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.8125rem; }
+    .host-row input { width: 100%; padding: 0.4375rem 0.625rem; background: #1e293b; border: 1px solid #334155; border-radius: 0.375rem; color: #e2e8f0; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.8125rem; }
+    .host-row input[readonly] { background: #0b1220; color: #94a3b8; border-style: dashed; cursor: not-allowed; }
+    .host-row small { grid-column: 2; color: #64748b; font-size: 0.75rem; margin-top: -0.25rem; }
+    .inst-form label.block { display: block; font-size: 0.8125rem; font-weight: 500; margin-bottom: 0.25rem; }
+    .inst-form input[type="text"], .inst-form select { width: 100%; padding: 0.5rem 0.75rem; background: #1e293b; border: 1px solid #334155; border-radius: 0.375rem; color: #e2e8f0; font-size: 0.875rem; font-family: inherit; margin-bottom: 0.25rem; }
+    .inst-form small { display: block; color: #64748b; font-size: 0.75rem; margin-bottom: 0.75rem; }
+    .inst-row { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; margin-top: 0.5rem; }
+    .inst-table { width: 100%; border-collapse: collapse; font-size: 0.8125rem; }
+    .inst-table th { text-align: left; color: #64748b; font-weight: 500; padding: 0.375rem 0.5rem; border-bottom: 1px solid #334155; }
+    .inst-table td { padding: 0.375rem 0.5rem; border-top: 1px solid #1e293b; vertical-align: middle; }
+    .inst-error { background: #ef444411; border: 1px solid #ef444455; border-radius: 0.375rem; padding: 0.5rem 0.75rem; }
+    .inst-ok { color: #4ade80; background: #22c55e11; border: 1px solid #22c55e44; border-radius: 0.375rem; padding: 0.5rem 0.75rem; margin-bottom: 0.5rem; }
+    .inst-warns { color: #fde68a; background: #f59e0b11; border: 1px solid #f59e0b44; border-radius: 0.375rem; padding: 0.5rem 0.75rem 0.5rem 1.75rem; margin-bottom: 0.5rem; }
+    .inst-danger { border-color: #ef444466; }
+    .inst-panel { margin-top: 0.75rem; padding: 0.75rem 1rem; border: 1px solid #3b82f655; border-radius: 0.5rem; background: #1e293b; }
+    .inst-panel ul { margin: 0.25rem 0 0.5rem 1.25rem; color: #94a3b8; }
   </style>
   <link rel="stylesheet" href="/static/directory.css">
 </head>
@@ -264,6 +298,7 @@
     <!-- Catalog Tab -->
     <div class="tab-content active" id="tab-catalog">
       <div class="drift" id="drift"></div>
+      <div id="instances-overview"></div>
       {{range $category, $apps := .Categories}}
       <div class="category">
         <div class="category-title">{{$category}}</div>
@@ -308,8 +343,9 @@
               {{end}}
             </div>
             {{end}}
+            {{if eq .Manifest.Instances "multi"}}<div class="app-instances" data-instances-of="{{.ID}}"></div>{{end}}
             <div class="app-footer">
-              <span></span>
+              {{if eq .Manifest.Instances "multi"}}<button type="button" class="btn btn-secondary btn-sm" data-add-instance="{{.ID}}" title="Run another, fully separate copy of this app">+ Add instance</button>{{else}}<span></span>{{end}}
               {{if .Enabled}}
               <button class="toggle disable" onclick="toggleApp('{{.ID}}', false, event)">Disable</button>
               {{else}}
@@ -336,11 +372,13 @@
               <span class="detail-tab" data-dtab="logs" data-app="{{.ID}}">Logs</span>
               {{end}}
               <span class="detail-tab" data-dtab="expert" data-app="{{.ID}}">Expert</span>
+              <span class="detail-tab" data-dtab="instances" data-app="{{.ID}}">Instances</span>
             </div>
             <div class="detail-content active" id="detail-settings-{{.ID}}"></div>
             <div class="detail-content" id="detail-status-{{.ID}}"></div>
             <div class="detail-content" id="detail-logs-{{.ID}}"></div>
             <div class="detail-content" id="detail-expert-{{.ID}}"></div>
+            <div class="detail-content" id="detail-instances-{{.ID}}"></div>
           </div>
           {{end}}
         </div>
@@ -434,6 +472,11 @@
     </div>
   </div>
 
+  <!-- App instances: create, detail (hostnames, backups, delete) -->
+  <div class="op-modal" id="inst-modal">
+    <div class="op-modal-box inst-modal-box" id="inst-modal-box"></div>
+  </div>
+
   <script src="/static/directory.js"></script>
   <script>
     // ── Tab switching ─────────────────────────────────────
@@ -469,6 +512,7 @@
         if (tab.dataset.dtab === 'status') loadStatus(appId);
         if (tab.dataset.dtab === 'logs') loadLogs(appId);
         if (tab.dataset.dtab === 'expert') loadExpert(appId);
+        if (tab.dataset.dtab === 'instances') loadTemplateInstances(appId);
       });
     });
 
@@ -496,11 +540,13 @@
         try {
           const j = await res.json();
           const err = new Error(j.error || ('HTTP ' + res.status));
-          Object.assign(err, { op: j.op, output: j.output || '', hint: j.hint || '', rolled_back: !!j.rolled_back });
+          Object.assign(err, { status: res.status, op: j.op, output: j.output || '', hint: j.hint || '', rolled_back: !!j.rolled_back });
           return err;
         } catch (e) { /* fall through */ }
       }
-      return new Error((await res.text()).trim() || ('HTTP ' + res.status));
+      const err = new Error((await res.text()).trim() || ('HTTP ' + res.status));
+      err.status = res.status;
+      return err;
     }
     async function apiPost(url, body) { return (await apiCall(url, 'POST', body)).json(); }
     async function apiPut(url, body) { return (await apiCall(url, 'PUT', body)).json(); }
@@ -518,7 +564,7 @@
     let openDetailId = null;
 
     function toggleDetail(id, e) {
-      if (e.target.closest('.toggle, .app-url, .detail-close')) return;
+      if (e.target.closest('.toggle, .app-url, .detail-close, [data-add-instance], [data-open-instance]')) return;
       const panel = document.getElementById('detail-' + id);
       const card = document.querySelector(`.app-card[data-id="${id}"]`);
 
@@ -1465,6 +1511,578 @@
         btn.textContent = enable ? 'Enable' : 'Disable';
       }
     }
+
+    // ── App instances (contract §11) ──────────────────────
+    // Admin-only API (§11.7). Everything rendered goes through escapeHtml;
+    // actions are data-* attributes handled by the delegated listeners
+    // below (no inline handlers with data).
+    const INSTANCE_ID_RE = /^[a-z][a-z0-9-]{0,30}$/;
+    const HOST_LABEL_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
+    const STATE_PILL = { enabled: 'ok', created: 'info', disabled: '', deleting: 'warn', restoring: 'warn', error: 'bad' };
+    let instancesCache = [];
+    let catalogCache = null;
+    let instCtx = null; // the open dialog: { kind: 'create'|'instance'|'backups', … }
+
+    async function loadCatalogInfo() {
+      if (!catalogCache) {
+        const list = await apiGet('/api/templates');
+        catalogCache = {};
+        for (const t of list) catalogCache[t.id] = t;
+      }
+      return catalogCache;
+    }
+    function templateLabel(tid) {
+      const t = catalogCache && catalogCache[tid];
+      return t ? ((t.manifest.icon ? t.manifest.icon + ' ' : '') + (t.manifest.name || tid)) : tid;
+    }
+    function statePill(s) {
+      return '<span class="pill ' + (STATE_PILL[s] || '') + '">' + escapeHtml(s) + '</span>';
+    }
+    function fmtSize(n) {
+      if (!(n >= 0)) return '';
+      const u = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+      let i = 0;
+      while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+      return (i ? n.toFixed(1) : String(n)) + ' ' + u[i];
+    }
+    function normHost(h) { return String(h || '').trim().toLowerCase().replace(/\.$/, ''); }
+
+    // Error text as the Hub said it, with what the status means.
+    function errorBox(err) {
+      const pre = { 400: 'Invalid: ', 403: 'Not allowed: ', 404: 'Not found: ', 409: 'Refused: ', 503: 'Unavailable: ',
+        507: 'Not enough free space on the Hub\'s data volume: ' }[err && err.status] || '';
+      let h = '<div class="op-msg inst-error">' + escapeHtml(pre + ((err && err.message) || String(err))) +
+        (err && err.rolled_back ? ' — rolled back: the previous data was put back.' : '') + '</div>';
+      if (err && err.hint) h += '<div class="op-hint">' + escapeHtml(err.hint) + '</div>';
+      if (err && err.output) h += '<pre class="log-viewer op-output">' + escapeHtml(err.output) + '</pre>';
+      return h;
+    }
+    function warningsList(ws) {
+      if (!ws || !ws.length) return '';
+      return '<ul class="inst-warns">' + ws.map(w => '<li>' + escapeHtml(w) + '</li>').join('') + '</ul>';
+    }
+
+    // A hostname the Hub would refuse, said before sending (the Hub
+    // checks again): one label under a domain, enrolled domains only
+    // when ready (kept hosts excepted).
+    function hostProblem(router, host, domains, keep) {
+      host = normHost(host);
+      if (!host) return router + ': a hostname is required';
+      const main = domains.find(d => d.main);
+      const extra = domains.find(d => !d.main && (host === d.name || host.endsWith('.' + d.name)));
+      if (extra) {
+        const rest = host === extra.name ? '' : host.slice(0, -extra.name.length - 1);
+        if (rest && !HOST_LABEL_RE.test(rest)) return router + ': ' + host + ' — only ' + extra.name + ' or <label>.' + extra.name + ' (the domain\'s certificate covers one label)';
+        if (!extra.assignable && !keep) return router + ': ' + host + ' — domain ' + extra.name + ' is not ready yet (' + (extra.state || 'not ready') + '): its records or certificate are not OK';
+        return '';
+      }
+      if (main && host.endsWith('.' + main.name)) {
+        const label = host.slice(0, -main.name.length - 1);
+        if (!HOST_LABEL_RE.test(label)) return router + ': ' + host + ' — only <label>.' + main.name + '; deeper names need an enrolled domain';
+        return '';
+      }
+      return router + ': ' + host + ' is neither <label>.' + (main ? main.name : 'main domain') + ' nor on an enrolled domain';
+    }
+
+    async function instanceDefaults(tid, id, domain) {
+      return apiGet('/api/instances/defaults?template=' + encodeURIComponent(tid) + '&id=' + encodeURIComponent(id || '') +
+        (domain ? '&domain=' + encodeURIComponent(domain) : ''));
+    }
+
+    function domainOptions(domains, selected) {
+      return domains.map(d => '<option value="' + escapeHtml(d.name) + '"' + (d.name === selected ? ' selected' : '') + (d.assignable ? '' : ' disabled') + '>' +
+        escapeHtml(d.name) + (d.main ? ' (main domain)' : d.assignable ? '' : ' — not ready (' + escapeHtml(d.state || '?') + ')') + '</option>').join('');
+    }
+
+    // Host inputs: immutable routers read-only once the instance exists.
+    function hostRows(routers, hosts, existing, tid) {
+      return routers.map(r => {
+        const fixed = r.immutable && existing;
+        let note = '';
+        if (r.immutable) note = existing ? 'Fixed: ' + templateLabel(tid) + ' binds its data to this hostname; it can\'t change once the instance exists.'
+          : 'Choose carefully: ' + templateLabel(tid) + ' binds its data to this hostname; it can\'t change after creation.';
+        return '<div class="host-row"><label for="host-' + escapeHtml(r.router) + '">' + escapeHtml(r.router) + (r.immutable ? ' 🔒' : '') + '</label>' +
+          '<input type="text" id="host-' + escapeHtml(r.router) + '" data-host-router="' + escapeHtml(r.router) + '" value="' + escapeHtml(hosts[r.router] || '') + '"' +
+          (fixed ? ' readonly data-immutable="1"' : '') + ' spellcheck="false" autocomplete="off" placeholder="' + escapeHtml(r.subdomain) + '.<domain>">' +
+          (note ? '<small>' + escapeHtml(note) + '</small>' : '') + '</div>';
+      }).join('');
+    }
+    function collectHosts(box) {
+      const out = {};
+      box.querySelectorAll('[data-host-router]').forEach(i => { out[i.dataset.hostRouter] = normHost(i.value); });
+      return out;
+    }
+
+    // ── catalog: chips on cards, overview, per-template tab ──
+    async function refreshInstances() {
+      try { instancesCache = await apiGet('/api/instances'); } catch (e) { instancesCache = []; }
+      renderInstanceLists();
+    }
+    function renderInstanceLists() {
+      document.querySelectorAll('[data-instances-of]').forEach(el => {
+        const mine = instancesCache.filter(i => i.template === el.dataset.instancesOf && !i.default);
+        el.innerHTML = mine.length ? '<span class="settings-empty">Instances</span>' + mine.map(i =>
+          '<button type="button" class="inst-chip" data-open-instance="' + escapeHtml(i.id) + '">' + escapeHtml(i.id) + statePill(i.state) + '</button>').join('') : '';
+      });
+      renderInstancesOverview();
+      if (openDetailId) {
+        const c = document.getElementById('detail-instances-' + openDetailId);
+        if (c && c.classList.contains('active')) loadTemplateInstances(openDetailId);
+      }
+    }
+
+    function instanceTable(list, withTemplate) {
+      let h = '<table class="inst-table"><thead><tr><th>Instance</th>' + (withTemplate ? '<th>Template</th>' : '') + '<th>State</th><th>Hostnames</th><th></th></tr></thead><tbody>';
+      for (const i of list) {
+        h += '<tr><td><code>' + escapeHtml(i.id) + '</code>' + (i.default ? ' <span class="settings-empty">default</span>' : '') + '</td>' +
+          (withTemplate ? '<td>' + escapeHtml(templateLabel(i.template)) + '</td>' : '') +
+          '<td>' + statePill(i.state) + (i.error ? ' <span class="settings-empty">' + escapeHtml(i.error) + '</span>' : '') + '</td>' +
+          '<td>' + Object.keys(i.hosts || {}).sort().map(r => '<code>' + escapeHtml(i.hosts[r]) + '</code>').join('<br>') + '</td>' +
+          '<td style="text-align:right"><button type="button" class="btn btn-secondary btn-sm" data-open-instance="' + escapeHtml(i.id) + '">Open</button></td></tr>';
+      }
+      return h + '</tbody></table>';
+    }
+
+    function renderInstancesOverview() {
+      const box = document.getElementById('instances-overview');
+      const extra = instancesCache.filter(i => !i.default || i.state === 'deleting' || i.state === 'restoring' || i.state === 'error');
+      let h = '<div class="category"><div class="category-title" style="display:flex;justify-content:space-between;align-items:center">' +
+        '<span>Instances</span><button type="button" class="btn btn-secondary btn-sm" data-all-backups="1">Backups</button></div>';
+      h += extra.length ? instanceTable(extra, true)
+        : '<p class="settings-empty">No extra instances. Use “+ Add instance” on an app to run another, fully separate copy of it.</p>';
+      box.innerHTML = h + '</div>';
+    }
+
+    async function loadTemplateInstances(tid) {
+      const box = document.getElementById('detail-instances-' + tid);
+      if (!box) return;
+      await loadCatalogInfo();
+      const t = catalogCache[tid];
+      const list = instancesCache.filter(i => i.template === tid);
+      if (!list.some(i => i.id === tid) && t) list.unshift(defaultInstanceView(t));
+      let h = instanceTable(list, false);
+      if (t && t.manifest.instances === 'multi') {
+        h += '<div class="inst-row"><button type="button" class="btn btn-primary btn-sm" data-add-instance="' + escapeHtml(tid) + '">+ Add instance</button>' +
+          '<span class="settings-empty">Each instance has its own containers, data, settings, Keycloak client and groups.</span></div>';
+      } else {
+        h += '<p class="settings-empty" style="margin-top:0.5rem">This template runs only as its default instance (instances: single).</p>';
+      }
+      box.innerHTML = h;
+    }
+
+    // The default instance of a template not listed by the API yet (never
+    // enabled, no state): the catalog entry is its view.
+    function defaultInstanceView(t) {
+      return { id: t.id, template: t.id, default: true, state: t.enabled ? 'enabled' : 'disabled', hosts: t.hosts || {},
+        access_group: t.manifest.auth && t.manifest.auth.access_group || '', admin_group: t.manifest.auth && t.manifest.auth.admin_group || '',
+        keycloak_clients: (t.manifest.keycloak_clients || []).map(c => c.client_id), project: 'portcullis-' + t.id };
+    }
+
+    // ── dialog ───────────────────────────────────────────
+    function openInstModal(html) {
+      document.getElementById('inst-modal-box').innerHTML = html;
+      document.getElementById('inst-modal').classList.add('visible');
+    }
+    function closeInstModal() {
+      document.getElementById('inst-modal').classList.remove('visible');
+      document.getElementById('inst-modal-box').innerHTML = '';
+      instCtx = null;
+      refreshInstances();
+    }
+    function modalHead(title) {
+      return '<div class="inst-modal-head"><div class="inst-modal-title">' + title + '</div>' +
+        '<button type="button" class="detail-close" data-inst-close="1" title="Close">&times;</button></div>';
+    }
+
+    // ── create ───────────────────────────────────────────
+    async function openCreateInstance(tid) {
+      await loadCatalogInfo();
+      instCtx = { kind: 'create', tid, edited: {} };
+      openInstModal(modalHead('Add an instance of ' + escapeHtml(templateLabel(tid))) +
+        '<form class="inst-form" id="inst-create-form" autocomplete="off">' +
+        '<div class="inst-section"><h4>Name</h4>' +
+        '<label class="block" for="inst-new-id">Instance id</label>' +
+        '<input type="text" id="inst-new-id" value="' + escapeHtml(tid + '-') + '" spellcheck="false" maxlength="31">' +
+        '<small>Lowercase letters, digits and “-”, starting with a letter, at most 31 characters (e.g. ' + escapeHtml(tid) + '-team-a). ' +
+        'It names the compose project, the Keycloak client and the groups <code>users_&lt;id&gt;</code> / <code>admin_&lt;id&gt;</code>.</small>' +
+        '<label class="block" for="inst-new-domain">Domain</label><select id="inst-new-domain"></select>' +
+        '<small>The main domain or an enrolled domain that is ready (Settings → Domains). Changing it re-fills the hostnames you haven\'t edited.</small></div>' +
+        '<div class="inst-section"><h4>Hostnames</h4><div id="inst-new-hosts"><p class="settings-empty">Loading…</p></div>' +
+        '<small>Pre-filled from the instance id and domain; each one is editable. One label under the domain: <code>&lt;label&gt;.&lt;domain&gt;</code> (or an enrolled domain itself).</small></div>' +
+        '<p class="settings-empty">The instance is created stopped (state <code>created</code>) with its own empty groups: review its settings, add members, then enable it.</p>' +
+        '<div id="inst-create-result"></div>' +
+        '<div class="op-modal-actions"><button type="button" class="btn btn-secondary btn-sm" data-inst-close="1">Cancel</button>' +
+        '<button type="submit" class="btn btn-primary btn-sm">Create instance</button></div></form>');
+      document.getElementById('inst-new-id').focus();
+      await refreshCreateDefaults();
+    }
+
+    let createTimer = null;
+    async function refreshCreateDefaults() {
+      if (!instCtx || instCtx.kind !== 'create') return;
+      const ctx = instCtx;
+      const id = document.getElementById('inst-new-id').value.trim();
+      const sel = document.getElementById('inst-new-domain');
+      const domain = sel.value || '';
+      try {
+        const d = await instanceDefaults(ctx.tid, INSTANCE_ID_RE.test(id) ? id : '', domain);
+        if (instCtx !== ctx) return;
+        ctx.domains = d.domains;
+        ctx.routers = d.routers;
+        if (!sel.options.length) sel.innerHTML = domainOptions(d.domains, d.domains[0] && d.domains[0].name);
+        const box = document.getElementById('inst-new-hosts');
+        const current = collectHosts(box);
+        const hosts = {};
+        for (const r of d.routers) hosts[r.router] = ctx.edited[r.router] ? current[r.router] : (d.hosts[r.router] || '');
+        box.innerHTML = d.routers.length ? hostRows(d.routers, hosts, false, ctx.tid) : '<p class="settings-empty">This template serves no hostnames.</p>';
+      } catch (err) {
+        document.getElementById('inst-new-hosts').innerHTML = errorBox(err);
+      }
+    }
+
+    async function submitCreateInstance() {
+      const ctx = instCtx;
+      const out = document.getElementById('inst-create-result');
+      const id = document.getElementById('inst-new-id').value.trim();
+      if (!INSTANCE_ID_RE.test(id)) { out.innerHTML = errorBox(new Error('the instance id must match ' + INSTANCE_ID_RE.source)); return; }
+      const hosts = collectHosts(document.getElementById('inst-new-hosts'));
+      const problems = Object.keys(hosts).sort().map(r => hostProblem(r, hosts[r], ctx.domains || [], false)).filter(Boolean);
+      if (problems.length) { out.innerHTML = '<div class="op-msg inst-error">' + problems.map(escapeHtml).join('<br>') + '</div>'; return; }
+      out.innerHTML = '<p class="settings-empty">Creating…</p>';
+      try {
+        const res = await apiPost('/api/instances', { template: ctx.tid, id, hosts });
+        showToast('Instance ' + id + ' created', 'success');
+        await refreshInstances();
+        openInstance(id, { notice: 'Created. It is stopped: review its settings, then enable it.', warnings: res.warnings });
+      } catch (err) { out.innerHTML = errorBox(err); }
+    }
+
+    // ── instance detail ──────────────────────────────────
+    async function openInstance(id, opts) {
+      await loadCatalogInfo();
+      try { instancesCache = await apiGet('/api/instances'); renderInstanceLists(); } catch (e) { /* keep */ }
+      let inst = instancesCache.find(i => i.id === id);
+      if (!inst && catalogCache[id]) inst = defaultInstanceView(catalogCache[id]);
+      if (!inst) { showToast('Instance ' + id + ' not found', 'error'); return; }
+      const tabs = [['overview', 'Overview']];
+      if (!inst.default) tabs.push(['settings', 'Settings'], ['logs', 'Logs'], ['expert', 'Expert']);
+      tabs.push(['backups', 'Backups'], ['delete', 'Delete']);
+      instCtx = { kind: 'instance', id, inst, tab: (opts && opts.tab) || 'overview' };
+      let h = modalHead(escapeHtml(templateLabel(inst.template)) + ' · <code>' + escapeHtml(id) + '</code> ' + statePill(inst.state));
+      if (opts && opts.notice) h += '<div class="inst-ok">' + escapeHtml(opts.notice) + '</div>';
+      h += warningsList(opts && opts.warnings);
+      h += '<div class="detail-tabs">' + tabs.map(([k, l]) => '<span class="detail-tab" data-itab="' + k + '">' + escapeHtml(l) + '</span>').join('') + '</div>';
+      for (const [k] of tabs) {
+        const domId = (k === 'settings' || k === 'logs' || k === 'expert') ? ' id="detail-' + k + '-' + escapeHtml(id) + '"' : '';
+        h += '<div class="detail-content" data-ipane="' + k + '"' + domId + '></div>';
+      }
+      openInstModal(h);
+      showInstTab(instCtx.tab);
+    }
+
+    function showInstTab(k) {
+      const box = document.getElementById('inst-modal-box');
+      box.querySelectorAll('[data-itab]').forEach(t => t.classList.toggle('active', t.dataset.itab === k));
+      box.querySelectorAll('[data-ipane]').forEach(p => p.classList.toggle('active', p.dataset.ipane === k));
+      const pane = box.querySelector('[data-ipane="' + k + '"]');
+      const id = instCtx.id;
+      instCtx.tab = k;
+      if (k === 'overview') renderInstOverview(pane);
+      if (k === 'settings') loadSettings(id);
+      if (k === 'logs') loadLogs(id);
+      if (k === 'expert') loadExpert(id);
+      if (k === 'backups') loadBackups(pane, id);
+      if (k === 'delete') renderInstDelete(pane);
+    }
+
+    async function renderInstOverview(pane) {
+      const inst = instCtx.inst;
+      let h = '<div class="inst-section"><h4>Instance</h4><dl class="inst-facts">' +
+        '<dt>Template</dt><dd>' + escapeHtml(templateLabel(inst.template)) + ' <code>' + escapeHtml(inst.template) + '</code></dd>' +
+        '<dt>Compose project</dt><dd><code>' + escapeHtml(inst.project || '') + '</code></dd>' +
+        (inst.access_group ? '<dt>Access group</dt><dd><code>' + escapeHtml(inst.access_group) + '</code></dd>' : '') +
+        (inst.admin_group ? '<dt>Admin group</dt><dd><code>' + escapeHtml(inst.admin_group) + '</code></dd>' : '') +
+        ((inst.keycloak_clients || []).length ? '<dt>Keycloak clients</dt><dd>' + inst.keycloak_clients.map(c => '<code>' + escapeHtml(c) + '</code>').join(', ') + '</dd>' : '') +
+        '</dl>';
+      if (inst.error) h += '<div class="op-msg">' + escapeHtml(inst.error) + '</div>';
+      if (inst.state === 'deleting') h += '<div class="public-warn">A delete stopped part-way: open Delete to finish it (the first backup is kept).</div>';
+      if (inst.state === 'restoring') h += '<div class="public-warn">A restore didn\'t finish: restore it again from Backups (its pre-restore backup is put back first).</div>';
+      if (!inst.default && inst.state !== 'deleting' && inst.state !== 'restoring') {
+        const on = inst.state === 'enabled';
+        h += '<div class="inst-row"><button type="button" class="toggle ' + (on ? 'disable' : 'enable') + '" data-inst-enable="' + (on ? '0' : '1') + '">' + (on ? 'Disable' : 'Enable') + '</button>' +
+          '<span class="settings-empty">' + (on ? 'Disabling stops it and keeps everything.' : 'Enabling creates its Keycloak client and starts it.') + '</span></div>';
+      } else if (inst.default) {
+        h += '<p class="settings-empty" style="margin-top:0.5rem">The default instance: its settings, logs and expert mode are in the app\'s card.</p>';
+      }
+      h += '</div><div class="inst-section"><h4>Hostnames</h4><div id="inst-hosts-editor"><p class="settings-empty">Loading…</p></div></div>';
+      pane.innerHTML = h;
+      const ed = pane.querySelector('#inst-hosts-editor');
+      try {
+        const d = await instanceDefaults(inst.template, inst.id, '');
+        instCtx.domains = d.domains;
+        instCtx.routers = d.routers;
+        if (d.legacy) { ed.innerHTML = '<p class="settings-empty">This template still uses ${PORTCULLIS_DOMAIN} rules: its hostnames are fixed.</p>' + hostRowsReadOnly(inst.hosts); return; }
+        const pending = inst.state === 'deleting' || inst.state === 'restoring';
+        ed.innerHTML = hostRows(d.routers, inst.hosts || {}, true, inst.template) +
+          '<div class="inst-row"><label class="settings-empty" for="inst-move-domain">Move to domain</label>' +
+          '<select id="inst-move-domain" style="background:#1e293b;border:1px solid #334155;color:#e2e8f0;border-radius:0.375rem;padding:0.375rem 0.5rem">' + domainOptions(d.domains, '') + '</select>' +
+          '<button type="button" class="btn btn-secondary btn-sm" data-inst-fill="1">Fill hostnames</button></div>' +
+          '<p class="public-warn">Saving applies at once: Keycloak redirect URIs, policies and share links move to the new hostnames and the instance restarts. The old hostnames stop working (no redirects).</p>' +
+          '<div id="inst-hosts-result"></div>' +
+          '<div class="inst-row"><button type="button" class="btn btn-primary btn-sm" data-inst-save-hosts="1"' + (pending ? ' disabled' : '') + '>Save hostnames</button></div>';
+      } catch (err) { ed.innerHTML = errorBox(err); }
+    }
+    function hostRowsReadOnly(hosts) {
+      return Object.keys(hosts || {}).sort().map(r => '<div class="host-row"><label>' + escapeHtml(r) + '</label><input type="text" readonly value="' + escapeHtml(hosts[r]) + '"></div>').join('');
+    }
+
+    async function fillHostsForDomain() {
+      const domain = document.getElementById('inst-move-domain').value;
+      try {
+        const d = await instanceDefaults(instCtx.inst.template, instCtx.id, domain);
+        document.querySelectorAll('#inst-hosts-editor [data-host-router]').forEach(i => {
+          if (!i.dataset.immutable && d.hosts[i.dataset.hostRouter]) i.value = d.hosts[i.dataset.hostRouter];
+        });
+      } catch (err) { document.getElementById('inst-hosts-result').innerHTML = errorBox(err); }
+    }
+
+    async function saveInstanceHosts(btn) {
+      const out = document.getElementById('inst-hosts-result');
+      const hosts = collectHosts(document.getElementById('inst-hosts-editor'));
+      const cur = instCtx.inst.hosts || {};
+      const problems = Object.keys(hosts).sort().map(r => hostProblem(r, hosts[r], instCtx.domains || [], normHost(cur[r]) === hosts[r])).filter(Boolean);
+      if (problems.length) { out.innerHTML = '<div class="op-msg inst-error">' + problems.map(escapeHtml).join('<br>') + '</div>'; return; }
+      btn.classList.add('loading');
+      out.innerHTML = '<p class="settings-empty">Applying…</p>';
+      try {
+        const v = await apiPut('/api/instances/' + encodeURIComponent(instCtx.id) + '/hosts', { hosts });
+        instCtx.inst = v && v.id ? v : instCtx.inst;
+        showToast('Hostnames of ' + instCtx.id + ' saved', 'success');
+        openInstance(instCtx.id, { notice: 'Hostnames saved and applied.' });
+      } catch (err) { out.innerHTML = errorBox(err); btn.classList.remove('loading'); }
+    }
+
+    async function toggleInstance(btn) {
+      const id = instCtx.id, enable = btn.dataset.instEnable === '1';
+      btn.classList.add('loading');
+      btn.textContent = enable ? 'Enabling…' : 'Disabling…';
+      try {
+        await apiPost(enable ? '/api/templates/enable' : '/api/templates/disable', { id });
+        showToast(id + (enable ? ' enabled' : ' disabled'), 'success');
+        openInstance(id);
+      } catch (err) {
+        btn.classList.remove('loading');
+        btn.textContent = enable ? 'Enable' : 'Disable';
+        btn.closest('.inst-section').insertAdjacentHTML('beforeend', errorBox(err));
+      }
+    }
+
+    // ── delete (typed id, §11.4) ─────────────────────────
+    function renderInstDelete(pane) {
+      const inst = instCtx.inst, id = inst.id;
+      let h = '<div class="inst-section inst-danger"><h4>Delete this instance</h4>';
+      if (inst.state === 'deleting') h += '<div class="public-warn">A previous delete stopped part-way: deleting again continues where it stopped (the first backup is kept).</div>';
+      h += '<p>Deleting <code>' + escapeHtml(id) + '</code> is permanent. The Hub first takes a backup (kept under Backups, restorable into a new instance), then removes:</p>' +
+        '<ul class="policy-notes" style="margin-bottom:0.75rem"><li>its containers and volumes (all its data)</li><li>its Keycloak clients and access role</li>' +
+        '<li>its generated secrets, settings, policies and share links</li><li>its groups' + (inst.access_group ? ' <code>' + escapeHtml(inst.access_group) + '</code>' : '') +
+        (inst.admin_group ? ' <code>' + escapeHtml(inst.admin_group) + '</code>' : '') + ' (kept, with a warning, if anything else uses them)</li></ul>' +
+        (inst.default ? '<p class="settings-empty">This is the template\'s default instance: the template stays in the catalog, and enabling it again starts a fresh one.</p>' : '') +
+        '<div class="inst-form" style="margin-top:0.75rem"><label class="block" for="inst-del-confirm">Type <code>' + escapeHtml(id) + '</code> to confirm</label>' +
+        '<input type="text" id="inst-del-confirm" spellcheck="false" autocomplete="off" placeholder="' + escapeHtml(id) + '"></div>' +
+        '<div id="inst-del-result"></div>' +
+        '<div class="inst-row"><button type="button" class="btn btn-danger btn-sm" data-inst-delete="1" disabled style="background:#ef4444;color:#fff">Back up and delete ' + escapeHtml(id) + '</button></div></div>';
+      pane.innerHTML = h;
+    }
+
+    async function deleteInstance(btn) {
+      const id = instCtx.id;
+      const confirmVal = document.getElementById('inst-del-confirm').value.trim();
+      const out = document.getElementById('inst-del-result');
+      if (confirmVal !== id) { out.innerHTML = errorBox(new Error('type the instance id (' + id + ') to confirm')); return; }
+      btn.disabled = true;
+      btn.textContent = 'Backing up and deleting…';
+      try {
+        const res = await (await apiCall('/api/instances/' + encodeURIComponent(id), 'DELETE', { confirm: confirmVal })).json();
+        const inst = instCtx.inst;
+        instCtx = { kind: 'deleted', id };
+        document.getElementById('inst-modal-box').innerHTML = modalHead(escapeHtml(templateLabel(inst.template)) + ' · <code>' + escapeHtml(id) + '</code>') + '<div class="inst-section"><div class="inst-ok">Deleted <code>' + escapeHtml(id) + '</code>.</div>' +
+          '<p>Automatic backup: <code>' + escapeHtml(res.backup || '') + '</code> — listed under Backups; it can be restored into a new instance.</p>' +
+          (res.warnings && res.warnings.length ? '<h4 style="margin-top:0.75rem">Warnings</h4>' + warningsList(res.warnings) : '') +
+          '<div class="op-modal-actions"><button type="button" class="btn btn-secondary btn-sm" data-inst-close="1">Close</button></div></div>';
+        showToast(id + ' deleted', 'success');
+        refreshInstances();
+      } catch (err) {
+        out.innerHTML = errorBox(err);
+        btn.disabled = false;
+        btn.textContent = 'Back up and delete ' + id;
+      }
+    }
+
+    // ── backups and restore (§11.5, §11.6) ───────────────
+    function openAllBackups() {
+      instCtx = { kind: 'backups', id: '' };
+      openInstModal(modalHead('Instance backups') +
+        '<p class="settings-empty" style="margin-bottom:0.75rem">Every archive under the Hub\'s backups directory, deleted instances\' included. Core\'s <code>./portcullis backup</code> ships them offsite with the Hub\'s data.</p>' +
+        '<div data-ipane="backups" class="detail-content active"></div>');
+      loadBackups(document.querySelector('#inst-modal-box [data-ipane="backups"]'), '');
+    }
+
+    async function loadBackups(pane, id) {
+      pane.innerHTML = '<p class="settings-empty">Loading…</p>';
+      let list = [], problem = null;
+      try { list = await apiGet(id ? '/api/instances/' + encodeURIComponent(id) + '/backups' : '/api/backups'); } catch (err) { problem = err; }
+      let h = '';
+      if (id) {
+        h += '<div class="inst-row" style="margin:0 0 0.75rem"><button type="button" class="btn btn-primary btn-sm" data-bk-now="1">Back up now</button>' +
+          '<span class="settings-empty">A running instance is stopped while its volumes are copied (databases at rest), then started again.</span></div>';
+      }
+      h += '<div id="inst-bk-result"></div>';
+      if (problem) h += errorBox(problem);
+      else if (!list.length) h += '<p class="settings-empty">No backups yet.</p>';
+      else {
+        h += '<table class="inst-table"><thead><tr><th>Created</th>' + (id ? '' : '<th>Instance</th>') + '<th>Reason</th><th>Size</th><th>Archive</th><th></th></tr></thead><tbody>';
+        for (const b of list) {
+          h += '<tr><td style="white-space:nowrap">' + escapeHtml(fmtTime(b.created_at)) + '</td>' +
+            (id ? '' : '<td><code>' + escapeHtml(b.instance) + '</code>' + (b.instance_exists ? '' : ' <span class="pill warn">deleted</span>') + '</td>') +
+            '<td>' + escapeHtml(b.reason) + '</td><td style="white-space:nowrap">' + escapeHtml(fmtSize(b.size)) + '</td><td><code>' + escapeHtml(b.archive) + '</code></td>' +
+            '<td style="white-space:nowrap;text-align:right">' +
+            (b.instance_exists ? '<button type="button" class="btn btn-secondary btn-sm" data-bk-restore="' + escapeHtml(b.archive) + '" data-bk-instance="' + escapeHtml(b.instance) + '">Restore here</button> ' : '') +
+            '<button type="button" class="btn btn-secondary btn-sm" data-bk-restore-as="' + escapeHtml(b.archive) + '" data-bk-template="' + escapeHtml(b.template) + '">Restore as new…</button></td></tr>' +
+            '<tr data-bk-panel="' + escapeHtml(b.archive) + '" hidden><td colspan="' + (id ? 5 : 6) + '"></td></tr>';
+        }
+        h += '</tbody></table>';
+      }
+      pane.innerHTML = h;
+    }
+
+    function restorePanel(btn, asNew) {
+      const archive = asNew ? btn.dataset.bkRestoreAs : btn.dataset.bkRestore;
+      const row = btn.closest('tbody').querySelector('[data-bk-panel="' + CSS.escape(archive) + '"]');
+      document.querySelectorAll('#inst-modal-box [data-bk-panel]').forEach(r => { if (r !== row) { r.hidden = true; r.firstElementChild.innerHTML = ''; } });
+      if (!row.hidden && row.dataset.mode === (asNew ? 'new' : 'same')) { row.hidden = true; row.firstElementChild.innerHTML = ''; return; }
+      row.dataset.mode = asNew ? 'new' : 'same';
+      let h = '<div class="inst-panel inst-form">';
+      if (asNew) {
+        const tid = btn.dataset.bkTemplate;
+        h += '<strong>Restore <code>' + escapeHtml(archive) + '</code> into a new instance</strong>' +
+          '<ul><li>The new instance is created stopped, with default hostnames on the main domain, new empty groups <code>users_&lt;id&gt;</code> / <code>admin_&lt;id&gt;</code> and new Keycloak client secrets.</li>' +
+          '<li>Its data, settings, policies and custom override come from the backup.</li>' +
+          '<li>Settings of type <code>path</code> keep the same host directory: the two instances would share it.</li>' +
+          '<li>Templates with fixed hostnames (e.g. a Matrix server name) are refused: restore into the same instance instead.</li></ul>' +
+          '<label class="block" for="inst-restore-id">New instance id</label>' +
+          '<input type="text" id="inst-restore-id" value="' + escapeHtml(tid + '-') + '" spellcheck="false" autocomplete="off" maxlength="31">' +
+          '<div class="inst-row"><button type="button" class="btn btn-primary btn-sm" data-bk-go-new="' + escapeHtml(archive) + '">Restore into the new instance</button>' +
+          '<button type="button" class="btn btn-secondary btn-sm" data-bk-cancel="1">Cancel</button></div>';
+      } else {
+        const inst = btn.dataset.bkInstance;
+        h += '<strong>Restore <code>' + escapeHtml(archive) + '</code> into <code>' + escapeHtml(inst) + '</code>?</strong>' +
+          '<ul><li>Its volumes, env, custom override, settings and policies are replaced by the backup\'s (volumes the backup lacks are emptied).</li>' +
+          '<li>Its current hostnames are kept.</li>' +
+          '<li>A pre-restore backup is taken first (the instance is stopped); if any step fails it is put back.</li>' +
+          '<li>An enabled instance is started again afterwards.</li></ul>' +
+          '<div class="inst-row"><button type="button" class="btn btn-primary btn-sm" data-bk-go-same="' + escapeHtml(archive) + '" data-bk-instance="' + escapeHtml(inst) + '">Replace the data of ' + escapeHtml(inst) + '</button>' +
+          '<button type="button" class="btn btn-secondary btn-sm" data-bk-cancel="1">Cancel</button></div>';
+      }
+      h += '<div class="inst-restore-result"></div></div>';
+      row.firstElementChild.innerHTML = h;
+      row.hidden = false;
+      const inp = row.querySelector('#inst-restore-id');
+      if (inp) inp.focus();
+    }
+
+    async function runRestore(btn, asNew) {
+      const panel = btn.closest('.inst-panel');
+      const out = panel.querySelector('.inst-restore-result');
+      let url, body, target;
+      if (asNew) {
+        target = panel.querySelector('#inst-restore-id').value.trim();
+        if (!INSTANCE_ID_RE.test(target)) { out.innerHTML = errorBox(new Error('the instance id must match ' + INSTANCE_ID_RE.source)); return; }
+        url = '/api/instances/restore';
+        body = { archive: btn.dataset.bkGoNew, id: target };
+      } else {
+        target = btn.dataset.bkInstance;
+        url = '/api/instances/' + encodeURIComponent(target) + '/restore';
+        body = { archive: btn.dataset.bkGoSame };
+      }
+      panel.querySelectorAll('button').forEach(b => b.disabled = true);
+      out.innerHTML = '<p class="settings-empty">Restoring… (this can take a while)</p>';
+      try {
+        const res = await apiPost(url, body);
+        out.innerHTML = '<div class="inst-ok">Restored into <code>' + escapeHtml(target) + '</code>.' +
+          (res.pre_restore_backup ? ' Pre-restore backup: <code>' + escapeHtml(res.pre_restore_backup) + '</code>.' : '') + '</div>' +
+          warningsList(res.warnings) +
+          (asNew ? '<div class="inst-row"><button type="button" class="btn btn-secondary btn-sm" data-open-instance="' + escapeHtml(target) + '">Open ' + escapeHtml(target) + '</button></div>' : '');
+        showToast('Restored into ' + target, 'success');
+        refreshInstances();
+      } catch (err) {
+        out.innerHTML = errorBox(err);
+        panel.querySelectorAll('button').forEach(b => b.disabled = false);
+      }
+    }
+
+    async function backupNow(btn) {
+      const id = instCtx.id;
+      const out = document.getElementById('inst-bk-result');
+      btn.disabled = true;
+      btn.textContent = 'Backing up…';
+      try {
+        const res = await apiCall('/api/instances/' + encodeURIComponent(id) + '/backups', 'POST');
+        const entry = await res.json();
+        showToast('Backup ' + entry.archive + ' written', 'success');
+        await loadBackups(btn.closest('[data-ipane]'), id);
+        document.getElementById('inst-bk-result').innerHTML = '<div class="inst-ok">Backup <code>' + escapeHtml(entry.archive) + '</code> written (' + escapeHtml(fmtSize(entry.size)) + ').</div>';
+      } catch (err) {
+        out.innerHTML = errorBox(err);
+        btn.disabled = false;
+        btn.textContent = 'Back up now';
+      }
+    }
+
+    // ── delegated listeners ──────────────────────────────
+    document.addEventListener('click', e => {
+      const t = e.target;
+      let el;
+      if ((el = t.closest('[data-add-instance]'))) { e.stopPropagation(); openCreateInstance(el.dataset.addInstance); return; }
+      if ((el = t.closest('[data-open-instance]'))) { e.stopPropagation(); openInstance(el.dataset.openInstance); return; }
+      if (t.closest('[data-all-backups]')) { openAllBackups(); return; }
+      if (!t.closest('#inst-modal')) return;
+      if (t.id === 'inst-modal' || t.closest('[data-inst-close]')) { closeInstModal(); return; }
+      if ((el = t.closest('[data-itab]'))) { showInstTab(el.dataset.itab); return; }
+      if ((el = t.closest('[data-inst-enable]'))) { toggleInstance(el); return; }
+      if (t.closest('[data-inst-fill]')) { fillHostsForDomain(); return; }
+      if ((el = t.closest('[data-inst-save-hosts]'))) { saveInstanceHosts(el); return; }
+      if ((el = t.closest('[data-inst-delete]'))) { deleteInstance(el); return; }
+      if ((el = t.closest('[data-bk-now]'))) { backupNow(el); return; }
+      if ((el = t.closest('[data-bk-restore]'))) { restorePanel(el, false); return; }
+      if ((el = t.closest('[data-bk-restore-as]'))) { restorePanel(el, true); return; }
+      if ((el = t.closest('[data-bk-go-same]'))) { runRestore(el, false); return; }
+      if ((el = t.closest('[data-bk-go-new]'))) { runRestore(el, true); return; }
+      if ((el = t.closest('[data-bk-cancel]'))) { const row = el.closest('[data-bk-panel]'); row.hidden = true; row.firstElementChild.innerHTML = ''; }
+    });
+    document.addEventListener('input', e => {
+      const t = e.target;
+      if (t.id === 'inst-del-confirm') {
+        const btn = document.querySelector('#inst-modal-box [data-inst-delete]');
+        if (btn) btn.disabled = t.value.trim() !== instCtx.id;
+        return;
+      }
+      if (instCtx && instCtx.kind === 'create') {
+        if (t.dataset && t.dataset.hostRouter) { instCtx.edited[t.dataset.hostRouter] = true; return; }
+        if (t.id === 'inst-new-id') { clearTimeout(createTimer); createTimer = setTimeout(refreshCreateDefaults, 250); }
+      }
+    });
+    document.addEventListener('change', e => {
+      if (e.target.id === 'inst-new-domain') refreshCreateDefaults();
+    });
+    document.addEventListener('submit', e => {
+      if (e.target.id === 'inst-create-form') { e.preventDefault(); submitCreateInstance(); }
+    });
+    document.addEventListener('keydown', e => {
+      if (e.key === 'Escape' && document.getElementById('inst-modal').classList.contains('visible')) closeInstModal();
+    });
+    loadCatalogInfo().catch(() => {});
+    refreshInstances();
+    setInterval(() => { if (!instCtx) refreshInstances(); }, 15000);
 
     // ── Sources ───────────────────────────────────────────
     async function addSource() {

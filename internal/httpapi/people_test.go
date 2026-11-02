@@ -85,7 +85,8 @@ func (e *peopleEnv) setup(t *testing.T) {
 func TestPeopleListenerHasNoAppRoutes(t *testing.T) {
 	e := newPeopleEnv(t)
 	for _, path := range []string{"/api/templates", "/api/settings", "/api/drift", "/api/templates/compose/x",
-		"/api/status", "/api/sources", "/api/portal/apps", "/api/domains", "/static/index.html", "/nope"} {
+		"/api/status", "/api/sources", "/api/portal/apps", "/api/domains", "/api/instances", "/api/backups",
+		"/api/instances/x/backups", "/api/instances/defaults?template=demo", "/static/index.html", "/nope"} {
 		if r, _ := doAs(t, e.people, "root", "GET", path, ""); r.StatusCode != 404 {
 			t.Errorf("people GET %s = %d, want 404", path, r.StatusCode)
 		}

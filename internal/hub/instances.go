@@ -235,6 +235,12 @@ func (h *Hub) CreateInstance(templateID, id string, hosts map[string]string) err
 	if strings.HasPrefix(id, templates.ReservedInstancePrefix) {
 		return statusErr(400, "instance id %q: ids starting with %q are reserved", id, templates.ReservedInstancePrefix)
 	}
+	h.mu.RLock()
+	_, exists := h.st.Instances[id]
+	h.mu.RUnlock()
+	if exists {
+		return statusErr(409, "instance %s already exists", id)
+	}
 	// A leftover project of that name (e.g. a deleted instance whose
 	// containers survived) is someone else's: refuse. Docker first, never
 	// under mu.

@@ -69,6 +69,7 @@ func (s *Server) Handler() (http.Handler, error) {
 	s.registerDirectory(mux)
 	// Hub listener only (never people, contract §11.7).
 	s.registerDomains(mux)
+	s.registerInstances(mux)
 	return ProxySecret(s.Secret, CSRF(mux)), nil
 }
 
