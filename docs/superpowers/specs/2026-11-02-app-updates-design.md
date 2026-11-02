@@ -187,6 +187,13 @@ Keep apps current with little effort and without breaking anyone's data:
      volumes; services with state volumes must declare a path (CI fails the
      bump otherwise, and an issue is opened).
 
+8. **User correction (supersedes Goal 1, Goal 4's tested-digest list and Call 2).** Templates **keep `tag@sha256`**. Bot updates (digest bumps = minor, tag bumps = major) reach templates `main` only when every test is green, so **every template revision on `main` is CI-tested**: the template's digest *is* the tested digest, and there is no separate tested-digest list.
+   - Channel **immediate**: the Hub ignores the template's digest and resolves the newest digest for the tag (recorded per instance).
+   - Channel **tested minor**: the Hub follows the template's digest within the instance's current major.
+   - Channel **tested major**: also follows the template's tag (major) bumps with their declared upgrade paths.
+   - Instances on an older major get no minor updates (the template carries only the latest major's digest) — the caveat the user accepted.
+   - The validator keeps requiring `tag@sha256`; the Hub's per-instance record still pins what each instance actually runs (relevant for channel immediate).
+
 ## Left to the builder
 
 - Scheduler details, registry rate-limit handling and caching, UI layout,
