@@ -410,6 +410,16 @@
       </p>
       <div id="global-policy-form"></div>
 
+      <div class="category-title" style="margin: 2rem 0 1rem;">Domains</div>
+      <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
+        Extra domains or subdomains for app instances (never for the portal, Hub, people or sign-in pages).
+        Portcullis points <code style="background: #0f172a; padding: 0.125rem 0.375rem; border-radius: 0.25rem;">&lt;domain&gt;</code> and
+        <code style="background: #0f172a; padding: 0.125rem 0.375rem; border-radius: 0.25rem;">*.&lt;domain&gt;</code> at this server and obtains a wildcard
+        certificate with the DNS provider's API token. A domain receives hostnames once its records are OK and its certificate is valid.
+        Tokens are write-only: they go to core's domains service (encrypted at rest) and are never shown again.
+      </p>
+      <div id="domains-root"></div>
+
     </div>
   </div>
 
@@ -433,7 +443,7 @@
         document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
         tab.classList.add('active');
         document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
-        if (tab.dataset.tab === 'settings') loadGlobalSettings();
+        if (tab.dataset.tab === 'settings') { loadGlobalSettings(); loadDomains(); }
         if (tab.dataset.tab === 'users') PortcullisDirectory.show(document.getElementById('directory-root'), { listener: 'hub' });
         history.replaceState(null, '', tab.dataset.tab === 'catalog' ? location.pathname : '#' + tab.dataset.tab);
       });
@@ -884,6 +894,143 @@
         container.innerHTML = '<p class="settings-empty">Failed to load settings.</p>';
       }
     }
+
+    // ── Domains (contract §12) ────────────────────────────
+    // Credential keys per provider (the domains service's exact set).
+    const MAIN_DOMAIN = {{.Domain}};
+    const DOMAIN_PROVIDERS = {
+      cloudflare: [['api_token', 'API token (Zone › DNS › Edit)', true]],
+      porkbun: [['api_key', 'API key', true], ['secret_api_key', 'Secret API key', true]],
+      route53: [['access_key_id', 'Access key ID', true], ['secret_access_key', 'Secret access key', true], ['hosted_zone_id', 'Hosted zone ID (optional)', false]],
+      digitalocean: [['auth_token', 'API token', true]],
+      hetzner: [['api_token', 'DNS API token', true]],
+    };
+
+    function credFields(provider, prefix) {
+      return (DOMAIN_PROVIDERS[provider] || []).map(([key, label, required]) =>
+        '<div class="form-group"><label>' + escapeHtml(label) + '</label>' +
+        '<input type="password" autocomplete="off" spellcheck="false" data-cred="' + escapeHtml(key) + '"' +
+        (required ? ' required' : '') + ' placeholder="' + escapeHtml(required ? 'required' : 'optional') + '"></div>').join('');
+    }
+
+    function providerSelect(id) {
+      return '<select id="' + id + '">' + Object.keys(DOMAIN_PROVIDERS).map(p =>
+        '<option value="' + escapeHtml(p) + '">' + escapeHtml(p) + '</option>').join('') + '</select>';
+    }
+
+    // Reads the credential inputs of a form, then clears them (never kept).
+    function takeCreds(form) {
+      const creds = {};
+      form.querySelectorAll('[data-cred]').forEach(i => { if (i.value !== '') creds[i.dataset.cred] = i.value; i.value = ''; });
+      return creds;
+    }
+
+    function domainStatus(d) {
+      const ok = '<span style="color:#4ade80">✓</span>', no = '<span style="color:#f87171">✗</span>';
+      let until = '—';
+      if (d.cert_not_after) {
+        const t = new Date(d.cert_not_after);
+        until = escapeHtml(isNaN(t) ? d.cert_not_after : t.toISOString().slice(0, 10));
+      }
+      return '<td>' + (d.records_ok ? ok : no) + '</td><td>' + until + '</td><td>' + escapeHtml(d.state || '') + '</td>' +
+        '<td style="color:#f87171;max-width:28rem;word-break:break-word">' + escapeHtml(d.last_error || '') + '</td>';
+    }
+
+    async function loadDomains() {
+      const root = document.getElementById('domains-root');
+      root.innerHTML = '<p class="settings-empty">Loading...</p>';
+      let list = [], problem = '', disabled = false;
+      try {
+        const res = await fetch('/api/domains', { headers: { 'Content-Type': 'application/json' } });
+        const body = (res.headers.get('Content-Type') || '').includes('application/json') ? await res.json() : { error: (await res.text()).trim() };
+        if (res.ok) list = body;
+        else { problem = body.error || ('HTTP ' + res.status); list = body.domains || []; disabled = !!body.disabled || res.status === 403; }
+      } catch (err) { problem = err.message; }
+      let html = '';
+      if (problem) {
+        html += '<div class="public-warn">' + escapeHtml(problem) +
+          (disabled ? '' : ' — showing the last known status; new hostnames on these domains are refused until the service answers.') + '</div>';
+      }
+      if (list.length) {
+        html += '<table style="width:100%;border-collapse:collapse;font-size:0.8125rem;margin-bottom:1rem"><thead><tr style="text-align:left;color:#94a3b8">' +
+          '<th>Domain</th><th>Provider</th><th>Records OK</th><th>Certificate valid until</th><th>State</th><th>Last error</th><th></th></tr></thead><tbody>';
+        for (const d of list) {
+          html += '<tr style="border-top:1px solid #334155"><td><code>' + escapeHtml(d.name) + '</code></td><td>' + escapeHtml(d.provider) + '</td>' + domainStatus(d) +
+            '<td style="white-space:nowrap">' + (disabled ? '' :
+              '<button class="btn btn-sm" data-domain-token="' + escapeHtml(d.name) + '">Replace token</button> ' +
+              '<button class="btn btn-sm btn-danger" data-domain-delete="' + escapeHtml(d.name) + '">Remove</button>') + '</td></tr>' +
+            '<tr class="domain-token-row" data-token-row="' + escapeHtml(d.name) + '" style="display:none"><td colspan="7"></td></tr>';
+        }
+        html += '</tbody></table>';
+      } else if (!problem) {
+        html += '<p class="settings-empty">No enrolled domains.</p>';
+      }
+      if (!disabled) {
+        html += '<form class="settings-form" id="domain-enroll-form" style="max-width:32rem">' +
+          '<div class="form-group"><label>Domain or subdomain</label><small>e.g. team-b.example.org or team-a.' + escapeHtml(MAIN_DOMAIN) + '</small>' +
+          '<input type="text" id="domain-name" required spellcheck="false" autocomplete="off" placeholder="team-b.example.org"></div>' +
+          '<div class="form-group"><label>DNS provider</label>' + providerSelect('domain-provider') + '</div>' +
+          '<div id="domain-creds">' + credFields('cloudflare') + '</div>' +
+          '<button type="submit" class="btn btn-primary btn-sm">Enroll domain</button></form>';
+      }
+      root.innerHTML = html;
+      const form = document.getElementById('domain-enroll-form');
+      if (form) {
+        document.getElementById('domain-provider').addEventListener('change', e => {
+          document.getElementById('domain-creds').innerHTML = credFields(e.target.value);
+        });
+        form.addEventListener('submit', async e => {
+          e.preventDefault();
+          const name = document.getElementById('domain-name').value.trim();
+          const provider = document.getElementById('domain-provider').value;
+          const credentials = takeCreds(form);
+          try {
+            await apiCall('/api/domains', 'POST', { name, provider, credentials });
+            showToast('Enrolling ' + name + ': records and certificate are being set up.', 'success');
+            loadDomains();
+          } catch (err) { showToast(err.message || 'Enrollment failed', 'error'); }
+        });
+      }
+    }
+
+    document.addEventListener('click', async e => {
+      const tok = e.target.closest('[data-domain-token]');
+      if (tok) {
+        const name = tok.dataset.domainToken;
+        const row = document.querySelector('[data-token-row="' + CSS.escape(name) + '"]');
+        if (!row) return;
+        if (row.style.display !== 'none') { row.style.display = 'none'; row.firstElementChild.innerHTML = ''; return; }
+        const cell = row.firstElementChild;
+        cell.innerHTML = '<form class="settings-form" style="max-width:32rem;padding:0.75rem 0"><div class="form-group"><label>DNS provider</label>' +
+          providerSelect('domain-token-provider') + '</div><div class="domain-token-creds">' + credFields('cloudflare') + '</div>' +
+          '<button type="submit" class="btn btn-primary btn-sm">Replace token</button></form>';
+        row.style.display = '';
+        const form = cell.querySelector('form');
+        form.querySelector('select').addEventListener('change', ev => { form.querySelector('.domain-token-creds').innerHTML = credFields(ev.target.value); });
+        form.addEventListener('submit', async ev => {
+          ev.preventDefault();
+          const provider = form.querySelector('select').value;
+          const credentials = takeCreds(form);
+          try {
+            await apiCall('/api/domains/' + encodeURIComponent(name) + '/token', 'POST', { provider, credentials });
+            showToast('Token replaced for ' + name + '.', 'success');
+            loadDomains();
+          } catch (err) { showToast(err.message || 'Replacing the token failed', 'error'); }
+        });
+        return;
+      }
+      const del = e.target.closest('[data-domain-delete]');
+      if (del) {
+        const name = del.dataset.domainDelete;
+        if (!confirm('Remove ' + name + '? Its records and certificate are removed. Refused while an instance uses it.')) return;
+        try {
+          const res = await apiCall('/api/domains/' + encodeURIComponent(name), 'DELETE');
+          const body = res.status === 200 ? await res.json() : {};
+          showToast(body.warning ? 'Removed ' + name + ' — ' + body.warning : 'Removed ' + name + '.', body.warning ? 'error' : 'success');
+          loadDomains();
+        } catch (err) { showToast(err.message || 'Removing failed', 'error'); }
+      }
+    });
 
     async function saveGlobalSettings(e) {
       e.preventDefault();
