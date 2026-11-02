@@ -574,3 +574,69 @@ settings:
 		{"nextcloud", nextcloud, hdrCompose, "", ""},
 	})
 }
+
+// Traefik merges same-named services of several containers: a template
+// defining one name on two compose services is refused, every time with
+// the same reason (explicit service: and implicit).
+func TestDuplicateTraefikServiceRefused(t *testing.T) {
+	web := "  web:\n    image: x\n    labels:\n" +
+		"      traefik.http.routers.app.rule: Host(`${PORTCULLIS_HOST_APP:-app.portcullis.local}`)\n" +
+		"      traefik.http.routers.app.middlewares: portcullis-auth@docker,portcullis-groups@docker\n" +
+		"      traefik.http.services.app.loadbalancer.server.port: \"80\"\n"
+	initSvc := "  init:\n    image: x\n    labels:\n" +
+		"      traefik.http.services.app.loadbalancer.server.port: \"80\"\n" +
+		"      traefik.http.routers.side.rule: Host(`${PORTCULLIS_HOST_APP:-app.portcullis.local}`) && PathPrefix(`/side`)\n"
+	layouts := map[string]string{
+		"explicit": "services:\n" + web + initSvc + "      traefik.http.routers.side.service: app\n",
+		"implicit": "services:\n" + web + initSvc,
+	}
+	for name, c := range layouts {
+		for i := 0; i < 25; i++ {
+			_, err := build("app", "src", "", []byte(hdrHead+opts(personHeader)), []byte(c), "example.org", nil)
+			if err == nil || err.Error() != "Traefik service app is defined on services init and web (Traefik would merge them into one load balancer): give each its own name" {
+				t.Fatalf("%s, run %d: %v", name, i, err)
+			}
+		}
+	}
+}
+
+// A router whose explicit service the Hub can't map to a compose service
+// fails closed for header delivery.
+func TestHeaderUnresolvableServiceRefused(t *testing.T) {
+	var m Manifest
+	if err := yaml.Unmarshal([]byte(hdrHead+opts(personHeader)), &m); err != nil {
+		t.Fatal(err)
+	}
+	for _, svc := range []string{"x@file", "nope", "nope@docker", "weighted@internal"} {
+		routes, err := ParseRoutes([]byte(hdrCompose))
+		if err != nil {
+			t.Fatal(err)
+		}
+		routes.Info["app"].TraefikService = svc
+		err = ValidateSettingsSpec(&Template{ID: "app", Manifest: m}, []byte(hdrCompose), routes, nil)
+		if err == nil || !strings.Contains(err.Error(), "setting quota") || !strings.Contains(err.Error(), "router app's service "+svc) {
+			t.Errorf("%s: %v", svc, err)
+		}
+	}
+}
+
+// "$$" is compose's literal "$": only an even run of "$" before "${"
+// leaves it an interpolation.
+func TestInterpolationEscapes(t *testing.T) {
+	for s, want := range map[string]bool{
+		"${X}": true, "a${X:-1}": true, "$${X}": false, "$$${X}": true, "$$$${X}": false,
+		"${XY}": false, "$X": false, "${X-a}": true, "${X?err}": true,
+	} {
+		if got := referenced(s, "X"); got != want {
+			t.Errorf("referenced(%q) = %v, want %v", s, got, want)
+		}
+	}
+	// An escaped index beyond max_items doesn't count; an interpolated one does.
+	c := strings.Replace(hdrCompose, "      DISK_2: ${DISK_2:-}\n", "      DISK_2: ${DISK_2:-}\n      X: $${DISK_3}\n", 1)
+	o := "{key: disks, label: D, type: list, items: {type: string}, max_items: 2, delivery: [{env: 'DISK_{n}'}]}"
+	runSettingsCases(t, []settingsCase{
+		{"escaped beyond", hdrHead + opts(o), c, "", ""},
+		{"interpolated beyond", hdrHead + opts(o), strings.Replace(c, "$${DISK_3}", "$$${DISK_3}", 1), "disks", "DISK_3"},
+		{"escaped only", hdrHead + opts("{key: theme, label: T, type: string}"), strings.Replace(hdrCompose, "THEME: ${THEME:-dark}", "THEME: $${THEME}", 1), "theme", "hard-codes"},
+	})
+}

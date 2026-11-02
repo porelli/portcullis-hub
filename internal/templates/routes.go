@@ -149,6 +149,8 @@ func ParseRoutes(compose []byte) (*Routes, error) {
 	r := &Routes{Routers: map[string][]string{}, Info: map[string]*RouterInfo{}, TraefikServices: map[string][]string{},
 		HostRouters: map[string]string{}, HostVars: map[string]string{}, Names: map[string]bool{}}
 	subs := map[string]bool{}
+	// tsvcOwner: the compose service defining each Traefik HTTP service.
+	tsvcOwner := map[string]string{}
 	names := make([]string, 0, len(doc.Services))
 	for name := range doc.Services {
 		names = append(names, name)
@@ -221,6 +223,13 @@ func ParseRoutes(compose []byte) (*Routes, error) {
 			}
 		}
 		for name := range tsvcs {
+			// Traefik merges same-named services of several containers into
+			// one load balancer: which backend a router reaches would then
+			// depend on the replica, not on the template.
+			if o, ok := tsvcOwner[name]; ok {
+				return nil, fmt.Errorf("Traefik service %s is defined on services %s and %s (Traefik would merge them into one load balancer): give each its own name", name, o, svc)
+			}
+			tsvcOwner[name] = svc
 			r.TraefikServices[svc] = append(r.TraefikServices[svc], name)
 		}
 		sort.Strings(r.TraefikServices[svc])

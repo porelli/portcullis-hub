@@ -890,8 +890,33 @@ func composeEnvironment(compose []byte) (map[string]map[string]*string, error) {
 
 // referenced reports whether compose interpolates ${name}.
 func referenced(s, name string) bool {
-	re := regexp.MustCompile(`(^|[^$])\$\{` + regexp.QuoteMeta(name) + `(\}|:?[-?+])`)
-	return re.MatchString(s)
+	re := regexp.MustCompile(`\$\{` + regexp.QuoteMeta(name) + `(\}|:?[-?+])`)
+	return len(interpolations(s, re)) > 0
+}
+
+// interpolations are re's matches in s that compose interpolates: a match
+// (starting at the "$" of "${") preceded by an odd run of "$" is escaped
+// ("$$" is a literal "$"), so "$${X}" is literal and "$$${X}" is "$" +
+// ${X}. Each result is the match's submatches.
+func interpolations(s string, re *regexp.Regexp) [][]string {
+	var out [][]string
+	for _, idx := range re.FindAllStringSubmatchIndex(s, -1) {
+		run := 0
+		for i := idx[0] - 1; i >= 0 && s[i] == '$'; i-- {
+			run++
+		}
+		if run%2 == 1 {
+			continue
+		}
+		m := make([]string, len(idx)/2)
+		for j := range m {
+			if idx[2*j] >= 0 {
+				m[j] = s[idx[2*j]:idx[2*j+1]]
+			}
+		}
+		out = append(out, m)
+	}
+	return out
 }
 
 // interpolatedAnywhere reports whether any decoded scalar value of the
@@ -988,11 +1013,11 @@ func (v *specCheck) indexed(o *Option, prefix string) error {
 	if o.MaxItems == nil || *o.MaxItems < 1 || *o.MaxItems > maxIndexed {
 		return fmt.Errorf("indexed env %s%s needs max_items (1-%d)", prefix, IndexSuffix, maxIndexed)
 	}
-	re := regexp.MustCompile(`(^|[^$])\$\{` + regexp.QuoteMeta(prefix) + `_([0-9]+)(\}|:?[-?+])`)
+	re := regexp.MustCompile(`\$\{` + regexp.QuoteMeta(prefix) + `_([0-9]+)(\}|:?[-?+])`)
 	for _, sc := range v.scalars {
-		for _, mm := range re.FindAllStringSubmatch(sc, -1) {
-			if n, _ := strconv.Atoi(mm[2]); n < 1 || n > *o.MaxItems {
-				return fmt.Errorf("compose.yml references %s_%s, beyond max_items %d", prefix, mm[2], *o.MaxItems)
+		for _, mm := range interpolations(sc, re) {
+			if n, _ := strconv.Atoi(mm[1]); n < 1 || n > *o.MaxItems {
+				return fmt.Errorf("compose.yml references %s_%s, beyond max_items %d", prefix, mm[1], *o.MaxItems)
 			}
 		}
 	}
@@ -1437,15 +1462,24 @@ func forwardAuthed(ri *RouterInfo) bool {
 // routerTarget is the compose service a router sends requests to: the
 // service defining its explicit Traefik service (@docker trimmed), else
 // the service carrying its labels.
-func (v *specCheck) routerTarget(ri *RouterInfo) string {
-	if ts := strings.TrimSuffix(ri.TraefikService, "@docker"); ts != "" {
-		for svc, names := range v.routes.TraefikServices {
-			if contains(names, ts) {
-				return svc
-			}
+// ok is false for an explicit service no compose service defines (a
+// provider other than docker, weighted / mirroring, unknown): fail closed.
+// Traefik service names are unique across compose services (ParseRoutes).
+func (v *specCheck) routerTarget(ri *RouterInfo) (string, bool) {
+	ts := ri.TraefikService
+	if ts == "" {
+		return ri.Service, true
+	}
+	ts, prov, _ := strings.Cut(ts, "@")
+	if prov != "" && prov != "docker" {
+		return "", false
+	}
+	for svc, names := range v.routes.TraefikServices {
+		if contains(names, ts) {
+			return svc, true
 		}
 	}
-	return ri.Service
+	return "", false
 }
 
 func (v *specCheck) header(o *Option, h *HeaderDelivery) error {
@@ -1462,23 +1496,29 @@ func (v *specCheck) header(o *Option, h *HeaderDelivery) error {
 	// The compose services group-gate's headers reach (the backends of
 	// gated routers), and every router that reaches them, wherever its
 	// labels sit.
-	gated := map[string]bool{}
-	for _, ri := range v.routes.Info {
-		if ri.Gated() {
-			gated[v.routerTarget(ri)] = true
-		}
-	}
-	if len(gated) == 0 {
-		return fmt.Errorf("header %s needs routers with portcullis-groups@docker (group-gate returns the header)", h.Name)
-	}
 	names := make([]string, 0, len(v.routes.Info))
 	for r := range v.routes.Info {
 		names = append(names, r)
 	}
 	sort.Strings(names)
+	gated, target := map[string]bool{}, map[string]string{}
 	for _, r := range names {
 		ri := v.routes.Info[r]
-		if t := v.routerTarget(ri); gated[t] && !forwardAuthed(ri) {
+		t, ok := v.routerTarget(ri)
+		if !ok {
+			return fmt.Errorf("header %s: router %s's service %s isn't one of the template's own services: the Hub can't tell which backend it reaches", h.Name, r, ri.TraefikService)
+		}
+		target[r] = t
+		if ri.Gated() {
+			gated[t] = true
+		}
+	}
+	if len(gated) == 0 {
+		return fmt.Errorf("header %s needs routers with portcullis-groups@docker (group-gate returns the header)", h.Name)
+	}
+	for _, r := range names {
+		ri := v.routes.Info[r]
+		if t := target[r]; gated[t] && !forwardAuthed(ri) {
 			return fmt.Errorf("header %s: router %s reaches service %s without Portcullis forward-auth: clients could forge the header there", h.Name, r, t)
 		}
 	}
