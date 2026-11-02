@@ -1,6 +1,6 @@
 # AI support: MCP companions, "Connect your AI", the AI page, one "all my apps" endpoint, and the Portcullis MCP
 
-Status: draft for approval (2026-11-02)
+Status: approved (2026-11-02)
 
 Evidence base: `.superpowers/sdd/ai-brainstorm-context.md` (the user's
 decisions) and `settings-brainstorm-context.md` (standing constraints).
