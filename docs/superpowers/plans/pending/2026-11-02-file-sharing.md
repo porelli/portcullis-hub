@@ -49,7 +49,7 @@ uids, and apply people changes live.
 
 **Spec:** `docs/superpowers/specs/2026-11-02-file-sharing-design.md` (hub repo).
 Read it together with:
-- project 1's plan, `docs/superpowers/plans/2026-11-02-app-settings-panel.md`
+- project 1's plan, `docs/superpowers/plans/pending/2026-11-02-app-settings-panel.md`
   ("Interfaces for later plans"; its exact names are used here);
 - project 2's spec, `docs/superpowers/specs/2026-11-02-shared-folders-doctor-design.md`;
 - the certificates spec, `docs/superpowers/specs/2026-11-02-certificates-selfservice-design.md`
@@ -84,7 +84,7 @@ Read it together with:
 
 **Project 2 dependencies.** Every name marked **[P2]** comes from the
 "Interfaces for later plans" section of project 2's plan,
-`docs/superpowers/plans/2026-11-02-shared-folders-doctor.md` (its branch
+`docs/superpowers/plans/pending/2026-11-02-shared-folders-doctor.md` (its branch
 is `folders`), and uses project 2's exact identifiers. The full list is at
 the end ("Project 2 names this plan depends on"). Three things this plan
 adds to project 2's code are also marked there:
@@ -1675,7 +1675,7 @@ templates):**
 ## Project 2 names this plan depends on
 
 These come from project 2's "Interfaces for later plans"
-(`docs/superpowers/plans/2026-11-02-shared-folders-doctor.md`).
+(`docs/superpowers/plans/pending/2026-11-02-shared-folders-doctor.md`).
 
 **Used as defined:**
 1. `templates.Option.Folder *FolderSpec`, `FolderSpec{Access, RunsAs *RunsAs, JoinsGroup string; MustOwn bool}`,
