@@ -298,9 +298,10 @@ func (h *Hub) checkInstanceHostsLocked(v *templates.Template) error {
 	// Every host, main or extra-domain, whatever its classification: never
 	// the main apex (above), never at or under a core host; the templates'
 	// reserved default hostnames are checked last (full hosts).
+	coreSubs := policy.CoreSubdomains()
 	for _, r := range routers {
 		host := v.Hosts[r]
-		for sub := range policy.CoreSubdomains {
+		for sub := range coreSubs {
 			if c := sub + "." + main; host == c || strings.HasSuffix(host, "."+c) {
 				return statusErr(409, "hostname %s (host router %s) is at or under the core hostname %s", host, r, c)
 			}
@@ -308,7 +309,7 @@ func (h *Hub) checkInstanceHostsLocked(v *templates.Template) error {
 	}
 	mine := map[string]bool{}
 	for _, sub := range v.Subdomains {
-		if policy.CoreSubdomains[sub] {
+		if coreSubs[sub] {
 			return statusErr(409, "hostname %s.%s is a core hostname", sub, h.cfg.Domain)
 		}
 		mine[sub] = true
@@ -351,7 +352,16 @@ func (h *Hub) checkInstanceHostsLocked(v *templates.Template) error {
 		if id == v.ID || h.findLocked(id) != nil {
 			continue
 		}
-		if s := subClash(append(append([]string{}, snap.Subdomains...), snap.PublicSubdomains...)); s != "" {
+		// Published snapshots now store full hosts (v5), but legacy subdomains
+		// still need to be checked for collision.
+		var snapSubs []string
+		for _, host := range append(append([]string{}, snap.Hosts...), snap.PublicHosts...) {
+			// Extract subdomain if it's on the main domain
+			if label, ok := strings.CutSuffix(host, "."+h.cfg.Domain); ok {
+				snapSubs = append(snapSubs, label)
+			}
+		}
+		if s := subClash(snapSubs); s != "" {
 			return statusErr(409, "hostname %s.%s is still published for instance %s (its template is missing)", s, h.cfg.Domain, id)
 		}
 	}

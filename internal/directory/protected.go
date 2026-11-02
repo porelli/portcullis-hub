@@ -31,7 +31,7 @@ func ProtectedGroups(extra, mapFile string) map[string]bool {
 		}
 		k, v, ok := strings.Cut(line, "=")
 		// "*" (people: any signed-in user, contract §5.1) is no group.
-		if v = strings.TrimSpace(v); ok && policy.CoreSubdomains[strings.ToLower(strings.TrimSpace(k))] && v != "" && v != "*" {
+		if v = strings.TrimSpace(v); ok && policy.CoreSubdomains()[strings.ToLower(strings.TrimSpace(k))] && v != "" && v != "*" {
 			set[v] = true
 		}
 	}

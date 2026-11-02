@@ -30,16 +30,21 @@ type PortalApp struct {
 	AdminGroup  string `json:"admin_group"`
 }
 
-// PortalDocument is portal-apps.json.
+// PortalDocument is portal-apps.json (contract §10).
 type PortalDocument struct {
 	Version int         `json:"version"`
 	Apps    []PortalApp `json:"apps"`
+	// Domains lists every enrolled domain on which at least one listed
+	// instance has a hostname (contract §10, v2).
+	Domains []string `json:"domains"`
 }
 
-// portalLocked lists enabled apps whose template is present (an app with
-// a missing template has no name/URL to show). Caller holds h.mu (read).
+// portalLocked lists enabled instances whose template is present (an instance
+// with a missing template has no name/URL to show). Caller holds h.mu (read).
 func (h *Hub) portalLocked() PortalDocument {
 	doc := PortalDocument{Version: PortalVersion, Apps: []PortalApp{}}
+	domainsUsed := map[string]bool{}
+	enrolled := h.enrolledLocked()
 	for i := range h.instances {
 		t := &h.instances[i]
 		if !t.Enabled {
@@ -52,8 +57,18 @@ func (h *Hub) portalLocked() PortalDocument {
 			a.AccessGroup = m.Auth.AccessGroup
 		}
 		doc.Apps = append(doc.Apps, a)
+		// Track which enrolled domains have hosts in use (contract §10).
+		for _, host := range t.Hosts {
+			if d, ok := extraDomainOf(host, enrolled); ok {
+				domainsUsed[d.Name] = true
+			}
+		}
 	}
 	sort.Slice(doc.Apps, func(i, j int) bool { return doc.Apps[i].ID < doc.Apps[j].ID })
+	for d := range domainsUsed {
+		doc.Domains = append(doc.Domains, d)
+	}
+	sort.Strings(doc.Domains)
 	return doc
 }
 

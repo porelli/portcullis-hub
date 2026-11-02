@@ -371,14 +371,15 @@ func ExtractToken(pa *PublicAccess, input string) (string, error) {
 
 var serviceNameRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
 
-// PublicPlan is how the Hub routes an app's public paths.
+// PublicPlan is how the Hub routes an instance's public paths.
 type PublicPlan struct {
 	Service string // compose service that gets the router labels
 	// TraefikService is the Traefik service the router targets; "" lets
 	// Traefik use the container's only (implicit) service.
 	TraefikService string
-	HostArgs       []string // Host() arguments as written in the template
-	Subdomains     []string
+	HostArgs       []string     // Host() arguments as written in the template
+	Subdomains     []string     // main-domain labels (instance view)
+	Hosts          []string     // full hostnames (instance view, v5)
 	Paths          []PublicPath // normalised manifest paths
 	// Priority beats every router of the app, whatever PORTCULLIS_DOMAIN
 	// expands to (Traefik's default priority is the rule's length).

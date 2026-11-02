@@ -8,14 +8,35 @@ import (
 	"github.com/portcullis/hub/internal/fsutil"
 )
 
-// FileVersion is the policy-file format version (contract §4). Version 4
-// adds the expiring array for membership expiry enforcement. group-gate
-// serves only version 4: the Hub and core must be upgraded together.
-const FileVersion = 4
+// FileVersion is the policy-file format version (contract §4). Version 5
+// keys policies, groups and path groups by full hostname instead of subdomain,
+// and adds extra_domains. group-gate serves only version 5: the Hub and core
+// must be upgraded together.
+const FileVersion = 5
 
-// CoreSubdomains are owned by the core stack (group-gate-map.conf); templates
-// may never publish policies, groups or path groups for them.
-var CoreSubdomains = map[string]bool{"auth": true, "traefik": true, "hub": true, "directory": true, "enroll": true, "metrics": true, "people": true}
+// coreSubdomains are the core subdomain labels (group-gate-map.conf uses
+// `<sub>=<group>` entries; contract §4).
+var coreSubdomains = []string{"auth", "traefik", "hub", "directory", "enroll", "metrics", "people"}
+
+// CoreSubdomains returns the core subdomain labels as a set.
+func CoreSubdomains() map[string]bool {
+	set := make(map[string]bool, len(coreSubdomains))
+	for _, s := range coreSubdomains {
+		set[s] = true
+	}
+	return set
+}
+
+// CoreHosts returns the full hostnames owned by the core stack
+// (group-gate-map.conf); templates may never publish policies, groups or path
+// groups for them (contract §4).
+func CoreHosts(mainDomain string) map[string]bool {
+	hosts := map[string]bool{mainDomain: true}
+	for _, sub := range coreSubdomains {
+		hosts[sub+"."+mainDomain] = true
+	}
+	return hosts
+}
 
 // PathGroup requires Group for request paths under Prefix.
 type PathGroup struct {
@@ -35,12 +56,15 @@ type Expiring struct {
 
 // Document is the JSON written for group-gate.
 type Document struct {
-	Version    int                    `json:"version"`
-	Default    AuthPolicy             `json:"default"`
-	Policies   map[string]AuthPolicy  `json:"policies"`
-	Groups     map[string]string      `json:"groups"`
-	PathGroups map[string][]PathGroup `json:"path_groups"`
-	// PublicPaths is, per subdomain, the public exception core's public
+	Version int        `json:"version"`
+	Default AuthPolicy `json:"default"`
+	// ExtraDomains lists enrolled domains (contract §12); extra-domain hosts
+	// lie on one of them. group-gate uses this to build step-up URLs. Version 5+.
+	ExtraDomains []string               `json:"extra_domains"`
+	Policies     map[string]AuthPolicy  `json:"policies"`
+	Groups       map[string]string      `json:"groups"`
+	PathGroups   map[string][]PathGroup `json:"path_groups"`
+	// PublicPaths is, per hostname, the public exception core's public
 	// guard enforces on the Hub's public router (forward-auth and the group
 	// check don't run there). Listed share tokens stay "{token}".
 	PublicPaths map[string]PublicEntry `json:"public_paths"`
@@ -74,23 +98,23 @@ type PublicEntry struct {
 // denied. Never create an LLDAP group with this name.
 const DenyGroup = "__portcullis_deny__"
 
-// App is the per-template input to Build.
+// App is the per-instance input to Build (contract v5).
 type App struct {
 	ID      string
 	Enabled bool
-	// Deny marks an app whose subdomains are known (e.g. from running
-	// containers' labels) but whose config is not: its subdomains get
+	// Deny marks an app whose hosts are known (e.g. from running
+	// containers' labels) but whose config is not: its hosts get
 	// DenyGroup unless an enabled app with a known config claims them.
 	Deny        bool
-	Subdomains  []string
+	Hosts       map[string]string // hostname → hostname (keyed by host for iteration)
 	GroupAccess bool
 	AccessGroup string
 	AdminGroup  string
 	AdminPaths  []string
-	// PublicSubdomains / Public: the app's public exception, when a public
+	// PublicHosts / Public: the app's public exception, when a public
 	// router exists.
-	PublicSubdomains []string
-	Public           *PublicEntry
+	PublicHosts map[string]string
+	Public      *PublicEntry
 }
 
 // Stricter reports whether a is strictly stricter than b: higher LoA first,
@@ -111,31 +135,37 @@ func Stricter(a, b AuthPolicy) bool {
 	return len(a.Factors) < len(b.Factors) && len(a.Factors) > 0
 }
 
-// Build assembles the policy document.
+// Build assembles the policy document (contract v5, keyed by hostname).
 //
-// group-gate looks policies, groups and path groups up by request subdomain
-// only, so only enabled templates publish entries, and only under the
-// subdomains they route (never under their template ID: an ID can equal
-// another app's subdomain). Core subdomains are never published.
+// group-gate looks policies, groups and path groups up by full hostname, so
+// only enabled instances publish entries, and only under the hostnames they
+// route. Core hostnames are never published (they come from
+// group-gate-map.conf, §4).
 //
-// The Hub refuses to enable two templates that route the same subdomain; if
-// it happens anyway (state edited by hand, compose changed on disk) the
-// writer stays deterministic and fails towards the stricter outcome: the
-// stricter effective policy wins, path groups are merged, and the access
-// group of the lowest template ID wins. Each collision is logged.
-func Build(apps []App, perApp map[string]AuthPolicy, def AuthPolicy) Document {
+// The Hub refuses to enable instances with hostname collisions; if it happens
+// anyway (state edited by hand, compose changed on disk) the writer stays
+// deterministic and fails towards the stricter outcome: the stricter effective
+// policy wins, path groups are merged, and the access group of the lowest
+// instance ID wins. Each collision is logged.
+//
+// extraDomains is the list of enrolled domains (§12) for extra_domains.
+func Build(apps []App, perApp map[string]AuthPolicy, def AuthPolicy, extraDomains []string) Document {
 	doc := Document{
-		Version:     FileVersion,
-		Default:     def,
-		Policies:    map[string]AuthPolicy{},
-		Groups:      map[string]string{},
-		PathGroups:  map[string][]PathGroup{},
-		PublicPaths: map[string]PublicEntry{},
-		Expiring:    []Expiring{},
+		Version:      FileVersion,
+		Default:      def,
+		ExtraDomains: append([]string(nil), extraDomains...),
+		Policies:     map[string]AuthPolicy{},
+		Groups:       map[string]string{},
+		PathGroups:   map[string][]PathGroup{},
+		PublicPaths:  map[string]PublicEntry{},
+		Expiring:     []Expiring{},
 	}
+	sort.Strings(doc.ExtraDomains)
 	sorted := append([]App(nil), apps...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
 
+	// coreHosts can't be computed here: we need mainDomain. The Hub filters
+	// them before calling Build. For safety, we accept a nil Hosts map.
 	type claim struct {
 		app      string
 		policy   AuthPolicy
@@ -151,42 +181,38 @@ func Build(apps []App, perApp map[string]AuthPolicy, def AuthPolicy) Document {
 		if !override {
 			p = def
 		}
-		for _, sub := range a.Subdomains {
-			if CoreSubdomains[sub] {
-				log.Printf("auth-policy: template %s routes core subdomain %q — ignored", a.ID, sub)
-				continue
-			}
-			claims[sub] = append(claims[sub], claim{a.ID, p, override})
+		for host := range a.Hosts {
+			claims[host] = append(claims[host], claim{a.ID, p, override})
 
 			// Only apps that opt into group-based access get a required
 			// group; for the others access_group is informational.
 			if a.GroupAccess && a.AccessGroup != "" {
-				if owner, taken := groupOwner[sub]; taken {
-					if doc.Groups[sub] != a.AccessGroup {
-						log.Printf("auth-policy: subdomain %q is routed by %s and %s — keeping group %q of %s", sub, owner, a.ID, doc.Groups[sub], owner)
+				if owner, taken := groupOwner[host]; taken {
+					if doc.Groups[host] != a.AccessGroup {
+						log.Printf("auth-policy: hostname %q is routed by %s and %s — keeping group %q of %s", host, owner, a.ID, doc.Groups[host], owner)
 					}
 				} else {
-					groupOwner[sub] = a.ID
-					doc.Groups[sub] = a.AccessGroup
+					groupOwner[host] = a.ID
+					doc.Groups[host] = a.AccessGroup
 				}
 			}
 			if a.AdminGroup != "" && len(a.AdminPaths) > 0 {
 				have := map[string]string{}
-				for _, pg := range doc.PathGroups[sub] {
+				for _, pg := range doc.PathGroups[host] {
 					have[pg.Prefix] = pg.Group
 				}
 				for _, prefix := range a.AdminPaths {
 					if g, ok := have[prefix]; ok {
 						if g != a.AdminGroup {
-							log.Printf("auth-policy: subdomain %q path %q claimed with groups %q and %q — keeping %q", sub, prefix, g, a.AdminGroup, g)
+							log.Printf("auth-policy: hostname %q path %q claimed with groups %q and %q — keeping %q", host, prefix, g, a.AdminGroup, g)
 						}
 						continue
 					}
 					have[prefix] = a.AdminGroup
-					doc.PathGroups[sub] = append(doc.PathGroups[sub], PathGroup{Prefix: prefix, Group: a.AdminGroup})
+					doc.PathGroups[host] = append(doc.PathGroups[host], PathGroup{Prefix: prefix, Group: a.AdminGroup})
 				}
-				sort.Slice(doc.PathGroups[sub], func(i, j int) bool {
-					return doc.PathGroups[sub][i].Prefix < doc.PathGroups[sub][j].Prefix
+				sort.Slice(doc.PathGroups[host], func(i, j int) bool {
+					return doc.PathGroups[host][i].Prefix < doc.PathGroups[host][j].Prefix
 				})
 			}
 		}
@@ -195,37 +221,31 @@ func Build(apps []App, perApp map[string]AuthPolicy, def AuthPolicy) Document {
 		if !a.Enabled || a.Deny || a.Public == nil {
 			continue
 		}
-		for _, sub := range a.PublicSubdomains {
-			if CoreSubdomains[sub] {
-				continue
-			}
-			if _, taken := doc.PublicPaths[sub]; taken {
+		for host := range a.PublicHosts {
+			if _, taken := doc.PublicPaths[host]; taken {
 				// Only one public router per host can exist (one owner
-				// per subdomain); keep the lowest template ID's.
-				log.Printf("auth-policy: subdomain %q has public exceptions from several apps — keeping the first (%s ignored)", sub, a.ID)
+				// per hostname); keep the lowest instance ID's.
+				log.Printf("auth-policy: hostname %q has public exceptions from several apps — keeping the first (%s ignored)", host, a.ID)
 				continue
 			}
-			doc.PublicPaths[sub] = *a.Public
+			doc.PublicPaths[host] = *a.Public
 		}
 	}
 	for _, a := range sorted {
 		if !a.Deny {
 			continue
 		}
-		for _, sub := range a.Subdomains {
-			if CoreSubdomains[sub] {
+		for host := range a.Hosts {
+			if _, claimed := claims[host]; claimed {
 				continue
 			}
-			if _, claimed := claims[sub]; claimed {
-				continue
+			if doc.Groups[host] != DenyGroup {
+				log.Printf("auth-policy: DENYING ALL ACCESS to %q (app %s has running containers but no known config)", host, a.ID)
 			}
-			if doc.Groups[sub] != DenyGroup {
-				log.Printf("auth-policy: DENYING ALL ACCESS to %q (app %s has running containers but no known config)", sub, a.ID)
-			}
-			doc.Groups[sub] = DenyGroup
+			doc.Groups[host] = DenyGroup
 		}
 	}
-	for sub, cs := range claims {
+	for host, cs := range claims {
 		anyOverride := false
 		best := cs[0]
 		for _, c := range cs {
@@ -239,11 +259,11 @@ func Build(apps []App, perApp map[string]AuthPolicy, def AuthPolicy) Document {
 			for i, c := range cs {
 				ids[i] = c.app
 			}
-			log.Printf("auth-policy: subdomain %q is routed by %v — publishing the strictest policy (of %s)", sub, ids, best.app)
+			log.Printf("auth-policy: hostname %q is routed by %v — publishing the strictest policy (of %s)", host, ids, best.app)
 		}
 		// Apps without an override inherit "default" in group-gate already.
 		if anyOverride {
-			doc.Policies[sub] = best.policy
+			doc.Policies[host] = best.policy
 		}
 	}
 	return doc

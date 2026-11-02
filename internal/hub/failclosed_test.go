@@ -38,7 +38,7 @@ func TestMissingTemplateEnforcesSnapshot(t *testing.T) {
 	}
 	st, _ := state.Load(filepath.Join(f.data, "state.yaml"))
 	snap, ok := st.Published["grafana"]
-	if !ok || strings.Join(snap.Subdomains, ",") != "grafana" || snap.AccessGroup != "users_grafana" ||
+	if !ok || strings.Join(snap.Hosts, ",") != "grafana.portcullis.local" || snap.AccessGroup != "users_grafana" ||
 		snap.AdminGroup != "admin_grafana" || len(snap.AdminPaths) != 2 || snap.Policy == nil || snap.Policy.Factors[0] != "mtls" {
 		t.Fatalf("snapshot = %+v", snap)
 	}
@@ -100,8 +100,8 @@ func TestSnapshotTracksLiveTemplate(t *testing.T) {
 	writeFile(t, filepath.Join(f.src, "grafana", "compose.yml"), "services:\n  grafana:\n    labels:\n      traefik.http.routers.g.rule: Host(`dash.${PORTCULLIS_DOMAIN}`)\n")
 	f.h.Discover()
 	st, _ := state.Load(filepath.Join(f.data, "state.yaml"))
-	if s := st.Published["grafana"].Subdomains; strings.Join(s, ",") != "dash" {
-		t.Errorf("snapshot subdomains = %v", s)
+	if s := st.Published["grafana"].Hosts; strings.Join(s, ",") != "dash.portcullis.local" {
+		t.Errorf("snapshot hosts = %v", s)
 	}
 	f.h.SaveSettings("grafana", SettingsUpdate{Values: map[string]string{}, Inherit: true})
 	st, _ = state.Load(filepath.Join(f.data, "state.yaml"))

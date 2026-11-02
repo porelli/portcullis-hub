@@ -493,7 +493,7 @@ func TestPeopleDirectoryUnavailable(t *testing.T) {
 }
 
 func TestCoreSubdomainsHasPeople(t *testing.T) {
-	if !policy.CoreSubdomains["people"] {
+	if !policy.CoreSubdomains()["people"] {
 		t.Error("people is not a core subdomain")
 	}
 }

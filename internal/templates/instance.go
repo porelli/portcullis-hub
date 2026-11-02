@@ -202,11 +202,17 @@ func (t *Template) InstanceOn(id string, hosts map[string]string, domain string,
 	if t.Public != nil {
 		p := *t.Public
 		p.Subdomains = nil
+		p.Hosts = nil
 		for _, s := range t.Public.Subdomains {
 			if v := mapSub(s); v != "" {
 				p.Subdomains = append(p.Subdomains, v)
 			}
 		}
+		// Hosts: full hostnames for v5 policy (includes extra-domain hosts).
+		for _, h := range c.Hosts {
+			p.Hosts = append(p.Hosts, h)
+		}
+		sort.Strings(p.Hosts)
 		c.Public = &p
 	}
 

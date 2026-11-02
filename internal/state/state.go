@@ -22,27 +22,26 @@ type Source struct {
 }
 
 // PublishedApp is the last known routing/authorization config of an enabled
-// app, as published to group-gate. If the app's template later stops
+// instance, as published to group-gate. If the instance's template later stops
 // loading (source removed, sync broke it, validation tightened) while its
 // containers keep running, the Hub keeps enforcing this snapshot instead of
-// silently dropping the app's entries (which would fail open).
+// silently dropping the instance's entries (which would fail open). Policy v5.
 type PublishedApp struct {
-	Subdomains  []string `json:"subdomains" yaml:"subdomains"`
+	Hosts       []string `json:"hosts" yaml:"hosts"`
 	GroupAccess bool     `json:"group_access" yaml:"group_access"`
 	AccessGroup string   `json:"access_group,omitempty" yaml:"access_group,omitempty"`
 	AdminGroup  string   `json:"admin_group,omitempty" yaml:"admin_group,omitempty"`
 	AdminPaths  []string `json:"admin_paths,omitempty" yaml:"admin_paths,omitempty"`
-	// Policy is the app's own policy override at publish time; nil means it
+	// Policy is the instance's own policy override at publish time; nil means it
 	// inherits the (current) global default.
 	Policy *policy.AuthPolicy `json:"policy,omitempty" yaml:"policy,omitempty"`
-	// NativeLoginOnly: the app ran with its own login only (no Portcullis
+	// NativeLoginOnly: the instance ran with its own login only (no Portcullis
 	// sign-in on its routers, so GroupAccess is false) at publish time.
 	NativeLoginOnly bool `json:"native_login_only,omitempty" yaml:"native_login_only,omitempty"`
-	// PublicSubdomains / PublicPaths are the app's public exceptions at
-	// publish time ({token} kept, never the tokens); empty when no public
-	// router was generated.
-	PublicSubdomains []string            `json:"public_subdomains,omitempty" yaml:"public_subdomains,omitempty"`
-	Public           *policy.PublicEntry `json:"public,omitempty" yaml:"public,omitempty"`
+	// PublicHosts / Public are the instance's public exceptions at publish time
+	// ({token} kept, never the tokens); empty when no public router was generated.
+	PublicHosts []string            `json:"public_hosts,omitempty" yaml:"public_hosts,omitempty"`
+	Public      *policy.PublicEntry `json:"public,omitempty" yaml:"public,omitempty"`
 }
 
 // Instance is an app instance other than a template's implicit default

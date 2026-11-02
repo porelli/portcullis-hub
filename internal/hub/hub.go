@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"sync"
 	"time"
 
@@ -314,13 +315,18 @@ func (h *Hub) Discover() {
 	}
 }
 
-// snapshot captures what an enabled template publishes to group-gate.
+// snapshot captures what an enabled instance publishes to group-gate (v5).
 // Caller must hold mu.
 func (h *Hub) snapshot(t *templates.Template) state.PublishedApp {
 	a := t.Manifest.Auth
 	acc := h.accessLocked(t)
+	hosts := make([]string, 0, len(t.Hosts))
+	for _, h := range t.Hosts {
+		hosts = append(hosts, h)
+	}
+	sort.Strings(hosts)
 	p := state.PublishedApp{
-		Subdomains:      append([]string(nil), t.Subdomains...),
+		Hosts:           hosts,
 		GroupAccess:     acc.groupAccess(t),
 		NativeLoginOnly: acc.SignIn == SignInNative,
 		AccessGroup:     a.AccessGroup,
@@ -332,7 +338,12 @@ func (h *Hub) snapshot(t *templates.Template) state.PublishedApp {
 		p.Policy = &ov
 	}
 	if pub := h.publicLocked(t, t.Public); pub.Active() {
-		p.PublicSubdomains = append([]string(nil), t.Public.Subdomains...)
+		pubHosts := make([]string, 0, len(t.Public.Hosts))
+		for _, h := range t.Public.Hosts {
+			pubHosts = append(pubHosts, h)
+		}
+		sort.Strings(pubHosts)
+		p.PublicHosts = pubHosts
 		p.Public = publicEntry(&t.Manifest, pub.Published)
 	}
 	return p
@@ -434,6 +445,12 @@ func (h *Hub) WritePolicy() error {
 	h.driftMu.Unlock()
 
 	h.mu.RLock()
+	mainDomain := h.cfg.Domain
+	coreHosts := policy.CoreHosts(mainDomain)
+	extraDomains := make([]string, 0, len(h.enrolledLocked()))
+	for _, d := range h.enrolledLocked() {
+		extraDomains = append(extraDomains, d.Name)
+	}
 	perApp := make(map[string]policy.AuthPolicy, len(h.st.AuthPolicies))
 	for k, v := range h.st.AuthPolicies {
 		perApp[k] = v
@@ -446,17 +463,30 @@ func (h *Hub) WritePolicy() error {
 			continue
 		}
 		covered[t.ID] = true
+		// Filter out core hosts: they come from group-gate-map.conf.
+		hosts := make(map[string]string, len(t.Hosts))
+		for _, h := range t.Hosts {
+			if !coreHosts[h] {
+				hosts[h] = h
+			}
+		}
 		app := policy.App{
 			ID:          t.ID,
 			Enabled:     true,
-			Subdomains:  t.Subdomains,
+			Hosts:       hosts,
 			GroupAccess: h.accessLocked(t).groupAccess(t),
 			AccessGroup: t.Manifest.Auth.AccessGroup,
 			AdminGroup:  t.Manifest.Auth.AdminGroup,
 			AdminPaths:  t.Manifest.Auth.AdminPaths,
 		}
 		if pub := h.publicLocked(t, t.Public); pub.Active() {
-			app.PublicSubdomains, app.Public = t.Public.Subdomains, publicEntry(&t.Manifest, pub.Published)
+			pubHosts := make(map[string]string, len(t.Public.Hosts))
+			for _, ph := range t.Public.Hosts {
+				if !coreHosts[ph] {
+					pubHosts[ph] = ph
+				}
+			}
+			app.PublicHosts, app.Public = pubHosts, publicEntry(&t.Manifest, pub.Published)
 		}
 		apps = append(apps, app)
 	}
@@ -466,39 +496,66 @@ func (h *Hub) WritePolicy() error {
 		}
 		covered[id] = true
 		if snap, ok := h.st.Published[id]; ok {
-			log.Printf("auth-policy: WARNING: template for enabled app %s is missing — still enforcing its last known config (subdomains %v)", id, snap.Subdomains)
+			log.Printf("auth-policy: WARNING: template for enabled app %s is missing — still enforcing its last known config (hosts %v)", id, snap.Hosts)
 			if _, ok := perApp[id]; !ok && snap.Policy != nil {
 				perApp[id] = *snap.Policy
+			}
+			hosts := make(map[string]string, len(snap.Hosts))
+			for _, h := range snap.Hosts {
+				if !coreHosts[h] {
+					hosts[h] = h
+				}
+			}
+			pubHosts := make(map[string]string, len(snap.PublicHosts))
+			for _, h := range snap.PublicHosts {
+				if !coreHosts[h] {
+					pubHosts[h] = h
+				}
 			}
 			apps = append(apps, policy.App{
 				ID:          id,
 				Enabled:     true,
-				Subdomains:  snap.Subdomains,
+				Hosts:       hosts,
 				GroupAccess: snap.GroupAccess,
 				AccessGroup: snap.AccessGroup,
 				AdminGroup:  snap.AdminGroup,
 				AdminPaths:  snap.AdminPaths,
 				// The containers keep the public router they were started
 				// with: keep showing it.
-				PublicSubdomains: snap.PublicSubdomains,
-				Public:           snap.Public,
+				PublicHosts: pubHosts,
+				Public:      snap.Public,
 			})
 			continue
 		}
 		if subs := runtime[id]; len(subs) > 0 {
-			apps = append(apps, policy.App{ID: id, Enabled: true, Deny: true, Subdomains: subs})
+			// Runtime subs are still subdomains (from Traefik labels); expand them to full hostnames.
+			hosts := make(map[string]string, len(subs))
+			for _, sub := range subs {
+				h := sub + "." + mainDomain
+				if !coreHosts[h] {
+					hosts[h] = h
+				}
+			}
+			apps = append(apps, policy.App{ID: id, Enabled: true, Deny: true, Hosts: hosts})
 		} else {
-			log.Printf("auth-policy: WARNING: enabled app %s has neither a template nor a last known config, and no routed subdomains are known yet — cannot publish a deny entry", id)
+			log.Printf("auth-policy: WARNING: enabled app %s has neither a template nor a last known config, and no routed hosts are known yet — cannot publish a deny entry", id)
 		}
 	}
 	// Running app projects that are not enabled (drift) are routed by
-	// Traefik but have no config: deny their subdomains too.
+	// Traefik but have no config: deny their hosts too.
 	for id, subs := range runtime {
 		if !covered[id] && len(subs) > 0 {
-			apps = append(apps, policy.App{ID: id, Enabled: true, Deny: true, Subdomains: subs})
+			hosts := make(map[string]string, len(subs))
+			for _, sub := range subs {
+				h := sub + "." + mainDomain
+				if !coreHosts[h] {
+					hosts[h] = h
+				}
+			}
+			apps = append(apps, policy.App{ID: id, Enabled: true, Deny: true, Hosts: hosts})
 		}
 	}
-	doc := policy.Build(apps, perApp, h.st.Default())
+	doc := policy.Build(apps, perApp, h.st.Default(), extraDomains)
 	doc.Expiring = expiring
 	portal := h.portalLocked()
 	h.mu.RUnlock()
@@ -525,8 +582,9 @@ func (h *Hub) WritePolicy() error {
 }
 
 func coreSubdomain(subs []string) string {
+	coreSubs := policy.CoreSubdomains()
 	for _, s := range subs {
-		if policy.CoreSubdomains[s] {
+		if coreSubs[s] {
 			return s
 		}
 	}

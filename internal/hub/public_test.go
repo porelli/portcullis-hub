@@ -150,7 +150,7 @@ func TestPublicListedTokens(t *testing.T) {
 	}
 	st, _ := state.Load(filepath.Join(f.data, "state.yaml"))
 	if strings.Join(st.PublicTokens["cloud"], ",") != "AbC123,Zz9" || st.Published["cloud"].Public == nil || guardPathsOf(*st.Published["cloud"].Public) != "prefix:/s/{token},static:/dist" ||
-		strings.Join(st.Published["cloud"].PublicSubdomains, ",") != "cloud" {
+		strings.Join(st.Published["cloud"].PublicHosts, ",") != "cloud.portcullis.local" {
 		t.Errorf("state tokens %v snapshot %+v", st.PublicTokens, st.Published["cloud"])
 	}
 

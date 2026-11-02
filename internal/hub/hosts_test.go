@@ -414,7 +414,7 @@ func TestSetHostsRewritesPublicShareHosts(t *testing.T) {
 		t.Errorf("old host still in groups: %v", doc.Groups)
 	}
 	st, _ := state.Load(filepath.Join(f.data, "state.yaml"))
-	if strings.Join(st.PublicTokens["cloud-b"], ",") != "AbC123" || strings.Join(st.Published["cloud-b"].PublicSubdomains, ",") != "files" {
+	if strings.Join(st.PublicTokens["cloud-b"], ",") != "AbC123" || strings.Join(st.Published["cloud-b"].PublicHosts, ",") != "files.example.org" {
 		t.Errorf("state tokens %v snapshot %+v", st.PublicTokens["cloud-b"], st.Published["cloud-b"])
 	}
 	env := readFile(t, f.h.envPath("cloud-b"))
