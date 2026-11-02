@@ -447,3 +447,41 @@ func TestSyncReassertsCallbacks(t *testing.T) {
 		t.Fatalf("callbacks = %q", got)
 	}
 }
+
+// TestSyncCallbacksUnderLock (re-review N3): the access sync re-asserts an
+// instance's callbacks while holding its lock — a disable can't run
+// between the read and the PUT (and get its removed callback put back).
+func TestSyncCallbacksUnderLock(t *testing.T) {
+	f := plexOnExtra(t)
+	var disableErr, signInErr error
+	f.idp.mu.Lock()
+	f.idp.onCallbacks = func() {
+		// Inside the sync's PUT: the instance is locked.
+		disableErr = f.h.Disable("plex-b")
+		signInErr = f.h.SaveSettings("plex-b", SettingsUpdate{Values: map[string]string{}, SignIn: strp(SignInNative)})
+	}
+	f.idp.mu.Unlock()
+	if err := f.h.SyncClientAccess(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var busy ErrBusy
+	if !errors.As(disableErr, &busy) || !errors.As(signInErr, &busy) {
+		t.Fatalf("during the sync's PUT: disable %v, sign-in change %v (want busy)", disableErr, signInErr)
+	}
+	// After the sync, disable removes the callback and nothing re-adds it.
+	if err := f.h.Disable("plex-b"); err != nil {
+		t.Fatal(err)
+	}
+	f.idp.mu.Lock()
+	f.idp.callbacks = nil
+	f.idp.mu.Unlock()
+	if err := f.h.SyncClientAccess(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	f.idp.mu.Lock()
+	got := strings.Join(f.idp.callbacks, " ")
+	f.idp.mu.Unlock()
+	if got != "" {
+		t.Fatalf("sync after disable: %q", got)
+	}
+}

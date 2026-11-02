@@ -232,6 +232,16 @@ func (h *Hub) SaveSettings(id string, u SettingsUpdate) (retErr error) {
 	if problems := configProblems(t, u, native); len(problems) > 0 {
 		return problems[0]
 	}
+	// A sign-in mode change holds the instance's lock (as enable, disable,
+	// SetHosts and the access sync do) for the callback change and the
+	// save, so their callback changes can't interleave.
+	if u.SignIn != nil {
+		unlock, err := h.lockApp(id)
+		if err != nil {
+			return err
+		}
+		defer unlock()
+	}
 	// A sign-in mode change of an enabled instance moves its extra-domain
 	// sign-in callbacks (contract §5) first: a Keycloak failure changes
 	// nothing; a later failure here undoes them.

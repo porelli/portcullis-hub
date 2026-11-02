@@ -1,6 +1,7 @@
 # App settings panel: template-declared settings, per-person and per-group values
 
-Status: approved (2026-11-02)
+Status: approved (2026-11-02). Amended 2026-11-02 with person-entered
+values (user request; call 32).
 
 Project 1 of 3 (1 settings panel → 2 shared folders + doctor → 3 file
 sharing: file-share passwords, Samba, Time Machine). Evidence base:
@@ -27,7 +28,9 @@ allowance". An admin should be able to:
   everyone else who has access;
 - see who gets what, and why.
 
-People should see their own values for the apps they can use.
+People should see their own values for the apps they can use. For options
+the template marks as theirs to give (e.g. their Mozilla account id for
+Firefox Sync), people enter the value themselves (call 32).
 
 The definition has to cover apps we don't have yet: quotas, roles, budgets,
 library access, ACL groups, app passwords. So it is built from a small set
@@ -82,14 +85,23 @@ a change applies), not from per-app options.
 9. **Extension points for projects 2 and 3** are defined (names, shapes,
    contract sections), so those projects add field types and panels without
    reworking this one.
+10. **Person-entered values** (user request, call 32). A template can
+    declare an option whose value each person enters for themselves on My
+    apps → <app>, e.g. their Mozilla account id. The template declares the
+    validation and whether values must be unique; the app receives the
+    (person, value) list of its current population only. First consumer:
+    the Firefox Sync allowlist. No Firefox-specific Hub code.
 
 ## Non-goals
 
 - Hub-managed shared folders, folder ownership checks and the doctor
   (project 2). File-share passwords, Samba and Time Machine templates
   (project 3).
-- People editing their own values (e.g. raising their own quota). People
-  only see their values.
+- People editing their own resolved values (e.g. raising their own
+  quota). People only see the values admins set through groups. The one
+  exception is an option the template declares `scope: person_entered`
+  (call 32): its value is the person's own (an id of theirs in another
+  system), not a grant, so it can never be privileged.
 - Delegated editing. Delegates (`edit_details` / `invite` / `remove`) have no
   access to app settings.
 - Settings for core services (Keycloak, Traefik, group-gate).
@@ -125,6 +137,17 @@ a change applies), not from per-app options.
 - **Silent half-application.** A delivery that fails (hook exits non-zero,
   LLDAP write refused) is shown on the instance as failed, with the reason.
   It is never reported as applied.
+- **A person-entered value granting anything** (call 32). What a person
+  types reaches the app only as data about that person. It is never
+  privileged, never resolved into anyone else's value, and never delivered
+  for someone outside the population.
+- **Claiming someone else's id.** With `unique: true`, two people of one
+  instance can never hold the same value, so one person can't put a second
+  person's external account on their own entry. The refusal doesn't say who
+  holds it.
+- **Leaving without losing access.** Someone who leaves the access group
+  disappears from what the app receives at the next delivery, even though
+  their entry is kept.
 
 ## Constraints and facts (verified in the code)
 
@@ -206,6 +229,21 @@ a change applies), not from per-app options.
   - templates get `PORTCULLIS_ACCESS_GROUP` / `PORTCULLIS_ADMIN_GROUP`;
   - restore into a new id rewrites hostnames and creates new groups
     (§11.5-11.6).
+- **Firefox Sync today** (`tpl-sync-vikunja` branch `apps-sync-vikunja`,
+  `firefox-sync/manifest.yaml`, `compose.yml`):
+  - `auth.method: custom`, `group_access: false`, no access group, no
+    `native_login`. Its routers are public (Firefox makes every Sync
+    request anonymously), so Portcullis passes no identity to it.
+  - Who may sync is the admin-entered text setting
+    `FIREFOX_SYNC_ALLOWED_ACCOUNTS`: Mozilla account uids, 32 hexadecimal
+    characters, separated by commas or spaces. The `firefox-sync-init`
+    one-shot installs it with a database trigger at every start (psql
+    `\getenv`, never argv). A uid taken off the list loses its tokenserver
+    rows at the next start.
+- **Access groups without enforcement.** A template may declare
+  `auth.access_group` with `group_access: false` and a method other than
+  native-oidc (`validate.go:92-104`). The Hub still creates the group per
+  instance (`create.go:64`), but nothing in front of the app enforces it.
 - **Standing rules.**
   - Prefer mature libraries.
   - No migration or back-compat code: there are no installs, so templates
@@ -247,6 +285,22 @@ a change applies), not from per-app options.
   member of — the resolved reason's group is always one they belong to.
   Losing groups (e.g. in "largest of …") are never shown; the full
   breakdown stays in the admin preview.
+- **Person-entered values (2026-11-02):** "Can we provide an option for
+  users to specify their Mozilla ID to allowlist?" A generic per-person
+  option whose value the person enters on their People page (My apps →
+  <app>), not an admin. First consumer: Firefox Sync. Each member of the
+  instance's access group can enter their Mozilla account id; the template
+  receives the (person, value) list of the current access-group members
+  only and uses it as its allowlist. Generic, with no Firefox-specific Hub
+  code. Required parts: a validation pattern and length declared by the
+  template; an optional admin override or clear; a uniqueness option; the
+  person sees and edits only their own value, admins see all; delivery
+  through the existing mechanisms; only people currently in the population
+  are delivered; an audit with the person as the actor; applies as
+  declared; a People page input with save and status; people-listener
+  routes `PUT` / `DELETE /api/me/apps/{instance}/values/{key}`. It is a
+  sibling of project 3's `person_secret` (a credential the Hub generates
+  for the person), not the same thing. Design: call 32.
 
 ## Calls made while drafting (check these)
 
@@ -324,10 +378,14 @@ brainstorm. The others were made while drafting this spec.
      Implemented and tested with fixture templates. No template is
      converted to it here.
 
+   - `person_entered`: one value per person, entered by that person on My
+     apps (call 32). Not resolved, no default, no group rows.
+
    The people a `person` option applies to are the members of the
    instance's access group, or every signed-in user when the instance has
    none. Call 27 spells this out for path groups, public routes and
-   `sign_in: native`.
+   `sign_in: native`. Call 32 gives the population of a `person_entered`
+   option.
 8. **Option keys are identifiers, not env names.**
    - Keys match `^[a-z][a-z0-9_]{0,39}$`.
    - An env delivery names its variable (`env: IMMICH_TRASH_DAYS`).
@@ -438,6 +496,10 @@ brainstorm. The others were made while drafting this spec.
     - Instance options, secrets and other people are never included.
     - Project 3 adds per-person credential panels in the same place (call
       20).
+    - Amended by call 32: `GET /api/me/apps` stays the only read route.
+      Two write routes join it, `PUT` and `DELETE
+      /api/me/apps/{instance}/values/{key}`, and they too act only on the
+      caller's own value. The allowlist test lists all three.
 16. **Hooks (runtime API delivery).**
     - A template declares `hooks:` with:
       - `name` and `service`;
@@ -518,6 +580,14 @@ brainstorm. The others were made while drafting this spec.
       across restore.
     - **My apps panels:** the `GET /api/me/apps` entry has a `credentials`
       list that is empty in project 1.
+    - **Siblings, not the same:** `person_secret` is a *type* whose value
+      the Hub generates and the person never types; it is shown once,
+      stored only hashed, revoked on leave, and listed under `credentials`.
+      `person_entered` (call 32) is a *scope* over ordinary types whose
+      value the person types; it is visible to them and to admins, kept on
+      leave, and listed under `entries`. A `person_secret` option has no
+      `scope` (project 3 refuses one), so the two never combine. The routes
+      are siblings too: `…/credentials/{key}` and `…/values/{key}`.
 21. **Template contract v3** (breaking: MAJOR bump).
     - The contract gets a new section "§13 Settings": types, scopes,
       resolution, deliveries, data-file and hook-input formats, `applies`
@@ -529,6 +599,7 @@ brainstorm. The others were made while drafting this spec.
     - The schema and `validate.py` in the templates repo enforce the same
       rules as the Hub, including the cross-checks:
       - a `person` option has a per-person delivery;
+      - a `person_entered` option follows call 32's rules;
       - claim delivery needs native-oidc and a declared client;
       - header delivery needs forward-auth;
       - `group_values` use placeholders only;
@@ -557,7 +628,8 @@ brainstorm. The others were made while drafting this spec.
       - instance values;
       - per-person configs: default, rule, ordered group rows;
       - group records;
-      - secret metadata.
+      - secret metadata;
+      - person-entered values (call 32).
     - Secret values live only in the `.env` or the secrets file, not in
       `state.yaml`.
     - Instance backup and restore carry all of it (contract §11.5).
@@ -574,7 +646,10 @@ brainstorm. The others were made while drafting this spec.
       - a member of `admin_<id>` gets `immich_role: admin`;
       - Grafana gets the role header;
       - a membership change updates the claim within the debounce window;
-      - the people listener returns only the caller's apps.
+      - the people listener returns only the caller's apps;
+      - a person enters a value on My apps, and the fixture app's data file
+        lists it; after they leave the access group it is gone from the
+        file, and it comes back when they rejoin (call 32).
 
 Calls 25-31 settle questions from the builder check. All are
 **Controller's calls**.
@@ -716,6 +791,178 @@ Calls 25-31 settle questions from the builder check. All are
     - `requires` joins call 6's constraint list and call 21's schema
       cross-checks.
 
+Call 32 settles the user's request of 2026-11-02 (person-entered values).
+The request and its required parts are the user's; the details marked
+**Controller's call** are the controller's.
+
+32. **Person-entered values: `scope: person_entered`.** *(The request is
+    the user's; the details are Controller's calls.)*
+    - **A scope, not a type.** *(Controller's call.)* The value is an
+      ordinary typed value (a `string` with a pattern, an `int`, …); what
+      differs is who gives it and how it is picked, which is exactly what
+      call 7's scopes describe. So the existing type constraints, render
+      and deliveries apply unchanged, and the Hub has no new kind. It
+      also keeps it clearly apart from project 3's `person_secret`, which
+      is a type (call 20, "Siblings, not the same").
+    - **Declaration.** *(Controller's call.)*
+      - Types: `string`, `int`, `bool`, `enum` only. `secret` is refused
+        (a credential is `person_secret`'s job), and so are the list,
+        table, path, group and user types.
+      - Constraints are the type's own (call 6): `pattern`, `min_len` /
+        `max_len`, `format`, `min` / `max`, `options`. A `string` must
+        declare `max_len` ≤ 256, or a `pattern` or `format` that bounds
+        it, so a person can't store a novel.
+      - `unique: true` (`string` and `int` only): no two people of one
+        instance hold the same value of that option. Values compare in
+        canonical form, exactly. Templates whose ids are case-insensitive
+        declare a lowercase `pattern`. (On `list`, `unique` keeps its call
+        6 meaning; the two can't meet, since a person-entered option is
+        never a list.)
+      - `admin_override: true` lets admins set a value on someone's
+        behalf. The default is false: a value about someone's external
+        account should come from that person. Admins can **always** clear
+        a value (bad data, a uniqueness dispute).
+      - Refused: `default`, `required`, `resolve`, `resolve_choices`,
+        `group_values`, `privileged`, `requires` (either direction),
+        `self_visible: false` (the person must see what they edit), and
+        `applies: account_creation`.
+      - Deliveries (the existing mechanisms, call 11 rendering):
+        - `file`: the data file's `entries` section (below);
+        - `hook`: the same, on stdin;
+        - `env`: the list of values as one variable. It needs
+          `render.join` or `render.format: json` and `applies: restart`.
+          This is not per-person env (call 7): the variable carries the
+          collection, never one person's value;
+        - `claim` / `header`: each person's own value, per person, under
+          the same rules as for `person` options (calls 12-13). People
+          with no value get none.
+      - `applies` is declared as usual and has to match the delivery
+        path, because person-entered changes are delivered like
+        membership changes (below): a `file` delivery's `applies` must be
+        what its file's `on_membership_change` does (`restart` → restart,
+        `reload` → reload, `hook` → live, `none` → `live`, `next_request`
+        or `next_sign_in`); a `hook` delivery needs `applies: live` and
+        `membership_change` in the hook's `when`; a claim is
+        `next_sign_in` and a header `next_request`.
+    - **Population: who may enter, and whose values are delivered.**
+      *(Controller's call.)* The person must be in the option's population
+      both to enter a value and to have it delivered.
+      - When the instance's routes carry Portcullis identity, it is call
+        27's population.
+      - When they don't (method `public`, `custom` without Portcullis
+        sign-in, or `sign_in: native`), call 27 would give nobody, since
+        the app never sees a Portcullis username. A person-entered value
+        is different: it *is* the app-side identity (the Mozilla uid), and
+        the person proved who they are on people.<domain>. So the
+        population is then the members of the template's `access_group`,
+        minus expired-but-not-removed `expiring` entries. Nothing in front
+        of the app enforces that group; the delivered list is how the app
+        enforces it.
+      - The validator therefore requires `auth.access_group` on a template
+        with a `person_entered` option whose routes can run without
+        Portcullis identity (method `public` or `custom`, or
+        `native_login.allow_without_gateway`). Without one, "everyone in
+        LLDAP" would be the allowlist. Fail closed.
+      - Admin, extra and core groups never widen it, as in call 27.
+    - **Leaving, rejoining, deleting.** *(Controller's call.)*
+      - A person who leaves the population keeps their stored value, but
+        it is no longer delivered: the next membership delivery (debounced,
+        call 17) drops them from `entries`, claims and headers. If they
+        rejoin, it is delivered again with no re-entry. This differs from
+        `person_secret`'s `revoke_on_leave` on purpose: an id is not a
+        capability, and the delivery filter already takes their access
+        away.
+      - Deleting the account through the Hub deletes the person's values
+        in every instance (`directory.Service.UserDeleted` hook, after the
+        LLDAP delete succeeds; audited with the admin as the actor).
+      - Each value stores the LLDAP user uuid it was entered under. An
+        account deleted outside the Hub, or deleted and re-created with
+        the same name, no longer matches: from that moment the value is
+        not delivered, and the next reconcile purges it (audited, actor
+        `hub`). Like call 29 for groups, a re-created name inherits
+        nothing.
+      - A disabled instance keeps its values and delivers none. Deleting
+        the instance deletes them. Backups carry them (`instance.yaml`
+        settings); restore into a new id copies them (the same people's
+        own ids), and the uuid check still applies.
+      - A template update that removes or retypes the option drops its
+        values (call 23). Values that no longer pass tightened
+        constraints are dropped, and so are later duplicates when
+        `unique: true` is newly declared (the earliest `updated_at`
+        stays). Both are audited, and the app-updates preview lists them.
+    - **Uniqueness.** *(Controller's call.)* It is checked under `Hub.mu`
+      at save against **every stored value** of that option in that
+      instance, delivered or not. A person who left still holds their id,
+      so delivered values are always unique and a rejoin never collides.
+      A conflict is a 409 "already registered for <app> by another
+      person". It never names the holder. The admin sees the holder in
+      the panel and can clear it. The audit records the refusal with the
+      holder's name, since the audit is admin-only.
+    - **Delivery shape.** *(Controller's call.)*
+      - The data file (call 14) gains a section
+        `"entries": {"<key>": [{"user": "<lowercase user>", "value": <rendered>}]}`,
+        sorted by user. It holds population members with a matching uuid
+        only. Person-entered values are never under `people`, which stays
+        "values the Hub resolved".
+      - Hook stdin (call 16) carries the same `entries`.
+      - An env delivery is the rendered values in user order, joined. It
+        has no usernames.
+      - A person's change goes through the membership path: debounced 60 s
+        per instance (call 17), the file's `on_membership_change`, and
+        hooks with trigger `membership_change`. Many people editing at
+        once therefore cause one restart, not a restart storm. The panel
+        warns "people entering or changing a value restarts <app>" when
+        that is the effect.
+    - **Visibility.** *(Controller's call.)*
+      - On My apps, the person sees only their own value, its status (not
+        set / set / set by an administrator, and when), the input
+        constraints and when it applies. Never other people's values, and
+        never how many people entered one.
+      - The app shows on My apps when the caller is in the option's
+        population, even with no resolved values, so the person can enter
+        a value.
+      - In the admin panel, every stored value shows with its person, when
+        it was set and by whom, and "delivered" or the reason it isn't
+        ("no access", "account changed"). Population members with no value
+        are listed as "not set". The admin can clear any value, and can
+        set one when `admin_override` is on.
+    - **Routes.** *(The routes are the user's; the rest is the
+      controller's.)*
+      - People listener, caller only (`X-Forwarded-User`, lowercased),
+        CSRF guard as for the directory API, body ≤ 4 KiB:
+        - `PUT /api/me/apps/{instance}/values/{key}` with
+          `{"value": <json>}` → 200 with the caller's entry;
+        - `DELETE /api/me/apps/{instance}/values/{key}` → 204.
+        - Refusals: 404 when the instance isn't enabled, the key isn't a
+          `person_entered` option, or the caller isn't in its population
+          (the same answer for all three, so nothing leaks); 400 with the
+          constraint; 409 for uniqueness; 503 when LLDAP is unavailable
+          (the population can't be checked).
+      - Hub listener, admins only: `PUT` / `DELETE
+        /api/instances/{id}/settings/entries/{key}/{user}`. A `PUT`
+        without `admin_override` is a 403. The person must be in the
+        population (404 otherwise), and uniqueness applies to admins too.
+      - These two people-listener routes and `GET /api/me/apps` are the
+        three entries of the people-route allowlist (call 15). Project 3
+        appends its credential routes.
+    - **Audit.** *(Controller's call.)* `settings.person_value`, target
+      `<instance>/<key>/<user>`, actor = the person (self-service), the
+      admin, or `hub` (purges). The detail is one of:
+      - `set: <before or unset> -> <after>`;
+      - `cleared`;
+      - `deleted` (account deleted);
+      - `purged` (account changed outside the Hub);
+      - `invalidated` (template update).
+
+      Refusals are audited `refused`. The values are not secrets, so they
+      are shown, as `settings.change` shows values.
+    - **State.** *(Controller's call.)* The values go in `state.yaml`,
+      per instance: key → lowercase user → `{value, uuid, updated_at,
+      set_by}`, where `set_by` is empty for the person and holds the
+      admin's name otherwise. They aren't secrets, so they don't need the
+      secrets store. Nothing about them is in `delivered.json` beyond the
+      usual per-unit hashes.
+
 ## Example: the template declaration
 
 Immich (pilot; abridged):
@@ -818,6 +1065,68 @@ settings:
       delivery: [{hook: apply-settings, render: {unit: GB, integer: true, unlimited: none}}]
 ```
 
+Firefox Sync allowlist (first person-entered consumer, call 32; abridged).
+The template gains an access group that defines who may sync; Portcullis
+still doesn't sit in front of Firefox:
+
+```yaml
+auth:
+  method: custom
+  group_access: false                  # Firefox's requests are anonymous: nothing in front enforces it
+  access_group: firefox_sync           # users_<id> for further instances; who may enter a uid (call 32)
+settings:
+  sections: [Accounts]
+  options:
+    - key: mozilla_uid
+      label: Mozilla account ID
+      description: >
+        The uid of the Mozilla account you sign in to Firefox with
+        (32 lowercase hexadecimal characters). Only accounts listed here
+        can sync with this server.
+      type: string
+      pattern: '^[0-9a-f]{32}$'
+      min_len: 32
+      max_len: 32
+      scope: person_entered
+      unique: true                     # one person can't list another person's account
+      admin_override: true             # admins may enter it for someone who asks
+      section: Accounts
+      applies: restart                 # = the file's on_membership_change
+      delivery: [{file: {name: allowlist}}]
+    - key: extra_accounts              # accounts not tied to a Portcullis person (was FIREFOX_SYNC_ALLOWED_ACCOUNTS)
+      label: Other allowed accounts
+      type: list
+      items: {type: string, pattern: '^[0-9a-f]{32}$'}
+      unique: true
+      scope: instance
+      section: Accounts
+      applies: restart
+      delivery: [{file: {name: allowlist}}]
+files:
+  - name: allowlist
+    service: firefox-sync-init         # its guard.sql reads /portcullis/allowlist.json at every start
+    mount: /portcullis
+    on_membership_change: restart      # a uid off the list loses its tokenserver rows at the next start
+```
+
+The data file the init one-shot reads (alice and bob are in `firefox_sync`;
+carol entered a uid, then left the group, so hers is stored but not
+delivered):
+
+```json
+{"version": 1, "instance": "firefox-sync",
+ "values": {"extra_accounts": ["5d41402abc4b2a76b9719d911017c592"]},
+ "people": {}, "groups": {},
+ "entries": {"mozilla_uid": [
+   {"user": "alice", "value": "0f1e2d3c4b5a69788796a5b4c3d2e1f0"},
+   {"user": "bob",   "value": "a1b2c3d4e5f60718293a4b5c6d7e8f90"}]}}
+```
+
+The allowlist is the union of `entries.mozilla_uid[].value` and
+`values.extra_accounts`. A template that keeps today's env path can declare
+`delivery: [{env: FIREFOX_SYNC_PERSON_ACCOUNTS, render: {join: ","}}]`
+instead, with the same population filter.
+
 ## Example: the resulting UI behaviour
 
 **Hub → Apps → Time Machine → Settings → Backups.** The admin sees:
@@ -864,6 +1173,39 @@ Photos (Immich)                                 photos.example.com
 Apps alice can't access don't appear. Project 3 adds "File-share password"
 under Time Machine here.
 
+**people.<domain> → My apps → Firefox Sync** for alice, who is in
+`firefox_sync` (call 32):
+
+```
+Firefox Sync                                    sync.example.com
+  Mozilla account ID   [ 0f1e2d3c4b5a69788796a5b4c3d2e1f0 ]  [ Save ] [ Clear ]
+                       32 lowercase hexadecimal characters
+                       ✓ Saved 2 Nov 2026 · Firefox Sync picks it up within
+                         about a minute (the app restarts)
+```
+
+- Before saving, the input checks the pattern and length. The Hub checks
+  them again.
+- A uid someone else already entered: "This account is already registered
+  for Firefox Sync by another person". It doesn't say who.
+- Set by an admin: "Set by an administrator on 2 Nov 2026"; alice can still
+  change or clear it.
+- Not set: an empty input and "Not set: Firefox Sync won't accept your
+  account until you enter it".
+
+**Hub → Apps → Firefox Sync → Settings → Accounts** (admin):
+
+```
+Mozilla account ID                    entered by each person · applies: after a restart
+  2 of 3 people with access have entered one                       [ search… ]
+    alice  0f1e2d3c…e1f0   by alice, 2 Nov    delivered       [ Edit ]  [ Clear ]
+    bob    a1b2c3d4…8f90   by root, 1 Nov     delivered       [ Edit ]  [ Clear ]
+    dave   not set                                            [ Set ]
+  Stored, not delivered:
+    carol  9988aabb…0011   by carol, 30 Oct   no access (left firefox_sync) [ Clear ]
+  ⚠ People entering or changing a value restarts Firefox Sync.
+```
+
 ## Left to the builder
 
 - API shapes for the Hub settings endpoints (replace
@@ -889,3 +1231,7 @@ under Time Machine here.
   multi-host headers (26), population (27), privileged groups (28), groups
   deleted outside the Hub (29), Immich/Grafana role sync (30), `requires`
   (31).
+- Person-entered values (call 32), user request of 2026-11-02. Left to the
+  builder: the Firefox Sync `guard.sql` change that reads the data file
+  (psql `\set` from the mounted file, then `jsonb`), done on the
+  firefox-sync template branch.
