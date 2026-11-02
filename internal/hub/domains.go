@@ -232,7 +232,14 @@ func (h *Hub) RefreshDomains(ctx context.Context) ([]domains.Domain, error) {
 	list = fromKnown(known)
 	h.mu.Lock()
 	h.domainsReachable = true
-	// A deleting mark whose name the service no longer lists is done.
+	if h.domainsGen != gen {
+		// A domain operation (or a deleting mark) happened while List was
+		// in flight: its result is newer than this list.
+		h.mu.Unlock()
+		return list, nil
+	}
+	// A deleting mark whose name the service no longer lists is done (only
+	// from a list fetched after the mark: the generation check above).
 	for n := range h.domainsDeleting {
 		gone := true
 		for _, d := range known {
@@ -241,12 +248,6 @@ func (h *Hub) RefreshDomains(ctx context.Context) ([]domains.Domain, error) {
 		if gone {
 			delete(h.domainsDeleting, n)
 		}
-	}
-	if h.domainsGen != gen {
-		// A domain operation committed while List was in flight: its
-		// result is newer than this list.
-		h.mu.Unlock()
-		return list, nil
 	}
 	namesChanged := !reflect.DeepEqual(knownNames(known), knownNames(h.st.Domains))
 	changed := !reflect.DeepEqual(known, h.st.Domains)

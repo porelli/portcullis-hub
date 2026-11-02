@@ -549,3 +549,40 @@ func TestDeleteNoAnswerStaysDeleting(t *testing.T) {
 		t.Fatalf("mark %v, known %v", marked, f.h.KnownDomains())
 	}
 }
+
+// TestStaleListKeepsDeletingMark: a list fetched before a delete marked the
+// domain can't clear the mark (it would be assignable mid-delete).
+func TestStaleListKeepsDeletingMark(t *testing.T) {
+	f, api, _ := newDomainsFixture(t)
+	readyDomain(t, f, api, "team-b.example.net")
+	saved := api.list["team-b.example.net"]
+	api.mu.Lock()
+	delete(api.list, "team-b.example.net") // the stale snapshot lacks it
+	listed, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	api.listHook = func() { once.Do(func() { close(listed); <-release }) }
+	api.mu.Unlock()
+	done := make(chan struct{})
+	go func() { f.h.RefreshDomains(context.Background()); close(done) }()
+	<-listed
+	api.mu.Lock()
+	api.list["team-b.example.net"] = saved
+	api.listHook = nil
+	api.mu.Unlock()
+	// What DeleteDomain does under its lock.
+	f.h.mu.Lock()
+	f.h.domainsDeleting = map[string]bool{"team-b.example.net": true}
+	f.h.domainsGen++
+	f.h.mu.Unlock()
+	close(release)
+	<-done
+	f.h.mu.RLock()
+	marked := f.h.domainsDeleting["team-b.example.net"]
+	f.h.mu.RUnlock()
+	if !marked {
+		t.Fatal("a stale list cleared the deleting mark")
+	}
+	if err := f.h.CreateInstance("grafana", "grafana-s", map[string]string{"grafana": "grafana.team-b.example.net"}); statusOf(err) != 409 {
+		t.Fatalf("assignable mid-delete: %v", err)
+	}
+}
