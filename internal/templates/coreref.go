@@ -2,7 +2,6 @@ package templates
 
 import (
 	"fmt"
-	"regexp"
 	"sort"
 	"strings"
 
@@ -36,10 +35,6 @@ var reservedRefs = []string{"forward-auth-ext", "portcullis-auth-ext", "portcull
 // reservedDNSNames: a container answering to one of these on a network it
 // shares with a core service could intercept that service's traffic.
 var reservedDNSNames = map[string]bool{"domains": true}
-
-// hostVarOnlyRe: a value that is exactly one PORTCULLIS_HOST_* variable
-// with an optional literal hostname default.
-var hostVarOnlyRe = regexp.MustCompile(`^\$\{PORTCULLIS_HOST_[A-Z0-9_]+(:-[a-z0-9]([a-z0-9.-]*[a-z0-9])?)?\}$`)
 
 func isCoreNetwork(name string) bool {
 	n := strings.ToLower(strings.TrimSpace(name))
@@ -104,15 +99,54 @@ func str(v interface{}) (string, bool) {
 	return s, ok
 }
 
+// asMap: v must be absent (nil) or a mapping with string keys; anything
+// else (a list, a scalar, non-string keys) is refused — fail closed on
+// shapes the checks below would otherwise skip.
+func asMap(v interface{}, what string) (map[string]interface{}, error) {
+	switch t := v.(type) {
+	case nil:
+		return nil, nil
+	case map[string]interface{}:
+		return t, nil
+	}
+	return nil, fmt.Errorf("%s must be a mapping with string keys", what)
+}
+
+// hostVarHostname: the one interpolated hostname allowed — exactly the
+// contract v2 Host() argument `${PORTCULLIS_HOST_<ROUTER>:-<sub>.portcullis.local}`
+// (routes.go hostVarArgRe) for a hostname variable of this template's own
+// host routers (the Hub always sets it to a validated full hostname).
+func hostVarHostname(v string, hostVars map[string]string) error {
+	m := hostVarArgRe.FindStringSubmatch(v)
+	if m == nil {
+		return fmt.Errorf("hostname %q uses variable interpolation: it must be a literal or exactly ${PORTCULLIS_HOST_<ROUTER>:-<sub>.portcullis.local}", v)
+	}
+	own := false
+	for _, hv := range hostVars {
+		own = own || hv == m[1]
+	}
+	if !own {
+		return fmt.Errorf("hostname %q: %s is not a hostname variable of this template's host routers", v, m[1])
+	}
+	if def := m[2] + ".portcullis.local"; reservedDNSNames[m[2]] || reservedDNSNames[def] {
+		return fmt.Errorf("hostname %q: the default %s is reserved", v, def)
+	}
+	return nil
+}
+
 // checkCoreRefs rejects a compose file that references the reserved
 // sign-in names, joins a core network (by name, external name or
 // network_mode container:), answers to a reserved DNS name (service name,
 // container_name, hostname, network alias), uses interpolation in any of
 // those, or uses `include` / `extends`.
-func checkCoreRefs(compose []byte) error {
-	var doc map[string]interface{}
-	if err := yaml.Unmarshal(compose, &doc); err != nil {
+func checkCoreRefs(compose []byte, hostVars map[string]string) error {
+	var raw interface{}
+	if err := yaml.Unmarshal(compose, &raw); err != nil {
 		return fmt.Errorf("compose.yml: %w", err)
+	}
+	doc, err := asMap(raw, "compose.yml")
+	if err != nil {
+		return err
 	}
 	if _, ok := doc["include"]; ok {
 		return fmt.Errorf("compose.yml: top-level include is not allowed (it pulls in files the Hub can't check)")
@@ -129,14 +163,20 @@ func checkCoreRefs(compose []byte) error {
 		return err
 	}
 
-	nets, _ := doc["networks"].(map[string]interface{})
+	nets, err := asMap(doc["networks"], "top-level networks")
+	if err != nil {
+		return err
+	}
 	keys := make([]string, 0, len(nets))
 	for k := range nets {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
-		n, _ := nets[k].(map[string]interface{})
+		n, err := asMap(nets[k], "network "+k)
+		if err != nil {
+			return err
+		}
 		name, hasName := str(n["name"])
 		if hasName {
 			if err := literal("network "+k+": name", name); err != nil {
@@ -154,6 +194,7 @@ func checkCoreRefs(compose []byte) error {
 			ext = v
 		case string:
 			return fmt.Errorf("network %s: external must be true or false, not %q", k, v)
+		case nil:
 		case map[string]interface{}:
 			ext = true
 			en, ok := str(v["name"])
@@ -169,20 +210,28 @@ func checkCoreRefs(compose []byte) error {
 			if en != "" {
 				hasName = true
 			}
+		default:
+			return fmt.Errorf("network %s: external must be true, false or a mapping", k)
 		}
 		if ext && !hasName && isCoreNetwork(k) {
 			return fmt.Errorf("network %s is a core network (templates join only portcullis-proxy)", k)
 		}
 	}
 
-	svcs, _ := doc["services"].(map[string]interface{})
+	svcs, err := asMap(doc["services"], "services")
+	if err != nil {
+		return err
+	}
 	names := make([]string, 0, len(svcs))
 	for s := range svcs {
 		names = append(names, s)
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		s, _ := svcs[name].(map[string]interface{})
+		s, err := asMap(svcs[name], "service "+name)
+		if err != nil {
+			return err
+		}
 		if _, ok := s["extends"]; ok {
 			return fmt.Errorf("service %s: extends is not allowed (it pulls in configuration the Hub can't check)", name)
 		}
@@ -202,10 +251,12 @@ func checkCoreRefs(compose []byte) error {
 			// GitLab's ${PORTCULLIS_HOST_GITLAB:-git.portcullis.local}): the
 			// Hub always sets it to a validated full hostname, never a
 			// single label like "domains".
-			if !(field == "hostname" && hostVarOnlyRe.MatchString(v)) {
-				if err := literal("service "+name+": "+field, v); err != nil {
-					return err
+			if field == "hostname" && interpolated(v) {
+				if err := hostVarHostname(v, hostVars); err != nil {
+					return fmt.Errorf("service %s: %w", name, err)
 				}
+			} else if err := literal("service "+name+": "+field, v); err != nil {
+				return err
 			}
 			lv := strings.ToLower(strings.TrimSpace(v))
 			if field != "network_mode" && reservedDNSNames[lv] {
@@ -231,7 +282,10 @@ func checkCoreRefs(compose []byte) error {
 				if err := literal("service "+name+": network", net); err != nil {
 					return err
 				}
-				c, _ := cfg.(map[string]interface{})
+				c, err := asMap(cfg, "service "+name+": network "+net)
+				if err != nil {
+					return err
+				}
 				switch al := c["aliases"].(type) {
 				case nil:
 				case []interface{}:

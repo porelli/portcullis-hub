@@ -58,7 +58,7 @@ func Discover(dir, source, domain string) []Template {
 			log.Printf("Skipping template %s: %v", e.Name(), err)
 			continue
 		}
-		if err := checkCoreRefs(compose); err != nil {
+		if err := checkCoreRefs(compose, routes.HostVars); err != nil {
 			log.Printf("Skipping template %s: %v", e.Name(), err)
 			continue
 		}

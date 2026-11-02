@@ -17,7 +17,7 @@ func TestCheckCoreRefs(t *testing.T) {
 		"services:\n  web:\n    hostname: web$$1\n    environment:\n      X: ${PORTCULLIS_DOMAIN}\n",
 	}
 	for _, c := range ok {
-		if err := checkCoreRefs([]byte(c)); err != nil {
+		if err := checkCoreRefs([]byte(c), map[string]string{"gitlab": "PORTCULLIS_HOST_GITLAB"}); err != nil {
 			t.Errorf("refused %q: %v", c, err)
 		}
 	}
@@ -36,7 +36,7 @@ func TestCheckCoreRefs(t *testing.T) {
 		"socket proxy network":   "services:\n  web:\n    networks: [s]\nnetworks:\n  s:\n    external: true\n    name: portcullis_socket-proxy-hub\n",
 	}
 	for what, c := range bad {
-		if err := checkCoreRefs([]byte(c)); err == nil {
+		if err := checkCoreRefs([]byte(c), map[string]string{"gitlab": "PORTCULLIS_HOST_GITLAB"}); err == nil {
 			t.Errorf("%s: accepted", what)
 		} else if strings.Contains(err.Error(), "\n") {
 			t.Errorf("%s: multi-line error %q", what, err)
