@@ -1069,3 +1069,28 @@ func (l *lockedBuf) String() string {
 	defer l.mu.Unlock()
 	return l.b.String()
 }
+
+// TestDiscoverClaimsAfterSort: Discover sorts enabled templates first;
+// the template lookup used for existing instances' claims must follow the
+// sort. Here grafana (enabled) moves ahead of chat and disks, and a new
+// single template "team" names the volume grafana's instance team-x
+// derives (portcullis_team-x-grafana-data): it must be skipped.
+func TestDiscoverClaimsAfterSort(t *testing.T) {
+	team := [2]string{
+		"name: Team\ninstances: single\nauth:\n  method: forward-auth\n",
+		"services:\n  team:\n    image: x\n    labels:\n" +
+			"      traefik.http.routers.team.rule: Host(`${PORTCULLIS_HOST_TEAM:-team.portcullis.local}`)\n" +
+			"    volumes:\n      - d:/d\n" +
+			"volumes:\n  d:\n    name: portcullis_team-x-grafana-data\n",
+	}
+	f := newInstanceFixtureExtra(t, func(st *state.AppState) {
+		st.SetEnabled("grafana", true)
+		st.Instances["team-x"] = state.Instance{ID: "team-x", Template: "grafana", Hosts: map[string]string{"grafana": "grafana-team-x.example.org"}}
+	}, nil, map[string][2]string{"team": team})
+	if f.h.Template("grafana") == nil {
+		t.Fatal("grafana was skipped")
+	}
+	if f.h.Template("team") != nil {
+		t.Error("team loaded although it names instance team-x's volume portcullis_team-x-grafana-data")
+	}
+}
