@@ -195,6 +195,9 @@ func checkCoreRefs(compose []byte, hostVars map[string]string) error {
 	if err != nil {
 		return err
 	}
+	if err := checkComposeKeys(doc); err != nil {
+		return err
+	}
 	if _, ok := doc["include"]; ok {
 		return fmt.Errorf("compose.yml: top-level include is not allowed (it pulls in files the Hub can't check)")
 	}
@@ -535,10 +538,28 @@ func FoldKey(s string) string {
 // traefik.* key shape is refused (it could be something Traefik decodes
 // that ParseRoutes and the override never see).
 var (
+	// HTTP only: templates never define TCP or UDP routing (none of the
+	// templates needs it, and it would bypass forward-auth, contract §4).
 	traefikKinds = map[string]map[string]bool{
 		"http": {"routers": true, "services": true, "middlewares": true, "serverstransports": true},
-		"tcp":  {"routers": true, "services": true, "middlewares": true, "serverstransports": true},
-		"udp":  {"routers": true, "services": true},
+	}
+	// labelSegRe: every dot-separated segment of a traefik.* key. A stray
+	// "]" or "[" (or an empty segment) panics Traefik's label decoder and
+	// stops its docker provider — a core-wide outage.
+	labelSegRe = regexp.MustCompile(`^[A-Za-z0-9_-]+(\[[0-9]+\])?$`)
+	// labelNameRe: the router / service / middleware name segment.
+	labelNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
+	// coreTraefikNames are the @docker routers, middlewares and services
+	// core defines (core docker-compose.yml labels, all profiles; checked
+	// against a sibling core checkout by TestCoreTraefikNamesComplete). A
+	// template defining one would collide with core's (Traefik disables
+	// both, or merges them).
+	coreTraefikNames = map[string]map[string]bool{
+		"routers": set("dashboard", "enroll", "enroll-invite", "enroll-self", "grafana-metrics", "hub", "keycloak", "keycloak-admin",
+			"keycloak-resources", "lldap", "oauth2-callback", "people", "portal"),
+		"middlewares": set("directory-redirect", "hub-proxy-secret", "portal-path", "portcullis-auth", "portcullis-auth-console",
+			"portcullis-auth-ext", "portcullis-groups", "portcullis-public-guard", "portcullis-self"),
+		"services": set("enroll", "forward-auth", "forward-auth-ext", "grafana-metrics", "group-gate", "hub", "hub-people", "keycloak", "lldap"),
 	}
 	routerAttrRe = map[string]*regexp.Regexp{
 		"http": regexp.MustCompile(`^(rule|entrypoints|middlewares|service|priority|tls|tls\.options|tls\.certresolver|tls\.domains\[[0-9]+\]\.(main|sans)|observability\.(accesslogs|metrics|tracing))$`),
@@ -555,13 +576,24 @@ func checkTraefikKeyShape(svc, k string) error {
 	case "traefik.enable", "traefik.docker.network":
 		return nil
 	}
+	for _, seg := range strings.Split(k, ".") {
+		if !labelSegRe.MatchString(seg) {
+			return fmt.Errorf("service %s: Traefik label %q: segment %q is not [A-Za-z0-9_-] (with an optional [n]) — it could crash Traefik's label decoder", svc, k, seg)
+		}
+	}
 	segs := strings.SplitN(k, ".", 5)
 	if len(segs) < 5 || segs[0] != "traefik" {
 		return fmt.Errorf("service %s: Traefik label %q has an unsupported shape", svc, k)
 	}
 	kinds, ok := traefikKinds[segs[1]]
 	if !ok || !kinds[segs[2]] {
-		return fmt.Errorf("service %s: Traefik label %q: unsupported protocol or kind (http/tcp: routers, services, middlewares, serverstransports; udp: routers, services)", svc, k)
+		return fmt.Errorf("service %s: Traefik label %q: unsupported protocol or kind (only traefik.http.<routers|services|middlewares|serverstransports>; no TCP or UDP routing)", svc, k)
+	}
+	if !labelNameRe.MatchString(segs[3]) {
+		return fmt.Errorf("service %s: Traefik label %q: name %q must match %s", svc, k, segs[3], labelNameRe)
+	}
+	if coreTraefikNames[segs[2]][segs[3]] {
+		return fmt.Errorf("service %s: Traefik label %q: %s %q is core's (reserved)", svc, k, strings.TrimSuffix(segs[2], "s"), segs[3])
 	}
 	if segs[2] == "routers" && !routerAttrRe[segs[1]].MatchString(segs[4]) {
 		return fmt.Errorf("service %s: Traefik label %q: unsupported router attribute %q", svc, k, segs[4])
@@ -582,6 +614,50 @@ func CheckTags(n *yaml.Node) error {
 	for _, c := range n.Content {
 		if err := CheckTags(c); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+func set(names ...string) map[string]bool {
+	m := make(map[string]bool, len(names))
+	for _, n := range names {
+		m[n] = true
+	}
+	return m
+}
+
+// Compose keys a template may use (top level and per service). Anything
+// else is refused — e.g. label_file (compose ≥ 2.32) adds labels the Hub
+// never sees, deploy.labels, annotations, build, env_file, configs,
+// secrets, profiles, links. Grown from what the templates use plus
+// harmless runtime settings.
+var (
+	topLevelKeys = set("services", "volumes", "networks", "name")
+	serviceKeys  = set("image", "volumes", "restart", "environment", "networks", "security_opt", "cap_drop", "cap_add",
+		"pids_limit", "mem_limit", "mem_reservation", "memswap_limit", "cpus", "cpu_shares", "labels", "command", "read_only",
+		"depends_on", "tmpfs", "entrypoint", "user", "group_add", "healthcheck", "shm_size", "network_mode", "working_dir",
+		"hostname", "devices", "container_name", "ports", "expose", "ulimits", "stop_grace_period", "stop_signal", "init",
+		"privileged", "sysctls", "logging", "tty", "stdin_open", "dns", "dns_search", "extra_hosts", "platform", "pull_policy",
+		"pid", "ipc", "volumes_from", "domainname", "mac_address", "oom_score_adj", "storage_opt", "userns_mode",
+		"device_cgroup_rules", "gpus", "runtime", "isolation", "blkio_config", "cgroup", "cgroup_parent", "cpuset")
+)
+
+// checkComposeKeys: only allowlisted top-level and service keys (x-*
+// extension keys are allowed at the top level, for anchors).
+func checkComposeKeys(doc map[string]interface{}) error {
+	for k := range doc {
+		if !topLevelKeys[k] && !strings.HasPrefix(k, "x-") {
+			return fmt.Errorf("compose.yml: top-level key %q is not allowed", k)
+		}
+	}
+	svcs, _ := doc["services"].(map[string]interface{})
+	for name, raw := range svcs {
+		s, _ := raw.(map[string]interface{})
+		for k := range s {
+			if !serviceKeys[k] {
+				return fmt.Errorf("service %s: compose key %q is not allowed in templates (the Hub can't check what it does)", name, k)
+			}
 		}
 	}
 	return nil

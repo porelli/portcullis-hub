@@ -16,7 +16,7 @@ import (
 // policy and no group (fail open).
 
 var (
-	routerLabelRe     = regexp.MustCompile(`^traefik\.(http|tcp|udp)\.routers\.([^.]+)\.(.+)$`)
+	routerLabelRe     = regexp.MustCompile(`^traefik\.(http|tcp|udp)\.routers\.([a-z0-9][a-z0-9_-]*)\.(.+)$`)
 	middlewareLabelRe = regexp.MustCompile(`^traefik\.(?:http|tcp)\.middlewares\.([^.]+)\.`)
 	serviceLabelRe    = regexp.MustCompile(`^traefik\.http\.services\.([^.]+)\.`)
 	// traefikNameRe matches every label defining a router, service or

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -181,6 +182,20 @@ var unicodeBypasses = map[string]string{
 	"unknown attribute": "traefik.http.routers.app.foo: bar",
 	"udp rule":          "traefik.udp.routers.u.rule: x",
 	"short key":         "traefik.http.routers: x",
+	// Fix round 3: segments that crash Traefik's decoder, TCP/UDP, core names.
+	"headers ]":         "traefik.http.middlewares.m.headers.foo]: x",
+	"port ]":            "traefik.http.services.s.loadbalancer.server.port]: \"80\"",
+	"router name ]":     "traefik.http.routers.x].rule: Host(`a.b`)",
+	"empty segment":     "traefik.http.routers.app..service: s",
+	"[ without ]":       "traefik.http.middlewares.m.headers.customrequestheaders[0: x",
+	"bracket mid":       "traefik.http.services.s.loadbalancer.servers[0]x.url: http://a",
+	"tcp router":        "traefik.tcp.routers.t.entrypoints: websecure",
+	"tcp service":       "traefik.tcp.services.t.loadbalancer.server.port: \"22\"",
+	"udp service":       "traefik.udp.services.u.loadbalancer.server.port: \"53\"",
+	"core middleware":   "traefik.http.middlewares.portcullis-groups.forwardauth.address: http://evil",
+	"core router":       "traefik.http.routers.keycloak.entrypoints: websecure",
+	"core service":      "traefik.http.services.hub.loadbalancer.server.port: \"1\"",
+	"core public guard": "traefik.http.middlewares.portcullis-public-guard.forwardauth.address: http://evil",
 }
 
 func TestCheckCoreRefsUnicodeFolding(t *testing.T) {
@@ -235,6 +250,19 @@ func TestDiscoverRefusesBypasses(t *testing.T) {
 	}
 	writeTpl(t, dir, "tagged", manifest, strings.Replace(compose(""), "    labels:\n", "    labels: !override\n", 1))
 	ids["tagged"] = "!override tag"
+	// Compose keys outside the allowlist.
+	for id, svcLine := range map[string]string{
+		"labelfile":   "    label_file: ./more-labels.env\n",
+		"deploylabel": "    deploy:\n      labels:\n        traefik.http.routers.x.rule: Host(`auth.example.org`)\n",
+		"annotations": "    annotations:\n      a: b\n",
+		"envfile":     "    env_file: ./x.env\n",
+		"build":       "    build: .\n",
+	} {
+		writeTpl(t, dir, id, manifest, strings.Replace(compose(""), "    image: x\n", "    image: x\n"+svcLine, 1))
+		ids[id] = svcLine
+	}
+	writeTpl(t, dir, "toplevelsecrets", manifest, compose("")+"secrets:\n  s:\n    file: ./s\n")
+	ids["toplevelsecrets"] = "top-level secrets"
 	loaded := map[string]bool{}
 	for _, tp := range Discover(dir, "local", "example.org") {
 		loaded[tp.ID] = true
@@ -245,6 +273,32 @@ func TestDiscoverRefusesBypasses(t *testing.T) {
 	for id, what := range ids {
 		if loaded[id] {
 			t.Errorf("%s (%s) loaded", id, what)
+		}
+	}
+}
+
+// TestCoreTraefikNamesComplete: coreTraefikNames lists every router,
+// middleware and service core's docker-compose.yml defines (sibling core
+// checkout, all profiles' services; skipped without one).
+func TestCoreTraefikNamesComplete(t *testing.T) {
+	core := os.Getenv("PORTCULLIS_CORE_DIR")
+	if core == "" {
+		core = filepath.Join("..", "..", "..", "portcullis")
+	}
+	b, err := os.ReadFile(filepath.Join(core, "docker-compose.yml"))
+	if err != nil {
+		t.Skipf("no core checkout: %v", err)
+	}
+	labels, err := ServiceLabels(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	re := regexp.MustCompile(`^traefik\.http\.(routers|middlewares|services)\.([^.]+)\.`)
+	for svc, l := range labels {
+		for k := range l {
+			if m := re.FindStringSubmatch(k); m != nil && !coreTraefikNames[m[1]][m[2]] {
+				t.Errorf("core service %s defines %s %q, missing from coreTraefikNames", svc, m[1], m[2])
+			}
 		}
 	}
 }
