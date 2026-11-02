@@ -98,6 +98,8 @@ a change applies), not from per-app options.
 - Changing what an app does with a value. When upstream can't take a
   per-person value (Plex, Vaultwarden orgs, Pi-hole per person), the
   template can't declare one.
+- Per-person exceptions for one named person. One-off values use a
+  one-member manual group.
 
 ## Anti-goals
 
@@ -239,6 +241,12 @@ a change applies), not from per-app options.
   relevant (they have access).
 - The split into three projects in this order: settings panel → shared
   folders + doctor → file sharing.
+- No per-person exceptions: one-off values use a one-member manual group.
+- People page My apps: YES, a person sees which group gave them a value
+  (the `reason.group` field in `/api/me/apps`), but only groups they are a
+  member of — the resolved reason's group is always one they belong to.
+  Losing groups (e.g. in "largest of …") are never shown; the full
+  breakdown stays in the admin preview.
 
 ## Calls made while drafting (check these)
 
@@ -877,16 +885,6 @@ under Time Machine here.
 
 ## Open questions
 
-- **For the user:** a per-person exception for one named person ("+
-  Exception for one person", with a reason and an optional expiry, like
-  rule-group exceptions) that beats group values. Should it be in this
-  project? *(Controller's call so far: unconfirmed, not in scope.)*
-- **For the user:** should a person see which group gave them a value (the
-  "from office_milan" reason on My apps), or only the value? The draft shows
-  the group, since people can see their own memberships. Disclosing the
-  group adds a `reason.group` field to each `/api/me/apps` value. Showing
-  only the value drops that field, and the reason becomes "from a group" or
-  "everyone with access".
 - Resolved by the builder check: reload (call 25), the core change and
   multi-host headers (26), population (27), privileged groups (28), groups
   deleted outside the Hub (29), Immich/Grafana role sync (30), `requires`
