@@ -635,6 +635,11 @@ func ValidateSettingsSpec(t *Template, compose []byte, routes *Routes, known fun
 	if v.env, err = composeEnvironment(compose); err != nil {
 		return err
 	}
+	var doc interface{}
+	if err := yaml.Unmarshal(compose, &doc); err != nil {
+		return fmt.Errorf("compose.yml: %v", err)
+	}
+	scalarValues(doc, &v.scalars)
 	if err := v.files(); err != nil {
 		return err
 	}
@@ -683,6 +688,7 @@ type specCheck struct {
 	routes   *Routes
 	known    func(string) bool
 	services map[string]bool
+	scalars  []string                      // compose.yml's decoded scalar values
 	env      map[string]map[string]*string // service → environment
 	files_   map[string]*DataFile
 	hooks_   map[string]*Hook
@@ -883,9 +889,41 @@ func composeEnvironment(compose []byte) (map[string]map[string]*string, error) {
 }
 
 // referenced reports whether compose interpolates ${name}.
-func referenced(compose []byte, name string) bool {
+func referenced(s, name string) bool {
 	re := regexp.MustCompile(`(^|[^$])\$\{` + regexp.QuoteMeta(name) + `(\}|:?[-?+])`)
-	return re.Match(compose)
+	return re.MatchString(s)
+}
+
+// interpolatedAnywhere reports whether any decoded scalar value of the
+// compose file interpolates ${name} (comments and keys don't count).
+func (v *specCheck) interpolatedAnywhere(name string) bool {
+	for _, s := range v.scalars {
+		if referenced(s, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// scalarValues collects every scalar value (not mapping keys) of a
+// decoded YAML document.
+func scalarValues(x interface{}, out *[]string) {
+	switch t := x.(type) {
+	case string:
+		*out = append(*out, t)
+	case map[string]interface{}:
+		for _, val := range t {
+			scalarValues(val, out)
+		}
+	case map[interface{}]interface{}:
+		for _, val := range t {
+			scalarValues(val, out)
+		}
+	case []interface{}:
+		for _, e := range t {
+			scalarValues(e, out)
+		}
+	}
 }
 
 func (v *specCheck) envNames() error {
@@ -930,11 +968,11 @@ func (v *specCheck) envNames() error {
 			}
 			owner[n] = "setting " + o.Key
 			for svc, env := range v.env {
-				if val, ok := env[n]; ok && val != nil && !referenced([]byte(*val), n) {
+				if val, ok := env[n]; ok && val != nil && !referenced(*val, n) {
 					return fmt.Errorf("setting %s: compose.yml hard-codes %s in service %s's environment (use ${%s})", o.Key, n, svc, n)
 				}
 			}
-			if !referenced(v.compose, n) {
+			if !v.interpolatedAnywhere(n) {
 				return fmt.Errorf("setting %s: env name %s is not referenced as ${%s} in compose.yml", o.Key, n, n)
 			}
 		}
@@ -950,10 +988,12 @@ func (v *specCheck) indexed(o *Option, prefix string) error {
 	if o.MaxItems == nil || *o.MaxItems < 1 || *o.MaxItems > maxIndexed {
 		return fmt.Errorf("indexed env %s%s needs max_items (1-%d)", prefix, IndexSuffix, maxIndexed)
 	}
-	re := regexp.MustCompile(`\$\{` + regexp.QuoteMeta(prefix) + `_([0-9]+)(\}|:?[-?+])`)
-	for _, mm := range re.FindAllSubmatch(v.compose, -1) {
-		if n, _ := strconv.Atoi(string(mm[1])); n < 1 || n > *o.MaxItems {
-			return fmt.Errorf("compose.yml references %s_%s, beyond max_items %d", prefix, mm[1], *o.MaxItems)
+	re := regexp.MustCompile(`(^|[^$])\$\{` + regexp.QuoteMeta(prefix) + `_([0-9]+)(\}|:?[-?+])`)
+	for _, sc := range v.scalars {
+		for _, mm := range re.FindAllStringSubmatch(sc, -1) {
+			if n, _ := strconv.Atoi(mm[2]); n < 1 || n > *o.MaxItems {
+				return fmt.Errorf("compose.yml references %s_%s, beyond max_items %d", prefix, mm[2], *o.MaxItems)
+			}
 		}
 	}
 	return nil
@@ -1394,6 +1434,20 @@ func forwardAuthed(ri *RouterInfo) bool {
 	return false
 }
 
+// routerTarget is the compose service a router sends requests to: the
+// service defining its explicit Traefik service (@docker trimmed), else
+// the service carrying its labels.
+func (v *specCheck) routerTarget(ri *RouterInfo) string {
+	if ts := strings.TrimSuffix(ri.TraefikService, "@docker"); ts != "" {
+		for svc, names := range v.routes.TraefikServices {
+			if contains(names, ts) {
+				return svc
+			}
+		}
+	}
+	return ri.Service
+}
+
 func (v *specCheck) header(o *Option, h *HeaderDelivery) error {
 	scope := o.EffectiveScope()
 	if scope != ScopePerson && scope != ScopePersonEntered {
@@ -1405,24 +1459,27 @@ func (v *specCheck) header(o *Option, h *HeaderDelivery) error {
 	if nl := v.m.Auth.NativeLogin; nl != nil && nl.AllowWithoutGateway {
 		return fmt.Errorf("header %s: the app may run with its own login only (no Portcullis in front): clients could forge the header", h.Name)
 	}
-	// The services group-gate's headers reach, and every router on them.
-	var gated []string
-	seen := map[string]bool{}
+	// The compose services group-gate's headers reach (the backends of
+	// gated routers), and every router that reaches them, wherever its
+	// labels sit.
+	gated := map[string]bool{}
 	for _, ri := range v.routes.Info {
-		if ri.Gated() && !seen[ri.Service] {
-			seen[ri.Service] = true
-			gated = append(gated, ri.Service)
+		if ri.Gated() {
+			gated[v.routerTarget(ri)] = true
 		}
 	}
 	if len(gated) == 0 {
 		return fmt.Errorf("header %s needs routers with portcullis-groups@docker (group-gate returns the header)", h.Name)
 	}
-	sort.Strings(gated)
-	for _, svc := range gated {
-		for _, r := range v.routes.Routers[svc] {
-			if ri := v.routes.Info[r]; ri != nil && !forwardAuthed(ri) {
-				return fmt.Errorf("header %s: service %s also has router %s without Portcullis forward-auth: clients could forge the header there", h.Name, svc, r)
-			}
+	names := make([]string, 0, len(v.routes.Info))
+	for r := range v.routes.Info {
+		names = append(names, r)
+	}
+	sort.Strings(names)
+	for _, r := range names {
+		ri := v.routes.Info[r]
+		if t := v.routerTarget(ri); gated[t] && !forwardAuthed(ri) {
+			return fmt.Errorf("header %s: router %s reaches service %s without Portcullis forward-auth: clients could forge the header there", h.Name, r, t)
 		}
 	}
 	k := strings.ToLower(h.Name)

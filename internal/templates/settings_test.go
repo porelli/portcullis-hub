@@ -219,6 +219,7 @@ func TestEnvNames(t *testing.T) {
 		{"with ports[]", hdrHead + "ports:\n  - {key: THEME, container: 80, service: web}\n" + opts("{key: theme, label: T, type: string}"), hdrCompose, "theme", "THEME"},
 		{"with port bind", hdrHead + "ports:\n  - {key: TRASH, container: 80, service: web}\n" + opts("{key: x, label: T, type: string, delivery: [{env: TRASH_BIND}]}"), hdrCompose, "x", "TRASH_BIND"},
 		{"not referenced", hdrHead + opts("{key: missing, label: M, type: string}"), hdrCompose, "missing", "not referenced"},
+		{"only in a comment", hdrHead + opts("{key: missing, label: M, type: string}"), "# uses ${MISSING}\n" + hdrCompose, "missing", "not referenced"},
 		{"hard-coded", hdrHead + opts("{key: hard, label: H, type: string}"), hdrCompose, "hard", "hard-codes"},
 		{"indexed", hdrHead + opts("{key: disks, label: D, type: list, items: {type: string, pattern: '^/dev/'}, max_items: 2, delivery: [{env: 'DISK_{n}'}]}"), hdrCompose, "", ""},
 		{"indexed no max_items", hdrHead + opts("{key: disks, label: D, type: list, items: {type: string}, delivery: [{env: 'DISK_{n}'}]}"), hdrCompose, "disks", "max_items"},
@@ -261,6 +262,33 @@ func TestClaimDeliveryNeedsNativeOIDCClient(t *testing.T) {
 
 const personHeader = "{key: quota, label: Q, type: int, scope: person, default: 1, delivery: [{header: {name: X-Forwarded-Attr-Quota}}]}"
 
+// sideRouter: a router labelled on init, without forward-auth, whose
+// Traefik service is web's: it reaches the delivering backend.
+const sideRouter = "services:\n  web:\n    image: x\n    labels:\n" +
+	"      traefik.http.routers.app.rule: Host(`${PORTCULLIS_HOST_APP:-app.portcullis.local}`)\n" +
+	"      traefik.http.routers.app.middlewares: portcullis-auth@docker,portcullis-groups@docker\n" +
+	"      traefik.http.services.app.loadbalancer.server.port: \"80\"\n" +
+	"  init:\n    image: x\n    labels:\n" +
+	"      traefik.http.routers.side.rule: Host(`${PORTCULLIS_HOST_APP:-app.portcullis.local}`) && PathPrefix(`/side`)\n" +
+	"      traefik.http.routers.side.service: app\n"
+
+// gatedElsewhere: the gated router is labelled on init but targets web's
+// Traefik service, so web is the delivering backend; pubRouter is an
+// ungated router on web.
+const pubRouter = "      traefik.http.routers.pub.rule: Host(`${PORTCULLIS_HOST_APP:-app.portcullis.local}`) && PathPrefix(`/pub`)\n" +
+	"      traefik.http.routers.pub.service: app\n"
+
+const gatedElsewhere = "services:\n  web:\n    image: x\n    labels:\n" +
+	"      traefik.http.services.app.loadbalancer.server.port: \"80\"\n" + pubRouter +
+	"  init:\n    image: x\n    labels:\n" +
+	"      traefik.http.routers.app.rule: Host(`${PORTCULLIS_HOST_APP:-app.portcullis.local}`)\n" +
+	"      traefik.http.routers.app.service: app@docker\n" +
+	"      traefik.http.routers.app.middlewares: portcullis-auth@docker,portcullis-groups@docker\n"
+
+// publicAccess: the Hub's own public router (P14) — not in compose, so
+// header delivery stays allowed (the Grafana pilot).
+const publicAccess = "  identity_headers: [X-WEBAUTH-USER]\n  public_access:\n    description: Shared dashboards\n    paths:\n      - {prefix: /public-dashboards, description: Shared dashboards}\n"
+
 func TestHeaderDeliveryRules(t *testing.T) {
 	noGroups := strings.Replace(hdrCompose, "portcullis-auth@docker,portcullis-groups@docker", "portcullis-auth@docker", 1)
 	// A second router on the delivering service, without forward-auth.
@@ -271,6 +299,10 @@ func TestHeaderDeliveryRules(t *testing.T) {
 		{"no group-gate", hdrHead + opts(personHeader), noGroups, "quota", "portcullis-groups"},
 		{"public router", hdrHead + opts(personHeader), public, "quota", "router share"},
 		{"sign_in native", "name: App\nauth:\n  method: custom\n  sso: false\n  native_login: {supported: true, allow_without_gateway: true}\n" + opts(personHeader), hdrCompose, "quota", "own login"},
+		{"router elsewhere reaches the backend", hdrHead + opts(personHeader), sideRouter, "quota", "router side reaches service web"},
+		{"gated router elsewhere, public on the backend", hdrHead + opts(personHeader), gatedElsewhere, "quota", "router pub reaches service web"},
+		{"gated router elsewhere, backend clean", hdrHead + opts(personHeader), strings.Replace(gatedElsewhere, pubRouter, "", 1), "", ""},
+		{"public_access on the delivering service", hdrHead + publicAccess + opts(personHeader), hdrCompose, "", ""},
 		{"duplicate", hdrHead + opts(personHeader, strings.Replace(personHeader, "key: quota", "key: q2", 1)), hdrCompose, "q2", "X-Forwarded-Attr-Quota"},
 		{"duplicate case-insensitive", hdrHead + opts(personHeader, strings.Replace(strings.Replace(personHeader, "key: quota", "key: q2", 1), "Attr-Quota", "Attr-QUOTA", 1)), hdrCompose, "q2", "QUOTA"},
 	})
@@ -442,7 +474,7 @@ func TestPersonEnteredRules(t *testing.T) {
 		{"header ok", hdrHead + opts(pe("applies: next_request, delivery: [{header: {name: X-Forwarded-Attr-Uid}}]")), hdrCompose, "", ""},
 		{"custom without access_group", strings.Replace(ff, "  access_group: users_firefox-sync\n", "", 1), firefoxCompose, "mozilla_uid", "access_group"},
 		{"public without access_group", "name: App\nauth:\n  method: public\n" + strings.TrimPrefix(ff, firefoxHead), firefoxCompose, "mozilla_uid", "access_group"},
-		{"forward-auth needs none", hdrHead + opts(pe("applies: next_request, delivery: [{header: {name: X-Forwarded-Attr-Uid}}]")), hdrCompose, "", ""},
+		{"header-auth needs no access_group", hdrHead + opts(pe("applies: next_request, delivery: [{header: {name: X-Forwarded-Attr-Uid}}]")), hdrCompose, "", ""},
 	})
 }
 
