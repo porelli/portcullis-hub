@@ -144,6 +144,7 @@ func TestCheckCoreRefsBypasses(t *testing.T) {
 		"uppercase key rule":      "services:\n  web:\n    labels:\n      Traefik.http.routers.a.rule: Host(`${X:-a.b}`)\n",
 		"space key rule":          "services:\n  web:\n    labels:\n      - \" traefik.http.routers.a.rule=Host(`${X:-a.b}`)\"\n",
 		"mixed-case key":          "services:\n  web:\n    labels:\n      traefik.HTTP.routers.a.middlewares: x\n",
+		"router attr case":        "services:\n  web:\n    labels:\n      traefik.http.routers.a.Rule: Host(`${X:-a.b}`)\n",
 		"tcp rule var":            "services:\n  web:\n    labels:\n      traefik.tcp.routers.a.rule: HostSNI(`${X}`)\n",
 		"static ipv6 named":       "services:\n  web:\n    networks:\n      p:\n        ipv6_address: fd00::2\nnetworks:\n  p:\n    name: portcullis-proxy\n",
 	}
@@ -156,6 +157,7 @@ func TestCheckCoreRefsBypasses(t *testing.T) {
 		// The template's own host variable in a redirect (headscale).
 		"services:\n  web:\n    labels:\n      traefik.http.middlewares.m.redirectregex.replacement: https://${PORTCULLIS_HOST_GITLAB:-git.portcullis.local}/admin\n      traefik.http.middlewares.m.redirectregex.regex: ^https://[^/]+/?$$\n",
 		"services:\n  web:\n    labels:\n      com.example.note: ${ANY}\n",
+		"services:\n  web:\n    labels:\n      traefik.http.middlewares.h.headers.customresponseheaders.X-App: grafana\n",
 	}
 	for _, c := range ok {
 		if err := checkCoreRefs([]byte(c), hv); err != nil {

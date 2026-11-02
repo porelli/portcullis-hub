@@ -442,11 +442,17 @@ func checkServiceLabels(svc string, labels interface{}, hostVars map[string]stri
 		if !strings.HasPrefix(lk, "traefik") {
 			continue
 		}
-		// Traefik label keys exactly as ParseRoutes matches them: lowercase,
-		// no surrounding whitespace (Traefik itself is case-insensitive, so
-		// `Traefik.http…` or ` traefik.http…` would route unparsed).
-		if k != lk {
-			return fmt.Errorf("service %s: Traefik label key %q must be lowercase without surrounding whitespace", svc, k)
+		// Traefik label keys as ParseRoutes matches them (Traefik itself is
+		// case-insensitive, so `Traefik.http…`, ` traefik.http…` or a
+		// `…Rule` would route unparsed): no surrounding whitespace, the
+		// structural part `traefik.<proto>.<kind>.<name>` lowercase, and
+		// router keys lowercase throughout. Only middleware/service
+		// configuration may carry case (header names).
+		segs := strings.SplitN(k, ".", 5)
+		structural := strings.Join(segs[:min(4, len(segs))], ".")
+		if k != strings.TrimSpace(k) || structural != strings.ToLower(structural) ||
+			(len(segs) > 2 && strings.EqualFold(segs[2], "routers") && k != lk) {
+			return fmt.Errorf("service %s: Traefik label key %q must be lowercase (router keys entirely, others up to the name) without surrounding whitespace", svc, k)
 		}
 		// Every traefik.* value is a literal, except HTTP router rules:
 		// ParseRoutes checks their host variables.
