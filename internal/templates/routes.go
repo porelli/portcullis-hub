@@ -614,24 +614,35 @@ func isAlnum(c byte) bool {
 
 var (
 	runtimeHostRe = regexp.MustCompile(`(?i)\bHost\(([^)]*)\)`)
-	quotedRe      = regexp.MustCompile("[`\"]([^`\"]*)[`\"]")
-	dnsLabelRe    = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
+	// runtimeOtherHostRe: host matchers whose hosts can't be derived.
+	runtimeOtherHostRe = regexp.MustCompile(`(?i)\bHost(?:Regexp|Header|SNI|SNIRegexp)\([^)]*\)`)
+	quotedRe           = regexp.MustCompile("[`\"]([^`\"]*)[`\"]")
+	dnsLabelRe         = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
 )
 
-// RuntimeSubdomains extracts, leniently, the subdomains of domain that a
-// running container's (already variable-substituted) Traefik rule routes:
-// every Host() argument of the form <label>.<domain>. Used to fail closed
-// for apps the Hub has no config for, so it errs towards finding hosts.
-func RuntimeSubdomains(rule, domain string) []string {
-	domain = strings.ToLower(strings.TrimSuffix(domain, "."))
-	var out []string
+// RuntimeHosts extracts, leniently, the full hostnames a running
+// container's (already variable-substituted) Traefik rule routes: every
+// Host() argument, on any domain (main, enrolled or other), lowercased
+// with one trailing dot dropped. Used to fail closed for apps the Hub has
+// no config for, so it errs towards finding hosts. unparsed lists what
+// could not be turned into a hostname (an invalid Host() argument, a
+// Host() without a quoted argument, HostRegexp/HostHeader/HostSNI
+// matchers): the caller still denies the hosts it found and logs these.
+func RuntimeHosts(rule string) (hosts, unparsed []string) {
 	for _, m := range runtimeHostRe.FindAllStringSubmatch(rule, -1) {
-		for _, q := range quotedRe.FindAllStringSubmatch(m[1], -1) {
-			h := strings.ToLower(strings.TrimSuffix(q[1], "."))
-			if label, ok := strings.CutSuffix(h, "."+domain); ok && dnsLabelRe.MatchString(label) {
-				out = append(out, label)
+		qs := quotedRe.FindAllStringSubmatch(m[1], -1)
+		if len(qs) == 0 {
+			unparsed = append(unparsed, m[0])
+		}
+		for _, q := range qs {
+			h := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(q[1]), "."))
+			if ValidHostname(h) {
+				hosts = append(hosts, h)
+			} else {
+				unparsed = append(unparsed, q[1])
 			}
 		}
 	}
-	return out
+	unparsed = append(unparsed, runtimeOtherHostRe.FindAllString(rule, -1)...)
+	return hosts, unparsed
 }

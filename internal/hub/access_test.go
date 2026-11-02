@@ -229,7 +229,7 @@ func TestNativeLoginSignIn(t *testing.T) {
 	if v := view(t, f, "plex"); v.SignIn == nil || v.SignIn.Mode != SignInGateway || v.SignIn.AccessGroup != "users_plex" || !v.SignIn.AllowWithoutGateway {
 		t.Errorf("sign-in view = %+v", v.SignIn)
 	}
-	if g := readPolicy(t, f).Groups["plex"]; g != "users_plex" {
+	if g := readPolicy(t, f).Groups["plex.example.org"]; g != "users_plex" {
 		t.Errorf("gateway group = %q", g)
 	}
 	if p := portalApp(t, f, "plex"); p.AccessGroup != "users_plex" {
@@ -253,7 +253,7 @@ func TestNativeLoginSignIn(t *testing.T) {
 	if strings.Contains(ov, "portcullis-auth") || !strings.Contains(ov, mw+": security-headers@file") || !strings.Contains(ov, tls+": public@file") {
 		t.Errorf("native override:\n%s", ov)
 	}
-	if _, ok := readPolicy(t, f).Groups["plex"]; ok {
+	if _, ok := readPolicy(t, f).Groups["plex.example.org"]; ok {
 		t.Error("native-only app still publishes a group")
 	}
 	if p := portalApp(t, f, "plex"); p.AccessGroup != "" {
@@ -286,7 +286,7 @@ func TestNativeLoginSignIn(t *testing.T) {
 	if ov := readOverride(t, f, "plex"); !strings.Contains(ov, mw+": portcullis-auth@docker,portcullis-groups@docker,security-headers@file") || !strings.Contains(ov, tls+": protected@file") {
 		t.Errorf("back to gateway:\n%s", ov)
 	}
-	if p := readPolicy(t, f).Policies["plex"]; factors(p) != "mtls/" {
+	if p := readPolicy(t, f).Policies["plex.example.org"]; factors(p) != "mtls/" {
 		t.Errorf("published policy = %+v", p)
 	}
 	if d := driftFor(f.h.Reconcile(context.Background()), "plex"); d == nil || !strings.Contains(d.Message, "tls.options") {
@@ -340,7 +340,7 @@ func TestNativeLoginSnapshot(t *testing.T) {
 	if err := f.h.WritePolicy(); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := readPolicy(t, f).Groups["plex"]; ok {
+	if _, ok := readPolicy(t, f).Groups["plex.example.org"]; ok {
 		t.Error("snapshot publishes a group for a native-only app")
 	}
 	f.engine.containers = []docker.Container{container("c1", "portcullis-plex", "plex", "running")}

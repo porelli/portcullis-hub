@@ -175,9 +175,12 @@ func TestRealTemplates(t *testing.T) {
 	t.Logf("%d templates loaded", len(ids))
 }
 
-func TestRuntimeSubdomains(t *testing.T) {
-	got := RuntimeSubdomains("Host(`A.example.org`, `b.example.org.`) || (Host(\"c.example.org\") && PathPrefix(`/x`)) || HostRegexp(`d.example.org`) || Host(`e.other.org`) || Host(`f.g.example.org`)", "example.org")
-	if strings.Join(got, ",") != "a,b,c" {
-		t.Errorf("RuntimeSubdomains = %v", got)
+func TestRuntimeHosts(t *testing.T) {
+	hosts, unparsed := RuntimeHosts("Host(`A.example.org`, `b.example.org.`) || (Host(\"c.example.org\") && PathPrefix(`/x`)) || HostRegexp(`d.example.org`) || Host(`e.other.org`) || Host(`f.g.example.org`) || Host(`bad_host`) || Host() || HostSNI(`*`)")
+	if strings.Join(hosts, ",") != "a.example.org,b.example.org,c.example.org,e.other.org,f.g.example.org" {
+		t.Errorf("RuntimeHosts = %v", hosts)
+	}
+	if strings.Join(unparsed, ",") != "bad_host,Host(),HostRegexp(`d.example.org`),HostSNI(`*`)" {
+		t.Errorf("unparsed = %v", unparsed)
 	}
 }

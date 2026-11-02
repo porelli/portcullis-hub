@@ -42,7 +42,7 @@ func TestEnableFailureExplainedAndRolledBack(t *testing.T) {
 	}
 	// Reconcile mid-operation sees the leftovers: deny their subdomain.
 	f.h.Reconcile(context.Background())
-	if g := readPolicy(t, f).Groups["grafana"]; g != policy.DenyGroup {
+	if g := readPolicy(t, f).Groups["grafana.example.org"]; g != policy.DenyGroup {
 		t.Fatalf("leftover project not denied: %q", g)
 	}
 
@@ -77,7 +77,7 @@ func TestEnableFailureExplainedAndRolledBack(t *testing.T) {
 	if len(rep.Items) != 0 {
 		t.Errorf("drift after rollback: %+v", rep.Items)
 	}
-	if g, ok := readPolicy(t, f).Groups["grafana"]; ok {
+	if g, ok := readPolicy(t, f).Groups["grafana.example.org"]; ok {
 		t.Errorf("grafana still in the policy file: %q", g)
 	}
 

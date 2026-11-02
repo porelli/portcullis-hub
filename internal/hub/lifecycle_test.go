@@ -101,10 +101,10 @@ func TestEnable(t *testing.T) {
 
 	// Policy file: groups + path_groups for the routed subdomain.
 	doc := readPolicy(t, f)
-	if doc.Groups["grafana"] != "users_grafana" {
+	if doc.Groups["grafana.example.org"] != "users_grafana" {
 		t.Errorf("groups = %v", doc.Groups)
 	}
-	pg := doc.PathGroups["grafana"]
+	pg := doc.PathGroups["grafana.example.org"]
 	if len(pg) != 2 || pg[0] != (policy.PathGroup{Prefix: "/admin", Group: "admin_grafana"}) || pg[1].Prefix != "/api/admin" {
 		t.Errorf("path_groups = %+v", doc.PathGroups)
 	}
@@ -473,7 +473,7 @@ func TestSaveSettingsValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	doc := readPolicy(t, f)
-	if p := doc.Policies["grafana"]; p.Op != "all" || len(doc.Policies) != 1 {
+	if p := doc.Policies["grafana.example.org"]; p.Op != "all" || len(doc.Policies) != 1 {
 		t.Errorf("policy file = %+v", doc.Policies)
 	}
 	// Inherit drops the override.
@@ -483,7 +483,7 @@ func TestSaveSettingsValidation(t *testing.T) {
 	if v, _ := f.h.AppSettings("grafana"); v.AuthPolicy != nil {
 		t.Errorf("override not dropped: %+v", v.AuthPolicy)
 	}
-	if _, ok := readPolicy(t, f).Policies["grafana"]; ok {
+	if _, ok := readPolicy(t, f).Policies["grafana.example.org"]; ok {
 		t.Error("policy file still has the override")
 	}
 }
@@ -536,7 +536,7 @@ func TestRoutingValidation(t *testing.T) {
 	writeFile(t, filepath.Join(f.src, "grafana", "compose.yml"), "services:\n  grafana:\n    labels:\n      traefik.http.routers.g.rule: Host(`dash.${PORTCULLIS_DOMAIN}`)\n")
 	f.h.Discover()
 	f.h.Enable("grafana")
-	if doc := readPolicy(t, f); doc.Groups["dash"] != "users_grafana" || doc.Groups["grafana"] != "" {
+	if doc := readPolicy(t, f); doc.Groups["dash.example.org"] != "users_grafana" || doc.Groups["grafana.example.org"] != "" {
 		t.Errorf("groups = %v", doc.Groups)
 	}
 }

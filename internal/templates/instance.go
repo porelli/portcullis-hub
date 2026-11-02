@@ -208,9 +208,17 @@ func (t *Template) InstanceOn(id string, hosts map[string]string, domain string,
 				p.Subdomains = append(p.Subdomains, v)
 			}
 		}
-		// Hosts: full hostnames for v5 policy (includes extra-domain hosts).
-		for _, h := range c.Hosts {
-			p.Hosts = append(p.Hosts, h)
+		// Hosts: the full hostnames (extra-domain hosts included) of the
+		// host routers of the public routers' subdomains only — never
+		// every host of the instance (that would widen the exception).
+		pubSub := map[string]bool{}
+		for _, s := range t.Public.Subdomains {
+			pubSub[s] = true
+		}
+		for r, sub := range t.HostRouters {
+			if pubSub[sub] {
+				p.Hosts = append(p.Hosts, c.Hosts[r])
+			}
 		}
 		sort.Strings(p.Hosts)
 		c.Public = &p

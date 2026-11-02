@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/portcullis/hub/internal/docker"
+	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/templates"
 )
 
@@ -92,7 +93,7 @@ func computeDrift(enabled, known, snapshot map[string]bool, counts map[string]pr
 			if snapshot[id] {
 				d.Message = "template missing — still enforced from last known config"
 			} else {
-				d.Message = "template missing and no known config — access to its subdomains is denied"
+				d.Message = "template missing and no known config — access to its hostnames is denied"
 			}
 			d.Actions = []string{ActionDisable}
 		case enabled[id] && c.running == 0:
@@ -176,8 +177,12 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 			if !strings.HasPrefix(k, "traefik.http.routers.") || !strings.HasSuffix(k, ".rule") {
 				continue
 			}
-			for _, sub := range templates.RuntimeSubdomains(v, h.cfg.Domain) {
-				routed[id][sub] = true
+			hosts, unparsed := templates.RuntimeHosts(v)
+			for _, host := range hosts {
+				routed[id][host] = true
+			}
+			if len(unparsed) > 0 {
+				log.Printf("reconcile: %s: %s: cannot derive hostnames from %v — denying only the hosts found (%v)", id, k, unparsed, hosts)
 			}
 		}
 		pc := counts[id]
@@ -221,8 +226,11 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 		}
 	}
 	snapshot := map[string]bool{}
+	coreHosts := policy.CoreHosts(h.cfg.Domain)
 	for id, snap := range h.st.Published {
-		snapshot[id] = true
+		// Without a (non-core) host the snapshot is unknown config: the
+		// policy writer denies instead (WritePolicy).
+		snapshot[id] = len(hostSet(snap.Hosts, coreHosts)) > 0
 		if snap.NativeLoginOnly && !known[id] {
 			nativeOnly[id] = true
 		}
@@ -251,18 +259,18 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 
 	runtime := map[string][]string{}
 	for id, set := range routed {
-		var subs []string
+		var hosts []string
 		for s := range set {
-			subs = append(subs, s)
+			hosts = append(hosts, s)
 		}
-		sort.Strings(subs)
-		if len(subs) > 0 {
-			runtime[id] = subs
+		sort.Strings(hosts)
+		if len(hosts) > 0 {
+			runtime[id] = hosts
 		}
 	}
 	h.driftMu.Lock()
-	routesChanged := !reflect.DeepEqual(runtime, h.runtimeSubs) && !(len(runtime) == 0 && len(h.runtimeSubs) == 0)
-	h.runtimeSubs = runtime
+	routesChanged := !reflect.DeepEqual(runtime, h.runtimeHosts) && !(len(runtime) == 0 && len(h.runtimeHosts) == 0)
+	h.runtimeHosts = runtime
 	h.driftMu.Unlock()
 	if routesChanged {
 		h.writePolicyLogged()

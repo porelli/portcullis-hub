@@ -140,7 +140,7 @@ func TestPublicListedTokens(t *testing.T) {
 	}
 
 	doc := readPolicy(t, f)
-	if e := doc.PublicPaths["cloud"]; guardPathsOf(e) != "prefix:/s/{token},static:/dist" || e.TokenPattern != "^[A-Za-z0-9-]{1,32}$" ||
+	if e := doc.PublicPaths["cloud.example.org"]; guardPathsOf(e) != "prefix:/s/{token},static:/dist" || e.TokenPattern != "^[A-Za-z0-9-]{1,32}$" ||
 		strings.Join(e.CredentialHeaders, ",") != "Authorization,Proxy-Authorization" || doc.Version != policy.FileVersion {
 		t.Errorf("public_paths = %+v", doc.PublicPaths)
 	}
@@ -150,7 +150,7 @@ func TestPublicListedTokens(t *testing.T) {
 	}
 	st, _ := state.Load(filepath.Join(f.data, "state.yaml"))
 	if strings.Join(st.PublicTokens["cloud"], ",") != "AbC123,Zz9" || st.Published["cloud"].Public == nil || guardPathsOf(*st.Published["cloud"].Public) != "prefix:/s/{token},static:/dist" ||
-		strings.Join(st.Published["cloud"].PublicHosts, ",") != "cloud.portcullis.local" {
+		strings.Join(st.Published["cloud"].PublicHosts, ",") != "cloud.example.org" {
 		t.Errorf("state tokens %v snapshot %+v", st.PublicTokens, st.Published["cloud"])
 	}
 
@@ -242,7 +242,7 @@ func TestPublicSnapshotWhenTemplateMissing(t *testing.T) {
 		t.Fatal(err)
 	}
 	doc := readPolicy(t, f)
-	if doc.Groups["cloud"] != "users_cloud" || guardPathsOf(doc.PublicPaths["cloud"]) != "prefix:/apps/text,prefix:/s,static:/dist" {
+	if doc.Groups["cloud.example.org"] != "users_cloud" || guardPathsOf(doc.PublicPaths["cloud.example.org"]) != "prefix:/apps/text,prefix:/s,static:/dist" {
 		t.Errorf("snapshot not enforced: groups %v public %v", doc.Groups, doc.PublicPaths)
 	}
 }
@@ -428,7 +428,7 @@ func TestPublicGuardAndCredentials(t *testing.T) {
 		strings.Contains(ov, "HeaderRegexp") || strings.Contains(ov, "QueryRegexp") {
 		t.Errorf("override:\n%s", ov)
 	}
-	e := readPolicy(t, f).PublicPaths["cloud"]
+	e := readPolicy(t, f).PublicPaths["cloud.example.org"]
 	if strings.Join(e.CredentialHeaders, ",") != "Authorization,Proxy-Authorization,X-Api-Key" || strings.Join(e.CredentialCookies, ",") != "nc_token" ||
 		strings.Join(e.CredentialQuery, ",") != "apiKey" || !strings.Contains(strings.Join(e.StaticExtensions, ","), "woff2") {
 		t.Errorf("guard entry = %+v", e)

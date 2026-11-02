@@ -119,3 +119,48 @@ func TestHostVariableExpansionInKeycloakClients(t *testing.T) {
 		t.Errorf("extra BackchannelLogoutURL = %s, want %s", ec.BackchannelLogoutURL, wantExtraLogout)
 	}
 }
+
+// Only the hosts of the routers the template marks public carry the public
+// exception — never every host of the instance — and an extra-domain host
+// of a public router is included (full hostname, no subdomain).
+func TestPublicHostsOnlyPublicRouters(t *testing.T) {
+	domain := "portcullis.example.com"
+	tpl := &Template{
+		ID:          "cloud",
+		TemplateID:  "cloud",
+		HostRouters: map[string]string{"web": "cloud", "admin": "cloud-admin"},
+		Subdomains:  []string{"cloud", "cloud-admin"},
+		Public:      &PublicPlan{Service: "web", Subdomains: []string{"cloud"}},
+		raw:         &Manifest{Instances: "multi"},
+	}
+	main, err := tpl.Instance("cloud-b", map[string]string{"web": "cloud-b." + domain, "admin": "cloud-b-admin." + domain}, domain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(main.Public.Hosts, ","); got != "cloud-b."+domain {
+		t.Errorf("main domain: public hosts = %s, want only the public router's host", got)
+	}
+	if got := strings.Join(main.Public.Subdomains, ","); got != "cloud-b" {
+		t.Errorf("main domain: public subdomains = %s", got)
+	}
+	extra := func(h string) bool { return strings.HasSuffix(h, ".team-b.example.org") }
+	ex, err := tpl.InstanceOn("cloud-c", map[string]string{"web": "files.team-b.example.org", "admin": "cloud-c-admin." + domain}, domain, extra)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(ex.Public.Hosts, ","); got != "files.team-b.example.org" {
+		t.Errorf("extra domain: public hosts = %s, want the extra-domain host only", got)
+	}
+	if len(ex.Public.Subdomains) != 0 {
+		t.Errorf("extra domain: public subdomains = %v", ex.Public.Subdomains)
+	}
+	// The admin router is public instead: only its host.
+	tpl.Public = &PublicPlan{Service: "admin", Subdomains: []string{"cloud-admin"}}
+	adm, err := tpl.InstanceOn("cloud-c", map[string]string{"web": "files.team-b.example.org", "admin": "cloud-c-admin." + domain}, domain, extra)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(adm.Public.Hosts, ","); got != "cloud-c-admin."+domain {
+		t.Errorf("admin public: public hosts = %s", got)
+	}
+}

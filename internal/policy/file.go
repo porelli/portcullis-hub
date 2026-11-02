@@ -153,7 +153,7 @@ func Build(apps []App, perApp map[string]AuthPolicy, def AuthPolicy, extraDomain
 	doc := Document{
 		Version:      FileVersion,
 		Default:      def,
-		ExtraDomains: append([]string(nil), extraDomains...),
+		ExtraDomains: append([]string{}, extraDomains...),
 		Policies:     map[string]AuthPolicy{},
 		Groups:       map[string]string{},
 		PathGroups:   map[string][]PathGroup{},

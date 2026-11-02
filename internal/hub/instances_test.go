@@ -321,10 +321,10 @@ func TestTwoInstancesSeparate(t *testing.T) {
 
 	// Policy: one entry per instance, each with its own groups.
 	doc := readPolicy(t, f)
-	if doc.Groups["grafana"] != "users_grafana" || doc.Groups["grafana-team-a"] != "users_grafana-team-a" {
+	if doc.Groups["grafana.example.org"] != "users_grafana" || doc.Groups["grafana-team-a.example.org"] != "users_grafana-team-a" {
 		t.Errorf("groups = %v", doc.Groups)
 	}
-	if pg := doc.PathGroups["grafana-team-a"]; len(pg) != 1 || pg[0].Group != "admin_grafana-team-a" {
+	if pg := doc.PathGroups["grafana-team-a.example.org"]; len(pg) != 1 || pg[0].Group != "admin_grafana-team-a" {
 		t.Errorf("path_groups = %v", doc.PathGroups)
 	}
 	// Portal: one entry per instance.
@@ -348,7 +348,7 @@ func TestTwoInstancesSeparate(t *testing.T) {
 	if !f.h.IsEnabled("grafana") {
 		t.Error("disabling B disabled A")
 	}
-	if g := readPolicy(t, f).Groups; g["grafana-team-a"] != "" || g["grafana"] != "users_grafana" {
+	if g := readPolicy(t, f).Groups; g["grafana-team-a.example.org"] != "" || g["grafana.example.org"] != "users_grafana" {
 		t.Errorf("after disable: groups = %v", g)
 	}
 	st, err := state.Load(filepath.Join(f.data, "state.yaml"))
@@ -802,7 +802,7 @@ func TestBrokenInstanceListedAsError(t *testing.T) {
 		t.Errorf("grafana-b = %+v", v)
 	}
 	// Still fail-closed: chat-b is enabled, its published snapshot holds.
-	if g := readPolicy(t, f).Groups["chat-b"]; g != "users_chat-b" {
+	if g := readPolicy(t, f).Groups["chat-b.example.org"]; g != "users_chat-b" {
 		t.Errorf("policy groups = %v", readPolicy(t, f).Groups)
 	}
 	if err := f.h.Enable("grafana-b"); err == nil {

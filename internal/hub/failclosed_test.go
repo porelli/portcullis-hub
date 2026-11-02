@@ -38,7 +38,7 @@ func TestMissingTemplateEnforcesSnapshot(t *testing.T) {
 	}
 	st, _ := state.Load(filepath.Join(f.data, "state.yaml"))
 	snap, ok := st.Published["grafana"]
-	if !ok || strings.Join(snap.Hosts, ",") != "grafana.portcullis.local" || snap.AccessGroup != "users_grafana" ||
+	if !ok || strings.Join(snap.Hosts, ",") != "grafana.example.org" || snap.AccessGroup != "users_grafana" ||
 		snap.AdminGroup != "admin_grafana" || len(snap.AdminPaths) != 2 || snap.Policy == nil || snap.Policy.Factors[0] != "mtls" {
 		t.Fatalf("snapshot = %+v", snap)
 	}
@@ -55,8 +55,8 @@ func TestMissingTemplateEnforcesSnapshot(t *testing.T) {
 	check := func(label string) {
 		t.Helper()
 		doc := readPolicy(t, f)
-		if doc.Groups["grafana"] != "users_grafana" || len(doc.PathGroups["grafana"]) != 2 ||
-			strings.Join(doc.Policies["grafana"].Factors, ",") != "mtls" {
+		if doc.Groups["grafana.example.org"] != "users_grafana" || len(doc.PathGroups["grafana.example.org"]) != 2 ||
+			strings.Join(doc.Policies["grafana.example.org"].Factors, ",") != "mtls" {
 			t.Errorf("%s: policy file lost the app: %+v", label, doc)
 		}
 	}
@@ -88,7 +88,7 @@ func TestMissingTemplateEnforcesSnapshot(t *testing.T) {
 	}
 	f.engine.containers = nil
 	f.h.Reconcile(context.Background())
-	if doc := readPolicy(t, f); doc.Groups["grafana"] != "" || len(doc.Policies) != 0 {
+	if doc := readPolicy(t, f); doc.Groups["grafana.example.org"] != "" || len(doc.Policies) != 0 {
 		t.Errorf("entries kept after disable: %+v", doc)
 	}
 }
@@ -100,7 +100,7 @@ func TestSnapshotTracksLiveTemplate(t *testing.T) {
 	writeFile(t, filepath.Join(f.src, "grafana", "compose.yml"), "services:\n  grafana:\n    labels:\n      traefik.http.routers.g.rule: Host(`dash.${PORTCULLIS_DOMAIN}`)\n")
 	f.h.Discover()
 	st, _ := state.Load(filepath.Join(f.data, "state.yaml"))
-	if s := st.Published["grafana"].Hosts; strings.Join(s, ",") != "dash.portcullis.local" {
+	if s := st.Published["grafana"].Hosts; strings.Join(s, ",") != "dash.example.org" {
 		t.Errorf("snapshot hosts = %v", s)
 	}
 	f.h.SaveSettings("grafana", SettingsUpdate{Values: map[string]string{}, Inherit: true})
@@ -131,16 +131,16 @@ func TestDenyWithoutConfig(t *testing.T) {
 
 	rep := f.h.Reconcile(context.Background())
 	doc := readPolicy(t, f)
-	for _, sub := range []string{"ghost", "ghost-api", "stray"} {
+	for _, sub := range []string{"ghost.example.org", "ghost-api.example.org", "stray.example.org"} {
 		if doc.Groups[sub] != policy.DenyGroup {
 			t.Errorf("groups[%s] = %q, want deny", sub, doc.Groups[sub])
 		}
 	}
-	if _, ok := doc.Groups["auth"]; ok {
+	if _, ok := doc.Groups["auth.example.org"]; ok {
 		t.Error("core subdomain published")
 	}
-	if doc.Groups["grafana"] != "users_grafana" {
-		t.Errorf("live app overridden by deny: %q", doc.Groups["grafana"])
+	if doc.Groups["grafana.example.org"] != "users_grafana" {
+		t.Errorf("live app overridden by deny: %q", doc.Groups["grafana.example.org"])
 	}
 	if d := driftFor(rep, "ghost"); d == nil || d.Kind != DriftTemplateMissing || !strings.Contains(d.Message, "denied") {
 		t.Errorf("drift = %+v", d)
@@ -151,7 +151,7 @@ func TestDenyWithoutConfig(t *testing.T) {
 	f.engine.containers = nil
 	f.engine.mu.Unlock()
 	f.h.Reconcile(context.Background())
-	if doc := readPolicy(t, f); doc.Groups["stray"] != "" {
+	if doc := readPolicy(t, f); doc.Groups["stray.example.org"] != "" {
 		t.Errorf("deny kept: %v", doc.Groups)
 	}
 	// Docker unreachable keeps the last known routes (no fail open).
@@ -160,8 +160,81 @@ func TestDenyWithoutConfig(t *testing.T) {
 	f.engine.listErr = context.DeadlineExceeded
 	f.h.Reconcile(context.Background())
 	f.h.WritePolicy()
-	if doc := readPolicy(t, f); doc.Groups["ghost"] != policy.DenyGroup {
+	if doc := readPolicy(t, f); doc.Groups["ghost.example.org"] != policy.DenyGroup {
 		t.Errorf("deny dropped while docker is unreachable: %v", doc.Groups)
+	}
+}
+
+// Running app projects without config are denied on every hostname
+// their routers name, on any domain (enrolled extra domains included),
+// not only <sub>.<main domain>; a rule host that can't be derived still
+// leaves the derivable ones denied.
+func TestDenyExtraDomainHostsWithoutConfig(t *testing.T) {
+	f := newFixture(t)
+	doms := &fakeDomains{}
+	doms.set(Domain{Name: "team-b.example.net", State: DomainReady})
+	f.h.SetDomainSource(doms)
+	f.h.mu.Lock()
+	f.h.st.SetEnabled("ghost", true) // enabled, no template, no snapshot
+	f.h.mu.Unlock()
+	ghost := container("x1", "portcullis-ghost", "web", "running")
+	ghost.Labels["traefik.http.routers.ghost.rule"] = "Host(`Files.Team-B.example.net.`)"
+	stray := container("o1", "portcullis-stray", "web", "running")
+	stray.Labels["traefik.http.routers.stray.rule"] = "Host(`team-b.example.net`) || Host(`a.b.example.org`) || Host(`elsewhere.example.com`) || HostRegexp(`.+`) || Host(`bad_host`)"
+	f.engine.containers = []docker.Container{ghost, stray}
+	f.h.Reconcile(context.Background())
+	doc := readPolicy(t, f)
+	for _, host := range []string{"files.team-b.example.net", "team-b.example.net", "a.b.example.org", "elsewhere.example.com"} {
+		if doc.Groups[host] != policy.DenyGroup {
+			t.Errorf("groups[%s] = %q, want deny", host, doc.Groups[host])
+		}
+	}
+	if strings.Join(doc.ExtraDomains, ",") != "team-b.example.net" {
+		t.Errorf("extra_domains = %v", doc.ExtraDomains)
+	}
+	for k := range doc.Groups {
+		if k == "bad_host" || strings.Contains(k, "+") {
+			t.Errorf("unparseable host published as a key: %q", k)
+		}
+	}
+}
+
+// A published snapshot without hostnames is unknown config: the instance's
+// running hosts get the deny group instead (no legacy fallback).
+func TestSnapshotWithoutHostsDenies(t *testing.T) {
+	f := newFixture(t)
+	doms := &fakeDomains{}
+	doms.set(Domain{Name: "team-b.example.net", State: DomainReady})
+	f.h.SetDomainSource(doms)
+	f.h.mu.Lock()
+	f.h.st.SetEnabled("ghost", true)
+	f.h.st.Published["ghost"] = state.PublishedApp{GroupAccess: true, AccessGroup: "users_ghost", PublicHosts: []string{"ghost.example.org"}, Public: &policy.PublicEntry{}}
+	f.h.mu.Unlock()
+	ghost := container("x1", "portcullis-ghost", "web", "running")
+	ghost.Labels["traefik.http.routers.ghost.rule"] = "Host(`ghost.example.org`) || Host(`ghost.team-b.example.net`)"
+	f.engine.containers = []docker.Container{ghost}
+	rep := f.h.Reconcile(context.Background())
+	if d := driftFor(rep, "ghost"); d == nil || d.Kind != DriftTemplateMissing || !strings.Contains(d.Message, "denied") {
+		t.Errorf("drift = %+v", d)
+	}
+	doc := readPolicy(t, f)
+	for _, host := range []string{"ghost.example.org", "ghost.team-b.example.net"} {
+		if doc.Groups[host] != policy.DenyGroup {
+			t.Errorf("groups[%s] = %q, want deny", host, doc.Groups[host])
+		}
+	}
+	if _, ok := doc.PublicPaths["ghost.example.org"]; ok {
+		t.Error("public exception published from a snapshot without hosts")
+	}
+	// A snapshot whose only hosts are core hosts is no config either.
+	f.h.mu.Lock()
+	f.h.st.Published["ghost"] = state.PublishedApp{Hosts: []string{"auth.example.org", "example.org"}, GroupAccess: true, AccessGroup: "users_ghost"}
+	f.h.mu.Unlock()
+	if err := f.h.WritePolicy(); err != nil {
+		t.Fatal(err)
+	}
+	if doc := readPolicy(t, f); doc.Groups["ghost.example.org"] != policy.DenyGroup || doc.Groups["auth.example.org"] != "" {
+		t.Errorf("core-only snapshot: groups = %v", doc.Groups)
 	}
 }
 

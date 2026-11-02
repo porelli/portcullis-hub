@@ -149,9 +149,10 @@ func checkComposeConfig(t *testing.T, h *Hub, v *templates.Template) {
 				t.Errorf("%s: service %s keeps the template's Traefik name in %s", v.ID, svc, k)
 			}
 			if strings.HasSuffix(k, ".rule") && parts[1] == "http" {
-				for _, sub := range templates.RuntimeSubdomains(val, "example.org") {
-					if !hosts[sub+".example.org"] {
-						t.Errorf("%s: %s routes %s.example.org, not one of %v", v.ID, k, sub, v.Hosts)
+				rh, _ := templates.RuntimeHosts(val)
+				for _, host := range rh {
+					if !hosts[host] {
+						t.Errorf("%s: %s routes %s, not one of %v", v.ID, k, host, v.Hosts)
 					}
 				}
 			}

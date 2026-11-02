@@ -352,17 +352,12 @@ func (h *Hub) checkInstanceHostsLocked(v *templates.Template) error {
 		if id == v.ID || h.findLocked(id) != nil {
 			continue
 		}
-		// Published snapshots now store full hosts (v5), but legacy subdomains
-		// still need to be checked for collision.
-		var snapSubs []string
+		// Snapshots store full hosts (v5), main-domain and extra-domain.
 		for _, host := range append(append([]string{}, snap.Hosts...), snap.PublicHosts...) {
-			// Extract subdomain if it's on the main domain
-			if label, ok := strings.CutSuffix(host, "."+h.cfg.Domain); ok {
-				snapSubs = append(snapSubs, label)
+			label, onMain := strings.CutSuffix(host, "."+main)
+			if _, ok := seen[host]; ok || (onMain && mine[label]) {
+				return statusErr(409, "hostname %s is still published for instance %s (its template is missing)", host, id)
 			}
-		}
-		if s := subClash(snapSubs); s != "" {
-			return statusErr(409, "hostname %s.%s is still published for instance %s (its template is missing)", s, h.cfg.Domain, id)
 		}
 	}
 	// Templates from other sources and skipped duplicates route their

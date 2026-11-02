@@ -393,7 +393,7 @@ func TestSetHostsRewritesPublicShareHosts(t *testing.T) {
 	if r := publicRule(); !strings.Contains(r, "Host(`cloud-b.example.org`)") || !strings.Contains(r, "/s/AbC123") {
 		t.Fatalf("public rule before = %s", r)
 	}
-	if doc := readPolicy(t, f); len(doc.PublicPaths["cloud-b"].Paths) == 0 {
+	if doc := readPolicy(t, f); len(doc.PublicPaths["cloud-b.example.org"].Paths) == 0 {
 		t.Fatalf("public_paths before = %v", doc.PublicPaths)
 	}
 	callsBefore := len(f.runner.Calls())
@@ -407,10 +407,10 @@ func TestSetHostsRewritesPublicShareHosts(t *testing.T) {
 		t.Errorf("public rule after = %s", r)
 	}
 	doc := readPolicy(t, f)
-	if _, old := doc.PublicPaths["cloud-b"]; old || len(doc.PublicPaths["files"].Paths) == 0 || doc.Groups["files"] != "users_cloud-b" {
+	if _, old := doc.PublicPaths["cloud-b.example.org"]; old || len(doc.PublicPaths["files.example.org"].Paths) == 0 || doc.Groups["files.example.org"] != "users_cloud-b" {
 		t.Errorf("policy after: public %v groups %v", doc.PublicPaths, doc.Groups)
 	}
-	if _, old := doc.Groups["cloud-b"]; old {
+	if _, old := doc.Groups["cloud-b.example.org"]; old {
 		t.Errorf("old host still in groups: %v", doc.Groups)
 	}
 	st, _ := state.Load(filepath.Join(f.data, "state.yaml"))
@@ -625,7 +625,7 @@ func TestSetHostsFailuresAfterCommit(t *testing.T) {
 				t.Errorf("not restarted: %s", after)
 			}
 			if c.name != "policy write" {
-				if doc := readPolicy(t, f); doc.Groups["talk"] != "users_chat-b" {
+				if doc := readPolicy(t, f); doc.Groups["talk.example.org"] != "users_chat-b" {
 					t.Errorf("policy not written: %v", doc.Groups)
 				}
 			}
@@ -638,7 +638,7 @@ func TestSetHostsFailuresAfterCommit(t *testing.T) {
 			if len(f.idp.hostUpdates) != 4 || !strings.Contains(strings.Join(f.runner.Calls()[calls:], " "), "up:portcullis-chat-b") {
 				t.Errorf("retry did not re-apply: Keycloak %v compose %v", f.idp.hostUpdates, f.runner.Calls()[calls:])
 			}
-			if onDisk(t, f, "chat-b") != "talk.example.org" || readPolicy(t, f).Groups["talk"] != "users_chat-b" {
+			if onDisk(t, f, "chat-b") != "talk.example.org" || readPolicy(t, f).Groups["talk.example.org"] != "users_chat-b" {
 				t.Error("retry did not converge")
 			}
 			if lo := f.h.LastOp("chat-b"); lo == nil || !lo.OK || lo.Op != OpHosts {

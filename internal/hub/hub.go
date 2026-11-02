@@ -124,12 +124,13 @@ type Hub struct {
 
 	driftMu sync.Mutex
 	drift   DriftReport
-	// runtimeSubs: subdomains routed by each app project's containers (from
-	// their Traefik labels), as last seen by Reconcile.
-	runtimeSubs map[string][]string
-	driftKey    map[string]string
-	kick        chan struct{}
-	bindRoots   []string // validated OverrideBindRoots
+	// runtimeHosts: full hostnames (any domain) routed by each app
+	// project's containers (from their Traefik labels), as last seen by
+	// Reconcile.
+	runtimeHosts map[string][]string
+	driftKey     map[string]string
+	kick         chan struct{}
+	bindRoots    []string // validated OverrideBindRoots
 
 	// ops: each app's last lifecycle operation (mirrors <data>/ops).
 	opsMu sync.Mutex
@@ -438,9 +439,9 @@ func (h *Hub) WritePolicy() error {
 	// Directory state first: it is network I/O, never under h.mu.
 	expiring, attrs, keepAttrs := h.directoryState()
 	h.driftMu.Lock()
-	runtime := make(map[string][]string, len(h.runtimeSubs))
-	for id, subs := range h.runtimeSubs {
-		runtime[id] = subs
+	runtime := make(map[string][]string, len(h.runtimeHosts))
+	for id, hosts := range h.runtimeHosts {
+		runtime[id] = hosts
 	}
 	h.driftMu.Unlock()
 
@@ -464,29 +465,21 @@ func (h *Hub) WritePolicy() error {
 		}
 		covered[t.ID] = true
 		// Filter out core hosts: they come from group-gate-map.conf.
-		hosts := make(map[string]string, len(t.Hosts))
-		for _, h := range t.Hosts {
-			if !coreHosts[h] {
-				hosts[h] = h
-			}
+		hosts := make([]string, 0, len(t.Hosts))
+		for _, host := range t.Hosts {
+			hosts = append(hosts, host)
 		}
 		app := policy.App{
 			ID:          t.ID,
 			Enabled:     true,
-			Hosts:       hosts,
+			Hosts:       hostSet(hosts, coreHosts),
 			GroupAccess: h.accessLocked(t).groupAccess(t),
 			AccessGroup: t.Manifest.Auth.AccessGroup,
 			AdminGroup:  t.Manifest.Auth.AdminGroup,
 			AdminPaths:  t.Manifest.Auth.AdminPaths,
 		}
 		if pub := h.publicLocked(t, t.Public); pub.Active() {
-			pubHosts := make(map[string]string, len(t.Public.Hosts))
-			for _, ph := range t.Public.Hosts {
-				if !coreHosts[ph] {
-					pubHosts[ph] = ph
-				}
-			}
-			app.PublicHosts, app.Public = pubHosts, publicEntry(&t.Manifest, pub.Published)
+			app.PublicHosts, app.Public = hostSet(t.Public.Hosts, coreHosts), publicEntry(&t.Manifest, pub.Published)
 		}
 		apps = append(apps, app)
 	}
@@ -495,63 +488,41 @@ func (h *Hub) WritePolicy() error {
 			continue
 		}
 		covered[id] = true
-		if snap, ok := h.st.Published[id]; ok {
+		// A snapshot without a (non-core) host is unknown config: it would
+		// publish nothing for the hosts the containers still route, so it
+		// falls through to the deny path below (fail closed).
+		if snap, ok := h.st.Published[id]; ok && len(hostSet(snap.Hosts, coreHosts)) > 0 {
 			log.Printf("auth-policy: WARNING: template for enabled app %s is missing — still enforcing its last known config (hosts %v)", id, snap.Hosts)
 			if _, ok := perApp[id]; !ok && snap.Policy != nil {
 				perApp[id] = *snap.Policy
 			}
-			hosts := make(map[string]string, len(snap.Hosts))
-			for _, h := range snap.Hosts {
-				if !coreHosts[h] {
-					hosts[h] = h
-				}
-			}
-			pubHosts := make(map[string]string, len(snap.PublicHosts))
-			for _, h := range snap.PublicHosts {
-				if !coreHosts[h] {
-					pubHosts[h] = h
-				}
-			}
 			apps = append(apps, policy.App{
 				ID:          id,
 				Enabled:     true,
-				Hosts:       hosts,
+				Hosts:       hostSet(snap.Hosts, coreHosts),
 				GroupAccess: snap.GroupAccess,
 				AccessGroup: snap.AccessGroup,
 				AdminGroup:  snap.AdminGroup,
 				AdminPaths:  snap.AdminPaths,
 				// The containers keep the public router they were started
 				// with: keep showing it.
-				PublicHosts: pubHosts,
+				PublicHosts: hostSet(snap.PublicHosts, coreHosts),
 				Public:      snap.Public,
 			})
 			continue
+		} else if ok {
+			log.Printf("auth-policy: WARNING: template for enabled app %s is missing and its last known config has no hostnames — treating it as unknown (deny)", id)
 		}
-		if subs := runtime[id]; len(subs) > 0 {
-			// Runtime subs are still subdomains (from Traefik labels); expand them to full hostnames.
-			hosts := make(map[string]string, len(subs))
-			for _, sub := range subs {
-				h := sub + "." + mainDomain
-				if !coreHosts[h] {
-					hosts[h] = h
-				}
-			}
+		if hosts := hostSet(runtime[id], coreHosts); len(hosts) > 0 {
 			apps = append(apps, policy.App{ID: id, Enabled: true, Deny: true, Hosts: hosts})
 		} else {
 			log.Printf("auth-policy: WARNING: enabled app %s has neither a template nor a last known config, and no routed hosts are known yet — cannot publish a deny entry", id)
 		}
 	}
 	// Running app projects that are not enabled (drift) are routed by
-	// Traefik but have no config: deny their hosts too.
-	for id, subs := range runtime {
-		if !covered[id] && len(subs) > 0 {
-			hosts := make(map[string]string, len(subs))
-			for _, sub := range subs {
-				h := sub + "." + mainDomain
-				if !coreHosts[h] {
-					hosts[h] = h
-				}
-			}
+	// Traefik but have no config: deny their hosts (any domain) too.
+	for id, rh := range runtime {
+		if hosts := hostSet(rh, coreHosts); !covered[id] && len(hosts) > 0 {
 			apps = append(apps, policy.App{ID: id, Enabled: true, Deny: true, Hosts: hosts})
 		}
 	}
@@ -579,6 +550,18 @@ func (h *Hub) WritePolicy() error {
 	// the policy does: enable, disable, template sync.
 	errs = append(errs, writePortal(h.portalPath(), portal))
 	return errors.Join(errs...)
+}
+
+// hostSet is the policy.App host set of hosts (normalised), core hosts
+// left out: they come from group-gate-map.conf (contract §4).
+func hostSet(hosts []string, core map[string]bool) map[string]string {
+	out := make(map[string]string, len(hosts))
+	for _, host := range hosts {
+		if n := NormalizeHost(host); n != "" && !core[n] {
+			out[n] = n
+		}
+	}
+	return out
 }
 
 func coreSubdomain(subs []string) string {
