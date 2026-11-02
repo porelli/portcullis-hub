@@ -13,7 +13,7 @@ require (
 	github.com/moby/moby/api v1.56.1
 	github.com/moby/moby/client v0.6.2
 	github.com/vjeantet/ldapserver v1.0.2-0.20260725103726-663e6b9910fb
-	golang.org/x/mod v0.35.0
+	golang.org/x/mod v0.42.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
