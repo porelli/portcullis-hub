@@ -913,8 +913,8 @@
         (required ? ' required' : '') + ' placeholder="' + escapeHtml(required ? 'required' : 'optional') + '"></div>').join('');
     }
 
-    function providerSelect(id) {
-      return '<select id="' + id + '">' + Object.keys(DOMAIN_PROVIDERS).map(p =>
+    function providerSelect(cls) {
+      return '<select class="' + cls + '">' + Object.keys(DOMAIN_PROVIDERS).map(p =>
         '<option value="' + escapeHtml(p) + '">' + escapeHtml(p) + '</option>').join('') + '</select>';
     }
 
@@ -976,13 +976,13 @@
       root.innerHTML = html;
       const form = document.getElementById('domain-enroll-form');
       if (form) {
-        document.getElementById('domain-provider').addEventListener('change', e => {
+        form.querySelector('.domain-provider').addEventListener('change', e => {
           document.getElementById('domain-creds').innerHTML = credFields(e.target.value);
         });
         form.addEventListener('submit', async e => {
           e.preventDefault();
           const name = document.getElementById('domain-name').value.trim();
-          const provider = document.getElementById('domain-provider').value;
+          const provider = form.querySelector('.domain-provider').value;
           const credentials = takeCreds(form);
           try {
             await apiCall('/api/domains', 'POST', { name, provider, credentials });
