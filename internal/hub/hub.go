@@ -25,6 +25,7 @@ import (
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/policy"
+	"github.com/portcullis/hub/internal/settings"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
 )
@@ -116,7 +117,9 @@ type Groups interface {
 // Hub is the application core. All exported methods are safe for
 // concurrent use.
 type Hub struct {
-	cfg     Config
+	cfg Config
+	// kinds is the settings type registry (immutable after New).
+	kinds   *settings.Registry
 	compose compose.Runner
 	engine  Engine
 	idp     IdP
@@ -228,6 +231,7 @@ func New(cfg Config, runner compose.Runner, engine Engine, idp IdP) (*Hub, error
 		return nil, err
 	}
 	h := &Hub{
+		kinds:     settings.NewRegistry(),
 		bindRoots: roots,
 		cfg:       cfg,
 		compose:   runner,
@@ -357,7 +361,7 @@ func (h *Hub) Discover() {
 	var ts []templates.Template
 	for _, src := range h.st.Sources {
 		if src.Path != "" {
-			ts = append(ts, templates.Discover(src.Path, src.Name, h.cfg.Domain, nil)...)
+			ts = append(ts, templates.Discover(src.Path, src.Name, h.cfg.Domain, h.kinds)...)
 		}
 	}
 	h.allTemplates = append([]templates.Template(nil), ts...)

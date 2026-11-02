@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/portcullis/hub/internal/settings"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
 )
@@ -70,7 +71,7 @@ func TestRealTemplatesInstances(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(dir, e.Name(), "manifest.yaml")); err != nil || loaded[e.Name()] {
 			continue
 		}
-		_, err := templates.Load(dir, e.Name(), "portcullis", "example.org", nil)
+		_, err := templates.Load(dir, e.Name(), "portcullis", "example.org", settings.NewRegistry())
 		t.Errorf("%s: not in the catalog: %v", e.Name(), err)
 	}
 	_, lookErr := exec.LookPath("docker")

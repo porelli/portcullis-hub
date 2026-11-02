@@ -170,7 +170,7 @@ func TestReservedTypesRefused(t *testing.T) {
 	}
 	// A Hub whose registry knows the type still refuses a reserved one
 	// until its project lands; an unknown type is refused by known.
-	only := func(typ string) bool { return typ == TypeString }
+	only := onlyString{}
 	if _, err := build("app", "src", "", []byte(hdrHead+opts("{key: n, label: N, type: int, delivery: [{env: THEME}]}")), []byte(hdrCompose), "example.org", only); err == nil || !strings.Contains(err.Error(), "setting n") {
 		t.Errorf("type unknown to known() accepted: %v", err)
 	}
@@ -204,7 +204,7 @@ func TestResolveFitsType(t *testing.T) {
 		{"priority on string", oidcHead + opts("{key: quota, label: Q, type: string, scope: person, default: a, resolve: priority, "+personClaim+"}"), oidcCompose, "", ""},
 		{"unknown rule", oidcHead + opts("{key: quota, label: Q, type: int, scope: person, default: 1, resolve: avg, "+personClaim+"}"), oidcCompose, "quota", "resolve avg"},
 		{"choice does not fit", oidcHead + opts("{key: quota, label: Q, type: int, scope: person, default: 1, resolve: max, resolve_choices: [max, min, union], "+personClaim+"}"), oidcCompose, "quota", "resolve_choices: union"},
-		{"choices fit", oidcHead + opts("{key: quota, label: Q, type: size, step: 1GiB, allow_unlimited: true, scope: person, default: 100GiB, resolve: max, resolve_choices: [max, min, priority], "+personClaim+"}"), oidcCompose, "", ""},
+		{"choices fit", oidcHead + opts("{key: quota, label: Q, type: size, step: 1GiB, allow_unlimited: true, scope: person, default: 100GiB, resolve: max, resolve_choices: [max, min, priority], delivery: [{claim: {client: app, name: app_quota, json_type: int, render: {unit: GiB, unlimited: '-1'}}}]}"), oidcCompose, "", ""},
 	})
 }
 
@@ -221,7 +221,7 @@ func TestEnvNames(t *testing.T) {
 		{"not referenced", hdrHead + opts("{key: missing, label: M, type: string}"), hdrCompose, "missing", "not referenced"},
 		{"only in a comment", hdrHead + opts("{key: missing, label: M, type: string}"), "# uses ${MISSING}\n" + hdrCompose, "missing", "not referenced"},
 		{"hard-coded", hdrHead + opts("{key: hard, label: H, type: string}"), hdrCompose, "hard", "hard-codes"},
-		{"indexed", hdrHead + opts("{key: disks, label: D, type: list, items: {type: string, pattern: '^/dev/'}, max_items: 2, delivery: [{env: 'DISK_{n}'}]}"), hdrCompose, "", ""},
+		{"indexed", hdrHead + opts("{key: disks, label: D, type: list, items: {type: string, pattern: '^/dev/.+$'}, max_items: 2, delivery: [{env: 'DISK_{n}'}]}"), hdrCompose, "", ""},
 		{"indexed no max_items", hdrHead + opts("{key: disks, label: D, type: list, items: {type: string}, delivery: [{env: 'DISK_{n}'}]}"), hdrCompose, "disks", "max_items"},
 		{"indexed unreferenced", hdrHead + opts("{key: disks, label: D, type: list, items: {type: string}, max_items: 3, delivery: [{env: 'DISK_{n}'}]}"), hdrCompose, "disks", "DISK_3"},
 		{"indexed beyond max_items", hdrHead + opts("{key: disks, label: D, type: list, items: {type: string}, max_items: 1, delivery: [{env: 'DISK_{n}'}]}"), hdrCompose, "disks", "DISK_2"},
@@ -920,3 +920,9 @@ func TestDuplicateRouterNameRefused(t *testing.T) {
 		}
 	}
 }
+
+// onlyString is a registry that knows only string.
+type onlyString struct{}
+
+func (onlyString) Known(typ string) bool     { return typ == TypeString }
+func (onlyString) CheckOption(*Option) error { return nil }

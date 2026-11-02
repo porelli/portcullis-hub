@@ -12,9 +12,9 @@ import (
 
 // Discover loads every valid template directly under dir. Invalid templates
 // are logged and skipped. {{DOMAIN}} in app URLs is replaced by domain.
-// known reports whether the Hub implements a settings type
-// (settings.Registry.Known); nil = BuiltinTypes.
-func Discover(dir, source, domain string, known func(typ string) bool) []Template {
+// kinds is the Hub's settings type registry (settings.Registry); nil =
+// BuiltinTypes without type-specific checks (tests only).
+func Discover(dir, source, domain string, kinds Kinds) []Template {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil
@@ -27,7 +27,7 @@ func Discover(dir, source, domain string, known func(typ string) bool) []Templat
 		if _, err := os.Stat(filepath.Join(dir, e.Name(), "manifest.yaml")); err != nil {
 			continue
 		}
-		t, err := Load(dir, e.Name(), source, domain, known)
+		t, err := Load(dir, e.Name(), source, domain, kinds)
 		if err != nil {
 			log.Printf("Skipping template %s: %v", e.Name(), err)
 			continue
@@ -39,7 +39,7 @@ func Discover(dir, source, domain string, known func(typ string) bool) []Templat
 
 // Load reads and validates the template in dir/name, as Discover does,
 // and returns its catalog entry or why it is refused.
-func Load(dir, name, source, domain string, known func(typ string) bool) (Template, error) {
+func Load(dir, name, source, domain string, kinds Kinds) (Template, error) {
 	p := filepath.Join(dir, name)
 	data, err := os.ReadFile(filepath.Join(p, "manifest.yaml"))
 	if err != nil {
@@ -49,12 +49,12 @@ func Load(dir, name, source, domain string, known func(typ string) bool) (Templa
 	if err != nil {
 		compose = nil
 	}
-	return build(name, source, p, data, compose, domain, known)
+	return build(name, source, p, data, compose, domain, kinds)
 }
 
 // build validates a template from its manifest and compose file (nil =
 // missing) and returns its catalog entry (the default instance's view).
-func build(id, source, path string, data, compose []byte, domain string, known func(typ string) bool) (Template, error) {
+func build(id, source, path string, data, compose []byte, domain string, kinds Kinds) (Template, error) {
 	if !IDRe.MatchString(id) {
 		return Template{}, fmt.Errorf("directory name must match %s", IDRe)
 	}
@@ -117,7 +117,7 @@ func build(id, source, path string, data, compose []byte, domain string, known f
 		Names:        routes.Names,
 		raw:          &raw,
 	}
-	if err := ValidateSettingsSpec(&t, compose, routes, known); err != nil {
+	if err := ValidateSettingsSpec(&t, compose, routes, kinds); err != nil {
 		return Template{}, err
 	}
 	// The catalog entry shows the default instance.

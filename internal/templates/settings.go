@@ -616,17 +616,37 @@ func strictDecode(n *yaml.Node, v any) error {
 
 // ── validation ───────────────────────────────────────────
 
+// Kinds is the Hub's settings type registry (settings.Registry): which
+// types it implements, and each option's type-specific checks (bounds,
+// patterns, choices, columns, renders, the default and group_values as
+// canonical values).
+type Kinds interface {
+	Known(typ string) bool
+	CheckOption(o *Option) error
+}
+
+// builtinKinds knows BuiltinTypes and checks nothing type-specific.
+type builtinKinds struct{}
+
+// nilKinds is what a nil Kinds means. The package's tests set it to the
+// real settings registry (export_test.go), so every fixture also passes
+// the type-specific checks.
+var nilKinds Kinds = builtinKinds{}
+
+func (builtinKinds) Known(typ string) bool     { return BuiltinTypes[typ] }
+func (builtinKinds) CheckOption(*Option) error { return nil }
+
 // ValidateSettingsSpec checks t's settings, files, hooks and reload
-// against its manifest, compose file and routes (contract §13). known
-// reports whether the Hub implements a type (settings.Registry.Known; nil
-// = BuiltinTypes); a reserved type or field is refused with "<what> needs
-// <feature>", an unknown type as such.
-func ValidateSettingsSpec(t *Template, compose []byte, routes *Routes, known func(typ string) bool) error {
-	if known == nil {
-		known = func(typ string) bool { return BuiltinTypes[typ] }
+// against its manifest, compose file and routes (contract §13). kinds is
+// the Hub's type registry (settings.Registry; nil = BuiltinTypes without
+// type-specific checks); a reserved type or field is refused with "<what>
+// needs <feature>", an unknown type as such.
+func ValidateSettingsSpec(t *Template, compose []byte, routes *Routes, kinds Kinds) error {
+	if kinds == nil {
+		kinds = nilKinds
 	}
 	m := &t.Manifest
-	v := &specCheck{m: m, compose: compose, routes: routes, known: known}
+	v := &specCheck{m: m, compose: compose, routes: routes, kinds: kinds}
 	v.services = map[string]bool{}
 	for _, s := range Services(compose) {
 		v.services[s] = true
@@ -678,6 +698,9 @@ func ValidateSettingsSpec(t *Template, compose []byte, routes *Routes, known fun
 		if err := v.option(o); err != nil {
 			return fmt.Errorf("setting %s: %w", o.Key, err)
 		}
+		if err := v.kinds.CheckOption(o); err != nil {
+			return fmt.Errorf("setting %s: %w", o.Key, err)
+		}
 	}
 	return nil
 }
@@ -686,7 +709,7 @@ type specCheck struct {
 	m        *Manifest
 	compose  []byte
 	routes   *Routes
-	known    func(string) bool
+	kinds    Kinds
 	services map[string]bool
 	scalars  []string                      // compose.yml's decoded scalar values
 	env      map[string]map[string]*string // service → environment
@@ -1057,7 +1080,7 @@ func (v *specCheck) typeOf(o *Option) error {
 	if what, f := reservedUse(o); f != "" {
 		return fmt.Errorf("%s needs %s, which this Hub doesn't implement", what, f)
 	}
-	if o.Type == "" || !v.known(o.Type) {
+	if o.Type == "" || !v.kinds.Known(o.Type) {
 		return fmt.Errorf("unknown type %q", o.Type)
 	}
 	return nil
