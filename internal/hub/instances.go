@@ -238,6 +238,9 @@ func (h *Hub) CreateInstance(templateID, id string, hosts map[string]string) err
 	if strings.HasPrefix(id, templates.ReservedInstancePrefix) {
 		return statusErr(400, "instance id %q: ids starting with %q are reserved", id, templates.ReservedInstancePrefix)
 	}
+	if err := templates.CheckIDShape(id); err != nil {
+		return statusErr(400, "instance %v", err)
+	}
 	h.mu.RLock()
 	_, exists := h.st.Instances[id]
 	h.mu.RUnlock()

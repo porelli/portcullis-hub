@@ -403,6 +403,11 @@ func TestInstanceIDRules(t *testing.T) {
 		{"g" + strings.Repeat("a", 31), 400, "must match"},
 		{"portcullis-x", 400, "reserved"},
 		{"portcullisx", 400, "reserved"},
+		{"a-portcullis-b", 400, "portcullis may not be a segment"},
+		{"team-portcullis", 400, "portcullis may not be a segment"},
+		{"team--b", 400, "single -"},
+		{"team-", 400, "single -"},
+		{"portcullisx-b", 400, "reserved"},
 		{"chat", 409, "template id"},
 		{"disks", 409, "template id"},
 	} {

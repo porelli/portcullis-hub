@@ -585,6 +585,9 @@ func (h *Hub) restoreInstanceAs(archive, newID, actor string, hosts map[string]s
 	if !templates.InstanceIDRe.MatchString(newID) {
 		return res, statusErr(400, "instance id %q must match %s", newID, templates.InstanceIDRe)
 	}
+	if err := templates.CheckIDShape(newID); err != nil {
+		return res, statusErr(400, "instance %v", err)
+	}
 	unlock, err := h.lockApp(newID)
 	if err != nil {
 		return res, err

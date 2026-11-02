@@ -92,8 +92,39 @@ func RenameLabels(labels map[string]string, names map[string]bool, id string) ma
 	return out
 }
 
+// TraefikEnable reads a service's traefik.enable label (key folded, as
+// Traefik's label decoder matches it). Traefik turns a container on for any
+// value strconv.ParseBool accepts ("1", "t", "TRUE", …); the Hub accepts
+// only exactly true or false (a YAML bool decodes to those), and one such
+// key, so every reader agrees with Traefik. Every read of traefik.enable
+// goes through here.
+func TraefikEnable(labels map[string]string) (bool, error) {
+	key, on := "", false
+	for k, v := range labels {
+		if FoldKey(k) != "traefik.enable" {
+			continue
+		}
+		if key != "" {
+			a, b := key, k
+			if b < a {
+				a, b = b, a
+			}
+			return false, fmt.Errorf("traefik.enable is set twice (%q and %q)", a, b)
+		}
+		key = k
+		switch v {
+		case "true":
+			on = true
+		case "false":
+		default:
+			return false, fmt.Errorf("traefik.enable is %q: write true or false (Traefik also reads 1, t, TRUE, … as on; the Hub accepts only these two)", v)
+		}
+	}
+	return on, nil
+}
+
 // FirstEnabledService is the first compose service, in compose.yml order,
-// whose labels set traefik.enable to "true" ("" = none). The Hub puts its
+// whose labels set traefik.enable to true (TraefikEnable; "" = none). The Hub puts its
 // extra-domain sign-in routers there (contract §5).
 func FirstEnabledService(compose []byte) (string, error) {
 	labels, err := ServiceLabels(compose)
@@ -115,10 +146,12 @@ func FirstEnabledService(compose []byte) (string, error) {
 		svcs := doc.Content[i+1]
 		for j := 0; j+1 < len(svcs.Content); j += 2 {
 			name := svcs.Content[j].Value
-			for k, v := range labels[name] {
-				if FoldKey(k) == "traefik.enable" && strings.EqualFold(strings.TrimSpace(v), "true") {
-					return name, nil
-				}
+			on, err := TraefikEnable(labels[name])
+			if err != nil {
+				return "", fmt.Errorf("service %s: %w", name, err)
+			}
+			if on {
+				return name, nil
 			}
 		}
 	}

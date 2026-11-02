@@ -58,6 +58,9 @@ func build(id, source, path string, data, compose []byte, domain string, known f
 	if !IDRe.MatchString(id) {
 		return Template{}, fmt.Errorf("directory name must match %s", IDRe)
 	}
+	if err := CheckIDShape(id); err != nil {
+		return Template{}, fmt.Errorf("directory name: %w", err)
+	}
 	if err := SingleDocument(data, "manifest.yaml"); err != nil {
 		return Template{}, err
 	}

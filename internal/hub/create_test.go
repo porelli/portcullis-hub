@@ -73,6 +73,25 @@ func TestCreateInstanceAsGroups(t *testing.T) {
 	if _, err := f.h.CreateInstanceAs("disks", "disks-b", nil, "alice"); statusOf(err) != 409 {
 		t.Errorf("single = %v", err)
 	}
+	// Ids whose automatic Traefik names could equal another instance's.
+	for _, id := range []string{"grafana-portcullis-b", "grafana--b", "grafana-"} {
+		if _, err := f.h.CreateInstanceAs("grafana", id, nil, "alice"); statusOf(err) != 400 || !strings.Contains(err.Error(), "instance id") {
+			t.Errorf("%s = %v", id, err)
+		}
+	}
+}
+
+func TestRestoreAsRefusesIDShape(t *testing.T) {
+	f, _, _ := grafanaB(t)
+	entry, err := f.h.BackupInstance("grafana-b", "root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"grafana-portcullis-c", "team-portcullis", "grafana--c", "grafana-"} {
+		if _, err := f.h.RestoreInstanceAs(entry.Archive, id, "root"); statusOf(err) != 400 || !strings.Contains(err.Error(), "instance id") {
+			t.Errorf("%s = %v", id, err)
+		}
+	}
 }
 
 func TestInstanceDomainsAndRouters(t *testing.T) {

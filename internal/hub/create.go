@@ -47,6 +47,9 @@ func (h *Hub) CreateInstanceAs(templateID, id string, hosts map[string]string, a
 	if !templates.InstanceIDRe.MatchString(id) {
 		return res, statusErr(400, "instance id %q must match %s", id, templates.InstanceIDRe)
 	}
+	if err := templates.CheckIDShape(id); err != nil {
+		return res, statusErr(400, "instance %v", err)
+	}
 	unlock, err := h.lockApp(id)
 	if err != nil {
 		return res, err

@@ -129,6 +129,21 @@ func autoServiceLike(name string) bool {
 	return strings.Contains(name, "-portcullis-") || strings.HasSuffix(name, "-portcullis")
 }
 
+// nonAlnumRe is what Traefik's provider.Normalize collapses into "-"
+// (Normalize keeps Unicode letters too: treating them as separators only
+// makes more names collide, never fewer).
+var nonAlnumRe = regexp.MustCompile(`[^a-zA-Z0-9]+`)
+
+// autoNameKey is the comparison key of compose service svc's part of its
+// automatic Traefik name, Normalize("<svc>_<project>"): runs of other
+// characters as "-", leading/trailing ones dropped (Normalize splits on
+// them; the "_" joining the project absorbs a trailing run), lowercased
+// (Traefik's merge is case-sensitive; case-only differences are refused
+// all the same).
+func autoNameKey(svc string) string {
+	return strings.ToLower(strings.Trim(nonAlnumRe.ReplaceAllString(svc, "-"), "-"))
+}
+
 // ReservedPrefix is reserved for Hub-generated Traefik routers and
 // middlewares (public_access); templates may not define names with it.
 const ReservedPrefix = "portcullis-public-"
@@ -147,7 +162,10 @@ const ReservedPrefix = "portcullis-public-"
 //   - HostRegexp, HostHeader, HostSNI and HostSNIRegexp are rejected, as are
 //     TCP routers (they bypass forward-auth)
 //   - a traefik.enable=true service must declare an HTTP router (otherwise
-//     Traefik would synthesise one from its defaultRule)
+//     Traefik would synthesise one from its defaultRule); traefik.enable is
+//     exactly true or false (TraefikEnable)
+//   - no two Traefik-enabled services share an automatic service name
+//     (autoNameKey: my-web, my_web and my.web would be one load balancer)
 func ParseRoutes(compose []byte) (*Routes, error) {
 	var doc struct {
 		Services map[string]struct {
@@ -162,6 +180,8 @@ func ParseRoutes(compose []byte) (*Routes, error) {
 	subs := map[string]bool{}
 	// tsvcOwner: the compose service defining each Traefik HTTP service.
 	tsvcOwner := map[string]string{}
+	// autoOwner: the Traefik-enabled compose service per automatic name.
+	autoOwner := map[string]string{}
 	names := make([]string, 0, len(doc.Services))
 	for name := range doc.Services {
 		names = append(names, name)
@@ -250,7 +270,21 @@ func ParseRoutes(compose []byte) (*Routes, error) {
 		if len(r.TraefikServices[svc]) == 0 {
 			delete(r.TraefikServices, svc)
 		}
-		if len(httpRouters) == 0 && strings.EqualFold(strings.TrimSpace(labels["traefik.enable"]), "true") {
+		enabled, err := TraefikEnable(labels)
+		if err != nil {
+			return nil, fmt.Errorf("service %s: %w", svc, err)
+		}
+		if enabled {
+			// Traefik names a container's automatic service (and default
+			// router) Normalize("<compose service>_<project>"): services
+			// whose names normalise alike share one load balancer.
+			k := autoNameKey(svc)
+			if o, ok := autoOwner[k]; ok {
+				return nil, fmt.Errorf("services %s and %s would get the same automatic Traefik service name (Traefik turns every run of characters other than letters and digits into -, %s-portcullis-<id>) and be merged into one load balancer: rename one of them", o, svc, k)
+			}
+			autoOwner[k] = svc
+		}
+		if len(httpRouters) == 0 && enabled {
 			// Unless the service only has TCP/UDP routers.
 			onlyL4 := false
 			for k := range labels {

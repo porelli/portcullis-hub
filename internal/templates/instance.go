@@ -21,6 +21,29 @@ var InstanceIDRe = regexp.MustCompile(`^[a-z][a-z0-9-]{0,30}$`)
 // ReservedInstancePrefix may not start an instance id (§11.1).
 const ReservedInstancePrefix = "portcullis"
 
+// CheckIDShape refuses a template or instance id that would let two
+// instances' automatic Traefik names collide. Traefik names a container's
+// automatic service and default router Normalize("<compose service>_portcullis-<id>")
+// (runs of other characters than letters and digits become "-", leading
+// and trailing ones dropped), so:
+//   - "portcullis" may not be a segment of the id (instance a-portcullis-b's
+//     service x would be instance b's service x-portcullis-a);
+//   - the id must be its own normal form, segments of [a-z0-9] joined by
+//     single "-" (my_app, my--app and my-app- would all be my-app).
+func CheckIDShape(id string) error {
+	for _, seg := range nonAlnumRe.Split(id, -1) {
+		if strings.EqualFold(seg, "portcullis") {
+			return fmt.Errorf("id %q: portcullis may not be a segment of an id (Traefik's automatic names <service>-portcullis-<id> of two instances could collide)", id)
+		}
+	}
+	if !idNormalRe.MatchString(id) {
+		return fmt.Errorf("id %q: write it as letters and digits joined by single - (Traefik turns _, -- and a trailing - into the same automatic name as another id)", id)
+	}
+	return nil
+}
+
+var idNormalRe = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
+
 // Instance variables the Hub writes into every instance's .env (§3.1).
 const (
 	VarInstance       = "PORTCULLIS_INSTANCE"

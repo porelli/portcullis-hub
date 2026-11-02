@@ -680,3 +680,144 @@ func TestAutoServiceNameRefused(t *testing.T) {
 		}
 	}
 }
+
+// autoCollide: two Traefik-enabled services whose names normalise alike.
+// a carries the gated router, b an ungated one; neither names a Traefik
+// service, so both routers reach the one automatic load balancer
+// Normalize("<name>_portcullis-app") — b's ungated router would reach a.
+func autoCollide(a, b, enableB string) string {
+	return "services:\n  " + a + ":\n    image: x\n    labels:\n" +
+		"      traefik.enable: \"true\"\n" +
+		"      traefik.http.routers.app.rule: Host(`${PORTCULLIS_HOST_APP:-app.portcullis.local}`)\n" +
+		"      traefik.http.routers.app.middlewares: portcullis-auth@docker,portcullis-groups@docker\n" +
+		"  " + b + ":\n    image: x\n    labels:\n" +
+		"      traefik.enable: " + enableB + "\n" +
+		"      traefik.http.routers.side.rule: Host(`${PORTCULLIS_HOST_APP:-app.portcullis.local}`) && PathPrefix(`/side`)\n"
+}
+
+func TestAutoNameCollisionRefused(t *testing.T) {
+	for _, c := range [][2]string{
+		{"my-web", "my_web"}, {"my-web", "my.web"}, {"my_web", "my.web"},
+		{"my-web", "my--web"}, {"my-web", "my-_.web"}, {"web", "web-"}, {"web", "web_"},
+		{"web", "Web"}, {"my-web", "My_Web"},
+	} {
+		compose := autoCollide(c[0], c[1], `"true"`)
+		var first string
+		for i := 0; i < 25; i++ {
+			_, err := build("app", "src", "", []byte(hdrHead+opts(personHeader)), []byte(compose), "example.org", nil)
+			if err == nil || !strings.Contains(err.Error(), "would get the same automatic Traefik service name") {
+				t.Fatalf("%v run %d: %v", c, i, err)
+			}
+			if i == 0 {
+				first = err.Error()
+			} else if err.Error() != first {
+				t.Fatalf("%v run %d: %q, run 0: %q", c, i, err, first)
+			}
+		}
+	}
+	// Distinct normal forms, or the second service not Traefik-enabled:
+	// no shared load balancer (the header rule then judges the layout).
+	for _, c := range [][3]string{
+		{"myweb", "my-web", `"true"`}, {"web", "web2", `"true"`}, {"web-a", "web-b", `"true"`},
+		{"my-web", "my_web", `"false"`}, {"my-web", "my_web", "false"},
+	} {
+		if _, err := ParseRoutes([]byte(autoCollide(c[0], c[1], c[2]))); err != nil {
+			t.Errorf("%v refused: %v", c, err)
+		}
+	}
+	// No traefik.enable at all (exposedByDefault is false): not enabled.
+	c := "services:\n  my-web:\n    image: x\n  my_web:\n    image: x\n"
+	if _, err := ParseRoutes([]byte(c)); err != nil {
+		t.Errorf("unlabelled: %v", err)
+	}
+}
+
+func TestTraefikEnableStrict(t *testing.T) {
+	// The reviewer's layout: a "1" service with no routers gets Traefik's
+	// default router (rule Host(`<automatic name>`), no forward-auth).
+	noRouter := func(v string) string {
+		return "services:\n  web:\n    image: x\n    labels:\n" +
+			"      traefik.http.routers.app.rule: Host(`${PORTCULLIS_HOST_APP:-app.portcullis.local}`)\n" +
+			"      traefik.http.routers.app.middlewares: portcullis-auth@docker,portcullis-groups@docker\n" +
+			"  side:\n    image: x\n    labels:\n      traefik.enable: " + v + "\n"
+	}
+	for _, v := range []string{`"1"`, `"t"`, `"T"`, `"TRUE"`, `"True"`, `"true "`, `" true"`, `"yes"`, `"on"`, `"0"`, `"F"`, `"FALSE"`, `""`, "1", "0", "yes"} {
+		for i := 0; i < 20; i++ {
+			_, err := build("app", "src", "", []byte(hdrHead+opts(personHeader)), []byte(noRouter(v)), "example.org", nil)
+			if err == nil || !strings.Contains(err.Error(), "service side: traefik.enable is") || !strings.Contains(err.Error(), "write true or false") {
+				t.Fatalf("%s run %d: %v", v, i, err)
+			}
+		}
+		if _, err := FirstEnabledService([]byte(noRouter(v))); err == nil {
+			t.Errorf("FirstEnabledService %s: no error", v)
+		}
+	}
+	// List form without a value, and two keys that fold alike.
+	for _, c := range []string{
+		"services:\n  side:\n    image: x\n    labels:\n      - traefik.enable\n",
+		"services:\n  side:\n    image: x\n    labels:\n      - traefik.enable=1\n",
+		"services:\n  side:\n    image: x\n    labels:\n      traefik.enable: \"false\"\n      Traefik.Enable: \"true\"\n",
+	} {
+		for i := 0; i < 20; i++ {
+			if _, err := ParseRoutes([]byte(c)); err == nil || !strings.Contains(err.Error(), "service side: traefik.enable is") {
+				t.Fatalf("%q run %d: %v", c, i, err)
+			}
+		}
+	}
+	// A folded key is read as Traefik reads it: on, and without a router
+	// refused as before.
+	c := "services:\n  side:\n    image: x\n    labels:\n      Traefik.Enable: \"true\"\n"
+	if _, err := ParseRoutes([]byte(c)); err == nil || !strings.Contains(err.Error(), "without an HTTP router rule") {
+		t.Errorf("folded key: %v", err)
+	}
+	// Exactly true / false, string or YAML bool.
+	for _, v := range []string{`"true"`, "true", "True", "TRUE", `"false"`, "false"} {
+		if _, err := ParseRoutes([]byte(noRouter(v) + "      traefik.http.routers.s.rule: Host(`${PORTCULLIS_HOST_APP:-app.portcullis.local}`) && PathPrefix(`/s`)\n")); err != nil {
+			t.Errorf("%s refused: %v", v, err)
+		}
+	}
+	svc, err := FirstEnabledService([]byte("services:\n  a:\n    image: x\n    labels:\n      traefik.enable: false\n  b:\n    image: x\n    labels:\n      - traefik.enable=true\n"))
+	if err != nil || svc != "b" {
+		t.Errorf("FirstEnabledService = %q, %v", svc, err)
+	}
+}
+
+func TestCheckIDShape(t *testing.T) {
+	for _, id := range []string{"a-portcullis-b", "portcullis", "x-portcullis", "portcullis-x", "a_portcullis_b", "a-PORTCULLIS-b", "my_app", "my--app", "app-", "app_", "a_b"} {
+		if CheckIDShape(id) == nil {
+			t.Errorf("%s accepted", id)
+		}
+	}
+	for _, id := range []string{"app", "my-app", "a-portcullisx", "portcullisx-b", "xportcullis-b", "grafana", "firefox-sync", "a1-2b"} {
+		if err := CheckIDShape(id); err != nil {
+			t.Errorf("%s refused: %v", id, err)
+		}
+	}
+	compose := "services:\n  web:\n    image: x\n"
+	for _, id := range []string{"a-portcullis-b", "my_app", "my--app"} {
+		for i := 0; i < 20; i++ {
+			if _, err := build(id, "src", "", []byte("name: App\nauth:\n  method: forward-auth\n"), []byte(compose), "example.org", nil); err == nil || !strings.Contains(err.Error(), "directory name: id") {
+				t.Fatalf("template %s run %d: %v", id, i, err)
+			}
+		}
+	}
+	if _, err := build("my-app", "src", "", []byte("name: App\nauth:\n  method: forward-auth\n"), []byte(compose), "example.org", nil); err != nil {
+		t.Errorf("my-app: %v", err)
+	}
+}
+
+// The round-3 rule still holds next to the round-4 ones: an explicit name
+// shaped like an automatic one is refused, 20 builds each.
+func TestAutoServiceNameRuleStillHolds(t *testing.T) {
+	rule := ".rule: Host(`${PORTCULLIS_HOST_APP:-app.portcullis.local}`)\n"
+	for _, name := range []string{"web-portcullis-app", "x-portcullis"} {
+		c := "services:\n  web:\n    image: x\n    labels:\n      traefik.enable: \"true\"\n      traefik.http.routers.app" + rule +
+			"      traefik.http.routers.app.service: " + name + "\n" +
+			"      traefik.http.services." + name + ".loadbalancer.server.port: \"80\"\n"
+		for i := 0; i < 20; i++ {
+			if _, err := ParseRoutes([]byte(c)); err == nil || !strings.Contains(err.Error(), "looks like an automatic service name") {
+				t.Fatalf("%s run %d: %v", name, i, err)
+			}
+		}
+	}
+}
