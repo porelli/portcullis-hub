@@ -63,8 +63,14 @@ func TestRenameLabels(t *testing.T) {
 		"traefik.udp.routers.dns.entrypoints":                  "dns",
 		"traefik.http.routers.portcullis-public-x.service":     "app",
 		"com.example.other":                                    "app",
+		// Folded (fix round 5, I4): Traefik reads keys and references
+		// case-insensitively, so must the renaming.
+		"traefik.http.routers.app2.service":                    "App",
+		"traefik.http.routers.app2.middlewares":                "App-Hdr@Docker, portcullis-auth@docker",
+		"traefik.http.Middlewares.App-Chain.Chain.Middlewares": "APP-HDR",
+		"traefik.http.middlewares.app-hdr.headers.X-Case":      "v",
 	}
-	names := map[string]bool{"app": true, "app-x": true, "app-hdr": true, "app-chain": true, "dns": true}
+	names := map[string]bool{"app": true, "app2": true, "app-x": true, "app-hdr": true, "app-chain": true, "dns": true}
 	got := RenameLabels(in, names, "i1")
 	want := map[string]string{
 		"traefik.enable":                                          "true",
@@ -78,6 +84,10 @@ func TestRenameLabels(t *testing.T) {
 		"traefik.udp.routers.i1_dns.entrypoints":                  "dns",
 		"traefik.http.routers.portcullis-public-x.service":        "i1_app",
 		"com.example.other":                                       "app",
+		"traefik.http.routers.i1_app2.service":                    "i1_app",
+		"traefik.http.routers.i1_app2.middlewares":                "i1_app-hdr@docker,portcullis-auth@docker",
+		"traefik.http.middlewares.i1_app-chain.Chain.Middlewares": "i1_app-hdr",
+		"traefik.http.middlewares.i1_app-hdr.headers.X-Case":      "v",
 	}
 	if len(got) != len(want) {
 		t.Errorf("got %v", got)

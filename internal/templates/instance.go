@@ -76,6 +76,11 @@ type InstanceNames struct {
 	Clients     []string          // Keycloak client ids, manifest order
 	AccessGroup string            // "" if the manifest has none
 	AdminGroup  string
+	// Traefik are the Traefik router / service / middleware names the
+	// instance defines (the template's, InstanceName-renamed for a
+	// non-default instance), sorted: Traefik merges same-name objects, so
+	// two instances may not share one.
+	Traefik []string
 }
 
 // NamesFor returns instance id's derived names for this template.
@@ -90,10 +95,10 @@ func (t *Template) NamesFor(id string) InstanceNames {
 	for _, k := range t.Volumes {
 		if !m.Multi() {
 			// A single template's volumes keep what compose names them:
-			// its declared portcullis_<key>, else <project>_<key>. The
-			// Hub's override never renames them.
-			if t.NamedVolumes[k] {
-				n.Volumes[k] = "portcullis_" + k
+			// its declared portcullis_<id>[-_…] name, else
+			// <project>_<key>. The Hub's override never renames them.
+			if name := t.NamedVolumes[k]; name != "" {
+				n.Volumes[k] = name
 			} else {
 				n.Volumes[k] = n.Project + "_" + k
 			}
@@ -114,6 +119,12 @@ func (t *Template) NamesFor(id string) InstanceNames {
 		default:
 			n.Clients = append(n.Clients, id+"-"+c.ClientID)
 		}
+	}
+	for _, name := range sortedKeys(t.Names) {
+		if !def {
+			name = InstanceName(id, name)
+		}
+		n.Traefik = append(n.Traefik, name)
 	}
 	if g := m.Auth.AccessGroup; g != "" {
 		n.AccessGroup = g
@@ -367,44 +378,61 @@ func checkInstanceRules(m *Manifest, r *Routes) error {
 	return nil
 }
 
-// checkVolumeNames enforces contract §3 Volumes: a single template names
-// each volume portcullis_<key>, a multi template names none (the Hub's
-// override sets both, §11.2, so another name would orphan its data).
-func checkVolumeNames(compose []byte, multi bool) error {
+// checkVolumeNames enforces contract §3 Volumes: a single template may
+// name a (non-external) volume only portcullis_<template-id> or
+// portcullis_<template-id>-… / portcullis_<template-id>_… (its own
+// namespace: any other name could be another app's or core's data); a
+// multi template names none (the Hub's override sets them, §11.2).
+// Collisions inside those namespaces (template "a" naming portcullis_a-b,
+// template "a-b"'s portcullis_a-b) are name claims (internal/hub).
+func checkVolumeNames(compose []byte, id string, multi bool) error {
 	var doc struct {
 		Volumes map[string]interface{} `yaml:"volumes"`
 	}
 	if err := yaml.Unmarshal(compose, &doc); err != nil {
 		return err
 	}
-	for k, v := range doc.Volumes {
-		mv, _ := v.(map[string]interface{})
+	keys := make([]string, 0, len(doc.Volumes))
+	for k := range doc.Volumes {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		mv, _ := doc.Volumes[k].(map[string]interface{})
 		if ext, ok := mv["external"]; ok && ext != nil && ext != false {
 			continue
 		}
-		name, has := mv["name"]
-		switch {
-		case has && multi:
+		raw, has := mv["name"]
+		if !has {
+			continue
+		}
+		if multi {
 			return fmt.Errorf("volume %s: an instances: multi template declares no volume name (the Hub sets it)", k)
-		case has && name != "portcullis_"+k:
-			return fmt.Errorf("volume %s: name must be portcullis_%s", k, k)
+		}
+		name, ok := raw.(string)
+		own := "portcullis_" + id
+		if !ok || !(name == own || strings.HasPrefix(name, own+"-") || strings.HasPrefix(name, own+"_")) {
+			return fmt.Errorf("volume %s: name %v must be %s or start with %s- or %s_ (the template's own namespace)", k, raw, own, own, own)
 		}
 	}
 	return nil
 }
 
-// declaredVolumeNames returns the volume keys that declare a name:.
-func declaredVolumeNames(compose []byte) map[string]bool {
+// declaredVolumeNames returns the names non-external volumes declare
+// (volume key → name).
+func declaredVolumeNames(compose []byte) map[string]string {
 	var doc struct {
 		Volumes map[string]interface{} `yaml:"volumes"`
 	}
-	out := map[string]bool{}
+	out := map[string]string{}
 	if yaml.Unmarshal(compose, &doc) != nil {
 		return out
 	}
 	for k, v := range doc.Volumes {
-		if mv, ok := v.(map[string]interface{}); ok && mv["name"] != nil {
-			out[k] = true
+		if mv, ok := v.(map[string]interface{}); ok {
+			if n, ok := mv["name"].(string); ok && n != "" {
+				out[k] = n
+			}
 		}
 	}
 	return out

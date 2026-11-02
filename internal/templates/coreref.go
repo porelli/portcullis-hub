@@ -78,6 +78,23 @@ func reservedDNSName(name string) bool {
 	return false
 }
 
+// CoreContainerClash returns the container name compose would give
+// service svc of project portcullis-<id> (portcullis-<id>-<svc>-<n>, or
+// portcullis_<id>_<svc>_<n> with the old separator) when it is a core
+// service's (portcullis-<core service>-<n>: id "forward" + service "auth"
+// is forward-auth), else "". Instance ids and service names that do this
+// are refused (Discover for the default instance, CreateInstance).
+func CoreContainerClash(id string, services []string) string {
+	for _, svc := range services {
+		for _, sep := range []string{"-", "_"} {
+			if coreServices[FoldKey(id+sep+svc)] {
+				return "portcullis" + sep + id + sep + svc + sep + "1"
+			}
+		}
+	}
+	return ""
+}
+
 func isCoreNetwork(name string) bool {
 	n := strings.ToLower(strings.TrimSpace(name))
 	return coreNetworks[n] || coreNetworks[strings.TrimPrefix(n, "portcullis_")]
@@ -688,16 +705,20 @@ var (
 			"portcullis-auth-ext", "portcullis-groups", "portcullis-public-guard", "portcullis-self"),
 		"services": set("enroll", "forward-auth", "forward-auth-ext", "grafana-metrics", "group-gate", "hub", "hub-people", "keycloak", "lldap"),
 	}
-	routerAttrRe = regexp.MustCompile(`^(rule|entrypoints|middlewares|service|priority|tls|tls\.options|tls\.certresolver|tls\.domains\[[0-9]+\]\.(main|sans)|observability\.(accesslogs|metrics|tracing))$`)
+	// routerAttrRe: no tls.certresolver / tls.domains (certificates are
+	// core's: a template asking ACME for names it doesn't route).
+	routerAttrRe = regexp.MustCompile(`^(rule|entrypoints|middlewares|service|priority|tls|tls\.options|observability\.(accesslogs|metrics|tracing))$`)
 	// serviceAttrRe: a service is a load balancer over the labelled
 	// container itself (Traefik takes its address on the shared network) —
 	// never server(s).url (Traefik would proxy to any address it can
 	// reach: the socket proxies, the Hub, Keycloak as the trusted Traefik
 	// IP), a serverstransport, or a weighted / mirroring / failover
-	// service naming other services.
+	// service naming other services; no healthcheck either (Traefik would
+	// send requests from its own address — trusted by core's header-auth
+	// services — with the template's method, headers and followed
+	// redirects).
 	serviceAttrRe = regexp.MustCompile(`^loadbalancer\.(server\.(port|scheme)|passhostheader|responseforwarding\.flushinterval|` +
-		`sticky\.cookie(\.(name|secure|httponly|samesite|maxage|path))?|` +
-		`healthcheck\.(path|port|interval|unhealthyinterval|timeout|scheme|hostname|followredirects|method|status|mode|headers\.[a-z0-9_-]+))$`)
+		`sticky\.cookie(\.(name|secure|httponly|samesite|maxage|path))?)$`)
 	// middlewareAttrRe: the middleware types a template may define, each
 	// with its attributes ("" = the type alone, e.g. compress=true).
 	// Refused (not listed): forwardauth (Traefik would send requests to any
@@ -765,7 +786,7 @@ func checkTraefikKeyShape(svc, k string) error {
 		}
 	case "services":
 		if !serviceAttrRe.MatchString(attr) {
-			return fmt.Errorf("service %s: Traefik label %q: unsupported service attribute %q (a service balances over its own container: loadbalancer.server.port / scheme, passhostheader, sticky, healthcheck — never a server url)", svc, k, attr)
+			return fmt.Errorf("service %s: Traefik label %q: unsupported service attribute %q (a service balances over its own container: loadbalancer.server.port / scheme, passhostheader, sticky — never a server url or a healthcheck)", svc, k, attr)
 		}
 	case "middlewares":
 		typ, rest, _ := strings.Cut(attr, ".")
@@ -843,9 +864,14 @@ func checkComposeKeys(doc map[string]interface{}) error {
 }
 
 // appMiddlewares are core's @docker middlewares a template may chain
-// (contract §5); every @file middleware of core's dynamic configuration
-// (security-headers, rate-limit, client-headers, …) is for apps too.
-var appMiddlewares = set("portcullis-auth", "portcullis-groups")
+// (contract §5); fileMiddlewares the @file middlewares of core's
+// traefik/dynamic/middlewares.yml (checked against a sibling core
+// checkout by TestCoreFileMiddlewaresComplete) — never an admin's own
+// @file objects under traefik/dynamic/local.
+var (
+	appMiddlewares  = set("portcullis-auth", "portcullis-groups")
+	fileMiddlewares = set("client-headers", "client-cert-pem", "rate-limit", "rate-limit-auth", "security-headers")
+)
 
 // chainLabelRe: a chain middleware's member list (folded key).
 var chainLabelRe = regexp.MustCompile(`^traefik\.http\.middlewares\.[^.]+\.chain\.middlewares$`)
@@ -877,33 +903,45 @@ func collectOwnNames(pairs map[string]map[string]string) ownNames {
 // (`hub@docker` would route the template's host to the Hub, Keycloak or
 // LLDAP; `api@internal` is Traefik's dashboard), an @file one or another
 // app's — and routers and chains use only the template's own middlewares,
-// portcullis-auth@docker / portcullis-groups@docker and core's @file
+// portcullis-auth@docker / portcullis-groups@docker and core's five @file
 // middlewares (`hub-proxy-secret@docker` injects the Hub's proxy secret).
-// Keys are compared folded, references lowercased.
+// Keys are compared folded; the keys and values of every reference
+// (router service, router middlewares, chain middlewares) must be
+// lowercase, so RenameLabels (which renames them per instance) and
+// Traefik read the same names.
 func checkCoreReferences(svc, k, v string, own ownNames) error {
-	ref := func(s string) (base, provider string) {
-		base, provider, _ = strings.Cut(strings.ToLower(strings.TrimSpace(s)), "@")
-		return base, provider
-	}
 	fk := FoldKey(strings.TrimSpace(k))
 	m := routerLabelRe.FindStringSubmatch(fk)
-	switch {
-	case m != nil && m[3] == "service":
+	isRef := m != nil && (m[3] == "service" || m[3] == "middlewares") || chainLabelRe.MatchString(fk)
+	if !isRef {
+		return nil
+	}
+	if k != strings.ToLower(k) || !isASCII(k) {
+		return fmt.Errorf("service %s: label key %q names services or middlewares: it must be lowercase", svc, k)
+	}
+	if v != strings.ToLower(v) || !isASCII(v) {
+		return fmt.Errorf("service %s: label %s: %q must be lowercase (references are renamed per instance)", svc, k, v)
+	}
+	ref := func(s string) (base, provider string) {
+		base, provider, _ = strings.Cut(strings.TrimSpace(s), "@")
+		return base, provider
+	}
+	if m != nil && m[3] == "service" {
 		base, prov := ref(v)
 		if (prov != "" && prov != "docker") || !own.services[base] || coreTraefikNames["services"][base] {
 			return fmt.Errorf("service %s: label %s: router service %q is not one this template defines (core's, @file, @internal and other apps' services are refused)", svc, k, v)
 		}
-	case m != nil && m[3] == "middlewares", chainLabelRe.MatchString(fk):
-		for _, mw := range strings.Split(v, ",") {
-			base, prov := ref(mw)
-			if base == "" && prov == "" {
-				continue
-			}
-			ok := prov == "file" && base != "" ||
-				(prov == "" || prov == "docker") && (appMiddlewares[base] || own.middlewares[base] && !coreTraefikNames["middlewares"][base])
-			if !ok {
-				return fmt.Errorf("service %s: label %s: middleware %q is not allowed (apps use their own middlewares, portcullis-auth@docker, portcullis-groups@docker and core's @file middlewares)", svc, k, strings.TrimSpace(mw))
-			}
+		return nil
+	}
+	for _, mw := range strings.Split(v, ",") {
+		base, prov := ref(mw)
+		if base == "" && prov == "" {
+			continue
+		}
+		ok := prov == "file" && fileMiddlewares[base] ||
+			(prov == "" || prov == "docker") && (appMiddlewares[base] || own.middlewares[base] && !coreTraefikNames["middlewares"][base])
+		if !ok {
+			return fmt.Errorf("service %s: label %s: middleware %q is not allowed (apps use their own middlewares, portcullis-auth@docker, portcullis-groups@docker and core's @file middlewares %s)", svc, k, strings.TrimSpace(mw), strings.Join(sortedKeys(fileMiddlewares), ", "))
 		}
 	}
 	return nil

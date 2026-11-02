@@ -286,9 +286,11 @@ type Template struct {
 	// Volumes are the compose file's top-level volume keys that aren't
 	// external (the Hub names them per instance, §11.2).
 	Volumes []string `json:"-"`
-	// NamedVolumes are the volume keys the compose file names itself
-	// (single templates: portcullis_<key>).
-	NamedVolumes map[string]bool `json:"-"`
+	// NamedVolumes are the names the compose file gives its volumes
+	// (key → name; single templates only: portcullis_<template-id>[-_…]).
+	NamedVolumes map[string]string `json:"-"`
+	// Services are the compose file's service names, sorted.
+	Services []string `json:"-"`
 	// Names are the Traefik names the template defines (Routes.Names).
 	Names map[string]bool `json:"-"`
 	// InstanceEnv are the instance variables (§3.1) of an instance view.

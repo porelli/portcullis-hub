@@ -43,10 +43,13 @@ func InstanceName(id, name string) string { return id + "_" + name }
 // and in the references to them: routers' service and middlewares values
 // and chain middlewares (name or name@docker). Names the template doesn't
 // define (portcullis-auth@docker, security-headers@file, …) are kept.
+// Keys and references are matched folded (FoldKey), as Traefik's decoder
+// and the validator (checkCoreReferences) read them; renamed references
+// are written lowercase.
 func RenameLabels(labels map[string]string, names map[string]bool, id string) map[string]string {
 	ref := func(v string) string {
 		v = strings.TrimSpace(v)
-		base, prov, hasProv := strings.Cut(v, "@")
+		base, prov, hasProv := strings.Cut(FoldKey(v), "@")
 		if !names[base] || (hasProv && prov != "docker") {
 			return v
 		}
@@ -57,18 +60,27 @@ func RenameLabels(labels map[string]string, names map[string]bool, id string) ma
 	}
 	out := make(map[string]string, len(labels))
 	for k, v := range labels {
-		m := traefikKeyRe.FindStringSubmatch(k)
+		fk := FoldKey(k)
+		m := traefikKeyRe.FindStringSubmatch(fk)
 		if m == nil {
 			out[k] = v
 			continue
 		}
+		kind := strings.TrimSuffix(strings.TrimPrefix(m[1][len("traefik."):], "http."), ".")
 		if names[m[2]] {
-			k = m[1] + InstanceName(id, m[2]) + m[3]
+			// The rest of the key keeps its case (header names); a key
+			// whose folded form differs in length (non-ASCII, refused by
+			// the validator) is written folded.
+			rest := m[3]
+			if len(fk) == len(k) {
+				rest = k[len(fk)-len(m[3]):]
+			}
+			k = m[1] + InstanceName(id, m[2]) + rest
 		}
 		switch {
-		case strings.HasPrefix(m[1], "traefik.") && strings.Contains(m[1], ".routers.") && m[3] == ".service":
+		case kind == "routers" && m[3] == ".service":
 			v = ref(v)
-		case strings.HasSuffix(m[3], ".middlewares"):
+		case kind == "routers" && m[3] == ".middlewares", kind == "middlewares" && strings.HasSuffix(m[3], ".chain.middlewares"):
 			parts := strings.Split(v, ",")
 			for i, p := range parts {
 				parts[i] = ref(p)

@@ -63,16 +63,21 @@ func Discover(dir, source, domain string) []Template {
 			log.Printf("Skipping template %s: %v", e.Name(), err)
 			continue
 		}
-		if err := checkVolumeNames(compose, m.Multi()); err != nil {
+		if err := checkCoreRefs(compose, routes.HostVars); err != nil {
 			log.Printf("Skipping template %s: %v", e.Name(), err)
 			continue
 		}
-		if err := checkCoreRefs(compose, routes.HostVars); err != nil {
+		if err := checkVolumeNames(compose, e.Name(), m.Multi()); err != nil {
 			log.Printf("Skipping template %s: %v", e.Name(), err)
 			continue
 		}
 		if err := checkInstanceRules(&m, routes); err != nil {
 			log.Printf("Skipping template %s: %v", e.Name(), err)
+			continue
+		}
+		services := Services(compose)
+		if c := CoreContainerClash(e.Name(), services); c != "" {
+			log.Printf("Skipping template %s: its container %s would be a core service's container name", e.Name(), c)
 			continue
 		}
 		raw := m
@@ -89,6 +94,7 @@ func Discover(dir, source, domain string) []Template {
 			HostForm:     routes.Form,
 			Volumes:      ComposeVolumes(compose),
 			NamedVolumes: declaredVolumeNames(compose),
+			Services:     services,
 			Names:        routes.Names,
 			raw:          &raw,
 		}

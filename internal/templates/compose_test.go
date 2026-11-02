@@ -23,8 +23,7 @@ const sampleCompose = `services:
     labels:
       traefik.http.routers.other.rule: Host(` + "`git.${PORTCULLIS_DOMAIN}`" + `)
 volumes:
-  data:
-    name: portcullis_data
+  data: {}
 `
 
 func TestServices(t *testing.T) {

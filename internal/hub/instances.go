@@ -230,6 +230,9 @@ func (h *Hub) CreateInstance(templateID, id string, hosts map[string]string) err
 	if err := h.checkInstanceNamesLocked(t, id); err != nil {
 		return err
 	}
+	if c := templates.CoreContainerClash(id, t.Services); c != "" {
+		return statusErr(409, "instance id %s: its container %s would be a core service's container name", id, c)
+	}
 	if hosts == nil {
 		var err error
 		if hosts, err = defaultHostsFor(t, id, h.cfg.Domain); err != nil {
@@ -309,7 +312,8 @@ func (r *reservations) match(claims []string) (string, string) {
 // its instances' names, §11.1): for each non-default instance id, its
 // project, users_<id>, admin_<id> and client <id> always; its exact
 // derived names when lookup finds its template, else the patterns
-// portcullis_<id>-* (volumes) and <id>-* (further clients). Default
+// portcullis_<id>-* (volumes), <id>-* (further clients) and <id>_*
+// (Traefik names). Default
 // instances whose template is missing keep their project and the groups
 // of their published snapshot. Instances of skipTemplate (and its default
 // instance) are left out. Caller must hold mu.
@@ -342,7 +346,8 @@ func (h *Hub) reservationsLocked(lookup func(templateID string) *templates.Templ
 		who += " (template " + e.Template + " missing)"
 		r.prefixes = append(r.prefixes,
 			struct{ prefix, who string }{"volume\x00portcullis_" + id + "-", who},
-			struct{ prefix, who string }{"Keycloak client\x00" + id + "-", who})
+			struct{ prefix, who string }{"Keycloak client\x00" + id + "-", who},
+			struct{ prefix, who string }{traefikClaim + "\x00" + templates.InstanceName(id, ""), who})
 	}
 	// Default instances whose template is gone: last known names.
 	for id, snap := range h.st.Published {
@@ -366,7 +371,8 @@ func (h *Hub) reservationsLocked(lookup func(templateID string) *templates.Templ
 
 // nameClaims are an instance's derived names as comparable claims
 // ("<kind>\x00<lower-cased name>", §11.1: case-insensitive), in a fixed
-// order: project, groups, volumes (by key), Keycloak clients.
+// order: project, groups, volumes (by key), Keycloak clients, Traefik
+// names.
 func nameClaims(n templates.InstanceNames) []string {
 	var out []string
 	add := func(kind, name string) {
@@ -387,6 +393,31 @@ func nameClaims(n templates.InstanceNames) []string {
 	}
 	for _, c := range n.Clients {
 		add("Keycloak client", c)
+	}
+	for _, c := range n.Traefik {
+		add(traefikClaim, c)
+	}
+	return out
+}
+
+// traefikClaim is the claim kind of a Traefik router / service /
+// middleware name (Traefik merges same-name objects across containers: a
+// template defining another app's service name would receive its traffic,
+// forward-auth identity headers included).
+const traefikClaim = "Traefik name"
+
+// defaultClaimKinds: the claims two templates' default instances may not
+// share (Discover; the first template — enabled ones first — keeps them).
+// Groups are left out: templates may share an access group on purpose.
+var defaultClaimKinds = map[string]bool{"volume": true, traefikClaim: true}
+
+// defaultClaims are t's default-instance claims of defaultClaimKinds.
+func defaultClaims(t *templates.Template) []string {
+	var out []string
+	for _, c := range nameClaims(t.NamesFor(t.ID)) {
+		if kind, _, _ := strings.Cut(c, "\x00"); defaultClaimKinds[kind] {
+			out = append(out, c)
+		}
 	}
 	return out
 }
@@ -411,4 +442,15 @@ func templateDir(t *templates.Template) string {
 		return t.TemplateID
 	}
 	return t.ID
+}
+
+// firstClaimed returns the first of claims already in claimed, and its
+// owner.
+func firstClaimed(claims []string, claimed map[string]string) (string, string) {
+	for _, c := range claims {
+		if who, ok := claimed[c]; ok {
+			return c, who
+		}
+	}
+	return "", ""
 }

@@ -15,6 +15,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -308,11 +310,28 @@ func (h *Hub) Discover() {
 	for i := range uniq {
 		byID[uniq[i].ID] = &uniq[i]
 	}
+	// Two templates' default instances may not share a volume or a Traefik
+	// name (defaultClaims): enabled ones claim first, then source order.
+	enabled := map[string]bool{}
+	for _, id := range h.st.Enabled {
+		enabled[id] = true
+	}
+	sort.SliceStable(uniq, func(i, j int) bool { return enabled[uniq[i].ID] && !enabled[uniq[j].ID] })
+	claimed := map[string]string{}
 	kept := make([]templates.Template, 0, len(uniq))
 	for _, t := range uniq {
 		if c := h.claimCollision(&t, byID); c != "" {
 			log.Printf("Skipping template %s: its default instance would use the %s", t.ID, c)
 			continue
+		}
+		cs := defaultClaims(&t)
+		if c, who := firstClaimed(cs, claimed); who != "" {
+			kind, name, _ := strings.Cut(c, "\x00")
+			log.Printf("Skipping template %s: its default instance would use the %s %s of the default instance of %s", t.ID, kind, name, who)
+			continue
+		}
+		for _, c := range cs {
+			claimed[c] = t.ID
 		}
 		kept = append(kept, t)
 	}

@@ -242,6 +242,24 @@ var unicodeBypasses = map[string]string{
 	"router service undefined": "traefik.http.routers.app.service: nothere",
 	"router mw other app":      "traefik.http.routers.app.middlewares: portcullis-auth@docker,portcullis-groups@docker,other-app-mw@docker",
 	"router mw internal":       "traefik.http.routers.app.middlewares: portcullis-auth@docker,portcullis-groups@docker,x@internal",
+	// Fix round 5: no healthcheck (Traefik's own requests, from the IP
+	// core's header-auth services trust), no certificate resolver or
+	// domains, @file only core's five middlewares, lowercase references.
+	"healthcheck path":      "traefik.http.services.s.loadbalancer.healthcheck.path: /",
+	"healthcheck hostname":  "traefik.http.services.s.loadbalancer.healthcheck.hostname: hub",
+	"healthcheck redirects": "traefik.http.services.s.loadbalancer.healthcheck.followredirects: \"true\"",
+	"healthcheck method":    "traefik.http.services.s.loadbalancer.healthcheck.method: DELETE",
+	"healthcheck headers":   "traefik.http.services.s.loadbalancer.healthcheck.headers.X-Forwarded-User: admin",
+	"healthcheck case":      "traefik.http.services.s.loadBalancer.HealthCheck.Path: /",
+	"tls certresolver":      "traefik.http.routers.app.tls.certresolver: letsencrypt",
+	"tls domains":           "traefik.http.routers.app.tls.domains[0].main: auth.example.org",
+	"tls domains sans":      "traefik.http.routers.app.tls.domains[0].sans: hub.example.org",
+	"file admin mw":         "traefik.http.routers.app.middlewares: portcullis-auth@docker,portcullis-groups@docker,strict-rate-limit@file",
+	"file chain other":      "traefik.http.middlewares.c.chain.middlewares: protected@file",
+	"file empty base":       "traefik.http.routers.app.middlewares: portcullis-auth@docker,portcullis-groups@docker,@file",
+	"file case":             "traefik.http.routers.app.middlewares: portcullis-auth@docker,portcullis-groups@docker,Security-Headers@file",
+	"mw case":               "traefik.http.routers.app.middlewares: Portcullis-Auth@docker,portcullis-groups@docker",
+	"mw provider case":      "traefik.http.routers.app.middlewares: portcullis-auth@Docker,portcullis-groups@docker",
 }
 
 func TestCheckCoreRefsUnicodeFolding(t *testing.T) {
@@ -329,7 +347,6 @@ func TestDiscoverRefusesBypasses(t *testing.T) {
 			"traefik.http.services.app.loadbalancer.server.scheme: https",
 			"traefik.http.services.app.loadbalancer.passhostheader: \"true\"",
 			"traefik.http.services.app.loadbalancer.sticky.cookie.name: s",
-			"traefik.http.services.app.loadbalancer.healthcheck.path: /health",
 			"traefik.http.middlewares.c.chain.middlewares: h,z@docker,rate-limit@file",
 			"traefik.http.middlewares.h.headers.customRequestHeaders.X-App: grafana",
 			"traefik.http.middlewares.z.compress: \"true\"",
@@ -339,7 +356,7 @@ func TestDiscoverRefusesBypasses(t *testing.T) {
 			"traefik.http.middlewares.i.ipallowlist.sourcerange: 10.0.0.0/8",
 			"traefik.http.middlewares.l.ratelimit.average: \"10\"",
 		}, "    volumes: [data:/data]\n    networks:\n      default: {}\n      portcullis-proxy:\n        aliases: [grafana-internal]\n",
-			"volumes:\n  data:\n    name: portcullis_data\n  shared:\n    external: true\n    name: media-library\n"),
+			"volumes:\n  data:\n    name: portcullis_control-attrs-data\n  cache:\n    name: portcullis_control-attrs\n  shared:\n    external: true\n    name: media-library\n"),
 	}
 	for id, c := range controls {
 		writeTpl(t, dir, id, manifest, c)
@@ -382,6 +399,49 @@ func TestDiscoverRefusesBypasses(t *testing.T) {
 		writeTpl(t, dir, id, manifest, build("web", nil, "    volumes: [db:/x]\n", top))
 		ids[id] = top
 	}
+	// Volume names (fix round 5, I3): a single template names a volume
+	// only portcullis_<its id>[-_…]; a multi template names none.
+	for id, top := range map[string]string{
+		"vol-bare":       "volumes:\n  db:\n    name: portcullis_data\n",
+		"vol-other-app":  "volumes:\n  db:\n    name: portcullis_gitea-data\n",
+		"vol-other-pref": "volumes:\n  db:\n    name: portcullis_vol-other-prefx\n",
+		"vol-project":    "volumes:\n  db:\n    name: portcullis-gitea_gitea-data\n",
+		"vol-plain":      "volumes:\n  db:\n    name: mydata\n",
+		"vol-case":       "volumes:\n  db:\n    name: Portcullis_vol-case\n",
+		"vol-not-string": "volumes:\n  db:\n    name: [portcullis_vol-not-string]\n",
+	} {
+		writeTpl(t, dir, id, manifest, build("web", nil, "    volumes: [db:/x]\n", top))
+		ids[id] = top
+	}
+	multiManifest := "name: App\ncategory: test\nicon: x\ninstances: multi\nauth:\n  method: forward-auth\n"
+	multiCompose := func(lines []string, top string) string {
+		return strings.Replace(build("web", lines, "", top), "Host(`app.${PORTCULLIS_DOMAIN}`)", "Host(`${PORTCULLIS_HOST_APP:-app.portcullis.local}`)", 1)
+	}
+	writeTpl(t, dir, "vol-multi", multiManifest, multiCompose(nil, "volumes:\n  db:\n    name: portcullis_vol-multi\n"))
+	ids["vol-multi"] = "multi template volume name"
+	// Mixed-case references to the template's own objects (fix round 5,
+	// I4): RenameLabels renames them per instance, so they must read the
+	// same to it, the validator and Traefik.
+	for id, lines := range map[string][]string{
+		"ref-service-case": {"traefik.http.routers.app.service: App", "traefik.http.services.app.loadbalancer.server.port: \"80\""},
+		"ref-mw-case": {"traefik.http.routers.app.middlewares: portcullis-auth@docker,portcullis-groups@docker,Hdr",
+			"traefik.http.middlewares.hdr.headers.customrequestheaders.X-A: b"},
+		"ref-chain-case": {"traefik.http.routers.app.middlewares: portcullis-auth@docker,portcullis-groups@docker,c",
+			"traefik.http.middlewares.c.chain.middlewares: HDR@docker", "traefik.http.middlewares.hdr.compress: \"true\""},
+		"ref-chain-key-case": {"traefik.http.routers.app.middlewares: portcullis-auth@docker,portcullis-groups@docker,c",
+			"traefik.http.middlewares.c.Chain.middlewares: hdr", "traefik.http.middlewares.hdr.compress: \"true\""},
+	} {
+		writeTpl(t, dir, id, multiManifest, multiCompose(lines, ""))
+		ids[id] = strings.Join(lines, "; ")
+	}
+	// Container names (fix round 5, M6): project portcullis-forward's
+	// service auth is portcullis-forward-auth-1, core's forward-auth.
+	writeTpl(t, dir, "forward", manifest, build("auth", nil, "", ""))
+	ids["forward"] = "container portcullis-forward-auth-1"
+	writeTpl(t, dir, "socket-proxy", manifest, build("hub-x", nil, "", ""))
+	writeTpl(t, dir, "socket", manifest, strings.Replace(build("web", nil, "", ""), "services:\n", "services:\n  proxy-hub:\n    image: x\n", 1))
+	ids["socket"] = "container portcullis-socket-proxy-hub-1"
+	controls["socket-proxy"] = "service hub-x: no core container name"
 	// Core DNS names (fix round 4, I2).
 	for _, n := range []string{"hub", "keycloak", "forward-auth", "forward-auth-ext", "group-gate", "lldap", "vault", "postgres",
 		"socket-proxy-traefik", "socket-proxy-hub", "traefik", "domains", "enroll", "prometheus", "alertmanager"} {
@@ -508,6 +568,42 @@ func TestCoreNamesComplete(t *testing.T) {
 	for k := range doc.Volumes {
 		if !coreVolumes[k] {
 			t.Errorf("core volume %s missing from coreVolumes", k)
+		}
+	}
+}
+
+// TestCoreFileMiddlewaresComplete: fileMiddlewares are exactly the
+// middlewares of core's traefik/dynamic/middlewares.yml (sibling core
+// checkout; skipped without one) — the only @file objects a template may
+// reference.
+func TestCoreFileMiddlewaresComplete(t *testing.T) {
+	core := os.Getenv("PORTCULLIS_CORE_DIR")
+	if core == "" {
+		core = filepath.Join("..", "..", "..", "portcullis")
+	}
+	b, err := os.ReadFile(filepath.Join(core, "traefik", "dynamic", "middlewares.yml"))
+	if err != nil {
+		t.Skipf("no core checkout: %v", err)
+	}
+	var doc struct {
+		HTTP struct {
+			Middlewares map[string]interface{} `yaml:"middlewares"`
+		} `yaml:"http"`
+	}
+	if err := yaml.Unmarshal(b, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.HTTP.Middlewares) == 0 {
+		t.Fatal("core's middlewares.yml defines no middlewares")
+	}
+	for name := range doc.HTTP.Middlewares {
+		if !fileMiddlewares[name] {
+			t.Errorf("core @file middleware %s missing from fileMiddlewares", name)
+		}
+	}
+	for name := range fileMiddlewares {
+		if _, ok := doc.HTTP.Middlewares[name]; !ok {
+			t.Errorf("fileMiddlewares lists %s, which core's middlewares.yml doesn't define", name)
 		}
 	}
 }

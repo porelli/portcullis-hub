@@ -2,6 +2,7 @@ package hub
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -869,9 +870,202 @@ func TestMissingTemplateKeepsReservations(t *testing.T) {
 	r := f.h.reservationsLocked(func(tid string) *templates.Template { return f.h.catalogLocked(tid) }, "")
 	f.h.mu.Unlock()
 	for _, c := range []string{"project\x00portcullis-grafana-b", "group\x00users_grafana-b", "group\x00admin_grafana-b",
-		"Keycloak client\x00grafana-b", "volume\x00portcullis_grafana-b-anything", "project\x00portcullis-grafana", "group\x00users_grafana"} {
+		"Keycloak client\x00grafana-b", "volume\x00portcullis_grafana-b-anything", "project\x00portcullis-grafana", "group\x00users_grafana",
+		"Traefik name\x00grafana-b_anything"} {
 		if _, who := r.match([]string{c}); who == "" {
 			t.Errorf("%q not reserved", c)
 		}
 	}
+}
+
+// TestTraefikNameClaims (fix round 5, I2): Traefik merges same-name
+// routers, services and middlewares across containers, so a template
+// defining another app's name would receive its traffic (forward-auth
+// identity headers included). Every template-defined name, renamed per
+// instance, is a claim: Discover refuses a second default instance with
+// it (enabled ones first), CreateInstance an instance deriving it.
+func TestTraefikNameClaims(t *testing.T) {
+	route := func(r string) string {
+		return "      traefik.http.routers." + r + ".rule: Host(`${PORTCULLIS_HOST_" + strings.ToUpper(r) + ":-" + r + ".portcullis.local}`)\n"
+	}
+	m := "name: X\ninstances: multi\nauth:\n  method: forward-auth\n"
+	extra := map[string][2]string{
+		// aaa sorts before grafana and defines grafana's service and
+		// middleware: Traefik would merge them with grafana's.
+		"aaa": {m, "services:\n  s:\n    image: x\n    labels:\n" + route("aaa") +
+			"      traefik.http.services.grafana.loadbalancer.server.port: \"80\"\n" +
+			"      traefik.http.middlewares.grafana-headers.headers.customresponseheaders.X-User: admin\n"},
+		// Two templates, neither enabled, sharing a router name: the
+		// first (source order) keeps it.
+		"pair-a": {m, "services:\n  s:\n    image: x\n    labels:\n" + route("pair") + "      traefik.http.services.pair-a.loadbalancer.server.port: \"80\"\n"},
+		"pair-b": {m, "services:\n  s:\n    image: x\n    labels:\n" + route("pair") + "      traefik.http.services.pair-b.loadbalancer.server.port: \"80\"\n"},
+		"fine":   {m, "services:\n  s:\n    image: x\n    labels:\n" + route("fine")},
+	}
+	f := newInstanceFixtureExtra(t, func(st *state.AppState) { st.SetEnabled("grafana", true) }, nil, extra)
+	if f.h.Template("aaa") != nil {
+		t.Error("aaa (grafana's Traefik service and middleware) was loaded")
+	}
+	if f.h.Template("grafana") == nil {
+		t.Error("grafana (enabled, claims first) was skipped")
+	}
+	if f.h.Template("pair-a") == nil || f.h.Template("pair-b") != nil {
+		t.Errorf("pair: a loaded %v, b loaded %v; want only a", f.h.Template("pair-a") != nil, f.h.Template("pair-b") != nil)
+	}
+	if f.h.Template("fine") == nil {
+		t.Error("fine was skipped")
+	}
+	// Not enabled, grafana has no precedence: aaa sorts first and wins.
+	g := newInstanceFixtureExtra(t, nil, nil, map[string][2]string{"aaa": extra["aaa"]})
+	if g.h.Template("aaa") == nil || g.h.Template("grafana") != nil {
+		t.Errorf("unenabled: aaa loaded %v, grafana loaded %v; want aaa only", g.h.Template("aaa") != nil, g.h.Template("grafana") != nil)
+	}
+	// An instance's names are its own (<id>_<name>), so it may run beside
+	// the default instance; its claims are the renamed names.
+	if err := f.h.CreateInstance("grafana", "gb", nil); err != nil {
+		t.Fatal(err)
+	}
+	f.h.mu.Lock()
+	r := f.h.reservationsLocked(func(tid string) *templates.Template { return f.h.catalogLocked(tid) }, "")
+	f.h.mu.Unlock()
+	for _, c := range []string{"Traefik name\x00gb_grafana", "Traefik name\x00gb_grafana-api", "Traefik name\x00gb_grafana-headers"} {
+		if _, who := r.match([]string{c}); who != "instance gb" {
+			t.Errorf("%q: owner %q, want instance gb", c, who)
+		}
+	}
+	n := f.h.Template("grafana").NamesFor("gb")
+	if strings.Join(n.Traefik, ",") != "gb_grafana,gb_grafana-api,gb_grafana-headers" {
+		t.Errorf("NamesFor(gb).Traefik = %v", n.Traefik)
+	}
+	// CreateInstance compares the same claims (checkInstanceNamesLocked):
+	// a template-defined name an instance would derive is refused.
+	f.h.mu.Lock()
+	f.h.allTemplates = append(f.h.allTemplates, templates.Template{ID: "evil", TemplateID: "evil", Names: map[string]bool{"gc_grafana": true}})
+	f.h.mu.Unlock()
+	if err := f.h.CreateInstance("grafana", "gc", nil); statusOf(err) != 409 || !strings.Contains(err.Error(), "Traefik name gc_grafana") {
+		t.Errorf("gc: %v", err)
+	}
+}
+
+// TestSingleVolumeNameClaims (fix round 5, I3): a single template names
+// its volumes inside portcullis_<template-id>[-_…]; a name in that
+// namespace another template's (or instance's) volume derives is a claim.
+func TestSingleVolumeNameClaims(t *testing.T) {
+	single := "name: S\ninstances: single\nauth:\n  method: forward-auth\n"
+	multi := "name: M\ninstances: multi\nauth:\n  method: forward-auth\n"
+	f := newInstanceFixtureExtra(t, nil, nil, map[string][2]string{
+		// op's own namespace holds portcullis_op-s-grafana-data, which
+		// grafana instance "op-s" would derive.
+		"op": {single, "services:\n  s:\n    image: x\n    volumes: [d:/d]\nvolumes:\n  d:\n    name: portcullis_op-s-grafana-data\n"},
+		// st names portcullis_st-data; multi template "store" (default
+		// instance: portcullis_<key>) has the key st-data.
+		"st":    {single, "services:\n  s:\n    image: x\n    volumes: [d:/d]\nvolumes:\n  d:\n    name: portcullis_st-data\n"},
+		"store": {multi, "services:\n  s:\n    image: x\n    volumes: [st-data:/d]\nvolumes:\n  st-data: {}\n"},
+		// Not its own namespace.
+		"thief": {single, "services:\n  s:\n    image: x\n    volumes: [d:/d]\nvolumes:\n  d:\n    name: portcullis_disks-data\n"},
+	})
+	if f.h.Template("thief") != nil {
+		t.Error("thief (disks' volume portcullis_disks-data) was loaded")
+	}
+	if f.h.Template("st") == nil || f.h.Template("store") != nil {
+		t.Errorf("st loaded %v, store loaded %v; want st only (source order)", f.h.Template("st") != nil, f.h.Template("store") != nil)
+	}
+	if got := f.h.Template("op").NamesFor("op").Volumes["d"]; got != "portcullis_op-s-grafana-data" {
+		t.Errorf("op's volume = %q", got)
+	}
+	if err := f.h.CreateInstance("grafana", "op-s", nil); statusOf(err) != 409 || !strings.Contains(err.Error(), "volume portcullis_op-s-grafana-data") {
+		t.Errorf("op-s: %v", err)
+	}
+}
+
+// TestInstanceCoreContainerName (fix round 5, M6): project
+// portcullis-<id> names its containers portcullis-<id>-<service>-<n>;
+// one that is a core service's container name is refused.
+func TestInstanceCoreContainerName(t *testing.T) {
+	m := "name: A\ninstances: multi\nauth:\n  method: forward-auth\n"
+	f := newInstanceFixtureExtra(t, nil, nil, map[string][2]string{
+		"authy": {m, "services:\n  auth:\n    image: x\n  proxy-hub:\n    image: x\n    labels:\n" +
+			"      traefik.http.routers.authy.rule: Host(`${PORTCULLIS_HOST_AUTHY:-authy.portcullis.local}`)\n"},
+		// The default instance: project portcullis-forward, service auth.
+		"forward": {m, "services:\n  auth:\n    image: x\n"},
+	})
+	if f.h.Template("forward") != nil {
+		t.Error("forward (container portcullis-forward-auth-1) was loaded")
+	}
+	for id, c := range map[string]string{"forward": "portcullis-forward-auth-1", "socket": "portcullis-socket-proxy-hub-1"} {
+		if err := f.h.CreateInstance("authy", id, nil); statusOf(err) != 409 || !strings.Contains(err.Error(), c) {
+			t.Errorf("%s: %v", id, err)
+		}
+	}
+	if err := f.h.CreateInstance("authy", "authy-b", nil); err != nil {
+		t.Errorf("authy-b: %v", err)
+	}
+}
+
+// TestInstanceMixedCaseReference (fix round 5, I4): a multi template
+// whose non-default instance would carry a mixed-case reference (the
+// validator folds, RenameLabels used to match raw case, so "Hdr" stayed
+// the default instance's middleware) is refused at discover; the
+// lowercase form loads and its instance gets every reference renamed.
+func TestInstanceMixedCaseReference(t *testing.T) {
+	m := "name: C\ninstances: multi\nauth:\n  method: forward-auth\n"
+	body := func(p, ref string) string {
+		return "services:\n  s:\n    image: x\n    labels:\n" +
+			"      traefik.http.routers." + p + ".rule: Host(`${PORTCULLIS_HOST_" + strings.ToUpper(p) + ":-" + p + ".portcullis.local}`)\n" +
+			"      traefik.http.routers." + p + ".middlewares: portcullis-auth@docker,portcullis-groups@docker," + p + "-cc\n" +
+			"      traefik.http.middlewares." + p + "-cc.chain.middlewares: " + ref + "\n" +
+			"      traefik.http.middlewares." + p + "-hdr.headers.customrequestheaders.X-A: b\n"
+	}
+	logs := &lockedBuf{}
+	log.SetOutput(logs)
+	defer log.SetOutput(os.Stderr)
+	f := newInstanceFixtureExtra(t, nil, nil, map[string][2]string{
+		"mixed": {m, body("mixed", "Mixed-Hdr@docker")},
+		"lower": {m, body("lower", "lower-hdr@docker")},
+	})
+	if !strings.Contains(logs.String(), `Skipping template mixed: service s: label traefik.http.middlewares.mixed-cc.chain.middlewares: "Mixed-Hdr@docker" must be lowercase`) {
+		t.Errorf("mixed not refused for its case:\n%s", logs.String())
+	}
+	if f.h.Template("mixed") != nil {
+		t.Fatal("mixed-case reference loaded")
+	}
+	if err := f.h.CreateInstance("mixed", "mixed-b", nil); statusOf(err) != 404 {
+		t.Errorf("mixed-b: %v", err)
+	}
+	if err := f.h.CreateInstance("lower", "lower-b", nil); err != nil {
+		t.Fatal(err)
+	}
+	f.h.mu.Lock()
+	it := f.h.findLocked("lower-b")
+	rl, err := f.h.routeLabelsLocked(it)
+	var labels map[string]map[string]string
+	if err == nil {
+		labels, err = f.h.instanceLabelsLocked(it, rl)
+	}
+	f.h.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := labels["s"]
+	if l["traefik.http.middlewares.lower-b_lower-cc.chain.middlewares"] != "lower-b_lower-hdr@docker" ||
+		!strings.Contains(l["traefik.http.routers.lower-b_lower.middlewares"], "lower-b_lower-cc") {
+		t.Errorf("instance labels = %v", l)
+	}
+}
+
+// lockedBuf is a log sink safe for the Hub's background goroutines.
+type lockedBuf struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (l *lockedBuf) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuf) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
 }
