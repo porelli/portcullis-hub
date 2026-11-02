@@ -45,9 +45,9 @@ func isCoreNetwork(name string) bool {
 	return coreNetworks[n] || coreNetworks[strings.TrimPrefix(n, "portcullis_")]
 }
 
-// SingleDocument refuses YAML with more than one non-empty document:
-// compose merges every document of a file, while yaml.Unmarshal (and so
-// every check here) reads only the first.
+// SingleDocument refuses YAML with more than one document (empty ones
+// included): compose merges every document of a file, while yaml.Unmarshal
+// (and so every check here) reads only the first.
 func SingleDocument(b []byte, what string) error {
 	dec := yaml.NewDecoder(bytes.NewReader(b))
 	n := 0
@@ -60,9 +60,8 @@ func SingleDocument(b []byte, what string) error {
 		if err != nil {
 			return fmt.Errorf("%s: %w", what, err)
 		}
-		if len(node.Content) == 0 || (node.Content[0].Kind == yaml.ScalarNode && node.Content[0].Tag == "!!null") {
-			continue
-		}
+		// Any second document — even an empty one — is refused: parsers
+		// differ on which document they read.
 		if n++; n > 1 {
 			return fmt.Errorf("%s holds more than one YAML document (compose would merge them; the Hub checks one)", what)
 		}
@@ -279,7 +278,7 @@ func checkCoreRefs(compose []byte, hostVars map[string]string) error {
 		if _, ok := s["extends"]; ok {
 			return fmt.Errorf("service %s: extends is not allowed (it pulls in configuration the Hub can't check)", name)
 		}
-		if err := checkServiceLabels(name, s["labels"]); err != nil {
+		if err := checkServiceLabels(name, s["labels"], hostVars); err != nil {
 			return err
 		}
 		for _, field := range []string{"pid", "ipc"} {
@@ -405,7 +404,7 @@ func checkCoreRefs(compose []byte, hostVars map[string]string) error {
 // middlewares or services must be literals (compose interpolates after
 // the Hub's checks); the routing rule may use the host variables
 // (checked by ParseRoutes).
-func checkServiceLabels(svc string, labels interface{}) error {
+func checkServiceLabels(svc string, labels interface{}, hostVars map[string]string) error {
 	pairs := map[string]string{}
 	switch l := labels.(type) {
 	case nil:
@@ -434,19 +433,43 @@ func checkServiceLabels(svc string, labels interface{}) error {
 		return fmt.Errorf("service %s: labels must be a list or a mapping", svc)
 	}
 	for k, v := range pairs {
-		if !strings.HasPrefix(strings.ToLower(k), "traefik.") {
-			continue
-		}
+		// Every label key is a literal (a key like ${X:-traefik}.http… or
+		// traef${E}ik.… would dodge the prefix check below).
 		if err := literal("service "+svc+": label key", k); err != nil {
 			return err
 		}
-		lk := strings.ToLower(k)
-		if strings.HasSuffix(lk, ".middlewares") || strings.HasSuffix(lk, ".service") || strings.HasSuffix(lk, ".entrypoints") ||
-			strings.HasSuffix(lk, ".tls.options") || strings.HasSuffix(lk, ".tls.certresolver") {
-			if err := literal("service "+svc+": label "+k, v); err != nil {
-				return err
-			}
+		lk := strings.ToLower(strings.TrimSpace(k))
+		if !strings.HasPrefix(lk, "traefik.") && lk != "traefik" {
+			continue
+		}
+		// Every traefik.* value is a literal, except router rules: their
+		// host variables are checked by ParseRoutes.
+		if strings.HasPrefix(lk, "traefik.http.routers.") && strings.HasSuffix(lk, ".rule") {
+			continue
+		}
+		// The template's own contract-v2 host variables may appear (e.g. a
+		// redirect to its own host); anything else interpolated is refused.
+		if err := literal("service "+svc+": label "+k, withoutOwnHostVars(v, hostVars)); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+// hostVarAnyRe finds contract-v2 host-variable expressions in a string.
+var hostVarAnyRe = regexp.MustCompile(`\$\{(PORTCULLIS_HOST_[A-Z0-9_]+):-([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)\.portcullis\.local\}`)
+
+// withoutOwnHostVars removes the template's own host-variable expressions
+// from v (whatever else is interpolated stays and is refused).
+func withoutOwnHostVars(v string, hostVars map[string]string) string {
+	own := map[string]bool{}
+	for _, hv := range hostVars {
+		own[hv] = true
+	}
+	return hostVarAnyRe.ReplaceAllStringFunc(v, func(m string) string {
+		if own[hostVarAnyRe.FindStringSubmatch(m)[1]] {
+			return "h"
+		}
+		return m
+	})
 }

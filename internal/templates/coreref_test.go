@@ -53,8 +53,13 @@ func TestSingleDocument(t *testing.T) {
 	if err := SingleDocument([]byte("services:\n  web: {}\n"), "x"); err != nil {
 		t.Fatal(err)
 	}
-	if err := SingleDocument([]byte("---\nservices:\n  web: {}\n---\n"), "x"); err != nil {
-		t.Fatalf("empty trailing document refused: %v", err)
+	if err := SingleDocument([]byte("---\nservices:\n  web: {}\n"), "x"); err != nil {
+		t.Fatalf("a leading document marker refused: %v", err)
+	}
+	for _, c := range []string{"---\nservices:\n  web: {}\n---\n", "---\n---\nservices:\n  web: {}\n", "~\n---\nservices:\n  web: {}\n"} {
+		if err := SingleDocument([]byte(c), "x"); err == nil {
+			t.Errorf("%q: a second (empty) document accepted", c)
+		}
 	}
 	two := "services:\n  web:\n    image: x\n---\nservices:\n  web:\n    network_mode: container:portcullis-hub-1\n"
 	if err := SingleDocument([]byte(two), "x"); err == nil {
@@ -81,4 +86,76 @@ func writeTpl(t *testing.T, dir, id, manifest, compose string) {
 	}
 	os.WriteFile(filepath.Join(dir, id, "manifest.yaml"), []byte(manifest), 0o644)
 	os.WriteFile(filepath.Join(dir, id, "compose.yml"), []byte(compose), 0o644)
+}
+
+// TestCheckCoreRefsBypasses: interpolation, escapes, anchors and merge
+// keys, list-form labels, include / extends, shapes, namespaces, fixed
+// addresses and label literals.
+func TestCheckCoreRefsBypasses(t *testing.T) {
+	hv := map[string]string{"gitlab": "PORTCULLIS_HOST_GITLAB"}
+	bad := map[string]string{
+		"interpolated name":       "services:\n  web:\n    networks: [n]\nnetworks:\n  n:\n    external: true\n    name: ${X:-portcullis-certs}\n",
+		"interpolated ext name":   "services:\n  web:\n    networks: [n]\nnetworks:\n  n:\n    external:\n      name: $NET\n",
+		"interpolated hostname":   "services:\n  web:\n    hostname: ${H:-domains}\n",
+		"interpolated container":  "services:\n  web:\n    container_name: \"$${X}${Y}\"\n",
+		"interpolated alias":      "services:\n  web:\n    networks:\n      portcullis-proxy:\n        aliases: [\"${A:-domains}\"]\nnetworks:\n  portcullis-proxy:\n    external: true\n",
+		"interpolated netmode":    "services:\n  web:\n    network_mode: ${MODE}\n",
+		"escaped ref":             "services:\n  web:\n    labels:\n      x: \"portcullis-auth\\x2dext@docker\"\n",
+		"quoted escaped network":  "services:\n  web:\n    networks: [n]\nnetworks:\n  n:\n    external: true\n    name: \"portcullis\\x2dcerts\"\n",
+		"anchor alias ref":        "x-mw: &mw portcullis-auth-ext@docker\nservices:\n  web:\n    labels:\n      traefik.http.routers.a.middlewares: *mw\n",
+		"merge key network":       "x-net: &net\n  external: true\n  name: portcullis-domains\nservices:\n  web:\n    networks: [n]\nnetworks:\n  n:\n    <<: *net\n",
+		"list labels ref":         "services:\n  web:\n    labels:\n      - traefik.http.routers.a.service=forward-auth-ext@docker\n",
+		"include":                 "include:\n  - other.yml\nservices:\n  web:\n    image: x\n",
+		"extends":                 "services:\n  web:\n    extends:\n      service: base\n  base:\n    image: x\n",
+		"extends file":            "services:\n  web:\n    extends:\n      file: ../x/compose.yml\n      service: hub\n",
+		"hostname var + suffix":   "services:\n  web:\n    hostname: ${PORTCULLIS_HOST_GITLAB}x\n",
+		"hostname other var":      "services:\n  web:\n    hostname: ${OTHER:-domains}\n",
+		"hostname reserved dflt":  "services:\n  web:\n    hostname: ${PORTCULLIS_HOST_GITLAB:-domains}\n",
+		"hostname reserved sub":   "services:\n  web:\n    hostname: ${PORTCULLIS_HOST_GITLAB:-domains.portcullis.local}\n",
+		"hostname foreign var":    "services:\n  web:\n    hostname: ${PORTCULLIS_HOST_OTHER:-git.portcullis.local}\n",
+		"hostname no default":     "services:\n  web:\n    hostname: ${PORTCULLIS_HOST_GITLAB}\n",
+		"services as list":        "services:\n  - web\n",
+		"service as scalar":       "services:\n  web: x\n",
+		"non-string keys":         "services:\n  web:\n    networks:\n      1: {}\n",
+		"networks as list":        "services:\n  web:\n    image: x\nnetworks:\n  - portcullis-certs\n",
+		"network cfg as list":     "services:\n  web:\n    networks:\n      n: [a]\nnetworks:\n  n: {}\n",
+		"service networks scalar": "services:\n  web:\n    networks: portcullis-certs\n",
+		"external as string":      "services:\n  web:\n    networks: [n]\nnetworks:\n  n:\n    external: \"yes\"\n",
+		"top-level list":          "- services\n",
+		"split by variable":       "services:\n  web:\n    labels:\n      traefik.http.routers.a.middlewares: portcullis-auth${U}-ext@docker\n",
+		"split by bare var":       "services:\n  web:\n    environment:\n      X: forward-auth$U-ext\n",
+		"middlewares var":         "services:\n  web:\n    labels:\n      traefik.http.routers.a.middlewares: ${MW}\n",
+		"router service var":      "services:\n  web:\n    labels:\n      - traefik.http.routers.a.service=${SVC}@docker\n",
+		"label key var":           "services:\n  web:\n    labels:\n      traefik.http.routers.${R}.rule: Host(`a.b`)\n",
+		"label key prefix var":    "services:\n  web:\n    labels:\n      ${X:-traefik}.http.routers.a.middlewares: portcullis-auth@docker\n",
+		"label key inner var":     "services:\n  web:\n    labels:\n      - traef${E}ik.http.routers.a.middlewares=x\n",
+		"enable var":              "services:\n  web:\n    labels:\n      traefik.enable: ${ON}\n",
+		"priority var":            "services:\n  web:\n    labels:\n      traefik.http.routers.a.priority: ${P}\n",
+		"port var":                "services:\n  web:\n    labels:\n      traefik.http.services.a.loadbalancer.server.port: ${PORT}\n",
+		"middleware config var":   "services:\n  web:\n    labels:\n      traefik.http.middlewares.m.headers.customrequestheaders.X: ${V}\n",
+		"foreign host var":        "services:\n  web:\n    labels:\n      traefik.http.middlewares.m.redirectregex.replacement: https://${PORTCULLIS_HOST_OTHER:-x.portcullis.local}/\n",
+		"tls options var":         "services:\n  web:\n    labels:\n      traefik.http.routers.a.tls.options: ${T}\n",
+		"volumes_from container":  "services:\n  web:\n    volumes_from: [\"container:portcullis-hub-1\"]\n",
+		"volumes_from var":        "services:\n  web:\n    volumes_from: [\"${C}\"]\n",
+		"pid container":           "services:\n  web:\n    pid: container:portcullis-traefik-1\n",
+		"ipc container":           "services:\n  web:\n    ipc: \"container:x\"\n",
+		"pid var":                 "services:\n  web:\n    pid: ${P}\n",
+		"static ip on proxy":      "services:\n  web:\n    networks:\n      portcullis-proxy:\n        ipv4_address: 172.31.250.2\nnetworks:\n  portcullis-proxy:\n    external: true\n",
+		"static ipv6 named":       "services:\n  web:\n    networks:\n      p:\n        ipv6_address: fd00::2\nnetworks:\n  p:\n    name: portcullis-proxy\n",
+	}
+	for what, c := range bad {
+		if err := checkCoreRefs([]byte(c), hv); err == nil {
+			t.Errorf("%s: accepted", what)
+		}
+	}
+	ok := []string{
+		// The template's own host variable in a redirect (headscale).
+		"services:\n  web:\n    labels:\n      traefik.http.middlewares.m.redirectregex.replacement: https://${PORTCULLIS_HOST_GITLAB:-git.portcullis.local}/admin\n      traefik.http.middlewares.m.redirectregex.regex: ^https://[^/]+/?$$\n",
+		"services:\n  web:\n    labels:\n      com.example.note: ${ANY}\n",
+	}
+	for _, c := range ok {
+		if err := checkCoreRefs([]byte(c), hv); err != nil {
+			t.Errorf("refused %q: %v", c, err)
+		}
+	}
 }
