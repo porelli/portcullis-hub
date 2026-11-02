@@ -15,7 +15,7 @@ import (
 func TestCheckCoreRefs(t *testing.T) {
 	ok := []string{
 		"services:\n  web:\n    image: x\n    networks: [portcullis-proxy, default]\nnetworks:\n  portcullis-proxy:\n    external: true\n",
-		"services:\n  web:\n    networks:\n      internal:\n        aliases: [web-internal]\nnetworks:\n  internal: {}\n",
+		"services:\n  web:\n    networks:\n      internal:\n        aliases: [web-int]\n      default:\n        aliases: [web-internal]\nnetworks:\n  internal: {}\n",
 		"services:\n  web:\n    network_mode: host\n",
 		// A template's own (project-scoped) network may reuse a core key.
 		"services:\n  web:\n    networks: [monitoring]\nnetworks:\n  monitoring: {}\n",
@@ -43,6 +43,7 @@ func TestCheckCoreRefs(t *testing.T) {
 		"container_name domains": "services:\n  web:\n    container_name: domains\n",
 		"alias domains":          "services:\n  web:\n    networks:\n      portcullis-proxy:\n        aliases: [Domains]\nnetworks:\n  portcullis-proxy:\n    external: true\n",
 		"network_mode container": "services:\n  web:\n    network_mode: container:portcullis-hub-1\n",
+		"internal alias own net": "services:\n  web:\n    networks:\n      internal:\n        aliases: [web-internal]\nnetworks:\n  internal: {}\n",
 		"socket proxy network":   "services:\n  web:\n    networks: [s]\nnetworks:\n  s:\n    external: true\n    name: portcullis_socket-proxy-hub\n",
 	}
 	for what, c := range bad {
@@ -355,7 +356,7 @@ func TestDiscoverRefusesBypasses(t *testing.T) {
 			"traefik.http.middlewares.p.stripprefix.prefixes: /api",
 			"traefik.http.middlewares.i.ipallowlist.sourcerange: 10.0.0.0/8",
 			"traefik.http.middlewares.l.ratelimit.average: \"10\"",
-		}, "    volumes: [data:/data]\n    networks:\n      default: {}\n      portcullis-proxy:\n        aliases: [grafana-internal]\n",
+		}, "    volumes: [data:/data]\n    networks:\n      default:\n        aliases: [grafana-internal]\n      portcullis-proxy:\n        aliases: [grafana-web]\n",
 			"volumes:\n  data:\n    name: portcullis_control-attrs-data\n  cache:\n    name: portcullis_control-attrs\n  shared:\n    external: true\n    name: media-library\n"),
 	}
 	for id, c := range controls {
@@ -461,6 +462,93 @@ func TestDiscoverRefusesBypasses(t *testing.T) {
 		writeTpl(t, dir, id, manifest, build("web", nil, svcExtra, ""))
 		ids[id] = svcExtra
 	}
+	// network_mode: only none, host or service:<own service>; any other
+	// value joins the network of that name (core's internal one included).
+	sidecar := func(id, mode string) string {
+		return strings.Replace(build("web", nil, "", ""), "services:\n",
+			"services:\n  side:\n    image: x\n    network_mode: "+mode+"\n", 1)
+	}
+	for id, mode := range map[string]string{
+		"nm-core":           "portcullis",
+		"nm-core-prefixed":  "portcullis_portcullis-auth",
+		"nm-proxy":          "portcullis-proxy",
+		"nm-named":          "media-net",
+		"nm-bridge":         "bridge",
+		"nm-other-default":  "portcullis-esphome_default",
+		"nm-container":      "container:portcullis-hub-1",
+		"nm-container-case": "Container:hub",
+		"nm-container-ws":   "\" container:hub\"",
+		"nm-host-case":      "Host",
+		"nm-none-ws":        "\" none\"",
+		"nm-service-other":  "service:hub",
+		"nm-service-self":   "service:side",
+		"nm-service-case":   "service:Web",
+		"nm-service-prefix": "Service:web",
+		"nm-empty":          "\"\"",
+	} {
+		writeTpl(t, dir, id, manifest, sidecar(id, mode))
+		ids[id] = "network_mode " + mode
+	}
+	writeTpl(t, dir, "nm-with-networks", manifest, strings.Replace(build("web", nil, "", ""), "services:\n",
+		"services:\n  side:\n    image: x\n    network_mode: none\n    networks:\n      portcullis-proxy:\n        aliases: [esphome-internal]\n", 1))
+	ids["nm-with-networks"] = "network_mode none with networks"
+	for id, mode := range map[string]string{"nm-ok-none": "none", "nm-ok-host": "host", "nm-ok-service": "service:web"} {
+		writeTpl(t, dir, id, manifest, sidecar(id, mode))
+		controls[id] = "network_mode " + mode
+	}
+	// networks.default: never named or external (it would be shared with
+	// portcullis-proxy or another instance's project).
+	for id, top := range map[string]string{
+		"def-proxy":      "  default:\n    name: portcullis-proxy\n    external: true\n",
+		"def-instance":   "  default:\n    name: portcullis-esphome_default\n",
+		"def-external":   "  default:\n    external: true\n",
+		"def-ext-false":  "  default:\n    external: false\n",
+		"def-ext-legacy": "  default:\n    external:\n      name: portcullis-gitea_default\n",
+		"def-name-null":  "  default:\n    name: null\n",
+	} {
+		writeTpl(t, dir, id, manifest, build("web", nil, "", top))
+		ids[id] = top
+	}
+	for id, top := range map[string]string{
+		"def-ok-empty":  "  default: {}\n",
+		"def-ok-driver": "  default:\n    driver: bridge\n",
+	} {
+		writeTpl(t, dir, id, manifest, build("web", nil, "", top))
+		controls[id] = top
+	}
+	// Gate upstream names (-internal): on the project's default network
+	// only — never as a service name, container_name, hostname or alias on
+	// any other network.
+	for id, svcExtra := range map[string]string{
+		"int-alias-proxy":    "    networks:\n      default: {}\n      portcullis-proxy:\n        aliases: [esphome-internal]\n",
+		"int-alias-case":     "    networks:\n      default: {}\n      portcullis-proxy:\n        aliases: [ESPHome-Internal]\n",
+		"int-alias-dot":      "    networks:\n      default: {}\n      portcullis-proxy:\n        aliases: [\"esphome-internal.\"]\n",
+		"int-alias-own-net":  "    networks:\n      default: {}\n      backend:\n        aliases: [esphome-internal]\n      portcullis-proxy: {}\n",
+		"int-hostname":       "    hostname: esphome-internal\n",
+		"int-container":      "    container_name: mattermost-internal\n",
+		"int-hostname-multi": "    hostname: x-internal\n    networks: [default, portcullis-proxy]\n",
+	} {
+		top := ""
+		if strings.Contains(svcExtra, "backend:") {
+			top = "  backend: {}\n"
+		}
+		writeTpl(t, dir, id, manifest, build("web", nil, svcExtra, top))
+		ids[id] = svcExtra
+	}
+	writeTpl(t, dir, "int-svc", manifest, build("zigbee2mqtt-internal", nil, "", ""))
+	ids["int-svc"] = "service zigbee2mqtt-internal on portcullis-proxy"
+	writeTpl(t, dir, "int-svc-mode", manifest, strings.Replace(build("web", nil, "", ""), "services:\n",
+		"services:\n  esphome-internal:\n    image: x\n    networks: [portcullis-proxy]\n", 1))
+	ids["int-svc-mode"] = "unrouted service esphome-internal on portcullis-proxy"
+	// Allowed: -internal names on the default network only (aliases there,
+	// a default-only service or hostname), and no DNS name at all under
+	// network_mode none.
+	ok := strings.Replace(build("web", nil, "", ""), "services:\n",
+		"services:\n  app:\n    image: x\n    networks:\n      default:\n        aliases: [app-internal]\n"+
+			"  db-internal:\n    image: x\n    hostname: db-internal\n"+
+			"  quiet:\n    image: x\n    hostname: esphome-internal\n    network_mode: none\n", 1)
+	writeTpl(t, dir, "int-ok", manifest, ok)
+	controls["int-ok"] = "-internal names on default only"
 	var logs strings.Builder
 	log.SetOutput(&logs)
 	defer log.SetOutput(os.Stderr)

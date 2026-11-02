@@ -222,9 +222,11 @@ func hostVarHostname(v string, hostVars map[string]string) error {
 }
 
 // checkCoreRefs rejects a compose file that references the reserved
-// sign-in names, joins a core network (by name, external name or
-// network_mode container:), answers to a reserved DNS name (service name,
-// container_name, hostname, network alias), uses a core volume, uses
+// sign-in names, joins a core network (by name or external name), sets a
+// network_mode other than none / host / service:<own service>, names or
+// externalises networks.default, answers to a reserved DNS name (service
+// name, container_name, hostname, network alias) or to a gate upstream
+// name (-internal) off the default network, uses a core volume, uses
 // interpolation in any of those, or uses `include` / `extends`; plus the
 // label checks (checkServiceLabels).
 func checkCoreRefs(compose []byte, hostVars map[string]string) error {
@@ -290,6 +292,18 @@ func checkCoreRefs(compose []byte, hostVars map[string]string) error {
 			}
 		} else if n["name"] != nil {
 			return fmt.Errorf("network %s: name must be a string", k)
+		}
+		// The project's own default network stays project-scoped: a name or
+		// external mapping would share it (gated backends, -internal
+		// upstream names included) with portcullis-proxy or another
+		// instance's project.
+		if k == "default" {
+			if _, ok := n["name"]; ok {
+				return fmt.Errorf("network default: name is not allowed (the default network stays the project's own)")
+			}
+			if _, ok := n["external"]; ok {
+				return fmt.Errorf("network default: external is not allowed (the default network stays the project's own)")
+			}
 		}
 		ext := false
 		switch v := n["external"].(type) {
@@ -408,13 +422,21 @@ func checkCoreRefs(compose []byte, hostVars map[string]string) error {
 			} else if err := literal("service "+name+": "+field, v); err != nil {
 				return err
 			}
-			lv := strings.ToLower(strings.TrimSpace(v))
-			if field != "network_mode" && reservedDNSName(v) {
+			if field == "network_mode" {
+				if _, both := s["networks"]; both {
+					return fmt.Errorf("service %s: network_mode and networks are mutually exclusive", name)
+				}
+				if err := checkNetworkMode(name, v, svcs); err != nil {
+					return err
+				}
+				continue
+			}
+			if reservedDNSName(v) {
 				return fmt.Errorf("service %s: %s: the DNS name %q is core's (reserved)", name, field, v)
 			}
-			if field == "network_mode" && strings.HasPrefix(lv, "container:") {
-				return fmt.Errorf("service %s: network_mode %s joins another container's network namespace", name, v)
-			}
+		}
+		if err := checkInternalNames(name, s); err != nil {
+			return err
 		}
 		switch sn := s["networks"].(type) {
 		case []interface{}:
@@ -467,6 +489,94 @@ func checkCoreRefs(compose []byte, hostVars map[string]string) error {
 		case nil:
 		default:
 			return fmt.Errorf("service %s: networks must be a list or a mapping", name)
+		}
+	}
+	return nil
+}
+
+// checkNetworkMode: a template service's network_mode is exactly none,
+// host or service:<another service of the same template>. Any other value
+// is a network name (compose and Docker match these keywords exactly, so
+// "Host" or " none" name a network too): network_mode portcullis would put
+// the service on core's internal network unchecked. container: (another
+// container's namespace) is refused under any spelling.
+func checkNetworkMode(svc, v string, svcs map[string]interface{}) error {
+	if strings.HasPrefix(FoldKey(strings.TrimSpace(v)), "container:") {
+		return fmt.Errorf("service %s: network_mode %q joins another container's network namespace", svc, v)
+	}
+	if v == "none" || v == "host" {
+		return nil
+	}
+	if target, ok := strings.CutPrefix(v, "service:"); ok && target != svc {
+		if _, own := svcs[target]; own {
+			return nil
+		}
+	}
+	return fmt.Errorf("service %s: network_mode %q: only none, host or service:<another service of this template> (exactly, lower case) are allowed — any other value joins the network of that name", svc, v)
+}
+
+// internalSuffix: names ending in it are gate upstreams (the templates
+// repo's validate.py GATED_BACKENDS: the nginx gate proxies to
+// <app>-internal by Docker DNS on every network it joins, portcullis-proxy
+// included). Such a name is declared on the template's own default network
+// only; answering to one anywhere else could catch another app's gated
+// traffic.
+const internalSuffix = "-internal"
+
+func isInternalName(n string) bool {
+	return strings.HasSuffix(strings.TrimSuffix(FoldKey(strings.TrimSpace(n)), "."), internalSuffix)
+}
+
+// checkInternalNames refuses a service that answers to a name ending in
+// -internal (service name, container_name, hostname — on every network it
+// joins — or a network alias) on any network but the project's own
+// default (top-level networks.default can't be named or external). A
+// service with network_mode (none, host, service:) has no DNS name of its
+// own. Shapes and literals were checked by the caller.
+func checkInternalNames(svc string, s map[string]interface{}) error {
+	if mode, _ := s["network_mode"].(string); mode != "" {
+		return nil
+	}
+	common := []string{svc}
+	for _, f := range []string{"container_name", "hostname"} {
+		if v, ok := str(s[f]); ok {
+			common = append(common, v)
+		}
+	}
+	nets := map[string][]string{}
+	switch sn := s["networks"].(type) {
+	case []interface{}:
+		for _, x := range sn {
+			if v, ok := str(x); ok {
+				nets[v] = nil
+			}
+		}
+	case map[string]interface{}:
+		for net, cfg := range sn {
+			nets[net] = nil
+			c, _ := cfg.(map[string]interface{})
+			if al, ok := c["aliases"].([]interface{}); ok {
+				for _, x := range al {
+					if a, ok := str(x); ok {
+						nets[net] = append(nets[net], a)
+					}
+				}
+			}
+		}
+	}
+	keys := make([]string, 0, len(nets))
+	for k := range nets {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, net := range keys {
+		if net == "default" {
+			continue
+		}
+		for _, n := range append(append([]string(nil), common...), nets[net]...) {
+			if isInternalName(n) {
+				return fmt.Errorf("service %s: the name %q ends in %s but is on network %s (gate upstream names are declared on the project's default network only)", svc, n, internalSuffix, net)
+			}
 		}
 	}
 	return nil
