@@ -176,11 +176,13 @@ func (c *Client) EnsureClientAccess(ctx context.Context, s AccessSpec) error {
 	if gerr == nil && group != nil {
 		keep = str(group.ID)
 	}
-	mapped := false
-	if !lookupFailed {
-		if mapped, err = c.stripGroupGrants(ctx, tok, uuid, role, keep, s); err != nil {
-			return err
-		}
+	keepName := ""
+	if lookupFailed {
+		keepName = s.Group
+	}
+	mapped, err := c.stripGroupGrants(ctx, tok, uuid, role, keep, keepName, s)
+	if err != nil {
+		return err
 	}
 	if err := c.stripUserGrants(ctx, tok, uuid, role, s); err != nil {
 		return err
@@ -205,7 +207,11 @@ func (c *Client) EnsureClientAccess(ctx context.Context, s AccessSpec) error {
 
 // stripGroupGrants removes the access role from every group but keepID;
 // true if keepID has it.
-func (c *Client) stripGroupGrants(ctx context.Context, tok, uuid string, role *gocloak.Role, keepID string, s AccessSpec) (bool, error) {
+//
+// keepID is the access group's id; when the group lookup failed (keepID ""
+// and keepName set) the group named keepName at the top level keeps its
+// grant and every other group still loses it (revocation never waits).
+func (c *Client) stripGroupGrants(ctx context.Context, tok, uuid string, role *gocloak.Role, keepID, keepName string, s AccessSpec) (bool, error) {
 	var have []*gocloak.Group
 	for first := 0; ; first += pageSize {
 		var page []*gocloak.Group
@@ -230,6 +236,9 @@ func (c *Client) stripGroupGrants(ctx context.Context, tok, uuid string, role *g
 		}
 		if keepID != "" && str(o.ID) == keepID {
 			mapped = true
+			continue
+		}
+		if keepID == "" && keepName != "" && str(o.Name) == keepName && (str(o.Path) == "" || str(o.Path) == "/"+keepName) {
 			continue
 		}
 		if err := c.api().DeleteClientRoleFromGroup(ctx, tok, Realm, url.PathEscape(uuid), url.PathEscape(str(o.ID)), []gocloak.Role{*role}); err != nil {
