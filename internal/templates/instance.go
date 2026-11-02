@@ -233,6 +233,7 @@ func (t *Template) InstanceOn(id string, hosts map[string]string, domain string,
 	for i, kc := range raw.Clients {
 		kc.ClientID = names.Clients[i]
 		kc.RedirectURI = expand(kc.RedirectURI)
+		kc.BackchannelLogoutURL = expand(kc.BackchannelLogoutURL)
 		if kc.RedirectURIs != nil {
 			uris := make([]string, len(kc.RedirectURIs))
 			for j, u := range kc.RedirectURIs {
@@ -298,8 +299,18 @@ func checkInstanceRules(m *Manifest, r *Routes) error {
 			return err
 		}
 	}
+	if m.Hosts != nil {
+		for _, h := range m.Hosts.Immutable {
+			if _, ok := r.HostRouters[h]; !ok {
+				return fmt.Errorf("hosts.immutable: %s is not a host router", h)
+			}
+		}
+	}
 	for _, c := range m.Clients {
-		for _, u := range append([]string{c.RedirectURI}, c.RedirectURIs...) {
+		if m.Multi() && strings.Contains(c.BackchannelLogoutURL, "{{DOMAIN}}") {
+			return fmt.Errorf("keycloak client %s: a multi template names its backchannel_logout_url host as {{HOST_<ROUTER>}}", c.ClientID)
+		}
+		for _, u := range append([]string{c.RedirectURI, c.BackchannelLogoutURL}, c.RedirectURIs...) {
 			if err := check("keycloak client "+c.ClientID, u); err != nil {
 				return err
 			}

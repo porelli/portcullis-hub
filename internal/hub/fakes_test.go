@@ -198,6 +198,28 @@ type fakeIdP struct {
 	// onCallbacks, if set, runs (once) at the start of the next
 	// UpdateForwardAuthCallbacks, without f.mu.
 	onCallbacks func()
+	access      []string // "+<client>:<owner>:<group>" / "-<client>:<owner>"
+	accessErr   error
+}
+
+func (f *fakeIdP) EnsureClientAccess(ctx context.Context, s keycloak.AccessSpec) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.access = append(f.access, "+"+s.ClientID+":"+s.TemplateID+":"+s.Group)
+	return f.accessErr
+}
+
+func (f *fakeIdP) RemoveClientAccess(ctx context.Context, clientID, owner string, allowedHosts []string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.access = append(f.access, "-"+clientID+":"+owner)
+	return nil
+}
+
+func (f *fakeIdP) accessCalls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.access...)
 }
 
 func (f *fakeIdP) RegisterClient(ctx context.Context, s keycloak.ClientSpec) error {

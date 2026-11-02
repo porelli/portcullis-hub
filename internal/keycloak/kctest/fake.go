@@ -39,6 +39,11 @@ type User struct {
 	// /users/{id}/credentials answers (Keycloak gives 404 or 500 for a
 	// federated user whose LDAP entry is gone).
 	CredentialsStatus int
+	// Groups are the realm groups (by name) the user is a member of;
+	// ClientRoles the client roles mapped to the user directly (client
+	// uuid → role names).
+	Groups      []string
+	ClientRoles map[string][]string
 }
 
 // LDAPProviderID is the id of the fake's LDAP user storage provider.
@@ -82,6 +87,13 @@ type Client struct {
 	Secret               string            `json:"secret,omitempty"`
 	RedirectURIs         []string          `json:"redirectUris"`
 	WebOrigins           []string          `json:"webOrigins"`
+	// AuthenticationFlowBindingOverrides: "browser" / "direct_grant" →
+	// flow id. A PUT merges them like Keycloak (an empty value removes
+	// the binding; an unknown flow id is a 400).
+	AuthenticationFlowBindingOverrides map[string]string `json:"authenticationFlowBindingOverrides"`
+	DirectAccessGrantsEnabled          *bool             `json:"directAccessGrantsEnabled,omitempty"`
+	ImplicitFlowEnabled                *bool             `json:"implicitFlowEnabled,omitempty"`
+	ServiceAccountsEnabled             *bool             `json:"serviceAccountsEnabled,omitempty"`
 }
 
 // Server is the fake.
@@ -109,6 +121,19 @@ type Server struct {
 	// FailPrefix, if set, makes every request whose "METHOD path" starts
 	// with it answer 500.
 	FailPrefix string
+
+	// Authentication flows, authenticator configs, groups and client
+	// roles (access.go).
+	Flows       map[string]*Flow       // by id
+	AuthConfigs map[string]*AuthConfig // by id
+	BrowserFlow string                 // the realm's browser flow alias
+	Groups      map[string]*Group      // by id
+	// Roles: client uuid → role name → role id.
+	Roles map[string]map[string]string
+	// LDAPGroups are LLDAP group names; the group mapper's sync imports
+	// the missing ones into Groups (as Keycloak's READ_ONLY mapper does).
+	LDAPGroups []string
+	roleDesc   map[string]string // role id → description
 }
 
 const (
@@ -120,7 +145,8 @@ const (
 func New(t *testing.T) *Server {
 	t.Helper()
 	s := &Server{Users: map[string]*User{}, nextID: 1, Components: map[string]*Component{},
-		Scopes: map[string]*ClientScope{}, Clients: map[string]*Client{}}
+		Scopes: map[string]*ClientScope{}, Clients: map[string]*Client{},
+		Flows: map[string]*Flow{}, AuthConfigs: map[string]*AuthConfig{}, Groups: map[string]*Group{}, Roles: map[string]map[string]string{}, roleDesc: map[string]string{}}
 	s.HTTP = httptest.NewServer(http.HandlerFunc(s.serve))
 	t.Cleanup(s.HTTP.Close)
 	return s
@@ -366,6 +392,9 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.FailPrefix != "" && strings.HasPrefix(r.Method+" "+r.URL.Path, s.FailPrefix) {
 		w.WriteHeader(500)
+		return
+	}
+	if s.serveAccess(w, r) {
 		return
 	}
 	if strings.HasPrefix(r.URL.Path, realm+"/components") {
@@ -656,6 +685,23 @@ func (s *Server) serveClients(w http.ResponseWriter, r *http.Request) {
 		}
 		// A client PUT ignores the scope lists (sub-resources do those).
 		c.ID, c.DefaultClientScopes, c.OptionalClientScopes = old.ID, old.DefaultClientScopes, old.OptionalClientScopes
+		// Flow binding overrides merge; "" removes one.
+		merged := map[string]string{}
+		for k, v := range old.AuthenticationFlowBindingOverrides {
+			merged[k] = v
+		}
+		for k, v := range c.AuthenticationFlowBindingOverrides {
+			if v == "" {
+				delete(merged, k)
+				continue
+			}
+			if s.Flows[v] == nil {
+				w.WriteHeader(400)
+				return
+			}
+			merged[k] = v
+		}
+		c.AuthenticationFlowBindingOverrides = merged
 		if c.Attributes == nil {
 			c.Attributes = map[string]string{}
 		}

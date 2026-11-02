@@ -415,6 +415,31 @@ type ClientSpec struct {
 	// OmitEmailVerified attaches EmailUnverifiedScope instead of "email"
 	// (manifest keycloak_clients[].email_verified_claim: false).
 	OmitEmailVerified bool
+	// BackchannelLogoutURL (manifest keycloak_clients[].backchannel_logout_url,
+	// hosts expanded) is where Keycloak POSTs a logout token when a session
+	// ends (sign-out, the Hub signing a user out after a group removal), so
+	// the app ends its own session too. "" = leave the client's setting as
+	// it is.
+	BackchannelLogoutURL string
+}
+
+// Backchannel logout client attributes.
+const (
+	attrBackchannelURL     = "backchannel.logout.url"
+	attrBackchannelSession = "backchannel.logout.session.required"
+)
+
+// withBackchannel sets the client's backchannel logout URL (with "session
+// required": the logout token carries the sid) if s declares one.
+func withBackchannel(client *gocloak.Client, s ClientSpec) {
+	if s.BackchannelLogoutURL == "" {
+		return
+	}
+	if client.Attributes == nil {
+		client.Attributes = map[string]string{}
+	}
+	client.Attributes[attrBackchannelURL] = s.BackchannelLogoutURL
+	client.Attributes[attrBackchannelSession] = "true"
 }
 
 // RegisterClient creates (or, if it already exists and the template owns
@@ -444,6 +469,7 @@ func (c *Client) RegisterClient(ctx context.Context, s ClientSpec) error {
 		},
 		DefaultClientScopes: append([]string{"openid", "profile", wantEmail}, DefaultScopes...),
 	}
+	withBackchannel(&rep, s)
 	_, err = c.api().CreateClient(ctx, tok, Realm, rep)
 	switch code := statusCode(err); {
 	case err == nil:
@@ -475,6 +501,7 @@ func (c *Client) RegisterClient(ctx context.Context, s ClientSpec) error {
 			existing.RedirectURIs = s.RedirectURIs
 		}
 		withACR(existing, s.ACR)
+		withBackchannel(existing, s)
 		if err := c.putClient(ctx, tok, existing); err != nil {
 			return err
 		}
@@ -523,6 +550,10 @@ func (c *Client) UpdateClientHosts(ctx context.Context, s ClientSpec, oldURIs []
 		}
 		existing.WebOrigins = origins
 	}
+	// The backchannel logout URL follows its host like the web origins.
+	if u := existing.Attributes[attrBackchannelURL]; u != "" {
+		existing.Attributes[attrBackchannelURL] = moveURLHost(u, hostMap)
+	}
 	if err := c.putClient(ctx, tok, existing); err != nil {
 		return err
 	}
@@ -564,6 +595,25 @@ func moveOrigin(o string, hostMap map[string]string) string {
 	to, ok := hostMap[strings.ToLower(u.Hostname())]
 	if !ok {
 		return o
+	}
+	if p := u.Port(); p != "" {
+		to += ":" + p
+	}
+	u.Host = to
+	return u.String()
+}
+
+// moveURLHost returns the https URL raw with its host replaced by
+// hostMap's entry for it (path, query and port kept); raw unchanged if it
+// isn't an https URL of a mapped host.
+func moveURLHost(raw string, hostMap map[string]string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.User != nil {
+		return raw
+	}
+	to, ok := hostMap[strings.ToLower(u.Hostname())]
+	if !ok {
+		return raw
 	}
 	if p := u.Port(); p != "" {
 		to += ":" + p

@@ -15,6 +15,9 @@ var (
 	EnvKeyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,127}$`)
 	// groupRe constrains LLDAP group names published to group-gate.
 	groupRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
+	// backchannelRe: an https URL on one of the instance's own hosts, no
+	// query, fragment, whitespace or userinfo.
+	backchannelRe = regexp.MustCompile(`^https://(\{\{HOST_[A-Z0-9_]+\}\}|[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.\{\{DOMAIN\}\})(/[A-Za-z0-9._~!$&'()*+,;=:@%/-]*)?$`)
 )
 
 // ValidID reports whether s is an acceptable template / source identifier.
@@ -91,6 +94,17 @@ func ValidateManifest(m *Manifest) error {
 	}
 	if a.AdminGroup != "" && !groupRe.MatchString(a.AdminGroup) {
 		return fmt.Errorf("invalid auth.admin_group %q", a.AdminGroup)
+	}
+	if a.KeycloakAccessRole && (a.Method != "native-oidc" || a.AccessGroup == "") {
+		return fmt.Errorf("auth.keycloak_access_role needs auth.method native-oidc and auth.access_group")
+	}
+	for _, c := range m.Clients {
+		if u := c.BackchannelLogoutURL; u != "" && !backchannelRe.MatchString(u) {
+			return fmt.Errorf("client %s: backchannel_logout_url %q must be https://{{HOST_<ROUTER>}}/<path> (or https://<sub>.{{DOMAIN}}/<path>)", c.ClientID, u)
+		}
+	}
+	if m.Hosts != nil && len(m.Hosts.Immutable) == 0 {
+		return fmt.Errorf("hosts.immutable: list at least one host router (or omit hosts)")
 	}
 	if len(a.AdminPaths) > 0 && a.AdminGroup == "" {
 		return fmt.Errorf("auth.admin_paths requires auth.admin_group")

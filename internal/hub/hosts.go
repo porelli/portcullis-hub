@@ -613,6 +613,11 @@ func (h *Hub) planHostsLocked(id string, hosts map[string]string) (*hostsChange,
 		}
 		reapply = true
 	}
+	for r, o := range cur.Hosts {
+		if view.Hosts[r] != o && t.Manifest.ImmutableHost(r) {
+			return nil, statusErr(409, "the hostname of %s (%s) can't change: template %s fixes it once the instance exists (create a new instance for another hostname)", r, o, cur.TemplateID)
+		}
+	}
 	if err := h.checkInstanceHostsLocked(&view); err != nil {
 		return nil, err
 	}

@@ -174,6 +174,7 @@ func (h *Hub) redirectURIs(c templates.KeycloakClient) []string {
 }
 
 func (h *Hub) clientSpec(t *templates.Template, c templates.KeycloakClient, acr string) keycloak.ClientSpec {
+	bcl := strings.ReplaceAll(c.BackchannelLogoutURL, "{{DOMAIN}}", h.cfg.Domain)
 	// Secret: per-app .env first, then core .env.
 	secret := ""
 	if c.SecretEnv != "" {
@@ -199,7 +200,8 @@ func (h *Hub) clientSpec(t *templates.Template, c templates.KeycloakClient, acr 
 		ACR:          acr,
 		// Most apps get the realm's email scope; email_verified_claim: false
 		// swaps it for email-unverified.
-		OmitEmailVerified: !c.SendsEmailVerified(),
+		OmitEmailVerified:    !c.SendsEmailVerified(),
+		BackchannelLogoutURL: bcl,
 	}
 }
 
@@ -267,6 +269,12 @@ func (h *Hub) enableLocked(id string) (rolledBack bool, err error) {
 			case err != nil:
 				log.Printf("Warning: failed to register client %s: %v", c.ClientID, err)
 			}
+		}
+		// The access role (contract §8): never start an app whose sign-in
+		// should be restricted but isn't. A missing access group is only a
+		// warning — the client then denies everybody until it exists.
+		if err := h.ensureAccess(context.Background(), &tmpl); err != nil {
+			return false, err
 		}
 		// Sign-in callbacks of its extra-domain hosts (contract §5).
 		if err := h.idp.UpdateForwardAuthCallbacks(context.Background(), callbacks, nil); err != nil {

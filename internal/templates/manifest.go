@@ -28,7 +28,16 @@ type Auth struct {
 	// (default: its override adds forward-auth + group-gate) and, if
 	// AllowWithoutGateway, "the app's own login only" (no Portcullis).
 	NativeLogin *NativeLogin `yaml:"native_login" json:"native_login,omitempty"`
-	Notes       string       `yaml:"notes" json:"notes"`
+	// KeycloakAccessRole (native-oidc with access_group only) makes the Hub
+	// enforce the access group in Keycloak (contract §8 "Access role"):
+	// each client of the instance gets the client role "access", the
+	// instance's access group gets it, and the client's browser flow denies
+	// sign-in without it. For apps that can't restrict sign-in to a group
+	// themselves (or let outsiders create accounts without rights). The Hub
+	// does the same for every native-oidc template with group_access: false
+	// (see Template.AccessRoleEnforced).
+	KeycloakAccessRole bool   `yaml:"keycloak_access_role" json:"keycloak_access_role,omitempty"`
+	Notes              string `yaml:"notes" json:"notes"`
 }
 
 // NativeLogin is auth.native_login (method custom only).
@@ -156,6 +165,11 @@ type KeycloakClient struct {
 	// refuse email_verified=false but accept the claim being absent.
 	// Unset means true.
 	EmailVerifiedClaim *bool `yaml:"email_verified_claim" json:"email_verified_claim,omitempty"`
+	// BackchannelLogoutURL is the app's OIDC back-channel logout endpoint
+	// (https://{{HOST_<ROUTER>}}/<path>): Keycloak POSTs a logout token
+	// there when a session ends, so the app ends its own session too
+	// (e.g. Nextcloud user_oidc, Synapse).
+	BackchannelLogoutURL string `yaml:"backchannel_logout_url" json:"backchannel_logout_url,omitempty"`
 }
 
 // SendsEmailVerified reports whether the client gets the email_verified
@@ -193,6 +207,38 @@ type Manifest struct {
 	Clients     []KeycloakClient `yaml:"keycloak_clients" json:"keycloak_clients"`
 	ConfigFiles []ConfigFile     `yaml:"config_files" json:"config_files"`
 	URLs        []AppURL         `yaml:"urls" json:"urls"`
+	// Hosts are per-host-router properties (contract §3.1).
+	Hosts *HostsSpec `yaml:"hosts" json:"hosts,omitempty"`
+}
+
+// HostsSpec is the manifest's hosts block.
+type HostsSpec struct {
+	// Immutable host routers keep the hostname the instance was created
+	// with (e.g. Synapse's server_name, part of every user and room id):
+	// SetHosts refuses to change it.
+	Immutable []string `yaml:"immutable" json:"immutable,omitempty"`
+}
+
+// ImmutableHost reports whether host router r's hostname may never change.
+func (m *Manifest) ImmutableHost(r string) bool {
+	if m.Hosts == nil {
+		return false
+	}
+	for _, x := range m.Hosts.Immutable {
+		if x == r {
+			return true
+		}
+	}
+	return false
+}
+
+// AccessRoleEnforced reports whether the Hub enforces the access group in
+// Keycloak for the app's clients (contract §8 "Access role"): native-oidc
+// apps with an access group that either can't restrict sign-in to it
+// (group_access: false) or ask for it (auth.keycloak_access_role).
+func (m *Manifest) AccessRoleEnforced() bool {
+	a := &m.Auth
+	return a.Method == "native-oidc" && a.AccessGroup != "" && (!a.GroupAccess || a.KeycloakAccessRole)
 }
 
 // Instance modes (Manifest.Instances).

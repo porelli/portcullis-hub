@@ -130,6 +130,13 @@ func newInstanceFixture(t *testing.T, seed func(*state.AppState)) *fixture {
 // (nil: the fakeIdP in f.idp).
 func newInstanceFixtureWith(t *testing.T, seed func(*state.AppState), idp IdP) *fixture {
 	t.Helper()
+	return newInstanceFixtureExtra(t, seed, idp, nil)
+}
+
+// newInstanceFixtureExtra is newInstanceFixtureWith with extra templates
+// (id → manifest, compose) in the source.
+func newInstanceFixtureExtra(t *testing.T, seed func(*state.AppState), idp IdP, extra map[string][2]string) *fixture {
+	t.Helper()
 	root := t.TempDir()
 	f := &fixture{
 		runner:  newFakeRunner(),
@@ -149,6 +156,10 @@ func newInstanceFixtureWith(t *testing.T, seed func(*state.AppState), idp IdP) *
 		writeFile(t, filepath.Join(f.src, id, "manifest.yaml"), files[0])
 		writeFile(t, filepath.Join(f.src, id, "compose.yml"), files[1])
 		writeFile(t, filepath.Join(f.src, id, "conf", "app.ini"), "[v1]\n")
+	}
+	for id, files := range extra {
+		writeFile(t, filepath.Join(f.src, id, "manifest.yaml"), files[0])
+		writeFile(t, filepath.Join(f.src, id, "compose.yml"), files[1])
 	}
 	st := state.New()
 	st.Sources = []state.Source{{Name: "local", Path: f.src}}

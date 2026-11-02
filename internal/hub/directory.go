@@ -150,6 +150,7 @@ const (
 	directorySyncDebounce = time.Second
 	directorySyncRetry    = time.Minute
 	attrSyncTimeout       = 2 * time.Minute
+	accessSyncInterval    = 10 * time.Minute
 )
 
 // RunDirectorySync writes the policy once at start and after each
@@ -188,28 +189,39 @@ func (h *Hub) RunDirectorySync(ctx context.Context) {
 	}
 }
 
-// runAttrSync runs attrSync on each kick (coalesced) and on retry.
+// runAttrSync runs attrSync and then SyncClientAccess on each kick
+// (coalesced), on retry and every accessSyncInterval (the realm's browser
+// flow may change under the access flows; groups may be created in LLDAP
+// directly).
 func (h *Hub) runAttrSync(ctx context.Context, kick <-chan struct{}) {
 	var retry <-chan time.Time
+	tick := time.NewTicker(accessSyncInterval)
+	defer tick.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-kick:
 		case <-retry:
+		case <-tick.C:
 		}
 		retry = nil
 		h.policyWriteMu.Lock()
 		sync := h.attrSync
 		h.policyWriteMu.Unlock()
-		if sync == nil {
-			continue
-		}
 		sctx, cancel := context.WithTimeout(ctx, attrSyncTimeout)
-		err := sync(sctx)
+		var err error
+		if sync != nil {
+			if err = sync(sctx); err != nil && ctx.Err() == nil {
+				log.Printf("keycloak: attribute mapper sync failed (retrying in %s): %v", directorySyncRetry, err)
+			}
+		}
+		aerr := h.SyncClientAccess(sctx)
 		cancel()
-		if err != nil && ctx.Err() == nil {
-			log.Printf("keycloak: attribute mapper sync failed (retrying in %s): %v", directorySyncRetry, err)
+		if aerr != nil && ctx.Err() == nil {
+			log.Printf("keycloak: access role sync incomplete (retrying in %s): %v", directorySyncRetry, aerr)
+		}
+		if (err != nil || aerr != nil) && ctx.Err() == nil {
 			retry = time.After(directorySyncRetry)
 		}
 	}

@@ -66,6 +66,10 @@ type IdP interface {
 	// UpdateForwardAuthCallbacks adds/removes extra-domain callback URIs
 	// on portcullis-forward-auth (contract §5).
 	UpdateForwardAuthCallbacks(ctx context.Context, add, remove []string) error
+	// EnsureClientAccess / RemoveClientAccess manage an instance client's
+	// access role, group mapping and access flow (contract §8).
+	EnsureClientAccess(ctx context.Context, s keycloak.AccessSpec) error
+	RemoveClientAccess(ctx context.Context, clientID, owner string, allowedHosts []string) error
 }
 
 // Hub is the application core. All exported methods are safe for
