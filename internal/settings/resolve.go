@@ -2,6 +2,7 @@ package settings
 
 import (
 	"sort"
+	"strings"
 
 	"github.com/portcullis/hub/internal/templates"
 )
@@ -31,9 +32,10 @@ type Candidate struct {
 
 // Reason sources.
 const (
-	ReasonGroup    = "group"
-	ReasonDefault  = "default"
-	ReasonCombined = "combined"
+	ReasonGroup      = "group"
+	ReasonDefault    = "default"
+	ReasonCombined   = "combined"
+	ReasonFailClosed = "fail-closed" // Stale rows under min, or duplicate group names
 )
 
 // Reason explains how the value was resolved: which group won, which rule
@@ -53,49 +55,119 @@ type Resolved struct {
 }
 
 // canonicalizeSet canonicalizes a set result (multi_enum, list, groups, users):
-// parses items one by one (dropping those that don't parse, e.g. stale choices),
-// applies the kind's canonical order (option order for multi_enum, sorted for
-// groups/users), and returns []any{}. min_items/max_items are NOT applied
+// validates items with item-level parsers (NO count checks), drops stale items,
+// applies the kind's canonical order. min_items/max_items are NOT applied
 // (they're enforced when admins save rows, not at resolution).
 func (r *Registry) canonicalizeSet(o *templates.Option, items []any) []any {
 	if len(items) == 0 {
 		return []any{}
 	}
 
-	k, err := r.Kind(o.Type)
-	if err != nil {
-		return []any{}
-	}
-
-	// Parse each item individually (drops stale choices)
 	var valid []any
-	for _, item := range items {
-		// For multi_enum/groups/users, items are strings; for list they can be various types
-		if parsed, err := k.Parse(o, []any{item}); err == nil {
-			// Parse returns a []any for set types
-			if list, ok := parsed.([]any); ok && len(list) > 0 {
-				valid = append(valid, list[0])
+
+	switch o.Type {
+	case templates.TypeMultiEnum:
+		// Validate against Choices (no Parse call, no countItems)
+		choiceSet := make(map[string]bool, len(o.Choices))
+		for _, c := range o.Choices {
+			choiceSet[c.Value] = true
+		}
+		// Option order: iterate Choices and collect matching items
+		for _, c := range o.Choices {
+			for _, item := range items {
+				if s, ok := item.(string); ok && s == c.Value {
+					valid = append(valid, s)
+					break // Only add once per choice
+				}
 			}
 		}
-	}
 
-	if len(valid) == 0 {
-		return []any{}
-	}
-
-	// Apply canonical order by parsing the whole valid set
-	if canonical, err := k.Parse(o, valid); err == nil {
-		if list, ok := canonical.([]any); ok {
-			return list
+	case templates.TypeGroups, templates.TypeUsers:
+		// Validate as names (lowercase, no @), then sort
+		seen := map[string]bool{}
+		for _, item := range items {
+			s, ok := item.(string)
+			if !ok || s == "" {
+				continue
+			}
+			if o.Type == templates.TypeUsers {
+				// Users: lowercase, no @
+				if strings.ContainsRune(s, '@') {
+					continue
+				}
+				s = strings.ToLower(s)
+			}
+			// Groups/users: valid name
+			if !seen[s] {
+				valid = append(valid, s)
+				seen[s] = true
+			}
 		}
+		// Sort for canonical order
+		sort.Slice(valid, func(i, j int) bool {
+			return valid[i].(string) < valid[j].(string)
+		})
+
+	case templates.TypeList:
+		// Validate each item with the list's item kind (no countItems)
+		if o.Items == nil {
+			return []any{}
+		}
+		// Build a temporary option for the item type
+		itemOpt := &templates.Option{Type: o.Items.Type}
+		// Copy item-level constraints
+		if o.Items.Pattern != "" {
+			itemOpt.Pattern = o.Items.Pattern
+		}
+		if o.Items.Format != "" {
+			itemOpt.Format = o.Items.Format
+		}
+		if o.Items.MinLen != nil {
+			itemOpt.MinLen = o.Items.MinLen
+		}
+		if o.Items.MaxLen != nil {
+			itemOpt.MaxLen = o.Items.MaxLen
+		}
+		if o.Items.Min != nil {
+			itemOpt.Min = o.Items.Min
+		}
+		if o.Items.Max != nil {
+			itemOpt.Max = o.Items.Max
+		}
+		if len(o.Items.Choices) > 0 {
+			itemOpt.Choices = o.Items.Choices
+		}
+
+		itemKind, err := r.Kind(itemOpt.Type)
+		if err != nil {
+			return []any{}
+		}
+
+		// Parse each item individually
+		seen := map[any]bool{}
+		for _, item := range items {
+			if parsed, err := itemKind.Parse(itemOpt, item); err == nil {
+				// Dedupe
+				if !seen[parsed] {
+					valid = append(valid, parsed)
+					seen[parsed] = true
+				}
+			}
+		}
+		// First-row order (already in order from iteration)
+
+	default:
+		return []any{}
 	}
 
 	return valid
 }
 
-// lowestRankedChoice returns the option's lowest-ranked value (fail closed
-// for privileged options under min). For enum: first choice. For bool: false.
-func lowestRankedChoice(o *templates.Option) Value {
+// failClosedValue returns the fail-closed value for an option when stale rows
+// exist under min or duplicate group names are found. For enum: first choice.
+// For bool: false. For int/size/duration: lower bound (Min, else 0) - never
+// Unlimited, never the default. For sets: empty []any{}.
+func failClosedValue(o *templates.Option) Value {
 	switch o.Type {
 	case templates.TypeEnum:
 		if len(o.Choices) > 0 {
@@ -104,8 +176,21 @@ func lowestRankedChoice(o *templates.Option) Value {
 		return ""
 	case templates.TypeBool:
 		return false
+	case templates.TypeInt, templates.TypeSize, templates.TypeDuration:
+		// Lower bound: option's Min if set, else 0
+		if o.Min != nil {
+			// Parse Min (can be "10GiB" for size, "30d" for duration, or int)
+			r := NewRegistry()
+			if k, err := r.Kind(o.Type); err == nil {
+				if minVal, err := k.Parse(o, o.Min); err == nil {
+					return minVal
+				}
+			}
+		}
+		return int64(0)
+	case templates.TypeMultiEnum, templates.TypeList, templates.TypeGroups, templates.TypeUsers:
+		return []any{}
 	default:
-		// For other types, lowest means smallest number/size/duration
 		return nil
 	}
 }
@@ -113,23 +198,38 @@ func lowestRankedChoice(o *templates.Option) Value {
 // Resolve resolves one person option for person p using config c. The
 // default is a fallback: it applies only to people in none of the row groups.
 // A row whose group id mismatches p.Groups[row.Group] is skipped (call 29).
-// Rows are deduped by group (first occurrence wins).
+// Duplicate group names in config → fail-closed (invalid configuration).
 func (r *Registry) Resolve(o *templates.Option, c PersonConfig, p Person) Resolved {
 	rule := c.Rule
 	if rule == "" {
 		rule = o.Resolve
 	}
 
-	// Find matching rows (rows whose group the person is in, and whose id
-	// matches). Dedupe by group (first wins): mark seen before the id check
-	// so the first row for a group always decides.
+	// Detect duplicate group names (invalid configuration)
 	seen := map[string]bool{}
-	var matches []Candidate
+	var duplicates []string
 	for _, row := range c.Rows {
 		if seen[row.Group] {
-			continue
+			duplicates = append(duplicates, row.Group)
 		}
 		seen[row.Group] = true
+	}
+
+	// Duplicate group names → fail-closed
+	if len(duplicates) > 0 {
+		return Resolved{
+			Value: failClosedValue(o),
+			Reason: Reason{
+				Source: ReasonFailClosed,
+				Rule:   rule,
+				// Note: duplicates in a comment would be helpful but Reason has no comment field
+			},
+		}
+	}
+
+	// Find matching rows (rows whose group the person is in, and whose id matches)
+	var matches []Candidate
+	for _, row := range c.Rows {
 		if gid, ok := p.Groups[row.Group]; ok && gid == row.GroupID {
 			matches = append(matches, Candidate{Group: row.Group, Value: row.Value})
 		}
@@ -166,10 +266,10 @@ func (r *Registry) Resolve(o *templates.Option, c PersonConfig, p Person) Resolv
 	return Resolved{Value: c.Default, Reason: Reason{Source: ReasonDefault, Rule: rule}}
 }
 
-// resolveMaxMin resolves max or min by comparing values. Under min: if any
-// matching row's value is incomparable (stale), fail closed by returning the
-// option's lowest-ranked choice with all rows in Others (admin preview shows
-// the stale value). Under max: incomparable rows are dropped.
+// resolveMaxMin resolves max or min by comparing values. Under min with stale rows:
+// enum/bool fail closed to lowest-ranked choice; int/size/duration drop stale and
+// take min of comparable (or lower bound if none comparable). Under max: stale rows
+// are dropped.
 func (r *Registry) resolveMaxMin(o *templates.Option, rule string, matches []Candidate, def Value) Resolved {
 	k, err := r.Kind(o.Type)
 	if err != nil {
@@ -187,33 +287,47 @@ func (r *Registry) resolveMaxMin(o *templates.Option, rule string, matches []Can
 		}
 	}
 
-	// Under min: if ANY row is incomparable, fail closed to lowest-ranked choice
+	// Under min with stale rows: fail closed behavior depends on type
 	if rule == templates.ResolveMin && len(stale) > 0 {
-		lowest := lowestRankedChoice(o)
-		if lowest == nil {
-			lowest = def
+		// For enum/bool: fail closed to lowest-ranked choice
+		if o.Type == templates.TypeEnum || o.Type == templates.TypeBool {
+			allRows := append([]Candidate{}, comparable...)
+			allRows = append(allRows, stale...)
+			return Resolved{
+				Value: failClosedValue(o),
+				Reason: Reason{
+					Source: ReasonFailClosed,
+					Rule:   rule,
+					Others: allRows,
+				},
+			}
 		}
-		// All rows (comparable + stale) go in Others
-		allRows := append([]Candidate{}, comparable...)
-		allRows = append(allRows, stale...)
-		return Resolved{
-			Value: lowest,
-			Reason: Reason{
-				Source: "fail-closed", // special source indicating fail-closed
-				Rule:   rule,
-				Others: allRows,
-			},
-		}
+		// For int/size/duration: drop stale, continue with comparable, but keep stale in Others
+		// (if none comparable, fall through to handle below)
 	}
 
-	// No comparable matches → default
+	// Track stale for Others
+	staleForOthers := stale
+
+	// No comparable matches → fail closed for int/size/duration under min, default otherwise
 	if len(comparable) == 0 {
+		if rule == templates.ResolveMin && (o.Type == templates.TypeInt || o.Type == templates.TypeSize || o.Type == templates.TypeDuration) {
+			// Lower bound, not default
+			return Resolved{
+				Value: failClosedValue(o),
+				Reason: Reason{
+					Source: ReasonFailClosed,
+					Rule:   rule,
+					Others: stale,
+				},
+			}
+		}
 		return Resolved{
 			Value: def,
 			Reason: Reason{
 				Source: ReasonDefault,
 				Rule:   rule,
-				Others: stale, // show stale rows in admin preview
+				Others: stale,
 			},
 		}
 	}
@@ -268,8 +382,9 @@ func (r *Registry) resolveMaxMin(o *templates.Option, rule string, matches []Can
 	}
 
 	// Under max: stale rows are dropped but shown in Others
-	if rule == templates.ResolveMax {
-		others = append(others, stale...)
+	// Under min with numeric types: stale rows also shown in Others
+	if rule == templates.ResolveMax || (rule == templates.ResolveMin && len(staleForOthers) > 0) {
+		others = append(others, staleForOthers...)
 	}
 
 	return Resolved{
@@ -342,41 +457,64 @@ func (r *Registry) resolveUnion(o *templates.Option, matches []Candidate, rule s
 }
 
 // resolveIntersection computes the intersection of all matching sets.
-// Canonicalizes item by item (drops stale choices) for deterministic results.
+// Builds intersection by iterating first row's list (first-row order, deterministic).
+// Canonicalizes item by item (drops stale choices).
 func (r *Registry) resolveIntersection(o *templates.Option, matches []Candidate, rule string) Resolved {
-	// Build a set per match (treat non-list as empty set)
-	sets := make([]map[any]bool, len(matches))
+	// Get first row's list (for deterministic order)
+	var firstList []any
+	if len(matches) > 0 {
+		if list, ok := matches[0].Value.([]any); ok {
+			firstList = list
+		}
+	}
+
+	// Empty first list or non-list → empty intersection
+	if len(firstList) == 0 {
+		groups := make([]string, len(matches))
+		for i, m := range matches {
+			groups[i] = m.Group
+		}
+		sort.Strings(groups)
+		return Resolved{
+			Value: []any{},
+			Reason: Reason{
+				Source: ReasonCombined,
+				Groups: groups,
+				Rule:   rule,
+			},
+		}
+	}
+
+	// Build sets for all other rows (for efficient lookup)
+	otherSets := make([]map[any]bool, len(matches))
 	for i, m := range matches {
-		sets[i] = map[any]bool{}
+		otherSets[i] = map[any]bool{}
 		list, ok := m.Value.([]any)
 		if !ok {
-			// Treat non-list as empty set → intersection is empty
+			// Non-list treated as empty set
 			continue
 		}
 		for _, item := range list {
-			sets[i][item] = true
+			otherSets[i][item] = true
 		}
 	}
 
-	// Keep only items present in every set
+	// Iterate first row's list (first-row order, deterministic)
 	var result []any
-	if len(sets) > 0 {
-		// Start with items from first set
-		for item := range sets[0] {
-			inAll := true
-			for i := 1; i < len(sets); i++ {
-				if !sets[i][item] {
-					inAll = false
-					break
-				}
+	for _, item := range firstList {
+		inAll := true
+		for i := 0; i < len(matches); i++ {
+			if !otherSets[i][item] {
+				inAll = false
+				break
 			}
-			if inAll {
-				result = append(result, item)
-			}
+		}
+		if inAll {
+			result = append(result, item)
 		}
 	}
 
-	// Canonicalize: parse item by item, apply canonical order (deterministic)
+	// Canonicalize: validate items, NO count checks (list keeps first-row order)
 	result = r.canonicalizeSet(o, result)
 
 	groups := make([]string, len(matches))

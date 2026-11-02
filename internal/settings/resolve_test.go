@@ -459,47 +459,36 @@ func TestIncomparableValues(t *testing.T) {
 }
 
 func TestDedupeFirstRowDecides(t *testing.T) {
+	// Duplicate group names now trigger fail-closed (invalid configuration).
+	// This test verifies that behavior is now in TestDuplicateGroupNames.
+	// Test here: proper handling when first row has wrong id (no duplicates)
 	r := NewRegistry()
 	o := &templates.Option{
 		Type:    templates.TypeInt,
 		Resolve: templates.ResolveMax,
 	}
 
-	// Two rows for office_milan: first has id 7 (matches), second has id 9 (wrong)
-	// First row should decide even though its id matches
+	// One row for office_milan with wrong id → skipped, person gets default
 	config := PersonConfig{
 		Default: int64(100),
 		Rule:    o.Resolve,
 		Rows: []Row{
-			{Group: "office_milan", GroupID: 7, Value: int64(500)},
-			{Group: "office_milan", GroupID: 9, Value: int64(999)}, // duplicate, wrong id
+			{Group: "office_milan", GroupID: 9, Value: int64(500)}, // wrong id
 		},
 	}
 
 	alice := Person{
 		User:   "alice",
-		Groups: map[string]int{"office_milan": 7},
+		Groups: map[string]int{"office_milan": 7}, // has id 7, not 9
 	}
 
 	res := r.Resolve(o, config, alice)
-	// First row matches and decides
-	if res.Value != int64(500) {
-		t.Errorf("dedupe: want 500 (first row), got %v", res.Value)
-	}
-
-	// Now test with first row having wrong id
-	config.Rows = []Row{
-		{Group: "office_milan", GroupID: 9, Value: int64(999)}, // first, wrong id
-		{Group: "office_milan", GroupID: 7, Value: int64(500)}, // second, correct id
-	}
-
-	res = r.Resolve(o, config, alice)
-	// First row decides (doesn't match), so alice gets default
+	// Row has wrong id, so alice gets default
 	if res.Value != int64(100) {
-		t.Errorf("dedupe first wrong: want default 100, got %v", res.Value)
+		t.Errorf("wrong id: want default 100, got %v", res.Value)
 	}
 	if res.Reason.Source != ReasonDefault {
-		t.Errorf("dedupe first wrong: want source %s, got %s", ReasonDefault, res.Reason.Source)
+		t.Errorf("wrong id: want source %s, got %s", ReasonDefault, res.Reason.Source)
 	}
 }
 
@@ -596,4 +585,190 @@ func TestCheckRequires(t *testing.T) {
 	if err := CheckRequires(spec, values); err != nil {
 		t.Errorf("both set: want nil, got %v", err)
 	}
+}
+
+// Fix Round 3 tests
+
+func TestCanonicalizeWithMinItems(t *testing.T) {
+	r := NewRegistry()
+
+	// Multi_enum with min_items: 2 - should not drop items due to min_items
+	o := &templates.Option{
+		Type:     templates.TypeMultiEnum,
+		Resolve:  templates.ResolveUnion,
+		MinItems: ptr(2),
+		MaxItems: ptr(5),
+		Choices: []templates.EnumOption{
+			{Value: "a", Label: "A"},
+			{Value: "b", Label: "B"},
+			{Value: "c", Label: "C"},
+		},
+	}
+
+	rows := []Row{
+		{Group: "it_staff", GroupID: 9, Value: []any{"a"}},          // 1 item (< min_items)
+		{Group: "office_milan", GroupID: 7, Value: []any{"b", "c"}}, // 2 items
+	}
+	bob := Person{
+		User:   "bob",
+		Groups: map[string]int{"it_staff": 9, "office_milan": 7},
+	}
+
+	config := PersonConfig{Default: []any{}, Rule: o.Resolve, Rows: rows}
+	res := r.Resolve(o, config, bob)
+	union := res.Value.([]any)
+	// Should get [a b c] even though first row has < min_items
+	if len(union) != 3 || union[0] != "a" || union[1] != "b" || union[2] != "c" {
+		t.Errorf("min_items: want [a b c], got %v", union)
+	}
+
+	// List with item kind and max exceeded
+	o2 := &templates.Option{
+		Type:     templates.TypeList,
+		Resolve:  templates.ResolveUnion,
+		MaxItems: ptr(2),
+		Items: &templates.ItemSpec{
+			Type: templates.TypeInt,
+			Min:  int64(0),
+			Max:  int64(100),
+		},
+	}
+
+	rows2 := []Row{
+		{Group: "it_staff", GroupID: 9, Value: []any{int64(10), int64(20), int64(30)}}, // 3 items > max_items
+	}
+	config2 := PersonConfig{Default: []any{}, Rule: o2.Resolve, Rows: rows2}
+	res = r.Resolve(o2, config2, bob)
+	listUnion := res.Value.([]any)
+	// Should get all 3 items (max_items not applied at resolution)
+	if len(listUnion) != 3 {
+		t.Errorf("list max exceeded: want 3 items, got %d: %v", len(listUnion), listUnion)
+	}
+}
+
+func TestNumericMinFailClosed(t *testing.T) {
+	r := NewRegistry()
+	o := &templates.Option{
+		Type:    templates.TypeSize,
+		Resolve: templates.ResolveMin,
+		Min:     "1GiB",
+	}
+
+	// 10 GiB + corrupt row + default 500 GiB → should get 10 GiB (min of comparable)
+	rows := []Row{
+		{Group: "office_milan", GroupID: 7, Value: int64(10 * GiB)},
+		{Group: "admins", GroupID: 9, Value: "corrupt"},
+	}
+	config := PersonConfig{Default: int64(500 * GiB), Rule: o.Resolve, Rows: rows}
+
+	bob := Person{
+		User:   "bob",
+		Groups: map[string]int{"office_milan": 7, "admins": 9},
+	}
+
+	res := r.Resolve(o, config, bob)
+	// Should get 10 GiB (min of comparable), not 500 GiB default
+	if res.Value != int64(10*GiB) {
+		t.Errorf("numeric min fail-closed: want 10 GiB, got %v", res.Value)
+	}
+	// Stale row should be in Others
+	if len(res.Reason.Others) != 1 || res.Reason.Others[0].Group != "admins" {
+		t.Errorf("numeric min: want stale in Others, got %v", res.Reason.Others)
+	}
+
+	// All rows stale → lower bound (Min = 1GiB)
+	rows2 := []Row{
+		{Group: "admins", GroupID: 9, Value: "corrupt"},
+		{Group: "office_milan", GroupID: 7, Value: "also_corrupt"},
+	}
+	config2 := PersonConfig{Default: int64(500 * GiB), Rule: o.Resolve, Rows: rows2}
+
+	res = r.Resolve(o, config2, bob)
+	// Should get lower bound (1 GiB), not default (500 GiB)
+	if res.Value != int64(1*GiB) {
+		t.Errorf("all stale: want 1 GiB (lower bound), got %v", res.Value)
+	}
+	if res.Reason.Source != ReasonFailClosed {
+		t.Errorf("all stale: want source %s, got %s", ReasonFailClosed, res.Reason.Source)
+	}
+
+	// No Min set → should use 0
+	o3 := &templates.Option{
+		Type:    templates.TypeInt,
+		Resolve: templates.ResolveMin,
+	}
+	config3 := PersonConfig{Default: int64(500), Rule: o3.Resolve, Rows: rows2}
+	res = r.Resolve(o3, config3, bob)
+	if res.Value != int64(0) {
+		t.Errorf("no Min: want 0, got %v", res.Value)
+	}
+}
+
+func TestDuplicateGroupNames(t *testing.T) {
+	r := NewRegistry()
+	o := &templates.Option{
+		Type:    templates.TypeEnum,
+		Resolve: templates.ResolveMax,
+		Choices: []templates.EnumOption{
+			{Value: "viewer", Label: "Viewer"},
+			{Value: "editor", Label: "Editor"},
+			{Value: "admin", Label: "Admin"},
+		},
+	}
+
+	// Rows with duplicate group name "office_milan"
+	rows := []Row{
+		{Group: "office_milan", GroupID: 7, Value: "editor"},
+		{Group: "office_milan", GroupID: 9, Value: "admin"}, // duplicate!
+	}
+	config := PersonConfig{Default: "viewer", Rule: o.Resolve, Rows: rows}
+
+	bob := Person{
+		User:   "bob",
+		Groups: map[string]int{"office_milan": 7},
+	}
+
+	res := r.Resolve(o, config, bob)
+	// Duplicate group names → fail-closed to lowest-ranked choice
+	if res.Value != "viewer" {
+		t.Errorf("duplicate groups: want viewer (fail-closed), got %v", res.Value)
+	}
+	if res.Reason.Source != ReasonFailClosed {
+		t.Errorf("duplicate groups: want source %s, got %s", ReasonFailClosed, res.Reason.Source)
+	}
+}
+
+func TestIntersectionFirstRowOrder(t *testing.T) {
+	r := NewRegistry()
+	o := &templates.Option{
+		Type:    templates.TypeList,
+		Resolve: templates.ResolveIntersection,
+		Items: &templates.ItemSpec{
+			Type: templates.TypeString,
+		},
+	}
+
+	// First row has order: c, a, b
+	// Second row has: a, b, c
+	// Intersection should maintain first-row order: c, a, b
+	rows := []Row{
+		{Group: "it_staff", GroupID: 9, Value: []any{"c", "a", "b"}},
+		{Group: "office_milan", GroupID: 7, Value: []any{"a", "b", "c"}},
+	}
+	bob := Person{
+		User:   "bob",
+		Groups: map[string]int{"it_staff": 9, "office_milan": 7},
+	}
+
+	config := PersonConfig{Default: []any{}, Rule: o.Resolve, Rows: rows}
+	res := r.Resolve(o, config, bob)
+	inter := res.Value.([]any)
+	// Should maintain first-row order: c, a, b
+	if len(inter) != 3 || inter[0] != "c" || inter[1] != "a" || inter[2] != "b" {
+		t.Errorf("intersection first-row order: want [c a b], got %v", inter)
+	}
+}
+
+func ptr[T any](v T) *T {
+	return &v
 }
