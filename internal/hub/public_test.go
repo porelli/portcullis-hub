@@ -315,6 +315,11 @@ func TestPublicDrift(t *testing.T) {
 	if d := publicDrift(t, f, exact); d == nil || d.Kind != DriftPublicAccess || !strings.Contains(d.Message, "unexpected") {
 		t.Errorf("stale public router not reported: %+v", d)
 	}
+	// compose up recreates the container with the new labels (the fake
+	// engine doesn't; the post-up image-label check reads it).
+	f.engine.mu.Lock()
+	f.engine.containers = []docker.Container{runningAs(t, f, nil)}
+	f.engine.mu.Unlock()
 	n := len(f.runner.Calls())
 	if err := f.h.ResolveDrift("cloud", ActionApply); err != nil {
 		t.Fatal(err)

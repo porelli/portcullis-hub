@@ -86,7 +86,10 @@ func (h *Hub) composeUp(t *templates.Template) error {
 	if err := h.syncTemplateFiles(live); err != nil {
 		return statusErr(500, "sync template files: %v", err)
 	}
-	return h.compose.Up(context.Background(), h.project(live))
+	if err := h.compose.Up(context.Background(), h.project(live)); err != nil {
+		return err
+	}
+	return h.checkImageLabels(live)
 }
 
 // syncTemplateFiles publishes the template's support files, serialised per

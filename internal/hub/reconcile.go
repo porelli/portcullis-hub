@@ -206,6 +206,7 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 	known := map[string]bool{}
 	blockedPublic := map[string]string{}
 	desired := map[string]map[string]map[string]string{}
+	expectedKeys := map[string]map[string]map[string]bool{}
 	signInSet := map[string]bool{} // the Hub sets the routers' middlewares
 	nativeOnly := map[string]bool{}
 	for i := range h.instances {
@@ -219,6 +220,9 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 			if acc := h.accessLocked(t); acc.SignIn != "" {
 				signInSet[t.ID] = true
 				nativeOnly[t.ID] = acc.SignIn == SignInNative
+			}
+			if k, err := h.expectedTraefikKeysLocked(t); err == nil {
+				expectedKeys[t.ID] = k
 			}
 			if d, err := h.desiredRouteLabelsLocked(t); err == nil {
 				desired[t.ID] = d
@@ -250,6 +254,11 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 		}
 		if d := diffExposure(c.id, want[c.service], c.labels, signInSet[c.id]); d != "" && exposureDiff[c.id] == "" {
 			exposureDiff[c.id] = c.service + ": " + d
+		}
+		if keys, ok := expectedKeys[c.id]; ok && exposureDiff[c.id] == "" {
+			if extra := extraTraefikKeys(keys[c.service], c.labels); len(extra) > 0 {
+				exposureDiff[c.id] = c.service + ": Traefik labels from the image, not from compose: " + strings.Join(extra, ", ")
+			}
 		}
 	}
 	rep.Items = computeDrift(enabled, known, snapshot, counts, exposureDiff, havePublic, blockedPublic, h.appBusy)
