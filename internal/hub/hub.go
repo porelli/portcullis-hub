@@ -85,6 +85,13 @@ type Hub struct {
 	// receives instance operations (SetAudit). Both guarded by mu.
 	domains DomainSource
 	audit   Auditor
+	// domainsAPI is core's domains service (domains.go; nil = not
+	// configured); domainsReachable: its last call succeeded. Both guarded
+	// by mu. domainOpMu serialises enroll / token / delete (held across
+	// the service calls, never together with mu).
+	domainsAPI       DomainsAPI
+	domainsReachable bool
+	domainOpMu       sync.Mutex
 
 	// mu guards st and templates. Never hold it across docker/network calls.
 	mu        sync.RWMutex
@@ -173,8 +180,9 @@ func New(cfg Config, runner compose.Runner, engine Engine, idp IdP) (*Hub, error
 		kick:      make(chan struct{}, 1),
 		dirKick:   make(chan struct{}, 1),
 		driftKey:  map[string]string{},
-		domains:   mainDomainOnly{cfg.Domain},
 	}
+	// The known list in state.yaml (empty = only the main domain).
+	h.domains = knownDomains{h}
 	st, err := state.Load(h.statePath())
 	if err != nil {
 		return nil, err

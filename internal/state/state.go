@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -42,6 +43,17 @@ type PublishedApp struct {
 	// ({token} kept, never the tokens); empty when no public router was generated.
 	PublicHosts []string            `json:"public_hosts,omitempty" yaml:"public_hosts,omitempty"`
 	Public      *policy.PublicEntry `json:"public,omitempty" yaml:"public,omitempty"`
+}
+
+// KnownDomain is an enrolled domain as the domains service last reported
+// it. There is deliberately no field for credentials.
+type KnownDomain struct {
+	Name         string     `json:"name" yaml:"name"`
+	Provider     string     `json:"provider" yaml:"provider"`
+	RecordsOK    bool       `json:"records_ok" yaml:"records_ok"`
+	CertNotAfter *time.Time `json:"cert_not_after,omitempty" yaml:"cert_not_after,omitempty"`
+	LastError    string     `json:"last_error,omitempty" yaml:"last_error,omitempty"`
+	State        string     `json:"state" yaml:"state"`
 }
 
 // Instance is an app instance other than a template's implicit default
@@ -96,6 +108,10 @@ type AppState struct {
 	// Portcullis in front. No entry = Portcullis sign-in, then the app's
 	// own login.
 	SignIn map[string]string `json:"sign_in,omitempty" yaml:"sign_in,omitempty"`
+	// Domains is the last known list of enrolled domains (contract §12.3)
+	// with their provider and status — NEVER credentials. It keeps feeding
+	// extra_domains and the portal while the domains service is down.
+	Domains []KnownDomain `json:"domains,omitempty" yaml:"domains,omitempty"`
 
 	// LegacyPassword lists, after Load, the policies that named the removed
 	// "password" factor and were normalised ("" = the global default). Not

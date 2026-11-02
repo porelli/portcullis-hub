@@ -17,6 +17,7 @@ import (
 	"github.com/portcullis/hub/internal/compose"
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
+	"github.com/portcullis/hub/internal/domains"
 	"github.com/portcullis/hub/internal/httpapi"
 	"github.com/portcullis/hub/internal/hub"
 	"github.com/portcullis/hub/internal/invite"
@@ -101,6 +102,14 @@ func main() {
 	if err := invites.Available(); err != nil {
 		log.Printf("invite links disabled (password fallback only): %v", err)
 	}
+	// Enrolled domains (contract §12): core's domains service, bearer secret
+	// from a file. Without it the Domains section says why and instances
+	// use main-domain hosts only; the known list keeps being published.
+	dom := domains.New(env("HUB_DOMAINS_API_URL", domains.DefaultAPIURL), env("HUB_DOMAINS_SECRET_FILE", domains.DefaultSecretFile))
+	if err := dom.Available(); err != nil {
+		log.Printf("domains disabled: %v", err)
+	}
+	h.SetDomainsAPI(dom)
 	dirStore, err := openDirectoryStore(cfg.DataDir)
 	if err != nil {
 		log.Fatalf("refusing to start: %v", err)
@@ -164,6 +173,7 @@ func main() {
 	defer stop()
 	go h.RunReconciler(ctx)
 	go h.RunDirectorySync(ctx)
+	go h.RunDomainSync(ctx, 30*time.Second)
 	if dir.Store != nil && ll.Available() == nil {
 		// Rule groups, exceptions and expiries -> LLDAP membership: every
 		// minute (expiries) and after each directory mutation.

@@ -66,6 +66,8 @@ func (s *Server) Handler() (http.Handler, error) {
 	mux.HandleFunc("/api/settings", s.handleSettings)
 	mux.HandleFunc("GET /api/portal/apps", s.handlePortalApps)
 	s.registerDirectory(mux)
+	// Hub listener only (never people, contract §11.7).
+	s.registerDomains(mux)
 	return ProxySecret(s.Secret, CSRF(mux)), nil
 }
 

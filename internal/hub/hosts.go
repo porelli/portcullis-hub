@@ -36,23 +36,19 @@ const DomainReady = "ready"
 // DomainSource lists the known domains. Every entry other than the main
 // domain is an enrolled domain: a host at or under one is an extra-domain
 // host (§5). Domains is called under the Hub's lock: it must return a
-// cached list (no network calls). Task 7's domains client provides it;
-// until then only the main domain exists.
+// cached list (no network calls): in production knownDomains, the last
+// known list of the domains service in state.yaml (domains.go).
 type DomainSource interface {
 	Domains() []Domain
 }
 
-// mainDomainOnly is the DomainSource with no enrolled domain.
-type mainDomainOnly struct{ name string }
-
-func (m mainDomainOnly) Domains() []Domain { return []Domain{{Name: m.name, State: DomainReady}} }
-
-// SetDomainSource replaces the domain list (call before serving).
+// SetDomainSource replaces the domain list (tests; production uses the
+// known list in state.yaml, domains.go). nil = the known list.
 func (h *Hub) SetDomainSource(ds DomainSource) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if ds == nil {
-		ds = mainDomainOnly{h.cfg.Domain}
+		ds = knownDomains{h}
 	}
 	h.domains = ds
 	h.rebuildLocked()
@@ -154,6 +150,9 @@ func placeHost(router, host, main string, enrolled []Domain, keep bool) error {
 	if d, ok := extraDomainOf(host, enrolled); ok {
 		if rest := strings.TrimSuffix(strings.TrimSuffix(host, d.Name), "."); rest != "" && !templates.ValidLabel(rest) {
 			return statusErr(400, "hostname %s (host router %s): only %s or <label>.%s — the domain's certificate covers one label", host, router, d.Name, d.Name)
+		}
+		if d.State == DomainUnreachable && !keep {
+			return errDomainsUnreachable(host, router, d.Name)
 		}
 		if d.State != DomainReady && !keep {
 			return statusErr(409, "hostname %s (host router %s): domain %s is not assignable yet (state %q: its records or certificate are not ready)", host, router, d.Name, d.State)
