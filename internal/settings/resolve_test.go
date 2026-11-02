@@ -1,6 +1,7 @@
 package settings
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/portcullis/hub/internal/templates"
@@ -77,7 +78,7 @@ func TestMaxMinWithUnlimited(t *testing.T) {
 		t.Errorf("max: want Others=[{office_milan, 10GiB}], got %v", res.Reason.Others)
 	}
 
-	// Min: 10 GiB wins
+	// Min: 10 GiB wins, Others includes unlimited
 	o.Resolve = templates.ResolveMin
 	config.Rule = o.Resolve
 	res = r.Resolve(o, config, bob)
@@ -86,6 +87,31 @@ func TestMaxMinWithUnlimited(t *testing.T) {
 	}
 	if res.Reason.Group != "office_milan" {
 		t.Errorf("min: want group office_milan, got %s", res.Reason.Group)
+	}
+	if len(res.Reason.Others) != 1 || res.Reason.Others[0].Group != "it_staff" {
+		t.Errorf("min: want Others=[{it_staff, unlimited}], got %v", res.Reason.Others)
+	}
+
+	// Tie case: two equal values, earlier row wins
+	o.Resolve = templates.ResolveMax
+	tieRows := []Row{
+		{Group: "office_milan", GroupID: 7, Value: int64(10 * GiB)},
+		{Group: "office_paris", GroupID: 8, Value: int64(10 * GiB)},
+	}
+	config.Rows = tieRows
+	alice := Person{
+		User:   "alice",
+		Groups: map[string]int{"office_milan": 7, "office_paris": 8},
+	}
+	res = r.Resolve(o, config, alice)
+	if res.Value != int64(10*GiB) {
+		t.Errorf("tie: want 10 GiB, got %v", res.Value)
+	}
+	if res.Reason.Group != "office_milan" {
+		t.Errorf("tie: want group office_milan (earlier), got %s", res.Reason.Group)
+	}
+	if len(res.Reason.Others) != 1 {
+		t.Errorf("tie: want 1 Other, got %d", len(res.Reason.Others))
 	}
 }
 
@@ -136,9 +162,11 @@ func TestPriorityRowOrder(t *testing.T) {
 func TestUnionIntersection(t *testing.T) {
 	r := NewRegistry()
 
+	// Test with multi_enum
 	rows := []Row{
 		{Group: "it_staff", GroupID: 9, Value: []any{"a", "b"}},
 		{Group: "office_milan", GroupID: 7, Value: []any{"b", "c"}},
+		{Group: "office_paris", GroupID: 8, Value: []any{"d"}}, // bob isn't in this
 	}
 	bob := Person{
 		User:   "bob",
@@ -160,7 +188,11 @@ func TestUnionIntersection(t *testing.T) {
 		t.Errorf("union: want source %s, got %s", ReasonCombined, res.Reason.Source)
 	}
 	if len(res.Reason.Groups) != 2 {
-		t.Errorf("union: want 2 groups, got %v", res.Reason.Groups)
+		t.Errorf("union: want 2 groups, got %d: %v", len(res.Reason.Groups), res.Reason.Groups)
+	}
+	// Groups should be sorted
+	if len(res.Reason.Groups) == 2 && (res.Reason.Groups[0] != "it_staff" || res.Reason.Groups[1] != "office_milan") {
+		t.Errorf("union: want sorted groups [it_staff office_milan], got %v", res.Reason.Groups)
 	}
 
 	// Intersection
@@ -173,6 +205,26 @@ func TestUnionIntersection(t *testing.T) {
 	}
 	if res.Reason.Source != ReasonCombined {
 		t.Errorf("intersection: want source %s, got %s", ReasonCombined, res.Reason.Source)
+	}
+
+	// Test with groups type
+	o2 := &templates.Option{
+		Type:    templates.TypeGroups,
+		Resolve: templates.ResolveUnion,
+	}
+	rowsGroups := []Row{
+		{Group: "it_staff", GroupID: 9, Value: []any{"group_a", "group_b"}},
+		{Group: "office_milan", GroupID: 7, Value: []any{"group_b", "group_c"}},
+	}
+	config2 := PersonConfig{Default: []any{}, Rule: o2.Resolve, Rows: rowsGroups}
+	res = r.Resolve(o2, config2, bob)
+	unionGroups := res.Value.([]any)
+	// groups type canonicalizes: dedupes and sorts
+	if len(unionGroups) != 3 {
+		t.Errorf("groups union: want 3 groups, got %d: %v", len(unionGroups), unionGroups)
+	}
+	if res.Reason.Source != ReasonCombined {
+		t.Errorf("groups union: want source %s, got %s", ReasonCombined, res.Reason.Source)
 	}
 }
 
@@ -277,6 +329,41 @@ func TestRowIDMismatchGrantsNothing(t *testing.T) {
 	}
 }
 
+func TestIncomparableValues(t *testing.T) {
+	r := NewRegistry()
+	o := &templates.Option{
+		Type:    templates.TypeEnum,
+		Resolve: templates.ResolveMin,
+		Choices: []templates.EnumOption{
+			{Value: "viewer", Label: "Viewer"},
+			{Value: "editor", Label: "Editor"},
+		},
+	}
+
+	// Row has a stale enum value "admin" not in choices
+	config := PersonConfig{
+		Default: "viewer",
+		Rule:    o.Resolve,
+		Rows: []Row{
+			{Group: "editors", GroupID: 5, Value: "admin"}, // incomparable
+		},
+	}
+
+	bob := Person{
+		User:   "bob",
+		Groups: map[string]int{"editors": 5},
+	}
+
+	res := r.Resolve(o, config, bob)
+	// The incomparable value is dropped, so bob gets the default
+	if res.Value != "viewer" {
+		t.Errorf("want default viewer, got %v", res.Value)
+	}
+	if res.Reason.Source != ReasonDefault {
+		t.Errorf("want source %s, got %s", ReasonDefault, res.Reason.Source)
+	}
+}
+
 func TestEffects(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -309,6 +396,7 @@ func TestEffects(t *testing.T) {
 		{templates.AppliesAccountCreation, EffectNone},
 		{templates.AppliesReload, EffectReload},
 		{templates.AppliesRestart, EffectRestart},
+		{"unknown", EffectRestart}, // fail safe
 	}
 
 	for _, tt := range effectTests {
@@ -348,7 +436,7 @@ func TestCheckRequires(t *testing.T) {
 		t.Fatal("want error, got nil")
 	}
 	// Error should mention both keys
-	if !contains(err.Error(), "craft_version") || !contains(err.Error(), "craft_sha256") {
+	if !strings.Contains(err.Error(), "craft_version") || !strings.Contains(err.Error(), "craft_sha256") {
 		t.Errorf("error should name both options, got: %v", err)
 	}
 
@@ -369,17 +457,4 @@ func TestCheckRequires(t *testing.T) {
 	if err := CheckRequires(spec, values); err != nil {
 		t.Errorf("both set: want nil, got %v", err)
 	}
-}
-
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > len(substr) && findSubstring(s, substr))
-}
-
-func findSubstring(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }

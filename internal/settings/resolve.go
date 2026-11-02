@@ -55,6 +55,7 @@ type Resolved struct {
 // Resolve resolves one person option for person p using config c. The
 // default is a fallback: it applies only to people in none of the row groups.
 // A row whose group id mismatches p.Groups[row.Group] is skipped (call 29).
+// Rows are deduped by group (first occurrence wins).
 func (r *Registry) Resolve(o *templates.Option, c PersonConfig, p Person) Resolved {
 	rule := c.Rule
 	if rule == "" {
@@ -62,11 +63,16 @@ func (r *Registry) Resolve(o *templates.Option, c PersonConfig, p Person) Resolv
 	}
 
 	// Find matching rows (rows whose group the person is in, and whose id
-	// matches).
+	// matches). Dedupe by group (first wins).
+	seen := map[string]bool{}
 	var matches []Candidate
 	for _, row := range c.Rows {
+		if seen[row.Group] {
+			continue
+		}
 		if gid, ok := p.Groups[row.Group]; ok && gid == row.GroupID {
 			matches = append(matches, Candidate{Group: row.Group, Value: row.Value})
+			seen[row.Group] = true
 		}
 	}
 
@@ -88,28 +94,37 @@ func (r *Registry) Resolve(o *templates.Option, c PersonConfig, p Person) Resolv
 	case templates.ResolvePriority:
 		return resolvePriority(matches, rule)
 	case templates.ResolveUnion:
-		return resolveUnion(matches, rule)
+		return r.resolveUnion(o, matches, rule)
 	case templates.ResolveIntersection:
-		return resolveIntersection(matches, rule)
+		return r.resolveIntersection(o, matches, rule)
 	case templates.ResolveAny:
 		return resolveAny(matches, rule)
 	case templates.ResolveAll:
 		return resolveAll(matches, rule)
-	default:
-		// Shouldn't happen (validator checks this)
-		return Resolved{
-			Value: c.Default,
-			Reason: Reason{
-				Source: ReasonDefault,
-				Rule:   rule,
-			},
-		}
 	}
+
+	// Unreachable (validator ensures rule is valid)
+	return Resolved{Value: c.Default, Reason: Reason{Source: ReasonDefault, Rule: rule}}
 }
 
 // resolveMaxMin resolves max or min by comparing values.
 func (r *Registry) resolveMaxMin(o *templates.Option, rule string, matches []Candidate, def Value) Resolved {
-	if len(matches) == 0 {
+	k, err := r.Kind(o.Type)
+	if err != nil {
+		// Shouldn't happen
+		return Resolved{Value: def, Reason: Reason{Source: ReasonDefault, Rule: rule}}
+	}
+
+	// Drop values not comparable to themselves (e.g., stale enum values)
+	var comparable []Candidate
+	for _, m := range matches {
+		if _, ok := k.Compare(o, m.Value, m.Value); ok {
+			comparable = append(comparable, m)
+		}
+	}
+
+	// No comparable matches → default
+	if len(comparable) == 0 {
 		return Resolved{
 			Value: def,
 			Reason: Reason{
@@ -119,17 +134,11 @@ func (r *Registry) resolveMaxMin(o *templates.Option, rule string, matches []Can
 		}
 	}
 
-	k, err := r.Kind(o.Type)
-	if err != nil {
-		// Shouldn't happen
-		return Resolved{Value: def, Reason: Reason{Source: ReasonDefault, Rule: rule}}
-	}
-
-	best := matches[0]
+	best := comparable[0]
 	var others []Candidate
 
-	for i := 1; i < len(matches); i++ {
-		cand := matches[i]
+	for i := 1; i < len(comparable); i++ {
+		cand := comparable[i]
 		cmp, ok := k.Compare(o, best.Value, cand.Value)
 		if !ok {
 			// Type not comparable (shouldn't happen)
@@ -187,11 +196,6 @@ func (r *Registry) resolveMaxMin(o *templates.Option, rule string, matches []Can
 
 // resolvePriority picks the first match (admin's row order).
 func resolvePriority(matches []Candidate, rule string) Resolved {
-	if len(matches) == 0 {
-		// Shouldn't happen
-		return Resolved{}
-	}
-
 	best := matches[0]
 	var others []Candidate
 	if len(matches) > 1 {
@@ -210,13 +214,14 @@ func resolvePriority(matches []Candidate, rule string) Resolved {
 }
 
 // resolveUnion computes the union of all matching sets.
-func resolveUnion(matches []Candidate, rule string) Resolved {
+func (r *Registry) resolveUnion(o *templates.Option, matches []Candidate, rule string) Resolved {
 	seen := map[any]bool{}
 	var result []any
 
 	for _, m := range matches {
 		list, ok := m.Value.([]any)
 		if !ok {
+			// Treat non-list as empty set
 			continue
 		}
 		for _, item := range list {
@@ -224,6 +229,19 @@ func resolveUnion(matches []Candidate, rule string) Resolved {
 				seen[item] = true
 				result = append(result, item)
 			}
+		}
+	}
+
+	// Empty result
+	if result == nil {
+		result = []any{}
+	}
+
+	// Canonicalize through Parse (dedupes, sorts)
+	k, err := r.Kind(o.Type)
+	if err == nil {
+		if canonical, err := k.Parse(o, result); err == nil {
+			result = canonical.([]any)
 		}
 	}
 
@@ -244,44 +262,49 @@ func resolveUnion(matches []Candidate, rule string) Resolved {
 }
 
 // resolveIntersection computes the intersection of all matching sets.
-func resolveIntersection(matches []Candidate, rule string) Resolved {
-	if len(matches) == 0 {
-		return Resolved{Value: []any{}}
-	}
-
-	// Start with the first set
-	first, ok := matches[0].Value.([]any)
-	if !ok {
-		return Resolved{Value: []any{}}
-	}
-
-	counts := map[any]int{}
-	for _, item := range first {
-		counts[item]++
-	}
-
-	// Count occurrences in other sets
-	for i := 1; i < len(matches); i++ {
-		list, ok := matches[i].Value.([]any)
+func (r *Registry) resolveIntersection(o *templates.Option, matches []Candidate, rule string) Resolved {
+	// Build a set per match (treat non-list as empty set)
+	sets := make([]map[any]bool, len(matches))
+	for i, m := range matches {
+		sets[i] = map[any]bool{}
+		list, ok := m.Value.([]any)
 		if !ok {
+			// Treat non-list as empty set
 			continue
 		}
-		seen := map[any]bool{}
 		for _, item := range list {
-			if _, exists := counts[item]; exists && !seen[item] {
-				counts[item]++
-				seen[item] = true
+			sets[i][item] = true
+		}
+	}
+
+	// Keep only items present in every set
+	var result []any
+	if len(sets) > 0 {
+		// Start with items from first set
+		for item := range sets[0] {
+			inAll := true
+			for i := 1; i < len(sets); i++ {
+				if !sets[i][item] {
+					inAll = false
+					break
+				}
+			}
+			if inAll {
+				result = append(result, item)
 			}
 		}
 	}
 
-	// Keep only items present in all sets
-	var result []any
-	for _, item := range first {
-		if counts[item] == len(matches) {
-			result = append(result, item)
-			// Mark as added to avoid duplicates
-			counts[item] = -1
+	// Empty result
+	if result == nil {
+		result = []any{}
+	}
+
+	// Canonicalize through Parse (dedupes, sorts)
+	k, err := r.Kind(o.Type)
+	if err == nil {
+		if canonical, err := k.Parse(o, result); err == nil {
+			result = canonical.([]any)
 		}
 	}
 

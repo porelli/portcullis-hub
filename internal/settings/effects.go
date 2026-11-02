@@ -12,7 +12,8 @@ const (
 )
 
 // EffectOf maps an applies value to its effect: live/next_request/next_sign_in/
-// account_creation → none, reload → reload, restart → restart.
+// account_creation → none, reload → reload, restart → restart. Unknown values
+// → restart (strongest, fail safe).
 func EffectOf(applies string) string {
 	switch applies {
 	case templates.AppliesLive,
@@ -25,7 +26,7 @@ func EffectOf(applies string) string {
 	case templates.AppliesRestart:
 		return EffectRestart
 	default:
-		return EffectNone
+		return EffectRestart
 	}
 }
 
