@@ -55,7 +55,7 @@ func TestCLI(t *testing.T) {
 	out := string(b)
 	for _, want := range []string{
 		"compose -p portcullis-app -f /c.yml up --no-start --no-deps",
-		"compose -p portcullis-app -f /c.yml up -d --no-deps",
+		"compose -p portcullis-app -f /c.yml up -d --no-deps --pull never",
 		"compose -p portcullis-app -f /c.yml down --remove-orphans",
 		"compose -p portcullis-app down --remove-orphans",
 		"DOCKER_HOST=tcp://socket-proxy-hub:2375 ORPHANS=true",

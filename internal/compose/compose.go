@@ -195,9 +195,11 @@ func (c *CLI) Create(ctx context.Context, p Project) error {
 	return c.run(ctx, c.UpTimeout, "up", Args(p, "up", "--no-start", "--no-deps"))
 }
 
-// Up runs `up -d --no-deps`.
+// Up runs `up -d --no-deps --pull never`: Create already pulled the
+// images it inspected, so Up starts exactly those (a re-pull between the
+// two could swap in an image whose labels the Hub never saw).
 func (c *CLI) Up(ctx context.Context, p Project) error {
-	return c.run(ctx, c.UpTimeout, "up", Args(p, "up", "-d", "--no-deps"))
+	return c.run(ctx, c.UpTimeout, "up", Args(p, "up", "-d", "--no-deps", "--pull", "never"))
 }
 
 // Down runs `down --remove-orphans` (volumes are kept): containers of
