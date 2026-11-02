@@ -85,7 +85,9 @@ func (h *Hub) deleteInstance(id, confirm, actor string, ready func()) (res *Dele
 	if ready != nil {
 		ready()
 	}
-	if tg.entry.State == state.InstanceRestoring {
+	if tg.entry.State == state.InstanceRestoring && tg.entry.RestoreAs != "" {
+		res.Warnings = append(res.Warnings, fmt.Sprintf("%s was being restored from %s and never finished: the delete backup holds its half-restored data", id, tg.entry.RestoreAs))
+	} else if tg.entry.State == state.InstanceRestoring {
 		res.Warnings = append(res.Warnings, fmt.Sprintf("%s had an unfinished restore: the delete backup holds its half-restored data; its data from before that restore is in the pre-restore backup %s", id, tg.entry.Backup))
 	}
 	if tg.entry.State == state.InstanceDeleting {
@@ -255,13 +257,14 @@ func (h *Hub) deleteSteps(id, actor string, res *DeleteResult) error {
 	}
 
 	// 6. Files, ops record, state; policy and portal.
-	for _, p := range []string{h.envPath(id), h.overridePath(id), h.userOverridePath(id), h.opPath(id)} {
+	for _, p := range []string{h.envPath(id), h.overridePath(id), h.userOverridePath(id), h.opPath(id), h.hostsOpPath(id)} {
 		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("removing %s: %w", p, err)
 		}
 	}
 	h.opsMu.Lock()
 	delete(h.ops, id)
+	delete(h.hostsOps, id)
 	h.opsMu.Unlock()
 	h.mu.Lock()
 	h.st.SetEnabled(id, false)

@@ -256,13 +256,14 @@ func (s *Server) handleRestoreAs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var b struct {
-		Archive string `json:"archive"`
-		ID      string `json:"id"`
+		Archive string            `json:"archive"`
+		ID      string            `json:"id"`
+		Hosts   map[string]string `json:"hosts"`
 	}
-	if !decodeStrict(w, r, &b, `{"archive": "<instance-id>/<YYYYMMDDTHHMMSSZ>.tar", "id": "<new instance-id>"}`) {
+	if !decodeStrict(w, r, &b, `{"archive": "<instance-id>/<YYYYMMDDTHHMMSSZ>.tar", "id": "<new instance-id>", "hosts": {"<host router>": "<hostname>"} (optional)}`) {
 		return
 	}
-	op, err := s.Hub.StartRestoreAs(b.Archive, b.ID, actor(r))
+	op, err := s.Hub.StartRestoreAs(b.Archive, b.ID, actor(r), b.Hosts)
 	noStore(w)
 	if err != nil {
 		writeErr(w, err, http.StatusInternalServerError)

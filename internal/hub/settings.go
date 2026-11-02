@@ -3,11 +3,13 @@ package hub
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"log"
 	"net"
 	"os"
 	"strconv"
 
+	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
@@ -209,7 +211,7 @@ type SettingsUpdate struct {
 // SaveSettings validates and stores an app's settings (and optionally its
 // policy) in one state change, rewrites its override/.env and, if enabled,
 // queues a restart.
-func (h *Hub) SaveSettings(id string, u SettingsUpdate) error {
+func (h *Hub) SaveSettings(id string, u SettingsUpdate) (retErr error) {
 	t := h.Template(id)
 	if t == nil {
 		return ErrNotFound
@@ -229,6 +231,22 @@ func (h *Hub) SaveSettings(id string, u SettingsUpdate) error {
 	}
 	if problems := configProblems(t, u, native); len(problems) > 0 {
 		return problems[0]
+	}
+	// A sign-in mode change of an enabled instance moves its extra-domain
+	// sign-in callbacks (contract §5) first: a Keycloak failure changes
+	// nothing; a later failure here undoes them.
+	if add, remove := h.signInCallbackChange(t, u.SignIn); len(add)+len(remove) > 0 && h.idp != nil {
+		if err := h.idp.UpdateForwardAuthCallbacks(context.Background(), add, remove); err != nil {
+			return &StatusError{Status: 502, Err: fmt.Errorf("sign-in mode not changed (nothing was saved): Keycloak %s callbacks: %w", keycloak.ForwardAuthClient, err)}
+		}
+		defer func() {
+			if retErr == nil {
+				return
+			}
+			if err := h.idp.UpdateForwardAuthCallbacks(context.Background(), remove, add); err != nil {
+				log.Printf("settings: %s: undoing the %s callback change failed: %v", id, keycloak.ForwardAuthClient, err)
+			}
+		}()
 	}
 
 	h.mu.Lock()
@@ -345,6 +363,34 @@ func (h *Hub) SaveSettings(id string, u SettingsUpdate) error {
 		h.goBackground(func() { h.Restart(tmpl) })
 	}
 	return nil
+}
+
+// signInCallbackChange: the callback URIs a sign-in mode change of
+// enabled instance t adds and removes (signInExtraHostsLocked under the
+// current and the new mode; nothing for a disabled instance or no change).
+func (h *Hub) signInCallbackChange(t *templates.Template, mode *string) (add, remove []string) {
+	if mode == nil {
+		return nil, nil
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !h.st.IsEnabled(t.ID) {
+		return nil, nil
+	}
+	before := callbackURIs(h.signInExtraHostsLocked(t))
+	prev, had := h.st.SignIn[t.ID]
+	if *mode == SignInNative {
+		h.st.SignIn[t.ID] = state.SignInNative
+	} else {
+		delete(h.st.SignIn, t.ID)
+	}
+	after := callbackURIs(h.signInExtraHostsLocked(t))
+	if had {
+		h.st.SignIn[t.ID] = prev
+	} else {
+		delete(h.st.SignIn, t.ID)
+	}
+	return minus(after, before), minus(before, after)
 }
 
 // DefaultPolicy returns the global default policy.

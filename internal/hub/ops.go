@@ -69,11 +69,24 @@ func (e *OpError) Unwrap() error { return e.Err }
 func (h *Hub) opsDir() string          { return filepath.Join(h.cfg.DataDir, "ops") }
 func (h *Hub) opPath(id string) string { return filepath.Join(h.opsDir(), id+".json") }
 
+// hostsOpPath keeps the last hostname change's record (OpHosts) apart
+// from the last operation: a later enable / backup must not hide a failed
+// hostname change that SetHosts re-applies.
+func (h *Hub) hostsOpPath(id string) string { return filepath.Join(h.opsDir(), id+".hosts.json") }
+
 // loadOps reads the stored records (unreadable ones are skipped).
 func (h *Hub) loadOps() {
 	h.ops = map[string]OpRecord{}
+	h.hostsOps = map[string]OpRecord{}
 	entries, _ := os.ReadDir(h.opsDir())
 	for _, e := range entries {
+		if id, ok := strings.CutSuffix(e.Name(), ".hosts.json"); ok && templates.ValidID(id) {
+			var r OpRecord
+			if data, err := os.ReadFile(filepath.Join(h.opsDir(), e.Name())); err == nil && json.Unmarshal(data, &r) == nil {
+				h.hostsOps[id] = r
+			}
+			continue
+		}
 		id, ok := strings.CutSuffix(e.Name(), ".json")
 		if !ok || !templates.ValidID(id) {
 			continue
@@ -83,9 +96,22 @@ func (h *Hub) loadOps() {
 			continue
 		}
 		var r OpRecord
-		if json.Unmarshal(data, &r) == nil {
-			h.ops[id] = r
+		if json.Unmarshal(data, &r) != nil {
+			continue
 		}
+		if r.Running {
+			// The Hub stopped while it ran: it never finished. Restores
+			// are recovered by RecoverRestores, deletes stay "deleting".
+			r.Running, r.OK, r.Status = false, false, 500
+			r.Error = "interrupted: the Hub stopped while this " + r.Op + " was running — check the instance and run it again"
+			if out, err := json.MarshalIndent(r, "", "  "); err == nil {
+				if err := fsutil.WriteFileAtomic(filepath.Join(h.opsDir(), e.Name()), out, 0600); err != nil {
+					log.Printf("ops: cannot mark %s %s interrupted: %v", r.Op, id, err)
+				}
+			}
+			log.Printf("ops: %s %s was interrupted by a Hub stop", r.Op, id)
+		}
+		h.ops[id] = r
 	}
 }
 
@@ -99,13 +125,23 @@ func (h *Hub) LastOp(id string) *OpRecord {
 	return nil
 }
 
+// lastHostsOp is id's last hostname change record (nil: none).
+func (h *Hub) lastHostsOp(id string) *OpRecord {
+	h.opsMu.Lock()
+	defer h.opsMu.Unlock()
+	if r, ok := h.hostsOps[id]; ok {
+		return &r
+	}
+	return nil
+}
+
 // FailedOps maps app ID → operation, for apps whose last operation failed.
 func (h *Hub) FailedOps() map[string]string {
 	h.opsMu.Lock()
 	defer h.opsMu.Unlock()
 	out := map[string]string{}
 	for id, r := range h.ops {
-		if !r.OK {
+		if !r.OK && !r.Running {
 			out[id] = r.Op
 		}
 	}
@@ -137,10 +173,18 @@ func (h *Hub) finishOp(id, op string, err error, rolledBack bool) error {
 	}
 	h.opsMu.Lock()
 	h.ops[id] = r
+	if op == OpHosts {
+		h.hostsOps[id] = r
+	}
 	h.opsMu.Unlock()
 	if data, merr := json.MarshalIndent(r, "", "  "); merr == nil {
 		if werr := fsutil.WriteFileAtomic(h.opPath(id), data, 0600); werr != nil {
 			log.Printf("ops: cannot record %s %s: %v", op, id, werr)
+		}
+		if op == OpHosts {
+			if werr := fsutil.WriteFileAtomic(h.hostsOpPath(id), data, 0600); werr != nil {
+				log.Printf("ops: cannot record %s %s: %v", op, id, werr)
+			}
 		}
 	}
 	if err == nil {

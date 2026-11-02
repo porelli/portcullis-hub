@@ -120,6 +120,10 @@ func (h *Hub) renderOverrideLocked(t *templates.Template, values map[string]stri
 	for svc := range replaced {
 		services[svc] = true
 	}
+	// The extra-domain sign-in routers' service may route nothing itself.
+	if len(rl.signInLabels) > 0 {
+		services[rl.signInService] = true
+	}
 	names := make([]string, 0, len(services))
 	for svc := range services {
 		names = append(names, svc)
@@ -159,7 +163,10 @@ func (h *Hub) renderOverrideLocked(t *templates.Template, values map[string]stri
 			}
 			continue
 		}
-		if routers := serviceRouters[svc]; len(routers) > 0 {
+		routers := serviceRouters[svc]
+		public := plan != nil && svc == plan.Service && len(publicLines) > 0
+		signIn := svc == rl.signInService && len(rl.signInLabels) > 0
+		if len(routers) > 0 || public || signIn {
 			b.WriteString("    labels:\n")
 			for _, r := range routers {
 				fmt.Fprintf(&b, "      traefik.http.routers.%s.tls.options: %s\n", r, tier)
@@ -167,12 +174,12 @@ func (h *Hub) renderOverrideLocked(t *templates.Template, values map[string]stri
 					fmt.Fprintf(&b, "      traefik.http.routers.%s.middlewares: %s\n", r, mw)
 				}
 			}
-			if plan != nil && svc == plan.Service {
+			if public {
 				for _, l := range publicLines {
 					fmt.Fprintf(&b, "      %s\n", l)
 				}
 			}
-			if svc == rl.signInService {
+			if signIn {
 				keys := make([]string, 0, len(rl.signInLabels))
 				for k := range rl.signInLabels {
 					keys = append(keys, k)
@@ -373,6 +380,10 @@ func (h *Hub) extraSignInLocked(t *templates.Template, rl *routeLabels) error {
 		names = append(names, name)
 	}
 	sort.Strings(names)
+	chains, err := templateChains(t.ReadCompose())
+	if err != nil {
+		return err
+	}
 	maxBound := 0
 	for _, name := range names {
 		ri := rl.routes.Info[name]
@@ -411,8 +422,16 @@ func (h *Hub) extraSignInLocked(t *templates.Template, rl *routeLabels) error {
 		out := make([]string, 0, len(mws))
 		for _, m := range mws {
 			m = strings.TrimSpace(m)
-			if m == gatewayMiddlewares[0] {
+			base, prov, _ := strings.Cut(m, "@")
+			docker := prov == "" || prov == "docker"
+			switch {
+			case docker && base == authMiddlewareName:
 				m, uses = ExtAuthMiddleware, true
+			case docker && chainReachesAuth(chains, base, map[string]bool{}):
+				// Its chain would keep the main-domain sign-in on an
+				// extra-domain host (the Hub swaps only the router's own
+				// list).
+				return fmt.Errorf("router %s routes extra-domain hosts but reaches portcullis-auth@docker through the template's chain middleware %s: list portcullis-auth@docker on the router itself to use an extra domain", name, m)
 			}
 			out = append(out, m)
 		}
@@ -460,6 +479,53 @@ func (h *Hub) extraSignInLocked(t *templates.Template, rl *routeLabels) error {
 		rl.signInLabels[k+"service"] = "forward-auth-ext@docker"
 	}
 	return nil
+}
+
+// authMiddlewareName is core's forwardAuth middleware (as
+// portcullis-auth@docker, or without a provider on a docker label).
+const authMiddlewareName = "portcullis-auth"
+
+// templateChains maps each chain middleware the template's labels define
+// (folded name) to its members.
+func templateChains(compose []byte) (map[string][]string, error) {
+	labels, err := templates.ServiceLabels(compose)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string][]string{}
+	for _, l := range labels {
+		for k, v := range l {
+			segs := strings.Split(templates.FoldKey(strings.TrimSpace(k)), ".")
+			if len(segs) == 6 && segs[0] == "traefik" && segs[1] == "http" && segs[2] == "middlewares" && segs[4] == "chain" && segs[5] == "middlewares" {
+				for _, m := range strings.Split(v, ",") {
+					if m = strings.TrimSpace(m); m != "" {
+						out[segs[3]] = append(out[segs[3]], m)
+					}
+				}
+			}
+		}
+	}
+	return out, nil
+}
+
+// chainReachesAuth: chain middleware name (the template's own, docker
+// provider) includes portcullis-auth, directly or through nested chains.
+func chainReachesAuth(chains map[string][]string, name string, seen map[string]bool) bool {
+	name = strings.ToLower(name)
+	if seen[name] {
+		return false
+	}
+	seen[name] = true
+	for _, m := range chains[name] {
+		base, prov, _ := strings.Cut(m, "@")
+		if prov != "" && prov != "docker" {
+			continue
+		}
+		if base == authMiddlewareName || chainReachesAuth(chains, base, seen) {
+			return true
+		}
+	}
+	return false
 }
 
 // desiredRouteLabelsLocked returns, per compose service, the Traefik

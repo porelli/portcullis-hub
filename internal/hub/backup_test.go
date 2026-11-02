@@ -764,14 +764,60 @@ func TestRestoreNewIDImmutableHosts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The archive's hostname is still talk-b's: refused, nothing created.
 	if _, err := f.h.RestoreInstanceAs(entry.Archive, "talk-c", "root"); statusOf(err) != 409 || !strings.Contains(err.Error(), "talk-b") {
 		t.Errorf("restore as a new id = %v", err)
 	}
 	if f.h.Template("talk-c") != nil {
 		t.Error("talk-c was created")
 	}
+	// Another hostname for the immutable router: refused.
+	if _, err := f.h.RestoreInstanceAsWith(entry.Archive, "talk-c", "root", map[string]string{"talk": "talk-c.example.org"}); statusOf(err) != 409 || !strings.Contains(err.Error(), "data is bound") {
+		t.Errorf("restore as a new id with another immutable host = %v", err)
+	}
 	if _, err := f.h.RestoreInstance("talk-b", entry.Archive, "root"); err != nil {
 		t.Errorf("same-id restore: %v", err)
+	}
+	// Once talk-b is deleted, its hostname is free: a new id gets the
+	// archive's hostname (final review I3).
+	host := f.h.Template("talk-b").Hosts["talk"]
+	if _, err := f.h.DeleteInstance("talk-b", "talk-b", "root"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.h.RestoreInstanceAs(entry.Archive, "talk-c", "root"); err != nil {
+		t.Fatalf("restore as a new id after the delete: %v", err)
+	}
+	v := f.h.Template("talk-c")
+	if v == nil || v.Hosts["talk"] != host {
+		t.Fatalf("talk-c hosts = %v, want %s", v, host)
+	}
+	f.h.mu.RLock()
+	e := f.h.st.Instances["talk-c"]
+	f.h.mu.RUnlock()
+	if e.State != state.InstanceCreated || e.RestoreAs != "" {
+		t.Errorf("talk-c entry after the restore = %+v", e)
+	}
+}
+
+// TestRestoreAsHostsGiven: restore-as takes optional hostnames, validated
+// like CreateInstance.
+func TestRestoreAsHostsGiven(t *testing.T) {
+	f, _, _ := grafanaB(t)
+	entry, err := f.h.BackupInstance("grafana-b", "root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.h.RestoreInstanceAsWith(entry.Archive, "grafana-c", "root", map[string]string{"grafana": "grafana-b.example.org"}); statusOf(err) != 409 {
+		t.Errorf("taken hostname = %v", err)
+	}
+	if _, err := f.h.RestoreInstanceAsWith(entry.Archive, "grafana-c", "root", map[string]string{"nope": "x.example.org"}); statusOf(err) != 400 {
+		t.Errorf("unknown router = %v", err)
+	}
+	if _, err := f.h.RestoreInstanceAsWith(entry.Archive, "grafana-c", "root", map[string]string{"grafana": "Dash.Example.org."}); err != nil {
+		t.Fatal(err)
+	}
+	if v := f.h.Template("grafana-c"); v == nil || v.Hosts["grafana"] != "dash.example.org" {
+		t.Fatalf("grafana-c = %v", v)
 	}
 }
 

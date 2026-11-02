@@ -230,6 +230,7 @@ type fakeIdP struct {
 	// onCallbacks, if set, runs (once) at the start of the next
 	// UpdateForwardAuthCallbacks, without f.mu.
 	onCallbacks func()
+	callbackErr error    // UpdateForwardAuthCallbacks fails with it (recorded nothing)
 	access      []string // "+<client>:<owner>:<group>" / "-<client>:<owner>"
 	accessErr   error
 	deleted     []string // "<client>:<owner>"
@@ -301,6 +302,9 @@ func (f *fakeIdP) UpdateForwardAuthCallbacks(ctx context.Context, add, remove []
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.callbackErr != nil {
+		return f.callbackErr
+	}
 	if len(add)+len(remove) > 0 {
 		f.callbacks = append(f.callbacks, "+"+strings.Join(add, ",")+" -"+strings.Join(remove, ","))
 	}

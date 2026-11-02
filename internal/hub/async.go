@@ -55,7 +55,12 @@ func (h *Hub) startAsync(id, op string, fn func(ready func()) (map[string]string
 		})
 	}
 	done := make(chan error, 1)
+	// Tracked in h.bg: the Hub waits (bounded) for it on shutdown
+	// (WaitTimeout); a record still "running" at the next start is marked
+	// interrupted (loadOps).
+	h.bg.Add(1)
 	go func() {
+		defer h.bg.Done()
 		result, warnings, err := fn(ready)
 		select {
 		case <-accepted:
@@ -166,9 +171,9 @@ func (h *Hub) StartRestore(id, archive, actor string) (*AsyncOp, error) {
 
 // StartRestoreAs starts a restore into the new instance newID in the
 // background (its op record is newID's); the result holds "instance".
-func (h *Hub) StartRestoreAs(archive, newID, actor string) (*AsyncOp, error) {
+func (h *Hub) StartRestoreAs(archive, newID, actor string, hosts map[string]string) (*AsyncOp, error) {
 	return h.startAsync(newID, OpRestore, func(ready func()) (map[string]string, []string, error) {
-		res, err := h.restoreInstanceAs(archive, newID, actor, ready)
+		res, err := h.restoreInstanceAs(archive, newID, actor, hosts, ready)
 		return restoreResult(res, archive, newID), restoreWarnings(res), err
 	})
 }

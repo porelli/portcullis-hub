@@ -203,7 +203,16 @@ func main() {
 			log.Fatal(err)
 		}
 	}
+	// Background backups / restores / deletes get a bounded time to finish
+	// (core's stop_grace_period for the hub is longer); one still running
+	// is marked interrupted at the next start.
+	if !h.WaitTimeout(shutdownWait) {
+		log.Printf("shutdown: background instance operations still running after %s — they are marked interrupted at the next start", shutdownWait)
+	}
 }
+
+// shutdownWait bounds the wait for background operations on shutdown.
+const shutdownWait = 50 * time.Second
 
 // newHTTPServer: both listeners use the same timeouts.
 func newHTTPServer(addr string, h http.Handler) *http.Server {

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/policy"
@@ -210,6 +211,8 @@ func (h *Hub) restoreTarget(id string) (*templates.Template, state.Instance, err
 	switch {
 	case e.State == state.InstanceDeleting:
 		return nil, e, statusErr(409, "instance %s is being deleted: restore its backup into a new instance instead", id)
+	case e.State == state.InstanceRestoring && e.RestoreAs != "":
+		return nil, e, statusErr(409, "instance %s is being restored from %s (a restore into a new id): wait for it — an interrupted one is removed at the next Hub start, or delete it", id, e.RestoreAs)
 	case v == nil && reason != "":
 		return nil, e, statusErr(409, "instance %s can't be resolved (%s): fix its template first", id, reason)
 	case v == nil:
@@ -342,6 +345,13 @@ func (h *Hub) RecoverRestores() {
 				return
 			}
 			defer unlock()
+			h.mu.RLock()
+			e := h.st.Instances[id]
+			h.mu.RUnlock()
+			if e.State == state.InstanceRestoring && e.RestoreAs != "" {
+				h.removeUnfinishedRestoreAs(id, e.RestoreAs)
+				return
+			}
 			view, e, err := h.restoreTarget(id)
 			if err == nil && e.State == state.InstanceRestoring {
 				err = h.recoverRestoreLocked(id, view, e.Backup)
@@ -351,6 +361,58 @@ func (h *Hub) RecoverRestores() {
 			}
 		})
 	}
+}
+
+// removeUnfinishedRestoreAs removes a new instance an interrupted restore
+// into a new id left behind (state "restoring" with restore_as): its
+// project's volumes, files, per-instance state and state entry — it was
+// never enabled. Its groups stay (no acting admin at start-up; logged:
+// delete them in Users & Groups). Caller holds the app lock.
+func (h *Hub) removeUnfinishedRestoreAs(id, archive string) {
+	ctx := context.Background()
+	var errs []error
+	if h.engine != nil {
+		vols, err := h.projectVolumes(ctx, id)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("listing its volumes: %w", err))
+		}
+		for _, v := range vols {
+			if err := h.engine.RemoveVolume(ctx, v.Name); err != nil && !docker.IsNotFound(err) {
+				errs = append(errs, fmt.Errorf("volume %s: %w", v.Name, err))
+			}
+		}
+	}
+	if len(errs) > 0 {
+		log.Printf("instance %s: removing the unfinished restore from %s failed (it stays \"restoring\"; delete it): %v", id, archive, errors.Join(errs...))
+		return
+	}
+	for _, p := range []string{h.envPath(id), h.overridePath(id), h.userOverridePath(id)} {
+		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+			log.Printf("instance %s: removing %s: %v", id, p, err)
+		}
+	}
+	h.mu.Lock()
+	var groups []string
+	if v := h.findLocked(id); v != nil {
+		n := v.NamesFor(id)
+		for _, g := range []string{n.AccessGroup, n.AdminGroup} {
+			if g != "" {
+				groups = append(groups, g)
+			}
+		}
+	}
+	delete(h.st.Instances, id)
+	h.applyConfigLocked(id, instanceConfig{})
+	h.rebuildLocked()
+	h.saveLocked()
+	h.mu.Unlock()
+	h.writePolicyLogged()
+	msg := fmt.Sprintf("an interrupted restore of %s into the new instance %s was removed (restore it again)", archive, id)
+	if len(groups) > 0 {
+		msg += "; its groups " + strings.Join(groups, ", ") + " may have been created: delete them in Users & Groups if unused"
+	}
+	log.Printf("instance %s: %s", id, msg)
+	h.recordOp(id, OpRecord{Op: OpRestore, At: time.Now().UTC(), Error: msg, Status: 500})
 }
 
 // restorePlan maps the archive's volumes to instance id's: the project's
@@ -496,14 +558,23 @@ func (h *Hub) rollbackStaged(id string, view *templates.Template, pre *staged, w
 // secret_env regenerated). A failure after the create removes what it
 // created. Audited as instance.restore.
 func (h *Hub) RestoreInstanceAs(archive, newID, actor string) (res *RestoreResult, err error) {
-	return h.restoreInstanceAs(archive, newID, actor, nil)
+	return h.restoreInstanceAs(archive, newID, actor, nil, nil)
+}
+
+// RestoreInstanceAsWith is RestoreInstanceAs with hostnames (host router
+// → hostname) for the new instance: given ones are used as CreateInstance
+// would (validated, collisions refused); the others default to the
+// archive's hostname for hosts.immutable routers, else the new id's
+// default on the main domain.
+func (h *Hub) RestoreInstanceAsWith(archive, newID, actor string, hosts map[string]string) (res *RestoreResult, err error) {
+	return h.restoreInstanceAs(archive, newID, actor, hosts, nil)
 }
 
 // restoreInstanceAs is RestoreInstanceAs; ready (if set) is called once
 // the request is accepted (archive name and new id valid, lock held, the
 // archive file exists, the actor resolves), before the archive is
 // verified (StartRestoreAs answers 202 then).
-func (h *Hub) restoreInstanceAs(archive, newID, actor string, ready func()) (res *RestoreResult, err error) {
+func (h *Hub) restoreInstanceAs(archive, newID, actor string, hosts map[string]string, ready func()) (res *RestoreResult, err error) {
 	res = &RestoreResult{}
 	defer func() {
 		h.auditOp(actor, "instance.restore", newID, "archive="+archive+" new_instance=true", err)
@@ -561,14 +632,9 @@ func (h *Hub) restoreInstanceAs(archive, newID, actor string, ready func()) (res
 	if !tmpl.Manifest.Multi() {
 		return res, statusErr(409, "template %s is instances: single — restore the archive into its default instance instead", tmpl.ID)
 	}
-	defaults, err := defaultHostsFor(&tmpl, newID, domain)
+	want, err := restoreAsHosts(&tmpl, newID, domain, sb.cfg.Hosts, hosts)
 	if err != nil {
 		return res, err
-	}
-	for r, old := range sb.cfg.Hosts {
-		if tmpl.Manifest.ImmutableHost(r) && defaults[r] != old {
-			return res, statusErr(409, "template %s fixes the hostname of %s once an instance exists (its data is bound to %s): a new id would get %s — restore the archive into instance %s instead", tmpl.ID, r, old, defaults[r], sb.m.Instance)
-		}
 	}
 	names := tmpl.NamesFor(newID)
 	for k := range sb.volumes {
@@ -597,9 +663,21 @@ func (h *Hub) restoreInstanceAs(archive, newID, actor string, ready func()) (res
 		}
 	}
 
-	if err := h.CreateInstance(tmpl.ID, newID, nil); err != nil {
+	// Validated as CreateInstance validates any hostname: an immutable
+	// router's archived hostname that is taken or no longer placeable is
+	// refused here (nothing created).
+	if err := h.CreateInstance(tmpl.ID, newID, want); err != nil {
 		return res, err
 	}
+	// Marked "restoring" (restore_as) until complete: an interrupted one
+	// is removed at the next start (RecoverRestores).
+	h.mu.Lock()
+	if e, ok := h.st.Instances[newID]; ok {
+		e.State, e.RestoreAs = state.InstanceRestoring, archive
+		h.st.Instances[newID] = e
+	}
+	markErr := h.st.Save(h.statePath())
+	h.mu.Unlock()
 	var createdVols []string
 	var createdGroups []string
 	undo := func(cause error) error {
@@ -630,6 +708,10 @@ func (h *Hub) restoreInstanceAs(archive, newID, actor string, ready func()) (res
 			return fmt.Errorf("%w — removing the half-restored instance failed too: %v", cause, err)
 		}
 		return fmt.Errorf("%w — the new instance %s was removed again", cause, newID)
+	}
+
+	if markErr != nil {
+		return res, undo(statusErr(500, "recording the restore failed: %v", markErr))
 	}
 
 	// Settings, env (client secrets regenerated), custom override.
@@ -702,7 +784,61 @@ func (h *Hub) restoreInstanceAs(archive, newID, actor string, ready func()) (res
 			return res, undo(statusErr(500, "%v", err))
 		}
 	}
+	// Complete: a new instance, never enabled.
+	h.mu.Lock()
+	if e, ok := h.st.Instances[newID]; ok {
+		e.State, e.RestoreAs = state.InstanceCreated, ""
+		h.st.Instances[newID] = e
+	}
+	h.rebuildLocked()
+	saveErr = h.st.Save(h.statePath())
+	h.mu.Unlock()
+	if saveErr != nil {
+		return res, undo(statusErr(500, "recording the completed restore failed: %v", saveErr))
+	}
 	h.writePolicyLogged()
 	log.Printf("instance %s of %s restored from %s", newID, tmpl.ID, archive)
 	return res, nil
+}
+
+// restoreAsHosts are the hostnames of a restore into the new id newID:
+// given (normalised) where the request names a router, else the
+// archive's hostname for a hosts.immutable router (its data is bound to
+// it), else newID's default on the main domain. An immutable router given
+// another hostname than the archive's is refused (409).
+func restoreAsHosts(t *templates.Template, newID, domain string, archived, given map[string]string) (map[string]string, error) {
+	suffix := instanceSuffix(t.TemplateID, newID)
+	out := map[string]string{}
+	for r := range given {
+		if _, ok := t.HostRouters[r]; !ok {
+			return nil, statusErr(400, "%s is not a host router of template %s", r, t.TemplateID)
+		}
+	}
+	routers := make([]string, 0, len(t.HostRouters))
+	for r := range t.HostRouters {
+		routers = append(routers, r)
+	}
+	sort.Strings(routers)
+	for _, r := range routers {
+		old := NormalizeHost(archived[r])
+		immutable := t.Manifest.ImmutableHost(r) && old != ""
+		if g, ok := given[r]; ok {
+			g = NormalizeHost(g)
+			if immutable && g != old {
+				return nil, statusErr(409, "template %s fixes the hostname of %s once an instance exists (its data is bound to %s): the restored instance must keep %s", t.TemplateID, r, old, old)
+			}
+			out[r] = g
+			continue
+		}
+		if immutable {
+			out[r] = old
+			continue
+		}
+		host, ok := defaultHost(t.HostRouters[r], suffix, domain)
+		if !ok {
+			return nil, statusErr(400, "host router %s: no valid default hostname for %s-%s.%s — give an explicit hostname", r, t.HostRouters[r], suffix, domain)
+		}
+		out[r] = host
+	}
+	return out, nil
 }

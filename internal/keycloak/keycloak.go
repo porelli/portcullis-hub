@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -686,7 +687,11 @@ func (c *Client) UpdateForwardAuthCallbacks(ctx context.Context, add, remove []s
 	if err != nil {
 		return err
 	}
+	before := append([]string(nil), existing.RedirectURIs...)
 	existing.RedirectURIs = replaceEntries(existing.RedirectURIs, remove, add)
+	if slices.Equal(before, existing.RedirectURIs) {
+		return nil // already so (the sync loop re-asserts them)
+	}
 	if err := c.putClient(ctx, tok, existing); err != nil {
 		return err
 	}

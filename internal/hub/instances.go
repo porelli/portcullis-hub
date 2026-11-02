@@ -120,6 +120,9 @@ func (h *Hub) pendingLocked(id string) error {
 	case state.InstanceDeleting:
 		return statusErr(409, "instance %s is being deleted: delete it again to finish", id)
 	case state.InstanceRestoring:
+		if e.RestoreAs != "" {
+			return statusErr(409, "instance %s is being restored from %s (a restore into a new id): wait for it — an interrupted one is removed at the next Hub start, or delete it", id, e.RestoreAs)
+		}
 		return statusErr(409, "instance %s has an unfinished restore: restore it again (its pre-restore backup %s is put back first)", id, e.Backup)
 	}
 	return nil
@@ -184,7 +187,7 @@ func (h *Hub) Instances() []InstanceView {
 			v.State = StateDeleting
 		case e.State == state.InstanceRestoring:
 			v.State = StateRestoring
-		case hasOp && !op.OK:
+		case hasOp && !op.OK && !op.Running:
 			v.State = StateError
 		case t.Enabled:
 			v.State = StateEnabled
@@ -277,6 +280,7 @@ func (h *Hub) CreateInstance(templateID, id string, hosts map[string]string) err
 		}
 	}
 
+	runtime := h.runtimeCopy() // driftMu before mu
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	t := h.catalogLocked(templateID)
@@ -302,7 +306,7 @@ func (h *Hub) CreateInstance(templateID, id string, hosts map[string]string) err
 	if err != nil {
 		return err
 	}
-	if err := h.checkInstanceHostsLocked(&view); err != nil {
+	if err := h.checkInstanceHostsLocked(&view, runtime); err != nil {
 		return err
 	}
 	h.st.Instances[id] = state.Instance{ID: id, Template: templateID, Hosts: view.Hosts, State: state.InstanceCreated}

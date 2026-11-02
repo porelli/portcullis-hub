@@ -61,6 +61,12 @@ func TestUpdateForwardAuthCallbacks(t *testing.T) {
 	if got := strings.Join(kc.ClientByClientID(keycloak.ForwardAuthClient).RedirectURIs, ","); got != "https://auth.example.org/oauth2/callback,https://g.team.org/oauth2/callback" {
 		t.Errorf("callbacks = %s", got)
 	}
+	// Re-asserting what is there already writes nothing (the Hub's sync
+	// loop does it every interval).
+	puts := kc.CountCalls("PUT")
+	if err := c.UpdateForwardAuthCallbacks(ctx, []string{keycloak.CallbackURI("g.team.org")}, nil); err != nil || kc.CountCalls("PUT") != puts {
+		t.Errorf("re-assert: %v, %d PUTs", err, kc.CountCalls("PUT")-puts)
+	}
 }
 
 func TestForwardAuthCallbacksConcurrent(t *testing.T) {

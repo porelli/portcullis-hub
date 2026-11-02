@@ -79,8 +79,8 @@ func TestAsyncInstanceOps(t *testing.T) {
 		"untyped delete":      func() (*AsyncOp, error) { return h.StartDelete("grafana-b", "grafana", "root") },
 		"bad archive":         func() (*AsyncOp, error) { return h.StartRestore("grafana-b", "../x.tar", "root") },
 		"missing archive":     func() (*AsyncOp, error) { return h.StartRestore("grafana-b", "grafana-b/20201102T153000Z.tar", "root") },
-		"restore onto exists": func() (*AsyncOp, error) { return h.StartRestoreAs(archive, "grafana-b", "root") },
-		"bad new id":          func() (*AsyncOp, error) { return h.StartRestoreAs(archive, "Bad", "root") },
+		"restore onto exists": func() (*AsyncOp, error) { return h.StartRestoreAs(archive, "grafana-b", "root", nil) },
+		"bad new id":          func() (*AsyncOp, error) { return h.StartRestoreAs(archive, "Bad", "root", nil) },
 	} {
 		if op, err := start(); err == nil || op != nil || statusOf(err) < 400 || statusOf(err) >= 500 {
 			t.Errorf("%s = %+v %v, want a synchronous 4xx", name, op, err)
@@ -106,7 +106,7 @@ func TestAsyncInstanceOps(t *testing.T) {
 	}
 
 	// Restore into a new id: the new id's record.
-	op3, err := h.StartRestoreAs(archive, "grafana-c", "root")
+	op3, err := h.StartRestoreAs(archive, "grafana-c", "root", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

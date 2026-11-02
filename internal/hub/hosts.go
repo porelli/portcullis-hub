@@ -157,6 +157,9 @@ func placeHost(router, host, main string, enrolled []Domain, keep bool) error {
 		if d.State == DomainUnreachable && !keep {
 			return errDomainsUnreachable(host, router, d.Name)
 		}
+		if d.State == DomainMissing && !keep {
+			return statusErr(409, "hostname %s (host router %s): domain %s is no longer listed by the domains service (state %q): re-enroll it before giving it new hostnames", host, router, d.Name, d.State)
+		}
 		if d.State != DomainReady && !keep {
 			return statusErr(409, "hostname %s (host router %s): domain %s is not assignable yet (state %q: its records or certificate are not ready)", host, router, d.Name, d.State)
 		}
@@ -271,6 +274,14 @@ func (h *Hub) resolveHostsLocked(t *templates.Template, id string, hosts, curren
 	if err != nil {
 		return templates.Template{}, statusErr(400, "%v", err)
 	}
+	// Hostnames the routing can't serve (a router mixing main- and
+	// extra-domain hosts, a chain reaching portcullis-auth on an extra
+	// domain) are refused now, not at the next enable.
+	if len(view.ExtraHosts) > 0 {
+		if _, err := h.routeLabelsLocked(&view); err != nil {
+			return templates.Template{}, statusErr(400, "these hostnames can't be routed: %v", err)
+		}
+	}
 	return view, nil
 }
 
@@ -278,8 +289,10 @@ func (h *Hub) resolveHostsLocked(t *templates.Template, id string, hosts, curren
 // instance, a core host, or a hostname held by any other instance (enabled
 // or not, its template resolvable or not), by the published snapshot of a
 // default instance whose template is missing, or that is the default
-// hostname of any other template of any source. Caller must hold mu.
-func (h *Hub) checkInstanceHostsLocked(v *templates.Template) error {
+// hostname of any other template of any source, or that a running app
+// project other than the instance's own still routes (runtime: Reconcile's
+// last view, runtimeCopy — taken before mu). Caller must hold mu.
+func (h *Hub) checkInstanceHostsLocked(v *templates.Template, runtime map[string][]string) error {
 	main := strings.ToLower(h.cfg.Domain)
 	seen := map[string]string{}
 	routers := make([]string, 0, len(v.Hosts))
@@ -359,6 +372,24 @@ func (h *Hub) checkInstanceHostsLocked(v *templates.Template) error {
 			label, onMain := strings.CutSuffix(host, "."+main)
 			if _, ok := seen[host]; ok || (onMain && mine[label]) {
 				return statusErr(409, "hostname %s is still published for instance %s (its template is missing)", host, id)
+			}
+		}
+	}
+	// Projects still running with a hostname (a disabled or deleted
+	// instance whose containers survived, an old hostname after a failed
+	// restart): two routers for one host.
+	rids := make([]string, 0, len(runtime))
+	for id := range runtime {
+		rids = append(rids, id)
+	}
+	sort.Strings(rids)
+	for _, id := range rids {
+		if id == v.ID {
+			continue
+		}
+		for _, oh := range runtime[id] {
+			if r, ok := seen[NormalizeHost(oh)]; ok {
+				return statusErr(409, "hostname %s (host router %s) is still routed by the running project of %s — restart or stop it first", oh, r, id)
 			}
 		}
 	}
@@ -512,8 +543,9 @@ func (h *Hub) SetHosts(instanceID string, hosts map[string]string, actor string)
 	}
 	defer unlock()
 
+	runtime := h.runtimeCopy() // driftMu before mu
 	h.mu.Lock()
-	ch, err := h.planHostsLocked(instanceID, hosts)
+	ch, err := h.planHostsLocked(instanceID, hosts, runtime)
 	h.mu.Unlock()
 	if ch != nil {
 		detail = hostsDetail(ch.oldHosts, ch.newHosts)
@@ -532,8 +564,9 @@ func (h *Hub) SetHosts(instanceID string, hosts map[string]string, actor string)
 		return h.finishOp(instanceID, OpHosts, err, false)
 	}
 
+	runtime = h.runtimeCopy()
 	h.mu.Lock()
-	view, keep, saveErr, err := h.commitHostsLocked(ch)
+	view, keep, saveErr, err := h.commitHostsLocked(ch, runtime)
 	h.mu.Unlock()
 	if err != nil {
 		var se *StatusError
@@ -568,7 +601,7 @@ func (h *Hub) SetHosts(instanceID string, hosts map[string]string, actor string)
 
 // planHostsLocked validates a hostname change; nil, nil = no change.
 // Caller must hold mu.
-func (h *Hub) planHostsLocked(id string, hosts map[string]string) (*hostsChange, error) {
+func (h *Hub) planHostsLocked(id string, hosts map[string]string, runtime map[string][]string) (*hostsChange, error) {
 	cur := h.findLocked(id)
 	if cur == nil {
 		if _, broken := h.brokenInstances[id]; broken {
@@ -598,7 +631,7 @@ func (h *Hub) planHostsLocked(id string, hosts map[string]string) (*hostsChange,
 	if reflect.DeepEqual(view.Hosts, cur.Hosts) {
 		// Nothing to change, unless the last change failed part-way:
 		// then re-apply it (Keycloak, files, policy, restart).
-		if lo := h.LastOp(id); lo == nil || lo.Op != OpHosts || lo.OK {
+		if lo := h.lastHostsOp(id); lo == nil || lo.OK {
 			return nil, nil
 		}
 		reapply = true
@@ -608,7 +641,7 @@ func (h *Hub) planHostsLocked(id string, hosts map[string]string) (*hostsChange,
 			return nil, statusErr(409, "the hostname of %s (%s) can't change: template %s fixes it once the instance exists (create a new instance for another hostname)", r, o, cur.TemplateID)
 		}
 	}
-	if err := h.checkInstanceHostsLocked(&view); err != nil {
+	if err := h.checkInstanceHostsLocked(&view, runtime); err != nil {
 		return nil, err
 	}
 	ch := &hostsChange{id: id, old: *cur, new: view, enabled: h.st.IsEnabled(id), reapply: reapply,
@@ -720,7 +753,7 @@ func (h *Hub) revertKeycloakHosts(ch *hostsChange, n int, callbacks bool, keep m
 // (on a lost race) holds the callback URIs whose host another instance
 // now holds; saveErr is a failed state.yaml write after the commit; err
 // means nothing was committed. Caller must hold mu (write).
-func (h *Hub) commitHostsLocked(ch *hostsChange) (view templates.Template, keep map[string]bool, saveErr, err error) {
+func (h *Hub) commitHostsLocked(ch *hostsChange, runtime map[string][]string) (view templates.Template, keep map[string]bool, saveErr, err error) {
 	cur := h.findLocked(ch.id)
 	t := (*templates.Template)(nil)
 	if cur != nil {
@@ -730,7 +763,7 @@ func (h *Hub) commitHostsLocked(ch *hostsChange) (view templates.Template, keep 
 		return view, nil, nil, statusErr(409, "instance %s changed meanwhile: retry", ch.id)
 	}
 	if view, err = h.resolveHostsLocked(t, ch.id, ch.newHosts, ch.oldHosts); err == nil {
-		err = h.checkInstanceHostsLocked(&view)
+		err = h.checkInstanceHostsLocked(&view, runtime)
 	}
 	if err != nil {
 		keep = map[string]bool{}
@@ -763,7 +796,7 @@ func (h *Hub) commitHostsLocked(ch *hostsChange) (view templates.Template, keep 
 		e = state.Instance{ID: ch.id, Template: t.ID}
 	}
 	e.Hosts = copyMap(view.Hosts)
-	if ch.id == t.ID && e.State == "" && reflect.DeepEqual(e.Hosts, t.DefaultHosts(h.cfg.Domain)) {
+	if ch.id == t.ID && e.State == "" && !hasImmutableHosts(t) && reflect.DeepEqual(e.Hosts, t.DefaultHosts(h.cfg.Domain)) {
 		delete(h.st.Instances, ch.id) // the default instance needs no entry
 	} else {
 		h.st.Instances[ch.id] = e

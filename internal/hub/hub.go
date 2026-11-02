@@ -183,6 +183,9 @@ type Hub struct {
 	// ops: each app's last lifecycle operation (mirrors <data>/ops).
 	opsMu sync.Mutex
 	ops   map[string]OpRecord
+	// hostsOps: each instance's last hostname change (OpHosts), kept
+	// apart from ops (mirrors <data>/ops/<id>.hosts.json).
+	hostsOps map[string]OpRecord
 
 	// Directory publishing (SetDirectory). lastExpiring is the expiring
 	// list last written (guarded by policyWriteMu; nil: not yet known).
@@ -252,6 +255,22 @@ func (h *Hub) Init() {
 // Wait blocks until queued background restarts and policy propagation
 // have finished.
 func (h *Hub) Wait() { h.bg.Wait() }
+
+// WaitTimeout is Wait bounded by d (shutdown: background backups,
+// restores and deletes get d to finish); false if they didn't.
+func (h *Hub) WaitTimeout(d time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		h.bg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(d):
+		return false
+	}
+}
 
 func (h *Hub) goBackground(fn func()) {
 	h.bg.Add(1)

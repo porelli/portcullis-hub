@@ -102,6 +102,7 @@ func (h *Hub) SyncClientAccess(ctx context.Context) error {
 	}
 	h.mu.RUnlock()
 	var errs []error
+	var callbacks []string
 	for i := range views {
 		t := &views[i]
 		unlock, err := h.lockApp(t.ID)
@@ -118,6 +119,9 @@ func (h *Hub) SyncClientAccess(ctx context.Context) error {
 		}
 		h.mu.RUnlock()
 		if still {
+			h.mu.RLock()
+			callbacks = append(callbacks, callbackURIs(h.signInExtraHostsLocked(t))...)
+			h.mu.RUnlock()
 			for _, c := range t.Manifest.Clients {
 				var err error
 				if t.Manifest.AccessRoleEnforced() {
@@ -134,6 +138,14 @@ func (h *Hub) SyncClientAccess(ctx context.Context) error {
 			}
 		}
 		unlock()
+	}
+	// The running instances' extra-domain sign-in callbacks (contract §5)
+	// are re-asserted too: core's keycloak configure may reset the
+	// portcullis-forward-auth client's redirect URIs.
+	if len(callbacks) > 0 {
+		if err := h.idp.UpdateForwardAuthCallbacks(ctx, callbacks, nil); err != nil {
+			errs = append(errs, fmt.Errorf("%s callbacks: %w", keycloak.ForwardAuthClient, err))
+		}
 	}
 	return errors.Join(errs...)
 }

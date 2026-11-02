@@ -31,6 +31,14 @@ import (
 // assigned (503), existing ones stay.
 const DomainUnreachable = "unreachable"
 
+// DomainMissing is the state of a known domain the domains service no
+// longer lists while instances still have hostnames on it: kept (never
+// silently dropped — its hosts would stop resolving to a view and their
+// instances would be stranded), not assignable, still an extra domain
+// (extra_domains, sign-in routers and callbacks stay), logged loudly.
+// Re-enrolling the name (EnrollDomain) or moving the hostnames ends it.
+const DomainMissing = "missing"
+
 // DomainsAPI is core's domains service (internal/domains.Client).
 type DomainsAPI interface {
 	Available() error
@@ -63,6 +71,8 @@ func (k knownDomains) Domains() []Domain {
 		switch {
 		case h.domainsDeleting[d.Name]:
 			st = "deleting"
+		case d.State == DomainMissing:
+			st = DomainMissing
 		case !h.domainsReachable:
 			st = DomainUnreachable
 		case knownAssignable(d, now):
@@ -229,15 +239,16 @@ func (h *Hub) RefreshDomains(ctx context.Context) ([]domains.Domain, error) {
 		return nil, domainsErr(err)
 	}
 	known := validKnown(h.cfg.Domain, toKnown(list))
-	list = fromKnown(known)
 	h.mu.Lock()
 	h.domainsReachable = true
 	if h.domainsGen != gen {
 		// A domain operation (or a deleting mark) happened while List was
 		// in flight: its result is newer than this list.
 		h.mu.Unlock()
-		return list, nil
+		return fromKnown(known), nil
 	}
+	known = h.keepMissingLocked(known)
+	list = fromKnown(known)
 	// A deleting mark whose name the service no longer lists is done (only
 	// from a list fetched after the mark: the generation check above).
 	for n := range h.domainsDeleting {
@@ -268,6 +279,54 @@ func (h *Hub) RefreshDomains(ctx context.Context) ([]domains.Domain, error) {
 	return list, nil
 }
 
+// keepMissingLocked adds to the service's (validated) list every known
+// domain it no longer lists that instances still have hostnames on, in
+// state DomainMissing (logged loudly when it goes missing). A listed
+// entry nesting with such a name is dropped (logged): the in-use name
+// wins. Names without users are dropped as before. Caller holds mu.
+func (h *Hub) keepMissingLocked(known []state.KnownDomain) []state.KnownDomain {
+	listed := map[string]bool{}
+	for _, d := range known {
+		listed[d.Name] = true
+	}
+	var missing []state.KnownDomain
+	for _, d := range h.st.Domains {
+		if listed[d.Name] {
+			continue
+		}
+		users := h.domainUsersLocked(d.Name)
+		if len(users) == 0 {
+			continue
+		}
+		if d.State != DomainMissing {
+			log.Printf("domains: WARNING: %s is no longer listed by the domains service, but instance(s) %s still have hostnames on it: kept as %q — not assignable, its hostnames stay routed (records and certificate are no longer maintained); re-enroll it or move those hostnames", d.Name, strings.Join(users, ", "), DomainMissing)
+		}
+		d.State, d.RecordsOK = DomainMissing, false
+		d.LastError = "no longer listed by the domains service; still used by instance(s) " + strings.Join(users, ", ") + ": re-enroll it or move their hostnames"
+		missing = append(missing, d)
+	}
+	if len(missing) == 0 {
+		return known
+	}
+	out := make([]state.KnownDomain, 0, len(known)+len(missing))
+	for _, d := range known {
+		nested := ""
+		for _, m := range missing {
+			if strings.HasSuffix(d.Name, "."+m.Name) || strings.HasSuffix(m.Name, "."+d.Name) {
+				nested = m.Name
+			}
+		}
+		if nested != "" {
+			log.Printf("domains: ignoring %q from the domains service: nested with %s, which instances still use", d.Name, nested)
+			continue
+		}
+		out = append(out, d)
+	}
+	out = append(out, missing...)
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
 // RunDomainSync refreshes the known list every interval (status and
 // reachability for host validation).
 func (h *Hub) RunDomainSync(ctx context.Context, interval time.Duration) {
@@ -293,13 +352,13 @@ func (h *Hub) RunDomainSync(ctx context.Context, interval time.Duration) {
 // reserved: instance views, state instances, published snapshots, the
 // hosts running app projects route (runtime), and every template's default
 // hostnames on the main domain. Caller holds mu.
-func (h *Hub) knownHostsLocked(runtime map[string][]string) map[string]string {
+func (h *Hub) knownHostsLocked(runtime map[string][]string) map[string]hostUse {
 	main := strings.ToLower(h.cfg.Domain)
-	out := map[string]string{} // host → who
+	out := map[string]hostUse{}
 	add := func(host, who string) {
 		if host = NormalizeHost(host); host != "" {
 			if _, ok := out[host]; !ok {
-				out[host] = who
+				out[host] = hostUse{who: who}
 			}
 		}
 	}
@@ -329,10 +388,23 @@ func (h *Hub) knownHostsLocked(runtime map[string][]string) map[string]string {
 	}
 	for _, t := range h.allTemplates {
 		for _, s := range t.Subdomains {
-			add(s+"."+main, "template "+t.ID+" (default hostname)")
+			host := s + "." + main
+			if u, ok := out[host]; ok {
+				u.template = true
+				out[host] = u
+			} else {
+				out[host] = hostUse{who: "template " + t.ID + " (default hostname)", template: true}
+			}
 		}
 	}
 	return out
+}
+
+// hostUse is who knows a hostname (knownHostsLocked); template: it is a
+// template's default hostname on the main domain.
+type hostUse struct {
+	who      string
+	template bool
 }
 
 // checkEnrollLocked applies §12.3 "Enroll" and the reclassification rule:
@@ -350,7 +422,14 @@ func (h *Hub) checkEnrollLocked(name string, runtime map[string][]string, self b
 			return statusErr(409, "%s is at or under the core host %s: extra domains never carry core pages", name, c)
 		}
 	}
+	missing := false
 	for _, d := range h.st.Domains {
+		if d.Name == name && d.State == DomainMissing {
+			// Re-enrolling a domain the service lost: the hostnames
+			// already on it are its own, not a takeover.
+			missing = true
+			continue
+		}
 		if self && d.Name == name {
 			continue // the re-check after Enroll: a refresh may already list it
 		}
@@ -371,7 +450,10 @@ func (h *Hub) checkEnrollLocked(name string, runtime map[string][]string, self b
 	sort.Strings(hosts)
 	for _, host := range hosts {
 		if host == name || strings.HasSuffix(host, "."+name) {
-			return statusErr(409, "%s would take over the hostname %s (%s): change that hostname first", name, host, known[host])
+			if missing && !known[host].template {
+				continue
+			}
+			return statusErr(409, "%s would take over the hostname %s (%s): change that hostname first", name, host, known[host].who)
 		}
 	}
 	return nil

@@ -301,6 +301,16 @@ func (h *Hub) enableInner(id string, restoring bool) (rolledBack bool, err error
 		if err := h.idp.UpdateForwardAuthCallbacks(context.Background(), callbacks, nil); err != nil {
 			return false, &StatusError{Status: 502, Err: fmt.Errorf("Keycloak %s callbacks: %w", keycloak.ForwardAuthClient, err)}
 		}
+		// A failed enable takes them away again (the instance stays
+		// disabled; an unused callback must not linger).
+		defer func() {
+			if err == nil || len(callbacks) == 0 {
+				return
+			}
+			if cerr := h.idp.UpdateForwardAuthCallbacks(context.Background(), nil, callbacks); cerr != nil {
+				log.Printf("instance %s: removing the %s callbacks after a failed enable failed: %v", id, keycloak.ForwardAuthClient, cerr)
+			}
+		}()
 	}
 	if err := h.composeUp(&tmpl); err != nil {
 		if !composeFailed(err) {
@@ -319,6 +329,12 @@ func (h *Hub) enableInner(id string, restoring bool) (rolledBack bool, err error
 	if e, ok := h.st.Instances[id]; ok && e.State == state.InstanceCreated {
 		e.State = ""
 		h.st.Instances[id] = e
+	}
+	// A default instance's hosts.immutable hostnames are pinned once it
+	// first runs: a later main-domain change keeps them (its data is bound
+	// to them) instead of moving it to <sub>.<new domain>.
+	if _, ok := h.st.Instances[id]; !ok && tmpl.IsDefault() && hasImmutableHosts(&tmpl) {
+		h.st.Instances[id] = state.Instance{ID: id, Template: id, Hosts: copyMap(tmpl.Hosts)}
 	}
 	h.rebuildLocked()
 	h.refreshPublishedLocked()
@@ -489,4 +505,14 @@ func (h *Hub) restartLocked(t *templates.Template) error {
 		return fmt.Errorf("compose down failed (the containers may not have been recreated): %w", downErr)
 	}
 	return nil
+}
+
+// hasImmutableHosts: t declares a hosts.immutable host router.
+func hasImmutableHosts(t *templates.Template) bool {
+	for r := range t.HostRouters {
+		if t.Manifest.ImmutableHost(r) {
+			return true
+		}
+	}
+	return false
 }

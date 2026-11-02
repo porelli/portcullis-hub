@@ -80,6 +80,10 @@ type Instance struct {
 	// interrupted restore is rolled back from it), relative to
 	// <data>/backups.
 	Backup string `json:"backup,omitempty" yaml:"backup,omitempty"`
+	// RestoreAs is the archive a restore into this NEW instance is filling
+	// it from (state InstanceRestoring, no pre-restore backup): an
+	// interrupted one is removed again at the next start.
+	RestoreAs string `json:"restore_as,omitempty" yaml:"restore_as,omitempty"`
 }
 
 // Persisted instance states (Instance.State).
