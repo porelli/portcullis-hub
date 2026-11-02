@@ -148,8 +148,10 @@ func Stricter(a, b AuthPolicy) bool {
 // policy wins, path groups are merged, and the access group of the lowest
 // instance ID wins. Each collision is logged.
 //
-// extraDomains is the list of enrolled domains (§12) for extra_domains.
-func Build(apps []App, perApp map[string]AuthPolicy, def AuthPolicy, extraDomains []string) Document {
+// mainDomain names the core hosts (CoreHosts): any app, public or deny host
+// equal to one is skipped and logged. extraDomains is the list of enrolled
+// domains (§12) for extra_domains.
+func Build(apps []App, perApp map[string]AuthPolicy, def AuthPolicy, mainDomain string, extraDomains []string) Document {
 	doc := Document{
 		Version:      FileVersion,
 		Default:      def,
@@ -164,8 +166,14 @@ func Build(apps []App, perApp map[string]AuthPolicy, def AuthPolicy, extraDomain
 	sorted := append([]App(nil), apps...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
 
-	// coreHosts can't be computed here: we need mainDomain. The Hub filters
-	// them before calling Build. For safety, we accept a nil Hosts map.
+	core := CoreHosts(mainDomain)
+	isCore := func(a App, host, kind string) bool {
+		if core[host] {
+			log.Printf("auth-policy: app %s routes core hostname %q (%s) — ignored", a.ID, host, kind)
+			return true
+		}
+		return false
+	}
 	type claim struct {
 		app      string
 		policy   AuthPolicy
@@ -182,6 +190,9 @@ func Build(apps []App, perApp map[string]AuthPolicy, def AuthPolicy, extraDomain
 			p = def
 		}
 		for host := range a.Hosts {
+			if isCore(a, host, "host") {
+				continue
+			}
 			claims[host] = append(claims[host], claim{a.ID, p, override})
 
 			// Only apps that opt into group-based access get a required
@@ -222,6 +233,14 @@ func Build(apps []App, perApp map[string]AuthPolicy, def AuthPolicy, extraDomain
 			continue
 		}
 		for host := range a.PublicHosts {
+			if isCore(a, host, "public host") {
+				continue
+			}
+			if _, routed := a.Hosts[host]; !routed {
+				// A public exception only ever opens a host the app routes.
+				log.Printf("auth-policy: app %s has a public exception for %q, which is not one of its hosts — ignored", a.ID, host)
+				continue
+			}
 			if _, taken := doc.PublicPaths[host]; taken {
 				// Only one public router per host can exist (one owner
 				// per hostname); keep the lowest instance ID's.
@@ -236,6 +255,9 @@ func Build(apps []App, perApp map[string]AuthPolicy, def AuthPolicy, extraDomain
 			continue
 		}
 		for host := range a.Hosts {
+			if isCore(a, host, "deny host") {
+				continue
+			}
 			if _, claimed := claims[host]; claimed {
 				continue
 			}

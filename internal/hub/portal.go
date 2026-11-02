@@ -34,15 +34,16 @@ type PortalApp struct {
 type PortalDocument struct {
 	Version int         `json:"version"`
 	Apps    []PortalApp `json:"apps"`
-	// Domains lists every enrolled domain on which at least one listed
-	// instance has a hostname (contract §10, v2).
+	// Domains lists, sorted, every enrolled domain on which at least one
+	// listed instance has a hostname (contract §10; still format version 1).
+	// Always an array, never null.
 	Domains []string `json:"domains"`
 }
 
 // portalLocked lists enabled instances whose template is present (an instance
 // with a missing template has no name/URL to show). Caller holds h.mu (read).
 func (h *Hub) portalLocked() PortalDocument {
-	doc := PortalDocument{Version: PortalVersion, Apps: []PortalApp{}}
+	doc := PortalDocument{Version: PortalVersion, Apps: []PortalApp{}, Domains: []string{}}
 	domainsUsed := map[string]bool{}
 	enrolled := h.enrolledLocked()
 	for i := range h.instances {

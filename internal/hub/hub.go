@@ -9,11 +9,12 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
-	"sort"
+	"slices"
 	"sync"
 	"time"
 
@@ -321,13 +322,8 @@ func (h *Hub) Discover() {
 func (h *Hub) snapshot(t *templates.Template) state.PublishedApp {
 	a := t.Manifest.Auth
 	acc := h.accessLocked(t)
-	hosts := make([]string, 0, len(t.Hosts))
-	for _, h := range t.Hosts {
-		hosts = append(hosts, h)
-	}
-	sort.Strings(hosts)
 	p := state.PublishedApp{
-		Hosts:           hosts,
+		Hosts:           slices.Sorted(maps.Values(t.Hosts)),
 		GroupAccess:     acc.groupAccess(t),
 		NativeLoginOnly: acc.SignIn == SignInNative,
 		AccessGroup:     a.AccessGroup,
@@ -339,12 +335,7 @@ func (h *Hub) snapshot(t *templates.Template) state.PublishedApp {
 		p.Policy = &ov
 	}
 	if pub := h.publicLocked(t, t.Public); pub.Active() {
-		pubHosts := make([]string, 0, len(t.Public.Hosts))
-		for _, h := range t.Public.Hosts {
-			pubHosts = append(pubHosts, h)
-		}
-		sort.Strings(pubHosts)
-		p.PublicHosts = pubHosts
+		p.PublicHosts = slices.Sorted(slices.Values(t.Public.Hosts))
 		p.Public = publicEntry(&t.Manifest, pub.Published)
 	}
 	return p
@@ -448,8 +439,9 @@ func (h *Hub) WritePolicy() error {
 	h.mu.RLock()
 	mainDomain := h.cfg.Domain
 	coreHosts := policy.CoreHosts(mainDomain)
-	extraDomains := make([]string, 0, len(h.enrolledLocked()))
-	for _, d := range h.enrolledLocked() {
+	enrolled := h.enrolledLocked()
+	extraDomains := make([]string, 0, len(enrolled))
+	for _, d := range enrolled {
 		extraDomains = append(extraDomains, d.Name)
 	}
 	perApp := make(map[string]policy.AuthPolicy, len(h.st.AuthPolicies))
@@ -464,15 +456,10 @@ func (h *Hub) WritePolicy() error {
 			continue
 		}
 		covered[t.ID] = true
-		// Filter out core hosts: they come from group-gate-map.conf.
-		hosts := make([]string, 0, len(t.Hosts))
-		for _, host := range t.Hosts {
-			hosts = append(hosts, host)
-		}
 		app := policy.App{
 			ID:          t.ID,
 			Enabled:     true,
-			Hosts:       hostSet(hosts, coreHosts),
+			Hosts:       hostSet(slices.Collect(maps.Values(t.Hosts)), coreHosts),
 			GroupAccess: h.accessLocked(t).groupAccess(t),
 			AccessGroup: t.Manifest.Auth.AccessGroup,
 			AdminGroup:  t.Manifest.Auth.AdminGroup,
@@ -491,7 +478,12 @@ func (h *Hub) WritePolicy() error {
 		// A snapshot without a (non-core) host is unknown config: it would
 		// publish nothing for the hosts the containers still route, so it
 		// falls through to the deny path below (fail closed).
-		if snap, ok := h.st.Published[id]; ok && len(hostSet(snap.Hosts, coreHosts)) > 0 {
+		snap, ok := h.st.Published[id]
+		var snapHosts map[string]string
+		if ok {
+			snapHosts = hostSet(snap.Hosts, coreHosts)
+		}
+		if len(snapHosts) > 0 {
 			log.Printf("auth-policy: WARNING: template for enabled app %s is missing — still enforcing its last known config (hosts %v)", id, snap.Hosts)
 			if _, ok := perApp[id]; !ok && snap.Policy != nil {
 				perApp[id] = *snap.Policy
@@ -499,7 +491,7 @@ func (h *Hub) WritePolicy() error {
 			apps = append(apps, policy.App{
 				ID:          id,
 				Enabled:     true,
-				Hosts:       hostSet(snap.Hosts, coreHosts),
+				Hosts:       snapHosts,
 				GroupAccess: snap.GroupAccess,
 				AccessGroup: snap.AccessGroup,
 				AdminGroup:  snap.AdminGroup,
@@ -513,20 +505,22 @@ func (h *Hub) WritePolicy() error {
 		} else if ok {
 			log.Printf("auth-policy: WARNING: template for enabled app %s is missing and its last known config has no hostnames — treating it as unknown (deny)", id)
 		}
-		if hosts := hostSet(runtime[id], coreHosts); len(hosts) > 0 {
-			apps = append(apps, policy.App{ID: id, Enabled: true, Deny: true, Hosts: hosts})
-		} else {
+		// No config: its running hosts are denied by the loop below.
+		if len(hostSet(runtime[id], coreHosts)) == 0 {
 			log.Printf("auth-policy: WARNING: enabled app %s has neither a template nor a last known config, and no routed hosts are known yet — cannot publish a deny entry", id)
 		}
 	}
-	// Running app projects that are not enabled (drift) are routed by
-	// Traefik but have no config: deny their hosts (any domain) too.
+	// Every host a running app project routes that no known config claims
+	// is denied (any domain): projects that are not enabled (drift), but
+	// also enabled ones whose containers still route hosts outside their
+	// config — old hostnames after a SetHosts whose restart failed, hosts
+	// outside a missing template's snapshot. Build skips claimed hosts.
 	for id, rh := range runtime {
-		if hosts := hostSet(rh, coreHosts); !covered[id] && len(hosts) > 0 {
+		if hosts := hostSet(rh, coreHosts); len(hosts) > 0 {
 			apps = append(apps, policy.App{ID: id, Enabled: true, Deny: true, Hosts: hosts})
 		}
 	}
-	doc := policy.Build(apps, perApp, h.st.Default(), extraDomains)
+	doc := policy.Build(apps, perApp, h.st.Default(), mainDomain, extraDomains)
 	doc.Expiring = expiring
 	portal := h.portalLocked()
 	h.mu.RUnlock()
@@ -554,10 +548,17 @@ func (h *Hub) WritePolicy() error {
 
 // hostSet is the policy.App host set of hosts (normalised), core hosts
 // left out: they come from group-gate-map.conf (contract §4).
+// Invalid hostnames (contract §4 key shape) are dropped and logged: group-gate
+// would deny the whole file on such a key.
 func hostSet(hosts []string, core map[string]bool) map[string]string {
 	out := make(map[string]string, len(hosts))
 	for _, host := range hosts {
-		if n := NormalizeHost(host); n != "" && !core[n] {
+		n := NormalizeHost(host)
+		switch {
+		case core[n]:
+		case !templates.ValidHostname(n):
+			log.Printf("auth-policy: %q is not a valid hostname — not published", host)
+		default:
 			out[n] = n
 		}
 	}

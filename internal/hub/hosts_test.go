@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -11,8 +12,10 @@ import (
 	"testing"
 
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/keycloak/kctest"
+	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/state"
 )
 
@@ -731,5 +734,67 @@ func TestSetHostsConcurrentCallbacks(t *testing.T) {
 	}
 	if !got["https://auth.example.org/oauth2/callback"] || len(got) != len(ids)+1 {
 		t.Errorf("callbacks = %v", got)
+	}
+}
+
+// After a hostname change whose restart failed, the old containers still
+// route the old hostname: it is denied, not left without a group.
+func TestSetHostsFailedRestartDeniesOldHost(t *testing.T) {
+	f := chatB(t)
+	old := container("c1", "portcullis-chat-b", "web", "running")
+	old.Labels["traefik.http.routers.chat-b_chat.rule"] = "Host(`chat-b.example.org`)"
+	f.engine.containers = []docker.Container{old}
+	f.h.Reconcile(context.Background())
+	if g := readPolicy(t, f).Groups["chat-b.example.org"]; g != "users_chat-b" {
+		t.Fatalf("before: group = %q", g)
+	}
+	f.runner.upErr = errors.New("boom")
+	if err := f.h.SetHosts("chat-b", map[string]string{"chat": "talk.example.org"}, "alice"); err == nil {
+		t.Fatal("restart failure not reported")
+	}
+	f.h.Reconcile(context.Background())
+	doc := readPolicy(t, f)
+	if doc.Groups["chat-b.example.org"] != policy.DenyGroup {
+		t.Errorf("old host = %q, want deny", doc.Groups["chat-b.example.org"])
+	}
+	if doc.Groups["talk.example.org"] != "users_chat-b" {
+		t.Errorf("new host = %q", doc.Groups["talk.example.org"])
+	}
+	// The restart succeeds: the old host leaves the runtime and the file.
+	f.runner.upErr = nil
+	if err := f.h.SetHosts("chat-b", map[string]string{"chat": "talk.example.org"}, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	old.Labels["traefik.http.routers.chat-b_chat.rule"] = "Host(`talk.example.org`)"
+	f.engine.mu.Lock()
+	f.engine.containers = []docker.Container{old}
+	f.engine.mu.Unlock()
+	f.h.Reconcile(context.Background())
+	if g, ok := readPolicy(t, f).Groups["chat-b.example.org"]; ok {
+		t.Errorf("old host still published: %q", g)
+	}
+}
+
+// A missing template's containers routing hosts outside its snapshot: the
+// snapshot hosts stay enforced, the others are denied.
+func TestSnapshotDeniesUnlistedRuntimeHosts(t *testing.T) {
+	f := chatB(t)
+	f.h.mu.Lock()
+	snap := f.h.st.Published["chat-b"]
+	f.h.mu.Unlock()
+	if strings.Join(snap.Hosts, ",") != "chat-b.example.org" {
+		t.Fatalf("snapshot = %+v", snap)
+	}
+	if err := os.RemoveAll(filepath.Join(f.src, "chat")); err != nil {
+		t.Fatal(err)
+	}
+	f.h.Discover()
+	c := container("c1", "portcullis-chat-b", "web", "running")
+	c.Labels["traefik.http.routers.chat-b_chat.rule"] = "Host(`chat-b.example.org`) || Host(`sneaky.example.org`)"
+	f.engine.containers = []docker.Container{c}
+	f.h.Reconcile(context.Background())
+	doc := readPolicy(t, f)
+	if doc.Groups["chat-b.example.org"] != "users_chat-b" || doc.Groups["sneaky.example.org"] != policy.DenyGroup {
+		t.Errorf("groups = %v", doc.Groups)
 	}
 }

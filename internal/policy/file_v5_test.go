@@ -34,7 +34,7 @@ func TestPolicyFileV5KeyedByHost(t *testing.T) {
 		"grafana-team-b": mtls,
 	}
 
-	doc := Build(apps, perApp, webauthn, []string{extraDomain})
+	doc := Build(apps, perApp, webauthn, "portcullis.example.com", []string{extraDomain})
 
 	if doc.Version != 5 {
 		t.Errorf("version = %d, want 5", doc.Version)
@@ -71,23 +71,27 @@ func TestPolicyFileV5KeyedByHost(t *testing.T) {
 	}
 }
 
-// TestCoreHostsNeverPublished verifies Build doesn't publish core hosts (the
-// Hub filters them before calling Build).
+// TestCoreHostsNeverPublished feeds every core host to Build — as app
+// hosts, public hosts and deny hosts — and checks none is published (they
+// come from group-gate-map.conf, contract §4).
 func TestCoreHostsNeverPublished(t *testing.T) {
 	mainDomain := "portcullis.example.com"
-
-	apps := []App{
-		// A normal app
-		{ID: "grafana", Enabled: true,
-			Hosts:       map[string]string{"grafana." + mainDomain: "grafana." + mainDomain},
-			GroupAccess: true, AccessGroup: "users_grafana"},
+	core := CoreHosts(mainDomain)
+	if len(core) != 8 || !core[mainDomain] || !core["people."+mainDomain] || !core["metrics."+mainDomain] {
+		t.Fatalf("CoreHosts = %v", core)
 	}
-
-	doc := Build(apps, nil, AuthPolicy{}, []string{})
-
-	// Core hosts must never appear in any map
-	coreHosts := CoreHosts(mainDomain)
-	for host := range coreHosts {
+	all := map[string]string{"grafana." + mainDomain: "grafana." + mainDomain}
+	for h := range core {
+		all[h] = h
+	}
+	pub := &PublicEntry{Paths: []PublicPath{{"/s", "prefix"}}}
+	apps := []App{
+		{ID: "grafana", Enabled: true, Hosts: all, PublicHosts: all, Public: pub,
+			GroupAccess: true, AccessGroup: "users_grafana", AdminGroup: "admin_grafana", AdminPaths: []string{"/admin"}},
+		{ID: "ghost", Enabled: true, Deny: true, Hosts: all},
+	}
+	doc := Build(apps, map[string]AuthPolicy{"grafana": {}}, AuthPolicy{}, mainDomain, nil)
+	for host := range core {
 		if _, ok := doc.Policies[host]; ok {
 			t.Errorf("core host %s in policies", host)
 		}
@@ -97,11 +101,13 @@ func TestCoreHostsNeverPublished(t *testing.T) {
 		if _, ok := doc.PathGroups[host]; ok {
 			t.Errorf("core host %s in path_groups", host)
 		}
+		if _, ok := doc.PublicPaths[host]; ok {
+			t.Errorf("core host %s in public_paths", host)
+		}
 	}
-
-	// The normal app should be there
-	if doc.Groups["grafana."+mainDomain] != "users_grafana" {
-		t.Errorf("normal app not in groups")
+	g := "grafana." + mainDomain
+	if doc.Groups[g] != "users_grafana" || len(doc.PathGroups[g]) != 1 || len(doc.PublicPaths) != 1 || len(doc.Groups) != 1 {
+		t.Errorf("normal host: groups %v path_groups %v public %v", doc.Groups, doc.PathGroups, doc.PublicPaths)
 	}
 }
 
@@ -118,7 +124,7 @@ func TestDenyGroupForUnknownRunningHosts(t *testing.T) {
 			Hosts: map[string]string{"ghost.portcullis.example.com": "ghost.portcullis.example.com"}},
 	}
 
-	doc := Build(apps, nil, AuthPolicy{}, nil)
+	doc := Build(apps, nil, AuthPolicy{}, "portcullis.example.com", nil)
 
 	if doc.Groups["ghost.portcullis.example.com"] != DenyGroup {
 		t.Errorf("ghost host = %q, want %q", doc.Groups["ghost.portcullis.example.com"], DenyGroup)

@@ -26,7 +26,7 @@ func TestBuild(t *testing.T) {
 			Hosts:       map[string]string{"media." + domain: "media." + domain},
 			GroupAccess: true, AccessGroup: "users_jellyfin",
 			AdminGroup: "admin_jellyfin", AdminPaths: []string{"/admin"}},
-		// Tries to claim core hostnames (Build doesn't filter; Hub does).
+		// Tries to claim core hostnames: skipped.
 		{ID: "evil", Enabled: true,
 			Hosts:       map[string]string{"auth." + domain: "auth." + domain, "hub." + domain: "hub." + domain, "evil." + domain: "evil." + domain},
 			GroupAccess: true, AccessGroup: "users_evil",
@@ -42,7 +42,7 @@ func TestBuild(t *testing.T) {
 		"evil":     {},
 		"hub":      {},
 	}
-	doc := Build(apps, perApp, webauthn, []string{})
+	doc := Build(apps, perApp, webauthn, domain, []string{})
 
 	if doc.Version != 5 {
 		t.Errorf("version = %d, want 5", doc.Version)
@@ -51,12 +51,10 @@ func TestBuild(t *testing.T) {
 		t.Errorf("default = %+v", doc.Default)
 	}
 	// Hostname keys of enabled apps with an override only — no instance-ID
-	// keys, nothing for disabled apps.
+	// keys, nothing for disabled apps, nothing for core hosts.
 	wantPolicies := map[string]AuthPolicy{
 		"git." + domain:      mtls,
 		"registry." + domain: mtls,
-		"auth." + domain:     {},
-		"hub." + domain:      {},
 		"evil." + domain:     {},
 	}
 	if !reflect.DeepEqual(doc.Policies, wantPolicies) {
@@ -65,8 +63,6 @@ func TestBuild(t *testing.T) {
 	wantGroups := map[string]string{
 		"git." + domain:      "users_gitlab",
 		"registry." + domain: "users_gitlab",
-		"auth." + domain:     "users_evil",
-		"hub." + domain:      "users_evil",
 		"evil." + domain:     "users_evil",
 	}
 	if !reflect.DeepEqual(doc.Groups, wantGroups) {
@@ -76,12 +72,21 @@ func TestBuild(t *testing.T) {
 	wantPG := map[string][]PathGroup{
 		"git." + domain:      gl,
 		"registry." + domain: gl,
-		"auth." + domain:     {{"/", "admin_evil"}},
-		"hub." + domain:      {{"/", "admin_evil"}},
 		"evil." + domain:     {{"/", "admin_evil"}},
 	}
 	if !reflect.DeepEqual(doc.PathGroups, wantPG) {
 		t.Errorf("path_groups = %+v, want %+v", doc.PathGroups, wantPG)
+	}
+	for core := range CoreHosts(domain) {
+		if _, ok := doc.Policies[core]; ok {
+			t.Errorf("core host %s in policies", core)
+		}
+		if _, ok := doc.Groups[core]; ok {
+			t.Errorf("core host %s in groups", core)
+		}
+		if _, ok := doc.PathGroups[core]; ok {
+			t.Errorf("core host %s in path_groups", core)
+		}
 	}
 }
 
@@ -99,7 +104,7 @@ func TestBuildIDIsNotAKey(t *testing.T) {
 	doc := Build(apps, map[string]AuthPolicy{
 		"vaultwarden": {Factors: []string{"mtls"}},
 		"passwords":   {}, // public
-	}, AuthPolicy{Factors: []string{"webauthn"}}, []string{})
+	}, AuthPolicy{Factors: []string{"webauthn"}}, domain, []string{})
 	if p := doc.Policies["passwords."+domain]; strings.Join(p.Factors, ",") != "mtls" {
 		t.Errorf("passwords.%s = %+v, want vaultwarden's mtls policy", domain, p)
 	}
@@ -124,7 +129,7 @@ func TestBuildCollisions(t *testing.T) {
 	for _, order := range [][]App{{a, b}, {b, a}} {
 		// a is public by override, b inherits the webauthn default: the
 		// stricter (inherited) policy is published.
-		doc := Build(order, map[string]AuthPolicy{"a": {}}, webauthn, []string{})
+		doc := Build(order, map[string]AuthPolicy{"a": {}}, webauthn, "portcullis.local", []string{})
 		if p := doc.Policies[shared]; strings.Join(p.Factors, ",") != "webauthn" {
 			t.Errorf("policy = %+v", p)
 		}
@@ -139,11 +144,11 @@ func TestBuildCollisions(t *testing.T) {
 	// Two overrides: all-of beats any-of at the same LoA, higher LoA wins.
 	anyOf := AuthPolicy{Factors: []string{"mtls", "webauthn"}, Op: "any"}
 	allOf := AuthPolicy{Factors: []string{"password", "webauthn"}, Op: "all"}
-	doc := Build([]App{a, b}, map[string]AuthPolicy{"a": anyOf, "b": allOf}, AuthPolicy{}, []string{})
+	doc := Build([]App{a, b}, map[string]AuthPolicy{"a": anyOf, "b": allOf}, AuthPolicy{}, "portcullis.local", []string{})
 	if p := doc.Policies[shared]; p.Op != "all" {
 		t.Errorf("policy = %+v, want all-of", p)
 	}
-	doc = Build([]App{a, b}, map[string]AuthPolicy{"a": {Factors: []string{"mtls"}}, "b": allOf}, AuthPolicy{}, []string{})
+	doc = Build([]App{a, b}, map[string]AuthPolicy{"a": {Factors: []string{"mtls"}}, "b": allOf}, AuthPolicy{}, "portcullis.local", []string{})
 	if p := doc.Policies[shared]; strings.Join(p.Factors, ",") != "mtls" {
 		t.Errorf("policy = %+v, want mtls", p)
 	}
@@ -171,7 +176,7 @@ func TestStricter(t *testing.T) {
 func TestWrite(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "group-gate-policy.json")
-	doc := Build(nil, nil, AuthPolicy{}, []string{})
+	doc := Build(nil, nil, AuthPolicy{}, "portcullis.local", []string{})
 	if err := Write(path, doc); err != nil {
 		t.Fatal(err)
 	}
@@ -221,15 +226,16 @@ func TestBuildDeny(t *testing.T) {
 		{ID: "ghost", Enabled: true, Deny: true,
 			Hosts: map[string]string{shared: shared, ghostHost: ghostHost, hubHost: hubHost}},
 	}
-	doc := Build(apps, nil, AuthPolicy{}, []string{})
+	doc := Build(apps, nil, AuthPolicy{}, "portcullis.local", []string{})
 	if doc.Groups[ghostHost] != DenyGroup {
 		t.Errorf("ghost host = %q, want %q", doc.Groups[ghostHost], DenyGroup)
 	}
 	if _, ok := doc.Groups[shared]; ok {
 		t.Error("deny overrode a hostname claimed by a live app")
 	}
-	// Note: Build doesn't filter core hosts; the Hub does that before calling.
-	// The hub host will have DenyGroup if it reaches Build.
+	if _, ok := doc.Groups[hubHost]; ok {
+		t.Error("core host published")
+	}
 }
 
 func TestBuildPublicPaths(t *testing.T) {
@@ -255,13 +261,14 @@ func TestBuildPublicPaths(t *testing.T) {
 		{ID: "gone", Enabled: true, Deny: true,
 			Hosts:       map[string]string{goneHost: goneHost},
 			PublicHosts: map[string]string{goneHost: goneHost}, Public: cloud},
+		// A public host the app doesn't route: never opened.
+		{ID: "wide", Enabled: true,
+			Hosts:       map[string]string{"wide." + domain: "wide." + domain},
+			PublicHosts: map[string]string{"wide-admin." + domain: "wide-admin." + domain}, Public: cloud},
 	}
-	doc := Build(apps, nil, InitialDefault(), []string{})
-	if doc.Version != 5 || len(doc.PublicPaths) != 2 {
-		t.Errorf("public_paths length = %d (version %d), want 2", len(doc.PublicPaths), doc.Version)
-	}
-	if !reflect.DeepEqual(doc.PublicPaths[cloudHost], *cloud) {
-		t.Errorf("public_paths[%s] = %+v", cloudHost, doc.PublicPaths[cloudHost])
+	doc := Build(apps, nil, InitialDefault(), "portcullis.local", []string{})
+	if doc.Version != 5 || len(doc.PublicPaths) != 1 || !reflect.DeepEqual(doc.PublicPaths[cloudHost], *cloud) {
+		t.Errorf("public_paths = %+v (version %d)", doc.PublicPaths, doc.Version)
 	}
 	if doc.Groups[goneHost] != DenyGroup {
 		t.Errorf("deny app lost its deny group: %v", doc.Groups)
@@ -273,7 +280,7 @@ func TestBuildPublicPaths(t *testing.T) {
 			t.Errorf("policy file lacks %s: %s", want, raw)
 		}
 	}
-	raw, _ = json.Marshal(Build(nil, nil, InitialDefault(), []string{}))
+	raw, _ = json.Marshal(Build(nil, nil, InitialDefault(), "portcullis.local", []string{}))
 	if !strings.Contains(string(raw), `"public_paths":{}`) {
 		t.Errorf("empty public_paths not published as {}: %s", raw)
 	}

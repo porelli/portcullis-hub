@@ -104,7 +104,7 @@ auth:
   admin_group: admin_hs
 urls:
   - {label: a, url: "https://{{HOST_HEADSCALE}}/x"}
-  - {label: b, url: "https://{{HOST_HEADPLANE}}/admin and https://auth.{{DOMAIN}}"}
+  - {label: b, url: "https://{{HOST_HEADPLANE}}/admin"}
 keycloak_clients:
   - {client_id: headscale, redirect_uri: "https://{{HOST_HEADSCALE}}/oidc/callback"}
   - {client_id: headplane, redirect_uris: ["https://{{HOST_HEADPLANE}}/admin/oidc/callback"]}
@@ -129,7 +129,7 @@ keycloak_clients:
 		t.Errorf("view = %+v", v)
 	}
 	m := v.Manifest
-	if m.URLs[0].URL != "https://vpn-b.example.org/x" || m.URLs[1].URL != "https://vpn-admin-b.example.org/admin and https://auth.example.org" {
+	if m.URLs[0].URL != "https://vpn-b.example.org/x" || m.URLs[1].URL != "https://vpn-admin-b.example.org/admin" {
 		t.Errorf("urls = %+v", m.URLs)
 	}
 	if m.Clients[0].ClientID != "hs-b" || m.Clients[0].RedirectURI != "https://vpn-b.example.org/oidc/callback" ||
@@ -191,6 +191,12 @@ func TestDiscoverInstanceRules(t *testing.T) {
 		"reserved env":     {"name: X\nauth:\n  method: forward-auth\nenv:\n  - key: PORTCULLIS_HOST_X\n", "services:\n  s:\n    image: x\n"},
 		"reserved setting": {"name: X\nauth:\n  method: forward-auth\nsettings:\n  - key: PORTCULLIS_INSTANCE\n", "services:\n  s:\n    image: x\n"},
 		"reserved port":    {"name: X\nauth:\n  method: forward-auth\nports:\n  - key: PORTCULLIS_OIDC_CLIENT_ID_A\n", "services:\n  s:\n    image: x\n"},
+		"multi {{DOMAIN}} url": {"name: X\ninstances: multi\nauth:\n  method: forward-auth\nurls:\n  - {label: a, url: \"https://x.{{DOMAIN}}\"}\n",
+			"services:\n  s:\n    labels:\n      traefik.http.routers.x.rule: Host(`${PORTCULLIS_HOST_X:-x.portcullis.local}`)\n"},
+		"multi {{DOMAIN}} redirect_uri": {"name: X\ninstances: multi\nauth:\n  method: native-oidc\n  group_access: true\n  access_group: users_x\nkeycloak_clients:\n  - {client_id: x, redirect_uri: \"https://x.{{DOMAIN}}/cb\"}\n",
+			"services:\n  s:\n    labels:\n      traefik.http.routers.x.rule: Host(`${PORTCULLIS_HOST_X:-x.portcullis.local}`)\n"},
+		"multi {{DOMAIN}} redirect_uris": {"name: X\ninstances: multi\nauth:\n  method: native-oidc\n  group_access: true\n  access_group: users_x\nkeycloak_clients:\n  - {client_id: x, redirect_uris: [\"https://{{HOST_X}}/cb\", \"https://auth.{{DOMAIN}}/cb\"]}\n",
+			"services:\n  s:\n    labels:\n      traefik.http.routers.x.rule: Host(`${PORTCULLIS_HOST_X:-x.portcullis.local}`)\n"},
 		"client key clash": {"name: X\nauth:\n  method: native-oidc\n  group_access: true\nkeycloak_clients:\n  - client_id: a-b\n  - client_id: a.b\n", "services:\n  s:\n    image: x\n"},
 	}
 	for name, c := range cases {
@@ -200,6 +206,27 @@ func TestDiscoverInstanceRules(t *testing.T) {
 		os.WriteFile(filepath.Join(dir, "x", "compose.yml"), []byte(c[1]), 0644)
 		if got := Discover(dir, "s", "example.org"); len(got) != 0 {
 			t.Errorf("%s: loaded", name)
+		}
+	}
+	// Without {{DOMAIN}} the same multi manifests load; a single template
+	// may still use {{DOMAIN}} (the main domain).
+	for name, c := range map[string][2]string{
+		"multi host placeholders": {"name: X\ninstances: multi\nauth:\n  method: native-oidc\n  group_access: true\n  access_group: users_x\nurls:\n  - {label: a, url: \"https://{{HOST_X}}\"}\nkeycloak_clients:\n  - {client_id: x, redirect_uri: \"https://{{HOST_X}}/cb\", redirect_uris: [\"https://{{HOST_X}}/cb2\"]}\n",
+			"services:\n  s:\n    labels:\n      traefik.http.routers.x.rule: Host(`${PORTCULLIS_HOST_X:-x.portcullis.local}`)\n"},
+		"single {{DOMAIN}}": {"name: X\ninstances: single\nauth:\n  method: native-oidc\n  group_access: true\n  access_group: users_x\nurls:\n  - {label: a, url: \"https://x.{{DOMAIN}}\"}\nkeycloak_clients:\n  - {client_id: x, redirect_uri: \"https://x.{{DOMAIN}}/cb\"}\n",
+			"services:\n  s:\n    labels:\n      traefik.http.routers.x.rule: Host(`${PORTCULLIS_HOST_X:-x.portcullis.local}`)\n"},
+	} {
+		dir := t.TempDir()
+		os.MkdirAll(filepath.Join(dir, "x"), 0755)
+		os.WriteFile(filepath.Join(dir, "x", "manifest.yaml"), []byte(c[0]), 0644)
+		os.WriteFile(filepath.Join(dir, "x", "compose.yml"), []byte(c[1]), 0644)
+		got := Discover(dir, "s", "example.org")
+		if len(got) != 1 {
+			t.Errorf("%s: not loaded", name)
+			continue
+		}
+		if u := got[0].Manifest.URLs[0].URL; u != "https://x.example.org" {
+			t.Errorf("%s: url = %s", name, u)
 		}
 	}
 }

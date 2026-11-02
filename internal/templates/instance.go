@@ -308,8 +308,21 @@ func checkInstanceRules(m *Manifest, r *Routes) error {
 		}
 		return nil
 	}
+	// A multi template writes its own hosts only as {{HOST_<ROUTER>}}
+	// (contract §3.1): {{DOMAIN}} would point every instance at the default
+	// instance's hostnames.
+	noDomain := func(where, s string) error {
+		if m.Multi() && strings.Contains(s, "{{DOMAIN}}") {
+			return fmt.Errorf("%s: a multi template names its hosts as {{HOST_<ROUTER>}}, not with {{DOMAIN}}", where)
+		}
+		return nil
+	}
 	for i, u := range m.URLs {
-		if err := check(fmt.Sprintf("urls[%d]", i), u.URL); err != nil {
+		where := fmt.Sprintf("urls[%d]", i)
+		if err := noDomain(where, u.URL); err != nil {
+			return err
+		}
+		if err := check(where, u.URL); err != nil {
 			return err
 		}
 	}
@@ -323,6 +336,11 @@ func checkInstanceRules(m *Manifest, r *Routes) error {
 	for _, c := range m.Clients {
 		if m.Multi() && strings.Contains(c.BackchannelLogoutURL, "{{DOMAIN}}") {
 			return fmt.Errorf("keycloak client %s: a multi template names its backchannel_logout_url host as {{HOST_<ROUTER>}}", c.ClientID)
+		}
+		for _, u := range append([]string{c.RedirectURI}, c.RedirectURIs...) {
+			if err := noDomain("keycloak client "+c.ClientID+" redirect URI", u); err != nil {
+				return err
+			}
 		}
 		for _, u := range append([]string{c.RedirectURI, c.BackchannelLogoutURL}, c.RedirectURIs...) {
 			if err := check("keycloak client "+c.ClientID, u); err != nil {

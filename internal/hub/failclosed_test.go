@@ -427,3 +427,20 @@ func TestPublishedExpiringCorruptFile(t *testing.T) {
 		t.Errorf("got %#v", got)
 	}
 }
+
+// Hosts that are not valid hostnames (contract §4 key shape) are never
+// published — group-gate would deny the whole file — while the valid ones
+// of the same snapshot stay enforced.
+func TestInvalidSnapshotHostsDropped(t *testing.T) {
+	f := newFixture(t)
+	f.h.mu.Lock()
+	f.h.st.SetEnabled("ghost", true)
+	f.h.st.Published["ghost"] = state.PublishedApp{Hosts: []string{"Ghost.Example.org.", "bad_host.example.org", "*.example.org", "nodot"}, GroupAccess: true, AccessGroup: "users_ghost"}
+	f.h.mu.Unlock()
+	if err := f.h.WritePolicy(); err != nil {
+		t.Fatal(err)
+	}
+	if g := readPolicy(t, f).Groups; len(g) != 1 || g["ghost.example.org"] != "users_ghost" {
+		t.Errorf("groups = %v", g)
+	}
+}
