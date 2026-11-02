@@ -64,19 +64,20 @@ func Discover(dir, source, domain string) []Template {
 		}
 		raw := m
 		t := Template{
-			ID:          e.Name(),
-			TemplateID:  e.Name(),
-			Source:      source,
-			Manifest:    m,
-			Path:        filepath.Join(dir, e.Name()),
-			Subdomains:  routes.Subdomains,
-			Public:      public,
-			HostRouters: routes.HostRouters,
-			HostVars:    routes.HostVars,
-			HostForm:    routes.Form,
-			Volumes:     ComposeVolumes(compose),
-			Names:       routes.Names,
-			raw:         &raw,
+			ID:           e.Name(),
+			TemplateID:   e.Name(),
+			Source:       source,
+			Manifest:     m,
+			Path:         filepath.Join(dir, e.Name()),
+			Subdomains:   routes.Subdomains,
+			Public:       public,
+			HostRouters:  routes.HostRouters,
+			HostVars:     routes.HostVars,
+			HostForm:     routes.Form,
+			Volumes:      ComposeVolumes(compose),
+			NamedVolumes: declaredVolumeNames(compose),
+			Names:        routes.Names,
+			raw:          &raw,
 		}
 		// The catalog entry shows the default instance.
 		view, err := t.Instance(t.ID, nil, domain)

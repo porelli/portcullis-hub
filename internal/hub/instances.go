@@ -41,6 +41,9 @@ type InstanceView struct {
 	AdminGroup      string            `json:"admin_group"`
 	KeycloakClients []string          `json:"keycloak_clients"`
 	Project         string            `json:"project"`
+	// Error says why an instance can't be resolved (state "error"): its
+	// template is missing or no longer fits its hostnames.
+	Error string `json:"error,omitempty"`
 }
 
 // rebuildLocked recomputes the instance views from the catalog and state
@@ -49,6 +52,7 @@ type InstanceView struct {
 func (h *Hub) rebuildLocked() {
 	var out []templates.Template
 	byTemplate := map[string][]string{}
+	broken := map[string]string{}
 	for i := range h.templates {
 		t := &h.templates[i]
 		var hosts map[string]string
@@ -58,6 +62,7 @@ func (h *Hub) rebuildLocked() {
 		v, err := t.Instance(t.ID, hosts, h.cfg.Domain)
 		if err != nil {
 			log.Printf("instance %s: %v", t.ID, err)
+			broken[t.ID] = err.Error()
 			continue
 		}
 		v.Enabled = h.st.IsEnabled(t.ID)
@@ -75,11 +80,16 @@ func (h *Hub) rebuildLocked() {
 		}
 		t := h.catalogLocked(e.Template)
 		if t == nil {
-			continue // template missing: fail-closed via published
+			// Fail-closed via the published snapshot; listed as error.
+			broken[id] = "template " + e.Template + " is missing"
+			continue
 		}
 		v, err := t.Instance(id, e.Hosts, h.cfg.Domain)
 		if err != nil {
+			// Kept (listed as error, enforced from its published snapshot)
+			// rather than dropped: its containers may still run.
 			log.Printf("instance %s: %v", id, err)
+			broken[id] = err.Error()
 			continue
 		}
 		v.Enabled = h.st.IsEnabled(id)
@@ -96,6 +106,7 @@ func (h *Hub) rebuildLocked() {
 		h.templates[i].Instances = byTemplate[h.templates[i].ID]
 	}
 	h.instances = out
+	h.brokenInstances = broken
 }
 
 // catalogLocked returns the catalog entry of a template id. Caller must
@@ -158,6 +169,15 @@ func (h *Hub) Instances() []InstanceView {
 			v.State = StateDisabled
 		}
 		out = append(out, v)
+	}
+	for id, reason := range h.brokenInstances {
+		e, inState := h.st.Instances[id]
+		tid := e.Template
+		if !inState {
+			tid = id
+		}
+		out = append(out, InstanceView{ID: id, Template: tid, Default: id == tid, State: StateError, Error: reason,
+			Hosts: copyMap(e.Hosts), KeycloakClients: []string{}, Project: projectName(id)})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
@@ -279,55 +299,82 @@ func (h *Hub) checkInstanceNamesLocked(t *templates.Template, id string) error {
 	if h.templateIDs[id] || h.catalogLocked(id) != nil {
 		return statusErr(409, "instance id %s is a template id (the default instance of that template)", id)
 	}
-	mine := t.NamesFor(id)
-	type owner struct{ kind, who string }
-	taken := map[string]owner{} // lower-cased name → owner
-	claim := func(kind, name, who string) {
-		if name != "" {
-			taken[kind+"\x00"+strings.ToLower(name)] = owner{kind, who}
-		}
-	}
-	claimAll := func(n templates.InstanceNames, who string) {
-		claim("project", n.Project, who)
-		for _, v := range n.Volumes {
-			claim("volume", v, who)
-		}
-		for _, c := range n.Clients {
-			claim("Keycloak client", c, who)
-		}
-		claim("group", n.AccessGroup, who)
-		claim("group", n.AdminGroup, who)
-	}
+	taken := map[string]string{} // claim → owner
 	for _, tt := range h.allTemplates {
-		claimAll(tt.NamesFor(tt.ID), "the default instance of "+tt.ID)
+		for _, c := range nameClaims(tt.NamesFor(tt.ID)) {
+			taken[c] = "the default instance of " + tt.ID
+		}
 	}
 	for oid, e := range h.st.Instances {
 		if ot := h.catalogLocked(e.Template); ot != nil {
-			claimAll(ot.NamesFor(oid), "instance "+oid)
+			for _, c := range nameClaims(ot.NamesFor(oid)) {
+				taken[c] = "instance " + oid
+			}
 		}
 	}
-	check := func(kind, name string) error {
-		if name == "" {
-			return nil
-		}
-		if o, ok := taken[kind+"\x00"+strings.ToLower(name)]; ok {
-			return statusErr(409, "instance id %s: its %s %s is already used by %s", id, kind, name, o.who)
-		}
-		return nil
-	}
-	errs := []error{check("project", mine.Project), check("group", mine.AccessGroup), check("group", mine.AdminGroup)}
-	for _, v := range mine.Volumes {
-		errs = append(errs, check("volume", v))
-	}
-	for _, c := range mine.Clients {
-		errs = append(errs, check("Keycloak client", c))
-	}
-	for _, e := range errs {
-		if e != nil {
-			return e
+	for _, c := range nameClaims(t.NamesFor(id)) {
+		if who, ok := taken[c]; ok {
+			kind, name, _ := strings.Cut(c, "\x00")
+			return statusErr(409, "instance id %s: its %s %s is already used by %s", id, kind, name, who)
 		}
 	}
 	return nil
+}
+
+// nameClaims are an instance's derived names as comparable claims
+// ("<kind>\x00<lower-cased name>", §11.1: case-insensitive), in a fixed
+// order: project, groups, volumes (by key), Keycloak clients.
+func nameClaims(n templates.InstanceNames) []string {
+	var out []string
+	add := func(kind, name string) {
+		if name != "" {
+			out = append(out, kind+"\x00"+strings.ToLower(name))
+		}
+	}
+	add("project", n.Project)
+	add("group", n.AccessGroup)
+	add("group", n.AdminGroup)
+	keys := make([]string, 0, len(n.Volumes))
+	for k := range n.Volumes {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		add("volume", n.Volumes[k])
+	}
+	for _, c := range n.Clients {
+		add("Keycloak client", c)
+	}
+	return out
+}
+
+// claimCollision reports (as "<kind> <name> of instance <id>")
+// whether template t's default instance would use a name an existing
+// instance of another template already derives. Caller must hold mu.
+func (h *Hub) claimCollision(t *templates.Template, byID map[string]*templates.Template) string {
+	mine := map[string]bool{}
+	for _, c := range nameClaims(t.NamesFor(t.ID)) {
+		mine[c] = true
+	}
+	ids := make([]string, 0, len(h.st.Instances))
+	for id := range h.st.Instances {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		e := h.st.Instances[id]
+		ot := byID[e.Template]
+		if ot == nil || e.Template == t.ID || id == e.Template {
+			continue
+		}
+		for _, c := range nameClaims(ot.NamesFor(id)) {
+			if mine[c] {
+				kind, name, _ := strings.Cut(c, "\x00")
+				return kind + " " + name + " of instance " + id
+			}
+		}
+	}
+	return ""
 }
 
 // checkInstanceHostsLocked refuses hostnames used twice by the instance,
@@ -359,6 +406,17 @@ func (h *Hub) checkInstanceHostsLocked(v *templates.Template) error {
 			for _, mine := range v.Subdomains {
 				if s == mine {
 					return statusErr(409, "hostname %s.%s is already routed by instance %s", s, h.cfg.Domain, o.ID)
+				}
+			}
+		}
+	}
+	// Templates from other sources and skipped duplicates route their
+	// default hostnames too, should they ever be enabled.
+	for _, tt := range h.allTemplates {
+		for _, s := range tt.Subdomains {
+			for _, mine := range v.Subdomains {
+				if s == mine {
+					return statusErr(409, "hostname %s.%s is the default hostname of template %s (source %s)", s, h.cfg.Domain, tt.ID, tt.Source)
 				}
 			}
 		}

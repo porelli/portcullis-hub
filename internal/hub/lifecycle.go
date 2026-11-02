@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/portcullis/hub/internal/compose"
@@ -81,10 +82,20 @@ func (h *Hub) composeUp(t *templates.Template) error {
 	if err := h.checkUserOverride(live); err != nil {
 		return err
 	}
-	if err := templates.SyncFiles(live, h.templatesRoot()); err != nil {
+	if err := h.syncTemplateFiles(live); err != nil {
 		return statusErr(500, "sync template files: %v", err)
 	}
 	return h.compose.Up(context.Background(), h.project(live))
+}
+
+// syncTemplateFiles publishes the template's support files, serialised per
+// TEMPLATE id: every instance of a template shares <core>/templates/<id>/.
+func (h *Hub) syncTemplateFiles(t *templates.Template) error {
+	m, _ := h.syncMu.LoadOrStore(templateDir(t), &sync.Mutex{})
+	mu := m.(*sync.Mutex)
+	mu.Lock()
+	defer mu.Unlock()
+	return templates.SyncFiles(t, h.templatesRoot())
 }
 
 func (h *Hub) composeDown(t *templates.Template) error {

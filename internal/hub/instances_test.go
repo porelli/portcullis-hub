@@ -1,10 +1,12 @@
 package hub
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -138,6 +140,7 @@ func newInstanceFixture(t *testing.T, seed func(*state.AppState)) *fixture {
 	} {
 		writeFile(t, filepath.Join(f.src, id, "manifest.yaml"), files[0])
 		writeFile(t, filepath.Join(f.src, id, "compose.yml"), files[1])
+		writeFile(t, filepath.Join(f.src, id, "conf", "app.ini"), "[v1]\n")
 	}
 	st := state.New()
 	st.Sources = []state.Source{{Name: "local", Path: f.src}}
@@ -169,79 +172,56 @@ func readFile(t *testing.T, path string) string {
 }
 
 func TestDefaultInstanceUnchanged(t *testing.T) {
-	// An existing state.yaml (no instances section) with grafana enabled.
-	f := newInstanceFixture(t, func(st *state.AppState) {
-		st.Enabled = []string{"grafana"}
-		st.Settings["grafana"] = map[string]string{"GRAFANA_PORT": "3301"}
-	})
+	// Byte for byte what the base commit (before instances) generated from
+	// an existing state.yaml with grafana and disks enabled. The env only
+	// gains the instance variables.
+	check := func(name string, got map[string]string, extraOverride string) {
+		t.Helper()
+		for _, n := range []string{"grafana.override.yml", "disks.override.yml", "policy.json"} {
+			want := golden(t, n)
+			if n == "grafana.override.yml" {
+				want += extraOverride
+			}
+			if got[n] != want {
+				t.Errorf("%s: %s differs from the base commit's:\n got:\n%s\nwant:\n%s", name, n, got[n], want)
+			}
+		}
+		for _, n := range []string{"grafana.env", "disks.env"} {
+			if g := instanceVarLineRe.ReplaceAllString(got[n], ""); g != golden(t, n) {
+				t.Errorf("%s: %s differs from the base commit's (instance variables aside):\n got:\n%s\nwant:\n%s", name, n, g, golden(t, n))
+			}
+		}
+		for k, want := range map[string]string{
+			"PORTCULLIS_INSTANCE=": "grafana", "PORTCULLIS_HOST_GRAFANA=": "grafana.example.org",
+			"PORTCULLIS_ACCESS_GROUP=": "users_grafana", "PORTCULLIS_ADMIN_GROUP=": "admin_grafana", "PORTCULLIS_OIDC_CLIENT_ID=": "",
+		} {
+			if !strings.Contains(got["grafana.env"], "\n"+k+want+"\n") {
+				t.Errorf("%s: grafana.env lacks %s%s", name, k, want)
+			}
+		}
+		if !strings.Contains(got["disks.env"], "\nPORTCULLIS_INSTANCE=disks\n") || !strings.Contains(got["disks.env"], "\nPORTCULLIS_HOST_DISKS=disks.example.org\n") {
+			t.Errorf("%s: disks.env = %s", name, got["disks.env"])
+		}
+	}
+	// The templates as they were: identical.
+	_, legacy := goldenRun(t, false)
+	check("legacy", legacy, "")
+	// grafana converted to contract v2: identical, plus the volume name
+	// the template no longer declares itself (today's name).
+	f, v2 := goldenRun(t, true)
+	check("v2", v2, "volumes:\n  \"grafana-data\":\n    name: \"portcullis_grafana-data\"\n")
+
 	tpl := f.h.Template("grafana")
-	if tpl == nil || !tpl.Enabled || !tpl.IsDefault() || tpl.TemplateID != "grafana" {
+	if tpl == nil || !tpl.Enabled || !tpl.IsDefault() || tpl.TemplateID != "grafana" || tpl.Hosts["grafana"] != "grafana.example.org" {
 		t.Fatalf("default instance = %+v", tpl)
 	}
-	if got := strings.Join(tpl.Subdomains, ","); got != "grafana" {
-		t.Errorf("subdomains = %s", got)
-	}
-	if tpl.Hosts["grafana"] != "grafana.example.org" || len(tpl.Hosts) != 1 {
-		t.Errorf("hosts = %v", tpl.Hosts)
-	}
-	if a := tpl.Manifest.Auth; a.AccessGroup != "users_grafana" || a.AdminGroup != "admin_grafana" {
-		t.Errorf("groups = %s / %s", a.AccessGroup, a.AdminGroup)
-	}
-	if u := tpl.Manifest.URLs[0].URL; u != "https://grafana.example.org" {
-		t.Errorf("url = %s", u)
-	}
-
-	// The start-up policy write already publishes it, keyed as today.
-	doc := readPolicy(t, f)
-	if doc.Groups["grafana"] != "users_grafana" || len(doc.Groups) != 1 {
-		t.Errorf("groups = %v", doc.Groups)
-	}
-	if pg := doc.PathGroups["grafana"]; len(pg) != 1 || pg[0].Group != "admin_grafana" {
-		t.Errorf("path_groups = %v", doc.PathGroups)
-	}
-
-	// A restart regenerates exactly today's files.
-	if err := f.h.RestartApp("grafana"); err != nil {
-		t.Fatal(err)
-	}
 	ps := f.runner.Projects()
-	p := ps[len(ps)-1]
-	if p.Name != "portcullis-grafana" || p.EnvFile != filepath.Join(f.data, "env", "grafana.env") {
+	if p := ps[len(ps)-1]; p.Name != "portcullis-disks" {
 		t.Errorf("project = %+v", p)
 	}
-	ov := readFile(t, filepath.Join(f.data, "overrides", "grafana.override.yml"))
-	for _, want := range []string{
-		"traefik.http.routers.grafana.tls.options: authaware@file",
-		"traefik.http.routers.grafana-api.tls.options: authaware@file",
-		`"0.0.0.0:3301:3000/tcp"`,
-		"volumes:\n  \"grafana-data\":\n    name: \"portcullis_grafana-data\"\n",
-	} {
-		if !strings.Contains(ov, want) {
-			t.Errorf("override lacks %q:\n%s", want, ov)
-		}
-	}
-	if strings.Contains(ov, "!override") || strings.Contains(ov, "grafana_") {
-		t.Errorf("default instance renamed something:\n%s", ov)
-	}
-
-	// Its env is written on enable; enable it again from scratch to check.
-	if err := f.h.Disable("grafana"); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.h.Enable("grafana"); err != nil {
-		t.Fatal(err)
-	}
-	env := readEnvFile(filepath.Join(f.data, "env", "grafana.env"))
-	for k, want := range map[string]string{
-		"PORTCULLIS_INSTANCE": "grafana", "PORTCULLIS_HOST_GRAFANA": "grafana.example.org",
-		"PORTCULLIS_ACCESS_GROUP": "users_grafana", "PORTCULLIS_ADMIN_GROUP": "admin_grafana",
-		"PORTCULLIS_OIDC_CLIENT_ID": "", "PORTCULLIS_DOMAIN": "example.org", "GRAFANA_PORT": "3301",
-	} {
-		if v, ok := env[k]; !ok || v != want {
-			t.Errorf("env %s = %q, want %q", k, v, want)
-		}
-	}
-	if iv := f.h.Instances(); len(iv) != 1 || iv[0].ID != "grafana" || !iv[0].Default || iv[0].State != StateEnabled || iv[0].Project != "portcullis-grafana" {
+	iv := f.h.Instances()
+	if len(iv) != 2 || iv[1].ID != "grafana" || !iv[1].Default || iv[1].State != StateEnabled || iv[1].Project != "portcullis-grafana" ||
+		iv[1].AccessGroup != "users_grafana" {
 		t.Errorf("instances = %+v", iv)
 	}
 	// Nothing about instances was written to state.yaml.
@@ -509,14 +489,26 @@ func TestSingleTemplateRefusesSecondInstance(t *testing.T) {
 	if err := f.h.CreateInstance("nope", "nope-b", nil); statusOf(err) != 404 {
 		t.Errorf("unknown template: %v", err)
 	}
-	// The single template still runs as its default instance, its volume
-	// keeping its declared name.
+	// The single template still runs as its default instance; the Hub
+	// never names a single template's volumes (they keep what compose
+	// names them: the declared name, else <project>_<key>).
 	if err := f.h.Enable("disks"); err != nil {
 		t.Fatal(err)
 	}
 	ov := readFile(t, filepath.Join(f.data, "overrides", "disks.override.yml"))
-	if !strings.Contains(ov, "name: \"portcullis_disks-data\"") {
-		t.Errorf("override:\n%s", ov)
+	if strings.Contains(ov, "volumes:") || strings.Contains(ov, "name:") {
+		t.Errorf("override names a single template's volume:\n%s", ov)
+	}
+	if n := f.h.Template("disks").NamesFor("disks"); n.Volumes["disks-data"] != "portcullis_disks-data" {
+		t.Errorf("names = %+v", n)
+	}
+	// A legacy single template with an unnamed volume (golden fixture).
+	g, out := goldenRun(t, false)
+	if ov := out["disks.override.yml"]; strings.Contains(ov, "volumes:") {
+		t.Errorf("legacy override:\n%s", ov)
+	}
+	if n := g.h.Template("disks").NamesFor("disks"); n.Volumes["data"] != "portcullis-disks_data" {
+		t.Errorf("legacy names = %+v", n)
 	}
 }
 
@@ -647,5 +639,147 @@ func TestInstanceEnvIsTheHubs(t *testing.T) {
 	}
 	if v := readEnvFile(path)["PORTCULLIS_HOST_GRAFANA"]; v != "grafana.example.org" {
 		t.Errorf("after restart: %s", v)
+	}
+}
+
+// TestSiblingsShareSupportFiles: instances of one template share
+// <core>/templates/<template-id>/. An unchanged tree is never swapped
+// under a running sibling; concurrent syncs of siblings are serialised.
+func TestSiblingsShareSupportFiles(t *testing.T) {
+	f := newInstanceFixture(t, nil)
+	dest := filepath.Join(f.project, "templates", "grafana")
+	if err := f.h.Enable("grafana"); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, id := range []string{"grafana-b", "grafana-c"} {
+		if err := f.h.CreateInstance("grafana", id, nil); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.h.SaveSettings(id, SettingsUpdate{Values: map[string]string{"GRAFANA_PORT": fmt.Sprint(3311 + i)}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := f.h.Enable("grafana-b"); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(dest)
+	if err != nil || !os.SameFile(before, after) {
+		t.Fatalf("the running sibling's support dir was swapped although nothing changed (%v)", err)
+	}
+	// Changed content: two siblings sync concurrently, both succeed and the
+	// result is the new tree.
+	writeFile(t, filepath.Join(f.src, "grafana", "conf", "app.ini"), "[v2]\n")
+	if err := f.h.Disable("grafana-b"); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	for i, id := range []string{"grafana-b", "grafana-c"} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs[i] = f.h.Enable(id)
+		}()
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("enable %d: %v", i, err)
+		}
+	}
+	if got := readFile(t, filepath.Join(dest, "conf", "app.ini")); got != "[v2]\n" {
+		t.Errorf("support file = %q", got)
+	}
+	entries, _ := os.ReadDir(filepath.Join(f.project, "templates"))
+	for _, e := range entries {
+		if e.Name() != "grafana" {
+			t.Errorf("leftover %s in templates/", e.Name())
+		}
+	}
+}
+
+// TestDiscoverSkipsTemplateCollidingWithInstance: a template discovered
+// after an instance whose derived names its default instance would use is
+// skipped; the instance was there first.
+func TestDiscoverSkipsTemplateCollidingWithInstance(t *testing.T) {
+	f := newInstanceFixture(t, nil)
+	if err := f.h.CreateInstance("grafana", "grafana-b", nil); err != nil {
+		t.Fatal(err)
+	}
+	for id, c := range map[string][2]string{
+		// its access group is grafana-b's.
+		"teamb": {"name: T\nauth:\n  method: forward-auth\n  group_access: true\n  access_group: USERS_grafana-b\n",
+			"services:\n  s:\n    image: x\n"},
+		// its volume portcullis_grafana-b-grafana-data is grafana-b's.
+		"store": {"name: S\ninstances: multi\nauth:\n  method: forward-auth\n",
+			"services:\n  s:\n    image: x\nvolumes:\n  grafana-b-grafana-data: {}\n"},
+		// no collision.
+		"fine": {"name: F\nauth:\n  method: forward-auth\n", "services:\n  s:\n    image: x\n"},
+	} {
+		writeFile(t, filepath.Join(f.src, id, "manifest.yaml"), c[0])
+		writeFile(t, filepath.Join(f.src, id, "compose.yml"), c[1])
+	}
+	f.h.Discover()
+	if f.h.Template("teamb") != nil || f.h.Template("store") != nil {
+		t.Error("a colliding template was loaded")
+	}
+	if f.h.Template("fine") == nil || f.h.Template("grafana-b") == nil {
+		t.Error("lost a template or the instance")
+	}
+}
+
+func TestBrokenInstanceListedAsError(t *testing.T) {
+	f := newInstanceFixture(t, nil)
+	for _, c := range [][2]string{{"chat", "chat-b"}, {"grafana", "grafana-b"}} {
+		if err := f.h.CreateInstance(c[0], c[1], nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := f.h.Enable("chat-b"); err != nil {
+		t.Fatal(err)
+	}
+	// chat's template disappears; grafana's host router is renamed, so
+	// grafana-b's stored hostnames no longer fit.
+	os.RemoveAll(filepath.Join(f.src, "chat"))
+	writeFile(t, filepath.Join(f.src, "grafana", "compose.yml"), strings.ReplaceAll(strings.ReplaceAll(v2GrafanaCompose,
+		"routers.grafana.", "routers.dash."), "PORTCULLIS_HOST_GRAFANA", "PORTCULLIS_HOST_DASH"))
+	writeFile(t, filepath.Join(f.src, "grafana", "manifest.yaml"), strings.ReplaceAll(v2GrafanaManifest, "HOST_GRAFANA", "HOST_DASH"))
+	f.h.Discover()
+	got := map[string]InstanceView{}
+	for _, v := range f.h.Instances() {
+		got[v.ID] = v
+	}
+	if v := got["chat-b"]; v.State != StateError || !strings.Contains(v.Error, "template chat is missing") || v.Template != "chat" {
+		t.Errorf("chat-b = %+v", v)
+	}
+	if v := got["grafana-b"]; v.State != StateError || !strings.Contains(v.Error, "dash") || v.Hosts["grafana"] != "grafana-b.example.org" {
+		t.Errorf("grafana-b = %+v", v)
+	}
+	// Still fail-closed: chat-b is enabled, its published snapshot holds.
+	if g := readPolicy(t, f).Groups["chat-b"]; g != "users_chat-b" {
+		t.Errorf("policy groups = %v", readPolicy(t, f).Groups)
+	}
+	if err := f.h.Enable("grafana-b"); err == nil {
+		t.Error("enabled a broken instance")
+	}
+}
+
+func TestInstanceHostsVsOtherSources(t *testing.T) {
+	f := newInstanceFixture(t, nil)
+	other := filepath.Join(filepath.Dir(f.src), "other-src")
+	// A duplicate id (skipped: the first source wins) routing "talk".
+	writeFile(t, filepath.Join(other, "chat", "manifest.yaml"), "name: C2\nauth:\n  method: forward-auth\n")
+	writeFile(t, filepath.Join(other, "chat", "compose.yml"), "services:\n  s:\n    labels:\n      traefik.http.routers.talk.rule: Host(`${PORTCULLIS_HOST_TALK:-talk.portcullis.local}`)\n")
+	f.h.mu.Lock()
+	f.h.st.Sources = append(f.h.st.Sources, state.Source{Name: "other", Path: other})
+	f.h.mu.Unlock()
+	f.h.Discover()
+	err := f.h.CreateInstance("grafana", "grafana-b", map[string]string{"grafana": "talk.example.org"})
+	if statusOf(err) != 409 || !strings.Contains(err.Error(), "template chat (source other)") {
+		t.Errorf("got %v", err)
 	}
 }

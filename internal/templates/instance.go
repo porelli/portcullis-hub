@@ -80,6 +80,17 @@ func (t *Template) NamesFor(id string) InstanceNames {
 	m := t.rawManifest()
 	n := InstanceNames{Project: "portcullis-" + id, Volumes: map[string]string{}}
 	for _, k := range t.Volumes {
+		if !m.Multi() {
+			// A single template's volumes keep what compose names them:
+			// its declared portcullis_<key>, else <project>_<key>. The
+			// Hub's override never renames them.
+			if t.NamedVolumes[k] {
+				n.Volumes[k] = "portcullis_" + k
+			} else {
+				n.Volumes[k] = n.Project + "_" + k
+			}
+			continue
+		}
 		if def {
 			n.Volumes[k] = "portcullis_" + k
 		} else {
@@ -288,6 +299,23 @@ func checkVolumeNames(compose []byte, multi bool) error {
 		}
 	}
 	return nil
+}
+
+// declaredVolumeNames returns the volume keys that declare a name:.
+func declaredVolumeNames(compose []byte) map[string]bool {
+	var doc struct {
+		Volumes map[string]interface{} `yaml:"volumes"`
+	}
+	out := map[string]bool{}
+	if yaml.Unmarshal(compose, &doc) != nil {
+		return out
+	}
+	for k, v := range doc.Volumes {
+		if mv, ok := v.(map[string]interface{}); ok && mv["name"] != nil {
+			out[k] = true
+		}
+	}
+	return out
 }
 
 // ComposeVolumes returns the sorted top-level volume keys of a compose

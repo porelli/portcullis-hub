@@ -174,15 +174,17 @@ func (h *Hub) renderOverrideLocked(t *templates.Template, values map[string]stri
 			}
 		}
 	}
-	// Volume names (§11.2): the default instance keeps today's
-	// portcullis_<key>, other instances get portcullis_<id>-<key>.
-	if vols := t.NamesFor(t.ID).Volumes; len(vols) > 0 {
+	// Volume names (§11.2), multi templates only (they declare none): the
+	// default instance gets portcullis_<key>, others portcullis_<id>-<key>.
+	// A single template's volumes stay exactly as compose names them.
+	multiVols := t.Manifest.Multi() && len(t.Volumes) > 0
+	if vols := t.NamesFor(t.ID).Volumes; multiVols {
 		b.WriteString("volumes:\n")
 		for _, k := range t.Volumes {
 			fmt.Fprintf(&b, "  %s:\n    name: %s\n", yamlQuote(k), yamlQuote(vols[k]))
 		}
 	}
-	if len(names) == 0 && len(t.Volumes) == 0 {
+	if len(names) == 0 && !multiVols {
 		return "", nil
 	}
 	return b.String(), nil

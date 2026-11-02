@@ -77,6 +77,9 @@ type Hub struct {
 	// instances are the instance views (instances.go): the default
 	// instance of every catalog template plus state's instances.
 	instances []templates.Template
+	// brokenInstances: instance id → why it has no view (template missing
+	// or its hostnames no longer fit); listed with state "error".
+	brokenInstances map[string]string
 	// allTemplates is every template discovered in any source (duplicates
 	// and skipped ones included): their default names are reserved
 	// (§11.1). templateIDs are their ids.
@@ -87,6 +90,9 @@ type Hub struct {
 	// run without holding mu.
 	appOps    sync.Map
 	sourceOps sync.Map
+	// syncMu: per template id, a *sync.Mutex around its support-file sync
+	// (shared by all its instances).
+	syncMu sync.Map
 	// lockPoll is how often a queued restart retries the app lock.
 	lockPoll time.Duration
 
@@ -259,6 +265,22 @@ func (h *Hub) Discover() {
 		seen[t.ID] = true
 		uniq = append(uniq, t)
 	}
+	// A template whose default names (project, volumes, groups, Keycloak
+	// clients) an existing instance of another template already derives
+	// would share them: the instance was there first.
+	byID := map[string]*templates.Template{}
+	for i := range uniq {
+		byID[uniq[i].ID] = &uniq[i]
+	}
+	kept := make([]templates.Template, 0, len(uniq))
+	for _, t := range uniq {
+		if c := h.claimCollision(&t, byID); c != "" {
+			log.Printf("Skipping template %s: its default instance would use the %s", t.ID, c)
+			continue
+		}
+		kept = append(kept, t)
+	}
+	uniq = kept
 	templates.Sort(uniq)
 	h.templates = uniq
 	h.rebuildLocked()
