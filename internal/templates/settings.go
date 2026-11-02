@@ -1504,12 +1504,33 @@ func (v *specCheck) header(o *Option, h *HeaderDelivery) error {
 		names = append(names, r)
 	}
 	sort.Strings(names)
+	// A service on network_mode host can reach every port of the host
+	// (the delivering backend's included): no Traefik routing through it.
+	svcs := make([]string, 0, len(v.routes.NetworkMode))
+	for svc := range v.routes.NetworkMode {
+		svcs = append(svcs, svc)
+	}
+	sort.Strings(svcs)
+	for _, svc := range svcs {
+		ns, ok := v.routes.NetNS(svc)
+		if !ok {
+			return fmt.Errorf("header %s: service %s's network_mode doesn't resolve to a service of the template (a cycle?): the Hub can't tell which backend its routers reach", h.Name, svc)
+		}
+		if ns == "host" && v.routes.TraefikLabelled[svc] {
+			return fmt.Errorf("header %s: service %s has Traefik labels and runs in the host's network namespace (network_mode host): it can reach any port on the host, the delivering backend's included", h.Name, svc)
+		}
+	}
+	// Targets are network namespaces: a service on network_mode
+	// service:X shares X's, so a router to it reaches X's processes.
 	gated, target := map[string]bool{}, map[string]string{}
 	for _, r := range names {
 		ri := v.routes.Info[r]
 		t, ok := v.routerTarget(ri)
 		if !ok {
 			return fmt.Errorf("header %s: router %s's service %s isn't one of the template's own services: the Hub can't tell which backend it reaches", h.Name, r, ri.TraefikService)
+		}
+		if t, ok = v.routes.NetNS(t); !ok {
+			return fmt.Errorf("header %s: router %s's backend has a network_mode the Hub can't resolve", h.Name, r)
 		}
 		target[r] = t
 		if ri.Gated() {
@@ -1522,7 +1543,7 @@ func (v *specCheck) header(o *Option, h *HeaderDelivery) error {
 	for _, r := range names {
 		ri := v.routes.Info[r]
 		if t := target[r]; gated[t] && !forwardAuthed(ri) {
-			return fmt.Errorf("header %s: router %s reaches service %s without Portcullis forward-auth: clients could forge the header there", h.Name, r, t)
+			return fmt.Errorf("header %s: router %s reaches service %s (its network namespace) without Portcullis forward-auth: clients could forge the header there", h.Name, r, t)
 		}
 	}
 	k := strings.ToLower(h.Name)

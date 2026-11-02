@@ -59,6 +59,37 @@ type Routes struct {
 	// Names are the Traefik router, service and middleware names the
 	// template's labels define (any protocol), for per-instance renaming.
 	Names map[string]bool
+	// NetworkMode is each compose service's network_mode as written
+	// (string values only; checkNetworkMode validates them).
+	NetworkMode map[string]string
+	// TraefikLabelled: compose services with any traefik.* label (folded).
+	TraefikLabelled map[string]bool
+}
+
+// NetNS is the compose service whose network namespace svc runs in:
+// network_mode service:X followed transitively; "host" for the host's.
+// ok is false for a cycle or a service: target the template doesn't
+// define (fail closed).
+func (r *Routes) NetNS(svc string) (string, bool) {
+	seen := map[string]bool{}
+	for {
+		if seen[svc] {
+			return "", false
+		}
+		seen[svc] = true
+		nm := r.NetworkMode[svc]
+		if nm == "host" {
+			return "host", true
+		}
+		next, ok := strings.CutPrefix(nm, "service:")
+		if !ok {
+			return svc, true
+		}
+		if _, own := r.NetworkMode[next]; !own {
+			return "", false
+		}
+		svc = next
+	}
 }
 
 // Rule forms (Routes.Form).
@@ -169,14 +200,18 @@ const ReservedPrefix = "portcullis-public-"
 func ParseRoutes(compose []byte) (*Routes, error) {
 	var doc struct {
 		Services map[string]struct {
-			Labels interface{} `yaml:"labels"`
+			Labels      interface{} `yaml:"labels"`
+			NetworkMode interface{} `yaml:"network_mode"`
 		} `yaml:"services"`
 	}
 	if err := yaml.Unmarshal(compose, &doc); err != nil {
 		return nil, fmt.Errorf("compose.yml: %w", err)
 	}
 	r := &Routes{Routers: map[string][]string{}, Info: map[string]*RouterInfo{}, TraefikServices: map[string][]string{},
-		HostRouters: map[string]string{}, HostVars: map[string]string{}, Names: map[string]bool{}}
+		HostRouters: map[string]string{}, HostVars: map[string]string{}, Names: map[string]bool{},
+		NetworkMode: map[string]string{}, TraefikLabelled: map[string]bool{}}
+	// routerOwner: the compose service defining each HTTP router (folded).
+	routerOwner := map[string]string{}
 	subs := map[string]bool{}
 	// tsvcOwner: the compose service defining each Traefik HTTP service.
 	tsvcOwner := map[string]string{}
@@ -191,6 +226,13 @@ func ParseRoutes(compose []byte) (*Routes, error) {
 		labels, err := labelMap(doc.Services[svc].Labels)
 		if err != nil {
 			return nil, fmt.Errorf("service %s: %w", svc, err)
+		}
+		nm, _ := doc.Services[svc].NetworkMode.(string)
+		r.NetworkMode[svc] = nm
+		for k := range labels {
+			if strings.HasPrefix(FoldKey(k), "traefik.") {
+				r.TraefikLabelled[svc] = true
+			}
 		}
 		type router struct {
 			rule    string
@@ -303,6 +345,12 @@ func ParseRoutes(compose []byte) (*Routes, error) {
 		sort.Strings(rnames)
 		for _, name := range rnames {
 			rt := httpRouters[name]
+			// Traefik would merge (or drop) same-named routers of two
+			// containers; the Hub's view (Info) would keep only one.
+			if o, ok := routerOwner[FoldKey(name)]; ok {
+				return nil, fmt.Errorf("router %s is defined on services %s and %s: give each its own name", name, o, svc)
+			}
+			routerOwner[FoldKey(name)] = svc
 			if !rt.hasRule {
 				return nil, fmt.Errorf("service %s: router %s has no rule (Traefik would apply its default rule)", svc, name)
 			}

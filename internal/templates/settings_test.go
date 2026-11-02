@@ -821,3 +821,102 @@ func TestAutoServiceNameRuleStillHolds(t *testing.T) {
 		}
 	}
 }
+
+// netnsLayout: web carries the gated router; side runs in web's network
+// namespace (directly or through mid) and carries an ungated router to
+// its own automatic service — which is web's processes.
+func netnsLayout(sideMode, extra string) string {
+	return "services:\n  web:\n    image: x\n    labels:\n" +
+		"      traefik.enable: \"true\"\n" +
+		"      traefik.http.routers.app.rule: Host(`${PORTCULLIS_HOST_APP:-app.portcullis.local}`)\n" +
+		"      traefik.http.routers.app.middlewares: portcullis-auth@docker,portcullis-groups@docker\n" +
+		"  side:\n    image: x\n    network_mode: \"" + sideMode + "\"\n    labels:\n" +
+		"      traefik.enable: \"true\"\n" +
+		"      traefik.http.routers.side.rule: Host(`${PORTCULLIS_HOST_APP:-app.portcullis.local}`) && PathPrefix(`/side`)\n" + extra
+}
+
+func TestHeaderNetworkModeService(t *testing.T) {
+	head := []byte(hdrHead + opts(personHeader))
+	for name, c := range map[string]string{
+		"service:web":         netnsLayout("service:web", ""),
+		"chained service:mid": netnsLayout("service:mid", "  mid:\n    image: x\n    network_mode: \"service:web\"\n"),
+		"chained twice":       netnsLayout("service:mid", "  mid:\n    image: x\n    network_mode: \"service:mid2\"\n  mid2:\n    image: x\n    network_mode: \"service:web\"\n"),
+	} {
+		for i := 0; i < 25; i++ {
+			_, err := build("app", "src", "", head, []byte(c), "example.org", nil)
+			if err == nil || !strings.Contains(err.Error(), "router side reaches service web (its network namespace) without Portcullis forward-auth") {
+				t.Fatalf("%s run %d: %v", name, i, err)
+			}
+		}
+	}
+	// The other way round: the gated router's backend runs in side's
+	// namespace, so side's ungated router reaches the delivering process.
+	rev := "services:\n  web:\n    image: x\n    network_mode: \"service:side\"\n    labels:\n" +
+		"      traefik.enable: \"true\"\n" +
+		"      traefik.http.routers.app.rule: Host(`${PORTCULLIS_HOST_APP:-app.portcullis.local}`)\n" +
+		"      traefik.http.routers.app.middlewares: portcullis-auth@docker,portcullis-groups@docker\n" +
+		"  side:\n    image: x\n    labels:\n      traefik.enable: \"true\"\n" +
+		"      traefik.http.routers.side.rule: Host(`${PORTCULLIS_HOST_APP:-app.portcullis.local}`) && PathPrefix(`/side`)\n"
+	for i := 0; i < 20; i++ {
+		if _, err := build("app", "src", "", head, []byte(rev), "example.org", nil); err == nil || !strings.Contains(err.Error(), "router side reaches service side") {
+			t.Fatalf("reverse run %d: %v", i, err)
+		}
+	}
+	// Gated there too: accepted.
+	ok := netnsLayout("service:web", "      traefik.http.routers.side.middlewares: portcullis-auth@docker\n")
+	if _, err := build("app", "src", "", head, []byte(ok), "example.org", nil); err != nil {
+		t.Errorf("gated side refused: %v", err)
+	}
+	// A cycle fails closed (compose refuses it too).
+	cyc := netnsLayout("service:mid", "  mid:\n    image: x\n    network_mode: \"service:side\"\n")
+	r, err := ParseRoutes([]byte(cyc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := r.NetNS("side"); ok {
+		t.Error("cycle resolved")
+	}
+	if ns, ok := r.NetNS("web"); !ok || ns != "web" {
+		t.Errorf("web = %q %v", ns, ok)
+	}
+}
+
+func TestHeaderNetworkModeHostLabelled(t *testing.T) {
+	head := []byte(hdrHead + opts(personHeader))
+	// Even a gated router on a host-mode service is refused: the service
+	// itself can reach any port on the host.
+	for name, c := range map[string]string{
+		"host, ungated":        netnsLayout("host", ""),
+		"host, gated":          netnsLayout("host", "      traefik.http.routers.side.middlewares: portcullis-auth@docker\n"),
+		"via service: to host": netnsLayout("service:mid", "  mid:\n    image: x\n    network_mode: \"host\"\n"),
+	} {
+		for i := 0; i < 20; i++ {
+			_, err := build("app", "src", "", head, []byte(c), "example.org", nil)
+			if err == nil || !strings.Contains(err.Error(), "service side has Traefik labels and runs in the host's network namespace") {
+				t.Fatalf("%s run %d: %v", name, i, err)
+			}
+		}
+	}
+	// No header delivery: host mode with labels is not this rule's concern.
+	if _, err := build("app", "src", "", []byte(hdrHead), []byte(netnsLayout("host", "")), "example.org", nil); err != nil && strings.Contains(err.Error(), "host's network namespace") {
+		t.Errorf("no header delivery: %v", err)
+	}
+	// An unlabelled host-mode service in a header-delivering template: fine.
+	c := hdrCompose + "  agent:\n    image: x\n    network_mode: \"host\"\n"
+	if _, err := build("app", "src", "", head, []byte(c), "example.org", nil); err != nil && strings.Contains(err.Error(), "host's network namespace") {
+		t.Errorf("unlabelled host service: %v", err)
+	}
+}
+
+func TestDuplicateRouterNameRefused(t *testing.T) {
+	c := "services:\n  a:\n    image: x\n    labels:\n" +
+		"      traefik.http.routers.app.rule: Host(`${PORTCULLIS_HOST_APP:-app.portcullis.local}`)\n" +
+		"      traefik.http.routers.app.middlewares: portcullis-auth@docker,portcullis-groups@docker\n" +
+		"  b:\n    image: x\n    labels:\n" +
+		"      traefik.http.routers.app.rule: Host(`${PORTCULLIS_HOST_APP:-app.portcullis.local}`)\n"
+	for i := 0; i < 20; i++ {
+		if _, err := ParseRoutes([]byte(c)); err == nil || err.Error() != "router app is defined on services a and b: give each its own name" {
+			t.Fatalf("run %d: %v", i, err)
+		}
+	}
+}
