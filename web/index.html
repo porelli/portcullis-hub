@@ -549,6 +549,23 @@
       return err;
     }
     async function apiPost(url, body) { return (await apiCall(url, 'POST', body)).json(); }
+    // Long instance operations (backup, restore, delete; contract §11.7)
+    // answer 202 {op_id, poll}: poll the op record until that operation
+    // finished, then return its record ({result, warnings}) or throw an
+    // error shaped like apiError's (status, output, hint, rolled_back).
+    async function runInstanceOp(url, method, body) {
+      const acc = await (await apiCall(url, method, body)).json();
+      for (;;) {
+        await new Promise(r => setTimeout(r, 1500));
+        let rec;
+        try { rec = await apiGet(acc.poll); } catch (e) { if (e.status === 404) continue; throw e; }
+        if (!rec || rec.op_id !== acc.op_id || rec.running) continue;
+        if (rec.ok) return { result: rec.result || {}, warnings: rec.warnings || [] };
+        const err = new Error(rec.error || (acc.op + ' failed'));
+        Object.assign(err, { status: rec.status || 500, op: rec.op, output: rec.output || '', hint: rec.hint || '', rolled_back: !!rec.rolled_back });
+        throw err;
+      }
+    }
     async function apiPut(url, body) { return (await apiCall(url, 'PUT', body)).json(); }
     async function apiGet(url) { return (await apiCall(url, 'GET')).json(); }
 
@@ -1919,7 +1936,8 @@
       btn.disabled = true;
       btn.textContent = 'Backing up and deleting…';
       try {
-        const res = await (await apiCall('/api/instances/' + encodeURIComponent(id), 'DELETE', { confirm: confirmVal })).json();
+        const op = await runInstanceOp('/api/instances/' + encodeURIComponent(id), 'DELETE', { confirm: confirmVal });
+        const res = { backup: op.result.backup, warnings: op.warnings };
         const inst = instCtx.inst;
         instCtx = { kind: 'deleted', id };
         document.getElementById('inst-modal-box').innerHTML = modalHead(escapeHtml(templateLabel(inst.template)) + ' · <code>' + escapeHtml(id) + '</code>') + '<div class="inst-section"><div class="inst-ok">Deleted <code>' + escapeHtml(id) + '</code>.</div>' +
@@ -2024,7 +2042,8 @@
       panel.querySelectorAll('button').forEach(b => b.disabled = true);
       out.innerHTML = '<p class="settings-empty">Restoring… (this can take a while)</p>';
       try {
-        const res = await apiPost(url, body);
+        const op = await runInstanceOp(url, 'POST', body);
+        const res = { pre_restore_backup: op.result.pre_restore_backup, warnings: op.warnings };
         out.innerHTML = '<div class="inst-ok">Restored into <code>' + escapeHtml(target) + '</code>.' +
           (res.pre_restore_backup ? ' Pre-restore backup: <code>' + escapeHtml(res.pre_restore_backup) + '</code>.' : '') + '</div>' +
           warningsList(res.warnings) +
@@ -2043,11 +2062,15 @@
       btn.disabled = true;
       btn.textContent = 'Backing up…';
       try {
-        const res = await apiCall('/api/instances/' + encodeURIComponent(id) + '/backups', 'POST');
-        const entry = await res.json();
-        showToast('Backup ' + entry.archive + ' written', 'success');
-        await loadBackups(btn.closest('[data-ipane]'), id);
-        document.getElementById('inst-bk-result').innerHTML = '<div class="inst-ok">Backup <code>' + escapeHtml(entry.archive) + '</code> written (' + escapeHtml(fmtSize(entry.size)) + ').</div>';
+        const op = await runInstanceOp('/api/instances/' + encodeURIComponent(id) + '/backups', 'POST');
+        const archive = op.result.archive || '';
+        showToast('Backup ' + archive + ' written', 'success');
+        const pane = btn.closest('[data-ipane]');
+        if (pane) await loadBackups(pane, id);
+        const list = await apiGet('/api/instances/' + encodeURIComponent(id) + '/backups').catch(() => []);
+        const entry = list.find(b => b.archive === archive);
+        const res = document.getElementById('inst-bk-result');
+        if (res) res.innerHTML = '<div class="inst-ok">Backup <code>' + escapeHtml(archive) + '</code> written' + (entry ? ' (' + escapeHtml(fmtSize(entry.size)) + ')' : '') + '.</div>';
       } catch (err) {
         out.innerHTML = errorBox(err);
         btn.disabled = false;

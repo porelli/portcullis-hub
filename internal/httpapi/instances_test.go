@@ -396,6 +396,7 @@ func TestInstanceRoutesAdminOnly(t *testing.T) {
 		{"POST", "/api/instances/grafana/backups", ""},
 		{"POST", "/api/instances/grafana/restore", `{"archive":"grafana/20261102T153000Z.tar"}`},
 		{"POST", "/api/instances/restore", `{"archive":"grafana/20261102T153000Z.tar","id":"grafana-c"}`},
+		{"GET", "/api/instances/grafana/op", ""},
 	}
 	for _, user := range []string{"dana", "nobody", ""} {
 		for _, r := range routes {
@@ -551,14 +552,13 @@ func TestDeleteNeedsTypedID(t *testing.T) {
 		t.Fatal("instance gone")
 	}
 	// Typed: backup first, then everything goes; warnings reported.
-	code, b := e.do(t, "root", "DELETE", "/api/instances/grafana-team-a", `{"confirm":"grafana-team-a"}`)
-	var res hub.DeleteResult
-	json.Unmarshal([]byte(b), &res)
-	if code != 200 || !strings.HasPrefix(res.Backup, "grafana-team-a/") {
-		t.Fatalf("delete = %d %s", code, b)
+	// Accepted (202), runs in the background; the op record has the outcome.
+	rec := e.runOp(t, "DELETE", "/api/instances/grafana-team-a", `{"confirm":"grafana-team-a"}`)
+	if !rec.OK || rec.Op != "delete" || !strings.HasPrefix(rec.Result["backup"], "grafana-team-a/") {
+		t.Fatalf("delete op = %+v", rec)
 	}
-	if !strings.Contains(strings.Join(res.Warnings, "\n"), "IdP") && !strings.Contains(strings.Join(res.Warnings, "\n"), "Keycloak") {
-		t.Errorf("warnings = %v", res.Warnings)
+	if !strings.Contains(strings.Join(rec.Warnings, "\n"), "IdP") && !strings.Contains(strings.Join(rec.Warnings, "\n"), "Keycloak") {
+		t.Errorf("warnings = %v", rec.Warnings)
 	}
 	if _, ok := e.s.Hub.InstanceView("grafana-team-a"); ok {
 		t.Error("instance still listed")
@@ -570,7 +570,7 @@ func TestDeleteNeedsTypedID(t *testing.T) {
 		t.Error("group kept")
 	}
 	// The backup stays listed (instance gone).
-	code, b = e.do(t, "root", "GET", "/api/backups", "")
+	code, b := e.do(t, "root", "GET", "/api/backups", "")
 	if code != 200 || !strings.Contains(b, `"instance_exists":false`) || !strings.Contains(b, `"reason":"delete"`) {
 		t.Fatalf("backups = %d %s", code, b)
 	}
@@ -585,11 +585,16 @@ func TestBackupRestoreRoutes(t *testing.T) {
 	mustDo(t, e.hub, "root", "POST", "/api/instances", `{"template":"grafana","id":"grafana-team-a"}`, 201)
 	vol := "portcullis_grafana-team-a-grafana-data"
 	e.engine.addVolume(vol, "portcullis-grafana-team-a", "grafana-data", map[string]string{"grafana.db": "v1"})
-	code, b := e.do(t, "root", "POST", "/api/instances/grafana-team-a/backups", "")
+	rec := e.runOp(t, "POST", "/api/instances/grafana-team-a/backups", "")
+	list, _ := e.s.Hub.ListBackups("grafana-team-a")
 	var entry hub.BackupEntry
-	json.Unmarshal([]byte(b), &entry)
-	if code != 201 || entry.Reason != "manual" || entry.Instance != "grafana-team-a" || !entry.InstanceExists {
-		t.Fatalf("backup = %d %s", code, b)
+	for _, x := range list {
+		if x.Archive == rec.Result["archive"] {
+			entry = x
+		}
+	}
+	if !rec.OK || rec.Op != "backup" || entry.Reason != "manual" || entry.Instance != "grafana-team-a" || !entry.InstanceExists {
+		t.Fatalf("backup = %+v %+v", rec, list)
 	}
 	// Listed, per instance and overall.
 	for _, p := range []string{"/api/backups", "/api/instances/grafana-team-a/backups"} {
@@ -605,11 +610,9 @@ func TestBackupRestoreRoutes(t *testing.T) {
 	e.engine.vols[vol].body["grafana.db"] = []byte("v2")
 	e.engine.mu.Unlock()
 	time.Sleep(1100 * time.Millisecond) // archives are named by the second
-	code, b = e.do(t, "root", "POST", "/api/instances/grafana-team-a/restore", `{"archive":"`+entry.Archive+`"}`)
-	var rr hub.RestoreResult
-	json.Unmarshal([]byte(b), &rr)
-	if code != 200 || !strings.HasPrefix(rr.PreRestoreBackup, "grafana-team-a/") {
-		t.Fatalf("restore = %d %s", code, b)
+	rec = e.runOp(t, "POST", "/api/instances/grafana-team-a/restore", `{"archive":"`+entry.Archive+`"}`)
+	if !rec.OK || rec.Op != "restore" || !strings.HasPrefix(rec.Result["pre_restore_backup"], "grafana-team-a/") {
+		t.Fatalf("restore = %+v", rec)
 	}
 	e.engine.mu.Lock()
 	if got := string(e.engine.vols[vol].body["grafana.db"]); got != "v1" {
@@ -633,9 +636,9 @@ func TestBackupRestoreRoutes(t *testing.T) {
 		}
 	}
 	// Into a new id: created, default hosts, data copied, groups made.
-	code, b = e.do(t, "root", "POST", "/api/instances/restore", `{"archive":"`+entry.Archive+`","id":"grafana-team-c"}`)
-	if code != 201 {
-		t.Fatalf("restore as = %d %s", code, b)
+	rec = e.runOp(t, "POST", "/api/instances/restore", `{"archive":"`+entry.Archive+`","id":"grafana-team-c"}`)
+	if !rec.OK || rec.Result["instance"] != "grafana-team-c" {
+		t.Fatalf("restore as = %+v", rec)
 	}
 	v, ok := e.s.Hub.InstanceView("grafana-team-c")
 	if !ok || v.State != "created" || v.Hosts["grafana"] != "grafana-team-c.example.org" {
@@ -654,4 +657,32 @@ func TestBackupRestoreRoutes(t *testing.T) {
 	if len(got) < 3 || strings.Join(got[:3], ",") != strings.Join(want, ",") || got[len(got)-1] != "instance.restore:ok:root:grafana-team-c" {
 		t.Errorf("audit = %v", got)
 	}
+}
+
+// runOp sends a long-operation request, expects 202 with an op id, and
+// polls the instance's op record until that operation finished.
+func (e *instEnv) runOp(t *testing.T, method, path, body string) hub.OpRecord {
+	t.Helper()
+	code, b := e.do(t, "root", method, path, body)
+	var acc struct{ OpID, Op, Instance, Poll string }
+	json.Unmarshal([]byte(b), &struct {
+		OpID     *string `json:"op_id"`
+		Op       *string `json:"op"`
+		Instance *string `json:"instance"`
+		Poll     *string `json:"poll"`
+	}{&acc.OpID, &acc.Op, &acc.Instance, &acc.Poll})
+	if code != 202 || acc.OpID == "" || acc.Poll != "/api/instances/"+acc.Instance+"/op" {
+		t.Fatalf("%s %s = %d %s, want 202 + op id", method, path, code, b)
+	}
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		code, b := e.do(t, "root", "GET", acc.Poll, "")
+		var rec hub.OpRecord
+		if code == 200 && json.Unmarshal([]byte(b), &rec) == nil && rec.OpID == acc.OpID && !rec.Running {
+			return rec
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("%s %s: op %s did not finish", method, path, acc.OpID)
+	return hub.OpRecord{}
 }

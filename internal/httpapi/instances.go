@@ -25,6 +25,7 @@ func (s *Server) registerInstances(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/instances/{id}/backups", s.handleBackupInstance)
 	mux.HandleFunc("POST /api/instances/{id}/restore", s.handleRestoreInstance)
 	mux.HandleFunc("POST /api/instances/restore", s.handleRestoreAs)
+	mux.HandleFunc("GET /api/instances/{id}/op", s.handleInstanceOp)
 }
 
 // decodeStrict decodes a small JSON body into v (unknown fields refused);
@@ -178,13 +179,13 @@ func (s *Server) handleDeleteInstance(w http.ResponseWriter, r *http.Request) {
 	if !decodeStrict(w, r, &b, `{"confirm": "<instance-id>"}`) {
 		return
 	}
-	res, err := s.Hub.DeleteInstance(id, b.Confirm, actor(r))
+	op, err := s.Hub.StartDelete(id, b.Confirm, actor(r))
 	noStore(w)
 	if err != nil {
 		writeErr(w, err, http.StatusBadGateway)
 		return
 	}
-	writeJSON(w, res)
+	writeAccepted(w, op)
 }
 
 func (s *Server) handleBackups(w http.ResponseWriter, r *http.Request) {
@@ -218,13 +219,13 @@ func (s *Server) handleBackupInstance(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	entry, err := s.Hub.BackupInstance(id, actor(r))
+	op, err := s.Hub.StartBackup(id, actor(r))
 	noStore(w)
 	if err != nil {
 		writeErr(w, err, http.StatusInternalServerError)
 		return
 	}
-	writeJSONStatus(w, http.StatusCreated, entry)
+	writeAccepted(w, op)
 }
 
 func (s *Server) handleRestoreInstance(w http.ResponseWriter, r *http.Request) {
@@ -241,13 +242,13 @@ func (s *Server) handleRestoreInstance(w http.ResponseWriter, r *http.Request) {
 	if !decodeStrict(w, r, &b, `{"archive": "<instance-id>/<YYYYMMDDTHHMMSSZ>.tar"}`) {
 		return
 	}
-	res, err := s.Hub.RestoreInstance(id, b.Archive, actor(r))
+	op, err := s.Hub.StartRestore(id, b.Archive, actor(r))
 	noStore(w)
 	if err != nil {
 		writeErr(w, err, http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, res)
+	writeAccepted(w, op)
 }
 
 func (s *Server) handleRestoreAs(w http.ResponseWriter, r *http.Request) {
@@ -261,11 +262,41 @@ func (s *Server) handleRestoreAs(w http.ResponseWriter, r *http.Request) {
 	if !decodeStrict(w, r, &b, `{"archive": "<instance-id>/<YYYYMMDDTHHMMSSZ>.tar", "id": "<new instance-id>"}`) {
 		return
 	}
-	res, err := s.Hub.RestoreInstanceAs(b.Archive, b.ID, actor(r))
+	op, err := s.Hub.StartRestoreAs(b.Archive, b.ID, actor(r))
 	noStore(w)
 	if err != nil {
 		writeErr(w, err, http.StatusInternalServerError)
 		return
 	}
-	writeJSONStatus(w, http.StatusCreated, res)
+	writeAccepted(w, op)
+}
+
+// writeAccepted answers a long operation the Hub runs in the background
+// (backup, restore, delete; contract §11.7): 202 with the op id and where
+// to poll its op record.
+func writeAccepted(w http.ResponseWriter, op *hub.AsyncOp) {
+	writeJSONStatus(w, http.StatusAccepted, map[string]string{
+		"op_id": op.OpID, "op": op.Op, "instance": op.Instance,
+		"poll": "/api/instances/" + op.Instance + "/op",
+	})
+}
+
+// handleInstanceOp is an instance's op record (also of a deleted
+// instance, or of a new id a restore creates): poll it until running is
+// false and op_id is the request's.
+func (s *Server) handleInstanceOp(w http.ResponseWriter, r *http.Request) {
+	if !s.adminOnly(w, r) {
+		return
+	}
+	id, ok := instanceID(w, r)
+	if !ok {
+		return
+	}
+	noStore(w)
+	rec := s.Hub.LastOp(id)
+	if rec == nil {
+		http.Error(w, "no operation recorded for "+id, http.StatusNotFound)
+		return
+	}
+	writeJSON(w, rec)
 }

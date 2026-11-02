@@ -45,6 +45,13 @@ func (h *Hub) SetGroups(g Groups) {
 // "deleting") the same call continues where it stopped, keeping the
 // first backup. Audited as instance.delete.
 func (h *Hub) DeleteInstance(id, confirm, actor string) (res *DeleteResult, err error) {
+	return h.deleteInstance(id, confirm, actor, nil)
+}
+
+// deleteInstance is DeleteInstance; ready (if set) is called once the
+// request is accepted (typed id, lock held, instance found, actor
+// resolved), before the delete's backup (StartDelete answers 202 then).
+func (h *Hub) deleteInstance(id, confirm, actor string, ready func()) (res *DeleteResult, err error) {
 	res = &DeleteResult{}
 	defer func() {
 		detail := "backup=" + res.Backup
@@ -74,6 +81,9 @@ func (h *Hub) DeleteInstance(id, confirm, actor string) (res *DeleteResult, err 
 		if err := groupsAPI.ResolveActor(context.Background(), actor); err != nil {
 			return res, fmt.Errorf("the acting admin %q can't delete the instance's groups — nothing was deleted: %w", actor, err)
 		}
+	}
+	if ready != nil {
+		ready()
 	}
 	if tg.entry.State == state.InstanceRestoring {
 		res.Warnings = append(res.Warnings, fmt.Sprintf("%s had an unfinished restore: the delete backup holds its half-restored data; its data from before that restore is in the pre-restore backup %s", id, tg.entry.Backup))

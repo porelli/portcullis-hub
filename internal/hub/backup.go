@@ -269,6 +269,13 @@ func (h *Hub) projectRunning(ctx context.Context, id string) (bool, error) {
 // archive isn't written; a failed restart after a written backup is an
 // OpError that names the archive).
 func (h *Hub) BackupInstance(id, actor string) (entry *BackupEntry, err error) {
+	return h.backupInstance(id, actor, nil)
+}
+
+// backupInstance is BackupInstance; ready (if set) is called once the
+// request is accepted (lock held, instance found, Docker available) and
+// the backup itself starts (StartBackup answers 202 then).
+func (h *Hub) backupInstance(id, actor string, ready func()) (entry *BackupEntry, err error) {
 	defer func() {
 		detail := ""
 		if entry != nil {
@@ -283,6 +290,18 @@ func (h *Hub) BackupInstance(id, actor string) (entry *BackupEntry, err error) {
 	defer unlock()
 	if err := h.pending(id); err != nil {
 		return nil, err
+	}
+	if ready != nil {
+		h.mu.RLock()
+		_, ok := h.targetLocked(id)
+		h.mu.RUnlock()
+		if !ok {
+			return nil, statusErr(404, "instance not found: %s", id)
+		}
+		if h.engine == nil {
+			return nil, statusErr(503, "Docker is not available: cannot back up %s", id)
+		}
+		ready()
 	}
 	return h.backupLocked(id, BackupManual, false)
 }

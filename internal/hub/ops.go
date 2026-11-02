@@ -43,6 +43,16 @@ type OpRecord struct {
 	// RolledBack: a failed enable was undone (compose down: containers
 	// and network removed, volumes kept).
 	RolledBack bool `json:"rolled_back,omitempty"`
+	// Background operations (backup, restore, delete; AsyncOp): OpID
+	// names the request, Running is true until it finished (At = start
+	// time while running), Result its outcome (archive, backup,
+	// pre_restore_backup, instance), Warnings as the synchronous answer
+	// had them, Status the HTTP status a failure stands for.
+	OpID     string            `json:"op_id,omitempty"`
+	Running  bool              `json:"running,omitempty"`
+	Result   map[string]string `json:"result,omitempty"`
+	Warnings []string          `json:"warnings,omitempty"`
+	Status   int               `json:"status,omitempty"`
 }
 
 // OpError is a failed lifecycle operation as the API returns it: the

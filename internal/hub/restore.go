@@ -89,6 +89,15 @@ func configProblem(t *templates.Template, c instanceConfig, archive string) erro
 // Any failure there puts the pre-restore backup back the same way (an
 // *OpError with rolled_back; op "restore"). Audited as instance.restore.
 func (h *Hub) RestoreInstance(id, archive, actor string) (res *RestoreResult, err error) {
+	return h.restoreInstance(id, archive, actor, nil)
+}
+
+// restoreInstance is RestoreInstance; ready (if set) is called once the
+// request is accepted (archive name, lock held, instance restorable, the
+// archive file exists), before the archive is verified (StartRestore
+// answers 202 then; a verification refusal is the operation's failure,
+// with nothing changed).
+func (h *Hub) restoreInstance(id, archive, actor string, ready func()) (res *RestoreResult, err error) {
 	res = &RestoreResult{}
 	defer func() {
 		h.auditOp(actor, "instance.restore", id, "archive="+archive+" pre_restore="+res.PreRestoreBackup, err)
@@ -104,6 +113,12 @@ func (h *Hub) RestoreInstance(id, archive, actor string) (res *RestoreResult, er
 	view, e, err := h.restoreTarget(id)
 	if err != nil {
 		return res, err
+	}
+	if ready != nil {
+		if err := h.archiveExists(archive); err != nil {
+			return res, err
+		}
+		ready()
 	}
 	if e.State == state.InstanceRestoring {
 		// An interrupted restore: put its pre-restore backup back first.
@@ -481,6 +496,14 @@ func (h *Hub) rollbackStaged(id string, view *templates.Template, pre *staged, w
 // secret_env regenerated). A failure after the create removes what it
 // created. Audited as instance.restore.
 func (h *Hub) RestoreInstanceAs(archive, newID, actor string) (res *RestoreResult, err error) {
+	return h.restoreInstanceAs(archive, newID, actor, nil)
+}
+
+// restoreInstanceAs is RestoreInstanceAs; ready (if set) is called once
+// the request is accepted (archive name and new id valid, lock held, the
+// archive file exists, the actor resolves), before the archive is
+// verified (StartRestoreAs answers 202 then).
+func (h *Hub) restoreInstanceAs(archive, newID, actor string, ready func()) (res *RestoreResult, err error) {
 	res = &RestoreResult{}
 	defer func() {
 		h.auditOp(actor, "instance.restore", newID, "archive="+archive+" new_instance=true", err)
@@ -496,6 +519,25 @@ func (h *Hub) RestoreInstanceAs(archive, newID, actor string) (res *RestoreResul
 		return res, err
 	}
 	defer unlock()
+	if ready != nil {
+		h.mu.RLock()
+		_, exists := h.st.Instances[newID]
+		exists = exists || h.findLocked(newID) != nil
+		groupsAPI := h.groups
+		h.mu.RUnlock()
+		if exists {
+			return res, statusErr(409, "instance %s already exists", newID)
+		}
+		if err := h.archiveExists(archive); err != nil {
+			return res, err
+		}
+		if groupsAPI != nil {
+			if err := groupsAPI.ResolveActor(context.Background(), actor); err != nil {
+				return res, fmt.Errorf("the acting admin %q can't create the instance's groups — nothing was changed: %w", actor, err)
+			}
+		}
+		ready()
+	}
 	if err := h.checkFree(archivePathOf(h, archive), "staging the archive"); err != nil {
 		return res, err
 	}
