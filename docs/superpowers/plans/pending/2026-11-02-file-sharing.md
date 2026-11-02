@@ -295,10 +295,13 @@ adds to project 2's code are also marked there:
     person	<user>	<field>	<rendered>
     group	<key>	<group>	<rendered>
     row	<key>	<row key>	<column>	<rendered>
+    entry	<key>	<user>	<rendered>
     ```
     - Lists render comma-joined.
     - A `folder` column renders two columns, `<col>.mount` and
       `<col>.gid`.
+    - The `entry` line encodes person-entered values (project 1 Task 15A);
+      one line per (key, user) pair, sorted by key then user.
     - Lines are sorted by bytes.
   - **Hook reports:** stdout lines starting with `PORTCULLIS-REPORT `,
     followed by one JSON `HookReport` (shape in Task 10). Any other output
@@ -569,8 +572,8 @@ type HookCredential struct{ ID string `json:"id"`; Version int `json:"version"` 
 - `internal/hub/hub.go` (register `PersonIDKind` before `Init`).
 
 **Interfaces:**
-- Consumes: project 1's `directory.Membership`, `People`; Task 4's
-  `PersonIDKind`.
+- Consumes: project 1's `directory.Membership` (with `UUIDs` from Task 15A),
+  `People`; Task 4's `PersonIDKind`; `lldap.User.UUID` (from project 1 Task 15A).
 - Produces:
 ```go
 // state
@@ -580,8 +583,6 @@ type PersonIDEntry struct {
 }
 type PersonIDPool struct{ Next int `yaml:"next"`; Entries []PersonIDEntry `yaml:"entries"` }
 // AppState.PersonIDs map[string]PersonIDPool `yaml:"person_ids,omitempty"`
-// directory.Membership gains UUIDs map[string]string // lowercase user → LLDAP uuid
-// lldap.User gains UUID string `json:"uuid"`
 func (h *Hub) allocPersonIDs(pool string, people []settings.Person, uuids map[string]string) (map[string]int, error) // under mu, saves once
 func (h *Hub) PersonID(pool, user string) (int, bool)
 ```
@@ -1159,8 +1160,10 @@ type FileSharingIn struct {
       `Cache-Control: no-store` and `Pragma: no-cache`; 404, 409 or 403
       as in Task 8;
     - `DELETE …/{key}` → 204.
-  - `peopleAppRoutes` becomes
-    `{"GET /api/me/apps", "POST /api/me/apps/{instance}/credentials/{key}", "DELETE /api/me/apps/{instance}/credentials/{key}"}`.
+  - `peopleAppRoutes` (already has 3 entries after project 1: `GET
+    /api/me/apps`, `PUT|DELETE /api/me/apps/{instance}/values/{key}`)
+    appends these two credential routes, becoming
+    `{"GET /api/me/apps", "PUT /api/me/apps/{instance}/values/{key}", "DELETE /api/me/apps/{instance}/values/{key}", "POST /api/me/apps/{instance}/credentials/{key}", "DELETE /api/me/apps/{instance}/credentials/{key}"}`.
   - **Hub listener, `adminOnly`:**
     - `GET /api/instances/{id}/credentials` → `[]CredentialsView`;
     - `DELETE /api/instances/{id}/credentials/{key}/{user}` → 204.
@@ -1176,9 +1179,10 @@ type FileSharingIn struct {
   - `TestAdminCredentialRoutes`: a delegate → 403; root → 200 with no
     `password` or hash field anywhere in the JSON; DELETE audited with
     actor root.
-  - `TestPeopleListenerHasNoAppRoutes` (updated): exactly
-    `peopleAppRoutes` beyond the directory. The credential routes → 404
-    on the Hub listener; the admin routes → 404 on the people listener.
+  - `TestPeopleListenerHasNoAppRoutes` (updated): exactly 5 routes in
+    `peopleAppRoutes` (3 from project 1, 2 from file sharing) beyond the
+    directory. The credential routes → 404 on the Hub listener; the admin
+    routes → 404 on the people listener.
   - `TestCredentialBodyLimit`: 9 KiB → 413.
 - [ ] **Step 2: run.**
   `go test -race ./internal/httpapi/ -run 'TestCreateCredential|TestCredentialRoutes|TestAdminCredential|TestPeopleListener|TestCredentialBody'`
