@@ -162,10 +162,22 @@ func TestPriorityRowOrder(t *testing.T) {
 func TestUnionIntersection(t *testing.T) {
 	r := NewRegistry()
 
-	// Test with multi_enum
+	// Test with multi_enum: real Choices, assert canonical order on shuffled union
+	o := &templates.Option{
+		Type:    templates.TypeMultiEnum,
+		Resolve: templates.ResolveUnion,
+		Choices: []templates.EnumOption{
+			{Value: "a", Label: "A"},
+			{Value: "b", Label: "B"},
+			{Value: "c", Label: "C"},
+			{Value: "d", Label: "D"},
+		},
+	}
+
+	// Rows with shuffled order: c,b in first, a,c in second
 	rows := []Row{
-		{Group: "it_staff", GroupID: 9, Value: []any{"a", "b"}},
-		{Group: "office_milan", GroupID: 7, Value: []any{"b", "c"}},
+		{Group: "it_staff", GroupID: 9, Value: []any{"c", "b"}},
+		{Group: "office_milan", GroupID: 7, Value: []any{"a", "c"}},
 		{Group: "office_paris", GroupID: 8, Value: []any{"d"}}, // bob isn't in this
 	}
 	bob := Person{
@@ -173,16 +185,12 @@ func TestUnionIntersection(t *testing.T) {
 		Groups: map[string]int{"it_staff": 9, "office_milan": 7},
 	}
 
-	// Union
-	o := &templates.Option{
-		Type:    templates.TypeMultiEnum,
-		Resolve: templates.ResolveUnion,
-	}
 	config := PersonConfig{Default: []any{}, Rule: o.Resolve, Rows: rows}
 	res := r.Resolve(o, config, bob)
 	union := res.Value.([]any)
+	// Canonical order is option order: a, b, c (not d since bob isn't in office_paris)
 	if len(union) != 3 || union[0] != "a" || union[1] != "b" || union[2] != "c" {
-		t.Errorf("union: want [a b c], got %v", union)
+		t.Errorf("union: want canonical order [a b c], got %v", union)
 	}
 	if res.Reason.Source != ReasonCombined {
 		t.Errorf("union: want source %s, got %s", ReasonCombined, res.Reason.Source)
@@ -195,36 +203,91 @@ func TestUnionIntersection(t *testing.T) {
 		t.Errorf("union: want sorted groups [it_staff office_milan], got %v", res.Reason.Groups)
 	}
 
-	// Intersection
+	// Intersection on multi_enum
 	o.Resolve = templates.ResolveIntersection
 	config.Rule = o.Resolve
 	res = r.Resolve(o, config, bob)
 	inter := res.Value.([]any)
-	if len(inter) != 1 || inter[0] != "b" {
-		t.Errorf("intersection: want [b], got %v", inter)
+	if len(inter) != 1 || inter[0] != "c" {
+		t.Errorf("intersection: want [c], got %v", inter)
 	}
 	if res.Reason.Source != ReasonCombined {
 		t.Errorf("intersection: want source %s, got %s", ReasonCombined, res.Reason.Source)
 	}
 
-	// Test with groups type
+	// Test with groups type: assert sorted value + exact Reason.Groups, covers intersection
 	o2 := &templates.Option{
 		Type:    templates.TypeGroups,
 		Resolve: templates.ResolveUnion,
 	}
 	rowsGroups := []Row{
-		{Group: "it_staff", GroupID: 9, Value: []any{"group_a", "group_b"}},
-		{Group: "office_milan", GroupID: 7, Value: []any{"group_b", "group_c"}},
+		{Group: "it_staff", GroupID: 9, Value: []any{"group_c", "group_a"}}, // shuffled
+		{Group: "office_milan", GroupID: 7, Value: []any{"group_b", "group_a"}},
 	}
 	config2 := PersonConfig{Default: []any{}, Rule: o2.Resolve, Rows: rowsGroups}
 	res = r.Resolve(o2, config2, bob)
 	unionGroups := res.Value.([]any)
-	// groups type canonicalizes: dedupes and sorts
-	if len(unionGroups) != 3 {
-		t.Errorf("groups union: want 3 groups, got %d: %v", len(unionGroups), unionGroups)
+	// groups type canonicalizes: sorted
+	if len(unionGroups) != 3 || unionGroups[0] != "group_a" || unionGroups[1] != "group_b" || unionGroups[2] != "group_c" {
+		t.Errorf("groups union: want sorted [group_a group_b group_c], got %v", unionGroups)
 	}
 	if res.Reason.Source != ReasonCombined {
 		t.Errorf("groups union: want source %s, got %s", ReasonCombined, res.Reason.Source)
+	}
+	// Exact Reason.Groups check
+	if len(res.Reason.Groups) != 2 || res.Reason.Groups[0] != "it_staff" || res.Reason.Groups[1] != "office_milan" {
+		t.Errorf("groups union: want Reason.Groups=[it_staff office_milan], got %v", res.Reason.Groups)
+	}
+
+	// groups intersection
+	o2.Resolve = templates.ResolveIntersection
+	config2.Rule = o2.Resolve
+	res = r.Resolve(o2, config2, bob)
+	interGroups := res.Value.([]any)
+	if len(interGroups) != 1 || interGroups[0] != "group_a" {
+		t.Errorf("groups intersection: want [group_a], got %v", interGroups)
+	}
+
+	// Intersection with a non-list match → []any{}
+	o3 := &templates.Option{
+		Type:    templates.TypeMultiEnum,
+		Resolve: templates.ResolveIntersection,
+		Choices: []templates.EnumOption{
+			{Value: "a", Label: "A"},
+			{Value: "b", Label: "B"},
+		},
+	}
+	rowsWithNonList := []Row{
+		{Group: "it_staff", GroupID: 9, Value: []any{"a", "b"}},
+		{Group: "office_milan", GroupID: 7, Value: "not_a_list"}, // non-list
+	}
+	config3 := PersonConfig{Default: []any{}, Rule: o3.Resolve, Rows: rowsWithNonList}
+	res = r.Resolve(o3, config3, bob)
+	interEmpty := res.Value.([]any)
+	if len(interEmpty) != 0 {
+		t.Errorf("intersection with non-list: want [], got %v", interEmpty)
+	}
+
+	// First list with duplicate items doesn't pass an item missing from another row
+	o4 := &templates.Option{
+		Type:    templates.TypeMultiEnum,
+		Resolve: templates.ResolveIntersection,
+		Choices: []templates.EnumOption{
+			{Value: "a", Label: "A"},
+			{Value: "b", Label: "B"},
+			{Value: "c", Label: "C"},
+		},
+	}
+	rowsWithDupes := []Row{
+		{Group: "it_staff", GroupID: 9, Value: []any{"a", "a", "b"}}, // duplicate "a"
+		{Group: "office_milan", GroupID: 7, Value: []any{"b", "c"}},  // no "a"
+	}
+	config4 := PersonConfig{Default: []any{}, Rule: o4.Resolve, Rows: rowsWithDupes}
+	res = r.Resolve(o4, config4, bob)
+	interNoDupes := res.Value.([]any)
+	// Only "b" is in both sets (duplicate "a" doesn't count twice)
+	if len(interNoDupes) != 1 || interNoDupes[0] != "b" {
+		t.Errorf("intersection with dupes: want [b], got %v", interNoDupes)
 	}
 }
 
@@ -331,6 +394,8 @@ func TestRowIDMismatchGrantsNothing(t *testing.T) {
 
 func TestIncomparableValues(t *testing.T) {
 	r := NewRegistry()
+
+	// Under min: stale value triggers fail-closed to lowest-ranked choice
 	o := &templates.Option{
 		Type:    templates.TypeEnum,
 		Resolve: templates.ResolveMin,
@@ -345,7 +410,7 @@ func TestIncomparableValues(t *testing.T) {
 		Default: "viewer",
 		Rule:    o.Resolve,
 		Rows: []Row{
-			{Group: "editors", GroupID: 5, Value: "admin"}, // incomparable
+			{Group: "editors", GroupID: 5, Value: "admin"}, // incomparable (stale)
 		},
 	}
 
@@ -355,12 +420,86 @@ func TestIncomparableValues(t *testing.T) {
 	}
 
 	res := r.Resolve(o, config, bob)
-	// The incomparable value is dropped, so bob gets the default
+	// Fail closed: lowest-ranked choice (viewer)
 	if res.Value != "viewer" {
-		t.Errorf("want default viewer, got %v", res.Value)
+		t.Errorf("fail-closed under min: want viewer (lowest), got %v", res.Value)
+	}
+	if res.Reason.Source != "fail-closed" {
+		t.Errorf("fail-closed under min: want source fail-closed, got %s", res.Reason.Source)
+	}
+	// Stale row should be in Others
+	if len(res.Reason.Others) != 1 || res.Reason.Others[0].Group != "editors" {
+		t.Errorf("fail-closed: want stale row in Others, got %v", res.Reason.Others)
+	}
+
+	// Under max: stale values are dropped
+	o.Resolve = templates.ResolveMax
+	config.Rule = o.Resolve
+	config.Rows = []Row{
+		{Group: "editors", GroupID: 5, Value: "editor"},
+		{Group: "admins", GroupID: 7, Value: "admin"}, // stale
+	}
+	alice := Person{
+		User:   "alice",
+		Groups: map[string]int{"editors": 5, "admins": 7},
+	}
+
+	res = r.Resolve(o, config, alice)
+	// Only comparable value wins
+	if res.Value != "editor" {
+		t.Errorf("max with stale: want editor, got %v", res.Value)
+	}
+	if res.Reason.Group != "editors" {
+		t.Errorf("max with stale: want group editors, got %s", res.Reason.Group)
+	}
+	// Stale row should be in Others
+	if len(res.Reason.Others) != 1 || res.Reason.Others[0].Group != "admins" {
+		t.Errorf("max with stale: want stale row in Others, got %v", res.Reason.Others)
+	}
+}
+
+func TestDedupeFirstRowDecides(t *testing.T) {
+	r := NewRegistry()
+	o := &templates.Option{
+		Type:    templates.TypeInt,
+		Resolve: templates.ResolveMax,
+	}
+
+	// Two rows for office_milan: first has id 7 (matches), second has id 9 (wrong)
+	// First row should decide even though its id matches
+	config := PersonConfig{
+		Default: int64(100),
+		Rule:    o.Resolve,
+		Rows: []Row{
+			{Group: "office_milan", GroupID: 7, Value: int64(500)},
+			{Group: "office_milan", GroupID: 9, Value: int64(999)}, // duplicate, wrong id
+		},
+	}
+
+	alice := Person{
+		User:   "alice",
+		Groups: map[string]int{"office_milan": 7},
+	}
+
+	res := r.Resolve(o, config, alice)
+	// First row matches and decides
+	if res.Value != int64(500) {
+		t.Errorf("dedupe: want 500 (first row), got %v", res.Value)
+	}
+
+	// Now test with first row having wrong id
+	config.Rows = []Row{
+		{Group: "office_milan", GroupID: 9, Value: int64(999)}, // first, wrong id
+		{Group: "office_milan", GroupID: 7, Value: int64(500)}, // second, correct id
+	}
+
+	res = r.Resolve(o, config, alice)
+	// First row decides (doesn't match), so alice gets default
+	if res.Value != int64(100) {
+		t.Errorf("dedupe first wrong: want default 100, got %v", res.Value)
 	}
 	if res.Reason.Source != ReasonDefault {
-		t.Errorf("want source %s, got %s", ReasonDefault, res.Reason.Source)
+		t.Errorf("dedupe first wrong: want source %s, got %s", ReasonDefault, res.Reason.Source)
 	}
 }
 
