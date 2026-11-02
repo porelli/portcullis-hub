@@ -439,12 +439,18 @@ func checkServiceLabels(svc string, labels interface{}, hostVars map[string]stri
 			return err
 		}
 		lk := strings.ToLower(strings.TrimSpace(k))
-		if !strings.HasPrefix(lk, "traefik.") && lk != "traefik" {
+		if !strings.HasPrefix(lk, "traefik") {
 			continue
 		}
-		// Every traefik.* value is a literal, except router rules: their
-		// host variables are checked by ParseRoutes.
-		if strings.HasPrefix(lk, "traefik.http.routers.") && strings.HasSuffix(lk, ".rule") {
+		// Traefik label keys exactly as ParseRoutes matches them: lowercase,
+		// no surrounding whitespace (Traefik itself is case-insensitive, so
+		// `Traefik.http…` or ` traefik.http…` would route unparsed).
+		if k != lk {
+			return fmt.Errorf("service %s: Traefik label key %q must be lowercase without surrounding whitespace", svc, k)
+		}
+		// Every traefik.* value is a literal, except HTTP router rules:
+		// ParseRoutes checks their host variables.
+		if m := routerLabelRe.FindStringSubmatch(k); m != nil && m[1] == "http" && m[3] == "rule" {
 			continue
 		}
 		// The template's own contract-v2 host variables may appear (e.g. a

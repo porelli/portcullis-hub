@@ -141,6 +141,10 @@ func TestCheckCoreRefsBypasses(t *testing.T) {
 		"ipc container":           "services:\n  web:\n    ipc: \"container:x\"\n",
 		"pid var":                 "services:\n  web:\n    pid: ${P}\n",
 		"static ip on proxy":      "services:\n  web:\n    networks:\n      portcullis-proxy:\n        ipv4_address: 172.31.250.2\nnetworks:\n  portcullis-proxy:\n    external: true\n",
+		"uppercase key rule":      "services:\n  web:\n    labels:\n      Traefik.http.routers.a.rule: Host(`${X:-a.b}`)\n",
+		"space key rule":          "services:\n  web:\n    labels:\n      - \" traefik.http.routers.a.rule=Host(`${X:-a.b}`)\"\n",
+		"mixed-case key":          "services:\n  web:\n    labels:\n      traefik.HTTP.routers.a.middlewares: x\n",
+		"tcp rule var":            "services:\n  web:\n    labels:\n      traefik.tcp.routers.a.rule: HostSNI(`${X}`)\n",
 		"static ipv6 named":       "services:\n  web:\n    networks:\n      p:\n        ipv6_address: fd00::2\nnetworks:\n  p:\n    name: portcullis-proxy\n",
 	}
 	for what, c := range bad {
