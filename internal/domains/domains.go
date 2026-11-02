@@ -17,6 +17,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Defaults (contract §12.1).
@@ -147,11 +148,9 @@ func (c *Client) do(ctx context.Context, method, path string, body any, creds ma
 			Error string `json:"error"`
 		}
 		_ = json.Unmarshal(raw, &e)
-		msg := e.Error
-		if len(msg) > 500 {
-			msg = msg[:500] + "…"
-		}
-		return resp.StatusCode, &APIError{Status: resp.StatusCode, Message: redact(msg, creds)}
+		// Redact first, then clip (on a rune boundary): clipping first could
+		// cut a credential so that its remaining prefix escapes redaction.
+		return resp.StatusCode, &APIError{Status: resp.StatusCode, Message: clip(redact(e.Error, creds), 500)}
 	}
 	if out != nil && len(raw) > 0 {
 		if err := json.Unmarshal(raw, out); err != nil {
@@ -159,6 +158,17 @@ func (c *Client) do(ctx context.Context, method, path string, body any, creds ma
 		}
 	}
 	return resp.StatusCode, nil
+}
+
+// clip shortens s to at most n bytes on a rune boundary.
+func clip(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n] + "…"
 }
 
 func path(name string) string { return "/domains/" + url.PathEscape(name) }

@@ -100,6 +100,16 @@ func TestEnableFailureExplainedAndRolledBack(t *testing.T) {
 	if strings.Contains(string(data), secret) {
 		t.Error("secret stored in the op record")
 	}
+	// A secret straddling the clip of the error line is redacted before
+	// clipping: no prefix of it survives.
+	for _, pad := range []int{270, 280, 290, 560, 580, 590, 598} {
+		f.runner.upErr = &compose.Error{Command: "up", Err: errors.New("exit status 1"),
+			Output: "Error: " + strings.Repeat("x", pad) + secret + " trailing\n"}
+		err = f.h.Enable("grafana")
+		if !errors.As(err, &oe) || strings.Contains(oe.Record.Error, secret[:6]) {
+			t.Errorf("pad %d: a secret prefix survived clipping: %q", pad, oe.Record.Error[len(oe.Record.Error)-40:])
+		}
+	}
 
 	// A later success replaces the failure.
 	f.runner.upErr = nil

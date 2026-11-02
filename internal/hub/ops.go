@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/portcullis/hub/internal/compose"
 	"github.com/portcullis/hub/internal/fsutil"
@@ -113,7 +114,9 @@ func (h *Hub) finishOp(id, op string, err error, rolledBack bool) error {
 	r := OpRecord{Op: op, At: time.Now().UTC(), OK: err == nil, RolledBack: rolledBack}
 	if err != nil {
 		redact := h.secretRedactor(id)
-		r.Error = redact(err.Error())
+		// Redact, then clip (never the other way round: a cut secret's
+		// prefix would escape redaction).
+		r.Error = clipRunes(redact(err.Error()), 600)
 		var ce *compose.Error
 		if errors.As(err, &ce) {
 			r.Output = redact(ce.Output)
@@ -183,4 +186,15 @@ func (h *Hub) secretRedactor(id string) func(string) string {
 		}
 		return s
 	}
+}
+
+// clipRunes shortens s to at most n bytes on a rune boundary.
+func clipRunes(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n] + "…"
 }

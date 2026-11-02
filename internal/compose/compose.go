@@ -40,8 +40,10 @@ func (e *Error) Error() string {
 
 func (e *Error) Unwrap() error { return e.Err }
 
-// LastLine returns the line of s that most likely names the cause (clipped):
-// the last one mentioning an error, else the last non-empty one.
+// LastLine returns the line of s that most likely names the cause: the
+// last one mentioning an error, else the last non-empty one. Not clipped:
+// callers redact secrets first and clip afterwards (hub.finishOp), since
+// clipping first could cut a secret so its prefix escapes redaction.
 func LastLine(s string) string {
 	lines := strings.Split(strings.TrimSpace(s), "\n")
 	pick := ""
@@ -57,9 +59,6 @@ func LastLine(s string) string {
 			pick = l
 			break
 		}
-	}
-	if len(pick) > 300 {
-		pick = pick[:300] + "…"
 	}
 	return pick
 }

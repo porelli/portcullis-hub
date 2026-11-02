@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestClient(t *testing.T) {
@@ -60,5 +61,29 @@ func TestClient(t *testing.T) {
 	}
 	if err := New(srv.URL, filepath.Join(t.TempDir(), "x")).Available(); !errors.Is(err, ErrNotConfigured) {
 		t.Fatalf("missing secret: %v", err)
+	}
+}
+
+// TestRedactBeforeClip: a credential straddling the 500-byte clip of the
+// service's message is redacted before clipping.
+func TestRedactBeforeClip(t *testing.T) {
+	secret := strings.Repeat("k", 40)
+	tok := "tokSECRETvalue0123456789"
+	for _, pad := range []int{480, 490, 495, 499} {
+		msg := strings.Repeat("é", pad/2) + tok + " end"
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(400)
+			w.Write([]byte(`{"error":"` + msg + `"}`))
+		}))
+		f := filepath.Join(t.TempDir(), "s")
+		os.WriteFile(f, []byte(secret), 0600)
+		_, err := New(srv.URL, f).Enroll(context.Background(), "a.example.org", "cloudflare", map[string]string{"api_token": tok})
+		srv.Close()
+		if err == nil || strings.Contains(err.Error(), tok[:4]) {
+			t.Errorf("pad %d: %v", pad, err)
+		}
+		if !utf8.ValidString(err.Error()) {
+			t.Errorf("pad %d: clipped inside a rune", pad)
+		}
 	}
 }

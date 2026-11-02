@@ -12,6 +12,9 @@ func TestCheckCoreRefs(t *testing.T) {
 		"services:\n  web:\n    network_mode: host\n",
 		// A template's own (project-scoped) network may reuse a core key.
 		"services:\n  web:\n    networks: [monitoring]\nnetworks:\n  monitoring: {}\n",
+		"services:\n  web:\n    hostname: ${PORTCULLIS_HOST_GITLAB:-git.portcullis.local}\n",
+		// $$ is a literal dollar; interpolation elsewhere (env) is fine.
+		"services:\n  web:\n    hostname: web$$1\n    environment:\n      X: ${PORTCULLIS_DOMAIN}\n",
 	}
 	for _, c := range ok {
 		if err := checkCoreRefs([]byte(c)); err != nil {
