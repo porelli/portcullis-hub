@@ -231,6 +231,12 @@ func (h *Hub) Enable(id string) error {
 }
 
 func (h *Hub) enableLocked(id string) (rolledBack bool, err error) {
+	return h.enableInner(id, false)
+}
+
+// enableInner is enableLocked; restoring lets a restore enable the
+// instance it is restoring (state "restoring").
+func (h *Hub) enableInner(id string, restoring bool) (rolledBack bool, err error) {
 
 	// Phase 1 (under mu): validate and write local files — fast filesystem
 	// work that needs a consistent view of state.
@@ -241,9 +247,9 @@ func (h *Hub) enableLocked(id string) (rolledBack bool, err error) {
 		return false, statusErr(400, "app instance not found: %s", id)
 	}
 	tmpl := *t // the catalog slice may be replaced meanwhile
-	if e, ok := h.st.Instances[id]; ok && e.State == state.InstanceDeleting {
+	if err := h.pendingLocked(id); err != nil && !restoring {
 		h.mu.Unlock()
-		return false, statusErr(409, "instance %s is being deleted: delete it again to finish", id)
+		return false, err
 	}
 	if h.st.IsEnabled(id) {
 		h.mu.Unlock()

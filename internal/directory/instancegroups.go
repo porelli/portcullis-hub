@@ -37,8 +37,30 @@ func (s *Service) keptGroupReason(name string) (string, error) {
 				return "it is the " + p + " permission group", nil
 			}
 		}
+		for g, gc := range cfg.Groups {
+			if gc != nil && gc.Rule != nil && strings.EqualFold(g, name) {
+				return "it is a rule group (its members come from a rule an admin set)", nil
+			}
+		}
 	}
 	return "", nil
+}
+
+// ResolveActor checks that actor can run the instance group operations:
+// an LLDAP administrator (as CallerFor resolves it). Users & Groups not
+// available is no error (the group steps are warnings then).
+func (s *Service) ResolveActor(ctx context.Context, actor string) error {
+	if s.LLDAP.Available() != nil {
+		return nil
+	}
+	c, err := s.CallerFor(ctx, actor)
+	if err != nil {
+		return err
+	}
+	if !c.Admin {
+		return forbidden("%s is not an administrator", actor)
+	}
+	return nil
 }
 
 // DeleteInstanceGroup deletes group name for an instance delete, as

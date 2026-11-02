@@ -593,8 +593,8 @@ func (h *Hub) planHostsLocked(id string, hosts map[string]string) (*hostsChange,
 		}
 		return nil, statusErr(404, "instance not found: %s", id)
 	}
-	if e, ok := h.st.Instances[id]; ok && e.State == state.InstanceDeleting {
-		return nil, statusErr(409, "instance %s is being deleted", id)
+	if err := h.pendingLocked(id); err != nil {
+		return nil, err
 	}
 	if cur.HostForm == templates.FormLegacy {
 		return nil, statusErr(409, "template %s still uses ${PORTCULLIS_DOMAIN} rules: its hostnames are fixed", cur.TemplateID)

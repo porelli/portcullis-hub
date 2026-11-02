@@ -146,6 +146,51 @@ func ValidateSettings(t *templates.Template, values map[string]string) error {
 	return nil
 }
 
+// configCapability is what t's app can enforce in a sign-in mode (native:
+// the app's own login only, where the template allows it) — as
+// accessLocked computes it.
+func configCapability(t *templates.Template, native bool) policy.Capability {
+	auth := &t.Manifest.Auth
+	method := auth.Method
+	if auth.HasNativeLogin() && !(native && auth.NativeLogin.AllowWithoutGateway) {
+		method = "forward-auth"
+	}
+	return policy.CapabilityFor(method)
+}
+
+// configProblems lists every reason (400 StatusErrors, in a fixed order)
+// why the per-instance configuration in u doesn't fit template t:
+// settings (ValidateSettings), the sign-in mode, the policy override
+// against what the app enforces in its resulting sign-in mode (native),
+// and the public exceptions (validatePublic). Shared by SaveSettings
+// and restore, so a restored archive meets the same rules as a save.
+func configProblems(t *templates.Template, u SettingsUpdate, native bool) []error {
+	var out []error
+	if err := ValidateSettings(t, u.Values); err != nil {
+		out = append(out, err)
+	}
+	if u.SignIn != nil {
+		nl := t.Manifest.Auth.NativeLogin
+		switch {
+		case !t.Manifest.Auth.HasNativeLogin():
+			out = append(out, statusErr(400, "this app has no sign-in choice (its template doesn't declare auth.native_login)"))
+		case *u.SignIn == SignInNative && !nl.AllowWithoutGateway:
+			out = append(out, statusErr(400, "this template doesn't allow the app's own login without Portcullis"))
+		case *u.SignIn != SignInNative && *u.SignIn != SignInGateway:
+			out = append(out, statusErr(400, "sign-in must be %q or %q", SignInGateway, SignInNative))
+		}
+	}
+	if !u.Inherit && u.Policy != nil {
+		if msg := configCapability(t, native).Check(*u.Policy); msg != "" {
+			out = append(out, statusErr(400, "access policy: %s", msg))
+		}
+	}
+	if _, err := validatePublic(t, u); err != nil {
+		out = append(out, err)
+	}
+	return out
+}
+
 // SettingsUpdate is a PUT /api/templates/settings/<id> request.
 type SettingsUpdate struct {
 	Values  map[string]string
@@ -172,20 +217,18 @@ func (h *Hub) SaveSettings(id string, u SettingsUpdate) error {
 	if u.Values == nil {
 		u.Values = map[string]string{}
 	}
-	if err := ValidateSettings(t, u.Values); err != nil {
-		return err
+	h.mu.RLock()
+	pendErr := h.pendingLocked(id)
+	native := h.st.SignIn[id] == state.SignInNative
+	h.mu.RUnlock()
+	if pendErr != nil {
+		return pendErr
 	}
-
 	if u.SignIn != nil {
-		nl := t.Manifest.Auth.NativeLogin
-		switch {
-		case !t.Manifest.Auth.HasNativeLogin():
-			return statusErr(400, "this app has no sign-in choice (its template doesn't declare auth.native_login)")
-		case *u.SignIn == SignInNative && !nl.AllowWithoutGateway:
-			return statusErr(400, "this template doesn't allow the app's own login without Portcullis")
-		case *u.SignIn != SignInNative && *u.SignIn != SignInGateway:
-			return statusErr(400, "sign-in must be %q or %q", SignInGateway, SignInNative)
-		}
+		native = *u.SignIn == SignInNative
+	}
+	if problems := configProblems(t, u, native); len(problems) > 0 {
+		return problems[0]
 	}
 
 	h.mu.Lock()
@@ -206,15 +249,6 @@ func (h *Hub) SaveSettings(id string, u SettingsUpdate) error {
 			delete(h.st.SignIn, id)
 		}
 		signInChanged = h.accessLocked(t).SignIn != before
-	}
-	// The override is checked against what the app can enforce in its
-	// (new) sign-in mode.
-	if !u.Inherit && u.Policy != nil {
-		if msg := h.accessLocked(t).Capability.Check(*u.Policy); msg != "" {
-			restoreSignIn()
-			h.mu.Unlock()
-			return statusErr(400, "access policy: %s", msg)
-		}
 	}
 	prev, hadPrev := h.st.Settings[id]
 	h.st.Settings[id] = u.Values
@@ -414,6 +448,9 @@ func (h *Hub) Env(id string) (map[string]string, []string, error) {
 func (h *Hub) SaveEnv(id string, vars map[string]string) error {
 	if h.Template(id) == nil {
 		return ErrNotFound
+	}
+	if err := h.pending(id); err != nil {
+		return err
 	}
 	for k, v := range vars {
 		if !templates.EnvKeyRe.MatchString(k) || templates.HasControlChars(v) {

@@ -94,7 +94,14 @@ type IdP interface {
 // Groups manages app instances' LLDAP groups through the Users & Groups
 // guardrails (directory.Service: CreateGroup / DeleteGroup as actor,
 // audited there). Warnings are reported, not errors.
+//
+// actor must be an administrator the Users & Groups side resolves
+// (directory CallerFor + lldap_admin): ResolveActor checks that, and the
+// Hub calls it before any destructive step of an operation that will
+// need the groups (delete, restore into a new id), so a bad actor fails
+// before anything changes.
 type Groups interface {
+	ResolveActor(ctx context.Context, actor string) error
 	CreateInstanceGroup(ctx context.Context, actor, name string) ([]string, error)
 	DeleteInstanceGroup(ctx context.Context, actor, name string) ([]string, error)
 }
@@ -226,11 +233,17 @@ func New(cfg Config, runner compose.Runner, engine Engine, idp IdP) (*Hub, error
 	return h, nil
 }
 
-// Init clones the default source on first run, discovers templates and
-// seeds the group-gate policy file.
+// Init removes backup / restore leftovers (SweepBackupLeftovers), clones
+// the default source on first run, discovers templates, rolls back
+// interrupted restores in the background (RecoverRestores) and seeds the
+// group-gate policy file.
 func (h *Hub) Init() {
+	// Before anything can start a backup or restore.
+	h.SweepBackupLeftovers()
 	h.autoLoadDefaultTemplates()
 	h.Discover()
+	// Interrupted same-instance restores are rolled back (background).
+	h.RecoverRestores()
 	if err := h.WritePolicy(); err != nil {
 		log.Printf("auth-policy: initial group-gate policy write failed: %v", err)
 	}

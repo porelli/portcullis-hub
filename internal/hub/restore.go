@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/state"
@@ -28,19 +30,56 @@ type volumePlan struct {
 	key     string
 	vol     docker.Volume // name, driver, labels, options to (re)create
 	existed bool
+	tar     string // staged inner tar; "" = leave the volume empty
+}
+
+// configProblem refuses (409, listing every problem) an archive whose
+// per-instance configuration doesn't fit template t by SaveSettings'
+// rules (configProblems): settings, sign-in mode, policy override, public
+// exceptions.
+func configProblem(t *templates.Template, c instanceConfig, archive string) error {
+	u := SettingsUpdate{Values: c.Settings, Policy: c.AuthPolicy, PublicAccess: c.PublicAccess}
+	if u.Values == nil {
+		u.Values = map[string]string{}
+	}
+	if c.SignIn != "" {
+		si := c.SignIn
+		u.SignIn = &si
+	}
+	if c.PublicMode != "" {
+		m := c.PublicMode
+		u.PublicMode = &m
+	}
+	if len(c.PublicTokens) > 0 {
+		tk := append([]string(nil), c.PublicTokens...)
+		u.PublicTokens = &tk
+	}
+	problems := configProblems(t, u, c.SignIn == state.SignInNative)
+	if len(problems) == 0 {
+		return nil
+	}
+	msgs := make([]string, 0, len(problems))
+	for _, p := range problems {
+		msgs = append(msgs, p.Error())
+	}
+	return statusErr(409, "archive %s refused (nothing was changed): its configuration doesn't fit template %s as it is now: %s", archive, t.TemplateID, strings.Join(msgs, "; "))
 }
 
 // RestoreInstance restores archive (<id>/<timestamp>.tar under
 // <data>/backups; it must belong to id) into the existing instance id,
 // replacing its data. The archive is verified first (400 bad name, 404
-// missing, 409 checksum / layout / template mismatch, a volume that can't
-// be emptied — nothing changes on any of these). Then: a backup (reason
-// restore; the instance is stopped), every archived volume emptied and
-// filled, the env, custom override and per-instance settings from the
-// archive — the current hostnames are kept, the Hub override is
-// regenerated —, and, if the instance was enabled, the full enable
-// (Keycloak clients, access role, callbacks, policy, compose up). Any
-// failure there puts the pre-restore backup back the same way (an
+// missing, 409 checksum / layout / template mismatch, a configuration
+// SaveSettings would refuse, a volume that can't be emptied — nothing
+// changes on any of these). Then: a backup (reason restore; the instance
+// is stopped), state "restoring" with that backup recorded (an
+// interrupted restore is rolled back from it by the next RestoreInstance
+// or at startup, RecoverRestores), every archived volume emptied and
+// filled and every other volume of the project emptied (its data is in
+// the pre-restore backup), the env, custom override and per-instance
+// settings from the archive — the current hostnames are kept, the Hub
+// override is regenerated —, and, if the instance was enabled, the full
+// enable (Keycloak clients, access role, callbacks, policy, compose up).
+// Any failure there puts the pre-restore backup back the same way (an
 // *OpError with rolled_back; op "restore"). Audited as instance.restore.
 func (h *Hub) RestoreInstance(id, archive, actor string) (res *RestoreResult, err error) {
 	res = &RestoreResult{}
@@ -55,22 +94,21 @@ func (h *Hub) RestoreInstance(id, archive, actor string) (res *RestoreResult, er
 		return res, err
 	}
 	defer unlock()
-	h.mu.RLock()
-	var view *templates.Template
-	if v := h.findLocked(id); v != nil {
-		c := *v
-		view = &c
+	view, e, err := h.restoreTarget(id)
+	if err != nil {
+		return res, err
 	}
-	e := h.st.Instances[id]
-	reason := h.brokenInstances[id]
-	h.mu.RUnlock()
-	switch {
-	case e.State == state.InstanceDeleting:
-		return res, statusErr(409, "instance %s is being deleted: restore its backup into a new instance instead", id)
-	case view == nil && reason != "":
-		return res, statusErr(409, "instance %s can't be resolved (%s): fix its template first", id, reason)
-	case view == nil:
-		return res, statusErr(404, "instance not found: %s", id)
+	if e.State == state.InstanceRestoring {
+		// An interrupted restore: put its pre-restore backup back first.
+		if err := h.recoverRestoreLocked(id, view, e.Backup); err != nil {
+			return res, err
+		}
+		if view, _, err = h.restoreTarget(id); err != nil {
+			return res, err
+		}
+	}
+	if err := h.checkFree(archivePathOf(h, archive), "staging the archive"); err != nil {
+		return res, err
 	}
 	sb, err := h.stageArchive(archive)
 	if err != nil {
@@ -80,9 +118,17 @@ func (h *Hub) RestoreInstance(id, archive, actor string) (res *RestoreResult, er
 	if sb.m.Template != view.TemplateID {
 		return res, statusErr(409, "archive %s is a backup of template %s, instance %s runs %s", archive, sb.m.Template, id, view.TemplateID)
 	}
+	if err := configProblem(view, sb.cfg, archive); err != nil {
+		return res, err
+	}
 	plan, err := h.restorePlan(id, view, sb)
 	if err != nil {
 		return res, err
+	}
+	for _, p := range plan {
+		if p.tar == "" {
+			res.Warnings = append(res.Warnings, fmt.Sprintf("volume %s is not in the archive: it was emptied (its data is in the pre-restore backup)", p.vol.Name))
+		}
 	}
 	wasEnabled := view.Enabled
 
@@ -93,31 +139,169 @@ func (h *Hub) RestoreInstance(id, archive, actor string) (res *RestoreResult, er
 		return res, fmt.Errorf("the backup before the restore failed — nothing was restored: %w", err)
 	}
 	res.PreRestoreBackup = pre.Archive
+	// The record survives a crash from here on.
+	if err := h.markRestoring(id, pre.Archive); err != nil {
+		if wasEnabled {
+			if rerr := h.startAgain(view); rerr != nil {
+				log.Printf("instance %s: starting again after a refused restore: %v", id, rerr)
+			}
+		}
+		return res, statusErr(500, "recording the restore failed — nothing was restored: %v", err)
+	}
 	applyErr := h.applyRestore(id, sb, plan, wasEnabled)
 	if applyErr == nil {
+		h.clearRestoring(id)
 		log.Printf("instance %s restored from %s (pre-restore backup %s)", id, archive, pre.Archive)
 		return res, h.finishOp(id, OpRestore, nil, false)
 	}
 	// Put the previous data back.
-	rerr := h.rollbackRestore(id, view, pre.Archive, plan, wasEnabled)
-	if rerr != nil {
-		applyErr = fmt.Errorf("restore from %s failed: %w — putting the pre-restore backup %s back failed too: %v (restore it again once the cause is fixed)", archive, applyErr, pre.Archive, rerr)
+	if rerr := h.rollbackRestore(id, view, pre.Archive, wasEnabled); rerr != nil {
+		applyErr = fmt.Errorf("restore from %s failed: %w — putting the pre-restore backup %s back failed too: %v (it stays \"restoring\": restore again once the cause is fixed, the pre-restore backup is put back first)", archive, applyErr, pre.Archive, rerr)
 		return res, h.finishOp(id, OpRestore, applyErr, false)
 	}
+	h.clearRestoring(id)
 	applyErr = fmt.Errorf("restore from %s failed: %w — the previous data was put back (pre-restore backup %s)", archive, applyErr, pre.Archive)
 	return res, h.finishOp(id, OpRestore, applyErr, true)
 }
 
-// restorePlan maps the archive's volumes to instance id's: the project's
-// existing volume of that key, else the derived name (§11.2). Refused
-// (409) before anything changes: a key the template doesn't have, a
-// volume that isn't a plain local one (its data would survive the
-// remove).
-func (h *Hub) restorePlan(id string, view *templates.Template, sb *staged) ([]volumePlan, error) {
-	if len(sb.volumes) == 0 {
-		return nil, nil
+func archivePathOf(h *Hub, archive string) string {
+	return filepath.Join(h.backupsDir(), filepath.FromSlash(archive))
+}
+
+// restoreTarget is instance id's view and state entry for a restore.
+func (h *Hub) restoreTarget(id string) (*templates.Template, state.Instance, error) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	e := h.st.Instances[id]
+	reason := h.brokenInstances[id]
+	v := h.findLocked(id)
+	switch {
+	case e.State == state.InstanceDeleting:
+		return nil, e, statusErr(409, "instance %s is being deleted: restore its backup into a new instance instead", id)
+	case v == nil && reason != "":
+		return nil, e, statusErr(409, "instance %s can't be resolved (%s): fix its template first", id, reason)
+	case v == nil:
+		return nil, e, statusErr(404, "instance not found: %s", id)
 	}
+	c := *v
+	return &c, e, nil
+}
+
+// markRestoring records state "restoring" with the pre-restore backup and
+// marks the instance disabled, before anything is replaced.
+func (h *Hub) markRestoring(id, preArchive string) error {
+	h.mu.Lock()
+	e := h.st.Instances[id]
+	if e.ID == "" {
+		e = state.Instance{ID: id, Template: id}
+	}
+	prev, had := h.st.Instances[id]
+	enabled := h.st.IsEnabled(id)
+	e.State, e.Backup = state.InstanceRestoring, preArchive
+	h.st.Instances[id] = e
+	h.st.SetEnabled(id, false)
+	err := h.st.Save(h.statePath())
+	if err != nil {
+		if had {
+			h.st.Instances[id] = prev
+		} else {
+			delete(h.st.Instances, id)
+		}
+		h.st.SetEnabled(id, enabled)
+		h.mu.Unlock()
+		return err
+	}
+	h.rebuildLocked()
+	h.refreshPublishedLocked()
+	h.mu.Unlock()
+	h.writePolicyLogged()
+	return nil
+}
+
+// clearRestoring ends state "restoring" (a default instance's entry that
+// only held it goes away).
+func (h *Hub) clearRestoring(id string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	e, ok := h.st.Instances[id]
+	if !ok || e.State != state.InstanceRestoring {
+		return
+	}
+	e.State, e.Backup = "", ""
+	if e.Template == id && len(e.Hosts) == 0 {
+		delete(h.st.Instances, id)
+	} else {
+		h.st.Instances[id] = e
+	}
+	h.rebuildLocked()
+	h.saveLocked()
+}
+
+// recoverRestoreLocked rolls an interrupted restore of id back from its
+// pre-restore backup (verified like any archive), enabled again if it was
+// enabled when that backup was taken. Caller holds the app lock.
+func (h *Hub) recoverRestoreLocked(id string, view *templates.Template, preArchive string) error {
+	if preArchive == "" {
+		return statusErr(409, "instance %s has an unfinished restore without a recorded pre-restore backup: delete it or fix state.yaml", id)
+	}
+	pre, err := h.stageArchive(preArchive)
+	if err != nil {
+		return fmt.Errorf("instance %s has an unfinished restore; its pre-restore backup %s can't be used: %w", id, preArchive, err)
+	}
+	wasEnabled := pre.cfg.Enabled
+	pre.cleanup()
+	if err := h.rollbackRestore(id, view, preArchive, wasEnabled); err != nil {
+		return h.finishOp(id, OpRestore, fmt.Errorf("rolling back the unfinished restore of %s from %s failed (it stays \"restoring\"): %w", id, preArchive, err), false)
+	}
+	h.clearRestoring(id)
+	log.Printf("instance %s: unfinished restore rolled back from %s", id, preArchive)
+	// Recorded (the ops record says what happened), not returned: the
+	// instance is consistent again.
+	_ = h.finishOp(id, OpRestore, fmt.Errorf("an unfinished restore of %s was rolled back from its pre-restore backup %s", id, preArchive), true)
+	return nil
+}
+
+// RecoverRestores rolls back every interrupted same-instance restore
+// (state "restoring") in the background (Init calls it).
+func (h *Hub) RecoverRestores() {
+	h.mu.RLock()
+	var ids []string
+	for id, e := range h.st.Instances {
+		if e.State == state.InstanceRestoring {
+			ids = append(ids, id)
+		}
+	}
+	h.mu.RUnlock()
+	sort.Strings(ids)
+	for _, id := range ids {
+		h.goBackground(func() {
+			unlock, err := h.lockApp(id)
+			if err != nil {
+				log.Printf("instance %s: unfinished restore not rolled back now (%v): the next restore does it", id, err)
+				return
+			}
+			defer unlock()
+			view, e, err := h.restoreTarget(id)
+			if err == nil && e.State == state.InstanceRestoring {
+				err = h.recoverRestoreLocked(id, view, e.Backup)
+			}
+			if err != nil {
+				log.Printf("instance %s: unfinished restore: %v", id, err)
+			}
+		})
+	}
+}
+
+// restorePlan maps the archive's volumes to instance id's: the project's
+// existing volume of that key, else the derived name (§11.2); every other
+// volume of the project is emptied (tar ""). Refused (409) before
+// anything changes: a key the template doesn't have, a volume that isn't
+// a plain local one (its data would survive the remove).
+func (h *Hub) restorePlan(id string, view *templates.Template, sb *staged) ([]volumePlan, error) {
 	if h.engine == nil {
+		if len(sb.volumes) == 0 {
+			return nil, nil
+		}
 		return nil, statusErr(503, "Docker is not available: cannot restore volumes")
 	}
 	cur, err := h.projectVolumes(context.Background(), id)
@@ -129,6 +313,11 @@ func (h *Hub) restorePlan(id string, view *templates.Template, sb *staged) ([]vo
 	for k := range sb.volumes {
 		keys = append(keys, k)
 	}
+	for k := range cur {
+		if _, ok := sb.volumes[k]; !ok {
+			keys = append(keys, k)
+		}
+	}
 	sort.Strings(keys)
 	var out []volumePlan
 	for _, k := range keys {
@@ -136,7 +325,7 @@ func (h *Hub) restorePlan(id string, view *templates.Template, sb *staged) ([]vo
 			if !plainVolume(v) {
 				return nil, statusErr(409, "volume %s uses driver %q with options: the Hub can't empty it (restore it by hand)", v.Name, v.Driver)
 			}
-			out = append(out, volumePlan{key: k, vol: docker.Volume{Name: v.Name, Driver: v.Driver, Labels: v.Labels}, existed: true})
+			out = append(out, volumePlan{key: k, vol: docker.Volume{Name: v.Name, Driver: v.Driver, Labels: v.Labels}, existed: true, tar: sb.volumes[k]})
 			continue
 		}
 		name, ok := derived[k]
@@ -148,7 +337,7 @@ func (h *Hub) restorePlan(id string, view *templates.Template, sb *staged) ([]vo
 		} else if !docker.IsNotFound(err) {
 			return nil, statusErr(503, "volume %s: %v", name, err)
 		}
-		out = append(out, volumePlan{key: k, vol: composeVolume(id, k, name)})
+		out = append(out, volumePlan{key: k, vol: composeVolume(id, k, name), tar: sb.volumes[k]})
 	}
 	return out, nil
 }
@@ -176,7 +365,7 @@ func (h *Hub) applyRestore(id string, sb *staged, plan []volumePlan, wasEnabled 
 		}
 	}
 	for _, p := range plan {
-		if err := h.fillVolume(ctx, id, p.vol, p.existed, sb.volumes[p.key]); err != nil {
+		if _, err := h.fillVolume(ctx, id, p.vol, p.existed, p.tar); err != nil {
 			return err
 		}
 	}
@@ -199,7 +388,7 @@ func (h *Hub) applyRestore(id string, sb *staged, plan []volumePlan, wasEnabled 
 		return err
 	}
 	if wasEnabled {
-		if _, err := h.enableLocked(id); err != nil {
+		if _, err := h.enableInner(id, true); err != nil {
 			return err
 		}
 	} else {
@@ -208,11 +397,10 @@ func (h *Hub) applyRestore(id string, sb *staged, plan []volumePlan, wasEnabled 
 	return nil
 }
 
-// rollbackRestore puts the pre-restore backup back after a failed
-// restore: its volumes, files and settings; volumes the failed restore
-// created that weren't there before are removed.
-func (h *Hub) rollbackRestore(id string, view *templates.Template, preArchive string, plan []volumePlan, wasEnabled bool) error {
-	ctx := context.Background()
+// rollbackRestore puts the pre-restore backup back after a failed (or
+// interrupted) restore: its volumes, files and settings; the project's
+// volumes it doesn't have are emptied.
+func (h *Hub) rollbackRestore(id string, view *templates.Template, preArchive string, wasEnabled bool) error {
 	// A failed enable already rolled its compose up back; make sure.
 	if err := h.stopProject(&target{id: id, view: view}); err != nil {
 		return fmt.Errorf("compose down: %w", err)
@@ -222,17 +410,11 @@ func (h *Hub) rollbackRestore(id string, view *templates.Template, preArchive st
 		return err
 	}
 	defer pre.cleanup()
-	var back []volumePlan
-	for _, p := range plan {
-		if _, ok := pre.volumes[p.key]; ok {
-			back = append(back, volumePlan{key: p.key, vol: p.vol, existed: true})
-			continue
-		}
-		if err := h.engine.RemoveVolume(ctx, p.vol.Name); err != nil && !docker.IsNotFound(err) {
-			return fmt.Errorf("removing volume %s: %w", p.vol.Name, err)
-		}
+	plan, err := h.restorePlan(id, view, pre)
+	if err != nil {
+		return err
 	}
-	return h.applyRestore(id, pre, back, wasEnabled)
+	return h.applyRestore(id, pre, plan, wasEnabled)
 }
 
 // RestoreInstanceAs restores archive (any listed one, a deleted
@@ -263,6 +445,9 @@ func (h *Hub) RestoreInstanceAs(archive, newID, actor string) (res *RestoreResul
 		return res, err
 	}
 	defer unlock()
+	if err := h.checkFree(archivePathOf(h, archive), "staging the archive"); err != nil {
+		return res, err
+	}
 	sb, err := h.stageArchive(archive)
 	if err != nil {
 		return res, err
@@ -301,6 +486,23 @@ func (h *Hub) RestoreInstanceAs(archive, newID, actor string) (res *RestoreResul
 	if len(sb.volumes) > 0 && h.engine == nil {
 		return res, statusErr(503, "Docker is not available: cannot restore volumes")
 	}
+	if err := configProblem(&tmpl, sb.cfg, archive); err != nil {
+		return res, err
+	}
+	h.mu.RLock()
+	groupsAPI := h.groups
+	h.mu.RUnlock()
+	if groupsAPI != nil && (names.AccessGroup != "" || names.AdminGroup != "") {
+		if err := groupsAPI.ResolveActor(context.Background(), actor); err != nil {
+			return res, fmt.Errorf("the acting admin %q can't create the instance's groups — nothing was changed: %w", actor, err)
+		}
+	}
+	// Host paths are shared, not copied: say so.
+	for _, st := range tmpl.Manifest.Settings {
+		if v := sb.cfg.Settings[st.Key]; st.Type == "path" && v != "" {
+			res.Warnings = append(res.Warnings, fmt.Sprintf("setting %s mounts host path %s, as instance %s did: the two instances share that directory unless you change it", st.Key, v, sb.m.Instance))
+		}
+	}
 
 	if err := h.CreateInstance(tmpl.ID, newID, nil); err != nil {
 		return res, err
@@ -315,9 +517,6 @@ func (h *Hub) RestoreInstanceAs(archive, newID, actor string) (res *RestoreResul
 				errs = append(errs, err)
 			}
 		}
-		h.mu.RLock()
-		groupsAPI := h.groups
-		h.mu.RUnlock()
 		for _, g := range createdGroups {
 			if _, err := groupsAPI.DeleteInstanceGroup(ctx, actor, g); err != nil {
 				errs = append(errs, err)
@@ -365,7 +564,6 @@ func (h *Hub) RestoreInstanceAs(archive, newID, actor string) (res *RestoreResul
 		envErr = h.generateAppEnvLocked(v)
 	}
 	saveErr := h.st.Save(h.statePath())
-	groupsAPI := h.groups
 	h.mu.Unlock()
 	if err := errors.Join(envErr, saveErr); err != nil {
 		return res, undo(statusErr(500, "%v", err))
@@ -403,8 +601,11 @@ func (h *Hub) RestoreInstanceAs(archive, newID, actor string) (res *RestoreResul
 	}
 	for _, k := range keys {
 		v := composeVolume(newID, k, names.Volumes[k])
-		createdVols = append(createdVols, v.Name)
-		if err := h.fillVolume(context.Background(), newID, v, false, sb.volumes[k]); err != nil {
+		created, err := h.fillVolume(context.Background(), newID, v, false, sb.volumes[k])
+		if created {
+			createdVols = append(createdVols, v.Name)
+		}
+		if err != nil {
 			return res, undo(statusErr(500, "%v", err))
 		}
 	}

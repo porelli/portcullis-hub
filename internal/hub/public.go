@@ -257,46 +257,12 @@ func (h *Hub) publicViewLocked(t *templates.Template, eff policy.AuthPolicy) *Pu
 // a settings update to state. Returns whether anything changed. Caller
 // must hold mu (write).
 func (h *Hub) applyPublicUpdateLocked(t *templates.Template, u SettingsUpdate) (bool, error) {
-	pa := t.Manifest.Auth.PublicAccess
 	if u.PublicAccess == nil && !u.PublicAccessDefault && u.PublicMode == nil && u.PublicTokens == nil {
 		return false, nil
 	}
-	if pa == nil {
-		return false, statusErr(400, "%s declares no public exceptions", t.ID)
-	}
-	var tokens []string
-	if u.PublicTokens != nil {
-		if len(*u.PublicTokens) > 0 && !pa.HasTokenPaths() {
-			return false, statusErr(400, "%s has no per-share paths; it can only open all shares", t.ID)
-		}
-		seen := map[string]bool{}
-		for _, in := range *u.PublicTokens {
-			if strings.TrimSpace(in) == "" {
-				continue
-			}
-			tok, err := templates.ExtractToken(pa, in)
-			if err != nil {
-				return false, statusErr(400, "%v", err)
-			}
-			if !seen[tok] {
-				seen[tok] = true
-				tokens = append(tokens, tok)
-			}
-		}
-		if len(tokens) > templates.MaxPublicTokens {
-			return false, statusErr(400, "at most %d listed shares per app (got %d)", templates.MaxPublicTokens, len(tokens))
-		}
-	}
-	if u.PublicMode != nil {
-		switch m := *u.PublicMode; m {
-		case "", templates.ModeAll:
-		case templates.ModeListed:
-			if !pa.HasTokenPaths() {
-				return false, statusErr(400, "%s has no per-share paths; mode listed is not available", t.ID)
-			}
-		default:
-			return false, statusErr(400, "public mode must be all or listed")
-		}
+	tokens, err := validatePublic(t, u)
+	if err != nil {
+		return false, err
 	}
 
 	before := h.publicLocked(t, t.Public)
@@ -352,6 +318,53 @@ func (h *Hub) applyPublicUpdateLocked(t *templates.Template, u SettingsUpdate) (
 	}
 	return !equalStrings(before.Routed, after.Routed) || before.Enabled != after.Enabled || before.Blocked != after.Blocked ||
 		before.Explicit != after.Explicit || before.Mode != after.Mode || !equalStrings(before.Tokens, after.Tokens), nil
+}
+
+// validatePublic checks the public-access part of u against t's
+// auth.public_access and returns the listed shares as tokens (deduplicated).
+func validatePublic(t *templates.Template, u SettingsUpdate) ([]string, error) {
+	pa := t.Manifest.Auth.PublicAccess
+	if u.PublicAccess == nil && !u.PublicAccessDefault && u.PublicMode == nil && u.PublicTokens == nil {
+		return nil, nil
+	}
+	if pa == nil {
+		return nil, statusErr(400, "%s declares no public exceptions", t.ID)
+	}
+	var tokens []string
+	if u.PublicTokens != nil {
+		if len(*u.PublicTokens) > 0 && !pa.HasTokenPaths() {
+			return nil, statusErr(400, "%s has no per-share paths; it can only open all shares", t.ID)
+		}
+		seen := map[string]bool{}
+		for _, in := range *u.PublicTokens {
+			if strings.TrimSpace(in) == "" {
+				continue
+			}
+			tok, err := templates.ExtractToken(pa, in)
+			if err != nil {
+				return nil, statusErr(400, "%v", err)
+			}
+			if !seen[tok] {
+				seen[tok] = true
+				tokens = append(tokens, tok)
+			}
+		}
+		if len(tokens) > templates.MaxPublicTokens {
+			return nil, statusErr(400, "at most %d listed shares per app (got %d)", templates.MaxPublicTokens, len(tokens))
+		}
+	}
+	if u.PublicMode != nil {
+		switch m := *u.PublicMode; m {
+		case "", templates.ModeAll:
+		case templates.ModeListed:
+			if !pa.HasTokenPaths() {
+				return nil, statusErr(400, "%s has no per-share paths; mode listed is not available", t.ID)
+			}
+		default:
+			return nil, statusErr(400, "public mode must be all or listed")
+		}
+	}
+	return tokens, nil
 }
 
 func equalStrings(a, b []string) bool {

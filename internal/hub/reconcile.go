@@ -425,6 +425,9 @@ func (h *Hub) ResolveDrift(id, action string) error {
 		if t == nil || !t.Enabled {
 			return statusErr(400, "%s is not an enabled app with a template", id)
 		}
+		if err := h.pending(id); err != nil {
+			return err
+		}
 		op := OpStart
 		if action == ActionApply {
 			op = OpApply

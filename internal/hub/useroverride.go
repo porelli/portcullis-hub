@@ -672,6 +672,9 @@ func (h *Hub) SaveUserOverride(id, content string) (restart bool, detail string,
 	if t == nil {
 		return false, "", ErrNotFound
 	}
+	if err := h.pending(id); err != nil {
+		return false, "", err
+	}
 	if len(content) > 256<<10 {
 		return false, "", statusErr(400, "the override is too large (max 256 KiB)")
 	}

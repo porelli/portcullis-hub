@@ -18,6 +18,14 @@ func TestInstanceGroups(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.ll.AddGroup("inviters")
+	if err := e.svc.ResolveActor(ctx, "root"); err != nil {
+		t.Errorf("ResolveActor(root) = %v", err)
+	}
+	for _, a := range []string{"alice", "", "nobody"} {
+		if err := e.svc.ResolveActor(ctx, a); err == nil {
+			t.Errorf("ResolveActor(%q) accepted", a)
+		}
+	}
 	if w, err := e.svc.CreateInstanceGroup(ctx, "root", "users_grafana-b"); err != nil || len(w) != 0 || !e.ll.HasGroup("users_grafana-b") {
 		t.Fatalf("create: %v %v", w, err)
 	}
@@ -40,6 +48,12 @@ func TestInstanceGroups(t *testing.T) {
 		if err != nil || len(w) != 1 || !strings.Contains(w[0], "kept") || !e.ll.HasGroup(g) {
 			t.Errorf("%s: %v %v", g, w, err)
 		}
+	}
+	// A rule group is kept too (its membership is an admin's rule).
+	e.ll.AddGroup("milan")
+	setRule(t, store, "milan", `city = "Milan"`)
+	if w, err := e.svc.DeleteInstanceGroup(ctx, "root", "milan"); err != nil || len(w) != 1 || !strings.Contains(w[0], "rule group") || !e.ll.HasGroup("milan") {
+		t.Errorf("rule group: %v %v", w, err)
 	}
 	// Not an admin: refused like the Users & Groups page.
 	e.ll.AddGroup("users_x")

@@ -72,17 +72,21 @@ type Instance struct {
 	Template string            `json:"template" yaml:"template"`
 	Hosts    map[string]string `json:"hosts" yaml:"hosts"`
 	// State is InstanceCreated until the instance is first enabled
-	// (InstanceDeleting during a guarded delete); "" otherwise.
+	// (InstanceDeleting during a guarded delete, InstanceRestoring while a
+	// same-instance restore replaces its data); "" otherwise.
 	State string `json:"state,omitempty" yaml:"state,omitempty"`
-	// Backup is the archive a guarded delete took (relative to
-	// <data>/backups), recorded with InstanceDeleting: a retry keeps it.
+	// Backup is the archive a guarded delete took (InstanceDeleting: a
+	// retry keeps it) or the pre-restore backup (InstanceRestoring: an
+	// interrupted restore is rolled back from it), relative to
+	// <data>/backups.
 	Backup string `json:"backup,omitempty" yaml:"backup,omitempty"`
 }
 
 // Persisted instance states (Instance.State).
 const (
-	InstanceCreated  = "created"
-	InstanceDeleting = "deleting"
+	InstanceCreated   = "created"
+	InstanceDeleting  = "deleting"
+	InstanceRestoring = "restoring"
 )
 
 // AppState tracks which apps are enabled and their settings.

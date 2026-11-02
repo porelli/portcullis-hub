@@ -598,6 +598,9 @@ func (e *fakeEngine) CreateHelper(ctx context.Context, s docker.HelperSpec) (str
 	id := fmt.Sprintf("helper-%d", v.nextID)
 	v.helpers[id] = s
 	v.helperLog = append(v.helperLog, s)
+	e.mu.Lock()
+	e.containers = append(e.containers, docker.Container{ID: id, Names: []string{"/" + id}, State: "created", Labels: map[string]string{docker.LabelHelper: s.Instance}})
+	e.mu.Unlock()
 	return id, nil
 }
 
@@ -607,6 +610,15 @@ func (e *fakeEngine) RemoveContainer(ctx context.Context, id string) error {
 	defer v.vmu.Unlock()
 	delete(v.helpers, id)
 	v.removed = append(v.removed, id)
+	e.mu.Lock()
+	var keep []docker.Container
+	for _, c := range e.containers {
+		if c.ID != id {
+			keep = append(keep, c)
+		}
+	}
+	e.containers = keep
+	e.mu.Unlock()
 	return nil
 }
 
@@ -714,9 +726,16 @@ func (e *fakeEngine) CopyToContainer(ctx context.Context, id, path string, conte
 
 // fakeGroups records instance group operations.
 type fakeGroups struct {
-	mu     sync.Mutex
-	calls  []string // "+name:actor" / "-name:actor"
-	delErr error
+	mu       sync.Mutex
+	calls    []string // "+name:actor" / "-name:actor"
+	delErr   error
+	actorErr error
+}
+
+func (g *fakeGroups) ResolveActor(ctx context.Context, actor string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.actorErr
 }
 
 func (g *fakeGroups) CreateInstanceGroup(ctx context.Context, actor, name string) ([]string, error) {

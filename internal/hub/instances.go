@@ -26,7 +26,10 @@ const (
 	StateEnabled  = "enabled"
 	StateDisabled = "disabled"
 	StateDeleting = "deleting"
-	StateError    = "error"
+	// StateRestoring: a same-instance restore started and hasn't finished
+	// (an interrupted one is rolled back on the next restore or start).
+	StateRestoring = "restoring"
+	StateError     = "error"
 )
 
 // InstanceView is one instance as GET /api/instances shows it (§11.7).
@@ -109,6 +112,26 @@ func (h *Hub) rebuildLocked() {
 	h.brokenInstances = broken
 }
 
+// pendingLocked refuses (409) changes to an instance a guarded delete or
+// a restore hasn't finished ("deleting" / "restoring"). Caller must hold
+// mu.
+func (h *Hub) pendingLocked(id string) error {
+	switch e := h.st.Instances[id]; e.State {
+	case state.InstanceDeleting:
+		return statusErr(409, "instance %s is being deleted: delete it again to finish", id)
+	case state.InstanceRestoring:
+		return statusErr(409, "instance %s has an unfinished restore: restore it again (its pre-restore backup %s is put back first)", id, e.Backup)
+	}
+	return nil
+}
+
+// pending is pendingLocked taking mu.
+func (h *Hub) pending(id string) error {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.pendingLocked(id)
+}
+
 // catalogLocked returns the catalog entry of a template id. Caller must
 // hold mu.
 func (h *Hub) catalogLocked(templateID string) *templates.Template {
@@ -159,6 +182,8 @@ func (h *Hub) Instances() []InstanceView {
 		switch {
 		case e.State == state.InstanceDeleting:
 			v.State = StateDeleting
+		case e.State == state.InstanceRestoring:
+			v.State = StateRestoring
 		case hasOp && !op.OK:
 			v.State = StateError
 		case t.Enabled:
@@ -177,8 +202,11 @@ func (h *Hub) Instances() []InstanceView {
 			tid = id
 		}
 		st := StateError
-		if e.State == state.InstanceDeleting {
+		switch e.State {
+		case state.InstanceDeleting:
 			st = StateDeleting
+		case state.InstanceRestoring:
+			st = StateRestoring
 		}
 		out = append(out, InstanceView{ID: id, Template: tid, Default: id == tid, State: st, Error: reason,
 			Hosts: copyMap(e.Hosts), KeycloakClients: []string{}, Project: projectName(id)})

@@ -67,6 +67,14 @@ func (h *Hub) DeleteInstance(id, confirm, actor string) (res *DeleteResult, err 
 	if !ok {
 		return res, statusErr(404, "instance not found: %s", id)
 	}
+	h.mu.RLock()
+	groupsAPI := h.groups
+	h.mu.RUnlock()
+	if groupsAPI != nil {
+		if err := groupsAPI.ResolveActor(context.Background(), actor); err != nil {
+			return res, fmt.Errorf("the acting admin %q can't delete the instance's groups — nothing was deleted: %w", actor, err)
+		}
+	}
 	if tg.entry.State == state.InstanceDeleting {
 		res.Backup = tg.entry.Backup
 	} else {
@@ -82,9 +90,14 @@ func (h *Hub) DeleteInstance(id, confirm, actor string) (res *DeleteResult, err 
 		}
 		e.State, e.Backup = state.InstanceDeleting, entry.Archive
 		h.st.Instances[id] = e
+		// Disabled with it (the backup left it stopped): nothing may
+		// start it again, drift included.
+		h.st.SetEnabled(id, false)
 		h.rebuildLocked()
+		h.refreshPublishedLocked()
 		h.saveLocked()
 		h.mu.Unlock()
+		h.writePolicyLogged()
 		log.Printf("instance %s: deleting (backup %s)", id, entry.Archive)
 	}
 	if err := h.deleteSteps(id, actor, res); err != nil {
@@ -124,8 +137,11 @@ func (h *Hub) deleteSteps(id, actor string, res *DeleteResult) error {
 		clients = snap.Clients
 		groups = []string{snap.AccessGroup, snap.AdminGroup}
 	case id != tg.templateID:
-		clients = []string{id}
 		groups = []string{"users_" + id, "admin_" + id}
+	}
+	if tg.view == nil && len(clients) == 0 && id != tg.templateID {
+		// The derived first client id (§11.2); further ones aren't known.
+		clients = []string{id}
 	}
 	shared := map[string]string{}
 	for _, g := range groups {
@@ -136,8 +152,12 @@ func (h *Hub) deleteSteps(id, actor string, res *DeleteResult) error {
 		}
 	}
 	h.mu.RUnlock()
-	if tg.view == nil && !hasSnap {
-		res.Warnings = append(res.Warnings, fmt.Sprintf("the template of %s is missing and it has no published snapshot: its Keycloak clients and groups other than the derived ones may be left behind", id))
+	if tg.view == nil && (!hasSnap || len(snap.Clients) == 0) {
+		if id != tg.templateID {
+			res.Warnings = append(res.Warnings, fmt.Sprintf("the template of %s is missing and no published snapshot lists its Keycloak clients: only the derived client id %s is deleted, others may be left behind", id, id))
+		} else {
+			res.Warnings = append(res.Warnings, fmt.Sprintf("the template of %s is missing and no published snapshot lists its Keycloak clients: they may be left behind", id))
+		}
 	}
 
 	// 3. Project down, then its volumes.
@@ -165,7 +185,9 @@ func (h *Hub) deleteSteps(id, actor string, res *DeleteResult) error {
 	}
 
 	// 4. Keycloak: access role and flow, clients, forward-auth callbacks.
-	if h.idp != nil {
+	if h.idp == nil {
+		res.Warnings = append(res.Warnings, "Keycloak is not configured: no clients, access roles or callbacks were removed")
+	} else {
 		var errs []error
 		if tg.view != nil {
 			if err := h.RemoveInstanceAccess(ctx, tg.view); err != nil {
@@ -202,6 +224,10 @@ func (h *Hub) deleteSteps(id, actor string, res *DeleteResult) error {
 	for _, g := range groups {
 		switch {
 		case g == "":
+		case g != "users_"+id && g != "admin_"+id:
+			// Only the instance's own names (§11.2): a manifest group
+			// with another name is someone's on purpose.
+			res.Warnings = append(res.Warnings, fmt.Sprintf("group %s was kept: it isn't named users_%s / admin_%s (delete it on the Users & Groups page if nothing needs it)", g, id, id))
 		case shared[g] != "":
 			res.Warnings = append(res.Warnings, fmt.Sprintf("group %s was kept: %s uses it too", g, shared[g]))
 		case groupsAPI == nil:

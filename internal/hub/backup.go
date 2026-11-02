@@ -17,6 +17,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -268,11 +269,8 @@ func (h *Hub) BackupInstance(id, actor string) (entry *BackupEntry, err error) {
 		return nil, err
 	}
 	defer unlock()
-	h.mu.RLock()
-	e, ok := h.st.Instances[id]
-	h.mu.RUnlock()
-	if ok && e.State == state.InstanceDeleting {
-		return nil, statusErr(409, "instance %s is being deleted: its delete backup is %s", id, e.Backup)
+	if err := h.pending(id); err != nil {
+		return nil, err
 	}
 	return h.backupLocked(id, BackupManual, false)
 }
@@ -317,6 +315,9 @@ func (h *Hub) backupLocked(id, reason string, keepStopped bool) (*BackupEntry, e
 	}
 	os.Chmod(h.backupsDir(), 0700)
 	os.Chmod(dir, 0700)
+	if err := needFree(dir, 0, "the backup of "+id); err != nil {
+		return nil, err
+	}
 	stage, err := os.MkdirTemp(dir, ".staging-")
 	if err != nil {
 		return nil, statusErr(500, "backup staging: %v", err)
@@ -439,6 +440,10 @@ func (h *Hub) writeBackup(ctx context.Context, id, dir, stage string, m *BackupM
 		}
 		m.Volumes[k] = vols[k].Name
 		m.Files[member] = sum
+	}
+	// Assembling copies the staged members once more.
+	if err := needFree(dir, dirSize(stage), "the backup archive of "+id); err != nil {
+		return nil, err
 	}
 	now := time.Now().UTC().Truncate(time.Second)
 	var final string
@@ -932,16 +937,34 @@ func checkVolumeArchive(p string) error {
 // missing one is created with labels; then the daemon extracts the tar
 // at "/" of a never-started helper mounting it at helperMount (owners,
 // modes, mtimes and the volume root's own metadata as archived).
-func (h *Hub) fillVolume(ctx context.Context, id string, v docker.Volume, existed bool, tarPath string) error {
+func (h *Hub) fillVolume(ctx context.Context, id string, v docker.Volume, existed bool, tarPath string) (created bool, err error) {
 	if existed {
 		if err := h.engine.RemoveVolume(ctx, v.Name); err != nil && !docker.IsNotFound(err) {
-			return fmt.Errorf("emptying volume %s: %w", v.Name, err)
+			return false, fmt.Errorf("emptying volume %s: %w", v.Name, err)
+		}
+	} else {
+		// Creating an existing volume is a no-op for Docker: it must
+		// really be new (nobody else's appeared meanwhile).
+		if old, err := h.engine.InspectVolume(ctx, v.Name); err == nil {
+			return false, fmt.Errorf("volume %s appeared meanwhile (labels %v): not touching it", old.Name, old.Labels)
+		} else if !docker.IsNotFound(err) {
+			return false, fmt.Errorf("volume %s: %w", v.Name, err)
 		}
 	}
 	if err := h.engine.CreateVolume(ctx, v); err != nil {
-		return fmt.Errorf("creating volume %s: %w", v.Name, err)
+		return false, fmt.Errorf("creating volume %s: %w", v.Name, err)
 	}
-	return h.withHelper(ctx, id, v.Name, false, func(hid string) error {
+	got, err := h.engine.InspectVolume(ctx, v.Name)
+	if err != nil {
+		return false, fmt.Errorf("volume %s after creating it: %w", v.Name, err)
+	}
+	if got.Labels[docker.LabelProject] != v.Labels[docker.LabelProject] || got.Labels[docker.LabelVolume] != v.Labels[docker.LabelVolume] {
+		return false, fmt.Errorf("volume %s is not the one created for %s (labels %v): not touching it", v.Name, v.Labels[docker.LabelProject], got.Labels)
+	}
+	if tarPath == "" {
+		return true, nil
+	}
+	return true, h.withHelper(ctx, id, v.Name, false, func(hid string) error {
 		f, err := os.Open(tarPath)
 		if err != nil {
 			return err
@@ -952,6 +975,95 @@ func (h *Hub) fillVolume(ctx context.Context, id string, v docker.Volume, existe
 		}
 		return nil
 	})
+}
+
+// freeMargin is the free space a backup or restore leaves on the data
+// volume at least.
+const freeMargin = 64 << 20
+
+// freeSpace returns the bytes available to the Hub on dir's filesystem
+// (a var for tests).
+var freeSpace = func(dir string) (uint64, error) {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(dir, &st); err != nil {
+		return 0, err
+	}
+	return uint64(st.Bavail) * uint64(st.Bsize), nil
+}
+
+// needFree refuses (507) when dir's filesystem has less than need bytes
+// plus freeMargin available.
+func needFree(dir string, need int64, what string) error {
+	avail, err := freeSpace(dir)
+	if err != nil {
+		return statusErr(500, "checking free space for %s: %v", what, err)
+	}
+	if need < 0 {
+		need = 0
+	}
+	if avail < uint64(need)+freeMargin {
+		return statusErr(507, "not enough free space for %s: %d MiB available, %d MiB needed (plus a %d MiB margin) on the Hub's data volume — free some space (old backups under <data>/backups) and try again",
+			what, avail>>20, need>>20, freeMargin>>20)
+	}
+	return nil
+}
+
+// checkFree is needFree for staging the archive at p (its size).
+func (h *Hub) checkFree(p, what string) error {
+	fi, err := os.Stat(p)
+	if err != nil {
+		return nil // stageArchive answers 404
+	}
+	return needFree(h.backupsDir(), fi.Size(), what)
+}
+
+// dirSize sums the regular files under dir.
+func dirSize(dir string) int64 {
+	var n int64
+	filepath.WalkDir(dir, func(_ string, d os.DirEntry, err error) error {
+		if err == nil && d.Type().IsRegular() {
+			if fi, err := d.Info(); err == nil {
+				n += fi.Size()
+			}
+		}
+		return nil
+	})
+	return n
+}
+
+// SweepBackupLeftovers removes what an interrupted backup or restore left
+// behind: helper containers (LabelHelper), staging directories and
+// .partial archives. Init calls it before anything can start one.
+func (h *Hub) SweepBackupLeftovers() {
+	if h.engine != nil {
+		cs, err := h.engine.ListContainers(context.Background(), docker.Filters{"label": {docker.LabelHelper}})
+		if err != nil {
+			log.Printf("backups: cannot list leftover helper containers: %v", err)
+		}
+		for _, c := range cs {
+			if err := h.engine.RemoveContainer(context.Background(), c.ID); err != nil {
+				log.Printf("backups: removing leftover helper container %s: %v", c.Name(), err)
+			} else {
+				log.Printf("backups: removed leftover helper container %s", c.Name())
+			}
+		}
+	}
+	os.RemoveAll(filepath.Join(h.backupsDir(), ".staging"))
+	dirs, _ := os.ReadDir(h.backupsDir())
+	for _, d := range dirs {
+		if !d.IsDir() || !templates.ValidID(d.Name()) {
+			continue
+		}
+		files, _ := os.ReadDir(filepath.Join(h.backupsDir(), d.Name()))
+		for _, f := range files {
+			if strings.HasPrefix(f.Name(), ".staging-") || strings.HasSuffix(f.Name(), ".tar.partial") {
+				p := filepath.Join(h.backupsDir(), d.Name(), f.Name())
+				if err := os.RemoveAll(p); err == nil {
+					log.Printf("backups: removed leftover %s", p)
+				}
+			}
+		}
+	}
 }
 
 // plainVolume reports whether v can be emptied by removing and creating

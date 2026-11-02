@@ -480,7 +480,7 @@ var nonUserOps = map[string]bool{"Overview": true, "OverviewFor": true, "Recent"
 	// Read-only views for the Hub's publishing (policy expiring, user attributes).
 	"Publish": true, "SharedFields": true,
 	// App instance groups: CreateGroup / DeleteGroup as the actor, never a user.
-	"CreateInstanceGroup": true, "DeleteInstanceGroup": true}
+	"CreateInstanceGroup": true, "DeleteInstanceGroup": true, "ResolveActor": true}
 
 func TestProtectedAccountsParity(t *testing.T) {
 	e := newEnv(t)
