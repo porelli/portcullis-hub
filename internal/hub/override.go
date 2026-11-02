@@ -172,6 +172,16 @@ func (h *Hub) renderOverrideLocked(t *templates.Template, values map[string]stri
 					fmt.Fprintf(&b, "      %s\n", l)
 				}
 			}
+			if svc == rl.signInService {
+				keys := make([]string, 0, len(rl.signInLabels))
+				for k := range rl.signInLabels {
+					keys = append(keys, k)
+				}
+				sort.Strings(keys)
+				for _, k := range keys {
+					fmt.Fprintf(&b, "      %s: %s\n", yamlQuote(k), yamlQuote(rl.signInLabels[k]))
+				}
+			}
 		}
 	}
 	// Volume names (§11.2), multi templates only (they declare none): the
@@ -213,6 +223,14 @@ func hubLabels(rl *routeLabels) (map[string]map[string]string, error) {
 			}
 		}
 		out[svc] = m
+	}
+	if len(rl.signInLabels) > 0 {
+		if out[rl.signInService] == nil {
+			out[rl.signInService] = map[string]string{}
+		}
+		for k, v := range rl.signInLabels {
+			out[rl.signInService][k] = v
+		}
 	}
 	if rl.plan != nil {
 		for _, l := range rl.public {
@@ -272,9 +290,29 @@ type routeLabels struct {
 	public []string              // public router + strip middleware lines ("key: value"), on plan.Service
 	// middlewares are the routers' middleware chains the Hub sets (apps
 	// with auth.native_login only); a router without an entry keeps the
-	// template's.
+	// template's. Routers on extra-domain hosts get the template's (or
+	// the native_login) chain with portcullis-auth-ext@docker in place of
+	// portcullis-auth@docker (contract §5).
 	middlewares map[string]string
+	// signIn maps each router that uses portcullis-auth-ext@docker to its
+	// extra-domain hosts (sorted); signInService carries the sign-in
+	// routers' labels (signInLabels, full keys) — the first compose service
+	// with traefik.enable=true.
+	signIn        map[string][]string
+	signInService string
+	signInLabels  map[string]string
 }
+
+// ExtAuthMiddleware is core's forwardAuth middleware for extra-domain
+// hosts (forward-auth-ext, contract §5).
+const ExtAuthMiddleware = "portcullis-auth-ext@docker"
+
+// SignInRouterPrefix starts the name of every extra-domain sign-in router
+// the Hub renders: portcullis-oauth2-<instance-id>_<host router>.
+const SignInRouterPrefix = "portcullis-oauth2-"
+
+// SignInRouterName is the sign-in router of instance id's router r.
+func SignInRouterName(id, r string) string { return SignInRouterPrefix + id + "_" + r }
 
 // routeLabelsLocked computes the tier and public-router labels from the
 // template's compose file and state. The custom override can't change any
@@ -304,12 +342,124 @@ func (h *Hub) routeLabelsLocked(t *templates.Template) (*routeLabels, error) {
 			}
 		}
 	}
+	if err := h.extraSignInLocked(t, rl); err != nil {
+		return nil, err
+	}
 	if pub.Active() {
 		if rl.public, err = publicLabels(t.ID, &t.Manifest, plan, pub.Routed, rl.tier); err != nil {
 			return nil, err
 		}
 	}
 	return rl, nil
+}
+
+// extraSignInLocked renders the extra-domain sign-in (contract §5): every
+// router whose hosts lie on an enrolled domain and whose chain (as
+// rendered) has portcullis-auth@docker gets portcullis-auth-ext@docker in
+// its place, and one Host()-scoped /oauth2/ router per such router sends
+// the sign-in endpoints to forward-auth-ext. A router may not mix
+// extra-domain and main-domain hosts (one chain can't serve both).
+// Caller must hold mu.
+func (h *Hub) extraSignInLocked(t *templates.Template, rl *routeLabels) error {
+	if len(t.ExtraHosts) == 0 {
+		return nil
+	}
+	extra := map[string]bool{}
+	for _, x := range t.ExtraHosts {
+		extra[x] = true
+	}
+	names := make([]string, 0, len(rl.routes.Info))
+	for name := range rl.routes.Info {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	maxBound := 0
+	for _, name := range names {
+		ri := rl.routes.Info[name]
+		bound := ri.Priority
+		if !ri.HasPriority {
+			bound = len(ri.Rule) + strings.Count(ri.Rule, "${")*253
+		}
+		if bound > maxBound {
+			maxBound = bound
+		}
+		var hosts []string
+		mainHosts := 0
+		seen := map[string]bool{}
+		for _, hv := range ri.HostVars {
+			host := t.InstanceEnv[hv]
+			if hv == "" || !extra[host] {
+				mainHosts++
+				continue
+			}
+			if !seen[host] {
+				seen[host] = true
+				hosts = append(hosts, host)
+			}
+		}
+		if len(hosts) == 0 {
+			continue
+		}
+		if mainHosts > 0 {
+			return fmt.Errorf("router %s routes both extra-domain and main-domain hosts; one sign-in chain can't serve both", name)
+		}
+		mws := ri.Middlewares
+		if m, ok := rl.middlewares[name]; ok {
+			mws = strings.Split(m, ",")
+		}
+		uses := false
+		out := make([]string, 0, len(mws))
+		for _, m := range mws {
+			m = strings.TrimSpace(m)
+			if m == gatewayMiddlewares[0] {
+				m, uses = ExtAuthMiddleware, true
+			}
+			out = append(out, m)
+		}
+		if !uses {
+			continue
+		}
+		if rl.middlewares == nil {
+			rl.middlewares = map[string]string{}
+		}
+		rl.middlewares[name] = strings.Join(out, ",")
+		if rl.signIn == nil {
+			rl.signIn = map[string][]string{}
+		}
+		sort.Strings(hosts)
+		rl.signIn[name] = hosts
+	}
+	if len(rl.signIn) == 0 {
+		return nil
+	}
+	svc, err := templates.FirstEnabledService(t.ReadCompose())
+	if err != nil {
+		return err
+	}
+	if svc == "" {
+		return fmt.Errorf("no service with traefik.enable=true for the extra-domain sign-in routers")
+	}
+	// Above every router of the instance and its public router (whose
+	// priority is the same bound + 1).
+	prio := strconv.Itoa(maxBound + 2)
+	rl.signInService, rl.signInLabels = svc, map[string]string{}
+	for r, hosts := range rl.signIn {
+		match := make([]string, len(hosts))
+		for i, host := range hosts {
+			match[i] = "Host(`" + host + "`)"
+		}
+		rule := match[0]
+		if len(match) > 1 {
+			rule = "(" + strings.Join(match, " || ") + ")"
+		}
+		k := "traefik.http.routers." + SignInRouterName(t.ID, r) + "."
+		rl.signInLabels[k+"rule"] = rule + " && PathPrefix(`/oauth2/`)"
+		rl.signInLabels[k+"entrypoints"] = "websecure"
+		rl.signInLabels[k+"tls.options"] = rl.tier
+		rl.signInLabels[k+"priority"] = prio
+		rl.signInLabels[k+"service"] = "forward-auth-ext@docker"
+	}
+	return nil
 }
 
 // desiredRouteLabelsLocked returns, per compose service, the Traefik
@@ -364,12 +514,14 @@ func expandComposeValue(v, domain string, instanceEnv map[string]string) string 
 }
 
 // exposureLabel reports whether a label key decides an app's exposure:
-// a router's tls.options, anything of its public router / middleware and,
+// a router's tls.options, anything of its public router / middleware or
+// of its extra-domain sign-in routers and,
 // for apps whose sign-in the Hub sets (mw), every router's middlewares.
 func exposureLabel(id, k string, mw bool) bool {
 	// Folded like Traefik's decoder, so an odd-cased key counts too.
 	k = templates.FoldKey(k)
 	return strings.HasPrefix(k, "traefik.http.routers."+PublicRouterName(id)+".") ||
+		strings.HasPrefix(k, "traefik.http.routers."+SignInRouterName(id, "")) ||
 		(mw && strings.HasPrefix(k, "traefik.http.routers.") && strings.HasSuffix(k, ".middlewares")) ||
 		strings.HasPrefix(k, "traefik.http.middlewares."+PublicStripMiddleware(id)+".") ||
 		(strings.HasPrefix(k, "traefik.http.routers.") && strings.HasSuffix(k, ".tls.options"))

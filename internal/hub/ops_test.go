@@ -26,7 +26,7 @@ func bindError(extra string) error {
 func TestEnableFailureExplainedAndRolledBack(t *testing.T) {
 	f := newFixture(t)
 	// What compose left behind before failing: a created, stopped container.
-	c := container("c1", "portcullis-grafana", "grafana", "created")
+	c := container("c1", "portcullis-grafana", "web", "created")
 	c.Labels["traefik.http.routers.grafana.rule"] = "Host(`grafana.example.org`)"
 	f.engine.containers = []docker.Container{c}
 	f.runner.onDown = func(project string) {

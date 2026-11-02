@@ -91,3 +91,36 @@ func RenameLabels(labels map[string]string, names map[string]bool, id string) ma
 	}
 	return out
 }
+
+// FirstEnabledService is the first compose service, in compose.yml order,
+// whose labels set traefik.enable to "true" ("" = none). The Hub puts its
+// extra-domain sign-in routers there (contract §5).
+func FirstEnabledService(compose []byte) (string, error) {
+	labels, err := ServiceLabels(compose)
+	if err != nil {
+		return "", err
+	}
+	var root yaml.Node
+	if err := yaml.Unmarshal(compose, &root); err != nil {
+		return "", fmt.Errorf("compose.yml: %w", err)
+	}
+	if len(root.Content) == 0 || root.Content[0].Kind != yaml.MappingNode {
+		return "", nil
+	}
+	doc := root.Content[0]
+	for i := 0; i+1 < len(doc.Content); i += 2 {
+		if doc.Content[i].Value != "services" || doc.Content[i+1].Kind != yaml.MappingNode {
+			continue
+		}
+		svcs := doc.Content[i+1]
+		for j := 0; j+1 < len(svcs.Content); j += 2 {
+			name := svcs.Content[j].Value
+			for k, v := range labels[name] {
+				if FoldKey(k) == "traefik.enable" && strings.EqualFold(strings.TrimSpace(v), "true") {
+					return name, nil
+				}
+			}
+		}
+	}
+	return "", nil
+}

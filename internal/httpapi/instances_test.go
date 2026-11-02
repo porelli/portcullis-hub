@@ -265,7 +265,7 @@ urls:
     url: "https://{{HOST_GRAFANA}}"
 `
 
-const instGrafanaCompose = "services:\n  grafana:\n    image: grafana\n    volumes:\n      - grafana-data:/var/lib/grafana\n    labels:\n" +
+const instGrafanaCompose = "services:\n  web:\n    image: grafana\n    volumes:\n      - grafana-data:/var/lib/grafana\n    labels:\n" +
 	"      traefik.http.routers.grafana.rule: Host(`${PORTCULLIS_HOST_GRAFANA:-grafana.portcullis.local}`)\n" +
 	"volumes:\n  grafana-data: {}\n"
 

@@ -36,11 +36,11 @@ ports:
   - key: GRAFANA_PORT
     container: 3000
     default: 3300
-    service: grafana
+    service: web
 `
 
 const v2GrafanaCompose = "services:\n" +
-	"  grafana:\n" +
+	"  web:\n" +
 	"    image: grafana\n" +
 	"    environment:\n" +
 	"      GF_SERVER_ROOT_URL: https://${PORTCULLIS_HOST_GRAFANA:-grafana.portcullis.local}\n" +
@@ -605,7 +605,7 @@ func TestInstanceDriftRenamedLabels(t *testing.T) {
 		t.Fatal(err)
 	}
 	keys := []string{}
-	for k := range want["grafana"] {
+	for k := range want["web"] {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
@@ -613,8 +613,8 @@ func TestInstanceDriftRenamedLabels(t *testing.T) {
 		t.Errorf("desired keys = %v", keys)
 	}
 	// A running container carrying exactly those labels is not drift.
-	c := container("c1", "portcullis-grafana-b", "grafana", "running")
-	for k, v := range want["grafana"] {
+	c := container("c1", "portcullis-grafana-b", "web", "running")
+	for k, v := range want["web"] {
 		c.Labels[k] = v
 	}
 	c.Labels["traefik.http.routers.grafana-b_grafana.rule"] = "Host(`grafana-b.example.org`)"

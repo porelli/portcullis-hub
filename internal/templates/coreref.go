@@ -49,12 +49,6 @@ var (
 		"textfile-exporter", "grafana")
 	coreVolumes = set("postgres_data", "vault_data", "lldap_data", "hub_data", "traefik_acme", "domains_data",
 		"prometheus_data", "alertmanager_data", "grafana_data")
-	// coreDNSShared: core services whose name a template service may
-	// reuse. Nothing in core resolves "grafana" by DNS on a network a
-	// template can join (Traefik reaches core's monitoring Grafana by its
-	// container address; Grafana itself talks to Prometheus on
-	// monitoring), and the grafana template's service is named grafana.
-	coreDNSShared = set("grafana")
 	// coreContainerRe: compose's container names for core's services.
 	coreContainerRe = regexp.MustCompile(`^portcullis[-_](.+)[-_][0-9]+$`)
 )
@@ -68,7 +62,7 @@ func reservedDNSName(name string) bool {
 	n := strings.TrimSuffix(FoldKey(strings.TrimSpace(name)), ".")
 	first, _, _ := strings.Cut(n, ".")
 	for _, c := range []string{n, first} {
-		if coreServices[c] && !coreDNSShared[c] {
+		if coreServices[c] {
 			return true
 		}
 		if m := coreContainerRe.FindStringSubmatch(c); m != nil && coreServices[m[1]] {

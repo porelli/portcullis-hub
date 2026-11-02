@@ -243,9 +243,13 @@ func TestHelperImagePinned(t *testing.T) {
 		t.Fatalf("HelperImage %q is not pinned name:tag@sha256", HelperImage)
 	}
 	// Same image as core's CLI helpers (one pin to keep current).
-	b, err := os.ReadFile(filepath.Join("..", "..", "..", "portcullis", "scripts", "lib", "common.sh"))
+	core := os.Getenv("PORTCULLIS_CORE_DIR")
+	if core == "" {
+		core = filepath.Join("..", "..", "..", "portcullis")
+	}
+	b, err := os.ReadFile(filepath.Join(core, "scripts", "lib", "common.sh"))
 	if err != nil {
-		t.Skip("no sibling core checkout")
+		t.Skip("no core checkout")
 	}
 	if !strings.Contains(string(b), `PORTCULLIS_HELPER_IMAGE="`+HelperImage+`"`) {
 		t.Errorf("HelperImage %s differs from core's PORTCULLIS_HELPER_IMAGE", HelperImage)

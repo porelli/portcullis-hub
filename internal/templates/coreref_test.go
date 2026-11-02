@@ -340,7 +340,7 @@ func TestDiscoverRefusesBypasses(t *testing.T) {
 	// Controls: everything here is allowed and must load.
 	controls := map[string]string{
 		"control": compose(""),
-		"control-attrs": build("grafana", []string{
+		"control-attrs": build("dash", []string{
 			"traefik.http.routers.app.service: app",
 			"traefik.http.routers.app.middlewares: client-headers@file,portcullis-auth@docker,portcullis-groups@docker,c@docker,security-headers@file",
 			"traefik.http.services.app.loadbalancer.server.port: \"3000\"",
@@ -542,7 +542,7 @@ func TestCoreNamesComplete(t *testing.T) {
 		if !coreServices[name] {
 			t.Errorf("core service %s missing from coreServices", name)
 		}
-		if !coreDNSShared[name] && !reservedDNSName(name) {
+		if !reservedDNSName(name) {
 			t.Errorf("core service %s is not a reserved DNS name", name)
 		}
 		if !reservedDNSName("portcullis-" + name + "-1") {

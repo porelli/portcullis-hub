@@ -386,10 +386,6 @@ func (h *Hub) signInExtraHostsLocked(t *templates.Template) []string {
 	if len(t.ExtraHosts) == 0 {
 		return nil
 	}
-	extra := map[string]bool{}
-	for _, x := range t.ExtraHosts {
-		extra[x] = true
-	}
 	rl, err := h.routeLabelsLocked(t)
 	if err != nil {
 		// Unknown routing: keep every extra host's callback (an unused
@@ -397,22 +393,9 @@ func (h *Hub) signInExtraHostsLocked(t *templates.Template) []string {
 		return append([]string(nil), t.ExtraHosts...)
 	}
 	set := map[string]bool{}
-	for name, ri := range rl.routes.Info {
-		mws := ri.Middlewares
-		if m, ok := rl.middlewares[name]; ok {
-			mws = strings.Split(m, ",")
-		}
-		uses := false
-		for _, m := range mws {
-			uses = uses || strings.TrimSpace(m) == gatewayMiddlewares[0]
-		}
-		if !uses {
-			continue
-		}
-		for _, hv := range ri.HostVars {
-			if host := t.InstanceEnv[hv]; extra[host] {
-				set[host] = true
-			}
+	for _, hosts := range rl.signIn {
+		for _, host := range hosts {
+			set[host] = true
 		}
 	}
 	out := make([]string, 0, len(set))

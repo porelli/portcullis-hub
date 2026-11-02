@@ -326,15 +326,15 @@ settings:
     options: [dark, light]
   - key: MEDIA
     type: path
-    target: {service: grafana, mount: /media}
+    target: {service: web, mount: /media}
 ports:
   - key: GRAFANA_PORT
     container: 3000
     default: 3300
-    service: grafana
+    service: web
 `
 
-const grafanaCompose = "services:\n  grafana:\n    image: grafana\n    environment:\n      X: ${CORE_VAR}\n    labels:\n      traefik.http.routers.grafana.rule: Host(`grafana.${PORTCULLIS_DOMAIN:-x}`)\n      traefik.http.routers.grafana.entrypoints: websecure\n"
+const grafanaCompose = "services:\n  web:\n    image: grafana\n    environment:\n      X: ${CORE_VAR}\n    labels:\n      traefik.http.routers.grafana.rule: Host(`grafana.${PORTCULLIS_DOMAIN:-x}`)\n      traefik.http.routers.grafana.entrypoints: websecure\n"
 
 const otherManifest = `name: Other
 category: misc

@@ -533,7 +533,7 @@ func TestRoutingValidation(t *testing.T) {
 		}
 	}
 	// A template update changes the routed subdomains used for the policy file.
-	writeFile(t, filepath.Join(f.src, "grafana", "compose.yml"), "services:\n  grafana:\n    labels:\n      traefik.http.routers.g.rule: Host(`dash.${PORTCULLIS_DOMAIN}`)\n")
+	writeFile(t, filepath.Join(f.src, "grafana", "compose.yml"), "services:\n  web:\n    labels:\n      traefik.http.routers.g.rule: Host(`dash.${PORTCULLIS_DOMAIN}`)\n")
 	f.h.Discover()
 	f.h.Enable("grafana")
 	if doc := readPolicy(t, f); doc.Groups["dash.example.org"] != "users_grafana" || doc.Groups["grafana.example.org"] != "" {
@@ -646,7 +646,7 @@ func TestExpertFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	vars, services, err := f.h.Env("grafana")
-	if err != nil || vars["FOO"] != "bar" || fmt.Sprint(services) != "[grafana]" {
+	if err != nil || vars["FOO"] != "bar" || fmt.Sprint(services) != "[web]" {
 		t.Errorf("env = %v %v %v", vars, services, err)
 	}
 }

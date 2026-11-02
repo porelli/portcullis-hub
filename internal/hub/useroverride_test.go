@@ -9,7 +9,7 @@ import (
 
 func TestUserOverrideValidation(t *testing.T) {
 	f := newFixture(t)
-	svc := func(body string) string { return "services:\n  grafana:\n" + body }
+	svc := func(body string) string { return "services:\n  web:\n" + body }
 	bad := map[string]string{
 		"yaml":                      "services: [unclosed",
 		"not a mapping":             "- a\n- b\n",
@@ -166,7 +166,7 @@ func TestUserOverridePorts(t *testing.T) {
 	if err := f.h.Enable("grafana"); err != nil { // 3300
 		t.Fatal(err)
 	}
-	if _, _, err := f.h.SaveUserOverride("grafana", "services:\n  grafana:\n    ports: [\"3300:3000\"]\n"); statusOf(err) != 409 {
+	if _, _, err := f.h.SaveUserOverride("grafana", "services:\n  web:\n    ports: [\"3300:3000\"]\n"); statusOf(err) != 409 {
 		t.Errorf("duplicate of its own Settings port accepted: %v", err)
 	}
 	if _, _, err := f.h.SaveUserOverride("other", "services:\n  web:\n    ports: [\"9000:80\"]\n"); err != nil {
@@ -178,15 +178,15 @@ func TestUserOverridePorts(t *testing.T) {
 	if err := f.h.Enable("other"); err != nil {
 		t.Fatal(err)
 	}
-	_, _, err := f.h.SaveUserOverride("grafana", "services:\n  grafana:\n    ports: [\"9000:3000\"]\n")
+	_, _, err := f.h.SaveUserOverride("grafana", "services:\n  web:\n    ports: [\"9000:3000\"]\n")
 	if statusOf(err) != 409 || !strings.Contains(err.Error(), "enabled app other — change its custom override") {
 		t.Errorf("collision with another app's custom port: %v", err)
 	}
 	// Binding a specific address doesn't help against 0.0.0.0.
-	if _, _, err := f.h.SaveUserOverride("grafana", "services:\n  grafana:\n    ports: [\"127.0.0.1:9000:3000\"]\n"); statusOf(err) != 409 {
+	if _, _, err := f.h.SaveUserOverride("grafana", "services:\n  web:\n    ports: [\"127.0.0.1:9000:3000\"]\n"); statusOf(err) != 409 {
 		t.Errorf("overlapping bind accepted: %v", err)
 	}
-	if _, _, err := f.h.SaveUserOverride("grafana", "services:\n  grafana:\n    ports: [\"9000:3000/udp\"]\n"); err != nil {
+	if _, _, err := f.h.SaveUserOverride("grafana", "services:\n  web:\n    ports: [\"9000:3000/udp\"]\n"); err != nil {
 		t.Errorf("other protocol refused: %v", err)
 	}
 }

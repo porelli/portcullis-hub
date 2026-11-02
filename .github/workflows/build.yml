@@ -6,6 +6,9 @@ on:
     tags: ['v*']
   pull_request:
     branches: [main]
+  # Feature branches (e.g. the cross-repo `instances` branch): tests and an
+  # image build, never a push (PUSH below is true only for push events).
+  workflow_dispatch:
 
 permissions: {}
 
@@ -50,6 +53,29 @@ jobs:
       - name: go build
         run: go build -o /dev/null ./cmd/hub
 
+      # The real templates and core: every published template must load
+      # with the Hub's rules (TestRealTemplates*), and the Hub's lists of
+      # core names must match core (TestCore*Complete). The same-named
+      # branch of each repo when it exists (cross-repo feature branches
+      # land together), else main.
+      - name: Check out the templates and core (same branch, else main)
+        env:
+          REF: ${{ github.head_ref || github.ref_name }}
+        run: |
+          for repo in portcullis-templates portcullis; do
+            url="https://github.com/porelli/$repo"
+            ref=main
+            if [[ "$REF" =~ ^[A-Za-z0-9._/-]+$ ]] && [ "$REF" != main ] && git ls-remote --exit-code --heads "$url" "$REF" >/dev/null; then ref="$REF"; fi
+            echo "$repo: $ref" | tee -a "$GITHUB_STEP_SUMMARY"
+            git clone --quiet --depth=1 --branch "$ref" "$url" "$RUNNER_TEMP/$repo"
+          done
+
+      - name: Real templates and core names
+        env:
+          PORTCULLIS_TEMPLATES_DIR: ${{ runner.temp }}/portcullis-templates
+          PORTCULLIS_CORE_DIR: ${{ runner.temp }}/portcullis
+        run: go test -count=1 -v -run 'TestRealTemplates|TestCore[A-Za-z]*Complete|TestHelperImagePinned' ./internal/... 2>&1 | grep -E '^(=== RUN|--- |PASS|FAIL|ok|\s+[a-z_]+_test\.go)' ; test "${PIPESTATUS[0]}" = 0
+
   build:
     needs: test
     runs-on: ubuntu-latest
@@ -59,7 +85,9 @@ jobs:
       id-token: write   # keyless cosign signing (GitHub OIDC)
     env:
       IMAGE: ghcr.io/${{ github.repository }}
-      PUSH: ${{ github.event_name != 'pull_request' }}
+      # Only pushes (main → edge, v* tags) publish; PRs and dispatched
+      # feature-branch runs just build.
+      PUSH: ${{ github.event_name == 'push' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
