@@ -3,6 +3,7 @@
 package httpapi
 
 import (
+	"net"
 	"net/http"
 	"os"
 	"testing"
@@ -18,6 +19,15 @@ import (
 // request in as "root" (an LLDAP admin) with the proxy secret, and runs
 // until HUB_HARNESS_FOR (a duration, default 30m) has passed.
 func TestHarness(t *testing.T) {
+	addr := os.Getenv("HUB_HARNESS_ADDR")
+	if addr == "" {
+		addr = "127.0.0.1:18888"
+	}
+	// It signs everyone in as an admin: loopback only.
+	host, _, err := net.SplitHostPort(addr)
+	if ip := net.ParseIP(host); err != nil || ip == nil || !ip.IsLoopback() {
+		t.Fatalf("HUB_HARNESS_ADDR %q: the harness signs every request in as an admin and only listens on a loopback IP address (e.g. 127.0.0.1:18888)", addr)
+	}
 	e := newInstEnv(t)
 	h := e.s.Hub
 	// Seed: two extra instances, one enabled, with data; backups, one of
@@ -40,10 +50,6 @@ func TestHarness(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	addr := os.Getenv("HUB_HARNESS_ADDR")
-	if addr == "" {
-		addr = "127.0.0.1:18888"
-	}
 	d, err := time.ParseDuration(os.Getenv("HUB_HARNESS_FOR"))
 	if err != nil {
 		d = 30 * time.Minute

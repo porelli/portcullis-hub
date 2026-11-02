@@ -1814,8 +1814,10 @@
       } else if (inst.default) {
         h += '<p class="settings-empty" style="margin-top:0.5rem">The default instance: its settings, logs and expert mode are in the app\'s card.</p>';
       }
-      h += '</div><div class="inst-section"><h4>Hostnames</h4><div id="inst-hosts-editor"><p class="settings-empty">Loading…</p></div></div>';
+      h += '</div><div class="inst-section"><h4>Last operation</h4><div id="inst-lastop"><p class="settings-empty">Loading…</p></div></div>';
+      h += '<div class="inst-section"><h4>Hostnames</h4><div id="inst-hosts-editor"><p class="settings-empty">Loading…</p></div></div>';
       pane.innerHTML = h;
+      loadInstLastOp(pane.querySelector('#inst-lastop'), inst.id);
       const ed = pane.querySelector('#inst-hosts-editor');
       try {
         const d = await instanceDefaults(inst.template, inst.id, '');
@@ -1831,6 +1833,21 @@
           '<div id="inst-hosts-result"></div>' +
           '<div class="inst-row"><button type="button" class="btn btn-primary btn-sm" data-inst-save-hosts="1"' + (pending ? ' disabled' : '') + '>Save hostnames</button></div>';
       } catch (err) { ed.innerHTML = errorBox(err); }
+    }
+    // The last lifecycle record (restore, delete, hosts, enable, …) and the
+    // newest backup: a long backup / restore / delete whose request was
+    // cut (e.g. by Traefik's read timeout) still completes, and its
+    // outcome shows here and in the backups list.
+    async function loadInstLastOp(box, id) {
+      const [op, backups] = await Promise.all([
+        apiGet('/api/templates/lastop/' + encodeURIComponent(id)).catch(() => null),
+        apiGet('/api/instances/' + encodeURIComponent(id) + '/backups').catch(() => []),
+      ]);
+      let h = op ? renderOpRecord(id, op) : '<p class="settings-empty">No lifecycle operation recorded.</p>';
+      const b = backups && backups[0];
+      h += b ? '<p>Newest backup: <code>' + escapeHtml(b.archive) + '</code> · ' + escapeHtml(b.reason) + ' · ' + escapeHtml(fmtTime(b.created_at)) + ' · ' + escapeHtml(fmtSize(b.size)) + '</p>'
+        : '<p class="settings-empty">No backups yet.</p>';
+      box.innerHTML = h;
     }
     function hostRowsReadOnly(hosts) {
       return Object.keys(hosts || {}).sort().map(r => '<div class="host-row"><label>' + escapeHtml(r) + '</label><input type="text" readonly value="' + escapeHtml(hosts[r]) + '"></div>').join('');

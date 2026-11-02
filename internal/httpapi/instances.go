@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"strings"
 
 	"github.com/portcullis/hub/internal/hub"
 	"github.com/portcullis/hub/internal/templates"
@@ -155,7 +154,13 @@ func (s *Server) handleInstanceHosts(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err, http.StatusBadGateway)
 		return
 	}
-	v, _ := s.Hub.InstanceView(id)
+	v, ok := s.Hub.InstanceView(id)
+	if !ok {
+		// Changed but no longer resolvable (e.g. a concurrent delete):
+		// never a zero-value 200.
+		http.Error(w, "hostnames changed, but instance "+id+" can no longer be listed", http.StatusConflict)
+		return
+	}
 	writeJSON(w, v)
 }
 
@@ -173,7 +178,7 @@ func (s *Server) handleDeleteInstance(w http.ResponseWriter, r *http.Request) {
 	if !decodeStrict(w, r, &b, `{"confirm": "<instance-id>"}`) {
 		return
 	}
-	res, err := s.Hub.DeleteInstance(id, strings.TrimSpace(b.Confirm), actor(r))
+	res, err := s.Hub.DeleteInstance(id, b.Confirm, actor(r))
 	noStore(w)
 	if err != nil {
 		writeErr(w, err, http.StatusBadGateway)

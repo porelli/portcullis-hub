@@ -732,6 +732,9 @@ type fakeGroups struct {
 	actorErr error
 	// createErr, if set, fails creating the named group.
 	createErr func(name string) error
+	// createWarn, if set, creates the group with a warning (purged
+	// leftovers).
+	createWarn func(name string) string
 }
 
 func (g *fakeGroups) ResolveActor(ctx context.Context, actor string) error {
@@ -740,16 +743,21 @@ func (g *fakeGroups) ResolveActor(ctx context.Context, actor string) error {
 	return g.actorErr
 }
 
-func (g *fakeGroups) CreateInstanceGroup(ctx context.Context, actor, name string) ([]string, error) {
+func (g *fakeGroups) CreateInstanceGroup(ctx context.Context, actor, name string) (bool, []string, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.createErr != nil {
 		if err := g.createErr(name); err != nil {
-			return nil, err
+			return false, nil, err
 		}
 	}
 	g.calls = append(g.calls, "+"+name+":"+actor)
-	return nil, nil
+	if g.createWarn != nil {
+		if w := g.createWarn(name); w != "" {
+			return true, []string{w}, nil
+		}
+	}
+	return true, nil, nil
 }
 
 func (g *fakeGroups) DeleteInstanceGroup(ctx context.Context, actor, name string) ([]string, error) {

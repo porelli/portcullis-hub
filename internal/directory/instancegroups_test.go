@@ -3,6 +3,7 @@ package directory_test
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/portcullis/hub/internal/directory"
 )
@@ -26,11 +27,21 @@ func TestInstanceGroups(t *testing.T) {
 			t.Errorf("ResolveActor(%q) accepted", a)
 		}
 	}
-	if w, err := e.svc.CreateInstanceGroup(ctx, "root", "users_grafana-b"); err != nil || len(w) != 0 || !e.ll.HasGroup("users_grafana-b") {
-		t.Fatalf("create: %v %v", w, err)
+	if made, w, err := e.svc.CreateInstanceGroup(ctx, "root", "users_grafana-b"); err != nil || !made || len(w) != 0 || !e.ll.HasGroup("users_grafana-b") {
+		t.Fatalf("create: %v %v %v", made, w, err)
 	}
-	if w, err := e.svc.CreateInstanceGroup(ctx, "root", "users_grafana-b"); err != nil || len(w) != 1 || !strings.Contains(w[0], "already exists") {
-		t.Errorf("create existing: %v %v", w, err)
+	if made, w, err := e.svc.CreateInstanceGroup(ctx, "root", "users_grafana-b"); err != nil || made || len(w) != 1 || !strings.Contains(w[0], "already exists") {
+		t.Errorf("create existing: %v %v %v", made, w, err)
+	}
+	// Purged leftovers are a warning, but the group was created (an undo
+	// must delete it).
+	cfg, _ = store.Load()
+	cfg.Groups["users_grafana-c"] = &directory.GroupConfig{Expiry: map[string]time.Time{"alice": time.Now().Add(time.Hour)}}
+	if err := store.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if made, w, err := e.svc.CreateInstanceGroup(ctx, "root", "users_grafana-c"); err != nil || !made || len(w) != 1 || !strings.Contains(w[0], "purged leftovers") {
+		t.Errorf("create with leftovers: %v %v %v", made, w, err)
 	}
 	e.ll.AddGroup("admin_grafana-b", "alice")
 	if w, err := e.svc.DeleteInstanceGroup(ctx, "root", "admin_grafana-b"); err != nil || len(w) != 0 || e.ll.HasGroup("admin_grafana-b") {

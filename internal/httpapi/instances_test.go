@@ -478,13 +478,13 @@ func TestCreateInstanceRoute(t *testing.T) {
 		msg  string
 	}{
 		{`{"template":"grafana","id":"Bad_ID"}`, 400, "must match"},
-		{`{"template":"grafana","id":"grafana-lab"}`, 409, "already exists"},
+		{`{"template":"grafana","id":"grafana-lab"}`, 409, "instance grafana-lab already exists\n"},
 		{`{"template":"grafana","id":"grafana-x","hosts":{"grafana":"a.b.example.org"}}`, 400, "deeper names need an enrolled domain"},
 		{`{"template":"grafana","id":"grafana-x","hosts":{"grafana":"a.b.team-b.example.net"}}`, 400, "covers one label"},
 		{`{"template":"grafana","id":"grafana-x","hosts":{"grafana":"g.pending.example.net"}}`, 409, "not assignable"},
 		{`{"template":"grafana","id":"grafana-x","extra":1}`, 400, "body must be"},
 	} {
-		if code, b := e.do(t, "root", "POST", "/api/instances", c.body); code != c.code || !strings.Contains(b, c.msg) {
+		if code, b := e.do(t, "root", "POST", "/api/instances", c.body); code != c.code || !strings.Contains(b, c.msg) || (strings.HasSuffix(c.msg, "\n") && b != c.msg) {
 			t.Errorf("%s = %d %s, want %d %q", c.body, code, b, c.code, c.msg)
 		}
 	}
@@ -517,8 +517,16 @@ func TestUpdateHostsRoute(t *testing.T) {
 	if code, _ := e.do(t, "root", "PUT", "/api/instances/nope/hosts", `{"hosts":{"home":"x.example.org"}}`); code != 404 {
 		t.Errorf("unknown = %d", code)
 	}
+	// The default instance (never enabled, not listed before): the answer
+	// is its view, never a zero value.
+	code, b = e.do(t, "root", "PUT", "/api/instances/grafana/hosts", `{"hosts":{"grafana":"dash.example.org"}}`)
+	var v hub.InstanceView
+	json.Unmarshal([]byte(b), &v)
+	if code != 200 || v.ID != "grafana" || !v.Default || v.Template != "grafana" || v.Hosts["grafana"] != "dash.example.org" || v.Project != "portcullis-grafana" {
+		t.Fatalf("default instance = %d %s", code, b)
+	}
 	got := strings.Join(e.auditActions(t, "instance.update"), ",")
-	if got != "instance.update:ok:root:home-b,instance.update:refused:root:home-b,instance.update:refused:root:nope" {
+	if got != "instance.update:ok:root:home-b,instance.update:refused:root:home-b,instance.update:refused:root:nope,instance.update:ok:root:grafana" {
 		t.Errorf("audit = %s", got)
 	}
 }
@@ -527,7 +535,7 @@ func TestDeleteNeedsTypedID(t *testing.T) {
 	e := newInstEnv(t)
 	mustDo(t, e.hub, "root", "POST", "/api/instances", `{"template":"grafana","id":"grafana-team-a"}`, 201)
 	e.engine.addVolume("portcullis_grafana-team-a-grafana-data", "portcullis-grafana-team-a", "grafana-data", map[string]string{"grafana.db": "rows"})
-	for _, body := range []string{`{}`, `{"confirm":""}`, `{"confirm":"grafana"}`, `{"confirm":"GRAFANA-TEAM-A"}`} {
+	for _, body := range []string{`{}`, `{"confirm":""}`, `{"confirm":"grafana"}`, `{"confirm":"GRAFANA-TEAM-A"}`, `{"confirm":" grafana-team-a "}`, `{"confirm":"grafana-team-a\n"}`} {
 		if code, b := e.do(t, "root", "DELETE", "/api/instances/grafana-team-a", body); code != 400 || !strings.Contains(b, "type the instance id") {
 			t.Errorf("%s = %d %s, want 400", body, code, b)
 		}
@@ -612,14 +620,15 @@ func TestBackupRestoreRoutes(t *testing.T) {
 	for _, c := range []struct {
 		path, body string
 		code       int
+		msg        string
 	}{
-		{"/api/instances/grafana-team-a/restore", `{"archive":"../x.tar"}`, 400},
-		{"/api/instances/grafana-team-a/restore", `{"archive":"grafana-lab/20261102T153000Z.tar"}`, 400},
-		{"/api/instances/grafana-team-a/restore", `{"archive":"grafana-team-a/20201102T153000Z.tar"}`, 404},
-		{"/api/instances/restore", `{"archive":"grafana-team-a/20201102T153000Z.tar","id":"grafana-c"}`, 404},
-		{"/api/instances/restore", `{"archive":"` + entry.Archive + `","id":"grafana-team-a"}`, 409},
+		{"/api/instances/grafana-team-a/restore", `{"archive":"../x.tar"}`, 400, ""},
+		{"/api/instances/grafana-team-a/restore", `{"archive":"grafana-lab/20261102T153000Z.tar"}`, 400, ""},
+		{"/api/instances/grafana-team-a/restore", `{"archive":"grafana-team-a/20201102T153000Z.tar"}`, 404, ""},
+		{"/api/instances/restore", `{"archive":"grafana-team-a/20201102T153000Z.tar","id":"grafana-c"}`, 404, ""},
+		{"/api/instances/restore", `{"archive":"` + entry.Archive + `","id":"grafana-team-a"}`, 409, "instance grafana-team-a already exists\n"},
 	} {
-		if code, b := e.do(t, "root", "POST", c.path, c.body); code != c.code {
+		if code, b := e.do(t, "root", "POST", c.path, c.body); code != c.code || (c.msg != "" && b != c.msg) {
 			t.Errorf("%s %s = %d %s, want %d", c.path, c.body, code, b, c.code)
 		}
 	}

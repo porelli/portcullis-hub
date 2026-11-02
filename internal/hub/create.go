@@ -98,13 +98,13 @@ func (h *Hub) CreateInstanceAs(templateID, id string, hosts map[string]string, a
 			res.Warnings = append(res.Warnings, fmt.Sprintf("group %s was not created: users & groups is not available", g))
 			continue
 		}
-		w, err := groupsAPI.CreateInstanceGroup(context.Background(), actor, g)
+		made, w, err := groupsAPI.CreateInstanceGroup(context.Background(), actor, g)
 		res.Warnings = append(res.Warnings, w...)
+		if made {
+			created = append(created, g)
+		}
 		if err != nil {
 			return res, undo(fmt.Errorf("creating group %s: %w", g, err))
-		}
-		if len(w) == 0 {
-			created = append(created, g)
 		}
 	}
 	if v, ok := h.InstanceView(id); ok {
@@ -114,14 +114,28 @@ func (h *Hub) CreateInstanceAs(templateID, id string, hosts map[string]string, a
 	return res, nil
 }
 
-// InstanceView returns one instance as GET /api/instances lists it.
+// InstanceView returns one instance as GET /api/instances lists it. A
+// default instance the list leaves out (never enabled, no state, no op
+// record) is built from its catalog view; false only for an unknown id.
 func (h *Hub) InstanceView(id string) (InstanceView, bool) {
 	for _, v := range h.Instances() {
 		if v.ID == id {
 			return v, true
 		}
 	}
-	return InstanceView{}, false
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	t := h.findLocked(id)
+	if t == nil {
+		return InstanceView{}, false
+	}
+	n := t.NamesFor(t.ID)
+	st := StateDisabled
+	if t.Enabled {
+		st = StateEnabled
+	}
+	return InstanceView{ID: t.ID, Template: t.TemplateID, Default: t.IsDefault(), State: st, Hosts: copyMap(t.Hosts),
+		AccessGroup: n.AccessGroup, AdminGroup: n.AdminGroup, KeycloakClients: append([]string{}, n.Clients...), Project: n.Project}, true
 }
 
 // hostList renders hosts for the audit log: "router=host,…", sorted.

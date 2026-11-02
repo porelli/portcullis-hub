@@ -629,13 +629,13 @@ func (h *Hub) RestoreInstanceAs(archive, newID, actor string) (res *RestoreResul
 			res.Warnings = append(res.Warnings, fmt.Sprintf("group %s was not created: users & groups is not available", g))
 			continue
 		}
-		w, err := groupsAPI.CreateInstanceGroup(context.Background(), actor, g)
+		made, w, err := groupsAPI.CreateInstanceGroup(context.Background(), actor, g)
 		res.Warnings = append(res.Warnings, w...)
+		if made {
+			createdGroups = append(createdGroups, g)
+		}
 		if err != nil {
 			return res, undo(fmt.Errorf("creating group %s: %w", g, err))
-		}
-		if len(w) == 0 {
-			createdGroups = append(createdGroups, g)
 		}
 	}
 

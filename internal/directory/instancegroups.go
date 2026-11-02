@@ -98,25 +98,27 @@ func (s *Service) DeleteInstanceGroup(ctx context.Context, actor, name string) (
 
 // CreateInstanceGroup creates an instance's (empty, manual) group as
 // actor. An existing group is kept as it is, with a warning (its members
-// get access to the instance).
-func (s *Service) CreateInstanceGroup(ctx context.Context, actor, name string) (warnings []string, err error) {
+// get access to the instance). created reports that this call created
+// the group (its warnings, e.g. purged leftovers, don't change that): an
+// undo deletes exactly the groups created.
+func (s *Service) CreateInstanceGroup(ctx context.Context, actor, name string) (created bool, warnings []string, err error) {
 	if name == "" {
-		return nil, nil
+		return false, nil, nil
 	}
 	if aerr := s.LLDAP.Available(); aerr != nil {
-		return []string{fmt.Sprintf("group %s was not created: users & groups is not available (%v)", name, aerr)}, nil
+		return false, []string{fmt.Sprintf("group %s was not created: users & groups is not available (%v)", name, aerr)}, nil
 	}
 	c, err := s.CallerFor(ctx, actor)
 	if err != nil {
-		return nil, err
+		return false, nil, err
 	}
 	res, err := s.CreateGroup(ctx, c, name)
 	var de *Error
 	if errors.As(err, &de) && de.Status == http.StatusConflict && strings.Contains(de.Msg, "already exists") {
-		return []string{fmt.Sprintf("group %s already exists and was kept with its members: they can use the instance", name)}, nil
+		return false, []string{fmt.Sprintf("group %s already exists and was kept with its members: they can use the instance", name)}, nil
 	}
 	if res != nil {
 		warnings = append(warnings, res.Warnings...)
 	}
-	return warnings, err
+	return err == nil, warnings, err
 }

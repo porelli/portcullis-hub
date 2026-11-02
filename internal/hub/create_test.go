@@ -41,7 +41,9 @@ func TestCreateInstanceAsGroups(t *testing.T) {
 	}
 	g.actorErr = nil
 
-	// A failing group: the instance and the groups created so far go again.
+	// A failing group: the instance and the groups created so far go
+	// again — a group created with a warning (purged leftovers) included.
+	g.createWarn = func(name string) string { return "purged leftovers of an earlier group " + name }
 	g.createErr = func(name string) error {
 		if strings.HasPrefix(name, "admin_") {
 			return errors.New("lldap down")
@@ -59,7 +61,7 @@ func TestCreateInstanceAsGroups(t *testing.T) {
 		t.Errorf("groups = %s", got)
 	}
 	// The id is free again.
-	g.createErr = nil
+	g.createErr, g.createWarn = nil, nil
 	if _, err := f.h.CreateInstanceAs("grafana", "grafana-c", nil, "alice"); err != nil {
 		t.Fatal(err)
 	}
@@ -87,5 +89,46 @@ func TestInstanceDomainsAndRouters(t *testing.T) {
 	}
 	if _, _, _, ok := f.h.HostRouters("nope"); ok {
 		t.Error("unknown template")
+	}
+}
+
+// TestRestoreAsUndoesWarnedGroups: a group RestoreInstanceAs created with
+// a warning is still its own: a later failure deletes it again.
+func TestRestoreAsUndoesWarnedGroups(t *testing.T) {
+	f, _, groups := grafanaB(t)
+	entry, err := f.h.BackupInstance("grafana-b", "root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	groups.createWarn = func(name string) string { return "purged leftovers of an earlier group " + name }
+	f.engine.vol().copyToErr = func(string) error { return errors.New("disk full") }
+	_, err = f.h.RestoreInstanceAs(entry.Archive, "grafana-c", "root")
+	if err == nil || !strings.Contains(err.Error(), "removed again") {
+		t.Fatalf("restore = %v", err)
+	}
+	got := strings.Join(groups.Calls(), ",")
+	for _, want := range []string{"-users_grafana-c:root", "-admin_grafana-c:root"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("groups = %s, want %s", got, want)
+		}
+	}
+	if _, ok := f.h.InstanceView("grafana-c"); ok {
+		t.Error("instance kept")
+	}
+}
+
+func TestInstanceViewDefaultFallback(t *testing.T) {
+	f := newInstanceFixture(t, nil)
+	for _, iv := range f.h.Instances() {
+		if iv.ID == "grafana" {
+			t.Fatal("precondition: the never-enabled default instance is not listed")
+		}
+	}
+	v, ok := f.h.InstanceView("grafana")
+	if !ok || !v.Default || v.State != StateDisabled || v.Hosts["grafana"] != "grafana.example.org" || v.AccessGroup != "users_grafana" || v.Project != "portcullis-grafana" {
+		t.Errorf("view = %+v %v", v, ok)
+	}
+	if _, ok := f.h.InstanceView("nope"); ok {
+		t.Error("unknown id")
 	}
 }

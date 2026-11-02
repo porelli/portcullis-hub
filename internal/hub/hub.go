@@ -102,7 +102,7 @@ type IdP interface {
 // before anything changes.
 type Groups interface {
 	ResolveActor(ctx context.Context, actor string) error
-	CreateInstanceGroup(ctx context.Context, actor, name string) ([]string, error)
+	CreateInstanceGroup(ctx context.Context, actor, name string) (created bool, warnings []string, err error)
 	DeleteInstanceGroup(ctx context.Context, actor, name string) ([]string, error)
 }
 
