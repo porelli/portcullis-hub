@@ -35,7 +35,10 @@ type Auth struct {
 	// sign-in without it. For apps that can't restrict sign-in to a group
 	// themselves (or let outsiders create accounts without rights). The Hub
 	// does the same for every native-oidc template with group_access: false
-	// (see Template.AccessRoleEnforced).
+	// (see Template.AccessRoleEnforced; such a template must declare an
+	// access_group). Every client of an enforced app has direct access
+	// grants, implicit flow, service accounts, device/CIBA grants and
+	// standard token exchange switched off: only the browser flow signs in.
 	KeycloakAccessRole bool   `yaml:"keycloak_access_role" json:"keycloak_access_role,omitempty"`
 	Notes              string `yaml:"notes" json:"notes"`
 }

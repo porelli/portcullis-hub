@@ -98,6 +98,11 @@ func ValidateManifest(m *Manifest) error {
 	if a.KeycloakAccessRole && (a.Method != "native-oidc" || a.AccessGroup == "") {
 		return fmt.Errorf("auth.keycloak_access_role needs auth.method native-oidc and auth.access_group")
 	}
+	// The Hub enforces the access group in Keycloak for such apps
+	// (AccessRoleEnforced); without one every realm user could sign in.
+	if a.Method == "native-oidc" && !a.GroupAccess && a.AccessGroup == "" {
+		return fmt.Errorf("auth.method native-oidc with group_access false needs auth.access_group (the Hub restricts sign-in to it in Keycloak)")
+	}
 	for _, c := range m.Clients {
 		if u := c.BackchannelLogoutURL; u != "" && !backchannelRe.MatchString(u) {
 			return fmt.Errorf("client %s: backchannel_logout_url %q must be https://{{HOST_<ROUTER>}}/<path> (or https://<sub>.{{DOMAIN}}/<path>)", c.ClientID, u)

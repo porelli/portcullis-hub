@@ -32,6 +32,8 @@ type Execution struct {
 	FlowID      string
 	Requirement string
 	ConfigID    string
+	// Priority orders a flow's executions (Keycloak sorts by it).
+	Priority int
 }
 
 // AuthConfig is a fake authenticator config.
@@ -146,6 +148,65 @@ func (s *Server) ClientRole(clientID, role string) bool {
 	return c != nil && s.Roles[c.ID][role] != ""
 }
 
+// AddComposite makes the role parent contain the client role
+// clientID.role, as an admin would in the console. parent is a realm role
+// name or "<clientId>.<role>" (split at the last dot).
+func (s *Server) AddComposite(parent, clientID, role string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	pid := s.roleIDLocked(parent)
+	c := s.clientByClientIDLocked(clientID)
+	if pid == "" || c == nil || s.Roles[c.ID][role] == "" {
+		panic("kctest: AddComposite: no such role")
+	}
+	s.Composites[pid] = append(s.Composites[pid], s.Roles[c.ID][role])
+}
+
+// CompositeParents returns the roles (as AddComposite names them) that
+// contain the client role clientID.role (sorted).
+func (s *Server) CompositeParents(clientID, role string) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c := s.clientByClientIDLocked(clientID)
+	if c == nil {
+		return nil
+	}
+	id := s.Roles[c.ID][role]
+	names := map[string]string{}
+	for n, rid := range s.RealmRoles {
+		names[rid] = n
+	}
+	for cid, roles := range s.Roles {
+		for n, rid := range roles {
+			names[rid] = s.Clients[cid].ClientID + "." + n
+		}
+	}
+	var out []string
+	for p, kids := range s.Composites {
+		if contains(kids, id) {
+			out = append(out, names[p])
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// roleIDLocked resolves a realm role name or "<clientId>.<role>".
+func (s *Server) roleIDLocked(ref string) string {
+	if id := s.RealmRoles[ref]; id != "" {
+		return id
+	}
+	i := strings.LastIndex(ref, ".")
+	if i < 0 {
+		return ""
+	}
+	c := s.clientByClientIDLocked(ref[:i])
+	if c == nil {
+		return ""
+	}
+	return s.Roles[c.ID][ref[i+1:]]
+}
+
 // RoleGroups returns the names of the groups the client role is mapped to
 // (sorted).
 func (s *Server) RoleGroups(clientID, role string) []string {
@@ -230,6 +291,37 @@ func (s *Server) FlowProviders(id string) []string {
 	return out
 }
 
+// ExecConfig returns the config of the first execution of provider in
+// the flow tree id (depth-first; nil: none).
+func (s *Server) ExecConfig(id, provider string) map[string]string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var walk func(f *Flow) map[string]string
+	walk = func(f *Flow) map[string]string {
+		for _, e := range f.Execs {
+			if e.FlowID != "" {
+				if sub := s.Flows[e.FlowID]; sub != nil {
+					if c := walk(sub); c != nil {
+						return c
+					}
+				}
+				continue
+			}
+			if e.Provider == provider {
+				if c := s.AuthConfigs[e.ConfigID]; c != nil {
+					return c.Config
+				}
+				return map[string]string{}
+			}
+		}
+		return nil
+	}
+	if f := s.Flows[id]; f != nil {
+		return walk(f)
+	}
+	return nil
+}
+
 // SetRealmBrowserFlow sets the realm's browser flow alias.
 func (s *Server) SetRealmBrowserFlow(alias string) {
 	s.mu.Lock()
@@ -259,7 +351,7 @@ func (s *Server) AddFlow(alias, description string, children ...Node) string {
 
 func (s *Server) addNodesLocked(f *Flow, nodes []Node) {
 	for _, n := range nodes {
-		e := &Execution{ID: s.newID("exec"), Requirement: n.Requirement}
+		e := &Execution{ID: s.newID("exec"), Requirement: n.Requirement, Priority: 10 * (len(f.Execs) + 1)}
 		if n.Alias != "" {
 			sub := &Flow{ID: s.newID("flow"), Alias: n.Alias, ProviderID: "basic-flow"}
 			s.Flows[sub.ID] = sub
@@ -334,16 +426,19 @@ func (s *Server) Login(clientID, username string, sso bool) error {
 	if u == nil {
 		return fmt.Errorf("no user %s", username)
 	}
+	// AuthenticationFlowResolver: the override if that flow exists, else
+	// the realm's browser flow.
 	var flow *Flow
 	if c := s.clientByClientIDLocked(clientID); c != nil && c.AuthenticationFlowBindingOverrides["browser"] != "" {
 		flow = s.Flows[c.AuthenticationFlowBindingOverrides["browser"]]
-	} else {
+	}
+	if flow == nil {
 		flow = s.flowByAlias(s.BrowserFlow)
 	}
 	if flow == nil {
 		return fmt.Errorf("no browser flow")
 	}
-	lc := &loginCtx{user: u, sso: sso}
+	lc := &loginCtx{user: u, sso: sso, top: flow, done: map[string]bool{}}
 	if !s.runFlow(flow, lc, false) {
 		if lc.denied {
 			return ErrDenied
@@ -357,6 +452,8 @@ type loginCtx struct {
 	user   *User
 	sso    bool
 	denied bool
+	top    *Flow
+	done   map[string]bool // execution id → sub-flow finished with SUCCESS
 }
 
 func isCondition(p string) bool { return strings.HasPrefix(p, "conditional-") }
@@ -384,6 +481,7 @@ func (s *Server) runFlow(f *Flow, lc *loginCtx, skipConditions bool) bool {
 				if !s.runFlow(sub, lc, true) {
 					return false
 				}
+				lc.done[e.ID] = true
 				continue
 			}
 			if !s.runExec(e, lc) {
@@ -403,7 +501,9 @@ func (s *Server) runFlow(f *Flow, lc *loginCtx, skipConditions bool) bool {
 func (s *Server) runExec(e *Execution, lc *loginCtx) bool {
 	if e.FlowID != "" {
 		sub := s.Flows[e.FlowID]
-		return sub != nil && s.runFlow(sub, lc, false)
+		ok := sub != nil && s.runFlow(sub, lc, false)
+		lc.done[e.ID] = ok
+		return ok
 	}
 	switch e.Provider {
 	case "auth-cookie":
@@ -435,29 +535,101 @@ func (s *Server) conditionsHold(f *Flow, lc *loginCtx) bool {
 			if !s.userRoleCondition(cfg, lc.user) {
 				return false
 			}
+		case "conditional-sub-flow-executed":
+			if !s.subFlowExecutedCondition(cfg, lc) {
+				return false
+			}
+		default:
+			return false // a condition the fake doesn't model
 		}
 	}
 	return true
 }
 
+// userRoleCondition is Keycloak 26's ConditionalRoleAuthenticator: an
+// unknown role → false, before negate is applied.
 func (s *Server) userRoleCondition(cfg map[string]string, u *User) bool {
-	ref := cfg["condUserRole"]
-	i := strings.LastIndex(ref, ".")
-	if i < 0 {
+	if cfg == nil {
 		return false
 	}
-	c := s.clientByClientIDLocked(ref[:i])
-	role := ref[i+1:]
-	if c == nil || s.Roles[c.ID][role] == "" {
-		return false // Keycloak: unknown role → the condition doesn't hold
+	id := s.roleIDLocked(cfg["condUserRole"])
+	if id == "" {
+		return false
 	}
-	has := contains(u.ClientRoles[c.ID], role)
-	for _, gn := range u.Groups {
-		if g := s.groupByName(gn); g != nil && contains(g.ClientRoles[c.ID], role) {
-			has = true
+	return s.userHasRole(u, id) != (cfg["negate"] == "true")
+}
+
+// userHasRole: the user's client roles, its groups' client roles and
+// default-roles-portcullis, expanded through composites.
+func (s *Server) userHasRole(u *User, id string) bool {
+	var held []string
+	for cid, names := range u.ClientRoles {
+		for _, n := range names {
+			held = append(held, s.Roles[cid][n])
 		}
 	}
-	return has != (cfg["negate"] == "true")
+	for _, gn := range u.Groups {
+		if g := s.groupByName(gn); g != nil {
+			for cid, names := range g.ClientRoles {
+				for _, n := range names {
+					held = append(held, s.Roles[cid][n])
+				}
+			}
+		}
+	}
+	held = append(held, s.RealmRoles["default-roles-portcullis"])
+	seen := map[string]bool{}
+	for len(held) > 0 {
+		r := held[0]
+		held = held[1:]
+		if r == "" || seen[r] {
+			continue
+		}
+		if r == id {
+			return true
+		}
+		seen[r] = true
+		held = append(held, s.Composites[r]...)
+	}
+	return false
+}
+
+// subFlowExecutedCondition is Keycloak 26's
+// ConditionalSubFlowExecutedAuthenticator: flow_to_check looked up by
+// alias, its execution within the top-level flow; check_result
+// "not-executed" holds unless that execution finished with SUCCESS (also
+// when the flow or its execution is missing).
+func (s *Server) subFlowExecutedCondition(cfg map[string]string, lc *loginCtx) bool {
+	if cfg == nil {
+		return false
+	}
+	executed := cfg["check_result"] != "not-executed"
+	f := s.flowByAlias(cfg["flow_to_check"])
+	if f == nil {
+		return !executed
+	}
+	var find func(*Flow) *Execution
+	find = func(p *Flow) *Execution {
+		for _, e := range p.Execs {
+			if e.FlowID == "" {
+				continue
+			}
+			if e.FlowID == f.ID {
+				return e
+			}
+			if sub := s.Flows[e.FlowID]; sub != nil {
+				if x := find(sub); x != nil {
+					return x
+				}
+			}
+		}
+		return nil
+	}
+	e := find(lc.top)
+	if e == nil {
+		return !executed
+	}
+	return executed == lc.done[e.ID]
 }
 
 func contains(list []string, v string) bool {
@@ -520,7 +692,12 @@ func (s *Server) deleteRoleLocked(clientUUID, role string) {
 	if s.Roles[clientUUID][role] == "" {
 		return
 	}
+	id := s.Roles[clientUUID][role]
 	delete(s.Roles[clientUUID], role)
+	delete(s.Composites, id)
+	for p, kids := range s.Composites {
+		s.Composites[p] = without(kids, id)
+	}
 	for _, g := range s.Groups {
 		g.ClientRoles[clientUUID] = without(g.ClientRoles[clientUUID], role)
 	}
@@ -554,6 +731,48 @@ func (s *Server) serveAccess(w http.ResponseWriter, r *http.Request) bool {
 		json.NewEncoder(w).Encode(map[string]interface{}{"realm": "portcullis", "browserFlow": s.BrowserFlow})
 	case strings.HasPrefix(p, realm+"/authentication/"):
 		s.serveAuthentication(w, r, strings.Trim(strings.TrimPrefix(p, realm+"/authentication/"), "/"))
+	case p == realm+"/roles" && r.Method == "GET":
+		out := []map[string]interface{}{}
+		names := make([]string, 0, len(s.RealmRoles))
+		for n := range s.RealmRoles {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		for _, n := range names {
+			id := s.RealmRoles[n]
+			out = append(out, map[string]interface{}{"id": id, "name": n, "composite": len(s.Composites[id]) > 0, "clientRole": false})
+		}
+		json.NewEncoder(w).Encode(out)
+	case strings.HasPrefix(p, realm+"/roles-by-id/"):
+		// GET {id}/composites/clients/{client}; DELETE {id}/composites
+		parts := strings.Split(strings.Trim(strings.TrimPrefix(p, realm+"/roles-by-id/"), "/"), "/")
+		switch {
+		case len(parts) == 4 && parts[1] == "composites" && parts[2] == "clients" && r.Method == "GET":
+			c := s.Clients[parts[3]]
+			if c == nil {
+				http.NotFound(w, r)
+				return true
+			}
+			out := []map[string]interface{}{}
+			for n, id := range s.Roles[c.ID] {
+				if contains(s.Composites[parts[0]], id) {
+					out = append(out, map[string]interface{}{"id": id, "name": n, "clientRole": true, "containerId": c.ID})
+				}
+			}
+			json.NewEncoder(w).Encode(out)
+		case len(parts) == 2 && parts[1] == "composites" && r.Method == "DELETE":
+			var roles []struct{ ID string }
+			if json.NewDecoder(r.Body).Decode(&roles) != nil {
+				w.WriteHeader(400)
+				return true
+			}
+			for _, ro := range roles {
+				s.Composites[parts[0]] = without(s.Composites[parts[0]], ro.ID)
+			}
+			w.WriteHeader(204)
+		default:
+			http.NotFound(w, r)
+		}
 	case strings.HasPrefix(p, realm+"/groups"):
 		s.serveGroups(w, r, strings.Trim(strings.TrimPrefix(p, realm+"/groups"), "/"))
 	case strings.HasPrefix(p, realm+"/user-storage/"):
@@ -605,6 +824,17 @@ func (s *Server) serveClientRoles(w http.ResponseWriter, r *http.Request, parts 
 	}
 	roles := s.Roles[c.ID]
 	switch {
+	case len(parts) == 2 && r.Method == "GET":
+		out := []map[string]interface{}{}
+		names := make([]string, 0, len(roles))
+		for n := range roles {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		for _, n := range names {
+			out = append(out, map[string]interface{}{"id": roles[n], "name": n, "composite": len(s.Composites[roles[n]]) > 0, "clientRole": true, "containerId": c.ID})
+		}
+		json.NewEncoder(w).Encode(out)
 	case len(parts) == 2 && r.Method == "POST":
 		var body struct{ Name, Description string }
 		if json.NewDecoder(r.Body).Decode(&body) != nil || body.Name == "" {
@@ -636,18 +866,39 @@ func (s *Server) serveClientRoles(w http.ResponseWriter, r *http.Request, parts 
 				out = append(out, groupRep(g))
 			}
 		}
-		json.NewEncoder(w).Encode(out)
+		json.NewEncoder(w).Encode(paginate(r, out))
 	case len(parts) == 4 && parts[3] == "users" && r.Method == "GET":
 		out := []map[string]interface{}{}
-		for _, u := range s.Users {
-			if u.ClientRoles != nil && contains(u.ClientRoles[c.ID], parts[2]) {
+		names := make([]string, 0, len(s.Users))
+		for n := range s.Users {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		for _, n := range names {
+			if u := s.Users[n]; u.ClientRoles != nil && contains(u.ClientRoles[c.ID], parts[2]) {
 				out = append(out, rep(u))
 			}
 		}
-		json.NewEncoder(w).Encode(out)
+		json.NewEncoder(w).Encode(paginate(r, out))
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+// paginate applies first/max like Keycloak's role-mapping endpoints
+// (max defaults to 100).
+func paginate(r *http.Request, out []map[string]interface{}) []map[string]interface{} {
+	first, max := 0, 100
+	fmt.Sscan(r.URL.Query().Get("first"), &first)
+	fmt.Sscan(r.URL.Query().Get("max"), &max)
+	if first > len(out) {
+		first = len(out)
+	}
+	out = out[first:]
+	if max >= 0 && max < len(out) {
+		out = out[:max]
+	}
+	return out
 }
 
 func (s *Server) sortedGroups() []*Group {
@@ -701,7 +952,7 @@ func (s *Server) serveGroups(w http.ResponseWriter, r *http.Request, rest string
 
 func (s *Server) execReps(f *Flow, level int, out *[]map[string]interface{}) {
 	for i, e := range f.Execs {
-		m := map[string]interface{}{"id": e.ID, "requirement": e.Requirement, "level": level, "index": i, "authenticationFlow": e.FlowID != ""}
+		m := map[string]interface{}{"id": e.ID, "requirement": e.Requirement, "level": level, "index": i, "priority": e.Priority, "authenticationFlow": e.FlowID != ""}
 		if e.ConfigID != "" {
 			m["authenticationConfig"] = e.ConfigID
 		}
@@ -715,6 +966,23 @@ func (s *Server) execReps(f *Flow, level int, out *[]map[string]interface{}) {
 		m["providerId"], m["displayName"] = e.Provider, e.Provider
 		*out = append(*out, m)
 	}
+}
+
+// nextPriority is Keycloak's getNextPriority: the last execution's + 1.
+func nextPriority(f *Flow) int {
+	if len(f.Execs) == 0 {
+		return 0
+	}
+	return f.Execs[len(f.Execs)-1].Priority + 1
+}
+
+func containsExec(f *Flow, e *Execution) bool {
+	for _, x := range f.Execs {
+		if x == e {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) execByID(id string) *Execution {
@@ -799,14 +1067,21 @@ func (s *Server) serveAuthentication(w http.ResponseWriter, r *http.Request, res
 			s.execReps(f, 0, &out)
 			json.NewEncoder(w).Encode(out)
 		case len(parts) == 3 && r.Method == "PUT":
-			var body struct{ ID, Requirement string }
+			// Keycloak's updateExecutions: requirement and priority (a
+			// representation without one sets 0), then the flow is
+			// re-sorted by priority.
+			var body struct {
+				ID, Requirement string
+				Priority        int
+			}
 			json.NewDecoder(r.Body).Decode(&body)
 			e := s.execByID(body.ID)
-			if e == nil {
+			if e == nil || !containsExec(f, e) {
 				http.NotFound(w, r)
 				return
 			}
-			e.Requirement = body.Requirement
+			e.Requirement, e.Priority = body.Requirement, body.Priority
+			sort.SliceStable(f.Execs, func(i, j int) bool { return f.Execs[i].Priority < f.Execs[j].Priority })
 			w.WriteHeader(204)
 		case len(parts) == 4 && parts[3] == "execution" && r.Method == "POST":
 			var body struct{ Provider string }
@@ -814,7 +1089,7 @@ func (s *Server) serveAuthentication(w http.ResponseWriter, r *http.Request, res
 				w.WriteHeader(400)
 				return
 			}
-			e := &Execution{ID: s.newID("exec"), Provider: body.Provider, Requirement: "DISABLED"}
+			e := &Execution{ID: s.newID("exec"), Provider: body.Provider, Requirement: "DISABLED", Priority: nextPriority(f)}
 			f.Execs = append(f.Execs, e)
 			created(w, r, e.ID)
 		case len(parts) == 4 && parts[3] == "flow" && r.Method == "POST":
@@ -829,7 +1104,7 @@ func (s *Server) serveAuthentication(w http.ResponseWriter, r *http.Request, res
 			}
 			sub := &Flow{ID: s.newID("flow"), Alias: body.Alias, Description: body.Description, ProviderID: body.Type}
 			s.Flows[sub.ID] = sub
-			e := &Execution{ID: s.newID("exec"), FlowID: sub.ID, Requirement: "DISABLED"}
+			e := &Execution{ID: s.newID("exec"), FlowID: sub.ID, Requirement: "DISABLED", Priority: nextPriority(f)}
 			f.Execs = append(f.Execs, e)
 			created(w, r, e.ID)
 		default:

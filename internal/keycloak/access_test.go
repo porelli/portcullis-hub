@@ -3,6 +3,7 @@ package keycloak_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -60,7 +61,8 @@ func TestClientAccessRoleEnforced(t *testing.T) {
 	if cl.DirectAccessGrantsEnabled == nil || *cl.DirectAccessGrantsEnabled || cl.Attributes["oauth2.device.authorization.grant.enabled"] != "false" {
 		t.Errorf("grants that skip the browser flow left on: %+v %v", cl.DirectAccessGrantsEnabled, cl.Attributes)
 	}
-	// Shape: the whole sign-in, then the deny at the top level; the invite
+	// Shape: the whole sign-in, then the positive membership check, then
+	// the deny unless that check succeeded, at the top level; the invite
 	// IdP redirector is not copied.
 	got := strings.Join(kc.FlowProviders(fid), "\n")
 	for _, want := range []string{
@@ -68,13 +70,18 @@ func TestClientAccessRoleEnforced(t *testing.T) {
 		"1:ALTERNATIVE:auth-cookie",
 		"1:ALTERNATIVE:[" + flow.Alias + ".portcullis-step-up]",
 		"3:REQUIRED:[" + flow.Alias + ".portcullis-loa-1-factors]",
-		"0:CONDITIONAL:[" + flow.Alias + ".deny]",
-		"1:REQUIRED:conditional-user-role",
-		"1:REQUIRED:deny-access-authenticator",
+		"0:CONDITIONAL:[" + flow.Alias + ".member]\n1:REQUIRED:conditional-user-role\n1:REQUIRED:allow-access-authenticator\n" +
+			"0:CONDITIONAL:[" + flow.Alias + ".deny]\n1:REQUIRED:conditional-sub-flow-executed\n1:REQUIRED:deny-access-authenticator",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("flow lacks %q:\n%s", want, got)
 		}
+	}
+	if cfg := kc.ExecConfig(fid, "conditional-user-role"); cfg["condUserRole"] != "netbird.access" || cfg["negate"] != "false" {
+		t.Errorf("role condition config = %v", cfg)
+	}
+	if cfg := kc.ExecConfig(fid, "conditional-sub-flow-executed"); cfg["flow_to_check"] != flow.Alias+".member" || cfg["check_result"] != "not-executed" {
+		t.Errorf("sub-flow condition config = %v", cfg)
 	}
 	if strings.Contains(got, "identity-provider-redirector") {
 		t.Errorf("copied the IdP redirector:\n%s", got)
@@ -105,11 +112,25 @@ func TestClientAccessRoleEnforced(t *testing.T) {
 	}
 
 	// Keycloak's user-role condition doesn't hold for a role that doesn't
-	// exist: deleting the role opens the client. The next ensure puts it
-	// back (and RemoveClientAccess unbinds before deleting the role).
+	// exist (even negated): the member check is then skipped and the deny
+	// fires — deleting the role locks everybody out, it opens nothing. The
+	// next ensure puts it back.
 	kc.DeleteClientRole("netbird", keycloak.AccessRole)
-	if err := kc.Login("netbird", "bob", true); err != nil {
-		t.Fatalf("fake: a missing role should not deny (Keycloak's behaviour): %v", err)
+	for _, u := range []string{"alice", "bob"} {
+		if err := kc.Login("netbird", u, true); !errors.Is(err, kctest.ErrDenied) {
+			t.Fatalf("%s with the role deleted: %v, want denied (fail closed)", u, err)
+		}
+	}
+	// The member sub-flow renamed (flow_to_check finds nothing): denied too.
+	kc.With(func() {
+		for _, f := range kc.Flows {
+			if f.Alias == flow.Alias+".member" {
+				f.Alias += "-renamed"
+			}
+		}
+	})
+	if err := kc.Login("netbird", "alice", true); !errors.Is(err, kctest.ErrDenied) {
+		t.Fatalf("alice with the member sub-flow renamed: %v, want denied", err)
 	}
 	if err := c.EnsureClientAccess(ctx, netbirdAccess); err != nil {
 		t.Fatal(err)
@@ -167,7 +188,7 @@ func TestClientAccessIdempotent(t *testing.T) {
 	old := kc.ClientByClientID("netbird").AuthenticationFlowBindingOverrides["browser"]
 	kc.With(func() {
 		for _, cfg := range kc.AuthConfigs {
-			if cfg.Config["loa-condition-level"] == "2" {
+			if cfg.Config["loa-condition-level"] == "2" && !strings.HasPrefix(cfg.Alias, keycloak.AccessFlowPrefix) {
 				cfg.Config["loa-max-age"] = "0"
 			}
 		}
@@ -183,25 +204,192 @@ func TestClientAccessIdempotent(t *testing.T) {
 		t.Errorf("after rebuild flows/configs %d/%d, want %d/%d", kc.FlowCount(), kc.ConfigCount(), flows, configs)
 	}
 
-	// A leftover of an interrupted build (same alias, no completion
-	// marker, never bound) is deleted and built again.
-	alias := kc.FlowByID(cur).Alias
+	// A leftover of an interrupted build (no completion marker, never
+	// bound) is ignored and deleted; so is a complete copy of an older
+	// shape version.
 	if err := c.RemoveClientAccess(ctx, "netbird", "netbird", nil); err != nil {
 		t.Fatal(err)
 	}
-	kc.AddFlow(alias, "half-built", kctest.Node{Requirement: "REQUIRED", Provider: "auth-cookie"})
+	half := kc.AddFlow(keycloak.AccessFlowPrefix+"-netbird-0123456789", "half-built", kctest.Node{Requirement: "REQUIRED", Provider: "auth-cookie"})
+	v1 := kc.AddFlow(keycloak.AccessFlowPrefix+"-netbird-abcdefabcd", "old [complete]", kctest.Node{Requirement: "REQUIRED", Provider: "auth-cookie"})
 	if err := c.EnsureClientAccess(ctx, netbirdAccess); err != nil {
 		t.Fatal(err)
 	}
 	f := kc.FlowByID(kc.ClientByClientID("netbird").AuthenticationFlowBindingOverrides["browser"])
-	if f == nil || f.Alias != alias || !strings.HasSuffix(f.Description, "[complete]") {
-		t.Errorf("rebuilt flow = %+v", f)
+	if f == nil || f.ID == half || f.ID == v1 || !strings.HasSuffix(f.Description, "[complete v2]") || kc.FlowByID(half) != nil || kc.FlowByID(v1) != nil {
+		t.Errorf("rebuilt flow = %+v (half-built left: %v, v1 left: %v)", f, kc.FlowByID(half) != nil, kc.FlowByID(v1) != nil)
 	}
 	if kc.FlowCount() != flows || kc.ConfigCount() != configs {
 		t.Errorf("after an interrupted build flows/configs %d/%d, want %d/%d", kc.FlowCount(), kc.ConfigCount(), flows, configs)
 	}
 	if err := kc.Login("netbird", "bob", true); !errors.Is(err, kctest.ErrDenied) {
 		t.Errorf("bob: %v", err)
+	}
+}
+
+// TestClientAccessCopyRepaired: an edit to the Hub's bound copy is
+// noticed on the next ensure (the copy is compared with what the Hub would
+// build) and replaced by a fresh copy.
+func TestClientAccessCopyRepaired(t *testing.T) {
+	ctx := context.Background()
+	for name, tamper := range map[string]func(kc *kctest.Server, alias string){
+		"deny disabled": func(kc *kctest.Server, alias string) {
+			for _, f := range kc.Flows {
+				if f.Alias == alias {
+					for _, e := range f.Execs {
+						if e.FlowID != "" && kc.Flows[e.FlowID].Alias == alias+".deny" {
+							e.Requirement = "DISABLED"
+						}
+					}
+				}
+			}
+		},
+		"role condition repointed": func(kc *kctest.Server, alias string) {
+			for _, cfg := range kc.AuthConfigs {
+				if cfg.Config["condUserRole"] != "" {
+					cfg.Config["condUserRole"] = "other.access"
+				}
+			}
+		},
+		"deny removed": func(kc *kctest.Server, alias string) {
+			for _, f := range kc.Flows {
+				if f.Alias == alias+".deny" {
+					delete(kc.AuthConfigs, f.Execs[1].ConfigID) // Keycloak deletes an execution's config with it
+					f.Execs = f.Execs[:1]
+				}
+			}
+		},
+		"member sub-flow renamed": func(kc *kctest.Server, alias string) {
+			for _, f := range kc.Flows {
+				if f.Alias == alias+".member" {
+					f.Alias = "x"
+				}
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			kc, c := accessRealm(t)
+			kc.AddClientRole("other", keycloak.AccessRole, "x")
+			kc.GrantClientRole("bob", "other", keycloak.AccessRole)
+			if err := c.EnsureClientAccess(ctx, netbirdAccess); err != nil {
+				t.Fatal(err)
+			}
+			flows, configs := kc.FlowCount(), kc.ConfigCount()
+			old := kc.ClientByClientID("netbird").AuthenticationFlowBindingOverrides["browser"]
+			alias := kc.FlowByID(old).Alias
+			kc.With(func() { tamper(kc, alias) })
+			if err := c.EnsureClientAccess(ctx, netbirdAccess); err != nil {
+				t.Fatal(err)
+			}
+			cur := kc.ClientByClientID("netbird").AuthenticationFlowBindingOverrides["browser"]
+			if cur == old || kc.FlowByID(old) != nil {
+				t.Fatalf("edited copy kept: old %s, bound %s", old, cur)
+			}
+			if err := kc.Login("netbird", "bob", true); !errors.Is(err, kctest.ErrDenied) {
+				t.Errorf("bob: %v, want denied", err)
+			}
+			if err := kc.Login("netbird", "alice", true); err != nil {
+				t.Errorf("alice: %v", err)
+			}
+			if kc.FlowCount() > flows || kc.ConfigCount() > configs {
+				t.Errorf("flows/configs %d/%d, want ≤ %d/%d", kc.FlowCount(), kc.ConfigCount(), flows, configs)
+			}
+		})
+	}
+}
+
+// TestClientAccessForeignGrants: every way to hold the role other than
+// membership of the access group is removed — composites (realm and
+// client roles), other groups and direct grants beyond the first page.
+func TestClientAccessForeignGrants(t *testing.T) {
+	ctx := context.Background()
+	kc, c := accessRealm(t)
+	if err := c.EnsureClientAccess(ctx, netbirdAccess); err != nil {
+		t.Fatal(err)
+	}
+	// default-roles-portcullis (everybody) and a client role bob holds.
+	kc.AddComposite("default-roles-portcullis", "netbird", keycloak.AccessRole)
+	if err := kc.Login("netbird", "bob", true); err != nil {
+		t.Fatalf("fake: a composite should grant the role: %v", err)
+	}
+	kc.AddClientRole("other", "viewer", "x")
+	kc.GrantClientRole("bob", "other", "viewer")
+	kc.AddComposite("other.viewer", "netbird", keycloak.AccessRole)
+	// More than a page of groups and direct grants.
+	for i := 0; i < 130; i++ {
+		g := fmt.Sprintf("g%03d", i)
+		kc.AddGroup(g)
+		u := fmt.Sprintf("u%03d", i)
+		kc.Import(u)
+		kc.GrantClientRole(u, "netbird", keycloak.AccessRole)
+	}
+	nb := kc.ClientByClientID("netbird").ID
+	kc.With(func() {
+		for _, g := range kc.Groups {
+			if strings.HasPrefix(g.Name, "g") {
+				g.ClientRoles[nb] = []string{keycloak.AccessRole}
+			}
+		}
+	})
+	if err := c.EnsureClientAccess(ctx, netbirdAccess); err != nil {
+		t.Fatal(err)
+	}
+	if got := kc.CompositeParents("netbird", keycloak.AccessRole); len(got) != 0 {
+		t.Errorf("composites left: %v", got)
+	}
+	if got := kc.RoleGroups("netbird", keycloak.AccessRole); strings.Join(got, ",") != "users_netbird" {
+		t.Errorf("role groups = %d (%v...)", len(got), got[:min(3, len(got))])
+	}
+	for _, u := range []string{"bob", "u000", "u129"} {
+		if err := kc.Login("netbird", u, true); !errors.Is(err, kctest.ErrDenied) {
+			t.Errorf("%s: %v, want denied", u, err)
+		}
+	}
+	if err := kc.Login("netbird", "alice", true); err != nil {
+		t.Errorf("alice: %v", err)
+	}
+	if err := kc.Login("other", "bob", true); err != nil {
+		t.Errorf("bob on other (its viewer role kept): %v", err)
+	}
+}
+
+// TestClientAccessKeepsOrder: a copy keeps the source's execution order,
+// DISABLED executions included (Keycloak's execution PUT resets the
+// priority unless the representation carries it — gocloak's doesn't).
+func TestClientAccessKeepsOrder(t *testing.T) {
+	ctx := context.Background()
+	kc, c := accessRealm(t)
+	// Keycloak's built-in "browser" flow.
+	kc.AddFlow("browser", "browser based authentication",
+		kctest.Node{Requirement: "ALTERNATIVE", Provider: "auth-cookie"},
+		kctest.Node{Requirement: "DISABLED", Provider: "auth-spnego"},
+		kctest.Node{Requirement: "ALTERNATIVE", Provider: "identity-provider-redirector"},
+		kctest.Node{Requirement: "ALTERNATIVE", Alias: "forms", Children: []kctest.Node{
+			{Requirement: "REQUIRED", Provider: "auth-username-password-form"},
+			{Requirement: "CONDITIONAL", Alias: "Browser - Conditional OTP", Children: []kctest.Node{
+				{Requirement: "REQUIRED", Provider: "conditional-user-configured"},
+				{Requirement: "REQUIRED", Provider: "auth-otp-form"},
+			}},
+		}},
+	)
+	kc.SetRealmBrowserFlow("browser")
+	if err := c.EnsureClientAccess(ctx, netbirdAccess); err != nil {
+		t.Fatal(err)
+	}
+	fid := kc.ClientByClientID("netbird").AuthenticationFlowBindingOverrides["browser"]
+	got := strings.Join(kc.FlowProviders(fid), ",")
+	a := kc.FlowByID(fid).Alias
+	want := "0:REQUIRED:[" + a + ".sign-in],1:ALTERNATIVE:auth-cookie,1:DISABLED:auth-spnego,1:ALTERNATIVE:[" + a + ".forms]," +
+		"2:REQUIRED:auth-username-password-form,2:CONDITIONAL:[" + a + ".Browser - Conditional OTP],3:REQUIRED:conditional-user-configured,3:REQUIRED:auth-otp-form,"
+	if !strings.HasPrefix(got, want) {
+		t.Errorf("copy order:\n%s\nwant prefix\n%s", got, want)
+	}
+	before := mutations(kc)
+	if err := c.EnsureClientAccess(ctx, netbirdAccess); err != nil {
+		t.Fatal(err)
+	}
+	if n := mutations(kc) - before; n != 0 {
+		t.Errorf("second ensure: %d mutating calls", n)
 	}
 }
 

@@ -99,6 +99,14 @@ func TestEnableEnforcesAccessRole(t *testing.T) {
 			t.Errorf("%s on vpn-b before its group exists: %v", u, err)
 		}
 	}
+	// The sync reports no error for the missing group (no quick retry
+	// loop of LDAP group syncs) and the client keeps denying.
+	if err := f.h.SyncClientAccess(ctx); err != nil {
+		t.Fatalf("sync with vpn-b's group missing: %v", err)
+	}
+	if err := kc.Login("vpn-b", "bob", true); !errors.Is(err, kctest.ErrDenied) {
+		t.Errorf("bob on vpn-b before its group exists: %v", err)
+	}
 	// The group is created and bob added: the sync maps it. Team A's
 	// member still can't open team B's instance, and vice versa.
 	kc.AddLDAPGroup("users_vpn-b")

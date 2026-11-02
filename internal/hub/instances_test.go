@@ -840,7 +840,7 @@ func TestMissingTemplateKeepsReservations(t *testing.T) {
 	for id, c := range map[string][2]string{
 		"teamb": {"name: T\nauth:\n  method: forward-auth\n  group_access: true\n  access_group: users_grafana-b\n", "services:\n  s:\n    image: x\n"},
 		"store": {"name: S\ninstances: multi\nauth:\n  method: forward-auth\n", "services:\n  s:\n    image: x\nvolumes:\n  grafana-b-data: {}\n"},
-		"kc":    {"name: K\nauth:\n  method: native-oidc\nkeycloak_clients:\n  - client_id: grafana-b-x\n", "services:\n  s:\n    image: x\n"},
+		"kc":    {"name: K\nauth:\n  method: native-oidc\n  group_access: true\nkeycloak_clients:\n  - client_id: grafana-b-x\n", "services:\n  s:\n    image: x\n"},
 		// The missing default instance's published groups too.
 		"ga":   {"name: G\nauth:\n  method: forward-auth\n  group_access: true\n  access_group: users_grafana\n", "services:\n  s:\n    image: x\n"},
 		"fine": {"name: F\nauth:\n  method: forward-auth\n", "services:\n  s:\n    image: x\n"},

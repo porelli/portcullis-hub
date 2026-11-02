@@ -81,7 +81,11 @@ func (h *Hub) RemoveInstanceAccess(ctx context.Context, t *templates.Template) e
 // its template: the access role set up where AccessRoleEnforced, removed
 // where not (a template that no longer needs it). An instance with a
 // lifecycle operation in progress is skipped this round (reported, so the
-// caller retries). Errors are joined; a missing access group is one.
+// caller retries). Errors are joined. A missing access group is only
+// logged: the client denies everybody meanwhile (fail closed), and the
+// group appearing is a directory change (or the periodic pass) that runs
+// the sync again — it is no reason for the caller's quick retry (an LDAP
+// group sync each time).
 func (h *Hub) SyncClientAccess(ctx context.Context) error {
 	if h.idp == nil {
 		return nil
@@ -121,7 +125,10 @@ func (h *Hub) SyncClientAccess(ctx context.Context) error {
 				} else {
 					err = h.idp.RemoveClientAccess(ctx, c.ClientID, t.ID, instanceHosts(t))
 				}
-				if err != nil {
+				switch {
+				case errors.Is(err, keycloak.ErrGroupNotFound):
+					log.Printf("Warning: instance %s: %v", t.ID, err)
+				case err != nil:
 					errs = append(errs, fmt.Errorf("instance %s: %w", t.ID, err))
 				}
 			}

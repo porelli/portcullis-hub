@@ -134,6 +134,11 @@ type Server struct {
 	// the missing ones into Groups (as Keycloak's READ_ONLY mapper does).
 	LDAPGroups []string
 	roleDesc   map[string]string // role id → description
+	// RealmRoles: realm role name → id. Every user holds
+	// default-roles-portcullis (as in Keycloak).
+	RealmRoles map[string]string
+	// Composites: role id → the ids of the roles it contains.
+	Composites map[string][]string
 }
 
 const (
@@ -146,7 +151,8 @@ func New(t *testing.T) *Server {
 	t.Helper()
 	s := &Server{Users: map[string]*User{}, nextID: 1, Components: map[string]*Component{},
 		Scopes: map[string]*ClientScope{}, Clients: map[string]*Client{},
-		Flows: map[string]*Flow{}, AuthConfigs: map[string]*AuthConfig{}, Groups: map[string]*Group{}, Roles: map[string]map[string]string{}, roleDesc: map[string]string{}}
+		Flows: map[string]*Flow{}, AuthConfigs: map[string]*AuthConfig{}, Groups: map[string]*Group{}, Roles: map[string]map[string]string{}, roleDesc: map[string]string{},
+		RealmRoles: map[string]string{"default-roles-portcullis": "role-default"}, Composites: map[string][]string{}}
 	s.HTTP = httptest.NewServer(http.HandlerFunc(s.serve))
 	t.Cleanup(s.HTTP.Close)
 	return s

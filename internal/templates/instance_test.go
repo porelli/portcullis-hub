@@ -191,7 +191,7 @@ func TestDiscoverInstanceRules(t *testing.T) {
 		"reserved env":     {"name: X\nauth:\n  method: forward-auth\nenv:\n  - key: PORTCULLIS_HOST_X\n", "services:\n  s:\n    image: x\n"},
 		"reserved setting": {"name: X\nauth:\n  method: forward-auth\nsettings:\n  - key: PORTCULLIS_INSTANCE\n", "services:\n  s:\n    image: x\n"},
 		"reserved port":    {"name: X\nauth:\n  method: forward-auth\nports:\n  - key: PORTCULLIS_OIDC_CLIENT_ID_A\n", "services:\n  s:\n    image: x\n"},
-		"client key clash": {"name: X\nauth:\n  method: native-oidc\nkeycloak_clients:\n  - client_id: a-b\n  - client_id: a.b\n", "services:\n  s:\n    image: x\n"},
+		"client key clash": {"name: X\nauth:\n  method: native-oidc\n  group_access: true\nkeycloak_clients:\n  - client_id: a-b\n  - client_id: a.b\n", "services:\n  s:\n    image: x\n"},
 	}
 	for name, c := range cases {
 		dir := t.TempDir()
