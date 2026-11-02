@@ -7,7 +7,10 @@ on:
   pull_request:
     branches: [main]
   # Feature branches (e.g. the cross-repo `instances` branch): tests and an
-  # image build, never a push (PUSH below is true only for push events).
+  # image build, never a push. On main it publishes `edge` like a push: the
+  # Dependabot auto-merge job dispatches it after a merge (a GITHUB_TOKEN
+  # merge starts no push run). Dispatching on main needs write access, the
+  # same trust as pushing to main.
   workflow_dispatch:
 
 permissions: {}
@@ -92,9 +95,10 @@ jobs:
       id-token: write   # keyless cosign signing (GitHub OIDC)
     env:
       IMAGE: ghcr.io/${{ github.repository }}
-      # Only pushes (main → edge, v* tags) publish; PRs and dispatched
+      # Pushes (main → edge, v* tags) and dispatched runs on main (the
+      # auto-merge job, after a Dependabot merge) publish; PRs and dispatched
       # feature-branch runs just build.
-      PUSH: ${{ github.event_name == 'push' }}
+      PUSH: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -142,12 +146,12 @@ jobs:
           annotations: ${{ steps.meta.outputs.annotations }}
           provenance: mode=max
           sbom: true
-          # Layer cache. Only pushes to main write it (mode=max: every stage,
+          # Layer cache. Only main's publishing runs (push, or dispatch on main) write it (mode=max: every stage,
           # both platforms, under one content-addressed scope); PRs and tags
           # only read it. PR-written caches would never be read by main, and
           # tag-ref caches aren't readable from any other ref.
           cache-from: type=gha,scope=image-main
-          cache-to: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') && 'type=gha,scope=image-main,mode=max' || '' }}
+          cache-to: ${{ (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')) && 'type=gha,scope=image-main,mode=max' || '' }}
 
       - name: Install cosign
         if: env.PUSH == 'true'

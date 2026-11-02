@@ -13,9 +13,8 @@ name: Dependabot auto-merge
 # protection or repo auto-merge setting is needed.
 #
 # A merge made with GITHUB_TOKEN starts no push workflows, so `dispatch`
-# re-runs main's tests + image build with workflow_dispatch. That run pushes no
-# image (build.yml pushes on push events only): the `edge` image and the main
-# caches catch up with the next human push to main.
+# re-runs build.yml on main with workflow_dispatch, which tests, publishes
+# `edge` and writes the main layer cache like a push (build.yml PUSH).
 on:
   workflow_run:
     workflows: [Build and Push]
