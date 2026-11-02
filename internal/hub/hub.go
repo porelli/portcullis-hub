@@ -306,10 +306,6 @@ func (h *Hub) Discover() {
 	// A template whose default names (project, volumes, groups, Keycloak
 	// clients) an existing instance of another template already derives
 	// would share them: the instance was there first.
-	byID := map[string]*templates.Template{}
-	for i := range uniq {
-		byID[uniq[i].ID] = &uniq[i]
-	}
 	// Two templates' default instances may not share a volume or a Traefik
 	// name (defaultClaims): enabled ones claim first, then source order.
 	enabled := map[string]bool{}
@@ -317,6 +313,12 @@ func (h *Hub) Discover() {
 		enabled[id] = true
 	}
 	sort.SliceStable(uniq, func(i, j int) bool { return enabled[uniq[i].ID] && !enabled[uniq[j].ID] })
+	// byID points into uniq: build it only after the sort, which moves the
+	// elements (pointers taken before would name the wrong templates).
+	byID := map[string]*templates.Template{}
+	for i := range uniq {
+		byID[uniq[i].ID] = &uniq[i]
+	}
 	claimed := map[string]string{}
 	kept := make([]templates.Template, 0, len(uniq))
 	for _, t := range uniq {
