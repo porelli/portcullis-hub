@@ -66,8 +66,9 @@ func main() {
 		OverrideBindRoots:   os.Getenv("HUB_OVERRIDE_BIND_ROOTS"),
 		// Settings data files (contract §13.7): default
 		// <PROJECT_DIR>/appfiles (core mounts ./appfiles there), bind-mounted
-		// from <PROJECT_HOST_DIR>/appfiles. HUB_APPFILES_DIR moves them;
-		// HUB_APPFILES_HOST_DIR is then the daemon's path (default: the same).
+		// from <PROJECT_HOST_DIR>/appfiles. HUB_APPFILES_DIR moves them and
+		// needs HUB_APPFILES_HOST_DIR (the daemon's path): one without the
+		// other refuses to start.
 		AppFilesDir:     os.Getenv("HUB_APPFILES_DIR"),
 		AppFilesHostDir: os.Getenv("HUB_APPFILES_HOST_DIR"),
 		// Template sources are fast-forwarded at every start (fail-safe:

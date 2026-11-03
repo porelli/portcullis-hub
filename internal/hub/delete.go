@@ -265,15 +265,17 @@ func (h *Hub) deleteSteps(id, actor string, res *DeleteResult) error {
 			return fmt.Errorf("removing %s: %w", p, err)
 		}
 	}
+	// Its settings data files (<appfiles>/<id>/) and delivery record,
+	// under the delivery lock, before the settings store: a run that
+	// started before the delete finishes first (its record would re-create
+	// <data>/settings/<id>/), and later runs see the instance busy.
+	if err := h.forgetDeliveries(id); err != nil {
+		return fmt.Errorf("removing the data files of %s: %w", id, err)
+	}
 	// The settings store (<data>/settings/<id>/: secrets); its values
 	// are in the delete's backup.
 	if err := h.removeSecrets(id); err != nil {
 		return fmt.Errorf("removing the settings store of %s: %w", id, err)
-	}
-	// Its settings data files (<appfiles>/<id>/), under the delivery lock
-	// (a run that started before the delete can't write them again).
-	if err := h.forgetDeliveries(id); err != nil {
-		return fmt.Errorf("removing the data files of %s: %w", id, err)
 	}
 	h.opsMu.Lock()
 	delete(h.ops, id)

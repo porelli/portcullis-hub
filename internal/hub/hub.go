@@ -61,8 +61,8 @@ type Config struct {
 	// §13.7; "" = <ProjectDir>/appfiles, core's ./appfiles mount;
 	// HUB_APPFILES_DIR overrides it). AppFilesHostDir is the same
 	// directory as the Docker daemon sees it, for the override's bind
-	// mounts ("" = <ProjectHostDir>/appfiles, or AppFilesDir when that
-	// was set).
+	// mounts ("" = <ProjectHostDir>/appfiles; the two are set together
+	// or not at all: New refuses one without the other).
 	AppFilesDir     string
 	AppFilesHostDir string
 }
@@ -289,14 +289,14 @@ func New(cfg Config, runner compose.Runner, engine Engine, idp IdP) (*Hub, error
 	if cfg.ReconcileInterval <= 0 {
 		cfg.ReconcileInterval = time.Minute
 	}
-	if cfg.AppFilesDir == "" {
+	switch {
+	case cfg.AppFilesDir == "" && cfg.AppFilesHostDir == "":
 		cfg.AppFilesDir = filepath.Join(cfg.ProjectDir, "appfiles")
-		if cfg.AppFilesHostDir == "" {
-			cfg.AppFilesHostDir = filepath.Join(cfg.ProjectHostDir, "appfiles")
-		}
-	}
-	if cfg.AppFilesHostDir == "" {
-		cfg.AppFilesHostDir = cfg.AppFilesDir
+		cfg.AppFilesHostDir = filepath.Join(cfg.ProjectHostDir, "appfiles")
+	case cfg.AppFilesDir == "" || cfg.AppFilesHostDir == "":
+		// Fail closed: a guessed daemon path would bind-mount a wrong
+		// (Docker-created, root-owned, empty) directory into apps.
+		return nil, fmt.Errorf("HUB_APPFILES_DIR and HUB_APPFILES_HOST_DIR must be set together (the data file directory as the Hub and as the Docker daemon see it); unset both for <PROJECT_DIR>/appfiles")
 	}
 	for _, d := range []string{cfg.DataDir, filepath.Join(cfg.DataDir, "repos"), filepath.Join(cfg.DataDir, "env"), filepath.Join(cfg.DataDir, "overrides"), filepath.Join(cfg.DataDir, "ops")} {
 		if err := os.MkdirAll(d, 0755); err != nil {

@@ -94,6 +94,7 @@ type queuedDelivery struct {
 	trig   Trigger
 	effect string
 	stop   func() bool
+	due    time.Time // when the armed timer fires
 }
 
 // deliverOpts: effect is a save's effect on the running instance (P5:
@@ -147,7 +148,8 @@ func triggerRank(t Trigger) int {
 }
 
 // queueDelivery queues a run of instance id: after delay (an armed timer
-// is kept, so repeated requests within the window make one run), or at
+// is kept, so repeated requests within the window make one run; a
+// shorter delay re-arms it), or at
 // once (delay 0; an armed timer is folded in). Effects and triggers of
 // merged requests combine. Never runs inline: safe under any lock but
 // deliveryMu.
@@ -179,9 +181,18 @@ func (h *Hub) queueDelivery(id string, trig Trigger, effect string, delay time.D
 		h.goBackground(func() { h.runQueued(id, run) })
 		return
 	}
-	if q.stop == nil {
-		q.stop = h.afterFunc(delay, func() { h.fireQueued(id, q) })
+	due := time.Now().Add(delay)
+	switch {
+	case q.stop == nil:
+	case due.Before(q.due) && q.stop():
+		// A shorter delay (a busy retry under a membership debounce):
+		// re-armed, so it never waits for the longer window.
+	default:
+		h.deliveryMu.Unlock()
+		return
 	}
+	q.due = due
+	q.stop = h.afterFunc(delay, func() { h.fireQueued(id, q) })
 	h.deliveryMu.Unlock()
 }
 
@@ -396,14 +407,17 @@ func (h *Hub) deliver(ctx context.Context, id string, trig Trigger, opt deliverO
 	l.Lock()
 	defer l.Unlock()
 	for try := 1; ; try++ {
-		rep, superseded, err := h.deliverOnce(ctx, id, trig, opt)
+		rep, applied, superseded, err := h.deliverOnce(ctx, id, trig, opt)
 		if !superseded || err != nil {
 			return rep, err
 		}
 		if !opt.lifecycle {
 			// A newer commit: its own run follows; this one runs again
-			// (after the lock is released) with its effect.
-			h.queueDelivery(id, trig, opt.effect, 0)
+			// (after the lock is released) with the effects it owed so far
+			// — its own and those of what it already wrote (a written
+			// file is unchanged for the next run, which would otherwise
+			// never apply its on_membership_change).
+			h.queueDelivery(id, trig, applied, 0)
 			return rep, nil
 		}
 		if try >= supersededTries {
@@ -424,15 +438,16 @@ type fileOutput struct {
 }
 
 // deliverOnce is deliver's body; superseded: a newer commit made the run
-// stop before a write.
-func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deliverOpts) (rep *DeliveryReport, superseded bool, err error) {
+// stop before a write, and applied is then the strongest effect the run
+// still owes (its own plus those of the units it already wrote).
+func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deliverOpts) (rep *DeliveryReport, applied string, superseded bool, err error) {
 	rep = &DeliveryReport{Instance: id, Units: []UnitResult{}}
 	now := time.Now().UTC()
 	h.mu.RLock()
 	t := h.findLocked(id)
 	if t == nil {
 		h.mu.RUnlock()
-		return rep, false, nil
+		return rep, "", false, nil
 	}
 	tmpl := *t
 	enabled := h.st.IsEnabled(id)
@@ -445,10 +460,10 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 			// record, a restore's files); run again later.
 			rep.Units = append(rep.Units, UnitResult{Unit: unitBusy, Skipped: SkipBusy, At: now})
 			h.queueDelivery(id, trig, opt.effect, busyRetry)
-			return rep, false, nil
+			return rep, "", false, nil
 		}
 		if !enabled {
-			return rep, false, nil
+			return rep, "", false, nil
 		}
 	}
 
@@ -476,7 +491,7 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 	live := h.findLocked(id)
 	if live == nil {
 		h.mu.RUnlock()
-		return rep, false, nil
+		return rep, "", false, nil
 	}
 	tmpl = *live
 	gen := h.deliveryGenLocked(&tmpl)
@@ -491,7 +506,10 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 	}
 	// current re-checks the generation (under mu: no commit can happen
 	// between the check and the write that follows while mu is held).
-	current := func() bool { return h.deliveryGenLocked(&tmpl) == gen }
+	current := func() bool {
+		live := h.findLocked(id)
+		return live != nil && h.deliveryGenLocked(live) == gen
+	}
 	finish := func() {
 		for _, u := range rep.Units {
 			delivered.Status[u.Unit] = u
@@ -511,7 +529,13 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 		case o.skip != "":
 			if opt.lifecycle && o.people && !fileExists(h.dataFilePath(id, o.file.Name)) {
 				finish()
-				return rep, false, statusErr(503, "data file %s of %s needs the directory and was never delivered: not starting while the directory is unavailable (%s)", o.file.Name, id, h.redactUnitError(id, merr))
+				why := h.redactUnitError(id, merr)
+				h.mu.RLock()
+				if h.people == nil {
+					why = "Users & Groups not configured"
+				}
+				h.mu.RUnlock()
+				return rep, "", false, statusErr(503, "data file %s of %s needs the directory and was never delivered: not starting while the directory is unavailable (%s)", o.file.Name, id, why)
 			}
 			u.Skipped = o.skip
 		case o.err != nil:
@@ -519,7 +543,7 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 			if opt.lifecycle {
 				rep.Units = append(rep.Units, u)
 				finish()
-				return rep, false, statusErr(500, "data file %s of %s: %s", o.file.Name, id, u.Error)
+				return rep, "", false, statusErr(500, "data file %s of %s: %s", o.file.Name, id, u.Error)
 			}
 		case delivered.Hashes[u.Unit] == o.hash && h.fileOnDisk(id, o):
 			u.OK, u.Skipped = true, SkipUnchanged
@@ -529,7 +553,7 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 				h.mu.RUnlock()
 				stale(i)
 				finish()
-				return rep, true, nil
+				return rep, settings.Strongest(effects...), true, nil
 			}
 			werr := h.writeDataFile(id, o)
 			h.mu.RUnlock()
@@ -538,7 +562,7 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 				if opt.lifecycle {
 					rep.Units = append(rep.Units, u)
 					finish()
-					return rep, false, statusErr(500, "data file %s of %s: %s", o.file.Name, id, u.Error)
+					return rep, "", false, statusErr(500, "data file %s of %s: %s", o.file.Name, id, u.Error)
 				}
 				break
 			}
@@ -551,10 +575,11 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 		rep.Units = append(rep.Units, u)
 	}
 
+	h.stage(id, "files")
 	if opt.lifecycle {
 		// TriggerStart: compose up follows; never a reload or restart.
 		finish()
-		return rep, false, nil
+		return rep, "", false, nil
 	}
 
 	// Group records in the env, re-rendered against this run's snapshot
@@ -568,7 +593,7 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 			switch {
 			case stop:
 				finish()
-				return rep, true, nil
+				return rep, settings.Strongest(effects...), true, nil
 			case eerr != nil:
 				u.Error = h.redactUnitError(id, eerr)
 			case changed:
@@ -579,6 +604,7 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 			}
 		}
 		rep.Units = append(rep.Units, u)
+		h.stage(id, "env")
 	}
 
 	// The strongest effect: one reload or one restart per run.
@@ -589,7 +615,7 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 		h.mu.RUnlock()
 		if !ok {
 			finish()
-			return rep, true, nil
+			return rep, settings.Strongest(effects...), true, nil
 		}
 		restartTmpl := tmpl
 		h.goBackground(func() { h.Restart(restartTmpl) })
@@ -598,7 +624,7 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 		rep.Units = append(rep.Units, h.reloadUnit(ctx, &tmpl))
 	}
 	finish()
-	return rep, false, nil
+	return rep, "", false, nil
 }
 
 // membershipEffect is what a data file's on_membership_change does when

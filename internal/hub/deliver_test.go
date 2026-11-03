@@ -647,6 +647,11 @@ func TestStartDeliversFilesBeforeCreate(t *testing.T) {
 	if n := len(g.runner.Creates()); n != 0 {
 		t.Errorf("compose ran %d times", n)
 	}
+	// No directory configured at all: said so.
+	g.h.SetPeople(nil)
+	if err := g.h.Enable(tmID); err == nil || !strings.Contains(err.Error(), "Users & Groups not configured") {
+		t.Errorf("enable without a directory = %v", err)
+	}
 	_ = people
 }
 
@@ -701,5 +706,156 @@ func TestDeliverBusyRequeued(t *testing.T) {
 	f.h.Wait()
 	if got := readDoc(t, f.appFile(tmID, "people")).Values["greeting"]; got != "queued" {
 		t.Errorf("greeting = %v after the re-queued run", got)
+	}
+}
+
+// blockAt makes the first run reaching stage wait until the returned
+// release is called; reached is closed when it arrives.
+func blockAt(f *fixture, stage string) (reached chan struct{}, release func()) {
+	reached = make(chan struct{})
+	rel := make(chan struct{})
+	var once sync.Once
+	f.h.deliverHook = func(id, s string) {
+		if s == stage {
+			once.Do(func() {
+				close(reached)
+				<-rel
+			})
+		}
+	}
+	return reached, func() { close(rel) }
+}
+
+// A membership run superseded after it wrote its file still applies the
+// file's on_membership_change: its re-queued run carries the restart it
+// owed (the file is unchanged by then) — exactly one restart.
+func TestStaleMembershipRunKeepsItsRestart(t *testing.T) {
+	f, people, _ := tmFixture(t)
+	if err := f.h.Enable(tmID); err != nil {
+		t.Fatal(err)
+	}
+	tmConfigure(t, f)
+	f.h.Wait()
+	before := restarts(f)
+	people.addGroup("tm_big", "bob")
+	reached, release := blockAt(f, "files")
+	done := make(chan *DeliveryReport, 1)
+	go func() {
+		rep, _ := f.h.Deliver(context.Background(), tmID, TriggerMembership)
+		done <- rep
+	}()
+	<-reached
+	// A save with no restart of its own commits meanwhile.
+	saved := make(chan error, 1)
+	go func() {
+		_, err := f.h.SaveSettings(tmID, SettingsUpdate{Values: vals("greeting", "meanwhile")}, "admin")
+		saved <- err
+	}()
+	for storedSettings(f, tmID).Values["greeting"] != "meanwhile" {
+		time.Sleep(time.Millisecond)
+	}
+	release()
+	rep := <-done
+	if err := <-saved; err != nil {
+		t.Fatal(err)
+	}
+	f.h.Wait()
+	if _, ok := unit(rep, "restart"); ok {
+		t.Errorf("the superseded run restarted itself: %+v", rep)
+	}
+	if got := readDoc(t, f.appFile(tmID, "people")).People["bob"]["size_limit"]; got != float64(512000) {
+		t.Errorf("bob = %v", got)
+	}
+	if n := restarts(f) - before; n != 1 {
+		t.Errorf("restarts = %d, want exactly 1", n)
+	}
+}
+
+// The same for the env: group records re-rendered (the directory back),
+// then the run superseded before its restart — the re-queued run restarts.
+func TestStaleEnvRefreshKeepsItsRestart(t *testing.T) {
+	f, _, people := privFixture(t)
+	clk := &fakeClock{}
+	f.h.afterFunc, f.h.sleep = clk.afterFunc, clk.sleep
+	if err := f.h.Enable("privapp"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.h.save("privapp", SettingsUpdate{Groups: map[string][]GroupValueInput{"libraries": rows("office_milan", []string{"/lib/a"})}}); err != nil {
+		t.Fatal(err)
+	}
+	f.h.Wait()
+	people.set(func(p *fakePeople) { p.err = errors.New("down") })
+	f.h.RestartApp("privapp")
+	people.set(func(p *fakePeople) { p.err = nil })
+	f.h.Wait()
+	before := len(f.runner.Calls())
+	reached, release := blockAt(f, "env")
+	done := make(chan struct{})
+	go func() {
+		f.h.Deliver(context.Background(), "privapp", TriggerMembership)
+		close(done)
+	}()
+	<-reached
+	// A save whose own effect is none (a claim option) commits meanwhile.
+	saved := make(chan error, 1)
+	go func() {
+		saved <- f.h.save("privapp", SettingsUpdate{Person: map[string]PersonChange{"tier": {Default: raw("pro")}}})
+	}()
+	for storedSettings(f, "privapp").Person["tier"].Default != "pro" {
+		time.Sleep(time.Millisecond)
+	}
+	release()
+	<-done
+	if err := <-saved; err != nil {
+		t.Fatal(err)
+	}
+	f.h.Wait()
+	n := 0
+	for _, c := range f.runner.Calls()[before:] {
+		if c == "down:"+ProjectPrefix+"privapp" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("restarts = %d, want exactly 1 (calls %v)", n, f.runner.Calls()[before:])
+	}
+	if v := readEnvFile(f.h.envPath("privapp"))["PRIVAPP_LIBRARIES"]; !strings.Contains(v, "office_milan") {
+		t.Errorf("env = %q", v)
+	}
+}
+
+// M4: a shorter delay re-arms an armed timer.
+func TestQueueShorterDelayRearms(t *testing.T) {
+	f, _, clk := tmFixture(t)
+	f.h.queueDelivery(tmID, TriggerMembership, settings.EffectNone, settingsDebounce)
+	f.h.queueDelivery(tmID, TriggerSave, settings.EffectReload, busyRetry)
+	ts := clk.pending()
+	if len(ts) != 1 || ts[0].d != busyRetry {
+		t.Fatalf("armed = %+v", ts)
+	}
+	f.h.deliveryMu.Lock()
+	q := f.h.queued[tmID]
+	f.h.deliveryMu.Unlock()
+	if q == nil || q.trig != TriggerSave || q.effect != settings.EffectReload {
+		t.Errorf("merged = %+v", q)
+	}
+	f.h.queueDelivery(tmID, TriggerMembership, settings.EffectNone, settingsDebounce)
+	if ts := clk.pending(); len(ts) != 1 || ts[0].d != busyRetry {
+		t.Errorf("a longer delay re-armed: %+v", ts)
+	}
+}
+
+// M3: the data file directory is given as both paths or neither.
+func TestAppFilesDirsTogether(t *testing.T) {
+	data := t.TempDir()
+	for _, c := range []Config{{AppFilesDir: "/x"}, {AppFilesHostDir: "/y"}} {
+		c.ProjectDir, c.DataDir = t.TempDir(), data
+		if _, err := New(c, newFakeRunner(), &fakeEngine{}, nil); err == nil || !strings.Contains(err.Error(), "HUB_APPFILES_HOST_DIR") {
+			t.Errorf("%+v: err = %v", c, err)
+		}
+	}
+	h, err := New(Config{ProjectDir: "/p", ProjectHostDir: "/hp", DataDir: data}, newFakeRunner(), &fakeEngine{}, nil)
+	if err != nil || h.cfg.AppFilesDir != "/p/appfiles" || h.cfg.AppFilesHostDir != "/hp/appfiles" {
+		t.Errorf("defaults = %q %q (%v)", h.cfg.AppFilesDir, h.cfg.AppFilesHostDir, err)
 	}
 }

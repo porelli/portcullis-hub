@@ -153,10 +153,15 @@ func (h *Hub) buildFilesLocked(t *templates.Template, m *directory.Membership) [
 		}
 		o.data, o.secrets, o.err = h.renderDataFileLocked(t, f.Name, m, people, secrets)
 		if o.err == nil {
+			// The data bytes and whether a secrets file goes with them —
+			// never the secrets (fileOnDisk compares those bytes).
 			sum := sha256.New()
 			sum.Write(o.data)
-			sum.Write([]byte{0})
-			sum.Write(o.secrets)
+			if o.secrets != nil {
+				sum.Write([]byte{1})
+			} else {
+				sum.Write([]byte{0})
+			}
 			o.hash = hex.EncodeToString(sum.Sum(nil))
 		}
 		out = append(out, o)
