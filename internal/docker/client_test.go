@@ -453,3 +453,99 @@ func TestContainerState(t *testing.T) {
 		}
 	}
 }
+
+// ExecStdin: argv as given (never through a shell), the user, stdin
+// attached and delivered byte for byte, then closed (EOF); no TTY.
+func TestExecStdin(t *testing.T) {
+	var body struct {
+		Cmd          []string
+		User         string
+		AttachStdin  bool
+		AttachStdout bool
+		AttachStderr bool
+		Tty          bool
+	}
+	gotStdin := make(chan []byte, 1)
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && r.URL.Path == "/containers/c1/exec":
+			json.NewDecoder(r.Body).Decode(&body)
+			w.WriteHeader(201)
+			fmt.Fprint(w, `{"Id":"e1"}`)
+		case r.Method == "POST" && r.URL.Path == "/exec/e1/start":
+			conn, rw := hijack(t, w, r)
+			if conn == nil {
+				return
+			}
+			in, _ := io.ReadAll(rw) // until the client's CloseWrite
+			gotStdin <- in
+			rw.Write(frame(Stdout, fmt.Sprintf("got %d bytes\n", len(in))))
+			rw.Flush()
+			conn.Close()
+		case r.URL.Path == "/exec/e1/json":
+			fmt.Fprint(w, `{"Running":false,"ExitCode":0}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	stdin := []byte(`{"trigger":"settings_change","secrets":{"token":"a b'c$"}}` + "\n")
+	res, err := c.ExecStdin(context.Background(), "c1", ExecInput{Cmd: []string{"/apply", "--now"}, User: "10001", Stdin: stdin, Timeout: 5 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !body.AttachStdin || !body.AttachStdout || !body.AttachStderr || body.Tty {
+		t.Errorf("create = %+v", body)
+	}
+	if strings.Join(body.Cmd, "|") != "/apply|--now" || body.User != "10001" {
+		t.Errorf("cmd = %q, user = %q", body.Cmd, body.User)
+	}
+	if got := <-gotStdin; !bytes.Equal(got, stdin) {
+		t.Errorf("stdin = %q, want %q", got, stdin)
+	}
+	if res.ExitCode != 0 || res.TimedOut || string(res.Output) != fmt.Sprintf("got %d bytes\n", len(stdin)) || res.ExecID != "e1" {
+		t.Errorf("res = %+v (%q)", res, res.Output)
+	}
+}
+
+// A hook that never exits: TimedOut, and ExecRunning reports it.
+func TestExecStdinTimeout(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/containers/c1/exec":
+			fmt.Fprint(w, `{"Id":"e1"}`)
+		case "/exec/e1/start":
+			conn, rw := hijack(t, w, r)
+			if conn == nil {
+				return
+			}
+			defer conn.Close()
+			closed := make(chan struct{})
+			go func() { io.Copy(io.Discard, rw); close(closed) }()
+			select {
+			case <-release:
+			case <-time.After(10 * time.Second):
+			}
+		case "/exec/e1/json":
+			fmt.Fprint(w, `{"Running":true,"ExitCode":0}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	start := time.Now()
+	res, err := c.ExecStdin(context.Background(), "c1", ExecInput{Cmd: []string{"/apply"}, Stdin: []byte("{}"), Timeout: 300 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.TimedOut || res.ExitCode != -1 || res.ExecID != "e1" {
+		t.Errorf("res = %+v", res)
+	}
+	if time.Since(start) > 5*time.Second {
+		t.Error("timeout not enforced")
+	}
+	running, err := c.ExecRunning(context.Background(), "e1")
+	if err != nil || !running {
+		t.Errorf("ExecRunning = %v, %v", running, err)
+	}
+}

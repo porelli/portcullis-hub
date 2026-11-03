@@ -160,6 +160,68 @@ type fakeEngine struct {
 	kills    []string
 	killHook func(id, signal string)
 	states   map[string]docker.State
+	// ExecStdin (hooks): every call, in order; execStdin (if set) answers
+	// it (called without mu: it may block); execRunning: ExecRunning's
+	// answer per exec id; execInflight / execMaxInflight: overlap.
+	execCalls       []execCall
+	execStdin       func(id string, in docker.ExecInput) (*docker.ExecResult, error)
+	execRunning     map[string]bool
+	execInspects    int
+	execInflight    int
+	execMaxInflight int
+}
+
+type execCall struct {
+	container string
+	in        docker.ExecInput
+}
+
+func (e *fakeEngine) ExecStdin(ctx context.Context, id string, in docker.ExecInput) (*docker.ExecResult, error) {
+	e.mu.Lock()
+	e.execCalls = append(e.execCalls, execCall{container: id, in: in})
+	fn := e.execStdin
+	e.execInflight++
+	if e.execInflight > e.execMaxInflight {
+		e.execMaxInflight = e.execInflight
+	}
+	e.mu.Unlock()
+	defer func() {
+		e.mu.Lock()
+		e.execInflight--
+		e.mu.Unlock()
+	}()
+	if fn != nil {
+		return fn(id, in)
+	}
+	return &docker.ExecResult{Output: []byte("applied\n"), ExecID: "x"}, nil
+}
+
+func (e *fakeEngine) ExecRunning(ctx context.Context, execID string) (bool, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.execInspects++
+	return e.execRunning[execID], nil
+}
+
+func (e *fakeEngine) setExec(fn func(id string, in docker.ExecInput) (*docker.ExecResult, error)) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.execStdin = fn
+}
+
+func (e *fakeEngine) setExecRunning(execID string, running bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.execRunning == nil {
+		e.execRunning = map[string]bool{}
+	}
+	e.execRunning[execID] = running
+}
+
+func (e *fakeEngine) ExecCalls() []execCall {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]execCall(nil), e.execCalls...)
 }
 
 func (e *fakeEngine) ContainerKill(ctx context.Context, id, signal string) error {

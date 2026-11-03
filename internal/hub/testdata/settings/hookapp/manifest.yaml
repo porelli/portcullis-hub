@@ -1,0 +1,45 @@
+name: Hook App Fixture
+category: tools
+instances: multi
+auth:
+  method: header-auth
+  group_access: true
+  access_group: users_hookapp
+  admin_group: admin_hookapp
+urls:
+  - label: Web
+    url: "https://{{HOST_HOOKAPP}}"
+hooks:
+  - {name: apply, service: app, command: [/apply], when: [start, settings_change, membership_change], timeout: 5s}
+  - {name: audit, service: app, user: "10001", command: [/audit, --json], when: [settings_change]}
+reload: {hook: apply}
+settings:
+  options:
+    - key: quota
+      label: Quota
+      type: size
+      step: 1GiB
+      default: 1GiB
+      applies: live
+      delivery:
+        - {hook: apply, render: {unit: GiB, integer: true}}
+        - {hook: audit, render: {unit: GiB, integer: true}}
+    - key: token
+      label: Token
+      type: secret
+      applies: live
+      delivery: [{hook: apply}]
+    - key: motd
+      label: Message of the day
+      type: string
+      max_len: 200
+      applies: reload
+      delivery: [{hook: apply}]
+    - key: seats
+      label: Seats
+      type: int
+      scope: person
+      default: 1
+      resolve: max
+      applies: live
+      delivery: [{hook: apply}]

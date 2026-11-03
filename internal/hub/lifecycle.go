@@ -32,7 +32,12 @@ func (h *Hub) lockApp(id string) (func(), error) {
 	if _, busy := h.appOps.LoadOrStore(id, struct{}{}); busy {
 		return nil, ErrBusy{ID: id}
 	}
-	return func() { h.appOps.Delete(id) }, nil
+	return func() {
+		h.opsMu.Lock()
+		delete(h.startHookFailed, id)
+		h.opsMu.Unlock()
+		h.appOps.Delete(id)
+	}, nil
 }
 
 func (h *Hub) appBusy(id string) bool {
@@ -105,7 +110,13 @@ func (h *Hub) composeUp(t *templates.Template) error {
 	if err := h.compose.Up(context.Background(), h.project(live)); err != nil {
 		return err
 	}
-	return h.checkImageLabels(live)
+	if err := h.checkImageLabels(live); err != nil {
+		return err
+	}
+	// The start hooks (when: start) after the up, under the lifecycle
+	// lock still held: reported and op-recorded, never a rollback.
+	h.runStartHooks(context.Background(), live.ID)
+	return nil
 }
 
 // syncTemplateFiles publishes the template's support files, serialised per

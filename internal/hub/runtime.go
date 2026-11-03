@@ -116,17 +116,7 @@ func (h *Hub) Exec(ctx context.Context, id, service, command string) (*ExecResul
 	if err != nil {
 		return nil, statusErr(502, "docker: %v", err)
 	}
-	var target *docker.Container
-	for i := range cs {
-		c := &cs[i]
-		if c.Service() != service || c.State != "running" {
-			continue
-		}
-		// Prefer replica 1, like `docker compose exec`.
-		if target == nil || c.Labels[docker.LabelNumber] == "1" {
-			target = c
-		}
-	}
+	target := runningContainer(cs, service)
 	if target == nil {
 		return nil, statusErr(409, "service %s has no running container", service)
 	}
@@ -145,6 +135,24 @@ func (h *Hub) Exec(ctx context.Context, id, service, command string) (*ExecResul
 		out += fmt.Sprintf("\n[hub: %v]\n", err)
 	}
 	return &ExecResult{Output: out, ExitCode: res.ExitCode}, nil
+}
+
+// runningContainer is the running container of service among cs (an
+// instance's appContainers: its own project only, no one-off
+// containers), replica 1 preferred like `docker compose exec`; nil: none.
+// Shared by Exec and the settings hooks.
+func runningContainer(cs []docker.Container, service string) *docker.Container {
+	var target *docker.Container
+	for i := range cs {
+		c := &cs[i]
+		if c.Service() != service || c.State != "running" {
+			continue
+		}
+		if target == nil || c.Labels[docker.LabelNumber] == "1" {
+			target = c
+		}
+	}
+	return target
 }
 
 func contains(list []string, s string) bool {

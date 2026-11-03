@@ -1,0 +1,8 @@
+services:
+  app:
+    image: hookapp
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.hookapp.rule: Host(`${PORTCULLIS_HOST_HOOKAPP:-hookapp.portcullis.local}`)
+      traefik.http.routers.hookapp.entrypoints: websecure
+      traefik.http.services.hookapp.loadbalancer.server.port: "8080"

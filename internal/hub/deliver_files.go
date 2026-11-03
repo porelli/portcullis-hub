@@ -186,13 +186,45 @@ func fileHasSecret(t *templates.Template, name string) bool {
 // secrets file (nil when the file carries no secret option). Errors
 // never carry a secret. Caller holds mu (read).
 func (h *Hub) renderDataFileLocked(t *templates.Template, name string, m *directory.Membership, people map[string]map[string]settings.Resolved, secrets map[string]string) (data, secretsDoc []byte, err error) {
-	doc := settings.NewDataFileDoc(t.ID)
+	doc, sec, err := h.renderDocLocked(t, docTarget{
+		deliveries: func(o *templates.Option) []templates.Delivery { return fileDeliveries(o, name) },
+		field:      func(d *templates.Delivery) string { return d.File.Field },
+	}, m, people, secrets)
+	if err != nil {
+		return nil, nil, err
+	}
+	if data, err = json.MarshalIndent(doc, "", "  "); err != nil {
+		return nil, nil, err
+	}
+	data = append(data, '\n')
+	if sec != nil {
+		if secretsDoc, err = json.MarshalIndent(settings.SecretsFileDoc{Version: settings.DataFileVersion, Instance: t.ID, Secrets: sec}, "", "  "); err != nil {
+			return nil, nil, errors.New("the secrets file could not be encoded")
+		}
+		secretsDoc = append(secretsDoc, '\n')
+	}
+	return data, secretsDoc, nil
+}
+
+// docTarget is what a rendered document carries: an option's deliveries
+// into it, and a per-person delivery's field ("" = the option key).
+type docTarget struct {
+	deliveries func(o *templates.Option) []templates.Delivery
+	field      func(d *templates.Delivery) string
+}
+
+// renderDocLocked renders the document (a data file, a hook's stdin) of
+// target: instance values, per-person values of the population, group
+// records matching snapshot m, and the set secret options' values (sec:
+// nil when target carries no secret option). Shared by data files and
+// hooks. Caller holds mu (read).
+func (h *Hub) renderDocLocked(t *templates.Template, target docTarget, m *directory.Membership, people map[string]map[string]settings.Resolved, secrets map[string]string) (doc settings.DataFileDoc, sec map[string]string, err error) {
+	doc = settings.NewDataFileDoc(t.ID)
 	s := h.st.Settings[t.ID]
-	var sec map[string]string
 	opts := t.Manifest.Options()
 	for i := range opts {
 		o := &opts[i]
-		ds := fileDeliveries(o, name)
+		ds := target.deliveries(o)
 		if len(ds) == 0 {
 			continue
 		}
@@ -217,7 +249,7 @@ func (h *Hub) renderDataFileLocked(t *templates.Template, name string, m *direct
 			for _, d := range ds {
 				r, err := settings.RenderDelivery(o, v, &d)
 				if err != nil {
-					return nil, nil, fmt.Errorf("setting %s: %w", o.Key, err)
+					return doc, nil, fmt.Errorf("setting %s: %w", o.Key, err)
 				}
 				doc.Values[o.Key] = r.JSON
 			}
@@ -234,7 +266,7 @@ func (h *Hub) renderDataFileLocked(t *templates.Template, name string, m *direct
 						log.Printf("settings: %s: %s: the value of %s doesn't render (%v): omitted", t.ID, o.Key, user, err)
 						continue
 					}
-					field := d.File.Field
+					field := target.field(&d)
 					if field == "" {
 						field = o.Key
 					}
@@ -254,7 +286,7 @@ func (h *Hub) renderDataFileLocked(t *templates.Template, name string, m *direct
 				for _, r := range recs {
 					rd, err := settings.RenderDelivery(o, r.Value, &d)
 					if err != nil {
-						return nil, nil, fmt.Errorf("setting %s: group %s: %w", o.Key, r.Group, err)
+						return doc, nil, fmt.Errorf("setting %s: group %s: %w", o.Key, r.Group, err)
 					}
 					list = append(list, settings.GroupRecordOut{Group: r.Group, Value: rd.JSON})
 				}
@@ -263,17 +295,7 @@ func (h *Hub) renderDataFileLocked(t *templates.Template, name string, m *direct
 		}
 		// person_entered: the entries section (Task 15A).
 	}
-	if data, err = json.MarshalIndent(doc, "", "  "); err != nil {
-		return nil, nil, err
-	}
-	data = append(data, '\n')
-	if sec != nil {
-		if secretsDoc, err = json.MarshalIndent(settings.SecretsFileDoc{Version: settings.DataFileVersion, Instance: t.ID, Secrets: sec}, "", "  "); err != nil {
-			return nil, nil, errors.New("the secrets file could not be encoded")
-		}
-		secretsDoc = append(secretsDoc, '\n')
-	}
-	return data, secretsDoc, nil
+	return doc, sec, nil
 }
 
 func sortedUsers(p map[string]map[string]settings.Resolved) []string {

@@ -88,6 +88,11 @@ type Engine interface {
 	// ContainerState is its run state and health after the grace period.
 	ContainerKill(ctx context.Context, id, signal string) error
 	ContainerState(ctx context.Context, id string) (docker.State, error)
+	// ExecStdin runs a settings hook (§13.8): argv, stdin written then
+	// closed, no TTY; ExecRunning: a timed-out exec still runs (Docker
+	// can't kill it: the next hook run waits for it).
+	ExecStdin(ctx context.Context, id string, in docker.ExecInput) (*docker.ExecResult, error)
+	ExecRunning(ctx context.Context, execID string) (bool, error)
 }
 
 // IdP manages the OIDC clients templates declare.
@@ -192,6 +197,9 @@ type Hub struct {
 	deliveryStatus map[string]map[string]UnitResult
 	lastTrigger    map[string]Trigger
 	deliverLocks   sync.Map
+	// hookExecs: per instance, a timed-out hook exec that may still run
+	// (deliver_hooks.go; under deliveryMu).
+	hookExecs map[string]string
 	// The engine's clock (test-settable): afterFunc arms a timer (returns
 	// its stop), sleep waits out the reload grace period.
 	afterFunc func(d time.Duration, f func()) (stop func() bool)
@@ -271,6 +279,10 @@ type Hub struct {
 	// hostsOps: each instance's last hostname change (OpHosts), kept
 	// apart from ops (mirrors <data>/ops/<id>.hosts.json).
 	hostsOps map[string]OpRecord
+	// startHookFailed: a start hook failed during the lifecycle operation
+	// holding the instance's lock (composeUp): that operation's success
+	// keeps the hook's failure record (cleared when the lock is released).
+	startHookFailed map[string]bool
 
 	// Directory publishing (SetDirectory). lastExpiring is the expiring
 	// list last written (guarded by policyWriteMu; nil: not yet known).

@@ -18,13 +18,16 @@ import (
 // running", never that the app accepted the change. A failure is the
 // instance's op record (op reload), unless another operation's running
 // record is there (P20). Not running: nothing is sent (the next start
-// reads the files).
+// reads the files). The hook form runs the declared hook with the same
+// stdin and exit-code rules (deliver_hooks.go).
 
 // reloadApplied is a successful signal reload's status text.
 const reloadApplied = "reload signal sent, app still running"
 
-// reloadUnit runs t's reload action.
-func (h *Hub) reloadUnit(ctx context.Context, t *templates.Template) UnitResult {
+// reloadUnit runs t's reload action. The hook form: the hook already ran
+// in this run's hook step (forced there, folded with the hook
+// deliveries); ran has its result.
+func (h *Hub) reloadUnit(ctx context.Context, t *templates.Template, ran map[string]UnitResult) UnitResult {
 	u := UnitResult{Unit: unitReload, At: time.Now().UTC()}
 	r := t.Manifest.Reload
 	switch {
@@ -32,8 +35,16 @@ func (h *Hub) reloadUnit(ctx context.Context, t *templates.Template) UnitResult 
 		u.Skipped = SkipUnsupported
 		return u
 	case r.Hook != "":
-		// The hook form arrives with hooks (Task 10).
-		u.Skipped = SkipUnsupported
+		hu, ok := ran[r.Hook]
+		switch {
+		case !ok:
+			u.Skipped = SkipUnchanged // not run: nothing to reload
+		case hu.OK:
+			u.OK, u.Message = true, "applied by hook "+r.Hook
+		default:
+			// Its failure is the hook's op record already.
+			u.Skipped, u.Error = hu.Skipped, hu.Error
+		}
 		return u
 	case h.engine == nil:
 		u.Skipped = SkipNotRunning

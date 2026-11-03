@@ -2,6 +2,7 @@ package docker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -18,6 +19,18 @@ type ExecResult struct {
 	ExitCode  int // -1 if unknown (timeout / still running)
 	TimedOut  bool
 	Truncated bool
+	// ExecID names the exec instance (ExecRunning: a timed-out process
+	// may still run — Docker can't kill it).
+	ExecID string
+}
+
+// ExecInput is one ExecStdin run: argv (never through a shell), the user
+// to run as ("" = the container's), the stdin bytes and the timeout.
+type ExecInput struct {
+	Cmd     []string
+	User    string
+	Stdin   []byte
+	Timeout time.Duration
 }
 
 // Exec runs cmd in container id (no TTY, no stdin) and returns combined
@@ -26,11 +39,39 @@ type ExecResult struct {
 // container is not killed. Creating and inspecting the exec are each also
 // bounded by requestTimeout (a hung daemon call never waits for timeout).
 func (c *Client) Exec(ctx context.Context, id string, cmd []string, timeout time.Duration) (*ExecResult, error) {
+	return c.exec(ctx, id, client.ExecCreateOptions{AttachStdout: true, AttachStderr: true, Cmd: cmd}, nil, timeout)
+}
+
+// ExecStdin runs in.Cmd in container id as Exec does (no TTY, same output
+// cap and timeout), with stdin attached: in.Stdin is written, then the
+// write side is closed (the process reads EOF).
+func (c *Client) ExecStdin(ctx context.Context, id string, in ExecInput) (*ExecResult, error) {
+	opts := client.ExecCreateOptions{AttachStdin: true, AttachStdout: true, AttachStderr: true, Cmd: in.Cmd, User: in.User}
+	stdin := in.Stdin
+	if stdin == nil {
+		stdin = []byte{}
+	}
+	return c.exec(ctx, id, opts, stdin, in.Timeout)
+}
+
+// ExecRunning reports whether exec instance execID still runs.
+func (c *Client) ExecRunning(ctx context.Context, execID string) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
+	defer cancel()
+	info, err := c.api.ExecInspect(ctx, execID, client.ExecInspectOptions{})
+	if err != nil {
+		return false, fmt.Errorf("exec inspect: %w", err)
+	}
+	return info.Running, nil
+}
+
+// exec is Exec / ExecStdin; stdin nil = not attached.
+func (c *Client) exec(ctx context.Context, id string, opts client.ExecCreateOptions, stdin []byte, timeout time.Duration) (*ExecResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	cctx, ccancel := context.WithTimeout(ctx, requestTimeout)
-	created, err := c.api.ExecCreate(cctx, id, client.ExecCreateOptions{AttachStdout: true, AttachStderr: true, Cmd: cmd})
+	created, err := c.api.ExecCreate(cctx, id, opts)
 	ccancel()
 	if err != nil {
 		return nil, fmt.Errorf("exec create: %w", err)
@@ -41,18 +82,42 @@ func (c *Client) Exec(ctx context.Context, id string, cmd []string, timeout time
 	att, err := c.api.ExecAttach(ctx, created.ID, client.ExecAttachOptions{})
 	if err != nil {
 		if ctx.Err() != nil {
-			return &ExecResult{ExitCode: -1, TimedOut: ctx.Err() == context.DeadlineExceeded}, nil
+			return &ExecResult{ExitCode: -1, TimedOut: ctx.Err() == context.DeadlineExceeded, ExecID: created.ID}, nil
 		}
 		return nil, fmt.Errorf("exec start: %w", err)
 	}
 	// The hijacked connection ignores ctx once set up: close it on expiry.
 	stop := context.AfterFunc(ctx, att.Close)
+	var stdinErr chan error
+	if stdin != nil {
+		cw, ok := att.Conn.(client.CloseWriter)
+		if !ok {
+			stop()
+			att.Close()
+			return &ExecResult{ExitCode: -1, ExecID: created.ID}, errors.New("exec stdin: the connection can't be half-closed")
+		}
+		// Written while the output is read: a process that writes before
+		// it has read everything never blocks the other side.
+		stdinErr = make(chan error, 1)
+		go func() {
+			_, werr := att.Conn.Write(stdin)
+			if cerr := cw.CloseWrite(); werr == nil {
+				werr = cerr
+			}
+			stdinErr <- werr
+		}()
+	}
 	out := &limitedBuffer{max: maxExecOutput}
 	_, streamErr := stdcopy.StdCopy(out, out, att.Reader)
 	stop()
 	att.Close()
+	if stdinErr != nil {
+		// A write error is not the run's error: a process may exit
+		// without reading its stdin; its exit code decides.
+		<-stdinErr
+	}
 
-	res := &ExecResult{Output: out.buf, ExitCode: -1, Truncated: out.truncated}
+	res := &ExecResult{Output: out.buf, ExitCode: -1, Truncated: out.truncated, ExecID: created.ID}
 	if ctx.Err() != nil {
 		res.TimedOut = ctx.Err() == context.DeadlineExceeded
 		return res, nil

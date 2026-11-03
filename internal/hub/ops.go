@@ -28,6 +28,7 @@ const (
 	OpDelete  = "delete"  // guarded delete (a failure leaves it "deleting": retry)
 	OpRestore = "restore" // restore from a backup (a failure puts the pre-restore backup back)
 	OpReload  = "reload"  // a settings delivery's reload signal (deliver_reload.go)
+	OpHook    = "hook"    // a settings hook run (deliver_hooks.go)
 )
 
 // OpRecord is an app's last lifecycle operation, kept in
@@ -155,7 +156,7 @@ func (h *Hub) finishOp(id, op string, err error, rolledBack bool) error {
 	return h.finishOpGuarded(id, op, err, rolledBack, false)
 }
 
-// finishDeliveryOp records a settings delivery's outcome (op reload) as
+// finishDeliveryOp records a settings delivery's outcome (op reload, hook) as
 // finishOp does, except over another operation's running record, which a
 // delivery never replaces (P20).
 func (h *Hub) finishDeliveryOp(id, op string, err error) {
@@ -192,6 +193,15 @@ func (h *Hub) finishOpGuarded(id, op string, err error, rolledBack, keepRunning 
 		}
 		return &OpError{Record: r, Err: err}
 	}
+	if err == nil && op != OpHook && h.startHookFailed[id] {
+		// The operation's compose up succeeded and its start hook failed
+		// after it: the hook's failure stays the record.
+		delete(h.startHookFailed, id)
+		h.opsMu.Unlock()
+		log.Printf("ops: %s %s succeeded; its start hook's failure stays recorded", op, id)
+		return nil
+	}
+	delete(h.startHookFailed, id)
 	h.ops[id] = r
 	if op == OpHosts {
 		h.hostsOps[id] = r

@@ -29,8 +29,8 @@ import (
 //     the desired output of every unit;
 //  3. each unit is compared with <data>/settings/<id>/delivered.json and
 //     what is on disk; unchanged units are skipped;
-//  4. changed units are applied in order — files, (claims, headers,
-//     hooks: later tasks), then the strongest effect: reload or a
+//  4. changed units are applied in order — files, (claims, headers:
+//     later tasks), hooks (deliver_hooks.go), then the strongest effect: reload or a
 //     background Restart (P5: the engine is the only one that reloads or
 //     restarts) — each write after re-checking the generation under mu:
 //     a newer commit makes the run stop ("superseded") and run again;
@@ -310,6 +310,8 @@ func hasPeopleOptions(t *templates.Template) bool {
 type deliveredDoc struct {
 	Hashes map[string]string     `json:"hashes"`
 	Status map[string]UnitResult `json:"status"`
+	// Triggers: the trigger each hook last ran for (a retry sends it).
+	Triggers map[string]string `json:"triggers,omitempty"`
 }
 
 func (h *Hub) deliveredPath(id string) string {
@@ -317,7 +319,7 @@ func (h *Hub) deliveredPath(id string) string {
 }
 
 func (h *Hub) loadDelivered(id string) deliveredDoc {
-	d := deliveredDoc{Hashes: map[string]string{}, Status: map[string]UnitResult{}}
+	d := deliveredDoc{Hashes: map[string]string{}, Status: map[string]UnitResult{}, Triggers: map[string]string{}}
 	if !templates.ValidID(id) {
 		return d
 	}
@@ -327,13 +329,16 @@ func (h *Hub) loadDelivered(id string) deliveredDoc {
 	}
 	if err := json.Unmarshal(b, &d); err != nil {
 		log.Printf("settings: %s: delivered.json unreadable (%v): every unit is delivered again", id, err)
-		return deliveredDoc{Hashes: map[string]string{}, Status: map[string]UnitResult{}}
+		return deliveredDoc{Hashes: map[string]string{}, Status: map[string]UnitResult{}, Triggers: map[string]string{}}
 	}
 	if d.Hashes == nil {
 		d.Hashes = map[string]string{}
 	}
 	if d.Status == nil {
 		d.Status = map[string]UnitResult{}
+	}
+	if d.Triggers == nil {
+		d.Triggers = map[string]string{}
 	}
 	return d
 }
@@ -370,7 +375,8 @@ func (h *Hub) deliveryGenLocked(t *templates.Template) string {
 		Files    []templates.DataFile
 		Options  []templates.Option
 		Reload   *templates.Reload
-	}{h.st.Settings[t.ID], h.st.IsEnabled(t.ID), h.st.SignIn[t.ID], t.Manifest.Files, t.Manifest.Options(), t.Manifest.Reload})
+		Hooks    []templates.Hook
+	}{h.st.Settings[t.ID], h.st.IsEnabled(t.ID), h.st.SignIn[t.ID], t.Manifest.Files, t.Manifest.Options(), t.Manifest.Reload, t.Manifest.Hooks})
 	if err != nil {
 		// Never equal: the run can't prove it is current.
 		return "unmarshalable:" + err.Error() + time.Now().String()
@@ -469,7 +475,7 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 
 	// Outside mu: stale rows first (P8: purged, audited), then the
 	// directory snapshot the units render from.
-	needPeople := filesNeedPeople(&tmpl) || hasGroupEnv(&tmpl)
+	needPeople := filesNeedPeople(&tmpl) || hasGroupEnv(&tmpl) || (!opt.lifecycle && hooksNeedPeople(&tmpl))
 	if hasRows && !opt.lifecycle {
 		for _, w := range h.reconcileGroupRows(ctx, id) {
 			log.Printf("settings: %s: %s", id, w)
@@ -496,6 +502,10 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 	tmpl = *live
 	gen := h.deliveryGenLocked(&tmpl)
 	outs := h.buildFilesLocked(&tmpl, m)
+	var hookOuts []hookOutput
+	if !opt.lifecycle {
+		hookOuts = h.buildHooksLocked(&tmpl, m)
+	}
 	h.mu.RUnlock()
 	h.stage(id, "built")
 
@@ -523,6 +533,7 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 	}
 
 	// Files.
+	membershipHooks := false // a file with on_membership_change: hook changed
 	for i, o := range outs {
 		u := UnitResult{Unit: fileUnit(o.file.Name), At: now}
 		switch {
@@ -570,6 +581,7 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 			delivered.Hashes[u.Unit] = o.hash
 			if trig == TriggerMembership || trig == TriggerRetry {
 				effects = append(effects, membershipEffect(o.file.OnMembershipChange))
+				membershipHooks = membershipHooks || o.file.OnMembershipChange == templates.MembershipHook
 			}
 		}
 		rep.Units = append(rep.Units, u)
@@ -607,28 +619,59 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 		h.stage(id, "env")
 	}
 
+	// Hooks; the reload hook runs once, folded with them.
+	effect := settings.Strongest(effects...)
+	var ran map[string]UnitResult
+	if len(hookOuts) > 0 {
+		step := hookStep{id: id, trig: trig, outs: hookOuts, force: map[string]bool{}, current: current, delivered: &delivered, now: now}
+		if r := tmpl.Manifest.Reload; effect == settings.EffectReload && r != nil && r.Hook != "" {
+			step.force[r.Hook] = true
+		}
+		if membershipHooks {
+			step.forceWhen = templates.HookMembershipChange
+		}
+		units, hran, stop, requeue := h.runHooks(ctx, &tmpl, step)
+		rep.Units = append(rep.Units, units...)
+		ran = hran
+		if stop {
+			finish()
+			return rep, effect, true, nil
+		}
+		if requeue {
+			// A timed-out run still runs: again later (with the reload it
+			// may still owe).
+			again := settings.EffectNone
+			if r := tmpl.Manifest.Reload; effect == settings.EffectReload && r != nil && r.Hook != "" && ran[r.Hook].Skipped == SkipPrevRunning {
+				again = settings.EffectReload
+			}
+			h.queueDelivery(id, trig, again, busyRetry)
+		}
+		h.stage(id, "hooks")
+	}
+
 	// The strongest effect: one reload or one restart per run.
-	switch settings.Strongest(effects...) {
+	switch effect {
 	case settings.EffectRestart:
 		h.mu.RLock()
 		ok := current()
 		h.mu.RUnlock()
 		if !ok {
 			finish()
-			return rep, settings.Strongest(effects...), true, nil
+			return rep, effect, true, nil
 		}
 		restartTmpl := tmpl
 		h.goBackground(func() { h.Restart(restartTmpl) })
 		rep.Units = append(rep.Units, UnitResult{Unit: unitRestart, OK: true, Message: "restart queued", At: now})
 	case settings.EffectReload:
-		rep.Units = append(rep.Units, h.reloadUnit(ctx, &tmpl))
+		rep.Units = append(rep.Units, h.reloadUnit(ctx, &tmpl, ran))
 	}
 	finish()
 	return rep, "", false, nil
 }
 
 // membershipEffect is what a data file's on_membership_change does when
-// a membership delivery changed it (hook: Task 10).
+// a membership delivery changed it (hook: the hooks declaring
+// membership_change run, deliver_hooks.go).
 func membershipEffect(on string) string {
 	switch on {
 	case templates.MembershipRestart:
