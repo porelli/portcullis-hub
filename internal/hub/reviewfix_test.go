@@ -424,3 +424,78 @@ func TestGroupEnvNoHTMLEscape(t *testing.T) {
 		t.Errorf("renderGroupEnv with a double quote = %v, want the JSON escaping named", err)
 	}
 }
+
+// H9: a membership change that removes someone from a group runs the
+// headers unit at once (a demotion never waits out the debounce); the
+// rest of the delivery stays debounced.
+func TestMembershipRemovalRunsHeadersNow(t *testing.T) {
+	f, people, _ := headerFixture(t, nil)
+	headerEnable(t, f)
+	f.h.TriggerMembershipDelivery() // the snapshot removals are judged against
+	f.h.Wait()
+	if got := attrHosts(t, f)[headerMain][hdrSuffix]["carol"]; got != "Editor" {
+		t.Fatalf("carol = %q, want Editor", got)
+	}
+	people.removeMember("editors", "carol")
+	f.h.TriggerMembershipDelivery()
+	f.h.Wait() // the debounce timer is not fired
+	if got := attrHosts(t, f)[headerMain][hdrSuffix]["carol"]; got != "Viewer" {
+		t.Errorf("carol = %q right after her removal, want Viewer (not after the debounce)", got)
+	}
+	if !f.h.DeliveryStatus(headerID).Pending {
+		t.Error("the debounced membership delivery is not queued any more")
+	}
+	// An addition waits for the debounce.
+	people.addGroup("editors", "alice")
+	f.h.TriggerMembershipDelivery()
+	f.h.Wait()
+	if got := attrHosts(t, f)[headerMain][hdrSuffix]["alice"]; got != "Viewer" {
+		t.Errorf("alice = %q before the debounce, want Viewer (only removals run at once)", got)
+	}
+}
+
+// H10: LLDAP answering without a uuid never purges a stored value, and a
+// save is refused (503) rather than stored unbound.
+func TestEmptyUUIDNeitherPurgesNorStores(t *testing.T) {
+	f, people, _, _ := entryFixture(t)
+	mustSetEntry(t, f, entryID, "ext_id", "alice", aliceExt, "alice")
+	settle(f)
+	people.set(func(p *fakePeople) {
+		if p.uuids == nil {
+			p.uuids = map[string]string{}
+		}
+		p.uuids["alice"] = ""
+		p.uuids["bob"] = ""
+	})
+	deliverNow(t, f, entryID, TriggerMembership)
+	if _, ok := storedSettings(f, entryID).Entered["ext_id"]["alice"]; !ok {
+		t.Error("alice's value was purged because LLDAP gave no uuid")
+	}
+	_, err := setEntry(f, entryID, "ext_id", "bob", bobExt, "bob")
+	if statusOf(err) != 503 {
+		t.Errorf("a save without a uuid = %v, want 503", err)
+	}
+	if _, ok := storedSettings(f, entryID).Entered["ext_id"]["bob"]; ok {
+		t.Error("bob's value stored without a uuid")
+	}
+}
+
+// H11: a person-entered value is refused at save when its claim's
+// json_type can't take it, or when its header value holds a ',' (an app
+// splitting list headers would read two values).
+func TestEntryDeliverableClaimAndHeader(t *testing.T) {
+	claim := &templates.Option{Key: "n", Type: templates.TypeInt, Scope: templates.ScopePersonEntered, Delivery: templates.Deliveries{{Claim: &templates.ClaimDelivery{Client: "app", Name: "n", JSONType: "int"}}}}
+	if err := entryDeliverable(claim, int64(9999999999)); err == nil || !strings.Contains(err.Error(), "32-bit") {
+		t.Errorf("an int over 32 bits for a json_type int claim = %v, want refused", err)
+	}
+	if err := entryDeliverable(claim, int64(42)); err != nil {
+		t.Errorf("42 = %v", err)
+	}
+	hdr := &templates.Option{Key: "team", Type: templates.TypeString, Scope: templates.ScopePersonEntered, Delivery: templates.Deliveries{{Header: &templates.HeaderDelivery{Name: "X-Forwarded-Attr-Team"}}}}
+	if err := entryDeliverable(hdr, "x, admins"); err == nil || !strings.Contains(err.Error(), ",") {
+		t.Errorf("a header value with a comma = %v, want refused", err)
+	}
+	if err := entryDeliverable(hdr, "red team"); err != nil {
+		t.Errorf("red team = %v", err)
+	}
+}

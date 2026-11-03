@@ -1739,7 +1739,7 @@ func (s *Service) DeleteGroup(ctx context.Context, c *Caller, name, confirm stri
 	// Only once the LLDAP delete succeeded, outside s.mu (the Hub takes
 	// its own lock: order s.mu → Hub.mu).
 	if deletedID >= 0 && s.GroupDeleted != nil {
-		res.Warnings = append(res.Warnings, s.GroupDeleted(ctx, c.User, name, deletedID)...)
+		res.Warnings = append(res.Warnings, s.GroupDeleted(ctx, strings.ToLower(c.User), name, deletedID)...)
 	}
 	if err != nil {
 		return res, err

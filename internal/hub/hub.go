@@ -203,7 +203,10 @@ type Hub struct {
 	queued         map[string]*queuedDelivery
 	deliveryStatus map[string]map[string]UnitResult
 	lastTrigger    map[string]Trigger
-	deliverLocks   sync.Map
+	// lastMembers: user → groups (expired left out) at the last
+	// TriggerMembershipDelivery, to tell a removal (under deliveryMu).
+	lastMembers  map[string]map[string]bool
+	deliverLocks sync.Map
 	// entryLimit: refused people-entry saves per caller (entries.go);
 	// entryNow its clock (nil: time.Now; tests set it).
 	entryLimit entryLimiter

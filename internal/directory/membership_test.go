@@ -258,7 +258,8 @@ func TestGroupDeletedHook(t *testing.T) {
 	if len(calls) != 0 {
 		t.Fatalf("hook called for a missing group: %+v", calls)
 	}
-	res, err := e.svc.DeleteGroup(ctx, asRoot, "office_milan", "office_milan")
+	// The actor in lowercase (H12), as UserDeleted gets it.
+	res, err := e.svc.DeleteGroup(ctx, &directory.Caller{User: "Root", Admin: true}, "office_milan", "office_milan")
 	if err != nil {
 		t.Fatal(err)
 	}

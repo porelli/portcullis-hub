@@ -506,6 +506,11 @@ func (h *Hub) setEntry(ctx context.Context, instance, key, user string, raw json
 		h.mu.Unlock()
 		return nil, nil, err
 	}
+	if m.UUIDs[user] == "" {
+		// Never stored unbound: a value is the account's (call 32).
+		h.mu.Unlock()
+		return nil, nil, statusErr(503, "Users & Groups gave no account id for %s: try again later", user)
+	}
 	if admin && !o.AdminOverride {
 		h.mu.Unlock()
 		return refuse(statusErr(403, "setting %s: admins can't set this value (the template has no admin_override); an admin can clear it", key), "refused")
@@ -607,8 +612,20 @@ func entryDeliverable(o *templates.Option, v settings.Value) error {
 				return err
 			}
 		case d.Header != nil, d.Claim != nil:
-			if _, err := settings.RenderDelivery(o, v, &d); err != nil {
+			r, err := settings.RenderDelivery(o, v, &d)
+			if err != nil {
 				return err
+			}
+			if d.Claim != nil {
+				// Else renderClaimValues clears it (and the earlier value).
+				if err := claimValueFits(d.Claim.JSONType, r.Text); err != nil {
+					return fmt.Errorf("%s: %w", settings.DeliveryName(&d), err)
+				}
+			}
+			if d.Header != nil && strings.Contains(r.Text, ",") {
+				// One verbatim value: an app splitting list headers would
+				// read two.
+				return fmt.Errorf("%s: the value can't contain ',' (a header value is one item)", settings.DeliveryName(&d))
 			}
 		}
 	}
@@ -772,7 +789,10 @@ func (h *Hub) purgeStaleEntries(ctx context.Context, id string, m *directory.Mem
 	var cands []cand
 	for _, k := range slices.Sorted(maps.Keys(before)) {
 		for _, u := range slices.Sorted(maps.Keys(before[k])) {
-			if e := before[k][u]; m.UUIDs[u] == "" || m.UUIDs[u] != e.UUID {
+			// Gone from LLDAP, or another (non-empty) uuid: an empty one
+			// (LLDAP answering without it) proves nothing.
+			_, exists := m.Users[u]
+			if e := before[k][u]; !exists || m.UUIDs[u] != "" && m.UUIDs[u] != e.UUID {
 				cands = append(cands, cand{k, u})
 			}
 		}

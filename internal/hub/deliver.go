@@ -265,16 +265,97 @@ func (h *Hub) TriggerDelivery(id string, trig Trigger, immediate bool) {
 // whose output changed are applied.
 func (h *Hub) TriggerMembershipDelivery() {
 	h.mu.RLock()
-	var ids []string
+	var ids, hdr []string
 	for _, id := range h.st.Enabled {
 		if t := h.findLocked(id); t != nil && hasPeopleOptions(t) {
 			ids = append(ids, id)
+			if headersNeedPeople(t) {
+				hdr = append(hdr, id)
+			}
 		}
 	}
 	h.mu.RUnlock()
+	// Someone left a group: the headers (no restart, no reload) follow at
+	// once, so a demotion never waits out the debounce.
+	if len(hdr) > 0 {
+		if m := h.membershipRemoval(); m != nil {
+			for _, id := range hdr {
+				h.goBackground(func() { h.deliverHeadersNow(id, m) })
+			}
+		}
+	}
 	for _, id := range ids {
 		h.queueDelivery(id, TriggerMembership, settings.EffectNone, settingsDebounce)
 	}
+}
+
+// membershipRemoval reads the directory and compares it with the
+// previous call's snapshot: the new snapshot when someone left a group
+// (or the directory) since — an expired membership counts as left —,
+// else nil (also with the directory unavailable).
+func (h *Hub) membershipRemoval() *directory.Membership {
+	ctx, cancel := context.WithTimeout(context.Background(), groupSnapshotTimeout)
+	m, err := h.membership(ctx)
+	cancel()
+	if err != nil {
+		return nil
+	}
+	cur := map[string]map[string]bool{}
+	for u, gs := range m.Users {
+		cur[u] = map[string]bool{}
+		for g := range gs {
+			if !m.Expired[u][g] {
+				cur[u][g] = true
+			}
+		}
+	}
+	h.deliveryMu.Lock()
+	prev := h.lastMembers
+	h.lastMembers = cur
+	h.deliveryMu.Unlock()
+	for u, gs := range prev {
+		for g := range gs {
+			if !cur[u][g] {
+				return m
+			}
+		}
+	}
+	return nil
+}
+
+// deliverHeadersNow runs only instance id's headers unit with snapshot
+// m (a removal: TriggerMembershipDelivery), under its delivery lock;
+// the debounced full run follows as usual.
+func (h *Hub) deliverHeadersNow(id string, m *directory.Membership) {
+	l := h.deliverLock(id)
+	l.Lock()
+	defer l.Unlock()
+	now := time.Now().UTC()
+	delivered := h.loadDelivered(id)
+	h.mu.RLock()
+	t := h.findLocked(id)
+	if t == nil || !h.st.IsEnabled(id) || h.pendingLocked(id) != nil {
+		h.mu.RUnlock()
+		return
+	}
+	tmpl := *t
+	gen := h.deliveryGenLocked(&tmpl)
+	_, recorded := delivered.Hashes[unitHeaders]
+	plan := h.buildHeadersLocked(&tmpl, m, recorded)
+	h.mu.RUnlock()
+	if !plan.active {
+		return
+	}
+	current := func() bool {
+		live := h.findLocked(id)
+		return live != nil && h.deliveryGenLocked(live) == gen
+	}
+	u, stop := h.runHeaders(id, plan, current, &delivered, now)
+	if stop {
+		return // a newer commit: its own run follows
+	}
+	recordUnits(id, &delivered, []UnitResult{u})
+	h.saveDelivered(id, delivered)
 }
 
 // RunSettingsDelivery queues membership deliveries every
