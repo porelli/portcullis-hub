@@ -1355,18 +1355,16 @@ func (h *Hub) applyDefaultPolicy() {
 // Env returns an app's .env variables and compose service names. The
 // variables of secret options are shown as [set] (write-only: set them
 // under Settings).
-func (h *Hub) Env(id string) (map[string]string, []string, error) {
-	t := h.Template(id)
-	if t == nil {
-		return nil, nil, ErrNotFound
-	}
-	vars := readEnvFile(h.envPath(id))
-	// Also every variable holding a stored secret's value: a line a
-	// template update left behind (an env variable renamed, an option no
-	// longer secret) is no longer among the current names.
-	secrets, err := h.secretValues(id)
+// secretMask is the predicate Expert Env masks a variable by (and SaveEnv
+// takes [set] back as unchanged by): a non-empty value of a secret
+// option's env name, or of a variable the template doesn't declare
+// (declaredEnvNames, Hub-set names included) holding a stored secret's
+// value — a line a template update left behind (an env variable renamed,
+// an option no longer secret), or an admin's copy of a secret.
+func (h *Hub) secretMask(t *templates.Template) (func(name, value string) bool, error) {
+	secrets, err := h.secretValues(t.ID)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	stored := map[string]bool{}
 	for _, v := range secrets {
@@ -1375,8 +1373,24 @@ func (h *Hub) Env(id string) (map[string]string, []string, error) {
 		}
 	}
 	names := secretOptionEnvNames(t)
+	declared := declaredEnvNames(t)
+	return func(n, v string) bool {
+		return v != "" && (names[n] || stored[v] && !declared[n] && !templates.ReservedVar(n))
+	}, nil
+}
+
+func (h *Hub) Env(id string) (map[string]string, []string, error) {
+	t := h.Template(id)
+	if t == nil {
+		return nil, nil, ErrNotFound
+	}
+	vars := readEnvFile(h.envPath(id))
+	masked, err := h.secretMask(t)
+	if err != nil {
+		return nil, nil, err
+	}
 	for n, v := range vars {
-		if v != "" && (names[n] || stored[v]) {
+		if masked(n, v) {
 			vars[n] = settings.SecretShown
 		}
 	}
@@ -1395,7 +1409,10 @@ func (h *Hub) SaveEnv(id string, vars map[string]string) error {
 		return ErrNotFound
 	}
 	owners := optionEnvOwners(t)
-	secretNames := secretOptionEnvNames(t)
+	masked, err := h.secretMask(t)
+	if err != nil {
+		return err
+	}
 	// The read-modify-write under mu, as every other .env writer's.
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -1409,14 +1426,14 @@ func (h *Hub) SaveEnv(id string, vars map[string]string) error {
 		if !templates.EnvKeyRe.MatchString(k) || templates.HasControlChars(v) {
 			return statusErr(400, "invalid variable %q (keys: [A-Za-z_][A-Za-z0-9_]*, values: no newlines)", k)
 		}
+		if v == cur[k] || (v == settings.SecretShown && masked(k, cur[k])) {
+			continue // posted back unchanged (a masked value as Env showed it)
+		}
 		o, owned := owners[k]
 		hubSet := templates.ReservedVar(k) || k == "PORTCULLIS_DOMAIN"
 		if !owned && !hubSet {
 			write[k] = v
 			continue
-		}
-		if v == cur[k] || (secretNames[k] && cur[k] != "" && v == settings.SecretShown) {
-			continue // posted back unchanged
 		}
 		// Routing, hostnames and names come from the Hub, never the env.
 		if hubSet {

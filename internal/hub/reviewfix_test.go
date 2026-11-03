@@ -860,3 +860,45 @@ func TestRetryNeverBlocksOnDeliveryLock(t *testing.T) {
 		t.Error("the queued retry did not run once the lock was free")
 	}
 }
+
+// ── Residual pass ──
+
+// Residual I1: the Expert round trip of a variable masked by value: an
+// undeclared copy of a secret (MY_COPY=1000) posted back as [set] stays
+// as it is; a Hub-set variable whose value collides with a secret is not
+// masked (declared), so posting it back is no 400.
+func TestExpertEnvRoundTripWithSecretValues(t *testing.T) {
+	f, _ := secretFixture(t)
+	const id = "secretapp"
+	if err := f.h.Enable(id); err != nil {
+		t.Fatal(err)
+	}
+	f.h.Wait()
+	group := composeReads(t, f.h.envPath(id))["PORTCULLIS_ACCESS_GROUP"]
+	if group == "" {
+		t.Fatal("no PORTCULLIS_ACCESS_GROUP in the .env")
+	}
+	saveSecret(t, f, id, "api_key", setSecret("1000"))
+	saveSecret(t, f, id, "token", setSecret(group))
+	if err := f.h.SaveEnv(id, map[string]string{"MY_COPY": "1000"}); err != nil {
+		t.Fatal(err)
+	}
+	vars, _, err := f.h.Env(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if vars["MY_COPY"] != settings.SecretShown {
+		t.Errorf("MY_COPY shown as %q, want masked", vars["MY_COPY"])
+	}
+	if vars["PORTCULLIS_ACCESS_GROUP"] != group {
+		t.Errorf("PORTCULLIS_ACCESS_GROUP shown as %q, want %q (declared: not masked)", vars["PORTCULLIS_ACCESS_GROUP"], group)
+	}
+	// The UI posts every variable back.
+	if err := f.h.SaveEnv(id, vars); err != nil {
+		t.Fatalf("posting Env back = %v", err)
+	}
+	got := composeReads(t, f.h.envPath(id))
+	if got["MY_COPY"] != "1000" || got["PORTCULLIS_ACCESS_GROUP"] != group {
+		t.Errorf("after the round trip MY_COPY=%q PORTCULLIS_ACCESS_GROUP=%q", got["MY_COPY"], got["PORTCULLIS_ACCESS_GROUP"])
+	}
+}

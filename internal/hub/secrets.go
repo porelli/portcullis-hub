@@ -376,7 +376,7 @@ func blankEnvNamesExcept(data []byte, names map[string]bool, secrets map[string]
 		}
 	}
 	for k, v := range parseEnv(data) {
-		if stored[v] && !declared[k] {
+		if stored[v] && !declared[k] && !(declared != nil && templates.ReservedVar(k)) {
 			names[k] = true
 		}
 	}
