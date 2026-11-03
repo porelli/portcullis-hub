@@ -294,6 +294,8 @@
     h += optionsHtml(st);
     h += portsHtml(st);
     h += '<div class="ps-bar" data-ps-bar>' + barHtml() + '</div>';
+    // One group list per panel, for the free-text group editors.
+    if ((p.directory_groups || []).length) h += '<datalist id="ps-groups-' + esc(st.id) + '">' + p.directory_groups.map(g => '<option value="' + esc(g) + '">').join('') + '</datalist>';
     h += '</form>';
     st.el.innerHTML = h;
     st.accessBase = accessParts(st);
@@ -374,10 +376,45 @@
     return h;
   }
 
+  // redrawOption rebuilds one option's markup. A typed secret value is
+  // never put into markup: redrawing a secret option with one drops it
+  // from the draft too, so the (empty) input and the draft agree.
   function redrawOption(st, key) {
     const box = st.el.querySelector('[data-opt="' + CSS.escape(key) + '"]');
     const o = st.opts[key];
-    if (box && o) box.innerHTML = optionInner(st, o, scopeOf(o));
+    if (!box || !o) return;
+    if (o.type === 'secret' && st.secrets[key] && 'value' in st.secrets[key]) delete st.secrets[key];
+    box.innerHTML = optionInner(st, o, scopeOf(o));
+  }
+
+  // refocus focuses the first of selectors that matches an enabled
+  // control in the panel (after a redraw replaced the focused one).
+  function refocus(st, ...selectors) {
+    for (const sel of selectors) {
+      const x = st.el.querySelector(sel);
+      if (x && !x.disabled) { x.focus(); return; }
+    }
+  }
+
+  // setRowError shows (msg) or clears (null) a row's error in place.
+  function setRowError(st, key, uid, msg) {
+    const k = key + '\u0000' + uid;
+    if (msg) st.rowErrors[k] = msg; else delete st.rowErrors[k];
+    const li = st.el.querySelector('[data-row][data-key="' + CSS.escape(key) + '"][data-uid="' + CSS.escape(uid) + '"]');
+    if (!li) return;
+    let n = li.querySelector(':scope > .ps-row-err');
+    if (!msg) { if (n) n.remove(); return; }
+    if (!n) { n = document.createElement('div'); n.className = 'ps-err ps-row-err'; li.appendChild(n); }
+    n.textContent = String(msg);
+  }
+
+  // setOptionError shows or clears an option's error in place.
+  function setOptionError(st, key, msg) {
+    if (msg) st.errors[key] = msg; else delete st.errors[key];
+    const n = st.el.querySelector('[data-err-for="' + CSS.escape(key) + '"]');
+    if (!n) return;
+    n.textContent = msg ? String(msg) : '';
+    n.hidden = !msg;
   }
 
   // ── editors ────────────────────────────────────────────────────────
@@ -444,7 +481,6 @@
         const ml = typeof o.max_len === 'number' ? ' maxlength="' + esc(o.max_len) + '"' : '';
         const list = o.type === 'group' && (st.panel.directory_groups || []).length ? ' list="ps-groups-' + esc(st.id) + '"' : '';
         h += '<input type="text" data-part="text" spellcheck="false" value="' + esc(v === null || v === undefined ? '' : v) + '"' + ph + ml + list + lbl + '>';
-        if (list) h += '<datalist id="ps-groups-' + esc(st.id) + '">' + st.panel.directory_groups.map(g => '<option value="' + esc(g) + '">').join('') + '</datalist>';
       }
     }
     return h + '</span>';
@@ -709,7 +745,7 @@
     if (!op) return '<div class="ps-hint">' + (st.previewError ? 'No preview: fix the error above.' : 'Loading the preview…') + '</div>';
     const w = st.who[o.key];
     const q = w.q.trim().toLowerCase();
-    const people = q ? op.people.filter(p => p.user.includes(q) || personValue(p).toLowerCase().includes(q) || reasonText(o, p).toLowerCase().includes(q)) : op.people;
+    const people = q ? op.people.filter(p => p.user.toLowerCase().includes(q) || personValue(p).toLowerCase().includes(q) || reasonText(o, p).toLowerCase().includes(q)) : op.people;
     const pages = Math.max(1, Math.ceil(people.length / PAGE));
     if (w.page >= pages) w.page = pages - 1;
     let h = '';
@@ -900,9 +936,16 @@
 
   // ── errors from the server ─────────────────────────────────────────
 
+  // clearServerErrors drops the Hub's refusals, clearing their nodes in
+  // place (no option is redrawn: focus, caret and typed secrets stay).
   function clearServerErrors(st) {
-    for (const k of Object.keys(st.errors)) if (st.errors[k] && st.errors[k].server) delete st.errors[k];
-    for (const k of Object.keys(st.rowErrors)) if (st.rowErrors[k] && st.rowErrors[k].server) delete st.rowErrors[k];
+    for (const k of Object.keys(st.errors)) if (st.errors[k] && st.errors[k].server) setOptionError(st, k, null);
+    for (const k of Object.keys(st.rowErrors)) {
+      if (st.rowErrors[k] && st.rowErrors[k].server) {
+        const [key, uid] = k.split('\u0000');
+        setRowError(st, key, uid, null);
+      }
+    }
     st.barError = '';
   }
 
@@ -917,9 +960,9 @@
       const g = /^group (\S+?)[:,]? /.exec(m[2]) || /group (\S+?) (?:was|is|has)/.exec(m[2]);
       const rows = st.person[key] ? st.person[key].rows : st.groups[key];
       const row = g && rows ? rows.find(r => r.group.toLowerCase() === g[1].toLowerCase()) : null;
-      if (row) st.rowErrors[key + '\u0000' + row.uid] = Object.assign(new String(msg), { server: true });
-      else st.errors[key] = Object.assign(new String(msg), { server: true });
-      redrawOption(st, key);
+      const e = Object.assign(new String(msg), { server: true });
+      if (row) setRowError(st, key, row.uid, e);
+      else setOptionError(st, key, e);
       st.barError = err.status === 409 ? 'Refused (409): see ' + (st.opts[key].label || key) + '.' : 'See ' + (st.opts[key].label || key) + '.';
       return;
     }
@@ -945,12 +988,10 @@
     try {
       const p = await window.apiPost('/api/instances/' + encodeURIComponent(st.id) + '/settings/preview', b);
       if (seq !== st.previewSeq || states.get(st.el) !== st) return;
-      const hadServerErrors = Object.values(st.errors).some(e => e.server) || Object.values(st.rowErrors).some(e => e.server);
       clearServerErrors(st);
       st.preview = p;
       st.previewFor = key;
       st.previewError = '';
-      if (hadServerErrors) for (const k in st.opts) redrawOption(st, k);
       redrawWho(st);
     } catch (err) {
       if (seq !== st.previewSeq || states.get(st.el) !== st) return;
@@ -1108,10 +1149,16 @@
       }
       if (t.matches('[data-row-group]')) {
         if (e.type !== 'change' && t.tagName === 'SELECT') return;
-        const row = rowList(st, t.dataset.key).find(r => r.uid === t.dataset.uid);
+        const key = t.dataset.key, uid = t.dataset.uid;
+        const row = rowList(st, key).find(r => r.uid === uid);
         if (row) row.group = t.value.trim();
-        delete st.rowErrors[t.dataset.key + '\u0000' + t.dataset.uid];
-        if (t.tagName === 'SELECT') redrawOption(st, t.dataset.key);
+        if (t.tagName === 'SELECT') {
+          delete st.rowErrors[key + '\u0000' + uid];
+          redrawOption(st, key);
+          refocus(st, '[data-row-group][data-uid="' + CSS.escape(uid) + '"]');
+        } else {
+          setRowError(st, key, uid, t.value.trim() === '' ? new String('choose a group') : null);
+        }
         schedulePreview(st);
         return;
       }
@@ -1119,6 +1166,7 @@
         if (e.type !== 'change') return;
         st.person[t.dataset.key].resolve = t.value;
         redrawOption(st, t.dataset.key);
+        refocus(st, '[data-resolve][data-key="' + CSS.escape(t.dataset.key) + '"]');
         schedulePreview(st);
         return;
       }
@@ -1180,7 +1228,11 @@
           const i = rows.findIndex(r => r.uid === uid);
           if (moveRow(st, key, uid, i + (b.dataset.action === 'row-up' ? -1 : 1))) {
             redrawOption(st, key);
-            el.querySelector('[data-action="' + b.dataset.action + '"][data-uid="' + CSS.escape(uid) + '"]:not([disabled])')?.focus();
+            // At an end the pressed button is disabled: its sibling, else
+            // the row's group picker, takes the focus.
+            const other = b.dataset.action === 'row-up' ? 'row-down' : 'row-up';
+            const u = '[data-uid="' + CSS.escape(uid) + '"]';
+            refocus(st, '[data-action="' + b.dataset.action + '"]' + u, '[data-action="' + other + '"]' + u, '[data-row-group]' + u);
             schedulePreview(st);
           }
           return;
