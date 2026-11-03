@@ -251,7 +251,21 @@ func TestComposeGIDDefaultsRefused(t *testing.T) {
 		{"group_add int", p, svc("    group_add: [10001, 60999]\n"), "", "service extra: group_add gid 60999 is in 60000-60999"},
 		{"group_add default", p, svc("    group_add: [\"${G:-60500}\"]\n"), "", "service extra: group_add gid 60500 (the default of ${G}) is in 60000-60999"},
 		{"group_add option default", hdrHead + opts("{key: pgid, label: G, type: int, default: 60004}", fpath("media", "web", "")), svc("    group_add: [\"${PGID}\"]\n"), "", "service extra: group_add ${PGID} is setting pgid, whose default 60004 is in 60000-60999"},
-		{"group_add escaped", p, svc("    group_add: [\"$${G:-60500}\", video, \"10001\"]\n"), "", ""},
+		{"group_add names ok", p, svc("    group_add: [video, \"10001\", \"${G:+1000}\", $G]\n"), "", ""},
+		{"group_add escaped", p, svc("    group_add: [\"$${G:-60500}\"]\n"), "", `service extra: group_add entry "$${G:-60500}" must be a whole number, a group name or exactly one ${NAME} / $NAME (no mixed forms)`},
+		{"group_add mixed", p, svc("    group_add: [\"${X:-6}0001\"]\n"), "", `service extra: group_add entry "${X:-6}0001" must be a whole number, a group name or exactly one ${NAME} / $NAME (no mixed forms)`},
+		{"group_add nested", p, svc("    group_add: [\"${X:-${Y:-60001}}\"]\n"), "", `group_add entry "${X:-${Y:-60001}}" must be`},
+		{"user mixed", p, svc("    user: \"1000:${X:-6}0001\"\n"), "", `service extra: compose user: gid "${X:-6}0001" must be a whole number or exactly one ${NAME} / $NAME (no mixed forms)`},
+		{"user two refs", p, svc("    user: \"1000:${A}${B}\"\n"), "", `compose user: gid "${A}${B}" must be`},
+		{"group_add text fallback", p, svc("    group_add: [\"${G:-abc}\"]\n"), "", `group_add entry "${G:-abc}" must be`},
+		{"group_add empty fallback", p, svc("    group_add: [\"${G:-}\"]\n"), "", `group_add entry "${G:-}" must be`},
+		{"group_add $ fallback", p, svc("    group_add: [\"${G:-$H}\"]\n"), "", `group_add entry "${G:-$H}" must be`},
+		{"group_add error form", p, svc("    group_add: [\"${G:?unset}\"]\n"), "", `group_add entry "${G:?unset}" must be`},
+		{"user forms ok", p, svc("    user: \"${U}:${XG-1000}\"\n"), "", ""},
+		{"user plus ok", p, svc("    user: \"1000:${XG:+1000}\"\n"), "", ""},
+		{"user plus in range", p, svc("    user: \"1000:${XG+60001}\"\n"), "", "gid 60001 (the value ${XG+…} gives) is in 60000-60999"},
+		{"user text fallback", p, svc("    user: \"1000:${XG:-x}\"\n"), "", `compose user: gid "${XG:-x}" must be`},
+		{"user gid name", p, svc("    user: \"1000:staff\"\n"), "", `compose user: gid "staff" must be`},
 		{"group_add not a list", p, svc("    group_add: \"60001\"\n"), "", "service extra: group_add must be a list"},
 	})
 }
@@ -262,7 +276,7 @@ func TestFolderServiceReferencesResolve(t *testing.T) {
 	folderCases(t, []settingsCase{
 		{"unknown ref", m, svc("    group_add: [\"${NOPE:-1000}\"]\n"), "media", `service extra's group_add entry "${NOPE:-1000}" next to a folder block must be a number or ${NAME} of an instance int option`},
 		{"named group", m, svc("    group_add: [video]\n"), "media", `group_add entry "video" next to a folder block must be a number`},
-		{"mixed", m, svc("    group_add: [\"1${PGID}\"]\n"), "media", `group_add entry "1${PGID}"`},
+		{"mixed", m, svc("    group_add: [\"1${PGID}\"]\n"), "", `group_add entry "1${PGID}" must be a whole number, a group name or exactly one`},
 		{"option ref ok", m, svc("    group_add: [\"${PGID:-1000}\", \"10001\", 44]\n"), "", ""},
 		{"named group without folder", hdrHead + opts(fpath("media", "extra", "")), svc("    group_add: [video]\n"), "", ""},
 	})
@@ -301,6 +315,21 @@ func TestEffectiveMode(t *testing.T) {
 	} {
 		if got := c.o.EffectiveMode(); got != c.want {
 			t.Errorf("%+v: %q, want %q", c.o, got, c.want)
+		}
+	}
+}
+
+// groupAddResolves applies the same strict forms: an option name with a
+// non-numeric fallback is not resolved (security review).
+func TestGroupAddResolvesStrictForms(t *testing.T) {
+	m := &Manifest{Settings: &SettingsSpec{Options: []Option{{Key: "pgid", Type: TypeInt}}}}
+	for e, ok := range map[string]bool{
+		"${PGID}": true, "$PGID": true, "${PGID:-1000}": true, "${PGID-1000}": true, "${PGID:+1000}": true, "1000": true,
+		"${PGID:-abc}": false, "${PGID:-$X}": false, "${PGID:-${X}}": false, "${PGID?e}": false, "${NOPE}": false, "video": false, "x${PGID}": false,
+	} {
+		v := &specCheck{m: m, groupAdd: map[string][]string{"s": {e}}}
+		if err := v.groupAddResolves("s"); (err == nil) != ok {
+			t.Errorf("%q: %v, want ok=%v", e, err, ok)
 		}
 	}
 }

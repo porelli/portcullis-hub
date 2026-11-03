@@ -345,9 +345,7 @@ type userPart struct {
 }
 
 var (
-	userEnvRe  = regexp.MustCompile(`^\$\{([A-Za-z_][A-Za-z0-9_]*)(?::?-[^}]*)?\}$`)
-	userBareRe = regexp.MustCompile(`^\$([A-Za-z_][A-Za-z0-9_]*)$`)
-	userNumRe  = regexp.MustCompile(`^[0-9]{1,10}$`)
+	userNumRe = regexp.MustCompile(`^[0-9]{1,10}$`)
 )
 
 func parseUserPart(s string) userPart {
@@ -355,11 +353,11 @@ func parseUserPart(s string) userPart {
 		n, _ := strconv.ParseInt(s, 10, 64)
 		return userPart{num: &n}
 	}
-	if m := userEnvRe.FindStringSubmatch(s); m != nil {
-		return userPart{env: m[1]}
-	}
-	if m := userBareRe.FindStringSubmatch(s); m != nil {
-		return userPart{env: m[1]}
+	if m := singleRefRe.FindStringSubmatch(s); m != nil {
+		if m[1] != "" {
+			return userPart{env: m[1]}
+		}
+		return userPart{env: m[4]}
 	}
 	return userPart{other: true}
 }
@@ -414,6 +412,16 @@ func composeIDs(compose []byte) (users map[string]string, groupAdd map[string][]
 	return users, groupAdd, nil
 }
 
+// singleRefRe is the only accepted interpolation form of a gid (or uid)
+// source: exactly $NAME, ${NAME}, or ${NAME:-n} / ${NAME-n} / ${NAME:+n}
+// / ${NAME+n} with a plain whole-number n (range-checked) — nothing
+// around it, no nesting, no $ in the fallback, no ${NAME?err} (security
+// review). groupNameRe is a plain group name (group_add only).
+var (
+	singleRefRe = regexp.MustCompile(`^(?:\$\{([A-Za-z_][A-Za-z0-9_]*)(?:(:?[-+])([0-9]{1,10}))?\}|\$([A-Za-z_][A-Za-z0-9_]*))$`)
+	groupNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.-]*$`)
+)
+
 // gidRefRe is an interpolation in a gid source: ${NAME}, ${NAME<op>value}
 // (op -, :-, +, :+, ?, :?) or $NAME.
 var gidRefRe = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)(?:(:?[-+?])([^}]*))?\}|\$([A-Za-z_][A-Za-z0-9_]*)`)
@@ -437,12 +445,12 @@ func (v *specCheck) composeGIDs() error {
 	sort.Strings(svcs)
 	for _, s := range svcs {
 		if _, g, ok := splitUser(v.users[s]); ok {
-			if err := v.gidSource(s, "compose user: gid", "compose user: gid", g); err != nil {
+			if err := v.gidSource(s, "compose user: gid", "compose user: gid", g, false); err != nil {
 				return err
 			}
 		}
 		for _, e := range v.groupAdd[s] {
-			if err := v.gidSource(s, "group_add gid", "group_add", e); err != nil {
+			if err := v.gidSource(s, "group_add gid", "group_add", e, true); err != nil {
 				return err
 			}
 		}
@@ -451,13 +459,25 @@ func (v *specCheck) composeGIDs() error {
 }
 
 // gidSource checks one gid source value of service svc. lit prefixes a
-// number's refusal, ref an option reference's.
-func (v *specCheck) gidSource(svc, lit, ref, val string) error {
+// number's refusal, ref an option reference's; names admits a plain
+// group name (group_add). Anything but a whole number, a name or exactly
+// one ${…} / $NAME is refused: a mixed form (${X:-6}0001, ${A}${B},
+// nesting, $$-escapes) could compose a gid no check sees.
+func (v *specCheck) gidSource(svc, lit, ref, val string, names bool) error {
 	if userNumRe.MatchString(val) {
 		if n, _ := strconv.ParseInt(val, 10, 64); InFolderGIDRange(n) {
 			return fmt.Errorf("service %s: %s %d is in %s", svc, lit, n, gidRangeText)
 		}
 		return nil
+	}
+	if names && groupNameRe.MatchString(val) {
+		return nil
+	}
+	if !singleRefRe.MatchString(val) {
+		if names {
+			return fmt.Errorf("service %s: group_add entry %q must be a whole number, a group name or exactly one ${NAME} / $NAME (no mixed forms)", svc, val)
+		}
+		return fmt.Errorf("service %s: compose user: gid %q must be a whole number or exactly one ${NAME} / $NAME (no mixed forms)", svc, val)
 	}
 	for _, m := range interpolations(val, gidRefRe) {
 		name, op, value := m[1], m[2], m[3]
