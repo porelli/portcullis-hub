@@ -105,7 +105,9 @@ func TestEnvForeignLinesKeptRaw(t *testing.T) {
 }
 
 // Fix 3: a committed save whose env / override write fails is audited
-// as committed (before -> after), plus one error entry for the failure.
+// as committed (before -> after), plus one error entry for the failure;
+// the save answers with the failure as a warning (final review H17: the
+// delivery still runs).
 func TestCommittedSaveAuditedOnDeliveryFailure(t *testing.T) {
 	f, audit := immichFixture(t)
 	if err := f.h.save("immich", SettingsUpdate{Values: vals("trash_days", 30)}); err != nil {
@@ -115,9 +117,9 @@ func TestCommittedSaveAuditedOnDeliveryFailure(t *testing.T) {
 	os.Chmod(dir, 0500)
 	defer os.Chmod(dir, 0755)
 	n := len(audit.entries)
-	_, err := f.h.SaveSettings("immich", SettingsUpdate{Values: vals("uploads", "/srv/up")}, "alice")
-	if statusOf(err) != 500 {
-		t.Fatalf("err = %v", err)
+	res, err := f.h.SaveSettings("immich", SettingsUpdate{Values: vals("uploads", "/srv/up")}, "alice")
+	if err != nil || !strings.Contains(strings.Join(res.Warnings, "\n"), "override generation failed") {
+		t.Fatalf("err = %v, result %+v: want the override failure as a warning", err, res)
 	}
 	es := audit.entries[n:]
 	if len(es) != 2 || es[0].Target != "immich/uploads" || es[0].Result != "ok" || es[0].Detail != "scope=instance: unset -> /srv/up" ||

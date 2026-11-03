@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"log"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/fsutil"
+	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/settings"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
@@ -617,21 +619,66 @@ func (h *Hub) requeueOwed() {
 // model). A run whose generation is no longer current never writes.
 // Caller holds mu.
 func (h *Hub) deliveryGenLocked(t *templates.Template) string {
+	// The population's inputs too (group access, the access role, the
+	// policy, public mode): a run built before a policy save never
+	// writes the old population after it.
+	acc := h.accessLocked(t)
+	pol, hasPol := h.st.AuthPolicies[t.ID]
 	b, err := json.Marshal(struct {
-		Settings state.InstanceSettings
-		Enabled  bool
-		SignIn   string
-		Files    []templates.DataFile
-		Options  []templates.Option
-		Reload   *templates.Reload
-		Hooks    []templates.Hook
-	}{h.st.Settings[t.ID], h.st.IsEnabled(t.ID), h.st.SignIn[t.ID], t.Manifest.Files, t.Manifest.Options(), t.Manifest.Reload, t.Manifest.Hooks})
+		Settings    state.InstanceSettings
+		Enabled     bool
+		SignIn      string
+		Files       []templates.DataFile
+		Options     []templates.Option
+		Reload      *templates.Reload
+		Hooks       []templates.Hook
+		GroupAccess bool
+		Access      any
+		Policy      *policy.AuthPolicy
+		Public      any
+		PublicMode  any
+		Auth        templates.Auth
+	}{h.st.Settings[t.ID], h.st.IsEnabled(t.ID), h.st.SignIn[t.ID], t.Manifest.Files, t.Manifest.Options(), t.Manifest.Reload, t.Manifest.Hooks,
+		acc.groupAccess(t), acc, policyOrNil(pol, hasPol), t.Public, h.st.PublicMode[t.ID], t.Manifest.Auth})
 	if err != nil {
 		// Never equal: the run can't prove it is current.
 		return "unmarshalable:" + err.Error() + time.Now().String()
 	}
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
+}
+
+// deliveryGensLocked is every enabled instance's delivery generation.
+// Caller holds mu.
+func (h *Hub) deliveryGensLocked() map[string]string {
+	out := map[string]string{}
+	for _, id := range h.st.Enabled {
+		if t := h.findLocked(id); t != nil {
+			out[id] = h.deliveryGenLocked(t)
+		}
+	}
+	return out
+}
+
+// redeliverChanged queues a delivery of every enabled instance whose
+// generation differs from before (a source sync): its outputs follow the
+// new template without waiting for a save or a start.
+func (h *Hub) redeliverChanged(before map[string]string) {
+	h.mu.RLock()
+	now := h.deliveryGensLocked()
+	h.mu.RUnlock()
+	for _, id := range slices.Sorted(maps.Keys(now)) {
+		if before[id] != now[id] {
+			h.queueDelivery(id, TriggerRetry, settings.EffectNone, 0)
+		}
+	}
+}
+
+func policyOrNil(p policy.AuthPolicy, ok bool) *policy.AuthPolicy {
+	if !ok {
+		return nil
+	}
+	return &p
 }
 
 // redactUnitError is err as a unit shows it: redacted, then clipped.
@@ -723,11 +770,18 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 	if !opt.lifecycle {
 		// The run's own effect is owed until it is applied.
 		owedSeq = h.setOwed(id, opt.effect)
-		if pendErr != nil || h.appBusy(id) {
+		if h.appBusy(id) {
 			// P20: never during a lifecycle or async operation (its op
 			// record, a restore's files); run again later.
 			rep.Units = append(rep.Units, UnitResult{Unit: unitBusy, Skipped: SkipBusy, At: now})
 			h.queueDeliveryWith(id, trig, opt.effect, busyRetry, forceList(opt.force), opt.stuckRetry)
+			return rep, "", false, nil
+		}
+		if pendErr != nil {
+			// Stuck deleting or restoring (no operation running): nothing
+			// is delivered and nothing re-queued — finishing the delete or
+			// restore starts the instance again (its effect stays owed).
+			rep.Units = append(rep.Units, UnitResult{Unit: unitBusy, Skipped: SkipBusy, Message: h.redactUnitError(id, pendErr), At: now})
 			return rep, "", false, nil
 		}
 		if !enabled {

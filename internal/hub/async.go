@@ -114,18 +114,19 @@ func (h *Hub) finishAsync(id, op, opID string, result map[string]string, warning
 
 // recordOp stores r as id's op record (memory and <data>/ops/<id>.json),
 // also for an instance that no longer exists (a finished delete).
-// The file is written first: a poller that sees the record finished
-// finds it on disk too.
+// The file is written first, both under opsMu (as finishOpGuarded): a
+// poller that sees the record finished finds it on disk too, and memory
+// and disk never hold different writers' records.
 func (h *Hub) recordOp(id string, r OpRecord) {
+	h.opsMu.Lock()
+	defer h.opsMu.Unlock()
 	if data, err := json.MarshalIndent(r, "", "  "); err == nil {
 		os.MkdirAll(filepath.Dir(h.opPath(id)), 0700)
 		if err := fsutil.WriteFileAtomic(h.opPath(id), data, 0600); err != nil {
 			log.Printf("ops: cannot record %s %s: %v", r.Op, id, err)
 		}
 	}
-	h.opsMu.Lock()
 	h.ops[id] = r
-	h.opsMu.Unlock()
 }
 
 // errStatus is the HTTP status an operation error stands for.

@@ -266,6 +266,7 @@ func (h *Hub) syncSources(trigger string, timeout time.Duration) SourceSyncStatu
 
 	h.mu.RLock()
 	before := h.enabledSourcesLocked()
+	gens := h.deliveryGensLocked()
 	h.mu.RUnlock()
 
 	byName := map[string]int{}
@@ -330,6 +331,9 @@ func (h *Hub) syncSources(trigger string, timeout time.Duration) SourceSyncStatu
 	}
 	// Only after the final Discover (a rolled-back update drops nothing).
 	h.pruneSettings()
+	// The data files, claims, headers and hooks follow a template that
+	// changed what they render.
+	h.redeliverChanged(gens)
 
 	h.mu.RLock()
 	for _, id := range h.st.Enabled {

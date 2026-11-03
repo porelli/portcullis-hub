@@ -3,10 +3,12 @@ package hub
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -571,5 +573,236 @@ func TestStoredEntryCommaNeverInHeader(t *testing.T) {
 	}
 	if !found {
 		t.Error("no settings.person_value invalidated audit for alice")
+	}
+}
+
+// ── H17 (delivery engine minors) ──
+
+// H17: SaveEnv's read-modify-write of the .env holds mu (every other
+// .env writer does).
+func TestSaveEnvHoldsMu(t *testing.T) {
+	f, _ := immichFixture(t)
+	f.h.mu.RLock() // a reader: SaveEnv's write must wait for it
+	done := make(chan error, 1)
+	go func() { done <- f.h.SaveEnv("immich", map[string]string{"FREE_VAR": "x"}) }()
+	select {
+	case err := <-done:
+		f.h.mu.RUnlock()
+		t.Fatalf("SaveEnv finished (%v) while mu was held", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	f.h.mu.RUnlock()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if composeReads(t, f.h.envPath("immich"))["FREE_VAR"] != "x" {
+		t.Error("FREE_VAR not written")
+	}
+}
+
+// H17: the op record in memory and on disk are written together (under
+// opsMu) by both writers: after racing writes they agree.
+func TestOpRecordMemoryMatchesFile(t *testing.T) {
+	f, _ := secretFixture(t)
+	const id = "secretapp"
+	for i := 0; i < 50; i++ {
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			f.h.recordOp(id, OpRecord{Op: OpRestart, OpID: "op", At: time.Now().UTC(), Running: true})
+		}()
+		go func() {
+			defer wg.Done()
+			f.h.finishDeliveryOp(id, OpHook, errors.New("hook failed"))
+		}()
+		wg.Wait()
+		f.h.opsMu.Lock()
+		mem := f.h.ops[id]
+		f.h.opsMu.Unlock()
+		b, err := os.ReadFile(f.h.opPath(id))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var disk OpRecord
+		if err := json.Unmarshal(b, &disk); err != nil {
+			t.Fatal(err)
+		}
+		if mem.Op != disk.Op || mem.Running != disk.Running {
+			t.Fatalf("round %d: memory %s running=%v, file %s running=%v", i, mem.Op, mem.Running, disk.Op, disk.Running)
+		}
+	}
+}
+
+// H17: with a template view, a backup blanks by value only variables the
+// template doesn't declare (an orphan line a template update left):
+// PUID=1000 stays when a secret happens to be 1000.
+func TestBackupBlanksByValueOnlyOrphans(t *testing.T) {
+	f, _ := secretFixture(t)
+	const id = "secretapp"
+	saveSecret(t, f, id, "api_key", setSecret("1000"))
+	if err := f.h.Enable(id); err != nil {
+		t.Fatal(err)
+	}
+	f.h.Wait()
+	// PUID: declared (a compose reference); OLD_KEY: an orphan.
+	cp := filepath.Join(f.src, "secretapp", "compose.yml")
+	writeFile(t, cp, strings.Replace(string(mustRead(t, cp)), "      API_KEY: ${HEADSCALE_API_KEY}\n", "      API_KEY: ${HEADSCALE_API_KEY}\n      PUID: ${PUID:-1000}\n", 1))
+	f.h.Discover()
+	if err := f.h.SaveEnv(id, map[string]string{"PUID": "1000", "OLD_KEY": "1000"}); err != nil {
+		t.Fatal(err)
+	}
+	entry, err := f.h.BackupInstance(id, "root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, data, _ := readArchive(t, archivePath(f, entry.Archive))
+	env := string(data["config/env"])
+	if !strings.Contains(env, "\nPUID=1000\n") {
+		t.Errorf("PUID blanked:\n%s", env)
+	}
+	if !strings.Contains(env, "\nOLD_KEY=\n") || !strings.Contains(env, "\nHEADSCALE_API_KEY=\n") {
+		t.Errorf("the secret's lines not blanked:\n%s", env)
+	}
+}
+
+// H17: hook output a Python hook printed with json.dumps (ensure_ascii)
+// is redacted too.
+func TestRedactsASCIIEscapedSecret(t *testing.T) {
+	f, _ := secretFixture(t)
+	const val = "pässwört-€-😀"
+	saveSecret(t, f, "secretapp", "api_key", setSecret(val))
+	// Python's json.dumps(..., ensure_ascii=True): lowercase \uXXXX,
+	// surrogate pairs past the BMP.
+	out := f.h.secretRedactor("secretapp", nil)(`{"api_key": "p\u00e4ssw\u00f6rt-\u20ac-\ud83d\ude00"}`)
+	if strings.Contains(out, `ssw`) {
+		t.Errorf("not redacted: %s", out)
+	}
+}
+
+// H17: a committed save whose .env write failed still delivers; the
+// error is a warning.
+func TestCommittedSaveWithEnvFailureDelivers(t *testing.T) {
+	f, _, _ := privFixture(t)
+	const id = "privapp"
+	if err := f.h.Enable(id); err != nil {
+		t.Fatal(err)
+	}
+	f.h.Wait()
+	dir := filepath.Dir(f.h.envPath(id))
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	res, err := f.h.SaveSettings(id, SettingsUpdate{Values: vals("motd", "hello")}, "root")
+	os.Chmod(dir, 0o755)
+	if err != nil {
+		t.Fatalf("SaveSettings = %v, want the committed save answered with a warning", err)
+	}
+	if !strings.Contains(strings.Join(res.Warnings, "\n"), "env") || res.Deliveries == nil {
+		t.Errorf("warnings %v, deliveries %+v: want the env failure as a warning and the delivery run", res.Warnings, res.Deliveries)
+	}
+	f.h.Wait()
+}
+
+// H17: an instance stuck in a pending state (a failed delete) gets no
+// delivery re-queued forever.
+func TestNoRequeueWhilePending(t *testing.T) {
+	f, _, _ := headerFixture(t, nil)
+	headerEnable(t, f)
+	f.h.mu.Lock()
+	f.h.st.Instances[headerID] = state.Instance{Template: f.h.st.Instances[headerID].Template, State: state.InstanceDeleting}
+	f.h.mu.Unlock()
+	rep := deliverNow(t, f, headerID, TriggerRetry)
+	if u, ok := unit(rep, unitBusy); !ok || u.Skipped == "" {
+		t.Errorf("units = %+v, want the run skipped", rep.Units)
+	}
+	if f.h.DeliveryStatus(headerID).Pending {
+		t.Error("a delivery is re-queued for a pending (deleting) instance")
+	}
+}
+
+// H17: forgetDeliveries drops every per-instance engine map.
+func TestForgetDeliveriesClearsHookState(t *testing.T) {
+	f, _ := secretFixture(t)
+	const id = "secretapp"
+	f.h.deliveryMu.Lock()
+	f.h.hookStuck = map[string]int{id: 2}
+	f.h.hookExecs = map[string]timedOutExec{id: {execID: "x"}}
+	f.h.lastTrigger = map[string]Trigger{id: TriggerRetry}
+	f.h.deliveryMu.Unlock()
+	if err := f.h.forgetDeliveries(id); err != nil {
+		t.Fatal(err)
+	}
+	f.h.deliveryMu.Lock()
+	defer f.h.deliveryMu.Unlock()
+	if _, a := f.h.hookStuck[id]; a {
+		t.Error("hookStuck kept")
+	}
+	if _, b := f.h.hookExecs[id]; b {
+		t.Error("hookExecs kept")
+	}
+	if _, c := f.h.lastTrigger[id]; c {
+		t.Error("lastTrigger kept")
+	}
+}
+
+// H17: a source sync that changes an enabled instance's delivery
+// generation queues its delivery.
+func TestSourceSyncQueuesDelivery(t *testing.T) {
+	f := newSyncFixture(t, grafanaManifest)
+	h := f.start(t, false)
+	h.Wait()
+	var mu sync.Mutex
+	runs := map[string]int{}
+	h.deliverHook = func(id, stage string) {
+		if stage == "built" {
+			mu.Lock()
+			runs[id]++
+			mu.Unlock()
+		}
+	}
+	f.commit(t, strings.Replace(grafanaManifest, "label: Theme\n", "label: Colour theme\n", 1))
+	if err := h.SyncSources(); err != nil {
+		t.Fatal(err)
+	}
+	h.Wait()
+	mu.Lock()
+	defer mu.Unlock()
+	if runs["grafana"] == 0 {
+		t.Error("no delivery after the sync changed grafana's generation")
+	}
+}
+
+// H17: the delivery generation covers the population's inputs (group
+// access, the access role, public mode, the policy).
+func TestDeliveryGenCoversPopulationInputs(t *testing.T) {
+	f, _, _ := headerFixture(t, nil)
+	headerEnable(t, f)
+	gen := func() string {
+		f.h.mu.RLock()
+		defer f.h.mu.RUnlock()
+		return f.h.deliveryGenLocked(f.h.findLocked(headerID))
+	}
+	before := gen()
+	f.h.mu.Lock()
+	f.h.st.AuthPolicies[headerID] = policy.AuthPolicy{Factors: []string{"passkey"}}
+	f.h.mu.Unlock()
+	if gen() == before {
+		t.Error("the generation ignores the instance's policy")
+	}
+}
+
+// H17: setEnvVars updates every line of a duplicated key (compose reads
+// the last one).
+func TestSetEnvVarsUpdatesDuplicates(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "x.env")
+	if err := os.WriteFile(p, []byte("A=1\nB=2\nA=3\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := setEnvVars(p, map[string]string{"A": "9"}, false); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(p); string(b) != "A=9\nB=2\nA=9\n" {
+		t.Errorf(".env = %q", b)
 	}
 }

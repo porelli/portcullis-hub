@@ -468,7 +468,8 @@ func setEnvVars(envFile string, vars map[string]string, quote bool) error {
 		if !ok || strings.HasPrefix(k, "#") {
 			continue
 		}
-		if v, want := vars[k]; want && !done[k] {
+		// Every line of a duplicated key (compose reads the last one).
+		if v, want := vars[k]; want {
 			lines[i] = envLine(k, v, quote)
 			done[k] = true
 		}

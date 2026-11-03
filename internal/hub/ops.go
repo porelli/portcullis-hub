@@ -204,10 +204,8 @@ func (h *Hub) finishOpGuarded(id, op string, err error, rolledBack, keepRunning 
 	if op == OpHosts {
 		h.hostsOps[id] = r
 	}
-	h.opsMu.Unlock()
-	if keepHook {
-		log.Printf("ops: %s %s succeeded; its start hook's failure stays recorded", op, id)
-	}
+	// The files under opsMu too: memory and disk never disagree with
+	// another writer's record (recordOp).
 	if data, merr := json.MarshalIndent(r, "", "  "); merr == nil {
 		if !keepHook {
 			if werr := fsutil.WriteFileAtomic(h.opPath(id), data, 0600); werr != nil {
@@ -219,6 +217,10 @@ func (h *Hub) finishOpGuarded(id, op string, err error, rolledBack, keepRunning 
 				log.Printf("ops: cannot record %s %s: %v", op, id, werr)
 			}
 		}
+	}
+	h.opsMu.Unlock()
+	if keepHook {
+		log.Printf("ops: %s %s succeeded; its start hook's failure stays recorded", op, id)
 	}
 	if err == nil {
 		return nil

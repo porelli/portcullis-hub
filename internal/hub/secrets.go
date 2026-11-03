@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf16"
 
 	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/state"
@@ -189,7 +190,47 @@ func jsonForms(v string) []string {
 			}
 		}
 	}
+	// ASCII-escaped, as Python's json.dumps (ensure_ascii) writes it: a
+	// hook printing its stdin back.
+	if f := asciiJSON(v); f != v && !slices.Contains(out, f) {
+		out = append(out, f)
+	}
 	return out
+}
+
+// asciiJSON is v as a JSON string body with every non-ASCII rune as
+// lowercase \uXXXX (a surrogate pair past the BMP), quotes, backslashes
+// and control characters escaped (Python's json.dumps default).
+func asciiJSON(v string) string {
+	var b strings.Builder
+	for _, r := range v {
+		switch {
+		case r == '"':
+			b.WriteString(`\"`)
+		case r == '\\':
+			b.WriteString(`\\`)
+		case r == '\n':
+			b.WriteString(`\n`)
+		case r == '\r':
+			b.WriteString(`\r`)
+		case r == '\t':
+			b.WriteString(`\t`)
+		case r == '\b':
+			b.WriteString(`\b`)
+		case r == '\f':
+			b.WriteString(`\f`)
+		case r < 0x20:
+			fmt.Fprintf(&b, `\u%04x`, r)
+		case r < 0x80:
+			b.WriteRune(r)
+		case r > 0xffff:
+			r1, r2 := utf16.EncodeRune(r)
+			fmt.Fprintf(&b, `\u%04x\u%04x`, r1, r2)
+		default:
+			fmt.Fprintf(&b, `\u%04x`, r)
+		}
+	}
+	return b.String()
 }
 
 // Generated-secret alphabets. ascii_printable is printable ASCII without
@@ -267,6 +308,37 @@ func secretOptionEnvNames(t *templates.Template) map[string]bool {
 	return out
 }
 
+// declaredEnvNames are the env variables template t itself declares or
+// reads: its non-secret options' env names, env[] keys, port keys (and
+// <KEY>_BIND), the instance variables, PORTCULLIS_DOMAIN and every
+// ${VAR} compose.yml references.
+func declaredEnvNames(t *templates.Template) map[string]bool {
+	out := templates.EnvRefs(string(t.ReadCompose()))
+	if out == nil {
+		out = map[string]bool{}
+	}
+	secret := secretOptionEnvNames(t)
+	for n := range optionEnvOwners(t) {
+		if !secret[n] {
+			out[n] = true
+		}
+	}
+	for _, e := range t.Manifest.Env {
+		out[e.Key] = true
+	}
+	for _, p := range t.Manifest.Ports {
+		out[p.Key], out[p.Key+"_BIND"] = true, true
+	}
+	for k := range t.InstanceEnv {
+		out[k] = true
+	}
+	out["PORTCULLIS_DOMAIN"] = true
+	for n := range secret {
+		delete(out, n) // blanked by name anyway
+	}
+	return out
+}
+
 // optionEnvOwners maps every env name of t's options to its option key.
 func optionEnvOwners(t *templates.Template) map[string]string {
 	out := map[string]string{}
@@ -281,10 +353,18 @@ func optionEnvOwners(t *templates.Template) map[string]string {
 
 // blankEnvNames is an .env file with the values of names emptied (KEY=),
 // and of every variable whose value is one of secrets (an instance whose
-// template doesn't resolve: its secret options' names are unknown), every
-// other line kept byte for byte: a backup's config/env carries no secret
-// (they are in config/settings-secrets.json only).
+// template doesn't resolve: its secret options' names are unknown; a line
+// a template update left behind), every other line kept byte for byte: a
+// backup's config/env carries no secret (they are in
+// config/settings-secrets.json only).
 func blankEnvNames(data []byte, names map[string]bool, secrets map[string]string) []byte {
+	return blankEnvNamesExcept(data, names, secrets, nil)
+}
+
+// blankEnvNamesExcept is blankEnvNames whose value matching skips the
+// variables of declared (a template view's own: declaredEnvNames) — a
+// PUID=1000 is not blanked because some secret is 1000.
+func blankEnvNamesExcept(data []byte, names map[string]bool, secrets map[string]string, declared map[string]bool) []byte {
 	names = maps.Clone(names)
 	if names == nil {
 		names = map[string]bool{}
@@ -296,7 +376,7 @@ func blankEnvNames(data []byte, names map[string]bool, secrets map[string]string
 		}
 	}
 	for k, v := range parseEnv(data) {
-		if stored[v] {
+		if stored[v] && !declared[k] {
 			names[k] = true
 		}
 	}

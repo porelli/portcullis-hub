@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"maps"
@@ -777,8 +778,13 @@ func showPort(v string, ok bool) string {
 // "refused").
 func (h *Hub) SaveSettings(id string, u SettingsUpdate, actor string) (_ *SaveResult, retErr error) {
 	var changes []settingChange
+	var writeErr error
 	defer func() {
-		h.auditSettings(id, actor, u, changes, retErr)
+		err := retErr
+		if err == nil {
+			err = writeErr
+		}
+		h.auditSettings(id, actor, u, changes, err)
 	}()
 	t := h.Template(id)
 	if t == nil {
@@ -812,6 +818,12 @@ func (h *Hub) SaveSettings(id string, u SettingsUpdate, actor string) (_ *SaveRe
 		return nil, err
 	}
 	out := &SaveResult{Effect: sv.effect, Changed: sv.keys, Warnings: append([]string{}, bindWarnings...)}
+	if len(sv.writeErrs) > 0 {
+		writeErr = errors.Join(sv.writeErrs...)
+		for _, e := range sv.writeErrs {
+			out.Warnings = append(out.Warnings, h.redactUnitError(id, e))
+		}
+	}
 	if out.Changed == nil {
 		out.Changed = []string{}
 	}
@@ -838,6 +850,8 @@ type saved struct {
 	effect  string
 	keys    []string
 	changes []settingChange
+	// writeErrs: the override or .env write failed after the commit.
+	writeErrs []error
 }
 
 // saveSettings is SaveSettings' state change: under the instance's lock
@@ -988,11 +1002,13 @@ func (h *Hub) saveSettings(t *templates.Template, u SettingsUpdate, parsed *pars
 	} else {
 		res.effect = settings.Strongest(own...)
 	}
+	// Committed: a failed override or .env write is a warning (audited),
+	// and the delivery still runs.
 	if overrideErr != nil {
-		return res, false, statusErr(500, "settings saved but override generation failed: %v", overrideErr)
+		res.writeErrs = append(res.writeErrs, statusErr(500, "settings saved but override generation failed: %v", overrideErr))
 	}
 	if envErr != nil {
-		return res, false, statusErr(500, "settings saved but the env file write failed: %v", envErr)
+		res.writeErrs = append(res.writeErrs, statusErr(500, "settings saved but the env file write failed: %v", envErr))
 	}
 
 	if policyChanged || publicChanged || signInChanged {
@@ -1380,7 +1396,10 @@ func (h *Hub) SaveEnv(id string, vars map[string]string) error {
 	}
 	owners := optionEnvOwners(t)
 	secretNames := secretOptionEnvNames(t)
-	if err := h.pending(id); err != nil {
+	// The read-modify-write under mu, as every other .env writer's.
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if err := h.pendingLocked(id); err != nil {
 		return err
 	}
 	cur := readEnvFile(h.envPath(id))
@@ -1405,10 +1424,8 @@ func (h *Hub) SaveEnv(id string, vars map[string]string) error {
 		}
 		return statusErr(400, "%s belongs to the setting %s: set it under Settings", k, o)
 	}
-	for _, k := range slices.Sorted(maps.Keys(write)) {
-		if err := setEnvVar(h.envPath(id), k, write[k]); err != nil {
-			return statusErr(500, "failed to write env: %v", err)
-		}
+	if err := setEnvVars(h.envPath(id), write, false); err != nil {
+		return statusErr(500, "failed to write env: %v", err)
 	}
 	return nil
 }

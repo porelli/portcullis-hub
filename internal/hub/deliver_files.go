@@ -66,6 +66,9 @@ func (h *Hub) forgetDeliveries(id string) error {
 	}
 	delete(h.queued, id)
 	delete(h.deliveryStatus, id)
+	delete(h.hookStuck, id)
+	delete(h.hookExecs, id)
+	delete(h.lastTrigger, id)
 	h.deliveryMu.Unlock()
 	if err := os.Remove(h.deliveredPath(id)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err

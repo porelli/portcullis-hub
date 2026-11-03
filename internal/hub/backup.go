@@ -390,9 +390,12 @@ func (h *Hub) backupLocked(id, reason string, keepStopped bool) (*BackupEntry, e
 	// Secret settings are in config/settings-secrets.json only: their
 	// env variables are blanked in config/env (a restore writes them
 	// from the store again).
-	var secretEnv map[string]bool
+	// With a view, matching by value only blanks variables the template
+	// doesn't declare (lines an update left behind); without one, any.
+	var secretEnv, declared map[string]bool
 	if tg.view != nil {
 		secretEnv = secretOptionEnvNames(tg.view)
+		declared = declaredEnvNames(tg.view)
 	}
 	secrets, err := h.secretValues(id)
 	if err != nil {
@@ -414,7 +417,7 @@ func (h *Hub) backupLocked(id, reason string, keepStopped bool) (*BackupEntry, e
 		}
 		if err == nil {
 			if member == "config/env" {
-				data = blankEnvNames(data, secretEnv, secrets)
+				data = blankEnvNamesExcept(data, secretEnv, secrets, declared)
 			}
 			err = add(member, data)
 		}
