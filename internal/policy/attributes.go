@@ -44,8 +44,11 @@ type UserAttributesDocument struct {
 // follows it.
 const HeaderPrefix = "X-Forwarded-Attr-"
 
-// hostHeaderRe is group-gate's header suffix form (_ATTR_HEADER_RE).
-var hostHeaderRe = regexp.MustCompile(`^[A-Za-z0-9]+(-[A-Za-z0-9]+){0,30}$`)
+// HeaderNameRe is the one header-delivery name form (contract §13.6):
+// HeaderPrefix + group-gate's header suffix form (_ATTR_HEADER_RE). The
+// templates validator uses it (templates.HeaderDeliveryRe), so every
+// accepted name survives BuildHosts and group-gate.
+var HeaderNameRe = regexp.MustCompile(`^X-Forwarded-Attr-[A-Za-z0-9]+(-[A-Za-z0-9]+){0,30}$`)
 
 // BuildUserAttributes constructs the user-attributes.json document from field
 // definitions and user data. Only fields in the fields list are included. Users
@@ -125,7 +128,7 @@ func BuildHosts(hosts map[string]map[string]map[string]string) map[string]map[st
 		seen := map[string]bool{}
 		for _, hdr := range sortedKeys(hosts[host]) {
 			folded := strings.ToLower(hdr)
-			if !hostHeaderRe.MatchString(hdr) || strings.HasPrefix(folded, strings.ToLower(HeaderPrefix)) || seen[folded] {
+			if !HeaderNameRe.MatchString(HeaderPrefix+hdr) || strings.HasPrefix(folded, strings.ToLower(HeaderPrefix)) || seen[folded] {
 				continue
 			}
 			seen[folded] = true

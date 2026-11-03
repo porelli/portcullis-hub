@@ -259,7 +259,10 @@ func (h *Hub) runHeaders(id string, p headerPlan, current func() bool, delivered
 		}
 	}
 	h.mu.Unlock()
-	if same && delivered.Hashes[unitHeaders] == p.hash {
+	recorded, hasRecord := delivered.Hashes[unitHeaders]
+	// Unchanged: the record equals the plan and its hash is recorded — or,
+	// for a plan without hosts (nothing to publish), nothing is recorded.
+	if same && (recorded == p.hash || p.hosts == nil && !hasRecord) {
 		u.OK, u.Skipped = true, SkipUnchanged
 		return u, false
 	}
@@ -379,4 +382,38 @@ func (h *Hub) seedHostHeaders() {
 			h.hostHeaders[t.ID] = rec
 		}
 	}
+}
+
+// replaceAttrHosts rewrites only the hosts section of the existing
+// user-attributes.json (WritePolicy while the directory state fails).
+// written: the file has these hosts now; false when there is no
+// readable version 2 file (it is left as it is).
+func (h *Hub) replaceAttrHosts(hosts map[string]map[string]map[string]string) (written bool, err error) {
+	b, rerr := os.ReadFile(h.attributesPath())
+	if rerr != nil {
+		return false, nil
+	}
+	var doc policy.UserAttributesDocument
+	if json.Unmarshal(b, &doc) != nil || doc.Version != policy.UserAttributesVersion || doc.Fields == nil || doc.Users == nil {
+		return false, nil
+	}
+	next := policy.BuildHosts(hosts)
+	if reflect.DeepEqual(policy.BuildHosts(doc.Hosts), next) && doc.Hosts != nil {
+		return true, nil
+	}
+	doc.Hosts = next
+	if err := policy.WriteUserAttributes(h.attributesPath(), doc); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// headerRecorded: instance id has a header record (in memory or a unit
+// hash in delivered.json).
+func (h *Hub) headerRecorded(id string) bool {
+	h.mu.RLock()
+	n := len(h.hostHeaders[id])
+	h.mu.RUnlock()
+	_, ok := h.loadDelivered(id).Hashes[unitHeaders]
+	return n > 0 || ok
 }

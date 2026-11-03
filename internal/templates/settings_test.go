@@ -296,6 +296,10 @@ func TestHeaderDeliveryRules(t *testing.T) {
 	runSettingsCases(t, []settingsCase{
 		{"ok", hdrHead + opts(personHeader), hdrCompose, "", ""},
 		{"bad name", hdrHead + opts("{key: quota, label: Q, type: int, scope: person, default: 1, delivery: [{header: {name: X-Quota}}]}"), hdrCompose, "quota", "X-Forwarded-Attr-"},
+		// group-gate's suffix form (policy.HeaderNameRe): a trailing or
+		// doubled "-" would be dropped from user-attributes.json.
+		{"trailing dash", hdrHead + opts("{key: quota, label: Q, type: int, scope: person, default: 1, delivery: [{header: {name: X-Forwarded-Attr-Quota-}}]}"), hdrCompose, "quota", "X-Forwarded-Attr-"},
+		{"double dash", hdrHead + opts("{key: quota, label: Q, type: int, scope: person, default: 1, delivery: [{header: {name: X-Forwarded-Attr-A--B}}]}"), hdrCompose, "quota", "X-Forwarded-Attr-"},
 		{"no group-gate", hdrHead + opts(personHeader), noGroups, "quota", "portcullis-groups"},
 		{"public router", hdrHead + opts(personHeader), public, "quota", "router share"},
 		{"sign_in native", "name: App\nauth:\n  method: custom\n  sso: false\n  native_login: {supported: true, allow_without_gateway: true}\n" + opts(personHeader), hdrCompose, "quota", "own login"},

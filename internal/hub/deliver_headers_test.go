@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -8,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/settings"
@@ -141,6 +143,12 @@ func TestHeaderKeysAreSuffixes(t *testing.T) {
 	}
 }
 
+// TestHeaderRefusedWithNativeSignIn exercises the defence-in-depth branch
+// of configCheck: the manifest has native_login without
+// allow_without_gateway, because the templates validator already refuses
+// a header delivery together with allow_without_gateway (the template
+// would not load), so a template that really allows native sign-in can
+// never also deliver headers.
 func TestHeaderRefusedWithNativeSignIn(t *testing.T) {
 	f, _, _ := headerFixture(t, func(m string) string {
 		m = strings.Replace(m, "method: header-auth", "method: custom", 1)
@@ -306,5 +314,91 @@ func TestPublicStripsHeaderDeliveries(t *testing.T) {
 		if !slices.Contains(got, want) {
 			t.Errorf("publicStripHeaders lacks %s: %v", want, got)
 		}
+	}
+}
+
+// M2: a plan without hosts (header options, no gated host) and nothing
+// recorded is unchanged: no policy write (and no directory call) per run.
+func TestHeaderNilPlanUnchanged(t *testing.T) {
+	f, _, _ := headerFixture(t, nil)
+	headerEnable(t, f)
+	calls := 0
+	f.h.SetDirectory(func(context.Context) ([]policy.Expiring, *policy.UserAttributesDocument, error) {
+		calls++
+		return nil, nil, nil
+	}, nil)
+	h := f.h
+	h.mu.Lock()
+	delete(h.hostHeaders, headerID)
+	h.mu.Unlock()
+	current := func() bool { return true }
+	plan := headerPlan{active: true, hash: "nil-plan"}
+	for i := 0; i < 2; i++ {
+		d := deliveredDoc{Hashes: map[string]string{}}
+		u, stop := h.runHeaders(headerID, plan, current, &d, time.Now())
+		if stop || !u.OK || u.Skipped != SkipUnchanged {
+			t.Errorf("run %d: unit = %+v (stop %v), want unchanged", i, u, stop)
+		}
+	}
+	if calls != 0 {
+		t.Errorf("%d policy writes for an unchanged empty plan", calls)
+	}
+}
+
+// M3: the directory state failing for the policy write (the snapshot the
+// header unit used was fine): the existing file keeps its fields and
+// users, only its hosts section follows the plan — a demotion still
+// reaches group-gate.
+func TestHeaderDemotionWithDirectoryStateDown(t *testing.T) {
+	f, _, _ := headerFixture(t, nil)
+	attrs := policy.BuildUserAttributes([]policy.AttrField{{Name: "cost_center"}}, map[string]map[string][]string{"carol": {"cost_center": {"CC-1"}}}, nil)
+	f.h.SetDirectory(func(context.Context) ([]policy.Expiring, *policy.UserAttributesDocument, error) {
+		return nil, &attrs, nil
+	}, nil)
+	headerEnable(t, f)
+	if got := attrHosts(t, f)[headerMain][hdrSuffix]["carol"]; got != "Editor" {
+		t.Fatalf("carol = %q, want Editor", got)
+	}
+	f.h.SetDirectory(func(context.Context) ([]policy.Expiring, *policy.UserAttributesDocument, error) {
+		return nil, nil, errors.New("directory publish failed")
+	}, nil)
+	res, err := f.h.SaveSettings(headerID, SettingsUpdate{Person: map[string]PersonChange{
+		"role": {Default: raw("Viewer"), Rows: rows("{{ADMIN_GROUP}}", "Admin")},
+	}}, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	settle(f)
+	if u, _ := unit(res.Deliveries, unitHeaders); !u.OK || u.Error != "" {
+		t.Errorf("unit headers = %+v", u)
+	}
+	doc, _ := readAttrs(t, f)
+	if got := doc.Hosts[headerMain][hdrSuffix]["carol"]; got != "Viewer" {
+		t.Errorf("carol = %q with the directory state down, want Viewer (demoted)", got)
+	}
+	if got := doc.Users["carol"]["cost_center"]; len(got) != 1 || got[0] != "CC-1" {
+		t.Errorf("the kept file's users = %v, want carol's cost_center kept", doc.Users)
+	}
+}
+
+// M4: a committed SetHosts queues a delivery, so the headers move to the
+// new host even when the restart fails.
+func TestHeadersFollowSetHosts(t *testing.T) {
+	f, _, _ := headerFixture(t, nil)
+	headerEnable(t, f)
+	const moved = "dash-c.example.org"
+	f.runner.mu.Lock()
+	f.runner.upErr = errors.New("up failed")
+	f.runner.mu.Unlock()
+	if err := f.h.SetHosts(headerID, map[string]string{"dash": moved, "dash-team": headerExtra, "dash-status": headerStatus}, "admin"); err == nil {
+		t.Log("SetHosts: the restart did not fail")
+	}
+	settle(f)
+	hosts := attrHosts(t, f)
+	if got := hosts[moved][hdrSuffix]; !reflect.DeepEqual(got, headerWant) {
+		t.Errorf("%s = %v, want %v (hosts %v)", moved, got, headerWant, hosts)
+	}
+	if _, ok := hosts[headerMain]; ok {
+		t.Errorf("the old host %s keeps headers: %v", headerMain, hosts)
 	}
 }

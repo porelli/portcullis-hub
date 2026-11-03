@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/portcullis/hub/internal/policy"
 )
 
 // Settings (template contract v3, integration contracts §13): the
@@ -453,8 +455,9 @@ var (
 	fileHookNameRe = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,31}$`)
 	fieldRe        = regexp.MustCompile(`^[a-z][a-z0-9_]{0,39}$`)
 	claimNameRe    = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
-	// HeaderDeliveryRe is the header delivery name form (§13.6).
-	HeaderDeliveryRe = regexp.MustCompile(`^X-Forwarded-Attr-[A-Za-z0-9][A-Za-z0-9-]{0,62}$`)
+	// HeaderDeliveryRe is the header delivery name form (§13.6): the
+	// policy package's (group-gate's suffix form after the prefix).
+	HeaderDeliveryRe = policy.HeaderNameRe
 )
 
 // Group placeholders: the only group_values keys (stored as written).

@@ -805,6 +805,15 @@ func (h *Hub) writePolicy() (attrsWritten bool, retErr error) {
 	var errs []error
 	switch {
 	case keepAttrs:
+		// The directory's fields and users stay as published; the hosts
+		// section (header deliveries, from their own snapshots) follows,
+		// so a demotion still reaches group-gate. No readable v2 file:
+		// kept as it is.
+		written, err := h.replaceAttrHosts(hosts)
+		attrsWritten = written
+		if err != nil {
+			errs = append(errs, err)
+		}
 	case attrs == nil && len(hosts) == 0:
 		attrsWritten = true
 		if err := os.Remove(h.attributesPath()); err != nil && !errors.Is(err, os.ErrNotExist) {

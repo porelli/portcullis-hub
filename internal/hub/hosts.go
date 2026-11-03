@@ -600,6 +600,12 @@ func (h *Hub) SetHosts(instanceID string, hosts map[string]string, actor string)
 		errs = append(errs, fmt.Errorf("policy file write failed (retry the change): %w", perr))
 	}
 	log.Printf("instance %s: %s", instanceID, detail)
+	if ch.enabled && (headersNeedPeople(&view) || h.headerRecorded(instanceID)) {
+		// The header deliveries are keyed by host: a delivery moves them
+		// to the new hostnames whatever the restart does (queued: it runs
+		// once this operation releases the instance).
+		h.TriggerDelivery(instanceID, TriggerMembership, true)
+	}
 	if ch.enabled {
 		defer h.TriggerReconcile()
 		if rerr := h.restartLocked(&view); rerr != nil {
