@@ -476,6 +476,9 @@ func (h *Hub) removeUnfinishedRestoreAs(id, archive string) {
 			log.Printf("instance %s: removing %s: %v", id, p, err)
 		}
 	}
+	if err := h.removeSecrets(id); err != nil {
+		log.Printf("instance %s: removing its settings store: %v", id, err)
+	}
 	h.mu.Lock()
 	var groups []string
 	if v := h.findLocked(id); v != nil {
@@ -586,16 +589,24 @@ func (h *Hub) applyRestore(id string, sb *staged, plan []volumePlan, wasEnabled 
 	h.mu.Lock()
 	h.applyConfigLocked(id, sb.cfg)
 	h.rebuildLocked()
+	// The secrets store as archived (config/settings-secrets.json; none =
+	// no secrets), before the env is written from it.
+	var secretsErr error
+	if v := h.findLocked(id); v != nil {
+		secretsErr = h.restoreSecretsLocked(v, sb.secrets, false)
+	} else {
+		secretsErr = h.writeArchivedSecrets(id, sb.secrets)
+	}
 	if v := h.findLocked(id); v != nil {
 		h.seedSettingsLocked(v)
 	}
 	var envErr error
-	if v := h.findLocked(id); v != nil {
+	if v := h.findLocked(id); v != nil && secretsErr == nil {
 		envErr = h.refreshInstanceEnvLocked(v)
 	}
 	saveErr := h.st.Save(h.statePath())
 	h.mu.Unlock()
-	if err := errors.Join(envErr, saveErr); err != nil {
+	if err := errors.Join(secretsErr, envErr, saveErr); err != nil {
 		return err
 	}
 	if wasEnabled {
@@ -791,6 +802,9 @@ func (h *Hub) restoreInstanceAs(archive, newID, actor string, hosts map[string]s
 				errs = append(errs, err)
 			}
 		}
+		if err := h.removeSecrets(newID); err != nil {
+			errs = append(errs, err)
+		}
 		h.mu.Lock()
 		delete(h.st.Instances, newID)
 		h.applyConfigLocked(newID, instanceConfig{})
@@ -831,7 +845,9 @@ func (h *Hub) restoreInstanceAs(archive, newID, actor string, hosts map[string]s
 	var envErr error
 	if v := h.findLocked(newID); v == nil {
 		envErr = fmt.Errorf("instance %s does not resolve", newID)
-	} else if sb.env != nil {
+	} else if envErr = h.restoreSecretsLocked(v, sb.secrets, true); envErr == nil && sb.env != nil {
+		// Secrets copied, generate-declared ones regenerated (as client
+		// secret_envs are), before the env is written from them.
 		envErr = h.generateAppEnvLocked(v)
 	}
 	saveErr := h.st.Save(h.statePath())

@@ -262,6 +262,11 @@ func (h *Hub) deleteSteps(id, actor string, res *DeleteResult) error {
 			return fmt.Errorf("removing %s: %w", p, err)
 		}
 	}
+	// The settings store (<data>/settings/<id>/: secrets); its values
+	// are in the delete's backup.
+	if err := h.removeSecrets(id); err != nil {
+		return fmt.Errorf("removing the settings store of %s: %w", id, err)
+	}
 	h.opsMu.Lock()
 	delete(h.ops, id)
 	delete(h.hostsOps, id)

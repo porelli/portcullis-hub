@@ -102,6 +102,11 @@ settings:
       resolve: max
       group_values: {"{{ADMIN_GROUP}}": 100GiB}
       delivery: [{file: {name: people, field: quota}}]
+    - key: admin_token
+      label: Admin token
+      type: secret
+      applies: live
+      delivery: [{hook: motd}]
 ports:
   - key: IMMICH_PORT
     container: 2283
@@ -465,11 +470,20 @@ func TestBackupCarriesTypedSettings(t *testing.T) {
 	f.h.mu.Lock()
 	s := f.h.st.Settings["immich-b"]
 	s.Person["quota"] = state.PersonSetting{Default: int64(5 << 30), Resolve: "max", Rows: []state.GroupValue{{Group: "staff", GroupID: 7, Value: "unlimited"}}}
-	s.Secrets = map[string]state.SecretMeta{}
 	f.h.st.Settings["immich-b"] = s
 	f.h.saveLocked()
-	want := s.Clone()
 	f.h.mu.Unlock()
+	// A real secret: its metadata in state, its value in the store.
+	const secret = "tok-9f8e7d6c5b4a"
+	if err := f.h.save("immich-b", SettingsUpdate{Secrets: map[string]SecretChange{"admin_token": setSecret(secret)}}); err != nil {
+		t.Fatal(err)
+	}
+	f.h.mu.Lock()
+	want := f.h.st.Settings["immich-b"].Clone()
+	f.h.mu.Unlock()
+	if _, ok := want.Secrets["admin_token"]; !ok {
+		t.Fatalf("no secret metadata: %+v", want.Secrets)
+	}
 
 	entry, err := f.h.BackupInstance("immich-b", "root")
 	if err != nil {
@@ -480,8 +494,17 @@ func TestBackupCarriesTypedSettings(t *testing.T) {
 	if err := yaml.Unmarshal(data["config/instance.yaml"], &cfg); err != nil || cfg.Settings == nil {
 		t.Fatalf("instance.yaml: %v\n%s", err, data["config/instance.yaml"])
 	}
-	if bytes.Contains(data["config/instance.yaml"], []byte("secret")) {
-		t.Errorf("instance.yaml mentions secrets:\n%s", data["config/instance.yaml"])
+	if _, ok := cfg.Settings.Secrets["admin_token"]; !ok {
+		t.Errorf("instance.yaml lacks the secret's metadata:\n%s", data["config/instance.yaml"])
+	}
+	// The value is in config/settings-secrets.json and nowhere else.
+	if !bytes.Contains(data[secretsMember], []byte(secret)) {
+		t.Errorf("%s lacks the secret", secretsMember)
+	}
+	for name, b := range data {
+		if name != secretsMember && bytes.Contains(b, []byte(secret)) {
+			t.Errorf("archive member %s holds the secret value", name)
+		}
 	}
 	// The size row is not valid for quota without allow_unlimited:
 	// refused on restore, nothing changes.
@@ -504,7 +527,9 @@ func TestBackupCarriesTypedSettings(t *testing.T) {
 	f.h.mu.RLock()
 	got := f.h.st.Settings["immich-c"].Clone()
 	f.h.mu.RUnlock()
-	want.Secrets = nil
+	if _, ok := got.Secrets["admin_token"]; !ok || storedSecrets(t, f, "immich-c")["admin_token"] != secret {
+		t.Errorf("restore-as didn't copy the secret: %+v", got.Secrets)
+	}
 	if fmt.Sprint(got.Values) != fmt.Sprint(want.Values) || !reflect.DeepEqual(got.Ports, want.Ports) || fmt.Sprint(got.Person) != fmt.Sprint(want.Person) || len(got.Groups) != 0 {
 		t.Errorf("restored:\n got %#v\nwant %#v", got, want)
 	}

@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -213,10 +212,12 @@ func opHint(out string) string {
 
 var secretKeyRe = regexp.MustCompile(`(?i)secret|passw|token|key|salt|credential|private|auth|cookie`)
 
-// secretRedactor returns a function that blanks the values of the app's and
-// core's secret-looking env variables (and generated ones) in s. Compose
-// doesn't print env values on up/down, but its error output is shown to the
-// browser and stored: never let one through.
+// secretRedactor returns a function that blanks, in s, the instance's
+// stored secret settings (knownSecrets, whatever their length) and the
+// values of the app's and core's secret-looking env variables (and
+// generated ones). Compose doesn't print env values on up/down, but its
+// error output is shown to the browser and stored: never let one through.
+// Used by finishOp and the async ops (finishAsync); redact, then clip.
 func (h *Hub) secretRedactor(id string) func(string) string {
 	generated := map[string]bool{}
 	if t := h.Template(id); t != nil {
@@ -234,14 +235,8 @@ func (h *Hub) secretRedactor(id string) func(string) string {
 			}
 		}
 	}
-	// Longest first, so a secret containing another is blanked whole.
-	sort.Slice(vals, func(i, j int) bool { return len(vals[i]) > len(vals[j]) })
-	return func(s string) string {
-		for _, v := range vals {
-			s = strings.ReplaceAll(s, v, "[redacted]")
-		}
-		return s
-	}
+	vals = append(vals, h.knownSecrets(id)...)
+	return func(s string) string { return redactValues(s, vals) }
 }
 
 // clipRunes shortens s to at most n bytes on a rune boundary.

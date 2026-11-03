@@ -127,17 +127,44 @@ func (h *Hub) portEnvLocked(t *templates.Template) map[string]string {
 // (unquoted values; the writers single-quote them): every env name of an
 // instance option, rendered per delivery (RenderDelivery; an indexed
 // NAME_{n} one item per variable, unused ones empty), empty when the
-// option has no value. Left alone (P12): secret
-// options (their store writes them), group-scope options (their records)
-// and person-entered lists (the delivery engine writes those outside
-// mu). Caller must hold mu.
+// option has no value. A secret option's value comes from the secrets
+// store (empty when unset or cleared). Left alone (P12): group-scope
+// options (their records) and person-entered lists (the delivery engine
+// writes those outside mu). Errors never carry a value. Caller must hold
+// mu.
 func (h *Hub) optionEnvLocked(t *templates.Template) (map[string]string, error) {
 	s := h.st.Settings[t.ID]
 	out := map[string]string{}
+	var secrets map[string]string
 	opts := t.Manifest.Options()
 	for i := range opts {
 		o := &opts[i]
-		if o.EffectiveScope() != templates.ScopeInstance || o.Type == templates.TypeSecret {
+		if o.EffectiveScope() != templates.ScopeInstance {
+			continue
+		}
+		if o.Type == templates.TypeSecret {
+			if len(envDeliveries(o)) == 0 {
+				continue
+			}
+			if secrets == nil {
+				var err error
+				if secrets, err = h.secretValues(t.ID); err != nil {
+					return nil, err
+				}
+			}
+			var v any
+			if x := secrets[o.Key]; x != "" {
+				if _, set := s.Secrets[o.Key]; set {
+					v = x
+				}
+			}
+			env, err := renderOptionEnv(o, v)
+			if err != nil {
+				return nil, fmt.Errorf("setting %s: %s", o.Key, redactValues(err.Error(), []string{secrets[o.Key]}))
+			}
+			for k, x := range env {
+				out[k] = x
+			}
 			continue
 		}
 		v, ok := h.effectiveValue(t, o, s)

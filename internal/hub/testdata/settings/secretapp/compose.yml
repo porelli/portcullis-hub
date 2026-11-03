@@ -1,0 +1,15 @@
+services:
+  server:
+    image: secretapp
+    environment:
+      API_KEY: ${HEADSCALE_API_KEY}
+    volumes:
+      - data:/data
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.secretapp.rule: Host(`${PORTCULLIS_HOST_SECRETAPP:-secretapp.portcullis.local}`)
+      traefik.http.routers.secretapp.entrypoints: websecure
+      traefik.http.routers.secretapp.middlewares: portcullis-auth@docker,portcullis-groups@docker
+      traefik.http.services.secretapp.loadbalancer.server.port: "8080"
+volumes:
+  data: {}

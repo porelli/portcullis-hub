@@ -77,7 +77,13 @@ func (h *Hub) auditOp(actor, action, target, detail string, err error) {
 	}
 	e := directory.AuditEntry{Actor: actor, Action: action, Target: target, Detail: detail, Result: "ok"}
 	if err != nil {
-		e.Result, e.Error = "error", err.Error()
+		msg := err.Error()
+		// An instance's errors are redacted like its op records (stored
+		// secret settings, secret-looking env values).
+		if inst, _, _ := strings.Cut(target, "/"); templates.ValidID(inst) {
+			msg = h.secretRedactor(inst)(msg)
+		}
+		e.Result, e.Error = "error", msg
 		var se *StatusError
 		if errors.As(err, &se) && se.Status < 500 {
 			e.Result = "refused"

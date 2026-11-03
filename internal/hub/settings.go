@@ -49,6 +49,9 @@ type AppSettingsView struct {
 	SignIn *SignInView `json:"sign_in,omitempty"`
 	// PublicAccess is set when the manifest declares auth.public_access.
 	PublicAccess *PublicAccessView `json:"public_access,omitempty"`
+	// Secrets: every secret option, set or not (write-only: never a
+	// value).
+	Secrets map[string]SecretView `json:"secrets"`
 }
 
 // SignInView is the "Sign-in" setting of an app with its own login.
@@ -99,6 +102,7 @@ func (h *Hub) AppSettings(id string) (*AppSettingsView, error) {
 		}
 	}
 	v.PublicAccess = h.publicViewLocked(t, eff)
+	v.Secrets = h.secretViewsLocked(t)
 	return v, nil
 }
 
@@ -134,6 +138,15 @@ type parsedSettings struct {
 	values map[string]any
 	person map[string]state.PersonSetting
 	groups map[string][]state.GroupValue
+	// secrets: the secret changes (a value given or generated, or a
+	// clear). Never logged or echoed.
+	secrets map[string]secretOp
+}
+
+// secretOp is one parsed secret change.
+type secretOp struct {
+	value            string
+	clear, generated bool
 }
 
 // ValidateSettings checks a settings update against template t: ports
@@ -310,7 +323,7 @@ func parsePerson(kinds *settings.Registry, folders FolderSource, o *templates.Op
 // parseSettings validates u's settings part against t (ValidateSettings)
 // and returns it canonical.
 func parseSettings(t *templates.Template, kinds *settings.Registry, folders FolderSource, u SettingsUpdate) (*parsedSettings, error) {
-	out := &parsedSettings{values: map[string]any{}, person: map[string]state.PersonSetting{}, groups: map[string][]state.GroupValue{}}
+	out := &parsedSettings{values: map[string]any{}, person: map[string]state.PersonSetting{}, groups: map[string][]state.GroupValue{}, secrets: map[string]secretOp{}}
 	if u.Ports != nil {
 		if err := validatePorts(t, u.Ports); err != nil {
 			return nil, err
@@ -394,9 +407,57 @@ func parseSettings(t *templates.Template, kinds *settings.Registry, folders Fold
 		if o == nil || o.Type != templates.TypeSecret {
 			return nil, statusErr(400, "setting %q is not a secret option", clip(k, 64))
 		}
-		return nil, statusErr(400, "setting %s: secret settings are not available in this Hub version yet", k)
+		op, err := parseSecretChange(kinds, o, u.Secrets[k])
+		if err != nil {
+			return nil, err
+		}
+		out.secrets[k] = op
 	}
 	return out, nil
+}
+
+// parseSecretChange checks one secret change: exactly one of a value, a
+// generate (the option must declare generate) or a clear; an empty value
+// is not a clear. A value must parse as a secret and, when delivered by
+// env, be one env can carry single-quoted. Errors name the option, never
+// the value.
+func parseSecretChange(kinds *settings.Registry, o *templates.Option, c SecretChange) (secretOp, error) {
+	if o.EffectiveScope() != templates.ScopeInstance {
+		return secretOp{}, statusErr(400, "setting %s: only instance secrets can be set", o.Key)
+	}
+	if c.Value != nil && *c.Value == "" && !c.Clear && !c.Generate {
+		return secretOp{}, statusErr(400, "setting %s: an empty value doesn't clear a secret: clearing needs an explicit action (clear)", o.Key)
+	}
+	n := 0
+	for _, b := range []bool{c.Value != nil, c.Generate, c.Clear} {
+		if b {
+			n++
+		}
+	}
+	if n != 1 {
+		return secretOp{}, statusErr(400, "setting %s: give exactly one of a value, generate or clear", o.Key)
+	}
+	switch {
+	case c.Clear:
+		return secretOp{clear: true}, nil
+	case c.Generate:
+		if o.Generate == nil {
+			return secretOp{}, statusErr(400, "setting %s: the template declares no generate for this secret: enter a value", o.Key)
+		}
+		v, err := generateSecret(o.Generate)
+		if err != nil {
+			return secretOp{}, statusErr(500, "setting %s: %v", o.Key, err)
+		}
+		return secretOp{value: v, generated: true}, nil
+	}
+	v, err := parseValue(kinds, nil, o, *c.Value)
+	if err != nil {
+		return secretOp{}, statusErr(400, "setting %s: %s", o.Key, redactValues(err.Error(), []string{*c.Value}))
+	}
+	if _, err := renderOptionEnv(o, v); err != nil {
+		return secretOp{}, statusErr(400, "setting %s: %s", o.Key, redactValues(err.Error(), []string{*c.Value}))
+	}
+	return secretOp{value: *c.Value}, nil
 }
 
 // validatePorts checks a port configuration (keys: the template's port
@@ -641,6 +702,9 @@ func (h *Hub) Deliver(ctx context.Context, id string, trig Trigger) (*DeliveryRe
 type settingChange struct {
 	key, scope, group string
 	before, after     string
+	// secret: a secret's change (replaced, generated, cleared) instead
+	// of before -> after.
+	secret string
 }
 
 // showValue is v as the audit and the panel show it ("unset" = none).
@@ -821,8 +885,17 @@ func (h *Hub) saveSettings(t *templates.Template, u SettingsUpdate, parsed *pars
 			return res, false, err
 		}
 	}
+	// Secret values go to their store before state names them (the
+	// metadata): a failed write changes nothing.
+	restoreSecrets, err := h.applySecretsLocked(id, parsed.secrets)
+	if err != nil {
+		undo()
+		h.mu.Unlock()
+		return res, false, err
+	}
 	publicChanged, err := h.applyPublicUpdateLocked(t, u)
 	if err != nil {
+		restoreSecrets()
 		undo()
 		h.mu.Unlock()
 		return res, false, err
@@ -960,6 +1033,41 @@ func (h *Hub) nextSettingsLocked(t *templates.Template, cur state.InstanceSettin
 		}
 		effects = append(effects, e)
 	}
+	now := time.Now().UTC()
+	for _, k := range slices.Sorted(maps.Keys(parsed.secrets)) {
+		o := optionByKey(t, k)
+		op := parsed.secrets[k]
+		_, had := cur.Secrets[k]
+		detail := secretReplaced
+		if op.clear {
+			if !had {
+				continue
+			}
+			if o.Required {
+				return next, nil, nil, nil, statusErr(400, "setting %s is required", k)
+			}
+			delete(next.Secrets, k)
+			detail = secretCleared
+		} else {
+			if next.Secrets == nil {
+				next.Secrets = map[string]state.SecretMeta{}
+			}
+			next.Secrets[k] = state.SecretMeta{UpdatedAt: now, Generated: op.generated}
+			if op.generated {
+				detail = secretGenerated
+			}
+		}
+		changes = append(changes, settingChange{key: k, scope: templates.ScopeInstance, secret: detail})
+		e := settings.EffectOf(o.EffectiveApplies())
+		own = append(own, e)
+		if len(envDeliveries(o)) > 0 {
+			e = settings.EffectRestart
+		}
+		effects = append(effects, e)
+	}
+	if len(next.Secrets) == 0 {
+		next.Secrets = nil
+	}
 	if len(parsed.values) > 0 && t.Manifest.Settings != nil {
 		if err := settings.CheckRequires(t.Manifest.Settings, h.instanceValuesLocked(t, next)); err != nil {
 			return next, nil, nil, nil, statusErr(400, "%v", err)
@@ -972,6 +1080,35 @@ func (h *Hub) nextSettingsLocked(t *templates.Template, cur state.InstanceSettin
 		next.Types = nil
 	}
 	return next, effects, own, changes, nil
+}
+
+// applySecretsLocked writes ops into instance id's secrets store and
+// returns how to put the previous store back. Errors carry no value.
+// Caller must hold mu (write).
+func (h *Hub) applySecretsLocked(id string, ops map[string]secretOp) (func(), error) {
+	if len(ops) == 0 {
+		return func() {}, nil
+	}
+	prev, err := h.secretValues(id)
+	if err != nil {
+		return nil, statusErr(500, "%v", err)
+	}
+	next := maps.Clone(prev)
+	for k, op := range ops {
+		if op.clear {
+			delete(next, k)
+		} else {
+			next[k] = op.value
+		}
+	}
+	if err := h.writeSecrets(id, next); err != nil {
+		return nil, statusErr(500, "nothing was saved: %v", err)
+	}
+	return func() {
+		if err := h.writeSecrets(id, prev); err != nil {
+			log.Printf("settings: %s: putting the previous secrets back failed: %v", id, err)
+		}
+	}, nil
 }
 
 // settingsEmpty reports an empty value (required options).
@@ -1002,7 +1139,12 @@ func (h *Hub) auditSettings(id, actor string, u SettingsUpdate, changes []settin
 			if c.group != "" {
 				d += " group=" + c.group
 			}
-			h.auditOp(actor, "settings.change", id+"/"+c.key, d+": "+c.before+" -> "+c.after, nil)
+			if c.secret != "" {
+				d += ": " + c.secret
+			} else {
+				d += ": " + c.before + " -> " + c.after
+			}
+			h.auditOp(actor, "settings.change", id+"/"+c.key, d, nil)
 		}
 		if err != nil {
 			h.auditOp(actor, "settings.change", id, "delivery", err)
@@ -1149,20 +1291,31 @@ func (h *Hub) applyDefaultPolicy() {
 
 // ── Expert mode (compose layers: useroverride.go) ─────────
 
-// Env returns an app's .env variables and compose service names.
+// Env returns an app's .env variables and compose service names. The
+// variables of secret options are shown as [set] (write-only: set them
+// under Settings).
 func (h *Hub) Env(id string) (map[string]string, []string, error) {
 	t := h.Template(id)
 	if t == nil {
 		return nil, nil, ErrNotFound
 	}
-	return readEnvFile(h.envPath(id)), templates.Services(t.ReadCompose()), nil
+	vars := readEnvFile(h.envPath(id))
+	for n := range secretOptionEnvNames(t) {
+		if vars[n] != "" {
+			vars[n] = settings.SecretShown
+		}
+	}
+	return vars, templates.Services(t.ReadCompose()), nil
 }
 
-// SaveEnv sets variables in an app's .env.
+// SaveEnv sets variables in an app's .env. A variable an option owns
+// (its env delivery) is refused: it is set under Settings, which writes it.
 func (h *Hub) SaveEnv(id string, vars map[string]string) error {
-	if h.Template(id) == nil {
+	t := h.Template(id)
+	if t == nil {
 		return ErrNotFound
 	}
+	owners := optionEnvOwners(t)
 	if err := h.pending(id); err != nil {
 		return err
 	}
@@ -1173,6 +1326,9 @@ func (h *Hub) SaveEnv(id string, vars map[string]string) error {
 		// Routing, hostnames and names come from the Hub, never the env.
 		if templates.ReservedVar(k) || k == "PORTCULLIS_DOMAIN" {
 			return statusErr(400, "%s is set by the Hub", k)
+		}
+		if o, ok := owners[k]; ok {
+			return statusErr(400, "%s belongs to the setting %s: set it under Settings", k, o)
 		}
 	}
 	for k, v := range vars {

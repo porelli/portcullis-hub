@@ -32,8 +32,9 @@ import (
 
 // Instance backups (contract §11.5): <data>/backups/<id>/<UTC>.tar, an
 // uncompressed tar of MANIFEST.json (first; sha256 of every other member),
-// config/instance.yaml, config/env, config/override.yml, config/user.yml
-// and volumes/<key>.tar (one inner tar per volume, as the daemon's archive
+// config/instance.yaml, config/env (secret settings' variables blanked),
+// config/override.yml, config/user.yml, config/settings-secrets.json
+// (the secrets store, when there is one) and volumes/<key>.tar (one inner tar per volume, as the daemon's archive
 // endpoint produces it: entries "data/…", numeric uid/gid, modes, mtimes).
 //
 // Volume I/O never runs a process: a helper container (HelperImage)
@@ -101,6 +102,10 @@ type BackupEntry struct {
 	Size           int64     `json:"size"`
 	InstanceExists bool      `json:"instance_exists"`
 }
+
+// secretsMember is the archive member with the instance's secret settings
+// (its secrets store; 0600 like every member, the archive is 0600 too).
+const secretsMember = "config/settings-secrets.json"
 
 // instanceConfig is config/instance.yaml: the instance's state entry.
 type instanceConfig struct {
@@ -382,12 +387,35 @@ func (h *Hub) backupLocked(id, reason string, keepStopped bool) (*BackupEntry, e
 	if err := add("config/instance.yaml", inst); err != nil {
 		return nil, statusErr(500, "backup: %v", err)
 	}
+	// Secret settings are in config/settings-secrets.json only: their
+	// env variables are blanked in config/env (a restore writes them
+	// from the store again).
+	var secretEnv map[string]bool
+	if tg.view != nil {
+		secretEnv = secretOptionEnvNames(tg.view)
+	}
+	secrets, err := h.secretValues(id)
+	if err != nil {
+		return nil, statusErr(500, "backup: %v", err)
+	}
+	if len(secrets) > 0 {
+		data, err := json.MarshalIndent(secrets, "", "  ")
+		if err == nil {
+			err = add(secretsMember, data)
+		}
+		if err != nil {
+			return nil, statusErr(500, "backup %s failed", secretsMember)
+		}
+	}
 	for member, src := range map[string]string{"config/env": h.envPath(id), "config/override.yml": h.overridePath(id), "config/user.yml": h.userOverridePath(id)} {
 		data, err := os.ReadFile(src)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
 		if err == nil {
+			if member == "config/env" {
+				data = blankEnvNames(data, secretEnv)
+			}
 			err = add(member, data)
 		}
 		if err != nil {
@@ -782,7 +810,7 @@ func (m *BackupManifest) validate() error {
 			return fmt.Errorf("%s: bad sha256 for %s", manifestMember, name)
 		}
 		switch name {
-		case "config/instance.yaml", "config/env", "config/override.yml", "config/user.yml":
+		case "config/instance.yaml", "config/env", "config/override.yml", "config/user.yml", secretsMember:
 			continue
 		}
 		key, ok := strings.CutPrefix(name, "volumes/")
@@ -812,6 +840,7 @@ type staged struct {
 	cfg     instanceConfig
 	env     []byte            // nil: no config/env
 	user    []byte            // nil: no config/user.yml
+	secrets []byte            // nil: no config/settings-secrets.json
 	volumes map[string]string // key → staged inner tar
 }
 
@@ -933,6 +962,11 @@ func (s *staged) unpack(tr *tar.Reader) error {
 			s.env = data
 		case "config/user.yml":
 			s.user = data
+		case secretsMember:
+			if _, err := parseSecrets(data); err != nil {
+				return fmt.Errorf("%s: %w", secretsMember, err)
+			}
+			s.secrets = data
 		}
 	}
 	for name := range s.m.Files {

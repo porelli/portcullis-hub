@@ -1,0 +1,26 @@
+name: Secret App
+category: tools
+instances: multi
+auth:
+  method: header-auth
+  group_access: true
+  access_group: users_secretapp
+  admin_group: admin_secretapp
+urls:
+  - label: Web
+    url: "https://{{HOST_SECRETAPP}}"
+hooks:
+  - {name: rotate, service: server, command: [/bin/rotate], when: [settings_change]}
+settings:
+  options:
+    - key: api_key
+      label: API key
+      type: secret
+      applies: restart
+      delivery: [{env: HEADSCALE_API_KEY}]
+    - key: token
+      label: Token
+      type: secret
+      generate: {length: 32, charset: alphanumeric}
+      applies: live
+      delivery: [{hook: rotate}]
