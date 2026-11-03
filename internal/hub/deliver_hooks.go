@@ -242,7 +242,7 @@ func (h *Hub) runHooks(ctx context.Context, t *templates.Template, step hookStep
 		hk := o.hook
 		unit := hookUnit(hk.Name)
 		declared := want != "" && slices.Contains(hk.When, want)
-		forced := step.trig == TriggerRetry || step.force[hk.Name] ||
+		forced := step.trig == TriggerRetry || step.force[forceAllHooks] || step.force[hk.Name] ||
 			(step.forceWhen != "" && slices.Contains(hk.When, step.forceWhen)) ||
 			(declared && step.trig == TriggerStart)
 		pending := o.hash == "" || step.delivered.Hashes[unit] != o.hash

@@ -931,3 +931,29 @@ func TestClaimClearedWithoutUUID(t *testing.T) {
 		t.Errorf("dave's quota = %v after leaving, want cleared", got)
 	}
 }
+
+// Residual M1: a busy Retry merged into a queued membership run keeps
+// "re-run every hook": the unchanged audit hook (settings_change only)
+// runs again.
+func TestBusyRetryMergedKeepsForceAll(t *testing.T) {
+	f, _, _ := hookFixture(t)
+	enableHook(t, f)
+	f.h.Deliver(context.Background(), hookID, TriggerRetry)
+	f.h.Wait()
+	f.h.TriggerMembershipDelivery() // a debounced membership run is queued
+	if !f.h.DeliveryStatus(hookID).Pending {
+		t.Fatal("no membership run queued")
+	}
+	l := f.h.deliverLock(hookID)
+	l.Lock()
+	n := len(f.engine.ExecCalls())
+	if _, err := f.h.RetryDeliveries(context.Background(), hookID, "admin"); err != nil {
+		l.Unlock()
+		t.Fatal(err)
+	}
+	l.Unlock()
+	f.h.Wait()
+	if runs := hookRuns(t, f, "/audit", n); len(runs) != 1 {
+		t.Errorf("audit ran %d times after the merged retry, want 1 (every hook re-run)", len(runs))
+	}
+}

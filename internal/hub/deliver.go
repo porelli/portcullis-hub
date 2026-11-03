@@ -109,6 +109,11 @@ type queuedDelivery struct {
 	real  bool
 }
 
+// forceAllHooks in a run's force set re-runs every hook (a retry merged
+// into a queued run of another trigger). Never a hook name (hook names
+// match the validator's name rule).
+const forceAllHooks = "*"
+
 // deliverOpts: effect is a save's effect on the running instance (P5:
 // SaveSettings computes it, the engine applies it); lifecycle: the run is
 // part of a lifecycle operation that holds the instance's lock (compose
@@ -181,6 +186,11 @@ func (h *Hub) queueDelivery(id string, trig Trigger, effect string, delay time.D
 // request is a stuck-exec re-queue (not a new trigger).
 func (h *Hub) queueDeliveryWith(id string, trig Trigger, effect string, delay time.Duration, force []string, stuckRetry bool) {
 	h.setOwed(id, effect)
+	if trig == TriggerRetry {
+		// Merged into a run of another trigger (membership, save ranks
+		// higher), a retry still re-runs every hook.
+		force = append(slices.Clone(force), forceAllHooks)
+	}
 	h.deliveryMu.Lock()
 	if h.queued == nil {
 		h.queued = map[string]*queuedDelivery{}
