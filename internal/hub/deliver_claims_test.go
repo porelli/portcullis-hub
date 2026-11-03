@@ -318,6 +318,23 @@ func TestClaimVisibleAttributeRefused(t *testing.T) {
 	}
 }
 
+// T18 concern 2: a failed delivery unit is logged (redacted), not only
+// shown in the panel.
+func TestDeliveryUnitFailureLogged(t *testing.T) {
+	f, _, store := claimFixture(t)
+	logs := captureLog(t)
+	quota := SettingAttr(claimID, "storage_quota")
+	store.mu.Lock()
+	store.schema[quota] = lldapAttr(quota, true)
+	store.mu.Unlock()
+	claimEnable(t, f, claimID)
+	deliverNow(t, f, claimID, TriggerRetry)
+	want := "settings: " + claimID + ": delivery unit claim:" + quota + " failed: LLDAP attribute " + quota
+	if got := logs.String(); !strings.Contains(got, want) {
+		t.Errorf("log lacks %q:\n%s", want, got)
+	}
+}
+
 func TestDeleteRemovesClaims(t *testing.T) {
 	f, people, store := claimFixture(t)
 	people.addGroup("users_immich-b", "alice")

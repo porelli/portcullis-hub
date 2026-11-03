@@ -308,14 +308,12 @@ func (s *Server) graphql(caller, q string, vars map[string]interface{}) (interfa
 		}, nil
 	case op("addUserAttribute"):
 		name := str(vars["name"])
-		// LLDAP (v0.6.3 validate_attribute_name) refuses names outside
-		// a-z, A-Z, 0-9 and '-'. Enforced for the Hub-owned hidden
-		// attributes (AddHiddenUserAttribute: not visible); custom fields
-		// (visible) follow in a separate task.
-		if visible, _ := vars["isVisible"].(bool); !visible {
-			if bad := invalidAttrChars(name); bad != "" {
-				return nil, fmt.Errorf("Cannot create attribute with invalid name. Valid characters: a-z, A-Z, 0-9, and dash (-). Invalid chars found: %s", bad)
-			}
+		// LLDAP v0.6.3 refuses every attribute name outside a-z, A-Z,
+		// 0-9 and '-' (crates/validation/src/attributes.rs
+		// validate_attribute_name, called by add_user_attribute in
+		// crates/graphql-server/src/mutation/mod.rs), whatever its flags.
+		if bad := invalidAttrChars(name); bad != "" {
+			return nil, fmt.Errorf("Cannot create attribute with invalid name. Valid characters: a-z, A-Z, 0-9, and dash (-). Invalid chars found: %s", bad)
 		}
 		s.UserAttributeSchema[name] = AttributeSchema{
 			AttributeType: str(vars["attributeType"]),

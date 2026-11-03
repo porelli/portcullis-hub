@@ -9,6 +9,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/portcullis/hub/internal/lldap"
 	"github.com/portcullis/hub/internal/rules"
 )
 
@@ -42,7 +43,7 @@ func (s *Service) CreateField(ctx context.Context, c *Caller, f Field) error {
 			return &Error{Status: http.StatusServiceUnavailable, Msg: "custom fields not configured"}
 		}
 		if reservedAttr(f.Name) {
-			return refuse("field names starting with %q are reserved for the Hub's per-person setting attributes", ReservedAttrPrefix)
+			return refuse("field names starting with \"ps_\" are reserved: their LLDAP attribute (%q…) is one of the Hub's per-person setting attributes", ReservedAttrPrefix)
 		}
 		if !validFieldName(f.Name) {
 			return invalid("invalid field name: 1-31 lowercase letters and digits, starting with a letter; '_' only between two of them (not at the end, not doubled)")
@@ -86,20 +87,22 @@ func (s *Service) CreateField(ctx context.Context, c *Caller, f Field) error {
 			}
 		}
 
-		// Check if attribute already exists in LLDAP
+		// Check if attribute already exists in LLDAP (the field's LLDAP
+		// name: '_' → '-', LLDAP refuses '_')
+		attr := lldap.FieldAttrName(f.Name)
 		attrs, err := s.LLDAP.UserAttributes(ctx)
 		if err != nil {
 			return &Error{Status: http.StatusBadGateway, Msg: err.Error()}
 		}
 		for _, a := range attrs {
-			if a.Name == f.Name {
-				return refuse("LLDAP attribute %q already exists", f.Name)
+			if strings.EqualFold(a.Name, attr) {
+				return refuse("LLDAP attribute %q already exists", attr)
 			}
 		}
 
 		// Create in LLDAP first
 		isList := f.Multi
-		if err := s.LLDAP.AddUserAttribute(ctx, f.Name, isList); err != nil {
+		if err := s.LLDAP.AddUserAttribute(ctx, attr, isList); err != nil {
 			return &Error{Status: http.StatusBadGateway, Msg: fmt.Sprintf("creating LLDAP attribute: %v", err)}
 		}
 
@@ -107,8 +110,8 @@ func (s *Service) CreateField(ctx context.Context, c *Caller, f Field) error {
 		cfg.Fields = append(cfg.Fields, f)
 		if err := s.Store.Save(cfg); err != nil {
 			// Best-effort rollback: delete the LLDAP attribute
-			if derr := s.LLDAP.DeleteUserAttribute(ctx, f.Name); derr != nil {
-				return fmt.Errorf("saving directory.yaml failed (%v) and rolling back the LLDAP attribute failed (%v): manually delete attribute %q in LLDAP", err, derr, f.Name)
+			if derr := s.LLDAP.DeleteUserAttribute(ctx, attr); derr != nil {
+				return fmt.Errorf("saving directory.yaml failed (%v) and rolling back the LLDAP attribute failed (%v): manually delete attribute %q in LLDAP", err, derr, attr)
 			}
 			return fmt.Errorf("save directory.yaml: %w", err)
 		}
@@ -356,8 +359,9 @@ func (s *Service) DeleteField(ctx context.Context, c *Caller, name, confirm stri
 		}
 
 		// Then delete from LLDAP (deleting the attribute drops all values)
-		if err := s.LLDAP.DeleteUserAttribute(ctx, name); err != nil {
-			return &Error{Status: http.StatusBadGateway, Msg: fmt.Sprintf("deleting LLDAP attribute failed (%v): the LLDAP attribute %q is left behind and must be removed (portcullis lldap-ui) before re-creating the field", err, name)}
+		attr := lldap.FieldAttrName(name)
+		if err := s.LLDAP.DeleteUserAttribute(ctx, attr); err != nil {
+			return &Error{Status: http.StatusBadGateway, Msg: fmt.Sprintf("deleting LLDAP attribute failed (%v): the LLDAP attribute %q is left behind and must be removed (portcullis lldap-ui) before re-creating the field", err, attr)}
 		}
 
 		return nil

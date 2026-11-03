@@ -784,9 +784,7 @@ func (h *Hub) runClaimsOnly(ctx context.Context, id string) error {
 		h.queueDelivery(id, TriggerMembership, settings.EffectNone, 0)
 		return nil
 	}
-	for _, u := range units {
-		delivered.Status[u.Unit] = u
-	}
+	recordUnits(id, &delivered, units)
 	h.saveDelivered(id, delivered)
 	return nil
 }

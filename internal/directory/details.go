@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/portcullis/hub/internal/lldap"
 )
 
 const maxTextRunes = 1024
@@ -58,7 +60,7 @@ func (s *Service) SetDetails(ctx context.Context, c *Caller, user string, attrs 
 
 		for name, vals := range trimmedAttrs {
 			if len(vals) == 0 {
-				remove = append(remove, name)
+				remove = append(remove, lldap.FieldAttrName(name))
 			} else {
 				set[name] = vals
 			}
@@ -67,7 +69,7 @@ func (s *Service) SetDetails(ctx context.Context, c *Caller, user string, attrs 
 			detail += changeDetail(u.Attributes, trimmedAttrs)
 		}
 
-		return s.LLDAP.SetUserAttributes(ctx, user, set, remove)
+		return s.LLDAP.SetUserAttributes(ctx, user, toLLDAPAttrs(set), remove)
 	})
 }
 

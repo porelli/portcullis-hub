@@ -39,7 +39,9 @@ func TestEnsureAttributeMappersIdempotent(t *testing.T) {
 		t.Fatalf("LDAP mappers = %s", got)
 	}
 	m := ldap["portcullis-attr-cost_center"]
-	want := map[string][]string{"ldap.attribute": {"cost_center"}, "user.model.attribute": {"attr_cost_center"}, "read.only": {"true"},
+	// The LDAP attribute is the field's LLDAP name (cost-center: LLDAP
+	// refuses '_'); the mapper and claim keep the field name.
+	want := map[string][]string{"ldap.attribute": {"cost-center"}, "user.model.attribute": {"attr_cost_center"}, "read.only": {"true"},
 		"always.read.value.from.ldap": {"true"}, "is.mandatory.in.ldap": {"false"}}
 	if m.ProviderID != "user-attribute-ldap-mapper" || m.ProviderType != "org.keycloak.storage.ldap.mappers.LDAPStorageMapper" ||
 		m.ParentID != kctest.LDAPProviderID || !reflect.DeepEqual(m.Config, want) {

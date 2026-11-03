@@ -408,6 +408,9 @@ func TestHookEchoedSecretRedacted(t *testing.T) {
 	logMu.Lock()
 	logged := logBuf.String()
 	logMu.Unlock()
+	if !strings.Contains(logged, "settings: "+hookID+": delivery unit hook:apply failed: ") {
+		t.Errorf("failed unit not logged: %.500q", logged)
+	}
 	for _, where := range []struct{ name, s string }{{"unit error", u.Error}, {"op record", op.Error}, {"log", logged}, {"status", f.h.DeliveryStatus(hookID).Units["hook:apply"].Error}} {
 		if !strings.Contains(where.s, "[redacted]") {
 			t.Errorf("%s: nothing redacted: %.300q", where.name, where.s)

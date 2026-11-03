@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/lldap"
 )
 
 // privEnv is an env with a store, an admin-only field (clearance) and
@@ -137,7 +138,7 @@ func TestPrivilegedGroupsAreGuarding(t *testing.T) {
 	// A rule that became privileged later (written straight to the store)
 	// adds nobody (addsBlocked).
 	e.ll.AddUser("bob", "bob@example.org", "Bob", "")
-	if err := e.svc.LLDAP.SetUserAttributes(ctx, "bob", map[string][]string{"office_location": {"Milan"}, "clearance": {"high"}}, nil); err != nil {
+	if err := e.svc.LLDAP.SetUserAttributes(ctx, "bob", map[string][]string{lldap.FieldAttrName("office_location"): {"Milan"}, "clearance": {"high"}}, nil); err != nil {
 		t.Fatal(err)
 	}
 	cfg, _ := store.Load()
@@ -200,7 +201,7 @@ func TestReservedAttrPrefix(t *testing.T) {
 		t.Fatal(err)
 	}
 	b, _ := json.Marshal(ov)
-	if strings.Contains(string(b), attr) {
+	if strings.Contains(string(b), attr) || strings.Contains(string(b), "ps_0123456789ab") {
 		t.Errorf("overview shows %s: %s", attr, b)
 	}
 	if !strings.Contains(string(b), "Milan") {

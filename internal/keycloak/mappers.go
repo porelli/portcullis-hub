@@ -11,6 +11,8 @@ import (
 	"strings"
 
 	"github.com/Nerzal/gocloak/v14"
+
+	"github.com/portcullis/hub/internal/lldap"
 )
 
 // AttrField is a custom user field shared with apps (contract §9.6).
@@ -37,7 +39,9 @@ const (
 
 func ldapMapperConfig(f AttrField) map[string][]string {
 	return map[string][]string{
-		"ldap.attribute":              {f.Name},
+		// The field's LLDAP attribute ('_' → '-', LLDAP refuses '_');
+		// the user attribute and claim keep the field name.
+		"ldap.attribute":              {lldap.FieldAttrName(f.Name)},
 		"user.model.attribute":        {"attr_" + f.Name},
 		"read.only":                   {"true"},
 		"always.read.value.from.ldap": {"true"},
@@ -94,8 +98,9 @@ func ownedMapper(name string) bool { return strings.HasPrefix(name, AttrMapperPr
 // EnsureAttributeMappers makes Keycloak carry exactly fields (contract
 // §9.6). Idempotent:
 //   - on every LDAP user storage provider, a user-attribute-ldap-mapper
-//     portcullis-attr-<name> (LDAP attribute <name> → user attribute
-//     attr_<name>, read-only, always read from LDAP);
+//     portcullis-attr-<name> (LDAP attribute lldap.FieldAttrName(<name>),
+//     '_' → '-', → user attribute attr_<name>, read-only, always read
+//     from LDAP);
 //   - the openid-connect client scope portcullis-attributes, with an
 //     oidc-usermodel-attribute-mapper portcullis-attr-<name> per field
 //     (claim attr_<name> in access, ID and userinfo tokens; multivalued =

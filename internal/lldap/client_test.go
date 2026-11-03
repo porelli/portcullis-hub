@@ -625,3 +625,23 @@ func TestHiddenUserAttributeLLDAPName(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// TestUserAttributeLLDAPName: the fake refuses '_' in every attribute
+// create (visible custom fields too), like LLDAP v0.6.3.
+func TestUserAttributeLLDAPName(t *testing.T) {
+	c, f := newClient(t)
+	ctx := context.Background()
+	err := c.AddUserAttribute(ctx, "cost_center", false)
+	if err == nil || !strings.Contains(err.Error(), "invalid name") {
+		t.Fatalf("cost_center: err = %v, want LLDAP's invalid-name refusal", err)
+	}
+	if _, ok := f.UserAttributeSchema["cost_center"]; ok {
+		t.Error("refused attribute was created")
+	}
+	if err := c.AddUserAttribute(ctx, lldap.FieldAttrName("cost_center"), false); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := f.UserAttributeSchema["cost-center"]; !ok {
+		t.Error("cost-center not created")
+	}
+}

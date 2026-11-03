@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/lldap"
 	"github.com/portcullis/hub/internal/rules"
 )
 
@@ -48,7 +49,7 @@ func TestPublishAndOnChange(t *testing.T) {
 	if err := e.svc.SetDetails(ctx, asRoot, "alice", map[string][]string{"cost_center": {"CC-1"}, "teams": {"a", "b"}, "clearance": {"secret"}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.svc.LLDAP.SetUserAttributes(ctx, "portcullis-hub", map[string][]string{"cost_center": {"svc"}}, nil); err != nil {
+	if err := e.svc.LLDAP.SetUserAttributes(ctx, "portcullis-hub", map[string][]string{lldap.FieldAttrName("cost_center"): {"svc"}}, nil); err != nil {
 		t.Fatal(err)
 	}
 	until := time.Now().Add(48 * time.Hour).UTC().Truncate(time.Second)

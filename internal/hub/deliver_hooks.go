@@ -486,8 +486,8 @@ func (h *Hub) runStartHooks(ctx context.Context, id string) {
 	delivered := h.loadDelivered(id)
 	r := h.runHooks(ctx, &tmpl, hookStep{id: id, trig: TriggerStart, outs: outs, delivered: &delivered, now: time.Now().UTC()})
 	failed := false
+	recordUnits(id, &delivered, r.units)
 	for _, u := range r.units {
-		delivered.Status[u.Unit] = u
 		failed = failed || (!u.OK && u.Skipped == "")
 	}
 	h.saveDelivered(id, delivered)

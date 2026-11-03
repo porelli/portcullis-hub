@@ -13,3 +13,6 @@ func (s *Service) DesiredFromLLDAP(ctx context.Context, cfg *Config, now time.Ti
 	}
 	return s.Desired(cfg, sn, now), nil
 }
+
+// ValidFieldName exposes validFieldName (tests).
+func ValidFieldName(name string) bool { return validFieldName(name) }

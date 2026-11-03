@@ -91,8 +91,42 @@ type App struct {
 // field, never shown in the overview, CSV export or import.
 const ReservedAttrPrefix = "ps-"
 
-// reservedAttr reports a Hub-owned attribute name.
-func reservedAttr(name string) bool { return strings.HasPrefix(name, ReservedAttrPrefix) }
+// reservedAttr reports a field name whose LLDAP attribute would be a
+// Hub-owned one (ps_<x> → ps-<x>; a hand-written ps-<x> too).
+func reservedAttr(field string) bool {
+	return strings.HasPrefix(lldap.FieldAttrName(field), ReservedAttrPrefix)
+}
+
+// toLLDAPAttrs renames custom field values to their LLDAP attributes
+// (lldap.FieldAttrName) for SetUserAttributes.
+func toLLDAPAttrs(attrs map[string][]string) map[string][]string {
+	out := make(map[string][]string, len(attrs))
+	for f, v := range attrs {
+		out[lldap.FieldAttrName(f)] = v
+	}
+	return out
+}
+
+// listUsers is LLDAP's users with their custom attributes renamed to
+// field names (lldap.FieldFromAttrName); attributes that can't be a
+// field (a '_' in the name) are dropped. Everything in this package
+// reads users through it.
+func (s *Service) listUsers(ctx context.Context) ([]lldap.User, error) {
+	users, err := s.LLDAP.ListUsers(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for i, u := range users {
+		attrs := make(map[string][]string, len(u.Attributes))
+		for a, v := range u.Attributes {
+			if f, ok := lldap.FieldFromAttrName(a); ok {
+				attrs[f] = v
+			}
+		}
+		users[i].Attributes = attrs
+	}
+	return users, nil
+}
 
 // Service implements the user/group operations. Mutations are serialised
 // so guardrail checks and the change can't interleave with another change.
@@ -408,7 +442,7 @@ func (s *Service) overview(ctx context.Context, me string, c *Caller) (*Overview
 		}
 	}
 
-	users, err := s.LLDAP.ListUsers(ctx)
+	users, err := s.listUsers(ctx)
 	if err != nil {
 		return nil, &Error{Status: http.StatusBadGateway, Msg: err.Error()}
 	}
@@ -652,7 +686,7 @@ type snapshot struct {
 }
 
 func (s *Service) load(ctx context.Context) (*snapshot, error) {
-	users, err := s.LLDAP.ListUsers(ctx)
+	users, err := s.listUsers(ctx)
 	if err != nil {
 		return nil, &Error{Status: http.StatusBadGateway, Msg: err.Error()}
 	}
@@ -1056,7 +1090,7 @@ func (s *Service) CreateUser(ctx context.Context, c *Caller, req CreateRequest) 
 			return err
 		}
 		if len(attrs) > 0 {
-			if err := s.LLDAP.SetUserAttributes(ctx, req.Username, attrs, nil); err != nil {
+			if err := s.LLDAP.SetUserAttributes(ctx, req.Username, toLLDAPAttrs(attrs), nil); err != nil {
 				// Don't leave an account without its details behind.
 				if derr := s.LLDAP.DeleteUser(ctx, req.Username); derr != nil {
 					return fmt.Errorf("setting the details failed (%v) and removing the new user failed too (%v): delete %s in LLDAP", err, derr, req.Username)
