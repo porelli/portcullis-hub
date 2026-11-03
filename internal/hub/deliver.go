@@ -118,6 +118,10 @@ type deliverOpts struct {
 	// re-queue after a still-running timed-out hook asked for this run.
 	force      map[string]bool
 	stuckRetry bool
+	// noWait: never wait for the delivery lock (a save's request): a run
+	// in progress gets this one queued with its effect, and the report
+	// is one busy unit.
+	noWait bool
 }
 
 func realAfterFunc(d time.Duration, f func()) func() bool { return time.AfterFunc(d, f).Stop }
@@ -568,7 +572,14 @@ func (h *Hub) deliverForStart(ctx context.Context, id string) error {
 // deliver is one engine run (see the top of this file).
 func (h *Hub) deliver(ctx context.Context, id string, trig Trigger, opt deliverOpts) (*DeliveryReport, error) {
 	l := h.deliverLock(id)
-	l.Lock()
+	if opt.noWait {
+		if !l.TryLock() {
+			h.queueDeliveryWith(id, trig, opt.effect, 0, forceList(opt.force), opt.stuckRetry)
+			return &DeliveryReport{Instance: id, Units: []UnitResult{{Unit: unitBusy, Skipped: SkipBusy, Message: "a delivery is running: this one follows it", At: time.Now().UTC()}}}, nil
+		}
+	} else {
+		l.Lock()
+	}
 	defer l.Unlock()
 	for try := 1; ; try++ {
 		rep, applied, superseded, err := h.deliverOnce(ctx, id, trig, opt)

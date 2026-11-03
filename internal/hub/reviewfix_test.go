@@ -350,3 +350,49 @@ func TestOptionEnvFailsClosedPerVariable(t *testing.T) {
 		t.Errorf("unit %s = %+v (%v), want an error naming motd only, no value", unitEnvValues, u, ok)
 	}
 }
+
+// H16: a save never waits for a delivery in progress (a long hook holds
+// the delivery lock): it answers at once with a busy unit, and its
+// delivery — with the save's effect — runs once the lock is free.
+func TestSaveNeverBlocksOnDeliveryLock(t *testing.T) {
+	f, _, _ := privFixture(t)
+	const id = "privapp"
+	if err := f.h.Enable(id); err != nil {
+		t.Fatal(err)
+	}
+	f.h.Wait()
+	l := f.h.deliverLock(id)
+	l.Lock()
+	type result struct {
+		res *SaveResult
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		res, err := f.h.SaveSettings(id, SettingsUpdate{Values: vals("motd", "busy save")}, "root")
+		done <- result{res, err}
+	}()
+	var r result
+	select {
+	case r = <-done:
+	case <-time.After(5 * time.Second):
+		l.Unlock()
+		t.Fatal("SaveSettings waited for the delivery lock")
+	}
+	before := len(f.runner.Calls())
+	l.Unlock()
+	if r.err != nil {
+		t.Fatal(r.err)
+	}
+	if r.res.Deliveries == nil {
+		t.Fatal("no deliveries in the answer")
+	}
+	if u, ok := unit(r.res.Deliveries, unitBusy); !ok || u.Skipped != SkipBusy {
+		t.Errorf("deliveries = %+v, want a busy unit", r.res.Deliveries.Units)
+	}
+	f.h.Wait()
+	calls := strings.Join(f.runner.Calls()[before:], " ")
+	if !strings.Contains(calls, "down:portcullis-"+id) || !strings.Contains(calls, "up:portcullis-"+id) {
+		t.Errorf("compose calls after the lock was freed = %q, want the save's restart", calls)
+	}
+}

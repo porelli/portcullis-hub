@@ -817,7 +817,9 @@ func (h *Hub) SaveSettings(id string, u SettingsUpdate, actor string) (_ *SaveRe
 	// the engine takes id's delivery lock and may talk to the network;
 	// it writes the data files, then reloads or restarts (background).
 	if len(sv.keys) > 0 || sv.effect != settings.EffectNone {
-		rep, err := h.deliver(context.Background(), id, TriggerSave, deliverOpts{effect: sv.effect})
+		// Never waiting for a run in progress (a hook can hold the lock
+		// for its whole timeout): busy = queued, the panel polls.
+		rep, err := h.deliver(context.Background(), id, TriggerSave, deliverOpts{effect: sv.effect, noWait: true})
 		if err != nil {
 			out.Warnings = append(out.Warnings, "delivery: "+err.Error())
 		}
