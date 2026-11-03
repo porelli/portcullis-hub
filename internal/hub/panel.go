@@ -31,6 +31,8 @@ const (
 	// WarnMembershipRestart is formatted with the app's name.
 	WarnMembershipRestart = "people joining or leaving restarts %s"
 	WarnNeedsSignIn       = "per-person values need Portcullis sign-in"
+	// WarnEntryRestart: a person-entered option whose changes restart.
+	WarnEntryRestart = "people entering or changing a value restarts %s"
 )
 
 // OptionView is one option as the panel shows it: its definition, the
@@ -60,7 +62,10 @@ type PopulationView struct {
 	Why   string `json:"why,omitempty"`
 }
 
-// EntryRow is one stored person-entered value (Task 15A).
+// EntryRow is one stored person-entered value (spec call 32): the
+// person, the value, when and by whom it was set (the person's name, or
+// the admin's), and whether it is delivered or why not (EntryWhyNoAccess,
+// EntryWhyAccountChanged).
 type EntryRow struct {
 	User      string    `json:"user"`
 	Value     any       `json:"value"`
@@ -71,8 +76,8 @@ type EntryRow struct {
 	Why       string    `json:"why,omitempty"`
 }
 
-// EntriesView is a person_entered option's values (Task 15A fills it;
-// always empty until then).
+// EntriesView is a person_entered option's values: every stored value,
+// sorted by user, and the population members without one.
 type EntriesView struct {
 	Rows   []EntryRow `json:"rows"`
 	NotSet []string   `json:"not_set"`
@@ -295,6 +300,7 @@ func (h *Hub) SettingsPanel(ctx context.Context, id string) (*SettingsPanel, err
 		}
 		p.Options = append(p.Options, h.optionViewLocked(t, o, m, why))
 	}
+	p.Entries = h.entriesViewLocked(t, m)
 	h.mu.RUnlock()
 	p.Deliveries = h.DeliveryStatus(id)
 	return p, nil
@@ -328,6 +334,9 @@ func (h *Hub) optionViewLocked(t *templates.Template, o *templates.Option, m *di
 		if why == WhyNativeSignIn || why == WhyNoIdentity {
 			v.Warnings = append(v.Warnings, WarnNeedsSignIn)
 		}
+	}
+	if o.EffectiveScope() == templates.ScopePersonEntered && entryRestarts(t, o) {
+		v.Warnings = append(v.Warnings, fmt.Sprintf(WarnEntryRestart, t.Manifest.Name))
 	}
 	if o.Privileged && m != nil {
 		for _, g := range slices.Sorted(maps.Keys(m.Groups)) {
@@ -468,4 +477,23 @@ func (h *Hub) RetryDeliveries(ctx context.Context, id, actor string) (*DeliveryR
 	}
 	h.auditOp(actor, "settings.retry", id, detail, err)
 	return rep, err
+}
+
+// entryRestarts: a change of person-entered option o restarts the app
+// (an env list, or a data file with on_membership_change: restart).
+func entryRestarts(t *templates.Template, o *templates.Option) bool {
+	for _, d := range o.Delivery {
+		if d.Env != "" {
+			return true
+		}
+		if d.File == nil {
+			continue
+		}
+		for _, f := range t.Manifest.Files {
+			if f.Name == d.File.Name && f.OnMembershipChange == templates.MembershipRestart {
+				return true
+			}
+		}
+	}
+	return false
 }

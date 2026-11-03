@@ -90,13 +90,13 @@ func claimDeliveries(o *templates.Option) []templates.Delivery {
 	return out
 }
 
-// claimOptions are t's person options with claim deliveries (person-entered
-// claims: Task 15A).
+// claimOptions are t's person and person-entered options with claim
+// deliveries (a person-entered claim carries each person's own value).
 func claimOptions(t *templates.Template) []*templates.Option {
 	var out []*templates.Option
 	opts := t.Manifest.Options()
 	for i := range opts {
-		if opts[i].EffectiveScope() == templates.ScopePerson && len(claimDeliveries(&opts[i])) > 0 {
+		if sc := opts[i].EffectiveScope(); (sc == templates.ScopePerson || sc == templates.ScopePersonEntered) && len(claimDeliveries(&opts[i])) > 0 {
 			out = append(out, &opts[i])
 		}
 	}
@@ -159,7 +159,7 @@ func (h *Hub) buildClaimsLocked(t *templates.Template, m *directory.Membership) 
 	if m == nil {
 		plan.skip = SkipDirectory
 	} else {
-		people = h.resolvePeopleLocked(t, m)
+		people = h.peopleWithEntriesLocked(t, m)
 		plan.users = make(map[string]bool, len(m.Users))
 		for u := range m.Users {
 			plan.users[u] = true

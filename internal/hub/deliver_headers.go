@@ -41,13 +41,13 @@ import (
 
 const unitHeaders = "headers"
 
-// headerOptions are t's person options with header deliveries
-// (person-entered headers: Task 15A).
+// headerOptions are t's person and person-entered options with header
+// deliveries (a person-entered header carries each person's own value).
 func headerOptions(t *templates.Template) []*templates.Option {
 	var out []*templates.Option
 	opts := t.Manifest.Options()
 	for i := range opts {
-		if opts[i].EffectiveScope() == templates.ScopePerson && len(headerDeliveries(&opts[i])) > 0 {
+		if sc := opts[i].EffectiveScope(); (sc == templates.ScopePerson || sc == templates.ScopePersonEntered) && len(headerDeliveries(&opts[i])) > 0 {
 			out = append(out, &opts[i])
 		}
 	}
@@ -187,7 +187,7 @@ func (h *Hub) buildHeadersLocked(t *templates.Template, m *directory.Membership,
 	}
 	bySuffix := map[string]map[string]string{}
 	if len(opts) > 0 {
-		people := h.resolvePeopleLocked(t, m)
+		people := h.peopleWithEntriesLocked(t, m)
 		users := sortedUsers(people)
 		for _, o := range opts {
 			for _, d := range headerDeliveries(o) {

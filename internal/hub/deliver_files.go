@@ -222,6 +222,7 @@ func (h *Hub) renderDocLocked(t *templates.Template, target docTarget, m *direct
 	doc = settings.NewDataFileDoc(t.ID)
 	s := h.st.Settings[t.ID]
 	opts := t.Manifest.Options()
+	var entryPop *Population // the person-entered population, once
 	for i := range opts {
 		o := &opts[i]
 		ds := target.deliveries(o)
@@ -292,8 +293,34 @@ func (h *Hub) renderDocLocked(t *templates.Template, target docTarget, m *direct
 				}
 				doc.Groups[o.Key] = list
 			}
+		case templates.ScopePersonEntered:
+			// The entries section: population members whose uuid
+			// matches, sorted by user (call 32); never under people.
+			if m == nil {
+				continue
+			}
+			if entryPop == nil {
+				p := h.entryPopulationLocked(t, m)
+				entryPop = &p
+			}
+			entries := h.deliveredEntriesLocked(t, o.Key, *entryPop, m.UUIDs)
+			for _, d := range ds {
+				list := make([]settings.EntryOut, 0, len(entries))
+				for _, e := range entries {
+					r, err := settings.RenderDelivery(o, e.Value, &d)
+					if err != nil {
+						log.Printf("settings: %s: %s: the value of %s doesn't render (%v): omitted", t.ID, o.Key, e.User, err)
+						continue
+					}
+					list = append(list, settings.EntryOut{User: e.User, Value: r.JSON})
+				}
+				field := target.field(&d)
+				if field == "" {
+					field = o.Key
+				}
+				doc.Entries[field] = list
+			}
 		}
-		// person_entered: the entries section (Task 15A).
 	}
 	return doc, sec, nil
 }

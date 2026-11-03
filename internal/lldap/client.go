@@ -327,6 +327,7 @@ type GroupRef struct {
 // User is an LLDAP user.
 type User struct {
 	ID           string              `json:"id"`
+	UUID         string              `json:"uuid"` // LLDAP's per-account uuid (a re-created name gets a new one)
 	Email        string              `json:"email"`
 	DisplayName  string              `json:"displayName"`
 	CreationDate string              `json:"creationDate"`
@@ -358,6 +359,7 @@ func (c *Client) ListUsers(ctx context.Context) ([]User, error) {
 	var resp struct {
 		Users []struct {
 			ID           string     `json:"id"`
+			UUID         string     `json:"uuid"`
 			Email        string     `json:"email"`
 			DisplayName  string     `json:"displayName"`
 			CreationDate string     `json:"creationDate"`
@@ -371,7 +373,7 @@ func (c *Client) ListUsers(ctx context.Context) ([]User, error) {
 			} `json:"attributes"`
 		} `json:"users"`
 	}
-	err := c.graphql(ctx, `query { users { id email displayName creationDate groups { id displayName } attributes { name value schema { isHardcoded } } } }`, nil, &resp)
+	err := c.graphql(ctx, `query { users { id uuid email displayName creationDate groups { id displayName } attributes { name value schema { isHardcoded } } } }`, nil, &resp)
 	if err != nil {
 		return nil, err
 	}
@@ -379,6 +381,7 @@ func (c *Client) ListUsers(ctx context.Context) ([]User, error) {
 	for _, u := range resp.Users {
 		user := User{
 			ID:           u.ID,
+			UUID:         u.UUID,
 			Email:        u.Email,
 			DisplayName:  u.DisplayName,
 			CreationDate: u.CreationDate,

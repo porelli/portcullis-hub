@@ -50,11 +50,35 @@ type MyCredential struct {
 	Info   []MyInfoLine `json:"info,omitempty"`
 }
 
-// MyEntry is a person-entered value (Task 15A fills it).
-type MyEntry struct{}
+// EntryInput is what a person-entered value's input needs (the
+// option's own constraints; the Hub checks them again at save).
+type EntryInput struct {
+	Type    string                 `json:"type"`
+	Pattern string                 `json:"pattern,omitempty"`
+	Format  string                 `json:"format,omitempty"`
+	MinLen  *int                   `json:"min_len,omitempty"`
+	MaxLen  *int                   `json:"max_len,omitempty"`
+	Min     any                    `json:"min,omitempty"`
+	Max     any                    `json:"max,omitempty"`
+	Unit    string                 `json:"unit,omitempty"`
+	Choices []templates.EnumOption `json:"options,omitempty"`
+}
 
-// EntryInput is what a person-entered value's input needs (Task 15A).
-type EntryInput struct{}
+// MyEntry is one person-entered value of the caller (spec call 32): the
+// option, its input, and the caller's own value — never anyone else's,
+// never how many people entered one, never the admin's name.
+type MyEntry struct {
+	Key         string     `json:"key"`
+	Label       string     `json:"label"`
+	Description string     `json:"description,omitempty"`
+	Applies     string     `json:"applies"`
+	Input       EntryInput `json:"input"`
+	Unique      bool       `json:"unique,omitempty"`
+	Value       any        `json:"value"` // canonical; null = not set
+	Display     string     `json:"display,omitempty"`
+	SetByAdmin  bool       `json:"set_by_admin,omitempty"`
+	UpdatedAt   *time.Time `json:"updated_at,omitempty"`
+}
 
 // MyApp is one app on the caller's My apps tab. Entries and Credentials
 // are always [] (never null).
@@ -70,7 +94,9 @@ type MyApp struct {
 
 // MyApps lists user's (any case) apps: enabled instances whose
 // population holds them, with their self-visible person options'
-// resolved values; an app with none is left out. The directory snapshot
+// resolved values, and those whose person-entered options' population
+// holds them, with their own entries (Task 15A); an app with neither is
+// left out. The directory snapshot
 // is taken before mu; an unavailable directory is the membership error.
 func (h *Hub) MyApps(ctx context.Context, user string) ([]MyApp, error) {
 	user = strings.ToLower(user)
@@ -93,14 +119,22 @@ func (h *Hub) MyApps(ctx context.Context, user string) ([]MyApp, error) {
 				break
 			}
 		}
-		if groups == nil {
-			continue
-		}
-		resolved := h.resolvePeopleLocked(t, m)[user]
 		app := MyApp{ID: t.ID, Name: instanceName(t), Icon: t.Manifest.Icon, Values: []MyValue{}, Entries: []MyEntry{}, Credentials: []MyCredential{}}
 		if len(t.Manifest.URLs) > 0 {
 			app.URL = t.Manifest.URLs[0].URL
 		}
+		if eo := entryOptions(t); len(eo) > 0 && inPopulation(h.entryPopulationLocked(t, m), user) {
+			for _, o := range eo {
+				app.Entries = append(app.Entries, h.myEntryLocked(t, o, user, m.UUIDs[user]))
+			}
+		}
+		if groups == nil {
+			if len(app.Entries) > 0 {
+				out = append(out, app)
+			}
+			continue
+		}
+		resolved := h.resolvePeopleLocked(t, m)[user]
 		opts := t.Manifest.Options()
 		for j := range opts {
 			o := &opts[j]
@@ -115,7 +149,7 @@ func (h *Hub) MyApps(ctx context.Context, user string) ([]MyApp, error) {
 				app.Values = append(app.Values, v)
 			}
 		}
-		if len(app.Values) > 0 {
+		if len(app.Values) > 0 || len(app.Entries) > 0 {
 			out = append(out, app)
 		}
 	}

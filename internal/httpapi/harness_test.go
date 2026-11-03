@@ -51,6 +51,11 @@ import (
 //     POST /harness/hook/fix (POST /harness/hook/break fails it again),
 //     so the deliveries strip shows the reason and Retry clears it.
 //   - claimapp, headerapp, nativeapp: claims, headers, native sign-in.
+//   - entryapp: ENABLED (method custom, access group entryapp: alice, bob
+//     and dave), person-entered ext_id (32 lowercase hex, unique,
+//     admin_override, file ids restarting) and nick (hook apply, no
+//     admin_override); carol entered an ext_id and then left entryapp
+//     (the panel's "Stored, not delivered: no access").
 //
 // The directory: root (admin), dana, alice, bob, carol, dave, erin and
 // user01-user55; groups office_milan (alice, bob, erin), it_staff (bob,
@@ -85,7 +90,7 @@ func TestHarness(t *testing.T) {
 	}
 	var eng *harnessEngine
 	e := newInstEnvWith(t, t.TempDir(), extra, func(f *fakeEngine) hub.Engine {
-		eng = &harnessEngine{fakeEngine: f, running: map[string][]string{"hookapp": {"app"}}}
+		eng = &harnessEngine{fakeEngine: f, running: map[string][]string{"hookapp": {"app"}, "entryapp": {"app"}}}
 		return eng
 	})
 	h := e.s.Hub
@@ -117,6 +122,7 @@ func TestHarness(t *testing.T) {
 		t.Fatal(err)
 	}
 	seedSettings(t, h, eng)
+	seedEntries(t, e)
 
 	d, err := time.ParseDuration(os.Getenv("HUB_HARNESS_FOR"))
 	if err != nil {
@@ -179,7 +185,7 @@ func TestHarness(t *testing.T) {
 
 // harnessFixtures are the Hub's settings test templates the harness
 // serves (internal/hub/testdata/settings).
-var harnessFixtures = []string{"tmfixture", "privapp", "secretapp", "hookapp", "claimapp", "headerapp", "nativeapp"}
+var harnessFixtures = []string{"tmfixture", "privapp", "secretapp", "hookapp", "claimapp", "headerapp", "nativeapp", "entryapp"}
 
 // seedDirectory adds the settings fixtures' people and groups to the
 // fake LLDAP.
@@ -205,6 +211,25 @@ func seedDirectory(e *instEnv) {
 	e.ll.AddGroup("admin_dash", "root")
 	e.ll.AddGroup("users_immich", "alice", "bob", "carol")
 	e.ll.AddGroup("admin_immich", "root")
+	e.ll.AddGroup("entryapp", "alice", "bob", "carol", "dave")
+}
+
+// harnessCarolExt is the ext_id carol entered before leaving entryapp.
+const harnessCarolExt = "c0ffeec0ffeec0ffeec0ffeec0ffee00"
+
+// seedEntries enables entryapp, has carol enter an ext_id, then takes
+// her out of its access group (stored, not delivered: no access).
+func seedEntries(t *testing.T, e *instEnv) {
+	t.Helper()
+	h := e.s.Hub
+	if err := h.Enable("entryapp"); err != nil {
+		t.Fatalf("enabling entryapp: %v", err)
+	}
+	if _, err := h.SetPersonValue(context.Background(), "entryapp", "ext_id", "carol", json.RawMessage(`"`+harnessCarolExt+`"`), "carol"); err != nil {
+		t.Fatalf("seeding carol's ext_id: %v", err)
+	}
+	e.ll.RemoveMember("entryapp", "carol")
+	h.Wait()
 }
 
 // seedSettings stores the fixtures' panel content and makes hookapp's

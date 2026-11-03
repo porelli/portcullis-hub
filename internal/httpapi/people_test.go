@@ -84,7 +84,7 @@ func (e *peopleEnv) setup(t *testing.T) {
 
 // peopleAppRoutes are the only app routes of the people listener
 // (contract §5.1): caller-only. Later plans append.
-var peopleAppRoutes = []string{"GET /api/me/apps"}
+var peopleAppRoutes = []string{"GET /api/me/apps", "PUT /api/me/apps/{instance}/values/{key}", "DELETE /api/me/apps/{instance}/values/{key}"}
 
 // TestPeopleListenerHasNoAppRoutes: the people mux registers exactly the
 // directory API, peopleAppRoutes, /healthz, the page and its assets —

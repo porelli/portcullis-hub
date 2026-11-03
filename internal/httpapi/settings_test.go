@@ -77,9 +77,20 @@ type setEnv struct {
 
 func newSetEnv(t *testing.T) *setEnv {
 	t.Helper()
+	return newSetEnvWith(t, nil)
+}
+
+// newSetEnvWith is newSetEnv with extra templates (id → manifest,
+// compose).
+func newSetEnvWith(t *testing.T, extra map[string][2]string) *setEnv {
+	t.Helper()
 	root := t.TempDir()
 	src := filepath.Join(root, "src")
-	for id, files := range map[string][2]string{"vault": {setVaultManifest, setVaultCompose}, "plex": {setPlexManifest, setPlexCompose}} {
+	tmpls := map[string][2]string{"vault": {setVaultManifest, setVaultCompose}, "plex": {setPlexManifest, setPlexCompose}}
+	for id, files := range extra {
+		tmpls[id] = files
+	}
+	for id, files := range tmpls {
 		os.MkdirAll(filepath.Join(src, id), 0755)
 		os.WriteFile(filepath.Join(src, id, "manifest.yaml"), []byte(files[0]), 0644)
 		os.WriteFile(filepath.Join(src, id, "compose.yml"), []byte(files[1]), 0644)

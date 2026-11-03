@@ -1,0 +1,21 @@
+name: Entry Env Fixture
+category: tools
+auth:
+  method: custom
+  sso: false
+  group_access: false
+  access_group: entryenv
+urls:
+  - label: Web
+    url: "https://{{HOST_ENTRYENV}}"
+settings:
+  options:
+    - key: ext_id
+      label: External account id
+      type: string
+      pattern: "^[0-9a-f]{32}$"
+      max_len: 32
+      scope: person_entered
+      unique: true
+      applies: restart
+      delivery: [{env: EXT_IDS, render: {join: ","}}]

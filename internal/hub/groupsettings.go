@@ -912,6 +912,12 @@ func (h *Hub) pruneSettingsLocked() (audits []func()) {
 			delete(s.Entered, k)
 			drop(k, why)
 		}
+		// Values that no longer pass tightened constraints, and later
+		// duplicates of a newly unique option (call 32).
+		if more := h.pruneEntriesLocked(id, t, &s); len(more) > 0 {
+			changed = true
+			audits = append(audits, more...)
+		}
 		if !changed {
 			continue
 		}
@@ -984,6 +990,9 @@ func SettingsIncompatibilities(old, new *templates.Template, s state.InstanceSet
 		if why := staleKey(new, key, scope, typ); why != "" {
 			out = append(out, fmt.Sprintf("setting %s: %s: its stored value is dropped", key, why))
 			return
+		}
+		if scope == templates.ScopePersonEntered {
+			out = append(out, entryIncompatibilities(o, s.Entered[key])...)
 		}
 		if o.Privileged && (prev == nil || !prev.Privileged) && len(s.Person[key].Rows) > 0 {
 			out = append(out, fmt.Sprintf("setting %s becomes privileged: its rows from groups that can't hold privileged values (rule groups on fields delegates can edit) grant nothing and are dropped", key))

@@ -127,6 +127,12 @@ type Service struct {
 	// call 19). It must not block on the directory. Its warnings are
 	// added to the delete's.
 	GroupDeleted func(ctx context.Context, actor, name string, id int) []string
+	// UserDeleted, if set, is called after DeleteUser deleted an account
+	// in LLDAP (the acting admin and the account's name), outside s.mu:
+	// the Hub deletes the person's person-entered setting values (spec
+	// call 32). It must not block on the directory. Its warnings are
+	// added to the delete's.
+	UserDeleted func(ctx context.Context, actor, name string) []string
 
 	mu sync.Mutex
 	// ruleState: each rule group's membership (lowercase) after the last
@@ -1213,6 +1219,7 @@ func (s *Service) UpdateUser(ctx context.Context, c *Caller, username string, em
 func (s *Service) DeleteUser(ctx context.Context, c *Caller, username, confirm string) (*Result, error) {
 	res := newResult()
 	detail := ""
+	deleted := "" // set once the LLDAP delete succeeded
 	err := s.run(ctx, c, PermRemove, "user.delete", username, &detail, func() error {
 		if confirm != username {
 			return invalid("type the username to confirm")
@@ -1267,6 +1274,7 @@ func (s *Service) DeleteUser(ctx context.Context, c *Caller, username, confirm s
 			detail = ""
 			return err
 		}
+		deleted = u.ID
 		if kcID != "" {
 			if err := s.KC.DeleteUserByID(ctx, kcID); err != nil {
 				kcErr = "delete: " + err.Error()
@@ -1295,6 +1303,11 @@ func (s *Service) DeleteUser(ctx context.Context, c *Caller, username, confirm s
 		}
 		return nil
 	})
+	// Only once the LLDAP delete succeeded, outside s.mu (the Hub takes
+	// its own lock: order s.mu → Hub.mu).
+	if deleted != "" && s.UserDeleted != nil {
+		res.Warnings = append(res.Warnings, s.UserDeleted(ctx, c.User, strings.ToLower(deleted))...)
+	}
 	return res, err
 }
 

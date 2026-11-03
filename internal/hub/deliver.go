@@ -485,6 +485,9 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 	enabled := h.st.IsEnabled(id)
 	pendErr := h.pendingLocked(id)
 	hasRows := len(h.st.Settings[id].Person)+len(h.st.Settings[id].Groups) > 0
+	// The person-entered values as stored before the snapshot (only
+	// those can be judged against it: purgeStaleEntries).
+	enteredBefore := enteredCopy(h.st.Settings[id].Entered)
 	h.mu.RUnlock()
 	if !opt.lifecycle {
 		if pendErr != nil || h.appBusy(id) {
@@ -501,7 +504,7 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 
 	// Outside mu: stale rows first (P8: purged, audited), then the
 	// directory snapshot the units render from.
-	needPeople := filesNeedPeople(&tmpl) || hasGroupEnv(&tmpl) || (!opt.lifecycle && (claimsNeedPeople(&tmpl) || headersNeedPeople(&tmpl) || hooksNeedPeople(&tmpl)))
+	needPeople := filesNeedPeople(&tmpl) || hasGroupEnv(&tmpl) || hasEntryEnv(&tmpl) || (!opt.lifecycle && (claimsNeedPeople(&tmpl) || headersNeedPeople(&tmpl) || hooksNeedPeople(&tmpl)))
 	if hasRows && !opt.lifecycle {
 		for _, w := range h.reconcileGroupRows(ctx, id) {
 			log.Printf("settings: %s: %s", id, w)
@@ -516,6 +519,12 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 		if merr != nil {
 			log.Printf("settings: %s: WARNING: directory unavailable (%v): deliveries that need people keep what they last delivered", id, merr)
 		}
+	}
+	// Person-entered values of accounts deleted or re-created outside
+	// the Hub: purged (P22: only while LLDAP looks sane; the delivery
+	// below filters them either way).
+	if !opt.lifecycle {
+		h.purgeStaleEntries(ctx, id, m, enteredBefore)
 	}
 
 	delivered := h.loadDelivered(id)
@@ -622,6 +631,29 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 
 	h.stage(id, "files")
 	if opt.lifecycle {
+		// The person-entered env lists before the containers are created
+		// (no restart: compose reads the .env at create); the directory
+		// down keeps the last list.
+		if hasEntryEnv(&tmpl) {
+			u := UnitResult{Unit: unitEnv, At: now}
+			if m == nil {
+				u.Skipped = SkipDirectory
+			} else {
+				changed, stop, eerr := h.refreshEngineEnv(&tmpl, gen, m)
+				switch {
+				case stop:
+					finish()
+					return rep, "", true, nil
+				case eerr != nil:
+					u.Error = h.redactUnitError(id, eerr)
+				case changed:
+					u.OK = true
+				default:
+					u.OK, u.Skipped = true, SkipUnchanged
+				}
+			}
+			rep.Units = append(rep.Units, u)
+		}
 		// TriggerStart: compose up follows; never a reload or restart.
 		// Claims follow in the background (deliverClaimsAfterStart).
 		finish()
@@ -648,14 +680,15 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 		h.stage(id, "headers")
 	}
 
-	// Group records in the env, re-rendered against this run's snapshot
-	// (a write without one — directory down — delivered none).
-	if hasGroupEnv(&tmpl) {
+	// Group records and person-entered lists in the env, re-rendered
+	// against this run's snapshot (a write without one — directory down —
+	// delivered no records and kept the last lists).
+	if hasGroupEnv(&tmpl) || hasEntryEnv(&tmpl) {
 		u := UnitResult{Unit: unitEnv, At: now}
 		if m == nil {
 			u.Skipped = SkipDirectory
 		} else {
-			changed, stop, eerr := h.refreshGroupEnv(&tmpl, gen, m)
+			changed, stop, eerr := h.refreshEngineEnv(&tmpl, gen, m)
 			switch {
 			case stop:
 				finish()
@@ -737,10 +770,15 @@ func membershipEffect(on string) string {
 	return settings.EffectNone
 }
 
-// refreshGroupEnv rewrites instance t's option env with snapshot m when
-// the generation is still gen; changed: the .env changed (compose reads
-// it at create: a restart). stop: superseded.
-func (h *Hub) refreshGroupEnv(t *templates.Template, gen string, m *directory.Membership) (changed, stop bool, err error) {
+// refreshEngineEnv rewrites the env variables the engine owns in
+// instance t's .env with snapshot m (fetched outside mu) when the
+// generation is still gen: the option env with the group records, and
+// the person-entered lists (P12: generateAppEnvLocked leaves those as it
+// finds them; written here with setEnvVars, under the delivery lock, in
+// the same section as every other .env writer's mu so no update is
+// lost). changed: the .env changed (compose reads it at create: a
+// restart). stop: superseded.
+func (h *Hub) refreshEngineEnv(t *templates.Template, gen string, m *directory.Membership) (changed, stop bool, err error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	live := h.findLocked(t.ID)
@@ -748,8 +786,15 @@ func (h *Hub) refreshGroupEnv(t *templates.Template, gen string, m *directory.Me
 		return false, true, nil
 	}
 	before, _ := os.ReadFile(h.envPath(t.ID))
-	if err := h.writeOptionEnvLocked(live, m); err != nil {
-		return false, false, err
+	if hasGroupEnv(live) {
+		if err := h.writeOptionEnvLocked(live, m); err != nil {
+			return false, false, err
+		}
+	}
+	if hasEntryEnv(live) {
+		if err := setEnvVars(h.envPath(t.ID), h.entryEnvLocked(live, m), true); err != nil {
+			return false, false, err
+		}
 	}
 	after, _ := os.ReadFile(h.envPath(t.ID))
 	return string(before) != string(after), false, nil

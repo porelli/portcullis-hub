@@ -43,7 +43,8 @@ type Server struct {
 	BaseDN string
 
 	mu        sync.Mutex
-	Users     map[string]map[string]string // id → email, displayName
+	Users     map[string]map[string]string // id → email, displayName, uuid
+	nextUUID  int
 	Passwords map[string]string
 	Groups    map[int]*Group
 	nextGroup int
@@ -116,7 +117,7 @@ func (s *Server) LDAPURL() string { return "ldap://" + s.LDAP.Addr().String() }
 func (s *Server) AddUser(id, email, display, password string, groups ...string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.Users[id] = map[string]string{"email": email, "displayName": display}
+	s.Users[id] = map[string]string{"email": email, "displayName": display, "uuid": s.newUUID()}
 	if password != "" {
 		s.Passwords[id] = password
 	}
@@ -127,6 +128,20 @@ func (s *Server) AddUser(id, email, display, password string, groups ...string) 
 			}
 		}
 	}
+}
+
+// newUUID is a fresh account uuid (a re-created name gets a new one).
+// Caller holds s.mu.
+func (s *Server) newUUID() string {
+	s.nextUUID++
+	return fmt.Sprintf("00000000-0000-4000-8000-%012d", s.nextUUID)
+}
+
+// UUIDOf is user id's uuid ("" = no such user).
+func (s *Server) UUIDOf(id string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.Users[id]["uuid"]
 }
 
 // AddGroup adds a group and returns its id.
@@ -318,7 +333,7 @@ func (s *Server) graphql(caller, q string, vars map[string]interface{}) (interfa
 		if str(in["email"]) == "" {
 			return nil, fmt.Errorf("Email is required when creating a new user")
 		}
-		s.Users[id] = map[string]string{"email": str(in["email"]), "displayName": str(in["displayName"])}
+		s.Users[id] = map[string]string{"email": str(in["email"]), "displayName": str(in["displayName"]), "uuid": s.newUUID()}
 		s.Mutations = append(s.Mutations, "createUser "+id)
 		return map[string]interface{}{"createUser": map[string]string{"id": id}}, nil
 	case op("updateUser"):
@@ -457,6 +472,7 @@ func (s *Server) graphql(caller, q string, vars map[string]interface{}) (interfa
 			}
 			out = append(out, map[string]interface{}{
 				"id":           id,
+				"uuid":         u["uuid"],
 				"email":        u["email"],
 				"displayName":  u["displayName"],
 				"creationDate": "2026-01-01T00:00:00+00:00",

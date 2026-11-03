@@ -36,6 +36,11 @@ type Membership struct {
 	// Privilege: group → why it can't hold a privileged value
 	// (PrivilegeProblem); absent = it may.
 	Privilege map[string]string
+	// UUIDs: lowercase user → LLDAP account uuid (the service account
+	// excluded): a name deleted and re-created gets a new one (spec call
+	// 32: a person-entered value is bound to the uuid it was entered
+	// under).
+	UUIDs map[string]string
 }
 
 // Membership reads LLDAP and directory.yaml. LLDAP unavailable: 503;
@@ -57,10 +62,11 @@ func (s *Service) Membership(ctx context.Context, now time.Time) (*Membership, e
 		return nil, err
 	}
 	svc := strings.ToLower(s.serviceUser())
-	m := &Membership{Users: map[string]map[string]int{}, Groups: map[string]MemberGroup{}, Expired: map[string]map[string]bool{}, Privilege: map[string]string{}}
-	for id := range sn.users {
+	m := &Membership{Users: map[string]map[string]int{}, Groups: map[string]MemberGroup{}, Expired: map[string]map[string]bool{}, Privilege: map[string]string{}, UUIDs: map[string]string{}}
+	for id, u := range sn.users {
 		if id != svc {
 			m.Users[id] = map[string]int{}
+			m.UUIDs[id] = u.UUID
 		}
 	}
 	for name, g := range sn.groups {

@@ -1,0 +1,41 @@
+name: Entry App Fixture
+category: tools
+instances: multi
+auth:
+  method: custom
+  sso: false
+  group_access: false
+  access_group: entryapp
+urls:
+  - label: Web
+    url: "https://{{HOST_ENTRYAPP}}"
+files:
+  - {name: ids, service: app, mount: /portcullis, on_membership_change: restart}
+hooks:
+  - {name: apply, service: app, command: [/apply], when: [membership_change]}
+settings:
+  options:
+    - key: motd
+      label: Message of the day
+      type: string
+      max_len: 50
+      applies: restart
+      delivery: [{file: {name: ids}}]
+    - key: ext_id
+      label: External account id
+      description: Your account id in the external service (32 lowercase hex characters).
+      type: string
+      pattern: "^[0-9a-f]{32}$"
+      max_len: 32
+      scope: person_entered
+      unique: true
+      admin_override: true
+      applies: restart
+      delivery: [{file: {name: ids}}]
+    - key: nick
+      label: Nickname
+      type: string
+      max_len: 20
+      scope: person_entered
+      applies: live
+      delivery: [{hook: apply}]

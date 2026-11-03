@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/hub"
 	"github.com/portcullis/hub/internal/rules"
 )
 
@@ -66,6 +67,85 @@ func decodeLarge(w http.ResponseWriter, r *http.Request, limit int64, v interfac
 // lowercased; nothing about anyone else is answered.
 func (s *Server) registerPeopleApps(mux routeMux) {
 	mux.HandleFunc("GET /api/me/apps", s.handleMyApps)
+	// The caller's own person-entered values (Task 15A, spec call 32).
+	mux.HandleFunc("PUT /api/me/apps/{instance}/values/{key}", s.handlePutMyValue)
+	mux.HandleFunc("DELETE /api/me/apps/{instance}/values/{key}", s.handleDeleteMyValue)
+}
+
+// entryBody is a person-entered value's body: {"value": <json>}.
+type entryBody struct {
+	Value json.RawMessage `json:"value"`
+}
+
+// readEntryBody decodes an entry body (≤ hub.EntryBodyMax: 413 beyond;
+// unknown fields and trailing data 400, never echoing the body).
+func readEntryBody(w http.ResponseWriter, r *http.Request) (json.RawMessage, bool) {
+	var b entryBody
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, hub.EntryBodyMax))
+	dec.DisallowUnknownFields()
+	err := dec.Decode(&b)
+	if err == nil && dec.Decode(&struct{}{}) != io.EOF {
+		err = errors.New("trailing data")
+	}
+	if err != nil {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return nil, false
+		}
+		http.Error(w, `body must be {"value": <value>}`, http.StatusBadRequest)
+		return nil, false
+	}
+	return b.Value, true
+}
+
+// entryErr answers a person-entered value's refusal: 4xx with the Hub's
+// text (it never names another person); 5xx the generic message, the
+// cause only logged.
+func entryErr(w http.ResponseWriter, who string, err error) {
+	var se *hub.StatusError
+	if errors.As(err, &se) && se.Status < 500 {
+		http.Error(w, se.Error(), se.Status)
+		return
+	}
+	log.Printf("people: value of %s: %v", who, err)
+	http.Error(w, directory.GenericUnavailable, http.StatusServiceUnavailable)
+}
+
+// handlePutMyValue stores the caller's (X-Forwarded-User, lowercased)
+// own value → 200 hub.MyEntry. No caller 401.
+func (s *Server) handlePutMyValue(w http.ResponseWriter, r *http.Request) {
+	user := strings.ToLower(actor(r))
+	if user == "" {
+		http.Error(w, "no signed-in user (X-Forwarded-User)", http.StatusUnauthorized)
+		return
+	}
+	v, ok := readEntryBody(w, r)
+	if !ok {
+		return
+	}
+	me, err := s.Hub.SetPersonValue(r.Context(), r.PathValue("instance"), r.PathValue("key"), user, v, user)
+	if err != nil {
+		entryErr(w, user, err)
+		return
+	}
+	noStore(w)
+	writeJSON(w, me)
+}
+
+// handleDeleteMyValue clears the caller's own value → 204 (also when
+// nothing was set).
+func (s *Server) handleDeleteMyValue(w http.ResponseWriter, r *http.Request) {
+	user := strings.ToLower(actor(r))
+	if user == "" {
+		http.Error(w, "no signed-in user (X-Forwarded-User)", http.StatusUnauthorized)
+		return
+	}
+	if err := s.Hub.ClearPersonValue(r.Context(), r.PathValue("instance"), r.PathValue("key"), user, user); err != nil {
+		entryErr(w, user, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // handleMyApps answers {"apps": [hub.MyApp…]}: the caller's own resolved

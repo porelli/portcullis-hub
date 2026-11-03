@@ -25,6 +25,43 @@ func (s *Server) registerSettings(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /api/instances/{id}/settings", s.handleSaveSettings)
 	mux.HandleFunc("POST /api/instances/{id}/settings/preview", s.handlePreviewSettings)
 	mux.HandleFunc("POST /api/instances/{id}/settings/retry", s.handleRetryDeliveries)
+	// Person-entered values (Task 15A): admins view them in the panel,
+	// set one with admin_override, and can always clear one.
+	mux.HandleFunc("PUT /api/instances/{id}/settings/entries/{key}/{user}", s.handlePutEntry)
+	mux.HandleFunc("DELETE /api/instances/{id}/settings/entries/{key}/{user}", s.handleDeleteEntry)
+}
+
+// handlePutEntry sets a person's value as the admin (the option needs
+// admin_override: else 403) → 200 hub.EntryRow.
+func (s *Server) handlePutEntry(w http.ResponseWriter, r *http.Request) {
+	id, ok := s.settingsAdmin(w, r)
+	if !ok {
+		return
+	}
+	v, ok := readEntryBody(w, r)
+	if !ok {
+		return
+	}
+	row, err := s.Hub.SetEntryAsAdmin(r.Context(), id, r.PathValue("key"), r.PathValue("user"), v, actor(r))
+	if err != nil {
+		writeErr(w, err, http.StatusInternalServerError)
+		return
+	}
+	noStore(w)
+	writeJSON(w, row)
+}
+
+// handleDeleteEntry clears a person's value as the admin → 204.
+func (s *Server) handleDeleteEntry(w http.ResponseWriter, r *http.Request) {
+	id, ok := s.settingsAdmin(w, r)
+	if !ok {
+		return
+	}
+	if err := s.Hub.ClearEntryAsAdmin(r.Context(), id, r.PathValue("key"), r.PathValue("user"), actor(r)); err != nil {
+		writeErr(w, err, http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // settingsBody is the PUT / preview body.

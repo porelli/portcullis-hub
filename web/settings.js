@@ -690,17 +690,120 @@
     return h + '</div>';
   }
 
+  // enteredHtml: a person_entered option's stored values (spec call 32).
+  // Delivered values: "N of M people with access have entered one", with
+  // search; stored values that aren't delivered, with the reason (no
+  // access, account changed); population members without one. Clear on
+  // every value; Set / Edit only with the template's admin_override.
+  // Actions go straight to the entries API, never through the draft.
+  function entryState(st, key) {
+    if (!st.ent) st.ent = {};
+    if (!st.ent[key]) st.ent[key] = { q: '', edit: null, error: '', busy: false };
+    return st.ent[key];
+  }
+
+  function entryMatch(q, r) {
+    if (!q) return true;
+    q = q.toLowerCase();
+    return String(r.user).toLowerCase().includes(q) || String(r.display || '').toLowerCase().includes(q);
+  }
+
+  function entryEditHtml(st, o, user, v) {
+    const es = entryState(st, o.key);
+    return '<span class="ps-entry-edit" data-entry-edit="' + esc(user) + '">' +
+      editorHtml(st, o, v, 'entry', '', { label: (o.label || o.key) + ' for ' + user }) +
+      '<button type="button" class="btn btn-primary btn-sm" data-action="entry-save" data-key="' + esc(o.key) + '" data-user="' + esc(user) + '"' + (es.busy ? ' disabled' : '') + '>Save</button>' +
+      '<button type="button" class="btn btn-secondary btn-sm" data-action="entry-cancel" data-key="' + esc(o.key) + '">Cancel</button></span>';
+  }
+
+  function entryRowHtml(st, o, r) {
+    const es = entryState(st, o.key);
+    const k = ' data-key="' + esc(o.key) + '" data-user="' + esc(r.user) + '"';
+    let h = '<li data-entry-row="' + esc(r.user) + '"><span class="ps-user">' + esc(r.user) + '</span>';
+    if (es.edit === r.user) {
+      h += entryEditHtml(st, o, r.user, r.value);
+    } else {
+      h += '<span class="ps-val">' + esc(r.display) + '</span>';
+      h += '<span class="ps-why">' + (r.set_by && r.set_by !== r.user ? 'set by ' + esc(r.set_by) : 'entered') + ', ' + esc(fmtDate(r.updated_at)) +
+        (r.delivered ? '' : ' · not delivered: ' + esc(r.why || 'unknown')) + '</span>';
+      // Set / Edit only for people in the population (the Hub refuses others).
+      if (o.admin_override && r.why !== 'no access') h += '<button type="button" class="btn btn-secondary btn-sm" data-action="entry-edit"' + k + '>Edit</button>';
+      h += '<button type="button" class="btn btn-danger btn-sm" data-action="entry-clear"' + k + (es.busy ? ' disabled' : '') + '>Clear</button>';
+    }
+    return h + '</li>';
+  }
+
   function enteredHtml(st, o) {
     const ev = (st.panel.entries || {})[o.key] || { rows: [], not_set: [] };
-    let h = '<div class="ps-hint">Each person enters their own value on My apps' + (o.admin_override ? '; administrators may set one for them' : '') + '.</div>';
-    if (!(ev.rows || []).length) return h + '<div class="ps-hint">Nobody has entered one yet.</div>';
-    h += '<ul class="ps-who-rows">';
-    for (const r of ev.rows) {
-      h += '<li><span class="ps-user">' + esc(r.user) + '</span><span class="ps-val">' + esc(r.display) + '</span><span class="ps-why">by ' + esc(r.set_by) + ', ' + esc(fmtDate(r.updated_at)) + ' · ' + esc(r.delivered ? 'delivered' : ('not delivered' + (r.why ? ': ' + r.why : ''))) + '</span></li>';
+    const es = entryState(st, o.key);
+    const rows = ev.rows || [], notSet = ev.not_set || [];
+    const delivered = rows.filter(r => r.delivered), stored = rows.filter(r => !r.delivered);
+    const total = delivered.length + notSet.length;
+    let h = '<div class="ps-entries" data-entries="' + esc(o.key) + '">';
+    h += '<div class="ps-hint">Each person enters their own value on My apps' + (o.admin_override ? '; administrators may set one for them' : '') + (o.unique ? '. Values are unique: no two people can register the same one' : '') + '.</div>';
+    h += '<div class="ps-who-head"><span data-entries-count>' + esc(delivered.length + ' of ' + plural(total, 'person', 'people') + ' with access ' + (delivered.length === 1 ? 'has' : 'have') + ' entered one') + '</span>' +
+      '<input type="search" class="ps-search" data-entry-search data-key="' + esc(o.key) + '" value="' + esc(es.q) + '" placeholder="search…" aria-label="Search entered values"></div>';
+    h += '<div data-entries-list="' + esc(o.key) + '">' + entriesList(st, o, delivered, stored, notSet) + '</div>';
+    if (es.error) h += '<div class="ps-err" data-entry-error>' + esc(es.error) + '</div>';
+    return h + '</div>';
+  }
+
+  function entriesList(st, o, delivered, stored, notSet) {
+    const es = entryState(st, o.key);
+    let h = '';
+    const d = delivered.filter(r => entryMatch(es.q, r));
+    h += '<ul class="ps-who-rows" data-entries-delivered>' + (d.length ? d.map(r => entryRowHtml(st, o, r)).join('') : '<li class="ps-muted">' + esc(es.q ? 'No match.' : 'Nobody has entered one yet.') + '</li>') + '</ul>';
+    const s = stored.filter(r => entryMatch(es.q, r));
+    if (s.length) {
+      h += '<div class="ps-hint">Stored, not delivered</div><ul class="ps-who-rows" data-entries-stored>' + s.map(r => entryRowHtml(st, o, r)).join('') + '</ul>';
     }
-    h += '</ul>';
-    if ((ev.not_set || []).length) h += '<div class="ps-hint">Not set: ' + ev.not_set.map(esc).join(', ') + '</div>';
+    const n = notSet.filter(u => entryMatch(es.q, { user: u }));
+    if (n.length) {
+      h += '<div class="ps-hint">Not set</div><ul class="ps-who-rows" data-entries-notset>';
+      for (const u of n) {
+        h += '<li data-entry-row="' + esc(u) + '"><span class="ps-user">' + esc(u) + '</span>';
+        if (es.edit === u) h += entryEditHtml(st, o, u, null);
+        else if (o.admin_override) h += '<button type="button" class="btn btn-secondary btn-sm" data-action="entry-edit" data-key="' + esc(o.key) + '" data-user="' + esc(u) + '">Set</button>';
+        h += '</li>';
+      }
+      h += '</ul>';
+    }
     return h;
+  }
+
+  function redrawEntries(st, key) {
+    const o = st.opts[key];
+    const box = st.el.querySelector('[data-entries-list="' + CSS.escape(key) + '"]');
+    if (!o || !box) return;
+    const ev = (st.panel.entries || {})[key] || { rows: [], not_set: [] };
+    const rows = ev.rows || [];
+    box.innerHTML = entriesList(st, o, rows.filter(r => r.delivered), rows.filter(r => !r.delivered), ev.not_set || []);
+  }
+
+  // entryRequest sets (value !== undefined) or clears user's value, then
+  // reloads the panel's entries and deliveries (the draft is kept).
+  async function entryRequest(st, key, user, value) {
+    const es = entryState(st, key);
+    const url = '/api/instances/' + encodeURIComponent(st.id) + '/settings/entries/' + encodeURIComponent(key) + '/' + encodeURIComponent(user);
+    es.busy = true;
+    es.error = '';
+    redrawOption(st, key);
+    try {
+      if (value === undefined) await window.apiCall(url, 'DELETE');
+      else await window.apiPut(url, { value });
+      es.edit = null;
+      window.showToast && window.showToast(value === undefined ? 'Value cleared' : 'Value saved', 'success');
+    } catch (err) {
+      es.error = err.message || 'failed';
+    }
+    try {
+      const p = await window.apiGet('/api/instances/' + encodeURIComponent(st.id) + '/settings');
+      st.panel.entries = p.entries;
+      st.panel.deliveries = p.deliveries;
+      redrawStrip(st);
+    } catch (e) { /* keep the old lists */ }
+    es.busy = false;
+    redrawOption(st, key);
   }
 
   // ── who gets what ──────────────────────────────────────────────────
@@ -1080,7 +1183,7 @@
   // onEdit reads an edited value into the draft.
   function onEdit(st, ed) {
     const key = ed.dataset.key, o = st.opts[key];
-    if (!o) return;
+    if (!o || ed.dataset.where === 'entry') return; // read on Save (entryRequest)
     const where = ed.dataset.where, uid = ed.dataset.uid;
     const r = readEditor(o, ed);
     const errKey = where === 'row' ? key + '\u0000' + uid : key;
@@ -1136,6 +1239,11 @@
         if (list) list.innerHTML = whoList(st, st.opts[t.dataset.key]);
         return;
       }
+      if (t.matches('[data-entry-search]')) {
+        entryState(st, t.dataset.key).q = t.value;
+        redrawEntries(st, t.dataset.key);
+        return;
+      }
       if (t.matches('[data-secret-input]')) {
         const k = t.dataset.secretInput;
         if (t.value === '') delete st.secrets[k]; else st.secrets[k] = { value: t.value };
@@ -1183,7 +1291,7 @@
     el.addEventListener('change', onInput);
 
     el.addEventListener('keydown', e => {
-      if (e.key === 'Enter' && e.target.matches('[data-who-search]')) e.preventDefault();
+      if (e.key === 'Enter' && e.target.matches('[data-who-search], [data-entry-search]')) e.preventDefault();
     });
 
     el.addEventListener('click', e => {
@@ -1205,6 +1313,38 @@
           return;
         }
         case 'retry': retry(st); return;
+        case 'entry-edit': {
+          const es = entryState(st, key);
+          es.edit = b.dataset.user;
+          es.error = '';
+          redrawOption(st, key);
+          refocus(st, '[data-entry-edit="' + CSS.escape(b.dataset.user) + '"] input, [data-entry-edit="' + CSS.escape(b.dataset.user) + '"] select');
+          return;
+        }
+        case 'entry-cancel': {
+          const es = entryState(st, key);
+          es.edit = null;
+          es.error = '';
+          redrawOption(st, key);
+          return;
+        }
+        case 'entry-save': {
+          const ed = b.closest('[data-entry-edit]')?.querySelector('[data-ed]');
+          if (!ed || !o) return;
+          const r = readEditor(o, ed);
+          if (r.error || r.empty) {
+            entryState(st, key).error = r.error || 'enter a value (Clear removes it)';
+            redrawOption(st, key);
+            return;
+          }
+          entryRequest(st, key, b.dataset.user, r.value);
+          return;
+        }
+        case 'entry-clear': {
+          if (!window.confirm('Clear ' + b.dataset.user + "'s " + ((o && o.label) || key) + '? The app stops receiving it.')) return;
+          entryRequest(st, key, b.dataset.user, undefined);
+          return;
+        }
         case 'row-add': {
           rowList(st, key).push({ uid: nextUid(), group: '', value: newRowValue(st, o), group0: '', gid0: 0 });
           // A row without a group can't be previewed or saved yet.

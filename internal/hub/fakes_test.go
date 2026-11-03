@@ -1173,9 +1173,12 @@ type fakePeople struct {
 	members   map[string]map[string]bool
 	expired   map[string]map[string]bool
 	privilege map[string]string
-	err       error
-	nextID    int
-	calls     int
+	// uuids: LLDAP account uuids (default "uuid-<user>"; recreate gives
+	// a new one).
+	uuids  map[string]string
+	err    error
+	nextID int
+	calls  int
 	// onMembership, if set, runs once after the next snapshot is taken
 	// (without p.mu): something changing between snapshot and use.
 	onMembership func()
@@ -1212,6 +1215,43 @@ func (p *fakePeople) deleteGroup(name string) {
 	delete(p.members, name)
 }
 
+// uuidLocked is user's account uuid. Caller holds p.mu.
+func (p *fakePeople) uuidLocked(user string) string {
+	if u, ok := p.uuids[user]; ok {
+		return u
+	}
+	return "uuid-" + user
+}
+
+// uuidOf is user's account uuid.
+func (p *fakePeople) uuidOf(user string) string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.uuidLocked(user)
+}
+
+// recreate deletes user and creates the name again (a new uuid, no
+// groups).
+func (p *fakePeople) recreate(user string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.uuids == nil {
+		p.uuids = map[string]string{}
+	}
+	p.nextID++
+	p.uuids[user] = fmt.Sprintf("uuid-%s-%d", user, p.nextID)
+	for _, ms := range p.members {
+		delete(ms, user)
+	}
+}
+
+// removeMember takes user out of group.
+func (p *fakePeople) removeMember(group, user string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.members[group], user)
+}
+
 func (p *fakePeople) id(name string) int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -1236,10 +1276,11 @@ func (p *fakePeople) Membership(ctx context.Context, now time.Time) (*directory.
 	if p.err != nil {
 		return nil, p.err
 	}
-	m := &directory.Membership{Users: map[string]map[string]int{}, Groups: map[string]directory.MemberGroup{}, Expired: map[string]map[string]bool{}, Privilege: map[string]string{}}
+	m := &directory.Membership{Users: map[string]map[string]int{}, Groups: map[string]directory.MemberGroup{}, Expired: map[string]map[string]bool{}, Privilege: map[string]string{}, UUIDs: map[string]string{}}
 	for u := range p.users {
 		if u != "portcullis-hub" {
 			m.Users[u] = map[string]int{}
+			m.UUIDs[u] = p.uuidLocked(u)
 		}
 	}
 	for g, id := range p.groups {

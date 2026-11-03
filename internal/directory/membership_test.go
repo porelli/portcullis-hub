@@ -3,6 +3,7 @@ package directory_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -274,3 +275,56 @@ type brokenDir struct{ directory.Directory }
 func (brokenDir) Available() error { return errUnavailable }
 
 var errUnavailable = &directory.Error{Status: 503, Msg: "LLDAP credentials missing"}
+
+func TestMembershipCarriesUUID(t *testing.T) {
+	e := newEnv(t)
+	m, err := e.svc.Membership(ctx, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := e.ll.UUIDOf("alice")
+	if want == "" || m.UUIDs["alice"] != want {
+		t.Errorf("uuids[alice] = %q, want %q (%+v)", m.UUIDs["alice"], want, m.UUIDs)
+	}
+	if _, ok := m.UUIDs["portcullis-hub"]; ok {
+		t.Errorf("service account in UUIDs: %+v", m.UUIDs)
+	}
+	if m.UUIDs["root"] == "" || m.UUIDs["root"] == want {
+		t.Errorf("uuids[root] = %q", m.UUIDs["root"])
+	}
+}
+
+func TestUserDeletedHook(t *testing.T) {
+	e := newEnv(t)
+	type call struct{ actor, name string }
+	var calls []call
+	e.svc.UserDeleted = func(_ context.Context, actor, name string) []string {
+		calls = append(calls, call{actor, name})
+		return []string{"purged entries"}
+	}
+	real := e.svc.LLDAP
+	e.svc.LLDAP = failUserDelete{real}
+	if _, err := e.svc.DeleteUser(ctx, asRoot, "alice", "alice"); err == nil {
+		t.Fatal("failing delete succeeded")
+	}
+	if len(calls) != 0 {
+		t.Fatalf("hook called for a failed delete: %+v", calls)
+	}
+	e.svc.LLDAP = real
+	res, err := e.svc.DeleteUser(ctx, asRoot, "alice", "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 1 || calls[0] != (call{"root", "alice"}) {
+		t.Errorf("calls = %+v", calls)
+	}
+	if !strings.Contains(strings.Join(res.Warnings, ";"), "purged entries") {
+		t.Errorf("warnings = %v", res.Warnings)
+	}
+}
+
+type failUserDelete struct{ directory.Directory }
+
+func (failUserDelete) DeleteUser(context.Context, string) error {
+	return errors.New("simulated LLDAP failure")
+}

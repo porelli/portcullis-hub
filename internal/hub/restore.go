@@ -140,6 +140,31 @@ func (h *Hub) configProblem(t *templates.Template, c *instanceConfig, archive st
 		}
 		canon.Types[k] = o.Type
 	}
+	for _, k := range slices.Sorted(maps.Keys(s.Entered)) {
+		o := scoped(k, templates.ScopePersonEntered)
+		if o == nil {
+			continue
+		}
+		vals := map[string]state.EnteredValue{}
+		for _, u := range slices.Sorted(maps.Keys(s.Entered[k])) {
+			e := s.Entered[k][u]
+			v, err := h.kinds.Parse(o, e.Value)
+			if err != nil {
+				problems = append(problems, statusErr(400, "setting %s: the value of %s: %v", k, clip(u, 64), err))
+				continue
+			}
+			e.Value = storedValue(v)
+			vals[strings.ToLower(u)] = e
+		}
+		if canon.Entered == nil {
+			canon.Entered = map[string]map[string]state.EnteredValue{}
+		}
+		canon.Entered[k] = vals
+		if canon.Types == nil {
+			canon.Types = map[string]string{}
+		}
+		canon.Types[k] = o.Type
+	}
 	for k := range s.Secrets {
 		if o := optionByKey(t, k); o == nil || o.Type != templates.TypeSecret {
 			problems = append(problems, statusErr(400, "setting %s is not a secret option of the template", clip(k, 64)))

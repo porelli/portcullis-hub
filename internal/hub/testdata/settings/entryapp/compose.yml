@@ -1,0 +1,8 @@
+services:
+  app:
+    image: entryapp
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.entryapp.rule: Host(`${PORTCULLIS_HOST_ENTRYAPP:-entryapp.portcullis.local}`)
+      traefik.http.routers.entryapp.entrypoints: websecure
+      traefik.http.services.entryapp.loadbalancer.server.port: "8080"

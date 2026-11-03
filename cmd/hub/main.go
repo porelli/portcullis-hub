@@ -159,6 +159,7 @@ func main() {
 	// the claim units say "Users & Groups not configured".
 	h.SetAttrStore(ll)
 	dir.GroupDeleted = h.PurgeGroupSettings
+	dir.UserDeleted = h.PurgePersonValues
 	// The policy file's expiring list and user-attributes.json come from
 	// the directory (contract §4, §4.1); shared fields become Keycloak
 	// attr_<field> claims (§9.6). Keycloak failures are logged and retried,
