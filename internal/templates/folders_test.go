@@ -251,7 +251,9 @@ func TestComposeGIDDefaultsRefused(t *testing.T) {
 		{"group_add int", p, svc("    group_add: [10001, 60999]\n"), "", "service extra: group_add gid 60999 is in 60000-60999"},
 		{"group_add default", p, svc("    group_add: [\"${G:-60500}\"]\n"), "", "service extra: group_add gid 60500 (the default of ${G}) is in 60000-60999"},
 		{"group_add option default", hdrHead + opts("{key: pgid, label: G, type: int, default: 60004}", fpath("media", "web", "")), svc("    group_add: [\"${PGID}\"]\n"), "", "service extra: group_add ${PGID} is setting pgid, whose default 60004 is in 60000-60999"},
-		{"group_add names ok", p, svc("    group_add: [video, \"10001\", \"${G:+1000}\", $G]\n"), "", ""},
+		{"group_add names ok", p, svc("    group_add: [video, \"10001\", \"${G-1000}\", $G]\n"), "", ""},
+		{"group_add plus", p, svc("    group_add: [\"${G:+1000}\"]\n"), "", `group_add entry "${G:+1000}" must be`},
+		{"group_add plus bare", p, svc("    group_add: [\"${G+1000}\"]\n"), "", `group_add entry "${G+1000}" must be`},
 		{"group_add escaped", p, svc("    group_add: [\"$${G:-60500}\"]\n"), "", `service extra: group_add entry "$${G:-60500}" must be a whole number, a group name or exactly one ${NAME} / $NAME (no mixed forms)`},
 		{"group_add mixed", p, svc("    group_add: [\"${X:-6}0001\"]\n"), "", `service extra: group_add entry "${X:-6}0001" must be a whole number, a group name or exactly one ${NAME} / $NAME (no mixed forms)`},
 		{"group_add nested", p, svc("    group_add: [\"${X:-${Y:-60001}}\"]\n"), "", `group_add entry "${X:-${Y:-60001}}" must be`},
@@ -262,9 +264,17 @@ func TestComposeGIDDefaultsRefused(t *testing.T) {
 		{"group_add $ fallback", p, svc("    group_add: [\"${G:-$H}\"]\n"), "", `group_add entry "${G:-$H}" must be`},
 		{"group_add error form", p, svc("    group_add: [\"${G:?unset}\"]\n"), "", `group_add entry "${G:?unset}" must be`},
 		{"user forms ok", p, svc("    user: \"${U}:${XG-1000}\"\n"), "", ""},
-		{"user plus ok", p, svc("    user: \"1000:${XG:+1000}\"\n"), "", ""},
-		{"user plus in range", p, svc("    user: \"1000:${XG+60001}\"\n"), "", "gid 60001 (the value ${XG+…} gives) is in 60000-60999"},
-		{"user text fallback", p, svc("    user: \"1000:${XG:-x}\"\n"), "", `compose user: gid "${XG:-x}" must be`},
+		{"user plus", p, svc("    user: \"1000:${XG:+1000}\"\n"), "", `compose user: gid "${XG:+1000}" must be`},
+		{"user plus in range", p, svc("    user: \"1000:${XG+60001}\"\n"), "", `compose user: gid "${XG+60001}" must be`},
+		{"uid mixed", p, svc("    user: \"${X:-6}0001:1000\"\n"), "", `service extra: compose user: uid "${X:-6}0001" must be a whole number, a user name or exactly one ${NAME} / $NAME (no mixed forms)`},
+		{"uid plus", p, svc("    user: \"${X:+0}\"\n"), "", `compose user: uid "${X:+0}" must be`},
+		{"uid colon fallback", p, svc("    user: \"${A:-1:60001}\"\n"), "", `service extra: compose user: "${A:-1:60001}": a ${…} fallback may only be a whole number (no ':', '$' or nesting)`},
+		{"uid dollar fallback", p, svc("    user: \"${A:-$B}:1000\"\n"), "", `a ${…} fallback may only be a whole number`},
+		{"unterminated", p, svc("    user: \"${A:-1\"\n"), "", `a ${…} fallback may only be a whole number`},
+		{"uid name ok", p, svc("    user: www-data\n"), "", ""},
+		{"uid forms ok", p, svc("    user: \"${U-1000}:${G:-1000}\"\n"), "", ""},
+		{"uid bare ok", p, svc("    user: \"$U:1000\"\n"), "", ""},
+		{"user text fallback", p, svc("    user: \"1000:${XG:-x}\"\n"), "", `compose user: "1000:${XG:-x}": a ${…} fallback may only be a whole number`},
 		{"user gid name", p, svc("    user: \"1000:staff\"\n"), "", `compose user: gid "staff" must be`},
 		{"group_add not a list", p, svc("    group_add: \"60001\"\n"), "", "service extra: group_add must be a list"},
 	})
@@ -324,7 +334,7 @@ func TestEffectiveMode(t *testing.T) {
 func TestGroupAddResolvesStrictForms(t *testing.T) {
 	m := &Manifest{Settings: &SettingsSpec{Options: []Option{{Key: "pgid", Type: TypeInt}}}}
 	for e, ok := range map[string]bool{
-		"${PGID}": true, "$PGID": true, "${PGID:-1000}": true, "${PGID-1000}": true, "${PGID:+1000}": true, "1000": true,
+		"${PGID}": true, "$PGID": true, "${PGID:-1000}": true, "${PGID-1000}": true, "1000": true, "${PGID:+1000}": false, "${PGID+1000}": false,
 		"${PGID:-abc}": false, "${PGID:-$X}": false, "${PGID:-${X}}": false, "${PGID?e}": false, "${NOPE}": false, "video": false, "x${PGID}": false,
 	} {
 		v := &specCheck{m: m, groupAdd: map[string][]string{"s": {e}}}

@@ -413,12 +413,16 @@ func composeIDs(compose []byte) (users map[string]string, groupAdd map[string][]
 }
 
 // singleRefRe is the only accepted interpolation form of a gid (or uid)
-// source: exactly $NAME, ${NAME}, or ${NAME:-n} / ${NAME-n} / ${NAME:+n}
-// / ${NAME+n} with a plain whole-number n (range-checked) — nothing
-// around it, no nesting, no $ in the fallback, no ${NAME?err} (security
-// review). groupNameRe is a plain group name (group_add only).
+// source: exactly $NAME, ${NAME}, or ${NAME:-n} / ${NAME-n}
+// with a plain whole-number n (range-checked) — nothing around it, no
+// nesting, no $ in the fallback, no ${NAME?err} and no ${NAME:+n} /
+// ${NAME+n} (compose substitutes n when NAME is set: a parser
+// differential; security review). groupNameRe is a plain group name
+// (group_add only) or user name (the uid part).
 var (
-	singleRefRe = regexp.MustCompile(`^(?:\$\{([A-Za-z_][A-Za-z0-9_]*)(?:(:?[-+])([0-9]{1,10}))?\}|\$([A-Za-z_][A-Za-z0-9_]*))$`)
+	singleRefRe = regexp.MustCompile(`^(?:\$\{([A-Za-z_][A-Za-z0-9_]*)(?:(:?-)([0-9]{1,10}))?\}|\$([A-Za-z_][A-Za-z0-9_]*))$`)
+	// braceRefRe is a ${…} whose fallback (if any) is only digits.
+	braceRefRe  = regexp.MustCompile(`^\$\{[A-Za-z_][A-Za-z0-9_]*(?:[:?+-]{1,2}[0-9]*)?\}`)
 	groupNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.-]*$`)
 )
 
@@ -444,7 +448,15 @@ func (v *specCheck) composeGIDs() error {
 	}
 	sort.Strings(svcs)
 	for _, s := range svcs {
-		if _, g, ok := splitUser(v.users[s]); ok {
+		u := v.users[s]
+		if err := userFallbacks(s, u); err != nil {
+			return err
+		}
+		uid, g, ok := splitUser(u)
+		if u != "" && !userNumRe.MatchString(uid) && !groupNameRe.MatchString(uid) && !singleRefRe.MatchString(uid) {
+			return fmt.Errorf("service %s: compose user: uid %q must be a whole number, a user name or exactly one ${NAME} / $NAME (no mixed forms)", s, uid)
+		}
+		if ok {
 			if err := v.gidSource(s, "compose user: gid", "compose user: gid", g, false); err != nil {
 				return err
 			}
@@ -453,6 +465,25 @@ func (v *specCheck) composeGIDs() error {
 			if err := v.gidSource(s, "group_add gid", "group_add", e, true); err != nil {
 				return err
 			}
+		}
+	}
+	return nil
+}
+
+// userFallbacks refuses a compose user: whose ${…} fallbacks hold
+// anything but digits (a ':' there would move compose's uid/gid split,
+// a '$' nest another value), checked before splitUser.
+func userFallbacks(svc, u string) error {
+	for i := 0; i < len(u); i++ {
+		if u[i] != '$' || i+1 >= len(u) {
+			continue
+		}
+		if u[i+1] == '$' {
+			i++
+			continue
+		}
+		if u[i+1] == '{' && !braceRefRe.MatchString(u[i:]) {
+			return fmt.Errorf("service %s: compose user: %q: a ${…} fallback may only be a whole number (no ':', '$' or nesting)", svc, u)
 		}
 	}
 	return nil
@@ -486,11 +517,7 @@ func (v *specCheck) gidSource(svc, lit, ref, val string, names bool) error {
 		}
 		if op != "" && op != "?" && op != ":?" && userNumRe.MatchString(value) {
 			if n, _ := strconv.ParseInt(value, 10, 64); InFolderGIDRange(n) {
-				src := "the default of ${" + name + "}"
-				if strings.HasSuffix(op, "+") {
-					src = "the value ${" + name + op + "…} gives"
-				}
-				return fmt.Errorf("service %s: %s %d (%s) is in %s", svc, lit, n, src, gidRangeText)
+				return fmt.Errorf("service %s: %s %d (the default of ${%s}) is in %s", svc, lit, n, name, gidRangeText)
 			}
 		}
 		if ro := v.anyEnvOption(name); ro != nil {
