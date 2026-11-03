@@ -589,7 +589,7 @@ func checkChoices(cs []templates.EnumOption) error {
 			return fmt.Errorf("options: value %q listed twice", c.Value)
 		}
 		seen[c.Value] = true
-		if c.Label == "" || len(c.Label) > 64 || checkText(c.Label) != nil {
+		if c.Label == "" || utf8.RuneCountInString(c.Label) > 64 || checkText(c.Label) != nil {
 			return fmt.Errorf("options: value %q needs a single-line label of at most 64 characters", c.Value)
 		}
 	}

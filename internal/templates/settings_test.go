@@ -181,8 +181,8 @@ const personClaim = "delivery: [{claim: {client: app, name: app_quota, json_type
 func TestPersonScopeNeedsDefaultAndPersonDelivery(t *testing.T) {
 	runSettingsCases(t, []settingsCase{
 		{"no default", oidcHead + opts("{key: quota, label: Q, type: int, scope: person, resolve: max, "+personClaim+"}"), oidcCompose, "quota", "default"},
-		{"env only", hdrHead + opts("{key: quota, label: Q, type: int, scope: person, default: 1, delivery: [{env: TRASH_DAYS}]}"), hdrCompose, "quota", "per-person env is not allowed"},
-		{"no delivery", hdrHead + opts("{key: quota, label: Q, type: int, scope: person, default: 1}"), hdrCompose, "quota", "per-person delivery"},
+		{"env only", hdrHead + opts("{key: quota, label: Q, type: int, scope: person, resolve: priority, default: 1, delivery: [{env: TRASH_DAYS}]}"), hdrCompose, "quota", "per-person env is not allowed"},
+		{"no delivery", hdrHead + opts("{key: quota, label: Q, type: int, scope: person, resolve: priority, default: 1}"), hdrCompose, "quota", "per-person delivery"},
 		{"claim", oidcHead + opts("{key: quota, label: Q, type: int, scope: person, default: 10, resolve: max, "+personClaim+"}"), oidcCompose, "", ""},
 		{"bad scope", hdrHead + opts("{key: quota, label: Q, type: int, scope: everyone}"), hdrCompose, "quota", "scope"},
 		{"group default", hdrHead + opts("{key: quota, label: Q, type: int, scope: group, default: 1, delivery: [{env: THEME, render: {format: json}}]}"), hdrCompose, "quota", "default"},
@@ -192,7 +192,7 @@ func TestPersonScopeNeedsDefaultAndPersonDelivery(t *testing.T) {
 		{"instance resolve", hdrHead + opts("{key: trash_days, label: Q, type: int, resolve: max}"), hdrCompose, "trash_days", "resolve"},
 		{"instance privileged", hdrHead + opts("{key: trash_days, label: Q, type: bool, privileged: true}"), hdrCompose, "trash_days", "privileged"},
 		{"instance self_visible", hdrHead + opts("{key: trash_days, label: Q, type: int, self_visible: false}"), hdrCompose, "trash_days", "self_visible"},
-		{"two kinds in one delivery", oidcHead + opts("{key: quota, label: Q, type: int, scope: person, default: 1, delivery: [{env: TRASH_DAYS, hook: x}]}"), oidcCompose, "quota", "exactly one"},
+		{"two kinds in one delivery", oidcHead + opts("{key: quota, label: Q, type: int, scope: person, resolve: priority, default: 1, delivery: [{env: TRASH_DAYS, hook: x}]}"), oidcCompose, "quota", "exactly one"},
 	})
 }
 
@@ -249,18 +249,18 @@ func TestEnvNames(t *testing.T) {
 
 func TestClaimDeliveryNeedsNativeOIDCClient(t *testing.T) {
 	cases := []settingsCase{
-		{"forward-auth", hdrHead + opts("{key: quota, label: Q, type: int, scope: person, default: 1, "+personClaim+"}"), hdrCompose, "quota", "native-oidc"},
-		{"unknown client", oidcHead + opts("{key: quota, label: Q, type: int, scope: person, default: 1, delivery: [{claim: {client: other, name: app_quota, json_type: int}}]}"), oidcCompose, "quota", "client other"},
-		{"bad json_type", oidcHead + opts("{key: quota, label: Q, type: int, scope: person, default: 1, delivery: [{claim: {client: app, name: app_quota, json_type: float}}]}"), oidcCompose, "quota", "json_type"},
-		{"duplicate claim", oidcHead + opts("{key: quota, label: Q, type: int, scope: person, default: 1, "+personClaim+"}", "{key: q2, label: Q, type: int, scope: person, default: 1, "+personClaim+"}"), oidcCompose, "q2", "app_quota"},
+		{"forward-auth", hdrHead + opts("{key: quota, label: Q, type: int, scope: person, resolve: priority, default: 1, "+personClaim+"}"), hdrCompose, "quota", "native-oidc"},
+		{"unknown client", oidcHead + opts("{key: quota, label: Q, type: int, scope: person, resolve: priority, default: 1, delivery: [{claim: {client: other, name: app_quota, json_type: int}}]}"), oidcCompose, "quota", "client other"},
+		{"bad json_type", oidcHead + opts("{key: quota, label: Q, type: int, scope: person, resolve: priority, default: 1, delivery: [{claim: {client: app, name: app_quota, json_type: float}}]}"), oidcCompose, "quota", "json_type"},
+		{"duplicate claim", oidcHead + opts("{key: quota, label: Q, type: int, scope: person, resolve: priority, default: 1, "+personClaim+"}", "{key: q2, label: Q, type: int, scope: person, resolve: priority, default: 1, "+personClaim+"}"), oidcCompose, "q2", "app_quota"},
 	}
 	for _, n := range []string{"sub", "email", "groups", "acr", "amr", "preferred_username", "attr_x", "portcullis_x"} {
-		cases = append(cases, settingsCase{"claim " + n, oidcHead + opts("{key: quota, label: Q, type: int, scope: person, default: 1, delivery: [{claim: {client: app, name: "+n+", json_type: int}}]}"), oidcCompose, "quota", "claim " + n})
+		cases = append(cases, settingsCase{"claim " + n, oidcHead + opts("{key: quota, label: Q, type: int, scope: person, resolve: priority, default: 1, delivery: [{claim: {client: app, name: "+n+", json_type: int}}]}"), oidcCompose, "quota", "claim " + n})
 	}
 	runSettingsCases(t, cases)
 }
 
-const personHeader = "{key: quota, label: Q, type: int, scope: person, default: 1, delivery: [{header: {name: X-Forwarded-Attr-Quota}}]}"
+const personHeader = "{key: quota, label: Q, type: int, scope: person, resolve: priority, default: 1, delivery: [{header: {name: X-Forwarded-Attr-Quota}}]}"
 
 // sideRouter: a router labelled on init, without forward-auth, whose
 // Traefik service is web's: it reaches the delivering backend.
@@ -295,11 +295,11 @@ func TestHeaderDeliveryRules(t *testing.T) {
 	public := strings.Replace(hdrCompose, "  init:\n", "      traefik.http.routers.share.rule: Host(`${PORTCULLIS_HOST_APP:-app.portcullis.local}`) && PathPrefix(`/share`)\n  init:\n", 1)
 	runSettingsCases(t, []settingsCase{
 		{"ok", hdrHead + opts(personHeader), hdrCompose, "", ""},
-		{"bad name", hdrHead + opts("{key: quota, label: Q, type: int, scope: person, default: 1, delivery: [{header: {name: X-Quota}}]}"), hdrCompose, "quota", "X-Forwarded-Attr-"},
+		{"bad name", hdrHead + opts("{key: quota, label: Q, type: int, scope: person, resolve: priority, default: 1, delivery: [{header: {name: X-Quota}}]}"), hdrCompose, "quota", "X-Forwarded-Attr-"},
 		// group-gate's suffix form (policy.HeaderNameRe): a trailing or
 		// doubled "-" would be dropped from user-attributes.json.
-		{"trailing dash", hdrHead + opts("{key: quota, label: Q, type: int, scope: person, default: 1, delivery: [{header: {name: X-Forwarded-Attr-Quota-}}]}"), hdrCompose, "quota", "X-Forwarded-Attr-"},
-		{"double dash", hdrHead + opts("{key: quota, label: Q, type: int, scope: person, default: 1, delivery: [{header: {name: X-Forwarded-Attr-A--B}}]}"), hdrCompose, "quota", "X-Forwarded-Attr-"},
+		{"trailing dash", hdrHead + opts("{key: quota, label: Q, type: int, scope: person, resolve: priority, default: 1, delivery: [{header: {name: X-Forwarded-Attr-Quota-}}]}"), hdrCompose, "quota", "X-Forwarded-Attr-"},
+		{"double dash", hdrHead + opts("{key: quota, label: Q, type: int, scope: person, resolve: priority, default: 1, delivery: [{header: {name: X-Forwarded-Attr-A--B}}]}"), hdrCompose, "quota", "X-Forwarded-Attr-"},
 		{"no group-gate", hdrHead + opts(personHeader), noGroups, "quota", "portcullis-groups"},
 		{"public router", hdrHead + opts(personHeader), public, "quota", "router share"},
 		{"sign_in native", "name: App\nauth:\n  method: custom\n  sso: false\n  native_login: {supported: true, allow_without_gateway: true}\n" + opts(personHeader), hdrCompose, "quota", "own login"},
@@ -323,9 +323,9 @@ hooks:
 func TestFileAndHookRefs(t *testing.T) {
 	pf := func(o string) string { return hdrHead + opts(o) + filesBlock }
 	runSettingsCases(t, []settingsCase{
-		{"ok", pf("{key: quota, label: Q, type: int, scope: person, default: 1, delivery: [{file: {name: people, field: quota}}, {hook: apply}]}"), hdrCompose, "", ""},
-		{"undeclared file", pf("{key: quota, label: Q, type: int, scope: person, default: 1, delivery: [{file: {name: nope}}]}"), hdrCompose, "quota", "file nope"},
-		{"undeclared hook", pf("{key: quota, label: Q, type: int, scope: person, default: 1, delivery: [{hook: nope}]}"), hdrCompose, "quota", "hook nope"},
+		{"ok", pf("{key: quota, label: Q, type: int, scope: person, resolve: priority, default: 1, delivery: [{file: {name: people, field: quota}}, {hook: apply}]}"), hdrCompose, "", ""},
+		{"undeclared file", pf("{key: quota, label: Q, type: int, scope: person, resolve: priority, default: 1, delivery: [{file: {name: nope}}]}"), hdrCompose, "quota", "file nope"},
+		{"undeclared hook", pf("{key: quota, label: Q, type: int, scope: person, resolve: priority, default: 1, delivery: [{hook: nope}]}"), hdrCompose, "quota", "hook nope"},
 		{"field on instance", pf("{key: trash_days, label: Q, type: int, delivery: [{file: {name: people, field: x}}]}"), hdrCompose, "trash_days", "field"},
 		{"file service", hdrHead + "files:\n  - {name: people, service: nope, mount: /portcullis}\n", hdrCompose, "", "files[people]: service nope"},
 		{"file name", hdrHead + "files:\n  - {name: People, service: init, mount: /portcullis}\n", hdrCompose, "", "People"},
@@ -346,7 +346,7 @@ func TestFileAndHookRefs(t *testing.T) {
 		{"path delivery", hdrHead + opts("{key: media, label: M, type: path, target: {service: web, mount: /media}, delivery: [{env: THEME}]}"), hdrCompose, "media", "target"},
 		{"path no target", hdrHead + opts("{key: media, label: M, type: path}"), hdrCompose, "media", "target"},
 		{"path target service", hdrHead + opts("{key: media, label: M, type: path, target: {service: nope, mount: /media}}"), hdrCompose, "media", "nope"},
-		{"path person", hdrHead + opts("{key: media, label: M, type: path, scope: person, default: /x, target: {service: web, mount: /media}}"), hdrCompose, "media", "instance"},
+		{"path person", hdrHead + opts("{key: media, label: M, type: path, scope: person, resolve: priority, default: /x, target: {service: web, mount: /media}}"), hdrCompose, "media", "instance"},
 	})
 }
 
@@ -938,7 +938,7 @@ func (onlyString) CheckOption(*Option) error { return nil }
 // Keycloak converts the attribute value to that type.
 func TestClaimJSONTypeFitsRender(t *testing.T) {
 	c := func(typ, extra, claim string) string {
-		return oidcHead + opts("{key: v, label: V, type: "+typ+", scope: person, "+extra+", delivery: [{claim: {client: app, name: app_v, "+claim+"}}]}")
+		return oidcHead + opts("{key: v, label: V, type: "+typ+", scope: person, resolve: priority, "+extra+", delivery: [{claim: {client: app, name: app_v, "+claim+"}}]}")
 	}
 	runSettingsCases(t, []settingsCase{
 		{"int ok", c("int", "default: 1", "json_type: int"), oidcCompose, "", ""},
@@ -961,5 +961,49 @@ func TestClaimJSONTypeFitsRender(t *testing.T) {
 		{"json unlimited text", c("size", "default: 1GiB, allow_unlimited: true", "json_type: json, render: {unlimited: none}"), oidcCompose, "v", "unlimited"},
 		{"json table ok", c("table", "default: [], columns: [{name: a, label: A, type: string}]", "json_type: json"), oidcCompose, "", ""},
 		{"string anything", c("enum", "default: a, options: [{value: a, label: A}]", "json_type: string"), oidcCompose, "", ""},
+	})
+}
+
+// Final whole-branch review (hub H1-H6): the validator refuses what the
+// runtime could never deliver.
+func TestFinalReviewValidatorRules(t *testing.T) {
+	hdr := func(o string) string { return hdrHead + opts(o) }
+	oidc := func(o string) string { return oidcHead + opts(o) }
+	runSettingsCases(t, []settingsCase{
+		// H1: scope person needs resolve.
+		{"person without resolve", oidc("{key: quota, label: Q, type: int, scope: person, default: 1, " + personClaim + "}"), oidcCompose, "quota", "scope person needs resolve"},
+		// H2: a secret is instance scope only.
+		{"group secret", hdr("{key: theme, label: T, type: secret, scope: group, delivery: [{env: THEME, render: {format: json}}]}"), hdrCompose, "theme", "a secret option needs scope instance"},
+		{"person secret", oidc("{key: quota, label: Q, type: secret, scope: person, resolve: priority, " + personClaim + "}"), oidcCompose, "quota", "a secret option needs scope instance"},
+		// H3: the default and group_values render through every delivery.
+		{"env default with a quote", hdr("{key: theme, label: T, type: string, default: \"it's\"}"), hdrCompose, "theme", "default"},
+		{"env default with a backslash", hdr("{key: theme, label: T, type: string, default: 'a\\b', delivery: [{env: THEME}]}"), hdrCompose, "theme", "single quote, a backslash"},
+		{"size default not whole", hdr("{key: theme, label: T, type: size, default: 1536, delivery: [{env: THEME, render: {unit: KiB, integer: true}}]}"), hdrCompose, "theme", "whole number"},
+		{"list default item with the separator", hdr("{key: theme, label: T, type: list, items: {type: string}, default: ['a,b']}"), hdrCompose, "theme", "separator"},
+		{"group_values not renderable", oidc("{key: quota, label: Q, type: size, scope: person, default: 1GiB, resolve: max, group_values: {'{{ADMIN_GROUP}}': 1536}, delivery: [{claim: {client: app, name: app_quota, json_type: int, render: {unit: KiB, integer: true}}}]}"), oidcCompose, "quota", "group_values"},
+		{"env render true with a quote", hdr("{key: theme, label: T, type: bool, default: false, delivery: [{env: THEME, render: {true: \"it's\"}}]}"), hdrCompose, "theme", "an env value is single-quoted"},
+		{"env render join with a backslash", hdr("{key: theme, label: T, type: list, items: {type: string}, delivery: [{env: THEME, render: {join: '\\'}}]}"), hdrCompose, "theme", "an env value is single-quoted"},
+		{"header render true with a quote", hdr("{key: quota, label: Q, type: bool, scope: person, default: false, resolve: any, applies: next_request, delivery: [{header: {name: X-Forwarded-Attr-Quota, render: {true: \"it's\"}}}]}"), hdrCompose, "", ""},
+		{"env yaml", hdr("{key: theme, label: T, type: list, items: {type: string}, delivery: [{env: THEME, render: {format: yaml}}]}"), hdrCompose, "theme", "format yaml is multi-line"},
+		{"env csv table", hdr("{key: theme, label: T, type: table, columns: [{name: a, label: A, type: string}], delivery: [{env: THEME, render: {format: csv}}]}"), hdrCompose, "theme", "format csv is multi-line"},
+		{"header yaml", hdr("{key: quota, label: Q, type: list, items: {type: string}, scope: person, default: [], resolve: union, applies: next_request, delivery: [{header: {name: X-Forwarded-Attr-Quota, render: {format: yaml}}}]}"), hdrCompose, "quota", "format yaml is multi-line"},
+		{"file yaml list", hdr("{key: quota, label: Q, type: list, items: {type: string}, scope: person, default: [], resolve: union, delivery: [{file: {name: people, render: {format: yaml}}}]}") + "files:\n  - {name: people, service: web, mount: /portcullis}\n", hdrCompose, "", ""},
+		{"person_entered scalar file yaml", firefoxHead + strings.Replace(firefoxSettings, "delivery: [{file: {name: allowlist}}]\n    - key: extra", "delivery: [{file: {name: allowlist, render: {format: yaml}}}]\n    - key: extra", 1), firefoxCompose, "mozilla_uid", "format yaml"},
+		// H4: JSON renders don't escape & < >.
+		{"json env with an ampersand", hdr("{key: theme, label: T, type: list, items: {type: string}, default: ['https://x/?a=1&b=2'], delivery: [{env: THEME, render: {format: json}}]}"), hdrCompose, "", ""},
+		{"json env with a double quote", hdr("{key: theme, label: T, type: list, items: {type: string}, default: ['say \"hi\"'], delivery: [{env: THEME, render: {format: json}}]}"), hdrCompose, "theme", "JSON escapes"},
+		// H5: unlimited's sentinel out of the values' reach.
+		{"unlimited sentinel reachable", oidc("{key: quota, label: Q, type: size, allow_unlimited: true, scope: person, default: 1GiB, resolve: min, delivery: [{claim: {client: app, name: app_quota, json_type: int, render: {unit: GiB, unlimited: '0'}}}]}"), oidcCompose, "quota", "allow_unlimited: claim app_quota renders unlimited as 0"},
+		{"unlimited sentinel above max", oidc("{key: quota, label: Q, type: size, allow_unlimited: true, max: 10GiB, scope: person, default: 1GiB, resolve: min, delivery: [{claim: {client: app, name: app_quota, json_type: int, render: {unit: GiB, unlimited: '100'}}}]}"), oidcCompose, "", ""},
+		{"unlimited sentinel below min", oidc("{key: quota, label: Q, type: size, allow_unlimited: true, min: 1GiB, scope: person, default: 1GiB, resolve: min, delivery: [{claim: {client: app, name: app_quota, json_type: int, render: {unit: GiB, unlimited: '0'}}}]}"), oidcCompose, "", ""},
+		{"unlimited sentinel not a number", oidc("{key: quota, label: Q, type: size, allow_unlimited: true, scope: person, default: 1GiB, resolve: min, delivery: [{claim: {client: app, name: app_quota, json_type: string, render: {unit: GiB, unlimited: none}}}]}"), oidcCompose, "", ""},
+		// H6.
+		{"required person empty default", oidc("{key: quota, label: Q, type: string, scope: person, required: true, default: '', resolve: priority, delivery: [{claim: {client: app, name: app_quota, json_type: string}}]}"), oidcCompose, "quota", "required on scope person needs a non-empty default"},
+		{"required person default", oidc("{key: quota, label: Q, type: string, scope: person, required: true, default: a, resolve: priority, delivery: [{claim: {client: app, name: app_quota, json_type: string}}]}"), oidcCompose, "", ""},
+		{"required group", hdr("{key: theme, label: T, type: string, scope: group, required: true, delivery: [{env: THEME, render: {format: json}}]}"), hdrCompose, "theme", "required is not for scope group"},
+		{"generate above max_len", hdr("{key: theme, label: T, type: secret, max_len: 32, generate: {length: 64, charset: hex}}"), hdrCompose, "theme", "generate.length 64 is above max_len 32"},
+		{"generate below min_len", hdr("{key: theme, label: T, type: secret, min_len: 40, generate: {length: 32, charset: hex}}"), hdrCompose, "theme", "generate.length 32 is below min_len 40"},
+		{"label of 64 runes", hdr("{key: theme, label: " + strings.Repeat("é", 64) + ", type: string}"), hdrCompose, "", ""},
+		{"label of 65 runes", hdr("{key: theme, label: " + strings.Repeat("é", 65) + ", type: string}"), hdrCompose, "theme", "at most 64 characters"},
 	})
 }

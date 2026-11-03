@@ -335,7 +335,7 @@ func renderEnvDelivery(o *templates.Option, v any, d *templates.Delivery) (map[s
 		}
 		x = r.Text
 	}
-	if _, err := envQuote(x); err != nil {
+	if err := settings.CheckEnvText(x, settings.EnvJSON(o, d)); err != nil {
 		return nil, fmt.Errorf("env %s: %w", d.Env, err)
 	}
 	out[d.Env] = x
@@ -348,8 +348,8 @@ func renderEnvDelivery(o *templates.Option, v any, d *templates.Delivery) (map[s
 // quotes as an escaped quote: a trailing \ would swallow the next line)
 // or a line break can't be single-quoted safely: an error.
 func envQuote(v string) (string, error) {
-	if strings.ContainsAny(v, "'\\\n\r") {
-		return "", fmt.Errorf("the value contains a single quote, a backslash or a line break, which an env value can't carry (use a file or hook delivery)")
+	if err := settings.CheckEnvText(v, false); err != nil {
+		return "", err
 	}
 	return "'" + v + "'", nil
 }

@@ -76,12 +76,13 @@ func TestBuiltinTypesParity(t *testing.T) {
 	}
 }
 
-func TestParseDefault(t *testing.T) {
-	if err := ParseDefault(opt(t, "type: size\ndefault: 500GiB\n")); err != nil {
+func TestCheckOptionDefault(t *testing.T) {
+	r := NewRegistry()
+	if err := r.CheckOption(opt(t, "type: size\ndefault: 500GiB\n")); err != nil {
 		t.Error(err)
 	}
-	wantErr(t, ParseDefault(opt(t, "type: size\ndefault: 500 gigs\n")), "default")
-	if err := ParseDefault(opt(t, "type: size\n")); err != nil {
+	wantErr(t, r.CheckOption(opt(t, "type: size\ndefault: 500 gigs\n")), "default")
+	if err := r.CheckOption(opt(t, "type: size\n")); err != nil {
 		t.Error(err)
 	}
 }

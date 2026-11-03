@@ -34,13 +34,15 @@ func CheckRequires(spec *templates.SettingsSpec, values map[string]Value) error 
 	return nil
 }
 
-// isEmpty reports whether v is an empty value (nil, empty string, empty list,
-// empty table).
+// isEmpty reports whether v is an empty value (nil, empty string, false,
+// empty list, empty table).
 func isEmpty(v Value) bool {
 	if v == nil {
 		return true
 	}
 	switch x := v.(type) {
+	case bool:
+		return !x
 	case string:
 		return x == ""
 	case []any:

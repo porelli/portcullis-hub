@@ -154,26 +154,25 @@ func (r *Registry) CheckOption(o *templates.Option) error {
 	if err := checkRenders(o); err != nil {
 		return err
 	}
+	// The default and each group_values value parse, and render through
+	// every delivery (the implicit env included, with the env quote rule).
 	if o.Default != nil {
-		if _, err := r.Parse(o, o.Default); err != nil {
+		v, err := r.Parse(o, o.Default)
+		if err == nil {
+			err = checkValueDeliveries(o, v)
+		}
+		if err != nil {
 			return fmt.Errorf("default %v: %w", o.Default, err)
 		}
 	}
 	for _, g := range sortedKeys(o.GroupValues) {
-		if _, err := r.Parse(o, o.GroupValues[g]); err != nil {
+		v, err := r.Parse(o, o.GroupValues[g])
+		if err == nil {
+			err = checkValueDeliveries(o, v)
+		}
+		if err != nil {
 			return fmt.Errorf("group_values[%s] %v: %w", g, o.GroupValues[g], err)
 		}
-	}
-	return nil
-}
-
-// ParseDefault checks that o's default (if any) is a valid value of o.
-func ParseDefault(o *templates.Option) error {
-	if o.Default == nil {
-		return nil
-	}
-	if _, err := NewRegistry().Parse(o, o.Default); err != nil {
-		return fmt.Errorf("default %v: %w", o.Default, err)
 	}
 	return nil
 }

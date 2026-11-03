@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/portcullis/hub/internal/lldap"
 	"github.com/portcullis/hub/internal/templates"
@@ -237,7 +238,7 @@ func (tableKind) CheckOption(o *templates.Option) error {
 			return fmt.Errorf("columns: %s listed twice", c.Name)
 		}
 		seen[c.Name] = true
-		if c.Label == "" || len(c.Label) > 64 || checkText(c.Label) != nil {
+		if c.Label == "" || utf8.RuneCountInString(c.Label) > 64 || checkText(c.Label) != nil {
 			return fmt.Errorf("columns: %s needs a single-line label of at most 64 characters", c.Name)
 		}
 		k := listItemTypes[c.Type]

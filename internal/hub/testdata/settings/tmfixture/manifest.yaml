@@ -19,6 +19,7 @@ settings:
       type: size
       scope: person
       allow_unlimited: true
+      min: 1MiB
       default: 1GiB
       resolve: max
       applies: restart

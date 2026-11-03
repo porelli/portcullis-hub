@@ -12,6 +12,7 @@ import (
 
 	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/settings"
+	"github.com/portcullis/hub/internal/templates"
 )
 
 // Final whole-branch review fixes (hub items H7-H18).
@@ -394,5 +395,32 @@ func TestSaveNeverBlocksOnDeliveryLock(t *testing.T) {
 	calls := strings.Join(f.runner.Calls()[before:], " ")
 	if !strings.Contains(calls, "down:portcullis-"+id) || !strings.Contains(calls, "up:portcullis-"+id) {
 		t.Errorf("compose calls after the lock was freed = %q, want the save's restart", calls)
+	}
+}
+
+// H2 (defence in depth): group records of a secret option are refused
+// even if a template slipped past the validator.
+func TestGroupSecretRecordsRefused(t *testing.T) {
+	tm := &templates.Template{ID: "x"}
+	tm.Manifest.Settings = &templates.SettingsSpec{Options: []templates.Option{
+		{Key: "token", Label: "Token", Type: templates.TypeSecret, Scope: templates.ScopeGroup, Delivery: templates.Deliveries{{Env: "TOKEN", Render: &templates.Render{Format: templates.RenderJSON}}}},
+	}}
+	_, err := parseSettings(tm, settings.NewRegistry(), nil, SettingsUpdate{Groups: map[string][]GroupValueInput{"token": {{Group: "editors", Value: raw("s3cret")}}}})
+	if statusOf(err) != 400 || !strings.Contains(err.Error(), "secret") || strings.Contains(err.Error(), "s3cret") {
+		t.Errorf("parseSettings = %v, want 400 refusing a secret's group records (no value)", err)
+	}
+}
+
+// H4: group env records keep & < > as they are (no &, which env
+// would refuse), and a JSON escape is named as such.
+func TestGroupEnvNoHTMLEscape(t *testing.T) {
+	o := &templates.Option{Key: "team", Type: templates.TypeString, Scope: templates.ScopeGroup, Delivery: templates.Deliveries{{Env: "TEAM", Render: &templates.Render{Format: templates.RenderJSON}}}}
+	env, err := renderGroupEnv(o, []settings.Row{{Group: "rd", Value: "R&D <x>"}})
+	if err != nil || env["TEAM"] != `[{"group":"rd","value":"R&D <x>"}]` {
+		t.Errorf("renderGroupEnv = %q, %v", env["TEAM"], err)
+	}
+	_, err = renderGroupEnv(o, []settings.Row{{Group: "rd", Value: `say "hi"`}})
+	if err == nil || !strings.Contains(err.Error(), "JSON escapes") {
+		t.Errorf("renderGroupEnv with a double quote = %v, want the JSON escaping named", err)
 	}
 }

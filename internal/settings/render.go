@@ -5,6 +5,7 @@ import (
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	"math"
 	"math/big"
 	"strconv"
 	"strings"
@@ -87,18 +88,132 @@ func checkRenders(o *templates.Option) error {
 	}
 	for i := range o.Delivery {
 		d := &o.Delivery[i]
-		if err := checkRender(o, RenderOf(d)); err != nil {
+		if err := checkRender(o, d, RenderOf(d)); err != nil {
 			return fmt.Errorf("%s: render: %w", DeliveryName(d), err)
+		}
+	}
+	return checkUnlimitedReach(o)
+}
+
+// checkUnlimitedReach refuses allow_unlimited when a delivery's numeric
+// render.unlimited is also what a value within the option's bounds
+// renders as: the app would take that value for unlimited (and under
+// resolve: min a restrictive row would win as the smallest).
+func checkUnlimitedReach(o *templates.Option) error {
+	if o.Type != templates.TypeSize || !o.AllowUnlimited {
+		return nil
+	}
+	b, err := readBounds(o, parseSize)
+	if err != nil {
+		return nil // the kind's own check reports it
+	}
+	for i := range o.Delivery {
+		d := &o.Delivery[i]
+		r := RenderOf(d)
+		if r == nil || r.Unlimited == nil {
+			continue
+		}
+		n, err := strconv.ParseInt(*r.Unlimited, 10, 64)
+		if err != nil || n < 0 {
+			continue // not a number, or below any size
+		}
+		div := int64(1)
+		if r.Unit != "" {
+			div = sizeRenderUnits[r.Unit]
+		}
+		if div == 0 || n > math.MaxInt64/div {
+			continue
+		}
+		v := n * div
+		if (b.min == nil || v >= *b.min) && (b.max == nil || v <= *b.max) {
+			return fmt.Errorf("allow_unlimited: %s renders unlimited as %s, which the value %s also renders as (set min above it, or render unlimited as a value no size reaches)", DeliveryName(d), *r.Unlimited, showSize(v))
 		}
 	}
 	return nil
 }
 
-func checkRender(o *templates.Option, r *templates.Render) error {
+// envUnsafe: characters a single-quoted env value can't carry.
+const envUnsafe = "'\\\n\r"
+
+// CheckEnvText refuses text an env delivery can't carry single-quoted
+// (a ' or \, a line break). fromJSON: the text is a JSON rendering, so a
+// backslash came from JSON's escaping and the message says so.
+func CheckEnvText(text string, fromJSON bool) error {
+	if !strings.ContainsAny(text, envUnsafe) {
+		return nil
+	}
+	if fromJSON && strings.Contains(text, "\\") {
+		return fmt.Errorf("the JSON text contains a backslash (JSON escapes a double quote, a backslash and control characters inside strings as \\…), which an env value can't carry (use a file or hook delivery)")
+	}
+	return fmt.Errorf("the value contains a single quote, a backslash or a line break, which an env value can't carry (use a file or hook delivery)")
+}
+
+// EnvJSON: env delivery d of o carries JSON text (format json; a table's
+// default rendering).
+func EnvJSON(o *templates.Option, d *templates.Delivery) bool {
+	r := RenderOf(d)
+	return (r != nil && r.Format == templates.RenderJSON) || (o.Type == templates.TypeTable && (r == nil || r.Format == ""))
+}
+
+// valueDeliveries are o's deliveries, the implicit env UPPER(key) of an
+// instance option without any included.
+func valueDeliveries(o *templates.Option) []templates.Delivery {
+	if len(o.Delivery) == 0 {
+		if n := o.EnvName(); n != "" {
+			return []templates.Delivery{{Env: n}}
+		}
+	}
+	return o.Delivery
+}
+
+// checkValueDeliveries renders v (a default or a group_values value)
+// through every delivery of o as the runtime would, the env quote rule
+// included: a value no delivery can take is refused up front.
+func checkValueDeliveries(o *templates.Option, v Value) error {
+	for _, d := range valueDeliveries(o) {
+		if strings.HasSuffix(d.Env, templates.IndexSuffix) {
+			items, err := RenderIndexed(o, v, &d)
+			if err != nil {
+				return err
+			}
+			for i, it := range items {
+				if err := CheckEnvText(it, false); err != nil {
+					return fmt.Errorf("%s: item %d: %w", DeliveryName(&d), i+1, err)
+				}
+			}
+			continue
+		}
+		r, err := RenderDelivery(o, v, &d)
+		if err != nil {
+			return err
+		}
+		if d.Env != "" {
+			if err := CheckEnvText(r.Text, EnvJSON(o, &d)); err != nil {
+				return fmt.Errorf("%s: %w", DeliveryName(&d), err)
+			}
+		}
+	}
+	return nil
+}
+
+func checkRender(o *templates.Option, d *templates.Delivery, r *templates.Render) error {
 	if r == nil {
 		r = &templates.Render{}
 	}
 	t := o.Type
+	if d.Env != "" {
+		for _, x := range []struct {
+			name string
+			v    *string
+		}{{"true", r.True}, {"false", r.False}, {"unlimited", r.Unlimited}, {"join", r.Join}} {
+			if x.v != nil && strings.ContainsAny(*x.v, "'\\") {
+				return fmt.Errorf("%s must not contain a single quote or a backslash (an env value is single-quoted)", x.name)
+			}
+		}
+	}
+	if (r.Format == templates.RenderYAML || r.Format == templates.RenderCSV) && (d.Env != "" || d.Header != nil || d.Claim != nil) {
+		return fmt.Errorf("format %s is multi-line: an env, header or claim delivery takes one line (use format: json or join)", r.Format)
+	}
 	switch {
 	case r.Unit == "":
 	case t == templates.TypeSize:
@@ -145,7 +260,8 @@ func checkRender(o *templates.Option, r *templates.Render) error {
 	}
 	// A person_entered env delivery renders the collection of everyone's
 	// values (§13.13): join and the list formats fit any of its types.
-	collection := listLike(t) || o.EffectiveScope() == templates.ScopePersonEntered
+	pe := o.EffectiveScope() == templates.ScopePersonEntered
+	collection := listLike(t) || pe
 	if r.Join != nil {
 		if !collection {
 			return fmt.Errorf("join is for list, multi_enum, groups and users options (and person_entered collections)")
@@ -160,7 +276,12 @@ func checkRender(o *templates.Option, r *templates.Render) error {
 	switch r.Format {
 	case "", templates.RenderJSON:
 	case templates.RenderYAML, templates.RenderCSV:
-		if !collection && t != templates.TypeTable {
+		// Only env carries a person_entered collection; elsewhere it is
+		// the person's own (scalar) value.
+		if !listLike(t) && t != templates.TypeTable {
+			if pe {
+				return fmt.Errorf("format %s is for list and table values: outside env a person_entered %s is the person's own value", r.Format, t)
+			}
 			return fmt.Errorf("format %s is for list, multi_enum, groups, users and table options (and person_entered collections)", r.Format)
 		}
 	default:
@@ -239,11 +360,11 @@ func Render(o *templates.Option, v Value, rd *templates.Render) (Rendered, error
 	switch rd.Format {
 	case "":
 	case templates.RenderJSON:
-		b, err := json.Marshal(out.JSON)
+		t, err := JSONText(out.JSON)
 		if err != nil {
 			return Rendered{}, err
 		}
-		out.Text = string(b)
+		out.Text = t
 	default:
 		return Rendered{}, fmt.Errorf("format %s is for list and table options", rd.Format)
 	}
@@ -321,11 +442,11 @@ func renderList(v Value, rd *templates.Render) (Rendered, error) {
 	}
 	switch rd.Format {
 	case templates.RenderJSON:
-		b, err := json.Marshal(items)
+		t, err := JSONText(items)
 		if err != nil {
 			return Rendered{}, err
 		}
-		return Rendered{Text: string(b), JSON: items}, nil
+		return Rendered{Text: t, JSON: items}, nil
 	case templates.RenderYAML:
 		b, err := yaml.Marshal(items)
 		if err != nil {
@@ -364,6 +485,18 @@ func renderList(v Value, rd *templates.Render) (Rendered, error) {
 	// No render: files and hooks get the list, env / headers the
 	// comma-joined text (unusable when an item holds a comma).
 	return Rendered{Text: joined, JSON: items, textErr: clash}, nil
+}
+
+// JSONText is v as compact JSON without HTML escaping (json.Marshal
+// writes & < > as \u0026 …, whose backslash an env value can't carry).
+func JSONText(v any) (string, error) {
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return "", err
+	}
+	return strings.TrimSuffix(b.String(), "\n"), nil
 }
 
 // multiLine is structured text: the same string for files and hooks, and
@@ -406,11 +539,11 @@ func renderTable(o *templates.Option, v Value, rd *templates.Render) (Rendered, 
 	}
 	switch rd.Format {
 	case "", templates.RenderJSON:
-		b, err := json.Marshal(structured)
+		t, err := JSONText(structured)
 		if err != nil {
 			return Rendered{}, err
 		}
-		return Rendered{Text: string(b), JSON: structured}, nil
+		return Rendered{Text: t, JSON: structured}, nil
 	case templates.RenderYAML:
 		b, err := yaml.Marshal(structured)
 		if err != nil {

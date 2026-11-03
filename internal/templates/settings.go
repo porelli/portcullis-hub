@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
 
@@ -1107,7 +1108,7 @@ func (v *specCheck) typeOf(o *Option) error {
 }
 
 func (v *specCheck) option(o *Option) error {
-	if o.Label == "" || len(o.Label) > 64 || HasControlChars(o.Label) {
+	if o.Label == "" || utf8.RuneCountInString(o.Label) > 64 || HasControlChars(o.Label) {
 		return fmt.Errorf("label must be a single non-empty line of at most 64 characters")
 	}
 	if len(o.Description) > 500 || strings.ContainsFunc(o.Description, func(r rune) bool { return r != '\n' && IsControlRune(r) }) {
@@ -1141,8 +1142,14 @@ func (v *specCheck) option(o *Option) error {
 		return fmt.Errorf("group_values need scope: person")
 	case o.AdminOverride && scope != ScopePersonEntered:
 		return fmt.Errorf("admin_override needs scope: person_entered")
+	case o.Type == TypeSecret && scope != ScopeInstance:
+		return fmt.Errorf("a secret option needs scope instance (a secret is write-only, stored apart from the settings)")
 	case scope == ScopePerson && o.Default == nil:
 		return fmt.Errorf("scope person needs a default (the value for everyone else with access)")
+	case o.Required && scope == ScopeGroup:
+		return fmt.Errorf("required is not for scope group (its records are optional, and it has no default)")
+	case o.Required && scope == ScopePerson && emptyDefault(o.Default):
+		return fmt.Errorf("required on scope person needs a non-empty default (the value for everyone without a row)")
 	case scope == ScopeGroup && o.Default != nil:
 		return fmt.Errorf("scope group takes no default (the group records are the values)")
 	case o.Unique && o.Type != TypeList && !(scope == ScopePersonEntered && (o.Type == TypeString || o.Type == TypeInt)):
@@ -1172,7 +1179,29 @@ func (v *specCheck) option(o *Option) error {
 	if err := v.pathAndSecret(o); err != nil {
 		return err
 	}
-	return v.deliveries(o)
+	if err := v.deliveries(o); err != nil {
+		return err
+	}
+	if scope == ScopePerson && o.Resolve == "" {
+		return fmt.Errorf("scope person needs resolve (how a person's rows combine: max, min, priority, union, intersection, any or all)")
+	}
+	return nil
+}
+
+// emptyDefault: a manifest default that holds no value (none, "", an
+// empty list or map).
+func emptyDefault(d any) bool {
+	switch x := d.(type) {
+	case nil:
+		return true
+	case string:
+		return x == ""
+	case []any:
+		return len(x) == 0
+	case map[string]any:
+		return len(x) == 0
+	}
+	return false
 }
 
 func (v *specCheck) personEntered(o *Option) error {
@@ -1392,6 +1421,12 @@ func (v *specCheck) pathAndSecret(o *Option) error {
 		}
 		if !GenerateCharsets[g.Charset] {
 			return fmt.Errorf("generate.charset %q must be hex, alphanumeric or ascii_printable", g.Charset)
+		}
+		if o.MinLen != nil && g.Length < *o.MinLen {
+			return fmt.Errorf("generate.length %d is below min_len %d", g.Length, *o.MinLen)
+		}
+		if o.MaxLen != nil && g.Length > *o.MaxLen {
+			return fmt.Errorf("generate.length %d is above max_len %d", g.Length, *o.MaxLen)
 		}
 	}
 	return nil

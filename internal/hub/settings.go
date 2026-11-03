@@ -392,6 +392,11 @@ func parseSettings(t *templates.Template, kinds *settings.Registry, folders Fold
 		if err != nil {
 			return nil, err
 		}
+		if o.Type == templates.TypeSecret {
+			// Never stored in state.yaml nor served (the validator refuses
+			// the template too).
+			return nil, statusErr(400, "setting %s is a secret: a secret takes no group records (only an instance value, set under secrets)", k)
+		}
 		sent(k, u.Groups[k])
 		in, err := rowsFromInput(o, u.Groups[k])
 		if err != nil {

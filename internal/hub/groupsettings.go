@@ -3,7 +3,6 @@ package hub
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -439,14 +438,14 @@ func renderGroupEnvDelivery(o *templates.Option, recs []settings.Row, d *templat
 		}
 		items = append(items, map[string]any{"group": r.Group, "value": rd.JSON})
 	}
-	b, err := json.Marshal(items)
+	text, err := settings.JSONText(items)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := envQuote(string(b)); err != nil {
+	if err := settings.CheckEnvText(text, true); err != nil {
 		return nil, fmt.Errorf("env %s: %w", d.Env, err)
 	}
-	return map[string]string{d.Env: string(b)}, nil
+	return map[string]string{d.Env: text}, nil
 }
 
 // bindPlaceholderRows binds instance id's unbound placeholder rows and
