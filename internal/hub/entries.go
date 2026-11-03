@@ -141,6 +141,11 @@ func entryValues(kinds *settings.Registry, o *templates.Option, stored map[strin
 	}
 	for _, u := range users {
 		v, err := kinds.Parse(o, stored[u].Value)
+		if err == nil {
+			// What a save would refuse (stored before a rule, restored):
+			// never delivered, dropped by the prune.
+			err = entryDeliverable(o, v)
+		}
 		if err != nil {
 			invalid = append(invalid, u)
 			continue

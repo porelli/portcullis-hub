@@ -12,6 +12,7 @@ import (
 
 	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/settings"
+	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
 )
 
@@ -497,5 +498,78 @@ func TestEntryDeliverableClaimAndHeader(t *testing.T) {
 	}
 	if err := entryDeliverable(hdr, "red team"); err != nil {
 		t.Errorf("red team = %v", err)
+	}
+}
+
+// H9 (follow-up): immediate header runs queued behind one another read
+// the directory once they hold the delivery lock: the last one to run
+// publishes the newest membership whatever their order.
+func TestHeadersNowNeverPublishOlderMembership(t *testing.T) {
+	f, people, _ := headerFixture(t, nil)
+	headerEnable(t, f)
+	f.h.TriggerMembershipDelivery()
+	f.h.Wait()
+	l := f.h.deliverLock(headerID)
+	l.Lock()
+	people.removeMember("editors", "carol")
+	f.h.TriggerMembershipDelivery() // run A, waiting for the lock
+	people.removeMember("admin_dash-b", "bob")
+	f.h.TriggerMembershipDelivery() // run B, waiting for the lock
+	l.Unlock()
+	f.h.Wait()
+	got := attrHosts(t, f)[headerMain][hdrSuffix]
+	if got["carol"] != "Viewer" || got["bob"] != "Viewer" {
+		t.Errorf("published = %v, want carol and bob Viewer (the newest membership)", got)
+	}
+}
+
+// teamHeader adds a person_entered header option team to headerapp.
+func teamHeader(m string) string {
+	return m + `    - key: team
+      label: Team
+      type: string
+      max_len: 40
+      scope: person_entered
+      applies: next_request
+      delivery: [{header: {name: X-Forwarded-Attr-Team}}]
+`
+}
+
+// H11 (follow-up): a stored person-entered value holding ',' (stored
+// before the rule, or restored) never reaches a header, and the prune
+// invalidates it (audited).
+func TestStoredEntryCommaNeverInHeader(t *testing.T) {
+	f, people, _ := headerFixture(t, teamHeader)
+	audit := &fakeAudit{}
+	f.h.SetAudit(audit)
+	headerEnable(t, f)
+	f.h.mu.Lock()
+	s := f.h.st.Settings[headerID].Clone()
+	s.Entered = map[string]map[string]state.EnteredValue{"team": {
+		"alice": {Value: "x, admins", UUID: people.uuidOf("alice"), UpdatedAt: time.Now().UTC()},
+		"bob":   {Value: "blue", UUID: people.uuidOf("bob"), UpdatedAt: time.Now().UTC()},
+	}}
+	f.h.st.Settings[headerID] = s
+	f.h.mu.Unlock()
+	deliverNow(t, f, headerID, TriggerRetry)
+	got := attrHosts(t, f)[headerMain]["Team"]
+	if _, ok := got["alice"]; ok || got["bob"] != "blue" {
+		t.Errorf("Team = %v, want bob's only (alice's holds a ',')", got)
+	}
+	f.h.pruneSettings()
+	if _, ok := storedSettings(f, headerID).Entered["team"]["alice"]; ok {
+		t.Error("the prune kept alice's undeliverable value")
+	}
+	if _, ok := storedSettings(f, headerID).Entered["team"]["bob"]; !ok {
+		t.Error("the prune dropped bob's value")
+	}
+	found := false
+	for _, e := range auditsOf(audit, "settings.person_value") {
+		if e.Target == headerID+"/team/alice" && e.Detail == "invalidated" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("no settings.person_value invalidated audit for alice")
 	}
 }

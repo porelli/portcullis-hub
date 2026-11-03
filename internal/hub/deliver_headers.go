@@ -198,6 +198,10 @@ func (h *Hub) buildHeadersLocked(t *templates.Template, m *directory.Membership,
 						continue // no value, or UNRESOLVED (fail closed)
 					}
 					r, err := settings.RenderDelivery(o, res.Value, &d)
+					if err == nil && o.EffectiveScope() == templates.ScopePersonEntered && strings.Contains(r.Text, ",") {
+						// One verbatim value (entryDeliverable refuses it at save).
+						err = errors.New("it contains ','")
+					}
 					if err != nil {
 						log.Printf("settings: %s: %s: the value of %s can't be delivered as a header (%v): left out", t.ID, o.Key, user, err)
 						plan.unrenderable++

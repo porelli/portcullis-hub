@@ -277,11 +277,9 @@ func (h *Hub) TriggerMembershipDelivery() {
 	h.mu.RUnlock()
 	// Someone left a group: the headers (no restart, no reload) follow at
 	// once, so a demotion never waits out the debounce.
-	if len(hdr) > 0 {
-		if m := h.membershipRemoval(); m != nil {
-			for _, id := range hdr {
-				h.goBackground(func() { h.deliverHeadersNow(id, m) })
-			}
+	if len(hdr) > 0 && h.membershipRemoval() {
+		for _, id := range hdr {
+			h.goBackground(func() { h.deliverHeadersNow(id) })
 		}
 	}
 	for _, id := range ids {
@@ -290,15 +288,15 @@ func (h *Hub) TriggerMembershipDelivery() {
 }
 
 // membershipRemoval reads the directory and compares it with the
-// previous call's snapshot: the new snapshot when someone left a group
-// (or the directory) since — an expired membership counts as left —,
-// else nil (also with the directory unavailable).
-func (h *Hub) membershipRemoval() *directory.Membership {
+// previous call's snapshot: whether someone left a group (or the
+// directory) since — an expired membership counts as left (false with
+// the directory unavailable).
+func (h *Hub) membershipRemoval() bool {
 	ctx, cancel := context.WithTimeout(context.Background(), groupSnapshotTimeout)
 	m, err := h.membership(ctx)
 	cancel()
 	if err != nil {
-		return nil
+		return false
 	}
 	cur := map[string]map[string]bool{}
 	for u, gs := range m.Users {
@@ -316,20 +314,28 @@ func (h *Hub) membershipRemoval() *directory.Membership {
 	for u, gs := range prev {
 		for g := range gs {
 			if !cur[u][g] {
-				return m
+				return true
 			}
 		}
 	}
-	return nil
+	return false
 }
 
-// deliverHeadersNow runs only instance id's headers unit with snapshot
-// m (a removal: TriggerMembershipDelivery), under its delivery lock;
-// the debounced full run follows as usual.
-func (h *Hub) deliverHeadersNow(id string, m *directory.Membership) {
+// deliverHeadersNow runs only instance id's headers unit (a removal:
+// TriggerMembershipDelivery), under its delivery lock, from a snapshot
+// read once the lock is held (outside mu): runs that queued up behind
+// one another never publish an older membership last. The debounced
+// full run follows as usual; the directory unavailable: nothing.
+func (h *Hub) deliverHeadersNow(id string) {
 	l := h.deliverLock(id)
 	l.Lock()
 	defer l.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), groupSnapshotTimeout)
+	m, err := h.membership(ctx)
+	cancel()
+	if err != nil {
+		return
+	}
 	now := time.Now().UTC()
 	delivered := h.loadDelivered(id)
 	h.mu.RLock()
