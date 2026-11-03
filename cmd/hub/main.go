@@ -64,6 +64,12 @@ func main() {
 		Domain:              env("PORTCULLIS_DOMAIN", "portcullis.local"),
 		DefaultTemplatesURL: os.Getenv("DEFAULT_TEMPLATES_URL"),
 		OverrideBindRoots:   os.Getenv("HUB_OVERRIDE_BIND_ROOTS"),
+		// Settings data files (contract §13.7): default
+		// <PROJECT_DIR>/appfiles (core mounts ./appfiles there), bind-mounted
+		// from <PROJECT_HOST_DIR>/appfiles. HUB_APPFILES_DIR moves them;
+		// HUB_APPFILES_HOST_DIR is then the daemon's path (default: the same).
+		AppFilesDir:     os.Getenv("HUB_APPFILES_DIR"),
+		AppFilesHostDir: os.Getenv("HUB_APPFILES_HOST_DIR"),
 		// Template sources are fast-forwarded at every start (fail-safe:
 		// a failed pull keeps the previous checkout); "false" turns it off.
 		SyncSourcesAtStart: os.Getenv("HUB_SYNC_SOURCES_AT_START") != "false",
@@ -188,6 +194,7 @@ func main() {
 	defer stop()
 	go h.RunReconciler(ctx)
 	go h.RunDirectorySync(ctx)
+	go h.RunSettingsDelivery(ctx)
 	go h.RunDomainSync(ctx, 30*time.Second)
 	// Keycloak drops its copy of a user deleted straight in LLDAP only when
 	// the user is looked up (removeInvalidUsersEnabled; its periodic LDAP

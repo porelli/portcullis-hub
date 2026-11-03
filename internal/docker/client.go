@@ -173,3 +173,41 @@ func (c *Client) tty(ctx context.Context, id string) (bool, error) {
 	}
 	return res.Container.Config != nil && res.Container.Config.Tty, nil
 }
+
+// ContainerKill sends signal (e.g. "HUP") to container id (POST
+// /containers/{id}/kill?signal=…): a reload, never a stop. An empty
+// signal is refused (the daemon would send SIGKILL).
+func (c *Client) ContainerKill(ctx context.Context, id, signal string) error {
+	if signal == "" {
+		return fmt.Errorf("container kill: no signal")
+	}
+	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
+	defer cancel()
+	_, err := c.api.ContainerKill(ctx, id, client.ContainerKillOptions{Signal: signal})
+	return err
+}
+
+// State is a container's run state: running, and its healthcheck status
+// ("" = no healthcheck; else starting, healthy or unhealthy).
+type State struct {
+	Running bool
+	Health  string
+}
+
+// ContainerState inspects container id's run state.
+func (c *Client) ContainerState(ctx context.Context, id string) (State, error) {
+	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
+	defer cancel()
+	res, err := c.api.ContainerInspect(ctx, id, client.ContainerInspectOptions{})
+	if err != nil {
+		return State{}, err
+	}
+	var st State
+	if s := res.Container.State; s != nil {
+		st.Running = s.Running
+		if s.Health != nil {
+			st.Health = string(s.Health.Status)
+		}
+	}
+	return st, nil
+}

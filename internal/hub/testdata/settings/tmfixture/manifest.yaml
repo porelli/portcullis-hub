@@ -1,0 +1,37 @@
+name: Time Machine Fixture
+category: tools
+instances: multi
+auth:
+  method: header-auth
+  group_access: true
+  access_group: users_tmfixture
+  admin_group: admin_tmfixture
+urls:
+  - label: Web
+    url: "https://{{HOST_TMFIXTURE}}"
+files:
+  - {name: people, service: app, mount: /portcullis, on_membership_change: restart}
+reload: {service: app, signal: HUP}
+settings:
+  options:
+    - key: size_limit
+      label: Backup size limit
+      type: size
+      scope: person
+      allow_unlimited: true
+      default: 1GiB
+      resolve: max
+      applies: restart
+      delivery:
+        - {file: {name: people, render: {unit: MiB, integer: true, unlimited: "0"}}}
+    - key: greeting
+      label: Greeting
+      type: string
+      max_len: 200
+      applies: reload
+      delivery: [{file: {name: people}}]
+    - key: api_token
+      label: API token
+      type: secret
+      applies: reload
+      delivery: [{file: {name: people}}]

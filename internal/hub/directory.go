@@ -154,7 +154,8 @@ const (
 )
 
 // RunDirectorySync writes the policy once at start and after each
-// TriggerDirectorySync (debounced), until ctx is done; each write is
+// TriggerDirectorySync (debounced), until ctx is done; each write queues
+// the membership deliveries (TriggerMembershipDelivery) and is
 // followed by an attribute-mapper sync in a separate loop, so a slow
 // Keycloak never delays a policy write. A failed mapper sync is logged
 // and retried after a minute.
@@ -168,6 +169,9 @@ func (h *Hub) RunDirectorySync(ctx context.Context) {
 	defer func() { <-done }()
 	for {
 		h.writePolicyLogged()
+		// Membership may have changed: per-person, per-group and
+		// person-entered deliveries follow (debounced per instance).
+		h.TriggerMembershipDelivery()
 		select {
 		case attrKick <- struct{}{}:
 		default:

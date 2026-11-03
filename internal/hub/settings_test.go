@@ -145,6 +145,12 @@ func immichFixture(t *testing.T) (*fixture, *fakeAudit) {
 	}
 	audit := &fakeAudit{}
 	f.h.SetAudit(audit)
+	// The directory its per-person data file renders from (a people
+	// file is never started without one: P6).
+	people := newFakePeople()
+	people.addGroup("users_immich", "alice")
+	people.addGroup("admin_immich")
+	f.h.SetPeople(people)
 	return f, audit
 }
 
@@ -461,6 +467,9 @@ func TestBackupCarriesTypedSettings(t *testing.T) {
 	f, _ := immichFixture(t)
 	simulateCompose(f, 0)
 	f.h.SetGroups(&fakeGroups{})
+	// No directory: archived rows are kept as they are (their group ids
+	// aren't checked; this test pins the archive round trip).
+	f.h.SetPeople(nil)
 	if err := f.h.CreateInstance("immich", "immich-b", nil); err != nil {
 		t.Fatal(err)
 	}

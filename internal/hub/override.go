@@ -96,6 +96,12 @@ func (h *Hub) renderOverrideLocked(t *templates.Template, s state.InstanceSettin
 		serviceMounts[o.Target.Service] = append(serviceMounts[o.Target.Service], string(mountJSON))
 	}
 
+	// Settings data files (contract §13.7): each file's directory,
+	// read-only at its mount (deliver_files.go).
+	for svc, mounts := range h.dataFileMounts(t) {
+		serviceMounts[svc] = append(serviceMounts[svc], mounts...)
+	}
+
 	servicePorts := make(map[string][]string)
 	for _, p := range t.Manifest.Ports {
 		if p.Service == "" || p.NetworkModeHost || p.Range != "" {

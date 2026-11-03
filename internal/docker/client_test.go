@@ -400,3 +400,56 @@ func TestExecCreateInspectTimeout(t *testing.T) {
 		}
 	}
 }
+
+func TestContainerKill(t *testing.T) {
+	var gotPath, gotSignal, gotMethod string
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotSignal, gotMethod = r.URL.Path, r.URL.Query().Get("signal"), r.Method
+		w.WriteHeader(204)
+	}))
+	if err := c.ContainerKill(context.Background(), "c1", "HUP"); err != nil {
+		t.Fatal(err)
+	}
+	if gotMethod != http.MethodPost || gotPath != "/containers/c1/kill" || gotSignal != "HUP" {
+		t.Errorf("request = %s %s signal=%q", gotMethod, gotPath, gotSignal)
+	}
+	// An empty signal would be SIGKILL: refused before any call.
+	gotPath = ""
+	if err := c.ContainerKill(context.Background(), "c1", ""); err == nil || gotPath != "" {
+		t.Errorf("empty signal: err = %v, path = %q", err, gotPath)
+	}
+	// A daemon error is returned.
+	c = newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(409)
+		fmt.Fprint(w, `{"message":"container c1 is not running"}`)
+	}))
+	if err := c.ContainerKill(context.Background(), "c1", "HUP"); err == nil || !strings.Contains(err.Error(), "not running") {
+		t.Errorf("err = %v", err)
+	}
+}
+
+func TestContainerState(t *testing.T) {
+	for _, tc := range []struct {
+		body    string
+		running bool
+		health  string
+	}{
+		{`{"State":{"Status":"running","Running":true,"Health":{"Status":"healthy"}}}`, true, "healthy"},
+		{`{"State":{"Status":"running","Running":true,"Health":{"Status":"unhealthy"}}}`, true, "unhealthy"},
+		{`{"State":{"Status":"running","Running":true}}`, true, ""},
+		{`{"State":{"Status":"exited","Running":false,"ExitCode":1}}`, false, ""},
+	} {
+		var gotPath string
+		c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotPath = r.URL.Path
+			fmt.Fprint(w, tc.body)
+		}))
+		st, err := c.ContainerState(context.Background(), "c1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if gotPath != "/containers/c1/json" || st.Running != tc.running || st.Health != tc.health {
+			t.Errorf("%s: path %s, state %+v", tc.body, gotPath, st)
+		}
+	}
+}

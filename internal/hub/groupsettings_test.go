@@ -583,7 +583,7 @@ func TestGroupScopeNotPersonResolved(t *testing.T) {
 func (h *Hub) triggeredDeliveries() []string {
 	h.deliveryMu.Lock()
 	defer h.deliveryMu.Unlock()
-	return slices.Sorted(maps.Keys(h.pendingDelivery))
+	return slices.Sorted(maps.Keys(h.lastTrigger))
 }
 
 // Group records reach the env only when the directory snapshot fetched
@@ -614,6 +614,14 @@ func TestGroupRecordsNeedTheDirectory(t *testing.T) {
 	}
 	people.set(func(p *fakePeople) { p.err = nil })
 	if err := f.h.save("privapp", SettingsUpdate{Values: vals("motd", "z")}); err != nil {
+		t.Fatal(err)
+	}
+	// Its data file delivered once (a people file never delivered fails
+	// a start with the directory down: P6), then disabled.
+	if err := f.h.Enable("privapp"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.h.Disable("privapp"); err != nil {
 		t.Fatal(err)
 	}
 	people.set(func(p *fakePeople) { p.err = &directory.Error{Status: 502, Msg: "LLDAP unreachable"} })

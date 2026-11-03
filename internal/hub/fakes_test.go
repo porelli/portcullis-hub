@@ -154,6 +154,52 @@ type fakeEngine struct {
 	execID     string
 	execRes    *docker.ExecResult
 	ve         *volumeEngine
+	// kills: "<container>:<signal>" per ContainerKill; killHook runs in
+	// it; states overrides a container's ContainerState (default: its
+	// listed state, no healthcheck).
+	kills    []string
+	killHook func(id, signal string)
+	states   map[string]docker.State
+}
+
+func (e *fakeEngine) ContainerKill(ctx context.Context, id, signal string) error {
+	e.mu.Lock()
+	e.kills = append(e.kills, id+":"+signal)
+	hook := e.killHook
+	e.mu.Unlock()
+	if hook != nil {
+		hook(id, signal)
+	}
+	return nil
+}
+
+func (e *fakeEngine) ContainerState(ctx context.Context, id string) (docker.State, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if st, ok := e.states[id]; ok {
+		return st, nil
+	}
+	for _, c := range e.containers {
+		if c.ID == id {
+			return docker.State{Running: c.State == "running"}, nil
+		}
+	}
+	return docker.State{}, errors.New("no such container")
+}
+
+func (e *fakeEngine) Kills() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]string(nil), e.kills...)
+}
+
+func (e *fakeEngine) setState(id string, st docker.State) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.states == nil {
+		e.states = map[string]docker.State{}
+	}
+	e.states[id] = st
 }
 
 func (e *fakeEngine) ListContainers(ctx context.Context, f docker.Filters) ([]docker.Container, error) {

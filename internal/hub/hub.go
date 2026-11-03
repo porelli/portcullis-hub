@@ -57,6 +57,14 @@ type Config struct {
 	// OverrideBindRoots is HUB_OVERRIDE_BIND_ROOTS: host directories custom
 	// overrides may bind-mount from ("" = /srv:/mnt:/media).
 	OverrideBindRoots string
+	// AppFilesDir is where the Hub writes settings data files (contract
+	// §13.7; "" = <ProjectDir>/appfiles, core's ./appfiles mount;
+	// HUB_APPFILES_DIR overrides it). AppFilesHostDir is the same
+	// directory as the Docker daemon sees it, for the override's bind
+	// mounts ("" = <ProjectHostDir>/appfiles, or AppFilesDir when that
+	// was set).
+	AppFilesDir     string
+	AppFilesHostDir string
 }
 
 // Engine is the part of the Docker Engine API the Hub uses.
@@ -76,6 +84,10 @@ type Engine interface {
 	RemoveContainer(ctx context.Context, id string) error
 	CopyFromContainer(ctx context.Context, id, path string) (io.ReadCloser, error)
 	CopyToContainer(ctx context.Context, id, path string, content io.Reader) error
+	// ContainerKill signals a container (a settings reload, §13.8);
+	// ContainerState is its run state and health after the grace period.
+	ContainerKill(ctx context.Context, id, signal string) error
+	ContainerState(ctx context.Context, id string) (docker.State, error)
 }
 
 // IdP manages the OIDC clients templates declare.
@@ -171,10 +183,21 @@ type Hub struct {
 	// people reads LLDAP membership for per-person settings (SetPeople;
 	// nil = not available). Guarded by mu.
 	people People
-	// deliveryMu guards pendingDelivery: the instances TriggerDelivery
-	// queued (the delivery engine, Task 9, drains it).
-	deliveryMu      sync.Mutex
-	pendingDelivery map[string]Trigger
+	// The settings delivery engine (deliver.go). deliveryMu guards queued
+	// (debounced and re-queued runs per instance) and deliveryStatus (the
+	// last outcome per instance and unit, mirrored in delivered.json).
+	// deliverLocks: per instance, the *sync.Mutex every run holds.
+	deliveryMu     sync.Mutex
+	queued         map[string]*queuedDelivery
+	deliveryStatus map[string]map[string]UnitResult
+	lastTrigger    map[string]Trigger
+	deliverLocks   sync.Map
+	// The engine's clock (test-settable): afterFunc arms a timer (returns
+	// its stop), sleep waits out the reload grace period.
+	afterFunc func(d time.Duration, f func()) (stop func() bool)
+	sleep     func(ctx context.Context, d time.Duration) error
+	// deliverHook, if set, is called at engine stages (tests).
+	deliverHook func(id, stage string)
 	// domainsAPI is core's domains service (domains.go; nil = not
 	// configured); domainsReachable: its last call succeeded. Both guarded
 	// by mu. domainOpMu serialises enroll / token / delete (held across
@@ -266,6 +289,15 @@ func New(cfg Config, runner compose.Runner, engine Engine, idp IdP) (*Hub, error
 	if cfg.ReconcileInterval <= 0 {
 		cfg.ReconcileInterval = time.Minute
 	}
+	if cfg.AppFilesDir == "" {
+		cfg.AppFilesDir = filepath.Join(cfg.ProjectDir, "appfiles")
+		if cfg.AppFilesHostDir == "" {
+			cfg.AppFilesHostDir = filepath.Join(cfg.ProjectHostDir, "appfiles")
+		}
+	}
+	if cfg.AppFilesHostDir == "" {
+		cfg.AppFilesHostDir = cfg.AppFilesDir
+	}
 	for _, d := range []string{cfg.DataDir, filepath.Join(cfg.DataDir, "repos"), filepath.Join(cfg.DataDir, "env"), filepath.Join(cfg.DataDir, "overrides"), filepath.Join(cfg.DataDir, "ops")} {
 		if err := os.MkdirAll(d, 0755); err != nil {
 			return nil, err
@@ -286,6 +318,8 @@ func New(cfg Config, runner compose.Runner, engine Engine, idp IdP) (*Hub, error
 		kick:      make(chan struct{}, 1),
 		dirKick:   make(chan struct{}, 1),
 		driftKey:  map[string]string{},
+		afterFunc: realAfterFunc,
+		sleep:     realSleep,
 	}
 	// The known list in state.yaml (empty = only the main domain).
 	h.domains = knownDomains{h}

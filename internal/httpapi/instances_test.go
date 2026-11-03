@@ -54,6 +54,11 @@ func newFakeEngine() *fakeEngine {
 	return &fakeEngine{vols: map[string]*fakeVol{}, helpers: map[string]docker.HelperSpec{}}
 }
 
+func (e *fakeEngine) ContainerKill(context.Context, string, string) error { return nil }
+func (e *fakeEngine) ContainerState(context.Context, string) (docker.State, error) {
+	return docker.State{}, cerrdefs.ErrNotFound.WithMessage("no such container")
+}
+
 var errNoVolume = cerrdefs.ErrNotFound.WithMessage("no such volume")
 
 func (e *fakeEngine) addVolume(name, project, key string, files map[string]string) {

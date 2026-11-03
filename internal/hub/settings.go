@@ -703,10 +703,12 @@ const (
 
 // UnitResult is one delivery unit's outcome.
 type UnitResult struct {
-	Unit    string    `json:"unit"`              // "env" | "file:<name>" | "hook:<name>" | "claim:<attr>" | "headers" | "reload" | "restart"
-	OK      bool      `json:"ok"`                //
-	Skipped string    `json:"skipped,omitempty"` // "unchanged" | "not running" | "directory unavailable"
-	Error   string    `json:"error,omitempty"`   // redacted, then clipped
+	Unit    string `json:"unit"`              // "env" | "file:<name>" | "hook:<name>" | "claim:<attr>" | "headers" | "reload" | "restart"
+	OK      bool   `json:"ok"`                //
+	Skipped string `json:"skipped,omitempty"` // "unchanged" | "not running" | "directory unavailable" | "busy" | "superseded"
+	// Message: what OK means ("reload signal sent, app still running").
+	Message string    `json:"message,omitempty"`
+	Error   string    `json:"error,omitempty"` // redacted, then clipped (2000)
 	At      time.Time `json:"at"`
 }
 
@@ -714,14 +716,6 @@ type UnitResult struct {
 type DeliveryReport struct {
 	Instance string       `json:"instance"`
 	Units    []UnitResult `json:"units"`
-}
-
-// Deliver runs instance id's settings deliveries for trig (files,
-// claims, headers, hooks, reload). Until the delivery engine (Task 9)
-// it delivers nothing: an empty report. Never call it holding mu or
-// id's lifecycle lock.
-func (h *Hub) Deliver(ctx context.Context, id string, trig Trigger) (*DeliveryReport, error) {
-	return &DeliveryReport{Instance: id, Units: []UnitResult{}}, nil
 }
 
 // settingChange is one changed (key, scope, group) for the audit.
@@ -757,10 +751,11 @@ func showPort(v string, ok bool) string {
 
 // SaveSettings validates and stores an instance's settings (and
 // optionally its policy, public exceptions and sign-in mode) in one
-// state change, rewrites its override and .env, and applies the effect:
-// a restart (in the background) only when a changed option applies at
-// restart, a port or path changed, or the override changed (policy, public
-// exceptions, sign-in); every other effect goes through Deliver. Only
+// state change, rewrites its override and .env, and hands the effect to
+// the delivery engine (P5: it alone reloads or restarts): a restart (in
+// the background) when a changed option applies at restart, a port or
+// path changed, or the override changed (policy, public exceptions,
+// sign-in); a reload for options that apply at reload. Only
 // declared option keys and ports are taken. Every changed (key, scope,
 // group) is audited as settings.change by actor (a refused save:
 // "refused").
@@ -807,17 +802,14 @@ func (h *Hub) SaveSettings(id string, u SettingsUpdate, actor string) (_ *SaveRe
 		return out, nil
 	}
 	// Outside every lock (the sign-in lock is released by saveSettings):
-	// the engine may take id's delivery lock and talk to the network.
-	if len(sv.keys) > 0 {
-		rep, err := h.Deliver(context.Background(), id, TriggerSave)
+	// the engine takes id's delivery lock and may talk to the network;
+	// it writes the data files, then reloads or restarts (background).
+	if len(sv.keys) > 0 || sv.effect != settings.EffectNone {
+		rep, err := h.deliver(context.Background(), id, TriggerSave, deliverOpts{effect: sv.effect})
 		if err != nil {
 			out.Warnings = append(out.Warnings, "delivery: "+err.Error())
 		}
 		out.Deliveries = rep
-	}
-	if sv.effect == settings.EffectRestart {
-		tmpl := *t
-		h.goBackground(func() { h.Restart(tmpl) })
 	}
 	return out, nil
 }

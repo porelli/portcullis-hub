@@ -95,25 +95,6 @@ func isPlaceholder(g string) bool {
 	return g == templates.PlaceholderAccessGroup || g == templates.PlaceholderAdminGroup
 }
 
-// TriggerDelivery queues instance id's settings delivery for trig. Until
-// the delivery engine (Task 9) it only records the request and runs the
-// stub Deliver in the background: never inline, so it is safe under any
-// lifecycle lock (PurgeGroupSettings runs inside DeleteInstance's).
-// immediate=false will be debounced (settingsDebounce) by the engine.
-func (h *Hub) TriggerDelivery(id string, trig Trigger, immediate bool) {
-	h.deliveryMu.Lock()
-	if h.pendingDelivery == nil {
-		h.pendingDelivery = map[string]Trigger{}
-	}
-	h.pendingDelivery[id] = trig
-	h.deliveryMu.Unlock()
-	h.goBackground(func() {
-		if _, err := h.Deliver(context.Background(), id, trig); err != nil {
-			log.Printf("settings: %s: delivery (%s): %v", id, trig, err)
-		}
-	})
-}
-
 // bindRowsForSave binds the rows and records of a save to the
 // directory's current group ids, before mu is taken: an unknown group is
 // a 400, a placeholder whose group doesn't exist yet stays unbound (a

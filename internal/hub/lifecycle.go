@@ -87,6 +87,13 @@ func (h *Hub) composeUp(t *templates.Template) error {
 	if err := h.syncTemplateFiles(live); err != nil {
 		return statusErr(500, "sync template files: %v", err)
 	}
+	// The settings data files before the containers exist (P6): an init
+	// one-shot reads them at start, and Docker would create a missing
+	// bind source as a root-owned directory. Trigger start: never a
+	// reload or restart.
+	if err := h.deliverForStart(context.Background(), live.ID); err != nil {
+		return err
+	}
 	// Create without starting, inspect the labels (image LABELs merge in),
 	// only then start: an image-label router is never live.
 	if err := h.compose.Create(context.Background(), h.project(live)); err != nil {

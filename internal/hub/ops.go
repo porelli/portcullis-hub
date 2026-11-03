@@ -27,6 +27,7 @@ const (
 	OpHosts   = "hosts"   // hostname change (SetHosts): Keycloak, files, restart
 	OpDelete  = "delete"  // guarded delete (a failure leaves it "deleting": retry)
 	OpRestore = "restore" // restore from a backup (a failure puts the pre-restore backup back)
+	OpReload  = "reload"  // a settings delivery's reload signal (deliver_reload.go)
 )
 
 // OpRecord is an app's last lifecycle operation, kept in
@@ -151,6 +152,18 @@ func (h *Hub) FailedOps() map[string]string {
 // *OpError carrying compose's (redacted) output and a hint, or nil.
 // Unknown apps and busy refusals are not recorded.
 func (h *Hub) finishOp(id, op string, err error, rolledBack bool) error {
+	return h.finishOpGuarded(id, op, err, rolledBack, false)
+}
+
+// finishDeliveryOp records a settings delivery's outcome (op reload) as
+// finishOp does, except over another operation's running record, which a
+// delivery never replaces (P20).
+func (h *Hub) finishDeliveryOp(id, op string, err error) {
+	h.finishOpGuarded(id, op, err, false, true)
+}
+
+// finishOpGuarded is finishOp; keepRunning: leave a running record in place.
+func (h *Hub) finishOpGuarded(id, op string, err error, rolledBack, keepRunning bool) error {
 	var busy ErrBusy
 	if errors.As(err, &busy) || errors.Is(err, ErrNotFound) || !templates.ValidID(id) {
 		return err
@@ -171,6 +184,14 @@ func (h *Hub) finishOp(id, op string, err error, rolledBack bool) error {
 		r.Hint = opHint(r.Error + "\n" + r.Output)
 	}
 	h.opsMu.Lock()
+	if cur := h.ops[id]; keepRunning && cur.Running {
+		h.opsMu.Unlock()
+		log.Printf("ops: %s %s not recorded: %s is running (%s)", op, id, cur.Op, r.Error)
+		if err == nil {
+			return nil
+		}
+		return &OpError{Record: r, Err: err}
+	}
 	h.ops[id] = r
 	if op == OpHosts {
 		h.hostsOps[id] = r

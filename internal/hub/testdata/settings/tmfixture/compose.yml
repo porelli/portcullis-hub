@@ -1,0 +1,8 @@
+services:
+  app:
+    image: tmfixture
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.tmfixture.rule: Host(`${PORTCULLIS_HOST_TMFIXTURE:-tmfixture.portcullis.local}`)
+      traefik.http.routers.tmfixture.entrypoints: websecure
+      traefik.http.services.tmfixture.loadbalancer.server.port: "8080"
