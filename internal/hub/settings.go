@@ -861,6 +861,9 @@ func (h *Hub) saveSettings(t *templates.Template, u SettingsUpdate, parsed *pars
 		}()
 	}
 
+	// The directory snapshot the env's group records are checked against
+	// (network: before mu).
+	members := h.groupSnapshot(id)
 	h.mu.Lock()
 	// A restore or delete may have started since SaveSettings checked.
 	if err := h.pendingLocked(id); err != nil {
@@ -959,7 +962,7 @@ func (h *Hub) saveSettings(t *templates.Template, u SettingsUpdate, parsed *pars
 	// Options with an env delivery go into the .env — every one of them,
 	// empty when unset, so clearing a field actually clears it — and so
 	// do the ports the app binds itself (network_mode: host, ranges).
-	envErr := h.writeOptionEnvLocked(t)
+	envErr := h.writeOptionEnvLocked(t, members)
 	h.mu.Unlock()
 	res.changes = changes
 	for _, c := range changes {
@@ -1093,6 +1096,9 @@ func (h *Hub) nextSettingsLocked(t *templates.Template, cur state.InstanceSettin
 	}
 	if len(next.Secrets) == 0 {
 		next.Secrets = nil
+	}
+	if err := staleRebind(cur, parsed); err != nil {
+		return next, nil, nil, nil, err
 	}
 	ge, gown, gchanges := h.groupSettingsChangesLocked(t, cur, &next, parsed)
 	effects, own, changes = append(effects, ge...), append(own, gown...), append(changes, gchanges...)

@@ -368,7 +368,8 @@ func TestGroupValuesPlaceholdersOnly(t *testing.T) {
 	runSettingsCases(t, []settingsCase{
 		{"literal", oidcHead + opts(role+"default: user, group_values: {admins: admin}}"), oidcCompose, "role", "admins"},
 		{"admin placeholder", oidcHead + opts(role+`default: user, group_values: {"{{ADMIN_GROUP}}": admin}}`), oidcCompose, "", ""},
-		{"access placeholder", oidcHead + opts(role+`default: user, group_values: {"{{ACCESS_GROUP}}": admin}}`), oidcCompose, "", ""},
+		{"access placeholder on a privileged option", oidcHead + opts(role+`default: user, group_values: {"{{ACCESS_GROUP}}": admin}}`), oidcCompose, "role", "privileged"},
+		{"access placeholder", oidcHead + opts(strings.Replace(role, "privileged: true, ", "", 1)+`default: user, group_values: {"{{ACCESS_GROUP}}": admin}}`), oidcCompose, "", ""},
 		{"no admin group", strings.Replace(oidcHead, "  admin_group: admin_app\n", "", 1) + opts(role+`default: user, group_values: {"{{ADMIN_GROUP}}": admin}}`), oidcCompose, "role", "admin_group"},
 		{"instance scope", hdrHead + opts(`{key: theme, label: T, type: string, group_values: {"{{ADMIN_GROUP}}": x}}`), hdrCompose, "theme", "group_values"},
 	})

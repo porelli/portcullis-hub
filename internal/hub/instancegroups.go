@@ -77,6 +77,7 @@ func (h *Hub) EnableAs(id, actor string) (*EnableResult, error) {
 	// The template's starting rows, bound to the groups that now exist
 	// (P7: a default instance has no CreateInstance to seed them).
 	h.seedSettings(id)
+	h.reseedPlaceholderRows(id, res.GroupsCreated)
 	res.Warnings = append(res.Warnings, h.bindPlaceholderRows(context.Background(), id)...)
 	rolledBack, err := h.enableLocked(id)
 	return res, h.finishOp(id, OpEnable, err, rolledBack)
@@ -277,6 +278,7 @@ func (h *Hub) CreateMissingGroups(ctx context.Context, ids []string, actor strin
 				r.Error = err.Error()
 			}
 			h.seedSettings(id)
+			h.reseedPlaceholderRows(id, created)
 			r.Warnings = append(r.Warnings, h.bindPlaceholderRows(ctx, id)...)
 		}
 		unlock()

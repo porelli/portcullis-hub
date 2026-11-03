@@ -592,6 +592,7 @@ func (h *Hub) applyRestore(id string, sb *staged, plan []volumePlan, wasEnabled 
 	if err := writeOrRemove(h.userOverridePath(id), sb.user); err != nil {
 		return fmt.Errorf("custom override: %w", err)
 	}
+	members := h.groupSnapshot(id)
 	h.mu.Lock()
 	h.applyConfigLocked(id, sb.cfg)
 	h.rebuildLocked()
@@ -608,7 +609,7 @@ func (h *Hub) applyRestore(id string, sb *staged, plan []volumePlan, wasEnabled 
 	}
 	var envErr error
 	if v := h.findLocked(id); v != nil && secretsErr == nil {
-		envErr = h.refreshInstanceEnvLocked(v)
+		envErr = h.refreshInstanceEnvLocked(v, members)
 	}
 	saveErr := h.st.Save(h.statePath())
 	h.mu.Unlock()
@@ -854,6 +855,7 @@ func (h *Hub) restoreInstanceAs(archive, newID, actor string, hosts map[string]s
 	if err := writeOrRemove(h.userOverridePath(newID), sb.user); err != nil {
 		return res, undo(statusErr(500, "custom override: %v", err))
 	}
+	members := h.groupSnapshot(newID)
 	h.mu.Lock()
 	h.applyConfigLocked(newID, sb.cfg)
 	h.rebuildLocked()
@@ -866,7 +868,7 @@ func (h *Hub) restoreInstanceAs(archive, newID, actor string, hosts map[string]s
 	} else if envErr = h.restoreSecretsLocked(v, sb.secrets, true); envErr == nil && sb.env != nil {
 		// Secrets copied, generate-declared ones regenerated (as client
 		// secret_envs are), before the env is written from them.
-		envErr = h.generateAppEnvLocked(v)
+		envErr = h.generateAppEnvLocked(v, members)
 	}
 	saveErr := h.st.Save(h.statePath())
 	h.mu.Unlock()

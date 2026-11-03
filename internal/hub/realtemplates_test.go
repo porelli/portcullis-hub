@@ -96,7 +96,7 @@ func TestRealTemplatesInstances(t *testing.T) {
 		for _, id := range ids {
 			h.mu.Lock()
 			v := h.findLocked(id)
-			err := h.generateAppEnvLocked(v)
+			err := h.generateAppEnvLocked(v, nil)
 			if err == nil {
 				err = h.generateOverrideLocked(v, state.InstanceSettings{})
 			}

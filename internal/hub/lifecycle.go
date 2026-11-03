@@ -66,6 +66,7 @@ func (h *Hub) composeUp(t *templates.Template) error {
 	if _, err := os.Stat(t.ComposePath()); err != nil {
 		return nil
 	}
+	members := h.groupSnapshot(t.ID)
 	h.mu.Lock()
 	live := t
 	if l := h.findLocked(t.ID); l != nil {
@@ -74,7 +75,7 @@ func (h *Hub) composeUp(t *templates.Template) error {
 	}
 	err := h.generateOverrideLocked(live, h.st.Settings[t.ID])
 	if err == nil {
-		err = h.refreshInstanceEnvLocked(live)
+		err = h.refreshInstanceEnvLocked(live, members)
 	}
 	h.mu.Unlock()
 	if err != nil {
@@ -239,7 +240,9 @@ func (h *Hub) enableLocked(id string) (rolledBack bool, err error) {
 func (h *Hub) enableInner(id string, restoring bool) (rolledBack bool, err error) {
 
 	// Phase 1 (under mu): validate and write local files — fast filesystem
-	// work that needs a consistent view of state.
+	// work that needs a consistent view of state. The directory snapshot
+	// for group records first (network: outside mu).
+	members := h.groupSnapshot(id)
 	h.mu.Lock()
 	t := h.findLocked(id)
 	if t == nil {
@@ -266,7 +269,7 @@ func (h *Hub) enableInner(id string, restoring bool) (rolledBack bool, err error
 	// The template's starting per-person rows (after EnableAs created
 	// the instance's missing groups).
 	h.seedSettingsLocked(&tmpl)
-	if err := h.generateAppEnvLocked(&tmpl); err != nil {
+	if err := h.generateAppEnvLocked(&tmpl, members); err != nil {
 		h.mu.Unlock()
 		return false, statusErr(500, "env setup failed: %v", err)
 	}

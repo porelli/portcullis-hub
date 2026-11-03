@@ -11,6 +11,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/settings"
@@ -43,6 +44,42 @@ import (
 //
 // Directory calls (network) never run under mu; audits run after mu is
 // released (auditOp takes it).
+
+// groupSnapshotTimeout bounds the directory call before an env write.
+const groupSnapshotTimeout = 10 * time.Second
+
+// hasGroupEnv reports a group-scope option of t delivered by env.
+func hasGroupEnv(t *templates.Template) bool {
+	opts := t.Manifest.Options()
+	for i := range opts {
+		if opts[i].EffectiveScope() == templates.ScopeGroup && len(envDeliveries(&opts[i])) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// groupSnapshot is the directory snapshot an env write of instance id
+// checks its group records against. Fetched with no lock held (network);
+// nil when the instance has no group-scope env delivery (no call) or the
+// directory can't be read (logged: no records are delivered).
+func (h *Hub) groupSnapshot(id string) *directory.Membership {
+	h.mu.RLock()
+	t := h.findLocked(id)
+	need := t != nil && hasGroupEnv(t)
+	h.mu.RUnlock()
+	if !need {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), groupSnapshotTimeout)
+	defer cancel()
+	m, err := h.membership(ctx)
+	if err != nil {
+		log.Printf("settings: %s: WARNING: directory unavailable (%v): group records are not delivered", id, err)
+		return nil
+	}
+	return m
+}
 
 // purgeActor audits the Hub's own purges.
 const purgeActor = "hub"
@@ -101,19 +138,27 @@ func (h *Hub) bindRowsForSave(ctx context.Context, t *templates.Template, parsed
 	}
 	m, err := h.membership(ctx)
 	if err != nil {
-		return nil, &StatusError{Status: 503, Err: fmt.Errorf("per-person and per-group values need the directory to bind their groups (nothing was saved): %w", err)}
+		status := 503
+		var se *StatusError
+		if errors.As(err, &se) {
+			status = se.Status
+		}
+		return nil, &StatusError{Status: status, Err: fmt.Errorf("per-person and per-group values need the directory to bind their groups (nothing was saved): %w", err)}
 	}
-	h.mu.RLock()
-	people := h.people
-	h.mu.RUnlock()
 	var warnings []string
 	bind := func(o *templates.Option, rows []state.GroupValue) error {
+		seen := map[string]string{}
 		for i := range rows {
 			r := &rows[i]
 			name := placeholderGroup(t, r.Group)
 			if name == "" {
 				return statusErr(400, "setting %s: %s: the template has no such group", o.Key, r.Group)
 			}
+			// {{ADMIN_GROUP}} and admin_<id> are one group: one row.
+			if prev, dup := seen[strings.ToLower(name)]; dup {
+				return statusErr(400, "setting %s: %s and %s are the same group %s (one value per group)", o.Key, prev, r.Group, name)
+			}
+			seen[strings.ToLower(name)] = r.Group
 			mg, ok := m.Groups[name]
 			if !ok {
 				if isPlaceholder(r.Group) {
@@ -124,18 +169,9 @@ func (h *Hub) bindRowsForSave(ctx context.Context, t *templates.Template, parsed
 				return statusErr(400, "setting %s: group %s doesn't exist", o.Key, name)
 			}
 			r.GroupID = mg.ID
-			if o.Privileged {
-				why, err := people.PrivilegeProblem(ctx, name)
-				if err != nil {
-					var de *directory.Error
-					if errors.As(err, &de) && de.Status == 404 {
-						return statusErr(400, "setting %s: group %s doesn't exist", o.Key, name)
-					}
-					return &StatusError{Status: 503, Err: fmt.Errorf("setting %s: group %s: %w", o.Key, name, err)}
-				}
-				if why != "" {
-					return statusErr(400, "setting %s: group %s can't grant a privileged value: %s", o.Key, name, why)
-				}
+			// The snapshot's PrivilegeProblem answer (Membership.Privilege).
+			if why := m.Privilege[name]; o.Privileged && why != "" {
+				return statusErr(400, "setting %s: group %s can't grant a privileged value: %s", o.Key, name, why)
 			}
 		}
 		return nil
@@ -151,6 +187,38 @@ func (h *Hub) bindRowsForSave(ctx context.Context, t *templates.Template, parsed
 		}
 	}
 	return warnings, nil
+}
+
+// staleRebind refuses (409) a save whose row or record for a group was
+// stored against another id of that group than the one it was just
+// bound to: the group was deleted and re-created since, and its old
+// value must not pass to the new group just because the panel resent the
+// row (call 29). The admin removes the row and adds it again. Checked
+// under mu against the stored state.
+func staleRebind(cur state.InstanceSettings, parsed *parsedSettings) error {
+	check := func(key string, stored, sent []state.GroupValue) error {
+		old := map[string]int{}
+		for _, r := range stored {
+			old[r.Group] = r.GroupID
+		}
+		for _, r := range sent {
+			if id := old[r.Group]; id != 0 && r.GroupID != 0 && id != r.GroupID {
+				return statusErr(409, "setting %s: group %s was re-created since its row was saved; remove the row and add it again", key, r.Group)
+			}
+		}
+		return nil
+	}
+	for _, k := range slices.Sorted(maps.Keys(parsed.person)) {
+		if err := check(k, cur.Person[k].Rows, parsed.person[k].Rows); err != nil {
+			return err
+		}
+	}
+	for _, k := range slices.Sorted(maps.Keys(parsed.groups)) {
+		if err := check(k, cur.Groups[k], parsed.groups[k]); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // groupSettingsChangesLocked applies parsed's person and group changes
@@ -285,15 +353,30 @@ func (h *Hub) groupSettingsChangesLocked(t *templates.Template, cur state.Instan
 	return effects, own, changes
 }
 
-// groupRecordsOut are a group option's bound records as delivered: the
+// groupRecordsOut are a group option's records as delivered: the
 // group's name (placeholders resolved) and the canonical value, in the
-// admin's order. Records that aren't bound, or whose value no longer
-// parses (logged), are left out. Caller holds mu (read).
-func (h *Hub) groupRecordsOut(t *templates.Template, o *templates.Option, recs []state.GroupValue) []settings.Row {
+// admin's order — only records whose group id equals the group's id in
+// the directory snapshot m (a group deleted and re-created outside the
+// Hub gets nothing, before any reconcile). No snapshot (m nil: the
+// directory unavailable): no records at all, logged (fail closed).
+// Unbound records and values that no longer parse (logged) are left out.
+// Caller holds mu (read).
+func (h *Hub) groupRecordsOut(t *templates.Template, o *templates.Option, recs []state.GroupValue, m *directory.Membership) []settings.Row {
 	out := []settings.Row{}
+	if len(recs) == 0 {
+		return out
+	}
+	if m == nil {
+		log.Printf("settings: %s: %s: no directory snapshot: its group records are not delivered", t.ID, o.Key)
+		return out
+	}
 	for _, r := range recs {
 		name := placeholderGroup(t, r.Group)
 		if name == "" || r.GroupID == 0 {
+			continue
+		}
+		if mg, ok := m.Groups[name]; !ok || mg.ID != r.GroupID {
+			log.Printf("settings: %s: %s: the record for %s doesn't match the directory (group gone or re-created): not delivered", t.ID, o.Key, name)
 			continue
 		}
 		v, err := h.kinds.Parse(o, r.Value)
@@ -401,6 +484,61 @@ func (h *Hub) bindPlaceholderRows(ctx context.Context, id string) []string {
 	return warnings
 }
 
+// reseedPlaceholderRows puts back instance id's template-declared
+// placeholder rows (group_values) whose group was just created by
+// "create missing groups" or an enable (created), when their row is
+// missing — it was purged with the deleted group. Unbound (id 0):
+// bindPlaceholderRows binds them to the new group. Rows an admin entered
+// are never re-created, and nothing comes back for a group that already
+// existed (the admin may have removed the row). Never call it holding mu.
+func (h *Hub) reseedPlaceholderRows(id string, created []string) {
+	if len(created) == 0 {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	t := h.findLocked(id)
+	if t == nil {
+		return
+	}
+	s := h.st.Settings[id].Clone()
+	changed := false
+	opts := t.Manifest.Options()
+	for i := range opts {
+		o := &opts[i]
+		p, ok := s.Person[o.Key]
+		if o.EffectiveScope() != templates.ScopePerson || !ok {
+			continue
+		}
+		for _, ph := range seedPlaceholders {
+			raw, declared := o.GroupValues[ph]
+			name := placeholderGroup(t, ph)
+			if !declared || name == "" || !slices.Contains(created, name) {
+				continue
+			}
+			present := false
+			for _, r := range p.Rows {
+				present = present || r.Group == ph || strings.EqualFold(placeholderGroup(t, r.Group), name)
+			}
+			if present {
+				continue
+			}
+			v, err := h.kinds.Parse(o, raw)
+			if err != nil {
+				continue
+			}
+			p.Rows = append(p.Rows, state.GroupValue{Group: ph, Value: storedValue(v)})
+			changed = true
+			log.Printf("settings: %s: %s: the template's row for %s (%s) is back, for the re-created group", id, o.Key, ph, name)
+		}
+		s.Person[o.Key] = p
+	}
+	if changed {
+		h.st.Settings[id] = s
+		h.saveLocked()
+	}
+}
+
 // purged is one audited purge (after mu is released).
 type purged struct{ target, detail string }
 
@@ -458,7 +596,8 @@ func (h *Hub) dropRowsLocked(id string, t *templates.Template, drop func(key, na
 }
 
 // PurgeGroupSettings removes every per-group row and group record that
-// names group name (any id) in every instance, after the directory
+// names group name (exactly, or in another case when bound to id) in
+// every instance, after the directory
 // deleted it (directory.Service.GroupDeleted, spec call 19): audited as
 // settings.purge by actor, and the affected instances re-deliver. It
 // only changes state and queues the deliveries (TriggerDelivery, in the
@@ -469,8 +608,10 @@ func (h *Hub) PurgeGroupSettings(ctx context.Context, actor, name string, id int
 	var all []purged
 	affected := map[string]bool{}
 	for _, inst := range slices.Sorted(maps.Keys(h.st.Settings)) {
-		ps := h.dropRowsLocked(inst, h.findLocked(inst), func(_, g string, _ state.GroupValue) string {
-			if strings.EqualFold(g, name) {
+		ps := h.dropRowsLocked(inst, h.findLocked(inst), func(_, g string, r state.GroupValue) string {
+			// The exact name; another case only when bound to this id
+			// (two LLDAP groups may differ in case only).
+			if g == name || strings.EqualFold(g, name) && r.GroupID == id {
 				return fmt.Sprintf("group deleted (id %d)", id)
 			}
 			return ""
@@ -506,9 +647,11 @@ func (h *Hub) ldapSane(ctx context.Context) string {
 	if s == nil {
 		return "the LLDAP sanity check is not configured"
 	}
+	// The sweep's state under its lock; the LLDAP check outside it (a
+	// sweep holds the lock across Keycloak).
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	st := s.load()
+	s.mu.Unlock()
 	if st.Paused {
 		return "LLDAP looks wrong (" + st.Reason + ")"
 	}

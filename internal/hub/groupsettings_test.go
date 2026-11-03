@@ -216,6 +216,7 @@ func TestSavePersonRows(t *testing.T) {
 		"default parses":  {Person: map[string]PersonChange{"tier": {Default: raw("gold")}}},
 		"no default":      {Person: map[string]PersonChange{"tier": {Rows: rows("office_milan", "pro")}}},
 		"privileged def":  {Person: map[string]PersonChange{"role": {Default: raw("admin")}}},
+		"placeholder dup": {Person: map[string]PersonChange{"tier": {Default: raw("basic"), Rows: rows(templates.PlaceholderAdminGroup, "pro", "admin_privapp", "basic")}}},
 		"duplicate group": {Person: map[string]PersonChange{"tier": {Default: raw("basic"), Rows: rows("office_milan", "pro", "office_milan", "basic")}}},
 	} {
 		if _, err := f.h.SaveSettings("privapp", u, "root"); statusOf(err) != 400 {
@@ -303,6 +304,25 @@ func TestRecreatedGroupInheritsNothing(t *testing.T) {
 	if got := resolved(t, f, people, "privapp")["alice"]["tier"]; got.Value != "basic" || got.Reason.Source != settings.ReasonDefault {
 		t.Errorf("alice after re-create = %+v", got)
 	}
+	// Saving the same rows again (the panel resends them) never binds the
+	// old value to the new group: 409 until the row is removed and added.
+	_, err := f.h.SaveSettings("privapp", SettingsUpdate{Person: map[string]PersonChange{"tier": {Default: raw("basic"), Rows: rows("office_milan", "pro")}}}, "root")
+	if statusOf(err) != 409 || !strings.Contains(err.Error(), "office_milan was re-created") {
+		t.Errorf("stale rebind = %v", err)
+	}
+	if got := storedSettings(f, "privapp").Person["tier"].Rows; len(got) != 1 || got[0].GroupID != old {
+		t.Errorf("refused save changed the row: %+v", got)
+	}
+	// Same for group records.
+	f.h.mu.Lock()
+	s := f.h.st.Settings["privapp"]
+	s.Groups = map[string][]state.GroupValue{"libraries": {{Group: "office_milan", GroupID: old, Value: []any{"/a"}}}}
+	f.h.st.Settings["privapp"] = s
+	f.h.mu.Unlock()
+	_, err = f.h.SaveSettings("privapp", SettingsUpdate{Groups: map[string][]GroupValueInput{"libraries": rows("office_milan", []string{"/a"})}}, "root")
+	if statusOf(err) != 409 {
+		t.Errorf("stale record rebind = %v", err)
+	}
 	// LLDAP looking wrong (the bootstrap admin gone): no purge.
 	people.set(func(p *fakePeople) { delete(p.users, "admin") })
 	if w := f.h.reconcileGroupRows(context.Background(), "privapp"); len(w) == 0 {
@@ -317,7 +337,7 @@ func TestRecreatedGroupInheritsNothing(t *testing.T) {
 		t.Errorf("row kept: %+v", got)
 	}
 	purges := auditsOf(audit, "settings.purge")
-	if len(purges) != 1 || purges[0].Actor != "hub" || purges[0].Target != "privapp/tier" || !strings.Contains(purges[0].Detail, "office_milan") {
+	if len(purges) != 2 || purges[0].Actor != "hub" || purges[0].Target != "privapp/tier" || purges[1].Target != "privapp/libraries" || !strings.Contains(purges[0].Detail, "office_milan") {
 		t.Errorf("purge audit = %+v", purges)
 	}
 	if !slices.Contains(f.h.triggeredDeliveries(), "privapp") {
@@ -564,4 +584,125 @@ func (h *Hub) triggeredDeliveries() []string {
 	h.deliveryMu.Lock()
 	defer h.deliveryMu.Unlock()
 	return slices.Sorted(maps.Keys(h.pendingDelivery))
+}
+
+// Group records reach the env only when the directory snapshot fetched
+// for the write has their group with the same id (fail closed).
+func TestGroupRecordsNeedTheDirectory(t *testing.T) {
+	f, _, people := privFixture(t)
+	if _, err := f.h.SaveSettings("privapp", SettingsUpdate{Groups: map[string][]GroupValueInput{
+		"libraries": rows("users_privapp", []string{"/b"}, "office_milan", []string{"/a"}),
+	}}, "root"); err != nil {
+		t.Fatal(err)
+	}
+	// office_milan re-created straight in LLDAP; no reconcile has run.
+	people.deleteGroup("office_milan")
+	people.addGroup("office_milan", "alice")
+	if err := f.h.save("privapp", SettingsUpdate{Values: vals("motd", "x")}); err != nil {
+		t.Fatal(err)
+	}
+	if want := `PRIVAPP_LIBRARIES='[{"group":"users_privapp","value":["/b"]}]'`; !strings.Contains(envOf(t, f, "privapp"), want) {
+		t.Errorf("env lacks %s:\n%s", want, envOf(t, f, "privapp"))
+	}
+	// The directory down: no group values at all, also on enable.
+	people.set(func(p *fakePeople) { p.err = &directory.Error{Status: 502, Msg: "LLDAP unreachable"} })
+	if err := f.h.save("privapp", SettingsUpdate{Values: vals("motd", "y")}); err != nil {
+		t.Fatal(err)
+	}
+	if want := `PRIVAPP_LIBRARIES='[]'`; !strings.Contains(envOf(t, f, "privapp"), want) {
+		t.Errorf("env lacks %s:\n%s", want, envOf(t, f, "privapp"))
+	}
+	people.set(func(p *fakePeople) { p.err = nil })
+	if err := f.h.save("privapp", SettingsUpdate{Values: vals("motd", "z")}); err != nil {
+		t.Fatal(err)
+	}
+	people.set(func(p *fakePeople) { p.err = &directory.Error{Status: 502, Msg: "LLDAP unreachable"} })
+	if err := f.h.Enable("privapp"); err != nil {
+		t.Fatal(err)
+	}
+	f.h.Wait()
+	if want := `PRIVAPP_LIBRARIES='[]'`; !strings.Contains(envOf(t, f, "privapp"), want) {
+		t.Errorf("enable: env lacks %s:\n%s", want, envOf(t, f, "privapp"))
+	}
+	// h.membership keeps the directory's 502.
+	if _, err := f.h.InPopulation(context.Background(), "privapp", "alice"); statusOf(err) != 502 {
+		t.Errorf("unreachable = %v", err)
+	}
+}
+
+// A template's starting row whose group was deleted (and purged) comes
+// back, bound to the new group, when "create missing groups" or an enable
+// re-creates that group; rows the admin entered never do.
+func TestReseedTemplateRows(t *testing.T) {
+	f, _, people := privFixture(t)
+	if _, err := f.h.EnableAs("privapp", "root"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.h.SaveSettings("privapp", SettingsUpdate{Person: map[string]PersonChange{"role": {Default: raw("user"),
+		Rows: rows(templates.PlaceholderAdminGroup, "admin", "office_milan", "admin")}}}, "root"); err != nil {
+		t.Fatal(err)
+	}
+	for _, g := range []string{"admin_privapp", "office_milan"} {
+		id := people.id(g)
+		people.deleteGroup(g)
+		f.h.PurgeGroupSettings(context.Background(), "root", g, id)
+	}
+	f.h.groups.(*fakeGroups).set(func(g *fakeGroups) { delete(g.existing, "admin_privapp") })
+	if r := storedSettings(f, "privapp").Person["role"].Rows; len(r) != 0 {
+		t.Fatalf("rows after the purge = %+v", r)
+	}
+	people.addGroup("office_milan")
+	res, err := f.h.CreateMissingGroups(context.Background(), nil, "root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res) != 1 || !slices.Contains(res[0].Created, "admin_privapp") {
+		t.Fatalf("created = %+v", res)
+	}
+	r := storedSettings(f, "privapp").Person["role"].Rows
+	if len(r) != 1 || r[0].Group != templates.PlaceholderAdminGroup || r[0].GroupID != people.id("admin_privapp") || r[0].Value != "admin" {
+		t.Errorf("rows = %+v (admin_privapp %d)", r, people.id("admin_privapp"))
+	}
+	// The group existing already: nothing comes back (an admin may have
+	// removed the row on purpose).
+	f.h.mu.Lock()
+	s := f.h.st.Settings["privapp"]
+	p := s.Person["role"]
+	p.Rows = nil
+	s.Person["role"] = p
+	f.h.st.Settings["privapp"] = s
+	f.h.mu.Unlock()
+	if _, err := f.h.CreateMissingGroups(context.Background(), nil, "root"); err != nil {
+		t.Fatal(err)
+	}
+	if r := storedSettings(f, "privapp").Person["role"].Rows; len(r) != 0 {
+		t.Errorf("a row the admin removed came back: %+v", r)
+	}
+}
+
+// The purge matches the deleted group's exact name; another case only
+// for rows bound to the deleted id.
+func TestPurgeMatchesExactName(t *testing.T) {
+	f, _, people := privFixture(t)
+	other := people.addGroup("Office_Milan", "bob")
+	if _, err := f.h.SaveSettings("privapp", SettingsUpdate{
+		Person: map[string]PersonChange{"tier": {Default: raw("basic"), Rows: rows("office_milan", "pro")}},
+		Groups: map[string][]GroupValueInput{"libraries": rows("Office_Milan", []string{"/m"})},
+	}, "root"); err != nil {
+		t.Fatal(err)
+	}
+	id := people.id("office_milan")
+	people.deleteGroup("office_milan")
+	f.h.PurgeGroupSettings(context.Background(), "root", "office_milan", id)
+	s := storedSettings(f, "privapp")
+	if len(s.Person["tier"].Rows) != 0 {
+		t.Errorf("tier rows = %+v", s.Person["tier"].Rows)
+	}
+	if r := s.Groups["libraries"]; len(r) != 1 || r[0].Group != "Office_Milan" || r[0].GroupID != other {
+		t.Errorf("another group's record (case only) was purged: %+v", r)
+	}
+	f.h.PurgeGroupSettings(context.Background(), "root", "OFFICE_MILAN", other)
+	if r := storedSettings(f, "privapp").Groups["libraries"]; len(r) != 0 {
+		t.Errorf("same id, other case kept: %+v", r)
+	}
 }

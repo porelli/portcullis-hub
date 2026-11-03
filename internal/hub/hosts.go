@@ -480,6 +480,9 @@ type hostsChange struct {
 	oldHosts, newHosts map[string]string
 	// reapply: same hostnames, re-applied after a failed change.
 	reapply bool
+	// members: the directory snapshot the env's group records are
+	// checked against (fetched before mu; nil = none delivered).
+	members *directory.Membership
 }
 
 type clientHosts struct {
@@ -571,6 +574,7 @@ func (h *Hub) SetHosts(instanceID string, hosts map[string]string, actor string)
 	}
 
 	runtime = h.runtimeCopy()
+	ch.members = h.groupSnapshot(instanceID)
 	h.mu.Lock()
 	view, keep, saveErr, err := h.commitHostsLocked(ch, runtime)
 	h.mu.Unlock()
@@ -785,7 +789,7 @@ func (h *Hub) commitHostsLocked(ch *hostsChange, runtime map[string][]string) (v
 	// Files first, restorable: nothing is committed if they fail.
 	envPath, ovPath := h.envPath(ch.id), h.overridePath(ch.id)
 	restore := backupFiles(envPath, ovPath)
-	ferr := h.refreshInstanceEnvLocked(&view)
+	ferr := h.refreshInstanceEnvLocked(&view, ch.members)
 	if ferr == nil && fileExists(ovPath) {
 		ferr = h.generateOverrideLocked(&view, h.st.Settings[ch.id])
 	}

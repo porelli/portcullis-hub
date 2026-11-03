@@ -811,6 +811,12 @@ func (g *fakeGroups) DeleteInstanceGroup(ctx context.Context, actor, name string
 	return nil, nil
 }
 
+func (g *fakeGroups) set(fn func(g *fakeGroups)) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	fn(g)
+}
+
 func (g *fakeGroups) Calls() []string {
 	g.mu.Lock()
 	defer g.mu.Unlock()

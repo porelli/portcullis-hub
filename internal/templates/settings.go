@@ -1290,6 +1290,11 @@ func (v *specCheck) groupValues(o *Option) error {
 			if v.m.Auth.AccessGroup == "" {
 				return fmt.Errorf("group_values: %s needs auth.access_group", k)
 			}
+			// It would make the access group guarding (call 28): its rule
+			// could then gain no member on a delegate-editable field.
+			if o.Privileged {
+				return fmt.Errorf("group_values: %s on a privileged option would give everyone with access a privileged value: use %s", k, PlaceholderAdminGroup)
+			}
 		case PlaceholderAdminGroup:
 			if v.m.Auth.AdminGroup == "" {
 				return fmt.Errorf("group_values: %s needs auth.admin_group", k)

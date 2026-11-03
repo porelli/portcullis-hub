@@ -2,6 +2,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"maps"
 	"sort"
 	"strings"
@@ -115,7 +116,13 @@ func (h *Hub) membership(ctx context.Context) (*directory.Membership, error) {
 	}
 	m, err := p.Membership(ctx, time.Now().UTC())
 	if err != nil {
-		return nil, &StatusError{Status: 503, Err: err}
+		// The directory's status (502 unreachable, 503 unavailable).
+		status := 503
+		var de *directory.Error
+		if errors.As(err, &de) && de.Status >= 500 {
+			status = de.Status
+		}
+		return nil, &StatusError{Status: status, Err: err}
 	}
 	return m, nil
 }

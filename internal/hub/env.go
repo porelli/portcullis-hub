@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/settings"
 	"github.com/portcullis/hub/internal/templates"
@@ -31,7 +32,7 @@ func randomSecret() (string, error) {
 // deliveries are written from state (optionEnvLocked: every option env
 // name, empty when unset), and ${VAR} references in compose.yml are
 // filled from the core .env. Caller must hold mu.
-func (h *Hub) generateAppEnvLocked(t *templates.Template) error {
+func (h *Hub) generateAppEnvLocked(t *templates.Template, m *directory.Membership) error {
 	envFile := h.envPath(t.ID)
 	vars := readEnvRaw(envFile) // preserve user edits, as written
 	vars["PORTCULLIS_DOMAIN"] = h.cfg.Domain
@@ -54,7 +55,7 @@ func (h *Hub) generateAppEnvLocked(t *templates.Template) error {
 	for k, v := range h.portEnvLocked(t) {
 		vars[k] = v
 	}
-	optEnv, err := h.optionEnvLocked(t)
+	optEnv, err := h.optionEnvLocked(t, m)
 	if err != nil {
 		return err
 	}
@@ -95,8 +96,8 @@ func (h *Hub) generateAppEnvLocked(t *templates.Template) error {
 // writeOptionEnvLocked updates the option variables (optionEnvLocked,
 // single-quoted) and the port variables (portEnvLocked) in id's .env,
 // keeping every other line. Caller must hold mu.
-func (h *Hub) writeOptionEnvLocked(t *templates.Template) error {
-	vars, err := h.optionEnvLocked(t)
+func (h *Hub) writeOptionEnvLocked(t *templates.Template, m *directory.Membership) error {
+	vars, err := h.optionEnvLocked(t, m)
 	if err != nil {
 		return err
 	}
@@ -132,7 +133,7 @@ func (h *Hub) portEnvLocked(t *templates.Template) map[string]string {
 // options (their records) and person-entered lists (the delivery engine
 // writes those outside mu). Errors never carry a value. Caller must hold
 // mu.
-func (h *Hub) optionEnvLocked(t *templates.Template) (map[string]string, error) {
+func (h *Hub) optionEnvLocked(t *templates.Template, m *directory.Membership) (map[string]string, error) {
 	s := h.st.Settings[t.ID]
 	out := map[string]string{}
 	var secrets map[string]string
@@ -140,11 +141,13 @@ func (h *Hub) optionEnvLocked(t *templates.Template) (map[string]string, error) 
 	for i := range opts {
 		o := &opts[i]
 		if o.EffectiveScope() == templates.ScopeGroup && len(envDeliveries(o)) > 0 {
-			// The records as one JSON value per env delivery (bound
-			// records of the stored type only).
+			// The records as one JSON value per env delivery: only
+			// records of the stored type whose group id matches the
+			// caller's directory snapshot m (fetched outside mu); no
+			// snapshot = no records (fail closed).
 			var recs []settings.Row
 			if h.typeMatchesLocked(t, o.Key, o) {
-				recs = h.groupRecordsOut(t, o, s.Groups[o.Key])
+				recs = h.groupRecordsOut(t, o, s.Groups[o.Key], m)
 			}
 			env, err := renderGroupEnv(o, recs)
 			if err != nil {
@@ -435,13 +438,13 @@ func hostNetPortValues(t *templates.Template, values map[string]string) map[stri
 // an existing .env before every compose up, so the routed hostnames are
 // always the Hub's and the app starts with the stored settings. Caller
 // must hold mu.
-func (h *Hub) refreshInstanceEnvLocked(t *templates.Template) error {
+func (h *Hub) refreshInstanceEnvLocked(t *templates.Template, m *directory.Membership) error {
 	path := h.envPath(t.ID)
 	if _, err := os.Stat(path); err != nil {
 		return nil // not generated yet: enable writes it whole
 	}
 	cur := readEnvRaw(path)
-	opts, err := h.optionEnvLocked(t)
+	opts, err := h.optionEnvLocked(t, m)
 	if err != nil {
 		return err
 	}
