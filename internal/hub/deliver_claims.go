@@ -347,8 +347,7 @@ func (h *Hub) runClaims(ctx context.Context, step claimStep) (units []UnitResult
 	}
 
 	// The attributes (hidden, not editable). exists: the Hub's attribute
-	// is there (its mappers stay in the ensure set); ready: values may be
-	// written.
+	// is there; ready: values may be written.
 	exists, ready := map[string]bool{}, map[string]bool{}
 	var lost []string // existing attributes without a record
 	for _, o := range plan.outs {
@@ -400,43 +399,6 @@ func (h *Hub) runClaims(ctx context.Context, step claimStep) (units []UnitResult
 				}
 			}
 			d.Claims[claimUnit(a)] = rec
-		}
-	}
-
-	// The mappers: every client of the instance gets its exact set (none:
-	// its setting mappers go — a claim moved to another client).
-	cids := append([]string(nil), plan.all...)
-	for cid := range plan.clients {
-		if !slices.Contains(cids, cid) {
-			cids = append(cids, cid)
-		}
-	}
-	sort.Strings(cids)
-	for _, cid := range cids {
-		var claims []keycloak.SettingClaim
-		for _, c := range plan.clients[cid] {
-			if exists[c.Attr] {
-				claims = append(claims, c)
-			}
-		}
-		if !isCurrent() {
-			return collect(), true
-		}
-		err := idp.EnsureSettingClaims(ctx, cid, t.ID, claims)
-		if err == nil {
-			continue
-		}
-		if len(plan.clients[cid]) == 0 {
-			// Nothing to deliver there: another owner's client, one not
-			// registered yet, a Keycloak hiccup — only logged.
-			log.Printf("settings: %s: Keycloak client %s (no setting claims): %v", t.ID, cid, err)
-			continue
-		}
-		for _, c := range plan.clients[cid] {
-			if ready[c.Attr] {
-				ready[c.Attr] = false
-				res[c.Attr].Error = h.redactUnitError(t.ID, fmt.Errorf("Keycloak client %s: %w", cid, err))
-			}
 		}
 	}
 
@@ -515,6 +477,55 @@ func (h *Hub) runClaims(ctx context.Context, step claimStep) (units []UnitResult
 	for _, o := range plan.outs {
 		if ready[o.attr] {
 			res[o.attr].OK = true
+		}
+	}
+
+	// The mappers, last: every client of the instance gets its exact set
+	// (none: its setting mappers go — a claim moved to another client).
+	// A claim is in it only when its attribute exists AND its values were
+	// reconciled in this run (written, or unchanged against the last
+	// successful record): a render error, a failed write or a failed
+	// holders query drops the mapper until a later run reconciles it, so
+	// a stale value is never put into a token.
+	reconciled := func(a string) bool { return exists[a] && ready[a] && len(failed[a]) == 0 }
+	cids := append([]string(nil), plan.all...)
+	for cid := range plan.clients {
+		if !slices.Contains(cids, cid) {
+			cids = append(cids, cid)
+		}
+	}
+	sort.Strings(cids)
+	for _, cid := range cids {
+		var claims []keycloak.SettingClaim
+		for _, c := range plan.clients[cid] {
+			if reconciled(c.Attr) {
+				claims = append(claims, c)
+			}
+		}
+		if !isCurrent() {
+			return fin(), true
+		}
+		err := idp.EnsureSettingClaims(ctx, cid, t.ID, claims)
+		if err == nil {
+			continue
+		}
+		var ce *keycloak.ConflictError
+		hit := plan.clients[cid]
+		if len(hit) == 0 {
+			if errors.As(err, &ce) || errors.Is(err, keycloak.ErrClientNotFound) {
+				// Nothing of ours there: another owner's client, or one
+				// not registered yet (no mapper can be on it) — logged.
+				log.Printf("settings: %s: Keycloak client %s (no setting claims): %v", t.ID, cid, err)
+				continue
+			}
+			// A stale mapper may stay on it: every unit fails, retried.
+			for _, o := range plan.outs {
+				hit = append(hit, keycloak.SettingClaim{Attr: o.attr})
+			}
+		}
+		for _, c := range hit {
+			res[c.Attr].OK = false
+			res[c.Attr].Error = h.redactUnitError(t.ID, fmt.Errorf("Keycloak client %s: %w", cid, err))
 		}
 	}
 	return fin(), false
@@ -637,9 +648,10 @@ func (h *Hub) removeInstanceClaims(ctx context.Context, idp IdP, id string, clie
 // deliverClaimsAfterStart delivers instance id's claims in the background
 // after a compose up (the start run writes only the data files: a start
 // never waits for LLDAP or Keycloak). It takes the delivery lock, so it
-// runs after the start's own deliveries; no busy check — the claims
-// write no files or op records, and the instance was just started from
-// its current state. Superseded: the newer commit's run delivers them.
+// runs after the start's own deliveries. Gated like any delivery
+// (runClaimsOnly): a disabled, deleting or restoring instance gets
+// nothing; a busy one (the start's lifecycle lock still held) a normal
+// delivery after busyRetry; a superseded run re-queues one.
 func (h *Hub) deliverClaimsAfterStart(id string) {
 	recorded := len(h.loadDelivered(id).Claims) > 0
 	h.mu.RLock()
@@ -680,8 +692,17 @@ func (h *Hub) runClaimsOnly(ctx context.Context, id string) error {
 	}
 	h.mu.RLock()
 	live := h.findLocked(id)
-	if live == nil {
+	if live == nil || !h.st.IsEnabled(id) || h.pendingLocked(id) != nil {
+		// Disabled, deleting (its claims are being removed) or restoring:
+		// nothing is written; whatever comes next delivers.
 		h.mu.RUnlock()
+		return nil
+	}
+	if h.appBusy(id) {
+		// A lifecycle or async op holds the instance (P20): a normal
+		// delivery after it, never a write under it.
+		h.mu.RUnlock()
+		h.queueDelivery(id, TriggerMembership, settings.EffectNone, busyRetry)
 		return nil
 	}
 	tmpl := *live
@@ -697,7 +718,14 @@ func (h *Hub) runClaimsOnly(ctx context.Context, id string) error {
 		return live != nil && h.deliveryGenLocked(live) == gen
 	}
 	delivered := h.loadDelivered(id)
-	units, _ := h.runClaims(ctx, claimStep{t: &tmpl, plan: plan, current: current, delivered: &delivered, now: now})
+	units, superseded := h.runClaims(ctx, claimStep{t: &tmpl, plan: plan, current: current, delivered: &delivered, now: now})
+	if superseded {
+		// A newer commit: what was written is recorded; a normal
+		// delivery (after this lock is released) finishes the claims.
+		h.saveDelivered(id, delivered)
+		h.queueDelivery(id, TriggerMembership, settings.EffectNone, 0)
+		return nil
+	}
 	annotateWhy(&tmpl, units, why)
 	for _, u := range units {
 		delivered.Status[u.Unit] = u

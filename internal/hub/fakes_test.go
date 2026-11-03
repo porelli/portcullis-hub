@@ -355,8 +355,16 @@ type fakeIdP struct {
 	claimErr    error
 	// claimGate, if set, blocks every EnsureSettingClaims until closed.
 	claimGate chan struct{}
-	// claimAll: every EnsureSettingClaims call ("<client>:<n claims>").
-	claimAll []string
+	// claimAll: every EnsureSettingClaims call ("<client>:<n claims>");
+	// claimFail: per client, EnsureSettingClaims fails with it.
+	claimAll  []string
+	claimFail map[string]error
+}
+
+func (f *fakeIdP) claimAllCalls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.claimAll...)
 }
 
 func (f *fakeIdP) EnsureSettingClaims(ctx context.Context, clientID, owner string, claims []keycloak.SettingClaim) error {
@@ -369,6 +377,9 @@ func (f *fakeIdP) EnsureSettingClaims(ctx context.Context, clientID, owner strin
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.claimAll = append(f.claimAll, fmt.Sprintf("%s:%d", clientID, len(claims)))
+	if err := f.claimFail[clientID]; err != nil {
+		return err
+	}
 	if f.claimErr != nil {
 		return f.claimErr
 	}

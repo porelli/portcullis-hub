@@ -15,6 +15,7 @@ import (
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/lldap"
+	"github.com/portcullis/hub/internal/state"
 )
 
 const claimID = "immich"
@@ -441,9 +442,8 @@ func TestClaimNewAttributeNoSweep(t *testing.T) {
 			t.Errorf("a removal for a new attribute: %q", c)
 		}
 	}
-	// The enable's background delivery wrote the four members, the save
-	// alice's new quota: nothing else.
-	if n := len(store.calls()); n != 5 {
+	// One write per population member: nothing else.
+	if n := len(store.calls()); n != 4 {
 		t.Errorf("writes = %q", store.calls())
 	}
 	// Recorded as soon as they exist (known, so never swept again).
@@ -478,7 +478,8 @@ func TestClaimLostRecordQueriesHolders(t *testing.T) {
 }
 
 // The start never waits for the claims: they run in the background after
-// the up.
+// the up (gated: the enable's own run finds the instance busy or not yet
+// enabled, and a normal delivery follows).
 func TestStartDoesNotWaitOnClaims(t *testing.T) {
 	f, _, store := claimFixture(t)
 	gate := make(chan struct{})
@@ -499,16 +500,116 @@ func TestStartDoesNotWaitOnClaims(t *testing.T) {
 		close(gate)
 		t.Fatal("the enable waited for the claims")
 	}
-	if n := len(store.calls()); n != 0 {
-		t.Errorf("values written before the mappers: %q", store.calls())
-	}
 	close(gate)
 	f.h.Wait()
+	deliverNow(t, f, claimID, TriggerMembership)
 	if v, _ := store.value("bob", SettingAttr(claimID, "role")); v != "admin" {
-		t.Errorf("after the background claims: bob's role = %q", v)
+		t.Errorf("bob's role = %q", v)
 	}
 	if u := f.h.DeliveryStatus(claimID).Units["claim:"+SettingAttr(claimID, "role")]; !u.OK {
 		t.Errorf("status = %+v", u)
+	}
+}
+
+// The background claims run writes nothing for a disabled, restoring or
+// deleting instance, and re-queues a normal delivery while it is busy.
+func TestClaimsAfterStartGated(t *testing.T) {
+	f, _, store := claimFixture(t)
+	claimEnable(t, f, claimID)
+	deliverNow(t, f, claimID, TriggerRetry)
+	before, ensures := len(store.calls()), len(f.idp.claimAllCalls())
+	quiet := func(name string) {
+		t.Helper()
+		if err := f.h.runClaimsOnly(context.Background(), claimID); err != nil {
+			t.Fatal(err)
+		}
+		f.h.Wait()
+		if n := len(store.calls()) - before; n != 0 {
+			t.Errorf("%s: %d LLDAP writes", name, n)
+		}
+		if n := len(f.idp.claimAllCalls()) - ensures; n != 0 {
+			t.Errorf("%s: %d Keycloak ensures", name, n)
+		}
+	}
+	// Something to write if the run went ahead: carol's quota changes.
+	f.h.SetPeople(f.h.people)
+	people := f.h.people.(*fakePeople)
+	people.addGroup("office_milan", "carol")
+
+	f.h.mu.Lock()
+	f.h.st.SetEnabled(claimID, false)
+	f.h.mu.Unlock()
+	quiet("disabled")
+	f.h.mu.Lock()
+	f.h.st.SetEnabled(claimID, true)
+	e := f.h.st.Instances[claimID]
+	e.ID, e.Template, e.State = claimID, claimID, state.InstanceRestoring
+	f.h.st.Instances[claimID] = e
+	f.h.mu.Unlock()
+	quiet("restoring")
+	f.h.mu.Lock()
+	e.State = state.InstanceDeleting
+	f.h.st.Instances[claimID] = e
+	f.h.mu.Unlock()
+	quiet("deleting")
+	f.h.mu.Lock()
+	e.State = ""
+	f.h.st.Instances[claimID] = e
+	f.h.mu.Unlock()
+
+	unlock, err := f.h.lockApp(claimID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	quiet("busy")
+	unlock()
+	f.h.deliveryMu.Lock()
+	q := f.h.queued[claimID]
+	f.h.deliveryMu.Unlock()
+	if q == nil {
+		t.Error("busy: no delivery re-queued")
+	}
+}
+
+// A delete that lands while the background claims run waits for the
+// delivery lock leaves no attribute and no mapper behind.
+func TestDeleteWhileClaimsWaitLeavesNothing(t *testing.T) {
+	f, _, store := claimFixture(t)
+	claimEnable(t, f, claimID)
+	deliverNow(t, f, claimID, TriggerRetry)
+	l := f.h.deliverLock(claimID)
+	l.Lock()
+	f.h.deliverClaimsAfterStart(claimID) // waits on the lock
+	delDone := make(chan error, 1)
+	go func() {
+		_, err := f.h.DeleteInstance(claimID, claimID, "root")
+		delDone <- err
+	}()
+	// Step 4 done (the attributes are gone); the delete now waits on the
+	// delivery lock too (forgetDeliveries).
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		store.mu.Lock()
+		n := len(store.deleted)
+		store.mu.Unlock()
+		if n == 2 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	ensures := len(f.idp.claimAllCalls())
+	l.Unlock()
+	if err := <-delDone; err != nil {
+		t.Fatal(err)
+	}
+	f.h.Wait()
+	for _, a := range []string{SettingAttr(claimID, "role"), SettingAttr(claimID, "storage_quota")} {
+		if _, ok := store.has(a); ok {
+			t.Errorf("attribute %s re-created after the delete", a)
+		}
+	}
+	if n := len(f.idp.claimAllCalls()) - ensures; n != 0 {
+		t.Errorf("%d mapper ensures after the delete's step 4", n)
 	}
 }
 
@@ -606,24 +707,81 @@ func TestClaimStoreNotConfigured(t *testing.T) {
 	}
 }
 
-// An attribute that exists keeps its mapper when creating another one
-// fails.
-func TestClaimFailedCreateKeepsOtherMappers(t *testing.T) {
-	f, _, store := claimFixture(t)
+// A claim stays in the ensure set only when its attribute exists and its
+// values were reconciled: an attribute that can't be (re-)created, or
+// whose writes fail, loses its mapper; the reconciled one keeps its own.
+func TestClaimUnreconciledDropsMapper(t *testing.T) {
+	f, people, store := claimFixture(t)
 	claimEnable(t, f, claimID)
 	deliverNow(t, f, claimID, TriggerRetry)
-	role := SettingAttr(claimID, "role")
+	role, quota := SettingAttr(claimID, "role"), SettingAttr(claimID, "storage_quota")
+	has := func(a string) bool {
+		for _, c := range f.idp.settingClaims("immich") {
+			if c.Attr == a {
+				return true
+			}
+		}
+		return false
+	}
 	// The quota attribute vanished and can't be re-created.
 	store.mu.Lock()
-	delete(store.schema, SettingAttr(claimID, "storage_quota"))
-	store.mu.Unlock()
+	delete(store.schema, quota)
 	store.failAdd = true
+	store.mu.Unlock()
 	deliverNow(t, f, claimID, TriggerRetry)
-	found := false
-	for _, c := range f.idp.settingClaims("immich") {
-		found = found || c.Attr == role
+	if !has(role) || has(quota) {
+		t.Errorf("after a failed create: claims = %+v", f.idp.settingClaims("immich"))
 	}
-	if !found {
-		t.Errorf("role's mapper dropped: %+v", f.idp.settingClaims("immich"))
+	store.mu.Lock()
+	store.failAdd = false
+	store.mu.Unlock()
+	deliverNow(t, f, claimID, TriggerRetry)
+	if !has(role) || !has(quota) {
+		t.Fatalf("after recovery: claims = %+v", f.idp.settingClaims("immich"))
+	}
+	// A value write fails (dave joins office_milan, his write fails):
+	// the quota mapper goes until a run reconciles it.
+	people.addGroup("office_milan", "dave")
+	store.mu.Lock()
+	store.failUser = "dave"
+	store.mu.Unlock()
+	rep := deliverNow(t, f, claimID, TriggerMembership)
+	if !has(role) || has(quota) {
+		t.Errorf("after a failed write: claims = %+v", f.idp.settingClaims("immich"))
+	}
+	if u, _ := unit(rep, "claim:"+quota); u.OK {
+		t.Errorf("quota unit = %+v", u)
+	}
+	store.mu.Lock()
+	store.failUser = ""
+	store.mu.Unlock()
+	deliverNow(t, f, claimID, TriggerMembership)
+	if !has(quota) {
+		t.Errorf("after the retry: claims = %+v", f.idp.settingClaims("immich"))
+	}
+}
+
+// A non-conflict error on a client without claims (a stale mapper may
+// stay there) fails the units, retried; a conflict is only logged.
+func TestClaimClientlessErrorFails(t *testing.T) {
+	twoClients := func(m string) string {
+		return strings.Replace(m, "keycloak_clients:\n  - client_id: immich\n    redirect_uri: https://{{HOST_IMMICH}}/auth/login\n",
+			"keycloak_clients:\n  - client_id: immich\n    redirect_uri: https://{{HOST_IMMICH}}/auth/login\n  - client_id: immich-web\n    redirect_uri: https://{{HOST_IMMICH}}/web/login\n", 1)
+	}
+	f, _, _ := claimFixtureWith(t, twoClients)
+	claimEnable(t, f, claimID)
+	f.idp.mu.Lock()
+	f.idp.claimFail = map[string]error{"immich-web": fmt.Errorf("keycloak 500")}
+	f.idp.mu.Unlock()
+	rep := deliverNow(t, f, claimID, TriggerRetry)
+	if u, _ := unit(rep, "claim:"+SettingAttr(claimID, "role")); u.OK || !strings.Contains(u.Error, "immich-web") {
+		t.Errorf("unit = %+v", u)
+	}
+	f.idp.mu.Lock()
+	f.idp.claimFail = map[string]error{"immich-web": &keycloak.ConflictError{ClientID: "immich-web", Owner: "x"}}
+	f.idp.mu.Unlock()
+	rep = deliverNow(t, f, claimID, TriggerRetry)
+	if u, _ := unit(rep, "claim:"+SettingAttr(claimID, "role")); !u.OK {
+		t.Errorf("conflict on a claim-less client: unit = %+v", u)
 	}
 }

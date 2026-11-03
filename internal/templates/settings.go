@@ -1505,11 +1505,11 @@ func claimTypeFits(o *Option, c *ClaimDelivery) error {
 	if rd == nil {
 		rd = &Render{}
 	}
-	numeric := func() error {
+	numeric := func(int32Only bool) error {
 		switch o.Type {
 		case TypeInt, TypeDuration:
 		case TypeSize:
-			if rd.Unit == "" || rd.Unit == "B" {
+			if int32Only && (rd.Unit == "" || rd.Unit == "B") {
 				return fmt.Errorf("json_type %s: a size in bytes overflows the 32-bit integer Keycloak converts to: render it in a unit (render.unit: MiB, GiB, …)", c.JSONType)
 			}
 		default:
@@ -1517,10 +1517,14 @@ func claimTypeFits(o *Option, c *ClaimDelivery) error {
 		}
 		if o.AllowUnlimited {
 			if rd.Unlimited == nil {
-				return fmt.Errorf("json_type %s: render.unlimited must be a number", c.JSONType)
+				return fmt.Errorf("json_type %s: render.unlimited must be set", c.JSONType)
 			}
-			if _, err := strconv.ParseInt(*rd.Unlimited, 10, 32); err != nil {
-				return fmt.Errorf("json_type %s: render.unlimited %q must be a 32-bit integer", c.JSONType, *rd.Unlimited)
+			if int32Only {
+				if _, err := strconv.ParseInt(*rd.Unlimited, 10, 32); err != nil {
+					return fmt.Errorf("json_type %s: render.unlimited %q must be a 32-bit integer", c.JSONType, *rd.Unlimited)
+				}
+			} else if !json.Valid([]byte(*rd.Unlimited)) {
+				return fmt.Errorf("json_type %s: render.unlimited %q must be JSON (a number or null)", c.JSONType, *rd.Unlimited)
 			}
 		}
 		return nil
@@ -1536,16 +1540,16 @@ func claimTypeFits(o *Option, c *ClaimDelivery) error {
 	}
 	switch c.JSONType {
 	case "int":
-		return numeric()
+		return numeric(true)
 	case "bool":
 		return boolean()
 	case "json":
-		if rd.Format == RenderJSON {
-			return nil
+		if rd.Format == RenderJSON || (o.Type == TypeTable && rd.Format == "") {
+			return nil // a table renders JSON by default
 		}
 		switch o.Type {
 		case TypeInt, TypeSize, TypeDuration:
-			return numeric()
+			return numeric(false)
 		case TypeBool:
 			return boolean()
 		}

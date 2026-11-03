@@ -952,6 +952,10 @@ func TestClaimJSONTypeFitsRender(t *testing.T) {
 		{"json list joined", c("list", "default: [a], items: {type: string}", "json_type: json"), oidcCompose, "v", "json_type json"},
 		{"json string", c("string", "default: x", "json_type: json"), oidcCompose, "v", "json_type json"},
 		{"json int ok", c("int", "default: 1", "json_type: json"), oidcCompose, "", ""},
+		{"json size in bytes ok", c("size", "default: 1GiB", "json_type: json"), oidcCompose, "", ""},
+		{"json unlimited null ok", c("size", "default: 1GiB, allow_unlimited: true", "json_type: json, render: {unlimited: 'null'}"), oidcCompose, "", ""},
+		{"json unlimited text", c("size", "default: 1GiB, allow_unlimited: true", "json_type: json, render: {unlimited: none}"), oidcCompose, "v", "unlimited"},
+		{"json table ok", c("table", "default: [], columns: [{name: a, label: A, type: string}]", "json_type: json"), oidcCompose, "", ""},
 		{"string anything", c("enum", "default: a, options: [{value: a, label: A}]", "json_type: string"), oidcCompose, "", ""},
 	})
 }
