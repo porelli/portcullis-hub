@@ -25,7 +25,7 @@ import (
 // per-group claim mapper without scripts, so each (instance, option)
 // with a claim delivery gets a Hub-owned LLDAP user attribute
 // SettingAttr(instance, key) — STRING, single-valued, not visible, not
-// editable, under the directory's reserved prefix ps_ (Users & Groups
+// editable, under the directory's reserved prefix ps- (Users & Groups
 // never shows or edits it) — holding each person's rendered value, an
 // LDAP mapper reading it, and a protocol mapper on that instance's
 // client only, both portcullis-setting-<attr>.
@@ -66,7 +66,7 @@ func (h *Hub) SetAttrStore(a AttrStore) {
 const settingAttrPrefix = directory.ReservedAttrPrefix
 
 // SettingAttr is the Hub-owned LLDAP attribute of option key of instance:
-// "ps_" + the first 12 hex of sha256(instance + "\x00" + key).
+// "ps-" + the first 12 hex (LLDAP allows only letters, digits and - in attribute names) of sha256(instance + "\x00" + key).
 func SettingAttr(instance, key string) string {
 	sum := sha256.Sum256([]byte(instance + "\x00" + key))
 	return settingAttrPrefix + hex.EncodeToString(sum[:])[:12]

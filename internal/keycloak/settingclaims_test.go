@@ -12,8 +12,8 @@ import (
 )
 
 const (
-	quotaAttr = "ps_0123456789ab"
-	roleAttr  = "ps_ba9876543210"
+	quotaAttr = "ps-0123456789ab"
+	roleAttr  = "ps-ba9876543210"
 )
 
 func TestEnsureSettingClaims(t *testing.T) {

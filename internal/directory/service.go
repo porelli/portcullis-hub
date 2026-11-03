@@ -89,7 +89,7 @@ type App struct {
 // ReservedAttrPrefix starts the Hub-owned LLDAP attributes that carry
 // per-person setting claims (contract §13, call 12): never a custom
 // field, never shown in the overview, CSV export or import.
-const ReservedAttrPrefix = "ps_"
+const ReservedAttrPrefix = "ps-"
 
 // reservedAttr reports a Hub-owned attribute name.
 func reservedAttr(name string) bool { return strings.HasPrefix(name, ReservedAttrPrefix) }
@@ -384,7 +384,7 @@ func (s *Service) overview(ctx context.Context, me string, c *Caller) (*Overview
 			cfg = nil
 		}
 		if cfg != nil {
-			// Hub-owned ps_* attributes are never shown (not even a field
+			// Hub-owned ps-* attributes are never shown (not even a field
 			// someone wrote into directory.yaml by hand).
 			ov.Fields = make([]Field, 0, len(cfg.Fields))
 			for _, f := range cfg.Fields {

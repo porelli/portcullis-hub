@@ -177,11 +177,11 @@ func TestReservedAttrPrefix(t *testing.T) {
 	store := &directory.Store{Path: filepath.Join(t.TempDir(), "directory.yaml")}
 	e.svc.Store = store
 	err := e.svc.CreateField(ctx, asRoot, directory.Field{Name: directory.ReservedAttrPrefix + "x", Label: "X", Kind: directory.FieldKindText})
-	wantStatus(t, "CreateField ps_x", err, 409)
+	wantStatus(t, "CreateField ps-x", err, 409)
 	if err := e.svc.CreateField(ctx, asRoot, directory.Field{Name: "city", Label: "City", Kind: directory.FieldKindText}); err != nil {
 		t.Fatal(err)
 	}
-	// A Hub-owned claim attribute, and a ps_ field someone wrote into
+	// A Hub-owned claim attribute, and a ps- field someone wrote into
 	// directory.yaml by hand.
 	attr := directory.ReservedAttrPrefix + "0123456789ab"
 	if err := e.svc.LLDAP.AddUserAttribute(ctx, attr, false); err != nil {
@@ -213,7 +213,7 @@ func TestReservedAttrPrefix(t *testing.T) {
 	if b, _ := json.Marshal(pv); strings.Contains(string(b), attr) {
 		t.Errorf("people overview shows %s", attr)
 	}
-	// Import: a ps_ column is refused, current values never show it.
+	// Import: a ps- column is refused, current values never show it.
 	rev, err := e.svc.ImportReview(ctx, asRoot, []string{"username", attr}, [][]string{{"alice", "admin"}})
 	if err == nil {
 		if b, _ := json.Marshal(rev); strings.Contains(string(b), "\"admin\"") && !strings.Contains(string(b), "reserved") {

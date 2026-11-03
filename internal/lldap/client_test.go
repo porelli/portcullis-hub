@@ -582,13 +582,13 @@ func TestSetPasswordOneDeadline(t *testing.T) {
 func TestAddHiddenUserAttribute(t *testing.T) {
 	c, f := newClient(t)
 	ctx := context.Background()
-	if err := c.AddHiddenUserAttribute(ctx, "ps_0123456789ab"); err != nil {
+	if err := c.AddHiddenUserAttribute(ctx, "ps-0123456789ab"); err != nil {
 		t.Fatal(err)
 	}
 	if err := c.AddUserAttribute(ctx, "department", false); err != nil {
 		t.Fatal(err)
 	}
-	s := f.UserAttributeSchema["ps_0123456789ab"]
+	s := f.UserAttributeSchema["ps-0123456789ab"]
 	if s.AttributeType != "STRING" || s.IsList || s.IsVisible || s.IsEditable {
 		t.Errorf("schema = %+v, want STRING/single/hidden/not-editable", s)
 	}
@@ -600,7 +600,7 @@ func TestAddHiddenUserAttribute(t *testing.T) {
 	for _, a := range attrs {
 		got[a.Name] = a
 	}
-	if a := got["ps_0123456789ab"]; a.IsVisible || a.IsEditable || a.IsList {
+	if a := got["ps-0123456789ab"]; a.IsVisible || a.IsEditable || a.IsList {
 		t.Errorf("hidden attribute = %+v", a)
 	}
 	if a := got["department"]; !a.IsVisible || a.IsEditable {

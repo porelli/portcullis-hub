@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -101,16 +102,25 @@ func deliverNow(t *testing.T, f *fixture, id string, trig Trigger) *DeliveryRepo
 
 func TestSettingAttrName(t *testing.T) {
 	a := SettingAttr("immich", "storage_quota")
-	if !strings.HasPrefix(a, "ps_") || len(a) != 15 || a == SettingAttr("immich-b", "storage_quota") || a == SettingAttr("immich", "role") {
+	if !strings.HasPrefix(a, "ps-") || len(a) != 15 || a == SettingAttr("immich-b", "storage_quota") || a == SettingAttr("immich", "role") {
 		t.Errorf("SettingAttr = %q", a)
 	}
-	// "ps_" + the first 12 hex of sha256("immich\x00storage_quota").
-	if a != "ps_"+sha256Hex("immich\x00storage_quota")[:12] {
+	// "ps-" + the first 12 hex of sha256("immich\x00storage_quota").
+	if a != "ps-"+sha256Hex("immich\x00storage_quota")[:12] {
 		t.Errorf("SettingAttr = %q", a)
 	}
 	// Hidden by the directory: the same reserved prefix.
 	if !strings.HasPrefix(a, reservedAttrPrefix()) {
 		t.Errorf("%q is not under the directory's reserved prefix %q", a, reservedAttrPrefix())
+	}
+	// LLDAP (v0.6.3 validate_attribute_name) creates only attributes named
+	// with a-z, A-Z, 0-9 and '-': "ps_…" was refused ("Invalid chars found:
+	// _") and no claim was ever delivered (e2e-settings).
+	lldapName := regexp.MustCompile(`^[A-Za-z0-9-]+$`)
+	for _, ik := range [][2]string{{"immich", "storage_quota"}, {"immich", "role"}, {"my-app_2", "a_b_c"}} {
+		if n := SettingAttr(ik[0], ik[1]); !lldapName.MatchString(n) {
+			t.Errorf("SettingAttr(%q, %q) = %q: LLDAP refuses the name", ik[0], ik[1], n)
+		}
 	}
 }
 

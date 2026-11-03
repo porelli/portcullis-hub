@@ -16,7 +16,7 @@ import (
 
 // Per-person setting claims (contract §13.6, spec call 12): each
 // (instance, option) with a claim delivery has a Hub-owned LLDAP
-// attribute ps_<12 hex>; Keycloak reads it through an LDAP mapper and a
+// attribute ps-<12 hex>; Keycloak reads it through an LDAP mapper and a
 // protocol mapper on that instance's client only puts it into the
 // tokens. Both mappers are named portcullis-setting-<attr>.
 //
@@ -28,19 +28,19 @@ import (
 const SettingMapperPrefix = "portcullis-setting-"
 
 // settingAttrRe is the Hub-owned attribute form (hub.SettingAttr).
-var settingAttrRe = regexp.MustCompile(`^ps_[0-9a-f]{12}$`)
+var settingAttrRe = regexp.MustCompile(`^ps-[0-9a-f]{12}$`)
 
 // settingJSONTypes maps a template's json_type to Keycloak's
 // jsonType.label ("" = string).
 var settingJSONTypes = map[string]string{"": "String", "string": "String", "int": "int", "bool": "boolean", "json": "JSON"}
 
-// SettingClaim is one claim on a client: LLDAP attribute Attr (ps_…) as
+// SettingClaim is one claim on a client: LLDAP attribute Attr (ps-…) as
 // claim Claim, JSONType int|string|bool|json.
 type SettingClaim struct{ Attr, Claim, JSONType string }
 
 func checkSettingAttr(attr string) error {
 	if !settingAttrRe.MatchString(attr) {
-		return fmt.Errorf("%q is not a setting attribute (ps_ + 12 hex)", attr)
+		return fmt.Errorf("%q is not a setting attribute (ps- + 12 hex)", attr)
 	}
 	return nil
 }
