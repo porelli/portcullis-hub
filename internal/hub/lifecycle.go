@@ -17,6 +17,7 @@ import (
 	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/policy"
+	"github.com/portcullis/hub/internal/settings"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
 )
@@ -474,7 +475,7 @@ func (h *Hub) disableLocked(id string) error {
 // files, and compose reads them at run time, so a queued restart always
 // applies the latest ones. The outcome is recorded (LastOp).
 func (h *Hub) Restart(t templates.Template) {
-	deadline := time.Now().Add(20 * time.Minute)
+	deadline := time.Now().Add(h.restartWait)
 	var unlock func()
 	for {
 		u, err := h.lockApp(t.ID)
@@ -483,7 +484,10 @@ func (h *Hub) Restart(t templates.Template) {
 			break
 		}
 		if time.Now().After(deadline) {
+			// Recorded (never over another operation's running record);
+			// the restart stays owed: Init queues it again.
 			log.Printf("restart %s gave up: %v", t.ID, err)
+			h.finishOpGuarded(t.ID, OpRestart, fmt.Errorf("the restart gave up after waiting %s for another operation (%s): restart the app", h.restartWait, err.Error()), false, true)
 			return
 		}
 		time.Sleep(h.lockPoll)
@@ -492,7 +496,9 @@ func (h *Hub) Restart(t templates.Template) {
 	if !h.IsEnabled(t.ID) {
 		return // disabled while we waited
 	}
+	seq := h.owedSeqOf(t.ID)
 	h.finishOp(t.ID, OpRestart, h.restartLocked(&t), false)
+	h.clearOwed(t.ID, seq, settings.EffectRestart)
 	h.TriggerReconcile()
 }
 

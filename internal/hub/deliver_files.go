@@ -70,6 +70,7 @@ func (h *Hub) forgetDeliveries(id string) error {
 	if err := os.Remove(h.deliveredPath(id)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+	h.forgetOwed(id)
 	return os.RemoveAll(h.appFilesDir(id))
 }
 

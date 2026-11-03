@@ -172,6 +172,7 @@ func (h *Hub) queueDelivery(id string, trig Trigger, effect string, delay time.D
 // queueDeliveryWith is queueDelivery with hooks to force and whether the
 // request is a stuck-exec re-queue (not a new trigger).
 func (h *Hub) queueDeliveryWith(id string, trig Trigger, effect string, delay time.Duration, force []string, stuckRetry bool) {
+	h.setOwed(id, effect)
 	h.deliveryMu.Lock()
 	if h.queued == nil {
 		h.queued = map[string]*queuedDelivery{}
@@ -335,9 +336,14 @@ func hasPeopleOptions(t *templates.Template) bool {
 type deliveredDoc struct {
 	Hashes map[string]string     `json:"hashes"`
 	Status map[string]UnitResult `json:"status"`
-	// Claims: per claim unit ("claim:<attr>"), user → hash of the value
-	// last written (or claimPending), never the value.
+	// Claims: per claim unit ("claim:<attr>"), user → "<uuid>:<hash>"
+	// of the value last written (or claimPending), never the value.
 	Claims map[string]map[string]string `json:"claims,omitempty"`
+	// Owed: the strongest effect (reload, restart) a committed change
+	// still owes — recorded before the run that applies it is queued or
+	// spawned, cleared once it ran (Init re-queues it). Owned by
+	// setOwed / clearOwed: saveDelivered writes the in-memory value.
+	Owed string `json:"owed,omitempty"`
 }
 
 func (h *Hub) deliveredPath(id string) string {
@@ -389,6 +395,14 @@ func (h *Hub) saveDelivered(id string, d deliveredDoc) {
 	}
 	h.deliveryStatus[id] = d.Status
 	h.deliveryMu.Unlock()
+	h.owedMu.Lock()
+	defer h.owedMu.Unlock()
+	d.Owed = h.owedLocked(id)
+	h.writeDeliveredLocked(id, d)
+}
+
+// writeDeliveredLocked writes delivered.json. Caller holds owedMu.
+func (h *Hub) writeDeliveredLocked(id string, d deliveredDoc) {
 	if err := h.ensureSecretsDir(id); err != nil {
 		log.Printf("settings: %s: delivery record not saved: %v", id, err)
 		return
@@ -399,6 +413,106 @@ func (h *Hub) saveDelivered(id string, d deliveredDoc) {
 	}
 	if err != nil {
 		log.Printf("settings: %s: delivery record not saved: %v", id, err)
+	}
+}
+
+// owedLocked is instance id's owed effect (the in-memory value once
+// loaded, else delivered.json's). Caller holds owedMu.
+func (h *Hub) owedLocked(id string) string {
+	if v, ok := h.owed[id]; ok {
+		return v
+	}
+	v := h.loadDelivered(id).Owed
+	if h.owed == nil {
+		h.owed = map[string]string{}
+	}
+	h.owed[id] = v
+	return v
+}
+
+// setOwed records that instance id owes effect (reload, restart; none:
+// nothing) in delivered.json before the run that applies it is queued
+// or spawned; it returns the record's sequence number for clearOwed.
+func (h *Hub) setOwed(id, effect string) int64 {
+	h.owedMu.Lock()
+	defer h.owedMu.Unlock()
+	if effect != settings.EffectReload && effect != settings.EffectRestart || !templates.ValidID(id) {
+		return h.owedSeq[id]
+	}
+	cur := h.owedLocked(id)
+	next := settings.Strongest(cur, effect)
+	if h.owedSeq == nil {
+		h.owedSeq = map[string]int64{}
+	}
+	h.owedSeq[id]++
+	if next != cur {
+		h.owed[id] = next
+		d := h.loadDelivered(id)
+		d.Owed = next
+		h.writeDeliveredLocked(id, d)
+	}
+	return h.owedSeq[id]
+}
+
+// owedSeqOf is instance id's current owed sequence number.
+func (h *Hub) owedSeqOf(id string) int64 {
+	h.owedMu.Lock()
+	defer h.owedMu.Unlock()
+	return h.owedSeq[id]
+}
+
+// clearOwed clears instance id's owed effect once a run applied upTo
+// (restart covers a reload), unless something was owed again since seq
+// (that run applies it).
+func (h *Hub) clearOwed(id string, seq int64, upTo string) {
+	h.owedMu.Lock()
+	defer h.owedMu.Unlock()
+	cur := h.owedLocked(id)
+	if cur == "" || h.owedSeq[id] != seq || settings.Strongest(cur, upTo) != upTo {
+		return
+	}
+	h.owed[id] = ""
+	if !fileExists(h.deliveredPath(id)) {
+		return
+	}
+	d := h.loadDelivered(id)
+	d.Owed = ""
+	h.writeDeliveredLocked(id, d)
+}
+
+// forgetOwed drops instance id's owed effect (disabled, deleted).
+func (h *Hub) forgetOwed(id string) {
+	h.owedMu.Lock()
+	defer h.owedMu.Unlock()
+	if h.owedSeq == nil {
+		h.owedSeq = map[string]int64{}
+	}
+	h.owedSeq[id]++
+	if h.owedLocked(id) == "" {
+		return
+	}
+	h.owed[id] = ""
+	if fileExists(h.deliveredPath(id)) {
+		d := h.loadDelivered(id)
+		d.Owed = ""
+		h.writeDeliveredLocked(id, d)
+	}
+}
+
+// requeueOwed queues, at Init, a delivery of every enabled instance that
+// still owes a reload or restart (the previous run stopped first).
+func (h *Hub) requeueOwed() {
+	h.mu.RLock()
+	ids := append([]string(nil), h.st.Enabled...)
+	h.mu.RUnlock()
+	for _, id := range ids {
+		h.owedMu.Lock()
+		owed := h.owedLocked(id)
+		h.owedMu.Unlock()
+		if owed != "" {
+			log.Printf("settings: %s: a %s is still owed: queued again", id, owed)
+			h.queueDelivery(id, TriggerRetry, owed, 0)
+		}
 	}
 }
 
@@ -502,7 +616,10 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 	// those can be judged against it: purgeStaleEntries).
 	enteredBefore := enteredCopy(h.st.Settings[id].Entered)
 	h.mu.RUnlock()
+	owedSeq := int64(0)
 	if !opt.lifecycle {
+		// The run's own effect is owed until it is applied.
+		owedSeq = h.setOwed(id, opt.effect)
 		if pendErr != nil || h.appBusy(id) {
 			// P20: never during a lifecycle or async operation (its op
 			// record, a restore's files); run again later.
@@ -511,6 +628,7 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 			return rep, "", false, nil
 		}
 		if !enabled {
+			h.forgetOwed(id)
 			return rep, "", false, nil
 		}
 	}
@@ -759,10 +877,13 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 			return rep, effect, true, nil
 		}
 		restartTmpl := tmpl
+		// Owed until the restart's finishOp (Restart clears it).
+		h.setOwed(id, settings.EffectRestart)
 		h.goBackground(func() { h.Restart(restartTmpl) })
 		rep.Units = append(rep.Units, UnitResult{Unit: unitRestart, OK: true, Message: "restart queued", At: now})
 	case settings.EffectReload:
 		rep.Units = append(rep.Units, h.reloadUnit(ctx, &tmpl, ran))
+		h.clearOwed(id, owedSeq, settings.EffectReload)
 	}
 	finish()
 	return rep, "", false, nil

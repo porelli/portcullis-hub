@@ -273,8 +273,18 @@ type Hub struct {
 	// (<data>/template-sync.json); guarded by syncHashMu.
 	syncHashMu sync.Mutex
 	syncHashes map[string]string
-	// lockPoll is how often a queued restart retries the app lock.
-	lockPoll time.Duration
+	// lockPoll is how often a queued restart retries the app lock;
+	// restartWait how long it tries before giving up (a failed restart
+	// op record; the restart stays owed).
+	lockPoll    time.Duration
+	restartWait time.Duration
+	// owed: per instance, the strongest effect (reload, restart) a
+	// committed change still owes, mirrored in delivered.json "owed"
+	// (Init re-queues it); owedSeq counts its updates. Under owedMu,
+	// which also serialises every delivered.json write.
+	owedMu  sync.Mutex
+	owed    map[string]string
+	owedSeq map[string]int64
 
 	// bg tracks background lifecycle work (queued restarts, default-policy
 	// propagation) so callers can wait for it.
@@ -340,18 +350,19 @@ func New(cfg Config, runner compose.Runner, engine Engine, idp IdP) (*Hub, error
 		return nil, err
 	}
 	h := &Hub{
-		kinds:     settings.NewRegistry(),
-		bindRoots: roots,
-		cfg:       cfg,
-		compose:   runner,
-		engine:    engine,
-		idp:       idp,
-		lockPoll:  2 * time.Second,
-		kick:      make(chan struct{}, 1),
-		dirKick:   make(chan struct{}, 1),
-		driftKey:  map[string]string{},
-		afterFunc: realAfterFunc,
-		sleep:     realSleep,
+		kinds:       settings.NewRegistry(),
+		bindRoots:   roots,
+		cfg:         cfg,
+		compose:     runner,
+		engine:      engine,
+		idp:         idp,
+		lockPoll:    2 * time.Second,
+		restartWait: 20 * time.Minute,
+		kick:        make(chan struct{}, 1),
+		dirKick:     make(chan struct{}, 1),
+		driftKey:    map[string]string{},
+		afterFunc:   realAfterFunc,
+		sleep:       realSleep,
 	}
 	// The known list in state.yaml (empty = only the main domain).
 	h.domains = knownDomains{h}
@@ -395,6 +406,9 @@ func (h *Hub) Init() {
 	if err := h.WritePolicy(); err != nil {
 		log.Printf("auth-policy: initial group-gate policy write failed: %v", err)
 	}
+	// Reloads and restarts committed changes still owe (the previous run
+	// stopped before applying them): queued again.
+	h.requeueOwed()
 }
 
 // Wait blocks until queued background restarts and policy propagation

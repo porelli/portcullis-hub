@@ -8,8 +8,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/portcullis/hub/internal/policy"
+	"github.com/portcullis/hub/internal/settings"
 )
 
 // Final whole-branch review fixes (hub items H7-H18).
@@ -185,4 +187,76 @@ func TestSecretEnvLineAfterTemplateUpdate(t *testing.T) {
 		t.Errorf("the .env still holds the dropped secret:\n%s", b)
 	}
 	checkEnv("removed")
+}
+
+// H14: a restart owed by a committed save survives a Hub restart: it is
+// recorded in delivered.json before it is queued, Init re-queues it,
+// and the restart's finishOp clears it.
+func TestOwedRestartSurvivesHubRestart(t *testing.T) {
+	f, _ := secretFixture(t)
+	clk := &fakeClock{}
+	f.h.afterFunc, f.h.sleep = clk.afterFunc, clk.sleep
+	f.clk = clk
+	const id = "secretapp"
+	if err := f.h.Enable(id); err != nil {
+		t.Fatal(err)
+	}
+	f.h.Wait()
+	unlock, err := f.h.lockApp(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	saveSecret(t, f, id, "api_key", setSecret("owed-1"))
+	f.h.Wait()
+	if got := f.h.loadDelivered(id).Owed; got != settings.EffectRestart {
+		t.Fatalf("owed = %q while the app is busy, want %q", got, settings.EffectRestart)
+	}
+	// The Hub restarts before the busy retry fires.
+	before := len(f.runner.Calls())
+	h2, err := New(Config{ProjectDir: f.project, ProjectHostDir: "/host/project", DataDir: f.data, Domain: "example.org"}, f.runner, f.engine, f.idp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h2.lockPoll = 5 * time.Millisecond
+	h2.SetGroups(&fakeGroups{})
+	h2.afterFunc, h2.sleep = clk.afterFunc, clk.sleep
+	h2.Init()
+	h2.Wait()
+	calls := strings.Join(f.runner.Calls()[before:], " ")
+	if !strings.Contains(calls, "down:"+projectName(id)) || !strings.Contains(calls, "up:"+projectName(id)) {
+		t.Errorf("compose calls after the Hub restart = %q, want the owed restart", calls)
+	}
+	if got := h2.loadDelivered(id).Owed; got != "" {
+		t.Errorf("owed = %q after the restart, want cleared", got)
+	}
+	if r := h2.LastOp(id); r == nil || r.Op != OpRestart || !r.OK {
+		t.Errorf("last op = %+v, want a successful restart", r)
+	}
+}
+
+// H14: a restart that gives up waiting for the app lock records a failed
+// restart op, and the restart stays owed.
+func TestRestartGivingUpRecordsFailure(t *testing.T) {
+	f, _ := secretFixture(t)
+	const id = "secretapp"
+	if err := f.h.Enable(id); err != nil {
+		t.Fatal(err)
+	}
+	f.h.Wait()
+	f.h.setOwed(id, settings.EffectRestart)
+	unlock, err := f.h.lockApp(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	f.h.restartWait = 20 * time.Millisecond
+	f.h.Restart(*f.h.Template(id))
+	r := f.h.LastOp(id)
+	if r == nil || r.Op != OpRestart || r.OK || !strings.Contains(r.Error, "gave up") {
+		t.Errorf("last op = %+v, want a failed restart that gave up", r)
+	}
+	if got := f.h.loadDelivered(id).Owed; got != settings.EffectRestart {
+		t.Errorf("owed = %q after giving up, want still %q", got, settings.EffectRestart)
+	}
 }
