@@ -308,6 +308,15 @@ func (s *Server) graphql(caller, q string, vars map[string]interface{}) (interfa
 		}, nil
 	case op("addUserAttribute"):
 		name := str(vars["name"])
+		// LLDAP (v0.6.3 validate_attribute_name) refuses names outside
+		// a-z, A-Z, 0-9 and '-'. Enforced for the Hub-owned hidden
+		// attributes (AddHiddenUserAttribute: not visible); custom fields
+		// (visible) follow in a separate task.
+		if visible, _ := vars["isVisible"].(bool); !visible {
+			if bad := invalidAttrChars(name); bad != "" {
+				return nil, fmt.Errorf("Cannot create attribute with invalid name. Valid characters: a-z, A-Z, 0-9, and dash (-). Invalid chars found: %s", bad)
+			}
+		}
 		s.UserAttributeSchema[name] = AttributeSchema{
 			AttributeType: str(vars["attributeType"]),
 			IsList:        vars["isList"].(bool),
@@ -614,4 +623,16 @@ func (c *ldapConn) passwordModify(w ldapserver.ResponseWriter, m *ldapserver.Mes
 		s.Mutations = append(s.Mutations, "password "+uid)
 		reply(ldapserver.LDAPResultSuccess, "")
 	}
+}
+
+// invalidAttrChars returns the characters of name LLDAP refuses in an
+// attribute name (anything but a-z, A-Z, 0-9 and '-').
+func invalidAttrChars(name string) string {
+	var b strings.Builder
+	for _, r := range name {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-') {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }

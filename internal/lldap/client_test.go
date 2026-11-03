@@ -607,3 +607,21 @@ func TestAddHiddenUserAttribute(t *testing.T) {
 		t.Errorf("department = %+v", a)
 	}
 }
+
+// TestHiddenUserAttributeLLDAPName: the fake refuses what LLDAP v0.6.3
+// refuses (validate_attribute_name: a-z, A-Z, 0-9 and '-' only), so a
+// setting attribute named with '_' (the e2e-settings bug) fails here too.
+func TestHiddenUserAttributeLLDAPName(t *testing.T) {
+	c, f := newClient(t)
+	ctx := context.Background()
+	err := c.AddHiddenUserAttribute(ctx, "ps_0123456789ab")
+	if err == nil || !strings.Contains(err.Error(), "invalid name") {
+		t.Fatalf("ps_0123456789ab: err = %v, want LLDAP's invalid-name refusal", err)
+	}
+	if _, ok := f.UserAttributeSchema["ps_0123456789ab"]; ok {
+		t.Error("refused attribute was created")
+	}
+	if err := c.AddHiddenUserAttribute(ctx, "ps-0123456789ab"); err != nil {
+		t.Fatal(err)
+	}
+}
