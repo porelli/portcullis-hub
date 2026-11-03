@@ -180,6 +180,9 @@ func TestSecretEnvLineAfterTemplateUpdate(t *testing.T) {
 	removed := strings.Replace(renamed, "    - key: api_key\n      label: API key\n      type: secret\n      applies: restart\n      delivery: [{env: HEADSCALE_KEY}]\n", "", 1)
 	removed = strings.Replace(removed, "      requires: [api_key]\n", "", 1)
 	writeFile(t, manifest, removed)
+	// The compose reference goes with it (a reference left behind is a
+	// declared variable: the prune keeps it, residual M3).
+	writeFile(t, composePath, strings.Replace(string(mustRead(t, composePath)), "      API_KEY: ${HEADSCALE_KEY}\n", "      API_KEY: none\n", 1))
 	f.h.Discover()
 	if optionByKey(f.h.Template("secretapp"), "api_key") != nil {
 		t.Fatal("update not loaded")
@@ -990,5 +993,41 @@ func TestOwedNeverForDeletingClearedByUp(t *testing.T) {
 	}
 	if f.h.DeliveryStatus(id).Pending {
 		t.Error("a delivery is re-queued for a deleting instance")
+	}
+}
+
+// Residual M3: the prune blanks a dropped secret's value only in lines
+// the template doesn't declare (or its options own): a declared PUID=1000
+// survives a dropped secret 1000.
+func TestPruneKeepsDeclaredVariables(t *testing.T) {
+	f, _ := secretFixture(t)
+	const id = "secretapp"
+	saveSecret(t, f, id, "api_key", setSecret("1000"))
+	cp := filepath.Join(f.src, "secretapp", "compose.yml")
+	writeFile(t, cp, strings.Replace(string(mustRead(t, cp)), "      API_KEY: ${HEADSCALE_API_KEY}\n", "      API_KEY: ${HEADSCALE_API_KEY}\n      PUID: ${PUID:-1000}\n", 1))
+	f.h.Discover()
+	if err := f.h.Enable(id); err != nil {
+		t.Fatal(err)
+	}
+	f.h.Wait()
+	if err := f.h.SaveEnv(id, map[string]string{"PUID": "1000"}); err != nil {
+		t.Fatal(err)
+	}
+	// The option goes (and the compose reference with it).
+	manifest := filepath.Join(f.src, "secretapp", "manifest.yaml")
+	m := strings.Replace(string(mustRead(t, manifest)), "    - key: api_key\n      label: API key\n      type: secret\n      applies: restart\n      delivery: [{env: HEADSCALE_API_KEY}]\n", "", 1)
+	writeFile(t, manifest, strings.Replace(m, "      requires: [api_key]\n", "", 1))
+	writeFile(t, cp, strings.Replace(string(mustRead(t, cp)), "      API_KEY: ${HEADSCALE_API_KEY}\n", "      API_KEY: none\n", 1))
+	f.h.Discover()
+	if optionByKey(f.h.Template(id), "api_key") != nil {
+		t.Fatal("update not loaded")
+	}
+	f.h.pruneSettings()
+	env := composeReads(t, f.h.envPath(id))
+	if env["PUID"] != "1000" {
+		t.Errorf("PUID = %q after the prune, want 1000 (declared)", env["PUID"])
+	}
+	if env["HEADSCALE_API_KEY"] != "" {
+		t.Errorf("HEADSCALE_API_KEY = %q, want blanked", env["HEADSCALE_API_KEY"])
 	}
 }

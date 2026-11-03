@@ -994,7 +994,17 @@ func (h *Hub) dropStoredSecretsLocked(id string, keys []string) {
 		log.Printf("settings: %s: the .env is unreadable (%v): the dropped secrets stay in the store", id, err)
 		return
 	default:
-		if b := blankEnvNames(data, nil, gone); !bytes.Equal(b, data) {
+		// Lines the template declares (env[], ports, compose references,
+		// Expert copies of them) are kept: only leftovers and option-owned
+		// lines (rewritten at the next env write anyway) are blanked.
+		declared := map[string]bool{}
+		if t := h.findLocked(id); t != nil {
+			declared = declaredEnvNames(t)
+			for n := range optionEnvOwners(t) {
+				delete(declared, n)
+			}
+		}
+		if b := blankEnvNamesExcept(data, nil, gone, declared); !bytes.Equal(b, data) {
 			if err := fsutil.WriteFileAtomic(path, b, 0600); err != nil {
 				log.Printf("settings: %s: blanking the dropped secrets in the .env failed (%v): they stay in the store", id, err)
 				return
