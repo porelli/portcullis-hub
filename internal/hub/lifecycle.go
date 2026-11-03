@@ -72,11 +72,17 @@ func (h *Hub) composeUp(t *templates.Template) error {
 	if _, err := os.Stat(t.ComposePath()); err != nil {
 		return nil
 	}
+	seq := h.owedSeqOf(t.ID)
 	live, err := h.prepareUp(t)
 	if err != nil {
 		return err
 	}
-	return h.startUp(live)
+	if err := h.startUp(live); err != nil {
+		return err
+	}
+	// The containers run what is configured now: nothing is owed.
+	h.clearOwed(t.ID, seq, settings.EffectRestart)
+	return nil
 }
 
 // prepareUp is everything composeUp does before compose runs: the Hub
@@ -551,6 +557,7 @@ func (h *Hub) restartLocked(t *templates.Template) error {
 	if _, err := os.Stat(t.ComposePath()); err != nil {
 		return nil
 	}
+	seq := h.owedSeqOf(t.ID)
 	live, err := h.prepareUp(t)
 	if err != nil {
 		return err
@@ -562,6 +569,7 @@ func (h *Hub) restartLocked(t *templates.Template) error {
 		}
 		return err
 	}
+	h.clearOwed(t.ID, seq, settings.EffectRestart)
 	if downErr != nil {
 		return fmt.Errorf("compose down failed (the containers may not have been recreated): %w", downErr)
 	}

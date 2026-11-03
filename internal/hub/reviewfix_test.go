@@ -957,3 +957,38 @@ func TestBusyRetryMergedKeepsForceAll(t *testing.T) {
 		t.Errorf("audit ran %d times after the merged retry, want 1 (every hook re-run)", len(runs))
 	}
 }
+
+// Residual M2: a run for an instance being deleted records no owed
+// effect (nor re-queues); a successful compose up clears what is owed.
+func TestOwedNeverForDeletingClearedByUp(t *testing.T) {
+	f, _ := secretFixture(t)
+	const id = "secretapp"
+	f.h.setOwed(id, settings.EffectRestart)
+	if err := f.h.Enable(id); err != nil {
+		t.Fatal(err)
+	}
+	f.h.Wait()
+	if got := f.h.loadDelivered(id).Owed; got != "" {
+		t.Errorf("owed = %q after a successful up, want cleared", got)
+	}
+	f.h.mu.Lock()
+	f.h.st.Instances[id] = state.Instance{Template: id, State: state.InstanceDeleting}
+	f.h.mu.Unlock()
+	unlock, err := f.h.lockApp(id) // the delete holds the instance's lock
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	if _, err := f.h.deliver(context.Background(), id, TriggerSave, deliverOpts{effect: settings.EffectRestart}); err != nil {
+		t.Fatal(err)
+	}
+	f.h.owedMu.Lock()
+	mem := f.h.owed[id]
+	f.h.owedMu.Unlock()
+	if got := f.h.loadDelivered(id).Owed; got != "" || mem != "" {
+		t.Errorf("owed = %q (memory %q) for a deleting instance, want none", got, mem)
+	}
+	if f.h.DeliveryStatus(id).Pending {
+		t.Error("a delivery is re-queued for a deleting instance")
+	}
+}

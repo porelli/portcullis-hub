@@ -109,6 +109,14 @@ type queuedDelivery struct {
 	real  bool
 }
 
+// deletingInstance: instance id is being deleted (state deleting): no
+// effect is owed for it.
+func (h *Hub) deletingInstance(id string) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.st.Instances[id].State == state.InstanceDeleting
+}
+
 // forceAllHooks in a run's force set re-runs every hook (a retry merged
 // into a queued run of another trigger). Never a hook name (hook names
 // match the validator's name rule).
@@ -185,7 +193,9 @@ func (h *Hub) queueDelivery(id string, trig Trigger, effect string, delay time.D
 // queueDeliveryWith is queueDelivery with hooks to force and whether the
 // request is a stuck-exec re-queue (not a new trigger).
 func (h *Hub) queueDeliveryWith(id string, trig Trigger, effect string, delay time.Duration, force []string, stuckRetry bool) {
-	h.setOwed(id, effect)
+	if !h.deletingInstance(id) {
+		h.setOwed(id, effect)
+	}
 	if trig == TriggerRetry {
 		// Merged into a run of another trigger (membership, save ranks
 		// higher), a retry still re-runs every hook.
@@ -774,6 +784,7 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 	tmpl := *t
 	enabled := h.st.IsEnabled(id)
 	pendErr := h.pendingLocked(id)
+	deleting := h.st.Instances[id].State == state.InstanceDeleting
 	hasRows := len(h.st.Settings[id].Person)+len(h.st.Settings[id].Groups) > 0
 	// The person-entered values as stored before the snapshot (only
 	// those can be judged against it: purgeStaleEntries).
@@ -781,8 +792,12 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 	h.mu.RUnlock()
 	owedSeq := int64(0)
 	if !opt.lifecycle {
-		// The run's own effect is owed until it is applied.
-		owedSeq = h.setOwed(id, opt.effect)
+		if deleting {
+			// Going away: nothing delivered, re-queued or owed (its
+			// delivery records are being removed).
+			rep.Units = append(rep.Units, UnitResult{Unit: unitBusy, Skipped: SkipBusy, Message: h.redactUnitError(id, pendErr), At: now})
+			return rep, "", false, nil
+		}
 		if h.appBusy(id) {
 			// P20: never during a lifecycle or async operation (its op
 			// record, a restore's files); run again later.
@@ -801,6 +816,9 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 			h.forgetOwed(id)
 			return rep, "", false, nil
 		}
+		// The run's own effect is owed until it is applied (after the
+		// busy and pending checks: a busy run's re-queue records it).
+		owedSeq = h.setOwed(id, opt.effect)
 	}
 
 	// Outside mu: stale rows first (P8: purged, audited), then the
