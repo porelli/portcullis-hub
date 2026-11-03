@@ -378,8 +378,14 @@ func TestHeaderNilPlanAfterFailedWrite(t *testing.T) {
 	if !u.OK || u.Skipped != "" {
 		t.Errorf("unit after the failure = %+v, want written", u)
 	}
-	if hosts := attrHosts(t, f); len(hosts) != 0 {
-		t.Errorf("hosts = %v after a nil plan, want none (stale hosts kept published)", hosts)
+	// No values left (H7: the header stays declared, empty, on the
+	// instance's gated hosts).
+	for host, byS := range attrHosts(t, f) {
+		for s, vals := range byS {
+			if len(vals) != 0 {
+				t.Errorf("%s %s = %v after a nil plan, want no values (stale hosts kept published)", host, s, vals)
+			}
+		}
 	}
 }
 

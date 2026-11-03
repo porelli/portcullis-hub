@@ -288,30 +288,60 @@ func (h *Hub) runHeaders(id string, p headerPlan, current func() bool, delivered
 
 // publishedHostHeadersLocked merges the header records of the enabled
 // instances with a template view onto the hosts their routers gate now
-// (WritePolicy). Caller holds mu (read).
-func (h *Hub) publishedHostHeadersLocked() map[string]map[string]map[string]string {
-	out := map[string]map[string]map[string]string{}
+// (WritePolicy). Every header suffix an enabled instance declares is
+// declared on each host it gates, with no values while there is no
+// record yet (enabled again, the first delivery pending or skipped, a
+// failed seed, a host SetHosts just added): group-gate then drops the
+// same-named shared-field header there. suppress: the folded suffixes
+// of instances whose gated hosts are unknown — the caller drops the
+// colliding shared-field headers everywhere (fail closed). Caller holds
+// mu (read).
+func (h *Hub) publishedHostHeadersLocked() (out map[string]map[string]map[string]string, suppress map[string]bool) {
+	out = map[string]map[string]map[string]string{}
 	for i := range h.instances {
 		t := &h.instances[i]
+		if !h.st.IsEnabled(t.ID) {
+			continue
+		}
 		rec := h.hostHeaders[t.ID]
-		if !h.st.IsEnabled(t.ID) || len(rec) == 0 {
+		suffixes := map[string]bool{}
+		for _, name := range headerNames(&t.Manifest) {
+			suffixes[headerSuffix(name)] = true
+		}
+		if len(suffixes) == 0 && len(rec) == 0 {
 			continue
 		}
 		hosts, err := h.groupsHostsLocked(t)
 		if err != nil {
-			log.Printf("auth-policy: %s: its routers' hosts are unknown (%v): no setting headers published", t.ID, err)
+			log.Printf("auth-policy: %s: its routers' hosts are unknown (%v): no setting headers published, same-named shared-field headers withheld", t.ID, err)
+			if suppress == nil {
+				suppress = map[string]bool{}
+			}
+			for s := range suffixes {
+				suppress[strings.ToLower(s)] = true
+			}
+			for _, byS := range rec {
+				for s := range byS {
+					suppress[strings.ToLower(s)] = true
+				}
+			}
 			continue
 		}
 		for _, host := range hosts {
-			for s, v := range rec[host] {
-				if out[host] == nil {
-					out[host] = map[string]map[string]string{}
+			if out[host] == nil {
+				out[host] = map[string]map[string]string{}
+			}
+			for s := range suffixes {
+				if out[host][s] == nil {
+					out[host][s] = map[string]string{}
 				}
+			}
+			for s, v := range rec[host] {
 				out[host][s] = v
 			}
 		}
 	}
-	return out
+	return out, suppress
 }
 
 // dropHostHeadersLocked forgets the header records of instances that
@@ -383,8 +413,10 @@ func (h *Hub) seedHostHeaders() {
 // replaceAttrHosts rewrites only the hosts section of the existing
 // user-attributes.json (WritePolicy while the directory state fails).
 // written: the file has these hosts now; false when there is no
-// readable version 2 file (it is left as it is).
-func (h *Hub) replaceAttrHosts(hosts map[string]map[string]map[string]string) (written bool, err error) {
+// readable version 2 file (it is left as it is). suppress: the shared
+// fields whose header collides with an instance's unknown hosts are
+// dropped from the kept fields and users (publishedHostHeadersLocked).
+func (h *Hub) replaceAttrHosts(hosts map[string]map[string]map[string]string, suppress map[string]bool) (written bool, err error) {
 	b, rerr := os.ReadFile(h.attributesPath())
 	if rerr != nil {
 		return false, nil
@@ -394,7 +426,9 @@ func (h *Hub) replaceAttrHosts(hosts map[string]map[string]map[string]string) (w
 		return false, nil
 	}
 	next := policy.BuildHosts(hosts)
-	if reflect.DeepEqual(policy.BuildHosts(doc.Hosts), next) && doc.Hosts != nil {
+	fields := len(doc.Fields)
+	policy.SuppressFieldHeaders(&doc, suppress)
+	if reflect.DeepEqual(policy.BuildHosts(doc.Hosts), next) && doc.Hosts != nil && len(doc.Fields) == fields {
 		return true, nil
 	}
 	doc.Hosts = next

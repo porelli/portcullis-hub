@@ -800,7 +800,7 @@ func (h *Hub) writePolicy() (attrsWritten bool, retErr error) {
 	portal := h.portalLocked()
 	// The header deliveries (§4.1 hosts): enabled instances with a view,
 	// on the hosts their routers gate now.
-	hosts := h.publishedHostHeadersLocked()
+	hosts, suppress := h.publishedHostHeadersLocked()
 	h.mu.RUnlock()
 	if err := policy.Write(h.policyPath(), doc); err != nil {
 		return false, err
@@ -813,12 +813,12 @@ func (h *Hub) writePolicy() (attrsWritten bool, retErr error) {
 		// section (header deliveries, from their own snapshots) follows,
 		// so a demotion still reaches group-gate. No readable v2 file:
 		// kept as it is.
-		written, err := h.replaceAttrHosts(hosts)
+		written, err := h.replaceAttrHosts(hosts, suppress)
 		attrsWritten = written
 		if err != nil {
 			errs = append(errs, err)
 		}
-	case attrs == nil && len(hosts) == 0:
+	case attrs == nil && len(hosts) == 0 && len(suppress) == 0:
 		attrsWritten = true
 		if err := os.Remove(h.attributesPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
 			errs = append(errs, err)
@@ -829,6 +829,7 @@ func (h *Hub) writePolicy() (attrsWritten bool, retErr error) {
 			out = *attrs
 		}
 		out.Hosts = policy.BuildHosts(hosts)
+		policy.SuppressFieldHeaders(&out, suppress)
 		if err := policy.WriteUserAttributes(h.attributesPath(), out); err != nil {
 			errs = append(errs, err)
 		} else {

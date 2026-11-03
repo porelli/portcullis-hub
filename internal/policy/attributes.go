@@ -108,6 +108,36 @@ func BuildUserAttributes(fields []AttrField, users map[string]map[string][]strin
 	return doc
 }
 
+// SuppressFieldHeaders drops every shared field whose header (the part
+// after HeaderPrefix, folded) is in suffixes, with its users' values:
+// a header delivery whose gated hosts are unknown could not declare it
+// per host, so the field header goes nowhere (fail closed).
+func SuppressFieldHeaders(doc *UserAttributesDocument, suffixes map[string]bool) {
+	if doc == nil || len(suffixes) == 0 {
+		return
+	}
+	// New maps: doc may share them with the directory's document.
+	fields := make(map[string]string, len(doc.Fields))
+	for name, hdr := range doc.Fields {
+		if !suffixes[strings.ToLower(hdr)] {
+			fields[name] = hdr
+		}
+	}
+	users := make(map[string]map[string][]string, len(doc.Users))
+	for user, vals := range doc.Users {
+		kept := make(map[string][]string, len(vals))
+		for name, v := range vals {
+			if _, ok := fields[name]; ok {
+				kept[name] = v
+			}
+		}
+		if len(kept) > 0 {
+			users[user] = kept
+		}
+	}
+	doc.Fields, doc.Users = fields, users
+}
+
 // BuildHosts cleans the hosts section (host → header suffix → user →
 // value; never nil) so group-gate accepts the file: hosts and users
 // lowercase (two spellings of one: the first in sorted order); header
