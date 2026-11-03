@@ -463,24 +463,28 @@ func (h *Hub) SetEntryAsAdmin(ctx context.Context, instance, key, user string, r
 func (h *Hub) setEntry(ctx context.Context, instance, key, user string, raw json.RawMessage, actor string, admin bool) (*MyEntry, *EntryRow, error) {
 	user, actor = strings.ToLower(user), strings.ToLower(actor)
 	target := instance + "/" + key + "/" + user
+	// The refusal limit first (a 429 stays cheap): a slot is reserved
+	// for this save and released when it ends — as a refusal only for a
+	// 4xx answer (a 5xx is never the caller's).
+	refused := false
+	if !admin {
+		if !h.entryLimit.reserve(user, h.entryClock()) {
+			return nil, nil, errEntryLimited
+		}
+		defer func() { h.entryLimit.release(user, h.entryClock(), refused) }()
+	}
 	m, err := h.membership(ctx)
 	if err != nil {
 		return nil, nil, errEntryDirectory(err)
 	}
-	if !admin && !h.entryLimit.allow(user, h.entryClock()) {
-		return nil, nil, errEntryLimited
-	}
 	refuse := func(err error, detail string) (*MyEntry, *EntryRow, error) {
-		if !admin {
-			h.entryLimit.refused(user, h.entryClock())
-		}
+		var se *StatusError
+		refused = errors.As(err, &se) && se.Status >= 400 && se.Status < 500
 		h.auditOp(actor, "settings.person_value", target, detail, err)
 		return nil, nil, err
 	}
 	noEntry := func() (*MyEntry, *EntryRow, error) {
-		if !admin {
-			h.entryLimit.refused(user, h.entryClock())
-		}
+		refused = true
 		return nil, nil, errNoEntry
 	}
 	h.mu.Lock()
@@ -874,6 +878,9 @@ const (
 type entryLimiter struct {
 	mu sync.Mutex
 	by map[string]*entryWindow
+	// inflight: saves holding a reserved slot (they may still become
+	// refusals), per user.
+	inflight map[string]int
 }
 
 type entryWindow struct {
@@ -905,26 +912,39 @@ func (l *entryLimiter) window(user string, now time.Time) *entryWindow {
 	return w
 }
 
-// allow reports whether user may save now (false: 429, counted).
-func (l *entryLimiter) allow(user string, now time.Time) bool {
+// reserve takes a slot for one save of user: false (429, counted as
+// suppressed) when the window's refusals plus the saves still in flight
+// reach the limit — so concurrent saves can never exceed it. Every true
+// must be followed by one release.
+func (l *entryLimiter) reserve(user string, now time.Time) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	w := l.window(user, now)
-	if w.refused < entryRefusalLimit {
-		return true
+	if w.refused+l.inflight[user] >= entryRefusalLimit {
+		w.suppressed++
+		if w.suppressed == 1 {
+			log.Printf("people: %s: more than %d refused value saves in a minute: further saves refused with 429 until the minute is over", user, entryRefusalLimit)
+		}
+		return false
 	}
-	w.suppressed++
-	if w.suppressed == 1 {
-		log.Printf("people: %s: more than %d refused value saves in a minute: further saves refused with 429 until the minute is over", user, entryRefusalLimit)
+	if l.inflight == nil {
+		l.inflight = map[string]int{}
 	}
-	return false
+	l.inflight[user]++
+	return true
 }
 
-// refused counts one refused save of user.
-func (l *entryLimiter) refused(user string, now time.Time) {
+// release ends a reserved save: refused (a 4xx answer) counts in the
+// window, anything else just frees the slot.
+func (l *entryLimiter) release(user string, now time.Time, refused bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.window(user, now).refused++
+	if l.inflight[user]--; l.inflight[user] <= 0 {
+		delete(l.inflight, user)
+	}
+	if refused {
+		l.window(user, now).refused++
+	}
 }
 
 // entryClock is the limiter's clock (h.entryNow in tests).

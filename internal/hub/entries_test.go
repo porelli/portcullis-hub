@@ -963,3 +963,70 @@ func TestEntryRefusalsRateLimited(t *testing.T) {
 		t.Errorf("admin = %v", err)
 	}
 }
+
+// Fix round 2: concurrent failing saves reserve slots under the
+// limiter's lock: at most the limit are refused (and audited), the rest
+// get 429.
+func TestEntryRefusalLimitConcurrent(t *testing.T) {
+	f, _, _, audit := entryFixture(t)
+	now := time.Date(2026, 11, 3, 10, 0, 0, 0, time.UTC)
+	f.h.entryNow = func() time.Time { return now }
+	const n = 40
+	var wg sync.WaitGroup
+	codes := make([]int, n)
+	for i := range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := setEntry(f, entryID, "ext_id", "alice", "nope", "alice")
+			codes[i] = statusOf(err)
+		}()
+	}
+	wg.Wait()
+	refused, limited := 0, 0
+	for _, c := range codes {
+		switch c {
+		case 400:
+			refused++
+		case 429:
+			limited++
+		default:
+			t.Errorf("code %d", c)
+		}
+	}
+	if refused > entryRefusalLimit || refused+limited != n {
+		t.Errorf("refused %d, limited %d (limit %d)", refused, limited, entryRefusalLimit)
+	}
+	if a := len(auditsOf(audit, "settings.person_value")); a != refused || a > entryRefusalLimit {
+		t.Errorf("audited %d, refused %d", a, refused)
+	}
+}
+
+// Fix round 2: a 5xx is never the caller's refusal; the limit is checked
+// before the directory lookup.
+func TestEntryLimitIgnores5xxAndSkipsDirectory(t *testing.T) {
+	f, people, _, _ := entryFixture(t)
+	now := time.Date(2026, 11, 3, 10, 0, 0, 0, time.UTC)
+	f.h.entryNow = func() time.Time { return now }
+	people.set(func(p *fakePeople) { p.err = &directory.Error{Status: 503, Msg: "down"} })
+	for range 2 * entryRefusalLimit {
+		if _, err := setEntry(f, entryID, "ext_id", "alice", aliceExt, "alice"); statusOf(err) != 503 {
+			t.Fatalf("directory down = %v", err)
+		}
+	}
+	people.set(func(p *fakePeople) { p.err = nil })
+	mustSetEntry(t, f, entryID, "ext_id", "alice", aliceExt, "alice") // not limited by the 503s
+	for range entryRefusalLimit {
+		setEntry(f, entryID, "ext_id", "alice", "nope", "alice")
+	}
+	var before int
+	people.set(func(p *fakePeople) { before = p.calls })
+	if _, err := setEntry(f, entryID, "ext_id", "alice", aliceExt, "alice"); statusOf(err) != 429 {
+		t.Fatalf("past the limit = %v", err)
+	}
+	var after int
+	people.set(func(p *fakePeople) { after = p.calls })
+	if after != before {
+		t.Errorf("a 429 asked the directory (%d -> %d calls)", before, after)
+	}
+}
