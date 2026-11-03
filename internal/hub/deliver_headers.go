@@ -259,10 +259,10 @@ func (h *Hub) runHeaders(id string, p headerPlan, current func() bool, delivered
 		}
 	}
 	h.mu.Unlock()
-	recorded, hasRecord := delivered.Hashes[unitHeaders]
-	// Unchanged: the record equals the plan and its hash is recorded — or,
-	// for a plan without hosts (nothing to publish), nothing is recorded.
-	if same && (recorded == p.hash || p.hosts == nil && !hasRecord) {
+	// Unchanged: the record equals the plan and the plan's hash is
+	// recorded — only after a successful write (nil plans included): a
+	// failed write leaves no hash, so the next run rewrites the file.
+	if same && delivered.Hashes[unitHeaders] == p.hash {
 		u.OK, u.Skipped = true, SkipUnchanged
 		return u, false
 	}
@@ -278,11 +278,7 @@ func (h *Hub) runHeaders(id string, p headerPlan, current func() bool, delivered
 		delete(delivered.Hashes, unitHeaders)
 	default:
 		u.OK = true
-		if p.hosts == nil {
-			delete(delivered.Hashes, unitHeaders)
-		} else {
-			delivered.Hashes[unitHeaders] = p.hash
-		}
+		delivered.Hashes[unitHeaders] = p.hash
 		if p.unrenderable > 0 {
 			u.Message = fmt.Sprintf("%d value(s) could not be rendered as a header: left out", p.unrenderable)
 		}

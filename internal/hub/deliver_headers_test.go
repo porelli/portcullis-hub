@@ -317,8 +317,9 @@ func TestPublicStripsHeaderDeliveries(t *testing.T) {
 	}
 }
 
-// M2: a plan without hosts (header options, no gated host) and nothing
-// recorded is unchanged: no policy write (and no directory call) per run.
+// M2: a plan without hosts (header options, no gated host) is written
+// once (its hash recorded), then unchanged: no policy write (and no
+// directory call) per run.
 func TestHeaderNilPlanUnchanged(t *testing.T) {
 	f, _, _ := headerFixture(t, nil)
 	headerEnable(t, f)
@@ -333,15 +334,52 @@ func TestHeaderNilPlanUnchanged(t *testing.T) {
 	h.mu.Unlock()
 	current := func() bool { return true }
 	plan := headerPlan{active: true, hash: "nil-plan"}
-	for i := 0; i < 2; i++ {
-		d := deliveredDoc{Hashes: map[string]string{}}
-		u, stop := h.runHeaders(headerID, plan, current, &d, time.Now())
-		if stop || !u.OK || u.Skipped != SkipUnchanged {
-			t.Errorf("run %d: unit = %+v (stop %v), want unchanged", i, u, stop)
-		}
+	d := deliveredDoc{Hashes: map[string]string{}}
+	u, stop := h.runHeaders(headerID, plan, current, &d, time.Now())
+	if stop || !u.OK || u.Skipped != "" || d.Hashes[unitHeaders] != "nil-plan" {
+		t.Errorf("first run: unit = %+v (stop %v), hash %q; want written and recorded", u, stop, d.Hashes[unitHeaders])
 	}
-	if calls != 0 {
-		t.Errorf("%d policy writes for an unchanged empty plan", calls)
+	u, stop = h.runHeaders(headerID, plan, current, &d, time.Now())
+	if stop || !u.OK || u.Skipped != SkipUnchanged {
+		t.Errorf("second run: unit = %+v (stop %v), want unchanged", u, stop)
+	}
+	if calls != 1 {
+		t.Errorf("%d policy writes, want 1 (the first run only)", calls)
+	}
+}
+
+// A failed write leaves the last published hosts in the file and no
+// hash: the next plan — even one without hosts — rewrites the file.
+func TestHeaderNilPlanAfterFailedWrite(t *testing.T) {
+	f, _, _ := headerFixture(t, nil)
+	headerEnable(t, f)
+	if len(attrHosts(t, f)) == 0 {
+		t.Fatal("no hosts published")
+	}
+	h := f.h
+	current := func() bool { return true }
+	plan := headerPlan{active: true, hash: "nil-plan"}
+	d := h.loadDelivered(headerID)
+	// The policy write fails (the data directory not writable).
+	if err := os.Chmod(f.data, 0555); err != nil {
+		t.Fatal(err)
+	}
+	u, _ := h.runHeaders(headerID, plan, current, &d, time.Now())
+	if err := os.Chmod(f.data, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if u.Error == "" {
+		t.Fatalf("unit = %+v, want the failed write", u)
+	}
+	if len(attrHosts(t, f)) == 0 {
+		t.Fatal("the failed write changed the file")
+	}
+	u, _ = h.runHeaders(headerID, plan, current, &d, time.Now())
+	if !u.OK || u.Skipped != "" {
+		t.Errorf("unit after the failure = %+v, want written", u)
+	}
+	if hosts := attrHosts(t, f); len(hosts) != 0 {
+		t.Errorf("hosts = %v after a nil plan, want none (stale hosts kept published)", hosts)
 	}
 }
 
