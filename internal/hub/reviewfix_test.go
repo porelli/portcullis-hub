@@ -1008,3 +1008,36 @@ func TestOwedNeverForDeletingClearedByUp(t *testing.T) {
 		t.Error("a delivery is re-queued for a deleting instance")
 	}
 }
+
+// Residual M3 reverted (security ruling): the prune blanks EVERY .env
+// line holding a dropped secret's value, declared ones too — once out of
+// the store nothing would mask or redact it.
+func TestPruneLeavesDroppedSecretInNoEnvLine(t *testing.T) {
+	f, _ := secretFixture(t)
+	const id = "secretapp"
+	const val = "s3cr3t-everywhere"
+	saveSecret(t, f, id, "api_key", setSecret(val))
+	cp := filepath.Join(f.src, "secretapp", "compose.yml")
+	writeFile(t, cp, strings.Replace(string(mustRead(t, cp)), "      API_KEY: ${HEADSCALE_API_KEY}\n", "      API_KEY: ${HEADSCALE_API_KEY}\n      COPY: ${COPY_KEY:-}\n", 1))
+	f.h.Discover()
+	if err := f.h.Enable(id); err != nil {
+		t.Fatal(err)
+	}
+	f.h.Wait()
+	if err := f.h.SaveEnv(id, map[string]string{"COPY_KEY": val, "MY_COPY": val}); err != nil {
+		t.Fatal(err)
+	}
+	manifest := filepath.Join(f.src, "secretapp", "manifest.yaml")
+	m := strings.Replace(string(mustRead(t, manifest)), "    - key: api_key\n      label: API key\n      type: secret\n      applies: restart\n      delivery: [{env: HEADSCALE_API_KEY}]\n", "", 1)
+	writeFile(t, manifest, strings.Replace(m, "      requires: [api_key]\n", "", 1))
+	f.h.Discover()
+	if optionByKey(f.h.Template(id), "api_key") != nil {
+		t.Fatal("update not loaded")
+	}
+	f.h.pruneSettings()
+	for k, v := range composeReads(t, f.h.envPath(id)) {
+		if v == val {
+			t.Errorf("%s still holds the dropped secret", k)
+		}
+	}
+}
