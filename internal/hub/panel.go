@@ -82,6 +82,10 @@ type EntriesView struct {
 // appear: Secrets carries {set, updated_at, generated} only.
 type SettingsPanel struct {
 	AppSettingsView
+	// Name is the app's display name; Enabled: the instance runs (a save
+	// that changes its sign-in or access restarts it).
+	Name     string       `json:"name"`
+	Enabled  bool         `json:"enabled"`
 	Sections []string     `json:"sections"`
 	Options  []OptionView `json:"options"`
 	// Instance: the stored instance option values (canonical; absent =
@@ -97,6 +101,10 @@ type SettingsPanel struct {
 	Population PopulationView                 `json:"population"`
 	Deliveries DeliveryStatus                 `json:"deliveries"`
 	Entries    map[string]EntriesView         `json:"entries"`
+	// DirectoryGroups: every directory group name, sorted (the row
+	// pickers; empty while the directory is unavailable). Privileged
+	// options carry GroupChoices instead.
+	DirectoryGroups []string `json:"directory_groups"`
 }
 
 // PersonPreview is one person's value under a draft. Reason.Others (the
@@ -121,9 +129,14 @@ type OptionPreview struct {
 // options' values. The effect covers the option values, secrets and
 // ports; a policy, public-access or sign-in change restarts an enabled
 // instance on top (its override changes).
+//
+// Population is who per-person values reach under the draft: a draft
+// that switches to the app's own login only reaches nobody
+// (WhyNativeSignIn).
 type Preview struct {
-	Effect  string                   `json:"effect"`
-	Options map[string]OptionPreview `json:"options"`
+	Effect     string                   `json:"effect"`
+	Options    map[string]OptionPreview `json:"options"`
+	Population PopulationView           `json:"population"`
 }
 
 // withPlaceholders maps rows the panel sent with the instance's group
@@ -227,6 +240,12 @@ func (h *Hub) SettingsPanel(ctx context.Context, id string) (*SettingsPanel, err
 		Secrets:         base.Secrets,
 		Ports:           maps.Clone(s.Ports),
 		Entries:         map[string]EntriesView{},
+		Name:            t.Manifest.Name,
+		Enabled:         t.Enabled,
+		DirectoryGroups: []string{},
+	}
+	if m != nil {
+		p.DirectoryGroups = slices.Sorted(maps.Keys(m.Groups))
 	}
 	if p.Ports == nil {
 		p.Ports = map[string]string{}
@@ -383,9 +402,16 @@ func (h *Hub) PreviewSettings(ctx context.Context, id string, u SettingsUpdate) 
 		out.Effect = settings.Strongest(effects...)
 	}
 	if m == nil {
+		if hasPersonOptions(live) {
+			out.Population.Why = "Users & Groups unavailable"
+		}
 		return out, nil
 	}
 	pop := h.populationLocked(live, m)
+	if u.SignIn != nil && live.Manifest.Auth.HasNativeLogin() {
+		pop = populationIn(live, m, *u.SignIn == SignInNative && live.Manifest.Auth.NativeLogin.AllowWithoutGateway)
+	}
+	out.Population = PopulationView{Count: len(pop.People), Why: pop.Why}
 	in := map[string]bool{}
 	for _, p := range pop.People {
 		in[p.User] = true

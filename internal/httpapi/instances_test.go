@@ -314,8 +314,20 @@ func newInstEnv(t *testing.T) *instEnv {
 
 func newInstEnvAt(t *testing.T, root string) *instEnv {
 	t.Helper()
+	return newInstEnvWith(t, root, nil, nil)
+}
+
+// newInstEnvWith is newInstEnvAt with extra templates (id → manifest,
+// compose) in the source, and engine wrapping the fake engine (nil: the
+// fake engine itself).
+func newInstEnvWith(t *testing.T, root string, extra map[string][2]string, engine func(*fakeEngine) hub.Engine) *instEnv {
+	t.Helper()
 	src := filepath.Join(root, "src")
-	for id, files := range map[string][2]string{"grafana": {instGrafanaManifest, instGrafanaCompose}, "home": {instHomeManifest, instHomeCompose}} {
+	tmpls := map[string][2]string{"grafana": {instGrafanaManifest, instGrafanaCompose}, "home": {instHomeManifest, instHomeCompose}}
+	for id, files := range extra {
+		tmpls[id] = files
+	}
+	for id, files := range tmpls {
 		os.MkdirAll(filepath.Join(src, id), 0755)
 		os.WriteFile(filepath.Join(src, id, "manifest.yaml"), []byte(files[0]), 0644)
 		os.WriteFile(filepath.Join(src, id, "compose.yml"), []byte(files[1]), 0644)
@@ -326,7 +338,11 @@ func newInstEnvAt(t *testing.T, root string) *instEnv {
 	st.Sources = []state.Source{{Name: "local", Path: src}}
 	st.Save(filepath.Join(data, "state.yaml"))
 	eng := newFakeEngine()
-	h, err := hub.New(hub.Config{ProjectDir: filepath.Join(root, "project"), ProjectHostDir: "/host/project", DataDir: data, Domain: "example.org"}, nopRunner{}, eng, nil)
+	var he hub.Engine = eng
+	if engine != nil {
+		he = engine(eng)
+	}
+	h, err := hub.New(hub.Config{ProjectDir: filepath.Join(root, "project"), ProjectHostDir: "/host/project", DataDir: data, Domain: "example.org"}, nopRunner{}, he, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

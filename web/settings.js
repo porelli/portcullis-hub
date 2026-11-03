@@ -1,837 +1,1286 @@
-// Portcullis Hub settings panel (Task 14, contract §13).
-// Usage: window.PortcullisSettings.render(container, instanceId)
-// Consumes GET /api/instances/{id}/settings, PUT /api/instances/{id}/settings,
-// POST .../settings/preview, POST .../settings/retry.
-
-(function() {
+// Portcullis Hub — the instance settings panel (contract §13, Task 14).
+//
+//   window.PortcullisSettings.render(container, instanceId)
+//
+// GET    /api/instances/{id}/settings          the panel (hub.SettingsPanel)
+// PUT    /api/instances/{id}/settings          save the draft (hub.SaveResult)
+// POST   /api/instances/{id}/settings/preview  what the draft would do (hub.Preview)
+// POST   /api/instances/{id}/settings/retry    run the deliveries again
+//
+// Rules: every interpolation goes through escapeHtml (index.html); data-*
+// attributes and delegated listeners only; secret values are never put
+// into the DOM (password inputs keep what the admin types, and the panel
+// is rebuilt from the server after a save, so they are emptied). The
+// access policy, sign-in and public-exception blocks are index.html's
+// renderers (renderAppPolicy, renderSignIn, renderPublicBlock and their
+// collectors) and are posted in the same body.
+(function () {
   'use strict';
 
-  // Escape HTML (shared escapeHtml from index.html).
-  const esc = window.escapeHtml || (s => String(s).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])));
+  const esc = s => window.escapeHtml(s);
+  const PAGE = 50;
+  const DEBOUNCE_MS = 400;
+  const UNRESOLVED = "unresolved: the app's own default applies";
 
-  let panelData = null;  // Current panel response from API
-  let draftData = null;  // Current draft (edited values)
-  let previewData = null; // Last preview result
-  let previewTimer = null; // Debounce timer for preview
-  let saveInProgress = false;
-
-  // ── Utilities ───────────────────────────────────────────────────
-
-  // Size units for rendering
+  const SIZE_MULT = { B: 1, KiB: 2 ** 10, MiB: 2 ** 20, GiB: 2 ** 30, TiB: 2 ** 40, PiB: 2 ** 50 };
   const SIZE_UNITS = ['MiB', 'GiB', 'TiB'];
-
-  // Parse a size value into {num, unit, unlimited}
-  function parseSize(bytes) {
-    if (bytes === 'unlimited') return { unlimited: true };
-    if (typeof bytes !== 'number') return { num: '', unit: 'GiB', unlimited: false };
-
-    // Convert bytes to best unit
-    const tib = bytes / (1024 * 1024 * 1024 * 1024);
-    if (tib >= 1) return { num: tib, unit: 'TiB', unlimited: false };
-    const gib = bytes / (1024 * 1024 * 1024);
-    if (gib >= 1) return { num: gib, unit: 'GiB', unlimited: false };
-    const mib = bytes / (1024 * 1024);
-    return { num: mib, unit: 'MiB', unlimited: false };
-  }
-
-  // Render a size value for display
-  function displaySize(bytes) {
-    if (bytes === 'unlimited') return 'unlimited';
-    const s = parseSize(bytes);
-    if (s.unlimited) return 'unlimited';
-    return s.num + ' ' + s.unit;
-  }
-
-  // Display a resolved value (from preview)
-  function displayResolved(option, resolved) {
-    if (!resolved.value) return 'unresolved: the app\'s own default applies';
-    if (option.type === 'size') return displaySize(resolved.value);
-    if (Array.isArray(resolved.value)) return resolved.value.join(', ');
-    return String(resolved.value);
-  }
-
-  // Get current draft or fall back to panel data
-  function currentDraft() {
-    return draftData || {};
-  }
-
-  // Mark draft as changed
-  function setDraft(key, value) {
-    if (!draftData) draftData = {};
-    draftData[key] = value;
-    requestPreview();
-  }
-
-  // ── Preview (debounced) ─────────────────────────────────────────
-
-  function requestPreview() {
-    clearTimeout(previewTimer);
-    previewTimer = setTimeout(runPreview, 400);
-  }
-
-  async function runPreview() {
-    if (!panelData) return;
-    const body = buildSaveBody();
-    try {
-      // Use the global apiPost helper (proxy secret handled by middleware)
-      if (window.apiPost) {
-        previewData = await window.apiPost('/api/instances/' + encodeURIComponent(panelData.id) + '/settings/preview', body);
-      } else {
-        const res = await fetch('/api/instances/' + encodeURIComponent(panelData.id) + '/settings/preview', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body)
-        });
-        if (!res.ok) throw new Error(await res.text());
-        previewData = await res.json();
-      }
-      renderSaveBar();
-      renderPreviews();
-    } catch (err) {
-      console.error('Preview failed:', err);
-    }
-  }
-
-  // ── Build save body ─────────────────────────────────────────────
-
-  function buildSaveBody() {
-    const body = {
-      values: {},
-      person: {},
-      groups: {},
-      secrets: {},
-      ports: {}
-    };
-
-    // Collect instance values
-    const draft = currentDraft();
-    for (const opt of panelData.options || []) {
-      if (opt.scope === 'instance' && opt.type !== 'secret') {
-        const key = opt.key;
-        if (key in draft.values) {
-          body.values[key] = draft.values[key];
-        } else if (panelData.instance && key in panelData.instance) {
-          body.values[key] = panelData.instance[key];
-        }
-      }
-    }
-
-    // Person configurations
-    if (draft.person) {
-      for (const [key, pc] of Object.entries(draft.person)) {
-        body.person[key] = pc;
-      }
-    } else if (panelData.person) {
-      for (const [key, pc] of Object.entries(panelData.person)) {
-        body.person[key] = pc;
-      }
-    }
-
-    // Group records
-    if (draft.groups) {
-      for (const [key, recs] of Object.entries(draft.groups)) {
-        body.groups[key] = recs;
-      }
-    } else if (panelData.groups) {
-      for (const [key, recs] of Object.entries(panelData.groups)) {
-        body.groups[key] = recs;
-      }
-    }
-
-    // Secrets (only changed ones from UI)
-    if (draft.secrets) {
-      body.secrets = draft.secrets;
-    }
-
-    // Ports
-    if (draft.ports) {
-      for (const [key, val] of Object.entries(draft.ports)) {
-        body.ports[key] = val;
-      }
-    } else if (panelData.ports) {
-      for (const [key, val] of Object.entries(panelData.ports)) {
-        body.ports[key] = val;
-      }
-    }
-
-    return body;
-  }
-
-  // ── Render functions ────────────────────────────────────────────
-
-  function render(container, instanceId) {
-    container.innerHTML = '<p class="settings-empty">Loading settings...</p>';
-
-    // Use the global apiGet helper if available
-    const loadData = window.apiGet ?
-      window.apiGet('/api/instances/' + encodeURIComponent(instanceId) + '/settings') :
-      fetch('/api/instances/' + encodeURIComponent(instanceId) + '/settings')
-        .then(res => {
-          if (!res.ok) throw new Error('Failed to load settings');
-          return res.json();
-        });
-
-    loadData
-      .then(data => {
-        panelData = data;
-        draftData = null;
-        previewData = null;
-        renderPanel(container);
-        requestPreview();
-      })
-      .catch(err => {
-        container.innerHTML = '<p class="settings-empty">Failed to load settings: ' + esc(err.message) + '</p>';
-      });
-  }
-
-  function renderPanel(container) {
-    let html = '<div class="settings-panel">';
-
-    // Deliveries strip
-    html += renderDeliveries();
-
-    // Render sections
-    const sections = panelData.sections || [];
-    if (sections.length === 0) {
-      // No sections: render all options
-      html += renderOptions(panelData.options || []);
-    } else {
-      for (const section of sections) {
-        const opts = (panelData.options || []).filter(o => o.section === section);
-        if (opts.length === 0) continue;
-        html += '<div class="settings-section">';
-        html += '<h3 class="section-title">' + esc(section) + '</h3>';
-        html += renderOptions(opts);
-        html += '</div>';
-      }
-    }
-
-    // Save bar
-    html += '<div id="settings-save-bar"></div>';
-
-    html += '</div>';
-    container.innerHTML = html;
-    attachListeners(container);
-  }
-
-  function renderDeliveries() {
-    const d = panelData.deliveries;
-    if (!d || !d.units || d.units.length === 0) return '';
-
-    let html = '<div class="deliveries-strip">';
-    html += '<div class="delivery-title">Deliveries</div>';
-    html += '<div class="delivery-units">';
-
-    for (const u of d.units) {
-      const hasError = u.error && u.error !== '';
-      const skipped = u.skipped && u.skipped !== '';
-      let statusClass = hasError ? 'delivery-failed' : (skipped ? 'delivery-skipped' : 'delivery-ok');
-      let statusText = hasError ? u.error : (skipped ? u.skipped : 'applied');
-
-      html += '<div class="delivery-unit ' + statusClass + '">';
-      html += '<span class="delivery-name">' + esc(u.name) + '</span>';
-      html += '<span class="delivery-status">' + esc(statusText) + '</span>';
-      html += '</div>';
-    }
-
-    html += '</div>';
-    html += '<button type="button" class="btn btn-sm btn-secondary" data-retry-deliveries="1">Retry</button>';
-    html += '</div>';
-
-    return html;
-  }
-
-  function renderOptions(options) {
-    let html = '';
-
-    for (const opt of options) {
-      html += '<div class="option-row" data-option-key="' + esc(opt.key) + '">';
-      html += '<div class="option-header">';
-      html += '<label class="option-label">' + esc(opt.label) + '</label>';
-      html += '<span class="option-applies">' + esc(opt.effect) + '</span>';
-      html += '</div>';
-
-      if (opt.description) {
-        html += '<div class="option-description">' + esc(opt.description) + '</div>';
-      }
-
-      if (opt.warnings && opt.warnings.length > 0) {
-        for (const w of opt.warnings) {
-          html += '<div class="option-warning">' + esc(w) + '</div>';
-        }
-      }
-
-      // Render based on scope
-      if (opt.scope === 'person') {
-        html += renderPersonOption(opt);
-      } else if (opt.scope === 'group') {
-        html += renderGroupOption(opt);
-      } else {
-        html += renderInstanceOption(opt);
-      }
-
-      html += '</div>';
-    }
-
-    return html;
-  }
-
-  function renderInstanceOption(opt) {
-    const draft = currentDraft();
-    let value = (draft.values && opt.key in draft.values) ? draft.values[opt.key] :
-                (panelData.instance && opt.key in panelData.instance) ? panelData.instance[opt.key] :
-                opt.default;
-
-    if (opt.type === 'secret') {
-      return renderSecretOption(opt);
-    }
-
-    if (opt.type === 'size') {
-      return renderSizeOption(opt, value);
-    }
-
-    if (opt.type === 'bool') {
-      const checked = value === true || value === 'true';
-      return '<label class="option-checkbox"><input type="checkbox" data-instance-value="' + esc(opt.key) + '" ' + (checked ? 'checked' : '') + '> ' + esc(opt.label) + '</label>';
-    }
-
-    if (opt.type === 'enum') {
-      let html = '<select data-instance-value="' + esc(opt.key) + '">';
-      for (const o of opt.options || []) {
-        const sel = value === o.value ? ' selected' : '';
-        html += '<option value="' + esc(o.value) + '"' + sel + '>' + esc(o.label || o.value) + '</option>';
-      }
-      html += '</select>';
-      return html;
-    }
-
-    if (opt.type === 'path') {
-      let html = '<input type="text" data-instance-value="' + esc(opt.key) + '" value="' + esc(value || '') + '" placeholder="/path/on/host">';
-      if (opt.writes_as) {
-        html += '<small class="option-hint">The app writes here as ' + esc(opt.writes_as.uid) + ':' + esc(opt.writes_as.gid) + '</small>';
-      }
-      return html;
-    }
-
-    // Default: text input
-    return '<input type="text" data-instance-value="' + esc(opt.key) + '" value="' + esc(value || '') + '">';
-  }
-
-  function renderSecretOption(opt) {
-    const secret = panelData.secrets && panelData.secrets[opt.key];
-    let html = '<div class="secret-option">';
-
-    if (secret && secret.set) {
-      html += '<div class="secret-status">Set ✓ (updated ' + esc(new Date(secret.updated_at).toLocaleDateString()) + ')</div>';
-      html += '<div class="secret-actions">';
-      html += '<button type="button" class="btn btn-sm" data-secret-replace="' + esc(opt.key) + '">Replace</button>';
-      if (opt.generate) {
-        html += '<button type="button" class="btn btn-sm" data-secret-generate="' + esc(opt.key) + '">Generate</button>';
-      }
-      html += '<button type="button" class="btn btn-sm btn-danger" data-secret-clear="' + esc(opt.key) + '">Clear</button>';
-      html += '</div>';
-    } else {
-      html += '<div class="secret-actions">';
-      html += '<input type="password" data-secret-value="' + esc(opt.key) + '" placeholder="Enter secret value">';
-      if (opt.generate) {
-        html += '<button type="button" class="btn btn-sm" data-secret-generate="' + esc(opt.key) + '">Generate</button>';
-      }
-      html += '</div>';
-    }
-
-    html += '</div>';
-    return html;
-  }
-
-  function renderSizeOption(opt, value) {
-    const parsed = parseSize(value);
-    let html = '<div class="size-option">';
-    html += '<input type="number" data-size-value="' + esc(opt.key) + '" value="' + (parsed.unlimited ? '' : parsed.num) + '" step="' + (opt.step || 1) + '">';
-    html += '<select data-size-unit="' + esc(opt.key) + '">';
-    for (const u of SIZE_UNITS) {
-      const sel = parsed.unit === u ? ' selected' : '';
-      html += '<option value="' + esc(u) + '"' + sel + '>' + esc(u) + '</option>';
-    }
-    html += '</select>';
-    if (opt.allow_unlimited) {
-      html += '<label class="option-checkbox"><input type="checkbox" data-size-unlimited="' + esc(opt.key) + '" ' + (parsed.unlimited ? 'checked' : '') + '> unlimited</label>';
-    }
-    html += '</div>';
-    return html;
-  }
-
-  function renderPersonOption(opt) {
-    const draft = currentDraft();
-    const pc = (draft.person && draft.person[opt.key]) || panelData.person[opt.key] || { default: opt.default, resolve: opt.resolve, rows: [] };
-
-    let html = '<div class="person-option" data-person-key="' + esc(opt.key) + '">';
-
-    // Default row
-    html += '<div class="person-row person-row-default">';
-    html += '<span class="person-row-label">Everyone else with access</span>';
-    html += renderPersonValue(opt, pc.default);
-    html += '</div>';
-
-    // Group rows
-    for (let i = 0; i < pc.rows.length; i++) {
-      const row = pc.rows[i];
-      html += '<div class="person-row" data-row-index="' + i + '">';
-      html += renderGroupPicker(opt, row.group, row.group_id);
-      html += renderPersonValue(opt, row.value);
-      html += '<button type="button" class="btn-icon" data-remove-row="' + i + '">✕</button>';
-      html += '</div>';
-    }
-
-    // Add group button
-    html += '<div class="person-row-add">';
-    html += '<button type="button" class="btn btn-sm" data-add-group-row="' + esc(opt.key) + '">+ Add group</button>';
-    html += '</div>';
-
-    // Resolve selector
-    if (opt.resolve_choices && opt.resolve_choices.length > 1) {
-      html += '<div class="person-resolve">';
-      html += '<label>When someone is in several groups: </label>';
-      html += '<select data-person-resolve="' + esc(opt.key) + '">';
-      for (const choice of opt.resolve_choices) {
-        const sel = pc.resolve === choice ? ' selected' : '';
-        html += '<option value="' + esc(choice) + '"' + sel + '>' + esc(choice) + '</option>';
-      }
-      html += '</select>';
-      html += '</div>';
-    }
-
-    // Preview
-    html += '<div class="person-preview" data-preview-key="' + esc(opt.key) + '"></div>';
-
-    html += '</div>';
-    return html;
-  }
-
-  function renderGroupPicker(opt, groupName, groupId) {
-    let html = '<select data-group-name="1" data-group-id="' + (groupId || '') + '">';
-
-    if (opt.privileged && opt.group_choices) {
-      for (const gc of opt.group_choices) {
-        const sel = gc.name === groupName ? ' selected' : '';
-        const disabled = gc.disabled ? ' disabled' : '';
-        html += '<option value="' + esc(gc.name) + '"' + sel + disabled;
-        if (gc.reason) html += ' title="' + esc(gc.reason) + '"';
-        html += '>' + esc(gc.name);
-        if (gc.reason) html += ' (' + esc(gc.reason) + ')';
-        html += '</option>';
-      }
-    } else {
-      // TODO: Load available groups from directory API
-      html += '<option value="' + esc(groupName) + '" selected>' + esc(groupName) + '</option>';
-    }
-
-    html += '</select>';
-    return html;
-  }
-
-  function renderPersonValue(opt, value) {
-    // Render input for the value based on option type
-    if (opt.type === 'size') {
-      return renderSizeOption(opt, value);
-    }
-
-    if (opt.type === 'bool') {
-      const checked = value === true || value === 'true';
-      return '<input type="checkbox" data-person-value="1" ' + (checked ? 'checked' : '') + '>';
-    }
-
-    if (opt.type === 'enum') {
-      let html = '<select data-person-value="1">';
-      for (const o of opt.options || []) {
-        const sel = value === o.value ? ' selected' : '';
-        html += '<option value="' + esc(o.value) + '"' + sel + '>' + esc(o.label || o.value) + '</option>';
-      }
-      html += '</select>';
-      return html;
-    }
-
-    return '<input type="text" data-person-value="1" value="' + esc(value || '') + '">';
-  }
-
-  function renderGroupOption(opt) {
-    // Group-scope options (not implemented in Task 14)
-    return '<div class="option-note">Group-scope options are not yet implemented.</div>';
-  }
-
-  function renderPreviews() {
-    if (!previewData || !previewData.options) return;
-
-    for (const [key, preview] of Object.entries(previewData.options)) {
-      const container = document.querySelector('[data-preview-key="' + CSS.escape(key) + '"]');
-      if (!container) continue;
-
-      let html = '<div class="preview-header">';
-      html += '<strong>Who gets what (' + preview.people.length + ' people with access)</strong>';
-      if (preview.changes > 0) {
-        html += ' <span class="preview-changes">' + preview.changes + ' change' + (preview.changes === 1 ? '' : 's') + '</span>';
-      }
-      html += '</div>';
-
-      // Show first 50 people
-      html += '<div class="preview-list">';
-      const shown = preview.people.slice(0, 50);
-      for (const p of shown) {
-        html += '<div class="preview-row">';
-        html += '<span class="preview-user">' + esc(p.user) + '</span>';
-        html += '<span class="preview-value">' + esc(p.display) + '</span>';
-        if (p.reason && p.reason.group) {
-          html += '<span class="preview-reason">from ' + esc(p.reason.group) + '</span>';
-        }
-        html += '</div>';
-      }
-      html += '</div>';
-
-      if (preview.people.length > 50) {
-        html += '<div class="preview-more">' + (preview.people.length - 50) + ' more...</div>';
-      }
-
-      // No access warnings
-      if (preview.no_access) {
-        for (const [group, count] of Object.entries(preview.no_access)) {
-          if (count > 0) {
-            html += '<div class="preview-warning">⚠ ' + count + ' member' + (count === 1 ? '' : 's') + ' of ' + esc(group) + ' ' + (count === 1 ? 'has' : 'have') + ' no access to this instance and get' + (count === 1 ? 's' : '') + ' nothing.</div>';
-          }
-        }
-      }
-
-      container.innerHTML = html;
-    }
-  }
-
-  function renderSaveBar() {
-    const container = document.getElementById('settings-save-bar');
-    if (!container) return;
-
-    let html = '<div class="save-bar">';
-
-    if (previewData) {
-      html += '<div class="save-effect">';
-      if (previewData.effect && previewData.effect !== 'none') {
-        html += 'Saving ' + esc(previewData.effect === 'restart' ? 'restarts ' + panelData.name : previewData.effect);
-      } else {
-        html += 'Takes effect with no restart';
-      }
-      html += '</div>';
-
-      // Count changes
-      let totalChanges = 0;
-      if (previewData.options) {
-        for (const preview of Object.values(previewData.options)) {
-          totalChanges += preview.changes || 0;
-        }
-      }
-
-      if (totalChanges > 0) {
-        html += '<div class="save-changes">Changes: ' + totalChanges + ' people get a new value</div>';
-      }
-    }
-
-    html += '<button type="button" class="btn btn-primary" data-save-settings="1"' + (saveInProgress ? ' disabled' : '') + '>';
-    html += saveInProgress ? 'Saving...' : 'Save';
-    html += '</button>';
-    html += '</div>';
-
-    container.innerHTML = html;
-  }
-
-  // ── Event handlers ──────────────────────────────────────────────
-
-  function attachListeners(container) {
-    container.addEventListener('click', handleClick);
-    container.addEventListener('input', handleInput);
-    container.addEventListener('change', handleChange);
-  }
-
-  function handleClick(e) {
-    const t = e.target;
-
-    if (t.closest('[data-save-settings]')) {
-      saveSettings();
-      return;
-    }
-
-    if (t.closest('[data-retry-deliveries]')) {
-      retryDeliveries();
-      return;
-    }
-
-    const addGroupRow = t.closest('[data-add-group-row]');
-    if (addGroupRow) {
-      const key = addGroupRow.dataset.addGroupRow;
-      addGroupRow_handler(key);
-      return;
-    }
-
-    const removeRow = t.closest('[data-remove-row]');
-    if (removeRow) {
-      const personOpt = removeRow.closest('[data-person-key]');
-      if (personOpt) {
-        const key = personOpt.dataset.personKey;
-        const index = parseInt(removeRow.dataset.removeRow, 10);
-        removeGroupRow(key, index);
-      }
-      return;
-    }
-
-    const secretReplace = t.closest('[data-secret-replace]');
-    if (secretReplace) {
-      showSecretInput(secretReplace.dataset.secretReplace);
-      return;
-    }
-
-    const secretGenerate = t.closest('[data-secret-generate]');
-    if (secretGenerate) {
-      generateSecret(secretGenerate.dataset.secretGenerate);
-      return;
-    }
-
-    const secretClear = t.closest('[data-secret-clear]');
-    if (secretClear) {
-      if (confirm('Clear this secret? The app will receive an empty value.')) {
-        clearSecret(secretClear.dataset.secretClear);
-      }
-      return;
-    }
-  }
-
-  function handleInput(e) {
-    const t = e.target;
-
-    const instanceValue = t.closest('[data-instance-value]');
-    if (instanceValue) {
-      const key = instanceValue.dataset.instanceValue;
-      updateInstanceValue(key, t.value);
-      return;
-    }
-
-    const sizeValue = t.closest('[data-size-value]');
-    if (sizeValue) {
-      const key = sizeValue.dataset.sizeValue;
-      updateSizeValue(key);
-      return;
-    }
-  }
-
-  function handleChange(e) {
-    const t = e.target;
-
-    const personResolve = t.closest('[data-person-resolve]');
-    if (personResolve) {
-      const key = personResolve.dataset.personResolve;
-      updatePersonResolve(key, t.value);
-      return;
-    }
-
-    const sizeUnit = t.closest('[data-size-unit]');
-    if (sizeUnit) {
-      const key = sizeUnit.dataset.sizeUnit;
-      updateSizeValue(key);
-      return;
-    }
-
-    const sizeUnlimited = t.closest('[data-size-unlimited]');
-    if (sizeUnlimited) {
-      const key = sizeUnlimited.dataset.sizeUnlimited;
-      updateSizeValue(key);
-      return;
-    }
-  }
-
-  function updateInstanceValue(key, value) {
-    if (!draftData) draftData = { values: {} };
-    if (!draftData.values) draftData.values = {};
-    draftData.values[key] = value;
-    requestPreview();
-  }
-
-  function updateSizeValue(key) {
-    const container = document.querySelector('[data-size-value="' + CSS.escape(key) + '"]').closest('.size-option');
-    const numInput = container.querySelector('[data-size-value]');
-    const unitSelect = container.querySelector('[data-size-unit]');
-    const unlimitedCheck = container.querySelector('[data-size-unlimited]');
-
-    if (unlimitedCheck && unlimitedCheck.checked) {
-      if (!draftData) draftData = { values: {} };
-      if (!draftData.values) draftData.values = {};
-      draftData.values[key] = 'unlimited';
-    } else {
-      const num = parseFloat(numInput.value);
-      const unit = unitSelect.value;
-      let bytes;
-      if (unit === 'TiB') bytes = num * 1024 * 1024 * 1024 * 1024;
-      else if (unit === 'GiB') bytes = num * 1024 * 1024 * 1024;
-      else bytes = num * 1024 * 1024;
-
-      if (!draftData) draftData = { values: {} };
-      if (!draftData.values) draftData.values = {};
-      draftData.values[key] = bytes;
-    }
-    requestPreview();
-  }
-
-  function updatePersonResolve(key, resolve) {
-    if (!draftData) draftData = { person: {} };
-    if (!draftData.person) draftData.person = {};
-    if (!draftData.person[key]) {
-      draftData.person[key] = JSON.parse(JSON.stringify(panelData.person[key] || {}));
-    }
-    draftData.person[key].resolve = resolve;
-    requestPreview();
-  }
-
-  function addGroupRow_handler(key) {
-    if (!draftData) draftData = { person: {} };
-    if (!draftData.person) draftData.person = {};
-    if (!draftData.person[key]) {
-      draftData.person[key] = JSON.parse(JSON.stringify(panelData.person[key] || { rows: [] }));
-    }
-    draftData.person[key].rows.push({ group: '', value: null });
-
-    // Re-render the person option
-    const container = document.querySelector('[data-person-key="' + CSS.escape(key) + '"]');
-    if (container) {
-      const opt = panelData.options.find(o => o.key === key);
-      if (opt) {
-        container.outerHTML = '<div class="option-row" data-option-key="' + esc(opt.key) + '">' + renderPersonOption(opt) + '</div>';
-      }
-    }
-  }
-
-  function removeGroupRow(key, index) {
-    if (!draftData) draftData = { person: {} };
-    if (!draftData.person) draftData.person = {};
-    if (!draftData.person[key]) {
-      draftData.person[key] = JSON.parse(JSON.stringify(panelData.person[key] || { rows: [] }));
-    }
-    draftData.person[key].rows.splice(index, 1);
-
-    // Re-render the person option
-    const container = document.querySelector('[data-person-key="' + CSS.escape(key) + '"]');
-    if (container) {
-      const opt = panelData.options.find(o => o.key === key);
-      if (opt) {
-        container.outerHTML = '<div class="option-row" data-option-key="' + esc(opt.key) + '">' + renderPersonOption(opt) + '</div>';
-      }
-    }
-    requestPreview();
-  }
-
-  function showSecretInput(key) {
-    // Replace the "Set ✓" status with an input
-    const secretOpt = document.querySelector('[data-option-key="' + CSS.escape(key) + '"] .secret-option');
-    if (!secretOpt) return;
-
-    secretOpt.innerHTML = '<div class="secret-actions">' +
-      '<input type="password" data-secret-value="' + esc(key) + '" placeholder="Enter new secret value">' +
-      '<button type="button" class="btn btn-sm" data-secret-save="' + esc(key) + '">Save</button>' +
-      '</div>';
-  }
-
-  function generateSecret(key) {
-    // Mark as generate in draft
-    if (!draftData) draftData = { secrets: {} };
-    if (!draftData.secrets) draftData.secrets = {};
-    draftData.secrets[key] = { generate: true };
-    requestPreview();
-  }
-
-  function clearSecret(key) {
-    // Mark as clear in draft
-    if (!draftData) draftData = { secrets: {} };
-    if (!draftData.secrets) draftData.secrets = {};
-    draftData.secrets[key] = { clear: true };
-    requestPreview();
-  }
-
-  async function saveSettings() {
-    if (saveInProgress) return;
-    saveInProgress = true;
-    renderSaveBar();
-
-    const body = buildSaveBody();
-
-    try {
-      // Use the global apiPut helper if available
-      if (window.apiPut) {
-        await window.apiPut('/api/instances/' + encodeURIComponent(panelData.id) + '/settings', body);
-      } else {
-        const res = await fetch('/api/instances/' + encodeURIComponent(panelData.id) + '/settings', {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body)
-        });
-        if (!res.ok) {
-          const err = await res.text();
-          throw new Error(err);
-        }
-      }
-
-      // Clear secrets from inputs
-      document.querySelectorAll('[data-secret-value]').forEach(inp => inp.value = '');
-
-      // Show success
-      if (window.showToast) {
-        window.showToast('Settings saved', 'success');
-      }
-
-      // Reload panel
-      const container = document.querySelector('.settings-panel').parentElement;
-      render(container, panelData.id);
-
-    } catch (err) {
-      console.error('Save failed:', err);
-      if (window.showToast) {
-        window.showToast('Failed to save: ' + err.message, 'error');
-      }
-    } finally {
-      saveInProgress = false;
-      renderSaveBar();
-    }
-  }
-
-  async function retryDeliveries() {
-    try {
-      // Use the global apiPost helper if available (needs Content-Type: application/json per brief)
-      if (window.apiPost) {
-        await window.apiPost('/api/instances/' + encodeURIComponent(panelData.id) + '/settings/retry', {});
-      } else {
-        const res = await fetch('/api/instances/' + encodeURIComponent(panelData.id) + '/settings/retry', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: '{}'
-        });
-        if (!res.ok) {
-          throw new Error(await res.text());
-        }
-      }
-
-      if (window.showToast) {
-        window.showToast('Deliveries retried', 'success');
-      }
-
-      // Reload deliveries status
-      setTimeout(() => {
-        const container = document.querySelector('.settings-panel').parentElement;
-        render(container, panelData.id);
-      }, 1000);
-
-    } catch (err) {
-      console.error('Retry failed:', err);
-      if (window.showToast) {
-        window.showToast('Retry failed: ' + err.message, 'error');
-      }
-    }
-  }
-
-  // ── Export ──────────────────────────────────────────────────────
-
-  window.PortcullisSettings = {
-    render: render
+  const DUR_MULT = { s: 1, m: 60, h: 3600, d: 86400, w: 604800 };
+  const DUR_UNITS = [['s', 'seconds'], ['m', 'minutes'], ['h', 'hours'], ['d', 'days']];
+
+  const RESOLVE_LABEL = {
+    max: 'largest wins',
+    min: 'smallest wins',
+    priority: 'first matching group wins (in this order)',
+    union: 'everything any of their groups gives',
+    intersection: 'only what all of their groups give',
+    any: 'on if any of their groups says on',
+    all: 'on only if all of their groups say on'
+  };
+  const RULE_OF = { max: 'largest of', min: 'smallest of', priority: 'first of' };
+  const APPLIES = {
+    live: 'applies: at once',
+    next_request: 'applies: at the next request',
+    next_sign_in: 'applies: at the next sign-in',
+    account_creation: 'applies: when an account is created',
+    reload: 'applies: after a reload',
+    restart: 'applies: after a restart'
+  };
+  // What a save of an option with no reload/restart effect means.
+  const NO_RESTART_TEXT = {
+    live: 'Takes effect at once; no restart',
+    next_request: "Takes effect at each person's next request; no restart",
+    next_sign_in: "Takes effect at each person's next sign-in; no restart",
+    account_creation: 'Applies to accounts created from now on (existing accounts keep their value); no restart'
+  };
+  const SKIP_TEXT = {
+    'unchanged': 'unchanged: nothing new to deliver',
+    'not running': 'not running: delivered when the app starts',
+    'directory unavailable': 'skipped: Users & Groups was unavailable, the last delivery is kept',
+    'busy': 'skipped: the app was busy with another operation, it runs again shortly',
+    'superseded': 'skipped: a newer save replaced this run, which runs again',
+    'not supported': 'not supported by this app',
+    'previous run still running': 'waiting: the previous run of this hook is still running'
   };
 
+  const states = new WeakMap();
+  let uidSeq = 0;
+  const nextUid = () => 'r' + (++uidSeq);
+
+  // ── values ─────────────────────────────────────────────────────────
+
+  function sizeBytes(v) {
+    if (v === 'unlimited') return 'unlimited';
+    if (typeof v === 'number') return v;
+    const m = /^\s*(\d+(?:\.\d+)?)\s*(B|KiB|MiB|GiB|TiB|PiB)\s*$/.exec(String(v == null ? '' : v));
+    return m ? Math.round(Number(m[1]) * SIZE_MULT[m[2]]) : null;
+  }
+
+  function showSize(n) {
+    if (n === 'unlimited') return 'unlimited';
+    if (typeof n !== 'number') return String(n);
+    let unit = 'B';
+    for (const u of ['KiB', 'MiB', 'GiB', 'TiB', 'PiB']) if (n >= SIZE_MULT[u]) unit = u;
+    return Number((n / SIZE_MULT[unit]).toPrecision(4)) + ' ' + unit;
+  }
+
+  function durSeconds(v) {
+    if (typeof v === 'number') return v;
+    const s = String(v == null ? '' : v).trim();
+    if (!/^(\d+[wdhms])+$/.test(s)) return null;
+    let n = 0;
+    for (const m of s.matchAll(/(\d+)([wdhms])/g)) n += Number(m[1]) * DUR_MULT[m[2]];
+    return n;
+  }
+
+  function showDur(n) {
+    if (typeof n !== 'number') return String(n);
+    if (n === 0) return '0s';
+    let out = '';
+    for (const [u, k] of [['d', 86400], ['h', 3600], ['m', 60], ['s', 1]]) {
+      if (n >= k) { out += Math.floor(n / k) + u; n %= k; }
+    }
+    return out;
+  }
+
+  // canonical turns a template literal (a default, a step) into the
+  // panel's canonical form (sizes in bytes, durations in seconds).
+  function canonical(o, raw) {
+    if (raw === undefined || raw === null) return null;
+    switch (o.type) {
+      case 'size': return sizeBytes(raw);
+      case 'duration': return durSeconds(raw);
+      case 'int': return typeof raw === 'number' ? raw : Number(raw);
+      default: return raw;
+    }
+  }
+
+  function choiceLabel(o, v) {
+    const c = (o.options || []).find(x => x.value === v);
+    return c ? (c.label || c.value) : String(v);
+  }
+
+  function display(o, v) {
+    if (v === null || v === undefined) return '—';
+    switch (o.type) {
+      case 'size': return showSize(v);
+      case 'duration': return showDur(v);
+      case 'enum': return choiceLabel(o, v);
+      case 'multi_enum': return (v || []).map(x => choiceLabel(o, x)).join(', ') || '(none)';
+      case 'bool': return v ? 'on' : 'off';
+      case 'int': return String(v) + (o.unit ? ' ' + o.unit : '');
+      case 'secret': return '[set]';
+    }
+    if (Array.isArray(v)) return v.map(x => typeof x === 'object' ? JSON.stringify(x) : String(x)).join(', ') || '(none)';
+    if (typeof v === 'object') return JSON.stringify(v);
+    return String(v);
+  }
+
+  const scopeOf = o => o.scope || 'instance';
+  const jsonEq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  const plural = (n, one, many) => n + ' ' + (n === 1 ? one : many);
+
+  function fmtDate(s) {
+    const d = new Date(s);
+    if (isNaN(d)) return String(s || '');
+    return d.toLocaleString(undefined, { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+  }
+
+  // ── state ──────────────────────────────────────────────────────────
+
+  function optionByKey(st, key) { return st.opts[key]; }
+
+  function rowsFrom(list) {
+    return (list || []).map(r => ({ uid: nextUid(), group: r.group, value: r.value, group0: r.group, gid0: r.group_id || 0 }));
+  }
+
+  // newState builds the draft from the panel: instance values (null =
+  // the template default), per-person configurations, group records,
+  // ports; the saved forms are kept to tell what changed.
+  function newState(el, id, panel) {
+    const st = {
+      el, id, panel, opts: {}, values: {}, person: {}, groups: {}, secrets: {}, ports: Object.assign({}, panel.ports || {}),
+      base: {}, errors: {}, rowErrors: {}, barError: '', preview: null, previewFor: '', previewSeq: 0, timer: 0,
+      saving: false, retrying: false, who: {}, flash: null, accessBase: null, drag: null
+    };
+    for (const o of panel.options || []) {
+      st.opts[o.key] = o;
+      const sc = scopeOf(o);
+      if (sc === 'instance' && o.type !== 'secret') {
+        st.values[o.key] = o.key in (panel.instance || {}) ? panel.instance[o.key] : null;
+      } else if (sc === 'person') {
+        const p = (panel.person || {})[o.key];
+        st.person[o.key] = p
+          ? { default: p.default, resolve: p.resolve || '', rows: rowsFrom(p.rows) }
+          : { default: canonical(o, o.default), resolve: '', rows: [] };
+        st.who[o.key] = { q: '', page: 0 };
+      } else if (sc === 'group') {
+        st.groups[o.key] = rowsFrom((panel.groups || {})[o.key]);
+      }
+    }
+    st.base = { values: JSON.stringify(st.values), ports: JSON.stringify(st.ports), person: {}, groups: {} };
+    for (const k in st.person) st.base.person[k] = JSON.stringify(personBody(st.person[k]));
+    for (const k in st.groups) st.base.groups[k] = JSON.stringify(rowsBody(st.groups[k]));
+    st.baseValues = JSON.parse(st.base.values);
+    return st;
+  }
+
+  // rowsBody: rows as the API takes them. A row keeps the group_id it
+  // was received with while it names the same group; added rows (and
+  // rows moved to another group) carry none.
+  function rowsBody(rows) {
+    return rows.map(r => {
+      const out = { group: r.group, value: r.value };
+      if (r.gid0 && r.group === r.group0) out.group_id = r.gid0;
+      return out;
+    });
+  }
+
+  function personBody(p) {
+    const out = { default: p.default, rows: rowsBody(p.rows) };
+    if (p.resolve) out.resolve = p.resolve;
+    return out;
+  }
+
+  function changedValueKeys(st) {
+    return Object.keys(st.values).filter(k => !jsonEq(st.values[k], st.baseValues[k]));
+  }
+  function changedPersonKeys(st) {
+    return Object.keys(st.person).filter(k => JSON.stringify(personBody(st.person[k])) !== st.base.person[k]);
+  }
+  function changedGroupKeys(st) {
+    return Object.keys(st.groups).filter(k => JSON.stringify(rowsBody(st.groups[k])) !== st.base.groups[k]);
+  }
+
+  // accessParts is the policy / sign-in / public part of the form, as
+  // index.html's collectors read it.
+  function accessParts(st) {
+    const form = st.el.querySelector('form[data-ps-form]');
+    const out = {};
+    if (!form) return out;
+    const si = form.querySelector('input[name="__signin"]:checked');
+    if (si) out.sign_in = si.value;
+    const pol = window.collectPolicy(form, st.id);
+    if (!pol.skip) out.policy = pol.inherit ? { inherit: true } : { policy: pol.policy };
+    const pub = {};
+    window.collectPublic(form, pub);
+    if ('_public_access' in pub) out.pub = { public_access: pub._public_access, public_mode: pub._public_mode, public_tokens: pub._public_tokens };
+    return out;
+  }
+
+  function accessChanges(st) {
+    const now = accessParts(st), base = st.accessBase || {};
+    const out = {};
+    if (now.sign_in !== undefined && now.sign_in !== base.sign_in) out.sign_in = now.sign_in;
+    if (now.policy && !jsonEq(now.policy, base.policy)) out.policy = now.policy;
+    if (now.pub && !jsonEq(now.pub, base.pub)) out.pub = now.pub;
+    return out;
+  }
+
+  // body is the draft as a PUT / preview body: only what changed.
+  function body(st) {
+    const b = {};
+    const vk = changedValueKeys(st);
+    if (vk.length) { b.values = {}; for (const k of vk) b.values[k] = st.values[k]; }
+    const pk = changedPersonKeys(st);
+    if (pk.length) { b.person = {}; for (const k of pk) b.person[k] = personBody(st.person[k]); }
+    const gk = changedGroupKeys(st);
+    if (gk.length) { b.groups = {}; for (const k of gk) b.groups[k] = rowsBody(st.groups[k]); }
+    if (Object.keys(st.secrets).length) b.secrets = Object.assign({}, st.secrets);
+    if (JSON.stringify(st.ports) !== st.base.ports) b.ports = Object.assign({}, st.ports);
+    const a = accessChanges(st);
+    if (a.sign_in) b.sign_in = a.sign_in;
+    if (a.policy) {
+      if (a.policy.inherit) b.auth_policy_inherit = true; else b.auth_policy = a.policy.policy;
+    }
+    if (a.pub) {
+      b.public_access = a.pub.public_access;
+      if (a.pub.public_mode !== undefined) b.public_mode = a.pub.public_mode;
+      if (a.pub.public_tokens !== undefined) b.public_tokens = a.pub.public_tokens;
+    }
+    return b;
+  }
+
+  // Draft keys whose option changed, for the effect wording.
+  function changedOptions(st) {
+    return [...changedValueKeys(st), ...changedPersonKeys(st), ...changedGroupKeys(st), ...Object.keys(st.secrets)]
+      .map(k => st.opts[k]).filter(Boolean);
+  }
+
+  // ── rendering: panel ───────────────────────────────────────────────
+
+  function render(el, id) {
+    el.innerHTML = '<p class="settings-empty">Loading settings…</p>';
+    bind(el);
+    return window.apiGet('/api/instances/' + encodeURIComponent(id) + '/settings').then(panel => {
+      const prev = states.get(el);
+      const st = newState(el, id, panel);
+      if (prev && prev.id === id) st.flash = prev.flash;
+      states.set(el, st);
+      draw(st);
+      runPreview(st);
+    }).catch(err => {
+      el.innerHTML = '<p class="settings-empty">Failed to load settings: ' + esc(err.message) + '</p>';
+    });
+  }
+
+  function draw(st) {
+    const p = st.panel;
+    let h = '<form class="settings-form ps" data-ps-form novalidate>';
+    h += '<div class="ps-strip" data-ps-strip>' + stripHtml(st) + '</div>';
+    if (st.flash) h += '<div class="ps-flash" data-ps-flash>' + st.flash + '</div>';
+    h += window.renderSignIn(st.id, p.sign_in);
+    h += window.renderAppPolicy(st.id, p);
+    h += window.renderPublicBlock(st.id, p.public_access);
+    h += optionsHtml(st);
+    h += portsHtml(st);
+    h += '<div class="ps-bar" data-ps-bar>' + barHtml() + '</div>';
+    h += '</form>';
+    st.el.innerHTML = h;
+    st.accessBase = accessParts(st);
+    st.flash = null;
+    redrawBar(st);
+  }
+
+  function optionsHtml(st) {
+    const opts = st.panel.options || [];
+    if (!opts.length) return '';
+    const sections = st.panel.sections || [];
+    const groups = [];
+    const loose = opts.filter(o => !o.section || !sections.includes(o.section));
+    if (loose.length) groups.push({ title: sections.length ? 'General' : '', opts: loose });
+    for (const s of sections) {
+      const os = opts.filter(o => o.section === s);
+      if (os.length) groups.push({ title: s, opts: os });
+    }
+    let h = '<div class="ps-options">';
+    for (const g of groups) {
+      h += '<section class="ps-section">';
+      if (g.title) h += '<h4 class="ps-section-title">' + esc(g.title) + '</h4>';
+      h += sectionBody(st, g.opts);
+      h += '</section>';
+    }
+    return h + '</div>';
+  }
+
+  // sectionBody lays out a section's options; an option with `requires`
+  // is shown side by side with what it requires (a craft pair).
+  function sectionBody(st, opts) {
+    const placed = new Set();
+    let h = '';
+    for (const o of opts) {
+      if (placed.has(o.key)) continue;
+      const pair = (o.requires || []).map(k => opts.find(x => x.key === k)).filter(x => x && !placed.has(x.key));
+      if (pair.length) {
+        h += '<div class="ps-pair">';
+        for (const x of [...pair, o]) { placed.add(x.key); h += optionHtml(st, x); }
+        h += '</div>';
+        continue;
+      }
+      // Required by a later option of this section: placed with it.
+      if (opts.some(x => x !== o && (x.requires || []).includes(o.key) && !placed.has(x.key))) continue;
+      placed.add(o.key);
+      h += optionHtml(st, o);
+    }
+    return h;
+  }
+
+  function appliesBadge(o) {
+    const t = o.effect === 'restart' ? APPLIES.restart : o.effect === 'reload' ? APPLIES.reload : (APPLIES[o.applies || 'restart'] || '');
+    return t ? '<span class="ps-applies">' + esc(t) + '</span>' : '';
+  }
+
+  function optionHtml(st, o) {
+    const sc = scopeOf(o);
+    let h = '<div class="ps-opt" data-opt="' + esc(o.key) + '">';
+    h += optionInner(st, o, sc);
+    return h + '</div>';
+  }
+
+  function optionInner(st, o, sc) {
+    let h = '<div class="ps-opt-head"><span class="ps-opt-label">' + esc(o.label || o.key) + '</span>';
+    if (sc === 'person') h += '<span class="ps-scope">per person</span>';
+    if (sc === 'group') h += '<span class="ps-scope">per group</span>';
+    if (sc === 'person_entered') h += '<span class="ps-scope">entered by each person</span>';
+    if (o.privileged) h += '<span class="ps-scope ps-priv">privileged</span>';
+    h += appliesBadge(o) + '</div>';
+    if (o.description) h += '<div class="ps-desc">' + esc(o.description) + '</div>';
+    if ((o.requires || []).length) h += '<div class="ps-hint">Needs ' + o.requires.map(k => '<em>' + esc((st.opts[k] || {}).label || k) + '</em>').join(', ') + '.</div>';
+    if (sc === 'instance') h += o.type === 'secret' ? secretHtml(st, o) : instanceHtml(st, o);
+    else if (sc === 'person') h += personHtml(st, o);
+    else if (sc === 'group') h += groupScopeHtml(st, o);
+    else if (sc === 'person_entered') h += enteredHtml(st, o);
+    for (const w of o.warnings || []) h += '<div class="ps-warn">⚠ ' + esc(w) + '</div>';
+    h += '<div class="ps-err" data-err-for="' + esc(o.key) + '"' + (st.errors[o.key] ? '' : ' hidden') + '>' + esc(st.errors[o.key] || '') + '</div>';
+    return h;
+  }
+
+  function redrawOption(st, key) {
+    const box = st.el.querySelector('[data-opt="' + CSS.escape(key) + '"]');
+    const o = st.opts[key];
+    if (box && o) box.innerHTML = optionInner(st, o, scopeOf(o));
+  }
+
+  // ── editors ────────────────────────────────────────────────────────
+
+  // editorHtml is the input(s) for one value of o. data-where says
+  // where the value goes: "value" (instance), "default", "row"
+  // (data-uid) — read back by readEditor.
+  function editorHtml(st, o, v, where, uid, extra) {
+    let h = '<span class="ps-ed ps-ed-' + esc(o.type) + '" data-ed data-key="' + esc(o.key) + '" data-where="' + esc(where) + '"' + (uid ? ' data-uid="' + esc(uid) + '"' : '') + '>';
+    const lbl = ' aria-label="' + esc((extra && extra.label) || o.label || o.key) + '"';
+    switch (o.type) {
+      case 'bool':
+        h += '<label class="ps-check"><input type="checkbox" data-part="bool"' + lbl + (v ? ' checked' : '') + '> ' + (v ? 'on' : 'off') + '</label>';
+        break;
+      case 'enum':
+        h += '<select data-part="enum"' + lbl + '>';
+        for (const c of o.options || []) h += '<option value="' + esc(c.value) + '"' + (c.value === v ? ' selected' : '') + '>' + esc(c.label || c.value) + '</option>';
+        h += '</select>';
+        break;
+      case 'multi_enum': {
+        const set = new Set(v || []);
+        for (const c of o.options || []) h += '<label class="ps-check"><input type="checkbox" data-part="multi" value="' + esc(c.value) + '"' + (set.has(c.value) ? ' checked' : '') + '> ' + esc(c.label || c.value) + '</label>';
+        break;
+      }
+      case 'size': {
+        const unl = v === 'unlimited';
+        const n = typeof v === 'number' ? v : null;
+        let unit = 'GiB';
+        if (n !== null) {
+          unit = 'MiB';
+          for (const u of SIZE_UNITS) if (n >= SIZE_MULT[u] && n % SIZE_MULT[u] === 0) unit = u;
+          if (n > 0 && n % SIZE_MULT.MiB !== 0) unit = n >= SIZE_MULT.TiB ? 'TiB' : n >= SIZE_MULT.GiB ? 'GiB' : 'MiB';
+        }
+        const num = n === null ? '' : Number((n / SIZE_MULT[unit]).toPrecision(12));
+        const step = sizeBytes(o.step);
+        const stepAttr = step ? Number((step / SIZE_MULT[unit]).toPrecision(12)) : 'any';
+        h += '<input type="number" min="0" data-part="num" step="' + esc(stepAttr) + '" value="' + esc(num) + '"' + lbl + (unl ? ' disabled' : '') + '>';
+        h += '<select data-part="unit" aria-label="unit">' + SIZE_UNITS.map(u => '<option value="' + u + '"' + (u === unit ? ' selected' : '') + '>' + u + '</option>').join('') + '</select>';
+        if (o.allow_unlimited) h += '<label class="ps-check"><input type="checkbox" data-part="unl"' + (unl ? ' checked' : '') + '> unlimited</label>';
+        break;
+      }
+      case 'duration': {
+        const n = typeof v === 'number' ? v : null;
+        let unit = 's';
+        if (n) for (const [u] of DUR_UNITS) if (n % DUR_MULT[u] === 0) unit = u;
+        h += '<input type="number" min="0" step="1" data-part="num" value="' + esc(n === null ? '' : n / DUR_MULT[unit]) + '"' + lbl + '>';
+        h += '<select data-part="unit" aria-label="unit">' + DUR_UNITS.map(([u, l]) => '<option value="' + u + '"' + (u === unit ? ' selected' : '') + '>' + l + '</option>').join('') + '</select>';
+        break;
+      }
+      case 'int': {
+        const a = ['min', 'max', 'step'].filter(k => typeof o[k] === 'number').map(k => ' ' + k + '="' + esc(o[k]) + '"').join('');
+        h += '<input type="number" data-part="int"' + a + ' value="' + esc(v === null || v === undefined ? '' : v) + '"' + lbl + '>';
+        if (o.unit) h += '<span class="ps-int-unit">' + esc(o.unit) + '</span>';
+        break;
+      }
+      case 'list': case 'groups': case 'users':
+        h += '<textarea data-part="lines" rows="3" placeholder="one per line"' + lbl + '>' + esc((v || []).join('\n')) + '</textarea>';
+        break;
+      case 'table':
+        h += '<textarea data-part="json" rows="4" placeholder="[{&quot;column&quot;: &quot;value&quot;}]"' + lbl + '>' + esc(v === null || v === undefined ? '' : JSON.stringify(v, null, 1)) + '</textarea>';
+        break;
+      default: {
+        const ph = extra && extra.placeholder ? ' placeholder="' + esc(extra.placeholder) + '"' : '';
+        const ml = typeof o.max_len === 'number' ? ' maxlength="' + esc(o.max_len) + '"' : '';
+        const list = o.type === 'group' && (st.panel.directory_groups || []).length ? ' list="ps-groups-' + esc(st.id) + '"' : '';
+        h += '<input type="text" data-part="text" spellcheck="false" value="' + esc(v === null || v === undefined ? '' : v) + '"' + ph + ml + list + lbl + '>';
+        if (list) h += '<datalist id="ps-groups-' + esc(st.id) + '">' + st.panel.directory_groups.map(g => '<option value="' + esc(g) + '">').join('') + '</datalist>';
+      }
+    }
+    return h + '</span>';
+  }
+
+  // readEditor returns {value} or {error}.
+  function readEditor(o, ed) {
+    const part = p => ed.querySelector('[data-part="' + p + '"]');
+    switch (o.type) {
+      case 'bool': return { value: part('bool').checked };
+      case 'enum': return { value: part('enum').value };
+      case 'multi_enum': return { value: [...ed.querySelectorAll('[data-part="multi"]:checked')].map(x => x.value) };
+      case 'size': {
+        const unl = part('unl');
+        part('num').disabled = !!(unl && unl.checked);
+        if (unl && unl.checked) return { value: 'unlimited' };
+        const raw = part('num').value.trim();
+        if (raw === '') return { error: 'enter a size' };
+        const n = Number(raw);
+        if (!isFinite(n) || n < 0) return { error: 'not a size' };
+        const unit = part('unit').value;
+        const bytes = Math.round(n * SIZE_MULT[unit]);
+        const step = sizeBytes(o.step);
+        part('num').step = step ? String(Number((step / SIZE_MULT[unit]).toPrecision(12))) : 'any';
+        if (step && bytes % step !== 0) return { error: 'must be a multiple of ' + showSize(step) };
+        const min = sizeBytes(o.min), max = sizeBytes(o.max);
+        if (typeof min === 'number' && bytes < min) return { error: 'at least ' + showSize(min) };
+        if (typeof max === 'number' && bytes > max) return { error: 'at most ' + showSize(max) };
+        return { value: bytes };
+      }
+      case 'duration': {
+        const raw = part('num').value.trim();
+        if (raw === '') return { error: 'enter a duration' };
+        const n = Number(raw);
+        if (!Number.isInteger(n * DUR_MULT[part('unit').value]) || n < 0) return { error: 'whole seconds only' };
+        const secs = n * DUR_MULT[part('unit').value];
+        const step = durSeconds(o.step);
+        if (step && secs % step !== 0) return { error: 'must be a multiple of ' + showDur(step) };
+        return { value: secs };
+      }
+      case 'int': {
+        const raw = part('int').value.trim();
+        if (raw === '') return { value: null, empty: true };
+        const n = Number(raw);
+        if (!Number.isInteger(n)) return { error: 'a whole number' };
+        if (typeof o.min === 'number' && n < o.min) return { error: 'at least ' + o.min };
+        if (typeof o.max === 'number' && n > o.max) return { error: 'at most ' + o.max };
+        if (typeof o.step === 'number' && o.step > 0 && (n - (typeof o.min === 'number' ? o.min : 0)) % o.step !== 0) return { error: 'in steps of ' + o.step };
+        return { value: n };
+      }
+      case 'list': case 'groups': case 'users': {
+        let items = part('lines').value.split('\n').map(s => s.trim()).filter(Boolean);
+        if (o.type === 'list' && o.items && o.items.type === 'int') {
+          if (items.some(x => !/^-?\d+$/.test(x))) return { error: 'whole numbers, one per line' };
+          items = items.map(Number);
+        }
+        return { value: items };
+      }
+      case 'table': {
+        const raw = part('json').value.trim();
+        if (raw === '') return { value: null, empty: true };
+        try { return { value: JSON.parse(raw) }; } catch (e) { return { error: 'not valid JSON' }; }
+      }
+      default: {
+        const s = part('text').value;
+        return s === '' ? { value: null, empty: true } : { value: s };
+      }
+    }
+  }
+
+  // ── instance options ───────────────────────────────────────────────
+
+  function instanceHtml(st, o) {
+    const v = st.values[o.key];
+    const isDefault = v === null || v === undefined;
+    const shown = isDefault ? canonical(o, o.default) : v;
+    let h = '<div class="ps-inst">';
+    h += editorHtml(st, o, shown, 'value', '', { placeholder: o.default_display ? 'default: ' + o.default_display : '' });
+    if (isDefault) h += '<span class="ps-hint ps-inline">' + (o.default_display ? 'template default (' + esc(o.default_display) + ')' : 'not set') + '</span>';
+    else if (o.default !== undefined) h += '<button type="button" class="btn btn-sm btn-secondary" data-action="use-default" data-key="' + esc(o.key) + '">Use default</button>';
+    h += '</div>';
+    if (o.type === 'path') h += pathHint(st, o);
+    return h;
+  }
+
+  // pathHint: the mount and "the app writes here as uid:gid" (writes_as
+  // numbers, or the value of the instance option they name).
+  function pathHint(st, o) {
+    let h = '';
+    if (o.target) h += '<div class="ps-hint">Mounted in ' + esc(o.target.service) + ' at <code>' + esc(o.target.mount) + '</code>' + (o.mode ? ' (' + esc(o.mode) + ')' : '') + '.</div>';
+    if (o.writes_as) {
+      const ref = r => {
+        if (typeof r === 'number') return String(r);
+        const ro = st.opts[r];
+        const v = ro ? (st.values[r] !== null && st.values[r] !== undefined ? st.values[r] : canonical(ro, ro.default)) : null;
+        return v === null || v === undefined ? String(r) : String(v);
+      };
+      h += '<div class="ps-hint">The app writes here as <code>' + esc(ref(o.writes_as.uid) + ':' + ref(o.writes_as.gid)) + '</code>.</div>';
+    }
+    return h;
+  }
+
+  // ── secrets ────────────────────────────────────────────────────────
+
+  function secretHtml(st, o) {
+    const sv = (st.panel.secrets || {})[o.key] || { set: false };
+    const pend = st.secrets[o.key];
+    let h = '<div class="ps-secret">';
+    h += '<div class="ps-secret-status">' + (sv.set
+      ? 'Set ✓' + (sv.updated_at ? ' (updated ' + esc(fmtDate(sv.updated_at)) + (sv.generated ? ', generated' : '') + ')' : '')
+      : 'Not set') + '</div>';
+    if (pend && pend.generate) h += '<div class="ps-pending">A new value is generated when you save. <button type="button" class="btn btn-sm btn-secondary" data-action="secret-undo" data-key="' + esc(o.key) + '">Undo</button></div>';
+    else if (pend && pend.clear) h += '<div class="ps-pending">Cleared when you save. <button type="button" class="btn btn-sm btn-secondary" data-action="secret-undo" data-key="' + esc(o.key) + '">Undo</button></div>';
+    else if (st.secretOpen && st.secretOpen[o.key]) {
+      h += '<div class="ps-secret-input"><input type="password" autocomplete="new-password" spellcheck="false" data-secret-input="' + esc(o.key) + '" aria-label="New value for ' + esc(o.label || o.key) + '" placeholder="new value">';
+      h += '<button type="button" class="btn btn-sm btn-secondary" data-action="secret-undo" data-key="' + esc(o.key) + '">Cancel</button></div>';
+    } else {
+      h += '<div class="ps-secret-actions">';
+      h += '<button type="button" class="btn btn-sm btn-secondary" data-action="secret-replace" data-key="' + esc(o.key) + '">' + (sv.set ? 'Replace' : 'Set') + '</button>';
+      if (o.generate) h += '<button type="button" class="btn btn-sm btn-secondary" data-action="secret-generate" data-key="' + esc(o.key) + '">Generate</button>';
+      if (sv.set) h += '<button type="button" class="btn btn-sm btn-danger" data-action="secret-clear" data-key="' + esc(o.key) + '">Clear</button>';
+      h += '</div>';
+    }
+    return h + '</div>';
+  }
+
+  // ── per-person and group-scope rows ────────────────────────────────
+
+  function groupPicker(st, o, rows, r) {
+    const used = new Set(rows.filter(x => x !== r).map(x => x.group.toLowerCase()));
+    const choices = o.privileged ? (o.group_choices || []).map(c => ({ name: c.name, disabled: c.disabled, reason: c.reason }))
+      : (st.panel.directory_groups || []).map(g => ({ name: g }));
+    const lbl = ' aria-label="Group"';
+    if (!choices.length) {
+      return '<input type="text" class="ps-group" data-row-group data-key="' + esc(o.key) + '" data-uid="' + esc(r.uid) + '" value="' + esc(r.group) + '" placeholder="group"' + lbl + '>';
+    }
+    let h = '<select class="ps-group" data-row-group data-key="' + esc(o.key) + '" data-uid="' + esc(r.uid) + '"' + lbl + '>';
+    if (!r.group) h += '<option value="" selected disabled>choose a group…</option>';
+    let found = false;
+    for (const c of choices) {
+      const sel = c.name === r.group;
+      found = found || sel;
+      let label = c.name, dis = false;
+      if (c.disabled) { label += " — can't grant a privileged value: " + (c.reason || 'refused'); dis = true; }
+      else if (used.has(c.name.toLowerCase())) { label += ' — already has a row'; dis = true; }
+      h += '<option value="' + esc(c.name) + '"' + (sel ? ' selected' : '') + (dis && !sel ? ' disabled' : '') + (c.reason ? ' title="' + esc(c.reason) + '"' : '') + '>' + esc(label) + '</option>';
+    }
+    if (r.group && !found) h += '<option value="' + esc(r.group) + '" selected>' + esc(r.group) + ' — not in the directory</option>';
+    return h + '</select>';
+  }
+
+  function rowsHtml(st, o, rows, priority) {
+    let h = '<ol class="ps-rows' + (priority ? ' ps-priority' : '') + '" data-rows="' + esc(o.key) + '">';
+    rows.forEach((r, i) => {
+      h += '<li class="ps-row" data-row data-key="' + esc(o.key) + '" data-uid="' + esc(r.uid) + '">';
+      if (priority) {
+        h += '<span class="ps-handle" draggable="true" data-handle data-key="' + esc(o.key) + '" data-uid="' + esc(r.uid) + '" title="Drag to reorder" aria-hidden="true">⠿</span>';
+        h += '<span class="ps-rank">' + (i + 1) + '.</span>';
+      }
+      h += groupPicker(st, o, rows, r);
+      h += editorHtml(st, o, r.value, 'row', r.uid, { label: (o.label || o.key) + ' for ' + (r.group || 'the new row') });
+      if (priority) {
+        h += '<button type="button" class="btn-icon ps-move" data-action="row-up" data-key="' + esc(o.key) + '" data-uid="' + esc(r.uid) + '"' + (i === 0 ? ' disabled' : '') + ' aria-label="Move ' + esc(r.group || 'row') + ' up" title="Move up">▲</button>';
+        h += '<button type="button" class="btn-icon ps-move" data-action="row-down" data-key="' + esc(o.key) + '" data-uid="' + esc(r.uid) + '"' + (i === rows.length - 1 ? ' disabled' : '') + ' aria-label="Move ' + esc(r.group || 'row') + ' down" title="Move down">▼</button>';
+      }
+      h += '<button type="button" class="btn-icon" data-action="row-remove" data-key="' + esc(o.key) + '" data-uid="' + esc(r.uid) + '" aria-label="Remove the row for ' + esc(r.group || 'the new group') + '" title="Remove">✕</button>';
+      const err = st.rowErrors[o.key + '\u0000' + r.uid];
+      if (err) h += '<div class="ps-err ps-row-err">' + esc(err) + '</div>';
+      h += '</li>';
+    });
+    h += '</ol>';
+    h += '<button type="button" class="btn btn-sm btn-secondary ps-add" data-action="row-add" data-key="' + esc(o.key) + '">+ Add group</button>';
+    return h;
+  }
+
+  function personHtml(st, o) {
+    const p = st.person[o.key];
+    const rule = p.resolve || o.resolve || 'max';
+    const priority = rule === 'priority';
+    let h = '<div class="ps-person">';
+    if (priority) h += '<div class="ps-hint">Order matters: the first group a person is in gives their value. Drag the handles or use ▲ ▼.</div>';
+    h += rowsHtml(st, o, p.rows, priority);
+    const refused = (o.group_choices || []).filter(c => c.disabled);
+    if (o.privileged && refused.length) {
+      h += '<div class="ps-refused"><span>Can\'t grant a privileged value:</span><ul>' + refused.map(c => '<li data-refused-group="' + esc(c.name) + '"><span class="ps-user">' + esc(c.name) + '</span> — ' + esc(c.reason || 'refused') + '</li>').join('') + '</ul></div>';
+    }
+    h += '<div class="ps-row ps-row-default"><span class="ps-row-label">Everyone else with access</span>' + editorHtml(st, o, p.default, 'default', '', { label: (o.label || o.key) + ' for everyone else with access' }) + '</div>';
+    const choices = [o.resolve, ...(o.resolve_choices || [])].filter((x, i, a) => x && a.indexOf(x) === i);
+    h += '<div class="ps-resolve">When someone is in several groups: ';
+    if (choices.length > 1) {
+      h += '<select data-resolve data-key="' + esc(o.key) + '" aria-label="When someone is in several groups">';
+      for (const c of choices) h += '<option value="' + esc(c === o.resolve ? '' : c) + '"' + (c === rule ? ' selected' : '') + '>' + esc(RESOLVE_LABEL[c] || c) + (c === o.resolve ? ' (template)' : '') + '</option>';
+      h += '</select>';
+    } else {
+      h += '<strong>' + esc(RESOLVE_LABEL[rule] || rule) + '</strong>';
+    }
+    h += '</div>';
+    h += '<div class="ps-who" data-who="' + esc(o.key) + '">' + whoHead(st, o) + '<div data-who-list="' + esc(o.key) + '">' + whoList(st, o) + '</div></div>';
+    return h + '</div>';
+  }
+
+  function groupScopeHtml(st, o) {
+    const rows = st.groups[o.key];
+    let h = '<div class="ps-person">';
+    if (!rows.length) h += '<div class="ps-hint">No group has a value yet.</div>';
+    h += rowsHtml(st, o, rows, false);
+    return h + '</div>';
+  }
+
+  function enteredHtml(st, o) {
+    const ev = (st.panel.entries || {})[o.key] || { rows: [], not_set: [] };
+    let h = '<div class="ps-hint">Each person enters their own value on My apps' + (o.admin_override ? '; administrators may set one for them' : '') + '.</div>';
+    if (!(ev.rows || []).length) return h + '<div class="ps-hint">Nobody has entered one yet.</div>';
+    h += '<ul class="ps-who-rows">';
+    for (const r of ev.rows) {
+      h += '<li><span class="ps-user">' + esc(r.user) + '</span><span class="ps-val">' + esc(r.display) + '</span><span class="ps-why">by ' + esc(r.set_by) + ', ' + esc(fmtDate(r.updated_at)) + ' · ' + esc(r.delivered ? 'delivered' : ('not delivered' + (r.why ? ': ' + r.why : ''))) + '</span></li>';
+    }
+    h += '</ul>';
+    if ((ev.not_set || []).length) h += '<div class="ps-hint">Not set: ' + ev.not_set.map(esc).join(', ') + '</div>';
+    return h;
+  }
+
+  // ── who gets what ──────────────────────────────────────────────────
+
+  function population(st) {
+    return (st.preview && st.preview.population) || st.panel.population || { count: 0 };
+  }
+
+  function whoHead(st, o) {
+    const pop = population(st);
+    const w = st.who[o.key];
+    return '<div class="ps-who-head"><span>Who gets what (' + esc(plural(pop.count || 0, 'person', 'people')) + ' with access)</span>' +
+      '<input type="search" class="ps-search" data-who-search data-key="' + esc(o.key) + '" value="' + esc(w.q) + '" placeholder="search…" aria-label="Search people"></div>';
+  }
+
+  function reasonText(o, p) {
+    const r = p.reason || {};
+    switch (r.source) {
+      case 'group':
+        if ((r.others || []).length) {
+          const all = [r.group + ' (' + p.display + ')', ...r.others.map(c => c.group + ' (' + display(o, c.value) + ')')];
+          return (RULE_OF[r.rule] || r.rule + ' of') + ' ' + all.join(', ');
+        }
+        return 'from ' + r.group;
+      case 'default': return 'everyone else with access';
+      case 'combined': return 'combined from ' + (r.groups || []).join(', ');
+      case 'fail-closed': return 'fail-closed: the rows could not be resolved safely' + ((r.others || []).length ? ' (' + r.others.map(c => c.group).join(', ') + ')' : '');
+    }
+    return '';
+  }
+
+  function personValue(p) {
+    const fc = (p.reason || {}).source === 'fail-closed';
+    if (p.display === UNRESOLVED) return UNRESOLVED;
+    return p.display + (fc ? ' (fail-closed)' : '');
+  }
+
+  function whoList(st, o) {
+    const pop = population(st);
+    if (pop.why) return '<div class="ps-hint">Nobody gets a per-person value: ' + esc(pop.why) + '.</div>';
+    const op = st.preview && st.preview.options && st.preview.options[o.key];
+    if (!op) return '<div class="ps-hint">' + (st.previewError ? 'No preview: fix the error above.' : 'Loading the preview…') + '</div>';
+    const w = st.who[o.key];
+    const q = w.q.trim().toLowerCase();
+    const people = q ? op.people.filter(p => p.user.includes(q) || personValue(p).toLowerCase().includes(q) || reasonText(o, p).toLowerCase().includes(q)) : op.people;
+    const pages = Math.max(1, Math.ceil(people.length / PAGE));
+    if (w.page >= pages) w.page = pages - 1;
+    let h = '';
+    if (!people.length) h += '<div class="ps-hint">' + (q ? 'Nobody matches.' : 'Nobody has access.') + '</div>';
+    else {
+      h += '<ul class="ps-who-rows">';
+      for (const p of people.slice(w.page * PAGE, (w.page + 1) * PAGE)) {
+        h += '<li><span class="ps-user">' + esc(p.user) + '</span><span class="ps-val' + (p.display === UNRESOLVED ? ' ps-unresolved' : '') + '">' + esc(personValue(p)) + '</span><span class="ps-why">' + esc(reasonText(o, p)) + '</span></li>';
+      }
+      h += '</ul>';
+    }
+    if (pages > 1) {
+      h += '<div class="ps-pager"><button type="button" class="btn btn-sm btn-secondary" data-action="who-prev" data-key="' + esc(o.key) + '"' + (w.page === 0 ? ' disabled' : '') + '>‹ Previous</button>';
+      h += '<span>' + esc((w.page * PAGE + 1) + '–' + Math.min(people.length, (w.page + 1) * PAGE) + ' of ' + people.length) + '</span>';
+      h += '<button type="button" class="btn btn-sm btn-secondary" data-action="who-next" data-key="' + esc(o.key) + '"' + (w.page >= pages - 1 ? ' disabled' : '') + '>Next ›</button></div>';
+    }
+    const name = st.panel.name || st.id;
+    for (const [g, n] of Object.entries(op.no_access || {})) {
+      if (n > 0) h += '<div class="ps-warn">⚠ ' + esc(plural(n, 'member', 'members') + ' of ' + g + ' ' + (n === 1 ? 'has' : 'have') + ' no access to ' + name + ' and ' + (n === 1 ? 'gets' : 'get') + ' nothing.') + '</div>';
+    }
+    return h;
+  }
+
+  function redrawWho(st) {
+    for (const k in st.person) {
+      const o = st.opts[k];
+      const head = st.el.querySelector('[data-who="' + CSS.escape(k) + '"] .ps-who-head span');
+      if (head) head.textContent = 'Who gets what (' + plural(population(st).count || 0, 'person', 'people') + ' with access)';
+      const list = st.el.querySelector('[data-who-list="' + CSS.escape(k) + '"]');
+      if (list) list.innerHTML = whoList(st, o);
+    }
+  }
+
+  // ── ports ──────────────────────────────────────────────────────────
+
+  function portsHtml(st) {
+    const defs = st.panel.port_definitions || [];
+    if (!defs.length) return '';
+    let h = '<div class="ports-section"><div class="ports-title">Host Ports</div>';
+    for (const p of defs) {
+      const proto = String(p.protocol || 'tcp').toLowerCase();
+      const bindKey = p.key + '_BIND';
+      const host = p.key in st.ports ? st.ports[p.key] : (p.range ? String(p.range) : String(p.default || ''));
+      const bind = st.ports[bindKey] || p.bind || '0.0.0.0';
+      h += '<div class="port-row"><div class="port-meta"><span class="port-label">' + esc(p.label || p.key) + '</span>';
+      h += '<span class="port-badge port-' + esc(proto) + '">' + esc(proto.toUpperCase()) + '</span>';
+      if (p.network_mode_host) h += '<span class="port-badge port-host">host net</span>';
+      if (p.range) h += '<span class="port-badge port-range">range</span>';
+      else h += '<span class="port-container">&rarr; :' + esc(p.container || '') + '</span>';
+      h += '</div>';
+      if (p.description) h += '<small>' + esc(p.description) + '</small>';
+      if (p.range) {
+        h += '<div class="port-inputs"><input type="text" data-port="' + esc(p.key) + '" value="' + esc(host) + '" placeholder="' + esc(p.range) + '" class="port-host" aria-label="' + esc(p.label || p.key) + '"></div>';
+        h += '<small class="port-hint">low-high; the app binds these host ports itself.</small>';
+      } else if (p.network_mode_host) {
+        h += '<div class="port-inputs"><input type="number" min="1" max="65535" data-port="' + esc(p.key) + '" value="' + esc(host) + '" placeholder="' + (p.required ? 'required' : 'disabled') + '" class="port-host" aria-label="' + esc(p.label || p.key) + '"></div>';
+        h += '<small class="port-hint">Host network: the app binds this host port itself.</small>';
+      } else {
+        h += '<div class="port-inputs"><input type="text" data-port="' + esc(bindKey) + '" value="' + esc(bind) + '" placeholder="0.0.0.0" class="port-bind" aria-label="Bind address">';
+        h += '<input type="number" min="1" max="65535" data-port="' + esc(p.key) + '" value="' + esc(host) + '" placeholder="' + (p.required ? 'required' : 'disabled') + '" class="port-host" aria-label="' + esc(p.label || p.key) + '">';
+        h += '<button type="button" class="btn btn-sm" data-action="port-reset" data-key="' + esc(p.key) + '">Reset</button></div>';
+        if (!p.required) h += '<small class="port-hint">Leave the host port empty to disable this binding.</small>';
+      }
+      h += '</div>';
+    }
+    return h + '</div>';
+  }
+
+  // ── deliveries strip ───────────────────────────────────────────────
+
+  function unitLabel(u) {
+    const [kind, name] = [u.split(':')[0], u.slice(u.indexOf(':') + 1)];
+    switch (kind) {
+      case 'env': return "Environment (.env, read when the app starts)";
+      case 'file': return 'Data file ' + name;
+      case 'hook': return 'Hook ' + name;
+      case 'claim': return 'Sign-in claim ' + name;
+      case 'headers': return 'Request headers';
+      case 'reload': return 'Reload';
+      case 'restart': return 'Restart';
+      case 'delivery': return 'Delivery';
+    }
+    return u;
+  }
+
+  function stripHtml(st) {
+    const d = st.panel.deliveries || { units: {} };
+    const units = Object.values(d.units || {}).sort((a, b) => a.unit.localeCompare(b.unit));
+    const failed = units.some(u => u.error);
+    let h = '<div class="ps-strip-head"><span class="ps-strip-title">Deliveries</span>';
+    if (d.pending) h += '<span class="ps-hint ps-inline">a run is queued' + (d.trigger ? ' (' + esc(d.trigger) + ')' : '') + '</span>';
+    h += '<button type="button" class="btn btn-sm ' + (failed ? 'btn-primary' : 'btn-secondary') + '" data-action="retry"' + (st.retrying ? ' disabled' : '') + '>' + (st.retrying ? '<span class="ps-spin" aria-hidden="true"></span> Retrying…' : 'Retry') + '</button></div>';
+    if (!units.length) return h + '<div class="ps-hint">Nothing delivered yet.</div>';
+    h += '<ul class="ps-units">';
+    for (const u of units) {
+      let cls, text;
+      if (u.error) { cls = 'failed'; text = 'failed: ' + u.error; }
+      else if (u.skipped) { cls = 'skipped'; text = SKIP_TEXT[u.skipped] || ('skipped: ' + u.skipped); }
+      else { cls = 'ok'; text = 'last applied' + (u.message ? ': ' + u.message : ''); }
+      h += '<li class="ps-unit ps-unit-' + cls + '" data-unit="' + esc(u.unit) + '"><span class="ps-unit-name">' + esc(unitLabel(u.unit)) + '</span>';
+      h += '<span class="ps-unit-text">' + esc(text) + '</span><span class="ps-unit-at">' + esc(u.at ? fmtDate(u.at) : '') + '</span></li>';
+    }
+    return h + '</ul>';
+  }
+
+  function redrawStrip(st) {
+    const s = st.el.querySelector('[data-ps-strip]');
+    if (s) s.innerHTML = stripHtml(st);
+  }
+
+  // ── save bar ───────────────────────────────────────────────────────
+
+  function effectText(st, b) {
+    const name = st.panel.name || st.id;
+    const enabled = !!st.panel.enabled;
+    const opts = changedOptions(st);
+    const hasOptions = opts.length > 0 || 'ports' in b;
+    const access = 'sign_in' in b || 'auth_policy' in b || 'auth_policy_inherit' in b || 'public_access' in b;
+    let base = '';
+    if (hasOptions) {
+      const eff = st.preview && st.previewFor === JSON.stringify(b) ? st.preview.effect : '';
+      if (!eff) base = 'Checking what saving does…';
+      else if (eff === 'restart' || eff === 'reload') base = enabled ? 'Saving ' + (eff === 'restart' ? 'restarts ' : 'reloads ') + name : name + ' is not running: the change applies when it starts';
+      else {
+        const texts = [...new Set(opts.map(o => NO_RESTART_TEXT[o.applies] || '').filter(Boolean))];
+        base = texts.length ? texts.join(' · ') : (enabled ? 'No restart needed' : 'Saved for the next start');
+      }
+    }
+    if (access) {
+      const t = enabled ? 'the sign-in/access change restarts ' + name : 'the sign-in/access change applies when ' + name + ' starts';
+      base = base ? base + ' and ' + t : t.charAt(0).toUpperCase() + t.slice(1);
+    }
+    return base;
+  }
+
+  function changesText(st, b) {
+    if (!st.preview || st.previewFor !== JSON.stringify(b)) return '';
+    const parts = [];
+    for (const k of changedPersonKeys(st)) {
+      const op = (st.preview.options || {})[k];
+      if (op) parts.push({ label: st.opts[k].label || k, n: op.changes || 0 });
+    }
+    if (!parts.length) return '';
+    const one = p => plural(p.n, 'person gets', 'people get') + ' a new value';
+    if (parts.length === 1) return 'Changes: ' + one(parts[0]);
+    return 'Changes: ' + parts.map(p => p.label + ': ' + one(p)).join('; ');
+  }
+
+  // The bar's buttons stay in place (redrawn in place, never replaced):
+  // a preview finishing while the admin clicks Save must not swallow the
+  // click.
+  function barHtml() {
+    return '<div class="ps-bar-actions">' +
+      '<button type="submit" class="btn btn-primary btn-sm" data-action="save" disabled>Save</button>' +
+      '<button type="button" class="btn btn-secondary btn-sm" data-action="discard" disabled>Discard</button></div>' +
+      '<div class="ps-bar-text" data-ps-bar-text></div>';
+  }
+
+  function barText(st, b, dirty) {
+    const blocked = Object.keys(st.errors).length > 0 || Object.keys(st.rowErrors).length > 0;
+    let h = '';
+    if (st.saving) h += '<div class="ps-effect">Saving — a reload can take up to 10 seconds…</div>';
+    else if (!dirty) h += '<div class="ps-effect ps-muted">No unsaved changes.</div>';
+    else {
+      h += '<div class="ps-effect" data-ps-effect>' + esc(effectText(st, b)) + '</div>';
+      const c = changesText(st, b);
+      if (c) h += '<div class="ps-changes" data-ps-changes>' + esc(c) + '</div>';
+      if (blocked && !st.barError) h += '<div class="ps-err">Fix the marked values first.</div>';
+    }
+    if (st.barError) h += '<div class="ps-err" data-ps-bar-error>' + esc(st.barError) + '</div>';
+    return h;
+  }
+
+  function redrawBar(st) {
+    const bar = st.el.querySelector('[data-ps-bar]');
+    if (!bar) return;
+    const b = body(st);
+    const dirty = Object.keys(b).length > 0;
+    const saveBtn = bar.querySelector('[data-action="save"]');
+    saveBtn.disabled = st.saving || !dirty;
+    saveBtn.innerHTML = st.saving ? '<span class="ps-spin" aria-hidden="true"></span> Saving…' : 'Save';
+    bar.querySelector('[data-action="discard"]').disabled = st.saving || !dirty;
+    bar.querySelector('[data-ps-bar-text]').innerHTML = barText(st, b, dirty);
+    bar.classList.toggle('ps-busy', st.saving);
+    bar.setAttribute('aria-busy', st.saving ? 'true' : 'false');
+    st.el.querySelector('form[data-ps-form]')?.classList.toggle('ps-saving', st.saving);
+  }
+
+  // ── errors from the server ─────────────────────────────────────────
+
+  function clearServerErrors(st) {
+    for (const k of Object.keys(st.errors)) if (st.errors[k] && st.errors[k].server) delete st.errors[k];
+    for (const k of Object.keys(st.rowErrors)) if (st.rowErrors[k] && st.rowErrors[k].server) delete st.rowErrors[k];
+    st.barError = '';
+  }
+
+  // placeError shows a refusal next to what it concerns: "setting <key>:
+  // group <g> …" next to that row, "setting <key>: …" next to the
+  // option, anything else in the save bar. 409s say so.
+  function placeError(st, err) {
+    const msg = (err.status === 409 ? 'Refused (409): ' : err.status === 400 ? '' : (err.status ? 'Error ' + err.status + ': ' : '')) + (err.message || String(err));
+    const m = /^setting ([a-z][a-z0-9_]*):\s*(.*)$/s.exec(err.message || '');
+    if (m && st.opts[m[1]]) {
+      const key = m[1];
+      const g = /^group (\S+?)[:,]? /.exec(m[2]) || /group (\S+?) (?:was|is|has)/.exec(m[2]);
+      const rows = st.person[key] ? st.person[key].rows : st.groups[key];
+      const row = g && rows ? rows.find(r => r.group.toLowerCase() === g[1].toLowerCase()) : null;
+      if (row) st.rowErrors[key + '\u0000' + row.uid] = Object.assign(new String(msg), { server: true });
+      else st.errors[key] = Object.assign(new String(msg), { server: true });
+      redrawOption(st, key);
+      st.barError = err.status === 409 ? 'Refused (409): see ' + (st.opts[key].label || key) + '.' : 'See ' + (st.opts[key].label || key) + '.';
+      return;
+    }
+    st.barError = msg;
+  }
+
+  // ── preview ────────────────────────────────────────────────────────
+
+  function schedulePreview(st) {
+    clearTimeout(st.timer);
+    redrawBar(st);
+    st.timer = setTimeout(() => runPreview(st), DEBOUNCE_MS);
+  }
+
+  async function runPreview(st) {
+    if (Object.keys(st.errors).some(k => !st.errors[k].server) || Object.keys(st.rowErrors).some(k => !st.rowErrors[k].server)) {
+      redrawBar(st);
+      return;
+    }
+    const b = body(st);
+    const key = JSON.stringify(b);
+    const seq = ++st.previewSeq;
+    try {
+      const p = await window.apiPost('/api/instances/' + encodeURIComponent(st.id) + '/settings/preview', b);
+      if (seq !== st.previewSeq || states.get(st.el) !== st) return;
+      const hadServerErrors = Object.values(st.errors).some(e => e.server) || Object.values(st.rowErrors).some(e => e.server);
+      clearServerErrors(st);
+      st.preview = p;
+      st.previewFor = key;
+      st.previewError = '';
+      if (hadServerErrors) for (const k in st.opts) redrawOption(st, k);
+      redrawWho(st);
+    } catch (err) {
+      if (seq !== st.previewSeq || states.get(st.el) !== st) return;
+      clearServerErrors(st);
+      st.previewError = err.message;
+      st.preview = null;
+      placeError(st, err);
+      redrawWho(st);
+    }
+    redrawBar(st);
+  }
+
+  // ── actions ────────────────────────────────────────────────────────
+
+  function rowList(st, key) {
+    return st.person[key] ? st.person[key].rows : st.groups[key];
+  }
+
+  function newRowValue(st, o) {
+    if (st.person[o.key]) return JSON.parse(JSON.stringify(st.person[o.key].default));
+    switch (o.type) {
+      case 'bool': return false;
+      case 'list': case 'multi_enum': case 'groups': case 'users': return [];
+      case 'enum': return (o.options || [])[0] ? o.options[0].value : '';
+      default: return canonical(o, o.default);
+    }
+  }
+
+  function moveRow(st, key, uid, to) {
+    const rows = rowList(st, key);
+    const i = rows.findIndex(r => r.uid === uid);
+    if (i < 0 || to < 0 || to >= rows.length || to === i) return false;
+    const [r] = rows.splice(i, 1);
+    rows.splice(to, 0, r);
+    return true;
+  }
+
+  async function save(st) {
+    if (st.saving) return;
+    clearTimeout(st.timer);
+    const b = body(st);
+    if (!Object.keys(b).length) return;
+    if (Object.keys(st.errors).some(k => !st.errors[k].server) || Object.keys(st.rowErrors).some(k => !st.rowErrors[k].server)) {
+      st.barError = 'Fix the marked values first.';
+      redrawBar(st);
+      return;
+    }
+    st.saving = true;
+    clearServerErrors(st);
+    redrawBar(st);
+    try {
+      const res = await window.apiPut('/api/instances/' + encodeURIComponent(st.id) + '/settings', b);
+      // The draft (typed secret values included) is dropped: the panel
+      // is rebuilt from the server, its password inputs empty.
+      st.secrets = {};
+      let flash = '<strong>Saved.</strong> ' + esc(res.changed && res.changed.length ? 'Changed: ' + res.changed.join(', ') + '.' : '');
+      for (const w of res.warnings || []) flash += '<div class="ps-warn">⚠ ' + esc(w) + '</div>';
+      st.flash = flash;
+      window.showToast && window.showToast('Settings saved', 'success');
+      await render(st.el, st.id);
+    } catch (err) {
+      st.saving = false;
+      placeError(st, err);
+      redrawBar(st);
+      window.showToast && window.showToast(err.message || 'Failed to save settings', 'error');
+    }
+  }
+
+  async function retry(st) {
+    if (st.retrying) return;
+    st.retrying = true;
+    redrawStrip(st);
+    try {
+      await window.apiPost('/api/instances/' + encodeURIComponent(st.id) + '/settings/retry', {});
+    } catch (err) {
+      window.showToast && window.showToast(err.message || 'Retry failed', 'error');
+    }
+    try {
+      const p = await window.apiGet('/api/instances/' + encodeURIComponent(st.id) + '/settings');
+      st.panel.deliveries = p.deliveries;
+    } catch (e) { /* keep the old strip */ }
+    st.retrying = false;
+    redrawStrip(st);
+  }
+
+  // onEdit reads an edited value into the draft.
+  function onEdit(st, ed) {
+    const key = ed.dataset.key, o = st.opts[key];
+    if (!o) return;
+    const where = ed.dataset.where, uid = ed.dataset.uid;
+    const r = readEditor(o, ed);
+    const errKey = where === 'row' ? key + '\u0000' + uid : key;
+    const errs = where === 'row' ? st.rowErrors : st.errors;
+    let box = where === 'row' ? ed.closest('[data-row]') : ed.closest('.ps-row-default, .ps-inst');
+    let errEl = box && box.querySelector(':scope > .ps-err-local');
+    if (r.error) {
+      errs[errKey] = new String(r.error);
+      if (box && !errEl) { errEl = document.createElement('div'); errEl.className = 'ps-err ps-err-local'; box.appendChild(errEl); }
+      if (errEl) errEl.textContent = r.error;
+      ed.classList.add('ps-invalid');
+      redrawBar(st);
+      return;
+    }
+    delete errs[errKey];
+    if (errEl) errEl.remove();
+    ed.classList.remove('ps-invalid');
+    const lbl = ed.querySelector('.ps-check');
+    if (o.type === 'bool' && lbl) lbl.lastChild.textContent = r.value ? ' on' : ' off';
+    let v = r.value;
+    if (where === 'value') {
+      if (r.empty) v = null;
+      st.values[key] = v;
+    } else if (where === 'default') {
+      st.person[key].default = v;
+    } else {
+      const row = rowList(st, key).find(x => x.uid === uid);
+      if (row) row.value = v;
+    }
+    schedulePreview(st);
+  }
+
+  function bind(el) {
+    if (el.dataset.psBound) return;
+    el.dataset.psBound = '1';
+    const stOf = () => states.get(el);
+
+    el.addEventListener('submit', e => {
+      e.preventDefault();
+      e.stopPropagation();
+      const st = stOf();
+      if (st) save(st);
+    });
+
+    const onInput = e => {
+      const st = stOf();
+      if (!st || st.saving) return;
+      const t = e.target;
+      if (t.matches('[data-who-search]')) {
+        st.who[t.dataset.key].q = t.value;
+        st.who[t.dataset.key].page = 0;
+        const list = el.querySelector('[data-who-list="' + CSS.escape(t.dataset.key) + '"]');
+        if (list) list.innerHTML = whoList(st, st.opts[t.dataset.key]);
+        return;
+      }
+      if (t.matches('[data-secret-input]')) {
+        const k = t.dataset.secretInput;
+        if (t.value === '') delete st.secrets[k]; else st.secrets[k] = { value: t.value };
+        schedulePreview(st);
+        return;
+      }
+      if (t.matches('[data-port]')) {
+        st.ports[t.dataset.port] = t.value.trim();
+        schedulePreview(st);
+        return;
+      }
+      if (t.matches('[data-row-group]')) {
+        if (e.type !== 'change' && t.tagName === 'SELECT') return;
+        const row = rowList(st, t.dataset.key).find(r => r.uid === t.dataset.uid);
+        if (row) row.group = t.value.trim();
+        delete st.rowErrors[t.dataset.key + '\u0000' + t.dataset.uid];
+        if (t.tagName === 'SELECT') redrawOption(st, t.dataset.key);
+        schedulePreview(st);
+        return;
+      }
+      if (t.matches('[data-resolve]')) {
+        if (e.type !== 'change') return;
+        st.person[t.dataset.key].resolve = t.value;
+        redrawOption(st, t.dataset.key);
+        schedulePreview(st);
+        return;
+      }
+      const ed = t.closest('[data-ed]');
+      if (ed) {
+        if (e.type === 'input' && (t.type === 'checkbox' || t.tagName === 'SELECT')) return; // their change event follows
+        onEdit(st, ed);
+        return;
+      }
+      // The access policy, sign-in and public blocks (index.html).
+      if (t.closest('.policy-section, .public-section')) schedulePreview(st);
+    };
+    el.addEventListener('input', onInput);
+    el.addEventListener('change', onInput);
+
+    el.addEventListener('keydown', e => {
+      if (e.key === 'Enter' && e.target.matches('[data-who-search]')) e.preventDefault();
+    });
+
+    el.addEventListener('click', e => {
+      const st = stOf();
+      if (!st) return;
+      // index.html's public-token "Remove" button edits the form inline.
+      if (e.target.closest('.public-section')) setTimeout(() => schedulePreview(st), 0);
+      const b = e.target.closest('[data-action]');
+      if (!b || !el.contains(b) || b.disabled) return;
+      const key = b.dataset.key, uid = b.dataset.uid;
+      const o = key ? st.opts[key] : null;
+      switch (b.dataset.action) {
+        case 'save': return; // the submit handler saves
+        case 'discard': {
+          st.secrets = {};
+          st.errors = {};
+          st.rowErrors = {};
+          render(el, st.id);
+          return;
+        }
+        case 'retry': retry(st); return;
+        case 'row-add': {
+          rowList(st, key).push({ uid: nextUid(), group: '', value: newRowValue(st, o), group0: '', gid0: 0 });
+          // A row without a group can't be previewed or saved yet.
+          st.rowErrors[key + '\u0000' + rowList(st, key).slice(-1)[0].uid] = new String('choose a group');
+          redrawOption(st, key);
+          el.querySelector('[data-rows="' + CSS.escape(key) + '"] li:last-child [data-row-group]')?.focus();
+          redrawBar(st);
+          return;
+        }
+        case 'row-remove': {
+          const rows = rowList(st, key);
+          const i = rows.findIndex(r => r.uid === uid);
+          if (i >= 0) rows.splice(i, 1);
+          delete st.rowErrors[key + '\u0000' + uid];
+          redrawOption(st, key);
+          schedulePreview(st);
+          return;
+        }
+        case 'row-up': case 'row-down': {
+          const rows = rowList(st, key);
+          const i = rows.findIndex(r => r.uid === uid);
+          if (moveRow(st, key, uid, i + (b.dataset.action === 'row-up' ? -1 : 1))) {
+            redrawOption(st, key);
+            el.querySelector('[data-action="' + b.dataset.action + '"][data-uid="' + CSS.escape(uid) + '"]:not([disabled])')?.focus();
+            schedulePreview(st);
+          }
+          return;
+        }
+        case 'who-prev': case 'who-next': {
+          st.who[key].page += b.dataset.action === 'who-next' ? 1 : -1;
+          const list = el.querySelector('[data-who-list="' + CSS.escape(key) + '"]');
+          if (list) list.innerHTML = whoList(st, o);
+          return;
+        }
+        case 'use-default': {
+          st.values[key] = null;
+          delete st.errors[key];
+          redrawOption(st, key);
+          schedulePreview(st);
+          return;
+        }
+        case 'secret-replace': {
+          st.secretOpen = Object.assign({}, st.secretOpen, { [key]: true });
+          redrawOption(st, key);
+          el.querySelector('[data-secret-input="' + CSS.escape(key) + '"]')?.focus();
+          return;
+        }
+        case 'secret-generate': {
+          st.secrets[key] = { generate: true };
+          redrawOption(st, key);
+          schedulePreview(st);
+          return;
+        }
+        case 'secret-clear': {
+          if (!window.confirm('Clear ' + (o.label || key) + '? The app loses this secret when you save.')) return;
+          st.secrets[key] = { clear: true };
+          redrawOption(st, key);
+          schedulePreview(st);
+          return;
+        }
+        case 'secret-undo': {
+          delete st.secrets[key];
+          if (st.secretOpen) delete st.secretOpen[key];
+          redrawOption(st, key);
+          schedulePreview(st);
+          return;
+        }
+        case 'port-reset': {
+          const def = (st.panel.port_definitions || []).find(p => p.key === key);
+          if (!def) return;
+          st.ports[key] = def.default ? String(def.default) : '';
+          st.ports[key + '_BIND'] = def.bind || '0.0.0.0';
+          const host = el.querySelector('[data-port="' + CSS.escape(key) + '"]');
+          const bindEl = el.querySelector('[data-port="' + CSS.escape(key + '_BIND') + '"]');
+          if (host) host.value = st.ports[key];
+          if (bindEl) bindEl.value = st.ports[key + '_BIND'];
+          schedulePreview(st);
+          return;
+        }
+      }
+    });
+
+    // Priority order: drag a row by its handle onto another row.
+    el.addEventListener('dragstart', e => {
+      const st = stOf();
+      const hdl = e.target.closest && e.target.closest('[data-handle]');
+      if (!st || !hdl) return;
+      st.drag = { key: hdl.dataset.key, uid: hdl.dataset.uid };
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', hdl.dataset.uid);
+      hdl.closest('[data-row]')?.classList.add('ps-dragging');
+    });
+    el.addEventListener('dragover', e => {
+      const st = stOf();
+      const row = e.target.closest && e.target.closest('[data-row]');
+      if (!st || !st.drag || !row || row.dataset.key !== st.drag.key) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      el.querySelectorAll('.ps-drop-before, .ps-drop-after').forEach(x => x.classList.remove('ps-drop-before', 'ps-drop-after'));
+      const r = row.getBoundingClientRect();
+      row.classList.add(e.clientY < r.top + r.height / 2 ? 'ps-drop-before' : 'ps-drop-after');
+    });
+    el.addEventListener('drop', e => {
+      const st = stOf();
+      const row = e.target.closest && e.target.closest('[data-row]');
+      if (!st || !st.drag || !row || row.dataset.key !== st.drag.key) return;
+      e.preventDefault();
+      const rows = rowList(st, st.drag.key);
+      const from = rows.findIndex(x => x.uid === st.drag.uid);
+      let to = rows.findIndex(x => x.uid === row.dataset.uid);
+      const r = row.getBoundingClientRect();
+      if (e.clientY >= r.top + r.height / 2) to++;
+      if (from < to) to--;
+      const key = st.drag.key;
+      st.drag = null;
+      if (moveRow(st, key, rows[from].uid, to)) schedulePreview(st);
+      redrawOption(st, key);
+    });
+    el.addEventListener('dragend', () => {
+      const st = stOf();
+      if (st) st.drag = null;
+      el.querySelectorAll('.ps-dragging, .ps-drop-before, .ps-drop-after').forEach(x => x.classList.remove('ps-dragging', 'ps-drop-before', 'ps-drop-after'));
+    });
+  }
+
+  window.PortcullisSettings = { render };
 })();

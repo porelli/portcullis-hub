@@ -45,11 +45,17 @@ type Population struct {
 // populationWhyLocked is why t's routes give per-person values to
 // nobody ("" = they carry Portcullis identity). Caller holds mu.
 func (h *Hub) populationWhyLocked(t *templates.Template) string {
+	return populationWhy(t, h.accessLocked(t).SignIn == SignInNative)
+}
+
+// populationWhy is populationWhyLocked with the sign-in mode given
+// (native: the app's own login only).
+func populationWhy(t *templates.Template, native bool) string {
 	a := &t.Manifest.Auth
 	switch {
 	case a.Method == "public", a.Method == "custom" && !a.HasNativeLogin():
 		return WhyNoIdentity
-	case h.accessLocked(t).SignIn == SignInNative:
+	case native:
 		return WhyNativeSignIn
 	}
 	return ""
@@ -78,7 +84,13 @@ func personOf(m *directory.Membership, user string) settings.Person {
 
 // populationLocked is t's population in m. Caller holds mu (read).
 func (h *Hub) populationLocked(t *templates.Template, m *directory.Membership) Population {
-	if why := h.populationWhyLocked(t); why != "" {
+	return populationIn(t, m, h.accessLocked(t).SignIn == SignInNative)
+}
+
+// populationIn is t's population in m with the sign-in mode given
+// (native: the app's own login only; a draft's mode in the preview).
+func populationIn(t *templates.Template, m *directory.Membership, native bool) Population {
+	if why := populationWhy(t, native); why != "" {
 		return Population{Why: why}
 	}
 	var users []string

@@ -529,3 +529,21 @@ func TestDirectoryAssetsServed(t *testing.T) {
 		t.Error("the hub index lost its Users & Groups tab (#users deep link)")
 	}
 }
+
+// TestSettingsAssetHubOnly: the settings panel's script is served on the
+// Hub listener only; the people listener serves just its own assets.
+func TestSettingsAssetHubOnly(t *testing.T) {
+	e := newPeopleEnv(t)
+	if r, b := doAs(t, e.hub, "root", "GET", "/static/settings.js", ""); r.StatusCode != 200 || !strings.HasPrefix(r.Header.Get("Content-Type"), "text/javascript") || !strings.Contains(b, "PortcullisSettings") {
+		t.Errorf("hub settings.js = %d %q", r.StatusCode, r.Header.Get("Content-Type"))
+	}
+	for _, p := range []string{"/static/settings.js", "/static/index.html", "/static/people.html", "/static/web.go"} {
+		if r, _ := doAs(t, e.people, "bob", "GET", p, ""); r.StatusCode != 404 {
+			t.Errorf("people %s = %d, want 404", p, r.StatusCode)
+		}
+	}
+	_, b := doAs(t, e.hub, "root", "GET", "/", "")
+	if !strings.Contains(b, `src="/static/settings.js"`) {
+		t.Error("the hub index does not load settings.js")
+	}
+}

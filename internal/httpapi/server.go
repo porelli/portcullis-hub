@@ -228,11 +228,13 @@ func (s *Server) handlePeoplePage(w http.ResponseWriter, r *http.Request) {
 	w.Write(data)
 }
 
-// handlePeopleStatic serves only the .js and .css assets on the people
-// listener (not the Hub's index.html template).
+// peopleStatic are the assets people.html loads: the people listener
+// serves these only (never the Hub's index.html or settings.js).
+var peopleStatic = map[string]bool{"directory.js": true, "directory.css": true}
+
+// handlePeopleStatic serves only peopleStatic on the people listener.
 func (s *Server) handlePeopleStatic(w http.ResponseWriter, r *http.Request) {
-	p := strings.TrimPrefix(r.URL.Path, "/static/")
-	if !strings.HasSuffix(p, ".js") && !strings.HasSuffix(p, ".css") {
+	if !peopleStatic[strings.TrimPrefix(r.URL.Path, "/static/")] {
 		http.NotFound(w, r)
 		return
 	}

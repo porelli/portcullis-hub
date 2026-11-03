@@ -268,8 +268,18 @@ func TestPreviewRoute(t *testing.T) {
 	if p.Effect != "none" || op.Changes != 1 || len(op.People) != 2 {
 		t.Errorf("preview = %s", b)
 	}
-	if code, b := e.do(t, "root", "GET", "/api/instances/vault/settings", ""); code != 200 || strings.Contains(b, "office_milan") {
-		t.Errorf("the preview stored the row: %s", b)
+	code, b = e.do(t, "root", "GET", "/api/instances/vault/settings", "")
+	var panel hub.SettingsPanel
+	if err := json.Unmarshal([]byte(b), &panel); code != 200 || err != nil {
+		t.Fatalf("panel = %d %v", code, err)
+	}
+	for _, r := range panel.Person["storage_quota"].Rows {
+		if r.Group == "office_milan" {
+			t.Errorf("the preview stored the row: %+v", panel.Person)
+		}
+	}
+	if p.Population.Count != 2 {
+		t.Errorf("preview population = %+v", p.Population)
 	}
 }
 

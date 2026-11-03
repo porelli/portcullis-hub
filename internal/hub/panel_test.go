@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -392,6 +393,87 @@ func TestSaveEnvSkipsUnchangedOwned(t *testing.T) {
 				t.Errorf("a changed %s = %v, want 400", k, err)
 			}
 			break
+		}
+	}
+}
+
+// A draft that switches to the app's own login reaches nobody: the
+// preview's population is empty with the native-sign-in reason, and
+// switching back to Portcullis sign-in brings the people back.
+func TestPreviewNativeSignInDraft(t *testing.T) {
+	m := mustRead(t, filepath.Join("testdata", "settings", "nativeapp", "manifest.yaml"))
+	c := mustRead(t, filepath.Join("testdata", "settings", "nativeapp", "compose.yml"))
+	f := newInstanceFixtureExtra(t, nil, nil, map[string][2]string{nativeID: {string(m), string(c)}})
+	if f.h.Template(nativeID) == nil {
+		t.Fatalf("nativeapp not loaded (see the log)")
+	}
+	f.h.SetAudit(&fakeAudit{})
+	people := newFakePeople()
+	people.addGroup("users_nativeapp", "alice", "bob")
+	f.h.SetPeople(people)
+
+	p, err := f.h.PreviewSettings(context.Background(), nativeID, SettingsUpdate{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Population.Count != 2 || p.Population.Why != "" || len(p.Options["seats"].People) != 2 {
+		t.Fatalf("gateway: population %+v, seats %+v", p.Population, p.Options["seats"])
+	}
+	p, err = f.h.PreviewSettings(context.Background(), nativeID, SettingsUpdate{SignIn: strp(SignInNative)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Population.Count != 0 || p.Population.Why != WhyNativeSignIn || len(p.Options["seats"].People) != 0 {
+		t.Errorf("native draft: population %+v, seats %+v", p.Population, p.Options["seats"])
+	}
+	if f.h.SignInMode(nativeID) != SignInGateway {
+		t.Errorf("the preview stored the sign-in mode")
+	}
+	// Stored native, draft back to gateway: the population is back.
+	if err := f.h.save(nativeID, SettingsUpdate{SignIn: strp(SignInNative)}); err != nil {
+		t.Fatal(err)
+	}
+	p, err = f.h.PreviewSettings(context.Background(), nativeID, SettingsUpdate{SignIn: strp(SignInGateway)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Population.Count != 2 || len(p.Options["seats"].People) != 2 {
+		t.Errorf("gateway draft over a stored native: population %+v", p.Population)
+	}
+	panel, err := f.h.SettingsPanel(context.Background(), nativeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if panel.Population.Why != WhyNativeSignIn {
+		t.Errorf("stored native: panel population %+v", panel.Population)
+	}
+}
+
+// The panel names the app, says whether it runs, and lists the
+// directory's groups for the row pickers.
+func TestPanelNameEnabledGroups(t *testing.T) {
+	f, _, _ := panelFixture(t)
+	p, err := f.h.SettingsPanel(context.Background(), "panelapp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Name != "Panel App" || p.Enabled {
+		t.Errorf("name %q enabled %v", p.Name, p.Enabled)
+	}
+	if got := strings.Join(p.DirectoryGroups, ","); got != "admin_panelapp,it_staff,office_milan,users_panelapp" {
+		t.Errorf("directory groups = %s", got)
+	}
+	if err := f.h.Enable("panelapp"); err != nil {
+		t.Fatal(err)
+	}
+	f.h.Wait()
+	if p, err = f.h.SettingsPanel(context.Background(), "panelapp"); err != nil || !p.Enabled {
+		t.Errorf("after enable: %v %v", p.Enabled, err)
+	}
+	b, _ := json.Marshal(p)
+	for _, k := range []string{`"name":"Panel App"`, `"enabled":true`, `"directory_groups":[`} {
+		if !strings.Contains(string(b), k) {
+			t.Errorf("panel JSON lacks %s", k)
 		}
 	}
 }
