@@ -24,13 +24,12 @@ import (
 	"github.com/portcullis/hub/internal/templates"
 )
 
-// AppSettingsView is the GET /api/templates/settings/<id> payload.
+// AppSettingsView is an instance's policy, sign-in and public-access
+// part of the settings panel (SettingsPanel embeds it).
 type AppSettingsView struct {
-	Definitions []templates.Option `json:"definitions"`
-	Ports       []templates.Port   `json:"ports"`
-	// Values are the stored port settings and instance option values
-	// (canonical; never secrets).
-	Values map[string]any `json:"values"`
+	// PortDefinitions are the template's declared ports (the stored
+	// values are SettingsPanel.Ports).
+	PortDefinitions []templates.Port `json:"port_definitions"`
 	// EffectivePolicy is what applies: the configured policy (override or
 	// global default) intersected with what the app can enforce.
 	EffectivePolicy policy.AuthPolicy `json:"effective_policy"`
@@ -79,9 +78,7 @@ func (h *Hub) AppSettings(id string) (*AppSettingsView, error) {
 	}
 	pub := h.publicLocked(t, t.Public)
 	v := &AppSettingsView{
-		Definitions:     t.Manifest.Options(),
-		Ports:           t.Manifest.Ports,
-		Values:          settingsValues(h.st.Settings[id]),
+		PortDefinitions: t.Manifest.Ports,
 		EffectivePolicy: eff,
 		DefaultPolicy:   h.st.Default(),
 		SafetyScore:     policy.SafetyScore(eff),
@@ -104,18 +101,6 @@ func (h *Hub) AppSettings(id string) (*AppSettingsView, error) {
 	v.PublicAccess = h.publicViewLocked(t, eff)
 	v.Secrets = h.secretViewsLocked(t)
 	return v, nil
-}
-
-// settingsValues is the view's flat values: ports and instance values.
-func settingsValues(s state.InstanceSettings) map[string]any {
-	out := make(map[string]any, len(s.Ports)+len(s.Values))
-	for k, v := range s.Ports {
-		out[k] = v
-	}
-	for k, v := range s.Values {
-		out[k] = v
-	}
-	return out
 }
 
 // SignInMode returns an app's sign-in mode ("" for apps without their own
@@ -141,6 +126,9 @@ type parsedSettings struct {
 	// secrets: the secret changes (a value given or generated, or a
 	// clear). Never logged or echoed.
 	secrets map[string]secretOp
+	// sentIDs: option key → lowercase group → the group id the panel
+	// sent with the row (GroupValueInput.GroupID; absent = a new row).
+	sentIDs map[string]map[string]int
 }
 
 // secretOp is one parsed secret change.
@@ -323,7 +311,18 @@ func parsePerson(kinds *settings.Registry, folders FolderSource, o *templates.Op
 // parseSettings validates u's settings part against t (ValidateSettings)
 // and returns it canonical.
 func parseSettings(t *templates.Template, kinds *settings.Registry, folders FolderSource, u SettingsUpdate) (*parsedSettings, error) {
-	out := &parsedSettings{values: map[string]any{}, person: map[string]state.PersonSetting{}, groups: map[string][]state.GroupValue{}, secrets: map[string]secretOp{}}
+	out := &parsedSettings{values: map[string]any{}, person: map[string]state.PersonSetting{}, groups: map[string][]state.GroupValue{}, secrets: map[string]secretOp{}, sentIDs: map[string]map[string]int{}}
+	sent := func(key string, in []GroupValueInput) {
+		for _, r := range in {
+			if r.GroupID == 0 {
+				continue
+			}
+			if out.sentIDs[key] == nil {
+				out.sentIDs[key] = map[string]int{}
+			}
+			out.sentIDs[key][strings.ToLower(r.Group)] = r.GroupID
+		}
+	}
 	if u.Ports != nil {
 		if err := validatePorts(t, u.Ports); err != nil {
 			return nil, err
@@ -373,6 +372,7 @@ func parseSettings(t *templates.Template, kinds *settings.Registry, folders Fold
 			return nil, err
 		}
 		pc := u.Person[k]
+		sent(k, pc.Rows)
 		def, err := decodeRaw(pc.Default)
 		if err != nil {
 			return nil, statusErr(400, "setting %s: default: %v", k, err)
@@ -392,6 +392,7 @@ func parseSettings(t *templates.Template, kinds *settings.Registry, folders Fold
 		if err != nil {
 			return nil, err
 		}
+		sent(k, u.Groups[k])
 		in, err := rowsFromInput(o, u.Groups[k])
 		if err != nil {
 			return nil, err
@@ -667,15 +668,21 @@ type SettingsUpdate struct {
 
 // PersonChange is a per-person option's new configuration.
 type PersonChange struct {
-	Default json.RawMessage
-	Resolve string
-	Rows    []GroupValueInput
+	Default json.RawMessage   `json:"default"`
+	Resolve string            `json:"resolve,omitempty"`
+	Rows    []GroupValueInput `json:"rows"`
 }
 
 // GroupValueInput is one per-group row or record as the API sends it.
+//
+// GroupID is the id the panel showed for a stored row (0 = a new row):
+// a save whose GroupID differs from the stored row's is refused 409
+// (staleRebind) — the row was purged, or its group re-created, since the
+// panel was loaded.
 type GroupValueInput struct {
-	Group string
-	Value json.RawMessage
+	Group   string          `json:"group"`
+	Value   json.RawMessage `json:"value"`
+	GroupID int             `json:"group_id,omitempty"`
 }
 
 // SecretChange changes a secret option: a new value, a generated one, or
@@ -709,7 +716,7 @@ const (
 type UnitResult struct {
 	Unit    string `json:"unit"`              // "env" | "file:<name>" | "hook:<name>" | "claim:<attr>" | "headers" | "reload" | "restart"
 	OK      bool   `json:"ok"`                //
-	Skipped string `json:"skipped,omitempty"` // "unchanged" | "not running" | "directory unavailable" | "busy" | "superseded"
+	Skipped string `json:"skipped,omitempty"` // Skip*: "unchanged" | "not running" | "directory unavailable" | "busy" | "superseded" | "not supported" | "previous run still running"
 	// Message: what OK means ("reload signal sent, app still running").
 	Message string    `json:"message,omitempty"`
 	Error   string    `json:"error,omitempty"` // redacted, then clipped (2000)
@@ -776,6 +783,7 @@ func (h *Hub) SaveSettings(id string, u SettingsUpdate, actor string) (_ *SaveRe
 	pendErr := h.pendingLocked(id)
 	native := h.st.SignIn[id] == state.SignInNative
 	folders := h.folders
+	u = withPlaceholders(t, h.st.Settings[id], u)
 	h.mu.RUnlock()
 	if pendErr != nil {
 		return nil, pendErr
@@ -1338,31 +1346,46 @@ func (h *Hub) Env(id string) (map[string]string, []string, error) {
 	return vars, templates.Services(t.ReadCompose()), nil
 }
 
-// SaveEnv sets variables in an app's .env. A variable an option owns
-// (its env delivery) is refused: it is set under Settings, which writes it.
+// SaveEnv sets variables in an app's .env. The Expert UI posts every
+// variable back: a variable an option owns (its env delivery) or the Hub
+// sets (instance variables, PORTCULLIS_*) is skipped when its value is
+// unchanged (a set secret's [set] counts as unchanged) and refused (400)
+// when it was changed — options are set under Settings, which writes
+// them.
 func (h *Hub) SaveEnv(id string, vars map[string]string) error {
 	t := h.Template(id)
 	if t == nil {
 		return ErrNotFound
 	}
 	owners := optionEnvOwners(t)
+	secretNames := secretOptionEnvNames(t)
 	if err := h.pending(id); err != nil {
 		return err
 	}
-	for k, v := range vars {
+	cur := readEnvFile(h.envPath(id))
+	write := map[string]string{}
+	for _, k := range slices.Sorted(maps.Keys(vars)) {
+		v := vars[k]
 		if !templates.EnvKeyRe.MatchString(k) || templates.HasControlChars(v) {
 			return statusErr(400, "invalid variable %q (keys: [A-Za-z_][A-Za-z0-9_]*, values: no newlines)", k)
 		}
+		o, owned := owners[k]
+		hubSet := templates.ReservedVar(k) || k == "PORTCULLIS_DOMAIN"
+		if !owned && !hubSet {
+			write[k] = v
+			continue
+		}
+		if v == cur[k] || (secretNames[k] && cur[k] != "" && v == settings.SecretShown) {
+			continue // posted back unchanged
+		}
 		// Routing, hostnames and names come from the Hub, never the env.
-		if templates.ReservedVar(k) || k == "PORTCULLIS_DOMAIN" {
+		if hubSet {
 			return statusErr(400, "%s is set by the Hub", k)
 		}
-		if o, ok := owners[k]; ok {
-			return statusErr(400, "%s belongs to the setting %s: set it under Settings", k, o)
-		}
+		return statusErr(400, "%s belongs to the setting %s: set it under Settings", k, o)
 	}
-	for k, v := range vars {
-		if err := setEnvVar(h.envPath(id), k, v); err != nil {
+	for _, k := range slices.Sorted(maps.Keys(write)) {
+		if err := setEnvVar(h.envPath(id), k, write[k]); err != nil {
 			return statusErr(500, "failed to write env: %v", err)
 		}
 	}

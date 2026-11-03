@@ -145,8 +145,8 @@ func TestOverrideValidation(t *testing.T) {
 	if err := saveApp(t, f, "grafana", SettingsUpdate{Values: vals("gf_theme", "light"), Policy: &policy.AuthPolicy{Factors: []string{"password"}}}); statusOf(err) != 400 {
 		t.Fatal(err)
 	}
-	if v := view(t, f, "grafana"); v.Values["gf_theme"] != nil {
-		t.Errorf("settings stored despite a refused policy: %v", v.Values)
+	if v := storedSettings(f, "grafana").Values; v["gf_theme"] != nil {
+		t.Errorf("settings stored despite a refused policy: %v", v)
 	}
 	for id, p := range map[string]policy.AuthPolicy{
 		"vault":   {Factors: []string{"mtls"}},

@@ -818,9 +818,13 @@
     async function loadSettings(id) {
       const container = document.getElementById('detail-settings-' + id);
       try {
-        const data = await apiGet('/api/templates/settings/' + id);
-        const hasSettings = data.definitions && data.definitions.length > 0;
-        const hasPorts = data.ports && data.ports.length > 0;
+        // Interim (Task 13): the instance settings panel; Task 14 replaces
+        // this form. Only instance options (no secrets) and ports here.
+        const data = await apiGet('/api/instances/' + encodeURIComponent(id) + '/settings');
+        const defs = (data.options || []).filter(o => (!o.scope || o.scope === 'instance') && o.type !== 'secret');
+        const portDefs = data.port_definitions || [];
+        const hasSettings = defs.length > 0;
+        const hasPorts = portDefs.length > 0;
         // Access policy always rendered — every app gets a policy knob.
         let html = '<form class="settings-form" onsubmit="saveSettings(event, \'' + id + '\')">';
         html += renderSignIn(id, data.sign_in);
@@ -831,8 +835,8 @@
           container.innerHTML = html;
           return;
         }
-        for (const s of (data.definitions || [])) {
-          const raw = data.values ? data.values[s.key] : undefined;
+        for (const s of defs) {
+          const raw = data.instance ? data.instance[s.key] : undefined;
           const shown = raw == null ? s.default : raw;
           const val = shown == null ? '' : (Array.isArray(shown) ? shown.join(',') : String(shown));
           html += '<div class="form-group">';
@@ -854,10 +858,10 @@
         }
         if (hasPorts) {
           html += '<div class="ports-section"><div class="ports-title">Host Ports</div>';
-          for (const p of data.ports) {
+          for (const p of portDefs) {
             const proto = (p.protocol || 'tcp').toLowerCase();
             const bindKey = p.key + '_BIND';
-            const vals = data.values || {};
+            const vals = data.ports || {};
             const hostVal = (p.key in vals) ? vals[p.key] : String(p.default || '');
             const bindVal = vals[bindKey] || p.bind || '0.0.0.0';
             const isRange = !!p.range;
@@ -916,27 +920,42 @@
       e.preventDefault();
       e.stopPropagation();
       const form = e.target;
-      const payload = {};
+      const flat = {};
       // Non-policy fields (text inputs, selects, port inputs, etc.)
       const policySuffixes = [id + '-factor', id + '-op', id + '-inherit', id + '-none'];
       for (const el of form.elements) {
         if (!el.name) continue;
         if (policySuffixes.includes(el.name) || el.name.startsWith('__pub_') || el.name === '__signin') continue;
-        payload[el.name] = el.value.trim();
+        flat[el.name] = el.value.trim();
+      }
+      // Interim (Task 13): the instance settings body; Task 14 replaces it.
+      const payload = { values: {} };
+      const portKeys = new Set();
+      for (const el of form.querySelectorAll('.ports-section input[name]')) portKeys.add(el.name);
+      if (portKeys.size > 0) payload.ports = {};
+      for (const [k, v] of Object.entries(flat)) {
+        if (portKeys.has(k)) { payload.ports[k] = v; continue; }
+        const sel = form.elements[k];
+        const isBool = sel && sel.tagName === 'SELECT' && sel.options.length === 2 && sel.options[0].value === 'false';
+        payload.values[k] = v === '' ? null : (isBool ? v === 'true' : v);
       }
       const signIn = form.querySelector('input[name="__signin"]:checked');
-      if (signIn) payload._sign_in = signIn.value;
+      if (signIn) payload.sign_in = signIn.value;
       const { skip, inherit, policy } = collectPolicy(form, id);
       if (skip) {
         // Nothing to enforce (own sign-in): leave the stored policy alone.
       } else if (inherit) {
-        payload._auth_policy_inherit = 'true';
+        payload.auth_policy_inherit = true;
       } else {
-        payload._auth_policy = policy;
+        payload.auth_policy = policy;
       }
-      collectPublic(form, payload);
+      const pub = {};
+      collectPublic(form, pub);
+      if ('_public_access' in pub) payload.public_access = pub._public_access;
+      if ('_public_mode' in pub) payload.public_mode = pub._public_mode;
+      if ('_public_tokens' in pub) payload.public_tokens = pub._public_tokens;
       try {
-        await apiPut('/api/templates/settings/' + id, payload);
+        await apiPut('/api/instances/' + encodeURIComponent(id) + '/settings', payload);
         showToast('Saved. App will restart if running.', 'success');
         // Re-render so the new effective policy + score show.
         loadSettings(id);

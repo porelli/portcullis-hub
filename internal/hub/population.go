@@ -10,6 +10,7 @@ import (
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/settings"
+	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
 )
 
@@ -168,9 +169,15 @@ func placeholderGroup(t *templates.Template, g string) string {
 // closed), placeholders resolved to the instance's group names, unbound
 // rows (id 0) left out — they grant nothing. Caller holds mu (read).
 func (h *Hub) personConfigLocked(t *templates.Template, key string) settings.PersonConfig {
+	return h.personConfigFrom(t, key, h.st.Settings[t.ID])
+}
+
+// personConfigFrom is personConfigLocked for the settings s (stored, or
+// a preview's draft).
+func (h *Hub) personConfigFrom(t *templates.Template, key string, s state.InstanceSettings) settings.PersonConfig {
 	o := optionByKey(t, key)
-	ps, ok := h.st.Settings[t.ID].Person[key]
-	if o == nil || !ok || !h.typeMatchesLocked(t, key, o) {
+	ps, ok := s.Person[key]
+	if typ := s.Types[key]; o == nil || !ok || (typ != "" && typ != o.Type) {
 		pc := settings.PersonConfig{}
 		if o != nil {
 			pc.Default, _ = h.kinds.Parse(o, o.Default)
@@ -203,7 +210,12 @@ func (h *Hub) personConfigLocked(t *templates.Template, key string) settings.Per
 // a rule changed) grants the option's lowest-ranked value from that
 // moment — never dropped, so it can't lift a min or a priority either.
 func (h *Hub) personConfigForLocked(t *templates.Template, key string, m *directory.Membership) settings.PersonConfig {
-	pc := h.personConfigLocked(t, key)
+	return h.personConfigForFrom(t, key, h.st.Settings[t.ID], m)
+}
+
+// personConfigForFrom is personConfigForLocked for the settings s.
+func (h *Hub) personConfigForFrom(t *templates.Template, key string, s state.InstanceSettings, m *directory.Membership) settings.PersonConfig {
+	pc := h.personConfigFrom(t, key, s)
 	o := optionByKey(t, key)
 	if o == nil || !o.Privileged {
 		return pc

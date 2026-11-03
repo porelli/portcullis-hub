@@ -207,8 +207,8 @@ func TestPortCollision(t *testing.T) {
 	if statusOf(err) != 409 {
 		t.Errorf("err = %v", err)
 	}
-	if v, _ := f.h.AppSettings("other"); v.Values["OTHER_PORT"] != "3301" {
-		t.Errorf("settings not rolled back: %v", v.Values)
+	if v := storedSettings(f, "other").Ports; v["OTHER_PORT"] != "3301" {
+		t.Errorf("settings not rolled back: %v", v)
 	}
 }
 

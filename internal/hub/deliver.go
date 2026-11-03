@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 	"sync"
 	"time"
 
@@ -537,10 +536,6 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 		_, recorded := delivered.Hashes[unitHeaders]
 		headers = h.buildHeadersLocked(&tmpl, m, recorded)
 	}
-	why := h.populationWhyLocked(&tmpl)
-	if m != nil {
-		why = h.populationLocked(&tmpl, m).Why
-	}
 	var hookOuts []hookOutput
 	if !opt.lifecycle {
 		hookOuts = h.buildHooksLocked(&tmpl, m)
@@ -559,7 +554,6 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 		return live != nil && h.deliveryGenLocked(live) == gen
 	}
 	finish := func() {
-		annotateWhy(&tmpl, rep.Units, why)
 		for _, u := range rep.Units {
 			delivered.Status[u.Unit] = u
 		}
@@ -774,37 +768,4 @@ func sortedFiles(t *templates.Template) []templates.DataFile {
 		return 0
 	})
 	return fs
-}
-
-// annotateWhy sets the population's reason (why) on the units that
-// deliver per-person values when it is empty for a reason (sign_in
-// native, no Portcullis identity, no access group): the panel shows why
-// they carry nobody.
-func annotateWhy(t *templates.Template, units []UnitResult, why string) {
-	if why == "" {
-		return
-	}
-	for i := range units {
-		u := &units[i]
-		if u.Error != "" || u.Message != "" || (u.Skipped != "" && u.Skipped != SkipUnchanged) {
-			continue
-		}
-		name := ""
-		switch {
-		case strings.HasPrefix(u.Unit, "file:"):
-			name = strings.TrimPrefix(u.Unit, "file:")
-			if !fileNeedsPeople(t, name) {
-				continue
-			}
-		case strings.HasPrefix(u.Unit, "hook:"):
-			name = strings.TrimPrefix(u.Unit, "hook:")
-			if !hookNeedsPeople(t, name) {
-				continue
-			}
-		case strings.HasPrefix(u.Unit, claimUnitPrefix), u.Unit == unitHeaders:
-		default:
-			continue
-		}
-		u.Message = why
-	}
 }

@@ -103,6 +103,32 @@ func isPlaceholder(g string) bool {
 // hold privileged values (400 with the directory's reason) and its
 // default must be its lowest-ranked value. Directory unavailable: 503.
 func (h *Hub) bindRowsForSave(ctx context.Context, t *templates.Template, parsed *parsedSettings) ([]string, error) {
+	if err := privilegedDefaults(t, parsed); err != nil {
+		return nil, err
+	}
+	if rowCount(parsed) == 0 {
+		return nil, nil // nothing to bind: no directory needed
+	}
+	m, err := h.membership(ctx)
+	if err != nil {
+		return nil, bindDirectoryErr(err)
+	}
+	return h.bindRowsWith(t, parsed, m)
+}
+
+// privilegedDefaults: a privileged option's default must be its
+// lowest-ranked value (400).
+func privilegedDefaults(t *templates.Template, parsed *parsedSettings) error {
+	for _, k := range slices.Sorted(maps.Keys(parsed.person)) {
+		if o := optionByKey(t, k); o.Privileged && !reflect.DeepEqual(parsed.person[k].Default, lowestValue(o)) {
+			return statusErr(400, "setting %s: a privileged option's default must be its lowest-ranked value %v", k, lowestValue(o))
+		}
+	}
+	return nil
+}
+
+// rowCount is the number of rows and records parsed carries.
+func rowCount(parsed *parsedSettings) int {
 	n := 0
 	for _, p := range parsed.person {
 		n += len(p.Rows)
@@ -110,23 +136,22 @@ func (h *Hub) bindRowsForSave(ctx context.Context, t *templates.Template, parsed
 	for _, recs := range parsed.groups {
 		n += len(recs)
 	}
-	for _, k := range slices.Sorted(maps.Keys(parsed.person)) {
-		if o := optionByKey(t, k); o.Privileged && !reflect.DeepEqual(parsed.person[k].Default, lowestValue(o)) {
-			return nil, statusErr(400, "setting %s: a privileged option's default must be its lowest-ranked value %v", k, lowestValue(o))
-		}
+	return n
+}
+
+// bindDirectoryErr is the error of a save or preview whose rows can't be
+// bound: the directory's status (503 by default).
+func bindDirectoryErr(err error) error {
+	status := 503
+	var se *StatusError
+	if errors.As(err, &se) {
+		status = se.Status
 	}
-	if n == 0 {
-		return nil, nil // nothing to bind: no directory needed
-	}
-	m, err := h.membership(ctx)
-	if err != nil {
-		status := 503
-		var se *StatusError
-		if errors.As(err, &se) {
-			status = se.Status
-		}
-		return nil, &StatusError{Status: status, Err: fmt.Errorf("per-person and per-group values need the directory to bind their groups (nothing was saved): %w", err)}
-	}
+	return &StatusError{Status: status, Err: fmt.Errorf("per-person and per-group values need the directory to bind their groups (nothing was saved): %w", err)}
+}
+
+// bindRowsWith is bindRowsForSave against the snapshot m (no lock held).
+func (h *Hub) bindRowsWith(t *templates.Template, parsed *parsedSettings, m *directory.Membership) ([]string, error) {
 	var warnings []string
 	bind := func(o *templates.Option, rows []state.GroupValue) error {
 		seen := map[string]string{}
@@ -177,14 +202,29 @@ func (h *Hub) bindRowsForSave(ctx context.Context, t *templates.Template, parsed
 // value must not pass to the new group just because the panel resent the
 // row (call 29). The admin removes the row and adds it again. Checked
 // under mu against the stored state.
+//
+// The panel also sends back the id each row was shown with
+// (parsed.sentIDs): a row sent with an id must still be stored with that
+// id — a row purged since (its group deleted, perhaps re-created) or
+// bound to another id is the same 409. A row sent without an id is a
+// new row.
 func staleRebind(cur state.InstanceSettings, parsed *parsedSettings) error {
 	check := func(key string, stored, sent []state.GroupValue) error {
 		old := map[string]int{}
+		folded := map[string]int{}
 		for _, r := range stored {
 			old[r.Group] = r.GroupID
+			folded[strings.ToLower(r.Group)] = r.GroupID
 		}
 		for _, r := range sent {
 			if id := old[r.Group]; id != 0 && r.GroupID != 0 && id != r.GroupID {
+				return statusErr(409, "setting %s: group %s was re-created since its row was saved; remove the row and add it again", key, r.Group)
+			}
+			want, sentID := parsed.sentIDs[key][strings.ToLower(r.Group)]
+			if !sentID {
+				continue
+			}
+			if have, ok := folded[strings.ToLower(r.Group)]; !ok || have != want {
 				return statusErr(409, "setting %s: group %s was re-created since its row was saved; remove the row and add it again", key, r.Group)
 			}
 		}

@@ -3,7 +3,6 @@ package httpapi
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"html/template"
 	"io/fs"
 	"log"
@@ -49,7 +48,6 @@ func (s *Server) Handler() (http.Handler, error) {
 	mux.HandleFunc("/api/templates", s.handleTemplates)
 	mux.HandleFunc("/api/templates/enable", s.handleEnable)
 	mux.HandleFunc("/api/templates/disable", s.handleDisable)
-	mux.HandleFunc("/api/templates/settings/", s.handleTemplateSettings)
 	mux.HandleFunc("/api/templates/status/", s.handleTemplateStatus)
 	mux.HandleFunc("/api/templates/logs/", s.handleTemplateLogs)
 	mux.HandleFunc("/api/templates/compose/", s.handleTemplateCompose)
@@ -70,6 +68,7 @@ func (s *Server) Handler() (http.Handler, error) {
 	// Hub listener only (never people, contract §11.7).
 	s.registerDomains(mux)
 	s.registerInstances(mux)
+	s.registerSettings(mux)
 	return ProxySecret(s.Secret, CSRF(mux)), nil
 }
 
@@ -446,44 +445,6 @@ func (s *Server) handleSyncSources(w http.ResponseWriter, r *http.Request) {
 
 // ── settings ─────────────────────────────────────────────
 
-func (s *Server) handleTemplateSettings(w http.ResponseWriter, r *http.Request) {
-	id, ok := appID(w, r, "/api/templates/settings/")
-	if !ok {
-		return
-	}
-	switch r.Method {
-	case http.MethodGet:
-		v, err := s.Hub.AppSettings(id)
-		if err != nil {
-			writeErr(w, err, http.StatusInternalServerError)
-			return
-		}
-		writeJSON(w, v)
-	case http.MethodPut:
-		var raw map[string]interface{}
-		if !decodeJSON(w, r, &raw) {
-			return
-		}
-		u, err := parseSettingsUpdate(raw, s.Hub.Template(id))
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		before := s.Hub.SignInMode(id)
-		res, err := s.Hub.SaveSettings(id, u, r.Header.Get("X-Forwarded-User"))
-		if u.SignIn != nil && (err != nil || s.Hub.SignInMode(id) != before) {
-			s.auditSignIn(r, id, before, *u.SignIn, err)
-		}
-		if err != nil {
-			writeErr(w, err, http.StatusInternalServerError)
-			return
-		}
-		writeJSON(w, map[string]interface{}{"status": "saved", "result": res})
-	default:
-		http.Error(w, "GET or PUT only", http.StatusMethodNotAllowed)
-	}
-}
-
 // auditSignIn records a change (or refused change) of an app's sign-in
 // mode in the Hub's audit log: switching to the app's own login removes
 // Portcullis from in front of it.
@@ -521,133 +482,6 @@ func (s *Server) audit(e directory.AuditEntry, err error) {
 	if aerr := l.Append(e); aerr != nil {
 		log.Printf("audit: %v", aerr)
 	}
-}
-
-// parseSettingsUpdate splits the settings PUT body: the template's port
-// keys (and <KEY>_BIND) are its port configuration, any other key an
-// option value (as the panel form sends them: "" = back to the default,
-// "true"/"false" for a bool option), plus reserved keys — _sign_in ("gateway"/"native", apps with
-// their own login), _auth_policy ({factors, op}),
-// _auth_policy_inherit (true/"true" drops the per-app override),
-// _public_access (true/false/"default"), _public_mode ("all"/"listed"/""
-// for the template default) and _public_tokens (share URLs or tokens).
-func parseSettingsUpdate(raw map[string]interface{}, t *templates.Template) (hub.SettingsUpdate, error) {
-	var u hub.SettingsUpdate
-	if v, ok := raw["_auth_policy_inherit"]; ok {
-		switch tv := v.(type) {
-		case bool:
-			u.Inherit = tv
-		case string:
-			u.Inherit = tv == "true"
-		}
-		delete(raw, "_auth_policy_inherit")
-	}
-	if v, ok := raw["_auth_policy"]; ok && v != nil {
-		if m, ok := v.(map[string]interface{}); ok {
-			p := policy.AuthPolicy{}
-			if fs, ok := m["factors"].([]interface{}); ok {
-				for _, f := range fs {
-					if s, ok := f.(string); ok {
-						p.Factors = append(p.Factors, s)
-					}
-				}
-			}
-			if s, ok := m["op"].(string); ok {
-				p.Op = s
-			}
-			u.Policy = &p
-		}
-	}
-	delete(raw, "_auth_policy")
-	if v, ok := raw["_sign_in"]; ok {
-		m, isStr := v.(string)
-		if !isStr {
-			return u, fmt.Errorf("_sign_in must be %q or %q", hub.SignInGateway, hub.SignInNative)
-		}
-		u.SignIn = &m
-		delete(raw, "_sign_in")
-	}
-	if v, ok := raw["_public_access"]; ok {
-		// true / false: the admin's choice; "default": back to the
-		// template's enabled_by_default.
-		switch tv := v.(type) {
-		case bool:
-			u.PublicAccess = &tv
-		case string:
-			switch tv {
-			case "true", "false":
-				on := tv == "true"
-				u.PublicAccess = &on
-			case "default":
-				u.PublicAccessDefault = true
-			default:
-				return u, fmt.Errorf("_public_access must be true, false or \"default\"")
-			}
-		default:
-			return u, fmt.Errorf("_public_access must be true, false or \"default\"")
-		}
-		delete(raw, "_public_access")
-	}
-	if v, ok := raw["_public_mode"]; ok {
-		m, isStr := v.(string)
-		if !isStr {
-			return u, fmt.Errorf("_public_mode must be a string")
-		}
-		u.PublicMode = &m
-		delete(raw, "_public_mode")
-	}
-	if v, ok := raw["_public_tokens"]; ok {
-		list, isList := v.([]interface{})
-		if !isList {
-			return u, fmt.Errorf("_public_tokens must be a list of share URLs or tokens")
-		}
-		toks := make([]string, 0, len(list))
-		for _, item := range list {
-			s, isStr := item.(string)
-			if !isStr {
-				return u, fmt.Errorf("_public_tokens must be a list of share URLs or tokens")
-			}
-			toks = append(toks, s)
-		}
-		u.PublicTokens = &toks
-		delete(raw, "_public_tokens")
-	}
-	ports := map[string]bool{}
-	bools := map[string]bool{}
-	if t != nil {
-		for _, p := range t.Manifest.Ports {
-			ports[p.Key], ports[p.Key+"_BIND"] = true, true
-		}
-		for _, o := range t.Manifest.Options() {
-			bools[o.Key] = o.Type == templates.TypeBool
-		}
-	}
-	u.Values = make(map[string]json.RawMessage, len(raw))
-	for k, v := range raw {
-		if ports[k] {
-			if s, ok := v.(string); ok {
-				if u.Ports == nil {
-					u.Ports = map[string]string{}
-				}
-				u.Ports[k] = s
-			}
-			continue
-		}
-		if str, ok := v.(string); ok {
-			switch {
-			case str == "":
-				v = nil
-			case bools[k] && (str == "true" || str == "false"):
-				v = str == "true"
-			}
-		}
-		b, err := json.Marshal(v)
-		if err != nil {
-			return u, fmt.Errorf("setting %s: %v", k, err)
-		}
-		u.Values[k] = b
-	}
-	return u, nil
 }
 
 func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {

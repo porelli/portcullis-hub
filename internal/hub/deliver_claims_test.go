@@ -419,14 +419,15 @@ func TestNativeSignInClearsPersonDeliveries(t *testing.T) {
 	if len(runs) == 0 || len(runs[len(runs)-1].People) != 0 {
 		t.Errorf("hook people after native sign-in = %+v", runs)
 	}
+	// The reason is the panel's population (never a unit message).
 	for _, name := range []string{"file:people", "hook:apply"} {
-		if u, ok := unit(rep, name); !ok || u.Message != WhyNativeSignIn {
-			t.Errorf("%s = %+v (%v), want the reason %q", name, u, ok, WhyNativeSignIn)
+		if u, ok := unit(rep, name); !ok || u.Message == WhyNativeSignIn {
+			t.Errorf("%s = %+v (%v)", name, u, ok)
 		}
 	}
-	st := f.h.DeliveryStatus(nativeID)
-	if st.Units["file:people"].Message != WhyNativeSignIn {
-		t.Errorf("panel status = %+v", st.Units["file:people"])
+	p, err := f.h.SettingsPanel(context.Background(), nativeID)
+	if err != nil || p.Population.Why != WhyNativeSignIn || p.Population.Count != 0 {
+		t.Errorf("panel population = %+v, %v; want the reason %q", p.Population, err, WhyNativeSignIn)
 	}
 }
 

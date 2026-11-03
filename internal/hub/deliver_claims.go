@@ -765,10 +765,6 @@ func (h *Hub) runClaimsOnly(ctx context.Context, id string) error {
 	gen := h.deliveryGenLocked(&tmpl)
 	plan := h.buildClaimsLocked(&tmpl, m)
 	headers := h.buildHeadersLocked(&tmpl, m, headersRecorded)
-	why := h.populationWhyLocked(&tmpl)
-	if m != nil {
-		why = h.populationLocked(&tmpl, m).Why
-	}
 	h.mu.RUnlock()
 	current := func() bool {
 		live := h.findLocked(id)
@@ -788,7 +784,6 @@ func (h *Hub) runClaimsOnly(ctx context.Context, id string) error {
 		h.queueDelivery(id, TriggerMembership, settings.EffectNone, 0)
 		return nil
 	}
-	annotateWhy(&tmpl, units, why)
 	for _, u := range units {
 		delivered.Status[u.Unit] = u
 	}
