@@ -53,7 +53,7 @@ func goldenRun(t *testing.T, v2 bool) (*fixture, map[string]string) {
 	st := state.New()
 	st.Sources = []state.Source{{Name: "local", Path: f.src}}
 	st.Enabled = []string{"grafana", "disks"}
-	st.Settings["grafana"] = map[string]string{"GRAFANA_PORT": "3301", "gf_theme": "dark"}
+	st.Settings["grafana"] = state.InstanceSettings{Ports: map[string]string{"GRAFANA_PORT": "3301"}, Values: map[string]any{"gf_theme": "dark"}}
 	os.MkdirAll(f.data, 0755)
 	if err := st.Save(filepath.Join(f.data, "state.yaml")); err != nil {
 		t.Fatal(err)

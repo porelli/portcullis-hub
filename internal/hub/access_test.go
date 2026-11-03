@@ -50,10 +50,7 @@ func newAccessFixture(t *testing.T) *fixture {
 
 func saveApp(t *testing.T, f *fixture, id string, u SettingsUpdate) error {
 	t.Helper()
-	if u.Values == nil {
-		u.Values = map[string]string{}
-	}
-	err := f.h.SaveSettings(id, u)
+	err := f.h.save(id, u)
 	f.h.Wait()
 	return err
 }
@@ -145,10 +142,10 @@ func TestOverrideValidation(t *testing.T) {
 		}
 	}
 	// Refused before anything is stored, settings included.
-	if err := saveApp(t, f, "grafana", SettingsUpdate{Values: map[string]string{"gf_theme": "light"}, Policy: &policy.AuthPolicy{Factors: []string{"password"}}}); statusOf(err) != 400 {
+	if err := saveApp(t, f, "grafana", SettingsUpdate{Values: vals("gf_theme", "light"), Policy: &policy.AuthPolicy{Factors: []string{"password"}}}); statusOf(err) != 400 {
 		t.Fatal(err)
 	}
-	if v := view(t, f, "grafana"); v.Values["gf_theme"] != "" {
+	if v := view(t, f, "grafana"); v.Values["gf_theme"] != nil {
 		t.Errorf("settings stored despite a refused policy: %v", v.Values)
 	}
 	for id, p := range map[string]policy.AuthPolicy{

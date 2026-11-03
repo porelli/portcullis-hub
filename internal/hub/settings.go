@@ -3,15 +3,23 @@ package hub
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
+	"maps"
 	"net"
 	"os"
+	"path"
+	"reflect"
+	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/portcullis/hub/internal/keycloak"
+	"github.com/portcullis/hub/internal/lldap"
 	"github.com/portcullis/hub/internal/policy"
+	"github.com/portcullis/hub/internal/settings"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
 )
@@ -20,7 +28,9 @@ import (
 type AppSettingsView struct {
 	Definitions []templates.Option `json:"definitions"`
 	Ports       []templates.Port   `json:"ports"`
-	Values      map[string]string  `json:"values"`
+	// Values are the stored port settings and instance option values
+	// (canonical; never secrets).
+	Values map[string]any `json:"values"`
 	// EffectivePolicy is what applies: the configured policy (override or
 	// global default) intersected with what the app can enforce.
 	EffectivePolicy policy.AuthPolicy `json:"effective_policy"`
@@ -68,7 +78,7 @@ func (h *Hub) AppSettings(id string) (*AppSettingsView, error) {
 	v := &AppSettingsView{
 		Definitions:     t.Manifest.Options(),
 		Ports:           t.Manifest.Ports,
-		Values:          h.st.Settings[id],
+		Values:          settingsValues(h.st.Settings[id]),
 		EffectivePolicy: eff,
 		DefaultPolicy:   h.st.Default(),
 		SafetyScore:     policy.SafetyScore(eff),
@@ -92,6 +102,18 @@ func (h *Hub) AppSettings(id string) (*AppSettingsView, error) {
 	return v, nil
 }
 
+// settingsValues is the view's flat values: ports and instance values.
+func settingsValues(s state.InstanceSettings) map[string]any {
+	out := make(map[string]any, len(s.Ports)+len(s.Values))
+	for k, v := range s.Ports {
+		out[k] = v
+	}
+	for k, v := range s.Values {
+		out[k] = v
+	}
+	return out
+}
+
 // SignInMode returns an app's sign-in mode ("" for apps without their own
 // login, or unknown apps).
 func (h *Hub) SignInMode(id string) string {
@@ -104,29 +126,291 @@ func (h *Hub) SignInMode(id string) string {
 	return h.accessLocked(t).SignIn
 }
 
-// ValidateSettings checks user-supplied settings against a manifest: every
-// key/value ends up in the per-app .env and possibly the compose override.
-func ValidateSettings(t *templates.Template, values map[string]string) error {
-	for k, v := range values {
-		if !templates.EnvKeyRe.MatchString(k) {
-			return statusErr(400, "invalid setting key %q", k)
-		}
-		if templates.HasControlChars(v) {
-			return statusErr(400, "setting %s contains control characters", k)
+// parsedSettings is a validated SettingsUpdate's settings part: canonical
+// values (nil = back to the default), ports as given, and the per-person
+// and per-group changes (rows not bound to group ids).
+type parsedSettings struct {
+	ports  map[string]string // nil = unchanged
+	values map[string]any
+	person map[string]state.PersonSetting
+	groups map[string][]state.GroupValue
+}
+
+// ValidateSettings checks a settings update against template t: ports
+// keep their rules (declared keys and <KEY>_BIND only, 1-65535 or a
+// low-high range, a bind IP), and every option value must be a declared
+// option of the right scope that parses as its type (kinds) and renders
+// for each of its env deliveries. Shared folders (folder:…) are refused:
+// no FolderSource.
+func ValidateSettings(t *templates.Template, kinds *settings.Registry, u SettingsUpdate) error {
+	_, err := parseSettings(t, kinds, nil, u)
+	return err
+}
+
+// optionByKey is t's option key, or nil.
+func optionByKey(t *templates.Template, key string) *templates.Option {
+	opts := t.Manifest.Options()
+	for i := range opts {
+		if opts[i].Key == key {
+			return &opts[i]
 		}
 	}
-	for _, st := range t.Manifest.Options() {
-		if v := values[st.Key]; v != "" && st.Type == templates.TypePath {
-			if err := templates.ValidatePathSetting(v); err != nil {
-				return statusErr(400, "setting %s: %v", st.Key, err)
-			}
+	return nil
+}
+
+// decodeRaw decodes one JSON value (numbers as json.Number, so int64s
+// stay exact); empty or null = nil.
+func decodeRaw(raw json.RawMessage) (any, error) {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return nil, nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return nil, fmt.Errorf("not a JSON value: %v", err)
+	}
+	if dec.More() {
+		return nil, fmt.Errorf("not a single JSON value")
+	}
+	return v, nil
+}
+
+// folderPrefix marks a shared-folder path value (project 2).
+const folderPrefix = "folder:"
+
+// folderRef splits "folder:<id>[/<subpath>]".
+func folderRef(v string) (id, sub string, err error) {
+	rest := strings.TrimPrefix(v, folderPrefix)
+	id, sub, _ = strings.Cut(rest, "/")
+	if id == "" || templates.HasControlChars(rest) {
+		return "", "", fmt.Errorf("%q is not a shared folder (folder:<id>[/<subpath>])", v)
+	}
+	if sub != "" {
+		c := path.Clean("/" + sub)
+		if c != "/"+sub || strings.Contains(sub, "..") {
+			return "", "", fmt.Errorf("%q: the subpath must be clean and relative", v)
+		}
+	}
+	return id, sub, nil
+}
+
+// folderHostPath resolves a folder:… value through folders (nil: shared
+// folders aren't available).
+func folderHostPath(folders FolderSource, v string) (string, error) {
+	if folders == nil {
+		return "", fmt.Errorf("%q names a shared folder: shared folders arrive in project 2", v)
+	}
+	id, sub, err := folderRef(v)
+	if err != nil {
+		return "", err
+	}
+	p, err := folders.FolderHostPath(id, sub)
+	if err != nil {
+		return "", fmt.Errorf("shared folder %s: %w", id, err)
+	}
+	return p, nil
+}
+
+// parseValue parses raw as a value of o: a path's folder:… value through
+// folders, anything else through its kind.
+func parseValue(kinds *settings.Registry, folders FolderSource, o *templates.Option, raw any) (any, error) {
+	if s, ok := raw.(string); ok && o.Type == templates.TypePath && strings.HasPrefix(s, folderPrefix) {
+		if _, err := folderHostPath(folders, s); err != nil {
+			return nil, err
+		}
+		return s, nil
+	}
+	return kinds.Parse(o, raw)
+}
+
+// storedValue is a canonical value as state stores it (unlimited as its
+// text).
+func storedValue(v any) any {
+	if v == (settings.Unlimited{}) {
+		return settings.UnlimitedText
+	}
+	return v
+}
+
+// validRowGroup: a row's group is an LLDAP group name or a placeholder.
+func validRowGroup(g string) bool {
+	return g == templates.PlaceholderAccessGroup || g == templates.PlaceholderAdminGroup || lldap.ValidGroupName(g)
+}
+
+// parseRows checks one option's per-group rows (person rows or group
+// records): a valid group name or placeholder each, no group twice
+// (duplicate rows are invalid configuration: refused at save, P-T5), and
+// a value of o each (canonical). Group ids are kept as given (rows from
+// an archive); the save path binds them (Task 8).
+func parseRows(kinds *settings.Registry, folders FolderSource, o *templates.Option, rows []state.GroupValue) ([]state.GroupValue, error) {
+	seen := map[string]bool{}
+	out := make([]state.GroupValue, 0, len(rows))
+	for i, r := range rows {
+		if !validRowGroup(r.Group) {
+			return nil, statusErr(400, "setting %s: row %d: %q is not a group name", o.Key, i+1, r.Group)
+		}
+		if seen[strings.ToLower(r.Group)] {
+			return nil, statusErr(400, "setting %s: group %s has more than one row (one value per group)", o.Key, r.Group)
+		}
+		seen[strings.ToLower(r.Group)] = true
+		if r.Value == nil {
+			return nil, statusErr(400, "setting %s: group %s: no value", o.Key, r.Group)
+		}
+		v, err := parseValue(kinds, folders, o, r.Value)
+		if err != nil {
+			return nil, statusErr(400, "setting %s: group %s: %v", o.Key, r.Group, err)
+		}
+		out = append(out, state.GroupValue{Group: r.Group, GroupID: r.GroupID, Value: storedValue(v)})
+	}
+	return out, nil
+}
+
+// rowsFromInput turns API rows into state rows (unbound: id 0).
+func rowsFromInput(o *templates.Option, in []GroupValueInput) ([]state.GroupValue, error) {
+	out := make([]state.GroupValue, 0, len(in))
+	for i, r := range in {
+		v, err := decodeRaw(r.Value)
+		if err != nil {
+			return nil, statusErr(400, "setting %s: row %d: %v", o.Key, i+1, err)
+		}
+		out = append(out, state.GroupValue{Group: r.Group, Value: v})
+	}
+	return out, nil
+}
+
+// parsePerson checks a per-person option's configuration: a default of
+// o (required, stored canonical), a rule the template offers, valid rows.
+func parsePerson(kinds *settings.Registry, folders FolderSource, o *templates.Option, p state.PersonSetting) (state.PersonSetting, error) {
+	if p.Default == nil {
+		return p, statusErr(400, "setting %s: a per-person option needs a default", o.Key)
+	}
+	def, err := parseValue(kinds, folders, o, p.Default)
+	if err != nil {
+		return p, statusErr(400, "setting %s: default: %v", o.Key, err)
+	}
+	if p.Resolve != "" && p.Resolve != o.Resolve && !slices.Contains(o.ResolveChoices, p.Resolve) {
+		return p, statusErr(400, "setting %s: resolve %q is not one the template offers", o.Key, p.Resolve)
+	}
+	rows, err := parseRows(kinds, folders, o, p.Rows)
+	if err != nil {
+		return p, err
+	}
+	return state.PersonSetting{Default: storedValue(def), Resolve: p.Resolve, Rows: rows}, nil
+}
+
+// parseSettings validates u's settings part against t (ValidateSettings)
+// and returns it canonical.
+func parseSettings(t *templates.Template, kinds *settings.Registry, folders FolderSource, u SettingsUpdate) (*parsedSettings, error) {
+	out := &parsedSettings{values: map[string]any{}, person: map[string]state.PersonSetting{}, groups: map[string][]state.GroupValue{}}
+	if u.Ports != nil {
+		if err := validatePorts(t, u.Ports); err != nil {
+			return nil, err
+		}
+		out.ports = u.Ports
+	}
+	scoped := func(key, scope string) (*templates.Option, error) {
+		o := optionByKey(t, key)
+		if o == nil {
+			return nil, statusErr(400, "unknown setting %q", clip(key, 64))
+		}
+		if o.EffectiveScope() != scope {
+			return nil, statusErr(400, "setting %s is a %s option, not %s", key, o.EffectiveScope(), scope)
+		}
+		return o, nil
+	}
+	for _, k := range slices.Sorted(maps.Keys(u.Values)) {
+		o, err := scoped(k, templates.ScopeInstance)
+		if err != nil {
+			return nil, err
+		}
+		if o.Type == templates.TypeSecret {
+			// Write-only secrets (contract §13.10) have their own store;
+			// a secret is never taken as a plain value.
+			return nil, statusErr(400, "setting %s is a secret: secret values are write-only and can't be set as a plain value", k)
+		}
+		raw, err := decodeRaw(u.Values[k])
+		if err != nil {
+			return nil, statusErr(400, "setting %s: %v", k, err)
+		}
+		if raw == nil {
+			out.values[k] = nil
+			continue
+		}
+		v, err := parseValue(kinds, folders, o, raw)
+		if err != nil {
+			return nil, statusErr(400, "setting %s: %v", k, err)
+		}
+		if _, err := renderOptionEnv(o, v); err != nil {
+			return nil, statusErr(400, "setting %s: %v", k, err)
+		}
+		out.values[k] = v
+	}
+	for _, k := range slices.Sorted(maps.Keys(u.Person)) {
+		o, err := scoped(k, templates.ScopePerson)
+		if err != nil {
+			return nil, err
+		}
+		pc := u.Person[k]
+		def, err := decodeRaw(pc.Default)
+		if err != nil {
+			return nil, statusErr(400, "setting %s: default: %v", k, err)
+		}
+		rows, err := rowsFromInput(o, pc.Rows)
+		if err != nil {
+			return nil, err
+		}
+		p, err := parsePerson(kinds, folders, o, state.PersonSetting{Default: def, Resolve: pc.Resolve, Rows: rows})
+		if err != nil {
+			return nil, err
+		}
+		out.person[k] = p
+	}
+	for _, k := range slices.Sorted(maps.Keys(u.Groups)) {
+		o, err := scoped(k, templates.ScopeGroup)
+		if err != nil {
+			return nil, err
+		}
+		in, err := rowsFromInput(o, u.Groups[k])
+		if err != nil {
+			return nil, err
+		}
+		rows, err := parseRows(kinds, folders, o, in)
+		if err != nil {
+			return nil, err
+		}
+		out.groups[k] = rows
+	}
+	for _, k := range slices.Sorted(maps.Keys(u.Secrets)) {
+		o := optionByKey(t, k)
+		if o == nil || o.Type != templates.TypeSecret {
+			return nil, statusErr(400, "setting %q is not a secret option", clip(k, 64))
+		}
+		return nil, statusErr(400, "setting %s: secret settings are not available in this Hub version yet", k)
+	}
+	return out, nil
+}
+
+// validatePorts checks a port configuration (keys: the template's port
+// keys and their <KEY>_BIND).
+func validatePorts(t *templates.Template, ports map[string]string) error {
+	known := map[string]bool{}
+	for _, p := range t.Manifest.Ports {
+		known[p.Key], known[p.Key+"_BIND"] = true, true
+	}
+	for _, k := range slices.Sorted(maps.Keys(ports)) {
+		if !known[k] {
+			return statusErr(400, "unknown port setting %q", clip(k, 64))
+		}
+		if templates.HasControlChars(ports[k]) {
+			return statusErr(400, "port setting %s contains control characters", k)
 		}
 	}
 	for _, p := range t.Manifest.Ports {
-		if b := values[p.Key+"_BIND"]; b != "" && net.ParseIP(b) == nil {
+		if b := ports[p.Key+"_BIND"]; b != "" && net.ParseIP(b) == nil {
 			return statusErr(400, "bind address for %s must be an IP address", p.Key)
 		}
-		v, ok := values[p.Key]
+		v, ok := ports[p.Key]
 		if !ok {
 			continue
 		}
@@ -149,6 +433,57 @@ func ValidateSettings(t *templates.Template, values map[string]string) error {
 	return nil
 }
 
+// clip cuts s to n bytes (an echoed key in an error).
+func clip(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
+}
+
+// effectiveValue is o's value for instance t: the stored one (parsed
+// again: a value a template update no longer accepts is not used —
+// logged, fail closed), else the default; ok false = no value. A path's
+// folder:… value is returned as stored. Caller must hold mu.
+func (h *Hub) effectiveValue(t *templates.Template, o *templates.Option, s state.InstanceSettings) (any, bool) {
+	if raw, ok := s.Values[o.Key]; ok && raw != nil {
+		if str, isStr := raw.(string); isStr && o.Type == templates.TypePath && strings.HasPrefix(str, folderPrefix) {
+			return str, true
+		}
+		v, err := h.kinds.Parse(o, raw)
+		if err != nil {
+			log.Printf("settings: %s: stored %s no longer fits the template (%v): not used", t.ID, o.Key, err)
+			return nil, false
+		}
+		return v, true
+	}
+	if o.Default == nil {
+		return nil, false
+	}
+	v, err := h.kinds.Parse(o, o.Default)
+	if err != nil {
+		return nil, false
+	}
+	return v, true
+}
+
+// instanceValuesLocked are t's effective instance-scope values (stored or
+// default) by key. Caller must hold mu.
+func (h *Hub) instanceValuesLocked(t *templates.Template, s state.InstanceSettings) map[string]settings.Value {
+	out := map[string]settings.Value{}
+	opts := t.Manifest.Options()
+	for i := range opts {
+		o := &opts[i]
+		if o.EffectiveScope() != templates.ScopeInstance {
+			continue
+		}
+		if v, ok := h.effectiveValue(t, o, s); ok {
+			out[o.Key] = v
+		}
+	}
+	return out
+}
+
 // configCapability is what t's app can enforce in a sign-in mode (native:
 // the app's own login only, where the template allows it) — as
 // accessLocked computes it.
@@ -161,15 +496,12 @@ func configCapability(t *templates.Template, native bool) policy.Capability {
 	return policy.CapabilityFor(method)
 }
 
-// configProblems lists every reason (400 StatusErrors, in a fixed order)
-// why the per-instance configuration in u doesn't fit template t:
-// settings (ValidateSettings), the sign-in mode, the policy override
-// against what the app enforces in its resulting sign-in mode (native),
-// and the public exceptions (validatePublic). Shared by SaveSettings
-// and restore, so a restored archive meets the same rules as a save.
-func configProblems(t *templates.Template, u SettingsUpdate, native bool) []error {
+// configCheck is configProblems plus the parsed settings (nil when they
+// don't validate).
+func configCheck(t *templates.Template, kinds *settings.Registry, folders FolderSource, u SettingsUpdate, native bool) (*parsedSettings, []error) {
 	var out []error
-	if err := ValidateSettings(t, u.Values); err != nil {
+	parsed, err := parseSettings(t, kinds, folders, u)
+	if err != nil {
 		out = append(out, err)
 	}
 	if u.SignIn != nil {
@@ -191,12 +523,37 @@ func configProblems(t *templates.Template, u SettingsUpdate, native bool) []erro
 	if _, err := validatePublic(t, u); err != nil {
 		out = append(out, err)
 	}
+	return parsed, out
+}
+
+// configProblems lists every reason (400 StatusErrors, in a fixed order)
+// why the per-instance configuration in u doesn't fit template t:
+// settings (ValidateSettings, with shared folders through folders), the
+// sign-in mode, the policy override against what the app enforces in its
+// resulting sign-in mode (native), and the public exceptions
+// (validatePublic). Shared by SaveSettings and restore, so a restored
+// archive meets the same rules as a save.
+func configProblems(t *templates.Template, kinds *settings.Registry, folders FolderSource, u SettingsUpdate, native bool) []error {
+	_, out := configCheck(t, kinds, folders, u, native)
 	return out
 }
 
-// SettingsUpdate is a PUT /api/templates/settings/<id> request.
+// SettingsUpdate is a settings save (PUT): the settings part plus the
+// policy, public exceptions and sign-in mode.
 type SettingsUpdate struct {
-	Values  map[string]string
+	// Ports: nil = unchanged; otherwise the instance's whole port
+	// configuration (port keys and <KEY>_BIND; an absent key = the
+	// template's default, "" = not published).
+	Ports map[string]string
+	// Values are instance options to change; a key not listed is
+	// unchanged, JSON null = back to the default.
+	Values map[string]json.RawMessage
+	// Person / Groups: per-person and per-group options (Task 8).
+	Person map[string]PersonChange
+	Groups map[string][]GroupValueInput
+	// Secrets: secret options (Task 7).
+	Secrets map[string]SecretChange
+
 	Policy  *policy.AuthPolicy // nil = unchanged; normalised by SaveSettings
 	Inherit bool               // drop the per-app policy override
 	// Public exceptions (auth.public_access); nil = unchanged.
@@ -209,37 +566,183 @@ type SettingsUpdate struct {
 	SignIn *string
 }
 
-// SaveSettings validates and stores an app's settings (and optionally its
-// policy) in one state change, rewrites its override/.env and, if enabled,
-// queues a restart.
-func (h *Hub) SaveSettings(id string, u SettingsUpdate) (retErr error) {
+// PersonChange is a per-person option's new configuration.
+type PersonChange struct {
+	Default json.RawMessage
+	Resolve string
+	Rows    []GroupValueInput
+}
+
+// GroupValueInput is one per-group row or record as the API sends it.
+type GroupValueInput struct {
+	Group string
+	Value json.RawMessage
+}
+
+// SecretChange changes a secret option: a new value, a generated one, or
+// cleared.
+type SecretChange struct {
+	Value           *string
+	Generate, Clear bool
+}
+
+// SaveResult is what a settings save did: its effect (settings.Effect*),
+// the changed keys, warnings and the delivery report.
+type SaveResult struct {
+	Effect     string          `json:"effect"`
+	Changed    []string        `json:"changed"`
+	Warnings   []string        `json:"warnings,omitempty"`
+	Deliveries *DeliveryReport `json:"deliveries,omitempty"`
+}
+
+// Trigger is why a delivery runs (§13.8 hook triggers).
+type Trigger string
+
+// Delivery triggers.
+const (
+	TriggerStart      Trigger = "start"
+	TriggerSave       Trigger = "settings_change"
+	TriggerMembership Trigger = "membership_change"
+	TriggerRetry      Trigger = "retry"
+)
+
+// UnitResult is one delivery unit's outcome.
+type UnitResult struct {
+	Unit    string    `json:"unit"`              // "env" | "file:<name>" | "hook:<name>" | "claim:<attr>" | "headers" | "reload" | "restart"
+	OK      bool      `json:"ok"`                //
+	Skipped string    `json:"skipped,omitempty"` // "unchanged" | "not running" | "directory unavailable"
+	Error   string    `json:"error,omitempty"`   // redacted, then clipped
+	At      time.Time `json:"at"`
+}
+
+// DeliveryReport is one delivery run's outcome per unit.
+type DeliveryReport struct {
+	Instance string       `json:"instance"`
+	Units    []UnitResult `json:"units"`
+}
+
+// Deliver runs instance id's settings deliveries for trig (files,
+// claims, headers, hooks, reload). Until the delivery engine (Task 9)
+// it delivers nothing: an empty report. Never call it holding mu or
+// id's lifecycle lock.
+func (h *Hub) Deliver(ctx context.Context, id string, trig Trigger) (*DeliveryReport, error) {
+	return &DeliveryReport{Instance: id, Units: []UnitResult{}}, nil
+}
+
+// settingChange is one changed (key, scope, group) for the audit.
+type settingChange struct {
+	key, scope, group string
+	before, after     string
+}
+
+// showValue is v as the audit and the panel show it ("unset" = none).
+func (h *Hub) showValue(o *templates.Option, v any, ok bool) string {
+	if !ok || v == nil {
+		return "unset"
+	}
+	if s, isStr := v.(string); isStr && strings.HasPrefix(s, folderPrefix) {
+		return s
+	}
+	return h.kinds.Display(o, v)
+}
+
+// showPort is a port setting as the audit shows it.
+func showPort(v string, ok bool) string {
+	switch {
+	case !ok:
+		return "default"
+	case v == "":
+		return "off"
+	}
+	return v
+}
+
+// SaveSettings validates and stores an instance's settings (and
+// optionally its policy, public exceptions and sign-in mode) in one
+// state change, rewrites its override and .env, and applies the effect:
+// a restart (in the background) only when a changed option applies at
+// restart, a port or path changed, or the override changed (policy, public
+// exceptions, sign-in); every other effect goes through Deliver. Only
+// declared option keys and ports are taken. Every changed (key, scope,
+// group) is audited as settings.change by actor (a refused save:
+// "refused").
+func (h *Hub) SaveSettings(id string, u SettingsUpdate, actor string) (_ *SaveResult, retErr error) {
+	var changes []settingChange
+	defer func() {
+		h.auditSettings(id, actor, u, changes, retErr)
+	}()
 	t := h.Template(id)
 	if t == nil {
-		return ErrNotFound
-	}
-	if u.Values == nil {
-		u.Values = map[string]string{}
+		return nil, ErrNotFound
 	}
 	h.mu.RLock()
 	pendErr := h.pendingLocked(id)
 	native := h.st.SignIn[id] == state.SignInNative
+	folders := h.folders
 	h.mu.RUnlock()
 	if pendErr != nil {
-		return pendErr
+		return nil, pendErr
 	}
 	if u.SignIn != nil {
 		native = *u.SignIn == SignInNative
 	}
-	if problems := configProblems(t, u, native); len(problems) > 0 {
-		return problems[0]
+	parsed, problems := configCheck(t, h.kinds, folders, u, native)
+	if len(problems) > 0 {
+		return nil, problems[0]
 	}
+	for _, k := range slices.Sorted(maps.Keys(parsed.person)) {
+		return nil, statusErr(400, "setting %s: per-person values can't be saved by this Hub version yet", k)
+	}
+	for _, k := range slices.Sorted(maps.Keys(parsed.groups)) {
+		return nil, statusErr(400, "setting %s: per-group values can't be saved by this Hub version yet", k)
+	}
+	sv, enabled, err := h.saveSettings(t, u, parsed)
+	changes = sv.changes
+	if err != nil {
+		return nil, err
+	}
+	out := &SaveResult{Effect: sv.effect, Changed: sv.keys, Warnings: []string{}}
+	if out.Changed == nil {
+		out.Changed = []string{}
+	}
+	if !enabled {
+		return out, nil
+	}
+	// Outside every lock (the sign-in lock is released by saveSettings):
+	// the engine may take id's delivery lock and talk to the network.
+	if len(sv.keys) > 0 {
+		rep, err := h.Deliver(context.Background(), id, TriggerSave)
+		if err != nil {
+			out.Warnings = append(out.Warnings, "delivery: "+err.Error())
+		}
+		out.Deliveries = rep
+	}
+	if sv.effect == settings.EffectRestart {
+		tmpl := *t
+		h.goBackground(func() { h.Restart(tmpl) })
+	}
+	return out, nil
+}
+
+// saved is what saveSettings changed.
+type saved struct {
+	effect  string
+	keys    []string
+	changes []settingChange
+}
+
+// saveSettings is SaveSettings' state change: under the instance's lock
+// for a sign-in change, then mu.
+func (h *Hub) saveSettings(t *templates.Template, u SettingsUpdate, parsed *parsedSettings) (res saved, enabled bool, retErr error) {
+	id := t.ID
+	res.effect = settings.EffectNone
 	// A sign-in mode change holds the instance's lock (as enable, disable,
 	// SetHosts and the access sync do) for the callback change and the
 	// save, so their callback changes can't interleave.
 	if u.SignIn != nil {
 		unlock, err := h.lockApp(id)
 		if err != nil {
-			return err
+			return res, false, err
 		}
 		defer unlock()
 	}
@@ -248,7 +751,7 @@ func (h *Hub) SaveSettings(id string, u SettingsUpdate) (retErr error) {
 	// nothing; a later failure here undoes them.
 	if add, remove := h.signInCallbackChange(t, u.SignIn); len(add)+len(remove) > 0 && h.idp != nil {
 		if err := h.idp.UpdateForwardAuthCallbacks(context.Background(), add, remove); err != nil {
-			return &StatusError{Status: 502, Err: fmt.Errorf("sign-in mode not changed (nothing was saved): Keycloak %s callbacks: %w", keycloak.ForwardAuthClient, err)}
+			return res, false, &StatusError{Status: 502, Err: fmt.Errorf("sign-in mode not changed (nothing was saved): Keycloak %s callbacks: %w", keycloak.ForwardAuthClient, err)}
 		}
 		defer func() {
 			if retErr == nil {
@@ -262,11 +765,17 @@ func (h *Hub) SaveSettings(id string, u SettingsUpdate) (retErr error) {
 
 	h.mu.Lock()
 	prevSignIn, hadSignIn := h.st.SignIn[id]
-	restoreSignIn := func() {
+	prev, hadPrev := h.st.Settings[id]
+	undo := func() {
 		if hadSignIn {
 			h.st.SignIn[id] = prevSignIn
 		} else {
 			delete(h.st.SignIn, id)
+		}
+		if hadPrev {
+			h.st.Settings[id] = prev
+		} else {
+			delete(h.st.Settings, id)
 		}
 	}
 	signInChanged := false
@@ -279,32 +788,31 @@ func (h *Hub) SaveSettings(id string, u SettingsUpdate) (retErr error) {
 		}
 		signInChanged = h.accessLocked(t).SignIn != before
 	}
-	prev, hadPrev := h.st.Settings[id]
-	h.st.Settings[id] = u.Values
+	next, effects, changes, err := h.nextSettingsLocked(t, prev, parsed)
+	if err != nil {
+		undo()
+		h.mu.Unlock()
+		return res, false, err
+	}
+	if next.IsZero() {
+		delete(h.st.Settings, id)
+	} else {
+		h.st.Settings[id] = next
+	}
 	live := h.findLocked(id)
-	enabled := live != nil && live.Enabled
+	enabled = live != nil && live.Enabled
 	if enabled {
 		if err := h.checkPortCollisionsLocked(t); err != nil {
-			if hadPrev {
-				h.st.Settings[id] = prev
-			} else {
-				delete(h.st.Settings, id)
-			}
-			restoreSignIn()
+			undo()
 			h.mu.Unlock()
-			return err
+			return res, false, err
 		}
 	}
 	publicChanged, err := h.applyPublicUpdateLocked(t, u)
 	if err != nil {
-		if hadPrev {
-			h.st.Settings[id] = prev
-		} else {
-			delete(h.st.Settings, id)
-		}
-		restoreSignIn()
+		undo()
 		h.mu.Unlock()
-		return err
+		return res, false, err
 	}
 	policyChanged := false
 	if u.Inherit {
@@ -330,51 +838,169 @@ func (h *Hub) SaveSettings(id string, u SettingsUpdate) (retErr error) {
 	h.saveLocked()
 	effective := h.effectivePolicyLocked(t)
 	// The override reads state (policy → TLS tier): render under the lock.
-	overrideErr := h.generateOverrideLocked(t, u.Values)
+	before, _ := os.ReadFile(h.overridePath(id))
+	overrideErr := h.generateOverrideLocked(t, next)
+	after, _ := os.ReadFile(h.overridePath(id))
+	if !bytes.Equal(before, after) {
+		effects = append(effects, settings.EffectRestart)
+	}
+	// Options with an env delivery go into the .env — every one of them,
+	// empty when unset, so clearing a field actually clears it — and so
+	// do the ports the app binds itself (network_mode: host, ranges).
+	envErr := h.writeOptionEnvLocked(t)
 	h.mu.Unlock()
+	res.changes = changes
+	for _, c := range changes {
+		if !slices.Contains(res.keys, c.key) {
+			res.keys = append(res.keys, c.key)
+		}
+	}
+	res.effect = settings.Strongest(effects...)
 	if overrideErr != nil {
-		return statusErr(500, "settings saved but override generation failed: %v", overrideErr)
+		return res, false, statusErr(500, "settings saved but override generation failed: %v", overrideErr)
 	}
-
-	// Options with an env delivery go into the .env — including empty
-	// values, so clearing a field actually clears it — and so do the
-	// ports the app binds itself (network_mode: host, ranges).
-	envPath := h.envPath(id)
-	for k, v := range hostNetPortValues(t, u.Values) {
-		if err := setEnvVar(envPath, k, v); err != nil {
-			return statusErr(500, "failed to write env: %v", err)
-		}
-	}
-	for _, st := range t.Manifest.Options() {
-		name := flatEnvName(&st)
-		if name == "" {
-			continue
-		}
-		if v, ok := u.Values[st.Key]; ok {
-			if err := setEnvVar(envPath, name, v); err != nil {
-				return statusErr(500, "failed to write env: %v", err)
-			}
-		}
+	if envErr != nil {
+		return res, false, statusErr(500, "settings saved but the env file write failed: %v", envErr)
 	}
 
 	if policyChanged || publicChanged || signInChanged {
 		h.writePolicyLogged()
 	}
-	if policyChanged {
-		if h.idp != nil {
-			acr := policy.ACR(effective)
-			for _, c := range t.Manifest.Clients {
-				if err := h.idp.UpdateClientACR(context.Background(), h.clientSpec(t, c, acr)); err != nil {
-					log.Printf("auth-policy: keycloak client %s update failed: %v", c.ClientID, err)
-				}
+	if policyChanged && h.idp != nil {
+		acr := policy.ACR(effective)
+		for _, c := range t.Manifest.Clients {
+			if err := h.idp.UpdateClientACR(context.Background(), h.clientSpec(t, c, acr)); err != nil {
+				log.Printf("auth-policy: keycloak client %s update failed: %v", c.ClientID, err)
 			}
 		}
 	}
-	if enabled {
-		tmpl := *t
-		h.goBackground(func() { h.Restart(tmpl) })
+	return res, enabled, nil
+}
+
+// nextSettingsLocked applies parsed to cur: the new settings, the effect
+// of each changed option (a path or port change restarts), and the
+// changes for the audit. The instance options must then still satisfy
+// their required and requires rules. Caller must hold mu.
+func (h *Hub) nextSettingsLocked(t *templates.Template, cur state.InstanceSettings, parsed *parsedSettings) (state.InstanceSettings, []string, []settingChange, error) {
+	next := cur.Clone()
+	var effects []string
+	var changes []settingChange
+	if parsed.ports != nil {
+		next.Ports = nil
+		if len(parsed.ports) > 0 {
+			next.Ports = maps.Clone(parsed.ports)
+		}
+		keys := map[string]bool{}
+		for k := range cur.Ports {
+			keys[k] = true
+		}
+		for k := range next.Ports {
+			keys[k] = true
+		}
+		for _, k := range slices.Sorted(maps.Keys(keys)) {
+			a, okA := cur.Ports[k]
+			b, okB := next.Ports[k]
+			if a == b && okA == okB {
+				continue
+			}
+			changes = append(changes, settingChange{key: k, scope: "port", before: showPort(a, okA), after: showPort(b, okB)})
+			effects = append(effects, settings.EffectRestart)
+		}
 	}
-	return nil
+	for _, k := range slices.Sorted(maps.Keys(parsed.values)) {
+		o := optionByKey(t, k)
+		before, okB := h.effectiveValue(t, o, cur)
+		v := parsed.values[k]
+		if v == nil {
+			delete(next.Values, k)
+			delete(next.Types, k)
+		} else {
+			if next.Values == nil {
+				next.Values = map[string]any{}
+			}
+			if next.Types == nil {
+				next.Types = map[string]string{}
+			}
+			next.Values[k] = storedValue(v)
+			next.Types[k] = o.Type
+		}
+		after, okA := h.effectiveValue(t, o, next)
+		if okA && o.Required && settingsEmpty(after) || !okA && o.Required {
+			return next, nil, nil, statusErr(400, "setting %s is required", k)
+		}
+		if okA == okB && reflect.DeepEqual(after, before) {
+			continue
+		}
+		changes = append(changes, settingChange{key: k, scope: templates.ScopeInstance, before: h.showValue(o, before, okB), after: h.showValue(o, after, okA)})
+		e := settings.EffectOf(o.EffectiveApplies())
+		if o.Type == templates.TypePath {
+			e = settings.EffectRestart
+		}
+		effects = append(effects, e)
+	}
+	if len(parsed.values) > 0 && t.Manifest.Settings != nil {
+		if err := settings.CheckRequires(t.Manifest.Settings, h.instanceValuesLocked(t, next)); err != nil {
+			return next, nil, nil, statusErr(400, "%v", err)
+		}
+	}
+	if len(next.Values) == 0 {
+		next.Values = nil
+	}
+	if len(next.Types) == 0 {
+		next.Types = nil
+	}
+	return next, effects, changes, nil
+}
+
+// settingsEmpty reports an empty value (required options).
+func settingsEmpty(v any) bool {
+	switch x := v.(type) {
+	case nil:
+		return true
+	case string:
+		return x == ""
+	case []any:
+		return len(x) == 0
+	case []map[string]any:
+		return len(x) == 0
+	}
+	return false
+}
+
+// auditSettings records a save: one settings.change per changed (key,
+// scope, group), or — refused / failed — one per requested key. Called
+// with no lock held (auditOp takes mu).
+func (h *Hub) auditSettings(id, actor string, u SettingsUpdate, changes []settingChange, err error) {
+	if err != nil {
+		var keys []string
+		for k := range u.Ports {
+			keys = append(keys, k)
+		}
+		for k := range u.Values {
+			keys = append(keys, k)
+		}
+		for k := range u.Person {
+			keys = append(keys, k)
+		}
+		for k := range u.Groups {
+			keys = append(keys, k)
+		}
+		for k := range u.Secrets {
+			keys = append(keys, k)
+		}
+		slices.Sort(keys)
+		for _, k := range slices.Compact(keys) {
+			h.auditOp(actor, "settings.change", id+"/"+clip(k, 64), "", err)
+		}
+		return
+	}
+	for _, c := range changes {
+		d := "scope=" + c.scope
+		if c.group != "" {
+			d += " group=" + c.group
+		}
+		h.auditOp(actor, "settings.change", id+"/"+c.key, d+": "+c.before+" -> "+c.after, nil)
+	}
 }
 
 // signInCallbackChange: the callback URIs a sign-in mode change of
@@ -527,35 +1153,71 @@ func (h *Hub) SaveEnv(id string, vars map[string]string) error {
 	return nil
 }
 
-// flatEnvName is the env variable option o's flat string value is written
-// to ("" = none: no env delivery, or an indexed one — typed values and
-// the other deliveries arrive with the settings engine).
-func flatEnvName(o *templates.Option) string {
-	n := o.EnvName()
-	if strings.HasSuffix(n, templates.IndexSuffix) {
-		return ""
-	}
-	return n
-}
+// seedPlaceholders are the group_values placeholders in the order their
+// rows are seeded: the admin group first (under priority the more
+// specific group wins), then the access group.
+var seedPlaceholders = []string{templates.PlaceholderAdminGroup, templates.PlaceholderAccessGroup}
 
-// settingsEnv maps stored settings to env variables: an option's value
-// goes to its env name (none: not in the env), any other key (ports and
-// their _BIND) as is.
-func settingsEnv(t *templates.Template, values map[string]string) map[string]string {
-	opts := map[string]*templates.Option{}
-	for i, o := range t.Manifest.Options() {
-		opts[o.Key] = &t.Manifest.Options()[i]
-	}
-	out := make(map[string]string, len(values))
-	for k, v := range values {
-		o, ok := opts[k]
-		if !ok {
-			out[k] = v
+// seedSettingsLocked gives every per-person option of instance t that
+// has no stored configuration its template start: the default
+// (canonical) and one row per group_values placeholder, stored as the
+// placeholder with no group id (unbound: it grants nothing until bound,
+// Task 8). Instance options store nothing: their defaults apply
+// implicitly. Run on create, on enable, after a restore and by "create
+// missing groups"; never changes what is already stored. Reports
+// whether it changed state. Caller must hold mu (write).
+func (h *Hub) seedSettingsLocked(t *templates.Template) bool {
+	s := h.st.Settings[t.ID]
+	changed := false
+	opts := t.Manifest.Options()
+	for i := range opts {
+		o := &opts[i]
+		if o.EffectiveScope() != templates.ScopePerson {
 			continue
 		}
-		if n := flatEnvName(o); n != "" {
-			out[n] = v
+		if _, ok := s.Person[o.Key]; ok {
+			continue
 		}
+		def, err := h.kinds.Parse(o, o.Default)
+		if err != nil {
+			log.Printf("settings: %s: %s: the template default doesn't parse (%v): not seeded", t.ID, o.Key, err)
+			continue
+		}
+		p := state.PersonSetting{Default: storedValue(def)}
+		for _, ph := range seedPlaceholders {
+			raw, ok := o.GroupValues[ph]
+			if !ok {
+				continue
+			}
+			v, err := h.kinds.Parse(o, raw)
+			if err != nil {
+				log.Printf("settings: %s: %s: group_values[%s] doesn't parse (%v): not seeded", t.ID, o.Key, ph, err)
+				continue
+			}
+			p.Rows = append(p.Rows, state.GroupValue{Group: ph, Value: storedValue(v)})
+		}
+		if s.Person == nil {
+			s.Person = map[string]state.PersonSetting{}
+		}
+		if s.Types == nil {
+			s.Types = map[string]string{}
+		}
+		s.Person[o.Key] = p
+		s.Types[o.Key] = o.Type
+		changed = true
 	}
-	return out
+	if changed {
+		h.st.Settings[t.ID] = s
+	}
+	return changed
+}
+
+// seedSettings is seedSettingsLocked for instance id (saved when it
+// changed anything).
+func (h *Hub) seedSettings(id string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if t := h.findLocked(id); t != nil && h.seedSettingsLocked(t) {
+		h.saveLocked()
+	}
 }

@@ -691,7 +691,7 @@ func (h *Hub) SaveUserOverride(id, content string) (restart bool, detail string,
 	h.mu.RLock()
 	enabled := h.st.IsEnabled(id)
 	if enabled {
-		err = h.checkPortsLocked(t, append(resolvePortBindings(t, h.st.Settings[id]), po.ports...))
+		err = h.checkPortsLocked(t, append(resolvePortBindings(t, h.st.Settings[id].Ports), po.ports...))
 	}
 	h.mu.RUnlock()
 	if err != nil {

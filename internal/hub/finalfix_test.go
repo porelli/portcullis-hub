@@ -191,7 +191,7 @@ func TestInterruptedOpsAndRestoreAs(t *testing.T) {
 	f.h.mu.Lock()
 	f.h.st.Instances["grafana-c"] = state.Instance{ID: "grafana-c", Template: "grafana",
 		Hosts: map[string]string{"grafana": "grafana-c.example.org"}, State: state.InstanceRestoring, RestoreAs: "grafana-b/20261101T000000Z.tar"}
-	f.h.st.Settings["grafana-c"] = map[string]string{"X": "y"}
+	f.h.st.Settings["grafana-c"] = state.InstanceSettings{Ports: map[string]string{"X": "y"}}
 	f.h.rebuildLocked()
 	f.h.mu.Unlock()
 	f.h.recordOp("grafana", OpRecord{Op: OpBackup, OpID: "abc", Running: true, At: time.Now()})
@@ -340,7 +340,7 @@ func TestChainReachingAuthRefusedOnExtra(t *testing.T) {
 		t.Fatal(err)
 	}
 	f2.h.mu.RLock()
-	ov, err := f2.h.renderOverrideLocked(f2.h.findLocked("fwd-b"), nil)
+	ov, err := f2.h.renderOverrideLocked(f2.h.findLocked("fwd-b"), state.InstanceSettings{})
 	f2.h.mu.RUnlock()
 	if err != nil || !strings.Contains(ov, "portcullis-auth-ext@docker") || strings.Contains(ov, `"portcullis-auth,`) {
 		t.Fatalf("override = %v\n%s", err, ov)
@@ -458,7 +458,7 @@ func TestSyncCallbacksUnderLock(t *testing.T) {
 	f.idp.onCallbacks = func() {
 		// Inside the sync's PUT: the instance is locked.
 		disableErr = f.h.Disable("plex-b")
-		signInErr = f.h.SaveSettings("plex-b", SettingsUpdate{Values: map[string]string{}, SignIn: strp(SignInNative)})
+		signInErr = f.h.save("plex-b", SettingsUpdate{SignIn: strp(SignInNative)})
 	}
 	f.idp.mu.Unlock()
 	if err := f.h.SyncClientAccess(context.Background()); err != nil {

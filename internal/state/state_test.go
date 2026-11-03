@@ -58,7 +58,7 @@ func TestSaveRoundTrip(t *testing.T) {
 	s.SetEnabled("a", true)
 	s.SetEnabled("b", false)
 	s.Sources = []Source{{Name: "portcullis", URL: "https://x", Path: "/data/repos/portcullis"}}
-	s.Settings["a"] = map[string]string{"K": "v"}
+	s.Settings["a"] = InstanceSettings{Ports: map[string]string{"K": "v"}, Values: map[string]any{"n": 30}, Person: map[string]PersonSetting{"q": {Default: "x", Rows: []GroupValue{{Group: "g", GroupID: 3, Value: "y"}}}}}
 	s.AuthPolicies["a"] = policy.AuthPolicy{Factors: []string{"mtls"}}
 	s.SetDefault(policy.AuthPolicy{Factors: []string{"webauthn"}})
 	if err := s.Save(p); err != nil {
@@ -75,7 +75,7 @@ func TestSaveRoundTrip(t *testing.T) {
 	if len(got.Enabled) != 1 || got.Enabled[0] != "a" || !got.IsEnabled("a") || got.IsEnabled("b") {
 		t.Errorf("enabled = %v", got.Enabled)
 	}
-	if got.Settings["a"]["K"] != "v" || got.Sources[0].Path != "/data/repos/portcullis" {
+	if got.Settings["a"].Ports["K"] != "v" || got.Settings["a"].Values["n"] != 30 || got.Settings["a"].Person["q"].Rows[0].GroupID != 3 || got.Sources[0].Path != "/data/repos/portcullis" {
 		t.Errorf("round trip lost data: %+v", got)
 	}
 	if p := got.ResolvePolicy("a"); p.Factors[0] != "mtls" {

@@ -67,10 +67,7 @@ func listp(s ...string) *[]string { return &s }
 
 func save(t *testing.T, f *fixture, u SettingsUpdate) {
 	t.Helper()
-	if u.Values == nil {
-		u.Values = map[string]string{}
-	}
-	if err := f.h.SaveSettings("cloud", u); err != nil {
+	if err := f.h.save("cloud", u); err != nil {
 		t.Fatal(err)
 	}
 	f.h.Wait()
@@ -216,12 +213,12 @@ func TestPublicSettingsValidation(t *testing.T) {
 			return &l
 		}()},
 	} {
-		u.Values = map[string]string{}
-		if err := f.h.SaveSettings("cloud", u); statusOf(err) != 400 {
+		_ = u
+		if err := f.h.save("cloud", u); statusOf(err) != 400 {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
-	if err := f.h.SaveSettings("grafana", SettingsUpdate{Values: map[string]string{}, PublicAccess: boolp(true)}); statusOf(err) != 400 {
+	if err := f.h.save("grafana", SettingsUpdate{PublicAccess: boolp(true)}); statusOf(err) != 400 {
 		t.Errorf("public access on an app without public_access: %v", err)
 	}
 	st, _ := state.Load(filepath.Join(f.data, "state.yaml"))

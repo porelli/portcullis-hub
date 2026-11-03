@@ -101,9 +101,10 @@ type AppState struct {
 	// Instances are the instances other than the implicit default ones,
 	// by id. The default instance of a template (id = template id) needs
 	// no entry: it uses the template's hostnames on the main domain.
-	Instances    map[string]Instance          `json:"instances,omitempty" yaml:"instances,omitempty"`
-	Sources      []Source                     `json:"sources" yaml:"sources"`
-	Settings     map[string]map[string]string `json:"settings" yaml:"settings"`
+	Instances map[string]Instance `json:"instances,omitempty" yaml:"instances,omitempty"`
+	Sources   []Source            `json:"sources" yaml:"sources"`
+	// Settings are each instance's settings (contract §13), by id.
+	Settings     map[string]InstanceSettings  `json:"settings" yaml:"settings"`
 	AuthPolicies map[string]policy.AuthPolicy `json:"auth_policies" yaml:"auth_policies"`
 	// DefaultPolicy is the admin-chosen global default; nil = never set,
 	// which means policy.InitialDefault. An explicitly saved empty policy
@@ -137,6 +138,159 @@ type AppState struct {
 	LegacyPassword map[string]bool `json:"-" yaml:"-"`
 }
 
+// InstanceSettings are one instance's settings (contract §13). Values
+// are canonical (internal/settings): sizes in bytes, durations in
+// seconds, unlimited as the string "unlimited". Secret values are never
+// here (Secrets holds metadata only; the values live in the Hub's 0600
+// secrets store).
+type InstanceSettings struct {
+	// Ports are the template's port keys and their <KEY>_BIND addresses.
+	Ports map[string]string `json:"ports,omitempty" yaml:"ports,omitempty"`
+	// Values are the instance-scope option values (absent = the default).
+	Values map[string]any `json:"values,omitempty" yaml:"values,omitempty"`
+	// Types: option key → its type when it was stored (a retyped option's
+	// stored value is dropped on template update).
+	Types map[string]string `json:"types,omitempty" yaml:"types,omitempty"`
+	// Person: per-person options (default, rule, per-group rows).
+	Person map[string]PersonSetting `json:"person,omitempty" yaml:"person,omitempty"`
+	// Groups: scope-group options' records, in the admin's order.
+	Groups map[string][]GroupValue `json:"groups,omitempty" yaml:"groups,omitempty"`
+	// Secrets: secret options' metadata only, never their values.
+	Secrets map[string]SecretMeta `json:"secrets,omitempty" yaml:"secrets,omitempty"`
+	// Entered: person-entered values (call 32), option key → lowercase
+	// username → value.
+	Entered map[string]map[string]EnteredValue `json:"entered,omitempty" yaml:"entered,omitempty"`
+}
+
+// PersonSetting is a per-person option's configuration: the default
+// (fallback for people in no row's group, canonical), the resolve rule
+// ("" = the template's) and the per-group rows in the admin's order.
+type PersonSetting struct {
+	Default any          `json:"default" yaml:"default"`
+	Resolve string       `json:"resolve,omitempty" yaml:"resolve,omitempty"`
+	Rows    []GroupValue `json:"rows,omitempty" yaml:"rows,omitempty"`
+}
+
+// GroupValue is one per-group row or record: the LLDAP group name (or a
+// {{ACCESS_GROUP}} / {{ADMIN_GROUP}} placeholder) and its id at save (0 =
+// not bound yet: it grants nothing), and the canonical value.
+type GroupValue struct {
+	Group   string `json:"group" yaml:"group"`
+	GroupID int    `json:"group_id" yaml:"group_id"`
+	Value   any    `json:"value" yaml:"value"`
+}
+
+// SecretMeta is what state keeps of a secret option: when it was set and
+// whether the Hub generated it. Never the value.
+type SecretMeta struct {
+	UpdatedAt time.Time `json:"updated_at" yaml:"updated_at"`
+	Generated bool      `json:"generated,omitempty" yaml:"generated,omitempty"`
+}
+
+// EnteredValue is one person-entered value (call 32).
+type EnteredValue struct {
+	Value     any       `json:"value" yaml:"value"` // canonical
+	UUID      string    `json:"uuid" yaml:"uuid"`   // LLDAP user uuid at save
+	UpdatedAt time.Time `json:"updated_at" yaml:"updated_at"`
+	SetBy     string    `json:"set_by,omitempty" yaml:"set_by,omitempty"` // "" = the person; else the admin's username
+}
+
+// IsZero reports whether s holds nothing.
+func (s InstanceSettings) IsZero() bool {
+	return len(s.Ports)+len(s.Values)+len(s.Types)+len(s.Person)+len(s.Groups)+len(s.Secrets)+len(s.Entered) == 0
+}
+
+// Clone is a deep copy of s (values are copied structurally: lists and
+// tables are fresh slices and maps).
+func (s InstanceSettings) Clone() InstanceSettings {
+	var c InstanceSettings
+	if s.Ports != nil {
+		c.Ports = make(map[string]string, len(s.Ports))
+		for k, v := range s.Ports {
+			c.Ports[k] = v
+		}
+	}
+	if s.Values != nil {
+		c.Values = make(map[string]any, len(s.Values))
+		for k, v := range s.Values {
+			c.Values[k] = cloneValue(v)
+		}
+	}
+	if s.Types != nil {
+		c.Types = make(map[string]string, len(s.Types))
+		for k, v := range s.Types {
+			c.Types[k] = v
+		}
+	}
+	if s.Person != nil {
+		c.Person = make(map[string]PersonSetting, len(s.Person))
+		for k, p := range s.Person {
+			c.Person[k] = PersonSetting{Default: cloneValue(p.Default), Resolve: p.Resolve, Rows: cloneRows(p.Rows)}
+		}
+	}
+	if s.Groups != nil {
+		c.Groups = make(map[string][]GroupValue, len(s.Groups))
+		for k, rows := range s.Groups {
+			c.Groups[k] = cloneRows(rows)
+		}
+	}
+	if s.Secrets != nil {
+		c.Secrets = make(map[string]SecretMeta, len(s.Secrets))
+		for k, v := range s.Secrets {
+			c.Secrets[k] = v
+		}
+	}
+	if s.Entered != nil {
+		c.Entered = make(map[string]map[string]EnteredValue, len(s.Entered))
+		for k, m := range s.Entered {
+			cm := make(map[string]EnteredValue, len(m))
+			for u, e := range m {
+				e.Value = cloneValue(e.Value)
+				cm[u] = e
+			}
+			c.Entered[k] = cm
+		}
+	}
+	return c
+}
+
+func cloneRows(rows []GroupValue) []GroupValue {
+	if rows == nil {
+		return nil
+	}
+	out := make([]GroupValue, len(rows))
+	for i, r := range rows {
+		r.Value = cloneValue(r.Value)
+		out[i] = r
+	}
+	return out
+}
+
+// cloneValue copies a decoded value's lists and maps.
+func cloneValue(v any) any {
+	switch x := v.(type) {
+	case []any:
+		out := make([]any, len(x))
+		for i, e := range x {
+			out[i] = cloneValue(e)
+		}
+		return out
+	case []map[string]any:
+		out := make([]map[string]any, len(x))
+		for i, e := range x {
+			out[i] = cloneValue(e).(map[string]any)
+		}
+		return out
+	case map[string]any:
+		out := make(map[string]any, len(x))
+		for k, e := range x {
+			out[k] = cloneValue(e)
+		}
+		return out
+	}
+	return v
+}
+
 // SignInNative is the SignIn value for "the app's own login only".
 const SignInNative = "native"
 
@@ -152,7 +306,7 @@ func (s *AppState) init() {
 		s.Instances = make(map[string]Instance)
 	}
 	if s.Settings == nil {
-		s.Settings = make(map[string]map[string]string)
+		s.Settings = make(map[string]InstanceSettings)
 	}
 	if s.AuthPolicies == nil {
 		s.AuthPolicies = make(map[string]policy.AuthPolicy)

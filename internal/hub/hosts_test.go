@@ -380,7 +380,7 @@ func TestSetHostsRewritesPublicShareHosts(t *testing.T) {
 	if err := f.h.Enable("cloud-b"); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.h.SaveSettings("cloud-b", SettingsUpdate{Values: map[string]string{}, PublicTokens: listp("AbC123")}); err != nil {
+	if err := f.h.save("cloud-b", SettingsUpdate{PublicTokens: listp("AbC123")}); err != nil {
 		t.Fatal(err)
 	}
 	f.h.Wait()
@@ -712,7 +712,7 @@ func TestSetHostsConcurrentCallbacks(t *testing.T) {
 		if err := f.h.CreateInstance("grafana", id, nil); err != nil {
 			t.Fatal(err)
 		}
-		f.h.SaveSettings(id, SettingsUpdate{Values: map[string]string{"GRAFANA_PORT": fmt.Sprint(4000 + i)}})
+		f.h.save(id, SettingsUpdate{Ports: map[string]string{"GRAFANA_PORT": fmt.Sprint(4000 + i)}})
 		if err := f.h.Enable(id); err != nil {
 			t.Fatal(err)
 		}

@@ -272,6 +272,7 @@ func (h *Hub) CreateMissingGroups(ctx context.Context, ids []string, actor strin
 			if err != nil {
 				r.Error = err.Error()
 			}
+			h.seedSettings(id)
 		}
 		unlock()
 		out = append(out, r)

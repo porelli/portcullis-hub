@@ -117,7 +117,7 @@ func TestResolveDrift(t *testing.T) {
 	if err := f.h.ResolveDrift("grafana", ActionDisable); err != nil || f.h.IsEnabled("grafana") {
 		t.Errorf("disable: %v", err)
 	}
-	f.h.SaveSettings("other", SettingsUpdate{Values: map[string]string{"OTHER_PORT": "3301"}})
+	f.h.save("other", SettingsUpdate{Ports: map[string]string{"OTHER_PORT": "3301"}})
 	if err := f.h.ResolveDrift("other", ActionAdopt); err != nil || !f.h.IsEnabled("other") {
 		t.Errorf("adopt: %v", err)
 	}

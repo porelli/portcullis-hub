@@ -12,6 +12,8 @@ import (
 
 	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/policy"
+	"github.com/portcullis/hub/internal/settings"
+	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
 )
 
@@ -23,8 +25,8 @@ import (
 // Port ranges and network_mode: host ports stay in the base compose.yml.
 // It is always regenerated (never hand-edited); the admin's own additions
 // go in the custom override (useroverride.go). Caller must hold mu.
-func (h *Hub) generateOverrideLocked(t *templates.Template, values map[string]string) error {
-	content, err := h.renderOverrideLocked(t, values)
+func (h *Hub) generateOverrideLocked(t *templates.Template, s state.InstanceSettings) error {
+	content, err := h.renderOverrideLocked(t, s)
 	if err != nil {
 		return err
 	}
@@ -35,22 +37,63 @@ func (h *Hub) generateOverrideLocked(t *templates.Template, values map[string]st
 	return fsutil.WriteFileAtomic(h.overridePath(t.ID), []byte(content), 0600)
 }
 
+// mountSourceLocked is a path option value's host directory: a shared
+// folder through h.folders (none: refused), anything else through the
+// kind's Mounter (re-checked: stored values are never trusted blindly).
+// Caller must hold mu.
+func (h *Hub) mountSourceLocked(o *templates.Option, v any) (string, error) {
+	if str, ok := v.(string); ok && strings.HasPrefix(str, folderPrefix) {
+		return folderHostPath(h.folders, str)
+	}
+	k, err := h.kinds.Kind(o.Type)
+	if err != nil {
+		return "", err
+	}
+	m, ok := k.(settings.Mounter)
+	if !ok {
+		return "", fmt.Errorf("type %s is not a host directory", o.Type)
+	}
+	p, err := m.HostPath(o, v)
+	if err != nil {
+		return "", err
+	}
+	if err := templates.ValidatePathSetting(p); err != nil {
+		return "", err
+	}
+	return p, nil
+}
+
+// composeLiteral escapes $ as $$: compose interpolates the override, and
+// a host path is literal.
+func composeLiteral(s string) string { return strings.ReplaceAll(s, "$", "$$") }
+
 // renderOverrideLocked returns the Hub override's content ("" = none
 // needed). Caller must hold mu.
-func (h *Hub) renderOverrideLocked(t *templates.Template, values map[string]string) (string, error) {
+func (h *Hub) renderOverrideLocked(t *templates.Template, s state.InstanceSettings) (string, error) {
+	values := s.Ports
 	serviceMounts := make(map[string][]string)
-	for _, s := range t.Manifest.Options() {
-		val := values[s.Key]
-		if val == "" || s.Target == nil || s.Target.Mount == "" || s.Type != templates.TypePath {
+	opts := t.Manifest.Options()
+	for i := range opts {
+		o := &opts[i]
+		if o.Type != templates.TypePath || o.EffectiveScope() != templates.ScopeInstance || o.Target == nil || o.Target.Mount == "" {
 			continue
 		}
-		if err := templates.ValidatePathSetting(val); err != nil {
-			return "", fmt.Errorf("setting %s: %w", s.Key, err)
+		v, ok := h.effectiveValue(t, o, s)
+		if !ok {
+			continue
+		}
+		host, err := h.mountSourceLocked(o, v)
+		if err != nil {
+			return "", fmt.Errorf("setting %s: %w", o.Key, err)
+		}
+		vol := composeLiteral(host) + ":" + o.Target.Mount
+		if o.Mode == "ro" {
+			vol += ":ro"
 		}
 		// JSON string == valid YAML double-quoted scalar: safe for spaces,
 		// quotes and '#'.
-		mountJSON, _ := json.Marshal(val + ":" + s.Target.Mount)
-		serviceMounts[s.Target.Service] = append(serviceMounts[s.Target.Service], string(mountJSON))
+		mountJSON, _ := json.Marshal(vol)
+		serviceMounts[o.Target.Service] = append(serviceMounts[o.Target.Service], string(mountJSON))
 	}
 
 	servicePorts := make(map[string][]string)

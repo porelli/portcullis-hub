@@ -104,17 +104,19 @@ type BackupEntry struct {
 
 // instanceConfig is config/instance.yaml: the instance's state entry.
 type instanceConfig struct {
-	ID           string             `yaml:"id"`
-	Template     string             `yaml:"template"`
-	Default      bool               `yaml:"default"`
-	Hosts        map[string]string  `yaml:"hosts,omitempty"`
-	Enabled      bool               `yaml:"enabled"`
-	Settings     map[string]string  `yaml:"settings,omitempty"`
-	AuthPolicy   *policy.AuthPolicy `yaml:"auth_policy,omitempty"`
-	PublicAccess *bool              `yaml:"public_access,omitempty"`
-	PublicMode   string             `yaml:"public_mode,omitempty"`
-	PublicTokens []string           `yaml:"public_tokens,omitempty"`
-	SignIn       string             `yaml:"sign_in,omitempty"`
+	ID       string            `yaml:"id"`
+	Template string            `yaml:"template"`
+	Default  bool              `yaml:"default"`
+	Hosts    map[string]string `yaml:"hosts,omitempty"`
+	Enabled  bool              `yaml:"enabled"`
+	// Settings: ports and option values (canonical), per-person and
+	// per-group rows, secret metadata — never secret values.
+	Settings     *state.InstanceSettings `yaml:"settings,omitempty"`
+	AuthPolicy   *policy.AuthPolicy      `yaml:"auth_policy,omitempty"`
+	PublicAccess *bool                   `yaml:"public_access,omitempty"`
+	PublicMode   string                  `yaml:"public_mode,omitempty"`
+	PublicTokens []string                `yaml:"public_tokens,omitempty"`
+	SignIn       string                  `yaml:"sign_in,omitempty"`
 	// State is the state entry's state ("created" for a never-enabled
 	// instance; a restore keeps it).
 	State     string              `yaml:"state,omitempty"`
@@ -161,7 +163,8 @@ func (h *Hub) instanceConfigLocked(tg *target) instanceConfig {
 		c.Hosts = copyMap(tg.entry.Hosts)
 	}
 	if s, ok := h.st.Settings[id]; ok {
-		c.Settings = copyMap(s)
+		cs := s.Clone()
+		c.Settings = &cs
 	}
 	if p, ok := h.st.AuthPolicies[id]; ok {
 		p.Factors = append([]string(nil), p.Factors...)
@@ -186,8 +189,8 @@ func (h *Hub) instanceConfigLocked(tg *target) instanceConfig {
 // (hostnames, enabled and published snapshot are not touched). Caller
 // must hold mu (write).
 func (h *Hub) applyConfigLocked(id string, c instanceConfig) {
-	if c.Settings != nil {
-		h.st.Settings[id] = copyMap(c.Settings)
+	if c.Settings != nil && !c.Settings.IsZero() {
+		h.st.Settings[id] = c.Settings.Clone()
 	} else {
 		delete(h.st.Settings, id)
 	}

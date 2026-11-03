@@ -271,7 +271,7 @@ func TestTwoInstancesSeparate(t *testing.T) {
 	if err := f.h.Enable("grafana-team-a"); statusOf(err) != 409 || !strings.Contains(err.Error(), "3300") {
 		t.Fatalf("port clash: %v", err)
 	}
-	if err := f.h.SaveSettings("grafana-team-a", SettingsUpdate{Values: map[string]string{"GRAFANA_PORT": "3310"}}); err != nil {
+	if err := f.h.save("grafana-team-a", SettingsUpdate{Ports: map[string]string{"GRAFANA_PORT": "3310"}}); err != nil {
 		t.Fatal(err)
 	}
 	callsBefore := len(f.runner.Calls())
@@ -561,13 +561,13 @@ func TestHostNetworkPortsPerInstance(t *testing.T) {
 		t.Fatalf("same host-network port: %v", err)
 	}
 	// A free port but an overlapping range is still refused.
-	if err := f.h.SaveSettings("relay-b", SettingsUpdate{Values: map[string]string{"RELAY_PORT": "3479", "RELAY_RANGE": "40000-49152"}}); err != nil {
+	if err := f.h.save("relay-b", SettingsUpdate{Ports: map[string]string{"RELAY_PORT": "3479", "RELAY_RANGE": "40000-49152"}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.h.Enable("relay-b"); statusOf(err) != 409 || !strings.Contains(err.Error(), "RELAY_RANGE") {
 		t.Fatalf("overlapping range: %v", err)
 	}
-	if err := f.h.SaveSettings("relay-b", SettingsUpdate{Values: map[string]string{"RELAY_PORT": "3479", "RELAY_RANGE": "40000-40100"}}); err != nil {
+	if err := f.h.save("relay-b", SettingsUpdate{Ports: map[string]string{"RELAY_PORT": "3479", "RELAY_RANGE": "40000-40100"}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.h.Enable("relay-b"); err != nil {
@@ -578,13 +578,13 @@ func TestHostNetworkPortsPerInstance(t *testing.T) {
 		t.Errorf("instance env = %v", env)
 	}
 	// Changing a running instance's ports into a clash is refused.
-	err = f.h.SaveSettings("relay-b", SettingsUpdate{Values: map[string]string{"RELAY_PORT": "3478", "RELAY_RANGE": "40000-40100"}})
+	err = f.h.save("relay-b", SettingsUpdate{Ports: map[string]string{"RELAY_PORT": "3478", "RELAY_RANGE": "40000-40100"}})
 	if statusOf(err) != 409 {
 		t.Errorf("clash on save: %v", err)
 	}
 	// Bad ranges are refused.
 	for _, r := range []string{"40100-40000", "0-10", "1-70000", "abc", "40000"} {
-		if err := f.h.SaveSettings("relay-b", SettingsUpdate{Values: map[string]string{"RELAY_RANGE": r}}); statusOf(err) != 400 {
+		if err := f.h.save("relay-b", SettingsUpdate{Ports: map[string]string{"RELAY_RANGE": r}}); statusOf(err) != 400 {
 			t.Errorf("range %q: %v", r, err)
 		}
 	}
@@ -687,7 +687,7 @@ func TestSiblingsShareSupportFiles(t *testing.T) {
 		if err := f.h.CreateInstance("grafana", id, nil); err != nil {
 			t.Fatal(err)
 		}
-		if err := f.h.SaveSettings(id, SettingsUpdate{Values: map[string]string{"GRAFANA_PORT": fmt.Sprint(3311 + i)}}); err != nil {
+		if err := f.h.save(id, SettingsUpdate{Ports: map[string]string{"GRAFANA_PORT": fmt.Sprint(3311 + i)}}); err != nil {
 			t.Fatal(err)
 		}
 	}

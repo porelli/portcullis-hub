@@ -1060,6 +1060,10 @@ func (v *specCheck) indexed(o *Option, prefix string) error {
 	return nil
 }
 
+// EffectiveApplies is o's applies, or its §13.9 default (claims
+// next_sign_in, headers next_request, otherwise restart).
+func (o *Option) EffectiveApplies() string { return appliesOf(o) }
+
 // appliesOf is o's effective applies (§13.9 defaults).
 func appliesOf(o *Option) string {
 	if o.Applies != "" {

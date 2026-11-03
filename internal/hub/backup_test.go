@@ -369,7 +369,7 @@ func TestDeleteRemovesEverything(t *testing.T) {
 	f.engine.addVolume("portcullis_other", "portcullis-other", "data", 0)
 	f.engine.addVolume("unlabelled", "", "", 0)
 	f.h.mu.Lock()
-	f.h.st.Settings["chat-b"] = map[string]string{"K": "v"}
+	f.h.st.Settings["chat-b"] = state.InstanceSettings{Ports: map[string]string{"K": "v"}}
 	f.h.st.PublicTokens["chat-b"] = []string{"tok"}
 	f.h.mu.Unlock()
 	for _, p := range []string{f.h.userOverridePath("chat-b")} {
@@ -470,7 +470,7 @@ func TestDeleteDefaultInstanceKeepsSharedGroup(t *testing.T) {
 func TestRestoreSameInstance(t *testing.T) {
 	f, audit, _ := grafanaB(t)
 	f.h.mu.Lock()
-	f.h.st.Settings["grafana-b"] = map[string]string{"K": "v1"}
+	f.h.st.Settings["grafana-b"] = state.InstanceSettings{Ports: map[string]string{"GRAFANA_PORT": "3401"}}
 	f.h.saveLocked()
 	f.h.mu.Unlock()
 	writeFile(t, f.h.userOverridePath("grafana-b"), "services: {}\n")
@@ -485,7 +485,7 @@ func TestRestoreSameInstance(t *testing.T) {
 	setEnvVar(f.h.envPath("grafana-b"), "GF_SECRET", "changed")
 	os.Remove(f.h.userOverridePath("grafana-b"))
 	f.h.mu.Lock()
-	f.h.st.Settings["grafana-b"] = map[string]string{"K": "v2"}
+	f.h.st.Settings["grafana-b"] = state.InstanceSettings{Ports: map[string]string{"GRAFANA_PORT": "3402"}}
 	f.h.mu.Unlock()
 	if err := f.h.SetHosts("grafana-b", map[string]string{"grafana": "grafana-x.example.org"}, "root"); err != nil {
 		t.Fatal(err)
@@ -517,9 +517,9 @@ func TestRestoreSameInstance(t *testing.T) {
 		t.Errorf("view = %+v", v)
 	}
 	f.h.mu.RLock()
-	k := f.h.st.Settings["grafana-b"]["K"]
+	k := f.h.st.Settings["grafana-b"].Ports["GRAFANA_PORT"]
 	f.h.mu.RUnlock()
-	if k != "v1" {
+	if k != "3401" {
 		t.Errorf("setting = %s", k)
 	}
 	calls := strings.Join(f.runner.Calls()[n:], " ")
@@ -893,7 +893,7 @@ func TestDiscoverStatefulClaimsFirst(t *testing.T) {
 	newcomer = strings.NewReplacer("users_grafana", "users_aaa", "admin_grafana", "admin_aaa").Replace(newcomer)
 	aaaCompose := strings.Replace(v2GrafanaCompose, "grafana.portcullis.local", "aaa.portcullis.local", -1)
 	f := newInstanceFixtureExtra(t, func(st *state.AppState) {
-		st.Settings["grafana"] = map[string]string{"K": "v"}
+		st.Settings["grafana"] = state.InstanceSettings{Ports: map[string]string{"K": "v"}}
 	}, nil, map[string][2]string{"aaa": {newcomer, aaaCompose}})
 	if f.h.Template("grafana") == nil || f.h.Template("aaa") != nil {
 		t.Errorf("grafana %v, aaa %v: the stateful template must keep its names", f.h.Template("grafana") != nil, f.h.Template("aaa") != nil)

@@ -263,6 +263,9 @@ func (h *Hub) enableInner(id string, restoring bool) (rolledBack bool, err error
 		h.mu.Unlock()
 		return false, err
 	}
+	// The template's starting per-person rows (after EnableAs created
+	// the instance's missing groups).
+	h.seedSettingsLocked(&tmpl)
 	if err := h.generateAppEnvLocked(&tmpl); err != nil {
 		h.mu.Unlock()
 		return false, statusErr(500, "env setup failed: %v", err)

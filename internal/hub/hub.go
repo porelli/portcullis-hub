@@ -114,12 +114,32 @@ type Groups interface {
 	DeleteInstanceGroup(ctx context.Context, actor, name string) ([]string, error)
 }
 
+// FolderSource resolves a shared folder (project 2) to its host
+// directory. It is called under the Hub lock: it must answer from
+// memory, never over the network.
+type FolderSource interface {
+	FolderHostPath(id, subpath string) (string, error)
+}
+
+// SetFolderSource sets where shared-folder path values resolve.
+func (h *Hub) SetFolderSource(f FolderSource) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.folders = f
+}
+
+// Kinds is the Hub's settings type registry.
+func (h *Hub) Kinds() *settings.Registry { return h.kinds }
+
 // Hub is the application core. All exported methods are safe for
 // concurrent use.
 type Hub struct {
 	cfg Config
 	// kinds is the settings type registry (immutable after New).
-	kinds   *settings.Registry
+	kinds *settings.Registry
+	// folders resolves shared-folder path values (project 2; SetFolderSource;
+	// nil = not available: folder:… values are refused). Guarded by mu.
+	folders FolderSource
 	compose compose.Runner
 	engine  Engine
 	idp     IdP

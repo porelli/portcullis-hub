@@ -2,11 +2,14 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -38,17 +41,33 @@ type volumePlan struct {
 // configProblem refuses (409, listing every problem) an archive whose
 // per-instance configuration doesn't fit template t by SaveSettings'
 // rules (configProblems): settings, sign-in mode, policy override, public
-// exceptions.
-func configProblem(t *templates.Template, c instanceConfig, archive string) error {
-	u := SettingsUpdate{Values: c.Settings, PublicAccess: c.PublicAccess}
+// exceptions. Archived per-person and per-group rows must be valid too
+// (their group ids are kept). When it fits, c.Settings is made canonical
+// for t (values parsed again, types recorded) — what applyConfigLocked
+// stores.
+func (h *Hub) configProblem(t *templates.Template, c *instanceConfig, archive string) error {
+	var s state.InstanceSettings
+	if c.Settings != nil {
+		s = c.Settings.Clone()
+	}
+	u := SettingsUpdate{Ports: s.Ports, PublicAccess: c.PublicAccess, Values: map[string]json.RawMessage{}}
+	if u.Ports == nil {
+		u.Ports = map[string]string{}
+	}
+	var problems []error
+	for k, v := range s.Values {
+		b, err := json.Marshal(v)
+		if err != nil {
+			problems = append(problems, statusErr(400, "setting %s: %v", k, err))
+			continue
+		}
+		u.Values[k] = b
+	}
 	if c.AuthPolicy != nil {
 		// As state.yaml loads it (a legacy factor rewritten, never weaker)
 		// and as applyConfigLocked stores it.
 		n := policy.Normalize(*c.AuthPolicy)
 		u.Policy = &n
-	}
-	if u.Values == nil {
-		u.Values = map[string]string{}
 	}
 	if c.SignIn != "" {
 		si := c.SignIn
@@ -62,8 +81,74 @@ func configProblem(t *templates.Template, c instanceConfig, archive string) erro
 		tk := append([]string(nil), c.PublicTokens...)
 		u.PublicTokens = &tk
 	}
-	problems := configProblems(t, u, c.SignIn == state.SignInNative)
+	h.mu.RLock()
+	folders := h.folders
+	h.mu.RUnlock()
+	parsed, more := configCheck(t, h.kinds, folders, u, c.SignIn == state.SignInNative)
+	problems = append(problems, more...)
+	canon := s
+	canon.Values, canon.Types = nil, nil
+	if parsed != nil {
+		for k, v := range parsed.values {
+			if v == nil {
+				continue
+			}
+			if canon.Values == nil {
+				canon.Values, canon.Types = map[string]any{}, map[string]string{}
+			}
+			canon.Values[k] = storedValue(v)
+			canon.Types[k] = optionByKey(t, k).Type
+		}
+	}
+	scoped := func(k, scope string) *templates.Option {
+		o := optionByKey(t, k)
+		if o == nil || o.EffectiveScope() != scope {
+			problems = append(problems, statusErr(400, "setting %s is not a %s option of the template", clip(k, 64), scope))
+			return nil
+		}
+		return o
+	}
+	for _, k := range slices.Sorted(maps.Keys(s.Person)) {
+		o := scoped(k, templates.ScopePerson)
+		if o == nil {
+			continue
+		}
+		p, err := parsePerson(h.kinds, folders, o, s.Person[k])
+		if err != nil {
+			problems = append(problems, err)
+			continue
+		}
+		canon.Person[k] = p
+		if canon.Types == nil {
+			canon.Types = map[string]string{}
+		}
+		canon.Types[k] = o.Type
+	}
+	for _, k := range slices.Sorted(maps.Keys(s.Groups)) {
+		o := scoped(k, templates.ScopeGroup)
+		if o == nil {
+			continue
+		}
+		rows, err := parseRows(h.kinds, folders, o, s.Groups[k])
+		if err != nil {
+			problems = append(problems, err)
+			continue
+		}
+		canon.Groups[k] = rows
+		if canon.Types == nil {
+			canon.Types = map[string]string{}
+		}
+		canon.Types[k] = o.Type
+	}
+	for k := range s.Secrets {
+		if o := optionByKey(t, k); o == nil || o.Type != templates.TypeSecret {
+			problems = append(problems, statusErr(400, "setting %s is not a secret option of the template", clip(k, 64)))
+		}
+	}
 	if len(problems) == 0 {
+		if c.Settings != nil {
+			c.Settings = &canon
+		}
 		return nil
 	}
 	msgs := make([]string, 0, len(problems))
@@ -141,7 +226,7 @@ func (h *Hub) restoreInstance(id, archive, actor string, ready func()) (res *Res
 	if sb.m.Template != view.TemplateID {
 		return res, statusErr(409, "archive %s is a backup of template %s, instance %s runs %s", archive, sb.m.Template, id, view.TemplateID)
 	}
-	if err := configProblem(view, sb.cfg, archive); err != nil {
+	if err := h.configProblem(view, &sb.cfg, archive); err != nil {
 		return res, err
 	}
 	plan, err := h.restorePlan(id, view, sb)
@@ -501,6 +586,9 @@ func (h *Hub) applyRestore(id string, sb *staged, plan []volumePlan, wasEnabled 
 	h.mu.Lock()
 	h.applyConfigLocked(id, sb.cfg)
 	h.rebuildLocked()
+	if v := h.findLocked(id); v != nil {
+		h.seedSettingsLocked(v)
+	}
 	var envErr error
 	if v := h.findLocked(id); v != nil {
 		envErr = h.refreshInstanceEnvLocked(v)
@@ -648,7 +736,7 @@ func (h *Hub) restoreInstanceAs(archive, newID, actor string, hosts map[string]s
 	if len(sb.volumes) > 0 && h.engine == nil {
 		return res, statusErr(503, "Docker is not available: cannot restore volumes")
 	}
-	if err := configProblem(&tmpl, sb.cfg, archive); err != nil {
+	if err := h.configProblem(&tmpl, &sb.cfg, archive); err != nil {
 		return res, err
 	}
 	h.mu.RLock()
@@ -660,9 +748,11 @@ func (h *Hub) restoreInstanceAs(archive, newID, actor string, hosts map[string]s
 		}
 	}
 	// Host paths are shared, not copied: say so.
-	for _, st := range tmpl.Manifest.Options() {
-		if v := sb.cfg.Settings[st.Key]; st.Type == templates.TypePath && v != "" {
-			res.Warnings = append(res.Warnings, fmt.Sprintf("setting %s mounts host path %s, as instance %s did: the two instances share that directory unless you change it", st.Key, v, sb.m.Instance))
+	if sb.cfg.Settings != nil {
+		for _, st := range tmpl.Manifest.Options() {
+			if v, ok := sb.cfg.Settings.Values[st.Key]; ok && st.Type == templates.TypePath && v != nil {
+				res.Warnings = append(res.Warnings, fmt.Sprintf("setting %s mounts host path %v, as instance %s did: the two instances share that directory unless you change it", st.Key, v, sb.m.Instance))
+			}
 		}
 	}
 
@@ -735,6 +825,9 @@ func (h *Hub) restoreInstanceAs(archive, newID, actor string, hosts map[string]s
 	h.mu.Lock()
 	h.applyConfigLocked(newID, sb.cfg)
 	h.rebuildLocked()
+	if v := h.findLocked(newID); v != nil {
+		h.seedSettingsLocked(v)
+	}
 	var envErr error
 	if v := h.findLocked(newID); v == nil {
 		envErr = fmt.Errorf("instance %s does not resolve", newID)

@@ -5,12 +5,16 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/portcullis/hub/internal/fsutil"
+	"github.com/portcullis/hub/internal/settings"
 	"github.com/portcullis/hub/internal/templates"
 )
 
@@ -24,9 +28,10 @@ func randomSecret() (string, error) {
 }
 
 // generateAppEnvLocked writes the per-app .env: existing values are kept,
-// missing manifest env vars are generated, user settings are applied, and
-// ${VAR} references in compose.yml are filled from the core .env.
-// Caller must hold mu.
+// missing manifest env vars are generated, the instance options' env
+// deliveries are written from state (optionEnvLocked: every option env
+// name, empty when unset), and ${VAR} references in compose.yml are
+// filled from the core .env. Caller must hold mu.
 func (h *Hub) generateAppEnvLocked(t *templates.Template) error {
 	envFile := h.envPath(t.ID)
 	vars := readEnvFile(envFile) // preserve user edits
@@ -47,12 +52,14 @@ func (h *Hub) generateAppEnvLocked(t *templates.Template) error {
 			vars[v.Key] = ""
 		}
 	}
-	for k, v := range settingsEnv(t, h.st.Settings[t.ID]) {
+	for k, v := range h.portEnvLocked(t) {
 		vars[k] = v
 	}
-	// Ports the app binds itself (network_mode: host, ranges) reach it only
-	// through the env: write their effective value (setting or default).
-	for k, v := range hostNetPortValues(t, h.st.Settings[t.ID]) {
+	optEnv, err := h.optionEnvLocked(t)
+	if err != nil {
+		return err
+	}
+	for k, v := range optEnv {
 		vars[k] = v
 	}
 	// The instance variables (contract §2, §3.1) are derived, never kept
@@ -79,10 +86,182 @@ func (h *Hub) generateAppEnvLocked(t *templates.Template) error {
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
-		lines = append(lines, k+"="+vars[k])
+		_, quoted := optEnv[k]
+		lines = append(lines, envLine(k, vars[k], quoted))
 	}
 	// 0600: contains generated secrets.
 	return fsutil.WriteFileAtomic(envFile, []byte(strings.Join(lines, "\n")+"\n"), 0600)
+}
+
+// writeOptionEnvLocked updates the option variables (optionEnvLocked,
+// single-quoted) and the port variables (portEnvLocked) in id's .env,
+// keeping every other line. Caller must hold mu.
+func (h *Hub) writeOptionEnvLocked(t *templates.Template) error {
+	vars, err := h.optionEnvLocked(t)
+	if err != nil {
+		return err
+	}
+	if err := setEnvVars(h.envPath(t.ID), h.portEnvLocked(t), false); err != nil {
+		return err
+	}
+	return setEnvVars(h.envPath(t.ID), vars, true)
+}
+
+// portEnvLocked are t's port settings as env variables: the stored port
+// keys and <KEY>_BIND as they are, and the effective value of every port
+// the app binds itself (network_mode: host, ranges: compose publishes
+// nothing for them, the template reads them from the env). Caller must
+// hold mu.
+func (h *Hub) portEnvLocked(t *templates.Template) map[string]string {
+	s := h.st.Settings[t.ID]
+	out := maps.Clone(s.Ports)
+	if out == nil {
+		out = map[string]string{}
+	}
+	for k, v := range hostNetPortValues(t, s.Ports) {
+		out[k] = v
+	}
+	return out
+}
+
+// optionEnvLocked is what the Hub writes for t's options into its .env
+// (unquoted values; the writers single-quote them): every env name of an
+// instance option, rendered per delivery (RenderDelivery; an indexed
+// NAME_{n} one item per variable, unused ones empty), empty when the
+// option has no value. Left alone (P12): secret
+// options (their store writes them), group-scope options (their records)
+// and person-entered lists (the delivery engine writes those outside
+// mu). Caller must hold mu.
+func (h *Hub) optionEnvLocked(t *templates.Template) (map[string]string, error) {
+	s := h.st.Settings[t.ID]
+	out := map[string]string{}
+	opts := t.Manifest.Options()
+	for i := range opts {
+		o := &opts[i]
+		if o.EffectiveScope() != templates.ScopeInstance || o.Type == templates.TypeSecret {
+			continue
+		}
+		v, ok := h.effectiveValue(t, o, s)
+		if !ok {
+			v = nil
+		}
+		env, err := renderOptionEnv(o, v)
+		if err != nil {
+			return nil, fmt.Errorf("setting %s: %w", o.Key, err)
+		}
+		for k, x := range env {
+			out[k] = x
+		}
+	}
+	return out, nil
+}
+
+// envDeliveries are o's env deliveries: the declared ones, or the
+// implicit env UPPER(key) of an instance option without deliveries.
+func envDeliveries(o *templates.Option) []templates.Delivery {
+	if len(o.Delivery) == 0 {
+		if n := o.EnvName(); n != "" {
+			return []templates.Delivery{{Env: n}}
+		}
+		return nil
+	}
+	var out []templates.Delivery
+	for _, d := range o.Delivery {
+		if d.Env != "" {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// renderOptionEnv renders the canonical v (nil = no value: every name
+// empty) for each of o's env deliveries. A rendered value env can't
+// carry single-quoted (a ' or a newline) is an error naming the variable.
+func renderOptionEnv(o *templates.Option, v any) (map[string]string, error) {
+	out := map[string]string{}
+	for _, d := range envDeliveries(o) {
+		if prefix, ok := strings.CutSuffix(d.Env, templates.IndexSuffix); ok {
+			var items []string
+			if v != nil {
+				var err error
+				if items, err = settings.RenderIndexed(o, v, &d); err != nil {
+					return nil, err
+				}
+			}
+			for _, n := range o.EnvNames() {
+				if !strings.HasPrefix(n, prefix+"_") {
+					continue
+				}
+				i, _ := strconv.Atoi(strings.TrimPrefix(n, prefix+"_"))
+				x := ""
+				if i >= 1 && i <= len(items) {
+					x = items[i-1]
+				}
+				if _, err := envQuote(x); err != nil {
+					return nil, fmt.Errorf("env %s: %w", n, err)
+				}
+				out[n] = x
+			}
+			continue
+		}
+		x := ""
+		if v != nil {
+			r, err := settings.RenderDelivery(o, v, &d)
+			if err != nil {
+				return nil, err
+			}
+			x = r.Text
+		}
+		if _, err := envQuote(x); err != nil {
+			return nil, fmt.Errorf("env %s: %w", d.Env, err)
+		}
+		out[d.Env] = x
+	}
+	return out, nil
+}
+
+// envQuote single-quotes v for an .env file: compose reads a
+// single-quoted value literally ($, #, spaces and " stay as they are). A
+// value with ' or a line break can't be single-quoted: an error.
+func envQuote(v string) (string, error) {
+	if strings.ContainsAny(v, "'\n\r") {
+		return "", fmt.Errorf("the value contains a single quote or a line break, which an env value can't carry (use a file or hook delivery)")
+	}
+	return "'" + v + "'", nil
+}
+
+// plainEnvRe: a value compose reads the same quoted or not.
+var plainEnvRe = regexp.MustCompile(`^[A-Za-z0-9_./:@%+,=-]+$`)
+
+// envLine is one KEY=VALUE line. An option value (quote) is always
+// single-quoted (envQuote, contract §13.5); any other value only when it
+// holds something compose would interpret ($, #, spaces, quotes). Empty
+// is KEY=; a value that can't be single-quoted (a ' from an earlier
+// edit) is written as it is, as before.
+func envLine(k, v string, quote bool) string {
+	if v == "" {
+		return k + "="
+	}
+	if !quote && plainEnvRe.MatchString(v) {
+		return k + "=" + v
+	}
+	if q, err := envQuote(v); err == nil {
+		return k + "=" + q
+	}
+	return k + "=" + v
+}
+
+// envUnquote is a value as read from an .env line: a single-quoted
+// value's content, a double-quoted one's when it holds nothing compose
+// would interpret ($, \, "), anything else as written.
+func envUnquote(v string) string {
+	if len(v) >= 2 && v[0] == '\'' && v[len(v)-1] == '\'' && !strings.Contains(v[1:len(v)-1], "'") {
+		return v[1 : len(v)-1]
+	}
+	if len(v) >= 2 && v[0] == '"' && v[len(v)-1] == '"' && !strings.ContainsAny(v[1:len(v)-1], "$\\\"") {
+		return v[1 : len(v)-1]
+	}
+	return v
 }
 
 // readEnvFile parses KEY=VALUE lines (missing file = empty map).
@@ -94,7 +273,9 @@ func readEnvFile(path string) map[string]string {
 	return parseEnv(data)
 }
 
-// parseEnv parses KEY=VALUE lines.
+// parseEnv parses KEY=VALUE lines; quoted values are unquoted
+// (envUnquote), so a value written by writeEnvMap / setEnvVar reads back
+// as it was.
 func parseEnv(data []byte) map[string]string {
 	result := make(map[string]string)
 	for _, line := range strings.Split(string(data), "\n") {
@@ -103,7 +284,7 @@ func parseEnv(data []byte) map[string]string {
 			continue
 		}
 		if k, v, ok := strings.Cut(line, "="); ok {
-			result[k] = v
+			result[k] = envUnquote(v)
 		}
 	}
 	return result
@@ -119,30 +300,54 @@ func writeEnvMap(path string, vars map[string]string) error {
 	var b strings.Builder
 	b.WriteString("# Auto-generated by Portcullis Hub — do not edit manually\n")
 	for _, k := range keys {
-		b.WriteString(k + "=" + vars[k] + "\n")
+		b.WriteString(envLine(k, vars[k], false) + "\n")
 	}
 	return fsutil.WriteFileAtomic(path, []byte(b.String()), 0600)
 }
 
-// setEnvVar updates or appends key=value in an .env file.
+// setEnvVar updates or appends key=value (quoted as needed: envLine) in
+// an .env file.
 func setEnvVar(envFile, key, value string) error {
+	return setEnvVars(envFile, map[string]string{key: value}, false)
+}
+
+// setEnvVars updates or appends each key=value (envLine; quote: always
+// single-quoted) in an .env file in one write, keeping every other line;
+// new keys are appended sorted.
+func setEnvVars(envFile string, vars map[string]string, quote bool) error {
+	if len(vars) == 0 {
+		return nil
+	}
 	data, err := os.ReadFile(envFile)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	lines := strings.Split(string(data), "\n")
-	found := false
+	var lines []string
+	if len(data) > 0 {
+		lines = strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+	}
+	done := map[string]bool{}
 	for i, line := range lines {
-		if strings.HasPrefix(line, key+"=") {
-			lines[i] = key + "=" + value
-			found = true
-			break
+		k, _, ok := strings.Cut(strings.TrimSpace(line), "=")
+		if !ok || strings.HasPrefix(k, "#") {
+			continue
+		}
+		if v, want := vars[k]; want && !done[k] {
+			lines[i] = envLine(k, v, quote)
+			done[k] = true
 		}
 	}
-	if !found {
-		lines = append(lines, key+"="+value)
+	keys := make([]string, 0, len(vars))
+	for k := range vars {
+		if !done[k] {
+			keys = append(keys, k)
+		}
 	}
-	return fsutil.WriteFileAtomic(envFile, []byte(strings.Join(lines, "\n")), 0600)
+	sort.Strings(keys)
+	for _, k := range keys {
+		lines = append(lines, envLine(k, vars[k], quote))
+	}
+	return fsutil.WriteFileAtomic(envFile, []byte(strings.Join(lines, "\n")+"\n"), 0600)
 }
 
 // hostNetPortValues are the effective values of the ports an app binds
@@ -170,30 +375,34 @@ func hostNetPortValues(t *templates.Template, values map[string]string) map[stri
 }
 
 // refreshInstanceEnvLocked rewrites the derived variables (domain and
-// instance variables) in an existing .env before every compose up, so
-// the routed hostnames are always the Hub's. Caller must hold mu.
+// instance variables) and the settings' variables (optionEnvLocked) in
+// an existing .env before every compose up, so the routed hostnames are
+// always the Hub's and the app starts with the stored settings. Caller
+// must hold mu.
 func (h *Hub) refreshInstanceEnvLocked(t *templates.Template) error {
 	path := h.envPath(t.ID)
 	if _, err := os.Stat(path); err != nil {
 		return nil // not generated yet: enable writes it whole
 	}
 	cur := readEnvFile(path)
-	want := map[string]string{"PORTCULLIS_DOMAIN": h.cfg.Domain}
+	opts, err := h.optionEnvLocked(t)
+	if err != nil {
+		return err
+	}
+	want := h.portEnvLocked(t)
+	want["PORTCULLIS_DOMAIN"] = h.cfg.Domain
 	for k, v := range t.InstanceEnv {
 		want[k] = v
 	}
-	keys := make([]string, 0, len(want))
-	for k := range want {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
-		if v, ok := cur[k]; ok && v == want[k] {
-			continue
-		}
-		if err := setEnvVar(path, k, want[k]); err != nil {
-			return err
+	for _, m := range []map[string]string{want, opts} {
+		for k, v := range m {
+			if c, ok := cur[k]; ok && c == v {
+				delete(m, k)
+			}
 		}
 	}
-	return nil
+	if err := setEnvVars(path, want, false); err != nil {
+		return err
+	}
+	return setEnvVars(path, opts, true)
 }

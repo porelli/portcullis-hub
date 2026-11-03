@@ -15,6 +15,7 @@ import (
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/hub"
 	"github.com/portcullis/hub/internal/state"
+	"github.com/portcullis/hub/internal/templates"
 	"github.com/portcullis/hub/web"
 )
 
@@ -161,15 +162,22 @@ func TestServerRoutes(t *testing.T) {
 }
 
 func TestParseSettingsUpdate(t *testing.T) {
+	tmpl := &templates.Template{Manifest: templates.Manifest{
+		Ports:    []templates.Port{{Key: "P"}},
+		Settings: &templates.SettingsSpec{Options: []templates.Option{{Key: "on", Type: templates.TypeBool}}},
+	}}
 	u, _ := parseSettingsUpdate(map[string]interface{}{
-		"A": "1", "N": 5.0, "_auth_policy_inherit": "true",
+		"A": "1", "N": 5.0, "E": "", "on": "true", "P": "3300", "P_BIND": "127.0.0.1", "_auth_policy_inherit": "true",
 		"_auth_policy": map[string]interface{}{"factors": []interface{}{"mtls", 3.0}, "op": "all"},
-	})
+	}, tmpl)
 	if !u.Inherit || u.Policy == nil || len(u.Policy.Factors) != 1 || u.Policy.Op != "all" {
 		t.Errorf("update = %+v", u)
 	}
-	if len(u.Values) != 1 || u.Values["A"] != "1" {
-		t.Errorf("values = %v", u.Values)
+	if len(u.Values) != 4 || string(u.Values["A"]) != `"1"` || string(u.Values["N"]) != "5" || string(u.Values["E"]) != "null" || string(u.Values["on"]) != "true" {
+		t.Errorf("values = %s", u.Values)
+	}
+	if len(u.Ports) != 2 || u.Ports["P"] != "3300" || u.Ports["P_BIND"] != "127.0.0.1" {
+		t.Errorf("ports = %v", u.Ports)
 	}
 }
 
@@ -226,17 +234,17 @@ func TestSignInAudited(t *testing.T) {
 func TestParseSettingsUpdatePublic(t *testing.T) {
 	u, err := parseSettingsUpdate(map[string]interface{}{
 		"_public_access": false, "_public_mode": "listed", "_public_tokens": []interface{}{"https://x/s/abc", "def"}, "K": "v",
-	})
-	if err != nil || u.PublicAccess == nil || *u.PublicAccess || *u.PublicMode != "listed" || len(*u.PublicTokens) != 2 || u.Values["K"] != "v" || len(u.Values) != 1 {
+	}, nil)
+	if err != nil || u.PublicAccess == nil || *u.PublicAccess || *u.PublicMode != "listed" || len(*u.PublicTokens) != 2 || string(u.Values["K"]) != `"v"` || len(u.Values) != 1 {
 		t.Errorf("u = %+v, %v", u, err)
 	}
-	if u, err := parseSettingsUpdate(map[string]interface{}{"_public_access": "default"}); err != nil || !u.PublicAccessDefault || u.PublicAccess != nil {
+	if u, err := parseSettingsUpdate(map[string]interface{}{"_public_access": "default"}, nil); err != nil || !u.PublicAccessDefault || u.PublicAccess != nil {
 		t.Errorf("default: %+v %v", u, err)
 	}
 	for _, raw := range []map[string]interface{}{
 		{"_public_access": "maybe"}, {"_public_access": 1.0}, {"_public_mode": true}, {"_public_tokens": "abc"}, {"_public_tokens": []interface{}{1.0}},
 	} {
-		if _, err := parseSettingsUpdate(raw); err == nil {
+		if _, err := parseSettingsUpdate(raw, nil); err == nil {
 			t.Errorf("accepted %v", raw)
 		}
 	}

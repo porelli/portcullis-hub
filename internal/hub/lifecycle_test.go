@@ -190,20 +190,20 @@ func TestPortCollision(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 	// Rebinding to a specific IP still overlaps 0.0.0.0; another port is fine.
-	if err := f.h.SaveSettings("other", SettingsUpdate{Values: map[string]string{"OTHER_PORT": "3300", "OTHER_PORT_BIND": "127.0.0.1"}}); err != nil {
+	if err := f.h.save("other", SettingsUpdate{Ports: map[string]string{"OTHER_PORT": "3300", "OTHER_PORT_BIND": "127.0.0.1"}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.h.Enable("other"); statusOf(err) != 409 {
 		t.Errorf("err = %v", err)
 	}
-	if err := f.h.SaveSettings("other", SettingsUpdate{Values: map[string]string{"OTHER_PORT": "3301"}}); err != nil {
+	if err := f.h.save("other", SettingsUpdate{Ports: map[string]string{"OTHER_PORT": "3301"}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.h.Enable("other"); err != nil {
 		t.Errorf("err = %v", err)
 	}
 	// Changing an enabled app onto a claimed port is refused and rolled back.
-	err = f.h.SaveSettings("other", SettingsUpdate{Values: map[string]string{"OTHER_PORT": "3300"}})
+	err = f.h.save("other", SettingsUpdate{Ports: map[string]string{"OTHER_PORT": "3300"}})
 	if statusOf(err) != 409 {
 		t.Errorf("err = %v", err)
 	}
@@ -349,7 +349,7 @@ func TestConcurrentLifecycle(t *testing.T) {
 	f := newFixture(t)
 	f.runner.delay = time.Millisecond
 	// Avoid the port collision so both apps can be enabled.
-	f.h.SaveSettings("other", SettingsUpdate{Values: map[string]string{"OTHER_PORT": "3301"}})
+	f.h.save("other", SettingsUpdate{Ports: map[string]string{"OTHER_PORT": "3301"}})
 	ids := []string{"grafana", "other"}
 	var wg sync.WaitGroup
 	for g := 0; g < 16; g++ {
@@ -429,25 +429,28 @@ func TestConfigFilesConfined(t *testing.T) {
 
 func TestSaveSettingsValidation(t *testing.T) {
 	f := newFixture(t)
-	bad := []map[string]string{
-		{"bad-key": "x"},
-		{"gf_theme": "dark\nEVIL=1"},
-		{"media": "/a:/etc"},
-		{"GRAFANA_PORT": "70000"},
-		{"GRAFANA_PORT": "abc"},
-		{"GRAFANA_PORT_BIND": "localhost"},
+	bad := []SettingsUpdate{
+		{Values: vals("bad-key", "x")},
+		{Values: vals("gf_theme", "dark\nEVIL=1")},
+		{Values: vals("media", "/a:/etc")},
+		{Ports: map[string]string{"GRAFANA_PORT": "70000"}},
+		{Ports: map[string]string{"GRAFANA_PORT": "abc"}},
+		{Ports: map[string]string{"GRAFANA_PORT_BIND": "localhost"}},
+		{Ports: map[string]string{"gf_theme": "dark"}},
+		{Values: vals("GRAFANA_PORT", "3000")},
 	}
-	for _, v := range bad {
-		if err := f.h.SaveSettings("grafana", SettingsUpdate{Values: v}); statusOf(err) != 400 {
-			t.Errorf("SaveSettings(%v) = %v, want 400", v, err)
+	for _, u := range bad {
+		if err := f.h.save("grafana", u); statusOf(err) != 400 {
+			t.Errorf("SaveSettings(%+v) = %v, want 400", u, err)
 		}
 	}
-	if err := f.h.SaveSettings("nope", SettingsUpdate{}); statusOf(err) != 404 {
+	if err := f.h.save("nope", SettingsUpdate{}); statusOf(err) != 404 {
 		t.Errorf("unknown app: %v", err)
 	}
 
-	err := f.h.SaveSettings("grafana", SettingsUpdate{
-		Values: map[string]string{"gf_theme": "light", "media": "/mnt/My Media", "GRAFANA_PORT": ""},
+	err := f.h.save("grafana", SettingsUpdate{
+		Values: vals("gf_theme", "light", "media", "/mnt/My Media"),
+		Ports:  map[string]string{"GRAFANA_PORT": ""},
 		Policy: &policy.AuthPolicy{Factors: []string{"WEBAUTHN", "mtls"}, Op: "all"},
 	})
 	if err != nil {
@@ -477,7 +480,7 @@ func TestSaveSettingsValidation(t *testing.T) {
 		t.Errorf("policy file = %+v", doc.Policies)
 	}
 	// Inherit drops the override.
-	if err := f.h.SaveSettings("grafana", SettingsUpdate{Values: map[string]string{}, Inherit: true}); err != nil {
+	if err := f.h.save("grafana", SettingsUpdate{Inherit: true}); err != nil {
 		t.Fatal(err)
 	}
 	if v, _ := f.h.AppSettings("grafana"); v.AuthPolicy != nil {

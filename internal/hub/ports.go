@@ -109,7 +109,7 @@ func portOverlap(a, b portBinding) bool {
 // appPortsLocked is every host port an app publishes: its manifest ports
 // as set in Settings plus its custom override's. Caller must hold mu.
 func (h *Hub) appPortsLocked(t *templates.Template) []portBinding {
-	return append(resolvePortBindings(t, h.st.Settings[t.ID]), h.userPortsLocked(t)...)
+	return append(resolvePortBindings(t, h.st.Settings[t.ID].Ports), h.userPortsLocked(t)...)
 }
 
 func portDesc(p portBinding) string {

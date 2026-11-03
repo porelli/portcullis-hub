@@ -3,6 +3,8 @@ package hub
 import (
 	"strings"
 	"testing"
+
+	"github.com/portcullis/hub/internal/state"
 )
 
 // TestExtraDomainSignInRendered: on an extra-domain host, the override
@@ -74,7 +76,7 @@ func TestExtraDomainSignInRendered(t *testing.T) {
 
 	// The default instance on the main domain: unchanged.
 	h.mu.RLock()
-	defOv, err := h.renderOverrideLocked(h.findLocked("grafana"), nil)
+	defOv, err := h.renderOverrideLocked(h.findLocked("grafana"), state.InstanceSettings{})
 	h.mu.RUnlock()
 	if err != nil {
 		t.Fatal(err)
@@ -98,7 +100,7 @@ func TestExtraDomainSignInRendered(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.mu.RLock()
-	defOv, err = h.renderOverrideLocked(h.findLocked("grafana"), nil)
+	defOv, err = h.renderOverrideLocked(h.findLocked("grafana"), state.InstanceSettings{})
 	h.mu.RUnlock()
 	if err != nil {
 		t.Fatal(err)

@@ -30,7 +30,7 @@ func driftFor(rep DriftReport, id string) *Drift {
 // snapshot persisted in state.yaml — across restarts too.
 func TestMissingTemplateEnforcesSnapshot(t *testing.T) {
 	f := newFixture(t)
-	if err := f.h.SaveSettings("grafana", SettingsUpdate{Values: map[string]string{}, Policy: &policy.AuthPolicy{Factors: []string{"mtls"}}}); err != nil {
+	if err := f.h.save("grafana", SettingsUpdate{Policy: &policy.AuthPolicy{Factors: []string{"mtls"}}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.h.Enable("grafana"); err != nil {
@@ -103,7 +103,7 @@ func TestSnapshotTracksLiveTemplate(t *testing.T) {
 	if s := st.Published["grafana"].Hosts; strings.Join(s, ",") != "dash.example.org" {
 		t.Errorf("snapshot hosts = %v", s)
 	}
-	f.h.SaveSettings("grafana", SettingsUpdate{Values: map[string]string{}, Inherit: true})
+	f.h.save("grafana", SettingsUpdate{Inherit: true})
 	st, _ = state.Load(filepath.Join(f.data, "state.yaml"))
 	if st.Published["grafana"].Policy != nil {
 		t.Error("snapshot still has the dropped override")

@@ -98,7 +98,7 @@ func TestRealTemplatesInstances(t *testing.T) {
 			v := h.findLocked(id)
 			err := h.generateAppEnvLocked(v)
 			if err == nil {
-				err = h.generateOverrideLocked(v, nil)
+				err = h.generateOverrideLocked(v, state.InstanceSettings{})
 			}
 			c := *v
 			h.mu.Unlock()

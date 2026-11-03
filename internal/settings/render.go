@@ -467,3 +467,27 @@ func RenderDelivery(o *templates.Option, v Value, d *templates.Delivery) (Render
 	}
 	return out, nil
 }
+
+// RenderIndexed renders a list v for an indexed env delivery d
+// (NAME_{n}, §13.6): one single-line text per item, each rendered on its
+// own (never joined, so no separator can clash). More items than
+// max_items are refused.
+func RenderIndexed(o *templates.Option, v Value, d *templates.Delivery) ([]string, error) {
+	name := DeliveryName(d)
+	l, ok := v.([]Value)
+	if !ok {
+		return nil, fmt.Errorf("%s: not a list: %T", name, v)
+	}
+	if o.MaxItems == nil || len(l) > *o.MaxItems {
+		return nil, fmt.Errorf("%s: %d items don't fit its max_items", name, len(l))
+	}
+	out := make([]string, len(l))
+	for i, it := range l {
+		s := itemText(it)
+		if hasControl(s) {
+			return nil, fmt.Errorf("%s: item %d contains a newline or control characters", name, i+1)
+		}
+		out[i] = s
+	}
+	return out, nil
+}

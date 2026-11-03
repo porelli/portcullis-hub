@@ -464,13 +464,13 @@ func (s *Server) handleTemplateSettings(w http.ResponseWriter, r *http.Request) 
 		if !decodeJSON(w, r, &raw) {
 			return
 		}
-		u, err := parseSettingsUpdate(raw)
+		u, err := parseSettingsUpdate(raw, s.Hub.Template(id))
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 		before := s.Hub.SignInMode(id)
-		err = s.Hub.SaveSettings(id, u)
+		res, err := s.Hub.SaveSettings(id, u, r.Header.Get("X-Forwarded-User"))
 		if u.SignIn != nil && (err != nil || s.Hub.SignInMode(id) != before) {
 			s.auditSignIn(r, id, before, *u.SignIn, err)
 		}
@@ -478,7 +478,7 @@ func (s *Server) handleTemplateSettings(w http.ResponseWriter, r *http.Request) 
 			writeErr(w, err, http.StatusInternalServerError)
 			return
 		}
-		writeJSON(w, map[string]string{"status": "saved"})
+		writeJSON(w, map[string]interface{}{"status": "saved", "result": res})
 	default:
 		http.Error(w, "GET or PUT only", http.StatusMethodNotAllowed)
 	}
@@ -523,13 +523,15 @@ func (s *Server) audit(e directory.AuditEntry, err error) {
 	}
 }
 
-// parseSettingsUpdate splits the settings PUT body: string values are
-// settings, plus reserved keys — _sign_in ("gateway"/"native", apps with
+// parseSettingsUpdate splits the settings PUT body: the template's port
+// keys (and <KEY>_BIND) are its port configuration, any other key an
+// option value (as the panel form sends them: "" = back to the default,
+// "true"/"false" for a bool option), plus reserved keys — _sign_in ("gateway"/"native", apps with
 // their own login), _auth_policy ({factors, op}),
 // _auth_policy_inherit (true/"true" drops the per-app override),
 // _public_access (true/false/"default"), _public_mode ("all"/"listed"/""
 // for the template default) and _public_tokens (share URLs or tokens).
-func parseSettingsUpdate(raw map[string]interface{}) (hub.SettingsUpdate, error) {
+func parseSettingsUpdate(raw map[string]interface{}, t *templates.Template) (hub.SettingsUpdate, error) {
 	var u hub.SettingsUpdate
 	if v, ok := raw["_auth_policy_inherit"]; ok {
 		switch tv := v.(type) {
@@ -610,11 +612,40 @@ func parseSettingsUpdate(raw map[string]interface{}) (hub.SettingsUpdate, error)
 		u.PublicTokens = &toks
 		delete(raw, "_public_tokens")
 	}
-	u.Values = make(map[string]string, len(raw))
-	for k, v := range raw {
-		if s, ok := v.(string); ok {
-			u.Values[k] = s
+	ports := map[string]bool{}
+	bools := map[string]bool{}
+	if t != nil {
+		for _, p := range t.Manifest.Ports {
+			ports[p.Key], ports[p.Key+"_BIND"] = true, true
 		}
+		for _, o := range t.Manifest.Options() {
+			bools[o.Key] = o.Type == templates.TypeBool
+		}
+	}
+	u.Values = make(map[string]json.RawMessage, len(raw))
+	for k, v := range raw {
+		if ports[k] {
+			if s, ok := v.(string); ok {
+				if u.Ports == nil {
+					u.Ports = map[string]string{}
+				}
+				u.Ports[k] = s
+			}
+			continue
+		}
+		if str, ok := v.(string); ok {
+			switch {
+			case str == "":
+				v = nil
+			case bools[k] && (str == "true" || str == "false"):
+				v = str == "true"
+			}
+		}
+		b, err := json.Marshal(v)
+		if err != nil {
+			return u, fmt.Errorf("setting %s: %v", k, err)
+		}
+		u.Values[k] = b
 	}
 	return u, nil
 }

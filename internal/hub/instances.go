@@ -314,6 +314,9 @@ func (h *Hub) CreateInstance(templateID, id string, hosts map[string]string) err
 	}
 	h.st.Instances[id] = state.Instance{ID: id, Template: templateID, Hosts: view.Hosts, State: state.InstanceCreated}
 	h.rebuildLocked()
+	if v := h.findLocked(id); v != nil {
+		h.seedSettingsLocked(v)
+	}
 	h.saveLocked()
 	log.Printf("instance %s of %s created (hosts %v)", id, templateID, view.Hosts)
 	return nil

@@ -832,7 +832,9 @@
           return;
         }
         for (const s of (data.definitions || [])) {
-          const val = (data.values && data.values[s.key]) || (s.default == null ? '' : String(s.default));
+          const raw = data.values ? data.values[s.key] : undefined;
+          const shown = raw == null ? s.default : raw;
+          const val = shown == null ? '' : (Array.isArray(shown) ? shown.join(',') : String(shown));
           html += '<div class="form-group">';
           html += '<label>' + escapeHtml(s.label) + '</label>';
           if (s.description) html += '<small>' + escapeHtml(s.description) + '</small>';

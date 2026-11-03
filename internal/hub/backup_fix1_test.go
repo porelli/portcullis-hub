@@ -42,15 +42,15 @@ func TestRestoreRefusesInvalidConfig(t *testing.T) {
 	}
 	p := archivePath(f, entry.Archive)
 	_, data, _ := readArchive(t, p)
-	bad := strings.Replace(string(data["config/instance.yaml"]), "enabled: true", "enabled: true\nsign_in: native\npublic_mode: listed\nsettings:\n  bad key: x", 1)
+	bad := strings.Replace(string(data["config/instance.yaml"]), "enabled: true", "enabled: true\nsign_in: native\npublic_mode: listed\nsettings:\n  values:\n    bad key: x", 1)
 	rewriteMember(t, p, "config/instance.yaml", []byte(bad))
 	n, hl := len(f.runner.Calls()), len(f.engine.vol().helperLog)
 	_, err = f.h.RestoreInstance("grafana-b", entry.Archive, "root")
-	if statusOf(err) != 409 || !strings.Contains(err.Error(), "invalid setting key") || !strings.Contains(err.Error(), "sign-in choice") || !strings.Contains(err.Error(), "public exceptions") {
+	if statusOf(err) != 409 || !strings.Contains(err.Error(), `unknown setting "bad key"`) || !strings.Contains(err.Error(), "sign-in choice") || !strings.Contains(err.Error(), "public exceptions") {
 		t.Fatalf("same-instance restore of a bad config = %v", err)
 	}
 	_, err = f.h.RestoreInstanceAs(entry.Archive, "grafana-c", "root")
-	if statusOf(err) != 409 || !strings.Contains(err.Error(), "invalid setting key") {
+	if statusOf(err) != 409 || !strings.Contains(err.Error(), `unknown setting "bad key"`) {
 		t.Fatalf("new-id restore of a bad config = %v", err)
 	}
 	if len(f.runner.Calls()) != n || len(f.engine.vol().helperLog) != hl || f.h.Template("grafana-c") != nil || len(groups.Calls()) != 0 {
@@ -68,7 +68,7 @@ func TestRestoreRefusesInvalidConfig(t *testing.T) {
 func TestInterruptedRestoreRolledBack(t *testing.T) {
 	f, _, _ := grafanaB(t)
 	f.h.mu.Lock()
-	f.h.st.Settings["grafana-b"] = map[string]string{"K": "current"}
+	f.h.st.Settings["grafana-b"] = state.InstanceSettings{Ports: map[string]string{"GRAFANA_PORT": "3401"}}
 	f.h.saveLocked()
 	f.h.mu.Unlock()
 	secret := readEnvFile(f.h.envPath("grafana-b"))["GF_SECRET"]
@@ -98,7 +98,7 @@ func TestInterruptedRestoreRolledBack(t *testing.T) {
 	}
 	for name, err := range map[string]error{
 		"enable":   f.h.Enable("grafana-b"),
-		"settings": f.h.SaveSettings("grafana-b", SettingsUpdate{Values: map[string]string{}}),
+		"settings": f.h.save("grafana-b", SettingsUpdate{}),
 		"env":      f.h.SaveEnv("grafana-b", map[string]string{"X": "y"}),
 		"hosts":    f.h.SetHosts("grafana-b", map[string]string{"grafana": "g2.example.org"}, "root"),
 	} {
@@ -142,9 +142,9 @@ func TestInterruptedRestoreRolledBack(t *testing.T) {
 	}
 	h2.mu.RLock()
 	e, inState := h2.st.Instances["grafana-b"]
-	k := h2.st.Settings["grafana-b"]["K"]
+	k := h2.st.Settings["grafana-b"].Ports["GRAFANA_PORT"]
 	h2.mu.RUnlock()
-	if e.State != "" || e.Backup != "" || !inState || k != "current" || !h2.IsEnabled("grafana-b") {
+	if e.State != "" || e.Backup != "" || !inState || k != "3401" || !h2.IsEnabled("grafana-b") {
 		t.Errorf("after recovery: entry %+v, K=%s, enabled %v", e, k, h2.IsEnabled("grafana-b"))
 	}
 	if lo := h2.LastOp("grafana-b"); lo == nil || lo.Op != OpRestore || lo.OK || !lo.RolledBack {
@@ -381,7 +381,7 @@ func TestDeletingIsDisabled(t *testing.T) {
 	if e.State != state.InstanceDeleting {
 		t.Fatalf("entry = %+v", e)
 	}
-	if err := f.h.SaveSettings("grafana-b", SettingsUpdate{Values: map[string]string{}}); statusOf(err) != 409 {
+	if err := f.h.save("grafana-b", SettingsUpdate{}); statusOf(err) != 409 {
 		t.Errorf("settings while deleting = %v", err)
 	}
 	if err := f.h.SaveEnv("grafana-b", map[string]string{"X": "y"}); statusOf(err) != 409 {
@@ -405,7 +405,7 @@ func TestRestoreNewIDWarnsPathSettings(t *testing.T) {
 	if err := f.h.CreateInstance("media", "media-b", nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.h.SaveSettings("media-b", SettingsUpdate{Values: map[string]string{"library": "/srv/library"}}); err != nil {
+	if err := f.h.save("media-b", SettingsUpdate{Values: vals("library", "/srv/library")}); err != nil {
 		t.Fatal(err)
 	}
 	entry, err := f.h.BackupInstance("media-b", "root")
@@ -515,7 +515,7 @@ func TestConfigProblemsPublicRoutable(t *testing.T) {
 	tmpl.Manifest.Auth.PublicAccess = &templates.PublicAccess{Description: "x"}
 	tmpl.Public = nil
 	on := true
-	if p := configProblems(&tmpl, SettingsUpdate{Values: map[string]string{}, PublicAccess: &on}, false); len(p) != 1 || !strings.Contains(p[0].Error(), "can't be routed") {
+	if p := configProblems(&tmpl, f.h.kinds, nil, SettingsUpdate{PublicAccess: &on}, false); len(p) != 1 || !strings.Contains(p[0].Error(), "can't be routed") {
 		t.Errorf("problems = %v", p)
 	}
 }
