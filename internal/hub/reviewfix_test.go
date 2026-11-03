@@ -508,21 +508,37 @@ func TestEntryDeliverableClaimAndHeader(t *testing.T) {
 }
 
 // H9 (follow-up): immediate header runs queued behind one another read
-// the directory once they hold the delivery lock: the last one to run
-// publishes the newest membership whatever their order.
+// the directory only once they hold the delivery lock: while the test
+// holds it, the only directory reads are the removal checks; each run
+// then reads it again (an older snapshot can never be published last).
 func TestHeadersNowNeverPublishOlderMembership(t *testing.T) {
 	f, people, _ := headerFixture(t, nil)
 	headerEnable(t, f)
 	f.h.TriggerMembershipDelivery()
 	f.h.Wait()
+	calls := func() int {
+		people.mu.Lock()
+		defer people.mu.Unlock()
+		return people.calls
+	}
 	l := f.h.deliverLock(headerID)
 	l.Lock()
+	start := calls()
 	people.removeMember("editors", "carol")
 	f.h.TriggerMembershipDelivery() // run A, waiting for the lock
 	people.removeMember("admin_dash-b", "bob")
 	f.h.TriggerMembershipDelivery() // run B, waiting for the lock
+	time.Sleep(50 * time.Millisecond)
+	if n := calls() - start; n != 2 {
+		l.Unlock()
+		t.Fatalf("%d directory reads while the lock was held, want 2 (the removal checks only)", n)
+	}
+	held := calls()
 	l.Unlock()
 	f.h.Wait()
+	if n := calls() - held; n != 2 {
+		t.Errorf("%d directory reads by the two runs once the lock was free, want 2 (each reads it under the lock)", n)
+	}
 	got := attrHosts(t, f)[headerMain][hdrSuffix]
 	if got["carol"] != "Viewer" || got["bob"] != "Viewer" {
 		t.Errorf("published = %v, want carol and bob Viewer (the newest membership)", got)
