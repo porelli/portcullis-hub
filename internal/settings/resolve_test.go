@@ -692,15 +692,16 @@ func TestNumericMinFailClosed(t *testing.T) {
 		t.Errorf("all stale: want source %s, got %s", ReasonFailClosed, res.Reason.Source)
 	}
 
-	// No Min set → should use 0
+	// No Min set, default not unlimited, no render.unlimited → the default
+	// (never a synthesized 0, which some apps read as unlimited).
 	o3 := &templates.Option{
 		Type:    templates.TypeInt,
 		Resolve: templates.ResolveMin,
 	}
 	config3 := PersonConfig{Default: int64(500), Rule: o3.Resolve, Rows: rows2}
 	res = r.Resolve(o3, config3, bob)
-	if res.Value != int64(0) {
-		t.Errorf("no Min: want 0, got %v", res.Value)
+	if res.Value != int64(500) || res.Reason.Source != ReasonFailClosed {
+		t.Errorf("no Min: want default 500 fail-closed, got %v %s", res.Value, res.Reason.Source)
 	}
 }
 
@@ -771,4 +772,182 @@ func TestIntersectionFirstRowOrder(t *testing.T) {
 
 func ptr[T any](v T) *T {
 	return &v
+}
+
+func strp(s string) *string { return &s }
+
+// unresolvedOK fails unless res is UNRESOLVED (nil value, fail-closed).
+func unresolvedOK(t *testing.T, what string, res Resolved) {
+	t.Helper()
+	if res.Value != nil || res.Reason.Source != ReasonFailClosed {
+		t.Errorf("%s: want UNRESOLVED (nil, fail-closed), got %#v %s", what, res.Value, res.Reason.Source)
+	}
+}
+
+func TestSetItemsUseKindParsers(t *testing.T) {
+	r := NewRegistry()
+	bob := Person{User: "bob", Groups: map[string]int{"a": 1, "b": 2}}
+
+	// users: the Kelvin sign K (U+212A) lowercases to k; it must not alias
+	// "kevin", it is dropped (ASCII only).
+	users := &templates.Option{Type: templates.TypeUsers, Resolve: templates.ResolveUnion}
+	res := r.Resolve(users, PersonConfig{Rows: []Row{
+		{Group: "a", GroupID: 1, Value: []any{"\u212Aevin", "Alice"}},
+		{Group: "b", GroupID: 2, Value: []any{"carol", "x@example.com"}},
+	}}, bob)
+	got := res.Value.([]Value)
+	if len(got) != 2 || got[0] != "alice" || got[1] != "carol" {
+		t.Errorf("users union: want [alice carol], got %v", got)
+	}
+
+	// users intersection: a Kelvin-sign row item never matches "kevin".
+	users.Resolve = templates.ResolveIntersection
+	res = r.Resolve(users, PersonConfig{Rows: []Row{
+		{Group: "a", GroupID: 1, Value: []any{"\u212Aevin"}},
+		{Group: "b", GroupID: 2, Value: []any{"kevin"}},
+	}}, bob)
+	if got := res.Value.([]Value); len(got) != 0 {
+		t.Errorf("users intersection: want [], got %v", got)
+	}
+
+	// groups: an invalid group name is dropped (lldap.ValidGroupName).
+	groups := &templates.Option{Type: templates.TypeGroups, Resolve: templates.ResolveUnion}
+	res = r.Resolve(groups, PersonConfig{Rows: []Row{
+		{Group: "a", GroupID: 1, Value: []any{"staff", "bad\nname", ""}},
+		{Group: "b", GroupID: 2, Value: []any{"admins"}},
+	}}, bob)
+	got = res.Value.([]Value)
+	if len(got) != 2 || got[0] != "admins" || got[1] != "staff" {
+		t.Errorf("groups union: want [admins staff], got %v", got)
+	}
+}
+
+func TestSetCanonicalKeys(t *testing.T) {
+	r := NewRegistry()
+	bob := Person{User: "bob", Groups: map[string]int{"a": 1, "b": 2}}
+	ints := &templates.Option{
+		Type:    templates.TypeList,
+		Resolve: templates.ResolveIntersection,
+		Items:   &templates.ItemSpec{Type: templates.TypeInt},
+	}
+
+	// int64(10) and float64(10) (JSON-decoded) are the same item.
+	res := r.Resolve(ints, PersonConfig{Rows: []Row{
+		{Group: "a", GroupID: 1, Value: []any{int64(10), int64(20)}},
+		{Group: "b", GroupID: 2, Value: []any{float64(10)}},
+	}}, bob)
+	got := res.Value.([]Value)
+	if len(got) != 1 || got[0] != int64(10) {
+		t.Errorf("int64/float64 intersection: want [10], got %#v", got)
+	}
+
+	ints.Resolve = templates.ResolveUnion
+	res = r.Resolve(ints, PersonConfig{Rows: []Row{
+		{Group: "a", GroupID: 1, Value: []any{int64(10)}},
+		{Group: "b", GroupID: 2, Value: []any{float64(10), float64(30)}},
+	}}, bob)
+	got = res.Value.([]Value)
+	if len(got) != 2 || got[0] != int64(10) || got[1] != int64(30) {
+		t.Errorf("int64/float64 union: want [10 30] (int64), got %#v", got)
+	}
+
+	// Nested / unhashable items are dropped, never a panic.
+	res = r.Resolve(ints, PersonConfig{Rows: []Row{
+		{Group: "a", GroupID: 1, Value: []any{[]any{int64(1)}, map[string]any{"x": 1}, int64(5)}},
+		{Group: "b", GroupID: 2, Value: map[string]any{"not": "a list"}},
+	}}, bob)
+	got = res.Value.([]Value)
+	if len(got) != 1 || got[0] != int64(5) {
+		t.Errorf("nested union: want [5], got %#v", got)
+	}
+	ints.Resolve = templates.ResolveIntersection
+	res = r.Resolve(ints, PersonConfig{Rows: []Row{
+		{Group: "a", GroupID: 1, Value: []any{[]any{int64(1)}, int64(5)}},
+		{Group: "b", GroupID: 2, Value: []any{[]any{int64(1)}, int64(5)}},
+	}}, bob)
+	got = res.Value.([]Value)
+	if len(got) != 1 || got[0] != int64(5) {
+		t.Errorf("nested intersection: want [5], got %#v", got)
+	}
+
+	// max/min compare canonical values: float64(30) is the int 30.
+	n := &templates.Option{Type: templates.TypeInt, Resolve: templates.ResolveMax}
+	res = r.Resolve(n, PersonConfig{Rows: []Row{
+		{Group: "a", GroupID: 1, Value: int64(20)},
+		{Group: "b", GroupID: 2, Value: float64(30)},
+	}}, bob)
+	if res.Value != int64(30) || res.Reason.Group != "b" {
+		t.Errorf("max over float64: want int64 30 from b, got %#v %s", res.Value, res.Reason.Group)
+	}
+}
+
+func TestNumericFailClosedNeverUnlimited(t *testing.T) {
+	r := NewRegistry()
+	bob := Person{User: "bob", Groups: map[string]int{"a": 1}}
+	stale := []Row{{Group: "a", GroupID: 1, Value: "corrupt"}}
+	env := func(unl string) templates.Deliveries {
+		return templates.Deliveries{{Env: "QUOTA", Render: &templates.Render{Unit: "GiB", Unlimited: strp(unl)}}}
+	}
+	size := func() *templates.Option {
+		return &templates.Option{Type: templates.TypeSize, Resolve: templates.ResolveMin,
+			AllowUnlimited: true, Delivery: env("0")}
+	}
+
+	// Min unset, default unlimited → UNRESOLVED.
+	unresolvedOK(t, "default unlimited", r.Resolve(size(), PersonConfig{Default: Unlimited{}, Rows: stale}, bob))
+	unresolvedOK(t, "default unlimited text", r.Resolve(size(), PersonConfig{Default: UnlimitedText, Rows: stale}, bob))
+
+	// Min unset, default renders as the delivery's render.unlimited ("0")
+	// → UNRESOLVED.
+	unresolvedOK(t, "default renders unlimited", r.Resolve(size(), PersonConfig{Default: int64(0), Rows: stale}, bob))
+
+	// Min unset, no default → UNRESOLVED.
+	unresolvedOK(t, "no default", r.Resolve(size(), PersonConfig{Rows: stale}, bob))
+
+	// Min unset, a default that renders as a real number → the default.
+	res := r.Resolve(size(), PersonConfig{Default: int64(5 * GiB), Rows: stale}, bob)
+	if res.Value != int64(5*GiB) || res.Reason.Source != ReasonFailClosed {
+		t.Errorf("safe default: want 5 GiB fail-closed, got %v %s", res.Value, res.Reason.Source)
+	}
+
+	// Min set → Min (parsed through the kind), whatever the default.
+	o := size()
+	o.Min = "2GiB"
+	res = r.Resolve(o, PersonConfig{Default: Unlimited{}, Rows: stale}, bob)
+	if res.Value != int64(2*GiB) || res.Reason.Source != ReasonFailClosed {
+		t.Errorf("min set: want 2 GiB, got %v %s", res.Value, res.Reason.Source)
+	}
+}
+
+func TestDuplicatesUnresolved(t *testing.T) {
+	r := NewRegistry()
+	bob := Person{User: "bob", Groups: map[string]int{"office_milan": 7}}
+	dup := []Row{
+		{Group: "office_milan", GroupID: 7, Value: "first"},
+		{Group: "office_milan", GroupID: 9, Value: "second"},
+	}
+	for _, typ := range []string{templates.TypeString, templates.TypePath, templates.TypeSecret, templates.TypeGroup, templates.TypeUser} {
+		o := &templates.Option{Type: typ, Resolve: templates.ResolvePriority}
+		unresolvedOK(t, "duplicates on "+typ, r.Resolve(o, PersonConfig{Default: "fallback", Rows: dup}, bob))
+	}
+
+	// Duplicates on a set → empty set (its most restrictive value).
+	o := &templates.Option{Type: templates.TypeGroups, Resolve: templates.ResolveUnion}
+	res := r.Resolve(o, PersonConfig{Rows: []Row{
+		{Group: "office_milan", GroupID: 7, Value: []any{"staff"}},
+		{Group: "office_milan", GroupID: 9, Value: []any{"admins"}},
+	}}, bob)
+	if got, ok := res.Value.([]Value); !ok || len(got) != 0 || res.Reason.Source != ReasonFailClosed {
+		t.Errorf("duplicates on groups: want [] fail-closed, got %#v %s", res.Value, res.Reason.Source)
+	}
+}
+
+func TestPriorityInvalidFirstRowFailsClosed(t *testing.T) {
+	r := NewRegistry()
+	bob := Person{User: "bob", Groups: map[string]int{"a": 1, "b": 2}}
+	o := &templates.Option{Type: templates.TypeString, Resolve: templates.ResolvePriority, Pattern: "^[a-z]+$"}
+	unresolvedOK(t, "invalid first row", r.Resolve(o, PersonConfig{Default: "x", Rows: []Row{
+		{Group: "a", GroupID: 1, Value: "NOT VALID"},
+		{Group: "b", GroupID: 2, Value: "ok"},
+	}}, bob))
 }

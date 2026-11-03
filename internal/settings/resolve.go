@@ -2,7 +2,6 @@ package settings
 
 import (
 	"sort"
-	"strings"
 
 	"github.com/portcullis/hub/internal/templates"
 )
@@ -32,16 +31,22 @@ type Candidate struct {
 
 // Reason sources.
 const (
-	ReasonGroup      = "group"
-	ReasonDefault    = "default"
-	ReasonCombined   = "combined"
-	ReasonFailClosed = "fail-closed" // Stale rows under min, or duplicate group names
+	ReasonGroup    = "group"
+	ReasonDefault  = "default"
+	ReasonCombined = "combined"
+	// ReasonFailClosed: the rows couldn't be resolved safely (stale or
+	// invalid rows under min or priority, duplicate group names). The value
+	// is the option's most restrictive one; when there is none (string,
+	// path, secret, table, single group/user, or a number with no safe
+	// lower bound) Value is nil, which means "no value": consumers must
+	// omit the setting for this person, never substitute the default.
+	ReasonFailClosed = "fail-closed"
 )
 
 // Reason explains how the value was resolved: which group won, which rule
 // was used, and which other groups lost (for the admin preview only).
 type Reason struct {
-	Source string      `json:"source"` // ReasonGroup | ReasonDefault | ReasonCombined
+	Source string      `json:"source"` // ReasonGroup | ReasonDefault | ReasonCombined | ReasonFailClosed
 	Group  string      `json:"group,omitempty"`
 	Groups []string    `json:"groups,omitempty"` // union/intersection/any/all
 	Rule   string      `json:"rule"`
@@ -49,540 +54,373 @@ type Reason struct {
 }
 
 // Resolved is the resolved value and the reason explaining how it was picked.
+// Value nil with Reason.Source ReasonFailClosed is UNRESOLVED: there is no
+// value for this person and consumers (deliveries) must omit it.
 type Resolved struct {
 	Value  Value
 	Reason Reason
 }
 
-// canonicalizeSet canonicalizes a set result (multi_enum, list, groups, users):
-// validates items with item-level parsers (NO count checks), drops stale items,
-// applies the kind's canonical order. min_items/max_items are NOT applied
-// (they're enforced when admins save rows, not at resolution).
-func (r *Registry) canonicalizeSet(o *templates.Option, items []any) []any {
-	if len(items) == 0 {
-		return []any{}
-	}
-
-	var valid []any
-
-	switch o.Type {
-	case templates.TypeMultiEnum:
-		// Validate against Choices (no Parse call, no countItems)
-		choiceSet := make(map[string]bool, len(o.Choices))
-		for _, c := range o.Choices {
-			choiceSet[c.Value] = true
-		}
-		// Option order: iterate Choices and collect matching items
-		for _, c := range o.Choices {
-			for _, item := range items {
-				if s, ok := item.(string); ok && s == c.Value {
-					valid = append(valid, s)
-					break // Only add once per choice
-				}
-			}
-		}
-
-	case templates.TypeGroups, templates.TypeUsers:
-		// Validate as names (lowercase, no @), then sort
-		seen := map[string]bool{}
-		for _, item := range items {
-			s, ok := item.(string)
-			if !ok || s == "" {
-				continue
-			}
-			if o.Type == templates.TypeUsers {
-				// Users: lowercase, no @
-				if strings.ContainsRune(s, '@') {
-					continue
-				}
-				s = strings.ToLower(s)
-			}
-			// Groups/users: valid name
-			if !seen[s] {
-				valid = append(valid, s)
-				seen[s] = true
-			}
-		}
-		// Sort for canonical order
-		sort.Slice(valid, func(i, j int) bool {
-			return valid[i].(string) < valid[j].(string)
-		})
-
-	case templates.TypeList:
-		// Validate each item with the list's item kind (no countItems)
-		if o.Items == nil {
-			return []any{}
-		}
-		// Build a temporary option for the item type
-		itemOpt := &templates.Option{Type: o.Items.Type}
-		// Copy item-level constraints
-		if o.Items.Pattern != "" {
-			itemOpt.Pattern = o.Items.Pattern
-		}
-		if o.Items.Format != "" {
-			itemOpt.Format = o.Items.Format
-		}
-		if o.Items.MinLen != nil {
-			itemOpt.MinLen = o.Items.MinLen
-		}
-		if o.Items.MaxLen != nil {
-			itemOpt.MaxLen = o.Items.MaxLen
-		}
-		if o.Items.Min != nil {
-			itemOpt.Min = o.Items.Min
-		}
-		if o.Items.Max != nil {
-			itemOpt.Max = o.Items.Max
-		}
-		if len(o.Items.Choices) > 0 {
-			itemOpt.Choices = o.Items.Choices
-		}
-
-		itemKind, err := r.Kind(itemOpt.Type)
-		if err != nil {
-			return []any{}
-		}
-
-		// Parse each item individually
-		seen := map[any]bool{}
-		for _, item := range items {
-			if parsed, err := itemKind.Parse(itemOpt, item); err == nil {
-				// Dedupe
-				if !seen[parsed] {
-					valid = append(valid, parsed)
-					seen[parsed] = true
-				}
-			}
-		}
-		// First-row order (already in order from iteration)
-
-	default:
-		return []any{}
-	}
-
-	return valid
+// unresolved is the UNRESOLVED result (see Resolved).
+func unresolved(rule string, others []Candidate) Resolved {
+	return Resolved{Value: nil, Reason: Reason{Source: ReasonFailClosed, Rule: rule, Others: others}}
 }
 
-// failClosedValue returns the fail-closed value for an option when stale rows
-// exist under min or duplicate group names are found. For enum: first choice.
-// For bool: false. For int/size/duration: lower bound (Min, else 0) - never
-// Unlimited, never the default. For sets: empty []any{}.
-func failClosedValue(o *templates.Option) Value {
+// setItemParser is Task 4's item parser for a set-like option (multi_enum,
+// list, groups, users): one item in, its canonical value out. nil = not a
+// set-like type.
+func (r *Registry) setItemParser(o *templates.Option) func(any) (Value, error) {
+	switch o.Type {
+	case templates.TypeMultiEnum:
+		return func(it any) (Value, error) { return parseChoice(o.Choices, it) }
+	case templates.TypeGroups, templates.TypeUsers:
+		k := nameKind{user: o.Type == templates.TypeUsers, set: true}
+		return func(it any) (Value, error) { return k.one(it) }
+	case templates.TypeList:
+		io := itemOption(o)
+		k := listItemTypes[io.Type]
+		if k == nil {
+			return nil
+		}
+		return func(it any) (Value, error) { return k.Parse(io, it) }
+	}
+	return nil
+}
+
+// canonicalItems canonicalises one set row: each item goes through the
+// item parser, items that fail (stale choices, invalid names, nested or
+// wrongly typed values) are dropped, duplicates (by canonical key)
+// collapse. The row's order is kept; no count bounds are applied
+// (min_items/max_items are enforced when admins save rows). A row that
+// isn't a list contributes no items.
+func canonicalItems(parse func(any) (Value, error), raw Value) ([]Value, []string) {
+	l, err := toList(raw)
+	if err != nil || parse == nil {
+		return nil, nil
+	}
+	var out []Value
+	var keys []string
+	seen := map[string]bool{}
+	for _, it := range l {
+		v, err := parse(it)
+		if err != nil {
+			continue
+		}
+		key := itemKey(v)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, v)
+		keys = append(keys, key)
+	}
+	return out, keys
+}
+
+// canonicalOrder applies the kind's canonical order to canonical items:
+// option order (multi_enum), sorted (groups, users), as given (list:
+// first-row order).
+func canonicalOrder(o *templates.Option, items []Value) []Value {
+	switch o.Type {
+	case templates.TypeMultiEnum:
+		in := map[string]bool{}
+		for _, it := range items {
+			in[it.(string)] = true
+		}
+		out := []Value{}
+		for _, c := range o.Choices {
+			if in[c.Value] {
+				out = append(out, c.Value)
+				in[c.Value] = false
+			}
+		}
+		return out
+	case templates.TypeGroups, templates.TypeUsers:
+		out := append([]Value{}, items...)
+		sort.Slice(out, func(i, j int) bool { return out[i].(string) < out[j].(string) })
+		return out
+	}
+	if items == nil {
+		return []Value{}
+	}
+	return items
+}
+
+// failClosedValue is the most restrictive value of o, used when rows can't
+// be resolved safely. ok = false means UNRESOLVED (no safe value). enum:
+// the lowest-ranked choice; bool: false; sets: empty; int/size/duration:
+// the option's Min (parsed through the kind) if set, else the default def
+// only if it parses, isn't Unlimited, and renders differently from every
+// delivery's render.unlimited (an app may read 0 or -1 as unlimited);
+// everything else: UNRESOLVED.
+func (r *Registry) failClosedValue(o *templates.Option, def Value) (Value, bool) {
 	switch o.Type {
 	case templates.TypeEnum:
 		if len(o.Choices) > 0 {
-			return o.Choices[0].Value
+			return o.Choices[0].Value, true
 		}
-		return ""
 	case templates.TypeBool:
-		return false
+		return false, true
+	case templates.TypeMultiEnum, templates.TypeList, templates.TypeGroups, templates.TypeUsers:
+		return []Value{}, true
 	case templates.TypeInt, templates.TypeSize, templates.TypeDuration:
-		// Lower bound: option's Min if set, else 0
+		k, err := r.Kind(o.Type)
+		if err != nil {
+			return nil, false
+		}
 		if o.Min != nil {
-			// Parse Min (can be "10GiB" for size, "30d" for duration, or int)
-			r := NewRegistry()
-			if k, err := r.Kind(o.Type); err == nil {
-				if minVal, err := k.Parse(o, o.Min); err == nil {
-					return minVal
-				}
+			if v, err := k.Parse(o, o.Min); err == nil && v != (Unlimited{}) {
+				return v, true
+			}
+			return nil, false
+		}
+		if def == nil {
+			return nil, false
+		}
+		v, err := k.Parse(o, def)
+		if err != nil || v == (Unlimited{}) {
+			return nil, false
+		}
+		for i := range o.Delivery {
+			d := &o.Delivery[i]
+			rd := RenderOf(d)
+			if rd == nil || rd.Unlimited == nil {
+				continue
+			}
+			out, err := RenderDelivery(o, v, d)
+			if err != nil || out.Text == *rd.Unlimited {
+				return nil, false
 			}
 		}
-		return int64(0)
-	case templates.TypeMultiEnum, templates.TypeList, templates.TypeGroups, templates.TypeUsers:
-		return []any{}
-	default:
-		return nil
+		return v, true
 	}
+	return nil, false
+}
+
+// failClosed is the fail-closed result: failClosedValue, or UNRESOLVED.
+func (r *Registry) failClosed(o *templates.Option, rule string, def Value, others []Candidate) Resolved {
+	v, ok := r.failClosedValue(o, def)
+	if !ok {
+		return unresolved(rule, others)
+	}
+	return Resolved{Value: v, Reason: Reason{Source: ReasonFailClosed, Rule: rule, Others: others}}
 }
 
 // Resolve resolves one person option for person p using config c. The
 // default is a fallback: it applies only to people in none of the row groups.
 // A row whose group id mismatches p.Groups[row.Group] is skipped (call 29).
-// Duplicate group names in config → fail-closed (invalid configuration).
+// Duplicate group names in c → fail-closed (invalid configuration).
+// Matching row values are canonicalised through the option's kind before
+// they are compared or combined; a nil Value is UNRESOLVED (see Resolved).
 func (r *Registry) Resolve(o *templates.Option, c PersonConfig, p Person) Resolved {
 	rule := c.Rule
 	if rule == "" {
 		rule = o.Resolve
 	}
 
-	// Detect duplicate group names (invalid configuration)
+	// Duplicate group names: invalid configuration, fail closed (a stale-id
+	// row must never shadow or add to the current one).
 	seen := map[string]bool{}
-	var duplicates []string
 	for _, row := range c.Rows {
 		if seen[row.Group] {
-			duplicates = append(duplicates, row.Group)
+			return r.failClosed(o, rule, c.Default, nil)
 		}
 		seen[row.Group] = true
 	}
 
-	// Duplicate group names → fail-closed
-	if len(duplicates) > 0 {
-		return Resolved{
-			Value: failClosedValue(o),
-			Reason: Reason{
-				Source: ReasonFailClosed,
-				Rule:   rule,
-				// Note: duplicates in a comment would be helpful but Reason has no comment field
-			},
-		}
-	}
-
-	// Find matching rows (rows whose group the person is in, and whose id matches)
 	var matches []Candidate
 	for _, row := range c.Rows {
 		if gid, ok := p.Groups[row.Group]; ok && gid == row.GroupID {
 			matches = append(matches, Candidate{Group: row.Group, Value: row.Value})
 		}
 	}
-
-	// No matches → default
 	if len(matches) == 0 {
-		return Resolved{
-			Value: c.Default,
-			Reason: Reason{
-				Source: ReasonDefault,
-				Rule:   rule,
-			},
-		}
+		return Resolved{Value: c.Default, Reason: Reason{Source: ReasonDefault, Rule: rule}}
 	}
 
-	// Resolve
 	switch rule {
 	case templates.ResolveMax, templates.ResolveMin:
 		return r.resolveMaxMin(o, rule, matches, c.Default)
 	case templates.ResolvePriority:
-		return resolvePriority(matches, rule)
+		return r.resolvePriority(o, rule, matches, c.Default)
 	case templates.ResolveUnion:
-		return r.resolveUnion(o, matches, rule)
+		return r.resolveUnion(o, rule, matches)
 	case templates.ResolveIntersection:
-		return r.resolveIntersection(o, matches, rule)
-	case templates.ResolveAny:
-		return resolveAny(matches, rule)
-	case templates.ResolveAll:
-		return resolveAll(matches, rule)
+		return r.resolveIntersection(o, rule, matches)
+	case templates.ResolveAny, templates.ResolveAll:
+		return r.resolveAnyAll(o, rule, matches)
 	}
-
-	// Unreachable (validator ensures rule is valid)
-	return Resolved{Value: c.Default, Reason: Reason{Source: ReasonDefault, Rule: rule}}
+	// Unknown rule (the validator refuses it): fail closed.
+	return r.failClosed(o, rule, c.Default, matches)
 }
 
-// resolveMaxMin resolves max or min by comparing values. Under min with stale rows:
-// enum/bool fail closed to lowest-ranked choice; int/size/duration drop stale and
-// take min of comparable (or lower bound if none comparable). Under max: stale rows
-// are dropped.
+// canonical parses v through o's kind; ok = false for a stale or invalid
+// value.
+func (r *Registry) canonical(o *templates.Option, v Value) (Value, bool) {
+	k, err := r.Kind(o.Type)
+	if err != nil {
+		return nil, false
+	}
+	cv, err := k.Parse(o, v)
+	if err != nil {
+		return nil, false
+	}
+	return cv, true
+}
+
+// resolveMaxMin resolves max or min on canonical values; ties go to the
+// earlier row. Rows that don't parse or aren't ordered are stale: under max
+// they're dropped; under min enum/bool fail closed, int/size/duration drop
+// them and take the min of the rest (fail closed if none is left). Stale
+// rows are listed in Others.
 func (r *Registry) resolveMaxMin(o *templates.Option, rule string, matches []Candidate, def Value) Resolved {
 	k, err := r.Kind(o.Type)
 	if err != nil {
-		// Shouldn't happen
-		return Resolved{Value: def, Reason: Reason{Source: ReasonDefault, Rule: rule}}
+		return r.failClosed(o, rule, def, matches)
 	}
 
-	// Separate comparable and incomparable (stale) rows
-	var comparable, stale []Candidate
+	var good, stale []Candidate
 	for _, m := range matches {
-		if _, ok := k.Compare(o, m.Value, m.Value); ok {
-			comparable = append(comparable, m)
-		} else {
-			stale = append(stale, m)
-		}
-	}
-
-	// Under min with stale rows: fail closed behavior depends on type
-	if rule == templates.ResolveMin && len(stale) > 0 {
-		// For enum/bool: fail closed to lowest-ranked choice
-		if o.Type == templates.TypeEnum || o.Type == templates.TypeBool {
-			allRows := append([]Candidate{}, comparable...)
-			allRows = append(allRows, stale...)
-			return Resolved{
-				Value: failClosedValue(o),
-				Reason: Reason{
-					Source: ReasonFailClosed,
-					Rule:   rule,
-					Others: allRows,
-				},
+		if cv, ok := r.canonical(o, m.Value); ok {
+			if _, ok := k.Compare(o, cv, cv); ok {
+				good = append(good, Candidate{Group: m.Group, Value: cv})
+				continue
 			}
 		}
-		// For int/size/duration: drop stale, continue with comparable, but keep stale in Others
-		// (if none comparable, fall through to handle below)
+		stale = append(stale, m)
 	}
 
-	// Track stale for Others
-	staleForOthers := stale
-
-	// No comparable matches → fail closed for int/size/duration under min, default otherwise
-	if len(comparable) == 0 {
-		if rule == templates.ResolveMin && (o.Type == templates.TypeInt || o.Type == templates.TypeSize || o.Type == templates.TypeDuration) {
-			// Lower bound, not default
-			return Resolved{
-				Value: failClosedValue(o),
-				Reason: Reason{
-					Source: ReasonFailClosed,
-					Rule:   rule,
-					Others: stale,
-				},
-			}
+	if rule == templates.ResolveMin && len(stale) > 0 &&
+		(o.Type == templates.TypeEnum || o.Type == templates.TypeBool) {
+		return r.failClosed(o, rule, def, append(append([]Candidate{}, good...), stale...))
+	}
+	if len(good) == 0 {
+		if rule == templates.ResolveMin {
+			return r.failClosed(o, rule, def, stale)
 		}
-		return Resolved{
-			Value: def,
-			Reason: Reason{
-				Source: ReasonDefault,
-				Rule:   rule,
-				Others: stale,
-			},
-		}
+		return Resolved{Value: def, Reason: Reason{Source: ReasonDefault, Rule: rule, Others: stale}}
 	}
 
-	best := comparable[0]
+	best := good[0]
 	var others []Candidate
-
-	for i := 1; i < len(comparable); i++ {
-		cand := comparable[i]
-		cmp, ok := k.Compare(o, best.Value, cand.Value)
-		if !ok {
-			// Type not comparable (shouldn't happen after filtering)
-			continue
-		}
-
-		// For unlimited under max: unlimited beats any number
-		// For unlimited under min: any number beats unlimited
-		_, bestUnlimited := best.Value.(Unlimited)
-		_, candUnlimited := cand.Value.(Unlimited)
-
-		if rule == templates.ResolveMax {
-			// Max: higher wins, ties to earlier
-			// unlimited beats any number
-			if candUnlimited && !bestUnlimited {
-				others = append(others, best)
-				best = cand
-			} else if !candUnlimited && bestUnlimited {
-				others = append(others, cand)
-			} else if cmp < 0 {
-				// cand > best
-				others = append(others, best)
-				best = cand
-			} else {
-				others = append(others, cand)
-			}
+	for _, cand := range good[1:] {
+		cmp, _ := k.Compare(o, best.Value, cand.Value)
+		if (rule == templates.ResolveMax && cmp < 0) || (rule == templates.ResolveMin && cmp > 0) {
+			others = append(others, best)
+			best = cand
 		} else {
-			// Min: lower wins, ties to earlier
-			// any number beats unlimited
-			if candUnlimited && !bestUnlimited {
-				others = append(others, cand)
-			} else if !candUnlimited && bestUnlimited {
-				others = append(others, best)
-				best = cand
-			} else if cmp > 0 {
-				// cand < best
-				others = append(others, best)
-				best = cand
-			} else {
-				others = append(others, cand)
-			}
+			others = append(others, cand)
 		}
 	}
-
-	// Under max: stale rows are dropped but shown in Others
-	// Under min with numeric types: stale rows also shown in Others
-	if rule == templates.ResolveMax || (rule == templates.ResolveMin && len(staleForOthers) > 0) {
-		others = append(others, staleForOthers...)
-	}
+	others = append(others, stale...)
 
 	return Resolved{
-		Value: best.Value,
-		Reason: Reason{
-			Source: ReasonGroup,
-			Group:  best.Group,
-			Rule:   rule,
-			Others: others,
-		},
+		Value:  best.Value,
+		Reason: Reason{Source: ReasonGroup, Group: best.Group, Rule: rule, Others: others},
 	}
 }
 
-// resolvePriority picks the first match (admin's row order).
-func resolvePriority(matches []Candidate, rule string) Resolved {
-	best := matches[0]
+// resolvePriority picks the first match (admin's row order). A first match
+// that doesn't parse fails closed: falling through to a later row could
+// hand out a less restrictive value.
+func (r *Registry) resolvePriority(o *templates.Option, rule string, matches []Candidate, def Value) Resolved {
 	var others []Candidate
 	if len(matches) > 1 {
 		others = matches[1:]
 	}
-
+	cv, ok := r.canonical(o, matches[0].Value)
+	if !ok {
+		return r.failClosed(o, rule, def, matches)
+	}
 	return Resolved{
-		Value: best.Value,
-		Reason: Reason{
-			Source: ReasonGroup,
-			Group:  best.Group,
-			Rule:   rule,
-			Others: others,
-		},
+		Value:  cv,
+		Reason: Reason{Source: ReasonGroup, Group: matches[0].Group, Rule: rule, Others: others},
 	}
 }
 
-// resolveUnion computes the union of all matching sets. Canonicalizes item by
-// item (drops stale choices) and applies the kind's canonical order.
-func (r *Registry) resolveUnion(o *templates.Option, matches []Candidate, rule string) Resolved {
-	seen := map[any]bool{}
-	var result []any
-
-	for _, m := range matches {
-		list, ok := m.Value.([]any)
-		if !ok {
-			// Treat non-list as empty set
-			continue
-		}
-		for _, item := range list {
-			if !seen[item] {
-				seen[item] = true
-				result = append(result, item)
-			}
-		}
-	}
-
-	// Canonicalize: parse item by item, apply canonical order
-	result = r.canonicalizeSet(o, result)
-
+// contributing is the sorted names of the matching rows.
+func contributing(matches []Candidate) []string {
 	groups := make([]string, len(matches))
 	for i, m := range matches {
 		groups[i] = m.Group
 	}
 	sort.Strings(groups)
+	return groups
+}
 
+// resolveUnion is the union of the matching rows' canonical items, in the
+// kind's canonical order.
+func (r *Registry) resolveUnion(o *templates.Option, rule string, matches []Candidate) Resolved {
+	parse := r.setItemParser(o)
+	seen := map[string]bool{}
+	var result []Value
+	for _, m := range matches {
+		items, keys := canonicalItems(parse, m.Value)
+		for i, it := range items {
+			if !seen[keys[i]] {
+				seen[keys[i]] = true
+				result = append(result, it)
+			}
+		}
+	}
 	return Resolved{
-		Value: result,
-		Reason: Reason{
-			Source: ReasonCombined,
-			Groups: groups,
-			Rule:   rule,
-		},
+		Value:  canonicalOrder(o, result),
+		Reason: Reason{Source: ReasonCombined, Groups: contributing(matches), Rule: rule},
 	}
 }
 
-// resolveIntersection computes the intersection of all matching sets.
-// Builds intersection by iterating first row's list (first-row order, deterministic).
-// Canonicalizes item by item (drops stale choices).
-func (r *Registry) resolveIntersection(o *templates.Option, matches []Candidate, rule string) Resolved {
-	// Get first row's list (for deterministic order)
-	var firstList []any
-	if len(matches) > 0 {
-		if list, ok := matches[0].Value.([]any); ok {
-			firstList = list
+// resolveIntersection is the intersection of the matching rows' canonical
+// items: the first row's items (first-row order) present in every row, then
+// the kind's canonical order.
+func (r *Registry) resolveIntersection(o *templates.Option, rule string, matches []Candidate) Resolved {
+	parse := r.setItemParser(o)
+	first, firstKeys := canonicalItems(parse, matches[0].Value)
+	sets := make([]map[string]bool, len(matches)-1)
+	for i, m := range matches[1:] {
+		_, keys := canonicalItems(parse, m.Value)
+		sets[i] = make(map[string]bool, len(keys))
+		for _, k := range keys {
+			sets[i][k] = true
 		}
 	}
-
-	// Empty first list or non-list → empty intersection
-	if len(firstList) == 0 {
-		groups := make([]string, len(matches))
-		for i, m := range matches {
-			groups[i] = m.Group
-		}
-		sort.Strings(groups)
-		return Resolved{
-			Value: []any{},
-			Reason: Reason{
-				Source: ReasonCombined,
-				Groups: groups,
-				Rule:   rule,
-			},
-		}
-	}
-
-	// Build sets for all other rows (for efficient lookup)
-	otherSets := make([]map[any]bool, len(matches))
-	for i, m := range matches {
-		otherSets[i] = map[any]bool{}
-		list, ok := m.Value.([]any)
-		if !ok {
-			// Non-list treated as empty set
-			continue
-		}
-		for _, item := range list {
-			otherSets[i][item] = true
-		}
-	}
-
-	// Iterate first row's list (first-row order, deterministic)
-	var result []any
-	for _, item := range firstList {
+	var result []Value
+	for i, it := range first {
 		inAll := true
-		for i := 0; i < len(matches); i++ {
-			if !otherSets[i][item] {
+		for _, s := range sets {
+			if !s[firstKeys[i]] {
 				inAll = false
 				break
 			}
 		}
 		if inAll {
-			result = append(result, item)
+			result = append(result, it)
 		}
 	}
-
-	// Canonicalize: validate items, NO count checks (list keeps first-row order)
-	result = r.canonicalizeSet(o, result)
-
-	groups := make([]string, len(matches))
-	for i, m := range matches {
-		groups[i] = m.Group
-	}
-	sort.Strings(groups)
-
 	return Resolved{
-		Value: result,
-		Reason: Reason{
-			Source: ReasonCombined,
-			Groups: groups,
-			Rule:   rule,
-		},
+		Value:  canonicalOrder(o, result),
+		Reason: Reason{Source: ReasonCombined, Groups: contributing(matches), Rule: rule},
 	}
 }
 
-// resolveAny returns true if any match is true.
-func resolveAny(matches []Candidate, rule string) Resolved {
-	result := false
+// resolveAnyAll: any = true if some row is true; all = true only if every
+// row is true. A row that doesn't parse as a bool counts as false.
+func (r *Registry) resolveAnyAll(o *templates.Option, rule string, matches []Candidate) Resolved {
+	result := rule == templates.ResolveAll
 	for _, m := range matches {
-		if b, ok := m.Value.(bool); ok && b {
+		cv, ok := r.canonical(o, m.Value)
+		b := ok && cv == true
+		if rule == templates.ResolveAny && b {
 			result = true
 			break
 		}
-	}
-
-	groups := make([]string, len(matches))
-	for i, m := range matches {
-		groups[i] = m.Group
-	}
-	sort.Strings(groups)
-
-	return Resolved{
-		Value: result,
-		Reason: Reason{
-			Source: ReasonCombined,
-			Groups: groups,
-			Rule:   rule,
-		},
-	}
-}
-
-// resolveAll returns true only if all matches are true.
-func resolveAll(matches []Candidate, rule string) Resolved {
-	result := true
-	for _, m := range matches {
-		b, ok := m.Value.(bool)
-		if !ok || !b {
+		if rule == templates.ResolveAll && !b {
 			result = false
 			break
 		}
 	}
-
-	groups := make([]string, len(matches))
-	for i, m := range matches {
-		groups[i] = m.Group
-	}
-	sort.Strings(groups)
-
 	return Resolved{
-		Value: result,
-		Reason: Reason{
-			Source: ReasonCombined,
-			Groups: groups,
-			Rule:   rule,
-		},
+		Value:  result,
+		Reason: Reason{Source: ReasonCombined, Groups: contributing(matches), Rule: rule},
 	}
 }
 
