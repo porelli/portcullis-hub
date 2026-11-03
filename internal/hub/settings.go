@@ -400,6 +400,14 @@ func parseSettings(t *templates.Template, kinds *settings.Registry, folders Fold
 		if err != nil {
 			return nil, err
 		}
+		recs := make([]settings.Row, 0, len(rows))
+		for _, r := range rows {
+			v, _ := kinds.Parse(o, r.Value)
+			recs = append(recs, settings.Row{Group: r.Group, Value: v})
+		}
+		if _, err := renderGroupEnv(o, recs); err != nil {
+			return nil, statusErr(400, "setting %s: %v", k, err)
+		}
 		out.groups[k] = rows
 	}
 	for _, k := range slices.Sorted(maps.Keys(u.Secrets)) {
@@ -515,6 +523,11 @@ func clip(s string, n int) string {
 // logged, fail closed), else the default; ok false = no value. A path's
 // folder:… value is returned as stored. Caller must hold mu.
 func (h *Hub) effectiveValue(t *templates.Template, o *templates.Option, s state.InstanceSettings) (any, bool) {
+	if typ := s.Types[o.Key]; typ != "" && typ != o.Type {
+		// Retyped by a template update: never read as the new type (the
+		// prune after the sync drops it).
+		return nil, false
+	}
 	if raw, ok := s.Values[o.Key]; ok && raw != nil {
 		if str, isStr := raw.(string); isStr && o.Type == templates.TypePath && strings.HasPrefix(str, folderPrefix) {
 			return str, true
@@ -775,18 +788,18 @@ func (h *Hub) SaveSettings(id string, u SettingsUpdate, actor string) (_ *SaveRe
 	if len(problems) > 0 {
 		return nil, problems[0]
 	}
-	for _, k := range slices.Sorted(maps.Keys(parsed.person)) {
-		return nil, statusErr(400, "setting %s: per-person values can't be saved by this Hub version yet", k)
-	}
-	for _, k := range slices.Sorted(maps.Keys(parsed.groups)) {
-		return nil, statusErr(400, "setting %s: per-group values can't be saved by this Hub version yet", k)
+	// Rows and records are bound to the directory's group ids (and a
+	// privileged option's groups checked) before mu: network calls.
+	bindWarnings, err := h.bindRowsForSave(context.Background(), t, parsed)
+	if err != nil {
+		return nil, err
 	}
 	sv, enabled, err := h.saveSettings(t, u, parsed)
 	changes = sv.changes
 	if err != nil {
 		return nil, err
 	}
-	out := &SaveResult{Effect: sv.effect, Changed: sv.keys, Warnings: []string{}}
+	out := &SaveResult{Effect: sv.effect, Changed: sv.keys, Warnings: append([]string{}, bindWarnings...)}
 	if out.Changed == nil {
 		out.Changed = []string{}
 	}
@@ -1081,6 +1094,8 @@ func (h *Hub) nextSettingsLocked(t *templates.Template, cur state.InstanceSettin
 	if len(next.Secrets) == 0 {
 		next.Secrets = nil
 	}
+	ge, gown, gchanges := h.groupSettingsChangesLocked(t, cur, &next, parsed)
+	effects, own, changes = append(effects, ge...), append(own, gown...), append(changes, gchanges...)
 	if len(parsed.values)+len(parsed.secrets) > 0 && t.Manifest.Settings != nil {
 		if err := settings.CheckRequires(t.Manifest.Settings, h.requiresValuesLocked(t, next)); err != nil {
 			return next, nil, nil, nil, statusErr(400, "%v", err)

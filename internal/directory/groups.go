@@ -72,14 +72,23 @@ func (s *Service) loadConfig() (*Config, error) {
 }
 
 // guardingGroups maps each group whose rule may use only admin-only
-// fields to why: administrator groups, permission groups and app admin
-// groups.
+// fields to why: administrator groups, permission groups, app admin
+// groups and the groups of an app's privileged setting rows (computed on
+// the fly from App.PrivilegedGroups, spec call 28).
 func (s *Service) guardingGroups(cfg *Config) map[string]string {
 	out := map[string]string{}
 	if s.Apps != nil {
-		for _, a := range s.Apps() {
+		apps := s.Apps()
+		for _, a := range apps {
 			if a.AdminGroup != "" {
 				out[a.AdminGroup] = "the admin group of app " + a.ID
+			}
+		}
+		for _, a := range apps {
+			for _, g := range a.PrivilegedGroups {
+				if _, ok := out[g]; !ok && g != "" {
+					out[g] = "a privileged value of app " + a.ID
+				}
 			}
 		}
 	}

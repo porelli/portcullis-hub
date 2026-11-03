@@ -80,7 +80,9 @@ func checkDetails(c *Caller, cfg *Config, sn *snapshot, attrs map[string][]strin
 	// Build field map
 	fields := make(map[string]Field)
 	for _, f := range cfg.Fields {
-		fields[f.Name] = f
+		if !reservedAttr(f.Name) { // Hub-owned: never written through details
+			fields[f.Name] = f
+		}
 	}
 
 	// Trim and validate all attrs first

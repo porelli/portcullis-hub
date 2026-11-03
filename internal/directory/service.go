@@ -79,7 +79,20 @@ type App struct {
 	ID, Name                string
 	Enabled                 bool
 	AccessGroup, AdminGroup string
+	// PrivilegedGroups: every group named in a row of one of the app's
+	// privileged options (spec call 28). They guard like AdminGroup
+	// ("a privileged value of app <id>"); nothing about them is stored
+	// here, so removing the row ends the guarding at once.
+	PrivilegedGroups []string
 }
+
+// ReservedAttrPrefix starts the Hub-owned LLDAP attributes that carry
+// per-person setting claims (contract §13, call 12): never a custom
+// field, never shown in the overview, CSV export or import.
+const ReservedAttrPrefix = "ps_"
+
+// reservedAttr reports a Hub-owned attribute name.
+func reservedAttr(name string) bool { return strings.HasPrefix(name, ReservedAttrPrefix) }
 
 // Service implements the user/group operations. Mutations are serialised
 // so guardrail checks and the change can't interleave with another change.
@@ -108,6 +121,12 @@ type Service struct {
 	// attributes (contract §4, §4.1) and the Keycloak mappers (§9.6). It
 	// must not block: the Hub coalesces calls into one background sync.
 	OnChange func()
+	// GroupDeleted, if set, is called after DeleteGroup deleted a group in
+	// LLDAP (the acting admin, the group's name and its LLDAP id), outside
+	// s.mu: the Hub purges the per-group setting rows that named it (spec
+	// call 19). It must not block on the directory. Its warnings are
+	// added to the delete's.
+	GroupDeleted func(ctx context.Context, actor, name string, id int) []string
 
 	mu sync.Mutex
 	// ruleState: each rule group's membership (lowercase) after the last
@@ -195,21 +214,21 @@ type UserView struct {
 	ServerInvite string              `json:"server_invite,omitempty"`
 	Attrs        map[string][]string `json:"attrs,omitempty"` // custom attributes that are defined fields
 	// Memberships: one per group in Groups, with how it is held.
-	Memberships []Membership `json:"memberships"`
+	Memberships []UserMembership `json:"memberships"`
 	// CreatedBy: the delegate who invited this account (until an admin
 	// takes it over), so rule memberships can say "account created by X".
 	CreatedBy string `json:"created_by,omitempty"`
 }
 
-// How a membership is held (Membership.How).
+// How a membership is held (UserMembership.How).
 const (
 	HowManual    = "manual"    // added by hand (manual group), or a rule group member the rule doesn't (yet) explain
 	HowRule      = "rule"      // the group's rule matches
 	HowException = "exception" // an active "added" exception of a rule group
 )
 
-// Membership is one group of a user and how they are in it.
-type Membership struct {
+// UserMembership is one group of a user and how they are in it.
+type UserMembership struct {
 	Group  string     `json:"group"`
 	How    string     `json:"how"`              // manual | rule | exception
 	Reason string     `json:"reason,omitempty"` // exception: its reason
@@ -359,14 +378,20 @@ func (s *Service) overview(ctx context.Context, me string, c *Caller) (*Overview
 			cfg = nil
 		}
 		if cfg != nil {
-			ov.Fields = make([]Field, len(cfg.Fields))
-			copy(ov.Fields, cfg.Fields)
+			// Hub-owned ps_* attributes are never shown (not even a field
+			// someone wrote into directory.yaml by hand).
+			ov.Fields = make([]Field, 0, len(cfg.Fields))
+			for _, f := range cfg.Fields {
+				if !reservedAttr(f.Name) {
+					ov.Fields = append(ov.Fields, f)
+				}
+			}
 			sort.Slice(ov.Fields, func(i, j int) bool {
 				return ov.Fields[i].Name < ov.Fields[j].Name
 			})
 			// Track which fields are defined
 			fieldNames = make(map[string]bool)
-			for _, f := range cfg.Fields {
+			for _, f := range ov.Fields {
 				fieldNames[f.Name] = true
 			}
 			for p, g := range cfg.Permissions {
@@ -414,7 +439,7 @@ func (s *Service) overview(ctx context.Context, me string, c *Caller) (*Overview
 	for _, u := range users {
 		inLLDAP[strings.ToLower(u.ID)] = true
 		v := UserView{Username: u.ID, Email: u.Email, DisplayName: u.DisplayName, Created: u.CreationDate, Groups: []string{},
-			Protected: s.protection(u.ID), Self: me != "" && strings.EqualFold(me, u.ID), Attrs: map[string][]string{}, Memberships: []Membership{}}
+			Protected: s.protection(u.ID), Self: me != "" && strings.EqualFold(me, u.ID), Attrs: map[string][]string{}, Memberships: []UserMembership{}}
 		for _, g := range u.Groups {
 			v.Groups = append(v.Groups, g.DisplayName)
 			v.Admin = v.Admin || admins[g.DisplayName]
@@ -552,7 +577,7 @@ func (s *Service) addGroupConfig(ov *Overview, cfg *Config, sn *snapshot, admins
 		uv := &ov.Users[i]
 		id := strings.ToLower(uv.Username)
 		for _, g := range uv.Groups {
-			m := Membership{Group: g, How: HowManual}
+			m := UserMembership{Group: g, How: HowManual}
 			if ge := evals[g]; ge != nil {
 				switch {
 				case ge.include[id]:
@@ -1616,6 +1641,7 @@ func (s *Service) DeleteGroup(ctx context.Context, c *Caller, name, confirm stri
 	res := newResult()
 	detail := ""
 	var logout []string
+	deletedID := -1
 	err := s.run(ctx, c, permAdmin, "group.delete", name, &detail, func() error {
 		if confirm != name {
 			return invalid("type the group name to confirm")
@@ -1634,6 +1660,7 @@ func (s *Service) DeleteGroup(ctx context.Context, c *Caller, name, confirm stri
 		if err := s.LLDAP.DeleteGroup(ctx, g.ID); err != nil {
 			return err
 		}
+		deletedID = g.ID
 		for _, m := range g.Members() {
 			if !s.protectedAccount(m) {
 				logout = append(logout, m)
@@ -1662,6 +1689,11 @@ func (s *Service) DeleteGroup(ctx context.Context, c *Caller, name, confirm stri
 	// logout is set only once the LLDAP delete succeeded: sign the former
 	// members out even if writing the audit entry failed afterwards.
 	s.logoutAll(ctx, logout, res)
+	// Only once the LLDAP delete succeeded, outside s.mu (the Hub takes
+	// its own lock: order s.mu → Hub.mu).
+	if deletedID >= 0 && s.GroupDeleted != nil {
+		res.Warnings = append(res.Warnings, s.GroupDeleted(ctx, c.User, name, deletedID)...)
+	}
 	if err != nil {
 		return res, err
 	}

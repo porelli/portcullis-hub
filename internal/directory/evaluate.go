@@ -568,7 +568,7 @@ func (s *Service) SharedFields() ([]Field, error) {
 func sharedFields(cfg *Config) []Field {
 	out := []Field{}
 	for _, f := range cfg.Fields {
-		if f.ShareWithApps {
+		if f.ShareWithApps && !reservedAttr(f.Name) {
 			out = append(out, f)
 		}
 	}

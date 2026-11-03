@@ -143,6 +143,11 @@ func main() {
 	// instance groups go through the same guardrails (§11.4 step 5).
 	h.SetAudit(dir.Audit)
 	h.SetGroups(dir)
+	// Per-person and per-group settings read LLDAP membership through the
+	// directory; a group deleted there purges the setting rows naming it
+	// in every instance (contract §13.4).
+	h.SetPeople(dir)
+	dir.GroupDeleted = h.PurgeGroupSettings
 	// The policy file's expiring list and user-attributes.json come from
 	// the directory (contract §4, §4.1); shared fields become Keycloak
 	// attr_<field> claims (§9.6). Keycloak failures are logged and retried,

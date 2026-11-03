@@ -186,7 +186,9 @@ func (s *Service) ImportReview(ctx context.Context, c *Caller, header []string, 
 		}
 		fields = make(map[string]Field)
 		for _, f := range cfg.Fields {
-			fields[f.Name] = f
+			if !reservedAttr(f.Name) { // Hub-owned attributes are never imported
+				fields[f.Name] = f
+			}
 		}
 	} else {
 		cfg = &Config{

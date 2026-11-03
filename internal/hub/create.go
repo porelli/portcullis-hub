@@ -110,6 +110,9 @@ func (h *Hub) CreateInstanceAs(templateID, id string, hosts map[string]string, a
 			return res, undo(fmt.Errorf("creating group %s: %w", g, err))
 		}
 	}
+	// The template's starting rows (seeded by CreateInstance), bound to
+	// the groups just created.
+	res.Warnings = append(res.Warnings, h.bindPlaceholderRows(context.Background(), id)...)
 	if v, ok := h.InstanceView(id); ok {
 		res.InstanceView = v
 	}

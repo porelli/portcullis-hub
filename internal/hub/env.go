@@ -139,6 +139,22 @@ func (h *Hub) optionEnvLocked(t *templates.Template) (map[string]string, error) 
 	opts := t.Manifest.Options()
 	for i := range opts {
 		o := &opts[i]
+		if o.EffectiveScope() == templates.ScopeGroup && len(envDeliveries(o)) > 0 {
+			// The records as one JSON value per env delivery (bound
+			// records of the stored type only).
+			var recs []settings.Row
+			if h.typeMatchesLocked(t, o.Key, o) {
+				recs = h.groupRecordsOut(t, o, s.Groups[o.Key])
+			}
+			env, err := renderGroupEnv(o, recs)
+			if err != nil {
+				return nil, fmt.Errorf("setting %s: %w", o.Key, err)
+			}
+			for k, x := range env {
+				out[k] = x
+			}
+			continue
+		}
 		if o.EffectiveScope() != templates.ScopeInstance {
 			continue
 		}

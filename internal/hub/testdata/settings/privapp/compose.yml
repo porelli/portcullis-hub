@@ -1,0 +1,12 @@
+services:
+  app:
+    image: privapp
+    environment:
+      LIBS: ${PRIVAPP_LIBRARIES}
+      MOTD: ${PRIVAPP_MOTD}
+      BANNER: ${PRIVAPP_BANNER}
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.privapp.rule: Host(`${PORTCULLIS_HOST_PRIVAPP:-privapp.portcullis.local}`)
+      traefik.http.routers.privapp.entrypoints: websecure
+      traefik.http.services.privapp.loadbalancer.server.port: "8080"

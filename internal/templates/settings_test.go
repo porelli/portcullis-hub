@@ -299,6 +299,8 @@ func TestHeaderDeliveryRules(t *testing.T) {
 		{"no group-gate", hdrHead + opts(personHeader), noGroups, "quota", "portcullis-groups"},
 		{"public router", hdrHead + opts(personHeader), public, "quota", "router share"},
 		{"sign_in native", "name: App\nauth:\n  method: custom\n  sso: false\n  native_login: {supported: true, allow_without_gateway: true}\n" + opts(personHeader), hdrCompose, "quota", "own login"},
+		{"method public", "name: App\nauth:\n  method: public\n" + opts(personHeader), hdrCompose, "quota", "no Portcullis identity"},
+		{"custom without native_login", "name: App\nauth:\n  method: custom\n  sso: false\n" + opts(personHeader), hdrCompose, "quota", "no Portcullis identity"},
 		{"router elsewhere reaches the backend", hdrHead + opts(personHeader), sideRouter, "quota", "router side reaches service web"},
 		{"gated router elsewhere, public on the backend", hdrHead + opts(personHeader), gatedElsewhere, "quota", "router pub reaches service web"},
 		{"gated router elsewhere, backend clean", hdrHead + opts(personHeader), strings.Replace(gatedElsewhere, pubRouter, "", 1), "", ""},

@@ -328,6 +328,8 @@ func (h *Hub) syncSources(trigger string, timeout time.Duration) SourceSyncStatu
 	if reverted {
 		h.Discover()
 	}
+	// Only after the final Discover (a rolled-back update drops nothing).
+	h.pruneSettings()
 
 	h.mu.RLock()
 	for _, id := range h.st.Enabled {

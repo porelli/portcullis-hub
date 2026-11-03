@@ -1533,6 +1533,11 @@ func (v *specCheck) header(o *Option, h *HeaderDelivery) error {
 	if !HeaderDeliveryRe.MatchString(h.Name) {
 		return fmt.Errorf("header %q must be X-Forwarded-Attr-<Name>", h.Name)
 	}
+	// Identity-less routes (spec call 27, T-5): nobody is in a person
+	// option's population there, and nothing strips a forged header.
+	if a := &v.m.Auth; a.Method == "public" || a.Method == "custom" && !a.HasNativeLogin() {
+		return fmt.Errorf("header %s: method %s routes carry no Portcullis identity (no per-person values, and clients could forge the header)", h.Name, a.Method)
+	}
 	if nl := v.m.Auth.NativeLogin; nl != nil && nl.AllowWithoutGateway {
 		return fmt.Errorf("header %s: the app may run with its own login only (no Portcullis in front): clients could forge the header", h.Name)
 	}

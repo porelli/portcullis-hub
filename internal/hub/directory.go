@@ -228,7 +228,10 @@ func (h *Hub) runAttrSync(ctx context.Context, kick <-chan struct{}) {
 }
 
 // DirectoryApps lists every instance's groups for the Users page
-// (group suggestions and "used by").
+// (group suggestions and "used by") and the guarding rules: each
+// instance's privileged groups are the groups named in rows of its
+// privileged options (state only, no network: the directory calls this
+// under its own lock, order s.mu → Hub.mu).
 func (h *Hub) DirectoryApps() []directory.App {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -236,7 +239,8 @@ func (h *Hub) DirectoryApps() []directory.App {
 	for i := range h.instances {
 		t := &h.instances[i]
 		out = append(out, directory.App{ID: t.ID, Name: instanceName(t), Enabled: t.Enabled,
-			AccessGroup: t.Manifest.Auth.AccessGroup, AdminGroup: t.Manifest.Auth.AdminGroup})
+			AccessGroup: t.Manifest.Auth.AccessGroup, AdminGroup: t.Manifest.Auth.AdminGroup,
+			PrivilegedGroups: h.privilegedGroupsLocked(t)})
 	}
 	return out
 }

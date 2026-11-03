@@ -1,0 +1,59 @@
+name: Priv App
+category: tools
+instances: multi
+auth:
+  method: native-oidc
+  sso: true
+  group_access: true
+  access_group: users_privapp
+  admin_group: admin_privapp
+keycloak_clients:
+  - client_id: privapp
+    redirect_uri: https://{{HOST_PRIVAPP}}/cb
+files:
+  - {name: libs, service: app, mount: /portcullis, on_membership_change: restart}
+settings:
+  options:
+    - key: role
+      label: Role
+      type: enum
+      scope: person
+      privileged: true
+      options:
+        - {value: user, label: User}
+        - {value: admin, label: Administrator}
+      default: user
+      resolve: max
+      group_values: {"{{ADMIN_GROUP}}": admin}
+      applies: next_sign_in
+      delivery: [{claim: {client: privapp, name: role}}]
+    - key: tier
+      label: Tier
+      type: enum
+      scope: person
+      options:
+        - {value: basic, label: Basic}
+        - {value: pro, label: Pro}
+      default: basic
+      resolve: max
+      applies: next_sign_in
+      delivery: [{claim: {client: privapp, name: tier}}]
+    - key: libraries
+      label: Libraries
+      type: list
+      items: {type: string}
+      scope: group
+      applies: restart
+      delivery:
+        - {file: {name: libs}}
+        - {env: PRIVAPP_LIBRARIES, render: {format: json}}
+    - key: motd
+      label: Message of the day
+      type: string
+      applies: restart
+      delivery: [{env: PRIVAPP_MOTD}]
+    - key: banner
+      label: Banner
+      type: string
+      applies: restart
+      delivery: [{env: PRIVAPP_BANNER}]

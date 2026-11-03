@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/portcullis/hub/internal/compose"
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/policy"
@@ -114,6 +115,23 @@ type Groups interface {
 	DeleteInstanceGroup(ctx context.Context, actor, name string) ([]string, error)
 }
 
+// People is the directory as per-person and per-group settings read it
+// (directory.Service): LLDAP membership with group ids, and whether a
+// group may hold a privileged value. Network calls: never call them
+// holding mu (lock order: directory s.mu → Hub.mu).
+type People interface {
+	Membership(ctx context.Context, now time.Time) (*directory.Membership, error)
+	PrivilegeProblem(ctx context.Context, group string) (string, error)
+}
+
+// SetPeople wires the directory for per-person / per-group settings (nil:
+// such saves are 503, populations unknown).
+func (h *Hub) SetPeople(p People) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.people = p
+}
+
 // FolderSource resolves a shared folder (project 2) to its host
 // directory. It is called under the Hub lock: it must answer from
 // memory, never over the network.
@@ -150,6 +168,13 @@ type Hub struct {
 	// groups creates / deletes instance groups (SetGroups; nil = not
 	// available: a warning). Guarded by mu.
 	groups Groups
+	// people reads LLDAP membership for per-person settings (SetPeople;
+	// nil = not available). Guarded by mu.
+	people People
+	// deliveryMu guards pendingDelivery: the instances TriggerDelivery
+	// queued (the delivery engine, Task 9, drains it).
+	deliveryMu      sync.Mutex
+	pendingDelivery map[string]Trigger
 	// domainsAPI is core's domains service (domains.go; nil = not
 	// configured); domainsReachable: its last call succeeded. Both guarded
 	// by mu. domainOpMu serialises enroll / token / delete (held across
@@ -293,6 +318,9 @@ func (h *Hub) Init() {
 			log.Printf("sources: start-up sync incomplete — the previous template versions are kept (see above)")
 		}
 	}
+	// After the final Discover: stored settings of options the templates
+	// removed, retyped or rescoped are dropped (audited; P9).
+	h.pruneSettings()
 	// Interrupted same-instance restores are rolled back (background).
 	h.RecoverRestores()
 	if err := h.WritePolicy(); err != nil {

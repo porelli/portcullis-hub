@@ -233,6 +233,7 @@ func (h *Hub) restoreInstance(id, archive, actor string, ready func()) (res *Res
 	if err := h.configProblem(view, &sb.cfg, archive); err != nil {
 		return res, err
 	}
+	res.Warnings = append(res.Warnings, h.checkArchivedRows(context.Background(), view, sb.cfg.Settings, false)...)
 	plan, err := h.restorePlan(id, view, sb)
 	if err != nil {
 		return res, err
@@ -270,6 +271,7 @@ func (h *Hub) restoreInstance(id, archive, actor string, ready func()) (res *Res
 		if cerr := h.clearRestoring(id, keep); cerr != nil {
 			res.Warnings = append(res.Warnings, cerr.Error())
 		}
+		res.Warnings = append(res.Warnings, h.bindPlaceholderRows(context.Background(), id)...)
 		log.Printf("instance %s restored from %s (pre-restore backup %s)", id, archive, pre.Archive)
 		return res, h.finishOp(id, OpRestore, nil, false)
 	}
@@ -763,6 +765,7 @@ func (h *Hub) restoreInstanceAs(archive, newID, actor string, hosts map[string]s
 	if err := h.configProblem(&tmpl, &sb.cfg, archive); err != nil {
 		return res, err
 	}
+	res.Warnings = append(res.Warnings, h.checkArchivedRows(context.Background(), &tmpl, sb.cfg.Settings, true)...)
 	h.mu.RLock()
 	groupsAPI := h.groups
 	h.mu.RUnlock()
@@ -923,6 +926,8 @@ func (h *Hub) restoreInstanceAs(archive, newID, actor string, hosts map[string]s
 	if saveErr != nil {
 		return res, undo(statusErr(500, "recording the completed restore failed: %v", saveErr))
 	}
+	// Its starting rows, bound to the new id's groups.
+	res.Warnings = append(res.Warnings, h.bindPlaceholderRows(context.Background(), newID)...)
 	h.writePolicyLogged()
 	log.Printf("instance %s of %s restored from %s", newID, tmpl.ID, archive)
 	return res, nil

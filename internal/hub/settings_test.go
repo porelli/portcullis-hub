@@ -236,7 +236,7 @@ func TestSaveValidatesTypes(t *testing.T) {
 		"too many items": {SettingsUpdate{Values: vals("disks", []string{"a", "b", "c", "d"})}, []string{"disks"}},
 		"folder":         {SettingsUpdate{Values: vals("library", "folder:photos")}, []string{"library", "shared folder"}},
 		"secret change":  {SettingsUpdate{Secrets: map[string]SecretChange{"motd": {Generate: true}}}, []string{"motd"}},
-		"person rows":    {SettingsUpdate{Person: map[string]PersonChange{"quota": {Default: json.RawMessage(`"1GiB"`)}}}, []string{"quota"}},
+		"person default": {SettingsUpdate{Person: map[string]PersonChange{"quota": {Default: json.RawMessage(`"lots"`)}}}, []string{"quota", "default"}},
 		"duplicate rows": {SettingsUpdate{Person: map[string]PersonChange{"quota": {Default: json.RawMessage(`"1GiB"`), Rows: []GroupValueInput{{Group: "staff", Value: json.RawMessage(`"2GiB"`)}, {Group: "staff", Value: json.RawMessage(`"3GiB"`)}}}}}, []string{"quota", "staff", "more than one row"}},
 	} {
 		_, err := f.h.SaveSettings("immich", c.u, "admin")

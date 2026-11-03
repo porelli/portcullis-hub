@@ -17,8 +17,10 @@ import (
 
 	cerrdefs "github.com/containerd/errdefs"
 	"github.com/portcullis/hub/internal/compose"
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/keycloak"
+	"github.com/portcullis/hub/internal/lldap"
 	"github.com/portcullis/hub/internal/state"
 )
 
@@ -747,6 +749,8 @@ type fakeGroups struct {
 	// are added); missingErr fails the check.
 	existing   map[string]bool
 	missingErr error
+	// people, if set, gets the groups created and deleted here.
+	people *fakePeople
 }
 
 func (g *fakeGroups) MissingInstanceGroups(ctx context.Context, names []string) ([]string, error) {
@@ -783,6 +787,9 @@ func (g *fakeGroups) CreateInstanceGroup(ctx context.Context, actor, name string
 		g.existing = map[string]bool{}
 	}
 	g.existing[name] = true
+	if g.people != nil {
+		g.people.addGroup(name)
+	}
 	if g.createWarn != nil {
 		if w := g.createWarn(name); w != "" {
 			return true, []string{w}, nil
@@ -798,6 +805,9 @@ func (g *fakeGroups) DeleteInstanceGroup(ctx context.Context, actor, name string
 		return nil, g.delErr
 	}
 	g.calls = append(g.calls, "-"+name+":"+actor)
+	if g.people != nil {
+		g.people.deleteGroup(name)
+	}
 	return nil, nil
 }
 
@@ -806,3 +816,123 @@ func (g *fakeGroups) Calls() []string {
 	defer g.mu.Unlock()
 	return append([]string(nil), g.calls...)
 }
+
+// fakePeople is the directory as the Hub's settings see it (People) and
+// the LLDAP side of the sweep check (LDAPUsers): users, groups with ids
+// (a re-created group gets a new id), expired memberships and groups
+// that can't hold privileged values.
+type fakePeople struct {
+	mu        sync.Mutex
+	users     map[string]bool
+	groups    map[string]int
+	members   map[string]map[string]bool
+	expired   map[string]map[string]bool
+	privilege map[string]string
+	err       error
+	nextID    int
+	calls     int
+}
+
+func newFakePeople(users ...string) *fakePeople {
+	p := &fakePeople{users: map[string]bool{"admin": true, "portcullis-hub": true}, groups: map[string]int{}, members: map[string]map[string]bool{},
+		expired: map[string]map[string]bool{}, privilege: map[string]string{}, nextID: 100}
+	for _, u := range users {
+		p.users[u] = true
+	}
+	return p
+}
+
+func (p *fakePeople) addGroup(name string, members ...string) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if _, ok := p.groups[name]; !ok {
+		p.nextID++
+		p.groups[name] = p.nextID
+		p.members[name] = map[string]bool{}
+	}
+	for _, m := range members {
+		p.users[m] = true
+		p.members[name][m] = true
+	}
+	return p.groups[name]
+}
+
+func (p *fakePeople) deleteGroup(name string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.groups, name)
+	delete(p.members, name)
+}
+
+func (p *fakePeople) id(name string) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.groups[name]
+}
+
+func (p *fakePeople) set(fn func(p *fakePeople)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	fn(p)
+}
+
+func (p *fakePeople) Membership(ctx context.Context, now time.Time) (*directory.Membership, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.calls++
+	if p.err != nil {
+		return nil, p.err
+	}
+	m := &directory.Membership{Users: map[string]map[string]int{}, Groups: map[string]directory.MemberGroup{}, Expired: map[string]map[string]bool{}, Privilege: map[string]string{}}
+	for u := range p.users {
+		if u != "portcullis-hub" {
+			m.Users[u] = map[string]int{}
+		}
+	}
+	for g, id := range p.groups {
+		mg := directory.MemberGroup{ID: id, Members: []string{}}
+		for u := range p.members[g] {
+			mg.Members = append(mg.Members, u)
+			m.Users[u][g] = id
+		}
+		sort.Strings(mg.Members)
+		m.Groups[g] = mg
+		if why := p.privilege[g]; why != "" {
+			m.Privilege[g] = why
+		}
+	}
+	for u, gs := range p.expired {
+		m.Expired[u] = map[string]bool{}
+		for g, v := range gs {
+			m.Expired[u][g] = v
+		}
+	}
+	return m, nil
+}
+
+func (p *fakePeople) PrivilegeProblem(ctx context.Context, group string) (string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.err != nil {
+		return "", p.err
+	}
+	if _, ok := p.groups[group]; !ok {
+		return "", &directory.Error{Status: 404, Msg: "no such group " + group}
+	}
+	return p.privilege[group], nil
+}
+
+func (p *fakePeople) ListUsers(ctx context.Context) ([]lldap.User, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.err != nil {
+		return nil, p.err
+	}
+	var out []lldap.User
+	for u := range p.users {
+		out = append(out, lldap.User{ID: u})
+	}
+	return out, nil
+}
+
+func (p *fakePeople) ServiceUser() string { return "portcullis-hub" }

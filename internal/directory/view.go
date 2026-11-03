@@ -43,7 +43,7 @@ type PeopleUser struct {
 	DisplayName string              `json:"display_name"`
 	Created     string              `json:"created"`
 	Groups      []string            `json:"groups"`
-	Memberships []Membership        `json:"memberships"`
+	Memberships []UserMembership    `json:"memberships"`
 	CreatedBy   string              `json:"created_by,omitempty"`
 	Protected   string              `json:"protected,omitempty"`
 	Self        bool                `json:"self,omitempty"`

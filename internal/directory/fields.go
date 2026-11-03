@@ -41,6 +41,9 @@ func (s *Service) CreateField(ctx context.Context, c *Caller, f Field) error {
 		if s.Store == nil {
 			return &Error{Status: http.StatusServiceUnavailable, Msg: "custom fields not configured"}
 		}
+		if reservedAttr(f.Name) {
+			return refuse("field names starting with %q are reserved for the Hub's per-person setting attributes", ReservedAttrPrefix)
+		}
 		if !validFieldName(f.Name) {
 			return invalid("invalid field name: 1-31 lowercase letters and digits, starting with a letter; '_' only between two of them (not at the end, not doubled)")
 		}
