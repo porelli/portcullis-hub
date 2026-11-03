@@ -1445,7 +1445,7 @@ func (v *specCheck) pathAndSecret(o *Option) error {
 				switch d, bad, in := idDefault(ro); {
 				case bad:
 					return fmt.Errorf("writes_as.%s: setting %s's default %s is not a whole number", r.what, ro.Key, quoteDefault(ro.Default))
-				case in:
+				case in && r.what == "gid":
 					return fmt.Errorf("writes_as.%s: setting %s's default %d is in %s", r.what, ro.Key, d, gidRangeText)
 				}
 			default:

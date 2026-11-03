@@ -13,8 +13,11 @@ const fCompose = "services:\n  web:\n    image: x\n    environment:\n      PUID:
 	"      traefik.http.routers.app.rule: Host(`${PORTCULLIS_HOST_APP:-app.portcullis.local}`)\n" +
 	"      traefik.http.routers.app.middlewares: portcullis-auth@docker,portcullis-groups@docker\n" +
 	"  fixed:\n    image: x\n    user: \"1000:1000\"\n" +
-	"  envuser:\n    image: x\n    user: \"${PUID:-1000}:${PGID:-1000}\"\n" +
 	"  named:\n    image: x\n    user: www-data\n"
+
+// fComposeEnvUser adds a service whose user: takes both ids from
+// PUID/PGID (the fixture must declare them as int options).
+const fComposeEnvUser = fCompose + "  envuser:\n    image: x\n    user: \"${PUID:-1000}:${PGID:-1000}\"\n"
 
 const (
 	puidOpt = "{key: puid, label: P, type: int, default: 1000}"
@@ -79,8 +82,8 @@ func TestRunsAsMatchesComposeUser(t *testing.T) {
 		{"gid differs", hdrHead + opts(fpath("media", "fixed", ", folder: {access: read, runs_as: {uid: 1000, gid: 100}}")), "", "media", `folder.runs_as.gid 100 doesn't match service fixed's compose user: "1000:1000"`},
 		{"uid differs", hdrHead + opts(fpath("media", "fixed", ", folder: {access: read, runs_as: {uid: 0, gid: 1000}}")), "", "media", `folder.runs_as.uid 0 doesn't match`},
 		{"numbers match", hdrHead + opts(fpath("media", "fixed", ", folder: {access: read, runs_as: {uid: 1000, gid: 1000}}")), "", "", ""},
-		{"env form", hdrHead + opts(puidOpt, pgidOpt, fpath("media", "envuser", ", folder: {access: read, runs_as: {uid_env: PUID, gid_env: PGID}}")), "", "", ""},
-		{"env user, numbers", hdrHead + opts(puidOpt, pgidOpt, fpath("media", "envuser", ", folder: {access: read, runs_as: {uid: 1000, gid: 1000}}")), "", "media", "folder.runs_as.uid: service envuser's compose user: takes it from ${PUID}: use uid_env: PUID"},
+		{"env form", hdrHead + opts(puidOpt, pgidOpt, fpath("media", "envuser", ", folder: {access: read, runs_as: {uid_env: PUID, gid_env: PGID}}")), fComposeEnvUser, "", ""},
+		{"env user, numbers", hdrHead + opts(puidOpt, pgidOpt, fpath("media", "envuser", ", folder: {access: read, runs_as: {uid: 1000, gid: 1000}}")), fComposeEnvUser, "media", "folder.runs_as.uid: service envuser's compose user: takes it from ${PUID}: use uid_env: PUID"},
 		{"numeric user, env", hdrHead + opts(puidOpt, pgidOpt, fpath("media", "fixed", ", folder: {access: read, runs_as: {uid_env: PUID, gid_env: PGID}}")), "", "media", "folder.runs_as.uid_env PUID doesn't match service fixed's compose user"},
 		{"named user", hdrHead + opts(fpath("media", "named", ", folder: {access: read, runs_as: {uid: 33, gid: 33}}")), "", "media", "give numbers in compose `user:`"},
 		{"named user, no folder", hdrHead + opts(fpath("media", "named", "")), "", "", ""},
@@ -224,7 +227,7 @@ func TestLanOnlyPort(t *testing.T) {
 
 // fComposeNoEnvUser is fCompose without the ${PGID} user: (which would
 // itself refuse a PGID option defaulting into the folder range).
-var fComposeNoEnvUser = strings.Replace(fCompose, "  envuser:\n    image: x\n    user: \"${PUID:-1000}:${PGID:-1000}\"\n", "", 1)
+var fComposeNoEnvUser = fCompose
 
 func TestFolderGIDDefaultsRead(t *testing.T) {
 	g := ", folder: {access: read, runs_as: {uid_env: PUID, gid_env: PGID}}"
@@ -240,9 +243,21 @@ func TestFolderGIDDefaultsRead(t *testing.T) {
 }
 
 func TestComposeGIDDefaultsRefused(t *testing.T) {
-	svc := func(extra string) string { return fComposeNoEnvUser + "  extra:\n    image: x\n" + extra }
-	p := hdrHead + opts(fpath("media", "web", ""))
+	// XG, G and U are instance int options (follow-up 3: a reference must
+	// name one); the refs service interpolates them.
+	refs := "  refs:\n    image: x\n    environment:\n      XG: ${XG:-}\n      G: ${G:-}\n      U: ${U:-}\n      NAME: ${NAME:-}\n"
+	svc := func(extra string) string { return fComposeNoEnvUser + refs + "  extra:\n    image: x\n" + extra }
+	ints := []string{"{key: xg, label: XG, type: int}", "{key: g, label: G, type: int}", "{key: u, label: U, type: int}"}
+	p := hdrHead + opts(ints[0], ints[1], ints[2], fpath("media", "web", ""))
+	withString := hdrHead + opts(ints[0], ints[1], ints[2], "{key: name, label: N, type: string}", fpath("media", "web", ""))
 	folderCases(t, []settingsCase{
+		{"uid undeclared", p, svc("    user: \"${NOPE}:1000\"\n"), "", "service extra: compose user: uid ${NOPE} must name an instance int option of this template (not a string option, an undeclared variable or PORTCULLIS_*)"},
+		{"gid undeclared", p, svc("    user: \"1000:$NOPE\"\n"), "", "service extra: compose user: gid ${NOPE} must name an instance int option of this template"},
+		{"gid string option", withString, svc("    user: \"1000:${NAME}\"\n"), "", "compose user: gid ${NAME} must name an instance int option"},
+		{"uid string option", withString, svc("    user: \"${NAME}\"\n"), "", "compose user: uid ${NAME} must name an instance int option"},
+		{"gid portcullis", p, svc("    user: \"1000:${PORTCULLIS_INSTANCE}\"\n"), "", "compose user: gid ${PORTCULLIS_INSTANCE} must name an instance int option"},
+		{"group_add undeclared", p, svc("    group_add: [\"${NOPE:-1000}\"]\n"), "", "service extra: group_add ${NOPE} must name an instance int option of this template"},
+		{"group_add string option", withString, svc("    group_add: [$NAME]\n"), "", "group_add ${NAME} must name an instance int option"},
 		{"user :- default", p, svc("    user: \"1000:${XG:-60001}\"\n"), "", "service extra: compose user: gid 60001 (the default of ${XG}) is in 60000-60999 (shared folder groups)"},
 		{"user - default", p, svc("    user: \"1000:${XG-60002}\"\n"), "", "gid 60002 (the default of ${XG}) is in 60000-60999"},
 		{"user option default", hdrHead + opts("{key: pgid, label: G, type: int, default: 60003}", fpath("media", "web", "")), svc("    user: \"1000:${PGID:-1000}\"\n"), "", "service extra: compose user: gid ${PGID} is setting pgid, whose default 60003 is in 60000-60999 (shared folder groups)"},
@@ -284,7 +299,7 @@ func TestFolderServiceReferencesResolve(t *testing.T) {
 	m := hdrHead + opts(puidOpt, pgidOpt, fpath("media", "extra", rw))
 	svc := func(extra string) string { return fCompose + "  extra:\n    image: x\n" + extra }
 	folderCases(t, []settingsCase{
-		{"unknown ref", m, svc("    group_add: [\"${NOPE:-1000}\"]\n"), "media", `service extra's group_add entry "${NOPE:-1000}" next to a folder block must be a number or ${NAME} of an instance int option`},
+		{"unknown ref", m, svc("    group_add: [\"${NOPE:-1000}\"]\n"), "", "service extra: group_add ${NOPE} must name an instance int option of this template"},
 		{"named group", m, svc("    group_add: [video]\n"), "media", `group_add entry "video" next to a folder block must be a number`},
 		{"mixed", m, svc("    group_add: [\"1${PGID}\"]\n"), "", `group_add entry "1${PGID}" must be a whole number, a group name or exactly one`},
 		{"option ref ok", m, svc("    group_add: [\"${PGID:-1000}\", \"10001\", 44]\n"), "", ""},
@@ -341,5 +356,40 @@ func TestGroupAddResolvesStrictForms(t *testing.T) {
 		if err := v.groupAddResolves("s"); (err == nil) != ok {
 			t.Errorf("%q: %v, want ok=%v", e, err, ok)
 		}
+	}
+}
+
+// Follow-up 3 (re-review "New Breakage").
+
+func TestComposeIDsForms(t *testing.T) {
+	refs := "  refs:\n    image: x\n    environment:\n      FIRST: ${FIRST:-}\n      SECOND: ${SECOND:-}\n"
+	svc := func(extra string) string { return fComposeNoEnvUser + refs + "  extra:\n    image: x\n" + extra }
+	two := func(def string) string {
+		return hdrHead + opts("{key: g2, label: G, type: int"+def+", delivery: [{env: FIRST}, {env: SECOND}]}", fpath("media", "web", ""))
+	}
+	anchors := "x-u: &u \"1000:60001\"\nx-g: &g \"60002\"\n"
+	folderCases(t, []settingsCase{
+		{"aliased user", two(""), anchors + svc("    user: *u\n"), "", "service extra: compose user: gid 60001 is in 60000-60999"},
+		{"aliased group_add entry", two(""), anchors + svc("    group_add: [*g]\n"), "", "service extra: group_add gid 60002 is in 60000-60999"},
+		{"octal group_add", two(""), svc("    group_add: [0165141]\n"), "", "service extra: group_add gid 60001 is in 60000-60999"},
+		{"octal user", two(""), svc("    user: 0165141\n"), "", ""},
+		{"second env delivery ok", two(""), svc("    user: \"1000:${SECOND}\"\n    group_add: [$SECOND]\n"), "", ""},
+		{"second env delivery default", two(", default: 60003"), svc("    group_add: [\"${SECOND}\"]\n"), "", "service extra: group_add ${SECOND} is setting g2, whose default 60003 is in 60000-60999"},
+	})
+}
+
+// The folder gid range is a gid rule: uid sources in it are not refused
+// (as for a numeric runs_as.uid).
+func TestUIDDefaultsNotRangeChecked(t *testing.T) {
+	folderCases(t, []settingsCase{
+		{"uid_env default", hdrHead + opts("{key: puid, label: P, type: int, default: 60001}", pgidOpt, fpath("media", "web", ", folder: {access: read, runs_as: {uid_env: PUID, gid_env: PGID}}")), fComposeNoEnvUser, "", ""},
+		{"writes_as uid key", hdrHead + opts("{key: puid, label: P, type: int, default: 60001}", fpath("media", "web", ", writes_as: {uid: puid, gid: 0}")), fComposeNoEnvUser, "", ""},
+		{"uid_env second delivery", hdrHead + opts("{key: puid, label: P, type: int, default: 1000, delivery: [{env: OTHER_UID}, {env: PUID}]}", pgidOpt, fpath("media", "web", ", folder: {access: read, runs_as: {uid_env: PUID, gid_env: PGID}}")), strings.Replace(fComposeNoEnvUser, "    environment:\n", "    environment:\n      OTHER_UID: ${OTHER_UID:-}\n", 1), "", ""},
+	})
+}
+
+func TestComposeIDsDecodeError(t *testing.T) {
+	if _, _, err := composeIDs([]byte("services:\n  a: [1, 2]\n")); err == nil {
+		t.Error("a service that isn't a mapping decoded")
 	}
 }

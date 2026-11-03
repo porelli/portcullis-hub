@@ -5,6 +5,7 @@ import (
 	"math"
 	"reflect"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -208,7 +209,7 @@ func (v *specCheck) folderOption(o *Option) error {
 		switch d, bad, in := idDefault(ro); {
 		case bad:
 			return fmt.Errorf("folder.runs_as.%s_env %s names setting %s, whose default %s is not a whole number", id.what, id.env, ro.Key, quoteDefault(ro.Default))
-		case in:
+		case in && id.what == "gid":
 			return fmt.Errorf("folder.runs_as.%s_env %s names setting %s, whose default %d is in %s", id.what, id.env, ro.Key, d, gidRangeText)
 		}
 	}
@@ -236,13 +237,12 @@ func (v *specCheck) folderOption(o *Option) error {
 	return v.sameEnvSameRunsAs(o)
 }
 
-// envOption is the instance int option whose EnvName() is name.
+// envOption is the instance int option that delivers env name.
+// Every env name the option delivers counts (EnvNames: later and indexed
+// deliveries too).
 func (v *specCheck) envOption(name string) *Option {
-	for i := range v.m.Settings.Options {
-		ro := &v.m.Settings.Options[i]
-		if ro.Type == TypeInt && ro.EffectiveScope() == ScopeInstance && ro.EnvName() == name {
-			return ro
-		}
+	if ro := v.anyEnvOption(name); ro != nil && ro.Type == TypeInt {
+		return ro
 	}
 	return nil
 }
@@ -388,28 +388,64 @@ func composeIDs(compose []byte) (users map[string]string, groupAdd map[string][]
 			GroupAdd yaml.Node `yaml:"group_add"`
 		} `yaml:"services"`
 	}
-	users, groupAdd = map[string]string{}, map[string][]string{}
-	if yaml.Unmarshal(compose, &doc) != nil {
-		return users, groupAdd, nil
+	if err := yaml.Unmarshal(compose, &doc); err != nil {
+		return nil, nil, fmt.Errorf("compose.yml: %v", err)
 	}
+	users, groupAdd = map[string]string{}, map[string][]string{}
 	for svc, s := range doc.Services {
-		if s.User.Kind == yaml.ScalarNode && s.User.Tag != "!!null" {
-			users[svc] = s.User.Value
+		u, err := idScalar(&s.User)
+		if err != nil {
+			return nil, nil, fmt.Errorf("service %s: user: %v", svc, err)
 		}
-		switch g := &s.GroupAdd; {
+		if u != nil {
+			users[svc] = *u
+		}
+		switch g := resolveAlias(&s.GroupAdd); {
 		case g.Kind == 0 || (g.Kind == yaml.ScalarNode && g.Tag == "!!null"):
 		case g.Kind == yaml.SequenceNode:
 			for _, e := range g.Content {
-				if e.Kind != yaml.ScalarNode {
+				v, err := idScalar(e)
+				if err != nil || v == nil {
 					return nil, nil, fmt.Errorf("service %s: group_add entries must be numbers or names", svc)
 				}
-				groupAdd[svc] = append(groupAdd[svc], e.Value)
+				groupAdd[svc] = append(groupAdd[svc], *v)
 			}
 		default:
 			return nil, nil, fmt.Errorf("service %s: group_add must be a list", svc)
 		}
 	}
 	return users, groupAdd, nil
+}
+
+// resolveAlias follows YAML aliases (user: *u) to the anchored node.
+func resolveAlias(n *yaml.Node) *yaml.Node {
+	for i := 0; n.Kind == yaml.AliasNode && n.Alias != nil && i < 32; i++ {
+		n = n.Alias
+	}
+	return n
+}
+
+// idScalar is a user: / group_add value as compose reads it (nil = not
+// set): aliases followed, and an !!int decoded as YAML does (0165141 is
+// octal 60001; 0x… hex) and written in decimal, so the range checks see
+// the number Docker gets.
+func idScalar(n *yaml.Node) (*string, error) {
+	n = resolveAlias(n)
+	switch {
+	case n.Kind == 0 || (n.Kind == yaml.ScalarNode && n.Tag == "!!null"):
+		return nil, nil
+	case n.Kind != yaml.ScalarNode:
+		return nil, fmt.Errorf("want a scalar")
+	case n.Tag == "!!int":
+		var i int64
+		if err := n.Decode(&i); err != nil {
+			return nil, err
+		}
+		v := strconv.FormatInt(i, 10)
+		return &v, nil
+	}
+	v := n.Value
+	return &v, nil
 }
 
 // singleRefRe is the only accepted interpolation form of a gid (or uid)
@@ -456,6 +492,9 @@ func (v *specCheck) composeGIDs() error {
 		if u != "" && !userNumRe.MatchString(uid) && !groupNameRe.MatchString(uid) && !singleRefRe.MatchString(uid) {
 			return fmt.Errorf("service %s: compose user: uid %q must be a whole number, a user name or exactly one ${NAME} / $NAME (no mixed forms)", s, uid)
 		}
+		if err := v.intRef(s, "compose user: uid", uid); err != nil {
+			return err
+		}
 		if ok {
 			if err := v.gidSource(s, "compose user: gid", "compose user: gid", g, false); err != nil {
 				return err
@@ -466,6 +505,25 @@ func (v *specCheck) composeGIDs() error {
 				return err
 			}
 		}
+	}
+	return nil
+}
+
+// intRef: a ${NAME} / $NAME uid or gid source must name an instance int
+// option of this template (follow-up 3): a string option or an undeclared
+// variable (Expert env, core env) could expand to "1000:60001"; an int
+// can't hold ':', and its default is range-checked. what names the source.
+func (v *specCheck) intRef(svc, what, val string) error {
+	m := singleRefRe.FindStringSubmatch(val)
+	if m == nil {
+		return nil
+	}
+	name := m[1]
+	if name == "" {
+		name = m[4]
+	}
+	if v.envOption(name) == nil {
+		return fmt.Errorf("service %s: %s ${%s} must name an instance int option of this template (not a string option, an undeclared variable or PORTCULLIS_*)", svc, what, name)
 	}
 	return nil
 }
@@ -510,6 +568,9 @@ func (v *specCheck) gidSource(svc, lit, ref, val string, names bool) error {
 		}
 		return fmt.Errorf("service %s: compose user: gid %q must be a whole number or exactly one ${NAME} / $NAME (no mixed forms)", svc, val)
 	}
+	if err := v.intRef(svc, ref, val); err != nil {
+		return err
+	}
 	for _, m := range interpolations(val, gidRefRe) {
 		name, op, value := m[1], m[2], m[3]
 		if name == "" {
@@ -520,7 +581,7 @@ func (v *specCheck) gidSource(svc, lit, ref, val string, names bool) error {
 				return fmt.Errorf("service %s: %s %d (the default of ${%s}) is in %s", svc, lit, n, name, gidRangeText)
 			}
 		}
-		if ro := v.anyEnvOption(name); ro != nil {
+		if ro := v.envOption(name); ro != nil {
 			if d, _, in := idDefault(ro); in {
 				return fmt.Errorf("service %s: %s ${%s} is setting %s, whose default %d is in %s", svc, ref, name, ro.Key, d, gidRangeText)
 			}
@@ -529,14 +590,15 @@ func (v *specCheck) gidSource(svc, lit, ref, val string, names bool) error {
 	return nil
 }
 
-// anyEnvOption is the instance option (any type) whose EnvName() is name.
+// anyEnvOption is the instance option (any type) that delivers env name
+// (any of its EnvNames).
 func (v *specCheck) anyEnvOption(name string) *Option {
 	if v.m.Settings == nil {
 		return nil
 	}
 	for i := range v.m.Settings.Options {
 		ro := &v.m.Settings.Options[i]
-		if ro.EffectiveScope() == ScopeInstance && ro.EnvName() == name {
+		if ro.EffectiveScope() == ScopeInstance && slices.Contains(ro.EnvNames(), name) {
 			return ro
 		}
 	}
