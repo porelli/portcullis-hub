@@ -1,9 +1,11 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -121,3 +123,66 @@ func TestClaimRewrittenForRecreatedAccount(t *testing.T) {
 	}
 }
 
+// H13: a template update renames a secret option's env variable, then
+// removes the option: neither Expert Env nor a backup's config/env ever
+// shows the old line's value, and the prune blanks it in the .env.
+func TestSecretEnvLineAfterTemplateUpdate(t *testing.T) {
+	f, _ := secretFixture(t)
+	const val = "s3cr3t-old-line"
+	saveSecret(t, f, "secretapp", "api_key", setSecret(val))
+	if err := f.h.Enable("secretapp"); err != nil {
+		t.Fatal(err)
+	}
+	f.h.Wait()
+	manifest := filepath.Join(f.src, "secretapp", "manifest.yaml")
+	m := string(mustRead(t, manifest))
+	renamed := strings.Replace(m, "{env: HEADSCALE_API_KEY}", "{env: HEADSCALE_KEY}", 1)
+	writeFile(t, manifest, renamed)
+	composePath := filepath.Join(f.src, "secretapp", "compose.yml")
+	writeFile(t, composePath, strings.ReplaceAll(string(mustRead(t, composePath)), "HEADSCALE_API_KEY", "HEADSCALE_KEY"))
+	f.h.Discover()
+	if optionByKey(f.h.Template("secretapp"), "api_key") == nil {
+		t.Fatal("rename not loaded")
+	}
+	f.h.pruneSettings()
+	checkEnv := func(when string) {
+		t.Helper()
+		vars, _, err := f.h.Env("secretapp")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for k, v := range vars {
+			if strings.Contains(v, val) {
+				t.Errorf("%s: Expert Env shows %s=%q", when, k, v)
+			}
+		}
+		entry, err := f.h.BackupInstance("secretapp", "root")
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, data, _ := readArchive(t, archivePath(f, entry.Archive))
+		for name, b := range data {
+			if name != secretsMember && bytes.Contains(b, []byte(val)) {
+				t.Errorf("%s: archive member %s holds the secret", when, name)
+			}
+		}
+	}
+	checkEnv("renamed")
+	// Removed (and api_url's requires with it): the prune drops the
+	// stored value and blanks its old .env line first.
+	removed := strings.Replace(renamed, "    - key: api_key\n      label: API key\n      type: secret\n      applies: restart\n      delivery: [{env: HEADSCALE_KEY}]\n", "", 1)
+	removed = strings.Replace(removed, "      requires: [api_key]\n", "", 1)
+	writeFile(t, manifest, removed)
+	f.h.Discover()
+	if optionByKey(f.h.Template("secretapp"), "api_key") != nil {
+		t.Fatal("update not loaded")
+	}
+	f.h.pruneSettings()
+	if _, ok := storedSecrets(t, f, "secretapp")["api_key"]; ok {
+		t.Fatal("the prune kept the dropped secret")
+	}
+	if b, _ := os.ReadFile(f.h.envPath("secretapp")); bytes.Contains(b, []byte(val)) {
+		t.Errorf("the .env still holds the dropped secret:\n%s", b)
+	}
+	checkEnv("removed")
+}

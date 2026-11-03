@@ -1338,8 +1338,22 @@ func (h *Hub) Env(id string) (map[string]string, []string, error) {
 		return nil, nil, ErrNotFound
 	}
 	vars := readEnvFile(h.envPath(id))
-	for n := range secretOptionEnvNames(t) {
-		if vars[n] != "" {
+	// Also every variable holding a stored secret's value: a line a
+	// template update left behind (an env variable renamed, an option no
+	// longer secret) is no longer among the current names.
+	secrets, err := h.secretValues(id)
+	if err != nil {
+		return nil, nil, err
+	}
+	stored := map[string]bool{}
+	for _, v := range secrets {
+		if v != "" {
+			stored[v] = true
+		}
+	}
+	names := secretOptionEnvNames(t)
+	for n, v := range vars {
+		if v != "" && (names[n] || stored[v]) {
 			vars[n] = settings.SecretShown
 		}
 	}

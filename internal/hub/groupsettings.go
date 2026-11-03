@@ -1,12 +1,14 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"maps"
+	"os"
 	"reflect"
 	"slices"
 	"sort"
@@ -15,6 +17,7 @@ import (
 	"time"
 
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/settings"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
@@ -922,14 +925,7 @@ func (h *Hub) pruneSettingsLocked() (audits []func()) {
 			continue
 		}
 		if len(secretGone) > 0 {
-			if vals, err := h.secretValues(id); err == nil {
-				for _, k := range secretGone {
-					delete(vals, k)
-				}
-				if err := h.writeSecrets(id, vals); err != nil {
-					log.Printf("settings: %s: removing dropped secrets from the store failed: %v", id, err)
-				}
-			}
+			h.dropStoredSecretsLocked(id, secretGone)
 		}
 		if len(s.Values) == 0 {
 			s.Values = nil
@@ -959,6 +955,50 @@ func (h *Hub) pruneSettingsLocked() (audits []func()) {
 		h.saveLocked()
 	}
 	return audits
+}
+
+// dropStoredSecretsLocked removes the dropped secrets keys from instance
+// id's store — after blanking every .env variable holding one of their
+// values (the line a removed or renamed delivery left behind): once out
+// of the store, nothing would recognise the value in Expert Env or a
+// backup's config/env. The .env not rewritable: the values stay in the
+// store (still masked and blanked by value). Caller holds mu.
+func (h *Hub) dropStoredSecretsLocked(id string, keys []string) {
+	vals, err := h.secretValues(id)
+	if err != nil {
+		log.Printf("settings: %s: removing dropped secrets from the store failed: %v", id, err)
+		return
+	}
+	gone := map[string]string{}
+	for _, k := range keys {
+		if v, ok := vals[k]; ok {
+			gone[k] = v
+		}
+	}
+	if len(gone) == 0 {
+		return
+	}
+	path := h.envPath(id)
+	data, err := os.ReadFile(path)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+	case err != nil:
+		log.Printf("settings: %s: the .env is unreadable (%v): the dropped secrets stay in the store", id, err)
+		return
+	default:
+		if b := blankEnvNames(data, nil, gone); !bytes.Equal(b, data) {
+			if err := fsutil.WriteFileAtomic(path, b, 0600); err != nil {
+				log.Printf("settings: %s: blanking the dropped secrets in the .env failed (%v): they stay in the store", id, err)
+				return
+			}
+		}
+	}
+	for k := range gone {
+		delete(vals, k)
+	}
+	if err := h.writeSecrets(id, vals); err != nil {
+		log.Printf("settings: %s: removing dropped secrets from the store failed: %v", id, err)
+	}
 }
 
 // pruneSettings is pruneSettingsLocked, audited after the unlock.
