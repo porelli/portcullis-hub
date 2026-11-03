@@ -459,12 +459,14 @@ func (h *Hub) PreviewSettings(ctx context.Context, id string, u SettingsUpdate) 
 
 // RetryDeliveries runs instance id's deliveries again now (every hook,
 // trigger retry) and reports each unit; audited settings.retry by actor.
-// The run is not cancelled with the request.
+// The run is not cancelled with the request, and never waits for one in
+// progress (a hook can hold the delivery lock for its whole timeout):
+// busy = queued (TriggerRetry), reported as a busy unit; the panel polls.
 func (h *Hub) RetryDeliveries(ctx context.Context, id, actor string) (*DeliveryReport, error) {
 	if h.Template(id) == nil {
 		return nil, ErrNotFound
 	}
-	rep, err := h.deliver(context.WithoutCancel(ctx), id, TriggerRetry, deliverOpts{})
+	rep, err := h.deliver(context.WithoutCancel(ctx), id, TriggerRetry, deliverOpts{noWait: true})
 	detail := ""
 	if rep != nil {
 		failed := 0

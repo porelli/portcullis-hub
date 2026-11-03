@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -821,5 +822,41 @@ func TestFailedUnitLoggedOnChange(t *testing.T) {
 	}
 	if !strings.Contains(out, "permission denied") {
 		t.Errorf("the changed error is not logged:\n%s", out)
+	}
+}
+
+// Follow-up to H16: the panel's Retry never waits for a delivery in
+// progress either: busy = queued (TriggerRetry), answered as a busy unit.
+func TestRetryNeverBlocksOnDeliveryLock(t *testing.T) {
+	f, _, _ := headerFixture(t, nil)
+	headerEnable(t, f)
+	f.h.Wait()
+	var ran atomic.Bool
+	f.h.deliverHook = func(id, stage string) {
+		if id == headerID && stage == "built" {
+			ran.Store(true)
+		}
+	}
+	l := f.h.deliverLock(headerID)
+	l.Lock()
+	done := make(chan *DeliveryReport, 1)
+	go func() {
+		rep, _ := f.h.RetryDeliveries(context.Background(), headerID, "admin")
+		done <- rep
+	}()
+	var rep *DeliveryReport
+	select {
+	case rep = <-done:
+	case <-time.After(5 * time.Second):
+		l.Unlock()
+		t.Fatal("RetryDeliveries waited for the delivery lock")
+	}
+	l.Unlock()
+	if u, ok := unit(rep, unitBusy); !ok || u.Skipped != SkipBusy {
+		t.Errorf("units = %+v, want a busy unit", rep.Units)
+	}
+	f.h.Wait()
+	if !ran.Load() {
+		t.Error("the queued retry did not run once the lock was free")
 	}
 }
