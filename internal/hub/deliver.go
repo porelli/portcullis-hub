@@ -74,10 +74,12 @@ const (
 
 // Delivery units.
 const (
-	unitEnv     = "env"
-	unitReload  = "reload"
-	unitRestart = "restart"
-	unitBusy    = "delivery"
+	unitEnv = "env"
+	// unitEnvValues: option env values written empty (optionEnvLocked).
+	unitEnvValues = "env:values"
+	unitReload    = "reload"
+	unitRestart   = "restart"
+	unitBusy      = "delivery"
 )
 
 func fileUnit(name string) string { return "file:" + name }
@@ -315,6 +317,9 @@ func (h *Hub) statusUnits(id string) map[string]UnitResult {
 	out := make(map[string]UnitResult, len(st))
 	for k, v := range st {
 		out[k] = v
+	}
+	if u, ok := h.envProblemsUnit(id); ok {
+		out[u.Unit] = u
 	}
 	return out
 }

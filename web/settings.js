@@ -923,7 +923,7 @@
   function unitLabel(u) {
     const [kind, name] = [u.split(':')[0], u.slice(u.indexOf(':') + 1)];
     switch (kind) {
-      case 'env': return "Environment (.env, read when the app starts)";
+      case 'env': return name === 'values' ? 'Environment values written empty' : "Environment (.env, read when the app starts)";
       case 'file': return 'Data file ' + name;
       case 'hook': return 'Hook ' + name;
       case 'claim': return 'Sign-in claim ' + name;

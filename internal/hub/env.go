@@ -5,9 +5,11 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -131,13 +133,33 @@ func (h *Hub) portEnvLocked(t *templates.Template) map[string]string {
 // option has no value. A secret option's value comes from the secrets
 // store (empty when unset or cleared). Left alone (P12): group-scope
 // options (their records) and person-entered lists (the delivery engine
-// writes those outside mu). Errors never carry a value. Caller must hold
-// mu.
+// writes those outside mu). A stored value one env delivery can't carry
+// (a template update added the delivery; save refuses such values) fails
+// closed for that delivery's variables only: written empty, logged and
+// reported in the panel's deliveries (unit env:values); the error is
+// only the secrets store being unreadable. Errors and problems never
+// carry a value. Caller must hold mu.
 func (h *Hub) optionEnvLocked(t *templates.Template, m *directory.Membership) (map[string]string, error) {
 	s := h.st.Settings[t.ID]
 	out := map[string]string{}
+	var problems []string
 	var secrets map[string]string
 	opts := t.Manifest.Options()
+	put := func(o *templates.Option, redact []string, render func(d *templates.Delivery) (map[string]string, error)) {
+		for _, d := range envDeliveries(o) {
+			env, err := render(&d)
+			if err != nil {
+				for _, n := range envDeliveryNames(o, &d) {
+					out[n] = ""
+				}
+				problems = append(problems, fmt.Sprintf("setting %s: %s: written empty", o.Key, redactValues(err.Error(), redact)))
+				continue
+			}
+			for k, x := range env {
+				out[k] = x
+			}
+		}
+	}
 	for i := range opts {
 		o := &opts[i]
 		if o.EffectiveScope() == templates.ScopeGroup && len(envDeliveries(o)) > 0 {
@@ -149,13 +171,9 @@ func (h *Hub) optionEnvLocked(t *templates.Template, m *directory.Membership) (m
 			if h.typeMatchesLocked(t, o.Key, o) {
 				recs = h.groupRecordsOut(t, o, s.Groups[o.Key], m)
 			}
-			env, err := renderGroupEnv(o, recs)
-			if err != nil {
-				return nil, fmt.Errorf("setting %s: %w", o.Key, err)
-			}
-			for k, x := range env {
-				out[k] = x
-			}
+			put(o, nil, func(d *templates.Delivery) (map[string]string, error) {
+				return renderGroupEnvDelivery(o, recs, d)
+			})
 			continue
 		}
 		if o.EffectiveScope() != templates.ScopeInstance {
@@ -177,28 +195,74 @@ func (h *Hub) optionEnvLocked(t *templates.Template, m *directory.Membership) (m
 					v = x
 				}
 			}
-			env, err := renderOptionEnv(o, v)
-			if err != nil {
-				return nil, fmt.Errorf("setting %s: %s", o.Key, redactValues(err.Error(), []string{secrets[o.Key]}))
-			}
-			for k, x := range env {
-				out[k] = x
-			}
+			put(o, []string{secrets[o.Key]}, func(d *templates.Delivery) (map[string]string, error) {
+				return renderEnvDelivery(o, v, d)
+			})
 			continue
 		}
 		v, ok := h.effectiveValue(t, o, s)
 		if !ok {
 			v = nil
 		}
-		env, err := renderOptionEnv(o, v)
-		if err != nil {
-			return nil, fmt.Errorf("setting %s: %w", o.Key, err)
-		}
-		for k, x := range env {
-			out[k] = x
+		put(o, nil, func(d *templates.Delivery) (map[string]string, error) {
+			return renderEnvDelivery(o, v, d)
+		})
+	}
+	h.setEnvProblems(t.ID, problems)
+	return out, nil
+}
+
+// envDeliveryNames are the variables env delivery d of o writes (an
+// indexed NAME_{n}: each NAME_<i>).
+func envDeliveryNames(o *templates.Option, d *templates.Delivery) []string {
+	prefix, ok := strings.CutSuffix(d.Env, templates.IndexSuffix)
+	if !ok {
+		return []string{d.Env}
+	}
+	var out []string
+	for _, n := range o.EnvNames() {
+		if strings.HasPrefix(n, prefix+"_") {
+			out = append(out, n)
 		}
 	}
-	return out, nil
+	return out
+}
+
+// setEnvProblems records instance id's option env values written empty
+// (optionEnvLocked), logging each new one once.
+func (h *Hub) setEnvProblems(id string, problems []string) {
+	sort.Strings(problems)
+	h.envProblemsMu.Lock()
+	defer h.envProblemsMu.Unlock()
+	prev := h.envProblems[id]
+	if strings.Join(prev, "\n") == strings.Join(problems, "\n") {
+		return
+	}
+	for _, p := range problems {
+		if !slices.Contains(prev, p) {
+			log.Printf("settings: %s: WARNING: %s (the value can't go in the .env)", id, p)
+		}
+	}
+	if h.envProblems == nil {
+		h.envProblems = map[string][]string{}
+	}
+	if len(problems) == 0 {
+		delete(h.envProblems, id)
+		return
+	}
+	h.envProblems[id] = problems
+}
+
+// envProblemsUnit is the env:values unit the panel shows while some
+// option env value is written empty (ok: there is one).
+func (h *Hub) envProblemsUnit(id string) (UnitResult, bool) {
+	h.envProblemsMu.Lock()
+	defer h.envProblemsMu.Unlock()
+	p := h.envProblems[id]
+	if len(p) == 0 {
+		return UnitResult{}, false
+	}
+	return UnitResult{Unit: unitEnvValues, Error: clipRunes(strings.Join(p, "; "), unitErrorMax)}, true
 }
 
 // envDeliveries are o's env deliveries: the declared ones, or the
@@ -225,43 +289,56 @@ func envDeliveries(o *templates.Option) []templates.Delivery {
 func renderOptionEnv(o *templates.Option, v any) (map[string]string, error) {
 	out := map[string]string{}
 	for _, d := range envDeliveries(o) {
-		if prefix, ok := strings.CutSuffix(d.Env, templates.IndexSuffix); ok {
-			var items []string
-			if v != nil {
-				var err error
-				if items, err = settings.RenderIndexed(o, v, &d); err != nil {
-					return nil, err
-				}
-			}
-			for _, n := range o.EnvNames() {
-				if !strings.HasPrefix(n, prefix+"_") {
-					continue
-				}
-				i, _ := strconv.Atoi(strings.TrimPrefix(n, prefix+"_"))
-				x := ""
-				if i >= 1 && i <= len(items) {
-					x = items[i-1]
-				}
-				if _, err := envQuote(x); err != nil {
-					return nil, fmt.Errorf("env %s: %w", n, err)
-				}
-				out[n] = x
-			}
-			continue
+		env, err := renderEnvDelivery(o, v, &d)
+		if err != nil {
+			return nil, err
 		}
-		x := ""
+		for k, x := range env {
+			out[k] = x
+		}
+	}
+	return out, nil
+}
+
+// renderEnvDelivery is renderOptionEnv for one env delivery d.
+func renderEnvDelivery(o *templates.Option, v any, d *templates.Delivery) (map[string]string, error) {
+	out := map[string]string{}
+	if prefix, ok := strings.CutSuffix(d.Env, templates.IndexSuffix); ok {
+		var items []string
 		if v != nil {
-			r, err := settings.RenderDelivery(o, v, &d)
-			if err != nil {
+			var err error
+			if items, err = settings.RenderIndexed(o, v, d); err != nil {
 				return nil, err
 			}
-			x = r.Text
 		}
-		if _, err := envQuote(x); err != nil {
-			return nil, fmt.Errorf("env %s: %w", d.Env, err)
+		for _, n := range o.EnvNames() {
+			if !strings.HasPrefix(n, prefix+"_") {
+				continue
+			}
+			i, _ := strconv.Atoi(strings.TrimPrefix(n, prefix+"_"))
+			x := ""
+			if i >= 1 && i <= len(items) {
+				x = items[i-1]
+			}
+			if _, err := envQuote(x); err != nil {
+				return nil, fmt.Errorf("env %s: %w", n, err)
+			}
+			out[n] = x
 		}
-		out[d.Env] = x
+		return out, nil
 	}
+	x := ""
+	if v != nil {
+		r, err := settings.RenderDelivery(o, v, d)
+		if err != nil {
+			return nil, err
+		}
+		x = r.Text
+	}
+	if _, err := envQuote(x); err != nil {
+		return nil, fmt.Errorf("env %s: %w", d.Env, err)
+	}
+	out[d.Env] = x
 	return out, nil
 }
 

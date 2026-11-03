@@ -72,6 +72,19 @@ func (h *Hub) composeUp(t *templates.Template) error {
 	if _, err := os.Stat(t.ComposePath()); err != nil {
 		return nil
 	}
+	live, err := h.prepareUp(t)
+	if err != nil {
+		return err
+	}
+	return h.startUp(live)
+}
+
+// prepareUp is everything composeUp does before compose runs: the Hub
+// override, the .env, the custom override check, the template's files
+// and the start's data files. restartLocked runs it before stopping
+// anything (an app is never left down by a refusal). Returns the live
+// view the up uses. Failures are *StatusError.
+func (h *Hub) prepareUp(t *templates.Template) (*templates.Template, error) {
 	members := h.groupSnapshot(t.ID)
 	h.mu.Lock()
 	live := t
@@ -85,21 +98,27 @@ func (h *Hub) composeUp(t *templates.Template) error {
 	}
 	h.mu.Unlock()
 	if err != nil {
-		return statusErr(500, "override generation failed: %v", err)
+		return nil, statusErr(500, "override generation failed: %v", err)
 	}
 	if err := h.checkUserOverride(live); err != nil {
-		return err
+		return nil, err
 	}
 	if err := h.syncTemplateFiles(live); err != nil {
-		return statusErr(500, "sync template files: %v", err)
+		return nil, statusErr(500, "sync template files: %v", err)
 	}
 	// The settings data files before the containers exist (P6): an init
 	// one-shot reads them at start, and Docker would create a missing
 	// bind source as a root-owned directory. Trigger start: never a
 	// reload or restart.
 	if err := h.deliverForStart(context.Background(), live.ID); err != nil {
-		return err
+		return nil, err
 	}
+	return live, nil
+}
+
+// startUp is composeUp after prepareUp: create, the image-label check,
+// up, the start hooks and the background claims.
+func (h *Hub) startUp(live *templates.Template) error {
 	// Create without starting, inspect the labels (image LABELs merge in),
 	// only then start: an image-label router is never live.
 	if err := h.compose.Create(context.Background(), h.project(live)); err != nil {
@@ -527,8 +546,17 @@ func (h *Hub) restartLocked(t *templates.Template) error {
 	if err := h.checkUserOverride(t); err != nil {
 		return err
 	}
+	// Then everything the up needs (override, .env, data files): a
+	// refusal there leaves the app running as it was.
+	if _, err := os.Stat(t.ComposePath()); err != nil {
+		return nil
+	}
+	live, err := h.prepareUp(t)
+	if err != nil {
+		return err
+	}
 	downErr := h.composeDown(t)
-	if err := h.composeUp(t); err != nil {
+	if err := h.startUp(live); err != nil {
 		if composeFailed(err) {
 			return fmt.Errorf("compose up failed: %w", err)
 		}

@@ -420,24 +420,33 @@ func (h *Hub) groupRecordsOut(t *templates.Template, o *templates.Option, recs [
 func renderGroupEnv(o *templates.Option, recs []settings.Row) (map[string]string, error) {
 	out := map[string]string{}
 	for _, d := range envDeliveries(o) {
-		items := make([]map[string]any, 0, len(recs))
-		for _, r := range recs {
-			rd, err := settings.Render(o, r.Value, settings.RenderOf(&d))
-			if err != nil {
-				return nil, fmt.Errorf("env %s: group %s: %w", d.Env, r.Group, err)
-			}
-			items = append(items, map[string]any{"group": r.Group, "value": rd.JSON})
-		}
-		b, err := json.Marshal(items)
+		env, err := renderGroupEnvDelivery(o, recs, &d)
 		if err != nil {
 			return nil, err
 		}
-		if _, err := envQuote(string(b)); err != nil {
-			return nil, fmt.Errorf("env %s: %w", d.Env, err)
-		}
-		out[d.Env] = string(b)
+		maps.Copy(out, env)
 	}
 	return out, nil
+}
+
+// renderGroupEnvDelivery is renderGroupEnv for one env delivery d.
+func renderGroupEnvDelivery(o *templates.Option, recs []settings.Row, d *templates.Delivery) (map[string]string, error) {
+	items := make([]map[string]any, 0, len(recs))
+	for _, r := range recs {
+		rd, err := settings.Render(o, r.Value, settings.RenderOf(d))
+		if err != nil {
+			return nil, fmt.Errorf("env %s: group %s: %w", d.Env, r.Group, err)
+		}
+		items = append(items, map[string]any{"group": r.Group, "value": rd.JSON})
+	}
+	b, err := json.Marshal(items)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := envQuote(string(b)); err != nil {
+		return nil, fmt.Errorf("env %s: %w", d.Env, err)
+	}
+	return map[string]string{d.Env: string(b)}, nil
 }
 
 // bindPlaceholderRows binds instance id's unbound placeholder rows and

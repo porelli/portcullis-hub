@@ -282,9 +282,13 @@ type Hub struct {
 	// committed change still owes, mirrored in delivered.json "owed"
 	// (Init re-queues it); owedSeq counts its updates. Under owedMu,
 	// which also serialises every delivered.json write.
-	owedMu  sync.Mutex
-	owed    map[string]string
-	owedSeq map[string]int64
+	owedMu sync.Mutex
+	// envProblems: per instance, the option env values written empty
+	// (optionEnvLocked; under envProblemsMu, a leaf lock).
+	envProblemsMu sync.Mutex
+	envProblems   map[string][]string
+	owed          map[string]string
+	owedSeq       map[string]int64
 
 	// bg tracks background lifecycle work (queued restarts, default-policy
 	// propagation) so callers can wait for it.

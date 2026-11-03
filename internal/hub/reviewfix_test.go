@@ -290,3 +290,63 @@ func TestFieldHeaderSuppressedTemplateMissing(t *testing.T) {
 		}
 	}
 }
+
+// H15: a restart prepares the up (override, .env, data files) before it
+// stops anything: a refusal there (a data file that needs people, never
+// delivered, the directory down) leaves the app running.
+func TestRestartRefusalLeavesAppRunning(t *testing.T) {
+	f, _, people := privFixture(t)
+	const id = "privapp"
+	if err := f.h.Enable(id); err != nil {
+		t.Fatal(err)
+	}
+	f.h.Wait()
+	if err := os.Remove(f.h.dataFilePath(id, "libs")); err != nil {
+		t.Fatal(err)
+	}
+	people.set(func(p *fakePeople) { p.err = errors.New("lldap down") })
+	before := len(f.runner.Calls())
+	err := f.h.RestartApp(id)
+	if statusOf(err) != 503 {
+		t.Fatalf("RestartApp = %v, want 503", err)
+	}
+	if calls := f.runner.Calls()[before:]; len(calls) != 0 {
+		t.Errorf("compose calls of a refused restart = %v, want none (the app left running)", calls)
+	}
+}
+
+// H15: a stored value one env delivery can't carry (a template update
+// added it) is written empty for that variable only, logged and shown
+// in the panel's deliveries; every other variable is written and the
+// app still starts.
+func TestOptionEnvFailsClosedPerVariable(t *testing.T) {
+	f, _, _ := privFixture(t)
+	const id = "privapp"
+	if _, err := f.h.SaveSettings(id, SettingsUpdate{Values: vals("motd", "hello", "banner", "world")}, "root"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.h.Enable(id); err != nil {
+		t.Fatal(err)
+	}
+	f.h.Wait()
+	const bad = "it's here"
+	f.h.mu.Lock()
+	s := f.h.st.Settings[id].Clone()
+	s.Values["motd"] = bad
+	f.h.st.Settings[id] = s
+	f.h.mu.Unlock()
+	if err := f.h.RestartApp(id); err != nil {
+		t.Fatalf("RestartApp = %v, want the app started", err)
+	}
+	env := composeReads(t, f.h.envPath(id))
+	if v, ok := env["PRIVAPP_MOTD"]; !ok || v != "" {
+		t.Errorf("PRIVAPP_MOTD = %q (present %v), want written empty", v, ok)
+	}
+	if env["PRIVAPP_BANNER"] != "world" {
+		t.Errorf("PRIVAPP_BANNER = %q, want world", env["PRIVAPP_BANNER"])
+	}
+	u, ok := f.h.DeliveryStatus(id).Units[unitEnvValues]
+	if !ok || !strings.Contains(u.Error, "motd") || strings.Contains(u.Error, bad) || strings.Contains(u.Error, "banner") {
+		t.Errorf("unit %s = %+v (%v), want an error naming motd only, no value", unitEnvValues, u, ok)
+	}
+}
