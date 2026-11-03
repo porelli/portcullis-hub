@@ -63,6 +63,9 @@ func ruleDirectory(cfg *Config, sn *snapshot) *rules.Directory {
 	for id, u := range sn.users {
 		p := rules.Person{User: id, Attrs: map[string][]string{}}
 		for _, f := range cfg.Fields {
+			if reservedAttr(f.Name) {
+				continue // a Hub setting attribute: never a rule input
+			}
 			vals, ok := u.Attributes[f.Name]
 			if !ok || len(vals) == 0 {
 				continue

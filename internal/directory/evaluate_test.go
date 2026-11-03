@@ -445,3 +445,27 @@ func waitMembers(t *testing.T, e *env, group string, want ...string) {
 	}
 	t.Fatalf("%s members = %v, want %v", group, e.ll.GroupMembers(group), want)
 }
+
+// H18: a ps_ field written into directory.yaml by hand (its LLDAP
+// attribute is a Hub setting attribute) never takes part in a rule.
+func TestEvaluateSkipsReservedField(t *testing.T) {
+	e := newEnv(t)
+	store := &directory.Store{Path: filepath.Join(t.TempDir(), "directory.yaml")}
+	e.svc.Store = store
+	attr := directory.ReservedAttrPrefix + "0123456789ab"
+	if err := e.svc.LLDAP.AddUserAttribute(ctx, attr, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.svc.LLDAP.SetUserAttributes(ctx, "alice", map[string][]string{attr: {"admin"}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _ := store.Load()
+	cfg.Fields = append(cfg.Fields, directory.Field{Name: "ps_0123456789ab", Label: "Claim", Kind: directory.FieldKindText})
+	if err := store.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	e.ll.AddGroup("claim_admins")
+	setRule(t, store, "claim_admins", `ps_0123456789ab = "admin"`)
+	evaluate(t, e, t0)
+	wantMembers(t, e, "claim_admins")
+}

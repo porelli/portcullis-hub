@@ -473,14 +473,17 @@ func (h *Hub) loadDelivered(id string) deliveredDoc {
 	return d
 }
 
-// recordUnits puts units into d's status and logs every failed one (T18:
-// a failure shown only in the panel cost a CI iteration). u.Error is
-// already redacted, then clipped (redactUnitError, storeError or a fixed
-// text), so it is logged as is; no lock is taken (callers may hold mu).
+// recordUnits puts units into d's status and logs a failed one when its
+// error changed since the last recorded status (T18: a failure shown
+// only in the panel cost a CI iteration; a run repeating it logs
+// nothing new). u.Error is already redacted, then clipped
+// (redactUnitError, storeError or a fixed text), so it is logged as is;
+// no lock is taken (callers may hold mu).
 func recordUnits(id string, d *deliveredDoc, units []UnitResult) {
 	for _, u := range units {
+		prev, had := d.Status[u.Unit]
 		d.Status[u.Unit] = u
-		if !u.OK && u.Skipped == "" {
+		if !u.OK && u.Skipped == "" && (!had || prev.Error != u.Error) {
 			log.Printf("settings: %s: delivery unit %s failed: %s", id, u.Unit, u.Error)
 		}
 	}

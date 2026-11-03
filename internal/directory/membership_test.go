@@ -192,7 +192,8 @@ func TestReservedAttrPrefix(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg, _ := store.Load()
-	cfg.Fields = append(cfg.Fields, directory.Field{Name: attr, Label: "Claim", Kind: directory.FieldKindText})
+	// The field whose LLDAP attribute is attr (ps_ maps to ps-).
+	cfg.Fields = append(cfg.Fields, directory.Field{Name: "ps_0123456789ab", Label: "Claim", Kind: directory.FieldKindText})
 	if err := store.Save(cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -329,4 +330,16 @@ type failUserDelete struct{ directory.Directory }
 
 func (failUserDelete) DeleteUser(context.Context, string) error {
 	return errors.New("simulated LLDAP failure")
+}
+
+// H18: LLDAP's LDAP-side aliases of its built-in attributes (v0.6.3
+// crates/ldap/src/core/utils.rs map_user_field) are refused as field
+// names: a field givenname would be read back as first_name over LDAP.
+func TestFieldNameLDAPAliasesRefused(t *testing.T) {
+	e := newEnv(t)
+	e.svc.Store = &directory.Store{Path: filepath.Join(t.TempDir(), "directory.yaml")}
+	for _, n := range []string{"givenname", "sn", "cn", "objectclass", "memberof", "ismemberof", "entryuuid", "entrydn", "dn", "distinguishedname", "uid", "id", "mail", "email", "displayname", "firstname", "lastname", "jpegphoto", "createtimestamp", "creationdate", "modifytimestamp", "modifydate", "modified_date", "pwdchangedtime", "passwordmodifydate", "password_modified_date"} {
+		err := e.svc.CreateField(ctx, asRoot, directory.Field{Name: n, Label: "X", Kind: directory.FieldKindText})
+		wantStatus(t, "CreateField "+n, err, 400)
+	}
 }

@@ -13,10 +13,21 @@ import (
 	"github.com/portcullis/hub/internal/rules"
 )
 
-// LLDAP built-in attributes that can't be used as field names.
+// LLDAP built-in attributes that can't be used as field names, with the
+// names LLDAP's LDAP side reads as them (v0.6.3,
+// crates/ldap/src/core/utils.rs map_user_field): a field named givenname
+// would be served over LDAP as first_name, entryuuid as the uuid, ….
 var lldapBuiltins = map[string]bool{
 	"mail": true, "uid": true, "display_name": true, "first_name": true,
 	"last_name": true, "avatar": true, "creation_date": true, "uuid": true, "user_id": true,
+	// LDAP-side aliases.
+	"memberof": true, "ismemberof": true, "objectclass": true, "dn": true,
+	"distinguishedname": true, "entrydn": true, "id": true, "email": true,
+	"cn": true, "displayname": true, "givenname": true, "firstname": true,
+	"sn": true, "lastname": true, "jpegphoto": true, "creationdate": true,
+	"createtimestamp": true, "modifytimestamp": true, "modifydate": true,
+	"modified_date": true, "pwdchangedtime": true, "passwordmodifydate": true,
+	"password_modified_date": true, "entryuuid": true,
 }
 
 // fieldNameRe matches valid field names (contract §4.1): lowercase

@@ -299,7 +299,7 @@ func emailTaken(sn *snapshot, email, self string) string {
 func referencesTo(cfg *Config, sn *snapshot, user string) []string {
 	person := map[string]bool{}
 	for _, f := range cfg.Fields {
-		if f.Kind == FieldKindPerson {
+		if f.Kind == FieldKindPerson && !reservedAttr(f.Name) {
 			person[f.Name] = true
 		}
 	}

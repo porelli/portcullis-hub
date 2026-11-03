@@ -806,3 +806,20 @@ func TestSetEnvVarsUpdatesDuplicates(t *testing.T) {
 		t.Errorf(".env = %q", b)
 	}
 }
+
+// H18: a failed unit is logged when its error changes, not on every run.
+func TestFailedUnitLoggedOnChange(t *testing.T) {
+	buf := captureLog(t)
+	d := deliveredDoc{Hashes: map[string]string{}, Status: map[string]UnitResult{}}
+	fail := func(msg string) { recordUnits("app", &d, []UnitResult{{Unit: "file:people", Error: msg}}) }
+	fail("disk full")
+	fail("disk full")
+	fail("permission denied")
+	out := buf.String()
+	if n := strings.Count(out, "disk full"); n != 1 {
+		t.Errorf("logged %d times, want once:\n%s", n, out)
+	}
+	if !strings.Contains(out, "permission denied") {
+		t.Errorf("the changed error is not logged:\n%s", out)
+	}
+}
