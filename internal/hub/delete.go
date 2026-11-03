@@ -204,7 +204,14 @@ func (h *Hub) deleteSteps(id, actor string, res *DeleteResult) error {
 
 	// 4. Keycloak: access role and flow, setting claims (with their LLDAP
 	// attributes), clients, forward-auth callbacks.
-	if err := h.removeInstanceClaims(ctx, h.idp, id, clients, h.instanceClaimAttrs(tg.view, id), res); err != nil {
+	// Under the delivery lock: no delivery or background claims run is
+	// mid-write meanwhile (lockApp → deliverLock, as composeUp; no
+	// deliverLock holder ever waits for lockApp).
+	dl := h.deliverLock(id)
+	dl.Lock()
+	err := h.removeInstanceClaims(ctx, h.idp, id, clients, h.instanceClaimAttrs(tg.view, id), res)
+	dl.Unlock()
+	if err != nil {
 		return fmt.Errorf("setting claims: %w", err)
 	}
 	if h.idp == nil {

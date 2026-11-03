@@ -55,7 +55,20 @@ func claimFixtureWith(t *testing.T, edit func(string) string) (*fixture, *fakePe
 	simulateCompose(f, 0)
 	clk := &fakeClock{}
 	f.h.afterFunc, f.h.sleep = clk.afterFunc, clk.sleep
+	f.clk = clk
 	return f, people, store
+}
+
+// settle fires the armed timers (the deliveries queued while the
+// instance was busy) until none is left, then waits.
+func settle(f *fixture) {
+	for i := 0; i < 5; i++ {
+		f.h.Wait()
+		if f.clk.fire() == 0 {
+			break
+		}
+	}
+	f.h.Wait()
 }
 
 // claimEnable enables immich (binding the {{ADMIN_GROUP}} row) and
@@ -65,6 +78,9 @@ func claimEnable(t *testing.T, f *fixture, id string) {
 	if _, err := f.h.EnableAs(id, "root"); err != nil {
 		t.Fatal(err)
 	}
+	// The enable's claims: the background run found it busy and queued
+	// a delivery (busyRetry), which runs once its timer fires.
+	settle(f)
 	if _, err := f.h.SaveSettings(id, SettingsUpdate{Person: map[string]PersonChange{
 		"storage_quota": {Default: raw("100GiB"), Rows: rows("office_milan", "10GiB")},
 	}}, "admin"); err != nil {
@@ -442,8 +458,9 @@ func TestClaimNewAttributeNoSweep(t *testing.T) {
 			t.Errorf("a removal for a new attribute: %q", c)
 		}
 	}
-	// One write per population member: nothing else.
-	if n := len(store.calls()); n != 4 {
+	// The enable's delivery wrote the four members (default config), the
+	// save alice's new quota: nothing else.
+	if n := len(store.calls()); n != 5 {
 		t.Errorf("writes = %q", store.calls())
 	}
 	// Recorded as soon as they exist (known, so never swept again).
@@ -501,8 +518,8 @@ func TestStartDoesNotWaitOnClaims(t *testing.T) {
 		t.Fatal("the enable waited for the claims")
 	}
 	close(gate)
-	f.h.Wait()
-	deliverNow(t, f, claimID, TriggerMembership)
+	// Only the timers: the delivery queued by the background run.
+	settle(f)
 	if v, _ := store.value("bob", SettingAttr(claimID, "role")); v != "admin" {
 		t.Errorf("bob's role = %q", v)
 	}
@@ -585,17 +602,14 @@ func TestDeleteWhileClaimsWaitLeavesNothing(t *testing.T) {
 		_, err := f.h.DeleteInstance(claimID, claimID, "root")
 		delDone <- err
 	}()
-	// Step 4 done (the attributes are gone); the delete now waits on the
-	// delivery lock too (forgetDeliveries).
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		store.mu.Lock()
-		n := len(store.deleted)
-		store.mu.Unlock()
-		if n == 2 || time.Now().After(deadline) {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
+	// Step 4 (the claims cleanup) takes the delivery lock too: the
+	// delete waits for any run mid-write.
+	time.Sleep(200 * time.Millisecond)
+	store.mu.Lock()
+	n := len(store.deleted)
+	store.mu.Unlock()
+	if n != 0 {
+		t.Errorf("step 4 ran while a delivery held the lock (%d deleted)", n)
 	}
 	ensures := len(f.idp.claimAllCalls())
 	l.Unlock()
@@ -783,5 +797,68 @@ func TestClaimClientlessErrorFails(t *testing.T) {
 	rep = deliverNow(t, f, claimID, TriggerRetry)
 	if u, _ := unit(rep, "claim:"+SettingAttr(claimID, "role")); !u.OK {
 		t.Errorf("conflict on a claim-less client: unit = %+v", u)
+	}
+}
+
+// After a same-instance restore the claims follow the restored settings,
+// driven only by the timers (no stale value stays behind the mappers).
+func TestClaimsAfterRestore(t *testing.T) {
+	f, _, store := claimFixture(t)
+	claimEnable(t, f, claimID)
+	quota := SettingAttr(claimID, "storage_quota")
+	if v, _ := store.value("alice", quota); v != "10" {
+		t.Fatalf("alice = %q", v)
+	}
+	entry, err := f.h.BackupInstance(claimID, "root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.h.Wait()
+	settle(f)
+	if _, err := f.h.SaveSettings(claimID, SettingsUpdate{Person: map[string]PersonChange{
+		"storage_quota": {Default: raw("100GiB"), Rows: rows("office_milan", "20GiB")},
+	}}, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	f.h.Wait()
+	if v, _ := store.value("alice", quota); v != "20" {
+		t.Fatalf("alice after the save = %q", v)
+	}
+	if _, err := f.h.RestoreInstance(claimID, entry.Archive, "root"); err != nil {
+		t.Fatal(err)
+	}
+	settle(f)
+	if v, _ := store.value("alice", quota); v != "10" {
+		t.Errorf("alice after the restore = %q, want the restored 10", v)
+	}
+}
+
+// LLDAP unreadable: the mappers of claims whose desired values changed
+// since the last successful record go; unchanged ones stay.
+func TestClaimSchemaFailureDropsChangedMappers(t *testing.T) {
+	f, people, store := claimFixture(t)
+	claimEnable(t, f, claimID)
+	role, quota := SettingAttr(claimID, "role"), SettingAttr(claimID, "storage_quota")
+	people.addGroup("office_milan", "carol") // carol's quota changes
+	store.mu.Lock()
+	store.failSchema = true
+	store.mu.Unlock()
+	rep := deliverNow(t, f, claimID, TriggerMembership)
+	if u, _ := unit(rep, "claim:"+quota); u.OK {
+		t.Errorf("unit = %+v", u)
+	}
+	got := f.idp.settingClaims("immich")
+	if len(got) != 1 || got[0].Attr != role {
+		t.Errorf("claims with LLDAP unreadable = %+v, want role only", got)
+	}
+	store.mu.Lock()
+	store.failSchema = false
+	store.mu.Unlock()
+	deliverNow(t, f, claimID, TriggerMembership)
+	if n := len(f.idp.settingClaims("immich")); n != 2 {
+		t.Errorf("after recovery: %+v", f.idp.settingClaims("immich"))
+	}
+	if v, _ := store.value("carol", quota); v != "10" {
+		t.Errorf("carol = %q", v)
 	}
 }

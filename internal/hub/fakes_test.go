@@ -444,6 +444,8 @@ type fakeAttrStore struct {
 	err      error
 	lists    int  // ListUsers calls
 	failAdd  bool // AddHiddenUserAttribute fails
+	// failSchema: UserAttributes fails (LLDAP GraphQL down).
+	failSchema bool
 }
 
 func newFakeAttrStore() *fakeAttrStore {
@@ -455,6 +457,9 @@ func (s *fakeAttrStore) UserAttributes(ctx context.Context) ([]lldap.Attribute, 
 	defer s.mu.Unlock()
 	if s.err != nil {
 		return nil, s.err
+	}
+	if s.failSchema {
+		return nil, fmt.Errorf("lldap graphql down")
 	}
 	var out []lldap.Attribute
 	for _, a := range s.schema {
@@ -704,6 +709,7 @@ ports:
 const otherCompose = "services:\n  web:\n    image: x\n    labels:\n      traefik.http.routers.other.rule: Host(`other.${PORTCULLIS_DOMAIN}`)\n  worker:\n    image: y\n"
 
 type fixture struct {
+	clk     *fakeClock // set by fixtures that install a fake clock
 	h       *Hub
 	runner  *fakeRunner
 	engine  *fakeEngine

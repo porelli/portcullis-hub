@@ -330,6 +330,7 @@ func (h *Hub) runClaims(ctx context.Context, step claimStep) (units []UnitResult
 	}
 	attrs, err := store.UserAttributes(ctx)
 	if err != nil {
+		h.dropChangedClaims(ctx, t, plan, idp, d, isCurrent)
 		return failAll(h.storeError(t.ID, "LLDAP user attributes", err)), false
 	}
 	schema := make(map[string]lldap.Attribute, len(attrs))
@@ -367,6 +368,9 @@ func (h *Hub) runClaims(ctx context.Context, step claimStep) (units []UnitResult
 		default:
 			if o.err != nil {
 				break
+			}
+			if !isCurrent() {
+				return collect(), true
 			}
 			if err := store.AddHiddenUserAttribute(ctx, o.attr); err != nil {
 				u.Error = h.storeError(t.ID, fmt.Sprintf("creating LLDAP attribute %s of setting %s", o.attr, o.key), err)
@@ -531,6 +535,48 @@ func (h *Hub) runClaims(ctx context.Context, step claimStep) (units []UnitResult
 	return fin(), false
 }
 
+// dropChangedClaims fails closed when LLDAP can't be read (the values
+// can't be reconciled): every client keeps the mappers only of claims
+// whose desired values equal the last successful record; the others —
+// an admin role revoked, a quota lowered — go until a run writes them.
+// The directory unavailable (plan.skip) keeps the last delivery, as
+// documented. Errors are logged (the units already fail).
+func (h *Hub) dropChangedClaims(ctx context.Context, t *templates.Template, plan claimPlan, idp IdP, d *deliveredDoc, isCurrent func() bool) {
+	if plan.skip != "" || len(plan.outs) == 0 {
+		return
+	}
+	unchanged := map[string]bool{}
+	for _, o := range plan.outs {
+		rec := d.Claims[claimUnit(o.attr)]
+		ok := o.err == nil && rec != nil && len(rec) == len(o.values)
+		for u, v := range o.values {
+			ok = ok && rec[u] == claimHash(v)
+		}
+		unchanged[o.attr] = ok
+	}
+	cids := append([]string(nil), plan.all...)
+	for cid := range plan.clients {
+		if !slices.Contains(cids, cid) {
+			cids = append(cids, cid)
+		}
+	}
+	sort.Strings(cids)
+	for _, cid := range cids {
+		var claims []keycloak.SettingClaim
+		for _, c := range plan.clients[cid] {
+			if unchanged[c.Attr] {
+				claims = append(claims, c)
+			}
+		}
+		if !isCurrent() {
+			return
+		}
+		if err := idp.EnsureSettingClaims(ctx, cid, t.ID, claims); err != nil {
+			log.Printf("settings: %s: LLDAP unreadable: dropping the changed claims' mappers on Keycloak client %s failed: %v", t.ID, cid, err)
+		}
+	}
+}
+
 // claimUnits finishes the units: counts, unrenderable values, failed
 // writes, unchanged.
 func (h *Hub) claimUnits(plan claimPlan, order []string, res map[string]*UnitResult, written, cleared map[string]int, failed map[string][]string) []UnitResult {
@@ -692,17 +738,22 @@ func (h *Hub) runClaimsOnly(ctx context.Context, id string) error {
 	}
 	h.mu.RLock()
 	live := h.findLocked(id)
-	if live == nil || !h.st.IsEnabled(id) || h.pendingLocked(id) != nil {
-		// Disabled, deleting (its claims are being removed) or restoring:
-		// nothing is written; whatever comes next delivers.
+	if live == nil {
 		h.mu.RUnlock()
 		return nil
 	}
-	if h.appBusy(id) {
-		// A lifecycle or async op holds the instance (P20): a normal
-		// delivery after it, never a write under it.
+	if h.pendingLocked(id) != nil || h.appBusy(id) {
+		// The order of deliverOnce (P20): an operation holds the
+		// instance — the enable or restore that just started it (still
+		// before its commit), a delete — so a normal delivery runs after
+		// busyRetry, never a write under it. It delivers once the enable
+		// or restore has committed, and nothing once a delete is done.
 		h.mu.RUnlock()
 		h.queueDelivery(id, TriggerMembership, settings.EffectNone, busyRetry)
+		return nil
+	}
+	if !h.st.IsEnabled(id) {
+		h.mu.RUnlock()
 		return nil
 	}
 	tmpl := *live
