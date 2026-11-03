@@ -264,6 +264,21 @@ func claimRecordUUID(rec string) (string, bool) {
 	return uuid, ok
 }
 
+// recreated: record rec was written for another account than the one
+// with uuid now — both uuids known and different (an empty one, LLDAP
+// answering without it, proves nothing: the H10 rule).
+func recreated(rec, uuid string) bool {
+	was, ok := claimRecordUUID(rec)
+	return ok && was != "" && uuid != "" && was != uuid
+}
+
+// claimMatches: record rec holds value v for the account with uuid (an
+// unknown uuid on either side matches by the value alone).
+func claimMatches(rec, uuid, v string) bool {
+	_, hash, ok := strings.Cut(rec, ":")
+	return ok && hash == claimHash(v) && !recreated(rec, uuid)
+}
+
 // claimPending marks a user whose value is unknown — a failed write, or a
 // holder found by the holders query: written (or cleared) again.
 const claimPending = "pending"
@@ -441,7 +456,7 @@ func (h *Hub) runClaims(ctx context.Context, step claimStep) (units []UnitResult
 		}
 		rec := d.Claims[claimUnit(o.attr)]
 		for u, v := range o.values {
-			if rec[u] != claimRecord(plan.uuids[u], v) {
+			if !claimMatches(rec[u], plan.uuids[u], v) {
 				ch(u).set[o.attr] = []string{v}
 			}
 		}
@@ -449,7 +464,7 @@ func (h *Hub) runClaims(ctx context.Context, step claimStep) (units []UnitResult
 			if _, keep := o.values[u]; keep {
 				continue
 			}
-			if uuid, ok := claimRecordUUID(r); !plan.users[u] || ok && uuid != plan.uuids[u] {
+			if !plan.users[u] || recreated(r, plan.uuids[u]) {
 				// Gone from LLDAP, or re-created: its attributes went
 				// with the old account.
 				delete(rec, u)
@@ -568,7 +583,7 @@ func (h *Hub) dropChangedClaims(ctx context.Context, t *templates.Template, plan
 		rec := d.Claims[claimUnit(o.attr)]
 		ok := o.err == nil && rec != nil && len(rec) == len(o.values)
 		for u, v := range o.values {
-			ok = ok && rec[u] == claimRecord(plan.uuids[u], v)
+			ok = ok && claimMatches(rec[u], plan.uuids[u], v)
 		}
 		unchanged[o.attr] = ok
 	}

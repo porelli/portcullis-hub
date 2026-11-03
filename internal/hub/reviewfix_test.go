@@ -902,3 +902,32 @@ func TestExpertEnvRoundTripWithSecretValues(t *testing.T) {
 		t.Errorf("after the round trip MY_COPY=%q PORTCULLIS_ACCESS_GROUP=%q", got["MY_COPY"], got["PORTCULLIS_ACCESS_GROUP"])
 	}
 }
+
+// Residual I2: a person leaving the population while LLDAP answers
+// without uuids still has the claim attribute cleared (an empty uuid
+// never means "re-created").
+func TestClaimClearedWithoutUUID(t *testing.T) {
+	f, people, store := claimFixture(t)
+	quota := SettingAttr(claimID, "storage_quota")
+	claimEnable(t, f, claimID)
+	deliverNow(t, f, claimID, TriggerRetry)
+	if got := store.values["dave"][quota]; len(got) != 1 {
+		t.Fatalf("dave's quota = %v", got)
+	}
+	people.set(func(p *fakePeople) {
+		if p.uuids == nil {
+			p.uuids = map[string]string{}
+		}
+		for _, u := range []string{"alice", "bob", "carol", "dave", "erin"} {
+			p.uuids[u] = ""
+		}
+	})
+	people.removeMember("users_immich", "dave")
+	deliverNow(t, f, claimID, TriggerMembership)
+	store.mu.Lock()
+	got := store.values["dave"][quota]
+	store.mu.Unlock()
+	if len(got) != 0 {
+		t.Errorf("dave's quota = %v after leaving, want cleared", got)
+	}
+}
