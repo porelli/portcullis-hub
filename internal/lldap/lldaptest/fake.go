@@ -279,6 +279,8 @@ func (s *Server) graphql(caller, q string, vars map[string]interface{}) (interfa
 			attrs = append(attrs, map[string]interface{}{
 				"name":        name,
 				"isList":      schema.IsList,
+				"isVisible":   schema.IsVisible,
+				"isEditable":  schema.IsEditable,
 				"isHardcoded": false,
 			})
 		}

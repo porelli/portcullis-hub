@@ -312,6 +312,10 @@ func (c *Client) graphql(ctx context.Context, query string, vars map[string]inte
 type Attribute struct {
 	Name   string
 	IsList bool
+	// IsVisible / IsEditable: shown to users, editable by them (a
+	// Hub-owned setting attribute is neither: AddHiddenUserAttribute).
+	IsVisible  bool
+	IsEditable bool
 }
 
 // GroupRef is a group as listed on a user.
@@ -555,19 +559,21 @@ func (c *Client) UserAttributes(ctx context.Context) ([]Attribute, error) {
 				Attributes []struct {
 					Name        string `json:"name"`
 					IsList      bool   `json:"isList"`
+					IsVisible   bool   `json:"isVisible"`
+					IsEditable  bool   `json:"isEditable"`
 					IsHardcoded bool   `json:"isHardcoded"`
 				} `json:"attributes"`
 			} `json:"userSchema"`
 		} `json:"schema"`
 	}
-	err := c.graphql(ctx, `query { schema { userSchema { attributes { name isList isHardcoded } } } }`, nil, &out)
+	err := c.graphql(ctx, `query { schema { userSchema { attributes { name isList isVisible isEditable isHardcoded } } } }`, nil, &out)
 	if err != nil {
 		return nil, err
 	}
 	var attrs []Attribute
 	for _, a := range out.Schema.UserSchema.Attributes {
 		if !a.IsHardcoded {
-			attrs = append(attrs, Attribute{Name: a.Name, IsList: a.IsList})
+			attrs = append(attrs, Attribute{Name: a.Name, IsList: a.IsList, IsVisible: a.IsVisible, IsEditable: a.IsEditable})
 		}
 	}
 	return attrs, nil
@@ -580,6 +586,20 @@ func (c *Client) AddUserAttribute(ctx context.Context, name string, isList bool)
 		"attributeType": "STRING",
 		"isList":        isList,
 		"isVisible":     true,
+		"isEditable":    false,
+	}
+	return c.graphql(ctx, `mutation($name: String!, $attributeType: AttributeType!, $isList: Boolean!, $isVisible: Boolean!, $isEditable: Boolean!) { addUserAttribute(name: $name, attributeType: $attributeType, isList: $isList, isVisible: $isVisible, isEditable: $isEditable) { ok } }`, vars, nil)
+}
+
+// AddHiddenUserAttribute adds a Hub-owned user attribute (a setting's
+// claim value, contract §13.6): STRING, single-valued, not visible and
+// not editable — users never see or change it.
+func (c *Client) AddHiddenUserAttribute(ctx context.Context, name string) error {
+	vars := map[string]interface{}{
+		"name":          name,
+		"attributeType": "STRING",
+		"isList":        false,
+		"isVisible":     false,
 		"isEditable":    false,
 	}
 	return c.graphql(ctx, `mutation($name: String!, $attributeType: AttributeType!, $isList: Boolean!, $isVisible: Boolean!, $isEditable: Boolean!) { addUserAttribute(name: $name, attributeType: $attributeType, isList: $isList, isVisible: $isVisible, isEditable: $isEditable) { ok } }`, vars, nil)

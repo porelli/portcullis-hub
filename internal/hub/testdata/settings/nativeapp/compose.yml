@@ -1,0 +1,8 @@
+services:
+  app:
+    image: nativeapp
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.nativeapp.rule: Host(`${PORTCULLIS_HOST_NATIVEAPP:-nativeapp.portcullis.local}`)
+      traefik.http.routers.nativeapp.entrypoints: websecure
+      traefik.http.services.nativeapp.loadbalancer.server.port: "8080"

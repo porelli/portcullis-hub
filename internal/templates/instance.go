@@ -92,6 +92,19 @@ func (t *Template) rawManifest() *Manifest {
 	return &t.Manifest
 }
 
+// InstanceClientID is this instance's id of the template's Keycloak
+// client clientID (as keycloak_clients[] declares it; "" = none).
+func (t *Template) InstanceClientID(clientID string) string {
+	raw := t.rawManifest()
+	n := t.NamesFor(t.ID)
+	for i, c := range raw.Clients {
+		if c.ClientID == clientID && i < len(n.Clients) {
+			return n.Clients[i]
+		}
+	}
+	return ""
+}
+
 // InstanceNames are the names an instance derives from its id (§11.2).
 type InstanceNames struct {
 	Project     string

@@ -345,6 +345,186 @@ type fakeIdP struct {
 	accessErr   error
 	deleted     []string // "<client>:<owner>"
 	deleteErr   error
+	// Setting claims (EnsureSettingClaims / RemoveSettingClaims): the
+	// current claim set per client, the removals ("<client>:<owner>:<attr,…>"),
+	// claimOwners (client → owner tag; unset = the owner asked for) and
+	// claimErr (both fail with it).
+	claims      map[string][]keycloak.SettingClaim
+	claimRemove []string
+	claimOwners map[string]string
+	claimErr    error
+}
+
+func (f *fakeIdP) EnsureSettingClaims(ctx context.Context, clientID, owner string, claims []keycloak.SettingClaim) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.claimErr != nil {
+		return f.claimErr
+	}
+	if o, ok := f.claimOwners[clientID]; ok && o != owner {
+		return &keycloak.ConflictError{ClientID: clientID, TemplateID: owner, Owner: o}
+	}
+	if f.claims == nil {
+		f.claims = map[string][]keycloak.SettingClaim{}
+	}
+	f.claims[clientID] = append([]keycloak.SettingClaim(nil), claims...)
+	return nil
+}
+
+func (f *fakeIdP) RemoveSettingClaims(ctx context.Context, clientID, owner string, attrs []string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.claimErr != nil {
+		return f.claimErr
+	}
+	f.claimRemove = append(f.claimRemove, clientID+":"+owner+":"+strings.Join(attrs, ","))
+	if o, ok := f.claimOwners[clientID]; ok && o != owner {
+		return &keycloak.ConflictError{ClientID: clientID, TemplateID: owner, Owner: o}
+	}
+	drop := map[string]bool{}
+	for _, a := range attrs {
+		drop[a] = true
+	}
+	var kept []keycloak.SettingClaim
+	for _, c := range f.claims[clientID] {
+		if !drop[c.Attr] {
+			kept = append(kept, c)
+		}
+	}
+	if f.claims != nil {
+		f.claims[clientID] = kept
+	}
+	return nil
+}
+
+// settingClaims is client's current claim set.
+func (f *fakeIdP) settingClaims(client string) []keycloak.SettingClaim {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]keycloak.SettingClaim(nil), f.claims[client]...)
+}
+
+func (f *fakeIdP) claimRemovals() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.claimRemove...)
+}
+
+// fakeAttrStore is LLDAP's user attribute schema and values (AttrStore).
+type fakeAttrStore struct {
+	mu      sync.Mutex
+	schema  map[string]lldap.Attribute
+	values  map[string]map[string][]string // user → attr → values
+	sets    []string                       // SetUserAttributes calls: "<user> +a=v -b"
+	deleted []string
+	// failUser: SetUserAttributes for that user fails; err: every call.
+	failUser string
+	err      error
+}
+
+func newFakeAttrStore() *fakeAttrStore {
+	return &fakeAttrStore{schema: map[string]lldap.Attribute{}, values: map[string]map[string][]string{}}
+}
+
+func (s *fakeAttrStore) UserAttributes(ctx context.Context) ([]lldap.Attribute, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.err != nil {
+		return nil, s.err
+	}
+	var out []lldap.Attribute
+	for _, a := range s.schema {
+		out = append(out, a)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+func (s *fakeAttrStore) AddHiddenUserAttribute(ctx context.Context, name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.err != nil {
+		return s.err
+	}
+	if _, ok := s.schema[name]; ok {
+		return fmt.Errorf("attribute %s already exists", name)
+	}
+	s.schema[name] = lldap.Attribute{Name: name}
+	return nil
+}
+
+func (s *fakeAttrStore) DeleteUserAttribute(ctx context.Context, name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.err != nil {
+		return s.err
+	}
+	if _, ok := s.schema[name]; !ok {
+		return fmt.Errorf("no attribute %s", name)
+	}
+	delete(s.schema, name)
+	for _, vs := range s.values {
+		delete(vs, name)
+	}
+	s.deleted = append(s.deleted, name)
+	return nil
+}
+
+func (s *fakeAttrStore) SetUserAttributes(ctx context.Context, user string, set map[string][]string, remove []string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.err != nil {
+		return s.err
+	}
+	if user == s.failUser {
+		return fmt.Errorf("no such user %s", user)
+	}
+	call := user
+	for _, a := range remove {
+		if _, ok := s.schema[a]; !ok {
+			return fmt.Errorf("attribute %s must be declared first", a)
+		}
+		delete(s.values[user], a)
+		call += " -" + a
+	}
+	keys := make([]string, 0, len(set))
+	for a := range set {
+		keys = append(keys, a)
+	}
+	sort.Strings(keys)
+	for _, a := range keys {
+		if _, ok := s.schema[a]; !ok {
+			return fmt.Errorf("attribute %s must be declared first", a)
+		}
+		if s.values[user] == nil {
+			s.values[user] = map[string][]string{}
+		}
+		s.values[user][a] = append([]string(nil), set[a]...)
+		call += " +" + a + "=" + strings.Join(set[a], ",")
+	}
+	s.sets = append(s.sets, call)
+	return nil
+}
+
+// value is user's value of attr ("" and false: none).
+func (s *fakeAttrStore) value(user, attr string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v, ok := s.values[user][attr]
+	return strings.Join(v, ","), ok
+}
+
+func (s *fakeAttrStore) calls() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.sets...)
+}
+
+func (s *fakeAttrStore) has(attr string) (lldap.Attribute, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	a, ok := s.schema[attr]
+	return a, ok
 }
 
 func (f *fakeIdP) DeleteClient(ctx context.Context, clientID, owner string) error {

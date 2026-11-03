@@ -4,7 +4,7 @@
 // the user if Importable says LDAP has them. It also keeps components (one
 // LDAP provider plus its mappers), client scopes with protocol mappers, and
 // clients (create, update, redirect URIs, web origins) with their default
-// client scopes.
+// client scopes and their own protocol mappers.
 package kctest
 
 import (
@@ -94,6 +94,9 @@ type Client struct {
 	DirectAccessGrantsEnabled          *bool             `json:"directAccessGrantsEnabled,omitempty"`
 	ImplicitFlowEnabled                *bool             `json:"implicitFlowEnabled,omitempty"`
 	ServiceAccountsEnabled             *bool             `json:"serviceAccountsEnabled,omitempty"`
+	// ProtocolMappers: the client's own protocol mappers (a client PUT
+	// keeps them; the protocol-mappers sub-resource changes them).
+	ProtocolMappers []ProtocolMapper `json:"protocolMappers,omitempty"`
 }
 
 // Server is the fake.
@@ -233,6 +236,39 @@ func (s *Server) AddClient(clientID string, attrs map[string]string, scopes ...s
 	return id
 }
 
+// AddClientMapper adds a protocol mapper to client id (config may be
+// nil) and returns its id.
+func (s *Server) AddClientMapper(id, name, mapperType string, config map[string]string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c := s.Clients[id]
+	if c == nil {
+		return ""
+	}
+	if config == nil {
+		config = map[string]string{}
+	}
+	mid := s.newID("cpm")
+	c.ProtocolMappers = append(c.ProtocolMappers, ProtocolMapper{ID: mid, Name: name, Protocol: "openid-connect", ProtocolMapper: mapperType, Config: config})
+	return mid
+}
+
+// ClientMappers returns copies of client id's protocol mappers, by name
+// (nil: no such client).
+func (s *Server) ClientMappers(id string) map[string]ProtocolMapper {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c := s.Clients[id]
+	if c == nil {
+		return nil
+	}
+	out := map[string]ProtocolMapper{}
+	for _, m := range c.ProtocolMappers {
+		out[m.Name] = m
+	}
+	return out
+}
+
 // ClientByClientID returns a copy of the client with that clientId (nil:
 // none).
 func (s *Server) ClientByClientID(clientID string) *Client {
@@ -243,6 +279,7 @@ func (s *Server) ClientByClientID(clientID string) *Client {
 			cp := *c
 			cp.RedirectURIs = append([]string(nil), c.RedirectURIs...)
 			cp.WebOrigins = append([]string(nil), c.WebOrigins...)
+			cp.ProtocolMappers = append([]ProtocolMapper(nil), c.ProtocolMappers...)
 			return &cp
 		}
 	}
@@ -694,6 +731,9 @@ func (s *Server) serveClients(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		c.ID, c.DefaultClientScopes, c.OptionalClientScopes = s.newID("client"), scopes, nil
+		for i := range c.ProtocolMappers {
+			c.ProtocolMappers[i].ID = s.newID("cpm")
+		}
 		if c.Attributes == nil {
 			c.Attributes = map[string]string{}
 		}
@@ -719,6 +759,7 @@ func (s *Server) serveClients(w http.ResponseWriter, r *http.Request) {
 		}
 		// A client PUT ignores the scope lists (sub-resources do those).
 		c.ID, c.DefaultClientScopes, c.OptionalClientScopes = old.ID, old.DefaultClientScopes, old.OptionalClientScopes
+		c.ProtocolMappers = old.ProtocolMappers
 		// Flow binding overrides merge; "" removes one.
 		merged := map[string]string{}
 		for k, v := range old.AuthenticationFlowBindingOverrides {
@@ -741,6 +782,8 @@ func (s *Server) serveClients(w http.ResponseWriter, r *http.Request) {
 		}
 		s.Clients[c.ID] = &c
 		w.WriteHeader(204)
+	case len(parts) >= 3 && parts[1] == "protocol-mappers" && parts[2] == "models":
+		s.serveClientMappers(w, r, s.Clients[parts[0]], parts[3:])
 	case len(parts) == 3 && parts[1] == "default-client-scopes" && r.Method == "PUT":
 		c, sc := s.Clients[parts[0]], s.Scopes[parts[2]]
 		if c == nil || sc == nil {
@@ -775,6 +818,55 @@ func (s *Server) serveClients(w http.ResponseWriter, r *http.Request) {
 		}
 		c.OptionalClientScopes = kept
 		w.WriteHeader(204)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+// serveClientMappers is /clients/{id}/protocol-mappers/models[/{mapper}]
+// (GET, POST; PUT, DELETE), like Keycloak: a duplicate name is a 409.
+func (s *Server) serveClientMappers(w http.ResponseWriter, r *http.Request, c *Client, rest []string) {
+	if c == nil {
+		http.NotFound(w, r)
+		return
+	}
+	switch {
+	case len(rest) == 0 && r.Method == "GET":
+		json.NewEncoder(w).Encode(append([]ProtocolMapper{}, c.ProtocolMappers...))
+	case len(rest) == 0 && r.Method == "POST":
+		var m ProtocolMapper
+		if err := json.NewDecoder(r.Body).Decode(&m); err != nil || m.Name == "" {
+			w.WriteHeader(400)
+			return
+		}
+		for _, o := range c.ProtocolMappers {
+			if o.Name == m.Name {
+				w.WriteHeader(409)
+				return
+			}
+		}
+		m.ID = s.newID("cpm")
+		c.ProtocolMappers = append(c.ProtocolMappers, m)
+		created(w, r, m.ID)
+	case len(rest) == 1 && (r.Method == "PUT" || r.Method == "DELETE"):
+		for i, o := range c.ProtocolMappers {
+			if o.ID != rest[0] {
+				continue
+			}
+			if r.Method == "DELETE" {
+				c.ProtocolMappers = append(c.ProtocolMappers[:i:i], c.ProtocolMappers[i+1:]...)
+			} else {
+				var m ProtocolMapper
+				if json.NewDecoder(r.Body).Decode(&m) != nil || m.ID != o.ID {
+					w.WriteHeader(400)
+					return
+				}
+				c.ProtocolMappers[i] = m
+			}
+			w.WriteHeader(204)
+			return
+		}
+		http.NotFound(w, r)
 	default:
 		http.NotFound(w, r)
 	}

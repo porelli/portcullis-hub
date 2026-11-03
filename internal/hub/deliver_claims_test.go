@@ -1,0 +1,403 @@
+package hub
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"path/filepath"
+	"reflect"
+	"sort"
+	"strings"
+	"testing"
+
+	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/keycloak"
+	"github.com/portcullis/hub/internal/lldap"
+)
+
+const claimID = "immich"
+
+// claimFixture loads testdata/settings/claimapp as instance immich
+// (native-oidc, client immich): storage_quota (person, max, default
+// 100GiB, claim immich_quota int in GiB, and data file people) and role
+// (person, {{ADMIN_GROUP}}: admin, claim immich_role). users_immich:
+// alice, bob, carol, dave; admin_immich: bob; office_milan: alice; erin
+// is in no group. Not enabled yet.
+func claimFixture(t *testing.T) (*fixture, *fakePeople, *fakeAttrStore) {
+	t.Helper()
+	m := mustRead(t, filepath.Join("testdata", "settings", "claimapp", "manifest.yaml"))
+	c := mustRead(t, filepath.Join("testdata", "settings", "claimapp", "compose.yml"))
+	f := newInstanceFixtureExtra(t, nil, nil, map[string][2]string{claimID: {string(m), string(c)}})
+	if f.h.Template(claimID) == nil {
+		t.Fatalf("claimapp not loaded (see the log)")
+	}
+	f.h.SetAudit(&fakeAudit{})
+	people := newFakePeople("erin")
+	people.addGroup("users_immich", "alice", "bob", "carol", "dave")
+	people.addGroup("admin_immich", "bob")
+	people.addGroup("office_milan", "alice")
+	f.h.SetGroups(&fakeGroups{people: people, existing: map[string]bool{"users_immich": true, "admin_immich": true}})
+	f.h.SetPeople(people)
+	f.h.SetUserSweep(people, nil)
+	store := newFakeAttrStore()
+	f.h.SetAttrStore(store)
+	simulateCompose(f, 0)
+	clk := &fakeClock{}
+	f.h.afterFunc, f.h.sleep = clk.afterFunc, clk.sleep
+	return f, people, store
+}
+
+// claimEnable enables immich (binding the {{ADMIN_GROUP}} row) and
+// stores the quota rows: default 100GiB, office_milan 10GiB.
+func claimEnable(t *testing.T, f *fixture, id string) {
+	t.Helper()
+	if _, err := f.h.EnableAs(id, "root"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.h.SaveSettings(id, SettingsUpdate{Person: map[string]PersonChange{
+		"storage_quota": {Default: raw("100GiB"), Rows: rows("office_milan", "10GiB")},
+	}}, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	f.h.Wait()
+}
+
+func deliverNow(t *testing.T, f *fixture, id string, trig Trigger) *DeliveryReport {
+	t.Helper()
+	rep, err := f.h.Deliver(context.Background(), id, trig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.h.Wait()
+	return rep
+}
+
+func TestSettingAttrName(t *testing.T) {
+	a := SettingAttr("immich", "storage_quota")
+	if !strings.HasPrefix(a, "ps_") || len(a) != 15 || a == SettingAttr("immich-b", "storage_quota") || a == SettingAttr("immich", "role") {
+		t.Errorf("SettingAttr = %q", a)
+	}
+	// "ps_" + the first 12 hex of sha256("immich\x00storage_quota").
+	if a != "ps_"+sha256Hex("immich\x00storage_quota")[:12] {
+		t.Errorf("SettingAttr = %q", a)
+	}
+	// Hidden by the directory: the same reserved prefix.
+	if !strings.HasPrefix(a, reservedAttrPrefix()) {
+		t.Errorf("%q is not under the directory's reserved prefix %q", a, reservedAttrPrefix())
+	}
+}
+
+func TestClaimDeliveryPerPerson(t *testing.T) {
+	f, people, store := claimFixture(t)
+	quota, role := SettingAttr(claimID, "storage_quota"), SettingAttr(claimID, "role")
+	// erin never was in the population but holds a stale value (a lost
+	// delivered.json): the first delivery clears it.
+	if err := store.AddHiddenUserAttribute(context.Background(), quota); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetUserAttributes(context.Background(), "erin", map[string][]string{quota: {"999"}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	claimEnable(t, f, claimID)
+	rep := deliverNow(t, f, claimID, TriggerRetry)
+	for _, a := range []string{quota, role} {
+		if u, ok := unit(rep, "claim:"+a); !ok || !u.OK || u.Error != "" {
+			t.Errorf("unit claim:%s = %+v (%v)", a, u, ok)
+		}
+		at, ok := store.has(a)
+		if !ok || at.IsVisible || at.IsEditable || at.IsList {
+			t.Errorf("attribute %s = %+v %v, want hidden and not editable", a, at, ok)
+		}
+	}
+	for user, want := range map[string]string{"alice": "10", "bob": "100", "carol": "100", "dave": "100"} {
+		if got, _ := store.value(user, quota); got != want {
+			t.Errorf("%s quota = %q, want %q", user, got, want)
+		}
+	}
+	for user, want := range map[string]string{"alice": "user", "bob": "admin", "carol": "user"} {
+		if got, _ := store.value(user, role); got != want {
+			t.Errorf("%s role = %q, want %q", user, got, want)
+		}
+	}
+	if _, ok := store.value("erin", quota); ok {
+		t.Error("erin (outside the population) kept a value")
+	}
+	// The mappers: on client immich, with the template's claims.
+	want := []keycloak.SettingClaim{{Attr: role, Claim: "immich_role", JSONType: ""}, {Attr: quota, Claim: "immich_quota", JSONType: "int"}}
+	if got := f.idp.settingClaims("immich"); !sameClaims(got, want) {
+		t.Errorf("claims on immich = %+v, want %+v", got, want)
+	}
+
+	// dave leaves the access group: his values are removed.
+	people.set(func(p *fakePeople) { delete(p.members["users_immich"], "dave") })
+	deliverNow(t, f, claimID, TriggerMembership)
+	for _, a := range []string{quota, role} {
+		if v, ok := store.value("dave", a); ok {
+			t.Errorf("dave (outside the population) still has %s = %q", a, v)
+		}
+	}
+	// admin_immich members outside users_immich get nothing either.
+	people.set(func(p *fakePeople) { p.members["admin_immich"]["erin"] = true })
+	deliverNow(t, f, claimID, TriggerMembership)
+	if v, ok := store.value("erin", role); ok {
+		t.Errorf("erin (admin_immich only) has role %q", v)
+	}
+	// Per-user hashes only in delivered.json: no values.
+	d := f.h.loadDelivered(claimID)
+	if rec := d.Claims["claim:"+quota]; len(rec) != 3 || rec["alice"] == "" || rec["alice"] == "10" {
+		t.Errorf("delivered claims record = %+v", rec)
+	}
+}
+
+func sameClaims(a, b []keycloak.SettingClaim) bool {
+	key := func(l []keycloak.SettingClaim) map[string]keycloak.SettingClaim {
+		m := map[string]keycloak.SettingClaim{}
+		for _, c := range l {
+			m[c.Attr] = c
+		}
+		return m
+	}
+	return len(a) == len(b) && reflect.DeepEqual(key(a), key(b))
+}
+
+func TestClaimOnlyChangedUsersWritten(t *testing.T) {
+	f, people, store := claimFixture(t)
+	claimEnable(t, f, claimID)
+	deliverNow(t, f, claimID, TriggerRetry)
+	before := len(store.calls())
+	// carol joins office_milan: her quota (only) changes.
+	people.addGroup("office_milan", "carol")
+	rep := deliverNow(t, f, claimID, TriggerMembership)
+	calls := store.calls()[before:]
+	if len(calls) != 1 || calls[0] != "carol +"+SettingAttr(claimID, "storage_quota")+"=10" {
+		t.Errorf("writes after one membership change = %q", calls)
+	}
+	if u, _ := unit(rep, "claim:"+SettingAttr(claimID, "role")); !u.OK || u.Skipped != SkipUnchanged {
+		t.Errorf("role unit = %+v", u)
+	}
+	// Nothing changed: nothing written.
+	before = len(store.calls())
+	rep = deliverNow(t, f, claimID, TriggerMembership)
+	if n := len(store.calls()) - before; n != 0 {
+		t.Errorf("an unchanged run wrote %d times: %q", n, store.calls()[before:])
+	}
+	if u, _ := unit(rep, "claim:"+SettingAttr(claimID, "storage_quota")); !u.OK || u.Skipped != SkipUnchanged {
+		t.Errorf("quota unit = %+v", u)
+	}
+	// A failed write is retried on the next run (only that user).
+	people.addGroup("office_milan", "dave")
+	store.mu.Lock()
+	store.failUser = "dave"
+	store.mu.Unlock()
+	rep = deliverNow(t, f, claimID, TriggerMembership)
+	if u, _ := unit(rep, "claim:"+SettingAttr(claimID, "storage_quota")); u.OK || !strings.Contains(u.Error, "dave") {
+		t.Errorf("failed write unit = %+v", u)
+	}
+	store.mu.Lock()
+	store.failUser = ""
+	store.mu.Unlock()
+	before = len(store.calls())
+	deliverNow(t, f, claimID, TriggerMembership)
+	if calls := store.calls()[before:]; len(calls) != 1 || !strings.HasPrefix(calls[0], "dave ") {
+		t.Errorf("retry writes = %q", calls)
+	}
+}
+
+func TestClaimDeliveryNeedsKeycloak(t *testing.T) {
+	f, people, store := claimFixture(t)
+	claimEnable(t, f, claimID)
+	f.h.mu.Lock()
+	f.h.idp = nil
+	f.h.mu.Unlock()
+	before := len(store.calls())
+	// Something to deliver: carol's quota changes.
+	people.addGroup("office_milan", "carol")
+	rep := deliverNow(t, f, claimID, TriggerRetry)
+	for _, a := range []string{SettingAttr(claimID, "storage_quota"), SettingAttr(claimID, "role")} {
+		u, ok := unit(rep, "claim:"+a)
+		if !ok || u.OK || !strings.Contains(u.Error, "Keycloak not configured") {
+			t.Errorf("claim:%s = %+v (%v)", a, u, ok)
+		}
+	}
+	// Nothing else is skipped: the data file is delivered.
+	if u, ok := unit(rep, "file:people"); !ok || !u.OK || u.Error != "" {
+		t.Errorf("file:people = %+v (%v)", u, ok)
+	}
+	if d := readDoc(t, f.appFile(claimID, "people")); d.People["alice"]["quota"] != float64(10<<30) {
+		t.Errorf("people.alice = %v", d.People["alice"])
+	}
+	if calls := store.calls()[before:]; len(calls) != 0 {
+		t.Errorf("values written without Keycloak: %q", calls)
+	}
+}
+
+// The directory down: the claims are skipped, never cleared.
+func TestClaimDirectoryDownKeepsValues(t *testing.T) {
+	f, people, store := claimFixture(t)
+	claimEnable(t, f, claimID)
+	deliverNow(t, f, claimID, TriggerRetry)
+	before := len(store.calls())
+	people.set(func(p *fakePeople) { p.err = fmt.Errorf("down") })
+	rep := deliverNow(t, f, claimID, TriggerMembership)
+	if u, _ := unit(rep, "claim:"+SettingAttr(claimID, "storage_quota")); u.Skipped != SkipDirectory {
+		t.Errorf("unit = %+v", u)
+	}
+	if n := len(store.calls()) - before; n != 0 {
+		t.Errorf("%d writes with the directory down", n)
+	}
+	if v, _ := store.value("alice", SettingAttr(claimID, "storage_quota")); v != "10" {
+		t.Errorf("alice = %q", v)
+	}
+}
+
+// A setting attribute that exists visible or editable isn't the Hub's:
+// refused, nothing written.
+func TestClaimVisibleAttributeRefused(t *testing.T) {
+	f, _, store := claimFixture(t)
+	quota := SettingAttr(claimID, "storage_quota")
+	store.mu.Lock()
+	store.schema[quota] = lldapAttr(quota, true)
+	store.mu.Unlock()
+	claimEnable(t, f, claimID)
+	rep := deliverNow(t, f, claimID, TriggerRetry)
+	if u, _ := unit(rep, "claim:"+quota); u.OK || !strings.Contains(u.Error, "visible") {
+		t.Errorf("unit = %+v", u)
+	}
+	if v, ok := store.value("alice", quota); ok {
+		t.Errorf("written into a visible attribute: %q", v)
+	}
+}
+
+func TestDeleteRemovesClaims(t *testing.T) {
+	f, people, store := claimFixture(t)
+	people.addGroup("users_immich-b", "alice")
+	people.addGroup("admin_immich-b")
+	f.h.SetGroups(&fakeGroups{people: people, existing: map[string]bool{"users_immich": true, "admin_immich": true, "users_immich-b": true, "admin_immich-b": true}})
+	if err := f.h.CreateInstance(claimID, "immich-b", nil); err != nil {
+		t.Fatal(err)
+	}
+	claimEnable(t, f, claimID)
+	claimEnable(t, f, "immich-b")
+	deliverNow(t, f, claimID, TriggerRetry)
+	deliverNow(t, f, "immich-b", TriggerRetry)
+	mine := []string{SettingAttr(claimID, "role"), SettingAttr(claimID, "storage_quota")}
+	sort.Strings(mine)
+	theirs := []string{SettingAttr("immich-b", "role"), SettingAttr("immich-b", "storage_quota")}
+	for _, a := range append(append([]string{}, mine...), theirs...) {
+		if _, ok := store.has(a); !ok {
+			t.Fatalf("attribute %s not created", a)
+		}
+	}
+	if len(f.idp.settingClaims("immich-b")) != 2 {
+		t.Fatalf("immich-b claims = %+v", f.idp.settingClaims("immich-b"))
+	}
+
+	if _, err := f.h.DeleteInstance(claimID, claimID, "root"); err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range mine {
+		if _, ok := store.has(a); ok {
+			t.Errorf("attribute %s of the deleted instance kept", a)
+		}
+	}
+	store.mu.Lock()
+	deleted := append([]string(nil), store.deleted...)
+	store.mu.Unlock()
+	if !reflect.DeepEqual(deleted, mine) {
+		t.Errorf("DeleteUserAttribute calls = %v, want %v", deleted, mine)
+	}
+	if got := f.idp.claimRemovals(); len(got) != 1 || got[0] != "immich:immich:"+strings.Join(mine, ",") {
+		t.Errorf("mapper removals = %q", got)
+	}
+	// The other instance keeps its own.
+	for _, a := range theirs {
+		if _, ok := store.has(a); !ok {
+			t.Errorf("attribute %s of immich-b removed", a)
+		}
+	}
+	if len(f.idp.settingClaims("immich-b")) != 2 {
+		t.Errorf("immich-b claims = %+v", f.idp.settingClaims("immich-b"))
+	}
+	if v, _ := store.value("alice", SettingAttr("immich-b", "storage_quota")); v != "10" {
+		t.Errorf("alice's immich-b quota = %q", v)
+	}
+}
+
+// A client the instance doesn't own keeps its mappers (warning); the
+// delete goes on.
+func TestDeleteClaimsForeignClientWarns(t *testing.T) {
+	f, _, _ := claimFixture(t)
+	claimEnable(t, f, claimID)
+	deliverNow(t, f, claimID, TriggerRetry)
+	f.idp.mu.Lock()
+	f.idp.claimOwners = map[string]string{"immich": "someone"}
+	f.idp.mu.Unlock()
+	res, err := f.h.DeleteInstance(claimID, claimID, "root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(res.Warnings, "\n"), "setting claims") {
+		t.Errorf("warnings = %q", res.Warnings)
+	}
+}
+
+const nativeID = "nativeapp"
+
+func TestNativeSignInClearsPersonDeliveries(t *testing.T) {
+	m := mustRead(t, filepath.Join("testdata", "settings", "nativeapp", "manifest.yaml"))
+	c := mustRead(t, filepath.Join("testdata", "settings", "nativeapp", "compose.yml"))
+	f := newInstanceFixtureExtra(t, nil, nil, map[string][2]string{nativeID: {string(m), string(c)}})
+	if f.h.Template(nativeID) == nil {
+		t.Fatalf("nativeapp not loaded (see the log)")
+	}
+	f.h.SetAudit(&fakeAudit{})
+	people := newFakePeople()
+	people.addGroup("users_nativeapp", "alice", "bob")
+	f.h.SetPeople(people)
+	simulateCompose(f, 0)
+	clk := &fakeClock{}
+	f.h.afterFunc, f.h.sleep = clk.afterFunc, clk.sleep
+	if err := f.h.Enable(nativeID); err != nil {
+		t.Fatal(err)
+	}
+	f.h.Wait()
+	deliverNow(t, f, nativeID, TriggerRetry)
+	if d := readDoc(t, f.appFile(nativeID, "people")); len(d.People) != 2 {
+		t.Fatalf("gateway sign-in: people = %v", d.People)
+	}
+	execs := len(f.engine.ExecCalls())
+
+	if err := f.h.save(nativeID, SettingsUpdate{SignIn: strp(SignInNative)}); err != nil {
+		t.Fatal(err)
+	}
+	f.h.Wait()
+	rep := deliverNow(t, f, nativeID, TriggerMembership)
+	if d := readDoc(t, f.appFile(nativeID, "people")); len(d.People) != 0 {
+		t.Errorf("native sign-in: people = %v", d.People)
+	}
+	runs := hookRuns(t, f, "/apply", execs)
+	if len(runs) == 0 || len(runs[len(runs)-1].People) != 0 {
+		t.Errorf("hook people after native sign-in = %+v", runs)
+	}
+	for _, name := range []string{"file:people", "hook:apply"} {
+		if u, ok := unit(rep, name); !ok || u.Message != WhyNativeSignIn {
+			t.Errorf("%s = %+v (%v), want the reason %q", name, u, ok, WhyNativeSignIn)
+		}
+	}
+	st := f.h.DeliveryStatus(nativeID)
+	if st.Units["file:people"].Message != WhyNativeSignIn {
+		t.Errorf("panel status = %+v", st.Units["file:people"])
+	}
+}
+
+func sha256Hex(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
+}
+
+func reservedAttrPrefix() string { return directory.ReservedAttrPrefix }
+
+func lldapAttr(name string, visible bool) lldap.Attribute {
+	return lldap.Attribute{Name: name, IsVisible: visible}
+}

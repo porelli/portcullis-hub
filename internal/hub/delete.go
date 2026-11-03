@@ -202,7 +202,11 @@ func (h *Hub) deleteSteps(id, actor string, res *DeleteResult) error {
 		}
 	}
 
-	// 4. Keycloak: access role and flow, clients, forward-auth callbacks.
+	// 4. Keycloak: access role and flow, setting claims (with their LLDAP
+	// attributes), clients, forward-auth callbacks.
+	if err := h.removeInstanceClaims(ctx, h.idp, id, clients, h.instanceClaimAttrs(tg.view, id), res); err != nil {
+		return fmt.Errorf("setting claims: %w", err)
+	}
 	if h.idp == nil {
 		res.Warnings = append(res.Warnings, "Keycloak is not configured: no clients, access roles or callbacks were removed")
 	} else {

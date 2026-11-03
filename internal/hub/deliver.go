@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -29,8 +30,9 @@ import (
 //     the desired output of every unit;
 //  3. each unit is compared with <data>/settings/<id>/delivered.json and
 //     what is on disk; unchanged units are skipped;
-//  4. changed units are applied in order — files, (claims, headers:
-//     later tasks), hooks (deliver_hooks.go), then the strongest effect: reload or a
+//  4. changed units are applied in order — files, claims
+//     (deliver_claims.go; also in a start run), (headers: a later task),
+//     hooks (deliver_hooks.go), then the strongest effect: reload or a
 //     background Restart (P5: the engine is the only one that reloads or
 //     restarts) — each write after re-checking the generation under mu:
 //     a newer commit makes the run stop ("superseded") and run again;
@@ -332,6 +334,9 @@ func hasPeopleOptions(t *templates.Template) bool {
 type deliveredDoc struct {
 	Hashes map[string]string     `json:"hashes"`
 	Status map[string]UnitResult `json:"status"`
+	// Claims: per claim unit ("claim:<attr>"), user → hash of the value
+	// last written (or claimPending), never the value.
+	Claims map[string]map[string]string `json:"claims,omitempty"`
 }
 
 func (h *Hub) deliveredPath(id string) string {
@@ -339,7 +344,7 @@ func (h *Hub) deliveredPath(id string) string {
 }
 
 func (h *Hub) loadDelivered(id string) deliveredDoc {
-	d := deliveredDoc{Hashes: map[string]string{}, Status: map[string]UnitResult{}}
+	d := deliveredDoc{Hashes: map[string]string{}, Status: map[string]UnitResult{}, Claims: map[string]map[string]string{}}
 	if !templates.ValidID(id) {
 		return d
 	}
@@ -349,13 +354,16 @@ func (h *Hub) loadDelivered(id string) deliveredDoc {
 	}
 	if err := json.Unmarshal(b, &d); err != nil {
 		log.Printf("settings: %s: delivered.json unreadable (%v): every unit is delivered again", id, err)
-		return deliveredDoc{Hashes: map[string]string{}, Status: map[string]UnitResult{}}
+		return deliveredDoc{Hashes: map[string]string{}, Status: map[string]UnitResult{}, Claims: map[string]map[string]string{}}
 	}
 	if d.Hashes == nil {
 		d.Hashes = map[string]string{}
 	}
 	if d.Status == nil {
 		d.Status = map[string]UnitResult{}
+	}
+	if d.Claims == nil {
+		d.Claims = map[string]map[string]string{}
 	}
 	return d
 }
@@ -492,7 +500,7 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 
 	// Outside mu: stale rows first (P8: purged, audited), then the
 	// directory snapshot the units render from.
-	needPeople := filesNeedPeople(&tmpl) || hasGroupEnv(&tmpl) || (!opt.lifecycle && hooksNeedPeople(&tmpl))
+	needPeople := filesNeedPeople(&tmpl) || hasGroupEnv(&tmpl) || claimsNeedPeople(&tmpl) || (!opt.lifecycle && hooksNeedPeople(&tmpl))
 	if hasRows && !opt.lifecycle {
 		for _, w := range h.reconcileGroupRows(ctx, id) {
 			log.Printf("settings: %s: %s", id, w)
@@ -519,6 +527,11 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 	tmpl = *live
 	gen := h.deliveryGenLocked(&tmpl)
 	outs := h.buildFilesLocked(&tmpl, m)
+	claims := h.buildClaimsLocked(&tmpl, m)
+	why := h.populationWhyLocked(&tmpl)
+	if m != nil {
+		why = h.populationLocked(&tmpl, m).Why
+	}
 	var hookOuts []hookOutput
 	if !opt.lifecycle {
 		hookOuts = h.buildHooksLocked(&tmpl, m)
@@ -538,6 +551,7 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 		return live != nil && h.deliveryGenLocked(live) == gen
 	}
 	finish := func() {
+		annotateWhy(&tmpl, rep.Units, why)
 		for _, u := range rep.Units {
 			delivered.Status[u.Unit] = u
 		}
@@ -605,6 +619,19 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 	}
 
 	h.stage(id, "files")
+
+	// Claims (LLDAP attributes and Keycloak mappers; also in a start run:
+	// the clients exist by then; a failure never fails the start).
+	cu, stop := h.runClaims(ctx, claimStep{t: &tmpl, plan: claims, current: current, delivered: &delivered, now: now})
+	rep.Units = append(rep.Units, cu...)
+	if stop {
+		finish()
+		if opt.lifecycle {
+			return rep, "", true, nil
+		}
+		return rep, settings.Strongest(effects...), true, nil
+	}
+	h.stage(id, "claims")
 	if opt.lifecycle {
 		// TriggerStart: compose up follows; never a reload or restart.
 		finish()
@@ -731,4 +758,37 @@ func sortedFiles(t *templates.Template) []templates.DataFile {
 		return 0
 	})
 	return fs
+}
+
+// annotateWhy sets the population's reason (why) on the units that
+// deliver per-person values when it is empty for a reason (sign_in
+// native, no Portcullis identity, no access group): the panel shows why
+// they carry nobody.
+func annotateWhy(t *templates.Template, units []UnitResult, why string) {
+	if why == "" {
+		return
+	}
+	for i := range units {
+		u := &units[i]
+		if u.Error != "" || u.Message != "" || (u.Skipped != "" && u.Skipped != SkipUnchanged) {
+			continue
+		}
+		name := ""
+		switch {
+		case strings.HasPrefix(u.Unit, "file:"):
+			name = strings.TrimPrefix(u.Unit, "file:")
+			if !fileNeedsPeople(t, name) {
+				continue
+			}
+		case strings.HasPrefix(u.Unit, "hook:"):
+			name = strings.TrimPrefix(u.Unit, "hook:")
+			if !hookNeedsPeople(t, name) {
+				continue
+			}
+		case strings.HasPrefix(u.Unit, claimUnitPrefix):
+		default:
+			continue
+		}
+		u.Message = why
+	}
 }

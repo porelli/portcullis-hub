@@ -112,6 +112,12 @@ type IdP interface {
 	// DeleteClient deletes a client tagged with owner (guarded delete);
 	// missing = nil, anything else of someone else's = *ConflictError.
 	DeleteClient(ctx context.Context, clientID, owner string) error
+	// EnsureSettingClaims / RemoveSettingClaims manage an instance
+	// client's per-person setting claims (contract §13.6: LDAP mappers
+	// and that client's protocol mappers portcullis-setting-<attr>; only
+	// a client tagged with owner, else *ConflictError).
+	EnsureSettingClaims(ctx context.Context, clientID, owner string, claims []keycloak.SettingClaim) error
+	RemoveSettingClaims(ctx context.Context, clientID, owner string, attrs []string) error
 }
 
 // Groups manages app instances' LLDAP groups through the Users & Groups
@@ -178,6 +184,7 @@ type Hub struct {
 	compose compose.Runner
 	engine  Engine
 	idp     IdP
+	attrs   AttrStore // LLDAP user attributes (setting claims); nil: none
 	// domains lists the main and enrolled domains (hosts.go); audit
 	// receives instance operations (SetAudit). Both guarded by mu.
 	domains DomainSource

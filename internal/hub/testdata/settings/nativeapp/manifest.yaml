@@ -1,0 +1,29 @@
+name: Native Sign-in Fixture
+category: tools
+instances: multi
+auth:
+  method: custom
+  sso: false
+  group_access: true
+  access_group: users_nativeapp
+  native_login:
+    supported: true
+    allow_without_gateway: true
+    note: its own accounts
+urls:
+  - label: Web
+    url: "https://{{HOST_NATIVEAPP}}"
+files:
+  - {name: people, service: app, mount: /portcullis}
+hooks:
+  - {name: apply, service: app, command: [/apply], when: [settings_change, membership_change]}
+settings:
+  options:
+    - key: seats
+      label: Seats
+      type: int
+      scope: person
+      default: 1
+      resolve: max
+      applies: live
+      delivery: [{hook: apply}, {file: {name: people}}]

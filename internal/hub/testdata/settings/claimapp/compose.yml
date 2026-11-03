@@ -1,0 +1,8 @@
+services:
+  server:
+    image: immich
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.immich.rule: Host(`${PORTCULLIS_HOST_IMMICH:-immich.portcullis.local}`)
+      traefik.http.routers.immich.entrypoints: websecure
+      traefik.http.services.immich.loadbalancer.server.port: "2283"

@@ -154,6 +154,11 @@ func main() {
 	// directory; a group deleted there purges the setting rows naming it
 	// in every instance (contract §13.4).
 	h.SetPeople(dir)
+	// Per-person claims: Hub-owned hidden LLDAP attributes (contract
+	// §13.6); without LLDAP credentials claim units say so.
+	if ll.Available() == nil {
+		h.SetAttrStore(ll)
+	}
 	dir.GroupDeleted = h.PurgeGroupSettings
 	// The policy file's expiring list and user-attributes.json come from
 	// the directory (contract §4, §4.1); shared fields become Keycloak

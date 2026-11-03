@@ -1,0 +1,39 @@
+name: Immich Claims Fixture
+category: media
+instances: multi
+auth:
+  method: native-oidc
+  sso: true
+  group_access: true
+  access_group: users_immich
+  admin_group: admin_immich
+keycloak_clients:
+  - client_id: immich
+    redirect_uri: https://{{HOST_IMMICH}}/auth/login
+files:
+  - {name: people, service: server, mount: /portcullis}
+settings:
+  options:
+    - key: storage_quota
+      label: Storage quota
+      type: size
+      step: 1GiB
+      scope: person
+      default: 100GiB
+      resolve: max
+      applies: next_sign_in
+      delivery:
+        - {claim: {client: immich, name: immich_quota, json_type: int, render: {unit: GiB, integer: true}}}
+        - {file: {name: people, field: quota}}
+    - key: role
+      label: Role
+      type: enum
+      scope: person
+      options:
+        - {value: user, label: User}
+        - {value: admin, label: Administrator}
+      default: user
+      resolve: max
+      group_values: {"{{ADMIN_GROUP}}": admin}
+      applies: next_sign_in
+      delivery: [{claim: {client: immich, name: immich_role}}]
