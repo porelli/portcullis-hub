@@ -42,8 +42,9 @@ type Kind interface {
 	Compare(o *templates.Option, a, b Value) (int, bool)
 }
 
-// Mounter is a kind whose value is a host directory (path; folder in
-// project 2).
+// Mounter is a kind whose value is a host directory (path). A shared
+// folder ref is resolved by the Hub only: HostPath refuses it
+// (ErrFolderRef).
 type Mounter interface {
 	HostPath(o *templates.Option, v Value) (string, error)
 }
@@ -151,6 +152,9 @@ func (r *Registry) CheckOption(o *templates.Option) error {
 	if err := k.CheckOption(o); err != nil {
 		return err
 	}
+	if err := checkChecks(o); err != nil {
+		return err
+	}
 	if err := checkRenders(o); err != nil {
 		return err
 	}
@@ -215,10 +219,30 @@ func onlyFields(o *templates.Option, allowed ...string) error {
 		{"target", o.Target != nil},
 		{"mode", o.Mode != ""},
 		{"needs", o.Needs != ""},
+		{"folder", o.Folder != nil},
 	}
 	for _, f := range set {
 		if f.on && !ok[f.name] {
 			return fmt.Errorf("%s is not a constraint of type %s", f.name, o.Type)
+		}
+	}
+	return nil
+}
+
+// checkChecks parses each free_space check's min with the size parser
+// (binary units only, as for size options; contract §13.15). The rest of
+// the catalog is checked by templates.ValidateSettingsSpec.
+func checkChecks(o *templates.Option) error {
+	for i, c := range o.Checks {
+		if c.Kind != templates.CheckFreeSpace || c.Min == "" {
+			continue
+		}
+		n, err := parseSize(c.Min)
+		if err != nil {
+			return fmt.Errorf("checks[%d] (free_space): min %q: %v", i, c.Min, err)
+		}
+		if n <= 0 {
+			return fmt.Errorf("checks[%d] (free_space): min must be more than 0", i)
 		}
 	}
 	return nil

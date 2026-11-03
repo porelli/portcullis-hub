@@ -128,6 +128,9 @@ type Port struct {
 	Service         string `yaml:"service" json:"service"`
 	NetworkModeHost bool   `yaml:"network_mode_host" json:"network_mode_host"`
 	Range           string `yaml:"range" json:"range"` // e.g. "49152-65535" (coturn media relays)
+	// LanOnly: the port should be reachable only from the local networks
+	// (§13.15). It changes nothing in the binding; the doctor judges it.
+	LanOnly bool `yaml:"lan_only" json:"lan_only"`
 }
 
 // EnvVar is a per-app variable the Hub writes into the app's .env.

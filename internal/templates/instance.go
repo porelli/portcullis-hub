@@ -61,7 +61,7 @@ func ReservedVar(k string) bool {
 	case VarInstance, VarOIDCClientID, VarAccessGroup, VarAdminGroup:
 		return true
 	}
-	return strings.HasPrefix(k, varHostPrefix) || strings.HasPrefix(k, varClientIDPrefix)
+	return strings.HasPrefix(k, varHostPrefix) || strings.HasPrefix(k, varClientIDPrefix) || strings.HasPrefix(k, varFolderPrefix)
 }
 
 // domainUseRe matches a {{DOMAIN}} with the host characters before it

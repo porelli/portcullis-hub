@@ -15,8 +15,11 @@ type pathKind struct{}
 func (pathKind) Name() string { return templates.TypePath }
 
 func (pathKind) CheckOption(o *templates.Option) error {
-	if err := onlyFields(o, "target", "mode", "needs"); err != nil {
+	if err := onlyFields(o, "target", "mode", "needs", "folder"); err != nil {
 		return err
+	}
+	if o.Folder != nil && (o.Mode != "" || o.Needs != "" || o.WritesAs != nil) {
+		return fmt.Errorf("folder together with mode, needs or writes_as: folder.access and folder.runs_as replace them")
 	}
 	switch o.Mode {
 	case "", "ro", "rw":
@@ -39,8 +42,8 @@ func cleanHostPath(raw any) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("want a host directory as a string, not %T", raw)
 	}
-	if strings.HasPrefix(s, "folder:") {
-		return "", fmt.Errorf("%q names a shared folder: shared folders arrive in project 2", s)
+	if strings.HasPrefix(s, FolderRefPrefix) {
+		return "", fmt.Errorf("%q: %w", s, ErrFolderRef)
 	}
 	if err := templates.ValidatePathSetting(s); err != nil {
 		return "", err

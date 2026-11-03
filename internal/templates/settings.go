@@ -75,16 +75,19 @@ type Option struct {
 	Requires    []string   `yaml:"requires" json:"requires,omitempty"`
 	Delivery    Deliveries `yaml:"delivery" json:"delivery,omitempty"`
 
-	// Reserved for projects 2 and 3: parsed, refused by ReservedFeature.
-	Folder        map[string]any   `yaml:"folder" json:"folder,omitempty"`
-	Checks        []map[string]any `yaml:"checks" json:"checks,omitempty"`
-	Hash          string           `yaml:"hash" json:"hash,omitempty"`
-	Length        int              `yaml:"length" json:"length,omitempty"`
-	RevokeOnLeave *bool            `yaml:"revoke_on_leave" json:"revoke_on_leave,omitempty"`
-	OnRestore     string           `yaml:"on_restore" json:"on_restore,omitempty"`
-	Pool          string           `yaml:"pool" json:"pool,omitempty"`
-	Username      map[string]any   `yaml:"username" json:"username,omitempty"`
-	Mount         *OptionMount     `yaml:"mount" json:"mount,omitempty"`
+	// Shared folders (§13.15): a path option's folder block (it replaces
+	// mode, needs and writes_as) and the option's doctor checks.
+	Folder *FolderSpec `yaml:"folder" json:"folder,omitempty"`
+	Checks []Check     `yaml:"checks" json:"checks,omitempty"`
+
+	// Reserved for project 3: parsed, refused by ReservedFeature.
+	Hash          string         `yaml:"hash" json:"hash,omitempty"`
+	Length        int            `yaml:"length" json:"length,omitempty"`
+	RevokeOnLeave *bool          `yaml:"revoke_on_leave" json:"revoke_on_leave,omitempty"`
+	OnRestore     string         `yaml:"on_restore" json:"on_restore,omitempty"`
+	Pool          string         `yaml:"pool" json:"pool,omitempty"`
+	Username      map[string]any `yaml:"username" json:"username,omitempty"`
+	Mount         *OptionMount   `yaml:"mount" json:"mount,omitempty"`
 }
 
 // SettingTarget is a path option's mount: the compose service and the
@@ -365,7 +368,7 @@ const (
 	TypeGroups       = "groups"
 	TypeUser         = "user"
 	TypeUsers        = "users"
-	TypeFolder       = "folder"        // reserved: project 2
+	TypeFolder       = "folder"        // reserved: shared folders are path values (§13.15)
 	TypePersonSecret = "person_secret" // reserved: project 3
 	TypePersonID     = "person_id"     // reserved: project 3
 )
@@ -567,11 +570,15 @@ func reservedUse(o *Option) (what, feature string) {
 	case TypePersonSecret, TypePersonID:
 		return "type " + o.Type, FeatureFileSharing
 	}
+	if f := o.Folder; f != nil && f.RunsAs != nil {
+		switch {
+		case f.RunsAs.UIDFrom != "":
+			return "folder.runs_as.uid_from", FeatureFileSharing
+		case f.RunsAs.GIDFrom != "":
+			return "folder.runs_as.gid_from", FeatureFileSharing
+		}
+	}
 	switch {
-	case o.Folder != nil:
-		return "folder", FeatureSharedFolders
-	case o.Checks != nil:
-		return "checks", FeatureSharedFolders
 	case o.Hash != "":
 		return "hash", FeatureFileSharing
 	case o.Length != 0:
@@ -686,6 +693,10 @@ func ValidateSettingsSpec(t *Template, compose []byte, routes *Routes, kinds Kin
 	if err := v.reload(); err != nil {
 		return err
 	}
+	v.users = composeUsers(compose)
+	if err := v.composeUserGIDs(); err != nil {
+		return err
+	}
 	if m.Settings == nil {
 		return nil
 	}
@@ -730,6 +741,7 @@ type specCheck struct {
 	services map[string]bool
 	scalars  []string                      // compose.yml's decoded scalar values
 	env      map[string]map[string]*string // service → environment
+	users    map[string]string             // service → compose user: ("" = unset)
 	files_   map[string]*DataFile
 	hooks_   map[string]*Hook
 	opts     map[string]*Option
@@ -1123,6 +1135,12 @@ func (v *specCheck) option(o *Option) error {
 	default:
 		return fmt.Errorf("scope %q must be instance, person, group or person_entered", o.Scope)
 	}
+	if err := v.folderOption(o); err != nil {
+		return err
+	}
+	if err := v.checks(o); err != nil {
+		return err
+	}
 	if o.Applies != "" && !appliesValues[o.Applies] {
 		return fmt.Errorf("applies %q must be live, reload, next_request, next_sign_in, restart or account_creation", o.Applies)
 	}
@@ -1404,6 +1422,9 @@ func (v *specCheck) pathAndSecret(o *Option) error {
 			case r.ref.Num != nil:
 				if *r.ref.Num < 0 {
 					return fmt.Errorf("writes_as.%s must be non-negative", r.what)
+				}
+				if r.what == "gid" && InFolderGIDRange(int64(*r.ref.Num)) {
+					return fmt.Errorf("writes_as.gid %d is in %s", *r.ref.Num, gidRangeText)
 				}
 			case r.ref.Key != "":
 				ro := v.opts[r.ref.Key]

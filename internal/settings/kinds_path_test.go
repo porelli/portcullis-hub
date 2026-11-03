@@ -21,7 +21,7 @@ func TestPathKind(t *testing.T) {
 	refused(t, o, "relative/dir", "absolute")
 	refused(t, o, "/", "/")
 	refused(t, o, "/mnt/../..", "/")
-	refused(t, o, "folder:abc", "shared folders arrive in project 2")
+	refused(t, o, "folder:abc", "resolved by the Hub")
 	refused(t, o, 5, "string")
 
 	k, _ := NewRegistry().Kind("path")

@@ -152,8 +152,11 @@ func TestReservedTypesRefused(t *testing.T) {
 		{"folder", hdrHead + opts("{key: media, label: X, type: folder}"), hdrCompose, "media", "type folder needs shared folders (project 2)"},
 		{"person_secret", hdrHead + opts("{key: smb, label: X, type: person_secret}"), hdrCompose, "smb", "type person_secret needs file sharing (project 3)"},
 		{"person_id", hdrHead + opts("{key: uid, label: X, type: person_id}"), hdrCompose, "uid", "type person_id needs file sharing (project 3)"},
-		{"folder block", hdrHead + opts("{key: media, label: X, type: path, target: {service: web, mount: /media}, folder: {access: read}}"), hdrCompose, "media", "shared folders (project 2)"},
-		{"checks", hdrHead + opts("{key: media, label: X, type: path, target: {service: web, mount: /media}, checks: [{kind: exclusive}]}"), hdrCompose, "media", "shared folders (project 2)"},
+		// Shared folders landed (§13.15): folder and checks are typed, no
+		// longer reserved; runs_as.uid_from / gid_from are (project 3).
+		{"folder block", hdrHead + opts("{key: media, label: X, type: path, target: {service: web, mount: /media}, folder: {access: read, runs_as: {uid: 1000, gid: 1000}}}"), hdrCompose, "", ""},
+		{"checks", hdrHead + opts("{key: media, label: X, type: path, target: {service: web, mount: /media}, folder: {access: write, runs_as: {uid: 1000, gid: 1000}}, checks: [{kind: exclusive, reason: one writer}]}"), hdrCompose, "", ""},
+		{"uid_from", hdrHead + opts("{key: media, label: X, type: path, target: {service: web, mount: /media}, folder: {access: write, runs_as: {uid_from: person_uid, gid: 0}}}"), hdrCompose, "media", "file sharing (project 3)"},
 		{"hash", hdrHead + opts("{key: theme, label: X, type: string, hash: nt}"), hdrCompose, "theme", "file sharing (project 3)"},
 		{"bare delivery", hdrHead + opts("{key: theme, label: X, type: string, delivery: file}"), hdrCompose, "theme", "file sharing (project 3)"},
 	})
