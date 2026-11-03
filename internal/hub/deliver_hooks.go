@@ -49,6 +49,8 @@ const (
 	hookPoll = time.Second
 	// SkipPrevRunning: a timed-out run of the instance still runs.
 	SkipPrevRunning = "previous run still running"
+	// hookStuckRequeues bounds the re-queues while it still runs.
+	hookStuckRequeues = 10
 )
 
 func hookUnit(name string) string { return "hook:" + name }
@@ -186,11 +188,9 @@ func (h *Hub) buildHooksLocked(t *templates.Template, m *directory.Membership) [
 }
 
 // hookStep is a run's hook deliveries (under deliverLock, never mu).
-// force: hooks that run whatever their when and hash (the trigger they
-// get: the run's, else the one they last ran for, else their first
-// when); forceWhen: also run every hook declaring that trigger. current
-// (nil: never superseded) re-checks the run's generation before each
-// exec. ran: each run hook's result.
+// force: hooks that run whatever their when and hash; forceWhen: also
+// run every hook declaring that trigger. current (nil: never
+// superseded) re-checks the run's generation before each exec.
 type hookStep struct {
 	id        string
 	trig      Trigger
@@ -202,10 +202,41 @@ type hookStep struct {
 	now       time.Time
 }
 
-// runHooks runs step; superseded: a newer commit came before an exec;
-// requeue: a hook was skipped because a timed-out run still runs.
-func (h *Hub) runHooks(ctx context.Context, t *templates.Template, step hookStep) (units []UnitResult, ran map[string]UnitResult, superseded, requeue bool) {
-	ran = map[string]UnitResult{}
+// hookRun is what runHooks did: ran = each run (or skipped) hook's
+// result; superseded: a newer commit came before an exec; stuck: a
+// timed-out run still runs (checked once per run: every later hook is
+// skipped too); retry: the forced hooks that were skipped (still running
+// or directory unavailable) — a re-queue must force them again;
+// directory: some hook was skipped for the directory.
+type hookRun struct {
+	units      []UnitResult
+	ran        map[string]UnitResult
+	superseded bool
+	stuck      bool
+	retry      []string
+	directory  bool
+}
+
+// hookTrigger is the trigger hk's stdin names: the run's when hk declares
+// it, the membership trigger a changed hook-file forced, else
+// settings_change when hk declares it, else hk's first when.
+func hookTrigger(hk templates.Hook, want, forceWhen string) string {
+	switch {
+	case want != "" && slices.Contains(hk.When, want):
+		return want
+	case forceWhen != "" && slices.Contains(hk.When, forceWhen):
+		return forceWhen
+	case slices.Contains(hk.When, templates.HookSettingsChange):
+		return templates.HookSettingsChange
+	case len(hk.When) > 0:
+		return hk.When[0]
+	}
+	return ""
+}
+
+// runHooks runs step.
+func (h *Hub) runHooks(ctx context.Context, t *templates.Template, step hookStep) hookRun {
+	r := hookRun{ran: map[string]UnitResult{}}
 	want := hookWhen(step.trig)
 	for _, o := range step.outs {
 		hk := o.hook
@@ -220,52 +251,84 @@ func (h *Hub) runHooks(ctx context.Context, t *templates.Template, step hookStep
 		case !forced && !(declared && pending):
 			if declared {
 				u.OK, u.Skipped = true, SkipUnchanged
-				units = append(units, u)
+				r.units = append(r.units, u)
 			}
 			// Not declared for this trigger: its last status stays.
 			continue
 		case o.skip != "":
 			u.Skipped = o.skip
+			r.directory = r.directory || o.skip == SkipDirectory
 		case o.err != nil:
 			u.Error = h.redactUnitError(step.id, o.err)
+		case r.stuck:
+			u.Skipped = SkipPrevRunning
 		default:
 			if step.current != nil {
 				h.mu.RLock()
 				ok := step.current()
 				h.mu.RUnlock()
 				if !ok {
-					return units, ran, true, requeue
+					r.superseded = true
+					return r
 				}
 			}
 			in := o.input
-			switch {
-			case declared:
-				in.Trigger = want
-			case step.forceWhen != "" && slices.Contains(hk.When, step.forceWhen):
-				in.Trigger = step.forceWhen
-			case want != "":
-				in.Trigger = want // the reload hook
-			case step.delivered.Triggers[unit] != "":
-				in.Trigger = step.delivered.Triggers[unit]
-			case len(hk.When) > 0:
-				in.Trigger = hk.When[0]
-			}
+			in.Trigger = hookTrigger(hk, want, step.forceWhen)
 			u = h.runHook(ctx, t, hk, in)
-			step.delivered.Triggers[unit] = in.Trigger
 			switch {
 			case u.OK:
 				step.delivered.Hashes[unit] = o.hash
 			case u.Skipped == SkipPrevRunning:
-				requeue = true
+				r.stuck = true
 			case u.Skipped == "":
 				// Failed: retried on the next trigger even when unchanged.
 				delete(step.delivered.Hashes, unit)
 			}
 		}
-		ran[hk.Name] = u
-		units = append(units, u)
+		if forced && (u.Skipped == SkipPrevRunning || u.Skipped == SkipDirectory) {
+			r.retry = append(r.retry, hk.Name)
+		}
+		r.ran[hk.Name] = u
+		r.units = append(r.units, u)
 	}
-	return units, ran, false, requeue
+	return r
+}
+
+// requeueHooks re-queues instance id's run (trig, effect) after hooks
+// were skipped: a stuck exec backs off (busyRetry doubling, at most
+// hookStuckRequeues re-queues since the last real trigger, then a failed
+// hook op record and no more re-queues until the next trigger); a
+// directory skip waits settingsDebounce. retry: hooks the run must force.
+func (h *Hub) requeueHooks(id string, trig Trigger, effect string, r hookRun, stuckRetry bool) {
+	if r.stuck {
+		h.deliveryMu.Lock()
+		if h.hookStuck == nil {
+			h.hookStuck = map[string]int{}
+		}
+		if !stuckRetry {
+			h.hookStuck[id] = 0
+		}
+		h.hookStuck[id]++
+		n := h.hookStuck[id]
+		prev := h.hookExecs[id]
+		h.deliveryMu.Unlock()
+		if n > hookStuckRequeues {
+			name := ""
+			for _, u := range r.units {
+				if u.Skipped == SkipPrevRunning {
+					name = strings.TrimPrefix(u.Unit, "hook:")
+					break
+				}
+			}
+			h.finishDeliveryOp(id, OpHook, fmt.Errorf("hook %s: %s (the run that timed out after %s): not retried until the next trigger", name, SkipPrevRunning, prev.timeout))
+			return
+		}
+		h.queueDeliveryWith(id, trig, effect, busyRetry<<min(n-1, 5), r.retry, true)
+		return
+	}
+	if r.directory && len(r.retry) > 0 {
+		h.queueDeliveryWith(id, trig, effect, settingsDebounce, r.retry, stuckRetry)
+	}
 }
 
 // runHook runs hook hk of instance t once with input in (under
@@ -299,7 +362,7 @@ func (h *Hub) runHook(ctx context.Context, t *templates.Template, hk templates.H
 		return u
 	}
 	timeout := hk.EffectiveTimeout()
-	if !h.waitPreviousHook(ctx, t.ID, timeout) {
+	if !h.waitPreviousHook(ctx, t.ID) {
 		u.Skipped = SkipPrevRunning
 		return u
 	}
@@ -311,9 +374,9 @@ func (h *Hub) runHook(ctx context.Context, t *templates.Template, hk templates.H
 	if res != nil && res.TimedOut && res.ExecID != "" {
 		h.deliveryMu.Lock()
 		if h.hookExecs == nil {
-			h.hookExecs = map[string]string{}
+			h.hookExecs = map[string]timedOutExec{}
 		}
-		h.hookExecs[t.ID] = res.ExecID
+		h.hookExecs[t.ID] = timedOutExec{execID: res.ExecID, timeout: timeout}
 		h.deliveryMu.Unlock()
 	}
 	output := func() string {
@@ -342,28 +405,37 @@ func (h *Hub) runHook(ctx context.Context, t *templates.Template, hk templates.H
 	return u
 }
 
+// timedOutExec is a timed-out hook exec that may still run, and the
+// timeout of the hook that started it (how long the next run waits).
+type timedOutExec struct {
+	execID  string
+	timeout time.Duration
+}
+
 // waitPreviousHook: instance id has no timed-out hook exec still running
-// — waiting for one up to timeout (ExecRunning every hookPoll).
-func (h *Hub) waitPreviousHook(ctx context.Context, id string, timeout time.Duration) bool {
+// — waiting for one up to its hook's timeout (ExecRunning every
+// hookPoll).
+func (h *Hub) waitPreviousHook(ctx context.Context, id string) bool {
 	h.deliveryMu.Lock()
-	execID := h.hookExecs[id]
+	prev := h.hookExecs[id]
 	h.deliveryMu.Unlock()
-	if execID == "" {
+	if prev.execID == "" {
 		return true
 	}
-	polls := int(timeout / hookPoll)
+	polls := int(prev.timeout / hookPoll)
 	for i := 0; ; i++ {
-		running, err := h.engine.ExecRunning(ctx, execID)
+		running, err := h.engine.ExecRunning(ctx, prev.execID)
 		if (err == nil && !running) || docker.IsNotFound(err) {
 			h.deliveryMu.Lock()
-			if h.hookExecs[id] == execID {
+			if h.hookExecs[id] == prev {
 				delete(h.hookExecs, id)
 			}
+			delete(h.hookStuck, id)
 			h.deliveryMu.Unlock()
 			return true
 		}
 		if i >= polls {
-			log.Printf("settings: %s: the hook run that timed out is still running (exec %s)", id, execID)
+			log.Printf("settings: %s: the hook run that timed out is still running (exec %s)", id, prev.execID)
 			return false
 		}
 		if h.sleep(ctx, hookPoll) != nil {
@@ -412,9 +484,9 @@ func (h *Hub) runStartHooks(ctx context.Context, id string) {
 	outs := h.buildHooksLocked(&tmpl, m)
 	h.mu.RUnlock()
 	delivered := h.loadDelivered(id)
-	units, _, _, requeue := h.runHooks(ctx, &tmpl, hookStep{id: id, trig: TriggerStart, outs: outs, delivered: &delivered, now: time.Now().UTC()})
+	r := h.runHooks(ctx, &tmpl, hookStep{id: id, trig: TriggerStart, outs: outs, delivered: &delivered, now: time.Now().UTC()})
 	failed := false
-	for _, u := range units {
+	for _, u := range r.units {
 		delivered.Status[u.Unit] = u
 		failed = failed || (!u.OK && u.Skipped == "")
 	}
@@ -429,7 +501,17 @@ func (h *Hub) runStartHooks(ctx context.Context, id string) {
 		}
 		h.opsMu.Unlock()
 	}
-	if requeue {
-		h.queueDelivery(id, TriggerStart, settings.EffectNone, busyRetry)
+	// Skipped start hooks (still running, directory down) are forced in
+	// the re-queued run, whatever trigger it merges into.
+	h.requeueHooks(id, TriggerStart, settings.EffectNone, r, false)
+}
+
+// forceList are force's hook names, sorted.
+func forceList(force map[string]bool) []string {
+	out := make([]string, 0, len(force))
+	for n := range force {
+		out = append(out, n)
 	}
+	slices.Sort(out)
+	return out
 }

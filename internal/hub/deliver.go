@@ -95,6 +95,11 @@ type queuedDelivery struct {
 	effect string
 	stop   func() bool
 	due    time.Time // when the armed timer fires
+	// force: hooks the run must run whatever its trigger (skipped start
+	// or forced runs re-queued; merged requests union them); real: some
+	// merged request is not a stuck-exec re-queue (deliver_hooks.go).
+	force map[string]bool
+	real  bool
 }
 
 // deliverOpts: effect is a save's effect on the running instance (P5:
@@ -104,6 +109,10 @@ type queuedDelivery struct {
 type deliverOpts struct {
 	effect    string
 	lifecycle bool
+	// force: hooks to run whatever the trigger; stuckRetry: only a
+	// re-queue after a still-running timed-out hook asked for this run.
+	force      map[string]bool
+	stuckRetry bool
 }
 
 func realAfterFunc(d time.Duration, f func()) func() bool { return time.AfterFunc(d, f).Stop }
@@ -154,6 +163,12 @@ func triggerRank(t Trigger) int {
 // merged requests combine. Never runs inline: safe under any lock but
 // deliveryMu.
 func (h *Hub) queueDelivery(id string, trig Trigger, effect string, delay time.Duration) {
+	h.queueDeliveryWith(id, trig, effect, delay, nil, false)
+}
+
+// queueDeliveryWith is queueDelivery with hooks to force and whether the
+// request is a stuck-exec re-queue (not a new trigger).
+func (h *Hub) queueDeliveryWith(id string, trig Trigger, effect string, delay time.Duration, force []string, stuckRetry bool) {
 	h.deliveryMu.Lock()
 	if h.queued == nil {
 		h.queued = map[string]*queuedDelivery{}
@@ -171,6 +186,13 @@ func (h *Hub) queueDelivery(id string, trig Trigger, effect string, delay time.D
 		q.trig = trig
 	}
 	q.effect = settings.Strongest(q.effect, effect)
+	q.real = q.real || !stuckRetry
+	for _, n := range force {
+		if q.force == nil {
+			q.force = map[string]bool{}
+		}
+		q.force[n] = true
+	}
 	if delay <= 0 {
 		if q.stop != nil {
 			q.stop()
@@ -210,7 +232,7 @@ func (h *Hub) fireQueued(id string, q *queuedDelivery) {
 }
 
 func (h *Hub) runQueued(id string, q queuedDelivery) {
-	if _, err := h.deliver(context.Background(), id, q.trig, deliverOpts{effect: q.effect}); err != nil {
+	if _, err := h.deliver(context.Background(), id, q.trig, deliverOpts{effect: q.effect, force: q.force, stuckRetry: !q.real}); err != nil {
 		log.Printf("settings: %s: delivery (%s): %v", id, q.trig, err)
 	}
 }
@@ -310,8 +332,6 @@ func hasPeopleOptions(t *templates.Template) bool {
 type deliveredDoc struct {
 	Hashes map[string]string     `json:"hashes"`
 	Status map[string]UnitResult `json:"status"`
-	// Triggers: the trigger each hook last ran for (a retry sends it).
-	Triggers map[string]string `json:"triggers,omitempty"`
 }
 
 func (h *Hub) deliveredPath(id string) string {
@@ -319,7 +339,7 @@ func (h *Hub) deliveredPath(id string) string {
 }
 
 func (h *Hub) loadDelivered(id string) deliveredDoc {
-	d := deliveredDoc{Hashes: map[string]string{}, Status: map[string]UnitResult{}, Triggers: map[string]string{}}
+	d := deliveredDoc{Hashes: map[string]string{}, Status: map[string]UnitResult{}}
 	if !templates.ValidID(id) {
 		return d
 	}
@@ -329,16 +349,13 @@ func (h *Hub) loadDelivered(id string) deliveredDoc {
 	}
 	if err := json.Unmarshal(b, &d); err != nil {
 		log.Printf("settings: %s: delivered.json unreadable (%v): every unit is delivered again", id, err)
-		return deliveredDoc{Hashes: map[string]string{}, Status: map[string]UnitResult{}, Triggers: map[string]string{}}
+		return deliveredDoc{Hashes: map[string]string{}, Status: map[string]UnitResult{}}
 	}
 	if d.Hashes == nil {
 		d.Hashes = map[string]string{}
 	}
 	if d.Status == nil {
 		d.Status = map[string]UnitResult{}
-	}
-	if d.Triggers == nil {
-		d.Triggers = map[string]string{}
 	}
 	return d
 }
@@ -423,7 +440,7 @@ func (h *Hub) deliver(ctx context.Context, id string, trig Trigger, opt deliverO
 			// — its own and those of what it already wrote (a written
 			// file is unchanged for the next run, which would otherwise
 			// never apply its on_membership_change).
-			h.queueDelivery(id, trig, applied, 0)
+			h.queueDeliveryWith(id, trig, applied, 0, forceList(opt.force), opt.stuckRetry)
 			return rep, nil
 		}
 		if try >= supersededTries {
@@ -465,7 +482,7 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 			// P20: never during a lifecycle or async operation (its op
 			// record, a restore's files); run again later.
 			rep.Units = append(rep.Units, UnitResult{Unit: unitBusy, Skipped: SkipBusy, At: now})
-			h.queueDelivery(id, trig, opt.effect, busyRetry)
+			h.queueDeliveryWith(id, trig, opt.effect, busyRetry, forceList(opt.force), opt.stuckRetry)
 			return rep, "", false, nil
 		}
 		if !enabled {
@@ -624,28 +641,29 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 	var ran map[string]UnitResult
 	if len(hookOuts) > 0 {
 		step := hookStep{id: id, trig: trig, outs: hookOuts, force: map[string]bool{}, current: current, delivered: &delivered, now: now}
+		for n := range opt.force {
+			step.force[n] = true
+		}
 		if r := tmpl.Manifest.Reload; effect == settings.EffectReload && r != nil && r.Hook != "" {
 			step.force[r.Hook] = true
 		}
 		if membershipHooks {
 			step.forceWhen = templates.HookMembershipChange
 		}
-		units, hran, stop, requeue := h.runHooks(ctx, &tmpl, step)
-		rep.Units = append(rep.Units, units...)
-		ran = hran
-		if stop {
+		hr := h.runHooks(ctx, &tmpl, step)
+		rep.Units = append(rep.Units, hr.units...)
+		ran = hr.ran
+		if hr.superseded {
 			finish()
 			return rep, effect, true, nil
 		}
-		if requeue {
-			// A timed-out run still runs: again later (with the reload it
-			// may still owe).
-			again := settings.EffectNone
-			if r := tmpl.Manifest.Reload; effect == settings.EffectReload && r != nil && r.Hook != "" && ran[r.Hook].Skipped == SkipPrevRunning {
-				again = settings.EffectReload
-			}
-			h.queueDelivery(id, trig, again, busyRetry)
+		// Skipped hooks: again later (forced, with the reload a skipped
+		// reload hook still owes).
+		again := settings.EffectNone
+		if r := tmpl.Manifest.Reload; effect == settings.EffectReload && r != nil && r.Hook != "" && ran[r.Hook].Skipped != "" && !ran[r.Hook].OK {
+			again = settings.EffectReload
 		}
+		h.requeueHooks(id, trig, again, hr, opt.stuckRetry)
 		h.stage(id, "hooks")
 	}
 

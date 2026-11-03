@@ -199,7 +199,10 @@ type Hub struct {
 	deliverLocks   sync.Map
 	// hookExecs: per instance, a timed-out hook exec that may still run
 	// (deliver_hooks.go; under deliveryMu).
-	hookExecs map[string]string
+	hookExecs map[string]timedOutExec
+	// hookStuck: per instance, re-queues since the last real trigger
+	// while a timed-out exec still runs (under deliveryMu).
+	hookStuck map[string]int
 	// The engine's clock (test-settable): afterFunc arms a timer (returns
 	// its stop), sleep waits out the reload grace period.
 	afterFunc func(d time.Duration, f func()) (stop func() bool)

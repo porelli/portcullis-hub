@@ -12,6 +12,7 @@ urls:
 hooks:
   - {name: apply, service: app, command: [/apply], when: [start, settings_change, membership_change], timeout: 5s}
   - {name: audit, service: app, user: "10001", command: [/audit, --json], when: [settings_change]}
+  - {name: warm, service: app, command: [/warm], when: [start], timeout: 2s}
 reload: {hook: apply}
 settings:
   options:
@@ -24,6 +25,7 @@ settings:
       delivery:
         - {hook: apply, render: {unit: GiB, integer: true}}
         - {hook: audit, render: {unit: GiB, integer: true}}
+        - {hook: warm, render: {unit: GiB, integer: true}}
     - key: token
       label: Token
       type: secret

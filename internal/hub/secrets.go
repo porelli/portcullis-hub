@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -146,17 +148,48 @@ func (h *Hub) knownSecrets(id string) []string {
 }
 
 // redactValues replaces every secret in s with [redacted], longest first
-// (a secret containing another is blanked whole). Callers clip after,
-// never before.
+// (a secret containing another is blanked whole). Each secret is also
+// blanked in its JSON string encodings (quotes trimmed; HTML-escaped and
+// not): output that echoes a hook's stdin carries `"`, `\`, `<`, `>`,
+// `&` escaped. Callers clip after, never before.
 func redactValues(s string, secrets []string) string {
-	vals := append([]string(nil), secrets...)
+	var vals []string
+	for _, v := range secrets {
+		if v == "" {
+			continue
+		}
+		vals = append(vals, v)
+		vals = append(vals, jsonForms(v)...)
+	}
 	sort.Slice(vals, func(i, j int) bool { return len(vals[i]) > len(vals[j]) })
 	for _, v := range vals {
-		if v != "" {
-			s = strings.ReplaceAll(s, v, "[redacted]")
-		}
+		s = strings.ReplaceAll(s, v, "[redacted]")
 	}
 	return s
+}
+
+// jsonForms are v's JSON string encodings without the quotes, when they
+// differ from v: encoding/json's default (HTML-escaped) and with
+// SetEscapeHTML(false).
+func jsonForms(v string) []string {
+	var out []string
+	if b, err := json.Marshal(v); err == nil && len(b) >= 2 {
+		if f := string(b[1 : len(b)-1]); f != v {
+			out = append(out, f)
+		}
+	}
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if enc.Encode(v) == nil {
+		b := bytes.TrimSuffix(buf.Bytes(), []byte("\n"))
+		if len(b) >= 2 {
+			if f := string(b[1 : len(b)-1]); f != v && !slices.Contains(out, f) {
+				out = append(out, f)
+			}
+		}
+	}
+	return out
 }
 
 // Generated-secret alphabets. ascii_printable is printable ASCII without

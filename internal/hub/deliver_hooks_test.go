@@ -3,6 +3,9 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"log"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -187,7 +190,7 @@ func TestHookSerialisedAndRetried(t *testing.T) {
 	enableHook(t, f)
 	// Two concurrent triggers: the second waits for the first.
 	release := make(chan struct{})
-	started := make(chan struct{}, 4)
+	started := make(chan struct{}, 16)
 	f.engine.setExec(func(id string, in docker.ExecInput) (*docker.ExecResult, error) {
 		started <- struct{}{}
 		<-release
@@ -319,7 +322,7 @@ func TestStartHookFailureRecorded(t *testing.T) {
 		t.Error("not enabled")
 	}
 	op := f.h.LastOp(hookID)
-	if op == nil || op.Op != OpHook || op.OK || !strings.Contains(op.Error, "apply") {
+	if op == nil || op.Op != OpHook || op.OK || !strings.HasPrefix(op.Error, "hook ") {
 		t.Errorf("op record = %+v", op)
 	}
 	if u := f.h.DeliveryStatus(hookID).Units["hook:apply"]; u.OK || u.Error == "" {
@@ -370,5 +373,192 @@ func TestHookNotRunningSkipped(t *testing.T) {
 	runs := hookRuns(t, f, "/apply", n)
 	if len(runs) != 1 || runs[0].Trigger != "start" || runs[0].Values["quota"] != float64(7) {
 		t.Errorf("start after not running: %+v", runs)
+	}
+}
+
+// Fix round 1: a secret that JSON escapes (`"`, `\`, `<`, `>`, `&`)
+// echoed back from stdin is redacted in every form, everywhere.
+func TestHookEchoedSecretRedacted(t *testing.T) {
+	f, _, _ := hookFixture(t)
+	enableHook(t, f)
+	const tok = `p"a\ss<w>&rd-0123456789`
+	forms := []string{tok, `p\"a\\ss<w>&rd-0123456789`, `p\"a\\ss<w>&rd-0123456789`}
+	var logBuf strings.Builder
+	var logMu sync.Mutex
+	log.SetOutput(writerFunc(func(b []byte) (int, error) {
+		logMu.Lock()
+		defer logMu.Unlock()
+		return logBuf.Write(b)
+	}))
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	tv := tok
+	saveHook(t, f, SettingsUpdate{Secrets: map[string]SecretChange{"token": {Value: &tv}}})
+	f.engine.setExec(func(id string, in docker.ExecInput) (*docker.ExecResult, error) {
+		if in.Cmd[0] != "/apply" {
+			return &docker.ExecResult{Output: []byte("ok"), ExecID: "ok"}, nil
+		}
+		return &docker.ExecResult{Output: append([]byte("bad input: "), in.Stdin...), ExitCode: 1, ExecID: "echo"}, nil
+	})
+	res := saveHook(t, f, SettingsUpdate{Values: map[string]json.RawMessage{"quota": raw("4GiB")}})
+	u, _ := unit(res.Deliveries, "hook:apply")
+	op := f.h.LastOp(hookID)
+	if u.OK || op == nil || op.OK {
+		t.Fatalf("unit %+v, op %+v", u, op)
+	}
+	logMu.Lock()
+	logged := logBuf.String()
+	logMu.Unlock()
+	for _, where := range []struct{ name, s string }{{"unit error", u.Error}, {"op record", op.Error}, {"log", logged}, {"status", f.h.DeliveryStatus(hookID).Units["hook:apply"].Error}} {
+		if !strings.Contains(where.s, "[redacted]") {
+			t.Errorf("%s: nothing redacted: %.300q", where.name, where.s)
+		}
+		for _, form := range forms {
+			if strings.Contains(where.s, form) {
+				t.Errorf("%s holds the secret as %q", where.name, form)
+			}
+		}
+	}
+}
+
+type writerFunc func([]byte) (int, error)
+
+func (w writerFunc) Write(b []byte) (int, error) { return w(b) }
+
+// Fix round 1: a hostname change whose restart's start hook fails keeps
+// its own (successful) hosts record; the instance's record is the hook's.
+func TestStartHookFailureKeepsHostsRecord(t *testing.T) {
+	f, _, _ := hookFixture(t)
+	enableHook(t, f)
+	f.engine.setExec(func(id string, in docker.ExecInput) (*docker.ExecResult, error) {
+		return &docker.ExecResult{Output: []byte("no\n"), ExitCode: 2, ExecID: "e2"}, nil
+	})
+	if err := f.h.SetHosts(hookID, map[string]string{"hookapp": "hooks-new.example.org"}, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	f.h.Wait()
+	if r := f.h.lastHostsOp(hookID); r == nil || !r.OK || r.Op != OpHosts {
+		t.Errorf("hosts record = %+v", r)
+	}
+	if b, err := os.ReadFile(f.h.hostsOpPath(hookID)); err != nil || !strings.Contains(string(b), `"ok": true`) {
+		t.Errorf("hosts.json = %s (%v)", b, err)
+	}
+	if r := f.h.LastOp(hookID); r == nil || r.Op != OpHook || r.OK {
+		t.Errorf("instance record = %+v", r)
+	}
+}
+
+// Fix round 1 (M2, M3): a stuck exec is checked once per run, up to the
+// timeout of the hook that timed out; re-queues back off and stop after
+// hookStuckRequeues with a failed hook record, until the next trigger.
+func TestHookStuckBackoffCapped(t *testing.T) {
+	f, _, clk := hookFixture(t)
+	enableHook(t, f)
+	// warm (2 s) times out and keeps running.
+	f.engine.setExec(func(id string, in docker.ExecInput) (*docker.ExecResult, error) {
+		if in.Cmd[0] == "/warm" {
+			return &docker.ExecResult{ExitCode: -1, TimedOut: true, ExecID: "stuck"}, nil
+		}
+		return &docker.ExecResult{Output: []byte("ok\n"), ExecID: "x"}, nil
+	})
+	f.engine.setExecRunning("stuck", true)
+	f.h.Deliver(context.Background(), hookID, TriggerRetry) // apply, audit run; warm times out
+	f.engine.setExec(nil)
+	inspects := func() int {
+		f.engine.mu.Lock()
+		defer f.engine.mu.Unlock()
+		return f.engine.execInspects
+	}
+	before := inspects()
+	rep, _ := f.h.Deliver(context.Background(), hookID, TriggerRetry)
+	// Once per run, up to warm's 2 s (3 inspects at hookPoll 1 s), every
+	// hook skipped.
+	if n := inspects() - before; n != 3 {
+		t.Errorf("inspects in one run = %d, want 3", n)
+	}
+	for _, name := range []string{"hook:apply", "hook:audit", "hook:warm"} {
+		if u, _ := unit(rep, name); u.Skipped != SkipPrevRunning {
+			t.Errorf("%s = %+v", name, u)
+		}
+	}
+	var delays []time.Duration
+	for range 20 {
+		ts := clk.pending()
+		if len(ts) == 0 {
+			break
+		}
+		delays = append(delays, ts[0].d)
+		clk.fire()
+		f.h.Wait()
+	}
+	if len(delays) != hookStuckRequeues {
+		t.Errorf("re-queues = %d (%v), want %d", len(delays), delays, hookStuckRequeues)
+	}
+	if len(delays) > 2 && (delays[0] != busyRetry || delays[1] != 2*busyRetry) {
+		t.Errorf("no backoff: %v", delays)
+	}
+	op := f.h.LastOp(hookID)
+	if op == nil || op.OK || op.Op != OpHook || !strings.Contains(op.Error, SkipPrevRunning) {
+		t.Errorf("op record after the cap = %+v", op)
+	}
+	// The next real trigger tries again.
+	f.h.Deliver(context.Background(), hookID, TriggerRetry)
+	if len(clk.pending()) != 1 {
+		t.Error("a new trigger did not re-queue")
+	}
+}
+
+// Fix round 1 (M4, M5): start hooks skipped at start are forced in the
+// re-queued run even when it merges into a higher-ranked trigger, and get
+// the trigger they declare.
+func TestSkippedStartHookForcedAfterMerge(t *testing.T) {
+	f, people, clk := hookFixture(t)
+	f.h.deliveryMu.Lock()
+	f.h.hookExecs = map[string]timedOutExec{hookID: {execID: "old", timeout: time.Second}}
+	f.h.deliveryMu.Unlock()
+	f.engine.setExecRunning("old", true)
+	enableHook(t, f)
+	if runs := hookRuns(t, f, "/warm", 0); len(runs) != 0 {
+		t.Fatalf("warm ran while the previous run runs")
+	}
+	// A membership change merges into the queued start re-run.
+	people.addGroup("users_hookapp", "alice", "bob", "dave")
+	f.h.TriggerMembershipDelivery()
+	if ts := clk.pending(); len(ts) != 1 {
+		t.Fatalf("armed timers = %d", len(ts))
+	}
+	f.engine.setExecRunning("old", false)
+	clk.fire()
+	f.h.Wait()
+	warm := hookRuns(t, f, "/warm", 0)
+	if len(warm) != 1 || warm[0].Trigger != "start" {
+		t.Errorf("warm runs = %+v (forced, its own trigger start)", warm)
+	}
+	if apply := hookRuns(t, f, "/apply", 0); len(apply) != 1 || apply[0].Trigger != "membership_change" {
+		t.Errorf("apply runs = %+v", apply)
+	}
+	// M5: a retry sends each hook a trigger it declares.
+	n := len(f.engine.ExecCalls())
+	f.h.Deliver(context.Background(), hookID, TriggerRetry)
+	for cmd, want := range map[string]string{"/warm": "start", "/apply": "settings_change", "/audit": "settings_change"} {
+		if runs := hookRuns(t, f, cmd, n); len(runs) != 1 || runs[0].Trigger != want {
+			t.Errorf("retry: %s runs = %+v, want trigger %s", cmd, runs, want)
+		}
+	}
+
+	// A start hook skipped with the directory down is re-queued, forced.
+	f2, people2, clk2 := hookFixture(t)
+	people2.set(func(p *fakePeople) { p.err = errors.New("directory down") })
+	enableHook(t, f2)
+	if runs := hookRuns(t, f2, "/apply", 0); len(runs) != 0 {
+		t.Fatalf("apply (needs people) ran with the directory down")
+	}
+	if ts := clk2.pending(); len(ts) != 1 || ts[0].d != settingsDebounce {
+		t.Fatalf("directory skip not re-queued: %d timers", len(ts))
+	}
+	people2.set(func(p *fakePeople) { p.err = nil })
+	clk2.fire()
+	f2.h.Wait()
+	if runs := hookRuns(t, f2, "/apply", 0); len(runs) != 1 || runs[0].Trigger != "start" {
+		t.Errorf("after the directory is back: apply runs = %+v", runs)
 	}
 }

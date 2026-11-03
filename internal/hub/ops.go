@@ -193,23 +193,26 @@ func (h *Hub) finishOpGuarded(id, op string, err error, rolledBack, keepRunning 
 		}
 		return &OpError{Record: r, Err: err}
 	}
-	if err == nil && op != OpHook && h.startHookFailed[id] {
-		// The operation's compose up succeeded and its start hook failed
-		// after it: the hook's failure stays the record.
-		delete(h.startHookFailed, id)
-		h.opsMu.Unlock()
-		log.Printf("ops: %s %s succeeded; its start hook's failure stays recorded", op, id)
-		return nil
-	}
+	// The operation's compose up succeeded and its start hook failed
+	// after it: the hook's failure stays the instance's record (only
+	// that one: a hostname change's own record is still written).
+	keepHook := err == nil && op != OpHook && h.startHookFailed[id]
 	delete(h.startHookFailed, id)
-	h.ops[id] = r
+	if !keepHook {
+		h.ops[id] = r
+	}
 	if op == OpHosts {
 		h.hostsOps[id] = r
 	}
 	h.opsMu.Unlock()
+	if keepHook {
+		log.Printf("ops: %s %s succeeded; its start hook's failure stays recorded", op, id)
+	}
 	if data, merr := json.MarshalIndent(r, "", "  "); merr == nil {
-		if werr := fsutil.WriteFileAtomic(h.opPath(id), data, 0600); werr != nil {
-			log.Printf("ops: cannot record %s %s: %v", op, id, werr)
+		if !keepHook {
+			if werr := fsutil.WriteFileAtomic(h.opPath(id), data, 0600); werr != nil {
+				log.Printf("ops: cannot record %s %s: %v", op, id, werr)
+			}
 		}
 		if op == OpHosts {
 			if werr := fsutil.WriteFileAtomic(h.hostsOpPath(id), data, 0600); werr != nil {
