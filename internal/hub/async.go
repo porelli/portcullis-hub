@@ -96,7 +96,7 @@ func (h *Hub) finishAsync(id, op, opID string, result map[string]string, warning
 		r = oe.Record
 		r.Op = op
 	} else if err != nil {
-		redact := h.secretRedactor(id)
+		redact := h.secretRedactor(id, secretsOf(err))
 		r.Error = clipRunes(redact(err.Error()), 600)
 		var ce *compose.Error
 		if errors.As(err, &ce) {

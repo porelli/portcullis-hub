@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
+	"maps"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -86,17 +88,33 @@ func (h *Hub) writeSecrets(id string, vals map[string]string) error {
 		}
 		return nil
 	}
-	if err := os.MkdirAll(h.secretsDir(id), 0700); err != nil {
-		return fmt.Errorf("secrets store directory of %s: %w", id, err)
+	if err := h.ensureSecretsDir(id); err != nil {
+		return err
 	}
-	os.Chmod(filepath.Dir(h.secretsDir(id)), 0700)
-	os.Chmod(h.secretsDir(id), 0700)
 	data, err := json.MarshalIndent(vals, "", "  ")
 	if err != nil {
 		return err
 	}
 	if err := fsutil.WriteFileAtomic(h.secretsPath(id), data, 0600); err != nil {
 		return fmt.Errorf("writing the secrets store of %s failed", id)
+	}
+	return nil
+}
+
+// ensureSecretsDir creates <data>/settings and <data>/settings/<id> as
+// 0700 (the mode set once, when created: MkdirAll applies the umask; a
+// failed chmod is logged, the store file itself is always 0600).
+func (h *Hub) ensureSecretsDir(id string) error {
+	for _, d := range []string{filepath.Dir(h.secretsDir(id)), h.secretsDir(id)} {
+		if _, err := os.Stat(d); err == nil {
+			continue
+		}
+		if err := os.Mkdir(d, 0700); err != nil && !errors.Is(err, os.ErrExist) {
+			return fmt.Errorf("secrets store directory of %s: %w", id, err)
+		}
+		if err := os.Chmod(d, 0700); err != nil {
+			log.Printf("settings: chmod 0700 %s: %v", d, err)
+		}
 	}
 	return nil
 }
@@ -161,8 +179,11 @@ var secretAlphabets = map[string]string{
 // charset's alphabet).
 func generateSecret(g *templates.GenerateSpec) (string, error) {
 	alpha, ok := secretAlphabets[g.Charset]
-	if !ok || g.Length < 1 {
+	if !ok {
 		return "", fmt.Errorf("generate: unknown charset %q", g.Charset)
+	}
+	if g.Length < 1 {
+		return "", fmt.Errorf("generate: length %d must be at least 1", g.Length)
 	}
 	n := big.NewInt(int64(len(alpha)))
 	b := make([]byte, g.Length)
@@ -226,9 +247,26 @@ func optionEnvOwners(t *templates.Template) map[string]string {
 }
 
 // blankEnvNames is an .env file with the values of names emptied (KEY=),
-// every other line kept byte for byte: a backup's config/env carries no
-// secret (they are in config/settings-secrets.json only).
-func blankEnvNames(data []byte, names map[string]bool) []byte {
+// and of every variable whose value is one of secrets (an instance whose
+// template doesn't resolve: its secret options' names are unknown), every
+// other line kept byte for byte: a backup's config/env carries no secret
+// (they are in config/settings-secrets.json only).
+func blankEnvNames(data []byte, names map[string]bool, secrets map[string]string) []byte {
+	names = maps.Clone(names)
+	if names == nil {
+		names = map[string]bool{}
+	}
+	stored := map[string]bool{}
+	for _, v := range secrets {
+		if v != "" {
+			stored[v] = true
+		}
+	}
+	for k, v := range parseEnv(data) {
+		if stored[v] {
+			names[k] = true
+		}
+	}
 	if len(names) == 0 {
 		return data
 	}
@@ -240,6 +278,26 @@ func blankEnvNames(data []byte, names map[string]bool) []byte {
 		}
 	}
 	return []byte(strings.Join(lines, "\n"))
+}
+
+// archiveSecrets are the secret values a staged archive holds: its
+// secrets store and the secret-looking values of its env (t: its
+// template, may be nil). For redaction only.
+func archiveSecrets(t *templates.Template, sb *staged) []string {
+	var out []string
+	if sb.secrets != nil {
+		if vals, err := parseSecrets(sb.secrets); err == nil {
+			for _, v := range vals {
+				if v != "" {
+					out = append(out, v)
+				}
+			}
+		}
+	}
+	if sb.env != nil {
+		out = append(out, envSecrets(t, parseEnv(sb.env))...)
+	}
+	return out
 }
 
 // writeArchivedSecrets writes an archive's secrets (nil = none) into

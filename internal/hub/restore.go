@@ -223,6 +223,10 @@ func (h *Hub) restoreInstance(id, archive, actor string, ready func()) (res *Res
 		return res, err
 	}
 	defer sb.cleanup()
+	// Redacted from here on: the values the instance has now and the
+	// archive's, whichever the instance holds when this ends.
+	extra := append(h.redactionSet(id), archiveSecrets(view, sb)...)
+	defer func() { err = withSecrets(err, extra) }()
 	if sb.m.Template != view.TemplateID {
 		return res, statusErr(409, "archive %s is a backup of template %s, instance %s runs %s", archive, sb.m.Template, id, view.TemplateID)
 	}
@@ -273,13 +277,13 @@ func (h *Hub) restoreInstance(id, archive, actor string, ready func()) (res *Res
 	rerr := h.stagedRollback(id, view, pre.Archive, wasEnabled)
 	if rerr != nil {
 		applyErr = fmt.Errorf("restore from %s failed: %w — putting the pre-restore backup %s back failed too: %v (it stays \"restoring\": restore again once the cause is fixed, the pre-restore backup is put back first)", archive, applyErr, pre.Archive, rerr)
-		return res, h.finishOp(id, OpRestore, applyErr, false)
+		return res, h.finishOp(id, OpRestore, withSecrets(applyErr, extra), false)
 	}
 	if cerr := h.clearRestoring(id, keep); cerr != nil {
 		res.Warnings = append(res.Warnings, cerr.Error())
 	}
 	applyErr = fmt.Errorf("restore from %s failed: %w — the previous data was put back (pre-restore backup %s)", archive, applyErr, pre.Archive)
-	return res, h.finishOp(id, OpRestore, applyErr, true)
+	return res, h.finishOp(id, OpRestore, withSecrets(applyErr, extra), true)
 }
 
 func archivePathOf(h *Hub, archive string) string {
@@ -719,6 +723,10 @@ func (h *Hub) restoreInstanceAs(archive, newID, actor string, hosts map[string]s
 		return res, err
 	}
 	defer sb.cleanup()
+	// Redacted from here on: the archive's values and (undo) the new
+	// instance's before it is removed.
+	var extra []string
+	defer func() { err = withSecrets(err, extra) }()
 
 	h.mu.RLock()
 	t := h.catalogLocked(sb.m.Template)
@@ -728,6 +736,11 @@ func (h *Hub) restoreInstanceAs(archive, newID, actor string, hosts map[string]s
 	}
 	domain := h.cfg.Domain
 	h.mu.RUnlock()
+	if t != nil {
+		extra = archiveSecrets(&tmpl, sb)
+	} else {
+		extra = archiveSecrets(nil, sb)
+	}
 	if t == nil {
 		return res, statusErr(409, "template %s of archive %s is not in the catalog", sb.m.Template, archive)
 	}
@@ -786,6 +799,8 @@ func (h *Hub) restoreInstanceAs(archive, newID, actor string, hosts map[string]s
 	var createdGroups []string
 	undo := func(cause error) error {
 		ctx := context.Background()
+		// Its regenerated secrets and env go with it: keep redacting them.
+		extra = append(extra, h.redactionSet(newID)...)
 		var errs []error
 		for _, v := range createdVols {
 			if err := h.engine.RemoveVolume(ctx, v); err != nil && !docker.IsNotFound(err) {

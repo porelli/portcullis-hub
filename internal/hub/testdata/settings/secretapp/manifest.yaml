@@ -24,3 +24,9 @@ settings:
       generate: {length: 32, charset: alphanumeric}
       applies: live
       delivery: [{hook: rotate}]
+    - key: api_url
+      label: API URL
+      type: string
+      applies: live
+      requires: [api_key]
+      delivery: [{hook: rotate}]

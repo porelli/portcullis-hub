@@ -374,3 +374,139 @@ func TestSecretsInBackup(t *testing.T) {
 		t.Errorf("settings store left after delete: %v", err)
 	}
 }
+
+// Fix round 1: an operation redacts the values it ran with, also when
+// the instance no longer holds them at the end. A failed same-instance
+// restore whose archived secret differs from the current one (rolled
+// back: the store holds the current one again).
+func TestSecretRedactedInFailedRestore(t *testing.T) {
+	f, audit := secretFixture(t)
+	if err := f.h.CreateInstance("secretapp", "secretapp-b", nil); err != nil {
+		t.Fatal(err)
+	}
+	const archived, current = "archived-key-111", "current-key-222"
+	saveSecret(t, f, "secretapp-b", "api_key", setSecret(archived))
+	if err := f.h.Enable("secretapp-b"); err != nil {
+		t.Fatal(err)
+	}
+	entry, err := f.h.BackupInstance("secretapp-b", "root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	saveSecret(t, f, "secretapp-b", "api_key", setSecret(current))
+	f.h.Wait()
+	f.runner.upErr = &compose.Error{Command: "up", Err: errors.New("exit status 1"),
+		Output: "env API_KEY=" + archived + "\nError: failed\n"}
+	op, err := f.h.StartRestore("secretapp-b", entry.Archive, "root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := waitOp(t, f.h, "secretapp-b", op.OpID)
+	stored, _ := os.ReadFile(f.h.opPath("secretapp-b"))
+	rj, _ := json.Marshal(r)
+	if r.OK || strings.Contains(string(rj), archived) || strings.Contains(string(stored), archived) || !strings.Contains(r.Output, "[redacted]") {
+		t.Errorf("failed restore record = %s", rj)
+	}
+	if got := storedSecrets(t, f, "secretapp-b")["api_key"]; got != current {
+		t.Errorf("after the rollback the store holds %q", got)
+	}
+	if a := auditText(audit); strings.Contains(a, archived) {
+		t.Errorf("audit = %s", a)
+	}
+	// The synchronous path too.
+	_, err = f.h.RestoreInstance("secretapp-b", entry.Archive, "root")
+	if err == nil || strings.Contains(err.Error(), archived) {
+		t.Errorf("sync restore = %v", err)
+	}
+}
+
+// A failed restore into a new id: the archived and the regenerated
+// secrets are gone with the removed instance, and still redacted.
+func TestSecretRedactedInFailedRestoreAs(t *testing.T) {
+	f, audit := secretFixture(t)
+	if err := f.h.CreateInstance("secretapp", "secretapp-b", nil); err != nil {
+		t.Fatal(err)
+	}
+	const key = "archived-key-333"
+	saveSecret(t, f, "secretapp-b", "api_key", setSecret(key))
+	saveSecret(t, f, "secretapp-b", "token", SecretChange{Generate: true})
+	if err := f.h.Enable("secretapp-b"); err != nil {
+		t.Fatal(err)
+	}
+	entry, err := f.h.BackupInstance("secretapp-b", "root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var regenerated string
+	f.engine.vol().copyToErr = func(string) error {
+		vals, _ := f.h.secretValues("secretapp-c")
+		regenerated = vals["token"]
+		return errors.New("disk full writing " + key + " / " + regenerated)
+	}
+	op, err := f.h.StartRestoreAs(entry.Archive, "secretapp-c", "root", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := waitOp(t, f.h, "secretapp-c", op.OpID)
+	if regenerated == "" || len(regenerated) != 32 {
+		t.Fatalf("the failure ran before the token was regenerated: %+v", r)
+	}
+	if _, err := os.Stat(f.h.secretsDir("secretapp-c")); !os.IsNotExist(err) {
+		t.Errorf("the undone instance kept its store: %v", err)
+	}
+	stored, _ := os.ReadFile(f.h.opPath("secretapp-c"))
+	rj, _ := json.Marshal(r)
+	for _, v := range []string{key, regenerated} {
+		if r.OK || strings.Contains(string(rj), v) || strings.Contains(string(stored), v) || strings.Contains(auditText(audit), v) {
+			t.Errorf("failed restore-as echoes a secret: %s", rj)
+		}
+	}
+	if !strings.Contains(r.Error, "[redacted]") {
+		t.Errorf("not redacted: %s", r.Error)
+	}
+}
+
+// Fix round 1: requires naming a secret — a set secret satisfies it,
+// and clearing a secret another set option requires is refused.
+func TestRequiresSecret(t *testing.T) {
+	f, _ := secretFixture(t)
+	if err := f.h.save("secretapp", SettingsUpdate{Values: vals("api_url", "https://x.example")}); statusOf(err) != 400 || !strings.Contains(err.Error(), "api_key") {
+		t.Errorf("api_url without api_key = %v", err)
+	}
+	saveSecret(t, f, "secretapp", "api_key", setSecret("s3cr3t"))
+	if err := f.h.save("secretapp", SettingsUpdate{Values: vals("api_url", "https://x.example")}); err != nil {
+		t.Errorf("api_url with api_key set = %v", err)
+	}
+	_, err := f.h.SaveSettings("secretapp", SettingsUpdate{Secrets: map[string]SecretChange{"api_key": {Clear: true}}}, "admin")
+	if statusOf(err) != 400 || !strings.Contains(err.Error(), "api_url") || !strings.Contains(err.Error(), "api_key") {
+		t.Errorf("clearing a required secret = %v", err)
+	}
+	if storedSecrets(t, f, "secretapp")["api_key"] != "s3cr3t" {
+		t.Error("the refused clear changed the store")
+	}
+	// Both together are fine.
+	if err := f.h.save("secretapp", SettingsUpdate{Values: vals("api_url", nil), Secrets: map[string]SecretChange{"api_key": {Clear: true}}}); err != nil {
+		t.Errorf("clearing both = %v", err)
+	}
+}
+
+// Fix round 1 minors: a backup without a view blanks env lines holding a
+// stored secret; generate's errors name the actual problem.
+func TestSecretMinors(t *testing.T) {
+	env := []byte("# x\nA='s3cr3t'\nB=s3cr3t\nC=other\nD='keep me'\n")
+	got := string(blankEnvNames(env, nil, map[string]string{"api_key": "s3cr3t"}))
+	if got != "# x\nA=\nB=\nC=other\nD='keep me'\n" {
+		t.Errorf("blanked:\n%s", got)
+	}
+	if _, err := generateSecret(&templates.GenerateSpec{Length: 0, Charset: templates.CharsetHex}); err == nil || !strings.Contains(err.Error(), "length") {
+		t.Errorf("bad length = %v", err)
+	}
+	if _, err := generateSecret(&templates.GenerateSpec{Length: 8, Charset: "alnum"}); err == nil || !strings.Contains(err.Error(), "charset") {
+		t.Errorf("bad charset = %v", err)
+	}
+	f, _ := secretFixture(t)
+	saveSecret(t, f, "secretapp", "api_key", setSecret("s3cr3t"))
+	if fi, err := os.Stat(filepath.Join(f.data, "settings")); err != nil || fi.Mode().Perm() != 0700 {
+		t.Errorf("settings dir: %v %v", fi, err)
+	}
+}

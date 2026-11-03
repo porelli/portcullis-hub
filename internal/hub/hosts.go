@@ -81,7 +81,7 @@ func (h *Hub) auditOp(actor, action, target, detail string, err error) {
 		// An instance's errors are redacted like its op records (stored
 		// secret settings, secret-looking env values).
 		if inst, _, _ := strings.Cut(target, "/"); templates.ValidID(inst) {
-			msg = h.secretRedactor(inst)(msg)
+			msg = h.secretRedactor(inst, secretsOf(err))(msg)
 		}
 		e.Result, e.Error = "error", msg
 		var se *StatusError

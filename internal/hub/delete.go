@@ -85,6 +85,9 @@ func (h *Hub) deleteInstance(id, confirm, actor string, ready func()) (res *Dele
 	if ready != nil {
 		ready()
 	}
+	// The store and env are removed part-way: redact what they hold now.
+	extra := h.redactionSet(id)
+	defer func() { err = withSecrets(err, extra) }()
 	if tg.entry.State == state.InstanceRestoring && tg.entry.RestoreAs != "" {
 		res.Warnings = append(res.Warnings, fmt.Sprintf("%s was being restored from %s and never finished: the delete backup holds its half-restored data", id, tg.entry.RestoreAs))
 	} else if tg.entry.State == state.InstanceRestoring {
@@ -116,7 +119,7 @@ func (h *Hub) deleteInstance(id, confirm, actor string, ready func()) (res *Dele
 		log.Printf("instance %s: deleting (backup %s)", id, entry.Archive)
 	}
 	if err := h.deleteSteps(id, actor, res); err != nil {
-		return res, h.finishOp(id, OpDelete, fmt.Errorf("delete of %s stopped part-way (it stays \"deleting\"; delete again to continue, the backup %s is kept): %w", id, res.Backup, err), false)
+		return res, h.finishOp(id, OpDelete, withSecrets(fmt.Errorf("delete of %s stopped part-way (it stays \"deleting\"; delete again to continue, the backup %s is kept): %w", id, res.Backup, err), extra), false)
 	}
 	log.Printf("instance %s deleted (backup %s)", id, res.Backup)
 	return res, nil

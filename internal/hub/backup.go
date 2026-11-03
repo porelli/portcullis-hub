@@ -414,7 +414,7 @@ func (h *Hub) backupLocked(id, reason string, keepStopped bool) (*BackupEntry, e
 		}
 		if err == nil {
 			if member == "config/env" {
-				data = blankEnvNames(data, secretEnv)
+				data = blankEnvNames(data, secretEnv, secrets)
 			}
 			err = add(member, data)
 		}

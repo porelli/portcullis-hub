@@ -553,6 +553,19 @@ func (h *Hub) instanceValuesLocked(t *templates.Template, s state.InstanceSettin
 	return out
 }
 
+// requiresValuesLocked are the values CheckRequires sees: the effective
+// instance values, plus every secret that is set as a non-empty marker
+// (its value is never read). Caller must hold mu.
+func (h *Hub) requiresValuesLocked(t *templates.Template, s state.InstanceSettings) map[string]settings.Value {
+	out := h.instanceValuesLocked(t, s)
+	for k := range s.Secrets {
+		if o := optionByKey(t, k); o != nil && o.Type == templates.TypeSecret {
+			out[k] = settings.SecretShown
+		}
+	}
+	return out
+}
+
 // configCapability is what t's app can enforce in a sign-in mode (native:
 // the app's own login only, where the template allows it) — as
 // accessLocked computes it.
@@ -1068,8 +1081,8 @@ func (h *Hub) nextSettingsLocked(t *templates.Template, cur state.InstanceSettin
 	if len(next.Secrets) == 0 {
 		next.Secrets = nil
 	}
-	if len(parsed.values) > 0 && t.Manifest.Settings != nil {
-		if err := settings.CheckRequires(t.Manifest.Settings, h.instanceValuesLocked(t, next)); err != nil {
+	if len(parsed.values)+len(parsed.secrets) > 0 && t.Manifest.Settings != nil {
+		if err := settings.CheckRequires(t.Manifest.Settings, h.requiresValuesLocked(t, next)); err != nil {
 			return next, nil, nil, nil, statusErr(400, "%v", err)
 		}
 	}
