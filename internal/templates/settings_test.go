@@ -199,9 +199,9 @@ func TestPersonScopeNeedsDefaultAndPersonDelivery(t *testing.T) {
 func TestResolveFitsType(t *testing.T) {
 	runSettingsCases(t, []settingsCase{
 		{"max on string", oidcHead + opts("{key: quota, label: Q, type: string, scope: person, default: a, resolve: max, "+personClaim+"}"), oidcCompose, "quota", "resolve max"},
-		{"union on list", oidcHead + opts("{key: langs, label: L, type: list, items: {type: string}, scope: person, default: [en], resolve: union, delivery: [{claim: {client: app, name: app_langs, json_type: json}}]}"), oidcCompose, "", ""},
+		{"union on list", oidcHead + opts("{key: langs, label: L, type: list, items: {type: string}, scope: person, default: [en], resolve: union, delivery: [{claim: {client: app, name: app_langs, json_type: json, render: {format: json}}}]}"), oidcCompose, "", ""},
 		{"any on bool", oidcHead + opts("{key: beta, label: B, type: bool, scope: person, default: false, resolve: any, delivery: [{claim: {client: app, name: app_beta, json_type: bool}}]}"), oidcCompose, "", ""},
-		{"priority on string", oidcHead + opts("{key: quota, label: Q, type: string, scope: person, default: a, resolve: priority, "+personClaim+"}"), oidcCompose, "", ""},
+		{"priority on string", oidcHead + opts("{key: quota, label: Q, type: string, scope: person, default: a, resolve: priority, delivery: [{claim: {client: app, name: app_quota, json_type: string}}]}"), oidcCompose, "", ""},
 		{"unknown rule", oidcHead + opts("{key: quota, label: Q, type: int, scope: person, default: 1, resolve: avg, "+personClaim+"}"), oidcCompose, "quota", "resolve avg"},
 		{"choice does not fit", oidcHead + opts("{key: quota, label: Q, type: int, scope: person, default: 1, resolve: max, resolve_choices: [max, min, union], "+personClaim+"}"), oidcCompose, "quota", "resolve_choices: union"},
 		{"choices fit", oidcHead + opts("{key: quota, label: Q, type: size, step: 1GiB, allow_unlimited: true, scope: person, default: 100GiB, resolve: max, resolve_choices: [max, min, priority], delivery: [{claim: {client: app, name: app_quota, json_type: int, render: {unit: GiB, unlimited: '-1'}}}]}"), oidcCompose, "", ""},
@@ -929,3 +929,29 @@ type onlyString struct{}
 
 func (onlyString) Known(typ string) bool     { return typ == TypeString }
 func (onlyString) CheckOption(*Option) error { return nil }
+
+// A claim's json_type must fit what its render can produce (statically):
+// Keycloak converts the attribute value to that type.
+func TestClaimJSONTypeFitsRender(t *testing.T) {
+	c := func(typ, extra, claim string) string {
+		return oidcHead + opts("{key: v, label: V, type: "+typ+", scope: person, "+extra+", delivery: [{claim: {client: app, name: app_v, "+claim+"}}]}")
+	}
+	runSettingsCases(t, []settingsCase{
+		{"int ok", c("int", "default: 1", "json_type: int"), oidcCompose, "", ""},
+		{"size in GiB ok", c("size", "default: 1GiB, step: 1GiB", "json_type: int, render: {unit: GiB, integer: true}"), oidcCompose, "", ""},
+		{"duration ok", c("duration", "default: 1h", "json_type: int"), oidcCompose, "", ""},
+		{"size in bytes", c("size", "default: 1GiB", "json_type: int"), oidcCompose, "v", "json_type int"},
+		{"size in B", c("size", "default: 1GiB", "json_type: int, render: {unit: B}"), oidcCompose, "v", "json_type int"},
+		{"unlimited not a number", c("size", "default: 1GiB, allow_unlimited: true", "json_type: int, render: {unit: GiB, unlimited: none}"), oidcCompose, "v", "unlimited"},
+		{"unlimited missing", c("size", "default: 1GiB, allow_unlimited: true", "json_type: int, render: {unit: GiB}"), oidcCompose, "v", "unlimited"},
+		{"int from string", c("string", "default: x", "json_type: int"), oidcCompose, "v", "json_type int"},
+		{"bool ok", c("bool", "default: false", "json_type: bool"), oidcCompose, "", ""},
+		{"bool rendered 1/0", c("bool", "default: false", `json_type: bool, render: {"true": "1", "false": "0"}`), oidcCompose, "v", "json_type bool"},
+		{"bool from enum", c("enum", "default: a, options: [{value: a, label: A}]", "json_type: bool"), oidcCompose, "v", "json_type bool"},
+		{"json list ok", c("list", "default: [a], items: {type: string}", "json_type: json, render: {format: json}"), oidcCompose, "", ""},
+		{"json list joined", c("list", "default: [a], items: {type: string}", "json_type: json"), oidcCompose, "v", "json_type json"},
+		{"json string", c("string", "default: x", "json_type: json"), oidcCompose, "v", "json_type json"},
+		{"json int ok", c("int", "default: 1", "json_type: json"), oidcCompose, "", ""},
+		{"string anything", c("enum", "default: a, options: [{value: a, label: A}]", "json_type: string"), oidcCompose, "", ""},
+	})
+}

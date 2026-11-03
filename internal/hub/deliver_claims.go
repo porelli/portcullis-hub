@@ -4,10 +4,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -42,6 +45,9 @@ import (
 // Network calls: never call it holding mu.
 type AttrStore interface {
 	UserAttributes(ctx context.Context) ([]lldap.Attribute, error)
+	// ListUsers (with their attributes) finds who holds a setting value
+	// when delivered.json's record of it is lost.
+	ListUsers(ctx context.Context) ([]lldap.User, error)
 	AddHiddenUserAttribute(ctx context.Context, name string) error
 	DeleteUserAttribute(ctx context.Context, name string) error
 	SetUserAttributes(ctx context.Context, user string, set map[string][]string, remove []string) error
@@ -126,24 +132,25 @@ func (h *Hub) instanceClaimAttrs(t *templates.Template, id string) []string {
 type claimOutput struct {
 	attr, key string
 	values    map[string]string // user → rendered value (people who get one)
-	err       error
+	// unrenderable: people whose value no delivery could take (cleared).
+	unrenderable int
+	err          error
 }
 
 // claimPlan is the claims step's desired state for one run.
 type claimPlan struct {
 	outs    []claimOutput                      // by attribute
 	clients map[string][]keycloak.SettingClaim // instance client id → its claims
-	byAttr  map[string][]string                // attribute → its clients
+	all     []string                           // every client of the instance
 	users   map[string]bool                    // every LLDAP user of the snapshot
 	skip    string                             // SkipDirectory: no snapshot
-	why     string                             // the population's reason when empty
 }
 
 // buildClaimsLocked is t's claims plan with snapshot m (nil: the
 // directory unavailable — skipped, nothing cleared). Caller holds mu
 // (read).
 func (h *Hub) buildClaimsLocked(t *templates.Template, m *directory.Membership) claimPlan {
-	plan := claimPlan{clients: map[string][]keycloak.SettingClaim{}, byAttr: map[string][]string{}}
+	plan := claimPlan{clients: map[string][]keycloak.SettingClaim{}, all: t.NamesFor(t.ID).Clients}
 	opts := claimOptions(t)
 	if len(opts) == 0 {
 		return plan
@@ -153,7 +160,6 @@ func (h *Hub) buildClaimsLocked(t *templates.Template, m *directory.Membership) 
 		plan.skip = SkipDirectory
 	} else {
 		people = h.resolvePeopleLocked(t, m)
-		plan.why = h.populationLocked(t, m).Why
 		plan.users = make(map[string]bool, len(m.Users))
 		for u := range m.Users {
 			plan.users[u] = true
@@ -169,10 +175,9 @@ func (h *Hub) buildClaimsLocked(t *templates.Template, m *directory.Membership) 
 				break
 			}
 			plan.clients[cid] = append(plan.clients[cid], keycloak.SettingClaim{Attr: out.attr, Claim: d.Claim.Name, JSONType: d.Claim.JSONType})
-			plan.byAttr[out.attr] = append(plan.byAttr[out.attr], cid)
 		}
 		if out.err == nil && people != nil {
-			out.err = renderClaimValues(t.ID, o, ds, people, out.values)
+			out.unrenderable, out.err = renderClaimValues(t.ID, o, ds, people, out.values)
 		}
 		plan.outs = append(plan.outs, out)
 	}
@@ -182,9 +187,10 @@ func (h *Hub) buildClaimsLocked(t *templates.Template, m *directory.Membership) 
 
 // renderClaimValues fills values with each person's rendered value of o
 // (one attribute holds one value: every claim delivery of o must render
-// it alike). nil (no value) and UNRESOLVED (ReasonFailClosed) values, and
-// values a delivery refuses, are left out: those people are cleared.
-func renderClaimValues(id string, o *templates.Option, ds []templates.Delivery, people map[string]map[string]settings.Resolved, values map[string]string) error {
+// it alike). nil (no value) and UNRESOLVED (ReasonFailClosed) values are
+// left out, and so are values a delivery refuses or its json_type can't
+// take (unrenderable, counted): those people are cleared.
+func renderClaimValues(id string, o *templates.Option, ds []templates.Delivery, people map[string]map[string]settings.Resolved, values map[string]string) (unrenderable int, err error) {
 	for _, user := range sortedUsers(people) {
 		res, ok := people[user][o.Key]
 		if !ok || res.Value == nil {
@@ -193,18 +199,43 @@ func renderClaimValues(id string, o *templates.Option, ds []templates.Delivery, 
 		text, set := "", false
 		for i := range ds {
 			r, err := settings.RenderDelivery(o, res.Value, &ds[i])
+			if err == nil {
+				err = claimValueFits(ds[i].Claim.JSONType, r.Text)
+			}
 			if err != nil {
-				log.Printf("settings: %s: %s: the value of %s doesn't render (%v): cleared", id, o.Key, user, err)
+				log.Printf("settings: %s: %s: the value of %s can't be delivered as a claim (%v): cleared", id, o.Key, user, err)
 				set = false
+				unrenderable++
 				break
 			}
 			if set && r.Text != text {
-				return fmt.Errorf("setting %s: its claim deliveries render one value differently (%s): one attribute holds one value", o.Key, settings.DeliveryName(&ds[i]))
+				return 0, fmt.Errorf("setting %s: its claim deliveries render one value differently (%s): one attribute holds one value", o.Key, settings.DeliveryName(&ds[i]))
 			}
 			text, set = r.Text, true
 		}
 		if set {
 			values[user] = text
+		}
+	}
+	return unrenderable, nil
+}
+
+// claimValueFits checks a rendered value against the claim's json_type
+// (Keycloak converts the attribute: int is a 32-bit integer, bool exactly
+// true/false, json a JSON document; string anything).
+func claimValueFits(jsonType, text string) error {
+	switch jsonType {
+	case "int":
+		if _, err := strconv.ParseInt(text, 10, 32); err != nil {
+			return fmt.Errorf("%q is not a 32-bit integer (json_type int)", text)
+		}
+	case "bool":
+		if text != "true" && text != "false" {
+			return fmt.Errorf("%q is not true or false (json_type bool)", text)
+		}
+	case "json":
+		if !json.Valid([]byte(text)) {
+			return fmt.Errorf("the value is not valid JSON (json_type json)")
 		}
 	}
 	return nil
@@ -216,16 +247,26 @@ func claimHash(v string) string {
 	return hex.EncodeToString(sum[:8])
 }
 
-// claimPending marks a user whose last write failed: written again.
+// claimPending marks a user whose value is unknown — a failed write, or a
+// holder found by the holders query: written (or cleared) again.
 const claimPending = "pending"
 
-// claimStep is the claims step's input from deliverOnce.
+// claimStep is the claims step's input.
 type claimStep struct {
 	t         *templates.Template
 	plan      claimPlan
 	current   func() bool // the generation is still the run's (call under mu)
 	delivered *deliveredDoc
 	now       time.Time
+}
+
+// storeError is an LLDAP failure as a unit shows it (credentials missing:
+// "Users & Groups not configured").
+func (h *Hub) storeError(id, what string, err error) string {
+	if errors.Is(err, lldap.ErrNotConfigured) {
+		return "Users & Groups not configured: the claims can't be delivered"
+	}
+	return h.redactUnitError(id, fmt.Errorf("%s: %w", what, err))
 }
 
 // runClaims applies step.plan (outside mu): the units, and whether a
@@ -284,23 +325,16 @@ func (h *Hub) runClaims(ctx context.Context, step claimStep) (units []UnitResult
 	}
 
 	// The schema: one read serves the orphans and the attributes.
-	var schema map[string]lldap.Attribute
-	readSchema := func() error {
-		attrs, err := store.UserAttributes(ctx)
-		if err != nil {
-			return err
-		}
-		schema = make(map[string]lldap.Attribute, len(attrs))
-		for _, a := range attrs {
-			schema[a.Name] = a
-		}
-		return nil
-	}
 	if !isCurrent() {
 		return collect(), true
 	}
-	if err := readSchema(); err != nil {
-		return failAll(h.redactUnitError(t.ID, fmt.Errorf("LLDAP user attributes: %w", err))), false
+	attrs, err := store.UserAttributes(ctx)
+	if err != nil {
+		return failAll(h.storeError(t.ID, "LLDAP user attributes", err)), false
+	}
+	schema := make(map[string]lldap.Attribute, len(attrs))
+	for _, a := range attrs {
+		schema[a.Name] = a
 	}
 	if len(orphans) > 0 {
 		h.removeOrphanClaims(ctx, t, orphans, schema, idp, store, d)
@@ -312,47 +346,96 @@ func (h *Hub) runClaims(ctx context.Context, step claimStep) (units []UnitResult
 		return collect(), false
 	}
 
-	// The attributes (hidden, not editable), then the mappers.
-	ready := map[string]bool{}
+	// The attributes (hidden, not editable). exists: the Hub's attribute
+	// is there (its mappers stay in the ensure set); ready: values may be
+	// written.
+	exists, ready := map[string]bool{}, map[string]bool{}
+	var lost []string // existing attributes without a record
 	for _, o := range plan.outs {
 		u := res[o.attr]
-		switch at, ok := schema[o.attr]; {
-		case o.err != nil:
-			u.Error = h.redactUnitError(t.ID, o.err)
+		unit := claimUnit(o.attr)
+		at, ok := schema[o.attr]
+		switch {
 		case ok && (at.IsVisible || at.IsEditable || at.IsList):
 			// Not one the Hub made: never write a value users could see.
 			u.Error = fmt.Sprintf("LLDAP attribute %s of setting %s exists and is visible, editable or a list: it isn't the Hub's hidden attribute, nothing was written (delete it in LLDAP)", o.attr, o.key)
-		case !ok:
-			if err := store.AddHiddenUserAttribute(ctx, o.attr); err != nil {
-				u.Error = h.redactUnitError(t.ID, fmt.Errorf("creating LLDAP attribute %s of setting %s: %w", o.attr, o.key, err))
+			continue
+		case ok:
+			exists[o.attr] = true
+			if d.Claims[unit] == nil {
+				lost = append(lost, o.attr)
+			}
+		default:
+			if o.err != nil {
 				break
 			}
-			ready[o.attr] = true
-		default:
-			ready[o.attr] = true
+			if err := store.AddHiddenUserAttribute(ctx, o.attr); err != nil {
+				u.Error = h.storeError(t.ID, fmt.Sprintf("creating LLDAP attribute %s of setting %s", o.attr, o.key), err)
+				continue
+			}
+			// New: nobody holds a value. Known and empty from now on.
+			exists[o.attr] = true
+			d.Claims[unit] = map[string]string{}
+		}
+		if o.err != nil {
+			u.Error = h.redactUnitError(t.ID, o.err)
+			continue
+		}
+		ready[o.attr] = true
+	}
+	if len(lost) > 0 {
+		// No record (delivered.json lost): who holds a value, from one
+		// query; only those are cleared or rewritten.
+		users, err := store.ListUsers(ctx)
+		for _, a := range lost {
+			if err != nil {
+				ready[a] = false
+				res[a].Error = h.storeError(t.ID, "LLDAP users (who holds "+a+")", err)
+				continue
+			}
+			rec := map[string]string{}
+			for _, u := range users {
+				if len(u.Attributes[a]) > 0 {
+					rec[strings.ToLower(u.ID)] = claimPending
+				}
+			}
+			d.Claims[claimUnit(a)] = rec
 		}
 	}
-	cids := make([]string, 0, len(plan.clients))
+
+	// The mappers: every client of the instance gets its exact set (none:
+	// its setting mappers go — a claim moved to another client).
+	cids := append([]string(nil), plan.all...)
 	for cid := range plan.clients {
-		cids = append(cids, cid)
+		if !slices.Contains(cids, cid) {
+			cids = append(cids, cid)
+		}
 	}
 	sort.Strings(cids)
 	for _, cid := range cids {
 		var claims []keycloak.SettingClaim
 		for _, c := range plan.clients[cid] {
-			if ready[c.Attr] {
+			if exists[c.Attr] {
 				claims = append(claims, c)
 			}
 		}
 		if !isCurrent() {
 			return collect(), true
 		}
-		if err := idp.EnsureSettingClaims(ctx, cid, t.ID, claims); err != nil {
-			for _, c := range plan.clients[cid] {
-				if ready[c.Attr] {
-					ready[c.Attr] = false
-					res[c.Attr].Error = h.redactUnitError(t.ID, fmt.Errorf("Keycloak client %s: %w", cid, err))
-				}
+		err := idp.EnsureSettingClaims(ctx, cid, t.ID, claims)
+		if err == nil {
+			continue
+		}
+		if len(plan.clients[cid]) == 0 {
+			// Nothing to deliver there: another owner's client, one not
+			// registered yet, a Keycloak hiccup — only logged.
+			log.Printf("settings: %s: Keycloak client %s (no setting claims): %v", t.ID, cid, err)
+			continue
+		}
+		for _, c := range plan.clients[cid] {
+			if ready[c.Attr] {
+				ready[c.Attr] = false
+				res[c.Attr].Error = h.redactUnitError(t.ID, fmt.Errorf("Keycloak client %s: %w", cid, err))
 			}
 		}
 	}
@@ -363,24 +446,17 @@ func (h *Hub) runClaims(ctx context.Context, step claimStep) (units []UnitResult
 		remove []string
 	}
 	changes := map[string]*change{}
-	written := map[string]int{}
-	cleared := map[string]int{}
+	ch := func(u string) *change {
+		if changes[u] == nil {
+			changes[u] = &change{set: map[string][]string{}}
+		}
+		return changes[u]
+	}
 	for _, o := range plan.outs {
 		if !ready[o.attr] {
 			continue
 		}
-		unit := claimUnit(o.attr)
-		rec, known := d.Claims[unit]
-		if rec == nil {
-			rec = map[string]string{}
-			d.Claims[unit] = rec
-		}
-		ch := func(u string) *change {
-			if changes[u] == nil {
-				changes[u] = &change{set: map[string][]string{}}
-			}
-			return changes[u]
-		}
+		rec := d.Claims[claimUnit(o.attr)]
 		for u, v := range o.values {
 			if rec[u] != claimHash(v) {
 				ch(u).set[o.attr] = []string{v}
@@ -397,26 +473,21 @@ func (h *Hub) runClaims(ctx context.Context, step claimStep) (units []UnitResult
 			}
 			ch(u).remove = append(ch(u).remove, o.attr)
 		}
-		if !known {
-			// No record (first delivery, or delivered.json lost): clear
-			// everyone else once.
-			for u := range plan.users {
-				if _, keep := o.values[u]; !keep && rec[u] == "" {
-					ch(u).remove = append(ch(u).remove, o.attr)
-				}
-			}
-		}
 	}
 	users := make([]string, 0, len(changes))
 	for u := range changes {
 		users = append(users, u)
 	}
 	sort.Strings(users)
+	written, cleared := map[string]int{}, map[string]int{}
 	failed := map[string][]string{}
+	fin := func() []UnitResult {
+		return h.claimUnits(plan, order, res, written, cleared, failed)
+	}
 	for _, u := range users {
 		c := changes[u]
 		if !isCurrent() {
-			return h.claimUnits(order, res, written, cleared, failed), true
+			return fin(), true
 		}
 		sort.Strings(c.remove)
 		err := store.SetUserAttributes(ctx, u, c.set, c.remove)
@@ -424,7 +495,7 @@ func (h *Hub) runClaims(ctx context.Context, step claimStep) (units []UnitResult
 			rec := d.Claims[claimUnit(a)]
 			if err != nil {
 				rec[u] = claimPending
-				failed[a] = append(failed[a], fmt.Sprintf("%s: %s", u, h.redactUnitError(t.ID, err)))
+				failed[a] = append(failed[a], fmt.Sprintf("%s: %s", u, h.storeError(t.ID, "write", err)))
 				continue
 			}
 			rec[u] = claimHash(v[0])
@@ -434,7 +505,7 @@ func (h *Hub) runClaims(ctx context.Context, step claimStep) (units []UnitResult
 			rec := d.Claims[claimUnit(a)]
 			if err != nil {
 				rec[u] = claimPending
-				failed[a] = append(failed[a], fmt.Sprintf("%s: %s", u, h.redactUnitError(t.ID, err)))
+				failed[a] = append(failed[a], fmt.Sprintf("%s: %s", u, h.storeError(t.ID, "write", err)))
 				continue
 			}
 			delete(rec, u)
@@ -446,11 +517,16 @@ func (h *Hub) runClaims(ctx context.Context, step claimStep) (units []UnitResult
 			res[o.attr].OK = true
 		}
 	}
-	return h.claimUnits(order, res, written, cleared, failed), false
+	return fin(), false
 }
 
-// claimUnits finishes the units: counts, failed writes, unchanged.
-func (h *Hub) claimUnits(order []string, res map[string]*UnitResult, written, cleared map[string]int, failed map[string][]string) []UnitResult {
+// claimUnits finishes the units: counts, unrenderable values, failed
+// writes, unchanged.
+func (h *Hub) claimUnits(plan claimPlan, order []string, res map[string]*UnitResult, written, cleared map[string]int, failed map[string][]string) []UnitResult {
+	bad := map[string]int{}
+	for _, o := range plan.outs {
+		bad[o.attr] = o.unrenderable
+	}
 	out := make([]UnitResult, 0, len(order))
 	for _, a := range order {
 		u := res[a]
@@ -462,6 +538,14 @@ func (h *Hub) claimUnits(order []string, res map[string]*UnitResult, written, cl
 			u.Skipped = SkipUnchanged
 		case u.OK:
 			u.Message = fmt.Sprintf("%d written, %d cleared", written[a], cleared[a])
+		}
+		if u.OK && bad[a] > 0 {
+			note := fmt.Sprintf("%d values can't be delivered as this claim (cleared; see the log)", bad[a])
+			if u.Message != "" {
+				u.Message += "; " + note
+			} else {
+				u.Message = note
+			}
 		}
 		out = append(out, *u)
 	}
@@ -528,6 +612,10 @@ func (h *Hub) removeInstanceClaims(ctx context.Context, idp IdP, id string, clie
 		return nil
 	}
 	have, err := store.UserAttributes(ctx)
+	if errors.Is(err, lldap.ErrNotConfigured) {
+		res.Warnings = append(res.Warnings, fmt.Sprintf("Users & Groups is not configured: the LLDAP setting attributes %s were not removed", strings.Join(attrs, ", ")))
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("listing the LLDAP user attributes: %w", err)
 	}
@@ -543,5 +631,77 @@ func (h *Hub) removeInstanceClaims(ctx context.Context, idp IdP, id string, clie
 			return fmt.Errorf("deleting LLDAP attribute %s: %w", a, err)
 		}
 	}
+	return nil
+}
+
+// deliverClaimsAfterStart delivers instance id's claims in the background
+// after a compose up (the start run writes only the data files: a start
+// never waits for LLDAP or Keycloak). It takes the delivery lock, so it
+// runs after the start's own deliveries; no busy check — the claims
+// write no files or op records, and the instance was just started from
+// its current state. Superseded: the newer commit's run delivers them.
+func (h *Hub) deliverClaimsAfterStart(id string) {
+	recorded := len(h.loadDelivered(id).Claims) > 0
+	h.mu.RLock()
+	t := h.findLocked(id)
+	run := t != nil && (claimsNeedPeople(t) || recorded)
+	h.mu.RUnlock()
+	if !run {
+		return
+	}
+	h.goBackground(func() {
+		if err := h.runClaimsOnly(context.Background(), id); err != nil {
+			log.Printf("settings: %s: claims after start: %v", id, err)
+		}
+	})
+}
+
+// runClaimsOnly is an engine run of the claims step alone.
+func (h *Hub) runClaimsOnly(ctx context.Context, id string) error {
+	l := h.deliverLock(id)
+	l.Lock()
+	defer l.Unlock()
+	now := time.Now().UTC()
+	h.mu.RLock()
+	t := h.findLocked(id)
+	h.mu.RUnlock()
+	if t == nil {
+		return nil
+	}
+	var m *directory.Membership
+	if claimsNeedPeople(t) {
+		mctx, cancel := context.WithTimeout(ctx, groupSnapshotTimeout)
+		var err error
+		m, err = h.membership(mctx)
+		cancel()
+		if err != nil {
+			log.Printf("settings: %s: WARNING: directory unavailable (%v): the claims keep what they last delivered", id, err)
+		}
+	}
+	h.mu.RLock()
+	live := h.findLocked(id)
+	if live == nil {
+		h.mu.RUnlock()
+		return nil
+	}
+	tmpl := *live
+	gen := h.deliveryGenLocked(&tmpl)
+	plan := h.buildClaimsLocked(&tmpl, m)
+	why := h.populationWhyLocked(&tmpl)
+	if m != nil {
+		why = h.populationLocked(&tmpl, m).Why
+	}
+	h.mu.RUnlock()
+	current := func() bool {
+		live := h.findLocked(id)
+		return live != nil && h.deliveryGenLocked(live) == gen
+	}
+	delivered := h.loadDelivered(id)
+	units, _ := h.runClaims(ctx, claimStep{t: &tmpl, plan: plan, current: current, delivered: &delivered, now: now})
+	annotateWhy(&tmpl, units, why)
+	for _, u := range units {
+		delivered.Status[u.Unit] = u
+	}
+	h.saveDelivered(id, delivered)
 	return nil
 }

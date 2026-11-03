@@ -1485,11 +1485,72 @@ func (v *specCheck) claim(o *Option, c *ClaimDelivery) error {
 	if c.JSONType != "" && !claimJSONTypes[c.JSONType] {
 		return fmt.Errorf("claim %s: json_type %q must be int, string, bool or json", c.Name, c.JSONType)
 	}
+	if err := claimTypeFits(o, c); err != nil {
+		return fmt.Errorf("claim %s: %w", c.Name, err)
+	}
 	k := c.Client + "\x00" + c.Name
 	if w, ok := v.claims[k]; ok {
 		return fmt.Errorf("claim %s on client %s is already delivered by setting %s", c.Name, c.Client, w)
 	}
 	v.claims[k] = o.Key
+	return nil
+}
+
+// claimTypeFits refuses a json_type the claim's render can't produce
+// (what is statically known; the Hub checks every rendered value too):
+// Keycloak converts the attribute to that type — int is a 32-bit integer,
+// bool exactly true/false, json a JSON document.
+func claimTypeFits(o *Option, c *ClaimDelivery) error {
+	rd := c.Render
+	if rd == nil {
+		rd = &Render{}
+	}
+	numeric := func() error {
+		switch o.Type {
+		case TypeInt, TypeDuration:
+		case TypeSize:
+			if rd.Unit == "" || rd.Unit == "B" {
+				return fmt.Errorf("json_type %s: a size in bytes overflows the 32-bit integer Keycloak converts to: render it in a unit (render.unit: MiB, GiB, …)", c.JSONType)
+			}
+		default:
+			return fmt.Errorf("json_type %s needs a number: type %s doesn't render as one", c.JSONType, o.Type)
+		}
+		if o.AllowUnlimited {
+			if rd.Unlimited == nil {
+				return fmt.Errorf("json_type %s: render.unlimited must be a number", c.JSONType)
+			}
+			if _, err := strconv.ParseInt(*rd.Unlimited, 10, 32); err != nil {
+				return fmt.Errorf("json_type %s: render.unlimited %q must be a 32-bit integer", c.JSONType, *rd.Unlimited)
+			}
+		}
+		return nil
+	}
+	boolean := func() error {
+		if o.Type != TypeBool {
+			return fmt.Errorf("json_type %s needs type bool (not %s)", c.JSONType, o.Type)
+		}
+		if (rd.True != nil && *rd.True != "true") || (rd.False != nil && *rd.False != "false") {
+			return fmt.Errorf("json_type %s: render.true / render.false must be exactly true / false", c.JSONType)
+		}
+		return nil
+	}
+	switch c.JSONType {
+	case "int":
+		return numeric()
+	case "bool":
+		return boolean()
+	case "json":
+		if rd.Format == RenderJSON {
+			return nil
+		}
+		switch o.Type {
+		case TypeInt, TypeSize, TypeDuration:
+			return numeric()
+		case TypeBool:
+			return boolean()
+		}
+		return fmt.Errorf("json_type %s: type %s renders plain text: add render.format: json", c.JSONType, o.Type)
+	}
 	return nil
 }
 

@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/keycloak"
@@ -25,10 +26,18 @@ const claimID = "immich"
 // alice, bob, carol, dave; admin_immich: bob; office_milan: alice; erin
 // is in no group. Not enabled yet.
 func claimFixture(t *testing.T) (*fixture, *fakePeople, *fakeAttrStore) {
+	return claimFixtureWith(t, nil)
+}
+
+// claimFixtureWith is claimFixture with the manifest edited by edit.
+func claimFixtureWith(t *testing.T, edit func(string) string) (*fixture, *fakePeople, *fakeAttrStore) {
 	t.Helper()
-	m := mustRead(t, filepath.Join("testdata", "settings", "claimapp", "manifest.yaml"))
+	m := string(mustRead(t, filepath.Join("testdata", "settings", "claimapp", "manifest.yaml")))
+	if edit != nil {
+		m = edit(m)
+	}
 	c := mustRead(t, filepath.Join("testdata", "settings", "claimapp", "compose.yml"))
-	f := newInstanceFixtureExtra(t, nil, nil, map[string][2]string{claimID: {string(m), string(c)}})
+	f := newInstanceFixtureExtra(t, nil, nil, map[string][2]string{claimID: {m, string(c)}})
 	if f.h.Template(claimID) == nil {
 		t.Fatalf("claimapp not loaded (see the log)")
 	}
@@ -122,6 +131,19 @@ func TestClaimDeliveryPerPerson(t *testing.T) {
 	}
 	if _, ok := store.value("erin", quota); ok {
 		t.Error("erin (outside the population) kept a value")
+	}
+	// The existing attribute had no record: one holders query, and only
+	// erin (the holder) was cleared — nobody else got a blind removal.
+	store.mu.Lock()
+	lists := store.lists
+	store.mu.Unlock()
+	if lists != 1 {
+		t.Errorf("%d holders queries, want 1", lists)
+	}
+	for _, c := range store.calls() {
+		if strings.HasPrefix(c, "admin ") {
+			t.Errorf("blind removal: %q", c)
+		}
 	}
 	// The mappers: on client immich, with the template's claims.
 	want := []keycloak.SettingClaim{{Attr: role, Claim: "immich_role", JSONType: ""}, {Attr: quota, Claim: "immich_quota", JSONType: "int"}}
@@ -400,4 +422,208 @@ func reservedAttrPrefix() string { return directory.ReservedAttrPrefix }
 
 func lldapAttr(name string, visible bool) lldap.Attribute {
 	return lldap.Attribute{Name: name, IsVisible: visible}
+}
+
+// A brand-new attribute: nobody can hold a value — no clearing calls, no
+// holders query; only the people who get a value are written.
+func TestClaimNewAttributeNoSweep(t *testing.T) {
+	f, _, store := claimFixture(t)
+	claimEnable(t, f, claimID)
+	deliverNow(t, f, claimID, TriggerRetry)
+	store.mu.Lock()
+	lists := store.lists
+	store.mu.Unlock()
+	if lists != 0 {
+		t.Errorf("%d holders queries for new attributes", lists)
+	}
+	for _, c := range store.calls() {
+		if strings.Contains(c, " -") {
+			t.Errorf("a removal for a new attribute: %q", c)
+		}
+	}
+	// The enable's background delivery wrote the four members, the save
+	// alice's new quota: nothing else.
+	if n := len(store.calls()); n != 5 {
+		t.Errorf("writes = %q", store.calls())
+	}
+	// Recorded as soon as they exist (known, so never swept again).
+	d := f.h.loadDelivered(claimID)
+	for _, a := range []string{SettingAttr(claimID, "role"), SettingAttr(claimID, "storage_quota")} {
+		if d.Claims["claim:"+a] == nil {
+			t.Errorf("no record for %s", a)
+		}
+	}
+}
+
+// A lost record: one holders query; holders outside the population are
+// cleared, holders inside rewritten, nobody else touched.
+func TestClaimLostRecordQueriesHolders(t *testing.T) {
+	f, _, store := claimFixture(t)
+	claimEnable(t, f, claimID)
+	deliverNow(t, f, claimID, TriggerRetry)
+	quota := SettingAttr(claimID, "storage_quota")
+	if err := store.SetUserAttributes(context.Background(), "erin", map[string][]string{quota: {"7"}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	d := f.h.loadDelivered(claimID)
+	delete(d.Claims, "claim:"+quota)
+	f.h.saveDelivered(claimID, d)
+	before := len(store.calls())
+	deliverNow(t, f, claimID, TriggerRetry)
+	calls := store.calls()[before:]
+	want := []string{"alice +" + quota + "=10", "bob +" + quota + "=100", "carol +" + quota + "=100", "dave +" + quota + "=100", "erin -" + quota}
+	if !reflect.DeepEqual(calls, want) {
+		t.Errorf("writes = %q, want %q", calls, want)
+	}
+}
+
+// The start never waits for the claims: they run in the background after
+// the up.
+func TestStartDoesNotWaitOnClaims(t *testing.T) {
+	f, _, store := claimFixture(t)
+	gate := make(chan struct{})
+	f.idp.mu.Lock()
+	f.idp.claimGate = gate
+	f.idp.mu.Unlock()
+	done := make(chan error, 1)
+	go func() {
+		_, err := f.h.EnableAs(claimID, "root")
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(10 * time.Second):
+		close(gate)
+		t.Fatal("the enable waited for the claims")
+	}
+	if n := len(store.calls()); n != 0 {
+		t.Errorf("values written before the mappers: %q", store.calls())
+	}
+	close(gate)
+	f.h.Wait()
+	if v, _ := store.value("bob", SettingAttr(claimID, "role")); v != "admin" {
+		t.Errorf("after the background claims: bob's role = %q", v)
+	}
+	if u := f.h.DeliveryStatus(claimID).Units["claim:"+SettingAttr(claimID, "role")]; !u.OK {
+		t.Errorf("status = %+v", u)
+	}
+}
+
+// A claim moved from one client to another leaves no mapper behind on
+// the first (every client gets its exact set, none included).
+func TestClaimMovedClientLeavesNoMapper(t *testing.T) {
+	twoClients := func(m string) string {
+		return strings.Replace(m, "keycloak_clients:\n  - client_id: immich\n    redirect_uri: https://{{HOST_IMMICH}}/auth/login\n",
+			"keycloak_clients:\n  - client_id: immich\n    redirect_uri: https://{{HOST_IMMICH}}/auth/login\n  - client_id: immich-web\n    redirect_uri: https://{{HOST_IMMICH}}/web/login\n", 1)
+	}
+	f, _, _ := claimFixtureWith(t, twoClients)
+	claimEnable(t, f, claimID)
+	deliverNow(t, f, claimID, TriggerRetry)
+	if n := len(f.idp.settingClaims("immich")); n != 2 {
+		t.Fatalf("immich claims = %+v", f.idp.settingClaims("immich"))
+	}
+	// A template update moves both claims to immich-web: immich has
+	// none left, and must lose its mappers.
+	m := twoClients(string(mustRead(t, filepath.Join("testdata", "settings", "claimapp", "manifest.yaml"))))
+	m = strings.Replace(m, "{claim: {client: immich, name: immich_role}}", "{claim: {client: immich-web, name: immich_role}}", 1)
+	m = strings.Replace(m, "{claim: {client: immich, name: immich_quota,", "{claim: {client: immich-web, name: immich_quota,", 1)
+	writeFile(t, filepath.Join(f.src, claimID, "manifest.yaml"), m)
+	f.h.Discover()
+	deliverNow(t, f, claimID, TriggerRetry)
+	if got := f.idp.settingClaims("immich"); len(got) != 0 {
+		t.Errorf("mappers stayed on immich: %+v", got)
+	}
+	if got := f.idp.settingClaims("immich-web"); len(got) != 2 {
+		t.Errorf("immich-web claims = %+v", got)
+	}
+	// A client with no claims that isn't the instance's: logged only.
+	f.idp.mu.Lock()
+	f.idp.claimOwners = map[string]string{"immich": "someone"}
+	f.idp.mu.Unlock()
+	rep := deliverNow(t, f, claimID, TriggerRetry)
+	for _, a := range []string{SettingAttr(claimID, "role"), SettingAttr(claimID, "storage_quota")} {
+		if u, _ := unit(rep, "claim:"+a); !u.OK {
+			t.Errorf("claim:%s = %+v (a conflict on a client without claims failed it)", a, u)
+		}
+	}
+}
+
+// A value its json_type can't take is omitted (cleared) and counted.
+func TestClaimValueMustFitJSONType(t *testing.T) {
+	withUploads := func(m string) string {
+		return m + `    - key: uploads
+      label: Uploads
+      type: int
+      scope: person
+      default: 5
+      resolve: max
+      applies: next_sign_in
+      delivery: [{claim: {client: immich, name: immich_uploads, json_type: int}}]
+`
+	}
+	f, _, store := claimFixtureWith(t, withUploads)
+	claimEnable(t, f, claimID)
+	if _, err := f.h.SaveSettings(claimID, SettingsUpdate{Person: map[string]PersonChange{
+		"uploads": {Default: raw(5), Rows: rows("office_milan", 3000000000)},
+	}}, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	rep := deliverNow(t, f, claimID, TriggerRetry)
+	a := SettingAttr(claimID, "uploads")
+	if v, ok := store.value("alice", a); ok {
+		t.Errorf("alice got %q, over int32", v)
+	}
+	if v, _ := store.value("bob", a); v != "5" {
+		t.Errorf("bob = %q", v)
+	}
+	if u, _ := unit(rep, "claim:"+a); !u.OK || !strings.Contains(u.Message, "1 values can't be delivered") {
+		t.Errorf("unit = %+v", u)
+	}
+	if err := claimValueFits("bool", "1"); err == nil {
+		t.Error("bool 1 accepted")
+	}
+	if err := claimValueFits("json", "a,b"); err == nil {
+		t.Error("json a,b accepted")
+	}
+	if err := claimValueFits("json", `["a","b"]`); err != nil {
+		t.Error(err)
+	}
+}
+
+// Missing LLDAP credentials: "Users & Groups not configured".
+func TestClaimStoreNotConfigured(t *testing.T) {
+	f, _, store := claimFixture(t)
+	claimEnable(t, f, claimID)
+	store.mu.Lock()
+	store.err = fmt.Errorf("reading: %w", lldap.ErrNotConfigured)
+	store.mu.Unlock()
+	rep := deliverNow(t, f, claimID, TriggerRetry)
+	if u, _ := unit(rep, "claim:"+SettingAttr(claimID, "role")); !strings.Contains(u.Error, "Users & Groups not configured") {
+		t.Errorf("unit = %+v", u)
+	}
+}
+
+// An attribute that exists keeps its mapper when creating another one
+// fails.
+func TestClaimFailedCreateKeepsOtherMappers(t *testing.T) {
+	f, _, store := claimFixture(t)
+	claimEnable(t, f, claimID)
+	deliverNow(t, f, claimID, TriggerRetry)
+	role := SettingAttr(claimID, "role")
+	// The quota attribute vanished and can't be re-created.
+	store.mu.Lock()
+	delete(store.schema, SettingAttr(claimID, "storage_quota"))
+	store.mu.Unlock()
+	store.failAdd = true
+	deliverNow(t, f, claimID, TriggerRetry)
+	found := false
+	for _, c := range f.idp.settingClaims("immich") {
+		found = found || c.Attr == role
+	}
+	if !found {
+		t.Errorf("role's mapper dropped: %+v", f.idp.settingClaims("immich"))
+	}
 }

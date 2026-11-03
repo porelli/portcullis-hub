@@ -155,10 +155,9 @@ func main() {
 	// in every instance (contract §13.4).
 	h.SetPeople(dir)
 	// Per-person claims: Hub-owned hidden LLDAP attributes (contract
-	// §13.6); without LLDAP credentials claim units say so.
-	if ll.Available() == nil {
-		h.SetAttrStore(ll)
-	}
+	// §13.6); credentials are read on every call, so missing ones make
+	// the claim units say "Users & Groups not configured".
+	h.SetAttrStore(ll)
 	dir.GroupDeleted = h.PurgeGroupSettings
 	// The policy file's expiring list and user-attributes.json come from
 	// the directory (contract §4, §4.1); shared fields become Keycloak

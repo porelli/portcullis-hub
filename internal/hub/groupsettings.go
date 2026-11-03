@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -650,7 +651,15 @@ func (h *Hub) ldapSane(ctx context.Context) string {
 // sane (ldapSane, P22) — otherwise nothing is purged (a warning).
 // Audited settings.purge by "hub"; a purge re-delivers. Never call it
 // holding mu. The delivery engine (Task 9) runs it before each delivery.
+//
+// Only rows that were stored, exactly so, before the snapshot was taken
+// can be purged: a row bound or re-seeded meanwhile (CreateMissingGroups
+// re-creating its group, a save) was checked against a newer directory
+// than this snapshot, so it is left for the next run to judge.
 func (h *Hub) reconcileGroupRows(ctx context.Context, id string) []string {
+	h.mu.RLock()
+	before := storedRowKeys(h.st.Settings[id])
+	h.mu.RUnlock()
 	m, err := h.membership(ctx)
 	if err != nil {
 		return []string{fmt.Sprintf("setting rows of %s not checked against the directory: %v", id, err)}
@@ -668,6 +677,9 @@ func (h *Hub) reconcileGroupRows(ctx context.Context, id string) []string {
 	ps := h.dropRowsLocked(id, t, func(key, name string, r state.GroupValue) string {
 		if r.GroupID == 0 {
 			return "" // unbound: grants nothing, kept for binding
+		}
+		if !before[rowKey(key, r)] {
+			return "" // stored after the snapshot: the next run judges it
 		}
 		mg, ok := m.Groups[name]
 		switch {
@@ -695,6 +707,27 @@ func (h *Hub) reconcileGroupRows(ctx context.Context, id string) []string {
 		h.TriggerDelivery(id, TriggerMembership, true)
 	}
 	return warnings
+}
+
+// rowKey identifies a stored row or record (option, group as stored, id).
+func rowKey(key string, r state.GroupValue) string {
+	return key + "\x00" + r.Group + "\x00" + strconv.Itoa(r.GroupID)
+}
+
+// storedRowKeys are the keys of s's rows and records.
+func storedRowKeys(s state.InstanceSettings) map[string]bool {
+	out := map[string]bool{}
+	for k, p := range s.Person {
+		for _, r := range p.Rows {
+			out[rowKey(k, r)] = true
+		}
+	}
+	for k, recs := range s.Groups {
+		for _, r := range recs {
+			out[rowKey(k, r)] = true
+		}
+	}
+	return out
 }
 
 // checkArchivedRows checks an archive's rows and records against the

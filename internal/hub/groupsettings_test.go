@@ -714,3 +714,45 @@ func TestPurgeMatchesExactName(t *testing.T) {
 		t.Errorf("same id, other case kept: %+v", r)
 	}
 }
+
+// A row bound after the reconcile's snapshot was taken is never purged
+// with that (older) snapshot: the race behind TestReseedTemplateRows'
+// flake, made deterministic.
+func TestReconcileKeepsRowsBoundAfterSnapshot(t *testing.T) {
+	f, _, people := privFixture(t)
+	if _, err := f.h.EnableAs("privapp", "root"); err != nil {
+		t.Fatal(err)
+	}
+	f.h.Wait()
+	old := people.id("admin_privapp")
+	people.deleteGroup("admin_privapp")
+	// The snapshot lacks admin_privapp; right after it, the group is
+	// re-created and the row re-bound to the new id (as
+	// CreateMissingGroups does).
+	people.set(func(p *fakePeople) {
+		p.onMembership = func() {
+			nid := people.addGroup("admin_privapp")
+			f.h.mu.Lock()
+			s := f.h.st.Settings["privapp"]
+			pr := s.Person["role"]
+			for i := range pr.Rows {
+				if pr.Rows[i].GroupID == old {
+					pr.Rows[i].GroupID = nid
+				}
+			}
+			s.Person["role"] = pr
+			f.h.st.Settings["privapp"] = s
+			f.h.mu.Unlock()
+		}
+	})
+	f.h.reconcileGroupRows(context.Background(), "privapp")
+	r := storedSettings(f, "privapp").Person["role"].Rows
+	if len(r) != 1 || r[0].GroupID != people.id("admin_privapp") {
+		t.Errorf("rows = %+v: a row bound after the snapshot was purged with it", r)
+	}
+	// The next run (a fresh snapshot) keeps it too: the group exists.
+	f.h.reconcileGroupRows(context.Background(), "privapp")
+	if r := storedSettings(f, "privapp").Person["role"].Rows; len(r) != 1 {
+		t.Errorf("rows after a fresh reconcile = %+v", r)
+	}
+}

@@ -353,11 +353,22 @@ type fakeIdP struct {
 	claimRemove []string
 	claimOwners map[string]string
 	claimErr    error
+	// claimGate, if set, blocks every EnsureSettingClaims until closed.
+	claimGate chan struct{}
+	// claimAll: every EnsureSettingClaims call ("<client>:<n claims>").
+	claimAll []string
 }
 
 func (f *fakeIdP) EnsureSettingClaims(ctx context.Context, clientID, owner string, claims []keycloak.SettingClaim) error {
 	f.mu.Lock()
+	gate := f.claimGate
+	f.mu.Unlock()
+	if gate != nil {
+		<-gate
+	}
+	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.claimAll = append(f.claimAll, fmt.Sprintf("%s:%d", clientID, len(claims)))
 	if f.claimErr != nil {
 		return f.claimErr
 	}
@@ -420,6 +431,8 @@ type fakeAttrStore struct {
 	// failUser: SetUserAttributes for that user fails; err: every call.
 	failUser string
 	err      error
+	lists    int  // ListUsers calls
+	failAdd  bool // AddHiddenUserAttribute fails
 }
 
 func newFakeAttrStore() *fakeAttrStore {
@@ -440,11 +453,32 @@ func (s *fakeAttrStore) UserAttributes(ctx context.Context) ([]lldap.Attribute, 
 	return out, nil
 }
 
+func (s *fakeAttrStore) ListUsers(ctx context.Context) ([]lldap.User, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lists++
+	if s.err != nil {
+		return nil, s.err
+	}
+	var out []lldap.User
+	for u, vs := range s.values {
+		a := map[string][]string{}
+		for k, v := range vs {
+			a[k] = append([]string(nil), v...)
+		}
+		out = append(out, lldap.User{ID: u, Attributes: a})
+	}
+	return out, nil
+}
+
 func (s *fakeAttrStore) AddHiddenUserAttribute(ctx context.Context, name string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.err != nil {
 		return s.err
+	}
+	if s.failAdd {
+		return fmt.Errorf("lldap down")
 	}
 	if _, ok := s.schema[name]; ok {
 		return fmt.Errorf("attribute %s already exists", name)
@@ -1125,6 +1159,9 @@ type fakePeople struct {
 	err       error
 	nextID    int
 	calls     int
+	// onMembership, if set, runs once after the next snapshot is taken
+	// (without p.mu): something changing between snapshot and use.
+	onMembership func()
 }
 
 func newFakePeople(users ...string) *fakePeople {
@@ -1172,6 +1209,11 @@ func (p *fakePeople) set(fn func(p *fakePeople)) {
 
 func (p *fakePeople) Membership(ctx context.Context, now time.Time) (*directory.Membership, error) {
 	p.mu.Lock()
+	hook := p.onMembership
+	p.onMembership = nil
+	if hook != nil {
+		defer hook()
+	}
 	defer p.mu.Unlock()
 	p.calls++
 	if p.err != nil {

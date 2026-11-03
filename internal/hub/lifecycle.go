@@ -116,6 +116,9 @@ func (h *Hub) composeUp(t *templates.Template) error {
 	// The start hooks (when: start) after the up, under the lifecycle
 	// lock still held: reported and op-recorded, never a rollback.
 	h.runStartHooks(context.Background(), live.ID)
+	// The claims (LLDAP and Keycloak) in the background: a start never
+	// waits for them.
+	h.deliverClaimsAfterStart(live.ID)
 	return nil
 }
 

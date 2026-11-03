@@ -31,7 +31,8 @@ import (
 //  3. each unit is compared with <data>/settings/<id>/delivered.json and
 //     what is on disk; unchanged units are skipped;
 //  4. changed units are applied in order — files, claims
-//     (deliver_claims.go; also in a start run), (headers: a later task),
+//     (deliver_claims.go; a start runs them in the background after the
+//     up: deliverClaimsAfterStart), (headers: a later task),
 //     hooks (deliver_hooks.go), then the strongest effect: reload or a
 //     background Restart (P5: the engine is the only one that reloads or
 //     restarts) — each write after re-checking the generation under mu:
@@ -500,7 +501,7 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 
 	// Outside mu: stale rows first (P8: purged, audited), then the
 	// directory snapshot the units render from.
-	needPeople := filesNeedPeople(&tmpl) || hasGroupEnv(&tmpl) || claimsNeedPeople(&tmpl) || (!opt.lifecycle && hooksNeedPeople(&tmpl))
+	needPeople := filesNeedPeople(&tmpl) || hasGroupEnv(&tmpl) || (!opt.lifecycle && (claimsNeedPeople(&tmpl) || hooksNeedPeople(&tmpl)))
 	if hasRows && !opt.lifecycle {
 		for _, w := range h.reconcileGroupRows(ctx, id) {
 			log.Printf("settings: %s: %s", id, w)
@@ -527,7 +528,10 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 	tmpl = *live
 	gen := h.deliveryGenLocked(&tmpl)
 	outs := h.buildFilesLocked(&tmpl, m)
-	claims := h.buildClaimsLocked(&tmpl, m)
+	var claims claimPlan
+	if !opt.lifecycle {
+		claims = h.buildClaimsLocked(&tmpl, m)
+	}
 	why := h.populationWhyLocked(&tmpl)
 	if m != nil {
 		why = h.populationLocked(&tmpl, m).Why
@@ -619,24 +623,21 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 	}
 
 	h.stage(id, "files")
+	if opt.lifecycle {
+		// TriggerStart: compose up follows; never a reload or restart.
+		// Claims follow in the background (deliverClaimsAfterStart).
+		finish()
+		return rep, "", false, nil
+	}
 
-	// Claims (LLDAP attributes and Keycloak mappers; also in a start run:
-	// the clients exist by then; a failure never fails the start).
+	// Claims (LLDAP attributes and Keycloak mappers).
 	cu, stop := h.runClaims(ctx, claimStep{t: &tmpl, plan: claims, current: current, delivered: &delivered, now: now})
 	rep.Units = append(rep.Units, cu...)
 	if stop {
 		finish()
-		if opt.lifecycle {
-			return rep, "", true, nil
-		}
 		return rep, settings.Strongest(effects...), true, nil
 	}
 	h.stage(id, "claims")
-	if opt.lifecycle {
-		// TriggerStart: compose up follows; never a reload or restart.
-		finish()
-		return rep, "", false, nil
-	}
 
 	// Group records in the env, re-rendered against this run's snapshot
 	// (a write without one — directory down — delivered none).
