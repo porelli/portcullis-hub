@@ -951,3 +951,36 @@ func TestPriorityInvalidFirstRowFailsClosed(t *testing.T) {
 		{Group: "b", GroupID: 2, Value: "ok"},
 	}}, bob))
 }
+
+func TestNumericFailClosedMinRendersUnlimited(t *testing.T) {
+	r := NewRegistry()
+	bob := Person{User: "bob", Groups: map[string]int{"a": 1}}
+	stale := []Row{{Group: "a", GroupID: 1, Value: "corrupt"}}
+	o := &templates.Option{Type: templates.TypeSize, Resolve: templates.ResolveMin,
+		AllowUnlimited: true, Min: int64(0),
+		Delivery: templates.Deliveries{{Env: "QUOTA", Render: &templates.Render{Unlimited: strp("0")}}}}
+
+	// min 0 renders as the delivery's render.unlimited "0" → UNRESOLVED
+	// (never the default either: Min decides).
+	unresolvedOK(t, "min renders unlimited", r.Resolve(o, PersonConfig{Default: int64(5 * GiB), Rows: stale}, bob))
+
+	// A safe Min (renders as "1024", not "0") → Min.
+	o.Min = "1KiB"
+	res := r.Resolve(o, PersonConfig{Default: Unlimited{}, Rows: stale}, bob)
+	if res.Value != int64(1024) || res.Reason.Source != ReasonFailClosed {
+		t.Errorf("safe min: want 1024 fail-closed, got %v %s", res.Value, res.Reason.Source)
+	}
+}
+
+func TestPrioritySetIgnoresCounts(t *testing.T) {
+	r := NewRegistry()
+	bob := Person{User: "bob", Groups: map[string]int{"a": 1}}
+	o := &templates.Option{Type: templates.TypeGroups, Resolve: templates.ResolvePriority, MinItems: ptr(3)}
+	res := r.Resolve(o, PersonConfig{Rows: []Row{
+		{Group: "a", GroupID: 1, Value: []any{"staff", "bad\nname", "admins"}},
+	}}, bob)
+	got, ok := res.Value.([]Value)
+	if !ok || len(got) != 2 || got[0] != "admins" || got[1] != "staff" || res.Reason.Source != ReasonGroup {
+		t.Errorf("priority set: want [admins staff] from group, got %#v %s", res.Value, res.Reason.Source)
+	}
+}

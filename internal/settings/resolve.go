@@ -149,10 +149,8 @@ func canonicalOrder(o *templates.Option, items []Value) []Value {
 // failClosedValue is the most restrictive value of o, used when rows can't
 // be resolved safely. ok = false means UNRESOLVED (no safe value). enum:
 // the lowest-ranked choice; bool: false; sets: empty; int/size/duration:
-// the option's Min (parsed through the kind) if set, else the default def
-// only if it parses, isn't Unlimited, and renders differently from every
-// delivery's render.unlimited (an app may read 0 or -1 as unlimited);
-// everything else: UNRESOLVED.
+// the option's Min if set, else the default def — either only if it is a
+// safeNumber; everything else: UNRESOLVED.
 func (r *Registry) failClosedValue(o *templates.Option, def Value) (Value, bool) {
 	switch o.Type {
 	case templates.TypeEnum:
@@ -168,33 +166,38 @@ func (r *Registry) failClosedValue(o *templates.Option, def Value) (Value, bool)
 		if err != nil {
 			return nil, false
 		}
+		bound := def
 		if o.Min != nil {
-			if v, err := k.Parse(o, o.Min); err == nil && v != (Unlimited{}) {
-				return v, true
-			}
+			bound = o.Min
+		}
+		if bound == nil {
 			return nil, false
 		}
-		if def == nil {
-			return nil, false
-		}
-		v, err := k.Parse(o, def)
-		if err != nil || v == (Unlimited{}) {
-			return nil, false
-		}
-		for i := range o.Delivery {
-			d := &o.Delivery[i]
-			rd := RenderOf(d)
-			if rd == nil || rd.Unlimited == nil {
-				continue
-			}
-			out, err := RenderDelivery(o, v, d)
-			if err != nil || out.Text == *rd.Unlimited {
-				return nil, false
-			}
-		}
-		return v, true
+		return r.safeNumber(o, k, bound)
 	}
 	return nil, false
+}
+
+// safeNumber parses raw (a Min or a default) through k and accepts it only
+// if it isn't Unlimited and every delivery with a render.unlimited renders
+// it as something else (an app may read 0 or -1 as unlimited).
+func (r *Registry) safeNumber(o *templates.Option, k Kind, raw any) (Value, bool) {
+	v, err := k.Parse(o, raw)
+	if err != nil || v == (Unlimited{}) {
+		return nil, false
+	}
+	for i := range o.Delivery {
+		d := &o.Delivery[i]
+		rd := RenderOf(d)
+		if rd == nil || rd.Unlimited == nil {
+			continue
+		}
+		out, err := RenderDelivery(o, v, d)
+		if err != nil || out.Text == *rd.Unlimited {
+			return nil, false
+		}
+	}
+	return v, true
 }
 
 // failClosed is the fail-closed result: failClosedValue, or UNRESOLVED.
@@ -255,8 +258,16 @@ func (r *Registry) Resolve(o *templates.Option, c PersonConfig, p Person) Resolv
 }
 
 // canonical parses v through o's kind; ok = false for a stale or invalid
-// value.
+// value. Set kinds are canonicalised item by item with no count bounds,
+// as under union/intersection (a non-list is invalid).
 func (r *Registry) canonical(o *templates.Option, v Value) (Value, bool) {
+	if parse := r.setItemParser(o); parse != nil {
+		if _, err := toList(v); err != nil {
+			return nil, false
+		}
+		items, _ := canonicalItems(parse, v)
+		return canonicalOrder(o, items), true
+	}
 	k, err := r.Kind(o.Type)
 	if err != nil {
 		return nil, false
