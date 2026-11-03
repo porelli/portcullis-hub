@@ -21,10 +21,13 @@ func TestRegistryReserved(t *testing.T) {
 	for typ, feature := range map[string]string{
 		"person_id":     "file sharing (project 3)",
 		"person_secret": "file sharing (project 3)",
-		"folder":        "shared folders (project 2)",
+		"folder":        "type: path with a folder block",
 	} {
 		_, err := r.Kind(typ)
 		var ni *ErrNotImplemented
+		if typ == "folder" && (err == nil || err.Error() != "type folder is reserved: a shared folder is a type: path option with a folder block (§13.15)") {
+			t.Errorf("Kind(folder) message = %v", err)
+		}
 		if !errors.As(err, &ni) || ni.Feature != feature || ni.Type != typ {
 			t.Errorf("Kind(%s) = %v, want ErrNotImplemented{%s}", typ, err, feature)
 		}

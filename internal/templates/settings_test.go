@@ -149,7 +149,7 @@ func TestOldTypesRefused(t *testing.T) {
 
 func TestReservedTypesRefused(t *testing.T) {
 	runSettingsCases(t, []settingsCase{
-		{"folder", hdrHead + opts("{key: media, label: X, type: folder}"), hdrCompose, "media", "type folder needs shared folders (project 2)"},
+		{"folder", hdrHead + opts("{key: media, label: X, type: folder}"), hdrCompose, "media", "type folder is reserved: a shared folder is a type: path option with a folder block (§13.15)"},
 		{"person_secret", hdrHead + opts("{key: smb, label: X, type: person_secret}"), hdrCompose, "smb", "type person_secret needs file sharing (project 3)"},
 		{"person_id", hdrHead + opts("{key: uid, label: X, type: person_id}"), hdrCompose, "uid", "type person_id needs file sharing (project 3)"},
 		// Shared folders landed (§13.15): folder and checks are typed, no

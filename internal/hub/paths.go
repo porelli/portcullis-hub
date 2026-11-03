@@ -55,10 +55,7 @@ func (h *Hub) PathUsages() []PathUsage {
 				continue
 			}
 			u := PathUsage{Instance: t.ID, Key: o.Key, Type: o.Type, HostPath: host, Service: o.Target.Service,
-				Mount: o.Target.Mount, Mode: o.Mode, Needs: o.Needs}
-			if u.Mode == "" {
-				u.Mode = "rw"
-			}
+				Mount: o.Target.Mount, Mode: o.EffectiveMode(), Needs: o.Needs}
 			if o.WritesAs != nil {
 				if values == nil {
 					values = h.instanceValuesLocked(&t, s)

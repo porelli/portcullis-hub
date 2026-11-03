@@ -2,6 +2,7 @@ package templates
 
 import (
 	"fmt"
+	"math"
 	"reflect"
 	"regexp"
 	"sort"
@@ -36,6 +37,41 @@ type RunsAs struct {
 	GIDEnv  string `yaml:"gid_env" json:"gid_env,omitempty"`
 	UIDFrom string `yaml:"uid_from" json:"uid_from,omitempty"` // reserved: project 3
 	GIDFrom string `yaml:"gid_from" json:"gid_from,omitempty"` // reserved: project 3
+}
+
+// UnmarshalYAML decodes strictly, with a friendly refusal for a uid / gid
+// that isn't a whole number.
+func (r *RunsAs) UnmarshalYAML(n *yaml.Node) error {
+	var p struct {
+		UID     yaml.Node `yaml:"uid"`
+		GID     yaml.Node `yaml:"gid"`
+		UIDEnv  string    `yaml:"uid_env"`
+		GIDEnv  string    `yaml:"gid_env"`
+		UIDFrom string    `yaml:"uid_from"`
+		GIDFrom string    `yaml:"gid_from"`
+	}
+	if err := strictDecode(n, &p); err != nil {
+		return err
+	}
+	num := func(what string, nd *yaml.Node) (*int, error) {
+		if nd.Kind == 0 || nd.Tag == "!!null" {
+			return nil, nil
+		}
+		var v int
+		if nd.Kind != yaml.ScalarNode || nd.Tag != "!!int" || nd.Decode(&v) != nil {
+			return nil, fmt.Errorf("folder.runs_as.%s: want a whole number, not %q (a variable goes in %s_env)", what, nd.Value, what)
+		}
+		return &v, nil
+	}
+	var err error
+	if r.UID, err = num("uid", &p.UID); err != nil {
+		return err
+	}
+	if r.GID, err = num("gid", &p.GID); err != nil {
+		return err
+	}
+	r.UIDEnv, r.GIDEnv, r.UIDFrom, r.GIDFrom = p.UIDEnv, p.GIDEnv, p.UIDFrom, p.GIDFrom
+	return nil
 }
 
 // Check is one template-declared doctor check (§13.15 catalog).
@@ -169,7 +205,10 @@ func (v *specCheck) folderOption(o *Option) error {
 		if ro == nil {
 			return fmt.Errorf("folder.runs_as.%s_env %s is not the env name of an instance int option of this template", id.what, id.env)
 		}
-		if d, ok := defaultInt(ro.Default); ok && InFolderGIDRange(d) {
+		switch d, bad, in := idDefault(ro); {
+		case bad:
+			return fmt.Errorf("folder.runs_as.%s_env %s names setting %s, whose default %s is not a whole number", id.what, id.env, ro.Key, quoteDefault(ro.Default))
+		case in:
 			return fmt.Errorf("folder.runs_as.%s_env %s names setting %s, whose default %d is in %s", id.what, id.env, ro.Key, d, gidRangeText)
 		}
 	}
@@ -191,6 +230,9 @@ func (v *specCheck) folderOption(o *Option) error {
 	if err := v.composeUserMatches(o.Target.Service, ra); err != nil {
 		return err
 	}
+	if err := v.groupAddResolves(o.Target.Service); err != nil {
+		return err
+	}
 	return v.sameEnvSameRunsAs(o)
 }
 
@@ -205,7 +247,8 @@ func (v *specCheck) envOption(name string) *Option {
 	return nil
 }
 
-// defaultInt reads a manifest default as an integer.
+// defaultInt reads a manifest default as an integer: a YAML int, a whole
+// float, or a decimal string (an int option parses one; review I1).
 func defaultInt(d any) (int64, bool) {
 	switch x := d.(type) {
 	case int:
@@ -217,8 +260,42 @@ func defaultInt(d any) (int64, bool) {
 			return 0, false
 		}
 		return int64(x), true
+	case float64:
+		if x != math.Trunc(x) || math.Abs(x) > 1<<53 {
+			return 0, false
+		}
+		return int64(x), true
+	case string:
+		if !decimalRe.MatchString(x) {
+			return 0, false
+		}
+		n, err := strconv.ParseInt(x, 10, 64)
+		return n, err == nil
 	}
 	return 0, false
+}
+
+var decimalRe = regexp.MustCompile(`^-?[0-9]{1,18}$`)
+
+// idDefault checks the default of option ro, which an id (runs_as env,
+// writes_as key, compose reference) refers to: readable as a whole number
+// when set (bad) and in the folder gid range (inRange, the value).
+func idDefault(ro *Option) (d int64, bad, inRange bool) {
+	if ro.Default == nil {
+		return 0, false, false
+	}
+	d, ok := defaultInt(ro.Default)
+	if !ok {
+		return 0, true, false
+	}
+	return d, false, InFolderGIDRange(d)
+}
+
+func quoteDefault(d any) string {
+	if s, ok := d.(string); ok {
+		return strconv.Quote(s)
+	}
+	return fmt.Sprint(d)
 }
 
 // sameEnvSameRunsAs: folder options of one service that share a uid_env
@@ -235,6 +312,15 @@ func (v *specCheck) sameEnvSameRunsAs(o *Option) error {
 			continue
 		}
 		pr := p.Folder.RunsAs
+		for _, j := range []*Option{p, o} {
+			if j.Folder.Join() == JoinGIDEnv && ra.GIDEnv != pr.GIDEnv {
+				other := o
+				if j == o {
+					other = p
+				}
+				return fmt.Errorf("service %s joins a folder group through gid_env %s: every folder option on it must use runs_as.gid_env %s (setting %s doesn't)", o.Target.Service, j.Folder.RunsAs.GIDEnv, j.Folder.RunsAs.GIDEnv, other.Key)
+			}
+		}
 		var shared string
 		switch {
 		case ra.GIDEnv != "" && ra.GIDEnv == pr.GIDEnv:
@@ -295,39 +381,133 @@ func splitUser(u string) (uid, gid string, hasGID bool) {
 	return u, "", false
 }
 
-// composeUsers reads every service's user: ("" = not set).
-func composeUsers(compose []byte) map[string]string {
+// composeIDs reads every service's user: ("" = not set) and group_add
+// entries (scalar values; a group_add that isn't a list is refused).
+func composeIDs(compose []byte) (users map[string]string, groupAdd map[string][]string, err error) {
 	var doc struct {
 		Services map[string]struct {
-			User yaml.Node `yaml:"user"`
+			User     yaml.Node `yaml:"user"`
+			GroupAdd yaml.Node `yaml:"group_add"`
 		} `yaml:"services"`
 	}
-	out := map[string]string{}
+	users, groupAdd = map[string]string{}, map[string][]string{}
 	if yaml.Unmarshal(compose, &doc) != nil {
-		return out
+		return users, groupAdd, nil
 	}
 	for svc, s := range doc.Services {
 		if s.User.Kind == yaml.ScalarNode && s.User.Tag != "!!null" {
-			out[svc] = s.User.Value
+			users[svc] = s.User.Value
+		}
+		switch g := &s.GroupAdd; {
+		case g.Kind == 0 || (g.Kind == yaml.ScalarNode && g.Tag == "!!null"):
+		case g.Kind == yaml.SequenceNode:
+			for _, e := range g.Content {
+				if e.Kind != yaml.ScalarNode {
+					return nil, nil, fmt.Errorf("service %s: group_add entries must be numbers or names", svc)
+				}
+				groupAdd[svc] = append(groupAdd[svc], e.Value)
+			}
+		default:
+			return nil, nil, fmt.Errorf("service %s: group_add must be a list", svc)
 		}
 	}
-	return out
+	return users, groupAdd, nil
 }
 
-// composeUserGIDs refuses a compose user: gid in the folder gid range on
-// any service.
-func (v *specCheck) composeUserGIDs() error {
-	svcs := make([]string, 0, len(v.users))
+// gidRefRe is an interpolation in a gid source: ${NAME}, ${NAME<op>value}
+// (op -, :-, +, :+, ?, :?) or $NAME.
+var gidRefRe = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)(?:(:?[-+?])([^}]*))?\}|\$([A-Za-z_][A-Za-z0-9_]*)`)
+
+// composeGIDs refuses a gid in the folder gid range on any service: a
+// literal compose user: gid or group_add entry, an interpolation's
+// default (${X:-n}, ${X-n}) or alternative value (${X:+n}), and the
+// default of the option an interpolation names (security-hook ruling 1).
+func (v *specCheck) composeGIDs() error {
+	seen := map[string]bool{}
+	var svcs []string
 	for s := range v.users {
+		seen[s] = true
 		svcs = append(svcs, s)
+	}
+	for s := range v.groupAdd {
+		if !seen[s] {
+			svcs = append(svcs, s)
+		}
 	}
 	sort.Strings(svcs)
 	for _, s := range svcs {
 		if _, g, ok := splitUser(v.users[s]); ok {
-			if p := parseUserPart(g); p.num != nil && InFolderGIDRange(*p.num) {
-				return fmt.Errorf("service %s: compose user: gid %d is in %s", s, *p.num, gidRangeText)
+			if err := v.gidSource(s, "compose user: gid", "compose user: gid", g); err != nil {
+				return err
 			}
 		}
+		for _, e := range v.groupAdd[s] {
+			if err := v.gidSource(s, "group_add gid", "group_add", e); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// gidSource checks one gid source value of service svc. lit prefixes a
+// number's refusal, ref an option reference's.
+func (v *specCheck) gidSource(svc, lit, ref, val string) error {
+	if userNumRe.MatchString(val) {
+		if n, _ := strconv.ParseInt(val, 10, 64); InFolderGIDRange(n) {
+			return fmt.Errorf("service %s: %s %d is in %s", svc, lit, n, gidRangeText)
+		}
+		return nil
+	}
+	for _, m := range interpolations(val, gidRefRe) {
+		name, op, value := m[1], m[2], m[3]
+		if name == "" {
+			name = m[4]
+		}
+		if op != "" && op != "?" && op != ":?" && userNumRe.MatchString(value) {
+			if n, _ := strconv.ParseInt(value, 10, 64); InFolderGIDRange(n) {
+				src := "the default of ${" + name + "}"
+				if strings.HasSuffix(op, "+") {
+					src = "the value ${" + name + op + "…} gives"
+				}
+				return fmt.Errorf("service %s: %s %d (%s) is in %s", svc, lit, n, src, gidRangeText)
+			}
+		}
+		if ro := v.anyEnvOption(name); ro != nil {
+			if d, _, in := idDefault(ro); in {
+				return fmt.Errorf("service %s: %s ${%s} is setting %s, whose default %d is in %s", svc, ref, name, ro.Key, d, gidRangeText)
+			}
+		}
+	}
+	return nil
+}
+
+// anyEnvOption is the instance option (any type) whose EnvName() is name.
+func (v *specCheck) anyEnvOption(name string) *Option {
+	if v.m.Settings == nil {
+		return nil
+	}
+	for i := range v.m.Settings.Options {
+		ro := &v.m.Settings.Options[i]
+		if ro.EffectiveScope() == ScopeInstance && ro.EnvName() == name {
+			return ro
+		}
+	}
+	return nil
+}
+
+// groupAddResolves: next to a folder block every group_add entry of the
+// target service is a number or one ${NAME} of an instance int option
+// (security-hook ruling 1: no gid the Hub can't see).
+func (v *specCheck) groupAddResolves(svc string) error {
+	for _, e := range v.groupAdd[svc] {
+		if userNumRe.MatchString(e) {
+			continue
+		}
+		if p := parseUserPart(e); p.env != "" && v.envOption(p.env) != nil {
+			continue
+		}
+		return fmt.Errorf("service %s's group_add entry %q next to a folder block must be a number or ${NAME} of an instance int option", svc, e)
 	}
 	return nil
 }
@@ -470,4 +650,20 @@ func sortedCheckKinds() []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// EffectiveMode is how o's path is mounted: "ro" or "rw". A folder block
+// decides it (access read is always read-only, also on a custom host
+// path, and wins over a stray mode); otherwise mode, default rw.
+func (o *Option) EffectiveMode() string {
+	if o.Folder != nil {
+		if o.Folder.Access == FolderWrite {
+			return "rw"
+		}
+		return "ro"
+	}
+	if o.Mode == "ro" {
+		return "ro"
+	}
+	return "rw"
 }

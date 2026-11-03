@@ -87,7 +87,7 @@ func (h *Hub) renderOverrideLocked(t *templates.Template, s state.InstanceSettin
 			return "", fmt.Errorf("setting %s: %w", o.Key, err)
 		}
 		vol := composeLiteral(host) + ":" + o.Target.Mount
-		if o.Mode == "ro" {
+		if o.EffectiveMode() == "ro" {
 			vol += ":ro"
 		}
 		// JSON string == valid YAML double-quoted scalar: safe for spaces,

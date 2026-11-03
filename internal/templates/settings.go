@@ -487,9 +487,14 @@ var reservedClaims = map[string]bool{
 
 // Reserved features (ReservedFeature).
 const (
-	FeatureSharedFolders = "shared folders (project 2)"
+	// FeatureSharedFolders: type folder is reserved; shared folders are
+	// path options with a folder block (§13.15).
+	FeatureSharedFolders = "type: path with a folder block"
 	FeatureFileSharing   = "file sharing (project 3)"
 )
+
+// FolderTypeRefusal is the refusal of type folder.
+const FolderTypeRefusal = "type folder is reserved: a shared folder is a type: path option with a folder block (§13.15)"
 
 // EffectiveScope returns o.Scope, or ScopeInstance when unset.
 func (o *Option) EffectiveScope() string {
@@ -693,8 +698,10 @@ func ValidateSettingsSpec(t *Template, compose []byte, routes *Routes, kinds Kin
 	if err := v.reload(); err != nil {
 		return err
 	}
-	v.users = composeUsers(compose)
-	if err := v.composeUserGIDs(); err != nil {
+	if v.users, v.groupAdd, err = composeIDs(compose); err != nil {
+		return err
+	}
+	if err := v.composeGIDs(); err != nil {
 		return err
 	}
 	if m.Settings == nil {
@@ -742,6 +749,7 @@ type specCheck struct {
 	scalars  []string                      // compose.yml's decoded scalar values
 	env      map[string]map[string]*string // service → environment
 	users    map[string]string             // service → compose user: ("" = unset)
+	groupAdd map[string][]string           // service → group_add entries
 	files_   map[string]*DataFile
 	hooks_   map[string]*Hook
 	opts     map[string]*Option
@@ -1110,6 +1118,9 @@ func (v *specCheck) typeOf(o *Option) error {
 	if repl, ok := oldTypes[o.Type]; ok {
 		return fmt.Errorf("type %s is template contract v2: %s", o.Type, repl)
 	}
+	if o.Type == TypeFolder {
+		return errors.New(FolderTypeRefusal)
+	}
 	if what, f := reservedUse(o); f != "" {
 		return fmt.Errorf("%s needs %s, which this Hub doesn't implement", what, f)
 	}
@@ -1430,6 +1441,12 @@ func (v *specCheck) pathAndSecret(o *Option) error {
 				ro := v.opts[r.ref.Key]
 				if ro == nil || ro.EffectiveScope() != ScopeInstance || (ro.Type != TypeInt && ro.Type != TypeString) {
 					return fmt.Errorf("writes_as.%s: %s is not an instance int or string option", r.what, r.ref.Key)
+				}
+				switch d, bad, in := idDefault(ro); {
+				case bad:
+					return fmt.Errorf("writes_as.%s: setting %s's default %s is not a whole number", r.what, ro.Key, quoteDefault(ro.Default))
+				case in:
+					return fmt.Errorf("writes_as.%s: setting %s's default %d is in %s", r.what, ro.Key, d, gidRangeText)
 				}
 			default:
 				return fmt.Errorf("writes_as.%s: a number or an option key", r.what)

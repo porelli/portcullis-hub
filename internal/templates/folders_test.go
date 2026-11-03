@@ -219,3 +219,88 @@ func TestLanOnlyPort(t *testing.T) {
 		t.Errorf("ports = %+v", tp.Manifest.Ports)
 	}
 }
+
+// Fix round 1 (review I1, I2, M1–M3; security-hook rulings).
+
+// fComposeNoEnvUser is fCompose without the ${PGID} user: (which would
+// itself refuse a PGID option defaulting into the folder range).
+var fComposeNoEnvUser = strings.Replace(fCompose, "  envuser:\n    image: x\n    user: \"${PUID:-1000}:${PGID:-1000}\"\n", "", 1)
+
+func TestFolderGIDDefaultsRead(t *testing.T) {
+	g := ", folder: {access: read, runs_as: {uid_env: PUID, gid_env: PGID}}"
+	folderCases(t, []settingsCase{
+		{"string default", hdrHead + opts(puidOpt, "{key: pgid, label: G, type: int, default: '60001'}", fpath("media", "web", g)), fComposeNoEnvUser, "media", "whose default 60001 is in 60000-60999"},
+		{"float default", hdrHead + opts(puidOpt, "{key: pgid, label: G, type: int, default: 60001.0}", fpath("media", "web", g)), fComposeNoEnvUser, "media", "whose default 60001 is in 60000-60999"},
+		{"unreadable default", hdrHead + opts(puidOpt, fpath("media", "web", g), "{key: pgid, label: G, type: int, default: lots}"), fComposeNoEnvUser, "media", `folder.runs_as.gid_env PGID names setting pgid, whose default "lots" is not a whole number`},
+		{"string default ok", hdrHead + opts(puidOpt, "{key: pgid, label: G, type: int, default: '1000'}", fpath("media", "web", g)), fComposeNoEnvUser, "", ""},
+		{"writes_as ref in range", hdrHead + opts("{key: pgid, label: G, type: int, default: 60001}", fpath("media", "web", ", writes_as: {uid: 0, gid: pgid}")), fComposeNoEnvUser, "media", "writes_as.gid: setting pgid's default 60001 is in 60000-60999 (shared folder groups)"},
+		{"writes_as ref string", hdrHead + opts("{key: pgid, label: G, type: string, default: 'x'}", fpath("media", "web", ", writes_as: {uid: 0, gid: pgid}")), fComposeNoEnvUser, "media", `writes_as.gid: setting pgid's default "x" is not a whole number`},
+		{"writes_as ref ok", hdrHead + opts("{key: pgid, label: G, type: string, default: '1000'}", fpath("media", "web", ", writes_as: {uid: 0, gid: pgid}")), fComposeNoEnvUser, "", ""},
+	})
+}
+
+func TestComposeGIDDefaultsRefused(t *testing.T) {
+	svc := func(extra string) string { return fComposeNoEnvUser + "  extra:\n    image: x\n" + extra }
+	p := hdrHead + opts(fpath("media", "web", ""))
+	folderCases(t, []settingsCase{
+		{"user :- default", p, svc("    user: \"1000:${XG:-60001}\"\n"), "", "service extra: compose user: gid 60001 (the default of ${XG}) is in 60000-60999 (shared folder groups)"},
+		{"user - default", p, svc("    user: \"1000:${XG-60002}\"\n"), "", "gid 60002 (the default of ${XG}) is in 60000-60999"},
+		{"user option default", hdrHead + opts("{key: pgid, label: G, type: int, default: 60003}", fpath("media", "web", "")), svc("    user: \"1000:${PGID:-1000}\"\n"), "", "service extra: compose user: gid ${PGID} is setting pgid, whose default 60003 is in 60000-60999 (shared folder groups)"},
+		{"user ok", p, svc("    user: \"1000:${XG:-1000}\"\n"), "", ""},
+		{"group_add literal", p, svc("    group_add: [\"60001\"]\n"), "", "service extra: group_add gid 60001 is in 60000-60999 (shared folder groups)"},
+		{"group_add int", p, svc("    group_add: [10001, 60999]\n"), "", "service extra: group_add gid 60999 is in 60000-60999"},
+		{"group_add default", p, svc("    group_add: [\"${G:-60500}\"]\n"), "", "service extra: group_add gid 60500 (the default of ${G}) is in 60000-60999"},
+		{"group_add option default", hdrHead + opts("{key: pgid, label: G, type: int, default: 60004}", fpath("media", "web", "")), svc("    group_add: [\"${PGID}\"]\n"), "", "service extra: group_add ${PGID} is setting pgid, whose default 60004 is in 60000-60999"},
+		{"group_add escaped", p, svc("    group_add: [\"$${G:-60500}\", video, \"10001\"]\n"), "", ""},
+		{"group_add not a list", p, svc("    group_add: \"60001\"\n"), "", "service extra: group_add must be a list"},
+	})
+}
+
+func TestFolderServiceReferencesResolve(t *testing.T) {
+	m := hdrHead + opts(puidOpt, pgidOpt, fpath("media", "extra", rw))
+	svc := func(extra string) string { return fCompose + "  extra:\n    image: x\n" + extra }
+	folderCases(t, []settingsCase{
+		{"unknown ref", m, svc("    group_add: [\"${NOPE:-1000}\"]\n"), "media", `service extra's group_add entry "${NOPE:-1000}" next to a folder block must be a number or ${NAME} of an instance int option`},
+		{"named group", m, svc("    group_add: [video]\n"), "media", `group_add entry "video" next to a folder block must be a number`},
+		{"mixed", m, svc("    group_add: [\"1${PGID}\"]\n"), "media", `group_add entry "1${PGID}"`},
+		{"option ref ok", m, svc("    group_add: [\"${PGID:-1000}\", \"10001\", 44]\n"), "", ""},
+		{"named group without folder", hdrHead + opts(fpath("media", "extra", "")), svc("    group_add: [video]\n"), "", ""},
+	})
+}
+
+func TestGIDEnvJoinOwnsService(t *testing.T) {
+	a := fpath("movies", "web", ", folder: {access: read, runs_as: {uid_env: PUID, gid_env: PGID}, joins_group: gid_env}")
+	num := fpath("tv", "web", ", folder: {access: read, runs_as: {uid: 1000, gid: 1000}}")
+	numFirst := fpath("tv", "web", ", folder: {access: read, runs_as: {uid: 1000, gid: 1000}}")
+	b := fpath("movies", "web", ", folder: {access: read, runs_as: {uid_env: PUID, gid_env: PGID}, joins_group: gid_env}")
+	folderCases(t, []settingsCase{
+		{"numeric after gid_env join", hdrHead + opts(puidOpt, pgidOpt, a, num), "", "tv", "service web joins a folder group through gid_env PGID: every folder option on it must use runs_as.gid_env PGID (setting tv doesn't)"},
+		{"gid_env join after numeric", hdrHead + opts(puidOpt, pgidOpt, numFirst, b), "", "movies", "service web joins a folder group through gid_env PGID: every folder option on it must use runs_as.gid_env PGID (setting tv doesn't)"},
+	})
+}
+
+func TestRunsAsNonIntegerFriendly(t *testing.T) {
+	folderCases(t, []settingsCase{
+		{"string uid", hdrHead + opts(fpath("media", "web", ", folder: {access: read, runs_as: {uid: abc, gid: 1}}")), "", "", `folder.runs_as.uid: want a whole number, not "abc" (a variable goes in uid_env)`},
+		{"float gid", hdrHead + opts(fpath("media", "web", ", folder: {access: read, runs_as: {uid: 1, gid: 1.5}}")), "", "", `folder.runs_as.gid: want a whole number, not "1.5" (a variable goes in gid_env)`},
+		{"hex ok", hdrHead + opts(fpath("media", "web", ", folder: {access: read, runs_as: {uid: 0x10, gid: 1}}")), "", "", ""},
+	})
+}
+
+func TestEffectiveMode(t *testing.T) {
+	for _, c := range []struct {
+		o    Option
+		want string
+	}{
+		{Option{Mode: "ro"}, "ro"},
+		{Option{Mode: "rw"}, "rw"},
+		{Option{}, "rw"},
+		{Option{Folder: &FolderSpec{Access: FolderRead}}, "ro"},
+		{Option{Folder: &FolderSpec{Access: FolderWrite}}, "rw"},
+		{Option{Mode: "rw", Folder: &FolderSpec{Access: FolderRead}}, "ro"},
+	} {
+		if got := c.o.EffectiveMode(); got != c.want {
+			t.Errorf("%+v: %q, want %q", c.o, got, c.want)
+		}
+	}
+}

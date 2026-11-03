@@ -66,6 +66,9 @@ type PerPersonKind interface {
 type ErrNotImplemented struct{ Type, Feature string }
 
 func (e *ErrNotImplemented) Error() string {
+	if e.Type == templates.TypeFolder {
+		return templates.FolderTypeRefusal
+	}
 	return fmt.Sprintf("type %s needs %s, which this Hub doesn't implement", e.Type, e.Feature)
 }
 

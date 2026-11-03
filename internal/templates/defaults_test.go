@@ -47,7 +47,7 @@ func TestDefaultsCanonical(t *testing.T) {
 		}
 	}
 	// A type the registry reserves is refused through Discover's path too.
-	if err := build("{key: f, label: F, type: folder}"); err == nil || !strings.Contains(err.Error(), "shared folders (project 2)") {
+	if err := build("{key: f, label: F, type: folder}"); err == nil || !strings.Contains(err.Error(), "a shared folder is a type: path option with a folder block") {
 		t.Errorf("folder: %v", err)
 	}
 }
