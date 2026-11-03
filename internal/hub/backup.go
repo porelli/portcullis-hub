@@ -917,6 +917,13 @@ func (s *staged) unpack(tr *tar.Reader) error {
 		}
 		switch hdr.Name {
 		case "config/instance.yaml":
+			var probe struct {
+				ID       string    `yaml:"id"`
+				Settings yaml.Node `yaml:"settings"`
+			}
+			if yaml.Unmarshal(data, &probe) == nil && state.IsLegacySettings(&probe.Settings) {
+				return fmt.Errorf("config/instance.yaml: the settings of instance %s are in the old flat form (before contract v3): this archive can't be restored by this Hub (settings are not migrated)", probe.ID)
+			}
 			dec := yaml.NewDecoder(bytes.NewReader(data))
 			dec.KnownFields(true)
 			if err := dec.Decode(&s.cfg); err != nil {

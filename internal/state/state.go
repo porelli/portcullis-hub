@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -195,6 +197,39 @@ type EnteredValue struct {
 	SetBy     string    `json:"set_by,omitempty" yaml:"set_by,omitempty"` // "" = the person; else the admin's username
 }
 
+// instanceSettingsKeys are InstanceSettings' YAML keys.
+var instanceSettingsKeys = map[string]bool{"ports": true, "values": true, "types": true, "person": true, "groups": true, "secrets": true, "entered": true}
+
+// IsLegacySettings reports whether n (one instance's settings) is not the
+// InstanceSettings form: the old flat KEY: value map (contract v2), or
+// anything else that isn't a mapping of its keys. Such settings are never
+// read silently (a lost <KEY>_BIND would publish a port on every
+// address): state.yaml and archives holding them are refused.
+func IsLegacySettings(n *yaml.Node) bool {
+	if n == nil || n.Kind == 0 || (n.Kind == yaml.ScalarNode && n.Tag == "!!null") {
+		return false
+	}
+	if n.Kind != yaml.MappingNode {
+		return true
+	}
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		if !instanceSettingsKeys[n.Content[i].Value] {
+			return true
+		}
+	}
+	return false
+}
+
+// UnmarshalYAML decodes strictly: an unknown key (the old flat form) is
+// an error, never dropped.
+func (s *InstanceSettings) UnmarshalYAML(n *yaml.Node) error {
+	if IsLegacySettings(n) {
+		return fmt.Errorf("line %d: settings in the old flat form (before contract v3) are not read", n.Line)
+	}
+	type plain InstanceSettings
+	return n.Decode((*plain)(s))
+}
+
 // IsZero reports whether s holds nothing.
 func (s InstanceSettings) IsZero() bool {
 	return len(s.Ports)+len(s.Values)+len(s.Types)+len(s.Person)+len(s.Groups)+len(s.Secrets)+len(s.Entered) == 0
@@ -367,6 +402,21 @@ func Load(path string) (*AppState, error) {
 	}
 	if len(bytes.TrimSpace(data)) == 0 {
 		return nil, fmt.Errorf("%s is empty (interrupted write?) — restore it from backup or delete it to start fresh", path)
+	}
+	var probe struct {
+		Settings map[string]yaml.Node `yaml:"settings"`
+	}
+	if err := yaml.Unmarshal(data, &probe); err == nil {
+		var legacy []string
+		for id, n := range probe.Settings {
+			if IsLegacySettings(&n) {
+				legacy = append(legacy, id)
+			}
+		}
+		if len(legacy) > 0 {
+			sort.Strings(legacy)
+			return nil, fmt.Errorf("%s: the settings of %s are in the old flat form (before contract v3): they are not migrated — remove them from settings: and re-enter them (ports and bind addresses included) after the upgrade", path, strings.Join(legacy, ", "))
+		}
 	}
 	s := &AppState{}
 	if err := yaml.Unmarshal(data, s); err != nil {

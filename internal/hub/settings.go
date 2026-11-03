@@ -209,7 +209,15 @@ func folderHostPath(folders FolderSource, v string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("shared folder %s: %w", id, err)
 	}
-	return p, nil
+	// The source's answer is checked like any host path: it ends up in a
+	// "<host>:<container>" volume entry.
+	if err := templates.ValidatePathSetting(p); err != nil {
+		return "", fmt.Errorf("shared folder %s: %w", id, err)
+	}
+	if !path.IsAbs(p) || path.Clean(p) == "/" {
+		return "", fmt.Errorf("shared folder %s: host path %q must be an absolute directory other than /", id, p)
+	}
+	return path.Clean(p), nil
 }
 
 // parseValue parses raw as a value of o: a path's folder:… value through
@@ -764,6 +772,11 @@ func (h *Hub) saveSettings(t *templates.Template, u SettingsUpdate, parsed *pars
 	}
 
 	h.mu.Lock()
+	// A restore or delete may have started since SaveSettings checked.
+	if err := h.pendingLocked(id); err != nil {
+		h.mu.Unlock()
+		return res, false, err
+	}
 	prevSignIn, hadSignIn := h.st.SignIn[id]
 	prev, hadPrev := h.st.Settings[id]
 	undo := func() {
@@ -788,7 +801,7 @@ func (h *Hub) saveSettings(t *templates.Template, u SettingsUpdate, parsed *pars
 		}
 		signInChanged = h.accessLocked(t).SignIn != before
 	}
-	next, effects, changes, err := h.nextSettingsLocked(t, prev, parsed)
+	next, effects, own, changes, err := h.nextSettingsLocked(t, prev, parsed)
 	if err != nil {
 		undo()
 		h.mu.Unlock()
@@ -855,7 +868,13 @@ func (h *Hub) saveSettings(t *templates.Template, u SettingsUpdate, parsed *pars
 			res.keys = append(res.keys, c.key)
 		}
 	}
-	res.effect = settings.Strongest(effects...)
+	// A disabled instance restarts nothing: its effect is the changed
+	// options' own (applies).
+	if enabled {
+		res.effect = settings.Strongest(effects...)
+	} else {
+		res.effect = settings.Strongest(own...)
+	}
 	if overrideErr != nil {
 		return res, false, statusErr(500, "settings saved but override generation failed: %v", overrideErr)
 	}
@@ -878,12 +897,14 @@ func (h *Hub) saveSettings(t *templates.Template, u SettingsUpdate, parsed *pars
 }
 
 // nextSettingsLocked applies parsed to cur: the new settings, the effect
-// of each changed option (a path or port change restarts), and the
+// of each changed option on a running instance (a path, port or
+// env-delivered option change restarts: compose reads them only at
+// create), each changed option's own effect (its applies), and the
 // changes for the audit. The instance options must then still satisfy
 // their required and requires rules. Caller must hold mu.
-func (h *Hub) nextSettingsLocked(t *templates.Template, cur state.InstanceSettings, parsed *parsedSettings) (state.InstanceSettings, []string, []settingChange, error) {
+func (h *Hub) nextSettingsLocked(t *templates.Template, cur state.InstanceSettings, parsed *parsedSettings) (state.InstanceSettings, []string, []string, []settingChange, error) {
 	next := cur.Clone()
-	var effects []string
+	var effects, own []string
 	var changes []settingChange
 	if parsed.ports != nil {
 		next.Ports = nil
@@ -926,21 +947,22 @@ func (h *Hub) nextSettingsLocked(t *templates.Template, cur state.InstanceSettin
 		}
 		after, okA := h.effectiveValue(t, o, next)
 		if okA && o.Required && settingsEmpty(after) || !okA && o.Required {
-			return next, nil, nil, statusErr(400, "setting %s is required", k)
+			return next, nil, nil, nil, statusErr(400, "setting %s is required", k)
 		}
 		if okA == okB && reflect.DeepEqual(after, before) {
 			continue
 		}
 		changes = append(changes, settingChange{key: k, scope: templates.ScopeInstance, before: h.showValue(o, before, okB), after: h.showValue(o, after, okA)})
 		e := settings.EffectOf(o.EffectiveApplies())
-		if o.Type == templates.TypePath {
+		own = append(own, e)
+		if o.Type == templates.TypePath || len(envDeliveries(o)) > 0 {
 			e = settings.EffectRestart
 		}
 		effects = append(effects, e)
 	}
 	if len(parsed.values) > 0 && t.Manifest.Settings != nil {
 		if err := settings.CheckRequires(t.Manifest.Settings, h.instanceValuesLocked(t, next)); err != nil {
-			return next, nil, nil, statusErr(400, "%v", err)
+			return next, nil, nil, nil, statusErr(400, "%v", err)
 		}
 	}
 	if len(next.Values) == 0 {
@@ -949,7 +971,7 @@ func (h *Hub) nextSettingsLocked(t *templates.Template, cur state.InstanceSettin
 	if len(next.Types) == 0 {
 		next.Types = nil
 	}
-	return next, effects, changes, nil
+	return next, effects, own, changes, nil
 }
 
 // settingsEmpty reports an empty value (required options).
@@ -968,9 +990,25 @@ func settingsEmpty(v any) bool {
 }
 
 // auditSettings records a save: one settings.change per changed (key,
-// scope, group), or — refused / failed — one per requested key. Called
-// with no lock held (auditOp takes mu).
+// scope, group) once the change is committed — also when writing the
+// override or env afterwards failed, which is one more entry (target the
+// instance, detail "delivery") carrying that error; a save refused or
+// failed before its commit is one entry per requested key. Called with
+// no lock held (auditOp takes mu).
 func (h *Hub) auditSettings(id, actor string, u SettingsUpdate, changes []settingChange, err error) {
+	if len(changes) > 0 {
+		for _, c := range changes {
+			d := "scope=" + c.scope
+			if c.group != "" {
+				d += " group=" + c.group
+			}
+			h.auditOp(actor, "settings.change", id+"/"+c.key, d+": "+c.before+" -> "+c.after, nil)
+		}
+		if err != nil {
+			h.auditOp(actor, "settings.change", id, "delivery", err)
+		}
+		return
+	}
 	if err != nil {
 		var keys []string
 		for k := range u.Ports {
@@ -992,14 +1030,6 @@ func (h *Hub) auditSettings(id, actor string, u SettingsUpdate, changes []settin
 		for _, k := range slices.Compact(keys) {
 			h.auditOp(actor, "settings.change", id+"/"+clip(k, 64), "", err)
 		}
-		return
-	}
-	for _, c := range changes {
-		d := "scope=" + c.scope
-		if c.group != "" {
-			d += " group=" + c.group
-		}
-		h.auditOp(actor, "settings.change", id+"/"+c.key, d+": "+c.before+" -> "+c.after, nil)
 	}
 }
 

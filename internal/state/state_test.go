@@ -167,3 +167,18 @@ sign_in: {plex: native}
 		t.Errorf("saved state still names password:\n%s", b)
 	}
 }
+
+// Settings in the old flat form are never read silently: Load refuses,
+// naming the instances (no migration).
+func TestLoadRefusesLegacyFlatSettings(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "state.yaml")
+	os.WriteFile(p, []byte("enabled: [grafana]\nsettings:\n  grafana:\n    GRAFANA_PORT: \"3301\"\n    GRAFANA_PORT_BIND: 127.0.0.1\n  other:\n    ports: {OTHER_PORT: \"1\"}\n  zeta:\n    K: v\n"), 0600)
+	_, err := Load(p)
+	if err == nil || !strings.Contains(err.Error(), "grafana, zeta") || strings.Contains(err.Error(), "other") || !strings.Contains(err.Error(), "old flat form") {
+		t.Fatalf("Load = %v", err)
+	}
+	os.WriteFile(p, []byte("settings:\n  other:\n    ports: {OTHER_PORT: \"1\"}\n"), 0600)
+	if s, err := Load(p); err != nil || s.Settings["other"].Ports["OTHER_PORT"] != "1" {
+		t.Fatalf("typed form: %v %+v", err, s)
+	}
+}

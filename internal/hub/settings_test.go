@@ -51,6 +51,11 @@ settings:
       type: string
       applies: live
       delivery: [{hook: motd}]
+    - key: banner
+      label: Banner
+      type: string
+      applies: live
+      delivery: [{env: IMMICH_BANNER}, {hook: motd}]
     - key: ml
       label: Machine learning
       type: bool
@@ -110,6 +115,8 @@ const immichCompose = "services:\n" +
 	"    environment:\n" +
 	"      TRASH: ${IMMICH_TRASH_DAYS}\n" +
 	"      ML: ${IMMICH_ML}\n" +
+	"      BANNER: ${IMMICH_BANNER}\n" +
+	"      NOTE: ${CORE_NOTE}\n" +
 	"      V: ${IMMICH_VERSION}\n" +
 	"      VS: ${IMMICH_VERSION_SHA}\n" +
 	"      APP_UID: ${IMMICH_UID}\n" +
@@ -219,6 +226,8 @@ func TestSaveValidatesTypes(t *testing.T) {
 		"unknown port":   {SettingsUpdate{Ports: map[string]string{"NOPE": "1"}}, []string{`unknown port setting "NOPE"`}},
 		"requires":       {SettingsUpdate{Values: vals("version_sha", "abc")}, []string{"version_sha", "version"}},
 		"quote in env":   {SettingsUpdate{Values: vals("version", "it's")}, []string{"version", "IMMICH_VERSION"}},
+		"backslash":      {SettingsUpdate{Values: vals("version", `x\`)}, []string{"version", "IMMICH_VERSION", "backslash"}},
+		"backslash item": {SettingsUpdate{Values: vals("disks", []string{`C:\d`})}, []string{"disks", "DISK_1"}},
 		"too many items": {SettingsUpdate{Values: vals("disks", []string{"a", "b", "c", "d"})}, []string{"disks"}},
 		"folder":         {SettingsUpdate{Values: vals("library", "folder:photos")}, []string{"library", "shared folder"}},
 		"secret change":  {SettingsUpdate{Secrets: map[string]SecretChange{"motd": {Generate: true}}}, []string{"motd"}},
@@ -534,10 +543,13 @@ func TestEnvQuoteHelpers(t *testing.T) {
 	if _, err := envQuote("a\nb"); err == nil {
 		t.Error("a newline was quoted")
 	}
-	if l := envLine("K", "a b", false); l != "K='a b'" {
-		t.Errorf("non-plain value: %s", l)
+	if l := envLine("K", "a b # c", false); l != "K=a b # c" {
+		t.Errorf("a value the Hub doesn't own is written raw: %s", l)
 	}
-	if l := envLine("K", "abc", false); l != "K=abc" {
-		t.Errorf("plain value: %s", l)
+	if l := envLine("K", "a b", true); l != "K='a b'" {
+		t.Errorf("option value: %s", l)
+	}
+	if l := envLine("K", "", true); l != "K=" {
+		t.Errorf("empty option value: %s", l)
 	}
 }

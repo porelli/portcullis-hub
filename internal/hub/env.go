@@ -8,7 +8,6 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -34,7 +33,7 @@ func randomSecret() (string, error) {
 // filled from the core .env. Caller must hold mu.
 func (h *Hub) generateAppEnvLocked(t *templates.Template) error {
 	envFile := h.envPath(t.ID)
-	vars := readEnvFile(envFile) // preserve user edits
+	vars := readEnvRaw(envFile) // preserve user edits, as written
 	vars["PORTCULLIS_DOMAIN"] = h.cfg.Domain
 
 	for _, v := range t.Manifest.Env {
@@ -67,7 +66,7 @@ func (h *Hub) generateAppEnvLocked(t *templates.Template) error {
 	for k, v := range t.InstanceEnv {
 		vars[k] = v
 	}
-	coreEnv := readEnvFile(filepath.Join(h.cfg.ProjectDir, ".env"))
+	coreEnv := readEnvRaw(filepath.Join(h.cfg.ProjectDir, ".env"))
 	for ref := range templates.EnvRefs(string(t.ReadCompose())) {
 		if _, exists := vars[ref]; !exists {
 			if v, ok := coreEnv[ref]; ok {
@@ -222,61 +221,74 @@ func renderOptionEnv(o *templates.Option, v any) (map[string]string, error) {
 
 // envQuote single-quotes v for an .env file: compose reads a
 // single-quoted value literally ($, #, spaces and " stay as they are). A
-// value with ' or a line break can't be single-quoted: an error.
+// value with ', a backslash (compose's dotenv reads \' inside single
+// quotes as an escaped quote: a trailing \ would swallow the next line)
+// or a line break can't be single-quoted safely: an error.
 func envQuote(v string) (string, error) {
-	if strings.ContainsAny(v, "'\n\r") {
-		return "", fmt.Errorf("the value contains a single quote or a line break, which an env value can't carry (use a file or hook delivery)")
+	if strings.ContainsAny(v, "'\\\n\r") {
+		return "", fmt.Errorf("the value contains a single quote, a backslash or a line break, which an env value can't carry (use a file or hook delivery)")
 	}
 	return "'" + v + "'", nil
 }
 
-// plainEnvRe: a value compose reads the same quoted or not.
-var plainEnvRe = regexp.MustCompile(`^[A-Za-z0-9_./:@%+,=-]+$`)
-
-// envLine is one KEY=VALUE line. An option value (quote) is always
-// single-quoted (envQuote, contract §13.5); any other value only when it
-// holds something compose would interpret ($, #, spaces, quotes). Empty
-// is KEY=; a value that can't be single-quoted (a ' from an earlier
-// edit) is written as it is, as before.
+// envLine is one KEY=VALUE line. A Hub-written option value (quote) is
+// single-quoted (envQuote, contract §13.5; empty is KEY=); any other
+// value is raw text written exactly as given — what compose reads from
+// it (inline comments, $$, double quotes, interpolation) is unchanged.
+// An option value that can't be quoted never reaches here (refused at
+// save); it is written empty rather than unquoted.
 func envLine(k, v string, quote bool) string {
-	if v == "" {
-		return k + "="
-	}
-	if !quote && plainEnvRe.MatchString(v) {
+	if !quote || v == "" {
 		return k + "=" + v
 	}
-	if q, err := envQuote(v); err == nil {
-		return k + "=" + q
+	q, err := envQuote(v)
+	if err != nil {
+		return k + "="
 	}
-	return k + "=" + v
+	return k + "=" + q
 }
 
-// envUnquote is a value as read from an .env line: a single-quoted
-// value's content, a double-quoted one's when it holds nothing compose
-// would interpret ($, \, "), anything else as written.
+// envUnquote is a value as the Hub reads it: the content of a value the
+// Hub single-quoted (no ' or \ inside), anything else as written.
 func envUnquote(v string) string {
-	if len(v) >= 2 && v[0] == '\'' && v[len(v)-1] == '\'' && !strings.Contains(v[1:len(v)-1], "'") {
-		return v[1 : len(v)-1]
-	}
-	if len(v) >= 2 && v[0] == '"' && v[len(v)-1] == '"' && !strings.ContainsAny(v[1:len(v)-1], "$\\\"") {
+	if len(v) >= 2 && v[0] == '\'' && v[len(v)-1] == '\'' && !strings.ContainsAny(v[1:len(v)-1], "'\\") {
 		return v[1 : len(v)-1]
 	}
 	return v
 }
 
-// readEnvFile parses KEY=VALUE lines (missing file = empty map).
+// readEnvFile parses KEY=VALUE lines (missing file = empty map); values
+// the Hub single-quoted are unquoted (envUnquote).
 func readEnvFile(path string) map[string]string {
+	out := readEnvRaw(path)
+	for k, v := range out {
+		out[k] = envUnquote(v)
+	}
+	return out
+}
+
+// readEnvRaw is readEnvFile with every value's raw text (what writers
+// write back unchanged).
+func readEnvRaw(path string) map[string]string {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return map[string]string{}
 	}
-	return parseEnv(data)
+	return parseEnvRaw(data)
 }
 
-// parseEnv parses KEY=VALUE lines; quoted values are unquoted
-// (envUnquote), so a value written by writeEnvMap / setEnvVar reads back
-// as it was.
+// parseEnv parses KEY=VALUE lines, unquoting values the Hub
+// single-quoted.
 func parseEnv(data []byte) map[string]string {
+	out := parseEnvRaw(data)
+	for k, v := range out {
+		out[k] = envUnquote(v)
+	}
+	return out
+}
+
+// parseEnvRaw parses KEY=VALUE lines, values as written.
+func parseEnvRaw(data []byte) map[string]string {
 	result := make(map[string]string)
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
@@ -284,13 +296,14 @@ func parseEnv(data []byte) map[string]string {
 			continue
 		}
 		if k, v, ok := strings.Cut(line, "="); ok {
-			result[k] = envUnquote(v)
+			result[k] = v
 		}
 	}
 	return result
 }
 
-// writeEnvMap writes vars as a sorted KEY=VALUE file (0600: secrets).
+// writeEnvMap writes vars (raw text) as a sorted KEY=VALUE file (0600:
+// secrets).
 func writeEnvMap(path string, vars map[string]string) error {
 	keys := make([]string, 0, len(vars))
 	for k := range vars {
@@ -305,15 +318,15 @@ func writeEnvMap(path string, vars map[string]string) error {
 	return fsutil.WriteFileAtomic(path, []byte(b.String()), 0600)
 }
 
-// setEnvVar updates or appends key=value (quoted as needed: envLine) in
-// an .env file.
+// setEnvVar updates or appends key=value (raw text) in an .env file.
 func setEnvVar(envFile, key, value string) error {
 	return setEnvVars(envFile, map[string]string{key: value}, false)
 }
 
-// setEnvVars updates or appends each key=value (envLine; quote: always
-// single-quoted) in an .env file in one write, keeping every other line;
-// new keys are appended sorted.
+// setEnvVars updates or appends each key=value (envLine; quote: Hub
+// option values, single-quoted; else raw text) in an .env file in one
+// write, keeping every other line as it is; new keys are appended
+// sorted.
 func setEnvVars(envFile string, vars map[string]string, quote bool) error {
 	if len(vars) == 0 {
 		return nil
@@ -384,7 +397,7 @@ func (h *Hub) refreshInstanceEnvLocked(t *templates.Template) error {
 	if _, err := os.Stat(path); err != nil {
 		return nil // not generated yet: enable writes it whole
 	}
-	cur := readEnvFile(path)
+	cur := readEnvRaw(path)
 	opts, err := h.optionEnvLocked(t)
 	if err != nil {
 		return err
@@ -394,11 +407,14 @@ func (h *Hub) refreshInstanceEnvLocked(t *templates.Template) error {
 	for k, v := range t.InstanceEnv {
 		want[k] = v
 	}
-	for _, m := range []map[string]string{want, opts} {
-		for k, v := range m {
-			if c, ok := cur[k]; ok && c == v {
-				delete(m, k)
-			}
+	for k, v := range want {
+		if c, ok := cur[k]; ok && c == v {
+			delete(want, k)
+		}
+	}
+	for k, v := range opts {
+		if c, ok := cur[k]; ok && strings.TrimPrefix(envLine(k, v, true), k+"=") == c {
+			delete(opts, k)
 		}
 	}
 	if err := setEnvVars(path, want, false); err != nil {

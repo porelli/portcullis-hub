@@ -809,7 +809,7 @@ func (h *Hub) restoreInstanceAs(archive, newID, actor string, hosts map[string]s
 
 	// Settings, env (client secrets regenerated), custom override.
 	if sb.env != nil {
-		env := parseEnv(sb.env)
+		env := parseEnvRaw(sb.env)
 		for _, c := range tmpl.Manifest.Clients {
 			if c.SecretEnv != "" {
 				delete(env, c.SecretEnv)
