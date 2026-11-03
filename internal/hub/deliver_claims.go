@@ -32,8 +32,9 @@ import (
 //
 // One unit per attribute ("claim:<attr>"), after the data files: the
 // attribute and the mappers are ensured, then only the people whose
-// value changed are written (per-user hashes in delivered.json under
-// claims["claim:<attr>"], never values). People outside the population,
+// value changed are written (per-user "<LLDAP uuid>:<hash>" records in
+// delivered.json under claims["claim:<attr>"], never values: a
+// re-created account is written again). People outside the population,
 // and UNRESOLVED values (fail closed), have the attribute cleared — never
 // a default. Without a directory snapshot the claims are skipped, never
 // cleared. Keycloak or LLDAP not configured: the units fail, nothing
@@ -143,6 +144,7 @@ type claimPlan struct {
 	clients map[string][]keycloak.SettingClaim // instance client id → its claims
 	all     []string                           // every client of the instance
 	users   map[string]bool                    // every LLDAP user of the snapshot
+	uuids   map[string]string                  // user → LLDAP account uuid
 	skip    string                             // SkipDirectory: no snapshot
 }
 
@@ -161,8 +163,10 @@ func (h *Hub) buildClaimsLocked(t *templates.Template, m *directory.Membership) 
 	} else {
 		people = h.peopleWithEntriesLocked(t, m)
 		plan.users = make(map[string]bool, len(m.Users))
+		plan.uuids = make(map[string]string, len(m.Users))
 		for u := range m.Users {
 			plan.users[u] = true
+			plan.uuids[u] = m.UUIDs[u]
 		}
 	}
 	for _, o := range opts {
@@ -241,10 +245,23 @@ func claimValueFits(jsonType, text string) error {
 	return nil
 }
 
-// claimHash is a delivered value's record (never the value).
+// claimHash is a delivered value's hash (never the value).
 func claimHash(v string) string {
 	sum := sha256.Sum256([]byte(v))
 	return hex.EncodeToString(sum[:8])
+}
+
+// claimRecord is a delivered value's record: the account's LLDAP uuid
+// and the value's hash. An account deleted and re-created under the
+// same name (a new uuid, its attributes gone with the old account) no
+// longer matches, so its value is written again.
+func claimRecord(uuid, v string) string { return uuid + ":" + claimHash(v) }
+
+// claimRecordUUID is the uuid a record was written under ("" for a
+// pending record).
+func claimRecordUUID(rec string) (string, bool) {
+	uuid, _, ok := strings.Cut(rec, ":")
+	return uuid, ok
 }
 
 // claimPending marks a user whose value is unknown — a failed write, or a
@@ -424,16 +441,17 @@ func (h *Hub) runClaims(ctx context.Context, step claimStep) (units []UnitResult
 		}
 		rec := d.Claims[claimUnit(o.attr)]
 		for u, v := range o.values {
-			if rec[u] != claimHash(v) {
+			if rec[u] != claimRecord(plan.uuids[u], v) {
 				ch(u).set[o.attr] = []string{v}
 			}
 		}
-		for u := range rec {
+		for u, r := range rec {
 			if _, keep := o.values[u]; keep {
 				continue
 			}
-			if !plan.users[u] {
-				// Gone from LLDAP: its attributes went with it.
+			if uuid, ok := claimRecordUUID(r); !plan.users[u] || ok && uuid != plan.uuids[u] {
+				// Gone from LLDAP, or re-created: its attributes went
+				// with the old account.
 				delete(rec, u)
 				continue
 			}
@@ -464,7 +482,7 @@ func (h *Hub) runClaims(ctx context.Context, step claimStep) (units []UnitResult
 				failed[a] = append(failed[a], fmt.Sprintf("%s: %s", u, h.storeError(t.ID, "write", err)))
 				continue
 			}
-			rec[u] = claimHash(v[0])
+			rec[u] = claimRecord(plan.uuids[u], v[0])
 			written[a]++
 		}
 		for _, a := range c.remove {
@@ -550,7 +568,7 @@ func (h *Hub) dropChangedClaims(ctx context.Context, t *templates.Template, plan
 		rec := d.Claims[claimUnit(o.attr)]
 		ok := o.err == nil && rec != nil && len(rec) == len(o.values)
 		for u, v := range o.values {
-			ok = ok && rec[u] == claimHash(v)
+			ok = ok && rec[u] == claimRecord(plan.uuids[u], v)
 		}
 		unchanged[o.attr] = ok
 	}

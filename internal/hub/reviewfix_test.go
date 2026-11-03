@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/portcullis/hub/internal/policy"
@@ -87,6 +88,36 @@ func TestFieldHeaderSuppressedWhenHostsUnknown(t *testing.T) {
 	}
 	if v, ok := doc.Users["alice"]["grafana_role"]; ok {
 		t.Errorf("alice's grafana_role = %v still published", v)
+	}
+}
+
+// H8: an account deleted and re-created under the same name inside one
+// debounce window (a new LLDAP uuid, its attributes gone with the old
+// account) gets its claim written again, though its value is unchanged.
+func TestClaimRewrittenForRecreatedAccount(t *testing.T) {
+	f, people, store := claimFixture(t)
+	quota := SettingAttr(claimID, "storage_quota")
+	claimEnable(t, f, claimID)
+	deliverNow(t, f, claimID, TriggerRetry)
+	if got := store.values["dave"][quota]; len(got) != 1 {
+		t.Fatalf("dave's quota = %v before the re-creation", got)
+	}
+	people.recreate("dave")
+	people.addGroup("users_immich", "dave")
+	store.mu.Lock()
+	delete(store.values, "dave")
+	store.mu.Unlock()
+	before := len(store.calls())
+	deliverNow(t, f, claimID, TriggerMembership)
+	calls := store.calls()[before:]
+	if len(calls) != 1 || !strings.HasPrefix(calls[0], "dave +") || !strings.Contains(calls[0], quota+"=100") {
+		t.Errorf("writes after dave's re-creation = %q, want dave's quota written", calls)
+	}
+	// Then unchanged.
+	before = len(store.calls())
+	deliverNow(t, f, claimID, TriggerMembership)
+	if n := len(store.calls()) - before; n != 0 {
+		t.Errorf("an unchanged run wrote %d times: %q", n, store.calls()[before:])
 	}
 }
 
