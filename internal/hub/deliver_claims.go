@@ -691,7 +691,8 @@ func (h *Hub) removeInstanceClaims(ctx context.Context, idp IdP, id string, clie
 	return nil
 }
 
-// deliverClaimsAfterStart delivers instance id's claims in the background
+// deliverClaimsAfterStart delivers instance id's claims and headers
+// (deliver_headers.go: they need the directory too) in the background
 // after a compose up (the start run writes only the data files: a start
 // never waits for LLDAP or Keycloak). It takes the delivery lock, so it
 // runs after the start's own deliveries. Gated like any delivery
@@ -699,10 +700,12 @@ func (h *Hub) removeInstanceClaims(ctx context.Context, idp IdP, id string, clie
 // nothing; a busy one (the start's lifecycle lock still held) a normal
 // delivery after busyRetry; a superseded run re-queues one.
 func (h *Hub) deliverClaimsAfterStart(id string) {
-	recorded := len(h.loadDelivered(id).Claims) > 0
+	d := h.loadDelivered(id)
+	_, headersRecorded := d.Hashes[unitHeaders]
+	recorded := len(d.Claims) > 0 || headersRecorded
 	h.mu.RLock()
 	t := h.findLocked(id)
-	run := t != nil && (claimsNeedPeople(t) || recorded)
+	run := t != nil && (claimsNeedPeople(t) || headersNeedPeople(t) || recorded)
 	h.mu.RUnlock()
 	if !run {
 		return
@@ -714,7 +717,7 @@ func (h *Hub) deliverClaimsAfterStart(id string) {
 	})
 }
 
-// runClaimsOnly is an engine run of the claims step alone.
+// runClaimsOnly is an engine run of the claims and headers steps alone.
 func (h *Hub) runClaimsOnly(ctx context.Context, id string) error {
 	l := h.deliverLock(id)
 	l.Lock()
@@ -726,8 +729,10 @@ func (h *Hub) runClaimsOnly(ctx context.Context, id string) error {
 	if t == nil {
 		return nil
 	}
+	delivered := h.loadDelivered(id)
+	_, headersRecorded := delivered.Hashes[unitHeaders]
 	var m *directory.Membership
-	if claimsNeedPeople(t) {
+	if claimsNeedPeople(t) || headersNeedPeople(t) {
 		mctx, cancel := context.WithTimeout(ctx, groupSnapshotTimeout)
 		var err error
 		m, err = h.membership(mctx)
@@ -759,6 +764,7 @@ func (h *Hub) runClaimsOnly(ctx context.Context, id string) error {
 	tmpl := *live
 	gen := h.deliveryGenLocked(&tmpl)
 	plan := h.buildClaimsLocked(&tmpl, m)
+	headers := h.buildHeadersLocked(&tmpl, m, headersRecorded)
 	why := h.populationWhyLocked(&tmpl)
 	if m != nil {
 		why = h.populationLocked(&tmpl, m).Why
@@ -768,8 +774,13 @@ func (h *Hub) runClaimsOnly(ctx context.Context, id string) error {
 		live := h.findLocked(id)
 		return live != nil && h.deliveryGenLocked(live) == gen
 	}
-	delivered := h.loadDelivered(id)
 	units, superseded := h.runClaims(ctx, claimStep{t: &tmpl, plan: plan, current: current, delivered: &delivered, now: now})
+	if !superseded && headers.active {
+		var hu UnitResult
+		if hu, superseded = h.runHeaders(id, headers, current, &delivered, now); !superseded {
+			units = append(units, hu)
+		}
+	}
 	if superseded {
 		// A newer commit: what was written is recorded; a normal
 		// delivery (after this lock is released) finishes the claims.

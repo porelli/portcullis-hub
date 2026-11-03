@@ -74,6 +74,10 @@ func publicStripHeaders(m *templates.Manifest) []string {
 	if pa := m.Auth.PublicAccess; pa != nil {
 		hs = append(hs, pa.CredentialHeaders...)
 	}
+	// Every declared header delivery (P14), whatever the instance's
+	// settings: group-gate never runs on the public router, so a client's
+	// copy would reach the backend as if group-gate had sent it.
+	hs = append(hs, headerNames(m)...)
 	for _, h := range hs {
 		set[http.CanonicalHeaderKey(h)] = true
 		set[strings.ReplaceAll(http.CanonicalHeaderKey(h), "-", "_")] = true

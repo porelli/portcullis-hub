@@ -2,6 +2,8 @@ package policy
 
 import (
 	"encoding/json"
+	"regexp"
+	"sort"
 	"strings"
 	"unicode"
 
@@ -9,8 +11,9 @@ import (
 )
 
 // UserAttributesVersion is the user-attributes.json format version
-// (contract §4.1).
-const UserAttributesVersion = 1
+// (contract §4.1): the Hub writes only version 2 (fields, users and the
+// per-host header-delivery headers); group-gate refuses any other.
+const UserAttributesVersion = 2
 
 // UserAttributesFile is the file name, next to the policy file.
 const UserAttributesFile = "user-attributes.json"
@@ -31,17 +34,30 @@ type UserAttributesDocument struct {
 	Version int                            `json:"version"`
 	Fields  map[string]string              `json:"fields"` // field name -> header name
 	Users   map[string]map[string][]string `json:"users"`  // username -> field name -> values
+	// Hosts: host → header suffix (the part after X-Forwarded-Attr-,
+	// e.g. "Grafana-Role") → username → value (header deliveries,
+	// contract §13.6). Always an object.
+	Hosts map[string]map[string]map[string]string `json:"hosts"`
 }
+
+// HeaderPrefix starts every attribute header; hosts keys are what
+// follows it.
+const HeaderPrefix = "X-Forwarded-Attr-"
+
+// hostHeaderRe is group-gate's header suffix form (_ATTR_HEADER_RE).
+var hostHeaderRe = regexp.MustCompile(`^[A-Za-z0-9]+(-[A-Za-z0-9]+){0,30}$`)
 
 // BuildUserAttributes constructs the user-attributes.json document from field
 // definitions and user data. Only fields in the fields list are included. Users
 // are keyed lowercase. Values longer than 1 KB are dropped, and control
-// characters are stripped from each value (contract §5).
-func BuildUserAttributes(fields []AttrField, users map[string]map[string][]string) UserAttributesDocument {
+// characters are stripped from each value (contract §5). hosts is the
+// per-host section (BuildHosts).
+func BuildUserAttributes(fields []AttrField, users map[string]map[string][]string, hosts map[string]map[string]map[string]string) UserAttributesDocument {
 	doc := UserAttributesDocument{
 		Version: UserAttributesVersion,
 		Fields:  make(map[string]string, len(fields)),
 		Users:   make(map[string]map[string][]string, len(users)),
+		Hosts:   BuildHosts(hosts),
 	}
 
 	// Build fields map with header name derivation
@@ -87,6 +103,61 @@ func BuildUserAttributes(fields []AttrField, users map[string]map[string][]strin
 	}
 
 	return doc
+}
+
+// BuildHosts cleans the hosts section (host → header suffix → user →
+// value; never nil) so group-gate accepts the file: hosts and users
+// lowercase (two spellings of one: the first in sorted order); header
+// suffixes in group-gate's form and not starting with X-Forwarded-Attr-
+// (others dropped; of two differing only in case, the first in sorted
+// order — group-gate would refuse the whole file); values control-
+// stripped, empty or over 1 KB dropped. A declared header keeps its key
+// without values (on that host it replaces a same-named field header);
+// a host without headers is left out.
+func BuildHosts(hosts map[string]map[string]map[string]string) map[string]map[string]map[string]string {
+	out := make(map[string]map[string]map[string]string, len(hosts))
+	for _, host := range sortedKeys(hosts) {
+		key := strings.ToLower(strings.TrimSpace(host))
+		if _, dup := out[key]; dup || key == "" {
+			continue
+		}
+		headers := map[string]map[string]string{}
+		seen := map[string]bool{}
+		for _, hdr := range sortedKeys(hosts[host]) {
+			folded := strings.ToLower(hdr)
+			if !hostHeaderRe.MatchString(hdr) || strings.HasPrefix(folded, strings.ToLower(HeaderPrefix)) || seen[folded] {
+				continue
+			}
+			seen[folded] = true
+			byUser := hosts[host][hdr]
+			vals := make(map[string]string, len(byUser))
+			for _, user := range sortedKeys(byUser) {
+				u := strings.ToLower(strings.TrimSpace(user))
+				if _, dup := vals[u]; dup || u == "" {
+					continue
+				}
+				v := stripControlChars(byUser[user])
+				if v == "" || len(v) > maxAttrValue {
+					continue
+				}
+				vals[u] = v
+			}
+			headers[hdr] = vals
+		}
+		if len(headers) > 0 {
+			out[key] = headers
+		}
+	}
+	return out
+}
+
+func sortedKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // fieldToHeader converts a field name to its header name: each underscore-

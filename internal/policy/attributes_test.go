@@ -33,10 +33,10 @@ func TestUserAttributesFile(t *testing.T) {
 		},
 	}
 
-	doc := BuildUserAttributes(fields, users)
+	doc := BuildUserAttributes(fields, users, nil)
 
-	if doc.Version != 1 {
-		t.Errorf("version = %d, want 1", doc.Version)
+	if doc.Version != 2 {
+		t.Errorf("version = %d, want 2", doc.Version)
 	}
 
 	// Check header name derivation
@@ -90,7 +90,7 @@ func TestUserAttributesFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if parsed["version"] != float64(1) {
+	if parsed["version"] != float64(2) {
 		t.Errorf("parsed version = %v", parsed["version"])
 	}
 
@@ -132,7 +132,7 @@ func TestUserAttributesEmpty(t *testing.T) {
 	path := filepath.Join(dir, "user-attributes.json")
 
 	// Empty fields and users
-	doc := BuildUserAttributes([]AttrField{}, map[string]map[string][]string{})
+	doc := BuildUserAttributes([]AttrField{}, map[string]map[string][]string{}, nil)
 	if err := WriteUserAttributes(path, doc); err != nil {
 		t.Fatal(err)
 	}
@@ -156,7 +156,7 @@ func TestControlCharsAndLargeValues(t *testing.T) {
 		},
 	}
 
-	doc := BuildUserAttributes(fields, users)
+	doc := BuildUserAttributes(fields, users, nil)
 	cleaned := doc.Users["user1"]["field1"][0]
 	if strings.Contains(cleaned, "\n") || strings.Contains(cleaned, "\x00") {
 		t.Errorf("control chars not stripped: %q", cleaned)
@@ -173,8 +173,60 @@ func TestControlCharsAndLargeValues(t *testing.T) {
 		},
 	}
 
-	doc = BuildUserAttributes(fields, users)
+	doc = BuildUserAttributes(fields, users, nil)
 	if vals, ok := doc.Users["user1"]["field1"]; ok && len(vals) > 0 {
 		t.Errorf("large value not dropped: len = %d", len(vals[0]))
+	}
+}
+
+// TestUserAttributesV2: version 2 with a hosts section (contract §4.1):
+// always an object; host keys lowercase; header keys are the suffix after
+// X-Forwarded-Attr- (what group-gate prefixes); users lowercase; values
+// control-stripped, over 1 KB dropped.
+func TestUserAttributesV2(t *testing.T) {
+	empty := BuildUserAttributes(nil, nil, nil)
+	b, _ := json.Marshal(empty)
+	if empty.Version != 2 || !strings.Contains(string(b), `"hosts":{}`) {
+		t.Errorf("empty document = %s, want version 2 and hosts {}", b)
+	}
+	doc := BuildUserAttributes(nil, nil, map[string]map[string]map[string]string{
+		"Grafana.Team-B.Example.org": {
+			"Grafana-Role": {"Alice": "Ad\x00m\nin", "bob": "Editor", "carol": strings.Repeat("a", 1025), "dave": "\x01"},
+			"Empty":        {},
+		},
+		"bare.example.org": {},
+	})
+	host, ok := doc.Hosts["grafana.team-b.example.org"]
+	if !ok || len(doc.Hosts) != 1 {
+		t.Fatalf("hosts = %+v, want only grafana.team-b.example.org", doc.Hosts)
+	}
+	want := map[string]string{"alice": "Admin", "bob": "Editor"}
+	if !reflect.DeepEqual(host["Grafana-Role"], want) {
+		t.Errorf("Grafana-Role = %+v, want %+v", host["Grafana-Role"], want)
+	}
+	// A declared header without values stays (on that host it replaces a
+	// same-named field header for everybody).
+	if v, ok := host["Empty"]; !ok || len(v) != 0 {
+		t.Errorf("Empty = %+v %v, want declared and empty", v, ok)
+	}
+	// Header names group-gate would refuse, or that collide case-
+	// insensitively (it would drop the whole file), are left out.
+	doc = BuildUserAttributes(nil, nil, map[string]map[string]map[string]string{
+		"a.example.org": {"Bad--Name": {"x": "1"}, "X-Forwarded-Attr-Full": {"x": "1"}, "Role": {"x": "1"}, "ROLE": {"x": "2"}},
+	})
+	if got := doc.Hosts["a.example.org"]; len(got) != 1 || got["ROLE"]["x"] != "2" {
+		t.Errorf("headers = %+v, want only ROLE (sorted first of the collision)", got)
+	}
+	// Two spellings of one user: one value (group-gate refuses duplicates).
+	doc = BuildUserAttributes(nil, nil, map[string]map[string]map[string]string{
+		"a.example.org": {"Role": {"Alice": "1", "alice": "2"}},
+	})
+	if got := doc.Hosts["a.example.org"]["Role"]; len(got) != 1 {
+		t.Errorf("Role = %+v, want one alice", got)
+	}
+	data, _ := json.Marshal(doc)
+	var parsed map[string]any
+	if err := json.Unmarshal(data, &parsed); err != nil || parsed["version"] != float64(2) {
+		t.Errorf("parsed = %v (%v)", parsed, err)
 	}
 }

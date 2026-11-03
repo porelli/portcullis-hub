@@ -1,0 +1,27 @@
+name: Grafana Headers Fixture
+category: monitoring
+instances: multi
+auth:
+  method: header-auth
+  group_access: true
+  access_group: users_dash
+  admin_group: admin_dash
+urls:
+  - label: Dashboards
+    url: "https://{{HOST_DASH}}"
+settings:
+  options:
+    - key: role
+      label: Role
+      type: enum
+      scope: person
+      privileged: true
+      options:
+        - {value: Viewer, label: Viewer}
+        - {value: Editor, label: Editor}
+        - {value: Admin, label: Admin}
+      default: Viewer
+      resolve: max
+      group_values: {"{{ADMIN_GROUP}}": Admin}
+      applies: next_request
+      delivery: [{header: {name: X-Forwarded-Attr-Grafana-Role}}]

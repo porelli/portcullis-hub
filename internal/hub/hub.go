@@ -239,6 +239,12 @@ type Hub struct {
 	// brokenInstances: instance id → why it has no view (template missing
 	// or its hostnames no longer fit); listed with state "error".
 	brokenInstances map[string]string
+	// hostHeaders: per instance, the header deliveries last delivered
+	// (deliver_headers.go): host → header suffix → user → value. Not in
+	// delivered.json: Init reads it back from user-attributes.json's
+	// hosts section (seedHostHeaders); disabled / view-less instances'
+	// records are dropped (rebuildLocked).
+	hostHeaders map[string]map[string]map[string]map[string]string
 	// allTemplates is every template discovered in any source (duplicates
 	// and skipped ones included): their default names are reserved
 	// (§11.1). templateIDs are their ids.
@@ -379,6 +385,9 @@ func (h *Hub) Init() {
 	h.pruneSettings()
 	// Interrupted same-instance restores are rolled back (background).
 	h.RecoverRestores()
+	// The header deliveries group-gate serves now: what the first policy
+	// write publishes again (P13).
+	h.seedHostHeaders()
 	if err := h.WritePolicy(); err != nil {
 		log.Printf("auth-policy: initial group-gate policy write failed: %v", err)
 	}
@@ -678,6 +687,13 @@ func (h *Hub) IsEnabled(id string) bool {
 // WritePolicy regenerates group-gate-policy.json from current state. Takes
 // mu itself — callers must NOT hold it.
 func (h *Hub) WritePolicy() error {
+	_, err := h.writePolicy()
+	return err
+}
+
+// writePolicy is WritePolicy; attrs: user-attributes.json was written
+// (or removed) — false when the directory failed and the file was kept.
+func (h *Hub) writePolicy() (attrsWritten bool, retErr error) {
 	// Serialise snapshot → rename so an older snapshot can never overwrite a
 	// newer one (a stale file could drop groups and fail open).
 	h.policyWriteMu.Lock()
@@ -778,27 +794,38 @@ func (h *Hub) WritePolicy() error {
 	doc := policy.Build(apps, perApp, h.st.Default(), mainDomain, extraDomains)
 	doc.Expiring = expiring
 	portal := h.portalLocked()
+	// The header deliveries (§4.1 hosts): enabled instances with a view,
+	// on the hosts their routers gate now.
+	hosts := h.publishedHostHeadersLocked()
 	h.mu.RUnlock()
 	if err := policy.Write(h.policyPath(), doc); err != nil {
-		return err
+		return false, err
 	}
 	h.lastExpiring = expiring
 	var errs []error
 	switch {
 	case keepAttrs:
-	case attrs == nil:
+	case attrs == nil && len(hosts) == 0:
+		attrsWritten = true
 		if err := os.Remove(h.attributesPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
 			errs = append(errs, err)
 		}
 	default:
-		if err := policy.WriteUserAttributes(h.attributesPath(), *attrs); err != nil {
+		out := policy.BuildUserAttributes(nil, nil, nil)
+		if attrs != nil {
+			out = *attrs
+		}
+		out.Hosts = policy.BuildHosts(hosts)
+		if err := policy.WriteUserAttributes(h.attributesPath(), out); err != nil {
 			errs = append(errs, err)
+		} else {
+			attrsWritten = true
 		}
 	}
 	// The landing portal's app list (contract §10) changes exactly when
 	// the policy does: enable, disable, template sync.
 	errs = append(errs, writePortal(h.portalPath(), portal))
-	return errors.Join(errs...)
+	return attrsWritten, errors.Join(errs...)
 }
 
 // hostSet is the policy.App host set of hosts (normalised), core hosts

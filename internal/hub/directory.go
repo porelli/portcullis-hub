@@ -131,7 +131,8 @@ func DirectoryStateOf(d *directory.Service) DirectoryState {
 		for _, f := range pub.Fields {
 			fields = append(fields, policy.AttrField{Name: f.Name, Multi: f.Multi})
 		}
-		doc := policy.BuildUserAttributes(fields, pub.Users)
+		// The hosts section (header deliveries) is merged in WritePolicy.
+		doc := policy.BuildUserAttributes(fields, pub.Users, nil)
 		return exp, &doc, nil
 	}
 }

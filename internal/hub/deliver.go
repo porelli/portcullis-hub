@@ -32,8 +32,9 @@ import (
 //     what is on disk; unchanged units are skipped;
 //  4. changed units are applied in order — files, claims
 //     (deliver_claims.go; a start runs them in the background after the
-//     up: deliverClaimsAfterStart), (headers: a later task),
-//     hooks (deliver_hooks.go), then the strongest effect: reload or a
+//     up: deliverClaimsAfterStart), headers (deliver_headers.go: the
+//     hosts section of user-attributes.json, published by a policy
+//     write; after a start with the claims), hooks (deliver_hooks.go), then the strongest effect: reload or a
 //     background Restart (P5: the engine is the only one that reloads or
 //     restarts) — each write after re-checking the generation under mu:
 //     a newer commit makes the run stop ("superseded") and run again;
@@ -501,7 +502,7 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 
 	// Outside mu: stale rows first (P8: purged, audited), then the
 	// directory snapshot the units render from.
-	needPeople := filesNeedPeople(&tmpl) || hasGroupEnv(&tmpl) || (!opt.lifecycle && (claimsNeedPeople(&tmpl) || hooksNeedPeople(&tmpl)))
+	needPeople := filesNeedPeople(&tmpl) || hasGroupEnv(&tmpl) || (!opt.lifecycle && (claimsNeedPeople(&tmpl) || headersNeedPeople(&tmpl) || hooksNeedPeople(&tmpl)))
 	if hasRows && !opt.lifecycle {
 		for _, w := range h.reconcileGroupRows(ctx, id) {
 			log.Printf("settings: %s: %s", id, w)
@@ -518,6 +519,7 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 		}
 	}
 
+	delivered := h.loadDelivered(id)
 	// Under mu: the generation and every desired output.
 	h.mu.RLock()
 	live := h.findLocked(id)
@@ -529,8 +531,11 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 	gen := h.deliveryGenLocked(&tmpl)
 	outs := h.buildFilesLocked(&tmpl, m)
 	var claims claimPlan
+	var headers headerPlan
 	if !opt.lifecycle {
 		claims = h.buildClaimsLocked(&tmpl, m)
+		_, recorded := delivered.Hashes[unitHeaders]
+		headers = h.buildHeadersLocked(&tmpl, m, recorded)
 	}
 	why := h.populationWhyLocked(&tmpl)
 	if m != nil {
@@ -543,7 +548,6 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 	h.mu.RUnlock()
 	h.stage(id, "built")
 
-	delivered := h.loadDelivered(id)
 	effects := []string{}
 	if trig == TriggerSave || trig == TriggerMembership || trig == TriggerRetry {
 		effects = append(effects, opt.effect)
@@ -638,6 +642,17 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 		return rep, settings.Strongest(effects...), true, nil
 	}
 	h.stage(id, "claims")
+
+	// Headers (user-attributes.json hosts; next_request: no effect).
+	if headers.active {
+		hu, stop := h.runHeaders(id, headers, current, &delivered, now)
+		if stop {
+			finish()
+			return rep, settings.Strongest(effects...), true, nil
+		}
+		rep.Units = append(rep.Units, hu)
+		h.stage(id, "headers")
+	}
 
 	// Group records in the env, re-rendered against this run's snapshot
 	// (a write without one — directory down — delivered none).
@@ -786,7 +801,7 @@ func annotateWhy(t *templates.Template, units []UnitResult, why string) {
 			if !hookNeedsPeople(t, name) {
 				continue
 			}
-		case strings.HasPrefix(u.Unit, claimUnitPrefix):
+		case strings.HasPrefix(u.Unit, claimUnitPrefix), u.Unit == unitHeaders:
 		default:
 			continue
 		}

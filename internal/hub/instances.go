@@ -110,6 +110,7 @@ func (h *Hub) rebuildLocked() {
 	}
 	h.instances = out
 	h.brokenInstances = broken
+	h.dropHostHeadersLocked()
 }
 
 // pendingLocked refuses (409) changes to an instance a guarded delete or

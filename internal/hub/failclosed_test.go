@@ -272,7 +272,7 @@ func TestDirectoryStateFailsClosed(t *testing.T) {
 	}
 
 	var fail atomic.Bool
-	attrs := policy.BuildUserAttributes([]policy.AttrField{{Name: "cost_center"}}, map[string]map[string][]string{"Alice": {"cost_center": {"CC-1"}}})
+	attrs := policy.BuildUserAttributes([]policy.AttrField{{Name: "cost_center"}}, map[string]map[string][]string{"Alice": {"cost_center": {"CC-1"}}}, nil)
 	state := func(context.Context) ([]policy.Expiring, *policy.UserAttributesDocument, error) {
 		if fail.Load() {
 			return nil, nil, errors.New("lldap down")

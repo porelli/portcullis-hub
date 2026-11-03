@@ -1,0 +1,22 @@
+services:
+  web:
+    image: grafana
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.dash.rule: Host(`${PORTCULLIS_HOST_DASH:-dash.portcullis.local}`)
+      traefik.http.routers.dash.entrypoints: websecure
+      traefik.http.routers.dash.middlewares: portcullis-auth@docker,portcullis-groups@docker
+      traefik.http.routers.dash.service: dash
+      traefik.http.routers.dash-team.rule: Host(`${PORTCULLIS_HOST_DASH_TEAM:-dash-team.portcullis.local}`)
+      traefik.http.routers.dash-team.entrypoints: websecure
+      traefik.http.routers.dash-team.middlewares: portcullis-auth@docker,portcullis-groups@docker
+      traefik.http.routers.dash-team.service: dash
+      traefik.http.services.dash.loadbalancer.server.port: "3000"
+  status:
+    image: status
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.dash-status.rule: Host(`${PORTCULLIS_HOST_DASH_STATUS:-dash-status.portcullis.local}`)
+      traefik.http.routers.dash-status.entrypoints: websecure
+      traefik.http.routers.dash-status.service: dash-status
+      traefik.http.services.dash-status.loadbalancer.server.port: "8080"

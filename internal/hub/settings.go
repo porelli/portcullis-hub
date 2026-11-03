@@ -604,6 +604,10 @@ func configCheck(t *templates.Template, kinds *settings.Registry, folders Folder
 		switch {
 		case !t.Manifest.Auth.HasNativeLogin():
 			out = append(out, statusErr(400, "this app has no sign-in choice (its template doesn't declare auth.native_login)"))
+		case *u.SignIn == SignInNative && declaresHeaders(&t.Manifest):
+			// Headers need group-gate in front (spec call 13): without
+			// it nothing strips a client's forged copy.
+			out = append(out, statusErr(400, "the app's own login without Portcullis can't be chosen: its settings deliver headers (%s), which need Portcullis sign-in", strings.Join(headerNames(&t.Manifest), ", ")))
 		case *u.SignIn == SignInNative && !nl.AllowWithoutGateway:
 			out = append(out, statusErr(400, "this template doesn't allow the app's own login without Portcullis"))
 		case *u.SignIn != SignInNative && *u.SignIn != SignInGateway:
