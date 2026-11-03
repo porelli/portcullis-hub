@@ -295,8 +295,14 @@ func TestHeadersTemplateMissing(t *testing.T) {
 	if err := f.h.WritePolicy(); err != nil {
 		t.Fatal(err)
 	}
-	if hosts := attrHosts(t, f); len(hosts) != 0 {
-		t.Errorf("template missing: hosts = %v, want none", hosts)
+	// No values; the suffixes stay declared from the published snapshot
+	// (H7: a same-named shared-field header never reaches its hosts).
+	for host, byS := range attrHosts(t, f) {
+		for s, vals := range byS {
+			if len(vals) != 0 {
+				t.Errorf("template missing: %s %s = %v, want no values", host, s, vals)
+			}
+		}
 	}
 }
 

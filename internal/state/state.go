@@ -52,6 +52,11 @@ type PublishedApp struct {
 	Traefik []string `json:"traefik,omitempty" yaml:"traefik,omitempty"`
 	Volumes []string `json:"volumes,omitempty" yaml:"volumes,omitempty"`
 	Clients []string `json:"clients,omitempty" yaml:"clients,omitempty"`
+	// HeaderSuffixes are the template's header-delivery suffixes at
+	// publish time: an instance whose template disappears keeps them
+	// declared (no values) on its hosts, so a same-named shared-field
+	// header never reaches them (fail closed).
+	HeaderSuffixes []string `json:"header_suffixes,omitempty" yaml:"header_suffixes,omitempty"`
 }
 
 // KnownDomain is an enrolled domain as the domains service last reported

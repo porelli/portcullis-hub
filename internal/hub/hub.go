@@ -612,6 +612,12 @@ func (h *Hub) snapshot(t *templates.Template) state.PublishedApp {
 	p.Traefik = append([]string(nil), n.Traefik...)
 	p.Volumes = slices.Sorted(maps.Values(n.Volumes))
 	p.Clients = append([]string(nil), n.Clients...)
+	for _, name := range headerNames(&t.Manifest) {
+		if sfx := headerSuffix(name); !slices.Contains(p.HeaderSuffixes, sfx) {
+			p.HeaderSuffixes = append(p.HeaderSuffixes, sfx)
+		}
+	}
+	slices.Sort(p.HeaderSuffixes)
 	if ov, ok := h.st.AuthPolicies[t.ID]; ok {
 		ov.Factors = append([]string(nil), ov.Factors...)
 		p.Policy = &ov

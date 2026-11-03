@@ -260,3 +260,33 @@ func TestRestartGivingUpRecordsFailure(t *testing.T) {
 		t.Errorf("owed = %q after giving up, want still %q", got, settings.EffectRestart)
 	}
 }
+
+// H7 (follow-up): an enabled instance whose template went missing is
+// enforced from its published snapshot, which keeps its header suffixes:
+// they stay declared, with no values, on the snapshot's hosts, so the
+// same-named shared-field header never reaches them.
+func TestFieldHeaderSuppressedTemplateMissing(t *testing.T) {
+	f, _, _ := headerFixture(t, nil)
+	sharedRoleField(f)
+	headerEnable(t, f)
+	f.h.mu.RLock()
+	snap := f.h.st.Published[headerID]
+	f.h.mu.RUnlock()
+	if len(snap.HeaderSuffixes) != 1 || snap.HeaderSuffixes[0] != hdrSuffix {
+		t.Errorf("published header suffixes = %v, want [%s]", snap.HeaderSuffixes, hdrSuffix)
+	}
+	if err := os.RemoveAll(filepath.Join(f.src, headerTemplate)); err != nil {
+		t.Fatal(err)
+	}
+	f.h.Discover()
+	if err := f.h.WritePolicy(); err != nil {
+		t.Fatal(err)
+	}
+	doc, _ := readAttrs(t, f)
+	for _, host := range []string{headerMain, headerExtra} {
+		vals, declared := doc.Hosts[host][hdrSuffix]
+		if !declared || len(vals) != 0 {
+			t.Errorf("%s %s = %v (declared %v), want declared with no values", host, hdrSuffix, vals, declared)
+		}
+	}
+}

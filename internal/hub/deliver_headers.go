@@ -341,6 +341,26 @@ func (h *Hub) publishedHostHeadersLocked() (out map[string]map[string]map[string
 			}
 		}
 	}
+	// Enabled instances without a view (the template missing) are
+	// enforced from their published snapshot: their header suffixes
+	// stay declared, with no values, on its hosts.
+	core := policy.CoreHosts(h.cfg.Domain)
+	for _, id := range h.st.Enabled {
+		snap, ok := h.st.Published[id]
+		if h.findLocked(id) != nil || !ok || len(snap.HeaderSuffixes) == 0 {
+			continue
+		}
+		for host := range hostSet(snap.Hosts, core) {
+			if out[host] == nil {
+				out[host] = map[string]map[string]string{}
+			}
+			for _, s := range snap.HeaderSuffixes {
+				if out[host][s] == nil {
+					out[host][s] = map[string]string{}
+				}
+			}
+		}
+	}
 	return out, suppress
 }
 
