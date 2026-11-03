@@ -3,6 +3,7 @@ services:
     image: entryenv
     environment:
       EXT_IDS: ${EXT_IDS}
+      TAGS: ${TAGS}
     labels:
       traefik.enable: "true"
       traefik.http.routers.entryenv.rule: Host(`${PORTCULLIS_HOST_ENTRYENV:-entryenv.portcullis.local}`)

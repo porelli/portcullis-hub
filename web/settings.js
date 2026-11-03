@@ -726,8 +726,9 @@
       h += '<span class="ps-val">' + esc(r.display) + '</span>';
       h += '<span class="ps-why">' + (r.set_by && r.set_by !== r.user ? 'set by ' + esc(r.set_by) : 'entered') + ', ' + esc(fmtDate(r.updated_at)) +
         (r.delivered ? '' : ' · not delivered: ' + esc(r.why || 'unknown')) + '</span>';
-      // Set / Edit only for people in the population (the Hub refuses others).
-      if (o.admin_override && r.why !== 'no access') h += '<button type="button" class="btn btn-secondary btn-sm" data-action="entry-edit"' + k + '>Edit</button>';
+      // Set / Edit only for people in the population (the Hub refuses
+      // others; with the directory down it can't tell).
+      if (o.admin_override && r.why !== 'no access' && r.why !== 'directory unavailable') h += '<button type="button" class="btn btn-secondary btn-sm" data-action="entry-edit"' + k + '>Edit</button>';
       h += '<button type="button" class="btn btn-danger btn-sm" data-action="entry-clear"' + k + (es.busy ? ' disabled' : '') + '>Clear</button>';
     }
     return h + '</li>';

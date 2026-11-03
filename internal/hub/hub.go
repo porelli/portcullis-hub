@@ -204,6 +204,10 @@ type Hub struct {
 	deliveryStatus map[string]map[string]UnitResult
 	lastTrigger    map[string]Trigger
 	deliverLocks   sync.Map
+	// entryLimit: refused people-entry saves per caller (entries.go);
+	// entryNow its clock (nil: time.Now; tests set it).
+	entryLimit entryLimiter
+	entryNow   func() time.Time
 	// hookExecs: per instance, a timed-out hook exec that may still run
 	// (deliver_hooks.go; under deliveryMu).
 	hookExecs map[string]timedOutExec

@@ -154,7 +154,12 @@ func (h *Hub) configProblem(t *templates.Template, c *instanceConfig, archive st
 				continue
 			}
 			e.Value = storedValue(v)
-			vals[strings.ToLower(u)] = e
+			lu := strings.ToLower(u)
+			if _, dup := vals[lu]; dup {
+				problems = append(problems, statusErr(400, "setting %s: two values for %s (names differ only in case)", k, clip(lu, 64)))
+				continue
+			}
+			vals[lu] = e
 		}
 		if canon.Entered == nil {
 			canon.Entered = map[string]map[string]state.EnteredValue{}

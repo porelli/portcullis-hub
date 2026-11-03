@@ -201,3 +201,14 @@ func TestOwnValuesPrefixNames(t *testing.T) {
 		t.Errorf("alice's value gone after alice2's DELETE: %s", a)
 	}
 }
+
+// Fix round 1 M6: refused saves past the per-caller limit answer 429.
+func TestOwnValueRefusalsLimited(t *testing.T) {
+	e := entryEnv(t)
+	const path = "/api/me/apps/entryapp/values/ext_id"
+	for range 10 {
+		mustDo(t, e.ppl, "bob", "PUT", path, valueBody("nope"), 400)
+	}
+	mustDo(t, e.ppl, "bob", "PUT", path, valueBody(entBob), 429)
+	mustDo(t, e.ppl, "alice", "PUT", path, valueBody(entAlice), 200)
+}

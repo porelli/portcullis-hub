@@ -57,6 +57,17 @@
     return 'Saved ' + fmtDate(e.updated_at) + (when ? ' · ' + when : '');
   }
 
+  // htmlPattern is a template pattern (^…$, the whole value) as an HTML
+  // pattern attribute, which the browser anchors itself: only the outer
+  // ^ and $ are removed and the rest is grouped, so an alternation keeps
+  // its meaning (^a|b$ → (?:a|b)).
+  function htmlPattern(p) {
+    let s = String(p);
+    if (s.startsWith('^')) s = s.slice(1);
+    if (s.endsWith('$') && !s.endsWith('\\$')) s = s.slice(0, -1);
+    return '(?:' + s + ')';
+  }
+
   // entryControl is the input for entry e (its constraints as the
   // browser can check them; the Hub checks them again).
   function entryControl(appID, e) {
@@ -82,7 +93,7 @@
     let a = ' type="text" autocomplete="off" spellcheck="false"';
     if (inp.max_len) a += ' maxlength="' + esc(inp.max_len) + '"';
     if (inp.min_len) a += ' minlength="' + esc(inp.min_len) + '"';
-    if (inp.pattern) a += ' pattern="' + esc(inp.pattern.replace(/^\^/, '').replace(/\$$/, '')) + '"';
+    if (inp.pattern) a += ' pattern="' + esc(htmlPattern(inp.pattern)) + '"';
     return '<input class="pd-input ma-text"' + a + common + ' value="' + esc(v == null ? '' : v) + '">';
   }
 

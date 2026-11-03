@@ -1306,7 +1306,7 @@ func (s *Service) DeleteUser(ctx context.Context, c *Caller, username, confirm s
 	// Only once the LLDAP delete succeeded, outside s.mu (the Hub takes
 	// its own lock: order s.mu → Hub.mu).
 	if deleted != "" && s.UserDeleted != nil {
-		res.Warnings = append(res.Warnings, s.UserDeleted(ctx, c.User, strings.ToLower(deleted))...)
+		res.Warnings = append(res.Warnings, s.UserDeleted(ctx, strings.ToLower(c.User), strings.ToLower(deleted))...)
 	}
 	return res, err
 }

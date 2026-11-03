@@ -19,3 +19,10 @@ settings:
       unique: true
       applies: restart
       delivery: [{env: EXT_IDS, render: {join: ","}}]
+    - key: tag
+      label: Tag
+      type: string
+      max_len: 20
+      scope: person_entered
+      applies: restart
+      delivery: [{env: TAGS, render: {format: json}}]

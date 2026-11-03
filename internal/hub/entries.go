@@ -10,6 +10,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/portcullis/hub/internal/directory"
@@ -44,6 +45,7 @@ import (
 const (
 	EntryWhyNoAccess       = "no access"
 	EntryWhyAccountChanged = "account changed"
+	EntryWhyDirectory      = "directory unavailable"
 )
 
 // EntryBodyMax bounds a person-entered value's request body (both
@@ -248,9 +250,14 @@ func (h *Hub) entryEnvLocked(t *templates.Template, m *directory.Membership) map
 		}
 		entries := h.deliveredEntriesLocked(t, o.Key, pop, m.UUIDs)
 		for _, d := range ds {
-			text, err := renderEntryList(o, d, entries)
+			text, left, err := renderEntryList(o, d, entries)
+			if len(left) > 0 {
+				log.Printf("settings: %s: %s: env %s: the values of %s can't be delivered through the env: left out (%d)", t.ID, o.Key, d.Env, strings.Join(left, ", "), len(left))
+			}
 			if err != nil {
-				log.Printf("settings: %s: %s: %v", t.ID, o.Key, err)
+				// Never blank the list: the variable stays as it is.
+				log.Printf("settings: %s: %s: env %s: the list can't be written (%v): kept as it is", t.ID, o.Key, d.Env, err)
+				continue
 			}
 			out[d.Env] = text
 		}
@@ -258,59 +265,91 @@ func (h *Hub) entryEnvLocked(t *templates.Template, m *directory.Membership) map
 	return out
 }
 
-// renderEntryList renders entries for env delivery d (items that don't
-// fit are left out; err reports them, without a value).
-func renderEntryList(o *templates.Option, d templates.Delivery, entries []settings.EntryOut) (string, error) {
-	rd := templates.Render{}
+// entryItemRender is d's render for one item of the list (no join, no
+// format: those apply to the list).
+func entryItemRender(d templates.Delivery) (item templates.Delivery, rd templates.Render) {
 	if d.Render != nil {
 		rd = *d.Render
 	}
-	item := d
-	itemRender := rd
-	itemRender.Join, itemRender.Format = nil, ""
-	item.Render = &itemRender
-	sep := ","
-	if rd.Join != nil {
-		sep = *rd.Join
+	ir := rd
+	ir.Join, ir.Format = nil, ""
+	item = d
+	item.Render = &ir
+	return item, rd
+}
+
+// entryItem is value v as one item of env delivery d's list, exactly as
+// the list carries it: format json — the item's JSON encoding (no HTML
+// escaping); else its text. An item the single-quoted env can't carry
+// (', \, a newline) or holding the list's separator (render.join, else
+// ",") is an error.
+func entryItem(o *templates.Option, d templates.Delivery, v settings.Value) (string, error) {
+	item, rd := entryItemRender(d)
+	r, err := settings.RenderDelivery(o, v, &item)
+	if err != nil {
+		return "", err
 	}
-	var texts []string
-	var jsons []any
-	var left []string
+	text := r.Text
+	if rd.Format == templates.RenderJSON {
+		if text, err = jsonText(r.JSON); err != nil {
+			return "", err
+		}
+	} else {
+		sep := ","
+		if rd.Join != nil {
+			sep = *rd.Join
+		}
+		if strings.Contains(text, sep) {
+			return "", fmt.Errorf("must not contain %q", sep)
+		}
+	}
+	if _, err := envQuote(text); err != nil {
+		return "", err
+	}
+	return text, nil
+}
+
+// jsonText is v's JSON encoding without HTML escaping (<, >, & stay as
+// they are: an escape would put a backslash into the env).
+func jsonText(v any) (string, error) {
+	var b strings.Builder
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return "", err
+	}
+	return strings.TrimSuffix(b.String(), "\n"), nil
+}
+
+// renderEntryList renders entries for env delivery d: the items joined
+// (render.join) or a JSON list. An item that doesn't fit (entryItem) is
+// left out (left: its users, never a value); the others are always
+// delivered. err: the list as a whole can't be written (the caller keeps
+// the variable as it is).
+func renderEntryList(o *templates.Option, d templates.Delivery, entries []settings.EntryOut) (out string, left []string, err error) {
+	_, rd := entryItemRender(d)
+	items := make([]string, 0, len(entries))
 	for _, e := range entries {
-		r, err := settings.RenderDelivery(o, e.Value, &item)
-		if err == nil {
-			_, err = envQuote(r.Text)
-		}
-		if err == nil && rd.Format != templates.RenderJSON && strings.Contains(r.Text, sep) {
-			err = fmt.Errorf("contains the separator")
-		}
+		text, err := entryItem(o, d, e.Value)
 		if err != nil {
 			left = append(left, e.User)
 			continue
 		}
-		texts = append(texts, r.Text)
-		jsons = append(jsons, r.JSON)
+		items = append(items, text)
 	}
-	var out string
 	if rd.Format == templates.RenderJSON {
-		if jsons == nil {
-			jsons = []any{}
-		}
-		b, err := json.Marshal(jsons)
-		if err != nil {
-			return "", err
-		}
-		out = string(b)
-		if _, err := envQuote(out); err != nil {
-			return "", fmt.Errorf("env %s: the list can't be written to the env", d.Env)
-		}
+		out = "[" + strings.Join(items, ",") + "]"
 	} else {
-		out = strings.Join(texts, sep)
+		sep := ","
+		if rd.Join != nil {
+			sep = *rd.Join
+		}
+		out = strings.Join(items, sep)
 	}
-	if len(left) > 0 {
-		return out, fmt.Errorf("env %s: the values of %s can't be delivered through the env: left out", d.Env, strings.Join(left, ", "))
+	if _, err := envQuote(out); err != nil {
+		return "", left, fmt.Errorf("the list can't be single-quoted: %w", err)
 	}
-	return out, nil
+	return out, left, nil
 }
 
 // entryInput is o's input description for My apps.
@@ -352,6 +391,7 @@ func (h *Hub) entryRowLocked(o *templates.Option, user string, e state.EnteredVa
 	}
 	switch {
 	case m == nil || pop == nil:
+		r.Why = EntryWhyDirectory
 	case !inPopulation(*pop, user):
 		r.Why = EntryWhyNoAccess
 	case e.UUID == "" || m.UUIDs[user] != e.UUID:
@@ -427,9 +467,21 @@ func (h *Hub) setEntry(ctx context.Context, instance, key, user string, raw json
 	if err != nil {
 		return nil, nil, errEntryDirectory(err)
 	}
+	if !admin && !h.entryLimit.allow(user, h.entryClock()) {
+		return nil, nil, errEntryLimited
+	}
 	refuse := func(err error, detail string) (*MyEntry, *EntryRow, error) {
+		if !admin {
+			h.entryLimit.refused(user, h.entryClock())
+		}
 		h.auditOp(actor, "settings.person_value", target, detail, err)
 		return nil, nil, err
+	}
+	noEntry := func() (*MyEntry, *EntryRow, error) {
+		if !admin {
+			h.entryLimit.refused(user, h.entryClock())
+		}
+		return nil, nil, errNoEntry
 	}
 	h.mu.Lock()
 	t := h.findLocked(instance)
@@ -439,12 +491,12 @@ func (h *Hub) setEntry(ctx context.Context, instance, key, user string, raw json
 	}
 	if t == nil || o == nil || !h.st.IsEnabled(instance) {
 		h.mu.Unlock()
-		return nil, nil, errNoEntry
+		return noEntry()
 	}
 	pop := h.entryPopulationLocked(t, m)
 	if !inPopulation(pop, user) {
 		h.mu.Unlock()
-		return nil, nil, errNoEntry
+		return noEntry()
 	}
 	if err := h.pendingLocked(instance); err != nil {
 		h.mu.Unlock()
@@ -490,17 +542,14 @@ func (h *Hub) setEntry(ctx context.Context, instance, key, user string, raw json
 	before := "unset"
 	if pv, ok := keep[user]; ok && had {
 		before = h.kinds.Display(o, pv)
-		if entryKey(pv) == entryKey(v) && prev.UUID == uuid && prev.UUID != "" {
+		if entryKey(pv) == entryKey(v) && prev.UUID == uuid && prev.UUID != "" && prev.SetBy == entrySetBy(admin, actor) {
 			me := h.myEntryLocked(t, o, user, uuid)
 			row := h.entryRowLocked(o, user, prev, true, &pop, m)
 			h.mu.Unlock()
 			return &me, &row, nil
 		}
 	}
-	setBy := ""
-	if admin {
-		setBy = actor
-	}
+	setBy := entrySetBy(admin, actor)
 	ev := state.EnteredValue{Value: storedValue(v), UUID: uuid, UpdatedAt: time.Now().UTC(), SetBy: setBy}
 	if s.Entered == nil {
 		s.Entered = map[string]map[string]state.EnteredValue{}
@@ -532,6 +581,16 @@ func (h *Hub) setEntry(ctx context.Context, instance, key, user string, raw json
 	return &me, &row, nil
 }
 
+// entrySetBy is what a value stored by actor records: "" for the person,
+// else the admin's name (a person re-saving an admin's value makes it
+// theirs: a change).
+func entrySetBy(admin bool, actor string) string {
+	if admin {
+		return actor
+	}
+	return ""
+}
+
 // entryDeliverable refuses a value o's deliveries can't take: an env
 // item with a ' or a newline or the list's separator (it would be left
 // out of the list), a header or claim it can't render.
@@ -539,23 +598,9 @@ func entryDeliverable(o *templates.Option, v settings.Value) error {
 	for _, d := range o.Delivery {
 		switch {
 		case d.Env != "":
-			rd := templates.Render{}
-			if d.Render != nil {
-				rd = *d.Render
-			}
-			item := d
-			ir := rd
-			ir.Join, ir.Format = nil, ""
-			item.Render = &ir
-			r, err := settings.RenderDelivery(o, v, &item)
-			if err != nil {
+			// Exactly as the list will carry it (entryItem).
+			if _, err := entryItem(o, d, v); err != nil {
 				return err
-			}
-			if _, err := envQuote(r.Text); err != nil {
-				return err
-			}
-			if rd.Join != nil && strings.Contains(r.Text, *rd.Join) {
-				return fmt.Errorf("must not contain %q", *rd.Join)
 			}
 		case d.Header != nil, d.Claim != nil:
 			if _, err := settings.RenderDelivery(o, v, &d); err != nil {
@@ -592,9 +637,20 @@ func (h *Hub) clearEntry(ctx context.Context, instance, key, user, actor string,
 	}
 	h.mu.Lock()
 	t := h.findLocked(instance)
-	if t == nil || entryOption(t, key) == nil || (!admin && (!h.st.IsEnabled(instance) || !inPopulation(h.entryPopulationLocked(t, m), user))) {
+	if t == nil || entryOption(t, key) == nil {
 		h.mu.Unlock()
 		return errNoEntry
+	}
+	if !admin {
+		// Their own value (stored under their current uuid) they can
+		// always remove — outside the population too, or with the app
+		// disabled; anything else needs what a save needs.
+		e, stored := h.st.Settings[instance].Entered[key][user]
+		own := stored && e.UUID != "" && e.UUID == m.UUIDs[user]
+		if !own && (!h.st.IsEnabled(instance) || !inPopulation(h.entryPopulationLocked(t, m), user)) {
+			h.mu.Unlock()
+			return errNoEntry
+		}
 	}
 	if err := h.pendingLocked(instance); err != nil {
 		h.mu.Unlock()
@@ -800,4 +856,81 @@ func entryIncompatibilities(o *templates.Option, stored map[string]state.Entered
 		out = append(out, fmt.Sprintf("setting %s: %d stored person-entered value(s) duplicate an earlier one of this now unique option and are dropped", o.Key, len(dupes)))
 	}
 	return out
+}
+
+// errEntryLimited: too many refused saves by one person in a minute.
+var errEntryLimited = &StatusError{Status: 429, Err: errors.New("too many refused attempts: try again in a minute")}
+
+// Refused people-entry saves per caller (a probe of which values are
+// registered, a flood of the audit): entryRefusalLimit per
+// entryRefusalWindow, then 429 until the window ends; saves refused past
+// the limit are not audited one by one — one log line per window says
+// how many there were. In memory only.
+const (
+	entryRefusalLimit  = 10
+	entryRefusalWindow = time.Minute
+)
+
+type entryLimiter struct {
+	mu sync.Mutex
+	by map[string]*entryWindow
+}
+
+type entryWindow struct {
+	start      time.Time
+	refused    int
+	suppressed int
+}
+
+// window is user's current window (a new one once the old has passed;
+// the old window's suppressed saves are logged). Caller holds l.mu.
+func (l *entryLimiter) window(user string, now time.Time) *entryWindow {
+	if l.by == nil {
+		l.by = map[string]*entryWindow{}
+	}
+	w := l.by[user]
+	if w == nil || now.Sub(w.start) >= entryRefusalWindow {
+		if w != nil && w.suppressed > 0 {
+			log.Printf("people: %s: %d more value saves refused (rate-limited, not audited one by one)", user, w.suppressed)
+		}
+		// Drop idle windows now and then (in memory, bounded by callers).
+		for u, x := range l.by {
+			if now.Sub(x.start) >= entryRefusalWindow && u != user {
+				delete(l.by, u)
+			}
+		}
+		w = &entryWindow{start: now}
+		l.by[user] = w
+	}
+	return w
+}
+
+// allow reports whether user may save now (false: 429, counted).
+func (l *entryLimiter) allow(user string, now time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	w := l.window(user, now)
+	if w.refused < entryRefusalLimit {
+		return true
+	}
+	w.suppressed++
+	if w.suppressed == 1 {
+		log.Printf("people: %s: more than %d refused value saves in a minute: further saves refused with 429 until the minute is over", user, entryRefusalLimit)
+	}
+	return false
+}
+
+// refused counts one refused save of user.
+func (l *entryLimiter) refused(user string, now time.Time) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.window(user, now).refused++
+}
+
+// entryClock is the limiter's clock (h.entryNow in tests).
+func (h *Hub) entryClock() time.Time {
+	if h.entryNow != nil {
+		return h.entryNow()
+	}
+	return time.Now()
 }

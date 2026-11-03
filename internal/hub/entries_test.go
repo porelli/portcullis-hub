@@ -230,7 +230,10 @@ func TestEntryUnique(t *testing.T) {
 func TestEntryUniqueRace(t *testing.T) {
 	f, _, _, _ := entryFixture(t)
 	const v = "cccccccccccccccccccccccccccccccc"
+	now := time.Now()
+	f.h.entryNow = func() time.Time { return now }
 	for range 20 {
+		now = now.Add(entryRefusalWindow) // the refusal limit is per minute
 		var wg sync.WaitGroup
 		errs := make([]error, 2)
 		for i, u := range []string{"alice", "bob"} {
@@ -806,5 +809,157 @@ func TestEntryHeaderOwnValue(t *testing.T) {
 		if got := hosts[host]["Team"]; !reflect.DeepEqual(got, map[string]string{"alice": "blue"}) {
 			t.Errorf("%s Team = %v", host, got)
 		}
+	}
+}
+
+// Fix round 1: the JSON list format, never HTML-escaped (no backslash in
+// the env); a value the list can't carry is refused at save.
+func TestEntryEnvJSONFormat(t *testing.T) {
+	f, _, _, _ := entryFixture(t)
+	if err := f.h.Enable(entryEnv); err != nil {
+		t.Fatal(err)
+	}
+	settle(f)
+	mustSetEntry(t, f, entryEnv, "tag", "alice", "a<b&c>", "alice")
+	mustSetEntry(t, f, entryEnv, "tag", "bob", "bob", "bob")
+	for _, v := range []string{`a"b`, `a\b`, "it's"} {
+		if _, err := setEntry(f, entryEnv, "tag", "bob", v, "bob"); statusOf(err) != 400 {
+			t.Errorf("%q = %v, want 400", v, err)
+		}
+	}
+	settle(f)
+	if want := `TAGS='["a<b&c>","bob"]'`; !strings.Contains(envOf(t, f, entryEnv), want) {
+		t.Errorf(".env lacks %s:\n%s", want, envOf(t, f, entryEnv))
+	}
+}
+
+// Fix round 1: one person's value the list can't carry (stored by any
+// route) never removes anybody else's from the env.
+func TestEntryEnvCraftedValueKeepsOthers(t *testing.T) {
+	f, people, _, _ := entryFixture(t)
+	if err := f.h.Enable(entryEnv); err != nil {
+		t.Fatal(err)
+	}
+	settle(f)
+	mustSetEntry(t, f, entryEnv, "tag", "alice", "alice-tag", "alice")
+	mustSetEntry(t, f, entryEnv, "ext_id", "alice", aliceExt, "alice")
+	storeEntryDirect(f, entryEnv, "tag", "bob", `x"y\`, people.uuidOf("bob"))
+	settle(f)
+	deliverNow(t, f, entryEnv, TriggerMembership)
+	env := envOf(t, f, entryEnv)
+	if !strings.Contains(env, `TAGS='["alice-tag"]'`) {
+		t.Errorf("TAGS lost alice's item:\n%s", env)
+	}
+	if !strings.Contains(env, "EXT_IDS='"+aliceExt+"'") {
+		t.Errorf("EXT_IDS changed:\n%s", env)
+	}
+	// renderEntryList drops only the offending item.
+	o := optionByKey(f.h.Template(entryEnv), "ext_id")
+	out, left, err := renderEntryList(o, o.Delivery[0], []settings.EntryOut{{User: "alice", Value: aliceExt}, {User: "bob", Value: "a,b"}, {User: "carol", Value: "it's"}})
+	if err != nil || out != aliceExt || strings.Join(left, ",") != "bob,carol" {
+		t.Errorf("renderEntryList = %q %v %v", out, left, err)
+	}
+}
+
+// Fix round 1 M1: a person can always clear their own value.
+func TestClearOwnValueOutsidePopulation(t *testing.T) {
+	f, people, _, _ := entryFixture(t)
+	mustSetEntry(t, f, entryID, "ext_id", "alice", aliceExt, "alice")
+	mustSetEntry(t, f, entryID, "nick", "alice", "Ali", "alice")
+	people.removeMember(entryID, "alice")
+	if err := f.h.ClearPersonValue(context.Background(), entryID, "ext_id", "alice", "alice"); err != nil {
+		t.Fatalf("outside the population: %v", err)
+	}
+	if err := f.h.Disable(entryID); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.h.ClearPersonValue(context.Background(), entryID, "nick", "alice", "alice"); err != nil {
+		t.Fatalf("disabled instance: %v", err)
+	}
+	if len(storedSettings(f, entryID).Entered) != 0 {
+		t.Errorf("stored = %+v", storedSettings(f, entryID).Entered)
+	}
+	// Nothing of hers stored: still the one 404 outside the population.
+	if err := f.h.ClearPersonValue(context.Background(), entryID, "nick", "alice", "alice"); statusOf(err) != 404 {
+		t.Errorf("nothing stored, outside = %v", err)
+	}
+}
+
+// Fix round 1 M2: re-saving an admin's value makes it the person's.
+func TestResaveTakesOverAdminValue(t *testing.T) {
+	f, _, _, audit := entryFixture(t)
+	if _, err := f.h.SetEntryAsAdmin(context.Background(), entryID, "ext_id", "alice", raw(aliceExt), "root"); err != nil {
+		t.Fatal(err)
+	}
+	e := mustSetEntry(t, f, entryID, "ext_id", "alice", aliceExt, "alice")
+	if e.SetByAdmin || storedSettings(f, entryID).Entered["ext_id"]["alice"].SetBy != "" {
+		t.Errorf("still the admin's: %+v", e)
+	}
+	if pv := auditsOf(audit, "settings.person_value"); len(pv) != 2 || pv[1].Actor != "alice" {
+		t.Errorf("audit = %+v", pv)
+	}
+}
+
+// Fix round 1 M3: with the directory down, rows say so.
+func TestPanelEntriesDirectoryDown(t *testing.T) {
+	f, people, _, _ := entryFixture(t)
+	mustSetEntry(t, f, entryID, "ext_id", "alice", aliceExt, "alice")
+	people.set(func(p *fakePeople) { p.err = &directory.Error{Status: 503, Msg: "down"} })
+	p, err := f.h.SettingsPanel(context.Background(), entryID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rows := p.Entries["ext_id"].Rows; len(rows) != 1 || rows[0].Delivered || rows[0].Why != EntryWhyDirectory {
+		t.Errorf("rows = %+v", rows)
+	}
+}
+
+// Fix round 1 M4: an archive with values for names that fold together is
+// refused.
+func TestRestoreRefusesCaseCollidingEntries(t *testing.T) {
+	f, people, _, _ := entryFixture(t)
+	s := state.InstanceSettings{Entered: map[string]map[string]state.EnteredValue{"ext_id": {
+		"Alice": {Value: aliceExt, UUID: people.uuidOf("alice")},
+		"alice": {Value: bobExt, UUID: people.uuidOf("alice")},
+	}}}
+	err := f.h.configProblem(f.h.Template(entryID), &instanceConfig{Settings: &s}, "entryapp/x.tar")
+	if statusOf(err) != 409 || !strings.Contains(err.Error(), "differ only in case") {
+		t.Errorf("configProblem = %v", err)
+	}
+}
+
+// Fix round 1 M6: refused saves are limited per caller.
+func TestEntryRefusalsRateLimited(t *testing.T) {
+	f, _, _, audit := entryFixture(t)
+	now := time.Date(2026, 11, 3, 10, 0, 0, 0, time.UTC)
+	f.h.entryNow = func() time.Time { return now }
+	for i := range entryRefusalLimit {
+		if _, err := setEntry(f, entryID, "ext_id", "alice", "nope", "alice"); statusOf(err) != 400 {
+			t.Fatalf("refusal %d = %v", i, err)
+		}
+	}
+	n := len(auditsOf(audit, "settings.person_value"))
+	for range 5 {
+		if _, err := setEntry(f, entryID, "ext_id", "alice", aliceExt, "alice"); statusOf(err) != 429 {
+			t.Fatalf("past the limit = %v, want 429", err)
+		}
+	}
+	if got := len(auditsOf(audit, "settings.person_value")); got != n {
+		t.Errorf("limited saves audited: %d -> %d", n, got)
+	}
+	// Others aren't affected; a 404 probe counts too.
+	mustSetEntry(t, f, entryID, "ext_id", "bob", bobExt, "bob")
+	// A minute later: allowed again.
+	now = now.Add(entryRefusalWindow)
+	mustSetEntry(t, f, entryID, "ext_id", "alice", aliceExt, "alice")
+	for range entryRefusalLimit {
+		setEntry(f, entryID, "nope", "alice", aliceExt, "alice")
+	}
+	if _, err := setEntry(f, entryID, "ext_id", "alice", aliceExt, "alice"); statusOf(err) != 429 {
+		t.Errorf("after ten 404s = %v, want 429", err)
+	}
+	// Admins are never limited.
+	if _, err := f.h.SetEntryAsAdmin(context.Background(), entryID, "ext_id", "alice", raw(aliceExt), "root"); err != nil {
+		t.Errorf("admin = %v", err)
 	}
 }

@@ -311,7 +311,7 @@ func TestUserDeletedHook(t *testing.T) {
 		t.Fatalf("hook called for a failed delete: %+v", calls)
 	}
 	e.svc.LLDAP = real
-	res, err := e.svc.DeleteUser(ctx, asRoot, "alice", "alice")
+	res, err := e.svc.DeleteUser(ctx, &directory.Caller{User: "Root", Admin: true}, "alice", "alice")
 	if err != nil {
 		t.Fatal(err)
 	}
