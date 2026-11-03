@@ -26,8 +26,11 @@ import (
 //	go test -tags harness -run TestHarness -timeout 0 ./internal/httpapi
 //
 // It listens on HUB_HARNESS_ADDR (default 127.0.0.1:18888), signs every
-// request in as "root" (an LLDAP admin) with the proxy secret, and runs
-// until HUB_HARNESS_FOR (a duration, default 30m) has passed.
+// request in as "root" (an LLDAP admin) with the proxy secret, serves the
+// people listener on HUB_HARNESS_PEOPLE_ADDR (default 127.0.0.1:18889)
+// signed in as HUB_HARNESS_PEOPLE_USER (default alice; a request's
+// X-Harness-User overrides it), and runs until HUB_HARNESS_FOR (a
+// duration, default 30m) has passed.
 //
 // Settings panel fixtures (the Hub's internal/hub/testdata/settings
 // templates, each a default instance):
@@ -43,7 +46,8 @@ import (
 //     group-scope
 //     list libraries (file + env) with a record for office_milan.
 //   - secretapp: secrets (one generated), api_url requiring api_key.
-//   - hookapp: ENABLED; its hook apply fails ("exited 1") until
+//   - hookapp: ENABLED, per-person seats office_milan 3, it_staff 5 (My
+//     apps: alice 3, bob 5); its hook apply fails ("exited 1") until
 //     POST /harness/hook/fix (POST /harness/hook/break fails it again),
 //     so the deliveries strip shows the reason and Retry clears it.
 //   - claimapp, headerapp, nativeapp: claims, headers, native sign-in.
@@ -134,11 +138,40 @@ func TestHarness(t *testing.T) {
 		handler.ServeHTTP(w, r)
 	}))
 	srv := &http.Server{Addr: addr, Handler: mux}
+	// The people listener (My apps): signed in as HUB_HARNESS_PEOPLE_USER
+	// (default alice), or the request's X-Harness-User.
+	paddr := os.Getenv("HUB_HARNESS_PEOPLE_ADDR")
+	if paddr == "" {
+		paddr = "127.0.0.1:18889"
+	}
+	if host, _, err := net.SplitHostPort(paddr); err != nil || net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback() {
+		t.Fatalf("HUB_HARNESS_PEOPLE_ADDR %q: loopback IP addresses only", paddr)
+	}
+	puser := os.Getenv("HUB_HARNESS_PEOPLE_USER")
+	if puser == "" {
+		puser = "alice"
+	}
+	people := e.ppl.Config.Handler
+	psrv := &http.Server{Addr: paddr, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		u := r.Header.Get("X-Harness-User")
+		if u == "" {
+			u = puser
+		}
+		r.Header.Set(ProxySecretHeader, testSecret)
+		r.Header.Set("X-Forwarded-User", u)
+		people.ServeHTTP(w, r)
+	})}
+	go func() {
+		if err := psrv.ListenAndServe(); err != http.ErrServerClosed {
+			t.Errorf("people listener: %v", err)
+		}
+	}()
 	go func() {
 		time.Sleep(d)
+		psrv.Close()
 		srv.Close()
 	}()
-	t.Logf("harness on http://%s for %s (hookapp's hook fails until POST /harness/hook/fix)", addr, d)
+	t.Logf("harness on http://%s, people listener on http://%s as %s, for %s (hookapp's hook fails until POST /harness/hook/fix)", addr, paddr, puser, d)
 	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
 		t.Fatal(err)
 	}
@@ -205,6 +238,15 @@ func seedSettings(t *testing.T, h *hub.Hub, eng *harnessEngine) {
 	}
 	if err := h.Disable("privapp"); err != nil {
 		t.Fatalf("disabling privapp: %v", err)
+	}
+	// My apps on the people listener: alice gets 3 seats from
+	// office_milan, bob 5 from it_staff (office_milan losing).
+	if _, err := h.SaveSettings("hookapp", hub.SettingsUpdate{
+		Person: map[string]hub.PersonChange{"seats": {Default: raw(1), Rows: []hub.GroupValueInput{
+			{Group: "office_milan", Value: raw(3)}, {Group: "it_staff", Value: raw(5)},
+		}}},
+	}, "root"); err != nil {
+		t.Fatalf("seeding hookapp: %v", err)
 	}
 	eng.hookOK.Store(true)
 	if err := h.Enable("hookapp"); err != nil {

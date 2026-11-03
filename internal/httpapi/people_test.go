@@ -82,8 +82,46 @@ func (e *peopleEnv) setup(t *testing.T) {
 	}
 }
 
+// peopleAppRoutes are the only app routes of the people listener
+// (contract §5.1): caller-only. Later plans append.
+var peopleAppRoutes = []string{"GET /api/me/apps"}
+
+// TestPeopleListenerHasNoAppRoutes: the people mux registers exactly the
+// directory API, peopleAppRoutes, /healthz, the page and its assets —
+// compared as sets of the patterns PeopleHandler registers.
 func TestPeopleListenerHasNoAppRoutes(t *testing.T) {
 	e := newPeopleEnv(t)
+	dir := &recordingMux{ServeMux: http.NewServeMux()}
+	e.s.registerDirectory(dir)
+	want := map[string]bool{"/healthz": true, "/": true, "/static/": true}
+	for _, p := range append(append([]string{}, dir.patterns...), peopleAppRoutes...) {
+		want[p] = true
+	}
+	got := map[string]bool{}
+	for _, p := range e.s.peopleMux().patterns {
+		if got[p] {
+			t.Errorf("people pattern %q registered twice", p)
+		}
+		got[p] = true
+	}
+	for p := range got {
+		if !want[p] {
+			t.Errorf("people listener registers %q, which is not allowed", p)
+		}
+	}
+	for p := range want {
+		if !got[p] {
+			t.Errorf("people listener lacks %q", p)
+		}
+	}
+	// The caller-only app routes: on people, never on the Hub listener.
+	e.s.Hub.SetPeople(e.s.Directory)
+	if r, b := doAs(t, e.people, "bob", "GET", "/api/me/apps", ""); r.StatusCode != 200 || !strings.Contains(b, `"apps":`) {
+		t.Errorf("people GET /api/me/apps = %d %s", r.StatusCode, b)
+	}
+	if r, _ := doAs(t, e.hub, "root", "GET", "/api/me/apps", ""); r.StatusCode != 404 {
+		t.Errorf("hub GET /api/me/apps = %d, want 404", r.StatusCode)
+	}
 	for _, path := range []string{"/api/templates", "/api/settings", "/api/drift", "/api/templates/compose/x",
 		"/api/status", "/api/sources", "/api/portal/apps", "/api/domains", "/api/instances", "/api/backups",
 		"/api/instances/x/backups", "/api/instances/x/op", "/api/instances/x/settings", "/api/instances/defaults?template=demo", "/static/index.html", "/nope"} {
@@ -531,11 +569,29 @@ func TestDirectoryAssetsServed(t *testing.T) {
 }
 
 // TestSettingsAssetHubOnly: the settings panel's script is served on the
-// Hub listener only; the people listener serves just its own assets.
+// Hub listener only; the people listener serves just its own assets
+// (directory.js, directory.css, myapps.js).
 func TestSettingsAssetHubOnly(t *testing.T) {
 	e := newPeopleEnv(t)
+	var allow []string
+	for a, ok := range peopleStatic {
+		if ok {
+			allow = append(allow, a)
+		}
+	}
+	sort.Strings(allow)
+	if strings.Join(allow, ",") != "directory.css,directory.js,myapps.js" {
+		t.Errorf("peopleStatic = %v, want exactly directory.css, directory.js, myapps.js", allow)
+	}
 	if r, b := doAs(t, e.hub, "root", "GET", "/static/settings.js", ""); r.StatusCode != 200 || !strings.HasPrefix(r.Header.Get("Content-Type"), "text/javascript") || !strings.Contains(b, "PortcullisSettings") {
 		t.Errorf("hub settings.js = %d %q", r.StatusCode, r.Header.Get("Content-Type"))
+	}
+	if r, b := doAs(t, e.people, "bob", "GET", "/static/myapps.js", ""); r.StatusCode != 200 || !strings.HasPrefix(r.Header.Get("Content-Type"), "text/javascript") || !strings.Contains(b, "PortcullisMyApps") {
+		t.Errorf("people myapps.js = %d %q", r.StatusCode, r.Header.Get("Content-Type"))
+	}
+	_, pb := doAs(t, e.people, "bob", "GET", "/", "")
+	if !strings.Contains(pb, `src="/static/myapps.js"`) || strings.Contains(pb, "settings.js") {
+		t.Error("the people page does not load myapps.js, or loads settings.js")
 	}
 	for _, p := range []string{"/static/settings.js", "/static/index.html", "/static/people.html", "/static/web.go"} {
 		if r, _ := doAs(t, e.people, "bob", "GET", p, ""); r.StatusCode != 404 {

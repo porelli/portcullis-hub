@@ -13,7 +13,7 @@ import (
 // username / group name; mutations take the actor from X-Forwarded-User
 // (set by core's group-gate, trusted because of the proxy secret).
 
-func (s *Server) registerDirectory(mux *http.ServeMux) {
+func (s *Server) registerDirectory(mux routeMux) {
 	mux.HandleFunc("GET /api/directory", s.handleDirectory)
 	mux.HandleFunc("GET /api/directory/audit", s.handleAudit)
 	mux.HandleFunc("POST /api/directory/users", s.handleCreateUser)

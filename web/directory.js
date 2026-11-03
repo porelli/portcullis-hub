@@ -115,6 +115,8 @@
   const openGroups = new Set();
   let imp = null;            // import review state
   let dialogClose = null;    // cleanup of the open dialog
+  let extraTabs = [];        // options.extraTabs that passed the checks
+  const BUILTIN_TABS = ['people', 'groups', 'org', 'setup'];
 
   const isAdmin = () => !!(me && me.admin) && !!(dir && dir.admin);
   const perms = () => (me && me.perms) || (dir && dir.perms) || [];
@@ -305,6 +307,11 @@
     root.querySelectorAll('.pd-panel').forEach(p => { p.hidden = p.dataset.panel !== name; });
     if (options.hashTabs) history.replaceState(null, '', name === 'people' ? location.pathname : '#' + name);
     if (name === 'setup' && isAdmin()) loadAudit();
+    const x = extraTabs.find(t => t.id === name);
+    if (x) {
+      const panel = root.querySelector('[data-panel="' + x.id + '"]');
+      try { x.render(panel); } catch (err) { panel.innerHTML = '<p class="pd-muted">' + esc((err && err.message) || 'failed') + '</p>'; }
+    }
   }
 
   function renderUserDatalist() {
@@ -1941,14 +1948,26 @@
     '</div>';
 
   // mount renders the shell into el once; show() (re)loads the data.
+  // opts: listener ('hub' | 'people'), hashTabs, onUser(name), extraTabs
+  // [{id, label, render(panel)}] (people.html: My apps).
   function mount(el, opts) {
     if (root) return;
     root = el;
     options = opts || {};
     el.innerHTML = SHELL;
+    // Extra tabs ({id, label, render(panel)}): a button before Setup and a
+    // panel after Org chart; render runs each time the tab is selected.
+    extraTabs = (options.extraTabs || []).filter(t => t && typeof t.render === 'function' && typeof t.label === 'string' &&
+      /^[a-z][a-z0-9-]{0,30}$/.test(t.id || '') && !BUILTIN_TABS.includes(t.id));
+    for (const t of extraTabs) {
+      root.querySelector('[data-pdtab="setup"]').insertAdjacentHTML('beforebegin',
+        '<button type="button" role="tab" class="pd-tab" data-pdtab="' + esc(t.id) + '" id="pd-tab-' + esc(t.id) + '" aria-controls="pd-panel-' + esc(t.id) + '">' + esc(t.label) + '</button>');
+      root.querySelector('.pd-panel[data-panel="setup"]').insertAdjacentHTML('beforebegin',
+        '<section class="pd-panel" data-panel="' + esc(t.id) + '" id="pd-panel-' + esc(t.id) + '" role="tabpanel" aria-labelledby="pd-tab-' + esc(t.id) + '" hidden></section>');
+    }
     if (options.hashTabs) {
       const h = location.hash.slice(1);
-      if (['people', 'groups', 'org', 'setup'].includes(h)) tab = h;
+      if (BUILTIN_TABS.includes(h) || extraTabs.some(t => t.id === h)) tab = h;
     }
     el.addEventListener('click', onClick);
     el.addEventListener('input', onInput);

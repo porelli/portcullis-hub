@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"mime"
 	"net/http"
 	"sort"
@@ -56,6 +57,34 @@ func decodeLarge(w http.ResponseWriter, r *http.Request, limit int64, v interfac
 		return false
 	}
 	return true
+}
+
+// ── my apps (people listener only, contract §5.1) ───────
+
+// registerPeopleApps registers the caller-only app routes of the people
+// listener (never the Hub listener): the caller is X-Forwarded-User,
+// lowercased; nothing about anyone else is answered.
+func (s *Server) registerPeopleApps(mux routeMux) {
+	mux.HandleFunc("GET /api/me/apps", s.handleMyApps)
+}
+
+// handleMyApps answers {"apps": [hub.MyApp…]}: the caller's own resolved
+// per-person values. No caller 401; the directory unavailable 503 with
+// the generic message (the cause is logged, never answered).
+func (s *Server) handleMyApps(w http.ResponseWriter, r *http.Request) {
+	user := strings.ToLower(actor(r))
+	if user == "" {
+		http.Error(w, "no signed-in user (X-Forwarded-User)", http.StatusUnauthorized)
+		return
+	}
+	apps, err := s.Hub.MyApps(r.Context(), user)
+	if err != nil {
+		log.Printf("people: my apps of %s: %v", user, err)
+		http.Error(w, directory.GenericUnavailable, http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, map[string]interface{}{"apps": apps})
 }
 
 // ── me ──────────────────────────────────────────────────

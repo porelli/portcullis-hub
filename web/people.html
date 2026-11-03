@@ -19,8 +19,9 @@
 </style>
 </head>
 <body>
-<!-- The people listener (people.<domain>): People, Groups, Org chart (and
-     Setup for admins). No app or catalog UI here; the API decides what
+<!-- The people listener (people.<domain>): People, Groups, Org chart, My
+     apps (myapps.js: the caller's own app settings) and Setup for admins.
+     No app or catalog UI here; the API decides what
      each signed-in user may see and do. -->
 <div class="container">
   <header>
@@ -30,10 +31,12 @@
   <main id="people"><noscript>This page needs JavaScript.</noscript></main>
 </div>
 <script src="/static/directory.js"></script>
+<script src="/static/myapps.js"></script>
 <script>
   PortcullisDirectory.show(document.getElementById('people'), {
     listener: 'people',
     hashTabs: true,
+    extraTabs: [{ id: 'myapps', label: 'My apps', render: PortcullisMyApps.render }],
     onUser: function (name) {
       document.getElementById('who-name').textContent = name;
       document.getElementById('who').hidden = !name;

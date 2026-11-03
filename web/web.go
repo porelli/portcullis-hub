@@ -4,8 +4,8 @@ package web
 import "embed"
 
 // FS holds index.html (the Hub), people.html (the people listener) and
-// the directory UI assets both pages load from /static/ (directory.js,
-// directory.css, settings.js).
+// the assets the pages load from /static/: directory.js and directory.css
+// (both), settings.js (the Hub only), myapps.js (people.html only).
 //
-//go:embed index.html people.html directory.js directory.css settings.js
+//go:embed index.html people.html directory.js directory.css settings.js myapps.js
 var FS embed.FS

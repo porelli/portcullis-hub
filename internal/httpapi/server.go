@@ -80,12 +80,37 @@ func (s *Server) PeopleHandler() (http.Handler, error) {
 	if _, err := fs.Stat(s.Web, "people.html"); err != nil {
 		return nil, err
 	}
-	mux := http.NewServeMux()
+	mux := s.peopleMux()
+	return ProxySecret(s.Secret, CSRF(markPeople(mux.ServeMux))), nil
+}
+
+// peopleMux is the people listener's routes, recorded
+// (TestPeopleListenerHasNoAppRoutes compares them with the allowlist).
+func (s *Server) peopleMux() *recordingMux {
+	mux := &recordingMux{ServeMux: http.NewServeMux()}
 	mux.HandleFunc("/healthz", s.handleHealthz)
 	mux.HandleFunc("/", s.handlePeoplePage)
 	mux.HandleFunc("/static/", s.handlePeopleStatic)
 	s.registerDirectory(mux)
-	return ProxySecret(s.Secret, CSRF(markPeople(mux))), nil
+	s.registerPeopleApps(mux)
+	return mux
+}
+
+// routeMux is what route registration needs (a *http.ServeMux, or a
+// recordingMux around one).
+type routeMux interface {
+	HandleFunc(pattern string, handler func(http.ResponseWriter, *http.Request))
+}
+
+// recordingMux is a ServeMux that records every pattern registered.
+type recordingMux struct {
+	*http.ServeMux
+	patterns []string
+}
+
+func (m *recordingMux) HandleFunc(pattern string, handler func(http.ResponseWriter, *http.Request)) {
+	m.patterns = append(m.patterns, pattern)
+	m.ServeMux.HandleFunc(pattern, handler)
 }
 
 // ── helpers ──────────────────────────────────────────────
@@ -230,7 +255,7 @@ func (s *Server) handlePeoplePage(w http.ResponseWriter, r *http.Request) {
 
 // peopleStatic are the assets people.html loads: the people listener
 // serves these only (never the Hub's index.html or settings.js).
-var peopleStatic = map[string]bool{"directory.js": true, "directory.css": true}
+var peopleStatic = map[string]bool{"directory.js": true, "directory.css": true, "myapps.js": true}
 
 // handlePeopleStatic serves only peopleStatic on the people listener.
 func (s *Server) handlePeopleStatic(w http.ResponseWriter, r *http.Request) {
