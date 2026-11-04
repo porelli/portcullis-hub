@@ -393,3 +393,30 @@ func TestComposeIDsDecodeError(t *testing.T) {
 		t.Error("a service that isn't a mapping decoded")
 	}
 }
+
+// Fix round 5: !!binary scalars are refused (compose decodes
+// [!!binary MDYwMDAx] to "060001", gid 60001).
+func TestBinaryTagRefused(t *testing.T) {
+	svc := func(extra string) string { return fCompose + "  extra:\n    image: x\n" + extra }
+	p := hdrHead + opts(fpath("media", "web", ""))
+	folderCases(t, []settingsCase{
+		{"group_add", p, svc("    group_add: [!!binary MDYwMDAx]\n"), "", "YAML tag !!binary is not allowed"},
+		{"user", p, svc("    user: !!binary MTAwMDowNjAwMDE=\n"), "", "YAML tag !!binary is not allowed"},
+		{"manifest", hdrHead + "description: !!binary aGk=\n" + opts(fpath("media", "web", "")), fCompose, "", "YAML tag !!binary is not allowed"},
+	})
+	for _, c := range []string{
+		"services:\n  s:\n    group_add: [!!binary MDYwMDAx]\n",
+		"services:\n  s:\n    user: !!binary MTAwMDowNjAwMDE=\n",
+		"services:\n  s:\n    user: !!float 1000\n",
+	} {
+		if _, _, err := composeIDs([]byte(c)); err == nil {
+			t.Errorf("composeIDs accepted %q", c)
+		}
+	}
+	if _, _, err := composeIDs([]byte("services:\n  s:\n    user: !!str 1000\n    group_add: [!!int 10001, !!null ~]\n")); err == nil {
+		t.Error("a null group_add entry accepted")
+	}
+	if u, _, err := composeIDs([]byte("services:\n  s:\n    user: !!str 1000\n")); err != nil || u["s"] != "1000" {
+		t.Errorf("!!str user = %v, %v", u, err)
+	}
+}

@@ -65,6 +65,13 @@ func build(id, source, path string, data, compose []byte, domain string, kinds K
 	if err := SingleDocument(data, "manifest.yaml"); err != nil {
 		return Template{}, err
 	}
+	var mnode yaml.Node
+	if err := yaml.Unmarshal(data, &mnode); err != nil {
+		return Template{}, fmt.Errorf("bad manifest: %v", err)
+	}
+	if err := CheckTags(&mnode); err != nil {
+		return Template{}, fmt.Errorf("manifest.yaml: %w", err)
+	}
 	var m Manifest
 	if err := yaml.Unmarshal(data, &m); err != nil {
 		return Template{}, fmt.Errorf("bad manifest: %v", err)

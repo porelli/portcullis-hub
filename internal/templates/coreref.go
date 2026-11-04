@@ -874,6 +874,9 @@ func CheckTags(n *yaml.Node) error {
 	if n.Style&yaml.TaggedStyle != 0 && !strings.HasPrefix(n.Tag, "!!") {
 		return fmt.Errorf("line %d: YAML tag %s is not allowed", n.Line, n.Tag)
 	}
+	if n.Tag == "!!binary" {
+		return fmt.Errorf("line %d: YAML tag !!binary is not allowed (a binary scalar decodes to text no check sees)", n.Line)
+	}
 	for _, c := range n.Content {
 		if err := CheckTags(c); err != nil {
 			return err

@@ -266,3 +266,16 @@ func TestExposureLabelFolded(t *testing.T) {
 		t.Fatal("folded exposure keys not recognised")
 	}
 }
+
+// !!binary scalars are refused in the custom override (fix round 5: they
+// decode to bytes the checks never see as text).
+func TestUserOverrideRefusesBinaryTag(t *testing.T) {
+	f := newFixture(t)
+	if _, _, err := f.h.SaveUserOverride("grafana", "services:\n  web:\n    labels:\n      note: plain\n"); err != nil {
+		t.Fatalf("plain label refused: %v", err)
+	}
+	_, _, err := f.h.SaveUserOverride("grafana", "services:\n  web:\n    labels:\n      note: !!binary MDYwMDAx\n")
+	if statusOf(err) != 400 || !strings.Contains(err.Error(), "!!binary") {
+		t.Errorf("binary label = %v", err)
+	}
+}

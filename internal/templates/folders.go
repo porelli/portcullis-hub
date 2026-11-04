@@ -426,7 +426,8 @@ func resolveAlias(n *yaml.Node) *yaml.Node {
 }
 
 // idScalar is a user: / group_add value as compose reads it (nil = not
-// set): aliases followed, and an !!int decoded as YAML does (0165141 is
+// set): only !!str, !!int and !!null (fix round 5: !!binary, !!float …
+// refused), aliases followed, and an !!int decoded as YAML does (0165141 is
 // octal 60001; 0x… hex) and written in decimal, so the range checks see
 // the number Docker gets.
 func idScalar(n *yaml.Node) (*string, error) {
@@ -436,6 +437,8 @@ func idScalar(n *yaml.Node) (*string, error) {
 		return nil, nil
 	case n.Kind != yaml.ScalarNode:
 		return nil, fmt.Errorf("want a scalar")
+	case n.Tag != "!!str" && n.Tag != "!!int":
+		return nil, fmt.Errorf("want a string or a whole number, not %s", n.Tag)
 	case n.Tag == "!!int":
 		var i int64
 		if err := n.Decode(&i); err != nil {
