@@ -137,6 +137,11 @@ func (h *Hub) doctorInputs(ctx context.Context) (*doctor.Inputs, error) {
 		}
 		in.Person = append(in.Person, h.personInputsLocked(t, m)...)
 	}
+	// Credentials whose holder's account can't be verified (F31: an
+	// empty uuid; Task 11's unverifiable_account).
+	if m != nil {
+		in.Unverifiable = unverifiableCredentials(m, h.st.Credentials, h.credentialTemplatesLocked())
+	}
 	return in, nil
 }
 

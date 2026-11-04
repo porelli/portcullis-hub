@@ -212,8 +212,16 @@ func main() {
 				env("HUB_GATE_MAP_FILE", filepath.Join(projectDir, "group-gate", "group-gate-map.conf")))
 		},
 		// Expiries, user attributes and Keycloak mappers follow every
-		// directory change (coalesced in the Hub's background sync).
-		OnChange: h.TriggerDirectorySync,
+		// directory change (coalesced in the Hub's background sync); so
+		// does the file-sharing holder check, at once (contract §13.16:
+		// Hub-made removals revoke with no debounce).
+		OnChange: func() {
+			h.TriggerDirectorySync()
+			h.TriggerCredentialCheck()
+		},
+		// The holder check also follows every evaluator run (its 60 s
+		// tick catches edits made straight in LLDAP; F27).
+		OnEvaluated: h.TriggerCredentialCheck,
 	}
 	// Instance operations are audited in the same log (contract §11.7);
 	// instance groups go through the same guardrails (§11.4 step 5).
@@ -303,9 +311,13 @@ func main() {
 		st := h.SyncSourcesAs(hub.SyncSignal)
 		log.Printf("sources: sync on SIGHUP finished (ok=%t)", st.OK)
 	})
-	if dir.Store != nil && ll.Available() == nil {
+	// File-sharing holder checks (revoke on leave), on each trigger.
+	go h.RunCredentialChecks(ctx)
+	if dir.Store != nil {
 		// Rule groups, exceptions and expiries -> LLDAP membership: every
-		// minute (expiries) and after each directory mutation.
+		// minute (expiries) and after each directory mutation. Started
+		// whatever LLDAP looks like at boot (F27): a run while it is
+		// unavailable does nothing but still drives the holder check.
 		go dir.RunEvaluator(ctx, time.Minute)
 	}
 

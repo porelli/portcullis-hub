@@ -2,6 +2,8 @@ package directory_test
 
 import (
 	"context"
+	"net/http"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -468,4 +470,50 @@ func TestEvaluateSkipsReservedField(t *testing.T) {
 	setRule(t, store, "claim_admins", `ps_0123456789ab = "admin"`)
 	evaluate(t, e, t0)
 	wantMembers(t, e, "claim_admins")
+}
+
+// OnEvaluated (plan 3 Task 9, F27) is called after every evaluator run:
+// a tick with no changes, a failed evaluation (directory.yaml corrupt)
+// and an unavailable directory (no store: 503) alike — the Hub's holder
+// check rides on it.
+func TestOnEvaluated(t *testing.T) {
+	run := func(t *testing.T, svc *directory.Service) {
+		t.Helper()
+		calls := make(chan struct{}, 16)
+		svc.OnEvaluated = func() {
+			select {
+			case calls <- struct{}{}:
+			default:
+			}
+		}
+		runCtx, cancel := context.WithCancel(ctx)
+		done := make(chan struct{})
+		go func() { svc.RunEvaluator(runCtx, 20*time.Millisecond); close(done) }()
+		defer func() { cancel(); <-done }()
+		for i := 0; i < 2; i++ { // the first run and a tick
+			select {
+			case <-calls:
+			case <-time.After(5 * time.Second):
+				t.Fatalf("OnEvaluated called %d time(s), want ≥ 2", i)
+			}
+		}
+	}
+	t.Run("no changes", func(t *testing.T) {
+		e, _ := evalEnv(t)
+		run(t, e.svc)
+	})
+	t.Run("error", func(t *testing.T) {
+		e, store := evalEnv(t)
+		if err := os.WriteFile(store.Path, []byte("version: [not yaml\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := e.svc.Evaluate(ctx, time.Now()); err == nil || status(err) == http.StatusServiceUnavailable {
+			t.Fatalf("Evaluate = %v, want a non-503 error", err)
+		}
+		run(t, e.svc)
+	})
+	t.Run("unavailable", func(t *testing.T) {
+		e := newEnv(t) // no store: 503
+		run(t, e.svc)
+	})
 }

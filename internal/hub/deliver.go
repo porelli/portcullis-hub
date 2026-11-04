@@ -491,6 +491,11 @@ type deliveredDoc struct {
 	// spawned, cleared once it ran (Init re-queues it). Owned by
 	// setOwed / clearOwed: saveDelivered writes the in-memory value.
 	Owed string `json:"owed,omitempty"`
+	// Members (person_secret instances, F28): the population and each
+	// group / groups option's expanded members (expandedMembersLocked)
+	// the last run whose file and hook units were all OK built its data
+	// files from; the holder check compares it with the directory.
+	Members map[string][]string `json:"members,omitempty"`
 }
 
 func (h *Hub) deliveredPath(id string) string {
@@ -900,8 +905,19 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 	if !opt.lifecycle {
 		hookOuts = h.buildHooksLocked(&tmpl, m)
 	}
+	// What grants file access, from the same snapshot (F28; recorded
+	// once the files and hooks are through: recordMembers).
+	var members map[string][]string
+	if m != nil && len(personSecretOptions(&tmpl)) > 0 {
+		members = h.expandedMembersLocked(&tmpl, m)
+	}
 	h.mu.RUnlock()
 	h.stage(id, "built")
+	recordMembers := func() {
+		if members != nil && membersRecordable(rep.Units) {
+			delivered.Members = members
+		}
+	}
 
 	rep.Units = append(rep.Units, credUnits...)
 	effects := []string{}
@@ -1008,6 +1024,7 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 		}
 		// TriggerStart: compose up follows; never a reload or restart.
 		// Claims follow in the background (deliverClaimsAfterStart).
+		recordMembers()
 		finish()
 		return rep, "", false, nil
 	}
@@ -1108,6 +1125,7 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 		rep.Units = append(rep.Units, h.reloadUnit(ctx, &tmpl, ran))
 		h.clearOwed(id, owedSeq, settings.EffectReload)
 	}
+	recordMembers()
 	finish()
 	return rep, "", false, nil
 }

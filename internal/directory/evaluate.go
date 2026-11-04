@@ -703,7 +703,12 @@ func (s *Service) RunEvaluator(ctx context.Context, interval time.Duration) {
 	}
 }
 
+// evaluateAndLog runs one evaluation and logs it; OnEvaluated follows
+// on every path (success, error, unavailable).
 func (s *Service) evaluateAndLog(ctx context.Context) {
+	if s.OnEvaluated != nil {
+		defer s.OnEvaluated()
+	}
 	rep, err := s.Evaluate(ctx, time.Now().UTC())
 	if err != nil {
 		var de *Error

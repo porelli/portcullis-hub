@@ -155,6 +155,13 @@ type Service struct {
 	// attributes (contract §4, §4.1) and the Keycloak mappers (§9.6). It
 	// must not block: the Hub coalesces calls into one background sync.
 	OnChange func()
+	// OnEvaluated, if set, is called after every evaluator run
+	// (RunEvaluator: the tick or a kick), on every path — changes or
+	// none, a failed evaluation, an unavailable directory — outside s.mu.
+	// The Hub's file-sharing holder check rides on it (contract §13.16:
+	// edits made directly in LLDAP are caught on this tick). It must not
+	// block.
+	OnEvaluated func()
 	// GroupDeleted, if set, is called after DeleteGroup deleted a group in
 	// LLDAP (the acting admin, the group's name and its LLDAP id), outside
 	// s.mu: the Hub purges the per-group setting rows that named it (spec

@@ -419,9 +419,16 @@ type Hub struct {
 	// revokeLockWait: how long a revocation tries for an instance's
 	// delivery lock (credentials.go; revokeLockWaitDefault, tests shorten
 	// it). credentialCheck: the holder re-check a create asks for (F30;
-	// Task 9 sets it; nil: none). Both set before use, never changed.
+	// New sets TriggerCredentialCheck; nil: none). Both set before use,
+	// never changed.
 	revokeLockWait  time.Duration
 	credentialCheck func()
+	// credKick: TriggerCredentialCheck's coalesced request, served by
+	// RunCredentialChecks (revoke.go). credCheckErr: the last check's
+	// error text (logged once per distinct error; RunCredentialChecks'
+	// goroutine only).
+	credKick     chan struct{}
+	credCheckErr string
 	// testHookInit, if set, is called at Init's stages (tests: order).
 	testHookInit func(stage string)
 	// testHookApplyRestore, if set, runs at applyRestore's stages
@@ -478,6 +485,7 @@ func New(cfg Config, runner compose.Runner, engine Engine, idp IdP) (*Hub, error
 		revokeLockWait: revokeLockWaitDefault,
 		kick:           make(chan struct{}, 1),
 		dirKick:        make(chan struct{}, 1),
+		credKick:       make(chan struct{}, 1),
 		driftKey:       map[string]string{},
 		afterFunc:      realAfterFunc,
 		sleep:          realSleep,
@@ -485,6 +493,9 @@ func New(cfg Config, runner compose.Runner, engine Engine, idp IdP) (*Hub, error
 		lookupIP:       defaultLookupIP,
 		idRanges:       templates.PersonIDPools,
 	}
+	// A create's holder re-check (F30) is the trigger RunCredentialChecks
+	// serves.
+	h.credentialCheck = h.TriggerCredentialCheck
 	// The secrets volume (F14): unusable = fail closed, the Hub still
 	// starts.
 	if h.secretsErr = checkSecretsDir(cfg.SecretsDir); h.secretsErr != nil && cfg.SecretsDir != "" {

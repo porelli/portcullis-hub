@@ -187,13 +187,32 @@ func (h *Hub) deleteSteps(id, actor string, res *DeleteResult) error {
 	h.rebuildLocked()
 	h.saveLocked()
 	// Its per-person secrets right after the down (§11.4 step 3, F13):
-	// a delete that fails later leaves no credential behind. No
-	// per-credential audit (instance.delete covers it).
+	// a delete that fails later leaves no credential behind. The project
+	// is down, so no hook runs (§13.16: instance delete revokes at once);
+	// each active credential is audited credential.revoke_leave reason
+	// deleted, actor the deleting admin.
+	var gone []revocation
+	for key, users := range h.st.Credentials[id] {
+		for u, c := range users {
+			if c.Active() {
+				gone = append(gone, revocation{key: key, user: u, by: actor, reason: state.CredentialReasonDeleted})
+			}
+		}
+	}
 	credErr := h.forgetCredentialsLocked(id)
 	h.mu.Unlock()
 	h.writePolicyLogged()
 	if credErr != nil {
 		return fmt.Errorf("removing the per-person passwords: %w", credErr)
+	}
+	sort.Slice(gone, func(i, j int) bool {
+		if gone[i].key != gone[j].key {
+			return gone[i].key < gone[j].key
+		}
+		return gone[i].user < gone[j].user
+	})
+	for _, r := range gone {
+		h.auditOp(actor, revokeAuditAction(r.reason), id+"/"+r.key+"/"+r.user, credentialDetail(id, r.key, r.user, actor, r.reason), nil)
 	}
 	if h.engine == nil {
 		res.Warnings = append(res.Warnings, "Docker is not available: the volumes of "+projectName(id)+" were not removed")

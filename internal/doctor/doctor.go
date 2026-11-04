@@ -202,6 +202,20 @@ type Inputs struct {
 	DomainErr   bool
 	Scans       map[string]ScanIn // by cleaned host path
 	Runtime     []RuntimeIn       // enabled instances' running containers (cached with the scans)
+	// Unverifiable: active file-sharing credentials whose holder LLDAP
+	// lists with an empty uuid — the holder check can't tell a re-created
+	// account (contract §13.16, F31; plan 3 Task 11 raises the Problem
+	// unverifiable_account "can't verify <user>'s account"). nil with the
+	// directory unavailable.
+	Unverifiable []UnverifiableIn
+}
+
+// UnverifiableIn is one active credential the holder check can't verify
+// (the holder's current LLDAP uuid is empty).
+type UnverifiableIn struct {
+	Instance string
+	Key      string
+	User     string
 }
 
 // Check is one kind of check.

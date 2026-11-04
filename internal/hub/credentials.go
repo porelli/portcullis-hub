@@ -161,8 +161,8 @@ func credentialDetail(instance, key, user, actor, reason string) string {
 }
 
 // triggerCredentialCheck asks for a non-blocking holder re-check (F30:
-// a removal that raced a create is revoked at once). Task 9 sets
-// credentialCheck (TriggerCredentialCheck); nil: nothing.
+// a removal that raced a create is revoked at once): credentialCheck,
+// TriggerCredentialCheck since New (revoke.go); nil: nothing.
 func (h *Hub) triggerCredentialCheck() {
 	if f := h.credentialCheck; f != nil {
 		f()
@@ -381,9 +381,11 @@ func credentialDirectoryErr(err error) error {
 	return &StatusError{Status: status, Err: errors.New("users & groups is not available: the password can't be created now")}
 }
 
-// revocation is one credential to revoke: by whom (RevokedBy) and why.
+// revocation is one credential to revoke: by whom (RevokedBy) and why;
+// id, when set, is the credential the holder check judged — a newer one
+// (created since) is left alone.
 type revocation struct {
-	key, user, by, reason string
+	key, user, by, reason, id string
 }
 
 // RevokeOwnCredential revokes user's own credential (reason self, no
@@ -422,6 +424,12 @@ func revokeAuditAction(reason string) string {
 // live apply (applyRevocation) once for the instance. Nothing active:
 // nothing done.
 func (h *Hub) revokeCredentials(ctx context.Context, instance string, revs []revocation) error {
+	_, err := h.revokeCredentialsN(ctx, instance, revs)
+	return err
+}
+
+// revokeCredentialsN is revokeCredentials with how many were revoked.
+func (h *Hub) revokeCredentialsN(ctx context.Context, instance string, revs []revocation) (int, error) {
 	now := time.Now().UTC()
 	type outcome struct {
 		r   revocation
@@ -458,7 +466,7 @@ func (h *Hub) revokeCredentials(ctx context.Context, instance string, revs []rev
 		// the file may be gone — the running app must lose the account.
 		h.applyRevocation(ctx, instance)
 	}
-	return err
+	return len(done), err
 }
 
 // revokeLocked revokes one credential: the metadata first (revoked now,
@@ -471,7 +479,7 @@ func (h *Hub) revokeCredentials(ctx context.Context, instance string, revs []rev
 func (h *Hub) revokeLocked(instance string, r revocation, now time.Time) (bool, error) {
 	users := h.st.Credentials[instance][r.key]
 	c, ok := users[r.user]
-	if !ok || !c.Active() {
+	if !ok || !c.Active() || (r.id != "" && c.ID != r.id) {
 		return false, nil
 	}
 	at := now
