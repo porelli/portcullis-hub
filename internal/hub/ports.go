@@ -96,8 +96,12 @@ func bindsOverlap(a, b string) bool {
 	return a == b || a == "0.0.0.0" || b == "0.0.0.0"
 }
 
+// ephemeral: b is published on a host port Docker picks (Port 0).
+func (b portBinding) ephemeral() bool { return b.Port == 0 && b.RangeEnd == 0 }
+
 func portOverlap(a, b portBinding) bool {
-	if a.Protocol != b.Protocol || !bindsOverlap(a.Bind, b.Bind) {
+	// An ephemeral host port never collides (H10): Docker picks a free one.
+	if a.ephemeral() || b.ephemeral() || a.Protocol != b.Protocol || !bindsOverlap(a.Bind, b.Bind) {
 		return false
 	}
 	aStart, aEnd := a.Port, a.Port
@@ -118,6 +122,9 @@ func (h *Hub) appPortsLocked(t *templates.Template) []portBinding {
 }
 
 func portDesc(p portBinding) string {
+	if p.ephemeral() {
+		return fmt.Sprintf("%s:(random)→%d/%s", p.Bind, p.Container, p.Protocol)
+	}
 	if p.RangeEnd > 0 {
 		return fmt.Sprintf("%s:%d-%d/%s", p.Bind, p.RangeStart, p.RangeEnd, p.Protocol)
 	}

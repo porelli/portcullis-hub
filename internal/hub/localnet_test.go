@@ -263,3 +263,55 @@ func TestExposurePortsGathered(t *testing.T) {
 func init() {
 	defaultLookupIP = func(context.Context, string) ([]netip.Addr, error) { return nil, nil }
 }
+
+// H10: a custom-override port published on an ephemeral host port
+// (`- 445`, "445", long syntax without published, "IP::445") is still
+// published (on all interfaces unless an IP is given): the doctor judges
+// it (Port 0), the collision checks skip it.
+func TestEphemeralOverridePortsJudged(t *testing.T) {
+	for _, c := range []struct {
+		item any
+		bind string
+	}{
+		{445, "0.0.0.0"},
+		{"445", "0.0.0.0"},
+		{"445/tcp", "0.0.0.0"},
+		{":445", "0.0.0.0"},
+		{"203.0.113.5::445", "203.0.113.5"},
+		{"[::1]::445", "::1"},
+		{map[string]any{"target": 445}, "0.0.0.0"},
+		{map[string]any{"target": 445, "host_ip": "192.168.1.10"}, "192.168.1.10"},
+	} {
+		pb, err := parseOverridePort("samba", "samba", c.item)
+		if err != nil || pb == nil || pb.Port != 0 || pb.RangeEnd != 0 || pb.Container != 445 || pb.Bind != c.bind || pb.Protocol != "tcp" || !pb.Custom {
+			t.Errorf("%v: %+v %v", c.item, pb, err)
+		}
+	}
+	if _, err := parseOverridePort("samba", "samba", 70000); err == nil {
+		t.Error("container port 70000 accepted")
+	}
+	// Two ephemeral ports never collide.
+	a, _ := parseOverridePort("samba", "samba", 445)
+	if portOverlap(*a, *a) {
+		t.Error("ephemeral ports overlap")
+	}
+
+	f, _ := sambaFixture(t)
+	f.h.lookupIP = func(context.Context, string) ([]netip.Addr, error) { return nil, nil }
+	writeFile(t, f.h.userOverridePath("samba"), "services:\n  samba:\n    ports:\n      - 445\n      - \"203.0.113.5::445\"\n")
+	enableQuiet(f, "samba")
+	r, err := f.h.Doctor(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var titles []string
+	for _, fd := range r.Findings {
+		if fd.Kind == doctor.KindLANOnlyExposed && (strings.Contains(fd.Title, "random host port") || strings.Contains(fd.Title, "203.0.113.5")) {
+			titles = append(titles, string(fd.Severity)+" "+fd.Title)
+		}
+	}
+	if len(titles) != 2 || !strings.Contains(strings.Join(titles, "\n"), "warning samba: LAN-only port SMB (SAMBA_SMB) listens on all interfaces (a random host port → 445/tcp)") ||
+		!strings.Contains(strings.Join(titles, "\n"), "problem samba: LAN-only port SMB (SAMBA_SMB) is bound to 203.0.113.5") {
+		t.Fatalf("ephemeral findings = %q (all %+v)", titles, r.Findings)
+	}
+}

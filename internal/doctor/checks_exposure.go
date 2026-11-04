@@ -92,6 +92,10 @@ func portName(p PortIn) string {
 
 // portSpec is "445/tcp" (or a range).
 func portSpec(p PortIn) string {
+	if p.Port == 0 {
+		// An ephemeral host port (H10): Docker picks it at each start.
+		return "a random host port → " + strconv.Itoa(p.Container) + "/" + p.Protocol
+	}
 	s := strconv.Itoa(p.Port)
 	if p.PortEnd > p.Port {
 		s += "-" + strconv.Itoa(p.PortEnd)
@@ -102,6 +106,10 @@ func portSpec(p PortIn) string {
 // portSubjects identify p: template ports by key, custom-override ports
 // by service, container port and host port.
 func portSubjects(p PortIn) []string {
+	if p.Custom && p.Port == 0 {
+		// Ephemeral host ports (H10) differ only by their bind.
+		return []string{p.Instance, "custom", p.Service, strconv.Itoa(p.Container), "0", p.Protocol, "bind:" + p.Bind}
+	}
 	if p.Custom {
 		return []string{p.Instance, "custom", p.Service, strconv.Itoa(p.Container), strconv.Itoa(p.Port), p.Protocol}
 	}
@@ -177,7 +185,7 @@ func (lanOnlyExposedCheck) Run(in *Inputs) []Finding {
 			f.Fix = "Bind the port to the host's LAN address in the custom override."
 			f.Steps = []string{
 				fmt.Sprintf("Open %s's Expert tab and edit the custom override's ports entry for container port %d of service %s.", p.Instance, p.Container, p.Service),
-				fmt.Sprintf("Write the host's LAN address before the host port, e.g. \"192.168.1.10:%d:%d\".", p.Port, p.Container),
+				fmt.Sprintf("Write the host's LAN address before the host port, e.g. \"192.168.1.10:%d:%d\".", max(p.Port, p.Container), p.Container),
 			}
 		} else if p.HostNetwork {
 			// Compose publishes nothing for a host-network port: <KEY>_BIND

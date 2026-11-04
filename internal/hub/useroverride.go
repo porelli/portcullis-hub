@@ -556,14 +556,20 @@ func pathUnder(p, root string) bool {
 	return p == root || strings.HasPrefix(p, root+"/")
 }
 
-// parseOverridePort parses a ports entry; nil means no host port is
-// published (container port only).
+// parseOverridePort parses a ports entry. A form without a host port
+// (`- 445`, "445", "IP::445", long syntax without published) is still
+// published, on an ephemeral host port: its binding has Port 0 (H10: the
+// doctor judges it; the collision checks skip it).
 func parseOverridePort(id, service string, item interface{}) (*portBinding, error) {
 	pb := portBinding{AppID: id, Key: "custom override", Bind: "0.0.0.0", Protocol: "tcp", Custom: true, Service: service}
 	var host string
 	switch v := item.(type) {
 	case int:
-		return nil, nil
+		if v < 1 || v > 65535 {
+			return nil, fmt.Errorf("port %d: container port must be 1-65535", v)
+		}
+		pb.Container = v
+		return &pb, nil
 	case string:
 		if strings.Contains(v, "$") {
 			return nil, fmt.Errorf("port %q: variables are not allowed (the Hub must see the real port)", v)
@@ -582,7 +588,7 @@ func parseOverridePort(id, service string, item interface{}) (*portBinding, erro
 		parts := strings.Split(s, ":")
 		switch len(parts) {
 		case 1:
-			return nil, checkPortSpec(v, parts[0])
+			// No host port: ephemeral.
 		case 2:
 			host = parts[0]
 		case 3:
@@ -614,7 +620,7 @@ func parseOverridePort(id, service string, item interface{}) (*portBinding, erro
 		}
 		switch p := v["published"].(type) {
 		case nil:
-			return nil, nil
+			// No host port: ephemeral.
 		case int:
 			host = strconv.Itoa(p)
 		case string:
@@ -635,7 +641,7 @@ func parseOverridePort(id, service string, item interface{}) (*portBinding, erro
 		return nil, fmt.Errorf("port host address %q is not an IP address", pb.Bind)
 	}
 	if host == "" {
-		return nil, nil
+		return &pb, nil // ephemeral (Port 0)
 	}
 	if a, b, ok := parsePortRange(host); ok {
 		if b > 65535 {
