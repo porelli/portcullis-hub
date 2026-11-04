@@ -103,6 +103,9 @@ type Engine interface {
 	RunHelper(ctx context.Context, s docker.RunSpec, out func(tar io.Reader) error) (*docker.RunResult, error)
 	InspectContainer(ctx context.Context, id string) (docker.ContainerInfo, error)
 	SecurityOptions(ctx context.Context) ([]string, error)
+	// DockerRootDir is the daemon's data root (no shared folder at,
+	// above or under it).
+	DockerRootDir(ctx context.Context) (string, error)
 }
 
 // IdP manages the OIDC clients templates declare.

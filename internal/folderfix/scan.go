@@ -192,7 +192,11 @@ func IsRefused(err error) bool {
 
 // Unsupported filesystems: the Hub refuses folders on them, and apply and
 // restore refuse to run there.
-var Unsupported = map[string]bool{"nfs": true, "cifs": true, "fuse": true, "overlay": true, "tmpfs": true}
+var Unsupported = map[string]bool{"nfs": true, "cifs": true, "fuse": true, "overlay": true, "tmpfs": true,
+	"9p": true, "ceph": true, "ramfs": true, "ecryptfs": true,
+	// virtiofs reports FUSE's magic (statfs says "fuse"); named for the
+	// Hub's refusal list all the same.
+	"virtiofs": true}
 
 // FSName maps a statfs f_type magic to a name.
 func FSName(magic int64) string {
@@ -215,6 +219,14 @@ func FSName(magic int64) string {
 		return "overlay"
 	case 0x01021994:
 		return "tmpfs"
+	case 0x01021997:
+		return "9p"
+	case 0x00C36400:
+		return "ceph"
+	case 0x858458F6:
+		return "ramfs"
+	case 0xF15F:
+		return "ecryptfs"
 	}
 	return "other"
 }

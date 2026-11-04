@@ -23,7 +23,8 @@ func TestValidID(t *testing.T) {
 }
 
 func TestHasControlChars(t *testing.T) {
-	for s, want := range map[string]bool{"": false, "abc def": false, "a\nb": true, "a\rb": true, "\x00": true, "\x7f": true, "tab\t": true, "ünï": false} {
+	for s, want := range map[string]bool{"": false, "abc def": false, "a\nb": true, "a\rb": true, "\x00": true, "\x7f": true, "tab\t": true, "ünï": false,
+		"a\u200eb": true, "a\u200fb": true, "a\u061cb": true, "a\u202eb": true, "a\u2066b": true} {
 		if got := HasControlChars(s); got != want {
 			t.Errorf("HasControlChars(%q) = %v, want %v", s, got, want)
 		}

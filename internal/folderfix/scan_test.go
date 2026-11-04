@@ -504,7 +504,8 @@ func TestRestoreRefusesBadSnapshots(t *testing.T) {
 func TestFSName(t *testing.T) {
 	for magic, want := range map[int64]string{0xEF53: "ext4", 0x58465342: "xfs", 0x9123683E: "btrfs", 0x2FC12FC1: "zfs",
 		0x6969: "nfs", 0xFF534D42: "cifs", 0xFE534D42: "cifs", int64(int32(-11317950)): "cifs", 0x65735546: "fuse",
-		0x794C7630: "overlay", 0x01021994: "tmpfs", 0x1234: "other"} {
+		0x794C7630: "overlay", 0x01021994: "tmpfs", 0x01021997: "9p", 0x00C36400: "ceph", 0x858458F6: "ramfs",
+		0xF15F: "ecryptfs", 0x1234: "other"} {
 		if got := FSName(magic); got != want {
 			t.Errorf("%#x: %s, want %s", magic, got, want)
 		}
@@ -518,8 +519,13 @@ func TestFSName(t *testing.T) {
 		t.Errorf("writableFS %v", writableFS)
 	}
 	for name := range Unsupported {
-		if !slices.Contains([]string{"nfs", "cifs", "fuse", "overlay", "tmpfs"}, name) {
+		if !slices.Contains([]string{"nfs", "cifs", "fuse", "overlay", "tmpfs", "9p", "virtiofs", "ceph", "ramfs", "ecryptfs"}, name) {
 			t.Errorf("unexpected %s", name)
+		}
+	}
+	for _, name := range []string{"9p", "virtiofs", "ceph", "ramfs", "ecryptfs"} {
+		if !Unsupported[name] {
+			t.Errorf("%s is not refused", name)
 		}
 	}
 }

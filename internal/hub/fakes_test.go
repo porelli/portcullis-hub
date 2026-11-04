@@ -1351,6 +1351,9 @@ type fixerFake struct {
 	inspected  []string
 	secOpts    []string
 	secErr     error
+	// dockerRoot / rootErr answer DockerRootDir ("" = /var/lib/docker).
+	dockerRoot string
+	rootErr    error
 }
 
 func (e *fakeEngine) fx() *fixerFake {
@@ -1410,6 +1413,16 @@ func (e *fakeEngine) SecurityOptions(ctx context.Context) ([]string, error) {
 	f.fmu.Lock()
 	defer f.fmu.Unlock()
 	return f.secOpts, f.secErr
+}
+
+func (e *fakeEngine) DockerRootDir(ctx context.Context) (string, error) {
+	f := e.fx()
+	f.fmu.Lock()
+	defer f.fmu.Unlock()
+	if f.dockerRoot == "" && f.rootErr == nil {
+		return "/var/lib/docker", nil
+	}
+	return f.dockerRoot, f.rootErr
 }
 
 func (f *fixerFake) Specs() []docker.RunSpec {

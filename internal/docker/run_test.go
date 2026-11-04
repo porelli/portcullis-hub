@@ -359,7 +359,7 @@ func TestInspectContainerAndSecurity(t *testing.T) {
 		case "/containers/abc123/json":
 			w.Write([]byte(`{"Id":"abc123full","Image":"sha256:` + strings.Repeat("b", 64) + `","Config":{"Image":"ghcr.io/x:edge","Labels":{"a":"b"}}}`))
 		case "/info":
-			w.Write([]byte(`{"SecurityOptions":["name=seccomp,profile=builtin","name=userns"]}`))
+			w.Write([]byte(`{"SecurityOptions":["name=seccomp,profile=builtin","name=userns"],"DockerRootDir":"/mnt/ssd/docker"}`))
 		default:
 			http.Error(w, `{"message":"no such container"}`, 404)
 		}
@@ -374,6 +374,9 @@ func TestInspectContainerAndSecurity(t *testing.T) {
 	opts, err := c.SecurityOptions(context.Background())
 	if err != nil || !slices.Equal(opts, []string{"name=seccomp,profile=builtin", "name=userns"}) {
 		t.Errorf("security options = %v, %v", opts, err)
+	}
+	if root, err := c.DockerRootDir(context.Background()); err != nil || root != "/mnt/ssd/docker" {
+		t.Errorf("docker root = %q, %v", root, err)
 	}
 }
 

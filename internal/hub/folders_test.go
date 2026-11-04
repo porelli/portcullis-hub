@@ -3,9 +3,12 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -746,5 +749,220 @@ func TestFolderRefusedAtStart(t *testing.T) {
 	}
 	if _, err := New(f.h.cfg, f.runner, f.engine, f.idp); err != nil {
 		t.Errorf("New = %v", err)
+	}
+}
+
+// ── fix round 1 ──────────────────────────────────────────
+
+// I1: one directory reached through two paths (a host bind mount, a
+// case-insensitive filesystem) is one folder: the probed root's dev/ino
+// equal to a stored folder's is 409, under mu.
+func TestFolderSameDirectoryRefused(t *testing.T) {
+	f, _, d := folderFixture(t)
+	createFolder(t, f, "photos", "/srv/photos")
+	orig := d.paths["/srv/photos"]
+	alias := d.add("/mnt/alias", "ext4")
+	alias.dev, alias.ino = orig.dev, orig.ino
+	_, _, err := f.h.CreateFolder(context.Background(), FolderInput{ID: "alias", Name: "A", Path: "/mnt/alias"}, "admin")
+	if statusOf(err) != 409 || !strings.Contains(err.Error(), "photos") {
+		t.Errorf("same dev/ino: %v", err)
+	}
+	if _, ok := storedFolder(f, "alias"); ok {
+		t.Error("stored")
+	}
+	// An update onto it too.
+	d.add("/srv/other", "ext4")
+	createFolder(t, f, "other", "/srv/other")
+	if _, err := f.h.UpdateFolder(context.Background(), "other", FolderInput{Name: "O", Path: "/mnt/alias"}, "admin"); statusOf(err) != 409 || !strings.Contains(err.Error(), "photos") {
+		t.Errorf("update onto the same directory: %v", err)
+	}
+	// Its own directory again (a rename of the path that probes the
+	// same inode) is no conflict with itself.
+	self := d.add("/mnt/self", "ext4")
+	o := d.paths["/srv/other"]
+	self.dev, self.ino = o.dev, o.ino
+	if _, err := f.h.UpdateFolder(context.Background(), "other", FolderInput{Name: "O", Path: "/mnt/self"}, "admin"); err != nil {
+		t.Errorf("own inode: %v", err)
+	}
+}
+
+// I1: the overlap and the core / data-files rules also compare a
+// case-folded, NFC form (fail closed: an alias on a case-insensitive or
+// normalising filesystem).
+func TestFolderPathFolded(t *testing.T) {
+	f, _, d := folderFixture(t)
+	f.h.cfg.AppFilesHostDir = "/srv/data/appfiles"
+	f.h.cfg.ProjectHostDir = "/srv/core"
+	createFolder(t, f, "photos", "/srv/photos")
+	d.add("/srv/café", "ext4")
+	createFolder(t, f, "cafe", "/srv/café")
+	for _, p := range []string{"/srv/Photos", "/srv/PHOTOS/2026", "/srv/café", "/srv/CAFÉ/x", "/srv/Straße"} {
+		d.add(p, "ext4")
+	}
+	d.add("/srv/strasse", "ext4")
+	createFolder(t, f, "strasse", "/srv/strasse")
+	for _, p := range []string{"/srv/Photos", "/srv/PHOTOS/2026", "/srv/café", "/srv/CAFÉ/x", "/srv/Straße"} {
+		if _, _, err := f.h.CreateFolder(context.Background(), FolderInput{ID: "x", Name: "X", Path: p}, "admin"); statusOf(err) != 409 {
+			t.Errorf("%q: %v, want 409 overlap", p, err)
+		}
+	}
+	for _, p := range []string{"/srv/Data/AppFiles/x", "/srv/DATA", "/srv/Core/x", "/srv/CORE"} {
+		if _, _, err := f.h.CreateFolder(context.Background(), FolderInput{ID: "x", Name: "X", Path: p}, "admin"); statusOf(err) != 400 {
+			t.Errorf("%q: %v, want 400", p, err)
+		}
+	}
+	if len(foldPath("/srv/x")) == 0 || foldPath("/srv/Straße") != foldPath("/srv/strasse") || foldPath("/srv/café") != foldPath("/srv/café") {
+		t.Errorf("foldPath")
+	}
+}
+
+// I2: a state save that fails undoes the change in memory and is a 500.
+func TestFolderSaveFailure(t *testing.T) {
+	f, audit, d := folderFixture(t)
+	createFolder(t, f, "photos", "/srv/photos")
+	before, _ := storedFolder(f, "photos")
+	breakState := func() {
+		os.Remove(f.h.statePath())
+		os.Mkdir(f.h.statePath(), 0o755)
+	}
+	fixState := func() { os.Remove(f.h.statePath()) }
+	breakState()
+	d.add("/srv/music", "ext4")
+	if _, _, err := f.h.CreateFolder(context.Background(), FolderInput{ID: "music", Name: "M", Path: "/srv/music"}, "admin"); statusOf(err) != 500 {
+		t.Errorf("create = %v, want 500", err)
+	}
+	if e := audit.last(); e.Action != "folder.create" || e.Result != "error" {
+		t.Errorf("audit = %+v", e)
+	}
+	f.h.mu.RLock()
+	_, kept := f.h.st.Folders["music"]
+	gids := slices.Clone(f.h.st.FolderGIDs)
+	f.h.mu.RUnlock()
+	if kept || !slices.Equal(gids, []int{60000}) {
+		t.Errorf("after a failed create: kept %v, gids %v", kept, gids)
+	}
+	d.add("/srv/pictures", "ext4")
+	if _, err := f.h.UpdateFolder(context.Background(), "photos", FolderInput{Name: "Renamed", Path: "/srv/pictures"}, "admin"); statusOf(err) != 500 {
+		t.Errorf("update = %v, want 500", err)
+	}
+	if fo, _ := storedFolder(f, "photos"); !reflect.DeepEqual(fo, before) {
+		t.Errorf("after a failed update: %+v", fo)
+	}
+	if err := f.h.DeleteFolder("photos", "admin"); statusOf(err) != 500 {
+		t.Errorf("delete = %v, want 500", err)
+	}
+	if fo, ok := storedFolder(f, "photos"); !ok || !reflect.DeepEqual(fo, before) {
+		t.Errorf("after a failed delete: %+v %v", fo, ok)
+	}
+	fixState()
+	if v := createFolder(t, f, "music", "/srv/music"); v.GID != 60001 {
+		t.Errorf("gid after the failure = %d", v.GID)
+	}
+}
+
+// I3: Docker's data root (wherever the daemon has it) is no folder, nor
+// anything at, above or under it; unreadable = 503.
+func TestFolderDockerRootRefused(t *testing.T) {
+	f, _, d := folderFixture(t)
+	fx := f.engine.fx()
+	fx.fmu.Lock()
+	fx.dockerRoot = "/mnt/ssd/docker"
+	fx.fmu.Unlock()
+	for _, p := range []string{"/mnt/ssd/docker", "/mnt/ssd/docker/volumes/x", "/mnt/ssd", "/mnt/SSD"} {
+		d.add(p, "ext4")
+		if _, _, err := f.h.CreateFolder(context.Background(), FolderInput{ID: "x", Name: "X", Path: p}, "admin"); statusOf(err) != 400 || !strings.Contains(err.Error(), "Docker") {
+			t.Errorf("create %q: %v, want 400", p, err)
+		}
+		if _, err := f.h.CheckFolderPath(context.Background(), p, false); statusOf(err) != 400 {
+			t.Errorf("check %q: %v, want 400", p, err)
+		}
+	}
+	if n := len(fx.Specs()); n != 0 {
+		t.Errorf("%d fixer runs", n)
+	}
+	createFolder(t, f, "photos", "/srv/photos")
+	if _, err := f.h.UpdateFolder(context.Background(), "photos", FolderInput{Name: "P", Path: "/mnt/ssd/docker/x"}, "admin"); statusOf(err) != 400 {
+		t.Errorf("update into it: %v", err)
+	}
+	fx.fmu.Lock()
+	fx.dockerRoot, fx.rootErr = "", errors.New("daemon down")
+	fx.fmu.Unlock()
+	d.add("/srv/music", "ext4")
+	if _, _, err := f.h.CreateFolder(context.Background(), FolderInput{ID: "music", Name: "M", Path: "/srv/music"}, "admin"); statusOf(err) != 503 {
+		t.Errorf("unreadable root: %v, want 503", err)
+	}
+	if _, err := f.h.CheckFolderPath(context.Background(), "/srv/music", false); statusOf(err) != 503 {
+		t.Errorf("check, unreadable root: %v", err)
+	}
+	fx.fmu.Lock()
+	fx.dockerRoot, fx.rootErr = "relative", nil
+	fx.fmu.Unlock()
+	if _, _, err := f.h.CreateFolder(context.Background(), FolderInput{ID: "music", Name: "M", Path: "/srv/music"}, "admin"); statusOf(err) != 503 {
+		t.Errorf("relative root: %v, want 503", err)
+	}
+}
+
+// M4: check path never creates inside another folder.
+func TestCheckFolderPathOverlapNoCreate(t *testing.T) {
+	f, _, d := folderFixture(t)
+	createFolder(t, f, "photos", "/srv/photos")
+	pc, err := f.h.CheckFolderPath(context.Background(), "/srv/photos/2026", true)
+	if err != nil || pc.Exists || pc.Created || len(pc.Problems) == 0 {
+		t.Errorf("check = %+v, %v", pc, err)
+	}
+	specs := f.engine.fx().Specs()
+	last := specs[len(specs)-1]
+	if _, c := argValue(last.Cmd, "create"); c || !last.Binds[0].ReadOnly {
+		t.Errorf("probe = %v %+v", last.Cmd, last.Binds)
+	}
+	if d.paths["/srv/photos/2026"] != nil {
+		t.Error("created inside a folder")
+	}
+}
+
+// M5: invisible and lookalike characters, and whitespace around a
+// component, are refused; inner spaces are fine.
+func TestFolderPathInvisibleRefused(t *testing.T) {
+	f, _, d := folderFixture(t)
+	for _, p := range []string{"/srv/photos\u200e", "/srv/photos\u200f", "/srv/photos\u061c", "/srv/pho\u200btos", "/srv/photos\ufeff",
+		"/srv/photos\u00a0", "/srv/photos\u00a0x", "/srv/photos ", "/srv/ photos", "/srv/a /b", "/srv/\u3000a"} {
+		if _, err := cleanFolderPath(p); statusOf(err) != 400 {
+			t.Errorf("%q: %v, want 400", p, err)
+		}
+	}
+	d.add("/srv/My Photos", "ext4")
+	if v := createFolder(t, f, "mine", "/srv/My Photos"); v.Path != "/srv/My Photos" {
+		t.Errorf("inner space: %+v", v)
+	}
+}
+
+// M6: FolderInput decodes from the API's snake_case JSON (contract §14.8).
+func TestFolderInputJSON(t *testing.T) {
+	dec := json.NewDecoder(strings.NewReader(`{"id":"photos","name":"P","path":"/srv/photos","description":"d","gid":1000,"create":true}`))
+	dec.DisallowUnknownFields()
+	var in FolderInput
+	if err := dec.Decode(&in); err != nil || in.ID != "photos" || in.Name != "P" || in.Path != "/srv/photos" || in.Description != "d" || in.GID == nil || *in.GID != 1000 || !in.Create {
+		t.Errorf("decoded %+v, %v", in, err)
+	}
+	b, _ := json.Marshal(in)
+	if want := `{"id":"photos","name":"P","path":"/srv/photos","description":"d","gid":1000,"create":true}`; string(b) != want {
+		t.Errorf("encoded %s\nwant    %s", b, want)
+	}
+}
+
+// M7: the Hub refuses every filesystem folderfix.Unsupported names,
+// 9p, virtiofs, ceph, ramfs and ecryptfs included.
+func TestFolderRefusedFilesystems(t *testing.T) {
+	f, _, d := folderFixture(t)
+	for fs := range folderfix.Unsupported {
+		if refusedFS[fs] == "" {
+			t.Errorf("%s has no reason", fs)
+		}
+	}
+	for _, fs := range []string{"9p", "virtiofs", "ceph", "ramfs", "ecryptfs"} {
+		d.add("/srv/"+fs, fs)
+		if _, _, err := f.h.CreateFolder(context.Background(), FolderInput{ID: "f" + fs, Name: fs, Path: "/srv/" + fs}, "admin"); statusOf(err) != 409 || !strings.Contains(err.Error(), fs) {
+			t.Errorf("%s: %v", fs, err)
+		}
 	}
 }

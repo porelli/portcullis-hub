@@ -31,7 +31,8 @@ func ValidID(s string) bool { return IDRe.MatchString(s) }
 // an admin reads in the panel, logs and files).
 func IsControlRune(r rune) bool {
 	return unicode.IsControl(r) || r == 0x2028 || r == 0x2029 ||
-		(r >= 0x202a && r <= 0x202e) || (r >= 0x2066 && r <= 0x2069)
+		(r >= 0x202a && r <= 0x202e) || (r >= 0x2066 && r <= 0x2069) ||
+		r == 0x200e || r == 0x200f || r == 0x061c // LRM, RLM, ALM
 }
 
 // HasControlChars reports whether s contains newlines or other control

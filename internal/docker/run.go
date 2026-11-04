@@ -335,6 +335,18 @@ func (c *Client) SecurityOptions(ctx context.Context) ([]string, error) {
 	return res.Info.SecurityOptions, nil
 }
 
+// DockerRootDir is the daemon's data root (Info DockerRootDir, a host
+// path): image layers, containers and volumes live under it.
+func (c *Client) DockerRootDir(ctx context.Context) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
+	defer cancel()
+	res, err := c.api.Info(ctx, client.InfoOptions{})
+	if err != nil {
+		return "", err
+	}
+	return res.Info.DockerRootDir, nil
+}
+
 // RemappedIDs names the SecurityOptions entry ("userns" or "rootless")
 // under which ids inside a container are translated, or "".
 func RemappedIDs(opts []string) string {
