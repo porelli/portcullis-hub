@@ -128,6 +128,12 @@ func build(id, source, path string, data, compose []byte, domain string, kinds K
 	if err := ValidateSettingsSpec(&t, compose, routes, kinds); err != nil {
 		return Template{}, err
 	}
+	if t.GIDRefs, err = GIDRefs(&t.Manifest, compose); err != nil {
+		return Template{}, err
+	}
+	if t.GIDEnvLeaks, err = GIDEnvLeaks(&t.Manifest, compose); err != nil {
+		return Template{}, err
+	}
 	// The catalog entry shows the default instance.
 	return t.Instance(t.ID, nil, domain)
 }

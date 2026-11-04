@@ -2,6 +2,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -218,9 +219,10 @@ func TestFolderMountRendered(t *testing.T) {
 			t.Errorf("env lacks %q:\n%s", want, env)
 		}
 	}
-	// The up probed the subpath first (ruling 24) and again after the start.
-	if n := probes(f); n != 4 {
-		t.Errorf("probes = %d, want 2 before and 2 after the up", n)
+	// The up probed the folder root and subpath before Create, right
+	// before the up (ruling 24, M1) and again after the start.
+	if n := probes(f); n != 6 {
+		t.Errorf("probes = %d, want 2 before Create, 2 before the up and 2 after it", n)
 	}
 	// Unassigned: the variable is written empty, the mount and group go.
 	setStored(f, "jellyfin", "movies", nil)
@@ -681,5 +683,190 @@ func TestRestartRefusesChangedFolderStillRunning(t *testing.T) {
 	}
 	if ch := f.h.FolderChanges(); len(ch) != 1 || ch[0].Key != "movies" {
 		t.Errorf("changes = %+v", ch)
+	}
+}
+
+// ── fix round 1 ──────────────────────────────────────────
+
+// I1: the post-start mismatch's down falls back to down by name, then
+// SIGKILL; a down that fails entirely is a 500 naming the folder, and
+// the change is recorded either way.
+func TestPostStartDownFallsBack(t *testing.T) {
+	f, d := jellyfinFixture(t)
+	setStored(f, "jellyfin", "movies", "folder:media/movies")
+	swap := func(string) {
+		d.mu.Lock()
+		d.symlinks["/srv/media/movies"] = true
+		d.mu.Unlock()
+	}
+	f.runner.upHook = swap
+	f.runner.downErr = errors.New("compose down failed")
+	err := f.h.Enable("jellyfin")
+	if statusOf(err) != 409 || !strings.Contains(err.Error(), "changed on disk") {
+		t.Fatalf("down by name works: %v", err)
+	}
+	if !strings.Contains(strings.Join(f.runner.Calls(), ","), "downbyname:portcullis-jellyfin") {
+		t.Errorf("calls = %v", f.runner.Calls())
+	}
+	if len(f.h.FolderChanges()) != 1 {
+		t.Errorf("changes = %+v", f.h.FolderChanges())
+	}
+
+	f.runner.byNameErr = errors.New("down by name failed")
+	f.engine.mu.Lock()
+	f.engine.containers = []docker.Container{{ID: "c1", State: "running", Labels: map[string]string{docker.LabelProject: "portcullis-jellyfin"}}}
+	f.engine.mu.Unlock()
+	d.mu.Lock()
+	delete(d.symlinks, "/srv/media/movies")
+	d.mu.Unlock()
+	err = f.h.Enable("jellyfin")
+	if statusOf(err) != 500 || !strings.Contains(err.Error(), "may still be running") || !strings.Contains(err.Error(), "Family media") {
+		t.Fatalf("nothing works: %v", err)
+	}
+	if !slices.Contains(f.engine.Kills(), "c1:KILL") {
+		t.Errorf("kills = %v", f.engine.Kills())
+	}
+	if ch := f.h.FolderChanges(); len(ch) != 1 || ch[0].Subpath != "movies" {
+		t.Errorf("changes = %+v", ch)
+	}
+}
+
+// I2: a failed up with folder probes always takes the project down, and
+// records a change the after-start probe sees.
+func TestFailedUpWithProbesTakesDown(t *testing.T) {
+	f, d := jellyfinFixture(t)
+	setStored(f, "jellyfin", "movies", "folder:media/movies")
+	if err := f.h.Enable("jellyfin"); err != nil {
+		t.Fatal(err)
+	}
+	f.runner.upErr = errors.New("compose up failed")
+	n := len(f.runner.Calls())
+	f.h.RestartApp("jellyfin")
+	f.h.Wait()
+	if got := strings.Join(f.runner.Calls()[n:], ","); got != "down:portcullis-jellyfin,up:portcullis-jellyfin,down:portcullis-jellyfin" {
+		t.Errorf("failed up: calls = %s", got)
+	}
+	if len(f.h.FolderChanges()) != 0 {
+		t.Errorf("no change, recorded %+v", f.h.FolderChanges())
+	}
+	f.runner.upHook = func(string) {
+		d.mu.Lock()
+		d.symlinks["/srv/media/movies"] = true
+		d.mu.Unlock()
+	}
+	n = len(f.runner.Calls())
+	err := f.h.RestartApp("jellyfin")
+	f.h.Wait()
+	if statusOf(err) != 409 || !strings.Contains(err.Error(), "changed on disk") {
+		t.Errorf("swapped during a failed up: %v", err)
+	}
+	if got := strings.Join(f.runner.Calls()[n:], ","); !strings.HasSuffix(got, "up:portcullis-jellyfin,down:portcullis-jellyfin") {
+		t.Errorf("calls = %s", got)
+	}
+	if ch := f.h.FolderChanges(); len(ch) != 1 {
+		t.Errorf("changes = %+v", ch)
+	}
+}
+
+// M1: a refused probe answers before anything is created.
+func TestProbeBeforeCreate(t *testing.T) {
+	f, d := jellyfinFixture(t)
+	setStored(f, "jellyfin", "movies", "folder:media/movies")
+	d.mu.Lock()
+	d.symlinks["/srv/media/movies"] = true
+	d.mu.Unlock()
+	if err := f.h.Enable("jellyfin"); statusOf(err) != 409 {
+		t.Fatalf("enable = %v", err)
+	}
+	if c := f.runner.Creates(); len(c) != 0 {
+		t.Errorf("created: %v", c)
+	}
+}
+
+// M2: a successful up clears the record even without probes, and a
+// delete clears it.
+func TestFolderChangeCleared(t *testing.T) {
+	f, d := jellyfinFixture(t)
+	simulateCompose(f, 0)
+	f.h.SetGroups(&fakeGroups{})
+	if err := f.h.CreateInstance("jellyfin", "jellyfin-b", nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"jellyfin", "jellyfin-b"} {
+		setStored(f, id, "movies", "folder:media/movies")
+	}
+	d.mu.Lock()
+	d.symlinks["/srv/media/movies"] = true
+	d.mu.Unlock()
+	for _, id := range []string{"jellyfin", "jellyfin-b"} {
+		if err := f.h.Enable(id); statusOf(err) != 409 {
+			t.Fatalf("enable %s = %v", id, err)
+		}
+	}
+	if len(f.h.FolderChanges()) != 2 {
+		t.Fatalf("changes = %+v", f.h.FolderChanges())
+	}
+	setStored(f, "jellyfin", "movies", "/srv/films")
+	if err := f.h.Enable("jellyfin"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.h.DeleteInstance("jellyfin-b", "jellyfin-b", "root"); err != nil {
+		t.Fatal(err)
+	}
+	if ch := f.h.FolderChanges(); len(ch) != 0 {
+		t.Errorf("changes = %+v", ch)
+	}
+}
+
+// I3 (defence): a gid_env variable another service reads is refused at
+// render and never carries the folder gid.
+func TestGIDEnvLeakRefusedAtRender(t *testing.T) {
+	f, _ := jellyfinFixture(t)
+	setStored(f, "jellyfin", "library", "folder:media/lib")
+	f.h.mu.Lock()
+	for i := range f.h.instances {
+		if f.h.instances[i].ID == "jellyfin" {
+			f.h.instances[i].GIDEnvLeaks = map[string]string{"PGID": "folder.joins_group: gid_env writes the folder gid to PGID, which service samba's group_add also reads"}
+		}
+	}
+	f.h.mu.Unlock()
+	if _, err := renderOverride(t, f, "jellyfin"); statusOf(err) != 409 || !strings.Contains(err.Error(), "service samba's group_add also reads") {
+		t.Errorf("render = %v", err)
+	}
+	if env := optionEnv(t, f, "jellyfin"); env["PGID"] == "60001" {
+		t.Errorf("env = %v", env)
+	}
+}
+
+// I4: the custom override can't give a service a folder gid.
+func TestOverrideUserFolderGIDRefused(t *testing.T) {
+	f, _ := jellyfinFixture(t)
+	tm := f.h.Template("jellyfin")
+	for _, u := range []string{`"1000:60001"`, `"0:60999"`, `"1000:060000"`} {
+		_, err := f.h.parseUserOverride(tm, []byte("services:\n  jellyfin:\n    user: "+u+"\n"))
+		if err == nil || !strings.Contains(err.Error(), "gid 60000–60999 is reserved for shared folder groups") {
+			t.Errorf("user %s = %v", u, err)
+		}
+	}
+	for _, u := range []string{`"1000:1000"`, `"60001"`, `1000`, `"1000:61000"`} {
+		if _, err := f.h.parseUserOverride(tm, []byte("services:\n  jellyfin:\n    user: "+u+"\n")); err != nil {
+			t.Errorf("user %s = %v", u, err)
+		}
+	}
+}
+
+// M3: the gid references are computed once, at discovery.
+func TestGIDRefsCachedOnTemplate(t *testing.T) {
+	f, _ := jellyfinFixture(t)
+	tm := f.h.Template("jellyfin")
+	if tm.GIDRefs["pgid"] == "" || tm.GIDRefs["media_gid"] == "" || tm.GIDEnvLeaks == nil {
+		t.Errorf("refs = %v leaks = %v", tm.GIDRefs, tm.GIDEnvLeaks)
+	}
+	// Rendering no longer needs compose.yml for them.
+	f.h.mu.RLock()
+	live := f.h.findLocked("jellyfin")
+	f.h.mu.RUnlock()
+	if refs := gidRefsOf(&templates.Template{GIDRefs: live.GIDRefs}); refs["pgid"] == "" {
+		t.Errorf("cached refs = %v", refs)
 	}
 }

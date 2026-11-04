@@ -286,6 +286,11 @@ type Template struct {
 	InstanceEnv map[string]string `json:"-"`
 	// Instances lists the template's instance ids (catalog only).
 	Instances []string `json:"instances"`
+	// GIDRefs (GIDRefs) and GIDEnvLeaks (GIDEnvLeaks), computed once at
+	// discovery from the manifest and compose.yml (shared, read-only, by
+	// every view of the template).
+	GIDRefs     map[string]string `json:"-"`
+	GIDEnvLeaks map[string]string `json:"-"`
 	// raw is the manifest as written ({{HOST_*}} unexpanded); nil = Manifest.
 	raw *Manifest
 }

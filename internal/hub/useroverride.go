@@ -330,6 +330,10 @@ func (h *Hub) checkOverrideService(t *templates.Template, name string, v interfa
 			return nil, nil, fmt.Errorf("%s is not allowed in a custom override", k)
 		}
 		switch k {
+		case "user":
+			if err := checkOverrideUser(val); err != nil {
+				return nil, nil, err
+			}
 		case "labels":
 			if err := checkOverrideLabels(val); err != nil {
 				return nil, nil, err
@@ -381,6 +385,25 @@ func (h *Hub) checkOverrideService(t *templates.Template, name string, v interfa
 		}
 	}
 	return ports, binds, nil
+}
+
+// checkOverrideUser refuses a user: whose gid is a folder group's
+// (60000–60999, fix round 1 I4): only a folder assignment gives an app a
+// folder gid. Interpolation is refused for the whole override
+// (checkNoInterpolation), so the gid is a literal here.
+func checkOverrideUser(v interface{}) error {
+	s, ok := v.(string)
+	if !ok {
+		return nil // a number: a uid only
+	}
+	_, g, hasGID := strings.Cut(s, ":")
+	if !hasGID {
+		return nil
+	}
+	if n, err := strconv.ParseInt(strings.TrimSpace(g), 10, 64); err == nil && templates.InFolderGIDRange(n) {
+		return fmt.Errorf("user %q: %s", s, errGIDReserved)
+	}
+	return nil
 }
 
 // overrideBindOf is a checked volumes entry of service svc as a host-path

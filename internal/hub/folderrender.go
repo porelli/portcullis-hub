@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/folderfix"
 	"github.com/portcullis/hub/internal/settings"
 	"github.com/portcullis/hub/internal/state"
@@ -250,7 +251,11 @@ func (h *Hub) folderEnvLocked(t *templates.Template) map[string]string {
 			out[uidVar] = strconv.Itoa(uid)
 		}
 	}
+	leaks := gidEnvLeaksOf(t)
 	for name, gid := range h.folderGIDEnvLocked(t, s) {
+		if _, leak := leaks[name]; leak {
+			continue // another service reads it: never the folder gid (I3)
+		}
 		out[name] = strconv.Itoa(gid)
 	}
 	return out
@@ -278,15 +283,32 @@ func idNumber(v any) (int64, bool) {
 	return 0, false
 }
 
-// gidRefsOf is templates.GIDRefs for t (nil when its compose doesn't
-// parse: Discover refused such a template already).
+// gidRefsOf is t's gid references (templates.GIDRefs), computed once at
+// discovery; a view built without Discover (nil) computes them.
 func gidRefsOf(t *templates.Template) map[string]string {
+	if t.GIDRefs != nil {
+		return t.GIDRefs
+	}
 	refs, err := templates.GIDRefs(&t.Manifest, t.ReadCompose())
 	if err != nil {
 		log.Printf("settings: %s: gid references: %v", t.ID, err)
 		return nil
 	}
 	return refs
+}
+
+// gidEnvLeaksOf is t's templates.GIDEnvLeaks (cached at discovery like
+// gidRefsOf).
+func gidEnvLeaksOf(t *templates.Template) map[string]string {
+	if t.GIDEnvLeaks != nil || t.GIDRefs != nil {
+		return t.GIDEnvLeaks
+	}
+	leaks, err := templates.GIDEnvLeaks(&t.Manifest, t.ReadCompose())
+	if err != nil {
+		log.Printf("settings: %s: gid_env variables: %v", t.ID, err)
+		return nil
+	}
+	return leaks
 }
 
 // gidOverridden: option o's env is written with a folder gid (a gid_env
@@ -331,6 +353,20 @@ func (h *Hub) gidRangeProblemsLocked(t *templates.Template, s state.InstanceSett
 // gidRangeRenderErr refuses (409) rendering t while a gid reference's
 // value is in the folder range. Caller must hold mu.
 func (h *Hub) gidRangeRenderErr(t *templates.Template, s state.InstanceSettings) error {
+	// A gid_env join whose variable another service reads (Discover
+	// refuses such templates; defence in depth, I3).
+	overrides := h.folderGIDEnvLocked(t, s)
+	envs := make([]string, 0, len(overrides))
+	for env := range overrides {
+		envs = append(envs, env)
+	}
+	sort.Strings(envs)
+	leaks := gidEnvLeaksOf(t)
+	for _, env := range envs {
+		if msg, ok := leaks[env]; ok {
+			return statusErr(http.StatusConflict, "%s", msg)
+		}
+	}
 	keys := h.gidRangeProblemsLocked(t, s)
 	if len(keys) == 0 {
 		return nil
@@ -614,6 +650,54 @@ func (h *Hub) probeFolders(ctx context.Context, ps []folderProbe, after bool) (*
 		p.subDev, p.subIno = subRep.Dev, subRep.Ino
 	}
 	return nil, "", nil
+}
+
+// folderTakeDown handles a probe refusal p (err, detail) once
+// containers exist: records a folder change (whatever the down does) and
+// takes the project down at once (volumes kept, forceDown). A down that
+// fails entirely is a 500 naming the folder: the project may still run.
+func (h *Hub) folderTakeDown(ctx context.Context, live *templates.Template, p *folderProbe, detail string, err error) error {
+	if p != nil && isFolderChanged(err) {
+		h.recordFolderChange(live.ID, p, detail)
+	}
+	if derr := h.forceDown(ctx, live); derr != nil {
+		name := "?"
+		if p != nil {
+			name = p.name
+		}
+		log.Printf("shared folders: ERROR: %s: taking the project down failed: %v", live.ID, derr)
+		return statusErr(http.StatusInternalServerError, "shared folder %s changed on disk and taking %s down failed: the project may still be running (%v)", name, live.ID, derr)
+	}
+	return err
+}
+
+// forceDown takes live's project down: compose down, else down by
+// project name, else SIGKILL to every container of the project (an
+// error then: a restart policy may bring them back).
+func (h *Hub) forceDown(ctx context.Context, live *templates.Template) error {
+	err := h.compose.Down(ctx, h.project(live))
+	if err == nil {
+		return nil
+	}
+	log.Printf("shared folders: %s: compose down failed (%v): down by project name", live.ID, err)
+	if err2 := h.compose.DownByName(ctx, projectName(live.ID)); err2 == nil {
+		return nil
+	} else {
+		err = errors.Join(err, err2)
+	}
+	if h.engine == nil {
+		return err
+	}
+	cs, lerr := h.engine.ListContainers(ctx, docker.Filters{"label": {docker.LabelProject + "=" + projectName(live.ID)}})
+	if lerr != nil {
+		return errors.Join(err, lerr)
+	}
+	for _, c := range cs {
+		if kerr := h.engine.ContainerKill(ctx, c.ID, "KILL"); kerr != nil {
+			err = errors.Join(err, kerr)
+		}
+	}
+	return fmt.Errorf("containers sent SIGKILL after: %w", err)
 }
 
 // recordFolderChange records (or, p nil, clears) instance id's

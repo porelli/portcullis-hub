@@ -127,16 +127,28 @@ func (h *Hub) prepareUp(t *templates.Template) (*templates.Template, error) {
 }
 
 // startUp is composeUp after prepareUp: create, the image-label check,
-// up, the start hooks and the background claims.
+// up, the start hooks and the background claims. Shared-folder values
+// with a subpath are probed before anything is created, again right
+// before the up and right after it (ruling 24, R44).
 func (h *Hub) startUp(live *templates.Template) error {
 	ctx := context.Background()
-	// The shared-folder values with a subpath, probed around the start
-	// (ruling 24, R44; read under mu, probed outside it).
+	// Read under mu, probed outside it.
 	h.mu.RLock()
 	probes, err := h.folderProbesLocked(live)
 	h.mu.RUnlock()
 	if err != nil {
 		return err
+	}
+	// Before Create: a refusal touches nothing (a running app keeps
+	// running on the mounts it started with).
+	if len(probes) > 0 {
+		if p, detail, err := h.probeFolders(ctx, probes, false); err != nil {
+			log.Printf("shared folders: %s: not started: %s", live.ID, detail)
+			if p != nil && isFolderChanged(err) {
+				h.recordFolderChange(live.ID, p, detail)
+			}
+			return err
+		}
 	}
 	// Create without starting, inspect the labels (image LABELs merge in),
 	// only then start: an image-label router is never live.
@@ -151,16 +163,22 @@ func (h *Hub) startUp(live *templates.Template) error {
 	if len(probes) > 0 {
 		if p, detail, err := h.probeFolders(ctx, probes, false); err != nil {
 			log.Printf("shared folders: %s: not started: %s", live.ID, detail)
-			if p != nil && isFolderChanged(err) {
-				h.recordFolderChange(live.ID, p, detail)
-			}
-			if derr := h.compose.Down(ctx, h.project(live)); derr != nil {
-				log.Printf("shared folders: %s: removing the created containers: %v", live.ID, derr)
-			}
-			return err
+			return h.folderTakeDown(ctx, live, p, detail, err)
 		}
 	}
 	if err := h.compose.Up(ctx, h.project(live)); err != nil {
+		if len(probes) > 0 {
+			// Some services may have started on a swapped subpath: probe
+			// again (record a change) and always take the project down.
+			p, detail, perr := h.probeFolders(ctx, probes, true)
+			if perr != nil {
+				log.Printf("shared folders: WARNING: %s: %s after a failed up", live.ID, detail)
+				return h.folderTakeDown(ctx, live, p, detail, perr)
+			}
+			if derr := h.forceDown(ctx, live); derr != nil {
+				return statusErr(500, "compose up of %s failed (%v) and taking it down failed too: the project may still be running (%v)", live.ID, err, derr)
+			}
+		}
 		return err
 	}
 	if err := h.checkImageLabels(live); err != nil {
@@ -171,16 +189,11 @@ func (h *Hub) startUp(live *templates.Template) error {
 	if len(probes) > 0 {
 		if p, detail, err := h.probeFolders(ctx, probes, true); err != nil {
 			log.Printf("shared folders: WARNING: %s: %s after the start: taken down", live.ID, detail)
-			if p != nil && isFolderChanged(err) {
-				h.recordFolderChange(live.ID, p, detail)
-			}
-			if derr := h.compose.Down(ctx, h.project(live)); derr != nil {
-				log.Printf("shared folders: %s: taking the project down failed: %v", live.ID, derr)
-			}
-			return err
+			return h.folderTakeDown(ctx, live, p, detail, err)
 		}
-		h.recordFolderChange(live.ID, nil, "")
 	}
+	// A clean start: no folder changed (M2).
+	h.recordFolderChange(live.ID, nil, "")
 	// The start hooks (when: start) after the up, under the lifecycle
 	// lock still held: reported and op-recorded, never a rollback.
 	h.runStartHooks(context.Background(), live.ID)

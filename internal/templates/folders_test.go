@@ -452,3 +452,19 @@ func TestGIDRefs(t *testing.T) {
 		t.Error("bad compose accepted")
 	}
 }
+
+// Fix round 1, I3: a gid_env join's variable may be read only by the
+// services the folder options target.
+func TestGIDEnvJoinVariableNotShared(t *testing.T) {
+	join := fpath("movies", "envuser", ", folder: {access: read, runs_as: {uid_env: PUID, gid_env: PGID}, joins_group: gid_env}")
+	m := hdrHead + opts(puidOpt, pgidOpt, join)
+	folderCases(t, []settingsCase{
+		{"alone", m, fComposeEnvUser, "", ""},
+		{"sidecar group_add", m, fComposeEnvUser + "  side:\n    image: x\n    group_add: [\"${PGID}\"]\n", "movies",
+			"folder.joins_group: gid_env writes the folder gid to PGID, which service side's group_add also reads: only the services the folder options target may use a gid_env variable"},
+		{"sidecar user", m, fComposeEnvUser + "  side:\n    image: x\n    user: \"${PUID:-1000}:${PGID:-1000}\"\n", "movies",
+			"folder.joins_group: gid_env writes the folder gid to PGID, which service side's compose user: gid also reads: only the services the folder options target may use a gid_env variable"},
+		{"group_add join elsewhere ok", hdrHead + opts(puidOpt, pgidOpt, fpath("movies", "envuser", ", folder: {access: read, runs_as: {uid_env: PUID, gid_env: PGID}}")),
+			fComposeEnvUser + "  side:\n    image: x\n    group_add: [\"${PGID}\"]\n", "", ""},
+	})
+}

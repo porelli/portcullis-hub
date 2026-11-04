@@ -1,6 +1,7 @@
 package templates
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"reflect"
@@ -234,7 +235,82 @@ func (v *specCheck) folderOption(o *Option) error {
 	if err := v.groupAddResolves(o.Target.Service); err != nil {
 		return err
 	}
+	if f.JoinsGroup == JoinGIDEnv {
+		if msg, leaks := gidEnvLeaks(v.m, v.users, v.groupAdd)[ra.GIDEnv]; leaks {
+			return errors.New(msg)
+		}
+	}
 	return v.sameEnvSameRunsAs(o)
+}
+
+// gidEnvLeaks: per variable a gid_env join writes the folder gid to, why
+// it would reach a service the join doesn't target (fix round 1, I3):
+// the first other service (sorted) whose compose user: gid or group_add
+// reads it. The .env is project-wide, so such a service would get the
+// folder's group without mounting the folder.
+func gidEnvLeaks(m *Manifest, users map[string]string, groupAdd map[string][]string) map[string]string {
+	if m.Settings == nil {
+		return nil
+	}
+	targets := map[string]map[string]bool{}
+	for i := range m.Settings.Options {
+		o := &m.Settings.Options[i]
+		if o.Folder == nil || o.Folder.JoinsGroup != JoinGIDEnv || o.Folder.RunsAs == nil || o.Folder.RunsAs.GIDEnv == "" || o.Target == nil {
+			continue
+		}
+		env := o.Folder.RunsAs.GIDEnv
+		if targets[env] == nil {
+			targets[env] = map[string]bool{}
+		}
+		targets[env][o.Target.Service] = true
+	}
+	if len(targets) == 0 {
+		return nil
+	}
+	svcs := make([]string, 0, len(users)+len(groupAdd))
+	seen := map[string]bool{}
+	for s := range users {
+		seen[s] = true
+		svcs = append(svcs, s)
+	}
+	for s := range groupAdd {
+		if !seen[s] {
+			svcs = append(svcs, s)
+		}
+	}
+	sort.Strings(svcs)
+	out := map[string]string{}
+	leak := func(env, svc, what string) {
+		if _, done := out[env]; !done {
+			out[env] = fmt.Sprintf("folder.joins_group: gid_env writes the folder gid to %s, which service %s's %s also reads: only the services the folder options target may use a gid_env variable", env, svc, what)
+		}
+	}
+	for env, on := range targets {
+		for _, s := range svcs {
+			if on[s] {
+				continue
+			}
+			if _, g, ok := splitUser(users[s]); ok && parseUserPart(g).env == env {
+				leak(env, s, "compose user: gid")
+			}
+			for _, e := range groupAdd[s] {
+				if parseUserPart(e).env == env {
+					leak(env, s, "group_add")
+				}
+			}
+		}
+	}
+	return out
+}
+
+// GIDEnvLeaks is gidEnvLeaks for a template's manifest and compose file
+// (the Hub's render-time defence; Discover refuses such templates).
+func GIDEnvLeaks(m *Manifest, compose []byte) (map[string]string, error) {
+	users, groupAdd, err := composeIDs(compose)
+	if err != nil {
+		return nil, err
+	}
+	return gidEnvLeaks(m, users, groupAdd), nil
 }
 
 // envOption is the instance int option that delivers env name.
