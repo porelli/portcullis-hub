@@ -1119,15 +1119,17 @@ func (h *Hub) StartAssign(id string, req AssignRequest, planHash, actor string) 
 	if err != nil {
 		return nil, err
 	}
-	return h.startAssignHeld(id, req, planHash, actor, unlock, nil)
+	return h.startAssignHeld(id, req, planHash, actor, unlock, nil, nil)
 }
 
 // startAssignHeld is StartAssign with the folder lock already held by
 // the caller (ruling 34: manage_as_folder holds it across its create);
 // unlockFolder is called when the operation ends or is refused; a
 // refusal (no operation started) calls onRefused first, still under the
-// folder lock (manage_as_folder deletes its new definition there).
-func (h *Hub) startAssignHeld(id string, req AssignRequest, planHash, actor string, unlockFolder func(), onRefused func(error)) (*AsyncOp, error) {
+// folder lock (manage_as_folder deletes its new definition there); an
+// accepted operation's error goes through onFailed (nil: as it is) before
+// it is recorded (manage_as_folder names the definition it leaves).
+func (h *Hub) startAssignHeld(id string, req AssignRequest, planHash, actor string, unlockFolder func(), onRefused func(error), onFailed func(error) error) (*AsyncOp, error) {
 	return h.startAsync(opKeyFolder(id), OpFolderAssign, func(accept func()) (result map[string]string, warnings []string, err error) {
 		accepted := false
 		ready := func() { accepted = true; accept() }
@@ -1178,6 +1180,9 @@ func (h *Hub) startAssignHeld(id string, req AssignRequest, planHash, actor stri
 		ready()
 		res, warns, dt, deliver, err := h.runAssign(id, c, actor)
 		detail, deliverTo = dt, deliver
+		if err != nil && onFailed != nil {
+			err = onFailed(err)
+		}
 		return res, warns, err
 	})
 }

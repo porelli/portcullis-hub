@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"errors"
+	"maps"
 	"net/netip"
 	"os"
 	"slices"
@@ -421,31 +422,22 @@ func TestFixHashMismatch(t *testing.T) {
 // recomputation under the locks differs) deletes the definition, and its
 // gid stays used.
 func TestManageAsFolderRefusalDeletesDefinition(t *testing.T) {
-	f, d, audit := manageFixture(t)
+	f, _, audit := manageFixture(t)
 	ctx := context.Background()
 	plan, err := f.h.PreviewFix(ctx, mediaFP, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The apply's scans: its recomputed plan's check and target scan,
-	// then the create's own check. During that third one (the plan's hash
-	// matched; the definition is about to be saved) writer's values change:
-	// the assignment's recomputation under the locks differs.
-	scans := 0
-	var hook func(string)
-	hook = func(string) {
-		scans++
-		if scans < 3 {
-			d.onScan = hook
-			return
-		}
+	// Between the create and the assignment's validation (M5: an injected
+	// hook, not the scan order), writer's ports change: the assignment's
+	// recomputation under the locks differs.
+	f.h.testHookManageDefined = func() {
 		f.h.mu.Lock()
 		s := f.h.st.Settings["writer"].Clone()
 		s.Ports = map[string]string{}
 		f.h.st.Settings["writer"] = s
 		f.h.mu.Unlock()
 	}
-	d.onScan = hook
 	_, err = f.h.ApplyFix(ctx, mediaFP, nil, plan.Hash, "admin")
 	if statusOf(err) != 409 {
 		t.Fatalf("apply: %v", err)
@@ -618,5 +610,192 @@ func TestReapplyAndUndoFixes(t *testing.T) {
 	got := auditOf(audit, "doctor.fix")
 	if len(got) != 3 || !strings.Contains(got[0], "ok fix=reapply_folder media") || !strings.Contains(got[2], "ok fix=undo_folder media") {
 		t.Errorf("doctor.fix = %v", got)
+	}
+}
+
+// ── fix round 1 ─────────────────────────────────────────
+
+// I1: compose publishes nothing for a host-network port, so <KEY>_BIND
+// can't move it: no rebind_port, explain-only.
+func TestRebindRefusedOnHostNetwork(t *testing.T) {
+	f, _ := rebindFixture(t)
+	ctx := context.Background()
+	fp := doctor.Fingerprint(doctor.KindLANOnlyExposed, "samba", "SAMBA_WSDD", "udp")
+	_, err := f.h.PreviewFix(ctx, fp, map[string]string{"address": "192.168.1.10"})
+	if statusOf(err) != 409 || !strings.Contains(err.Error(), "explain-only") || !strings.Contains(err.Error(), "firewall") {
+		t.Fatalf("preview: %v", err)
+	}
+	// Even a finding claiming one-click finds no port to rebind.
+	f.h.mu.RLock()
+	_, ok := f.h.rebindPortLocked(doctor.Finding{FP: fp})
+	f.h.mu.RUnlock()
+	if ok {
+		t.Error("a host-network port is rebindable")
+	}
+}
+
+// failFirstUps makes the next n compose ups fail with a bind error.
+func failFirstUps(f *fixture, n int) {
+	hook, calls := f.runner.upHook, 0
+	f.runner.upHook = func(p string) {
+		hook(p)
+		calls++
+		if calls <= n {
+			f.runner.upErr = &compose.Error{Command: "up", Err: errors.New("exit status 1"),
+				Output: "Error response from daemon: failed to bind host port 192.168.1.10:445/tcp: cannot assign requested address"}
+		} else {
+			f.runner.upErr = nil
+		}
+	}
+}
+
+func applyRebind(t *testing.T, f *fixture, addr string) *OpRecord {
+	t.Helper()
+	ctx := context.Background()
+	plan, err := f.h.PreviewFix(ctx, smbFP, map[string]string{"address": addr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	op, err := f.h.ApplyFix(ctx, smbFP, map[string]string{"address": addr}, plan.Hash, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return waitInstanceOp(t, f, "samba", op.OpID)
+}
+
+// I2: the rollback puts back only <KEY>_BIND, and only while it still is
+// the rebind's address: a save committed during the restart is kept.
+func TestRebindRollbackKeepsConcurrentSave(t *testing.T) {
+	for _, tc := range []struct {
+		name, bind string
+		want       map[string]string
+	}{
+		{"other port", "192.168.1.10", map[string]string{"SAMBA_WEB": "8099"}},
+		{"bind changed", "10.0.0.5", map[string]string{"SAMBA_WEB": "8099", "SAMBA_SMB_BIND": "10.0.0.5"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, _ := rebindFixture(t)
+			hook, calls := f.runner.upHook, 0
+			saved := make(chan error, 1)
+			f.runner.upHook = func(p string) {
+				hook(p)
+				calls++
+				f.runner.upErr = nil
+				if calls == 1 {
+					// A settings save while the restart runs (it doesn't
+					// take the instance lock).
+					_, err := f.h.SaveSettings("samba", SettingsUpdate{Ports: map[string]string{"SAMBA_SMB_BIND": tc.bind, "SAMBA_WEB": "8099"}}, "bob")
+					saved <- err
+					f.runner.upErr = &compose.Error{Command: "up", Err: errors.New("exit status 1"), Output: "cannot assign requested address"}
+				}
+			}
+			rec := applyRebind(t, f, "192.168.1.10")
+			if err := <-saved; err != nil {
+				t.Fatalf("save: %v", err)
+			}
+			if rec.OK {
+				t.Fatalf("rebind = %+v", rec)
+			}
+			if p := storedPorts(f, "samba"); !maps.Equal(p, tc.want) {
+				t.Errorf("ports = %v, want %v", p, tc.want)
+			}
+			ov, _ := os.ReadFile(f.h.overridePath("samba"))
+			if !strings.Contains(string(ov), ":8099:80/tcp") {
+				t.Errorf("override not regenerated from the current state:\n%s", ov)
+			}
+			if tc.bind != "192.168.1.10" && !strings.Contains(rec.Error, "changed since") {
+				t.Errorf("error = %q", rec.Error)
+			}
+			waitIdle(t, f, "samba")
+		})
+	}
+}
+
+// waitIdle waits until no operation holds id's lock (a queued restart
+// the save owed has run).
+func waitIdle(t *testing.T, f *fixture, id string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+		if !f.h.appBusy(id) {
+			return
+		}
+	}
+}
+
+// M1: rolled_back only when the start with the old bind worked.
+func TestRebindRollbackStartFails(t *testing.T) {
+	f, _ := rebindFixture(t)
+	failFirstUps(f, 2)
+	rec := applyRebind(t, f, "192.168.1.10")
+	if rec.OK || rec.RolledBack || !strings.Contains(rec.Error, "starting Samba again failed") {
+		t.Fatalf("rebind = %+v", rec)
+	}
+	if p := storedPorts(f, "samba"); p["SAMBA_SMB_BIND"] != "" {
+		t.Errorf("ports = %v", p)
+	}
+}
+
+// M2: a restart refused before anything stopped is rolled back without a
+// start; a failed down alone (the up with the new bind worked) is no
+// failed rebind.
+func TestRebindRefusedBeforeStop(t *testing.T) {
+	f, _ := rebindFixture(t)
+	ctx := context.Background()
+	plan, err := f.h.PreviewFix(ctx, smbFP, map[string]string{"address": "192.168.1.10"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The custom override no longer fits: restartLocked refuses first.
+	writeFile(t, f.h.userOverridePath("samba"), "services:\n  worker:\n    image: x\n")
+	calls := len(f.runner.Calls())
+	op, err := f.h.ApplyFix(ctx, smbFP, map[string]string{"address": "192.168.1.10"}, plan.Hash, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := waitInstanceOp(t, f, "samba", op.OpID)
+	if rec.OK || !rec.RolledBack || !strings.Contains(rec.Error, "nothing was stopped") {
+		t.Fatalf("rebind = %+v", rec)
+	}
+	if got := f.runner.Calls()[calls:]; len(got) != 0 {
+		t.Errorf("compose ran: %v", got)
+	}
+	if p := storedPorts(f, "samba"); p["SAMBA_SMB_BIND"] != "" {
+		t.Errorf("ports = %v", p)
+	}
+}
+
+func TestRebindDownOnlyFailure(t *testing.T) {
+	f, _ := rebindFixture(t)
+	f.runner.downErr = errors.New("down: exit status 1")
+	rec := applyRebind(t, f, "192.168.1.10")
+	if !rec.OK || rec.RolledBack || len(rec.Warnings) == 0 || !strings.Contains(strings.Join(rec.Warnings, "\n"), "compose down failed") {
+		t.Fatalf("rebind = %+v", rec)
+	}
+	if p := storedPorts(f, "samba"); p["SAMBA_SMB_BIND"] != "192.168.1.10" {
+		t.Errorf("ports = %v", p)
+	}
+}
+
+// M3: an accepted assignment that fails keeps the new definition, and
+// its op record says so.
+func TestManageAsFolderFailedOpNamesDefinition(t *testing.T) {
+	f, d, _ := manageFixture(t)
+	ctx := context.Background()
+	plan, err := f.h.PreviewFix(ctx, mediaFP, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.applyExit = 1
+	if _, err := f.h.ApplyFix(ctx, mediaFP, nil, plan.Hash, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	rec := waitFolderOp(t, f, "media")
+	if rec.OK || !strings.Contains(rec.Error, "shared folder media was defined (gid 60000) and is kept: assign it again or delete it") {
+		t.Fatalf("op = %+v", rec)
+	}
+	if fs, _ := foldersOf(f); fs["media"].GID != 60000 {
+		t.Errorf("folders = %v", fs)
 	}
 }

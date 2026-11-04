@@ -171,6 +171,15 @@ func (lanOnlyExposedCheck) Run(in *Inputs) []Finding {
 				fmt.Sprintf("Open %s's Expert tab and edit the custom override's ports entry for container port %d of service %s.", p.Instance, p.Container, p.Service),
 				fmt.Sprintf("Write the host's LAN address before the host port, e.g. \"192.168.1.10:%d:%d\".", p.Port, p.Container),
 			}
+		} else if p.HostNetwork {
+			// Compose publishes nothing for a host-network port: <KEY>_BIND
+			// can't move it (T12 I1; contract §14.6: firewall steps).
+			f.Class = FixExplain
+			f.Fix = "Make the app listen on the host's LAN address only, or block the port from outside the LAN."
+			f.Steps = []string{
+				fmt.Sprintf("Set service %s's own listen address to the host's LAN address in the app's configuration, if it has one: it runs on the host's network, so the Hub can't bind port %s for it.", p.Service, portName(p)),
+				hostNetworkText + ".",
+			}
 		} else {
 			f.Class, f.FixKind = FixOneClick, FixRebindPort
 			f.Fix = fmt.Sprintf("Bind %s to the host's LAN address (%s_BIND); %s restarts.", p.Key, p.Key, p.Instance)

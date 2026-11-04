@@ -205,10 +205,14 @@ type Hub struct {
 	// outside mu and the commit under mu (tests: a race with an
 	// assignment).
 	testHookSave func()
-	compose      compose.Runner
-	engine       Engine
-	idp          IdP
-	attrs        AttrStore // LLDAP user attributes (setting claims); nil: none
+	// testHookManageDefined, if set, runs in manage_as_folder's apply
+	// right after the definition is created, before the assignment is
+	// validated (doctorfix.go).
+	testHookManageDefined func()
+	compose               compose.Runner
+	engine                Engine
+	idp                   IdP
+	attrs                 AttrStore // LLDAP user attributes (setting claims); nil: none
 	// fixerImage caches selfImage (fixer.go; guarded by fixerMu, never
 	// mu); mountinfo reads /proc/self/mountinfo (test-settable).
 	fixerMu    sync.Mutex

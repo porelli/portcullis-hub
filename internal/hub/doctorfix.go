@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"maps"
@@ -509,11 +510,31 @@ func (manageAsFolderFixer) Apply(h *Hub, f doctor.Finding, params map[string]str
 		undefine()
 		return nil, errSetupChanged()
 	}
+	if h.testHookManageDefined != nil {
+		h.testHookManageDefined()
+	}
 	// startAssignHeld releases the folder lock when its operation ends,
 	// or after onRefused when it refuses (startAsync returns only then).
+	// An accepted operation that fails keeps the definition (its
+	// last_apply may hold the undo; the gid is used either way): the op
+	// record says so (M3).
+	kept := fmt.Sprintf("shared folder %s was defined (gid %d) and is kept: assign it again or delete it", in.ID, fd.GID)
 	held = false
-	op, err = h.startAssignHeld(in.ID, c.req, c.assign.plan.Hash, actor, unlock, func(error) { undefine() })
+	op, err = h.startAssignHeld(in.ID, c.req, c.assign.plan.Hash, actor, unlock, func(error) { undefine() },
+		func(err error) error { return noteErr(err, kept) })
 	return op, err
+}
+
+// noteErr is err with note appended to its message, its status kept (an
+// OpError's record too).
+func noteErr(err error, note string) error {
+	var oe *OpError
+	if errors.As(err, &oe) {
+		r := oe.Record
+		r.Error += "; " + note
+		return &OpError{Record: r, Err: oe.Err}
+	}
+	return fmt.Errorf("%w; %s", err, note)
 }
 
 // ── rebind_port ─────────────────────────────────────────
@@ -533,10 +554,11 @@ func (rebindPortFixer) fixTarget(h *Hub, f doctor.Finding, _ map[string]string) 
 
 // rebindPortLocked is the template port rebind_port finding f is about
 // (never a custom-override port: the Hub never writes the custom
-// override). Caller holds mu.
+// override; never a host-network port: compose publishes nothing for it,
+// so <KEY>_BIND can't move it). Caller holds mu.
 func (h *Hub) rebindPortLocked(f doctor.Finding) (doctor.PortIn, bool) {
 	for _, p := range h.portInsLocked() {
-		if !p.Custom && p.LanOnly && doctor.PortFP(p) == f.FP {
+		if !p.Custom && !p.HostNetwork && p.LanOnly && doctor.PortFP(p) == f.FP {
 			return p, true
 		}
 	}
@@ -653,9 +675,13 @@ func (rebindPortFixer) Preview(ctx context.Context, h *Hub, f doctor.Finding, pa
 // port save (parseSettings with the whole port configuration, the
 // collision check), state, override and env written under mu, then
 // restarted inline (restartLocked: no background Restart waiting on the
-// held lock). A failed restart puts the old configuration back,
-// regenerates and starts the instance again (composeUp): an OpError with
-// rolled_back and the restart's reason. Audited settings.change (ports)
+// held lock). A failed restart puts the old <KEY>_BIND back while it is
+// still this rebind's address (a save committed meanwhile is kept, and a
+// bind changed meanwhile is left and reported), regenerates from the
+// current state and, when the restart had stopped the instance, starts
+// it again (composeUp): an OpError with the restart's reason, rolled_back
+// only when the old bind is back and running. A failed down alone (the
+// up worked) is a warning. Audited settings.change (ports)
 // after the lock is released.
 func (rebindPortFixer) Apply(h *Hub, f doctor.Finding, params map[string]string, planHash, actor string) (*AsyncOp, error) {
 	ctx := context.Background()
@@ -744,25 +770,68 @@ func (rebindPortFixer) Apply(h *Hub, f doctor.Finding, params map[string]string,
 		changes = ch
 		ready()
 
-		rerr := h.restartLocked(t)
+		stopped, downErr, rerr := h.restartSteps(t)
 		if rerr == nil {
-			return map[string]string{"bind": c.addr, "key": c.port.Key}, c.warns, nil
+			// The up with the new bind worked: a failed down before it
+			// is no failed rebind (M2).
+			warns := slices.Clone(c.warns)
+			if downErr != nil {
+				warns = append(warns, fmt.Sprintf("compose down failed before the restart (%v): the up with the new bind worked, but some containers may not have been recreated", downErr))
+			}
+			return map[string]string{"bind": c.addr, "key": c.port.Key}, warns, nil
 		}
-		// Roll back: the old bind, the files regenerated, started again.
+		// Roll back only <KEY>_BIND, and only while it is still this
+		// rebind's address (I2: a save committed during the restart is
+		// kept), then regenerate from the current state; start the
+		// instance again only if the restart stopped it (M2).
+		bindKey := c.port.Key + "_BIND"
 		h.mu.Lock()
-		werr := write(prev)
+		now := h.st.Settings[inst].Clone()
+		nowBind, nowSet := now.Ports[bindKey]
+		ours := nowBind == c.addr
+		if ours {
+			if old, had := c.cur[bindKey]; had {
+				now.Ports[bindKey] = old
+			} else {
+				delete(now.Ports, bindKey)
+				if len(now.Ports) == 0 {
+					now.Ports = nil
+				}
+			}
+		}
+		werr := write(now)
 		h.mu.Unlock()
-		uerr := h.composeUp(t)
+		var uerr error
+		if stopped {
+			uerr = h.composeUp(t)
+		}
 		name := appName(t)
-		msg := fmt.Sprintf("the old bind %s was put back and %s started again", c.oldBind, name)
+		var cfg, start string
 		switch {
 		case werr != nil:
-			msg = fmt.Sprintf("putting the old bind %s back failed (%v); %s may still use %s", c.oldBind, werr, name, c.addr)
-		case uerr != nil:
-			msg = fmt.Sprintf("the old bind %s was put back, but starting %s again failed (%v)", c.oldBind, name, uerr)
+			cfg = fmt.Sprintf("putting the old bind %s back failed (%v); %s may still use %s", c.oldBind, werr, name, c.addr)
+		case !ours:
+			shown := nowBind
+			if !nowSet || shown == "" {
+				shown = "the default"
+			}
+			cfg = fmt.Sprintf("%s changed since the rebind started (now %s): left as it is", bindKey, shown)
+		default:
+			cfg = fmt.Sprintf("the old bind %s was put back", c.oldBind)
 		}
-		err = fmt.Errorf("%s: restarting with %s bind %s failed: %w", msg, c.port.Key, c.addr, rerr)
+		switch {
+		case !stopped:
+			start = fmt.Sprintf("nothing was stopped: %s still runs as it was", name)
+		case uerr != nil:
+			start = fmt.Sprintf("starting %s again failed (%v)", name, uerr)
+		default:
+			start = fmt.Sprintf("%s started again", name)
+		}
+		err = fmt.Errorf("%s; %s: restarting with %s bind %s failed: %w", cfg, start, c.port.Key, c.addr, rerr)
 		auditErr = err
-		return nil, c.warns, &OpError{Record: h.opRecordOf(inst, OpRebind, err, werr == nil), Err: err}
+		// rolled_back only when the old bind is back and the instance
+		// runs with it (M1).
+		rolledBack := ours && werr == nil && (!stopped || uerr == nil)
+		return nil, c.warns, &OpError{Record: h.opRecordOf(inst, OpRebind, err, rolledBack), Err: err}
 	})
 }

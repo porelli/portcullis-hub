@@ -84,7 +84,10 @@ func TestExposureAddressForms(t *testing.T) {
 			!strings.Contains(hn.Why, "Docker publishes around host firewalls such as ufw; restrict the port in your router or host firewall") {
 			t.Fatalf("host network %q = %+v", bind, got)
 		}
-		if ex == nil || ex.Severity != Problem || ex.FixKind != FixRebindPort {
+		// T12 I1: compose publishes nothing for a host-network port, so
+		// <KEY>_BIND can't move it: explain-only, with the steps.
+		if ex == nil || ex.Severity != Problem || ex.Class != FixExplain || ex.FixKind != "" || len(ex.Steps) != 2 ||
+			!strings.Contains(ex.Steps[0], "listen address") || !strings.Contains(ex.Steps[1], "firewall") {
 			t.Fatalf("host network %q exposed = %+v", bind, ex)
 		}
 	}

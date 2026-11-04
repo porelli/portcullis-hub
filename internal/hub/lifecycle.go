@@ -606,20 +606,35 @@ func (h *Hub) RestartApp(id string) error {
 }
 
 func (h *Hub) restartLocked(t *templates.Template) error {
+	_, downErr, err := h.restartSteps(t)
+	if err != nil {
+		return err
+	}
+	if downErr != nil {
+		return fmt.Errorf("compose down failed (the containers may not have been recreated): %w", downErr)
+	}
+	return nil
+}
+
+// restartSteps is restartLocked telling apart what happened: stopped
+// false = refused before anything was stopped (the app runs as it was);
+// downErr = compose down failed but the up that followed worked (err
+// nil).
+func (h *Hub) restartSteps(t *templates.Template) (stopped bool, downErr, err error) {
 	// Refuse before stopping anything: an override that no longer fits
 	// the template would leave the app down.
 	if err := h.checkUserOverride(t); err != nil {
-		return err
+		return false, nil, err
 	}
 	// Then everything the up needs (override, .env, data files): a
 	// refusal there leaves the app running as it was.
 	if _, err := os.Stat(t.ComposePath()); err != nil {
-		return nil
+		return false, nil, nil
 	}
 	seq := h.owedSeqOf(t.ID)
 	live, err := h.prepareUp(t)
 	if err != nil {
-		return err
+		return false, nil, err
 	}
 	// The shared-folder subpaths too (H15): a missing or changed one is
 	// refused while the app still runs on the mounts it started with.
@@ -627,7 +642,7 @@ func (h *Hub) restartLocked(t *templates.Template) error {
 	probes, err := h.folderProbesLocked(live)
 	h.mu.RUnlock()
 	if err != nil {
-		return err
+		return false, nil, err
 	}
 	if len(probes) > 0 {
 		if p, detail, err := h.probeFolders(context.Background(), probes, false); err != nil {
@@ -635,21 +650,18 @@ func (h *Hub) restartLocked(t *templates.Template) error {
 			if p != nil && isFolderChanged(err) {
 				h.recordFolderChange(live.ID, p, detail)
 			}
-			return err
+			return false, nil, err
 		}
 	}
-	downErr := h.composeDown(t)
+	downErr = h.composeDown(t)
 	if err := h.startUp(live); err != nil {
 		if composeFailed(err) {
-			return fmt.Errorf("compose up failed: %w", err)
+			return true, downErr, fmt.Errorf("compose up failed: %w", err)
 		}
-		return err
+		return true, downErr, err
 	}
 	h.clearOwed(t.ID, seq, settings.EffectRestart)
-	if downErr != nil {
-		return fmt.Errorf("compose down failed (the containers may not have been recreated): %w", downErr)
-	}
-	return nil
+	return true, downErr, nil
 }
 
 // hasImmutableHosts: t declares a hosts.immutable host router.
