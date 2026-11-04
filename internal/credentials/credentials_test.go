@@ -1,8 +1,12 @@
 package credentials
 
 import (
+	"encoding/hex"
 	"strings"
 	"testing"
+	"unicode/utf16"
+
+	"golang.org/x/crypto/md4"
 
 	"github.com/portcullis/hub/internal/templates"
 )
@@ -138,6 +142,30 @@ func TestCheckUsername(t *testing.T) {
 		}
 		if !ok && tt.reason != "" && reason != tt.reason {
 			t.Errorf("CheckUsername(%q): got reason %q, want %q", tt.user, reason, tt.reason)
+		}
+	}
+}
+
+// NTHash reads the bytes without a string copy (fix round 1): same
+// hashes as the UTF-16LE reference for ASCII, non-BMP and invalid UTF-8,
+// and the input is left as it was.
+func TestNTHashNoStringCopy(t *testing.T) {
+	ref := func(p []byte) string {
+		var le []byte
+		for _, u := range utf16.Encode([]rune(string(p))) {
+			le = append(le, byte(u), byte(u>>8))
+		}
+		h := md4.New()
+		h.Write(le)
+		return strings.ToUpper(hex.EncodeToString(h.Sum(nil)))
+	}
+	for _, s := range []string{"Abcd-EFGH-jkmn-PQRS-tuvw-2345", "pässwörd", "a\U0001F600b", "\xff\xfe"} {
+		in := []byte(s)
+		if got, want := NTHash(in), ref([]byte(s)); got != want {
+			t.Errorf("NTHash(%q) = %s, want %s", s, got, want)
+		}
+		if string(in) != s {
+			t.Errorf("NTHash changed its input %q", s)
 		}
 	}
 }

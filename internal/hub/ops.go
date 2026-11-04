@@ -283,23 +283,38 @@ var secretKeyRe = regexp.MustCompile(`(?i)secret|passw|token|key|salt|credential
 // the browser and stored: never let one through. Used by finishOp, the
 // async ops (finishAsync) and auditOp; redact, then clip.
 func (h *Hub) secretRedactor(id string, extra ...[]string) func(string) string {
-	vals := h.redactionSet(id)
+	vals, err := h.redactionSetErr(id)
+	if err != nil {
+		// F44, fail closed: a person_secret instance whose hashes can't be
+		// read shows no text that could hold one — only why.
+		msg := "the message is hidden: " + id + "'s password hashes couldn't be read to redact it (" + err.Error() + ")"
+		return func(string) string { return msg }
+	}
 	for _, x := range extra {
 		vals = append(vals, x...)
 	}
 	return func(s string) string { return redactValues(s, vals) }
 }
 
-// redactionSet is what secretRedactor(id) blanks as the instance is now.
+// redactionSet is what secretRedactor(id) blanks as the instance is now
+// (an unreadable hash set leaves the hashes out: callers that must fail
+// closed use redactionSetErr).
 func (h *Hub) redactionSet(id string) []string {
+	vals, _ := h.redactionSetErr(id)
+	return vals
+}
+
+// redactionSetErr is redactionSet plus the instance's current NT hashes
+// (upper and lower case, F44); err: they exist but can't be read.
+func (h *Hub) redactionSetErr(id string) ([]string, error) {
 	t := h.Template(id)
 	var vals []string
 	for _, p := range []string{h.envPath(id), filepath.Join(h.cfg.ProjectDir, ".env")} {
 		vals = append(vals, envSecrets(t, readEnvFile(p))...)
 	}
 	vals = append(vals, h.knownSecrets(id)...)
-	// The instance's current NT hashes, upper and lower case (F44).
-	return append(vals, h.credentialHashes(id, t)...)
+	hs, err := h.credentialHashes(id, t)
+	return append(vals, hs...), err
 }
 
 // envSecrets are the values in vars (an env file, unquoted) that look

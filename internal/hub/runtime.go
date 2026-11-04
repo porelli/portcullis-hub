@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/templates"
@@ -80,6 +81,11 @@ func (h *Hub) Logs(ctx context.Context, id, service string, lines int) ([]byte, 
 	if err != nil {
 		return nil, statusErr(502, "docker: %v", err)
 	}
+	// An instance's current NT hashes never reach the logs API (F44):
+	// unreadable ones = 503 before anything is read.
+	if _, err := h.redactCredentialHashes(t, "", false); err != nil {
+		return nil, err
+	}
 	sources := map[string][]byte{}
 	for _, c := range cs {
 		if service != "" && c.Service() != service {
@@ -89,10 +95,15 @@ func (h *Hub) Logs(ctx context.Context, id, service string, lines int) ([]byte, 
 		if err != nil {
 			out = []byte(fmt.Sprintf("[hub: cannot read logs: %v]\n", err))
 		}
-		sources[c.Name()] = out
+		// The engine caps the bytes it reads: a source may end in a cut
+		// hash.
+		red, rerr := h.redactCredentialHashes(t, strings.TrimRight(string(out), "\n"), true)
+		if rerr != nil {
+			return nil, rerr
+		}
+		sources[c.Name()] = []byte(red + "\n")
 	}
-	// An instance's current NT hashes never reach the logs API (F44).
-	return []byte(h.redactCredentialHashes(t, string(docker.MergeLogs(sources, lines)))), nil
+	return docker.MergeLogs(sources, lines), nil
 }
 
 // ExecResult is the outcome of Exec.
@@ -121,11 +132,19 @@ func (h *Hub) Exec(ctx context.Context, id, service, command string) (*ExecResul
 	if target == nil {
 		return nil, statusErr(409, "service %s has no running container", service)
 	}
+	if _, err := h.redactCredentialHashes(t, "", false); err != nil {
+		return nil, err // F44: unreadable hashes, nothing run
+	}
 	res, err := h.engine.Exec(ctx, target.ID, []string{"/bin/sh", "-c", command}, execTimeout)
 	if err != nil && res == nil {
 		return nil, statusErr(502, "docker: %v", err)
 	}
-	out := string(res.Output)
+	// F44: the instance's hashes blanked (a cut one too) before the
+	// Hub's notes are added.
+	out, rerr := h.redactCredentialHashes(t, string(res.Output), res.Truncated)
+	if rerr != nil {
+		return nil, rerr
+	}
 	if res.Truncated {
 		out += "\n[hub: output truncated]\n"
 	}
@@ -135,8 +154,7 @@ func (h *Hub) Exec(ctx context.Context, id, service, command string) (*ExecResul
 	if err != nil {
 		out += fmt.Sprintf("\n[hub: %v]\n", err)
 	}
-	// Nor an Exec answer (F44).
-	return &ExecResult{Output: h.redactCredentialHashes(t, out), ExitCode: res.ExitCode}, nil
+	return &ExecResult{Output: out, ExitCode: res.ExitCode}, nil
 }
 
 // runningContainer is the running container of service among cs (an

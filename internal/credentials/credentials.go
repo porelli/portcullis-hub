@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 	"unicode/utf16"
+	"unicode/utf8"
 
 	"golang.org/x/crypto/md4"
 
@@ -57,20 +58,29 @@ func Generate(length int) ([]byte, error) {
 }
 
 // NTHash computes the NT hash (uppercase hex of MD4(UTF-16LE(password))).
-// The password is the 29-character dashed form.
+// The password is the 29-character dashed form. No string copy of the
+// password is made, and the UTF-16 and little-endian buffers are zeroed
+// once hashed (invalid UTF-8 reads as U+FFFD, as a string conversion
+// would).
 func NTHash(password []byte) string {
-	// Convert to UTF-16LE
-	runes := []rune(string(password))
-	utf16Bytes := utf16.Encode(runes)
-	le := make([]byte, 0, len(utf16Bytes)*2)
-	for _, u := range utf16Bytes {
-		le = append(le, byte(u), byte(u>>8))
+	u16 := make([]uint16, 0, len(password))
+	for i := 0; i < len(password); {
+		r, n := utf8.DecodeRune(password[i:])
+		u16 = utf16.AppendRune(u16, r)
+		i += n
 	}
-
-	// MD4 hash
+	le := make([]byte, 2*len(u16))
+	for i, u := range u16 {
+		le[2*i], le[2*i+1] = byte(u), byte(u>>8)
+	}
 	h := md4.New()
 	h.Write(le)
-	return strings.ToUpper(hex.EncodeToString(h.Sum(nil)))
+	sum := h.Sum(nil)
+	for i := range u16 {
+		u16[i] = 0
+	}
+	Zero(le)
+	return strings.ToUpper(hex.EncodeToString(sum))
 }
 
 // Zero overwrites b with zeros.

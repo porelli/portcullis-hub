@@ -183,6 +183,9 @@ type execCall struct {
 }
 
 func (e *fakeEngine) ExecStdin(ctx context.Context, id string, in docker.ExecInput) (*docker.ExecResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err // like the SDK: a cancelled context fails the exec
+	}
 	e.mu.Lock()
 	e.execCalls = append(e.execCalls, execCall{container: id, in: in})
 	fn := e.execStdin

@@ -62,6 +62,9 @@ const (
 	revokeHookMax = 8 * time.Second
 	// revokeLockPoll: how often the lock is tried.
 	revokeLockPoll = 20 * time.Millisecond
+	// revokeApplyMax bounds a live apply (membership, lock, hooks),
+	// independent of the request's context.
+	revokeApplyMax = 30 * time.Second
 )
 
 // errRevokeNotLive is the op record of a revocation that stopped the
@@ -191,10 +194,12 @@ func (h *Hub) createCredential(ctx context.Context, instance, key, user string, 
 	ok := t != nil && h.st.IsEnabled(instance) && personSecretOption(t, key) != nil
 	h.mu.RUnlock()
 	if !ok {
+		h.auditCreateRefused(instance, key, user, refusedNotFound)
 		return nil, errNoCredential
 	}
 	m, err := h.membership(ctx)
 	if err != nil {
+		h.auditCreateRefused(instance, key, user, refusedDirectory)
 		return nil, credentialDirectoryErr(err)
 	}
 	h.mu.RLock()
@@ -212,6 +217,7 @@ func (h *Hub) createCredential(ctx context.Context, instance, key, user string, 
 	}
 	h.mu.RUnlock()
 	if !ok {
+		h.auditCreateRefused(instance, key, user, refusedNotFound)
 		return nil, errNoCredential
 	}
 	// 2. The username rule, before the proof (not consumed for a
@@ -224,9 +230,11 @@ func (h *Hub) createCredential(ctx context.Context, instance, key, user string, 
 	// 3. The account's uuid and the secrets volume (503, before the proof).
 	uuid := m.UUIDs[user]
 	if uuid == "" {
+		h.auditCreateRefused(instance, key, user, refusedNoAccountID)
 		return nil, statusErr(http.StatusServiceUnavailable, "Users & Groups gave no account id for %s: try again later", user)
 	}
 	if err := h.SecretsUsable(); err != nil {
+		h.auditCreateRefused(instance, key, user, refusedSecrets)
 		return nil, err
 	}
 	// 4. The fresh-auth proof (outside mu: network calls). Audited with
@@ -248,6 +256,7 @@ func (h *Hub) createCredential(ctx context.Context, instance, key, user string, 
 	if t == nil || !h.st.IsEnabled(instance) || personSecretOption(t, key) == nil {
 		h.mu.Unlock()
 		credentials.Zero(pw)
+		h.auditCreateRefused(instance, key, user, refusedNotFound)
 		return nil, errNoCredential
 	}
 	if h.st.Credentials[instance] == nil {
@@ -266,9 +275,23 @@ func (h *Hub) createCredential(ctx context.Context, instance, key, user string, 
 	}
 	users[user] = c
 	if werr := h.writeHashLocked(instance, key, user, hash); werr != nil {
-		if had {
+		// The new hash may be on the volume (the epoch or state.yaml failed
+		// after it): it must never stay under the old metadata (fix round
+		// 1). Written (or unknown): a regenerate is voided and the file
+		// removed — the person sees "voided" and creates again —, a first
+		// create leaves nothing. Not written: the old state is intact.
+		written := h.hashFileMayHoldLocked(instance, key, user, hash)
+		voided := false
+		switch {
+		case written && regen:
+			at := time.Now().UTC()
+			v := prev
+			v.RevokedAt, v.RevokedBy, v.Reason = &at, purgeActor, state.CredentialReasonRestore
+			users[user] = v
+			voided = true
+		case had:
 			users[user] = prev
-		} else {
+		default:
 			delete(users, user)
 			if len(users) == 0 {
 				delete(h.st.Credentials[instance], key)
@@ -277,9 +300,18 @@ func (h *Hub) createCredential(ctx context.Context, instance, key, user string, 
 				delete(h.st.Credentials, instance)
 			}
 		}
+		if written {
+			if rerr := h.removeHashLocked(instance, key, user); rerr != nil {
+				log.Printf("ERROR: credentials: %s/%s/%s: removing the hash of a failed create: %v (the next reconcile removes it)", instance, key, user, rerr)
+			}
+		}
 		h.mu.Unlock()
 		credentials.Zero(pw)
 		h.auditOp(user, "credential.create", target, credentialDetail(instance, key, user, user, ""), werr)
+		if voided {
+			// The old password may still be live in the app.
+			h.applyRevocation(ctx, instance)
+		}
 		return nil, werr
 	}
 	h.mu.Unlock()
@@ -292,6 +324,50 @@ func (h *Hub) createCredential(ctx context.Context, instance, key, user string, 
 	h.TriggerDelivery(instance, TriggerCredential, true)
 	h.triggerCredentialCheck()
 	return &CreatedCredential{Password: pw, Credential: c}, nil
+}
+
+// hashFileMayHoldLocked: (instance, key, user)'s hash file may hold hash
+// (it does, or the volume can't be read to tell). Caller holds mu.
+func (h *Hub) hashFileMayHoldLocked(instance, key, user, hash string) bool {
+	rel, err := secretRel(instance, key, user)
+	if err != nil {
+		return false // never written: the name is refused before any write
+	}
+	r, err := h.openSecrets()
+	if err != nil {
+		return true
+	}
+	defer r.Close()
+	b, err := r.ReadFile(rel)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false
+	}
+	return err != nil || string(b) == hash+"\n"
+}
+
+// Fixed reasons of refused creates in the audit (#9; never a proof).
+const (
+	refusedNotFound    = "not found"
+	refusedDirectory   = "users & groups unavailable"
+	refusedNoAccountID = "no account id"
+	refusedSecrets     = "secrets volume unusable"
+)
+
+// auditCreateRefused audits a refused create (404, 503) as refused with
+// a fixed reason; the instance and key are the caller's, clipped.
+func (h *Hub) auditCreateRefused(instance, key, user, reason string) {
+	h.mu.RLock()
+	a := h.audit
+	h.mu.RUnlock()
+	if a == nil {
+		return
+	}
+	instance, key, user = clip(instance, 64), clip(key, 64), clip(user, 64)
+	e := directory.AuditEntry{Actor: user, Action: "credential.create", Target: instance + "/" + key + "/" + user,
+		Detail: credentialDetail(instance, key, user, user, reason), Result: "refused", Error: reason}
+	if err := a.Append(e); err != nil {
+		log.Printf("audit: %v", err)
+	}
 }
 
 // credentialDirectoryErr: the population can't be checked (503, or the
@@ -347,32 +423,39 @@ func revokeAuditAction(reason string) string {
 // nothing done.
 func (h *Hub) revokeCredentials(ctx context.Context, instance string, revs []revocation) error {
 	now := time.Now().UTC()
-	var done []revocation
+	type outcome struct {
+		r   revocation
+		err error
+	}
+	var done []outcome
 	var err error
 	h.mu.Lock()
 	for _, r := range revs {
 		changed, rerr := h.revokeLocked(instance, r, now)
+		if changed {
+			done = append(done, outcome{r, rerr})
+		}
 		if rerr != nil {
+			if !changed {
+				done = append(done, outcome{r, rerr})
+			}
 			err = rerr
 			break
 		}
-		if changed {
-			done = append(done, r)
-		}
 	}
 	h.mu.Unlock()
-	for _, r := range done {
-		actor := r.by
-		if r.reason == state.CredentialReasonSelf {
+	applied := false
+	for _, o := range done {
+		actor := o.r.by
+		if o.r.reason == state.CredentialReasonSelf {
 			actor = "self"
 		}
-		h.auditOp(r.by, revokeAuditAction(r.reason), instance+"/"+r.key+"/"+r.user, credentialDetail(instance, r.key, r.user, actor, r.reason), nil)
+		h.auditOp(o.r.by, revokeAuditAction(o.r.reason), instance+"/"+o.r.key+"/"+o.r.user, credentialDetail(instance, o.r.key, o.r.user, actor, o.r.reason), o.err)
+		applied = true
 	}
-	if err != nil {
-		r := revs[len(done)]
-		h.auditOp(r.by, revokeAuditAction(r.reason), instance+"/"+r.key+"/"+r.user, credentialDetail(instance, r.key, r.user, r.by, r.reason), err)
-	}
-	if len(done) > 0 {
+	if applied {
+		// Also after a failed save: the metadata is revoked in memory and
+		// the file may be gone — the running app must lose the account.
 		h.applyRevocation(ctx, instance)
 	}
 	return err
@@ -380,7 +463,10 @@ func (h *Hub) revokeCredentials(ctx context.Context, instance string, revs []rev
 
 // revokeLocked revokes one credential: the metadata first (revoked now,
 // by, reason), then the hash file and the epoch (removeHashLocked saves
-// state.yaml); an error undoes the metadata. changed false: nothing was
+// state.yaml). An error never puts the credential back to active (fix
+// round 1): the file may already be gone, and a revocation must reach
+// the running app whatever failed after; a leftover file has no active
+// metadata and goes at the next reconcile. changed false: nothing was
 // active. Caller must hold mu (write).
 func (h *Hub) revokeLocked(instance string, r revocation, now time.Time) (bool, error) {
 	users := h.st.Credentials[instance][r.key]
@@ -388,13 +474,12 @@ func (h *Hub) revokeLocked(instance string, r revocation, now time.Time) (bool, 
 	if !ok || !c.Active() {
 		return false, nil
 	}
-	prev := c
 	at := now
 	c.RevokedAt, c.RevokedBy, c.Reason = &at, r.by, r.reason
 	users[r.user] = c
 	if err := h.removeHashLocked(instance, r.key, r.user); err != nil {
-		users[r.user] = prev
-		return false, err
+		log.Printf("ERROR: credentials: %s/%s/%s: the revocation's commit failed (%v): kept revoked, applied anyway", instance, r.key, r.user, err)
+		return true, err
 	}
 	return true, nil
 }
@@ -404,6 +489,10 @@ func (h *Hub) revokeLocked(instance string, r revocation, now time.Time) (bool, 
 // credential_change delivery.
 func (h *Hub) applyRevocation(ctx context.Context, id string) {
 	defer h.TriggerDelivery(id, TriggerCredential, true)
+	// A client hanging up must not turn a live revocation into a kill:
+	// the request's cancellation is dropped, the work bounded on its own.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), revokeApplyMax)
+	defer cancel()
 	h.mu.RLock()
 	live := h.findLocked(id)
 	if live == nil {
@@ -431,7 +520,7 @@ func (h *Hub) applyRevocation(ctx context.Context, id string) {
 	}
 	running := false
 	for s := range services {
-		running = running || runningContainer(cs, s) != nil
+		running = running || liveContainer(cs, s)
 	}
 	if !running {
 		return // 1. the next start's converge has no account for them
@@ -439,6 +528,18 @@ func (h *Hub) applyRevocation(ctx context.Context, id string) {
 	if err := h.revocationHooks(ctx, &t); err != nil {
 		h.revocationKill(&t, err) // 3.
 	}
+}
+
+// liveContainer: a container of service may still serve its accounts —
+// running, paused or restarting (a revocation must not count those as
+// stopped: they go to the hook, which can't exec in them, then the kill).
+func liveContainer(cs []docker.Container, service string) bool {
+	for _, c := range cs {
+		if c.Service() == service && (c.State == "running" || c.State == "paused" || c.State == "restarting") {
+			return true
+		}
+	}
+	return false
 }
 
 // revocationHooks runs every credential_change hook of t for a
@@ -648,54 +749,103 @@ func (h *Hub) credentialUnits(t *templates.Template, delivered *deliveredDoc, no
 }
 
 // credentialHashes are instance id's current NT hashes, upper and lower
-// case, for redaction (F44): read from the volume (no mu). nil without
-// person_secret options or a usable volume.
-func (h *Hub) credentialHashes(id string, t *templates.Template) []string {
-	if t == nil || h.secretsErr != nil {
-		return nil
+// case, for redaction (F44): read from the volume (no mu). nil, nil
+// without person_secret options; an error when they exist but the
+// volume or a hash file can't be read (callers fail closed, fix round 1).
+func (h *Hub) credentialHashes(id string, t *templates.Template) ([]string, error) {
+	if t == nil {
+		return nil, nil
 	}
 	opts := personSecretOptions(t)
 	if len(opts) == 0 {
-		return nil
+		return nil, nil
+	}
+	if h.secretsErr != nil {
+		return nil, fmt.Errorf("the secrets volume is not usable: %v", h.secretsErr)
 	}
 	r, err := os.OpenRoot(h.cfg.SecretsDir)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("the secrets volume can't be opened: %v", err)
 	}
 	defer r.Close()
 	var out []string
 	for _, o := range opts {
 		dir, err := secretDirRel(id, o.Key)
 		if err != nil {
-			continue
+			return nil, err
 		}
 		entries, err := fs.ReadDir(r.FS(), dir)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue // nothing created yet
+		}
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("the secrets of %s/%s can't be listed: %v", id, o.Key, err)
 		}
 		for _, e := range entries {
-			if !e.Type().IsRegular() || !strings.HasSuffix(e.Name(), ".nt") {
+			if !strings.HasSuffix(e.Name(), ".nt") {
 				continue
 			}
 			b, err := r.ReadFile(dir + "/" + e.Name())
 			if err != nil {
-				continue
+				return nil, fmt.Errorf("a hash file of %s/%s can't be read: %v", id, o.Key, err)
 			}
 			if v := strings.TrimSpace(string(b)); ntHashRe.MatchString(v) {
 				out = append(out, v, strings.ToLower(v))
 			}
 		}
 	}
-	return out
+	return out, nil
+}
+
+// errHashesUnreadable is the Exec / Logs answer for a person_secret
+// instance whose hashes can't be read for redaction (F44, fail closed).
+func errHashesUnreadable(id string) error {
+	return statusErr(http.StatusServiceUnavailable, "%s's password hashes can't be read to redact this output: it is not shown", id)
 }
 
 // redactCredentialHashes blanks instance t's current hashes in s (Exec
-// answers, the container logs API: F44).
-func (h *Hub) redactCredentialHashes(t *templates.Template, s string) string {
-	if hs := h.credentialHashes(t.ID, t); len(hs) > 0 {
-		return redactValues(s, hs)
+// answers, the container logs API: F44); truncated: s was cut, so a
+// trailing hex run that begins a hash is blanked too. An unreadable
+// hash set is an error (503).
+func (h *Hub) redactCredentialHashes(t *templates.Template, s string, truncated bool) (string, error) {
+	hs, err := h.credentialHashes(t.ID, t)
+	if err != nil {
+		log.Printf("credentials: %s: %v", t.ID, err)
+		return "", errHashesUnreadable(t.ID)
+	}
+	if len(hs) == 0 {
+		return s, nil
+	}
+	if truncated {
+		s = blankHashPrefixTail(s, hs)
+	}
+	return redactValues(s, hs), nil
+}
+
+// hashPrefixMin: the shortest trailing hash prefix blanked.
+const hashPrefixMin = 8
+
+// blankHashPrefixTail replaces the longest trailing run of s (≥
+// hashPrefixMin hex characters) that is the start of one of hashes (any
+// case) with [redacted]: what an output cap left of a cut hash.
+func blankHashPrefixTail(s string, hashes []string) string {
+	i := len(s)
+	for i > 0 && isHex(s[i-1]) {
+		i--
+	}
+	for j := i; len(s)-j >= hashPrefixMin; j++ {
+		tail := strings.ToUpper(s[j:])
+		for _, h := range hashes {
+			if strings.HasPrefix(strings.ToUpper(h), tail) {
+				return s[:j] + "[redacted]"
+			}
+		}
 	}
 	return s
+}
+
+func isHex(b byte) bool {
+	return '0' <= b && b <= '9' || 'a' <= b && b <= 'f' || 'A' <= b && b <= 'F'
 }
 
 // myCredentialLocked is user's card for person_secret option o of t

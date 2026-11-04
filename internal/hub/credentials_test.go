@@ -1020,3 +1020,257 @@ func TestCredentialsView(t *testing.T) {
 		t.Errorf("unknown instance: %v", err)
 	}
 }
+
+// ── fix round 1 ──────────────────────────────────────────
+
+// readOnlyData makes state.yaml unsavable until the returned func runs.
+func readOnlyData(t *testing.T, f *fixture) func() {
+	t.Helper()
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	if err := os.Chmod(f.data, 0500); err != nil {
+		t.Fatal(err)
+	}
+	restore := func() { os.Chmod(f.data, 0755) }
+	t.Cleanup(restore)
+	return restore
+}
+
+// #1: the file is gone but state.yaml can't be saved: the metadata
+// stays revoked, the revocation is applied live anyway, the answer 500.
+func TestRevokeSaveFailureStillApplied(t *testing.T) {
+	c := credSvcFixture(t)
+	cc := c.create(t, "alice")
+	credentials.Zero(cc.Password)
+	before := len(credExecs(c.f, templates.HookCredentialChange))
+	restore := readOnlyData(t, c.f)
+	err := c.f.h.RevokeOwnCredential(context.Background(), smbID, smbKey, "alice")
+	restore()
+	if statusOf(err) != 500 {
+		t.Fatalf("revoke with an unsavable state = %v, want 500", err)
+	}
+	if m, _ := credOf(c.f.h, smbID, "alice"); m.Active() || m.Reason != state.CredentialReasonSelf {
+		t.Errorf("metadata %+v: want revoked (self)", m)
+	}
+	if _, ok := c.hashFile("alice"); ok {
+		t.Error("the hash file is still there")
+	}
+	ins := credExecs(c.f, templates.HookCredentialChange)
+	if len(ins) <= before {
+		t.Fatal("the revocation was not applied live")
+	}
+	if _, has := ins[len(ins)-1].Credentials[smbKey]["alice"]; has {
+		t.Error("the live hook still lists alice")
+	}
+	// #8: the failed self-revoke is audited with actor self.
+	a := credAudits(c.audit, "credential.revoke")
+	if len(a) != 1 || !strings.Contains(a[0], "actor=self") || !strings.Contains(a[0], " error ") {
+		t.Errorf("audit = %v", a)
+	}
+	settle(c.f)
+}
+
+// F25: the hooks need people and the directory blips: the kill.
+func TestRevokeWhenDirectoryBlips(t *testing.T) {
+	c := credSvcFixture(t)
+	cc := c.create(t, "alice")
+	credentials.Zero(cc.Password)
+	c.f.h.mu.Lock()
+	for i := range c.f.h.instances {
+		if c.f.h.instances[i].ID != smbID {
+			continue
+		}
+		m := &c.f.h.instances[i].Manifest
+		ss := *m.Settings
+		ss.Options = append([]templates.Option(nil), ss.Options...)
+		for j := range ss.Options {
+			if ss.Options[j].Key == "uid" {
+				ss.Options[j].Delivery = append(append(templates.Deliveries(nil), ss.Options[j].Delivery...), templates.Delivery{Hook: "sync"})
+			}
+		}
+		m.Settings = &ss
+	}
+	c.f.h.mu.Unlock()
+	if !hooksNeedPeople(c.f.h.Template(smbID)) {
+		t.Fatal("the hook doesn't need people")
+	}
+	c.people.set(func(p *fakePeople) { p.err = errors.New("ldap blip") })
+	downs := countCalls(c.f, "down:"+smbProject)
+	execs := len(c.f.engine.ExecCalls())
+	if err := c.f.h.RevokeOwnCredential(context.Background(), smbID, smbKey, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if len(c.f.engine.ExecCalls()) != execs {
+		t.Error("a hook ran without the directory")
+	}
+	assertKilled(t, c, downs)
+	assertCredentialsOp(t, c)
+	c.people.set(func(p *fakePeople) { p.err = nil })
+	settle(c.f)
+}
+
+// #3: the client hanging up never turns a live revocation into a kill.
+func TestRevokeCancelledRequestStillLive(t *testing.T) {
+	c := credSvcFixture(t)
+	cc := c.create(t, "alice")
+	credentials.Zero(cc.Password)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	downs := countCalls(c.f, "down:"+smbProject)
+	before := len(credExecs(c.f, templates.HookCredentialChange))
+	if err := c.f.h.RevokeOwnCredential(ctx, smbID, smbKey, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if len(credExecs(c.f, templates.HookCredentialChange)) <= before {
+		t.Error("no hook ran")
+	}
+	if countCalls(c.f, "down:"+smbProject) != downs {
+		t.Error("a cancelled request killed the app")
+	}
+	settle(c.f)
+}
+
+// #5: a paused or restarting container counts as running: no "done".
+func TestRevokePausedOrRestartingCounts(t *testing.T) {
+	for _, st := range []string{"paused", "restarting"} {
+		t.Run(st, func(t *testing.T) {
+			c := credSvcFixture(t)
+			cc := c.create(t, "alice")
+			credentials.Zero(cc.Password)
+			c.f.engine.mu.Lock()
+			for i := range c.f.engine.containers {
+				c.f.engine.containers[i].State = st
+			}
+			c.f.engine.mu.Unlock()
+			downs := countCalls(c.f, "down:"+smbProject)
+			if err := c.f.h.RevokeOwnCredential(context.Background(), smbID, smbKey, "alice"); err != nil {
+				t.Fatal(err)
+			}
+			assertKilled(t, c, downs)
+			settle(c.f)
+		})
+	}
+}
+
+// #4: a person_secret instance whose hashes can't be read answers 503
+// on Exec and Logs, and its op records carry a fixed text.
+func TestHashesUnreadableFailClosed(t *testing.T) {
+	c := credSvcFixture(t)
+	cc := c.create(t, "alice")
+	credentials.Zero(cc.Password)
+	check := func(name string) {
+		t.Helper()
+		if _, err := c.f.h.Exec(context.Background(), smbID, "smb", "true"); statusOf(err) != 503 {
+			t.Errorf("%s: Exec = %v, want 503", name, err)
+		}
+		if _, err := c.f.h.Logs(context.Background(), smbID, "smb", 10); statusOf(err) != 503 {
+			t.Errorf("%s: Logs = %v, want 503", name, err)
+		}
+		c.f.h.finishOp(smbID, OpRestart, errors.New("boom with possibly a hash"), false)
+		if r := c.f.h.LastOp(smbID); r == nil || strings.Contains(r.Error, "boom") || !strings.Contains(r.Error, "hidden") {
+			t.Errorf("%s: op record %+v", name, r)
+		}
+	}
+	if os.Geteuid() != 0 {
+		os.Chmod(c.secrets, 0)
+		check("unreadable volume")
+		os.Chmod(c.secrets, 0700)
+	}
+	c.f.h.secretsErr = errors.New("volume gone")
+	check("unusable volume")
+	c.f.h.secretsErr = nil
+	settle(c.f)
+}
+
+// #6: a regenerate whose commit fails never leaves the new hash under
+// the old metadata: the credential is voided and its file removed.
+func TestRegenerateFailureVoids(t *testing.T) {
+	c := credSvcFixture(t)
+	first := c.create(t, "alice")
+	credentials.Zero(first.Password)
+	restore := readOnlyData(t, c.f)
+	cc, err := c.f.h.CreateCredential(context.Background(), smbID, smbKey, "alice", testProof)
+	restore()
+	if statusOf(err) != 500 || cc != nil {
+		t.Fatalf("regenerate with an unsavable state = %v, %v", cc, err)
+	}
+	m, _ := credOf(c.f.h, smbID, "alice")
+	if m.Active() || m.Reason != state.CredentialReasonRestore {
+		t.Errorf("metadata %+v: want voided", m)
+	}
+	if _, ok := c.hashFile("alice"); ok {
+		t.Error("a hash file is left")
+	}
+	v, err := c.f.h.MyApps(context.Background(), "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a := myApp(v.Apps, smbID); a == nil || a.Credentials[0].Status != CredStatusVoided {
+		t.Errorf("card = %+v", a)
+	}
+	settle(c.f)
+	// A failed first create leaves neither metadata nor a file.
+	restore = readOnlyData(t, c.f)
+	_, err = c.f.h.CreateCredential(context.Background(), smbID, smbKey, "bob", testProof)
+	restore()
+	if statusOf(err) != 500 {
+		t.Fatalf("create with an unsavable state = %v", err)
+	}
+	if _, ok := credOf(c.f.h, smbID, "bob"); ok {
+		t.Error("metadata for bob")
+	}
+	if _, ok := c.hashFile("bob"); ok {
+		t.Error("a hash file for bob")
+	}
+	settle(c.f)
+}
+
+// #9: refused 404 and 503 creates are audited refused with a fixed
+// reason, never the proof.
+func TestRefusedCreatesAudited(t *testing.T) {
+	c := credSvcFixture(t)
+	c.f.h.CreateCredential(context.Background(), smbID, smbKey, "carol", testProof)
+	c.people.set(func(p *fakePeople) { p.uuids = map[string]string{"alice": ""} })
+	c.f.h.CreateCredential(context.Background(), smbID, smbKey, "alice", testProof)
+	a := credAudits(c.audit, "credential.create")
+	if len(a) != 2 || !strings.Contains(a[0], "user=carol") || !strings.Contains(a[0], "reason=not found") || !strings.Contains(a[0], " refused ") ||
+		!strings.Contains(a[1], "user=alice") || !strings.Contains(a[1], "reason=no account id") || !strings.Contains(a[1], " refused ") {
+		t.Errorf("audits = %v", a)
+	}
+	for _, e := range a {
+		for _, s := range []string{testProof.Code, testProof.CodeVerifier, testProof.Nonce} {
+			if strings.Contains(e, s) {
+				t.Errorf("the audit carries the proof: %s", e)
+			}
+		}
+	}
+}
+
+// #10: a hash cut by truncation leaves no prefix in Exec or Logs.
+func TestTruncatedHashPrefixBlanked(t *testing.T) {
+	c := credSvcFixture(t)
+	cc := c.create(t, "alice")
+	hash := credentials.NTHash(cc.Password)
+	credentials.Zero(cc.Password)
+	c.f.engine.mu.Lock()
+	c.f.engine.execRes = &docker.ExecResult{Output: []byte("line\nx" + strings.ToLower(hash[:12])), Truncated: true}
+	c.f.engine.logs["smb-c"] = "2026-11-04T10:00:00Z importing " + hash[:20] + "\n"
+	c.f.engine.mu.Unlock()
+	ex, err := c.f.h.Exec(context.Background(), smbID, "smb", "cat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lg, err := c.f.h.Logs(context.Background(), smbID, "smb", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, s := range map[string]string{"exec": ex.Output, "logs": string(lg)} {
+		if strings.Contains(strings.ToUpper(s), hash[:8]) || !strings.Contains(s, "[redacted]") {
+			t.Errorf("%s = %q", name, s)
+		}
+	}
+	if !strings.Contains(ex.Output, "line\nx") {
+		t.Errorf("exec lost its text: %q", ex.Output)
+	}
+}
