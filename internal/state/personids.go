@@ -21,11 +21,24 @@ type PersonIDEntry struct {
 }
 
 // PersonIDPool is one Hub-wide pool: the next id to try (ids only
-// increase) and every id handed out.
+// increase; at most the range end + 1, which means exhausted), every id
+// handed out, and the ids a hook report or a per-person tree scan listed
+// as file owners (F8: never allocated; sorted by id, deduplicated, inside
+// the range, at most MaxSeenOwners — the oldest go first).
 type PersonIDPool struct {
 	Next    int             `json:"next" yaml:"next"`
 	Entries []PersonIDEntry `json:"entries" yaml:"entries"`
+	Seen    []SeenOwner     `json:"seen_owners,omitempty" yaml:"seen_owners,omitempty"`
 }
+
+// SeenOwner is one id seen owning files, and when it was first seen.
+type SeenOwner struct {
+	ID int       `json:"id" yaml:"id"`
+	At time.Time `json:"at" yaml:"at"`
+}
+
+// MaxSeenOwners bounds a pool's seen owners.
+const MaxSeenOwners = 4096
 
 // Clone is a deep copy.
 func (p PersonIDPool) Clone() PersonIDPool {
@@ -36,6 +49,9 @@ func (p PersonIDPool) Clone() PersonIDPool {
 			e.RetiredAt = &at
 		}
 		out.Entries[i] = e
+	}
+	if p.Seen != nil {
+		out.Seen = append([]SeenOwner(nil), p.Seen...)
 	}
 	return out
 }
@@ -55,8 +71,8 @@ func ReservedPersonID(id int) bool {
 }
 
 // checkPersonIDs refuses a corrupt person_ids pool: the Hub doesn't start
-// on it (like checkFolders). A next past the range is an exhausted (or
-// advanced, F8) pool, not corrupt.
+// on it (like checkFolders). next = range end + 1 is an exhausted pool,
+// not corrupt.
 func (s *AppState) checkPersonIDs() error {
 	pools := make([]string, 0, len(s.PersonIDs))
 	for name := range s.PersonIDs {
@@ -72,8 +88,21 @@ func (s *AppState) checkPersonIDs() error {
 		bad := func(format string, args ...any) error {
 			return fmt.Errorf("person_ids: %s: %s", name, fmt.Sprintf(format, args...))
 		}
-		if p.Next < r[0] {
-			return bad("next %d is below %d", p.Next, r[0])
+		if p.Next < r[0] || p.Next > r[1]+1 {
+			return bad("next %d is outside %d-%d", p.Next, r[0], r[1]+1)
+		}
+		if len(p.Seen) > MaxSeenOwners {
+			return bad("more than %d seen owners", MaxSeenOwners)
+		}
+		for i, o := range p.Seen {
+			switch {
+			case o.ID < r[0] || o.ID > r[1]:
+				return bad("seen owner %d is outside %d-%d", o.ID, r[0], r[1])
+			case i > 0 && o.ID <= p.Seen[i-1].ID:
+				return bad("seen owners not strictly ascending at %d", o.ID)
+			case o.At.IsZero():
+				return bad("seen owner %d has no time", o.ID)
+			}
 		}
 		ids := map[int]bool{}
 		uuids := map[string]bool{}

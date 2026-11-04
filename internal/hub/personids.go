@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/portcullis/hub/internal/settings"
@@ -99,57 +100,96 @@ func (h *Hub) personIDLocked(pool, user string) (int, bool) {
 
 // NoteSeenOwners records ids a hook report or a per-person tree scan
 // listed as file owners (F8): allocation skips them, so a rewound
-// state.yaml never hands out an id that already owns files. In memory:
-// the reports and scans feed it again after a restart, and the boot-time
-// epoch check advances the pools (AdvancePools).
-func (h *Hub) NoteSeenOwners(pool string, ids []int) {
+// state.yaml never hands out an id that already owns files. Kept in the
+// pool in state.yaml (sorted, deduplicated, ids inside the pool's range
+// only, at most state.MaxSeenOwners — the oldest go first), saved when
+// anything new was seen; a failed save changes nothing. Never call it
+// with a docker call in flight under mu (it takes mu).
+func (h *Hub) NoteSeenOwners(pool string, ids []int) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.noteSeenOwnersLocked(pool, ids)
-}
-
-func (h *Hub) noteSeenOwnersLocked(pool string, ids []int) {
-	if len(ids) == 0 {
-		return
+	r, ok := h.idRanges[pool]
+	if !ok {
+		return statusErr(http.StatusInternalServerError, "unknown person id pool %s", pool)
 	}
-	set := h.seenOwners[pool]
-	if set == nil {
-		set = map[int]bool{}
-		h.seenOwners[pool] = set
-	}
-	for _, id := range ids {
-		set[id] = true
-	}
-}
-
-// AdvancePools moves every pool's next forward by `by` (the boot-time
-// secrets check found .epoch missing or different: core was restored and
-// state.yaml may have rewound, F8). Pools state.yaml doesn't have yet are
-// advanced from their range's start. Saved; a failed save changes
-// nothing. Call it before any allocation.
-func (h *Hub) AdvancePools(by int) error {
-	h.mu.Lock()
-	defer h.mu.Unlock()
 	before := h.snapshotPoolsLocked()
-	h.advancePoolsLocked(by)
+	p := h.st.PersonIDs[pool].Clone()
+	if p.Next == 0 {
+		p.Next = r[0]
+	}
+	known := map[int]bool{}
+	for _, o := range p.Seen {
+		known[o.ID] = true
+	}
+	now := time.Now().UTC()
+	added := 0
+	for _, id := range ids {
+		if id < r[0] || id > r[1] || known[id] {
+			continue
+		}
+		known[id] = true
+		p.Seen = append(p.Seen, state.SeenOwner{ID: id, At: now})
+		added++
+	}
+	if added == 0 {
+		return nil
+	}
+	if over := len(p.Seen) - state.MaxSeenOwners; over > 0 {
+		// The oldest out (ties: the lower id).
+		sort.SliceStable(p.Seen, func(i, j int) bool {
+			if !p.Seen[i].At.Equal(p.Seen[j].At) {
+				return p.Seen[i].At.Before(p.Seen[j].At)
+			}
+			return p.Seen[i].ID < p.Seen[j].ID
+		})
+		p.Seen = p.Seen[over:]
+	}
+	sort.Slice(p.Seen, func(i, j int) bool { return p.Seen[i].ID < p.Seen[j].ID })
+	h.st.PersonIDs[pool] = p
 	return h.commitPoolsLocked(true, before)
 }
 
-// advancePoolsLocked is AdvancePools without the save (caller holds mu
-// and saves).
-func (h *Hub) advancePoolsLocked(by int) {
-	if by <= 0 {
-		return
+// maxPoolAdvance bounds AdvancePools' step.
+const maxPoolAdvance = 10 * PoolRewindStep
+
+// AdvancePools moves every pool's next forward by `by` (the boot-time
+// secrets check found .epoch missing or different: core was restored and
+// state.yaml may have rewound, F8), at most to the range end + 1
+// (exhausted). Pools state.yaml doesn't have yet are advanced from their
+// range's start. Once per process: a second call does nothing. Saved; a
+// failed save changes nothing (and doesn't count). Call it before any
+// allocation.
+func (h *Hub) AdvancePools(by int) error {
+	if by <= 0 || by > maxPoolAdvance {
+		return statusErr(http.StatusInternalServerError, "pool advance %d is outside 1-%d", by, maxPoolAdvance)
 	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.poolsAdvanced {
+		return nil
+	}
+	before := h.snapshotPoolsLocked()
+	h.advancePoolsLocked(by)
+	if err := h.commitPoolsLocked(true, before); err != nil {
+		return err
+	}
+	h.poolsAdvanced = true
+	return nil
+}
+
+// advancePoolsLocked is AdvancePools' change without the save or the
+// once-only flag (caller holds mu, checked by, and saves).
+func (h *Hub) advancePoolsLocked(by int) {
 	names := make([]string, 0, len(h.idRanges))
 	for name := range h.idRanges {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 	for _, name := range names {
+		r := h.idRanges[name]
 		p := h.st.PersonIDs[name].Clone()
-		from := max(p.Next, h.idRanges[name][0])
-		p.Next = from + by
+		from := max(p.Next, r[0])
+		p.Next = min(from+by, r[1]+1)
 		h.st.PersonIDs[name] = p
 		log.Printf("person-ids: core restore detected (secrets epoch): pool %s next %d -> %d (a pool never rewinds)", name, from, p.Next)
 	}
@@ -164,9 +204,12 @@ func (h *Hub) allocPersonIDsLocked(pool string, people []settings.Person, uuids 
 		return nil, false, statusErr(http.StatusInternalServerError, "unknown person id pool %s", pool)
 	}
 	p := h.st.PersonIDs[pool].Clone()
-	used := map[int]bool{}
+	used, seen := map[int]bool{}, map[int]bool{}
 	for _, e := range p.Entries {
 		used[e.ID] = true
+	}
+	for _, o := range p.Seen {
+		seen[o.ID] = true
 	}
 	where := ""
 	if instance != "" {
@@ -176,28 +219,59 @@ func (h *Hub) allocPersonIDsLocked(pool string, people []settings.Person, uuids 
 	changed := false
 	now := time.Now().UTC()
 	for _, person := range people {
-		user := person.User
-		uuid := uuids[user]
+		user := strings.ToLower(person.User)
+		uuid := uuids[person.User]
 		if uuid == "" {
+			uuid = uuids[user]
+		}
+		switch {
+		case user == "" || templates.HasControlChars(user):
+			log.Printf("person-ids: a username %q isn't usable%s: no %s id", user, where, pool)
+			continue
+		case uuid == "":
 			log.Printf("person-ids: %s has no LLDAP uuid%s: no %s id, left out", user, where, pool)
+			continue
+		case templates.HasControlChars(uuid):
+			log.Printf("person-ids: %s's LLDAP uuid has control characters%s: no %s id, left out", user, where, pool)
 			continue
 		}
 		if _, done := ids[user]; done {
 			continue
 		}
-		cur := -1
+		cur, own := -1, -1
 		for i, e := range p.Entries {
 			if e.User == user && e.RetiredAt == nil {
 				cur = i
-				break
+			}
+			if e.UUID == uuid {
+				own = i
 			}
 		}
-		if cur >= 0 && p.Entries[cur].UUID == uuid {
-			ids[user] = p.Entries[cur].ID
+		if own >= 0 {
+			e := &p.Entries[own]
+			switch {
+			case e.User != user:
+				// Same LLDAP account under another name: never a second entry.
+				log.Printf("person-ids: %s's LLDAP uuid already has %s id %d as %s%s: left out", user, pool, e.ID, e.User, where)
+				continue
+			case own == cur:
+				ids[user] = e.ID
+				continue
+			}
+			// The same account again (e.g. LLDAP restored): its own id back.
+			if cur >= 0 {
+				at := now
+				p.Entries[cur].RetiredAt = &at
+				log.Printf("person-ids: %s's LLDAP account changed back%s: %s id %d retired", user, where, pool, p.Entries[cur].ID)
+			}
+			e.RetiredAt = nil
+			ids[user] = e.ID
+			changed = true
+			log.Printf("person-ids: %s gets their own %s id %d back%s", user, pool, e.ID, where)
 			continue
 		}
 		id := max(p.Next, r[0])
-		for id <= r[1] && (state.ReservedPersonID(id) || used[id] || h.seenOwners[pool][id]) {
+		for id <= r[1] && (state.ReservedPersonID(id) || used[id] || seen[id]) {
 			id++
 		}
 		if id > r[1] {

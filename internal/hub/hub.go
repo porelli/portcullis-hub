@@ -385,10 +385,10 @@ type Hub struct {
 
 	// Person-id pools (personids.go, contract §13.16): idRanges = pool →
 	// its inclusive id range (templates.PersonIDPools; tests narrow it);
-	// seenOwners = pool → ids a hook report or a per-person tree scan
-	// listed as file owners (never allocated; F8). Both under mu.
-	idRanges   map[string][2]int
-	seenOwners map[string]map[int]bool
+	// poolsAdvanced: AdvancePools ran in this process (once only). Under
+	// mu.
+	idRanges      map[string][2]int
+	poolsAdvanced bool
 }
 
 // New loads state from cfg.DataDir and prepares the data directories. It
@@ -439,7 +439,6 @@ func New(cfg Config, runner compose.Runner, engine Engine, idp IdP) (*Hub, error
 		mountinfo:   func() ([]byte, error) { return os.ReadFile("/proc/self/mountinfo") },
 		lookupIP:    defaultLookupIP,
 		idRanges:    templates.PersonIDPools,
-		seenOwners:  map[string]map[int]bool{},
 	}
 	// The known list in state.yaml (empty = only the main domain).
 	h.domains = knownDomains{h}

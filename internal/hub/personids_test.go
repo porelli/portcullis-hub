@@ -1,9 +1,11 @@
 package hub
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/portcullis/hub/internal/settings"
@@ -240,7 +242,9 @@ func TestPoolSkipsCoreUIDs(t *testing.T) {
 
 func TestPoolSkipsSeenOwners(t *testing.T) {
 	f := smbFixture(t)
-	f.h.NoteSeenOwners(templates.PoolPOSIXUID, []int{20000, 20002})
+	if err := f.h.NoteSeenOwners(templates.PoolPOSIXUID, []int{20000, 20002}); err != nil {
+		t.Fatal(err)
+	}
 	ids, err := f.h.allocPersonIDs(templates.PoolPOSIXUID, persons("alice", "bob"), map[string]string{"alice": "a", "bob": "b"})
 	if err != nil {
 		t.Fatal(err)
@@ -314,5 +318,220 @@ func TestPersonIDsSurviveRestore(t *testing.T) {
 	}
 	if strings.Contains(string(data), "person_ids") {
 		t.Error("the instance archive carries person_ids")
+	}
+}
+
+// Fix round 1 #1: the same uuid is the same LLDAP account: it gets its
+// own entry and id back, never a second entry.
+func TestRestoredUUIDReactivates(t *testing.T) {
+	f := smbFixture(t)
+	for _, u := range []string{"uuid-A", "uuid-B"} {
+		if err := f.h.ensurePersonIDs(smbID, persons("alice"), map[string]string{"alice": u}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := mustPersonID(t, f.h, "alice"); got != 20001 {
+		t.Fatalf("alice/B = %d", got)
+	}
+	// LLDAP says alice = A again (e.g. an LLDAP restore).
+	if err := f.h.ensurePersonIDs(smbID, persons("alice"), map[string]string{"alice": "uuid-A"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := mustPersonID(t, f.h, "alice"); got != 20000 {
+		t.Errorf("alice/A again = %d, want her own 20000", got)
+	}
+	st := loadState(t, f) // Save → Load round trip: nothing Load refuses
+	p := st.PersonIDs[templates.PoolPOSIXUID]
+	if len(p.Entries) != 2 || p.Next != 20002 {
+		t.Fatalf("pool = %+v", p)
+	}
+	for _, e := range p.Entries {
+		if (e.UUID == "uuid-A") != (e.RetiredAt == nil) {
+			t.Errorf("entry %+v: A active, B retired expected", e)
+		}
+	}
+	// A uuid already held under another name gets nothing.
+	if err := f.h.ensurePersonIDs(smbID, persons("bob"), map[string]string{"bob": "uuid-A"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := f.h.PersonID(templates.PoolPOSIXUID, "bob"); ok {
+		t.Error("bob got an id with alice's uuid")
+	}
+	loadState(t, f)
+}
+
+// The allocator never writes what Load refuses: names are lowercased and
+// a uuid with control characters gets no id.
+func TestPersonIDInputsNormalised(t *testing.T) {
+	f := smbFixture(t)
+	if err := f.h.ensurePersonIDs(smbID, persons("Alice", "bob", ""), map[string]string{"Alice": "a", "bob": "b\n", "": "x"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := mustPersonID(t, f.h, "alice"); got != 20000 {
+		t.Errorf("alice = %d", got)
+	}
+	if _, ok := f.h.PersonID(templates.PoolPOSIXUID, "bob"); ok {
+		t.Error("bob's uuid has a newline but he got an id")
+	}
+	if p := loadState(t, f).PersonIDs[templates.PoolPOSIXUID]; len(p.Entries) != 1 || p.Entries[0].User != "alice" {
+		t.Errorf("entries = %+v", p.Entries)
+	}
+}
+
+// Fix round 1 #2: one advance per process.
+func TestAdvancePoolsOnce(t *testing.T) {
+	f := smbFixture(t)
+	for range 2 {
+		if err := f.h.AdvancePools(PoolRewindStep); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if p := loadState(t, f).PersonIDs[templates.PoolPOSIXUID]; p.Next != 21000 {
+		t.Errorf("next = %d after two calls, want 21000 (one advance)", p.Next)
+	}
+}
+
+// Fix round 1 #4: by is bounded and next stops at range end + 1.
+func TestAdvancePoolsBounded(t *testing.T) {
+	f := smbFixture(t)
+	for _, by := range []int{0, -1, maxPoolAdvance + 1} {
+		if err := f.h.AdvancePools(by); err == nil {
+			t.Errorf("AdvancePools(%d) accepted", by)
+		}
+	}
+	f.h.mu.Lock()
+	f.h.st.PersonIDs[templates.PoolPOSIXUID] = state.PersonIDPool{Next: 59500}
+	f.h.mu.Unlock()
+	if err := f.h.AdvancePools(PoolRewindStep); err != nil {
+		t.Fatal(err)
+	}
+	if p := loadState(t, f).PersonIDs[templates.PoolPOSIXUID]; p.Next != 60000 {
+		t.Errorf("next = %d, want 60000 (range end + 1)", p.Next)
+	}
+	if _, err := f.h.allocPersonIDs(templates.PoolPOSIXUID, persons("x"), map[string]string{"x": "x"}); err == nil || !strings.Contains(err.Error(), "exhausted") {
+		t.Errorf("alloc after cap = %v", err)
+	}
+}
+
+// Fix round 1 #3: a failed save changes nothing in memory.
+func TestPersonIDFailedSave(t *testing.T) {
+	f := smbFixture(t)
+	if err := f.h.ensurePersonIDs(smbID, persons("alice"), map[string]string{"alice": "uuid-A"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(f.data, 0500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(f.data, 0755) })
+	err := f.h.ensurePersonIDs(smbID, persons("alice", "bob"), map[string]string{"alice": "uuid-B", "bob": "b"})
+	os.Chmod(f.data, 0755)
+	if err == nil {
+		t.Fatal("ensurePersonIDs with a failing save succeeded")
+	}
+	f.h.mu.RLock()
+	p := f.h.st.PersonIDs[templates.PoolPOSIXUID]
+	f.h.mu.RUnlock()
+	if p.Next != 20001 || len(p.Entries) != 1 || p.Entries[0].RetiredAt != nil || p.Entries[0].UUID != "uuid-A" {
+		t.Errorf("pool in memory after a failed save = %+v", p)
+	}
+	if err := f.h.NoteSeenOwners(templates.PoolPOSIXUID, []int{20005}); err != nil {
+		t.Fatal(err)
+	}
+	os.Chmod(f.data, 0500)
+	if err := f.h.AdvancePools(PoolRewindStep); err == nil {
+		t.Error("AdvancePools with a failing save succeeded")
+	}
+	os.Chmod(f.data, 0755)
+	f.h.mu.RLock()
+	p = f.h.st.PersonIDs[templates.PoolPOSIXUID]
+	f.h.mu.RUnlock()
+	if p.Next != 20001 || len(p.Seen) != 1 {
+		t.Errorf("pool after a failed advance = %+v", p)
+	}
+	// The failed advance didn't count: it may run again.
+	if err := f.h.AdvancePools(PoolRewindStep); err != nil {
+		t.Fatal(err)
+	}
+	if p := loadState(t, f).PersonIDs[templates.PoolPOSIXUID]; p.Next != 21001 {
+		t.Errorf("next = %d", p.Next)
+	}
+}
+
+// Fix round 1 #5: concurrent allocations hand out distinct ids.
+func TestEnsurePersonIDsConcurrent(t *testing.T) {
+	f := smbFixture(t)
+	uuids := map[string]string{}
+	var a, b []string
+	for i := range 40 {
+		u := fmt.Sprintf("u%02d", i)
+		uuids[u] = "uuid-" + u
+		if i < 30 {
+			a = append(a, u)
+		}
+		if i >= 10 {
+			b = append(b, u)
+		}
+	}
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	for id, users := range map[string][]string{smbID: a, smbID + "-b": b} {
+		wg.Go(func() { errs <- f.h.ensurePersonIDs(id, persons(users...), uuids) })
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	seen := map[int]string{}
+	for u := range uuids {
+		id := mustPersonID(t, f.h, u)
+		if other, dup := seen[id]; dup {
+			t.Errorf("%s and %s share %d", u, other, id)
+		}
+		seen[id] = u
+	}
+	if p := loadState(t, f).PersonIDs[templates.PoolPOSIXUID]; len(p.Entries) != 40 || p.Next != 20040 {
+		t.Errorf("pool = next %d, %d entries", p.Next, len(p.Entries))
+	}
+}
+
+// Fix round 1 #6: seen owners are persisted, bounded and skipped after a
+// restart.
+func TestSeenOwnersPersist(t *testing.T) {
+	f := smbFixture(t)
+	if err := f.h.NoteSeenOwners(templates.PoolPOSIXUID, []int{20002, 20000, 20002, 5, 10001, 70000}); err != nil {
+		t.Fatal(err)
+	}
+	p := loadState(t, f).PersonIDs[templates.PoolPOSIXUID]
+	if len(p.Seen) != 2 || p.Seen[0].ID != 20000 || p.Seen[1].ID != 20002 {
+		t.Fatalf("seen = %+v (sorted, deduplicated, only in range)", p.Seen)
+	}
+	if err := f.h.NoteSeenOwners("nope", []int{20000}); err == nil {
+		t.Error("an unknown pool accepted")
+	}
+	h := reopen(t, f)
+	ids, err := h.allocPersonIDs(templates.PoolPOSIXUID, persons("alice", "bob"), map[string]string{"alice": "a", "bob": "b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ids["alice"] != 20001 || ids["bob"] != 20003 {
+		t.Errorf("after a restart ids = %v, want 20001 20003", ids)
+	}
+	// At most maxSeenOwners: the oldest go.
+	var many []int
+	for i := range state.MaxSeenOwners {
+		many = append(many, 30000+i)
+	}
+	if err := h.NoteSeenOwners(templates.PoolPOSIXUID, many); err != nil {
+		t.Fatal(err)
+	}
+	p = loadState(t, f).PersonIDs[templates.PoolPOSIXUID]
+	if len(p.Seen) != state.MaxSeenOwners {
+		t.Fatalf("%d seen owners kept", len(p.Seen))
+	}
+	if p.Seen[0].ID == 20000 || p.Seen[0].ID == 20002 {
+		t.Errorf("the oldest seen owners were kept: first %+v", p.Seen[0])
 	}
 }

@@ -63,13 +63,24 @@ func TestLoadRefusesCorruptPersonIDs(t *testing.T) {
 	if p := got.PersonIDs["posix_uid"]; p.Next != 20003 || len(p.Entries) != 3 || p.Entries[0].RetiredAt == nil {
 		t.Errorf("round trip = %+v", p)
 	}
-	// An advanced next beyond the range is an exhausted pool, not corrupt.
-	s.PersonIDs = map[string]PersonIDPool{"posix_uid": {Next: 61000}}
+	// next = range end + 1 is an exhausted pool, not corrupt; beyond it
+	// is corrupt (the Hub caps next there).
+	s.PersonIDs = map[string]PersonIDPool{"posix_uid": {Next: 60000}}
 	if err := s.Save(path); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Load(path); err != nil {
-		t.Errorf("advanced next: %v", err)
+		t.Errorf("exhausted next: %v", err)
+	}
+	// Seen owners round-trip.
+	g := goodPool()
+	g.Seen = []SeenOwner{{ID: 20005, At: time.Now().UTC()}, {ID: 30000, At: time.Now().UTC()}}
+	s.PersonIDs = map[string]PersonIDPool{"posix_uid": g}
+	if err := s.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := Load(path); err != nil || len(got.PersonIDs["posix_uid"].Seen) != 2 {
+		t.Errorf("seen owners: %v %+v", err, got)
 	}
 }
 
