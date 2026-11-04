@@ -35,6 +35,15 @@ const (
 	sIFLNK uint32 = 0o120000
 )
 
+// The admin's words for a root identity mismatch (the Hub uses them too):
+// a device number (or mount root) can change across a reboot on btrfs or
+// LVM — the same directory, re-checked in Shared folders —, another inode
+// is another directory.
+const (
+	DeviceChangedText = "the folder's identity changed (e.g. after a reboot on btrfs/LVM): re-check it in Shared folders"
+	SwappedText       = "the folder's root is a different directory now; if you didn't move it, someone may have swapped it"
+)
+
 func (s fileStat) typ() uint32  { return s.Mode & sIFMT }
 func (s fileStat) isDir() bool  { return s.typ() == sIFDIR }
 func (s fileStat) isReg() bool  { return s.typ() == sIFREG }
@@ -265,9 +274,14 @@ func openWalker(o Options, mode string) (*walker, error) {
 	}
 	w.root = st
 	w.r.Dev, w.r.Ino = st.Dev, st.Ino
-	if (o.ExpectDev != 0 || o.ExpectIno != 0) && (st.Dev != o.ExpectDev || st.Ino != o.ExpectIno) {
-		return w, refuse("%s is not the folder's directory (device %d inode %d, want %d/%d): the folder's identity changed (e.g. after a reboot on btrfs/LVM): re-check it in Shared folders",
-			o.Root, st.Dev, st.Ino, o.ExpectDev, o.ExpectIno)
+	if (o.ExpectDev != 0 || o.ExpectIno != 0) && st.Ino != o.ExpectIno {
+		// Another inode is another directory, never a reboot.
+		return w, refuse("%s is not the folder's directory (device %d inode %d, want %d/%d): %s",
+			o.Root, st.Dev, st.Ino, o.ExpectDev, o.ExpectIno, SwappedText)
+	}
+	if (o.ExpectDev != 0 || o.ExpectIno != 0) && st.Dev != o.ExpectDev {
+		return w, refuse("%s is not the folder's directory (device %d inode %d, want %d/%d): %s",
+			o.Root, st.Dev, st.Ino, o.ExpectDev, o.ExpectIno, DeviceChangedText)
 	}
 	ms, err := readMountinfo()
 	if err != nil {
@@ -276,7 +290,7 @@ func openWalker(o Options, mode string) (*walker, error) {
 	root, found := mountRootOf(ms, o.Root)
 	w.r.MountRoot = root
 	if o.ExpectMountRoot != "" && (!found || root != o.ExpectMountRoot) {
-		return w, refuse("%s is mounted from %q, want %q: the folder's identity changed (e.g. after a reboot on btrfs/LVM): re-check it in Shared folders", o.Root, root, o.ExpectMountRoot)
+		return w, refuse("%s is mounted from %q, want %q: %s", o.Root, root, o.ExpectMountRoot, DeviceChangedText)
 	}
 	prefix := o.Root + "/"
 	if o.Root == "/" {

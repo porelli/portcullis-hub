@@ -557,6 +557,56 @@ func TestRestoreRefusesBadSnapshots(t *testing.T) {
 	}
 }
 
+// Follow-up (a): after a device-only re-check the apply snapshot's header
+// still names the old device: restore takes it as the expected snapshot
+// root (--expect-snapshot-root), the walk root stays checked against the
+// current identity, and the inode must be the same.
+func TestRestoreExpectSnapshotRoot(t *testing.T) {
+	root := simpleTree(t)
+	dev, ino := rootIDs(t, root)
+	_, fino := rootIDs(t, filepath.Join(root, "g"))
+	hdr := `{"version":1,"kind":"apply","rules":` + strconv.Itoa(planRules) + `,"root_dev":` + strconv.FormatUint(dev+7, 10) + `,"root_ino":` + strconv.FormatUint(ino, 10) +
+		`,"gid":60001,"files":"rw","owner_uid":null,"created_at":"2026-11-03T00:00:00Z","entries":1}`
+	snap := gzLines(t, hdr, `{"p":"g","t":"f","ino":`+strconv.FormatUint(fino, 10)+`,"u":0,"g":0,"m":420,"a":"","d":""}`)
+	o := Options{Root: root, ExpectDev: dev, ExpectIno: ino, Target: Target{GID: 60001}}
+	if _, err := RestoreDryRun(o, bytes.NewReader(snap)); !IsRefused(err) {
+		t.Fatalf("old device without the flag: %v, want a refusal", err)
+	}
+	o.SnapshotRootDev, o.SnapshotRootIno = dev+7, ino
+	if _, err := RestoreDryRun(o, bytes.NewReader(snap)); err != nil {
+		t.Fatalf("with the snapshot root: %v", err)
+	}
+	bad := o
+	bad.SnapshotRootIno = ino + 1
+	if _, err := RestoreDryRun(bad, bytes.NewReader(snap)); !IsRefused(err) {
+		t.Fatalf("another inode: %v, want a refusal", err)
+	}
+	bad = o
+	bad.SnapshotRootDev = dev + 8
+	if _, err := RestoreDryRun(bad, bytes.NewReader(snap)); !IsRefused(err) {
+		t.Fatalf("another recorded device: %v, want a refusal", err)
+	}
+	// Through the argv (restore and the undo snapshot).
+	for _, mode := range []string{"restore", "snapshot"} {
+		x := ArgsExtra{In: "/in/snapshot.ndjson.gz"}
+		if mode == "snapshot" {
+			x = ArgsExtra{Out: "/out", Kind: "undo", In: "/in/snapshot.ndjson.gz"}
+		}
+		oo := Options{Root: "/folder", ExpectDev: 64, ExpectIno: 2, ExpectMountRoot: "/p", Target: Target{GID: 60001, Files: "rw"}, SnapshotRootDev: 63, SnapshotRootIno: 2}
+		if mode == "restore" {
+			oo.Target.Files = ""
+		}
+		args := Args(mode, oo, x)
+		_, got, _, err := parseArgs(args)
+		if err != nil || got.SnapshotRootDev != 63 || got.SnapshotRootIno != 2 {
+			t.Errorf("%s %q: %+v %v", mode, args, got, err)
+		}
+	}
+	if code, _, _ := runMain("scan", "--root="+root, "--expect-snapshot-root=1:2"); code != 1 {
+		t.Error("--expect-snapshot-root accepted on a scan")
+	}
+}
+
 func TestFSName(t *testing.T) {
 	for magic, want := range map[int64]string{0xEF53: "ext4", 0x58465342: "xfs", 0x9123683E: "btrfs", 0x2FC12FC1: "zfs",
 		0x6969: "nfs", 0xFF534D42: "cifs", 0xFE534D42: "cifs", int64(int32(-11317950)): "cifs", 0x65735546: "fuse",

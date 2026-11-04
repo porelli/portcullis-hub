@@ -521,8 +521,8 @@ func TestUpRefusesChangedFolder(t *testing.T) {
 	delete(d.symlinks, "/srv/media/movies")
 	d.paths["/srv/media"].ino = 999
 	d.mu.Unlock()
-	// H2: another device/inode points at the identity re-check.
-	if err := f.h.Enable("jellyfin"); statusOf(err) != 409 || !strings.Contains(err.Error(), identityText) {
+	// Follow-up (b): another inode is another directory.
+	if err := f.h.Enable("jellyfin"); statusOf(err) != 409 || !strings.Contains(err.Error(), swappedText) {
 		t.Fatalf("replaced root: %v", err)
 	}
 	// A missing subpath fails closed (Docker never creates it).
@@ -558,8 +558,8 @@ func TestUpProbesFolderRootWithoutSubpath(t *testing.T) {
 	ino := d.paths["/srv/media"].ino
 	d.paths["/srv/media"].ino = 999
 	d.mu.Unlock()
-	// H2: another device/inode points at the identity re-check.
-	if err := f.h.Enable("jellyfin"); statusOf(err) != 409 || !strings.Contains(err.Error(), identityText) {
+	// Follow-up (b): another inode is another directory.
+	if err := f.h.Enable("jellyfin"); statusOf(err) != 409 || !strings.Contains(err.Error(), swappedText) {
 		t.Fatalf("replaced root: %v", err)
 	}
 	if ups(f, "jellyfin") != 0 {
@@ -574,7 +574,7 @@ func TestUpProbesFolderRootWithoutSubpath(t *testing.T) {
 		d.paths["/srv/media"].ino = 998
 		d.mu.Unlock()
 	}
-	if err := f.h.Enable("jellyfin"); statusOf(err) != 409 || !strings.Contains(err.Error(), identityText) {
+	if err := f.h.Enable("jellyfin"); statusOf(err) != 409 || !strings.Contains(err.Error(), swappedText) {
 		t.Fatalf("after the start: %v", err)
 	}
 	if calls := strings.Join(f.runner.Calls(), ","); !strings.Contains(calls, "up:portcullis-jellyfin,down:portcullis-jellyfin") {
@@ -947,5 +947,36 @@ func TestGIDRefsCachedOnTemplate(t *testing.T) {
 	f.h.mu.RUnlock()
 	if refs := gidRefsOf(&templates.Template{GIDRefs: live.GIDRefs}); refs["pgid"] == "" {
 		t.Errorf("cached refs = %v", refs)
+	}
+}
+
+// Follow-up (b): only the device number changed: the reboot wording.
+func TestUpDeviceOnlyChange(t *testing.T) {
+	f, d := jellyfinFixture(t)
+	setStored(f, "jellyfin", "movies", "folder:media/movies")
+	d.mu.Lock()
+	d.paths["/srv/media"].dev = 2050
+	d.mu.Unlock()
+	err := f.h.Enable("jellyfin")
+	if statusOf(err) != 409 || !strings.Contains(err.Error(), identityText) || strings.Contains(err.Error(), "swapped") {
+		t.Fatalf("enable = %v", err)
+	}
+	if ch := f.h.FolderChanges(); len(ch) != 1 || !strings.Contains(ch[0].Detail, "device number changed") {
+		t.Errorf("changes = %+v", ch)
+	}
+}
+
+// Follow-up (d): a probe refused on a subpath is that subpath's value's.
+func TestProbeRefusalBlamesItsValue(t *testing.T) {
+	f, d := jellyfinFixture(t)
+	setStored(f, "jellyfin", "movies", "folder:media/movies", "tv", "folder:media/tv")
+	d.mu.Lock()
+	d.refuseSub = map[string]bool{"/srv/media/tv": true}
+	d.mu.Unlock()
+	if err := f.h.Enable("jellyfin"); statusOf(err) != 409 {
+		t.Fatalf("enable = %v", err)
+	}
+	if ch := f.h.FolderChanges(); len(ch) != 1 || ch[0].Key != "tv" || ch[0].Subpath != "tv" {
+		t.Errorf("changes = %+v", ch)
 	}
 }

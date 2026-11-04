@@ -388,6 +388,12 @@ type FolderApply struct {
 	Files    string    `json:"files" yaml:"files"` // rw | r
 	OwnerUID *int      `json:"owner_uid,omitempty" yaml:"owner_uid,omitempty"`
 	Snapshot string    `json:"snapshot,omitempty" yaml:"snapshot,omitempty"` // "<folder>/<ts>.ndjson.gz"
+	// RootDev / RootIno: the folder root the snapshot recorded, set when a
+	// device-only identity re-check changed the stored device since (0 =
+	// the folder's own dev/ino); restore expects the snapshot header to
+	// name them.
+	RootDev uint64 `json:"root_dev,omitempty" yaml:"root_dev,omitempty"`
+	RootIno uint64 `json:"root_ino,omitempty" yaml:"root_ino,omitempty"`
 }
 
 // FolderChange is a folder value whose root or subpath changed on disk

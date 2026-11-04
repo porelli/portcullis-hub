@@ -144,6 +144,10 @@ func (r fixerRun) validate() error {
 		return errors.New("only a folder scan learns an identity (unchecked)")
 	}
 	identity := o.ExpectDev != 0 && o.ExpectIno != 0 && o.ExpectMountRoot != ""
+	if (o.SnapshotRootDev != 0 || o.SnapshotRootIno != 0) &&
+		(!(r.Mode == "restore" || (r.Mode == "snapshot" && r.Extra.Kind == "undo")) || o.SnapshotRootDev == 0 || o.SnapshotRootIno != o.ExpectIno) {
+		return errors.New("an expected snapshot root goes with a restore or an undo snapshot of the same root inode")
+	}
 	switch r.Mode {
 	case "probe":
 		if r.Extra.Rel == "" {

@@ -12,6 +12,7 @@ import (
 	"golang.org/x/text/message"
 
 	"github.com/portcullis/hub/internal/doctor"
+	"github.com/portcullis/hub/internal/folderfix"
 )
 
 // Re-check identity (H2, contract §14.1): a folder's root is stored as
@@ -36,25 +37,47 @@ type IdentityCheck struct {
 	Old     FolderIdentity `json:"old"`
 	New     FolderIdentity `json:"new"`
 	Changed bool           `json:"changed"`
-	FSType  string         `json:"fs_type"`
-	Files   int64          `json:"files"`
-	Dirs    int64          `json:"dirs"`
-	Partial bool           `json:"partial"`
-	Lines   []string       `json:"lines"`
+	// DifferentDirectory: the inode changed — another directory, not a
+	// reboot: storing it needs confirm_different_directory and clears
+	// the last apply (follow-up (b)).
+	DifferentDirectory bool     `json:"different_directory"`
+	FSType             string   `json:"fs_type"`
+	Files              int64    `json:"files"`
+	Dirs               int64    `json:"dirs"`
+	Partial            bool     `json:"partial"`
+	Lines              []string `json:"lines"`
 	// Hash binds the apply to this preview (the folder, its path, both
 	// identities and its users).
 	Hash string `json:"plan_hash"`
 }
 
-// errFolderIdentity is the refusal (409) of a run whose folder root has
-// another device, inode or mount root than stored: a folder change (the
-// up records it) whose likely cause is a reboot.
-func errFolderIdentity(name string) error {
-	return &StatusError{Status: http.StatusConflict, Err: folderChangedError{name: name, identity: true}}
+// errFolderIdentity is the refusal (409) of a run whose folder root is not
+// the stored one (a folder change: the up records it). Another inode
+// (nowIno ≠ storedIno) is another directory — someone may have swapped
+// it —; only the device number changed is likely a reboot (btrfs, LVM),
+// which Re-check identity fixes (follow-up (b)).
+func errFolderIdentity(name string, storedIno, nowIno uint64) error {
+	kind := changeIdentity
+	if storedIno != nowIno {
+		kind = changeSwapped
+	}
+	return &StatusError{Status: http.StatusConflict, Err: folderChangedError{name: name, kind: kind}}
 }
 
-// identityText is the message a dev / ino / mount-root mismatch carries.
-const identityText = "the folder's identity changed (e.g. after a reboot on btrfs/LVM): re-check it in Shared folders"
+// identityText / swappedText are the messages of a device-only and of an
+// inode mismatch (the fixer's own refusals use the same words).
+const (
+	identityText = folderfix.DeviceChangedText
+	swappedText  = folderfix.SwappedText
+)
+
+// identityDetail is a probe's detail for a root that isn't the stored one.
+func identityDetail(dev, ino, storedDev, storedIno uint64) string {
+	if ino == storedIno {
+		return fmt.Sprintf("the folder's device number changed (device %d, stored %d; inode %d)", dev, storedDev, ino)
+	}
+	return fmt.Sprintf("the folder is another directory (device %d inode %d, stored %d %d)", dev, ino, storedDev, storedIno)
+}
 
 // PreviewRecheck probes and scans folder id's path (the path rules again,
 // no symlink component, a refused filesystem 409) under its folder lock
@@ -75,8 +98,10 @@ func (h *Hub) PreviewRecheck(ctx context.Context, id string) (*IdentityCheck, er
 // lockApp: no up, apply or undo of a user runs meanwhile), refuses while
 // an interrupted operation awaits recovery, and saves under mu only if
 // the definition is still the one previewed. Audited folder.update
-// ("recheck …").
-func (h *Hub) ApplyRecheck(ctx context.Context, id, planHash, actor string) (view *FolderView, err error) {
+// ("recheck …"). A different directory (another inode) needs
+// confirmDifferent (400 otherwise) and clears last_apply; a device-only
+// change keeps last_apply, recording the root its snapshot names.
+func (h *Hub) ApplyRecheck(ctx context.Context, id, planHash string, confirmDifferent bool, actor string) (view *FolderView, err error) {
 	detail := ""
 	defer func() {
 		if detail != "" || err != nil {
@@ -110,6 +135,9 @@ func (h *Hub) ApplyRecheck(ctx context.Context, id, planHash, actor string) (vie
 	if planHash == "" || subtle.ConstantTimeCompare([]byte(c.Hash), []byte(planHash)) != 1 {
 		return nil, statusErr(http.StatusConflict, "shared folder %s changed since the re-check's preview: re-check it again", id)
 	}
+	if c.DifferentDirectory && !confirmDifferent {
+		return nil, statusErr(http.StatusBadRequest, "shared folder %s: %s; storing it needs a second confirmation (confirm_different_directory) and forgets the last apply", id, swappedText)
+	}
 
 	h.mu.Lock()
 	f, ok := h.st.Folders[id]
@@ -127,6 +155,17 @@ func (h *Hub) ApplyRecheck(ctx context.Context, id, planHash, actor string) (vie
 		return nil, err
 	}
 	prev := f
+	cleared := false
+	switch {
+	case c.DifferentDirectory && f.LastApply != nil:
+		// Its snapshot is of the old directory: undo is meaningless.
+		f.LastApply, cleared = nil, true
+	case c.Changed && f.LastApply != nil && f.LastApply.RootDev == 0 && f.LastApply.RootIno == 0:
+		// Follow-up (a): the snapshot names the root as it was.
+		la := *f.LastApply
+		la.RootDev, la.RootIno = c.Old.Dev, c.Old.Ino
+		f.LastApply = &la
+	}
 	f.Dev, f.Ino, f.MountRoot = c.New.Dev, c.New.Ino, c.New.MountRoot
 	h.st.Folders[id] = f
 	if err := h.saveStateLocked(); err != nil {
@@ -141,6 +180,12 @@ func (h *Hub) ApplyRecheck(ctx context.Context, id, planHash, actor string) (vie
 	if c.Changed {
 		detail = fmt.Sprintf("recheck device %d→%d inode %d→%d mount_root %s→%s",
 			c.Old.Dev, c.New.Dev, c.Old.Ino, c.New.Ino, clip(c.Old.MountRoot, 200), clip(c.New.MountRoot, 200))
+		if c.DifferentDirectory {
+			detail += " different_directory"
+		}
+		if cleared {
+			detail += " last_apply cleared"
+		}
 	}
 	h.fillLastOp(&v)
 	return &v, nil
@@ -190,6 +235,7 @@ func (h *Hub) computeRecheck(ctx context.Context, id string) (*IdentityCheck, er
 		New:    FolderIdentity{Dev: rep.Dev, Ino: rep.Ino, MountRoot: rep.MountRoot},
 		FSType: rep.FSType, Files: rep.Files, Dirs: rep.Dirs, Partial: rep.Partial}
 	c.Changed = c.Old != c.New
+	c.DifferentDirectory = c.Old.Ino != c.New.Ino
 	show := func(i FolderIdentity) string {
 		return fmt.Sprintf("device %d, inode %d, mounted from `%s`", i.Dev, i.Ino, i.MountRoot)
 	}
@@ -204,8 +250,14 @@ func (h *Hub) computeRecheck(ctx context.Context, id string) (*IdentityCheck, er
 		c.Lines = append(c.Lines, "The folder's identity is as stored: nothing to re-check.")
 	case c.Old.Ino == c.New.Ino && c.Old.MountRoot == c.New.MountRoot:
 		c.Lines = append(c.Lines, "Only the device number changed: typical after a reboot on btrfs or LVM. Re-checking stores the new one; nothing on disk changes.")
+	case c.DifferentDirectory:
+		l := "The inode changed: " + swappedText + ". Store it only if you know why (a restored backup, a re-created volume): it needs a second confirmation; nothing on disk changes, but the apps that use the folder will mount what is there now."
+		if f.LastApply != nil {
+			l += " The last apply is forgotten: Undo last fix is no longer offered (its snapshot is of the old directory)."
+		}
+		c.Lines = append(c.Lines, l)
 	default:
-		c.Lines = append(c.Lines, "The inode or the mount root changed too: the path may now be another directory. Store it only if you know why (a restored backup, a re-created volume); nothing on disk changes, but the apps that use the folder will mount what is there now.")
+		c.Lines = append(c.Lines, "The mount root changed (same device number and inode): the path may now be mounted from elsewhere. Store it only if you know why; nothing on disk changes.")
 	}
 	if len(users) > 0 {
 		c.Lines = append(c.Lines, "Used by "+strings.Join(users, ", ")+": none of them is restarted.")

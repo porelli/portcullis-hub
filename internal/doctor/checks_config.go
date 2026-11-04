@@ -767,13 +767,20 @@ func (folderReachableAboveCheck) Run(in *Inputs) []Finding {
 	return out
 }
 
-// changedSteps are folder_changed's steps; a root with another device or
-// inode (H2) may be the same directory after a reboot on btrfs/LVM.
+// changedSteps are folder_changed's steps: a root whose device number
+// changed may be the same directory after a reboot on btrfs/LVM (H2); a
+// root with another inode is another directory (follow-up (b)).
 func changedSteps(c ChangeIn, where string) []string {
-	if strings.HasPrefix(c.Detail, "the folder is another directory") {
+	switch {
+	case strings.HasPrefix(c.Detail, "the folder's device number changed"):
 		return []string{
-			"If the host rebooted and only the device number changed (btrfs subvolumes, LVM), the folder is the same directory: re-check its identity (Settings → Shared folders → Edit → Re-check identity), then enable " + c.Instance + " again.",
-			"Otherwise check what replaced " + where + " on the host and put the real directory back (no symlink).",
+			"If the host rebooted (btrfs subvolumes, LVM), the folder is the same directory with a new device number: re-check its identity (Settings → Shared folders → Re-check identity), then enable " + c.Instance + " again.",
+			"Otherwise check what is mounted at " + where + " on the host.",
+		}
+	case strings.HasPrefix(c.Detail, "the folder is another directory"):
+		return []string{
+			"The folder's root is a different directory now; if you didn't move it, someone may have swapped it: check on the host what is at " + where + " and who replaced it.",
+			"Put the real directory back. Only if you moved it on purpose, re-check its identity (Settings → Shared folders → Re-check identity: it asks for a second confirmation and forgets the last apply).",
 		}
 	}
 	return []string{"On the host, check what replaced " + where + " and put the real directory back (no symlink).",

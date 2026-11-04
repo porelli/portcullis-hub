@@ -1033,6 +1033,20 @@ func (h *Hub) checkFoldersAtStart() error {
 
 // auditFolder records a folder operation after mu is released; a 4xx is
 // "refused".
+// rawErrorText is err's text before its own withSecrets pass(es): a
+// top-level secretsErr redacts with its set alone, which would cut a
+// longer secret of another set before the merged pass (follow-up (c)).
+// Its set is in secretsOf(err), so the caller's one pass covers it.
+func rawErrorText(err error) string {
+	for {
+		se, ok := err.(*secretsErr)
+		if !ok {
+			return err.Error()
+		}
+		err = se.err
+	}
+}
+
 func (h *Hub) auditFolder(actor, action, id, detail string, err error, instances ...string) {
 	h.mu.RLock()
 	a := h.audit
@@ -1051,16 +1065,18 @@ func (h *Hub) auditFolder(actor, action, id, detail string, err error, instances
 		// Redacted like the op record (H3): the error's own redaction
 		// set, then every affected instance's and the folder's users'
 		// secrets (stored secret settings, secret-looking env values).
-		msg := redactValues(err.Error(), secretsOf(err))
+		// One pass over the merged sets (longest first holds across
+		// them, follow-up (c)).
+		vals := secretsOf(err)
 		seen := map[string]bool{}
 		for _, inst := range append(slices.Clone(instances), users...) {
 			if seen[inst] || !templates.ValidID(inst) {
 				continue
 			}
 			seen[inst] = true
-			msg = h.secretRedactor(inst)(msg)
+			vals = append(vals, h.redactionSet(inst)...)
 		}
-		e.Result, e.Error = "error", clipRunes(msg, 600)
+		e.Result, e.Error = "error", clipRunes(redactValues(rawErrorText(err), vals), 600)
 		var se *StatusError
 		if errors.As(err, &se) && se.Status < 500 {
 			e.Result = "refused"

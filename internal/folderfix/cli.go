@@ -35,9 +35,9 @@ const SnapshotName = "snapshot.ndjson.gz"
 var modeFlags = map[string][]string{
 	"probe":    {"root", "rel", "create", "sub"},
 	"scan":     {"root", "expect-dev", "expect-ino", "expect-mount-root", "gid", "files", "owner", "principal", "children", "max-entries", "max-time"},
-	"snapshot": {"root", "expect-dev", "expect-ino", "expect-mount-root", "gid", "files", "owner", "out", "kind", "in"},
+	"snapshot": {"root", "expect-dev", "expect-ino", "expect-mount-root", "gid", "files", "owner", "out", "kind", "in", "expect-snapshot-root"},
 	"apply":    {"root", "expect-dev", "expect-ino", "expect-mount-root", "expect-digest", "gid", "files", "owner", "expect", "mkdir"},
-	"restore":  {"root", "expect-dev", "expect-ino", "expect-mount-root", "gid", "in", "dry-run"},
+	"restore":  {"root", "expect-dev", "expect-ino", "expect-mount-root", "gid", "in", "dry-run", "expect-snapshot-root"},
 }
 
 // Args is the argv (after "hub folderfix") for a run: the only form the Hub
@@ -62,6 +62,9 @@ func Args(mode string, o Options, x ArgsExtra) []string {
 	}
 	if o.ExpectMountRoot != "" {
 		add("expect-mount-root", o.ExpectMountRoot)
+	}
+	if o.SnapshotRootDev != 0 || o.SnapshotRootIno != 0 {
+		add("expect-snapshot-root", strconv.FormatUint(o.SnapshotRootDev, 10)+":"+strconv.FormatUint(o.SnapshotRootIno, 10))
 	}
 	if o.Target.GID != 0 {
 		add("gid", strconv.Itoa(o.Target.GID))
@@ -200,6 +203,7 @@ func parseArgs(args []string) (string, Options, ArgsExtra, error) {
 	dryRun := fs.Bool("dry-run", false, "")
 	expect := fs.Int64("expect", -1, "")
 	digest := fs.String("expect-digest", "", "")
+	snapRoot := fs.String("expect-snapshot-root", "", "")
 	fs.Var(&mkdirs, "mkdir", "")
 	if err := fs.Parse(args[1:]); err != nil {
 		return "", o, x, err
@@ -242,6 +246,15 @@ func parseArgs(args []string) (string, Options, ArgsExtra, error) {
 		return "", o, x, errors.New("--expect-dev and --expect-ino go together")
 	}
 	o.ExpectDev, o.ExpectIno, o.ExpectMountRoot = *dev, *ino, *mroot
+	if *snapRoot != "" {
+		ds, is, ok := strings.Cut(*snapRoot, ":")
+		d, err1 := strconv.ParseUint(ds, 10, 64)
+		i, err2 := strconv.ParseUint(is, 10, 64)
+		if !ok || err1 != nil || err2 != nil || d == 0 || i == 0 {
+			return "", o, x, fmt.Errorf("--expect-snapshot-root %q: want <dev>:<ino>", clip(*snapRoot, 40))
+		}
+		o.SnapshotRootDev, o.SnapshotRootIno = d, i
+	}
 	if *mroot != "" && !strings.HasPrefix(*mroot, "/") {
 		return "", o, x, errors.New("--expect-mount-root: want an absolute path")
 	}
@@ -291,8 +304,8 @@ func parseArgs(args []string) (string, Options, ArgsExtra, error) {
 		x.Out, x.Kind = *out, *kind
 		switch *kind {
 		case "apply":
-			if *in != "" {
-				return "", o, x, errors.New("--in goes with --kind=undo")
+			if *in != "" || o.SnapshotRootDev != 0 {
+				return "", o, x, errors.New("--in and --expect-snapshot-root go with --kind=undo")
 			}
 		case "undo":
 			if err := cleanAbs("in", *in); err != nil {

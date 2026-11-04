@@ -43,6 +43,9 @@ type fakeDisk struct {
 	// scanDev, if set, is the device a scan reports instead of the
 	// path's (the path changed between probe and scan).
 	scanDev uint64
+	// refuseSub: subpaths (host paths) a probe refuses (exit 2: "not a
+	// directory"), the subpaths before them reported.
+	refuseSub map[string]bool
 	// onScan, if set, runs (outside mu and the disk's lock) before a
 	// scan answers: another request racing this one.
 	onScan func(src string)
@@ -126,6 +129,11 @@ func (d *fakeDisk) run(s docker.RunSpec, _ func(io.Reader) error) (*docker.RunRe
 						sp.Symlink = path.Join(parts[:i+1]...)
 						break
 					}
+				}
+				if d.refuseSub[path.Join(src, rel, sub)] {
+					p.Errors = []string{sub + " is not a directory"}
+					b, _ := json.Marshal(p)
+					return &docker.RunResult{ExitCode: 2, Stdout: append(b, '\n')}, nil
 				}
 				if e := d.paths[path.Join(src, rel, sub)]; e != nil && sp.Symlink == "" {
 					sp.Exists, sp.Dev, sp.Ino = true, e.dev, e.ino

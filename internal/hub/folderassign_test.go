@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -131,6 +132,26 @@ type assignDisk struct {
 	applyEntered chan struct{}
 	// argv of the last run of each mode.
 	argv map[string][]string
+	// snapDev: the root device the last apply snapshot recorded; restore
+	// and the undo snapshot refuse another expected snapshot root, like
+	// the fixer's checkHeader.
+	snapDev uint64
+}
+
+// snapRootOK: the run's expected snapshot root device (the flag, else the
+// folder's current one) is the one the apply snapshot recorded.
+func (d *assignDisk) snapRootOK(cmd []string, cur uint64) bool {
+	d.amu.Lock()
+	defer d.amu.Unlock()
+	if d.snapDev == 0 {
+		return true
+	}
+	want := cur
+	if v, ok := argValue(cmd, "expect-snapshot-root"); ok {
+		ds, _, _ := strings.Cut(v, ":")
+		want, _ = strconv.ParseUint(ds, 10, 64)
+	}
+	return want == d.snapDev
 }
 
 func (d *assignDisk) log(e string) {
@@ -230,7 +251,13 @@ func (d *assignDisk) run(s docker.RunSpec, out func(io.Reader) error) (*docker.R
 			owner = o
 		}
 		plan := d.plan(e)
+		if kind == "undo" && !d.snapRootOK(s.Cmd, e.dev) {
+			return reply(folderfix.Report{Version: 1, Mode: "snapshot", Errors: []string{"the snapshot is of another directory"}}, 2)
+		}
 		d.amu.Lock()
+		if kind == "apply" {
+			d.snapDev = e.dev
+		}
 		if d.snapHeader != nil {
 			gid, files, owner = d.snapHeader(gid, files, owner)
 		}
@@ -274,6 +301,9 @@ func (d *assignDisk) run(s docker.RunSpec, out func(io.Reader) error) (*docker.R
 		}
 		return reply(rep, d.applyExit)
 	case "restore":
+		if !d.snapRootOK(s.Cmd, d.entry(src).dev) {
+			return reply(folderfix.Report{Version: 1, Mode: "restore", Errors: []string{"the snapshot is of another directory"}}, 2)
+		}
 		rep := d.restore
 		rep.Version, rep.Mode = 1, "restore"
 		d.amu.Lock()
@@ -1394,21 +1424,21 @@ func TestRecheckFolderIdentity(t *testing.T) {
 	if fo, _ := storedFolder(f, "media"); fo.Dev != 2049 {
 		t.Fatal("the preview stored the identity")
 	}
-	if _, err := f.h.ApplyRecheck(ctx, "media", strings.Repeat("0", 64), "admin"); statusOf(err) != 409 {
+	if _, err := f.h.ApplyRecheck(ctx, "media", strings.Repeat("0", 64), false, "admin"); statusOf(err) != 409 {
 		t.Errorf("stale hash = %v", err)
 	}
 	// Busy: the folder's lock, or a user's app lock.
 	unlock, _ := f.h.folderLock("media")
-	if _, err := f.h.ApplyRecheck(ctx, "media", chk.Hash, "admin"); statusOf(err) != 409 {
+	if _, err := f.h.ApplyRecheck(ctx, "media", chk.Hash, false, "admin"); statusOf(err) != 409 {
 		t.Errorf("folder busy = %v", err)
 	}
 	unlock()
 	unlockApp, _ := f.h.lockApp("immich")
-	if _, err := f.h.ApplyRecheck(ctx, "media", chk.Hash, "admin"); statusOf(err) != 409 {
+	if _, err := f.h.ApplyRecheck(ctx, "media", chk.Hash, false, "admin"); statusOf(err) != 409 {
 		t.Errorf("app busy = %v", err)
 	}
 	unlockApp()
-	v, err := f.h.ApplyRecheck(ctx, "media", chk.Hash, "admin")
+	v, err := f.h.ApplyRecheck(ctx, "media", chk.Hash, false, "admin")
 	if err != nil || v == nil || v.ID != "media" {
 		t.Fatalf("apply = %+v %v", v, err)
 	}
@@ -1429,7 +1459,7 @@ func TestRecheckFolderIdentity(t *testing.T) {
 	d.mu.Lock()
 	d.paths["/srv/media"].dev = 2051
 	d.mu.Unlock()
-	if _, err := f.h.ApplyRecheck(ctx, "media", chk.Hash, "admin"); statusOf(err) != 409 {
+	if _, err := f.h.ApplyRecheck(ctx, "media", chk.Hash, false, "admin"); statusOf(err) != 409 {
 		t.Errorf("changed since the preview = %v", err)
 	}
 	if _, err := f.h.PreviewRecheck(ctx, "nope"); statusOf(err) != 404 {
@@ -1499,6 +1529,118 @@ func TestRecoveryKeepsUndoTargetBeforeApply(t *testing.T) {
 	}
 	if rec := f.h.LastOp(opKeyFolder("media")); rec == nil || !strings.Contains(rec.Error, "nothing on disk changed") {
 		t.Errorf("record = %+v", rec)
+	}
+}
+
+// Follow-up (a): undo still works after a device-only re-check — the
+// restore runs get the snapshot's recorded root identity as the expected
+// one (--expect-snapshot-root), the walk root the current one.
+func TestUndoAfterDeviceOnlyRecheck(t *testing.T) {
+	f, d, _ := assignFixture(t)
+	ctx := context.Background()
+	if _, rec := assign(t, f, "media", libraryReq); !rec.OK {
+		t.Fatal(rec)
+	}
+	before, _ := storedFolder(f, "media")
+	d.mu.Lock()
+	d.paths["/srv/media"].dev = 2050
+	d.mu.Unlock()
+	if _, err := f.h.PreviewUndo(ctx, "media"); statusOf(err) != 409 {
+		t.Fatalf("undo before the re-check = %v", err)
+	}
+	chk, err := f.h.PreviewRecheck(ctx, "media")
+	if err != nil || chk.DifferentDirectory {
+		t.Fatalf("preview = %+v %v", chk, err)
+	}
+	if _, err := f.h.ApplyRecheck(ctx, "media", chk.Hash, false, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	fo, _ := storedFolder(f, "media")
+	if fo.LastApply == nil || fo.LastApply.Snapshot != before.LastApply.Snapshot || fo.LastApply.RootDev != 2049 || fo.LastApply.RootIno != before.Ino {
+		t.Fatalf("last apply = %+v", fo.LastApply)
+	}
+	d.restore = folderfix.Report{Changed: 12720}
+	plan, err := f.h.PreviewUndo(ctx, "media")
+	if err != nil {
+		t.Fatalf("undo preview after a device-only re-check: %v", err)
+	}
+	want := "2049:" + strconv.FormatUint(before.Ino, 10)
+	if v, _ := argValue(d.Argv("restore"), "expect-snapshot-root"); v != want {
+		t.Errorf("dry run --expect-snapshot-root = %q, want %q", v, want)
+	}
+	if v, _ := argValue(d.Argv("restore"), "expect-dev"); v != "2050" {
+		t.Errorf("dry run --expect-dev = %q", v)
+	}
+	if _, err := f.h.StartUndo("media", plan.Hash, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if rec := waitFolderOp(t, f, "media"); !rec.OK {
+		t.Fatalf("undo = %+v", rec)
+	}
+	for _, mode := range []string{"restore", "snapshot"} {
+		if v, _ := argValue(d.Argv(mode), "expect-snapshot-root"); v != want {
+			t.Errorf("%s --expect-snapshot-root = %q", mode, v)
+		}
+	}
+}
+
+// Follow-up (b): another inode is another directory: its own wording
+// everywhere, and a re-check that needs a second confirmation and forgets
+// the last apply.
+func TestRecheckDifferentDirectory(t *testing.T) {
+	f, d, audit := assignFixture(t)
+	ctx := context.Background()
+	if _, rec := assign(t, f, "media", libraryReq); !rec.OK {
+		t.Fatal(rec)
+	}
+	d.mu.Lock()
+	d.paths["/srv/media"].ino = 777
+	d.mu.Unlock()
+	if _, err := f.h.PreviewUndo(ctx, "media"); statusOf(err) != 409 || !strings.Contains(err.Error(), swappedText) || strings.Contains(err.Error(), "reboot") {
+		t.Errorf("undo = %v", err)
+	}
+	if err := f.h.Enable("immich"); statusOf(err) != 409 || !strings.Contains(err.Error(), swappedText) {
+		t.Errorf("enable = %v", err)
+	}
+	chk, err := f.h.PreviewRecheck(ctx, "media")
+	if err != nil || !chk.Changed || !chk.DifferentDirectory || chk.New.Ino != 777 {
+		t.Fatalf("preview = %+v %v", chk, err)
+	}
+	text := strings.Join(chk.Lines, "\n")
+	if !strings.Contains(text, swappedText) || !strings.Contains(text, "Undo last fix") {
+		t.Errorf("lines:\n%s", text)
+	}
+	if _, err := f.h.ApplyRecheck(ctx, "media", chk.Hash, false, "admin"); statusOf(err) != 400 || !strings.Contains(err.Error(), "confirm") {
+		t.Errorf("apply without the second confirmation = %v", err)
+	}
+	if fo, _ := storedFolder(f, "media"); fo.Ino == 777 {
+		t.Fatal("stored without the confirmation")
+	}
+	if _, err := f.h.ApplyRecheck(ctx, "media", chk.Hash, true, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if fo, _ := storedFolder(f, "media"); fo.Ino != 777 || fo.LastApply != nil {
+		t.Errorf("stored = %+v", fo)
+	}
+	if a := auditOf(audit, "folder.update"); len(a) == 0 || !strings.Contains(a[len(a)-1], "last_apply cleared") {
+		t.Errorf("audit = %q", a)
+	}
+}
+
+// Follow-up (c): one redaction pass over the merged sets — a shorter
+// secret of one set never cuts a longer one of another.
+func TestFolderAuditOverlappingSecrets(t *testing.T) {
+	f, _, audit := assignFixture(t)
+	enable(t, f, "immich")
+	f.h.mu.Lock()
+	err := setEnvVars(f.h.envPath("immich"), map[string]string{"API_TOKEN": "hunter2-long-secret"}, false)
+	f.h.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.h.auditFolder("admin", "folder.assign", "media", "", withSecrets(errors.New("PASSWORD=hunter2-long-secret"), []string{"hunter2"}), "immich")
+	if e := audit.last(); e.Error != "PASSWORD=[redacted]" {
+		t.Errorf("audit error = %q", e.Error)
 	}
 }
 

@@ -712,7 +712,7 @@ func (h *Hub) diskPlan(ctx context.Context, id string, c *assignCalc) error {
 		return errFolderChanged(f.Name)
 	}
 	if pr.Dev != f.Dev || pr.Ino != f.Ino {
-		return errFolderIdentity(f.Name)
+		return errFolderIdentity(f.Name, f.Ino, pr.Ino)
 	}
 	subs := map[string]bool{}
 	for _, up := range c.plan.Uses {
@@ -1638,9 +1638,29 @@ func (h *Hub) snapshotRun(ctx context.Context, rel string, r fixerRun) (*folderf
 // restore would rewrite (ToRestore) and leave alone (ChangedSince), with
 // nothing written.
 func (h *Hub) restoreDryRun(ctx context.Context, id, rel string, f state.Folder) (*folderfix.Report, error) {
-	return h.snapshotRun(ctx, rel, fixerRun{Mode: "restore", Folder: id, Source: f.Path,
-		Opts:  folderfix.Options{ExpectDev: f.Dev, ExpectIno: f.Ino, ExpectMountRoot: f.MountRoot, Target: folderfix.Target{GID: f.GID}},
+	o := folderfix.Options{ExpectDev: f.Dev, ExpectIno: f.Ino, ExpectMountRoot: f.MountRoot, Target: folderfix.Target{GID: f.GID}}
+	withSnapshotRoot(&o, f)
+	return h.snapshotRun(ctx, rel, fixerRun{Mode: "restore", Folder: id, Source: f.Path, Opts: o,
 		Extra: folderfix.ArgsExtra{DryRun: true}})
+}
+
+// snapshotRoot is the root identity f's last apply snapshot names: the
+// one recorded at a device-only re-check since (follow-up (a)), else the
+// folder's own.
+func snapshotRoot(f state.Folder) (dev, ino uint64) {
+	if la := f.LastApply; la != nil && (la.RootDev != 0 || la.RootIno != 0) {
+		return la.RootDev, la.RootIno
+	}
+	return f.Dev, f.Ino
+}
+
+// withSnapshotRoot: a restore or undo snapshot of f expects the snapshot
+// header to name snapshotRoot (passed only when it differs from the
+// folder's own).
+func withSnapshotRoot(o *folderfix.Options, f state.Folder) {
+	if dev, ino := snapshotRoot(f); dev != f.Dev || ino != f.Ino {
+		o.SnapshotRootDev, o.SnapshotRootIno = dev, ino
+	}
 }
 
 // computeUndo builds the undo plan from last_apply's snapshot (404
@@ -1681,7 +1701,8 @@ func (h *Hub) computeUndo(ctx context.Context, id string) (*undoCalc, error) {
 	if err != nil {
 		return nil, err
 	}
-	if hdr.Kind != "apply" || hdr.GID != f.GID || hdr.RootDev != f.Dev || hdr.RootIno != f.Ino {
+	sdev, sino := snapshotRoot(f)
+	if hdr.Kind != "apply" || hdr.GID != f.GID || hdr.RootDev != sdev || hdr.RootIno != sino || sino != f.Ino {
 		return nil, statusErr(http.StatusConflict, "permissions snapshot %s is not of this folder as it is now (kind %s, gid %d): it can't be undone", u.apply.Snapshot, hdr.Kind, hdr.GID)
 	}
 	ownerOK := (hdr.OwnerUID == nil) == (u.apply.OwnerUID == nil) && (hdr.OwnerUID == nil || *hdr.OwnerUID == *u.apply.OwnerUID)
@@ -1701,7 +1722,7 @@ func (h *Hub) computeUndo(ctx context.Context, id string) (*undoCalc, error) {
 		return nil, errFolderChanged(f.Name)
 	}
 	if pr.Dev != f.Dev || pr.Ino != f.Ino {
-		return nil, errFolderIdentity(f.Name)
+		return nil, errFolderIdentity(f.Name, f.Ino, pr.Ino)
 	}
 	dry, err := h.restoreDryRun(ctx, id, u.apply.Snapshot, f)
 	if err != nil {
@@ -1876,6 +1897,7 @@ func (h *Hub) runUndo(id string, u *undoCalc) (map[string]string, []string, stri
 		return result, nil, detail(), fail(err, false)
 	}
 	base := folderfix.Options{ExpectDev: f.Dev, ExpectIno: f.Ino, ExpectMountRoot: f.MountRoot, Target: u.target}
+	withSnapshotRoot(&base, f)
 	saved := ""
 	urep, err := h.snapshotRun(ctx, u.apply.Snapshot, fixerRun{Mode: "snapshot", Folder: id, Source: f.Path, Opts: base, Extra: folderfix.ArgsExtra{Kind: "undo"},
 		Out: func(r io.Reader) error {
@@ -1898,6 +1920,7 @@ func (h *Hub) runUndo(id string, u *undoCalc) (map[string]string, []string, stri
 		return result, warnings, detail(), fail(statusErr(http.StatusInternalServerError, "recording the undo snapshot: %v", err), false)
 	}
 	restoreOpts := folderfix.Options{ExpectDev: f.Dev, ExpectIno: f.Ino, ExpectMountRoot: f.MountRoot, Target: folderfix.Target{GID: f.GID}}
+	withSnapshotRoot(&restoreOpts, f)
 	rep, err := h.snapshotRun(ctx, u.apply.Snapshot, fixerRun{Mode: "restore", Folder: id, Source: f.Path, Opts: restoreOpts})
 	warnings = append(warnings, prefixed("restore", skippedWarnings(rep))...)
 	if err != nil {

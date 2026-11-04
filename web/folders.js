@@ -621,8 +621,10 @@
     window.apiPost('/api/folders/' + enc(id) + '/recheck/preview', {}).then(plan => {
       if (dialog !== ctx) return;
       ctx.plan = plan;
-      dialogBox().querySelector('[data-fd-plan]').innerHTML = planHtml(plan);
-      dialogBox().querySelector('[data-fd-apply]').disabled = !plan.changed;
+      // Another inode is another directory: a second, explicit confirm.
+      dialogBox().querySelector('[data-fd-plan]').innerHTML = planHtml(plan) + (plan.different_directory
+        ? '<label class="ps-check public-warn"><input type="checkbox" data-fd-recheck-confirm> This is another directory, and I want the folder to be it (the last apply is forgotten)</label>' : '');
+      dialogBox().querySelector('[data-fd-apply]').disabled = !plan.changed || !!plan.different_directory;
     }).catch(err => { if (dialog === ctx) dialogBox().querySelector('[data-fd-plan]').innerHTML = window.errorBox(err); });
   }
 
@@ -632,7 +634,8 @@
     const out = box.querySelector('[data-fd-op]');
     ap.disabled = true;
     try {
-      await window.apiPost('/api/folders/' + enc(ctx.folder) + '/recheck/apply', { plan_hash: ctx.plan.plan_hash });
+      const confirm = box.querySelector('[data-fd-recheck-confirm]');
+      await window.apiPost('/api/folders/' + enc(ctx.folder) + '/recheck/apply', { plan_hash: ctx.plan.plan_hash, confirm_different_directory: !!(confirm && confirm.checked) });
       if (dialog !== ctx) return;
       out.innerHTML = '<div class="inst-ok">The folder\'s new identity is stored.</div>';
       ctx.plan = null;
@@ -696,6 +699,10 @@
     });
     m.addEventListener('change', e => {
       const ctx = dialog;
+      if (ctx && ctx.kind === 'recheck' && e.target.matches('[data-fd-recheck-confirm]')) {
+        dialogBox().querySelector('[data-fd-apply]').disabled = !e.target.checked || !ctx.plan;
+        return;
+      }
       if (ctx && ctx.kind === 'assign' && e.target.matches('[data-fd-awrite]')) {
         readAssignUses(ctx);
         // The plan no longer matches the uses until the preview is back.

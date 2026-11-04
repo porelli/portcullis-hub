@@ -28,11 +28,18 @@ type Options struct {
 	// ExpectDigest (apply): "" = unchecked; else the plan's Digest must be
 	// exactly this (the snapshot's entries, M5).
 	ExpectDigest string
-	Target       Target
-	Principals   []Principal
-	Children     bool // per first-level child owner counts
-	MaxEntries   int64
-	MaxTime      time.Duration
+	// SnapshotRootDev / SnapshotRootIno (restore, undo snapshot): 0 = the
+	// apply snapshot's header must name the walk root itself; else it
+	// must name exactly these — the root as it was when the snapshot was
+	// taken, before a device-only identity re-check — and the inode must
+	// be the walk root's (follow-up (a)).
+	SnapshotRootDev uint64
+	SnapshotRootIno uint64
+	Target          Target
+	Principals      []Principal
+	Children        bool // per first-level child owner counts
+	MaxEntries      int64
+	MaxTime         time.Duration
 }
 
 // maxSample is the number of relative paths a Count keeps.

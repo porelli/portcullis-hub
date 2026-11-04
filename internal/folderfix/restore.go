@@ -36,8 +36,17 @@ func (w *walker) checkHeader(h snapHeader) error {
 	if h.Rules != planRules {
 		return refuse("the snapshot was made under rules %d, this fixer has %d", h.Rules, planRules)
 	}
-	if h.RootDev != w.root.Dev || h.RootIno != w.root.Ino {
-		return refuse("the snapshot is of another directory (device %d inode %d, the folder is %d/%d)", h.RootDev, h.RootIno, w.root.Dev, w.root.Ino)
+	wantDev, wantIno := w.root.Dev, w.root.Ino
+	if w.o.SnapshotRootDev != 0 || w.o.SnapshotRootIno != 0 {
+		// A device-only re-check since the snapshot: the same directory
+		// (inode), recorded on its old device number.
+		if w.o.SnapshotRootIno != w.root.Ino {
+			return refuse("the snapshot's recorded root inode %d is not the folder's %d: it is of another directory", w.o.SnapshotRootIno, w.root.Ino)
+		}
+		wantDev, wantIno = w.o.SnapshotRootDev, w.o.SnapshotRootIno
+	}
+	if h.RootDev != wantDev || h.RootIno != wantIno {
+		return refuse("the snapshot is of another directory (device %d inode %d, the folder is %d/%d)", h.RootDev, h.RootIno, wantDev, wantIno)
 	}
 	if uint32(h.GID) != w.t.GID {
 		return refuse("the snapshot is for gid %d, the folder's is %d", h.GID, w.t.GID)

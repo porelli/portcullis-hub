@@ -260,10 +260,18 @@ func TestFolderChanged(t *testing.T) {
 	// H2: a root with another device or inode points at the re-check.
 	got = of(t, "folder_changed", &Inputs{
 		Folders: []FolderIn{{ID: "media", Name: "Family media", Path: "/srv/media", GID: 60001}},
-		Changes: []ChangeIn{{Instance: "jellyfin", Key: "movies", Folder: "media", Detail: "the folder is another directory (device 50 inode 256, stored 49 256)"}},
+		Changes: []ChangeIn{{Instance: "jellyfin", Key: "movies", Folder: "media", Detail: "the folder's device number changed (device 50, stored 49; inode 256)"}},
 	})
 	if len(got) != 1 || !strings.Contains(got[0].Steps[0], "Re-check identity") {
 		t.Fatalf("identity steps = %+v", got)
+	}
+	// Follow-up (b): another inode is another directory: no reboot hint.
+	got = of(t, "folder_changed", &Inputs{
+		Folders: []FolderIn{{ID: "media", Name: "Family media", Path: "/srv/media", GID: 60001}},
+		Changes: []ChangeIn{{Instance: "jellyfin", Key: "movies", Folder: "media", Detail: "the folder is another directory (device 49 inode 300, stored 49 256)"}},
+	})
+	if len(got) != 1 || !strings.Contains(got[0].Steps[0], "someone may have swapped it") || strings.Contains(strings.Join(got[0].Steps, " "), "reboot") {
+		t.Fatalf("swapped steps = %+v", got)
 	}
 }
 

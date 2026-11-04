@@ -629,13 +629,25 @@ func (h *Hub) folderProbesLocked(t *templates.Template) ([]folderProbe, error) {
 // its root is a directory with another device, inode or mount root than
 // stored — often a reboot (H2), so the message points at the re-check.
 type folderChangedError struct {
-	name     string
-	identity bool
+	name string
+	kind changeKind
 }
 
+// changeKind: what changed about a folder root.
+type changeKind int
+
+const (
+	changeOnDisk   changeKind = iota // a symlink, missing: re-apply
+	changeIdentity                   // the device number: a reboot, re-check
+	changeSwapped                    // the inode: another directory
+)
+
 func (e folderChangedError) Error() string {
-	if e.identity {
+	switch e.kind {
+	case changeIdentity:
 		return "shared folder " + e.name + ": " + identityText
+	case changeSwapped:
+		return "shared folder " + e.name + ": " + swappedText
 	}
 	return "shared folder " + e.name + " changed on disk: re-apply it"
 }
@@ -679,11 +691,22 @@ func (h *Hub) probeFolders(ctx context.Context, ps []folderProbe, after bool) (*
 		}
 		rep, err := h.runProbe(ctx, fixerRun{Mode: "probe", Folder: fid, Source: first.root, Extra: folderfix.ArgsExtra{Rel: first.rel, Subs: subs}})
 		if err != nil {
+			// Follow-up (d): a refusal while walking a subpath is that
+			// subpath's value's (the report lists the subpaths before it).
+			blame := first
+			if rep != nil && rep.Exists && rep.Symlink == "" && len(rep.Subs) < len(subs) {
+				for _, i := range idx {
+					if ps[i].sub == subs[len(rep.Subs)] {
+						blame = &ps[i]
+						break
+					}
+				}
+			}
 			var se *StatusError
 			if errors.As(err, &se) && se.Status == http.StatusConflict {
-				return first, err.Error(), errFolderChanged(first.name)
+				return blame, err.Error(), errFolderChanged(blame.name)
 			}
-			return first, err.Error(), err
+			return blame, err.Error(), err
 		}
 		switch {
 		case rep.Symlink != "":
@@ -691,7 +714,7 @@ func (h *Hub) probeFolders(ctx context.Context, ps []folderProbe, after bool) (*
 		case !rep.Exists:
 			return first, "the folder is missing", errFolderChanged(first.name)
 		case rep.Dev != first.dev || rep.Ino != first.ino:
-			return first, fmt.Sprintf("the folder is another directory (device %d inode %d, stored %d %d)", rep.Dev, rep.Ino, first.dev, first.ino), errFolderIdentity(first.name)
+			return first, identityDetail(rep.Dev, rep.Ino, first.dev, first.ino), errFolderIdentity(first.name, first.ino, rep.Ino)
 		case len(rep.Subs) != len(subs):
 			return first, "the probe reported no subpaths", statusErr(http.StatusInternalServerError, "shared folder fixer (probe): %d subpaths reported, %d asked", len(rep.Subs), len(subs))
 		}

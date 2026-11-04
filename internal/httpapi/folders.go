@@ -45,7 +45,7 @@ const (
 	assignUsage       = `{"uses": [{"instance": "<id>", "key": "<option>", "subpath": "<relative path>", "write": true | false}]}`
 	assignApplyUsage  = `{"plan_hash": "<hash>", "uses": [{"instance": "<id>", "key": "<option>", "subpath": "<relative path>", "write": true | false}]}`
 	undoApplyUsage    = `{"plan_hash": "<hash>"}`
-	recheckUsage      = `{"plan_hash": "<hash from the re-check preview>"}`
+	recheckUsage      = `{"plan_hash": "<hash from the re-check preview>", "confirm_different_directory": true | false}`
 	localNetsUsage    = `{"networks": ["<cidr>", ...] | null}`
 )
 
@@ -369,6 +369,9 @@ func (s *Server) handleRecheckApply(w http.ResponseWriter, r *http.Request) {
 	}
 	var b struct {
 		PlanHash *string `json:"plan_hash"`
+		// A different directory (the preview's different_directory)
+		// needs this second confirmation.
+		ConfirmDifferent bool `json:"confirm_different_directory"`
 	}
 	if !decodeAPI(w, r, &b, recheckUsage) {
 		return
@@ -377,7 +380,7 @@ func (s *Server) handleRecheckApply(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "body must be "+recheckUsage)
 		return
 	}
-	v, err := s.Hub.ApplyRecheck(r.Context(), id, *b.PlanHash, actor(r))
+	v, err := s.Hub.ApplyRecheck(r.Context(), id, *b.PlanHash, b.ConfirmDifferent, actor(r))
 	if err != nil {
 		writeAPIErr(w, err)
 		return
