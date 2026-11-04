@@ -71,8 +71,11 @@ type Option struct {
 	// AdminOverride (person_entered only, call 32): admins may set a value.
 	AdminOverride bool `yaml:"admin_override" json:"admin_override,omitempty"`
 	// SelfVisible nil = true.
-	SelfVisible *bool      `yaml:"self_visible" json:"self_visible,omitempty"`
-	Requires    []string   `yaml:"requires" json:"requires,omitempty"`
+	SelfVisible *bool    `yaml:"self_visible" json:"self_visible,omitempty"`
+	Requires    []string `yaml:"requires" json:"requires,omitempty"`
+	// RequiresAny (instance options, §13.9): when this one is non-empty,
+	// at least one of the listed instance options must be.
+	RequiresAny []string   `yaml:"requires_any" json:"requires_any,omitempty"`
 	Delivery    Deliveries `yaml:"delivery" json:"delivery,omitempty"`
 
 	// Shared folders (§13.15): a path option's folder block (it replaces
@@ -80,15 +83,58 @@ type Option struct {
 	Folder *FolderSpec `yaml:"folder" json:"folder,omitempty"`
 	Checks []Check     `yaml:"checks" json:"checks,omitempty"`
 
-	// Reserved for project 3: parsed, refused by ReservedFeature.
-	Hash          string         `yaml:"hash" json:"hash,omitempty"`
-	Length        int            `yaml:"length" json:"length,omitempty"`
-	RevokeOnLeave *bool          `yaml:"revoke_on_leave" json:"revoke_on_leave,omitempty"`
-	OnRestore     string         `yaml:"on_restore" json:"on_restore,omitempty"`
-	Pool          string         `yaml:"pool" json:"pool,omitempty"`
-	Username      map[string]any `yaml:"username" json:"username,omitempty"`
-	Mount         *OptionMount   `yaml:"mount" json:"mount,omitempty"`
+	// File sharing (§13.2, §13.16): person_secret's hash, length, mount,
+	// revocation, restore, username rule and info lines; person_id's pool.
+	Hash          string        `yaml:"hash" json:"hash,omitempty"`
+	Length        int           `yaml:"length" json:"length,omitempty"`
+	RevokeOnLeave *bool         `yaml:"revoke_on_leave" json:"revoke_on_leave,omitempty"`
+	OnRestore     string        `yaml:"on_restore" json:"on_restore,omitempty"`
+	Pool          string        `yaml:"pool" json:"pool,omitempty"`
+	Username      *UsernameRule `yaml:"username" json:"username,omitempty"`
+	Mount         *OptionMount  `yaml:"mount" json:"mount,omitempty"`
+	Info          []InfoLine    `yaml:"info" json:"info,omitempty"`
 }
+
+// UsernameRule is a person_secret's username rule (§13.2): the usernames
+// the app can serve. Reason is shown to a person whose name fails.
+type UsernameRule struct {
+	Pattern  string   `yaml:"pattern" json:"pattern,omitempty"`
+	Reserved []string `yaml:"reserved" json:"reserved,omitempty"`
+	Reason   string   `yaml:"reason" json:"reason,omitempty"`
+}
+
+// UnmarshalYAML decodes strictly (unknown keys are refused).
+func (u *UsernameRule) UnmarshalYAML(n *yaml.Node) error {
+	type plain UsernameRule
+	return strictDecode(n, (*plain)(u))
+}
+
+// InfoLine is one line of a person_secret's credential card (§13.2):
+// Value is text with {user}, {value:<key>}, {port:<KEY>} and
+// {port_suffix:<KEY>:<default>} placeholders.
+type InfoLine struct {
+	Label string `yaml:"label" json:"label"`
+	Value string `yaml:"value" json:"value"`
+}
+
+// UnmarshalYAML decodes strictly (unknown keys are refused).
+func (l *InfoLine) UnmarshalYAML(n *yaml.Node) error {
+	type plain InfoLine
+	return strictDecode(n, (*plain)(l))
+}
+
+// File-sharing values (§13.2, §13.16).
+const (
+	HashNT        = "nt"
+	OnRestoreVoid = "void"
+	PoolPOSIXUID  = "posix_uid"
+	// PersonSecretMinLength is a person_secret's shortest length.
+	PersonSecretMinLength = 24
+)
+
+// PersonIDPools are the person_id pools and their id ranges (inclusive;
+// contract §13.16, preflight F7: 20000-59999).
+var PersonIDPools = map[string][2]int{PoolPOSIXUID: {20000, 59999}}
 
 // SettingTarget is a path option's mount: the compose service and the
 // container directory.
@@ -186,15 +232,22 @@ const (
 // GenerateCharsets are the accepted generate.charset values.
 var GenerateCharsets = map[string]bool{CharsetHex: true, CharsetAlphanumeric: true, CharsetASCIIPrintable: true}
 
-// OptionMount is reserved (project 3): where a person secret is mounted.
+// OptionMount is where a person_secret's hash files are mounted
+// (read-only): the compose service and the container directory.
 type OptionMount struct {
 	Service string `yaml:"service" json:"service"`
 	Path    string `yaml:"path" json:"path"`
 }
 
-// Deliveries is an option's delivery list. The scalar form (file | hook)
-// is project 3's person_secret delivery: parsed into Bare, refused by
-// ReservedFeature.
+// UnmarshalYAML decodes strictly (unknown keys are refused).
+func (m *OptionMount) UnmarshalYAML(n *yaml.Node) error {
+	type plain OptionMount
+	return strictDecode(n, (*plain)(m))
+}
+
+// Deliveries is an option's delivery list. The scalar form is
+// person_secret's delivery: file (parsed into Bare; any other option
+// refuses it, and so does person_secret for the scalar hook).
 type Deliveries []Delivery
 
 // UnmarshalYAML reads a sequence of deliveries, or the bare scalar form.
@@ -223,7 +276,7 @@ type Delivery struct {
 	File   *FileDelivery   `yaml:"file" json:"file,omitempty"`
 	Hook   string          `yaml:"hook" json:"hook,omitempty"`
 	Render *Render         `yaml:"render" json:"render,omitempty"` // for env and hook
-	Bare   string          `yaml:"-" json:"-"`                     // scalar form (project 3 person_secret only)
+	Bare   string          `yaml:"-" json:"-"`                     // scalar form (person_secret's delivery: file)
 }
 
 // ClaimDelivery is a token claim on one Keycloak client of the instance.
@@ -268,11 +321,31 @@ const (
 
 // DataFile is a declared data file (§13.7).
 type DataFile struct {
-	Name               string `yaml:"name" json:"name"`
-	Service            string `yaml:"service" json:"service"`
-	Mount              string `yaml:"mount" json:"mount"`
+	Name    string `yaml:"name" json:"name"`
+	Service string `yaml:"service" json:"service"`
+	Mount   string `yaml:"mount" json:"mount"`
+	// Format "" = FormatJSON, or FormatTSV (§13.7).
+	Format             string `yaml:"format" json:"format,omitempty"`
 	OnMembershipChange string `yaml:"on_membership_change" json:"on_membership_change,omitempty"`
 }
+
+// Data file formats (§13.7).
+const (
+	FormatJSON = "json"
+	FormatTSV  = "tsv"
+)
+
+// EffectiveFormat is f's format, FormatJSON when unset.
+func (f *DataFile) EffectiveFormat() string {
+	if f.Format == "" {
+		return FormatJSON
+	}
+	return f.Format
+}
+
+// FileName is the data file's name in its directory: <name>.json, or
+// <name>.tsv for format tsv.
+func (f *DataFile) FileName() string { return f.Name + "." + f.EffectiveFormat() }
 
 // UnmarshalYAML decodes strictly (unknown keys are refused).
 func (f *DataFile) UnmarshalYAML(n *yaml.Node) error {
@@ -369,8 +442,8 @@ const (
 	TypeUser         = "user"
 	TypeUsers        = "users"
 	TypeFolder       = "folder"        // reserved: shared folders are path values (§13.15)
-	TypePersonSecret = "person_secret" // reserved: project 3
-	TypePersonID     = "person_id"     // reserved: project 3
+	TypePersonSecret = "person_secret" // file sharing (§13.2, §13.16)
+	TypePersonID     = "person_id"     // file sharing (§13.2, §13.16)
 )
 
 // BuiltinTypes are the types this Hub implements (not the reserved ones).
@@ -379,6 +452,7 @@ var BuiltinTypes = map[string]bool{
 	TypeString: true, TypeInt: true, TypeSize: true, TypeDuration: true, TypeBool: true,
 	TypeEnum: true, TypeMultiEnum: true, TypeList: true, TypeTable: true, TypePath: true,
 	TypeSecret: true, TypeGroup: true, TypeGroups: true, TypeUser: true, TypeUsers: true,
+	TypePersonSecret: true, TypePersonID: true,
 }
 
 // oldTypes are the contract v2 types, refused with their replacement.
@@ -443,10 +517,13 @@ const (
 	HookStart            = "start"
 	HookSettingsChange   = "settings_change"
 	HookMembershipChange = "membership_change"
+	// HookCredentialChange: a person_secret credential was created,
+	// regenerated, revoked or voided (§13.8, §13.16).
+	HookCredentialChange = "credential_change"
 )
 
 // HookTriggers are the accepted hooks[].when values.
-var HookTriggers = map[string]bool{HookStart: true, HookSettingsChange: true, HookMembershipChange: true}
+var HookTriggers = map[string]bool{HookStart: true, HookSettingsChange: true, HookMembershipChange: true, HookCredentialChange: true}
 
 // Claim JSON types.
 var claimJSONTypes = map[string]bool{"int": true, "string": true, "bool": true, "json": true}
@@ -490,14 +567,18 @@ const (
 	// FeatureSharedFolders: type folder is reserved; shared folders are
 	// path options with a folder block (§13.15).
 	FeatureSharedFolders = "type: path with a folder block"
-	FeatureFileSharing   = "file sharing (project 3)"
 )
 
 // FolderTypeRefusal is the refusal of type folder.
 const FolderTypeRefusal = "type folder is reserved: a shared folder is a type: path option with a folder block (§13.15)"
 
-// EffectiveScope returns o.Scope, or ScopeInstance when unset.
+// EffectiveScope returns o.Scope, or ScopeInstance when unset; always
+// ScopePerson for person_secret and person_id (one value per person, set
+// by the Hub; their scope field is refused).
 func (o *Option) EffectiveScope() string {
+	if o.Type == TypePersonSecret || o.Type == TypePersonID {
+		return ScopePerson
+	}
 	if o.Scope == "" {
 		return ScopeInstance
 	}
@@ -561,50 +642,14 @@ func (o *Option) EnvNames() []string {
 // maxIndexed caps an indexed env delivery's max_items.
 const maxIndexed = 64
 
-// ReservedFeature names the project-2/3 feature o uses ("" = none).
+// ReservedFeature names the reserved feature o uses ("" = none): only
+// type folder is left (a shared folder is a path option with a folder
+// block).
 func ReservedFeature(o *Option) string {
-	_, f := reservedUse(o)
-	return f
-}
-
-// reservedUse is what of o is reserved, and for which feature.
-func reservedUse(o *Option) (what, feature string) {
-	switch o.Type {
-	case TypeFolder:
-		return "type " + o.Type, FeatureSharedFolders
-	case TypePersonSecret, TypePersonID:
-		return "type " + o.Type, FeatureFileSharing
+	if o.Type == TypeFolder {
+		return FeatureSharedFolders
 	}
-	if f := o.Folder; f != nil && f.RunsAs != nil {
-		switch {
-		case f.RunsAs.UIDFrom != "":
-			return "folder.runs_as.uid_from", FeatureFileSharing
-		case f.RunsAs.GIDFrom != "":
-			return "folder.runs_as.gid_from", FeatureFileSharing
-		}
-	}
-	switch {
-	case o.Hash != "":
-		return "hash", FeatureFileSharing
-	case o.Length != 0:
-		return "length", FeatureFileSharing
-	case o.RevokeOnLeave != nil:
-		return "revoke_on_leave", FeatureFileSharing
-	case o.OnRestore != "":
-		return "on_restore", FeatureFileSharing
-	case o.Pool != "":
-		return "pool", FeatureFileSharing
-	case o.Username != nil:
-		return "username", FeatureFileSharing
-	case o.Mount != nil:
-		return "mount", FeatureFileSharing
-	}
-	for _, d := range o.Delivery {
-		if d.Bare != "" {
-			return "delivery: " + d.Bare, FeatureFileSharing
-		}
-	}
-	return "", ""
+	return ""
 }
 
 // UnmarshalYAML refuses the contract v2 list form and unknown keys
@@ -727,6 +772,7 @@ func ValidateSettingsSpec(t *Template, compose []byte, routes *Routes, kinds Kin
 	if err := v.envNames(); err != nil {
 		return err
 	}
+	v.routerless = m.Auth.Method == "custom" && routes != nil && len(routes.Info) == 0
 	v.claims, v.headers, v.fields = map[string]string{}, map[string]string{}, map[string]string{}
 	for i := range m.Settings.Options {
 		o := &m.Settings.Options[i]
@@ -737,7 +783,7 @@ func ValidateSettingsSpec(t *Template, compose []byte, routes *Routes, kinds Kin
 			return fmt.Errorf("setting %s: %w", o.Key, err)
 		}
 	}
-	return nil
+	return v.usernamePatternEnv()
 }
 
 type specCheck struct {
@@ -756,6 +802,8 @@ type specCheck struct {
 	claims   map[string]string // client\x00claim → option
 	headers  map[string]string // folded header → option
 	fields   map[string]string // file\x00section\x00field → option
+	// routerless: method custom with zero HTTP routers (Manifest.Routerless).
+	routerless bool
 }
 
 func (v *specCheck) sections() error {
@@ -798,6 +846,11 @@ func (v *specCheck) files() error {
 		}
 		if !validMount(f.Mount) {
 			return fmt.Errorf("%s: mount %q must be an absolute, clean container directory (no ':')", w, f.Mount)
+		}
+		switch f.Format {
+		case "", FormatJSON, FormatTSV:
+		default:
+			return fmt.Errorf("%s: format %q must be json or tsv", w, f.Format)
 		}
 		switch f.OnMembershipChange {
 		case "", MembershipNone, MembershipRestart:
@@ -866,11 +919,11 @@ func (v *specCheck) hooks() error {
 			return fmt.Errorf("%s: user contains control characters", w)
 		}
 		if len(h.When) == 0 {
-			return fmt.Errorf("%s: when must list at least one trigger (start, settings_change, membership_change)", w)
+			return fmt.Errorf("%s: when must list at least one trigger (start, settings_change, membership_change, credential_change)", w)
 		}
 		for _, tr := range h.When {
 			if !HookTriggers[tr] {
-				return fmt.Errorf("%s: when %q must be start, settings_change or membership_change", w, tr)
+				return fmt.Errorf("%s: when %q must be start, settings_change, membership_change or credential_change", w, tr)
 			}
 		}
 		if h.Timeout < 0 || time.Duration(h.Timeout) > HookMaxTimeout {
@@ -1027,6 +1080,9 @@ func (v *specCheck) envNames() error {
 	}
 	for i := range v.m.Settings.Options {
 		o := &v.m.Settings.Options[i]
+		if o.Type == TypePersonSecret || o.Type == TypePersonID {
+			continue // no env: their own checks refuse an env delivery
+		}
 		var names []string
 		for _, d := range o.Delivery {
 			if d.Env == "" {
@@ -1121,8 +1177,8 @@ func (v *specCheck) typeOf(o *Option) error {
 	if o.Type == TypeFolder {
 		return errors.New(FolderTypeRefusal)
 	}
-	if what, f := reservedUse(o); f != "" {
-		return fmt.Errorf("%s needs %s, which this Hub doesn't implement", what, f)
+	if err := fileSharingFields(o); err != nil {
+		return err
 	}
 	if o.Type == "" || !v.kinds.Known(o.Type) {
 		return fmt.Errorf("unknown type %q", o.Type)
@@ -1140,6 +1196,15 @@ func (v *specCheck) option(o *Option) error {
 	if o.Section != "" && !contains(v.m.Settings.Sections, o.Section) {
 		return fmt.Errorf("section %q is not listed in settings.sections", o.Section)
 	}
+	if o.Applies != "" && !appliesValues[o.Applies] {
+		return fmt.Errorf("applies %q must be live, reload, next_request, next_sign_in, restart or account_creation", o.Applies)
+	}
+	switch o.Type {
+	case TypePersonSecret:
+		return v.personSecret(o)
+	case TypePersonID:
+		return v.personID(o)
+	}
 	scope := o.EffectiveScope()
 	switch scope {
 	case ScopeInstance, ScopePerson, ScopeGroup, ScopePersonEntered:
@@ -1152,9 +1217,6 @@ func (v *specCheck) option(o *Option) error {
 	if err := v.checks(o); err != nil {
 		return err
 	}
-	if o.Applies != "" && !appliesValues[o.Applies] {
-		return fmt.Errorf("applies %q must be live, reload, next_request, next_sign_in, restart or account_creation", o.Applies)
-	}
 	if scope == ScopePersonEntered {
 		if err := v.personEntered(o); err != nil {
 			return err
@@ -1163,8 +1225,10 @@ func (v *specCheck) option(o *Option) error {
 	switch {
 	case o.Privileged && scope != ScopePerson:
 		return fmt.Errorf("privileged needs scope: person")
-	case o.SelfVisible != nil && scope != ScopePerson && !(scope == ScopePersonEntered && *o.SelfVisible):
-		return fmt.Errorf("self_visible needs scope: person")
+	// An instance option may set self_visible: true (never false) for a
+	// person_secret info line's {value:<key>} (§13.1).
+	case o.SelfVisible != nil && scope != ScopePerson && !((scope == ScopePersonEntered || scope == ScopeInstance) && *o.SelfVisible):
+		return fmt.Errorf("self_visible needs scope: person (an instance option may only set self_visible: true)")
 	case o.Resolve != "" && scope != ScopePerson, len(o.ResolveChoices) > 0 && scope != ScopePerson:
 		return fmt.Errorf("resolve and resolve_choices need scope: person")
 	case o.GroupValues != nil && scope != ScopePerson:
@@ -1392,18 +1456,23 @@ func (v *specCheck) privileged(o *Option) error {
 }
 
 func (v *specCheck) requires(o *Option) error {
-	if len(o.Requires) > 0 && o.EffectiveScope() != ScopeInstance {
-		return fmt.Errorf("requires is for instance options")
-	}
-	for _, k := range o.Requires {
-		r := v.opts[k]
-		switch {
-		case k == o.Key:
-			return fmt.Errorf("requires names itself")
-		case r == nil:
-			return fmt.Errorf("requires %s: no such option", k)
-		case r.EffectiveScope() != ScopeInstance:
-			return fmt.Errorf("requires %s: not an instance option", k)
+	for _, l := range []struct {
+		field string
+		keys  []string
+	}{{"requires", o.Requires}, {"requires_any", o.RequiresAny}} {
+		if len(l.keys) > 0 && o.EffectiveScope() != ScopeInstance {
+			return fmt.Errorf("%s is for instance options", l.field)
+		}
+		for _, k := range l.keys {
+			r := v.opts[k]
+			switch {
+			case k == o.Key:
+				return fmt.Errorf("%s names itself", l.field)
+			case r == nil:
+				return fmt.Errorf("%s %s: no such option", l.field, k)
+			case r.EffectiveScope() != ScopeInstance:
+				return fmt.Errorf("%s %s: not an instance option", l.field, k)
+			}
 		}
 	}
 	return nil
@@ -1746,8 +1815,17 @@ func (v *specCheck) header(o *Option, h *HeaderDelivery) error {
 }
 
 func (v *specCheck) file(o *Option, fd *FileDelivery) error {
-	if v.files_[fd.Name] == nil {
+	f := v.files_[fd.Name]
+	if f == nil {
 		return fmt.Errorf("file %s is not declared in files", fd.Name)
+	}
+	if f.EffectiveFormat() == FormatTSV {
+		switch o.Type {
+		case TypeTable:
+			return fmt.Errorf("file %s is tsv, which has no table rows: deliver a table to a JSON file", fd.Name)
+		case TypeSecret:
+			return fmt.Errorf("file %s is tsv: a secret goes only to a JSON file's %s.secrets.json", fd.Name, fd.Name)
+		}
 	}
 	section := ""
 	switch o.EffectiveScope() {

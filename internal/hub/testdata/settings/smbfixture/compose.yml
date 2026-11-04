@@ -1,0 +1,5 @@
+services:
+  smb:
+    image: smbfixture
+    environment:
+      PORTCULLIS_USERNAME_PATTERN: '^[a-z_][a-z0-9_.-]{0,31}$$'

@@ -1,0 +1,74 @@
+name: SMB Fixture
+category: tools
+instances: multi
+auth:
+  method: custom
+  group_access: true
+  access_group: users_smbfixture
+  admin_group: admin_smbfixture
+  notes: "No web page: file sharing over SMB."
+ports:
+  - {key: SMB, label: SMB, container: 445, default: 445, protocol: tcp, service: smb, lan_only: true}
+files:
+  - {name: people, service: smb, mount: /portcullis/data, format: tsv, on_membership_change: hook}
+hooks:
+  - name: sync
+    service: smb
+    command: [/portcullis/portcullis-sync]
+    when: [start, settings_change, membership_change, credential_change]
+    timeout: 60s
+settings:
+  sections: [Access, Shares, Network]
+  options:
+    - key: share_password
+      label: File-share password
+      type: person_secret
+      hash: nt
+      length: 24
+      delivery: file
+      mount: {service: smb, path: /portcullis/secrets}
+      revoke_on_leave: true
+      on_restore: void
+      applies: live
+      section: Access
+      username:
+        pattern: "^[a-z_][a-z0-9_.-]{0,31}$"
+        reserved: [root, nobody, smbuser]
+        reason: "isn't a valid Samba and Unix name"
+      info:
+        - {label: Server, value: "smb://{value:connect_address}{port_suffix:SMB:445}/Home"}
+        - {label: Username, value: "{user}"}
+    - key: uid
+      label: File owner id
+      type: person_id
+      pool: posix_uid
+      self_visible: false
+      delivery: [{file: {name: people, field: uid}}]
+    - key: share1_readers
+      label: Share 1 readers
+      type: groups
+      section: Shares
+      applies: live
+      delivery: [{file: {name: people}}]
+    - key: share1_writers
+      label: Share 1 writers
+      type: groups
+      section: Shares
+      applies: live
+      delivery: [{file: {name: people}}]
+    - key: share1_folder
+      label: Share 1 folder
+      type: path
+      section: Shares
+      target: {service: smb, mount: /shares/1}
+      folder: {access: write, runs_as: {uid_from: uid}, joins_group: template}
+      requires_any: [share1_readers, share1_writers]
+    - key: connect_address
+      label: Address people connect to
+      type: string
+      format: hostname
+      required: true
+      self_visible: true
+      section: Network
+      applies: live
+      delivery: [{file: {name: people}}]

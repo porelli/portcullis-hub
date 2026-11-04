@@ -29,7 +29,7 @@ func newServer(t *testing.T) *httptest.Server {
 	root := t.TempDir()
 	src := filepath.Join(root, "src", "demo")
 	os.MkdirAll(src, 0755)
-	os.WriteFile(filepath.Join(src, "manifest.yaml"), []byte("name: Demo <b>\ncategory: test\nauth:\n  method: forward-auth\n"), 0644)
+	os.WriteFile(filepath.Join(src, "manifest.yaml"), []byte("name: Demo <b>\ncategory: test\nauth:\n  method: custom\n"), 0644)
 	os.WriteFile(filepath.Join(src, "compose.yml"), []byte("services:\n  web:\n    image: x\n"), 0644)
 	data := filepath.Join(root, "data")
 	os.MkdirAll(data, 0755)

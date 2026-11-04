@@ -75,7 +75,7 @@ func TestSingleDocument(t *testing.T) {
 	dir := t.TempDir()
 	writeTpl(t, dir, "multi", "name: Multi\ncategory: test\nicon: x\nauth:\n  method: public\n", two)
 	writeTpl(t, dir, "multiman", "name: A\ncategory: test\nicon: x\nauth:\n  method: public\n---\nname: B\n", "services:\n  web:\n    image: x\n")
-	writeTpl(t, dir, "single", "name: Single\ncategory: test\nicon: x\nauth:\n  method: public\n", "services:\n  web:\n    image: x\n")
+	writeTpl(t, dir, "single", "name: Single\ncategory: test\nicon: x\nauth:\n  method: custom\n", "services:\n  web:\n    image: x\n")
 	loaded := map[string]bool{}
 	for _, tp := range Discover(dir, "local", "example.org", nil) {
 		loaded[tp.ID] = true

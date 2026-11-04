@@ -136,16 +136,22 @@ func TestSameEnvSameRunsAs(t *testing.T) {
 	})
 }
 
-func TestUIDFromReserved(t *testing.T) {
+func TestUIDFromNotReserved(t *testing.T) {
 	folderCases(t, []settingsCase{
-		{"uid_from", hdrHead + opts(fpath("media", "web", ", folder: {access: write, runs_as: {uid_from: person_uid, gid: 0}}")), "", "media", "folder.runs_as.uid_from needs file sharing (project 3)"},
-		{"gid_from", hdrHead + opts(fpath("media", "web", ", folder: {access: write, runs_as: {uid: 0, gid_from: person_gid}}")), "", "media", "folder.runs_as.gid_from needs file sharing (project 3)"},
+		{"uid_from", hdrHead + opts(fpath("media", "web", ", folder: {access: write, runs_as: {uid_from: person_uid, gid: 0}}")), "", "media", "folder.runs_as.uid_from person_uid is not a person_id option"},
+		{"gid_from", hdrHead + opts(fpath("media", "web", ", folder: {access: write, runs_as: {uid: 0, gid_from: person_gid}}")), "", "media", "folder.runs_as.gid_from needs uid_from"},
 	})
-	if f := ReservedFeature(&Option{Type: TypePath, Folder: &FolderSpec{RunsAs: &RunsAs{UIDFrom: "x"}}}); f != FeatureFileSharing {
-		t.Errorf("ReservedFeature(uid_from) = %q", f)
+	for _, o := range []*Option{
+		{Type: TypePath, Folder: &FolderSpec{RunsAs: &RunsAs{UIDFrom: "x"}}},
+		{Type: TypePersonSecret}, {Type: TypePersonID},
+		{Type: TypePath, Folder: &FolderSpec{Access: FolderRead}, Checks: []Check{{Kind: CheckExclusive}}},
+	} {
+		if f := ReservedFeature(o); f != "" {
+			t.Errorf("ReservedFeature(%+v) = %q", o, f)
+		}
 	}
-	if f := ReservedFeature(&Option{Type: TypePath, Folder: &FolderSpec{Access: FolderRead}, Checks: []Check{{Kind: CheckExclusive}}}); f != "" {
-		t.Errorf("ReservedFeature(folder, checks) = %q", f)
+	if f := ReservedFeature(&Option{Type: TypeFolder}); f != FeatureSharedFolders {
+		t.Errorf("ReservedFeature(folder) = %q", f)
 	}
 }
 

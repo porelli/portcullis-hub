@@ -45,7 +45,7 @@ var (
 		"forward-auth", "forward-auth-ext", "group-gate", "hub", "enroll", "domains", "prometheus", "alertmanager", "blackbox",
 		"textfile-exporter", "grafana")
 	coreVolumes = set("postgres_data", "vault_data", "lldap_data", "hub_data", "traefik_acme", "domains_data",
-		"prometheus_data", "alertmanager_data", "grafana_data")
+		"prometheus_data", "alertmanager_data", "grafana_data", "hub_secrets")
 	// coreContainerRe: compose's container names for core's services.
 	coreContainerRe = regexp.MustCompile(`^portcullis[-_](.+)[-_][0-9]+$`)
 )

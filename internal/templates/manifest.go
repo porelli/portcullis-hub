@@ -201,6 +201,10 @@ type Manifest struct {
 	Files  []DataFile `yaml:"files" json:"files,omitempty"`
 	Hooks  []Hook     `yaml:"hooks" json:"hooks,omitempty"`
 	Reload *Reload    `yaml:"reload" json:"reload,omitempty"`
+
+	// routerless: compose.yml has no HTTP router (set by Discover;
+	// Routerless).
+	routerless bool
 }
 
 // HostsSpec is the manifest's hosts block.

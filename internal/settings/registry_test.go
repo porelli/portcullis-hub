@@ -3,6 +3,7 @@ package settings
 import (
 	"errors"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/portcullis/hub/internal/templates"
@@ -18,31 +19,31 @@ func (stubKind) Compare(*templates.Option, Value, Value) (int, bool) { return 0,
 
 func TestRegistryReserved(t *testing.T) {
 	r := NewRegistry()
-	for typ, feature := range map[string]string{
-		"person_id":     "file sharing (project 3)",
-		"person_secret": "file sharing (project 3)",
-		"folder":        "type: path with a folder block",
-	} {
-		_, err := r.Kind(typ)
-		var ni *ErrNotImplemented
-		if typ == "folder" && (err == nil || err.Error() != "type folder is reserved: a shared folder is a type: path option with a folder block (§13.15)") {
-			t.Errorf("Kind(folder) message = %v", err)
-		}
-		if !errors.As(err, &ni) || ni.Feature != feature || ni.Type != typ {
-			t.Errorf("Kind(%s) = %v, want ErrNotImplemented{%s}", typ, err, feature)
-		}
-		if r.Known(typ) {
-			t.Errorf("Known(%s) before Register", typ)
+	_, err := r.Kind("folder")
+	var ni *ErrNotImplemented
+	if err == nil || err.Error() != "type folder is reserved: a shared folder is a type: path option with a folder block (§13.15)" {
+		t.Errorf("Kind(folder) message = %v", err)
+	}
+	if !errors.As(err, &ni) || ni.Feature != "type: path with a folder block" || ni.Type != "folder" {
+		t.Errorf("Kind(folder) = %v, want ErrNotImplemented", err)
+	}
+	if r.Known("folder") {
+		t.Error("Known(folder)")
+	}
+	// File sharing landed: both types are built-in kinds (F4).
+	for _, typ := range []string{"person_secret", "person_id"} {
+		if k, err := r.Kind(typ); err != nil || k.Name() != typ || !r.Known(typ) {
+			t.Errorf("Kind(%s) = %v, %v", typ, k, err)
 		}
 	}
 	if _, err := r.Kind("text"); err == nil {
 		t.Error("Kind(text) must fail")
 	}
-	r.Register(stubKind{"person_id"})
-	if !r.Known("person_id") {
-		t.Error("Known(person_id) after Register")
+	r.Register(stubKind{"stubtype"})
+	if !r.Known("stubtype") {
+		t.Error("Known(stubtype) after Register")
 	}
-	if k, err := r.Kind("person_id"); err != nil || k.Name() != "person_id" {
+	if k, err := r.Kind("stubtype"); err != nil || k.Name() != "stubtype" {
 		t.Errorf("Kind after Register = %v, %v", k, err)
 	}
 	// Register replaces a kind of the same name.
@@ -51,9 +52,28 @@ func TestRegistryReserved(t *testing.T) {
 		t.Errorf("replaced kind not used: %q", got)
 	}
 	// A reserved type's option is refused through CheckOption too.
-	var ni *ErrNotImplemented
 	if err := NewRegistry().CheckOption(&templates.Option{Key: "k", Type: "folder"}); !errors.As(err, &ni) {
 		t.Errorf("CheckOption(folder) = %v", err)
+	}
+}
+
+// TestPersonKindsSetByTheHub: no admin input is a value of either type;
+// person_id displays as the number (F4).
+func TestPersonKindsSetByTheHub(t *testing.T) {
+	r := NewRegistry()
+	for _, typ := range []string{"person_secret", "person_id"} {
+		o := &templates.Option{Key: "k", Type: typ}
+		for _, raw := range []any{"x", int64(20000), 20000, true, []any{"a"}} {
+			if _, err := r.Parse(o, raw); err == nil || !strings.Contains(err.Error(), "set by the Hub") {
+				t.Errorf("Parse(%s, %v) = %v", typ, raw, err)
+			}
+		}
+	}
+	id := &templates.Option{Key: "uid", Type: "person_id"}
+	for _, v := range []Value{int64(20000), 20000} {
+		if got := r.Display(id, v); got != "20000" {
+			t.Errorf("Display(person_id, %v) = %q", v, got)
+		}
 	}
 }
 

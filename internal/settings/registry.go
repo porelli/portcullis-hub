@@ -86,7 +86,7 @@ func NewRegistry() *Registry {
 		multiEnumKind{}, listKind{}, tableKind{},
 		nameKind{name: templates.TypeGroup}, nameKind{name: templates.TypeGroups, set: true},
 		nameKind{name: templates.TypeUser, user: true}, nameKind{name: templates.TypeUsers, user: true, set: true},
-		pathKind{}, secretKind{},
+		pathKind{}, secretKind{}, personSecretKind{}, personIDKind{},
 	} {
 		r.Register(k)
 	}

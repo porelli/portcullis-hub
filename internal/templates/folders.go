@@ -30,15 +30,16 @@ type FolderSpec struct {
 }
 
 // RunsAs is the uid and gid the app's process uses on the mount: each a
-// number, or the env name of an instance int option (uid_env / gid_env).
-// UIDFrom / GIDFrom are reserved (file sharing, project 3).
+// number, the env name of an instance int option (uid_env / gid_env), or
+// (file sharing) the key of a person_id option (uid_from / gid_from:
+// each person's own id). uid_from with joins_group template needs no gid.
 type RunsAs struct {
 	UID     *int   `yaml:"uid" json:"uid,omitempty"`
 	GID     *int   `yaml:"gid" json:"gid,omitempty"`
 	UIDEnv  string `yaml:"uid_env" json:"uid_env,omitempty"`
 	GIDEnv  string `yaml:"gid_env" json:"gid_env,omitempty"`
-	UIDFrom string `yaml:"uid_from" json:"uid_from,omitempty"` // reserved: project 3
-	GIDFrom string `yaml:"gid_from" json:"gid_from,omitempty"` // reserved: project 3
+	UIDFrom string `yaml:"uid_from" json:"uid_from,omitempty"`
+	GIDFrom string `yaml:"gid_from" json:"gid_from,omitempty"`
 }
 
 // UnmarshalYAML decodes strictly, with a friendly refusal for a uid / gid
@@ -187,9 +188,32 @@ func (v *specCheck) folderOption(o *Option) error {
 		what string
 		num  *int
 		env  string
-	}{{"uid", ra.UID, ra.UIDEnv}, {"gid", ra.GID, ra.GIDEnv}} {
-		if (id.num != nil) == (id.env != "") {
-			return fmt.Errorf("folder.runs_as.%s: exactly one of %s, %s_env (a number, or the env name of an instance int option)", id.what, id.what, id.what)
+		from string
+	}{{"uid", ra.UID, ra.UIDEnv, ra.UIDFrom}, {"gid", ra.GID, ra.GIDEnv, ra.GIDFrom}} {
+		n := 0
+		for _, set := range []bool{id.num != nil, id.env != "", id.from != ""} {
+			if set {
+				n++
+			}
+		}
+		// Each person's files: the template applies the folder gid itself.
+		if id.what == "gid" && n == 0 && ra.UIDFrom != "" && f.JoinsGroup == JoinTemplate {
+			continue
+		}
+		if n != 1 {
+			return fmt.Errorf("folder.runs_as.%s: exactly one of %s, %s_env, %s_from (a number, the env name of an instance int option, or a person_id option)", id.what, id.what, id.what, id.what)
+		}
+		if id.from != "" {
+			if id.what == "gid" && ra.UIDFrom == "" {
+				return fmt.Errorf("folder.runs_as.gid_from needs uid_from (a per-person tree: each person's private group is their uid)")
+			}
+			if id.what == "gid" && f.JoinsGroup != JoinTemplate {
+				return fmt.Errorf("folder.runs_as.gid_from needs joins_group: template")
+			}
+			if ro := v.opts[id.from]; ro == nil || ro.Type != TypePersonID {
+				return fmt.Errorf("folder.runs_as.%s_from %s is not a person_id option of this template", id.what, id.from)
+			}
+			continue
 		}
 		if id.num != nil {
 			if *id.num < 0 || *id.num > maxRunsAsID {
@@ -705,6 +729,9 @@ func (v *specCheck) composeUserMatches(svc string, ra *RunsAs) error {
 	u := v.users[svc]
 	if u == "" {
 		return nil
+	}
+	if ra.UIDFrom != "" {
+		return fmt.Errorf("folder.runs_as.uid_from: service %s's compose user: %q runs every process as one uid: each person's own uid needs the service to start as root (no user:)", svc, u)
 	}
 	us, gs, hasGID := splitUser(u)
 	ids := []struct {

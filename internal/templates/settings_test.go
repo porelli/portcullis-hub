@@ -150,15 +150,17 @@ func TestOldTypesRefused(t *testing.T) {
 func TestReservedTypesRefused(t *testing.T) {
 	runSettingsCases(t, []settingsCase{
 		{"folder", hdrHead + opts("{key: media, label: X, type: folder}"), hdrCompose, "media", "type folder is reserved: a shared folder is a type: path option with a folder block (§13.15)"},
-		{"person_secret", hdrHead + opts("{key: smb, label: X, type: person_secret}"), hdrCompose, "smb", "type person_secret needs file sharing (project 3)"},
-		{"person_id", hdrHead + opts("{key: uid, label: X, type: person_id}"), hdrCompose, "uid", "type person_id needs file sharing (project 3)"},
+		// File sharing landed: person_secret / person_id are typed
+		// (filesharing_test.go); on a routed template they are refused.
+		{"person_secret", hdrHead + opts("{key: smb, label: X, type: person_secret}"), hdrCompose, "smb", "router-less"},
+		{"person_id", hdrHead + opts("{key: uid, label: X, type: person_id}"), hdrCompose, "uid", "router-less"},
 		// Shared folders landed (§13.15): folder and checks are typed, no
-		// longer reserved; runs_as.uid_from / gid_from are (project 3).
+		// longer reserved; nor are runs_as.uid_from / gid_from (file sharing).
 		{"folder block", hdrHead + opts("{key: media, label: X, type: path, target: {service: web, mount: /media}, folder: {access: read, runs_as: {uid: 1000, gid: 1000}}}"), hdrCompose, "", ""},
 		{"checks", hdrHead + opts("{key: media, label: X, type: path, target: {service: web, mount: /media}, folder: {access: write, runs_as: {uid: 1000, gid: 1000}}, checks: [{kind: exclusive, reason: one writer}]}"), hdrCompose, "", ""},
-		{"uid_from", hdrHead + opts("{key: media, label: X, type: path, target: {service: web, mount: /media}, folder: {access: write, runs_as: {uid_from: person_uid, gid: 0}}}"), hdrCompose, "media", "file sharing (project 3)"},
-		{"hash", hdrHead + opts("{key: theme, label: X, type: string, hash: nt}"), hdrCompose, "theme", "file sharing (project 3)"},
-		{"bare delivery", hdrHead + opts("{key: theme, label: X, type: string, delivery: file}"), hdrCompose, "theme", "file sharing (project 3)"},
+		{"uid_from", hdrHead + opts("{key: media, label: X, type: path, target: {service: web, mount: /media}, folder: {access: write, runs_as: {uid_from: person_uid, gid: 0}}}"), hdrCompose, "media", "uid_from person_uid is not a person_id option"},
+		{"hash", hdrHead + opts("{key: theme, label: X, type: string, hash: nt}"), hdrCompose, "theme", "hash is for person_secret options"},
+		{"bare delivery", hdrHead + opts("{key: theme, label: X, type: string, delivery: file}"), hdrCompose, "theme", "delivery: file is for person_secret options"},
 	})
 	if f := ReservedFeature(&Option{Type: TypeString}); f != "" {
 		t.Errorf("ReservedFeature(string) = %q", f)
@@ -168,7 +170,7 @@ func TestReservedTypesRefused(t *testing.T) {
 			t.Errorf("builtin %s is reserved: %q", typ, f)
 		}
 	}
-	if len(BuiltinTypes) != 15 || BuiltinTypes[TypeFolder] || BuiltinTypes[TypePersonSecret] || BuiltinTypes[TypePersonID] {
+	if len(BuiltinTypes) != 17 || BuiltinTypes[TypeFolder] || !BuiltinTypes[TypePersonSecret] || !BuiltinTypes[TypePersonID] {
 		t.Errorf("BuiltinTypes = %v", BuiltinTypes)
 	}
 	// A Hub whose registry knows the type still refuses a reserved one
@@ -806,12 +808,12 @@ func TestCheckIDShape(t *testing.T) {
 	compose := "services:\n  web:\n    image: x\n"
 	for _, id := range []string{"a-portcullis-b", "my_app", "my--app"} {
 		for i := 0; i < 20; i++ {
-			if _, err := build(id, "src", "", []byte("name: App\nauth:\n  method: forward-auth\n"), []byte(compose), "example.org", nil); err == nil || !strings.Contains(err.Error(), "directory name: id") {
+			if _, err := build(id, "src", "", []byte("name: App\nauth:\n  method: custom\n"), []byte(compose), "example.org", nil); err == nil || !strings.Contains(err.Error(), "directory name: id") {
 				t.Fatalf("template %s run %d: %v", id, i, err)
 			}
 		}
 	}
-	if _, err := build("my-app", "src", "", []byte("name: App\nauth:\n  method: forward-auth\n"), []byte(compose), "example.org", nil); err != nil {
+	if _, err := build("my-app", "src", "", []byte("name: App\nauth:\n  method: custom\n"), []byte(compose), "example.org", nil); err != nil {
 		t.Errorf("my-app: %v", err)
 	}
 }
