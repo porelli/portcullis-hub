@@ -19,6 +19,14 @@ import (
 // every folder apply, daily); a check here never runs anything. Every
 // finding from a partial scan carries Partial and says so.
 
+// plural returns the singular or plural form based on count.
+func plural(n int64, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
+}
+
 func init() {
 	Register(folderOwnerCheck{})
 	Register(sharedPathDiskCheck{})
@@ -78,7 +86,7 @@ func scanFor(in *Inputs, p string) (ScanIn, bool) {
 func partial(f *Finding, s ScanIn) {
 	if s.Report != nil && s.Report.Partial {
 		f.Partial = true
-		f.Why += fmt.Sprintf(" (partial scan: stopped after %d entries)", s.Report.Entries)
+		f.Why += fmt.Sprintf(" (partial scan: stopped after %d %s)", s.Report.Entries, plural(s.Report.Entries, "entry", "entries"))
 	}
 }
 
@@ -155,10 +163,10 @@ func blockedOf(s ScanIn, uses []PathIn) []blocked {
 		}
 		var cant []string
 		if b.Read > 0 {
-			cant = append(cant, fmt.Sprintf("can't read %d entries%s", b.Read, samples(pa.CantRead)))
+			cant = append(cant, fmt.Sprintf("can't read %d %s%s", b.Read, plural(int64(b.Read), "entry", "entries"), samples(pa.CantRead)))
 		}
 		if b.Write > 0 {
-			cant = append(cant, fmt.Sprintf("can't write %d entries%s", b.Write, samples(pa.CantWrite)))
+			cant = append(cant, fmt.Sprintf("can't write %d %s%s", b.Write, plural(int64(b.Write), "entry", "entries"), samples(pa.CantWrite)))
 		}
 		b.text = who + " and " + strings.Join(cant, " and ")
 		out = append(out, b)
@@ -211,17 +219,22 @@ func (folderOwnerCheck) Run(in *Inputs) []Finding {
 		var drift, driftKeys []string
 		if e := s.Report.Expected; e != nil {
 			for _, d := range []struct {
-				key, text string
+				key       string
+				one, many string
 				c         folderfix.Count
 			}{
-				{"group", "%d entries with another group%s", e.Group},
-				{"setgid", "%d directories without setgid%s", e.Setgid},
-				{"default_acl", "%d directories without the default ACL%s", e.DefaultACL},
-				{"mode", "%d entries with other permissions%s", e.Mode},
-				{"owner", "%d entries with another owner%s", e.Owner},
+				{"group", "1 entry with another group%s", "%d entries with another group%s", e.Group},
+				{"setgid", "1 directory without setgid%s", "%d directories without setgid%s", e.Setgid},
+				{"default_acl", "1 directory without the default ACL%s", "%d directories without the default ACL%s", e.DefaultACL},
+				{"mode", "1 entry with other permissions%s", "%d entries with other permissions%s", e.Mode},
+				{"owner", "1 entry with another owner%s", "%d entries with another owner%s", e.Owner},
 			} {
 				if d.c.N > 0 {
-					drift = append(drift, fmt.Sprintf(d.text, d.c.N, samples(d.c)))
+					text := d.many
+					if d.c.N == 1 {
+						text = d.one
+					}
+					drift = append(drift, fmt.Sprintf(text, d.c.N, samples(d.c)))
 					driftKeys = append(driftKeys, d.key)
 				}
 			}

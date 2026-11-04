@@ -294,3 +294,23 @@ func TestRuntimeGIDAdopted(t *testing.T) {
 		t.Fatalf("findings = %+v", got)
 	}
 }
+
+func TestPlural(t *testing.T) {
+	tests := []struct {
+		n    int64
+		one  string
+		many string
+		want string
+	}{
+		{1, "entry", "entries", "entry"},
+		{2, "entry", "entries", "entries"},
+		{0, "file", "files", "files"},
+		{1, "directory without setgid", "directories without setgid", "directory without setgid"},
+		{2, "directory without setgid", "directories without setgid", "directories without setgid"},
+	}
+	for _, tt := range tests {
+		if got := plural(tt.n, tt.one, tt.many); got != tt.want {
+			t.Errorf("plural(%d, %q, %q) = %q; want %q", tt.n, tt.one, tt.many, got, tt.want)
+		}
+	}
+}

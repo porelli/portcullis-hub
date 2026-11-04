@@ -45,6 +45,14 @@ import (
 // stopped with what state.yaml holds — it never runs the fixer again, so
 // it never applies over newer state.
 
+// plural returns the singular or plural form based on count.
+func plural(n int64, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
+}
+
 // downtimeRate is the entries per second each fixer run is estimated at.
 const downtimeRate = 5000
 
@@ -771,7 +779,7 @@ func (h *Hub) diskPlan(ctx context.Context, id string, c *assignCalc) error {
 		}
 	}
 	if !rep.ACL && rep.Plan.LoseAccess.N > 0 {
-		return statusErr(http.StatusConflict, "%s has no ACL support, so the fix can't keep what its current groups and owners may do: %d entries would change their access (explain-only: give the folder ACL support, or set its group and permissions by hand)", f.Path, rep.Plan.LoseAccess.N)
+		return statusErr(http.StatusConflict, "%s has no ACL support, so the fix can't keep what its current groups and owners may do: %d %s would change their access (explain-only: give the folder ACL support, or set its group and permissions by hand)", f.Path, rep.Plan.LoseAccess.N, plural(rep.Plan.LoseAccess.N, "entry", "entries"))
 	}
 	counts := *rep.Plan
 	d.Counts, d.Entries, d.Partial = &counts, rep.Entries, rep.Partial
@@ -779,7 +787,7 @@ func (h *Hub) diskPlan(ctx context.Context, id string, c *assignCalc) error {
 	c.plan.Warnings = append(c.plan.Warnings, skippedWarnings(rep)...)
 	if rep.Partial {
 		c.plan.Warnings = append(c.plan.Warnings, message.NewPrinter(language.English).Sprintf(
-			"the preview's check stopped after %d entries (%s): the counts are partial; the apply plans the whole folder", rep.Entries, rep.PartialReason))
+			"the preview's check stopped after %d %s (%s): the counts are partial; the apply plans the whole folder", rep.Entries, plural(rep.Entries, "entry", "entries"), rep.PartialReason))
 	}
 	return nil
 }
@@ -986,26 +994,27 @@ func (h *Hub) assignText(c *assignCalc) {
 		}
 		if k.ChangeGroup.N > 0 {
 			if k.ChangeGroup.N >= c.scan.Files+c.scan.Dirs {
-				lines = append(lines, p.Sprintf("%d files and %d folders change %s → %s.", c.scan.Files, c.scan.Dirs, groups, gidS))
+				lines = append(lines, p.Sprintf("%d %s and %d %s change %s → %s.", c.scan.Files, plural(c.scan.Files, "file", "files"), c.scan.Dirs, plural(c.scan.Dirs, "folder", "folders"), groups, gidS))
 			} else {
-				lines = append(lines, p.Sprintf("%d of its %d files and %d folders change %s → %s.", k.ChangeGroup.N, c.scan.Files, c.scan.Dirs, groups, gidS))
+				lines = append(lines, p.Sprintf("%d of its %d %s and %d %s change %s → %s.", k.ChangeGroup.N, c.scan.Files, plural(c.scan.Files, "file", "files"), c.scan.Dirs, plural(c.scan.Dirs, "folder", "folders"), groups, gidS))
 			}
 		}
 		for _, g := range slices.Sorted(maps.Keys(k.KeepGroup)) {
 			if g != f.GID {
-				lines = append(lines, p.Sprintf("Group %s keeps the access it has now through an ACL on %d entries.", strconv.Itoa(g), k.KeepGroup[g]))
+				lines = append(lines, p.Sprintf("Group %s keeps the access it has now through an ACL on %d %s.", strconv.Itoa(g), k.KeepGroup[g], plural(k.KeepGroup[g], "entry", "entries")))
 			}
 		}
 		if k.AddSetgid.N > 0 || k.AddDefaultACL.N > 0 {
-			lines = append(lines, p.Sprintf("%d folders get setgid and a default ACL, so files the apps create later stay in group %s with group write.", max(k.AddSetgid.N, k.AddDefaultACL.N), gidS))
+			n := max(k.AddSetgid.N, k.AddDefaultACL.N)
+			lines = append(lines, p.Sprintf("%d %s get setgid and a default ACL, so files the apps create later stay in group %s with group write.", n, plural(n, "folder", "folders"), gidS))
 		}
 		if k.Narrowed.N > 0 {
-			lines = append(lines, p.Sprintf("%d existing ACL entries are narrowed to what they grant today.", k.Narrowed.N))
+			lines = append(lines, p.Sprintf("%d existing ACL %s %s narrowed to what they grant today.", k.Narrowed.N, plural(k.Narrowed.N, "entry", "entries"), plural(k.Narrowed.N, "is", "are")))
 		}
 		if d.OwnerUID != nil && k.ChangeOwner.N > 0 {
-			lines = append(lines, p.Sprintf("%d entries change owner to uid %s.", k.ChangeOwner.N, strconv.Itoa(*d.OwnerUID)))
+			lines = append(lines, p.Sprintf("%d %s %s owner to uid %s.", k.ChangeOwner.N, plural(k.ChangeOwner.N, "entry", "entries"), plural(k.ChangeOwner.N, "changes", "change"), strconv.Itoa(*d.OwnerUID)))
 			for _, u := range slices.Sorted(maps.Keys(k.KeepUser)) {
-				lines = append(lines, p.Sprintf("uid %s keeps the access it has now through an ACL on %d entries.", strconv.Itoa(u), k.KeepUser[u]))
+				lines = append(lines, p.Sprintf("uid %s keeps the access it has now through an ACL on %d %s.", strconv.Itoa(u), k.KeepUser[u], plural(k.KeepUser[u], "entry", "entries")))
 			}
 		}
 		if d.Files == "rw" {
@@ -1746,8 +1755,8 @@ func (h *Hub) computeUndo(ctx context.Context, id string) (*undoCalc, error) {
 	p := message.NewPrinter(language.English)
 	at := u.apply.At.UTC().Format("2006-01-02 15:04 UTC")
 	lines := []string{
-		p.Sprintf("Undo the permissions fix of %s: snapshot %s recorded %d entries.", at, snapshotTS(u.apply.Snapshot), hdr.Entries),
-		p.Sprintf("%d entries go back to the owner, group, mode and ACLs they had before the fix; %d changed since the fix and are left alone.", dry.ToRestore, dry.ChangedSince.N),
+		p.Sprintf("Undo the permissions fix of %s: snapshot %s recorded %d %s.", at, snapshotTS(u.apply.Snapshot), hdr.Entries, plural(hdr.Entries, "entry", "entries")),
+		p.Sprintf("%d %s %s back to the owner, group, mode and ACLs they had before the fix; %d changed since the fix and are left alone.", dry.ToRestore, plural(dry.ToRestore, "entry", "entries"), plural(dry.ToRestore, "goes", "go"), dry.ChangedSince.N),
 		"An undo snapshot of the entries it rewrites is saved first, as a safety copy: an undo can't be undone.",
 		"The setting values don't change.",
 	}
@@ -1930,7 +1939,7 @@ func (h *Hub) runUndo(id string, u *undoCalc) (map[string]string, []string, stri
 		return result, warnings, detail(), fail(fmt.Errorf("the restore failed: %w", err), errStatus(err) != http.StatusConflict)
 	}
 	if rep.Failed.N > 0 {
-		return result, warnings, detail(), fail(statusErr(http.StatusInternalServerError, "%d entries couldn't be restored", rep.Failed.N), true)
+		return result, warnings, detail(), fail(statusErr(http.StatusInternalServerError, "%d %s couldn't be restored", rep.Failed.N, plural(rep.Failed.N, "entry", "entries")), true)
 	}
 	// Verify (R56): a restore dry run now finds nothing left to rewrite.
 	ver, err := h.restoreDryRun(ctx, id, u.apply.Snapshot, f)
@@ -1938,12 +1947,12 @@ func (h *Hub) runUndo(id string, u *undoCalc) (map[string]string, []string, stri
 		return result, warnings, detail(), fail(fmt.Errorf("the undo's verify failed: %w", err), true)
 	}
 	if ver.ToRestore > 0 {
-		return result, warnings, detail(), fail(statusErr(http.StatusInternalServerError, "the undo's verify found %d entries still as the fix left them", ver.ToRestore), true)
+		return result, warnings, detail(), fail(statusErr(http.StatusInternalServerError, "the undo's verify found %d %s still as the fix left them", ver.ToRestore, plural(ver.ToRestore, "entry", "entries")), true)
 	}
 	result["entries"] = strconv.FormatInt(rep.Changed, 10)
 	result["changed_since"] = strconv.FormatInt(rep.ChangedSince.N, 10)
 	if rep.ChangedSince.N > 0 {
-		warnings = append(warnings, message.NewPrinter(language.English).Sprintf("%d entries changed since the fix and were left alone", rep.ChangedSince.N))
+		warnings = append(warnings, message.NewPrinter(language.English).Sprintf("%d %s changed since the fix and were left alone", rep.ChangedSince.N, plural(rep.ChangedSince.N, "entry", "entries")))
 	}
 
 	m.Phase = "state"

@@ -249,7 +249,7 @@ func (h *Hub) computeRecheck(ctx context.Context, id string) (*IdentityCheck, er
 		return fmt.Sprintf("device %d, inode %d, mounted from `%s`", i.Dev, i.Ino, i.MountRoot)
 	}
 	c.Lines = []string{"Stored: " + show(c.Old) + ".", "Now: " + show(c.New) + "."}
-	counts := message.NewPrinter(language.English).Sprintf("`%s` holds %d files and %d folders on %s", f.Path, c.Files, c.Dirs, c.FSType)
+	counts := message.NewPrinter(language.English).Sprintf("`%s` holds %d %s and %d %s on %s", f.Path, c.Files, plural(c.Files, "file", "files"), c.Dirs, plural(c.Dirs, "folder", "folders"), c.FSType)
 	if c.Partial {
 		counts += " (a partial count)"
 	}
