@@ -920,6 +920,12 @@ func (h *Hub) writePolicy() (attrsWritten bool, retErr error) {
 			continue
 		}
 		covered[t.ID] = true
+		// Router-less instances (contract §3, §4): publish no hosts, groups
+		// or policy. They have no routers, so no hostnames, and get no
+		// Keycloak client or access role.
+		if t.Manifest.Routerless() {
+			continue
+		}
 		app := policy.App{
 			ID:          t.ID,
 			Enabled:     true,

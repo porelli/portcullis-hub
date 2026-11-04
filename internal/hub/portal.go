@@ -28,6 +28,9 @@ type PortalApp struct {
 	// signed-in user); AdminGroup is informational.
 	AccessGroup string `json:"access_group"`
 	AdminGroup  string `json:"admin_group"`
+	// Note is the template's auth.notes for router-less instances
+	// (contract §10); present only when URLs is empty.
+	Note string `json:"note,omitempty"`
 }
 
 // PortalDocument is portal-apps.json (contract §10).
@@ -53,7 +56,14 @@ func (h *Hub) portalLocked() PortalDocument {
 		}
 		m := t.Manifest
 		a := PortalApp{ID: t.ID, Template: t.TemplateID, Name: instanceName(t), Description: m.Description, Icon: m.Icon, Category: m.Category,
-			URLs: append([]templates.AppURL{}, m.URLs...), AuthMethod: m.Auth.Method, AdminGroup: m.Auth.AdminGroup}
+			AuthMethod: m.Auth.Method, AdminGroup: m.Auth.AdminGroup}
+		// Router-less instances (contract §3, §10): URLs empty, note present.
+		if m.Routerless() {
+			a.URLs = []templates.AppURL{}
+			a.Note = m.Auth.Notes
+		} else {
+			a.URLs = append([]templates.AppURL{}, m.URLs...)
+		}
 		if h.accessLocked(t).groupAccess(t) {
 			a.AccessGroup = m.Auth.AccessGroup
 		}

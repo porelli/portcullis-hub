@@ -137,7 +137,8 @@ func (h *Hub) MyApps(ctx context.Context, user string) (*MyAppsView, error) {
 			}
 		}
 		app := MyApp{ID: t.ID, Name: instanceName(t), Icon: t.Manifest.Icon, Values: []MyValue{}, Entries: []MyEntry{}, Credentials: []MyCredential{}}
-		if len(t.Manifest.URLs) > 0 {
+		// Router-less instances (contract §3): URL is empty string.
+		if !t.Manifest.Routerless() && len(t.Manifest.URLs) > 0 {
 			app.URL = t.Manifest.URLs[0].URL
 		}
 		if eo := entryOptions(t); len(eo) > 0 && inPopulation(h.entryPopulationLocked(t, m), user) {
