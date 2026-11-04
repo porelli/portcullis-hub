@@ -453,10 +453,55 @@ func fixerWarnings(rep *folderfix.Report) []string {
 	return []string{w + " (run the doctor's disk check again)"}
 }
 
+// coreProject / hubService: the compose labels the Hub's own container
+// carries (core's docker-compose.yml: `name: portcullis`, service `hub`).
+const (
+	coreProject = "portcullis"
+	hubService  = "hub"
+)
+
+// selfMountRe matches the root field of the hostname / hosts / resolv.conf
+// bind mounts Docker gives every container:
+// …/docker/containers/<64 hex>/<file>.
+var selfMountRe = regexp.MustCompile(`(?:^|/)docker/containers/([0-9a-f]{64})/(hostname|hosts|resolv\.conf)$`)
+
+// selfContainerID is the Hub's own container ID from /proc/self/mountinfo
+// (R53): the root of the /etc/hostname, /etc/hosts or /etc/resolv.conf mount.
+// Every such mount must name the same 64-hex ID; none, or two IDs, is an
+// error. Never a name or prefix lookup another container could shadow.
+func selfContainerID(mountinfo []byte) (string, error) {
+	id := ""
+	for _, line := range strings.Split(string(mountinfo), "\n") {
+		f := strings.Fields(line)
+		if len(f) < 5 {
+			continue
+		}
+		root, point := f[3], f[4]
+		if point != "/etc/hostname" && point != "/etc/hosts" && point != "/etc/resolv.conf" {
+			continue
+		}
+		m := selfMountRe.FindStringSubmatch(root)
+		if m == nil || "/etc/"+m[2] != point {
+			continue
+		}
+		if id != "" && id != m[1] {
+			return "", errors.New("mountinfo names two containers")
+		}
+		id = m[1]
+	}
+	if id == "" {
+		return "", errors.New("no docker/containers/<id>/ mount in /proc/self/mountinfo")
+	}
+	return id, nil
+}
+
 // selfImage is the image the fixer runs: Config.FixerImage (development,
 // HUB_FIXER_IMAGE with HUB_DEV=1; pulled if missing), else the image ID of
-// the Hub's own container, found by inspecting its hostname. Cached once
-// found; a failure is a 503 and is retried on the next run.
+// the Hub's own container (R53): its full ID from mountinfo
+// (selfContainerID), inspected by that ID, which must come back equal and
+// carry the labels com.docker.compose.project=portcullis and
+// com.docker.compose.service=hub. Any failure is a 503 with no fallback
+// (no hostname lookup), retried on the next run; cached once found.
 func (h *Hub) selfImage(ctx context.Context) (string, error) {
 	h.fixerMu.Lock()
 	defer h.fixerMu.Unlock()
@@ -473,16 +518,26 @@ func (h *Hub) selfImage(ctx context.Context) (string, error) {
 		h.fixerImage = ref
 		return ref, nil
 	}
-	name, err := h.hostname()
-	if err != nil || name == "" {
-		return fail("no hostname (%v)", err)
-	}
-	ci, err := h.engine.InspectContainer(ctx, name)
+	mi, err := h.mountinfo()
 	if err != nil {
-		return fail("inspecting container %q: %v", name, err)
+		return fail("reading mountinfo: %v", err)
+	}
+	id, err := selfContainerID(mi)
+	if err != nil {
+		return fail("%v", err)
+	}
+	ci, err := h.engine.InspectContainer(ctx, id)
+	if err != nil {
+		return fail("inspecting container %s: %v", id[:12], err)
+	}
+	if ci.ID != id {
+		return fail("inspecting %s answered container %q", id[:12], ci.ID)
+	}
+	if ci.Labels[docker.LabelProject] != coreProject || ci.Labels[docker.LabelService] != hubService {
+		return fail("container %s is not core's hub service (project %q, service %q)", id[:12], ci.Labels[docker.LabelProject], ci.Labels[docker.LabelService])
 	}
 	if !docker.PinnedImage(ci.Image) || !strings.HasPrefix(ci.Image, "sha256:") {
-		return fail("container %q reports image %q, not an image ID", name, ci.Image)
+		return fail("container %s reports image %q, not an image ID", id[:12], ci.Image)
 	}
 	h.fixerImage = ci.Image
 	return ci.Image, nil

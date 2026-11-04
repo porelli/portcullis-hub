@@ -196,10 +196,10 @@ type Hub struct {
 	idp     IdP
 	attrs   AttrStore // LLDAP user attributes (setting claims); nil: none
 	// fixerImage caches selfImage (fixer.go; guarded by fixerMu, never
-	// mu); hostname is os.Hostname (test-settable).
+	// mu); mountinfo reads /proc/self/mountinfo (test-settable).
 	fixerMu    sync.Mutex
 	fixerImage string
-	hostname   func() (string, error)
+	mountinfo  func() ([]byte, error)
 	// domains lists the main and enrolled domains (hosts.go); audit
 	// receives instance operations (SetAudit). Both guarded by mu.
 	domains DomainSource
@@ -389,7 +389,7 @@ func New(cfg Config, runner compose.Runner, engine Engine, idp IdP) (*Hub, error
 		driftKey:    map[string]string{},
 		afterFunc:   realAfterFunc,
 		sleep:       realSleep,
-		hostname:    os.Hostname,
+		mountinfo:   func() ([]byte, error) { return os.ReadFile("/proc/self/mountinfo") },
 	}
 	// The known list in state.yaml (empty = only the main domain).
 	h.domains = knownDomains{h}

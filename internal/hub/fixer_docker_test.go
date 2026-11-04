@@ -386,3 +386,21 @@ func first(s []string) string {
 	}
 	return clipRunes(s[0], 160)
 }
+
+// R53 on a real daemon: a container's own mountinfo names its full ID, and
+// inspecting that ID answers the same ID and its compose labels.
+func TestDockerSelfContainerID(t *testing.T) {
+	c := dockerOrSkip(t)
+	id := dockerCLI(t, "run", "-d", "--network", "none", "--label", "com.docker.compose.project=portcullis",
+		"--label", "com.docker.compose.service=hub", HelperImage, "sleep", "60")
+	t.Cleanup(func() { exec.Command("docker", "rm", "-f", id).Run() })
+	mi := dockerCLI(t, "exec", id, "cat", "/proc/self/mountinfo")
+	got, err := selfContainerID([]byte(mi))
+	if err != nil || got != id {
+		t.Fatalf("selfContainerID = %q, %v; want %q\n%s", got, err, id, mi)
+	}
+	ci, err := c.InspectContainer(context.Background(), got)
+	if err != nil || ci.ID != id || ci.Labels[docker.LabelProject] != coreProject || ci.Labels[docker.LabelService] != hubService || !strings.HasPrefix(ci.Image, "sha256:") {
+		t.Errorf("inspect = %+v, %v", ci, err)
+	}
+}

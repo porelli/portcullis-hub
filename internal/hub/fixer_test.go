@@ -21,13 +21,28 @@ import (
 
 var testSelfImage = "sha256:" + strings.Repeat("c", 64)
 
-// newFixerFixture: a Hub whose own container ("hubhost") runs testSelfImage.
+// testSelfID is the Hub's own container; testMountinfo its mountinfo.
+var (
+	testSelfID    = strings.Repeat("9", 64)
+	testMountinfo = mountinfoFor(testSelfID)
+	selfLabels    = map[string]string{docker.LabelProject: "portcullis", docker.LabelService: "hub"}
+)
+
+func mountinfoFor(id string) string {
+	return "340 300 0:50 / / ro,relatime - overlay overlay rw\n" +
+		"349 340 254:1 /docker/containers/" + id + "/hostname /etc/hostname rw,relatime - ext4 /dev/vda1 rw\n" +
+		"350 340 254:1 /docker/containers/" + id + "/hosts /etc/hosts rw,relatime - ext4 /dev/vda1 rw\n" +
+		"351 340 254:1 /docker/containers/" + id + "/resolv.conf /etc/resolv.conf rw,relatime - ext4 /dev/vda1 rw\n"
+}
+
+// newFixerFixture: a Hub whose own container (testSelfID, core's hub
+// service) runs testSelfImage.
 func newFixerFixture(t *testing.T) *fixture {
 	t.Helper()
 	f := newFixture(t)
 	fx := f.engine.fx()
-	fx.inspect = map[string]docker.ContainerInfo{"hubhost": {ID: "hubhostfull", Image: testSelfImage}}
-	f.h.hostname = func() (string, error) { return "hubhost", nil }
+	fx.inspect = map[string]docker.ContainerInfo{testSelfID: {ID: testSelfID, Image: testSelfImage, Labels: selfLabels}}
+	f.h.mountinfo = func() ([]byte, error) { return []byte(testMountinfo), nil }
 	return f
 }
 
@@ -254,7 +269,7 @@ func TestFixerImageResolution(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h.hostname = func() (string, error) { t.Error("inspected itself with FixerImage set"); return "", errors.New("x") }
+	h.mountinfo = func() ([]byte, error) { t.Error("inspected itself with FixerImage set"); return nil, errors.New("x") }
 	if img, err := h.selfImage(context.Background()); err != nil || img != dev {
 		t.Errorf("selfImage = %q, %v", img, err)
 	}
@@ -262,23 +277,77 @@ func TestFixerImageResolution(t *testing.T) {
 		t.Errorf("pulled %v", v.images)
 	}
 
-	// Unset: the Hub's own container's image ID, cached.
+	// Unset: the Hub's own container's image ID, inspected by its full ID
+	// from mountinfo (R53), cached.
 	f := newFixerFixture(t)
 	for range 2 {
 		if img, err := f.h.selfImage(context.Background()); err != nil || img != testSelfImage {
 			t.Errorf("selfImage = %q, %v", img, err)
 		}
 	}
-	if got := f.engine.fx().inspected; !slices.Equal(got, []string{"hubhost"}) {
+	if got := f.engine.fx().inspected; !slices.Equal(got, []string{testSelfID}) {
 		t.Errorf("inspected %v", got)
 	}
 
-	// Inspect fails, or answers no image ID: 503, nothing run.
+	other := strings.Repeat("7", 64)
+	short := testSelfID[:12]
+	hostname, _ := os.Hostname()
 	for name, fix := range map[string]func(*fixture){
 		"not found": func(f *fixture) { f.engine.fx().inspect = nil },
 		"error":     func(f *fixture) { f.engine.fx().inspectErr = errors.New("proxy down") },
-		"tag":       func(f *fixture) { f.engine.fx().inspect["hubhost"] = docker.ContainerInfo{Image: "ghcr.io/x:edge"} },
-		"hostname":  func(f *fixture) { f.h.hostname = func() (string, error) { return "", errors.New("no hostname") } },
+		"tag": func(f *fixture) {
+			f.engine.fx().inspect[testSelfID] = docker.ContainerInfo{ID: testSelfID, Image: "ghcr.io/x:edge", Labels: selfLabels}
+		},
+		// Another container answers for the Hub's id (a name or prefix
+		// that shadows it): its ID differs.
+		"shadowing container": func(f *fixture) {
+			f.engine.fx().inspect[testSelfID] = docker.ContainerInfo{ID: other, Image: testSelfImage, Labels: selfLabels}
+		},
+		// A container named after the Hub's hostname or short id is never
+		// consulted: mountinfo names another container, which isn't there.
+		"hostname shadow": func(f *fixture) {
+			fx := f.engine.fx()
+			fx.inspect[hostname] = docker.ContainerInfo{ID: other, Image: testSelfImage, Labels: selfLabels}
+			fx.inspect[short] = docker.ContainerInfo{ID: other, Image: testSelfImage, Labels: selfLabels}
+			delete(fx.inspect, testSelfID)
+		},
+		"label project": func(f *fixture) {
+			f.engine.fx().inspect[testSelfID] = docker.ContainerInfo{ID: testSelfID, Image: testSelfImage,
+				Labels: map[string]string{docker.LabelProject: "portcullis-evil", docker.LabelService: "hub"}}
+		},
+		"label service": func(f *fixture) {
+			f.engine.fx().inspect[testSelfID] = docker.ContainerInfo{ID: testSelfID, Image: testSelfImage,
+				Labels: map[string]string{docker.LabelProject: "portcullis", docker.LabelService: "hubx"}}
+		},
+		"no labels": func(f *fixture) {
+			f.engine.fx().inspect[testSelfID] = docker.ContainerInfo{ID: testSelfID, Image: testSelfImage}
+		},
+		"mountinfo unreadable": func(f *fixture) { f.h.mountinfo = func() ([]byte, error) { return nil, errors.New("no /proc") } },
+		"mountinfo garbage":    func(f *fixture) { f.h.mountinfo = func() ([]byte, error) { return []byte("garbage\n\x00\x01 x"), nil } },
+		"mountinfo no docker mount": func(f *fixture) {
+			f.h.mountinfo = func() ([]byte, error) { return []byte("340 300 0:50 / / ro - overlay overlay rw\n"), nil }
+		},
+		"mountinfo short id": func(f *fixture) {
+			f.h.mountinfo = func() ([]byte, error) {
+				return []byte("349 340 254:1 /docker/containers/" + short + "/hostname /etc/hostname rw - ext4 /dev/vda1 rw\n"), nil
+			}
+		},
+		"mountinfo two ids": func(f *fixture) {
+			mi := mountinfoFor(testSelfID) + strings.Replace(mountinfoFor(other), "/etc/hostname", "/etc/hosts", 1)
+			f.h.mountinfo = func() ([]byte, error) { return []byte(mi), nil }
+		},
+		// A container's hosts file bound as /etc/hostname is not the
+		// Docker-made mount.
+		"mountinfo crossed file": func(f *fixture) {
+			f.h.mountinfo = func() ([]byte, error) {
+				return []byte("349 340 254:1 /docker/containers/" + testSelfID + "/hosts /etc/hostname rw - ext4 /dev/vda1 rw\n"), nil
+			}
+		},
+		"mountinfo wrong mount point": func(f *fixture) {
+			f.h.mountinfo = func() ([]byte, error) {
+				return []byte("349 340 254:1 /docker/containers/" + testSelfID + "/hostname /srv/x rw - ext4 /dev/vda1 rw\n"), nil
+			}
+		},
 	} {
 		f := newFixerFixture(t)
 		fix(f)
@@ -289,13 +358,29 @@ func TestFixerImageResolution(t *testing.T) {
 		if n := len(f.engine.fx().Specs()); n != 0 {
 			t.Errorf("%s: %d helpers started", name, n)
 		}
+		for _, id := range f.engine.fx().inspected {
+			if id != testSelfID {
+				t.Errorf("%s: inspected %q, not the full id from mountinfo", name, id)
+			}
+		}
 		// A failure is not cached: the next run tries again.
 		f.engine.fx().inspectErr = nil
-		f.engine.fx().inspect = map[string]docker.ContainerInfo{"hubhost": {Image: testSelfImage}}
-		f.h.hostname = func() (string, error) { return "hubhost", nil }
+		f.engine.fx().inspect = map[string]docker.ContainerInfo{testSelfID: {ID: testSelfID, Image: testSelfImage, Labels: selfLabels}}
+		f.h.mountinfo = func() ([]byte, error) { return []byte(testMountinfo), nil }
 		if _, err := f.h.runFixer(context.Background(), fixerRun{Mode: "scan", Source: "/srv/x"}); err != nil {
 			t.Errorf("%s: retry: %v", name, err)
 		}
+	}
+}
+
+// The native layout (/var/lib/docker on the root filesystem) parses too.
+func TestSelfContainerID(t *testing.T) {
+	native := "1 0 8:1 /var/lib/docker/containers/" + testSelfID + "/resolv.conf /etc/resolv.conf rw - ext4 /dev/sda1 rw\n"
+	if id, err := selfContainerID([]byte(native)); err != nil || id != testSelfID {
+		t.Errorf("native: %q, %v", id, err)
+	}
+	if _, err := selfContainerID([]byte("1 0 8:1 /var/lib/podman/containers/" + testSelfID + "/hostname /etc/hostname rw - ext4 /dev/sda1 rw\n")); err == nil {
+		t.Error("a non-docker path accepted")
 	}
 }
 
