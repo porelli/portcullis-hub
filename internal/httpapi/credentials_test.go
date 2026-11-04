@@ -290,24 +290,25 @@ func TestAdminCredentialRoutes(t *testing.T) {
 		t.Fatalf("GET as root = %d, want 200: %s", w.Code, w.Body.String())
 	}
 
-	// Check no password or hash in response
-	bodyText := strings.ToLower(w.Body.String())
-	if strings.Contains(bodyText, "password") {
-		t.Error("admin view contains 'password'")
-	}
-	// Check for 32-hex patterns (NT hash)
-	hexPattern := regexp.MustCompile(`[0-9a-f]{32}`)
-	if hexPattern.MatchString(bodyText) {
-		t.Error("admin view contains 32-hex value (possible hash)")
-	}
-
-	// Verify JSON structure
+	// Verify JSON structure first
 	var views []hub.CredentialsView
 	if err := json.Unmarshal(w.Body.Bytes(), &views); err != nil {
 		t.Fatalf("invalid JSON: %v", err)
 	}
 	if len(views) == 0 {
 		t.Error("expected at least one credentials view")
+	}
+
+	// Check no password value or hash in response (field names like "share_password" are OK)
+	bodyText := strings.ToLower(w.Body.String())
+	// "password" field should not appear (option key "share_password" is OK)
+	if strings.Contains(bodyText, `"password":`) {
+		t.Error("admin view contains password value field")
+	}
+	// Check for 32-hex patterns (NT hash)
+	hexPattern := regexp.MustCompile(`[0-9a-f]{32}`)
+	if hexPattern.MatchString(bodyText) {
+		t.Error("admin view contains 32-hex value (possible hash)")
 	}
 
 	// DELETE as root (audited)
