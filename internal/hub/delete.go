@@ -300,7 +300,7 @@ func (h *Hub) deleteSteps(id, actor string, res *DeleteResult) error {
 	// Its folder uses went with its values; its write confirmations go
 	// too (contract §14.1).
 	dropWriteConfirmed(h.st.Folders, id)
-	delete(h.folderChanged, id)
+	delete(h.st.FolderChanged, id)
 	h.rebuildLocked()
 	h.refreshPublishedLocked()
 	saveErr := h.st.Save(h.statePath())

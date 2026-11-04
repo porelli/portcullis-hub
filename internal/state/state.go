@@ -149,6 +149,13 @@ type AppState struct {
 	// a deleted folder's gid stays here, so it is never reused.
 	Folders    map[string]Folder `json:"folders,omitempty" yaml:"folders,omitempty"`
 	FolderGIDs []int             `json:"folder_gids,omitempty" yaml:"folder_gids,omitempty"`
+	// FolderChanged: per instance, the folder value whose root or subpath
+	// changed on disk around its last up (the doctor's folder_changed,
+	// contract §14.5); kept across restarts, cleared by the instance's
+	// next successful up and by its delete.
+	FolderChanged map[string][]FolderChange `json:"folder_changed,omitempty" yaml:"folder_changed,omitempty"`
+	// DoctorMutes: finding fingerprint → its mute (contract §14.5).
+	DoctorMutes map[string]DoctorMute `json:"doctor_mutes,omitempty" yaml:"doctor_mutes,omitempty"`
 
 	// LegacyPassword lists, after Load, the policies that named the removed
 	// "password" factor and were normalised ("" = the global default). Not
@@ -376,6 +383,26 @@ type FolderApply struct {
 	Files    string    `json:"files" yaml:"files"` // rw | r
 	OwnerUID *int      `json:"owner_uid,omitempty" yaml:"owner_uid,omitempty"`
 	Snapshot string    `json:"snapshot,omitempty" yaml:"snapshot,omitempty"` // "<folder>/<ts>.ndjson.gz"
+}
+
+// FolderChange is a folder value whose root or subpath changed on disk
+// while its instance started (R44; doctor finding folder_changed).
+type FolderChange struct {
+	Instance string    `json:"instance" yaml:"instance"`
+	Key      string    `json:"key" yaml:"key"`
+	Folder   string    `json:"folder" yaml:"folder"`
+	Subpath  string    `json:"subpath" yaml:"subpath"`
+	At       time.Time `json:"at" yaml:"at"`
+	Detail   string    `json:"detail" yaml:"detail"`
+}
+
+// DoctorMute is an admin's mute of a doctor finding: the reason, who and
+// when, and the finding's inputs digest (a changed digest unmutes it).
+type DoctorMute struct {
+	Reason string    `json:"reason" yaml:"reason"`
+	Actor  string    `json:"actor" yaml:"actor"`
+	At     time.Time `json:"at" yaml:"at"`
+	Inputs string    `json:"inputs" yaml:"inputs"`
 }
 
 // Folder field limits (contract §14.1).

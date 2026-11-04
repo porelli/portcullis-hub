@@ -566,18 +566,11 @@ func restoredFolderWarnings(t *templates.Template, newID string, c *instanceConf
 
 // ── the probes around an up (ruling 24, R44) ─────────────
 
-// FolderChange is a folder value whose subpath changed on disk while
-// its instance started (doctor finding folder_changed, Problem,
-// explain-only: Task 9 shows it). Kept in memory until the instance's
-// next up passes both probes.
-type FolderChange struct {
-	Instance string    `json:"instance"`
-	Key      string    `json:"key"`
-	Folder   string    `json:"folder"`
-	Subpath  string    `json:"subpath"`
-	At       time.Time `json:"at"`
-	Detail   string    `json:"detail"`
-}
+// FolderChange is a folder value whose root or subpath changed on disk
+// while its instance started (doctor finding folder_changed, Problem,
+// explain-only). Kept in state.yaml (folder_changed: it survives a Hub
+// restart) until the instance's next successful up, or its delete.
+type FolderChange = state.FolderChange
 
 // FolderChanges lists the recorded folder_changed states (sorted by
 // instance, then key).
@@ -585,7 +578,7 @@ func (h *Hub) FolderChanges() []FolderChange {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	out := []FolderChange{}
-	for _, l := range h.folderChanged {
+	for _, l := range h.st.FolderChanged {
 		out = append(out, l...)
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -743,18 +736,25 @@ func (h *Hub) forceDown(ctx context.Context, live *templates.Template) error {
 }
 
 // recordFolderChange records (or, p nil, clears) instance id's
-// folder_changed state.
+// folder_changed state in state.yaml (a save failure is logged: the
+// record stays in memory).
 func (h *Hub) recordFolderChange(id string, p *folderProbe, detail string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if p == nil {
-		delete(h.folderChanged, id)
-		return
+		if _, ok := h.st.FolderChanged[id]; !ok {
+			return
+		}
+		delete(h.st.FolderChanged, id)
+	} else {
+		if h.st.FolderChanged == nil {
+			h.st.FolderChanged = map[string][]FolderChange{}
+		}
+		h.st.FolderChanged[id] = []FolderChange{{Instance: id, Key: p.key, Folder: p.folder, Subpath: p.sub, At: time.Now().UTC(), Detail: detail}}
 	}
-	if h.folderChanged == nil {
-		h.folderChanged = map[string][]FolderChange{}
+	if err := h.st.Save(h.statePath()); err != nil {
+		log.Printf("ERROR: shared folders: %s: saving the folder_changed record: %v", id, err)
 	}
-	h.folderChanged[id] = []FolderChange{{Instance: id, Key: p.key, Folder: p.folder, Subpath: p.sub, At: time.Now().UTC(), Detail: detail}}
 }
 
 // ── path usages ──────────────────────────────────────────
