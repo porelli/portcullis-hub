@@ -88,7 +88,24 @@ func (h *Hub) PersonID(pool, user string) (int, bool) {
 	return h.personIDLocked(pool, user)
 }
 
-// personIDLocked is PersonID for a caller holding mu (the renderers).
+// personIDForLocked is user's id in pool only while the entry belongs to
+// the account the directory names now: uuid non-empty and equal to the
+// entry's. A re-created account (another uuid) whose new id couldn't be
+// allocated gets nothing — never the former account's id (F9). Caller
+// holds mu (the renderers).
+func (h *Hub) personIDForLocked(pool, user, uuid string) (int, bool) {
+	if uuid == "" {
+		return 0, false
+	}
+	for _, e := range h.st.PersonIDs[pool].Entries {
+		if e.User == user && e.RetiredAt == nil && e.UUID == uuid {
+			return e.ID, true
+		}
+	}
+	return 0, false
+}
+
+// personIDLocked is PersonID for a caller holding mu.
 func (h *Hub) personIDLocked(pool, user string) (int, bool) {
 	for _, e := range h.st.PersonIDs[pool].Entries {
 		if e.User == user && e.RetiredAt == nil {

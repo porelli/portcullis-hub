@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -489,6 +490,163 @@ func TestHookReportStored(t *testing.T) {
 	for _, u := range f.h.DeliveryStatus(smbID).Units {
 		if strings.Contains(u.Error, "PORTCULLIS-REPORT") {
 			t.Errorf("the report line is in unit %s: %q", u.Unit, u.Error)
+		}
+	}
+}
+
+// Fix round 1 #1: a re-created account (another LLDAP uuid) never gets
+// the former account's uid, even when its own can't be allocated: it is
+// left out of the file.
+func TestRecreatedAccountNoOldUID(t *testing.T) {
+	c := credSvcFixture(t)
+	shareSetup(t, c)
+	old := mustPersonID(t, c.f.h, "alice")
+	c.f.h.mu.Lock()
+	p := c.f.h.st.PersonIDs[templates.PoolPOSIXUID]
+	p.Next = 60000 // exhausted: ensurePersonIDs fails for the new account
+	c.f.h.st.PersonIDs[templates.PoolPOSIXUID] = p
+	c.f.h.mu.Unlock()
+	c.people.recreate("alice")
+	c.people.addGroup("users_"+smbID, "alice")
+	c.people.addGroup("office_milan", "alice")
+	if _, err := c.f.h.Deliver(context.Background(), smbID, TriggerMembership); err != nil {
+		t.Fatal(err)
+	}
+	settle(c.f)
+	for _, l := range tsvLines(t, c.f, smbID) {
+		if strings.Contains(l, "alice") || strings.Contains(l, strconv.Itoa(old)) {
+			t.Errorf("the re-created alice (or her former uid %d) is in the file: %q", old, l)
+		}
+	}
+	c.f.h.mu.RLock()
+	got := c.f.h.expandedMembersLocked(c.f.h.findLocked(smbID), mustMembership(t, c.f.h))
+	c.f.h.mu.RUnlock()
+	if slices.Contains(got[membersPopulation], "alice") || slices.Contains(got["share1_readers"], "alice") {
+		t.Errorf("expandedMembersLocked = %v", got)
+	}
+}
+
+// Fix round 1 #4: the panel shows each instance group value's bound id
+// and sends it back; a name sent with an id that isn't stored for it is
+// 409 (a stale panel never re-binds a purged or re-created group); a name
+// without an id is new.
+func TestShareGroupStalePanel(t *testing.T) {
+	c := credSvcFixture(t)
+	shareSetup(t, c)
+	old := c.people.id("office_milan")
+	p, err := c.f.h.SettingsPanel(context.Background(), smbID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := p.InstanceGroupIDs["share1_readers"]["office_milan"]; got != old {
+		t.Fatalf("panel instance_group_ids = %+v", p.InstanceGroupIDs)
+	}
+	// Purged and re-created meanwhile; the panel resends what it showed.
+	c.people.deleteGroup("office_milan")
+	c.f.h.PurgeGroupSettings(context.Background(), "root", "office_milan", old)
+	c.people.addGroup("office_milan", "alice")
+	settle(c.f)
+	stale := SettingsUpdate{
+		Values:        vals("share1_readers", []string{"office_milan"}),
+		ValueGroupIDs: map[string]map[string]int{"share1_readers": {"office_milan": old}},
+	}
+	if _, err := c.f.h.SaveSettings(smbID, stale, "root"); statusOf(err) != 409 || !strings.Contains(err.Error(), "re-created since it was saved") {
+		t.Errorf("stale panel save = %v", err)
+	}
+	if _, err := c.f.h.PreviewSettings(context.Background(), smbID, stale); statusOf(err) != 409 {
+		t.Errorf("stale panel preview = %v", err)
+	}
+	// Without an id: a new name, bound to the group's current id.
+	if _, err := c.f.h.SaveSettings(smbID, SettingsUpdate{Values: vals("share1_readers", []string{"office_milan"})}, "root"); err != nil {
+		t.Fatalf("a new name: %v", err)
+	}
+	if got := storedSettings(c.f, smbID).GroupIDs["share1_readers"]["office_milan"]; got != c.people.id("office_milan") {
+		t.Errorf("bound to %d", got)
+	}
+	// The current id sent back: accepted.
+	cur := SettingsUpdate{
+		Values:        vals("share1_readers", []string{"office_milan", "users_" + smbID}),
+		ValueGroupIDs: map[string]map[string]int{"share1_readers": {"office_milan": c.people.id("office_milan")}},
+	}
+	if _, err := c.f.h.SaveSettings(smbID, cur, "root"); err != nil {
+		t.Errorf("the current id: %v", err)
+	}
+}
+
+// Fix round 1 #5: an expired membership of a share group is left out of
+// the expanded list.
+func TestExpiredShareMemberLeftOut(t *testing.T) {
+	c := credSvcFixture(t)
+	shareSetup(t, c)
+	c.people.set(func(p *fakePeople) { p.expired["bob"] = map[string]bool{"office_milan": true} })
+	if _, err := c.f.h.Deliver(context.Background(), smbID, TriggerMembership); err != nil {
+		t.Fatal(err)
+	}
+	settle(c.f)
+	lines := tsvLines(t, c.f, smbID)
+	if !slices.Contains(lines, "value\tshare1_readers\talice") || !slices.Contains(lines, "value\tshare1_writers\talice,bob,root") {
+		t.Errorf("readers / writers:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+// Fix round 1 #5: with the directory down the last people.tsv is kept and
+// a hook report is ignored (its subjects can't be checked).
+func TestDirectoryDownKeepsFileIgnoresReport(t *testing.T) {
+	c := credSvcFixture(t)
+	shareSetup(t, c)
+	before, err := os.ReadFile(c.f.tsvPath(smbID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.people.set(func(p *fakePeople) { p.err = errors.New("lldap down") })
+	answerHooks(c.f, goodReport+"\n", 0)
+	rep, err := c.f.h.Deliver(context.Background(), smbID, TriggerRetry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ran := false
+	for _, u := range rep.Units {
+		if u.Unit == "file:people" && u.Skipped != SkipDirectory {
+			t.Errorf("people unit = %+v", u)
+		}
+		if u.Unit == "hook:sync" && u.OK {
+			ran = true
+		}
+	}
+	if !ran {
+		t.Fatalf("the hook didn't run: %+v", rep.Units)
+	}
+	after, _ := os.ReadFile(c.f.tsvPath(smbID))
+	if string(after) != string(before) {
+		t.Errorf("people.tsv changed with the directory down:\n%s", after)
+	}
+	if r, ok := c.f.h.HookReport(smbID); ok {
+		t.Errorf("a report was stored with the directory down: %+v", r)
+	}
+}
+
+// Fix round 1 #6: saving the same effective list restarts nothing.
+func TestLocalNetworksUnchangedNoRestart(t *testing.T) {
+	c := credSvcFixture(t)
+	f := c.f
+	for _, step := range []struct {
+		name  string
+		cidrs []string
+		want  bool
+	}{
+		{"defaults again", nil, false},
+		{"defaults written out", append([]string{}, DefaultLocalNetworks...), false},
+		{"a change", []string{"192.168.1.0/24"}, true},
+		{"the same list", []string{"192.168.1.0/24"}, false},
+	} {
+		before := len(f.runner.Calls())
+		if err := f.h.SetLocalNetworks(step.cidrs, "root"); err != nil {
+			t.Fatal(err)
+		}
+		f.h.Wait()
+		got := slices.Contains(f.runner.Calls()[before:], "up:"+smbProject)
+		if got != step.want {
+			t.Errorf("%s: restarted = %v, want %v", step.name, got, step.want)
 		}
 	}
 }

@@ -113,6 +113,7 @@ func (h *Hub) setLocalNetworks(cidrs []string, actor string) error {
 	}
 	h.mu.Lock()
 	prev := h.st.LocalNetworks
+	prevEnv := h.localNetworksEnvLocked()
 	h.st.LocalNetworks = stored
 	if err := h.saveStateLocked(); err != nil {
 		h.st.LocalNetworks = prev
@@ -123,6 +124,12 @@ func (h *Hub) setLocalNetworks(cidrs []string, actor string) error {
 	// ${PORTCULLIS_LOCAL_NETWORKS} restart (the restart writes the .env
 	// again); the others get the value at their next .env write.
 	var restart []templates.Template
+	if h.localNetworksEnvLocked() == prevEnv {
+		// The effective list is unchanged (the same list saved again, or
+		// the defaults written out): nothing to restart.
+		h.mu.Unlock()
+		return nil
+	}
 	for _, id := range h.st.Enabled {
 		if t := h.findLocked(id); t != nil && t.UsesLocalNetworks {
 			restart = append(restart, *t)

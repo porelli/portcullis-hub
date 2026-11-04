@@ -354,7 +354,7 @@ func (h *Hub) renderDocLocked(t *templates.Template, target docTarget, m *direct
 				// render: ensurePersonIDs).
 				users, _ := carried()
 				for _, user := range users {
-					id, ok := h.personIDLocked(o.Pool, user)
+					id, ok := h.personIDForLocked(o.Pool, user, m.UUIDs[user])
 					if !ok {
 						continue
 					}

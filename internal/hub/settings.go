@@ -134,6 +134,8 @@ type parsedSettings struct {
 	// directory's id, filled by bindRowsWith; a nil map = not bound yet
 	// (stored unbound: grants nothing), an empty one = no group.
 	groupIDs map[string]map[string]int
+	// sentValueIDs: SettingsUpdate.ValueGroupIDs of the parsed values.
+	sentValueIDs map[string]map[string]int
 }
 
 // secretOp is one parsed secret change.
@@ -365,6 +367,12 @@ func parseSettings(t *templates.Template, kinds *settings.Registry, folders Fold
 		}
 		out.values[k] = v
 		if isGroupOption(o) {
+			if ids := u.ValueGroupIDs[k]; len(ids) > 0 {
+				if out.sentValueIDs == nil {
+					out.sentValueIDs = map[string]map[string]int{}
+				}
+				out.sentValueIDs[k] = ids
+			}
 			out.groupIDs[k] = nil // bound by bindRowsWith
 			if len(groupNames(v)) == 0 {
 				out.groupIDs[k] = map[string]int{}
@@ -658,6 +666,11 @@ type SettingsUpdate struct {
 	// Values are instance options to change; a key not listed is
 	// unchanged, JSON null = back to the default.
 	Values map[string]json.RawMessage
+	// ValueGroupIDs: for instance group / groups values in Values, the
+	// LLDAP id the panel showed for each name (InstanceGroupIDs); a name
+	// sent with an id no longer stored for it is 409, a name without one
+	// is new (F3, like rows' group_id).
+	ValueGroupIDs map[string]map[string]int
 	// Person / Groups: per-person and per-group options (Task 8).
 	Person map[string]PersonChange
 	Groups map[string][]GroupValueInput
@@ -1166,6 +1179,11 @@ func (h *Hub) nextSettingsLocked(t *templates.Template, cur state.InstanceSettin
 		for _, n := range slices.Sorted(maps.Keys(ids)) {
 			if old, ok := cur.GroupIDs[k][n]; ok && old != 0 && old != ids[n] {
 				return next, nil, nil, nil, statusErr(409, "setting %s: group %s was re-created since it was saved (id %d, now %d): remove it, save, then add it again", k, n, old, ids[n])
+			}
+			// The id the panel showed must still be the stored one: a
+			// stale panel never re-binds a purged or re-created group.
+			if sent, ok := parsed.sentValueIDs[k][n]; ok && (cur.GroupIDs[k][n] != sent || ids[n] != sent) {
+				return next, nil, nil, nil, statusErr(409, "setting %s: group %s was re-created since it was saved (or removed from the setting): reload, then add it again", k, n)
 			}
 		}
 		if len(ids) == 0 {

@@ -62,14 +62,15 @@ func optionExpands(o *templates.Option) bool {
 
 // fileMembersLocked are the population members of t in m the data files
 // carry (sorted): with person_id options, only those holding every id
-// (idless: the others, for the log). Caller holds mu (read).
+// under their current LLDAP uuid (idless: the others, for the log; an
+// empty or changed uuid holds none). Caller holds mu (read).
 func (h *Hub) fileMembersLocked(t *templates.Template, m *directory.Membership) (members, idless []string) {
 	ids := personIDOptions(t)
 	members = []string{}
 	for _, p := range h.populationLocked(t, m).People {
 		ok := true
 		for _, o := range ids {
-			if _, has := h.personIDLocked(o.Pool, p.User); !has {
+			if _, has := h.personIDForLocked(o.Pool, p.User, m.UUIDs[p.User]); !has {
 				ok = false
 			}
 		}

@@ -67,6 +67,7 @@ func (s *Server) handleDeleteEntry(w http.ResponseWriter, r *http.Request) {
 // settingsBody is the PUT / preview body.
 type settingsBody struct {
 	Values       map[string]json.RawMessage       `json:"values"`
+	ValueIDs     map[string]map[string]int        `json:"value_group_ids"`
 	Person       map[string]hub.PersonChange      `json:"person"`
 	Groups       map[string][]hub.GroupValueInput `json:"groups"`
 	Secrets      map[string]secretBody            `json:"secrets"`
@@ -88,7 +89,7 @@ type secretBody struct {
 }
 
 // settingsUsage is the fixed message of a body that doesn't decode.
-const settingsUsage = `body must be {"values": {"<key>": <value>}, "person": {"<key>": {"default", "resolve", "rows": [{"group", "value", "group_id"}]}}, ` +
+const settingsUsage = `body must be {"values": {"<key>": <value>}, "value_group_ids": {"<key>": {"<group>": <id>}}, "person": {"<key>": {"default", "resolve", "rows": [{"group", "value", "group_id"}]}}, ` +
 	`"groups": {"<key>": [{"group", "value", "group_id"}]}, "secrets": {"<key>": {"value" | "generate": true | "clear": true}}, ` +
 	`"ports": {"<KEY>": "<port>"}, "auth_policy", "auth_policy_inherit", "public_access": true | false | "default", "public_mode", "public_tokens", "sign_in"}`
 
@@ -115,15 +116,16 @@ func readSettingsBody(w http.ResponseWriter, r *http.Request) (hub.SettingsUpdat
 		return hub.SettingsUpdate{}, false
 	}
 	u := hub.SettingsUpdate{
-		Values:       b.Values,
-		Person:       b.Person,
-		Groups:       b.Groups,
-		Ports:        b.Ports,
-		Policy:       b.Policy,
-		Inherit:      b.Inherit,
-		PublicMode:   b.PublicMode,
-		PublicTokens: b.PublicTokens,
-		SignIn:       b.SignIn,
+		Values:        b.Values,
+		ValueGroupIDs: b.ValueIDs,
+		Person:        b.Person,
+		Groups:        b.Groups,
+		Ports:         b.Ports,
+		Policy:        b.Policy,
+		Inherit:       b.Inherit,
+		PublicMode:    b.PublicMode,
+		PublicTokens:  b.PublicTokens,
+		SignIn:        b.SignIn,
 	}
 	if len(b.Secrets) > 0 {
 		u.Secrets = make(map[string]hub.SecretChange, len(b.Secrets))

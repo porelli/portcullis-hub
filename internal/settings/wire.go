@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"unicode/utf8"
 
@@ -160,6 +161,11 @@ func ParseHookReport(output []byte) (*HookReport, error) {
 			return nil, fmt.Errorf("unknown field in report JSON")
 		}
 		return nil, fmt.Errorf("invalid JSON: %w", err)
+	}
+	// One document: nothing may follow it.
+	var extra json.RawMessage
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		return nil, errors.New("data after the report's JSON document")
 	}
 
 	// Validate version

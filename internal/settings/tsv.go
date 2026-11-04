@@ -21,11 +21,17 @@ func EncodeTSV(doc DataFileDoc) ([]byte, error) {
 	fmt.Fprintf(&buf, "version\t%d\n", doc.Version)
 
 	// Second line: instance
+	if err := checkTSVString(doc.Instance); err != nil {
+		return nil, fmt.Errorf("instance: %w", err)
+	}
 	fmt.Fprintf(&buf, "instance\t%s\n", doc.Instance)
 
 	// Collect all other lines
 	// Values
 	for key, val := range doc.Values {
+		if err := checkTSVString(key); err != nil {
+			return nil, fmt.Errorf("value key %q: %w", key, err)
+		}
 		rendered, err := renderTSVValue(val)
 		if err != nil {
 			return nil, fmt.Errorf("value %s: %w", key, err)
@@ -35,7 +41,13 @@ func EncodeTSV(doc DataFileDoc) ([]byte, error) {
 
 	// People
 	for user, fields := range doc.People {
+		if err := checkTSVString(user); err != nil {
+			return nil, fmt.Errorf("person %q: %w", user, err)
+		}
 		for field, val := range fields {
+			if err := checkTSVString(field); err != nil {
+				return nil, fmt.Errorf("person %s field %q: %w", user, field, err)
+			}
 			rendered, err := renderTSVValue(val)
 			if err != nil {
 				return nil, fmt.Errorf("person %s field %s: %w", user, field, err)
@@ -46,7 +58,13 @@ func EncodeTSV(doc DataFileDoc) ([]byte, error) {
 
 	// Groups
 	for key, records := range doc.Groups {
+		if err := checkTSVString(key); err != nil {
+			return nil, fmt.Errorf("group key %q: %w", key, err)
+		}
 		for _, rec := range records {
+			if err := checkTSVString(rec.Group); err != nil {
+				return nil, fmt.Errorf("group %s record %q: %w", key, rec.Group, err)
+			}
 			rendered, err := renderTSVValue(rec.Value)
 			if err != nil {
 				return nil, fmt.Errorf("group %s record %s: %w", key, rec.Group, err)
@@ -57,7 +75,13 @@ func EncodeTSV(doc DataFileDoc) ([]byte, error) {
 
 	// Entries
 	for field, entries := range doc.Entries {
+		if err := checkTSVString(field); err != nil {
+			return nil, fmt.Errorf("entry field %q: %w", field, err)
+		}
 		for _, entry := range entries {
+			if err := checkTSVString(entry.User); err != nil {
+				return nil, fmt.Errorf("entry %s user %q: %w", field, entry.User, err)
+			}
 			rendered, err := renderTSVValue(entry.Value)
 			if err != nil {
 				return nil, fmt.Errorf("entry %s user %s: %w", field, entry.User, err)

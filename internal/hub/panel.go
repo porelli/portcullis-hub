@@ -96,6 +96,10 @@ type SettingsPanel struct {
 	// Instance: the stored instance option values (canonical; absent =
 	// the default; never secrets).
 	Instance map[string]any `json:"instance"`
+	// InstanceGroupIDs: the LLDAP ids instance group / groups values are
+	// bound to (option key → name → id); send them back with the value
+	// (value_group_ids): a mismatch is a 409.
+	InstanceGroupIDs map[string]map[string]int `json:"instance_group_ids"`
 	// Person / Groups: per-person configurations and group records as
 	// stored, placeholders shown as the instance's group names, each row
 	// with its stored group_id (send it back: a mismatch is a 409).
@@ -236,18 +240,19 @@ func (h *Hub) SettingsPanel(ctx context.Context, id string) (*SettingsPanel, err
 	t = live
 	s := h.st.Settings[id]
 	p := &SettingsPanel{
-		AppSettingsView: *base,
-		Sections:        []string{},
-		Options:         []OptionView{},
-		Instance:        map[string]any{},
-		Person:          map[string]state.PersonSetting{},
-		Groups:          map[string][]state.GroupValue{},
-		Secrets:         base.Secrets,
-		Ports:           maps.Clone(s.Ports),
-		Entries:         map[string]EntriesView{},
-		Name:            t.Manifest.Name,
-		Enabled:         t.Enabled,
-		DirectoryGroups: []string{},
+		AppSettingsView:  *base,
+		Sections:         []string{},
+		Options:          []OptionView{},
+		Instance:         map[string]any{},
+		InstanceGroupIDs: map[string]map[string]int{},
+		Person:           map[string]state.PersonSetting{},
+		Groups:           map[string][]state.GroupValue{},
+		Secrets:          base.Secrets,
+		Ports:            maps.Clone(s.Ports),
+		Entries:          map[string]EntriesView{},
+		Name:             t.Manifest.Name,
+		Enabled:          t.Enabled,
+		DirectoryGroups:  []string{},
 	}
 	if m != nil {
 		p.DirectoryGroups = slices.Sorted(maps.Keys(m.Groups))
@@ -287,6 +292,9 @@ func (h *Hub) SettingsPanel(ctx context.Context, id string) (*SettingsPanel, err
 		case templates.ScopeInstance:
 			if v, ok := s.Values[o.Key]; ok && typeOK && o.Type != templates.TypeSecret {
 				p.Instance[o.Key] = v
+				if ids := s.GroupIDs[o.Key]; len(ids) > 0 {
+					p.InstanceGroupIDs[o.Key] = maps.Clone(ids)
+				}
 			}
 		case templates.ScopePerson:
 			if ps, ok := s.Person[o.Key]; ok && typeOK && !hubSetOption(o) {

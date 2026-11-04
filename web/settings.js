@@ -240,7 +240,22 @@
   function body(st) {
     const b = {};
     const vk = changedValueKeys(st);
-    if (vk.length) { b.values = {}; for (const k of vk) b.values[k] = st.values[k]; }
+    if (vk.length) {
+      b.values = {};
+      for (const k of vk) {
+        b.values[k] = st.values[k];
+        // Instance group values are id-bound: each name keeps the id the
+        // panel showed (a stale one is a 409); added names go without.
+        const o = st.opts[k];
+        const shown = (st.panel.instance_group_ids || {})[k];
+        if (o && (o.type === 'group' || o.type === 'groups') && shown && st.values[k] !== null) {
+          const names = Array.isArray(st.values[k]) ? st.values[k] : [st.values[k]];
+          const ids = {};
+          for (const n of names) if (typeof n === 'string' && Object.prototype.hasOwnProperty.call(shown, n)) ids[n] = shown[n];
+          if (Object.keys(ids).length) { b.value_group_ids = b.value_group_ids || {}; b.value_group_ids[k] = ids; }
+        }
+      }
+    }
     const pk = changedPersonKeys(st);
     if (pk.length) { b.person = {}; for (const k of pk) b.person[k] = personBody(st.person[k]); }
     const gk = changedGroupKeys(st);
