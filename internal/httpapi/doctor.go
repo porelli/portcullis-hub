@@ -22,7 +22,7 @@ func (s *Server) registerDoctor(mux routeMux) {
 const (
 	fixPreviewUsage = `{"params": {"<name>": "<value>"}} (params: "fix" picks one of the finding's fixes; rebind_port takes "address", manage_as_folder "name" and "id")`
 	fixApplyUsage   = `{"plan_hash": "<hash>", "params": {"<name>": "<value>"}}`
-	muteUsage       = `{"reason": "<why, at most 200 characters>"}`
+	muteUsage       = `{"reason": "<why, at most 200 characters>", "token": "<the finding's token from GET /api/doctor>"}`
 )
 
 // fpRe is a finding's fingerprint (doctor.Fingerprint: 16 hex).
@@ -134,11 +134,12 @@ func (s *Server) handleMute(w http.ResponseWriter, r *http.Request) {
 	}
 	var b struct {
 		Reason string `json:"reason"`
+		Token  string `json:"token"`
 	}
 	if !decodeAPI(w, r, &b, muteUsage) {
 		return
 	}
-	if err := s.Hub.MuteFinding(r.Context(), fp, b.Reason, actor(r)); err != nil {
+	if err := s.Hub.MuteFinding(r.Context(), fp, b.Reason, actor(r), b.Token); err != nil {
 		writeAPIErr(w, err)
 		return
 	}

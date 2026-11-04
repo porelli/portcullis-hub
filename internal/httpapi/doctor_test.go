@@ -18,7 +18,7 @@ func doctorRoutes(fp string) []route {
 		{"GET", "/api/doctor/op", ""},
 		{"POST", "/api/doctor/findings/" + fp + "/preview", `{"params":{}}`},
 		{"POST", "/api/doctor/findings/" + fp + "/apply", `{"plan_hash":"x","params":{}}`},
-		{"POST", "/api/doctor/findings/" + fp + "/mute", `{"reason":"known"}`},
+		{"POST", "/api/doctor/findings/" + fp + "/mute", `{"reason":"known","token":"x"}`},
 		{"DELETE", "/api/doctor/findings/" + fp + "/mute", ""},
 	}
 }
@@ -82,11 +82,18 @@ func TestDoctorAnswerShape(t *testing.T) {
 	infos := rep.Counts[doctor.Info]
 
 	// Mute: refusals first.
-	mustDo(t, e.hub, "root", "POST", "/api/doctor/findings/"+und.FP+"/mute", `{"reason":""}`, 400)
-	mustDo(t, e.hub, "root", "POST", "/api/doctor/findings/0123456789abcdef/mute", `{"reason":"x"}`, 404)
-	mustDo(t, e.hub, "root", "POST", "/api/doctor/findings/not-an-fp/mute", `{"reason":"x"}`, 404)
+	if und.Token == "" || !strings.Contains(b, `"token":"`+und.Token+`"`) {
+		t.Fatalf("no token in the answer: %+v", und)
+	}
+	tok := `,"token":"` + und.Token + `"}`
+	mustDo(t, e.hub, "root", "POST", "/api/doctor/findings/"+und.FP+"/mute", `{"reason":""`+tok, 400)
+	mustDo(t, e.hub, "root", "POST", "/api/doctor/findings/0123456789abcdef/mute", `{"reason":"x"`+tok, 404)
+	mustDo(t, e.hub, "root", "POST", "/api/doctor/findings/not-an-fp/mute", `{"reason":"x"`+tok, 404)
 	mustDo(t, e.hub, "root", "POST", "/api/doctor/findings/"+und.FP+"/mute", `{"reason":"known","why":1}`, 400)
-	mustDo(t, e.hub, "root", "POST", "/api/doctor/findings/"+und.FP+"/mute", `{"reason":"we know"}`, 204)
+	// H8: no token 400, a stale one 409.
+	mustDo(t, e.hub, "root", "POST", "/api/doctor/findings/"+und.FP+"/mute", `{"reason":"we know"}`, 400)
+	mustDo(t, e.hub, "root", "POST", "/api/doctor/findings/"+und.FP+"/mute", `{"reason":"we know","token":"`+strings.Repeat("0", 64)+`"}`, 409)
+	mustDo(t, e.hub, "root", "POST", "/api/doctor/findings/"+und.FP+"/mute", `{"reason":"we know"`+tok, 204)
 	rep = report(t, e)
 	m := findingOf(rep, "undeclared_template")
 	if m == nil || m.Muted == nil || m.Muted.Reason != "we know" || m.Muted.Actor != "root" || rep.Muted != 1 || rep.Counts[doctor.Info] != infos-1 {

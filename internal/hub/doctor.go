@@ -2,6 +2,7 @@ package hub
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"log"
 	"net/http"
@@ -188,16 +189,19 @@ func (h *Hub) personInputsLocked(t *templates.Template, m *directory.Membership)
 }
 
 // MuteFinding mutes the current finding fp with reason (non-empty, at
-// most 200 characters, one line): 400 / 404 for an unknown fp. The mute
-// keeps the finding's inputs digest: it lapses when they change. Audited
-// doctor.mute (detail: the reason).
-func (h *Hub) MuteFinding(ctx context.Context, fp, reason, actor string) error {
-	err := h.muteFinding(ctx, fp, reason, actor)
+// most 200 characters, one line): 400 / 404 for an unknown fp. token is
+// the finding's token as the admin saw it (required, 400): another
+// current token is 409, the finding changed since (H8: a mute never hides
+// a finding the admin didn't see). The mute keeps the finding's inputs
+// digest: it lapses when they change. Audited doctor.mute (detail: the
+// reason).
+func (h *Hub) MuteFinding(ctx context.Context, fp, reason, actor, token string) error {
+	err := h.muteFinding(ctx, fp, reason, actor, token)
 	h.auditDoctor(actor, "doctor.mute", fp, firstRunes(strings.TrimSpace(reason), muteReasonMax), err)
 	return err
 }
 
-func (h *Hub) muteFinding(ctx context.Context, fp, reason, actor string) error {
+func (h *Hub) muteFinding(ctx context.Context, fp, reason, actor, token string) error {
 	reason = strings.TrimSpace(reason)
 	switch {
 	case actor == "":
@@ -208,6 +212,8 @@ func (h *Hub) muteFinding(ctx context.Context, fp, reason, actor string) error {
 		return statusErr(http.StatusBadRequest, "the reason is longer than %d characters", muteReasonMax)
 	case templates.HasControlChars(reason) || !utf8.ValidString(reason):
 		return statusErr(http.StatusBadRequest, "the reason must be one line of text")
+	case token == "":
+		return statusErr(http.StatusBadRequest, "a mute needs the finding's token (from the doctor's report)")
 	}
 	r, err := h.Doctor(ctx)
 	if err != nil {
@@ -221,6 +227,9 @@ func (h *Hub) muteFinding(ctx context.Context, fp, reason, actor string) error {
 	}
 	if found == nil {
 		return statusErr(http.StatusNotFound, "no finding %s", clip(fp, 32))
+	}
+	if subtle.ConstantTimeCompare([]byte(found.Token), []byte(token)) != 1 {
+		return statusErr(http.StatusConflict, "the finding changed since you saw it: run the doctor again and check it before muting")
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()

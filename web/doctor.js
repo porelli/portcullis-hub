@@ -10,7 +10,7 @@
 // POST   /api/doctor/scan                     run the disk checks → 202 (poll /api/doctor/op)
 // POST   /api/doctor/findings/{fp}/preview    {params} → FixPlan (param fix picks a kind)
 // POST   /api/doctor/findings/{fp}/apply      {plan_hash, params} → 202 {op_id, poll}
-// POST   /api/doctor/findings/{fp}/mute       {reason}
+// POST   /api/doctor/findings/{fp}/mute       {reason, token} (409: the finding changed since)
 // DELETE /api/doctor/findings/{fp}/mute
 //
 // Rules: every interpolation goes through escapeHtml; data-* attributes
@@ -148,7 +148,7 @@
   }
 
   function card(f) {
-    let h = '<div class="dr-card dr-' + esc(f.severity) + '" data-dr-fp="' + esc(f.fp) + '">';
+    let h = '<div class="dr-card dr-' + esc(f.severity) + '" data-dr-fp="' + esc(f.fp) + '" data-dr-token="' + esc(f.token || '') + '">';
     h += '<div class="dr-title">' + sevPill(f.severity) + ' <span data-dr-title>' + md(f.title) + '</span></div>';
     if (f.why) h += '<div class="dr-why">' + md(f.why) + '</div>';
     if (f.fix_text) h += '<div class="dr-fixtext">' + md(f.fix_text) + '</div>';
@@ -290,12 +290,17 @@
       if (on) {
         const reason = c.querySelector('[data-dr-reason]').value.trim();
         if (!reason) { out.innerHTML = '<div class="op-msg inst-error">Give a reason.</div>'; return; }
-        await window.apiCall('/api/doctor/findings/' + enc(fp) + '/mute', 'POST', { reason });
+        // The token is the finding as shown: a finding that changed since
+        // (a severity rise) is refused (409), never muted unseen.
+        await window.apiCall('/api/doctor/findings/' + enc(fp) + '/mute', 'POST', { reason, token: c.dataset.drToken || '' });
       } else {
         await window.apiCall('/api/doctor/findings/' + enc(fp) + '/mute', 'DELETE');
       }
       render(rootEl);
-    } catch (err) { out.innerHTML = window.errorBox(err); }
+    } catch (err) {
+      out.innerHTML = window.errorBox(err) + (on && err.status === 409
+        ? '<div class="inst-row"><button type="button" class="btn btn-secondary btn-sm" data-dr-reload>Run the doctor again</button></div>' : '');
+    }
   }
 
   // ── scan ───────────────────────────────────────────────────────────

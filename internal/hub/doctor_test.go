@@ -197,18 +197,35 @@ func TestMuteAudited(t *testing.T) {
 		t.Fatalf("no custom_override_mount finding: %+v", r.Findings)
 	}
 	before := r.Counts[doctor.Warning]
+	var token string
+	for _, fd := range r.Findings {
+		if fd.FP == fp {
+			token = fd.Token
+		}
+	}
+	if token == "" {
+		t.Fatal("finding without a token")
+	}
+	// H8: the token is the finding as the admin saw it; another one (the
+	// finding changed since) is 409, a missing one 400.
+	if err := f.h.MuteFinding(ctx, fp, "known", "root", strings.Repeat("0", 64)); statusOf(err) != 409 || !strings.Contains(err.Error(), "the finding changed since you saw it") {
+		t.Errorf("stale token = %v", err)
+	}
+	if err := f.h.MuteFinding(ctx, fp, "known", "root", ""); statusOf(err) != 400 {
+		t.Errorf("no token = %v", err)
+	}
 
-	if err := f.h.MuteFinding(ctx, fp, "  ", "root"); statusOf(err) != 400 {
+	if err := f.h.MuteFinding(ctx, fp, "  ", "root", token); statusOf(err) != 400 {
 		t.Errorf("empty reason = %v", err)
 	}
-	if err := f.h.MuteFinding(ctx, fp, strings.Repeat("x", 201), "root"); statusOf(err) != 400 {
+	if err := f.h.MuteFinding(ctx, fp, strings.Repeat("x", 201), "root", token); statusOf(err) != 400 {
 		t.Errorf("long reason = %v", err)
 	}
-	if err := f.h.MuteFinding(ctx, "0123456789abcdef", "known", "root"); statusOf(err) != 404 {
+	if err := f.h.MuteFinding(ctx, "0123456789abcdef", "known", "root", token); statusOf(err) != 404 {
 		t.Errorf("unknown fp = %v", err)
 	}
 	reason := strings.Repeat("é", 200)
-	if err := f.h.MuteFinding(ctx, fp, reason, "root"); err != nil {
+	if err := f.h.MuteFinding(ctx, fp, reason, "root", token); err != nil {
 		t.Fatal(err)
 	}
 	e := audit.last()

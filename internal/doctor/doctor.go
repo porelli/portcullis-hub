@@ -80,7 +80,11 @@ type Finding struct {
 	// Inputs is the digest of what produced the finding; Run folds the
 	// severity in, so a mute never hides a finding whose severity rose.
 	Inputs string `json:"-"`
-	Muted  *Mute  `json:"muted,omitempty"`
+	// Token is the finding as it was reported (its inputs digest,
+	// opaque): a mute carries it back and is refused when the finding
+	// changed since (H8).
+	Token string `json:"token"`
+	Muted *Mute  `json:"muted,omitempty"`
 }
 
 // Mute is an admin's mute of a finding: it holds while the finding's
@@ -279,6 +283,7 @@ func Run(in *Inputs, mutes map[string]Mute) Report {
 	}
 	r := Report{Findings: make([]Finding, 0, len(byFP)), Counts: map[Severity]int{Problem: 0, Warning: 0, Info: 0}, Scans: []ScanSummary{}}
 	for _, f := range byFP {
+		f.Token = f.Inputs
 		if m, ok := mutes[f.FP]; ok && m.Inputs == f.Inputs {
 			m := m
 			f.Muted = &m

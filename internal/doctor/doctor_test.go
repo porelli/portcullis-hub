@@ -63,6 +63,10 @@ func TestMuteReappearsOnChange(t *testing.T) {
 		t.Fatalf("unmuted report = %+v", first)
 	}
 	digest := first.Findings[0].Inputs
+	// H8: the report carries the digest as the finding's token.
+	if first.Findings[0].Token != digest || digest == "" {
+		t.Errorf("token %q, digest %q", first.Findings[0].Token, digest)
+	}
 	mutes := map[string]Mute{f.FP: {Reason: "known", Actor: "root", At: time.Now(), Inputs: digest}}
 	r := Run(&Inputs{}, mutes)
 	if r.Muted != 1 || r.Counts[Warning] != 0 || r.Findings[0].Muted == nil || r.Findings[0].Muted.Reason != "known" {
