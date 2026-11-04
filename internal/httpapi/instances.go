@@ -30,6 +30,9 @@ func (s *Server) registerInstances(mux routeMux) {
 	mux.HandleFunc("POST /api/instances/missing-groups", s.handleCreateMissingGroups)
 	mux.HandleFunc("GET /api/keycloak/user-sweep", s.handleUserSweep)
 	mux.HandleFunc("POST /api/keycloak/user-sweep/resume", s.handleResumeUserSweep)
+	// Admin credential routes (Task 12, plan 3).
+	mux.HandleFunc("GET /api/instances/{id}/credentials", s.handleAdminCredentials)
+	mux.HandleFunc("DELETE /api/instances/{id}/credentials/{key}/{user}", s.handleAdminRevokeCredential)
 }
 
 // handleUserSweep: the guarded stale-record cleanup's status (banner).
