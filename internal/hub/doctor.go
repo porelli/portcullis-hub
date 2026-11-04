@@ -61,9 +61,11 @@ func pathIn(u PathUsage) doctor.PathIn {
 
 // doctorInputs gathers the doctor's inputs: the directory snapshot first
 // (never under mu; unavailable = per-person rows not judged by
-// membership), then a copy of the state under the read lock. Ports,
-// local networks and the main domain's addresses are Task 10's, disk
-// scans Task 11's.
+// membership) and the main domain's addresses (domainAddrs: cached, 2 s
+// timeout; a failure = DomainErr, nothing escalates), then a copy of the
+// state under the read lock: paths, folders, folder_changed records,
+// per-person options, published ports (portInsLocked) and the local
+// networks. Disk scans are Task 11's.
 func (h *Hub) doctorInputs(ctx context.Context) (*doctor.Inputs, error) {
 	h.mu.RLock()
 	people := h.people
@@ -76,10 +78,16 @@ func (h *Hub) doctorInputs(ctx context.Context) (*doctor.Inputs, error) {
 			m = nil
 		}
 	}
+	addrs, derr := h.domainAddrs(ctx)
+	if derr != nil {
+		log.Printf("doctor: couldn't resolve %s (%v): exposure not checked against its addresses", h.cfg.Domain, derr)
+	}
 
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	in := &doctor.Inputs{Now: time.Now().UTC(), BindRoots: slices.Clone(h.bindRoots)}
+	in := &doctor.Inputs{Now: time.Now().UTC(), BindRoots: slices.Clone(h.bindRoots),
+		Domain: h.cfg.Domain, DomainAddrs: addrs, DomainErr: derr != nil,
+		LocalNetworks: h.localNetworksLocked(), Ports: h.portInsLocked()}
 	for _, u := range h.pathUsagesLocked() {
 		in.Paths = append(in.Paths, pathIn(u))
 	}

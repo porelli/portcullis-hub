@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/netip"
 	"os"
 	"path"
 	"slices"
@@ -156,6 +157,10 @@ type AppState struct {
 	FolderChanged map[string][]FolderChange `json:"folder_changed,omitempty" yaml:"folder_changed,omitempty"`
 	// DoctorMutes: finding fingerprint → its mute (contract §14.5).
 	DoctorMutes map[string]DoctorMute `json:"doctor_mutes,omitempty" yaml:"doctor_mutes,omitempty"`
+	// LocalNetworks: the admin's LAN / VPN CIDRs (contract §14.7). A
+	// pointer so that [] (loopback only) survives a save: nil = the
+	// defaults.
+	LocalNetworks *[]string `json:"local_networks,omitempty" yaml:"local_networks,omitempty"`
 
 	// LegacyPassword lists, after Load, the policies that named the removed
 	// "password" factor and were normalised ("" = the global default). Not
@@ -582,9 +587,55 @@ func Load(path string) (*AppState, error) {
 	if err := s.checkFolders(); err != nil {
 		return nil, fmt.Errorf("corrupt %s (%v) — fix or move it aside, then restart", path, err)
 	}
+	if s.LocalNetworks != nil {
+		if _, err := ParseLocalNetworks(*s.LocalNetworks); err != nil {
+			return nil, fmt.Errorf("corrupt %s (local_networks: %v) — fix or move it aside, then restart", path, err)
+		}
+	}
 	s.init()
 	s.normalizeLegacy()
 	return s, nil
+}
+
+// MaxLocalNetworks is the most Local networks entries (contract §14.7).
+const MaxLocalNetworks = 64
+
+// ParseLocalNetworks parses a Local networks list: at most 64 CIDRs, each
+// in canonical form without host bits, no /0 prefix (it would make "LAN
+// only" mean anything), no duplicates. Errors name the entry.
+func ParseLocalNetworks(cidrs []string) ([]netip.Prefix, error) {
+	if len(cidrs) > MaxLocalNetworks {
+		return nil, fmt.Errorf("at most %d local networks (got %d)", MaxLocalNetworks, len(cidrs))
+	}
+	out := make([]netip.Prefix, 0, len(cidrs))
+	seen := map[netip.Prefix]bool{}
+	for _, c := range cidrs {
+		q := clipQuote(c)
+		p, err := netip.ParsePrefix(c)
+		switch {
+		case err != nil || p.Addr().Zone() != "":
+			return nil, fmt.Errorf("%s is not a CIDR (e.g. 192.168.1.0/24)", q)
+		case p.Bits() == 0:
+			return nil, fmt.Errorf("%s would count every address as local", q)
+		case p.Masked() != p:
+			return nil, fmt.Errorf("%s has host bits set (did you mean %s?)", q, p.Masked())
+		case p.Addr().Is4In6():
+			return nil, fmt.Errorf("%s: write IPv4 networks in their IPv4 form", q)
+		case seen[p]:
+			return nil, fmt.Errorf("%s is listed twice", q)
+		}
+		seen[p] = true
+		out = append(out, p)
+	}
+	return out, nil
+}
+
+// clipQuote is s quoted, at most 64 bytes of it.
+func clipQuote(s string) string {
+	if len(s) > 64 {
+		s = s[:64] + "…"
+	}
+	return fmt.Sprintf("%q", s)
 }
 
 // Save writes the state atomically with mode 0600.

@@ -214,6 +214,11 @@ type Hub struct {
 	fixerMu    sync.Mutex
 	fixerImage string
 	mountinfo  func() ([]byte, error)
+	// The main domain's A / AAAA lookup (localnet.go): lookupIP
+	// (test-settable), its cache under dnsMu (never mu).
+	lookupIP lookupIPFunc
+	dnsMu    sync.Mutex
+	dnsCache dnsCache
 	// domains lists the main and enrolled domains (hosts.go); audit
 	// receives instance operations (SetAudit). Both guarded by mu.
 	domains DomainSource
@@ -404,6 +409,7 @@ func New(cfg Config, runner compose.Runner, engine Engine, idp IdP) (*Hub, error
 		afterFunc:   realAfterFunc,
 		sleep:       realSleep,
 		mountinfo:   func() ([]byte, error) { return os.ReadFile("/proc/self/mountinfo") },
+		lookupIP:    defaultLookupIP,
 	}
 	// The known list in state.yaml (empty = only the main domain).
 	h.domains = knownDomains{h}

@@ -113,10 +113,14 @@ type FolderIn struct {
 	LastApply      *time.Time
 }
 
-// PortIn is a published port of an enabled instance (Task 10).
+// PortIn is a published port of an enabled instance (Task 10): a
+// template port as set in Settings, or a custom-override port (Custom;
+// Key and Label those of the template port with the same service and
+// container port, LanOnly from it). Port is the host port (a range's
+// first), Bind the host address as written ("" = all interfaces).
 type PortIn struct {
 	Instance, Key, Label, Service, Bind string
-	Port                                int
+	Port, PortEnd, Container            int
 	Protocol                            string
 	LanOnly, HostNetwork, Custom        bool
 }
@@ -162,8 +166,12 @@ type Inputs struct {
 	Person        []PersonIn
 	Changes       []ChangeIn
 	LocalNetworks []netip.Prefix
-	DomainAddrs   []netip.Addr
-	Scans         map[string]ScanIn // by cleaned host path
+	// Domain is the main domain, DomainAddrs its A / AAAA records;
+	// DomainErr: the lookup failed (nothing escalates on it).
+	Domain      string
+	DomainAddrs []netip.Addr
+	DomainErr   bool
+	Scans       map[string]ScanIn // by cleaned host path
 }
 
 // Check is one kind of check.

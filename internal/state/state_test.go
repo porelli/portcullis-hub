@@ -182,3 +182,26 @@ func TestLoadRefusesLegacyFlatSettings(t *testing.T) {
 		t.Fatalf("typed form: %v %+v", err, s)
 	}
 }
+
+func TestLocalNetworksLoad(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "state.yaml")
+	empty := []string{}
+	s := New()
+	s.LocalNetworks = &empty
+	if err := s.Save(p); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.LocalNetworks == nil || len(*got.LocalNetworks) != 0 {
+		t.Fatalf("[] round-trip = %v", got.LocalNetworks)
+	}
+	for _, bad := range []string{"0.0.0.0/0", "10.0.0.1/8", "x"} {
+		os.WriteFile(p, []byte("local_networks: [\""+bad+"\"]\n"), 0600)
+		if _, err := Load(p); err == nil || !strings.Contains(err.Error(), bad) {
+			t.Errorf("%s: err = %v", bad, err)
+		}
+	}
+}

@@ -20,6 +20,11 @@ type portBinding struct {
 	RangeStart      int
 	RangeEnd        int
 	Custom          bool // from the custom override (Expert)
+	// Service and Container: the compose service and container port (a
+	// range's first) the binding publishes; the doctor matches
+	// custom-override ports to lan_only template ports by them.
+	Service   string
+	Container int
 }
 
 func resolvePortBindings(t *templates.Template, values map[string]string) []portBinding {
@@ -36,7 +41,7 @@ func resolvePortBindings(t *templates.Template, values map[string]string) []port
 		if bind == "" {
 			bind = "0.0.0.0"
 		}
-		pb := portBinding{AppID: t.ID, Key: p.Key, Bind: bind, Protocol: proto, NetworkModeHost: p.NetworkModeHost}
+		pb := portBinding{AppID: t.ID, Key: p.Key, Bind: bind, Protocol: proto, NetworkModeHost: p.NetworkModeHost, Service: p.Service, Container: p.Container}
 		// Port ranges (e.g. coturn media relays): the setting, else the
 		// manifest's range.
 		if p.Range != "" {

@@ -357,7 +357,7 @@ func (h *Hub) checkOverrideService(t *templates.Template, name string, v interfa
 				return nil, nil, fmt.Errorf("ports must be a list")
 			}
 			for _, item := range list {
-				pb, err := parseOverridePort(t.ID, item)
+				pb, err := parseOverridePort(t.ID, name, item)
 				if err != nil {
 					return nil, nil, err
 				}
@@ -558,8 +558,8 @@ func pathUnder(p, root string) bool {
 
 // parseOverridePort parses a ports entry; nil means no host port is
 // published (container port only).
-func parseOverridePort(id string, item interface{}) (*portBinding, error) {
-	pb := portBinding{AppID: id, Key: "custom override", Bind: "0.0.0.0", Protocol: "tcp", Custom: true}
+func parseOverridePort(id, service string, item interface{}) (*portBinding, error) {
+	pb := portBinding{AppID: id, Key: "custom override", Bind: "0.0.0.0", Protocol: "tcp", Custom: true, Service: service}
 	var host string
 	switch v := item.(type) {
 	case int:
@@ -596,13 +596,16 @@ func parseOverridePort(id string, item interface{}) (*portBinding, error) {
 		if err := checkPortSpec(v, parts[len(parts)-1]); err != nil {
 			return nil, err
 		}
+		pb.Container = firstPort(parts[len(parts)-1])
 	case map[string]interface{}:
 		if err := onlyKeys(v, "port", "target", "published", "host_ip", "protocol", "mode", "name", "app_protocol"); err != nil {
 			return nil, err
 		}
-		if _, ok := v["target"].(int); !ok {
+		target, ok := v["target"].(int)
+		if !ok {
 			return nil, fmt.Errorf("port: target must be a number")
 		}
+		pb.Container = target
 		if ip, ok := v["host_ip"].(string); ok {
 			pb.Bind = ip
 		}
@@ -647,6 +650,15 @@ func parseOverridePort(id string, item interface{}) (*portBinding, error) {
 	}
 	pb.Port = n
 	return &pb, nil
+}
+
+// firstPort is a port spec's number, a range's first (0: none).
+func firstPort(p string) int {
+	if a, _, ok := parsePortRange(p); ok {
+		return a
+	}
+	n, _ := strconv.Atoi(p)
+	return n
 }
 
 func checkPortSpec(entry, p string) error {
