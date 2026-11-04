@@ -187,6 +187,8 @@ func (h *Hub) MuteFinding(ctx context.Context, fp, reason, actor string) error {
 func (h *Hub) muteFinding(ctx context.Context, fp, reason, actor string) error {
 	reason = strings.TrimSpace(reason)
 	switch {
+	case actor == "":
+		return statusErr(http.StatusUnauthorized, "a mute needs a signed-in admin")
 	case reason == "":
 		return statusErr(http.StatusBadRequest, "a mute needs a reason")
 	case utf8.RuneCountInString(reason) > muteReasonMax:
@@ -228,7 +230,12 @@ func (h *Hub) muteFinding(ctx context.Context, fp, reason, actor string) error {
 // UnmuteFinding removes fp's mute (404 when it has none). Audited
 // doctor.unmute.
 func (h *Hub) UnmuteFinding(fp, actor string) error {
-	err := h.unmuteFinding(fp)
+	var err error
+	if actor == "" {
+		err = statusErr(http.StatusUnauthorized, "an unmute needs a signed-in admin")
+	} else {
+		err = h.unmuteFinding(fp)
+	}
 	h.auditDoctor(actor, "doctor.unmute", fp, "", err)
 	return err
 }
