@@ -1,7 +1,6 @@
 package hub
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -126,14 +125,35 @@ type assignCalc struct {
 	inputs   map[string]hashInputs
 	scan     *folderfix.Report
 	mustOwn  map[string]bool // "<instance>/<key>" of the must_own use
+	// renderChanged: affected instances whose override or env the apply
+	// changes (dryRunAssign, M8), whether or not their own values change.
+	renderChanged map[string]bool
 }
 
-// hashInputs are an affected instance's current values and ports (the
-// plan hash covers them: any change since the preview is a 409).
+// hashInputs are an affected instance's current values and ports, and
+// its template's source hash (M1: a source sync between the preview and
+// the apply changes it), which the plan hash covers: any change since the
+// preview is a 409.
 type hashInputs struct {
 	Values  map[string]any    `json:"values"`
 	Ports   map[string]string `json:"ports"`
 	Enabled bool              `json:"enabled"`
+	Source  string            `json:"source"`
+}
+
+// fillSources sets each input's template source hash (file reads,
+// outside mu; a template that can't be hashed hashes as its error).
+func (h *Hub) fillSources(inputs map[string]hashInputs) {
+	for inst, in := range inputs {
+		if t := h.Template(inst); t != nil {
+			sum, err := templates.SourceHash(t)
+			if err != nil {
+				sum = "error: " + err.Error()
+			}
+			in.Source = sum
+			inputs[inst] = in
+		}
+	}
 }
 
 // applyMarker is <data>/folders/<id>.applying.json (contract §14.3).
@@ -161,7 +181,16 @@ func (h *Hub) markerPath(id string) string {
 	return filepath.Join(h.foldersDir(), id+".applying.json")
 }
 
+// testMarkerWrite, if set, runs before every marker write and may fail
+// it (tests: I1).
+var testMarkerWrite func(m *applyMarker) error
+
 func (h *Hub) writeMarker(id string, m *applyMarker) error {
+	if testMarkerWrite != nil {
+		if err := testMarkerWrite(m); err != nil {
+			return err
+		}
+	}
 	if err := os.MkdirAll(h.foldersDir(), 0o700); err != nil {
 		return err
 	}
@@ -542,28 +571,41 @@ func (c *assignCalc) changedInstances() []string {
 	return slices.Sorted(maps.Keys(set))
 }
 
+// touchedInstances are the instances whose files the apply changes: their
+// values change, or their render does (M8). Sorted.
+func (c *assignCalc) touchedInstances() []string {
+	set := map[string]bool{}
+	for _, i := range c.changedInstances() {
+		set[i] = true
+	}
+	for i := range c.renderChanged {
+		set[i] = true
+	}
+	return slices.Sorted(maps.Keys(set))
+}
+
 // stopSet is who the op stops: every running affected instance when the
 // disk changes (the snapshot and the apply see a still folder), else the
-// running instances whose values change.
+// running instances whose files change.
 func (c *assignCalc) stopSet() []string {
 	var out []string
-	changed := map[string]bool{}
-	for _, i := range c.changedInstances() {
-		changed[i] = true
+	touched := map[string]bool{}
+	for _, i := range c.touchedInstances() {
+		touched[i] = true
 	}
 	for _, inst := range c.affected {
-		if c.running[inst] && (c.plan.Disk != nil || changed[inst]) {
+		if c.running[inst] && (c.plan.Disk != nil || touched[inst]) {
 			out = append(out, inst)
 		}
 	}
 	return out
 }
 
-// regenSet: enabled instances whose values change but aren't running:
+// regenSet: enabled instances whose files change but aren't running:
 // their files are regenerated, they aren't started.
 func (c *assignCalc) regenSet() []string {
 	var out []string
-	for _, inst := range c.changedInstances() {
+	for _, inst := range c.touchedInstances() {
 		if c.enabled[inst] && !c.running[inst] {
 			out = append(out, inst)
 		}
@@ -582,6 +624,7 @@ func (h *Hub) computeAssign(ctx context.Context, id string, req AssignRequest) (
 	if err != nil {
 		return nil, err
 	}
+	h.fillSources(c.inputs)
 	if err := h.runningOf(ctx, c.affected, c.enabled, c.running); err != nil {
 		return nil, err
 	}
@@ -736,53 +779,67 @@ func skippedWarnings(rep *folderfix.Report) []string {
 
 // dryRunAssign renders every affected instance's override and env from
 // the planned values (ruling 5: before anything stops) and checks its
-// custom override. Under mu the planned settings and write
-// confirmations are put in place and taken out again within one
-// section, so no reader sees them; any refusal is 409.
+// custom override. It renders from a planned copy of the settings and
+// folder definitions (renderView) under the read lock: h.st is never
+// changed, nothing is recorded (no env problems, I3), a panic releases
+// the lock. A folder deleted meanwhile is ErrNotFound (C1). Every affected
+// instance whose override or env would differ from its current render is
+// added to c.renderChanged (M8: stopped and started, or regenerated, like
+// the instances whose values change). Any refusal is 409.
 func (h *Hub) dryRunAssign(id string, c *assignCalc) error {
-	h.mu.Lock()
-	saved := map[string]state.InstanceSettings{}
-	had := map[string]bool{}
-	for _, e := range c.edits {
-		if _, done := saved[e.Instance]; done {
-			continue
+	views, err := func() ([]*templates.Template, error) {
+		h.mu.RLock()
+		defer h.mu.RUnlock()
+		cur, ok := h.st.Folders[id]
+		if !ok {
+			return nil, ErrNotFound
 		}
-		saved[e.Instance], had[e.Instance] = h.st.Settings[e.Instance]
+		live := h.liveView()
+		planned := renderView{settings: maps.Clone(h.st.Settings), folders: maps.Clone(h.st.Folders)}
+		if planned.settings == nil {
+			planned.settings = map[string]state.InstanceSettings{}
+		}
+		for _, inst := range c.changedInstances() {
+			next := applyEdits(h.st.Settings[inst], c.edits, inst)
+			if next.IsZero() {
+				delete(planned.settings, inst)
+			} else {
+				planned.settings[inst] = next
+			}
+		}
+		pf := cur
+		pf.WriteConfirmed = c.wc
+		planned.folders[id] = pf
+		c.renderChanged = map[string]bool{}
+		var views []*templates.Template
+		for _, inst := range c.affected {
+			t := h.findLocked(inst)
+			if t == nil {
+				continue
+			}
+			tmpl := *t
+			ov, err := h.renderOverrideIn(planned, &tmpl, planned.settings[inst])
+			if err != nil {
+				return nil, fmt.Errorf("%s: %w", inst, err)
+			}
+			env, _, err := h.optionEnvIn(planned, &tmpl, nil)
+			if err != nil {
+				return nil, fmt.Errorf("%s: %w", inst, err)
+			}
+			// The current render (errors count as a difference: the
+			// apply's own up renders again and decides).
+			curOv, oerr := h.renderOverrideIn(live, &tmpl, h.st.Settings[inst])
+			curEnv, _, eerr := h.optionEnvIn(live, &tmpl, nil)
+			if oerr != nil || eerr != nil || curOv != ov || !maps.Equal(curEnv, env) {
+				c.renderChanged[inst] = true
+			}
+			views = append(views, &tmpl)
+		}
+		return views, nil
+	}()
+	if errors.Is(err, ErrNotFound) {
+		return err
 	}
-	for inst := range saved {
-		h.st.Settings[inst] = applyEdits(h.st.Settings[inst], c.edits, inst)
-	}
-	fsaved := h.st.Folders[id]
-	pf := fsaved
-	pf.WriteConfirmed = c.wc
-	h.st.Folders[id] = pf
-	var views []*templates.Template
-	var err error
-	for _, inst := range c.affected {
-		t := h.findLocked(inst)
-		if t == nil {
-			continue
-		}
-		tmpl := *t
-		if _, e := h.renderOverrideLocked(&tmpl, h.st.Settings[inst]); e != nil {
-			err = fmt.Errorf("%s: %w", inst, e)
-			break
-		}
-		if _, e := h.optionEnvLocked(&tmpl, nil); e != nil {
-			err = fmt.Errorf("%s: %w", inst, e)
-			break
-		}
-		views = append(views, &tmpl)
-	}
-	for inst, s := range saved {
-		if had[inst] {
-			h.st.Settings[inst] = s
-		} else {
-			delete(h.st.Settings, inst)
-		}
-	}
-	h.st.Folders[id] = fsaved
-	h.mu.Unlock()
 	if err != nil {
 		return statusErr(http.StatusConflict, "with this assignment %v: nothing was changed", err)
 	}
@@ -990,6 +1047,29 @@ func errSetupChanged() error {
 	return statusErr(http.StatusConflict, "the setup changed since the preview: preview it again")
 }
 
+// markerPending: a marker an interrupted operation left and recovery
+// hasn't handled yet (M7: a new apply or undo would overwrite it) is 409.
+func (h *Hub) markerPending(id string) error {
+	_, err := os.Lstat(h.markerPath(id))
+	switch {
+	case err == nil:
+		return statusErr(http.StatusConflict, "shared folder %s has an interrupted operation that hasn't been recovered yet: it is recovered at the Hub's start (see its last operation); try again after that", id)
+	case !errors.Is(err, os.ErrNotExist):
+		return statusErr(http.StatusInternalServerError, "shared folder %s: reading its apply marker: %v", id, err)
+	}
+	return nil
+}
+
+// opSecrets is every value the instances' errors must have redacted
+// (M5: the folder's op key has no secrets of its own).
+func (h *Hub) opSecrets(ids []string) []string {
+	var out []string
+	for _, inst := range ids {
+		out = append(out, h.redactionSet(inst)...)
+	}
+	return out
+}
+
 // StartAssign applies req to folder id in the background once the plan
 // recomputed under the locks has planHash (else 409, no operation): 202
 // semantics, the outcome in the folder's op record (_folder.<id>).
@@ -1017,6 +1097,9 @@ func (h *Hub) startAssignHeld(id string, req AssignRequest, planHash, actor stri
 			}
 		}()
 		defer unlockFolder()
+		if err := h.markerPending(id); err != nil {
+			return nil, nil, err
+		}
 		h.mu.RLock()
 		affected := h.assignAffectedLocked(id, req)
 		_, exists := h.st.Folders[id]
@@ -1049,6 +1132,15 @@ func (h *Hub) startAssignHeld(id string, req AssignRequest, planHash, actor stri
 	})
 }
 
+// prefixed is ws, each prefixed with the run's name ("snapshot: …").
+func prefixed(run string, ws []string) []string {
+	out := make([]string, 0, len(ws))
+	for _, w := range ws {
+		out = append(out, run+": "+w)
+	}
+	return out
+}
+
 // runAssign is the apply after it was accepted (contract §14.3
 // sequence). It returns the op's result, warnings, the folder.assign
 // detail and the instances to deliver to.
@@ -1058,7 +1150,10 @@ func (h *Hub) runAssign(id string, c *assignCalc, actor string) (map[string]stri
 	result := map[string]string{"add": strconv.Itoa(c.adds), "remove": strconv.Itoa(c.removes)}
 	warnings := slices.Clone(c.plan.Warnings)
 	detail := fmt.Sprintf("add=%d remove=%d", c.adds, c.removes)
+	secrets := h.opSecrets(c.affected)
+	fb := &failCtx{id: id, actor: actor, secrets: secrets}
 	m := &applyMarker{Kind: "apply", Folder: id, Instances: c.plan.Restarts, Phase: "disk", At: time.Now().UTC()}
+	fb.m = m
 	for _, e := range c.edits {
 		m.Values = append(m.Values, mvalue{e.Instance, e.Key, e.Value})
 	}
@@ -1066,40 +1161,40 @@ func (h *Hub) runAssign(id string, c *assignCalc, actor string) (map[string]stri
 		m.Files, m.OwnerUID = d.Files, d.OwnerUID
 	}
 	if err := h.writeMarker(id, m); err != nil {
-		return result, warnings, detail, nil, statusErr(http.StatusInternalServerError, "writing the apply marker: %v: nothing was changed", err)
+		return result, warnings, detail, nil, h.failBeforeState(fb, statusErr(http.StatusInternalServerError, "writing the apply marker: %v", err), "", false)
 	}
 	stopped, err := h.stopAll(c.plan.Restarts)
+	fb.stopped = stopped
 	if err != nil {
-		err = h.failBeforeState(id, m, stopped, err, "", false)
-		return result, warnings, detail, nil, err
+		return result, warnings, detail, nil, h.failBeforeState(fb, err, "", false)
 	}
 
 	// The disk: snapshot, apply, verify.
 	snap, changedN := "", int64(0)
 	if d != nil {
-		var applyRep *folderfix.Report
 		var diskChanged bool
-		snap, applyRep, diskChanged, err = h.applyDisk(ctx, id, f, d, m)
+		var ws []string
+		snap, changedN, ws, diskChanged, err = h.applyDisk(ctx, id, f, d, m)
+		warnings = append(warnings, ws...)
 		if snap != "" {
 			result["snapshot"] = snap
 		}
-		if applyRep != nil {
-			changedN = applyRep.Changed
-			warnings = append(warnings, skippedWarnings(applyRep)...)
-		}
 		if err != nil {
-			err = h.failBeforeState(id, m, stopped, err, snap, diskChanged)
-			return result, warnings, detail, nil, err
+			fb.entries = changedN
+			return result, warnings, detail, nil, h.failBeforeState(fb, err, snap, diskChanged)
 		}
 		result["entries"] = strconv.FormatInt(changedN, 10)
 		detail += fmt.Sprintf(" entries=%d snapshot=%s", changedN, snapshotTS(snap))
 	}
 
-	// Phase state.
+	// Phase state: recorded before the save (I1: unrecorded, the save
+	// doesn't happen).
 	m.Phase = "state"
 	if err := h.writeMarker(id, m); err != nil {
-		log.Printf("shared folders: %s: marker phase state: %v", id, err)
+		fb.entries = changedN
+		return result, warnings, detail, nil, h.failBeforeState(fb, statusErr(http.StatusInternalServerError, "recording the apply's phase: %v", err), snap, d != nil)
 	}
+	touched := c.touchedInstances()
 	regen := c.regenSet()
 	members := map[string]*directory.Membership{}
 	for _, inst := range regen {
@@ -1137,8 +1232,8 @@ func (h *Hub) runAssign(id string, c *assignCalc, actor string) (map[string]stri
 		}
 		h.st.Folders[id] = prevFolder
 		h.mu.Unlock()
-		err = h.failBeforeState(id, m, stopped, serr, snap, d != nil)
-		return result, warnings, detail, nil, err
+		fb.entries = changedN
+		return result, warnings, detail, nil, h.failBeforeState(fb, serr, snap, d != nil)
 	}
 	// Enabled instances that don't run: their files now (not started).
 	var regenErrs []string
@@ -1159,7 +1254,7 @@ func (h *Hub) runAssign(id string, c *assignCalc, actor string) (map[string]stri
 		warnings = append(warnings, fmt.Sprintf("%s is not running: its configuration was updated, it wasn't started", c.names[inst]))
 	}
 	for _, e := range regenErrs {
-		warnings = append(warnings, "regenerating "+e)
+		warnings = append(warnings, redactValues("regenerating "+e, secrets))
 	}
 
 	// Start what was stopped, with the new configuration.
@@ -1178,19 +1273,22 @@ func (h *Hub) runAssign(id string, c *assignCalc, actor string) (map[string]stri
 		h.auditFolder(actor, "folder.apply", id, fmt.Sprintf("entries=%d snapshot=%s", changedN, snapshotTS(snap)), nil)
 	}
 	deliver := []string{}
-	for _, inst := range c.changedInstances() {
+	for _, inst := range touched {
 		if c.enabled[inst] {
 			deliver = append(deliver, inst)
 		}
 	}
 	if startErr != nil {
-		return result, warnings, detail, deliver, statusErr(http.StatusInternalServerError, "the assignment was saved, but %v: start them from the app list", startErr)
+		err := statusErr(http.StatusInternalServerError, "the assignment was saved, but %v: start them from the app list", startErr)
+		return result, warnings, detail, deliver, withSecrets(err, append(secrets, secretsOf(startErr)...))
 	}
 	return result, warnings, detail, deliver, nil
 }
 
-// stopAll stops ids (compose down, volumes kept), in order; on a failure
-// it returns those already stopped and the error.
+// stopAll stops ids (compose down, volumes kept), in order. On a failure
+// the instance whose down failed is in the returned list too (I2: its
+// down may have half-run; composeUp of a running project changes
+// nothing), so the caller starts it again.
 func (h *Hub) stopAll(ids []string) ([]string, error) {
 	var stopped []string
 	for _, inst := range ids {
@@ -1199,6 +1297,7 @@ func (h *Hub) stopAll(ids []string) ([]string, error) {
 			return stopped, statusErr(http.StatusConflict, "%s has no template now", inst)
 		}
 		if err := h.composeDown(t); err != nil {
+			stopped = append(stopped, inst)
 			return stopped, fmt.Errorf("stopping %s failed: %w", inst, withSecrets(err, h.redactionSet(inst)))
 		}
 		stopped = append(stopped, inst)
@@ -1226,11 +1325,23 @@ func (h *Hub) startAll(ids []string) error {
 	return errors.Join(errs...)
 }
 
+// failCtx is what failBeforeState needs of the running apply.
+type failCtx struct {
+	id, actor string
+	m         *applyMarker
+	stopped   []string
+	secrets   []string
+	entries   int64
+}
+
 // failBeforeState handles a failure before the state save: the stopped
 // instances start again with their old configuration, the marker goes,
 // and the error says what changed on disk (snap: the snapshot that
-// undoes it, recorded as last_apply so "Undo last fix" offers it).
-func (h *Hub) failBeforeState(id string, m *applyMarker, stopped []string, cause error, snap string, diskChanged bool) error {
+// undoes it, recorded as last_apply so "Undo last fix" offers it; I4:
+// audited folder.apply with the snapshot). The error keeps the stopped
+// instances' redaction sets (M5).
+func (h *Hub) failBeforeState(fb *failCtx, cause error, snap string, diskChanged bool) error {
+	id, m := fb.id, fb.m
 	if diskChanged && snap != "" {
 		h.mu.Lock()
 		if f, ok := h.st.Folders[id]; ok {
@@ -1244,7 +1355,7 @@ func (h *Hub) failBeforeState(id string, m *applyMarker, stopped []string, cause
 		}
 		h.mu.Unlock()
 	}
-	startErr := h.startAll(stopped)
+	startErr := h.startAll(fb.stopped)
 	h.removeMarker(id)
 	var b strings.Builder
 	b.WriteString(cause.Error())
@@ -1257,27 +1368,50 @@ func (h *Hub) failBeforeState(id string, m *applyMarker, stopped []string, cause
 	default:
 		b.WriteString("; nothing on disk changed")
 	}
-	if len(stopped) > 0 {
+	if len(fb.stopped) > 0 {
 		if startErr != nil {
 			fmt.Fprintf(&b, "; starting the apps again failed: %v", startErr)
 		} else {
-			fmt.Fprintf(&b, "; %s started again with the old configuration", joinNames(h.appNames(stopped)))
+			fmt.Fprintf(&b, "; %s started again with the old configuration", joinNames(h.appNames(fb.stopped)))
 		}
 	}
 	status := errStatus(cause)
 	if startErr != nil || diskChanged {
 		status = http.StatusInternalServerError
 	}
-	return withSecrets(&StatusError{Status: status, Err: errors.New(b.String())}, secretsOf(cause))
+	sec := append(slices.Clone(fb.secrets), secretsOf(cause)...)
+	sec = append(sec, secretsOf(startErr)...)
+	err := withSecrets(&StatusError{Status: status, Err: errors.New(b.String())}, sec)
+	if diskChanged {
+		h.auditFolder(fb.actor, "folder.apply", id, fmt.Sprintf("entries=%d snapshot=%s", fb.entries, snapshotTS(snap)), err)
+	}
+	return err
 }
 
-// applyDisk runs the free-space check, the snapshot (saved by the Hub),
-// the apply (--expect and --expect-digest from the snapshot) and the
-// verify scan. diskChanged: the apply may have changed something (it
-// ran and didn't refuse).
-func (h *Hub) applyDisk(ctx context.Context, id string, f state.Folder, d *DiskPlan, m *applyMarker) (snap string, applyRep *folderfix.Report, diskChanged bool, err error) {
+// checkSavedSnapshot (M2): the snapshot the Hub stored for this apply is
+// an apply snapshot of this folder with the apply's target and the
+// snapshot run's count.
+func (h *Hub) checkSavedSnapshot(rel string, f state.Folder, d *DiskPlan, entries int64) error {
+	hdr, err := h.snapshotHeaderOf(rel)
+	if err != nil {
+		return err
+	}
+	ownerOK := (hdr.OwnerUID == nil) == (d.OwnerUID == nil) && (hdr.OwnerUID == nil || *hdr.OwnerUID == *d.OwnerUID)
+	if hdr.Kind != "apply" || hdr.GID != f.GID || hdr.Files != d.Files || !ownerOK || hdr.RootDev != f.Dev || hdr.RootIno != f.Ino || hdr.Entries != entries {
+		return statusErr(http.StatusInternalServerError, "the permissions snapshot doesn't match the apply (kind %s, gid %d, files %s, %d entries; want apply, %d, %s, %d)",
+			hdr.Kind, hdr.GID, hdr.Files, hdr.Entries, f.GID, d.Files, entries)
+	}
+	return nil
+}
+
+// applyDisk runs the free-space check, the snapshot (saved by the Hub,
+// its header checked, its name recorded in the marker), the apply
+// (--expect and --expect-digest from the snapshot) and the verify scan.
+// diskChanged: the apply may have changed something (it ran and didn't
+// refuse). Warnings: every run's races and skips (M6).
+func (h *Hub) applyDisk(ctx context.Context, id string, f state.Folder, d *DiskPlan, m *applyMarker) (snap string, changed int64, warns []string, diskChanged bool, err error) {
 	if err := needFree(h.cfg.DataDir, 0, "the permissions snapshot of shared folder "+f.Name); err != nil {
-		return "", nil, false, err
+		return "", 0, nil, false, err
 	}
 	target := folderfix.Target{GID: f.GID, Files: d.Files, OwnerUID: d.OwnerUID}
 	base := folderfix.Options{ExpectDev: f.Dev, ExpectIno: f.Ino, ExpectMountRoot: f.MountRoot, Target: target}
@@ -1288,46 +1422,60 @@ func (h *Hub) applyDisk(ctx context.Context, id string, f state.Folder, d *DiskP
 			saved = rel
 			return err
 		}})
+	warns = append(warns, prefixed("snapshot", skippedWarnings(snapRep))...)
 	if err != nil {
 		if saved != "" {
 			h.dropSnapshot(saved)
 		}
-		return "", nil, false, fmt.Errorf("the permissions snapshot failed: %w", err)
+		return "", 0, warns, false, fmt.Errorf("the permissions snapshot failed: %w", err)
 	}
 	if saved == "" || snapRep.Plan == nil || !digestRe.MatchString(snapRep.Plan.Digest) {
 		if saved != "" {
 			h.dropSnapshot(saved)
 		}
-		return "", nil, false, statusErr(http.StatusInternalServerError, "the permissions snapshot returned no plan")
+		return "", 0, warns, false, statusErr(http.StatusInternalServerError, "the permissions snapshot returned no plan")
 	}
+	if err := h.checkSavedSnapshot(saved, f, d, snapRep.Plan.Changes); err != nil {
+		h.dropSnapshot(saved)
+		return "", 0, warns, false, err
+	}
+	// I1: the snapshot is recorded before anything changes, or nothing
+	// changes.
 	m.Snapshot = saved
 	if err := h.writeMarker(id, m); err != nil {
-		log.Printf("shared folders: %s: marker snapshot: %v", id, err)
+		m.Snapshot = ""
+		h.dropSnapshot(saved)
+		return "", 0, warns, false, statusErr(http.StatusInternalServerError, "recording the permissions snapshot: %v", err)
 	}
 	applyOpts := base
 	applyOpts.ExpectDigest = snapRep.Plan.Digest
 	applyOpts.Target.Mkdir = d.Mkdir
-	applyRep, err = h.runFixer(ctx, fixerRun{Mode: "apply", Folder: id, Source: f.Path, Opts: applyOpts,
+	applyRep, err := h.runFixer(ctx, fixerRun{Mode: "apply", Folder: id, Source: f.Path, Opts: applyOpts,
 		Extra: folderfix.ArgsExtra{Expect: snapRep.Plan.Changes}})
+	if applyRep != nil {
+		changed = applyRep.Changed
+	}
+	warns = append(warns, prefixed("apply", skippedWarnings(applyRep))...)
 	if err != nil {
 		// Exit 2 (409) is a refusal: nothing changed.
-		return saved, applyRep, errStatus(err) != http.StatusConflict, fmt.Errorf("the apply failed: %w", err)
+		return saved, changed, warns, errStatus(err) != http.StatusConflict, fmt.Errorf("the apply failed: %w", err)
 	}
 	ver, err := h.runFixer(ctx, fixerRun{Mode: "scan", Folder: id, Source: f.Path, Opts: base})
+	warns = append(warns, prefixed("verify", fixerWarnings(ver))...)
 	if err != nil {
-		return saved, applyRep, true, fmt.Errorf("the verify scan failed: %w", err)
+		return saved, changed, warns, true, fmt.Errorf("the verify scan failed: %w", err)
 	}
 	if ver.Expected == nil || ver.Partial {
-		return saved, applyRep, true, statusErr(http.StatusInternalServerError, "the verify scan was incomplete")
+		return saved, changed, warns, true, statusErr(http.StatusInternalServerError, "the verify scan was incomplete")
 	}
 	e := ver.Expected
 	if n := e.Group.N + e.Setgid.N + e.DefaultACL.N + e.Mode.N + e.Owner.N; n > 0 {
-		return saved, applyRep, true, statusErr(http.StatusInternalServerError,
+		return saved, changed, warns, true, statusErr(http.StatusInternalServerError,
 			"the verify scan found entries not as planned (group %d, setgid %d, default ACL %d, mode %d, owner %d)",
 			e.Group.N, e.Setgid.N, e.DefaultACL.N, e.Mode.N, e.Owner.N)
 	}
 	h.storeScan(id, ver)
-	return saved, applyRep, true, nil
+	return saved, changed, warns, true, nil
 }
 
 // dropSnapshot removes a snapshot a failed run left half-trusted.
@@ -1347,22 +1495,45 @@ type undoCalc struct {
 	plan     *AssignPlan
 	folder   state.Folder
 	apply    state.FolderApply
-	data     []byte
 	header   *snapshotHeader
+	target   folderfix.Target // the header's (M3)
 	affected []string
 	enabled  map[string]bool
 	running  map[string]bool
 	names    map[string]string
 	inputs   map[string]hashInputs
+	dry      *folderfix.Report // restore --dry-run (R56)
 }
 
 func errNoUndo(name string) error {
 	return statusErr(http.StatusNotFound, "shared folder %s has no fix to undo (no apply yet, or the last operation was an undo)", name)
 }
 
+// snapshotRun is a fixer run fed snapshot rel (checksum checked again,
+// streamed: M4) at /in.
+func (h *Hub) snapshotRun(ctx context.Context, rel string, r fixerRun) (*folderfix.Report, error) {
+	f, size, err := h.openSnapshot(rel)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	r.In, r.InSize = f, size
+	return h.runFixer(ctx, r)
+}
+
+// restoreDryRun is `restore --dry-run` of rel on folder f (R56): what a
+// restore would rewrite (ToRestore) and leave alone (ChangedSince), with
+// nothing written.
+func (h *Hub) restoreDryRun(ctx context.Context, id, rel string, f state.Folder) (*folderfix.Report, error) {
+	return h.snapshotRun(ctx, rel, fixerRun{Mode: "restore", Folder: id, Source: f.Path,
+		Opts:  folderfix.Options{ExpectDev: f.Dev, ExpectIno: f.Ino, ExpectMountRoot: f.MountRoot, Target: folderfix.Target{GID: f.GID}},
+		Extra: folderfix.ArgsExtra{DryRun: true}})
+}
+
 // computeUndo builds the undo plan from last_apply's snapshot (404
-// without one), checking the snapshot (checksum, header) and the folder
-// root.
+// without one), checking the snapshot (checksum, header — whose target
+// must be last_apply's, M3) and the folder root, and counting with a
+// restore dry run what it would put back and leave alone (R56).
 func (h *Hub) computeUndo(ctx context.Context, id string) (*undoCalc, error) {
 	h.mu.RLock()
 	f, ok := h.st.Folders[id]
@@ -1392,18 +1563,20 @@ func (h *Hub) computeUndo(ctx context.Context, id string) (*undoCalc, error) {
 		}
 	}
 	h.mu.RUnlock()
-	data, err := h.openSnapshot(u.apply.Snapshot)
+	h.fillSources(u.inputs)
+	hdr, err := h.snapshotHeaderOf(u.apply.Snapshot)
 	if err != nil {
 		return nil, err
-	}
-	hdr, err := readSnapshotHeader(data)
-	if err != nil {
-		return nil, statusErr(http.StatusConflict, "permissions snapshot %s can't be read: %v", u.apply.Snapshot, err)
 	}
 	if hdr.Kind != "apply" || hdr.GID != f.GID || hdr.RootDev != f.Dev || hdr.RootIno != f.Ino {
 		return nil, statusErr(http.StatusConflict, "permissions snapshot %s is not of this folder as it is now (kind %s, gid %d): it can't be undone", u.apply.Snapshot, hdr.Kind, hdr.GID)
 	}
-	u.data, u.header = data, hdr
+	ownerOK := (hdr.OwnerUID == nil) == (u.apply.OwnerUID == nil) && (hdr.OwnerUID == nil || *hdr.OwnerUID == *u.apply.OwnerUID)
+	if hdr.Files != u.apply.Files || !ownerOK {
+		return nil, statusErr(http.StatusConflict, "permissions snapshot %s was made for another target (files %s) than the last apply records (files %s): it can't be undone", u.apply.Snapshot, hdr.Files, u.apply.Files)
+	}
+	u.header = hdr
+	u.target = folderfix.Target{GID: hdr.GID, Files: hdr.Files, OwnerUID: hdr.OwnerUID}
 	if err := h.runningOf(ctx, u.affected, u.enabled, u.running); err != nil {
 		return nil, err
 	}
@@ -1414,8 +1587,13 @@ func (h *Hub) computeUndo(ctx context.Context, id string) (*undoCalc, error) {
 	if !pr.Exists || pr.Dev != f.Dev || pr.Ino != f.Ino {
 		return nil, errFolderChanged(f.Name)
 	}
+	dry, err := h.restoreDryRun(ctx, id, u.apply.Snapshot, f)
+	if err != nil {
+		return nil, err
+	}
+	u.dry = dry
 	pl := &AssignPlan{Folder: id, GID: f.GID, Path: f.Path, Uses: []UsePlan{}, Restarts: []string{}, Snapshot: u.apply.Snapshot,
-		Disk: &DiskPlan{Files: u.apply.Files, OwnerUID: u.apply.OwnerUID, Entries: hdr.Entries, Dev: f.Dev, Ino: f.Ino}}
+		Disk: &DiskPlan{Files: hdr.Files, OwnerUID: hdr.OwnerUID, Entries: hdr.Entries, Dev: f.Dev, Ino: f.Ino}}
 	for _, x := range uses {
 		pl.Uses = append(pl.Uses, UsePlan{FolderUse: FolderUse{Instance: x.Instance, Key: x.Key, Subpath: x.Subpath},
 			Label: x.Label, Access: x.Access, ReadOnly: x.ReadOnly, Declared: x.Declared, JoinsGroup: templates.JoinGroupAdd, Change: "keep"})
@@ -1429,13 +1607,14 @@ func (h *Hub) computeUndo(ctx context.Context, id string) (*undoCalc, error) {
 	at := u.apply.At.UTC().Format("2006-01-02 15:04 UTC")
 	lines := []string{
 		p.Sprintf("Undo the permissions fix of %s: snapshot %s recorded %d entries.", at, snapshotTS(u.apply.Snapshot), hdr.Entries),
-		"Each entry goes back to the owner, group, mode and ACLs it had before the fix; an entry changed since the fix is left alone.",
+		p.Sprintf("%d entries go back to the owner, group, mode and ACLs they had before the fix; %d changed since the fix and are left alone.", dry.ToRestore, dry.ChangedSince.N),
 		"An undo snapshot of the entries it rewrites is saved first, as a safety copy: an undo can't be undone.",
 		"The setting values don't change.",
 	}
 	for _, x := range uses {
 		lines = append(lines, fmt.Sprintf("%s (%s) may lose access to the restored entries: they go back to their previous group.", u.names[x.Instance], x.Label))
 	}
+	pl.Warnings = append(pl.Warnings, prefixed("check", skippedWarnings(dry))...)
 	pl.Downtime = "none"
 	if len(pl.Restarts) > 0 {
 		var names []string
@@ -1476,8 +1655,9 @@ func (h *Hub) PreviewUndo(ctx context.Context, id string) (*AssignPlan, error) {
 }
 
 // StartUndo runs the undo in the background once its recomputed plan has
-// planHash (else 409): stop → undo snapshot → restore → verify → state
-// (last_apply cleared) → start.
+// planHash (else 409): stop → undo snapshot → restore → verify (a restore
+// dry run finds nothing left to rewrite) → state (last_apply cleared) →
+// start.
 func (h *Hub) StartUndo(id, planHash, actor string) (*AsyncOp, error) {
 	unlockFolder, err := h.folderLock(id)
 	if err != nil {
@@ -1491,6 +1671,9 @@ func (h *Hub) StartUndo(id, planHash, actor string) (*AsyncOp, error) {
 			}
 		}()
 		defer unlockFolder()
+		if err := h.markerPending(id); err != nil {
+			return nil, nil, err
+		}
 		h.mu.RLock()
 		set := map[string]bool{}
 		for _, x := range h.folderUsesLocked(id) {
@@ -1521,18 +1704,25 @@ func (h *Hub) StartUndo(id, planHash, actor string) (*AsyncOp, error) {
 	})
 }
 
-// runUndo is the accepted undo.
+// runUndo is the accepted undo. The detail names the snapshots also on a
+// failure (I4).
 func (h *Hub) runUndo(id string, u *undoCalc) (map[string]string, []string, string, error) {
 	ctx := context.Background()
 	f := u.folder
 	result := map[string]string{"snapshot": u.apply.Snapshot}
 	var warnings []string
-	m := &applyMarker{Kind: "undo", Folder: id, Instances: u.plan.Restarts, Phase: "disk", Snapshot: u.apply.Snapshot,
-		Files: u.apply.Files, OwnerUID: u.apply.OwnerUID, At: time.Now().UTC()}
-	if err := h.writeMarker(id, m); err != nil {
-		return result, nil, "", statusErr(http.StatusInternalServerError, "writing the undo marker: %v: nothing was changed", err)
+	secrets := h.opSecrets(u.affected)
+	detail := func() string {
+		d := "undo snapshot=" + snapshotTS(u.apply.Snapshot)
+		if s := result["undo_snapshot"]; s != "" {
+			d += " safety=" + snapshotTS(s)
+		}
+		return d
 	}
-	fail := func(stopped []string, cause error, restored bool) error {
+	m := &applyMarker{Kind: "undo", Folder: id, Instances: u.plan.Restarts, Phase: "disk", Snapshot: u.apply.Snapshot,
+		Files: u.target.Files, OwnerUID: u.target.OwnerUID, At: time.Now().UTC()}
+	var stopped []string
+	fail := func(cause error, restored bool) error {
 		startErr := h.startAll(stopped)
 		h.removeMarker(id)
 		msg := cause.Error() + ": the setting values are unchanged"
@@ -1554,57 +1744,69 @@ func (h *Hub) runUndo(id string, u *undoCalc) (map[string]string, []string, stri
 		if restored || startErr != nil {
 			status = http.StatusInternalServerError
 		}
-		return withSecrets(&StatusError{Status: status, Err: errors.New(msg)}, secretsOf(cause))
+		sec := append(slices.Clone(secrets), secretsOf(cause)...)
+		sec = append(sec, secretsOf(startErr)...)
+		return withSecrets(&StatusError{Status: status, Err: errors.New(msg)}, sec)
 	}
-	stopped, err := h.stopAll(u.plan.Restarts)
+	if err := h.writeMarker(id, m); err != nil {
+		return result, nil, detail(), fail(statusErr(http.StatusInternalServerError, "writing the undo marker: %v", err), false)
+	}
+	var err error
+	stopped, err = h.stopAll(u.plan.Restarts)
 	if err != nil {
-		return result, nil, "", fail(stopped, err, false)
+		return result, nil, detail(), fail(err, false)
 	}
 	if err := needFree(h.cfg.DataDir, 0, "the undo snapshot of shared folder "+f.Name); err != nil {
-		return result, nil, "", fail(stopped, err, false)
+		return result, nil, detail(), fail(err, false)
 	}
-	base := folderfix.Options{ExpectDev: f.Dev, ExpectIno: f.Ino, ExpectMountRoot: f.MountRoot,
-		Target: folderfix.Target{GID: f.GID, Files: u.apply.Files, OwnerUID: u.apply.OwnerUID}}
+	base := folderfix.Options{ExpectDev: f.Dev, ExpectIno: f.Ino, ExpectMountRoot: f.MountRoot, Target: u.target}
 	saved := ""
-	_, err = h.runFixer(ctx, fixerRun{Mode: "snapshot", Folder: id, Source: f.Path, Opts: base, Extra: folderfix.ArgsExtra{Kind: "undo"},
-		In: bytes.NewReader(u.data), InSize: int64(len(u.data)),
+	urep, err := h.snapshotRun(ctx, u.apply.Snapshot, fixerRun{Mode: "snapshot", Folder: id, Source: f.Path, Opts: base, Extra: folderfix.ArgsExtra{Kind: "undo"},
 		Out: func(r io.Reader) error {
 			rel, err := h.saveSnapshot(id, r)
 			saved = rel
 			return err
 		}})
+	warnings = append(warnings, prefixed("undo snapshot", skippedWarnings(urep))...)
 	if err != nil {
 		if saved != "" {
 			h.dropSnapshot(saved)
 		}
-		return result, nil, "", fail(stopped, fmt.Errorf("the undo snapshot failed: %w", err), false)
+		return result, warnings, detail(), fail(fmt.Errorf("the undo snapshot failed: %w", err), false)
 	}
 	m.Undo = saved
 	result["undo_snapshot"] = saved
+	// I1: the safety copy is recorded before anything changes.
 	if err := h.writeMarker(id, m); err != nil {
-		log.Printf("shared folders: %s: undo marker: %v", id, err)
+		m.Undo = ""
+		return result, warnings, detail(), fail(statusErr(http.StatusInternalServerError, "recording the undo snapshot: %v", err), false)
 	}
 	restoreOpts := folderfix.Options{ExpectDev: f.Dev, ExpectIno: f.Ino, ExpectMountRoot: f.MountRoot, Target: folderfix.Target{GID: f.GID}}
-	rep, err := h.runFixer(ctx, fixerRun{Mode: "restore", Folder: id, Source: f.Path, Opts: restoreOpts,
-		In: bytes.NewReader(u.data), InSize: int64(len(u.data))})
+	rep, err := h.snapshotRun(ctx, u.apply.Snapshot, fixerRun{Mode: "restore", Folder: id, Source: f.Path, Opts: restoreOpts})
+	warnings = append(warnings, prefixed("restore", skippedWarnings(rep))...)
 	if err != nil {
-		return result, nil, "", fail(stopped, fmt.Errorf("the restore failed: %w", err), errStatus(err) != http.StatusConflict)
+		return result, warnings, detail(), fail(fmt.Errorf("the restore failed: %w", err), errStatus(err) != http.StatusConflict)
 	}
-	// Verify: the restore reads back every entry it rewrote; none may
-	// have failed.
 	if rep.Failed.N > 0 {
-		return result, nil, "", fail(stopped, statusErr(http.StatusInternalServerError, "%d entries couldn't be restored", rep.Failed.N), true)
+		return result, warnings, detail(), fail(statusErr(http.StatusInternalServerError, "%d entries couldn't be restored", rep.Failed.N), true)
+	}
+	// Verify (R56): a restore dry run now finds nothing left to rewrite.
+	ver, err := h.restoreDryRun(ctx, id, u.apply.Snapshot, f)
+	if err != nil {
+		return result, warnings, detail(), fail(fmt.Errorf("the undo's verify failed: %w", err), true)
+	}
+	if ver.ToRestore > 0 {
+		return result, warnings, detail(), fail(statusErr(http.StatusInternalServerError, "the undo's verify found %d entries still as the fix left them", ver.ToRestore), true)
 	}
 	result["entries"] = strconv.FormatInt(rep.Changed, 10)
 	result["changed_since"] = strconv.FormatInt(rep.ChangedSince.N, 10)
 	if rep.ChangedSince.N > 0 {
 		warnings = append(warnings, message.NewPrinter(language.English).Sprintf("%d entries changed since the fix and were left alone", rep.ChangedSince.N))
 	}
-	warnings = append(warnings, skippedWarnings(rep)...)
 
 	m.Phase = "state"
 	if err := h.writeMarker(id, m); err != nil {
-		log.Printf("shared folders: %s: undo marker phase state: %v", id, err)
+		return result, warnings, detail(), fail(statusErr(http.StatusInternalServerError, "recording the undo's phase: %v", err), true)
 	}
 	h.mu.Lock()
 	if cur, ok := h.st.Folders[id]; ok && cur.LastApply != nil && cur.LastApply.Snapshot == u.apply.Snapshot {
@@ -1620,11 +1822,12 @@ func (h *Hub) runUndo(id string, u *undoCalc) (map[string]string, []string, stri
 	h.mu.Unlock()
 	startErr := h.startAll(stopped)
 	h.removeMarker(id)
-	detail := fmt.Sprintf("undo snapshot=%s safety=%s entries=%d changed_since=%d", snapshotTS(u.apply.Snapshot), snapshotTS(saved), rep.Changed, rep.ChangedSince.N)
+	d := fmt.Sprintf("%s entries=%d changed_since=%d", detail(), rep.Changed, rep.ChangedSince.N)
 	if startErr != nil {
-		return result, warnings, detail, statusErr(http.StatusInternalServerError, "the undo finished, but %v: start them from the app list", startErr)
+		err := statusErr(http.StatusInternalServerError, "the undo finished, but %v: start them from the app list", startErr)
+		return result, warnings, d, withSecrets(err, append(secrets, secretsOf(startErr)...))
 	}
-	return result, warnings, detail, nil
+	return result, warnings, d, nil
 }
 
 // ── recovery ─────────────────────────────────────────────
@@ -1634,7 +1837,9 @@ func (h *Hub) runUndo(id string, u *undoCalc) (map[string]string, []string, stri
 // instances it lists are started with what state.yaml holds (phase disk:
 // the old values; state: the new ones, if the save landed), the folder's
 // op record is marked interrupted and names the snapshot, the marker
-// goes. The fixer never runs again.
+// goes. The fixer never runs again. While a marker stays, a new apply or
+// undo of the folder is 409 (M7); a recovery that can't take its locks
+// records why and keeps the marker for the next start.
 func (h *Hub) RecoverFolderApplies() {
 	entries, _ := os.ReadDir(h.foldersDir())
 	for _, e := range entries {
@@ -1664,9 +1869,17 @@ func (h *Hub) recoverFolderApply(id string) {
 		h.removeMarker(id)
 		return
 	}
+	if m.Kind == "undo" {
+		rec.Op = OpFolderUndo
+	}
+	gaveUp := func(why error) {
+		rec.Error = clipRunes(fmt.Sprintf("interrupted, and not recovered yet: %v; %s stay as they are (stopped) until the next Hub start, which tries again — start them by hand meanwhile", why, joinNames(h.appNames(m.Instances))), 600)
+		h.recordOp(key, rec)
+		log.Printf("shared folders: %s: %s", id, rec.Error)
+	}
 	unlockFolder, err := h.folderLock(id)
 	if err != nil {
-		log.Printf("shared folders: %s: interrupted apply not recovered now (%v): the next start does it", id, err)
+		gaveUp(err)
 		return
 	}
 	defer unlockFolder()
@@ -1679,11 +1892,18 @@ func (h *Hub) recoverFolderApply(id string) {
 			break
 		}
 		if time.Now().After(deadline) {
-			log.Printf("shared folders: %s: interrupted apply not recovered (%v): the next start does it", id, err)
+			gaveUp(err)
 			return
 		}
 		time.Sleep(h.lockPoll)
 	}
+	var deliver []string
+	defer func() {
+		// After the locks: the engine would see the instances busy.
+		for _, inst := range deliver {
+			h.TriggerDelivery(inst, TriggerSave, true)
+		}
+	}()
 	defer unlockApps()
 
 	h.mu.Lock()
@@ -1695,10 +1915,8 @@ func (h *Hub) recoverFolderApply(id string) {
 	committed := false
 	switch m.Kind {
 	case "undo":
-		rec.Op = OpFolderUndo
 		committed = !defined || f.LastApply == nil || f.LastApply.Snapshot != m.Snapshot
 	default:
-		rec.Op = OpFolderAssign
 		committed = len(m.Values) > 0
 		for _, v := range m.Values {
 			cur, _ := h.st.Settings[v.Instance].Values[v.Key].(string)
@@ -1755,7 +1973,7 @@ func (h *Hub) recoverFolderApply(id string) {
 	}
 	if len(started) > 0 {
 		if startErr != nil {
-			fmt.Fprintf(&b, "; starting %s failed: %v", joinNames(started), startErr)
+			fmt.Fprintf(&b, "; starting %s failed: %v", joinNames(h.appNames(started)), redactValues(startErr.Error(), secretsOf(startErr)))
 		} else {
 			fmt.Fprintf(&b, "; %s started again", joinNames(h.appNames(started)))
 		}
@@ -1778,7 +1996,7 @@ func (h *Hub) recoverFolderApply(id string) {
 		}
 		for _, inst := range slices.Sorted(maps.Keys(changed)) {
 			if h.IsEnabled(inst) {
-				h.TriggerDelivery(inst, TriggerSave, true)
+				deliver = append(deliver, inst)
 			}
 		}
 	}

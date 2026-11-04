@@ -2,7 +2,6 @@ package hub
 
 import (
 	"bufio"
-	"bytes"
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
@@ -18,6 +17,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/portcullis/hub/internal/fsutil"
@@ -190,27 +190,55 @@ func (h *Hub) listSnapshots(folder string) []string {
 	return out
 }
 
-// openSnapshot reads snapshot rel and checks it against its .sha256: a
-// missing one is 404, a damaged one (no checksum, another digest) 409.
-func (h *Hub) openSnapshot(rel string) ([]byte, error) {
+// openSnapshot opens snapshot rel and checks it against its .sha256,
+// streaming (M4: never the whole file in memory): a missing one is 404, a
+// damaged one (no checksum, another digest) 409. The file is returned at
+// offset 0 with its size; the caller closes it.
+func (h *Hub) openSnapshot(rel string) (*os.File, int64, error) {
 	if err := snapshotRel(rel); err != nil {
-		return nil, statusErr(http.StatusNotFound, "%v", err)
+		return nil, 0, statusErr(http.StatusNotFound, "%v", err)
 	}
 	p := filepath.Join(h.snapshotsDir(), filepath.FromSlash(rel))
-	data, err := os.ReadFile(p)
+	f, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
-		return nil, statusErr(http.StatusNotFound, "permissions snapshot %s not found", rel)
+		return nil, 0, statusErr(http.StatusNotFound, "permissions snapshot %s not found", rel)
+	}
+	fail := func(err error) (*os.File, int64, error) {
+		f.Close()
+		return nil, 0, err
 	}
 	sumLine, err := os.ReadFile(p + ".sha256")
 	if err != nil {
-		return nil, statusErr(http.StatusConflict, "permissions snapshot %s has no checksum: it can't be used", rel)
+		return fail(statusErr(http.StatusConflict, "permissions snapshot %s has no checksum: it can't be used", rel))
 	}
 	want, _, _ := strings.Cut(strings.TrimSpace(string(sumLine)), " ")
-	got := sha256.Sum256(data)
-	if want != hex.EncodeToString(got[:]) {
-		return nil, statusErr(http.StatusConflict, "permissions snapshot %s is damaged (its checksum doesn't match): it can't be used", rel)
+	sum := sha256.New()
+	n, err := io.Copy(sum, f)
+	if err != nil {
+		return fail(statusErr(http.StatusInternalServerError, "reading permissions snapshot %s: %v", rel, err))
 	}
-	return data, nil
+	if want != hex.EncodeToString(sum.Sum(nil)) {
+		return fail(statusErr(http.StatusConflict, "permissions snapshot %s is damaged (its checksum doesn't match): it can't be used", rel))
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return fail(err)
+	}
+	return f, n, nil
+}
+
+// snapshotHeaderOf opens snapshot rel (checksum checked) and reads its
+// header.
+func (h *Hub) snapshotHeaderOf(rel string) (*snapshotHeader, error) {
+	f, _, err := h.openSnapshot(rel)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	hdr, err := readSnapshotHeader(f)
+	if err != nil {
+		return nil, statusErr(http.StatusConflict, "permissions snapshot %s can't be read: %v", rel, err)
+	}
+	return hdr, nil
 }
 
 // snapshotHeader is what the Hub reads of a snapshot's header line
@@ -228,8 +256,8 @@ type snapshotHeader struct {
 }
 
 // readSnapshotHeader decodes the first line of a snapshot.
-func readSnapshotHeader(data []byte) (*snapshotHeader, error) {
-	gz, err := gzip.NewReader(bytes.NewReader(data))
+func readSnapshotHeader(r io.Reader) (*snapshotHeader, error) {
+	gz, err := gzip.NewReader(r)
 	if err != nil {
 		return nil, fmt.Errorf("snapshot: %w", err)
 	}

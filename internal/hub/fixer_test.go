@@ -94,6 +94,9 @@ func TestFixerCapsByMode(t *testing.T) {
 			mkdirCaps, false, "/folder", nil, "", "", nil},
 		{"restore", fixerRun{Mode: "restore", Folder: "photos", Source: "/srv/photos", Opts: applyOpts(), In: strings.NewReader("SNAP"), InSize: 4},
 			writeCaps, false, "/folder", []string{"/in"}, "/in", "", nil},
+		// R56: a dry-run restore only reads.
+		{"restore dry run", fixerRun{Mode: "restore", Folder: "photos", Source: "/srv/photos", Opts: applyOpts(), In: strings.NewReader("SNAP"), InSize: 4, Extra: folderfix.ArgsExtra{DryRun: true}},
+			[]string{"DAC_READ_SEARCH"}, true, "/folder", []string{"/in"}, "/in", "", nil},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			f := newFixerFixture(t)

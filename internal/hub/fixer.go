@@ -196,7 +196,10 @@ func (r fixerRun) spec(image string) docker.RunSpec {
 			s.CapAdd = slices.Clone(fixerMkdirCaps)
 		}
 	case "restore":
-		bind.ReadOnly, s.CapAdd = false, slices.Clone(fixerWriteCaps)
+		// --dry-run (R56) only reads: the folder read-only, read caps.
+		if !x.DryRun {
+			bind.ReadOnly, s.CapAdd = false, slices.Clone(fixerWriteCaps)
+		}
 		x.In = fixerIn + "/" + folderfix.SnapshotName
 		s.Scratch = []string{fixerIn}
 	}

@@ -116,6 +116,15 @@ type assignDisk struct {
 	verifyBad int64
 	applyExit int
 	restore   folderfix.Report
+	// restored: a (non dry-run) restore ran; leftAfter is what a dry run
+	// still finds to rewrite after it (R56 verify).
+	restored  bool
+	leftAfter int64
+	// races: per run ("scan", "verify", "snapshot", "apply", "restore",
+	// "restore-dry") the races the report carries.
+	races map[string]int64
+	// snapHeader, if set, rewrites a snapshot header's gid, files, owner.
+	snapHeader func(gid, files, owner string) (string, string, string)
 	// applyGate, if set, blocks the apply until closed; applyEntered
 	// receives once it started.
 	applyGate    chan struct{}
@@ -155,6 +164,15 @@ func (d *assignDisk) plan(e *diskPath) *folderfix.PlanCounts {
 		KeepGroup: map[int]int64{1000: n}, KeepUser: map[int]int64{}, LoseAccess: folderfix.Count{N: d.lose}}
 }
 
+func (d *assignDisk) racesOf(run string) folderfix.Count {
+	d.amu.Lock()
+	defer d.amu.Unlock()
+	if n := d.races[run]; n > 0 {
+		return folderfix.Count{N: n, Sample: []string{run + "/x"}}
+	}
+	return folderfix.Count{}
+}
+
 func reply(rep any, exit int) (*docker.RunResult, error) {
 	b, _ := json.Marshal(rep)
 	return &docker.RunResult{ExitCode: exit, Stdout: append(b, '\n')}, nil
@@ -162,8 +180,12 @@ func reply(rep any, exit int) (*docker.RunResult, error) {
 
 func (d *assignDisk) run(s docker.RunSpec, out func(io.Reader) error) (*docker.RunResult, error) {
 	mode := fixerMode(s.Cmd)
+	ev := mode
+	if _, dry := argValue(s.Cmd, "dry-run"); dry {
+		ev = "restore-dry"
+	}
 	d.amu.Lock()
-	d.events = append(d.events, mode)
+	d.events = append(d.events, ev)
 	last := d.last
 	d.last = mode
 	if d.argv == nil {
@@ -183,8 +205,10 @@ func (d *assignDisk) run(s docker.RunSpec, out func(io.Reader) error) (*docker.R
 		var rep folderfix.Report
 		json.Unmarshal(bytes.TrimSpace(res.Stdout), &rep)
 		rep.ACL = d.acl
+		rep.Races = d.racesOf("scan")
 		if _, ok := argValue(s.Cmd, "gid"); ok {
 			if last == "apply" {
+				rep.Races = d.racesOf("verify")
 				rep.Plan = &folderfix.PlanCounts{}
 				rep.Expected = &folderfix.Conformance{Group: folderfix.Count{N: d.verifyBad}}
 			} else {
@@ -200,11 +224,21 @@ func (d *assignDisk) run(s docker.RunSpec, out func(io.Reader) error) (*docker.R
 			kind = "apply"
 		}
 		gid, _ := argValue(s.Cmd, "gid")
+		files, _ := argValue(s.Cmd, "files")
+		owner := "null"
+		if o, ok := argValue(s.Cmd, "owner"); ok {
+			owner = o
+		}
 		plan := d.plan(e)
+		d.amu.Lock()
+		if d.snapHeader != nil {
+			gid, files, owner = d.snapHeader(gid, files, owner)
+		}
+		d.amu.Unlock()
 		var gz bytes.Buffer
 		zw := gzip.NewWriter(&gz)
-		fmt.Fprintf(zw, `{"version":1,"kind":%q,"rules":1,"root_dev":%d,"root_ino":%d,"gid":%s,"files":"rw","owner_uid":null,"created_at":"x","entries":%d}`+"\n",
-			kind, e.dev, e.ino, gid, plan.Changes)
+		fmt.Fprintf(zw, `{"version":1,"kind":%q,"rules":1,"root_dev":%d,"root_ino":%d,"gid":%s,"files":%q,"owner_uid":%s,"created_at":"x","entries":%d}`+"\n",
+			kind, e.dev, e.ino, gid, files, owner, plan.Changes)
 		zw.Close()
 		var tb bytes.Buffer
 		tw := tar.NewWriter(&tb)
@@ -217,7 +251,7 @@ func (d *assignDisk) run(s docker.RunSpec, out func(io.Reader) error) (*docker.R
 				return nil, err
 			}
 		}
-		return reply(folderfix.Report{Version: 1, Mode: "snapshot", Dev: e.dev, Ino: e.ino, Plan: plan, Entries: plan.Changes}, 0)
+		return reply(folderfix.Report{Version: 1, Mode: "snapshot", Dev: e.dev, Ino: e.ino, Plan: plan, Entries: plan.Changes, Races: d.racesOf("snapshot")}, 0)
 	case "apply":
 		if d.applyEntered != nil {
 			d.applyEntered <- struct{}{}
@@ -242,6 +276,19 @@ func (d *assignDisk) run(s docker.RunSpec, out func(io.Reader) error) (*docker.R
 	case "restore":
 		rep := d.restore
 		rep.Version, rep.Mode = 1, "restore"
+		d.amu.Lock()
+		restored := d.restored
+		d.amu.Unlock()
+		if _, dry := argValue(s.Cmd, "dry-run"); dry {
+			rep.ToRestore, rep.Changed = rep.Changed, 0
+			if restored {
+				rep.ToRestore = d.leftAfter
+			}
+			return reply(rep, 0)
+		}
+		d.amu.Lock()
+		d.restored = true
+		d.amu.Unlock()
 		return reply(rep, 0)
 	}
 	return nil, fmt.Errorf("unexpected fixer mode %q", mode)
@@ -583,7 +630,7 @@ func TestApplySequence(t *testing.T) {
 }
 
 func TestApplyVerifyFails(t *testing.T) {
-	f, d, _ := assignFixture(t)
+	f, d, audit := assignFixture(t)
 	enable(t, f, "immich")
 	d.verifyBad = 3
 	ups0 := ups(f, "immich")
@@ -603,6 +650,10 @@ func TestApplyVerifyFails(t *testing.T) {
 	}
 	if ov, _ := os.ReadFile(f.h.overridePath("immich")); strings.Contains(string(ov), "/srv/media") {
 		t.Error("started with the new mount")
+	}
+	// I4: the disk may have changed: folder.apply audited with the snapshot.
+	if got := auditOf(audit, "folder.apply"); len(got) != 1 || !strings.HasPrefix(got[0], "media error entries=12723 snapshot="+snapshotTS(fo.LastApply.Snapshot)) {
+		t.Errorf("folder.apply = %v", got)
 	}
 	// An apply that refuses (exit 2) changed nothing: no undo offered.
 	d.verifyBad, d.applyExit = 0, 2
@@ -632,7 +683,11 @@ func TestAssignHoldsLocks(t *testing.T) {
 	if _, err := f.h.StartAssign("media", req, plan.Hash, "admin"); err != nil {
 		t.Fatal(err)
 	}
-	<-d.applyEntered
+	select {
+	case <-d.applyEntered:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("the apply never started: %+v", f.h.LastOp(opKeyFolder("media")))
+	}
 	busy := func(name string, err error) {
 		t.Helper()
 		if errStatus(err) != 409 {
@@ -740,8 +795,10 @@ func TestSnapshotRetention(t *testing.T) {
 	}
 	dir := filepath.Join(f.data, "folder-snapshots")
 	for _, s := range snaps {
-		if _, err := f.h.openSnapshot(s); err != nil {
+		if fh, _, err := f.h.openSnapshot(s); err != nil {
 			t.Errorf("open %s: %v", s, err)
+		} else {
+			fh.Close()
 		}
 		fi, err := os.Stat(filepath.Join(dir, s))
 		if err != nil || fi.Mode().Perm() != 0o600 {
@@ -759,10 +816,10 @@ func TestSnapshotRetention(t *testing.T) {
 	b, _ := os.ReadFile(p)
 	b[len(b)-1] ^= 0xff
 	os.WriteFile(p, b, 0o600)
-	if _, err := f.h.openSnapshot(snaps[0]); statusOf(err) != 409 || !strings.Contains(err.Error(), "damaged") {
+	if _, _, err := f.h.openSnapshot(snaps[0]); statusOf(err) != 409 || !strings.Contains(err.Error(), "damaged") {
 		t.Errorf("tampered: %v", err)
 	}
-	if _, err := f.h.openSnapshot("media/../../state.yaml"); err == nil {
+	if _, _, err := f.h.openSnapshot("media/../../state.yaml"); err == nil {
 		t.Error("traversal accepted")
 	}
 	// last_apply's snapshot is never pruned, even behind three newer ones
@@ -790,18 +847,25 @@ func TestUndo(t *testing.T) {
 	}
 	fo, _ := storedFolder(f, "media")
 	applySnap := fo.LastApply.Snapshot
-	applyData, _ := f.h.openSnapshot(applySnap)
+	applyData := readSnap(t, f, applySnap)
+	d.restore = folderfix.Report{Changed: 12720, ChangedSince: folderfix.Count{N: 3}}
 	plan, err := f.h.PreviewUndo(ctx, "media")
 	if err != nil {
 		t.Fatal(err)
 	}
 	text := strings.Join(plan.Lines, "\n")
+	// R56: the counts come from a restore dry run.
+	if !strings.Contains(text, "12,720 entries go back to the owner, group, mode and ACLs they had before the fix; 3 changed since the fix and are left alone.") {
+		t.Errorf("no dry-run counts:\n%s", text)
+	}
+	if runs := fixerRuns(d); slices.Contains(runs, "restore") || slices.Contains(runs, "snapshot") && len(f.h.listSnapshots("media")) != 1 {
+		t.Errorf("the preview restored: %v", runs)
+	}
 	at := fo.LastApply.At.UTC().Format("2006-01-02 15:04 UTC")
 	if !strings.Contains(text, "fix of "+at+": snapshot "+snapshotTS(applySnap)+" recorded 12,723 entries") ||
 		!strings.Contains(text, "Immich (Library) may lose access") || !strings.Contains(text, "Immich is stopped for") {
 		t.Errorf("lines:\n%s", text)
 	}
-	d.restore = folderfix.Report{Changed: 12720, ChangedSince: folderfix.Count{N: 3}}
 	n0 := len(d.Events())
 	if _, err := f.h.StartUndo("media", plan.Hash, "admin"); err != nil {
 		t.Fatal(err)
@@ -813,11 +877,13 @@ func TestUndo(t *testing.T) {
 	// stop → undo snapshot → restore → start.
 	var seq []string
 	for _, e := range d.Events()[n0:] {
-		if e == "down:immich" || e == "snapshot" || e == "restore" || e == "up:immich" {
+		if e == "down:immich" || e == "snapshot" || e == "restore" || e == "restore-dry" || e == "up:immich" {
 			seq = append(seq, e)
 		}
 	}
-	if want := []string{"down:immich", "snapshot", "restore", "up:immich"}; !reflect.DeepEqual(seq, want) {
+	// The recomputed plan's dry run, then stop → undo snapshot → restore →
+	// verify (a dry run, R56) → start.
+	if want := []string{"restore-dry", "down:immich", "snapshot", "restore", "restore-dry", "up:immich"}; !reflect.DeepEqual(seq, want) {
 		t.Errorf("sequence %v", seq)
 	}
 	if k, _ := argValue(d.Argv("snapshot"), "kind"); k != "undo" {
@@ -860,6 +926,21 @@ func TestUndo(t *testing.T) {
 	if len(f.h.listSnapshots("media")) != 2 {
 		t.Errorf("snapshots %v", f.h.listSnapshots("media"))
 	}
+}
+
+// readSnap is snapshot rel's bytes (checksum checked).
+func readSnap(t *testing.T, f *fixture, rel string) []byte {
+	t.Helper()
+	fh, _, err := f.h.openSnapshot(rel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fh.Close()
+	b, err := io.ReadAll(fh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }
 
 // reopen starts a new Hub on f's data directory (a Hub restart).
@@ -985,4 +1066,310 @@ func TestLoadOpsKeepsFolderRecords(t *testing.T) {
 		}
 	}
 	_ = state.Folder{}
+}
+
+// ── fix round 1 ──────────────────────────────────────────
+
+var libraryReq = AssignRequest{Uses: []FolderUse{{Instance: "immich", Key: "library"}}}
+
+// C1: a folder deleted while its preview runs: 404, state untouched (the
+// dry run never writes a zero folder back), state.yaml still loads.
+func TestPreviewRacesFolderDelete(t *testing.T) {
+	f, d, _ := assignFixture(t)
+	d.onScan = func(string) {
+		if err := f.h.DeleteFolder("media", "admin"); err != nil {
+			t.Errorf("delete: %v", err)
+		}
+	}
+	if _, err := f.h.PreviewAssign(context.Background(), "media", libraryReq); statusOf(err) != 404 {
+		t.Fatalf("preview = %v", err)
+	}
+	if _, ok := storedFolder(f, "media"); ok {
+		t.Fatal("the deleted folder came back")
+	}
+	f.h.mu.Lock()
+	err := f.h.saveStateLocked()
+	f.h.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := state.Load(filepath.Join(f.data, "state.yaml")); err != nil {
+		t.Fatalf("state.yaml after the race: %v", err)
+	}
+}
+
+// I3: the dry run records nothing: the panel's env problems stay what
+// the real configuration gives.
+func TestDryRunRecordsNothing(t *testing.T) {
+	f, _, _ := assignFixture(t)
+	setStored(f, "arr", "pgid", int64(60005))
+	f.h.mu.RLock()
+	_, err := f.h.optionEnvLocked(f.h.findLocked("arr"), nil)
+	f.h.mu.RUnlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	problems := func() []string {
+		f.h.envProblemsMu.Lock()
+		defer f.h.envProblemsMu.Unlock()
+		return slices.Clone(f.h.envProblems["arr"])
+	}
+	before := problems()
+	if len(before) == 0 {
+		t.Fatal("no env problem to keep")
+	}
+	if _, err := f.h.PreviewAssign(context.Background(), "media", AssignRequest{Uses: []FolderUse{{Instance: "arr", Key: "downloads"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if after := problems(); !slices.Equal(after, before) {
+		t.Errorf("env problems %v → %v", before, after)
+	}
+}
+
+// I1 + I4: a marker write that fails before the disk changes is a
+// failure with nothing changed; the phase-state write failing after the
+// apply offers the undo and audits folder.apply with the snapshot.
+func TestMarkerWriteFailures(t *testing.T) {
+	f, d, audit := assignFixture(t)
+	enable(t, f, "immich")
+	t.Cleanup(func() { testMarkerWrite = nil })
+	testMarkerWrite = func(m *applyMarker) error {
+		if m.Snapshot != "" && m.Phase == "disk" {
+			return errors.New("disk full")
+		}
+		return nil
+	}
+	ups0 := ups(f, "immich")
+	_, rec := assign(t, f, "media", libraryReq)
+	if rec.OK || !strings.Contains(rec.Error, "recording the permissions snapshot") || !strings.Contains(rec.Error, "nothing on disk changed") {
+		t.Fatalf("snapshot record: %+v", rec)
+	}
+	if slices.Contains(fixerRuns(d), "apply") {
+		t.Error("applied without the snapshot recorded")
+	}
+	if fo, _ := storedFolder(f, "media"); fo.LastApply != nil {
+		t.Errorf("last apply %+v", fo.LastApply)
+	}
+	if ups(f, "immich") != ups0+1 {
+		t.Error("not started again")
+	}
+	if len(f.h.listSnapshots("media")) != 0 {
+		t.Errorf("unrecorded snapshot kept: %v", f.h.listSnapshots("media"))
+	}
+	// Phase state.
+	testMarkerWrite = func(m *applyMarker) error {
+		if m.Phase == "state" {
+			return errors.New("disk full")
+		}
+		return nil
+	}
+	_, rec = assign(t, f, "media", libraryReq)
+	fo, _ := storedFolder(f, "media")
+	if rec.OK || fo.LastApply == nil || !strings.Contains(rec.Error, "can undo them") || value(f, "immich", "library") != nil {
+		t.Fatalf("phase state: %+v last apply %+v", rec, fo.LastApply)
+	}
+	got := auditOf(audit, "folder.apply")
+	if len(got) != 1 || !strings.HasPrefix(got[0], "media error entries=12723 snapshot="+snapshotTS(fo.LastApply.Snapshot)) {
+		t.Errorf("folder.apply = %v", got)
+	}
+	// The undo marker (the safety copy recorded) fails: nothing restored.
+	testMarkerWrite = func(m *applyMarker) error {
+		if m.Kind == "undo" && m.Undo != "" {
+			return errors.New("disk full")
+		}
+		return nil
+	}
+	plan, err := f.h.PreviewUndo(context.Background(), "media")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.h.StartUndo("media", plan.Hash, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	rec = waitFolderOp(t, f, "media")
+	if rec.OK || !strings.Contains(rec.Error, "nothing on disk changed") || d.restored {
+		t.Fatalf("undo marker: %+v restored %v", rec, d.restored)
+	}
+}
+
+// I2: an instance whose compose down failed is started again too.
+func TestStopFailureStartsItAgain(t *testing.T) {
+	f, _, _ := assignFixture(t)
+	enable(t, f, "immich")
+	f.runner.downErr = errors.New("down failed")
+	ups0 := ups(f, "immich")
+	_, rec := assign(t, f, "media", libraryReq)
+	if rec.OK || !strings.Contains(rec.Error, "stopping immich failed") || !strings.Contains(rec.Error, "Immich started again") {
+		t.Fatalf("op = %+v", rec)
+	}
+	if ups(f, "immich") != ups0+1 {
+		t.Errorf("not started again (ups %d → %d)", ups0, ups(f, "immich"))
+	}
+}
+
+// M1: a template source change between the preview and the apply.
+func TestApplyTemplateChanged(t *testing.T) {
+	f, _, _ := assignFixture(t)
+	plan, err := f.h.PreviewAssign(context.Background(), "media", libraryReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(f.src, "immich", "notes.txt"), "changed\n")
+	if _, err := f.h.StartAssign("media", libraryReq, plan.Hash, "admin"); statusOf(err) != 409 || !strings.Contains(err.Error(), "setup changed") {
+		t.Fatalf("apply = %v", err)
+	}
+}
+
+// M2: a saved snapshot whose header isn't the apply's: nothing applied.
+func TestSnapshotHeaderChecked(t *testing.T) {
+	f, d, _ := assignFixture(t)
+	d.snapHeader = func(gid, files, owner string) (string, string, string) { return "60002", files, owner }
+	_, rec := assign(t, f, "media", libraryReq)
+	if rec.OK || !strings.Contains(rec.Error, "doesn't match the apply") || !strings.Contains(rec.Error, "nothing on disk changed") {
+		t.Fatalf("op = %+v", rec)
+	}
+	if slices.Contains(fixerRuns(d), "apply") || len(f.h.listSnapshots("media")) != 0 {
+		t.Errorf("runs %v snapshots %v", fixerRuns(d), f.h.listSnapshots("media"))
+	}
+}
+
+// M3: an undo whose snapshot target differs from last_apply's: 409.
+func TestUndoTargetMismatch(t *testing.T) {
+	f, _, _ := assignFixture(t)
+	if _, rec := assign(t, f, "media", libraryReq); !rec.OK {
+		t.Fatal(rec)
+	}
+	f.h.mu.Lock()
+	fo := f.h.st.Folders["media"]
+	la := *fo.LastApply
+	la.Files = "rw" // the snapshot says r
+	fo.LastApply = &la
+	f.h.st.Folders["media"] = fo
+	f.h.mu.Unlock()
+	if _, err := f.h.PreviewUndo(context.Background(), "media"); statusOf(err) != 409 || !strings.Contains(err.Error(), "another target") {
+		t.Fatalf("preview undo = %v", err)
+	}
+}
+
+// R56: the undo's verify is a restore dry run that must find nothing left.
+func TestUndoVerifyFindsLeftovers(t *testing.T) {
+	f, d, _ := assignFixture(t)
+	if _, rec := assign(t, f, "media", libraryReq); !rec.OK {
+		t.Fatal(rec)
+	}
+	d.restore = folderfix.Report{Changed: 10}
+	d.leftAfter = 4
+	plan, err := f.h.PreviewUndo(context.Background(), "media")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.h.StartUndo("media", plan.Hash, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	rec := waitFolderOp(t, f, "media")
+	if rec.OK || !strings.Contains(rec.Error, "verify found 4 entries") || !strings.Contains(rec.Error, "Undo last fix can run again") {
+		t.Fatalf("op = %+v", rec)
+	}
+	if fo, _ := storedFolder(f, "media"); fo.LastApply == nil {
+		t.Error("last apply cleared after a failed verify")
+	}
+}
+
+// M5: a failure's error carries the stopped instances' redaction sets.
+func TestFailureKeepsRedaction(t *testing.T) {
+	f, _, _ := assignFixture(t)
+	enable(t, f, "immich")
+	f.h.mu.Lock()
+	err := setEnvVars(f.h.envPath("immich"), map[string]string{"API_TOKEN": "s3cr3t-token-value"}, false)
+	f.h.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fb := &failCtx{id: "media", actor: "admin", m: &applyMarker{}, secrets: f.h.opSecrets([]string{"immich"})}
+	got := f.h.failBeforeState(fb, errors.New("boom"), "", false)
+	if !slices.Contains(secretsOf(got), "s3cr3t-token-value") {
+		t.Errorf("redaction set lost: %v", secretsOf(got))
+	}
+}
+
+// M6: every run's races reach the op's warnings.
+func TestEveryRunsWarnings(t *testing.T) {
+	f, d, _ := assignFixture(t)
+	d.races = map[string]int64{"snapshot": 2, "verify": 3}
+	_, rec := assign(t, f, "media", libraryReq)
+	if !rec.OK {
+		t.Fatal(rec)
+	}
+	w := strings.Join(rec.Warnings, "\n")
+	for _, want := range []string{"snapshot: 2 entries changed while the fixer ran", "verify: 3 entries changed while the fixer ran"} {
+		if !strings.Contains(w, want) {
+			t.Errorf("warnings lack %q:\n%s", want, w)
+		}
+	}
+}
+
+// M7: while an unrecovered marker exists, a new apply or undo is 409;
+// a recovery that can't take its locks records a failed op and keeps
+// the marker.
+func TestUnrecoveredMarker(t *testing.T) {
+	f, _, _ := assignFixture(t)
+	if _, rec := assign(t, f, "media", libraryReq); !rec.OK {
+		t.Fatal(rec)
+	}
+	plan, err := f.h.PreviewUndo(context.Background(), "media")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := &applyMarker{Kind: "apply", Folder: "media", Instances: []string{"immich"}, Phase: "disk", At: time.Now().UTC()}
+	if err := f.h.writeMarker("media", m); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.h.StartAssign("media", libraryReq, "x", "admin"); statusOf(err) != 409 || !strings.Contains(err.Error(), "hasn't been recovered") {
+		t.Errorf("assign = %v", err)
+	}
+	if _, err := f.h.StartUndo("media", plan.Hash, "admin"); statusOf(err) != 409 || !strings.Contains(err.Error(), "hasn't been recovered") {
+		t.Errorf("undo = %v", err)
+	}
+	unlock, err := f.h.lockApp("immich")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.h.restartWait = 20 * time.Millisecond
+	f.h.recoverFolderApply("media")
+	unlock()
+	rec := f.h.LastOp(opKeyFolder("media"))
+	if rec == nil || rec.OK || !strings.Contains(rec.Error, "not recovered yet") {
+		t.Fatalf("record = %+v", rec)
+	}
+	if _, err := os.Stat(f.h.markerPath("media")); err != nil {
+		t.Errorf("marker removed: %v", err)
+	}
+}
+
+// M8: removing the must_own use changes the other users' env (their
+// PORTCULLIS_FOLDER_UID_<KEY>): they are restarted too, though only
+// samba's values change and nothing changes on disk.
+func TestRenderChangeRestartsOthers(t *testing.T) {
+	f, _, _ := assignFixture(t)
+	if _, rec := assign(t, f, "media", spec); !rec.OK {
+		t.Fatal(rec)
+	}
+	enable(t, f, "immich", "samba")
+	if env := optionEnv(t, f, "immich"); env["PORTCULLIS_FOLDER_UID_LIBRARY"] != "2000" {
+		t.Fatalf("env before = %v", env["PORTCULLIS_FOLDER_UID_LIBRARY"])
+	}
+	ups0 := ups(f, "immich")
+	plan, rec := assign(t, f, "media", libraryReq)
+	if !rec.OK {
+		t.Fatal(rec)
+	}
+	if plan.Disk != nil || !reflect.DeepEqual(plan.Restarts, []string{"immich", "samba"}) {
+		t.Errorf("disk %+v restarts %v", plan.Disk, plan.Restarts)
+	}
+	if ups(f, "immich") != ups0+1 {
+		t.Error("immich not restarted")
+	}
+	if env := optionEnv(t, f, "immich"); env["PORTCULLIS_FOLDER_UID_LIBRARY"] != "" {
+		t.Errorf("env after = %q", env["PORTCULLIS_FOLDER_UID_LIBRARY"])
+	}
 }

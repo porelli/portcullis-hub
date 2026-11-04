@@ -26,6 +26,20 @@ import (
 // folder variables, the settings-save refusals and the probes around an
 // up.
 
+// renderView is what a render reads of the instance settings and the
+// folder definitions: the Hub's state (liveView), or a planned copy a
+// dry run renders from (folderassign.go dryRunAssign) — h.st itself is
+// never changed for a dry run (C1).
+type renderView struct {
+	settings map[string]state.InstanceSettings
+	folders  map[string]state.Folder
+}
+
+// liveView is the Hub's state. Caller must hold mu.
+func (h *Hub) liveView() renderView {
+	return renderView{settings: h.st.Settings, folders: h.st.Folders}
+}
+
 // folderRefOf parses v as a folder value (ok false: not one).
 func folderRefOf(v any) (id, sub string, ok bool, err error) {
 	str, isStr := v.(string)
@@ -68,7 +82,7 @@ type folderMount struct {
 // folderMountLocked resolves o's folder value v for instance t: the
 // folder must be defined (state) and its host path resolve through
 // h.folders. Caller must hold mu.
-func (h *Hub) folderMountLocked(t *templates.Template, o *templates.Option, v any) (*folderMount, error) {
+func (h *Hub) folderMountIn(rv renderView, t *templates.Template, o *templates.Option, v any) (*folderMount, error) {
 	id, sub, ok, err := folderRefOf(v)
 	if !ok {
 		return nil, nil
@@ -76,7 +90,7 @@ func (h *Hub) folderMountLocked(t *templates.Template, o *templates.Option, v an
 	if err != nil {
 		return nil, err
 	}
-	f, defined := h.st.Folders[id]
+	f, defined := rv.folders[id]
 	if !defined {
 		return nil, fmt.Errorf("no shared folder %q", id)
 	}
@@ -85,6 +99,10 @@ func (h *Hub) folderMountLocked(t *templates.Template, o *templates.Option, v an
 		return nil, err
 	}
 	return &folderMount{o: o, id: id, sub: sub, folder: f, host: host, readOnly: folderReadOnly(o, &f, t.ID, o.Key)}, nil
+}
+
+func (h *Hub) folderMountLocked(t *templates.Template, o *templates.Option, v any) (*folderMount, error) {
+	return h.folderMountIn(h.liveView(), t, o, v)
 }
 
 // mountOptions are t's options the override mounts (instance-scope paths
@@ -104,14 +122,14 @@ func mountOptions(t *templates.Template) []*templates.Option {
 // folderMountsLocked are t's folder values (in option order). A value
 // that doesn't resolve is an error naming the option. Caller must hold
 // mu.
-func (h *Hub) folderMountsLocked(t *templates.Template, s state.InstanceSettings) ([]*folderMount, error) {
+func (h *Hub) folderMountsIn(rv renderView, t *templates.Template, s state.InstanceSettings) ([]*folderMount, error) {
 	var out []*folderMount
 	for _, o := range mountOptions(t) {
 		v, ok := h.effectiveValue(t, o, s)
 		if !ok {
 			continue
 		}
-		fm, err := h.folderMountLocked(t, o, v)
+		fm, err := h.folderMountIn(rv, t, o, v)
 		if err != nil {
 			return nil, fmt.Errorf("setting %s: %w", o.Key, err)
 		}
@@ -120,6 +138,10 @@ func (h *Hub) folderMountsLocked(t *templates.Template, s state.InstanceSettings
 		}
 	}
 	return out, nil
+}
+
+func (h *Hub) folderMountsLocked(t *templates.Template, s state.InstanceSettings) ([]*folderMount, error) {
+	return h.folderMountsIn(h.liveView(), t, s)
 }
 
 // folderGroupAdd is, per service, the folder gids the Hub adds as
@@ -156,7 +178,7 @@ func folderBindEntry(fm *folderMount) string {
 
 // folderGIDEnvLocked are the env variables a gid_env join sets to the
 // folder gid (env name → gid) for t's folder values. Caller must hold mu.
-func (h *Hub) folderGIDEnvLocked(t *templates.Template, s state.InstanceSettings) map[string]int {
+func (h *Hub) folderGIDEnvIn(rv renderView, t *templates.Template, s state.InstanceSettings) map[string]int {
 	out := map[string]int{}
 	for _, o := range mountOptions(t) {
 		if o.Folder == nil || o.Folder.Join() != templates.JoinGIDEnv || o.Folder.RunsAs == nil || o.Folder.RunsAs.GIDEnv == "" {
@@ -167,7 +189,7 @@ func (h *Hub) folderGIDEnvLocked(t *templates.Template, s state.InstanceSettings
 			continue
 		}
 		if id, _, isRef, err := folderRefOf(v); isRef && err == nil {
-			if f, defined := h.st.Folders[id]; defined {
+			if f, defined := rv.folders[id]; defined {
 				out[o.Folder.RunsAs.GIDEnv] = f.GID
 			}
 		}
@@ -175,12 +197,16 @@ func (h *Hub) folderGIDEnvLocked(t *templates.Template, s state.InstanceSettings
 	return out
 }
 
+func (h *Hub) folderGIDEnvLocked(t *templates.Template, s state.InstanceSettings) map[string]int {
+	return h.folderGIDEnvIn(h.liveView(), t, s)
+}
+
 // mustOwnUIDLocked is the uid of folder id's must_own use (an instance
 // whose option with must_own names the folder, its runs_as uid resolved),
 // the first by instance id; ok false: none. Caller must hold mu.
-func (h *Hub) mustOwnUIDLocked(id string) (int, bool) {
-	insts := make([]string, 0, len(h.st.Settings))
-	for inst := range h.st.Settings {
+func (h *Hub) mustOwnUIDIn(rv renderView, id string) (int, bool) {
+	insts := make([]string, 0, len(rv.settings))
+	for inst := range rv.settings {
 		insts = append(insts, inst)
 	}
 	sort.Strings(insts)
@@ -189,7 +215,7 @@ func (h *Hub) mustOwnUIDLocked(id string) (int, bool) {
 		if t == nil {
 			continue
 		}
-		s := h.st.Settings[inst]
+		s := rv.settings[inst]
 		var values map[string]settings.Value
 		for _, o := range mountOptions(t) {
 			if o.Folder == nil || !o.Folder.MustOwn {
@@ -216,6 +242,10 @@ func (h *Hub) mustOwnUIDLocked(id string) (int, bool) {
 	return 0, false
 }
 
+func (h *Hub) mustOwnUIDLocked(id string) (int, bool) {
+	return h.mustOwnUIDIn(h.liveView(), id)
+}
+
 // folderEnvLocked is what the folders write into t's .env (contract
 // §13.15): for every path option PORTCULLIS_FOLDER_GID_<KEY> (the folder
 // gid when the value is a folder value, else empty) and
@@ -223,8 +253,8 @@ func (h *Hub) mustOwnUIDLocked(id string) (int, bool) {
 // plus each gid_env join's variable set to the folder gid. optionEnvLocked
 // adds it last, so every .env writer carries it and gid_env wins over
 // the option's stored value. Caller must hold mu.
-func (h *Hub) folderEnvLocked(t *templates.Template) map[string]string {
-	s := h.st.Settings[t.ID]
+func (h *Hub) folderEnvIn(rv renderView, t *templates.Template) map[string]string {
+	s := rv.settings[t.ID]
 	out := map[string]string{}
 	opts := t.Manifest.Options()
 	for i := range opts {
@@ -242,23 +272,27 @@ func (h *Hub) folderEnvLocked(t *templates.Template) map[string]string {
 		if !isRef || err != nil {
 			continue
 		}
-		f, defined := h.st.Folders[id]
+		f, defined := rv.folders[id]
 		if !defined {
 			continue
 		}
 		out[gidVar] = strconv.Itoa(f.GID)
-		if uid, ok := h.mustOwnUIDLocked(id); ok {
+		if uid, ok := h.mustOwnUIDIn(rv, id); ok {
 			out[uidVar] = strconv.Itoa(uid)
 		}
 	}
 	leaks := gidEnvLeaksOf(t)
-	for name, gid := range h.folderGIDEnvLocked(t, s) {
+	for name, gid := range h.folderGIDEnvIn(rv, t, s) {
 		if _, leak := leaks[name]; leak {
 			continue // another service reads it: never the folder gid (I3)
 		}
 		out[name] = strconv.Itoa(gid)
 	}
 	return out
+}
+
+func (h *Hub) folderEnvLocked(t *templates.Template) map[string]string {
+	return h.folderEnvIn(h.liveView(), t)
 }
 
 // ── the folder gid range (preflight ruling 30) ───────────
@@ -326,12 +360,12 @@ func gidOverridden(o *templates.Option, overrides map[string]int) bool {
 // effective value is in 60000–60999 and isn't replaced by a folder
 // assignment (render time: a restore or an edited state.yaml put it
 // there). Sorted by key. Caller must hold mu.
-func (h *Hub) gidRangeProblemsLocked(t *templates.Template, s state.InstanceSettings) []string {
+func (h *Hub) gidRangeProblemsIn(rv renderView, t *templates.Template, s state.InstanceSettings) []string {
 	refs := gidRefsOf(t)
 	if len(refs) == 0 {
 		return nil
 	}
-	overrides := h.folderGIDEnvLocked(t, s)
+	overrides := h.folderGIDEnvIn(rv, t, s)
 	var out []string
 	for key := range refs {
 		o := optionByKey(t, key)
@@ -350,12 +384,16 @@ func (h *Hub) gidRangeProblemsLocked(t *templates.Template, s state.InstanceSett
 	return out
 }
 
+func (h *Hub) gidRangeProblemsLocked(t *templates.Template, s state.InstanceSettings) []string {
+	return h.gidRangeProblemsIn(h.liveView(), t, s)
+}
+
 // gidRangeRenderErr refuses (409) rendering t while a gid reference's
 // value is in the folder range. Caller must hold mu.
-func (h *Hub) gidRangeRenderErr(t *templates.Template, s state.InstanceSettings) error {
+func (h *Hub) gidRangeRenderErrIn(rv renderView, t *templates.Template, s state.InstanceSettings) error {
 	// A gid_env join whose variable another service reads (Discover
 	// refuses such templates; defence in depth, I3).
-	overrides := h.folderGIDEnvLocked(t, s)
+	overrides := h.folderGIDEnvIn(rv, t, s)
 	envs := make([]string, 0, len(overrides))
 	for env := range overrides {
 		envs = append(envs, env)
@@ -367,12 +405,16 @@ func (h *Hub) gidRangeRenderErr(t *templates.Template, s state.InstanceSettings)
 			return statusErr(http.StatusConflict, "%s", msg)
 		}
 	}
-	keys := h.gidRangeProblemsLocked(t, s)
+	keys := h.gidRangeProblemsIn(rv, t, s)
 	if len(keys) == 0 {
 		return nil
 	}
 	refs := gidRefsOf(t)
 	return statusErr(http.StatusConflict, "setting %s (%s): %s — change it in Settings", keys[0], refs[keys[0]], errGIDReserved)
+}
+
+func (h *Hub) gidRangeRenderErr(t *templates.Template, s state.InstanceSettings) error {
+	return h.gidRangeRenderErrIn(h.liveView(), t, s)
 }
 
 // ── settings saves (contract §13.15 "Settings saves") ────

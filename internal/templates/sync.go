@@ -193,3 +193,8 @@ func treeHash(dir string) (string, error) {
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
+
+// SourceHash is the hash of t's source tree (treeHash of t.Path): the
+// Hub's shared-folder plan hash binds it, so a source sync between a
+// preview and its apply is a "setup changed" refusal (T8 M1).
+func SourceHash(t *Template) (string, error) { return treeHash(t.Path) }

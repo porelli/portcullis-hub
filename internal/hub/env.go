@@ -140,8 +140,8 @@ func (h *Hub) portEnvLocked(t *templates.Template) map[string]string {
 // only the secrets store being unreadable. Errors and problems never
 // carry a value. The shared-folder variables (folderEnvLocked) come
 // last. Caller must hold mu.
-func (h *Hub) optionEnvLocked(t *templates.Template, m *directory.Membership) (map[string]string, error) {
-	s := h.st.Settings[t.ID]
+func (h *Hub) optionEnvIn(rv renderView, t *templates.Template, m *directory.Membership) (map[string]string, []string, error) {
+	s := rv.settings[t.ID]
 	out := map[string]string{}
 	var problems []string
 	var secrets map[string]string
@@ -187,7 +187,7 @@ func (h *Hub) optionEnvLocked(t *templates.Template, m *directory.Membership) (m
 			if secrets == nil {
 				var err error
 				if secrets, err = h.secretValues(t.ID); err != nil {
-					return nil, err
+					return nil, nil, err
 				}
 			}
 			var v any
@@ -220,7 +220,7 @@ func (h *Hub) optionEnvLocked(t *templates.Template, m *directory.Membership) (m
 	}
 	// A gid reference holding a folder group's gid no assignment wrote
 	// (ruling 30) is written empty: such a gid would reach the app.
-	for _, key := range h.gidRangeProblemsLocked(t, s) {
+	for _, key := range h.gidRangeProblemsIn(rv, t, s) {
 		o := optionByKey(t, key)
 		for _, n := range o.EnvNames() {
 			out[n] = ""
@@ -229,8 +229,18 @@ func (h *Hub) optionEnvLocked(t *templates.Template, m *directory.Membership) (m
 	}
 	// Last (ruling 11): the folder variables, and a gid_env join's
 	// variable set to the folder gid over the option's own value.
-	for k, v := range h.folderEnvLocked(t) {
+	for k, v := range h.folderEnvIn(rv, t) {
 		out[k] = v
+	}
+	return out, problems, nil
+}
+
+// optionEnvLocked is optionEnvIn over the Hub's state; its problems are
+// recorded for the panel (setEnvProblems). Caller must hold mu.
+func (h *Hub) optionEnvLocked(t *templates.Template, m *directory.Membership) (map[string]string, error) {
+	out, problems, err := h.optionEnvIn(h.liveView(), t, m)
+	if err != nil {
+		return nil, err
 	}
 	h.setEnvProblems(t.ID, problems)
 	return out, nil

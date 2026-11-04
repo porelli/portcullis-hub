@@ -69,11 +69,11 @@ func composeLiteral(s string) string { return strings.ReplaceAll(s, "$", "$$") }
 
 // renderOverrideLocked returns the Hub override's content ("" = none
 // needed). Caller must hold mu.
-func (h *Hub) renderOverrideLocked(t *templates.Template, s state.InstanceSettings) (string, error) {
+func (h *Hub) renderOverrideIn(rv renderView, t *templates.Template, s state.InstanceSettings) (string, error) {
 	values := s.Ports
 	// A gid reference holding a folder group's gid that no folder
 	// assignment wrote fails closed (preflight ruling 30).
-	if err := h.gidRangeRenderErr(t, s); err != nil {
+	if err := h.gidRangeRenderErrIn(rv, t, s); err != nil {
 		return "", err
 	}
 	serviceMounts := make(map[string][]string)
@@ -85,7 +85,7 @@ func (h *Hub) renderOverrideLocked(t *templates.Template, s state.InstanceSettin
 		}
 		// A shared folder (contract §13.15): long syntax, never created
 		// by Docker, read-only unless the use writes, plus its group.
-		fm, err := h.folderMountLocked(t, o, v)
+		fm, err := h.folderMountIn(rv, t, o, v)
 		if err != nil {
 			return "", fmt.Errorf("setting %s: %w", o.Key, err)
 		}
@@ -277,6 +277,12 @@ func (h *Hub) renderOverrideLocked(t *templates.Template, s state.InstanceSettin
 		return "", nil
 	}
 	return b.String(), nil
+}
+
+// renderOverrideLocked is renderOverrideIn over the Hub's state. Caller
+// must hold mu.
+func (h *Hub) renderOverrideLocked(t *templates.Template, s state.InstanceSettings) (string, error) {
+	return h.renderOverrideIn(h.liveView(), t, s)
 }
 
 // yamlQuote renders s as a YAML double-quoted scalar (a JSON string).
