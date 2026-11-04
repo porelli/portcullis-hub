@@ -274,22 +274,28 @@ func openWalker(o Options, mode string) (*walker, error) {
 	}
 	w.root = st
 	w.r.Dev, w.r.Ino = st.Dev, st.Ino
-	if (o.ExpectDev != 0 || o.ExpectIno != 0) && st.Ino != o.ExpectIno {
-		// Another inode is another directory, never a reboot.
-		return w, refuse("%s is not the folder's directory (device %d inode %d, want %d/%d): %s",
-			o.Root, st.Dev, st.Ino, o.ExpectDev, o.ExpectIno, SwappedText)
-	}
-	if (o.ExpectDev != 0 || o.ExpectIno != 0) && st.Dev != o.ExpectDev {
-		return w, refuse("%s is not the folder's directory (device %d inode %d, want %d/%d): %s",
-			o.Root, st.Dev, st.Ino, o.ExpectDev, o.ExpectIno, DeviceChangedText)
-	}
 	ms, err := readMountinfo()
 	if err != nil {
 		return w, fmt.Errorf("mountinfo: %w", err)
 	}
 	root, found := mountRootOf(ms, o.Root)
 	w.r.MountRoot = root
-	if o.ExpectMountRoot != "" && (!found || root != o.ExpectMountRoot) {
+	mountChanged := o.ExpectMountRoot != "" && (!found || root != o.ExpectMountRoot)
+	if o.ExpectDev != 0 || o.ExpectIno != 0 {
+		devChanged := st.Dev != o.ExpectDev
+		switch {
+		case st.Ino != o.ExpectIno || (devChanged && mountChanged):
+			// Another inode, or another device AND another mount root
+			// (a filesystem or subvolume root keeps its inode: btrfs 256,
+			// ext4 2), is another directory, never a reboot.
+			return w, refuse("%s is not the folder's directory (device %d inode %d, want %d/%d; mounted from %q, want %q): %s",
+				o.Root, st.Dev, st.Ino, o.ExpectDev, o.ExpectIno, root, o.ExpectMountRoot, SwappedText)
+		case devChanged:
+			return w, refuse("%s is not the folder's directory (device %d inode %d, want %d/%d): %s",
+				o.Root, st.Dev, st.Ino, o.ExpectDev, o.ExpectIno, DeviceChangedText)
+		}
+	}
+	if mountChanged {
 		return w, refuse("%s is mounted from %q, want %q: %s", o.Root, root, o.ExpectMountRoot, DeviceChangedText)
 	}
 	prefix := o.Root + "/"

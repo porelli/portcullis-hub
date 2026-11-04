@@ -394,6 +394,8 @@ type FolderApply struct {
 	// name them.
 	RootDev uint64 `json:"root_dev,omitempty" yaml:"root_dev,omitempty"`
 	RootIno uint64 `json:"root_ino,omitempty" yaml:"root_ino,omitempty"`
+	// RootMountRoot: the mount root recorded with them.
+	RootMountRoot string `json:"root_mount_root,omitempty" yaml:"root_mount_root,omitempty"`
 }
 
 // FolderChange is a folder value whose root or subpath changed on disk

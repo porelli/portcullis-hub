@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"path"
 	"strings"
 )
 
@@ -20,6 +21,10 @@ type ProbeReport struct {
 	Created   bool   `json:"created"`
 	MountRoot string `json:"mount_root"` // of the bind root (root)
 	FSType    string `json:"fs_type"`    // of the path, when it exists
+	// RelMountRoot: rel's own mount root (the deepest mount at or above
+	// root/rel: its root field + the rest of the path), what a scan of
+	// rel bound alone reports as mount_root; "" = unknown.
+	RelMountRoot string `json:"rel_mount_root,omitempty"`
 	// Subs: each --sub below rel, walked from rel's fd (H1: one run
 	// probes a folder root and every subpath an up mounts). Empty when
 	// rel is missing or a symlink.
@@ -71,11 +76,12 @@ func probe(root, rel string, create bool, subs []string) (*ProbeReport, error) {
 		return p, refuse("open %s: %v", root, err)
 	}
 	defer func() { closeFD(fd) }()
-	if ms, err := readMountinfo(); err != nil {
+	ms, err := readMountinfo()
+	if err != nil {
 		return p, fmt.Errorf("mountinfo: %w", err)
-	} else {
-		p.MountRoot, _ = mountRootOf(ms, root)
 	}
+	p.MountRoot, _ = mountRootOf(ms, root)
+	p.RelMountRoot = effectiveMountRoot(ms, path.Join(root, rel))
 	at := "."
 	var last fileStat
 	for _, c := range strings.Split(rel, "/") {
@@ -179,4 +185,29 @@ func (p *ProbeReport) failed(err error) error {
 		return unrefuse(err)
 	}
 	return err
+}
+
+// effectiveMountRoot is p's mount root: the topmost of the deepest mounts
+// at or above p, its root field joined with the rest of p ("" = none).
+func effectiveMountRoot(ms []mountEntry, p string) string {
+	best, rest := -1, ""
+	for i, m := range ms {
+		var r string
+		switch {
+		case m.Point == p:
+		case m.Point == "/":
+			r = p
+		case strings.HasPrefix(p, m.Point+"/"):
+			r = p[len(m.Point):]
+		default:
+			continue
+		}
+		if best < 0 || len(m.Point) >= len(ms[best].Point) {
+			best, rest = i, r
+		}
+	}
+	if best < 0 {
+		return ""
+	}
+	return path.Join(ms[best].Root, rest)
 }

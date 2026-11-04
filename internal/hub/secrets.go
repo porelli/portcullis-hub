@@ -148,25 +148,58 @@ func (h *Hub) knownSecrets(id string) []string {
 	return out
 }
 
-// redactValues replaces every secret in s with [redacted], longest first
-// (a secret containing another is blanked whole). Each secret is also
-// blanked in its JSON string encodings (quotes trimmed; HTML-escaped and
-// not): output that echoes a hook's stdin carries `"`, `\`, `<`, `>`,
-// `&` escaped. Callers clip after, never before.
+// redactValues replaces every secret in s with [redacted]. It works on
+// ranges of the original text (last round 3): every match of every
+// secret — overlapping ones too — is found first, overlapping or adjacent
+// ranges are merged, and each merged range is replaced once, so no
+// secret's replacement can hide part of another ("abcd" and "cdef" in
+// "xabcdefy" give "x[redacted]y"). Each secret is also matched in its
+// JSON string encodings (quotes trimmed; HTML-escaped and not): output
+// that echoes a hook's stdin carries `"`, `\`, `<`, `>`, `&` escaped.
+// Callers clip after, never before.
 func redactValues(s string, secrets []string) string {
+	seen := map[string]bool{}
 	var vals []string
 	for _, v := range secrets {
 		if v == "" {
 			continue
 		}
-		vals = append(vals, v)
-		vals = append(vals, jsonForms(v)...)
+		for _, x := range append([]string{v}, jsonForms(v)...) {
+			if x != "" && !seen[x] {
+				seen[x] = true
+				vals = append(vals, x)
+			}
+		}
 	}
-	sort.Slice(vals, func(i, j int) bool { return len(vals[i]) > len(vals[j]) })
+	type span struct{ from, to int }
+	var spans []span
 	for _, v := range vals {
-		s = strings.ReplaceAll(s, v, "[redacted]")
+		for off := 0; off < len(s); {
+			i := strings.Index(s[off:], v)
+			if i < 0 {
+				break
+			}
+			spans = append(spans, span{off + i, off + i + len(v)})
+			off += i + 1
+		}
 	}
-	return s
+	if len(spans) == 0 {
+		return s
+	}
+	sort.Slice(spans, func(i, j int) bool { return spans[i].from < spans[j].from })
+	var b strings.Builder
+	last := 0
+	for i := 0; i < len(spans); {
+		cur := spans[i]
+		for i++; i < len(spans) && spans[i].from <= cur.to; i++ {
+			cur.to = max(cur.to, spans[i].to)
+		}
+		b.WriteString(s[last:cur.from])
+		b.WriteString("[redacted]")
+		last = cur.to
+	}
+	b.WriteString(s[last:])
+	return b.String()
 }
 
 // jsonForms are v's JSON string encodings without the quotes, when they

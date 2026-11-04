@@ -1644,6 +1644,96 @@ func TestFolderAuditOverlappingSecrets(t *testing.T) {
 	}
 }
 
+// Last round 1/2: a folder that is a filesystem or subvolume root keeps
+// its inode (btrfs 256, ext4 2): another device AND another mount root is
+// another directory — the swapped wording, the second confirm, last_apply
+// cleared; another device alone (a btrfs reboot) stays device-only.
+func TestRecheckDeviceAndMountRootIsDifferentDirectory(t *testing.T) {
+	f, d, _ := assignFixture(t)
+	ctx := context.Background()
+	if _, rec := assign(t, f, "media", libraryReq); !rec.OK {
+		t.Fatal(rec)
+	}
+	d.mu.Lock()
+	d.paths["/srv/media"].dev, d.paths["/srv/media"].mountRoot = 2050, "/@other"
+	d.mu.Unlock()
+	if _, err := f.h.PreviewAssign(ctx, "media", spec); statusOf(err) != 409 || !strings.Contains(err.Error(), swappedText) {
+		t.Errorf("assign preview = %v", err)
+	}
+	if _, err := f.h.PreviewUndo(ctx, "media"); statusOf(err) != 409 || !strings.Contains(err.Error(), swappedText) {
+		t.Errorf("undo preview = %v", err)
+	}
+	if err := f.h.Enable("immich"); statusOf(err) != 409 || !strings.Contains(err.Error(), swappedText) {
+		t.Errorf("enable = %v", err)
+	}
+	chk, err := f.h.PreviewRecheck(ctx, "media")
+	if err != nil || !chk.DifferentDirectory {
+		t.Fatalf("preview = %+v %v", chk, err)
+	}
+	text := strings.Join(chk.Lines, "\n")
+	if strings.Contains(text, "same device number") || !strings.Contains(text, swappedText) || !strings.Contains(text, "mount root") {
+		t.Errorf("lines:\n%s", text)
+	}
+	if _, err := f.h.ApplyRecheck(ctx, "media", chk.Hash, false, "admin"); statusOf(err) != 400 {
+		t.Errorf("without the confirm = %v", err)
+	}
+	if _, err := f.h.ApplyRecheck(ctx, "media", chk.Hash, true, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if fo, _ := storedFolder(f, "media"); fo.LastApply != nil || fo.MountRoot != "/@other" {
+		t.Errorf("stored = %+v", fo)
+	}
+}
+
+// Last round 2: a mount root that changed alone (same device and inode)
+// says exactly that.
+func TestRecheckMountRootOnlyLine(t *testing.T) {
+	f, d, _ := assignFixture(t)
+	d.mu.Lock()
+	d.paths["/srv/media"].mountRoot = "/@moved"
+	d.mu.Unlock()
+	chk, err := f.h.PreviewRecheck(context.Background(), "media")
+	if err != nil || chk.DifferentDirectory || !chk.Changed {
+		t.Fatalf("preview = %+v %v", chk, err)
+	}
+	if text := strings.Join(chk.Lines, "\n"); !strings.Contains(text, "Only the mount root changed (same device number and inode)") {
+		t.Errorf("lines:\n%s", text)
+	}
+}
+
+// Last round 4: the undo preview refuses a recorded snapshot root whose
+// inode isn't the folder's (sino != f.Ino) or whose mount root differs.
+func TestUndoRefusesRecordedRootMismatch(t *testing.T) {
+	f, _, _ := assignFixture(t)
+	ctx := context.Background()
+	if _, rec := assign(t, f, "media", libraryReq); !rec.OK {
+		t.Fatal(rec)
+	}
+	set := func(change func(fo *state.Folder)) {
+		f.h.mu.Lock()
+		fo := f.h.st.Folders["media"]
+		la := *fo.LastApply
+		fo.LastApply = &la
+		change(&fo)
+		f.h.st.Folders["media"] = fo
+		f.h.mu.Unlock()
+	}
+	fo, _ := storedFolder(f, "media")
+	// The header still names the real root; the stored identity claims
+	// another inode (a recorded root of a directory the folder isn't).
+	set(func(x *state.Folder) {
+		x.LastApply.RootDev, x.LastApply.RootIno, x.LastApply.RootMountRoot = fo.Dev, fo.Ino, fo.MountRoot
+		x.Ino = fo.Ino + 9
+	})
+	if _, err := f.h.PreviewUndo(ctx, "media"); statusOf(err) != 409 || !strings.Contains(err.Error(), "can't be undone") {
+		t.Errorf("recorded inode ≠ folder inode = %v", err)
+	}
+	set(func(x *state.Folder) { x.Ino = fo.Ino; x.LastApply.RootMountRoot = "/@elsewhere" })
+	if _, err := f.h.PreviewUndo(ctx, "media"); statusOf(err) != 409 || !strings.Contains(err.Error(), "can't be undone") {
+		t.Errorf("recorded mount root ≠ folder's = %v", err)
+	}
+}
+
 // M6: every run's races reach the op's warnings.
 func TestEveryRunsWarnings(t *testing.T) {
 	f, d, _ := assignFixture(t)

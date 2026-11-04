@@ -510,3 +510,26 @@ func TestSecretMinors(t *testing.T) {
 		t.Errorf("settings dir: %v %v", fi, err)
 	}
 }
+
+// Last round 3: redaction works on ranges of the original text: every
+// match of every secret, overlapping or adjacent ranges merged, each
+// replaced once.
+func TestRedactValuesRanges(t *testing.T) {
+	for _, c := range []struct {
+		s       string
+		secrets []string
+		want    string
+	}{
+		{"xabcdefy", []string{"abcd", "cdef"}, "x[redacted]y"},
+		{"xabcdefy", []string{"cdef", "abcd"}, "x[redacted]y"},
+		{"abab", []string{"ab"}, "[redacted]"}, // adjacent matches merge
+		{"aaa", []string{"aa"}, "[redacted]"},  // overlapping matches of one secret
+		{"a-b", []string{"a", "b"}, "[redacted]-[redacted]"},
+		{"PASSWORD=hunter2-long-secret", []string{"hunter2", "hunter2-long-secret"}, "PASSWORD=[redacted]"},
+		{"nothing here", []string{"zzz", ""}, "nothing here"},
+	} {
+		if got := redactValues(c.s, c.secrets); got != c.want {
+			t.Errorf("redactValues(%q, %q) = %q, want %q", c.s, c.secrets, got, c.want)
+		}
+	}
+}

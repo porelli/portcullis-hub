@@ -474,7 +474,7 @@ func (h *Hub) scanOne(ctx context.Context, t ScanTarget) (e scanEntry, why strin
 		}
 		if rep.Dev != f.Dev || rep.Ino != f.Ino {
 			why := identityText
-			if rep.Ino != f.Ino {
+			if differentDirectory(f.Dev, f.Ino, f.MountRoot, rep.Dev, rep.Ino, rep.MountRoot) {
 				why = swappedText
 			}
 			return fail(fmt.Errorf("%s: device/inode %d/%d, now %d/%d: %s", f.Path, f.Dev, f.Ino, rep.Dev, rep.Ino, why))

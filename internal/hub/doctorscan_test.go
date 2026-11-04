@@ -868,3 +868,26 @@ func TestRuntimeDroppedAfterStart(t *testing.T) {
 		t.Error("the runtime gids of a restarted instance are still judged")
 	}
 }
+
+// Last round 1: a doctor scan classifies a folder root mismatch like the
+// up does: device and mount root changed = another directory; the device
+// alone = the identity re-check.
+func TestDoctorScanClassifiesIdentity(t *testing.T) {
+	for name, c := range map[string]struct {
+		mountRoot string
+		want      string
+	}{
+		"device only":       {"/srv/media", identityText},
+		"device+mount root": {"/@other", swappedText},
+	} {
+		f, d := scanFixture(t)
+		d.mu.Lock()
+		d.paths["/srv/media"].dev, d.paths["/srv/media"].mountRoot = 2050, c.mountRoot
+		d.mu.Unlock()
+		f.h.runDoctorScan(context.Background())
+		e, ok := f.h.scanEntries()["/srv/media"]
+		if !ok || !strings.Contains(e.Err, c.want) {
+			t.Errorf("%s: entry = %+v, want an error with %q", name, e, c.want)
+		}
+	}
+}

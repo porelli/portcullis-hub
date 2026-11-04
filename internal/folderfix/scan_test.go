@@ -774,3 +774,46 @@ func TestScanUnreadableIsFailure(t *testing.T) {
 		t.Fatalf("report %s: %v", out.Bytes(), err)
 	}
 }
+
+// Last round 1/4: the fixer's root refusals: another inode, or another
+// device AND another mount root (a filesystem or subvolume root keeps its
+// inode: btrfs 256, ext4 2), is another directory (SwappedText); another
+// device alone (a btrfs reboot) is the identity change (DeviceChangedText).
+func TestRootRefusalWording(t *testing.T) {
+	root := simpleTree(t)
+	dev, ino := rootIDs(t, root)
+	for name, c := range map[string]struct {
+		o    Options
+		want string
+	}{
+		"inode":              {Options{Root: root, ExpectDev: dev, ExpectIno: ino + 1}, SwappedText},
+		"device":             {Options{Root: root, ExpectDev: dev + 1, ExpectIno: ino}, DeviceChangedText},
+		"device+mount root":  {Options{Root: root, ExpectDev: dev + 1, ExpectIno: ino, ExpectMountRoot: "/elsewhere"}, SwappedText},
+		"mount root (found)": {Options{Root: root, ExpectDev: dev, ExpectIno: ino, ExpectMountRoot: "/elsewhere"}, DeviceChangedText},
+	} {
+		_, err := Scan(c.o)
+		if !IsRefused(err) || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: %v, want a refusal with %q", name, err, c.want)
+		}
+	}
+}
+
+// Last round 1: a probe reports rel's own mount root, the deepest mount
+// at or above it.
+func TestEffectiveMountRoot(t *testing.T) {
+	ms := []mountEntry{{Root: "/", Point: "/"}, {Root: "/data", Point: "/broot"}, {Root: "/@media", Point: "/broot/media"}}
+	for p, want := range map[string]string{
+		"/broot/photos":       "/data/photos",
+		"/broot/media":        "/@media",
+		"/broot/media/movies": "/@media/movies",
+		"/broot/mediax":       "/data/mediax",
+		"/etc":                "/etc",
+	} {
+		if got := effectiveMountRoot(ms, p); got != want {
+			t.Errorf("%s: %q, want %q", p, got, want)
+		}
+	}
+	if got := effectiveMountRoot(nil, "/broot/x"); got != "" {
+		t.Errorf("no mountinfo: %q", got)
+	}
+}

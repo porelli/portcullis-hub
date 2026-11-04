@@ -117,7 +117,7 @@ func (d *fakeDisk) run(s docker.RunSpec, _ func(io.Reader) error) (*docker.RunRe
 				p.Created = true
 			}
 			if e != nil {
-				p.Exists, p.Dev, p.Ino, p.FSType = true, e.dev, e.ino, e.fs
+				p.Exists, p.Dev, p.Ino, p.FSType, p.RelMountRoot = true, e.dev, e.ino, e.fs, e.mountRoot
 			}
 		}
 		if p.Exists {

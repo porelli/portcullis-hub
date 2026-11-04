@@ -712,7 +712,7 @@ func (h *Hub) diskPlan(ctx context.Context, id string, c *assignCalc) error {
 		return errFolderChanged(f.Name)
 	}
 	if pr.Dev != f.Dev || pr.Ino != f.Ino {
-		return errFolderIdentity(f.Name, f.Ino, pr.Ino)
+		return errFolderIdentity(f.Name, differentDirectory(f.Dev, f.Ino, f.MountRoot, pr.Dev, pr.Ino, pr.RelMountRoot))
 	}
 	subs := map[string]bool{}
 	for _, up := range c.plan.Uses {
@@ -1702,7 +1702,10 @@ func (h *Hub) computeUndo(ctx context.Context, id string) (*undoCalc, error) {
 		return nil, err
 	}
 	sdev, sino := snapshotRoot(f)
-	if hdr.Kind != "apply" || hdr.GID != f.GID || hdr.RootDev != sdev || hdr.RootIno != sino || sino != f.Ino {
+	// A recorded root (a device-only re-check since the apply) is the same
+	// directory only with the folder's inode and mount root (last round 1).
+	recordedOK := f.LastApply.RootDev == 0 || (sino == f.Ino && f.LastApply.RootMountRoot == f.MountRoot)
+	if hdr.Kind != "apply" || hdr.GID != f.GID || hdr.RootDev != sdev || hdr.RootIno != sino || sino != f.Ino || !recordedOK {
 		return nil, statusErr(http.StatusConflict, "permissions snapshot %s is not of this folder as it is now (kind %s, gid %d): it can't be undone", u.apply.Snapshot, hdr.Kind, hdr.GID)
 	}
 	ownerOK := (hdr.OwnerUID == nil) == (u.apply.OwnerUID == nil) && (hdr.OwnerUID == nil || *hdr.OwnerUID == *u.apply.OwnerUID)
@@ -1722,7 +1725,7 @@ func (h *Hub) computeUndo(ctx context.Context, id string) (*undoCalc, error) {
 		return nil, errFolderChanged(f.Name)
 	}
 	if pr.Dev != f.Dev || pr.Ino != f.Ino {
-		return nil, errFolderIdentity(f.Name, f.Ino, pr.Ino)
+		return nil, errFolderIdentity(f.Name, differentDirectory(f.Dev, f.Ino, f.MountRoot, pr.Dev, pr.Ino, pr.RelMountRoot))
 	}
 	dry, err := h.restoreDryRun(ctx, id, u.apply.Snapshot, f)
 	if err != nil {

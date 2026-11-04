@@ -602,6 +602,7 @@ type folderProbe struct {
 	key, folder, name, sub string
 	root, rel              string // the bind root and the folder's path below it
 	dev, ino               uint64 // the folder root's, as stored
+	mountRoot              string // the folder root's, as stored
 	subDev, subIno         uint64 // the subpath's, from the probe before the up
 }
 
@@ -620,7 +621,7 @@ func (h *Hub) folderProbesLocked(t *templates.Template) ([]folderProbe, error) {
 			return nil, statusErr(http.StatusConflict, "shared folder %s: %s is not under a bind root", fm.folder.Name, fm.folder.Path)
 		}
 		out = append(out, folderProbe{key: fm.o.Key, folder: fm.id, name: fm.folder.Name, sub: fm.sub,
-			root: root, rel: rel, dev: fm.folder.Dev, ino: fm.folder.Ino})
+			root: root, rel: rel, dev: fm.folder.Dev, ino: fm.folder.Ino, mountRoot: fm.folder.MountRoot})
 	}
 	return out, nil
 }
@@ -714,7 +715,8 @@ func (h *Hub) probeFolders(ctx context.Context, ps []folderProbe, after bool) (*
 		case !rep.Exists:
 			return first, "the folder is missing", errFolderChanged(first.name)
 		case rep.Dev != first.dev || rep.Ino != first.ino:
-			return first, identityDetail(rep.Dev, rep.Ino, first.dev, first.ino), errFolderIdentity(first.name, first.ino, rep.Ino)
+			sw := differentDirectory(first.dev, first.ino, first.mountRoot, rep.Dev, rep.Ino, rep.RelMountRoot)
+			return first, identityDetail(rep.Dev, rep.Ino, first.dev, first.ino, sw), errFolderIdentity(first.name, sw)
 		case len(rep.Subs) != len(subs):
 			return first, "the probe reported no subpaths", statusErr(http.StatusInternalServerError, "shared folder fixer (probe): %d subpaths reported, %d asked", len(rep.Subs), len(subs))
 		}
