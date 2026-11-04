@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/portcullis/hub/internal/doctor"
+	"github.com/portcullis/hub/internal/settings"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
 )
@@ -111,12 +112,26 @@ func (h *Hub) setLocalNetworks(cidrs []string, actor string) error {
 		stored = &list
 	}
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	prev := h.st.LocalNetworks
 	h.st.LocalNetworks = stored
 	if err := h.saveStateLocked(); err != nil {
 		h.st.LocalNetworks = prev
+		h.mu.Unlock()
 		return err
+	}
+	// F35: the enabled instances whose compose reads
+	// ${PORTCULLIS_LOCAL_NETWORKS} restart (the restart writes the .env
+	// again); the others get the value at their next .env write.
+	var restart []templates.Template
+	for _, id := range h.st.Enabled {
+		if t := h.findLocked(id); t != nil && t.UsesLocalNetworks {
+			restart = append(restart, *t)
+		}
+	}
+	h.mu.Unlock()
+	for _, t := range restart {
+		h.setOwed(t.ID, settings.EffectRestart)
+		h.goBackground(func() { h.Restart(t) })
 	}
 	return nil
 }

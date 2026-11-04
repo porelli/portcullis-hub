@@ -232,7 +232,21 @@ func (h *Hub) optionEnvIn(rv renderView, t *templates.Template, m *directory.Mem
 	for k, v := range h.folderEnvIn(rv, t) {
 		out[k] = v
 	}
+	// The Local networks (F35, §3.1): every .env write carries them, the
+	// canonical prefixes comma-joined ('' = saved empty: loopback only).
+	out[templates.VarLocalNetworks] = h.localNetworksEnvLocked()
 	return out, problems, nil
+}
+
+// localNetworksEnvLocked is PORTCULLIS_LOCAL_NETWORKS' value. Caller
+// holds mu (read).
+func (h *Hub) localNetworksEnvLocked() string {
+	nets := h.localNetworksLocked()
+	parts := make([]string, len(nets))
+	for i, p := range nets {
+		parts[i] = p.String()
+	}
+	return strings.Join(parts, ",")
 }
 
 // optionEnvLocked is optionEnvIn over the Hub's state; its problems are

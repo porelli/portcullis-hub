@@ -140,6 +140,7 @@ func build(id, source, path string, data, compose []byte, domain string, kinds K
 	if t.GIDEnvLeaks, err = GIDEnvLeaks(&t.Manifest, compose); err != nil {
 		return Template{}, err
 	}
+	t.UsesLocalNetworks = ReferencesLocalNetworks(compose)
 	// The catalog entry shows the default instance.
 	return t.Instance(t.ID, nil, domain)
 }

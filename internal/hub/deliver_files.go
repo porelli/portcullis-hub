@@ -45,6 +45,22 @@ func (h *Hub) dataFilePath(id, name string) string {
 	return filepath.Join(h.dataFileDir(id, name), name+".json")
 }
 
+// dataFilePathOf is data file f's path: <name>.json, or <name>.tsv for
+// format tsv (§13.7).
+func (h *Hub) dataFilePathOf(id string, f *templates.DataFile) string {
+	return filepath.Join(h.dataFileDir(id, f.Name), f.FileName())
+}
+
+// otherFormatPath is f's file in the format f doesn't use (removed when
+// f is written: a format change leaves no stale file behind).
+func (h *Hub) otherFormatPath(id string, f *templates.DataFile) string {
+	other := templates.DataFile{Name: f.Name, Format: templates.FormatTSV}
+	if f.EffectiveFormat() == templates.FormatTSV {
+		other.Format = templates.FormatJSON
+	}
+	return h.dataFilePathOf(id, &other)
+}
+
 func (h *Hub) secretsFilePath(id, name string) string {
 	return filepath.Join(h.dataFileDir(id, name), name+".secrets.json")
 }
@@ -110,8 +126,14 @@ func fileDeliveries(o *templates.Option, name string) []templates.Delivery {
 func fileNeedsPeople(t *templates.Template, name string) bool {
 	opts := t.Manifest.Options()
 	for i := range opts {
-		if opts[i].EffectiveScope() != templates.ScopeInstance && len(fileDeliveries(&opts[i], name)) > 0 {
+		ds := fileDeliveries(&opts[i], name)
+		if opts[i].EffectiveScope() != templates.ScopeInstance && len(ds) > 0 {
 			return true
+		}
+		for j := range ds {
+			if expandsMembers(&ds[j]) {
+				return true // the members of its groups
+			}
 		}
 	}
 	return false
@@ -145,6 +167,8 @@ func (h *Hub) buildFilesLocked(t *templates.Template, m *directory.Membership) [
 		}
 		if o.people && people == nil {
 			people = h.resolvePeopleLocked(t, m)
+			_, idless := h.fileMembersLocked(t, m)
+			logIdless(t, idless)
 		}
 		if !secretsRead && fileHasSecret(t, f.Name) {
 			secrets, secretsErr = h.secretValues(t.ID)
@@ -197,6 +221,17 @@ func (h *Hub) renderDataFileLocked(t *templates.Template, name string, m *direct
 	if err != nil {
 		return nil, nil, err
 	}
+	if f := dataFileOf(t, name); f != nil && f.EffectiveFormat() == templates.FormatTSV {
+		if sec != nil {
+			// Refused at discovery: secrets go only to a JSON file's
+			// secrets file.
+			return nil, nil, fmt.Errorf("data file %s: a tsv file can't carry secret options", name)
+		}
+		if data, err = settings.EncodeTSV(doc); err != nil {
+			return nil, nil, fmt.Errorf("data file %s: %w", name, err)
+		}
+		return data, nil, nil
+	}
 	if data, err = json.MarshalIndent(doc, "", "  "); err != nil {
 		return nil, nil, err
 	}
@@ -208,6 +243,16 @@ func (h *Hub) renderDataFileLocked(t *templates.Template, name string, m *direct
 		secretsDoc = append(secretsDoc, '\n')
 	}
 	return data, secretsDoc, nil
+}
+
+// dataFileOf is t's data file name, or nil.
+func dataFileOf(t *templates.Template, name string) *templates.DataFile {
+	for i := range t.Manifest.Files {
+		if t.Manifest.Files[i].Name == name {
+			return &t.Manifest.Files[i]
+		}
+	}
+	return nil
 }
 
 // docTarget is what a rendered document carries: an option's deliveries
@@ -227,6 +272,21 @@ func (h *Hub) renderDocLocked(t *templates.Template, target docTarget, m *direct
 	s := h.st.Settings[t.ID]
 	opts := t.Manifest.Options()
 	var entryPop *Population // the person-entered population, once
+	// The members the document carries (F9: with person_id options, only
+	// those holding their ids), once.
+	var members []string
+	var inFile map[string]bool
+	carried := func() ([]string, map[string]bool) {
+		if inFile == nil && m != nil {
+			members, _ = h.fileMembersLocked(t, m)
+			inFile = map[string]bool{}
+			for _, u := range members {
+				inFile[u] = true
+			}
+		}
+		return members, inFile
+	}
+	idOpts := len(personIDOptions(t)) > 0
 	for i := range opts {
 		o := &opts[i]
 		ds := target.deliveries(o)
@@ -235,6 +295,36 @@ func (h *Hub) renderDocLocked(t *templates.Template, target docTarget, m *direct
 		}
 		switch o.EffectiveScope() {
 		case templates.ScopeInstance:
+			if isGroupOption(o) && optionExpands(o) {
+				// expand_members (§13.5): the bound groups' members in the
+				// population; every delivery of such an option expands
+				// (the validator allows it on file deliveries only).
+				if m == nil {
+					continue
+				}
+				users, _ := carried()
+				users = h.boundMembersLocked(t, o, s, m, users)
+				for _, d := range ds {
+					if !expandsMembers(&d) {
+						v, ok := h.effectiveValue(t, o, s)
+						if !ok {
+							continue
+						}
+						r, err := settings.RenderDelivery(o, v, &d)
+						if err != nil {
+							return doc, nil, fmt.Errorf("setting %s: %w", o.Key, err)
+						}
+						doc.Values[o.Key] = r.JSON
+						continue
+					}
+					r, err := renderExpanded(o, users, &d)
+					if err != nil {
+						return doc, nil, fmt.Errorf("setting %s: %w", o.Key, err)
+					}
+					doc.Values[o.Key] = r.JSON
+				}
+				continue
+			}
 			if o.Type == templates.TypeSecret {
 				if sec == nil {
 					sec = map[string]string{}
@@ -259,7 +349,33 @@ func (h *Hub) renderDocLocked(t *templates.Template, target docTarget, m *direct
 				doc.Values[o.Key] = r.JSON
 			}
 		case templates.ScopePerson:
+			if o.Type == templates.TypePersonID {
+				// The Hub's id for each member (allocated before the
+				// render: ensurePersonIDs).
+				users, _ := carried()
+				for _, user := range users {
+					id, ok := h.personIDLocked(o.Pool, user)
+					if !ok {
+						continue
+					}
+					for _, d := range ds {
+						field := target.field(&d)
+						if field == "" {
+							field = o.Key
+						}
+						if doc.People[user] == nil {
+							doc.People[user] = map[string]any{}
+						}
+						doc.People[user][field] = id
+					}
+				}
+				continue
+			}
+			_, in := carried()
 			for _, user := range sortedUsers(people) {
+				if idOpts && !in[user] {
+					continue // no id: left out of the file (F9)
+				}
 				res, ok := people[user][o.Key]
 				if !ok || res.Value == nil {
 					// No value, or UNRESOLVED (ReasonFailClosed): omitted.
@@ -341,7 +457,7 @@ func sortedUsers(p map[string]map[string]settings.Resolved) []string {
 // fileOnDisk: o's data file (and secrets file, or its absence) is on
 // disk exactly as o would write it.
 func (h *Hub) fileOnDisk(id string, o fileOutput) bool {
-	b, err := os.ReadFile(h.dataFilePath(id, o.file.Name))
+	b, err := os.ReadFile(h.dataFilePathOf(id, &o.file))
 	if err != nil || !bytes.Equal(b, o.data) {
 		return false
 	}
@@ -379,8 +495,11 @@ func (h *Hub) writeDataFile(id string, o fileOutput) error {
 	} else if err := os.Remove(sp); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("removing the secrets file of %s: %w", o.file.Name, err)
 	}
-	if err := fsutil.WriteFileAtomic(h.dataFilePath(id, o.file.Name), o.data, dataFileMode); err != nil {
+	if err := fsutil.WriteFileAtomic(h.dataFilePathOf(id, &o.file), o.data, dataFileMode); err != nil {
 		return fmt.Errorf("writing data file %s: %w", o.file.Name, err)
+	}
+	if err := os.Remove(h.otherFormatPath(id, &o.file)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("removing the old data file of %s: %w", o.file.Name, err)
 	}
 	return nil
 }

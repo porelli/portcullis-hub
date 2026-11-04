@@ -295,6 +295,10 @@ type Template struct {
 	// every view of the template).
 	GIDRefs     map[string]string `json:"-"`
 	GIDEnvLeaks map[string]string `json:"-"`
+	// UsesLocalNetworks: compose.yml reads ${PORTCULLIS_LOCAL_NETWORKS}
+	// (found at discovery): saving Local networks restarts its enabled
+	// instances (F35).
+	UsesLocalNetworks bool `json:"-"`
 	// raw is the manifest as written ({{HOST_*}} unexpanded); nil = Manifest.
 	raw *Manifest
 }

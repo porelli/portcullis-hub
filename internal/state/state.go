@@ -204,6 +204,12 @@ type InstanceSettings struct {
 	// Entered: person-entered values (call 32), option key → lowercase
 	// username → value.
 	Entered map[string]map[string]EnteredValue `json:"entered,omitempty" yaml:"entered,omitempty"`
+	// GroupIDs: instance-scope group / groups options (contract §13.2,
+	// file sharing F3): option key → group name in Values → the LLDAP
+	// group id it was saved against. A name whose id is missing or no
+	// longer the directory's grants nothing (expand_members); a deleted or
+	// re-created group is purged from the value.
+	GroupIDs map[string]map[string]int `json:"group_ids,omitempty" yaml:"group_ids,omitempty"`
 }
 
 // PersonSetting is a per-person option's configuration: the default
@@ -326,6 +332,16 @@ func (s InstanceSettings) Clone() InstanceSettings {
 				cm[u] = e
 			}
 			c.Entered[k] = cm
+		}
+	}
+	if s.GroupIDs != nil {
+		c.GroupIDs = make(map[string]map[string]int, len(s.GroupIDs))
+		for k, m := range s.GroupIDs {
+			cm := make(map[string]int, len(m))
+			for g, id := range m {
+				cm[g] = id
+			}
+			c.GroupIDs[k] = cm
 		}
 	}
 	return c

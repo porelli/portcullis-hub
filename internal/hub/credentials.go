@@ -111,8 +111,8 @@ type CredentialsView struct {
 	Population int             `json:"population"`
 	Active     int             `json:"active"`
 	Rows       []CredentialRow `json:"rows"`
-	// Folders: the last hook report's per-person folders (Task 10 stores
-	// the report; [] until then).
+	// Folders: the last accepted hook report's folders (hook-report.json,
+	// §13.8); [] without one.
 	Folders  []settings.HookFolder `json:"folders"`
 	LastSync *UnitResult           `json:"last_sync,omitempty"`
 }
@@ -1006,9 +1006,13 @@ func (h *Hub) Credentials(ctx context.Context, instance string) ([]CredentialsVi
 		pop = h.populationLocked(t, m)
 		resolved = h.resolvePeopleLocked(t, m)
 	}
+	folders := []settings.HookFolder{}
+	if r, ok := h.HookReport(instance); ok && r.Report.Folders != nil {
+		folders = r.Report.Folders
+	}
 	out := []CredentialsView{}
 	for _, o := range personSecretOptions(t) {
-		v := CredentialsView{Instance: instance, Key: o.Key, Label: o.Label, Population: len(pop.People), Rows: []CredentialRow{}, Folders: []settings.HookFolder{}}
+		v := CredentialsView{Instance: instance, Key: o.Key, Label: o.Label, Population: len(pop.People), Rows: []CredentialRow{}, Folders: slices.Clone(folders)}
 		users := map[string]bool{}
 		for _, p := range pop.People {
 			users[p.User] = true

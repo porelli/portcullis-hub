@@ -3,3 +3,6 @@ services:
     image: smbfixture
     environment:
       PORTCULLIS_USERNAME_PATTERN: '^[a-z_][a-z0-9_.-]{0,31}$$'
+      LOCAL_NETWORKS: ${PORTCULLIS_LOCAL_NETWORKS}
+      SHARE1_GID: ${PORTCULLIS_FOLDER_GID_SHARE1_FOLDER}
+      SHARE2_GID: ${PORTCULLIS_FOLDER_GID_SHARE2_FOLDER}

@@ -392,11 +392,22 @@ func (h *Hub) runHook(ctx context.Context, t *templates.Template, hk templates.H
 		h.hookExecs[t.ID] = timedOutExec{execID: res.ExecID, timeout: timeout}
 		h.deliveryMu.Unlock()
 	}
+	// The output redacted first (the sent secrets, the instance's stored
+	// secrets and hashes); the report is read from that and its line
+	// removed from what the op record and the unit show (§13.8, F32).
+	var text string
+	if res != nil && len(res.Output) > 0 {
+		text = h.secretRedactor(t.ID, sent)(string(res.Output))
+		if err == nil && !res.TimedOut {
+			h.acceptHookReport(ctx, t, hk, []byte(text))
+		}
+		text = stripReportLines(text)
+	}
 	output := func() string {
-		if res == nil || len(res.Output) == 0 {
+		if text == "" {
 			return ""
 		}
-		s := string(res.Output)
+		s := text
 		if res.Truncated {
 			s += "\n[output truncated]"
 		}

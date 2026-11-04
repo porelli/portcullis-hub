@@ -130,6 +130,10 @@ type parsedSettings struct {
 	// sentIDs: option key → lowercase group → the group id the panel
 	// sent with the row (GroupValueInput.GroupID; absent = a new row).
 	sentIDs map[string]map[string]int
+	// groupIDs: instance group / groups values (F3) → group name → the
+	// directory's id, filled by bindRowsWith; a nil map = not bound yet
+	// (stored unbound: grants nothing), an empty one = no group.
+	groupIDs map[string]map[string]int
 }
 
 // secretOp is one parsed secret change.
@@ -299,7 +303,7 @@ func parsePerson(kinds *settings.Registry, folders FolderSource, o *templates.Op
 // parseSettings validates u's settings part against t (ValidateSettings)
 // and returns it canonical.
 func parseSettings(t *templates.Template, kinds *settings.Registry, folders FolderSource, u SettingsUpdate) (*parsedSettings, error) {
-	out := &parsedSettings{values: map[string]any{}, person: map[string]state.PersonSetting{}, groups: map[string][]state.GroupValue{}, secrets: map[string]secretOp{}, sentIDs: map[string]map[string]int{}}
+	out := &parsedSettings{values: map[string]any{}, person: map[string]state.PersonSetting{}, groups: map[string][]state.GroupValue{}, secrets: map[string]secretOp{}, sentIDs: map[string]map[string]int{}, groupIDs: map[string]map[string]int{}}
 	sent := func(key string, in []GroupValueInput) {
 		for _, r := range in {
 			if r.GroupID == 0 {
@@ -347,6 +351,9 @@ func parseSettings(t *templates.Template, kinds *settings.Registry, folders Fold
 		}
 		if raw == nil {
 			out.values[k] = nil
+			if isGroupOption(o) {
+				out.groupIDs[k] = map[string]int{}
+			}
 			continue
 		}
 		v, err := parseValue(kinds, folders, o, raw)
@@ -357,6 +364,12 @@ func parseSettings(t *templates.Template, kinds *settings.Registry, folders Fold
 			return nil, statusErr(400, "setting %s: %v", k, err)
 		}
 		out.values[k] = v
+		if isGroupOption(o) {
+			out.groupIDs[k] = nil // bound by bindRowsWith
+			if len(groupNames(v)) == 0 {
+				out.groupIDs[k] = map[string]int{}
+			}
+		}
 	}
 	for _, k := range slices.Sorted(maps.Keys(u.Person)) {
 		o, err := scoped(k, templates.ScopePerson)
@@ -829,7 +842,7 @@ func (h *Hub) SaveSettings(id string, u SettingsUpdate, actor string) (_ *SaveRe
 	if err != nil {
 		return nil, err
 	}
-	out := &SaveResult{Effect: sv.effect, Changed: sv.keys, Warnings: append([]string{}, bindWarnings...)}
+	out := &SaveResult{Effect: sv.effect, Changed: sv.keys, Warnings: append(append([]string{}, bindWarnings...), h.noAccessWarnings(t, sv.keys)...)}
 	if len(sv.writeErrs) > 0 {
 		writeErr = errors.Join(sv.writeErrs...)
 		for _, e := range sv.writeErrs {
@@ -1143,6 +1156,29 @@ func (h *Hub) nextSettingsLocked(t *templates.Template, cur state.InstanceSettin
 	}
 	if err := staleRebind(cur, parsed); err != nil {
 		return next, nil, nil, nil, err
+	}
+	// Instance group values (F3): stored with the ids they were bound
+	// to; a name stored against another id of that group is 409 (the
+	// group was re-created since: removed and added again, never rebound
+	// silently).
+	for _, k := range slices.Sorted(maps.Keys(parsed.groupIDs)) {
+		ids := parsed.groupIDs[k]
+		for _, n := range slices.Sorted(maps.Keys(ids)) {
+			if old, ok := cur.GroupIDs[k][n]; ok && old != 0 && old != ids[n] {
+				return next, nil, nil, nil, statusErr(409, "setting %s: group %s was re-created since it was saved (id %d, now %d): remove it, save, then add it again", k, n, old, ids[n])
+			}
+		}
+		if len(ids) == 0 {
+			delete(next.GroupIDs, k)
+			continue
+		}
+		if next.GroupIDs == nil {
+			next.GroupIDs = map[string]map[string]int{}
+		}
+		next.GroupIDs[k] = maps.Clone(ids)
+	}
+	if len(next.GroupIDs) == 0 {
+		next.GroupIDs = nil
 	}
 	ge, gown, gchanges := h.groupSettingsChangesLocked(t, cur, &next, parsed)
 	effects, own, changes = append(effects, ge...), append(own, gown...), append(changes, gchanges...)

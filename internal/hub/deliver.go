@@ -819,7 +819,7 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 	enabled := h.st.IsEnabled(id)
 	pendErr := h.pendingLocked(id)
 	deleting := h.st.Instances[id].State == state.InstanceDeleting
-	hasRows := len(h.st.Settings[id].Person)+len(h.st.Settings[id].Groups) > 0
+	hasRows := len(h.st.Settings[id].Person)+len(h.st.Settings[id].Groups)+len(h.st.Settings[id].GroupIDs) > 0
 	// The person-entered values as stored before the snapshot (only
 	// those can be judged against it: purgeStaleEntries).
 	enteredBefore := enteredCopy(h.st.Settings[id].Entered)
@@ -878,6 +878,21 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 	// below filters them either way).
 	if !opt.lifecycle {
 		h.purgeStaleEntries(ctx, id, m, enteredBefore)
+	}
+	// Person ids before the render, start runs included (F9: one short
+	// write-locked section; a member without a uuid gets none and is left
+	// out of the files). The directory unavailable: nothing to allocate
+	// for — the units that need people are skipped.
+	if m != nil && len(personIDOptions(&tmpl)) > 0 {
+		h.mu.RLock()
+		var pop Population
+		if live := h.findLocked(id); live != nil {
+			pop = h.populationLocked(live, m)
+		}
+		h.mu.RUnlock()
+		if err := h.ensurePersonIDs(id, pop.People, m.UUIDs); err != nil {
+			log.Printf("settings: %s: WARNING: person ids not allocated (%v): people without one are left out of the data files", id, err)
+		}
 	}
 
 	delivered := h.loadDelivered(id)
@@ -948,7 +963,7 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 		u := UnitResult{Unit: fileUnit(o.file.Name), At: now}
 		switch {
 		case o.skip != "":
-			if opt.lifecycle && o.people && !fileExists(h.dataFilePath(id, o.file.Name)) {
+			if opt.lifecycle && o.people && !fileExists(h.dataFilePathOf(id, &o.file)) {
 				finish()
 				why := h.redactUnitError(id, merr)
 				h.mu.RLock()

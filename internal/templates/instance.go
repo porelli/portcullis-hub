@@ -46,10 +46,14 @@ var idNormalRe = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
 
 // Instance variables the Hub writes into every instance's .env (§3.1).
 const (
-	VarInstance       = "PORTCULLIS_INSTANCE"
-	VarOIDCClientID   = "PORTCULLIS_OIDC_CLIENT_ID"
-	VarAccessGroup    = "PORTCULLIS_ACCESS_GROUP"
-	VarAdminGroup     = "PORTCULLIS_ADMIN_GROUP"
+	VarInstance     = "PORTCULLIS_INSTANCE"
+	VarOIDCClientID = "PORTCULLIS_OIDC_CLIENT_ID"
+	VarAccessGroup  = "PORTCULLIS_ACCESS_GROUP"
+	VarAdminGroup   = "PORTCULLIS_ADMIN_GROUP"
+	// VarLocalNetworks (file sharing, §3.1 / §14.7): the Hub's Local
+	// networks, comma-joined canonical prefixes ('' = saved empty). Compose
+	// may read it only as exactly ${PORTCULLIS_LOCAL_NETWORKS} (F36).
+	VarLocalNetworks  = "PORTCULLIS_LOCAL_NETWORKS"
 	varHostPrefix     = "PORTCULLIS_HOST_"
 	varClientIDPrefix = VarOIDCClientID + "_"
 )
@@ -58,7 +62,7 @@ const (
 // may not declare in env, settings or ports.
 func ReservedVar(k string) bool {
 	switch k {
-	case VarInstance, VarOIDCClientID, VarAccessGroup, VarAdminGroup:
+	case VarInstance, VarOIDCClientID, VarAccessGroup, VarAdminGroup, VarLocalNetworks:
 		return true
 	}
 	return strings.HasPrefix(k, varHostPrefix) || strings.HasPrefix(k, varClientIDPrefix) || strings.HasPrefix(k, varFolderPrefix)

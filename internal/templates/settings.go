@@ -310,6 +310,10 @@ type Render struct {
 	False     *string `yaml:"false" json:"false,omitempty"`
 	Join      *string `yaml:"join" json:"join,omitempty"`
 	Format    string  `yaml:"format" json:"format,omitempty"` // json | yaml | csv
+	// ExpandMembers (file deliveries of instance group / groups options,
+	// §13.5): the members of the bound groups within the population,
+	// sorted lowercase usernames, instead of the group names.
+	ExpandMembers bool `yaml:"expand_members" json:"expand_members,omitempty"`
 }
 
 // Render formats.
@@ -734,6 +738,9 @@ func ValidateSettingsSpec(t *Template, compose []byte, routes *Routes, kinds Kin
 		return fmt.Errorf("compose.yml: %v", err)
 	}
 	scalarValues(doc, &v.scalars)
+	if err := v.reservedVarRefs(); err != nil {
+		return err
+	}
 	if err := v.files(); err != nil {
 		return err
 	}

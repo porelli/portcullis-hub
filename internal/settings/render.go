@@ -273,6 +273,17 @@ func checkRender(o *templates.Option, d *templates.Delivery, r *templates.Render
 			return fmt.Errorf("join and format exclude each other")
 		}
 	}
+	if r.ExpandMembers {
+		if t != templates.TypeGroup && t != templates.TypeGroups || o.EffectiveScope() != templates.ScopeInstance {
+			return fmt.Errorf("expand_members is for group and groups options of scope instance")
+		}
+		if d.File == nil {
+			return fmt.Errorf("expand_members is for file deliveries (a data file holds the members)")
+		}
+		if r.Join != nil || r.Format != "" {
+			return fmt.Errorf("expand_members renders the member list: no join or format")
+		}
+	}
 	switch r.Format {
 	case "", templates.RenderJSON:
 	case templates.RenderYAML, templates.RenderCSV:

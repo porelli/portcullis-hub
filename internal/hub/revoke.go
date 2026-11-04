@@ -304,43 +304,20 @@ func (h *Hub) CheckCredentialHolders(ctx context.Context) (int, error) {
 }
 
 // expandedMembersLocked is what t's data files are built from that
-// grants file access (F28): the population (membersPopulation) and, per
-// instance group / groups option, the members of the groups it names
-// within the population (expired memberships dropped). Sorted, never
-// nil lists. Caller holds mu (read).
-//
-// Task 10 binds group values by id and delivers these lists in the data
-// file (render.expand_members); this comparison then matches the file
-// exactly. Until then it follows the names the values hold.
+// grants file access (F28), exactly as they render it: the members the
+// files carry (fileMembersLocked: the population, with person_id options
+// only those holding their ids) and, per instance group / groups option
+// delivered with render.expand_members, the members of its id-bound
+// groups among them (boundMembersLocked; expired memberships dropped).
+// Sorted, never nil lists. Caller holds mu (read).
 func (h *Hub) expandedMembersLocked(t *templates.Template, m *directory.Membership) map[string][]string {
-	pop := populationIn(t, m, false)
-	in := map[string]bool{}
-	people := make([]string, 0, len(pop.People))
-	for _, p := range pop.People {
-		in[p.User] = true
-		people = append(people, p.User)
-	}
-	out := map[string][]string{membersPopulation: people}
+	members, _ := h.fileMembersLocked(t, m)
+	out := map[string][]string{membersPopulation: members}
+	s := h.st.Settings[t.ID]
 	opts := t.Manifest.Options()
 	for i := range opts {
-		o := &opts[i]
-		if o.EffectiveScope() != templates.ScopeInstance || (o.Type != templates.TypeGroup && o.Type != templates.TypeGroups) {
-			continue
-		}
-		set := map[string]bool{}
-		if v, ok := h.effectiveValue(t, o, h.st.Settings[t.ID]); ok {
-			for _, n := range groupNames(v) {
-				g := placeholderGroup(t, n)
-				for _, u := range m.Groups[g].Members {
-					if in[u] && !m.Expired[u][g] {
-						set[u] = true
-					}
-				}
-			}
-		}
-		out[o.Key] = slices.Sorted(maps.Keys(set))
-		if out[o.Key] == nil {
-			out[o.Key] = []string{}
+		if o := &opts[i]; isGroupOption(o) && optionExpands(o) {
+			out[o.Key] = h.boundMembersLocked(t, o, s, m, members)
 		}
 	}
 	return out

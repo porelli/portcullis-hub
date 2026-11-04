@@ -44,18 +44,25 @@ settings:
       pool: posix_uid
       self_visible: false
       delivery: [{file: {name: people, field: uid}}]
+    - key: share1_name
+      label: Share 1 name
+      type: string
+      pattern: "^[A-Za-z0-9][A-Za-z0-9 _.-]{0,62}$"
+      section: Shares
+      applies: live
+      delivery: [{file: {name: people}}]
     - key: share1_readers
       label: Share 1 readers
       type: groups
       section: Shares
       applies: live
-      delivery: [{file: {name: people}}]
+      delivery: [{file: {name: people, render: {expand_members: true}}}]
     - key: share1_writers
       label: Share 1 writers
       type: groups
       section: Shares
       applies: live
-      delivery: [{file: {name: people}}]
+      delivery: [{file: {name: people, render: {expand_members: true}}}]
     - key: share1_folder
       label: Share 1 folder
       type: path
@@ -63,6 +70,32 @@ settings:
       target: {service: smb, mount: /shares/1}
       folder: {access: write, runs_as: {uid_from: uid}, joins_group: template}
       requires_any: [share1_readers, share1_writers]
+    - key: share2_name
+      label: Share 2 name
+      type: string
+      pattern: "^[A-Za-z0-9][A-Za-z0-9 _.-]{0,62}$"
+      section: Shares
+      applies: live
+      delivery: [{file: {name: people}}]
+    - key: share2_readers
+      label: Share 2 readers
+      type: groups
+      section: Shares
+      applies: live
+      delivery: [{file: {name: people, render: {expand_members: true}}}]
+    - key: share2_writers
+      label: Share 2 writers
+      type: groups
+      section: Shares
+      applies: live
+      delivery: [{file: {name: people, render: {expand_members: true}}}]
+    - key: share2_folder
+      label: Share 2 folder
+      type: path
+      section: Shares
+      target: {service: smb, mount: /shares/2}
+      folder: {access: write, runs_as: {uid_from: uid}, joins_group: template}
+      requires_any: [share2_readers, share2_writers]
     - key: connect_address
       label: Address people connect to
       type: string

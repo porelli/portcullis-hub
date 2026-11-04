@@ -138,6 +138,11 @@ func rowCount(parsed *parsedSettings) int {
 	for _, recs := range parsed.groups {
 		n += len(recs)
 	}
+	for _, ids := range parsed.groupIDs {
+		if ids == nil {
+			n++ // an instance group value to bind
+		}
+	}
 	return n
 }
 
@@ -194,6 +199,21 @@ func (h *Hub) bindRowsWith(t *templates.Template, parsed *parsedSettings, m *dir
 		if err := bind(optionByKey(t, k), parsed.groups[k]); err != nil {
 			return nil, err
 		}
+	}
+	// Instance group / groups values (F3): each name bound to its id.
+	for _, k := range slices.Sorted(maps.Keys(parsed.groupIDs)) {
+		if parsed.groupIDs[k] != nil {
+			continue
+		}
+		ids := map[string]int{}
+		for _, n := range groupNames(parsed.values[k]) {
+			mg, ok := m.Groups[placeholderGroup(t, n)]
+			if !ok {
+				return nil, statusErr(400, "setting %s: group %s doesn't exist", k, n)
+			}
+			ids[n] = mg.ID
+		}
+		parsed.groupIDs[k] = ids
 	}
 	return warnings, nil
 }
@@ -622,10 +642,66 @@ func (h *Hub) dropRowsLocked(id string, t *templates.Template, drop func(key, na
 	if len(s.Groups) == 0 {
 		s.Groups = nil
 	}
+	// Instance group / groups values (F3): the dropped names leave the
+	// value and their binding.
+	for _, k := range slices.Sorted(maps.Keys(s.GroupIDs)) {
+		ids := s.GroupIDs[k]
+		var removed []string
+		for _, n := range slices.Sorted(maps.Keys(ids)) {
+			name := n
+			if t != nil {
+				name = placeholderGroup(t, n)
+			}
+			if why := drop(k, name, state.GroupValue{Group: n, GroupID: ids[n]}); why != "" {
+				out = append(out, purged{target: id + "/" + k, detail: fmt.Sprintf("scope=%s group=%s id=%d: %s", templates.ScopeInstance, name, ids[n], why)})
+				removed = append(removed, n)
+				delete(ids, n)
+			}
+		}
+		if len(removed) > 0 {
+			s.Values = withoutGroups(s.Values, k, removed)
+		}
+		if len(ids) == 0 {
+			delete(s.GroupIDs, k)
+		}
+	}
+	if len(s.GroupIDs) == 0 {
+		s.GroupIDs = nil
+	}
 	if len(out) > 0 {
 		h.st.Settings[id] = s
 	}
 	return out
+}
+
+// withoutGroups is values with the names removed from key's group value:
+// a groups value keeps its other names (an empty list, not the default,
+// when none is left: a purge never brings a default back); a group value
+// is cleared (its default is bound to nothing).
+func withoutGroups(values map[string]any, key string, removed []string) map[string]any {
+	switch v := values[key].(type) {
+	case string:
+		if slices.Contains(removed, v) {
+			delete(values, key)
+		}
+	case []any:
+		kept := []any{}
+		for _, it := range v {
+			if s, ok := it.(string); !ok || !slices.Contains(removed, s) {
+				kept = append(kept, it)
+			}
+		}
+		values[key] = kept
+	case []string:
+		kept := []any{}
+		for _, it := range v {
+			if !slices.Contains(removed, it) {
+				kept = append(kept, it)
+			}
+		}
+		values[key] = kept
+	}
+	return values
 }
 
 // PurgeGroupSettings removes every per-group row and group record that
@@ -778,6 +854,11 @@ func storedRowKeys(s state.InstanceSettings) map[string]bool {
 			out[rowKey(k, r)] = true
 		}
 	}
+	for k, ids := range s.GroupIDs {
+		for n, id := range ids {
+			out[rowKey(k, state.GroupValue{Group: n, GroupID: id})] = true
+		}
+	}
 	return out
 }
 
@@ -875,6 +956,7 @@ func (h *Hub) pruneSettingsLocked() (audits []func()) {
 		drop := func(key, why string) {
 			changed = true
 			delete(s.Types, key)
+			delete(s.GroupIDs, key)
 			log.Printf("settings: %s: stored %s dropped: %s", id, key, why)
 			target, detail := id+"/"+key, why
 			audits = append(audits, func() { h.auditOp(purgeActor, "settings.purge", target, detail, nil) })

@@ -91,4 +91,4 @@ func golden(t *testing.T, name string) string {
 
 // instanceVarLineRe matches the instance variables (contract §2/§3.1) the
 // Hub now adds to every env, the default instance's included.
-var instanceVarLineRe = regexp.MustCompile(`(?m)^PORTCULLIS_(INSTANCE|HOST_[A-Z0-9_]+|OIDC_CLIENT_ID(_[A-Z0-9_]+)?|ACCESS_GROUP|ADMIN_GROUP)=.*\n`)
+var instanceVarLineRe = regexp.MustCompile(`(?m)^PORTCULLIS_(INSTANCE|HOST_[A-Z0-9_]+|OIDC_CLIENT_ID(_[A-Z0-9_]+)?|ACCESS_GROUP|ADMIN_GROUP|LOCAL_NETWORKS)=.*\n`)
