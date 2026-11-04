@@ -289,7 +289,7 @@ func (h *Hub) SettingsPanel(ctx context.Context, id string) (*SettingsPanel, err
 				p.Instance[o.Key] = v
 			}
 		case templates.ScopePerson:
-			if ps, ok := s.Person[o.Key]; ok && typeOK {
+			if ps, ok := s.Person[o.Key]; ok && typeOK && !hubSetOption(o) {
 				ps.Rows = shown(ps.Rows)
 				p.Person[o.Key] = ps
 			}
@@ -443,7 +443,7 @@ func (h *Hub) PreviewSettings(ctx context.Context, id string, u SettingsUpdate) 
 	opts := live.Manifest.Options()
 	for i := range opts {
 		o := &opts[i]
-		if o.EffectiveScope() != templates.ScopePerson {
+		if o.EffectiveScope() != templates.ScopePerson || hubSetOption(o) {
 			continue
 		}
 		before := h.personConfigForFrom(live, o.Key, cur, m)

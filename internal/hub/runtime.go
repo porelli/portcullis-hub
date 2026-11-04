@@ -91,7 +91,8 @@ func (h *Hub) Logs(ctx context.Context, id, service string, lines int) ([]byte, 
 		}
 		sources[c.Name()] = out
 	}
-	return docker.MergeLogs(sources, lines), nil
+	// An instance's current NT hashes never reach the logs API (F44).
+	return []byte(h.redactCredentialHashes(t, string(docker.MergeLogs(sources, lines)))), nil
 }
 
 // ExecResult is the outcome of Exec.
@@ -134,7 +135,8 @@ func (h *Hub) Exec(ctx context.Context, id, service, command string) (*ExecResul
 	if err != nil {
 		out += fmt.Sprintf("\n[hub: %v]\n", err)
 	}
-	return &ExecResult{Output: out, ExitCode: res.ExitCode}, nil
+	// Nor an Exec answer (F44).
+	return &ExecResult{Output: h.redactCredentialHashes(t, out), ExitCode: res.ExitCode}, nil
 }
 
 // runningContainer is the running container of service among cs (an

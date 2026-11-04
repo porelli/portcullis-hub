@@ -133,7 +133,7 @@ func myApps(t *testing.T, f *fixture, user string) []MyApp {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return apps
+	return apps.Apps
 }
 
 func myApp(apps []MyApp, id string) *MyApp {

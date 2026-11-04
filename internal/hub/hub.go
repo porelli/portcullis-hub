@@ -416,6 +416,12 @@ type Hub struct {
 	// nil = it succeeded): person_secret starts and SecretsUsable refuse
 	// (503) until a reconcile succeeds.
 	secretsReconcileErr error
+	// revokeLockWait: how long a revocation tries for an instance's
+	// delivery lock (credentials.go; revokeLockWaitDefault, tests shorten
+	// it). credentialCheck: the holder re-check a create asks for (F30;
+	// Task 9 sets it; nil: none). Both set before use, never changed.
+	revokeLockWait  time.Duration
+	credentialCheck func()
 	// testHookInit, if set, is called at Init's stages (tests: order).
 	testHookInit func(stage string)
 	// testHookApplyRestore, if set, runs at applyRestore's stages
@@ -461,22 +467,23 @@ func New(cfg Config, runner compose.Runner, engine Engine, idp IdP) (*Hub, error
 		return nil, fmt.Errorf("HUB_SECRETS_VOLUME %q is not a volume name", cfg.SecretsVolume)
 	}
 	h := &Hub{
-		kinds:       settings.NewRegistry(),
-		bindRoots:   roots,
-		cfg:         cfg,
-		compose:     runner,
-		engine:      engine,
-		idp:         idp,
-		lockPoll:    2 * time.Second,
-		restartWait: 20 * time.Minute,
-		kick:        make(chan struct{}, 1),
-		dirKick:     make(chan struct{}, 1),
-		driftKey:    map[string]string{},
-		afterFunc:   realAfterFunc,
-		sleep:       realSleep,
-		mountinfo:   func() ([]byte, error) { return os.ReadFile("/proc/self/mountinfo") },
-		lookupIP:    defaultLookupIP,
-		idRanges:    templates.PersonIDPools,
+		kinds:          settings.NewRegistry(),
+		bindRoots:      roots,
+		cfg:            cfg,
+		compose:        runner,
+		engine:         engine,
+		idp:            idp,
+		lockPoll:       2 * time.Second,
+		restartWait:    20 * time.Minute,
+		revokeLockWait: revokeLockWaitDefault,
+		kick:           make(chan struct{}, 1),
+		dirKick:        make(chan struct{}, 1),
+		driftKey:       map[string]string{},
+		afterFunc:      realAfterFunc,
+		sleep:          realSleep,
+		mountinfo:      func() ([]byte, error) { return os.ReadFile("/proc/self/mountinfo") },
+		lookupIP:       defaultLookupIP,
+		idRanges:       templates.PersonIDPools,
 	}
 	// The secrets volume (F14): unusable = fail closed, the Hub still
 	// starts.

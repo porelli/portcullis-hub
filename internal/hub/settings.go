@@ -322,6 +322,10 @@ func parseSettings(t *templates.Template, kinds *settings.Registry, folders Fold
 		if o == nil {
 			return nil, statusErr(400, "unknown setting %q", clip(key, 64))
 		}
+		if hubSetOption(o) {
+			// Per-person values the Hub computes (F5): no admin value.
+			return nil, statusErr(400, "setting %s is set by the Hub for each person: it takes no admin value", key)
+		}
 		if o.EffectiveScope() != scope {
 			return nil, statusErr(400, "setting %s is a %s option, not %s", key, o.EffectiveScope(), scope)
 		}
@@ -703,11 +707,15 @@ const (
 	TriggerSave       Trigger = "settings_change"
 	TriggerMembership Trigger = "membership_change"
 	TriggerRetry      Trigger = "retry"
+	// TriggerCredential: a person_secret credential was created,
+	// regenerated, revoked or voided (contract §13.16): immediate, never
+	// debounced; it ranks above a save (triggerRank).
+	TriggerCredential Trigger = "credential_change"
 )
 
 // UnitResult is one delivery unit's outcome.
 type UnitResult struct {
-	Unit    string `json:"unit"`              // "env" | "file:<name>" | "hook:<name>" | "claim:<attr>" | "headers" | "reload" | "restart"
+	Unit    string `json:"unit"`              // "env" | "file:<name>" | "credentials:<key>" | "hook:<name>" | "claim:<attr>" | "headers" | "reload" | "restart"
 	OK      bool   `json:"ok"`                //
 	Skipped string `json:"skipped,omitempty"` // Skip*: "unchanged" | "not running" | "directory unavailable" | "busy" | "superseded" | "not supported" | "previous run still running"
 	// Message: what OK means ("reload signal sent, app still running").
@@ -1475,7 +1483,7 @@ func (h *Hub) seedSettingsLocked(t *templates.Template) bool {
 	opts := t.Manifest.Options()
 	for i := range opts {
 		o := &opts[i]
-		if o.EffectiveScope() != templates.ScopePerson {
+		if o.EffectiveScope() != templates.ScopePerson || hubSetOption(o) {
 			continue
 		}
 		if _, ok := s.Person[o.Key]; ok {

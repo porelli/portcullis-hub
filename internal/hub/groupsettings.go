@@ -846,6 +846,9 @@ func staleKey(t *templates.Template, key, want, storedType string) string {
 	switch {
 	case o == nil:
 		return "the option was removed from the template"
+	case hubSetOption(o):
+		// person_secret / person_id: no stored admin value (F5).
+		return "the option's values are set by the Hub"
 	case o.EffectiveScope() != want:
 		return fmt.Sprintf("the option is now scope %s", o.EffectiveScope())
 	case storedType != "" && storedType != o.Type:

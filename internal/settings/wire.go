@@ -65,6 +65,18 @@ type HookInput struct {
 	DataFileDoc
 	Trigger string            `json:"trigger"`
 	Secrets map[string]string `json:"secrets"`
+	// Credentials (file sharing, contract §13.8): per person_secret
+	// option, the people with an active credential and its id and
+	// version — never a hash or a password. Always an object.
+	Credentials map[string]map[string]HookCredential `json:"credentials"`
+}
+
+// HookCredential is one active credential in a hook's input: its id
+// (new on every create and regenerate) and version (1, +1 per
+// regenerate).
+type HookCredential struct {
+	ID      string `json:"id"`
+	Version int    `json:"version"`
 }
 
 // HookReport is a hook's optional report line (contract §13.8): findings

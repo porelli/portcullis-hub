@@ -148,8 +148,9 @@ func (s *Server) handleDeleteMyValue(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// handleMyApps answers {"apps": [hub.MyApp…]}: the caller's own resolved
-// per-person values. No caller 401; the directory unavailable 503 with
+// handleMyApps answers hub.MyAppsView ({"apps": [hub.MyApp…],
+// "fresh_auth": {…}}): the caller's own resolved per-person values,
+// entries and credential cards. No caller 401; the directory unavailable 503 with
 // the generic message (the cause is logged, never answered).
 func (s *Server) handleMyApps(w http.ResponseWriter, r *http.Request) {
 	user := strings.ToLower(actor(r))
@@ -157,14 +158,14 @@ func (s *Server) handleMyApps(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no signed-in user (X-Forwarded-User)", http.StatusUnauthorized)
 		return
 	}
-	apps, err := s.Hub.MyApps(r.Context(), user)
+	view, err := s.Hub.MyApps(r.Context(), user)
 	if err != nil {
 		log.Printf("people: my apps of %s: %v", user, err)
 		http.Error(w, directory.GenericUnavailable, http.StatusServiceUnavailable)
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, map[string]interface{}{"apps": apps})
+	writeJSON(w, view)
 }
 
 // ── me ──────────────────────────────────────────────────

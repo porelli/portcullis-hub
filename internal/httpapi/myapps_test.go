@@ -70,3 +70,24 @@ func TestMyAppsDirectoryDown(t *testing.T) {
 		t.Errorf("directory down = %d %q, want 503 %q", r.StatusCode, b, directory.GenericUnavailable)
 	}
 }
+
+// F21: the answer is hub.MyAppsView — {"apps": [...]} plus fresh_auth
+// only when a listed app has a person_secret option (vault has none).
+func TestMyAppsViewShape(t *testing.T) {
+	e := myAppsEnv(t)
+	r, b := doAs(t, e.ppl, "bob", "GET", "/api/me/apps", "")
+	if r.StatusCode != 200 {
+		t.Fatalf("GET /api/me/apps = %d %s", r.StatusCode, b)
+	}
+	var ans map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(b), &ans); err != nil {
+		t.Fatal(err)
+	}
+	var apps []hub.MyApp
+	if err := json.Unmarshal(ans["apps"], &apps); err != nil || len(apps) != 1 || apps[0].Credentials == nil {
+		t.Errorf("apps = %s (%v)", ans["apps"], err)
+	}
+	if _, ok := ans["fresh_auth"]; ok || len(ans) != 1 {
+		t.Errorf("answer keys = %v, want only apps", b)
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/portcullis/hub/internal/freshauth"
 	"github.com/portcullis/hub/internal/settings"
 	"github.com/portcullis/hub/internal/templates"
 )
@@ -39,8 +40,11 @@ type MyInfoLine struct {
 	Value string `json:"value"`
 }
 
-// MyCredential is a per-person credential (empty list in project 1;
-// project 3 fills it).
+// MyCredential is the caller's credential of one person_secret option
+// (contract §5.1, §13.16): Status none, active (Since = created),
+// voided (Reason restore, Since = voided) or unavailable (Reason = the
+// template's username reason); Info the option's info lines rendered for
+// the caller.
 type MyCredential struct {
 	Key    string       `json:"key"`
 	Label  string       `json:"label"`
@@ -92,21 +96,34 @@ type MyApp struct {
 	Credentials []MyCredential `json:"credentials"`
 }
 
+// MyAppsView is GET /api/me/apps' answer (F21): the apps, and the
+// fresh-auth client's authorize information when some listed app has a
+// person_secret option (nil otherwise, or without a verifier).
+type MyAppsView struct {
+	Apps      []MyApp                  `json:"apps"`
+	FreshAuth *freshauth.AuthorizeInfo `json:"fresh_auth,omitempty"`
+}
+
 // MyApps lists user's (any case) apps: enabled instances whose
 // population holds them, with their self-visible person options'
-// resolved values, and those whose person-entered options' population
-// holds them, with their own entries (Task 15A); an app with neither is
-// left out. The directory snapshot
-// is taken before mu; an unavailable directory is the membership error.
-func (h *Hub) MyApps(ctx context.Context, user string) ([]MyApp, error) {
+// resolved values (never person_secret / person_id: F5) and their
+// credential cards (one per person_secret option, listed for population
+// members even without values or entries: F21), and those whose
+// person-entered options' population holds them, with their own entries
+// (Task 15A); an app with none of them is left out. The directory
+// snapshot is taken before mu; an unavailable directory is the
+// membership error.
+func (h *Hub) MyApps(ctx context.Context, user string) (*MyAppsView, error) {
 	user = strings.ToLower(user)
 	m, err := h.membership(ctx)
 	if err != nil {
 		return nil, err
 	}
+	info := h.FreshAuthInfo()
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	out := []MyApp{}
+	secretApps := false
 	for i := range h.instances {
 		t := &h.instances[i]
 		if !t.Enabled {
@@ -138,7 +155,7 @@ func (h *Hub) MyApps(ctx context.Context, user string) ([]MyApp, error) {
 		opts := t.Manifest.Options()
 		for j := range opts {
 			o := &opts[j]
-			if o.EffectiveScope() != templates.ScopePerson || o.Type == templates.TypeSecret || (o.SelfVisible != nil && !*o.SelfVisible) {
+			if o.EffectiveScope() != templates.ScopePerson || o.Type == templates.TypeSecret || hubSetOption(o) || (o.SelfVisible != nil && !*o.SelfVisible) {
 				continue
 			}
 			r, ok := resolved[o.Key]
@@ -149,12 +166,20 @@ func (h *Hub) MyApps(ctx context.Context, user string) ([]MyApp, error) {
 				app.Values = append(app.Values, v)
 			}
 		}
-		if len(app.Values) > 0 || len(app.Entries) > 0 {
+		for _, o := range personSecretOptions(t) {
+			app.Credentials = append(app.Credentials, h.myCredentialLocked(t, o, user))
+		}
+		if len(app.Values) > 0 || len(app.Entries) > 0 || len(app.Credentials) > 0 {
+			secretApps = secretApps || len(app.Credentials) > 0
 			out = append(out, app)
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
-	return out, nil
+	v := &MyAppsView{Apps: out}
+	if secretApps {
+		v.FreshAuth = info
+	}
+	return v, nil
 }
 
 // myValueOf is r as the caller sees it: UNRESOLVED (nil value) is left

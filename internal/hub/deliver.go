@@ -107,6 +107,10 @@ type queuedDelivery struct {
 	// merged request is not a stuck-exec re-queue (deliver_hooks.go).
 	force map[string]bool
 	real  bool
+	// whens: the hook triggers of every merged request (a save merged
+	// into a higher-ranked credential run keeps its settings_change
+	// hooks).
+	whens map[string]bool
 }
 
 // deletingInstance: instance id is being deleted (state deleting): no
@@ -137,6 +141,8 @@ type deliverOpts struct {
 	// in progress gets this one queued with its effect, and the report
 	// is one busy unit.
 	noWait bool
+	// whens: hook triggers of requests merged into this run.
+	whens map[string]bool
 }
 
 func realAfterFunc(d time.Duration, f func()) func() bool { return time.AfterFunc(d, f).Stop }
@@ -164,10 +170,13 @@ func (h *Hub) stage(id, s string) {
 	}
 }
 
-// triggerRank orders triggers when queued runs merge: a settings change
-// beats a membership change beats a retry beats a start.
+// triggerRank orders triggers when queued runs merge: a credential
+// change beats a settings change beats a membership change beats a retry
+// beats a start (a merged run keeps credential_change: F23).
 func triggerRank(t Trigger) int {
 	switch t {
+	case TriggerCredential:
+		return 5
 	case TriggerSave:
 		return 4
 	case TriggerMembership:
@@ -193,6 +202,12 @@ func (h *Hub) queueDelivery(id string, trig Trigger, effect string, delay time.D
 // queueDeliveryWith is queueDelivery with hooks to force and whether the
 // request is a stuck-exec re-queue (not a new trigger).
 func (h *Hub) queueDeliveryWith(id string, trig Trigger, effect string, delay time.Duration, force []string, stuckRetry bool) {
+	h.queueDeliveryWhens(id, trig, effect, delay, force, stuckRetry, nil)
+}
+
+// queueDeliveryWhens is queueDeliveryWith carrying the hook triggers of
+// requests already merged into the run being re-queued.
+func (h *Hub) queueDeliveryWhens(id string, trig Trigger, effect string, delay time.Duration, force []string, stuckRetry bool, whens map[string]bool) {
 	if !h.deletingInstance(id) {
 		h.setOwed(id, effect)
 	}
@@ -219,6 +234,10 @@ func (h *Hub) queueDeliveryWith(id string, trig Trigger, effect string, delay ti
 	}
 	q.effect = settings.Strongest(q.effect, effect)
 	q.real = q.real || !stuckRetry
+	for w := range whens {
+		q.addWhen(w)
+	}
+	q.addWhen(hookWhen(trig))
 	for _, n := range force {
 		if q.force == nil {
 			q.force = map[string]bool{}
@@ -250,6 +269,16 @@ func (h *Hub) queueDeliveryWith(id string, trig Trigger, effect string, delay ti
 	h.deliveryMu.Unlock()
 }
 
+func (q *queuedDelivery) addWhen(w string) {
+	if w == "" {
+		return
+	}
+	if q.whens == nil {
+		q.whens = map[string]bool{}
+	}
+	q.whens[w] = true
+}
+
 // fireQueued runs q when its timer fires (unless it was replaced).
 func (h *Hub) fireQueued(id string, q *queuedDelivery) {
 	h.deliveryMu.Lock()
@@ -264,7 +293,7 @@ func (h *Hub) fireQueued(id string, q *queuedDelivery) {
 }
 
 func (h *Hub) runQueued(id string, q queuedDelivery) {
-	if _, err := h.deliver(context.Background(), id, q.trig, deliverOpts{effect: q.effect, force: q.force, stuckRetry: !q.real}); err != nil {
+	if _, err := h.deliver(context.Background(), id, q.trig, deliverOpts{effect: q.effect, force: q.force, stuckRetry: !q.real, whens: q.whens}); err != nil {
 		log.Printf("settings: %s: delivery (%s): %v", id, q.trig, err)
 	}
 }
@@ -731,7 +760,7 @@ func (h *Hub) deliver(ctx context.Context, id string, trig Trigger, opt deliverO
 	l := h.deliverLock(id)
 	if opt.noWait {
 		if !l.TryLock() {
-			h.queueDeliveryWith(id, trig, opt.effect, 0, forceList(opt.force), opt.stuckRetry)
+			h.queueDeliveryWhens(id, trig, opt.effect, 0, forceList(opt.force), opt.stuckRetry, opt.whens)
 			return &DeliveryReport{Instance: id, Units: []UnitResult{{Unit: unitBusy, Skipped: SkipBusy, Message: "a delivery is running: this one follows it", At: time.Now().UTC()}}}, nil
 		}
 	} else {
@@ -749,7 +778,7 @@ func (h *Hub) deliver(ctx context.Context, id string, trig Trigger, opt deliverO
 			// — its own and those of what it already wrote (a written
 			// file is unchanged for the next run, which would otherwise
 			// never apply its on_membership_change).
-			h.queueDeliveryWith(id, trig, applied, 0, forceList(opt.force), opt.stuckRetry)
+			h.queueDeliveryWhens(id, trig, applied, 0, forceList(opt.force), opt.stuckRetry, opt.whens)
 			return rep, nil
 		}
 		if try >= supersededTries {
@@ -802,7 +831,7 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 			// P20: never during a lifecycle or async operation (its op
 			// record, a restore's files); run again later.
 			rep.Units = append(rep.Units, UnitResult{Unit: unitBusy, Skipped: SkipBusy, At: now})
-			h.queueDeliveryWith(id, trig, opt.effect, busyRetry, forceList(opt.force), opt.stuckRetry)
+			h.queueDeliveryWhens(id, trig, opt.effect, busyRetry, forceList(opt.force), opt.stuckRetry, opt.whens)
 			return rep, "", false, nil
 		}
 		if pendErr != nil {
@@ -847,6 +876,9 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 	}
 
 	delivered := h.loadDelivered(id)
+	// The credentials units first (secrets reconcile, metadata digest):
+	// the hook inputs below are built from what they leave.
+	credUnits := h.credentialUnits(&tmpl, &delivered, now)
 	// Under mu: the generation and every desired output.
 	h.mu.RLock()
 	live := h.findLocked(id)
@@ -871,8 +903,11 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 	h.mu.RUnlock()
 	h.stage(id, "built")
 
+	rep.Units = append(rep.Units, credUnits...)
 	effects := []string{}
-	if trig == TriggerSave || trig == TriggerMembership || trig == TriggerRetry {
+	// A credential run may have merged a save or a membership run: their
+	// effect is carried.
+	if trig == TriggerSave || trig == TriggerMembership || trig == TriggerRetry || trig == TriggerCredential {
 		effects = append(effects, opt.effect)
 	}
 	// current re-checks the generation (under mu: no commit can happen
@@ -938,7 +973,7 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 			}
 			u.OK = true
 			delivered.Hashes[u.Unit] = o.hash
-			if trig == TriggerMembership || trig == TriggerRetry {
+			if trig == TriggerMembership || trig == TriggerRetry || trig == TriggerCredential {
 				effects = append(effects, membershipEffect(o.file.OnMembershipChange))
 				membershipHooks = membershipHooks || o.file.OnMembershipChange == templates.MembershipHook
 			}
@@ -1027,7 +1062,7 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 	effect := settings.Strongest(effects...)
 	var ran map[string]UnitResult
 	if len(hookOuts) > 0 {
-		step := hookStep{id: id, trig: trig, outs: hookOuts, force: map[string]bool{}, current: current, delivered: &delivered, now: now}
+		step := hookStep{id: id, trig: trig, outs: hookOuts, force: map[string]bool{}, alsoWhen: opt.whens, current: current, delivered: &delivered, now: now}
 		for n := range opt.force {
 			step.force[n] = true
 		}

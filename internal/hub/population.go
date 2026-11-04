@@ -53,6 +53,11 @@ func (h *Hub) populationWhyLocked(t *templates.Template) string {
 func populationWhy(t *templates.Template, native bool) string {
 	a := &t.Manifest.Auth
 	switch {
+	case t.Manifest.Routerless() && a.GroupAccess && a.AccessGroup != "":
+		// Router-less custom with group access (F1, file sharing): the
+		// access group's members (minus expired) — what
+		// entryPopulationLocked gives such an instance.
+		return ""
 	case a.Method == "public", a.Method == "custom" && !a.HasNativeLogin():
 		return WhyNoIdentity
 	case native:
@@ -263,7 +268,9 @@ func (h *Hub) resolvePeopleLocked(t *templates.Template, m *directory.Membership
 	opts := t.Manifest.Options()
 	configs := map[string]settings.PersonConfig{}
 	for i := range opts {
-		if o := &opts[i]; o.EffectiveScope() == templates.ScopePerson {
+		if o := &opts[i]; o.EffectiveScope() == templates.ScopePerson && !hubSetOption(o) {
+			// person_secret / person_id: computed by the Hub, never
+			// resolved from admin rows (F5).
 			configs[o.Key] = h.personConfigForLocked(t, o.Key, m)
 		}
 	}

@@ -30,6 +30,9 @@ const (
 	OpRestore = "restore" // restore from a backup (a failure puts the pre-restore backup back)
 	OpReload  = "reload"  // a settings delivery's reload signal (deliver_reload.go)
 	OpHook    = "hook"    // a settings hook run (deliver_hooks.go)
+	// OpCredentials: a revocation that could not be applied live
+	// stopped the instance (credentials.go, contract §13.16 step 3).
+	OpCredentials = "credentials"
 )
 
 // OpRecord is an app's last lifecycle operation, kept in
@@ -294,7 +297,9 @@ func (h *Hub) redactionSet(id string) []string {
 	for _, p := range []string{h.envPath(id), filepath.Join(h.cfg.ProjectDir, ".env")} {
 		vals = append(vals, envSecrets(t, readEnvFile(p))...)
 	}
-	return append(vals, h.knownSecrets(id)...)
+	vals = append(vals, h.knownSecrets(id)...)
+	// The instance's current NT hashes, upper and lower case (F44).
+	return append(vals, h.credentialHashes(id, t)...)
 }
 
 // envSecrets are the values in vars (an env file, unquoted) that look

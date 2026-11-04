@@ -64,6 +64,8 @@ func hookWhen(trig Trigger) string {
 		return templates.HookSettingsChange
 	case TriggerMembership:
 		return templates.HookMembershipChange
+	case TriggerCredential:
+		return templates.HookCredentialChange
 	}
 	return ""
 }
@@ -163,18 +165,22 @@ func (h *Hub) buildHooksLocked(t *templates.Template, m *directory.Membership) [
 		if sec == nil {
 			sec = map[string]string{}
 		}
-		o.input = settings.HookInput{DataFileDoc: doc, Secrets: sec}
+		creds := h.hookCredentialsLocked(t)
+		o.input = settings.HookInput{DataFileDoc: doc, Secrets: sec, Credentials: creds}
 		// The hash: the document plus when each sent secret was last set —
 		// never a secret value (delivered.json).
 		meta := map[string]time.Time{}
 		for k := range sec {
 			meta[k] = s.Secrets[k].UpdatedAt
 		}
+		// The credentials' ids and versions (never a hash, F61); omitted
+		// without person_secret options.
 		b, err := json.Marshal(struct {
-			Doc     settings.DataFileDoc
-			Secrets map[string]time.Time
-			Hook    templates.Hook
-		}{doc, meta, hk})
+			Doc         settings.DataFileDoc
+			Secrets     map[string]time.Time
+			Hook        templates.Hook
+			Credentials map[string]map[string]settings.HookCredential `json:",omitempty"`
+		}{doc, meta, hk, creds})
 		if err != nil {
 			o.err = errors.New("the hook input could not be encoded")
 			out = append(out, o)
@@ -197,6 +203,8 @@ type hookStep struct {
 	outs      []hookOutput
 	force     map[string]bool
 	forceWhen string
+	// alsoWhen: the hook triggers of requests merged into this run.
+	alsoWhen  map[string]bool
 	current   func() bool
 	delivered *deliveredDoc
 	now       time.Time
@@ -242,6 +250,11 @@ func (h *Hub) runHooks(ctx context.Context, t *templates.Template, step hookStep
 		hk := o.hook
 		unit := hookUnit(hk.Name)
 		declared := want != "" && slices.Contains(hk.When, want)
+		for w := range step.alsoWhen {
+			// A merged request's trigger (a save merged into a credential
+			// run): its hooks still run when their input changed.
+			declared = declared || slices.Contains(hk.When, w)
+		}
 		forced := step.trig == TriggerRetry || step.force[forceAllHooks] || step.force[hk.Name] ||
 			(step.forceWhen != "" && slices.Contains(hk.When, step.forceWhen)) ||
 			(declared && step.trig == TriggerStart)
