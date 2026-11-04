@@ -81,7 +81,7 @@ func (h *Hub) doctorInputs(ctx context.Context) (*doctor.Inputs, error) {
 	}
 	// The disk scans' cache (Task 11), read before mu (a leaf lock; the
 	// file is loaded on first use).
-	scans, rt := h.scanCache(), h.scanRuntime()
+	scans, rt := h.scanEntries(), h.scanRuntime()
 	addrs, derr := h.domainAddrs(ctx)
 	if derr != nil {
 		log.Printf("doctor: couldn't resolve %s (%v): exposure not checked against its addresses", h.cfg.Domain, derr)

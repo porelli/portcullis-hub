@@ -225,6 +225,9 @@ type Hub struct {
 	scanData       *scanFile
 	scanCtx        context.Context
 	scanStartDelay time.Duration
+	// gidExecs: per container, gid-check execs that timed out (Docker
+	// can't kill them; under scanCacheMu, M8).
+	gidExecs map[string][]string
 	// The main domain's A / AAAA lookup (localnet.go): lookupIP
 	// (test-settable), its cache under dnsMu (never mu).
 	lookupIP lookupIPFunc

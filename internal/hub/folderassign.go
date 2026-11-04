@@ -84,6 +84,9 @@ type DiskPlan struct {
 	Partial  bool                  `json:"partial"`
 	Dev      uint64                `json:"dev"`
 	Ino      uint64                `json:"ino"`
+	// principals: the folder's uses as the apply leaves them, judged by
+	// the verify scan (I3; set by runAssign, never hashed).
+	principals []folderfix.Principal
 }
 
 // AssignPlan is a preview's answer (assignment or undo).
@@ -1170,6 +1173,7 @@ func (h *Hub) runAssign(id string, c *assignCalc, actor string) (map[string]stri
 	if d != nil {
 		var diskChanged bool
 		var ws []string
+		d.principals = h.plannedPrincipals(id, c)
 		snap, changedN, ws, diskChanged, err = h.applyDisk(ctx, id, f, d, m)
 		warnings = append(warnings, ws...)
 		if snap != "" {
@@ -1460,7 +1464,9 @@ func (h *Hub) applyDisk(ctx context.Context, id string, f state.Folder, d *DiskP
 		// Exit 2 (409) is a refusal: nothing changed.
 		return saved, changed, warns, errStatus(err) != http.StatusConflict, fmt.Errorf("the apply failed: %w", err)
 	}
-	ver, err := h.runFixer(ctx, fixerRun{Mode: "scan", Folder: id, Source: f.Path, Opts: base})
+	verOpts := base
+	verOpts.Principals = d.principals
+	ver, err := h.runFixer(ctx, fixerRun{Mode: "scan", Folder: id, Source: f.Path, Opts: verOpts})
 	warns = append(warns, prefixed("verify", fixerWarnings(ver))...)
 	if err != nil {
 		return saved, changed, warns, true, fmt.Errorf("the verify scan failed: %w", err)
@@ -1474,7 +1480,7 @@ func (h *Hub) applyDisk(ctx context.Context, id string, f state.Folder, d *DiskP
 			"the verify scan found entries not as planned (group %d, setgid %d, default ACL %d, mode %d, owner %d)",
 			e.Group.N, e.Setgid.N, e.DefaultACL.N, e.Mode.N, e.Owner.N)
 	}
-	h.storeScan(id, ver)
+	h.storeScan(id, ver, d.principals)
 	return saved, changed, warns, true, nil
 }
 

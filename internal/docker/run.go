@@ -306,6 +306,9 @@ type ContainerInfo struct {
 	ID     string
 	Image  string // the image ID (sha256:…) the container runs
 	Labels map[string]string
+	// PidMode is HostConfig.PidMode ("host": the container sees the
+	// host's processes; the doctor's gid check never reads it).
+	PidMode string
 }
 
 // InspectContainer inspects one container (IsNotFound when missing).
@@ -319,6 +322,9 @@ func (c *Client) InspectContainer(ctx context.Context, id string) (ContainerInfo
 	ci := ContainerInfo{ID: res.Container.ID, Image: res.Container.Image}
 	if res.Container.Config != nil {
 		ci.Labels = res.Container.Config.Labels
+	}
+	if res.Container.HostConfig != nil {
+		ci.PidMode = string(res.Container.HostConfig.PidMode)
 	}
 	return ci, nil
 }

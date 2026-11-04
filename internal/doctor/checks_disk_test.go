@@ -221,3 +221,35 @@ func TestRuntimeGIDFindings(t *testing.T) {
 		t.Errorf("why = %q", got[0].Why)
 	}
 }
+
+// M9: a never-applied folder is applied, not applied "again".
+func TestFolderOwnerFixWording(t *testing.T) {
+	cw := okReport()
+	cw.Principals = []folderfix.PrincipalAccess{{Name: "samba", UID: 10001, CantWrite: folderfix.Count{N: 9}}}
+	scans := map[string]ScanIn{"/srv/media": scanAt("/srv/media", "media", cw,
+		folderfix.Principal{Name: "samba", UID: 10001, GIDs: []int{10001}, Write: true})}
+	never := &Inputs{Folders: []FolderIn{{ID: "media", Name: "Family media", Path: "/srv/media", GID: 60001}}, Scans: scans}
+	fo := of(t, KindFolderOwner, never)
+	if len(fo) != 1 || strings.Contains(fo[0].Fix, "again") || !strings.HasPrefix(fo[0].Fix, "Apply shared folder Family media's consistent ownership:") {
+		t.Errorf("never applied: %+v", fo)
+	}
+	at := time.Now()
+	applied := &Inputs{Folders: []FolderIn{{ID: "media", Name: "Family media", Path: "/srv/media", GID: 60001, LastApply: &at}}, Scans: scans}
+	if fo := of(t, KindFolderOwner, applied); len(fo) != 1 || !strings.Contains(fo[0].Fix, "ownership again") {
+		t.Errorf("applied: %+v", fo)
+	}
+}
+
+// I4 / I2: a container the check couldn't read is an Info finding, never
+// silence.
+func TestRuntimeUnreadableInfo(t *testing.T) {
+	in := &Inputs{Runtime: []RuntimeIn{{Instance: "plex", Service: "plex", Container: "c3", Err: "no process status readable (exit 127)"}}}
+	got := of(t, KindGIDCollision, in)
+	if len(got) != 1 || got[0].Severity != Info || got[0].Title != "Group check skipped for plex (service plex)." ||
+		!strings.Contains(got[0].Why, "no process status readable") || got[0].Instances[0] != "plex" {
+		t.Fatalf("%+v", got)
+	}
+	if got[0].FP != Fingerprint(KindGIDCollision, "plex", "unreadable:plex") {
+		t.Errorf("fp %s", got[0].FP)
+	}
+}

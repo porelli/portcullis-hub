@@ -163,10 +163,12 @@ type ScanIn struct {
 }
 
 // RuntimeIn is what a running container's processes hold (Task 11, the
-// runtime gid check): every gid of their Gid: and Groups: lines.
+// runtime gid check): every gid of their Gid: and Groups: lines; Err: the
+// container couldn't be read (no GIDs; an Info finding).
 type RuntimeIn struct {
 	Instance, Service, Container string
 	GIDs                         []int
+	Err                          string
 }
 
 // Inputs is everything the checks judge (enabled instances only).

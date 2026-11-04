@@ -231,7 +231,7 @@ func (folderOwnerCheck) Run(in *Inputs) []Finding {
 			FP: Fingerprint(KindFolderOwner, "folder:"+s.Folder), Kind: KindFolderOwner, Severity: Warning,
 			Title: fmt.Sprintf("Shared folder %s drifted since the last apply.", fo.Name),
 			Class: FixOneClick, FixKind: FixReapplyFolder,
-			Fix:     fmt.Sprintf("Apply shared folder %s's consistent ownership again: its group, setgid directories and default ACLs (previewed first; a permissions snapshot is saved before anything changes).", fo.Name),
+			Fix:     fmt.Sprintf("Apply shared folder %s's consistent ownership%s: its group, setgid directories and default ACLs (previewed first; a permissions snapshot is saved before anything changes).", fo.Name, again(fo)),
 			Folders: []string{s.Folder}, Paths: []string{s.Target}, Instances: instancesOf(fo.Uses),
 		}
 		var why []string
@@ -249,6 +249,14 @@ func (folderOwnerCheck) Run(in *Inputs) []Finding {
 		out = append(out, f)
 	}
 	return out
+}
+
+// again is " again" once the folder was applied (M9).
+func again(fo FolderIn) string {
+	if fo.LastApply != nil {
+		return " again"
+	}
+	return ""
 }
 
 // ── shared_path (the disk part) ─────────────────────────
@@ -545,7 +553,13 @@ func (runtimeGIDCheck) Run(in *Inputs) []Finding {
 		services []string
 	}
 	hits := map[string]*hit{}
+	var out []Finding
+	var unread []RuntimeIn
 	for _, r := range in.Runtime {
+		if r.Err != "" {
+			unread = append(unread, r)
+			continue
+		}
 		for _, g := range r.GIDs {
 			if !templates.InFolderGIDRange(int64(g)) || allowed[r.Instance+"\x00"+r.Service][g] {
 				continue
@@ -569,7 +583,6 @@ func (runtimeGIDCheck) Run(in *Inputs) []Finding {
 		}
 		return list[i].gid < list[j].gid
 	})
-	var out []Finding
 	for _, h := range list {
 		svcs := uniq(h.services...)
 		held := fmt.Sprintf("The processes of %s's %s service hold gid %d (read from the running container, not from its configuration).",
@@ -592,6 +605,33 @@ func (runtimeGIDCheck) Run(in *Inputs) []Finding {
 			f.Steps = []string{fmt.Sprintf("Change %s's group (its group or PGID setting, or the image's user) to a gid outside 60000–60999.", h.inst)}
 		}
 		out = append(out, f)
+	}
+	// I4: a container the check couldn't read (no cat, a failed or hung
+	// exec, a pid: host container) is said, never silent: Info, one per
+	// instance and service.
+	sort.SliceStable(unread, func(i, j int) bool {
+		if unread[i].Instance != unread[j].Instance {
+			return unread[i].Instance < unread[j].Instance
+		}
+		return unread[i].Service < unread[j].Service
+	})
+	seen := map[string]bool{}
+	for _, r := range unread {
+		k := r.Instance + "\x00" + r.Service
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, Finding{
+			FP: Fingerprint(KindGIDCollision, r.Instance, "unreadable:"+r.Service), Kind: KindGIDCollision, Severity: Info,
+			Title: fmt.Sprintf("Group check skipped for %s (service %s).", r.Instance, r.Service),
+			Why: fmt.Sprintf("The doctor couldn't read which groups the processes of %s's %s container hold: %s. It can't tell whether they hold a shared folder's gid without being assigned to it.",
+				r.Instance, r.Service, r.Err),
+			Class:     FixExplain,
+			Steps:     []string{fmt.Sprintf("Check %s's group settings (PGID, the image's user) by hand: no gid in 60000–60999 unless it is assigned to that shared folder.", r.Instance)},
+			Instances: []string{r.Instance},
+			Inputs:    Digest([]any{r.Instance, r.Service}),
+		})
 	}
 	return out
 }

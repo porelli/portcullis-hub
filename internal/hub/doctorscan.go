@@ -19,10 +19,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/doctor"
 	"github.com/portcullis/hub/internal/folderfix"
 	"github.com/portcullis/hub/internal/fsutil"
+	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
 )
 
@@ -84,6 +86,10 @@ type scanEntry struct {
 	Report     *folderfix.Report     `json:"report,omitempty"`
 	Principals []folderfix.Principal `json:"principals,omitempty"`
 	Err        string                `json:"error,omitempty"`
+	// Dev / Ino: a folder entry's root as state.yaml had it when scanned
+	// (M6: a folder re-created at the same path is another directory).
+	Dev uint64 `json:"dev,omitempty"`
+	Ino uint64 `json:"ino,omitempty"`
 }
 
 // runtimeEntry is one running container's gids (the runtime gid check).
@@ -92,6 +98,8 @@ type runtimeEntry struct {
 	Service   string `json:"service"`
 	Container string `json:"container"`
 	GIDs      []int  `json:"gids"`
+	// Err: the container couldn't be read (an Info finding, I4).
+	Err string `json:"error,omitempty"`
 }
 
 // scanFile is <data>/doctor/scans.json.
@@ -247,7 +255,38 @@ func scanPrincipals(uses []PathUsage) []folderfix.Principal {
 // background (op key "_doctor", op doctor_scan; 202). 401 without an
 // actor, 503 without Users & Groups or the Engine API, 409 while a scan
 // runs (scheduled or on demand).
+//
+// Audited doctor.scan (target "disks"): a refusal (401, 503, 409) as
+// "refused", a finished scan with its counts — always after scanMu is
+// released (I1).
 func (h *Hub) StartDoctorScan(actor string) (*AsyncOp, error) {
+	op, err := h.startDoctorScan(actor)
+	if err != nil {
+		h.auditScan(actor, "", err)
+	}
+	return op, err
+}
+
+// auditScan writes the doctor.scan entry (after every lock): err set = the
+// scan was refused before it started (401, 503 and 409 alike: nothing
+// ran), recorded "refused" with its reason.
+func (h *Hub) auditScan(actor, detail string, err error) {
+	h.mu.RLock()
+	a := h.audit
+	h.mu.RUnlock()
+	if a == nil {
+		return
+	}
+	e := directory.AuditEntry{Actor: actor, Action: "doctor.scan", Target: "disks", Detail: detail, Result: "ok"}
+	if err != nil {
+		e.Result, e.Error = "refused", err.Error()
+	}
+	if aerr := a.Append(e); aerr != nil {
+		log.Printf("audit: %v", aerr)
+	}
+}
+
+func (h *Hub) startDoctorScan(actor string) (*AsyncOp, error) {
 	if actor == "" {
 		return nil, statusErr(http.StatusUnauthorized, "a disk check needs a signed-in admin")
 	}
@@ -264,9 +303,13 @@ func (h *Hub) StartDoctorScan(actor string) (*AsyncOp, error) {
 		if !h.scanMu.TryLock() {
 			return nil, nil, statusErr(http.StatusConflict, "a disk check is already running")
 		}
-		defer h.scanMu.Unlock()
 		ready()
-		res, warns := h.runDoctorScan(h.doctorContext())
+		res, warns := func() (map[string]string, []string) {
+			defer h.scanMu.Unlock()
+			return h.runDoctorScan(h.doctorContext())
+		}()
+		h.auditScan(actor, fmt.Sprintf("targets=%s scanned=%s failed=%s skipped=%s containers=%s",
+			res["targets"], res["scanned"], res["failed"], res["skipped"], res["containers"]), nil)
 		return res, warns, nil
 	})
 }
@@ -419,6 +462,7 @@ func (h *Hub) scanOne(ctx context.Context, t ScanTarget) (e scanEntry, why strin
 			return e, fmt.Sprintf("shared folder %s changed while the check ran: checked next time", name)
 		}
 		opts.ExpectDev, opts.ExpectIno, opts.ExpectMountRoot = f.Dev, f.Ino, f.MountRoot
+		e.Dev, e.Ino = f.Dev, f.Ino
 		rep, err := h.runFixer(ctx, fixerRun{Mode: "scan", Folder: t.Folder, Source: f.Path, Opts: opts})
 		if err != nil {
 			return fail(err)
@@ -469,8 +513,10 @@ func (h *Hub) scanOne(ctx context.Context, t ScanTarget) (e scanEntry, why strin
 
 // storeScan keeps an apply's verify scan as the folder's doctor scan
 // (P13): its races and skipped entries become skipped_entries findings,
-// its conformance clears a drift finding. Called outside mu.
-func (h *Hub) storeScan(folder string, rep *folderfix.Report) {
+// its conformance clears a drift finding, and its principals (the uses
+// as the apply leaves them, I3) keep a blocked app reported. Called
+// outside mu.
+func (h *Hub) storeScan(folder string, rep *folderfix.Report, principals []folderfix.Principal) {
 	if rep == nil {
 		return
 	}
@@ -481,7 +527,44 @@ func (h *Hub) storeScan(folder string, rep *folderfix.Report) {
 		return
 	}
 	cp := *rep
-	h.putScan(scanEntry{Target: f.Path, Folder: folder, At: time.Now().UTC(), Report: &cp})
+	h.putScan(scanEntry{Target: f.Path, Folder: folder, At: time.Now().UTC(), Report: &cp,
+		Principals: slices.Clone(principals), Dev: f.Dev, Ino: f.Ino})
+}
+
+// plannedPrincipals are folder id's uses' principals as the apply c
+// leaves them (I3: the verify scan judges them). The planned settings and
+// the folder's write confirmations are swapped in under the write lock
+// for the one pathUsagesLocked call — no other call, nothing stored —
+// and put back before it is released.
+func (h *Hub) plannedPrincipals(id string, c *assignCalc) []folderfix.Principal {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	origS, origF := h.st.Settings, h.st.Folders
+	defer func() { h.st.Settings, h.st.Folders = origS, origF }()
+	planned := maps.Clone(origS)
+	if planned == nil {
+		planned = map[string]state.InstanceSettings{}
+	}
+	for _, inst := range c.changedInstances() {
+		if next := applyEdits(origS[inst], c.edits, inst); next.IsZero() {
+			delete(planned, inst)
+		} else {
+			planned[inst] = next
+		}
+	}
+	folders := maps.Clone(origF)
+	if f, ok := folders[id]; ok {
+		f.WriteConfirmed = c.wc
+		folders[id] = f
+	}
+	h.st.Settings, h.st.Folders = planned, folders
+	var fu []PathUsage
+	for _, u := range h.pathUsagesLocked() {
+		if u.Folder == id {
+			fu = append(fu, u)
+		}
+	}
+	return scanPrincipals(fu)
 }
 
 // ── the runtime gid check ───────────────────────────────
@@ -508,12 +591,24 @@ func (h *Hub) collectRuntime(ctx context.Context, ids []string) []runtimeEntry {
 			if c.State != "running" || c.Project() != projectName(id) || len(out) >= maxRuntimeContainers {
 				continue
 			}
-			gids, err := h.containerGIDs(ctx, c.ID)
-			if err != nil {
-				log.Printf("doctor: %s: container %s: can't read its processes' groups: %v", id, c.Name(), err)
-				continue
+			e := runtimeEntry{Instance: id, Service: c.Service(), Container: c.Name()}
+			ci, err := h.engine.InspectContainer(ctx, c.ID)
+			switch {
+			case err != nil:
+				e.Err = clipRunes("inspecting the container failed: "+err.Error(), 300)
+			case ci.PidMode == "host":
+				// I2: its /proc is the host's: other apps' processes
+				// would be blamed on it.
+				e.Err = "it runs with pid: host, so its /proc lists the host's processes, not its own"
+			default:
+				if e.GIDs, err = h.containerGIDs(ctx, c.ID); err != nil {
+					e.Err = clipRunes(err.Error(), 300)
+				}
 			}
-			out = append(out, runtimeEntry{Instance: id, Service: c.Service(), Container: c.Name(), GIDs: gids})
+			if e.Err != "" {
+				log.Printf("doctor: %s: container %s: group check skipped: %s", id, c.Name(), e.Err)
+			}
+			out = append(out, e)
 		}
 	}
 	return out
@@ -528,16 +623,43 @@ func (h *Hub) collectRuntime(ctx context.Context, ids []string) []runtimeEntry {
 // only: `ls /proc` (the pids, at most maxStatusPIDs; failing — no ls —
 // pid 1 only) and one `cat` of their status files (a process that exited
 // meanwhile is just missing).
+//
+// M8: Docker can't kill a timed-out exec. Its id is kept (gidExecs), and
+// while one still runs (ExecRunning) the container is skipped with an
+// error, so hung processes never pile up run after run.
 func (h *Hub) containerGIDs(ctx context.Context, id string) ([]int, error) {
+	h.scanCacheMu.Lock()
+	pending := slices.Clone(h.gidExecs[id])
+	h.scanCacheMu.Unlock()
+	for _, x := range pending {
+		if running, err := h.engine.ExecRunning(ctx, x); err == nil && running {
+			return nil, errors.New("a previous group check (timed out) is still running in it")
+		}
+	}
+	h.scanCacheMu.Lock()
+	delete(h.gidExecs, id)
+	h.scanCacheMu.Unlock()
+	exec := func(cmd []string) (*docker.ExecResult, error) {
+		res, err := h.engine.Exec(ctx, id, cmd, gidExecTimeout)
+		if err == nil && res.TimedOut && res.ExecID != "" {
+			h.scanCacheMu.Lock()
+			if h.gidExecs == nil {
+				h.gidExecs = map[string][]string{}
+			}
+			h.gidExecs[id] = append(h.gidExecs[id], res.ExecID)
+			h.scanCacheMu.Unlock()
+		}
+		return res, err
+	}
 	pids := []int{1}
-	if res, err := h.engine.Exec(ctx, id, []string{"ls", "/proc"}, gidExecTimeout); err == nil && res.ExitCode == 0 && !res.TimedOut {
+	if res, err := exec([]string{"ls", "/proc"}); err == nil && res.ExitCode == 0 && !res.TimedOut {
 		pids = pidList(res.Output)
 	}
 	args := []string{"cat"}
 	for _, p := range pids {
 		args = append(args, "/proc/"+strconv.Itoa(p)+"/status")
 	}
-	res, err := h.engine.Exec(ctx, id, args, gidExecTimeout)
+	res, err := exec(args)
 	if err != nil {
 		return nil, err
 	}
@@ -647,7 +769,8 @@ func (x *scanFile) problem() string {
 		x.Runtime = []runtimeEntry{}
 	}
 	for k, e := range x.Scans {
-		if e.Target != k || !path.IsAbs(k) || path.Clean(k) != k || (e.Report == nil) == (e.Err == "") || e.At.IsZero() {
+		if e.Target != k || !path.IsAbs(k) || path.Clean(k) != k || (e.Report == nil) == (e.Err == "") || e.At.IsZero() ||
+			(e.Folder != "" && (e.Dev == 0 || e.Ino == 0)) {
 			return fmt.Sprintf("entry %q", clipRunes(k, 80))
 		}
 	}
@@ -764,15 +887,23 @@ func withoutSamples(r *folderfix.Report) *folderfix.Report {
 
 // scanCache is the cached scans as the doctor reads them, by target path.
 func (h *Hub) scanCache() map[string]doctor.ScanIn {
-	h.scanCacheMu.Lock()
-	defer h.scanCacheMu.Unlock()
-	sf := h.scanFileLocked()
-	out := make(map[string]doctor.ScanIn, len(sf.Scans))
-	for k, e := range sf.Scans {
-		out[k] = doctor.ScanIn{At: e.At, Report: e.Report, Target: e.Target, Folder: e.Folder,
-			Principals: slices.Clone(e.Principals), Err: e.Err}
+	out := map[string]doctor.ScanIn{}
+	for k, e := range h.scanEntries() {
+		out[k] = scanIn(e)
 	}
 	return out
+}
+
+func scanIn(e scanEntry) doctor.ScanIn {
+	return doctor.ScanIn{At: e.At, Report: e.Report, Target: e.Target, Folder: e.Folder,
+		Principals: slices.Clone(e.Principals), Err: e.Err}
+}
+
+// scanEntries is a copy of the cached entries.
+func (h *Hub) scanEntries() map[string]scanEntry {
+	h.scanCacheMu.Lock()
+	defer h.scanCacheMu.Unlock()
+	return maps.Clone(h.scanFileLocked().Scans)
 }
 
 // scanRuntime is the last run's container gids.
@@ -781,7 +912,7 @@ func (h *Hub) scanRuntime() []doctor.RuntimeIn {
 	defer h.scanCacheMu.Unlock()
 	var out []doctor.RuntimeIn
 	for _, r := range h.scanFileLocked().Runtime {
-		out = append(out, doctor.RuntimeIn{Instance: r.Instance, Service: r.Service, Container: r.Container, GIDs: slices.Clone(r.GIDs)})
+		out = append(out, doctor.RuntimeIn{Instance: r.Instance, Service: r.Service, Container: r.Container, GIDs: slices.Clone(r.GIDs), Err: r.Err})
 	}
 	return out
 }
@@ -795,14 +926,15 @@ func (h *Hub) lastFullScan() time.Time {
 }
 
 // doctorScansLocked is the cached scans of the current targets (a scan of
-// a target that is no longer one, or of a folder whose path changed, is
-// not judged) and the runtime gids of enabled instances. scans / rt come
-// from scanCache / scanRuntime, read before mu. Caller holds mu.
-func (h *Hub) doctorScansLocked(scans map[string]doctor.ScanIn, rt []doctor.RuntimeIn) (map[string]doctor.ScanIn, []doctor.RuntimeIn) {
+// a target that is no longer one, or of a folder whose path or root
+// dev/ino changed — M6 —, is not judged) and the runtime gids of enabled
+// instances. scans / rt come from scanEntries / scanRuntime, read before
+// mu. Caller holds mu.
+func (h *Hub) doctorScansLocked(scans map[string]scanEntry, rt []doctor.RuntimeIn) (map[string]doctor.ScanIn, []doctor.RuntimeIn) {
 	out := map[string]doctor.ScanIn{}
 	for _, t := range h.scanTargetsLocked() {
-		if s, ok := scans[t.Path]; ok && s.Folder == t.Folder {
-			out[t.Path] = s
+		if e, ok := scans[t.Path]; ok && h.entryCurrentLocked(e, t.Folder) {
+			out[t.Path] = scanIn(e)
 		}
 	}
 	var r []doctor.RuntimeIn
@@ -814,12 +946,30 @@ func (h *Hub) doctorScansLocked(scans map[string]doctor.ScanIn, rt []doctor.Runt
 	return out, r
 }
 
-// fillLastCheck adds the folder's cached scan (never under mu).
+// entryCurrentLocked: e is a scan of folder (a hand-typed path: "") as
+// it is now — for a folder, the same root dev/ino. Caller holds mu.
+func (h *Hub) entryCurrentLocked(e scanEntry, folder string) bool {
+	if e.Folder != folder {
+		return false
+	}
+	if folder == "" {
+		return true
+	}
+	f, ok := h.st.Folders[folder]
+	return ok && f.Path == e.Target && f.Dev == e.Dev && f.Ino == e.Ino
+}
+
+// fillLastCheck adds the folder's cached scan (never under mu: the cache
+// is read first, then judged under the read lock).
 func (h *Hub) fillLastCheck(v *FolderView) {
-	h.scanCacheMu.Lock()
-	defer h.scanCacheMu.Unlock()
-	e, ok := h.scanFileLocked().Scans[v.Path]
-	if !ok || e.Folder != v.ID {
+	e, ok := h.scanEntries()[v.Path]
+	if !ok {
+		return
+	}
+	h.mu.RLock()
+	cur := h.entryCurrentLocked(e, v.ID)
+	h.mu.RUnlock()
+	if !cur {
 		return
 	}
 	s := &doctor.ScanSummary{Target: e.Target, At: e.At}

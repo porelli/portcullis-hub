@@ -417,6 +417,7 @@ func TestRuntimeGIDCheck(t *testing.T) {
 		container("c-nas", "portcullis-nas", "nas", "running"),
 		container("c-arr", "portcullis-arr", "arr", "exited"),
 	}
+	f.engine.fixer.inspect["c-nas"] = docker.ContainerInfo{ID: "c-nas"}
 	var calls [][]string
 	f.engine.execFn = func(id string, cmd []string) (*docker.ExecResult, error) {
 		calls = append(calls, append([]string{id}, cmd...))
@@ -508,5 +509,214 @@ func TestRunDoctorScansStops(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("RunDoctorScans didn't stop")
+	}
+}
+
+// ── fix round 1 ─────────────────────────────────────────
+
+// I1: on-demand scans are audited doctor.scan (refusals "refused", the
+// counts in the detail, written after the locks are released).
+func TestDoctorScanAudited(t *testing.T) {
+	f, d := scanFixture(t)
+	audit := &fakeAudit{}
+	f.h.SetAudit(audit)
+	if _, err := f.h.StartDoctorScan(""); errStatus(err) != 401 {
+		t.Fatalf("no actor: %v", err)
+	}
+	f.h.SetPeople(nil)
+	if _, err := f.h.StartDoctorScan("admin"); errStatus(err) != 503 {
+		t.Fatalf("no directory: %v", err)
+	}
+	f.h.SetPeople(newFakePeople())
+	gate := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	var unlocked sync.Once
+	f.engine.fx().run = func(s docker.RunSpec, out func(io.Reader) error) (*docker.RunResult, error) {
+		if fixerMode(s.Cmd) == "scan" {
+			select {
+			case entered <- struct{}{}:
+			default:
+			}
+			<-gate
+		}
+		return d.run(s, out)
+	}
+	if _, err := f.h.StartDoctorScan("admin"); err != nil {
+		t.Fatal(err)
+	}
+	<-entered
+	if _, err := f.h.StartDoctorScan("admin"); errStatus(err) != 409 {
+		t.Fatalf("busy: %v", err)
+	}
+	unlocked.Do(func() { close(gate) })
+	waitDoctorOp(t, f.h)
+	// The entry is written after scanMu is released.
+	deadline := time.Now().Add(5 * time.Second)
+	for len(auditOf(audit, "doctor.scan")) < 4 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	got := auditOf(audit, "doctor.scan")
+	want := []string{"disks refused ", "disks refused ", "disks refused ", "disks ok targets=4 scanned=4 failed=0 skipped=0 containers=0"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("audit = %q", got)
+	}
+	if !f.h.scanMu.TryLock() {
+		t.Error("scanMu still held")
+	} else {
+		f.h.scanMu.Unlock()
+	}
+}
+
+// I2: a pid: host container's /proc is the host's: never read, an Info.
+func TestRuntimePidHostSkipped(t *testing.T) {
+	f, _ := scanFixture(t)
+	f.engine.fixer.inspect["c-nas"] = docker.ContainerInfo{ID: "c-nas", PidMode: "host"}
+	f.engine.mu.Lock()
+	f.engine.containers = []docker.Container{container("c-nas", "portcullis-nas", "nas", "running")}
+	n := 0
+	f.engine.execFn = func(id string, cmd []string) (*docker.ExecResult, error) { n++; return &docker.ExecResult{}, nil }
+	f.engine.mu.Unlock()
+	f.h.runDoctorScan(context.Background())
+	f.engine.mu.Lock()
+	calls := n
+	f.engine.mu.Unlock()
+	if calls != 0 {
+		t.Errorf("%d execs into a pid: host container", calls)
+	}
+	rt := f.h.scanRuntime()
+	if len(rt) != 1 || rt[0].GIDs != nil || !strings.Contains(rt[0].Err, "host's processes") {
+		t.Fatalf("runtime = %+v", rt)
+	}
+	assertSkippedInfo(t, f, "nas")
+}
+
+func assertSkippedInfo(t *testing.T, f *fixture, inst string) {
+	t.Helper()
+	r, err := f.h.Doctor(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, x := range r.Findings {
+		if x.Kind == doctor.KindGIDCollision && x.Severity == doctor.Info && strings.HasPrefix(x.Title, "Group check skipped for "+inst) {
+			return
+		}
+	}
+	t.Errorf("no 'group check skipped' Info for %s: %+v", inst, r.Findings)
+}
+
+// I4: an unreadable container (no cat, a failed exec, a failed inspect)
+// is an Info finding.
+func TestRuntimeUnreadableRecorded(t *testing.T) {
+	f, _ := scanFixture(t)
+	f.engine.fixer.inspect["c-nas"] = docker.ContainerInfo{ID: "c-nas"}
+	f.engine.mu.Lock()
+	f.engine.containers = []docker.Container{container("c-nas", "portcullis-nas", "nas", "running"), container("c-arr", "portcullis-arr", "arr", "running")}
+	f.engine.execFn = func(id string, cmd []string) (*docker.ExecResult, error) {
+		return &docker.ExecResult{Output: []byte("exec: not found"), ExitCode: 127}, nil
+	}
+	f.engine.mu.Unlock()
+	f.h.runDoctorScan(context.Background())
+	rt := f.h.scanRuntime()
+	if len(rt) != 2 {
+		t.Fatalf("runtime = %+v", rt)
+	}
+	for _, r := range rt {
+		switch r.Instance {
+		case "nas":
+			if !strings.Contains(r.Err, "no process status readable") {
+				t.Errorf("nas: %+v", r)
+			}
+		case "arr": // not inspectable
+			if !strings.Contains(r.Err, "inspect") {
+				t.Errorf("arr: %+v", r)
+			}
+		}
+	}
+	assertSkippedInfo(t, f, "nas")
+	assertSkippedInfo(t, f, "arr")
+}
+
+// M8: a container whose previous gid exec timed out and still runs is
+// skipped (and said) until it ended.
+func TestHungGIDExecSkipped(t *testing.T) {
+	f, _ := scanFixture(t)
+	f.engine.fixer.inspect["c-nas"] = docker.ContainerInfo{ID: "c-nas"}
+	f.engine.mu.Lock()
+	f.engine.containers = []docker.Container{container("c-nas", "portcullis-nas", "nas", "running")}
+	n := 0
+	f.engine.execFn = func(id string, cmd []string) (*docker.ExecResult, error) {
+		n++
+		return &docker.ExecResult{ExitCode: -1, TimedOut: true, ExecID: "e-" + cmd[0]}, nil
+	}
+	f.engine.mu.Unlock()
+	f.h.runDoctorScan(context.Background())
+	if rt := f.h.scanRuntime(); len(rt) != 1 || !strings.Contains(rt[0].Err, "timed out") {
+		t.Fatalf("first run: %+v", rt)
+	}
+	f.engine.setExecRunning("e-cat", true)
+	f.engine.mu.Lock()
+	n0 := n
+	f.engine.mu.Unlock()
+	f.h.runDoctorScan(context.Background())
+	f.engine.mu.Lock()
+	n1 := n
+	f.engine.mu.Unlock()
+	if n1 != n0 {
+		t.Errorf("exec'd again while the previous one runs (%d → %d)", n0, n1)
+	}
+	if rt := f.h.scanRuntime(); len(rt) != 1 || !strings.Contains(rt[0].Err, "still running") {
+		t.Fatalf("second run: %+v", rt)
+	}
+	// Once it ended, the container is read again.
+	f.engine.setExecRunning("e-cat", false)
+	f.h.runDoctorScan(context.Background())
+	f.engine.mu.Lock()
+	n2 := n
+	f.engine.mu.Unlock()
+	if n2 == n1 {
+		t.Error("not read again after the hung exec ended")
+	}
+}
+
+// I3: the apply's verify scan judges the folder's uses as the apply
+// leaves them, and the cache keeps them.
+func TestVerifyScanCarriesPrincipals(t *testing.T) {
+	f, d, _ := assignFixture(t)
+	enable(t, f, "nas")
+	if _, rec := assign(t, f, "media", AssignRequest{Uses: []FolderUse{{Instance: "nas", Key: "data"}}}); !rec.OK {
+		t.Fatalf("assign: %+v", rec)
+	}
+	if p, _ := argValue(d.Argv("scan"), "principal"); p != "nas:3000:3000,60001:w" {
+		t.Errorf("verify scan principal %q (%v)", p, d.Argv("scan"))
+	}
+	e := f.h.scanCache()["/srv/media"]
+	if len(e.Principals) != 1 || e.Principals[0].Name != "nas" || !e.Principals[0].Write {
+		t.Errorf("cached principals = %+v", e.Principals)
+	}
+}
+
+// M6: a cached scan of a folder whose root is now another directory
+// (deleted and re-created with the same id and path) is not judged.
+func TestCacheMatchesFolderDevIno(t *testing.T) {
+	f, _ := scanFixture(t)
+	f.h.runDoctorScan(context.Background())
+	f.h.mu.Lock()
+	m := f.h.st.Folders["media"]
+	m.Ino++
+	f.h.st.Folders["media"] = m
+	f.h.mu.Unlock()
+	r, err := f.h.Doctor(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range r.Scans {
+		if s.Target == "/srv/media" {
+			t.Errorf("stale scan judged: %+v", s)
+		}
+	}
+	for _, v := range f.h.Folders() {
+		if v.ID == "media" && v.LastCheck != nil {
+			t.Errorf("last_check of another directory: %+v", v.LastCheck)
+		}
 	}
 }
