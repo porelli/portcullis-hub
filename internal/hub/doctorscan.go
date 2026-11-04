@@ -532,34 +532,33 @@ func (h *Hub) storeScan(folder string, rep *folderfix.Report, principals []folde
 }
 
 // plannedPrincipals are folder id's uses' principals as the apply c
-// leaves them (I3: the verify scan judges them). The planned settings and
-// the folder's write confirmations are swapped in under the write lock
-// for the one pathUsagesLocked call — no other call, nothing stored —
-// and put back before it is released.
+// leaves them (I3: the verify scan judges them), from a planned copy —
+// T8's renderView {settings, folders} with c's edits applied to clones
+// (applyEdits) and the folder's write confirmations — under the read
+// lock (deferred: a panic releases it). h.st is never changed (T8 C1).
 func (h *Hub) plannedPrincipals(id string, c *assignCalc) []folderfix.Principal {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	origS, origF := h.st.Settings, h.st.Folders
-	defer func() { h.st.Settings, h.st.Folders = origS, origF }()
-	planned := maps.Clone(origS)
-	if planned == nil {
-		planned = map[string]state.InstanceSettings{}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	planned := renderView{settings: maps.Clone(h.st.Settings), folders: maps.Clone(h.st.Folders)}
+	if planned.settings == nil {
+		planned.settings = map[string]state.InstanceSettings{}
+	}
+	if planned.folders == nil {
+		planned.folders = map[string]state.Folder{}
 	}
 	for _, inst := range c.changedInstances() {
-		if next := applyEdits(origS[inst], c.edits, inst); next.IsZero() {
-			delete(planned, inst)
+		if next := applyEdits(h.st.Settings[inst], c.edits, inst); next.IsZero() {
+			delete(planned.settings, inst)
 		} else {
-			planned[inst] = next
+			planned.settings[inst] = next
 		}
 	}
-	folders := maps.Clone(origF)
-	if f, ok := folders[id]; ok {
-		f.WriteConfirmed = c.wc
-		folders[id] = f
+	if f, ok := planned.folders[id]; ok {
+		f.WriteConfirmed = maps.Clone(c.wc)
+		planned.folders[id] = f
 	}
-	h.st.Settings, h.st.Folders = planned, folders
 	var fu []PathUsage
-	for _, u := range h.pathUsagesLocked() {
+	for _, u := range h.pathUsagesIn(planned) {
 		if u.Folder == id {
 			fu = append(fu, u)
 		}

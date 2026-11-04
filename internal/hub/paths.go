@@ -69,14 +69,20 @@ func (h *Hub) PathUsages() []PathUsage {
 }
 
 // pathUsagesLocked is PathUsages for a caller holding mu (read or write).
-func (h *Hub) pathUsagesLocked() []PathUsage {
+func (h *Hub) pathUsagesLocked() []PathUsage { return h.pathUsagesIn(h.liveView()) }
+
+// pathUsagesIn is PathUsages over view v (its settings and folders; the
+// live state or a planned copy, folderrender.go renderView): it reads v,
+// the templates, enabled flags and custom overrides, never changes
+// anything. Caller holds mu (read).
+func (h *Hub) pathUsagesIn(v renderView) []PathUsage {
 	out := []PathUsage{}
 	for i := range h.instances {
 		t := &h.instances[i]
 		if !h.st.IsEnabled(t.ID) {
 			continue
 		}
-		s := h.st.Settings[t.ID]
+		s := v.settings[t.ID]
 		var values map[string]settings.Value
 		valuesOf := func() map[string]settings.Value {
 			if values == nil {
@@ -85,14 +91,14 @@ func (h *Hub) pathUsagesLocked() []PathUsage {
 			return values
 		}
 		var mounts []*folderMount
-		gidEnv := h.folderGIDEnvLocked(t, s)
+		gidEnv := h.folderGIDEnvIn(v, t, s)
 		var used []PathUsage
 		for _, o := range mountOptions(t) {
-			v, ok := h.effectiveValue(t, o, s)
+			val, ok := h.effectiveValue(t, o, s)
 			if !ok {
 				continue
 			}
-			u, fm, err := h.pathUsageLocked(t, o, v, valuesOf, gidEnv)
+			u, fm, err := h.pathUsageIn(v, t, o, val, valuesOf, gidEnv)
 			if err != nil {
 				log.Printf("settings: %s: %s: %v", t.ID, o.Key, err)
 				continue
@@ -115,12 +121,12 @@ func (h *Hub) pathUsagesLocked() []PathUsage {
 	return out
 }
 
-// pathUsageLocked is option o's usage with value v (fm: its folder mount,
-// nil for a host path). Caller must hold mu.
-func (h *Hub) pathUsageLocked(t *templates.Template, o *templates.Option, v any, values func() map[string]settings.Value, gidEnv map[string]int) (PathUsage, *folderMount, error) {
+// pathUsageIn is option o's usage with value v over view rv (fm: its
+// folder mount, nil for a host path). Caller must hold mu.
+func (h *Hub) pathUsageIn(rv renderView, t *templates.Template, o *templates.Option, v any, values func() map[string]settings.Value, gidEnv map[string]int) (PathUsage, *folderMount, error) {
 	u := PathUsage{Instance: t.ID, Key: o.Key, Label: o.Label, Type: o.Type, Service: o.Target.Service, Mount: o.Target.Mount,
 		Needs: o.Needs, Source: PathSourceSetting, Declared: o.Folder != nil, Checks: o.Checks}
-	fm, err := h.folderMountLocked(t, o, v)
+	fm, err := h.folderMountIn(rv, t, o, v)
 	if err != nil {
 		return u, nil, err
 	}

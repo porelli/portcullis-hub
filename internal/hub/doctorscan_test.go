@@ -2,6 +2,7 @@ package hub
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -717,6 +718,49 @@ func TestCacheMatchesFolderDevIno(t *testing.T) {
 	for _, v := range f.h.Folders() {
 		if v.ID == "media" && v.LastCheck != nil {
 			t.Errorf("last_check of another directory: %+v", v.LastCheck)
+		}
+	}
+}
+
+// I3 follow-up (T8 C1): the post-apply uses come from a cloned view under
+// the read lock: h.st is never touched (identical before and after), and
+// the computation runs while another reader holds mu.
+func TestPlannedPrincipalsLeaveStateAlone(t *testing.T) {
+	f, _, _ := assignFixture(t)
+	enable(t, f, "nas")
+	c, err := f.h.computeAssign(context.Background(), "media", AssignRequest{Uses: []FolderUse{{Instance: "nas", Key: "data"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := stateDump(t, f)
+	f.h.mu.RLock()
+	settingsBefore, foldersBefore := fmt.Sprintf("%p", f.h.st.Settings), fmt.Sprintf("%p", f.h.st.Folders)
+	done := make(chan []folderfix.Principal, 1)
+	go func() { done <- f.h.plannedPrincipals("media", c) }()
+	var ps []folderfix.Principal
+	select {
+	case ps = <-done:
+	case <-time.After(3 * time.Second):
+		f.h.mu.RUnlock()
+		t.Fatal("plannedPrincipals needs the write lock")
+	}
+	f.h.mu.RUnlock()
+	if len(ps) != 1 || ps[0].Name != "nas" || !slices.Contains(ps[0].GIDs, 60001) || !ps[0].Write {
+		t.Errorf("principals = %+v", ps)
+	}
+	if after := stateDump(t, f); after != before {
+		t.Errorf("state changed:\n%s\n---\n%s", before, after)
+	}
+	if fmt.Sprintf("%p", f.h.st.Settings) != settingsBefore || fmt.Sprintf("%p", f.h.st.Folders) != foldersBefore {
+		t.Error("h.st maps replaced")
+	}
+	// The nas use isn't stored yet: the live uses have no principal.
+	f.h.mu.RLock()
+	live := f.h.pathUsagesLocked()
+	f.h.mu.RUnlock()
+	for _, u := range live {
+		if u.Folder == "media" {
+			t.Errorf("planned value leaked into the live uses: %+v", u)
 		}
 	}
 }
