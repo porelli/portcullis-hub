@@ -793,7 +793,7 @@ func (h *Hub) SaveSettings(id string, u SettingsUpdate, actor string) (_ *SaveRe
 	h.mu.RLock()
 	pendErr := h.pendingLocked(id)
 	native := h.st.SignIn[id] == state.SignInNative
-	folders := h.folders
+	folders := h.folderSourceLocked()
 	u = withPlaceholders(t, h.st.Settings[id], u)
 	h.mu.RUnlock()
 	if pendErr != nil {

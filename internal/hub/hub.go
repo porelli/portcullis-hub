@@ -191,10 +191,13 @@ type Hub struct {
 	// folders resolves shared-folder path values (project 2; SetFolderSource;
 	// nil = not available: folder:… values are refused). Guarded by mu.
 	folders FolderSource
-	compose compose.Runner
-	engine  Engine
-	idp     IdP
-	attrs   AttrStore // LLDAP user attributes (setting claims); nil: none
+	// folderLocks: per shared folder id, the *sync.Mutex its operations
+	// try-lock (folders.go folderLock).
+	folderLocks sync.Map
+	compose     compose.Runner
+	engine      Engine
+	idp         IdP
+	attrs       AttrStore // LLDAP user attributes (setting claims); nil: none
 	// fixerImage caches selfImage (fixer.go; guarded by fixerMu, never
 	// mu); mountinfo reads /proc/self/mountinfo (test-settable).
 	fixerMu    sync.Mutex
@@ -398,6 +401,12 @@ func New(cfg Config, runner compose.Runner, engine Engine, idp IdP) (*Hub, error
 		return nil, err
 	}
 	h.st = st
+	// Shared folders resolve from state (folders.go; P8); a stored folder
+	// this configuration refuses stops the start (P24).
+	h.folders = hubFolders{h}
+	if err := h.checkFoldersAtStart(); err != nil {
+		return nil, err
+	}
 	h.loadOps()
 	h.loadSyncHashes()
 	return h, nil

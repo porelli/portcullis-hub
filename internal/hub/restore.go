@@ -82,7 +82,7 @@ func (h *Hub) configProblem(t *templates.Template, c *instanceConfig, archive st
 		u.PublicTokens = &tk
 	}
 	h.mu.RLock()
-	folders := h.folders
+	folders := h.folderSourceLocked()
 	h.mu.RUnlock()
 	parsed, more := configCheck(t, h.kinds, folders, u, c.SignIn == state.SignInNative)
 	problems = append(problems, more...)

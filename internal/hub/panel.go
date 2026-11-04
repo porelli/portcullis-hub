@@ -367,7 +367,7 @@ func (h *Hub) PreviewSettings(ctx context.Context, id string, u SettingsUpdate) 
 	}
 	h.mu.RLock()
 	native := h.st.SignIn[id] == state.SignInNative
-	folders := h.folders
+	folders := h.folderSourceLocked()
 	u = withPlaceholders(t, h.st.Settings[id], u)
 	h.mu.RUnlock()
 	if u.SignIn != nil {

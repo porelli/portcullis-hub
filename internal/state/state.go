@@ -6,15 +6,21 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"math"
 	"os"
+	"path"
+	"slices"
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/policy"
+	"github.com/portcullis/hub/internal/settings"
+	"github.com/portcullis/hub/internal/templates"
 )
 
 // Source is a template repository.
@@ -138,6 +144,11 @@ type AppState struct {
 	// with their provider and status — NEVER credentials. It keeps feeding
 	// extra_domains and the portal while the domains service is down.
 	Domains []KnownDomain `json:"domains,omitempty" yaml:"domains,omitempty"`
+	// Folders are the shared folders by id (contract §14.1); FolderGIDs
+	// every gid ever allocated from FolderGIDMin–FolderGIDMax, ascending:
+	// a deleted folder's gid stays here, so it is never reused.
+	Folders    map[string]Folder `json:"folders,omitempty" yaml:"folders,omitempty"`
+	FolderGIDs []int             `json:"folder_gids,omitempty" yaml:"folder_gids,omitempty"`
 
 	// LegacyPassword lists, after Load, the policies that named the removed
 	// "password" factor and were normalised ("" = the global default). Not
@@ -331,6 +342,120 @@ func cloneValue(v any) any {
 	return v
 }
 
+// The allocated folder gid range (contract §14.1; templates.FolderGIDMin /
+// FolderGIDMax refuse it in templates).
+const (
+	FolderGIDMin = templates.FolderGIDMin
+	FolderGIDMax = templates.FolderGIDMax
+)
+
+// Folder is a shared folder (contract §14.1). Path is the cleaned host
+// path; Dev, Ino and MountRoot are the folder root's device, inode and
+// exact /proc/self/mountinfo root as the fixer reported them at create or
+// at the last path change (R41, R43): every later run on the folder must
+// find exactly them.
+type Folder struct {
+	Name        string    `json:"name" yaml:"name"`
+	Path        string    `json:"path" yaml:"path"`
+	Description string    `json:"description,omitempty" yaml:"description,omitempty"`
+	GID         int       `json:"gid" yaml:"gid"`
+	Adopted     bool      `json:"adopted,omitempty" yaml:"adopted,omitempty"`
+	CreatedAt   time.Time `json:"created_at" yaml:"created_at"`
+	Dev         uint64    `json:"dev" yaml:"dev"`
+	Ino         uint64    `json:"ino" yaml:"ino"`
+	MountRoot   string    `json:"mount_root" yaml:"mount_root"`
+	// WriteConfirmed: "<instance>/<key>" → an admin-confirmed write for a
+	// template without a folder block.
+	WriteConfirmed map[string]bool `json:"write_confirmed,omitempty" yaml:"write_confirmed,omitempty"`
+	LastApply      *FolderApply    `json:"last_apply,omitempty" yaml:"last_apply,omitempty"`
+}
+
+// FolderApply is a folder's last apply (cleared by an undo).
+type FolderApply struct {
+	At       time.Time `json:"at" yaml:"at"`
+	Files    string    `json:"files" yaml:"files"` // rw | r
+	OwnerUID *int      `json:"owner_uid,omitempty" yaml:"owner_uid,omitempty"`
+	Snapshot string    `json:"snapshot,omitempty" yaml:"snapshot,omitempty"` // "<folder>/<ts>.ndjson.gz"
+}
+
+// Folder field limits (contract §14.1).
+const (
+	FolderNameMax        = 64
+	FolderDescriptionMax = 500
+)
+
+// ValidAdoptedGID is "" when gid may be adopted for a folder (contract
+// §14.1), else why not: ≥ 1000, not 65534 (nobody), outside the allocated
+// range, not 10001 (the Hub, which reads the data files) or 10002
+// (enroll's secrets), at most 2^31-1.
+func ValidAdoptedGID(gid int) string {
+	switch {
+	case gid < 1000:
+		return "it is a system group (below 1000)"
+	case gid == 65534:
+		return "65534 is the nobody group"
+	case gid >= FolderGIDMin && gid <= FolderGIDMax:
+		return fmt.Sprintf("%d-%d are allocated by the Hub", FolderGIDMin, FolderGIDMax)
+	case gid == 10001:
+		return "10001 is the Hub's own group (it reads the data files)"
+	case gid == 10002:
+		return "10002 is the group of enroll's secrets"
+	case gid > math.MaxInt32:
+		return "it is out of range"
+	}
+	return ""
+}
+
+// checkFolders refuses a corrupt folders / folder_gids entry: the Hub
+// doesn't start on it (P24). It checks the shape only; the Hub checks the
+// path rules against its configuration.
+func (s *AppState) checkFolders() error {
+	for i, g := range s.FolderGIDs {
+		if g < FolderGIDMin || g > FolderGIDMax {
+			return fmt.Errorf("folder_gids: %d is outside %d-%d", g, FolderGIDMin, FolderGIDMax)
+		}
+		if i > 0 && g <= s.FolderGIDs[i-1] {
+			return fmt.Errorf("folder_gids: not strictly ascending at %d", g)
+		}
+	}
+	gids := map[int]string{}
+	ids := make([]string, 0, len(s.Folders))
+	for id := range s.Folders {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		f := s.Folders[id]
+		bad := func(format string, args ...any) error {
+			return fmt.Errorf("folders: %s: %s", id, fmt.Sprintf(format, args...))
+		}
+		switch {
+		case !settings.FolderIDRe.MatchString(id):
+			return fmt.Errorf("folders: %q is not a folder id", id)
+		case f.Name == "" || utf8.RuneCountInString(f.Name) > FolderNameMax || templates.HasControlChars(f.Name):
+			return bad("name")
+		case utf8.RuneCountInString(f.Description) > FolderDescriptionMax || templates.HasControlChars(f.Description):
+			return bad("description")
+		case !path.IsAbs(f.Path) || path.Clean(f.Path) != f.Path || f.Path == "/" || templates.HasControlChars(f.Path) ||
+			strings.ContainsAny(f.Path, ":$"):
+			return bad("path %q", f.Path)
+		case f.Dev == 0 || f.Ino == 0 || !path.IsAbs(f.MountRoot) || templates.HasControlChars(f.MountRoot):
+			return bad("device, inode or mount root missing")
+		case f.Adopted && ValidAdoptedGID(f.GID) != "":
+			return bad("adopted gid %d: %s", f.GID, ValidAdoptedGID(f.GID))
+		case !f.Adopted && !slices.Contains(s.FolderGIDs, f.GID):
+			return bad("gid %d is not in folder_gids", f.GID)
+		case f.LastApply != nil && f.LastApply.Files != "rw" && f.LastApply.Files != "r":
+			return bad("last_apply.files %q", f.LastApply.Files)
+		}
+		if other, dup := gids[f.GID]; dup {
+			return bad("gid %d is also %s's", f.GID, other)
+		}
+		gids[f.GID] = id
+	}
+	return nil
+}
+
 // SignInNative is the SignIn value for "the app's own login only".
 const SignInNative = "native"
 
@@ -425,6 +550,9 @@ func Load(path string) (*AppState, error) {
 	}
 	s := &AppState{}
 	if err := yaml.Unmarshal(data, s); err != nil {
+		return nil, fmt.Errorf("corrupt %s (%v) — fix or move it aside, then restart", path, err)
+	}
+	if err := s.checkFolders(); err != nil {
 		return nil, fmt.Errorf("corrupt %s (%v) — fix or move it aside, then restart", path, err)
 	}
 	s.init()
