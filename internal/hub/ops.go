@@ -13,6 +13,7 @@ import (
 
 	"github.com/portcullis/hub/internal/compose"
 	"github.com/portcullis/hub/internal/fsutil"
+	"github.com/portcullis/hub/internal/settings"
 	"github.com/portcullis/hub/internal/templates"
 )
 
@@ -89,7 +90,7 @@ func (h *Hub) loadOps() {
 			continue
 		}
 		id, ok := strings.CutSuffix(e.Name(), ".json")
-		if !ok || !templates.ValidID(id) {
+		if !ok || !validOpKey(id) {
 			continue
 		}
 		data, err := os.ReadFile(filepath.Join(h.opsDir(), e.Name()))
@@ -114,6 +115,16 @@ func (h *Hub) loadOps() {
 		}
 		h.ops[id] = r
 	}
+}
+
+// validOpKey: an op record key loadOps keeps — an instance id, a shared
+// folder's opKeyFolder ("_folder.<id>") or the doctor's ("_doctor",
+// ruling 20).
+func validOpKey(k string) bool {
+	if fid, ok := strings.CutPrefix(k, "_folder."); ok {
+		return settings.FolderIDRe.MatchString(fid)
+	}
+	return k == opKeyDoctor || templates.ValidID(k)
 }
 
 // LastOp returns an app's last recorded operation (nil: none).
@@ -142,6 +153,10 @@ func (h *Hub) FailedOps() map[string]string {
 	defer h.opsMu.Unlock()
 	out := map[string]string{}
 	for id, r := range h.ops {
+		// Folder and doctor records (_folder.<id>, _doctor) are no app.
+		if strings.HasPrefix(id, "_") {
+			continue
+		}
 		if !r.OK && !r.Running {
 			out[id] = r.Op
 		}

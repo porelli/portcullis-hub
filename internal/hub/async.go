@@ -19,6 +19,15 @@ import (
 // the background, contract §11.7).
 const OpBackup = "backup"
 
+// Shared-folder operations (folderassign.go): their op record key is
+// opKeyFolder(id) ("_folder.<id>", folders.go); the doctor's scans use
+// opKeyDoctor (ruling 20). Instance ids can't start with "_".
+const (
+	OpFolderAssign = "folder_assign"
+	OpFolderUndo   = "folder_undo"
+	opKeyDoctor    = "_doctor"
+)
+
 // AsyncOp is a long instance operation (backup, restore, restore into a
 // new id, guarded delete) the Hub accepted and runs in the background,
 // holding the instance's lock. Its progress and outcome are the
