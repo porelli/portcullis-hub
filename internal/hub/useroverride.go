@@ -7,6 +7,7 @@ import (
 	"os"
 	"path"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -158,6 +159,15 @@ func sortedKeys(m map[string]bool) []string {
 // parsedOverride is what the Hub uses of a valid custom override.
 type parsedOverride struct {
 	ports []portBinding
+	// binds: the host-path bind mounts (absolute sources; templates/<id>
+	// binds and named volumes left out), per service in file order.
+	binds []overrideBind
+}
+
+// overrideBind is one bind mount of the custom override.
+type overrideBind struct {
+	Service, Source, Target string
+	ReadOnly                bool
 }
 
 // parseUserOverride validates a custom override against t's compose file.
@@ -204,11 +214,12 @@ func (h *Hub) parseUserOverride(t *templates.Template, data []byte) (*parsedOver
 				if _, ok := base.Services[name]; !ok {
 					return nil, fmt.Errorf("service %s is not defined by the template (services: %s)", name, strings.Join(templates.Services(t.ReadCompose()), ", "))
 				}
-				ports, err := h.checkOverrideService(t, name, svcs[name], base.Services)
+				ports, binds, err := h.checkOverrideService(t, name, svcs[name], base.Services)
 				if err != nil {
 					return nil, fmt.Errorf("service %s: %w", name, err)
 				}
 				out.ports = append(out.ports, ports...)
+				out.binds = append(out.binds, binds...)
 			}
 		case "volumes":
 			vols, ok := v.(map[string]interface{})
@@ -301,48 +312,50 @@ func onlyKeys(v interface{}, what string, allowed ...string) error {
 }
 
 // checkOverrideService validates one service's attributes and returns the
-// host ports it publishes.
-func (h *Hub) checkOverrideService(t *templates.Template, name string, v interface{}, baseServices map[string]interface{}) ([]portBinding, error) {
+// host ports it publishes and its host-path bind mounts.
+func (h *Hub) checkOverrideService(t *templates.Template, name string, v interface{}, baseServices map[string]interface{}) (ports []portBinding, binds []overrideBind, err error) {
 	if v == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 	svc, ok := v.(map[string]interface{})
 	if !ok {
-		return nil, fmt.Errorf("must be a mapping")
+		return nil, nil, fmt.Errorf("must be a mapping")
 	}
-	var ports []portBinding
 	for _, k := range sortedMapKeys(svc) {
 		val := svc[k]
 		if why, denied := overrideDenied[k]; denied {
-			return nil, fmt.Errorf("%s is not allowed: %s", k, why)
+			return nil, nil, fmt.Errorf("%s is not allowed: %s", k, why)
 		}
 		if !overrideServiceKeys[k] {
-			return nil, fmt.Errorf("%s is not allowed in a custom override", k)
+			return nil, nil, fmt.Errorf("%s is not allowed in a custom override", k)
 		}
 		switch k {
 		case "labels":
 			if err := checkOverrideLabels(val); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		case "volumes":
 			list, ok := val.([]interface{})
 			if !ok {
-				return nil, fmt.Errorf("volumes must be a list")
+				return nil, nil, fmt.Errorf("volumes must be a list")
 			}
 			for _, item := range list {
 				if err := h.checkOverrideVolume(templateDir(t), item); err != nil {
-					return nil, err
+					return nil, nil, err
+				}
+				if b, ok := overrideBindOf(name, item); ok {
+					binds = append(binds, b)
 				}
 			}
 		case "ports":
 			list, ok := val.([]interface{})
 			if !ok {
-				return nil, fmt.Errorf("ports must be a list")
+				return nil, nil, fmt.Errorf("ports must be a list")
 			}
 			for _, item := range list {
 				pb, err := parseOverridePort(t.ID, item)
 				if err != nil {
-					return nil, err
+					return nil, nil, err
 				}
 				if pb != nil {
 					ports = append(ports, *pb)
@@ -358,16 +371,44 @@ func (h *Hub) checkOverrideService(t *templates.Template, name string, v interfa
 			case map[string]interface{}:
 				deps = sortedMapKeys(d)
 			default:
-				return nil, fmt.Errorf("depends_on must be a list or a mapping")
+				return nil, nil, fmt.Errorf("depends_on must be a list or a mapping")
 			}
 			for _, d := range deps {
 				if _, ok := baseServices[d]; !ok {
-					return nil, fmt.Errorf("depends_on: service %s is not defined by the template", d)
+					return nil, nil, fmt.Errorf("depends_on: service %s is not defined by the template", d)
 				}
 			}
 		}
 	}
-	return ports, nil
+	return ports, binds, nil
+}
+
+// overrideBindOf is a checked volumes entry of service svc as a host-path
+// bind mount (ok false: a named or anonymous volume, tmpfs, or a
+// ./templates/<id> bind).
+func overrideBindOf(svc string, item interface{}) (overrideBind, bool) {
+	switch v := item.(type) {
+	case string:
+		parts := strings.Split(v, ":")
+		if len(parts) < 2 || !strings.HasPrefix(parts[0], "/") {
+			return overrideBind{}, false
+		}
+		b := overrideBind{Service: svc, Source: path.Clean(parts[0]), Target: parts[1]}
+		if len(parts) > 2 {
+			b.ReadOnly = slices.Contains(strings.Split(parts[2], ","), "ro")
+		}
+		return b, true
+	case map[string]interface{}:
+		typ, _ := v["type"].(string)
+		src, _ := v["source"].(string)
+		if typ != "bind" || !strings.HasPrefix(src, "/") {
+			return overrideBind{}, false
+		}
+		target, _ := v["target"].(string)
+		ro, _ := v["read_only"].(bool)
+		return overrideBind{Service: svc, Source: path.Clean(src), Target: target, ReadOnly: ro}, true
+	}
+	return overrideBind{}, false
 }
 
 func checkOverrideLabels(v interface{}) error {
@@ -599,15 +640,24 @@ func checkPortSpec(entry, p string) error {
 // publishes (none if it is absent or invalid — an invalid one never
 // reaches compose). Caller must hold mu.
 func (h *Hub) userPortsLocked(t *templates.Template) []portBinding {
+	if po := h.parsedUserOverride(t); po != nil {
+		return po.ports
+	}
+	return nil
+}
+
+// parsedUserOverride is t's stored custom override, parsed (nil: absent
+// or invalid).
+func (h *Hub) parsedUserOverride(t *templates.Template) *parsedOverride {
 	data, err := os.ReadFile(h.userOverridePath(t.ID))
 	if err != nil {
 		return nil
 	}
 	po, err := h.parseUserOverride(t, data)
-	if err != nil || po == nil {
+	if err != nil {
 		return nil
 	}
-	return po.ports
+	return po
 }
 
 // checkUserOverride re-validates the stored custom override against the

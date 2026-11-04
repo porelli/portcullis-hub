@@ -9,6 +9,7 @@ import (
 
 	"github.com/compose-spec/compose-go/v2/dotenv"
 	"github.com/portcullis/hub/internal/settings"
+	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
 )
 
@@ -163,9 +164,13 @@ func TestEffectEnvAndDisabled(t *testing.T) {
 func TestFolderHostPathChecked(t *testing.T) {
 	f, _ := immichFixture(t)
 	f.h.SetFolderSource(fakeFolders{"bad": "/tank/a:b", "rel": "tank", "root": "/"})
+	f.h.mu.Lock()
+	f.h.st.Folders = map[string]state.Folder{"bad": {GID: 60001}, "rel": {GID: 60002}, "root": {GID: 60003}}
+	f.h.mu.Unlock()
 	for _, id := range []string{"bad", "rel", "root"} {
-		if err := f.h.save("immich", SettingsUpdate{Values: vals("library", "folder:"+id)}); statusOf(err) != 400 {
-			t.Errorf("folder %s = %v", id, err)
+		setStored(f, "immich", "library", "folder:"+id)
+		if _, err := renderOverride(t, f, "immich"); err == nil {
+			t.Errorf("folder %s rendered", id)
 		}
 	}
 }

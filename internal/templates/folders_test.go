@@ -420,3 +420,35 @@ func TestBinaryTagRefused(t *testing.T) {
 		t.Errorf("!!str user = %v, %v", u, err)
 	}
 }
+
+// GIDRefs: every option a gid reference names (ruling 30), never a uid
+// source.
+func TestGIDRefs(t *testing.T) {
+	gid := 1001
+	m := &Manifest{Settings: &SettingsSpec{Options: []Option{
+		{Key: "puid", Type: TypeInt, Delivery: []Delivery{{Env: "PUID"}}},
+		{Key: "pgid", Type: TypeInt, Delivery: []Delivery{{Env: "PGID"}}},
+		{Key: "extra", Type: TypeInt, Delivery: []Delivery{{Env: "EXTRA_GID"}}},
+		{Key: "owner", Type: TypeString},
+		{Key: "media", Type: TypePath, Folder: &FolderSpec{Access: FolderRead, RunsAs: &RunsAs{UIDEnv: "PUID", GIDEnv: "PGID"}}},
+		{Key: "data", Type: TypePath, WritesAs: &Owner{UID: OwnerRef{Key: "puid"}, GID: OwnerRef{Key: "owner"}}},
+		{Key: "logs", Type: TypePath, WritesAs: &Owner{UID: OwnerRef{Num: &gid}, GID: OwnerRef{Num: &gid}}},
+	}}}
+	compose := []byte("services:\n  a:\n    user: \"${PUID:-1000}:${PGID:-1000}\"\n  b:\n    group_add: [\"${EXTRA_GID}\", \"100\"]\n")
+	got, err := GIDRefs(m, compose)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"pgid": "folder.runs_as.gid_env of media", "owner": "writes_as.gid of data", "extra": "group_add of service b"}
+	if len(got) != len(want) {
+		t.Fatalf("refs = %v", got)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("refs[%s] = %q, want %q", k, got[k], v)
+		}
+	}
+	if _, err := GIDRefs(m, []byte("services:\n  a: [1]\n")); err == nil {
+		t.Error("bad compose accepted")
+	}
+}

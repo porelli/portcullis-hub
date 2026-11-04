@@ -194,6 +194,10 @@ type Hub struct {
 	// folders resolves shared-folder path values (project 2; SetFolderSource;
 	// nil = not available: folder:… values are refused). Guarded by mu.
 	folders FolderSource
+	// folderChanged: per instance, the folder value whose subpath changed
+	// on disk around its last up (folderrender.go, R44; the doctor's
+	// folder_changed). Guarded by mu.
+	folderChanged map[string][]FolderChange
 	// folderLocks: per shared folder id, the *sync.Mutex its operations
 	// try-lock (folders.go folderLock).
 	folderLocks sync.Map

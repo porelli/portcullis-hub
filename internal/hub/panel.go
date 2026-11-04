@@ -368,14 +368,24 @@ func (h *Hub) PreviewSettings(ctx context.Context, id string, u SettingsUpdate) 
 	h.mu.RLock()
 	native := h.st.SignIn[id] == state.SignInNative
 	folders := h.folderSourceLocked()
+	defs := maps.Clone(h.st.Folders)
+	stored := h.st.Settings[id].Clone()
 	u = withPlaceholders(t, h.st.Settings[id], u)
 	h.mu.RUnlock()
 	if u.SignIn != nil {
 		native = *u.SignIn == SignInNative
 	}
+	// The save's folder refusals (ruling 18): the preview accepts only
+	// what the save would.
+	if err := folderSaveCheck(t, stored, defs, u); err != nil {
+		return nil, err
+	}
 	parsed, problems := configCheck(t, h.kinds, folders, u, native)
 	if len(problems) > 0 {
 		return nil, problems[0]
+	}
+	if err := gidRangeSaveCheck(t, parsed); err != nil {
+		return nil, err
 	}
 	if err := privilegedDefaults(t, parsed); err != nil {
 		return nil, err

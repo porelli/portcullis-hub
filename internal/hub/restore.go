@@ -260,6 +260,9 @@ func (h *Hub) restoreInstance(id, archive, actor string, ready func()) (res *Res
 	if sb.m.Template != view.TemplateID {
 		return res, statusErr(409, "archive %s is a backup of template %s, instance %s runs %s", archive, sb.m.Template, id, view.TemplateID)
 	}
+	// Values naming a shared folder that is gone are cleared (§11.6,
+	// §13.15: restores never refuse folder values).
+	res.Warnings = append(res.Warnings, dropMissingFolderRefs(&sb.cfg, h.folderDefs())...)
 	if err := h.configProblem(view, &sb.cfg, archive); err != nil {
 		return res, err
 	}
@@ -793,10 +796,16 @@ func (h *Hub) restoreInstanceAs(archive, newID, actor string, hosts map[string]s
 	if len(sb.volumes) > 0 && h.engine == nil {
 		return res, statusErr(503, "Docker is not available: cannot restore volumes")
 	}
+	defs := h.folderDefs()
+	res.Warnings = append(res.Warnings, dropMissingFolderRefs(&sb.cfg, defs)...)
 	if err := h.configProblem(&tmpl, &sb.cfg, archive); err != nil {
 		return res, err
 	}
 	res.Warnings = append(res.Warnings, h.checkArchivedRows(context.Background(), &tmpl, sb.cfg.Settings, true)...)
+	// Kept folder values (spec call 17, S12): the new instance uses the
+	// folder without an assignment preview, read-only unless its template
+	// declares write (write confirmations are never copied).
+	res.Warnings = append(res.Warnings, restoredFolderWarnings(&tmpl, newID, &sb.cfg, defs)...)
 	h.mu.RLock()
 	groupsAPI := h.groups
 	h.mu.RUnlock()
@@ -808,7 +817,7 @@ func (h *Hub) restoreInstanceAs(archive, newID, actor string, hosts map[string]s
 	// Host paths are shared, not copied: say so.
 	if sb.cfg.Settings != nil {
 		for _, st := range tmpl.Manifest.Options() {
-			if v, ok := sb.cfg.Settings.Values[st.Key]; ok && st.Type == templates.TypePath && v != nil {
+			if v, ok := sb.cfg.Settings.Values[st.Key]; ok && st.Type == templates.TypePath && v != nil && !isFolderValue(v) {
 				res.Warnings = append(res.Warnings, fmt.Sprintf("setting %s mounts host path %v, as instance %s did: the two instances share that directory unless you change it", st.Key, v, sb.m.Instance))
 			}
 		}

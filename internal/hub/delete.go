@@ -297,6 +297,9 @@ func (h *Hub) deleteSteps(id, actor string, res *DeleteResult) error {
 	delete(h.st.Instances, id)
 	h.applyConfigLocked(id, instanceConfig{})
 	delete(h.st.Published, id)
+	// Its folder uses went with its values; its write confirmations go
+	// too (contract §14.1).
+	dropWriteConfirmed(h.st.Folders, id)
 	h.rebuildLocked()
 	h.refreshPublishedLocked()
 	saveErr := h.st.Save(h.statePath())

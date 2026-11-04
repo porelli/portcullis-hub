@@ -178,34 +178,21 @@ func decodeRaw(raw json.RawMessage) (any, error) {
 	return v, nil
 }
 
-// folderPrefix marks a shared-folder path value (project 2).
-const folderPrefix = "folder:"
-
-// folderRef splits "folder:<id>[/<subpath>]".
-func folderRef(v string) (id, sub string, err error) {
-	rest := strings.TrimPrefix(v, folderPrefix)
-	id, sub, _ = strings.Cut(rest, "/")
-	if id == "" || templates.HasControlChars(rest) {
-		return "", "", fmt.Errorf("%q is not a shared folder (folder:<id>[/<subpath>])", v)
-	}
-	if sub != "" {
-		c := path.Clean("/" + sub)
-		if c != "/"+sub || strings.Contains(sub, "..") {
-			return "", "", fmt.Errorf("%q: the subpath must be clean and relative", v)
-		}
-	}
-	return id, sub, nil
-}
+// folderPrefix marks a shared-folder path value (contract §13.15).
+const folderPrefix = settings.FolderRefPrefix
 
 // folderHostPath resolves a folder:… value through folders (nil: shared
 // folders aren't available).
 func folderHostPath(folders FolderSource, v string) (string, error) {
 	if folders == nil {
-		return "", fmt.Errorf("%q names a shared folder: shared folders arrive in project 2", v)
+		return "", fmt.Errorf("%q names a shared folder, but shared folders aren't available", v)
 	}
-	id, sub, err := folderRef(v)
+	id, sub, ok, err := settings.ParseFolderRef(v)
 	if err != nil {
 		return "", err
+	}
+	if !ok {
+		return "", fmt.Errorf("%q is not a shared folder (folder:<id>[/<subpath>])", v)
 	}
 	p, err := folders.FolderHostPath(id, sub)
 	if err != nil {
@@ -793,7 +780,10 @@ func (h *Hub) SaveSettings(id string, u SettingsUpdate, actor string) (_ *SaveRe
 	h.mu.RLock()
 	pendErr := h.pendingLocked(id)
 	native := h.st.SignIn[id] == state.SignInNative
+	// Resolved outside mu: copies (the folders' paths and definitions).
 	folders := h.folderSourceLocked()
+	defs := maps.Clone(h.st.Folders)
+	cur := h.st.Settings[id].Clone()
 	u = withPlaceholders(t, h.st.Settings[id], u)
 	h.mu.RUnlock()
 	if pendErr != nil {
@@ -802,9 +792,16 @@ func (h *Hub) SaveSettings(id string, u SettingsUpdate, actor string) (_ *SaveRe
 	if u.SignIn != nil {
 		native = *u.SignIn == SignInNative
 	}
+	// Folder values change only through an assignment (§13.15).
+	if err := folderSaveCheck(t, cur, defs, u); err != nil {
+		return nil, err
+	}
 	parsed, problems := configCheck(t, h.kinds, folders, u, native)
 	if len(problems) > 0 {
 		return nil, problems[0]
+	}
+	if err := gidRangeSaveCheck(t, parsed); err != nil {
+		return nil, err
 	}
 	// Rows and records are bound to the directory's group ids (and a
 	// privileged option's groups checked) before mu: network calls.
@@ -890,8 +887,13 @@ func (h *Hub) saveSettings(t *templates.Template, u SettingsUpdate, parsed *pars
 	// (network: before mu).
 	members := h.groupSnapshot(id)
 	h.mu.Lock()
-	// A restore or delete may have started since SaveSettings checked.
+	// A restore or delete may have started since SaveSettings checked,
+	// or a folder assignment committed.
 	if err := h.pendingLocked(id); err != nil {
+		h.mu.Unlock()
+		return res, false, err
+	}
+	if err := folderSaveCheck(t, h.st.Settings[id], h.st.Folders, u); err != nil {
 		h.mu.Unlock()
 		return res, false, err
 	}

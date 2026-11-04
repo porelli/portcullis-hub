@@ -240,7 +240,6 @@ func TestSaveValidatesTypes(t *testing.T) {
 		"backslash":      {SettingsUpdate{Values: vals("version", `x\`)}, []string{"version", "IMMICH_VERSION", "backslash"}},
 		"backslash item": {SettingsUpdate{Values: vals("disks", []string{`C:\d`})}, []string{"disks", "DISK_1"}},
 		"too many items": {SettingsUpdate{Values: vals("disks", []string{"a", "b", "c", "d"})}, []string{"disks"}},
-		"folder":         {SettingsUpdate{Values: vals("library", "folder:photos")}, []string{"library", "shared folder"}},
 		"secret change":  {SettingsUpdate{Secrets: map[string]SecretChange{"motd": {Generate: true}}}, []string{"motd"}},
 		"person default": {SettingsUpdate{Person: map[string]PersonChange{"quota": {Default: json.RawMessage(`"lots"`)}}}, []string{"quota", "default"}},
 		"duplicate rows": {SettingsUpdate{Person: map[string]PersonChange{"quota": {Default: json.RawMessage(`"1GiB"`), Rows: []GroupValueInput{{Group: "staff", Value: json.RawMessage(`"2GiB"`)}, {Group: "staff", Value: json.RawMessage(`"3GiB"`)}}}}}, []string{"quota", "staff", "more than one row"}},
@@ -334,22 +333,26 @@ func TestPathMountReadOnly(t *testing.T) {
 	if !strings.Contains(ov, `- "/srv/$$photos:/library:ro"`) || !strings.Contains(ov, `- "/srv/up:/uploads"`) {
 		t.Errorf("override:\n%s", ov)
 	}
-	// folder:… without a FolderSource: refused.
-	if err := f.h.save("immich", SettingsUpdate{Values: vals("library", "folder:photos/2024")}); statusOf(err) != 400 {
-		t.Errorf("folder without source = %v", err)
+	// Folder values come only from an assignment (TestSaveSettingsRefusesFolderRefs);
+	// rendered, they resolve through the FolderSource and state.
+	f.h.mu.Lock()
+	f.h.st.Folders = map[string]state.Folder{"photos": {Name: "Photos", Path: "/tank/photos", GID: 60001}}
+	f.h.mu.Unlock()
+	setStored(f, "immich", "library", "folder:photos/2024")
+	f.h.SetFolderSource(nil)
+	if _, err := renderOverride(t, f, "immich"); err == nil {
+		t.Error("folder without source rendered")
 	}
 	f.h.SetFolderSource(fakeFolders{"photos": "/tank/photos"})
-	if err := f.h.save("immich", SettingsUpdate{Values: vals("library", "folder:nope")}); statusOf(err) != 400 {
-		t.Errorf("unknown folder = %v", err)
+	for _, v := range []string{"folder:nope", "folder:photos/../x"} {
+		setStored(f, "immich", "library", v)
+		if _, err := renderOverride(t, f, "immich"); err == nil {
+			t.Errorf("%s rendered", v)
+		}
 	}
-	if err := f.h.save("immich", SettingsUpdate{Values: vals("library", "folder:photos/../x")}); statusOf(err) != 400 {
-		t.Errorf("escaping subpath = %v", err)
-	}
-	if err := f.h.save("immich", SettingsUpdate{Values: vals("library", "folder:photos/2024")}); err != nil {
-		t.Fatal(err)
-	}
-	ov = readFile(t, f.h.overridePath("immich"))
-	if !strings.Contains(ov, `- "/tank/photos/2024:/library:ro"`) {
+	setStored(f, "immich", "library", "folder:photos/2024")
+	ov = mustRender(t, f, "immich")
+	if !strings.Contains(ov, "        source: \"/tank/photos/2024\"\n        target: \"/library\"\n        read_only: true\n") {
 		t.Errorf("override with a folder:\n%s", ov)
 	}
 }
@@ -366,8 +369,8 @@ func TestPathUsages(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := f.h.PathUsages()
-	want := []PathUsage{{Instance: "immich", Key: "library", Type: "path", HostPath: "/srv/photos", Service: "server",
-		Mount: "/library", Mode: "ro", Needs: "read", UID: 1234, GID: 1001, OwnerKnown: true}}
+	want := []PathUsage{{Instance: "immich", Key: "library", Label: "Library", Type: "path", HostPath: "/srv/photos", Service: "server",
+		Mount: "/library", Mode: "ro", Needs: "read", Access: "read", ReadOnly: true, UID: 1234, GID: 1001, OwnerKnown: true, Source: "setting"}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("usages = %+v", got)
 	}

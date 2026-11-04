@@ -42,7 +42,7 @@ func (h *Hub) generateOverrideLocked(t *templates.Template, s state.InstanceSett
 // kind's Mounter (re-checked: stored values are never trusted blindly).
 // Caller must hold mu.
 func (h *Hub) mountSourceLocked(o *templates.Option, v any) (string, error) {
-	if str, ok := v.(string); ok && strings.HasPrefix(str, folderPrefix) {
+	if str, ok := v.(string); ok && strings.HasPrefix(str, settings.FolderRefPrefix) {
 		return folderHostPath(h.folders, str)
 	}
 	k, err := h.kinds.Kind(o.Type)
@@ -71,15 +71,27 @@ func composeLiteral(s string) string { return strings.ReplaceAll(s, "$", "$$") }
 // needed). Caller must hold mu.
 func (h *Hub) renderOverrideLocked(t *templates.Template, s state.InstanceSettings) (string, error) {
 	values := s.Ports
+	// A gid reference holding a folder group's gid that no folder
+	// assignment wrote fails closed (preflight ruling 30).
+	if err := h.gidRangeRenderErr(t, s); err != nil {
+		return "", err
+	}
 	serviceMounts := make(map[string][]string)
-	opts := t.Manifest.Options()
-	for i := range opts {
-		o := &opts[i]
-		if o.Type != templates.TypePath || o.EffectiveScope() != templates.ScopeInstance || o.Target == nil || o.Target.Mount == "" {
-			continue
-		}
+	var folderMounts []*folderMount
+	for _, o := range mountOptions(t) {
 		v, ok := h.effectiveValue(t, o, s)
 		if !ok {
+			continue
+		}
+		// A shared folder (contract §13.15): long syntax, never created
+		// by Docker, read-only unless the use writes, plus its group.
+		fm, err := h.folderMountLocked(t, o, v)
+		if err != nil {
+			return "", fmt.Errorf("setting %s: %w", o.Key, err)
+		}
+		if fm != nil {
+			folderMounts = append(folderMounts, fm)
+			serviceMounts[o.Target.Service] = append(serviceMounts[o.Target.Service], folderBindEntry(fm))
 			continue
 		}
 		host, err := h.mountSourceLocked(o, v)
@@ -95,6 +107,7 @@ func (h *Hub) renderOverrideLocked(t *templates.Template, s state.InstanceSettin
 		mountJSON, _ := json.Marshal(vol)
 		serviceMounts[o.Target.Service] = append(serviceMounts[o.Target.Service], string(mountJSON))
 	}
+	serviceGroups := folderGroupAdd(folderMounts)
 
 	// Settings data files (contract §13.7): each file's directory,
 	// read-only at its mount (deliver_files.go).
@@ -163,6 +176,9 @@ func (h *Hub) renderOverrideLocked(t *templates.Template, s state.InstanceSettin
 	for svc := range servicePorts {
 		services[svc] = true
 	}
+	for svc := range serviceGroups {
+		services[svc] = true
+	}
 	for svc := range serviceRouters {
 		services[svc] = true
 	}
@@ -190,6 +206,13 @@ func (h *Hub) renderOverrideLocked(t *templates.Template, s state.InstanceSettin
 			b.WriteString("    volumes:\n")
 			for _, m := range mounts {
 				fmt.Fprintf(&b, "      - %s\n", m)
+			}
+		}
+		if gids := serviceGroups[svc]; len(gids) > 0 {
+			// Strings: compose merges them with the template's own list.
+			b.WriteString("    group_add:\n")
+			for _, g := range gids {
+				fmt.Fprintf(&b, "      - \"%d\"\n", g)
 			}
 		}
 		if ports := servicePorts[svc]; len(ports) > 0 {

@@ -104,6 +104,10 @@ func (h *Hub) prepareUp(t *templates.Template) (*templates.Template, error) {
 	}
 	h.mu.Unlock()
 	if err != nil {
+		var se *StatusError
+		if errors.As(err, &se) {
+			return nil, err // a refusal (a folder-range gid: 409)
+		}
 		return nil, statusErr(500, "override generation failed: %v", err)
 	}
 	if err := h.checkUserOverride(live); err != nil {
@@ -125,19 +129,57 @@ func (h *Hub) prepareUp(t *templates.Template) (*templates.Template, error) {
 // startUp is composeUp after prepareUp: create, the image-label check,
 // up, the start hooks and the background claims.
 func (h *Hub) startUp(live *templates.Template) error {
+	ctx := context.Background()
+	// The shared-folder values with a subpath, probed around the start
+	// (ruling 24, R44; read under mu, probed outside it).
+	h.mu.RLock()
+	probes, err := h.folderProbesLocked(live)
+	h.mu.RUnlock()
+	if err != nil {
+		return err
+	}
 	// Create without starting, inspect the labels (image LABELs merge in),
 	// only then start: an image-label router is never live.
-	if err := h.compose.Create(context.Background(), h.project(live)); err != nil {
+	if err := h.compose.Create(ctx, h.project(live)); err != nil {
 		return err
 	}
 	if p := h.imageLabelProblem(live); p != "" {
 		return h.refuseImageLabels(live, p, "was not started")
 	}
-	if err := h.compose.Up(context.Background(), h.project(live)); err != nil {
+	// Right before the up: Docker resolves bind sources on the host, so a
+	// subpath a writer app swapped for a symlink would mount its target.
+	if len(probes) > 0 {
+		if p, detail, err := h.probeFolders(ctx, probes, false); err != nil {
+			log.Printf("shared folders: %s: not started: %s", live.ID, detail)
+			if p != nil && isFolderChanged(err) {
+				h.recordFolderChange(live.ID, p, detail)
+			}
+			if derr := h.compose.Down(ctx, h.project(live)); derr != nil {
+				log.Printf("shared folders: %s: removing the created containers: %v", live.ID, derr)
+			}
+			return err
+		}
+	}
+	if err := h.compose.Up(ctx, h.project(live)); err != nil {
 		return err
 	}
 	if err := h.checkImageLabels(live); err != nil {
 		return err
+	}
+	// Right after the start: the same folders, the same subpaths. A
+	// change takes the project down at once (volumes kept).
+	if len(probes) > 0 {
+		if p, detail, err := h.probeFolders(ctx, probes, true); err != nil {
+			log.Printf("shared folders: WARNING: %s: %s after the start: taken down", live.ID, detail)
+			if p != nil && isFolderChanged(err) {
+				h.recordFolderChange(live.ID, p, detail)
+			}
+			if derr := h.compose.Down(ctx, h.project(live)); derr != nil {
+				log.Printf("shared folders: %s: taking the project down failed: %v", live.ID, derr)
+			}
+			return err
+		}
+		h.recordFolderChange(live.ID, nil, "")
 	}
 	// The start hooks (when: start) after the up, under the lifecycle
 	// lock still held: reported and op-recorded, never a rollback.
@@ -322,6 +364,10 @@ func (h *Hub) enableInner(id string, restoring bool) (rolledBack bool, err error
 	}
 	if err := h.generateOverrideLocked(&tmpl, h.st.Settings[tmpl.ID]); err != nil {
 		h.mu.Unlock()
+		var se *StatusError
+		if errors.As(err, &se) {
+			return false, err // a refusal (a folder-range gid: 409)
+		}
 		return false, statusErr(500, "override write failed: %v", err)
 	}
 	acr := policy.ACR(h.effectivePolicyLocked(&tmpl))
@@ -561,6 +607,23 @@ func (h *Hub) restartLocked(t *templates.Template) error {
 	live, err := h.prepareUp(t)
 	if err != nil {
 		return err
+	}
+	// The shared-folder subpaths too (H15): a missing or changed one is
+	// refused while the app still runs on the mounts it started with.
+	h.mu.RLock()
+	probes, err := h.folderProbesLocked(live)
+	h.mu.RUnlock()
+	if err != nil {
+		return err
+	}
+	if len(probes) > 0 {
+		if p, detail, err := h.probeFolders(context.Background(), probes, false); err != nil {
+			log.Printf("shared folders: %s: not restarted (still running): %s", live.ID, detail)
+			if p != nil && isFolderChanged(err) {
+				h.recordFolderChange(live.ID, p, detail)
+			}
+			return err
+		}
 	}
 	downErr := h.composeDown(t)
 	if err := h.startUp(live); err != nil {

@@ -779,3 +779,65 @@ func (o *Option) EffectiveMode() string {
 	}
 	return "rw"
 }
+
+// GIDRefs lists the options whose value becomes a gid (preflight ruling
+// 30): option key → the reference ("folder.runs_as.gid_env of movies",
+// "writes_as.gid of library", "compose user: gid of service arr",
+// "group_add of service web"). These are runs_as.gid_env, writes_as gid
+// keys, and the ${X} / $X of every service's compose user: gid and
+// group_add entries; never a uid source. The Hub refuses a value in
+// 60000–60999 for them unless a folder assignment wrote it.
+func GIDRefs(m *Manifest, compose []byte) (map[string]string, error) {
+	out := map[string]string{}
+	if m.Settings == nil {
+		return out, nil
+	}
+	v := &specCheck{m: m}
+	add := func(ro *Option, ref string) {
+		if ro != nil {
+			if _, ok := out[ro.Key]; !ok {
+				out[ro.Key] = ref
+			}
+		}
+	}
+	for i := range m.Settings.Options {
+		o := &m.Settings.Options[i]
+		if o.Folder != nil && o.Folder.RunsAs != nil && o.Folder.RunsAs.GIDEnv != "" {
+			add(v.anyEnvOption(o.Folder.RunsAs.GIDEnv), "folder.runs_as.gid_env of "+o.Key)
+		}
+		if o.WritesAs != nil && o.WritesAs.GID.Key != "" {
+			for j := range m.Settings.Options {
+				if ro := &m.Settings.Options[j]; ro.Key == o.WritesAs.GID.Key {
+					add(ro, "writes_as.gid of "+o.Key)
+				}
+			}
+		}
+	}
+	users, groupAdd, err := composeIDs(compose)
+	if err != nil {
+		return nil, err
+	}
+	ref := func(val string) *Option {
+		if p := parseUserPart(val); p.env != "" {
+			return v.anyEnvOption(p.env)
+		}
+		return nil
+	}
+	svcs := make([]string, 0, len(users)+len(groupAdd))
+	for s := range users {
+		svcs = append(svcs, s)
+	}
+	for s := range groupAdd {
+		svcs = append(svcs, s)
+	}
+	sort.Strings(svcs)
+	for _, s := range svcs {
+		if _, g, ok := splitUser(users[s]); ok {
+			add(ref(g), "compose user: gid of service "+s)
+		}
+		for _, e := range groupAdd[s] {
+			add(ref(e), "group_add of service "+s)
+		}
+	}
+	return out, nil
+}

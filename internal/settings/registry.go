@@ -9,6 +9,7 @@ package settings
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 
 	"github.com/portcullis/hub/internal/templates"
@@ -268,25 +269,7 @@ func ResolveOwner(o *templates.Option, instance map[string]Value) (uid, gid int,
 			}
 			return *ref.Num, nil
 		}
-		v, ok := instance[ref.Key]
-		if !ok || v == nil {
-			return 0, fmt.Errorf("writes_as.%s: %s has no value", what, ref.Key)
-		}
-		var n int64
-		switch x := v.(type) {
-		case string:
-			if n, err = parseDecimal(x); err != nil {
-				return 0, fmt.Errorf("writes_as.%s: %s = %q is not a number", what, ref.Key, x)
-			}
-		default:
-			if n, err = toInt(v); err != nil {
-				return 0, fmt.Errorf("writes_as.%s: %s is not a number", what, ref.Key)
-			}
-		}
-		if n < 0 || n > maxID {
-			return 0, fmt.Errorf("writes_as.%s: %s = %d is not a valid id", what, ref.Key, n)
-		}
-		return int(n), nil
+		return idValue("writes_as."+what, ref.Key, instance[ref.Key])
 	}
 	if uid, err = one("uid", o.WritesAs.UID); err != nil {
 		return 0, 0, err
@@ -295,4 +278,77 @@ func ResolveOwner(o *templates.Option, instance map[string]Value) (uid, gid int,
 		return 0, 0, err
 	}
 	return uid, gid, nil
+}
+
+// idValue reads option key's value v as a uid / gid (an int, or a
+// string holding a decimal number). what names the reference.
+func idValue(what, key string, v Value) (int, error) {
+	if v == nil {
+		return 0, fmt.Errorf("%s: %s has no value", what, key)
+	}
+	var n int64
+	var err error
+	switch x := v.(type) {
+	case string:
+		if n, err = parseDecimal(x); err != nil {
+			return 0, fmt.Errorf("%s: %s = %q is not a number", what, key, x)
+		}
+	default:
+		if n, err = toInt(v); err != nil {
+			return 0, fmt.Errorf("%s: %s is not a number", what, key)
+		}
+	}
+	if n < 0 || n > maxID {
+		return 0, fmt.Errorf("%s: %s = %d is not a valid id", what, key, n)
+	}
+	return int(n), nil
+}
+
+// ResolveRunsAs resolves a path option's folder.runs_as (contract
+// §13.15, preflight ruling 22) against the instance's values: numbers as
+// written, uid_env / gid_env through the instance option of opts (the
+// template's options) whose env names include it. uid_from / gid_from
+// (file sharing, project 3) don't resolve: an error.
+func ResolveRunsAs(o *templates.Option, opts []templates.Option, instance map[string]Value) (uid, gid int, err error) {
+	if o.Folder == nil || o.Folder.RunsAs == nil {
+		return 0, 0, fmt.Errorf("setting %s has no folder.runs_as", o.Key)
+	}
+	ra := o.Folder.RunsAs
+	one := func(what string, num *int, env, from string) (int, error) {
+		switch {
+		case from != "":
+			return 0, fmt.Errorf("folder.runs_as.%s_from %s: file sharing (project 3)", what, from)
+		case num != nil:
+			if *num < 0 || *num > maxID {
+				return 0, fmt.Errorf("folder.runs_as.%s = %d is not a valid id (0-%d)", what, *num, maxID)
+			}
+			return *num, nil
+		case env != "":
+			ro := EnvOption(opts, env)
+			if ro == nil {
+				return 0, fmt.Errorf("folder.runs_as.%s_env %s is no instance option's env name", what, env)
+			}
+			return idValue("folder.runs_as."+what+"_env", ro.Key, instance[ro.Key])
+		}
+		return 0, fmt.Errorf("folder.runs_as.%s has no source", what)
+	}
+	if uid, err = one("uid", ra.UID, ra.UIDEnv, ra.UIDFrom); err != nil {
+		return 0, 0, err
+	}
+	if gid, err = one("gid", ra.GID, ra.GIDEnv, ra.GIDFrom); err != nil {
+		return 0, 0, err
+	}
+	return uid, gid, nil
+}
+
+// EnvOption is the instance option of opts whose env names include name
+// (nil: none).
+func EnvOption(opts []templates.Option, name string) *templates.Option {
+	for i := range opts {
+		ro := &opts[i]
+		if ro.EffectiveScope() == templates.ScopeInstance && slices.Contains(ro.EnvNames(), name) {
+			return ro
+		}
+	}
+	return nil
 }

@@ -138,7 +138,8 @@ func (h *Hub) portEnvLocked(t *templates.Template) map[string]string {
 // closed for that delivery's variables only: written empty, logged and
 // reported in the panel's deliveries (unit env:values); the error is
 // only the secrets store being unreadable. Errors and problems never
-// carry a value. Caller must hold mu.
+// carry a value. The shared-folder variables (folderEnvLocked) come
+// last. Caller must hold mu.
 func (h *Hub) optionEnvLocked(t *templates.Template, m *directory.Membership) (map[string]string, error) {
 	s := h.st.Settings[t.ID]
 	out := map[string]string{}
@@ -204,9 +205,32 @@ func (h *Hub) optionEnvLocked(t *templates.Template, m *directory.Membership) (m
 		if !ok {
 			v = nil
 		}
+		if str, isStr := v.(string); isStr && o.Type == templates.TypePath && strings.HasPrefix(str, folderPrefix) {
+			// A folder value's env delivery carries its host path (the
+			// kind never resolves a ref).
+			if host, err := folderHostPath(h.folders, str); err == nil {
+				v = host
+			} else {
+				v = nil
+			}
+		}
 		put(o, nil, func(d *templates.Delivery) (map[string]string, error) {
 			return renderEnvDelivery(o, v, d)
 		})
+	}
+	// A gid reference holding a folder group's gid no assignment wrote
+	// (ruling 30) is written empty: such a gid would reach the app.
+	for _, key := range h.gidRangeProblemsLocked(t, s) {
+		o := optionByKey(t, key)
+		for _, n := range o.EnvNames() {
+			out[n] = ""
+		}
+		problems = append(problems, fmt.Sprintf("setting %s: %s: written empty", key, errGIDReserved))
+	}
+	// Last (ruling 11): the folder variables, and a gid_env join's
+	// variable set to the folder gid over the option's own value.
+	for k, v := range h.folderEnvLocked(t) {
+		out[k] = v
 	}
 	h.setEnvProblems(t.ID, problems)
 	return out, nil
