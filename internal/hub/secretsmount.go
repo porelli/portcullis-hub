@@ -2,9 +2,13 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
+	"path"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -24,6 +28,12 @@ const MinSubpathAPI = "1.45"
 // loadRendered loads p as compose will run it (template, Hub override,
 // custom override merged; interpolated from the Hub's environment and
 // the instance's env file; every profile), with compose's own library.
+// compose-go is what the docker compose CLI is built on: keep its version
+// within the compose-go line the image's docker-cli-compose (alpine,
+// compose ≥ compose.MinVersion) vendors — .github/dependabot.yml groups it
+// on its own so a bump is reviewed against that — so the check reads the
+// project as the up will (TestRealTemplatesInstances loads every real
+// template through it).
 func loadRendered(ctx context.Context, p compose.Project, workDir string) (*types.Project, error) {
 	opts := []cli.ProjectOptionsFn{
 		cli.WithName(p.Name),
@@ -46,6 +56,65 @@ func loadRendered(ctx context.Context, p compose.Project, workDir string) (*type
 	return po.LoadProject(ctx)
 }
 
+// dockerRootMounts refuses (400, dockerRootRule) every bind source and
+// every local volume's driver_opts.device at, above or under the Docker
+// daemon's data root; unreadable = 503. Relative bind sources are the
+// daemon's paths under the project directory.
+func (h *Hub) dockerRootMounts(ctx context.Context, t *templates.Template, proj *types.Project) error {
+	type use struct{ what, p string }
+	var uses []use
+	add := func(what, p string) {
+		if p == "" {
+			return
+		}
+		if !path.IsAbs(p) {
+			p = path.Join(filepath.ToSlash(h.cfg.ProjectHostDir), p)
+		}
+		uses = append(uses, use{what, path.Clean(p)})
+	}
+	svcs := make([]string, 0, len(proj.Services)+len(proj.DisabledServices))
+	all := map[string]types.ServiceConfig{}
+	for n, s := range proj.Services {
+		all[n] = s
+		svcs = append(svcs, n)
+	}
+	for n, s := range proj.DisabledServices {
+		if _, dup := all[n]; !dup {
+			all[n] = s
+			svcs = append(svcs, n)
+		}
+	}
+	sort.Strings(svcs)
+	for _, n := range svcs {
+		for _, m := range all[n].Volumes {
+			if m.Type == types.VolumeTypeBind {
+				add("service "+n+": bind "+m.Source, m.Source)
+			}
+		}
+	}
+	keys := make([]string, 0, len(proj.Volumes))
+	for k := range proj.Volumes {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		v := proj.Volumes[k]
+		if dev := v.DriverOpts["device"]; dev != "" && (v.Driver == "" || v.Driver == "local") {
+			add("volume "+k+": device "+dev, dev)
+		}
+	}
+	for _, u := range uses {
+		if err := h.dockerRootRule(ctx, u.p); err != nil {
+			var se *StatusError
+			if errors.As(err, &se) && se.Status == http.StatusBadRequest {
+				return statusErr(http.StatusBadRequest, "%s was not started: %s: %v", t.ID, u.what, err)
+			}
+			return err
+		}
+	}
+	return nil
+}
+
 // checkSecretsMounts is the pre-up check of contract §6 (F15) on t's
 // rendered project: every top-level volume whose resolved name is the
 // secrets volume, under any key, is mounted only through the key
@@ -58,7 +127,15 @@ func loadRendered(ctx context.Context, p compose.Project, workDir string) (*type
 func (h *Hub) checkSecretsMounts(ctx context.Context, t *templates.Template) error {
 	proj, err := loadRendered(ctx, h.project(t), h.cfg.ProjectDir)
 	if err != nil {
-		return statusErr(http.StatusConflict, "%s was not started: its compose project can't be read to check the secrets volume mounts: %s", t.ID, clip(err.Error(), 300))
+		// The loader's text may quote the env file or the overrides:
+		// logged redacted, then clipped; never answered.
+		log.Printf("instance %s: compose-go can't load the project: %s", t.ID, clip(h.secretRedactor(t.ID)(err.Error()), 600))
+		return statusErr(http.StatusConflict, "%s was not started: the instance's .env or compose files don't parse (see the Hub's log)", t.ID)
+	}
+	// No host path at, above or under Docker's data root (fix round 1):
+	// a bind there reaches every volume, the secrets one included.
+	if err := h.dockerRootMounts(ctx, t, proj); err != nil {
+		return err
 	}
 	vol := h.cfg.SecretsVolume
 	type want struct{ sub string }
@@ -139,6 +216,19 @@ func (h *Hub) checkSecretsMounts(ctx context.Context, t *templates.Template) err
 				return refuse("service %s mounts it writable", n)
 			}
 			mounters[n] = true
+		}
+	}
+	if len(mounters) > 0 {
+		// A shared pid or ipc namespace reaches a mounting service's
+		// files (/proc/<pid>/root) or memory (fix round 1).
+		for _, n := range names {
+			for field, v := range map[string]string{"pid": all[n].Pid, "ipc": all[n].Ipc} {
+				lv := strings.ToLower(strings.TrimSpace(v))
+				src, isSvc := strings.CutPrefix(lv, "service:")
+				if lv == "host" || strings.HasPrefix(lv, "container:") || (isSvc && mounters[src]) {
+					return refuse("service %s shares the %s namespace %s", n, field, v)
+				}
+			}
 		}
 	}
 	for _, n := range names {

@@ -77,11 +77,57 @@ func checkSecretsDir(dir string) error {
 // SecretsUsable is nil when the secrets volume can hold credentials,
 // else a 503 naming why (checked once, in New). The credential routes
 // answer it; person_secret instances refuse to enable or start with it.
+//
+// A failed reconcile (fix round 1) makes it 503 too, until a later
+// reconcile succeeds: this call retries it (under mu), so the next
+// credential route or start after the cause is fixed reconciles first.
 func (h *Hub) SecretsUsable() error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.secretsUsableLocked(true)
+}
+
+// secretsBaseErr is the 503 for an unusable volume (New's check).
+func (h *Hub) secretsBaseErr() error {
 	if h.secretsErr != nil {
 		return statusErr(http.StatusServiceUnavailable, "the Hub's secrets volume is not usable (%v): per-person passwords are unavailable", h.secretsErr)
 	}
 	return nil
+}
+
+// secretsUsableLocked is SecretsUsable under mu (write); retry reconciles
+// again first while the last reconcile failed.
+func (h *Hub) secretsUsableLocked(retry bool) error {
+	if err := h.secretsBaseErr(); err != nil {
+		return err
+	}
+	if h.secretsReconcileErr != nil && retry {
+		h.retryReconcileLocked()
+	}
+	if h.secretsReconcileErr != nil {
+		return statusErr(http.StatusServiceUnavailable, "the Hub's secrets volume could not be reconciled (%v): per-person passwords are unavailable until it is", h.secretsReconcileErr)
+	}
+	return nil
+}
+
+// retryReconcileLocked runs the reconcile again (after a failed one),
+// advancing the pools on a mismatch as reconcileSecrets does. Caller
+// must hold mu (write).
+func (h *Hub) retryReconcileLocked() {
+	_, mismatch, err := h.reconcileSecretsLocked("retry")
+	if err != nil {
+		log.Printf("secrets: reconcile retry: %v", err)
+		return
+	}
+	if mismatch && !h.poolsAdvanced {
+		before := h.snapshotPoolsLocked()
+		h.advancePoolsLocked(PoolRewindStep)
+		if err := h.commitPoolsLocked(true, before); err != nil {
+			log.Printf("ERROR: secrets: advancing the person-id pools after an epoch mismatch failed: %v", err)
+			return
+		}
+		h.poolsAdvanced = true
+	}
 }
 
 // secretRel is the hash file of (instance, key, user) relative to
@@ -123,7 +169,7 @@ func (h *Hub) secretPath(instance, key, user string) (string, error) {
 // openSecrets opens SecretsDir as an os.Root: every access stays inside
 // it (no "..", no symlink out).
 func (h *Hub) openSecrets() (*os.Root, error) {
-	if err := h.SecretsUsable(); err != nil {
+	if err := h.secretsBaseErr(); err != nil {
 		return nil, err
 	}
 	r, err := os.OpenRoot(h.cfg.SecretsDir)
@@ -237,6 +283,9 @@ func (h *Hub) writeHashLocked(instance, key, user, hash string) error {
 		// Never echoed: it may be a secret in the wrong form.
 		return statusErr(http.StatusInternalServerError, "refusing to write a hash file that isn't an NT hash")
 	}
+	if err := h.secretsUsableLocked(false); err != nil {
+		return err
+	}
 	r, err := h.openSecrets()
 	if err != nil {
 		return err
@@ -321,7 +370,7 @@ func (h *Hub) voidCredentialsLocked(instance, reason string) (int, error) {
 			}
 		}
 	}
-	if err := h.SecretsUsable(); err != nil {
+	if err := h.secretsBaseErr(); err != nil {
 		if active == 0 {
 			return 0, nil // nothing to void; no file can be checked
 		}
@@ -336,10 +385,17 @@ func (h *Hub) voidCredentialsLocked(instance, reason string) (int, error) {
 	if active == 0 && errors.Is(statErr, fs.ErrNotExist) {
 		return 0, nil
 	}
-	if err := r.RemoveAll(instance); err != nil {
-		return 0, statusErr(http.StatusInternalServerError, "removing the hash files of %s failed: %v", instance, err)
-	}
 	n := h.voidActiveLocked(instance, reason, time.Now().UTC())
+	if rmErr := r.RemoveAll(instance); rmErr != nil {
+		// Fail closed: the metadata is voided (saved with the epoch), and
+		// until a reconcile removes the leftover files no person_secret
+		// instance starts (fix round 1).
+		h.secretsReconcileErr = fmt.Errorf("removing the hash files of %s failed: %v", instance, rmErr)
+		log.Printf("ERROR: secrets: %v — per-person password apps won't start until it is fixed", h.secretsReconcileErr)
+		rerr := h.rotateEpochLocked(r)
+		h.auditVoidLocked(instance, n)
+		return n, errors.Join(statusErr(http.StatusInternalServerError, "removing the hash files of %s failed: %v", instance, rmErr), rerr)
+	}
 	err = h.rotateEpochLocked(r)
 	h.auditVoidLocked(instance, n)
 	return n, err
@@ -353,7 +409,7 @@ func (h *Hub) forgetCredentialsLocked(instance string) error {
 		return err
 	}
 	_, hasMeta := h.st.Credentials[instance]
-	if err := h.SecretsUsable(); err != nil {
+	if err := h.secretsBaseErr(); err != nil {
 		if !hasMeta {
 			log.Printf("secrets: %s: the secrets volume is not usable, no hash file of the instance can be left (none recorded)", instance)
 			return nil
@@ -415,6 +471,14 @@ func (h *Hub) reconcileSecrets(why string) (voided int, err error) {
 }
 
 func (h *Hub) reconcileSecretsLocked(why string) (voided int, mismatch bool, err error) {
+	// Any failure fails closed until a reconcile succeeds (fix round 1):
+	// the voids may be in memory only and old hash files still there.
+	defer func() {
+		h.secretsReconcileErr = err
+		if err != nil {
+			log.Printf("ERROR: secrets: %s: reconcile failed: %v — per-person password apps won't start until it succeeds", why, err)
+		}
+	}()
 	r, err := h.openSecrets()
 	if err != nil {
 		return 0, false, err
@@ -565,8 +629,8 @@ func (h *Hub) ensureSecretDirsLocked(t *templates.Template) error {
 	if len(opts) == 0 {
 		return nil
 	}
-	if err := h.SecretsUsable(); err != nil {
-		return statusErr(http.StatusServiceUnavailable, "%s has per-person passwords, but the Hub's secrets volume is not usable (%v): it is not started", t.ID, h.secretsErr)
+	if err := h.secretsUsableLocked(true); err != nil {
+		return statusErr(http.StatusServiceUnavailable, "%s has per-person passwords, but %v: it is not started", t.ID, err)
 	}
 	r, err := h.openSecrets()
 	if err != nil {

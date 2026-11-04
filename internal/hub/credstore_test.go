@@ -51,13 +51,7 @@ func credFixtureWith(t *testing.T, cfg func(root string, c *Config)) *fixture {
 	if err := f.h.CreateInstance(smbID, smbB, nil); err != nil {
 		t.Fatal(err)
 	}
-	people := newFakePeople()
-	people.addGroup("users_"+smbID, "alice", "bob", "carol")
-	people.addGroup("admin_" + smbID)
-	people.addGroup("users_"+smbB, "alice", "bob", "carol")
-	people.addGroup("admin_" + smbB)
-	f.h.SetPeople(people)
-	f.h.SetGroups(&fakeGroups{people: people, existing: map[string]bool{}})
+	smbPeople(f.h)
 	simulateCompose(f, 0)
 	for _, id := range []string{smbID, smbB} {
 		if err := f.h.save(id, SettingsUpdate{Values: vals("connect_address", "files.example.org")}); err != nil {
@@ -65,6 +59,18 @@ func credFixtureWith(t *testing.T, cfg func(root string, c *Config)) *fixture {
 		}
 	}
 	return f
+}
+
+// smbPeople wires a directory with alice, bob, carol in both instances'
+// access groups.
+func smbPeople(h *Hub) {
+	people := newFakePeople()
+	people.addGroup("users_"+smbID, "alice", "bob", "carol")
+	people.addGroup("admin_" + smbID)
+	people.addGroup("users_"+smbB, "alice", "bob", "carol")
+	people.addGroup("admin_" + smbB)
+	h.SetPeople(people)
+	h.SetGroups(&fakeGroups{people: people, existing: map[string]bool{}})
 }
 
 // addCred records an active credential of user on (inst, smbKey) with
@@ -700,5 +706,200 @@ func TestPathSettingDockerRoot(t *testing.T) {
 	_, err = f.h.RestoreInstance("immich", entry.Archive, "root")
 	if !errors.As(err, &se) || se.Status != 400 {
 		t.Errorf("restore = %v, want 400", err)
+	}
+}
+
+// ── fix round 1 ──────────────────────────────────────────
+
+// lockDir makes dir unwritable (its files can't be removed) until the
+// returned func runs (also at cleanup).
+func lockDir(t *testing.T, dir string) func() {
+	t.Helper()
+	if err := os.Chmod(dir, 0500); err != nil {
+		t.Fatal(err)
+	}
+	undo := func() { os.Chmod(dir, 0700) }
+	t.Cleanup(undo)
+	return undo
+}
+
+func createsOf(f *fixture, id string) int {
+	n := 0
+	for _, c := range f.runner.Creates() {
+		if c == projectName(id) {
+			n++
+		}
+	}
+	return n
+}
+
+func TestReconcileFailureFailsClosed(t *testing.T) {
+	f, audit, secrets := credFixture(t)
+	addCred(t, f.h, smbB, "alice", credentials.NTHash([]byte("a")))
+	f.h.Wait()
+	// A core restore (no .epoch) whose emptying fails part-way.
+	os.Remove(filepath.Join(secrets, ".epoch"))
+	unlock := lockDir(t, filepath.Join(secrets, smbB, smbKey))
+	h := restart(t, f, secrets, audit, nil)
+	smbPeople(h)
+	var se *StatusError
+	if err := h.SecretsUsable(); !errors.As(err, &se) || se.Status != 503 {
+		t.Errorf("SecretsUsable = %v, want 503", err)
+	}
+	before := createsOf(f, smbB)
+	if err := h.Enable(smbB); err == nil {
+		t.Fatal("enabled with the old hash files still on the volume")
+	}
+	if createsOf(f, smbB) != before || h.IsEnabled(smbB) {
+		t.Error("compose ran while the reconcile had failed")
+	}
+	// Fixed: the next operation reconciles again and the old hashes go
+	// before anything mounts them.
+	unlock()
+	var atCreate []string
+	prev := f.runner.createHook
+	f.runner.createHook = func(project string) {
+		if project == projectName(smbB) {
+			atCreate = volumeFiles(t, filepath.Join(secrets, smbB))
+		}
+		prev(project)
+	}
+	if err := h.Enable(smbB); err != nil {
+		t.Fatalf("enable after the fix: %v", err)
+	}
+	if len(atCreate) != 0 {
+		t.Errorf("old hashes mounted: %v", atCreate)
+	}
+	if err := h.SecretsUsable(); err != nil {
+		t.Errorf("SecretsUsable after the retry = %v", err)
+	}
+	if c, _ := credOf(h, smbB, "alice"); c.Active() {
+		t.Error("alice still active")
+	}
+}
+
+func TestPreUpRefusesSharedNamespaces(t *testing.T) {
+	f, _, _ := credFixture(t)
+	if err := f.h.Enable(smbB); err != nil {
+		t.Fatal(err)
+	}
+	for name, ov := range map[string]string{
+		"pid service": "services:\n  spy:\n    image: x\n    pid: service:smb\n",
+		"ipc service": "services:\n  spy:\n    image: x\n    ipc: service:smb\n",
+		"pid host":    "services:\n  spy:\n    image: x\n    pid: host\n",
+		"ipc host":    "services:\n  spy:\n    image: x\n    ipc: host\n",
+		"pid ctr":     "services:\n  spy:\n    image: x\n    pid: container:abc\n",
+	} {
+		writeFile(t, f.h.userOverridePath(smbB), ov)
+		err := f.h.checkSecretsMounts(t.Context(), f.h.Template(smbB))
+		var se *StatusError
+		if !errors.As(err, &se) || se.Status != 409 {
+			t.Errorf("%s: err = %v, want 409", name, err)
+		}
+	}
+}
+
+func TestPreUpRefusesDockerRootPaths(t *testing.T) {
+	f, _, _ := credFixture(t)
+	cases := map[string]string{
+		"bind under":   "services:\n  smb:\n    volumes:\n      - /var/lib/docker/volumes/portcullis_hub_secrets/_data:/x:ro\n",
+		"bind above":   "services:\n  smb:\n    volumes:\n      - type: bind\n        source: /var/lib\n        target: /x\n",
+		"local device": "volumes:\n  v:\n    driver: local\n    driver_opts: {type: none, o: bind, device: /var/lib/docker}\nservices:\n  smb:\n    volumes: [\"v:/y\"]\n",
+	}
+	for name, ov := range cases {
+		writeFile(t, f.h.userOverridePath(smbB), ov)
+		err := f.h.checkSecretsMounts(t.Context(), f.h.Template(smbB))
+		var se *StatusError
+		if !errors.As(err, &se) || se.Status != 400 {
+			t.Errorf("%s: err = %v, want 400", name, err)
+		}
+	}
+	// Beside the root: fine (also for an instance without secrets).
+	writeFile(t, f.h.userOverridePath(smbB), "services:\n  smb:\n    volumes:\n      - /srv/media:/media:ro\n")
+	if err := f.h.checkSecretsMounts(t.Context(), f.h.Template(smbB)); err != nil {
+		t.Errorf("a bind beside the Docker root: %v", err)
+	}
+	fx := f.engine.fx()
+	fx.fmu.Lock()
+	fx.rootErr = errors.New("info down")
+	fx.fmu.Unlock()
+	err := f.h.checkSecretsMounts(t.Context(), f.h.Template(smbB))
+	var se *StatusError
+	if !errors.As(err, &se) || se.Status != 503 {
+		t.Errorf("unreadable root = %v, want 503", err)
+	}
+}
+
+func TestLoaderErrorNotEchoed(t *testing.T) {
+	f, _, _ := credFixture(t)
+	writeFile(t, f.h.userOverridePath(smbB), "services:\n  smb:\n    environment: [\"TOKEN=SuperSecret123\"\n")
+	err := f.h.checkSecretsMounts(t.Context(), f.h.Template(smbB))
+	if err == nil || strings.Contains(err.Error(), "SuperSecret123") || !strings.Contains(err.Error(), "don't parse") {
+		t.Errorf("err = %v", err)
+	}
+}
+
+func TestRestoreRolledBackBeforeVoid(t *testing.T) {
+	f, audit, secrets := credFixture(t)
+	if err := f.h.Enable(smbB); err != nil {
+		t.Fatal(err)
+	}
+	addCred(t, f.h, smbB, "alice", credentials.NTHash([]byte("a")))
+	entry, err := f.h.BackupInstance(smbB, "root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed := false
+	f.h.testHookApplyRestore = func(stage string) error {
+		if stage == "volumes" && !failed {
+			failed = true
+			return errors.New("injected volume failure")
+		}
+		return nil
+	}
+	if _, err := f.h.RestoreInstance(smbB, entry.Archive, "root"); err == nil {
+		t.Fatal("the restore didn't fail")
+	}
+	if c, _ := credOf(f.h, smbB, "alice"); !c.Active() {
+		t.Error("a rolled-back restore voided alice")
+	}
+	if _, err := os.Stat(filepath.Join(secrets, smbB, smbKey, "alice.nt")); err != nil {
+		t.Errorf("alice's hash file: %v", err)
+	}
+	if len(voidAudits(audit)) != 0 {
+		t.Errorf("audits = %v", voidAudits(audit))
+	}
+	if !f.h.IsEnabled(smbB) {
+		t.Error("not running again after the rollback")
+	}
+}
+
+func TestRestoreVoidErrorNeverStartsOldHashes(t *testing.T) {
+	f, _, secrets := credFixture(t)
+	if err := f.h.Enable(smbB); err != nil {
+		t.Fatal(err)
+	}
+	addCred(t, f.h, smbB, "alice", credentials.NTHash([]byte("a")))
+	entry, err := f.h.BackupInstance(smbB, "root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlock := lockDir(t, filepath.Join(secrets, smbB, smbKey))
+	before := createsOf(f, smbB)
+	if _, err := f.h.RestoreInstance(smbB, entry.Archive, "root"); err == nil {
+		t.Fatal("the restore didn't fail")
+	}
+	if createsOf(f, smbB) != before || f.h.IsEnabled(smbB) {
+		t.Error("the instance started with the old hash files")
+	}
+	if c, _ := credOf(f.h, smbB, "alice"); c.Active() {
+		t.Error("alice still active after a void that failed")
+	}
+	unlock()
+	if err := f.h.SecretsUsable(); err != nil {
+		t.Errorf("after the fix: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(secrets, smbB, smbKey, "alice.nt")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("alice's old hash file: %v", err)
 	}
 }

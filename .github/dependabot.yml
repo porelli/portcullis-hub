@@ -9,6 +9,12 @@ updates:
     schedule:
       interval: weekly
     groups:
+      # compose-go is the loader of the Hub's pre-up secrets check: it must
+      # read projects as the docker compose the image ships does (its
+      # vendored compose-go). Its own group: review a bump against the
+      # image's docker-cli-compose (internal/hub/secretsmount.go).
+      compose-go:
+        patterns: ["github.com/compose-spec/compose-go*"]
       go:
         patterns: ["*"]
 

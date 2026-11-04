@@ -401,8 +401,15 @@ type Hub struct {
 	// secretsErr: why SecretsDir can't hold credentials (checkSecretsDir
 	// in New; nil = usable; immutable after New, F14).
 	secretsErr error
+	// secretsReconcileErr: the last secrets reconcile failed (under mu;
+	// nil = it succeeded): person_secret starts and SecretsUsable refuse
+	// (503) until a reconcile succeeds.
+	secretsReconcileErr error
 	// testHookInit, if set, is called at Init's stages (tests: order).
 	testHookInit func(stage string)
+	// testHookApplyRestore, if set, runs at applyRestore's stages
+	// ("volumes": after the volume fills); an error fails the restore.
+	testHookApplyRestore func(stage string) error
 }
 
 // New loads state from cfg.DataDir and prepares the data directories. It

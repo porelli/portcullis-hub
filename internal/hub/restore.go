@@ -627,6 +627,11 @@ func (h *Hub) applyRestore(id string, sb *staged, plan []volumePlan, wasEnabled,
 			return err
 		}
 	}
+	if h.testHookApplyRestore != nil {
+		if err := h.testHookApplyRestore("volumes"); err != nil {
+			return err
+		}
+	}
 	if err := writeOrRemove(h.envPath(id), sb.env); err != nil {
 		return fmt.Errorf("env: %w", err)
 	}
