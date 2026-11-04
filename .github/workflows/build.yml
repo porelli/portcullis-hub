@@ -50,6 +50,10 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      # setfacl for folderfix's TestSetfaclBytes (fatal under CI without it).
+      - name: install acl
+        run: command -v setfacl || { sudo apt-get update -q && sudo apt-get install -y -q acl; }
+
       - name: go test -race
         run: go test -race -count=1 ./...
 

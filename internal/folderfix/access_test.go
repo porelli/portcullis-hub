@@ -48,7 +48,9 @@ func TestAllowed(t *testing.T) {
 		{"owning group w masked", withACL, Principal{UID: 5000, GIDs: []int{100}}, W, false},
 		{"owning group plain r-x", plain, Principal{UID: 5000, GIDs: []int{100}}, R | X, true},
 		{"owning group plain w", plain, Principal{UID: 5000, GIDs: []int{100}}, W, false},
-		{"owning group no fall-through to other", plain, Principal{UID: 5000, GIDs: []int{100}}, X, true},
+		{"owning group plain x", plain, Principal{UID: 5000, GIDs: []int{100}}, X, true},
+		{"owning group no fall-through to other", Stat{UID: 1, GID: 100, Mode: 0o607}, Principal{UID: 5000, GIDs: []int{100}}, R, false},
+		{"owning group no fall-through to other (acl)", Stat{UID: 1, GID: 100, Access: ACL{{Tag: TagUserObj}, {Tag: TagGroupObj}, {Tag: TagOther, Perm: 7}}}, Principal{UID: 5000, GIDs: []int{100}}, R, false},
 
 		// named groups: masked; any matching entry that grants is enough
 		{"named group masked to nothing", withACL, Principal{UID: 5000, GIDs: []int{300}}, W, false},
@@ -65,6 +67,11 @@ func TestAllowed(t *testing.T) {
 		{"other rwx", withACL, Principal{UID: 5000, GIDs: []int{999}}, R | W | X, true},
 		{"other plain x", plain, Principal{UID: 5000}, X, true},
 		{"other plain r", plain, Principal{UID: 5000}, R, false},
+
+		// an empty non-nil ACL (DecodeACL of a header alone) is the mode's
+		{"empty acl owner", Stat{UID: 1000, GID: 100, Mode: 0o777, Access: ACL{}}, Principal{UID: 1000}, R | W | X, true},
+		{"empty acl other", Stat{UID: 1000, GID: 100, Mode: 0o604, Access: ACL{}}, Principal{UID: 5000}, R, true},
+		{"empty acl group", Stat{UID: 1000, GID: 100, Mode: 0o604, Access: ACL{}}, Principal{UID: 5000, GIDs: []int{100}}, R, false},
 
 		// want 0 is always granted (nothing asked)
 		{"want nothing", Stat{UID: 1, GID: 1}, Principal{UID: 9}, 0, true},

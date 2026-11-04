@@ -14,7 +14,7 @@ type Principal struct {
 }
 
 // Stat is what the check needs of an entry: owner, owning group, mode and
-// its access ACL (nil = the ACL the mode implies, FromMode). Dir tells the
+// its access ACL (nil or empty = the ACL the mode implies, FromMode). Dir tells the
 // caller which perms to ask for (r|x to list, w|x to create); Allowed itself
 // treats files and directories alike, as the kernel does.
 type Stat struct {
@@ -36,7 +36,7 @@ func Allowed(s Stat, p Principal, want Perm) bool {
 		return true
 	}
 	acl := s.Access
-	if acl == nil {
+	if len(acl) == 0 { // nil or a header-only xattr: no ACL, the mode decides
 		acl = FromMode(s.Mode)
 	}
 	mask, hasMask := acl.Mask()

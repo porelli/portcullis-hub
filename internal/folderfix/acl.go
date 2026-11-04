@@ -240,14 +240,15 @@ func (a ACL) Clamp() ACL {
 	return out
 }
 
-// Set returns a copy with the entry for (tag, id) set to p: replaced if
-// present, else inserted in canonical position. The id is ignored (0) for
+// Set returns a sorted copy with the entry for (tag, id) set to p: replaced
+// if present, else inserted in canonical position. The id is ignored (0) for
 // non-named tags. The receiver is never modified.
 func (a ACL) Set(tag uint16, id uint32, p Perm) ACL {
 	if !named(tag) {
 		id = 0
 	}
 	out := slices.Clone(a)
+	slices.SortStableFunc(out, less) // DecodeACL keeps buffer order
 	for i := range out {
 		if out[i].Tag == tag && out[i].ID == id {
 			out[i].Perm = p

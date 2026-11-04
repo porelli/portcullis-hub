@@ -14,11 +14,12 @@ import (
 
 // TestSetfaclBytes cross-checks setfaclSample against the kernel: where
 // setfacl is installed and the temp filesystem supports ACLs, the xattr
-// it leaves on a 0644 file is exactly the sample.
+// it leaves on a 0644 file is exactly the sample. With CI set a missing
+// setfacl or a temp filesystem without ACLs fails the test.
 func TestSetfaclBytes(t *testing.T) {
 	setfacl, err := exec.LookPath("setfacl")
 	if err != nil {
-		t.Skip("setfacl not installed")
+		setfaclUnavailable(t, "setfacl not installed")
 	}
 	f := filepath.Join(t.TempDir(), "f")
 	if err := os.WriteFile(f, nil, 0o644); err != nil {
@@ -28,7 +29,7 @@ func TestSetfaclBytes(t *testing.T) {
 		t.Fatal(err)
 	}
 	if out, err := exec.Command(setfacl, "-m", "u:1000:rw,g:60001:rwx,m::rwx", f).CombinedOutput(); err != nil {
-		t.Skipf("setfacl: %v: %s", err, out)
+		setfaclUnavailable(t, "setfacl: %v: %s", err, out)
 	}
 	buf := make([]byte, 256)
 	n, err := unix.Getxattr(f, XattrAccess, buf)

@@ -206,6 +206,33 @@ func TestSet(t *testing.T) {
 	}
 }
 
+func TestSetUnsortedReceiver(t *testing.T) {
+	// DecodeACL keeps buffer order; Set still yields a canonical ACL.
+	unsorted := ACL{
+		{Tag: TagOther, Perm: R},
+		{Tag: TagGroupObj, Perm: R},
+		{Tag: TagMask, Perm: 7},
+		{Tag: TagUserObj, Perm: 6},
+	}
+	got := unsorted.Set(TagGroup, 60001, 7)
+	want := ACL{
+		{Tag: TagUserObj, Perm: 6},
+		{Tag: TagGroupObj, Perm: R},
+		{Tag: TagGroup, ID: 60001, Perm: 7},
+		{Tag: TagMask, Perm: 7},
+		{Tag: TagOther, Perm: R},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Set on an unsorted ACL = %+v", got)
+	}
+	if err := got.Valid(); err != nil {
+		t.Fatalf("Valid: %v", err)
+	}
+	if unsorted[0].Tag != TagOther {
+		t.Fatal("Set reordered its receiver")
+	}
+}
+
 func TestClampKeepsEffective(t *testing.T) {
 	a := ACL{
 		{Tag: TagUserObj, Perm: R | W | X},
