@@ -65,7 +65,8 @@ func pathIn(u PathUsage) doctor.PathIn {
 // timeout; a failure = DomainErr, nothing escalates), then a copy of the
 // state under the read lock: paths, folders, folder_changed records,
 // per-person options, published ports (portInsLocked) and the local
-// networks. Disk scans are Task 11's.
+// networks, and the cached disk scans of the current targets with the
+// enabled instances' container gids (doctorscan.go).
 func (h *Hub) doctorInputs(ctx context.Context) (*doctor.Inputs, error) {
 	h.mu.RLock()
 	people := h.people
@@ -78,6 +79,9 @@ func (h *Hub) doctorInputs(ctx context.Context) (*doctor.Inputs, error) {
 			m = nil
 		}
 	}
+	// The disk scans' cache (Task 11), read before mu (a leaf lock; the
+	// file is loaded on first use).
+	scans, rt := h.scanCache(), h.scanRuntime()
 	addrs, derr := h.domainAddrs(ctx)
 	if derr != nil {
 		log.Printf("doctor: couldn't resolve %s (%v): exposure not checked against its addresses", h.cfg.Domain, derr)
@@ -91,6 +95,7 @@ func (h *Hub) doctorInputs(ctx context.Context) (*doctor.Inputs, error) {
 	for _, u := range h.pathUsagesLocked() {
 		in.Paths = append(in.Paths, pathIn(u))
 	}
+	in.Scans, in.Runtime = h.doctorScansLocked(scans, rt)
 	ids := make([]string, 0, len(h.st.Folders))
 	for id := range h.st.Folders {
 		ids = append(ids, id)

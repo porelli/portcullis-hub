@@ -149,11 +149,24 @@ type ChangeIn struct {
 	At                                     time.Time
 }
 
-// ScanIn is a cached disk scan (Task 11).
+// ScanIn is a cached disk scan (Task 11): of a shared folder (Folder)
+// or a hand-typed host path (Folder ""). Principals are the identities
+// the scan judged (their Name: the instance id, or "<instance>.<n>" when
+// one instance has several); Err: the scan failed (Report nil).
 type ScanIn struct {
-	At     time.Time
-	Report *folderfix.Report
-	Target string
+	At         time.Time
+	Report     *folderfix.Report
+	Target     string
+	Folder     string
+	Principals []folderfix.Principal
+	Err        string
+}
+
+// RuntimeIn is what a running container's processes hold (Task 11, the
+// runtime gid check): every gid of their Gid: and Groups: lines.
+type RuntimeIn struct {
+	Instance, Service, Container string
+	GIDs                         []int
 }
 
 // Inputs is everything the checks judge (enabled instances only).
@@ -172,6 +185,7 @@ type Inputs struct {
 	DomainAddrs []netip.Addr
 	DomainErr   bool
 	Scans       map[string]ScanIn // by cleaned host path
+	Runtime     []RuntimeIn       // enabled instances' running containers (cached with the scans)
 }
 
 // Check is one kind of check.

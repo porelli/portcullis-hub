@@ -207,10 +207,6 @@ func (h *Hub) removeMarker(id string) {
 	}
 }
 
-// storeScan keeps a verify scan as the folder's doctor scan (P13: Task 11
-// fills it).
-func (h *Hub) storeScan(folder string, rep *folderfix.Report) {}
-
 // lockApps takes every id's lifecycle lock, sorted, all or none (ruling
 // 4, D33): the first busy one releases those taken (409).
 func (h *Hub) lockApps(ids []string) (func(), error) {

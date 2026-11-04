@@ -411,6 +411,10 @@ func runSnapshot(o Options, x ArgsExtra) (*Report, error) {
 	return r, err
 }
 
+// DropSamples clears every Count's sample paths (the Hub's size-bounded
+// scan cache).
+func (r *Report) DropSamples() { dropSamples(r) }
+
 func dropSamples(r *Report) {
 	cs := []*Count{&r.HardLinks, &r.MountPoints, &r.Specials, &r.Symlinks, &r.SetID, &r.Races, &r.BadACL, &r.Failed, &r.ChangedSince,
 		&r.Skipped.PathTooLong, &r.Skipped.ACLTooLarge, &r.Skipped.FileCaps}

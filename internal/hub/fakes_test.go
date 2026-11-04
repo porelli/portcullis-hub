@@ -171,6 +171,8 @@ type fakeEngine struct {
 	execMaxInflight int
 	// fixer: started helper runs (fixer_test.go).
 	fixer *fixerFake
+	// execFn, if set, answers Exec (under mu: it must not call the engine).
+	execFn func(id string, cmd []string) (*docker.ExecResult, error)
 }
 
 type execCall struct {
@@ -312,6 +314,9 @@ func (e *fakeEngine) Exec(ctx context.Context, id string, cmd []string, timeout 
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.execID, e.execCmd = id, cmd
+	if fn := e.execFn; fn != nil {
+		return fn(id, cmd)
+	}
 	if e.execRes == nil {
 		return &docker.ExecResult{Output: []byte("ok\n")}, nil
 	}

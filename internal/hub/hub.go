@@ -214,6 +214,17 @@ type Hub struct {
 	fixerMu    sync.Mutex
 	fixerImage string
 	mountinfo  func() ([]byte, error)
+	// The doctor's disk scans (doctorscan.go): scanMu = one scan at a
+	// time (try-lock, 409); scanCacheMu (a leaf lock, never held with a
+	// fixer or docker call) guards scanData, the <data>/doctor/scans.json
+	// cache (nil = not loaded yet) and scanCtx, the scheduler's context
+	// (on-demand scans stop with it); scanStartDelay: the first scheduled
+	// scan's delay (0 = defaultScanStartDelay; tests).
+	scanMu         sync.Mutex
+	scanCacheMu    sync.Mutex
+	scanData       *scanFile
+	scanCtx        context.Context
+	scanStartDelay time.Duration
 	// The main domain's A / AAAA lookup (localnet.go): lookupIP
 	// (test-settable), its cache under dnsMu (never mu).
 	lookupIP lookupIPFunc

@@ -21,6 +21,7 @@ import (
 	"golang.org/x/text/unicode/norm"
 
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/doctor"
 	"github.com/portcullis/hub/internal/folderfix"
 	"github.com/portcullis/hub/internal/settings"
 	"github.com/portcullis/hub/internal/state"
@@ -111,7 +112,9 @@ type FolderView struct {
 	Adopted     bool            `json:"adopted"`
 	Uses        []FolderUseView `json:"uses"`
 	LastOp      *OpRecord       `json:"last_op,omitempty"`
-	// Task 11 adds LastCheck *doctor.ScanSummary `json:"last_check,omitempty"`.
+	// LastCheck is the folder's last disk scan (doctorscan.go: on demand,
+	// after an apply, daily).
+	LastCheck *doctor.ScanSummary `json:"last_check,omitempty"`
 }
 
 // FolderUseView is one setting value naming the folder. Access is the
@@ -874,8 +877,10 @@ func (h *Hub) folderViewLocked(id string) FolderView {
 		Uses: h.folderUsesLocked(id)}
 }
 
-// fillLastOp adds the folder's op record (under opsMu, never with mu).
+// fillLastOp adds the folder's op record (under opsMu, never with mu)
+// and its last disk scan.
 func (h *Hub) fillLastOp(v *FolderView) {
+	h.fillLastCheck(v)
 	h.opsMu.Lock()
 	defer h.opsMu.Unlock()
 	if r, ok := h.ops[opKeyFolder(v.ID)]; ok {

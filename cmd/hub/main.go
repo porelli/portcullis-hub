@@ -228,6 +228,9 @@ func main() {
 	go h.RunDirectorySync(ctx)
 	go h.RunSettingsDelivery(ctx)
 	go h.RunDomainSync(ctx, 30*time.Second)
+	// The doctor's disk checks: daily (and on demand, after every folder
+	// apply); cached in <data>/doctor/scans.json.
+	go h.RunDoctorScans(ctx, 24*time.Hour)
 	// Keycloak drops its copy of a user deleted straight in LLDAP only when
 	// the user is looked up (removeInvalidUsersEnabled; its periodic LDAP
 	// sync never removes users): list them all periodically. Keycloak
