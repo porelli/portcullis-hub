@@ -257,6 +257,14 @@ func TestFolderChanged(t *testing.T) {
 		!strings.Contains(got[0].Why, "movies is a symlink") || strings.Join(got[0].Paths, ",") != "/srv/media/movies" {
 		t.Fatalf("got %+v", got)
 	}
+	// H2: a root with another device or inode points at the re-check.
+	got = of(t, "folder_changed", &Inputs{
+		Folders: []FolderIn{{ID: "media", Name: "Family media", Path: "/srv/media", GID: 60001}},
+		Changes: []ChangeIn{{Instance: "jellyfin", Key: "movies", Folder: "media", Detail: "the folder is another directory (device 50 inode 256, stored 49 256)"}},
+	})
+	if len(got) != 1 || !strings.Contains(got[0].Steps[0], "Re-check identity") {
+		t.Fatalf("identity steps = %+v", got)
+	}
 }
 
 // H4: a service that holds a folder's gid and also mounts a path at or

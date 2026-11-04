@@ -658,11 +658,10 @@ func (folderChangedCheck) Run(in *Inputs) []Finding {
 		}
 		out = append(out, Finding{
 			FP: Fingerprint(KindFolderChanged, c.Instance, c.Key, c.Folder), Kind: KindFolderChanged, Severity: Problem,
-			Title: fmt.Sprintf("%s: shared folder %s changed on disk.", c.Instance, name),
-			Why:   fmt.Sprintf("The probe around %s's last start found: %s. A directory swapped for a symlink would let an app reach other host paths, so the Hub keeps %s down until the folder is right again.", c.Instance, c.Detail, c.Instance),
-			Class: FixExplain,
-			Steps: []string{"On the host, check what replaced " + where + " and put the real directory back (no symlink).",
-				"Re-apply the folder's assignment (Settings → Shared folders), then enable " + c.Instance + " again."},
+			Title:     fmt.Sprintf("%s: shared folder %s changed on disk.", c.Instance, name),
+			Why:       fmt.Sprintf("The probe around %s's last start found: %s. A directory swapped for a symlink would let an app reach other host paths, so the Hub keeps %s down until the folder is right again.", c.Instance, c.Detail, c.Instance),
+			Class:     FixExplain,
+			Steps:     changedSteps(c, where),
 			Instances: []string{c.Instance}, Folders: []string{c.Folder}, Paths: paths,
 			Inputs: Digest(c),
 		})
@@ -766,4 +765,17 @@ func (folderReachableAboveCheck) Run(in *Inputs) []Finding {
 		}
 	}
 	return out
+}
+
+// changedSteps are folder_changed's steps; a root with another device or
+// inode (H2) may be the same directory after a reboot on btrfs/LVM.
+func changedSteps(c ChangeIn, where string) []string {
+	if strings.HasPrefix(c.Detail, "the folder is another directory") {
+		return []string{
+			"If the host rebooted and only the device number changed (btrfs subvolumes, LVM), the folder is the same directory: re-check its identity (Settings → Shared folders → Edit → Re-check identity), then enable " + c.Instance + " again.",
+			"Otherwise check what replaced " + where + " on the host and put the real directory back (no symlink).",
+		}
+	}
+	return []string{"On the host, check what replaced " + where + " and put the real directory back (no symlink).",
+		"Re-apply the folder's assignment (Settings → Shared folders), then enable " + c.Instance + " again."}
 }

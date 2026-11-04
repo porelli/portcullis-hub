@@ -210,6 +210,7 @@
           (op ? '<div>' + (op.running ? '<span class="pill info">' + esc(op.op) + ' running</span>' :
             '<span class="pill ' + (op.ok ? 'ok' : 'bad') + '" title="' + esc(op.error || '') + '">' + esc(op.op) + (op.ok ? ' ok' : ' failed') + '</span>') + '</div>' : '') + '</td>' +
           '<td class="fd-actions"><button type="button" class="btn btn-secondary btn-sm" data-fd-edit="' + esc(f.id) + '">Edit</button> ' +
+          '<button type="button" class="btn btn-secondary btn-sm" data-fd-recheck="' + esc(f.id) + '" title="After a reboot on btrfs or LVM the folder\'s device number can change: check it and store the new one">Re-check identity…</button> ' +
           (f.last_apply && f.last_apply.snapshot ? '<button type="button" class="btn btn-secondary btn-sm" data-fd-undo="' + esc(f.id) + '" title="Restore the permissions the last apply changed">Undo last fix…</button> ' : '') +
           '<button type="button" class="btn btn-danger btn-sm" data-fd-remove="' + esc(f.id) + '">Remove</button></td></tr>' +
           '<tr data-fd-panel="' + esc(f.id) + '" hidden><td colspan="6"></td></tr>';
@@ -259,6 +260,7 @@
       if (t.closest('[data-fd-add]')) { openEdit(null); return; }
       if ((b = t.closest('[data-fd-edit]'))) { openEdit(b.dataset.fdEdit); return; }
       if ((b = t.closest('[data-fd-undo]'))) { openUndo(b.dataset.fdUndo); return; }
+      if ((b = t.closest('[data-fd-recheck]'))) { openRecheck(b.dataset.fdRecheck); return; }
       if ((b = t.closest('[data-fd-remove]'))) { removePanel(b.dataset.fdRemove); return; }
       if ((b = t.closest('[data-fd-del-cancel]'))) { removePanel(b.dataset.fdDelCancel); return; }
       if ((b = t.closest('[data-fd-del-go]'))) { removeFolder(b); }
@@ -607,6 +609,38 @@
     });
   }
 
+  // openRecheck: Re-check identity (H2) — the stored and the current
+  // device, inode and mount root; Apply stores the current ones.
+  function openRecheck(id) {
+    const ctx = { kind: 'recheck', folder: id };
+    openDialog(ctx, head('Re-check the identity of ' + esc(folderName(id))) +
+      '<p class="settings-empty">Nothing changes until you click Apply. Nothing on disk is changed, and no app is restarted.</p><div data-fd-plan><p class="settings-empty">Checking the folder…</p></div><div data-fd-op></div>' +
+      '<div class="op-modal-actions"><button type="button" class="btn btn-secondary btn-sm" data-fd-close>Close</button><button type="button" class="btn btn-primary btn-sm" data-fd-apply disabled>Apply</button></div>');
+    window.apiPost('/api/folders/' + enc(id) + '/recheck/preview', {}).then(plan => {
+      if (dialog !== ctx) return;
+      ctx.plan = plan;
+      dialogBox().querySelector('[data-fd-plan]').innerHTML = planHtml(plan);
+      dialogBox().querySelector('[data-fd-apply]').disabled = !plan.changed;
+    }).catch(err => { if (dialog === ctx) dialogBox().querySelector('[data-fd-plan]').innerHTML = window.errorBox(err); });
+  }
+
+  async function applyRecheck(ctx) {
+    const box = dialogBox();
+    const ap = box.querySelector('[data-fd-apply]');
+    const out = box.querySelector('[data-fd-op]');
+    ap.disabled = true;
+    try {
+      await window.apiPost('/api/folders/' + enc(ctx.folder) + '/recheck/apply', { plan_hash: ctx.plan.plan_hash });
+      if (dialog !== ctx) return;
+      out.innerHTML = '<div class="inst-ok">The folder\'s new identity is stored.</div>';
+      ctx.plan = null;
+      refresh();
+    } catch (err) {
+      if (dialog !== ctx) return;
+      out.innerHTML = window.errorBox(err) + (err.status === 409 ? '<div class="inst-row"><button type="button" class="btn btn-secondary btn-sm" data-fd-repreview>Check again</button></div>' : '');
+    }
+  }
+
   function bindModal(m) {
     m.addEventListener('click', e => {
       const ctx = dialog;
@@ -619,13 +653,14 @@
       if (t.closest('[data-fd-create-cancel]')) { checkPath(false); return; }
       if (t.closest('[data-fd-repreview]')) {
         dialogBox().querySelector('[data-fd-op]').innerHTML = '';
-        if (ctx.kind === 'assign') previewAssign(ctx); else openUndo(ctx.folder);
+        if (ctx.kind === 'assign') previewAssign(ctx); else if (ctx.kind === 'recheck') openRecheck(ctx.folder); else openUndo(ctx.folder);
         return;
       }
       const ap = t.closest('[data-fd-apply]');
       if (ap && !ap.disabled && ctx.plan) {
         if (ctx.kind === 'assign') applyPlan(ctx, '/api/folders/' + enc(ctx.folder) + '/assign/apply', { plan_hash: ctx.plan.plan_hash, uses: ctx.uses });
         else if (ctx.kind === 'undo') applyPlan(ctx, '/api/folders/' + enc(ctx.folder) + '/undo/apply', { plan_hash: ctx.plan.plan_hash });
+        else if (ctx.kind === 'recheck') applyRecheck(ctx);
       }
     });
     m.addEventListener('submit', e => {

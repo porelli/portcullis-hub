@@ -1365,6 +1365,78 @@ func TestPreviewRefusesMountAboveFolder(t *testing.T) {
 	}
 }
 
+// H2: a folder whose identity changed (a reboot on btrfs/LVM changes the
+// device number) says so, and "Re-check identity" previews old → new and
+// stores the new identity once confirmed.
+func TestRecheckFolderIdentity(t *testing.T) {
+	f, d, audit := assignFixture(t)
+	ctx := context.Background()
+	lib := AssignRequest{Uses: []FolderUse{{Instance: "immich", Key: "library"}}}
+	recheck := "the folder's identity changed (e.g. after a reboot on btrfs/LVM): re-check it in Shared folders"
+	d.mu.Lock()
+	d.paths["/srv/media"].dev = 2050
+	d.mu.Unlock()
+	if _, err := f.h.PreviewAssign(ctx, "media", lib); statusOf(err) != 409 || !strings.Contains(err.Error(), recheck) {
+		t.Fatalf("assign preview: %v", err)
+	}
+	setStored(f, "immich", "library", "folder:media")
+	if err := f.h.Enable("immich"); statusOf(err) != 409 || !strings.Contains(err.Error(), recheck) {
+		t.Fatalf("enable: %v", err)
+	}
+	chk, err := f.h.PreviewRecheck(ctx, "media")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !chk.Changed || chk.Old.Dev != 2049 || chk.New.Dev != 2050 || chk.Old.Ino != chk.New.Ino || chk.New.MountRoot != "/srv/media" || len(chk.Hash) != 64 ||
+		!strings.Contains(strings.Join(chk.Lines, "\n"), "Only the device number changed") {
+		t.Fatalf("preview = %+v", chk)
+	}
+	if fo, _ := storedFolder(f, "media"); fo.Dev != 2049 {
+		t.Fatal("the preview stored the identity")
+	}
+	if _, err := f.h.ApplyRecheck(ctx, "media", strings.Repeat("0", 64), "admin"); statusOf(err) != 409 {
+		t.Errorf("stale hash = %v", err)
+	}
+	// Busy: the folder's lock, or a user's app lock.
+	unlock, _ := f.h.folderLock("media")
+	if _, err := f.h.ApplyRecheck(ctx, "media", chk.Hash, "admin"); statusOf(err) != 409 {
+		t.Errorf("folder busy = %v", err)
+	}
+	unlock()
+	unlockApp, _ := f.h.lockApp("immich")
+	if _, err := f.h.ApplyRecheck(ctx, "media", chk.Hash, "admin"); statusOf(err) != 409 {
+		t.Errorf("app busy = %v", err)
+	}
+	unlockApp()
+	v, err := f.h.ApplyRecheck(ctx, "media", chk.Hash, "admin")
+	if err != nil || v == nil || v.ID != "media" {
+		t.Fatalf("apply = %+v %v", v, err)
+	}
+	if fo, _ := storedFolder(f, "media"); fo.Dev != 2050 || fo.Ino != chk.New.Ino || fo.MountRoot != "/srv/media" {
+		t.Errorf("stored = %+v", fo)
+	}
+	if a := auditOf(audit, "folder.update"); len(a) == 0 || !strings.Contains(a[len(a)-1], "media ok recheck device 2049→2050") {
+		t.Errorf("audit = %q", a)
+	}
+	if err := f.h.Enable("immich"); err != nil {
+		t.Errorf("enable after the re-check: %v", err)
+	}
+	// Unchanged: said so; changed again after the preview: 409.
+	chk, err = f.h.PreviewRecheck(ctx, "media")
+	if err != nil || chk.Changed || !strings.Contains(strings.Join(chk.Lines, "\n"), "as stored") {
+		t.Fatalf("unchanged preview = %+v %v", chk, err)
+	}
+	d.mu.Lock()
+	d.paths["/srv/media"].dev = 2051
+	d.mu.Unlock()
+	if _, err := f.h.ApplyRecheck(ctx, "media", chk.Hash, "admin"); statusOf(err) != 409 {
+		t.Errorf("changed since the preview = %v", err)
+	}
+	if _, err := f.h.PreviewRecheck(ctx, "nope"); statusOf(err) != 404 {
+		t.Errorf("unknown folder = %v", err)
+	}
+}
+
 // M6: every run's races reach the op's warnings.
 func TestEveryRunsWarnings(t *testing.T) {
 	f, d, _ := assignFixture(t)

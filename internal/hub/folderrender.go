@@ -625,17 +625,25 @@ func (h *Hub) folderProbesLocked(t *templates.Template) ([]folderProbe, error) {
 	return out, nil
 }
 
-// folderChangedError: a folder changed on disk around an up.
-type folderChangedError struct{ name string }
+// folderChangedError: a folder changed on disk around an up. identity:
+// its root is a directory with another device, inode or mount root than
+// stored — often a reboot (H2), so the message points at the re-check.
+type folderChangedError struct {
+	name     string
+	identity bool
+}
 
 func (e folderChangedError) Error() string {
+	if e.identity {
+		return "shared folder " + e.name + ": " + identityText
+	}
 	return "shared folder " + e.name + " changed on disk: re-apply it"
 }
 
 // errFolderChanged is the up's refusal (409) for a folder that changed
 // on disk.
 func errFolderChanged(name string) error {
-	return &StatusError{Status: http.StatusConflict, Err: folderChangedError{name}}
+	return &StatusError{Status: http.StatusConflict, Err: folderChangedError{name: name}}
 }
 
 // isFolderChanged: err is errFolderChanged's.
@@ -683,7 +691,7 @@ func (h *Hub) probeFolders(ctx context.Context, ps []folderProbe, after bool) (*
 		case !rep.Exists:
 			return first, "the folder is missing", errFolderChanged(first.name)
 		case rep.Dev != first.dev || rep.Ino != first.ino:
-			return first, fmt.Sprintf("the folder is another directory (device %d inode %d, stored %d %d)", rep.Dev, rep.Ino, first.dev, first.ino), errFolderChanged(first.name)
+			return first, fmt.Sprintf("the folder is another directory (device %d inode %d, stored %d %d)", rep.Dev, rep.Ino, first.dev, first.ino), errFolderIdentity(first.name)
 		case len(rep.Subs) != len(subs):
 			return first, "the probe reported no subpaths", statusErr(http.StatusInternalServerError, "shared folder fixer (probe): %d subpaths reported, %d asked", len(rep.Subs), len(subs))
 		}

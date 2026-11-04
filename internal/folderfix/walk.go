@@ -266,7 +266,7 @@ func openWalker(o Options, mode string) (*walker, error) {
 	w.root = st
 	w.r.Dev, w.r.Ino = st.Dev, st.Ino
 	if (o.ExpectDev != 0 || o.ExpectIno != 0) && (st.Dev != o.ExpectDev || st.Ino != o.ExpectIno) {
-		return w, refuse("%s is not the folder's directory (device %d inode %d, want %d/%d): re-check the folder's path",
+		return w, refuse("%s is not the folder's directory (device %d inode %d, want %d/%d): the folder's identity changed (e.g. after a reboot on btrfs/LVM): re-check it in Shared folders",
 			o.Root, st.Dev, st.Ino, o.ExpectDev, o.ExpectIno)
 	}
 	ms, err := readMountinfo()
@@ -276,7 +276,7 @@ func openWalker(o Options, mode string) (*walker, error) {
 	root, found := mountRootOf(ms, o.Root)
 	w.r.MountRoot = root
 	if o.ExpectMountRoot != "" && (!found || root != o.ExpectMountRoot) {
-		return w, refuse("%s is mounted from %q, want %q: the folder's path changed on the host", o.Root, root, o.ExpectMountRoot)
+		return w, refuse("%s is mounted from %q, want %q: the folder's identity changed (e.g. after a reboot on btrfs/LVM): re-check it in Shared folders", o.Root, root, o.ExpectMountRoot)
 	}
 	prefix := o.Root + "/"
 	if o.Root == "/" {

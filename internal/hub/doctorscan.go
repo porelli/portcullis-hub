@@ -468,7 +468,7 @@ func (h *Hub) scanOne(ctx context.Context, t ScanTarget) (e scanEntry, why strin
 			return fail(err)
 		}
 		if rep.Dev != f.Dev || rep.Ino != f.Ino {
-			return fail(fmt.Errorf("%s changed on disk (device/inode %d/%d, now %d/%d): re-apply the folder", f.Path, f.Dev, f.Ino, rep.Dev, rep.Ino))
+			return fail(fmt.Errorf("%s: device/inode %d/%d, now %d/%d: %s", f.Path, f.Dev, f.Ino, rep.Dev, rep.Ino, identityText))
 		}
 		e.At, e.Report = time.Now().UTC(), rep
 		return e, ""

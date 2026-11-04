@@ -136,6 +136,8 @@ var folderRoutes = []route{
 	{"POST", "/api/folders/media/assign/apply", `{"plan_hash":"x","uses":[]}`},
 	{"POST", "/api/folders/media/undo/preview", ""},
 	{"POST", "/api/folders/media/undo/apply", `{"plan_hash":"x"}`},
+	{"POST", "/api/folders/media/recheck/preview", ""},
+	{"POST", "/api/folders/media/recheck/apply", `{"plan_hash":"x"}`},
 	{"GET", "/api/folders/media/op", ""},
 	{"GET", "/api/settings/local-networks", ""},
 	{"PUT", "/api/settings/local-networks", `{"networks":null}`},
@@ -202,6 +204,7 @@ func TestHubListenerRegistersFolderRoutes(t *testing.T) {
 		"GET /api/folders", "POST /api/folders", "PUT /api/folders/{id}", "DELETE /api/folders/{id}",
 		"POST /api/folders/check", "POST /api/folders/{id}/assign/preview", "POST /api/folders/{id}/assign/apply",
 		"POST /api/folders/{id}/undo/preview", "POST /api/folders/{id}/undo/apply", "GET /api/folders/{id}/op",
+		"POST /api/folders/{id}/recheck/preview", "POST /api/folders/{id}/recheck/apply",
 		"GET /api/doctor", "POST /api/doctor/scan", "GET /api/doctor/op",
 		"POST /api/doctor/findings/{fp}/preview", "POST /api/doctor/findings/{fp}/apply",
 		"POST /api/doctor/findings/{fp}/mute", "DELETE /api/doctor/findings/{fp}/mute",
@@ -321,6 +324,8 @@ func TestFolderBodyRejectsUnknownFields(t *testing.T) {
 		{"POST", "/api/folders/media/assign/apply", `{"plan_hash":"x"}`},
 		{"POST", "/api/folders/media/assign/apply", `{"plan_hash":"x","uses":[],"force":true}`},
 		{"POST", "/api/folders/media/undo/apply", `{"plan_hash":"x","uses":[]}`},
+		{"POST", "/api/folders/media/recheck/apply", `{}`},
+		{"POST", "/api/folders/media/recheck/apply", `{"plan_hash":"x","dev":1}`},
 		{"PUT", "/api/settings/local-networks", `{"networks":[],"extra":1}`},
 		{"PUT", "/api/settings/local-networks", `{}`},
 	}
@@ -504,4 +509,24 @@ func (e *fakeEngine) gateFixer(mode string, gate chan struct{}, entered chan str
 		e.fixerGates = map[string][2]chan struct{}{}
 	}
 	e.fixerGates[mode] = [2]chan struct{}{gate, entered}
+}
+
+// H2: Re-check identity through the API: preview (nothing stored), apply
+// with its plan_hash (a stale one 409), audited folder.update.
+func TestFolderRecheckRoutes(t *testing.T) {
+	e := newFolderEnv(t, true)
+	b := mustDo(t, e.hub, "root", "POST", "/api/folders/media/recheck/preview", "", 200)
+	var chk hub.IdentityCheck
+	if err := json.Unmarshal([]byte(b), &chk); err != nil || chk.Folder != "media" || len(chk.Hash) != 64 || len(chk.Lines) == 0 || chk.New.Dev == 0 {
+		t.Fatalf("preview = %s %v", b, err)
+	}
+	mustDo(t, e.hub, "root", "POST", "/api/folders/media/recheck/apply", `{"plan_hash":"`+strings.Repeat("0", 64)+`"}`, 409)
+	b = mustDo(t, e.hub, "root", "POST", "/api/folders/media/recheck/apply", `{"plan_hash":"`+chk.Hash+`"}`, 200)
+	if !strings.Contains(b, `"folder":{`) {
+		t.Errorf("apply = %s", b)
+	}
+	mustDo(t, e.hub, "root", "POST", "/api/folders/nope/recheck/preview", "", 404)
+	if got := strings.Join(e.auditActions(t, "folder.update"), " "); !strings.Contains(got, "folder.update:ok:root:media") {
+		t.Errorf("audit = %s", got)
+	}
 }

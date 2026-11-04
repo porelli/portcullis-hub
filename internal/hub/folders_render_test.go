@@ -521,7 +521,8 @@ func TestUpRefusesChangedFolder(t *testing.T) {
 	delete(d.symlinks, "/srv/media/movies")
 	d.paths["/srv/media"].ino = 999
 	d.mu.Unlock()
-	if err := f.h.Enable("jellyfin"); statusOf(err) != 409 || !strings.Contains(err.Error(), changed) {
+	// H2: another device/inode points at the identity re-check.
+	if err := f.h.Enable("jellyfin"); statusOf(err) != 409 || !strings.Contains(err.Error(), identityText) {
 		t.Fatalf("replaced root: %v", err)
 	}
 	// A missing subpath fails closed (Docker never creates it).
@@ -557,7 +558,8 @@ func TestUpProbesFolderRootWithoutSubpath(t *testing.T) {
 	ino := d.paths["/srv/media"].ino
 	d.paths["/srv/media"].ino = 999
 	d.mu.Unlock()
-	if err := f.h.Enable("jellyfin"); statusOf(err) != 409 || !strings.Contains(err.Error(), changed) {
+	// H2: another device/inode points at the identity re-check.
+	if err := f.h.Enable("jellyfin"); statusOf(err) != 409 || !strings.Contains(err.Error(), identityText) {
 		t.Fatalf("replaced root: %v", err)
 	}
 	if ups(f, "jellyfin") != 0 {
@@ -572,7 +574,7 @@ func TestUpProbesFolderRootWithoutSubpath(t *testing.T) {
 		d.paths["/srv/media"].ino = 998
 		d.mu.Unlock()
 	}
-	if err := f.h.Enable("jellyfin"); statusOf(err) != 409 || !strings.Contains(err.Error(), changed) {
+	if err := f.h.Enable("jellyfin"); statusOf(err) != 409 || !strings.Contains(err.Error(), identityText) {
 		t.Fatalf("after the start: %v", err)
 	}
 	if calls := strings.Join(f.runner.Calls(), ","); !strings.Contains(calls, "up:portcullis-jellyfin,down:portcullis-jellyfin") {

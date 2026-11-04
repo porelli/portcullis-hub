@@ -701,8 +701,11 @@ func (h *Hub) diskPlan(ctx context.Context, id string, c *assignCalc) error {
 	if err != nil {
 		return err
 	}
-	if !pr.Exists || pr.Dev != f.Dev || pr.Ino != f.Ino {
+	if !pr.Exists {
 		return errFolderChanged(f.Name)
+	}
+	if pr.Dev != f.Dev || pr.Ino != f.Ino {
+		return errFolderIdentity(f.Name)
 	}
 	subs := map[string]bool{}
 	for _, up := range c.plan.Uses {
@@ -1680,8 +1683,11 @@ func (h *Hub) computeUndo(ctx context.Context, id string) (*undoCalc, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !pr.Exists || pr.Dev != f.Dev || pr.Ino != f.Ino {
+	if !pr.Exists {
 		return nil, errFolderChanged(f.Name)
+	}
+	if pr.Dev != f.Dev || pr.Ino != f.Ino {
+		return nil, errFolderIdentity(f.Name)
 	}
 	dry, err := h.restoreDryRun(ctx, id, u.apply.Snapshot, f)
 	if err != nil {

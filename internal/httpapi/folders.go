@@ -30,6 +30,8 @@ func (s *Server) registerFolders(mux routeMux) {
 	mux.HandleFunc("POST /api/folders/{id}/assign/apply", s.handleAssignApply)
 	mux.HandleFunc("POST /api/folders/{id}/undo/preview", s.handleUndoPreview)
 	mux.HandleFunc("POST /api/folders/{id}/undo/apply", s.handleUndoApply)
+	mux.HandleFunc("POST /api/folders/{id}/recheck/preview", s.handleRecheckPreview)
+	mux.HandleFunc("POST /api/folders/{id}/recheck/apply", s.handleRecheckApply)
 	mux.HandleFunc("GET /api/folders/{id}/op", s.handleFolderOp)
 	mux.HandleFunc("GET /api/settings/local-networks", s.handleLocalNetworks)
 	mux.HandleFunc("PUT /api/settings/local-networks", s.handleSetLocalNetworks)
@@ -43,6 +45,7 @@ const (
 	assignUsage       = `{"uses": [{"instance": "<id>", "key": "<option>", "subpath": "<relative path>", "write": true | false}]}`
 	assignApplyUsage  = `{"plan_hash": "<hash>", "uses": [{"instance": "<id>", "key": "<option>", "subpath": "<relative path>", "write": true | false}]}`
 	undoApplyUsage    = `{"plan_hash": "<hash>"}`
+	recheckUsage      = `{"plan_hash": "<hash from the re-check preview>"}`
 	localNetsUsage    = `{"networks": ["<cidr>", ...] | null}`
 )
 
@@ -333,6 +336,53 @@ func (s *Server) handleUndoApply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeOpAccepted(w, op)
+}
+
+// handleRecheckPreview is Re-check identity's preview (H2): the stored
+// and the current device, inode and mount root; nothing changes.
+func (s *Server) handleRecheckPreview(w http.ResponseWriter, r *http.Request) {
+	if !s.folderAdmin(w, r) {
+		return
+	}
+	id, ok := folderID(w, r)
+	if !ok {
+		return
+	}
+	c, err := s.Hub.PreviewRecheck(r.Context(), id)
+	if err != nil {
+		writeAPIErr(w, err)
+		return
+	}
+	noStore(w)
+	writeJSON(w, c)
+}
+
+// handleRecheckApply stores the identity the preview showed (its
+// plan_hash; another = 409) → {folder}.
+func (s *Server) handleRecheckApply(w http.ResponseWriter, r *http.Request) {
+	if !s.folderAdmin(w, r) {
+		return
+	}
+	id, ok := folderID(w, r)
+	if !ok {
+		return
+	}
+	var b struct {
+		PlanHash *string `json:"plan_hash"`
+	}
+	if !decodeAPI(w, r, &b, recheckUsage) {
+		return
+	}
+	if b.PlanHash == nil {
+		writeJSONError(w, http.StatusBadRequest, "body must be "+recheckUsage)
+		return
+	}
+	v, err := s.Hub.ApplyRecheck(r.Context(), id, *b.PlanHash, actor(r))
+	if err != nil {
+		writeAPIErr(w, err)
+		return
+	}
+	writeJSON(w, map[string]any{"folder": v})
 }
 
 // handleFolderOp is the folder's op record (_folder.<id>): poll it until
