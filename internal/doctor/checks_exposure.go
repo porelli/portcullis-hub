@@ -135,17 +135,20 @@ func (lanOnlyExposedCheck) Run(in *Inputs) []Finding {
 		}
 		why := "all"
 		switch {
+		case p.HostNetwork:
+			// Host networking: the app listens on every host address,
+			// around Docker and host firewalls alike, whatever <KEY>_BIND
+			// says — compose publishes nothing for the port, so the bind
+			// has no effect (T12 ruling, superseding T10's local-bind
+			// exception).
+			why = "host"
+			f.Severity = Problem
+			f.Title = fmt.Sprintf("%s: LAN-only port %s uses host networking and listens on every host address (%s).", p.Instance, portName(p), portSpec(p))
+			f.Why = "The template marks this port LAN-only, but service " + p.Service + " runs on the host's network: the Hub can't bind the port to an address (a bind setting has no effect there), so it is reachable from outside the LAN unless the app's own listen address or the host firewall restricts it."
 		case all:
 			f.Severity = Warning
 			f.Title = fmt.Sprintf("%s: LAN-only port %s listens on all interfaces (%s).", p.Instance, portName(p), portSpec(p))
 			f.Why = "The template marks this port LAN-only. Bound to all interfaces, it is reachable wherever the host is: from the internet too when the host has a public address or the router forwards the port."
-			if p.HostNetwork {
-				// Host networking: the app listens on every host address,
-				// around Docker and host firewalls alike (ruling).
-				f.Severity = Problem
-				f.Title = fmt.Sprintf("%s: LAN-only port %s uses host networking and listens on every host address (%s).", p.Instance, portName(p), portSpec(p))
-				f.Why = "The template marks this port LAN-only, but service " + p.Service + " runs on the host's network and binds every host address: it is reachable from outside the LAN unless its bind address is a local one."
-			}
 		case domain[a]:
 			why = "domain"
 			f.Severity = Problem
@@ -159,8 +162,13 @@ func (lanOnlyExposedCheck) Run(in *Inputs) []Finding {
 		default:
 			continue
 		}
-		// A failed lookup changes only the text: a mute holds.
-		f.Inputs = Digest([]any{p, why})
+		// A failed lookup changes only the text: a mute holds. Under host
+		// networking the bind has no effect, so it isn't an input.
+		dp := p
+		if p.HostNetwork {
+			dp.Bind = ""
+		}
+		f.Inputs = Digest([]any{dp, why})
 		if in.DomainErr && in.Domain != "" {
 			f.Why += fmt.Sprintf(" (couldn't resolve %s: the main domain's addresses weren't checked.)", in.Domain)
 		}

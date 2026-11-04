@@ -93,8 +93,21 @@ func TestExposureAddressForms(t *testing.T) {
 	}
 	local := smb("192.168.1.10")
 	local.HostNetwork = true
-	if got := exposure(t, local); len(got) != 1 || got[0].Kind != KindHostNetwork {
+	// T12 ruling (supersedes T10's local-bind exception): <KEY>_BIND has
+	// no effect under host networking, so a local one changes nothing.
+	got = exposure(t, local)
+	var lex *Finding
+	for i := range got {
+		if got[i].Kind == KindLANOnlyExposed {
+			lex = &got[i]
+		}
+	}
+	if len(got) != 2 || lex == nil || lex.Severity != Problem || lex.Class != FixExplain || lex.FixKind != "" ||
+		!strings.Contains(lex.Title, "every host address") {
 		t.Fatalf("host network, local bind = %+v", got)
+	}
+	if lex.FP != PortFP(smb("0.0.0.0")) {
+		t.Error("the bind changes a host-network port's fingerprint")
 	}
 
 	// No lan_only: no finding, whatever the address.
