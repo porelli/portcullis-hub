@@ -334,6 +334,10 @@ func TestChildFixRaces(t *testing.T) {
 			}
 			defer func() { testHookChildFix = nil }()
 			me := os.Getuid()
+			if me == 0 { // the root test run: uid 0 is never a person's
+				me = 4242
+				must(t, os.Lchown(filepath.Join(root, "tm", "alice"), me, me))
+			}
 			r, err := FixChild(Options{Root: root, ExpectDev: dev, ExpectIno: ino, ExpectMountRoot: "/m"}, "tm", ChildFix{Name: "alice", UID: me, Owner: me})
 			if !fired {
 				t.Fatal("the hook never ran")
