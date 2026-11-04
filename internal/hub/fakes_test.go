@@ -173,6 +173,8 @@ type fakeEngine struct {
 	fixer *fixerFake
 	// execFn, if set, answers Exec (under mu: it must not call the engine).
 	execFn func(id string, cmd []string) (*docker.ExecResult, error)
+	// apiVersion: APIVersion's answer ("" = 1.47).
+	apiVersion string
 }
 
 type execCall struct {
@@ -1428,6 +1430,15 @@ func (e *fakeEngine) DockerRootDir(ctx context.Context) (string, error) {
 		return "/var/lib/docker", nil
 	}
 	return f.dockerRoot, f.rootErr
+}
+
+func (e *fakeEngine) APIVersion(ctx context.Context) (string, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.apiVersion == "" {
+		return "1.47", nil
+	}
+	return e.apiVersion, nil
 }
 
 func (f *fixerFake) Specs() []docker.RunSpec {

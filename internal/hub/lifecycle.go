@@ -98,7 +98,12 @@ func (h *Hub) prepareUp(t *templates.Template) (*templates.Template, error) {
 		c := *l
 		live = &c
 	}
-	err := h.generateOverrideLocked(live, h.st.Settings[t.ID])
+	// The secrets volume's hash directories first (F14: unusable =
+	// refused, 503).
+	err := h.ensureSecretDirsLocked(live)
+	if err == nil {
+		err = h.generateOverrideLocked(live, h.st.Settings[t.ID])
+	}
 	if err == nil {
 		err = h.refreshInstanceEnvLocked(live, members)
 	}
@@ -111,6 +116,11 @@ func (h *Hub) prepareUp(t *templates.Template) (*templates.Template, error) {
 		return nil, statusErr(500, "override generation failed: %v", err)
 	}
 	if err := h.checkUserOverride(live); err != nil {
+		return nil, err
+	}
+	// The rendered project mounts the secrets volume only as the Hub's
+	// override does (F15).
+	if err := h.checkSecretsMounts(context.Background(), live); err != nil {
 		return nil, err
 	}
 	if err := h.syncTemplateFiles(live); err != nil {
@@ -166,6 +176,13 @@ func (h *Hub) startUp(live *templates.Template) error {
 			log.Printf("shared folders: %s: not started: %s", live.ID, detail)
 			return h.folderTakeDown(ctx, live, p, detail, err)
 		}
+	}
+	// Before every up (F15), again: the files are those compose reads.
+	if err := h.checkSecretsMounts(ctx, live); err != nil {
+		if derr := h.forceDown(ctx, live); derr != nil {
+			return statusErr(500, "%v — and taking the created project down failed: %v", err, derr)
+		}
+		return err
 	}
 	if err := h.compose.Up(ctx, h.project(live)); err != nil {
 		if len(probes) > 0 {
@@ -373,6 +390,11 @@ func (h *Hub) enableInner(id string, restoring bool) (rolledBack bool, err error
 		return false, err
 	}
 	if err := h.checkSubdomainCollisionsLocked(&tmpl); err != nil {
+		h.mu.Unlock()
+		return false, err
+	}
+	// Per-person passwords need a usable secrets volume (F14).
+	if err := h.ensureSecretDirsLocked(&tmpl); err != nil {
 		h.mu.Unlock()
 		return false, err
 	}

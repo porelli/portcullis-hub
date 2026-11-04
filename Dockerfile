@@ -24,11 +24,13 @@ FROM alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c03
 RUN apk add --no-cache ca-certificates git docker-cli docker-cli-compose \
  && addgroup -S -g 10001 hub \
  && adduser -S -D -u 10001 -G hub -h /home/hub hub \
- && mkdir -p /data \
- && chown 10001:10001 /data
+ && mkdir -p /data /secrets \
+ && chown 10001:10001 /data /secrets \
+ && chmod 0700 /secrets
 COPY --from=build /hub /usr/local/bin/hub
 # Writable paths (must be owned by / writable for uid 10001):
 #   /data               HUB_DATA_DIR — a fresh named volume inherits this ownership
+#   /secrets            HUB_SECRETS_DIR (core's hub_secrets): 10001:10001 0700, checked at start
 #   /project/templates  bind mount of <core>/templates on the host
 USER 10001:10001
 ENV HOME=/home/hub

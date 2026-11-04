@@ -215,8 +215,11 @@ func (c *CLI) DownByName(ctx context.Context, name string) error {
 
 // MinVersion is the oldest docker compose the Hub works with: the Hub's
 // override replaces non-default instances' labels with the !override tag
-// (contract §3.1), which compose supports since 2.24.4.
-const MinVersion = "2.24.4"
+// (contract §3.1, compose 2.24.4) and mounts the per-person secrets as a
+// volume subpath (`volume.subpath`, contract §6), which compose passes to
+// the Engine since 2.26.0 (docker/compose 39504607, "Add support for
+// volume Subpath option").
+const MinVersion = "2.26.0"
 
 // Version returns `docker compose version --short` (e.g. "2.29.1").
 func (c *CLI) Version(ctx context.Context) (string, error) {
@@ -246,7 +249,7 @@ func CheckVersion(v string) error {
 		return fmt.Errorf("cannot read the docker compose version %q (need %s or newer)", v, MinVersion)
 	}
 	if semver.Compare(sv, "v"+MinVersion) < 0 {
-		return fmt.Errorf("docker compose %s is too old: the Hub needs %s or newer (its overrides use the !override tag)", v, MinVersion)
+		return fmt.Errorf("docker compose %s is too old: the Hub needs %s or newer (its overrides use the !override tag and volume subpath mounts)", v, MinVersion)
 	}
 	return nil
 }

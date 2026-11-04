@@ -266,6 +266,11 @@ func (h *Hub) restoreInstance(id, archive, actor string, ready func()) (res *Res
 	if err := h.configProblem(view, &sb.cfg, archive); err != nil {
 		return res, err
 	}
+	if sb.cfg.Settings != nil {
+		if err := h.dockerRootValuesRule(context.Background(), view, sb.cfg.Settings.Values); err != nil {
+			return res, err
+		}
+	}
 	res.Warnings = append(res.Warnings, h.checkArchivedRows(context.Background(), view, sb.cfg.Settings, false)...)
 	plan, err := h.restorePlan(id, view, sb)
 	if err != nil {
@@ -299,7 +304,7 @@ func (h *Hub) restoreInstance(id, archive, actor string, ready func()) (res *Res
 	if e.State == state.InstanceCreated {
 		keep = state.InstanceCreated
 	}
-	applyErr := h.applyRestore(id, sb, plan, wasEnabled)
+	applyErr := h.applyRestore(id, sb, plan, wasEnabled, true)
 	if applyErr == nil {
 		if cerr := h.clearRestoring(id, keep); cerr != nil {
 			res.Warnings = append(res.Warnings, cerr.Error())
@@ -598,9 +603,12 @@ func composeVolume(id, key, name string) docker.Volume {
 }
 
 // applyRestore writes sb into instance id (stopped): volumes, env, custom
-// override, settings; then enables it again if it was enabled. It marks
-// the instance disabled while its data is replaced.
-func (h *Hub) applyRestore(id string, sb *staged, plan []volumePlan, wasEnabled bool) error {
+// override, settings; then, with void (a restore, not a rollback), every
+// credential of the instance is voided (§11.6, F12: after the volumes,
+// before the start: the restored start never sees an old account); then
+// it enables it again if it was enabled. It marks the instance disabled
+// while its data is replaced.
+func (h *Hub) applyRestore(id string, sb *staged, plan []volumePlan, wasEnabled, void bool) error {
 	ctx := context.Background()
 	h.mu.Lock()
 	h.st.SetEnabled(id, false)
@@ -645,8 +653,12 @@ func (h *Hub) applyRestore(id string, sb *staged, plan []volumePlan, wasEnabled 
 		envErr = h.refreshInstanceEnvLocked(v, members)
 	}
 	saveErr := h.st.Save(h.statePath())
+	var voidErr error
+	if void && secretsErr == nil && envErr == nil && saveErr == nil {
+		_, voidErr = h.voidCredentialsLocked(id, state.CredentialReasonRestore)
+	}
 	h.mu.Unlock()
-	if err := errors.Join(secretsErr, envErr, saveErr); err != nil {
+	if err := errors.Join(secretsErr, envErr, saveErr, voidErr); err != nil {
 		return err
 	}
 	if wasEnabled {
@@ -681,7 +693,7 @@ func (h *Hub) rollbackStaged(id string, view *templates.Template, pre *staged, w
 	if err != nil {
 		return err
 	}
-	return h.applyRestore(id, pre, plan, wasEnabled)
+	return h.applyRestore(id, pre, plan, wasEnabled, false)
 }
 
 // RestoreInstanceAs restores archive (any listed one, a deleted
@@ -801,6 +813,11 @@ func (h *Hub) restoreInstanceAs(archive, newID, actor string, hosts map[string]s
 	if err := h.configProblem(&tmpl, &sb.cfg, archive); err != nil {
 		return res, err
 	}
+	if sb.cfg.Settings != nil {
+		if err := h.dockerRootValuesRule(context.Background(), &tmpl, sb.cfg.Settings.Values); err != nil {
+			return res, err
+		}
+	}
 	res.Warnings = append(res.Warnings, h.checkArchivedRows(context.Background(), &tmpl, sb.cfg.Settings, true)...)
 	// Kept folder values (spec call 17, S12): the new instance uses the
 	// folder without an assignment preview, read-only unless its template
@@ -836,7 +853,13 @@ func (h *Hub) restoreInstanceAs(archive, newID, actor string, hosts map[string]s
 		e.State, e.RestoreAs = state.InstanceRestoring, archive
 		h.st.Instances[newID] = e
 	}
-	markErr := h.st.Save(h.statePath())
+	// A new instance has no credentials (archives carry none, §11.6):
+	// anything a former instance of that id left goes, unaudited.
+	var credErr error
+	if _, left := h.st.Credentials[newID]; left {
+		credErr = h.forgetCredentialsLocked(newID)
+	}
+	markErr := errors.Join(h.st.Save(h.statePath()), credErr)
 	h.mu.Unlock()
 	var createdVols []string
 	var createdGroups []string

@@ -165,6 +165,16 @@ type AppState struct {
 	// Task 5). Here and never in an instance archive: an instance restore
 	// keeps everyone's id.
 	PersonIDs map[string]PersonIDPool `json:"person_ids,omitempty" yaml:"person_ids,omitempty"`
+	// Credentials: instance → person_secret option key → lowercase user
+	// → the credential's metadata (contract §13.16, plan 3 Task 6). No
+	// secret: the hashes are on the secrets volume only. Not in instance
+	// archives (§11.5).
+	Credentials map[string]map[string]map[string]Credential `json:"credentials,omitempty" yaml:"credentials,omitempty"`
+	// SecretsEpoch is the secrets epoch (§11.6): 16 random bytes, hex,
+	// also in <secrets>/.epoch; rotated on every credential mutation. A
+	// mismatch (a core restore, a crash between the two writes) voids
+	// every credential.
+	SecretsEpoch string `json:"secrets_epoch,omitempty" yaml:"secrets_epoch,omitempty"`
 
 	// LegacyPassword lists, after Load, the policies that named the removed
 	// "password" factor and were normalised ("" = the global default). Not
@@ -540,6 +550,9 @@ func (s *AppState) init() {
 	}
 	if s.PersonIDs == nil {
 		s.PersonIDs = make(map[string]PersonIDPool)
+	}
+	if s.Credentials == nil {
+		s.Credentials = make(map[string]map[string]map[string]Credential)
 	}
 }
 

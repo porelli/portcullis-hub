@@ -480,3 +480,15 @@ func sortedServices[V any](m map[string]V) []string {
 	sort.Strings(out)
 	return out
 }
+
+// SecretsVolumeKey is the Hub override's top-level volume key for the
+// Hub's secrets volume (contract §6, F15): reserved — no template may
+// name it as a volume key, a service volume source or in volumes_from,
+// and no custom override may use it.
+const SecretsVolumeKey = "portcullis-hub-secrets"
+
+// NamesSecretsVolumeKey: s (folded, trimmed) names or embeds
+// SecretsVolumeKey (an interpolated value could produce it).
+func NamesSecretsVolumeKey(s string) bool {
+	return strings.Contains(FoldKey(s), SecretsVolumeKey)
+}

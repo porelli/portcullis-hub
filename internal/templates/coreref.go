@@ -340,6 +340,9 @@ func checkCoreRefs(compose []byte, hostVars map[string]string) error {
 				}
 			}
 		}
+		if err := checkSecretsVolumeRefs(name, s["volumes"]); err != nil {
+			return err
+		}
 		switch vf := s["volumes_from"].(type) {
 		case nil:
 		case []interface{}:
@@ -347,6 +350,9 @@ func checkCoreRefs(compose []byte, hostVars map[string]string) error {
 				sv, ok := str(x)
 				if !ok {
 					return fmt.Errorf("service %s: volumes_from entries must be strings", name)
+				}
+				if NamesSecretsVolumeKey(sv) {
+					return fmt.Errorf("service %s: volumes_from %s names the Hub's secrets volume", name, sv)
 				}
 				if err := literal("service "+name+": volumes_from", sv); err != nil {
 					return err
@@ -572,6 +578,32 @@ func labelPairs(svc string, labels interface{}) (map[string]string, error) {
 	return pairs, nil
 }
 
+// checkSecretsVolumeRefs: no volume entry of service svc names the Hub's
+// secrets volume key (F15), in the short or long syntax, interpolated or
+// not: the Hub's override declares that key for its subpath mounts.
+func checkSecretsVolumeRefs(svc string, raw interface{}) error {
+	list, ok := raw.([]interface{})
+	if !ok {
+		return nil
+	}
+	for _, item := range list {
+		var src string
+		switch v := item.(type) {
+		case string:
+			src, _, _ = strings.Cut(v, ":")
+			if strings.HasPrefix(strings.TrimSpace(v), "${") {
+				src = v // a ${X:-…} source may hold colons
+			}
+		case map[string]interface{}:
+			src, _ = str(v["source"])
+		}
+		if NamesSecretsVolumeKey(src) {
+			return fmt.Errorf("service %s: volume %s names the Hub's secrets volume (%s): only the Hub mounts it", svc, src, SecretsVolumeKey)
+		}
+	}
+	return nil
+}
+
 // checkCoreVolumes: no volume key of core's (a single template's and a
 // multi template's default instance's volumes are portcullis_<key>, core's
 // too: postgres_data would mount Keycloak's database), names are
@@ -590,6 +622,9 @@ func checkCoreVolumes(raw interface{}) error {
 	for _, k := range keys {
 		if err := literal("volume key", k); err != nil {
 			return err
+		}
+		if NamesSecretsVolumeKey(k) {
+			return fmt.Errorf("volume %s is reserved: %s is the Hub's secrets volume", k, SecretsVolumeKey)
 		}
 		if coreVolumes[FoldKey(strings.TrimSpace(k))] {
 			return fmt.Errorf("volume %s is core's (portcullis_%s): templates may not use core's volume names", k, k)

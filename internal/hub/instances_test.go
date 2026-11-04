@@ -138,6 +138,13 @@ func newInstanceFixtureWith(t *testing.T, seed func(*state.AppState), idp IdP) *
 // (id → manifest, compose) in the source.
 func newInstanceFixtureExtra(t *testing.T, seed func(*state.AppState), idp IdP, extra map[string][2]string) *fixture {
 	t.Helper()
+	return newInstanceFixtureCfg(t, seed, idp, extra, nil)
+}
+
+// newInstanceFixtureCfg is newInstanceFixtureExtra with cfg (if set)
+// adjusting the Hub's Config before New (root: the fixture's temp dir).
+func newInstanceFixtureCfg(t *testing.T, seed func(*state.AppState), idp IdP, extra map[string][2]string, cfg func(root string, c *Config)) *fixture {
+	t.Helper()
 	root := t.TempDir()
 	f := &fixture{
 		runner:  newFakeRunner(),
@@ -174,7 +181,11 @@ func newInstanceFixtureExtra(t *testing.T, seed func(*state.AppState), idp IdP, 
 	if idp == nil {
 		idp = f.idp
 	}
-	h, err := New(Config{ProjectDir: f.project, ProjectHostDir: "/host/project", DataDir: f.data, Domain: "example.org"}, f.runner, f.engine, idp)
+	c := Config{ProjectDir: f.project, ProjectHostDir: "/host/project", DataDir: f.data, Domain: "example.org"}
+	if cfg != nil {
+		cfg(root, &c)
+	}
+	h, err := New(c, f.runner, f.engine, idp)
 	if err != nil {
 		t.Fatal(err)
 	}

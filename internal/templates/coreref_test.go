@@ -400,6 +400,19 @@ func TestDiscoverRefusesBypasses(t *testing.T) {
 		writeTpl(t, dir, id, manifest, build("web", nil, "    volumes: [db:/x]\n", top))
 		ids[id] = top
 	}
+	// The Hub's secrets volume key (file sharing, F15): never a template
+	// volume key, service volume source or volumes_from entry.
+	for id, c := range map[string][2]string{
+		"sec-key":         {"    volumes: [db:/x]\n", "volumes:\n  db: {}\n  portcullis-hub-secrets: {}\n"},
+		"sec-key-case":    {"    volumes: [db:/x]\n", "volumes:\n  db: {}\n  Portcullis-Hub-Secrets: {}\n"},
+		"sec-short":       {"    volumes: [\"portcullis-hub-secrets:/x:ro\"]\n", ""},
+		"sec-long":        {"    volumes:\n      - {type: volume, source: portcullis-hub-secrets, target: /x}\n", ""},
+		"sec-interp":      {"    volumes: [\"${S:-portcullis-hub-secrets}:/x\"]\n", ""},
+		"sec-volumesfrom": {"    volumes_from: [portcullis-hub-secrets]\n", ""},
+	} {
+		writeTpl(t, dir, id, manifest, build("web", nil, c[0], c[1]))
+		ids[id] = c[0] + c[1]
+	}
 	// Volume names (fix round 5, I3): a single template names a volume
 	// only portcullis_<its id>[-_…]; a multi template names none.
 	for id, top := range map[string]string{

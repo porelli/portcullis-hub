@@ -95,6 +95,11 @@ func main() {
 		// Template sources are fast-forwarded at every start (fail-safe:
 		// a failed pull keeps the previous checkout); "false" turns it off.
 		SyncSourcesAtStart: os.Getenv("HUB_SYNC_SOURCES_AT_START") != "false",
+		// Per-person password hashes (contract §6, §13.16): core's
+		// hub_secrets volume at /secrets. Checked in New (owner = the
+		// Hub's uid, 0700); unusable = those apps refuse to start.
+		SecretsDir:    env("HUB_SECRETS_DIR", "/secrets"),
+		SecretsVolume: env("HUB_SECRETS_VOLUME", hub.DefaultSecretsVolume),
 	}
 	fixerImage, err := fixerImageFromEnv(os.Getenv)
 	if err != nil {

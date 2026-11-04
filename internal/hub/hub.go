@@ -69,6 +69,12 @@ type Config struct {
 	// Hub's own image ID otherwise. Development only (main honours
 	// HUB_FIXER_IMAGE only with HUB_DEV=1); must be pinned by @sha256.
 	FixerImage string
+	// SecretsDir is HUB_SECRETS_DIR, the hub_secrets volume as the Hub sees
+	// it (contract §6, §13.16; "" = none: per-person passwords are
+	// unavailable). SecretsVolume is its Docker name (HUB_SECRETS_VOLUME,
+	// "" = DefaultSecretsVolume), mounted into apps by subpath.
+	SecretsDir    string
+	SecretsVolume string
 }
 
 // Engine is the part of the Docker Engine API the Hub uses.
@@ -106,6 +112,9 @@ type Engine interface {
 	// DockerRootDir is the daemon's data root (no shared folder at,
 	// above or under it).
 	DockerRootDir(ctx context.Context) (string, error)
+	// APIVersion is the daemon's highest Engine API version (volume
+	// subpath mounts need 1.45, contract §6).
+	APIVersion(ctx context.Context) (string, error)
 }
 
 // IdP manages the OIDC clients templates declare.
@@ -389,6 +398,11 @@ type Hub struct {
 	// mu.
 	idRanges      map[string][2]int
 	poolsAdvanced bool
+	// secretsErr: why SecretsDir can't hold credentials (checkSecretsDir
+	// in New; nil = usable; immutable after New, F14).
+	secretsErr error
+	// testHookInit, if set, is called at Init's stages (tests: order).
+	testHookInit func(stage string)
 }
 
 // New loads state from cfg.DataDir and prepares the data directories. It
@@ -422,6 +436,12 @@ func New(cfg Config, runner compose.Runner, engine Engine, idp IdP) (*Hub, error
 	if cfg.FixerImage != "" && (!strings.Contains(cfg.FixerImage, "@sha256:") || !docker.PinnedImage(cfg.FixerImage)) {
 		return nil, fmt.Errorf("HUB_FIXER_IMAGE %q must be pinned by digest (name@sha256:<64 hex>)", cfg.FixerImage)
 	}
+	if cfg.SecretsVolume == "" {
+		cfg.SecretsVolume = DefaultSecretsVolume
+	}
+	if !volumeNameRe.MatchString(cfg.SecretsVolume) {
+		return nil, fmt.Errorf("HUB_SECRETS_VOLUME %q is not a volume name", cfg.SecretsVolume)
+	}
 	h := &Hub{
 		kinds:       settings.NewRegistry(),
 		bindRoots:   roots,
@@ -439,6 +459,11 @@ func New(cfg Config, runner compose.Runner, engine Engine, idp IdP) (*Hub, error
 		mountinfo:   func() ([]byte, error) { return os.ReadFile("/proc/self/mountinfo") },
 		lookupIP:    defaultLookupIP,
 		idRanges:    templates.PersonIDPools,
+	}
+	// The secrets volume (F14): unusable = fail closed, the Hub still
+	// starts.
+	if h.secretsErr = checkSecretsDir(cfg.SecretsDir); h.secretsErr != nil && cfg.SecretsDir != "" {
+		log.Printf("ERROR: secrets: %v — per-person passwords are unavailable and apps with them won't start", h.secretsErr)
 	}
 	// The known list in state.yaml (empty = only the main domain).
 	h.domains = knownDomains{h}
@@ -466,6 +491,16 @@ func New(cfg Config, runner compose.Runner, engine Engine, idp IdP) (*Hub, error
 func (h *Hub) Init() {
 	// Before anything can start a backup or restore.
 	h.SweepBackupLeftovers()
+	// The secrets epoch (§11.6) before anything can start or deliver: a
+	// core restore voids every credential and advances the person-id
+	// pools before any allocation (interrupted restores, folder applies
+	// and owed restarts below all start instances).
+	h.initStage("secrets")
+	if h.cfg.SecretsDir != "" || len(h.st.Credentials) > 0 {
+		if _, err := h.reconcileSecrets("start"); err != nil {
+			log.Printf("secrets: start-up check: %v", err)
+		}
+	}
 	h.autoLoadDefaultTemplates()
 	h.Discover()
 	// Fresh templates before the first policy write: the policy file the
@@ -494,7 +529,15 @@ func (h *Hub) Init() {
 	}
 	// Reloads and restarts committed changes still owe (the previous run
 	// stopped before applying them): queued again.
+	h.initStage("requeue")
 	h.requeueOwed()
+}
+
+// initStage calls testHookInit (tests).
+func (h *Hub) initStage(stage string) {
+	if h.testHookInit != nil {
+		h.testHookInit(stage)
+	}
 }
 
 // Wait blocks until queued background restarts and policy propagation

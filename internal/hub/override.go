@@ -115,6 +115,18 @@ func (h *Hub) renderOverrideIn(rv renderView, t *templates.Template, s state.Ins
 		serviceMounts[svc] = append(serviceMounts[svc], mounts...)
 	}
 
+	// Per-person credentials (contract §6, §13.16): each person_secret
+	// option's hash directory, read-only, as a subpath of the external
+	// secrets volume, on its mount.service only.
+	secretOpts := personSecretOptions(t)
+	for _, o := range secretOpts {
+		sub, err := secretDirRel(t.ID, o.Key)
+		if err != nil {
+			return "", fmt.Errorf("setting %s: %w", o.Key, err)
+		}
+		serviceMounts[o.Mount.Service] = append(serviceMounts[o.Mount.Service], secretsMountEntry(o.Mount.Path, sub))
+	}
+
 	servicePorts := make(map[string][]string)
 	for _, p := range t.Manifest.Ports {
 		if p.Service == "" || p.NetworkModeHost || p.Range != "" {
@@ -267,16 +279,32 @@ func (h *Hub) renderOverrideIn(rv renderView, t *templates.Template, s state.Ins
 	// default instance gets portcullis_<key>, others portcullis_<id>-<key>.
 	// A single template's volumes stay exactly as compose names them.
 	multiVols := t.Manifest.Multi() && len(t.Volumes) > 0
-	if vols := t.NamesFor(t.ID).Volumes; multiVols {
+	if multiVols || len(secretOpts) > 0 {
 		b.WriteString("volumes:\n")
+	}
+	if vols := t.NamesFor(t.ID).Volumes; multiVols {
 		for _, k := range t.Volumes {
 			fmt.Fprintf(&b, "  %s:\n    name: %s\n", yamlQuote(k), yamlQuote(vols[k]))
 		}
+	}
+	if len(secretOpts) > 0 {
+		fmt.Fprintf(&b, "  %s:\n    external: true\n    name: %s\n", templates.SecretsVolumeKey, yamlQuote(h.cfg.SecretsVolume))
 	}
 	if len(names) == 0 && !multiVols {
 		return "", nil
 	}
 	return b.String(), nil
+}
+
+// secretsMountEntry is the long-syntax mount of a person_secret option's
+// hash directory (sub = <instance>/<key>) at target, read-only.
+func secretsMountEntry(target, sub string) string {
+	return "type: volume\n" +
+		"        source: " + templates.SecretsVolumeKey + "\n" +
+		"        target: " + yamlQuote(composeLiteral(target)) + "\n" +
+		"        read_only: true\n" +
+		"        volume:\n" +
+		"          subpath: " + yamlQuote(sub)
 }
 
 // renderOverrideLocked is renderOverrideIn over the Hub's state. Caller

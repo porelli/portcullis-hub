@@ -1086,3 +1086,47 @@ func (h *Hub) auditFolder(actor, action, id, detail string, err error, instances
 		log.Printf("audit: %v", aerr)
 	}
 }
+
+// dockerRootValuesRule refuses (400, F16) every hand-typed path value in
+// values (option key → value; folder refs and nil skipped: a folder's
+// path passed dockerRootRule when it was defined) at, above or under the
+// Docker daemon's data root — hub_secrets and every other volume live
+// there. An unreadable root is 503. SaveSettings (the changed values)
+// and both restores (the archived ones) run it, outside mu.
+func (h *Hub) dockerRootValuesRule(ctx context.Context, t *templates.Template, values map[string]any) error {
+	keys := make([]string, 0, len(values))
+	for k := range values {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		v := values[k]
+		o := optionByKey(t, k)
+		if o == nil || o.Type != templates.TypePath || v == nil {
+			continue
+		}
+		if s, ok := v.(string); ok && strings.HasPrefix(s, settings.FolderRefPrefix) {
+			continue
+		}
+		kind, err := h.kinds.Kind(o.Type)
+		if err != nil {
+			return err
+		}
+		m, ok := kind.(settings.Mounter)
+		if !ok {
+			continue
+		}
+		p, err := m.HostPath(o, v)
+		if err != nil {
+			continue // refused by the value checks
+		}
+		if err := h.dockerRootRule(ctx, path.Clean(p)); err != nil {
+			var se *StatusError
+			if errors.As(err, &se) && se.Status == http.StatusBadRequest {
+				return statusErr(http.StatusBadRequest, "setting %s: %v", k, err)
+			}
+			return err
+		}
+	}
+	return nil
+}

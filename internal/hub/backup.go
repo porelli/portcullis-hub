@@ -244,6 +244,12 @@ func (h *Hub) projectVolumes(ctx context.Context, id string) (map[string]docker.
 		if v.Labels[docker.LabelProject] != projectName(id) {
 			continue
 		}
+		// The Hub's secrets volume is never an instance's (contract §11.5):
+		// never archived, replaced or removed, whatever its labels say.
+		if v.Name == h.cfg.SecretsVolume {
+			log.Printf("WARNING: volume %s carries the project label of %s: it is the Hub's secrets volume and is left out", v.Name, projectName(id))
+			continue
+		}
 		key := v.Labels[docker.LabelVolume]
 		if !volumeKeyRe.MatchString(key) {
 			return nil, fmt.Errorf("volume %s of %s has no valid %s label", v.Name, projectName(id), docker.LabelVolume)

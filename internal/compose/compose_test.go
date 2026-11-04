@@ -108,8 +108,9 @@ func TestCLIErrorCarriesOutput(t *testing.T) {
 
 func TestCheckVersion(t *testing.T) {
 	for v, ok := range map[string]bool{
-		"2.24.4": true, "v2.29.1": true, "5.6.1": true, "2.24.4-desktop.1": true,
-		"2.24.3": false, "2.20.0": false, "1.29.2": false, "": false, "garbage": false,
+		// volume subpath (per-person secrets, contract §6) since 2.26.0.
+		"2.26.0": true, "v2.29.1": true, "5.6.1": true, "2.26.0-desktop.1": true,
+		"2.25.0": false, "2.24.4": false, "2.24.3": false, "2.20.0": false, "1.29.2": false, "": false, "garbage": false,
 	} {
 		if err := CheckVersion(v); (err == nil) != ok {
 			t.Errorf("CheckVersion(%q) = %v", v, err)

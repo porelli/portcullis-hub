@@ -365,3 +365,15 @@ func RemappedIDs(opts []string) string {
 	}
 	return ""
 }
+
+// APIVersion is the daemon's highest Engine API version (GET /version,
+// e.g. "1.47").
+func (c *Client) APIVersion(ctx context.Context) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
+	defer cancel()
+	res, err := c.api.ServerVersion(ctx, client.ServerVersionOptions{})
+	if err != nil {
+		return "", err
+	}
+	return res.APIVersion, nil
+}

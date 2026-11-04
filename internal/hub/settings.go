@@ -803,6 +803,10 @@ func (h *Hub) SaveSettings(id string, u SettingsUpdate, actor string) (_ *SaveRe
 	if err := gidRangeSaveCheck(t, parsed); err != nil {
 		return nil, err
 	}
+	// No hand-typed path at, above or under Docker's data root (F16).
+	if err := h.dockerRootValuesRule(context.Background(), t, parsed.values); err != nil {
+		return nil, err
+	}
 	// Rows and records are bound to the directory's group ids (and a
 	// privileged option's groups checked) before mu: network calls.
 	bindWarnings, err := h.bindRowsForSave(context.Background(), t, parsed)

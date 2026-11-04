@@ -230,6 +230,9 @@ func (h *Hub) parseUserOverride(t *templates.Template, data []byte) (*parsedOver
 				if !volumeNameRe.MatchString(name) {
 					return nil, fmt.Errorf("volume name %q is invalid", name)
 				}
+				if templates.NamesSecretsVolumeKey(name) {
+					return nil, fmt.Errorf("volume %s is reserved: it is the Hub's secrets volume (%s)", name, templates.SecretsVolumeKey)
+				}
 				if err := onlyKeys(vols[name], "volume "+name, "labels"); err != nil {
 					return nil, fmt.Errorf("%w (driver, driver_opts, external and name could point at host paths or other apps' data)", err)
 				}
@@ -511,6 +514,9 @@ func (h *Hub) checkMountSource(id, src, typ string) error {
 		return fmt.Errorf("bind mount without a source")
 	}
 	isPath := strings.HasPrefix(src, "/") || strings.HasPrefix(src, ".") || strings.HasPrefix(src, "~")
+	if !isPath && templates.NamesSecretsVolumeKey(src) {
+		return fmt.Errorf("volume source %q: %s is the Hub's secrets volume: only the Hub mounts it", src, templates.SecretsVolumeKey)
+	}
 	if !isPath {
 		if typ == "bind" || !volumeNameRe.MatchString(src) {
 			return fmt.Errorf("volume source %q is neither a volume name nor an absolute path", src)
