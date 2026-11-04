@@ -16,7 +16,7 @@ import (
 // echoed — not in answers, not in errors (a malformed body gets a fixed
 // message, never the decoder's).
 
-func (s *Server) registerDomains(mux *http.ServeMux) {
+func (s *Server) registerDomains(mux routeMux) {
 	mux.HandleFunc("GET /api/domains", s.handleDomains)
 	mux.HandleFunc("POST /api/domains", s.handleEnrollDomain)
 	mux.HandleFunc("POST /api/domains/{name}/token", s.handleDomainToken)

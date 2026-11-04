@@ -14,7 +14,7 @@ import (
 // CSRF like every route, audited in the Hub with the X-Forwarded-User actor
 // (instance.create|update|delete|backup|restore).
 
-func (s *Server) registerInstances(mux *http.ServeMux) {
+func (s *Server) registerInstances(mux routeMux) {
 	mux.HandleFunc("GET /api/instances", s.handleInstances)
 	mux.HandleFunc("POST /api/instances", s.handleCreateInstance)
 	mux.HandleFunc("GET /api/instances/defaults", s.handleInstanceDefaults)
@@ -80,13 +80,20 @@ func (s *Server) handleCreateMissingGroups(w http.ResponseWriter, r *http.Reques
 // decodeStrict decodes a small JSON body into v (unknown fields refused);
 // usage is the message of a 400.
 func decodeStrict(w http.ResponseWriter, r *http.Request, v interface{}, usage string) bool {
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(v); err != nil || dec.Decode(&struct{}{}) != io.EOF {
+	if !strictBody(w, r, v) {
 		http.Error(w, "body must be "+usage, http.StatusBadRequest)
 		return false
 	}
 	return true
+}
+
+// strictBody decodes one JSON document of at most 64 KiB into v: unknown
+// fields and trailing data refused. The caller answers a failure with a
+// fixed message (never the decoder's error: it may quote the body).
+func strictBody(w http.ResponseWriter, r *http.Request, v interface{}) bool {
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10))
+	dec.DisallowUnknownFields()
+	return dec.Decode(v) == nil && dec.Decode(&struct{}{}) == io.EOF
 }
 
 // writeJSONStatus writes v as JSON with status code.

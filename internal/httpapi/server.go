@@ -40,7 +40,14 @@ func (s *Server) Handler() (http.Handler, error) {
 		return nil, err
 	}
 	s.index = idx
-	mux := http.NewServeMux()
+	return ProxySecret(s.Secret, CSRF(s.hubMux().ServeMux)), nil
+}
+
+// hubMux is the Hub listener's routes, recorded
+// (TestHubListenerRegistersFolderRoutes checks the shared-folder, doctor
+// and local-network routes are registered exactly once).
+func (s *Server) hubMux() *recordingMux {
+	mux := &recordingMux{ServeMux: http.NewServeMux()}
 	mux.HandleFunc("/healthz", s.handleHealthz)
 	mux.HandleFunc("/", s.handleIndex)
 	mux.HandleFunc("/static/", s.handleStatic)
@@ -69,7 +76,9 @@ func (s *Server) Handler() (http.Handler, error) {
 	s.registerDomains(mux)
 	s.registerInstances(mux)
 	s.registerSettings(mux)
-	return ProxySecret(s.Secret, CSRF(mux)), nil
+	s.registerFolders(mux)
+	s.registerDoctor(mux)
+	return mux
 }
 
 // PeopleHandler is the people listener (contract §5.1, people.<domain>,

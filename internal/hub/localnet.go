@@ -218,3 +218,13 @@ func portProto(p string) string {
 
 // lookupIPFunc resolves a host name (Hub.lookupIP; test-settable).
 type lookupIPFunc func(ctx context.Context, host string) ([]netip.Addr, error)
+
+// SetLookupIP replaces the main domain's A / AAAA lookup and forgets the
+// cached answer: other packages' tests stub DNS with it, so no test
+// resolves a real name (nil: the system resolver).
+func (h *Hub) SetLookupIP(f func(ctx context.Context, host string) ([]netip.Addr, error)) {
+	h.dnsMu.Lock()
+	defer h.dnsMu.Unlock()
+	h.lookupIP = f
+	h.dnsCache = dnsCache{}
+}

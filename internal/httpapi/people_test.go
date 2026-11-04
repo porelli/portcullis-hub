@@ -124,7 +124,8 @@ func TestPeopleListenerHasNoAppRoutes(t *testing.T) {
 	}
 	for _, path := range []string{"/api/templates", "/api/settings", "/api/drift", "/api/templates/compose/x",
 		"/api/status", "/api/sources", "/api/portal/apps", "/api/domains", "/api/instances", "/api/backups",
-		"/api/instances/x/backups", "/api/instances/x/op", "/api/instances/x/settings", "/api/instances/defaults?template=demo", "/static/index.html", "/nope"} {
+		"/api/instances/x/backups", "/api/instances/x/op", "/api/instances/x/settings", "/api/instances/defaults?template=demo", "/static/index.html", "/nope",
+		"/api/folders", "/api/folders/x/op", "/api/doctor", "/api/doctor/op", "/api/settings/local-networks"} {
 		if r, _ := doAs(t, e.people, "root", "GET", path, ""); r.StatusCode != 404 {
 			t.Errorf("people GET %s = %d, want 404", path, r.StatusCode)
 		}

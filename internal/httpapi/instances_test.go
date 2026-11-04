@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"sort"
@@ -52,7 +53,10 @@ type fakeEngine struct {
 	// fixerReports scripts a mode's answer (else a minimal report, exit 0).
 	fixerRuns    []docker.RunSpec
 	fixerReports map[string]fakeFixer
-	secOpts      []string
+	// fixerGates: a mode's runs block until gate[0] closes, signalling
+	// gate[1] (non-blocking) once each started (gateFixer).
+	fixerGates map[string][2]chan struct{}
+	secOpts    []string
 }
 
 // fakeFixer is one scripted fixer answer: exit code, the report line and,
@@ -99,7 +103,15 @@ func (e *fakeEngine) RunHelper(_ context.Context, s docker.RunSpec, out func(io.
 	e.mu.Lock()
 	e.fixerRuns = append(e.fixerRuns, s)
 	f, ok := e.fixerReports[mode]
+	gate, gated := e.fixerGates[mode]
 	e.mu.Unlock()
+	if gated {
+		select {
+		case gate[1] <- struct{}{}:
+		default:
+		}
+		<-gate[0]
+	}
 	if !ok {
 		f = fakeFixer{Report: fmt.Sprintf(`{"version":1,"mode":%q}`, mode), Snapshot: []byte("fake-snapshot")}
 	}
@@ -389,6 +401,21 @@ func newInstEnvAt(t *testing.T, root string) *instEnv {
 // fake engine itself).
 func newInstEnvWith(t *testing.T, root string, extra map[string][2]string, engine func(*fakeEngine) hub.Engine) *instEnv {
 	t.Helper()
+	return newInstEnvOpts(t, root, instEnvOpts{extra: extra, engine: engine})
+}
+
+// instEnvOpts: extra templates and the engine wrapper (newInstEnvWith),
+// cfg changes the Hub's Config, seed the state before the Hub loads it.
+type instEnvOpts struct {
+	extra  map[string][2]string
+	engine func(*fakeEngine) hub.Engine
+	cfg    func(*hub.Config)
+	seed   func(*state.AppState)
+}
+
+func newInstEnvOpts(t *testing.T, root string, o instEnvOpts) *instEnv {
+	t.Helper()
+	extra, engine := o.extra, o.engine
 	src := filepath.Join(root, "src")
 	tmpls := map[string][2]string{"grafana": {instGrafanaManifest, instGrafanaCompose}, "home": {instHomeManifest, instHomeCompose}}
 	for id, files := range extra {
@@ -403,16 +430,27 @@ func newInstEnvWith(t *testing.T, root string, extra map[string][2]string, engin
 	os.MkdirAll(data, 0755)
 	st := state.New()
 	st.Sources = []state.Source{{Name: "local", Path: src}}
+	if o.seed != nil {
+		o.seed(st)
+	}
 	st.Save(filepath.Join(data, "state.yaml"))
 	eng := newFakeEngine()
 	var he hub.Engine = eng
 	if engine != nil {
 		he = engine(eng)
 	}
-	h, err := hub.New(hub.Config{ProjectDir: filepath.Join(root, "project"), ProjectHostDir: "/host/project", DataDir: data, Domain: "example.org"}, nopRunner{}, he, nil)
+	cfg := hub.Config{ProjectDir: filepath.Join(root, "project"), ProjectHostDir: "/host/project", DataDir: data, Domain: "example.org"}
+	if o.cfg != nil {
+		o.cfg(&cfg)
+	}
+	h, err := hub.New(cfg, nopRunner{}, he, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	// No test resolves a real name (the doctor looks up the main domain).
+	h.SetLookupIP(func(context.Context, string) ([]netip.Addr, error) {
+		return []netip.Addr{netip.MustParseAddr("203.0.113.7")}, nil
+	})
 	h.Init()
 	t.Cleanup(h.Wait)
 	h.SetDomainSource(readyDomains{{Name: "team-b.example.net", State: hub.DomainReady}, {Name: "pending.example.net", State: "pending"}})

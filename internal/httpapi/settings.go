@@ -20,7 +20,7 @@ import (
 // settingsBodyMax bounds a settings body.
 const settingsBodyMax = 256 << 10
 
-func (s *Server) registerSettings(mux *http.ServeMux) {
+func (s *Server) registerSettings(mux routeMux) {
 	mux.HandleFunc("GET /api/instances/{id}/settings", s.handleSettingsPanel)
 	mux.HandleFunc("PUT /api/instances/{id}/settings", s.handleSaveSettings)
 	mux.HandleFunc("POST /api/instances/{id}/settings/preview", s.handlePreviewSettings)
