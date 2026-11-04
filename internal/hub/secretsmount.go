@@ -220,12 +220,15 @@ func (h *Hub) checkSecretsMounts(ctx context.Context, t *templates.Template) err
 	}
 	if len(mounters) > 0 {
 		// A shared pid or ipc namespace reaches a mounting service's
-		// files (/proc/<pid>/root) or memory (fix round 1).
+		// files (/proc/<pid>/root) or memory, in either direction (a
+		// mounter joining another service's namespace exposes them
+		// there): with a mounter, every service's pid / ipc stays
+		// private — no host, container:* or service:* (fix round 1).
 		for _, n := range names {
 			for field, v := range map[string]string{"pid": all[n].Pid, "ipc": all[n].Ipc} {
-				lv := strings.ToLower(strings.TrimSpace(v))
-				src, isSvc := strings.CutPrefix(lv, "service:")
-				if lv == "host" || strings.HasPrefix(lv, "container:") || (isSvc && mounters[src]) {
+				switch lv := strings.ToLower(strings.TrimSpace(v)); {
+				case lv == "", lv == "private", field == "ipc" && (lv == "shareable" || lv == "none"):
+				default:
 					return refuse("service %s shares the %s namespace %s", n, field, v)
 				}
 			}

@@ -784,11 +784,14 @@ func TestPreUpRefusesSharedNamespaces(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, ov := range map[string]string{
-		"pid service": "services:\n  spy:\n    image: x\n    pid: service:smb\n",
-		"ipc service": "services:\n  spy:\n    image: x\n    ipc: service:smb\n",
-		"pid host":    "services:\n  spy:\n    image: x\n    pid: host\n",
-		"ipc host":    "services:\n  spy:\n    image: x\n    ipc: host\n",
-		"pid ctr":     "services:\n  spy:\n    image: x\n    pid: container:abc\n",
+		"pid service":         "services:\n  spy:\n    image: x\n    pid: service:smb\n",
+		"ipc service":         "services:\n  spy:\n    image: x\n    ipc: service:smb\n",
+		"pid host":            "services:\n  spy:\n    image: x\n    pid: host\n",
+		"ipc host":            "services:\n  spy:\n    image: x\n    ipc: host\n",
+		"pid ctr":             "services:\n  spy:\n    image: x\n    pid: container:abc\n",
+		"mounter pid service": "services:\n  web:\n    image: x\n  smb:\n    pid: service:web\n",
+		"mounter ipc service": "services:\n  web:\n    image: x\n  smb:\n    ipc: service:web\n",
+		"unrelated pair":      "services:\n  a:\n    image: x\n  b:\n    image: x\n    pid: service:a\n",
 	} {
 		writeFile(t, f.h.userOverridePath(smbB), ov)
 		err := f.h.checkSecretsMounts(t.Context(), f.h.Template(smbB))
