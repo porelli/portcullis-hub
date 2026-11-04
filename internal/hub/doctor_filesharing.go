@@ -8,11 +8,13 @@ import (
 	"net/http"
 	"path"
 	"slices"
+	"strings"
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/doctor"
 	"github.com/portcullis/hub/internal/folderfix"
 	"github.com/portcullis/hub/internal/settings"
+	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
 )
 
@@ -239,15 +241,38 @@ func (revokeLeaverFixer) Apply(h *Hub, f doctor.Finding, params map[string]strin
 		return nil, err
 	}
 	if planHash == "" || c.hash != planHash {
-		return nil, errSetupChanged()
+		return nil, errCredentialChanged()
 	}
 	return h.startAsync(c.inst, OpRevokeLeaver, func(ready func()) (map[string]string, []string, error) {
 		ready()
-		if err := h.AdminRevokeCredential(ctx, c.inst, c.key, c.user, actor); err != nil {
+		// Only the previewed credential (fix round 1): one regenerated or
+		// created since is left alone, under the same lock as the revoke.
+		if err := h.adminRevokeCredentialID(ctx, c.inst, c.key, c.user, actor, c.id); err != nil {
 			return nil, nil, err
 		}
 		return map[string]string{"user": c.user, "key": c.key}, nil, nil
 	})
+}
+
+// errCredentialChanged: revoke_leaver's credential isn't the previewed one.
+func errCredentialChanged() error {
+	return statusErr(http.StatusConflict, "the credential changed since the preview: preview it again")
+}
+
+// adminRevokeCredentialID is the admin revoke of exactly credential id
+// (409 when the active credential is another one, or none).
+func (h *Hub) adminRevokeCredentialID(ctx context.Context, instance, key, user, actor, id string) error {
+	if id == "" {
+		return errCredentialChanged()
+	}
+	n, err := h.revokeCredentialsN(ctx, instance, []revocation{{key: key, user: user, by: strings.ToLower(actor), reason: state.CredentialReasonAdmin, id: id}})
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return errCredentialChanged()
+	}
+	return nil
 }
 
 // ── person_tree_owner ───────────────────────────────────
@@ -267,7 +292,7 @@ func (personTreeOwnerFixer) fixTarget(_ *Hub, f doctor.Finding, _ map[string]str
 // and the probe's identity of it.
 type treeCalc struct {
 	inst, key, user, tree string
-	uid                   int
+	uid, owner            int
 	pools                 []string
 	dev, ino              uint64
 	mountRoot             string
@@ -336,13 +361,19 @@ func (h *Hub) treePlan(ctx context.Context, f doctor.Finding, params map[string]
 	if !path.IsAbs(pr.RelMountRoot) || templates.HasControlChars(pr.RelMountRoot) {
 		return nil, statusErr(http.StatusInternalServerError, "person_tree_owner: the probe reported no mount root for %s", child)
 	}
-	c.dev, c.ino, c.mountRoot = pr.Dev, pr.Ino, pr.RelMountRoot
+	if pr.UID != c.uid {
+		// Fix round 1: only a folder the person already owns has its
+		// group and mode corrected; another owner's is a former
+		// account's — the Hub never moves data.
+		return nil, statusErr(http.StatusConflict, "explain-only: %s belongs to uid %d, not %s's (uid %d): a former account's folder; move it by hand (the Hub never moves data)", child, pr.UID, c.user, c.uid)
+	}
+	c.dev, c.ino, c.mountRoot, c.owner = pr.Dev, pr.Ino, pr.RelMountRoot, pr.UID
 	c.line = fmt.Sprintf("chown %d:%d + chmod 0700 %s (not recursive)", c.uid, c.uid, child)
 	c.hash = fixHash(struct {
 		Kind, FP, Instance, Key, User, Tree, MountRoot string
-		UID                                            int
+		UID, Owner                                     int
 		Dev, Ino                                       uint64
-	}{doctor.FixPersonTreeOwner, f.FP, c.inst, c.key, c.user, c.tree, c.mountRoot, c.uid, c.dev, c.ino})
+	}{doctor.FixPersonTreeOwner, f.FP, c.inst, c.key, c.user, c.tree, c.mountRoot, c.uid, c.owner, c.dev, c.ino})
 	return c, nil
 }
 
@@ -388,7 +419,7 @@ func (personTreeOwnerFixer) Apply(h *Hub, f doctor.Finding, params map[string]st
 		}
 		rep, err := h.runFixer(ctx, fixerRun{Mode: "childfix", Source: root,
 			Opts:  folderfix.Options{ExpectDev: c.dev, ExpectIno: c.ino, ExpectMountRoot: c.mountRoot},
-			Extra: folderfix.ArgsExtra{Rel: rel, Child: folderfix.ChildFix{Name: c.user, UID: c.uid}}})
+			Extra: folderfix.ArgsExtra{Rel: rel, Child: folderfix.ChildFix{Name: c.user, UID: c.uid, Owner: c.owner}}})
 		if err != nil {
 			return nil, nil, err
 		}

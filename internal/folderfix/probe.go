@@ -10,12 +10,16 @@ import (
 
 // ProbeReport is what probe answers about a path below a bind root.
 type ProbeReport struct {
-	Version   int    `json:"version"`
-	Mode      string `json:"mode"`
-	Root      string `json:"root"`
-	Rel       string `json:"rel"`
-	Dev       uint64 `json:"dev"`
-	Ino       uint64 `json:"ino"`
+	Version int    `json:"version"`
+	Mode    string `json:"mode"`
+	Root    string `json:"root"`
+	Rel     string `json:"rel"`
+	Dev     uint64 `json:"dev"`
+	Ino     uint64 `json:"ino"`
+	// UID / GID: the path's owner and group, when it exists (the
+	// person_tree_owner preview binds the owner, fix round 1).
+	UID       int    `json:"uid"`
+	GID       int    `json:"gid"`
 	Symlink   string `json:"symlink"` // the first symlink component ("" = none)
 	Exists    bool   `json:"exists"`
 	Created   bool   `json:"created"`
@@ -122,7 +126,7 @@ func probe(root, rel string, create bool, subs []string) (*ProbeReport, error) {
 		closeFD(fd)
 		fd, at, last = nfd, crel, fst
 	}
-	p.Exists, p.Dev, p.Ino = true, last.Dev, last.Ino
+	p.Exists, p.Dev, p.Ino, p.UID, p.GID = true, last.Dev, last.Ino, int(last.UID), int(last.GID)
 	if name, _, _, err := fsInfo(fd); err == nil {
 		p.FSType = name
 	}

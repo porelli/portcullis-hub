@@ -132,9 +132,22 @@ func TestPersonTreeOwnerFinding(t *testing.T) {
 	rfs := smbIn()
 	rfs.Trees = []TreeIn{treeIn()}
 	rfs.Report = &settings.HookReport{Version: 1, Findings: []settings.HookFinding{{Code: "wrong_owner", Severity: "warning", Subject: "alice", Message: "wrong", UID: i64(10000)}}}
+	rfs.ReportAt = time.Now()
+	// Fix round 1: the report alone is explain-only (no scan has shown
+	// alice's own uid owning it) — same fingerprint.
 	rep := of(t, KindPersonTreeOwner, treeInputs(rfs, time.Time{}))
-	if len(rep) != 1 || rep[0].FP != a.FP || rep[0].FixKind != FixPersonTreeOwner {
-		t.Errorf("from the report = %+v", rep)
+	if len(rep) != 1 || rep[0].FP != a.FP || rep[0].Class != FixExplain || rep[0].FixKind != "" || len(rep[0].Steps) == 0 {
+		t.Errorf("from the report alone = %+v", rep)
+	}
+	// An older scan showing another owner: still explain-only.
+	other := treeInputs(rfs, rfs.ReportAt.Add(-time.Hour), folderfix.ChildOwner{Name: "alice", UID: 10023, GID: 10023, Mode: 0o700, Dir: true})
+	if rep := of(t, KindPersonTreeOwner, other); len(rep) != 1 || rep[0].Class != FixExplain {
+		t.Errorf("report + scan of another owner = %+v", rep)
+	}
+	// An older scan showing alice's own uid: one-click.
+	own := treeInputs(rfs, rfs.ReportAt.Add(-time.Hour), folderfix.ChildOwner{Name: "alice", UID: 10000, GID: 10000, Mode: 0o700, Dir: true})
+	if rep := of(t, KindPersonTreeOwner, own); len(rep) != 1 || rep[0].FP != a.FP || rep[0].Class != FixOneClick || rep[0].FixKind != FixPersonTreeOwner {
+		t.Errorf("report + scan of alice's uid = %+v", rep)
 	}
 	// Generic disk checks leave a tree scan alone.
 	in.Scans["/srv/homes"] = ScanIn{Target: "/srv/homes", Tree: true, Report: &folderfix.Report{Symlinks: folderfix.Count{N: 3}, HardLinks: folderfix.Count{N: 1}}}

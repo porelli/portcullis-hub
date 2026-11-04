@@ -1337,7 +1337,7 @@ func TestRootChildFix(t *testing.T) {
 	}
 	dev, ino := ids(t, alice)
 	o := Options{Root: base, ExpectDev: dev, ExpectIno: ino, ExpectMountRoot: effectiveMountRoot(ms, alice)}
-	r, err := FixChild(o, "tm", ChildFix{Name: "alice", UID: 20000})
+	r, err := FixChild(o, "tm", ChildFix{Name: "alice", UID: 20000, Owner: 20000})
 	if err != nil {
 		t.Fatalf("childfix: %v (%+v)", err, r)
 	}
@@ -1353,7 +1353,7 @@ func TestRootChildFix(t *testing.T) {
 	if !reflect.DeepEqual(inside, after) {
 		t.Errorf("childfix changed something inside the child (it isn't recursive):\n%v\n%v", inside, after)
 	}
-	if r, err := FixChild(o, "tm", ChildFix{Name: "alice", UID: 20000}); err != nil || r.Changed != 0 {
+	if r, err := FixChild(o, "tm", ChildFix{Name: "alice", UID: 20000, Owner: 20000}); err != nil || r.Changed != 0 {
 		t.Errorf("second run: changed %d, %v", r.Changed, err)
 	}
 
@@ -1370,12 +1370,14 @@ func TestRootChildFix(t *testing.T) {
 		setfaclUnavailable(t, "bind mount: %v", err)
 	}
 	defer unix.Unmount(mp, unix.MNT_DETACH)
+	mkdirOwned(t, filepath.Join(tree, "erin"), 0o755, 20005, 20005)
 	was := diskTree(t, base)
-	for name, why := range map[string]string{"bob": "symlink", "carol": "not a directory", "dave": "another mount"} {
+	for name, why := range map[string]string{"bob": "symlink", "carol": "not a directory", "dave": "dave is its own filesystem (dataset/subvolume): fix it on the host",
+		"erin": "owned by uid 20005 now"} {
 		d, i := ids(t, filepath.Join(tree, name))
 		ms, _ := readMountinfo()
 		ro := Options{Root: base, ExpectDev: d, ExpectIno: i, ExpectMountRoot: effectiveMountRoot(ms, filepath.Join(tree, name))}
-		if _, err := FixChild(ro, "tm", ChildFix{Name: name, UID: 20003}); !IsRefused(err) || !strings.Contains(err.Error(), why) {
+		if _, err := FixChild(ro, "tm", ChildFix{Name: name, UID: 20003, Owner: 20003}); !IsRefused(err) || !strings.Contains(err.Error(), why) {
 			t.Errorf("%s: %v, want a refusal (%s)", name, err, why)
 		}
 	}

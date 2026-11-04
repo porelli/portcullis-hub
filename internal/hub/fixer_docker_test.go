@@ -412,14 +412,15 @@ func TestDockerSelfContainerID(t *testing.T) {
 }
 
 // treeVolume is a per-person tree in a fresh volume: t (root 0755) with
-// alice's directory (1000:100 0700) holding a file (1000:100 0640).
+// alice's directory (20000:100 0700: her own, with the wrong group)
+// holding a file (1000:100 0640).
 func treeVolume(t *testing.T) (string, string) {
 	t.Helper()
 	name := fmt.Sprintf("pcfixtree-%d", time.Now().UnixNano())
 	dockerCLI(t, "volume", "create", name)
 	t.Cleanup(func() { exec.Command("docker", "volume", "rm", "-f", name).Run() })
 	dockerCLI(t, "run", "--rm", "--network", "none", "-v", name+":/v", HelperImage, "sh", "-c",
-		"mkdir -p /v/t/alice && echo x > /v/t/alice/f && chown -R 1000:100 /v/t/alice && chmod 0700 /v/t/alice && chmod 0640 /v/t/alice/f && "+
+		"mkdir -p /v/t/alice && echo x > /v/t/alice/f && chown 20000:100 /v/t/alice && chown 1000:100 /v/t/alice/f && chmod 0700 /v/t/alice && chmod 0640 /v/t/alice/f && "+
 			"chown 0:0 /v /v/t && chmod 0755 /v /v/t")
 	return name, dockerCLI(t, "volume", "inspect", "--format", "{{.Mountpoint}}", name)
 }
@@ -444,7 +445,7 @@ func TestDockerChildFixCaps(t *testing.T) {
 			}
 			r := fixerRun{Mode: "childfix", Source: src,
 				Opts:  folderfix.Options{ExpectDev: pr.Dev, ExpectIno: pr.Ino, ExpectMountRoot: pr.RelMountRoot},
-				Extra: folderfix.ArgsExtra{Rel: "t", Child: folderfix.ChildFix{Name: "alice", UID: 20000}}}
+				Extra: folderfix.ArgsExtra{Rel: "t", Child: folderfix.ChildFix{Name: "alice", UID: 20000, Owner: 20000}}}
 			if err := r.validate(); err != nil {
 				t.Fatal(err)
 			}

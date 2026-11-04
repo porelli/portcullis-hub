@@ -235,8 +235,9 @@ func TestChildFixRefusals(t *testing.T) {
 		{"link", "alice", "link is a symlink", o},
 		{"tm", "alice", "not the directory the preview saw", Options{Root: root, ExpectDev: dev, ExpectIno: ino + 1, ExpectMountRoot: "/srv/tm/alice"}},
 		{"tm", "alice", "needs the child's device", Options{Root: root, ExpectDev: dev, ExpectIno: ino}},
+		{"tm", "alice", "is mounted from", Options{Root: root, ExpectDev: dev, ExpectIno: ino, ExpectMountRoot: "/elsewhere/alice"}},
 	} {
-		r, err := FixChild(c.o, c.rel, ChildFix{Name: c.name, UID: uid})
+		r, err := FixChild(c.o, c.rel, ChildFix{Name: c.name, UID: uid, Owner: uid})
 		if !IsRefused(err) || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%s/%s: %v, want a refusal %q", c.rel, c.name, err, c.want)
 		}
@@ -251,10 +252,96 @@ func TestChildFixRefusals(t *testing.T) {
 		t.Error("something written through the symlink")
 	}
 	// Through Main: a refusal is exit 2 with its report.
-	code, out, _ := runMain("childfix", "--root="+root, "--rel=tm", "--child=carol:"+strconv.Itoa(uid),
+	code, out, _ := runMain("childfix", "--root="+root, "--rel=tm", "--child=carol:"+strconv.Itoa(uid), "--expect-uid="+strconv.Itoa(uid),
 		"--expect-dev="+strconv.FormatUint(dev, 10), "--expect-ino="+strconv.FormatUint(ino, 10), "--expect-mount-root=/srv/tm/carol")
 	if code != 2 || !strings.Contains(out, `"mode":"childfix"`) || !strings.Contains(out, "symlink") {
 		t.Errorf("Main: exit %d out %q", code, out)
+	}
+}
+
+// TestChildFixOwner (fix round 1): childfix only corrects the group and
+// mode of a folder the person already owns: an expected owner other than
+// the uid, or a folder owned by another uid now, is refused (exit 2) with
+// nothing changed.
+func TestChildFixOwner(t *testing.T) {
+	root := t.TempDir()
+	mkdir(t, filepath.Join(root, "tm"), 0o755)
+	mkdir(t, filepath.Join(root, "tm", "alice"), 0o755)
+	alice := filepath.Join(root, "tm", "alice")
+	dev, ino := rootIDs(t, alice)
+	ms, _ := readMountinfo()
+	mr := effectiveMountRoot(ms, alice)
+	o := Options{Root: root, ExpectDev: dev, ExpectIno: ino, ExpectMountRoot: mr}
+	if mr == "" {
+		o.ExpectMountRoot = "/m" // no mountinfo here: only the first case reaches its check
+	}
+	me := os.Getuid()
+	before := treeState(t, root)
+	for name, c := range map[string]ChildFix{
+		"expected owner isn't the uid": {Name: "alice", UID: me + 1, Owner: me},
+		"owned by another uid now":     {Name: "alice", UID: me + 1, Owner: me + 1},
+	} {
+		if mr == "" && c.Owner != c.UID-1 {
+			continue
+		}
+		if _, err := FixChild(o, "tm", c); !IsRefused(err) || !strings.Contains(err.Error(), "uid") {
+			t.Errorf("%s: %v, want a refusal", name, err)
+		}
+	}
+	if after := treeState(t, root); !reflect.DeepEqual(before, after) {
+		t.Error("a refused childfix changed something")
+	}
+}
+
+// TestChildFixRaces (fix round 1): entries swapped between childfix's
+// steps (the test hooks after each lstat and open) are refused with
+// nothing changed: the child swapped for a symlink or another directory,
+// renamed after the open, a tree component swapped for a symlink.
+func TestChildFixRaces(t *testing.T) {
+	t.Cleanup(func() { testHookChildFix = nil })
+	for _, c := range []struct {
+		name, stage, at, want string
+		swap                  func(root string)
+	}{
+		{"child to symlink", "lstat", "tm/alice", "changed", func(root string) {
+			must(t, os.Rename(filepath.Join(root, "tm", "alice"), filepath.Join(root, "moved")))
+			must(t, os.Symlink(filepath.Join(root, "moved"), filepath.Join(root, "tm", "alice")))
+		}},
+		{"child to another directory", "lstat", "tm/alice", "changed", func(root string) {
+			must(t, os.Rename(filepath.Join(root, "tm", "alice"), filepath.Join(root, "moved")))
+			mkdir(t, filepath.Join(root, "tm", "alice"), 0o755)
+		}},
+		{"child renamed after the open", "open", "tm/alice", "changed while it was opened", func(root string) {
+			must(t, os.Rename(filepath.Join(root, "tm", "alice"), filepath.Join(root, "tm", "renamed")))
+		}},
+		{"tree component to symlink", "lstat", "tm", "changed", func(root string) {
+			must(t, os.Rename(filepath.Join(root, "tm"), filepath.Join(root, "tm2")))
+			must(t, os.Symlink(filepath.Join(root, "tm2"), filepath.Join(root, "tm")))
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			root := t.TempDir()
+			mkdir(t, filepath.Join(root, "tm"), 0o755)
+			mkdir(t, filepath.Join(root, "tm", "alice"), 0o755)
+			writeFile(t, filepath.Join(root, "tm", "alice", "inside"), 0o644)
+			dev, ino := rootIDs(t, filepath.Join(root, "tm", "alice"))
+			fired := false
+			testHookChildFix = func(stage, rel string) {
+				if !fired && stage == c.stage && rel == c.at {
+					fired = true
+					c.swap(root)
+				}
+			}
+			defer func() { testHookChildFix = nil }()
+			me := os.Getuid()
+			r, err := FixChild(Options{Root: root, ExpectDev: dev, ExpectIno: ino, ExpectMountRoot: "/m"}, "tm", ChildFix{Name: "alice", UID: me, Owner: me})
+			if !fired {
+				t.Fatal("the hook never ran")
+			}
+			if !IsRefused(err) || !strings.Contains(err.Error(), c.want) || r.Changed != 0 {
+				t.Errorf("%v (changed %d), want a refusal %q", err, r.Changed, c.want)
+			}
+		})
 	}
 }
 
@@ -427,7 +514,9 @@ func TestCLIArgs(t *testing.T) {
 		// Task 11: --top-only needs --children; childfix exactly one child
 		// with a uid above 0, its identity and mount root.
 		{"scan", "--root=" + root, "--top-only"},
-		{"childfix", "--root=" + root, "--rel=tm", "--child=alice:20000", "--expect-dev=1", "--expect-ino=2"},
+		{"childfix", "--root=" + root, "--rel=tm", "--child=alice:20000", "--expect-uid=20000", "--expect-dev=1", "--expect-ino=2"},
+		{"childfix", "--root=" + root, "--rel=tm", "--child=alice:20000", "--expect-dev=1", "--expect-ino=2", "--expect-mount-root=/m"},
+		{"childfix", "--root=" + root, "--rel=tm", "--child=alice:20000", "--expect-uid=x", "--expect-dev=1", "--expect-ino=2", "--expect-mount-root=/m"},
 		{"childfix", "--root=" + root, "--rel=tm", "--child=alice:0", "--expect-dev=1", "--expect-ino=2", "--expect-mount-root=/m"},
 		{"childfix", "--root=" + root, "--rel=tm", "--child=a/b:20000", "--expect-dev=1", "--expect-ino=2", "--expect-mount-root=/m"},
 		{"childfix", "--root=" + root, "--rel=tm", "--child=..:20000", "--expect-dev=1", "--expect-ino=2", "--expect-mount-root=/m"},
@@ -451,7 +540,7 @@ func TestCLIArgs(t *testing.T) {
 	}{
 		{"probe", Options{Root: "/broot"}, ArgsExtra{Rel: "photos/2024", Create: true}},
 		{"scan", Options{Root: "/folder", ExpectDev: 64, ExpectIno: 2, Children: true, TopOnly: true, MaxEntries: 10, MaxTime: time.Second}, ArgsExtra{}},
-		{"childfix", Options{Root: "/broot", ExpectDev: 64, ExpectIno: 9, ExpectMountRoot: "/srv/tm/alice"}, ArgsExtra{Rel: "tm", Child: ChildFix{Name: "alice", UID: 20000}}},
+		{"childfix", Options{Root: "/broot", ExpectDev: 64, ExpectIno: 9, ExpectMountRoot: "/srv/tm/alice"}, ArgsExtra{Rel: "tm", Child: ChildFix{Name: "alice", UID: 20000, Owner: 20000}}},
 		{"scan", Options{Root: "/folder", ExpectDev: 64, ExpectIno: 2, ExpectMountRoot: "/srv/pho tos",
 			Target:     Target{GID: 60001, Files: "r", OwnerUID: &owner},
 			Principals: []Principal{{Name: "immich", UID: 1000, GIDs: []int{1000, 60001}}, {Name: "samba", UID: 0, GIDs: []int{0}, Write: true}},
@@ -509,6 +598,9 @@ func TestProbe(t *testing.T) {
 	dev, ino := rootIDs(t, filepath.Join(root, "a", "b"))
 	if err != nil || !p.Exists || p.Symlink != "" || p.Dev != dev || p.Ino != ino || p.Created {
 		t.Fatalf("a/b: %+v %v", p, err)
+	}
+	if p.UID != os.Getuid() {
+		t.Errorf("a/b owner %d, want %d (fix round 1: the probe reports the owner)", p.UID, os.Getuid())
 	}
 	if p, err := Probe(root, "a/missing", false); err != nil || p.Exists || p.Ino != 0 {
 		t.Fatalf("missing: %+v %v", p, err)

@@ -164,6 +164,8 @@ func (r fixerRun) validate() error {
 			return fmt.Errorf("childfix: child %q", x.Child.Name)
 		case x.Child.UID <= 0 || x.Child.UID >= 0xFFFFFFFF:
 			return fmt.Errorf("childfix: uid %d", x.Child.UID)
+		case x.Child.Owner != x.Child.UID:
+			return fmt.Errorf("childfix: the child must already be owned by uid %d (owner %d)", x.Child.UID, x.Child.Owner)
 		case !identity:
 			return errors.New("childfix needs the child's device, inode and mount root")
 		case o.Target.GID != 0 || o.Target.OwnerUID != nil || len(o.Target.Mkdir) > 0 || len(o.Principals) > 0 || o.Children || o.ExpectDigest != "" ||

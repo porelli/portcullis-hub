@@ -32,6 +32,21 @@ const ChildMode = 0o700
 type ChildFix struct {
 	Name string
 	UID  int
+	// Owner (--expect-uid): the owner the preview's probe saw, which must
+	// be UID and must still be the child's: the fix only corrects the
+	// group and mode of a directory the person already owns (fix round 1);
+	// a folder of another uid is a former account's, never moved.
+	Owner int
+}
+
+// testHookChildFix, if set, runs at each step of FixChild (stage
+// "lstat" / "open", the relative path): tests swap entries there.
+var testHookChildFix func(stage, rel string)
+
+func childHook(stage, rel string) {
+	if testHookChildFix != nil {
+		testHookChildFix(stage, rel)
+	}
 }
 
 // validChildName: one component, no ':' (the --child separator), no
@@ -81,6 +96,9 @@ func FixChild(o Options, rel string, c ChildFix) (*Report, error) {
 	if c.UID <= 0 || c.UID >= 0xFFFFFFFF {
 		return r, fmt.Errorf("uid %d out of range", c.UID)
 	}
+	if c.Owner != c.UID {
+		return r, refuse("%s: owned by uid %d, not %d: only the group and mode of a person's own folder are fixed (a former account's folder is moved by hand): nothing changed", c.Name, c.Owner, c.UID)
+	}
 	if o.ExpectDev == 0 || o.ExpectIno == 0 || o.ExpectMountRoot == "" {
 		return r, refuse("childfix needs the child's device, inode and mount root")
 	}
@@ -95,6 +113,7 @@ func FixChild(o Options, rel string, c ChildFix) (*Report, error) {
 	for _, comp := range strings.Split(rel, "/") {
 		crel := joinRel(at, comp)
 		st, err := lstatAt(fd, comp)
+		childHook("lstat", crel)
 		switch {
 		case errors.Is(err, fs.ErrNotExist):
 			return r, refuse("%s doesn't exist", crel)
@@ -106,6 +125,7 @@ func FixChild(o Options, rel string, c ChildFix) (*Report, error) {
 			return r, refuse("%s is not a directory", crel)
 		}
 		nfd, err := openPathDir(fd, comp)
+		childHook("open", crel)
 		if err != nil {
 			return r, refuse("%s changed: %v", crel, err)
 		}
@@ -122,6 +142,7 @@ func FixChild(o Options, rel string, c ChildFix) (*Report, error) {
 	}
 	crel := joinRel(rel, c.Name)
 	st, err := lstatAt(fd, c.Name)
+	childHook("lstat", crel)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		return r, refuse("%s doesn't exist", crel)
@@ -133,6 +154,7 @@ func FixChild(o Options, rel string, c ChildFix) (*Report, error) {
 		return r, refuse("%s is not a directory: nothing changed", crel)
 	}
 	cfd, err := openPathDir(fd, c.Name)
+	childHook("open", crel)
 	if err != nil {
 		return r, refuse("%s changed: %v", crel, err)
 	}
@@ -155,7 +177,7 @@ func FixChild(o Options, rel string, c ChildFix) (*Report, error) {
 	full := path.Join(o.Root, crel)
 	_, isMount := mountRootOf(ms, full)
 	if isMount || fst.Dev != tree.Dev || (fst.MntID != 0 && tree.MntID != 0 && fst.MntID != tree.MntID) {
-		return r, refuse("%s is another mount: nothing changed", crel)
+		return r, refuse("%s is its own filesystem (dataset/subvolume): fix it on the host; nothing changed", c.Name)
 	}
 	r.MountRoot = effectiveMountRoot(ms, full)
 	if fst.Dev != o.ExpectDev || fst.Ino != o.ExpectIno {
@@ -163,6 +185,9 @@ func FixChild(o Options, rel string, c ChildFix) (*Report, error) {
 	}
 	if r.MountRoot != o.ExpectMountRoot {
 		return r, refuse("%s is mounted from %q, want %q: preview it again", crel, r.MountRoot, o.ExpectMountRoot)
+	}
+	if int(fst.UID) != c.Owner {
+		return r, refuse("%s is owned by uid %d now, not %d: a former account's folder is moved by hand: nothing changed", crel, fst.UID, c.Owner)
 	}
 	ok, err := idMapsIdentity()
 	if err != nil {
@@ -178,7 +203,7 @@ func FixChild(o Options, rel string, c ChildFix) (*Report, error) {
 		return r, refuse("%s is on %s: the Hub changes ownership only on ext4, xfs, btrfs and zfs", crel, r.FSType)
 	}
 	uid := uint32(c.UID)
-	if fst.UID != uid || fst.GID != uid || fst.Mode&modePerm != ChildMode {
+	if fst.GID != uid || fst.Mode&modePerm != ChildMode {
 		// fchown clears setuid / setgid, so the mode is set after it.
 		if err := chownPathFD(cfd, uid, uid); err != nil {
 			return r, fmt.Errorf("chown %s: %w", crel, err)

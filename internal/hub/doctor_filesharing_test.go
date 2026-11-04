@@ -69,8 +69,33 @@ func TestCanaryFindsUnrevokedHolder(t *testing.T) {
 	if !slices.Equal(plan.Lines, []string{"revoke bob's file-share password for SMB Fixture"}) || plan.Hash == "" {
 		t.Fatalf("preview = %+v", plan)
 	}
-	if _, err := f.h.ApplyFix(context.Background(), fd.FP, nil, strings.Repeat("0", 64), "admin"); errStatus(err) != 409 {
-		t.Fatalf("wrong hash: %v, want 409", err)
+	if _, err := f.h.ApplyFix(context.Background(), fd.FP, nil, strings.Repeat("0", 64), "admin"); errStatus(err) != 409 || !strings.Contains(err.Error(), "the credential changed since the preview") {
+		t.Fatalf("wrong hash: %v, want 409 the credential changed", err)
+	}
+	// Fix round 1: bob's credential regenerated since the preview (a new
+	// id): 409, nothing revoked.
+	f.h.mu.Lock()
+	cred := f.h.st.Credentials[smbID][smbKey]["bob"]
+	prevID := cred.ID
+	cred.ID = "c-bob-new"
+	f.h.st.Credentials[smbID][smbKey]["bob"] = cred
+	f.h.mu.Unlock()
+	if _, err := f.h.ApplyFix(context.Background(), fd.FP, nil, plan.Hash, "admin"); errStatus(err) != 409 || !strings.Contains(err.Error(), "the credential changed since the preview") {
+		t.Fatalf("regenerated credential: %v, want 409", err)
+	}
+	// The revoke itself is bound to the id (a regenerate between the
+	// check and the revoke).
+	if err := f.h.adminRevokeCredentialID(context.Background(), smbID, smbKey, "bob", "admin", prevID); errStatus(err) != 409 {
+		t.Fatalf("stale id: %v, want 409", err)
+	}
+	f.h.mu.Lock()
+	cred = f.h.st.Credentials[smbID][smbKey]["bob"]
+	active := cred.Active()
+	cred.ID = prevID
+	f.h.st.Credentials[smbID][smbKey]["bob"] = cred
+	f.h.mu.Unlock()
+	if !active {
+		t.Fatal("a stale-id revoke revoked the newer credential")
 	}
 	op, err := f.h.ApplyFix(context.Background(), fd.FP, nil, plan.Hash, "admin")
 	if err != nil {
@@ -92,7 +117,7 @@ func TestCanaryFindsUnrevokedHolder(t *testing.T) {
 	if a := credAudits(c.audit, "credential.revoke"); len(a) != 1 || !strings.HasPrefix(a[0], "admin ") {
 		t.Errorf("credential.revoke audits = %q", a)
 	}
-	if a := credAudits(c.audit, "doctor.fix"); len(a) != 2 || !strings.Contains(a[1], "fix=revoke_leaver "+smbID) || !strings.Contains(a[1], " ok") {
+	if a := credAudits(c.audit, "doctor.fix"); len(a) != 3 || !strings.Contains(a[2], "fix=revoke_leaver "+smbID) || !strings.Contains(a[2], " ok") {
 		t.Errorf("doctor.fix audits = %q", a)
 	}
 	if got := findingsOf(t, f, doctor.KindCredentialWithoutAccess); len(got) != 0 {
@@ -201,6 +226,20 @@ func TestPersonTreeOwnerFix(t *testing.T) {
 		t.Errorf("preview ran %q (read-only %v)", s.Cmd, s.Binds[0].ReadOnly)
 	}
 
+	// Fix round 1: owned by another uid now (the probe reads the owner):
+	// 409 explain-only, no childfix.
+	e.d.mu.Lock()
+	e.d.paths["/srv/homes"].children[0].UID = 20023
+	e.d.mu.Unlock()
+	if _, err := f.h.PreviewFix(context.Background(), fd.FP, nil); errStatus(err) != 409 || !strings.Contains(err.Error(), "explain-only") {
+		t.Fatalf("another owner: preview %v, want 409 explain-only", err)
+	}
+	if _, err := f.h.ApplyFix(context.Background(), fd.FP, nil, plan.Hash, "admin"); errStatus(err) != 409 || !strings.Contains(err.Error(), "explain-only") {
+		t.Fatalf("another owner: apply %v, want 409 explain-only", err)
+	}
+	e.d.mu.Lock()
+	e.d.paths["/srv/homes"].children[0].UID = e.alice
+	e.d.mu.Unlock()
 	// Another inode since the preview: 409, nothing run.
 	e.d.mu.Lock()
 	e.d.paths["/srv/homes/alice"].ino++
@@ -231,7 +270,7 @@ func TestPersonTreeOwnerFix(t *testing.T) {
 	}
 	alice := e.d.paths["/srv/homes/alice"]
 	for flag, v := range map[string]string{"root": "/broot", "rel": "homes", "child": "alice:" + strconv.Itoa(e.alice),
-		"expect-dev": strconv.FormatUint(alice.dev, 10), "expect-ino": strconv.FormatUint(alice.ino, 10), "expect-mount-root": "/srv/homes/alice"} {
+		"expect-uid": strconv.Itoa(e.alice), "expect-dev": strconv.FormatUint(alice.dev, 10), "expect-ino": strconv.FormatUint(alice.ino, 10), "expect-mount-root": "/srv/homes/alice"} {
 		if got, _ := argValue(fix.Cmd, flag); got != v {
 			t.Errorf("childfix --%s = %q, want %q (%q)", flag, got, v, fix.Cmd)
 		}
@@ -239,7 +278,7 @@ func TestPersonTreeOwnerFix(t *testing.T) {
 	if b := fix.Binds[0]; b.Source != "/srv" || b.Target != "/broot" || b.ReadOnly || !slices.Equal(fix.CapAdd, []string{"CHOWN", "FOWNER"}) {
 		t.Errorf("childfix bind %+v caps %v", b, fix.CapAdd)
 	}
-	if a := credAudits(e.audit, "doctor.fix"); len(a) != 2 || !strings.Contains(a[0], " refused ") || !strings.Contains(a[1], "fix=person_tree_owner "+smbID+" /srv/homes/alice") || !strings.Contains(a[1], " ok") {
+	if a := credAudits(e.audit, "doctor.fix"); len(a) != 3 || !strings.Contains(a[0], " refused ") || !strings.Contains(a[1], " refused ") || !strings.Contains(a[2], "fix=person_tree_owner "+smbID+" /srv/homes/alice") || !strings.Contains(a[2], " ok") {
 		t.Errorf("doctor.fix audits = %q", a)
 	}
 	// The tree was checked again: alice's directory is fine now.

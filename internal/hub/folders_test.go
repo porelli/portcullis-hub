@@ -121,6 +121,15 @@ func (d *fakeDisk) run(s docker.RunSpec, _ func(io.Reader) error) (*docker.RunRe
 			}
 			if e != nil {
 				p.Exists, p.Dev, p.Ino, p.FSType, p.RelMountRoot = true, e.dev, e.ino, e.fs, e.mountRoot
+				// A tree's child: its owner and group from the tree's children.
+				full := path.Join(src, rel)
+				if parent := d.paths[path.Dir(full)]; parent != nil {
+					for _, c := range parent.children {
+						if c.Name == path.Base(full) {
+							p.UID, p.GID = c.UID, c.GID
+						}
+					}
+				}
 			}
 		}
 		if p.Exists {

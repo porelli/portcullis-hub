@@ -39,7 +39,7 @@ var modeFlags = map[string][]string{
 	"snapshot": {"root", "expect-dev", "expect-ino", "expect-mount-root", "gid", "files", "owner", "out", "kind", "in", "expect-snapshot-root"},
 	"apply":    {"root", "expect-dev", "expect-ino", "expect-mount-root", "expect-digest", "gid", "files", "owner", "expect", "mkdir"},
 	"restore":  {"root", "expect-dev", "expect-ino", "expect-mount-root", "gid", "in", "dry-run", "expect-snapshot-root"},
-	"childfix": {"root", "rel", "child", "expect-dev", "expect-ino", "expect-mount-root"},
+	"childfix": {"root", "rel", "child", "expect-uid", "expect-dev", "expect-ino", "expect-mount-root"},
 }
 
 // Args is the argv (after "hub folderfix") for a run: the only form the Hub
@@ -60,6 +60,7 @@ func Args(mode string, o Options, x ArgsExtra) []string {
 	case "childfix":
 		add("rel", x.Rel)
 		add("child", formatChild(x.Child))
+		add("expect-uid", strconv.Itoa(x.Child.Owner))
 		add("expect-dev", strconv.FormatUint(o.ExpectDev, 10))
 		add("expect-ino", strconv.FormatUint(o.ExpectIno, 10))
 		add("expect-mount-root", o.ExpectMountRoot)
@@ -208,6 +209,7 @@ func parseArgs(args []string) (string, Options, ArgsExtra, error) {
 	fs.Var(&principals, "principal", "")
 	children := fs.Bool("children", false, "")
 	topOnly := fs.Bool("top-only", false, "")
+	expectUID := fs.String("expect-uid", "", "")
 	var childs listFlag
 	fs.Var(&childs, "child", "")
 	maxEntries := fs.Int64("max-entries", 0, "")
@@ -271,8 +273,11 @@ func parseArgs(args []string) (string, Options, ArgsExtra, error) {
 		if err != nil {
 			return "", o, x, err
 		}
-		if *dev == 0 || *mroot == "" || !strings.HasPrefix(*mroot, "/") {
-			return "", o, x, errors.New("childfix needs --rel, --child, --expect-dev, --expect-ino and --expect-mount-root (absolute)")
+		if *dev == 0 || *mroot == "" || !strings.HasPrefix(*mroot, "/") || *expectUID == "" {
+			return "", o, x, errors.New("childfix needs --rel, --child, --expect-uid, --expect-dev, --expect-ino and --expect-mount-root (absolute)")
+		}
+		if c.Owner, err = parseID(*expectUID); err != nil {
+			return "", o, x, fmt.Errorf("--expect-uid: %v", err)
 		}
 		o.ExpectDev, o.ExpectIno, o.ExpectMountRoot = *dev, *ino, *mroot
 		x.Rel, x.Child = *rel, c

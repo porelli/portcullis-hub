@@ -208,7 +208,7 @@ func judgeTrees(in *Inputs) []Finding {
 				out = append(out, treeFromScan(fs, app, t, s)...)
 				continue
 			}
-			out = append(out, treeFromReport(fs, app, t, len(trees) == 1)...)
+			out = append(out, treeFromReport(fs, app, t, len(trees) == 1, s, scanned)...)
 		}
 	}
 	return out
@@ -284,8 +284,11 @@ func treeFromScan(fs FileSharingIn, app string, t TreeIn, s ScanIn) []Finding {
 
 // treeFromReport: the hook report's former_account and wrong_owner
 // findings about tree t (their option is t's key; with a single tree, a
-// finding without an option is t's too).
-func treeFromReport(fs FileSharingIn, app string, t TreeIn, only bool) []Finding {
+// finding without an option is t's too). A wrong_owner offers the
+// one-click fix only when the tree's scan s (older than the report) shows
+// the person's own uid owning the directory (fix round 1: the fix never
+// takes a folder from another owner); else it is explain-only.
+func treeFromReport(fs FileSharingIn, app string, t TreeIn, only bool, s ScanIn, scanned bool) []Finding {
 	if fs.Report == nil {
 		return nil
 	}
@@ -309,7 +312,21 @@ func treeFromReport(fs FileSharingIn, app string, t TreeIn, only bool) []Finding
 			}
 			out = append(out, formerFinding(fs, app, t, f.Subject, owner))
 		case codeWrongOwner:
-			out = append(out, ownerFinding(fs, app, t, f.Subject, uid, "the app reports another group or mode"))
+			subj := f.Subject
+			wf := ownerFinding(fs, app, t, subj, uid, "the app reports another group or mode")
+			own := false
+			if scanned {
+				for _, c := range s.Report.Children {
+					own = own || (c.Name == subj && c.Dir && c.UID == uid)
+				}
+			}
+			if !own {
+				wf.Class, wf.FixKind, wf.Fix = FixExplain, "", ""
+				wf.Why = fmt.Sprintf("%s reports that `%s` doesn't have the owner, group or mode a person's folder needs (%d:%d, mode 0700); no disk check has shown it owned by %s's uid yet.",
+					app, path.Join(t.HostPath, subj), uid, uid, subj)
+				wf.Steps = []string{"Run the disk check (Doctor → Check disks): the one-click fix is offered once the check shows the folder is owned by the person's own uid; a folder of another uid is a former account's, moved by hand."}
+			}
+			out = append(out, wf)
 		}
 	}
 	return out
