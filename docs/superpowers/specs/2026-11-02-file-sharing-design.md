@@ -1,5 +1,7 @@
 # File sharing: file-share passwords, Samba and Time Machine
 
+Amended 2026-11-04 by the plan 3 preflight rulings (F2, F7, F34, F39, F40, F42, F51); see the contract §13 for the binding form.
+
 Status: approved (2026-11-02)
 
 Project 3 of 3: (1) [app settings panel](2026-11-02-app-settings-panel-design.md)
@@ -367,26 +369,7 @@ brainstorm. The others were made while drafting this spec.
       `CUSTOM_SMB_PROTO=SMB3`, `CUSTOM_SMB_AUTH=ntlmv2-only`,
       `SAMBA_CONF_MAP_TO_GUEST=Never`, `HIDE_SHARES=yes`.
 11. **Time Machine template mechanics.**
-    - The template's `entrypoint:` is a Portcullis wrapper (`/portcullis/start`):
-      1. it renders `EXTERNAL_CONF` from the people data file, one `.conf`
-         per person with a password:
-         - `TM_UID` = `TM_GID` = the person's uid (a private group);
-         - `VOLUME_SIZE_LIMIT` = their resolved limit in MiB, empty =
-           unlimited;
-         - `SHARE_NAME` = `<share prefix>-<username>`;
-         - `PASSWORD` = a throwaway random value made in the container and
-           never stored;
-      2. it execs mbentley's `/entrypoint.sh` with `command:`
-         `/portcullis/post`;
-      3. `post` runs `portcullis-sync`, which imports the real NT hashes over
-         the throwaway ones (`pdbedit -i smbpasswd:<file>`, from a 0600 temp
-         file in tmpfs), hardens and verifies `smb.conf`, then execs
-         `s6-svscan /etc/s6`.
-    - smbd starts only after the real hashes are in place, so the throwaway
-      passwords never serve a request.
-    - With nobody holding a password, there are no accounts and no shares,
-      and the default `timemachine` account is never created. CI asserts
-      both.
+    - `start` = `portcullis-sync --boot`, then `exec s6-svscan` over a copy of `/etc/s6` without avahi, dbus and nmbd. mbentley's `/entrypoint.sh` never runs; there are no throwaway passwords and no `EXTERNAL_CONF`. The image's default `timemachine` account is never created; CI asserts it with nobody eligible and with people.
     - Live changes: the hook edits the share's
       `fruit:time machine max size`, adds or removes accounts and stanzas,
       then runs `smbcontrol all reload-config`.
@@ -402,16 +385,15 @@ brainstorm. The others were made while drafting this spec.
       the smbpasswd passdb from the secrets directory, shares written to an
       included file), then execs `runsvdir -P /container/config/runit`.
     - Shares:
-      - **Home**: `path = <homes>/%U`, `valid users = %U`. The folder is
+      - **Home**: `path = /homes/%u`, `valid users` = the explicit list of people served (never empty). The folder is
         created by `portcullis-sync`, owned by the person's uid, mode 0700.
-      - **Shared folders**: one per row of the `shares` table:
-        - name, a project 2 folder, read groups and write groups;
+      - **Shared folders**: 8 fixed slots `share<n>_folder|name|readers|writers`:
         - `valid users` = readers ∪ writers, `write list` = writers,
           `read only = yes`. Nobody else can open the share, not even
           other people of the instance (call 26);
-        - `force group` = the folder's gid
-          (`PORTCULLIS_FOLDER_GID_<KEY>`, project 2 call 4);
-        - `create mask 0660`, `directory mask 2770`.
+        - `force group` = the folder's gid from `PORTCULLIS_FOLDER_GID_SHARE<n>_FOLDER` in compose `environment:`;
+        - `create mask 0660`, `directory mask 2770`;
+        - `requires_any: [share<n>_readers, share<n>_writers]`.
 
         Files therefore land as `<person uid>:<folder gid>`, which is what
         project 2 keeps consistent.
@@ -422,7 +404,7 @@ brainstorm. The others were made while drafting this spec.
     - If the folder is owned by another uid (a deleted account whose
       username was created again), it is **not** served.
     - The hook reports it, and project 2's doctor shows a finding: "alice's
-      Time Machine folder belongs to a former account (uid 10023)".
+      Time Machine folder belongs to a former account (uid 20023)".
     - Moving or deleting the folder is explain-only (project 2 call 11).
     - Former members' folders stay on disk. The File sharing tab lists them
       with their size.
@@ -451,18 +433,7 @@ brainstorm. The others were made while drafting this spec.
       - `smb://<connect address>[:port]/<share>` and the username;
       - for Time Machine: "Finder → Go → Connect to Server, then System
         Settings → Time Machine → Add Backup Disk".
-    - **Opt-in:** the admin sets the path option "Host Avahi services
-      directory" (e.g. `/etc/avahi/services`; the host runs `avahi-daemon`).
-      - The container's own Avahi is disabled.
-      - The template writes one service file, `portcullis-<instance>.service`.
-        It advertises `_smb._tcp` on the published port; for Time Machine
-        also `_adisk._tcp` with the share entries and `_device-info._tcp`
-        with the model.
-      - The host's Avahi announces the host's own name, which is where the
-        ports are published.
-      - Samba uses the image's built-in `/external/avahi` mode. Time Machine
-        copies mbentley's generated `smbd.service`, adjusted.
-      - Disabling the option removes the file.
+    - **Opt-in:** both templates mount the host's Avahi services directory (a path option) at `/portcullis/avahi`; a boolean option `advertise` (applies live) controls `portcullis-<instance>.service`. With advertise false (while mounted) the script removes the file, and it also removes it on container stop (a finish script). The option help says to turn off advertising before clearing the directory.
     - **Not used:** host networking (it collides with the host's Avahi and
       Samba, binds every interface, allows one instance per host, and
       `network_mode` can't be a setting) and macvlan (host-specific network
@@ -474,13 +445,12 @@ brainstorm. The others were made while drafting this spec.
     question 4; amends project 1 call 20).
     - `person_id` gains `pool:`. Every option in every instance with the same
       pool shares one allocation per person. The file-sharing templates use
-      pool `posix_uid`, range 10000-59999. That is clear of project 2's
-      folder gids (60000-60999) and of 65534.
+      pool `posix_uid`, range 20000–59999. The allocator also refuses a static reserved set (0–999, 1000, 10000–10099, 65534, 60000–60999) and skips any uid a hook report or per-person tree scan lists as an owner. On a secrets-epoch mismatch every pool's next id advances by 1000.
     - Allocated the first time a person needs one, never reused (deleted
       people are tombstoned), kept in Hub state, carried by the Hub's own
       backup.
     - A template states "each person's uid" as
-      `runs_as: {uid_from: <person_id key>, gid: folder}` in its `folder`
+      `runs_as: {uid_from: <person_id key>}` with `joins_group: template` in its `folder`
       block. The per-person private group form
       `runs_as: {uid_from: …, gid_from: …}` is call 29.
     - `person_id` is never shown on My apps (`self_visible: false`).
@@ -759,7 +729,7 @@ settings:
     - key: uid
       label: File owner id
       type: person_id
-      pool: posix_uid                   # Hub-wide, 10000-59999
+      pool: posix_uid                   # Hub-wide, 20000-59999
       self_visible: false
       delivery: [{file: {name: people, field: uid}}]
     - key: size_limit
@@ -783,10 +753,10 @@ settings:
         access: write
         runs_as: {uid_from: uid, gid_from: uid}   # private group per person (call 29)
         joins_group: template
-        checks:
-          - {kind: filesystem, needs: [xattr], not: [nfs, cifs, fuse],
-             reason: "Time Machine stores metadata in extended attributes"}
-          - {kind: exclusive, reason: "Backup bundles must not be written by other apps"}
+      checks:
+        - {kind: filesystem, needs: [xattr], not: [nfs, cifs, fuse],
+           reason: "Time Machine stores metadata in extended attributes"}
+        - {kind: exclusive, reason: "Backup bundles must not be written by other apps"}
     - key: share_prefix
       label: Share name prefix
       type: string
@@ -796,7 +766,7 @@ settings:
     - key: connect_address
       label: Address people connect to
       type: string
-      format: hostname                  # an IP address must also be accepted (project 1 format list)
+      format: hostname                  # `hostname` accepts dotted IPv4 (`templates.ValidHostname`)
       required: true
       section: Network
       self_visible: true                # shown on My apps as the server address
@@ -804,7 +774,7 @@ settings:
       label: Host Avahi services directory (Bonjour advertising)
       description: "Empty = off. Advertising shows every share name, which contains usernames, to everyone on the local network."
       type: path
-      target: {service: timemachine, mount: /external/avahi}
+      target: {service: timemachine, mount: /portcullis/avahi}
       section: Network
       applies: restart
     - key: model
@@ -816,7 +786,7 @@ settings:
       applies: restart
       section: Network
 # locked in compose.yml (not settings): CUSTOM_SMB_PROTO=SMB3, CUSTOM_SMB_AUTH=ntlmv2-only,
-# HIDE_SHARES=yes, SET_PERMISSIONS=false, EXTERNAL_CONF=/run/portcullis/conf,
+# HIDE_SHARES=yes, SET_PERMISSIONS=false,
 # tmpfs /run/samba, ulimits nofile 65536, cap_drop ALL + the minimal cap_add set.
 ```
 
@@ -830,18 +800,23 @@ settings:
       type: path
       target: {service: samba, mount: /homes}
       folder: {access: write, runs_as: {uid_from: uid, gid_from: uid}, joins_group: template}
-    - key: shares
-      label: Shared folders
-      type: table
-      key: name
-      columns:
-        - {key: name, type: string, pattern: "^[A-Za-z0-9][A-Za-z0-9 _-]{0,31}$"}
-        - {key: folder, type: folder, mount: "/shares/{name}",
-           runs_as: {uid_from: uid, gid: folder}, joins_group: template}
-        - {key: readers, type: groups}   # valid users = readers ∪ writers (call 26)
-        - {key: writers, type: groups}   # at least one group across both
-      applies: restart                  # new mounts; group edits alone apply live
-      delivery: [{file: {name: people, field: shares, render: {expand_members: true}}}]
+    - key: share1_folder
+      label: "Share 1: Folder"
+      type: folder
+      target: {service: samba, mount: /shares/1}
+      folder: {access: write, runs_as: {uid_from: uid}, joins_group: template}
+      requires_any: [share1_readers, share1_writers]
+    - key: share1_name
+      label: "Share 1: Name"
+      type: string
+      pattern: "^[A-Za-z0-9][A-Za-z0-9 _-]{0,31}$"
+    - key: share1_readers
+      label: "Share 1: Read groups"
+      type: groups
+    - key: share1_writers
+      label: "Share 1: Write groups"
+      type: groups
+    # … shares 2–8 …
 ```
 
 ## Example: the resulting UI behaviour
@@ -883,10 +858,10 @@ Time Machine                                         No web page · SMB
 ⚠ SMB (port 445) listens on all interfaces (0.0.0.0). File sharing should only be
   reachable from your local networks or VPN.                 [ Rebind… ] (doctor)
 People with access: 42 · passwords: 17
-  alice   uid 10007   10 GiB   password since 2 Nov 2026     [ Revoke ]
-  bob     uid 10011    2 TiB   no password
+  alice   uid 20007   10 GiB   password since 2 Nov 2026     [ Revoke ]
+  bob     uid 20011    2 TiB   no password
   …
-Former members' folders: carol (uid 10003) 182 GiB · kept on disk
+Former members' folders: carol (uid 20003) 182 GiB · kept on disk
 Last sync: ok, 2 Nov 2026 14:03 (live, no restart)
 ```
 
@@ -907,8 +882,7 @@ Last sync: ok, 2 Nov 2026 14:03 (live, no restart)
   - file deliveries and the secrets file mounted as **directories** (call 7);
   - the hook trigger `credential_change`, and the revoke-on-leave bypass of
     the debounce (call 6);
-  - the `table` column types `folder` (project 2) and `groups`, a per-row
-    mount pattern, and `render: {expand_members: true}`. That render puts the
+  - `render: {expand_members: true}` on `groups` options. That render puts the
     current members of each referenced group, limited to the instance's
     population, into the data file;
   - `GET /api/me/apps` `credentials[]`, and the people-listener allowlist that
@@ -955,9 +929,6 @@ Last sync: ok, 2 Nov 2026 14:03 (live, no restart)
 - Fresh-auth plumbing details if the certificates project hasn't built them
   yet; route payload shapes; metadata file location.
 - UI layout within the existing styles; the macOS/Windows how-to text.
-- Whether mbentley's entrypoint copes with an empty `EXTERNAL_CONF` directory
-  (no people yet); if not, the wrapper starts it with a placeholder that
-  creates no account.
 
 ## Open questions
 
