@@ -74,13 +74,25 @@ type Revocation struct {
 // person_secret options of the template are not judged. Sorted by
 // instance, key, user.
 //
+// An instance in creds without a view in tmpls (its template is missing)
+// has every active credential revoked (leave): fail closed.
+//
 // person_secret templates are router-less with group access (F1), so
 // their population doesn't depend on the sign-in mode.
 func credentialRevocations(m *directory.Membership, creds map[string]map[string]map[string]state.Credential, tmpls map[string]*templates.Template) []Revocation {
 	var out []Revocation
-	for _, id := range slices.Sorted(maps.Keys(tmpls)) {
+	for _, id := range slices.Sorted(maps.Keys(creds)) {
 		t := tmpls[id]
-		if t == nil || len(creds[id]) == 0 {
+		if t == nil {
+			// No view (the template is missing): nothing can say who may
+			// hold one — everyone goes (fail closed).
+			for _, key := range slices.Sorted(maps.Keys(creds[id])) {
+				for _, u := range slices.Sorted(maps.Keys(creds[id][key])) {
+					if c := creds[id][key][u]; c.Active() {
+						out = append(out, Revocation{Instance: id, Key: key, User: u, ID: c.ID, Reason: state.CredentialReasonLeave})
+					}
+				}
+			}
 			continue
 		}
 		opts := personSecretOptions(t)
@@ -222,7 +234,12 @@ func (h *Hub) CheckCredentialHolders(ctx context.Context) (int, error) {
 		byInst[r.Instance] = append(byInst[r.Instance], revocation{key: r.Key, user: r.User, by: purgeActor, reason: r.Reason, id: r.ID})
 	}
 	for id, rs := range byInst {
-		if t := tmpls[id]; populationIn(t, m, false).Why == WhyNoAccess {
+		t := tmpls[id]
+		if t == nil {
+			log.Printf("ERROR: credentials: %s: holds %d active file-sharing password(s) but its template is missing: revoking them all and stopping its project (fail closed; people must create new ones)", id, len(rs))
+			continue
+		}
+		if populationIn(t, m, false).Why == WhyNoAccess {
 			// F31: LLDAP answers without the access group — everyone goes
 			// (fail closed, irreversible: each person creates again).
 			log.Printf("ERROR: credentials: %s: Users & Groups answers but has no access group %s: revoking all %d active file-sharing password(s) of the instance (fail closed; people must create new ones)", id, accessGroupOf(t), len(rs))
@@ -235,6 +252,9 @@ func (h *Hub) CheckCredentialHolders(ctx context.Context) (int, error) {
 		}
 	}
 	h.mu.RUnlock()
+	if h.testHookHolderJudged != nil {
+		h.testHookHolderJudged()
+	}
 
 	// The revocations, one instance per goroutine (each live apply may
 	// take its lock wait and hook timeout).
@@ -267,7 +287,10 @@ func (h *Hub) CheckCredentialHolders(ctx context.Context) (int, error) {
 		}
 		prev := h.loadDelivered(id).Members
 		if prev == nil {
-			continue // never delivered with a snapshot: its next run records it
+			// Never recorded: unknown counts as changed (the debounced run
+			// records it; an armed timer is kept).
+			h.queueDelivery(id, TriggerMembership, settings.EffectNone, settingsDebounce)
+			continue
 		}
 		removed, added := membersDiff(prev, current[id])
 		switch {

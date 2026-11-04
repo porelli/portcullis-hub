@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/portcullis/hub/internal/directory"
 )
 
 // The spec: a corrupt directory.yaml refuses to start; a missing one is
@@ -121,5 +123,29 @@ func TestFreshAuthFromEnv(t *testing.T) {
 		if _, err := freshAuthFromEnv(get(map[string]string{"HUB_KEYCLOAK_PUBLIC_URL": bad}), "example.org", "http://keycloak:8080"); err == nil {
 			t.Errorf("HUB_KEYCLOAK_PUBLIC_URL=%q accepted", bad)
 		}
+	}
+}
+
+type fakeDirHub struct{ syncs, checks int }
+
+func (f *fakeDirHub) TriggerDirectorySync()   { f.syncs++ }
+func (f *fakeDirHub) TriggerCredentialCheck() { f.checks++ }
+
+// Plan 3 Task 9: OnChange triggers the directory sync and the holder
+// check; OnEvaluated (every evaluator run) the holder check only.
+func TestWireDirectoryHooks(t *testing.T) {
+	dir := &directory.Service{}
+	h := &fakeDirHub{}
+	wireDirectoryHooks(dir, h)
+	if dir.OnChange == nil || dir.OnEvaluated == nil {
+		t.Fatal("hooks not set")
+	}
+	dir.OnChange()
+	if h.syncs != 1 || h.checks != 1 {
+		t.Errorf("OnChange: syncs %d checks %d", h.syncs, h.checks)
+	}
+	dir.OnEvaluated()
+	if h.syncs != 1 || h.checks != 2 {
+		t.Errorf("OnEvaluated: syncs %d checks %d", h.syncs, h.checks)
 	}
 }

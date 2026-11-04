@@ -436,22 +436,24 @@ func (h *Hub) revokeCredentialsN(ctx context.Context, instance string, revs []re
 		err error
 	}
 	var done []outcome
-	var err error
+	var errs []error
 	h.mu.Lock()
 	for _, r := range revs {
+		// A failed commit never stops the others (fix round 1): each is
+		// revoked in memory, the errors collected, applied once below.
 		changed, rerr := h.revokeLocked(instance, r, now)
 		if changed {
 			done = append(done, outcome{r, rerr})
 		}
 		if rerr != nil {
-			if !changed {
-				done = append(done, outcome{r, rerr})
-			}
-			err = rerr
-			break
+			errs = append(errs, rerr)
 		}
 	}
 	h.mu.Unlock()
+	err := errors.Join(errs...)
+	if len(errs) == 1 {
+		err = errs[0] // keeps its status (500)
+	}
 	applied := false
 	for _, o := range done {
 		actor := o.r.by
@@ -505,6 +507,9 @@ func (h *Hub) applyRevocation(ctx context.Context, id string) {
 	live := h.findLocked(id)
 	if live == nil {
 		h.mu.RUnlock()
+		// No view (the template is missing): nothing tells which service
+		// holds the accounts — the project is killed by name (fix round 1).
+		h.revocationKillByName(id)
 		return
 	}
 	t := *live
@@ -667,6 +672,43 @@ func (h *Hub) revocationKill(t *templates.Template, cause error) {
 	h.setOwed(t.ID, settings.EffectRestart)
 	tmpl := *t
 	h.goBackground(func() { h.Restart(tmpl) })
+}
+
+// revocationKillByName is step 3 for an instance without a view: its
+// project down by name, else SIGKILL to its containers; op record
+// credentials; no restart (nothing to start it from). No project
+// running: nothing.
+func (h *Hub) revocationKillByName(id string) {
+	if !templates.ValidID(id) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	name := projectName(id)
+	var cs []docker.Container
+	if h.engine != nil {
+		var lerr error
+		cs, lerr = h.engine.ListContainers(ctx, docker.Filters{"label": {docker.LabelProject + "=" + name}})
+		if lerr == nil && len(cs) == 0 {
+			return
+		}
+	}
+	log.Printf("credentials: %s: a revocation on an instance without a template: stopping project %s", id, name)
+	err := h.compose.DownByName(ctx, name)
+	if err != nil && h.engine != nil {
+		for _, c := range cs {
+			if kerr := h.engine.ContainerKill(ctx, c.ID, "KILL"); kerr != nil {
+				err = errors.Join(err, kerr)
+			}
+		}
+		err = fmt.Errorf("containers sent SIGKILL after: %w", err)
+	}
+	rec := errors.New(errRevokeNotLive)
+	if err != nil {
+		log.Printf("ERROR: credentials: %s: stopping the project failed: %v", id, err)
+		rec = fmt.Errorf("revocation could not be applied live and stopping the instance failed: %w", err)
+	}
+	h.recordOp(id, h.opRecordOf(id, OpCredentials, rec, false))
 }
 
 // hookCredentialsLocked is t's HookInput.Credentials: per person_secret

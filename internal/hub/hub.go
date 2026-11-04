@@ -429,6 +429,10 @@ type Hub struct {
 	// goroutine only).
 	credKick     chan struct{}
 	credCheckErr string
+	// testHookHolderJudged, if set, runs in CheckCredentialHolders
+	// between the judgement and the revocations (tests: a change racing
+	// the check).
+	testHookHolderJudged func()
 	// testHookInit, if set, is called at Init's stages (tests: order).
 	testHookInit func(stage string)
 	// testHookApplyRestore, if set, runs at applyRestore's stages

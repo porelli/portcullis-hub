@@ -211,18 +211,8 @@ func main() {
 			return directory.ProtectedGroups(os.Getenv("INVITE_PROTECTED_GROUPS"),
 				env("HUB_GATE_MAP_FILE", filepath.Join(projectDir, "group-gate", "group-gate-map.conf")))
 		},
-		// Expiries, user attributes and Keycloak mappers follow every
-		// directory change (coalesced in the Hub's background sync); so
-		// does the file-sharing holder check, at once (contract §13.16:
-		// Hub-made removals revoke with no debounce).
-		OnChange: func() {
-			h.TriggerDirectorySync()
-			h.TriggerCredentialCheck()
-		},
-		// The holder check also follows every evaluator run (its 60 s
-		// tick catches edits made straight in LLDAP; F27).
-		OnEvaluated: h.TriggerCredentialCheck,
 	}
+	wireDirectoryHooks(dir, h)
 	// Instance operations are audited in the same log (contract §11.7);
 	// instance groups go through the same guardrails (§11.4 step 5).
 	h.SetAudit(dir.Audit)
@@ -393,4 +383,25 @@ func newHTTPServer(addr string, h http.Handler) *http.Server {
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 	}
+}
+
+// directoryHub is what the directory's change hooks drive.
+type directoryHub interface {
+	TriggerDirectorySync()
+	TriggerCredentialCheck()
+}
+
+// wireDirectoryHooks sets dir's OnChange and OnEvaluated (both
+// non-blocking). Expiries, user attributes and Keycloak mappers follow
+// every directory change (coalesced in the Hub's background sync); so
+// does the file-sharing holder check, at once (contract §13.16: Hub-made
+// removals revoke with no debounce). The holder check also follows every
+// evaluator run: its 60 s tick catches edits made straight in LLDAP
+// (F27).
+func wireDirectoryHooks(dir *directory.Service, h directoryHub) {
+	dir.OnChange = func() {
+		h.TriggerDirectorySync()
+		h.TriggerCredentialCheck()
+	}
+	dir.OnEvaluated = h.TriggerCredentialCheck
 }

@@ -546,3 +546,125 @@ func TestCredentialRevocations(t *testing.T) {
 		}
 	}
 }
+
+// Fix round 1 #1: an instance holding credentials whose view is gone
+// (template missing) is judged too — everyone revoked (leave) — and its
+// project is killed by name (no view to compose down), op credentials.
+func TestNoViewRevokesAndKills(t *testing.T) {
+	c := credSvcFixture(t)
+	cc := c.create(t, "bob")
+	credentials.Zero(cc.Password)
+	c.f.h.mu.Lock()
+	var kept []templates.Template
+	for _, it := range c.f.h.instances {
+		if it.ID != smbID {
+			kept = append(kept, it)
+		}
+	}
+	c.f.h.instances = kept
+	c.f.h.mu.Unlock()
+	if c.f.h.Template(smbID) != nil {
+		t.Fatal("the view is still there")
+	}
+	byName := countCalls(c.f, "downbyname:"+smbProject)
+	n, err := c.f.h.CheckCredentialHolders(context.Background())
+	if err != nil || n != 1 {
+		t.Fatalf("CheckCredentialHolders = %d, %v", n, err)
+	}
+	if c.active("bob") || c.reason("bob") != state.CredentialReasonLeave {
+		t.Errorf("bob: active %t reason %q", c.active("bob"), c.reason("bob"))
+	}
+	if _, has := c.hashFile("bob"); has {
+		t.Error("hash file left")
+	}
+	if countCalls(c.f, "downbyname:"+smbProject) <= byName {
+		t.Errorf("the project was not taken down by name: %v", c.f.runner.Calls())
+	}
+	if r := c.f.h.LastOp(smbID); r == nil || r.Op != OpCredentials || r.OK {
+		t.Errorf("op record %+v", r)
+	}
+	if got := credentialRevocations(&directory.Membership{Users: map[string]map[string]int{}}, map[string]map[string]map[string]state.Credential{"gone": {"k": {"x": {ID: "1", UUID: "u"}}}}, nil); len(got) != 1 || got[0].Reason != state.CredentialReasonLeave {
+		t.Errorf("pure: %+v", got)
+	}
+	settle(c.f)
+}
+
+// Fix round 1 #2: one failed commit doesn't stop the instance's other
+// revocations: both leavers are revoked (in memory, files gone), the
+// error returned, the revocation applied.
+func TestFailedCommitKeepsRevoking(t *testing.T) {
+	c := credSvcFixture(t)
+	for _, u := range []string{"alice", "bob"} {
+		cc := c.create(t, u)
+		credentials.Zero(cc.Password)
+	}
+	c.people.removeMember("users_"+smbID, "alice")
+	c.people.removeMember("users_"+smbID, "bob")
+	before := len(credExecs(c.f, templates.HookCredentialChange))
+	restore := readOnlyData(t, c.f)
+	n, err := c.f.h.CheckCredentialHolders(context.Background())
+	restore()
+	if err == nil || n != 2 {
+		t.Fatalf("CheckCredentialHolders = %d, %v; want 2 and the save error", n, err)
+	}
+	for _, u := range []string{"alice", "bob"} {
+		if c.active(u) {
+			t.Errorf("%s still active", u)
+		}
+		if _, has := c.hashFile(u); has {
+			t.Errorf("%s's hash file left", u)
+		}
+	}
+	if len(credExecs(c.f, templates.HookCredentialChange)) <= before {
+		t.Error("not applied live")
+	}
+	settle(c.f)
+}
+
+// Fix round 1 #3: no Members record (never delivered with a snapshot)
+// counts as changed: a debounced delivery is queued.
+func TestNilMembersRecordQueuesDelivery(t *testing.T) {
+	c := credSvcFixture(t)
+	settle(c.f)
+	d := c.f.h.loadDelivered(smbID)
+	d.Members = nil
+	c.f.h.saveDelivered(smbID, d)
+	runs := deliveryRuns(c.f.h, smbID)
+	if _, err := c.f.h.CheckCredentialHolders(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	c.f.h.Wait()
+	if runs.Load() != 0 {
+		t.Error("ran at once")
+	}
+	if !c.f.h.DeliveryStatus(smbID).Pending {
+		t.Error("no debounced delivery queued")
+	}
+	settle(c.f)
+	if c.f.h.loadDelivered(smbID).Members == nil {
+		t.Error("the delivery recorded no members")
+	}
+}
+
+// Fix round 1 #5: a credential re-created after the check judged the
+// old one is left alone (Revocation.ID).
+func TestStaleJudgementSparesNewCredential(t *testing.T) {
+	c := credSvcFixture(t)
+	cc := c.create(t, "bob")
+	credentials.Zero(cc.Password)
+	c.people.removeMember("users_"+smbID, "bob")
+	c.f.h.testHookHolderJudged = func() {
+		c.f.h.mu.Lock()
+		cr := c.f.h.st.Credentials[smbID][smbKey]["bob"]
+		cr.ID, cr.Version = "recreated", cr.Version+1
+		c.f.h.st.Credentials[smbID][smbKey]["bob"] = cr
+		c.f.h.mu.Unlock()
+	}
+	n, err := c.f.h.CheckCredentialHolders(context.Background())
+	if err != nil || n != 0 {
+		t.Fatalf("CheckCredentialHolders = %d, %v; want 0", n, err)
+	}
+	if !c.active("bob") {
+		t.Error("a credential created after the judgement was revoked")
+	}
+}
