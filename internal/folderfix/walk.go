@@ -2,8 +2,12 @@ package folderfix
 
 import (
 	"bufio"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"io/fs"
 	"path"
@@ -39,7 +43,13 @@ func (s fileStat) same(o fileStat) bool {
 	return s.Dev == o.Dev && s.Ino == o.Ino && s.typ() == o.typ()
 }
 
-var errNotRegular = errors.New("not a regular file")
+var (
+	errNotRegular   = errors.New("not a regular file")
+	errTooManyNames = errors.New("too many names in one directory")
+)
+
+// maxPathBytes: a longer path can't be snapshotted (R49).
+const maxPathBytes = 4096
 
 // maxDepth bounds the directories the walk holds open at once.
 const maxDepth = 512
@@ -51,7 +61,13 @@ var (
 	testHookAfterOpen  func(rel string)
 	// noACLForTest makes the walk behave as on a filesystem without ACLs.
 	noACLForTest bool
+	// testHookMkdir is called with a component's relative path before it is
+	// created (apply --mkdir, probe --create).
+	testHookMkdir func(rel string)
 )
+
+// maxDirNames caps the names read from one directory (a var for tests).
+var maxDirNames = 1_000_000
 
 // mountEntry is one line of /proc/self/mountinfo.
 type mountEntry struct {
@@ -197,6 +213,15 @@ type walker struct {
 	pt       []principalTally
 	stopped  bool
 	visit    func(*node)
+	digest   hash.Hash // over the entries to change (tally)
+	// chain: the open directories below the root, each with the inode its
+	// ".." must still be (R50: a subtree moved out mid-walk is left alone).
+	chain []level
+}
+
+type level struct {
+	fd     int
+	parent fileStat
 }
 
 // openWalker opens the root (O_DIRECTORY|O_NOFOLLOW), checks it is the
@@ -273,6 +298,7 @@ func openWalker(o Options, mode string) (*walker, error) {
 	if w.hasT {
 		w.r.Expected = &Conformance{}
 		w.r.Plan = &PlanCounts{KeepGroup: map[int]int64{}, KeepUser: map[int]int64{}}
+		w.digest = sha256.New()
 	}
 	if o.Children {
 		w.children = map[string]*ChildOwner{}
@@ -301,10 +327,12 @@ func (w *walker) reset() {
 	if w.hasT {
 		w.r.Expected = &Conformance{}
 		w.r.Plan = &PlanCounts{KeepGroup: map[int]int64{}, KeepUser: map[int]int64{}}
+		w.digest = sha256.New()
 	}
 	if w.children != nil {
 		w.children = map[string]*ChildOwner{}
 	}
+	w.start = time.Now()
 	w.owners = map[[2]uint32]int64{}
 	for i := range w.pt {
 		w.pt[i].out = &PrincipalAccess{Name: w.pt[i].p.Name, UID: w.pt[i].p.UID}
@@ -314,6 +342,9 @@ func (w *walker) reset() {
 
 // finish fills the aggregated parts of the report.
 func (w *walker) finish() *Report {
+	if w.r.Plan != nil && w.digest != nil {
+		w.r.Plan.Digest = hex.EncodeToString(w.digest.Sum(nil))
+	}
 	for k, n := range w.owners {
 		w.r.Owners = append(w.r.Owners, OwnerCount{UID: int(k[0]), GID: int(k[1]), N: n})
 	}
@@ -432,7 +463,7 @@ func (w *walker) run(visit func(*node)) {
 		anc[i] = true
 	}
 	if ok := w.handle(n, anc); ok {
-		w.dir(w.rootfd, ".", 0, w.childAnc(n, anc))
+		w.dir(w.rootfd, w.root, ".", 0, w.childAnc(n, anc))
 	}
 }
 
@@ -491,9 +522,12 @@ func (w *walker) handle(n *node, anc []bool) bool {
 	return true
 }
 
-func (w *walker) dir(fd int, rel string, depth int, anc []bool) {
+func (w *walker) dir(fd int, self fileStat, rel string, depth int, anc []bool) {
 	names, err := readNames(fd)
-	if err != nil {
+	if errors.Is(err, errTooManyNames) {
+		w.r.Partial, w.r.PartialReason = true, "names"
+		w.r.errorf("%s: more than %d names: only the first read", rel, maxDirNames)
+	} else if err != nil {
 		w.fail(rel, fmt.Errorf("list: %w", err))
 		return
 	}
@@ -561,14 +595,68 @@ func (w *walker) dir(fd int, rel string, depth int, anc []bool) {
 		if testHookAfterOpen != nil {
 			testHookAfterOpen(crel)
 		}
+		// R50: still in the folder: the entry under its name in this
+		// directory (a directory's ".." is this one), and this directory and
+		// every one above it where the walk found them. A subtree moved out
+		// by a process with a wider view of the filesystem is left alone.
+		var here bool
+		if isDir {
+			here = inPlace(cfd, self)
+		} else {
+			again, err := lstatAt(fd, name)
+			here = err == nil && again.same(fst)
+		}
+		if !here || !w.chainOK() {
+			closeFD(cfd)
+			w.r.Races.add(crel)
+			w.r.errorf("%s: moved during the walk: left alone", crel)
+			if !w.chainOK() {
+				return // this directory itself moved: the rest of it too
+			}
+			continue
+		}
 		if ok := w.handle(n, anc); ok && isDir {
 			if depth+1 >= maxDepth {
 				w.r.Partial, w.r.PartialReason = true, "depth"
 				w.r.errorf("%s: deeper than %d levels: not entered", crel, maxDepth)
 			} else {
-				w.dir(cfd, crel, depth+1, w.childAnc(n, anc))
+				w.chain = append(w.chain, level{fd: cfd, parent: self})
+				w.dir(cfd, fst, crel, depth+1, w.childAnc(n, anc))
+				w.chain = w.chain[:len(w.chain)-1]
 			}
 		}
 		closeFD(cfd)
 	}
+}
+
+// digestEntry adds one entry to change: its path and current state, so an
+// apply can tell the plan is the snapshot's entry for entry (M5).
+func digestEntry(h hash.Hash, n *node) {
+	var b [8]byte
+	num := func(v uint64) { binary.BigEndian.PutUint64(b[:], v); h.Write(b[:]) }
+	str := func(p []byte) { num(uint64(len(p))); h.Write(p) }
+	str([]byte(n.rel))
+	num(n.st.Ino)
+	num(uint64(n.st.UID))
+	num(uint64(n.st.GID))
+	num(uint64(n.st.Mode & modePerm))
+	str(n.raw.access)
+	str(n.raw.def)
+}
+
+// inPlace: fd's ".." is still parent.
+func inPlace(fd int, parent fileStat) bool {
+	st, err := lstatAt(fd, "..")
+	return err == nil && st.Dev == parent.Dev && st.Ino == parent.Ino
+}
+
+// chainOK: every open directory below the root is still where the walk
+// found it (each ".." the recorded parent).
+func (w *walker) chainOK() bool {
+	for _, l := range w.chain {
+		if !inPlace(l.fd, l.parent) {
+			return false
+		}
+	}
+	return true
 }

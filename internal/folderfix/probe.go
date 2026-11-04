@@ -56,30 +56,33 @@ func Probe(root, rel string, create bool) (*ProbeReport, error) {
 			if !create {
 				return p, nil
 			}
+			if testHookMkdir != nil {
+				testHookMkdir(crel)
+			}
 			if err := mkdirAt(fd, c, 0o755); err != nil {
-				return p, refuse("create %s: %v", crel, err)
+				return p, p.failed(refuse("create %s: %v", crel, err))
 			}
 			p.Created = true
 			st, err = lstatAt(fd, c)
 		}
 		if err != nil {
-			return p, err
+			return p, p.failed(err)
 		}
 		if st.isLink() {
 			p.Symlink = crel
 			return p, nil
 		}
 		if !st.isDir() {
-			return p, refuse("%s is not a directory", crel)
+			return p, p.failed(refuse("%s is not a directory", crel))
 		}
 		nfd, err := openAt(fd, c, true)
 		if err != nil {
-			return p, refuse("%s changed during the probe: %v", crel, err)
+			return p, p.failed(refuse("%s changed during the probe: %v", crel, err))
 		}
 		fst, err := fstatFD(nfd)
 		if err != nil || !fst.same(st) {
 			closeFD(nfd)
-			return p, refuse("%s changed during the probe", crel)
+			return p, p.failed(refuse("%s changed during the probe", crel))
 		}
 		closeFD(fd)
 		fd, at, last = nfd, crel, fst
@@ -89,4 +92,12 @@ func Probe(root, rel string, create bool) (*ProbeReport, error) {
 		p.FSType = name
 	}
 	return p, nil
+}
+
+// failed: once probe --create made a directory, no error is a refusal (M3).
+func (p *ProbeReport) failed(err error) error {
+	if p.Created {
+		return unrefuse(err)
+	}
+	return err
 }

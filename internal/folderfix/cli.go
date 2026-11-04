@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path"
+	"regexp"
 	"runtime/debug"
 	"slices"
 	"strconv"
@@ -24,14 +25,16 @@ type ArgsExtra struct {
 	Create bool   // probe
 }
 
+var digestRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
 // SnapshotName is the file snapshot writes in --out and restore reads.
 const SnapshotName = "snapshot.ndjson.gz"
 
 var modeFlags = map[string][]string{
 	"probe":    {"root", "rel", "create"},
 	"scan":     {"root", "expect-dev", "expect-ino", "expect-mount-root", "gid", "files", "owner", "principal", "children", "max-entries", "max-time"},
-	"snapshot": {"root", "expect-dev", "expect-ino", "expect-mount-root", "gid", "files", "owner", "max-entries", "max-time", "out", "kind", "in"},
-	"apply":    {"root", "expect-dev", "expect-ino", "expect-mount-root", "gid", "files", "owner", "max-entries", "max-time", "expect", "mkdir"},
+	"snapshot": {"root", "expect-dev", "expect-ino", "expect-mount-root", "gid", "files", "owner", "out", "kind", "in"},
+	"apply":    {"root", "expect-dev", "expect-ino", "expect-mount-root", "expect-digest", "gid", "files", "owner", "expect", "mkdir"},
 	"restore":  {"root", "expect-dev", "expect-ino", "expect-mount-root", "gid", "in"},
 }
 
@@ -72,7 +75,7 @@ func Args(mode string, o Options, x ArgsExtra) []string {
 			a = append(a, "--children")
 		}
 	}
-	if mode != "restore" {
+	if mode == "scan" {
 		if o.MaxEntries > 0 {
 			add("max-entries", strconv.FormatInt(o.MaxEntries, 10))
 		}
@@ -89,6 +92,7 @@ func Args(mode string, o Options, x ArgsExtra) []string {
 		}
 	case "apply":
 		add("expect", strconv.FormatInt(x.Expect, 10))
+		add("expect-digest", o.ExpectDigest)
 		for _, m := range o.Target.Mkdir {
 			add("mkdir", m)
 		}
@@ -185,6 +189,7 @@ func parseArgs(args []string) (string, Options, ArgsExtra, error) {
 	in := fs.String("in", "", "")
 	kind := fs.String("kind", "apply", "")
 	expect := fs.Int64("expect", -1, "")
+	digest := fs.String("expect-digest", "", "")
 	fs.Var(&mkdirs, "mkdir", "")
 	if err := fs.Parse(args[1:]); err != nil {
 		return "", o, x, err
@@ -277,9 +282,10 @@ func parseArgs(args []string) (string, Options, ArgsExtra, error) {
 			return "", o, x, fmt.Errorf("--kind %q: want apply or undo", clip(*kind, 20))
 		}
 	case "apply":
-		if o.Target.GID == 0 || *expect < 0 || o.ExpectDev == 0 {
-			return "", o, x, errors.New("apply needs --gid, --files, --expect-dev, --expect-ino and --expect")
+		if o.Target.GID == 0 || *expect < 0 || o.ExpectDev == 0 || o.ExpectMountRoot == "" || !digestRe.MatchString(*digest) {
+			return "", o, x, errors.New("apply needs --gid, --files, --expect-dev, --expect-ino, --expect-mount-root, --expect and --expect-digest (64 hex)")
 		}
+		o.ExpectDigest = *digest
 		x.Expect = *expect
 		for _, m := range mkdirs {
 			if err := validSubpath(m); err != nil {
@@ -288,8 +294,8 @@ func parseArgs(args []string) (string, Options, ArgsExtra, error) {
 		}
 		o.Target.Mkdir = mkdirs
 	case "restore":
-		if o.Target.GID == 0 || o.ExpectDev == 0 {
-			return "", o, x, errors.New("restore needs --gid, --expect-dev and --expect-ino")
+		if o.Target.GID == 0 || o.ExpectDev == 0 || o.ExpectMountRoot == "" {
+			return "", o, x, errors.New("restore needs --gid, --expect-dev, --expect-ino and --expect-mount-root")
 		}
 		if err := cleanAbs("in", *in); err != nil {
 			return "", o, x, err
@@ -397,7 +403,8 @@ func runSnapshot(o Options, x ArgsExtra) (*Report, error) {
 }
 
 func dropSamples(r *Report) {
-	cs := []*Count{&r.HardLinks, &r.MountPoints, &r.Specials, &r.Symlinks, &r.SetID, &r.Races, &r.BadACL, &r.Failed, &r.ChangedSince}
+	cs := []*Count{&r.HardLinks, &r.MountPoints, &r.Specials, &r.Symlinks, &r.SetID, &r.Races, &r.BadACL, &r.Failed, &r.ChangedSince,
+		&r.Skipped.PathTooLong, &r.Skipped.ACLTooLarge}
 	if e := r.Expected; e != nil {
 		cs = append(cs, &e.Group, &e.Setgid, &e.DefaultACL, &e.Mode, &e.Owner)
 	}

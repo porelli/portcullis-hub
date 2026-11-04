@@ -33,6 +33,9 @@ func (w *walker) checkHeader(h snapHeader) error {
 	if h.Kind != "apply" {
 		return refuse("snapshot kind %q: only an apply snapshot can be restored", h.Kind)
 	}
+	if h.Rules != planRules {
+		return refuse("the snapshot was made under rules %d, this fixer has %d", h.Rules, planRules)
+	}
 	if h.RootDev != w.root.Dev || h.RootIno != w.root.Ino {
 		return refuse("the snapshot is of another directory (device %d inode %d, the folder is %d/%d)", h.RootDev, h.RootIno, w.root.Dev, w.root.Ino)
 	}
@@ -63,15 +66,15 @@ func Restore(o Options, snapshot io.Reader) (*Report, error) {
 		return w.report(), err
 	}
 	if s, ok := snapshot.(io.Seeker); ok {
-		if err := readSnapshot(snapshot, w.checkHeader, func(snapLine, state) error { return nil }); err != nil {
+		if err := readSnapshot(snapshot, w.checkHeader, func(snapLine, state, string) error { return nil }); err != nil {
 			return w.report(), err
 		}
 		if _, err := s.Seek(0, io.SeekStart); err != nil {
 			return w.report(), err
 		}
 	}
-	err = readSnapshot(snapshot, w.checkHeader, func(l snapLine, s state) error {
-		w.restoreLine(l, s, nil)
+	err = readSnapshot(snapshot, w.checkHeader, func(l snapLine, s state, p string) error {
+		w.restoreLine(l, s, p, nil)
 		return nil
 	})
 	r := w.report()
@@ -98,8 +101,8 @@ func WriteUndoSnapshot(o Options, apply io.ReadSeeker, out io.Writer) (*Report, 
 	defer w.close()
 	var hdr snapHeader
 	var count int64
-	err = readSnapshot(apply, func(h snapHeader) error { hdr = h; return w.checkHeader(h) }, func(l snapLine, s state) error {
-		if w.restoreLine(l, s, func(*node) error { return nil }) {
+	err = readSnapshot(apply, func(h snapHeader) error { hdr = h; return w.checkHeader(h) }, func(l snapLine, s state, p string) error {
+		if w.restoreLine(l, s, p, func(*node) error { return nil }) {
 			count++
 		}
 		return nil
@@ -117,8 +120,8 @@ func WriteUndoSnapshot(o Options, apply io.ReadSeeker, out io.Writer) (*Report, 
 		return w.report(), err
 	}
 	var werr error
-	err = readSnapshot(apply, w.checkHeader, func(l snapLine, s state) error {
-		w.restoreLine(l, s, func(n *node) error {
+	err = readSnapshot(apply, w.checkHeader, func(l snapLine, s state, p string) error {
+		w.restoreLine(l, s, p, func(n *node) error {
 			if werr == nil {
 				werr = sw.line(n)
 			}
@@ -145,47 +148,47 @@ func WriteUndoSnapshot(o Options, apply io.ReadSeeker, out io.Writer) (*Report, 
 
 // restoreLine restores one entry (emit nil) or hands it to emit (undo
 // snapshot). true = the entry is one a restore rewrites.
-func (w *walker) restoreLine(l snapLine, rec state, emit func(*node) error) bool {
-	fd, st, ok := w.resolve(l.P, rec.Dir, l.Ino)
+func (w *walker) restoreLine(l snapLine, rec state, p string, emit func(*node) error) bool {
+	fd, st, ok := w.resolve(p, rec.Dir, l.Ino)
 	if !ok {
-		w.r.ChangedSince.add(l.P)
+		w.r.ChangedSince.add(p)
 		return false
 	}
 	defer closeFD(fd)
-	n := &node{rel: l.P, fd: fd, st: st}
+	n := &node{rel: p, fd: fd, st: st}
 	if err := w.readState(n); err != nil {
 		if errors.Is(err, errBadACL) {
-			w.r.ChangedSince.add(l.P)
+			w.r.ChangedSince.add(p)
 		} else {
-			w.fail(l.P, err)
+			w.fail(p, err)
 		}
 		return false
 	}
 	o, err := planEntry(rec, w.t)
 	if err != nil || o.setid || !o.change || !stateEqual(n.cur, o.want) {
-		w.r.ChangedSince.add(l.P)
+		w.r.ChangedSince.add(p)
 		return false
 	}
 	if emit != nil {
 		if err := emit(n); err != nil {
-			w.fail(l.P, err)
+			w.fail(p, err)
 		}
 		return true
 	}
 	acc, def, err := encodeState(rec)
 	if err != nil {
-		w.fail(l.P, err)
+		w.fail(p, err)
 		return false
 	}
 	if err := writeState(fd, n.cur, rec, acc, def, w.acl); err != nil {
-		w.fail(l.P, err)
+		w.fail(p, err)
 		if rerr := w.revert(n, rec); rerr != nil {
-			w.r.errorf("%s: putting it back failed: %v", l.P, rerr)
+			w.r.errorf("%s: putting it back failed: %v", p, rerr)
 		}
 		return false
 	}
 	if err := w.after(n, rec); err != nil {
-		w.fail(l.P, err)
+		w.fail(p, err)
 		return false
 	}
 	w.r.Changed++

@@ -11,6 +11,7 @@ import (
 	"compress/gzip"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"net"
 	"os"
@@ -21,6 +22,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -182,6 +184,7 @@ func apply(t *testing.T, o Options) *Report {
 	if err != nil {
 		t.Fatal(err)
 	}
+	o.ExpectDigest = s.Plan.Digest
 	r, err := Apply(o, s.Plan.Changes)
 	if err != nil {
 		t.Fatalf("apply: %v (%v)", err, r.Errors)
@@ -337,8 +340,13 @@ func TestRootApplyKeepsAccess(t *testing.T) {
 		t.Errorf("d/f: %s, want user:3000:r-- and group:1000:r--", aclText(sf.Access))
 	}
 	sd := stateOf(t, d)
-	if !slices.Contains(sd.Access, gr(1000, R|X)) || !slices.Contains(sd.Default, gr(1000, R|X)) || !slices.Contains(sd.Default, go_(R|W|X)) {
-		t.Errorf("d: %s / %s, want group:1000:r-x in both", aclText(sd.Access), aclText(sd.Default))
+	if !slices.Contains(sd.Access, gr(1000, R|X)) {
+		t.Errorf("d: %s, want group:1000:r-x", aclText(sd.Access))
+	}
+	// R51: the default ACL names only the folder group: files made later
+	// don't open to the previous group or to others.
+	if want := acl(uo(R|W|X), go_(R|W|X), mk(R|W|X), ot(0)); !slices.Equal(sd.Default, want) {
+		t.Errorf("d default %s, want %s", aclText(sd.Default), aclText(want))
 	}
 	verify(t, o)
 }
@@ -423,15 +431,24 @@ func TestRootSkips(t *testing.T) {
 	}
 }
 
-func TestRootSetuidKept(t *testing.T) {
+// R47: a setuid file is left alone under a group change too: keeping the
+// bit and giving the folder group x would let it run the file as its owner.
+func TestRootSetuidSkipped(t *testing.T) {
 	needRoot(t)
 	root := folderRoot(t)
 	p := filepath.Join(root, "suid")
-	fileOwned(t, p, 0o4755|os.ModeSetuid, 1000, 1000)
-	apply(t, opts(t, root, Target{GID: 60001, Files: "rw"}))
-	d := diskOf(t, p)
-	if d.Mode&modeSetuid == 0 || d.GID != 60001 || d.UID != 1000 {
-		t.Fatalf("setuid file after the group change: %d:%d %o", d.UID, d.GID, d.Mode)
+	fileOwned(t, p, 0o4750|os.ModeSetuid, 1000, 1000)
+	before := diskOf(t, p)
+	app := Principal{UID: 2001, GIDs: []int{60001}}
+	r := apply(t, opts(t, root, Target{GID: 60001, Files: "r"}))
+	if r.SetID.N != 1 || !slices.Equal(r.SetID.Sample, []string{"suid"}) {
+		t.Fatalf("setid %+v", r.SetID)
+	}
+	if after := diskOf(t, p); !reflect.DeepEqual(before, after) {
+		t.Fatalf("setuid file touched: %+v → %+v", before, after)
+	}
+	if allowed(t, p, app, X) {
+		t.Fatal("the folder group can run a setuid file it couldn't run before")
 	}
 	if rd := diskOf(t, root); rd.Mode&modeSetgid == 0 {
 		t.Fatalf("root without setgid: %o", rd.Mode)
@@ -531,7 +548,7 @@ func TestRootSnapshotRestore(t *testing.T) {
 		t.Fatalf("snapshot: %v %v", err, sr.Errors)
 	}
 	h := snapshotHeader(t, snap.Bytes())
-	if h.Kind != "apply" || h.GID != 60001 || h.Files != "rw" || h.OwnerUID != nil || h.Entries != sr.Plan.Changes || h.Entries != int64(len(before)) {
+	if h.Kind != "apply" || h.Rules != planRules || h.GID != 60001 || h.Files != "rw" || h.OwnerUID != nil || h.Entries != sr.Plan.Changes || h.Entries != int64(len(before))-1 || sr.SetID.N != 1 { // suid: R47
 		t.Fatalf("header %+v, %d entries in the tree", h, len(before))
 	}
 	if r, err := Apply(o, h.Entries); err != nil {
@@ -844,9 +861,286 @@ func TestRootMountRoot(t *testing.T) {
 	}
 }
 
-func must(t *testing.T, err error) {
+// R51: a directory without a default ACL gets exactly owner, folder group,
+// mask and "others" ---; under must_own no user:<old uid> entry either.
+func TestRootDefaultACL(t *testing.T) {
+	needRoot(t)
+	root := folderRoot(t)
+	d := filepath.Join(root, "pub")
+	mkdirOwned(t, d, 0o755, 1000, 1000)
+	owner := 2000
+	apply(t, opts(t, root, Target{GID: 60001, Files: "rw", OwnerUID: &owner}))
+	want := acl(uo(R|W|X), go_(R|W|X), mk(R|W|X), ot(0))
+	for _, p := range []string{root, d} {
+		if s := stateOf(t, p); !slices.Equal(s.Default, want) {
+			t.Errorf("%s default %s, want %s", p, aclText(s.Default), aclText(want))
+		}
+	}
+	// A file another process makes there isn't readable by others.
+	cmd := exec.Command("sh", "-c", `umask 022 && : > pub/new`)
+	cmd.Dir = root
+	cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: 2001, Gid: 2001, Groups: []uint32{60001}}}
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	if allowed(t, filepath.Join(d, "new"), Principal{UID: 5000, GIDs: []int{1000}}, R) {
+		t.Error("a new file is readable by the previous group / others")
+	}
+}
+
+// R50: a directory moved out of the folder after the walk opened it (by a
+// process with a wider view of the filesystem) is not changed, nor below it.
+func TestRootRenameOut(t *testing.T) {
+	needRoot(t)
+	for _, at := range []string{"d", "d/e"} {
+		t.Run(at, func(t *testing.T) {
+			root := folderRoot(t)
+			outside := filepath.Join(filepath.Dir(root), "outside")
+			mkdirOwned(t, outside, 0o755, 1000, 1000)
+			mkdirOwned(t, filepath.Join(root, "d"), 0o750, 1000, 1000)
+			mkdirOwned(t, filepath.Join(root, "d", "e"), 0o750, 1000, 1000)
+			fileOwned(t, filepath.Join(root, "d", "f"), 0o640, 1000, 1000)
+			fileOwned(t, filepath.Join(root, "d", "e", "g"), 0o640, 1000, 1000)
+			o := opts(t, root, Target{GID: 60001, Files: "rw"})
+			s, err := Scan(o)
+			if err != nil {
+				t.Fatal(err)
+			}
+			testHookAfterOpen = onSecond(at, func() {
+				must(t, os.Rename(filepath.Join(root, "d"), filepath.Join(outside, "d")))
+			})
+			r, _ := Apply(o, s.Plan.Changes)
+			testHookAfterOpen = nil
+			for p, d := range diskTree(t, filepath.Join(outside, "d")) {
+				// Changed before the move (pre-order): the moved point itself
+				// when it is below d, and d when e moved.
+				if at == "d/e" && p == filepath.Join(outside, "d") {
+					continue
+				}
+				if d.GID == 60001 {
+					t.Errorf("%s has the folder gid after it left the folder", p)
+				}
+			}
+			if r.Races.N == 0 {
+				t.Errorf("races %+v, want the moved subtree counted", r.Races)
+			}
+		})
+	}
+}
+
+// R48: a name that isn't UTF-8 (Latin-1 from an old NAS) round-trips.
+func TestRootNonUTF8Restore(t *testing.T) {
+	needRoot(t)
+	root := folderRoot(t)
+	mkdirOwned(t, filepath.Join(root, "d\xe8"), 0o750, 1000, 1000)
+	p := filepath.Join(root, "d\xe8", "caf\xe9.txt")
+	fileOwned(t, p, 0o640, 1000, 1000)
+	fileOwned(t, filepath.Join(root, "caf\xc3\xa9.txt"), 0o640, 1000, 1000) // valid UTF-8, the same text
+	before := diskTree(t, root)
+	o := opts(t, root, Target{GID: 60001, Files: "rw"})
+	var buf bytes.Buffer
+	if _, err := WriteSnapshot(o, &buf); err != nil {
+		t.Fatal(err)
+	}
+	apply(t, o)
+	r, err := Restore(o, bytes.NewReader(buf.Bytes()))
+	if err != nil || r.ChangedSince.N != 0 {
+		t.Fatalf("restore: %v, changed since %+v", err, r.ChangedSince)
+	}
+	for q, b := range before {
+		a := diskOf(t, q)
+		a.Ctime, b.Ctime = unix.Timespec{}, unix.Timespec{}
+		if !reflect.DeepEqual(a, b) {
+			t.Errorf("%q not restored: %+v → %+v", q, b, a)
+		}
+	}
+}
+
+// R49: a path over 4096 bytes (any writer app can make one) is skipped and
+// reported, never changed, and the snapshot stays restorable.
+func TestRootLongPath(t *testing.T) {
+	needRoot(t)
+	root := folderRoot(t)
+	fd, err := unix.Open(root, unix.O_DIRECTORY, 0)
+	must(t, err)
+	name := strings.Repeat("x", 250)
+	for i := 0; i < 18; i++ {
+		must(t, unix.Mkdirat(fd, name, 0o755))
+		nfd, err := unix.Openat(fd, name, unix.O_DIRECTORY, 0)
+		must(t, err)
+		unix.Close(fd)
+		fd = nfd
+	}
+	must(t, unix.Mknodat(fd, "deep", unix.S_IFREG|0o640, 0))
+	unix.Close(fd)
+	fileOwned(t, filepath.Join(root, "a"), 0o640, 1000, 1000)
+	o := opts(t, root, Target{GID: 60001, Files: "rw"})
+	var buf bytes.Buffer
+	sr, err := WriteSnapshot(o, &buf)
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	if sr.Skipped.PathTooLong.N != 3 { // the 17th- and 18th-level directories and "deep"
+		t.Errorf("path too long %+v", sr.Skipped.PathTooLong)
+	}
+	deep := filepath.Join(root, strings.Repeat(name+"/", 18)+"deep")
+	before := deepState(t, root, 18, name)
+	apply(t, o)
+	if after := deepState(t, root, 18, name); after != before {
+		t.Errorf("a too-long path was changed: %s → %s", before, after)
+	}
+	_ = deep
+	if _, err := Restore(o, bytes.NewReader(buf.Bytes())); err != nil {
+		t.Errorf("a snapshot WriteSnapshot wrote is refused by Restore: %v", err)
+	}
+}
+
+// deepState is uid:gid:mode of the entry at depth n (fd-relative: the path
+// is longer than PATH_MAX).
+func deepState(t *testing.T, root string, n int, name string) string {
 	t.Helper()
+	fd, err := unix.Open(root, unix.O_DIRECTORY, 0)
+	must(t, err)
+	for i := 0; i < n; i++ {
+		nfd, err := unix.Openat(fd, name, unix.O_DIRECTORY, 0)
+		must(t, err)
+		unix.Close(fd)
+		fd = nfd
+	}
+	defer unix.Close(fd)
+	var st unix.Stat_t
+	must(t, unix.Fstatat(fd, "deep", &st, unix.AT_SYMLINK_NOFOLLOW))
+	return fmt.Sprintf("%d:%d:%o", st.Uid, st.Gid, st.Mode)
+}
+
+// R49: an entry whose snapshot line would exceed the line cap is skipped.
+func TestRootACLTooLarge(t *testing.T) {
+	needRoot(t)
+	root := folderRoot(t)
+	big := filepath.Join(root, "big")
+	fileOwned(t, big, 0o640, 1000, 1000)
+	a := acl(uo(R|W), go_(R), mk(R), ot(0))
+	for i := uint32(0); i < 40; i++ {
+		a = a.Set(TagUser, 3000+i, R)
+	}
+	setACL(t, big, XattrAccess, a)
+	fileOwned(t, filepath.Join(root, "small"), 0o640, 1000, 1000)
+	old := maxSnapLine
+	maxSnapLine = 400
+	defer func() { maxSnapLine = old }()
+	before := diskOf(t, big)
+	o := opts(t, root, Target{GID: 60001, Files: "rw"})
+	var buf bytes.Buffer
+	sr, err := WriteSnapshot(o, &buf)
+	if err != nil || sr.Skipped.ACLTooLarge.N != 1 || !slices.Equal(sr.Skipped.ACLTooLarge.Sample, []string{"big"}) {
+		t.Fatalf("snapshot %v acl too large %+v", err, sr.Skipped.ACLTooLarge)
+	}
+	apply(t, o)
+	if after := diskOf(t, big); !reflect.DeepEqual(before, after) {
+		t.Error("an entry the snapshot can't hold was changed")
+	}
+	if _, err := Restore(o, bytes.NewReader(buf.Bytes())); err != nil {
+		t.Errorf("restore: %v", err)
+	}
+}
+
+// M8: no open without O_PATH ever reaches a FIFO or a device, also when one
+// is swapped in after the fstatat.
+func TestRootOPathSeam(t *testing.T) {
+	needRoot(t)
+	root := folderRoot(t)
+	fileOwned(t, filepath.Join(root, "f"), 0o644, 1000, 1000)
+	fileOwned(t, filepath.Join(root, "g"), 0o644, 1000, 1000)
+	var bad []string
+	orig := rawOpenat
+	rawOpenat = func(dirfd int, p string, flags int, mode uint32) (int, error) {
+		fd, err := orig(dirfd, p, flags, mode)
+		if err == nil && flags&unix.O_PATH == 0 {
+			var st unix.Stat_t
+			if unix.Fstat(fd, &st) == nil && st.Mode&unix.S_IFMT != unix.S_IFREG && st.Mode&unix.S_IFMT != unix.S_IFDIR {
+				bad = append(bad, fmt.Sprintf("%s (%o)", p, st.Mode))
+			}
+		}
+		return fd, err
+	}
+	defer func() { rawOpenat = orig }()
+	o := opts(t, root, Target{GID: 60001, Files: "rw"})
+	s, _ := Scan(o)
+	testHookBeforeOpen = func(rel string) {
+		switch rel {
+		case "f":
+			os.Remove(filepath.Join(root, "f"))
+			must(t, unix.Mkfifo(filepath.Join(root, "f"), 0o644))
+		case "g":
+			os.Remove(filepath.Join(root, "g"))
+			must(t, unix.Mknod(filepath.Join(root, "g"), unix.S_IFCHR|0o644, int(unix.Mkdev(1, 3))))
+		}
+	}
+	Apply(o, s.Plan.Changes)
+	testHookBeforeOpen = nil
+	if len(bad) > 0 {
+		t.Fatalf("opened without O_PATH: %v", bad)
+	}
+}
+
+// M6: apply refuses a filesystem outside ext4/xfs/btrfs/zfs (tmpfs here).
+func TestRootRefusesUnsupportedFS(t *testing.T) {
+	needRoot(t)
+	root := folderRoot(t)
+	if err := unix.Mount("tmpfs", root, "tmpfs", 0, "mode=0750"); err != nil {
+		setfaclUnavailable(t, "mount tmpfs: %v", err)
+	}
+	defer unix.Unmount(root, unix.MNT_DETACH)
+	fileOwned(t, filepath.Join(root, "f"), 0o640, 1000, 1000)
+	o := opts(t, root, Target{GID: 60001, Files: "rw"})
+	s, err := Scan(o)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if _, err := Apply(o, s.Plan.Changes); !IsRefused(err) || !strings.Contains(err.Error(), "tmpfs") {
+		t.Fatalf("apply on tmpfs: %v", err)
+	}
+}
+
+// M4: the caps don't apply to an apply: a plan accepted is applied whole.
+func TestRootApplyIgnoresCaps(t *testing.T) {
+	needRoot(t)
+	root := folderRoot(t)
+	for i := 0; i < 5; i++ {
+		fileOwned(t, filepath.Join(root, fmt.Sprint("f", i)), 0o640, 1000, 1000)
+	}
+	o := opts(t, root, Target{GID: 60001, Files: "rw"})
+	s, _ := Scan(o)
+	o.MaxEntries, o.MaxTime = 2, time.Nanosecond
+	r, err := Apply(o, s.Plan.Changes)
+	if err != nil || r.Changed != s.Plan.Changes || r.Partial {
+		t.Fatalf("apply with caps: %v changed %d partial %v", err, r.Changed, r.Partial)
+	}
+}
+
+// M5: the plan's digest must be the one the snapshot was taken with.
+func TestRootApplyDigest(t *testing.T) {
+	needRoot(t)
+	root := folderRoot(t)
+	fileOwned(t, filepath.Join(root, "f"), 0o640, 1000, 1000)
+	fileOwned(t, filepath.Join(root, "g"), 0o640, 1000, 1000)
+	o := opts(t, root, Target{GID: 60001, Files: "rw"})
+	var buf bytes.Buffer
+	sr, err := WriteSnapshot(o, &buf)
+	if err != nil || len(sr.Plan.Digest) != 64 {
+		t.Fatalf("snapshot %v digest %q", err, sr.Plan.Digest)
+	}
+	if sc, _ := Scan(o); sc.Plan.Digest != sr.Plan.Digest {
+		t.Fatalf("scan digest %q, snapshot %q", sc.Plan.Digest, sr.Plan.Digest)
+	}
+	// Same count, another entry: g changed since the snapshot, f fixed.
+	must(t, unix.Chmod(filepath.Join(root, "g"), 0o600))
+	before := diskTree(t, root)
+	o.ExpectDigest = sr.Plan.Digest
+	if _, err := Apply(o, sr.Plan.Changes); !IsRefused(err) || !strings.Contains(err.Error(), "digest") {
+		t.Fatalf("apply with a stale digest: %v", err)
+	}
+	if !reflect.DeepEqual(before, diskTree(t, root)) {
+		t.Fatal("changed")
 	}
 }

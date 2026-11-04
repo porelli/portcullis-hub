@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -201,6 +202,22 @@ func rootIDs(t *testing.T, p string) (uint64, uint64) {
 	return uint64(st.Dev), uint64(st.Ino)
 }
 
+// needWritableFS: apply runs only on ext4/xfs/btrfs/zfs (M6); the temp
+// dir of a developer Mac isn't one.
+func needWritableFS(t *testing.T) {
+	t.Helper()
+	r, err := Scan(Options{Root: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !writableFS[r.FSType] {
+		if runtime.GOOS == "linux" && os.Getenv("CI") != "" {
+			t.Fatalf("the CI temp dir is %s", r.FSType)
+		}
+		t.Skipf("apply refuses %s", r.FSType)
+	}
+}
+
 func runMain(args ...string) (int, string, string) {
 	var out, errb bytes.Buffer
 	code := Main(args, &out, &errb)
@@ -225,7 +242,7 @@ func TestApplyRefusesWrongRoot(t *testing.T) {
 	_, otherIno := rootIDs(t, t.TempDir())
 	before := treeState(t, root)
 	code, out, _ := runMain("apply", "--root="+root, "--expect-dev="+strconv.FormatUint(dev, 10), "--expect-ino="+strconv.FormatUint(otherIno, 10),
-		"--gid=60001", "--files=rw", "--expect=4")
+		"--expect-mount-root=/srv/x", "--expect-digest="+strings.Repeat("0", 64), "--gid=60001", "--files=rw", "--expect=4")
 	if code != 2 {
 		t.Fatalf("exit %d, want 2 (refused); out %s", code, out)
 	}
@@ -253,6 +270,7 @@ func TestApplyRefusesWrongRoot(t *testing.T) {
 }
 
 func TestApplyExpectMismatch(t *testing.T) {
+	needWritableFS(t)
 	root := simpleTree(t)
 	dev, ino := rootIDs(t, root)
 	o := Options{Root: root, ExpectDev: dev, ExpectIno: ino, Target: Target{GID: 60001, Files: "rw"}}
@@ -267,9 +285,9 @@ func TestApplyExpectMismatch(t *testing.T) {
 	if _, err := Apply(o, r.Plan.Changes-1); !IsRefused(err) || !strings.Contains(err.Error(), "changed since the preview") {
 		t.Fatalf("err %v, want the count refusal", err)
 	}
-	code, out, _ := runMain(Args("apply", o, ArgsExtra{Expect: 3})...)
-	if code != 2 || !strings.Contains(out, "expected 3") {
-		t.Fatalf("exit %d out %s", code, out)
+	o.ExpectDigest = r.Plan.Digest
+	if _, err := Apply(o, 3); !IsRefused(err) || !strings.Contains(err.Error(), "expected 3") {
+		t.Fatalf("err %v", err)
 	}
 	if after := treeState(t, root); !reflect.DeepEqual(before, after) {
 		t.Fatal("changed")
@@ -277,6 +295,7 @@ func TestApplyExpectMismatch(t *testing.T) {
 }
 
 func TestApplyRefusesMkdirThroughSymlink(t *testing.T) {
+	needWritableFS(t)
 	root := simpleTree(t)
 	elsewhere := t.TempDir()
 	if err := os.Symlink(elsewhere, filepath.Join(root, "movies")); err != nil {
@@ -299,6 +318,7 @@ func TestApplyRefusesMkdirThroughSymlink(t *testing.T) {
 
 func TestCLIArgs(t *testing.T) {
 	root := t.TempDir()
+	digest := strings.Repeat("ab", 32)
 	for _, args := range [][]string{
 		nil,
 		{"bogus", "--root=" + root},
@@ -313,6 +333,14 @@ func TestCLIArgs(t *testing.T) {
 		{"scan", "--root=" + root, "extra"},
 		{"restore", "--root=" + root, "--expect-dev=1", "--expect-ino=2", "--in=/in/s.gz"}, // no --gid
 		{"probe", "--root=" + root, "--rel=../etc"},
+		// M2: apply and restore need the mount root; M5: apply the digest;
+		// M4: no caps on apply or snapshot.
+		{"apply", "--root=" + root, "--expect-dev=1", "--expect-ino=2", "--gid=60001", "--files=rw", "--expect=1", "--expect-digest=" + digest},
+		{"apply", "--root=" + root, "--expect-dev=1", "--expect-ino=2", "--expect-mount-root=/srv/x", "--gid=60001", "--files=rw", "--expect=1"},
+		{"apply", "--root=" + root, "--expect-dev=1", "--expect-ino=2", "--expect-mount-root=/srv/x", "--gid=60001", "--files=rw", "--expect=1", "--expect-digest=" + digest, "--max-time=1m"},
+		{"apply", "--root=" + root, "--expect-dev=1", "--expect-ino=2", "--expect-mount-root=/srv/x", "--gid=60001", "--files=rw", "--expect=1", "--expect-digest=xyz"},
+		{"snapshot", "--root=" + root, "--gid=60001", "--files=rw", "--out=/out", "--max-entries=5"},
+		{"restore", "--root=" + root, "--expect-dev=1", "--expect-ino=2", "--gid=60001", "--in=/in/s.gz"},
 	} {
 		code, out, _ := runMain(args...)
 		if code != 1 || out != "" {
@@ -328,14 +356,14 @@ func TestCLIArgs(t *testing.T) {
 		x    ArgsExtra
 	}{
 		{"probe", Options{Root: "/broot"}, ArgsExtra{Rel: "photos/2024", Create: true}},
-		{"scan", Options{Root: "/folder", ExpectDev: 64, ExpectIno: 2, ExpectMountRoot: "/srv/photos",
+		{"scan", Options{Root: "/folder", ExpectDev: 64, ExpectIno: 2, ExpectMountRoot: "/srv/pho tos",
 			Target:     Target{GID: 60001, Files: "r", OwnerUID: &owner},
 			Principals: []Principal{{Name: "immich", UID: 1000, GIDs: []int{1000, 60001}}, {Name: "samba", UID: 0, GIDs: []int{0}, Write: true}},
 			Children:   true, MaxEntries: 1000, MaxTime: 30 * time.Second}, ArgsExtra{}},
-		{"snapshot", Options{Root: "/folder", ExpectDev: 64, ExpectIno: 2, Target: Target{GID: 60001, Files: "rw"}}, ArgsExtra{Out: "/out", Kind: "apply"}},
-		{"snapshot", Options{Root: "/folder", ExpectDev: 64, ExpectIno: 2, Target: Target{GID: 60001, Files: "rw"}}, ArgsExtra{Out: "/out", Kind: "undo", In: "/in/snapshot.ndjson.gz"}},
-		{"apply", Options{Root: "/folder", ExpectDev: 64, ExpectIno: 2, Target: Target{GID: 60001, Files: "rw", Mkdir: []string{"movies/hd", "tv"}}}, ArgsExtra{Expect: 12}},
-		{"restore", Options{Root: "/folder", ExpectDev: 64, ExpectIno: 2, Target: Target{GID: 60001}}, ArgsExtra{In: "/in/snapshot.ndjson.gz"}},
+		{"snapshot", Options{Root: "/folder", ExpectDev: 64, ExpectIno: 2, ExpectMountRoot: "/p", Target: Target{GID: 60001, Files: "rw"}}, ArgsExtra{Out: "/out", Kind: "apply"}},
+		{"snapshot", Options{Root: "/folder", ExpectDev: 64, ExpectIno: 2, ExpectMountRoot: "/p", Target: Target{GID: 60001, Files: "rw"}}, ArgsExtra{Out: "/out", Kind: "undo", In: "/in/snapshot.ndjson.gz"}},
+		{"apply", Options{Root: "/folder", ExpectDev: 64, ExpectIno: 2, ExpectMountRoot: "/p", ExpectDigest: digest, Target: Target{GID: 60001, Files: "rw", Mkdir: []string{"movies/hd", "tv"}}}, ArgsExtra{Expect: 12}},
+		{"restore", Options{Root: "/folder", ExpectDev: 64, ExpectIno: 2, ExpectMountRoot: "/p", Target: Target{GID: 60001}}, ArgsExtra{In: "/in/snapshot.ndjson.gz"}},
 	}
 	for _, c := range cases {
 		args := Args(c.mode, c.o, c.x)
@@ -430,7 +458,7 @@ func TestRestoreRefusesBadSnapshots(t *testing.T) {
 	dev, ino := rootIDs(t, root)
 	_, fino := rootIDs(t, filepath.Join(root, "g"))
 	hdr := func(kind string, gid int, rdev, rino uint64, n int) string {
-		return `{"version":1,"kind":"` + kind + `","root_dev":` + strconv.FormatUint(rdev, 10) + `,"root_ino":` + strconv.FormatUint(rino, 10) +
+		return `{"version":1,"kind":"` + kind + `","rules":` + strconv.Itoa(planRules) + `,"root_dev":` + strconv.FormatUint(rdev, 10) + `,"root_ino":` + strconv.FormatUint(rino, 10) +
 			`,"gid":` + strconv.Itoa(gid) + `,"files":"rw","owner_uid":null,"created_at":"2026-11-03T00:00:00Z","entries":` + strconv.Itoa(n) + `}`
 	}
 	line := func(p string) string {
@@ -451,6 +479,13 @@ func TestRestoreRefusesBadSnapshots(t *testing.T) {
 		"bad acl":        gzLines(t, hdr("apply", 60001, dev, ino, 1), strings.Replace(line("g"), `"a":""`, `"a":"AgAAAA=="`, 1)+``),
 		"not gzip":       []byte("{}"),
 		"mode type bits": gzLines(t, hdr("apply", 60001, dev, ino, 1), strings.Replace(line("g"), `"m":420`, `"m":33188`, 1)),
+		// M10: another rules version
+		"rules":    gzLines(t, strings.Replace(hdr("apply", 60001, dev, ino, 1), `"rules":`+strconv.Itoa(planRules), `"rules":`+strconv.Itoa(planRules+1), 1), line("g")),
+		"no rules": gzLines(t, strings.Replace(hdr("apply", 60001, dev, ino, 1), `"rules":`+strconv.Itoa(planRules)+`,`, ``, 1), line("g")),
+		// R48: pb only for a name that isn't UTF-8, and valid base64 of a clean path
+		"pb utf8":   gzLines(t, hdr("apply", 60001, dev, ino, 1), strings.Replace(line("g"), `"d":""`, `"d":"","pb":"Zw=="`, 1)),
+		"pb bad":    gzLines(t, hdr("apply", 60001, dev, ino, 1), strings.Replace(line("g"), `"d":""`, `"d":"","pb":"!!"`, 1)),
+		"pb dotdot": gzLines(t, hdr("apply", 60001, dev, ino, 1), strings.Replace(line("g"), `"d":""`, `"d":"","pb":"Li4v6Q=="`, 1)),
 	} {
 		if name == "bad acl" {
 			// a header-only ACL is fine; an invalid one (no USER_OBJ) isn't
@@ -473,6 +508,14 @@ func TestFSName(t *testing.T) {
 		if got := FSName(magic); got != want {
 			t.Errorf("%#x: %s, want %s", magic, got, want)
 		}
+	}
+	for name := range writableFS {
+		if !slices.Contains([]string{"ext4", "xfs", "btrfs", "zfs"}, name) {
+			t.Errorf("writable %s", name)
+		}
+	}
+	if len(writableFS) != 4 || writableFS["other"] {
+		t.Errorf("writableFS %v", writableFS)
 	}
 	for name := range Unsupported {
 		if !slices.Contains([]string{"nfs", "cifs", "fuse", "overlay", "tmpfs"}, name) {
@@ -530,5 +573,55 @@ func TestValidPaths(t *testing.T) {
 		if validSubpath(p) == nil {
 			t.Errorf("subpath %q accepted", p)
 		}
+	}
+}
+
+// M3: once a --mkdir or probe --create made something, a later refusal is
+// a failure (exit 1), never "refused, nothing changed".
+func TestCreateThenFailIsNoRefusal(t *testing.T) {
+	root := t.TempDir()
+	testHookMkdir = func(rel string) {
+		if rel == "a/b" {
+			writeFile(t, filepath.Join(root, "a", "b"), 0o644) // b appears as a file
+		}
+	}
+	defer func() { testHookMkdir = nil }()
+	p, err := Probe(root, "a/b/c", true)
+	if err == nil || IsRefused(err) || !p.Created {
+		t.Fatalf("probe: %v created %v, want a failure", err, p.Created)
+	}
+
+	needWritableFS(t)
+	root = simpleTree(t)
+	dev, ino := rootIDs(t, root)
+	o := Options{Root: root, ExpectDev: dev, ExpectIno: ino, Target: Target{GID: 60001, Files: "rw", Mkdir: []string{"one", "two/x"}}}
+	s, _ := Scan(o)
+	testHookMkdir = func(rel string) {
+		if rel == "one" {
+			must(t, os.Symlink(t.TempDir(), filepath.Join(root, "two")))
+		}
+	}
+	r, err := Apply(o, s.Plan.Changes)
+	if err == nil || IsRefused(err) || r.Created != 1 {
+		t.Fatalf("apply: %v created %d, want a failure", err, r.Created)
+	}
+}
+
+// M7: a directory with more names than the cap makes the walk partial.
+func TestScanDirNameCap(t *testing.T) {
+	root := simpleTree(t)
+	old := maxDirNames
+	maxDirNames = 1
+	defer func() { maxDirNames = old }()
+	r, err := Scan(Options{Root: root})
+	if err != nil || !r.Partial || r.PartialReason != "names" {
+		t.Fatalf("%v partial %v %q", err, r.Partial, r.PartialReason)
+	}
+}
+
+func must(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
 	}
 }

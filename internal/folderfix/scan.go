@@ -25,11 +25,14 @@ type Options struct {
 	// ExpectMountRoot: "" = unchecked; else the root field of Root's line in
 	// /proc/self/mountinfo must be exactly this (R41).
 	ExpectMountRoot string
-	Target          Target
-	Principals      []Principal
-	Children        bool // per first-level child owner counts
-	MaxEntries      int64
-	MaxTime         time.Duration
+	// ExpectDigest (apply): "" = unchecked; else the plan's Digest must be
+	// exactly this (the snapshot's entries, M5).
+	ExpectDigest string
+	Target       Target
+	Principals   []Principal
+	Children     bool // per first-level child owner counts
+	MaxEntries   int64
+	MaxTime      time.Duration
 }
 
 // maxSample is the number of relative paths a Count keeps.
@@ -75,12 +78,13 @@ type Conformance struct {
 
 // PlanCounts is what an apply to the Target would do.
 type PlanCounts struct {
-	Changes       int64 `json:"changes"` // entries an apply changes (its --expect)
-	ChangeGroup   Count `json:"change_group"`
-	AddSetgid     Count `json:"add_setgid"`
-	AddDefaultACL Count `json:"add_default_acl"`
-	ChangeOwner   Count `json:"change_owner"`
-	Narrowed      Count `json:"narrowed"`
+	Changes       int64  `json:"changes"` // entries an apply changes (its --expect)
+	Digest        string `json:"digest"`  // sha256 of those entries' paths and current state (its --expect-digest)
+	ChangeGroup   Count  `json:"change_group"`
+	AddSetgid     Count  `json:"add_setgid"`
+	AddDefaultACL Count  `json:"add_default_acl"`
+	ChangeOwner   Count  `json:"change_owner"`
+	Narrowed      Count  `json:"narrowed"`
 	// KeepGroup: previous gid → entries given a named group entry for it.
 	KeepGroup map[int]int64 `json:"keep_group"`
 	// KeepUser: previous owner uid (must_own) → entries given a named user entry.
@@ -98,6 +102,13 @@ type ChildOwner struct {
 	GID     int    `json:"gid"`
 	Entries int64  `json:"entries"`
 	Foreign int64  `json:"foreign"`
+}
+
+// Skipped counts entries the fix leaves alone because a snapshot couldn't
+// record them (R49).
+type Skipped struct {
+	PathTooLong Count `json:"path_too_long"` // path > 4096 bytes
+	ACLTooLarge Count `json:"acl_too_large"` // its snapshot line would exceed the line cap
 }
 
 // Report is the one JSON line every mode prints.
@@ -127,6 +138,7 @@ type Report struct {
 	BadACL       Count             `json:"bad_acl"`       // an ACL the fix can't carry exactly: skipped
 	Failed       Count             `json:"failed"`        // couldn't be read or changed
 	ChangedSince Count             `json:"changed_since"` // restore: changed since the fix (or gone): skipped
+	Skipped      Skipped           `json:"skipped"`
 	Principals   []PrincipalAccess `json:"principals,omitempty"`
 	Expected     *Conformance      `json:"expected,omitempty"` // when Target.GID != 0
 	Plan         *PlanCounts       `json:"plan,omitempty"`     // when Target.GID != 0
@@ -215,3 +227,7 @@ func Scan(o Options) (*Report, error) {
 	w.run(w.tally)
 	return w.finish(), nil
 }
+
+// writableFS: the only filesystems apply and restore write to (M6): an
+// allowlist, so vfat, exfat, ntfs3 and the rest ("other") are refused too.
+var writableFS = map[string]bool{"ext4": true, "xfs": true, "btrfs": true, "zfs": true}

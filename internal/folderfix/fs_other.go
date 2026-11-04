@@ -79,6 +79,9 @@ func readNames(fd int) ([]string, error) {
 			return names, nil
 		}
 		_, _, names = unix.ParseDirent(buf[:n], -1, names)
+		if len(names) > maxDirNames {
+			return names[:maxDirNames], errTooManyNames
+		}
 	}
 }
 

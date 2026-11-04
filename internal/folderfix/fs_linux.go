@@ -73,12 +73,12 @@ func ignoringEINTR(f func() error) error {
 func openNoatime(dirfd int, name string, flags int) (int, error) {
 	var fd int
 	err := ignoringEINTR(func() (err error) {
-		fd, err = unix.Openat(dirfd, name, flags|unix.O_NOATIME, 0)
+		fd, err = rawOpenat(dirfd, name, flags|unix.O_NOATIME, 0)
 		return err
 	})
 	if errors.Is(err, unix.EPERM) {
 		err = ignoringEINTR(func() (err error) {
-			fd, err = unix.Openat(dirfd, name, flags, 0)
+			fd, err = rawOpenat(dirfd, name, flags, 0)
 			return err
 		})
 	}
@@ -101,7 +101,7 @@ func openAt(dirfd int, name string, dir bool) (int, error) {
 	}
 	var pfd int
 	err := ignoringEINTR(func() (err error) {
-		pfd, err = unix.Openat(dirfd, name, unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		pfd, err = rawOpenat(dirfd, name, unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 		return err
 	})
 	if err != nil {
@@ -146,6 +146,9 @@ func readNames(fd int) ([]string, error) {
 			return names, nil
 		}
 		_, _, names = unix.ParseDirent(buf[:n], -1, names)
+		if len(names) > maxDirNames {
+			return names[:maxDirNames], errTooManyNames
+		}
 	}
 }
 
@@ -246,3 +249,6 @@ func idMapsIdentity() (bool, error) {
 }
 
 const syscallNoFollow = unix.O_NOFOLLOW
+
+// rawOpenat is every openat the walk makes (a seam for tests).
+var rawOpenat = unix.Openat

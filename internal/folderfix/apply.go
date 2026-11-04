@@ -23,6 +23,18 @@ func (w *walker) planNode(n *node) (outcome, bool) {
 		w.r.SetID.add(n.rel)
 		return o, false
 	}
+	if !o.change {
+		return o, true
+	}
+	// R49: what a snapshot can't record is never changed.
+	if len(n.rel) > maxPathBytes {
+		w.r.Skipped.PathTooLong.add(n.rel)
+		return o, false
+	}
+	if b, err := snapshotLine(n); err != nil || len(b) > maxSnapLine {
+		w.r.Skipped.ACLTooLarge.add(n.rel)
+		return o, false
+	}
 	return o, true
 }
 
@@ -35,6 +47,7 @@ func (w *walker) tally(n *node) {
 	}
 	e, p := w.r.Expected, w.r.Plan
 	p.Changes++
+	digestEntry(w.digest, n)
 	if o.group {
 		e.Group.add(n.rel)
 		p.ChangeGroup.add(n.rel)
@@ -80,8 +93,8 @@ func (w *walker) mayChange() error {
 	if !ok {
 		return refuse("the fixer runs in a user namespace with translated ids (userns-remap or rootless Docker): owners and ACLs would be wrong")
 	}
-	if Unsupported[w.r.FSType] {
-		return refuse("the folder is on %s: the Hub can't keep ownership consistent there", w.r.FSType)
+	if !writableFS[w.r.FSType] {
+		return refuse("the folder is on %s: the Hub changes ownership only on ext4, xfs, btrfs and zfs", w.r.FSType)
 	}
 	return nil
 }
@@ -90,6 +103,7 @@ func (w *walker) mayChange() error {
 // entries (the count the admin previewed and the snapshot holds), applies
 // it. Any refusal comes before the first change.
 func Apply(o Options, expect int64) (*Report, error) {
+	o.MaxEntries, o.MaxTime = 0, 0 // M4: a plan accepted is applied whole
 	w, err := openWalker(o, "apply")
 	if err != nil {
 		return w.report(), err
@@ -123,7 +137,11 @@ func Apply(o Options, expect int64) (*Report, error) {
 	if w.r.Plan.Changes != expect {
 		return w.finish(), refuse("the folder changed since the preview: %d entries to change, expected %d: nothing changed", w.r.Plan.Changes, expect)
 	}
-	plan, exp := w.r.Plan, w.r.Expected
+	r := w.finish()
+	if o.ExpectDigest != "" && r.Plan.Digest != o.ExpectDigest {
+		return r, refuse("the folder changed since the snapshot (another digest of the entries to change): nothing changed")
+	}
+	plan, exp := r.Plan, w.r.Expected
 	w.reset()
 	var created int64
 	for _, m := range o.Target.Mkdir {
@@ -132,11 +150,14 @@ func Apply(o Options, expect int64) (*Report, error) {
 		if err != nil {
 			r := w.finish()
 			r.Plan, r.Expected, r.Created = plan, exp, created
+			if created > 0 {
+				err = unrefuse(err) // M3: something was made: a failure
+			}
 			return r, fmt.Errorf("create %s: %w", m, err)
 		}
 	}
 	w.run(w.change)
-	r := w.finish()
+	r = w.finish()
 	r.Plan, r.Expected, r.Created = plan, exp, created
 	if r.Failed.N > 0 || r.Partial {
 		return r, fmt.Errorf("%d entries couldn't be changed", r.Failed.N)
@@ -206,6 +227,14 @@ func (w *walker) revert(n *node, onDisk state) error {
 	from := onDisk
 	from.UID = ^n.cur.UID // force the chown: a failed write may have done it
 	return writeState(n.fd, from, n.cur, n.raw.access, n.raw.def, w.acl)
+}
+
+// unrefuse turns a refusal into a plain failure: something already changed.
+func unrefuse(err error) error {
+	if IsRefused(err) {
+		return errors.New(err.Error())
+	}
+	return err
 }
 
 func encodeState(s state) (acc, def []byte, err error) {
@@ -368,18 +397,28 @@ func (w *walker) mkdir(rel string) (int64, error) {
 		return 0, err
 	}
 	defer func() { closeFD(fd) }()
+	comps := strings.Split(rel, "/")
+	at := strings.Join(comps[:len(comps)-len(missing)], "/")
+	if at == "" {
+		at = "."
+	}
 	var created int64
 	for _, c := range missing {
+		crel := joinRel(at, c)
+		at = crel
 		parent, err := fstatFD(fd)
 		if err != nil {
 			return created, err
+		}
+		if testHookMkdir != nil {
+			testHookMkdir(crel)
 		}
 		if err := mkdirAt(fd, c, 0o700); err != nil {
 			return created, err
 		}
 		created++
 		st, err := lstatAt(fd, c)
-		if err != nil || !st.isDir() || w.otherMount(st, c) {
+		if err != nil || !st.isDir() || w.otherMount(st, crel) {
 			return created, fmt.Errorf("%s changed after it was created", c)
 		}
 		nfd, err := openAt(fd, c, true)
