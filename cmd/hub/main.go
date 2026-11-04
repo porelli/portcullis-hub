@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -19,6 +21,7 @@ import (
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/domains"
 	"github.com/portcullis/hub/internal/folderfix"
+	"github.com/portcullis/hub/internal/freshauth"
 	"github.com/portcullis/hub/internal/httpapi"
 	"github.com/portcullis/hub/internal/hub"
 	"github.com/portcullis/hub/internal/invite"
@@ -59,6 +62,36 @@ func fixerImageFromEnv(getenv func(string) string) (string, error) {
 		return "", fmt.Errorf("HUB_FIXER_IMAGE is for development only: set HUB_DEV=1 or unset it")
 	}
 	return v, nil
+}
+
+// freshAuthSetup is the fresh-auth wiring (contract §8): the issuer and
+// authorize endpoint are public (HUB_KEYCLOAK_PUBLIC_URL, default
+// https://auth.<domain>: Keycloak runs with that --hostname, so it is the
+// tokens' iss), the code exchange and keys go to Keycloak internally
+// (KEYCLOAK_URL); the popup lands on https://people.<domain>/.
+type freshAuthSetup struct {
+	Issuer, TokenURL, JWKSURL, AuthorizeURL, RedirectURI, WebOrigin string
+}
+
+func freshAuthFromEnv(getenv func(string) string, domain, keycloakURL string) (freshAuthSetup, error) {
+	pub := getenv("HUB_KEYCLOAK_PUBLIC_URL")
+	if pub == "" {
+		pub = "https://auth." + domain
+	}
+	u, err := url.Parse(pub)
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+		return freshAuthSetup{}, fmt.Errorf("HUB_KEYCLOAK_PUBLIC_URL must be https://<host> (Keycloak's public URL), got %q", pub)
+	}
+	public := "https://" + u.Host + "/realms/" + keycloak.Realm
+	internal := strings.TrimRight(keycloakURL, "/") + "/realms/" + keycloak.Realm + "/protocol/openid-connect"
+	return freshAuthSetup{
+		Issuer:       public,
+		TokenURL:     internal + "/token",
+		JWKSURL:      internal + "/certs",
+		AuthorizeURL: public + "/protocol/openid-connect/auth",
+		RedirectURI:  "https://people." + domain + "/",
+		WebOrigin:    "https://people." + domain,
+	}, nil
 }
 
 func main() {
@@ -119,7 +152,12 @@ func main() {
 	if err != nil {
 		log.Fatalf("refusing to start: %v", err)
 	}
-	kc := keycloak.New(env("KEYCLOAK_URL", "http://keycloak:8080"), os.Getenv("KEYCLOAK_ADMIN"), os.Getenv("KEYCLOAK_ADMIN_PASSWORD"))
+	keycloakURL := env("KEYCLOAK_URL", "http://keycloak:8080")
+	kc := keycloak.New(keycloakURL, os.Getenv("KEYCLOAK_ADMIN"), os.Getenv("KEYCLOAK_ADMIN_PASSWORD"))
+	fa, err := freshAuthFromEnv(os.Getenv, cfg.Domain, keycloakURL)
+	if err != nil {
+		log.Fatalf("refusing to start: %v", err)
+	}
 
 	cli := compose.NewCLI(dockerHost)
 	if v, err := cli.Version(context.Background()); err != nil {
@@ -205,6 +243,17 @@ func main() {
 			fields = append(fields, keycloak.AttrField{Name: f.Name, Multi: f.Multi})
 		}
 		return kc.EnsureAttributeMappers(ctx, fields)
+	})
+	// Fresh auth (contract §8): the verifier for file-share password
+	// creates, and its Keycloak client, ensured in the directory sync loop.
+	h.SetFreshAuth(freshauth.New(freshauth.Config{
+		Issuer: fa.Issuer, TokenURL: fa.TokenURL, JWKSURL: fa.JWKSURL,
+		AuthorizeURL: fa.AuthorizeURL, RedirectURI: fa.RedirectURI,
+		// The token endpoint never redirects; a redirect is refused.
+		HTTP: &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
+	}))
+	h.SetFreshAuthClient(func(ctx context.Context) error {
+		return kc.EnsureFreshAuthClient(ctx, fa.RedirectURI, fa.WebOrigin)
 	})
 	h.Init()
 

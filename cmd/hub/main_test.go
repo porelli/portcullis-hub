@@ -95,3 +95,31 @@ func TestFixerImageFromEnv(t *testing.T) {
 		}
 	}
 }
+
+func TestFreshAuthFromEnv(t *testing.T) {
+	get := func(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
+	fa, err := freshAuthFromEnv(get(nil), "example.org", "http://keycloak:8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := freshAuthSetup{
+		Issuer:       "https://auth.example.org/realms/portcullis",
+		TokenURL:     "http://keycloak:8080/realms/portcullis/protocol/openid-connect/token",
+		JWKSURL:      "http://keycloak:8080/realms/portcullis/protocol/openid-connect/certs",
+		AuthorizeURL: "https://auth.example.org/realms/portcullis/protocol/openid-connect/auth",
+		RedirectURI:  "https://people.example.org/",
+		WebOrigin:    "https://people.example.org",
+	}
+	if fa != want {
+		t.Errorf("default = %+v\nwant %+v", fa, want)
+	}
+	fa, err = freshAuthFromEnv(get(map[string]string{"HUB_KEYCLOAK_PUBLIC_URL": "https://login.example.net/"}), "example.org", "http://keycloak:8080/")
+	if err != nil || fa.Issuer != "https://login.example.net/realms/portcullis" || fa.TokenURL != want.TokenURL {
+		t.Errorf("set = %+v, %v", fa, err)
+	}
+	for _, bad := range []string{"http://auth.example.org", "https://auth.example.org/sub", "https://u:p@auth.example.org", "https://auth.example.org?x=1", "auth.example.org", "https://"} {
+		if _, err := freshAuthFromEnv(get(map[string]string{"HUB_KEYCLOAK_PUBLIC_URL": bad}), "example.org", "http://keycloak:8080"); err == nil {
+			t.Errorf("HUB_KEYCLOAK_PUBLIC_URL=%q accepted", bad)
+		}
+	}
+}

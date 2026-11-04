@@ -259,6 +259,8 @@ type Hub struct {
 	// people reads LLDAP membership for per-person settings (SetPeople;
 	// nil = not available). Guarded by mu.
 	people People
+	// freshAuth verifies fresh-auth proofs (freshauth.go; nil: refused).
+	freshAuth FreshAuth
 	// The settings delivery engine (deliver.go). deliveryMu guards queued
 	// (debounced and re-queued runs per instance) and deliveryStatus (the
 	// last outcome per instance and unit, mirrored in delivered.json).
@@ -387,10 +389,13 @@ type Hub struct {
 
 	// Directory publishing (SetDirectory). lastExpiring is the expiring
 	// list last written (guarded by policyWriteMu; nil: not yet known).
-	dirState     DirectoryState
-	attrSync     func(ctx context.Context) error
-	lastExpiring []policy.Expiring
-	dirKick      chan struct{}
+	dirState DirectoryState
+	attrSync func(ctx context.Context) error
+	// freshAuthEnsure re-asserts the fresh-auth Keycloak client in the
+	// directory sync loop (freshauth.go); under policyWriteMu like attrSync.
+	freshAuthEnsure func(ctx context.Context) error
+	lastExpiring    []policy.Expiring
+	dirKick         chan struct{}
 
 	// Person-id pools (personids.go, contract §13.16): idRanges = pool →
 	// its inclusive id range (templates.PersonIDPools; tests narrow it);

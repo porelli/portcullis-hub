@@ -200,6 +200,7 @@ func (h *Hub) RunDirectorySync(ctx context.Context) {
 // directly).
 func (h *Hub) runAttrSync(ctx context.Context, kick <-chan struct{}) {
 	var retry <-chan time.Time
+	lastFreshErr := "" // logged once per distinct error
 	tick := time.NewTicker(accessSyncInterval)
 	defer tick.Stop()
 	for {
@@ -212,7 +213,7 @@ func (h *Hub) runAttrSync(ctx context.Context, kick <-chan struct{}) {
 		}
 		retry = nil
 		h.policyWriteMu.Lock()
-		sync := h.attrSync
+		sync, ensureFresh := h.attrSync, h.freshAuthEnsure
 		h.policyWriteMu.Unlock()
 		sctx, cancel := context.WithTimeout(ctx, attrSyncTimeout)
 		var err error
@@ -221,12 +222,25 @@ func (h *Hub) runAttrSync(ctx context.Context, kick <-chan struct{}) {
 				log.Printf("keycloak: attribute mapper sync failed (retrying in %s): %v", directorySyncRetry, err)
 			}
 		}
+		// The fresh-auth client (contract §8): created and re-asserted on
+		// every sync; until it is right, fresh auth fails closed.
+		var ferr error
+		if ensureFresh != nil {
+			if ferr = ensureFresh(sctx); ferr != nil && ctx.Err() == nil {
+				if msg := ferr.Error(); msg != lastFreshErr {
+					log.Printf("keycloak: fresh-auth client not in place (retrying every %s): %v", directorySyncRetry, ferr)
+					lastFreshErr = msg
+				}
+			} else if ferr == nil {
+				lastFreshErr = ""
+			}
+		}
 		aerr := h.SyncClientAccess(sctx)
 		cancel()
 		if aerr != nil && ctx.Err() == nil {
 			log.Printf("keycloak: access role sync incomplete (retrying in %s): %v", directorySyncRetry, aerr)
 		}
-		if (err != nil || aerr != nil) && ctx.Err() == nil {
+		if (err != nil || aerr != nil || ferr != nil) && ctx.Err() == nil {
 			retry = time.After(directorySyncRetry)
 		}
 	}

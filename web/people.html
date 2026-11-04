@@ -23,6 +23,34 @@
      apps (myapps.js: the caller's own app settings) and Setup for admins.
      No app or catalog UI here; the API decides what
      each signed-in user may see and do. -->
+<script>
+  // Fresh-auth popup callback (contract §5.1 "Fresh auth"). My apps opens
+  // Keycloak's authorize URL in a popup whose redirect URI is this page;
+  // Keycloak sends it back here with ?code=…&state=… (or ?error=…). The
+  // code and state are dropped from the URL and history at once. Only a
+  // same-origin opener (a guarded read of opener.location.origin: a
+  // cross-origin opener throws) gets them, posted to exactly this origin;
+  // the popup then closes. Without one, the parameters are ignored and
+  // the page loads as usual. The opener (myapps.js) accepts only a
+  // message whose event.origin === location.origin and whose state is
+  // the one it stored, then deletes its sessionStorage entries.
+  window.portcullisFreshAuthCallback = (function () {
+    var q = new URLSearchParams(location.search);
+    if (!q.has('code') && !q.has('state') && !q.has('error')) return false;
+    var msg = { type: 'portcullis-fresh-auth', code: q.get('code') || '', state: q.get('state') || '', error: q.get('error') || '' };
+    history.replaceState(null, '', location.pathname + location.hash);
+    var op = null;
+    try {
+      if (window.opener && window.opener !== window && window.opener.location.origin === location.origin) op = window.opener;
+    } catch (e) {
+      op = null;
+    }
+    if (!op) return false;
+    op.postMessage(msg, location.origin);
+    window.close();
+    return true;
+  })();
+</script>
 <div class="container">
   <header>
     <h1><span>&#9906;</span> People</h1>
@@ -33,15 +61,20 @@
 <script src="/static/directory.js"></script>
 <script src="/static/myapps.js"></script>
 <script>
-  PortcullisDirectory.show(document.getElementById('people'), {
-    listener: 'people',
-    hashTabs: true,
-    extraTabs: [{ id: 'myapps', label: 'My apps', render: PortcullisMyApps.render }],
-    onUser: function (name) {
-      document.getElementById('who-name').textContent = name;
-      document.getElementById('who').hidden = !name;
-    },
-  });
+  if (window.portcullisFreshAuthCallback) {
+    // The popup handed its result to My apps; close() may be refused.
+    document.getElementById('people').textContent = 'Signed in. You can close this window.';
+  } else {
+    PortcullisDirectory.show(document.getElementById('people'), {
+      listener: 'people',
+      hashTabs: true,
+      extraTabs: [{ id: 'myapps', label: 'My apps', render: PortcullisMyApps.render }],
+      onUser: function (name) {
+        document.getElementById('who-name').textContent = name;
+        document.getElementById('who').hidden = !name;
+      },
+    });
+  }
 </script>
 </body>
 </html>

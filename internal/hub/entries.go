@@ -483,8 +483,7 @@ func (h *Hub) setEntry(ctx context.Context, instance, key, user string, raw json
 		return nil, nil, errEntryDirectory(err)
 	}
 	refuse := func(err error, detail string) (*MyEntry, *EntryRow, error) {
-		var se *StatusError
-		refused = errors.As(err, &se) && se.Status >= 400 && se.Status < 500
+		refused = isRefusal(err)
 		h.auditOp(actor, "settings.person_value", target, detail, err)
 		return nil, nil, err
 	}

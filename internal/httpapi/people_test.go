@@ -615,3 +615,34 @@ func TestSettingsAssetHubOnly(t *testing.T) {
 		}
 	}
 }
+
+// F20: people.html is the fresh-auth popup's landing page. It drops code
+// and state from the URL at once, posts only to a same-origin opener
+// (guarded read of opener.location.origin) with targetOrigin =
+// location.origin, and otherwise ignores the parameters. (Checked in a
+// browser against the harness: same-origin opener gets the message and
+// the popup closes; a cross-origin opener gets nothing.)
+func TestPeoplePageFreshAuthCallback(t *testing.T) {
+	e := newPeopleEnv(t)
+	_, pb := doAs(t, e.people, "bob", "GET", "/", "")
+	i := strings.Index(pb, "portcullisFreshAuthCallback = (function")
+	if i < 0 || i > strings.Index(pb, `src="/static/directory.js"`) {
+		t.Fatal("no popup callback before the page's scripts")
+	}
+	cb := pb[i:]
+	cb = cb[:strings.Index(cb, "</script>")]
+	for _, want := range []string{
+		"history.replaceState(null, '', location.pathname + location.hash);",
+		"try {",
+		"window.opener.location.origin === location.origin",
+		"op.postMessage(msg, location.origin);",
+		"window.close();",
+	} {
+		if !strings.Contains(cb, want) {
+			t.Errorf("callback lacks %q", want)
+		}
+	}
+	if strings.Index(cb, "replaceState") > strings.Index(cb, "opener") || strings.Contains(cb, `"*"`) || strings.Contains(cb, "'*'") {
+		t.Error("the URL must be cleaned before the opener is looked at, and nothing posted to *")
+	}
+}

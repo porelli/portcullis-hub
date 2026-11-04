@@ -94,6 +94,9 @@ type Client struct {
 	DirectAccessGrantsEnabled          *bool             `json:"directAccessGrantsEnabled,omitempty"`
 	ImplicitFlowEnabled                *bool             `json:"implicitFlowEnabled,omitempty"`
 	ServiceAccountsEnabled             *bool             `json:"serviceAccountsEnabled,omitempty"`
+	PublicClient                       *bool             `json:"publicClient,omitempty"`
+	StandardFlowEnabled                *bool             `json:"standardFlowEnabled,omitempty"`
+	FullScopeAllowed                   *bool             `json:"fullScopeAllowed,omitempty"`
 	// ProtocolMappers: the client's own protocol mappers (a client PUT
 	// keeps them; the protocol-mappers sub-resource changes them).
 	ProtocolMappers []ProtocolMapper `json:"protocolMappers,omitempty"`
@@ -236,6 +239,28 @@ func (s *Server) AddClient(clientID string, attrs map[string]string, scopes ...s
 	return id
 }
 
+// AddScope adds a realm client scope (no mappers) and returns its id.
+func (s *Server) AddScope(name string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	id := s.newID("scope")
+	s.Scopes[id] = &ClientScope{ID: id, Name: name, Protocol: "openid-connect"}
+	return id
+}
+
+// UpdateClient changes client id in place (fn gets the stored client;
+// scope lists by name, as an admin could leave them).
+func (s *Server) UpdateClient(id string, fn func(*Client)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if c := s.Clients[id]; c != nil {
+		if c.Attributes == nil {
+			c.Attributes = map[string]string{}
+		}
+		fn(c)
+	}
+}
+
 // AddClientMapper adds a protocol mapper to client id (config may be
 // nil) and returns its id.
 func (s *Server) AddClientMapper(id, name, mapperType string, config map[string]string) string {
@@ -280,6 +305,14 @@ func (s *Server) ClientByClientID(clientID string) *Client {
 			cp.RedirectURIs = append([]string(nil), c.RedirectURIs...)
 			cp.WebOrigins = append([]string(nil), c.WebOrigins...)
 			cp.ProtocolMappers = append([]ProtocolMapper(nil), c.ProtocolMappers...)
+			cp.Attributes = map[string]string{}
+			for k, v := range c.Attributes {
+				cp.Attributes[k] = v
+			}
+			cp.AuthenticationFlowBindingOverrides = map[string]string{}
+			for k, v := range c.AuthenticationFlowBindingOverrides {
+				cp.AuthenticationFlowBindingOverrides[k] = v
+			}
 			return &cp
 		}
 	}
@@ -803,6 +836,20 @@ func (s *Server) serveClients(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		c.DefaultClientScopes = append(c.DefaultClientScopes, sc.Name)
+		w.WriteHeader(204)
+	case len(parts) == 3 && parts[1] == "default-client-scopes" && r.Method == "DELETE":
+		c, sc := s.Clients[parts[0]], s.Scopes[parts[2]]
+		if c == nil || sc == nil {
+			http.NotFound(w, r)
+			return
+		}
+		kept := []string{}
+		for _, n := range c.DefaultClientScopes {
+			if n != sc.Name {
+				kept = append(kept, n)
+			}
+		}
+		c.DefaultClientScopes = kept
 		w.WriteHeader(204)
 	case len(parts) == 3 && parts[1] == "optional-client-scopes" && r.Method == "DELETE":
 		c, sc := s.Clients[parts[0]], s.Scopes[parts[2]]

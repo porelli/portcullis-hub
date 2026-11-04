@@ -7,8 +7,10 @@ require (
 	github.com/alecthomas/participle/v2 v2.1.4
 	github.com/compose-spec/compose-go/v2 v2.16.2
 	github.com/containerd/errdefs v1.0.0
+	github.com/coreos/go-oidc/v3 v3.21.0
 	github.com/docker/go-units v0.5.0
 	github.com/go-asn1-ber/asn1-ber v1.5.8
+	github.com/go-jose/go-jose/v4 v4.1.8
 	github.com/go-ldap/ldap/v3 v3.4.15
 	github.com/go-resty/resty/v2 v2.17.2
 	github.com/hasura/go-graphql-client v0.16.0
@@ -19,6 +21,7 @@ require (
 	github.com/xhit/go-str2duration/v2 v2.2.0
 	golang.org/x/crypto v0.54.0
 	golang.org/x/mod v0.42.0
+	golang.org/x/oauth2 v0.37.0
 	golang.org/x/sys v0.47.0
 	golang.org/x/text v0.43.0
 	gopkg.in/yaml.v3 v3.0.1

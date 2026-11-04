@@ -22,6 +22,8 @@ import (
 
 	"github.com/Nerzal/gocloak/v14"
 	"github.com/go-resty/resty/v2"
+
+	"github.com/portcullis/hub/internal/freshauth"
 )
 
 // Realm is the Portcullis realm the Hub manages.
@@ -33,9 +35,11 @@ const OwnerAttr = "portcullis.hub.template"
 
 const maxBody = 16 << 20
 
-// protectedClients are core/built-in clients no template may touch.
+// protectedClients are core/built-in clients no template may touch, and
+// the Hub's own fresh-auth client (EnsureFreshAuthClient alone manages it:
+// no template takes it over, no attribute scope is attached to it).
 var protectedClients = map[string]bool{
-	"portcullis-forward-auth": true, "admin-cli": true, "account": true, "account-console": true,
+	"portcullis-forward-auth": true, freshauth.ClientID: true, "admin-cli": true, "account": true, "account-console": true,
 	"broker": true, "realm-management": true, "security-admin-console": true,
 }
 
