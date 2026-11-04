@@ -400,7 +400,7 @@ func (h *Hub) probeFolder(ctx context.Context, p string, create bool) (dev, ino 
 // must be the probe's dev / ino (the fixer refuses another, and the Hub
 // checks its report too).
 func (h *Hub) scanPath(ctx context.Context, p, folder string, dev, ino uint64) (*folderfix.Report, error) {
-	rep, err := h.runFixer(ctx, fixerRun{Mode: "scan", Folder: folder, Source: p,
+	rep, err := h.runFixer(ctx, fixerRun{Mode: "scan", Folder: folder, Source: p, Unchecked: folder != "",
 		Opts: folderfix.Options{ExpectDev: dev, ExpectIno: ino, MaxEntries: scanMaxEntries, MaxTime: previewMaxTime}})
 	if err != nil {
 		return nil, err

@@ -146,7 +146,13 @@ var testTarget = folderfix.Target{GID: 60001, Files: "rw"}
 func scanFolder(t *testing.T, h *Hub, src string, o folderfix.Options) *folderfix.Report {
 	t.Helper()
 	o.Target = testTarget
-	rep, err := h.runFixer(context.Background(), fixerRun{Mode: "scan", Folder: "dockertest", Source: src, Opts: o})
+	// A first scan learns the identity: a path check (H5: a folder scan
+	// checks dev, ino and mount root).
+	folder := "dockertest"
+	if o.ExpectDev == 0 {
+		folder = ""
+	}
+	rep, err := h.runFixer(context.Background(), fixerRun{Mode: "scan", Folder: folder, Source: src, Opts: o})
 	if err != nil {
 		t.Fatalf("scan: %v", err)
 	}

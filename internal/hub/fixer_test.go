@@ -74,9 +74,9 @@ func TestFixerCapsByMode(t *testing.T) {
 		outPath  string
 		wantArgs []string
 	}{
-		{"scan", fixerRun{Mode: "scan", Folder: "photos", Source: "/srv/photos", Opts: folderfix.Options{MaxEntries: 10}},
+		{"scan", fixerRun{Mode: "scan", Folder: "photos", Source: "/srv/photos", Opts: folderfix.Options{ExpectDev: 2049, ExpectIno: 12, MaxEntries: 10}, Unchecked: true},
 			[]string{"DAC_READ_SEARCH"}, true, "/folder", nil, "", "",
-			[]string{"scan", "--root=/folder", "--max-entries=10"}},
+			[]string{"scan", "--root=/folder", "--expect-dev=2049", "--expect-ino=12", "--max-entries=10"}},
 		{"snapshot", fixerRun{Mode: "snapshot", Folder: "photos", Source: "/srv/photos", Opts: applyOpts(), Out: snap},
 			[]string{"DAC_READ_SEARCH"}, true, "/folder", []string{"/out"}, "", "/out", nil},
 		{"undo snapshot", fixerRun{Mode: "snapshot", Folder: "photos", Source: "/srv/photos", Opts: applyOpts(),
@@ -234,6 +234,16 @@ func TestFixerRefusesBadRuns(t *testing.T) {
 		"root source":        {Mode: "scan", Source: "/"},
 		"bad folder id":      {Mode: "scan", Folder: "Photos!", Source: "/srv/x"},
 		"probe no rel":       {Mode: "probe", Source: "/srv"},
+		// H5: a folder scan and every snapshot check the identity; only a
+		// create / check-path / re-check scan says it is learning it
+		// (Unchecked: dev/ino still required, no mount root yet).
+		"snapshot no dev":            {Mode: "snapshot", Folder: "x", Source: "/srv/x", Opts: noDev, Out: snap},
+		"snapshot no mountroot":      {Mode: "snapshot", Folder: "x", Source: "/srv/x", Opts: noRoot, Out: snap},
+		"folder scan no dev":         {Mode: "scan", Folder: "x", Source: "/srv/x"},
+		"folder scan no mountroot":   {Mode: "scan", Folder: "x", Source: "/srv/x", Opts: folderfix.Options{ExpectDev: 1, ExpectIno: 2}},
+		"unchecked scan no dev":      {Mode: "scan", Folder: "x", Source: "/srv/x", Unchecked: true},
+		"unchecked on a non-scan":    {Mode: "restore", Folder: "x", Source: "/srv/x", Opts: applyOpts(), In: in(), InSize: 1, Unchecked: true},
+		"unchecked without a folder": {Mode: "scan", Source: "/srv/x", Opts: folderfix.Options{ExpectDev: 1, ExpectIno: 2}, Unchecked: true},
 	} {
 		var err error
 		if r.Mode == "probe" {

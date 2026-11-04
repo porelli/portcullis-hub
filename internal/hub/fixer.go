@@ -96,6 +96,11 @@ type fixerRun struct {
 	Out func(io.Reader) error
 	// Timeout: 0 = the mode's default (fixerTimeout).
 	Timeout time.Duration
+	// Unchecked: a folder scan that learns the folder's identity (create,
+	// path change, check path, re-check): the probe's dev/ino just before
+	// are still required, the mount root isn't known yet (H5). Every other
+	// folder scan and every snapshot checks dev, ino and mount root.
+	Unchecked bool
 }
 
 func fixerTimeout(r fixerRun) time.Duration {
@@ -135,6 +140,10 @@ func (r fixerRun) validate() error {
 	if (r.Out != nil) != (r.Mode == "snapshot") {
 		return fmt.Errorf("%s: an output is required exactly for snapshot", r.Mode)
 	}
+	if r.Unchecked && (r.Mode != "scan" || r.Folder == "") {
+		return errors.New("only a folder scan learns an identity (unchecked)")
+	}
+	identity := o.ExpectDev != 0 && o.ExpectIno != 0 && o.ExpectMountRoot != ""
 	switch r.Mode {
 	case "probe":
 		if r.Extra.Rel == "" {
@@ -149,9 +158,16 @@ func (r fixerRun) validate() error {
 			}
 		}
 	case "scan":
+		switch {
+		case r.Folder == "":
+		case r.Unchecked && (o.ExpectDev == 0 || o.ExpectIno == 0):
+			return errors.New("a folder scan learning its identity needs the probe's device and inode")
+		case !r.Unchecked && !identity:
+			return errors.New("a folder scan needs the folder's device, inode and mount root")
+		}
 	case "snapshot":
-		if o.Target.GID == 0 || r.Folder == "" {
-			return errors.New("snapshot needs a folder and its gid")
+		if o.Target.GID == 0 || r.Folder == "" || !identity {
+			return errors.New("snapshot needs a folder, its gid, device, inode and mount root")
 		}
 	case "apply":
 		if r.Folder == "" || o.Target.GID == 0 || o.ExpectDev == 0 || o.ExpectIno == 0 || o.ExpectMountRoot == "" || !digestRe.MatchString(o.ExpectDigest) {
