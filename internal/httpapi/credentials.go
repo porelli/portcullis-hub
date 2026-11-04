@@ -63,8 +63,11 @@ func credentialErr(w http.ResponseWriter, who string, err error) {
 	http.Error(w, directory.GenericUnavailable, http.StatusServiceUnavailable)
 }
 
-// noStore sets Cache-Control: no-store and Pragma: no-cache (§5.1: the
-// password goes in the answer only).
+// noStoreHeaders sets both Cache-Control: no-store and Pragma: no-cache for
+// credential responses that contain the password (§5.1: the password goes in
+// the answer only). The noStore function (directory.go) sets only
+// Cache-Control for other no-cache responses (My apps, admin views) that
+// contain no secrets.
 func noStoreHeaders(w http.ResponseWriter) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Pragma", "no-cache")

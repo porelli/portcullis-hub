@@ -24,6 +24,12 @@ func (h *Hub) SetFreshAuth(f FreshAuth) {
 	h.freshAuth = f
 }
 
+// SetFreshAuthReady marks the fresh-auth Keycloak client as configured (for
+// testing; in production the directory sync sets it).
+func (h *Hub) SetFreshAuthReady(ready bool) {
+	h.freshAuthReady.Store(ready)
+}
+
 // SetFreshAuthClient sets the Keycloak call that creates / re-asserts the
 // fresh-auth client (keycloak.Client.EnsureFreshAuthClient); the directory
 // sync loop runs it next to the attribute mappers, retried on failure.
