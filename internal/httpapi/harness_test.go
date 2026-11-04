@@ -3,21 +3,30 @@
 package httpapi
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
+	"github.com/portcullis/hub/internal/folderfix"
 	"github.com/portcullis/hub/internal/hub"
+	"github.com/portcullis/hub/internal/state"
 )
 
 // TestHarness serves the Hub UI against the in-memory fakes (LLDAP,
@@ -88,13 +97,30 @@ func TestHarness(t *testing.T) {
 		}
 		extra[id] = [2]string{manifest, string(c)}
 	}
+	// Shared folders and the doctor (plan 2, Task 14): photos (a
+	// declared read option, an undeclared one, a lan_only port) and samba
+	// (a declared write option).
+	extra["photos"] = [2]string{folderAppManifest, folderAppCompose}
+	extra["samba"] = [2]string{harnessSambaManifest, harnessSambaCompose}
 	var eng *harnessEngine
-	e := newInstEnvWith(t, t.TempDir(), extra, func(f *fakeEngine) hub.Engine {
-		eng = &harnessEngine{fakeEngine: f, running: map[string][]string{"hookapp": {"app"}, "entryapp": {"app"}}}
-		return eng
+	disk := newHarnessDisk()
+	e := newInstEnvOpts(t, t.TempDir(), instEnvOpts{
+		extra: extra,
+		engine: func(f *fakeEngine) hub.Engine {
+			eng = &harnessEngine{fakeEngine: f, disk: disk,
+				running: map[string][]string{"hookapp": {"app"}, "entryapp": {"app"}, "photos": {"server"}, "samba": {"samba"}}}
+			return eng
+		},
+		cfg: func(c *hub.Config) { c.FixerImage = testFixerImage },
+		seed: func(st *state.AppState) {
+			// A Problem: secretapp's folder changed on disk at its last
+			// start (explain-only).
+			st.FolderChanged = map[string][]state.FolderChange{"secretapp": {{Instance: "secretapp", Key: "files", Folder: "media",
+				At: time.Now().UTC(), Detail: "/srv/media/inbox is a symlink"}}}
+		},
 	})
 	h := e.s.Hub
-	for _, id := range harnessFixtures {
+	for _, id := range append(slices.Clone(harnessFixtures), "photos", "samba") {
 		if h.Template(id) == nil {
 			t.Fatalf("fixture %s not loaded (see the log)", id)
 		}
@@ -123,6 +149,7 @@ func TestHarness(t *testing.T) {
 	}
 	seedSettings(t, h, eng)
 	seedEntries(t, e)
+	seedFolders(t, h, disk)
 
 	d, err := time.ParseDuration(os.Getenv("HUB_HARNESS_FOR"))
 	if err != nil {
@@ -212,6 +239,10 @@ func seedDirectory(e *instEnv) {
 	e.ll.AddGroup("users_immich", "alice", "bob", "carol")
 	e.ll.AddGroup("admin_immich", "root")
 	e.ll.AddGroup("entryapp", "alice", "bob", "carol", "dave")
+	for _, id := range []string{"photos", "samba"} {
+		e.ll.AddGroup("users_"+id, "root", "alice", "bob")
+		e.ll.AddGroup("admin_"+id, "root")
+	}
 }
 
 // harnessCarolExt is the ext_id carol entered before leaving entryapp.
@@ -291,6 +322,12 @@ type harnessEngine struct {
 	*fakeEngine
 	running map[string][]string // instance id → services
 	hookOK  atomic.Bool
+	disk    *harnessDisk
+}
+
+// RunHelper answers the shared-folder fixer's runs from the fake disk.
+func (e *harnessEngine) RunHelper(_ context.Context, s docker.RunSpec, out func(io.Reader) error) (*docker.RunResult, error) {
+	return e.disk.run(s, out)
 }
 
 func (e *harnessEngine) ListContainers(ctx context.Context, f docker.Filters) ([]docker.Container, error) {
@@ -353,4 +390,307 @@ func (p harnessPeople) PrivilegeProblem(ctx context.Context, group string) (stri
 		why = harnessPrivilegeReason
 	}
 	return why, err
+}
+
+// ── shared folders and the doctor (plan 2, Task 14) ─────────────────
+
+// harnessSamba is a writer of shared folders (a declared write option).
+const harnessSambaManifest = `name: Samba
+category: files
+instances: multi
+auth:
+  method: header-auth
+  group_access: true
+  access_group: users_samba
+  admin_group: admin_samba
+urls:
+  - label: Web
+    url: "https://{{HOST_SAMBA}}"
+settings:
+  options:
+    - key: share
+      label: Shared folder
+      type: path
+      target: {service: samba, mount: /share}
+      folder: {access: write, runs_as: {uid: 2000, gid: 2000}}
+      applies: restart
+`
+
+const harnessSambaCompose = "services:\n  samba:\n    image: samba\n    user: \"2000:2000\"\n    labels:\n" +
+	"      traefik.enable: \"true\"\n" +
+	"      traefik.http.routers.samba.rule: Host(`${PORTCULLIS_HOST_SAMBA:-samba.portcullis.local}`)\n" +
+	"      traefik.http.routers.samba.entrypoints: websecure\n" +
+	"      traefik.http.routers.samba.middlewares: portcullis-auth@docker,portcullis-groups@docker\n" +
+	"      traefik.http.services.samba.loadbalancer.server.port: \"8080\"\n"
+
+// seedFolders enables photos and samba and defines two shared folders,
+// each applied once (a snapshot, so "Undo last fix…"): media (Family
+// media, used by photos' undeclared extra: an Info) and scans (its name
+// carries markup, used by samba), which then drifts (a Warning with
+// "Apply again" and "Undo last fix"). The Doctor also has photos' SMB
+// port on 0.0.0.0 (lan_only: Rebind…) and secretapp's changed folder (a
+// Problem, explain-only). /srv/photos and /srv/projects exist on the
+// fake disk, unused; /srv/new-share is missing ("Create it");
+// samba-office (disabled) is a second writer nobody assigned yet.
+func seedFolders(t *testing.T, h *hub.Hub, disk *harnessDisk) {
+	t.Helper()
+	for _, id := range []string{"photos", "samba"} {
+		if err := h.Enable(id); err != nil {
+			t.Fatalf("enabling %s: %v", id, err)
+		}
+	}
+	// samba-office: a second (disabled) writer, free for the browser's
+	// assignment.
+	if _, err := h.CreateInstanceAs("samba", "samba-office", nil, "root"); err != nil {
+		t.Fatalf("creating samba-office: %v", err)
+	}
+	for _, p := range []string{"/srv/media", "/srv/scans", "/srv/photos", "/srv/projects"} {
+		disk.add(p)
+	}
+	ctx := context.Background()
+	for _, f := range []struct {
+		id, name, path, desc string
+		uses                 []hub.FolderUse
+	}{
+		{"media", "Family media", "/srv/media", "Photos and videos of the family.", []hub.FolderUse{{Instance: "photos", Key: "extra"}}},
+		{"scans", "Old <b>scans</b>", "/srv/scans", "Scanned <i>letters</i>.", []hub.FolderUse{{Instance: "samba", Key: "share", Subpath: "letters"}}},
+	} {
+		if _, _, err := h.CreateFolder(ctx, hub.FolderInput{ID: f.id, Name: f.name, Path: f.path, Description: f.desc}, "root"); err != nil {
+			t.Fatalf("creating folder %s: %v", f.id, err)
+		}
+		req := hub.AssignRequest{Uses: f.uses}
+		plan, err := h.PreviewAssign(ctx, f.id, req)
+		if err != nil {
+			t.Fatalf("previewing %s: %v", f.id, err)
+		}
+		op, err := h.StartAssign(f.id, req, plan.Hash, "root")
+		if err != nil {
+			t.Fatalf("assigning %s: %v", f.id, err)
+		}
+		if rec := waitHubOp(t, h, "_folder."+f.id, op.OpID); !rec.OK {
+			t.Fatalf("assigning %s failed: %+v", f.id, rec)
+		}
+	}
+	disk.drift("/srv/scans", 37)
+	op, err := h.StartDoctorScan("root")
+	if err != nil {
+		t.Fatalf("doctor scan: %v", err)
+	}
+	if rec := waitHubOp(t, h, "_doctor", op.OpID); !rec.OK {
+		t.Fatalf("doctor scan failed: %+v", rec)
+	}
+}
+
+// waitHubOp waits for op id under key to finish.
+func waitHubOp(t *testing.T, h *hub.Hub, key, id string) hub.OpRecord {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		if r := h.LastOp(key); r != nil && r.OpID == id && !r.Running {
+			return *r
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("op %s of %s never finished: %+v", id, key, h.LastOp(key))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// harnessDir is one directory of the fake host disk.
+type harnessDir struct {
+	dev, ino    uint64
+	files, dirs int64
+	applied     bool  // the folder's ownership was applied
+	drift       int64 // entries that drifted since
+	last        int64 // entries the last apply changed (what an undo restores)
+}
+
+// harnessDisk answers the fixer's probe, scan, snapshot, apply and
+// restore runs (host path → directory). An apply reports 2 hard links
+// and 1 race (warnings), a restore 1 entry changed since the fix.
+type harnessDisk struct {
+	mu   sync.Mutex
+	dirs map[string]*harnessDir
+	next uint64
+}
+
+func newHarnessDisk() *harnessDisk { return &harnessDisk{dirs: map[string]*harnessDir{}} }
+
+func (d *harnessDisk) add(p string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.addLocked(p)
+}
+
+func (d *harnessDisk) addLocked(p string) *harnessDir {
+	d.next++
+	e := &harnessDir{dev: 2049, ino: 500 + d.next, files: 12410, dirs: 312}
+	d.dirs[p] = e
+	return e
+}
+
+func (d *harnessDisk) drift(p string, n int64) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.dirs[p].drift = n
+}
+
+// pending is what an apply would change.
+func (e *harnessDir) pending() int64 {
+	if !e.applied {
+		return e.files + e.dirs + 1
+	}
+	return e.drift
+}
+
+func (e *harnessDir) plan() *folderfix.PlanCounts {
+	n := e.pending()
+	if n == 0 {
+		return &folderfix.PlanCounts{Digest: strings.Repeat("cd", 32), KeepGroup: map[int]int64{}, KeepUser: map[int]int64{}}
+	}
+	dirs := int64(0)
+	if !e.applied {
+		dirs = e.dirs + 1
+	}
+	return &folderfix.PlanCounts{Changes: n, Digest: strings.Repeat("ab", 32), ChangeGroup: folderfix.Count{N: n},
+		AddSetgid: folderfix.Count{N: dirs}, AddDefaultACL: folderfix.Count{N: dirs},
+		KeepGroup: map[int]int64{1000: n}, KeepUser: map[int]int64{}}
+}
+
+func harnessReply(rep any, exit int) (*docker.RunResult, error) {
+	b, _ := json.Marshal(rep)
+	return &docker.RunResult{ExitCode: exit, Stdout: append(b, '\n')}, nil
+}
+
+func harnessArg(cmd []string, flag string) (string, bool) {
+	for _, a := range cmd {
+		if a == "--"+flag {
+			return "", true
+		}
+		if v, ok := strings.CutPrefix(a, "--"+flag+"="); ok {
+			return v, true
+		}
+	}
+	return "", false
+}
+
+func (d *harnessDisk) run(s docker.RunSpec, out func(io.Reader) error) (*docker.RunResult, error) {
+	if s.In != nil {
+		io.Copy(io.Discard, s.In)
+	}
+	mode := ""
+	if len(s.Cmd) > 2 {
+		mode = s.Cmd[2]
+	}
+	if len(s.Binds) == 0 {
+		return nil, fmt.Errorf("fixer %s without a bind mount", mode)
+	}
+	src := s.Binds[0].Source
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if mode == "probe" {
+		rel, _ := harnessArg(s.Cmd, "rel")
+		_, create := harnessArg(s.Cmd, "create")
+		p := folderfix.ProbeReport{Version: 1, Mode: "probe", Root: "/broot", Rel: rel, MountRoot: "/"}
+		e := d.dirs[path.Join(src, rel)]
+		if e == nil && create {
+			e = d.addLocked(path.Join(src, rel))
+			e.files, e.dirs = 0, 0
+			p.Created = true
+		}
+		if e != nil {
+			p.Exists, p.Dev, p.Ino, p.FSType = true, e.dev, e.ino, "ext4"
+		}
+		return harnessReply(p, 0)
+	}
+	e := d.dirs[src]
+	if e == nil {
+		return harnessReply(folderfix.Report{Version: 1, Mode: mode, Errors: []string{"no such directory"}}, 2)
+	}
+	n := e.files + e.dirs + 1
+	switch mode {
+	case "scan":
+		rep := folderfix.Report{Version: 1, Mode: "scan", Root: "/folder", Dev: e.dev, Ino: e.ino, MountRoot: src, FSType: "ext4",
+			ACL: true, Xattr: true, Entries: n, Files: e.files, Dirs: e.dirs, Owners: []folderfix.OwnerCount{{UID: 1000, GID: 1000, N: n}},
+			FreeBytes: 1 << 40, TotalBytes: 4 << 40}
+		if _, ok := harnessArg(s.Cmd, "gid"); ok {
+			rep.Plan = e.plan()
+			c := folderfix.Count{N: e.pending()}
+			if e.applied && e.drift > 0 {
+				c.Sample = []string{"1998/letter-01.pdf", "1998/letter-02.pdf"}
+			}
+			rep.Expected = &folderfix.Conformance{Group: c}
+		}
+		return harnessReply(rep, 0)
+	case "snapshot":
+		kind, _ := harnessArg(s.Cmd, "kind")
+		if kind == "" {
+			kind = "apply"
+		}
+		gid, _ := harnessArg(s.Cmd, "gid")
+		files, _ := harnessArg(s.Cmd, "files")
+		owner := "null"
+		if o, ok := harnessArg(s.Cmd, "owner"); ok {
+			owner = o
+		}
+		if gid == "" {
+			gid = "0"
+		}
+		plan := e.plan()
+		var gz bytes.Buffer
+		zw := gzip.NewWriter(&gz)
+		fmt.Fprintf(zw, `{"version":1,"kind":%q,"rules":1,"root_dev":%d,"root_ino":%d,"gid":%s,"files":%q,"owner_uid":%s,"created_at":"x","entries":%d}`+"\n",
+			kind, e.dev, e.ino, gid, files, owner, plan.Changes)
+		zw.Close()
+		var tb bytes.Buffer
+		tw := tar.NewWriter(&tb)
+		tw.WriteHeader(&tar.Header{Name: "out/", Typeflag: tar.TypeDir, Mode: 0o700})
+		tw.WriteHeader(&tar.Header{Name: "out/" + folderfix.SnapshotName, Typeflag: tar.TypeReg, Mode: 0o600, Size: int64(gz.Len())})
+		tw.Write(gz.Bytes())
+		tw.Close()
+		if out != nil {
+			if err := out(&tb); err != nil {
+				return nil, err
+			}
+		}
+		return harnessReply(folderfix.Report{Version: 1, Mode: "snapshot", Dev: e.dev, Ino: e.ino, Plan: plan, Entries: plan.Changes}, 0)
+	case "apply":
+		for _, a := range s.Cmd {
+			if m, ok := strings.CutPrefix(a, "--mkdir="); ok {
+				if d.dirs[path.Join(src, m)] == nil {
+					c := d.addLocked(path.Join(src, m))
+					c.files, c.dirs = 0, 0
+				}
+			}
+		}
+		plan := e.plan()
+		e.last, e.applied, e.drift = e.pending(), true, 0
+		return harnessReply(folderfix.Report{Version: 1, Mode: "apply", Dev: e.dev, Ino: e.ino, Changed: e.last, Plan: plan,
+			HardLinks: folderfix.Count{N: 2, Sample: []string{"album/cover.jpg"}},
+			Races:     folderfix.Count{N: 1, Sample: []string{"inbox/upload.part"}}}, 0)
+	case "restore":
+		rep := folderfix.Report{Version: 1, Mode: "restore", Dev: e.dev, Ino: e.ino}
+		if _, dry := harnessArg(s.Cmd, "dry-run"); dry {
+			if e.applied {
+				rep.ToRestore, rep.ChangedSince = e.last, folderfix.Count{N: 1, Sample: []string{"inbox/new.jpg"}}
+			}
+			return harnessReply(rep, 0)
+		}
+		rep.Changed, rep.ChangedSince = e.last, folderfix.Count{N: 1, Sample: []string{"inbox/new.jpg"}}
+		e.applied, e.drift = false, 0
+		return harnessReply(rep, 0)
+	}
+	return nil, fmt.Errorf("unexpected fixer mode %q", mode)
+}
+
+// Exec answers the doctor's group check (ls /proc, cat of the status
+// files): one process with gid 1000 and no supplementary groups.
+func (e *harnessEngine) Exec(ctx context.Context, id string, cmd []string, d time.Duration) (*docker.ExecResult, error) {
+	switch {
+	case len(cmd) > 0 && cmd[0] == "ls":
+		return &docker.ExecResult{Output: []byte("1\nself\n")}, nil
+	case len(cmd) > 0 && cmd[0] == "cat":
+		return &docker.ExecResult{Output: []byte("Name:\tapp\nUid:\t1000\t1000\t1000\t1000\nGid:\t1000\t1000\t1000\t1000\nGroups:\t\n")}, nil
+	}
+	return e.fakeEngine.Exec(ctx, id, cmd, d)
 }

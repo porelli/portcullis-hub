@@ -115,6 +115,9 @@ type FolderView struct {
 	// LastCheck is the folder's last disk scan (doctorscan.go: on demand,
 	// after an apply, daily).
 	LastCheck *doctor.ScanSummary `json:"last_check,omitempty"`
+	// LastApply is the folder's last apply (its snapshot: the UI's "Undo
+	// last fix…"); nil when never applied or undone.
+	LastApply *state.FolderApply `json:"last_apply,omitempty"`
 }
 
 // FolderUseView is one setting value naming the folder. Access is the
@@ -922,8 +925,17 @@ func (h *Hub) Folders() []FolderView {
 // folderViewLocked is folder id's view without its op record.
 func (h *Hub) folderViewLocked(id string) FolderView {
 	f := h.st.Folders[id]
-	return FolderView{ID: id, Name: f.Name, Path: f.Path, Description: f.Description, GID: f.GID, Adopted: f.Adopted,
+	v := FolderView{ID: id, Name: f.Name, Path: f.Path, Description: f.Description, GID: f.GID, Adopted: f.Adopted,
 		Uses: h.folderUsesLocked(id)}
+	if f.LastApply != nil {
+		la := *f.LastApply
+		if la.OwnerUID != nil {
+			uid := *la.OwnerUID
+			la.OwnerUID = &uid
+		}
+		v.LastApply = &la
+	}
+	return v
 }
 
 // fillLastOp adds the folder's op record (under opsMu, never with mu)

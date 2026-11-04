@@ -271,9 +271,15 @@
   function render(el, id) {
     el.innerHTML = '<p class="settings-empty">Loading settings…</p>';
     bind(el);
-    return window.apiGet('/api/instances/' + encodeURIComponent(id) + '/settings').then(panel => {
+    return window.apiGet('/api/instances/' + encodeURIComponent(id) + '/settings').then(async panel => {
+      // The shared folders, for the path options' picker.
+      let folders = [];
+      if ((panel.options || []).some(o => o.type === 'path') && window.PortcullisFolders) {
+        try { folders = await window.PortcullisFolders.list(); } catch (e) { /* custom paths only */ }
+      }
       const prev = states.get(el);
       const st = newState(el, id, panel);
+      st.folders = folders;
       if (prev && prev.id === id) st.flash = prev.flash;
       states.set(el, st);
       draw(st);
@@ -553,8 +559,67 @@
 
   // ── instance options ───────────────────────────────────────────────
 
+  // folderRefOf: "folder:<id>[/<sub>]" → {id, sub}, else null.
+  function folderRefOf(v) {
+    const m = typeof v === 'string' && /^folder:([a-z][a-z0-9-]{0,30})(?:\/(.+))?$/.exec(v);
+    return m ? { id: m[1], sub: m[2] || '' } : null;
+  }
+
+  // folderPickHtml: "Custom path" / "Shared folder: <name>" (plan 2 call
+  // 15). Choosing or leaving a shared folder opens the assignment preview
+  // (PortcullisFolders.openAssign), never the panel's save: the Hub
+  // refuses folder values through the settings save.
+  function folderPickHtml(st, o, ref) {
+    const fs = st.folders || [];
+    if (!window.PortcullisFolders || (!fs.length && !ref)) return '';
+    let h = '<div class="ps-folder-pick"><select data-folder-pick data-key="' + esc(o.key) + '" aria-label="' + esc((o.label || o.key) + ': path source') + '">' +
+      '<option value=""' + (ref ? '' : ' selected') + '>Custom path</option>';
+    let found = false;
+    for (const f of fs) {
+      const sel = ref && ref.id === f.id;
+      found = found || sel;
+      h += '<option value="' + esc(f.id) + '"' + (sel ? ' selected' : '') + '>Shared folder: ' + esc(f.name) + '</option>';
+    }
+    if (ref && !found) h += '<option value="' + esc(ref.id) + '" selected>Shared folder: ' + esc(ref.id) + ' (missing)</option>';
+    h += '</select>';
+    if (ref) {
+      const f = fs.find(x => x.id === ref.id);
+      h += '<button type="button" class="btn btn-sm btn-secondary" data-action="folder-change" data-key="' + esc(o.key) + '">Change subfolder…</button></div>';
+      h += '<div class="ps-hint">Uses shared folder <strong>' + esc(f ? f.name : ref.id) + '</strong>' +
+        (f ? ': <code>' + esc(f.path + (ref.sub ? '/' + ref.sub : '')) + '</code>' : '') +
+        '. Changes go through Settings → Shared folders (a previewed assignment).</div>';
+    } else {
+      h += '</div>';
+    }
+    return h;
+  }
+
   function instanceHtml(st, o) {
     const v = st.values[o.key];
+    if (o.type === 'path') {
+      const ref = folderRefOf((st.panel.instance || {})[o.key]);
+      if (ref) return folderPickHtml(st, o, ref) + pathHint(st, o);
+      const pick = folderPickHtml(st, o, null);
+      if (pick) return pick + instanceInner(st, o, v) + pathHint(st, o);
+    }
+    return instanceInner(st, o, v) + (o.type === 'path' ? pathHint(st, o) : '');
+  }
+
+  // openFolderAssign runs the assignment preview for option key (folder
+  // id chosen, or "" = leave the stored folder), then redraws: the panel
+  // from the server after an apply, else the option as stored.
+  async function openFolderAssign(st, key, folder) {
+    const ref = folderRefOf((st.panel.instance || {})[key]);
+    let spec;
+    if (folder) spec = { folder, add: [{ instance: st.id, key, subpath: ref && ref.id === folder ? ref.sub : '' }] };
+    else if (ref) spec = { folder: ref.id, remove: [{ instance: st.id, key }] };
+    else return;
+    const res = await window.PortcullisFolders.openAssign(spec);
+    if (res && res.applied) render(st.el, st.id);
+    else redrawOption(st, key);
+  }
+
+  function instanceInner(st, o, v) {
     const isDefault = v === null || v === undefined;
     const shown = isDefault ? canonical(o, o.default) : v;
     let h = '<div class="ps-inst">';
@@ -562,7 +627,6 @@
     if (isDefault) h += '<span class="ps-hint ps-inline">' + (o.default_display ? 'template default (' + esc(o.default_display) + ')' : 'not set') + '</span>';
     else if (o.default !== undefined) h += '<button type="button" class="btn btn-sm btn-secondary" data-action="use-default" data-key="' + esc(o.key) + '">Use default</button>';
     h += '</div>';
-    if (o.type === 'path') h += pathHint(st, o);
     return h;
   }
 
@@ -1233,6 +1297,10 @@
       const st = stOf();
       if (!st || st.saving) return;
       const t = e.target;
+      if (t.matches('[data-folder-pick]')) {
+        if (e.type === 'change') openFolderAssign(st, t.dataset.key, t.value);
+        return;
+      }
       if (t.matches('[data-who-search]')) {
         st.who[t.dataset.key].q = t.value;
         st.who[t.dataset.key].page = 0;
@@ -1382,6 +1450,11 @@
           st.who[key].page += b.dataset.action === 'who-next' ? 1 : -1;
           const list = el.querySelector('[data-who-list="' + CSS.escape(key) + '"]');
           if (list) list.innerHTML = whoList(st, o);
+          return;
+        }
+        case 'folder-change': {
+          const ref = folderRefOf((st.panel.instance || {})[key]);
+          if (ref) openFolderAssign(st, key, ref.id);
           return;
         }
         case 'use-default': {

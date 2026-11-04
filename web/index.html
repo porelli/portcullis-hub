@@ -363,6 +363,43 @@
     .ps option:disabled { color: #64748b; }
     .btn-icon { background: none; border: none; color: #64748b; cursor: pointer; padding: 0.25rem; font-size: 1rem; }
     .btn-icon:hover { color: #ef4444; }
+    /* Doctor and shared folders (web/doctor.js, web/folders.js) */
+    .tab-badge { display: inline-block; min-width: 1.25rem; padding: 0 0.375rem; margin-left: 0.375rem; border-radius: 9999px; background: #f59e0b; color: #0f172a; font-size: 0.6875rem; font-weight: 700; text-align: center; }
+    .tab-badge.bad { background: #ef4444; color: #fff; }
+    .tab-badge[hidden] { display: none; }
+    .doctor-line-box:empty { display: none; }
+    .doctor-line-box { margin: 0 0 0.75rem; font-size: 0.8125rem; }
+    .doctor-line { text-decoration: none; padding: 0.25rem 0.625rem; border-radius: 0.375rem; border: 1px solid #334155; }
+    .doctor-line.bad { color: #ef4444; border-color: #ef444455; background: #ef444411; }
+    .doctor-line.warn { color: #f59e0b; border-color: #f59e0b55; background: #f59e0b11; }
+    .doctor-line.info { color: #3b82f6; border-color: #3b82f655; background: #3b82f611; }
+    .dr-head { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.75rem; margin-bottom: 1rem; }
+    .dr-group { margin-bottom: 1.5rem; }
+    .dr-group summary { cursor: pointer; }
+    .dr-bad { color: #ef4444; } .dr-warn { color: #f59e0b; } .dr-info { color: #3b82f6; }
+    .dr-card { background: #1e293b; border: 1px solid #334155; border-left-width: 4px; border-radius: 0.5rem; padding: 0.875rem 1rem; margin-bottom: 0.75rem; font-size: 0.875rem; }
+    .dr-card.dr-problem { border-left-color: #ef4444; } .dr-card.dr-warning { border-left-color: #f59e0b; } .dr-card.dr-info { border-left-color: #3b82f6; }
+    .dr-title { font-weight: 600; margin-bottom: 0.375rem; }
+    .dr-why, .dr-fixtext { color: #cbd5e1; margin: 0.25rem 0; }
+    .dr-fixtext { color: #94a3b8; }
+    .dr-facts, .dr-muted-by { color: #94a3b8; font-size: 0.8125rem; margin: 0.25rem 0; }
+    .dr-steps { margin: 0.5rem 0 0 1.25rem; color: #cbd5e1; }
+    .fd-lines { margin: 0.5rem 0 0.5rem 1.25rem; }
+    .fd-lines li { margin: 0.125rem 0; }
+    .fd-downtime { color: #fde68a; font-size: 0.8125rem; margin: 0.5rem 0; }
+    .fd-progress { color: #93c5fd; font-size: 0.8125rem; }
+    .fd-table td { vertical-align: top; }
+    .fd-actions { white-space: nowrap; }
+    .fd-desc { font-size: 0.75rem; }
+    .fd-usedby { display: flex; flex-direction: column; gap: 0.375rem; max-height: 18rem; overflow-y: auto; }
+    .fd-use { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; font-size: 0.8125rem; }
+    .fd-use input[type=text] { width: 12rem; padding: 0.25rem 0.5rem; }
+    .fd-check { margin-top: 0.5rem; font-size: 0.8125rem; }
+    .fd-check-ok { color: #4ade80; } .fd-check-bad { color: #f59e0b; }
+    .fd-advanced { margin-bottom: 1rem; } .fd-advanced summary { cursor: pointer; color: #94a3b8; font-size: 0.8125rem; }
+    .ln-bad { color: #fca5a5; }
+    .ps-folder-pick { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0.375rem; }
+    .flash-target { outline: 2px solid #3b82f6; outline-offset: 2px; transition: outline-color 0.5s; }
   </style>
   <link rel="stylesheet" href="/static/directory.css">
 </head>
@@ -381,6 +418,7 @@
       <div class="tab active" data-tab="catalog">App Catalog</div>
       <div class="tab" data-tab="users">Users &amp; Groups</div>
       <div class="tab" data-tab="sources">Template Sources</div>
+      <div class="tab" data-tab="doctor" id="doctor-tab">Doctor <span class="tab-badge" hidden></span></div>
       <div class="tab" data-tab="settings">Settings</div>
     </div>
 
@@ -454,6 +492,7 @@
             <div class="auth-notes">{{.Manifest.Auth.Notes}}</div>
             {{end}}
             <div class="op-banner" id="op-banner-{{.ID}}"></div>
+            <div class="doctor-line-box" id="doctor-line-{{.ID}}"></div>
             <div class="detail-tabs">
               <span class="detail-tab active" data-dtab="settings" data-app="{{.ID}}">Settings</span>
               {{if .Enabled}}
@@ -479,6 +518,16 @@
       {{if not .Templates}}
       <div class="empty">No templates found. Add a template source or check the templates/ directory.</div>
       {{end}}
+    </div>
+
+    <!-- Doctor Tab (web/doctor.js) -->
+    <div class="tab-content" id="tab-doctor">
+      <div class="category-title" style="margin-bottom: 1rem;">Doctor</div>
+      <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
+        What the Hub finds wrong or risky in the apps' folders, ports and settings. The doctor never changes anything by itself:
+        every fix is previewed first and applied only when you click Apply.
+      </p>
+      <div id="doctor-root"></div>
     </div>
 
     <!-- Users & Groups Tab (web/directory.js) -->
@@ -553,6 +602,20 @@
       </p>
       <div id="domains-root"></div>
 
+      <div class="category-title" style="margin: 2rem 0 1rem;">Shared folders</div>
+      <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
+        Host folders several apps use. Each folder gets its own group: its files and folders are given that group, setgid and a default ACL,
+        so whatever one app writes the others can read (or write). Assigning apps is always previewed first, a permissions snapshot is saved
+        before anything changes, and the last apply can be undone. Removing a folder never deletes files.
+      </p>
+      <div id="folders-root"></div>
+
+      <div class="category-title" style="margin: 2rem 0 1rem;">Local networks</div>
+      <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
+        Your LAN and VPN ranges. The doctor judges LAN-only ports (file sharing, discovery) against them, and "Rebind…" only accepts an address inside them.
+      </p>
+      <div id="localnets-root"></div>
+
     </div>
   </div>
 
@@ -573,6 +636,8 @@
   </div>
 
   <script src="/static/directory.js"></script>
+  <script src="/static/folders.js"></script>
+  <script src="/static/doctor.js"></script>
   <script>
     // ── Tab switching ─────────────────────────────────────
     document.querySelectorAll('.tab').forEach(tab => {
@@ -581,7 +646,12 @@
         document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
         tab.classList.add('active');
         document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
-        if (tab.dataset.tab === 'settings') { loadGlobalSettings(); loadDomains(); }
+        if (tab.dataset.tab === 'settings') {
+          loadGlobalSettings(); loadDomains();
+          PortcullisFolders.render(document.getElementById('folders-root'));
+          PortcullisFolders.renderLocalNetworks(document.getElementById('localnets-root'));
+        }
+        if (tab.dataset.tab === 'doctor') PortcullisDoctor.render(document.getElementById('doctor-root'));
         if (tab.dataset.tab === 'users') PortcullisDirectory.show(document.getElementById('directory-root'), { listener: 'hub' });
         history.replaceState(null, '', tab.dataset.tab === 'catalog' ? location.pathname : '#' + tab.dataset.tab);
       });
@@ -694,6 +764,42 @@
       panel.classList.add('visible');
       loadSettings(id);
       loadOpBanner(id);
+      loadDoctorLine(id);
+    }
+
+    // The app detail's "Doctor: 1 warning" line (web/doctor.js), linking
+    // to the Doctor tab; nothing when the doctor found nothing.
+    async function loadDoctorLine(id) {
+      const el = document.getElementById('doctor-line-' + id);
+      if (!el || !window.PortcullisDoctor) return;
+      el.innerHTML = await PortcullisDoctor.lineFor(id);
+    }
+
+    // Opens instance id's settings panel scrolled to option key (the
+    // doctor's "Open setting"): the app's card for a default instance,
+    // the instance dialog otherwise.
+    async function openSettingAt(id, key) {
+      const card = document.querySelector('.app-card[data-id="' + CSS.escape(id) + '"]');
+      let paneSel;
+      if (card) {
+        document.querySelector('.tab[data-tab="catalog"]').click();
+        openAppSettings(id, false);
+        paneSel = '#detail-settings-' + CSS.escape(id);
+      } else {
+        await openInstance(id, { tab: 'settings' });
+        paneSel = '#inst-modal-box [data-ipane="settings"]';
+      }
+      const want = key ? paneSel + ' [data-opt="' + CSS.escape(key) + '"]' : paneSel;
+      for (let i = 0; i < 50; i++) {
+        const el = document.querySelector(want);
+        if (el) {
+          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          el.classList.add('flash-target');
+          setTimeout(() => el.classList.remove('flash-target'), 2500);
+          return;
+        }
+        await new Promise(r => setTimeout(r, 100));
+      }
     }
 
     function closeDetail(e) {
@@ -2235,6 +2341,10 @@
       box.innerHTML = html;
     }
     loadSourceSync();
+
+    // The Doctor tab's badge: Problems + Warnings.
+    PortcullisDoctor.badge(document.getElementById('doctor-tab'));
+    setInterval(() => PortcullisDoctor.refreshBadge(), 60000);
 
   </script>
 </body>

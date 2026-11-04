@@ -594,13 +594,24 @@ func TestSettingsAssetHubOnly(t *testing.T) {
 	if !strings.Contains(pb, `src="/static/myapps.js"`) || strings.Contains(pb, "settings.js") {
 		t.Error("the people page does not load myapps.js, or loads settings.js")
 	}
-	for _, p := range []string{"/static/settings.js", "/static/index.html", "/static/people.html", "/static/web.go"} {
+	// The shared folders and doctor UI (plan 2 Task 14): Hub only.
+	for _, a := range []struct{ file, global string }{{"folders.js", "PortcullisFolders"}, {"doctor.js", "PortcullisDoctor"}} {
+		if r, b := doAs(t, e.hub, "root", "GET", "/static/"+a.file, ""); r.StatusCode != 200 || !strings.HasPrefix(r.Header.Get("Content-Type"), "text/javascript") || !strings.Contains(b, a.global) {
+			t.Errorf("hub %s = %d %q", a.file, r.StatusCode, r.Header.Get("Content-Type"))
+		}
+		if strings.Contains(pb, a.file) {
+			t.Errorf("the people page loads %s", a.file)
+		}
+	}
+	for _, p := range []string{"/static/settings.js", "/static/folders.js", "/static/doctor.js", "/static/index.html", "/static/people.html", "/static/web.go"} {
 		if r, _ := doAs(t, e.people, "bob", "GET", p, ""); r.StatusCode != 404 {
 			t.Errorf("people %s = %d, want 404", p, r.StatusCode)
 		}
 	}
 	_, b := doAs(t, e.hub, "root", "GET", "/", "")
-	if !strings.Contains(b, `src="/static/settings.js"`) {
-		t.Error("the hub index does not load settings.js")
+	for _, f := range []string{"settings.js", "folders.js", "doctor.js"} {
+		if !strings.Contains(b, `src="/static/`+f+`"`) {
+			t.Errorf("the hub index does not load %s", f)
+		}
 	}
 }

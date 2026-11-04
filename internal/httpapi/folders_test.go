@@ -236,6 +236,9 @@ func TestFolderAPI(t *testing.T) {
 		len(list.Folders[0].Uses) != 1 || list.Folders[0].Uses[0].Key != "extra" {
 		t.Fatalf("list = %d %s", r.StatusCode, b)
 	}
+	if strings.Contains(b, `"last_apply"`) {
+		t.Errorf("a never-applied folder shows a last apply: %s", b)
+	}
 	if !strings.Contains(b, `"read_only":`) || !strings.Contains(b, `"description":`) {
 		t.Errorf("FolderView not snake_case: %s", b)
 	}

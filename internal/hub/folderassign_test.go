@@ -610,6 +610,11 @@ func TestApplySequence(t *testing.T) {
 	if fo.LastApply == nil || fo.LastApply.Snapshot == "" || fo.LastApply.Files != "r" || rec.Result["snapshot"] != fo.LastApply.Snapshot {
 		t.Errorf("last apply %+v result %v", fo.LastApply, rec.Result)
 	}
+	for _, v := range f.h.Folders() {
+		if v.ID == "media" && (v.LastApply == nil || v.LastApply.Snapshot != fo.LastApply.Snapshot) {
+			t.Errorf("the folder view lacks the last apply: %+v", v)
+		}
+	}
 	ts := snapshotTS(fo.LastApply.Snapshot)
 	if got := auditOf(audit, "folder.assign"); len(got) != 1 || got[0] != "media ok add=1 remove=0 entries=12723 snapshot="+ts {
 		t.Errorf("folder.assign = %v", got)
