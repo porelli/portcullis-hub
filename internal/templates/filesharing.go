@@ -3,7 +3,6 @@ package templates
 import (
 	"fmt"
 	"regexp"
-	"regexp/syntax"
 	"sort"
 	"strconv"
 	"strings"
@@ -19,6 +18,19 @@ import (
 // HTTP routers (§3; set by Discover — a manifest that wasn't discovered
 // is never router-less).
 func (m *Manifest) Routerless() bool { return m.Auth.Method == "custom" && m.routerless }
+
+// routerlessOf is the one router-less rule (Discover and the validator):
+// method custom and no HTTP router in the routes.
+func routerlessOf(method string, routes *Routes) bool {
+	return method == "custom" && routes != nil && len(routes.Info) == 0
+}
+
+// fieldUse is one optional field of an option and whether it is set (the
+// refusals of fields a type doesn't take).
+type fieldUse struct {
+	name string
+	on   bool
+}
 
 // Limits of the file-sharing fields.
 const (
@@ -37,10 +49,7 @@ const UsernamePatternVar = "PORTCULLIS_USERNAME_PATTERN"
 // (before the type is looked up).
 func fileSharingFields(o *Option) error {
 	if o.Type != TypePersonSecret {
-		for _, f := range []struct {
-			name string
-			on   bool
-		}{
+		for _, f := range []fieldUse{
 			{"hash", o.Hash != ""}, {"length", o.Length != 0}, {"revoke_on_leave", o.RevokeOnLeave != nil},
 			{"on_restore", o.OnRestore != ""}, {"username", o.Username != nil}, {"mount", o.Mount != nil},
 			{"info", o.Info != nil},
@@ -63,14 +72,8 @@ func fileSharingFields(o *Option) error {
 
 // personFieldsRefused refuses the option fields neither type takes (the
 // Hub sets their values: one per person, no default, no rows).
-func personFieldsRefused(o *Option, extra ...struct {
-	name string
-	on   bool
-}) error {
-	fs := []struct {
-		name string
-		on   bool
-	}{
+func personFieldsRefused(o *Option, extra ...fieldUse) error {
+	fs := []fieldUse{
 		{"scope", o.Scope != ""}, {"default", o.Default != nil}, {"required", o.Required},
 		{"resolve", o.Resolve != ""}, {"resolve_choices", o.ResolveChoices != nil},
 		{"group_values", o.GroupValues != nil}, {"privileged", o.Privileged},
@@ -101,13 +104,7 @@ func (v *specCheck) personSecret(o *Option) error {
 	if err := v.fileSharingTemplate(o); err != nil {
 		return err
 	}
-	if err := personFieldsRefused(o, struct {
-		name string
-		on   bool
-	}{"self_visible", o.SelfVisible != nil}, struct {
-		name string
-		on   bool
-	}{"checks", o.Checks != nil}); err != nil {
+	if err := personFieldsRefused(o, fieldUse{"self_visible", o.SelfVisible != nil}, fieldUse{"checks", o.Checks != nil}); err != nil {
 		return err
 	}
 	if o.Hash != HashNT {
@@ -219,43 +216,125 @@ func checkUsernameRule(u *UsernameRule) error {
 	return nil
 }
 
-// usernamePattern accepts an anchored pattern that Go's RE2 and busybox
-// ERE read alike (§13.2, F37): ^ … $ around literals, bracket classes and
-// {m,n} repeats of one of them. No backslash, dot, alternation, group,
-// flag or other repetition operator.
+// usernamePattern accepts only the patterns Go's RE2 and busybox ERE
+// read alike (§13.2, F37; T15's Python validator mirrors this rule):
+//
+//	pattern  = "^" atom* "$"
+//	atom     = (literal | class) [interval]
+//	literal  = a byte 0x21-0x7E other than \ . [ ] { } ( ) | * + ? ^ $
+//	class    = "[" ["^"] item+ "]"
+//	item     = "[:" name ":]" | a byte 0x21-0x7E other than \ [ ]
+//	name     = alnum | alpha | digit | lower | upper | xdigit
+//	interval = "{" m "}" | "{" m "," n "}"   (decimal, m <= n <= 1000)
+//
+// So no space, non-ASCII or control character, no backslash, dot,
+// alternation, group, flag, *, + or ?, no literal brace or bracket, no
+// collating element [. .] or equivalence class [= =], and no {,n} / {m,}.
 func usernamePattern(p string) error {
 	if len(p) > usernamePatMax {
 		return fmt.Errorf("at most %d characters", usernamePatMax)
 	}
-	if !strings.HasPrefix(p, "^") || !strings.HasSuffix(p, "$") {
+	if len(p) < 2 || p[0] != '^' || p[len(p)-1] != '$' {
 		return fmt.Errorf("must be anchored (^…$)")
 	}
-	if strings.ContainsAny(p, `\`) || HasControlChars(p) {
-		return fmt.Errorf("no backslashes or control characters (busybox reads them differently)")
+	for i := 0; i < len(p); i++ {
+		if p[i] < 0x21 || p[i] > 0x7e {
+			return fmt.Errorf("only printable ASCII without spaces")
+		}
+	}
+	body := p[1 : len(p)-1]
+	for i := 0; i < len(body); {
+		var n int
+		var err error
+		if body[i] == '[' {
+			n, err = patternClass(body[i:])
+		} else if strings.IndexByte(patternSpecial, body[i]) < 0 {
+			n = 1
+		} else {
+			err = fmt.Errorf("%q at %d is not a literal, a bracket class or an interval after one (only what RE2 and busybox ERE read alike)", body[i], i+1)
+		}
+		if err != nil {
+			return err
+		}
+		i += n
+		if i < len(body) && body[i] == '{' {
+			n, err := patternInterval(body[i:])
+			if err != nil {
+				return err
+			}
+			i += n
+		}
 	}
 	if _, err := regexp.Compile(p); err != nil {
 		return err
 	}
-	re, err := syntax.Parse(p, syntax.Perl)
-	if err != nil {
-		return err
-	}
-	bad := fmt.Errorf("only literals, bracket classes and {m,n} between ^ and $ (what RE2 and busybox ERE read alike)")
-	if re.Op != syntax.OpConcat || len(re.Sub) < 2 || re.Sub[0].Op != syntax.OpBeginText || re.Sub[len(re.Sub)-1].Op != syntax.OpEndText {
-		return bad
-	}
-	atom := func(r *syntax.Regexp) bool {
-		return (r.Op == syntax.OpLiteral && r.Flags&syntax.FoldCase == 0) || r.Op == syntax.OpCharClass
-	}
-	for _, r := range re.Sub[1 : len(re.Sub)-1] {
-		switch {
-		case atom(r):
-		case r.Op == syntax.OpRepeat && len(r.Sub) == 1 && atom(r.Sub[0]):
-		default:
-			return bad
-		}
-	}
 	return nil
+}
+
+// patternSpecial are the bytes that are never a literal in a username
+// pattern.
+const patternSpecial = `\.[]{}()|*+?^$`
+
+// patternClasses are the POSIX classes both engines read alike.
+var patternClasses = map[string]bool{"alnum": true, "alpha": true, "digit": true, "lower": true, "upper": true, "xdigit": true}
+
+// patternClass reads one bracket class at the start of s: its length.
+func patternClass(s string) (int, error) {
+	i, items := 1, 0
+	if i < len(s) && s[i] == '^' {
+		i++
+	}
+	for i < len(s) {
+		switch c := s[i]; {
+		case c == ']':
+			if items == 0 {
+				return 0, fmt.Errorf("an empty bracket class")
+			}
+			return i + 1, nil
+		case strings.HasPrefix(s[i:], "[:"):
+			end := strings.Index(s[i+2:], ":]")
+			if end < 0 || !patternClasses[s[i+2:i+2+end]] {
+				return 0, fmt.Errorf("a bracket class names only [:alnum:], [:alpha:], [:digit:], [:lower:], [:upper:] or [:xdigit:]")
+			}
+			i += 2 + end + 2
+		case c == '[' || c == '\\':
+			return 0, fmt.Errorf("%q inside a bracket class (no collating elements [. .] or equivalence classes [= =])", c)
+		default:
+			i++
+		}
+		items++
+	}
+	return 0, fmt.Errorf("an unclosed bracket class")
+}
+
+// patternInterval reads one {m} / {m,n} at the start of s: its length.
+func patternInterval(s string) (int, error) {
+	end := strings.IndexByte(s, '}')
+	bad := fmt.Errorf("an interval is {m} or {m,n} with m <= n <= 1000")
+	if end < 0 {
+		return 0, bad
+	}
+	ms, ns, two := strings.Cut(s[1:end], ",")
+	if !two {
+		ns = ms
+	}
+	m, err1 := patternCount(ms)
+	n, err2 := patternCount(ns)
+	if err1 != nil || err2 != nil || m > n {
+		return 0, bad
+	}
+	return end + 1, nil
+}
+
+func patternCount(s string) (int, error) {
+	if s == "" || len(s) > 4 || strings.Trim(s, "0123456789") != "" {
+		return 0, fmt.Errorf("not a count")
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n > 1000 {
+		return 0, fmt.Errorf("not a count")
+	}
+	return n, nil
 }
 
 // Info placeholders (§13.2).
@@ -363,9 +442,10 @@ func (v *specCheck) personID(o *Option) error {
 		if err := v.file(o, d.File); err != nil {
 			return err
 		}
-	}
-	if o.Applies == AppliesLive && v.files_[o.Delivery[0].File.Name].OnMembershipChange != MembershipHook {
-		return fmt.Errorf("applies: live means a hook applies it: deliver to a file with on_membership_change: hook")
+		// Every file it reaches must be applied live by a hook.
+		if o.Applies == AppliesLive && v.files_[d.File.Name].OnMembershipChange != MembershipHook {
+			return fmt.Errorf("applies: live means a hook applies it: file %s needs on_membership_change: hook", d.File.Name)
+		}
 	}
 	return nil
 }

@@ -117,6 +117,12 @@ func TestStringFormats(t *testing.T) {
 		refused(t, o, c.bad, c.format)
 	}
 	wantErr(t, NewRegistry().CheckOption(opt(t, "type: string\nformat: phone\n")), "format")
+	// F51: an "address people connect to" uses hostname, and a dotted
+	// IPv4 address matches it; IPv6 and single labels don't.
+	h := opt(t, "type: string\nformat: hostname\n")
+	mustParse(t, h, "192.168.1.10")
+	refused(t, h, "fd00::1", "hostname")
+	refused(t, h, "nas", "hostname")
 
 	p := opt(t, "type: string\npattern: '^[a-z]+$'\nmin_len: 2\nmax_len: 4\n")
 	mustParse(t, p, "abc")

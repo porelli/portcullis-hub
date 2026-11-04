@@ -92,12 +92,10 @@ func build(id, source, path string, data, compose []byte, domain string, kinds K
 	}
 	// Only method custom may have no HTTP router (§3, F48): a gateway
 	// method with none would protect nothing.
-	if len(routes.Info) == 0 {
-		if m.Auth.Method != "custom" {
-			return Template{}, fmt.Errorf("auth.method %s needs at least one HTTP router (only custom templates may have none)", m.Auth.Method)
-		}
-		m.routerless = true
+	if len(routes.Info) == 0 && m.Auth.Method != "custom" {
+		return Template{}, fmt.Errorf("auth.method %s needs at least one HTTP router (only custom templates may have none)", m.Auth.Method)
 	}
+	m.routerless = routerlessOf(m.Auth.Method, routes)
 	public, err := PlanPublic(&m, routes)
 	if err != nil {
 		return Template{}, err

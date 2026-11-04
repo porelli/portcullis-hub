@@ -135,7 +135,31 @@ func TestPersonSecretRules(t *testing.T) {
 		{"alternation", smb(pat(`'^(a|b)$'`)), smbCompose, "share_password", "username.pattern"},
 		{"star", smb(pat(`'^a*$'`)), smbCompose, "share_password", "username.pattern"},
 		{"flags", smb(pat(`'(?i)^a$'`)), smbCompose, "share_password", "username.pattern"},
-		{"literals and repeats", smb(pat(`'^u-[a-z]{2}[0-9]{1,}$'`)), smbCompose, "", ""},
+		{"literals and repeats", smb(pat(`'^u-[a-z]{2}[0-9]{1,3}$'`)), smbCompose, "", ""},
+		// Only what RE2 and busybox ERE read alike (fix round 1).
+		{"collating element", smb(pat(`'^[[.a.]]$'`)), smbCompose, "share_password", "username.pattern"},
+		{"equivalence class", smb(pat(`'^[[=a=]]$'`)), smbCompose, "share_password", "username.pattern"},
+		{"interval without m", smb(pat(`'^a{,3}$'`)), smbCompose, "share_password", "username.pattern"},
+		{"interval not digits", smb(pat(`'^a{x}$'`)), smbCompose, "share_password", "username.pattern"},
+		{"open interval", smb(pat(`'^a{1,}$'`)), smbCompose, "share_password", "username.pattern"},
+		{"interval m > n", smb(pat(`'^a{3,2}$'`)), smbCompose, "share_password", "username.pattern"},
+		{"interval over 1000", smb(pat(`'^a{1,1001}$'`)), smbCompose, "share_password", "username.pattern"},
+		{"literal brace", smb(pat(`'^a}$'`)), smbCompose, "share_password", "username.pattern"},
+		{"lone open brace", smb(pat(`'^{$'`)), smbCompose, "share_password", "username.pattern"},
+		{"literal close bracket", smb(pat(`'^a]$'`)), smbCompose, "share_password", "username.pattern"},
+		{"bracket in class", smb(pat(`'^[a[b]$'`)), smbCompose, "share_password", "username.pattern"},
+		{"word class", smb(pat(`'^[[:word:]]{1,3}$'`)), smbCompose, "share_password", "username.pattern"},
+		{"non-ASCII", smb(pat(`'^[é]{1,2}$'`)), smbCompose, "share_password", "username.pattern"},
+		{"non-ASCII literal", smb(pat(`'^é$'`)), smbCompose, "share_password", "username.pattern"},
+		{"empty class", smb(pat(`'^[]$'`)), smbCompose, "share_password", "username.pattern"},
+		{"repeated interval", smb(pat(`'^a{1,2}{1,2}$'`)), smbCompose, "share_password", "username.pattern"},
+		{"interval on the anchor", smb(pat(`'^{1,2}a$'`)), smbCompose, "share_password", "username.pattern"},
+		{"space", smb(pat(`'^a b$'`)), smbCompose, "share_password", "username.pattern"},
+		{"samba rule", smb(pat(`'^[a-z][a-z0-9._-]{0,31}$'`)), smbCompose, "", ""},
+		{"posix lower", smb(pat(`'^[[:lower:]]{1,8}$'`)), smbCompose, "", ""},
+		{"posix classes", smb(pat(`'^[[:alpha:]_][[:alnum:][:digit:][:upper:][:xdigit:].-]{0,31}$'`)), smbCompose, "", ""},
+		{"negated class", smb(pat(`'^[^A-Z]{1,8}$'`)), smbCompose, "", ""},
+		{"exact interval", smb(pat(`'^x[0-9]{4}$'`)), smbCompose, "", ""},
 		{"reserved upper", smb(ps("reserved: [root, nobody]", "reserved: [Root]")), smbCompose, "share_password", "username.reserved"},
 		{"reserved empty name", smb(ps("reserved: [root, nobody]", "reserved: ['']")), smbCompose, "share_password", "username.reserved"},
 		{"reason too long", smb(ps(`"isn't a valid Samba and Unix name"`, strings.Repeat("x", 201))), smbCompose, "share_password", "username.reason"},
@@ -150,6 +174,7 @@ func TestPersonSecretRules(t *testing.T) {
 		{"info stray brace", smb(ps("/Home", "/{Home")), smbCompose, "share_password", "info[0]"},
 		{"info stray close", smb(ps("/Home", "/Home}")), smbCompose, "share_password", "info[0]"},
 		{"info secret", jsonFile + opts(connectOpt, uidOpt, secretOpt, ps("{value:connect_address}", "{value:api}")), smbCompose, "share_password", "info[0]"},
+		{"info path option", smb("{key: data, label: Data, type: path, self_visible: true, target: {service: other, mount: /data}}", ps("{value:connect_address}", "{value:data}")), smbCompose, "share_password", "info[0]"},
 		{"info not self_visible", smb(plainOpt, ps("{value:connect_address}", "{value:motd}")), smbCompose, "share_password", "self_visible: true"},
 		{"info list", smb(listOpt, ps("{value:connect_address}", "{value:names}")), smbCompose, "share_password", "info[0]"},
 		{"info person option", smb(ps("{value:connect_address}", "{value:uid}")), smbCompose, "share_password", "info[0]"},
@@ -299,12 +324,13 @@ settings:
 }
 
 func TestPersonIDRules(t *testing.T) {
-	head := smbHead + opts(connectOpt, psOpt) // a person_id is not needed by them
-	one := func(o string) string { return head[:len(head)-1] + "\n    - " + o + "\n" }
 	noAccess := strings.Replace(smbHead, "  access_group: users_files\n", "", 1)
+	hookFile := strings.Replace(smbHead, "format: tsv}", "format: tsv, on_membership_change: hook}", 1)
+	one := func(o string) string { return hookFile + opts(connectOpt, psOpt, o) }
+	jsonHead := strings.Replace(hookFile, "hooks:\n", "  - {name: json, service: other, mount: /json}\nhooks:\n", 1)
 	runSettingsCases(t, []settingsCase{
 		{"ok", one(uidOpt), smbCompose, "", ""},
-		{"two ok", one(uidOpt) + "    - " + uid("key: uid", "key: gid", "field: uid", "field: gid") + "\n", smbCompose, "", ""},
+		{"two ok", one(uidOpt)[:len(one(uidOpt))-1] + "\n    - " + uid("key: uid", "key: gid", "field: uid", "field: gid") + "\n", smbCompose, "", ""},
 		{"unknown pool", one(uid("pool: posix_uid", "pool: posix_gid")), smbCompose, "uid", "pool must be posix_uid"},
 		{"no pool", one(uid("pool: posix_uid, ", "")), smbCompose, "uid", "pool must be posix_uid"},
 		{"self_visible missing", one(uid("self_visible: false, ", "")), smbCompose, "uid", "self_visible: false"},
@@ -321,7 +347,10 @@ func TestPersonIDRules(t *testing.T) {
 		{"requires", one(uid("}", "requires: [connect_address]")), smbCompose, "uid", "takes no requires"},
 		{"hash", one(uid("}", "hash: nt")), smbCompose, "uid", "hash is for person_secret"},
 		{"constraint", one(uid("}", "min: 1")), smbCompose, "uid", "min is not a constraint of type person_id"},
-		{"field twice", one(uidOpt) + "    - " + uid("key: uid", "key: gid") + "\n", smbCompose, "gid", "field uid is already written by setting uid"},
+		{"applies live, hook file", one(uid("}", "applies: live")), smbCompose, "", ""},
+		{"applies live, second file not hook", jsonHead + opts(connectOpt, psOpt, uid("{file: {name: people, field: uid}}", "{file: {name: people, field: uid}}, {file: {name: json}}", "}", "applies: live")), smbCompose, "uid", "applies: live"},
+		{"applies live, first file not hook", jsonHead + opts(connectOpt, psOpt, uid("{file: {name: people, field: uid}}", "{file: {name: json}}, {file: {name: people, field: uid}}", "}", "applies: live")), smbCompose, "uid", "applies: live"},
+		{"field twice", one(uidOpt)[:len(one(uidOpt))-1] + "\n    - " + uid("key: uid", "key: gid") + "\n", smbCompose, "gid", "field uid is already written by setting uid"},
 		{"no access group", noAccess + opts(connectOpt, uidOpt), smbCompose, "uid", "router-less"},
 		{"with a router", smbHead + opts(connectOpt, uidOpt), smbRouted, "uid", "router-less"},
 	})

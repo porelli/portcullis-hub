@@ -64,3 +64,17 @@ func TestRouterless(t *testing.T) {
 		t.Error("Routerless() = true for an undiscovered manifest")
 	}
 }
+
+// TestRouterlessOf: one rule for Discover and the validator.
+func TestRouterlessOf(t *testing.T) {
+	none, one := &Routes{}, &Routes{Info: map[string]*RouterInfo{"r": {}}}
+	for _, c := range []struct {
+		method string
+		routes *Routes
+		want   bool
+	}{{"custom", none, true}, {"custom", one, false}, {"custom", nil, false}, {"forward-auth", none, false}, {"public", none, false}} {
+		if got := routerlessOf(c.method, c.routes); got != c.want {
+			t.Errorf("routerlessOf(%s, %v) = %v", c.method, c.routes != nil && len(c.routes.Info) > 0, got)
+		}
+	}
+}

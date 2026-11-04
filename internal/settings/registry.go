@@ -194,6 +194,12 @@ func sortedKeys[V any](m map[string]V) []string {
 	return out
 }
 
+// fieldUse is one optional field of an option and whether it is set.
+type fieldUse struct {
+	name string
+	on   bool
+}
+
 // onlyFields refuses o's type-specific fields that type doesn't take
 // (a misplaced constraint must not pass silently).
 func onlyFields(o *templates.Option, allowed ...string) error {
@@ -201,10 +207,7 @@ func onlyFields(o *templates.Option, allowed ...string) error {
 	for _, a := range allowed {
 		ok[a] = true
 	}
-	set := []struct {
-		name string
-		on   bool
-	}{
+	set := []fieldUse{
 		{"pattern", o.Pattern != ""},
 		{"format", o.Format != ""},
 		{"min_len", o.MinLen != nil},

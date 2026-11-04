@@ -772,7 +772,7 @@ func ValidateSettingsSpec(t *Template, compose []byte, routes *Routes, kinds Kin
 	if err := v.envNames(); err != nil {
 		return err
 	}
-	v.routerless = m.Auth.Method == "custom" && routes != nil && len(routes.Info) == 0
+	v.routerless = routerlessOf(m.Auth.Method, routes)
 	v.claims, v.headers, v.fields = map[string]string{}, map[string]string{}, map[string]string{}
 	for i := range m.Settings.Options {
 		o := &m.Settings.Options[i]
