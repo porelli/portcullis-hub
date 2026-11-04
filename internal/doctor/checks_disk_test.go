@@ -273,3 +273,24 @@ func TestFolderOwnerOffersUndo(t *testing.T) {
 		t.Errorf("applied: %+v", fo)
 	}
 }
+
+// H9: an adopted folder gid (outside 60000–60999) held by a container not
+// assigned to it is a Problem too; 1000 for a folder that doesn't own it
+// stays unjudged.
+func TestRuntimeGIDAdopted(t *testing.T) {
+	photos := folderUse("immich", "library", "photos", "/srv/photos", false, true)
+	photos.GIDs = []int{1500}
+	in := &Inputs{
+		Folders: []FolderIn{{ID: "photos", Name: "Photos", Path: "/srv/photos", GID: 1500}},
+		Paths:   []PathIn{photos},
+		Runtime: []RuntimeIn{
+			{Instance: "immich", Service: "immich", Container: "c1", GIDs: []int{1000, 1500}}, // assigned
+			{Instance: "plex", Service: "plex", Container: "c2", GIDs: []int{1000, 1500}},     // not assigned
+		},
+	}
+	got := of(t, KindGIDCollision, in)
+	if len(got) != 1 || got[0].Title != "plex runs with gid 1500, the group of shared folder Photos." || got[0].Severity != Problem ||
+		got[0].FP != Fingerprint(KindGIDCollision, "plex", "photos") || strings.Contains(strings.Join(got[0].Steps, " "), "60000") {
+		t.Fatalf("findings = %+v", got)
+	}
+}

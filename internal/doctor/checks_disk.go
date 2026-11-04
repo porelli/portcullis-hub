@@ -567,7 +567,9 @@ func (runtimeGIDCheck) Run(in *Inputs) []Finding {
 			continue
 		}
 		for _, g := range r.GIDs {
-			if !templates.InFolderGIDRange(int64(g)) || allowed[r.Instance+"\x00"+r.Service][g] {
+			// The folder range, and every folder's own gid (an adopted
+			// one is outside the range, H9), minus what is assigned.
+			if _, owned := gidOwner[g]; (!owned && !templates.InFolderGIDRange(int64(g))) || allowed[r.Instance+"\x00"+r.Service][g] {
 				continue
 			}
 			k := r.Instance + "\x00" + strconv.Itoa(g)
@@ -602,7 +604,11 @@ func (runtimeGIDCheck) Run(in *Inputs) []Finding {
 			f.Title = fmt.Sprintf("%s runs with gid %d, the group of shared folder %s.", h.inst, h.gid, fo.Name)
 			f.Why = held + fmt.Sprintf(" Anything mounted with gid %d is reachable through that group: %s reaches shared folder %s's files without being assigned to it.", h.gid, h.inst, fo.Name)
 			f.Folders, f.Paths = []string{fo.ID}, []string{fo.Path}
-			f.Steps = []string{fmt.Sprintf("Change %s's group (its group or PGID setting, or the image's user) to a gid outside 60000–60999.", h.inst),
+			change := fmt.Sprintf("Change %s's group (its group or PGID setting, or the image's user) to a gid outside 60000–60999.", h.inst)
+			if !templates.InFolderGIDRange(int64(h.gid)) {
+				change = fmt.Sprintf("Change %s's group (its group or PGID setting, or the image's user) to a gid other than %d, which shared folder %s adopted.", h.inst, h.gid, fo.Name)
+			}
+			f.Steps = []string{change,
 				fmt.Sprintf("Or assign %s to shared folder %s (Settings → Shared folders), if it should use it.", h.inst, fo.Name)}
 		} else {
 			f.FP = Fingerprint(KindGIDCollision, h.inst, "gid:"+strconv.Itoa(h.gid))
