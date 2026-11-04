@@ -88,6 +88,9 @@ func readNames(fd int) ([]string, error) {
 var errNoXattr = errors.New("no POSIX ACLs on this system")
 
 func getXattr(int, string) ([]byte, error) { return nil, errNoXattr }
+
+// hasFileCaps: file capabilities are Linux-only.
+func hasFileCaps(int) (bool, error)        { return false, nil }
 func setXattr(int, string, []byte) error   { return errNoXattr }
 func removeXattr(int, string) error        { return errNoXattr }
 func support(int) (acl, xattr bool)        { return false, false }

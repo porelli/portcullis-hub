@@ -404,7 +404,7 @@ func runSnapshot(o Options, x ArgsExtra) (*Report, error) {
 
 func dropSamples(r *Report) {
 	cs := []*Count{&r.HardLinks, &r.MountPoints, &r.Specials, &r.Symlinks, &r.SetID, &r.Races, &r.BadACL, &r.Failed, &r.ChangedSince,
-		&r.Skipped.PathTooLong, &r.Skipped.ACLTooLarge}
+		&r.Skipped.PathTooLong, &r.Skipped.ACLTooLarge, &r.Skipped.FileCaps}
 	if e := r.Expected; e != nil {
 		cs = append(cs, &e.Group, &e.Setgid, &e.DefaultACL, &e.Mode, &e.Owner)
 	}

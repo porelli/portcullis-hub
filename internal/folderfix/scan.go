@@ -109,6 +109,9 @@ type ChildOwner struct {
 type Skipped struct {
 	PathTooLong Count `json:"path_too_long"` // path > 4096 bytes
 	ACLTooLarge Count `json:"acl_too_large"` // its snapshot line would exceed the line cap
+	// FileCaps: regular files with file capabilities (security.capability),
+	// which a chown would make the kernel drop (R54).
+	FileCaps Count `json:"filecaps"`
 }
 
 // Report is the one JSON line every mode prints.
@@ -225,7 +228,14 @@ func Scan(o Options) (*Report, error) {
 	}
 	defer w.close()
 	w.run(w.tally)
-	return w.finish(), nil
+	r := w.finish()
+	// R55: entries that couldn't be read make the scan a failure (exit 1;
+	// the report still says which): its counts and conformance are
+	// incomplete.
+	if r.Failed.N > 0 {
+		return r, fmt.Errorf("%d entries couldn't be read", r.Failed.N)
+	}
+	return r, nil
 }
 
 // writableFS: the only filesystems apply and restore write to (M6): an

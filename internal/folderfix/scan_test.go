@@ -625,3 +625,40 @@ func must(t *testing.T, err error) {
 		t.Fatal(err)
 	}
 }
+
+// R55: an entry the walk can't read for lack of permission is a failure
+// (failed, the scan exits 1), never a race. Unprivileged: root reads all.
+func TestScanUnreadableIsFailure(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads everything (TestRootUnreadableIsFailure covers root)")
+	}
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "locked"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(root, "locked", "inner"), 0o644)
+	os.Chmod(filepath.Join(root, "locked"), 0)
+	t.Cleanup(func() { os.Chmod(filepath.Join(root, "locked"), 0o700) })
+	writeFile(t, filepath.Join(root, "secret"), 0)
+	writeFile(t, filepath.Join(root, "open"), 0o644)
+	r, err := Scan(Options{Root: root})
+	if err == nil || IsRefused(err) {
+		t.Fatalf("scan err = %v, want a failure", err)
+	}
+	if r.Failed.N != 2 || !slices.Equal(r.Failed.Sample, []string{"locked", "secret"}) || r.Races.N != 0 {
+		t.Fatalf("failed %+v races %+v errors %q", r.Failed, r.Races, r.Errors)
+	}
+	for _, e := range r.Errors {
+		if strings.Contains(e, "changed during the walk") {
+			t.Errorf("reported as a race: %q", e)
+		}
+	}
+	var out, errb bytes.Buffer
+	if code := Main([]string{"scan", "--root=" + root}, &out, &errb); code != 1 {
+		t.Fatalf("exit %d, want 1 (%s)", code, errb.String())
+	}
+	var rep Report
+	if err := json.Unmarshal(out.Bytes(), &rep); err != nil || rep.Failed.N != 2 || len(rep.Errors) == 0 {
+		t.Fatalf("report %s: %v", out.Bytes(), err)
+	}
+}

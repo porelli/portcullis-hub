@@ -19,7 +19,9 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -1179,5 +1181,97 @@ func TestRootChangeOnlyPlanned(t *testing.T) {
 	}
 	if r.Changed != 3 || !slices.Contains(r.Races.Sample, "z/b") || !slices.Contains(r.Races.Sample, "z/c") {
 		t.Errorf("changed %d races %+v, want root, a, z changed and z/b, z/c counted", r.Changed, r.Races)
+	}
+}
+
+// fileCapsXattr is a vfs_cap_data revision 2 granting cap_net_raw (13),
+// effective: what `setcap cap_net_raw+ep` writes.
+var fileCapsXattr = []byte{0x01, 0x00, 0x00, 0x02, 0x00, 0x20, 0x00, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+
+// R54: a file with file capabilities is skipped by scan, plan and apply
+// (filecaps) and keeps its owner, mode, ACLs and security.capability
+// (a chown would make the kernel drop it).
+func TestRootFileCapsSkipped(t *testing.T) {
+	needRoot(t)
+	root := folderRoot(t)
+	p := filepath.Join(root, "ping")
+	fileOwned(t, p, 0o755, 1000, 1000)
+	if err := unix.Setxattr(p, "security.capability", fileCapsXattr, 0); err != nil {
+		t.Fatalf("setcap: %v", err)
+	}
+	fileOwned(t, filepath.Join(root, "plain"), 0o644, 1000, 1000)
+	before := diskOf(t, p)
+	o := opts(t, root, Target{GID: 60001, Files: "rw"})
+	s, err := Scan(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Skipped.FileCaps.N != 1 || !slices.Equal(s.Skipped.FileCaps.Sample, []string{"ping"}) {
+		t.Fatalf("scan filecaps %+v", s.Skipped.FileCaps)
+	}
+	if s.Plan.Changes != 2 || slices.Contains(s.Plan.ChangeGroup.Sample, "ping") {
+		t.Fatalf("plan %+v", s.Plan)
+	}
+	r := apply(t, o)
+	if r.Skipped.FileCaps.N != 1 || r.Changed != 2 {
+		t.Fatalf("apply filecaps %+v changed %d", r.Skipped.FileCaps, r.Changed)
+	}
+	if after := diskOf(t, p); !reflect.DeepEqual(before, after) {
+		t.Fatalf("file with capabilities touched: %+v → %+v", before, after)
+	}
+	if got := lxattr(p, "security.capability"); !bytes.Equal(got, fileCapsXattr) {
+		t.Fatalf("security.capability = %x, want %x", got, fileCapsXattr)
+	}
+	verify(t, o)
+}
+
+// R55 as root: a read-permission error while opening (here forced through
+// the openat seam: root reads everything) is failed, not a race, and the
+// scan fails; an apply refuses with nothing changed.
+func TestRootUnreadableIsFailure(t *testing.T) {
+	needRoot(t)
+	root := folderRoot(t)
+	if err := os.Mkdir(filepath.Join(root, "locked"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	fileOwned(t, filepath.Join(root, "secret"), 0o640, 1000, 1000)
+	fileOwned(t, filepath.Join(root, "open"), 0o640, 1000, 1000)
+	orig := rawOpenat
+	var mu sync.Mutex
+	secretFD := -1
+	rawOpenat = func(dirfd int, p string, flags int, mode uint32) (int, error) {
+		mu.Lock()
+		sfd := secretFD
+		mu.Unlock()
+		switch {
+		case p == "locked":
+			return -1, unix.EACCES
+		case sfd >= 0 && p == "/proc/self/fd/"+strconv.Itoa(sfd):
+			return -1, unix.EACCES
+		}
+		fd, err := orig(dirfd, p, flags, mode)
+		if err == nil && p == "secret" && flags&unix.O_PATH != 0 {
+			mu.Lock()
+			secretFD = fd
+			mu.Unlock()
+		}
+		return fd, err
+	}
+	defer func() { rawOpenat = orig }()
+	o := opts(t, root, Target{GID: 60001, Files: "rw"})
+	before := diskTree(t, root)
+	r, err := Scan(o)
+	if err == nil || IsRefused(err) {
+		t.Fatalf("scan err = %v, want a failure", err)
+	}
+	if r.Failed.N != 2 || !slices.Equal(r.Failed.Sample, []string{"locked", "secret"}) || r.Races.N != 0 {
+		t.Fatalf("failed %+v races %+v errors %q", r.Failed, r.Races, r.Errors)
+	}
+	o.ExpectDigest = strings.Repeat("0", 64)
+	if _, err := Apply(o, 1); !IsRefused(err) {
+		t.Fatalf("apply: %v, want a refusal", err)
+	}
+	if after := diskTree(t, root); !reflect.DeepEqual(before, after) {
+		t.Fatal("apply changed something")
 	}
 }

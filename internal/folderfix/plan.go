@@ -21,6 +21,9 @@ type state struct {
 	Mode     uint32 // permission and setuid/setgid/sticky bits (07777)
 	Access   ACL    // the access ACL xattr as decoded; nil when there is none
 	Default  ACL    // directories: the default ACL xattr as decoded; nil when none
+	// FileCaps: a security.capability xattr is present (R54; never
+	// written, never part of a snapshot line).
+	FileCaps bool
 }
 
 // target is Target in the form planEntry needs, plus whether the
@@ -35,9 +38,11 @@ type target struct {
 
 // outcome is what an apply does to one entry.
 type outcome struct {
-	want   state
-	setid  bool // skipped: setgid file under a group change, setuid file under an owner change
-	change bool
+	want  state
+	setid bool // skipped: setgid file under a group change, setuid file under an owner change
+	// filecaps: skipped, a regular file with file capabilities (R54).
+	filecaps bool
+	change   bool
 
 	group, setgid, defACL, mode, owner bool // the attributes that differ
 	narrowed                           bool // an existing named entry is narrowed to what it grants
@@ -110,7 +115,8 @@ func keepPerm(a ACL, tag uint16, id uint32, eff Perm) (Perm, error) {
 //     (also "---": without it its members would fall through to "others");
 //   - under must_own the previous owner gets a named entry with its user bits;
 //   - "others" and the user bits are never changed, nothing is removed;
-//   - setuid / setgid regular files are skipped (setid);
+//   - setuid / setgid regular files are skipped (setid), and so are
+//     regular files with file capabilities (filecaps, R54);
 //   - a directory's default ACL grants new files to the folder group only.
 //
 // An ACL on disk that isn't valid (unsorted, duplicate ids) is errBadACL:
@@ -123,6 +129,13 @@ func planEntry(cur state, t target) (outcome, error) {
 	// act as its owner or group.
 	if file && cur.Mode&(modeSetuid|modeSetgid) != 0 {
 		o.setid = true
+		return o, nil
+	}
+	// R54: a regular file with file capabilities is never touched either:
+	// any chown (a new group included) makes the kernel drop its
+	// security.capability xattr, which "nothing is ever removed" forbids.
+	if file && cur.FileCaps {
+		o.filecaps = true
 		return o, nil
 	}
 	if len(cur.Access) > 0 {

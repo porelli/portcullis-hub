@@ -23,6 +23,10 @@ func (w *walker) planNode(n *node) (outcome, bool) {
 		w.r.SetID.add(n.rel)
 		return o, false
 	}
+	if o.filecaps {
+		w.r.Skipped.FileCaps.add(n.rel)
+		return o, false
+	}
 	if !o.change {
 		return o, true
 	}

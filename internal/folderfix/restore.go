@@ -165,7 +165,9 @@ func (w *walker) restoreLine(l snapLine, rec state, p string, emit func(*node) e
 		return false
 	}
 	o, err := planEntry(rec, w.t)
-	if err != nil || o.setid || !o.change || !stateEqual(n.cur, o.want) {
+	// A file that has file capabilities now is left alone too (R54): the
+	// restore's chown would drop them.
+	if err != nil || o.setid || o.filecaps || n.cur.FileCaps || !o.change || !stateEqual(n.cur, o.want) {
 		w.r.ChangedSince.add(p)
 		return false
 	}

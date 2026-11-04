@@ -92,6 +92,26 @@ func TestPlanMustOwn(t *testing.T) {
 	}
 }
 
+// R54: a regular file with file capabilities (security.capability) is
+// never touched: a chown makes the kernel drop the xattr.
+func TestPlanFileCaps(t *testing.T) {
+	tg := target{GID: 60001, Write: true, ACL: true}
+	o, err := planEntry(state{UID: 1000, GID: 1000, Mode: 0o755, FileCaps: true}, tg)
+	if err != nil || !o.filecaps || o.change || o.setid {
+		t.Fatalf("filecaps: %+v, %v", o, err)
+	}
+	// Already conformant except for nothing: still left alone, no change.
+	owner := uint32(2000)
+	o, _ = planEntry(state{UID: 1000, GID: 60001, Mode: 0o775, FileCaps: true}, target{GID: 60001, Write: true, ACL: true, HasOwner: true, Owner: owner})
+	if !o.filecaps || o.change {
+		t.Fatalf("filecaps under must_own: %+v", o)
+	}
+	// A directory never carries file capabilities that matter: planned.
+	if o, _ := planEntry(state{Dir: true, UID: 1000, GID: 1000, Mode: 0o755, FileCaps: true}, tg); o.filecaps || !o.change {
+		t.Fatalf("directory: %+v", o)
+	}
+}
+
 func TestPlanSetID(t *testing.T) {
 	tg := target{GID: 60001, Write: true, HasOwner: true, Owner: 2000, ACL: true}
 	// setgid file to another group: skipped.

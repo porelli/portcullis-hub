@@ -154,6 +154,22 @@ func readNames(fd int) ([]string, error) {
 
 const maxXattr = 64 << 10
 
+// xattrCapability is the file capabilities xattr (R54).
+const xattrCapability = "security.capability"
+
+// hasFileCaps reports whether the file carries security.capability. A
+// filesystem without xattrs has none.
+func hasFileCaps(fd int) (bool, error) {
+	_, err := unix.Fgetxattr(fd, xattrCapability, nil)
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, unix.ENODATA), errors.Is(err, unix.ENOTSUP), errors.Is(err, unix.EOPNOTSUPP):
+		return false, nil
+	}
+	return false, err
+}
+
 // getXattr reads an xattr through the fd; nil when the entry has none.
 func getXattr(fd int, name string) ([]byte, error) {
 	buf := make([]byte, 256)

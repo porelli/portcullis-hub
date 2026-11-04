@@ -415,10 +415,16 @@ func (w *walker) otherMount(st fileStat, rel string) bool {
 // readState reads the entry's ownership through its fd.
 func (w *walker) readState(n *node) error {
 	n.cur = state{Dir: n.st.isDir(), UID: n.st.UID, GID: n.st.GID, Mode: n.st.Mode & modePerm}
+	var err error
+	if !n.cur.Dir {
+		// R54: read on every filesystem, with or without ACLs.
+		if n.cur.FileCaps, err = hasFileCaps(n.fd); err != nil {
+			return fmt.Errorf("read file capabilities: %w", err)
+		}
+	}
 	if !w.acl {
 		return nil
 	}
-	var err error
 	if n.raw.access, err = getXattr(n.fd, XattrAccess); err != nil {
 		return fmt.Errorf("read access ACL: %w", err)
 	}
@@ -578,6 +584,11 @@ func (w *walker) dir(fd int, self fileStat, rel string, depth int, anc []bool) {
 			testHookBeforeOpen(crel)
 		}
 		cfd, err := openAt(fd, name, isDir)
+		if errors.Is(err, fs.ErrPermission) {
+			// R55: unreadable (EACCES / EPERM) is a failure, never a race.
+			w.fail(crel, err)
+			continue
+		}
 		if err != nil {
 			w.r.Races.add(crel)
 			w.r.errorf("%s: changed during the walk: %v", crel, err)
