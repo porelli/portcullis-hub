@@ -150,6 +150,7 @@ type Report struct {
 	TotalBytes   uint64            `json:"total_bytes"`
 	Errors       []string          `json:"errors,omitempty"` // ≤ 20, clipped to 200 runes each
 	Changed      int64             `json:"changed"`          // apply / restore
+	ToRestore    int64             `json:"to_restore"`       // restore --dry-run: entries a restore would rewrite
 	Created      int64             `json:"created"`          // apply --mkdir
 	Elapsed      time.Duration     `json:"elapsed"`
 }

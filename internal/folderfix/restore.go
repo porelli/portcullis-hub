@@ -90,6 +90,33 @@ func Restore(o Options, snapshot io.Reader) (*Report, error) {
 	return r, nil
 }
 
+// RestoreDryRun is Restore without a single write (R56): ToRestore counts
+// the entries a restore would rewrite now, ChangedSince those it would
+// leave alone. The undo's preview shows it; run again after a restore, it
+// must find 0 still to rewrite (the undo's verify). It needs no write
+// capability and refuses nothing a read-only scan wouldn't.
+func RestoreDryRun(o Options, snapshot io.Reader) (*Report, error) {
+	w, err := openRestoreWalker(o, "restore")
+	if err != nil {
+		return w.report(), err
+	}
+	defer w.close()
+	err = readSnapshot(snapshot, w.checkHeader, func(l snapLine, s state, p string) error {
+		if w.restoreLine(l, s, p, func(*node) error { return nil }) {
+			w.r.ToRestore++
+		}
+		return nil
+	})
+	r := w.report()
+	if err != nil {
+		return r, err
+	}
+	if r.Failed.N > 0 {
+		return r, fmt.Errorf("%d entries couldn't be read", r.Failed.N)
+	}
+	return r, nil
+}
+
 // WriteUndoSnapshot writes, from an apply snapshot, the undo snapshot
 // (header kind "undo"): every entry Restore would rewrite, in its current
 // state. It changes nothing.

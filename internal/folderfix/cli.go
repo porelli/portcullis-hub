@@ -23,6 +23,7 @@ type ArgsExtra struct {
 	Kind   string // snapshot: "apply" (default) | "undo"
 	Rel    string // probe
 	Create bool   // probe
+	DryRun bool   // restore: count, write nothing (R56)
 }
 
 var digestRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -35,7 +36,7 @@ var modeFlags = map[string][]string{
 	"scan":     {"root", "expect-dev", "expect-ino", "expect-mount-root", "gid", "files", "owner", "principal", "children", "max-entries", "max-time"},
 	"snapshot": {"root", "expect-dev", "expect-ino", "expect-mount-root", "gid", "files", "owner", "out", "kind", "in"},
 	"apply":    {"root", "expect-dev", "expect-ino", "expect-mount-root", "expect-digest", "gid", "files", "owner", "expect", "mkdir"},
-	"restore":  {"root", "expect-dev", "expect-ino", "expect-mount-root", "gid", "in"},
+	"restore":  {"root", "expect-dev", "expect-ino", "expect-mount-root", "gid", "in", "dry-run"},
 }
 
 // Args is the argv (after "hub folderfix") for a run: the only form the Hub
@@ -98,6 +99,9 @@ func Args(mode string, o Options, x ArgsExtra) []string {
 		}
 	case "restore":
 		add("in", x.In)
+		if x.DryRun {
+			a = append(a, "--dry-run")
+		}
 	}
 	return a
 }
@@ -188,6 +192,7 @@ func parseArgs(args []string) (string, Options, ArgsExtra, error) {
 	out := fs.String("out", "", "")
 	in := fs.String("in", "", "")
 	kind := fs.String("kind", "apply", "")
+	dryRun := fs.Bool("dry-run", false, "")
 	expect := fs.Int64("expect", -1, "")
 	digest := fs.String("expect-digest", "", "")
 	fs.Var(&mkdirs, "mkdir", "")
@@ -300,7 +305,7 @@ func parseArgs(args []string) (string, Options, ArgsExtra, error) {
 		if err := cleanAbs("in", *in); err != nil {
 			return "", o, x, err
 		}
-		x.In = *in
+		x.In, x.DryRun = *in, *dryRun
 	}
 	return mode, o, x, nil
 }
@@ -341,7 +346,11 @@ func Main(args []string, stdout, stderr io.Writer) (code int) {
 	case "apply":
 		r, err = Apply(o, x.Expect)
 	case "restore":
-		r, err = runFile(x.In, func(f *os.File) (*Report, error) { return Restore(o, f) })
+		if x.DryRun {
+			r, err = runFile(x.In, func(f *os.File) (*Report, error) { return RestoreDryRun(o, f) })
+		} else {
+			r, err = runFile(x.In, func(f *os.File) (*Report, error) { return Restore(o, f) })
+		}
 	}
 	if r != nil {
 		if err != nil {

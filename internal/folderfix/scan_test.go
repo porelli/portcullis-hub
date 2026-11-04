@@ -364,6 +364,7 @@ func TestCLIArgs(t *testing.T) {
 		{"snapshot", Options{Root: "/folder", ExpectDev: 64, ExpectIno: 2, ExpectMountRoot: "/p", Target: Target{GID: 60001, Files: "rw"}}, ArgsExtra{Out: "/out", Kind: "undo", In: "/in/snapshot.ndjson.gz"}},
 		{"apply", Options{Root: "/folder", ExpectDev: 64, ExpectIno: 2, ExpectMountRoot: "/p", ExpectDigest: digest, Target: Target{GID: 60001, Files: "rw", Mkdir: []string{"movies/hd", "tv"}}}, ArgsExtra{Expect: 12}},
 		{"restore", Options{Root: "/folder", ExpectDev: 64, ExpectIno: 2, ExpectMountRoot: "/p", Target: Target{GID: 60001}}, ArgsExtra{In: "/in/snapshot.ndjson.gz"}},
+		{"restore", Options{Root: "/folder", ExpectDev: 64, ExpectIno: 2, ExpectMountRoot: "/p", Target: Target{GID: 60001}}, ArgsExtra{In: "/in/snapshot.ndjson.gz", DryRun: true}},
 	}
 	for _, c := range cases {
 		args := Args(c.mode, c.o, c.x)

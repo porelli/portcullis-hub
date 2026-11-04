@@ -605,6 +605,44 @@ func TestRootSnapshotRestore(t *testing.T) {
 	}
 }
 
+// R56: restore --dry-run counts what a restore would rewrite and what it
+// would leave alone, and writes nothing; after the restore it finds 0
+// still to rewrite (the undo's verify).
+func TestRootRestoreDryRun(t *testing.T) {
+	needRoot(t)
+	root := richTree(t)
+	o := opts(t, root, Target{GID: 60001, Files: "rw"})
+	var snap bytes.Buffer
+	if sr, err := WriteSnapshot(o, &snap); err != nil {
+		t.Fatalf("snapshot: %v %v", err, sr.Errors)
+	}
+	h := snapshotHeader(t, snap.Bytes())
+	if r, err := Apply(o, h.Entries); err != nil {
+		t.Fatalf("apply: %v %v", err, r.Errors)
+	}
+	must(t, unix.Chmod(filepath.Join(root, "edited"), 0o600))
+	applied := diskTree(t, root)
+	ro := o
+	ro.Target = Target{GID: 60001}
+	dr, err := RestoreDryRun(ro, bytes.NewReader(snap.Bytes()))
+	if err != nil {
+		t.Fatalf("dry run: %v %v", err, dr.Errors)
+	}
+	if dr.ToRestore != h.Entries-1 || dr.ChangedSince.N != 1 || dr.Changed != 0 {
+		t.Fatalf("dry run: to restore %d (want %d), changed since %+v, changed %d", dr.ToRestore, h.Entries-1, dr.ChangedSince, dr.Changed)
+	}
+	if now := diskTree(t, root); !reflect.DeepEqual(now, applied) {
+		t.Fatal("the dry run changed the tree")
+	}
+	if r, err := Restore(ro, bytes.NewReader(snap.Bytes())); err != nil || r.Changed != h.Entries-1 {
+		t.Fatalf("restore: %v changed %d", err, r.Changed)
+	}
+	after, err := RestoreDryRun(ro, bytes.NewReader(snap.Bytes()))
+	if err != nil || after.ToRestore != 0 {
+		t.Fatalf("after the restore: %v, %d still to restore", err, after.ToRestore)
+	}
+}
+
 func snapshotHeader(t *testing.T, b []byte) snapHeader {
 	t.Helper()
 	gz, err := gzip.NewReader(bytes.NewReader(b))
