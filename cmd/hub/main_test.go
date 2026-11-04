@@ -70,3 +70,28 @@ func TestFolderfixDispatch(t *testing.T) {
 		t.Fatalf("scan: exit %d out %q stderr %q", code, out, errOut)
 	}
 }
+
+// HUB_FIXER_IMAGE is honoured only with HUB_DEV=1 (ruling 37): an
+// env-selected root-capable image is otherwise refused at start.
+func TestFixerImageFromEnv(t *testing.T) {
+	pinned := "ghcr.io/porelli/portcullis-hub:dev@sha256:" + strings.Repeat("a", 64)
+	for _, c := range []struct {
+		img, dev string
+		want     string
+		ok       bool
+	}{
+		{"", "", "", true},
+		{"", "1", "", true},
+		{pinned, "1", pinned, true},
+		{pinned, "", "", false},
+		{pinned, "true", "", false},
+		{pinned, "0", "", false},
+	} {
+		got, err := fixerImageFromEnv(func(k string) string {
+			return map[string]string{"HUB_FIXER_IMAGE": c.img, "HUB_DEV": c.dev}[k]
+		})
+		if (err == nil) != c.ok || got != c.want {
+			t.Errorf("image %q dev %q: %q, %v", c.img, c.dev, got, err)
+		}
+	}
+}

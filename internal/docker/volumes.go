@@ -13,8 +13,9 @@ import (
 // Labels compose sets on the volumes it creates.
 const (
 	LabelVolume = "com.docker.compose.volume"
-	// LabelHelper marks the Hub's volume I/O helper containers (value:
-	// the instance id they serve).
+	// LabelHelper marks the Hub's helper containers: volume I/O helpers
+	// (value: the instance id they serve) and shared-folder fixers
+	// ("folder:<id>", or "path-check"; run.go).
 	LabelHelper = "io.portcullis.hub.helper"
 )
 

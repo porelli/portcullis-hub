@@ -4,7 +4,8 @@
 // container listing, logs, exec and events (`docker compose` does
 // up/down), plus instance backups (volumes.go): volume list / inspect /
 // create / remove and volume I/O through never-started helper containers
-// (the archive endpoints).
+// (the archive endpoints), and the one started helper, the shared-folder
+// fixer (run.go: RunHelper, InspectContainer, SecurityOptions).
 //
 // The SDK negotiates the API version on first use (GET/HEAD /_ping, which
 // the Hub's socket proxy allows), so the Hub keeps working across Engine

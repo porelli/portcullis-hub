@@ -48,6 +48,71 @@ type fakeEngine struct {
 	vols    map[string]*fakeVol
 	helpers map[string]docker.HelperSpec
 	next    int
+	// Shared-folder fixer runs (started helpers): every spec in fixerRuns;
+	// fixerReports scripts a mode's answer (else a minimal report, exit 0).
+	fixerRuns    []docker.RunSpec
+	fixerReports map[string]fakeFixer
+	secOpts      []string
+}
+
+// fakeFixer is one scripted fixer answer: exit code, the report line and,
+// for snapshot, the snapshot file copied out of /out.
+type fakeFixer struct {
+	Exit     int
+	Report   string
+	Snapshot []byte
+}
+
+// fakeSelfImage is the image ID every inspected container runs.
+var fakeSelfImage = "sha256:" + strings.Repeat("f", 64)
+
+func (e *fakeEngine) InspectContainer(_ context.Context, id string) (docker.ContainerInfo, error) {
+	return docker.ContainerInfo{ID: id, Image: fakeSelfImage}, nil
+}
+
+func (e *fakeEngine) SecurityOptions(context.Context) ([]string, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.secOpts, nil
+}
+
+// scriptFixer sets the answer of every later run of mode.
+func (e *fakeEngine) scriptFixer(mode string, f fakeFixer) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.fixerReports == nil {
+		e.fixerReports = map[string]fakeFixer{}
+	}
+	e.fixerReports[mode] = f
+}
+
+func (e *fakeEngine) RunHelper(_ context.Context, s docker.RunSpec, out func(io.Reader) error) (*docker.RunResult, error) {
+	if s.In != nil {
+		io.Copy(io.Discard, s.In)
+	}
+	mode := ""
+	if len(s.Cmd) > 2 {
+		mode = s.Cmd[2]
+	}
+	e.mu.Lock()
+	e.fixerRuns = append(e.fixerRuns, s)
+	f, ok := e.fixerReports[mode]
+	e.mu.Unlock()
+	if !ok {
+		f = fakeFixer{Report: fmt.Sprintf(`{"version":1,"mode":%q}`, mode), Snapshot: []byte("fake-snapshot")}
+	}
+	if f.Exit == 0 && s.OutPath != "" && out != nil {
+		var b bytes.Buffer
+		tw := tar.NewWriter(&b)
+		tw.WriteHeader(&tar.Header{Name: "out/", Typeflag: tar.TypeDir, Mode: 0o755})
+		tw.WriteHeader(&tar.Header{Name: "out/snapshot.ndjson.gz", Typeflag: tar.TypeReg, Mode: 0o600, Size: int64(len(f.Snapshot))})
+		tw.Write(f.Snapshot)
+		tw.Close()
+		if err := out(&b); err != nil {
+			return &docker.RunResult{}, err
+		}
+	}
+	return &docker.RunResult{ExitCode: f.Exit, Stdout: []byte(f.Report + "\n")}, nil
 }
 
 func newFakeEngine() *fakeEngine {

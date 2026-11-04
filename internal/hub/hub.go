@@ -65,6 +65,10 @@ type Config struct {
 	// or not at all: New refuses one without the other).
 	AppFilesDir     string
 	AppFilesHostDir string
+	// FixerImage replaces the shared-folder fixer's image (contract §6): the
+	// Hub's own image ID otherwise. Development only (main honours
+	// HUB_FIXER_IMAGE only with HUB_DEV=1); must be pinned by @sha256.
+	FixerImage string
 }
 
 // Engine is the part of the Docker Engine API the Hub uses.
@@ -93,6 +97,12 @@ type Engine interface {
 	// can't kill it: the next hook run waits for it).
 	ExecStdin(ctx context.Context, id string, in docker.ExecInput) (*docker.ExecResult, error)
 	ExecRunning(ctx context.Context, execID string) (bool, error)
+	// RunHelper runs the shared-folder fixer, a STARTED helper (contract
+	// §6, fixer.go); InspectContainer finds the Hub's own image;
+	// SecurityOptions is the daemon's Info (userns / rootless refusal).
+	RunHelper(ctx context.Context, s docker.RunSpec, out func(tar io.Reader) error) (*docker.RunResult, error)
+	InspectContainer(ctx context.Context, id string) (docker.ContainerInfo, error)
+	SecurityOptions(ctx context.Context) ([]string, error)
 }
 
 // IdP manages the OIDC clients templates declare.
@@ -185,6 +195,11 @@ type Hub struct {
 	engine  Engine
 	idp     IdP
 	attrs   AttrStore // LLDAP user attributes (setting claims); nil: none
+	// fixerImage caches selfImage (fixer.go; guarded by fixerMu, never
+	// mu); hostname is os.Hostname (test-settable).
+	fixerMu    sync.Mutex
+	fixerImage string
+	hostname   func() (string, error)
 	// domains lists the main and enrolled domains (hosts.go); audit
 	// receives instance operations (SetAudit). Both guarded by mu.
 	domains DomainSource
@@ -356,6 +371,10 @@ func New(cfg Config, runner compose.Runner, engine Engine, idp IdP) (*Hub, error
 	if err != nil {
 		return nil, err
 	}
+	// Fail closed: an unpinned, env-selected root-capable image (S1).
+	if cfg.FixerImage != "" && (!strings.Contains(cfg.FixerImage, "@sha256:") || !docker.PinnedImage(cfg.FixerImage)) {
+		return nil, fmt.Errorf("HUB_FIXER_IMAGE %q must be pinned by digest (name@sha256:<64 hex>)", cfg.FixerImage)
+	}
 	h := &Hub{
 		kinds:       settings.NewRegistry(),
 		bindRoots:   roots,
@@ -370,6 +389,7 @@ func New(cfg Config, runner compose.Runner, engine Engine, idp IdP) (*Hub, error
 		driftKey:    map[string]string{},
 		afterFunc:   realAfterFunc,
 		sleep:       realSleep,
+		hostname:    os.Hostname,
 	}
 	// The known list in state.yaml (empty = only the main domain).
 	h.domains = knownDomains{h}

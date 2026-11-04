@@ -169,6 +169,8 @@ type fakeEngine struct {
 	execInspects    int
 	execInflight    int
 	execMaxInflight int
+	// fixer: started helper runs (fixer_test.go).
+	fixer *fixerFake
 }
 
 type execCall struct {
@@ -853,6 +855,7 @@ func (e *fakeEngine) volumeNames() []string {
 }
 
 var errNoSuchVolume = cerrdefs.ErrNotFound.WithMessage("no such volume")
+var errNoSuchContainer = cerrdefs.ErrNotFound.WithMessage("no such container")
 
 func (e *fakeEngine) ListVolumes(ctx context.Context, f docker.Filters) ([]docker.Volume, error) {
 	v := e.vol()
@@ -1330,3 +1333,87 @@ func (p *fakePeople) ListUsers(ctx context.Context) ([]lldap.User, error) {
 }
 
 func (p *fakePeople) ServiceUser() string { return "portcullis-hub" }
+
+// ── fake fixer runs (started helpers, contract §6) ───────
+
+// fixerFake scripts started helper runs: every spec is recorded; run (if
+// set) answers, else reports[mode] (exit 0 + that stdout line), else a
+// minimal report of the mode. inspect answers InspectContainer by id;
+// secOpts is the daemon's SecurityOptions.
+type fixerFake struct {
+	fmu        sync.Mutex
+	specs      []docker.RunSpec
+	inputs     [][]byte // the drained In stream of each run (nil = none)
+	run        func(s docker.RunSpec, out func(io.Reader) error) (*docker.RunResult, error)
+	reports    map[string]string
+	inspect    map[string]docker.ContainerInfo
+	inspectErr error
+	inspected  []string
+	secOpts    []string
+	secErr     error
+}
+
+func (e *fakeEngine) fx() *fixerFake {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.fixer == nil {
+		e.fixer = &fixerFake{}
+	}
+	return e.fixer
+}
+
+// fixerMode is the mode of a fixer argv (/usr/local/bin/hub folderfix <mode> …).
+func fixerMode(cmd []string) string {
+	if len(cmd) < 3 {
+		return ""
+	}
+	return cmd[2]
+}
+
+func (e *fakeEngine) RunHelper(ctx context.Context, s docker.RunSpec, out func(io.Reader) error) (*docker.RunResult, error) {
+	f := e.fx()
+	var in []byte
+	if s.In != nil {
+		in, _ = io.ReadAll(s.In)
+	}
+	f.fmu.Lock()
+	f.specs = append(f.specs, s)
+	f.inputs = append(f.inputs, in)
+	run, rep := f.run, f.reports[fixerMode(s.Cmd)]
+	f.fmu.Unlock()
+	if run != nil {
+		return run(s, out)
+	}
+	if rep == "" {
+		rep = fmt.Sprintf(`{"version":1,"mode":%q}`, fixerMode(s.Cmd))
+	}
+	return &docker.RunResult{Stdout: []byte(rep + "\n")}, nil
+}
+
+func (e *fakeEngine) InspectContainer(ctx context.Context, id string) (docker.ContainerInfo, error) {
+	f := e.fx()
+	f.fmu.Lock()
+	defer f.fmu.Unlock()
+	f.inspected = append(f.inspected, id)
+	if f.inspectErr != nil {
+		return docker.ContainerInfo{}, f.inspectErr
+	}
+	ci, ok := f.inspect[id]
+	if !ok {
+		return docker.ContainerInfo{}, errNoSuchContainer
+	}
+	return ci, nil
+}
+
+func (e *fakeEngine) SecurityOptions(ctx context.Context) ([]string, error) {
+	f := e.fx()
+	f.fmu.Lock()
+	defer f.fmu.Unlock()
+	return f.secOpts, f.secErr
+}
+
+func (f *fixerFake) Specs() []docker.RunSpec {
+	f.fmu.Lock()
+	defer f.fmu.Unlock()
+	return append([]docker.RunSpec(nil), f.specs...)
+}

@@ -1109,8 +1109,10 @@ func dirSize(dir string) int64 {
 	return n
 }
 
-// SweepBackupLeftovers removes what an interrupted backup or restore left
-// behind: helper containers (LabelHelper), staging directories and
+// SweepBackupLeftovers removes what an interrupted backup, restore or
+// shared-folder fixer run left behind: helper containers (LabelHelper:
+// volume helpers and fixers, "folder:<id>" / "path-check" — a fixer still
+// running when the Hub stopped is killed with it), staging directories and
 // .partial archives. Init calls it before anything can start one.
 func (h *Hub) SweepBackupLeftovers() {
 	if h.engine != nil {

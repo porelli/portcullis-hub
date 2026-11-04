@@ -46,6 +46,21 @@ func openDirectoryStore(dataDir string) (*directory.Store, error) {
 	return st, nil
 }
 
+// fixerImageFromEnv is HUB_FIXER_IMAGE, honoured only with HUB_DEV=1 (contract
+// §6, ruling 37): the shared-folder fixer runs as root with file
+// capabilities, so outside development an env-selected image is refused
+// (the Hub then uses its own image ID). New checks it is pinned by digest.
+func fixerImageFromEnv(getenv func(string) string) (string, error) {
+	v := getenv("HUB_FIXER_IMAGE")
+	if v == "" {
+		return "", nil
+	}
+	if getenv("HUB_DEV") != "1" {
+		return "", fmt.Errorf("HUB_FIXER_IMAGE is for development only: set HUB_DEV=1 or unset it")
+	}
+	return v, nil
+}
+
 func main() {
 	// `hub folderfix …`: the shared-folder fixer, run by the Hub in a helper
 	// container (contract §6). First, before any Hub configuration is read.
@@ -81,6 +96,11 @@ func main() {
 		// a failed pull keeps the previous checkout); "false" turns it off.
 		SyncSourcesAtStart: os.Getenv("HUB_SYNC_SOURCES_AT_START") != "false",
 	}
+	fixerImage, err := fixerImageFromEnv(os.Getenv)
+	if err != nil {
+		log.Fatalf("refusing to start: %v", err)
+	}
+	cfg.FixerImage = fixerImage
 	if v := os.Getenv("HUB_RECONCILE_INTERVAL"); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil || d < 5*time.Second {

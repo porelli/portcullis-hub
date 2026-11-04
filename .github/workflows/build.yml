@@ -64,6 +64,19 @@ jobs:
       - name: folderfix root tests
         run: sudo -E env "PATH=$PATH" GOCACHE="$RUNNER_TEMP/gocache-root" go test -tags fixerroot -count=1 -v ./internal/folderfix/
 
+      # The started fixer helper against the runner's Docker daemon
+      # (fixer_docker_test.go, build tag docker): a Hub-shaped image of this
+      # tree, the real `hub folderfix` scan → snapshot → apply → verify →
+      # restore, the helper's capabilities / no-new-privs / network /
+      # read-only rootfs from inside, and each capability's necessity.
+      # PORTCULLIS_DOCKER_TEST=require: no daemon is a failure, not a skip.
+      - name: fixer helper docker tests
+        env:
+          PORTCULLIS_DOCKER_TEST: require
+        run: |
+          go vet -tags docker ./internal/hub/
+          go test -tags docker -count=1 -v -run 'TestDocker' ./internal/hub/
+
       - name: go build
         run: go build -o /dev/null ./cmd/hub
 
