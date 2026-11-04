@@ -140,6 +140,14 @@ func (r fixerRun) validate() error {
 		if r.Extra.Rel == "" {
 			return errors.New("probe needs a relative path")
 		}
+		if len(r.Extra.Subs) > 0 && r.Extra.Create {
+			return errors.New("probe: subpaths don't go with create")
+		}
+		for _, sub := range r.Extra.Subs {
+			if sub == "" || strings.HasPrefix(sub, "/") || path.Clean(sub) != sub || sub == "." || sub == ".." || strings.HasPrefix(sub, "../") {
+				return fmt.Errorf("probe: subpath %q", sub)
+			}
+		}
 	case "scan":
 	case "snapshot":
 		if o.Target.GID == 0 || r.Folder == "" {

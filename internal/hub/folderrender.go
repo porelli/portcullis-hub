@@ -596,7 +596,8 @@ func (h *Hub) FolderChanges() []FolderChange {
 	return out
 }
 
-// folderProbe is one folder value with a subpath to probe around an up.
+// folderProbe is one folder value to probe around an up: the folder
+// root always (H1), its subpath when it has one.
 type folderProbe struct {
 	key, folder, name, sub string
 	root, rel              string // the bind root and the folder's path below it
@@ -604,8 +605,9 @@ type folderProbe struct {
 	subDev, subIno         uint64 // the subpath's, from the probe before the up
 }
 
-// folderProbesLocked are t's folder values with a subpath (in option
-// order). A value that doesn't resolve is an error. Caller must hold mu.
+// folderProbesLocked are t's folder values (in option order), with or
+// without a subpath. A value that doesn't resolve is an error. Caller
+// must hold mu.
 func (h *Hub) folderProbesLocked(t *templates.Template) ([]folderProbe, error) {
 	mounts, err := h.folderMountsLocked(t, h.st.Settings[t.ID])
 	if err != nil {
@@ -613,9 +615,6 @@ func (h *Hub) folderProbesLocked(t *templates.Template) ([]folderProbe, error) {
 	}
 	var out []folderProbe
 	for _, fm := range mounts {
-		if fm.sub == "" {
-			continue
-		}
 		root, rel := h.bindRootOf(fm.folder.Path)
 		if root == "" || rel == "" {
 			return nil, statusErr(http.StatusConflict, "shared folder %s: %s is not under a bind root", fm.folder.Name, fm.folder.Path)
@@ -645,50 +644,70 @@ func isFolderChanged(err error) bool {
 	return errors.As(err, &fc)
 }
 
-// probeFolders probes each of ps (never under mu): the folder root must
-// be the stored device and inode with no symlink on its path, the
-// subpath must exist with no symlink component; after the start (after)
-// the subpath must also be the device and inode the first probe saw. It
-// returns the probe that failed (nil: all passed) and its refusal, with
-// what changed as detail.
+// probeFolders probes ps (never under mu), one fixer run per folder
+// covering its root and every subpath of ps below it (H1): the folder
+// root must be the stored device and inode with no symlink on its path,
+// each subpath must exist with no symlink component; after the start
+// (after) a subpath must also be the device and inode the first probe
+// saw. It returns the probe that failed (nil: all passed) and its
+// refusal, with what changed as detail.
 func (h *Hub) probeFolders(ctx context.Context, ps []folderProbe, after bool) (*folderProbe, string, error) {
+	var order []string
+	byFolder := map[string][]int{}
 	for i := range ps {
-		p := &ps[i]
-		run := func(rel string) (*folderfix.ProbeReport, error) {
-			rep, err := h.runProbe(ctx, fixerRun{Mode: "probe", Folder: p.folder, Source: p.root, Extra: folderfix.ArgsExtra{Rel: rel}})
-			var se *StatusError
-			if err != nil && errors.As(err, &se) && se.Status == http.StatusConflict {
-				return nil, errFolderChanged(p.name)
+		if _, seen := byFolder[ps[i].folder]; !seen {
+			order = append(order, ps[i].folder)
+		}
+		byFolder[ps[i].folder] = append(byFolder[ps[i].folder], i)
+	}
+	for _, fid := range order {
+		idx := byFolder[fid]
+		first := &ps[idx[0]]
+		var subs []string
+		for _, i := range idx {
+			if s := ps[i].sub; s != "" && !slices.Contains(subs, s) {
+				subs = append(subs, s)
 			}
-			return rep, err
 		}
-		rootRep, err := run(p.rel)
+		rep, err := h.runProbe(ctx, fixerRun{Mode: "probe", Folder: fid, Source: first.root, Extra: folderfix.ArgsExtra{Rel: first.rel, Subs: subs}})
 		if err != nil {
-			return p, err.Error(), err
+			var se *StatusError
+			if errors.As(err, &se) && se.Status == http.StatusConflict {
+				return first, err.Error(), errFolderChanged(first.name)
+			}
+			return first, err.Error(), err
 		}
 		switch {
-		case rootRep.Symlink != "":
-			return p, rootRep.Symlink + " is a symlink", errFolderChanged(p.name)
-		case !rootRep.Exists:
-			return p, "the folder is missing", errFolderChanged(p.name)
-		case rootRep.Dev != p.dev || rootRep.Ino != p.ino:
-			return p, fmt.Sprintf("the folder is another directory (device %d inode %d, stored %d %d)", rootRep.Dev, rootRep.Ino, p.dev, p.ino), errFolderChanged(p.name)
+		case rep.Symlink != "":
+			return first, rep.Symlink + " is a symlink", errFolderChanged(first.name)
+		case !rep.Exists:
+			return first, "the folder is missing", errFolderChanged(first.name)
+		case rep.Dev != first.dev || rep.Ino != first.ino:
+			return first, fmt.Sprintf("the folder is another directory (device %d inode %d, stored %d %d)", rep.Dev, rep.Ino, first.dev, first.ino), errFolderChanged(first.name)
+		case len(rep.Subs) != len(subs):
+			return first, "the probe reported no subpaths", statusErr(http.StatusInternalServerError, "shared folder fixer (probe): %d subpaths reported, %d asked", len(rep.Subs), len(subs))
 		}
-		subRep, err := run(path.Join(p.rel, p.sub))
-		if err != nil {
-			return p, err.Error(), err
+		for _, i := range idx {
+			p := &ps[i]
+			if p.sub == "" {
+				continue
+			}
+			k := slices.Index(subs, p.sub)
+			sp := rep.Subs[k]
+			switch {
+			case sp.Rel != p.sub:
+				return p, "the probe reported another subpath", statusErr(http.StatusInternalServerError, "shared folder fixer (probe): subpath %q reported for %q", sp.Rel, p.sub)
+			case sp.Symlink != "":
+				return p, path.Join(p.rel, sp.Symlink) + " is a symlink", errFolderChanged(p.name)
+			case !sp.Exists && after:
+				return p, p.sub + " is gone", errFolderChanged(p.name)
+			case !sp.Exists:
+				return p, p.sub + " doesn't exist", statusErr(http.StatusConflict, "shared folder %s: %s doesn't exist yet: apply the folder assignment (Settings → Shared folders)", p.name, p.sub)
+			case after && (sp.Dev != p.subDev || sp.Ino != p.subIno):
+				return p, p.sub + " is another directory than at the start", errFolderChanged(p.name)
+			}
+			p.subDev, p.subIno = sp.Dev, sp.Ino
 		}
-		switch {
-		case subRep.Symlink != "":
-			return p, subRep.Symlink + " is a symlink", errFolderChanged(p.name)
-		case !subRep.Exists && after:
-			return p, p.sub + " is gone", errFolderChanged(p.name)
-		case !subRep.Exists:
-			return p, p.sub + " doesn't exist", statusErr(http.StatusConflict, "shared folder %s: %s doesn't exist yet: apply the folder assignment (Settings → Shared folders)", p.name, p.sub)
-		case after && (subRep.Dev != p.subDev || subRep.Ino != p.subIno):
-			return p, p.sub + " is another directory than at the start", errFolderChanged(p.name)
-		}
-		p.subDev, p.subIno = subRep.Dev, subRep.Ino
 	}
 	return nil, "", nil
 }

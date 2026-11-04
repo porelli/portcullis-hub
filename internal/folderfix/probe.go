@@ -9,18 +9,31 @@ import (
 
 // ProbeReport is what probe answers about a path below a bind root.
 type ProbeReport struct {
-	Version   int      `json:"version"`
-	Mode      string   `json:"mode"`
-	Root      string   `json:"root"`
-	Rel       string   `json:"rel"`
-	Dev       uint64   `json:"dev"`
-	Ino       uint64   `json:"ino"`
-	Symlink   string   `json:"symlink"` // the first symlink component ("" = none)
-	Exists    bool     `json:"exists"`
-	Created   bool     `json:"created"`
-	MountRoot string   `json:"mount_root"` // of the bind root (root)
-	FSType    string   `json:"fs_type"`    // of the path, when it exists
-	Errors    []string `json:"errors,omitempty"`
+	Version   int    `json:"version"`
+	Mode      string `json:"mode"`
+	Root      string `json:"root"`
+	Rel       string `json:"rel"`
+	Dev       uint64 `json:"dev"`
+	Ino       uint64 `json:"ino"`
+	Symlink   string `json:"symlink"` // the first symlink component ("" = none)
+	Exists    bool   `json:"exists"`
+	Created   bool   `json:"created"`
+	MountRoot string `json:"mount_root"` // of the bind root (root)
+	FSType    string `json:"fs_type"`    // of the path, when it exists
+	// Subs: each --sub below rel, walked from rel's fd (H1: one run
+	// probes a folder root and every subpath an up mounts). Empty when
+	// rel is missing or a symlink.
+	Subs   []SubProbe `json:"subs,omitempty"`
+	Errors []string   `json:"errors,omitempty"`
+}
+
+// SubProbe is one subpath below the probed directory.
+type SubProbe struct {
+	Rel     string `json:"rel"`
+	Dev     uint64 `json:"dev"`
+	Ino     uint64 `json:"ino"`
+	Symlink string `json:"symlink"` // the first symlink component below Rel's parent ("" = none)
+	Exists  bool   `json:"exists"`
 }
 
 // Probe follows rel below root one component at a time (openat
@@ -30,6 +43,22 @@ type ProbeReport struct {
 // mkdirat under their parent's fd (0755, owned by the caller); nothing is
 // created past a symlink or a non-directory.
 func Probe(root, rel string, create bool) (*ProbeReport, error) {
+	return probe(root, rel, create, nil)
+}
+
+// ProbeSubs probes rel below root, then (rel an existing directory) each
+// of subs below rel, every one walked from rel's own fd: a subpath is
+// judged below the very directory whose device and inode were reported.
+func ProbeSubs(root, rel string, subs []string) (*ProbeReport, error) {
+	for _, s := range subs {
+		if err := validSubpath(s); err != nil {
+			return &ProbeReport{Version: 1, Mode: "probe", Root: root, Rel: rel}, err
+		}
+	}
+	return probe(root, rel, false, subs)
+}
+
+func probe(root, rel string, create bool, subs []string) (*ProbeReport, error) {
 	p := &ProbeReport{Version: 1, Mode: "probe", Root: root, Rel: rel}
 	if err := validRoot(root); err != nil {
 		return p, err
@@ -91,7 +120,57 @@ func Probe(root, rel string, create bool) (*ProbeReport, error) {
 	if name, _, _, err := fsInfo(fd); err == nil {
 		p.FSType = name
 	}
+	for _, sub := range subs {
+		sp, err := walkSub(fd, sub)
+		if err != nil {
+			return p, err
+		}
+		p.Subs = append(p.Subs, sp)
+	}
 	return p, nil
+}
+
+// walkSub follows sub below the directory fd (never closed here) one
+// component at a time, as probe does, creating nothing.
+func walkSub(dirfd int, sub string) (SubProbe, error) {
+	sp := SubProbe{Rel: sub}
+	fd, err := dupFD(dirfd)
+	if err != nil {
+		return sp, err
+	}
+	defer func() { closeFD(fd) }()
+	at := "."
+	var last fileStat
+	for _, c := range strings.Split(sub, "/") {
+		crel := joinRel(at, c)
+		st, err := lstatAt(fd, c)
+		if errors.Is(err, fs.ErrNotExist) {
+			return sp, nil
+		}
+		if err != nil {
+			return sp, err
+		}
+		if st.isLink() {
+			sp.Symlink = crel
+			return sp, nil
+		}
+		if !st.isDir() {
+			return sp, refuse("%s is not a directory", crel)
+		}
+		nfd, err := openAt(fd, c, true)
+		if err != nil {
+			return sp, refuse("%s changed during the probe: %v", crel, err)
+		}
+		fst, err := fstatFD(nfd)
+		if err != nil || !fst.same(st) {
+			closeFD(nfd)
+			return sp, refuse("%s changed during the probe", crel)
+		}
+		closeFD(fd)
+		fd, at, last = nfd, crel, fst
+	}
+	sp.Exists, sp.Dev, sp.Ino = true, last.Dev, last.Ino
+	return sp, nil
 }
 
 // failed: once probe --create made a directory, no error is a refusal (M3).

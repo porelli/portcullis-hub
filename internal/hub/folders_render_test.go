@@ -220,9 +220,10 @@ func TestFolderMountRendered(t *testing.T) {
 		}
 	}
 	// The up probed the folder root and subpath before Create, right
-	// before the up (ruling 24, M1) and again after the start.
-	if n := probes(f); n != 6 {
-		t.Errorf("probes = %d, want 2 before Create, 2 before the up and 2 after it", n)
+	// before the up (ruling 24, M1) and again after the start: one run
+	// each, root and subpath together (H1).
+	if n := probes(f); n != 3 {
+		t.Errorf("probes = %d, want 1 before Create, 1 before the up and 1 after it", n)
 	}
 	// Unassigned: the variable is written empty, the mount and group go.
 	setStored(f, "jellyfin", "movies", nil)
@@ -535,6 +536,82 @@ func TestUpRefusesChangedFolder(t *testing.T) {
 	}
 	if ups(f, "jellyfin") != 0 {
 		t.Error("started anyway")
+	}
+}
+
+// H1: a folder value without a subpath has its root probed around the up
+// too (device, inode, no symlink), and one run per folder covers the root
+// and every subpath the instance mounts from it.
+func TestUpProbesFolderRootWithoutSubpath(t *testing.T) {
+	f, d := jellyfinFixture(t)
+	setStored(f, "jellyfin", "movies", "folder:media")
+	changed := "shared folder Family media changed on disk"
+	d.mu.Lock()
+	d.symlinks["/srv/media"] = true
+	d.mu.Unlock()
+	if err := f.h.Enable("jellyfin"); statusOf(err) != 409 || !strings.Contains(err.Error(), changed) {
+		t.Fatalf("symlinked root: %v", err)
+	}
+	d.mu.Lock()
+	delete(d.symlinks, "/srv/media")
+	ino := d.paths["/srv/media"].ino
+	d.paths["/srv/media"].ino = 999
+	d.mu.Unlock()
+	if err := f.h.Enable("jellyfin"); statusOf(err) != 409 || !strings.Contains(err.Error(), changed) {
+		t.Fatalf("replaced root: %v", err)
+	}
+	if ups(f, "jellyfin") != 0 {
+		t.Fatal("started on a changed folder root")
+	}
+	// Replaced right after the start: taken down, recorded.
+	d.mu.Lock()
+	d.paths["/srv/media"].ino = ino
+	d.mu.Unlock()
+	f.runner.upHook = func(string) {
+		d.mu.Lock()
+		d.paths["/srv/media"].ino = 998
+		d.mu.Unlock()
+	}
+	if err := f.h.Enable("jellyfin"); statusOf(err) != 409 || !strings.Contains(err.Error(), changed) {
+		t.Fatalf("after the start: %v", err)
+	}
+	if calls := strings.Join(f.runner.Calls(), ","); !strings.Contains(calls, "up:portcullis-jellyfin,down:portcullis-jellyfin") {
+		t.Errorf("calls = %s", calls)
+	}
+	if ch := f.h.FolderChanges(); len(ch) != 1 || ch[0].Key != "movies" || ch[0].Subpath != "" {
+		t.Errorf("changes = %+v", ch)
+	}
+	// Two subpaths of one folder: one probe run per stage, both checked.
+	f.runner.upHook = nil
+	d.mu.Lock()
+	d.paths["/srv/media"].ino = ino
+	d.mu.Unlock()
+	setStored(f, "jellyfin", "movies", "folder:media/movies", "tv", "folder:media/tv")
+	before := probes(f)
+	if err := f.h.Enable("jellyfin"); err != nil {
+		t.Fatal(err)
+	}
+	if n := probes(f) - before; n != 3 {
+		t.Errorf("probe runs = %d, want 3 (one per stage)", n)
+	}
+	for _, sp := range f.engine.fx().Specs() {
+		if fixerMode(sp.Cmd) != "probe" {
+			continue
+		}
+		if rel, _ := argValue(sp.Cmd, "rel"); rel != "media" {
+			t.Errorf("probe rel = %q", rel)
+		}
+	}
+	last := f.engine.fx().Specs()
+	if subs := argValues(last[len(last)-1].Cmd, "sub"); !slices.Equal(subs, []string{"movies", "tv"}) {
+		t.Errorf("subs = %q", subs)
+	}
+	// A symlinked second subpath is refused before anything is created.
+	d.mu.Lock()
+	d.symlinks["/srv/media/tv"] = true
+	d.mu.Unlock()
+	if err := f.h.RestartApp("jellyfin"); statusOf(err) != 409 || !strings.Contains(err.Error(), changed) {
+		t.Fatalf("symlinked tv: %v", err)
 	}
 }
 

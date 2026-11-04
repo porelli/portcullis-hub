@@ -17,13 +17,14 @@ import (
 
 // ArgsExtra holds the flags of one mode beyond Options.
 type ArgsExtra struct {
-	Expect int64  // apply
-	Out    string // snapshot: the directory snapshot.ndjson.gz is written to
-	In     string // restore, undo snapshot: the apply snapshot
-	Kind   string // snapshot: "apply" (default) | "undo"
-	Rel    string // probe
-	Create bool   // probe
-	DryRun bool   // restore: count, write nothing (R56)
+	Expect int64    // apply
+	Out    string   // snapshot: the directory snapshot.ndjson.gz is written to
+	In     string   // restore, undo snapshot: the apply snapshot
+	Kind   string   // snapshot: "apply" (default) | "undo"
+	Rel    string   // probe
+	Create bool     // probe
+	Subs   []string // probe: subpaths below Rel, probed in the same run (H1)
+	DryRun bool     // restore: count, write nothing (R56)
 }
 
 var digestRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -32,7 +33,7 @@ var digestRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
 const SnapshotName = "snapshot.ndjson.gz"
 
 var modeFlags = map[string][]string{
-	"probe":    {"root", "rel", "create"},
+	"probe":    {"root", "rel", "create", "sub"},
 	"scan":     {"root", "expect-dev", "expect-ino", "expect-mount-root", "gid", "files", "owner", "principal", "children", "max-entries", "max-time"},
 	"snapshot": {"root", "expect-dev", "expect-ino", "expect-mount-root", "gid", "files", "owner", "out", "kind", "in"},
 	"apply":    {"root", "expect-dev", "expect-ino", "expect-mount-root", "expect-digest", "gid", "files", "owner", "expect", "mkdir"},
@@ -47,6 +48,9 @@ func Args(mode string, o Options, x ArgsExtra) []string {
 	switch mode {
 	case "probe":
 		add("rel", x.Rel)
+		for _, sub := range x.Subs {
+			add("sub", sub)
+		}
 		if x.Create {
 			a = append(a, "--create")
 		}
@@ -184,7 +188,8 @@ func parseArgs(args []string) (string, Options, ArgsExtra, error) {
 	gid := fs.String("gid", "", "")
 	files := fs.String("files", "", "")
 	owner := fs.String("owner", "", "")
-	var principals, mkdirs listFlag
+	var principals, mkdirs, subs listFlag
+	fs.Var(&subs, "sub", "")
 	fs.Var(&principals, "principal", "")
 	children := fs.Bool("children", false, "")
 	maxEntries := fs.Int64("max-entries", 0, "")
@@ -219,7 +224,18 @@ func parseArgs(args []string) (string, Options, ArgsExtra, error) {
 		if err := validSubpath(*rel); err != nil {
 			return "", o, x, err
 		}
+		if len(subs) > 0 && *create {
+			return "", o, x, errors.New("--sub doesn't go with --create")
+		}
+		for _, sub := range subs {
+			if err := validSubpath(sub); err != nil {
+				return "", o, x, fmt.Errorf("--sub: %v", err)
+			}
+		}
 		x.Rel, x.Create = *rel, *create
+		if len(subs) > 0 {
+			x.Subs = []string(subs)
+		}
 		return mode, o, x, nil
 	}
 	if (*dev == 0) != (*ino == 0) {
@@ -334,7 +350,11 @@ func Main(args []string, stdout, stderr io.Writer) (code int) {
 	switch mode {
 	case "probe":
 		var p *ProbeReport
-		p, err = Probe(o.Root, x.Rel, x.Create)
+		if len(x.Subs) > 0 {
+			p, err = ProbeSubs(o.Root, x.Rel, x.Subs)
+		} else {
+			p, err = Probe(o.Root, x.Rel, x.Create)
+		}
 		if err != nil {
 			p.Errors = append([]string{clip(err.Error(), maxErrRunes)}, p.Errors...)
 		}

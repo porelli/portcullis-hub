@@ -60,6 +60,17 @@ func argValue(cmd []string, flag string) (string, bool) {
 	return "", false
 }
 
+// argValues are every value of a repeated flag.
+func argValues(cmd []string, flag string) []string {
+	var out []string
+	for _, a := range cmd {
+		if v, ok := strings.CutPrefix(a, "--"+flag+"="); ok {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
 // add makes p an existing directory on fs.
 func (d *fakeDisk) add(p, fs string) *diskPath {
 	d.mu.Lock()
@@ -104,6 +115,22 @@ func (d *fakeDisk) run(s docker.RunSpec, _ func(io.Reader) error) (*docker.RunRe
 			}
 			if e != nil {
 				p.Exists, p.Dev, p.Ino, p.FSType = true, e.dev, e.ino, e.fs
+			}
+		}
+		if p.Exists {
+			for _, sub := range argValues(s.Cmd, "sub") {
+				sp := folderfix.SubProbe{Rel: sub}
+				parts := strings.Split(sub, "/")
+				for i := range parts {
+					if d.symlinks[path.Join(src, rel, path.Join(parts[:i+1]...))] {
+						sp.Symlink = path.Join(parts[:i+1]...)
+						break
+					}
+				}
+				if e := d.paths[path.Join(src, rel, sub)]; e != nil && sp.Symlink == "" {
+					sp.Exists, sp.Dev, sp.Ino = true, e.dev, e.ino
+				}
+				p.Subs = append(p.Subs, sp)
 			}
 		}
 		rep = p

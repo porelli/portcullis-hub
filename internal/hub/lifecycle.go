@@ -128,8 +128,9 @@ func (h *Hub) prepareUp(t *templates.Template) (*templates.Template, error) {
 
 // startUp is composeUp after prepareUp: create, the image-label check,
 // up, the start hooks and the background claims. Shared-folder values
-// with a subpath are probed before anything is created, again right
-// before the up and right after it (ruling 24, R44).
+// (the folder root always, H1; a subpath with it, one run per folder)
+// are probed before anything is created, again right before the up and
+// right after it (ruling 24, R44).
 func (h *Hub) startUp(live *templates.Template) error {
 	ctx := context.Background()
 	// Read under mu, probed outside it.

@@ -327,8 +327,8 @@ func TestCLIArgs(t *testing.T) {
 		{"apply", "--root=" + root, "--expect-dev=1", "--expect-ino=2", "--gid=60001", "--files=rw", "--expect=1", "--mkdir=../x"},
 		{"apply", "--root=" + root, "--expect-dev=1", "--expect-ino=2", "--gid=60001", "--files=rw", "--expect=1", "--mkdir=a:b"},
 		{"apply", "--root=" + root, "--gid=60001", "--files=rw", "--expect=1"}, // no expected identity
-		{"scan", "--root=" + root, "--gid=60001"}, // no --files
-		{"scan", "--root=" + root, "--mkdir=x"},   // not a scan flag
+		{"scan", "--root=" + root, "--gid=60001"},                              // no --files
+		{"scan", "--root=" + root, "--mkdir=x"},                                // not a scan flag
 		{"scan", "--root=" + root, "--principal=a:b:c"},
 		{"scan", "--root=" + root, "extra"},
 		{"restore", "--root=" + root, "--expect-dev=1", "--expect-ino=2", "--in=/in/s.gz"}, // no --gid
@@ -440,6 +440,61 @@ func TestProbe(t *testing.T) {
 	code, out, _ := runMain("probe", "--root="+root, "--rel=l/x")
 	if code != 0 || !strings.Contains(out, `"symlink":"l"`) {
 		t.Fatalf("CLI probe: %d %s", code, out)
+	}
+}
+
+// H1: one probe run checks the folder root and every subpath below it,
+// each walked from the root's own fd (no symlink component).
+func TestProbeSubs(t *testing.T) {
+	root := t.TempDir()
+	for _, d := range []string{"a", "a/b", "a/c", "a/c/d"} {
+		mkdir(t, filepath.Join(root, d), 0o755)
+	}
+	if err := os.Symlink(t.TempDir(), filepath.Join(root, "a", "l")); err != nil {
+		t.Fatal(err)
+	}
+	p, err := ProbeSubs(root, "a", []string{"b", "c/d", "l/x", "missing"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dev, ino := rootIDs(t, filepath.Join(root, "a"))
+	if !p.Exists || p.Dev != dev || p.Ino != ino || p.Symlink != "" || len(p.Subs) != 4 {
+		t.Fatalf("root: %+v", p)
+	}
+	bdev, bino := rootIDs(t, filepath.Join(root, "a", "b"))
+	ddev, dino := rootIDs(t, filepath.Join(root, "a", "c", "d"))
+	want := []SubProbe{
+		{Rel: "b", Exists: true, Dev: bdev, Ino: bino},
+		{Rel: "c/d", Exists: true, Dev: ddev, Ino: dino},
+		{Rel: "l/x", Symlink: "l"},
+		{Rel: "missing"},
+	}
+	if !reflect.DeepEqual(p.Subs, want) {
+		t.Fatalf("subs:\n got %+v\nwant %+v", p.Subs, want)
+	}
+	// A symlinked root: no subpath is walked.
+	if err := os.Symlink(filepath.Join(root, "a"), filepath.Join(root, "s")); err != nil {
+		t.Fatal(err)
+	}
+	if p, err := ProbeSubs(root, "s", []string{"b"}); err != nil || p.Symlink != "s" || p.Exists || len(p.Subs) != 0 {
+		t.Fatalf("symlinked root: %+v %v", p, err)
+	}
+	// Through the CLI; --sub never goes with --create, nor a bad subpath.
+	code, out, _ := runMain("probe", "--root="+root, "--rel=a", "--sub=b", "--sub=l/x")
+	if code != 0 || !strings.Contains(out, `"subs":[{"rel":"b"`) || !strings.Contains(out, `"symlink":"l"`) {
+		t.Fatalf("CLI probe: %d %s", code, out)
+	}
+	for _, args := range [][]string{
+		{"probe", "--root=" + root, "--rel=a", "--sub=b", "--create"},
+		{"probe", "--root=" + root, "--rel=a", "--sub=../x"},
+	} {
+		if code, out, _ := runMain(args...); code != 1 || out != "" {
+			t.Errorf("%q: exit %d out %q, want 1", args, code, out)
+		}
+	}
+	args := Args("probe", Options{Root: "/broot"}, ArgsExtra{Rel: "media", Subs: []string{"movies", "tv/hd"}})
+	if _, _, x, err := parseArgs(args); err != nil || !reflect.DeepEqual(x.Subs, []string{"movies", "tv/hd"}) || x.Rel != "media" {
+		t.Fatalf("round trip %q: %+v %v", args, x, err)
 	}
 }
 

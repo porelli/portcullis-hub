@@ -600,6 +600,15 @@ func (d *harnessDisk) run(s docker.RunSpec, out func(io.Reader) error) (*docker.
 		}
 		if e != nil {
 			p.Exists, p.Dev, p.Ino, p.FSType = true, e.dev, e.ino, "ext4"
+			for _, a := range s.Cmd {
+				if sub, ok := strings.CutPrefix(a, "--sub="); ok {
+					sp := folderfix.SubProbe{Rel: sub}
+					if se := d.dirs[path.Join(src, rel, sub)]; se != nil {
+						sp.Exists, sp.Dev, sp.Ino = true, se.dev, se.ino
+					}
+					p.Subs = append(p.Subs, sp)
+				}
+			}
 		}
 		return harnessReply(p, 0)
 	}
