@@ -161,6 +161,10 @@ type AppState struct {
 	// pointer so that [] (loopback only) survives a save: nil = the
 	// defaults.
 	LocalNetworks *[]string `json:"local_networks,omitempty" yaml:"local_networks,omitempty"`
+	// PersonIDs: pool → its Hub-wide person ids (contract §13.16, plan 3
+	// Task 5). Here and never in an instance archive: an instance restore
+	// keeps everyone's id.
+	PersonIDs map[string]PersonIDPool `json:"person_ids,omitempty" yaml:"person_ids,omitempty"`
 
 	// LegacyPassword lists, after Load, the policies that named the removed
 	// "password" factor and were normalised ("" = the global default). Not
@@ -534,6 +538,9 @@ func (s *AppState) init() {
 	if s.LegacyPassword == nil {
 		s.LegacyPassword = make(map[string]bool)
 	}
+	if s.PersonIDs == nil {
+		s.PersonIDs = make(map[string]PersonIDPool)
+	}
 }
 
 // normalizeLegacy rewrites stored policies that name the removed
@@ -593,6 +600,9 @@ func Load(path string) (*AppState, error) {
 		return nil, fmt.Errorf("corrupt %s (%v) — fix or move it aside, then restart", path, err)
 	}
 	if err := s.checkFolders(); err != nil {
+		return nil, fmt.Errorf("corrupt %s (%v) — fix or move it aside, then restart", path, err)
+	}
+	if err := s.checkPersonIDs(); err != nil {
 		return nil, fmt.Errorf("corrupt %s (%v) — fix or move it aside, then restart", path, err)
 	}
 	if s.LocalNetworks != nil {
