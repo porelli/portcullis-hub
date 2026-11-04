@@ -119,7 +119,7 @@ func (lanOnlyExposedCheck) Run(in *Inputs) []Finding {
 	}
 	var out []Finding
 	for _, p := range sortedPorts(in) {
-		if !p.LanOnly || p.HostNetwork {
+		if !p.LanOnly {
 			continue
 		}
 		a, ok := ParseBind(p.Bind)
@@ -135,6 +135,13 @@ func (lanOnlyExposedCheck) Run(in *Inputs) []Finding {
 			f.Severity = Warning
 			f.Title = fmt.Sprintf("%s: LAN-only port %s listens on all interfaces (%s).", p.Instance, portName(p), portSpec(p))
 			f.Why = "The template marks this port LAN-only. Bound to all interfaces, it is reachable wherever the host is: from the internet too when the host has a public address or the router forwards the port."
+			if p.HostNetwork {
+				// Host networking: the app listens on every host address,
+				// around Docker and host firewalls alike (ruling).
+				f.Severity = Problem
+				f.Title = fmt.Sprintf("%s: LAN-only port %s uses host networking and listens on every host address (%s).", p.Instance, portName(p), portSpec(p))
+				f.Why = "The template marks this port LAN-only, but service " + p.Service + " runs on the host's network and binds every host address: it is reachable from outside the LAN unless its bind address is a local one."
+			}
 		case domain[a]:
 			why = "domain"
 			f.Severity = Problem

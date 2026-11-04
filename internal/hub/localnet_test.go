@@ -41,6 +41,13 @@ ports:
     service: wsdd
     network_mode_host: true
     lan_only: true
+  - key: SAMBA_NB
+    label: NetBIOS
+    container: 137
+    protocol: udp
+    default: 137
+    service: samba
+    lan_only: true
 `
 
 const sambaCompose = "services:\n  samba:\n    image: samba\n    labels:\n" +
@@ -198,7 +205,7 @@ func TestDomainAddrsCached(t *testing.T) {
 func TestExposurePortsGathered(t *testing.T) {
 	f, _ := sambaFixture(t)
 	f.h.lookupIP = func(context.Context, string) ([]netip.Addr, error) { return nil, nil }
-	writeFile(t, f.h.userOverridePath("samba"), "services:\n  samba:\n    ports:\n      - \"8445:445\"\n      - \"[::ffff:192.168.1.10]:8139:139\"\n      - target: 445\n        published: 9445\n        host_ip: 203.0.113.5\n")
+	writeFile(t, f.h.userOverridePath("samba"), "services:\n  samba:\n    ports:\n      - \"8445:445\"\n      - \"[::ffff:192.168.1.10]:8139:139\"\n      - target: 445\n        published: 9445\n        host_ip: 203.0.113.5\n      - \"5445:445/udp\"\n      - \"8137:137\"\n      - \"8138:137/udp\"\n")
 	enableQuiet(f, "samba")
 	in, err := f.h.doctorInputs(context.Background())
 	if err != nil {
@@ -218,6 +225,12 @@ func TestExposurePortsGathered(t *testing.T) {
 		8445: {Instance: "samba", Key: "SAMBA_SMB", Label: "SMB", Service: "samba", Bind: "0.0.0.0", Port: 8445, Container: 445, Protocol: "tcp", LanOnly: true, Custom: true},
 		8139: {Instance: "samba", Key: "custom override", Service: "samba", Bind: "::ffff:192.168.1.10", Port: 8139, Container: 139, Protocol: "tcp", Custom: true},
 		9445: {Instance: "samba", Key: "SAMBA_SMB", Label: "SMB", Service: "samba", Bind: "203.0.113.5", Port: 9445, Container: 445, Protocol: "tcp", LanOnly: true, Custom: true},
+		137:  {Instance: "samba", Key: "SAMBA_NB", Label: "NetBIOS", Service: "samba", Bind: "0.0.0.0", Port: 137, Container: 137, Protocol: "udp", LanOnly: true},
+		// The protocol must match too (ruling): UDP 445 isn't SMB, TCP 137
+		// isn't NetBIOS; UDP 137 is.
+		5445: {Instance: "samba", Key: "custom override", Service: "samba", Bind: "0.0.0.0", Port: 5445, Container: 445, Protocol: "udp", Custom: true},
+		8137: {Instance: "samba", Key: "custom override", Service: "samba", Bind: "0.0.0.0", Port: 8137, Container: 137, Protocol: "tcp", Custom: true},
+		8138: {Instance: "samba", Key: "SAMBA_NB", Label: "NetBIOS", Service: "samba", Bind: "0.0.0.0", Port: 8138, Container: 137, Protocol: "udp", LanOnly: true, Custom: true},
 	}
 	if len(byPort) != len(want) {
 		t.Fatalf("ports = %+v", in.Ports)
@@ -238,7 +251,9 @@ func TestExposurePortsGathered(t *testing.T) {
 			sev[fd.Kind+" "+fd.Title] = fd.Severity
 		}
 	}
-	if len(sev) != 4 {
+	// 445 W, 3702 host_network W + lan_only_exposed P, 8445 W, 9445 P,
+	// 137 W, 8138 W.
+	if len(sev) != 7 {
 		t.Fatalf("findings = %v", sev)
 	}
 }

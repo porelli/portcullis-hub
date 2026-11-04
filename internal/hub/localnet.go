@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"slices"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/portcullis/hub/internal/doctor"
@@ -166,16 +167,19 @@ func (h *Hub) portInsLocked() []doctor.PortIn {
 			continue
 		}
 		byKey := map[string]templates.Port{}
+		// Matched by service, container port and protocol (ruling): a UDP
+		// override port is never the TCP lan_only port, nor the reverse.
 		type svcPort struct {
-			service string
-			port    int
+			service, proto string
+			port           int
 		}
 		bySvc := map[svcPort]templates.Port{}
 		for _, p := range t.Manifest.Ports {
 			byKey[p.Key] = p
 			if p.Service != "" && p.Container > 0 && !p.NetworkModeHost {
-				if _, dup := bySvc[svcPort{p.Service, p.Container}]; !dup || p.LanOnly {
-					bySvc[svcPort{p.Service, p.Container}] = p
+				k := svcPort{p.Service, portProto(p.Protocol), p.Container}
+				if _, dup := bySvc[k]; !dup || p.LanOnly {
+					bySvc[k] = p
 				}
 			}
 		}
@@ -189,7 +193,7 @@ func (h *Hub) portInsLocked() []doctor.PortIn {
 			}
 			mp, ok := byKey[b.Key]
 			if b.Custom {
-				mp, ok = bySvc[svcPort{b.Service, b.Container}]
+				mp, ok = bySvc[svcPort{b.Service, b.Protocol, b.Container}]
 				if ok {
 					pi.Key = mp.Key
 				}
@@ -202,6 +206,14 @@ func (h *Hub) portInsLocked() []doctor.PortIn {
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Instance < out[j].Instance })
 	return out
+}
+
+// portProto is a manifest port's protocol as bindings carry it.
+func portProto(p string) string {
+	if p == "" {
+		return "tcp"
+	}
+	return strings.ToLower(p)
 }
 
 // lookupIPFunc resolves a host name (Hub.lookupIP; test-settable).

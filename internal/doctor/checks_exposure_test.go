@@ -65,13 +65,33 @@ func TestExposureAddressForms(t *testing.T) {
 		t.Errorf("main-domain address: why = %q", got[0].Why)
 	}
 
-	// Host networking: a Warning, explain-only, the contract's text.
-	host := smb("0.0.0.0")
-	host.HostNetwork = true
-	got = exposure(t, host)
-	if len(got) != 1 || got[0].Kind != KindHostNetwork || got[0].Severity != Warning || got[0].Class != FixExplain ||
-		!strings.Contains(got[0].Why, "Docker publishes around host firewalls such as ufw; restrict the port in your router or host firewall") {
-		t.Fatalf("host network = %+v", got)
+	// Host networking (ruling): host_network Warning, plus
+	// lan_only_exposed as a Problem unless the bind is local.
+	for _, bind := range []string{"0.0.0.0", "", "203.0.113.5", "10.0.0.5"} {
+		host := smb(bind)
+		host.HostNetwork = true
+		got = exposure(t, host)
+		var hn, ex *Finding
+		for i := range got {
+			switch got[i].Kind {
+			case KindHostNetwork:
+				hn = &got[i]
+			case KindLANOnlyExposed:
+				ex = &got[i]
+			}
+		}
+		if len(got) != 2 || hn == nil || hn.Severity != Warning || hn.Class != FixExplain ||
+			!strings.Contains(hn.Why, "Docker publishes around host firewalls such as ufw; restrict the port in your router or host firewall") {
+			t.Fatalf("host network %q = %+v", bind, got)
+		}
+		if ex == nil || ex.Severity != Problem || ex.FixKind != FixRebindPort {
+			t.Fatalf("host network %q exposed = %+v", bind, ex)
+		}
+	}
+	local := smb("192.168.1.10")
+	local.HostNetwork = true
+	if got := exposure(t, local); len(got) != 1 || got[0].Kind != KindHostNetwork {
+		t.Fatalf("host network, local bind = %+v", got)
 	}
 
 	// No lan_only: no finding, whatever the address.
