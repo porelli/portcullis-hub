@@ -117,6 +117,13 @@ func (h *Hub) rebuildLocked() {
 // a restore hasn't finished ("deleting" / "restoring"). Caller must hold
 // mu.
 func (h *Hub) pendingLocked(id string) error {
+	if fid, ok := h.folderApplying[id]; ok {
+		name := fid
+		if f, ok := h.st.Folders[fid]; ok {
+			name = f.Name
+		}
+		return statusErr(409, "shared folder %s is being applied to %s: try again when it has finished", name, id)
+	}
 	switch e := h.st.Instances[id]; e.State {
 	case state.InstanceDeleting:
 		return statusErr(409, "instance %s is being deleted: delete it again to finish", id)

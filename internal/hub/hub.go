@@ -201,10 +201,18 @@ type Hub struct {
 	// folderLocks: per shared folder id, the *sync.Mutex its operations
 	// try-lock (folders.go folderLock).
 	folderLocks sync.Map
-	compose     compose.Runner
-	engine      Engine
-	idp         IdP
-	attrs       AttrStore // LLDAP user attributes (setting claims); nil: none
+	// folderApplying: instance → the shared folder whose assignment or
+	// undo is running on it (folderassign.go; pendingLocked answers 409,
+	// ruling 6). Guarded by mu.
+	folderApplying map[string]string
+	// testHookSave, if set, runs in SaveSettings between its checks
+	// outside mu and the commit under mu (tests: a race with an
+	// assignment).
+	testHookSave func()
+	compose      compose.Runner
+	engine       Engine
+	idp          IdP
+	attrs        AttrStore // LLDAP user attributes (setting claims); nil: none
 	// fixerImage caches selfImage (fixer.go; guarded by fixerMu, never
 	// mu); mountinfo reads /proc/self/mountinfo (test-settable).
 	fixerMu    sync.Mutex
@@ -443,6 +451,10 @@ func (h *Hub) Init() {
 	h.pruneSettings()
 	// Interrupted same-instance restores are rolled back (background).
 	h.RecoverRestores()
+	// Interrupted shared-folder applies and undos: their stopped apps are
+	// started again with what state.yaml holds (background; never a
+	// fixer run, contract §14.3).
+	h.RecoverFolderApplies()
 	// The header deliveries group-gate serves now: what the first policy
 	// write publishes again (P13).
 	h.seedHostHeaders()

@@ -366,12 +366,17 @@ func (h *Hub) PreviewSettings(ctx context.Context, id string, u SettingsUpdate) 
 		return nil, ErrNotFound
 	}
 	h.mu.RLock()
+	// A restore, delete or shared-folder apply in progress (ruling 6).
+	pendErr := h.pendingLocked(id)
 	native := h.st.SignIn[id] == state.SignInNative
 	folders := h.folderSourceLocked()
 	defs := maps.Clone(h.st.Folders)
 	stored := h.st.Settings[id].Clone()
 	u = withPlaceholders(t, h.st.Settings[id], u)
 	h.mu.RUnlock()
+	if pendErr != nil {
+		return nil, pendErr
+	}
 	if u.SignIn != nil {
 		native = *u.SignIn == SignInNative
 	}

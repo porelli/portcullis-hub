@@ -809,6 +809,9 @@ func (h *Hub) SaveSettings(id string, u SettingsUpdate, actor string) (_ *SaveRe
 	if err != nil {
 		return nil, err
 	}
+	if h.testHookSave != nil {
+		h.testHookSave()
+	}
 	sv, enabled, err := h.saveSettings(t, u, parsed)
 	changes = sv.changes
 	if err != nil {
