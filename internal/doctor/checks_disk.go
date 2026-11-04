@@ -223,11 +223,11 @@ func (folderOwnerCheck) Run(in *Inputs) []Finding {
 				one, many string
 				c         folderfix.Count
 			}{
-				{"group", "1 entry with another group%s", "%d entries with another group%s", e.Group},
-				{"setgid", "1 directory without setgid%s", "%d directories without setgid%s", e.Setgid},
-				{"default_acl", "1 directory without the default ACL%s", "%d directories without the default ACL%s", e.DefaultACL},
-				{"mode", "1 entry with other permissions%s", "%d entries with other permissions%s", e.Mode},
-				{"owner", "1 entry with another owner%s", "%d entries with another owner%s", e.Owner},
+				{"group", "%d entry with another group%s", "%d entries with another group%s", e.Group},
+				{"setgid", "%d directory without setgid%s", "%d directories without setgid%s", e.Setgid},
+				{"default_acl", "%d directory without the default ACL%s", "%d directories without the default ACL%s", e.DefaultACL},
+				{"mode", "%d entry with other permissions%s", "%d entries with other permissions%s", e.Mode},
+				{"owner", "%d entry with another owner%s", "%d entries with another owner%s", e.Owner},
 			} {
 				if d.c.N > 0 {
 					text := d.many

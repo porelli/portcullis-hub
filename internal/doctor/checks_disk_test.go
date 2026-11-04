@@ -314,3 +314,28 @@ func TestPlural(t *testing.T) {
 		}
 	}
 }
+
+// One entry drifted: singular wording, no stray format verbs.
+func TestFolderOwnerDriftSingular(t *testing.T) {
+	jelly := setting("jellyfin", "media", "folder:media", false)
+	one := okReport()
+	one.Expected = &folderfix.Conformance{Group: folderfix.Count{N: 1}, Setgid: folderfix.Count{N: 1}, Mode: folderfix.Count{N: 2}}
+	in := &Inputs{
+		Folders: []FolderIn{{ID: "media", Name: "Family media", Path: "/srv/media", GID: 60001, Uses: []PathIn{jelly}}},
+		Paths:   []PathIn{jelly},
+		Scans:   map[string]ScanIn{"/srv/media": scanAt("/srv/media", "media", one)},
+	}
+	fo := of(t, KindFolderOwner, in)
+	if len(fo) != 1 {
+		t.Fatalf("folder_owner = %+v", fo)
+	}
+	w := fo[0].Why
+	for _, s := range []string{"1 entry with another group", "1 directory without setgid", "2 entries with other permissions"} {
+		if !strings.Contains(w, s) {
+			t.Errorf("why %q lacks %q", w, s)
+		}
+	}
+	if strings.Contains(w, "%!") {
+		t.Errorf("format verb leak: %q", w)
+	}
+}
