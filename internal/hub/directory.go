@@ -223,10 +223,14 @@ func (h *Hub) runAttrSync(ctx context.Context, kick <-chan struct{}) {
 			}
 		}
 		// The fresh-auth client (contract §8): created and re-asserted on
-		// every sync; until it is right, fresh auth fails closed.
+		// every sync. freshAuthReady follows the last ensure: while it
+		// fails (a conflicting client, Keycloak down) checkFreshAuth
+		// refuses every proof.
 		var ferr error
 		if ensureFresh != nil {
-			if ferr = ensureFresh(sctx); ferr != nil && ctx.Err() == nil {
+			ferr = ensureFresh(sctx)
+			h.freshAuthReady.Store(ferr == nil)
+			if ferr != nil && ctx.Err() == nil {
 				if msg := ferr.Error(); msg != lastFreshErr {
 					log.Printf("keycloak: fresh-auth client not in place (retrying every %s): %v", directorySyncRetry, ferr)
 					lastFreshErr = msg

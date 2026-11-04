@@ -7,8 +7,10 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"log"
 	"net/http"
@@ -247,8 +249,15 @@ func TestFreshAuthRefusals(t *testing.T) {
 		{name: "unknown kid", token: func(p *idp, c map[string]any) string { return sign(p.t, jose.RS256, other, "rsa9", c) }},
 		{name: "RS512", token: func(p *idp, c map[string]any) string { return sign(p.t, jose.RS512, p.rsaKey, "rsa1", c) }},
 		{name: "PS256", token: func(p *idp, c map[string]any) string { return sign(p.t, jose.PS256, p.rsaKey, "rsa1", c) }},
-		{name: "HS256", token: func(p *idp, c map[string]any) string {
-			return sign(p.t, jose.HS256, []byte("0123456789abcdef0123456789abcdef"), "rsa1", c)
+		// The classic key-confusion attack: HMAC "signed" with the realm's
+		// public RSA key (as DER and as PEM) under its kid, hoping the
+		// verifier uses the public key as the HMAC secret.
+		{name: "HS256 with the public key DER", token: func(p *idp, c map[string]any) string {
+			return sign(p.t, jose.HS256, publicDER(p.t, &p.rsaKey.PublicKey), "rsa1", c)
+		}},
+		{name: "HS256 with the public key PEM", token: func(p *idp, c map[string]any) string {
+			der := publicDER(p.t, &p.rsaKey.PublicKey)
+			return sign(p.t, jose.HS256, pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der}), "rsa1", c)
 		}},
 		{name: "alg none", token: func(p *idp, c map[string]any) string {
 			b, _ := json.Marshal(c)
@@ -305,7 +314,8 @@ func TestFreshAuthRefusals(t *testing.T) {
 		"unknown kid":                    "id token signature not verified by the realm's keys",
 		"RS512":                          "id token malformed or signed with an unsupported algorithm",
 		"PS256":                          "id token malformed or signed with an unsupported algorithm",
-		"HS256":                          "id token malformed or signed with an unsupported algorithm",
+		"HS256 with the public key DER":  "id token malformed or signed with an unsupported algorithm",
+		"HS256 with the public key PEM":  "id token malformed or signed with an unsupported algorithm",
 		"alg none":                       "id token malformed or signed with an unsupported algorithm",
 		"not a jwt":                      "id token malformed or signed with an unsupported algorithm",
 		"no id_token":                    "no id token in the token response",
@@ -425,4 +435,13 @@ func TestFreshAuthNotConfigured(t *testing.T) {
 	if !errors.As(err, &fe) {
 		t.Fatalf("unconfigured verifier: %v", err)
 	}
+}
+
+func publicDER(t *testing.T, k *rsa.PublicKey) []byte {
+	t.Helper()
+	der, err := x509.MarshalPKIXPublicKey(k)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return der
 }

@@ -56,7 +56,8 @@ func (h *Hub) FreshAuthInfo() *freshauth.AuthorizeInfo {
 var errFreshAuth = &StatusError{Status: 403, Err: errors.New(freshauth.Message)}
 
 // checkFreshAuth verifies p for user outside mu. Every failure — no
-// verifier, a refused proof, anything unexpected — is errFreshAuth; reason
+// verifier, the Keycloak client not (yet) in place (freshAuthReady), a
+// refused proof, anything unexpected — is errFreshAuth; reason
 // is for the audit only (a fixed string of the verifier, never the code,
 // verifier, nonce or a token). A refusal is a 4xx: callers on the people
 // listener count it toward the caller's refusal limit (entryLimit, F45).
@@ -64,6 +65,9 @@ func (h *Hub) checkFreshAuth(ctx context.Context, p freshauth.Proof, user string
 	f := h.freshAuthVerifier()
 	if f == nil {
 		return nil, "fresh auth is not configured", errFreshAuth
+	}
+	if !h.freshAuthReady.Load() {
+		return nil, "fresh-auth client not in place", errFreshAuth
 	}
 	res, err = f.Verify(ctx, p, strings.ToLower(user))
 	if err == nil && res != nil {

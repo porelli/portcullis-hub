@@ -19,6 +19,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/portcullis/hub/internal/compose"
@@ -261,6 +262,11 @@ type Hub struct {
 	people People
 	// freshAuth verifies fresh-auth proofs (freshauth.go; nil: refused).
 	freshAuth FreshAuth
+	// freshAuthReady: the last ensure of the fresh-auth Keycloak client
+	// succeeded (runAttrSync); false at start and after any failure —
+	// e.g. an untagged client of that id (*keycloak.ConflictError) — so
+	// every proof is refused until the client is known to be right.
+	freshAuthReady atomic.Bool
 	// The settings delivery engine (deliver.go). deliveryMu guards queued
 	// (debounced and re-queued runs per instance) and deliveryStatus (the
 	// last outcome per instance and unit, mirrored in delivered.json).

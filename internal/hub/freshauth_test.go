@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/portcullis/hub/internal/freshauth"
+	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/policy"
 )
 
@@ -45,6 +46,7 @@ func TestCheckFreshAuth(t *testing.T) {
 	}
 	fa := &fakeFreshAuth{}
 	f.h.SetFreshAuth(fa)
+	f.h.freshAuthReady.Store(true) // the client is in place
 	if info := f.h.FreshAuthInfo(); info == nil || info.ClientID != freshauth.ClientID {
 		t.Errorf("FreshAuthInfo = %+v", info)
 	}
@@ -77,6 +79,7 @@ func TestFreshAuthRefusalsCountTowardLimit(t *testing.T) {
 	now := time.Date(2026, 11, 4, 10, 0, 0, 0, time.UTC)
 	f.h.entryNow = func() time.Time { return now }
 	f.h.SetFreshAuth(&fakeFreshAuth{err: &freshauth.Error{Reason: "stale"}})
+	f.h.freshAuthReady.Store(true)
 	for i := range entryRefusalLimit {
 		if !f.h.entryLimit.reserve("alice", f.h.entryClock()) {
 			t.Fatalf("limited after %d refusals", i)
@@ -116,3 +119,60 @@ func TestRunDirectorySyncEnsuresFreshAuthClient(t *testing.T) {
 	cancel()
 	<-done
 }
+
+// Review fix 1: until the fresh-auth client is in place (the last ensure
+// succeeded), every proof is refused, even one a verifier would accept: a
+// conflicting (untagged or foreign) client must fail closed.
+func TestFreshAuthRefusedUntilClientInPlace(t *testing.T) {
+	f := newFixture(t)
+	f.h.SetFreshAuth(&fakeFreshAuth{}) // accepts everything
+	var ensureErr atomic.Value
+	ensureErr.Store(errBox{&keycloak.ConflictError{ClientID: freshauth.ClientID}})
+	var ensures atomic.Int32
+	f.h.SetDirectory(func(context.Context) ([]policy.Expiring, *policy.UserAttributesDocument, error) {
+		return nil, nil, nil
+	}, nil)
+	f.h.SetFreshAuthClient(func(context.Context) error { ensures.Add(1); return ensureErr.Load().(errBox).err })
+	check := func(label string, wantOK bool) {
+		t.Helper()
+		_, reason, err := f.h.checkFreshAuth(context.Background(), testProof, "alice")
+		// The flag is stored right after the ensure returns: wait for it.
+		for i := 0; i < 500 && (err == nil) != wantOK; i++ {
+			time.Sleep(10 * time.Millisecond)
+			_, reason, err = f.h.checkFreshAuth(context.Background(), testProof, "alice")
+		}
+		if wantOK && err != nil {
+			t.Errorf("%s: refused: %v (%s)", label, err, reason)
+		}
+		if !wantOK && (statusOf(err) != 403 || err.Error() != freshauth.Message || reason != "fresh-auth client not in place" || !isRefusal(err)) {
+			t.Errorf("%s: %v (%q), want the 403 with reason \"fresh-auth client not in place\"", label, err, reason)
+		}
+	}
+	check("before any ensure", false)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { f.h.RunDirectorySync(ctx); close(done) }()
+	waitEnsures := func(n int32) {
+		t.Helper()
+		for i := 0; i < 500 && ensures.Load() < n; i++ {
+			time.Sleep(10 * time.Millisecond)
+		}
+		if ensures.Load() < n {
+			t.Fatalf("ensures %d, want %d", ensures.Load(), n)
+		}
+	}
+	waitEnsures(1)
+	check("ensure answered *ConflictError", false)
+	ensureErr.Store(errBox{nil})
+	f.h.TriggerDirectorySync()
+	waitEnsures(2)
+	check("after a nil ensure", true)
+	ensureErr.Store(errBox{errors.New("keycloak down")})
+	f.h.TriggerDirectorySync()
+	waitEnsures(3)
+	check("after a later failed ensure", false)
+	cancel()
+	<-done
+}
+
+type errBox struct{ err error }
