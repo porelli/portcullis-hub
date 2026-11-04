@@ -1133,12 +1133,12 @@ func (h *Hub) startAssignHeld(id string, req AssignRequest, planHash, actor stri
 	return h.startAsync(opKeyFolder(id), OpFolderAssign, func(accept func()) (result map[string]string, warnings []string, err error) {
 		accepted := false
 		ready := func() { accepted = true; accept() }
-		var deliverTo []string
+		var deliverTo, auditInsts []string
 		detail := ""
 		// Last: after every lock is released (the engine re-queues busy
 		// instances otherwise).
 		defer func() {
-			h.auditFolder(actor, "folder.assign", id, detail, err)
+			h.auditFolder(actor, "folder.assign", id, detail, err, auditInsts...)
 			for _, inst := range deliverTo {
 				h.TriggerDelivery(inst, TriggerSave, true)
 			}
@@ -1156,6 +1156,7 @@ func (h *Hub) startAssignHeld(id string, req AssignRequest, planHash, actor stri
 		affected := h.assignAffectedLocked(id, req)
 		_, exists := h.st.Folders[id]
 		h.mu.RUnlock()
+		auditInsts = affected
 		if !exists {
 			return nil, nil, ErrNotFound
 		}

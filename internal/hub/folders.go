@@ -1033,16 +1033,34 @@ func (h *Hub) checkFoldersAtStart() error {
 
 // auditFolder records a folder operation after mu is released; a 4xx is
 // "refused".
-func (h *Hub) auditFolder(actor, action, id, detail string, err error) {
+func (h *Hub) auditFolder(actor, action, id, detail string, err error, instances ...string) {
 	h.mu.RLock()
 	a := h.audit
+	var users []string
+	if err != nil {
+		for _, u := range h.folderUsesLocked(id) {
+			users = append(users, u.Instance)
+		}
+	}
 	h.mu.RUnlock()
 	if a == nil {
 		return
 	}
 	e := directory.AuditEntry{Actor: actor, Action: action, Target: clip(id, 64), Detail: detail, Result: "ok"}
 	if err != nil {
-		e.Result, e.Error = "error", err.Error()
+		// Redacted like the op record (H3): the error's own redaction
+		// set, then every affected instance's and the folder's users'
+		// secrets (stored secret settings, secret-looking env values).
+		msg := redactValues(err.Error(), secretsOf(err))
+		seen := map[string]bool{}
+		for _, inst := range append(slices.Clone(instances), users...) {
+			if seen[inst] || !templates.ValidID(inst) {
+				continue
+			}
+			seen[inst] = true
+			msg = h.secretRedactor(inst)(msg)
+		}
+		e.Result, e.Error = "error", clipRunes(msg, 600)
 		var se *StatusError
 		if errors.As(err, &se) && se.Status < 500 {
 			e.Result = "refused"

@@ -1297,6 +1297,36 @@ func TestFailureKeepsRedaction(t *testing.T) {
 	}
 }
 
+// H3: folder audits are redacted like op records (the error's own
+// redaction set and the affected instances' secrets), then clipped.
+func TestFolderAuditRedacted(t *testing.T) {
+	f, _, audit := assignFixture(t)
+	enable(t, f, "immich")
+	f.h.mu.Lock()
+	err := setEnvVars(f.h.envPath("immich"), map[string]string{"API_TOKEN": "s3cr3t-token-value"}, false)
+	f.h.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Through the error's redaction set (a disk-changed failure).
+	fb := &failCtx{id: "media", actor: "admin", m: &applyMarker{}, secrets: f.h.opSecrets([]string{"immich"})}
+	f.h.failBeforeState(fb, errors.New("compose up: API_TOKEN=s3cr3t-token-value rejected"), "", true)
+	e := audit.last()
+	if e.Action != "folder.apply" || e.Error == "" || strings.Contains(e.Error, "s3cr3t-token-value") || !strings.Contains(e.Error, "[redacted]") {
+		t.Errorf("folder.apply audit = %+v", e)
+	}
+	// Through the affected instances, the error carrying no set.
+	f.h.auditFolder("admin", "folder.assign", "media", "", errors.New("start immich: s3cr3t-token-value"), "immich")
+	if e := audit.last(); strings.Contains(e.Error, "s3cr3t-token-value") || !strings.Contains(e.Error, "[redacted]") {
+		t.Errorf("folder.assign audit = %+v", e)
+	}
+	// Clipped.
+	f.h.auditFolder("admin", "folder.assign", "media", "", errors.New(strings.Repeat("x", 5000)))
+	if e := audit.last(); len([]rune(e.Error)) > 601 {
+		t.Errorf("unclipped audit error: %d runes", len([]rune(e.Error)))
+	}
+}
+
 // M6: every run's races reach the op's warnings.
 func TestEveryRunsWarnings(t *testing.T) {
 	f, d, _ := assignFixture(t)
