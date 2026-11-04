@@ -48,6 +48,9 @@ func (w *walker) tally(n *node) {
 	e, p := w.r.Expected, w.r.Plan
 	p.Changes++
 	digestEntry(w.digest, n)
+	if w.planned != nil {
+		w.planned[entryKey(n)] = struct{}{}
+	}
 	if o.group {
 		e.Group.add(n.rel)
 		p.ChangeGroup.add(n.rel)
@@ -120,6 +123,7 @@ func Apply(o Options, expect int64) (*Report, error) {
 	if err := w.mayChange(); err != nil {
 		return w.report(), err
 	}
+	w.planned = map[[16]byte]struct{}{}
 	w.run(w.tally)
 	switch {
 	case w.r.Partial:
@@ -172,6 +176,15 @@ func (w *walker) change(n *node) {
 	if !ok || !o.change {
 		return
 	}
+	// R52: only an entry the plan recorded, exactly as recorded (path,
+	// inode, state): one altered or added since is left alone.
+	k := entryKey(n)
+	if _, ok := w.planned[k]; !ok {
+		w.r.Races.add(n.rel)
+		w.r.errorf("%s: changed since the plan: left alone", n.rel)
+		return
+	}
+	delete(w.planned, k)
 	if o.lose { // the planning walk refused these; a backstop
 		w.fail(n.rel, errors.New("would change a previous group's access"))
 		return
@@ -437,6 +450,16 @@ func (w *walker) mkdir(rel string) (int64, error) {
 		if err := fchmod(fd, parent.Mode&0o707|0o070|modeSetgid); err != nil {
 			return created, err
 		}
+		// The change walk sets its ACLs: it is planned as it is now (R52).
+		nst, err := fstatFD(fd)
+		if err != nil {
+			return created, err
+		}
+		n := &node{rel: crel, fd: fd, st: nst}
+		if err := w.readState(n); err != nil {
+			return created, err
+		}
+		w.planned[entryKey(n)] = struct{}{}
 	}
 	return created, nil
 }

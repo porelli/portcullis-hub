@@ -217,6 +217,9 @@ type walker struct {
 	// chain: the open directories below the root, each with the inode its
 	// ".." must still be (R50: a subtree moved out mid-walk is left alone).
 	chain []level
+	// planned: the entries the planning walk would change (entryKey), each
+	// changed at most once by the change walk (R52). nil = not recorded.
+	planned map[[16]byte]struct{}
 }
 
 type level struct {
@@ -631,7 +634,19 @@ func (w *walker) dir(fd int, self fileStat, rel string, depth int, anc []bool) {
 
 // digestEntry adds one entry to change: its path and current state, so an
 // apply can tell the plan is the snapshot's entry for entry (M5).
-func digestEntry(h hash.Hash, n *node) {
+func digestEntry(h hash.Hash, n *node) { h.Write(entryRecord(n)) }
+
+// entryKey identifies an entry to change by path, inode and current state
+// (R52: the change walk changes only entries the plan recorded so).
+func entryKey(n *node) [16]byte {
+	sum := sha256.Sum256(entryRecord(n))
+	var k [16]byte
+	copy(k[:], sum[:16])
+	return k
+}
+
+func entryRecord(n *node) []byte {
+	h := &recordBuf{}
 	var b [8]byte
 	num := func(v uint64) { binary.BigEndian.PutUint64(b[:], v); h.Write(b[:]) }
 	str := func(p []byte) { num(uint64(len(p))); h.Write(p) }
@@ -642,7 +657,12 @@ func digestEntry(h hash.Hash, n *node) {
 	num(uint64(n.st.Mode & modePerm))
 	str(n.raw.access)
 	str(n.raw.def)
+	return h.b
 }
+
+type recordBuf struct{ b []byte }
+
+func (r *recordBuf) Write(p []byte) (int, error) { r.b = append(r.b, p...); return len(p), nil }
 
 // inPlace: fd's ".." is still parent.
 func inPlace(fd int, parent fileStat) bool {

@@ -1144,3 +1144,40 @@ func TestRootApplyDigest(t *testing.T) {
 		t.Fatal("changed")
 	}
 }
+
+// R52: the change walk changes only entries the planning walk recorded,
+// exactly as recorded: one altered and one added between the two walks are
+// left alone (snapshot lines and changes stay 1:1).
+func TestRootChangeOnlyPlanned(t *testing.T) {
+	needRoot(t)
+	root := folderRoot(t)
+	fileOwned(t, filepath.Join(root, "a"), 0o640, 1000, 1000)
+	mkdirOwned(t, filepath.Join(root, "z"), 0o750, 1000, 1000)
+	fileOwned(t, filepath.Join(root, "z", "b"), 0o640, 1000, 1000)
+	o := opts(t, root, Target{GID: 60001, Files: "rw"})
+	s, err := Scan(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o.ExpectDigest = s.Plan.Digest
+	var altered, added disk
+	testHookAfterOpen = onSecond("a", func() {
+		must(t, unix.Chmod(filepath.Join(root, "z", "b"), 0o600))
+		fileOwned(t, filepath.Join(root, "z", "c"), 0o640, 1000, 1000)
+		altered, added = diskOf(t, filepath.Join(root, "z", "b")), diskOf(t, filepath.Join(root, "z", "c"))
+	})
+	r, err := Apply(o, s.Plan.Changes)
+	testHookAfterOpen = nil
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if d := diskOf(t, filepath.Join(root, "z", "b")); !reflect.DeepEqual(d, altered) {
+		t.Errorf("an entry altered after the plan was changed: %+v → %+v", altered, d)
+	}
+	if d := diskOf(t, filepath.Join(root, "z", "c")); !reflect.DeepEqual(d, added) {
+		t.Errorf("an entry added after the plan was changed: %+v → %+v", added, d)
+	}
+	if r.Changed != 3 || !slices.Contains(r.Races.Sample, "z/b") || !slices.Contains(r.Races.Sample, "z/c") {
+		t.Errorf("changed %d races %+v, want root, a, z changed and z/b, z/c counted", r.Changed, r.Races)
+	}
+}
