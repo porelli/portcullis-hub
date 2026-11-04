@@ -193,8 +193,15 @@ func (h *Hub) startUp(live *templates.Template) error {
 			return h.folderTakeDown(ctx, live, p, detail, err)
 		}
 	}
-	// A clean start: no folder changed (M2).
+	// A clean start: no folder changed (M2); the runtime gids read before
+	// it are stale (H11 M6).
 	h.recordFolderChange(live.ID, nil, "")
+	h.mu.Lock()
+	if h.startedAt == nil {
+		h.startedAt = map[string]time.Time{}
+	}
+	h.startedAt[live.ID] = time.Now().UTC()
+	h.mu.Unlock()
 	// The start hooks (when: start) after the up, under the lifecycle
 	// lock still held: reported and op-recorded, never a rollback.
 	h.runStartHooks(context.Background(), live.ID)

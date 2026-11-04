@@ -471,7 +471,7 @@ func TestContainerGIDsFallback(t *testing.T) {
 		return &docker.ExecResult{Output: []byte("Gid:\t5\t5\t5\t5\nGroups:\t60001\n"), ExitCode: 0}, nil
 	}
 	f.engine.mu.Unlock()
-	gids, err := f.h.containerGIDs(context.Background(), "c")
+	gids, _, _, err := f.h.containerGIDs(context.Background(), "c")
 	if err != nil || !reflect.DeepEqual(gids, []int{5, 60001}) {
 		t.Errorf("gids %v err %v", gids, err)
 	}
@@ -484,7 +484,7 @@ func TestContainerGIDsFallback(t *testing.T) {
 		return &docker.ExecResult{Output: []byte("not found"), ExitCode: 127}, nil
 	}
 	f.engine.mu.Unlock()
-	if _, err := f.h.containerGIDs(context.Background(), "c"); err == nil {
+	if _, _, _, err := f.h.containerGIDs(context.Background(), "c"); err == nil {
 		t.Error("no error")
 	}
 }
@@ -762,5 +762,109 @@ func TestPlannedPrincipalsLeaveStateAlone(t *testing.T) {
 		if u.Folder == "media" {
 			t.Errorf("planned value leaked into the live uses: %+v", u)
 		}
+	}
+}
+
+// H11 M4/M5: a container with more processes than the check reads says
+// so (Info), and one sharing another container's pid namespace is never
+// read (its /proc lists the other's processes).
+func TestRuntimePartialAndSharedPIDs(t *testing.T) {
+	f, _ := scanFixture(t)
+	f.engine.mu.Lock()
+	f.engine.containers = []docker.Container{
+		container("c-nas", "portcullis-nas", "nas", "running"),
+		container("c-samba", "portcullis-samba", "samba", "running"),
+	}
+	f.engine.fixer.inspect["c-nas"] = docker.ContainerInfo{ID: "c-nas"}
+	f.engine.fixer.inspect["c-samba"] = docker.ContainerInfo{ID: "c-samba", PidMode: "container:0123abcd"}
+	var ls strings.Builder
+	for i := 1; i <= 100; i++ {
+		fmt.Fprintf(&ls, "%d\n", i)
+	}
+	var execs []string
+	f.engine.execFn = func(id string, cmd []string) (*docker.ExecResult, error) {
+		execs = append(execs, id)
+		if cmd[0] == "ls" {
+			return &docker.ExecResult{Output: []byte(ls.String())}, nil
+		}
+		return &docker.ExecResult{Output: []byte("Gid:\t3000\t3000\t3000\t3000\nGroups:\t3000\n")}, nil
+	}
+	f.engine.mu.Unlock()
+	f.h.runDoctorScan(context.Background())
+	f.engine.mu.Lock()
+	got := slices.Clone(execs)
+	f.engine.mu.Unlock()
+	if slices.Contains(got, "c-samba") {
+		t.Errorf("read a container in another's pid namespace: %v", got)
+	}
+	rt := f.h.scanRuntime()
+	var nas, samba doctor.RuntimeIn
+	for _, r := range rt {
+		switch r.Instance {
+		case "nas":
+			nas = r
+		case "samba":
+			samba = r
+		}
+	}
+	if nas.PIDsRead != 64 || nas.PIDsTotal != 100 || !strings.Contains(samba.Err, "pid namespace") {
+		t.Fatalf("runtime = %+v", rt)
+	}
+	assertSkippedInfo(t, f, "samba")
+	r, err := f.h.Doctor(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, x := range r.Findings {
+		if x.Kind == doctor.KindGIDCollision && x.Severity == doctor.Info && strings.Contains(x.Title, "read 64 of 100 processes") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no partial group check Info: %+v", r.Findings)
+	}
+}
+
+// H11 M6: the runtime gids of an instance started since the scan are no
+// longer judged (its processes are new).
+func TestRuntimeDroppedAfterStart(t *testing.T) {
+	f, _ := scanFixture(t)
+	f.engine.mu.Lock()
+	f.engine.containers = []docker.Container{container("c-nas", "portcullis-nas", "nas", "running")}
+	f.engine.fixer.inspect["c-nas"] = docker.ContainerInfo{ID: "c-nas"}
+	f.engine.execFn = func(id string, cmd []string) (*docker.ExecResult, error) {
+		if cmd[0] == "ls" {
+			return &docker.ExecResult{Output: []byte("1\n")}, nil
+		}
+		return &docker.ExecResult{Output: []byte("Gid:\t3000\t3000\t3000\t3000\nGroups:\t3000 60002\n")}, nil
+	}
+	f.engine.mu.Unlock()
+	f.h.runDoctorScan(context.Background())
+	runtimeHit := func() bool {
+		r, err := f.h.Doctor(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, x := range r.Findings {
+			if x.FP == doctor.Fingerprint(doctor.KindGIDCollision, "nas", "docs") {
+				return true
+			}
+		}
+		return false
+	}
+	if !runtimeHit() {
+		t.Fatal("no runtime finding before the restart")
+	}
+	time.Sleep(5 * time.Millisecond)
+	f.h.mu.Lock()
+	f.h.st.SetEnabled("nas", false) // enabled by the fixture's flag only: start it for real
+	f.h.mu.Unlock()
+	if err := f.h.Enable("nas"); err != nil {
+		t.Fatal(err)
+	}
+	f.h.Wait()
+	if runtimeHit() {
+		t.Error("the runtime gids of a restarted instance are still judged")
 	}
 }

@@ -133,3 +133,30 @@ func TestRunScans(t *testing.T) {
 		t.Error("findings must be [] in JSON, not null")
 	}
 }
+
+// H11 M3: findings sharing a fingerprint fold every digest into the kept
+// one: new evidence from the lower-ranked check lifts a mute too.
+func TestSameFPFoldsDigests(t *testing.T) {
+	fp := Fingerprint("stub", "x")
+	static := Finding{FP: fp, Kind: "stub", Severity: Problem, Title: "static", Inputs: Digest("S")}
+	runtime := Finding{FP: fp, Kind: "stub", Severity: Problem, Title: "runtime", Inputs: Digest("R1")}
+	withOnly(t, stubCheck{kind: "stub", out: []Finding{static}}, stubCheck{kind: "stub", out: []Finding{runtime}})
+	first := Run(&Inputs{}, nil)
+	if len(first.Findings) != 1 || first.Findings[0].Title != "static" {
+		t.Fatalf("report = %+v", first)
+	}
+	mutes := map[string]Mute{fp: {Reason: "known", Inputs: first.Findings[0].Inputs}}
+	if r := Run(&Inputs{}, mutes); r.Muted != 1 {
+		t.Fatalf("not muted: %+v", r)
+	}
+	runtime.Inputs = Digest("R2")
+	withOnly(t, stubCheck{kind: "stub", out: []Finding{static}}, stubCheck{kind: "stub", out: []Finding{runtime}})
+	if r := Run(&Inputs{}, mutes); r.Muted != 0 || r.Findings[0].Title != "static" {
+		t.Fatalf("new runtime evidence stayed muted: %+v", r)
+	}
+	// A lone finding keeps its own digest (existing mutes hold).
+	withOnly(t, stubCheck{kind: "stub", out: []Finding{static}})
+	if r := Run(&Inputs{}, nil); r.Findings[0].Inputs != Digest([]string{string(Problem), Digest("S")}) {
+		t.Errorf("lone digest changed: %s", r.Findings[0].Inputs)
+	}
+}

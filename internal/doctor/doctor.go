@@ -177,6 +177,12 @@ type RuntimeIn struct {
 	Instance, Service, Container string
 	GIDs                         []int
 	Err                          string
+	// PIDsRead / PIDsTotal: the processes read and listed (Total > Read:
+	// a partial check, an Info).
+	PIDsRead, PIDsTotal int
+	// At: when the gids were read (the Hub drops entries of instances
+	// started since).
+	At time.Time
 }
 
 // Inputs is everything the checks judge (enabled instances only).
@@ -265,6 +271,7 @@ type ScanSummary struct {
 // fingerprint, only while the inputs digest matches).
 func Run(in *Inputs, mutes map[string]Mute) Report {
 	byFP := map[string]Finding{}
+	digests := map[string][]string{} // fp → every same-fp finding's digest
 	for _, c := range checks() {
 		for _, f := range c.Run(in) {
 			if f.Kind == "" {
@@ -275,10 +282,22 @@ func Run(in *Inputs, mutes map[string]Mute) Report {
 			}
 			f.Inputs = Digest([]string{string(f.Severity), f.Inputs})
 			f.Muted = nil
+			digests[f.FP] = append(digests[f.FP], f.Inputs)
 			if old, ok := byFP[f.FP]; ok && old.Severity.rank() <= f.Severity.rank() {
 				continue
 			}
 			byFP[f.FP] = f
+		}
+	}
+	// Same-fp findings fold every digest into the kept one (H11 M3): new
+	// evidence from a dropped one (runtime gid_collision under a static
+	// one) lifts a mute too. A lone finding keeps its own.
+	for fp, ds := range digests {
+		if len(ds) > 1 {
+			f := byFP[fp]
+			sort.Strings(ds)
+			f.Inputs = Digest(ds)
+			byFP[fp] = f
 		}
 	}
 	r := Report{Findings: make([]Finding, 0, len(byFP)), Counts: map[Severity]int{Problem: 0, Warning: 0, Info: 0}, Scans: []ScanSummary{}}

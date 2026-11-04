@@ -581,6 +581,8 @@
     } catch (err) {
       ctx.busy = false;
       box.querySelectorAll('[data-fd-close]').forEach(b => { b.disabled = false; });
+      // A refused apply changed nothing: the uses stay editable.
+      box.querySelectorAll('input').forEach(i => { i.disabled = false; });
       out.innerHTML = window.errorBox(err) + (err.status === 409 ? '<div class="inst-row"><button type="button" class="btn btn-secondary btn-sm" data-fd-repreview>Preview again</button></div>' : '');
       return;
     }
@@ -674,6 +676,7 @@
       if (ctx.kind === 'assign' && (t.matches('[data-fd-asub]') || t.matches('[data-fd-awrite]'))) {
         if (e.type === 'input' && t.type === 'checkbox') return;
         readAssignUses(ctx);
+        ctx.plan = null;
         dialogBox().querySelector('[data-fd-apply]').disabled = true;
         schedulePreview(ctx);
         return;
@@ -695,6 +698,9 @@
       const ctx = dialog;
       if (ctx && ctx.kind === 'assign' && e.target.matches('[data-fd-awrite]')) {
         readAssignUses(ctx);
+        // The plan no longer matches the uses until the preview is back.
+        ctx.plan = null;
+        dialogBox().querySelector('[data-fd-apply]').disabled = true;
         schedulePreview(ctx);
       }
     });

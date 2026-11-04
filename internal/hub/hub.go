@@ -201,6 +201,9 @@ type Hub struct {
 	// undo is running on it (folderassign.go; pendingLocked answers 409,
 	// ruling 6). Guarded by mu.
 	folderApplying map[string]string
+	// startedAt: when each instance last started cleanly (startUp, under
+	// mu): runtime gids read before it are not judged (H11 M6).
+	startedAt map[string]time.Time
 	// testHookSave, if set, runs in SaveSettings between its checks
 	// outside mu and the commit under mu (tests: a race with an
 	// assignment).

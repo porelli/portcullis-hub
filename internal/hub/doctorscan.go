@@ -100,6 +100,11 @@ type runtimeEntry struct {
 	GIDs      []int  `json:"gids"`
 	// Err: the container couldn't be read (an Info finding, I4).
 	Err string `json:"error,omitempty"`
+	// Read / Total: processes read and listed (H11 M4).
+	Read  int `json:"pids_read,omitempty"`
+	Total int `json:"pids_total,omitempty"`
+	// At: when they were read (H11 M6).
+	At time.Time `json:"at,omitempty"`
 }
 
 // scanFile is <data>/doctor/scans.json.
@@ -590,7 +595,7 @@ func (h *Hub) collectRuntime(ctx context.Context, ids []string) []runtimeEntry {
 			if c.State != "running" || c.Project() != projectName(id) || len(out) >= maxRuntimeContainers {
 				continue
 			}
-			e := runtimeEntry{Instance: id, Service: c.Service(), Container: c.Name()}
+			e := runtimeEntry{Instance: id, Service: c.Service(), Container: c.Name(), At: time.Now().UTC()}
 			ci, err := h.engine.InspectContainer(ctx, c.ID)
 			switch {
 			case err != nil:
@@ -599,8 +604,12 @@ func (h *Hub) collectRuntime(ctx context.Context, ids []string) []runtimeEntry {
 				// I2: its /proc is the host's: other apps' processes
 				// would be blamed on it.
 				e.Err = "it runs with pid: host, so its /proc lists the host's processes, not its own"
+			case strings.HasPrefix(ci.PidMode, "container:"):
+				// H11 M5: another container's processes would be blamed
+				// on it.
+				e.Err = "it shares another container's pid namespace (pid: service/container), so its /proc lists that container's processes"
 			default:
-				if e.GIDs, err = h.containerGIDs(ctx, c.ID); err != nil {
+				if e.GIDs, e.Read, e.Total, err = h.containerGIDs(ctx, c.ID); err != nil {
 					e.Err = clipRunes(err.Error(), 300)
 				}
 			}
@@ -626,13 +635,13 @@ func (h *Hub) collectRuntime(ctx context.Context, ids []string) []runtimeEntry {
 // M8: Docker can't kill a timed-out exec. Its id is kept (gidExecs), and
 // while one still runs (ExecRunning) the container is skipped with an
 // error, so hung processes never pile up run after run.
-func (h *Hub) containerGIDs(ctx context.Context, id string) ([]int, error) {
+func (h *Hub) containerGIDs(ctx context.Context, id string) (gids []int, read, total int, err error) {
 	h.scanCacheMu.Lock()
 	pending := slices.Clone(h.gidExecs[id])
 	h.scanCacheMu.Unlock()
 	for _, x := range pending {
 		if running, err := h.engine.ExecRunning(ctx, x); err == nil && running {
-			return nil, errors.New("a previous group check (timed out) is still running in it")
+			return nil, 0, 0, errors.New("a previous group check (timed out) is still running in it")
 		}
 	}
 	h.scanCacheMu.Lock()
@@ -650,9 +659,9 @@ func (h *Hub) containerGIDs(ctx context.Context, id string) ([]int, error) {
 		}
 		return res, err
 	}
-	pids := []int{1}
+	pids, total := []int{1}, 1
 	if res, err := exec([]string{"ls", "/proc"}); err == nil && res.ExitCode == 0 && !res.TimedOut {
-		pids = pidList(res.Output)
+		pids, total = pidList(res.Output)
 	}
 	args := []string{"cat"}
 	for _, p := range pids {
@@ -660,21 +669,21 @@ func (h *Hub) containerGIDs(ctx context.Context, id string) ([]int, error) {
 	}
 	res, err := exec(args)
 	if err != nil {
-		return nil, err
+		return nil, 0, 0, err
 	}
 	if res.TimedOut {
-		return nil, errors.New("timed out")
+		return nil, 0, 0, errors.New("timed out")
 	}
 	gids, ok := statusGIDs(res.Output)
 	if !ok {
-		return nil, fmt.Errorf("no process status readable (exit %d)", res.ExitCode)
+		return nil, 0, 0, fmt.Errorf("no process status readable (exit %d)", res.ExitCode)
 	}
-	return gids, nil
+	return gids, len(pids), total, nil
 }
 
 // pidList is the numeric names of ls /proc: 1 first, then ascending, at
-// most maxStatusPIDs.
-func pidList(out []byte) []int {
+// most maxStatusPIDs; total is how many were listed (1 included).
+func pidList(out []byte) ([]int, int) {
 	seen := map[int]bool{1: true}
 	var ps []int
 	for _, l := range strings.Split(string(out), "\n") {
@@ -688,7 +697,7 @@ func pidList(out []byte) []int {
 		}
 	}
 	sort.Ints(ps)
-	return append([]int{1}, ps[:min(len(ps), maxStatusPIDs-1)]...)
+	return append([]int{1}, ps[:min(len(ps), maxStatusPIDs-1)]...), len(ps) + 1
 }
 
 // statusGIDs collects the ids of every Gid: / Groups: line (ok: one was
@@ -911,7 +920,8 @@ func (h *Hub) scanRuntime() []doctor.RuntimeIn {
 	defer h.scanCacheMu.Unlock()
 	var out []doctor.RuntimeIn
 	for _, r := range h.scanFileLocked().Runtime {
-		out = append(out, doctor.RuntimeIn{Instance: r.Instance, Service: r.Service, Container: r.Container, GIDs: slices.Clone(r.GIDs), Err: r.Err})
+		out = append(out, doctor.RuntimeIn{Instance: r.Instance, Service: r.Service, Container: r.Container, GIDs: slices.Clone(r.GIDs), Err: r.Err,
+			PIDsRead: r.Read, PIDsTotal: r.Total, At: r.At})
 	}
 	return out
 }
@@ -938,6 +948,11 @@ func (h *Hub) doctorScansLocked(scans map[string]scanEntry, rt []doctor.RuntimeI
 	}
 	var r []doctor.RuntimeIn
 	for _, x := range rt {
+		// H11 M6: an instance started since the read runs new processes:
+		// its old gids aren't judged against today's assignments.
+		if s, ok := h.startedAt[x.Instance]; ok && !x.At.IsZero() && s.After(x.At) {
+			continue
+		}
 		if h.st.IsEnabled(x.Instance) {
 			r = append(r, x)
 		}

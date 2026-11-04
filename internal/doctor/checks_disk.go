@@ -627,6 +627,22 @@ func (runtimeGIDCheck) Run(in *Inputs) []Finding {
 		}
 		return unread[i].Service < unread[j].Service
 	})
+	// H11 M4: a check that read only the first processes says so.
+	for _, r := range in.Runtime {
+		if r.Err != "" || r.PIDsTotal <= r.PIDsRead {
+			continue
+		}
+		out = append(out, Finding{
+			FP: Fingerprint(KindGIDCollision, r.Instance, "partial:"+r.Service), Kind: KindGIDCollision, Severity: Info,
+			Title: fmt.Sprintf("Group check read %d of %d processes in %s (service %s).", r.PIDsRead, r.PIDsTotal, r.Instance, r.Service),
+			Why: fmt.Sprintf("The doctor reads the groups of at most %d processes per container (pid 1 and the lowest pids). A process beyond them that holds a shared folder's gid isn't seen.",
+				r.PIDsRead),
+			Class:     FixExplain,
+			Steps:     []string{fmt.Sprintf("Check %s's group settings (PGID, the image's user) by hand: no shared folder's gid unless it is assigned to that folder.", r.Instance)},
+			Instances: []string{r.Instance},
+			Inputs:    Digest([]any{r.Instance, r.Service, r.PIDsRead, r.PIDsTotal}),
+		})
+	}
 	seen := map[string]bool{}
 	for _, r := range unread {
 		k := r.Instance + "\x00" + r.Service

@@ -109,7 +109,23 @@
       try { for (const f of await window.PortcullisFolders.list()) folderNames[f.id] = f.name; } catch (e) { /* ids then */ }
     } catch (err) { el.innerHTML = window.errorBox(err); return; }
     setBadge(r);
+    // H11 M7: never a full redraw while a fix runs (its result would land
+    // in a detached card): only the other cards are updated in place.
+    if (Object.values(fixes).some(fx => fx && fx.busy)) { patch(r); return; }
     draw(r);
+  }
+
+  function patch(r) {
+    const byFP = {};
+    for (const f of r.findings || []) byFP[f.fp] = f;
+    rootEl.querySelectorAll('[data-dr-fp]').forEach(c => {
+      const fp = c.dataset.drFp;
+      if (fixes[fp] && fixes[fp].busy) return;
+      const f = byFP[fp];
+      if (!f) { c.remove(); return; }
+      delete fixes[fp];
+      c.outerHTML = card(f);
+    });
   }
 
   function lastScan(r) {
