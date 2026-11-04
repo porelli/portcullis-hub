@@ -57,6 +57,13 @@ jobs:
       - name: go test -race
         run: go test -race -count=1 ./...
 
+      # The shared-folder fixer as root on the runner's ext4 temp dir: real
+      # chown, ACL xattrs, mounts, device nodes and the uid-2001 inheritance
+      # check (root_test.go, build tag fixerroot; fatal under CI when root,
+      # ACLs, getfacl or mount aren't available).
+      - name: folderfix root tests
+        run: sudo -E env "PATH=$PATH" GOCACHE="$RUNNER_TEMP/gocache-root" go test -tags fixerroot -count=1 -v ./internal/folderfix/
+
       - name: go build
         run: go build -o /dev/null ./cmd/hub
 

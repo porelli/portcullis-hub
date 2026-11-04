@@ -18,6 +18,7 @@ import (
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/domains"
+	"github.com/portcullis/hub/internal/folderfix"
 	"github.com/portcullis/hub/internal/httpapi"
 	"github.com/portcullis/hub/internal/hub"
 	"github.com/portcullis/hub/internal/invite"
@@ -46,6 +47,11 @@ func openDirectoryStore(dataDir string) (*directory.Store, error) {
 }
 
 func main() {
+	// `hub folderfix …`: the shared-folder fixer, run by the Hub in a helper
+	// container (contract §6). First, before any Hub configuration is read.
+	if len(os.Args) > 1 && os.Args[1] == "folderfix" {
+		os.Exit(folderfix.Main(os.Args[2:], os.Stdout, os.Stderr))
+	}
 	// SIGHUP = sync the template sources. Registered first: a SIGHUP that
 	// arrives during start-up waits (Go's default would end the process).
 	hup := make(chan os.Signal, 1)
