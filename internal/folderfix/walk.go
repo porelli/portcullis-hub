@@ -524,7 +524,8 @@ func (w *walker) handle(n *node, anc []bool) bool {
 	if w.children != nil && n.child != "" {
 		c := w.children[n.child]
 		if c == nil {
-			c = &ChildOwner{Name: clip(n.child, maxPathRunes), UID: int(n.st.UID), GID: int(n.st.GID)}
+			co := childOwnerOf(n.child, n.st)
+			c = &co
 			w.children[n.child] = c
 		}
 		c.Entries++
@@ -649,7 +650,7 @@ func (w *walker) dir(fd int, self fileStat, rel string, depth int, anc []bool) {
 			}
 			continue
 		}
-		if ok := w.handle(n, anc); ok && isDir {
+		if ok := w.handle(n, anc); ok && isDir && !(w.o.TopOnly && w.children != nil) {
 			if depth+1 >= maxDepth {
 				w.r.Partial, w.r.PartialReason = true, "depth"
 				w.r.errorf("%s: deeper than %d levels: not entered", crel, maxDepth)

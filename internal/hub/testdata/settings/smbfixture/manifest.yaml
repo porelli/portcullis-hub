@@ -96,6 +96,12 @@ settings:
       target: {service: smb, mount: /shares/2}
       folder: {access: write, runs_as: {uid_from: uid}, joins_group: template}
       requires_any: [share2_readers, share2_writers]
+    - key: homes
+      label: Home folders
+      type: path
+      section: Shares
+      target: {service: smb, mount: /homes}
+      folder: {access: write, runs_as: {uid_from: uid, gid_from: uid}, joins_group: template}
     - key: connect_address
       label: Address people connect to
       type: string

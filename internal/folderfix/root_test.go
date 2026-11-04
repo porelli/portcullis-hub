@@ -1313,3 +1313,73 @@ func TestRootUnreadableIsFailure(t *testing.T) {
 		t.Fatal("apply changed something")
 	}
 }
+
+// TestRootChildFix (plan 3 Task 11, F33): childfix gives one top-level
+// directory of a per-person tree uid:uid and mode 0700 through its fd and
+// changes nothing inside it (not recursive); run again it changes
+// nothing; a symlink, a file and another mount in the tree are refused
+// with nothing changed.
+func TestRootChildFix(t *testing.T) {
+	needRoot(t)
+	base := folderRoot(t)
+	tree := filepath.Join(base, "tm")
+	mkdirOwned(t, tree, 0o755, 0, 0)
+	alice := filepath.Join(tree, "alice")
+	mkdirOwned(t, alice, 0o775|os.ModeSetgid, 20000, 100)
+	mkdirOwned(t, filepath.Join(alice, "sub"), 0o755, 1000, 1000)
+	fileOwned(t, filepath.Join(alice, "inside"), 0o644, 1000, 100)
+	fileOwned(t, filepath.Join(alice, "sub", "deeper"), 0o600, 20001, 20001)
+	inside := diskTree(t, alice)
+	delete(inside, alice)
+	ms, err := readMountinfo()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dev, ino := ids(t, alice)
+	o := Options{Root: base, ExpectDev: dev, ExpectIno: ino, ExpectMountRoot: effectiveMountRoot(ms, alice)}
+	r, err := FixChild(o, "tm", ChildFix{Name: "alice", UID: 20000})
+	if err != nil {
+		t.Fatalf("childfix: %v (%+v)", err, r)
+	}
+	want := []ChildOwner{{Name: "alice", UID: 20000, GID: 20000, Mode: 0o700, Dir: true}}
+	if r.Changed != 1 || !reflect.DeepEqual(r.Children, want) || r.Dev != dev || r.Ino != ino {
+		t.Errorf("report changed %d children %+v dev/ino %d/%d", r.Changed, r.Children, r.Dev, r.Ino)
+	}
+	if d := diskOf(t, alice); d.UID != 20000 || d.GID != 20000 || d.Mode&modePerm != 0o700 {
+		t.Errorf("alice: %d:%d %04o, want 20000:20000 0700", d.UID, d.GID, d.Mode&modePerm)
+	}
+	after := diskTree(t, alice)
+	delete(after, alice)
+	if !reflect.DeepEqual(inside, after) {
+		t.Errorf("childfix changed something inside the child (it isn't recursive):\n%v\n%v", inside, after)
+	}
+	if r, err := FixChild(o, "tm", ChildFix{Name: "alice", UID: 20000}); err != nil || r.Changed != 0 {
+		t.Errorf("second run: changed %d, %v", r.Changed, err)
+	}
+
+	// Refusals: nothing changes.
+	elsewhere := filepath.Join(base, "elsewhere")
+	mkdirOwned(t, elsewhere, 0o755, 1000, 1000)
+	must(t, os.Symlink(elsewhere, filepath.Join(tree, "bob")))
+	fileOwned(t, filepath.Join(tree, "carol"), 0o644, 1000, 1000)
+	src := filepath.Join(base, "src")
+	mkdirOwned(t, src, 0o755, 1000, 1000)
+	mp := filepath.Join(tree, "dave")
+	mkdirOwned(t, mp, 0o755, 1000, 1000)
+	if err := unix.Mount(src, mp, "", unix.MS_BIND, ""); err != nil {
+		setfaclUnavailable(t, "bind mount: %v", err)
+	}
+	defer unix.Unmount(mp, unix.MNT_DETACH)
+	was := diskTree(t, base)
+	for name, why := range map[string]string{"bob": "symlink", "carol": "not a directory", "dave": "another mount"} {
+		d, i := ids(t, filepath.Join(tree, name))
+		ms, _ := readMountinfo()
+		ro := Options{Root: base, ExpectDev: d, ExpectIno: i, ExpectMountRoot: effectiveMountRoot(ms, filepath.Join(tree, name))}
+		if _, err := FixChild(ro, "tm", ChildFix{Name: name, UID: 20003}); !IsRefused(err) || !strings.Contains(err.Error(), why) {
+			t.Errorf("%s: %v, want a refusal (%s)", name, err, why)
+		}
+	}
+	if now := diskTree(t, base); !reflect.DeepEqual(was, now) {
+		t.Errorf("a refused childfix changed something")
+	}
+}

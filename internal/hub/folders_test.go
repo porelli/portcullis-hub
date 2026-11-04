@@ -10,6 +10,7 @@ import (
 	"path"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -31,6 +32,8 @@ type diskPath struct {
 	files      int64
 	dirs       int64
 	owners     []folderfix.OwnerCount
+	// children: a per-person tree's first level (scan --children).
+	children []folderfix.ChildOwner
 }
 
 // fakeDisk answers probe and scan runs from its paths (host path →
@@ -151,8 +154,30 @@ func (d *fakeDisk) run(s docker.RunSpec, _ func(io.Reader) error) (*docker.RunRe
 		if d.scanDev != 0 {
 			dev = d.scanDev
 		}
-		rep = &folderfix.Report{Version: 1, Mode: "scan", Root: "/folder", Dev: dev, Ino: e.ino, MountRoot: e.mountRoot, FSType: e.fs,
+		r := &folderfix.Report{Version: 1, Mode: "scan", Root: "/folder", Dev: dev, Ino: e.ino, MountRoot: e.mountRoot, FSType: e.fs,
 			ACL: e.acl, Xattr: e.xattr, Entries: e.files + e.dirs + 1, Files: e.files, Dirs: e.dirs, Owners: e.owners}
+		if _, ok := argValue(s.Cmd, "children"); ok {
+			r.Children = append([]folderfix.ChildOwner{}, e.children...)
+		}
+		rep = r
+	case "childfix":
+		// One child of the tree src/rel: uid:uid 0700 (Task 11, F33).
+		rel, _ := argValue(s.Cmd, "rel")
+		c, _ := argValue(s.Cmd, "child")
+		name, uidS, _ := strings.Cut(c, ":")
+		uid, _ := strconv.Atoi(uidS)
+		tree, ce := d.paths[path.Join(src, rel)], d.paths[path.Join(src, rel, name)]
+		if tree == nil || ce == nil {
+			return &docker.RunResult{ExitCode: 2, Stdout: []byte(`{"version":1,"mode":"childfix","errors":["no such directory"]}` + "\n")}, nil
+		}
+		r := &folderfix.Report{Version: 1, Mode: "childfix", Root: "/broot", Dev: ce.dev, Ino: ce.ino, MountRoot: ce.mountRoot, FSType: ce.fs, Entries: 1, Dirs: 1}
+		for i := range tree.children {
+			if tree.children[i].Name == name {
+				tree.children[i].UID, tree.children[i].GID, tree.children[i].Mode, tree.children[i].Dir = uid, uid, 0o700, true
+				r.Changed, r.Children = 1, []folderfix.ChildOwner{tree.children[i]}
+			}
+		}
+		rep = r
 	default:
 		return nil, fmt.Errorf("unexpected fixer mode %q", fixerMode(s.Cmd))
 	}

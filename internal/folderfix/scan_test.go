@@ -169,9 +169,92 @@ func TestScanChildren(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []ChildOwner{{Name: "a", UID: os.Getuid(), GID: r.Children[0].GID, Entries: 2}, {Name: "b", UID: os.Getuid(), GID: r.Children[1].GID, Entries: 1}}
+	want := []ChildOwner{{Name: "a", UID: os.Getuid(), GID: r.Children[0].GID, Mode: 0o755, Dir: true, Entries: 2}, {Name: "b", UID: os.Getuid(), GID: r.Children[1].GID, Mode: 0o644, Entries: 1}}
 	if !reflect.DeepEqual(r.Children, want) {
 		t.Errorf("children %+v, want %+v", r.Children, want)
+	}
+}
+
+// TestScanChildrenTopOnly (plan 3 Task 11, per-person trees): --top-only
+// reads the first level only: each child's owner, group, mode and type,
+// never what is inside.
+func TestScanChildrenTopOnly(t *testing.T) {
+	root := t.TempDir()
+	mkdir(t, filepath.Join(root, "alice"), 0o700)
+	mkdir(t, filepath.Join(root, "alice", "deep"), 0o755)
+	writeFile(t, filepath.Join(root, "alice", "deep", "x"), 0o644)
+	writeFile(t, filepath.Join(root, "note"), 0o640)
+	r, err := Scan(Options{Root: root, Children: true, TopOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Entries != 3 || r.Dirs != 2 || r.Files != 1 {
+		t.Errorf("entries %d dirs %d files %d, want 3 / 2 / 1 (the root and the first level only)", r.Entries, r.Dirs, r.Files)
+	}
+	want := []ChildOwner{{Name: "alice", UID: os.Getuid(), GID: r.Children[0].GID, Mode: 0o700, Dir: true, Entries: 1}, {Name: "note", UID: os.Getuid(), GID: r.Children[1].GID, Mode: 0o640, Entries: 1}}
+	if !reflect.DeepEqual(r.Children, want) {
+		t.Errorf("children %+v, want %+v", r.Children, want)
+	}
+	code, out, _ := runMain("scan", "--root="+root, "--children", "--top-only")
+	if code != 0 || !strings.Contains(out, `"mode":448`) || !strings.Contains(out, `"dir":true`) {
+		t.Errorf("exit %d report %s", code, out)
+	}
+}
+
+// TestChildFixRefusals (F33): childfix refuses, with nothing changed, a
+// symlink, a non-directory, a missing child, a symlink in the tree's path
+// and a child that isn't the preview's inode (exit 2).
+func TestChildFixRefusals(t *testing.T) {
+	root := t.TempDir()
+	tree := filepath.Join(root, "tm")
+	mkdir(t, tree, 0o755)
+	mkdir(t, filepath.Join(tree, "alice"), 0o755)
+	writeFile(t, filepath.Join(tree, "alice", "inside"), 0o644)
+	writeFile(t, filepath.Join(tree, "bob"), 0o644)
+	elsewhere := t.TempDir()
+	if err := os.Symlink(elsewhere, filepath.Join(tree, "carol")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(tree, filepath.Join(root, "link")); err != nil {
+		t.Fatal(err)
+	}
+	dev, ino := rootIDs(t, filepath.Join(tree, "alice"))
+	before := treeState(t, root)
+	uid := os.Getuid()
+	if uid == 0 {
+		uid = 4242
+	}
+	o := Options{Root: root, ExpectDev: dev, ExpectIno: ino, ExpectMountRoot: "/srv/tm/alice"}
+	for _, c := range []struct {
+		rel, name, want string
+		o               Options
+	}{
+		{"tm", "carol", "is a symlink", o},
+		{"tm", "bob", "is not a directory", o},
+		{"tm", "dave", "doesn't exist", o},
+		{"link", "alice", "link is a symlink", o},
+		{"tm", "alice", "not the directory the preview saw", Options{Root: root, ExpectDev: dev, ExpectIno: ino + 1, ExpectMountRoot: "/srv/tm/alice"}},
+		{"tm", "alice", "needs the child's device", Options{Root: root, ExpectDev: dev, ExpectIno: ino}},
+	} {
+		r, err := FixChild(c.o, c.rel, ChildFix{Name: c.name, UID: uid})
+		if !IsRefused(err) || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s/%s: %v, want a refusal %q", c.rel, c.name, err, c.want)
+		}
+		if r == nil || r.Mode != "childfix" || r.Changed != 0 {
+			t.Errorf("%s/%s: report %+v", c.rel, c.name, r)
+		}
+	}
+	if after := treeState(t, root); !reflect.DeepEqual(before, after) {
+		t.Errorf("a refused childfix changed something:\n%v\n%v", before, after)
+	}
+	if ents, _ := os.ReadDir(elsewhere); len(ents) != 0 {
+		t.Error("something written through the symlink")
+	}
+	// Through Main: a refusal is exit 2 with its report.
+	code, out, _ := runMain("childfix", "--root="+root, "--rel=tm", "--child=carol:"+strconv.Itoa(uid),
+		"--expect-dev="+strconv.FormatUint(dev, 10), "--expect-ino="+strconv.FormatUint(ino, 10), "--expect-mount-root=/srv/tm/carol")
+	if code != 2 || !strings.Contains(out, `"mode":"childfix"`) || !strings.Contains(out, "symlink") {
+		t.Errorf("Main: exit %d out %q", code, out)
 	}
 }
 
@@ -341,6 +424,17 @@ func TestCLIArgs(t *testing.T) {
 		{"apply", "--root=" + root, "--expect-dev=1", "--expect-ino=2", "--expect-mount-root=/srv/x", "--gid=60001", "--files=rw", "--expect=1", "--expect-digest=xyz"},
 		{"snapshot", "--root=" + root, "--gid=60001", "--files=rw", "--out=/out", "--max-entries=5"},
 		{"restore", "--root=" + root, "--expect-dev=1", "--expect-ino=2", "--gid=60001", "--in=/in/s.gz"},
+		// Task 11: --top-only needs --children; childfix exactly one child
+		// with a uid above 0, its identity and mount root.
+		{"scan", "--root=" + root, "--top-only"},
+		{"childfix", "--root=" + root, "--rel=tm", "--child=alice:20000", "--expect-dev=1", "--expect-ino=2"},
+		{"childfix", "--root=" + root, "--rel=tm", "--child=alice:0", "--expect-dev=1", "--expect-ino=2", "--expect-mount-root=/m"},
+		{"childfix", "--root=" + root, "--rel=tm", "--child=a/b:20000", "--expect-dev=1", "--expect-ino=2", "--expect-mount-root=/m"},
+		{"childfix", "--root=" + root, "--rel=tm", "--child=..:20000", "--expect-dev=1", "--expect-ino=2", "--expect-mount-root=/m"},
+		{"childfix", "--root=" + root, "--rel=tm", "--child=alice", "--expect-dev=1", "--expect-ino=2", "--expect-mount-root=/m"},
+		{"childfix", "--root=" + root, "--rel=../tm", "--child=alice:20000", "--expect-dev=1", "--expect-ino=2", "--expect-mount-root=/m"},
+		{"childfix", "--root=" + root, "--rel=tm", "--child=alice:20000", "--child=bob:20001", "--expect-dev=1", "--expect-ino=2", "--expect-mount-root=/m"},
+		{"childfix", "--root=" + root, "--rel=tm", "--child=alice:20000", "--expect-dev=1", "--expect-ino=2", "--expect-mount-root=/m", "--gid=60001"},
 	} {
 		code, out, _ := runMain(args...)
 		if code != 1 || out != "" {
@@ -356,6 +450,8 @@ func TestCLIArgs(t *testing.T) {
 		x    ArgsExtra
 	}{
 		{"probe", Options{Root: "/broot"}, ArgsExtra{Rel: "photos/2024", Create: true}},
+		{"scan", Options{Root: "/folder", ExpectDev: 64, ExpectIno: 2, Children: true, TopOnly: true, MaxEntries: 10, MaxTime: time.Second}, ArgsExtra{}},
+		{"childfix", Options{Root: "/broot", ExpectDev: 64, ExpectIno: 9, ExpectMountRoot: "/srv/tm/alice"}, ArgsExtra{Rel: "tm", Child: ChildFix{Name: "alice", UID: 20000}}},
 		{"scan", Options{Root: "/folder", ExpectDev: 64, ExpectIno: 2, ExpectMountRoot: "/srv/pho tos",
 			Target:     Target{GID: 60001, Files: "r", OwnerUID: &owner},
 			Principals: []Principal{{Name: "immich", UID: 1000, GIDs: []int{1000, 60001}}, {Name: "samba", UID: 0, GIDs: []int{0}, Write: true}},

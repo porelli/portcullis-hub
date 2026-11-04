@@ -30,7 +30,9 @@
     rebind_port: 'Rebind…',
     manage_as_folder: 'Manage as shared folder…',
     reapply_folder: 'Apply again…',
-    undo_folder: 'Undo last fix…'
+    undo_folder: 'Undo last fix…',
+    revoke_leaver: 'Revoke the password…',
+    person_tree_owner: 'Fix the owner…'
   };
   // The parameters each fix kind takes (the Hub refuses others).
   const FIX_PARAMS = {

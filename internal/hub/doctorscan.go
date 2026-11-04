@@ -24,6 +24,7 @@ import (
 	"github.com/portcullis/hub/internal/doctor"
 	"github.com/portcullis/hub/internal/folderfix"
 	"github.com/portcullis/hub/internal/fsutil"
+	"github.com/portcullis/hub/internal/settings"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
 )
@@ -76,6 +77,11 @@ type ScanTarget struct {
 	Path, Folder string
 	Principals   []folderfix.Principal
 	Target       *folderfix.Target
+	// Children: a per-person tree (F33, contract §14.5): its first level
+	// only (owner, group, mode of each entry), no principals or target;
+	// the owners it finds feed Pools' seen owners (F8).
+	Children bool
+	Pools    []string
 }
 
 // scanEntry is one cached scan (Report nil ⇔ Err set).
@@ -86,6 +92,8 @@ type scanEntry struct {
 	Report     *folderfix.Report     `json:"report,omitempty"`
 	Principals []folderfix.Principal `json:"principals,omitempty"`
 	Err        string                `json:"error,omitempty"`
+	// Children: a per-person tree's top-level scan (ScanTarget.Children).
+	Children bool `json:"children,omitempty"`
 	// Dev / Ino: a folder entry's root as state.yaml had it when scanned
 	// (M6: a folder re-created at the same path is another directory).
 	Dev uint64 `json:"dev,omitempty"`
@@ -146,9 +154,16 @@ func (h *Hub) scanTargetsLocked() []ScanTarget {
 		t.Principals = scanPrincipals(fu)
 		out = append(out, t)
 	}
-	var hand []PathUsage
+	var hand, trees []PathUsage
 	for _, u := range uses {
 		if (u.Source != PathSourceSetting && u.Source != PathSourceCustomOverride) || u.HostPath == "" {
+			continue
+		}
+		if u.PersonTree {
+			if p := path.Clean(u.HostPath); h.underBindRoots(p) {
+				u.HostPath = p
+				trees = append(trees, u)
+			}
 			continue
 		}
 		p := path.Clean(u.HostPath)
@@ -191,8 +206,52 @@ func (h *Hub) scanTargetsLocked() []ScanTarget {
 		}
 		out = append(out, ScanTarget{Path: r, Principals: scanPrincipals(own)})
 	}
+	// Per-person trees (F33): one top-level scan per distinct path; a
+	// path another target already scans is left to it (logged).
+	byPath := map[string]int{}
+	for _, t := range out {
+		byPath[t.Path] = -1
+	}
+	sort.SliceStable(trees, func(i, j int) bool { return trees[i].HostPath < trees[j].HostPath })
+	for _, u := range trees {
+		pool := h.treePoolLocked(u.Instance, u.Key)
+		i, seen := byPath[u.HostPath]
+		switch {
+		case seen && i < 0:
+			log.Printf("doctor: %s: %s: per-person tree %s is also another disk check's target: its folders aren't checked", u.Instance, u.Key, u.HostPath)
+		case seen:
+			if pool != "" && !slices.Contains(out[i].Pools, pool) {
+				out[i].Pools = append(out[i].Pools, pool)
+			}
+		default:
+			byPath[u.HostPath] = len(out)
+			t := ScanTarget{Path: u.HostPath, Children: true}
+			if pool != "" {
+				t.Pools = []string{pool}
+			}
+			out = append(out, t)
+		}
+	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Path < out[j].Path })
 	return out
+}
+
+// treePoolLocked is the person-id pool of instance inst's per-person tree
+// option key (its runs_as uid_from option's pool; "" when unknown).
+// Caller holds mu.
+func (h *Hub) treePoolLocked(inst, key string) string {
+	t := h.findLocked(inst)
+	if t == nil {
+		return ""
+	}
+	o := optionByKey(t, key)
+	if !settings.PerPersonTree(o) {
+		return ""
+	}
+	if ro := optionByKey(t, o.Folder.RunsAs.UIDFrom); ro != nil && ro.Type == templates.TypePersonID {
+		return ro.Pool
+	}
+	return ""
 }
 
 // underBindRoots: p is at or under one of the bind roots.
@@ -438,12 +497,15 @@ func (h *Hub) runDoctorScan(ctx context.Context) (map[string]string, []string) {
 // scanOne scans t (never under mu). why != "": not scanned, the previous
 // result kept (a busy or meanwhile changed folder).
 func (h *Hub) scanOne(ctx context.Context, t ScanTarget) (e scanEntry, why string) {
-	e = scanEntry{Target: t.Path, Folder: t.Folder, Principals: t.Principals}
+	e = scanEntry{Target: t.Path, Folder: t.Folder, Principals: t.Principals, Children: t.Children}
 	fail := func(err error) (scanEntry, string) {
 		e.At, e.Report, e.Err = time.Now().UTC(), nil, clipRunes(err.Error(), 400)
 		return e, ""
 	}
 	opts := folderfix.Options{Principals: t.Principals, MaxEntries: scanMaxEntries, MaxTime: scanMaxTime}
+	if t.Children {
+		opts.Principals, opts.Children, opts.TopOnly = nil, true, true
+	}
 	if t.Target != nil {
 		opts.Target = *t.Target
 	}
@@ -516,8 +578,31 @@ func (h *Hub) scanOne(ctx context.Context, t ScanTarget) (e scanEntry, why strin
 	if _, rel := h.bindRootOf(p); rel == "" || (rep.MountRoot != "/"+rel && !strings.HasSuffix(rep.MountRoot, "/"+rel)) {
 		return fail(fmt.Errorf("the mount root %q of %s doesn't end with %q: the path resolved elsewhere, so its check was discarded", clipRunes(rep.MountRoot, 200), p, "/"+rel))
 	}
+	if t.Children {
+		h.noteTreeOwners(t, rep)
+	}
 	e.At, e.Report = time.Now().UTC(), rep
 	return e, ""
+}
+
+// noteTreeOwners: the owners a per-person tree's scan lists are never
+// handed out as new person ids (F8: NoteSeenOwners of the tree's pools).
+// Outside mu.
+func (h *Hub) noteTreeOwners(t ScanTarget, rep *folderfix.Report) {
+	var ids []int
+	for _, c := range rep.Children {
+		if !slices.Contains(ids, c.UID) {
+			ids = append(ids, c.UID)
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+	for _, p := range t.Pools {
+		if err := h.NoteSeenOwners(p, ids); err != nil {
+			log.Printf("doctor: %s: noting the tree's owners in pool %s: %v", t.Path, p, err)
+		}
+	}
 }
 
 // storeScan keeps an apply's verify scan as the folder's doctor scan
@@ -908,7 +993,7 @@ func (h *Hub) scanCache() map[string]doctor.ScanIn {
 
 func scanIn(e scanEntry) doctor.ScanIn {
 	return doctor.ScanIn{At: e.At, Report: e.Report, Target: e.Target, Folder: e.Folder,
-		Principals: slices.Clone(e.Principals), Err: e.Err}
+		Principals: slices.Clone(e.Principals), Err: e.Err, Tree: e.Children}
 }
 
 // scanEntries is a copy of the cached entries.
@@ -946,7 +1031,7 @@ func (h *Hub) lastFullScan() time.Time {
 func (h *Hub) doctorScansLocked(scans map[string]scanEntry, rt []doctor.RuntimeIn) (map[string]doctor.ScanIn, []doctor.RuntimeIn) {
 	out := map[string]doctor.ScanIn{}
 	for _, t := range h.scanTargetsLocked() {
-		if e, ok := scans[t.Path]; ok && h.entryCurrentLocked(e, t.Folder) {
+		if e, ok := scans[t.Path]; ok && e.Children == t.Children && h.entryCurrentLocked(e, t.Folder) {
 			out[t.Path] = scanIn(e)
 		}
 	}

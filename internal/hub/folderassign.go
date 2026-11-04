@@ -396,6 +396,9 @@ func (h *Hub) planAssignLocked(id string, req AssignRequest, pending *state.Fold
 		if o.Type != templates.TypePath || o.EffectiveScope() != templates.ScopeInstance || o.Target == nil || o.Target.Mount == "" {
 			return nil, statusErr(http.StatusBadRequest, "setting %s of %s is not a folder the app mounts: only path settings can use a shared folder", u.Key, u.Instance)
 		}
+		if settings.PerPersonTree(o) {
+			return nil, statusErr(http.StatusConflict, errPerPersonFolder, u.Key)
+		}
 		if _, _, _, err := settings.ParseFolderRef(folderValue(id, u.Subpath)); err != nil {
 			return nil, statusErr(http.StatusBadRequest, "setting %s of %s: %v", u.Key, u.Instance, err)
 		}

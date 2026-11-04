@@ -289,6 +289,8 @@
       const opts = (t && t.manifest && t.manifest.settings && t.manifest.settings.options) || [];
       for (const o of opts) {
         if (o.type !== 'path' || (o.scope && o.scope !== 'instance')) continue;
+        // A per-person tree (runs_as gid_from) never uses a shared folder (F34).
+        if (o.folder && o.folder.runs_as && o.folder.runs_as.gid_from) continue;
         out.push({ instance: i.id, app: (t.manifest.name || i.template), key: o.key, label: o.label || o.key, folder: o.folder || null, state: i.state || '' });
       }
     }

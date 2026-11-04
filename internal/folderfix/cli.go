@@ -25,6 +25,7 @@ type ArgsExtra struct {
 	Create bool     // probe
 	Subs   []string // probe: subpaths below Rel, probed in the same run (H1)
 	DryRun bool     // restore: count, write nothing (R56)
+	Child  ChildFix // childfix: the tree's child and its uid (Rel: the tree)
 }
 
 var digestRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -34,10 +35,11 @@ const SnapshotName = "snapshot.ndjson.gz"
 
 var modeFlags = map[string][]string{
 	"probe":    {"root", "rel", "create", "sub"},
-	"scan":     {"root", "expect-dev", "expect-ino", "expect-mount-root", "gid", "files", "owner", "principal", "children", "max-entries", "max-time"},
+	"scan":     {"root", "expect-dev", "expect-ino", "expect-mount-root", "gid", "files", "owner", "principal", "children", "top-only", "max-entries", "max-time"},
 	"snapshot": {"root", "expect-dev", "expect-ino", "expect-mount-root", "gid", "files", "owner", "out", "kind", "in", "expect-snapshot-root"},
 	"apply":    {"root", "expect-dev", "expect-ino", "expect-mount-root", "expect-digest", "gid", "files", "owner", "expect", "mkdir"},
 	"restore":  {"root", "expect-dev", "expect-ino", "expect-mount-root", "gid", "in", "dry-run", "expect-snapshot-root"},
+	"childfix": {"root", "rel", "child", "expect-dev", "expect-ino", "expect-mount-root"},
 }
 
 // Args is the argv (after "hub folderfix") for a run: the only form the Hub
@@ -54,6 +56,13 @@ func Args(mode string, o Options, x ArgsExtra) []string {
 		if x.Create {
 			a = append(a, "--create")
 		}
+		return a
+	case "childfix":
+		add("rel", x.Rel)
+		add("child", formatChild(x.Child))
+		add("expect-dev", strconv.FormatUint(o.ExpectDev, 10))
+		add("expect-ino", strconv.FormatUint(o.ExpectIno, 10))
+		add("expect-mount-root", o.ExpectMountRoot)
 		return a
 	}
 	if o.ExpectDev != 0 || o.ExpectIno != 0 {
@@ -81,6 +90,9 @@ func Args(mode string, o Options, x ArgsExtra) []string {
 		}
 		if o.Children {
 			a = append(a, "--children")
+			if o.TopOnly {
+				a = append(a, "--top-only")
+			}
 		}
 	}
 	if mode == "scan" {
@@ -173,7 +185,7 @@ func parseArgs(args []string) (string, Options, ArgsExtra, error) {
 	var o Options
 	var x ArgsExtra
 	if len(args) == 0 {
-		return "", o, x, errors.New("usage: folderfix probe|scan|snapshot|apply|restore --root=… [flags]")
+		return "", o, x, errors.New("usage: folderfix probe|scan|snapshot|apply|restore|childfix --root=… [flags]")
 	}
 	mode := args[0]
 	allowed, ok := modeFlags[mode]
@@ -195,6 +207,9 @@ func parseArgs(args []string) (string, Options, ArgsExtra, error) {
 	fs.Var(&subs, "sub", "")
 	fs.Var(&principals, "principal", "")
 	children := fs.Bool("children", false, "")
+	topOnly := fs.Bool("top-only", false, "")
+	var childs listFlag
+	fs.Var(&childs, "child", "")
 	maxEntries := fs.Int64("max-entries", 0, "")
 	maxTime := fs.Duration("max-time", 0, "")
 	out := fs.String("out", "", "")
@@ -245,6 +260,24 @@ func parseArgs(args []string) (string, Options, ArgsExtra, error) {
 	if (*dev == 0) != (*ino == 0) {
 		return "", o, x, errors.New("--expect-dev and --expect-ino go together")
 	}
+	if mode == "childfix" {
+		if err := validSubpath(*rel); err != nil {
+			return "", o, x, err
+		}
+		if len(childs) != 1 {
+			return "", o, x, errors.New("childfix takes exactly one --child")
+		}
+		c, err := parseChild(childs[0])
+		if err != nil {
+			return "", o, x, err
+		}
+		if *dev == 0 || *mroot == "" || !strings.HasPrefix(*mroot, "/") {
+			return "", o, x, errors.New("childfix needs --rel, --child, --expect-dev, --expect-ino and --expect-mount-root (absolute)")
+		}
+		o.ExpectDev, o.ExpectIno, o.ExpectMountRoot = *dev, *ino, *mroot
+		x.Rel, x.Child = *rel, c
+		return mode, o, x, nil
+	}
 	o.ExpectDev, o.ExpectIno, o.ExpectMountRoot = *dev, *ino, *mroot
 	if *snapRoot != "" {
 		ds, is, ok := strings.Cut(*snapRoot, ":")
@@ -288,7 +321,10 @@ func parseArgs(args []string) (string, Options, ArgsExtra, error) {
 		}
 		o.Principals = append(o.Principals, p)
 	}
-	o.Children = *children
+	o.Children, o.TopOnly = *children, *topOnly
+	if o.TopOnly && !o.Children {
+		return "", o, x, errors.New("--top-only goes with --children")
+	}
 	if *maxEntries < 0 || *maxTime < 0 {
 		return "", o, x, errors.New("--max-entries and --max-time can't be negative")
 	}
@@ -378,6 +414,8 @@ func Main(args []string, stdout, stderr io.Writer) (code int) {
 		r, err = runSnapshot(o, x)
 	case "apply":
 		r, err = Apply(o, x.Expect)
+	case "childfix":
+		r, err = FixChild(o, x.Rel, x.Child)
 	case "restore":
 		if x.DryRun {
 			r, err = runFile(x.In, func(f *os.File) (*Report, error) { return RestoreDryRun(o, f) })

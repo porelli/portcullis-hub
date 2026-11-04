@@ -38,8 +38,12 @@ type Options struct {
 	Target          Target
 	Principals      []Principal
 	Children        bool // per first-level child owner counts
-	MaxEntries      int64
-	MaxTime         time.Duration
+	// TopOnly (scan with Children): read the first level only, never
+	// entering a child (a per-person tree: its top-level directories'
+	// owner, group and mode are all the doctor judges).
+	TopOnly    bool
+	MaxEntries int64
+	MaxTime    time.Duration
 }
 
 // maxSample is the number of relative paths a Count keeps.
@@ -101,12 +105,15 @@ type PlanCounts struct {
 	LoseAccess Count `json:"lose_access"`
 }
 
-// ChildOwner is one first-level child: its owner and how many entries below
-// it (itself included) are not owned by that uid.
+// ChildOwner is one first-level child: its owner, group, permission bits
+// and type, and how many entries below it (itself included) are not owned
+// by that uid.
 type ChildOwner struct {
 	Name    string `json:"name"`
 	UID     int    `json:"uid"`
 	GID     int    `json:"gid"`
+	Mode    uint32 `json:"mode"` // permission bits (07777)
+	Dir     bool   `json:"dir"`
 	Entries int64  `json:"entries"`
 	Foreign int64  `json:"foreign"`
 }

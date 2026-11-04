@@ -293,7 +293,7 @@ func (sharedPathDiskCheck) Run(in *Inputs) []Finding {
 	var base []Finding
 	var out []Finding
 	for _, s := range sortedScans(in) {
-		if s.Folder != "" || s.Report == nil {
+		if s.Folder != "" || s.Report == nil || s.Tree {
 			continue
 		}
 		var uses []PathIn
@@ -435,7 +435,7 @@ func (noACLCheck) Kind() string { return KindNoACL }
 func (noACLCheck) Run(in *Inputs) []Finding {
 	var out []Finding
 	for _, s := range sortedScans(in) {
-		if s.Report == nil || s.Report.ACL {
+		if s.Report == nil || s.Report.ACL || s.Tree {
 			continue
 		}
 		f := Finding{
@@ -464,7 +464,7 @@ func (skippedEntriesCheck) Run(in *Inputs) []Finding {
 	var out []Finding
 	for _, s := range sortedScans(in) {
 		r := s.Report
-		if r == nil {
+		if r == nil || s.Tree {
 			continue
 		}
 		var parts, keys []string

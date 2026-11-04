@@ -8,6 +8,7 @@ package settings
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"sort"
@@ -307,11 +308,24 @@ func idValue(what, key string, v Value) (int, error) {
 	return int(n), nil
 }
 
+// ErrPerPersonOwner: a folder.runs_as uid_from / gid_from names a
+// person_id option (file sharing, contract §13.15–13.17, F34): each
+// person's files have their own owner, so the use has no single owner
+// (PathUsage OwnerKnown false).
+var ErrPerPersonOwner = errors.New("the owner is each person's own id (person_id)")
+
+// PerPersonTree: o is a per-person tree (folder.runs_as gid_from, F34):
+// never a shared folder, no folder gid, never a shared_path or
+// folder_owner subject.
+func PerPersonTree(o *templates.Option) bool {
+	return o != nil && o.Folder != nil && o.Folder.RunsAs != nil && o.Folder.RunsAs.GIDFrom != ""
+}
+
 // ResolveRunsAs resolves a path option's folder.runs_as (contract
 // §13.15, preflight ruling 22) against the instance's values: numbers as
 // written, uid_env / gid_env through the instance option of opts (the
 // template's options) whose env names include it. uid_from / gid_from
-// (file sharing, project 3) don't resolve: an error.
+// don't resolve: ErrPerPersonOwner (wrapped).
 func ResolveRunsAs(o *templates.Option, opts []templates.Option, instance map[string]Value) (uid, gid int, err error) {
 	if o.Folder == nil || o.Folder.RunsAs == nil {
 		return 0, 0, fmt.Errorf("setting %s has no folder.runs_as", o.Key)
@@ -320,7 +334,7 @@ func ResolveRunsAs(o *templates.Option, opts []templates.Option, instance map[st
 	one := func(what string, num *int, env, from string) (int, error) {
 		switch {
 		case from != "":
-			return 0, fmt.Errorf("folder.runs_as.%s_from %s: file sharing (project 3)", what, from)
+			return 0, fmt.Errorf("folder.runs_as.%s_from %s: %w", what, from, ErrPerPersonOwner)
 		case num != nil:
 			if *num < 0 || *num > maxID {
 				return 0, fmt.Errorf("folder.runs_as.%s = %d is not a valid id (0-%d)", what, *num, maxID)

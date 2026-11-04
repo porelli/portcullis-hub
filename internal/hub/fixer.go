@@ -64,6 +64,8 @@ var (
 	fixerReadCaps  = []string{"DAC_READ_SEARCH"}
 	fixerWriteCaps = []string{"CHOWN", "FOWNER", "FSETID", "DAC_READ_SEARCH"}
 	fixerMkdirCaps = []string{"CHOWN", "FOWNER", "FSETID", "DAC_OVERRIDE", "DAC_READ_SEARCH"}
+	// childfix (F33): fchown and fchmod of one directory through its fd.
+	fixerChildCaps = []string{"CHOWN", "FOWNER"}
 )
 
 // maxSnapshotBytes caps the snapshot a run copies out (ruling 31; a var for
@@ -74,7 +76,7 @@ var digestRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // fixerRun is one helper run.
 type fixerRun struct {
-	Mode string // probe | scan | snapshot | apply | restore
+	Mode string // probe | scan | snapshot | apply | restore | childfix
 	// Folder is the folder id (label "folder:<id>"); "" = a path check or
 	// a scan of a hand-typed path (label "path-check").
 	Folder string
@@ -107,7 +109,7 @@ func fixerTimeout(r fixerRun) time.Duration {
 	switch {
 	case r.Timeout > 0:
 		return r.Timeout
-	case r.Mode == "probe":
+	case r.Mode == "probe", r.Mode == "childfix":
 		return 2 * time.Minute
 	case r.Mode == "scan" && r.Opts.MaxTime > 0:
 		return r.Opts.MaxTime + 2*time.Minute
@@ -149,6 +151,25 @@ func (r fixerRun) validate() error {
 		return errors.New("an expected snapshot root goes with a restore or an undo snapshot of the same root inode")
 	}
 	switch r.Mode {
+	case "childfix":
+		// F33: one per-person tree's child, below the bind root (r.Source,
+		// bound at /broot), with the preview probe's identity.
+		x := r.Extra
+		switch {
+		case r.Folder != "":
+			return errors.New("childfix is for a per-person tree, never a shared folder")
+		case !validSub(x.Rel):
+			return fmt.Errorf("childfix: tree %q", x.Rel)
+		case !validSub(x.Child.Name) || strings.Contains(x.Child.Name, "/"):
+			return fmt.Errorf("childfix: child %q", x.Child.Name)
+		case x.Child.UID <= 0 || x.Child.UID >= 0xFFFFFFFF:
+			return fmt.Errorf("childfix: uid %d", x.Child.UID)
+		case !identity:
+			return errors.New("childfix needs the child's device, inode and mount root")
+		case o.Target.GID != 0 || o.Target.OwnerUID != nil || len(o.Target.Mkdir) > 0 || len(o.Principals) > 0 || o.Children || o.ExpectDigest != "" ||
+			x.Create || len(x.Subs) > 0 || x.Expect != 0 || x.In != "" || x.Out != "" || x.DryRun:
+			return errors.New("childfix takes the tree, the child and its identity only")
+		}
 	case "probe":
 		if r.Extra.Rel == "" {
 			return errors.New("probe needs a relative path")
@@ -157,7 +178,7 @@ func (r fixerRun) validate() error {
 			return errors.New("probe: subpaths don't go with create")
 		}
 		for _, sub := range r.Extra.Subs {
-			if sub == "" || strings.HasPrefix(sub, "/") || path.Clean(sub) != sub || sub == "." || sub == ".." || strings.HasPrefix(sub, "../") {
+			if !validSub(sub) {
 				return fmt.Errorf("probe: subpath %q", sub)
 			}
 		}
@@ -187,6 +208,12 @@ func (r fixerRun) validate() error {
 	return nil
 }
 
+// validSub: a clean relative path below the bind root or folder.
+func validSub(sub string) bool {
+	return sub != "" && !strings.HasPrefix(sub, "/") && path.Clean(sub) == sub && sub != "." && sub != ".." && !strings.HasPrefix(sub, "../") &&
+		!strings.ContainsFunc(sub, func(c rune) bool { return c < 0x20 || c == 0x7f })
+}
+
 // spec builds the helper for r: image, argv, mounts and caps by mode.
 func (r fixerRun) spec(image string) docker.RunSpec {
 	o, x := r.Opts, r.Extra
@@ -211,6 +238,10 @@ func (r fixerRun) spec(image string) docker.RunSpec {
 		// Read-write only to create the missing components (mkdirat as
 		// the bind root's owner: no capability beyond DAC_READ_SEARCH).
 		bind.ReadOnly = !x.Create
+	case "childfix":
+		// Read-write: the one directory's owner and mode, through its fd.
+		bind.Target, o.Root = fixerBindRoot, fixerBindRoot
+		bind.ReadOnly, s.CapAdd = false, slices.Clone(fixerChildCaps)
 	case "snapshot":
 		x.Out = fixerOut
 		s.Scratch, s.OutPath = []string{fixerOut}, fixerOut

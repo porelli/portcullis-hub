@@ -219,6 +219,34 @@ func fchmod(fd int, mode uint32) error {
 	return ignoringEINTR(func() error { return unix.Fchmod(fd, mode&07777) })
 }
 
+// atFDCWD: openPathDir relative to the working directory (an absolute
+// path).
+const atFDCWD = unix.AT_FDCWD
+
+// openPathDir opens a directory O_PATH (childfix, F33): no permission on
+// the directory itself is needed (only search on its parent), so uid 0
+// with CHOWN and FOWNER alone reaches a person's 0700 directory; a
+// symlink is never followed (O_NOFOLLOW|O_DIRECTORY).
+func openPathDir(dirfd int, name string) (int, error) {
+	var fd int
+	err := ignoringEINTR(func() (err error) {
+		fd, err = rawOpenat(dirfd, name, unix.O_PATH|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		return err
+	})
+	return fd, err
+}
+
+// chownPathFD / chmodPathFD change the inode an O_PATH fd refers to:
+// fchownat(AT_EMPTY_PATH), and chmod through its /proc/self/fd magic link
+// (the same inode, no path lookup; fchmod refuses an O_PATH fd).
+func chownPathFD(fd int, uid, gid uint32) error {
+	return ignoringEINTR(func() error { return unix.Fchownat(fd, "", int(uid), int(gid), unix.AT_EMPTY_PATH) })
+}
+
+func chmodPathFD(fd int, mode uint32) error {
+	return ignoringEINTR(func() error { return unix.Chmod("/proc/self/fd/"+strconv.Itoa(fd), mode&07777) })
+}
+
 func mkdirAt(dirfd int, name string, mode uint32) error {
 	return ignoringEINTR(func() error { return unix.Mkdirat(dirfd, name, mode) })
 }

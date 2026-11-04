@@ -415,8 +415,8 @@ func TestResolveRunsAs(t *testing.T) {
 		t.Errorf("env form = %d %d %v", uid, gid, err)
 	}
 	o.Folder.RunsAs = &templates.RunsAs{UIDFrom: "person_uid", GID: new(int)}
-	if _, _, err := settings.ResolveRunsAs(o, opts, nil); err == nil || !strings.Contains(err.Error(), "project 3") {
-		t.Errorf("uid_from = %v", err)
+	if _, _, err := settings.ResolveRunsAs(o, opts, nil); !errors.Is(err, settings.ErrPerPersonOwner) {
+		t.Errorf("uid_from = %v, want ErrPerPersonOwner (F34)", err)
 	}
 	o.Folder.RunsAs = &templates.RunsAs{UIDEnv: "NOPE", GID: new(int)}
 	if _, _, err := settings.ResolveRunsAs(o, opts, nil); err == nil {

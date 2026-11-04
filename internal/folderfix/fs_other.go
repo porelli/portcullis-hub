@@ -105,6 +105,18 @@ func fchmod(fd int, mode uint32) error {
 	return ignoringEINTR(func() error { return unix.Fchmod(fd, mode&07777) })
 }
 
+// atFDCWD: openPathDir relative to the working directory (an absolute
+// path).
+const atFDCWD = unix.AT_FDCWD
+
+// openPathDir / chownPathFD / chmodPathFD: no O_PATH here (developer
+// machines): a plain directory fd.
+func openPathDir(dirfd int, name string) (int, error) { return openFlags(dirfd, name, dirFlags) }
+
+func chownPathFD(fd int, uid, gid uint32) error { return fchown(fd, uid, gid) }
+
+func chmodPathFD(fd int, mode uint32) error { return fchmod(fd, mode) }
+
 func mkdirAt(dirfd int, name string, mode uint32) error {
 	return ignoringEINTR(func() error { return unix.Mkdirat(dirfd, name, mode) })
 }

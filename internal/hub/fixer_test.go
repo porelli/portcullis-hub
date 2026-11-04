@@ -94,6 +94,10 @@ func TestFixerCapsByMode(t *testing.T) {
 			mkdirCaps, false, "/folder", nil, "", "", nil},
 		{"restore", fixerRun{Mode: "restore", Folder: "photos", Source: "/srv/photos", Opts: applyOpts(), In: strings.NewReader("SNAP"), InSize: 4},
 			writeCaps, false, "/folder", []string{"/in"}, "/in", "", nil},
+		// F33: childfix: the bind root read-write, CHOWN FOWNER only.
+		{"childfix", fixerRun{Mode: "childfix", Source: "/srv", Opts: childOpts(), Extra: folderfix.ArgsExtra{Rel: "homes", Child: folderfix.ChildFix{Name: "alice", UID: 20000}}},
+			[]string{"CHOWN", "FOWNER"}, false, "/broot", nil, "", "",
+			[]string{"childfix", "--root=/broot", "--rel=homes", "--child=alice:20000", "--expect-dev=2049", "--expect-ino=77", "--expect-mount-root=/srv/homes/alice"}},
 		// R56: a dry-run restore only reads.
 		{"restore dry run", fixerRun{Mode: "restore", Folder: "photos", Source: "/srv/photos", Opts: applyOpts(), In: strings.NewReader("SNAP"), InSize: 4, Extra: folderfix.ArgsExtra{DryRun: true}},
 			[]string{"DAC_READ_SEARCH"}, true, "/folder", []string{"/in"}, "/in", "", nil},
@@ -203,6 +207,20 @@ func TestFixerArgv(t *testing.T) {
 }
 
 // Runs the T4 carries forbid are refused before any helper starts.
+func childOpts() folderfix.Options {
+	return folderfix.Options{ExpectDev: 2049, ExpectIno: 77, ExpectMountRoot: "/srv/homes/alice"}
+}
+
+func childOptsWith(f func(*folderfix.Options)) folderfix.Options {
+	o := childOpts()
+	f(&o)
+	return o
+}
+
+func child(rel, name string, uid int) folderfix.ArgsExtra {
+	return folderfix.ArgsExtra{Rel: rel, Child: folderfix.ChildFix{Name: name, UID: uid}}
+}
+
 func TestFixerRefusesBadRuns(t *testing.T) {
 	f := newFixerFixture(t)
 	noDigest := applyOpts()
@@ -244,6 +262,16 @@ func TestFixerRefusesBadRuns(t *testing.T) {
 		"unchecked scan no dev":      {Mode: "scan", Folder: "x", Source: "/srv/x", Unchecked: true},
 		"unchecked on a non-scan":    {Mode: "restore", Folder: "x", Source: "/srv/x", Opts: applyOpts(), In: in(), InSize: 1, Unchecked: true},
 		"unchecked without a folder": {Mode: "scan", Source: "/srv/x", Opts: folderfix.Options{ExpectDev: 1, ExpectIno: 2}, Unchecked: true},
+		// F33: childfix needs one child, a uid, the identity; never a
+		// folder, a target or principals.
+		"childfix no identity": {Mode: "childfix", Source: "/srv", Extra: child("homes", "alice", 20000)},
+		"childfix folder":      {Mode: "childfix", Folder: "x", Source: "/srv", Opts: childOpts(), Extra: child("homes", "alice", 20000)},
+		"childfix no tree":     {Mode: "childfix", Source: "/srv", Opts: childOpts(), Extra: child("", "alice", 20000)},
+		"childfix bad tree":    {Mode: "childfix", Source: "/srv", Opts: childOpts(), Extra: child("../etc", "alice", 20000)},
+		"childfix nested":      {Mode: "childfix", Source: "/srv", Opts: childOpts(), Extra: child("homes", "alice/x", 20000)},
+		"childfix uid 0":       {Mode: "childfix", Source: "/srv", Opts: childOpts(), Extra: child("homes", "alice", 0)},
+		"childfix target":      {Mode: "childfix", Source: "/srv", Opts: childOptsWith(func(o *folderfix.Options) { o.Target.GID = 60001 }), Extra: child("homes", "alice", 20000)},
+		"childfix principals":  {Mode: "childfix", Source: "/srv", Opts: childOptsWith(func(o *folderfix.Options) { o.Principals = []folderfix.Principal{{Name: "a"}} }), Extra: child("homes", "alice", 20000)},
 	} {
 		var err error
 		if r.Mode == "probe" {

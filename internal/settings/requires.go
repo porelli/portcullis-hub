@@ -68,3 +68,33 @@ func isEmpty(v Value) bool {
 		return false
 	}
 }
+
+// UnmetRequiresAny lists, in option order, the instance options of spec
+// that have a value while none of their requires_any options is set —
+// what a save refuses, judged on stored values (the doctor's
+// served_to_nobody, plan 3 Task 11: a share slot whose folder is set but
+// has neither readers nor writers).
+func UnmetRequiresAny(spec *templates.SettingsSpec, values map[string]Value) []string {
+	if spec == nil {
+		return nil
+	}
+	var out []string
+	for _, o := range spec.Options {
+		if o.EffectiveScope() != templates.ScopeInstance || len(o.RequiresAny) == 0 {
+			continue
+		}
+		if v, ok := values[o.Key]; !ok || isEmpty(v) {
+			continue
+		}
+		set := false
+		for _, req := range o.RequiresAny {
+			if rv, ok := values[req]; ok && !isEmpty(rv) {
+				set = true
+			}
+		}
+		if !set {
+			out = append(out, o.Key)
+		}
+	}
+	return out
+}

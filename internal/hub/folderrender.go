@@ -90,6 +90,10 @@ func (h *Hub) folderMountIn(rv renderView, t *templates.Template, o *templates.O
 	if err != nil {
 		return nil, err
 	}
+	if settings.PerPersonTree(o) {
+		// F34: a restore or an edited state.yaml put one there.
+		return nil, fmt.Errorf("%s is a per-person tree: it can't use a shared folder", o.Key)
+	}
 	f, defined := rv.folders[id]
 	if !defined {
 		return nil, fmt.Errorf("no shared folder %q", id)
@@ -265,8 +269,8 @@ func (h *Hub) folderEnvIn(rv renderView, t *templates.Template) map[string]strin
 	opts := t.Manifest.Options()
 	for i := range opts {
 		o := &opts[i]
-		if o.Type != templates.TypePath || o.EffectiveScope() != templates.ScopeInstance {
-			continue
+		if o.Type != templates.TypePath || o.EffectiveScope() != templates.ScopeInstance || settings.PerPersonTree(o) {
+			continue // F34: a per-person tree has no folder gid
 		}
 		gidVar, uidVar := templates.FolderGIDVar(o.Key), templates.FolderUIDVar(o.Key)
 		out[gidVar], out[uidVar] = "", ""
@@ -425,6 +429,9 @@ func (h *Hub) gidRangeRenderErr(t *templates.Template, s state.InstanceSettings)
 
 // ── settings saves (contract §13.15 "Settings saves") ────
 
+// errPerPersonFolder refuses a shared folder on a per-person tree (F34).
+const errPerPersonFolder = "setting %s holds each person's own folder (per-person tree): it can't use a shared folder; give it a host path"
+
 // folderSaveCheck refuses (409) what a settings save or its preview may
 // not change (preflight ruling 18; restores don't call it): a folder
 // value, replacing or clearing one, and an option a folder writes through
@@ -446,6 +453,9 @@ func folderSaveCheck(t *templates.Template, cur state.InstanceSettings, folders 
 			continue // parseSettings refuses it
 		}
 		if _, _, isRef, _ := folderRefOf(raw); isRef {
+			if settings.PerPersonTree(o) {
+				return statusErr(http.StatusConflict, errPerPersonFolder, k)
+			}
 			return statusErr(http.StatusConflict, "setting %s: a shared folder value can't be set here: assign through Settings → Shared folders", k)
 		}
 		if id, _, isRef, _ := folderRefOf(cur.Values[k]); isRef {

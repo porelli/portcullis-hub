@@ -410,3 +410,61 @@ func TestDockerSelfContainerID(t *testing.T) {
 		t.Errorf("inspect = %+v, %v", ci, err)
 	}
 }
+
+// treeVolume is a per-person tree in a fresh volume: t (root 0755) with
+// alice's directory (1000:100 0700) holding a file (1000:100 0640).
+func treeVolume(t *testing.T) (string, string) {
+	t.Helper()
+	name := fmt.Sprintf("pcfixtree-%d", time.Now().UnixNano())
+	dockerCLI(t, "volume", "create", name)
+	t.Cleanup(func() { exec.Command("docker", "volume", "rm", "-f", name).Run() })
+	dockerCLI(t, "run", "--rm", "--network", "none", "-v", name+":/v", HelperImage, "sh", "-c",
+		"mkdir -p /v/t/alice && echo x > /v/t/alice/f && chown -R 1000:100 /v/t/alice && chmod 0700 /v/t/alice && chmod 0640 /v/t/alice/f && "+
+			"chown 0:0 /v /v/t && chmod 0755 /v /v/t")
+	return name, dockerCLI(t, "volume", "inspect", "--format", "{{.Mountpoint}}", name)
+}
+
+// F33 on a real daemon: childfix with CHOWN and FOWNER only (the bind
+// root read-write at /broot) gives one person's 0700 directory uid:uid
+// 0700 and changes nothing inside it; without either capability it
+// fails (the contract's measured minimum).
+func TestDockerChildFixCaps(t *testing.T) {
+	c := dockerOrSkip(t)
+	h := dockerHub(t, c)
+	ctx := context.Background()
+	for _, drop := range []string{"", "CHOWN", "FOWNER"} {
+		t.Run("without "+drop, func(t *testing.T) {
+			vol, src := treeVolume(t)
+			pr, err := h.runProbe(ctx, fixerRun{Mode: "probe", Source: src, Extra: folderfix.ArgsExtra{Rel: "t/alice"}})
+			if err != nil || !pr.Exists || pr.RelMountRoot == "" {
+				t.Fatalf("probe = %+v, %v", pr, err)
+			}
+			if !slices.Contains([]string{"ext4", "xfs", "btrfs", "zfs"}, pr.FSType) {
+				t.Skipf("volume on %s", pr.FSType)
+			}
+			r := fixerRun{Mode: "childfix", Source: src,
+				Opts:  folderfix.Options{ExpectDev: pr.Dev, ExpectIno: pr.Ino, ExpectMountRoot: pr.RelMountRoot},
+				Extra: folderfix.ArgsExtra{Rel: "t", Child: folderfix.ChildFix{Name: "alice", UID: 20000}}}
+			if err := r.validate(); err != nil {
+				t.Fatal(err)
+			}
+			spec := r.spec(h.fixerImage)
+			spec.CapAdd = slices.DeleteFunc(spec.CapAdd, func(c string) bool { return c == drop })
+			res, err := c.RunHelper(ctx, spec, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var rep folderfix.Report
+			decodeStrict(lastLine(res.Stdout), &rep)
+			st := dockerCLI(t, "run", "--rm", "--network", "none", "-v", vol+":/v:ro", HelperImage, "stat", "-c", "%u:%g %a", "/v/t/alice", "/v/t/alice/f")
+			t.Logf("without %q: exit %d changed %d errors %q; stat %q", drop, res.ExitCode, rep.Changed, rep.Errors, st)
+			ok := res.ExitCode == 0 && rep.Changed == 1 && strings.HasPrefix(st, "20000:20000 700\n")
+			if want := drop == ""; ok != want {
+				t.Errorf("without %s: success %v, want %v", drop, ok, want)
+			}
+			if !strings.HasSuffix(st, "1000:100 640") {
+				t.Errorf("the file inside changed (childfix isn't recursive): %q", st)
+			}
+		})
+	}
+}

@@ -56,7 +56,7 @@ func pathIn(u PathUsage) doctor.PathIn {
 		Access: u.Access, Source: u.Source, Folder: u.Folder, Subpath: u.Subpath, JoinsGroup: u.JoinsGroup,
 		UIDEnv: u.UIDEnv, GIDEnv: u.GIDEnv, UID: u.UID, GID: u.GID, GIDs: slices.Clone(u.GIDs),
 		OwnerKnown: u.OwnerKnown, Writes: u.Writes, ReadOnly: u.ReadOnly, MustOwn: u.MustOwn, Declared: u.Declared,
-		Checks: slices.Clone(u.Checks),
+		Checks: slices.Clone(u.Checks), PersonTree: u.PersonTree,
 	}
 }
 
@@ -83,6 +83,8 @@ func (h *Hub) doctorInputs(ctx context.Context) (*doctor.Inputs, error) {
 	// The disk scans' cache (Task 11), read before mu (a leaf lock; the
 	// file is loaded on first use).
 	scans, rt := h.scanEntries(), h.scanRuntime()
+	// The stored hook reports (files, read before mu).
+	reports := h.fileSharingReports()
 	addrs, derr := h.domainAddrs(ctx)
 	if derr != nil {
 		log.Printf("doctor: couldn't resolve %s (%v): exposure not checked against its addresses", h.cfg.Domain, derr)
@@ -142,6 +144,9 @@ func (h *Hub) doctorInputs(ctx context.Context) (*doctor.Inputs, error) {
 	if m != nil {
 		in.Unverifiable = unverifiableCredentials(m, h.st.Credentials, h.credentialTemplatesLocked())
 	}
+	// File sharing (Task 11): the canary's holders, per-person trees,
+	// hook reports, an empty Local networks, slots served to nobody.
+	in.FileSharing = h.fileSharingInputsLocked(m, in.Paths, reports)
 	return in, nil
 }
 

@@ -103,7 +103,10 @@ type PathIn struct {
 	UID, GID                                                                                                    int
 	GIDs                                                                                                        []int
 	OwnerKnown, Writes, ReadOnly, MustOwn, Declared                                                             bool
-	Checks                                                                                                      []templates.Check
+	// PersonTree: a per-person tree (folder.runs_as gid_from, F34): never
+	// a shared_path or folder_owner subject.
+	PersonTree bool
+	Checks     []templates.Check
 }
 
 // PathIn sources (the Hub's PathSource*).
@@ -168,6 +171,9 @@ type ScanIn struct {
 	Folder     string
 	Principals []folderfix.Principal
 	Err        string
+	// Tree: a per-person tree's top-level scan (its Children only; the
+	// folder checks never judge it).
+	Tree bool
 }
 
 // RuntimeIn is what a running container's processes hold (Task 11, the
@@ -208,6 +214,8 @@ type Inputs struct {
 	// unverifiable_account "can't verify <user>'s account"). nil with the
 	// directory unavailable.
 	Unverifiable []UnverifiableIn
+	// FileSharing: the file-sharing instances (filesharing.go).
+	FileSharing []FileSharingIn
 }
 
 // UnverifiableIn is one active credential the holder check can't verify

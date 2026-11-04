@@ -609,9 +609,15 @@
     return h;
   }
 
+  // perPersonTree: a gid_from path option (each person's own folder):
+  // never a shared folder (F34), so no picker.
+  function perPersonTree(o) {
+    return !!(o.folder && o.folder.runs_as && o.folder.runs_as.gid_from);
+  }
+
   function instanceHtml(st, o) {
     const v = st.values[o.key];
-    if (o.type === 'path') {
+    if (o.type === 'path' && !perPersonTree(o)) {
       const ref = folderRefOf((st.panel.instance || {})[o.key]);
       if (ref) return folderPickHtml(st, o, ref) + pathHint(st, o);
       const pick = folderPickHtml(st, o, null);

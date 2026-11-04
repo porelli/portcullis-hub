@@ -193,7 +193,7 @@ func (sharedPathCheck) Kind() string { return KindSharedPath }
 func clusters(paths []PathIn) [][]PathIn {
 	var us []PathIn
 	for _, u := range paths {
-		if (u.Source == SourceSetting || u.Source == SourceCustomOverride) && u.HostPath != "" {
+		if (u.Source == SourceSetting || u.Source == SourceCustomOverride) && u.HostPath != "" && !u.PersonTree {
 			us = append(us, u)
 		}
 	}

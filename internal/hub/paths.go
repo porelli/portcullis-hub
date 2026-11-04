@@ -56,6 +56,11 @@ type PathUsage struct {
 	// under group_add).
 	GIDs   []int             `json:"gids,omitempty"`
 	Checks []templates.Check `json:"checks,omitempty"`
+	// PersonTree: a per-person tree (folder.runs_as gid_from, F34): each
+	// person's directory has their own owner (OwnerKnown false); never a
+	// shared folder, no folder gid, never a shared_path or folder_owner
+	// subject; the doctor scans its top level (doctorscan.go).
+	PersonTree bool `json:"person_tree,omitempty"`
 }
 
 // PathUsages lists every enabled instance's mounted host directories:
@@ -131,7 +136,7 @@ func (h *Hub) instanceUsagesIn(v renderView, t *templates.Template) []PathUsage 
 // folder mount, nil for a host path). Caller must hold mu.
 func (h *Hub) pathUsageIn(rv renderView, t *templates.Template, o *templates.Option, v any, values func() map[string]settings.Value, gidEnv map[string]int) (PathUsage, *folderMount, error) {
 	u := PathUsage{Instance: t.ID, Key: o.Key, Label: o.Label, Type: o.Type, Service: o.Target.Service, Mount: o.Target.Mount,
-		Needs: o.Needs, Source: PathSourceSetting, Declared: o.Folder != nil, Checks: o.Checks}
+		Needs: o.Needs, Source: PathSourceSetting, Declared: o.Folder != nil, Checks: o.Checks, PersonTree: settings.PerPersonTree(o)}
 	fm, err := h.folderMountIn(rv, t, o, v)
 	if err != nil {
 		return u, nil, err
