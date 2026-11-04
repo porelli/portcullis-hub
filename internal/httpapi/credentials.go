@@ -21,6 +21,10 @@ import (
 // credentialBodyMax: body limit for credential requests (8 KiB, §5.1).
 const credentialBodyMax = 8 << 10
 
+// zeroPassword is the function that zeros password buffers after writing the
+// response. Tests replace it with a spy to verify it was called.
+var zeroPassword = credentials.Zero
+
 // credentialBody is the create/regenerate body: code, code_verifier, nonce.
 type credentialBody struct {
 	Code         string `json:"code"`
@@ -101,7 +105,7 @@ func (s *Server) handleCreateCredential(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Zero the password after writing the response
-	defer credentials.Zero(cc.Password)
+	defer zeroPassword(cc.Password)
 
 	noStoreHeaders(w)
 	w.Header().Set("Content-Type", "application/json")

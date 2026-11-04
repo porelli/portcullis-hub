@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -98,7 +99,7 @@ func newCredEnv(t *testing.T) *credEnv {
 	// Set up fake fresh auth
 	fa := &fakeFreshAuth{}
 	ie.s.Hub.SetFreshAuth(fa)
-	ie.s.Hub.SetFreshAuthReady(true) // client is in place
+	ie.s.Hub.SetFreshAuthReadyForTest(true) // client is in place
 
 	return &credEnv{instEnv: ie, secrets: secrets, fa: fa}
 }
@@ -110,6 +111,17 @@ var passwordShape = regexp.MustCompile(`^([2-9A-HJ-NP-Ya-hjkmnp-z]{4}-){5}[2-9A-
 // buffer (spy).
 func TestCreateCredentialRoute(t *testing.T) {
 	e := newCredEnv(t)
+
+	// Spy on zeroPassword to verify it's called with the exact buffer
+	var zeroedBuf []byte
+	var zeroCalled bool
+	origZero := zeroPassword
+	zeroPassword = func(b []byte) {
+		zeroCalled = true
+		zeroedBuf = b
+		origZero(b) // actually zero it
+	}
+	defer func() { zeroPassword = origZero }()
 
 	// POST with valid fresh auth proof
 	body, _ := json.Marshal(map[string]string{
@@ -160,11 +172,16 @@ func TestCreateCredentialRoute(t *testing.T) {
 		t.Errorf("status = %q, want active", resp.Credential.Status)
 	}
 
-	// Verify password can be zeroed (contract requirement)
-	pw := []byte(resp.Password)
-	credentials.Zero(pw)
-	if string(pw) != strings.Repeat("\x00", len(resp.Password)) {
-		t.Error("credentials.Zero did not zero the password")
+	// Verify zeroPassword was called with the exact buffer
+	if !zeroCalled {
+		t.Error("zeroPassword was not called")
+	}
+	if zeroedBuf == nil {
+		t.Error("zeroPassword called with nil buffer")
+	}
+	// The buffer should have been zeroed (all zeros now)
+	if string(zeroedBuf) != strings.Repeat("\x00", len(resp.Password)) {
+		t.Error("zeroPassword did not zero the buffer")
 	}
 
 	// Verify hash file was created
@@ -173,6 +190,64 @@ func TestCreateCredentialRoute(t *testing.T) {
 		t.Error("hash file was not created")
 	}
 }
+
+// TestCreateCredentialZeroesOnWriteFailure verifies the password is zeroed
+// even when the response write fails.
+func TestCreateCredentialZeroesOnWriteFailure(t *testing.T) {
+	e := newCredEnv(t)
+
+	// Spy on zeroPassword
+	var zeroCalled bool
+	origZero := zeroPassword
+	zeroPassword = func(b []byte) {
+		zeroCalled = true
+		origZero(b)
+	}
+	defer func() { zeroPassword = origZero }()
+
+	// POST with valid fresh auth proof
+	body, _ := json.Marshal(map[string]string{
+		"code":          testProof.Code,
+		"code_verifier": testProof.CodeVerifier,
+		"nonce":         testProof.Nonce,
+	})
+
+	req := httptest.NewRequest("POST", "/api/me/apps/smbfixture/credentials/share_password", bytes.NewReader(body))
+	req.Header.Set("X-Forwarded-User", "Alice")
+	req.Header.Set("Content-Type", "application/json")
+	req.SetPathValue("instance", "smbfixture")
+	req.SetPathValue("key", "share_password")
+
+	// Use a ResponseWriter that errors on Write
+	w := &failingWriter{ResponseWriter: httptest.NewRecorder()}
+
+	e.s.handleCreateCredential(w, req)
+
+	// Even though Write failed, zeroPassword must have been called (defer)
+	if !zeroCalled {
+		t.Error("zeroPassword was not called even though Write failed")
+	}
+}
+
+// failingWriter is a ResponseWriter whose Write always errors.
+type failingWriter struct {
+	http.ResponseWriter
+	wroteHeader bool
+}
+
+func (f *failingWriter) WriteHeader(statusCode int) {
+	f.wroteHeader = true
+	f.ResponseWriter.WriteHeader(statusCode)
+}
+
+func (f *failingWriter) Write(b []byte) (int, error) {
+	if !f.wroteHeader {
+		f.WriteHeader(http.StatusOK)
+	}
+	return 0, errors.New("write failed")
+}
+
+var _ http.ResponseWriter = (*failingWriter)(nil)
 
 // TestCreateCredentialWrongUserProof (Review Focus 5): the fake verifier is
 // bound to bob → 403, with the generic message only.
@@ -342,21 +417,58 @@ func TestAdminCredentialRoutes(t *testing.T) {
 
 // TestCredentialRoutesOnCorrectListener: the credential routes return 404 on
 // the Hub listener; the admin routes return 404 on the people listener.
+// Accepting 403/405 hides a registration (405 means the pattern IS registered).
 func TestCredentialRoutesOnCorrectListener(t *testing.T) {
 	e := newCredEnv(t)
 
-	// Use GET requests for admin routes to avoid CSRF complications
+	// Each credential route (people) must return exactly 404 on Hub listener
+	credentialRoutes := []struct {
+		method, path string
+	}{
+		{"POST", "/api/me/apps/smbfixture/credentials/share_password"},
+		{"DELETE", "/api/me/apps/smbfixture/credentials/share_password"},
+	}
 
-	// Admin GET should NOT be on people listener (403/404/405 all acceptable - route doesn't exist)
-	req := httptest.NewRequest("GET", "/api/instances/smbfixture/credentials", nil)
-	req.Header.Set("X-Forwarded-User", "root")
-	req.Header.Set(ProxySecretHeader, testSecret)
-	w := httptest.NewRecorder()
+	for _, route := range credentialRoutes {
+		req := httptest.NewRequest(route.method, route.path, strings.NewReader(`{"code":"x","code_verifier":"y","nonce":"z"}`))
+		req.Header.Set("X-Forwarded-User", "alice")
+		req.Header.Set(ProxySecretHeader, testSecret)
+		req.Header.Set("X-Forwarded-Host", "hub.example.org")
+		req.Header.Set("Origin", "https://hub.example.org")
+		req.Header.Set("Sec-Fetch-Site", "same-origin")
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
 
-	e.ppl.Config.Handler.ServeHTTP(w, req)
+		e.hub.Config.Handler.ServeHTTP(w, req)
 
-	if w.Code != http.StatusNotFound && w.Code != http.StatusMethodNotAllowed {
-		t.Logf("admin GET on people listener = %d (expected 404 or 405, route shouldn't exist)", w.Code)
+		if w.Code != http.StatusNotFound {
+			t.Errorf("%s %s on Hub listener = %d, want exactly 404 (405 means pattern is registered)", route.method, route.path, w.Code)
+		}
+	}
+
+	// Each admin route (hub) must return exactly 404 on people listener
+	adminRoutes := []struct {
+		method, path string
+	}{
+		{"GET", "/api/instances/smbfixture/credentials"},
+		{"DELETE", "/api/instances/smbfixture/credentials/share_password/alice"},
+	}
+
+	for _, route := range adminRoutes {
+		req := httptest.NewRequest(route.method, route.path, nil)
+		req.Header.Set("X-Forwarded-User", "root")
+		req.Header.Set(ProxySecretHeader, testSecret)
+		req.Header.Set("X-Forwarded-Host", "people.example.org")
+		req.Header.Set("Origin", "https://people.example.org")
+		req.Header.Set("Sec-Fetch-Site", "same-origin")
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+
+		e.ppl.Config.Handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusNotFound {
+			t.Errorf("%s %s on people listener = %d, want exactly 404 (405 means pattern is registered)", route.method, route.path, w.Code)
+		}
 	}
 
 	// Verify peopleAppRoutes list is correct (exactly 5 routes as per contract §5.1)

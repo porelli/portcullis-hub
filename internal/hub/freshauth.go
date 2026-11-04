@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"testing"
 
 	"github.com/portcullis/hub/internal/freshauth"
 )
@@ -24,9 +25,13 @@ func (h *Hub) SetFreshAuth(f FreshAuth) {
 	h.freshAuth = f
 }
 
-// SetFreshAuthReady marks the fresh-auth Keycloak client as configured (for
-// testing; in production the directory sync sets it).
-func (h *Hub) SetFreshAuthReady(ready bool) {
+// SetFreshAuthReadyForTest marks the fresh-auth Keycloak client as configured
+// (for testing only; in production the directory sync sets it). Panics outside
+// tests.
+func (h *Hub) SetFreshAuthReadyForTest(ready bool) {
+	if !testing.Testing() {
+		panic("SetFreshAuthReadyForTest: refuses to work outside tests (it turns off a fail-closed gate)")
+	}
 	h.freshAuthReady.Store(ready)
 }
 
