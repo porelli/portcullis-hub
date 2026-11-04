@@ -974,7 +974,7 @@ func TestInterruptedApplyRestartsApps(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := &applyMarker{Kind: "apply", Folder: "media", Instances: []string{"immich"}, Phase: "disk", Snapshot: snap, Files: "r",
+	m := &applyMarker{Kind: "apply", Folder: "media", Instances: []string{"immich"}, Phase: "disk", Sub: "applying", Snapshot: snap, Files: "r",
 		Values: []mvalue{{"immich", "library", "folder:media"}}, At: time.Now().UTC()}
 	if err := f.h.writeMarker("media", m); err != nil {
 		t.Fatal(err)
@@ -1434,6 +1434,71 @@ func TestRecheckFolderIdentity(t *testing.T) {
 	}
 	if _, err := f.h.PreviewRecheck(ctx, "nope"); statusOf(err) != 404 {
 		t.Errorf("unknown folder = %v", err)
+	}
+}
+
+// H6: recovery waits for a busy folder lock (an on-demand scan, a
+// rename) like it waits for the app locks, instead of giving up.
+func TestRecoveryRetriesFolderLock(t *testing.T) {
+	f, _, _ := assignFixture(t)
+	m := &applyMarker{Kind: "apply", Folder: "media", Instances: []string{"immich"}, Phase: "disk", At: time.Now().UTC()}
+	if err := f.h.writeMarker("media", m); err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := f.h.folderLock("media")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.h.restartWait, f.h.lockPoll = 5*time.Second, 5*time.Millisecond
+	done := make(chan struct{})
+	go func() { f.h.recoverFolderApply("media"); close(done) }()
+	time.Sleep(50 * time.Millisecond)
+	unlock()
+	<-done
+	if rec := f.h.LastOp(opKeyFolder("media")); rec == nil || strings.Contains(rec.Error, "not recovered yet") || !strings.Contains(rec.Error, "interrupted") {
+		t.Fatalf("record = %+v", rec)
+	}
+	if _, err := os.Stat(f.h.markerPath("media")); !os.IsNotExist(err) {
+		t.Errorf("marker kept: %v", err)
+	}
+}
+
+// H7: the marker says "applying" before the apply run; an apply cut
+// short before that keeps the previous undo target (its snapshot of a
+// no-op is never recorded as the last apply).
+func TestRecoveryKeepsUndoTargetBeforeApply(t *testing.T) {
+	f, d, _ := assignFixture(t)
+	var marks []string
+	testMarkerWrite = func(m *applyMarker) error {
+		applied := slices.Contains(fixerRuns(d), "apply")
+		marks = append(marks, fmt.Sprintf("%s/%s/%t/%t", m.Phase, m.Sub, m.Snapshot != "", applied))
+		return nil
+	}
+	defer func() { testMarkerWrite = nil }()
+	if _, rec := assign(t, f, "media", libraryReq); !rec.OK {
+		t.Fatal(rec)
+	}
+	if !slices.Contains(marks, "disk/applying/true/false") {
+		t.Errorf("marker writes (phase/sub/snapshot/applied) = %v", marks)
+	}
+	first, _ := storedFolder(f, "media")
+	if first.LastApply == nil {
+		t.Fatal("no last apply")
+	}
+	snap, err := f.h.saveSnapshot("media", strings.NewReader("a later snapshot"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := &applyMarker{Kind: "apply", Folder: "media", Instances: []string{"immich"}, Phase: "disk", Snapshot: snap, Files: "r", At: time.Now().UTC()}
+	if err := f.h.writeMarker("media", m); err != nil {
+		t.Fatal(err)
+	}
+	f.h.recoverFolderApply("media")
+	if fo, _ := storedFolder(f, "media"); fo.LastApply == nil || fo.LastApply.Snapshot != first.LastApply.Snapshot {
+		t.Errorf("last apply = %+v, want the previous %s", fo.LastApply, first.LastApply.Snapshot)
+	}
+	if rec := f.h.LastOp(opKeyFolder("media")); rec == nil || !strings.Contains(rec.Error, "nothing on disk changed") {
+		t.Errorf("record = %+v", rec)
 	}
 }
 

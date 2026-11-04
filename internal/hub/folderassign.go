@@ -166,18 +166,25 @@ func (h *Hub) fillSources(inputs map[string]hashInputs) {
 	}
 }
 
+// applyRan: the marker's apply run may have started (H7).
+func applyRan(m *applyMarker) bool { return m.Sub == "applying" || m.Phase == "state" }
+
 // applyMarker is <data>/folders/<id>.applying.json (contract §14.3).
 type applyMarker struct {
-	Kind      string    `json:"kind"` // apply | undo
-	Folder    string    `json:"folder"`
-	Instances []string  `json:"instances"` // the ones stopped: started again
-	Phase     string    `json:"phase"`     // disk | state
-	Snapshot  string    `json:"snapshot,omitempty"`
-	Undo      string    `json:"undo_snapshot,omitempty"`
-	Files     string    `json:"files,omitempty"`
-	OwnerUID  *int      `json:"owner_uid,omitempty"`
-	Values    []mvalue  `json:"values,omitempty"` // the apply's planned values
-	At        time.Time `json:"at"`
+	Kind      string   `json:"kind"` // apply | undo
+	Folder    string   `json:"folder"`
+	Instances []string `json:"instances"` // the ones stopped: started again
+	Phase     string   `json:"phase"`     // disk | state
+	// Sub "applying": written right before the apply run (H7): only then
+	// may the disk have changed, so only then does recovery record the
+	// snapshot as the last apply.
+	Sub      string    `json:"sub,omitempty"`
+	Snapshot string    `json:"snapshot,omitempty"`
+	Undo     string    `json:"undo_snapshot,omitempty"`
+	Files    string    `json:"files,omitempty"`
+	OwnerUID *int      `json:"owner_uid,omitempty"`
+	Values   []mvalue  `json:"values,omitempty"` // the apply's planned values
+	At       time.Time `json:"at"`
 }
 
 type mvalue struct {
@@ -1544,6 +1551,13 @@ func (h *Hub) applyDisk(ctx context.Context, id string, f state.Folder, d *DiskP
 		h.dropSnapshot(saved)
 		return "", 0, warns, false, statusErr(http.StatusInternalServerError, "recording the permissions snapshot: %v", err)
 	}
+	// H7: the sub-phase before the apply run (a failed write: nothing
+	// changed, the recorded snapshot isn't the last apply).
+	m.Sub = "applying"
+	if err := h.writeMarker(id, m); err != nil {
+		m.Sub = ""
+		return saved, 0, warns, false, statusErr(http.StatusInternalServerError, "recording the apply's start: %v", err)
+	}
 	applyOpts := base
 	applyOpts.ExpectDigest = snapRep.Plan.Digest
 	applyOpts.Target.Mkdir = d.Mkdir
@@ -1979,14 +1993,24 @@ func (h *Hub) recoverFolderApply(id string) {
 		h.recordOp(key, rec)
 		log.Printf("shared folders: %s: %s", id, rec.Error)
 	}
-	unlockFolder, err := h.folderLock(id)
-	if err != nil {
-		gaveUp(err)
-		return
+	// The folder lock and the app locks, each retried up to restartWait
+	// (H6: an on-demand scan or a rename may hold the folder's).
+	deadline := time.Now().Add(h.restartWait)
+	var unlockFolder func()
+	for {
+		u, err := h.folderLock(id)
+		if err == nil {
+			unlockFolder = u
+			break
+		}
+		if time.Now().After(deadline) {
+			gaveUp(err)
+			return
+		}
+		time.Sleep(h.lockPoll)
 	}
 	defer unlockFolder()
 	var unlockApps func()
-	deadline := time.Now().Add(h.restartWait)
 	for {
 		u, err := h.lockApps(m.Instances)
 		if err == nil {
@@ -2031,7 +2055,9 @@ func (h *Hub) recoverFolderApply(id string) {
 		}
 		// The disk may be partly changed: offer the undo (a restore
 		// rewrites only entries still as the apply left them).
-		if !committed && defined && m.Snapshot != "" && (f.LastApply == nil || f.LastApply.Snapshot != m.Snapshot) {
+		// Only once the apply ran (H7: sub-phase applying, or phase
+		// state); before, the previous last apply stays the undo target.
+		if !committed && defined && m.Snapshot != "" && applyRan(&m) && (f.LastApply == nil || f.LastApply.Snapshot != m.Snapshot) {
 			prevF := f
 			f.LastApply = &state.FolderApply{At: m.At, Files: m.Files, OwnerUID: m.OwnerUID, Snapshot: m.Snapshot}
 			h.st.Folders[id] = f
@@ -2067,6 +2093,8 @@ func (h *Hub) recoverFolderApply(id string) {
 		switch {
 		case committed:
 			b.WriteString(": the new settings had been saved")
+		case m.Snapshot != "" && !applyRan(&m):
+			b.WriteString(": the settings are unchanged and nothing on disk changed (the apply hadn't started; permissions snapshot " + m.Snapshot + " was saved)")
 		case m.Snapshot != "":
 			b.WriteString(": the settings are unchanged; some permissions may have changed: permissions snapshot " + m.Snapshot + " can undo them (Undo last fix)")
 		default:
