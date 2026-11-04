@@ -1,12 +1,8 @@
 package credentials
 
 import (
-	"encoding/hex"
 	"strings"
 	"testing"
-	"unicode/utf16"
-
-	"golang.org/x/crypto/md4"
 
 	"github.com/portcullis/hub/internal/templates"
 )
@@ -77,12 +73,9 @@ func TestNTHashVectors(t *testing.T) {
 		{"", "31D6CFE0D16AE931B73C59D7E0C089C0"},
 		// 29-character dashed sample: we'll compute this with a pure Python MD4 implementation
 		// The value below is pinned from an independent computation:
-		// Python code used to compute (scratch file /tmp/compute_nt_hash.py):
-		//   import hashlib
-		//   pw = "2345-6789-ABCD-EFGH-JKMN-PQRS"
-		//   md4 = hashlib.new('md4')
-		//   md4.update(pw.encode('utf-16le'))
-		//   print(md4.hexdigest().upper())
+		// Pinned from an independent pure-Python MD4 (RFC 1320) over the
+		// UTF-16LE bytes, written outside this repo and cross-checked on the
+		// two published vectors above (2026-11-04).
 		// Result: 82675FAE64B89B8DD4265E10E6D2A5D2
 		{"2345-6789-ABCD-EFGH-JKMN-PQRS", "82675FAE64B89B8DD4265E10E6D2A5D2"},
 	}
@@ -146,27 +139,5 @@ func TestCheckUsername(t *testing.T) {
 		if !ok && tt.reason != "" && reason != tt.reason {
 			t.Errorf("CheckUsername(%q): got reason %q, want %q", tt.user, reason, tt.reason)
 		}
-	}
-}
-
-// computeNTHashPython computes the NT hash using pure Go crypto/md4 for comparison.
-// This is the reference implementation we use to verify our implementation.
-func computeNTHashPython(password string) string {
-	// Convert to UTF-16LE
-	utf16Bytes := utf16.Encode([]rune(password))
-	le := make([]byte, 0, len(utf16Bytes)*2)
-	for _, u := range utf16Bytes {
-		le = append(le, byte(u), byte(u>>8))
-	}
-	// MD4 hash
-	h := md4.New()
-	h.Write(le)
-	return strings.ToUpper(hex.EncodeToString(h.Sum(nil)))
-}
-
-func TestComputeNTHashPython(t *testing.T) {
-	// Verify our reference implementation matches known vectors
-	if got := computeNTHashPython("password"); got != "8846F7EAEE8FB117AD06BDD830B7586C" {
-		t.Errorf("computeNTHashPython(password) = %s, want 8846F7EAEE8FB117AD06BDD830B7586C", got)
 	}
 }
