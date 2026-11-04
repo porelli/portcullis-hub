@@ -18,6 +18,7 @@ require (
 	github.com/vjeantet/ldapserver v1.0.2-0.20260725103726-663e6b9910fb
 	github.com/xhit/go-str2duration/v2 v2.2.0
 	golang.org/x/mod v0.42.0
+	golang.org/x/sys v0.47.0
 	golang.org/x/text v0.43.0
 	gopkg.in/yaml.v3 v3.0.1
 )
@@ -50,5 +51,4 @@ require (
 	go.yaml.in/yaml/v3 v3.0.6 // indirect
 	golang.org/x/crypto v0.54.0 // indirect
 	golang.org/x/net v0.57.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
 )
