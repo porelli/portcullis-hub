@@ -38,7 +38,8 @@ func TestPlanKeepsAccess(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantA := acl(uo(R|W|X), go_(R|W|X), gr(1000, R|X), mk(R|W|X), ot(0))
-	if !slices.Equal(o.want.Access, wantA) || !slices.Equal(o.want.Default, wantA) || o.want.Mode != 0o2770 {
+	wantD := acl(uo(R|W|X), go_(R|W|X), mk(R|W|X), ot(0)) // R51: no group:1000, others ---
+	if !slices.Equal(o.want.Access, wantA) || !slices.Equal(o.want.Default, wantD) || o.want.Mode != 0o2770 {
 		t.Fatalf("dir: %s / %s %o", aclText(o.want.Access), aclText(o.want.Default), o.want.Mode)
 	}
 	if !o.setgid || !o.defACL || o.narrowed {
@@ -59,6 +60,23 @@ func TestPlanKeepsAccess(t *testing.T) {
 	o, _ = planEntry(state{UID: 1, GID: 60001, Mode: 0o664}, target{GID: 60001, Write: true, ACL: true})
 	if o.change {
 		t.Fatalf("consistent file changes: %+v", o)
+	}
+}
+
+// R51: an existing default ACL keeps its own entries (narrowed to its
+// mask) and "others"; it gains the folder group and mask rwx, never an
+// entry for the previous group or owner.
+func TestPlanDefaultACL(t *testing.T) {
+	def := acl(uo(R|W|X), us(3000, R|W|X), go_(R|X), mk(R|X), ot(R))
+	cur := state{Dir: true, UID: 1000, GID: 1000, Mode: 0o755, Default: def}
+	owner := uint32(2000)
+	o, err := planEntry(cur, target{GID: 60001, Write: true, HasOwner: true, Owner: owner, ACL: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := acl(uo(R|W|X), us(3000, R|X), go_(R|W|X), mk(R|W|X), ot(R))
+	if !slices.Equal(o.want.Default, want) || !o.narrowed {
+		t.Fatalf("default %s, want %s", aclText(o.want.Default), aclText(want))
 	}
 }
 
@@ -84,15 +102,25 @@ func TestPlanSetID(t *testing.T) {
 	if o, _ := planEntry(state{UID: 1000, GID: 60001, Mode: 0o4755}, tg); !o.setid {
 		t.Fatalf("setuid: %+v", o)
 	}
-	// setuid file, group change only: the bit is kept.
-	o, _ := planEntry(state{UID: 1000, GID: 1000, Mode: 0o4755}, target{GID: 60001, Write: true, ACL: true})
-	if o.setid || o.want.Mode&modeSetuid == 0 {
-		t.Fatalf("setuid kept: %+v %o", o, o.want.Mode)
+	// R47: a setuid file under a group change only: skipped too (the
+	// folder group would get x on a file that runs as its owner).
+	o, _ := planEntry(state{UID: 1000, GID: 1000, Mode: 0o4750}, target{GID: 60001, Write: true, ACL: true})
+	if !o.setid || o.change {
+		t.Fatalf("setuid, group change: %+v", o)
 	}
-	// setgid file already in the group: changed, bit kept.
+	// Even already in the group and owned right: left alone.
+	o, _ = planEntry(state{UID: 2000, GID: 60001, Mode: 0o4750}, target{GID: 60001, Write: true, ACL: true})
+	if !o.setid {
+		t.Fatalf("setuid in group: %+v", o)
+	}
 	o, _ = planEntry(state{UID: 1000, GID: 60001, Mode: 0o2750}, target{GID: 60001, Write: true, ACL: true})
-	if o.setid || o.want.Mode != 0o2770 {
-		t.Fatalf("setgid in group: %+v %o", o, o.want.Mode)
+	if !o.setid {
+		t.Fatalf("setgid in group: %+v", o)
+	}
+	// A setgid / setuid directory is no executable: planned as usual.
+	o, _ = planEntry(state{Dir: true, UID: 1000, GID: 1000, Mode: 0o4755}, target{GID: 60001, Write: true, ACL: true})
+	if o.setid || o.want.Mode&modeSetgid == 0 {
+		t.Fatalf("setuid dir: %+v", o)
 	}
 }
 
@@ -200,10 +228,33 @@ func TestPlanNeverWidens(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		if !cur.Dir && cur.Mode&(modeSetuid|modeSetgid) != 0 && !o.setid {
+			t.Fatalf("setid file planned: %s", describe(cur))
+		}
 		if o.setid {
 			continue
 		}
 		checked++
+		// Files made later in the directory (R51): through the default ACL
+		// nobody but the creator and the folder group gets anything they
+		// didn't get from the old default; with no old default, nothing.
+		if cur.Dir && withACL {
+			for _, uid := range uids {
+				for _, gids := range gidSets {
+					if slices.Contains(gids, int(tg.GID)) {
+						continue
+					}
+					p := Principal{UID: uid, GIDs: gids}
+					for _, w := range wants {
+						after := Allowed(inherited(o.want.Default, 9999, tg.GID), p, w)
+						before := cur.Default != nil && Allowed(inherited(cur.Default, 9999, tg.GID), p, w)
+						if after && !before {
+							t.Fatalf("default widened: uid %d gids %v %s: %s → %s", uid, gids, w, describe(cur), describe(o.want))
+						}
+					}
+				}
+			}
+		}
 		if _, _, err := encodeState(o.want); err != nil {
 			t.Fatalf("invalid ACL planned for %s: %v", describe(cur), err)
 		}
@@ -236,4 +287,30 @@ func TestPlanNeverWidens(t *testing.T) {
 	if checked < 50000 {
 		t.Fatalf("only %d entries checked", checked)
 	}
+}
+
+// inherited is the access check input of a file created 0666 by uid in a
+// directory with default ACL def (acl(5): the default entries, the mask ∧
+// the create mode's group bits; without a default ACL, umask 022 applies).
+func inherited(def ACL, uid, gid uint32) Stat {
+	if def == nil {
+		return Stat{UID: int(uid), GID: int(gid), Mode: 0o644}
+	}
+	a := canon(def)
+	for i := range a {
+		switch a[i].Tag {
+		case TagUserObj, TagOther:
+			a[i].Perm &= R | W
+		case TagMask:
+			a[i].Perm &= R | W
+		}
+	}
+	if _, ok := a.Mask(); !ok {
+		for i := range a {
+			if a[i].Tag == TagGroupObj {
+				a[i].Perm &= R | W
+			}
+		}
+	}
+	return Stat{UID: int(uid), GID: int(gid), Mode: 0o666, Access: a}
 }

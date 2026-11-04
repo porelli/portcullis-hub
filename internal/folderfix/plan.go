@@ -102,25 +102,26 @@ func keepPerm(a ACL, tag uint16, id uint32, eff Perm) (Perm, error) {
 }
 
 // planEntry computes the consistent-ownership state of contract §14.2 for one
-// entry and how it differs from cur. Nobody's effective rights shrink, and
+// entry and how it differs from cur (rules version planRules). Nobody's effective rights shrink, and
 // nobody but the folder group and the must_own uid gains any:
 //   - named entries are narrowed to entry ∧ old mask before the mask is raised;
 //   - the owning group class is narrowed the same way (group_obj ∧ old mask);
 //   - a previous owning group gets a named entry with its effective bits
 //     (also "---": without it its members would fall through to "others");
 //   - under must_own the previous owner gets a named entry with its user bits;
-//   - "others" and the user bits are never changed, nothing is removed.
+//   - "others" and the user bits are never changed, nothing is removed;
+//   - setuid / setgid regular files are skipped (setid);
+//   - a directory's default ACL grants new files to the folder group only.
 //
 // An ACL on disk that isn't valid (unsorted, duplicate ids) is errBadACL:
 // the entry is reported and left alone.
 func planEntry(cur state, t target) (outcome, error) {
 	o := outcome{want: cur}
 	file := !cur.Dir
-	if file && cur.Mode&modeSetgid != 0 && cur.GID != t.GID {
-		o.setid = true
-		return o, nil
-	}
-	if file && t.HasOwner && cur.Mode&modeSetuid != 0 && cur.UID != t.Owner {
+	// R47: a regular file with setuid or setgid is never touched: a new
+	// group, owner or group x on it would let the folder group or the app
+	// act as its owner or group.
+	if file && cur.Mode&(modeSetuid|modeSetgid) != 0 {
 		o.setid = true
 		return o, nil
 	}
@@ -246,41 +247,23 @@ func planEntry(cur state, t target) (outcome, error) {
 			w.Access = a
 		}
 		if cur.Dir {
+			// R51: the default ACL is what files made later get: the
+			// creator (USER_OBJ), the folder group rwx, mask rwx, and only
+			// what an existing default ACL already granted (its named
+			// entries narrowed to its mask, its "others"). Never an entry for
+			// the previous group or owner, and "others" --- when there was
+			// none: with a default ACL the umask no longer narrows new files.
 			var d ACL
-			var dEff Perm
 			if len(cur.Default) > 0 {
 				d = canon(cur.Default)
-				m, has := d.Mask()
-				if !has {
-					m = permAll
-				}
-				c := d.Clamp()
-				if !slices.Equal(c, d) {
+				if c := d.Clamp(); !slices.Equal(c, d) {
 					o.narrowed = true
+					d = c
 				}
-				d = c
-				dEff = permOf(d, TagGroupObj) & m
 			} else {
-				// What setfacl -d starts from: the access ACL's base entries.
-				d = ACL{{Tag: TagUserObj, Perm: userP}, {Tag: TagGroupObj, Perm: groupEff}, {Tag: TagOther, Perm: otherP}}
-				dEff = groupEff
+				d = ACL{{Tag: TagUserObj, Perm: userNew}, {Tag: TagGroupObj}, {Tag: TagOther}}
 			}
-			if changeGroup {
-				keep, err := keepPerm(d, TagGroup, cur.GID, dEff)
-				if err != nil {
-					return o, err
-				}
-				d = d.Set(TagGroup, cur.GID, keep)
-			}
-			if changeOwner {
-				keep, err := keepPerm(d, TagUser, cur.UID, permOf(d, TagUserObj))
-				if err != nil {
-					return o, err
-				}
-				d = d.Set(TagUser, cur.UID, keep)
-			}
-			d = d.Set(TagGroupObj, 0, permAll).Set(TagMask, 0, permAll)
-			w.Default = d
+			w.Default = d.Set(TagGroupObj, 0, permAll).Set(TagMask, 0, permAll)
 		}
 	}
 
