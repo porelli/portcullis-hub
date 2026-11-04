@@ -22,6 +22,7 @@ func init() {
 	Register(exclusiveCheck{})
 	Register(gidCollisionCheck{})
 	Register(folderChangedCheck{})
+	Register(folderReachableAboveCheck{})
 }
 
 // Finding kinds of this file.
@@ -35,6 +36,7 @@ const (
 	KindExclusive           = "exclusive"
 	KindGIDCollision        = "gid_collision"
 	KindFolderChanged       = "folder_changed"
+	KindFolderReachAbove    = "folder_reachable_above"
 
 	// FixManageAsFolder is shared_path's one-click fix (Task 12).
 	FixManageAsFolder = "manage_as_folder"
@@ -664,6 +666,104 @@ func (folderChangedCheck) Run(in *Inputs) []Finding {
 			Instances: []string{c.Instance}, Folders: []string{c.Folder}, Paths: paths,
 			Inputs: Digest(c),
 		})
+	}
+	return out
+}
+
+// ── folder_reachable_above (H4) ─────────────────────────
+
+// Reach is a service that holds folder f's gid (Use: one of its uses of
+// f) and also mounts Above, a host path at or above f's path.
+type Reach struct {
+	Use, Above PathIn
+}
+
+// ReachedAbove lists, for every service with a use of folder f in
+// paths, that service's other mounts (a setting's host path, a custom
+// override's bind, another folder's value) at or above f's path: the
+// service gets the folder's gid, and directories are group-writable
+// (contract §14.2), so through that mount it creates, renames and
+// deletes in every folder directory whatever its own use declares.
+// Sorted by instance, service, then the mount's host path.
+func ReachedAbove(f FolderIn, paths []PathIn) []Reach {
+	root := path.Clean(f.Path)
+	type svc struct{ inst, name string }
+	uses := map[svc]PathIn{}
+	for _, u := range sortedUses(paths) {
+		k := svc{u.Instance, u.Service}
+		if _, seen := uses[k]; u.Folder == f.ID && u.Source == SourceFolder && !seen {
+			uses[k] = u
+		}
+	}
+	var out []Reach
+	for _, o := range sortedUses(paths) {
+		u, ok := uses[svc{o.Instance, o.Service}]
+		if !ok || o.HostPath == "" || (o.Source == SourceFolder && o.Folder == f.ID) || !strings.HasPrefix(o.HostPath, "/") {
+			continue
+		}
+		if under(root, path.Clean(o.HostPath)) {
+			out = append(out, Reach{Use: u, Above: o})
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		a, b := out[i], out[j]
+		if a.Use.Instance != b.Use.Instance {
+			return a.Use.Instance < b.Use.Instance
+		}
+		if a.Use.Service != b.Use.Service {
+			return a.Use.Service < b.Use.Service
+		}
+		return path.Clean(a.Above.HostPath) < path.Clean(b.Above.HostPath)
+	})
+	return out
+}
+
+// ReachName is how a mount above a folder is named: "`/srv` (immich's
+// Extra)".
+func ReachName(o PathIn) string {
+	return "`" + path.Clean(o.HostPath) + "` (" + useName(o) + ")"
+}
+
+type folderReachableAboveCheck struct{}
+
+func (folderReachableAboveCheck) Kind() string { return KindFolderReachAbove }
+
+func (folderReachableAboveCheck) Run(in *Inputs) []Finding {
+	var out []Finding
+	for _, f := range in.Folders {
+		reach := ReachedAbove(f, in.Paths)
+		for i := 0; i < len(reach); {
+			j := i
+			for j < len(reach) && reach[j].Use.Instance == reach[i].Use.Instance && reach[j].Use.Service == reach[i].Use.Service {
+				j++
+			}
+			grp := reach[i:j]
+			i = j
+			u := grp[0].Use
+			var names []string
+			all := []PathIn{u}
+			for _, r := range grp {
+				names = append(names, ReachName(r.Above))
+				all = append(all, r.Above)
+			}
+			var paths []string
+			for _, r := range grp {
+				paths = append(paths, path.Clean(r.Above.HostPath))
+			}
+			out = append(out, Finding{
+				FP: Fingerprint(KindFolderReachAbove, u.Instance, u.Service, f.ID), Kind: KindFolderReachAbove, Severity: Problem,
+				Title: fmt.Sprintf("%s's service %s reaches all of shared folder %s through %s.", u.Instance, u.Service, f.Name, joinAnd(names)),
+				Why: fmt.Sprintf("%s holds the folder's group (gid %d) for %s, and also mounts a directory at or above `%s`. Folder directories are group-writable, so through that mount it can create, rename and delete anywhere in the folder, whatever access its own use declares.",
+					u.Service, f.GID, useName(u), path.Clean(f.Path)),
+				Class: FixExplain,
+				Steps: []string{
+					fmt.Sprintf("Remove the mount of %s from %s, or point it at a directory outside the shared folder (Settings, or the custom override in the Expert tab).", joinAnd(names), u.Instance),
+					fmt.Sprintf("Or unassign %s from shared folder %s (Settings → Shared folders).", u.Instance, f.Name),
+				},
+				Instances: []string{u.Instance}, Folders: []string{f.ID}, Paths: uniq(paths...),
+				Inputs: Digest([]any{f.ID, f.Path, f.GID, all}),
+			})
+		}
 	}
 	return out
 }

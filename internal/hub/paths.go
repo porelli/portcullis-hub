@@ -82,43 +82,49 @@ func (h *Hub) pathUsagesIn(v renderView) []PathUsage {
 		if !h.st.IsEnabled(t.ID) {
 			continue
 		}
-		s := v.settings[t.ID]
-		var values map[string]settings.Value
-		valuesOf := func() map[string]settings.Value {
-			if values == nil {
-				values = h.instanceValuesLocked(t, s)
-			}
-			return values
-		}
-		var mounts []*folderMount
-		gidEnv := h.folderGIDEnvIn(v, t, s)
-		var used []PathUsage
-		for _, o := range mountOptions(t) {
-			val, ok := h.effectiveValue(t, o, s)
-			if !ok {
-				continue
-			}
-			u, fm, err := h.pathUsageIn(v, t, o, val, valuesOf, gidEnv)
-			if err != nil {
-				log.Printf("settings: %s: %s: %v", t.ID, o.Key, err)
-				continue
-			}
-			if fm != nil {
-				mounts = append(mounts, fm)
-			}
-			used = append(used, u)
-		}
-		groups := folderGroupAdd(mounts)
-		for j := range used {
-			if g := groups[used[j].Service]; len(g) > 0 {
-				used[j].GIDs = append([]int(nil), g...)
-			}
-		}
-		out = append(out, used...)
-		out = append(out, h.customMountsLocked(t)...)
+		out = append(out, h.instanceUsagesIn(v, t)...)
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Instance < out[j].Instance })
 	return out
+}
+
+// instanceUsagesIn are instance t's usages over view v, enabled or not:
+// each path option with a value (option order), then the custom
+// override's bind mounts. Caller holds mu (read).
+func (h *Hub) instanceUsagesIn(v renderView, t *templates.Template) []PathUsage {
+	s := v.settings[t.ID]
+	var values map[string]settings.Value
+	valuesOf := func() map[string]settings.Value {
+		if values == nil {
+			values = h.instanceValuesLocked(t, s)
+		}
+		return values
+	}
+	var mounts []*folderMount
+	gidEnv := h.folderGIDEnvIn(v, t, s)
+	var used []PathUsage
+	for _, o := range mountOptions(t) {
+		val, ok := h.effectiveValue(t, o, s)
+		if !ok {
+			continue
+		}
+		u, fm, err := h.pathUsageIn(v, t, o, val, valuesOf, gidEnv)
+		if err != nil {
+			log.Printf("settings: %s: %s: %v", t.ID, o.Key, err)
+			continue
+		}
+		if fm != nil {
+			mounts = append(mounts, fm)
+		}
+		used = append(used, u)
+	}
+	groups := folderGroupAdd(mounts)
+	for j := range used {
+		if g := groups[used[j].Service]; len(g) > 0 {
+			used[j].GIDs = append([]int(nil), g...)
+		}
+	}
+	return append(used, h.customMountsLocked(t)...)
 }
 
 // pathUsageIn is option o's usage with value v over view rv (fm: its

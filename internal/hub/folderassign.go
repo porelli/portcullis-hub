@@ -24,6 +24,7 @@ import (
 	"golang.org/x/text/message"
 
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/doctor"
 	"github.com/portcullis/hub/internal/folderfix"
 	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/settings"
@@ -802,6 +803,35 @@ func skippedWarnings(rep *folderfix.Report) []string {
 	return append(out, fixerWarnings(rep)...)
 }
 
+// reachAboveErrIn refuses (409) a plan that leaves a service holding
+// folder id's gid (every use of it among insts, over view rv: enabled or
+// not) while it also mounts a host path at or above the folder (H4): the
+// gid would reach every folder directory through that mount, directories
+// being group-writable. Caller holds mu (read).
+func (h *Hub) reachAboveErrIn(rv renderView, id string, f state.Folder, insts []string) error {
+	var paths []doctor.PathIn
+	for _, inst := range insts {
+		t := h.findLocked(inst)
+		if t == nil {
+			continue
+		}
+		for _, u := range h.instanceUsagesIn(rv, t) {
+			paths = append(paths, pathIn(u))
+		}
+	}
+	reach := doctor.ReachedAbove(doctor.FolderIn{ID: id, Name: f.Name, Path: f.Path, GID: f.GID}, paths)
+	if len(reach) == 0 {
+		return nil
+	}
+	r := reach[0]
+	more := ""
+	if len(reach) > 1 {
+		more = fmt.Sprintf(" (and %d more)", len(reach)-1)
+	}
+	return statusErr(http.StatusConflict, "shared folder %s: %s's service %s would hold the folder's group and also mounts %s%s, at or above the folder: through that mount it could create, rename and delete anywhere in the folder. Remove that mount or point it outside the folder first",
+		f.Name, r.Use.Instance, r.Use.Service, doctor.ReachName(r.Above), more)
+}
+
 // dryRunAssign renders every affected instance's override and env from
 // the planned values (ruling 5: before anything stops) and checks its
 // custom override. It renders from a planned copy of the settings and
@@ -844,6 +874,9 @@ func (h *Hub) dryRunAssign(id string, c *assignCalc) error {
 		pf := cur
 		pf.WriteConfirmed = c.wc
 		planned.folders[id] = pf
+		if err := h.reachAboveErrIn(planned, id, pf, c.affected); err != nil {
+			return nil, err
+		}
 		c.renderChanged = map[string]bool{}
 		var views []*templates.Template
 		for _, inst := range c.affected {

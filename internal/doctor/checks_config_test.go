@@ -258,3 +258,40 @@ func TestFolderChanged(t *testing.T) {
 		t.Fatalf("got %+v", got)
 	}
 }
+
+// H4: a service that holds a folder's gid and also mounts a path at or
+// above the folder reaches every folder directory through that mount.
+func TestFolderReachableAbove(t *testing.T) {
+	media := FolderIn{ID: "media", Name: "Family media", Path: "/srv/media", GID: 60001}
+	use := folderUse("immich", "library", "media", "/srv/media/photos", false, true)
+	other := folderUse("jellyfin", "movies", "media", "/srv/media/movies", false, true)
+	above := setting("immich", "extra", "/srv", true)
+	at := custom("immich", "/srv/media")
+	elsewhere := setting("immich", "cache", "/srv/cache", true)
+	below := setting("immich", "inside", "/srv/media/photos/x", true)
+	otherSvc := setting("immich", "db", "/srv", true)
+	otherSvc.Service = "db"
+	media.Uses = []PathIn{use, other}
+	got := of(t, "folder_reachable_above", &Inputs{Folders: []FolderIn{media},
+		Paths: []PathIn{use, other, above, at, elsewhere, below, otherSvc}})
+	if len(got) != 1 {
+		t.Fatalf("findings = %+v", got)
+	}
+	f := got[0]
+	if f.Severity != Problem || f.Class != FixExplain || len(f.Steps) == 0 || f.FixKind != "" ||
+		strings.Join(f.Instances, ",") != "immich" || strings.Join(f.Folders, ",") != "media" ||
+		strings.Join(f.Paths, ",") != "/srv,/srv/media" || !strings.Contains(f.Title, "Family media") {
+		t.Errorf("finding = %+v", f)
+	}
+	if f.FP != Fingerprint("folder_reachable_above", "immich", "immich", "media") {
+		t.Errorf("fp = %s", f.FP)
+	}
+	reach := ReachedAbove(media, []PathIn{use, other, above, at, elsewhere, below, otherSvc})
+	if len(reach) != 2 || reach[0].Above.HostPath != "/srv" || reach[1].Above.HostPath != "/srv/media" || reach[0].Use.Key != "library" {
+		t.Errorf("reach = %+v", reach)
+	}
+	// Nothing at or above: no finding.
+	if got := of(t, "folder_reachable_above", &Inputs{Folders: []FolderIn{media}, Paths: []PathIn{use, other, elsewhere, below, otherSvc}}); len(got) != 0 {
+		t.Errorf("findings = %+v", got)
+	}
+}

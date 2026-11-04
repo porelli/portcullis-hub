@@ -1327,6 +1327,44 @@ func TestFolderAuditRedacted(t *testing.T) {
 	}
 }
 
+// H4: a preview is refused while a service the folder's gid reaches also
+// mounts a path at or above the folder (a setting or the custom
+// override): through it the gid would reach every folder directory.
+func TestPreviewRefusesMountAboveFolder(t *testing.T) {
+	f, _, _ := assignFixture(t)
+	ctx := context.Background()
+	use := func(uses ...FolderUse) AssignRequest { return AssignRequest{Uses: uses} }
+	lib := FolderUse{Instance: "immich", Key: "library"}
+	// A hand-typed setting of the target service above the folder.
+	setStored(f, "immich", "extra", "/srv")
+	_, err := f.h.PreviewAssign(ctx, "media", use(lib))
+	if statusOf(err) != 409 || !strings.Contains(err.Error(), "`/srv`") || !strings.Contains(err.Error(), "Family media") {
+		t.Fatalf("setting above: %v", err)
+	}
+	// At the folder's path itself.
+	setStored(f, "immich", "extra", "/srv/media")
+	if _, err := f.h.PreviewAssign(ctx, "media", use(lib)); statusOf(err) != 409 {
+		t.Fatalf("setting at: %v", err)
+	}
+	// Elsewhere, or below the folder: fine.
+	setStored(f, "immich", "extra", "/srv/docs")
+	if _, err := f.h.PreviewAssign(ctx, "media", use(lib)); err != nil {
+		t.Fatalf("elsewhere: %v", err)
+	}
+	// Another service the gid reaches (immich, already assigned) is
+	// judged when samba is added.
+	setStored(f, "immich", "extra", "/srv", "library", "folder:media")
+	if _, err := f.h.PreviewAssign(ctx, "media", use(lib, FolderUse{Instance: "samba", Key: "share"})); statusOf(err) != 409 || !strings.Contains(err.Error(), "immich") {
+		t.Fatalf("existing user: %v", err)
+	}
+	setStored(f, "immich", "extra", nil, "library", nil)
+	// The custom override's bind of the target service.
+	writeFile(t, f.h.userOverridePath("samba"), "services:\n  samba:\n    volumes:\n      - /srv:/all\n")
+	if _, err := f.h.PreviewAssign(ctx, "media", use(FolderUse{Instance: "samba", Key: "share"})); statusOf(err) != 409 || !strings.Contains(err.Error(), "custom override") {
+		t.Fatalf("custom override above: %v", err)
+	}
+}
+
 // M6: every run's races reach the op's warnings.
 func TestEveryRunsWarnings(t *testing.T) {
 	f, d, _ := assignFixture(t)
