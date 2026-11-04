@@ -1342,6 +1342,7 @@ type failCtx struct {
 // instances' redaction sets (M5).
 func (h *Hub) failBeforeState(fb *failCtx, cause error, snap string, diskChanged bool) error {
 	id, m := fb.id, fb.m
+	keepMarker := false // the snapshot couldn't be recorded: the marker names it for recovery
 	if diskChanged && snap != "" {
 		h.mu.Lock()
 		if f, ok := h.st.Folders[id]; ok {
@@ -1350,13 +1351,16 @@ func (h *Hub) failBeforeState(fb *failCtx, cause error, snap string, diskChanged
 			h.st.Folders[id] = f
 			if err := h.saveStateLocked(); err != nil {
 				h.st.Folders[id] = prev
-				log.Printf("shared folders: ERROR: %s: recording the snapshot to undo: %v", id, err)
+				keepMarker = true
+				log.Printf("shared folders: ERROR: %s: recording the snapshot to undo: %v (marker kept: recovery records it at the next start)", id, err)
 			}
 		}
 		h.mu.Unlock()
 	}
 	startErr := h.startAll(fb.stopped)
-	h.removeMarker(id)
+	if !keepMarker {
+		h.removeMarker(id)
+	}
 	var b strings.Builder
 	b.WriteString(cause.Error())
 	b.WriteString(": the settings are unchanged")
