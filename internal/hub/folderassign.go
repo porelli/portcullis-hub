@@ -60,6 +60,9 @@ type FolderUse struct {
 // AssignRequest is the full desired set of a folder's uses.
 type AssignRequest struct {
 	Uses []FolderUse `json:"uses"`
+	// reapply: plan the disk although every use is kept (the doctor's
+	// reapply_folder, Task 12; never from the API body).
+	reapply bool
 }
 
 // UsePlan is one use as the apply would leave it.
@@ -128,6 +131,9 @@ type assignCalc struct {
 	inputs   map[string]hashInputs
 	scan     *folderfix.Report
 	mustOwn  map[string]bool // "<instance>/<key>" of the must_own use
+	// pending: folder is a definition not stored yet (manage_as_folder's
+	// preview, ruling 34): planned with its predicted gid.
+	pending bool
 	// renderChanged: affected instances whose override or env the apply
 	// changes (dryRunAssign, M8), whether or not their own values change.
 	renderChanged map[string]bool
@@ -329,12 +335,18 @@ func (h *Hub) assignAffectedLocked(id string, req AssignRequest) []string {
 
 // planAssignLocked validates req against state and computes the uses,
 // value edits and write confirmations (no I/O). Caller holds mu.
-func (h *Hub) planAssignLocked(id string, req AssignRequest) (*assignCalc, error) {
+func (h *Hub) planAssignLocked(id string, req AssignRequest, pending *state.Folder) (*assignCalc, error) {
 	f, ok := h.st.Folders[id]
+	if pending != nil {
+		if ok {
+			return nil, statusErr(http.StatusConflict, "shared folder %s already exists", id)
+		}
+		f, ok = *pending, true
+	}
 	if !ok {
 		return nil, ErrNotFound
 	}
-	c := &assignCalc{folder: f, wc: maps.Clone(f.WriteConfirmed), enabled: map[string]bool{}, running: map[string]bool{},
+	c := &assignCalc{folder: f, pending: pending != nil, wc: maps.Clone(f.WriteConfirmed), enabled: map[string]bool{}, running: map[string]bool{},
 		names: map[string]string{}, inputs: map[string]hashInputs{}, mustOwn: map[string]bool{}}
 	if c.wc == nil {
 		c.wc = map[string]bool{}
@@ -549,7 +561,15 @@ func (h *Hub) planAssignLocked(id string, req AssignRequest) (*assignCalc, error
 		up.Env = env
 	}
 
-	if c.adds > 0 {
+	// A re-apply (the doctor's reapply_folder) plans the disk for the
+	// uses it keeps too: that is what fixes drift.
+	kept := 0
+	for _, up := range c.plan.Uses {
+		if up.Change != "remove" {
+			kept++
+		}
+	}
+	if c.adds > 0 || req.reapply && kept > 0 {
 		files := "r"
 		for _, up := range c.plan.Uses {
 			if up.Change != "remove" && up.Access == templates.FolderWrite {
@@ -617,8 +637,14 @@ func (c *assignCalc) regenSet() []string {
 // previewMaxTime), the dry-run render, the text and the hash. It changes
 // nothing.
 func (h *Hub) computeAssign(ctx context.Context, id string, req AssignRequest) (*assignCalc, error) {
+	return h.computeAssignFor(ctx, id, req, nil)
+}
+
+// computeAssignFor is computeAssign; pending non-nil plans folder id as
+// that definition, not stored yet (it must not exist).
+func (h *Hub) computeAssignFor(ctx context.Context, id string, req AssignRequest, pending *state.Folder) (*assignCalc, error) {
 	h.mu.RLock()
-	c, err := h.planAssignLocked(id, req)
+	c, err := h.planAssignLocked(id, req, pending)
 	h.mu.RUnlock()
 	if err != nil {
 		return nil, err
@@ -790,6 +816,12 @@ func (h *Hub) dryRunAssign(id string, c *assignCalc) error {
 		h.mu.RLock()
 		defer h.mu.RUnlock()
 		cur, ok := h.st.Folders[id]
+		if c.pending {
+			if ok {
+				return nil, errDefinedMeanwhile
+			}
+			cur, ok = c.folder, true
+		}
 		if !ok {
 			return nil, ErrNotFound
 		}
@@ -797,6 +829,9 @@ func (h *Hub) dryRunAssign(id string, c *assignCalc) error {
 		planned := renderView{settings: maps.Clone(h.st.Settings), folders: maps.Clone(h.st.Folders)}
 		if planned.settings == nil {
 			planned.settings = map[string]state.InstanceSettings{}
+		}
+		if planned.folders == nil {
+			planned.folders = map[string]state.Folder{}
 		}
 		for _, inst := range c.changedInstances() {
 			next := applyEdits(h.st.Settings[inst], c.edits, inst)
@@ -836,6 +871,9 @@ func (h *Hub) dryRunAssign(id string, c *assignCalc) error {
 		}
 		return views, nil
 	}()
+	if errors.Is(err, errDefinedMeanwhile) {
+		return statusErr(http.StatusConflict, "shared folder %s already exists", id)
+	}
 	if errors.Is(err, ErrNotFound) {
 		return err
 	}
@@ -849,6 +887,10 @@ func (h *Hub) dryRunAssign(id string, c *assignCalc) error {
 	}
 	return nil
 }
+
+// errDefinedMeanwhile: a pending folder's id was defined since its plan
+// started.
+var errDefinedMeanwhile = errors.New("defined meanwhile")
 
 // applyEdits is s with inst's edits applied (a copy).
 func applyEdits(s state.InstanceSettings, edits []valueEdit, inst string) state.InstanceSettings {
@@ -1077,14 +1119,18 @@ func (h *Hub) StartAssign(id string, req AssignRequest, planHash, actor string) 
 	if err != nil {
 		return nil, err
 	}
-	return h.startAssignHeld(id, req, planHash, actor, unlock)
+	return h.startAssignHeld(id, req, planHash, actor, unlock, nil)
 }
 
 // startAssignHeld is StartAssign with the folder lock already held by
 // the caller (ruling 34: manage_as_folder holds it across its create);
-// unlockFolder is called when the operation ends or is refused.
-func (h *Hub) startAssignHeld(id string, req AssignRequest, planHash, actor string, unlockFolder func()) (*AsyncOp, error) {
-	return h.startAsync(opKeyFolder(id), OpFolderAssign, func(ready func()) (result map[string]string, warnings []string, err error) {
+// unlockFolder is called when the operation ends or is refused; a
+// refusal (no operation started) calls onRefused first, still under the
+// folder lock (manage_as_folder deletes its new definition there).
+func (h *Hub) startAssignHeld(id string, req AssignRequest, planHash, actor string, unlockFolder func(), onRefused func(error)) (*AsyncOp, error) {
+	return h.startAsync(opKeyFolder(id), OpFolderAssign, func(accept func()) (result map[string]string, warnings []string, err error) {
+		accepted := false
+		ready := func() { accepted = true; accept() }
 		var deliverTo []string
 		detail := ""
 		// Last: after every lock is released (the engine re-queues busy
@@ -1095,7 +1141,12 @@ func (h *Hub) startAssignHeld(id string, req AssignRequest, planHash, actor stri
 				h.TriggerDelivery(inst, TriggerSave, true)
 			}
 		}()
-		defer unlockFolder()
+		defer func() {
+			if !accepted && onRefused != nil {
+				onRefused(err)
+			}
+			unlockFolder()
+		}()
 		if err := h.markerPending(id); err != nil {
 			return nil, nil, err
 		}

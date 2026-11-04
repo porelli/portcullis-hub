@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -251,5 +252,24 @@ func TestRuntimeUnreadableInfo(t *testing.T) {
 	}
 	if got[0].FP != Fingerprint(KindGIDCollision, "plex", "unreadable:plex") {
 		t.Errorf("fp %s", got[0].FP)
+	}
+}
+
+// T12 carry: folder_owner offers the undo too while the folder has a last
+// apply (an apply snapshot: an undo clears it).
+func TestFolderOwnerOffersUndo(t *testing.T) {
+	cw := okReport()
+	cw.Principals = []folderfix.PrincipalAccess{{Name: "samba", UID: 10001, CantWrite: folderfix.Count{N: 9}}}
+	scans := map[string]ScanIn{"/srv/media": scanAt("/srv/media", "media", cw,
+		folderfix.Principal{Name: "samba", UID: 10001, GIDs: []int{10001}, Write: true})}
+	never := &Inputs{Folders: []FolderIn{{ID: "media", Name: "Family media", Path: "/srv/media", GID: 60001}}, Scans: scans}
+	if fo := of(t, KindFolderOwner, never); len(fo) != 1 || len(fo[0].MoreFixes) != 0 {
+		t.Errorf("never applied: %+v", fo)
+	}
+	at := time.Now()
+	applied := &Inputs{Folders: []FolderIn{{ID: "media", Name: "Family media", Path: "/srv/media", GID: 60001, LastApply: &at}}, Scans: scans}
+	fo := of(t, KindFolderOwner, applied)
+	if len(fo) != 1 || fo[0].FixKind != FixReapplyFolder || !reflect.DeepEqual(fo[0].MoreFixes, []string{FixUndoFolder}) {
+		t.Errorf("applied: %+v", fo)
 	}
 }

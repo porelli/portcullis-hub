@@ -187,18 +187,7 @@ func (h *Hub) finishOpGuarded(id, op string, err error, rolledBack, keepRunning 
 	if h.Template(id) == nil && !h.IsEnabled(id) {
 		return err // e.g. "template not found": nothing to show it on
 	}
-	r := OpRecord{Op: op, At: time.Now().UTC(), OK: err == nil, RolledBack: rolledBack}
-	if err != nil {
-		redact := h.secretRedactor(id, secretsOf(err))
-		// Redact, then clip (never the other way round: a cut secret's
-		// prefix would escape redaction).
-		r.Error = clipRunes(redact(err.Error()), 600)
-		var ce *compose.Error
-		if errors.As(err, &ce) {
-			r.Output = redact(ce.Output)
-		}
-		r.Hint = opHint(r.Error + "\n" + r.Output)
-	}
+	r := h.opRecordOf(id, op, err, rolledBack)
 	h.opsMu.Lock()
 	if cur := h.ops[id]; keepRunning && cur.Running {
 		h.opsMu.Unlock()
@@ -242,6 +231,24 @@ func (h *Hub) finishOpGuarded(id, op string, err error, rolledBack, keepRunning 
 	}
 	log.Printf("%s %s failed: %s", op, id, r.Error)
 	return &OpError{Record: r, Err: err}
+}
+
+// opRecordOf is op's record for err on id (nil = ok): the redacted, then
+// clipped error, compose's (redacted) output and a hint.
+func (h *Hub) opRecordOf(id, op string, err error, rolledBack bool) OpRecord {
+	r := OpRecord{Op: op, At: time.Now().UTC(), OK: err == nil, RolledBack: rolledBack}
+	if err != nil {
+		redact := h.secretRedactor(id, secretsOf(err))
+		// Redact, then clip (never the other way round: a cut secret's
+		// prefix would escape redaction).
+		r.Error = clipRunes(redact(err.Error()), 600)
+		var ce *compose.Error
+		if errors.As(err, &ce) {
+			r.Output = redact(ce.Output)
+		}
+		r.Hint = opHint(r.Error + "\n" + r.Output)
+	}
+	return r
 }
 
 var bindInUseRe = regexp.MustCompile(`(?i)(?:bind(?: host port)?(?: for)? |listen \w+ )((?:\[[0-9a-fA-F:.]*\]|[0-9.]*):\d+(?:/(?:tcp|udp))?)`)

@@ -79,9 +79,9 @@ type folderMount struct {
 	readOnly bool
 }
 
-// folderMountLocked resolves o's folder value v for instance t: the
-// folder must be defined (state) and its host path resolve through
-// h.folders. Caller must hold mu.
+// folderMountIn resolves o's folder value v for instance t over view rv:
+// the folder must be defined in rv and its host path resolve (through
+// rv's definition, or a test's h.folders). Caller must hold mu.
 func (h *Hub) folderMountIn(rv renderView, t *templates.Template, o *templates.Option, v any) (*folderMount, error) {
 	id, sub, ok, err := folderRefOf(v)
 	if !ok {
@@ -94,7 +94,13 @@ func (h *Hub) folderMountIn(rv renderView, t *templates.Template, o *templates.O
 	if !defined {
 		return nil, fmt.Errorf("no shared folder %q", id)
 	}
-	host, err := folderHostPath(h.folders, v.(string))
+	// The view's definition (a planned one too: manage_as_folder plans a
+	// folder not stored yet), unless a test replaced the Hub's source.
+	src := h.folders
+	if _, own := src.(hubFolders); own {
+		src = folderPaths{id: f.Path}
+	}
+	host, err := folderHostPath(src, v.(string))
 	if err != nil {
 		return nil, err
 	}

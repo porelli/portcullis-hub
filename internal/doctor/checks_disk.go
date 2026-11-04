@@ -41,6 +41,9 @@ const (
 
 	// FixReapplyFolder is folder_owner's one-click fix (Task 12).
 	FixReapplyFolder = "reapply_folder"
+	// FixUndoFolder is the undo of a folder's last fix (contract §14.4),
+	// offered by folder_owner while the folder has a last apply.
+	FixUndoFolder = "undo_folder"
 )
 
 // sortedScans is in.Scans by target.
@@ -233,6 +236,9 @@ func (folderOwnerCheck) Run(in *Inputs) []Finding {
 			Class: FixOneClick, FixKind: FixReapplyFolder,
 			Fix:     fmt.Sprintf("Apply shared folder %s's consistent ownership%s: its group, setgid directories and default ACLs (previewed first; a permissions snapshot is saved before anything changes).", fo.Name, again(fo)),
 			Folders: []string{s.Folder}, Paths: []string{s.Target}, Instances: instancesOf(fo.Uses),
+		}
+		if fo.LastApply != nil {
+			f.MoreFixes = []string{FixUndoFolder}
 		}
 		var why []string
 		if len(bs) > 0 {

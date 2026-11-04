@@ -136,3 +136,13 @@ func TestIsLocal(t *testing.T) {
 		t.Error("empty list: only loopback is local")
 	}
 }
+
+// PortFP is the fp lan_only_exposed gives a port (Task 12 finds the port
+// a rebind_port finding is about by it).
+func TestPortFP(t *testing.T) {
+	p := PortIn{Instance: "samba", Key: "SAMBA_SMB", Service: "samba", Bind: "0.0.0.0", Port: 445, Container: 445, Protocol: "tcp", LanOnly: true}
+	got := of(t, KindLANOnlyExposed, &Inputs{Ports: []PortIn{p}})
+	if len(got) != 1 || got[0].FP != PortFP(p) || PortFP(p) != Fingerprint(KindLANOnlyExposed, "samba", "SAMBA_SMB", "tcp") {
+		t.Fatalf("%+v vs %s", got, PortFP(p))
+	}
+}

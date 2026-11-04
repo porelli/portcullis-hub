@@ -70,6 +70,10 @@ type Finding struct {
 	Paths     []string `json:"paths,omitempty"`
 	Class     FixClass `json:"fix_class,omitempty"`
 	FixKind   string   `json:"fix_kind,omitempty"`
+	// MoreFixes: other one-click fixes the finding offers besides FixKind
+	// (folder_owner: undo_folder while the folder has a last apply); the
+	// Hub's PreviewFix / ApplyFix pick one with the param "fix".
+	MoreFixes []string `json:"more_fix_kinds,omitempty"`
 	Steps     []string `json:"steps,omitempty"` // explain-only instructions
 	Link      *Link    `json:"link,omitempty"`
 	Partial   bool     `json:"partial,omitempty"`

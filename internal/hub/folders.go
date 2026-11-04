@@ -617,30 +617,7 @@ func (h *Hub) probeAndCheck(ctx context.Context, id, p string, create bool) (*fo
 func (h *Hub) CreateFolder(ctx context.Context, in FolderInput, actor string) (view *FolderView, warnings []string, err error) {
 	detail := ""
 	defer func() { h.auditFolder(actor, "folder.create", in.ID, detail, err) }()
-	if !settings.FolderIDRe.MatchString(in.ID) {
-		return nil, nil, badPath("the folder id must match %s", settings.FolderIDRe)
-	}
-	if err := checkFolderFields(in); err != nil {
-		return nil, nil, err
-	}
-	p, err := cleanFolderPath(in.Path)
-	if err != nil {
-		return nil, nil, err
-	}
-	if in.GID != nil {
-		if why := state.ValidAdoptedGID(*in.GID); why != "" {
-			return nil, nil, badPath("gid %d can't be adopted: %s", *in.GID, why)
-		}
-	}
-	if err := h.folderPathRule(p); err != nil {
-		return nil, nil, err
-	}
-	if err := h.dockerRootRule(ctx, p); err != nil {
-		return nil, nil, err
-	}
-	h.mu.RLock()
-	err = h.createChecksLocked(in, p, 0, 0)
-	h.mu.RUnlock()
+	p, err := h.folderPrechecks(ctx, in)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -649,9 +626,78 @@ func (h *Hub) CreateFolder(ctx context.Context, in FolderInput, actor string) (v
 		return nil, nil, err
 	}
 	defer unlock()
+	_, view, warnings, detail, err = h.defineFolderHeld(ctx, in, p)
+	return view, warnings, err
+}
+
+// folderPrechecks are a create's checks before the folder lock and any
+// fixer run: the id, fields and path rules, the Docker root, and under mu
+// the id, overlap and gid. Returns the cleaned path.
+func (h *Hub) folderPrechecks(ctx context.Context, in FolderInput) (string, error) {
+	if !settings.FolderIDRe.MatchString(in.ID) {
+		return "", badPath("the folder id must match %s", settings.FolderIDRe)
+	}
+	if err := checkFolderFields(in); err != nil {
+		return "", err
+	}
+	p, err := cleanFolderPath(in.Path)
+	if err != nil {
+		return "", err
+	}
+	if in.GID != nil {
+		if why := state.ValidAdoptedGID(*in.GID); why != "" {
+			return "", badPath("gid %d can't be adopted: %s", *in.GID, why)
+		}
+	}
+	if err := h.folderPathRule(p); err != nil {
+		return "", err
+	}
+	if err := h.dockerRootRule(ctx, p); err != nil {
+		return "", err
+	}
+	h.mu.RLock()
+	err = h.createChecksLocked(in, p, 0, 0)
+	h.mu.RUnlock()
+	if err != nil {
+		return "", err
+	}
+	return p, nil
+}
+
+// planFolderHeld is the definition a create of in at p (folderPrechecks')
+// would store, with the gid it would allocate (the lowest never allocated
+// now, ruling 34: predicted, not reserved), after the probe and the check;
+// nothing is stored. Caller holds in.ID's folder lock.
+func (h *Hub) planFolderHeld(ctx context.Context, in FolderInput, p string) (state.Folder, []string, error) {
 	pr, rep, warns, err := h.probeAndCheck(ctx, in.ID, p, in.Create)
 	if err != nil {
-		return nil, nil, err
+		return state.Folder{}, nil, err
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if err := h.createChecksLocked(in, p, pr.Dev, pr.Ino); err != nil {
+		return state.Folder{}, nil, err
+	}
+	f := state.Folder{Name: in.Name, Path: p, Description: in.Description, Dev: pr.Dev, Ino: pr.Ino, MountRoot: rep.MountRoot}
+	if in.GID != nil {
+		f.GID, f.Adopted = *in.GID, true
+	} else {
+		f.GID = h.nextGIDLocked()
+	}
+	if f.Adopted {
+		warns = append([]string{fmt.Sprintf("anything mounted with gid %d becomes reachable by this folder's apps", f.GID)}, warns...)
+	}
+	return f, warns, nil
+}
+
+// defineFolderHeld is a create's probe, check and save with in.ID's
+// folder lock held by the caller (ruling 34: manage_as_folder holds it
+// across the create and the assignment's validation). It doesn't audit:
+// detail is folder.create's, for the caller to write after its locks.
+func (h *Hub) defineFolderHeld(ctx context.Context, in FolderInput, p string) (f state.Folder, view *FolderView, warns []string, detail string, err error) {
+	pr, rep, warns, err := h.probeAndCheck(ctx, in.ID, p, in.Create)
+	if err != nil {
+		return f, nil, nil, "", err
 	}
 
 	// A lost race leaves what the probe created (in.Create): an empty
@@ -659,9 +705,9 @@ func (h *Hub) CreateFolder(ctx context.Context, in FolderInput, actor string) (v
 	h.mu.Lock()
 	if err := h.createChecksLocked(in, p, pr.Dev, pr.Ino); err != nil {
 		h.mu.Unlock()
-		return nil, nil, err
+		return f, nil, nil, "", err
 	}
-	f := state.Folder{Name: in.Name, Path: p, Description: in.Description, CreatedAt: time.Now().UTC(),
+	f = state.Folder{Name: in.Name, Path: p, Description: in.Description, CreatedAt: time.Now().UTC(),
 		Dev: pr.Dev, Ino: pr.Ino, MountRoot: rep.MountRoot}
 	if in.GID != nil {
 		f.GID, f.Adopted = *in.GID, true
@@ -684,7 +730,7 @@ func (h *Hub) CreateFolder(ctx context.Context, in FolderInput, actor string) (v
 			h.st.FolderGIDs = slices.Delete(h.st.FolderGIDs, gidAt, gidAt+1)
 		}
 		h.mu.Unlock()
-		return nil, nil, err
+		return f, nil, nil, "", err
 	}
 	v := h.folderViewLocked(in.ID)
 	h.mu.Unlock()
@@ -695,7 +741,7 @@ func (h *Hub) CreateFolder(ctx context.Context, in FolderInput, actor string) (v
 		warns = append([]string{fmt.Sprintf("anything mounted with gid %d becomes reachable by this folder's apps", f.GID)}, warns...)
 	}
 	h.fillLastOp(&v)
-	return &v, warns, nil
+	return f, &v, warns, detail, nil
 }
 
 // usesText lists uses for a refusal: "immich (library), samba (share)".
@@ -820,25 +866,28 @@ func (h *Hub) DeleteFolder(id, actor string) (err error) {
 		return err
 	}
 	defer unlock()
+	detail, err = h.deleteFolderHeld(id)
+	return err
+}
+
+// deleteFolderHeld is DeleteFolder with id's folder lock held by the
+// caller; detail is folder.delete's (the caller audits).
+func (h *Hub) deleteFolderHeld(id string) (detail string, err error) {
 	h.mu.Lock()
+	defer h.mu.Unlock()
 	f, ok := h.st.Folders[id]
 	if !ok {
-		h.mu.Unlock()
-		return ErrNotFound
+		return "", ErrNotFound
 	}
 	if uses := h.folderUsesLocked(id); len(uses) > 0 {
-		h.mu.Unlock()
-		return statusErr(http.StatusConflict, "shared folder %s is used by %s: change those settings first", id, usesText(uses))
+		return "", statusErr(http.StatusConflict, "shared folder %s is used by %s: change those settings first", id, usesText(uses))
 	}
 	delete(h.st.Folders, id)
 	if err := h.saveStateLocked(); err != nil {
 		h.st.Folders[id] = f
-		h.mu.Unlock()
-		return err
+		return "", err
 	}
-	h.mu.Unlock()
-	detail = fmt.Sprintf("gid=%d path=%s", f.GID, f.Path)
-	return nil
+	return fmt.Sprintf("gid=%d path=%s", f.GID, f.Path), nil
 }
 
 // saveStateLocked saves state.yaml; a failure is a 500 (the caller undoes

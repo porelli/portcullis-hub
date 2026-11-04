@@ -108,6 +108,10 @@ func portSubjects(p PortIn) []string {
 	return []string{p.Instance, p.Key, p.Protocol}
 }
 
+// PortFP is the fingerprint lan_only_exposed gives port p (the Hub finds
+// the port a rebind_port finding is about by it).
+func PortFP(p PortIn) string { return Fingerprint(KindLANOnlyExposed, portSubjects(p)...) }
+
 type lanOnlyExposedCheck struct{}
 
 func (lanOnlyExposedCheck) Kind() string { return KindLANOnlyExposed }
@@ -126,7 +130,7 @@ func (lanOnlyExposedCheck) Run(in *Inputs) []Finding {
 		all := !ok || a.IsUnspecified()
 		f := Finding{
 			Kind:      KindLANOnlyExposed,
-			FP:        Fingerprint(KindLANOnlyExposed, portSubjects(p)...),
+			FP:        PortFP(p),
 			Instances: []string{p.Instance},
 		}
 		why := "all"
