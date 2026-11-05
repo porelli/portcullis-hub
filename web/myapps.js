@@ -154,6 +154,14 @@
     return d.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
   }
 
+  // signedInName is the caller's username as people.html shows it ('' if
+  // not known yet). It reaches the page as text and is escaped like
+  // every other line.
+  function signedInName() {
+    const w = document.getElementById('who-name');
+    return w ? w.textContent.trim() : '';
+  }
+
   // credHtml is the card row of credential c of app.
   function credHtml(app, c) {
     const name = app.name || app.id;
@@ -169,7 +177,11 @@
         btns = '<button type="button" class="pd-btn primary sm" data-ma-act="cred-create">Create password</button>';
         break;
       case 'unavailable':
-        line = 'File sharing isn\'t available for your username: the username ' + (c.reason || 'can\'t be used here') + '. Ask an administrator.';
+        // The spec's copy; the name is the signed-in user people.html shows
+        // (#who-name, set by the directory before the tabs render).
+        line = signedInName()
+          ? { html: 'File sharing isn\'t available for the username <code>' + esc(signedInName()) + '</code>; ask an administrator.' }
+          : 'File sharing isn\'t available for your username; ask an administrator.';
         break;
       default:
         line = 'No password yet';
@@ -177,7 +189,7 @@
     }
     let h = '<div class="ma-value ma-cred" data-ma-cred data-ma-app="' + esc(app.id) + '" data-ma-key="' + esc(c.key) + '" data-ma-name="' + esc(name) + '" data-ma-status-kind="' + esc(c.status) + '">' +
       '<dt>' + esc(c.label || c.key) + '</dt><dd>' +
-      '<div class="ma-entry-row"><span class="ma-cred-line' + (c.status === 'unavailable' || c.status === 'voided' ? ' ma-cred-warn' : '') + '">' + esc(line) + '</span>' + btns + '</div>' +
+      '<div class="ma-entry-row"><span class="ma-cred-line' + (c.status === 'unavailable' || c.status === 'voided' ? ' ma-cred-warn' : '') + '">' + (typeof line === 'object' ? line.html : esc(line)) + '</span>' + btns + '</div>' +
       '<div data-ma-cred-panel></div>' +
       '<div class="ma-status pd-muted" data-ma-cred-status role="status"></div>';
     if ((c.info || []).length) {
@@ -220,18 +232,25 @@
 
   // endFlow forgets the flow in progress (and its sessionStorage entry).
   function endFlow() {
+    sessionStorage.removeItem(FA_KEY);
     if (!flow) return;
     clearInterval(flow.timer);
     flow = null;
-    sessionStorage.removeItem(FA_KEY);
   }
+  // A flow never outlives the page: an entry a previous page left (closed
+  // mid-flow, reloaded) is dropped at load and when the page goes.
+  sessionStorage.removeItem(FA_KEY);
+  const FLOW_DEADLINE_MS = 10 * 60 * 1000;
 
   // startFreshAuth opens the fresh sign-in popup for row's credential.
   // Called from the click itself: the popup is opened before any await,
   // so pop-up blockers allow it.
   async function startFreshAuth(el, row) {
     const fa = el.maFreshAuth;
-    if (!fa || !/^https?:\/\//i.test(fa.authorize_url || '')) {
+    // https only, except on a plain-http page (the local harness).
+    const okURL = /^https:\/\//i.test((fa && fa.authorize_url) || '') ||
+      (location.protocol === 'http:' && /^http:\/\//i.test((fa && fa.authorize_url) || ''));
+    if (!fa || !okURL) {
       credStatus(row, 'A fresh sign-in isn\'t available right now. Try again later.', true);
       return;
     }
@@ -280,8 +299,16 @@
     // A popup closed without an answer cancels the flow (after a grace:
     // the callback posts, then closes).
     let closedAt = 0;
+    const deadline = Date.now() + FLOW_DEADLINE_MS;
     mine.timer = setInterval(() => {
       if (flow !== mine) { clearInterval(mine.timer); return; }
+      if (Date.now() > deadline) {
+        if (!popup.closed) popup.close();
+        endFlow();
+        credBusy(row, false);
+        credStatus(row, 'The sign-in took too long: nothing changed. Try again.', true);
+        return;
+      }
       if (!popup.closed) return;
       if (!closedAt) { closedAt = Date.now(); return; }
       if (Date.now() - closedAt < 1000) return;
@@ -361,7 +388,7 @@
     dlg.innerHTML = '<div class="pd-dialog-headbar"><h3 class="pd-dialog-title">Your file-share password for ' + esc(name) + '</h3></div>' +
       '<div class="pd-dialog-body"><div class="ma-pw-row"><code class="ma-pw" data-ma-pw></code>' +
       '<button type="button" class="pd-btn secondary sm" data-ma-pw-act="copy">Copy</button></div>' +
-      '<p class="ma-pw-note"><strong>This is the only time it is shown: you won\'t see it again.</strong> Save it in your Mac\'s Keychain (or your password manager) when ' +
+      '<p class="ma-pw-note"><strong>This is the only time it is shown.</strong> Save it in your Mac\'s Keychain when ' +
       esc(name) + ' asks. It works only for ' + esc(name) + ' on this server.</p>' +
       '<div class="ma-status pd-muted" data-ma-pw-status role="status"></div>' +
       '<div class="ma-pw-actions"><button type="button" class="pd-btn primary sm" data-ma-pw-act="done">I\'ve saved it</button></div></div>';
@@ -389,7 +416,11 @@
     document.body.appendChild(dlg);
     dlg.showModal();
   }
-  window.addEventListener('pagehide', closeShown);
+  window.addEventListener('pagehide', () => {
+    closeShown();
+    if (flow && flow.popup && !flow.popup.closed) flow.popup.close();
+    endFlow();
+  });
 
   // credConfirm opens an inline confirm panel on row (regenerate: the
   // spec's warning; revoke: what it does).

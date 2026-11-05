@@ -1704,7 +1704,14 @@
       e.stopPropagation();
       const card = document.querySelector(`[data-id="${id}"]`);
       const btn = card.querySelector('.toggle');
-      if (enable && !(await confirmLanOnly(id))) return;
+      if (btn.disabled) return;
+      if (enable) {
+        // Disabled while the confirmation loads: a double click opens one dialog.
+        btn.disabled = true;
+        const go = await confirmLanOnly(id);
+        btn.disabled = false;
+        if (!go) return;
+      }
       btn.classList.add('loading');
       btn.textContent = enable ? 'Enabling...' : 'Disabling...';
       try {
@@ -2250,7 +2257,13 @@
 
     async function toggleInstance(btn) {
       const id = instCtx.id, enable = btn.dataset.instEnable === '1';
-      if (enable && !(await confirmLanOnly(id))) return;
+      if (btn.disabled) return;
+      if (enable) {
+        btn.disabled = true;
+        const go = await confirmLanOnly(id);
+        btn.disabled = false;
+        if (!go) return;
+      }
       btn.classList.add('loading');
       btn.textContent = enable ? 'Enabling…' : 'Disabling…';
       try {
