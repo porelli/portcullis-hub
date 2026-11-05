@@ -650,3 +650,48 @@ func TestLocalNetworksUnchangedNoRestart(t *testing.T) {
 		}
 	}
 }
+
+// TestSaveOfHookFileRunsItsHooks (e2e Hub bug 1): a save that changes a
+// data file with on_membership_change: hook runs the hooks that file
+// names in the same run, once — even when the hook's own input (no
+// deliveries of its own) did not change. Emptying share1_writers must
+// reach Samba's sync hook.
+func TestSaveOfHookFileRunsItsHooks(t *testing.T) {
+	c := credSvcFixture(t)
+	shareSetup(t, c)
+	execs := len(c.f.engine.ExecCalls())
+	res, err := c.f.h.SaveSettings(smbID, SettingsUpdate{Values: vals("share1_writers", []string{})}, "root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	settle(c.f)
+	if lines := tsvLines(t, c.f, smbID); !slices.Contains(lines, "value\tshare1_writers\t") {
+		t.Fatalf("people.tsv after the save:\n%s", strings.Join(lines, "\n"))
+	}
+	if res.Deliveries == nil {
+		t.Fatal("no delivery report")
+	}
+	var file, hook *UnitResult
+	for i, u := range res.Deliveries.Units {
+		switch u.Unit {
+		case fileUnit("people"):
+			file = &res.Deliveries.Units[i]
+		case hookUnit("sync"):
+			hook = &res.Deliveries.Units[i]
+		}
+	}
+	if file == nil || !file.OK || file.Skipped != "" {
+		t.Fatalf("people unit = %+v, want written", file)
+	}
+	if hook == nil || !hook.OK || hook.Skipped != "" {
+		t.Fatalf("sync unit = %+v, want run (not skipped)", hook)
+	}
+	calls := c.f.engine.ExecCalls()
+	if n := len(calls) - execs; n != 1 {
+		t.Fatalf("hook execs in the save = %d, want 1", n)
+	}
+	var in settings.HookInput
+	if err := json.Unmarshal(calls[len(calls)-1].in.Stdin, &in); err != nil || in.Trigger != "settings_change" {
+		t.Errorf("hook trigger = %q (%v), want settings_change", in.Trigger, err)
+	}
+}

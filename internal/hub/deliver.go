@@ -1006,8 +1006,11 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 			delivered.Hashes[u.Unit] = o.hash
 			if trig == TriggerMembership || trig == TriggerRetry || trig == TriggerCredential {
 				effects = append(effects, membershipEffect(o.file.OnMembershipChange))
-				membershipHooks = membershipHooks || o.file.OnMembershipChange == templates.MembershipHook
 			}
+			// A changed hook-file runs its hooks in this run, whatever
+			// the trigger (a save of a file-only option included): the
+			// hooks' own input may not have changed.
+			membershipHooks = membershipHooks || o.file.OnMembershipChange == templates.MembershipHook
 		}
 		rep.Units = append(rep.Units, u)
 	}
