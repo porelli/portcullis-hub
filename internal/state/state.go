@@ -246,7 +246,7 @@ type EnteredValue struct {
 }
 
 // instanceSettingsKeys are InstanceSettings' YAML keys.
-var instanceSettingsKeys = map[string]bool{"ports": true, "values": true, "types": true, "person": true, "groups": true, "secrets": true, "entered": true}
+var instanceSettingsKeys = map[string]bool{"ports": true, "values": true, "types": true, "person": true, "groups": true, "secrets": true, "entered": true, "group_ids": true}
 
 // IsLegacySettings reports whether n (one instance's settings) is not the
 // InstanceSettings form: the old flat KEY: value map (contract v2), or
@@ -280,7 +280,7 @@ func (s *InstanceSettings) UnmarshalYAML(n *yaml.Node) error {
 
 // IsZero reports whether s holds nothing.
 func (s InstanceSettings) IsZero() bool {
-	return len(s.Ports)+len(s.Values)+len(s.Types)+len(s.Person)+len(s.Groups)+len(s.Secrets)+len(s.Entered) == 0
+	return len(s.Ports)+len(s.Values)+len(s.Types)+len(s.Person)+len(s.Groups)+len(s.Secrets)+len(s.Entered)+len(s.GroupIDs) == 0
 }
 
 // Clone is a deep copy of s (values are copied structurally: lists and
