@@ -1836,7 +1836,7 @@ func (v *specCheck) file(o *Option, fd *FileDelivery) error {
 		if fd.Render != nil && fd.Render.Format != "" {
 			// B-M4: json / yaml / csv render structured (or multi-line)
 			// text a tsv line can't hold.
-			return fmt.Errorf("file %s is tsv, which takes only the default text: render.format %s is for JSON files", fd.Name, fd.Render.Format)
+			return fmt.Errorf("file %s is tsv: render.format %s can't be written to a tsv file (drop the format; lists are written as their comma-joined text)", fd.Name, fd.Render.Format)
 		}
 	}
 	section := ""

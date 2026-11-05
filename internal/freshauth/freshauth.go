@@ -85,8 +85,9 @@ type Result struct {
 	AMR      []string
 }
 
-// ReasonUnreachable: the token endpoint couldn't be reached (a Hub-side
-// outage, not the caller's refusal: the Hub answers 503).
+// ReasonUnreachable: the token endpoint or the realm's keys (JWKS)
+// couldn't be reached (a Hub-side outage, not the caller's refusal: the
+// Hub answers 503).
 const ReasonUnreachable = "code exchange failed: Keycloak unreachable"
 
 // Error is a refused proof: always answered 403 with Message; Reason
@@ -303,6 +304,11 @@ func oidcReason(err error) string {
 		return "id token audience is not the fresh-auth client"
 	case strings.Contains(msg, "signing algorithm") || strings.Contains(msg, "unsupported") || strings.Contains(msg, "malformed jwt"):
 		return "id token malformed or signed with an unsupported algorithm"
+	case strings.Contains(msg, "fetching keys"):
+		// N3: the realm's JWKS can't be fetched — a Hub-side outage
+		// (503, not the caller's refusal); a bad signature or an unknown
+		// kid never says this.
+		return ReasonUnreachable
 	case strings.Contains(msg, "signature") || strings.Contains(msg, "keys"):
 		return "id token signature not verified by the realm's keys"
 	case strings.Contains(msg, "nbf"):

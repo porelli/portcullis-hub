@@ -445,3 +445,25 @@ func publicDER(t *testing.T, k *rsa.PublicKey) []byte {
 	}
 	return der
 }
+
+// N3: the realm's keys can't be fetched (JWKS at a closed port) — a
+// Hub-side outage: ReasonUnreachable (the Hub answers 503, not counted),
+// never "signature not verified".
+func TestJWKSUnreachableIsUnreachable(t *testing.T) {
+	p := newIDP(t)
+	p.token = p.rs256(claims())
+	closed := httptest.NewServer(http.NotFoundHandler())
+	dead := closed.URL + "/certs"
+	closed.Close()
+	base := p.srv.URL + "/realms/portcullis/protocol/openid-connect"
+	v := freshauth.New(freshauth.Config{
+		Issuer: issuer, TokenURL: base + "/token", JWKSURL: dead,
+		AuthorizeURL: "https://auth.example.org/realms/portcullis/protocol/openid-connect/auth",
+		RedirectURI:  redirect, HTTP: p.srv.Client(), Now: func() time.Time { return now },
+	})
+	_, err := v.Verify(context.Background(), proof(), "alice")
+	var fe *freshauth.Error
+	if !errors.As(err, &fe) || fe.Reason != freshauth.ReasonUnreachable {
+		t.Fatalf("JWKS unreachable = %v (%+v), want reason %q", err, fe, freshauth.ReasonUnreachable)
+	}
+}

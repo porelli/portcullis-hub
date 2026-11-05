@@ -393,10 +393,10 @@ func TestTSVRefusesRenderFormat(t *testing.T) {
 	scalar := "{key: motd, label: MOTD, type: string, delivery: [{file: {name: people, render: {format: json}}}]}"
 	json := strings.Replace(smbHead, ", format: tsv}", "}", 1)
 	runSettingsCases(t, []settingsCase{
-		{"yaml list into tsv", smbHead + opts(connectOpt, list("yaml")), smbCompose, "tags", "tsv"},
-		{"csv list into tsv", smbHead + opts(connectOpt, list("csv")), smbCompose, "tags", "tsv"},
-		{"json list into tsv", smbHead + opts(connectOpt, list("json")), smbCompose, "tags", "tsv"},
-		{"json scalar into tsv", smbHead + opts(connectOpt, scalar), smbCompose, "motd", "tsv"},
+		{"yaml list into tsv", smbHead + opts(connectOpt, list("yaml")), smbCompose, "tags", "file people is tsv: render.format yaml can't be written to a tsv file"},
+		{"csv list into tsv", smbHead + opts(connectOpt, list("csv")), smbCompose, "tags", "file people is tsv: render.format csv can't be written to a tsv file"},
+		{"json list into tsv", smbHead + opts(connectOpt, list("json")), smbCompose, "tags", "file people is tsv: render.format json can't be written to a tsv file"},
+		{"json scalar into tsv", smbHead + opts(connectOpt, scalar), smbCompose, "motd", "file people is tsv: render.format json can't be written to a tsv file"},
 		{"yaml list into json", json + opts(connectOpt, list("yaml")), smbCompose, "", ""},
 		{"default list into tsv", smbHead + opts(connectOpt, "{key: tags, label: Tags, type: groups, delivery: [{file: {name: people}}]}"), smbCompose, "", ""},
 	})
