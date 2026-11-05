@@ -1009,7 +1009,7 @@ func (h *Hub) assignText(c *assignCalc) {
 		}
 		if k.AddSetgid.N > 0 || k.AddDefaultACL.N > 0 {
 			n := max(k.AddSetgid.N, k.AddDefaultACL.N)
-			lines = append(lines, p.Sprintf("%d %s get setgid and a default ACL, so files the apps create later stay in group %s with group write.", n, plural(n, "folder", "folders"), gidS))
+			lines = append(lines, p.Sprintf("%d %s setgid and a default ACL, so files the apps create later stay in group %s with group write.", n, plural(n, "folder gets", "folders get"), gidS))
 		}
 		if k.Narrowed.N > 0 {
 			lines = append(lines, p.Sprintf("%d existing ACL %s %s narrowed to what they grant today.", k.Narrowed.N, plural(k.Narrowed.N, "entry", "entries"), plural(k.Narrowed.N, "is", "are")))
