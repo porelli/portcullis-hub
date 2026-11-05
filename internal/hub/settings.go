@@ -754,6 +754,13 @@ type UnitResult struct {
 type DeliveryReport struct {
 	Instance string       `json:"instance"`
 	Units    []UnitResult `json:"units"`
+	// revokeAfter: instances whose credentials the run's secrets
+	// reconcile voided (A4): applied live once the delivery lock is
+	// released.
+	revokeAfter []string
+	// forceAgain: hooks a superseded run owes (B-I1: it wrote a file
+	// with on_membership_change: hook); its re-queue forces them.
+	forceAgain []string
 }
 
 // settingChange is one changed (key, scope, group) for the audit.
@@ -1201,7 +1208,14 @@ func (h *Hub) nextSettingsLocked(t *templates.Template, cur state.InstanceSettin
 	ge, gown, gchanges := h.groupSettingsChangesLocked(t, cur, &next, parsed)
 	effects, own, changes = append(effects, ge...), append(own, gown...), append(changes, gchanges...)
 	if len(parsed.values)+len(parsed.secrets) > 0 && t.Manifest.Settings != nil {
-		if err := settings.CheckRequires(t.Manifest.Settings, h.requiresValuesLocked(t, next)); err != nil {
+		touched := map[string]bool{}
+		for k := range parsed.values {
+			touched[k] = true
+		}
+		for k := range parsed.secrets {
+			touched[k] = true
+		}
+		if err := settings.CheckRequiresTouched(t.Manifest.Settings, h.requiresValuesLocked(t, next), touched); err != nil {
 			return next, nil, nil, nil, statusErr(400, "%v", err)
 		}
 	}

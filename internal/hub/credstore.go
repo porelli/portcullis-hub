@@ -110,23 +110,12 @@ func (h *Hub) secretsUsableLocked(retry bool) error {
 	return nil
 }
 
-// retryReconcileLocked runs the reconcile again (after a failed one),
-// advancing the pools on a mismatch as reconcileSecrets does. Caller
-// must hold mu (write).
+// retryReconcileLocked runs the reconcile again (after a failed one;
+// a mismatch advances the pools as reconcileSecrets does). Caller must
+// hold mu (write).
 func (h *Hub) retryReconcileLocked() {
-	_, mismatch, err := h.reconcileSecretsLocked("retry")
-	if err != nil {
+	if _, _, err := h.reconcileSecretsLocked("retry"); err != nil {
 		log.Printf("secrets: reconcile retry: %v", err)
-		return
-	}
-	if mismatch && !h.poolsAdvanced {
-		before := h.snapshotPoolsLocked()
-		h.advancePoolsLocked(PoolRewindStep)
-		if err := h.commitPoolsLocked(true, before); err != nil {
-			log.Printf("ERROR: secrets: advancing the person-id pools after an epoch mismatch failed: %v", err)
-			return
-		}
-		h.poolsAdvanced = true
 	}
 }
 
@@ -310,13 +299,44 @@ func (h *Hub) removeHashLocked(instance, key, user string) error {
 	}
 	r, err := h.openSecrets()
 	if err != nil {
+		// The file can't be checked: it may remain (A1, fail closed).
+		h.hashMayRemainLocked(instance, key, user, err)
 		return err
 	}
 	defer r.Close()
 	if err := r.Remove(rel); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return statusErr(http.StatusInternalServerError, "removing the hash file of %s on %s/%s failed: %v", user, instance, key, err)
+		// A1: the file stays a working password until a reconcile removes
+		// it — no person_secret instance starts meanwhile; the caller's
+		// metadata change is still saved (the epoch rotates).
+		h.hashMayRemainLocked(instance, key, user, err)
+		return errors.Join(statusErr(http.StatusInternalServerError, "removing the hash file of %s on %s/%s failed: %v", user, instance, key, err), h.rotateEpochLocked(r))
 	}
 	return h.rotateEpochLocked(r)
+}
+
+// hashMayRemainLocked records that (instance, key, user)'s hash file may
+// still be on the volume after a failed removal (A1): secretsReconcileErr
+// is set, so starts and credential routes are refused until a reconcile
+// succeeds (it removes the file). Caller must hold mu (write).
+func (h *Hub) hashMayRemainLocked(instance, key, user string, cause error) {
+	h.secretsReconcileErr = fmt.Errorf("the hash file of %s on %s/%s could not be removed: %v", user, instance, key, cause)
+	log.Printf("ERROR: secrets: %v — per-person password apps won't start until a reconcile removes it", h.secretsReconcileErr)
+}
+
+// hashFileMayRemainLocked: (instance, key, user)'s hash file is still on
+// the volume, or the volume can't be read to tell. Caller holds mu.
+func (h *Hub) hashFileMayRemainLocked(instance, key, user string) bool {
+	rel, err := secretRel(instance, key, user)
+	if err != nil {
+		return false // never written: the name is refused before any write
+	}
+	r, err := h.openSecrets()
+	if err != nil {
+		return true
+	}
+	defer r.Close()
+	_, err = r.Lstat(rel)
+	return !errors.Is(err, fs.ErrNotExist)
 }
 
 // voidActiveLocked marks every active credential of instance voided
@@ -457,20 +477,22 @@ func (h *Hub) auditVoidLocked(instance string, n int) {
 // files without active metadata are deleted and active metadata without
 // a hash file is voided. why names the caller in the log. Takes mu.
 func (h *Hub) reconcileSecrets(why string) (voided int, err error) {
-	h.mu.Lock()
-	voided, mismatch, err := h.reconcileSecretsLocked(why)
-	h.mu.Unlock()
-	if mismatch {
-		h.initStage("pools")
-		if perr := h.AdvancePools(PoolRewindStep); perr != nil {
-			log.Printf("ERROR: secrets: advancing the person-id pools after an epoch mismatch failed: %v", perr)
-			err = errors.Join(err, perr)
-		}
+	counts, _, err := h.reconcileSecretsCounts(why)
+	for _, n := range counts {
+		voided += n
 	}
 	return voided, err
 }
 
-func (h *Hub) reconcileSecretsLocked(why string) (voided int, mismatch bool, err error) {
+// reconcileSecretsCounts is reconcileSecrets with the voids per instance
+// and whether the epochs differed.
+func (h *Hub) reconcileSecretsCounts(why string) (map[string]int, bool, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.reconcileSecretsLocked(why)
+}
+
+func (h *Hub) reconcileSecretsLocked(why string) (counts map[string]int, mismatch bool, err error) {
 	// Any failure fails closed until a reconcile succeeds (fix round 1):
 	// the voids may be in memory only and old hash files still there.
 	defer func() {
@@ -481,12 +503,13 @@ func (h *Hub) reconcileSecretsLocked(why string) (voided int, mismatch bool, err
 	}()
 	r, err := h.openSecrets()
 	if err != nil {
-		return 0, false, err
+		return nil, false, err
 	}
 	defer r.Close()
 	now := time.Now().UTC()
-	counts := map[string]int{}
+	counts = map[string]int{}
 	changed := false
+	advanced := false
 	disk := readEpoch(r)
 	if disk == "" || disk != h.st.SecretsEpoch {
 		mismatch, changed = true, true
@@ -494,19 +517,29 @@ func (h *Hub) reconcileSecretsLocked(why string) (voided int, mismatch bool, err
 		for inst := range h.st.Credentials {
 			counts[inst] += h.voidActiveLocked(inst, state.CredentialReasonRestore, now)
 		}
+		// F8 / A3: every person-id pool advances before any allocation,
+		// in memory now and saved with the epoch rotation below (one
+		// save: a matching epoch can never hide a lost advance). Kept in
+		// memory even when a save fails (allocation is refused until a
+		// reconcile succeeds, then the next save carries it).
+		if !h.poolsAdvanced {
+			h.initStage("pools")
+			h.advancePoolsLocked(PoolRewindStep)
+			advanced = true
+		}
 		entries, err := fs.ReadDir(r.FS(), ".")
 		if err != nil {
-			return 0, true, statusErr(http.StatusInternalServerError, "reading the secrets volume: %v", err)
+			return counts, true, statusErr(http.StatusInternalServerError, "reading the secrets volume: %v", err)
 		}
 		for _, e := range entries {
 			if err := r.RemoveAll(e.Name()); err != nil {
-				return 0, true, statusErr(http.StatusInternalServerError, "emptying the secrets volume: %v", err)
+				return counts, true, statusErr(http.StatusInternalServerError, "emptying the secrets volume: %v", err)
 			}
 		}
 	} else {
 		c, n, err := h.reconcileOrphansLocked(r, now)
 		if err != nil {
-			return 0, false, err
+			return nil, false, err
 		}
 		changed = c
 		for inst, k := range n {
@@ -516,16 +549,18 @@ func (h *Hub) reconcileSecretsLocked(why string) (voided int, mismatch bool, err
 	if changed {
 		err = h.rotateEpochLocked(r)
 	}
+	if advanced && err == nil {
+		h.poolsAdvanced = true
+	}
 	insts := make([]string, 0, len(counts))
 	for inst := range counts {
 		insts = append(insts, inst)
 	}
 	sort.Strings(insts)
 	for _, inst := range insts {
-		voided += counts[inst]
 		h.auditVoidLocked(inst, counts[inst])
 	}
-	return voided, mismatch, err
+	return counts, mismatch, err
 }
 
 // reconcileOrphansLocked deletes every file on the volume that isn't

@@ -279,7 +279,22 @@ func (h *Hub) composeDown(t *templates.Template) error {
 	if _, err := os.Stat(t.ComposePath()); err != nil {
 		return nil
 	}
+	h.awaitDelivery(t.ID)
 	return h.compose.Down(context.Background(), h.project(t))
+}
+
+// awaitDelivery waits up to lifecycleDeliverWait for instance id's
+// delivery lock to be free (T18 c3, §13.9): a lifecycle down (backup,
+// restore, restart, delete, disable — the caller holds lockApp: lockApp
+// → deliverLock) lets an in-flight revocation hook finish first, then
+// proceeds either way. Never call it holding the delivery lock.
+func (h *Hub) awaitDelivery(id string) {
+	l := h.deliverLock(id)
+	if tryLockFor(l, h.lifecycleDeliverWait) {
+		l.Unlock()
+		return
+	}
+	log.Printf("%s: a delivery still holds the delivery lock after %s: stopping anyway", id, h.lifecycleDeliverWait)
 }
 
 // rollbackUp removes what a failed compose up left behind (containers,

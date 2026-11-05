@@ -421,8 +421,11 @@ type Hub struct {
 	// it). credentialCheck: the holder re-check a create asks for (F30;
 	// New sets TriggerCredentialCheck; nil: none). Both set before use,
 	// never changed.
-	revokeLockWait  time.Duration
-	credentialCheck func()
+	revokeLockWait time.Duration
+	// lifecycleDeliverWait: how long a lifecycle down waits for the
+	// instance's delivery lock (an in-flight revocation hook, H7).
+	lifecycleDeliverWait time.Duration
+	credentialCheck      func()
 	// credKick: TriggerCredentialCheck's coalesced request, served by
 	// RunCredentialChecks (revoke.go). credCheckErr: the last check's
 	// error text (logged once per distinct error; RunCredentialChecks'
@@ -478,24 +481,25 @@ func New(cfg Config, runner compose.Runner, engine Engine, idp IdP) (*Hub, error
 		return nil, fmt.Errorf("HUB_SECRETS_VOLUME %q is not a volume name", cfg.SecretsVolume)
 	}
 	h := &Hub{
-		kinds:          settings.NewRegistry(),
-		bindRoots:      roots,
-		cfg:            cfg,
-		compose:        runner,
-		engine:         engine,
-		idp:            idp,
-		lockPoll:       2 * time.Second,
-		restartWait:    20 * time.Minute,
-		revokeLockWait: revokeLockWaitDefault,
-		kick:           make(chan struct{}, 1),
-		dirKick:        make(chan struct{}, 1),
-		credKick:       make(chan struct{}, 1),
-		driftKey:       map[string]string{},
-		afterFunc:      realAfterFunc,
-		sleep:          realSleep,
-		mountinfo:      func() ([]byte, error) { return os.ReadFile("/proc/self/mountinfo") },
-		lookupIP:       defaultLookupIP,
-		idRanges:       templates.PersonIDPools,
+		kinds:                settings.NewRegistry(),
+		bindRoots:            roots,
+		cfg:                  cfg,
+		compose:              runner,
+		engine:               engine,
+		idp:                  idp,
+		lockPoll:             2 * time.Second,
+		restartWait:          20 * time.Minute,
+		revokeLockWait:       revokeLockWaitDefault,
+		lifecycleDeliverWait: lifecycleDeliverWaitDefault,
+		kick:                 make(chan struct{}, 1),
+		dirKick:              make(chan struct{}, 1),
+		credKick:             make(chan struct{}, 1),
+		driftKey:             map[string]string{},
+		afterFunc:            realAfterFunc,
+		sleep:                realSleep,
+		mountinfo:            func() ([]byte, error) { return os.ReadFile("/proc/self/mountinfo") },
+		lookupIP:             defaultLookupIP,
+		idRanges:             templates.PersonIDPools,
 	}
 	// A create's holder re-check (F30) is the trigger RunCredentialChecks
 	// serves.

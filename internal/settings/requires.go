@@ -12,7 +12,29 @@ import (
 // when an option has a non-empty value, every option it requires must also
 // have a non-empty value. Returns an error naming both options.
 func CheckRequires(spec *templates.SettingsSpec, values map[string]Value) error {
-	for _, o := range spec.Options {
+	return CheckRequiresTouched(spec, values, nil)
+}
+
+// CheckRequiresTouched is CheckRequires for a save of the touched keys
+// (nil: every key): requires_any is judged only for an option the save
+// touches or one whose requires_any names a touched key (B-M1: a slot a
+// group purge left without readers or writers doesn't block an
+// unrelated save; the doctor's served_to_nobody reports it). requires
+// is judged for every option, as before.
+func CheckRequiresTouched(spec *templates.SettingsSpec, values map[string]Value, touched map[string]bool) error {
+	judged := func(o *templates.Option) bool {
+		if touched == nil || touched[o.Key] {
+			return true
+		}
+		for _, k := range o.RequiresAny {
+			if touched[k] {
+				return true
+			}
+		}
+		return false
+	}
+	for i := range spec.Options {
+		o := &spec.Options[i]
 		if o.EffectiveScope() != templates.ScopeInstance {
 			continue
 		}
@@ -26,7 +48,7 @@ func CheckRequires(spec *templates.SettingsSpec, values map[string]Value) error 
 		}
 
 		// requires_any (§13.9): at least one of the listed options set.
-		if len(o.RequiresAny) > 0 {
+		if len(o.RequiresAny) > 0 && judged(o) {
 			found := false
 			for _, req := range o.RequiresAny {
 				if rv, ok := values[req]; ok && !isEmpty(rv) {

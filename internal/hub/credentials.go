@@ -65,6 +65,9 @@ const (
 	// revokeApplyMax bounds a live apply (membership, lock, hooks),
 	// independent of the request's context.
 	revokeApplyMax = 30 * time.Second
+	// lifecycleDeliverWaitDefault: how long a lifecycle down waits for
+	// an in-flight delivery (a revocation hook) to let go (H7).
+	lifecycleDeliverWaitDefault = 10 * time.Second
 )
 
 // errRevokeNotLive is the op record of a revocation that stopped the
@@ -321,7 +324,14 @@ func (h *Hub) createCredential(ctx context.Context, instance, key, user string, 
 		action = "credential.regenerate"
 	}
 	h.auditOp(user, action, target, credentialDetail(instance, key, user, user, ""), nil)
-	h.TriggerDelivery(instance, TriggerCredential, true)
+	if regen {
+		// D-I4: the old hash's removal is applied like a revocation (hook
+		// ≤ 8 s, else the kill): the old password never stays live while
+		// a hook is skipped or failing. It queues the delivery too.
+		h.applyRevocation(ctx, instance)
+	} else {
+		h.TriggerDelivery(instance, TriggerCredential, true)
+	}
 	h.triggerCredentialCheck()
 	return &CreatedCredential{Password: pw, Credential: c}, nil
 }
@@ -437,6 +447,7 @@ func (h *Hub) revokeCredentialsN(ctx context.Context, instance string, revs []re
 	}
 	var done []outcome
 	var errs []error
+	remains := false
 	h.mu.Lock()
 	for _, r := range revs {
 		// A failed commit never stops the others (fix round 1): each is
@@ -444,6 +455,10 @@ func (h *Hub) revokeCredentialsN(ctx context.Context, instance string, revs []re
 		changed, rerr := h.revokeLocked(instance, r, now)
 		if changed {
 			done = append(done, outcome{r, rerr})
+			// A1: a hash file that may remain would keep the account in a
+			// hook run (the script serves whoever has a file): only the
+			// kill applies such a revocation.
+			remains = remains || (rerr != nil && h.hashFileMayRemainLocked(instance, r.key, r.user))
 		}
 		if rerr != nil {
 			errs = append(errs, rerr)
@@ -466,7 +481,11 @@ func (h *Hub) revokeCredentialsN(ctx context.Context, instance string, revs []re
 	if applied {
 		// Also after a failed save: the metadata is revoked in memory and
 		// the file may be gone — the running app must lose the account.
-		h.applyRevocation(ctx, instance)
+		keys := make([]string, 0, len(done))
+		for _, o := range done {
+			keys = append(keys, o.r.key)
+		}
+		h.applyRevocationKeys(ctx, instance, keys, remains)
 	}
 	return len(done), err
 }
@@ -498,6 +517,14 @@ func (h *Hub) revokeLocked(instance string, r revocation, now time.Time) (bool, 
 // 1–3, see the top of this file), then queues the bookkeeping
 // credential_change delivery.
 func (h *Hub) applyRevocation(ctx context.Context, id string) {
+	h.applyRevocationKeys(ctx, id, nil, false)
+}
+
+// applyRevocationKeys is applyRevocation for revocations of keys: a key
+// that is no longer a person_secret option of the live template (A2: no
+// hook knows it) kills the project by name, then restarts it; kill (a
+// hash file that may remain, A1) skips the hooks for the kill.
+func (h *Hub) applyRevocationKeys(ctx context.Context, id string, keys []string, kill bool) {
 	defer h.TriggerDelivery(id, TriggerCredential, true)
 	// A client hanging up must not turn a live revocation into a kill:
 	// the request's cancellation is dropped, the work bounded on its own.
@@ -513,7 +540,21 @@ func (h *Hub) applyRevocation(ctx context.Context, id string) {
 		return
 	}
 	t := *live
+	stale := false
+	for _, k := range keys {
+		stale = stale || personSecretOption(&t, k) == nil
+	}
 	h.mu.RUnlock()
+	if stale {
+		// A2: the key was renamed or dropped by a source sync: the running
+		// containers may still hold its accounts, no hook can name them.
+		log.Printf("ERROR: credentials: %s: revoked a file-sharing password of an option the template no longer has: stopping the project", id)
+		if h.revocationKillByName(id) {
+			h.setOwed(id, settings.EffectRestart)
+			h.goBackground(func() { h.Restart(t) })
+		}
+		return
+	}
 	if h.engine == nil {
 		return // no Docker: nothing runs
 	}
@@ -537,6 +578,10 @@ func (h *Hub) applyRevocation(ctx context.Context, id string) {
 	}
 	if !running {
 		return // 1. the next start's converge has no account for them
+	}
+	if kill {
+		h.revocationKill(&t, errors.New("a revoked password's hash file may still be on the secrets volume"))
+		return
 	}
 	if err := h.revocationHooks(ctx, &t); err != nil {
 		h.revocationKill(&t, err) // 3.
@@ -677,10 +722,10 @@ func (h *Hub) revocationKill(t *templates.Template, cause error) {
 // revocationKillByName is step 3 for an instance without a view: its
 // project down by name, else SIGKILL to its containers; op record
 // credentials; no restart (nothing to start it from). No project
-// running: nothing.
-func (h *Hub) revocationKillByName(id string) {
+// running: nothing. Reports whether it stopped anything.
+func (h *Hub) revocationKillByName(id string) bool {
 	if !templates.ValidID(id) {
-		return
+		return false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
@@ -690,7 +735,7 @@ func (h *Hub) revocationKillByName(id string) {
 		var lerr error
 		cs, lerr = h.engine.ListContainers(ctx, docker.Filters{"label": {docker.LabelProject + "=" + name}})
 		if lerr == nil && len(cs) == 0 {
-			return
+			return false
 		}
 	}
 	log.Printf("credentials: %s: a revocation on an instance without a template: stopping project %s", id, name)
@@ -709,6 +754,7 @@ func (h *Hub) revocationKillByName(id string) {
 		rec = fmt.Errorf("revocation could not be applied live and stopping the instance failed: %w", err)
 	}
 	h.recordOp(id, h.opRecordOf(id, OpCredentials, rec, false))
+	return true
 }
 
 // hookCredentialsLocked is t's HookInput.Credentials: per person_secret
@@ -752,17 +798,24 @@ func (h *Hub) credentialDigestLocked(id, key string) (string, int) {
 // instance t (§13.9): the secrets reconcile (epoch check; orphan hash
 // files deleted, active metadata without a file voided), then per
 // person_secret option the digest of its active metadata, recorded in
-// delivered. Voids queue a credential_change delivery of every enabled
-// instance with person_secret options.
-func (h *Hub) credentialUnits(t *templates.Template, delivered *deliveredDoc, now time.Time) []UnitResult {
+// delivered. voided: the instances whose credentials the reconcile
+// voided (sorted) — the caller applies them live like revocations once
+// it released the delivery lock (A4: the running app still holds the
+// accounts).
+func (h *Hub) credentialUnits(t *templates.Template, delivered *deliveredDoc, now time.Time) (units []UnitResult, voided []string) {
 	opts := personSecretOptions(t)
 	if len(opts) == 0 {
-		return nil
+		return nil, nil
 	}
 	rerr := h.secretsBaseErr()
-	voided := 0
+	var counts map[string]int
 	if rerr == nil {
-		voided, rerr = h.reconcileSecrets("delivery of " + t.ID)
+		counts, _, rerr = h.reconcileSecretsCounts("delivery of " + t.ID)
+	}
+	for _, id := range slices.Sorted(maps.Keys(counts)) {
+		if counts[id] > 0 {
+			voided = append(voided, id)
+		}
 	}
 	out := make([]UnitResult, 0, len(opts))
 	h.mu.RLock()
@@ -783,19 +836,8 @@ func (h *Hub) credentialUnits(t *templates.Template, delivered *deliveredDoc, no
 		}
 		out = append(out, u)
 	}
-	var again []string
-	if voided > 0 {
-		for _, id := range h.st.Enabled {
-			if it := h.findLocked(id); it != nil && len(personSecretOptions(it)) > 0 {
-				again = append(again, id)
-			}
-		}
-	}
 	h.mu.RUnlock()
-	for _, id := range again {
-		h.TriggerDelivery(id, TriggerCredential, true)
-	}
-	return out
+	return out, voided
 }
 
 // credentialHashes are instance id's current NT hashes, upper and lower

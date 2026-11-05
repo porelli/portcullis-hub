@@ -46,6 +46,9 @@ func (h *Hub) ensurePersonIDs(instance string, people []settings.Person, uuids m
 	if len(pools) == 0 {
 		return nil
 	}
+	if err := h.poolsUsableLocked(); err != nil {
+		return err
+	}
 	names := make([]string, 0, len(pools))
 	for p := range pools {
 		names = append(names, p)
@@ -69,6 +72,9 @@ func (h *Hub) ensurePersonIDs(instance string, people []settings.Person, uuids m
 func (h *Hub) allocPersonIDs(pool string, people []settings.Person, uuids map[string]string) (map[string]int, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if err := h.poolsUsableLocked(); err != nil {
+		return nil, err
+	}
 	before := h.snapshotPoolsLocked()
 	ids, changed, err := h.allocPersonIDsLocked(pool, people, uuids, "")
 	if err != nil {
@@ -81,11 +87,19 @@ func (h *Hub) allocPersonIDs(pool string, people []settings.Person, uuids map[st
 	return ids, nil
 }
 
-// PersonID is user's id in pool (false: none yet).
-func (h *Hub) PersonID(pool, user string) (int, bool) {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	return h.personIDLocked(pool, user)
+// poolsUsableLocked refuses an allocation while the last secrets
+// reconcile failed (A3): it may not have learned that core was restored,
+// so the pools may be rewound — a re-allocated uid could own a former
+// person's files. The reconcile is retried first. Caller holds mu
+// (write).
+func (h *Hub) poolsUsableLocked() error {
+	if h.secretsReconcileErr != nil {
+		h.retryReconcileLocked()
+	}
+	if h.secretsReconcileErr != nil {
+		return statusErr(http.StatusServiceUnavailable, "person ids are not allocated while the secrets volume can't be reconciled (%v)", h.secretsReconcileErr)
+	}
+	return nil
 }
 
 // personIDForLocked is user's id in pool only while the entry belongs to
@@ -99,16 +113,6 @@ func (h *Hub) personIDForLocked(pool, user, uuid string) (int, bool) {
 	}
 	for _, e := range h.st.PersonIDs[pool].Entries {
 		if e.User == user && e.RetiredAt == nil && e.UUID == uuid {
-			return e.ID, true
-		}
-	}
-	return 0, false
-}
-
-// personIDLocked is PersonID for a caller holding mu.
-func (h *Hub) personIDLocked(pool, user string) (int, bool) {
-	for _, e := range h.st.PersonIDs[pool].Entries {
-		if e.User == user && e.RetiredAt == nil {
 			return e.ID, true
 		}
 	}

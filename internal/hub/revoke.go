@@ -70,9 +70,10 @@ type Revocation struct {
 //     doesn't have makes the population empty: everyone (fail closed).
 //
 // An empty current uuid revokes nothing on that ground
-// (unverifiableCredentials lists it for the doctor). Keys that aren't
-// person_secret options of the template are not judged. Sorted by
-// instance, key, user.
+// (unverifiableCredentials lists it for the doctor). Active credentials
+// on a key that isn't a person_secret option of the template (any more)
+// are revoked (leave; A2). Sorted by instance, key, user (a stale key's
+// first).
 //
 // An instance in creds without a view in tmpls (its template is missing)
 // has every active credential revoked (leave): fail closed.
@@ -96,6 +97,19 @@ func credentialRevocations(m *directory.Membership, creds map[string]map[string]
 			continue
 		}
 		opts := personSecretOptions(t)
+		// A2: a key that is no longer a person_secret option (renamed or
+		// dropped by a source sync) can't be judged or applied by a
+		// hook: its active credentials go (leave).
+		for _, key := range slices.Sorted(maps.Keys(creds[id])) {
+			if personSecretOption(t, key) != nil {
+				continue
+			}
+			for _, u := range slices.Sorted(maps.Keys(creds[id][key])) {
+				if c := creds[id][key][u]; c.Active() {
+					out = append(out, Revocation{Instance: id, Key: key, User: u, ID: c.ID, Reason: state.CredentialReasonLeave})
+				}
+			}
+		}
 		if len(opts) == 0 {
 			continue
 		}
@@ -238,6 +252,11 @@ func (h *Hub) CheckCredentialHolders(ctx context.Context) (int, error) {
 		if t == nil {
 			log.Printf("ERROR: credentials: %s: holds %d active file-sharing password(s) but its template is missing: revoking them all and stopping its project (fail closed; people must create new ones)", id, len(rs))
 			continue
+		}
+		for _, r := range rs {
+			if personSecretOption(t, r.key) == nil {
+				log.Printf("ERROR: credentials: %s: %s holds a file-sharing password on %s, which is no longer a per-person password option of the template: revoking it and stopping the project", id, r.user, r.key)
+			}
 		}
 		if populationIn(t, m, false).Why == WhyNoAccess {
 			// F31: LLDAP answers without the access group — everyone goes

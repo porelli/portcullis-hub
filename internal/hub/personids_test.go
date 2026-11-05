@@ -40,6 +40,19 @@ func persons(users ...string) []settings.Person {
 	return out
 }
 
+// PersonID is user's current id in pool whatever its uuid (tests only:
+// production code reads ids through personIDForLocked, B-M5).
+func (h *Hub) PersonID(pool, user string) (int, bool) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for _, e := range h.st.PersonIDs[pool].Entries {
+		if e.User == user && e.RetiredAt == nil {
+			return e.ID, true
+		}
+	}
+	return 0, false
+}
+
 func mustPersonID(t *testing.T, h *Hub, user string) int {
 	t.Helper()
 	id, ok := h.PersonID(templates.PoolPOSIXUID, user)

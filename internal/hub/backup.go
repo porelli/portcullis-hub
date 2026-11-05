@@ -460,6 +460,7 @@ func (h *Hub) backupLocked(id, reason string, keepStopped bool) (*BackupEntry, e
 // stopProject stops tg's project (compose down, volumes kept), by name
 // when its files don't work.
 func (h *Hub) stopProject(tg *target) error {
+	h.awaitDelivery(tg.id)
 	var downErr error
 	if tg.view != nil {
 		downErr = h.composeDown(tg.view)

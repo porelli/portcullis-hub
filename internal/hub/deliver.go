@@ -771,9 +771,36 @@ func (h *Hub) deliver(ctx context.Context, id string, trig Trigger, opt deliverO
 	} else {
 		l.Lock()
 	}
-	defer l.Unlock()
+	rep, err := h.deliverHeld(ctx, id, trig, opt)
+	l.Unlock()
+	// A4: credentials the run's reconcile voided are applied live (hook
+	// ≤ 8 s, else the kill), after the lock is released: the revocation
+	// takes it itself. A start applies its own instance in its converge.
+	if rep != nil {
+		for _, v := range rep.revokeAfter {
+			if opt.lifecycle && v == id {
+				continue
+			}
+			log.Printf("credentials: %s: the secrets reconcile voided file-sharing passwords: applying it live", v)
+			h.applyRevocation(ctx, v)
+		}
+	}
+	return rep, err
+}
+
+// deliverHeld is deliver's body under the instance's delivery lock.
+func (h *Hub) deliverHeld(ctx context.Context, id string, trig Trigger, opt deliverOpts) (*DeliveryReport, error) {
+	var voided []string
 	for try := 1; ; try++ {
 		rep, applied, superseded, err := h.deliverOnce(ctx, id, trig, opt)
+		if rep != nil {
+			for _, v := range rep.revokeAfter {
+				if !slices.Contains(voided, v) {
+					voided = append(voided, v)
+				}
+			}
+			rep.revokeAfter = voided
+		}
 		if !superseded || err != nil {
 			return rep, err
 		}
@@ -782,8 +809,16 @@ func (h *Hub) deliver(ctx context.Context, id string, trig Trigger, opt deliverO
 			// (after the lock is released) with the effects it owed so far
 			// — its own and those of what it already wrote (a written
 			// file is unchanged for the next run, which would otherwise
-			// never apply its on_membership_change).
-			h.queueDeliveryWhens(id, trig, applied, 0, forceList(opt.force), opt.stuckRetry, opt.whens)
+			// never apply its on_membership_change) — and the hooks such
+			// a file owes (B-I1: forced, so the re-run never records the
+			// reduced members without them).
+			force := forceList(opt.force)
+			for _, n := range rep.forceAgain {
+				if !slices.Contains(force, n) {
+					force = append(force, n)
+				}
+			}
+			h.queueDeliveryWhens(id, trig, applied, 0, force, opt.stuckRetry, opt.whens)
 			return rep, nil
 		}
 		if try >= supersededTries {
@@ -898,7 +933,19 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 	delivered := h.loadDelivered(id)
 	// The credentials units first (secrets reconcile, metadata digest):
 	// the hook inputs below are built from what they leave.
-	credUnits := h.credentialUnits(&tmpl, &delivered, now)
+	credUnits, voided := h.credentialUnits(&tmpl, &delivered, now)
+	rep.revokeAfter = voided
+	if opt.lifecycle {
+		// A1: a start never mounts a volume whose reconcile failed (old
+		// or orphan hash files may still be on it).
+		for _, u := range credUnits {
+			if u.Error != "" {
+				rep.Units = append(rep.Units, credUnits...)
+				h.saveDelivered(id, delivered)
+				return rep, "", false, statusErr(503, "%s: per-person passwords: %s: not starting", id, u.Error)
+			}
+		}
+	}
 	// Under mu: the generation and every desired output.
 	h.mu.RLock()
 	live := h.findLocked(id)
@@ -959,6 +1006,17 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 
 	// Files.
 	membershipHooks := false // a file with on_membership_change: hook changed
+	defer func() {
+		// B-I1: superseded after such a file was written, the re-run sees
+		// it unchanged — it must still run the file's hooks.
+		if superseded && membershipHooks {
+			for _, hk := range tmpl.Manifest.Hooks {
+				if slices.Contains(hk.When, templates.HookMembershipChange) {
+					rep.forceAgain = append(rep.forceAgain, hk.Name)
+				}
+			}
+		}
+	}()
 	for i, o := range outs {
 		u := UnitResult{Unit: fileUnit(o.file.Name), At: now}
 		switch {
