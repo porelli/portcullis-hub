@@ -287,8 +287,13 @@ func (h *Hub) composeDown(t *templates.Template) error {
 // delivery lock to be free (T18 c3, §13.9): a lifecycle down (backup,
 // restore, restart, delete, disable — the caller holds lockApp: lockApp
 // → deliverLock) lets an in-flight revocation hook finish first, then
-// proceeds either way. Never call it holding the delivery lock.
+// proceeds either way. Once per down (N4): composeDown calls it, and a
+// down by name without composeDown before it. Never call it holding the
+// delivery lock.
 func (h *Hub) awaitDelivery(id string) {
+	if h.testHookAwaitDelivery != nil {
+		h.testHookAwaitDelivery(id)
+	}
 	l := h.deliverLock(id)
 	if tryLockFor(l, h.lifecycleDeliverWait) {
 		l.Unlock()
@@ -574,6 +579,8 @@ func (h *Hub) disableLocked(id string) error {
 	var downErr error
 	if tmpl != nil {
 		downErr = h.composeDown(tmpl)
+	} else {
+		h.awaitDelivery(id) // composeDown waits otherwise (N4)
 	}
 	if tmpl == nil || downErr != nil {
 		if err := h.compose.DownByName(context.Background(), projectName(id)); err != nil {

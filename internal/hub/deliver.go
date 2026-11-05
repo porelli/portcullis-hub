@@ -775,10 +775,16 @@ func (h *Hub) deliver(ctx context.Context, id string, trig Trigger, opt deliverO
 	l.Unlock()
 	// A4: credentials the run's reconcile voided are applied live (hook
 	// ≤ 8 s, else the kill), after the lock is released: the revocation
-	// takes it itself. A start applies its own instance in its converge.
+	// takes it itself. A start's own instance gets a credential delivery
+	// (N1).
 	if rep != nil {
 		for _, v := range rep.revokeAfter {
 			if opt.lifecycle && v == id {
+				// N1: the start usually converges it, but a start refused
+				// later (a restart's folder probe, before the down) leaves
+				// the running app with the voided accounts: the
+				// credential delivery runs its hooks either way.
+				h.TriggerDelivery(id, TriggerCredential, true)
 				continue
 			}
 			log.Printf("credentials: %s: the secrets reconcile voided file-sharing passwords: applying it live", v)

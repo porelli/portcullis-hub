@@ -425,7 +425,9 @@ type Hub struct {
 	// lifecycleDeliverWait: how long a lifecycle down waits for the
 	// instance's delivery lock (an in-flight revocation hook, H7).
 	lifecycleDeliverWait time.Duration
-	credentialCheck      func()
+	// testHookAwaitDelivery: called by each awaitDelivery (tests).
+	testHookAwaitDelivery func(id string)
+	credentialCheck       func()
 	// credKick: TriggerCredentialCheck's coalesced request, served by
 	// RunCredentialChecks (revoke.go). credCheckErr: the last check's
 	// error text (logged once per distinct error; RunCredentialChecks'
