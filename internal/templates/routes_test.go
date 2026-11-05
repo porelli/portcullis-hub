@@ -133,6 +133,14 @@ func TestRealTemplates(t *testing.T) {
 	var ids []string
 	for _, tpl := range got {
 		ids = append(ids, tpl.ID)
+		if tpl.Manifest.Routerless() {
+			// A router-less custom template (file sharing, contract §3)
+			// routes nothing at all.
+			if len(tpl.Subdomains) != 0 || len(tpl.HostRouters) != 0 {
+				t.Errorf("%s: router-less but routes %v / %v", tpl.ID, tpl.Subdomains, tpl.HostRouters)
+			}
+			continue
+		}
 		if len(tpl.Subdomains) == 0 {
 			t.Errorf("%s routes no subdomain", tpl.ID)
 		}
