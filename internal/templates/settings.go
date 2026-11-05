@@ -1833,6 +1833,11 @@ func (v *specCheck) file(o *Option, fd *FileDelivery) error {
 		case TypeSecret:
 			return fmt.Errorf("file %s is tsv: a secret goes only to a JSON file's %s.secrets.json", fd.Name, fd.Name)
 		}
+		if fd.Render != nil && fd.Render.Format != "" {
+			// B-M4: json / yaml / csv render structured (or multi-line)
+			// text a tsv line can't hold.
+			return fmt.Errorf("file %s is tsv, which takes only the default text: render.format %s is for JSON files", fd.Name, fd.Render.Format)
+		}
 	}
 	section := ""
 	switch o.EffectiveScope() {

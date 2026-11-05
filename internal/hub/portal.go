@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"path/filepath"
 	"sort"
+	"strings"
+	"unicode/utf8"
 
 	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/templates"
@@ -28,8 +30,9 @@ type PortalApp struct {
 	// signed-in user); AdminGroup is informational.
 	AccessGroup string `json:"access_group"`
 	AdminGroup  string `json:"admin_group"`
-	// Note is the template's auth.notes for router-less instances
-	// (contract §10); present only when URLs is empty.
+	// Note is the first paragraph of the template's auth.notes (≤ 300
+	// runes, else "No web page.") for router-less instances (contract
+	// §10); always present then, and only when URLs is empty.
 	Note string `json:"note,omitempty"`
 }
 
@@ -60,7 +63,7 @@ func (h *Hub) portalLocked() PortalDocument {
 		// Router-less instances (contract §3, §10): URLs empty, note present.
 		if m.Routerless() {
 			a.URLs = []templates.AppURL{}
-			a.Note = m.Auth.Notes
+			a.Note = portalNote(m.Auth.Notes)
 		} else {
 			a.URLs = append([]templates.AppURL{}, m.URLs...)
 		}
@@ -107,4 +110,31 @@ func instanceName(t *templates.Template) string {
 		return t.Manifest.Name
 	}
 	return t.Manifest.Name + " (" + t.ID + ")"
+}
+
+// portalNoteMax caps a router-less entry's note (runes).
+const portalNoteMax = 300
+
+// portalNoNote is a router-less entry's note when auth.notes gives none.
+const portalNoNote = "No web page."
+
+// portalNote is a router-less entry's portal note (contract §10, B-M6 /
+// C-M4): the first paragraph of auth.notes (up to the first blank line;
+// its lines trimmed and joined with spaces) when it is at most
+// portalNoteMax runes, else "No web page." — never empty (group-gate
+// renders the card). The rest of auth.notes is for operators.
+func portalNote(notes string) string {
+	var lines []string
+	for _, l := range strings.Split(notes, "\n") {
+		l = strings.TrimSpace(l)
+		if l == "" {
+			break
+		}
+		lines = append(lines, l)
+	}
+	p := strings.Join(lines, " ")
+	if p == "" || utf8.RuneCountInString(p) > portalNoteMax {
+		return portalNoNote
+	}
+	return p
 }

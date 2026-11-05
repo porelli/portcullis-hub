@@ -384,6 +384,24 @@ func TestDataFileFormat(t *testing.T) {
 	})
 }
 
+// H10 (B-M4): a tsv file takes only the default text: every render.format
+// is refused on a tsv delivery (json files keep them).
+func TestTSVRefusesRenderFormat(t *testing.T) {
+	list := func(f string) string {
+		return "{key: tags, label: Tags, type: groups, delivery: [{file: {name: people, render: {format: " + f + "}}}]}"
+	}
+	scalar := "{key: motd, label: MOTD, type: string, delivery: [{file: {name: people, render: {format: json}}}]}"
+	json := strings.Replace(smbHead, ", format: tsv}", "}", 1)
+	runSettingsCases(t, []settingsCase{
+		{"yaml list into tsv", smbHead + opts(connectOpt, list("yaml")), smbCompose, "tags", "tsv"},
+		{"csv list into tsv", smbHead + opts(connectOpt, list("csv")), smbCompose, "tags", "tsv"},
+		{"json list into tsv", smbHead + opts(connectOpt, list("json")), smbCompose, "tags", "tsv"},
+		{"json scalar into tsv", smbHead + opts(connectOpt, scalar), smbCompose, "motd", "tsv"},
+		{"yaml list into json", json + opts(connectOpt, list("yaml")), smbCompose, "", ""},
+		{"default list into tsv", smbHead + opts(connectOpt, "{key: tags, label: Tags, type: groups, delivery: [{file: {name: people}}]}"), smbCompose, "", ""},
+	})
+}
+
 func TestRequiresAny(t *testing.T) {
 	r := "{key: readers, label: R, type: groups, delivery: [{file: {name: people}}]}"
 	w := "{key: writers, label: W, type: groups, delivery: [{file: {name: people}}]}"

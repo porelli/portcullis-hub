@@ -2,6 +2,7 @@ package credentials
 
 import (
 	"encoding/hex"
+	"regexp"
 	"strings"
 	"testing"
 	"unicode/utf16"
@@ -10,6 +11,9 @@ import (
 
 	"github.com/portcullis/hub/internal/templates"
 )
+
+// patternRE matches the 29-character dashed password shape.
+var patternRE = regexp.MustCompile(`^([A-Za-z2-9]{4}-){5}[A-Za-z2-9]{4}$`)
 
 // TestGenerateAlphabetAndShape checks the alphabet, shape and distribution.
 func TestGenerateAlphabetAndShape(t *testing.T) {
@@ -166,6 +170,22 @@ func TestNTHashNoStringCopy(t *testing.T) {
 		}
 		if string(in) != s {
 			t.Errorf("NTHash changed its input %q", s)
+		}
+	}
+}
+
+// H8 (B-M2/D-M1): the file server script's hard rules are refused for
+// every person_secret username, whatever the template's pattern admits.
+func TestCheckUsernameHardRules(t *testing.T) {
+	r := &templates.UsernameRule{Pattern: "^[a-z_.-][a-z0-9_./-]{0,31}$", Reason: "isn't a valid Samba and Unix name"}
+	for _, u := range []string{"a..b", ".alice", "-alice", "a/b", "pfg2024", "pfg1"} {
+		if ok, reason := CheckUsername(r, u); ok || reason == "" {
+			t.Errorf("CheckUsername(%q) = %t %q, want refused with a reason", u, ok, reason)
+		}
+	}
+	for _, u := range []string{"alice", "a.b", "a-b", "pfg", "pfgx1", "xpfg1"} {
+		if ok, reason := CheckUsername(r, u); !ok {
+			t.Errorf("CheckUsername(%q) refused: %q", u, reason)
 		}
 	}
 }

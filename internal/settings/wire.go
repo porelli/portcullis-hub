@@ -63,8 +63,10 @@ type SecretsFileDoc struct {
 
 // HookInput is a hook's stdin: the full desired state, never a diff.
 type HookInput struct {
+	// Trigger is the first key (D-M6: a script reading stdin finds it
+	// before the document, however large).
+	Trigger string `json:"trigger"`
 	DataFileDoc
-	Trigger string            `json:"trigger"`
 	Secrets map[string]string `json:"secrets"`
 	// Credentials (file sharing, contract §13.8): per person_secret
 	// option, the people with an active credential and its id and

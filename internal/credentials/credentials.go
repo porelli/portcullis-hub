@@ -90,9 +90,26 @@ func Zero(b []byte) {
 	}
 }
 
-// CheckUsername validates user against the rule. It returns ok=true when
-// the username passes, or ok=false with the rule's reason.
+// hardRefusedRe: the file server script's own refusals (templates
+// portcullis-sync), whatever a template's pattern admits: "..", a
+// leading "." or "-", "/", and the per-folder group names pfg<digits>.
+var hardRefusedRe = regexp.MustCompile(`\.\.|^[.-]|/|^pfg[0-9]+$`)
+
+// hardRefusedReason is the reason of a hard refusal without a rule.
+const hardRefusedReason = "isn't a name file sharing can use"
+
+// CheckUsername validates user against the rule (a person_secret
+// option's username rule) and the hard rules every file-sharing
+// username follows (B-M2: the script refuses them, so the Hub does too:
+// the card says unavailable). It returns ok=true when the username
+// passes, or ok=false with the rule's reason.
 func CheckUsername(r *templates.UsernameRule, user string) (ok bool, reason string) {
+	if hardRefusedRe.MatchString(user) {
+		if r != nil && r.Reason != "" {
+			return false, r.Reason
+		}
+		return false, hardRefusedReason
+	}
 	if r == nil {
 		return true, ""
 	}
@@ -119,6 +136,3 @@ func CheckUsername(r *templates.UsernameRule, user string) (ok bool, reason stri
 
 	return true, ""
 }
-
-// patternRE matches the 29-character dashed password shape.
-var patternRE = regexp.MustCompile(`^([A-Za-z2-9]{4}-){5}[A-Za-z2-9]{4}$`)

@@ -354,7 +354,7 @@ func (c hookReportCheck) Run(in *Inputs) []Finding {
 			var steps []string
 			switch f.Code {
 			case codeNameRefused:
-				steps = []string{"Pick another name in the app's settings: the app refuses names it reserves and names another of its shares already has."}
+				steps = []string{"A share name: pick another one in the app's settings — the app refuses names it reserves and names another of its shares already has.", "A person's username: the app can't serve that account; give the person a username it accepts in Users & Groups (they create a new password then)."}
 			case codeOwnerUnwritable:
 				steps = []string{"Check the folder's owner and permissions on the host (and the app's settings), then run the doctor again."}
 			default:

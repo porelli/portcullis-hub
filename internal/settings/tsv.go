@@ -137,12 +137,8 @@ func renderTSVValue(val any) (string, error) {
 		}
 		return strings.Join(items, ","), nil
 	default:
-		// For other types, try fmt.Sprint
-		s := fmt.Sprint(v)
-		if err := checkTSVString(s); err != nil {
-			return "", err
-		}
-		return s, nil
+		// B-M4: never Go syntax ([a b], map[…]) in a file a script parses.
+		return "", fmt.Errorf("a %T value has no tsv text (tsv takes the default scalar or list text)", v)
 	}
 }
 

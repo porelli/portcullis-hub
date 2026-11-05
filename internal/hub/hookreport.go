@@ -153,7 +153,12 @@ func (h *Hub) acceptHookReport(ctx context.Context, t *templates.Template, hk te
 	for _, f := range rep.Findings {
 		ok := pop[f.Subject]
 		if f.Code == "name_refused" {
-			ok = shares[f.Subject]
+			// A share name, or a population member's username the app
+			// refuses (B-M2/D-M1: an Info naming the user).
+			ok = shares[f.Subject] || pop[f.Subject]
+			if !shares[f.Subject] && pop[f.Subject] {
+				f.Severity = "info"
+			}
 		}
 		if f.Option != "" && !paths[f.Option] {
 			ok = false

@@ -219,3 +219,15 @@ func TestEncodeTSVSorting(t *testing.T) {
 		}
 	}
 }
+
+// H10 (B-M4): a value the tsv grammar has no text for is an error, never
+// Go syntax.
+func TestEncodeTSVUnknownTypeRefused(t *testing.T) {
+	for _, v := range []any{map[string]any{"a": 1}, []string{"a", "b"}, struct{}{}} {
+		doc := NewDataFileDoc("x")
+		doc.Values["k"] = v
+		if b, err := EncodeTSV(doc); err == nil {
+			t.Errorf("EncodeTSV(%T) = %q, want an error", v, b)
+		}
+	}
+}
