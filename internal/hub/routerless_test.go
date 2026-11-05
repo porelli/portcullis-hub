@@ -224,3 +224,76 @@ func TestRouterlessAccessRoleNeverEnforced(t *testing.T) {
 		t.Error("AccessRoleEnforced() = true for router-less custom instance")
 	}
 }
+
+func TestRouterlessLeftoverTraefikLabelsDenied(t *testing.T) {
+	// A router-less instance whose running project still carries Traefik
+	// router labels (e.g., leftover from before conversion, or misconfiguration)
+	// must have those hosts denied in the policy (fail-closed).
+	f := routerlessFixture(t)
+
+	tm := f.h.Template(smbID)
+	if tm == nil || !tm.Manifest.Routerless() {
+		t.Fatal("SMB fixture is not router-less")
+	}
+
+	// Set up directory and enable the instance.
+	people := newFakePeople()
+	people.addGroup("users_" + smbID)
+	people.addGroup("admin_" + smbID)
+	f.h.SetPeople(people)
+	f.h.SetGroups(&fakeGroups{people: people, existing: map[string]bool{}})
+
+	if err := f.h.Enable(smbID); err != nil {
+		t.Fatalf("Enable: %v", err)
+	}
+
+	// Add a running container with a Traefik router label (leftover label).
+	leakHost := "leak.example.test"
+	f.engine.mu.Lock()
+	c := container("smb-c", ProjectPrefix+smbID, "smb", "running")
+	c.Labels["traefik.http.routers.leak.rule"] = "Host(`" + leakHost + "`)"
+	f.engine.containers = append(f.engine.containers, c)
+	f.engine.mu.Unlock()
+
+	// Run reconcile to populate runtimeHosts from the container labels.
+	drift := f.h.Reconcile(context.Background())
+
+	// Check that reconcile reports drift for the instance (exposure drift:
+	// the running container has Traefik labels that don't match config).
+	var foundExposureDrift bool
+	for _, item := range drift.Items {
+		if item.ID == smbID {
+			// Router-less instances shouldn't have routers, so any exposure
+			// labels are drift. We expect DriftPublicAccess or similar.
+			if item.Kind != DriftNotRunning {
+				foundExposureDrift = true
+				t.Logf("reconcile reported drift: %+v", item)
+				break
+			}
+		}
+	}
+	if !foundExposureDrift {
+		t.Error("reconcile did not report exposure drift for router-less instance with leftover Traefik labels")
+	}
+
+	// Write the policy and check that the leak host is denied.
+	if err := f.h.WritePolicy(); err != nil {
+		t.Fatalf("WritePolicy: %v", err)
+	}
+
+	policyPath := f.h.policyPath()
+	b, err := os.ReadFile(policyPath)
+	if err != nil {
+		t.Fatalf("ReadFile policy: %v", err)
+	}
+	var doc policy.Document
+	if err := json.Unmarshal(b, &doc); err != nil {
+		t.Fatalf("Unmarshal policy: %v", err)
+	}
+
+	// The leak host must be denied.
+	if doc.Groups[leakHost] != policy.DenyGroup {
+		t.Errorf("leak host %q not denied in policy, Groups[host] = %q, want %q",
+			leakHost, doc.Groups[leakHost], policy.DenyGroup)
+	}
+}
