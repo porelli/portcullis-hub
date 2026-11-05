@@ -7,11 +7,16 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
+	"maps"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -22,9 +27,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/portcullis/hub/internal/credentials"
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/folderfix"
+	"github.com/portcullis/hub/internal/freshauth"
 	"github.com/portcullis/hub/internal/hub"
 	"github.com/portcullis/hub/internal/state"
 )
@@ -65,6 +72,20 @@ import (
 //     admin_override, file ids restarting) and nick (hook apply, no
 //     admin_override); carol entered an ext_id and then left entryapp
 //     (the panel's "Stored, not delivered: no access").
+//   - smbfixture (file sharing, plan 3 Task 14): ENABLED, router-less,
+//     access group users_smbfixture (alice, bob, carol, smbuser — a
+//     reserved name: "unavailable" — and harnessXSSUser), SMB lan_only
+//     on 0.0.0.0 (the doctor's Rebind…), connect_address nas.home.arpa,
+//     an extra info line carrying markup; alice's password starts voided
+//     by a restore, bob's is active; its sync hook reports folders
+//     (alice, a former member's 182 GiB, one of unknown size). Fresh
+//     auth is harnessFreshAuth: the authorize URL is the people
+//     listener's /harness/authorize (a fake sign-in page that sends a
+//     code back to the redirect URI, people.html), and Verify checks the
+//     code, its PKCE S256 challenge and nonce. GET /harness/evil?state=…
+//     on the Hub listener (another origin) posts a forged callback
+//     message to its parent. A people-listener request's harness_user
+//     cookie picks the user (after X-Harness-User).
 //
 // The directory: root (admin), dana, alice, bob, carol, dave, erin and
 // user01-user55; groups office_milan (alice, bob, erin), it_staff (bob,
@@ -102,17 +123,31 @@ func TestHarness(t *testing.T) {
 	// (a declared write option).
 	extra["photos"] = [2]string{folderAppManifest, folderAppCompose}
 	extra["samba"] = [2]string{harnessSambaManifest, harnessSambaCompose}
+	extra["smbfixture"] = harnessSMBFixture(t)
+	paddr := os.Getenv("HUB_HARNESS_PEOPLE_ADDR")
+	if paddr == "" {
+		paddr = "127.0.0.1:18889"
+	}
+	secrets := filepath.Join(t.TempDir(), "secrets")
+	if err := os.Mkdir(secrets, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	var eng *harnessEngine
 	disk := newHarnessDisk()
 	e := newInstEnvOpts(t, t.TempDir(), instEnvOpts{
 		extra: extra,
 		engine: func(f *fakeEngine) hub.Engine {
 			eng = &harnessEngine{fakeEngine: f, disk: disk,
-				running: map[string][]string{"hookapp": {"app"}, "entryapp": {"app"}, "photos": {"server"}, "samba": {"samba"}}}
+				running: map[string][]string{"hookapp": {"app"}, "entryapp": {"app"}, "photos": {"server"}, "samba": {"samba"}, "smbfixture": {"smb"}}}
 			return eng
 		},
-		cfg: func(c *hub.Config) { c.FixerImage = testFixerImage },
+		cfg: func(c *hub.Config) { c.FixerImage = testFixerImage; c.SecretsDir = secrets },
 		seed: func(st *state.AppState) {
+			// alice's file-share password was voided by a restore.
+			voided := time.Now().UTC().Add(-26 * time.Hour)
+			st.Credentials = map[string]map[string]map[string]state.Credential{"smbfixture": {"share_password": {"alice": {
+				ID: "0011223344556677", Version: 1, UUID: "harness", CreatedAt: voided.Add(-30 * 24 * time.Hour), CreatedBy: "alice",
+				RevokedAt: &voided, RevokedBy: "hub", Reason: state.CredentialReasonRestore}}}}
 			// A Problem: secretapp's folder changed on disk at its last
 			// start (explain-only).
 			st.FolderChanged = map[string][]state.FolderChange{"secretapp": {{Instance: "secretapp", Key: "files", Folder: "media",
@@ -120,7 +155,7 @@ func TestHarness(t *testing.T) {
 		},
 	})
 	h := e.s.Hub
-	for _, id := range append(slices.Clone(harnessFixtures), "photos", "samba") {
+	for _, id := range append(slices.Clone(harnessFixtures), "photos", "samba", "smbfixture") {
 		if h.Template(id) == nil {
 			t.Fatalf("fixture %s not loaded (see the log)", id)
 		}
@@ -150,6 +185,7 @@ func TestHarness(t *testing.T) {
 	seedSettings(t, h, eng)
 	seedEntries(t, e)
 	seedFolders(t, h, disk)
+	fa := seedFileSharing(t, h, paddr)
 
 	d, err := time.ParseDuration(os.Getenv("HUB_HARNESS_FOR"))
 	if err != nil {
@@ -165,6 +201,7 @@ func TestHarness(t *testing.T) {
 		eng.hookOK.Store(false)
 		fmt.Fprintln(w, "hook apply now exits 1")
 	})
+	mux.HandleFunc("GET /harness/evil", harnessEvilPage)
 	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		r.Header.Set(ProxySecretHeader, testSecret)
 		r.Header.Set("X-Forwarded-User", "root")
@@ -173,10 +210,6 @@ func TestHarness(t *testing.T) {
 	srv := &http.Server{Addr: addr, Handler: mux}
 	// The people listener (My apps): signed in as HUB_HARNESS_PEOPLE_USER
 	// (default alice), or the request's X-Harness-User.
-	paddr := os.Getenv("HUB_HARNESS_PEOPLE_ADDR")
-	if paddr == "" {
-		paddr = "127.0.0.1:18889"
-	}
 	if host, _, err := net.SplitHostPort(paddr); err != nil || net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback() {
 		t.Fatalf("HUB_HARNESS_PEOPLE_ADDR %q: loopback IP addresses only", paddr)
 	}
@@ -186,7 +219,14 @@ func TestHarness(t *testing.T) {
 	}
 	people := e.ppl.Config.Handler
 	psrv := &http.Server{Addr: paddr, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/harness/authorize" {
+			fa.authorizePage(w, r)
+			return
+		}
 		u := r.Header.Get("X-Harness-User")
+		if c, err := r.Cookie("harness_user"); u == "" && err == nil && c.Value != "" {
+			u = c.Value
+		}
 		if u == "" {
 			u = puser
 		}
@@ -239,6 +279,10 @@ func seedDirectory(e *instEnv) {
 	e.ll.AddGroup("users_immich", "alice", "bob", "carol")
 	e.ll.AddGroup("admin_immich", "root")
 	e.ll.AddGroup("entryapp", "alice", "bob", "carol", "dave")
+	e.ll.AddUser("smbuser", "smbuser@example.org", "Reserved Name", "")
+	e.ll.AddUser(harnessXSSUser, "xss@example.org", "<b>Mallory</b>", "")
+	e.ll.AddGroup("users_smbfixture", "alice", "bob", "carol", "smbuser", harnessXSSUser)
+	e.ll.AddGroup("admin_smbfixture", "root")
 	for _, id := range []string{"photos", "samba"} {
 		e.ll.AddGroup("users_"+id, "root", "alice", "bob")
 		e.ll.AddGroup("admin_"+id, "root")
@@ -364,6 +408,9 @@ func (e *harnessEngine) ContainerState(ctx context.Context, id string) (docker.S
 func (e *harnessEngine) ExecStdin(_ context.Context, _ string, in docker.ExecInput) (*docker.ExecResult, error) {
 	if len(in.Cmd) > 0 && in.Cmd[0] == "/apply" && !e.hookOK.Load() {
 		return &docker.ExecResult{ExitCode: 1, Output: []byte("quota backend unreachable: connection refused\n")}, nil
+	}
+	if len(in.Cmd) > 0 && in.Cmd[0] == "/portcullis/portcullis-sync" {
+		return &docker.ExecResult{Output: []byte("synced\nPORTCULLIS-REPORT " + harnessSMBReport + "\n")}, nil
 	}
 	return &docker.ExecResult{Output: []byte("ok\n")}, nil
 }
@@ -702,4 +749,181 @@ func (e *harnessEngine) Exec(ctx context.Context, id string, cmd []string, d tim
 		return &docker.ExecResult{Output: []byte("Name:\tapp\nUid:\t1000\t1000\t1000\t1000\nGid:\t1000\t1000\t1000\t1000\nGroups:\t\n")}, nil
 	}
 	return e.fakeEngine.Exec(ctx, id, cmd, d)
+}
+
+// ── file sharing (plan 3 Task 14) ─────────────────────────────────────
+
+// harnessXSSUser is a member of users_smbfixture whose name is markup:
+// the File sharing tab must show it as text.
+const harnessXSSUser = `<img src=x onerror=alert('xss-user')>`
+
+// harnessSMBReport is smbfixture's sync hook report: alice's home, a
+// former member's (uid 20003, 182 GiB) and one whose size the hook
+// couldn't read.
+const harnessSMBReport = `{"version":1,"folders":[` +
+	`{"option":"homes","name":"alice","uid":20000,"former":false,"bytes":10737418240},` +
+	`{"option":"homes","name":"carol","uid":20003,"former":true,"bytes":195421011968},` +
+	`{"option":"homes","name":"dave","uid":20004,"former":true,"bytes":null}]}`
+
+// harnessSMBFixture is the Hub's smbfixture template with an info line
+// carrying markup (My apps must show it as text).
+func harnessSMBFixture(t *testing.T) [2]string {
+	t.Helper()
+	dir := filepath.Join("..", "hub", "testdata", "settings", "smbfixture")
+	m, err := os.ReadFile(filepath.Join(dir, "manifest.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := os.ReadFile(filepath.Join(dir, "compose.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const line = `        - {label: Username, value: "{user}"}` + "\n"
+	manifest := string(m)
+	if !strings.Contains(manifest, line) {
+		t.Fatal("smbfixture's info lines changed: update harnessSMBFixture")
+	}
+	manifest = strings.Replace(manifest, line, line+`        - {label: "<b>Note</b>", value: "<img src=x onerror=alert('xss-info')> for {user}"}`+"\n", 1)
+	return [2]string{manifest, string(c)}
+}
+
+// seedFileSharing wires the fake fresh auth, adds smbfixture's people,
+// sets its connect address, enables it and creates bob's password.
+func seedFileSharing(t *testing.T, h *hub.Hub, paddr string) *harnessFreshAuth {
+	t.Helper()
+	fa := &harnessFreshAuth{base: "http://" + paddr, codes: map[string]harnessCode{}}
+	h.SetFreshAuth(fa)
+	h.SetFreshAuthReadyForTest(true)
+	raw, _ := json.Marshal("nas.home.arpa")
+	if _, err := h.SaveSettings("smbfixture", hub.SettingsUpdate{Values: map[string]json.RawMessage{"connect_address": raw}}, "root"); err != nil {
+		t.Fatalf("seeding smbfixture: %v", err)
+	}
+	if err := h.Enable("smbfixture"); err != nil {
+		t.Fatalf("enabling smbfixture: %v", err)
+	}
+	h.Wait()
+	// bob's password (the fake verifier accepts this one code).
+	fa.mu.Lock()
+	fa.codes["seed"] = harnessCode{challenge: s256B64("seed-verifier-0123456789012345678901234567890"), nonce: "seed-nonce", user: "bob"}
+	fa.mu.Unlock()
+	cc, err := h.CreateCredential(context.Background(), "smbfixture", "share_password", "bob",
+		freshauth.Proof{Code: "seed", CodeVerifier: "seed-verifier-0123456789012345678901234567890", Nonce: "seed-nonce"})
+	if err != nil {
+		t.Fatalf("creating bob's password: %v", err)
+	}
+	credentials.Zero(cc.Password)
+	h.Wait()
+	return fa
+}
+
+// harnessCode is one code the fake sign-in page handed out.
+type harnessCode struct{ challenge, nonce, user string }
+
+// harnessFreshAuth is the fresh-auth verifier for the browser check: its
+// authorize URL is the people listener's fake sign-in page, and Verify
+// accepts a code that page issued, once, when the posted verifier's S256
+// is the code's challenge and the nonce is the one the page was given.
+type harnessFreshAuth struct {
+	base  string // the people listener, http://host:port
+	mu    sync.Mutex
+	codes map[string]harnessCode
+	n     int
+}
+
+func s256B64(v string) string {
+	sum := sha256.Sum256([]byte(v))
+	return base64.RawURLEncoding.EncodeToString(sum[:])
+}
+
+func (f *harnessFreshAuth) Info() freshauth.AuthorizeInfo {
+	return freshauth.AuthorizeInfo{AuthorizeURL: f.base + "/harness/authorize", ClientID: freshauth.ClientID, RedirectURI: f.base + "/"}
+}
+
+func (f *harnessFreshAuth) Verify(_ context.Context, p freshauth.Proof, user string) (*freshauth.Result, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	c, ok := f.codes[p.Code]
+	delete(f.codes, p.Code) // single use
+	switch {
+	case !ok:
+		return nil, &freshauth.Error{Reason: "unknown or used code"}
+	case s256B64(p.CodeVerifier) != c.challenge:
+		return nil, &freshauth.Error{Reason: "PKCE verifier mismatch"}
+	case p.Nonce != c.nonce:
+		return nil, &freshauth.Error{Reason: "nonce mismatch"}
+	case c.user != user:
+		return nil, &freshauth.Error{Reason: "username mismatch"}
+	}
+	return &freshauth.Result{User: user, AuthTime: time.Now(), AMR: []string{"hwk"}}, nil
+}
+
+// authorizePage is the fake Keycloak authorize endpoint: every parameter
+// the contract requires must be there (400 naming the missing or wrong
+// ones), then a page "touches the passkey" and redirects to the redirect
+// URI with a fresh code and the state (also a link, and ?error= with
+// Cancel).
+func (f *harnessFreshAuth) authorizePage(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	info := f.Info()
+	want := map[string]string{"response_type": "code", "client_id": info.ClientID, "redirect_uri": info.RedirectURI, "scope": "openid",
+		"prompt": "login", "max_age": "0", "acr_values": "hwk", "code_challenge_method": "S256"}
+	var bad []string
+	for _, k := range slices.Sorted(maps.Keys(want)) {
+		if q.Get(k) != want[k] {
+			bad = append(bad, fmt.Sprintf("%s=%q (want %q)", k, q.Get(k), want[k]))
+		}
+	}
+	for _, k := range []string{"state", "nonce", "code_challenge"} {
+		if q.Get(k) == "" {
+			bad = append(bad, k+" missing")
+		}
+	}
+	if len(q.Get("code_challenge")) != 43 {
+		bad = append(bad, "code_challenge is not a base64url SHA-256")
+	}
+	if len(bad) > 0 {
+		http.Error(w, "fake authorize: "+strings.Join(bad, "; "), http.StatusBadRequest)
+		return
+	}
+	user := "alice"
+	if c, err := r.Cookie("harness_user"); err == nil && c.Value != "" {
+		user = c.Value
+	}
+	if u := os.Getenv("HUB_HARNESS_PEOPLE_USER"); u != "" && user == "alice" {
+		user = u
+	}
+	f.mu.Lock()
+	f.n++
+	code := fmt.Sprintf("harness-code-%d-%d", f.n, time.Now().UnixNano())
+	f.codes[code] = harnessCode{challenge: q.Get("code_challenge"), nonce: q.Get("nonce"), user: user}
+	f.mu.Unlock()
+	back := info.RedirectURI + "?" + url.Values{"code": {code}, "state": {q.Get("state")}}.Encode()
+	// harness_hold=1 (cookie): no automatic redirect, for the forged-message checks.
+	refresh := `<meta http-equiv="refresh" content="2;url=` + html.EscapeString(back) + `">`
+	if c, err := r.Cookie("harness_hold"); err == nil && c.Value == "1" {
+		refresh = ""
+	}
+	cancel := info.RedirectURI + "?" + url.Values{"error": {"access_denied"}, "state": {q.Get("state")}}.Encode()
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	fmt.Fprintf(w, `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Fake sign-in</title>
+%s</head>
+<body style="font-family:sans-serif;background:#0f172a;color:#e2e8f0;padding:2rem">
+<h1>Fake Keycloak (harness)</h1><p>prompt=login · max_age=0 · acr_values=hwk · PKCE S256 · signing in as <b>%s</b></p>
+<p><a id="approve" style="color:#60a5fa" href="%s">Touch your passkey (fake)</a> · <a id="deny" style="color:#94a3b8" href="%s">Cancel</a></p>
+<p>Continuing by itself in 2 seconds (unless the harness_hold cookie is 1).</p></body></html>`,
+		refresh, html.EscapeString(user), html.EscapeString(back), html.EscapeString(cancel))
+}
+
+// harnessEvilPage (Hub listener: another origin than people.<domain>)
+// posts a forged fresh-auth message, with the state it is given, to its
+// parent and its opener. myapps.js must ignore it.
+func harnessEvilPage(w http.ResponseWriter, r *http.Request) {
+	state, _ := json.Marshal(r.URL.Query().Get("state"))
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	fmt.Fprintf(w, `<!DOCTYPE html><html><body>evil<script>
+var m = {type: 'portcullis-fresh-auth', code: 'evil-code', state: %s, error: ''};
+if (window.parent !== window) window.parent.postMessage(m, '*');
+if (window.opener) window.opener.postMessage(m, '*');
+document.body.append(' posted');
+</script></body></html>`, state)
 }

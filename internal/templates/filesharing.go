@@ -19,6 +19,17 @@ import (
 // is never router-less).
 func (m *Manifest) Routerless() bool { return m.Auth.Method == "custom" && m.routerless }
 
+// HasPersonSecret reports whether the template has a person_secret option
+// (the Hub UI's File sharing tab).
+func (m *Manifest) HasPersonSecret() bool {
+	for _, o := range m.Options() {
+		if o.Type == TypePersonSecret {
+			return true
+		}
+	}
+	return false
+}
+
 // routerlessOf is the one router-less rule (Discover and the validator):
 // method custom and no HTTP router in the routes.
 func routerlessOf(method string, routes *Routes) bool {

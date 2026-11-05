@@ -982,6 +982,7 @@
       h += '<div class="port-row"><div class="port-meta"><span class="port-label">' + esc(p.label || p.key) + '</span>';
       h += '<span class="port-badge port-' + esc(proto) + '">' + esc(proto.toUpperCase()) + '</span>';
       if (p.network_mode_host) h += '<span class="port-badge port-host">host net</span>';
+      if (p.lan_only) h += '<span class="port-badge port-lan" title="Should be reachable only from your local networks or VPN">LAN only</span>';
       if (p.range) h += '<span class="port-badge port-range">range</span>';
       else h += '<span class="port-container">&rarr; :' + esc(p.container || '') + '</span>';
       h += '</div>';
@@ -997,6 +998,7 @@
         h += '<input type="number" min="1" max="65535" data-port="' + esc(p.key) + '" value="' + esc(host) + '" placeholder="' + (p.required ? 'required' : 'disabled') + '" class="port-host" aria-label="' + esc(p.label || p.key) + '">';
         h += '<button type="button" class="btn btn-sm" data-action="port-reset" data-key="' + esc(p.key) + '">Reset</button></div>';
         if (!p.required) h += '<small class="port-hint">Leave the host port empty to disable this binding.</small>';
+        if (p.lan_only && ['0.0.0.0', '::', '[::]'].includes(bind)) h += '<small class="port-hint public-warn">' + esc(p.label || p.key) + ' will listen on every interface of this server: bind it to a LAN address, or make sure your firewall or router blocks port ' + esc(host) + ' from the internet (Docker-published ports bypass ufw).</small>';
       }
       h += '</div>';
     }

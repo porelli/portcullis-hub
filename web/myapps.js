@@ -6,7 +6,14 @@
 // a change reaches the app. Values the person enters themselves (e.g.
 // their account id in another service, spec call 32) get an input with
 // Save and Clear (PUT / DELETE /api/me/apps/{app}/values/{key}) and a
-// status line. Only the caller's own values are ever shown. Registered
+// status line. A person_secret option gets a credential card (plan 3
+// Task 14, contract §5.1 / §13.16): create / regenerate the person's
+// file-share password after a fresh passkey sign-in in a popup (PKCE,
+// state and nonce in sessionStorage until the popup answers; the
+// password itself is never stored: it lives in one dialog, shown once,
+// and is dropped when the dialog closes or the cards reload), and revoke
+// it (DELETE, no fresh sign-in). Only the caller's own values are ever
+// shown. Registered
 // as an extra tab of PortcullisDirectory by people.html. Vanilla JS, no
 // build step.
 //
@@ -138,6 +145,300 @@
     return '';
   }
 
+  // ── file-share passwords (person_secret, contract §13.16) ─────────
+
+  // fmtDay is a date without the time ("5 Nov 2026").
+  function fmtDay(s) {
+    const d = new Date(s);
+    if (!s || isNaN(d)) return '';
+    return d.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
+  }
+
+  // credHtml is the card row of credential c of app.
+  function credHtml(app, c) {
+    const name = app.name || app.id;
+    let line, btns = '';
+    switch (c.status) {
+      case 'active':
+        line = 'Password active since ' + fmtDay(c.since);
+        btns = '<button type="button" class="pd-btn secondary sm" data-ma-act="cred-regen">Regenerate</button>' +
+          '<button type="button" class="pd-btn danger sm" data-ma-act="cred-revoke">Revoke</button>';
+        break;
+      case 'voided':
+        line = 'Your password was reset by a restore on ' + fmtDay(c.since) + '; create a new one.';
+        btns = '<button type="button" class="pd-btn primary sm" data-ma-act="cred-create">Create password</button>';
+        break;
+      case 'unavailable':
+        line = 'File sharing isn\'t available for your username: the username ' + (c.reason || 'can\'t be used here') + '. Ask an administrator.';
+        break;
+      default:
+        line = 'No password yet';
+        btns = '<button type="button" class="pd-btn primary sm" data-ma-act="cred-create">Create password</button>';
+    }
+    let h = '<div class="ma-value ma-cred" data-ma-cred data-ma-app="' + esc(app.id) + '" data-ma-key="' + esc(c.key) + '" data-ma-name="' + esc(name) + '" data-ma-status-kind="' + esc(c.status) + '">' +
+      '<dt>' + esc(c.label || c.key) + '</dt><dd>' +
+      '<div class="ma-entry-row"><span class="ma-cred-line' + (c.status === 'unavailable' || c.status === 'voided' ? ' ma-cred-warn' : '') + '">' + esc(line) + '</span>' + btns + '</div>' +
+      '<div data-ma-cred-panel></div>' +
+      '<div class="ma-status pd-muted" data-ma-cred-status role="status"></div>';
+    if ((c.info || []).length) {
+      h += '<dl class="ma-info">' + c.info.map(l => '<div><dt>' + esc(l.label) + '</dt><dd><code>' + esc(l.value) + '</code></dd></div>').join('') + '</dl>';
+    }
+    return h + '</dd></div>';
+  }
+
+  // The fresh-auth flow in progress (one at a time) and the shown-once
+  // password dialog.
+  const FA_KEY = 'portcullis-fresh-auth';
+  let flow = null; // {el, row, instance, key, name, popup, timer}
+  let shown = null; // {close()}
+
+  function b64url(bytes) {
+    let s = '';
+    for (const b of bytes) s += String.fromCharCode(b);
+    return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+  function randomB64(n) {
+    const a = new Uint8Array(n);
+    crypto.getRandomValues(a);
+    return b64url(a);
+  }
+  async function s256(v) {
+    const d = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(v));
+    return b64url(new Uint8Array(d));
+  }
+
+  function credStatus(row, text, warn, spin) {
+    const s = row && row.querySelector('[data-ma-cred-status]');
+    if (!s) return;
+    s.innerHTML = (spin ? '<span class="ma-spin" aria-hidden="true"></span> ' : '') + esc(text);
+    s.classList.toggle('pd-warn', !!warn);
+    s.classList.toggle('pd-muted', !warn);
+  }
+  function credBusy(row, on) {
+    row.querySelectorAll('button').forEach(b => { b.disabled = on; });
+  }
+
+  // endFlow forgets the flow in progress (and its sessionStorage entry).
+  function endFlow() {
+    if (!flow) return;
+    clearInterval(flow.timer);
+    flow = null;
+    sessionStorage.removeItem(FA_KEY);
+  }
+
+  // startFreshAuth opens the fresh sign-in popup for row's credential.
+  // Called from the click itself: the popup is opened before any await,
+  // so pop-up blockers allow it.
+  async function startFreshAuth(el, row) {
+    const fa = el.maFreshAuth;
+    if (!fa || !/^https?:\/\//i.test(fa.authorize_url || '')) {
+      credStatus(row, 'A fresh sign-in isn\'t available right now. Try again later.', true);
+      return;
+    }
+    if (flow && flow.popup && !flow.popup.closed) flow.popup.close();
+    endFlow();
+    const popup = window.open('', 'portcullis-fresh-auth', 'popup,width=520,height=720');
+    if (!popup) {
+      credStatus(row, 'Allow pop-ups for this page: the fresh sign-in opens in a small window.', true);
+      return;
+    }
+    const verifier = randomB64(64); // 86 characters (RFC 7636: 43–128)
+    const state = randomB64(32);
+    const nonce = randomB64(32);
+    const pending = { state, nonce, verifier, instance: row.dataset.maApp, key: row.dataset.maKey };
+    sessionStorage.setItem(FA_KEY, JSON.stringify(pending));
+    flow = { el, row, instance: pending.instance, key: pending.key, name: row.dataset.maName, popup, timer: 0 };
+    const mine = flow;
+    credBusy(row, true);
+    credStatus(row, 'Touch your passkey in the sign-in window to continue…', false, true);
+    let challenge;
+    try {
+      challenge = await s256(verifier);
+    } catch (err) {
+      popup.close();
+      endFlow();
+      credBusy(row, false);
+      credStatus(row, 'This browser can\'t start a secure sign-in: ' + err.message, true);
+      return;
+    }
+    if (flow !== mine) return;
+    const u = new URL(fa.authorize_url);
+    for (const [k, v] of [
+      ['response_type', 'code'],
+      ['client_id', fa.client_id],
+      ['redirect_uri', fa.redirect_uri],
+      ['scope', 'openid'],
+      ['prompt', 'login'],
+      ['max_age', '0'],
+      ['acr_values', 'hwk'],
+      ['state', state],
+      ['nonce', nonce],
+      ['code_challenge', challenge],
+      ['code_challenge_method', 'S256'],
+    ]) u.searchParams.set(k, v);
+    popup.location.href = u.toString();
+    // A popup closed without an answer cancels the flow (after a grace:
+    // the callback posts, then closes).
+    let closedAt = 0;
+    mine.timer = setInterval(() => {
+      if (flow !== mine) { clearInterval(mine.timer); return; }
+      if (!popup.closed) return;
+      if (!closedAt) { closedAt = Date.now(); return; }
+      if (Date.now() - closedAt < 1000) return;
+      endFlow();
+      credBusy(row, false);
+      credStatus(row, 'The sign-in window was closed: nothing changed.', true);
+    }, 400);
+  }
+
+  // The popup callback (people.html) posts {type, code, state, error}.
+  // Accepted only from this origin, from the popup this page opened, of
+  // type portcullis-fresh-auth and with the stored state; the stored
+  // entry is then deleted and the proof posted.
+  window.addEventListener('message', ev => {
+    if (ev.origin !== location.origin) return;
+    const d = ev.data;
+    if (!d || typeof d !== 'object' || d.type !== 'portcullis-fresh-auth' || typeof d.state !== 'string') return;
+    let pending = null;
+    try { pending = JSON.parse(sessionStorage.getItem(FA_KEY) || 'null'); } catch (_) { pending = null; }
+    if (!pending || !pending.state || d.state !== pending.state) return;
+    if (!flow || ev.source !== flow.popup || flow.instance !== pending.instance || flow.key !== pending.key) return;
+    const f = flow;
+    sessionStorage.removeItem(FA_KEY);
+    clearInterval(f.timer);
+    flow = null;
+    if (d.error || !d.code) {
+      credBusy(f.row, false);
+      credStatus(f.row, 'The sign-in didn\'t complete' + (d.error ? ' (' + String(d.error).slice(0, 100) + ')' : '') + ': nothing changed.', true);
+      return;
+    }
+    submitProof(f, pending, d);
+  });
+
+  // submitProof creates or regenerates the password with the proof, then
+  // reloads the cards and shows the password once.
+  async function submitProof(f, pending, d) {
+    credStatus(f.row, 'Creating your password…', false, true);
+    const url = '/api/me/apps/' + encodeURIComponent(f.instance) + '/credentials/' + encodeURIComponent(f.key);
+    let res, text;
+    try {
+      res = await fetch(url, {
+        method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: d.code, code_verifier: pending.verifier, nonce: pending.nonce })
+      });
+      text = await res.text();
+    } catch (err) {
+      res = null;
+      text = err.message;
+    }
+    if (!res || !res.ok) {
+      credBusy(f.row, false);
+      credStatus(f.row, (text || '').trim() || ('HTTP ' + (res ? res.status : '')), true);
+      return;
+    }
+    let pw = '';
+    try { pw = JSON.parse(text).password || ''; } catch (_) { pw = ''; }
+    text = null;
+    await load(f.el);
+    if (pw) showPassword(f.name, pw);
+    pw = null;
+  }
+
+  // closeShown closes the shown-once dialog (its node and the string go).
+  function closeShown() {
+    if (shown) shown.close();
+  }
+
+  // showPassword shows pw once: a modal dialog with Copy and "I've saved
+  // it". Closing it (either button, Escape, a reload of the cards,
+  // leaving the page) removes the node and drops the string.
+  function showPassword(name, pw) {
+    closeShown();
+    let secret = pw;
+    const dlg = document.createElement('dialog');
+    dlg.className = 'pd-dialog ma-pw-dialog';
+    dlg.setAttribute('aria-label', 'Your file-share password for ' + name);
+    dlg.innerHTML = '<div class="pd-dialog-headbar"><h3 class="pd-dialog-title">Your file-share password for ' + esc(name) + '</h3></div>' +
+      '<div class="pd-dialog-body"><div class="ma-pw-row"><code class="ma-pw" data-ma-pw></code>' +
+      '<button type="button" class="pd-btn secondary sm" data-ma-pw-act="copy">Copy</button></div>' +
+      '<p class="ma-pw-note"><strong>This is the only time it is shown: you won\'t see it again.</strong> Save it in your Mac\'s Keychain (or your password manager) when ' +
+      esc(name) + ' asks. It works only for ' + esc(name) + ' on this server.</p>' +
+      '<div class="ma-status pd-muted" data-ma-pw-status role="status"></div>' +
+      '<div class="ma-pw-actions"><button type="button" class="pd-btn primary sm" data-ma-pw-act="done">I\'ve saved it</button></div></div>';
+    dlg.querySelector('[data-ma-pw]').textContent = secret;
+    const clear = () => {
+      secret = null;
+      const c = dlg.querySelector('[data-ma-pw]');
+      if (c) c.textContent = '';
+      dlg.remove();
+      if (shown === me) shown = null;
+    };
+    const me = { close: () => { if (dlg.open) dlg.close(); clear(); } };
+    dlg.addEventListener('click', e => {
+      const b = e.target.closest('[data-ma-pw-act]');
+      if (!b) return;
+      if (b.dataset.maPwAct === 'done') { me.close(); return; }
+      const st = dlg.querySelector('[data-ma-pw-status]');
+      if (!secret || !navigator.clipboard) { st.textContent = 'Copy isn\'t available here: select the password and copy it.'; return; }
+      navigator.clipboard.writeText(secret).then(
+        () => { st.textContent = 'Copied.'; },
+        () => { st.textContent = 'Copy failed: select the password and copy it.'; });
+    });
+    dlg.addEventListener('close', clear);
+    shown = me;
+    document.body.appendChild(dlg);
+    dlg.showModal();
+  }
+  window.addEventListener('pagehide', closeShown);
+
+  // credConfirm opens an inline confirm panel on row (regenerate: the
+  // spec's warning; revoke: what it does).
+  function credConfirm(row, act) {
+    const p = row.querySelector('[data-ma-cred-panel]');
+    const name = row.dataset.maName;
+    p.innerHTML = act === 'regen'
+      ? '<div class="pd-warn ma-confirm"><p>Your Mac will ask for the new password; running backups stop. The old password stops working at once.</p>' +
+        '<button type="button" class="pd-btn primary sm" data-ma-act="cred-regen-go">Regenerate</button> <button type="button" class="pd-btn secondary sm" data-ma-act="cred-cancel">Cancel</button></div>'
+      : '<div class="pd-warn ma-confirm"><p>Revoke your file-share password for ' + esc(name) + '? Everything using it loses access at once; you can create a new one later.</p>' +
+        '<button type="button" class="pd-btn danger sm" data-ma-act="cred-revoke-go">Revoke</button> <button type="button" class="pd-btn secondary sm" data-ma-act="cred-cancel">Cancel</button></div>';
+  }
+
+  // revokeCred revokes row's credential (synchronous on the Hub: the
+  // revocation reaches the app before the answer, up to ~30 s).
+  async function revokeCred(el, row) {
+    row.querySelector('[data-ma-cred-panel]').innerHTML = '';
+    credBusy(row, true);
+    credStatus(row, 'Revoking… this can take up to 30 seconds.', false, true);
+    const url = '/api/me/apps/' + encodeURIComponent(row.dataset.maApp) + '/credentials/' + encodeURIComponent(row.dataset.maKey);
+    let res, text;
+    try {
+      res = await fetch(url, { method: 'DELETE', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' } });
+      text = await res.text();
+    } catch (err) {
+      res = null;
+      text = err.message;
+    }
+    if (!res || !res.ok) {
+      credBusy(row, false);
+      credStatus(row, (text || '').trim() || ('HTTP ' + (res ? res.status : '')), true);
+      return;
+    }
+    await load(el);
+  }
+
+  // credAction handles a credential button.
+  function credAction(el, row, act) {
+    const panel = row.querySelector('[data-ma-cred-panel]');
+    switch (act) {
+      case 'cred-create': panel.innerHTML = ''; startFreshAuth(el, row); break;
+      case 'cred-regen': credConfirm(row, 'regen'); break;
+      case 'cred-regen-go': panel.innerHTML = ''; startFreshAuth(el, row); break;
+      case 'cred-revoke': credConfirm(row, 'revoke'); break;
+      case 'cred-revoke-go': revokeCred(el, row); break;
+      case 'cred-cancel': panel.innerHTML = ''; break;
+    }
+  }
+
   // Only http(s) links are rendered as links.
   function safeURL(u) { return /^https?:\/\//i.test(u || '') ? u : ''; }
 
@@ -146,8 +447,10 @@
     const name = esc(app.name || app.id);
     let h = '<article class="pd-card ma-app" data-ma-app="' + esc(app.id) + '"><div class="ma-head">';
     if (app.icon) h += '<span class="ma-icon" aria-hidden="true">' + esc(app.icon) + '</span>';
-    h += '<h3 class="ma-name">' + (url ? '<a href="' + esc(url) + '" target="_blank" rel="noopener noreferrer">' + name + '</a>' : name) + '</h3></div>';
-    h += '<dl class="ma-values">';
+    h += '<h3 class="ma-name">' + (url ? '<a href="' + esc(url) + '" target="_blank" rel="noopener noreferrer">' + name + '</a>' : name) + '</h3>';
+    if (!url) h += '<span class="pd-pill">No web page</span>';
+    h += '</div><dl class="ma-values">';
+    for (const c of app.credentials || []) h += credHtml(app, c);
     for (const e of app.entries || []) h += entryHtml(app.id, e);
     for (const v of app.values || []) {
       const why = reasonText(v.reason);
@@ -165,6 +468,9 @@
   async function load(el) {
     const box = el.querySelector('[data-ma-list]');
     const seq = (el.maSeq = (el.maSeq || 0) + 1);
+    // A reload drops the shown-once password and any sign-in in progress.
+    closeShown();
+    if (flow && flow.el === el) { if (flow.popup && !flow.popup.closed) flow.popup.close(); endFlow(); }
     box.innerHTML = '<p class="pd-muted">Loading…</p>';
     let res, text;
     try {
@@ -181,7 +487,12 @@
       return;
     }
     let apps = [];
-    try { apps = (JSON.parse(text).apps) || []; } catch (_) { /* shown as empty */ }
+    el.maFreshAuth = null;
+    try {
+      const v = JSON.parse(text);
+      apps = v.apps || [];
+      el.maFreshAuth = v.fresh_auth || null;
+    } catch (_) { /* shown as empty */ }
     // The entries as last answered (a cleared row is redrawn from them).
     el.maEntries = new Map();
     for (const app of apps) for (const e of app.entries || []) el.maEntries.set(app.id + '\u0000' + e.key, e);
@@ -249,6 +560,8 @@
         const b = e.target.closest('[data-ma-act]');
         if (!b || !el.contains(b) || b.disabled) return;
         if (b.dataset.maAct === 'reload') { load(el); return; }
+        const cred = b.closest('[data-ma-cred]');
+        if (cred && b.dataset.maAct.startsWith('cred-')) { credAction(el, cred, b.dataset.maAct); return; }
         const row = b.closest('[data-ma-entry]');
         if (row && (b.dataset.maAct === 'save' || b.dataset.maAct === 'clear')) entryAction(el, row, b.dataset.maAct);
       });

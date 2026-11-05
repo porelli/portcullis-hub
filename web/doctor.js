@@ -5,6 +5,10 @@
 //   window.PortcullisDoctor.badge(tabEl)      Problems + Warnings on the tab
 //   window.PortcullisDoctor.refreshBadge()    the badge again (after a change)
 //   window.PortcullisDoctor.lineFor(instance) → Promise<string>  "Doctor: 1 warning" (HTML, escaped), '' when nothing
+//   window.PortcullisDoctor.findingsFor(instance, kinds) → Promise<[finding]>  that instance's
+//       unmuted findings of those kinds (with fp, severity, title, fix_class, fix_kind); [] on error (F50)
+//   <a href="#doctor" data-doctor-fp="<fp>" data-doctor-fix="<kind>">  anywhere: opens the Doctor tab at
+//       that finding (scrolled to, highlighted) and, with data-doctor-fix, opens that fix's panel
 //
 // GET    /api/doctor                          the report
 // POST   /api/doctor/scan                     run the disk checks → 202 (poll /api/doctor/op)
@@ -99,6 +103,35 @@
     return '<a href="#doctor" class="doctor-line ' + cls + '" data-doctor-goto="' + esc(instance) + '">Doctor: ' + esc(parts.join(', ')) + '</a>';
   }
 
+  // findingsFor resolves to instance's unmuted findings whose kind is in
+  // kinds (F50: the File sharing tab's LAN-only banner links each one).
+  async function findingsFor(instance, kinds) {
+    let r;
+    try { r = await report(false); } catch (e) { return []; }
+    return (r.findings || []).filter(f => !f.muted && (f.instances || []).includes(instance) && (kinds || []).includes(f.kind));
+  }
+
+  // A finding to show once the tab has drawn ({fp, fix}).
+  let focus = null;
+
+  function applyFocus() {
+    const want = focus;
+    focus = null;
+    if (!want || !rootEl) return;
+    const c = cardOf(want.fp);
+    if (!c) {
+      const out = rootEl.querySelector('[data-dr-scan-result]');
+      if (out) out.innerHTML = '<div class="public-warn">That finding is gone: what produced it changed since.</div>';
+      return;
+    }
+    const d = c.closest('details');
+    if (d) d.open = true;
+    c.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    c.classList.add('flash-target');
+    setTimeout(() => c.classList.remove('flash-target'), 2500);
+    if (want.fix && c.querySelector('[data-dr-fix="' + CSS.escape(want.fix) + '"]')) openFix(want.fp, want.fix);
+  }
+
   // ── the tab ────────────────────────────────────────────────────────
 
   async function render(el) {
@@ -113,8 +146,9 @@
     setBadge(r);
     // H11 M7: never a full redraw while a fix runs (its result would land
     // in a detached card): only the other cards are updated in place.
-    if (Object.values(fixes).some(fx => fx && fx.busy)) { patch(r); return; }
+    if (Object.values(fixes).some(fx => fx && fx.busy)) { patch(r); applyFocus(); return; }
     draw(r);
+    applyFocus();
   }
 
   function patch(r) {
@@ -381,15 +415,17 @@
     });
   }
 
-  // "Doctor: …" lines anywhere: open the tab.
+  // "Doctor: …" lines and finding links anywhere: open the tab (at the
+  // finding, data-doctor-fp, with its fix panel, data-doctor-fix).
   document.addEventListener('click', e => {
-    const a = e.target.closest('[data-doctor-goto]');
+    const a = e.target.closest('[data-doctor-goto], [data-doctor-fp]');
     if (!a) return;
     e.preventDefault();
     e.stopPropagation();
+    focus = a.dataset.doctorFp ? { fp: a.dataset.doctorFp, fix: a.dataset.doctorFix || '' } : null;
     const tab = document.querySelector('.tab[data-tab="doctor"]');
     if (tab) tab.click();
   });
 
-  window.PortcullisDoctor = { render, badge, refreshBadge, lineFor };
+  window.PortcullisDoctor = { render, badge, refreshBadge, lineFor, findingsFor };
 })();

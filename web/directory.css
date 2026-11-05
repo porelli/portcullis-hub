@@ -213,3 +213,21 @@
 .ma-status { font-size: 0.8125rem; margin-top: 0.25rem; }
 .ma-status.pd-warn { color: #fca5a5; }
 .ma-check { display: inline-flex; align-items: center; gap: 0.375rem; }
+/* My apps: file-share passwords (plan 3 Task 14) */
+.ma-cred-line { font-size: 0.875rem; }
+.ma-cred-warn { color: #f59e0b; }
+.ma-info { margin: 0.375rem 0 0; display: grid; gap: 0.125rem; font-size: 0.8125rem; }
+.ma-info > div { display: flex; gap: 0.5rem; }
+.ma-info dt { color: #94a3b8; min-width: 6rem; }
+.ma-info dd { margin: 0; }
+.ma-info code, .ma-pw { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.ma-confirm { margin: 0.5rem 0 0; }
+.ma-confirm p { margin: 0 0 0.5rem; }
+.ma-spin { display: inline-block; width: 0.75rem; height: 0.75rem; border: 2px solid #475569; border-top-color: #3b82f6; border-radius: 50%; animation: ma-spin 0.8s linear infinite; vertical-align: -0.125rem; }
+@keyframes ma-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .ma-spin { animation-duration: 3s; } }
+.ma-pw-dialog { width: min(560px, calc(100vw - 2rem)); }
+.ma-pw-row { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; margin-bottom: 0.75rem; }
+.ma-pw { font-size: 1.25rem; letter-spacing: 0.05em; background: #0f172a; border: 1px solid #334155; border-radius: 0.375rem; padding: 0.5rem 0.75rem; user-select: all; }
+.ma-pw-note { font-size: 0.875rem; margin: 0 0 0.5rem; }
+.ma-pw-actions { display: flex; justify-content: flex-end; margin-top: 0.75rem; }

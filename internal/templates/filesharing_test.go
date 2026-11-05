@@ -436,3 +436,20 @@ func mustBuild(t *testing.T, manifest, compose string) Template {
 	}
 	return tm
 }
+
+// TestHasPersonSecret: the Hub UI shows an app's File sharing tab when its
+// template has a person_secret option (plan 3 Task 14).
+func TestHasPersonSecret(t *testing.T) {
+	var none Manifest
+	if none.HasPersonSecret() {
+		t.Error("a manifest without settings has no person_secret option")
+	}
+	m := Manifest{Settings: &SettingsSpec{Options: []Option{{Key: "uid", Type: TypePersonID}}}}
+	if m.HasPersonSecret() {
+		t.Error("person_id alone is not a person_secret option")
+	}
+	m.Settings.Options = append(m.Settings.Options, Option{Key: "pw", Type: TypePersonSecret})
+	if !m.HasPersonSecret() {
+		t.Error("HasPersonSecret = false with a person_secret option")
+	}
+}

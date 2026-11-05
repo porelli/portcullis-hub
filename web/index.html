@@ -106,6 +106,7 @@
     .port-badge.port-udp { background: #a855f722; color: #a855f7; border: 1px solid #a855f744; }
     .port-badge.port-host { background: #f59e0b22; color: #f59e0b; border: 1px solid #f59e0b44; }
     .port-badge.port-range { background: #64748b22; color: #94a3b8; border: 1px solid #64748b44; font-family: monospace; }
+    .port-badge.port-lan { background: #f59e0b22; color: #f59e0b; border: 1px solid #f59e0b44; }
     .port-inputs { display: grid; grid-template-columns: 1fr 120px auto; gap: 0.5rem; margin-top: 0.375rem; }
     .port-inputs .port-bind { font-family: monospace; }
     .port-inputs .port-host { font-family: monospace; text-align: center; }
@@ -368,6 +369,18 @@
     .tab-badge.bad { background: #ef4444; color: #fff; }
     .tab-badge[hidden] { display: none; }
     .doctor-line-box:empty { display: none; }
+    /* File sharing tab and the LAN-only enable confirmation (plan 3 Task 14) */
+    .fs-banner { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 1rem; padding: 0.625rem 0.875rem; border: 1px solid #f59e0b55; background: #f59e0b11; border-radius: 0.5rem; font-size: 0.8125rem; }
+    .fs-banner.bad { border-color: #ef444455; background: #ef444411; color: #ef4444; }
+    .fs-table { width: 100%; border-collapse: collapse; margin-top: 0.5rem; }
+    .fs-table th, .fs-table td { text-align: left; padding: 0.375rem 0.5rem; border-top: 1px solid #1e293b; vertical-align: top; }
+    .fs-table th { color: #64748b; font-weight: 600; font-size: 0.75rem; }
+    .fs-confirm { display: inline-flex; gap: 0.375rem; align-items: center; flex-wrap: wrap; }
+    .lan-dialog { margin: auto; background: #1e293b; color: #e2e8f0; border: 1px solid #334155; border-radius: 0.75rem; padding: 1rem 1.25rem; width: min(560px, calc(100vw - 2rem)); }
+    .lan-dialog::backdrop { background: #020617cc; }
+    .lan-dialog h3 { font-size: 1rem; margin-bottom: 0.5rem; }
+    .lan-dialog label { display: flex; gap: 0.5rem; align-items: flex-start; font-size: 0.875rem; margin: 0.75rem 0; cursor: pointer; }
+    .lan-dialog .inst-row { justify-content: flex-end; }
     .doctor-line-box { margin: 0 0 0.75rem; font-size: 0.8125rem; }
     .doctor-line { text-decoration: none; padding: 0.25rem 0.625rem; border-radius: 0.375rem; border: 1px solid #334155; }
     .doctor-line.bad { color: #ef4444; border-color: #ef444455; background: #ef444411; }
@@ -449,6 +462,9 @@
                 {{else if eq (printf "%v" .Manifest.Auth.SSO) "partial"}}
                   <span class="auth-badge sso-partial" title="Partial SSO via proxy auth header">SSO*</span>
                 {{end}}
+                {{if .Manifest.Routerless}}
+                  <span class="auth-badge method" data-no-web-page="{{.ID}}" title="This app has no web page: people use it with its own client (see My apps)">No web page</span>
+                {{end}}
                 {{if .Manifest.Auth.GroupAccess}}
                   <span class="auth-badge group" title="Access restricted by LLDAP group">Group Access</span>
                 {{end}}
@@ -501,12 +517,16 @@
               {{if or .Enabled (index $.Failed .ID)}}
               <span class="detail-tab" data-dtab="logs" data-app="{{.ID}}">Logs</span>
               {{end}}
+              {{if .Manifest.HasPersonSecret}}
+              <span class="detail-tab" data-dtab="filesharing" data-app="{{.ID}}">File sharing</span>
+              {{end}}
               <span class="detail-tab" data-dtab="expert" data-app="{{.ID}}">Expert</span>
               <span class="detail-tab" data-dtab="instances" data-app="{{.ID}}">Instances</span>
             </div>
             <div class="detail-content active" id="detail-settings-{{.ID}}"></div>
             <div class="detail-content" id="detail-status-{{.ID}}"></div>
             <div class="detail-content" id="detail-logs-{{.ID}}"></div>
+            {{if .Manifest.HasPersonSecret}}<div class="detail-content" id="detail-filesharing-{{.ID}}"></div>{{end}}
             <div class="detail-content" id="detail-expert-{{.ID}}"></div>
             <div class="detail-content" id="detail-instances-{{.ID}}"></div>
           </div>
@@ -678,6 +698,7 @@
         if (tab.dataset.dtab === 'logs') loadLogs(appId);
         if (tab.dataset.dtab === 'expert') loadExpert(appId);
         if (tab.dataset.dtab === 'instances') loadTemplateInstances(appId);
+        if (tab.dataset.dtab === 'filesharing') loadFileSharing(appId, document.getElementById('detail-filesharing-' + appId));
       });
     });
 
@@ -1683,6 +1704,7 @@
       e.stopPropagation();
       const card = document.querySelector(`[data-id="${id}"]`);
       const btn = card.querySelector('.toggle');
+      if (enable && !(await confirmLanOnly(id))) return;
       btn.classList.add('loading');
       btn.textContent = enable ? 'Enabling...' : 'Disabling...';
       try {
@@ -1695,6 +1717,165 @@
         btn.classList.remove('loading');
         btn.textContent = enable ? 'Enable' : 'Disable';
       }
+    }
+
+    // ── File sharing (plan 3 Task 14, contract §13.16) ───
+    // An app whose template has a person_secret option: who has access,
+    // their ids, values and password status, Revoke (inline confirm;
+    // synchronous, up to ~30 s), former members' folders and the last
+    // sync from the hook report. Admins list and revoke, never create.
+    // The banner: the doctor's lan_only_exposed findings of the instance,
+    // each linking to its card (and its Rebind fix) on the Doctor tab.
+    function templateHasPersonSecret(tid) {
+      const t = catalogCache && catalogCache[tid];
+      const opts = (t && t.manifest && t.manifest.settings && t.manifest.settings.options) || [];
+      return opts.some(o => o.type === 'person_secret');
+    }
+    function fmtDay(s) {
+      const d = new Date(s);
+      return !s || isNaN(d) ? '' : d.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
+    }
+    const CRED_REASON = { self: 'by the person', admin: 'by an administrator', leave: 'left the app', deleted: 'account deleted', restore: 'reset by a restore' };
+    function credRowStatus(r) {
+      switch (r.status) {
+        case 'active': return 'password since ' + fmtDay(r.since);
+        case 'voided': return 'reset by a restore on ' + fmtDay(r.since) + ' (no password until they create a new one)';
+        case 'revoked': return 'revoked (' + (CRED_REASON[r.reason] || r.reason || 'unknown') + ') on ' + fmtDay(r.since);
+        case 'unavailable': return 'unavailable: the username ' + (r.reason || "can't be used");
+      }
+      return 'no password';
+    }
+    function lastSyncText(u) {
+      if (!u) return 'none yet';
+      const when = fmtTime(u.at);
+      if (u.skipped) return 'skipped (' + u.skipped + '), ' + when;
+      if (!u.ok) return 'failed, ' + when + (u.error ? ': ' + u.error : '');
+      return 'ok, ' + when + (u.message ? ' (' + u.message + ')' : '');
+    }
+    function credViewHtml(id, v) {
+      let h = '<div class="inst-section" data-fs-view="' + escapeHtml(v.key) + '"><h4>' + escapeHtml(v.label || v.key) + '</h4>' +
+        '<p>People with access: ' + escapeHtml(v.population) + ' · passwords: ' + escapeHtml(v.active) + '</p>';
+      const rows = v.rows || [];
+      if (rows.length) {
+        h += '<table class="fs-table"><thead><tr><th>Person</th><th>Ids</th><th>Values</th><th>Password</th><th></th></tr></thead><tbody>';
+        for (const r of rows) {
+          const ids = Object.keys(r.ids || {}).sort().map(k => escapeHtml(k) + ' <code>' + escapeHtml(r.ids[k]) + '</code>').join(', ');
+          const vals = Object.keys(r.values || {}).sort().map(k => escapeHtml(k) + ': ' + escapeHtml(r.values[k])).join(', ');
+          h += '<tr data-fs-row data-fs-key="' + escapeHtml(v.key) + '" data-fs-user="' + escapeHtml(r.user) + '">' +
+            '<td><code>' + escapeHtml(r.user) + '</code></td><td>' + (ids || '—') + '</td><td>' + (vals || '—') + '</td>' +
+            '<td>' + escapeHtml(credRowStatus(r)) + '</td><td data-fs-act>' +
+            (r.status === 'active' ? '<button type="button" class="btn btn-danger btn-sm" data-fs-revoke>Revoke</button>' : '') + '</td></tr>';
+        }
+        h += '</tbody></table>';
+      } else {
+        h += '<p class="settings-empty">Nobody has access yet.</p>';
+      }
+      const former = (v.folders || []).filter(f => f.former);
+      h += '<p style="margin-top:0.5rem">Former members\' folders: ' + (former.length
+        ? former.map(f => '<code>' + escapeHtml(f.name) + '</code> (uid ' + escapeHtml(f.uid) + ') ' + escapeHtml(f.bytes == null ? 'size unknown' : fmtSize(f.bytes))).join(', ') + ' · kept on disk'
+        : 'none') + '</p>';
+      h += '<p>Last sync: ' + escapeHtml(lastSyncText(v.last_sync)) + '</p></div>';
+      return h;
+    }
+    async function loadFileSharing(id, box) {
+      if (!box) return;
+      box.dataset.fsId = id;
+      if (!box.dataset.fsBound) {
+        box.dataset.fsBound = '1';
+        box.addEventListener('click', e => fileSharingClick(box, e));
+      }
+      const seq = (box.fsSeq = (box.fsSeq || 0) + 1);
+      if (!box.innerHTML) box.innerHTML = '<p class="settings-empty">Loading…</p>';
+      let views, findings;
+      try {
+        [views, findings] = await Promise.all([
+          apiGet('/api/instances/' + encodeURIComponent(id) + '/credentials'),
+          window.PortcullisDoctor ? PortcullisDoctor.findingsFor(id, ['lan_only_exposed']) : Promise.resolve([])
+        ]);
+      } catch (err) {
+        if (seq === box.fsSeq) box.innerHTML = errorBox(err);
+        return;
+      }
+      if (seq !== box.fsSeq) return;
+      let h = '';
+      for (const f of findings || []) {
+        const rebind = f.fix_class === 'one_click' && (f.fix_kind === 'rebind_port' || (f.more_fix_kinds || []).includes('rebind_port'));
+        h += '<div class="fs-banner' + (f.severity === 'problem' ? ' bad' : '') + '"><span>⚠ ' + escapeHtml(f.title) +
+          ' File sharing should only be reachable from your local networks or VPN.</span>' +
+          '<a href="#doctor" class="btn btn-secondary btn-sm" data-doctor-fp="' + escapeHtml(f.fp) + '"' + (rebind ? ' data-doctor-fix="rebind_port">Rebind… (doctor)' : '>Open in Doctor') + '</a></div>';
+      }
+      h += (views || []).map(v => credViewHtml(id, v)).join('') || '<p class="settings-empty">This app has no file-share passwords.</p>';
+      h += '<div class="inst-row"><button type="button" class="btn btn-secondary btn-sm" data-fs-reload>Refresh</button></div>';
+      box.innerHTML = h;
+    }
+    async function fileSharingClick(box, e) {
+      const t = e.target;
+      if (t.closest('[data-fs-reload]')) { loadFileSharing(box.dataset.fsId, box); return; }
+      const row = t.closest('[data-fs-row]');
+      if (!row) return;
+      const cell = row.querySelector('[data-fs-act]');
+      const key = row.dataset.fsKey, user = row.dataset.fsUser, id = box.dataset.fsId;
+      if (t.closest('[data-fs-revoke]')) {
+        cell.innerHTML = '<span class="fs-confirm">Revoke <code>' + escapeHtml(user) + '</code>\'s password? Their devices lose access at once. ' +
+          '<button type="button" class="btn btn-danger btn-sm" data-fs-revoke-go style="background:#ef4444;color:#fff">Revoke</button>' +
+          '<button type="button" class="btn btn-secondary btn-sm" data-fs-cancel>Cancel</button></span>';
+        return;
+      }
+      if (t.closest('[data-fs-cancel]')) {
+        cell.innerHTML = '<button type="button" class="btn btn-danger btn-sm" data-fs-revoke>Revoke</button>';
+        return;
+      }
+      if (t.closest('[data-fs-revoke-go]')) {
+        cell.innerHTML = '<span class="fd-progress"><span class="ps-spin" aria-hidden="true"></span> Revoking… this can take up to 30 seconds.</span>';
+        try {
+          await apiCall('/api/instances/' + encodeURIComponent(id) + '/credentials/' + encodeURIComponent(key) + '/' + encodeURIComponent(user), 'DELETE');
+          showToast(user + '\'s password revoked', 'success');
+          loadFileSharing(id, box);
+        } catch (err) {
+          cell.innerHTML = errorBox(err) + '<button type="button" class="btn btn-danger btn-sm" data-fs-revoke>Revoke</button>';
+        }
+      }
+    }
+
+    // confirmLanOnly asks the admin to confirm enabling id when a lan_only
+    // port would listen on every interface (bind 0.0.0.0 / ::, or host
+    // networking): the spec's sentence per port and a required checkbox.
+    // It warns and never blocks (spec call 14): no such port, or the panel
+    // unreadable (the doctor still reports it), = go ahead.
+    async function confirmLanOnly(id) {
+      let panel;
+      try { panel = await apiGet('/api/instances/' + encodeURIComponent(id) + '/settings'); } catch (e) { return true; }
+      const ports = panel.ports || {};
+      const open = [];
+      for (const p of panel.port_definitions || []) {
+        if (!p.lan_only) continue;
+        const host = p.key in ports ? ports[p.key] : String(p.range || p.default || '');
+        if (host === '' && !p.required) continue; // disabled
+        const bind = ports[p.key + '_BIND'] || p.bind || '0.0.0.0';
+        if (!p.network_mode_host && !['0.0.0.0', '::', '[::]', ''].includes(bind)) continue;
+        open.push({ label: p.label || p.key, port: host || String(p.default || '') });
+      }
+      if (!open.length) return true;
+      return new Promise(resolve => {
+        const dlg = document.createElement('dialog');
+        dlg.className = 'lan-dialog';
+        dlg.innerHTML = '<h3>Enable <code>' + escapeHtml(id) + '</code>?</h3>' +
+          open.map(o => '<p class="public-warn">' + escapeHtml(o.label) + ' will listen on every interface of this server. Make sure your firewall or router blocks port ' + escapeHtml(o.port) + ' from the internet; Docker-published ports bypass ufw.</p>').join('') +
+          '<p class="settings-empty">To listen on one LAN address instead, set the port\'s bind address under Settings → Host Ports (or use the doctor\'s Rebind… after enabling).</p>' +
+          '<label><input type="checkbox" data-lan-ack required> I have checked that ' + (open.length === 1 ? 'this port is' : 'these ports are') + ' blocked from the internet.</label>' +
+          '<div class="inst-row"><button type="button" class="btn btn-secondary btn-sm" data-lan-cancel>Cancel</button>' +
+          '<button type="button" class="btn btn-primary btn-sm" data-lan-go disabled>Enable</button></div>';
+        let answer = false;
+        dlg.addEventListener('change', e => { if (e.target.matches('[data-lan-ack]')) dlg.querySelector('[data-lan-go]').disabled = !e.target.checked; });
+        dlg.addEventListener('click', e => {
+          if (e.target.closest('[data-lan-cancel]')) dlg.close();
+          const go = e.target.closest('[data-lan-go]');
+          if (go && !go.disabled && dlg.querySelector('[data-lan-ack]').checked) { answer = true; dlg.close(); }
+        });
+        dlg.addEventListener('close', () => { dlg.remove(); resolve(answer); });
+        document.body.appendChild(dlg);
+        dlg.showModal();
+      });
     }
 
     // ── App instances (contract §11) ──────────────────────
@@ -1913,13 +2094,13 @@
         const d = await instanceDefaults(ctx.tid, INSTANCE_ID_RE.test(id) ? id : '', domain);
         if (instCtx !== ctx) return;
         ctx.domains = d.domains;
-        ctx.routers = d.routers;
+        ctx.routers = d.routers || [];
         if (!sel.options.length) sel.innerHTML = domainOptions(d.domains, d.domains[0] && d.domains[0].name);
         const box = document.getElementById('inst-new-hosts');
         const current = collectHosts(box);
         const hosts = {};
-        for (const r of d.routers) hosts[r.router] = ctx.edited[r.router] ? current[r.router] : (d.hosts[r.router] || '');
-        box.innerHTML = d.routers.length ? hostRows(d.routers, hosts, false, ctx.tid) : '<p class="settings-empty">This template serves no hostnames.</p>';
+        for (const r of ctx.routers) hosts[r.router] = ctx.edited[r.router] ? current[r.router] : ((d.hosts || {})[r.router] || '');
+        box.innerHTML = ctx.routers.length ? hostRows(ctx.routers, hosts, false, ctx.tid) : '<p class="settings-empty">No web page: this template serves no hostnames.</p>';
       } catch (err) {
         document.getElementById('inst-new-hosts').innerHTML = errorBox(err);
       }
@@ -1951,6 +2132,7 @@
       if (!inst) { showToast('Instance ' + id + ' not found', 'error'); return; }
       const tabs = [['overview', 'Overview']];
       if (!inst.default) tabs.push(['settings', 'Settings'], ['logs', 'Logs'], ['expert', 'Expert']);
+      if (!inst.default && templateHasPersonSecret(inst.template)) tabs.push(['filesharing', 'File sharing']);
       tabs.push(['backups', 'Backups'], ['delete', 'Delete']);
       instCtx = { kind: 'instance', id, inst, tab: (opts && opts.tab) || 'overview' };
       let h = modalHead(escapeHtml(templateLabel(inst.template)) + ' · <code>' + escapeHtml(id) + '</code> ' + statePill(inst.state));
@@ -1977,6 +2159,7 @@
       if (k === 'logs') loadLogs(id);
       if (k === 'expert') loadExpert(id);
       if (k === 'backups') loadBackups(pane, id);
+      if (k === 'filesharing') loadFileSharing(id, pane);
       if (k === 'delete') renderInstDelete(pane);
     }
 
@@ -2009,6 +2192,7 @@
         instCtx.domains = d.domains;
         instCtx.routers = d.routers;
         if (d.legacy) { ed.innerHTML = '<p class="settings-empty">This template still uses ${PORTCULLIS_DOMAIN} rules: its hostnames are fixed.</p>' + hostRowsReadOnly(inst.hosts); return; }
+        if (!(d.routers || []).length) { ed.innerHTML = '<p class="settings-empty">No web page: this app serves no hostnames (people use it with its own client).</p>'; return; }
         const pending = inst.state === 'deleting' || inst.state === 'restoring';
         ed.innerHTML = hostRows(d.routers, inst.hosts || {}, true, inst.template) +
           '<div class="inst-row"><label class="settings-empty" for="inst-move-domain">Move to domain</label>' +
@@ -2066,6 +2250,7 @@
 
     async function toggleInstance(btn) {
       const id = instCtx.id, enable = btn.dataset.instEnable === '1';
+      if (enable && !(await confirmLanOnly(id))) return;
       btn.classList.add('loading');
       btn.textContent = enable ? 'Enabling…' : 'Disabling…';
       try {
