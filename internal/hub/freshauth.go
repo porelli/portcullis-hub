@@ -66,6 +66,11 @@ func (h *Hub) FreshAuthInfo() *freshauth.AuthorizeInfo {
 // §5.1: 403 "a fresh passkey sign-in is required").
 var errFreshAuth = &StatusError{Status: 403, Err: errors.New(freshauth.Message)}
 
+// errFreshAuthUnavailable is the answer when fresh sign-in can't be
+// checked for a reason on the Hub's side (the Keycloak client not in
+// place, the token endpoint unreachable: C-M7): 503, generic text.
+var errFreshAuthUnavailable = &StatusError{Status: 503, Err: errors.New("fresh sign-in can't be checked right now: try again later")}
+
 // checkFreshAuth verifies p for user outside mu. Every failure — no
 // verifier, the Keycloak client not (yet) in place (freshAuthReady), a
 // refused proof, anything unexpected — is errFreshAuth; reason
@@ -78,13 +83,18 @@ func (h *Hub) checkFreshAuth(ctx context.Context, p freshauth.Proof, user string
 		return nil, "fresh auth is not configured", errFreshAuth
 	}
 	if !h.freshAuthReady.Load() {
-		return nil, "fresh-auth client not in place", errFreshAuth
+		// C-M7: the Hub's own outage, not the caller's refusal (503, not
+		// counted by the people listener's limit).
+		return nil, "fresh-auth client not in place", errFreshAuthUnavailable
 	}
 	res, err = f.Verify(ctx, p, strings.ToLower(user))
 	if err == nil && res != nil {
 		return res, "", nil
 	}
 	var fe *freshauth.Error
+	if errors.As(err, &fe) && fe.Reason == freshauth.ReasonUnreachable {
+		return nil, fe.Reason, errFreshAuthUnavailable
+	}
 	if errors.As(err, &fe) && fe.Reason != "" {
 		return nil, fe.Reason, errFreshAuth
 	}

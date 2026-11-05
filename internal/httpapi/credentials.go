@@ -106,22 +106,35 @@ func (s *Server) handleCreateCredential(w http.ResponseWriter, r *http.Request) 
 
 	// Zero the password after writing the response
 	defer zeroPassword(cc.Password)
+	for _, c := range cc.Password {
+		if c < 0x20 || c > 0x7e || c == '"' || c == '\\' {
+			// Never: the alphabet needs no escaping (fail closed).
+			log.Printf("people: credential of %s: the password has a byte JSON would escape", user)
+			http.Error(w, directory.GenericUnavailable, http.StatusInternalServerError)
+			return
+		}
+	}
 
 	noStoreHeaders(w)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 
-	// Build the credential view from state.Credential (always active on creation)
-	cred := cc.Credential
-	resp := map[string]interface{}{
-		"password": string(cc.Password),
-		"credential": map[string]interface{}{
-			"status": "active",
-			"since":  cred.CreatedAt,
-		},
+	// C-M1: the answer is built from bytes — never a string copy of the
+	// password (a string can't be zeroed) — and its buffer zeroed after
+	// the write. The alphabet and dashes need no JSON escaping; the
+	// credential view (always active on creation) is metadata only.
+	since, err := json.Marshal(cc.Credential.CreatedAt)
+	if err != nil {
+		since = []byte(`null`)
 	}
-
-	json.NewEncoder(w).Encode(resp)
+	buf := make([]byte, 0, len(cc.Password)+len(since)+64)
+	buf = append(buf, `{"password":"`...)
+	buf = append(buf, cc.Password...)
+	buf = append(buf, `","credential":{"status":"active","since":`...)
+	buf = append(buf, since...)
+	buf = append(buf, "}}\n"...)
+	w.Write(buf)
+	zeroPassword(buf)
 }
 
 // handleRevokeOwnCredential revokes the caller's own credential → 204 (also

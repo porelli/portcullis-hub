@@ -85,6 +85,10 @@ type Result struct {
 	AMR      []string
 }
 
+// ReasonUnreachable: the token endpoint couldn't be reached (a Hub-side
+// outage, not the caller's refusal: the Hub answers 503).
+const ReasonUnreachable = "code exchange failed: Keycloak unreachable"
+
 // Error is a refused proof: always answered 403 with Message; Reason
 // (a fixed string, never a proof value) goes only to the audit.
 type Error struct{ Reason string }
@@ -183,7 +187,7 @@ func (v *Verifier) Verify(ctx context.Context, p Proof, user string) (*Result, e
 			}
 			return nil, refuse("code exchange refused by Keycloak")
 		}
-		return nil, refuse("code exchange failed: Keycloak unreachable")
+		return nil, refuse(ReasonUnreachable)
 	}
 	raw, _ := tok.Extra("id_token").(string)
 	if raw == "" {

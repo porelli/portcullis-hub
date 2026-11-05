@@ -591,3 +591,62 @@ func TestPasswordZeroing(t *testing.T) {
 		t.Error("credentials.Zero did not zero all bytes")
 	}
 }
+
+// H13 (C-M1): the create answer is built from bytes (no string copy of
+// the password) and that buffer is zeroed after the write.
+func TestCreateCredentialAnswerBufferZeroed(t *testing.T) {
+	e := newCredEnv(t)
+	type call struct{ before, buf []byte }
+	var calls []call
+	origZero := zeroPassword
+	zeroPassword = func(b []byte) {
+		calls = append(calls, call{before: append([]byte(nil), b...), buf: b})
+		origZero(b)
+	}
+	defer func() { zeroPassword = origZero }()
+	body, _ := json.Marshal(map[string]string{"code": testProof.Code, "code_verifier": testProof.CodeVerifier, "nonce": testProof.Nonce})
+	req := httptest.NewRequest("POST", "/api/me/apps/smbfixture/credentials/share_password", bytes.NewReader(body))
+	req.Header.Set("X-Forwarded-User", "alice")
+	req.Header.Set("Content-Type", "application/json")
+	req.SetPathValue("instance", "smbfixture")
+	req.SetPathValue("key", "share_password")
+	w := httptest.NewRecorder()
+	e.s.handleCreateCredential(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("POST = %d: %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Password   string `json:"password"`
+		Credential struct {
+			Status string    `json:"status"`
+			Since  time.Time `json:"since"`
+		} `json:"credential"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil || resp.Password == "" || resp.Credential.Status != "active" || resp.Credential.Since.IsZero() {
+		t.Fatalf("answer %q: %v", w.Body.String(), err)
+	}
+	found := false
+	for _, c := range calls {
+		if bytes.Equal(bytes.TrimSpace(c.before), bytes.TrimSpace(w.Body.Bytes())) {
+			found = true
+			if strings.Trim(string(c.buf), "\x00") != "" {
+				t.Error("the answer buffer was not zeroed")
+			}
+		}
+	}
+	if !found {
+		t.Errorf("the answer buffer was never zeroed (%d zeroing calls)", len(calls))
+	}
+}
+
+// H14 (C-M6): the people listener's pages send Referrer-Policy:
+// no-referrer (the popup callback's ?code= never reaches a Referer).
+func TestPeopleListenerNoReferrer(t *testing.T) {
+	e := newCredEnv(t)
+	for _, p := range []string{"/", "/?code=abc&state=def", "/static/myapps.js", "/api/me/apps"} {
+		r, _ := doAs(t, e.ppl, "alice", "GET", p, "")
+		if got := r.Header.Get("Referrer-Policy"); got != "no-referrer" {
+			t.Errorf("GET %s: Referrer-Policy = %q", p, got)
+		}
+	}
+}

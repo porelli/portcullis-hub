@@ -90,7 +90,17 @@ func (s *Server) PeopleHandler() (http.Handler, error) {
 		return nil, err
 	}
 	mux := s.peopleMux()
-	return ProxySecret(s.Secret, CSRF(markPeople(mux.ServeMux))), nil
+	return noReferrer(ProxySecret(s.Secret, CSRF(markPeople(mux.ServeMux)))), nil
+}
+
+// noReferrer sets Referrer-Policy: no-referrer on every people-listener
+// answer (C-M6): the fresh-auth popup's callback (?code=…&state=…) never
+// reaches a Referer header or another host's access log.
+func noReferrer(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		next.ServeHTTP(w, r)
+	})
 }
 
 // peopleMux is the people listener's routes, recorded

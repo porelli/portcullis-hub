@@ -144,8 +144,10 @@ func TestFreshAuthRefusedUntilClientInPlace(t *testing.T) {
 		if wantOK && err != nil {
 			t.Errorf("%s: refused: %v (%s)", label, err, reason)
 		}
-		if !wantOK && (statusOf(err) != 403 || err.Error() != freshauth.Message || reason != "fresh-auth client not in place" || !isRefusal(err)) {
-			t.Errorf("%s: %v (%q), want the 403 with reason \"fresh-auth client not in place\"", label, err, reason)
+		// C-M7: the Hub's own outage is a 503 (generic text), never
+		// counted as the caller's refusal.
+		if !wantOK && (statusOf(err) != 503 || err != errFreshAuthUnavailable || reason != "fresh-auth client not in place" || isRefusal(err)) {
+			t.Errorf("%s: %v (%q), want the 503 with reason \"fresh-auth client not in place\"", label, err, reason)
 		}
 	}
 	check("before any ensure", false)
