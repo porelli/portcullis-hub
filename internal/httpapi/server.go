@@ -496,7 +496,6 @@ func (s *Server) handleSyncSources(w http.ResponseWriter, r *http.Request) {
 // Portcullis from in front of it.
 func (s *Server) auditSignIn(r *http.Request, id, before, want string, err error) {
 	e := directory.AuditEntry{
-		Actor:  r.Header.Get("X-Forwarded-User"),
 		Action: "app.sign_in",
 		Target: id,
 		Detail: before + " -> " + want,
@@ -505,11 +504,13 @@ func (s *Server) auditSignIn(r *http.Request, id, before, want string, err error
 	if want == hub.SignInNative {
 		e.Detail += " (app's own login only: no Portcullis sign-in)"
 	}
-	s.audit(e, err)
+	s.auditAs(requestActor(r), e, err)
 }
 
-// audit appends e (Result from err) to the Hub's audit log.
-func (s *Server) audit(e directory.AuditEntry, err error) {
+// auditAs appends e to the Hub's audit log, attributed to a (Actor, Via,
+// Client), with Result from err ("refused" for a 4xx StatusError).
+func (s *Server) auditAs(a directory.Actor, e directory.AuditEntry, err error) {
+	e.Actor, e.Via, e.Client = a.User, a.Via, a.Client
 	l := s.Audit
 	if l == nil && s.Directory != nil {
 		l = s.Directory.Audit
@@ -663,7 +664,7 @@ func (s *Server) handleTemplateCompose(w http.ResponseWriter, r *http.Request) {
 		}
 		restart, detail, err := s.Hub.SaveUserOverride(id, *req.UserOverride)
 		if !errors.Is(err, hub.ErrNotFound) {
-			s.audit(directory.AuditEntry{Actor: r.Header.Get("X-Forwarded-User"), Action: "app.compose_override", Target: id, Detail: detail}, err)
+			s.auditAs(requestActor(r), directory.AuditEntry{Action: "app.compose_override", Target: id, Detail: detail}, err)
 		}
 		if err != nil {
 			writeErr(w, err, http.StatusInternalServerError)

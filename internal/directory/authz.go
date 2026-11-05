@@ -28,11 +28,53 @@ var delegatedPerms = []string{PermEditDetails, PermInvite, PermRemove}
 
 // Caller is who is making a request, resolved once per request by
 // CallerFor. Admin: member of lldap_admin. Perms: the delegated
-// permissions whose group they are in.
+// permissions whose group they are in. Via / Client: the AI attribution
+// (Actor), set only by CallerAs from the MCP listener's identity.
 type Caller struct {
-	User  string
-	Admin bool
-	Perms map[string]bool
+	User   string
+	Admin  bool
+	Perms  map[string]bool
+	Via    string
+	Client string
+}
+
+// Actor is who an audited change is attributed to: the person (User, the
+// LLDAP username) and, for changes made through the Portcullis MCP, Via
+// ViaAI and Client (the AI client, the token's azp). Stored or displayed
+// actors (op records, created_by, logs) use User only.
+type Actor struct {
+	User, Via, Client string
+}
+
+// ViaAI is Actor.Via / AuditEntry.Via for changes made through the AI.
+const ViaAI = "ai"
+
+// Human is the actor of a request made by a person in a browser (or the
+// Hub itself): no AI attribution.
+func Human(user string) Actor { return Actor{User: user} }
+
+// Actor returns c's attribution (zero for a nil Caller).
+func (c *Caller) Actor() Actor {
+	if c == nil {
+		return Actor{}
+	}
+	return Actor{User: c.User, Via: c.Via, Client: c.Client}
+}
+
+// Check refuses (403) an actor without a user, a Via other than "" or
+// ViaAI, an AI actor without a client and a client without Via.
+func (a Actor) Check() error {
+	switch {
+	case strings.TrimSpace(a.User) == "":
+		return errNoActor()
+	case a.Via != "" && a.Via != ViaAI:
+		return forbidden("unknown attribution via %q", clip(a.Via))
+	case a.Via == ViaAI && strings.TrimSpace(a.Client) == "":
+		return forbidden("an AI change without its AI client — refusing an unattributable change")
+	case a.Via == "" && a.Client != "":
+		return forbidden("an AI client without via ai — refusing a mis-attributed change")
+	}
+	return nil
 }
 
 func forbidden(format string, a ...interface{}) error {
@@ -85,6 +127,22 @@ func (s *Service) CallerFor(ctx context.Context, user string) (*Caller, error) {
 			c.Perms[p] = true
 		}
 	}
+	return c, nil
+}
+
+// CallerAs is CallerFor for an Actor (the MCP listener's identity): the
+// permissions are resolved from a.User exactly as CallerFor does, and the
+// Caller keeps a.Via / a.Client so every audit entry of the request is
+// attributed to the AI client. An invalid actor is refused (Actor.Check).
+func (s *Service) CallerAs(ctx context.Context, a Actor) (*Caller, error) {
+	if err := a.Check(); err != nil {
+		return nil, err
+	}
+	c, err := s.CallerFor(ctx, a.User)
+	if err != nil {
+		return nil, err
+	}
+	c.Via, c.Client = a.Via, a.Client
 	return c, nil
 }
 

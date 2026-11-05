@@ -47,12 +47,14 @@ func (s *Server) registerDirectory(mux routeMux) {
 	mux.HandleFunc("POST /api/directory/import/apply", s.handleImportApply)
 }
 
-func actor(r *http.Request) string { return r.Header.Get("X-Forwarded-User") }
+// actor is the username r's changes are attributed to (requestActor's
+// User: X-Forwarded-User, or the MCP listener's identity).
+func actor(r *http.Request) string { return requestActor(r).User }
 
 // caller resolves the request's Caller (who, admin, delegated
 // permissions) once per request; on failure it has written the response.
 func (s *Server) caller(w http.ResponseWriter, r *http.Request) (*directory.Caller, bool) {
-	c, err := s.Directory.CallerFor(r.Context(), actor(r))
+	c, err := s.Directory.CallerAs(r.Context(), requestActor(r))
 	if err != nil {
 		// On the people listener (any signed-in user) an unavailable
 		// directory is reported generically; the detail is logged.

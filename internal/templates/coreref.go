@@ -43,9 +43,9 @@ var reservedRefs = []string{"forward-auth-ext", "portcullis-auth-ext", "portcull
 var (
 	coreServices = set("socket-proxy-traefik", "socket-proxy-hub", "traefik", "postgres", "vault", "lldap", "keycloak",
 		"forward-auth", "forward-auth-ext", "group-gate", "hub", "enroll", "domains", "prometheus", "alertmanager", "blackbox",
-		"textfile-exporter", "grafana")
+		"textfile-exporter", "grafana", "mcp-gate")
 	coreVolumes = set("postgres_data", "vault_data", "lldap_data", "hub_data", "traefik_acme", "domains_data",
-		"prometheus_data", "alertmanager_data", "grafana_data", "hub_secrets")
+		"prometheus_data", "alertmanager_data", "grafana_data", "hub_secrets", "mcp_gate_data")
 	// coreContainerRe: compose's container names for core's services.
 	coreContainerRe = regexp.MustCompile(`^portcullis[-_](.+)[-_][0-9]+$`)
 )
@@ -798,10 +798,10 @@ var (
 	// both, or merges them).
 	coreTraefikNames = map[string]map[string]bool{
 		"routers": set("dashboard", "enroll", "enroll-invite", "enroll-self", "grafana-metrics", "hub", "keycloak", "keycloak-admin",
-			"keycloak-resources", "lldap", "oauth2-callback", "people", "portal"),
+			"keycloak-resources", "lldap", "oauth2-callback", "people", "portal", "mcp", "hub-mcp", "people-mcp"),
 		"middlewares": set("directory-redirect", "hub-proxy-secret", "portal-path", "portcullis-auth", "portcullis-auth-console",
 			"portcullis-auth-ext", "portcullis-groups", "portcullis-public-guard", "portcullis-self"),
-		"services": set("enroll", "forward-auth", "forward-auth-ext", "grafana-metrics", "group-gate", "hub", "hub-people", "keycloak", "lldap"),
+		"services": set("enroll", "forward-auth", "forward-auth-ext", "grafana-metrics", "group-gate", "hub", "hub-people", "keycloak", "lldap", "mcp-gate"),
 	}
 	// routerAttrRe: no tls.certresolver / tls.domains (certificates are
 	// core's: a template asking ACME for names it doesn't route).

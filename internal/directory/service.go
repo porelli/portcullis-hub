@@ -864,7 +864,7 @@ func (s *Service) run(ctx context.Context, c *Caller, perm, action, target strin
 		done = err == nil
 	}
 	if s.Audit != nil {
-		e := AuditEntry{Actor: clip(c.User), Action: action, Target: clip(target), Result: "ok"}
+		e := AuditEntry{Actor: clip(c.User), Action: action, Target: clip(target), Result: "ok", Via: clip(c.Via), Client: clip(c.Client)}
 		if detail != nil {
 			e.Detail = clipN(*detail, maxAuditDetail)
 		}
