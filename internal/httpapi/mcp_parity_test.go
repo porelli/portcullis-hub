@@ -138,9 +138,11 @@ var destructiveTwins = map[string]string{
 // accessWidening are the tools that are D only for some arguments (G37,
 // ClassFor): their twin is a plain save.
 var accessWidening = map[string]string{
-	"set_policy":        "D unless the new policy is policy.Stricter than the current one",
-	"set_sign_in_mode":  "D for native (the app's own login, no Portcullis sign-in)",
-	"set_public_access": "D when it turns public access on (or widens it to all)",
+	"set_policy":         "D unless the new policy is policy.Stricter than the current one",
+	"set_sign_in_mode":   "D for native (the app's own login, no Portcullis sign-in)",
+	"set_public_access":  "D when it turns public access on (or widens it to all)",
+	"save_settings":      "D when it sets ports (host ports published, <KEY>_BIND changed)",
+	"set_local_networks": "D unless use_defaults or a list within the current one",
 }
 
 func TestToolParity(t *testing.T) {
@@ -228,7 +230,7 @@ func TestToolParity(t *testing.T) {
 		}
 	}
 	for _, n := range []string{"exec", "save_env", "save_custom_override", "resolve_drift", "delete_instance", "admin_revoke_credential",
-		"set_policy", "set_sign_in_mode", "set_public_access"} {
+		"set_policy", "set_sign_in_mode", "set_public_access", "save_settings", "set_local_networks"} {
 		if byName[n].Class != ClassDestructive {
 			t.Errorf("tool %s: class %q, want D", n, byName[n].Class)
 		}

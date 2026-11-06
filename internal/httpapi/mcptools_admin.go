@@ -8,6 +8,7 @@ import (
 	"log"
 	"maps"
 	"net/http"
+	"net/netip"
 	"slices"
 	"strings"
 	"time"
@@ -329,7 +330,7 @@ func (s *Server) registerAdminTools() {
 				}
 				return s.Hub.PreviewSettings(ctx, in.ID, in.update())
 			}),
-		admin("save_settings", "Save settings previewed with preview_settings (the same arguments and its plan_hash; a change since the preview is refused). Secrets are set with set_secret_setting; policy, sign-in and public access with their own tools.",
+		perCall(admin("save_settings", "Save settings previewed with preview_settings (the same arguments and its plan_hash; a change since the preview is refused). Secrets are set with set_secret_setting; policy, sign-in and public access with their own tools. A save with ports needs your confirmation in the browser.",
 			ClassWrite, "PUT /api/instances/{id}/settings", "settings.change", func(ctx context.Context, a directory.Actor, in saveSettingsArgs) (any, error) {
 				if err := instanceIDOK(in.ID); err != nil {
 					return nil, err
@@ -344,7 +345,7 @@ func (s *Server) registerAdminTools() {
 					return nil, &hub.StatusError{Status: http.StatusConflict, Err: errors.New("the settings or who they reach changed since the preview (plan_hash differs): preview again")}
 				}
 				return s.saveSettings(a, in.ID, u)
-			}),
+			}), settingsClass, idOf, settingsConsequences),
 		{Name: "set_secret_setting", Description: "Set a secret setting: the value is entered on the Hub's settings page, never in the chat. After you entered it, this reports whether it is set and when.",
 			Class: ClassSecret, Scope: ScopeAdmin, Twin: "PUT /api/instances/{id}/settings", In: secretSettingArgs{},
 			SecretForm: func(args json.RawMessage) string {
@@ -637,7 +638,7 @@ func (s *Server) registerAdminTools() {
 			ClassRead, "GET /api/settings/local-networks", "", func(context.Context, directory.Actor, noArgs) (any, error) {
 				return s.localNetworks(), nil
 			}),
-		admin("set_local_networks", "Set the local networks (CIDR prefixes; [] = loopback only), or go back to the defaults with use_defaults.",
+		perCall(admin("set_local_networks", "Set the local networks (CIDR prefixes; [] = loopback only), or go back to the defaults with use_defaults. A list that isn't within the current one needs your confirmation in the browser.",
 			ClassWrite, "PUT /api/settings/local-networks", "settings.local_networks", func(_ context.Context, a directory.Actor, in localNetsArgs) (any, error) {
 				cidrs := in.Networks
 				switch {
@@ -652,10 +653,71 @@ func (s *Server) registerAdminTools() {
 					return nil, err
 				}
 				return s.localNetworks(), nil
-			}),
+			}), s.localNetsClass, func(json.RawMessage) string { return "local-networks" }, localNetsConsequences),
 	} {
 		s.registerTool(t)
 	}
+}
+
+// perCall makes t a tool whose class is decided per call (G37): it
+// registers D with its typed check and consequences, and classFor says
+// W or D for each call's arguments.
+func perCall(t Tool, classFor func(json.RawMessage) ToolClass, typed func(json.RawMessage) string, consequences func(json.RawMessage) []string) Tool {
+	t.Class, t.ClassFor, t.Typed, t.Consequences = ClassDestructive, classFor, typed, consequences
+	return t
+}
+
+// settingsClass is save_settings' class (security review of T17a): D
+// whenever the call sets ports — they publish host ports and change
+// <KEY>_BIND —, W for settings only.
+func settingsClass(args json.RawMessage) ToolClass {
+	var a struct {
+		Ports *json.RawMessage `json:"ports"`
+	}
+	if json.Unmarshal(args, &a) != nil || a.Ports != nil {
+		return ClassDestructive
+	}
+	return ClassWrite
+}
+
+func settingsConsequences(args json.RawMessage) []string {
+	a, _ := decode[saveSettingsArgs](args)
+	keys := slices.Sorted(maps.Keys(a.Ports))
+	return []string{"Replaces " + a.ID + "'s port configuration (" + strings.Join(keys, ", ") + "): host ports may be published or bound to other addresses.",
+		"Saves the settings changes below too."}
+}
+
+// localNetsClass is set_local_networks' class (security review of T17a):
+// W for use_defaults or a list within the current one (every new prefix
+// inside a current prefix of its family); anything wider, or a list that
+// doesn't parse, D.
+func (s *Server) localNetsClass(args json.RawMessage) ToolClass {
+	a, err := decode[localNetsArgs](args)
+	if err != nil {
+		return ClassDestructive
+	}
+	if a.UseDefaults && len(a.Networks) == 0 {
+		return ClassWrite
+	}
+	cur := s.Hub.LocalNetworks()
+	for _, n := range a.Networks {
+		p, err := netip.ParsePrefix(strings.TrimSpace(n))
+		if err != nil {
+			return ClassDestructive
+		}
+		p = p.Masked()
+		if !slices.ContainsFunc(cur, func(c netip.Prefix) bool {
+			return c.Addr().Is4() == p.Addr().Is4() && c.Bits() <= p.Bits() && c.Contains(p.Addr())
+		}) {
+			return ClassDestructive
+		}
+	}
+	return ClassWrite
+}
+
+func localNetsConsequences(args json.RawMessage) []string {
+	a, _ := decode[localNetsArgs](args)
+	return []string{"Sets the local networks to " + strings.Join(a.Networks, ", ") + ": LAN-only ports and file sharing accept connections from them, and the apps using them restart."}
 }
 
 // update is the SettingsUpdate the arguments stand for (no secrets, no

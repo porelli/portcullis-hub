@@ -425,6 +425,17 @@ func TestToolClassPerCall(t *testing.T) {
 		{"set_sign_in_mode", map[string]any{"id": "nativeapp", "mode": "native"}, true},
 		{"set_public_access", map[string]any{"id": "cloud", "access": "off"}, false},
 		{"set_public_access", map[string]any{"id": "cloud", "access": "on"}, true},
+		// Security review: local networks within the current ones (the
+		// defaults include 10/8) or the defaults → W, wider → D.
+		{"set_local_networks", map[string]any{"networks": []string{"10.1.0.0/16"}}, false},
+		{"set_local_networks", map[string]any{"networks": []string{}}, false},
+		{"set_local_networks", map[string]any{"use_defaults": true}, false},
+		{"set_local_networks", map[string]any{"networks": []string{"10.1.0.0/16", "203.0.113.0/24"}}, true},
+		{"set_local_networks", map[string]any{"networks": []string{"0.0.0.0/1"}}, true},
+		// save_settings with ports → D, settings only → W (the hash
+		// mismatch answers after the class decided).
+		{"save_settings", map[string]any{"id": "secretapp", "values": map[string]any{"api_url": "https://a.example.org"}, "plan_hash": "x"}, false},
+		{"save_settings", map[string]any{"id": "secretapp", "ports": map[string]string{}, "plan_hash": "x"}, true},
 	} {
 		res := e.call(t, "/mcp/admin", "root", "2025-11-25", c.tool, c.args, nil)
 		txt, _ := resultText(res)
@@ -443,7 +454,7 @@ func TestToolClassPerCall(t *testing.T) {
 		tl := x.(map[string]any)
 		ann, _ := tl["annotations"].(map[string]any)
 		switch tl["name"] {
-		case "set_policy", "set_sign_in_mode", "set_public_access", "delete_instance", "exec":
+		case "set_policy", "set_sign_in_mode", "set_public_access", "save_settings", "set_local_networks", "delete_instance", "exec":
 			seen++
 			if ann["destructiveHint"] != true {
 				t.Errorf("%s annotations %v", tl["name"], ann)
@@ -454,7 +465,7 @@ func TestToolClassPerCall(t *testing.T) {
 			}
 		}
 	}
-	if seen != 5 {
+	if seen != 7 {
 		t.Errorf("listed %d of the D tools", seen)
 	}
 }
