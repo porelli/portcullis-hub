@@ -23,6 +23,7 @@ import (
 // per-person size (data file). plex: an app with its own login.
 const setVaultManifest = `name: Vault
 category: tools
+ai: {unsupported: "test fixture"}
 auth:
   method: header-auth
   group_access: true
@@ -59,7 +60,7 @@ const setVaultCompose = "services:\n  app:\n    image: vault\n    environment:\n
 	"      traefik.http.routers.vault.rule: Host(`vault.${PORTCULLIS_DOMAIN}`)\n" +
 	"      traefik.http.routers.vault.middlewares: portcullis-auth@docker,portcullis-groups@docker\n"
 
-const setPlexManifest = "name: Plex\nauth:\n  method: custom\n  sso: false\n  native_login: {supported: true, allow_without_gateway: true}\n"
+const setPlexManifest = "name: Plex\nai: {unsupported: test fixture}\nauth:\n  method: custom\n  sso: false\n  native_login: {supported: true, allow_without_gateway: true}\n"
 
 const setPlexCompose = "services:\n  web:\n    image: x\n    labels:\n      traefik.http.routers.plex.rule: Host(`plex.${PORTCULLIS_DOMAIN}`)\n"
 

@@ -19,6 +19,7 @@ import (
 const panelManifest = `name: Panel App
 category: tools
 instances: multi
+ai: {unsupported: "test fixture"}
 auth:
   method: header-auth
   group_access: true

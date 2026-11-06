@@ -493,7 +493,7 @@ func TestSaveSettingsValidation(t *testing.T) {
 
 func TestSubdomainCollision(t *testing.T) {
 	f := newFixture(t)
-	writeFile(t, filepath.Join(f.src, "clash", "manifest.yaml"), "name: Clash\nauth:\n  method: forward-auth\n")
+	writeFile(t, filepath.Join(f.src, "clash", "manifest.yaml"), "name: Clash\nai: {unsupported: test fixture}\nauth:\n  method: forward-auth\n")
 	writeFile(t, filepath.Join(f.src, "clash", "compose.yml"), "services:\n  c:\n    labels:\n      traefik.http.routers.c.rule: Host(`GRAFANA.${PORTCULLIS_DOMAIN}`) && PathPrefix(`/x`)\n")
 	f.h.Discover()
 	if err := f.h.Enable("grafana"); err != nil {

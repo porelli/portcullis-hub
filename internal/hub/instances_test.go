@@ -20,6 +20,7 @@ import (
 const v2GrafanaManifest = `name: Grafana
 category: monitoring
 instances: multi
+ai: {unsupported: "test fixture"}
 auth:
   method: header-auth
   group_access: true
@@ -62,6 +63,7 @@ const v2GrafanaCompose = "services:\n" +
 const v2ChatManifest = `name: Chat
 category: misc
 instances: multi
+ai: {unsupported: "test fixture"}
 auth:
   method: native-oidc
   sso: true
@@ -85,6 +87,7 @@ const v2ChatCompose = "services:\n  web:\n    image: x\n    labels:\n" +
 const v2RelayManifest = `name: Relay
 category: network
 instances: multi
+ai: {unsupported: "test fixture"}
 auth:
   method: forward-auth
 ports:
@@ -111,6 +114,7 @@ const v2RelayCompose = "services:\n  relay:\n    image: coturn\n    network_mode
 const singleManifest = `name: Disks
 category: monitoring
 instances: single
+ai: {unsupported: "test fixture"}
 auth:
   method: forward-auth
   notes: privileged, monitors the host's own disks
@@ -430,14 +434,14 @@ func TestInstanceIDRules(t *testing.T) {
 	// Derived names that equal another template's default names (§11.1).
 	// Volume: template store's default volume portcullis_team-grafana-data
 	// is what grafana instance "team" would derive.
-	writeFile(t, filepath.Join(f.src, "store", "manifest.yaml"), "name: Store\ninstances: multi\nauth:\n  method: custom\n")
+	writeFile(t, filepath.Join(f.src, "store", "manifest.yaml"), "name: Store\ninstances: multi\nai: {unsupported: test fixture}\nauth:\n  method: custom\n")
 	writeFile(t, filepath.Join(f.src, "store", "compose.yml"), "services:\n  s:\n    image: x\n    volumes: [team-grafana-data:/d]\nvolumes:\n  team-grafana-data: {}\n")
 	f.h.Discover()
 	if err := f.h.CreateInstance("grafana", "team", nil); statusOf(err) != 409 || !strings.Contains(err.Error(), "volume portcullis_team-grafana-data") {
 		t.Errorf("volume collision: %v", err)
 	}
 	// A group collision (case-insensitive) with a template's default group.
-	writeFile(t, filepath.Join(f.src, "teams", "manifest.yaml"), "name: Teams\ninstances: multi\nauth:\n  method: custom\n  group_access: true\n  access_group: Users_Ops\n")
+	writeFile(t, filepath.Join(f.src, "teams", "manifest.yaml"), "name: Teams\ninstances: multi\nai: {unsupported: test fixture}\nauth:\n  method: custom\n  group_access: true\n  access_group: Users_Ops\n")
 	writeFile(t, filepath.Join(f.src, "teams", "compose.yml"), "services:\n  s:\n    image: x\n")
 	f.h.Discover()
 	if err := f.h.CreateInstance("grafana", "ops", nil); statusOf(err) != 409 || !strings.Contains(err.Error(), "group users_ops") {
@@ -491,7 +495,7 @@ func TestInstanceIDRules(t *testing.T) {
 		t.Errorf("normalised host = %s", h)
 	}
 	// A template that later appears with an existing instance's id loses.
-	writeFile(t, filepath.Join(f.src, "grafana-b", "manifest.yaml"), "name: GB\nauth:\n  method: custom\n")
+	writeFile(t, filepath.Join(f.src, "grafana-b", "manifest.yaml"), "name: GB\nai: {unsupported: test fixture}\nauth:\n  method: custom\n")
 	writeFile(t, filepath.Join(f.src, "grafana-b", "compose.yml"), "services:\n  s:\n    image: x\n")
 	f.h.Discover()
 	if tpl := f.h.Template("grafana-b"); tpl == nil || tpl.TemplateID != "grafana" {
@@ -771,13 +775,13 @@ func TestDiscoverSkipsTemplateCollidingWithInstance(t *testing.T) {
 	}
 	for id, c := range map[string][2]string{
 		// its access group is grafana-b's.
-		"teamb": {"name: T\nauth:\n  method: custom\n  group_access: true\n  access_group: USERS_grafana-b\n",
+		"teamb": {"name: T\nai: {unsupported: test fixture}\nauth:\n  method: custom\n  group_access: true\n  access_group: USERS_grafana-b\n",
 			"services:\n  s:\n    image: x\n"},
 		// its volume portcullis_grafana-b-grafana-data is grafana-b's.
-		"store": {"name: S\ninstances: multi\nauth:\n  method: custom\n",
+		"store": {"name: S\ninstances: multi\nai: {unsupported: test fixture}\nauth:\n  method: custom\n",
 			"services:\n  s:\n    image: x\nvolumes:\n  grafana-b-grafana-data: {}\n"},
 		// no collision.
-		"fine": {"name: F\nauth:\n  method: custom\n", "services:\n  s:\n    image: x\n"},
+		"fine": {"name: F\nai: {unsupported: test fixture}\nauth:\n  method: custom\n", "services:\n  s:\n    image: x\n"},
 	} {
 		writeFile(t, filepath.Join(f.src, id, "manifest.yaml"), c[0])
 		writeFile(t, filepath.Join(f.src, id, "compose.yml"), c[1])
@@ -831,7 +835,7 @@ func TestInstanceHostsVsOtherSources(t *testing.T) {
 	f := newInstanceFixture(t, nil)
 	other := filepath.Join(filepath.Dir(f.src), "other-src")
 	// A duplicate id (skipped: the first source wins) routing "talk".
-	writeFile(t, filepath.Join(other, "chat", "manifest.yaml"), "name: C2\nauth:\n  method: custom\n")
+	writeFile(t, filepath.Join(other, "chat", "manifest.yaml"), "name: C2\nai: {unsupported: test fixture}\nauth:\n  method: custom\n")
 	writeFile(t, filepath.Join(other, "chat", "compose.yml"), "services:\n  s:\n    labels:\n      traefik.http.routers.talk.rule: Host(`${PORTCULLIS_HOST_TALK:-talk.portcullis.local}`)\n")
 	f.h.mu.Lock()
 	f.h.st.Sources = append(f.h.st.Sources, state.Source{Name: "other", Path: other})
@@ -855,12 +859,12 @@ func TestMissingTemplateKeepsReservations(t *testing.T) {
 	}
 	os.RemoveAll(filepath.Join(f.src, "grafana"))
 	for id, c := range map[string][2]string{
-		"teamb": {"name: T\nauth:\n  method: custom\n  group_access: true\n  access_group: users_grafana-b\n", "services:\n  s:\n    image: x\n"},
-		"store": {"name: S\ninstances: multi\nauth:\n  method: custom\n", "services:\n  s:\n    image: x\nvolumes:\n  grafana-b-data: {}\n"},
-		"kc":    {"name: K\nauth:\n  method: native-oidc\n  group_access: true\nkeycloak_clients:\n  - client_id: grafana-b-x\n", "services:\n  s:\n    image: x\n"},
+		"teamb": {"name: T\nai: {unsupported: test fixture}\nauth:\n  method: custom\n  group_access: true\n  access_group: users_grafana-b\n", "services:\n  s:\n    image: x\n"},
+		"store": {"name: S\ninstances: multi\nai: {unsupported: test fixture}\nauth:\n  method: custom\n", "services:\n  s:\n    image: x\nvolumes:\n  grafana-b-data: {}\n"},
+		"kc":    {"name: K\nai: {unsupported: test fixture}\nauth:\n  method: native-oidc\n  group_access: true\nkeycloak_clients:\n  - client_id: grafana-b-x\n", "services:\n  s:\n    image: x\n"},
 		// The missing default instance's published groups too.
-		"ga":   {"name: G\nauth:\n  method: custom\n  group_access: true\n  access_group: users_grafana\n", "services:\n  s:\n    image: x\n"},
-		"fine": {"name: F\nauth:\n  method: custom\n", "services:\n  s:\n    image: x\n"},
+		"ga":   {"name: G\nai: {unsupported: test fixture}\nauth:\n  method: custom\n  group_access: true\n  access_group: users_grafana\n", "services:\n  s:\n    image: x\n"},
+		"fine": {"name: F\nai: {unsupported: test fixture}\nauth:\n  method: custom\n", "services:\n  s:\n    image: x\n"},
 	} {
 		writeFile(t, filepath.Join(f.src, id, "manifest.yaml"), c[0])
 		writeFile(t, filepath.Join(f.src, id, "compose.yml"), c[1])
@@ -904,7 +908,7 @@ func TestTraefikNameClaims(t *testing.T) {
 	route := func(r string) string {
 		return "      traefik.http.routers." + r + ".rule: Host(`${PORTCULLIS_HOST_" + strings.ToUpper(r) + ":-" + r + ".portcullis.local}`)\n"
 	}
-	m := "name: X\ninstances: multi\nauth:\n  method: custom\n"
+	m := "name: X\ninstances: multi\nai: {unsupported: test fixture}\nauth:\n  method: custom\n"
 	extra := map[string][2]string{
 		// aaa sorts before grafana and defines grafana's service and
 		// middleware: Traefik would merge them with grafana's.
@@ -966,8 +970,8 @@ func TestTraefikNameClaims(t *testing.T) {
 // its volumes inside portcullis_<template-id>[-_…]; a name in that
 // namespace another template's (or instance's) volume derives is a claim.
 func TestSingleVolumeNameClaims(t *testing.T) {
-	single := "name: S\ninstances: single\nauth:\n  method: custom\n"
-	multi := "name: M\ninstances: multi\nauth:\n  method: custom\n"
+	single := "name: S\ninstances: single\nai: {unsupported: test fixture}\nauth:\n  method: custom\n"
+	multi := "name: M\ninstances: multi\nai: {unsupported: test fixture}\nauth:\n  method: custom\n"
 	f := newInstanceFixtureExtra(t, nil, nil, map[string][2]string{
 		// op's own namespace holds portcullis_op-s-grafana-data, which
 		// grafana instance "op-s" would derive.
@@ -997,7 +1001,7 @@ func TestSingleVolumeNameClaims(t *testing.T) {
 // portcullis-<id> names its containers portcullis-<id>-<service>-<n>;
 // one that is a core service's container name is refused.
 func TestInstanceCoreContainerName(t *testing.T) {
-	m := "name: A\ninstances: multi\nauth:\n  method: custom\n"
+	m := "name: A\ninstances: multi\nai: {unsupported: test fixture}\nauth:\n  method: custom\n"
 	f := newInstanceFixtureExtra(t, nil, nil, map[string][2]string{
 		"authy": {m, "services:\n  auth:\n    image: x\n  proxy-hub:\n    image: x\n    labels:\n" +
 			"      traefik.http.routers.authy.rule: Host(`${PORTCULLIS_HOST_AUTHY:-authy.portcullis.local}`)\n"},
@@ -1023,7 +1027,7 @@ func TestInstanceCoreContainerName(t *testing.T) {
 // the default instance's middleware) is refused at discover; the
 // lowercase form loads and its instance gets every reference renamed.
 func TestInstanceMixedCaseReference(t *testing.T) {
-	m := "name: C\ninstances: multi\nauth:\n  method: custom\n"
+	m := "name: C\ninstances: multi\nai: {unsupported: test fixture}\nauth:\n  method: custom\n"
 	body := func(p, ref string) string {
 		return "services:\n  s:\n    image: x\n    labels:\n" +
 			"      traefik.http.routers." + p + ".rule: Host(`${PORTCULLIS_HOST_" + strings.ToUpper(p) + ":-" + p + ".portcullis.local}`)\n" +
@@ -1093,7 +1097,7 @@ func (l *lockedBuf) String() string {
 // derives (portcullis_team-x-grafana-data): it must be skipped.
 func TestDiscoverClaimsAfterSort(t *testing.T) {
 	team := [2]string{
-		"name: Team\ninstances: single\nauth:\n  method: custom\n",
+		"name: Team\ninstances: single\nai: {unsupported: test fixture}\nauth:\n  method: custom\n",
 		"services:\n  team:\n    image: x\n    labels:\n" +
 			"      traefik.http.routers.team.rule: Host(`${PORTCULLIS_HOST_TEAM:-team.portcullis.local}`)\n" +
 			"    volumes:\n      - d:/d\n" +

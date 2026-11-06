@@ -1,5 +1,6 @@
 name: Entry Env Fixture
 category: tools
+ai: {unsupported: "test fixture"}
 auth:
   method: custom
   sso: false

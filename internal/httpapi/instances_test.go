@@ -344,6 +344,7 @@ category: monitoring
 icon: "📊"
 description: Dashboards
 instances: multi
+ai: {unsupported: "test fixture"}
 auth:
   method: header-auth
   group_access: true
@@ -363,6 +364,7 @@ category: chat
 icon: "💬"
 description: Synapse-like homeserver (its server name is fixed)
 instances: multi
+ai: {unsupported: "test fixture"}
 auth:
   method: forward-auth
   group_access: true

@@ -22,6 +22,7 @@ import (
 const jellyfinManifest = `name: Jellyfin
 category: media
 instances: multi
+ai: {unsupported: "test fixture"}
 auth:
   method: header-auth
   group_access: true

@@ -73,9 +73,9 @@ func TestSingleDocument(t *testing.T) {
 	}
 	// Discover skips such a template although its first document is clean.
 	dir := t.TempDir()
-	writeTpl(t, dir, "multi", "name: Multi\ncategory: test\nicon: x\nauth:\n  method: public\n", two)
-	writeTpl(t, dir, "multiman", "name: A\ncategory: test\nicon: x\nauth:\n  method: public\n---\nname: B\n", "services:\n  web:\n    image: x\n")
-	writeTpl(t, dir, "single", "name: Single\ncategory: test\nicon: x\nauth:\n  method: custom\n", "services:\n  web:\n    image: x\n")
+	writeTpl(t, dir, "multi", "name: Multi\ncategory: test\nicon: x\nai: {unsupported: test fixture}\nauth:\n  method: public\n", two)
+	writeTpl(t, dir, "multiman", "name: A\ncategory: test\nicon: x\nai: {unsupported: test fixture}\nauth:\n  method: public\n---\nname: B\n", "services:\n  web:\n    image: x\n")
+	writeTpl(t, dir, "single", "name: Single\ncategory: test\nicon: x\nai: {unsupported: test fixture}\nauth:\n  method: custom\n", "services:\n  web:\n    image: x\n")
 	loaded := map[string]bool{}
 	for _, tp := range Discover(dir, "local", "example.org", nil) {
 		loaded[tp.ID] = true
@@ -298,7 +298,7 @@ func TestCheckCoreRefsUnicodeFolding(t *testing.T) {
 // duplicate or a missing rule); the controls load.
 func TestDiscoverRefusesBypasses(t *testing.T) {
 	dir := t.TempDir()
-	manifest := "name: App\ncategory: test\nicon: x\nauth:\n  method: forward-auth\n"
+	manifest := "name: App\ncategory: test\nicon: x\nai: {unsupported: test fixture}\nauth:\n  method: forward-auth\n"
 	baseLabels := [][2]string{
 		{"traefik.enable", "\"true\""},
 		{"traefik.http.routers.app.rule", "Host(`app.${PORTCULLIS_DOMAIN}`)"},
@@ -427,7 +427,7 @@ func TestDiscoverRefusesBypasses(t *testing.T) {
 		writeTpl(t, dir, id, manifest, build("web", nil, "    volumes: [db:/x]\n", top))
 		ids[id] = top
 	}
-	multiManifest := "name: App\ncategory: test\nicon: x\ninstances: multi\nauth:\n  method: forward-auth\n"
+	multiManifest := "name: App\ncategory: test\nicon: x\ninstances: multi\nai: {unsupported: test fixture}\nauth:\n  method: forward-auth\n"
 	multiCompose := func(lines []string, top string) string {
 		return strings.Replace(build("web", lines, "", top), "Host(`app.${PORTCULLIS_DOMAIN}`)", "Host(`${PORTCULLIS_HOST_APP:-app.portcullis.local}`)", 1)
 	}

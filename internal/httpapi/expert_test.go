@@ -31,7 +31,7 @@ func newExpertServer(t *testing.T, runner compose.Runner) (http.Handler, *direct
 	root := t.TempDir()
 	src := filepath.Join(root, "src", "demo")
 	os.MkdirAll(src, 0755)
-	os.WriteFile(filepath.Join(src, "manifest.yaml"), []byte("name: Demo\ncategory: test\nauth:\n  method: forward-auth\n"), 0644)
+	os.WriteFile(filepath.Join(src, "manifest.yaml"), []byte("name: Demo\ncategory: test\nai: {unsupported: test fixture}\nauth:\n  method: forward-auth\n"), 0644)
 	os.WriteFile(filepath.Join(src, "compose.yml"), []byte("services:\n  web:\n    image: x\n    labels:\n      traefik.http.routers.demo.rule: Host(`demo.${PORTCULLIS_DOMAIN}`)\n"), 0644)
 	data := filepath.Join(root, "data")
 	os.MkdirAll(data, 0755)

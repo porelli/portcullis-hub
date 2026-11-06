@@ -102,6 +102,7 @@ func TestHostCollisionRuntimeHosts(t *testing.T) {
 const v2PlexManifest = `name: Plex
 category: media
 instances: multi
+ai: {unsupported: "test fixture"}
 auth:
   method: custom
   sso: false
@@ -288,6 +289,7 @@ func TestFailedEnableRemovesCallbacks(t *testing.T) {
 const fwdManifest = `name: Fwd
 category: misc
 instances: multi
+ai: {unsupported: "test fixture"}
 auth:
   method: forward-auth
   group_access: true

@@ -20,6 +20,7 @@ import (
 const sambaManifest = `name: Samba
 category: storage
 instances: multi
+ai: {unsupported: "test fixture"}
 auth:
   method: forward-auth
 ports:

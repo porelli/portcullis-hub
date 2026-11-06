@@ -107,6 +107,7 @@ func TestInstanceView(t *testing.T) {
 	}
 	write(filepath.Join(dir, "hs", "manifest.yaml"), `name: HS
 instances: multi
+ai: {unsupported: "test fixture"}
 auth:
   method: native-oidc
   group_access: true
@@ -187,37 +188,37 @@ keycloak_clients:
 
 func TestDiscoverInstanceRules(t *testing.T) {
 	cases := map[string][2]string{
-		"multi legacy rule": {"name: X\ninstances: multi\nauth:\n  method: forward-auth\n",
+		"multi legacy rule": {"name: X\ninstances: multi\nai: {unsupported: test fixture}\nauth:\n  method: forward-auth\n",
 			"services:\n  s:\n    labels:\n      traefik.http.routers.x.rule: Host(`x.${PORTCULLIS_DOMAIN}`)\n"},
-		"multi volume name": {"name: X\ninstances: multi\nauth:\n  method: forward-auth\n",
+		"multi volume name": {"name: X\ninstances: multi\nai: {unsupported: test fixture}\nauth:\n  method: forward-auth\n",
 			"services:\n  s:\n    image: x\nvolumes:\n  d:\n    name: portcullis_d\n"},
-		"single other volume name": {"name: X\ninstances: single\nauth:\n  method: forward-auth\n",
+		"single other volume name": {"name: X\ninstances: single\nai: {unsupported: test fixture}\nauth:\n  method: forward-auth\n",
 			"services:\n  s:\n    image: x\nvolumes:\n  d:\n    name: mydata\n"},
-		"multi portcullis- name": {"name: X\ninstances: multi\nauth:\n  method: forward-auth\n",
+		"multi portcullis- name": {"name: X\ninstances: multi\nai: {unsupported: test fixture}\nauth:\n  method: forward-auth\n",
 			"services:\n  s:\n    labels:\n      traefik.http.routers.x.rule: Host(`${PORTCULLIS_HOST_X:-x.portcullis.local}`)\n      traefik.http.middlewares.portcullis-mine.headers.x: y\n"},
-		"unknown placeholder": {"name: X\nauth:\n  method: forward-auth\nurls:\n  - {label: a, url: \"https://{{HOST_Y}}\"}\n",
+		"unknown placeholder": {"name: X\nai: {unsupported: test fixture}\nauth:\n  method: forward-auth\nurls:\n  - {label: a, url: \"https://{{HOST_Y}}\"}\n",
 			"services:\n  s:\n    labels:\n      traefik.http.routers.x.rule: Host(`${PORTCULLIS_HOST_X:-x.portcullis.local}`)\n"},
-		"bad instances":    {"name: X\ninstances: many\nauth:\n  method: forward-auth\n", "services:\n  s:\n    image: x\n"},
-		"reserved env":     {"name: X\nauth:\n  method: forward-auth\nenv:\n  - key: PORTCULLIS_HOST_X\n", "services:\n  s:\n    image: x\n"},
-		"reserved setting": {"name: X\nauth:\n  method: forward-auth\nsettings:\n  - key: PORTCULLIS_INSTANCE\n", "services:\n  s:\n    image: x\n"},
-		"reserved port":    {"name: X\nauth:\n  method: forward-auth\nports:\n  - key: PORTCULLIS_OIDC_CLIENT_ID_A\n", "services:\n  s:\n    image: x\n"},
-		"multi {{DOMAIN}} url": {"name: X\ninstances: multi\nauth:\n  method: forward-auth\nurls:\n  - {label: a, url: \"https://x.{{DOMAIN}}\"}\n",
+		"bad instances":    {"name: X\ninstances: many\nai: {unsupported: test fixture}\nauth:\n  method: forward-auth\n", "services:\n  s:\n    image: x\n"},
+		"reserved env":     {"name: X\nai: {unsupported: test fixture}\nauth:\n  method: forward-auth\nenv:\n  - key: PORTCULLIS_HOST_X\n", "services:\n  s:\n    image: x\n"},
+		"reserved setting": {"name: X\nai: {unsupported: test fixture}\nauth:\n  method: forward-auth\nsettings:\n  - key: PORTCULLIS_INSTANCE\n", "services:\n  s:\n    image: x\n"},
+		"reserved port":    {"name: X\nai: {unsupported: test fixture}\nauth:\n  method: forward-auth\nports:\n  - key: PORTCULLIS_OIDC_CLIENT_ID_A\n", "services:\n  s:\n    image: x\n"},
+		"multi {{DOMAIN}} url": {"name: X\ninstances: multi\nai: {unsupported: test fixture}\nauth:\n  method: forward-auth\nurls:\n  - {label: a, url: \"https://x.{{DOMAIN}}\"}\n",
 			"services:\n  s:\n    labels:\n      traefik.http.routers.x.rule: Host(`${PORTCULLIS_HOST_X:-x.portcullis.local}`)\n"},
-		"multi {{DOMAIN}} redirect_uri": {"name: X\ninstances: multi\nauth:\n  method: native-oidc\n  group_access: true\n  access_group: users_x\nkeycloak_clients:\n  - {client_id: x, redirect_uri: \"https://x.{{DOMAIN}}/cb\"}\n",
+		"multi {{DOMAIN}} redirect_uri": {"name: X\ninstances: multi\nai: {unsupported: test fixture}\nauth:\n  method: native-oidc\n  group_access: true\n  access_group: users_x\nkeycloak_clients:\n  - {client_id: x, redirect_uri: \"https://x.{{DOMAIN}}/cb\"}\n",
 			"services:\n  s:\n    labels:\n      traefik.http.routers.x.rule: Host(`${PORTCULLIS_HOST_X:-x.portcullis.local}`)\n"},
-		"multi {{DOMAIN}} redirect_uris": {"name: X\ninstances: multi\nauth:\n  method: native-oidc\n  group_access: true\n  access_group: users_x\nkeycloak_clients:\n  - {client_id: x, redirect_uris: [\"https://{{HOST_X}}/cb\", \"https://x.{{DOMAIN}}/cb2\"]}\n",
+		"multi {{DOMAIN}} redirect_uris": {"name: X\ninstances: multi\nai: {unsupported: test fixture}\nauth:\n  method: native-oidc\n  group_access: true\n  access_group: users_x\nkeycloak_clients:\n  - {client_id: x, redirect_uris: [\"https://{{HOST_X}}/cb\", \"https://x.{{DOMAIN}}/cb2\"]}\n",
 			"services:\n  s:\n    labels:\n      traefik.http.routers.x.rule: Host(`${PORTCULLIS_HOST_X:-x.portcullis.local}`)\n"},
-		"multi {{DOMAIN}} apex url": {"name: X\ninstances: multi\nauth:\n  method: native-oidc\n  group_access: true\n  access_group: users_x\nurls:\n  - {label: a, url: \"https://{{DOMAIN}}/\"}\n",
+		"multi {{DOMAIN}} apex url": {"name: X\ninstances: multi\nai: {unsupported: test fixture}\nauth:\n  method: native-oidc\n  group_access: true\n  access_group: users_x\nurls:\n  - {label: a, url: \"https://{{DOMAIN}}/\"}\n",
 			"services:\n  s:\n    labels:\n      traefik.http.routers.x.rule: Host(`${PORTCULLIS_HOST_X:-x.portcullis.local}`)\n"},
-		"multi {{DOMAIN}} non-core label url": {"name: X\ninstances: multi\nauth:\n  method: native-oidc\n  group_access: true\n  access_group: users_x\nurls:\n  - {label: a, url: \"https://vpn.{{DOMAIN}}\"}\n",
+		"multi {{DOMAIN}} non-core label url": {"name: X\ninstances: multi\nai: {unsupported: test fixture}\nauth:\n  method: native-oidc\n  group_access: true\n  access_group: users_x\nurls:\n  - {label: a, url: \"https://vpn.{{DOMAIN}}\"}\n",
 			"services:\n  s:\n    labels:\n      traefik.http.routers.x.rule: Host(`${PORTCULLIS_HOST_X:-x.portcullis.local}`)\n"},
-		"multi {{DOMAIN}} under core url": {"name: X\ninstances: multi\nauth:\n  method: native-oidc\n  group_access: true\n  access_group: users_x\nurls:\n  - {label: a, url: \"https://x.auth.{{DOMAIN}}\"}\n",
+		"multi {{DOMAIN}} under core url": {"name: X\ninstances: multi\nai: {unsupported: test fixture}\nauth:\n  method: native-oidc\n  group_access: true\n  access_group: users_x\nurls:\n  - {label: a, url: \"https://x.auth.{{DOMAIN}}\"}\n",
 			"services:\n  s:\n    labels:\n      traefik.http.routers.x.rule: Host(`${PORTCULLIS_HOST_X:-x.portcullis.local}`)\n"},
-		"multi {{DOMAIN}} core prefix url": {"name: X\ninstances: multi\nauth:\n  method: native-oidc\n  group_access: true\n  access_group: users_x\nurls:\n  - {label: a, url: \"https://auth.{{DOMAIN}}.evil.org\"}\n",
+		"multi {{DOMAIN}} core prefix url": {"name: X\ninstances: multi\nai: {unsupported: test fixture}\nauth:\n  method: native-oidc\n  group_access: true\n  access_group: users_x\nurls:\n  - {label: a, url: \"https://auth.{{DOMAIN}}.evil.org\"}\n",
 			"services:\n  s:\n    labels:\n      traefik.http.routers.x.rule: Host(`${PORTCULLIS_HOST_X:-x.portcullis.local}`)\n"},
-		"multi {{DOMAIN}} glued url": {"name: X\ninstances: multi\nauth:\n  method: native-oidc\n  group_access: true\n  access_group: users_x\nurls:\n  - {label: a, url: \"https://{{HOST_X}}.{{DOMAIN}}\"}\n",
+		"multi {{DOMAIN}} glued url": {"name: X\ninstances: multi\nai: {unsupported: test fixture}\nauth:\n  method: native-oidc\n  group_access: true\n  access_group: users_x\nurls:\n  - {label: a, url: \"https://{{HOST_X}}.{{DOMAIN}}\"}\n",
 			"services:\n  s:\n    labels:\n      traefik.http.routers.x.rule: Host(`${PORTCULLIS_HOST_X:-x.portcullis.local}`)\n"},
-		"client key clash": {"name: X\nauth:\n  method: native-oidc\n  group_access: true\nkeycloak_clients:\n  - client_id: a-b\n  - client_id: a.b\n", "services:\n  s:\n    image: x\n"},
+		"client key clash": {"name: X\nai: {unsupported: test fixture}\nauth:\n  method: native-oidc\n  group_access: true\nkeycloak_clients:\n  - client_id: a-b\n  - client_id: a.b\n", "services:\n  s:\n    image: x\n"},
 	}
 	for name, c := range cases {
 		dir := t.TempDir()
@@ -231,11 +232,11 @@ func TestDiscoverInstanceRules(t *testing.T) {
 	// Without {{DOMAIN}} the same multi manifests load; a single template
 	// may still use {{DOMAIN}} (the main domain).
 	for name, c := range map[string][2]string{
-		"multi host placeholders": {"name: X\ninstances: multi\nauth:\n  method: native-oidc\n  group_access: true\n  access_group: users_x\nurls:\n  - {label: a, url: \"https://{{HOST_X}}\"}\nkeycloak_clients:\n  - {client_id: x, redirect_uri: \"https://{{HOST_X}}/cb\", redirect_uris: [\"https://{{HOST_X}}/cb2\"]}\n",
+		"multi host placeholders": {"name: X\ninstances: multi\nai: {unsupported: test fixture}\nauth:\n  method: native-oidc\n  group_access: true\n  access_group: users_x\nurls:\n  - {label: a, url: \"https://{{HOST_X}}\"}\nkeycloak_clients:\n  - {client_id: x, redirect_uri: \"https://{{HOST_X}}/cb\", redirect_uris: [\"https://{{HOST_X}}/cb2\"]}\n",
 			"services:\n  s:\n    labels:\n      traefik.http.routers.x.rule: Host(`${PORTCULLIS_HOST_X:-x.portcullis.local}`)\n"},
-		"multi core links": {"name: X\ninstances: multi\nauth:\n  method: native-oidc\n  group_access: true\n  access_group: users_x\nurls:\n  - {label: a, url: \"https://{{HOST_X}}\"}\n  - {label: b, url: \"https://auth.{{DOMAIN}}/realms/portcullis/account and https://people.{{DOMAIN}}\"}\nkeycloak_clients:\n  - {client_id: x, redirect_uri: \"https://{{HOST_X}}/cb\", redirect_uris: [\"https://hub.{{DOMAIN}}/cb\"]}\n",
+		"multi core links": {"name: X\ninstances: multi\nai: {unsupported: test fixture}\nauth:\n  method: native-oidc\n  group_access: true\n  access_group: users_x\nurls:\n  - {label: a, url: \"https://{{HOST_X}}\"}\n  - {label: b, url: \"https://auth.{{DOMAIN}}/realms/portcullis/account and https://people.{{DOMAIN}}\"}\nkeycloak_clients:\n  - {client_id: x, redirect_uri: \"https://{{HOST_X}}/cb\", redirect_uris: [\"https://hub.{{DOMAIN}}/cb\"]}\n",
 			"services:\n  s:\n    labels:\n      traefik.http.routers.x.rule: Host(`${PORTCULLIS_HOST_X:-x.portcullis.local}`)\n"},
-		"single {{DOMAIN}}": {"name: X\ninstances: single\nauth:\n  method: native-oidc\n  group_access: true\n  access_group: users_x\nurls:\n  - {label: a, url: \"https://x.{{DOMAIN}}\"}\nkeycloak_clients:\n  - {client_id: x, redirect_uri: \"https://x.{{DOMAIN}}/cb\"}\n",
+		"single {{DOMAIN}}": {"name: X\ninstances: single\nai: {unsupported: test fixture}\nauth:\n  method: native-oidc\n  group_access: true\n  access_group: users_x\nurls:\n  - {label: a, url: \"https://x.{{DOMAIN}}\"}\nkeycloak_clients:\n  - {client_id: x, redirect_uri: \"https://x.{{DOMAIN}}/cb\"}\n",
 			"services:\n  s:\n    labels:\n      traefik.http.routers.x.rule: Host(`${PORTCULLIS_HOST_X:-x.portcullis.local}`)\n"},
 	} {
 		dir := t.TempDir()

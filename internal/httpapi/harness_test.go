@@ -445,6 +445,7 @@ func (p harnessPeople) PrivilegeProblem(ctx context.Context, group string) (stri
 const harnessSambaManifest = `name: Samba
 category: files
 instances: multi
+ai: {unsupported: "test fixture"}
 auth:
   method: header-auth
   group_access: true

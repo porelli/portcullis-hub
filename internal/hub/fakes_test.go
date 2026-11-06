@@ -667,6 +667,7 @@ func (f *fakeIdP) UpdateForwardAuthCallbacks(ctx context.Context, add, remove []
 
 const grafanaManifest = `name: Grafana
 category: monitoring
+ai: {unsupported: "test fixture"}
 auth:
   method: header-auth
   group_access: true
@@ -698,6 +699,7 @@ const grafanaCompose = "services:\n  web:\n    image: grafana\n    environment:\
 
 const otherManifest = `name: Other
 category: misc
+ai: {unsupported: "test fixture"}
 auth:
   method: native-oidc
   sso: true

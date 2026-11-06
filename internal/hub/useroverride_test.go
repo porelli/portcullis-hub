@@ -139,7 +139,7 @@ volumes:
 
 func TestUserOverrideNetworks(t *testing.T) {
 	f := newFixture(t)
-	writeFile(t, filepath.Join(f.src, "net", "manifest.yaml"), "name: Net\nauth:\n  method: forward-auth\n")
+	writeFile(t, filepath.Join(f.src, "net", "manifest.yaml"), "name: Net\nai: {unsupported: test fixture}\nauth:\n  method: forward-auth\n")
 	writeFile(t, filepath.Join(f.src, "net", "compose.yml"), "services:\n  a:\n    image: x\n    networks: [backend, portcullis-proxy]\n    labels:\n      traefik.http.routers.n.rule: Host(`net.${PORTCULLIS_DOMAIN}`)\nnetworks:\n  backend: {}\n  portcullis-proxy:\n    external: true\n")
 	f.h.Discover()
 	if _, _, err := f.h.SaveUserOverride("net", "networks:\n  backend:\n    driver_opts: {com.docker.network.driver.mtu: \"1400\"}\n"); err != nil {
@@ -248,7 +248,7 @@ func TestParseBindRoots(t *testing.T) {
 
 func TestUserOverrideFoldedTraefikLabel(t *testing.T) {
 	f := newFixture(t)
-	writeFile(t, filepath.Join(f.src, "net2", "manifest.yaml"), "name: Net\nauth:\n  method: forward-auth\n")
+	writeFile(t, filepath.Join(f.src, "net2", "manifest.yaml"), "name: Net\nai: {unsupported: test fixture}\nauth:\n  method: forward-auth\n")
 	writeFile(t, filepath.Join(f.src, "net2", "compose.yml"), "services:\n  a:\n    image: x\n    labels:\n      traefik.http.routers.n.rule: Host(`net2.${PORTCULLIS_DOMAIN}`)\n")
 	f.h.Discover()
 	for _, c := range []string{

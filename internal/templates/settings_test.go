@@ -14,6 +14,7 @@ import (
 
 // hdrHead is a header-auth app behind Portcullis (group-gate on its router).
 const hdrHead = `name: App
+ai: {unsupported: "test fixture"}
 auth:
   method: header-auth
   group_access: true
@@ -28,6 +29,7 @@ const hdrCompose = "services:\n  web:\n    image: x\n    environment:\n      TRA
 
 // oidcHead is a native-oidc app with one Keycloak client "app".
 const oidcHead = `name: App
+ai: {unsupported: "test fixture"}
 auth:
   method: native-oidc
   group_access: true
@@ -44,6 +46,7 @@ const oidcCompose = "services:\n  web:\n    image: x\n    environment:\n      AP
 
 // The spec's Firefox Sync block (call 32), as a whole template.
 const firefoxHead = `name: Firefox Sync
+ai: {unsupported: "test fixture"}
 auth:
   method: custom
   group_access: false
@@ -307,9 +310,9 @@ func TestHeaderDeliveryRules(t *testing.T) {
 		{"double dash", hdrHead + opts("{key: quota, label: Q, type: int, scope: person, resolve: priority, default: 1, delivery: [{header: {name: X-Forwarded-Attr-A--B}}]}"), hdrCompose, "quota", "X-Forwarded-Attr-"},
 		{"no group-gate", hdrHead + opts(personHeader), noGroups, "quota", "portcullis-groups"},
 		{"public router", hdrHead + opts(personHeader), public, "quota", "router share"},
-		{"sign_in native", "name: App\nauth:\n  method: custom\n  sso: false\n  native_login: {supported: true, allow_without_gateway: true}\n" + opts(personHeader), hdrCompose, "quota", "own login"},
-		{"method public", "name: App\nauth:\n  method: public\n" + opts(personHeader), hdrCompose, "quota", "no Portcullis identity"},
-		{"custom without native_login", "name: App\nauth:\n  method: custom\n  sso: false\n" + opts(personHeader), hdrCompose, "quota", "no Portcullis identity"},
+		{"sign_in native", "name: App\nai: {unsupported: test fixture}\nauth:\n  method: custom\n  sso: false\n  native_login: {supported: true, allow_without_gateway: true}\n" + opts(personHeader), hdrCompose, "quota", "own login"},
+		{"method public", "name: App\nai: {unsupported: test fixture}\nauth:\n  method: public\n" + opts(personHeader), hdrCompose, "quota", "no Portcullis identity"},
+		{"custom without native_login", "name: App\nai: {unsupported: test fixture}\nauth:\n  method: custom\n  sso: false\n" + opts(personHeader), hdrCompose, "quota", "no Portcullis identity"},
 		{"router elsewhere reaches the backend", hdrHead + opts(personHeader), sideRouter, "quota", "router side reaches service web"},
 		{"gated router elsewhere, public on the backend", hdrHead + opts(personHeader), gatedElsewhere, "quota", "router pub reaches service web"},
 		{"gated router elsewhere, backend clean", hdrHead + opts(personHeader), strings.Replace(gatedElsewhere, pubRouter, "", 1), "", ""},
@@ -485,7 +488,7 @@ func TestPersonEnteredRules(t *testing.T) {
 		{"header not next_request", hdrHead + opts(pe("applies: restart, delivery: [{header: {name: X-Forwarded-Attr-Uid}}]")), hdrCompose, "mozilla_uid", "next_request"},
 		{"header ok", hdrHead + opts(pe("applies: next_request, delivery: [{header: {name: X-Forwarded-Attr-Uid}}]")), hdrCompose, "", ""},
 		{"custom without access_group", strings.Replace(ff, "  access_group: users_firefox-sync\n", "", 1), firefoxCompose, "mozilla_uid", "access_group"},
-		{"public without access_group", "name: App\nauth:\n  method: public\n" + strings.TrimPrefix(ff, firefoxHead), firefoxCompose, "mozilla_uid", "access_group"},
+		{"public without access_group", "name: App\nai: {unsupported: test fixture}\nauth:\n  method: public\n" + strings.TrimPrefix(ff, firefoxHead), firefoxCompose, "mozilla_uid", "access_group"},
 		{"header-auth needs no access_group", hdrHead + opts(pe("applies: next_request, delivery: [{header: {name: X-Forwarded-Attr-Uid}}]")), hdrCompose, "", ""},
 	})
 }
@@ -808,12 +811,12 @@ func TestCheckIDShape(t *testing.T) {
 	compose := "services:\n  web:\n    image: x\n"
 	for _, id := range []string{"a-portcullis-b", "my_app", "my--app"} {
 		for i := 0; i < 20; i++ {
-			if _, err := build(id, "src", "", []byte("name: App\nauth:\n  method: custom\n"), []byte(compose), "example.org", nil); err == nil || !strings.Contains(err.Error(), "directory name: id") {
+			if _, err := build(id, "src", "", []byte("name: App\nai: {unsupported: test fixture}\nauth:\n  method: custom\n"), []byte(compose), "example.org", nil); err == nil || !strings.Contains(err.Error(), "directory name: id") {
 				t.Fatalf("template %s run %d: %v", id, i, err)
 			}
 		}
 	}
-	if _, err := build("my-app", "src", "", []byte("name: App\nauth:\n  method: custom\n"), []byte(compose), "example.org", nil); err != nil {
+	if _, err := build("my-app", "src", "", []byte("name: App\nai: {unsupported: test fixture}\nauth:\n  method: custom\n"), []byte(compose), "example.org", nil); err != nil {
 		t.Errorf("my-app: %v", err)
 	}
 }

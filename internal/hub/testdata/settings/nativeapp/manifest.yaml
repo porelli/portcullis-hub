@@ -1,6 +1,7 @@
 name: Native Sign-in Fixture
 category: tools
 instances: multi
+ai: {unsupported: "test fixture"}
 auth:
   method: custom
   sso: false

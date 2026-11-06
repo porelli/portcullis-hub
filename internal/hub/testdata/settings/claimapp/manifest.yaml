@@ -1,6 +1,7 @@
 name: Immich Claims Fixture
 category: media
 instances: multi
+ai: {unsupported: "test fixture"}
 auth:
   method: native-oidc
   sso: true

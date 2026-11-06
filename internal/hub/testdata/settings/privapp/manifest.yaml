@@ -1,6 +1,7 @@
 name: Priv App
 category: tools
 instances: multi
+ai: {unsupported: "test fixture"}
 auth:
   method: native-oidc
   sso: true

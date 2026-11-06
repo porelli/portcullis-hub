@@ -344,6 +344,7 @@ func TestSetHostsUpdatesKeycloakRedirects(t *testing.T) {
 const v2CloudManifest = `name: Cloud
 category: productivity
 instances: multi
+ai: {unsupported: "test fixture"}
 auth:
   method: forward-auth
   group_access: true
@@ -471,6 +472,7 @@ func TestSetHostsDefaultInstance(t *testing.T) {
 const v2TeamManifest = `name: Team
 category: misc
 instances: multi
+ai: {unsupported: "test fixture"}
 auth:
   method: forward-auth
 `

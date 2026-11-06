@@ -47,6 +47,7 @@ const myAppsExtra = `    - key: trash_days
 const myDashManifest = `name: Grafana
 category: monitoring
 instances: multi
+ai: {unsupported: "test fixture"}
 auth:
   method: header-auth
   group_access: true

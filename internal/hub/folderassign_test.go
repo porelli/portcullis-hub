@@ -35,7 +35,7 @@ import (
 // options (indented YAML list items) and services (the router's service
 // first).
 func folderApp(name, id, options, svc, extraServices string) [2]string {
-	m := "name: " + name + "\ncategory: media\ninstances: multi\nauth:\n  method: header-auth\n  group_access: true\n" +
+	m := "name: " + name + "\ncategory: media\ninstances: multi\nai: {unsupported: test fixture}\nauth:\n  method: header-auth\n  group_access: true\n" +
 		"  access_group: users_" + id + "\n  admin_group: admin_" + id + "\nurls:\n  - label: Web\n    url: \"https://{{HOST_" + strings.ToUpper(id) + "}}\"\n" +
 		"settings:\n  options:\n" + options
 	c := "services:\n" + svc +

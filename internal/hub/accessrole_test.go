@@ -15,6 +15,7 @@ import (
 const vpnManifest = `name: VPN
 category: network
 instances: multi
+ai: {unsupported: "test fixture"}
 auth:
   method: native-oidc
   sso: true
@@ -32,6 +33,7 @@ const vpnCompose = "services:\n  web:\n    image: x\n    labels:\n" +
 const homeManifest = `name: Home
 category: chat
 instances: multi
+ai: {unsupported: "test fixture"}
 auth:
   method: native-oidc
   sso: true

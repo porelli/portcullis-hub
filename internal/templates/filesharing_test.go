@@ -13,6 +13,7 @@ import (
 // the population; a tsv people file and a sync hook on service smb.
 const smbHead = `name: Files
 instances: multi
+ai: {unsupported: "test fixture"}
 auth:
   method: custom
   group_access: true
@@ -200,6 +201,7 @@ func TestTimeMachineBlock(t *testing.T) {
 	const m = `name: Time Machine
 description: Mac backups over SMB, one share per person
 instances: multi
+ai: {unsupported: "test fixture"}
 auth:
   method: custom
   group_access: true
