@@ -13,3 +13,12 @@ import "embed"
 //
 //go:embed index.html people.html directory.js directory.css settings.js myapps.js folders.js doctor.js confirm.html confirm.js freshauth.js freshauth-callback.js
 var FS embed.FS
+
+// Docs holds the docs pages the Hub ships as read-only MCP resources
+// (contract §15.10, portcullis://docs/<name>): committed copies of
+// portcullis-docs pages, refreshed by docs/sync.sh (go generate).
+// Separate from FS, so /static/ never serves them.
+//
+//go:generate sh docs/sync.sh
+//go:embed docs/*.md
+var Docs embed.FS

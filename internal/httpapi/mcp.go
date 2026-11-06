@@ -1,0 +1,662 @@
+package httpapi
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
+	"net/http"
+	"os"
+	"reflect"
+	"regexp"
+	"slices"
+	"strings"
+	"sync"
+	"unicode/utf8"
+
+	"github.com/gowebpki/jcs"
+
+	"github.com/portcullis/hub/internal/aigate"
+	"github.com/portcullis/hub/internal/confirm"
+	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/hub"
+	sdk "github.com/portcullis/hub/internal/mcpsdk"
+)
+
+// The Portcullis MCP (contract §15.10; plan 4 Task 16): the Hub's own
+// MCP server at /mcp/admin (https://hub.<d>/mcp, admins only) and
+// /mcp/people (https://people.<d>/mcp, anyone signed in), on the MCP
+// listener only (mcpRoute: the gate's secret and identity headers).
+// Stateless Streamable HTTP through internal/mcpsdk (the one SDK
+// adapter).
+//
+// Every tool is registered with registerTool and called through one path
+// (callTool): the caller from mcpIdentity only (callerFrom = CallerFor +
+// Via "ai" + Client) → /mcp/admin refuses non-admins ("admins only";
+// audited refused for W and D) and /mcp/people tools with a Perm the
+// caller lacks → argument names (G16: undeclared names, and on U tools
+// every secret-looking name, are "secrets are never passed through the
+// AI; use <url>") and the schema → class D: a confirmation (§15.6) → class
+// U: the URL of the Hub's form → Run → toolResult (one global redactor,
+// G40: redact, then clip to 1 MiB). Every answer is a tool result, never
+// a protocol error and never HTTP 401/403.
+
+// ToolClass is a Portcullis tool's class (§15.10).
+type ToolClass string
+
+const (
+	ClassRead        ToolClass = "R" // read
+	ClassWrite       ToolClass = "W" // write (audited)
+	ClassDestructive ToolClass = "D" // needs a confirmation
+	ClassSecret      ToolClass = "U" // needs a secret from the person: the URL of the Hub's form
+)
+
+// The two scopes (resources) of the Portcullis MCP.
+const (
+	ScopeAdmin  = "admin"
+	ScopePeople = "people"
+)
+
+// Tool is one Portcullis MCP tool.
+type Tool struct {
+	Name, Description string
+	Class             ToolClass
+	Scope             string // ScopeAdmin | ScopePeople
+	// Twin is the HTTP route it mirrors, exactly as registered
+	// ("DELETE /api/directory/users/{username}", "/api/templates/enable").
+	Twin string
+	// Perm: people tools only, "" or a directory.Perm* the caller must
+	// hold (hidden from callers without it, refused if called anyway).
+	Perm string
+	// Audit is the twin's audit action (W and D tools): a refusal before
+	// Run (admins only, a missing permission) is audited refused under it.
+	Audit string
+	// In is the argument struct (its JSON schema, additionalProperties
+	// false, is derived through the SDK adapter); Run gets the arguments'
+	// canonical JSON (RFC 8785), which they were checked and confirmed as.
+	In any
+	// Typed is a D tool's typed check (the instance id, the person's or
+	// group's name, the domain); "" = the tool's name.
+	Typed        func(args json.RawMessage) string
+	Consequences func(args json.RawMessage) []string // D tools: the lines the page shows
+	SecretForm   func(args json.RawMessage) string   // U tools: the Hub URL of the form, pre-filled with non-secret context
+	Run          func(ctx context.Context, c *directory.Caller, args json.RawMessage) (any, error)
+}
+
+// secretArgRe is the secret-looking argument name rule (§15.10).
+var secretArgRe = regexp.MustCompile(`(?i)token|password|secret|key`)
+
+// mcpSecretNameAllow are the declared argument names that may match
+// secretArgRe, each with the reason it was allowed (G16; reviewed). A U
+// tool takes none of them.
+var mcpSecretNameAllow = map[string]string{
+	"finding_token": "the doctor mute's finding digest (Finding.token): a digest of the finding's public inputs, not a credential",
+	"key":           "a settings entry's option key (a manifest name such as api_url), never its value",
+}
+
+var mcpToolNameRe = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
+
+// maxToolResult is a tool result's text bound, after redaction (§15.10).
+const maxToolResult = 1 << 20
+
+// The texts of §15.6 / §15.10.
+const (
+	textSecretArgs     = "secrets are never passed through the AI; use "
+	textConfirmPrefix  = "This needs your confirmation in your browser: open "
+	textConfirmSuffix  = ", then ask me to try again."
+	textStillWaiting   = "Still waiting for your confirmation in your browser"
+	textDeclined       = "You declined this in your browser"
+	textCancelled      = "You cancelled the confirmation; nothing was done"
+	textTooMany        = "Too many confirmations requested; try again later"
+	textTooLong        = "these arguments are too long to confirm safely"
+	textAdminsOnly     = "admins only"
+	textNotAllowed     = "not allowed: you don't have the permission this needs"
+	textResultHidden   = "result hidden: secrets couldn't be read"
+	textNoDirectory    = "Users & Groups is unavailable right now; try again"
+	textClipped        = "\n[clipped: the result is over 1 MiB]"
+	confirmInputKey    = "portcullis_confirmation"
+	secretFormInputKey = "portcullis_secret_form"
+)
+
+// mcpTool is a registered tool with what registration derived.
+type mcpTool struct {
+	Tool
+	schema   json.RawMessage
+	props    map[string]bool
+	validate func(any) error
+	in       reflect.Type
+}
+
+// mcpState is the Server's Portcullis MCP state: the registry, the
+// built SDK servers and the redactor cache.
+type mcpState struct {
+	mu      sync.Mutex
+	tools   map[string][]*mcpTool // scope → tools in registration order
+	gen     int
+	servers map[string]mcpBuilt
+
+	redactMu  sync.Mutex
+	redactKey string
+	redactSet []string
+	redactOK  bool
+}
+
+type mcpBuilt struct {
+	gen int
+	srv *sdk.Server
+}
+
+// checkTool is registration's check (registerTool panics on its error:
+// a bad tool is a programming error, caught by the tests).
+func checkTool(t Tool, existing []*mcpTool) (*mcpTool, error) {
+	if !mcpToolNameRe.MatchString(t.Name) {
+		return nil, fmt.Errorf("tool name %q", t.Name)
+	}
+	if t.Scope != ScopeAdmin && t.Scope != ScopePeople {
+		return nil, fmt.Errorf("tool %s: scope %q", t.Name, t.Scope)
+	}
+	if slices.ContainsFunc(existing, func(x *mcpTool) bool { return x.Name == t.Name }) {
+		return nil, fmt.Errorf("tool %s registered twice on %s", t.Name, t.Scope)
+	}
+	if strings.TrimSpace(t.Description) == "" || strings.TrimSpace(t.Twin) == "" || t.Run == nil || t.In == nil {
+		return nil, fmt.Errorf("tool %s: description, twin, In and Run are required", t.Name)
+	}
+	switch t.Class {
+	case ClassRead:
+	case ClassWrite:
+		if t.Audit == "" {
+			return nil, fmt.Errorf("tool %s: a W tool names its audit action", t.Name)
+		}
+	case ClassDestructive:
+		if t.Audit == "" || t.Typed == nil || t.Consequences == nil {
+			return nil, fmt.Errorf("tool %s: a D tool needs Audit, Typed and Consequences", t.Name)
+		}
+	case ClassSecret:
+		if t.SecretForm == nil {
+			return nil, fmt.Errorf("tool %s: a U tool needs SecretForm", t.Name)
+		}
+	default:
+		return nil, fmt.Errorf("tool %s: class %q", t.Name, t.Class)
+	}
+	if t.Perm != "" && (t.Scope != ScopePeople ||
+		!slices.Contains([]string{directory.PermEditDetails, directory.PermInvite, directory.PermRemove}, t.Perm)) {
+		return nil, fmt.Errorf("tool %s: perm %q (people tools only, a delegated permission)", t.Name, t.Perm)
+	}
+	in := reflect.TypeOf(t.In)
+	for in.Kind() == reflect.Pointer {
+		in = in.Elem()
+	}
+	if in.Kind() != reflect.Struct {
+		return nil, fmt.Errorf("tool %s: In must be a struct", t.Name)
+	}
+	raw, props, validate, err := sdk.Schema(in)
+	if err != nil {
+		return nil, fmt.Errorf("tool %s: schema: %v", t.Name, err)
+	}
+	m := &mcpTool{Tool: t, schema: raw, props: map[string]bool{}, validate: validate, in: in}
+	for _, p := range props {
+		if secretArgRe.MatchString(p) {
+			if t.Class == ClassSecret {
+				return nil, fmt.Errorf("tool %s: a U tool takes no secret-looking argument (%s)", t.Name, p)
+			}
+			if mcpSecretNameAllow[p] == "" {
+				return nil, fmt.Errorf("tool %s: argument %s looks like a secret and isn't on the reviewed allowlist", t.Name, p)
+			}
+		}
+		m.props[p] = true
+	}
+	return m, nil
+}
+
+// registerTool adds t to its scope's registry (panics on a bad tool).
+func (s *Server) registerTool(t Tool) {
+	s.mcp.mu.Lock()
+	defer s.mcp.mu.Unlock()
+	m, err := checkTool(t, s.mcp.tools[t.Scope])
+	if err != nil {
+		panic("registerTool: " + err.Error())
+	}
+	if s.mcp.tools == nil {
+		s.mcp.tools = map[string][]*mcpTool{}
+	}
+	s.mcp.tools[t.Scope] = append(s.mcp.tools[t.Scope], m)
+	s.mcp.gen++
+}
+
+// tools are scope's registered tools, in registration order.
+func (s *Server) tools(scope string) []Tool {
+	s.mcp.mu.Lock()
+	defer s.mcp.mu.Unlock()
+	out := make([]Tool, 0, len(s.mcp.tools[scope]))
+	for _, t := range s.mcp.tools[scope] {
+		out = append(out, t.Tool)
+	}
+	return out
+}
+
+// registerMCPTools registers the real tools (Tasks 17–19); none yet.
+func (s *Server) registerMCPTools() {}
+
+// mcpScopeOf names the scope's resource URL, listener, page base and
+// label for the person's messages.
+type mcpScopeInfo struct {
+	resource, listener, home, label string
+}
+
+func (s *Server) mcpScope(scope string) mcpScopeInfo {
+	d := hub.NormalizeHost(s.Hub.Domain())
+	if scope == ScopeAdmin {
+		return mcpScopeInfo{aigate.AdminURL(d), confirm.ListenerHub, "https://hub." + d + "/", "Portcullis (admin)"}
+	}
+	return mcpScopeInfo{aigate.PeopleURL(d), confirm.ListenerPeople, "https://people." + d + "/", "Portcullis"}
+}
+
+var errNoMCPIdentity = errors.New("no AI identity")
+
+// callerFrom is the tool caller: the MCP listener's identity only
+// (mcpIdentity, put on the request by mcpRoute; G41) resolved with
+// CallerFor and given Via "ai" and the AI client (Service.CallerAs).
+func (s *Server) callerFrom(ctx context.Context) (*directory.Caller, error) {
+	a, ok := ctx.Value(mcpIdentityKey{}).(directory.Actor)
+	if !ok || a.Via != directory.ViaAI || a.Client == "" {
+		return nil, errNoMCPIdentity
+	}
+	if s.Directory == nil {
+		return nil, errors.New("user management not configured")
+	}
+	return s.Directory.CallerAs(ctx, a)
+}
+
+// mcpHandler is the Streamable HTTP handler of scope's server.
+func (s *Server) mcpHandler(scope string) http.HandlerFunc {
+	h := sdk.Handler(func(*http.Request) *sdk.Server { return s.mcpServer(scope) })
+	return h.ServeHTTP
+}
+
+// mcpServer is scope's SDK server, rebuilt when the registry changed.
+func (s *Server) mcpServer(scope string) *sdk.Server {
+	s.mcp.mu.Lock()
+	defer s.mcp.mu.Unlock()
+	if b, ok := s.mcp.servers[scope]; ok && b.gen == s.mcp.gen {
+		return b.srv
+	}
+	info := s.mcpScope(scope)
+	srv := sdk.NewServer("portcullis-hub", info.label)
+	for _, t := range s.mcp.tools[scope] {
+		srv.AddTool(&sdk.Tool{Name: t.Name, Description: t.Description, InputSchema: t.schema, Annotations: annotations(t.Class, t.Twin)},
+			s.toolHandler(scope, t))
+	}
+	srv.AddReceivingMiddleware(sdk.FilterTools(func(ctx context.Context) func(string) bool {
+		return s.mcpVisible(ctx, scope)
+	}))
+	s.addMCPResources(srv, scope)
+	s.addMCPPrompts(srv, scope)
+	if s.mcp.servers == nil {
+		s.mcp.servers = map[string]mcpBuilt{}
+	}
+	s.mcp.servers[scope] = mcpBuilt{gen: s.mcp.gen, srv: srv}
+	return srv
+}
+
+// annotations (§15.10): R readOnlyHint; D destructiveHint; W and U
+// destructiveHint false; idempotentHint where the twin is a PUT.
+func annotations(c ToolClass, twin string) *sdk.ToolAnnotations {
+	t, f := true, false
+	a := &sdk.ToolAnnotations{IdempotentHint: strings.HasPrefix(twin, "PUT ")}
+	switch c {
+	case ClassRead:
+		a.ReadOnlyHint = true
+	case ClassDestructive:
+		a.DestructiveHint = &t
+	default:
+		a.DestructiveHint = &f
+	}
+	return a
+}
+
+// mcpVisible is tools/list's filter for the request's caller: a people
+// tool with a Perm is listed only to holders (and admins); a caller that
+// can't be resolved sees no such tool.
+func (s *Server) mcpVisible(ctx context.Context, scope string) func(string) bool {
+	s.mcp.mu.Lock()
+	perms := map[string]string{}
+	for _, t := range s.mcp.tools[scope] {
+		perms[t.Name] = t.Perm
+	}
+	s.mcp.mu.Unlock()
+	var c *directory.Caller
+	resolved := false
+	return func(name string) bool {
+		p := perms[name]
+		if p == "" {
+			return true
+		}
+		if !resolved {
+			c, _ = s.callerFrom(ctx)
+			resolved = true
+		}
+		return c != nil && (c.Admin || c.Perms[p])
+	}
+}
+
+func (s *Server) toolHandler(scope string, t *mcpTool) sdk.ToolHandler {
+	return func(ctx context.Context, req *sdk.CallToolRequest) (*sdk.CallToolResult, error) {
+		return s.callTool(ctx, scope, t, sdk.CallOf(req)), nil
+	}
+}
+
+type confirmationKey struct{}
+
+// confirmationID is the id of the confirmation the running D tool
+// consumed ("" for other tools): its own audit entry carries
+// "confirmation <id>" in its detail (§15.6).
+func confirmationID(ctx context.Context) string {
+	id, _ := ctx.Value(confirmationKey{}).(string)
+	return id
+}
+
+// callTool is the one call path of every tool.
+func (s *Server) callTool(ctx context.Context, scope string, t *mcpTool, call sdk.Call) *sdk.CallToolResult {
+	info := s.mcpScope(scope)
+	c, err := s.callerFrom(ctx)
+	if err != nil {
+		var de *directory.Error
+		if errors.As(err, &de) && de.Status < 500 {
+			return s.errResult(de.Msg)
+		}
+		log.Printf("mcp: %s: resolve caller: %v", t.Name, err)
+		return sdk.TextResult(textNoDirectory, true)
+	}
+	switch {
+	case scope == ScopeAdmin && !c.Admin:
+		s.auditToolRefusal(c, t, textAdminsOnly)
+		return sdk.TextResult(textAdminsOnly, true)
+	case t.Perm != "" && !c.Admin && !c.Perms[t.Perm]:
+		s.auditToolRefusal(c, t, textNotAllowed)
+		return sdk.TextResult(textNotAllowed, true)
+	}
+	args, declared, refusal := checkArgs(t, call.Arguments)
+	if refusal != "" {
+		url := info.home
+		if t.Class == ClassSecret {
+			url = t.SecretForm(declared)
+		}
+		if refusal == refusalSecret {
+			return sdk.TextResult(textSecretArgs+url, true)
+		}
+		return s.errResult(refusal)
+	}
+	switch t.Class {
+	case ClassDestructive:
+		id, answer := s.confirmCall(c, t, info, args, call)
+		if answer != nil {
+			return answer
+		}
+		ctx = context.WithValue(ctx, confirmationKey{}, id)
+	case ClassSecret:
+		switch call.InputReply(secretFormInputKey) {
+		case "accept":
+		case "decline", "cancel":
+			return sdk.TextResult("You cancelled; nothing was done", true)
+		default:
+			url := t.SecretForm(args)
+			if call.Protocol == sdk.ProtocolStateless && call.URLElicit {
+				if r, err := sdk.URLInputRequired(secretFormInputKey, t.Name+" on "+info.label+" needs a secret from you: enter it in your browser.", url, ""); err == nil {
+					return r
+				}
+			}
+			return sdk.TextResult("This needs a secret, which is never passed through the AI: enter it in your browser at "+url+", then ask me to check.", true)
+		}
+	}
+	v, err := t.Run(ctx, c, args)
+	// The redactor is built after Run: a secret Run itself set is in it.
+	redact, rerr := s.toolRedactor()
+	if rerr != nil {
+		log.Printf("mcp: %s: redaction set: %v", t.Name, rerr)
+		return sdk.TextResult(textResultHidden, true)
+	}
+	if err != nil {
+		return toolError(err, redact)
+	}
+	return toolResult(v, redact)
+}
+
+// auditToolRefusal records a refusal before Run of a W or D tool under
+// its twin's audit action, attributed via ai and the client.
+func (s *Server) auditToolRefusal(c *directory.Caller, t *mcpTool, why string) {
+	if (t.Class != ClassWrite && t.Class != ClassDestructive) || s.Audit == nil {
+		return
+	}
+	a := c.Actor()
+	if err := s.Audit.Append(directory.AuditEntry{Actor: a.User, Via: a.Via, Client: a.Client, Action: t.Audit,
+		Target: t.Name, Detail: "tool " + t.Name + ": " + why, Result: "refused"}); err != nil {
+		log.Printf("audit: %v", err)
+	}
+}
+
+const refusalSecret = "\x00secret"
+
+// checkArgs: the arguments (absent or null = {}) as their canonical JSON
+// (RFC 8785, jcs: one object, no duplicate keys), every top-level name
+// declared (undeclared, or a secret-looking name on a U tool =
+// refusalSecret), valid against the schema and decodable into In.
+// declared is the object with only the declared names (for SecretForm).
+func checkArgs(t *mcpTool, raw json.RawMessage) (args, declared json.RawMessage, refusal string) {
+	declared = json.RawMessage("{}")
+	r := strings.TrimSpace(string(raw))
+	if r == "" || r == "null" {
+		r = "{}"
+	}
+	if r[0] != '{' || !utf8.ValidString(r) {
+		return nil, declared, "invalid arguments: not one JSON object"
+	}
+	canon, err := jcs.Transform([]byte(r))
+	if err != nil {
+		return nil, declared, "invalid arguments: not one JSON object with distinct keys"
+	}
+	var m map[string]any
+	if err := json.Unmarshal(canon, &m); err != nil {
+		return nil, declared, "invalid arguments: not one JSON object"
+	}
+	keep := map[string]any{}
+	secret := false
+	for k, v := range m {
+		if !t.props[k] || (t.Class == ClassSecret && secretArgRe.MatchString(k)) {
+			secret = true
+			continue
+		}
+		keep[k] = v
+	}
+	if b, err := json.Marshal(keep); err == nil {
+		if c, err := jcs.Transform(b); err == nil {
+			declared = c
+		}
+	}
+	if secret {
+		return nil, declared, refusalSecret
+	}
+	if err := t.validate(m); err != nil {
+		return nil, declared, "invalid arguments: " + err.Error()
+	}
+	dec := json.NewDecoder(strings.NewReader(string(canon)))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(reflect.New(t.in).Interface()); err != nil {
+		return nil, declared, "invalid arguments: " + err.Error()
+	}
+	return canon, declared, ""
+}
+
+// confirmCall (§15.6): a D tool runs only by consuming an approved
+// confirmation of exactly (person, resource, tool, sha256 of args) on
+// the scope's listener → its id. Otherwise the answer: still waiting,
+// declined, or a new confirmation — a 2026-07-28 client that declared
+// URL elicitation gets an InputRequiredResult with the page's URL
+// elicitation, every other client the text (the Hub's MCP is stateless:
+// no elicitation/create; G17). Never form mode, never 401/403.
+func (s *Server) confirmCall(c *directory.Caller, t *mcpTool, info mcpScopeInfo, args json.RawMessage, call sdk.Call) (string, *sdk.CallToolResult) {
+	sum := sha256.Sum256(args)
+	digest := hex.EncodeToString(sum[:])
+	conf, err := s.Hub.ConsumeConfirmation(info.listener, c.User, info.resource, t.Name, digest)
+	switch {
+	case err == nil:
+		return conf.ID, nil
+	case errors.Is(err, confirm.ErrPending):
+		if r := call.InputReply(confirmInputKey); r == "decline" || r == "cancel" {
+			return "", sdk.TextResult(textCancelled, true)
+		}
+		return "", sdk.TextResult(textStillWaiting, true)
+	case errors.Is(err, confirm.ErrDeclined):
+		return "", sdk.TextResult(textDeclined, true)
+	case !errors.Is(err, confirm.ErrNotFound):
+		return "", s.errResult("can't check the confirmation right now; try again")
+	}
+	if len(args) > 4<<10 {
+		return "", sdk.TextResult(textTooLong, true)
+	}
+	typed := strings.TrimSpace(t.Typed(args))
+	if typed == "" {
+		typed = t.Name
+	}
+	conf, err = s.Hub.CreateConfirmation(c.Actor(), confirm.Request{
+		User: c.User, Client: c.Client, Resource: info.resource, Tool: t.Name, ArgsSHA256: digest, ArgsPreview: string(args),
+		Listener: info.listener, Typed: typed, Label: typed + " on " + info.label, Consequences: t.Consequences(args),
+	})
+	if err != nil {
+		var se *hub.StatusError
+		if errors.As(err, &se) && se.Status == http.StatusTooManyRequests {
+			return "", sdk.TextResult(textTooMany, true)
+		}
+		log.Printf("mcp: %s: create confirmation: %v", t.Name, err)
+		return "", s.errResult("can't ask for a confirmation right now; try again")
+	}
+	url := s.Hub.ConfirmationURL(conf)
+	if call.Protocol == sdk.ProtocolStateless && call.URLElicit {
+		if r, err := sdk.URLInputRequired(confirmInputKey, t.Name+" on "+info.label+" needs your confirmation in your browser.", url, conf.ID); err == nil {
+			return "", r
+		}
+	}
+	return "", sdk.TextResult(textConfirmPrefix+url+textConfirmSuffix, true)
+}
+
+// errResult is an isError result of a message that holds no secret
+// (refusals the Hub words itself), clipped.
+func (s *Server) errResult(msg string) *sdk.CallToolResult {
+	return sdk.TextResult(clipMessage(msg, 2000), true)
+}
+
+// toolError maps a Run error as the HTTP handlers do (writeErr): an
+// OpError as its JSON record, anything else (a 409 busy included) its
+// message — always an isError result, redacted, then clipped.
+func toolError(err error, redact func(string) string) *sdk.CallToolResult {
+	var oe *hub.OpError
+	if errors.As(err, &oe) {
+		b, _ := json.Marshal(map[string]any{"error": oe.Record.Error, "op": oe.Record.Op, "output": oe.Record.Output,
+			"hint": oe.Record.Hint, "rolled_back": oe.Record.RolledBack})
+		return sdk.TextResult(clipResult(redact(string(b))), true)
+	}
+	msg := err.Error()
+	var de *directory.Error
+	if errors.As(err, &de) {
+		msg = de.Msg
+	}
+	return sdk.TextResult(clipMessage(redact(msg), 2000), true)
+}
+
+// toolResult is v as JSON text, redacted, then clipped to 1 MiB.
+func toolResult(v any, redact func(string) string) *sdk.CallToolResult {
+	var b strings.Builder
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return sdk.TextResult("the result can't be encoded", true)
+	}
+	return sdk.TextResult(clipResult(redact(strings.TrimSuffix(b.String(), "\n"))), false)
+}
+
+// clipResult bounds a redacted text to maxToolResult bytes (with the
+// note), on a rune boundary.
+func clipResult(s string) string {
+	if len(s) <= maxToolResult {
+		return s
+	}
+	n := maxToolResult - len(textClipped)
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n] + textClipped
+}
+
+// OpStarted is a long operation's answer (§15.10): the twin's 202 body,
+// at once; get_op / wait_for_op show the outcome.
+type OpStarted struct {
+	OpID     string `json:"op_id"`
+	Op       string `json:"op"`
+	Instance string `json:"instance"`
+	Poll     string `json:"poll"`
+}
+
+// inviteLinkRe: core's invite links (§9.4, https://enroll.<d>/invite/<token>)
+// never reach the model (§15.10).
+var inviteLinkRe = regexp.MustCompile(`(?i)https?://enroll\.[^/\s"'<>\\]+/invite/[^\s"'<>\\]+`)
+
+// toolRedactor is the one redactor of every tool result (G40): the union
+// of every instance's redaction set and the provider secrets
+// (Hub.ToolRedactionSet), the Hub's file secrets (proxy and MCP gate
+// secrets, and RedactFiles: the invite and domains secrets, the LLDAP
+// password) and invite links. The set is cached under a key of every
+// source's stat (Hub.ToolRedactionKey + RedactFiles), rebuilt when it
+// changes. err: a source exists but can't be read — the result is hidden.
+func (s *Server) toolRedactor() (func(string) string, error) {
+	key := s.Hub.ToolRedactionKey() + "\x00" + filesKey(s.RedactFiles)
+	st := &s.mcp
+	st.redactMu.Lock()
+	defer st.redactMu.Unlock()
+	if !st.redactOK || st.redactKey != key {
+		vals, err := s.Hub.ToolRedactionSet()
+		if err != nil {
+			st.redactOK = false
+			return nil, err
+		}
+		for _, p := range s.RedactFiles {
+			b, err := os.ReadFile(p)
+			switch {
+			case errors.Is(err, os.ErrNotExist):
+				continue
+			case err != nil:
+				st.redactOK = false
+				return nil, fmt.Errorf("a Hub secret file can't be read: %v", errors.Unwrap(err))
+			}
+			if v := strings.TrimSpace(string(b)); v != "" {
+				vals = append(vals, v)
+			}
+			clear(b)
+		}
+		for _, v := range []string{s.Secret, s.MCPSecret} {
+			if v != "" {
+				vals = append(vals, v)
+			}
+		}
+		st.redactKey, st.redactSet, st.redactOK = key, vals, true
+	}
+	vals := st.redactSet
+	return func(x string) string {
+		return inviteLinkRe.ReplaceAllString(hub.RedactValues(x, vals), "[invite link hidden]")
+	}, nil
+}
+
+// filesKey is a stat line per file (never the content).
+func filesKey(paths []string) string {
+	var b strings.Builder
+	for _, p := range paths {
+		fi, err := os.Stat(p)
+		if err != nil {
+			fmt.Fprintf(&b, "%s:%v\n", p, errors.Is(err, os.ErrNotExist))
+			continue
+		}
+		fmt.Fprintf(&b, "%s:%d:%d\n", p, fi.Size(), fi.ModTime().UnixNano())
+	}
+	return b.String()
+}

@@ -288,6 +288,9 @@ func main() {
 		Secret:     secret,
 		MCPSecret:  mcp.secret,
 		Web:        web.FS,
+		Docs:       web.Docs,
+		// The Portcullis MCP redacts every result with these too (G40).
+		RedactFiles: []string{invites.SecretFile, dom.SecretFile, filepath.Join(ll.CredentialsDir, "password")},
 	}
 	handler, err := srv.Handler()
 	if err != nil {

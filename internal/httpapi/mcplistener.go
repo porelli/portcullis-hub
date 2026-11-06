@@ -18,7 +18,7 @@ import (
 // mcp-gate only. Every request but GET /healthz carries
 // X-Portcullis-MCP-Secret (HUB_MCP_GATE_SECRET, compared in constant
 // time, else 401; removed before any handler runs). With it the only
-// routes are /mcp/admin, /mcp/people (the Portcullis MCP, Tasks 14/15),
+// routes are /mcp/admin, /mcp/people (the Portcullis MCP, mcp.go),
 // POST /internal/credentials, POST /internal/confirmations and POST
 // /internal/confirmations/consume; anything else is 404. No CSRF guard
 // (no browser reaches it), no proxy secret (Traefik never targets it).
@@ -127,19 +127,12 @@ func (s *Server) mcpMux() *recordingMux {
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("/", http.NotFound)
 	domain := hub.NormalizeHost(s.Hub.Domain())
-	// The Portcullis MCP (§15.10), Streamable HTTP: Task 14 (admin) and
-	// Task 15 (people) replace these stubs. The identity check is final.
-	mux.HandleFunc("/mcp/admin", s.mcpRoute(aigate.AdminURL(domain), notYet("the Portcullis admin MCP (Task 14)")))
-	mux.HandleFunc("/mcp/people", s.mcpRoute(aigate.PeopleURL(domain), notYet("the Portcullis people MCP (Task 15)")))
+	// The Portcullis MCP (§15.10), Streamable HTTP, stateless (mcp.go).
+	s.registerMCPTools()
+	mux.HandleFunc("/mcp/admin", s.mcpRoute(aigate.AdminURL(domain), s.mcpHandler(ScopeAdmin)))
+	mux.HandleFunc("/mcp/people", s.mcpRoute(aigate.PeopleURL(domain), s.mcpHandler(ScopePeople)))
 	s.registerInternal(mux)
 	return mux
-}
-
-// notYet is a 501 stub of a route a later task implements.
-func notYet(what string) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		writeJSONStatus(w, http.StatusNotImplemented, map[string]string{"error": what + " is not implemented yet"})
-	}
 }
 
 // mcpRoute guards a /mcp/* route (§15.7): the gate's resource header must

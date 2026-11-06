@@ -34,6 +34,16 @@ type Server struct {
 	// "" = no MCP listener).
 	MCPSecret string
 	Web       fs.FS // contains index.html
+	// Docs holds docs/*.md, the docs pages the Portcullis MCP serves as
+	// resources (web.Docs; nil = none).
+	Docs fs.FS
+	// RedactFiles are the Hub's other file secrets (the invite and
+	// domains API secrets, the LLDAP service password): every Portcullis
+	// MCP result is redacted with their content (G40). A missing file is
+	// skipped; an unreadable one hides the result.
+	RedactFiles []string
+	// mcp: the Portcullis MCP's registry, servers and redactor cache.
+	mcp mcpState
 
 	index *template.Template
 	// confirmPage: confirm.html, parsed on first use (confirm.go).

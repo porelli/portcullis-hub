@@ -253,6 +253,21 @@ func checks() []Check {
 	return append([]Check(nil), registry...)
 }
 
+// Kinds is the check catalogue: every registered kind, sorted, once
+// each (the Portcullis MCP's portcullis://doctor/checks resource).
+func Kinds() []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, c := range checks() {
+		if k := c.Kind(); !seen[k] {
+			seen[k] = true
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // Fingerprint is the first 16 hex digits of sha256(kind \x00 subjects
 // sorted and joined by \x00): stable across runs and subject order.
 func Fingerprint(kind string, subjects ...string) string {

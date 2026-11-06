@@ -334,8 +334,10 @@ func TestMCPListenerSecret(t *testing.T) {
 		hdr  map[string][]string
 		want int
 	}{
-		{"/mcp/admin", id("https://hub.example.org/mcp", "root", "portcullis-ai-claude"), 501},
-		{"/mcp/people", id("https://people.example.org/mcp", "alice", "portcullis-ai-claude"), 501},
+		// Past the identity check: the MCP server's own answer to a body
+		// that isn't an MCP request (no Accept, no Content-Type: 400).
+		{"/mcp/admin", id("https://hub.example.org/mcp", "root", "portcullis-ai-claude"), 400},
+		{"/mcp/people", id("https://people.example.org/mcp", "alice", "portcullis-ai-claude"), 400},
 		{"/mcp/admin", id("https://people.example.org/mcp", "root", "portcullis-ai-claude"), 403},
 		{"/mcp/people", id("https://hub.example.org/mcp", "alice", "portcullis-ai-claude"), 403},
 		{"/mcp/admin", id(aiappResource, "root", "portcullis-ai-claude"), 403},
