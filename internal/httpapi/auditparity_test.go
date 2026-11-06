@@ -233,3 +233,76 @@ func TestRefusedPublicTokenNotInAuditFile(t *testing.T) {
 		t.Errorf("no fixed refusal in audit.jsonl:\n%s", raw)
 	}
 }
+
+// TestRefusedPublicTokenSignInAudit (fix round 2, S2): a save that
+// changes the sign-in mode and carries public tokens, refused, writes
+// the fixed text into the app.sign_in entry too — never a token. No
+// template can have both native_login (custom only) and public_access
+// (forward-auth / header-auth / native-oidc only: Discover refuses
+// "auth.public_access needs auth.method …"), so the fixture is plex
+// (custom, native_login): its public tokens are refused ("declares no
+// public exceptions") and the sign-in entry must still carry the
+// fixed text.
+func TestRefusedPublicTokenSignInAudit(t *testing.T) {
+	e := newSetEnv(t)
+	for _, in := range []string{`raw tok!SECRET1`, `tok"SECRET2`, "https://plex.example.org/s/seg!SECRET3"} {
+		body, _ := json.Marshal(map[string]any{"sign_in": "native", "public_mode": "listed", "public_tokens": []string{in}})
+		if code, b := e.do(t, "root", "PUT", "/api/instances/plex/settings", string(body)); code != 400 {
+			t.Fatalf("%q: %d %s, want 400", in, code, b)
+		}
+	}
+	var signIn int
+	for _, a := range readAudit(t, e.audit) {
+		if strings.Contains(a.Detail+a.Error, "SECRET") {
+			t.Errorf("a token form in the audit: %+v", a)
+		}
+		if a.Action == "app.sign_in" {
+			signIn++
+			if a.Result != "refused" || a.Error != "public token refused (400)" || a.Target != "plex" {
+				t.Errorf("app.sign_in = %+v, want refused with the fixed error", a)
+			}
+		}
+	}
+	if signIn != 3 {
+		t.Errorf("app.sign_in entries = %d, want 3", signIn)
+	}
+}
+
+// TestSourceURLDetail (fix round 2, S1): a source URL in the audit is
+// scheme://host[:port]/path — no user info, query or fragment (they
+// may carry a token); through the API, none reaches audit.jsonl.
+func TestSourceURLDetail(t *testing.T) {
+	for in, want := range map[string]string{
+		"https://user:pass@git.example.org:8443/org/repo.git?access_token=T1&token=T2#token=T3": "https://git.example.org:8443/org/repo.git",
+		"https://git.example.org/org/repo.git?x=1&token=T2":                                     "https://git.example.org/org/repo.git",
+		"https://git.example.org/org/repo.git#token=T3":                                         "https://git.example.org/org/repo.git",
+		"ssh://git@git.example.org/org/repo.git":                                                "ssh://git.example.org/org/repo.git",
+		"git@github.com:org/repo.git":                                                           "github.com:org/repo.git",
+		"tok3n@github.com:org/repo.git?token=T4#token=T5":                                       "github.com:org/repo.git",
+		"git@github.com:org/a@b.git":                                                            "github.com:org/a@b.git",
+	} {
+		if got := sourceURLDetail(in); got != want {
+			t.Errorf("sourceURLDetail(%q) = %q, want %q", in, got, want)
+		}
+	}
+
+	e := newInstEnv(t)
+	for _, u := range []string{
+		"https://user:pass@git.example.invalid/x.git",
+		"https://git.example.invalid/x.git?access_token=SECRETQ1",
+		"https://git.example.invalid/x.git?a=1&token=SECRETQ2",
+		"https://git.example.invalid/x.git#token=SECRETQ3",
+	} {
+		body, _ := json.Marshal(map[string]string{"name": "tok", "url": u})
+		e.do(t, "root", "POST", "/api/sources/add", string(body))
+	}
+	raw, _ := os.ReadFile(e.audit)
+	for _, bad := range []string{"SECRETQ", "access_token", "token=", "user:pass", "pass@"} {
+		if strings.Contains(string(raw), bad) {
+			t.Errorf("audit.jsonl holds %q:\n%s", bad, raw)
+		}
+	}
+	if n := strings.Count(string(raw), `"action":"source.add"`); n != 4 {
+		t.Errorf("source.add entries = %d, want 4:\n%s", n, raw)
+	}
+}

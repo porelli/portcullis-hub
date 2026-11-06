@@ -778,18 +778,30 @@ func (s *Server) handleTemplateEnv(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// sourceURLDetail is a source URL as an audit detail: an http(s) / ssh
-// URL without its user info (it may hold a token); the scp-like
-// user@host:path form as given (its user is the ssh login, no secret).
+// sourceURLDetail is a source URL as an audit detail: scheme://host[:port]/path
+// only — user info, query string and fragment dropped (any may carry a
+// token); the scp-like user@host:path form as host:path. The path stays
+// (it names the repository; a token placed in a path segment would
+// show — the residual).
 func sourceURLDetail(raw string) string {
-	if u, err := url.Parse(raw); err == nil && u.Scheme != "" {
-		u.User = nil
-		return clipMessage(u.String(), 300)
-	}
 	if strings.Contains(raw, "://") {
-		return "(unparsable URL)"
+		u, err := url.Parse(raw)
+		if err != nil || u.Scheme == "" {
+			return "(unparsable URL)"
+		}
+		clean := url.URL{Scheme: u.Scheme, Host: u.Host, Path: u.Path}
+		return clipMessage(clean.String(), 300)
 	}
-	return clipMessage(raw, 300)
+	v, _, _ := strings.Cut(raw, "?")
+	v, _, _ = strings.Cut(v, "#")
+	host := v
+	if c := strings.Index(v, ":"); c >= 0 {
+		host = v[:c]
+	}
+	if at := strings.LastIndex(host, "@"); at >= 0 {
+		v = v[at+1:]
+	}
+	return clipMessage(v, 300)
 }
 
 // policyDetail is an auth policy as an audit detail ("f1,f2 (op)"), as

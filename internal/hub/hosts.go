@@ -67,7 +67,7 @@ func (h *Hub) SetAudit(a Auditor) {
 }
 
 // auditOp records an instance operation; Result from err as the API does
-// (a 4xx StatusError is "refused").
+// (a 4xx StatusError or ErrBusy is "refused").
 func (h *Hub) auditOp(actor directory.Actor, action, target, detail string, err error) {
 	h.mu.RLock()
 	a := h.audit
