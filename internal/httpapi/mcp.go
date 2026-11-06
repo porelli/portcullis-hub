@@ -13,11 +13,11 @@ import (
 	"reflect"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"unicode/utf8"
-
-	"github.com/gowebpki/jcs"
 
 	"github.com/portcullis/hub/internal/aigate"
 	"github.com/portcullis/hub/internal/confirm"
@@ -82,8 +82,13 @@ type Tool struct {
 	// group's name, the domain); "" = the tool's name.
 	Typed        func(args json.RawMessage) string
 	Consequences func(args json.RawMessage) []string // D tools: the lines the page shows
-	SecretForm   func(args json.RawMessage) string   // U tools: the Hub URL of the form, pre-filled with non-secret context
-	Run          func(ctx context.Context, c *directory.Caller, args json.RawMessage) (any, error)
+	// SecretForm is a U tool's Hub URL of the form, pre-filled with
+	// non-secret context. A U tool's Run runs only on a retry whose input
+	// reply is "accept" — but that reply is the client's word, not the
+	// person's: Run must read the server-side state (was the secret set,
+	// when) and never treat the accept as proof that anything happened.
+	SecretForm func(args json.RawMessage) string
+	Run        func(ctx context.Context, c *directory.Caller, args json.RawMessage) (any, error)
 }
 
 // secretArgRe is the secret-looking argument name rule (§15.10).
@@ -96,6 +101,11 @@ var mcpSecretNameAllow = map[string]string{
 	"finding_token": "the doctor mute's finding digest (Finding.token): a digest of the finding's public inputs, not a credential",
 	"key":           "a settings entry's option key (a manifest name such as api_url), never its value",
 }
+
+// mcpFreeFormAllow are the argument fields (tool.path) that may be a map,
+// an interface or json.RawMessage — free-form JSON whose names no schema
+// pins — each with the reason it was allowed (reviewed; none yet).
+var mcpFreeFormAllow = map[string]string{}
 
 var mcpToolNameRe = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
 
@@ -116,6 +126,7 @@ const (
 	textNotAllowed     = "not allowed: you don't have the permission this needs"
 	textResultHidden   = "result hidden: secrets couldn't be read"
 	textNoDirectory    = "Users & Groups is unavailable right now; try again"
+	textInternal       = "internal error"
 	textClipped        = "\n[clipped: the result is over 1 MiB]"
 	confirmInputKey    = "portcullis_confirmation"
 	secretFormInputKey = "portcullis_secret_form"
@@ -192,23 +203,83 @@ func checkTool(t Tool, existing []*mcpTool) (*mcpTool, error) {
 	if in.Kind() != reflect.Struct {
 		return nil, fmt.Errorf("tool %s: In must be a struct", t.Name)
 	}
+	if err := checkArgType(t, in, "", map[reflect.Type]bool{}); err != nil {
+		return nil, err
+	}
 	raw, props, validate, err := sdk.Schema(in)
 	if err != nil {
 		return nil, fmt.Errorf("tool %s: schema: %v", t.Name, err)
 	}
 	m := &mcpTool{Tool: t, schema: raw, props: map[string]bool{}, validate: validate, in: in}
 	for _, p := range props {
-		if secretArgRe.MatchString(p) {
-			if t.Class == ClassSecret {
-				return nil, fmt.Errorf("tool %s: a U tool takes no secret-looking argument (%s)", t.Name, p)
-			}
-			if mcpSecretNameAllow[p] == "" {
-				return nil, fmt.Errorf("tool %s: argument %s looks like a secret and isn't on the reviewed allowlist", t.Name, p)
-			}
-		}
 		m.props[p] = true
 	}
 	return m, nil
+}
+
+var rawMessageType = reflect.TypeFor[json.RawMessage]()
+
+// checkArgType walks an argument type (G16, fix round 1): every property
+// name at any depth passes the secret-name rule (secretArgRe only from
+// mcpSecretNameAllow, never on a U tool), and a map, an interface or
+// json.RawMessage — names no schema pins — only from mcpFreeFormAllow.
+func checkArgType(t Tool, ty reflect.Type, path string, seen map[reflect.Type]bool) error {
+	for ty.Kind() == reflect.Pointer {
+		ty = ty.Elem()
+	}
+	free := func() error {
+		if mcpFreeFormAllow[t.Name+"."+path] == "" {
+			return fmt.Errorf("tool %s: argument %s is free-form (%s) and isn't on the reviewed allowlist", t.Name, path, ty)
+		}
+		return nil
+	}
+	if ty == rawMessageType {
+		return free()
+	}
+	switch ty.Kind() {
+	case reflect.Map, reflect.Interface:
+		return free()
+	case reflect.Slice, reflect.Array:
+		return checkArgType(t, ty.Elem(), path+"[]", seen)
+	case reflect.Struct:
+		if seen[ty] {
+			return nil
+		}
+		seen[ty] = true
+		defer delete(seen, ty)
+		for i := 0; i < ty.NumField(); i++ {
+			f := ty.Field(i)
+			name, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+			if name == "-" || (!f.IsExported() && !f.Anonymous) {
+				continue
+			}
+			if f.Anonymous && name == "" {
+				if err := checkArgType(t, f.Type, path, seen); err != nil {
+					return err
+				}
+				continue
+			}
+			if name == "" {
+				name = f.Name
+			}
+			p := name
+			if path != "" {
+				p = path + "." + name
+			}
+			if secretArgRe.MatchString(name) {
+				if t.Class == ClassSecret {
+					return fmt.Errorf("tool %s: a U tool takes no secret-looking argument (%s)", t.Name, p)
+				}
+				if mcpSecretNameAllow[name] == "" {
+					return fmt.Errorf("tool %s: argument %s looks like a secret and isn't on the reviewed allowlist", t.Name, p)
+				}
+			}
+			if err := checkArgType(t, f.Type, p, seen); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // registerTool adds t to its scope's registry (panics on a bad tool).
@@ -292,6 +363,19 @@ func (s *Server) mcpServer(scope string) *sdk.Server {
 	srv.AddReceivingMiddleware(sdk.FilterTools(func(ctx context.Context) func(string) bool {
 		return s.mcpVisible(ctx, scope)
 	}))
+	if scope == ScopeAdmin {
+		// Admins only, for every method (fix round 1): non-admins get
+		// empty lists, "admins only" for reads and prompts; tools/call
+		// reaches callTool, which refuses and audits.
+		srv.AddReceivingMiddleware(sdk.AdminOnly(func(ctx context.Context) (bool, error) {
+			c, err := s.callerFrom(ctx)
+			if err != nil {
+				log.Printf("mcp: admin: resolve caller: %v", err)
+				return false, err
+			}
+			return c.Admin, nil
+		}, textNoDirectory))
+	}
 	s.addMCPResources(srv, scope)
 	s.addMCPPrompts(srv, scope)
 	if s.mcp.servers == nil {
@@ -343,7 +427,14 @@ func (s *Server) mcpVisible(ctx context.Context, scope string) func(string) bool
 }
 
 func (s *Server) toolHandler(scope string, t *mcpTool) sdk.ToolHandler {
-	return func(ctx context.Context, req *sdk.CallToolRequest) (*sdk.CallToolResult, error) {
+	return func(ctx context.Context, req *sdk.CallToolRequest) (res *sdk.CallToolResult, err error) {
+		defer func() {
+			if recover() != nil {
+				// The value is never formatted: it may hold anything.
+				log.Printf("mcp: %s: panic", t.Name)
+				res, err = sdk.TextResult(textInternal, true), nil
+			}
+		}()
 		return s.callTool(ctx, scope, t, sdk.CallOf(req)), nil
 	}
 }
@@ -440,7 +531,7 @@ func (s *Server) auditToolRefusal(c *directory.Caller, t *mcpTool, why string) {
 const refusalSecret = "\x00secret"
 
 // checkArgs: the arguments (absent or null = {}) as their canonical JSON
-// (RFC 8785, jcs: one object, no duplicate keys), every top-level name
+// (sdk.CanonicalArguments: the gate's canon rules), every top-level name
 // declared (undeclared, or a secret-looking name on a U tool =
 // refusalSecret), valid against the schema and decodable into In.
 // declared is the object with only the declared names (for SecretForm).
@@ -453,9 +544,9 @@ func checkArgs(t *mcpTool, raw json.RawMessage) (args, declared json.RawMessage,
 	if r[0] != '{' || !utf8.ValidString(r) {
 		return nil, declared, "invalid arguments: not one JSON object"
 	}
-	canon, err := jcs.Transform([]byte(r))
+	canon, err := sdk.CanonicalArguments(json.RawMessage(r))
 	if err != nil {
-		return nil, declared, "invalid arguments: not one JSON object with distinct keys"
+		return nil, declared, "invalid arguments: they can't be passed on unchanged (one JSON object, distinct keys, safe numbers, depth ≤ 64)"
 	}
 	var m map[string]any
 	if err := json.Unmarshal(canon, &m); err != nil {
@@ -471,7 +562,7 @@ func checkArgs(t *mcpTool, raw json.RawMessage) (args, declared json.RawMessage,
 		keep[k] = v
 	}
 	if b, err := json.Marshal(keep); err == nil {
-		if c, err := jcs.Transform(b); err == nil {
+		if c, err := sdk.CanonicalArguments(b); err == nil {
 			declared = c
 		}
 	}
@@ -547,22 +638,29 @@ func (s *Server) errResult(msg string) *sdk.CallToolResult {
 	return sdk.TextResult(clipMessage(msg, 2000), true)
 }
 
-// toolError maps a Run error as the HTTP handlers do (writeErr): an
-// OpError as its JSON record, anything else (a 409 busy included) its
-// message — always an isError result, redacted, then clipped.
+// toolError maps a Run error as the HTTP handlers do (writeErr): the
+// status first ("409: …"; errStatus with 500 as the default, a
+// directory error's own), then an OpError as its JSON record, anything
+// else (a 409 busy included) its message — always an isError result,
+// redacted, then clipped.
 func toolError(err error, redact func(string) string) *sdk.CallToolResult {
+	code := errStatus(err, http.StatusInternalServerError)
+	var de *directory.Error
+	if errors.As(err, &de) {
+		code = de.Status
+	}
+	prefix := strconv.Itoa(code) + ": "
 	var oe *hub.OpError
 	if errors.As(err, &oe) {
 		b, _ := json.Marshal(map[string]any{"error": oe.Record.Error, "op": oe.Record.Op, "output": oe.Record.Output,
 			"hint": oe.Record.Hint, "rolled_back": oe.Record.RolledBack})
-		return sdk.TextResult(clipResult(redact(string(b))), true)
+		return sdk.TextResult(prefix+clipResult(redact(string(b))), true)
 	}
 	msg := err.Error()
-	var de *directory.Error
-	if errors.As(err, &de) {
+	if de != nil {
 		msg = de.Msg
 	}
-	return sdk.TextResult(clipMessage(redact(msg), 2000), true)
+	return sdk.TextResult(prefix+clipMessage(redact(msg), 2000), true)
 }
 
 // toolResult is v as JSON text, redacted, then clipped to 1 MiB.
@@ -605,8 +703,8 @@ var inviteLinkRe = regexp.MustCompile(`(?i)https?://enroll\.[^/\s"'<>\\]+/invite
 // toolRedactor is the one redactor of every tool result (G40): the union
 // of every instance's redaction set and the provider secrets
 // (Hub.ToolRedactionSet), the Hub's file secrets (proxy and MCP gate
-// secrets, and RedactFiles: the invite and domains secrets, the LLDAP
-// password) and invite links. The set is cached under a key of every
+// secrets, RedactFiles: the invite and domains secrets, the LLDAP
+// password; RedactLiterals: the Keycloak admin password) and invite links. The set is cached under a key of every
 // source's stat (Hub.ToolRedactionKey + RedactFiles), rebuilt when it
 // changes. err: a source exists but can't be read — the result is hidden.
 func (s *Server) toolRedactor() (func(string) string, error) {
@@ -634,20 +732,23 @@ func (s *Server) toolRedactor() (func(string) string, error) {
 			}
 			clear(b)
 		}
-		for _, v := range []string{s.Secret, s.MCPSecret} {
-			if v != "" {
-				vals = append(vals, v)
-			}
-		}
 		st.redactKey, st.redactSet, st.redactOK = key, vals, true
 	}
-	vals := st.redactSet
+	// The values the Hub holds in memory are added on every call (never
+	// part of the cached set, so a change of them can't go stale).
+	vals := slices.Clone(st.redactSet)
+	for _, v := range append([]string{s.Secret, s.MCPSecret}, s.RedactLiterals...) {
+		if v != "" {
+			vals = append(vals, v)
+		}
+	}
 	return func(x string) string {
 		return inviteLinkRe.ReplaceAllString(hub.RedactValues(x, vals), "[invite link hidden]")
 	}, nil
 }
 
-// filesKey is a stat line per file (never the content).
+// filesKey is a stat line per file — size, mtime, inode — never the
+// content (a file replaced by rename changes its inode).
 func filesKey(paths []string) string {
 	var b strings.Builder
 	for _, p := range paths {
@@ -656,7 +757,11 @@ func filesKey(paths []string) string {
 			fmt.Fprintf(&b, "%s:%v\n", p, errors.Is(err, os.ErrNotExist))
 			continue
 		}
-		fmt.Fprintf(&b, "%s:%d:%d\n", p, fi.Size(), fi.ModTime().UnixNano())
+		var ino uint64
+		if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+			ino = uint64(st.Ino)
+		}
+		fmt.Fprintf(&b, "%s:%d:%d:%d\n", p, fi.Size(), fi.ModTime().UnixNano(), ino)
 	}
 	return b.String()
 }

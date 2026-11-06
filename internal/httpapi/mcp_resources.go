@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io/fs"
+	"log"
 	"path"
 	"slices"
 	"strings"
@@ -54,27 +55,27 @@ func (s *Server) addMCPResources(srv *sdk.Server, scope string) {
 	for _, n := range names {
 		uri, file := docsURIPrefix+n, pages[n]
 		srv.AddResource(&sdk.Resource{URI: uri, Name: n, Title: "Portcullis docs: " + n, MIMEType: mimeMarkdown},
-			func(ctx context.Context, req *sdk.ReadResourceRequest) (*sdk.ReadResourceResult, error) {
+			safeResource(uri, func(ctx context.Context, req *sdk.ReadResourceRequest) (*sdk.ReadResourceResult, error) {
 				b, err := fs.ReadFile(s.Docs, file)
 				if err != nil {
 					return nil, sdk.ErrResourceNotFound(uri)
 				}
 				return sdk.TextResource(uri, mimeMarkdown, string(b)), nil
-			})
+			}))
 	}
 	if scope != ScopeAdmin {
 		return
 	}
 	srv.AddResource(&sdk.Resource{URI: templatesURI, Name: "templates", Title: "Loaded app templates", MIMEType: mimeJSON},
-		func(ctx context.Context, req *sdk.ReadResourceRequest) (*sdk.ReadResourceResult, error) {
+		safeResource(templatesURI, func(ctx context.Context, req *sdk.ReadResourceRequest) (*sdk.ReadResourceResult, error) {
 			var list []map[string]string
 			for _, t := range s.Hub.Templates() {
 				list = append(list, map[string]string{"id": t.ID, "name": t.Manifest.Name, "uri": templateURIPrefix + t.ID})
 			}
 			return s.jsonResource(templatesURI, list)
-		})
+		}))
 	srv.AddResourceTemplate(&sdk.ResourceTemplate{URITemplate: templateURITmplate, Name: "template", Title: "An app template's manifest", MIMEType: mimeJSON},
-		func(ctx context.Context, req *sdk.ReadResourceRequest) (*sdk.ReadResourceResult, error) {
+		safeResource(templateURITmplate, func(ctx context.Context, req *sdk.ReadResourceRequest) (*sdk.ReadResourceResult, error) {
 			uri := req.Params.URI
 			id, ok := strings.CutPrefix(uri, templateURIPrefix)
 			if !ok {
@@ -90,14 +91,14 @@ func (s *Server) addMCPResources(srv *sdk.Server, scope string) {
 				}
 			}
 			return nil, sdk.ErrResourceNotFound(uri)
-		})
+		}))
 	srv.AddResource(&sdk.Resource{URI: doctorChecksURI, Name: "doctor-checks", Title: "The doctor's check catalogue", MIMEType: mimeJSON},
-		func(ctx context.Context, req *sdk.ReadResourceRequest) (*sdk.ReadResourceResult, error) {
+		safeResource(doctorChecksURI, func(ctx context.Context, req *sdk.ReadResourceRequest) (*sdk.ReadResourceResult, error) {
 			return s.jsonResource(doctorChecksURI, map[string]any{
 				"kinds":      doctor.Kinds(),
 				"documented": docsURIPrefix + "integration-contracts (§14.5, §14.6)",
 			})
-		})
+		}))
 }
 
 // jsonResource is v as JSON through the tool redactor (a set that can't
@@ -178,7 +179,7 @@ func (s *Server) addMCPPrompts(srv *sdk.Server, scope string) {
 			args = append(args, &sdk.PromptArgument{Name: a[0], Description: a[1], Required: true})
 		}
 		srv.AddPrompt(&sdk.Prompt{Name: p.name, Title: p.title, Description: p.description, Arguments: args},
-			func(ctx context.Context, req *sdk.GetPromptRequest) (*sdk.GetPromptResult, error) {
+			safePrompt(p.name, func(ctx context.Context, req *sdk.GetPromptRequest) (*sdk.GetPromptResult, error) {
 				text := p.text
 				for _, a := range p.args {
 					v := strings.TrimSpace(req.Params.Arguments[a[0]])
@@ -188,6 +189,33 @@ func (s *Server) addMCPPrompts(srv *sdk.Server, scope string) {
 					text = strings.ReplaceAll(text, "{"+a[0]+"}", clipMessage(v, 200))
 				}
 				return sdk.UserPrompt(p.description, text), nil
-			})
+			}))
+	}
+}
+
+// safeResource / safePrompt recover a handler's panic (fix round 1): the
+// log names the resource or prompt, never the value; the answer is the
+// JSON-RPC error "internal error".
+func safeResource(name string, h sdk.ResourceHandler) sdk.ResourceHandler {
+	return func(ctx context.Context, req *sdk.ReadResourceRequest) (res *sdk.ReadResourceResult, err error) {
+		defer func() {
+			if recover() != nil {
+				log.Printf("mcp: %s: panic", name)
+				res, err = nil, sdk.InternalError()
+			}
+		}()
+		return h(ctx, req)
+	}
+}
+
+func safePrompt(name string, h sdk.PromptHandler) sdk.PromptHandler {
+	return func(ctx context.Context, req *sdk.GetPromptRequest) (res *sdk.GetPromptResult, err error) {
+		defer func() {
+			if recover() != nil {
+				log.Printf("mcp: %s: panic", name)
+				res, err = nil, sdk.InternalError()
+			}
+		}()
+		return h(ctx, req)
 	}
 }

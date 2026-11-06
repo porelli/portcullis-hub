@@ -4,9 +4,11 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"go/parser"
 	"go/token"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -16,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/fstest"
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/freshauth"
@@ -323,6 +326,44 @@ func TestMCPAdminRefusesNonAdmin(t *testing.T) {
 			}
 		}
 	}
+	// Every other method (fix round 1): empty lists, "admins only" for
+	// reads and prompts — nothing of the admin scope reaches alice.
+	e.s.Docs = web.Docs
+	e.s.mcp.mu.Lock()
+	e.s.mcp.gen++
+	e.s.mcp.mu.Unlock()
+	for _, v := range []string{"2026-07-28", "2025-11-25"} {
+		for method, key := range map[string]string{"tools/list": "tools", "resources/list": "resources",
+			"resources/templates/list": "resourceTemplates", "prompts/list": "prompts"} {
+			code, a := e.rpc(t, rpcCall{path: "/mcp/admin", user: "alice", version: v, method: method, params: map[string]any{}})
+			res, _ := a["result"].(map[string]any)
+			if xs, ok := res[key].([]any); code != 200 || !ok || len(xs) != 0 {
+				t.Errorf("%s alice %s = %d %v, want an empty %s", v, method, code, a, key)
+			}
+			// root still gets them.
+			_, a = e.rpc(t, rpcCall{path: "/mcp/admin", user: "root", version: v, method: method, params: map[string]any{}})
+			if xs, _ := a["result"].(map[string]any)[key].([]any); len(xs) == 0 {
+				t.Errorf("%s root %s empty", v, method)
+			}
+		}
+		for _, c := range []rpcCall{
+			{method: "resources/read", params: map[string]any{"uri": "portcullis://docs/integration-contracts"}},
+			{method: "resources/read", params: map[string]any{"uri": "portcullis://templates/aiapp"}},
+			{method: "prompts/get", name: "diagnose_app", params: map[string]any{"name": "diagnose_app", "arguments": map[string]any{"app": "aiapp"}}},
+			{method: "completion/complete", params: map[string]any{"ref": map[string]any{"type": "ref/prompt", "name": "diagnose_app"}, "argument": map[string]any{"name": "app", "value": "a"}}},
+		} {
+			c.path, c.user, c.version = "/mcp/admin", "alice", v
+			_, a := e.rpc(t, c)
+			if errObj, _ := a["error"].(map[string]any); errObj == nil || errObj["message"] != "admins only" || a["result"] != nil {
+				t.Errorf("%s alice %s %v = %v, want the JSON-RPC error admins only", v, c.method, c.params, a)
+			}
+		}
+		if v == "2025-11-25" { // 2026-07-28 has no ping
+			if code, a := e.rpc(t, rpcCall{path: "/mcp/admin", user: "alice", version: v, method: "ping", params: map[string]any{}}); code != 200 || a["result"] == nil {
+				t.Errorf("%s alice ping = %d %v", v, code, a)
+			}
+		}
+	}
 	got := map[string]int{}
 	for _, a := range readAudit(t, e.audit) {
 		if a.Result != "refused" || a.Actor != "alice" {
@@ -510,6 +551,14 @@ func TestMCPSecretArgsRefused(t *testing.T) {
 	if txt, _ := resultText(res); !strings.HasPrefix(txt, "invalid arguments") {
 		t.Errorf("duplicate keys = %q", txt)
 	}
+	// The gate's canon rules (fix round 1): what the gate can't pass on
+	// unchanged, the Hub refuses too.
+	for _, raw := range []string{`{"id":"\u2028"}`, `{"id":"a","n":0.30000000000000000001}`, `{"id":` + strings.Repeat("[", 70) + strings.Repeat("]", 70) + `}`} {
+		res = e.call(t, "/mcp/admin", "root", "2025-11-25", "save_thing", json.RawMessage(raw), nil)
+		if txt, _ := resultText(res); !strings.HasPrefix(txt, "invalid arguments") {
+			t.Errorf("%s = %q", raw, txt)
+		}
+	}
 	for _, n := range []string{"save_thing", "set_thing_secret", "my_things"} {
 		if e.runCount(n) != 0 {
 			t.Errorf("%s ran with refused arguments", n)
@@ -540,8 +589,68 @@ func TestNoSecretArgNames(t *testing.T) {
 			t.Errorf("allowlist %q: %q (must match secretArgRe and give a reason)", n, why)
 		}
 	}
+	for n, why := range mcpFreeFormAllow {
+		if strings.TrimSpace(why) == "" {
+			t.Errorf("free-form allowlist %q has no reason", n)
+		}
+	}
+	// checkTool walks the whole argument type (fix round 1).
+	type inner struct {
+		DBPassword string `json:"db_password"`
+	}
+	type nested struct {
+		Outer inner `json:"outer"`
+	}
+	type inSlice struct {
+		Rows []inner `json:"rows"`
+	}
+	type withMap struct {
+		Values map[string]string `json:"values"`
+	}
+	type withAny struct {
+		Value any `json:"value"`
+	}
+	type withRaw struct {
+		Doc json.RawMessage `json:"doc"`
+	}
+	type embedded struct {
+		inner
+		ID string `json:"id"`
+	}
+	type okNested struct {
+		Outer struct {
+			FindingToken string `json:"finding_token"`
+			Name         string `json:"name"`
+		} `json:"outer"`
+	}
+	run := func(context.Context, *directory.Caller, json.RawMessage) (any, error) { return nil, nil }
+	tool := func(in any, class ToolClass) Tool {
+		t := Tool{Name: "x", Description: "x", Class: class, Scope: ScopeAdmin, Twin: "PUT /x", Audit: "x.save", In: in, Run: run}
+		if class == ClassSecret {
+			t.SecretForm = func(json.RawMessage) string { return "" }
+		}
+		return t
+	}
+	for name, in := range map[string]any{"nested": nested{}, "slice": inSlice{}, "map": withMap{}, "any": withAny{},
+		"raw": withRaw{}, "embedded": embedded{}, "pointer": &nested{}} {
+		if _, err := checkTool(tool(in, ClassWrite), nil); err == nil {
+			t.Errorf("%s: registered", name)
+		}
+	}
+	if _, err := checkTool(tool(okNested{}, ClassWrite), nil); err != nil {
+		t.Errorf("an allowlisted nested name: %v", err)
+	}
+	if _, err := checkTool(tool(okNested{}, ClassSecret), nil); err == nil {
+		t.Error("a U tool registered a nested secret-looking name")
+	}
+	mcpFreeFormAllow["x.values"] = "test"
+	_, err := checkTool(tool(withMap{}, ClassWrite), nil)
+	delete(mcpFreeFormAllow, "x.values")
+	if err != nil {
+		t.Errorf("an allowlisted map field: %v", err)
+	}
 	s := &Server{}
-	s.registerMCPTools() // panics on an unreviewed name (checkTool)
+	s.registerMCPTools() // panics on an unreviewed name or type (checkTool)
 	for _, scope := range []string{ScopeAdmin, ScopePeople} {
 		for _, tl := range s.mcp.tools[scope] {
 			for p := range tl.props {
@@ -635,6 +744,38 @@ func TestMCPOutputRedacted(t *testing.T) {
 	if len(txt) > maxToolResult || !strings.HasSuffix(txt, textClipped) || !strings.Contains(txt, "[redacted]") {
 		t.Errorf("clipped result: %d bytes, suffix %q", len(txt), txt[max(0, len(txt)-60):])
 	}
+	// The Keycloak admin password (a value the Hub holds, not a file).
+	e.s.RedactLiterals = []string{"kc-admin-password-0123456789"}
+	out = "kc=kc-admin-password-0123456789"
+	check("keycloak admin password", "kc-admin-password-0123456789")
+	// A file replaced by rename with the same size and mtime: only its
+	// inode changed, and the cached set follows (fix round 1).
+	replaceSameStat := func(path, old, new string) {
+		t.Helper()
+		if len(old) != len(new) {
+			t.Fatal("same length needed")
+		}
+		fi, _ := os.Stat(path)
+		b, _ := os.ReadFile(path)
+		tmp := path + ".new"
+		os.WriteFile(tmp, []byte(strings.ReplaceAll(string(b), old, new)), 0o600)
+		os.Chtimes(tmp, fi.ModTime(), fi.ModTime())
+		if err := os.Rename(tmp, path); err != nil {
+			t.Fatal(err)
+		}
+		if fj, _ := os.Stat(path); fj.Size() != fi.Size() || !fj.ModTime().Equal(fi.ModTime()) {
+			t.Fatal("size or mtime changed")
+		}
+	}
+	out = "warm"
+	check("warm")
+	replaceSameStat(fileSecret, "invite-api-secret-0123456789abcdef", "invite-api-secret-ZYXWVUTSRQabcdef")
+	out = "file=invite-api-secret-ZYXWVUTSRQabcdef"
+	check("file secret replaced, same size and mtime", "invite-api-secret-ZYXWVUTSRQabcdef")
+	sameLen := strings.Repeat("q", len(newHdr)-4) + "wxyz"
+	replaceSameStat(envFile, newHdr, sameLen)
+	out = "env=" + sameLen
+	check("env file replaced, same size and mtime", sameLen)
 	// An unreadable file secret hides the result.
 	e.s.RedactFiles = []string{t.TempDir()} // a directory: exists, can't be read as a file
 	res := e.call(t, "/mcp/admin", "root", "2025-11-25", "list_things", map[string]any{}, nil)
@@ -677,6 +818,8 @@ func TestMCPProtocolVersions(t *testing.T) {
 		t.Errorf("server/discover = %d %v", code, a)
 	}
 	for _, c := range []rpcCall{
+		{method: "tools/list", params: map[string]any{}}, // no version at all
+		{method: "tools/call", params: map[string]any{"name": "list_things", "arguments": map[string]any{}}},
 		{version: "2025-03-26", method: "tools/list", params: map[string]any{}},
 		{version: "2027-01-01", method: "tools/list", params: map[string]any{}},
 		{method: "initialize", params: init("2025-03-26")},
@@ -881,3 +1024,64 @@ func TestSDKBehindAdapter(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// panicDocs is a docs FS whose pages panic when read.
+type panicDocs struct{ fstest.MapFS }
+
+func (panicDocs) ReadFile(string) ([]byte, error) { panic("panic-value-must-not-be-logged") }
+
+// TestMCPToolErrors (fix round 1): a panicking Run, resource or prompt
+// is recovered — logged by name, never its value — and answered
+// "internal error"; Run errors carry their status like writeErr.
+func TestMCPToolErrors(t *testing.T) {
+	e := newMCPTestEnv(t)
+	var logged strings.Builder
+	var logMu sync.Mutex
+	log.SetOutput(writerFunc(func(b []byte) (int, error) { logMu.Lock(); defer logMu.Unlock(); return logged.Write(b) }))
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	fail := func(err error) func(context.Context, *directory.Caller, json.RawMessage) (any, error) {
+		return func(context.Context, *directory.Caller, json.RawMessage) (any, error) { return nil, err }
+	}
+	e.s.registerTool(Tool{Name: "explode", Description: "x", Class: ClassRead, Scope: ScopeAdmin, Twin: "GET /x", In: struct{}{},
+		Run: func(context.Context, *directory.Caller, json.RawMessage) (any, error) {
+			panic("panic-value-must-not-be-logged")
+		}})
+	e.s.registerTool(Tool{Name: "busy", Description: "x", Class: ClassRead, Scope: ScopeAdmin, Twin: "GET /x", In: struct{}{},
+		Run: fail(&hub.StatusError{Status: http.StatusConflict, Err: errors.New("the instance is busy")})})
+	e.s.registerTool(Tool{Name: "plain", Description: "x", Class: ClassRead, Scope: ScopeAdmin, Twin: "GET /x", In: struct{}{},
+		Run: fail(errors.New("something broke"))})
+	e.s.registerTool(Tool{Name: "dir", Description: "x", Class: ClassRead, Scope: ScopeAdmin, Twin: "GET /x", In: struct{}{},
+		Run: fail(&directory.Error{Status: http.StatusForbidden, Msg: "not allowed: admins only"})})
+	res := e.call(t, "/mcp/admin", "root", "2025-11-25", "explode", map[string]any{}, nil)
+	if txt, isErr := resultText(res); !isErr || txt != "internal error" {
+		t.Errorf("panicking Run = %q %v", txt, isErr)
+	}
+	for tool, want := range map[string]string{"busy": "409: the instance is busy", "plain": "500: something broke", "dir": "403: not allowed: admins only"} {
+		res := e.call(t, "/mcp/admin", "root", "2025-11-25", tool, map[string]any{}, nil)
+		if txt, isErr := resultText(res); !isErr || txt != want {
+			t.Errorf("%s = %q %v, want %q", tool, txt, isErr, want)
+		}
+	}
+	e.s.Docs = panicDocs{fstest.MapFS{"docs/page.md": {Data: []byte("# x")}}}
+	e.s.mcp.mu.Lock()
+	e.s.mcp.gen++
+	e.s.mcp.mu.Unlock()
+	_, a := e.rpc(t, rpcCall{path: "/mcp/admin", user: "root", version: "2026-07-28", method: "resources/read", params: map[string]any{"uri": "portcullis://docs/page"}})
+	if errObj, _ := a["error"].(map[string]any); errObj == nil || errObj["message"] != "internal error" {
+		t.Errorf("panicking resource = %v", a)
+	}
+	logMu.Lock()
+	l := logged.String()
+	logMu.Unlock()
+	if strings.Contains(l, "panic-value-must-not-be-logged") || !strings.Contains(l, "mcp: explode: panic") || !strings.Contains(l, "mcp: portcullis://docs/page: panic") {
+		t.Errorf("log: %s", l)
+	}
+	// The listener still serves after the panics.
+	if got := e.list(t, "/mcp/admin", "root", "2025-11-25"); !slices.Contains(got, "list_things") {
+		t.Errorf("after the panics: %v", got)
+	}
+}
+
+type writerFunc func([]byte) (int, error)
+
+func (f writerFunc) Write(b []byte) (int, error) { return f(b) }

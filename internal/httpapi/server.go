@@ -42,6 +42,10 @@ type Server struct {
 	// MCP result is redacted with their content (G40). A missing file is
 	// skipped; an unreadable one hides the result.
 	RedactFiles []string
+	// RedactLiterals are secrets the Hub holds as values (the Keycloak
+	// admin password from KEYCLOAK_ADMIN_PASSWORD): redacted from every
+	// Portcullis MCP result too.
+	RedactLiterals []string
 	// mcp: the Portcullis MCP's registry, servers and redactor cache.
 	mcp mcpState
 

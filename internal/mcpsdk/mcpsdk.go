@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"reflect"
 	"slices"
+	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
@@ -128,7 +129,7 @@ func Handler(server func(*http.Request) *Server) http.Handler {
 
 // protocolOK: the header (at most one), when present, is supported; an
 // initialize request's protocolVersion is supported and, with a header,
-// equal to it.
+// equal to it; any other request without the header is refused.
 func protocolOK(h http.Header, body []byte) bool {
 	vals := h.Values("Mcp-Protocol-Version")
 	if len(vals) > 1 || (len(vals) == 1 && !slices.Contains(SupportedProtocols, vals[0])) {
@@ -139,8 +140,13 @@ func protocolOK(h http.Header, body []byte) bool {
 		return true // not one message: the SDK answers it
 	}
 	req, ok := msg.(*jsonrpc.Request)
-	if !ok || req.Method != "initialize" {
+	if !ok {
 		return true
+	}
+	if req.Method != "initialize" {
+		// Every request but initialize names its version in the header
+		// (§15.3; 2025-06-18 and later): none = unsupported.
+		return len(vals) == 1
 	}
 	var p mcp.InitializeParams
 	if json.Unmarshal(req.Params, &p) != nil || !slices.Contains(SupportedProtocols, p.ProtocolVersion) {
@@ -291,3 +297,50 @@ func FilterTools(keep func(ctx context.Context) func(name string) bool) Middlewa
 		}
 	}
 }
+
+// Codes of the JSON-RPC errors AdminOnly answers.
+const (
+	codeRefused     = jsonrpc.CodeInvalidRequest
+	codeUnavailable = jsonrpc.CodeInternalError
+)
+
+// AdminOnly is receiving middleware for the admin server (§15.10: admins
+// only): every method but initialize, ping and notifications/* asks
+// admin(ctx). An error is a JSON-RPC error with unavailable as its text;
+// a non-admin gets empty lists from the list methods, the JSON-RPC error
+// "admins only" from resources/read, prompts/get and anything else, and
+// reaches tools/call (the tool answers isError "admins only" and audits
+// the refusal).
+func AdminOnly(admin func(ctx context.Context) (bool, error), unavailable string) Middleware {
+	return func(next MethodHandler) MethodHandler {
+		return func(ctx context.Context, method string, req Request) (Result, error) {
+			if method == "initialize" || method == "ping" || strings.HasPrefix(method, "notifications/") {
+				return next(ctx, method, req)
+			}
+			ok, err := admin(ctx)
+			if err != nil {
+				return nil, &jsonrpc.Error{Code: codeUnavailable, Message: unavailable}
+			}
+			if ok {
+				return next(ctx, method, req)
+			}
+			switch method {
+			case "tools/call":
+				return next(ctx, method, req)
+			case MethodListTools:
+				return &mcp.ListToolsResult{Tools: []*mcp.Tool{}}, nil
+			case "resources/list":
+				return &mcp.ListResourcesResult{Resources: []*mcp.Resource{}}, nil
+			case "resources/templates/list":
+				return &mcp.ListResourceTemplatesResult{ResourceTemplates: []*mcp.ResourceTemplate{}}, nil
+			case "prompts/list":
+				return &mcp.ListPromptsResult{Prompts: []*mcp.Prompt{}}, nil
+			}
+			return nil, &jsonrpc.Error{Code: codeRefused, Message: "admins only"}
+		}
+	}
+}
+
+// InternalError is the JSON-RPC error of a resource or prompt handler
+// that failed unexpectedly (a recovered panic).
+func InternalError() error { return &jsonrpc.Error{Code: codeUnavailable, Message: "internal error"} }
