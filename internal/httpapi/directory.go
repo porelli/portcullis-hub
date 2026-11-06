@@ -247,11 +247,19 @@ func (s *Server) handleRemoveStale(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.Directory.RemoveStaleKeycloakUser(r.Context(), c, r.PathValue("username"), req.Confirm); err != nil {
+	if err := s.removeStale(r.Context(), c, r.PathValue("username"), req.Confirm); err != nil {
 		dirErr(w, err)
 		return
 	}
 	writeJSON(w, map[string]string{"status": "removed"})
+}
+
+// removeStale is the stale Keycloak record's removal (route and
+// remove_stale_keycloak_user; confirm = the username typed); audited
+// keycloak.remove_stale by Users & Groups.
+func (s *Server) removeStale(ctx context.Context, c *directory.Caller, username, confirm string) error {
+	s.rec("RemoveStaleKeycloakUser", username, confirm)
+	return s.Directory.RemoveStaleKeycloakUser(ctx, c, username, confirm)
 }
 
 func (s *Server) handleSetPassword(w http.ResponseWriter, r *http.Request) {

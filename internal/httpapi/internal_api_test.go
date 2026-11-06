@@ -125,6 +125,7 @@ type mcpEnvOpts struct {
 	prep  []func(*aiHookEngine)
 	extra map[string][2]string
 	wrap  func(hub.Engine) hub.Engine
+	cfg   func(*hub.Config) // more configuration (after the MCP's)
 }
 
 func newMCPEnvOpts(t *testing.T, o mcpEnvOpts) *mcpEnv {
@@ -165,6 +166,9 @@ func newMCPEnvOpts(t *testing.T, o mcpEnvOpts) *mcpEnv {
 		cfg: func(cfg *hub.Config) {
 			cfg.MCPGateRecipientFile = recip
 			cfg.MCPListener = true
+			if o.cfg != nil {
+				o.cfg(cfg)
+			}
 		},
 		seed: func(st *state.AppState) {
 			st.AI.Enabled = true

@@ -2,9 +2,14 @@ package httpapi
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"strconv"
+	"strings"
 
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/hub"
 	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/state"
@@ -32,6 +37,11 @@ func (s *Server) registerAI(mux routeMux) {
 	// Per-instance AI support (Task 12a, §15.11).
 	mux.HandleFunc("GET /api/instances/{id}/ai", s.handleInstanceAI)
 	mux.HandleFunc("PUT /api/instances/{id}/ai", s.handleUpdateInstanceAI)
+	// Revoke AI credentials now (§15.11; Task 17b: the twin of the
+	// Portcullis MCP's revoke_ai_access).
+	mux.HandleFunc("POST /api/instances/{id}/ai/revoke", s.handleRevokeAI)
+	// The gate's access log (§15.8, §15.11; Task 17b: ai_activity's twin).
+	mux.HandleFunc("GET /api/ai/activity", s.handleAIActivity)
 	// What saving a Hub default policy would switch off first (G43).
 	mux.HandleFunc("POST /api/settings/preview", s.handleDefaultPolicyPreview)
 }
@@ -45,6 +55,14 @@ const (
 		`"deployments": {"<deployment>": "<model>"}, "models": {"fetch": bool, "list": ["<model>", ...]}, "credentials": "admin"|"per_person"} (no secret fields)`
 	providerSecretUsage = `{"value": "<secret>"} or {"clear": true}`
 	instanceAIUsage     = `{"companions": {"<name>": {"enabled": bool, "mode": "read_only"|"read_write"}}}`
+	revokeAIUsage       = `{"companion": "<name>", "user": "<username>"} (user omitted = everyone)`
+)
+
+// maxActivity is GET /api/ai/activity's largest n (§15.11); defActivity
+// its default.
+const (
+	maxActivity = 200
+	defActivity = 50
 )
 
 // handleDefaultPolicyPreview: {"default_auth_policy"} → {"warnings"}
@@ -101,7 +119,7 @@ func (s *Server) handleUpdateInstanceAI(w http.ResponseWriter, r *http.Request) 
 	if !decodeAPI(w, r, &u, instanceAIUsage) {
 		return
 	}
-	res, err := s.Hub.UpdateInstanceAI(r.Context(), id, u, requestActor(r))
+	res, err := s.updateInstanceAI(r.Context(), requestActor(r), id, u)
 	if err != nil {
 		writeAPIErr(w, err)
 		return
@@ -126,12 +144,13 @@ func (s *Server) handleSaveAISettings(w http.ResponseWriter, r *http.Request) {
 	if !decodeAPI(w, r, &u, aiSettingsUsage) {
 		return
 	}
-	if err := s.Hub.SaveAISettings(u, requestActor(r)); err != nil {
+	v, err := s.saveAISettings(requestActor(r), u)
+	if err != nil {
 		writeAPIErr(w, err)
 		return
 	}
 	noStore(w)
-	writeJSON(w, s.Hub.AISettings())
+	writeJSON(w, v)
 }
 
 func (s *Server) handleModelProviders(w http.ResponseWriter, r *http.Request) {
@@ -150,7 +169,7 @@ func (s *Server) handleAddModelProvider(w http.ResponseWriter, r *http.Request) 
 	if !decodeAPI(w, r, &p, providerUsage) {
 		return
 	}
-	v, err := s.Hub.AddModelProvider(p, requestActor(r))
+	v, err := s.addModelProvider(requestActor(r), p)
 	if err != nil {
 		writeAPIErr(w, err)
 		return
@@ -167,7 +186,7 @@ func (s *Server) handleUpdateModelProvider(w http.ResponseWriter, r *http.Reques
 	if !decodeAPI(w, r, &p, providerUsage) {
 		return
 	}
-	v, err := s.Hub.UpdateModelProvider(r.PathValue("name"), p, requestActor(r))
+	v, err := s.updateModelProvider(requestActor(r), r.PathValue("name"), p)
 	if err != nil {
 		writeAPIErr(w, err)
 		return
@@ -180,7 +199,7 @@ func (s *Server) handleDeleteModelProvider(w http.ResponseWriter, r *http.Reques
 	if !s.folderAdmin(w, r) {
 		return
 	}
-	if err := s.Hub.DeleteModelProvider(r.PathValue("name"), requestActor(r)); err != nil {
+	if err := s.deleteModelProvider(requestActor(r), r.PathValue("name")); err != nil {
 		writeAPIErr(w, err)
 		return
 	}
@@ -251,4 +270,119 @@ func rawJSONString(raw []byte) ([]byte, bool) {
 		return nil, false
 	}
 	return []byte(s), true
+}
+
+// handleRevokeAI revokes one person's or everyone's AI credentials for a
+// companion now (§15.11; audited ai.credential.revoke by the Hub).
+func (s *Server) handleRevokeAI(w http.ResponseWriter, r *http.Request) {
+	if !s.folderAdmin(w, r) {
+		return
+	}
+	id, ok := instanceID(w, r)
+	if !ok {
+		return
+	}
+	var b struct {
+		Companion string `json:"companion"`
+		User      string `json:"user"`
+	}
+	if !decodeAPI(w, r, &b, revokeAIUsage) {
+		return
+	}
+	res, err := s.revokeAI(r.Context(), requestActor(r), id, b.Companion, b.User)
+	if err != nil {
+		writeAPIErr(w, err)
+		return
+	}
+	noStore(w)
+	writeJSON(w, res)
+}
+
+// handleAIActivity: the access log's lines, newest first, filtered by
+// instance and user, n ≤ 200 (§15.11).
+func (s *Server) handleAIActivity(w http.ResponseWriter, r *http.Request) {
+	if !s.folderAdmin(w, r) {
+		return
+	}
+	q := r.URL.Query()
+	n := 0
+	if v := q.Get("n"); v != "" {
+		var err error
+		if n, err = strconv.Atoi(v); err != nil {
+			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("n must be 1-%d", maxActivity))
+			return
+		}
+	}
+	lines, err := s.aiActivity(q.Get("instance"), q.Get("user"), n)
+	if err != nil {
+		writeAPIErr(w, err)
+		return
+	}
+	noStore(w)
+	writeJSON(w, map[string]any{"lines": lines})
+}
+
+// aiActivity is the access log read (route and ai_activity): n 0 = the
+// default, else 1–200; instance / user "" = any (user lowercased).
+func (s *Server) aiActivity(instance, user string, n int) ([]hub.AccessLine, error) {
+	if n == 0 {
+		n = defActivity
+	}
+	if n < 1 || n > maxActivity {
+		return nil, badArg(fmt.Sprintf("n must be 1-%d", maxActivity))
+	}
+	user = strings.ToLower(user)
+	return s.Hub.AccessLog(func(l hub.AccessLine) bool {
+		return (instance == "" || l.Instance == instance) && (user == "" || l.User == user)
+	}, n)
+}
+
+// revokeAI is the revoke's work (route and revoke_ai_access).
+func (s *Server) revokeAI(ctx context.Context, a directory.Actor, id, companion, user string) (map[string]any, error) {
+	user = strings.ToLower(user)
+	s.rec("RevokeAICredentials", id, companion, user)
+	if err := s.Hub.RevokeAICredentials(ctx, id, companion, user, a); err != nil {
+		return nil, err
+	}
+	who := user
+	if who == "" {
+		who = "everyone"
+	}
+	return map[string]any{"status": "revoked", "instance": id, "companion": companion, "user": who}, nil
+}
+
+// updateInstanceAI is the AI tab's save (route, set_ai_support and
+// set_ai_mode); audited ai.enable / ai.disable / ai.mode by the Hub.
+func (s *Server) updateInstanceAI(ctx context.Context, a directory.Actor, id string, u hub.InstanceAIUpdate) (*hub.InstanceAIResult, error) {
+	s.rec("UpdateInstanceAI", id, u)
+	return s.Hub.UpdateInstanceAI(ctx, id, u, a)
+}
+
+// saveAISettings is Settings → AI's save (route and save_hub_settings);
+// audited settings.ai by the Hub. → the settings as stored.
+func (s *Server) saveAISettings(a directory.Actor, u hub.AISettingsUpdate) (hub.AISettingsView, error) {
+	s.rec("SaveAISettings", u)
+	if err := s.Hub.SaveAISettings(u, a); err != nil {
+		return hub.AISettingsView{}, err
+	}
+	return s.Hub.AISettings(), nil
+}
+
+// addModelProvider, updateModelProvider and deleteModelProvider are the
+// provider routes' work (and add_model_provider, save_model_provider,
+// delete_model_provider); audited ai.provider.add|update|delete by the
+// Hub.
+func (s *Server) addModelProvider(a directory.Actor, p state.ModelProvider) (hub.ProviderView, error) {
+	s.rec("AddModelProvider", p)
+	return s.Hub.AddModelProvider(p, a)
+}
+
+func (s *Server) updateModelProvider(a directory.Actor, name string, p state.ModelProvider) (hub.ProviderView, error) {
+	s.rec("UpdateModelProvider", name, p)
+	return s.Hub.UpdateModelProvider(name, p, a)
+}
+
+func (s *Server) deleteModelProvider(a directory.Actor, name string) error {
+	s.rec("DeleteModelProvider", name)
+	return s.Hub.DeleteModelProvider(name, a)
 }

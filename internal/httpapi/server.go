@@ -548,17 +548,26 @@ func (s *Server) handleAddSource(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if req.Name == "" || req.URL == "" {
-		http.Error(w, "name and url required", http.StatusBadRequest)
-		return
-	}
-	err := s.Hub.AddSource(req.Name, req.URL)
-	s.auditOp(r, "", directory.AuditEntry{Action: "source.add", Target: clipMessage(req.Name, 64), Detail: sourceURLDetail(req.URL)}, err, http.StatusBadRequest)
+	res, err := s.addSource(requestActor(r), req.Name, req.URL)
 	if err != nil {
 		writeErr(w, err, http.StatusBadRequest)
 		return
 	}
-	writeJSON(w, map[string]string{"status": "added", "name": req.Name})
+	writeJSON(w, res)
+}
+
+// addSource is the add's work (route and add_source); audited source.add.
+func (s *Server) addSource(a directory.Actor, name, url string) (map[string]string, error) {
+	if name == "" || url == "" {
+		return nil, badArg("name and url required")
+	}
+	s.rec("AddSource", name, url)
+	err := s.Hub.AddSource(name, url)
+	s.auditOpAs(a, "", directory.AuditEntry{Action: "source.add", Target: clipMessage(name, 64), Detail: sourceURLDetail(url)}, err, http.StatusBadRequest)
+	if err != nil {
+		return nil, defaultStatus(err, http.StatusBadRequest)
+	}
+	return map[string]string{"status": "added", "name": name}, nil
 }
 
 func (s *Server) handleRemoveSource(w http.ResponseWriter, r *http.Request) {
@@ -571,13 +580,24 @@ func (s *Server) handleRemoveSource(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	err := s.Hub.RemoveSource(req.Name)
-	s.auditOp(r, "", directory.AuditEntry{Action: "source.remove", Target: clipMessage(req.Name, 64)}, err, http.StatusBadRequest)
+	res, err := s.removeSource(requestActor(r), req.Name)
 	if err != nil {
 		writeErr(w, err, http.StatusBadRequest)
 		return
 	}
-	writeJSON(w, map[string]string{"status": "removed", "name": req.Name})
+	writeJSON(w, res)
+}
+
+// removeSource is the removal's work (route and remove_source); audited
+// source.remove.
+func (s *Server) removeSource(a directory.Actor, name string) (map[string]string, error) {
+	s.rec("RemoveSource", name)
+	err := s.Hub.RemoveSource(name)
+	s.auditOpAs(a, "", directory.AuditEntry{Action: "source.remove", Target: clipMessage(name, 64)}, err, http.StatusBadRequest)
+	if err != nil {
+		return nil, defaultStatus(err, http.StatusBadRequest)
+	}
+	return map[string]string{"status": "removed", "name": name}, nil
 }
 
 // handleSyncSources: GET = the last sync's status (start-up, SIGHUP or
@@ -590,13 +610,24 @@ func (s *Server) handleSyncSources(w http.ResponseWriter, r *http.Request) {
 	if !methodIs(w, r, http.MethodPost) {
 		return
 	}
-	err := s.Hub.SyncSources()
-	s.auditOp(r, "", directory.AuditEntry{Action: "source.sync", Target: "sources"}, err, http.StatusInternalServerError)
+	res, err := s.syncSources(requestActor(r))
 	if err != nil {
 		writeErr(w, err, http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, map[string]interface{}{"status": "synced", "last": s.Hub.SourceSync()})
+	writeJSON(w, res)
+}
+
+// syncSources is the sync's work (route and sync_sources); audited
+// source.sync.
+func (s *Server) syncSources(a directory.Actor) (map[string]any, error) {
+	s.rec("SyncSources")
+	err := s.Hub.SyncSources()
+	s.auditOpAs(a, "", directory.AuditEntry{Action: "source.sync", Target: "sources"}, err, http.StatusInternalServerError)
+	if err != nil {
+		return nil, defaultStatus(err, http.StatusInternalServerError)
+	}
+	return map[string]any{"status": "synced", "last": s.Hub.SourceSync()}, nil
 }
 
 // ── settings ─────────────────────────────────────────────
@@ -679,15 +710,7 @@ func (s *Server) appendAudit(a directory.Actor, e directory.AuditEntry, status i
 func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		dp := s.Hub.DefaultPolicy()
-		writeJSON(w, map[string]interface{}{
-			"default_auth_policy":  dp,
-			"default_safety_score": policy.SafetyScore(dp),
-			"factors":              policy.Factors,
-			// The stored default named the removed "password" factor and
-			// was normalised (shown as a note until saved).
-			"legacy_password": s.Hub.DefaultPolicyLegacy(),
-		})
+		writeJSON(w, s.defaultPolicyView())
 	case http.MethodPut:
 		var req struct {
 			DefaultAuthPolicy *policy.AuthPolicy `json:"default_auth_policy"`
@@ -699,30 +722,55 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "expected {default_auth_policy: {factors, op}}", http.StatusBadRequest)
 			return
 		}
-		before := s.Hub.DefaultPolicy()
-		// Inheriting instances the new default puts at LoA 3 get AI
-		// support switched off first (G43; listed in the answer).
-		changed, warnings, err := s.Hub.SetDefaultPolicyAs(*req.DefaultAuthPolicy, requestActor(r))
-		after := *req.DefaultAuthPolicy
-		if err == nil {
-			after = policy.Normalize(after)
-		}
-		if changed || err != nil {
-			s.auditOp(r, "", directory.AuditEntry{Action: "settings.default_policy", Target: "default",
-				Detail: policyDetail(before) + " -> " + policyDetail(after)}, err, http.StatusInternalServerError)
-		}
+		res, err := s.setDefaultPolicy(requestActor(r), *req.DefaultAuthPolicy)
 		if err != nil {
 			writeErr(w, err, http.StatusInternalServerError)
 			return
 		}
-		if !changed {
-			writeJSON(w, map[string]any{"status": "unchanged", "warnings": warnings})
-			return
-		}
-		writeJSON(w, map[string]any{"status": "saved", "warnings": warnings})
+		writeJSON(w, res)
 	default:
 		http.Error(w, "GET or PUT only", http.StatusMethodNotAllowed)
 	}
+}
+
+// defaultPolicyView is GET /api/settings (and get_hub_settings' policy
+// part).
+func (s *Server) defaultPolicyView() map[string]any {
+	dp := s.Hub.DefaultPolicy()
+	return map[string]any{
+		"default_auth_policy":  dp,
+		"default_safety_score": policy.SafetyScore(dp),
+		"factors":              policy.Factors,
+		// The stored default named the removed "password" factor and
+		// was normalised (shown as a note until saved).
+		"legacy_password": s.Hub.DefaultPolicyLegacy(),
+	}
+}
+
+// setDefaultPolicy is the default policy's save (route and
+// set_default_policy): inheriting instances the new default puts at LoA 3
+// get AI support switched off first (G43; listed in the answer); audited
+// settings.default_policy when it changed (or failed).
+func (s *Server) setDefaultPolicy(a directory.Actor, p policy.AuthPolicy) (map[string]any, error) {
+	before := s.Hub.DefaultPolicy()
+	s.rec("SetDefaultPolicyAs", p)
+	changed, warnings, err := s.Hub.SetDefaultPolicyAs(p, a)
+	after := p
+	if err == nil {
+		after = policy.Normalize(after)
+	}
+	if changed || err != nil {
+		s.auditOpAs(a, "", directory.AuditEntry{Action: "settings.default_policy", Target: "default",
+			Detail: policyDetail(before) + " -> " + policyDetail(after)}, err, http.StatusInternalServerError)
+	}
+	if err != nil {
+		return nil, defaultStatus(err, http.StatusInternalServerError)
+	}
+	status := "saved"
+	if !changed {
+		status = "unchanged"
+	}
+	return map[string]any{"status": status, "warnings": warnings}, nil
 }
 
 // ── runtime (Engine API) ─────────────────────────────────

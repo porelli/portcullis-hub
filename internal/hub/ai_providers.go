@@ -234,6 +234,20 @@ func (h *Hub) ModelProviders(ctx context.Context) []ProviderView {
 	return out
 }
 
+// ModelProvider is provider name's stored definition (a copy; ok false:
+// none). The Portcullis MCP's save_model_provider judges its class by it
+// (Task 17b): where model traffic and secrets go.
+func (h *Hub) ModelProvider(name string) (state.ModelProvider, bool) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for _, p := range h.st.AI.Providers {
+		if p.Name == name {
+			return cloneProvider(p), true
+		}
+	}
+	return state.ModelProvider{}, false
+}
+
 // providerViewLocked is p's view (m nil: populations unknown). Caller
 // holds mu (read).
 func (h *Hub) providerViewLocked(p state.ModelProvider, m *directory.Membership) ProviderView {

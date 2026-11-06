@@ -66,6 +66,32 @@ settings:
 const teamCompose = "services:\n  web:\n    image: team\n    environment:\n      OWNERS: ${TEAM_OWNERS}\n      TITLE: ${TEAM_TITLE}\n    labels:\n" +
 	"      traefik.http.routers.teamapp.rule: Host(`${PORTCULLIS_HOST_TEAMAPP:-teamapp.portcullis.local}`)\n"
 
+// aiChatFixture is the AI page test template (openai_compatible and
+// anthropic providers).
+func aiChatFixture(t *testing.T) [2]string {
+	t.Helper()
+	dir := filepath.Join("..", "templates", "testdata", "ai", "chat")
+	m, err := os.ReadFile(filepath.Join(dir, "manifest.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := os.ReadFile(filepath.Join(dir, "compose.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return [2]string{string(m), string(c)}
+}
+
+// ollamaArgs is ollamaBody as tool arguments, with over replacing fields.
+func ollamaArgs(over map[string]any) map[string]any {
+	var a map[string]any
+	json.Unmarshal([]byte(ollamaBody), &a)
+	for k, v := range over {
+		a[k] = v
+	}
+	return a
+}
+
 // settingsFixture reads a template of the Hub's settings testdata.
 func settingsFixture(t *testing.T, id string) [2]string {
 	t.Helper()
@@ -90,6 +116,14 @@ type toolEnv struct {
 
 func newToolEnv(t *testing.T, extra map[string][2]string, wrap func(hub.Engine) hub.Engine) *toolEnv {
 	t.Helper()
+	return newToolEnvWith(t, mcpEnvOpts{extra: extra, wrap: wrap})
+}
+
+// newToolEnvWith is newToolEnv with o's extra templates, engine wrapper
+// and configuration.
+func newToolEnvWith(t *testing.T, o mcpEnvOpts) *toolEnv {
+	t.Helper()
+	extra := o.extra
 	all := map[string][2]string{
 		"notes":     {notesManifest, notesCompose},
 		"secretapp": settingsFixture(t, "secretapp"),
@@ -97,11 +131,13 @@ func newToolEnv(t *testing.T, extra map[string][2]string, wrap func(hub.Engine) 
 		"cloud":     {cloudManifest, cloudCompose},
 		"privapp":   settingsFixture(t, "privapp"),
 		"teamapp":   {teamManifest, teamCompose},
+		"ai-chat":   aiChatFixture(t),
 	}
 	for k, v := range extra {
 		all[k] = v
 	}
-	ce := newConfirmEnvOpts(t, mcpEnvOpts{extra: all, wrap: wrap})
+	o.extra = all
+	ce := newConfirmEnvOpts(t, o)
 	// Many confirmations per test (the hourly limit is TestMCPDestructive…'s).
 	ce.s.Hub.SetConfirmPerHourForTest(1000)
 	return &toolEnv{&mcpTestEnv{confirmEnv: ce, runs: map[string]int{}}}
@@ -181,21 +217,14 @@ type sameAsHTTPCase struct {
 	args         any
 	method, path string
 	body         string
-	instance     string // an async op to wait for ("" none)
+	instance     string // an async op (or a background restart) to wait for ("" none)
 	plan         bool   // the tool needs preview_settings' plan_hash first
 }
 
 // sameAsHTTPPending are the admin W and D tools whose same-as-HTTP case a
-// later task adds with the tool (T17b): none of them is registered yet;
-// each task drops its names when its tools land.
-var sameAsHTTPPending = map[string]string{
-	"sync_sources": "T17b", "add_source": "T17b", "remove_source": "T17b",
-	"backup_instance": "T17b", "restore_instance": "T17b", "restore_as": "T17b",
-	"enroll_domain": "T17b", "replace_domain_token": "T17b", "delete_domain": "T17b",
-	"set_ai_support": "T17b", "set_ai_mode": "T17b", "revoke_ai_access": "T17b",
-	"save_model_provider": "T17b", "set_model_provider_secret": "T17b", "delete_model_provider": "T17b",
-	"save_hub_settings": "T17b",
-}
+// later task adds with the tool: none is registered yet; each task drops
+// its names when its tools land (T17b emptied it).
+var sameAsHTTPPending = map[string]string{}
 
 // TestAdminToolsSameAsHTTP: every registered admin W and D tool (but
 // sameAsHTTPPending's) — and both classes of each per-call one — makes the
@@ -272,6 +301,54 @@ func TestAdminToolsSameAsHTTP(t *testing.T) {
 			method: "PUT", path: "/api/settings/local-networks", body: `{"networks":["10.0.0.0/8"]}`},
 		{tool: "set_local_networks", args: map[string]any{"networks": []string{"10.0.0.0/8", "203.0.113.0/24"}},
 			method: "PUT", path: "/api/settings/local-networks", body: `{"networks":["10.0.0.0/8","203.0.113.0/24"]}`},
+		// ── Task 17b ──
+		{tool: "sync_sources", args: map[string]any{},
+			method: "POST", path: "/api/sources/sync", body: ``},
+		{tool: "add_source", args: map[string]any{"name": "Bad Name", "url": "https://example.org/t.git"},
+			method: "POST", path: "/api/sources/add", body: `{"name":"Bad Name","url":"https://example.org/t.git"}`},
+		{tool: "remove_source", args: map[string]any{"name": "nosuch"},
+			method: "POST", path: "/api/sources/remove", body: `{"name":"nosuch"}`},
+		{tool: "backup_instance", args: map[string]any{"id": "secretapp"},
+			method: "POST", path: "/api/instances/secretapp/backups", body: ``, instance: "secretapp"},
+		{tool: "restore_instance", args: map[string]any{"id": "secretapp", "archive": "secretapp/20990101T000000Z.tar"},
+			method: "POST", path: "/api/instances/secretapp/restore", body: `{"archive":"secretapp/20990101T000000Z.tar"}`},
+		{tool: "restore_as", args: map[string]any{"archive": "secretapp/20990101T000000Z.tar", "id": "notes-b"},
+			method: "POST", path: "/api/instances/restore", body: `{"archive":"secretapp/20990101T000000Z.tar","id":"notes-b"}`},
+		{tool: "delete_domain", args: map[string]any{"name": "team-b.example.net"},
+			method: "DELETE", path: "/api/domains/team-b.example.net", body: ``},
+		{tool: "set_ai_mode", args: map[string]any{"id": "aiapp", "companion": "tok", "mode": "read_only"},
+			method: "PUT", path: "/api/instances/aiapp/ai", body: `{"companions":{"tok":{"mode":"read_only"}}}`},
+		{tool: "set_ai_mode", args: map[string]any{"id": "aiapp", "companion": "tok", "mode": "read_write"},
+			method: "PUT", path: "/api/instances/aiapp/ai", body: `{"companions":{"tok":{"mode":"read_write"}}}`},
+		{tool: "set_ai_support", args: map[string]any{"id": "aiapp", "companion": "tok", "enabled": false},
+			method: "PUT", path: "/api/instances/aiapp/ai", body: `{"companions":{"tok":{"enabled":false}}}`},
+		{tool: "set_ai_support", args: map[string]any{"id": "aiapp", "companion": "tok", "enabled": true},
+			method: "PUT", path: "/api/instances/aiapp/ai", body: `{"companions":{"tok":{"enabled":true}}}`},
+		{tool: "revoke_ai_access", args: map[string]any{"id": "aiapp", "companion": "tok"},
+			method: "POST", path: "/api/instances/aiapp/ai/revoke", body: `{"companion":"tok"}`},
+		{tool: "revoke_ai_access", args: map[string]any{"id": "aiapp", "companion": "hdr", "user": "alice"},
+			method: "POST", path: "/api/instances/aiapp/ai/revoke", body: `{"companion":"hdr","user":"alice"}`},
+		{tool: "add_model_provider", args: ollamaArgs(nil),
+			method: "POST", path: "/api/ai/providers", body: ollamaBody},
+		{tool: "save_model_provider", args: ollamaArgs(map[string]any{"label": "Ollama 2"}),
+			method: "PUT", path: "/api/ai/providers/ollama", body: strings.Replace(ollamaBody, `"Ollama"`, `"Ollama 2"`, 1)},
+		{tool: "save_model_provider", args: ollamaArgs(map[string]any{"base_url": "http://gpu2.lan:11434/v1"}),
+			method: "PUT", path: "/api/ai/providers/ollama", body: strings.Replace(ollamaBody, "gpu.lan", "gpu2.lan", 1)},
+		{tool: "delete_model_provider", args: map[string]any{"name": "ollama"},
+			method: "DELETE", path: "/api/ai/providers/ollama", body: ``},
+		{tool: "save_hub_settings", args: map[string]any{"limits": map[string]any{"resource_rpm": 100}},
+			method: "PUT", path: "/api/ai/settings", body: `{"limits":{"resource_rpm":100}}`},
+		{tool: "save_hub_settings", args: map[string]any{"allowed_origins": []string{"https://a.example.org"}},
+			method: "PUT", path: "/api/ai/settings", body: `{"allowed_origins":["https://a.example.org"]}`},
+		{tool: "resume_user_sweep", args: map[string]any{},
+			method: "POST", path: "/api/keycloak/user-sweep/resume", body: `{"confirm":"resume"}`},
+		{tool: "remove_stale_keycloak_user", args: map[string]any{"username": "ghost"},
+			method: "DELETE", path: "/api/directory/keycloak-stale/ghost", body: `{"confirm":"ghost"}`},
+		// Last of the AI cases: an mTLS default switches aiapp's companions off (G43).
+		{tool: "set_default_policy", args: map[string]any{"policy": map[string]any{"factors": []string{"mtls", "webauthn"}, "op": "all"}},
+			method: "PUT", path: "/api/settings", body: `{"default_auth_policy":{"factors":["mtls","webauthn"],"op":"all"}}`, instance: "secretapp"},
+		{tool: "set_default_policy", args: map[string]any{"policy": map[string]any{"factors": []string{"webauthn", "mtls"}, "op": "any"}},
+			method: "PUT", path: "/api/settings", body: `{"default_auth_policy":{"factors":["webauthn","mtls"],"op":"any"}}`, instance: "secretapp"},
 		{tool: "disable_instance", args: map[string]any{"id": "secretapp"},
 			method: "POST", path: "/api/templates/disable", body: `{"id":"secretapp"}`},
 		{tool: "delete_instance", args: map[string]any{"id": "grafana-a"},

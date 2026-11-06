@@ -198,6 +198,8 @@ func TestDomainRoutesAdminOnly(t *testing.T) {
 }
 
 func TestTokenNotEchoed(t *testing.T) {
+	// Task 17b: over every admin tool's result, too.
+	t.Run("admin tools", testToolsNotEchoed)
 	e := newDomainsEnv(t)
 	// Accepted: the answer carries no credentials.
 	code, b := e.do(t, e.hub, "root", "POST", "/api/domains", enrollBody("team-b.example.net", dnsToken))

@@ -616,6 +616,8 @@
       </p>
       <div id="global-policy-form"></div>
 
+      <div id="ai-secret-root" style="margin-top: 2rem;"></div>
+
       <div class="category-title" style="margin: 2rem 0 1rem;">Domains</div>
       <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
         Extra domains or subdomains for app instances (never for the portal, Hub, people or sign-in pages).
@@ -682,11 +684,17 @@
     });
     // Deep links: hub.<domain>/#users (directory.<domain> redirects there);
     // #app/<id>/settings[/<option>] opens an instance's settings at an
-    // option (the Portcullis MCP's set_secret_setting form).
+    // option (the Portcullis MCP's set_secret_setting form);
+    // #settings/domains?enroll=<name>[&provider=<p>] and ?token=<name> open
+    // the Domains forms (enroll_domain, replace_domain_token);
+    // #settings/ai?provider=<name>&field=<field> a provider secret's form
+    // (set_model_provider_secret). Secrets are typed here, never passed in.
     window.addEventListener('load', () => {
       const t = location.hash.slice(1);
       const app = /^app\/([a-z0-9-]+)\/settings(?:\/([A-Za-z0-9_.-]+))?$/.exec(t);
       if (app) { openSettingAt(app[1], app[2] || ''); return; }
+      const sec = /^settings\/(domains|ai)\?(.*)$/.exec(t);
+      if (sec) { openSettingsForm(sec[1], new URLSearchParams(sec[2])); return; }
       const tab = t && document.querySelector('.tab[data-tab="' + CSS.escape(t) + '"]');
       if (tab) tab.click();
     });
@@ -802,6 +810,78 @@
       const el = document.getElementById('doctor-line-' + id);
       if (!el || !window.PortcullisDoctor) return;
       el.innerHTML = await PortcullisDoctor.lineFor(id);
+    }
+
+    // Waits (up to 5 s) for an element matching sel.
+    async function waitFor(sel) {
+      for (let i = 0; i < 50; i++) {
+        const el = document.querySelector(sel);
+        if (el) return el;
+        await new Promise(r => setTimeout(r, 100));
+      }
+      return null;
+    }
+
+    function flash(el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      el.classList.add('flash-target');
+      setTimeout(() => el.classList.remove('flash-target'), 2500);
+    }
+
+    // The Settings tab's forms the Portcullis MCP's U tools link to:
+    // domains enroll / token, a model provider's secret.
+    async function openSettingsForm(kind, q) {
+      document.querySelector('.tab[data-tab="settings"]').click();
+      if (kind === 'domains' && q.get('enroll')) {
+        const form = await waitFor('#domain-enroll-form');
+        if (!form) return;
+        document.getElementById('domain-name').value = q.get('enroll');
+        const sel = form.querySelector('.domain-provider');
+        const p = q.get('provider');
+        if (p && sel && [...sel.options].some(o => o.value === p)) {
+          sel.value = p;
+          sel.dispatchEvent(new Event('change'));
+        }
+        flash(form);
+        form.querySelector('[data-cred]')?.focus();
+        return;
+      }
+      if (kind === 'domains' && q.get('token')) {
+        const btn = await waitFor('[data-domain-token="' + CSS.escape(q.get('token')) + '"]');
+        if (!btn) { showToast('No enrolled domain ' + q.get('token') + '.', 'error'); return; }
+        btn.click();
+        const row = document.querySelector('[data-token-row="' + CSS.escape(q.get('token')) + '"]');
+        if (row) { flash(row); row.querySelector('[data-cred]')?.focus(); }
+        return;
+      }
+      if (kind === 'ai' && q.get('provider') && q.get('field')) renderProviderSecretForm(q.get('provider'), q.get('field'));
+    }
+
+    // A model provider's secret field: typed into a password input,
+    // cleared on submit, never rendered back (the answer is {set,
+    // updated_at}). The full Settings → AI page is Task 22's.
+    function renderProviderSecretForm(name, field) {
+      const root = document.getElementById('ai-secret-root');
+      root.innerHTML = '<div class="category-title" style="margin: 0 0 1rem;">Model provider secret</div>' +
+        '<form class="settings-form" id="ai-secret-form" style="max-width:32rem">' +
+        '<div class="form-group"><label>' + escapeHtml(field) + ' of provider <code>' + escapeHtml(name) + '</code></label>' +
+        '<small>Write-only: stored on the Hub, never shown again.</small>' +
+        '<input type="password" id="ai-secret-value" required autocomplete="off" spellcheck="false"></div>' +
+        '<button type="submit" class="btn btn-primary btn-sm">Save secret</button> <span id="ai-secret-status"></span></form>';
+      const form = document.getElementById('ai-secret-form');
+      form.addEventListener('submit', async e => {
+        e.preventDefault();
+        const input = document.getElementById('ai-secret-value');
+        const value = input.value;
+        input.value = '';
+        try {
+          const v = await apiPut('/api/ai/providers/' + encodeURIComponent(name) + '/secrets/' + encodeURIComponent(field), { value });
+          document.getElementById('ai-secret-status').textContent = v.set ? 'Set ' + fmtTime(v.updated_at) + '.' : 'Not set.';
+          showToast('Secret saved.', 'success');
+        } catch (err) { showToast(err.message || 'Saving the secret failed', 'error'); }
+      });
+      flash(root);
+      document.getElementById('ai-secret-value').focus();
     }
 
     // Opens instance id's settings panel scrolled to option key (the

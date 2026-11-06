@@ -52,12 +52,20 @@ func (s *Server) handleResumeUserSweep(w http.ResponseWriter, r *http.Request) {
 	if !decodeStrict(w, r, &b, `{"confirm": "resume"}`) {
 		return
 	}
-	st, err := s.Hub.ResumeUserSweep(r.Context(), requestActor(r), b.Confirm)
+	st, err := s.resumeUserSweep(r.Context(), requestActor(r), b.Confirm)
 	if err != nil {
 		writeErr(w, err, http.StatusBadRequest)
 		return
 	}
 	writeJSON(w, st)
+}
+
+// resumeUserSweep is the resume's work (route and resume_user_sweep);
+// audited keycloak.sweep_resume by the Hub.
+func (s *Server) resumeUserSweep(ctx context.Context, a directory.Actor, confirm string) (hub.UserSweepStatus, error) {
+	s.rec("ResumeUserSweep", confirm)
+	st, err := s.Hub.ResumeUserSweep(ctx, a, confirm)
+	return st, defaultStatus(err, http.StatusBadRequest)
 }
 
 // handleMissingGroups lists the enabled instances whose access / admin
@@ -300,16 +308,26 @@ func (s *Server) handleBackups(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	list, err := s.Hub.ListBackups(id)
+	list, err := s.listBackups(id)
 	noStore(w)
 	if err != nil {
 		writeErr(w, err, http.StatusInternalServerError)
 		return
 	}
+	writeJSON(w, list)
+}
+
+// listBackups is the backups list (routes, list_backups and
+// list_backups_all; id "" = every instance's, deleted ones included).
+func (s *Server) listBackups(id string) ([]hub.BackupEntry, error) {
+	list, err := s.Hub.ListBackups(id)
+	if err != nil {
+		return nil, defaultStatus(err, http.StatusInternalServerError)
+	}
 	if list == nil {
 		list = []hub.BackupEntry{}
 	}
-	writeJSON(w, list)
+	return list, nil
 }
 
 func (s *Server) handleBackupInstance(w http.ResponseWriter, r *http.Request) {
@@ -320,7 +338,7 @@ func (s *Server) handleBackupInstance(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	op, err := s.Hub.StartBackup(id, requestActor(r))
+	op, err := s.startBackup(requestActor(r), id)
 	noStore(w)
 	if err != nil {
 		writeErr(w, err, http.StatusInternalServerError)
@@ -343,7 +361,7 @@ func (s *Server) handleRestoreInstance(w http.ResponseWriter, r *http.Request) {
 	if !decodeStrict(w, r, &b, `{"archive": "<instance-id>/<YYYYMMDDTHHMMSSZ>.tar"}`) {
 		return
 	}
-	op, err := s.Hub.StartRestore(id, b.Archive, requestActor(r))
+	op, err := s.startRestore(requestActor(r), id, b.Archive)
 	noStore(w)
 	if err != nil {
 		writeErr(w, err, http.StatusInternalServerError)
@@ -364,13 +382,34 @@ func (s *Server) handleRestoreAs(w http.ResponseWriter, r *http.Request) {
 	if !decodeStrict(w, r, &b, `{"archive": "<instance-id>/<YYYYMMDDTHHMMSSZ>.tar", "id": "<new instance-id>", "hosts": {"<host router>": "<hostname>"} (optional)}`) {
 		return
 	}
-	op, err := s.Hub.StartRestoreAs(b.Archive, b.ID, requestActor(r), b.Hosts)
+	op, err := s.startRestoreAs(requestActor(r), b.Archive, b.ID, b.Hosts)
 	noStore(w)
 	if err != nil {
 		writeErr(w, err, http.StatusInternalServerError)
 		return
 	}
 	writeAccepted(w, op)
+}
+
+// startBackup, startRestore and startRestoreAs are the background
+// operations' work (routes and backup_instance / restore_instance /
+// restore_as); audited instance.backup|restore by the Hub.
+func (s *Server) startBackup(a directory.Actor, id string) (*hub.AsyncOp, error) {
+	s.rec("StartBackup", id)
+	op, err := s.Hub.StartBackup(id, a)
+	return op, defaultStatus(err, http.StatusInternalServerError)
+}
+
+func (s *Server) startRestore(a directory.Actor, id, archive string) (*hub.AsyncOp, error) {
+	s.rec("StartRestore", id, archive)
+	op, err := s.Hub.StartRestore(id, archive, a)
+	return op, defaultStatus(err, http.StatusInternalServerError)
+}
+
+func (s *Server) startRestoreAs(a directory.Actor, archive, id string, hosts map[string]string) (*hub.AsyncOp, error) {
+	s.rec("StartRestoreAs", archive, id, hosts)
+	op, err := s.Hub.StartRestoreAs(archive, id, a, hosts)
+	return op, defaultStatus(err, http.StatusInternalServerError)
 }
 
 // writeAccepted answers a long operation the Hub runs in the background

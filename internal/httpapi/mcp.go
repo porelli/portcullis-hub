@@ -333,6 +333,7 @@ func (s *Server) registerMCPTools() {
 		return
 	}
 	s.registerAdminTools()
+	s.registerAdminTools2()
 }
 
 // mcpScopeOf names the scope's resource URL, listener, page base and

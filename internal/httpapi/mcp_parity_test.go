@@ -40,35 +40,6 @@ var confirmationRoutes = map[string]string{
 // the task ("T17b", "T18", "T20"). Each task removes its entries; T20
 // leaves it empty.
 var pendingToolRoutes = map[string]string{
-	// T17b: catalog and sources.
-	"/api/templates":      "T17b",
-	"/api/sources":        "T17b",
-	"/api/sources/add":    "T17b",
-	"/api/sources/remove": "T17b",
-	"/api/sources/sync":   "T17b",
-	// T17b: backups.
-	"GET /api/backups":                 "T17b",
-	"GET /api/instances/{id}/backups":  "T17b",
-	"POST /api/instances/{id}/backups": "T17b",
-	"POST /api/instances/{id}/restore": "T17b",
-	"POST /api/instances/restore":      "T17b",
-	// T17b: domains.
-	"GET /api/domains":               "T17b",
-	"POST /api/domains":              "T17b",
-	"POST /api/domains/{name}/token": "T17b",
-	"DELETE /api/domains/{name}":     "T17b",
-	// T17b: AI and Hub settings.
-	"GET /api/ai/settings":                         "T17b",
-	"PUT /api/ai/settings":                         "T17b",
-	"GET /api/ai/providers":                        "T17b",
-	"POST /api/ai/providers":                       "T17b",
-	"PUT /api/ai/providers/{name}":                 "T17b",
-	"DELETE /api/ai/providers/{name}":              "T17b",
-	"PUT /api/ai/providers/{name}/secrets/{field}": "T17b",
-	"GET /api/instances/{id}/ai":                   "T17b",
-	"PUT /api/instances/{id}/ai":                   "T17b",
-	"/api/settings":                                "T17b",
-	"POST /api/settings/preview":                   "T17b",
 	// T18: users and groups, the Keycloak user sweep.
 	"GET /api/directory":                                          "T18",
 	"GET /api/directory/audit":                                    "T18",
@@ -80,7 +51,6 @@ var pendingToolRoutes = map[string]string{
 	"POST /api/directory/users/{username}/require-passkey":        "T18",
 	"POST /api/directory/users/{username}/clear-actions":          "T18",
 	"POST /api/directory/users/{username}/remove-passkeys":        "T18",
-	"DELETE /api/directory/keycloak-stale/{username}":             "T18",
 	"POST /api/directory/groups":                                  "T18",
 	"DELETE /api/directory/groups/{group}":                        "T18",
 	"POST /api/directory/groups/{group}/members":                  "T18",
@@ -98,8 +68,6 @@ var pendingToolRoutes = map[string]string{
 	"PUT /api/directory/groups/{group}/members/{username}/expiry": "T18",
 	"PUT /api/directory/permissions/{perm}":                       "T18",
 	"POST /api/directory/import/apply":                            "T18",
-	"GET /api/keycloak/user-sweep":                                "T18",
-	"POST /api/keycloak/user-sweep/resume":                        "T18",
 	// T20: doctor and shared folders.
 	"GET /api/doctor":                        "T20",
 	"POST /api/doctor/scan":                  "T20",
@@ -133,6 +101,15 @@ var destructiveTwins = map[string]string{
 	"/api/templates/compose/":                             "writes the compose override that decides what runs (save_custom_override)",
 	"/api/drift/resolve":                                  "stops, adopts or recreates a project",
 	"DELETE /api/instances/{id}/credentials/{key}/{user}": "revokes a person's credential",
+	// Task 17b.
+	"/api/sources/remove":                             "removes a source; its enabled apps are disabled",
+	"POST /api/instances/{id}/restore":                "restores over the instance",
+	"POST /api/instances/restore":                     "restores an archive into a new instance (data and access settings from the archive)",
+	"DELETE /api/domains/{name}":                      "deletes a domain (records, certificate)",
+	"POST /api/instances/{id}/ai/revoke":              "revokes AI credentials in the app",
+	"DELETE /api/ai/providers/{name}":                 "deletes a model provider and its secrets",
+	"POST /api/keycloak/user-sweep/resume":            "typed confirmation (resume): Keycloak then removes records LLDAP lacks",
+	"DELETE /api/directory/keycloak-stale/{username}": "deletes a Keycloak record (typed username)",
 }
 
 // accessWidening are the tools that are D only for some arguments (G37,
@@ -144,6 +121,20 @@ var accessWidening = map[string]string{
 	"save_settings":      "D when it sets ports (host ports published, <KEY>_BIND changed)",
 	"set_local_networks": "D unless use_defaults or a list within the current one",
 	"enable_instance":    "D when the instance starts with public access on or the app's own login only (fix round 1)",
+	// Task 17b.
+	"set_ai_support":      "D when it switches a companion on",
+	"set_ai_mode":         "D unless read_only",
+	"save_model_provider": "D when it changes where model traffic goes (base_url, instance, instance_name, region) or names no stored provider",
+	"save_hub_settings":   "D when it turns AI or the people MCP on, changes clients or origins, or raises a limit or connection length",
+	"set_default_policy":  "D unless the new default is policy.Stricter than the current one",
+}
+
+// widensAlways are the D tools whose every call widens access (G37
+// add_source; Task 17b: adding a model provider sends people's data to a
+// new place): their twin is a plain add, and they have no ClassFor.
+var widensAlways = map[string]string{
+	"add_source":         "a source decides what apps can run (G37)",
+	"add_model_provider": "what people send on the AI page goes to it, and its secrets (Task 17b ruling)",
 }
 
 func TestToolParity(t *testing.T) {
@@ -223,25 +214,59 @@ func TestToolParity(t *testing.T) {
 			continue
 		}
 		_, widening := accessWidening[tl.Name]
+		_, always := widensAlways[tl.Name]
 		switch {
 		case widening && tl.ClassFor == nil:
 			t.Errorf("tool %s is access-widening but has no ClassFor", tl.Name)
+		case always && tl.ClassFor != nil:
+			t.Errorf("tool %s widens on every call but has a ClassFor", tl.Name)
+		case always:
 		case !widening && destructiveTwins[tl.Twin] == "":
 			t.Errorf("D tool %s: twin %s neither deletes, restores, revokes, runs code nor has a typed check", tl.Name, tl.Twin)
 		}
 	}
 	for _, n := range []string{"exec", "save_env", "save_custom_override", "resolve_drift", "delete_instance", "admin_revoke_credential",
-		"set_policy", "set_sign_in_mode", "set_public_access", "save_settings", "set_local_networks", "enable_instance"} {
+		"set_policy", "set_sign_in_mode", "set_public_access", "save_settings", "set_local_networks", "enable_instance",
+		// Task 17b (§15.10's D list, G37 and its rulings).
+		"add_source", "remove_source", "restore_instance", "restore_as", "delete_domain", "revoke_ai_access",
+		"add_model_provider", "delete_model_provider", "resume_user_sweep", "remove_stale_keycloak_user",
+		"set_ai_support", "set_ai_mode", "save_model_provider", "save_hub_settings", "set_default_policy"} {
 		if byName[n].Class != ClassDestructive {
 			t.Errorf("tool %s: class %q, want D", n, byName[n].Class)
 		}
 	}
-	// The tools of this part (17a) are all there.
-	for _, n := range admin17a {
+	// U tools (Task 17b): domain tokens and provider secrets.
+	for _, n := range []string{"set_secret_setting", "enroll_domain", "replace_domain_token", "set_model_provider_secret"} {
+		if byName[n].Class != ClassSecret {
+			t.Errorf("tool %s: class %q, want U", n, byName[n].Class)
+		}
+	}
+	// W (Task 17b): a backup can't widen access (the archive stays in the
+	// Hub's data; the instance comes back as it was); a sync pulls the
+	// sources the admin added.
+	for _, n := range []string{"backup_instance", "sync_sources"} {
+		if byName[n].Class != ClassWrite {
+			t.Errorf("tool %s: class %q, want W", n, byName[n].Class)
+		}
+	}
+	// The tools of both parts are all there.
+	for _, n := range append(slices.Clone(admin17a), admin17b...) {
 		if _, ok := byName[n]; !ok {
 			t.Errorf("tool %s is not registered", n)
 		}
 	}
+}
+
+// admin17b are the admin tools of T17b (catalog and sources, backups,
+// domains, AI, Hub settings and their G15 tools).
+var admin17b = []string{
+	"list_templates", "get_template", "list_sources", "sync_sources", "add_source", "remove_source",
+	"list_backups", "list_backups_all", "backup_instance", "restore_instance", "restore_as",
+	"list_domains", "enroll_domain", "replace_domain_token", "delete_domain",
+	"ai_status", "set_ai_support", "set_ai_mode", "revoke_ai_access", "ai_activity",
+	"list_model_providers", "add_model_provider", "save_model_provider", "set_model_provider_secret", "delete_model_provider",
+	"get_hub_settings", "save_hub_settings", "set_default_policy", "preview_default_policy",
+	"user_sweep_status", "resume_user_sweep", "remove_stale_keycloak_user",
 }
 
 // admin17a are the admin tools of T17a (overview, instances, settings,
