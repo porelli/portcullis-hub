@@ -778,30 +778,25 @@ func (s *Server) handleTemplateEnv(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// sourceURLDetail is a source URL as an audit detail: scheme://host[:port]/path
-// only — user info, query string and fragment dropped (any may carry a
-// token); the scp-like user@host:path form as host:path. The path stays
-// (it names the repository; a token placed in a path segment would
-// show — the residual).
+// sourceURLDetail is a source URL as an audit detail. A URL with a
+// scheme and host: scheme://host[:port]/path only — user info, query
+// string and fragment dropped (any may carry a token); the path stays (it
+// names the repository; a token placed in a path segment would show — the
+// residual). Anything else gets a fixed placeholder, never text derived
+// from it: "(scp-style source)" for user@host:path, else "(invalid URL)".
 func sourceURLDetail(raw string) string {
-	if strings.Contains(raw, "://") {
-		u, err := url.Parse(raw)
-		if err != nil || u.Scheme == "" {
-			return "(unparsable URL)"
+	if !strings.Contains(raw, "://") {
+		if strings.Contains(raw, "@") && strings.Contains(raw, ":") {
+			return "(scp-style source)"
 		}
-		clean := url.URL{Scheme: u.Scheme, Host: u.Host, Path: u.Path}
-		return clipMessage(clean.String(), 300)
+		return "(invalid URL)"
 	}
-	v, _, _ := strings.Cut(raw, "?")
-	v, _, _ = strings.Cut(v, "#")
-	host := v
-	if c := strings.Index(v, ":"); c >= 0 {
-		host = v[:c]
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "(invalid URL)"
 	}
-	if at := strings.LastIndex(host, "@"); at >= 0 {
-		v = v[at+1:]
-	}
-	return clipMessage(v, 300)
+	clean := url.URL{Scheme: u.Scheme, Host: u.Host, Path: u.Path}
+	return clipMessage(clean.String(), 300)
 }
 
 // policyDetail is an auth policy as an audit detail ("f1,f2 (op)"), as

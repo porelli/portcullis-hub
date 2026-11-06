@@ -277,9 +277,13 @@ func TestSourceURLDetail(t *testing.T) {
 		"https://git.example.org/org/repo.git?x=1&token=T2":                                     "https://git.example.org/org/repo.git",
 		"https://git.example.org/org/repo.git#token=T3":                                         "https://git.example.org/org/repo.git",
 		"ssh://git@git.example.org/org/repo.git":                                                "ssh://git.example.org/org/repo.git",
-		"git@github.com:org/repo.git":                                                           "github.com:org/repo.git",
-		"tok3n@github.com:org/repo.git?token=T4#token=T5":                                       "github.com:org/repo.git",
-		"git@github.com:org/a@b.git":                                                            "github.com:org/a@b.git",
+		// Never derived from text that isn't a URL with scheme and host.
+		"git@github.com:org/repo.git":                     "(scp-style source)",
+		"user:pass@host:repo.git":                         "(scp-style source)",
+		"tok3n@github.com:org/repo.git?token=T4#token=T5": "(scp-style source)",
+		"garbage pass:word stuff":                         "(invalid URL)",
+		"https:///no-host/path?token=T6":                  "(invalid URL)",
+		"https://%zz":                                     "(invalid URL)",
 	} {
 		if got := sourceURLDetail(in); got != want {
 			t.Errorf("sourceURLDetail(%q) = %q, want %q", in, got, want)
@@ -292,6 +296,7 @@ func TestSourceURLDetail(t *testing.T) {
 		"https://git.example.invalid/x.git?access_token=SECRETQ1",
 		"https://git.example.invalid/x.git?a=1&token=SECRETQ2",
 		"https://git.example.invalid/x.git#token=SECRETQ3",
+		"user:SECRETQ4@git.example.invalid:repo.git",
 	} {
 		body, _ := json.Marshal(map[string]string{"name": "tok", "url": u})
 		e.do(t, "root", "POST", "/api/sources/add", string(body))
@@ -302,7 +307,7 @@ func TestSourceURLDetail(t *testing.T) {
 			t.Errorf("audit.jsonl holds %q:\n%s", bad, raw)
 		}
 	}
-	if n := strings.Count(string(raw), `"action":"source.add"`); n != 4 {
-		t.Errorf("source.add entries = %d, want 4:\n%s", n, raw)
+	if n := strings.Count(string(raw), `"action":"source.add"`); n != 5 {
+		t.Errorf("source.add entries = %d, want 5:\n%s", n, raw)
 	}
 }
