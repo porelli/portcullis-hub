@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
@@ -18,6 +19,14 @@ import (
 // runningEngine is the fake engine with grafana's web container running
 // (exec needs one).
 type runningEngine struct{ *fakeEngine }
+
+// Exec exits 3 for a command containing "exit3".
+func (e runningEngine) Exec(ctx context.Context, id string, cmd []string, d time.Duration) (*docker.ExecResult, error) {
+	if strings.Contains(strings.Join(cmd, " "), "exit3") {
+		return &docker.ExecResult{Output: []byte("ok\n"), ExitCode: 3}, nil
+	}
+	return e.fakeEngine.Exec(ctx, id, cmd, d)
+}
 
 func (e runningEngine) ListContainers(ctx context.Context, f docker.Filters) ([]docker.Container, error) {
 	out, err := e.fakeEngine.ListContainers(ctx, f)
@@ -112,8 +121,9 @@ func TestUnauditedMutationsNowAudited(t *testing.T) {
 		{"enable unknown (human)", directory.Human("root"), "POST", "/api/templates/enable", `{"id":"missing"}`, 400, "instance.enable", "missing", ""},
 		{"restart", ai, "POST", "/api/templates/restart/grafana", `{}`, 200, "instance.restart", "grafana", ""},
 		{"restart unknown", ai, "POST", "/api/templates/restart/nosuch", `{}`, 404, "instance.restart", "nosuch", ""},
-		{"exec", ai, "POST", "/api/templates/exec/grafana", `{"service":"web","command":"` + secretCmd + `"}`, 200, "instance.exec", "grafana", "web"},
-		{"exec bad service", ai, "POST", "/api/templates/exec/grafana", `{"service":"db","command":"` + secretCmd + `"}`, 400, "instance.exec", "grafana", "db"},
+		{"exec", ai, "POST", "/api/templates/exec/grafana", `{"service":"web","command":"` + secretCmd + `"}`, 200, "instance.exec", "grafana", "service=web exit=0"},
+		{"exec non-zero exit", ai, "POST", "/api/templates/exec/grafana", `{"service":"web","command":"` + secretCmd + ` exit3"}`, 200, "instance.exec", "grafana", "service=web exit=3"},
+		{"exec bad service", ai, "POST", "/api/templates/exec/grafana", `{"service":"db","command":"` + secretCmd + `"}`, 400, "instance.exec", "grafana", "service=db"},
 		{"env save", ai, "PUT", "/api/templates/env/grafana", `{"MY_VAR":"` + secretVal + `"}`, 200, "app.env", "grafana", "MY_VAR"},
 		{"env save Hub-set", ai, "PUT", "/api/templates/env/grafana", `{"PORTCULLIS_DOMAIN":"` + secretVal + `"}`, 400, "app.env", "grafana", ""},
 		{"drift resolve", ai, "POST", "/api/drift/resolve", `{"id":"grafana","action":"apply"}`, 200, "drift.resolve", "grafana", "apply"},

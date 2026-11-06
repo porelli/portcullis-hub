@@ -682,8 +682,13 @@ func (s *Server) handleTemplateExec(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res, err := s.Hub.Exec(r.Context(), id, req.Service, req.Command)
-	// The service only: the command and its output may hold anything.
-	s.auditOp(r, id, directory.AuditEntry{Action: "instance.exec", Target: id, Detail: clipMessage(req.Service, 64)}, err, http.StatusBadGateway)
+	// The service and the exit code only: the command and its output
+	// may hold anything.
+	detail := "service=" + clipMessage(req.Service, 64)
+	if res != nil {
+		detail += " exit=" + strconv.Itoa(res.ExitCode)
+	}
+	s.auditOp(r, id, directory.AuditEntry{Action: "instance.exec", Target: id, Detail: detail}, err, http.StatusBadGateway)
 	if err != nil {
 		writeErr(w, err, http.StatusBadGateway)
 		return
@@ -787,11 +792,6 @@ func sourceURLDetail(raw string) string {
 	return clipMessage(raw, 300)
 }
 
-// policyDetail is an auth policy as an audit detail ("f1,f2 (op)").
-func policyDetail(p policy.AuthPolicy) string {
-	d := strings.Join(p.Factors, ",")
-	if p.Op != "" {
-		d += " (" + p.Op + ")"
-	}
-	return clipMessage(d, 200)
-}
+// policyDetail is an auth policy as an audit detail ("f1,f2 (op)"), as
+// the instance policy's settings.change shows it.
+func policyDetail(p policy.AuthPolicy) string { return hub.ShowPolicy(p) }

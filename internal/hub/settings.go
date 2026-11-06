@@ -998,6 +998,7 @@ func (h *Hub) saveSettings(t *templates.Template, u SettingsUpdate, parsed *pars
 		h.mu.Unlock()
 		return res, false, err
 	}
+	accBefore := h.accessAuditLocked(id)
 	publicChanged, err := h.applyPublicUpdateLocked(t, u)
 	if err != nil {
 		restoreSecrets()
@@ -1018,6 +1019,7 @@ func (h *Hub) saveSettings(t *templates.Template, u SettingsUpdate, parsed *pars
 	if policyChanged {
 		delete(h.st.LegacyPassword, id)
 	}
+	accChanges := accessChanges(accBefore, h.accessAuditLocked(id))
 	if signInChanged {
 		if h.accessLocked(t).SignIn == SignInNative {
 			log.Printf("settings: WARNING: %s now uses the app's own login only — its routers have no Portcullis sign-in (TLS tier public@file)", id)
@@ -1046,6 +1048,9 @@ func (h *Hub) saveSettings(t *templates.Template, u SettingsUpdate, parsed *pars
 			res.keys = append(res.keys, c.key)
 		}
 	}
+	// The policy and public-exception changes are audited too (G37), but
+	// aren't settings keys (Changed, warnings).
+	res.changes = append(res.changes, accChanges...)
 	// A disabled instance restarts nothing: its effect is the changed
 	// options' own (applies).
 	if enabled {
@@ -1300,6 +1305,20 @@ func (h *Hub) auditSettings(id string, actor directory.Actor, u SettingsUpdate, 
 	}
 	if err != nil {
 		var keys []string
+		if u.Policy != nil || u.Inherit {
+			keys = append(keys, "auth_policy")
+		}
+		if u.PublicAccess != nil || u.PublicAccessDefault {
+			keys = append(keys, "public_access")
+		}
+		if u.PublicMode != nil {
+			keys = append(keys, "public_mode")
+		}
+		if u.PublicTokens != nil {
+			keys = append(keys, "public_tokens")
+			// The refusal may quote a submitted token: never in the audit.
+			err = withSecrets(err, tokenRedactions(*u.PublicTokens))
+		}
 		for k := range u.Ports {
 			keys = append(keys, k)
 		}
@@ -1320,6 +1339,93 @@ func (h *Hub) auditSettings(id string, actor directory.Actor, u SettingsUpdate, 
 			h.auditOp(actor, "settings.change", id+"/"+clip(k, 64), "", err)
 		}
 	}
+}
+
+// accessAudit is an instance's policy and public exceptions as the audit
+// shows them (G37): never a token, only how many.
+type accessAudit struct {
+	policy, access, mode string
+	tokens               []string
+}
+
+// accessAuditLocked reads id's stored policy and public choices. Caller
+// holds mu.
+func (h *Hub) accessAuditLocked(id string) accessAudit {
+	a := accessAudit{policy: "inherited", access: "default", mode: "default"}
+	if p, ok := h.st.AuthPolicies[id]; ok {
+		a.policy = showPolicy(p)
+	}
+	if on, ok := h.st.PublicAccess[id]; ok {
+		a.access = "off"
+		if on {
+			a.access = "on"
+		}
+	}
+	if m, ok := h.st.PublicMode[id]; ok && m != "" {
+		a.mode = m
+	}
+	a.tokens = slices.Sorted(slices.Values(h.st.PublicTokens[id]))
+	return a
+}
+
+// ShowPolicy is an auth policy as the audit shows it ("f1,f2 (op)").
+func ShowPolicy(p policy.AuthPolicy) string { return showPolicy(p) }
+
+func showPolicy(p policy.AuthPolicy) string {
+	d := strings.Join(p.Factors, ",")
+	if d == "" {
+		d = "none"
+	}
+	if p.Op != "" {
+		d += " (" + p.Op + ")"
+	}
+	return clip(d, 200)
+}
+
+// accessChanges: the settings.change entries (scope policy / public)
+// between two accessAudits.
+func accessChanges(a, b accessAudit) []settingChange {
+	var out []settingChange
+	if a.policy != b.policy {
+		out = append(out, settingChange{key: "auth_policy", scope: "policy", before: a.policy, after: b.policy})
+	}
+	if a.access != b.access {
+		out = append(out, settingChange{key: "public_access", scope: "public", before: a.access, after: b.access})
+	}
+	if a.mode != b.mode {
+		out = append(out, settingChange{key: "public_mode", scope: "public", before: a.mode, after: b.mode})
+	}
+	if !slices.Equal(a.tokens, b.tokens) {
+		after := tokenCount(len(b.tokens))
+		if len(a.tokens) == len(b.tokens) {
+			after += " (changed)"
+		}
+		out = append(out, settingChange{key: "public_tokens", scope: "public", before: tokenCount(len(a.tokens)), after: after})
+	}
+	return out
+}
+
+func tokenCount(n int) string {
+	if n == 1 {
+		return "1 token"
+	}
+	return fmt.Sprintf("%d tokens", n)
+}
+
+// tokenRedactions: what a refusal of these public-token inputs may
+// quote (the input, trimmed, and its path segments of 3+ bytes).
+func tokenRedactions(in []string) []string {
+	var out []string
+	for _, v := range in {
+		v = strings.TrimSpace(v)
+		out = append(out, v)
+		for _, seg := range strings.Split(v, "/") {
+			if len(seg) >= 3 {
+				out = append(out, seg)
+			}
+		}
+	}
+	return out
 }
 
 // signInCallbackChange: the callback URIs a sign-in mode change of

@@ -2,10 +2,12 @@ package hub
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/doctor"
+	"github.com/portcullis/hub/internal/policy"
 )
 
 // TestHubAuditCarriesActor (Task 7c): an instance delete by a via-AI
@@ -98,5 +100,91 @@ func TestRevokeLeaverFixCarriesActor(t *testing.T) {
 	}
 	if m, _ := credOf(f.h, smbID, "bob"); m.RevokedBy != "root" {
 		t.Errorf("revoked_by = %q, want the user only", m.RevokedBy)
+	}
+}
+
+// TestAccessChangesAudited (Task 7c fix round 1, G37): a settings save's
+// policy and public-exception changes are settings.change entries with
+// scope policy / public and before -> after, by the actor with via /
+// client; a refused one is refused; public tokens appear as a count,
+// never their values; an unchanged policy writes nothing.
+func TestAccessChangesAudited(t *testing.T) {
+	f := newCloudFixture(t)
+	audit := &fakeAudit{}
+	f.h.SetAudit(audit)
+	saveAs := func(u SettingsUpdate) ([]directory.AuditEntry, error) {
+		t.Helper()
+		n := auditLen(audit)
+		_, err := f.h.SaveSettings("cloud", u, aiActor)
+		f.h.Wait()
+		return entriesSince(audit, n), err
+	}
+	want := func(what string, got []directory.AuditEntry, target, detail, result string) {
+		t.Helper()
+		wantVia(t, what, got, "settings.change")
+		for _, e := range got {
+			if e.Target == target {
+				if e.Detail != detail || e.Result != result {
+					t.Errorf("%s: %s = %q %s, want %q %s", what, target, e.Detail, e.Result, detail, result)
+				}
+				return
+			}
+		}
+		t.Errorf("%s: no entry for %s in %+v", what, target, got)
+	}
+
+	got, err := saveAs(SettingsUpdate{Policy: &policy.AuthPolicy{Factors: []string{"webauthn"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want("policy set", got, "cloud/auth_policy", "scope=policy: inherited -> webauthn", "ok")
+
+	if got, err = saveAs(SettingsUpdate{Policy: &policy.AuthPolicy{Factors: []string{"webauthn"}}}); err != nil || len(got) != 0 {
+		t.Errorf("unchanged policy: %v, entries %+v", err, got)
+	}
+
+	got, err = saveAs(SettingsUpdate{Policy: &policy.AuthPolicy{Factors: []string{"password"}}})
+	if errStatus(err) != 400 {
+		t.Fatalf("password policy = %v, want 400", err)
+	}
+	want("policy refused", got, "cloud/auth_policy", "", "refused")
+
+	got, err = saveAs(SettingsUpdate{Inherit: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want("policy inherit", got, "cloud/auth_policy", "scope=policy: webauthn -> inherited", "ok")
+
+	got, err = saveAs(SettingsUpdate{PublicAccess: boolp(false)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want("public off", got, "cloud/public_access", "scope=public: default -> off", "ok")
+
+	got, err = saveAs(SettingsUpdate{PublicAccess: boolp(true), PublicMode: strp("listed"), PublicTokens: listp("tok-SECRET-1", "tok-SECRET-2")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want("public on", got, "cloud/public_access", "scope=public: off -> on", "ok")
+	want("public tokens", got, "cloud/public_tokens", "scope=public: 0 tokens -> 2 tokens", "ok")
+
+	got, err = saveAs(SettingsUpdate{PublicTokens: listp("tok-SECRET-1", "tok-SECRET-3")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want("public tokens replaced", got, "cloud/public_tokens", "scope=public: 2 tokens -> 2 tokens (changed)", "ok")
+
+	got, err = saveAs(SettingsUpdate{PublicTokens: listp("bad token!")})
+	if errStatus(err) != 400 {
+		t.Fatalf("bad token = %v, want 400", err)
+	}
+	want("public tokens refused", got, "cloud/public_tokens", "", "refused")
+
+	audit.mu.Lock()
+	defer audit.mu.Unlock()
+	for _, e := range audit.entries {
+		if strings.Contains(e.Detail+e.Error, "tok-SECRET") || strings.Contains(e.Detail+e.Error, "bad token") {
+			t.Errorf("a public token in the audit: %+v", e)
+		}
 	}
 }
