@@ -155,8 +155,7 @@ func (h *Hub) buildClaimsLocked(t *templates.Template, m *directory.Membership) 
 	// Never the AI page's ai_client (EnsureAIClient's: exactly the username
 	// mapper; EnsureSettingClaims refuses it, G9/G10).
 	ai := instanceAIClientIDs(t)
-	all := slices.DeleteFunc(slices.Clone(t.NamesFor(t.ID).Clients), func(c string) bool { return ai[c] })
-	plan := claimPlan{clients: map[string][]keycloak.SettingClaim{}, all: all}
+	plan := claimPlan{clients: map[string][]keycloak.SettingClaim{}, all: withoutAIClients(t, t.NamesFor(t.ID).Clients)}
 	opts := claimOptions(t)
 	if len(opts) == 0 {
 		return plan

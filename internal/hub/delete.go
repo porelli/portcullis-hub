@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"slices"
 	"sort"
 	"strings"
 
@@ -117,7 +116,24 @@ func (h *Hub) deleteInstance(id, confirm string, actor directory.Actor, ready fu
 			return res, fmt.Errorf("the backup before the delete failed — nothing was deleted: %w", berr)
 		}
 		res.Backup = entry.Archive
+		if h.testHookDeleteBackedUp != nil {
+			h.testHookDeleteBackedUp(id)
+		}
 		h.mu.Lock()
+		// Again under the write lock that commits deleting (fix round 1):
+		// a litellm provider added while the backup ran would point at a
+		// deleted instance. Refused before any state change; the instance
+		// runs again as it did (the backup is kept).
+		if pointing := h.providersAtInstanceLocked(id); len(pointing) > 0 {
+			h.mu.Unlock()
+			err := statusErr(409, "model provider %s uses instance %s: delete it or point it at another instance in Settings → AI first (the backup %s was kept)", strings.Join(pointing, ", "), id, entry.Archive)
+			if tg.enabled && tg.view != nil {
+				if serr := h.startAgain(tg.view); serr != nil {
+					return res, fmt.Errorf("%w — and starting %s again failed: %v", err, id, serr)
+				}
+			}
+			return res, err
+		}
 		e := h.st.Instances[id]
 		if e.ID == "" {
 			e = state.Instance{ID: id, Template: tg.templateID}
@@ -338,12 +354,7 @@ func (h *Hub) deleteSteps(id string, actor directory.Actor, res *DeleteResult) e
 	dl := h.deliverLock(id)
 	dl.Lock()
 	// The AI page's ai_client carries no setting claims (G10).
-	claimClients := clients
-	if tg.view != nil {
-		ai := instanceAIClientIDs(tg.view)
-		claimClients = slices.DeleteFunc(slices.Clone(clients), func(c string) bool { return ai[c] })
-	}
-	err := h.removeInstanceClaims(ctx, h.idp, id, claimClients, h.instanceClaimAttrs(tg.view, id), res)
+	err := h.removeInstanceClaims(ctx, h.idp, id, withoutAIClients(tg.view, clients), h.instanceClaimAttrs(tg.view, id), res)
 	dl.Unlock()
 	if err != nil {
 		return fmt.Errorf("setting claims: %w", err)

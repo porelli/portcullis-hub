@@ -172,6 +172,15 @@ func (h *Hub) restoredAILocked(t *templates.Template, a *aiArchive, aErr error, 
 			}
 			next.Providers = append(next.Providers, p)
 		}
+		// A copy is a new place people's chats go out from (fix round 1):
+		// say where, with the labels people read.
+		if copy && len(next.Providers) > 0 {
+			var to []string
+			for _, p := range next.Providers {
+				to = append(to, h.st.AI.Providers[h.providerIndexLocked(p)].Label+" ("+p+")")
+			}
+			warnings = append(warnings, fmt.Sprintf("the AI page %s sends what people send on it, and what their apps return to it, to %s (the archive's selection): change it on its AI tab", t.ID, strings.Join(to, ", ")))
+		}
 	}
 	return next, a != nil || len(next.Companions) > 0, warnings
 }

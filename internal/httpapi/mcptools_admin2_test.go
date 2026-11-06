@@ -933,3 +933,36 @@ func TestRedactionKeyFollowsSecretEnvNames(t *testing.T) {
 		t.Errorf("a result holds it: %s", txt)
 	}
 }
+
+// TestAIProvidersClassRendered (Task 23 fix round 1): set_ai_providers is
+// judged by the selection as it renders now. A stored selection a
+// template narrowed (two anthropic providers, kind "one": only claude-a
+// renders) — keeping claude-b is new egress, D; claude-a alone W.
+func TestAIProvidersClassRendered(t *testing.T) {
+	e := newToolEnvWith(t, mcpEnvOpts{seed: func(st *state.AppState) {
+		st.AI.Providers = []state.ModelProvider{
+			{Name: "claude-a", Label: "A", Kind: "anthropic", Credentials: "admin"},
+			{Name: "claude-b", Label: "B", Kind: "anthropic", Credentials: "admin"},
+		}
+		st.AIInstances = map[string]state.AIInstance{"ai-chat": {Providers: []string{"claude-a", "claude-b"}}}
+	}})
+	if cur, ok := e.s.Hub.AIPageSelection("ai-chat"); !ok || !slices.Equal(cur, []string{"claude-a"}) {
+		t.Fatalf("rendered selection = %v %v", cur, ok)
+	}
+	for _, c := range []struct {
+		providers []string
+		confirm   bool
+	}{
+		{[]string{"claude-b"}, true},
+		{[]string{"claude-a"}, false},
+	} {
+		txt, _ := resultText(e.call(t, "/mcp/admin", "root", "2025-11-25", "set_ai_providers", map[string]any{"id": "ai-chat", "providers": c.providers}, nil))
+		m := confirmTextRe.FindStringSubmatch(txt)
+		if got := m != nil; got != c.confirm {
+			t.Errorf("%v: confirmation %v, want %v (%s)", c.providers, got, c.confirm, txt)
+		}
+		if m != nil {
+			e.decide(t, m[1], "", false)
+		}
+	}
+}

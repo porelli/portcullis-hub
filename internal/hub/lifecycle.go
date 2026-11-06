@@ -338,15 +338,7 @@ func (h *Hub) redirectURIs(c templates.KeycloakClient) []string {
 func (h *Hub) clientSpec(t *templates.Template, c templates.KeycloakClient, acr string) keycloak.ClientSpec {
 	bcl := strings.ReplaceAll(c.BackchannelLogoutURL, "{{DOMAIN}}", h.cfg.Domain)
 	// Secret: per-app .env first, then core .env.
-	secret := ""
-	if c.SecretEnv != "" {
-		for _, p := range []string{h.envPath(t.ID), filepath.Join(h.cfg.ProjectDir, ".env")} {
-			if v := readEnvFile(p)[c.SecretEnv]; v != "" {
-				secret = v
-				break
-			}
-		}
-	}
+	secret := h.clientSecret(t, c)
 	hosts := make([]string, 0, len(t.Hosts))
 	for _, host := range t.Hosts {
 		hosts = append(hosts, host)

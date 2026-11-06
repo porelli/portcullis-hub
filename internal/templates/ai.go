@@ -477,7 +477,50 @@ func checkAIVarRefs(m *Manifest, compose []byte) error {
 			}
 		}
 	}
+	// Nor may a service set one (an environment map key, or a list item
+	// NAME / NAME=…; case-insensitive): it would take the Hub's provider
+	// secret's place (G31, Task 23 fix round 1).
+	for _, svc := range sortedMapKeys(mapping(mapping(doc)["services"])) {
+		for _, k := range environmentKeys(mapping(mapping(doc)["services"])[svc]) {
+			if strings.HasPrefix(strings.ToUpper(k), varAIProviderPref) {
+				return fmt.Errorf("compose.yml: service %s sets %s: PORTCULLIS_AI_PROVIDER_* variables are set only by the Hub (on ai.chat.env's service)", svc, k)
+			}
+		}
+	}
 	return nil
+}
+
+// mapping is v as a string-keyed map (nil: not one).
+func mapping(v interface{}) map[string]interface{} {
+	m, _ := v.(map[string]interface{})
+	return m
+}
+
+func sortedMapKeys(m map[string]interface{}) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// environmentKeys are the variable names a compose service's environment
+// sets: its map keys, or each list item's name (before the first =).
+func environmentKeys(svc interface{}) []string {
+	var out []string
+	switch env := mapping(svc)["environment"].(type) {
+	case map[string]interface{}:
+		out = append(out, sortedMapKeys(env)...)
+	case []interface{}:
+		for _, it := range env {
+			if s, ok := it.(string); ok {
+				name, _, _ := strings.Cut(s, "=")
+				out = append(out, strings.TrimSpace(name))
+			}
+		}
+	}
+	return out
 }
 
 // rawRef is a compose interpolation with its full text.

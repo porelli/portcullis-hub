@@ -695,21 +695,23 @@ func aiSupportClass(args json.RawMessage) ToolClass {
 	return ClassDestructive
 }
 
-// aiProvidersClass (Task 23): W only when the new selection drops
-// providers from the AI page's current one and adds none (people's data
-// goes nowhere new); anything else — an added provider, an instance that
-// can't be read, arguments that don't decode — D.
+// aiProvidersClass (Task 23): W only when every provider of the new
+// selection is one the AI page renders now (Hub.AIPageSelection: a stored
+// one a template update stopped rendering — a kind gone, many → one —
+// counts as new; people's data goes nowhere new); anything else — an
+// added provider, an instance that isn't an AI page or can't be read,
+// arguments that don't decode — D.
 func (s *Server) aiProvidersClass(args json.RawMessage) ToolClass {
 	a, err := decode[aiProvidersArgs](args)
 	if err != nil || instanceIDOK(a.ID) != nil {
 		return ClassDestructive
 	}
-	v, err := s.Hub.InstanceAI(a.ID)
-	if err != nil || v.ProviderKinds == nil {
+	cur, ok := s.Hub.AIPageSelection(a.ID)
+	if !ok {
 		return ClassDestructive
 	}
 	for _, p := range a.Providers {
-		if !slices.Contains(v.Providers, p) {
+		if !slices.Contains(cur, p) {
 			return ClassDestructive
 		}
 	}
@@ -720,10 +722,7 @@ func (s *Server) aiProvidersClass(args json.RawMessage) ToolClass {
 // their labels: the data-egress note).
 func (s *Server) aiProvidersConsequences(args json.RawMessage) []string {
 	a, _ := decode[aiProvidersArgs](args)
-	cur := []string{}
-	if v, err := s.Hub.InstanceAI(a.ID); err == nil {
-		cur = v.Providers
-	}
+	cur, _ := s.Hub.AIPageSelection(a.ID)
 	var out []string
 	for _, p := range a.Providers {
 		if slices.Contains(cur, p) {

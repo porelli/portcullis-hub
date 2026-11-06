@@ -237,6 +237,11 @@ func TestChatRules(t *testing.T) {
 		{"ai_client without secret", chat, []string{"    secret_env: CHAT_MCP_SECRET\n", ""}, nil, "secret_env"},
 		{"provider var reference", chat, nil, []string{"OPENID_CLIENT_ID: ${PORTCULLIS_OIDC_CLIENT_ID:-chat}", "KEY: ${PORTCULLIS_AI_PROVIDER_X_KEY}"}, "PORTCULLIS_AI_PROVIDER_"},
 		{"provider var bare", chat, nil, []string{"OPENID_CLIENT_ID: ${PORTCULLIS_OIDC_CLIENT_ID:-chat}", "KEY: $PORTCULLIS_AI_PROVIDER_X_KEY"}, "PORTCULLIS_AI_PROVIDER_"},
+		// Fix round 1: a service may not set one either (map key, list item; any case).
+		{"provider var map key", chat, nil, []string{"OPENID_CLIENT_ID: ${PORTCULLIS_OIDC_CLIENT_ID:-chat}", "OPENID_CLIENT_ID: ${PORTCULLIS_OIDC_CLIENT_ID:-chat}\n      PORTCULLIS_AI_PROVIDER_X_KEY: sk-literal"}, "sets PORTCULLIS_AI_PROVIDER_X_KEY"},
+		{"provider var map key lowercase", chat, nil, []string{"OPENID_CLIENT_ID: ${PORTCULLIS_OIDC_CLIENT_ID:-chat}", "OPENID_CLIENT_ID: ${PORTCULLIS_OIDC_CLIENT_ID:-chat}\n      portcullis_ai_provider_x_key: sk-literal"}, "PORTCULLIS_AI_PROVIDER_"},
+		{"provider var list bare", chat, nil, []string{"      OPENID_CLIENT_ID: ${PORTCULLIS_OIDC_CLIENT_ID:-chat}", "      - OPENID_CLIENT_ID=${PORTCULLIS_OIDC_CLIENT_ID:-chat}\n      - PORTCULLIS_AI_PROVIDER_X_KEY"}, "sets PORTCULLIS_AI_PROVIDER_X_KEY"},
+		{"provider var list assignment", chat, nil, []string{"      OPENID_CLIENT_ID: ${PORTCULLIS_OIDC_CLIENT_ID:-chat}", "      - OPENID_CLIENT_ID=${PORTCULLIS_OIDC_CLIENT_ID:-chat}\n      - Portcullis_AI_Provider_X_KEY=sk-literal"}, "PORTCULLIS_AI_PROVIDER_"},
 		{"ai-providers file", "companion", []string{"hooks:\n", "files:\n  - {name: ai-providers, service: app, mount: /data}\nhooks:\n"}, nil, "ai-providers"},
 	})
 }

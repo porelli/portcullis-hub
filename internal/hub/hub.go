@@ -510,6 +510,9 @@ type Hub struct {
 	// aiOwedDrops: mcp:* scopes whose delete failed (under aiKCMu;
 	// memory): every client pass retries them while still unwanted.
 	aiOwedDrops map[string]bool
+	// testHookDeleteBackedUp, if set, runs in a delete right after its
+	// backup, before the deleting state is committed (Task 23 fix round 1).
+	testHookDeleteBackedUp func(id string)
 	// testHookAIBeforeSave, if set, runs in UpdateInstanceAI right before
 	// its state commit (tests: a racing policy save).
 	testHookAIBeforeSave func()

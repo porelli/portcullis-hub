@@ -1,10 +1,12 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"slices"
@@ -189,6 +191,10 @@ func TestProvidersFile(t *testing.T) {
 // TestProviderSecretsNeverEchoed (Task 23 part): the key is in no data
 // file, override, op record, state, audit, answer or gate file.
 func TestProviderSecretsNeverEchoed(t *testing.T) {
+	var logs bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(prev) })
 	a := chatFixture23(t, nil)
 	a.selectProviders(t, "ai-chat", "ollama-gpu")
 	a.enable(t, "ai-chat")
@@ -214,18 +220,28 @@ func TestProviderSecretsNeverEchoed(t *testing.T) {
 	sources := map[string][]byte{"answers": ans, "tab": vb, "gate file": gate, "state": state, "audit": audit}
 	sources["ai-providers.json"], _ = os.ReadFile(a.h.dataFilePath("ai-chat", templates.AIProvidersFile))
 	sources["override"], _ = os.ReadFile(a.h.overridePath("ai-chat"))
-	_ = filepath.WalkDir(a.h.cfg.DataDir, func(p string, d os.DirEntry, err error) error {
-		if err == nil && !d.IsDir() && strings.Contains(p, string(filepath.Separator)+"ops"+string(filepath.Separator)) {
-			sources[p], _ = os.ReadFile(p)
-		}
-		return nil
-	})
-	_ = filepath.WalkDir(a.h.cfg.AppFilesDir, func(p string, d os.DirEntry, err error) error {
-		if err == nil && !d.IsDir() {
-			sources[p], _ = os.ReadFile(p)
-		}
-		return nil
-	})
+	// Every file the Hub writes (fix round 1): the data directory, the
+	// project's appfiles and env files — but the two places the key
+	// belongs: the store and the AI page's own .env.
+	allowed := map[string]bool{a.h.providerSecretsPath(): true, a.h.envPath("ai-chat"): true}
+	seen := 0
+	for _, dir := range []string{a.h.cfg.DataDir, a.h.cfg.ProjectDir} {
+		_ = filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
+			if err == nil && !d.IsDir() && !allowed[p] {
+				sources[p], _ = os.ReadFile(p)
+				seen++
+			}
+			return nil
+		})
+	}
+	if seen < 10 {
+		t.Errorf("only %d files walked", seen)
+	}
+	if b, _ := os.ReadFile(a.h.providerSecretsPath()); !strings.Contains(string(b), chatMarker) {
+		t.Error("the store doesn't hold the key (the walk would prove nothing)")
+	}
+	a.h.Wait()
+	sources["logs"] = logs.Bytes()
 	for name, b := range sources {
 		if strings.Contains(string(b), chatMarker) {
 			t.Errorf("%s holds the provider secret", name)
@@ -688,6 +704,12 @@ func TestBackupRestoreProviderVars(t *testing.T) {
 	if !slices.ContainsFunc(res.Warnings, func(w string) bool { return strings.Contains(w, "litellm") }) {
 		t.Errorf("warnings = %v", res.Warnings)
 	}
+	// Fix round 1: the copy's egress is named, with the label.
+	if !slices.ContainsFunc(res.Warnings, func(w string) bool {
+		return strings.Contains(w, "the AI page ai-copy sends") && strings.Contains(w, ollamaGPU.Label+" (ollama-gpu)")
+	}) {
+		t.Errorf("no egress warning for the copy: %q", res.Warnings)
+	}
 	if v, _ := a.h.InstanceAI("ai-copy"); !slices.Equal(v.Providers, []string{"ollama-gpu"}) {
 		t.Errorf("copy selection = %v", v.Providers)
 	}
@@ -716,5 +738,57 @@ func TestRestoredSelectionChecked(t *testing.T) {
 	}
 	if len(w) != 3 || !strings.Contains(strings.Join(w, "\n"), "at most one") || !strings.Contains(strings.Join(w, "\n"), "google") || !strings.Contains(strings.Join(w, "\n"), "ghost") {
 		t.Errorf("warnings = %q", w)
+	}
+}
+
+// TestDeleteRefusedWhenProviderAddedDuringBackup (fix round 1): a litellm
+// provider added while the delete's backup runs makes the delete a 409
+// before any state change.
+func TestDeleteRefusedWhenProviderAddedDuringBackup(t *testing.T) {
+	a := chatFixture23(t, nil)
+	if err := a.h.DeleteModelProvider("litellm", root); err == nil {
+		// litellm is selected by ai-research's default: deselect first.
+		t.Fatal("expected the seeded selection to hold litellm")
+	}
+	a.selectProviders(t, "ai-research", "ollama-gpu")
+	a.selectProviders(t, "ai-chat", []string{}...)
+	if err := a.h.DeleteModelProvider("litellm", root); err != nil {
+		t.Fatal(err)
+	}
+	a.h.testHookDeleteBackedUp = func(id string) {
+		if _, err := a.h.AddModelProvider(liteProvider, root); err != nil {
+			t.Errorf("adding during the backup: %v", err)
+		}
+	}
+	_, err := a.h.DeleteInstance("litellm-lab", "litellm-lab", root)
+	a.h.testHookDeleteBackedUp = nil
+	if statusOf(err) != 409 || !strings.Contains(err.Error(), "model provider litellm") {
+		t.Fatalf("delete = %v, want 409 naming the provider", err)
+	}
+	a.h.mu.RLock()
+	e, ok := a.h.st.Instances["litellm-lab"]
+	a.h.mu.RUnlock()
+	if !ok || e.State == state.InstanceDeleting {
+		t.Errorf("state after the refusal = %+v (present %v)", e, ok)
+	}
+	if v := a.h.Template("litellm-lab"); v == nil {
+		t.Error("instance gone")
+	}
+}
+
+// TestTemplateSettingProviderVarRefused (fix round 1): a template whose
+// service sets a PORTCULLIS_AI_PROVIDER_* variable is not loaded.
+func TestTemplateSettingProviderVarRefused(t *testing.T) {
+	a := newInstAIFixture(t, nil, func(extra map[string][2]string) {
+		m, c := readFixture(t, filepath.Join("testdata", "ai", "chatapp"))[0], readFixture(t, filepath.Join("testdata", "ai", "chatapp"))[1]
+		extra["bad-chat"] = [2]string{strings.ReplaceAll(strings.ReplaceAll(m, "AI_CHAT", "BAD_CHAT"), "ai-chat", "bad-chat"), strings.Replace(strings.ReplaceAll(strings.ReplaceAll(c, "ai-chat", "bad-chat"), "AI_CHAT", "BAD_CHAT"),
+			"MCP_CLIENT_SECRET: ${CHAT_MCP_SECRET}", "MCP_CLIENT_SECRET: ${CHAT_MCP_SECRET}\n      portcullis_ai_provider_x_key: sk-literal", 1)}
+		extra["ai-chat"] = readFixture(t, filepath.Join("testdata", "ai", "chatapp"))
+	})
+	if a.h.Template("ai-chat") == nil {
+		t.Fatal("the clean fixture didn't load")
+	}
+	if a.h.Template("bad-chat") != nil {
+		t.Error("a template setting a provider variable was loaded")
 	}
 }

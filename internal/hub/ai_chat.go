@@ -125,6 +125,17 @@ func instanceAIClientIDs(t *templates.Template) map[string]bool {
 	return out
 }
 
+// withoutAIClients is ids without instance view t's ai_client (a copy;
+// t nil: ids as they are). The setting-claim paths use it: the ai_client
+// carries no setting claims (G9/G10).
+func withoutAIClients(t *templates.Template, ids []string) []string {
+	if t == nil {
+		return slices.Clone(ids)
+	}
+	ai := instanceAIClientIDs(t)
+	return slices.DeleteFunc(slices.Clone(ids), func(c string) bool { return ai[c] })
+}
+
 // ── the selection ──────────────────────────────────────
 
 // selectedProvidersLocked are the providers t's stored selection names
@@ -153,6 +164,24 @@ func (h *Hub) selectedProvidersLocked(t *templates.Template) []state.ModelProvid
 		out = append(out, p)
 	}
 	return out
+}
+
+// AIPageSelection is AI page id's provider selection as it renders now
+// (selectedProvidersLocked: what people's data goes to), sorted; ok false
+// when id is unknown or no AI page. The Portcullis MCP's set_ai_providers
+// judges its class by it (fix round 1).
+func (h *Hub) AIPageSelection(id string) ([]string, bool) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	t := h.findLocked(id)
+	if chatOf(t) == nil {
+		return nil, false
+	}
+	out := []string{}
+	for _, p := range h.selectedProvidersLocked(t) {
+		out = append(out, p.Name)
+	}
+	return out, true
 }
 
 // defaultSelectionLocked is §15.12's default: every provider whose kind t
