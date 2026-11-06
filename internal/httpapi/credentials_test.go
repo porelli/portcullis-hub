@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -98,7 +99,7 @@ func newCredEnv(t *testing.T) *credEnv {
 
 	// Set up fake fresh auth
 	fa := &fakeFreshAuth{}
-	ie.s.Hub.SetFreshAuth(fa)
+	ie.s.Hub.SetFreshAuth(hub.ListenerPeople, fa)
 	ie.s.Hub.SetFreshAuthReadyForTest(true) // client is in place
 
 	return &credEnv{instEnv: ie, secrets: secrets, fa: fa}
@@ -471,9 +472,26 @@ func TestCredentialRoutesOnCorrectListener(t *testing.T) {
 		}
 	}
 
-	// Verify peopleAppRoutes list is correct (exactly 5 routes as per contract §5.1)
-	if len(peopleAppRoutes) != 5 {
-		t.Errorf("peopleAppRoutes has %d entries, want exactly 5 per contract §5.1", len(peopleAppRoutes))
+	// The allowlist is exactly nine routes (contract §5.1, G12); seven
+	// are registered until Task 21 adds its two /api/me/ai* routes
+	// (notYetPeopleRoutes; Task 21 empties it and this requires nine).
+	if len(peopleAppRoutes) != 9 {
+		t.Errorf("peopleAppRoutes has %d entries, want exactly 9 per contract §5.1", len(peopleAppRoutes))
+	}
+	registered := map[string]bool{}
+	for _, p := range e.s.peopleMux().patterns {
+		registered[p] = true
+	}
+	n := 0
+	for _, p := range peopleAppRoutes {
+		if registered[p] {
+			n++
+		} else if !slices.Contains(notYetPeopleRoutes, p) {
+			t.Errorf("people listener lacks app route %q", p)
+		}
+	}
+	if n != 9-len(notYetPeopleRoutes) || len(notYetPeopleRoutes) != 2 {
+		t.Errorf("%d of the 9 app routes registered, want 7 until Task 21 (the missing two: %v)", n, notYetPeopleRoutes)
 	}
 
 	// Verify the credential routes are in the list

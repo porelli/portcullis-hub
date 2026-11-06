@@ -111,6 +111,9 @@ func TestFreshAuthFromEnv(t *testing.T) {
 		AuthorizeURL: "https://auth.example.org/realms/portcullis/protocol/openid-connect/auth",
 		RedirectURI:  "https://people.example.org/",
 		WebOrigin:    "https://people.example.org",
+		// The Hub listener's confirmation page (G11): its own verifier.
+		HubRedirectURI: "https://hub.example.org/",
+		HubWebOrigin:   "https://hub.example.org",
 	}
 	if fa != want {
 		t.Errorf("default = %+v\nwant %+v", fa, want)

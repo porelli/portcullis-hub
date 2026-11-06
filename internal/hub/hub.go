@@ -25,6 +25,7 @@ import (
 	"golang.org/x/sync/singleflight"
 
 	"github.com/portcullis/hub/internal/compose"
+	"github.com/portcullis/hub/internal/confirm"
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/keycloak"
@@ -277,8 +278,9 @@ type Hub struct {
 	// people reads LLDAP membership for per-person settings (SetPeople;
 	// nil = not available). Guarded by mu.
 	people People
-	// freshAuth verifies fresh-auth proofs (freshauth.go; nil: refused).
-	freshAuth FreshAuth
+	// freshAuth verifies fresh-auth proofs, per listener (freshauth.go;
+	// none: refused).
+	freshAuth map[string]FreshAuth
 	// freshAuthReady: the last ensure of the fresh-auth Keycloak client
 	// succeeded (runAttrSync); false at start and after any failure —
 	// e.g. an untagged client of that id (*keycloak.ConflictError) — so
@@ -465,6 +467,10 @@ type Hub struct {
 	callerDigests map[string]string
 	credsOnce     sync.Once
 	aiCreds       *aiCredStore
+	// confirmStore: the confirmations (confirm.go; in memory, created on
+	// first use under confirmOnce).
+	confirmOnce  sync.Once
+	confirmStore *confirm.Store
 	// mints: single flight per (resource, user) of MintCredential
 	// (ai_credentials.go, G35).
 	mints singleflight.Group

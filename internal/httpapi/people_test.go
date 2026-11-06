@@ -83,13 +83,27 @@ func (e *peopleEnv) setup(t *testing.T) {
 }
 
 // peopleAppRoutes are the only app routes of the people listener
-// (contract §5.1): caller-only. Later plans append.
+// (contract §5.1, G12): exactly nine, all caller-only — the five My apps
+// and credential routes, the two confirmation routes (Task 14) and Task
+// 21's two AI routes.
 var peopleAppRoutes = []string{
 	"GET /api/me/apps",
 	"PUT /api/me/apps/{instance}/values/{key}",
 	"DELETE /api/me/apps/{instance}/values/{key}",
 	"POST /api/me/apps/{instance}/credentials/{key}",
 	"DELETE /api/me/apps/{instance}/credentials/{key}",
+	"GET /confirm/{id}",
+	"POST /api/me/confirmations/{id}",
+	"GET /api/me/ai",
+	"DELETE /api/me/ai/connections/{client}",
+}
+
+// notYetPeopleRoutes are the peopleAppRoutes Task 21 registers: until it
+// lands the people listener registers the other seven. T21 empties this
+// list, so the test then requires all nine.
+var notYetPeopleRoutes = []string{
+	"GET /api/me/ai",
+	"DELETE /api/me/ai/connections/{client}",
 }
 
 // TestPeopleListenerHasNoAppRoutes: the people mux registers exactly the
@@ -102,6 +116,12 @@ func TestPeopleListenerHasNoAppRoutes(t *testing.T) {
 	want := map[string]bool{"/healthz": true, "/": true, "/static/": true}
 	for _, p := range append(append([]string{}, dir.patterns...), peopleAppRoutes...) {
 		want[p] = true
+	}
+	// Task 21 flips this: its two /api/me/ai* routes aren't registered
+	// yet, so exactly seven of the nine are (and the missing two are
+	// those).
+	for _, p := range notYetPeopleRoutes {
+		delete(want, p)
 	}
 	got := map[string]bool{}
 	for _, p := range e.s.peopleMux().patterns {
@@ -577,7 +597,8 @@ func TestDirectoryAssetsServed(t *testing.T) {
 
 // TestSettingsAssetHubOnly: the settings panel's script is served on the
 // Hub listener only; the people listener serves just its own assets
-// (directory.js, directory.css, myapps.js).
+// (directory.js, directory.css, myapps.js, and confirm.js for the
+// confirmation page).
 func TestSettingsAssetHubOnly(t *testing.T) {
 	e := newPeopleEnv(t)
 	var allow []string
@@ -587,8 +608,8 @@ func TestSettingsAssetHubOnly(t *testing.T) {
 		}
 	}
 	sort.Strings(allow)
-	if strings.Join(allow, ",") != "directory.css,directory.js,myapps.js" {
-		t.Errorf("peopleStatic = %v, want exactly directory.css, directory.js, myapps.js", allow)
+	if strings.Join(allow, ",") != "confirm.js,directory.css,directory.js,myapps.js" {
+		t.Errorf("peopleStatic = %v, want exactly confirm.js, directory.css, directory.js, myapps.js", allow)
 	}
 	if r, b := doAs(t, e.hub, "root", "GET", "/static/settings.js", ""); r.StatusCode != 200 || !strings.HasPrefix(r.Header.Get("Content-Type"), "text/javascript") || !strings.Contains(b, "PortcullisSettings") {
 		t.Errorf("hub settings.js = %d %q", r.StatusCode, r.Header.Get("Content-Type"))

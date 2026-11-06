@@ -64,8 +64,9 @@ func decodeLarge(w http.ResponseWriter, r *http.Request, limit int64, v interfac
 
 // registerPeopleApps registers the caller-only app routes of the people
 // listener (never the Hub listener): the caller is X-Forwarded-User,
-// lowercased; nothing about anyone else is answered. Contract §5.1: exactly
-// five routes.
+// lowercased; nothing about anyone else is answered. Contract §5.1 /
+// G12: exactly nine routes — these seven, and Task 21's GET /api/me/ai
+// and DELETE /api/me/ai/connections/{client}.
 func (s *Server) registerPeopleApps(mux routeMux) {
 	mux.HandleFunc("GET /api/me/apps", s.handleMyApps)
 	// The caller's own person-entered values (Task 15A, spec call 32).
@@ -74,6 +75,9 @@ func (s *Server) registerPeopleApps(mux routeMux) {
 	// The caller's own file-sharing credentials (Task 12, plan 3).
 	mux.HandleFunc("POST /api/me/apps/{instance}/credentials/{key}", s.handleCreateCredential)
 	mux.HandleFunc("DELETE /api/me/apps/{instance}/credentials/{key}", s.handleRevokeOwnCredential)
+	// The caller's own confirmations (plan 4 Task 14, §15.6): also on the
+	// Hub listener, each answering only for its own.
+	s.registerConfirm(mux)
 }
 
 // entryBody is a person-entered value's body: {"value": <json>}.

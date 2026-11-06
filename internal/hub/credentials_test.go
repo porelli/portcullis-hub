@@ -60,7 +60,7 @@ func credSvcFixture(t *testing.T) *credSvc {
 	}
 	settle(f)
 	fa := &fakeFreshAuth{}
-	f.h.SetFreshAuth(fa)
+	f.h.SetFreshAuth(ListenerPeople, fa)
 	f.h.freshAuthReady.Store(true)
 	var n atomic.Int32
 	f.h.credentialCheck = func() { n.Add(1) }
@@ -240,7 +240,7 @@ func TestCreateUnavailable503(t *testing.T) {
 	}
 
 	f := credFixtureWith(t, func(root string, cfg *Config) { cfg.SecretsDir = filepath.Join(root, "missing") })
-	f.h.SetFreshAuth(c.fa)
+	f.h.SetFreshAuth(ListenerPeople, c.fa)
 	f.h.freshAuthReady.Store(true)
 	if err := f.h.Enable(smbB); err == nil {
 		t.Fatal("enabled without a secrets volume")

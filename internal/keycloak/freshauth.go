@@ -54,21 +54,32 @@ func freshAuthMapper() gocloak.ProtocolMapperRepresentation {
 	}
 }
 
-// checkFreshAuthURIs: redirectURI is https://<host>/ exactly and webOrigin
-// https://<the same host>.
-func checkFreshAuthURIs(redirectURI, webOrigin string) error {
-	u, err := url.Parse(redirectURI)
-	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.Path != "/" || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" {
-		return fmt.Errorf("fresh-auth client: redirect URI %q must be https://<host>/", redirectURI)
+// checkFreshAuthURIs: redirectURIs[i] is https://<host>/ exactly and
+// webOrigins[i] https://<the same host>; at least one pair, the same
+// number of each, no host twice (contract §8: the people and hub hosts).
+func checkFreshAuthURIs(redirectURIs, webOrigins []string) error {
+	if len(redirectURIs) == 0 || len(redirectURIs) != len(webOrigins) {
+		return fmt.Errorf("fresh-auth client: want one web origin per redirect URI, got %d and %d", len(redirectURIs), len(webOrigins))
 	}
-	if webOrigin != "https://"+u.Host {
-		return fmt.Errorf("fresh-auth client: web origin %q must be https://%s", webOrigin, u.Host)
+	seen := map[string]bool{}
+	for i, redirectURI := range redirectURIs {
+		u, err := url.Parse(redirectURI)
+		if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.Path != "/" || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" {
+			return fmt.Errorf("fresh-auth client: redirect URI %q must be https://<host>/", redirectURI)
+		}
+		if webOrigins[i] != "https://"+u.Host {
+			return fmt.Errorf("fresh-auth client: web origin %q must be https://%s", webOrigins[i], u.Host)
+		}
+		if seen[u.Host] {
+			return fmt.Errorf("fresh-auth client: host %s listed twice", u.Host)
+		}
+		seen[u.Host] = true
 	}
 	return nil
 }
 
 // withFreshAuthSettings sets every asserted setting on rep.
-func withFreshAuthSettings(rep *gocloak.Client, redirectURI, webOrigin string) {
+func withFreshAuthSettings(rep *gocloak.Client, redirectURIs, webOrigins []string) {
 	rep.Name = gocloak.StringP("Portcullis fresh sign-in")
 	rep.Enabled = gocloak.BoolP(true)
 	rep.Protocol = gocloak.StringP(oidcProtocol)
@@ -82,8 +93,8 @@ func withFreshAuthSettings(rep *gocloak.Client, redirectURI, webOrigin string) {
 	rep.AuthorizationServicesEnabled = gocloak.BoolP(false)
 	rep.FullScopeAllowed = gocloak.BoolP(false)
 	rep.Secret = nil
-	rep.RedirectURIs = []string{redirectURI}
-	rep.WebOrigins = []string{webOrigin}
+	rep.RedirectURIs = append([]string{}, redirectURIs...)
+	rep.WebOrigins = append([]string{}, webOrigins...)
 	rep.RootURL, rep.BaseURL, rep.AdminURL = nil, nil, nil
 	if rep.Attributes == nil {
 		rep.Attributes = map[string]string{}
@@ -98,14 +109,16 @@ func withFreshAuthSettings(rep *gocloak.Client, redirectURI, webOrigin string) {
 // freshauth.ClientID (contract §8): owner-tagged; public, standard flow
 // only, PKCE S256; no direct grants, implicit flow, service accounts,
 // device or CIBA grant, token exchange or refresh tokens; redirect URIs
-// exactly [redirectURI], web origins exactly [webOrigin]; default scopes
+// exactly redirectURIs, web origins exactly webOrigins (the Hub passes
+// [https://people.<d>/, https://hub.<d>/] and their origins: one
+// verifier per listener, contract §8 / G11); default scopes
 // exactly FreshAuthScopes, no optional scopes; exactly one protocol mapper
 // (FreshAuthUsernameMapper); no flow overrides. An existing client of that
 // id without the tag (or tagged by anyone else) is a *ConflictError and
 // left alone: fresh auth then fails closed. A realm without one of the
 // scopes is an error (without acr there is no amr: every proof refused).
-func (c *Client) EnsureFreshAuthClient(ctx context.Context, redirectURI, webOrigin string) error {
-	if err := checkFreshAuthURIs(redirectURI, webOrigin); err != nil {
+func (c *Client) EnsureFreshAuthClient(ctx context.Context, redirectURIs, webOrigins []string) error {
+	if err := checkFreshAuthURIs(redirectURIs, webOrigins); err != nil {
 		return err
 	}
 	tok, err := c.token(ctx)
@@ -118,7 +131,7 @@ func (c *Client) EnsureFreshAuthClient(ctx context.Context, redirectURI, webOrig
 	if errors.Is(err, ErrClientNotFound) {
 		rep := gocloak.Client{ClientID: gocloak.StringP(id), DefaultClientScopes: append([]string{}, FreshAuthScopes...),
 			ProtocolMappers: []gocloak.ProtocolMapperRepresentation{freshAuthMapper()}}
-		withFreshAuthSettings(&rep, redirectURI, webOrigin)
+		withFreshAuthSettings(&rep, redirectURIs, webOrigins)
 		rep.AuthenticationFlowBindingOverrides = nil
 		_, err = g.CreateClient(ctx, tok, Realm, rep)
 		if err != nil && statusCode(err) != http.StatusConflict {
@@ -137,7 +150,7 @@ func (c *Client) EnsureFreshAuthClient(ctx context.Context, redirectURI, webOrig
 	if owner := existing.Attributes[OwnerAttr]; owner != id {
 		return &ConflictError{ClientID: id, TemplateID: id, Owner: owner}
 	}
-	withFreshAuthSettings(existing, redirectURI, webOrigin)
+	withFreshAuthSettings(existing, redirectURIs, webOrigins)
 	existing.ProtocolMappers = nil // the sub-resource below does those
 	if err := c.putClient(ctx, tok, existing); err != nil {
 		return err

@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Confirm an AI action</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #e2e8f0; line-height: 1.6; }
+  .container { max-width: 760px; margin: 0 auto; padding: 2rem; }
+  h1 { font-size: 1.5rem; color: #f1f5f9; margin-bottom: 0.25rem; }
+  h1 span { color: #3b82f6; }
+  .lead { color: #94a3b8; margin-bottom: 1.5rem; }
+  .card { background: #1e293b; border: 1px solid #334155; border-radius: 0.75rem; padding: 1.25rem 1.5rem; margin-bottom: 1rem; }
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: 0.35rem 1rem; }
+  dt { color: #94a3b8; }
+  dd { color: #f1f5f9; word-break: break-word; }
+  code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.875rem; }
+  h2 { font-size: 1rem; color: #f1f5f9; margin-bottom: 0.5rem; }
+  ul { padding-left: 1.25rem; }
+  pre { background: #0f172a; border: 1px solid #334155; border-radius: 0.5rem; padding: 0.75rem; white-space: pre-wrap; word-break: break-all; max-height: 24rem; overflow: auto; }
+  label { display: block; margin-bottom: 0.4rem; }
+  input[type=text] { width: 100%; padding: 0.5rem 0.75rem; border-radius: 0.5rem; border: 1px solid #475569; background: #0f172a; color: #f1f5f9; font-size: 1rem; }
+  .actions { display: flex; gap: 0.75rem; margin-top: 1rem; flex-wrap: wrap; }
+  button { padding: 0.55rem 1.1rem; border-radius: 0.5rem; border: 1px solid transparent; font-size: 0.95rem; cursor: pointer; }
+  button.primary { background: #dc2626; color: #fff; }
+  button.secondary { background: transparent; color: #e2e8f0; border-color: #475569; }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
+  .status { margin-top: 1rem; min-height: 1.5rem; }
+  .status.warn { color: #fca5a5; }
+  .status.ok { color: #86efac; }
+  .state { font-size: 1.05rem; }
+</style>
+</head>
+<body>
+<!-- The confirmation page (contract §15.6). Everything below is the Hub's
+     rendering of the stored request, escaped by html/template; confirm.js
+     reads only the data-* attributes and writes only textContent. -->
+<div class="container" id="confirm"
+     data-id="{{.ID}}" data-state="{{.State}}" data-typed="{{.Typed}}"
+     data-authorize-url="{{.FA.AuthorizeURL}}" data-client-id="{{.FA.ClientID}}" data-redirect-uri="{{.FA.RedirectURI}}">
+  <h1><span>&#9906;</span> Confirm an AI action</h1>
+  <p class="lead">An AI client asked to do this as you. Nothing happens unless you approve it here.</p>
+
+  <div class="card">
+    <dl>
+      <dt>Action</dt><dd><code>{{.Tool}}</code></dd>
+      <dt>Target</dt><dd>{{.Target}}</dd>
+      <dt>Requested by</dt><dd><code>{{.Client}}</code> at <time datetime="{{.CreatedAt}}">{{.CreatedAt}}</time></dd>
+      <dt>Valid until</dt><dd><time datetime="{{.ExpiresAt}}">{{.ExpiresAt}}</time></dd>
+      <dt>Resource</dt><dd><code>{{.Resource}}</code></dd>
+    </dl>
+  </div>
+
+  {{if .Consequences}}
+  <div class="card">
+    <h2>What happens</h2>
+    <ul>{{range .Consequences}}<li>{{.}}</li>{{end}}</ul>
+  </div>
+  {{end}}
+
+  <div class="card">
+    <h2>Arguments</h2>
+    <pre id="cf-args">{{.Arguments}}</pre>
+  </div>
+
+  <div class="card" id="cf-decide">
+  {{if .Pending}}
+    <label for="cf-typed">Type <strong>{{.Typed}}</strong> to confirm, then approve with your passkey.</label>
+    <input type="text" id="cf-typed" autocomplete="off" spellcheck="false">
+    <div class="actions">
+      <button type="button" class="primary" id="cf-approve" disabled>Approve with passkey</button>
+      <button type="button" class="secondary" id="cf-decline">Decline</button>
+    </div>
+  {{else}}
+    <p class="state" id="cf-state-text">This confirmation is {{.State}}. There is nothing to do here.</p>
+  {{end}}
+    <div class="status" id="cf-status" role="status"></div>
+  </div>
+</div>
+<script src="/static/confirm.js"></script>
+</body>
+</html>

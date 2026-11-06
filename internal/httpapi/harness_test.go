@@ -9,8 +9,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/portcullis/hub/internal/confirm"
 	"html"
 	"io"
 	"maps"
@@ -186,6 +188,7 @@ func TestHarness(t *testing.T) {
 	seedEntries(t, e)
 	seedFolders(t, h, disk)
 	fa := seedFileSharing(t, h, paddr)
+	hfa := seedConfirmations(t, h, addr, paddr)
 
 	d, err := time.ParseDuration(os.Getenv("HUB_HARNESS_FOR"))
 	if err != nil {
@@ -202,6 +205,7 @@ func TestHarness(t *testing.T) {
 		fmt.Fprintln(w, "hook apply now exits 1")
 	})
 	mux.HandleFunc("GET /harness/evil", harnessEvilPage)
+	mux.HandleFunc("GET /harness/authorize", hfa.authorizePage)
 	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		r.Header.Set(ProxySecretHeader, testSecret)
 		r.Header.Set("X-Forwarded-User", "root")
@@ -793,7 +797,7 @@ func harnessSMBFixture(t *testing.T) [2]string {
 func seedFileSharing(t *testing.T, h *hub.Hub, paddr string) *harnessFreshAuth {
 	t.Helper()
 	fa := &harnessFreshAuth{base: "http://" + paddr, codes: map[string]harnessCode{}}
-	h.SetFreshAuth(fa)
+	h.SetFreshAuth(hub.ListenerPeople, fa)
 	h.SetFreshAuthReadyForTest(true)
 	raw, _ := json.Marshal("nas.home.arpa")
 	if _, err := h.SaveSettings("smbfixture", hub.SettingsUpdate{Values: map[string]json.RawMessage{"connect_address": raw}}, directory.Human("root")); err != nil {
@@ -817,6 +821,52 @@ func seedFileSharing(t *testing.T, h *hub.Hub, paddr string) *harnessFreshAuth {
 	return fa
 }
 
+// seedConfirmations (plan 4 Task 14) wires the Hub listener's fake fresh
+// auth (its own /harness/authorize, signing in root) and seeds four
+// pending confirmations: two companion-style ones for the people user
+// (an argument carrying markup; typed check "AI App") and two admin ones
+// for root on the Hub listener (typed check "grafana-team-a"). Their
+// local URLs are logged.
+func seedConfirmations(t *testing.T, h *hub.Hub, addr, paddr string) *harnessFreshAuth {
+	t.Helper()
+	hfa := &harnessFreshAuth{base: "http://" + addr, as: "root", codes: map[string]harnessCode{}}
+	h.SetFreshAuth(hub.ListenerHub, hfa)
+	puser := os.Getenv("HUB_HARNESS_PEOPLE_USER")
+	if puser == "" {
+		puser = "alice"
+	}
+	digest := func(s string) string { sum := sha256.Sum256([]byte(s)); return hex.EncodeToString(sum[:]) }
+	for i, c := range []struct {
+		user, listener, tool, args, typed, label, base string
+		cons                                           []string
+	}{
+		{puser, hub.ListenerPeople, "delete_repo", `{"name":"<script>alert('xss-confirm')</script>","owner":"alice"}`, "AI App", "Tokens on AI App (aiapp.example.org)", paddr,
+			[]string{"Runs delete_repo once on AI App (aiapp.example.org) as you, with exactly the arguments below.", "AI App asks you to confirm every call of delete_repo."}},
+		{puser, hub.ListenerPeople, "delete_branch", `{"branch":"feature/x","repo":"site"}`, "AI App", "Tokens on AI App (aiapp.example.org)", paddr,
+			[]string{"Runs delete_branch once on AI App (aiapp.example.org) as you, with exactly the arguments below."}},
+		{"root", hub.ListenerHub, "delete_instance", `{"id":"grafana-team-a"}`, "grafana-team-a", "instance grafana-team-a", addr,
+			[]string{"Takes a backup, then permanently removes its containers, volumes, Keycloak client and groups users_grafana-team-a, admin_grafana-team-a"}},
+		{"root", hub.ListenerHub, "restore_instance", `{"backup":"2026-11-06T10:00:00Z","id":"grafana-team-a"}`, "grafana-team-a", "instance grafana-team-a", addr,
+			[]string{"Stops grafana-team-a and replaces its data with the backup's."}},
+	} {
+		res := "https://people.example.org/mcp"
+		if c.listener == hub.ListenerHub {
+			res = "https://hub.example.org/mcp"
+		}
+		if c.listener == hub.ListenerPeople {
+			res = "https://aiapp.example.org/mcp"
+		}
+		cf, err := h.CreateConfirmation(directory.Actor{User: c.user, Via: directory.ViaAI, Client: "portcullis-ai-claude"}, confirm.Request{
+			User: c.user, Client: "portcullis-ai-claude", Resource: res, Tool: c.tool, ArgsSHA256: digest(c.args), ArgsPreview: c.args,
+			Listener: c.listener, Typed: c.typed, Label: c.label, Consequences: c.cons})
+		if err != nil {
+			t.Fatalf("seeding confirmation %d: %v", i, err)
+		}
+		t.Logf("confirmation %d (%s, %s): http://%s/confirm/%s", i, c.user, c.tool, c.base, cf.ID)
+	}
+	return hfa
+}
+
 // harnessCode is one code the fake sign-in page handed out.
 type harnessCode struct{ challenge, nonce, user string }
 
@@ -825,7 +875,10 @@ type harnessCode struct{ challenge, nonce, user string }
 // accepts a code that page issued, once, when the posted verifier's S256
 // is the code's challenge and the nonce is the one the page was given.
 type harnessFreshAuth struct {
-	base  string // the people listener, http://host:port
+	base string // the listener, http://host:port
+	// as: the user the fake page signs in (""= the people listener's:
+	// the harness_user cookie, HUB_HARNESS_PEOPLE_USER, else alice).
+	as    string
 	mu    sync.Mutex
 	codes map[string]harnessCode
 	n     int
@@ -892,6 +945,9 @@ func (f *harnessFreshAuth) authorizePage(w http.ResponseWriter, r *http.Request)
 	}
 	if u := os.Getenv("HUB_HARNESS_PEOPLE_USER"); u != "" && user == "alice" {
 		user = u
+	}
+	if f.as != "" {
+		user = f.as
 	}
 	f.mu.Lock()
 	f.n++

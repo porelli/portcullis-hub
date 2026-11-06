@@ -291,8 +291,8 @@ func TestMCPListenerSecret(t *testing.T) {
 		method, path string
 		want         int
 	}{
-		{"POST", "/internal/confirmations", 501},
-		{"POST", "/internal/confirmations/consume", 501},
+		{"POST", "/internal/confirmations", 400},
+		{"POST", "/internal/confirmations/consume", 400},
 		{"GET", "/internal/credentials", 404},
 		{"PUT", "/internal/credentials", 404},
 		{"GET", "/internal/confirmations", 404},

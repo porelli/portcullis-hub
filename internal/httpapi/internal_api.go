@@ -19,12 +19,12 @@ import (
 // internalBodyMax bounds an internal API body.
 const internalBodyMax = 64 << 10
 
-// registerInternal adds the /internal routes. The confirmation routes are
-// Task 14's (companion confirmations, §15.6): 501 until then.
+// registerInternal adds the /internal routes (companion credentials and
+// confirmations, §15.6: confirm.go).
 func (s *Server) registerInternal(mux routeMux) {
 	mux.HandleFunc("POST /internal/credentials", s.handleInternalCredentials)
-	mux.HandleFunc("POST /internal/confirmations", notYet("companion confirmations (Task 14)"))
-	mux.HandleFunc("POST /internal/confirmations/consume", notYet("consuming companion confirmations (Task 14)"))
+	mux.HandleFunc("POST /internal/confirmations", s.handleInternalConfirmCreate)
+	mux.HandleFunc("POST /internal/confirmations/consume", s.handleInternalConfirmConsume)
 }
 
 // decodeInternal decodes r's body strictly into v; false = answered (400

@@ -383,6 +383,7 @@ func (h *Hub) RunReconciler(ctx context.Context) {
 		go h.watchEvents(ctx)
 	}
 	go h.runAIReconcile(ctx)
+	go h.runConfirmSweeper(ctx)
 	h.Reconcile(ctx)
 	tick := time.NewTicker(h.cfg.ReconcileInterval)
 	defer tick.Stop()

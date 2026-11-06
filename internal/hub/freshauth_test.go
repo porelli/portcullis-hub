@@ -45,7 +45,7 @@ func TestCheckFreshAuth(t *testing.T) {
 		t.Error("Info without a verifier")
 	}
 	fa := &fakeFreshAuth{}
-	f.h.SetFreshAuth(fa)
+	f.h.SetFreshAuth(ListenerPeople, fa)
 	f.h.freshAuthReady.Store(true) // the client is in place
 	if info := f.h.FreshAuthInfo(); info == nil || info.ClientID != freshauth.ClientID {
 		t.Errorf("FreshAuthInfo = %+v", info)
@@ -78,7 +78,7 @@ func TestFreshAuthRefusalsCountTowardLimit(t *testing.T) {
 	f, _, _, _ := entryFixture(t)
 	now := time.Date(2026, 11, 4, 10, 0, 0, 0, time.UTC)
 	f.h.entryNow = func() time.Time { return now }
-	f.h.SetFreshAuth(&fakeFreshAuth{err: &freshauth.Error{Reason: "stale"}})
+	f.h.SetFreshAuth(ListenerPeople, &fakeFreshAuth{err: &freshauth.Error{Reason: "stale"}})
 	f.h.freshAuthReady.Store(true)
 	for i := range entryRefusalLimit {
 		if !f.h.entryLimit.reserve("alice", f.h.entryClock()) {
@@ -125,7 +125,7 @@ func TestRunDirectorySyncEnsuresFreshAuthClient(t *testing.T) {
 // conflicting (untagged or foreign) client must fail closed.
 func TestFreshAuthRefusedUntilClientInPlace(t *testing.T) {
 	f := newFixture(t)
-	f.h.SetFreshAuth(&fakeFreshAuth{}) // accepts everything
+	f.h.SetFreshAuth(ListenerPeople, &fakeFreshAuth{}) // accepts everything
 	var ensureErr atomic.Value
 	ensureErr.Store(errBox{&keycloak.ConflictError{ClientID: freshauth.ClientID}})
 	var ensures atomic.Int32

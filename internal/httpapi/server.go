@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	"github.com/portcullis/hub/internal/directory"
@@ -35,6 +36,10 @@ type Server struct {
 	Web       fs.FS // contains index.html
 
 	index *template.Template
+	// confirmPage: confirm.html, parsed on first use (confirm.go).
+	confirmOnce sync.Once
+	confirmPage *template.Template
+	confirmErr  error
 }
 
 // Handler returns the full handler chain: proxy secret → CSRF → routes.
@@ -44,7 +49,9 @@ func (s *Server) Handler() (http.Handler, error) {
 		return nil, err
 	}
 	s.index = idx
-	return ProxySecret(s.Secret, CSRF(s.hubMux().ServeMux)), nil
+	// No-referrer on every answer (G11): the confirmation page's popup
+	// lands on https://hub.<d>/?code=…&state=… too.
+	return noReferrer(ProxySecret(s.Secret, CSRF(s.hubMux().ServeMux))), nil
 }
 
 // hubMux is the Hub listener's routes, recorded
@@ -83,6 +90,9 @@ func (s *Server) hubMux() *recordingMux {
 	s.registerFolders(mux)
 	s.registerDoctor(mux)
 	s.registerAI(mux)
+	// Confirmations of admin tools (contract §15.6, G12): the same two
+	// routes as the people listener's, for this listener's confirmations.
+	s.registerConfirm(mux)
 	return mux
 }
 
@@ -98,9 +108,10 @@ func (s *Server) PeopleHandler() (http.Handler, error) {
 	return noReferrer(ProxySecret(s.Secret, CSRF(markPeople(mux.ServeMux)))), nil
 }
 
-// noReferrer sets Referrer-Policy: no-referrer on every people-listener
-// answer (C-M6): the fresh-auth popup's callback (?code=…&state=…) never
-// reaches a Referer header or another host's access log.
+// noReferrer sets Referrer-Policy: no-referrer on every answer of the
+// people and Hub listeners (C-M6, G11): the fresh-auth popup's callback
+// (?code=…&state=…) never reaches a Referer header or another host's
+// access log.
 func noReferrer(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Referrer-Policy", "no-referrer")
@@ -283,9 +294,10 @@ func (s *Server) handlePeoplePage(w http.ResponseWriter, r *http.Request) {
 	w.Write(data)
 }
 
-// peopleStatic are the assets people.html loads: the people listener
-// serves these only (never the Hub's index.html or settings.js).
-var peopleStatic = map[string]bool{"directory.js": true, "directory.css": true, "myapps.js": true}
+// peopleStatic are the assets people.html and the confirmation page
+// load: the people listener serves these only (never the Hub's
+// index.html or settings.js).
+var peopleStatic = map[string]bool{"directory.js": true, "directory.css": true, "myapps.js": true, "confirm.js": true}
 
 // handlePeopleStatic serves only peopleStatic on the people listener.
 func (s *Server) handlePeopleStatic(w http.ResponseWriter, r *http.Request) {
