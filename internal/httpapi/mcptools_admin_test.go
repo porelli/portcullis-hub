@@ -426,12 +426,12 @@ func TestToolClassPerCall(t *testing.T) {
 		{"set_public_access", map[string]any{"id": "cloud", "access": "off"}, false},
 		{"set_public_access", map[string]any{"id": "cloud", "access": "on"}, true},
 		// Security review: local networks within the current ones (the
-		// defaults include 10/8) or the defaults → W, wider → D.
+		// defaults include 10/8), or the defaults while they are current
+		// → W; wider → D.
+		{"set_local_networks", map[string]any{"use_defaults": true}, false},
 		{"set_local_networks", map[string]any{"networks": []string{"10.1.0.0/16"}}, false},
 		{"set_local_networks", map[string]any{"networks": []string{}}, false},
-		{"set_local_networks", map[string]any{"use_defaults": true}, false},
-		{"set_local_networks", map[string]any{"networks": []string{"10.1.0.0/16", "203.0.113.0/24"}}, true},
-		{"set_local_networks", map[string]any{"networks": []string{"0.0.0.0/1"}}, true},
+
 		// save_settings with ports → D, settings only → W (the hash
 		// mismatch answers after the class decided).
 		{"save_settings", map[string]any{"id": "secretapp", "values": map[string]any{"api_url": "https://a.example.org"}, "plan_hash": "x"}, false},
@@ -441,6 +441,26 @@ func TestToolClassPerCall(t *testing.T) {
 		txt, _ := resultText(res)
 		if got := confirmTextRe.MatchString(txt); got != c.confirm {
 			t.Errorf("%s %v: confirmation %v, want %v (%s)", c.tool, c.args, got, c.confirm, txt)
+		}
+	}
+	// Current narrower than the defaults: going back to them is a
+	// widening (D); within the narrowed list still W.
+	if err := e.s.Hub.SetLocalNetworks([]string{"10.1.0.0/16"}, directory.Human("root")); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		args    map[string]any
+		confirm bool
+	}{
+		{map[string]any{"use_defaults": true}, true},
+		{map[string]any{"networks": []string{"10.0.0.0/8"}}, true},
+		{map[string]any{"networks": []string{"10.1.2.0/24"}}, false},
+		{map[string]any{"networks": []string{"10.1.0.0/16", "203.0.113.0/24"}}, true},
+		{map[string]any{"networks": []string{"0.0.0.0/1"}}, true},
+	} {
+		txt, _ := resultText(e.call(t, "/mcp/admin", "root", "2025-11-25", "set_local_networks", c.args, nil))
+		if got := confirmTextRe.MatchString(txt); got != c.confirm {
+			t.Errorf("narrowed: set_local_networks %v: confirmation %v, want %v (%s)", c.args, got, c.confirm, txt)
 		}
 	}
 	code, a := e.rpc(t, rpcCall{path: "/mcp/admin", user: "root", version: "2025-11-25", method: "tools/list", params: map[string]any{}})

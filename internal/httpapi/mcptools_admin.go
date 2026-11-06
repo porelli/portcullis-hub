@@ -688,24 +688,33 @@ func settingsConsequences(args json.RawMessage) []string {
 }
 
 // localNetsClass is set_local_networks' class (security review of T17a):
-// W for use_defaults or a list within the current one (every new prefix
-// inside a current prefix of its family); anything wider, or a list that
-// doesn't parse, D.
+// W only for a list within the current one (every new prefix inside a
+// current prefix of its family) — use_defaults judged as the default
+// list (DefaultLocalNetworks); anything wider, or a list that doesn't
+// parse, D.
 func (s *Server) localNetsClass(args json.RawMessage) ToolClass {
 	a, err := decode[localNetsArgs](args)
 	if err != nil {
 		return ClassDestructive
 	}
-	if a.UseDefaults && len(a.Networks) == 0 {
-		return ClassWrite
+	list := a.Networks
+	switch {
+	case a.UseDefaults && len(a.Networks) > 0:
+		return ClassDestructive // refused anyway
+	case a.UseDefaults:
+		// Back to the defaults widens a narrower list: judged like one.
+		list = hub.DefaultLocalNetworks
 	}
-	cur := s.Hub.LocalNetworks()
-	for _, n := range a.Networks {
+	var next []netip.Prefix
+	for _, n := range list {
 		p, err := netip.ParsePrefix(strings.TrimSpace(n))
 		if err != nil {
 			return ClassDestructive
 		}
-		p = p.Masked()
+		next = append(next, p.Masked())
+	}
+	cur := s.Hub.LocalNetworks()
+	for _, p := range next {
 		if !slices.ContainsFunc(cur, func(c netip.Prefix) bool {
 			return c.Addr().Is4() == p.Addr().Is4() && c.Bits() <= p.Bits() && c.Contains(p.Addr())
 		}) {
