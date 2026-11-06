@@ -1365,7 +1365,14 @@
       return [...out];
     }
 
-    async function loadAISettings() {
+    // The page's load in flight (the Settings tab's click and the deep
+    // link share it).
+    let aiLoading = null;
+    function loadAISettings() {
+      aiLoading = loadAISettingsNow().finally(() => { aiLoading = null; });
+      return aiLoading;
+    }
+    async function loadAISettingsNow() {
       const root = document.getElementById('ai-root');
       if (!root) return;
       let s, p;
@@ -1408,10 +1415,10 @@
       h += '<div class="policy-section"><div class="policy-title">Connection length</div>' +
         '<div class="form-group"><label for="ai-idle">Unused for at most (days, 1–30)</label><input type="number" id="ai-idle" name="offline_idle_days" min="1" max="30" value="' + escapeHtml(s.offline_idle_days) + '"></div>' +
         '<div class="form-group"><label for="ai-max">At most (days, 1–90)</label><input type="number" id="ai-max" name="offline_max_days" min="1" max="90" value="' + escapeHtml(s.offline_max_days) + '"></div>' +
-        aiNote('After that the person signs in again in their AI assistant. Access tokens last 5 minutes; refresh tokens rotate.') + '</div>';
+        aiNote('After that the person signs in again in their AI assistant. Access tokens last 5 minutes; refresh tokens don\'t rotate (Keycloak can\'t do it per client), so Disconnect and the limits above are what end a connection.') + '</div>';
       h += '<div class="policy-section"><div class="policy-title">Rate limits</div>' +
         AI_LIMITS.map(([k, label]) => '<div class="form-group"><label for="ai-lim-' + k + '">' + escapeHtml(label) + '</label>' +
-          '<input type="number" id="ai-lim-' + k + '" data-ai-limit="' + k + '" min="1" value="' + escapeHtml((s.limits || {})[k]) + '"></div>').join('') + '</div>';
+          '<input type="number" id="ai-lim-' + k + '" data-ai-limit="' + k + '" min="1" max="' + (k === 'fanout' ? 4 : 1000000) + '" value="' + escapeHtml((s.limits || {})[k]) + '"></div>').join('') + '</div>';
       h += '<div class="policy-section"><div class="policy-title">Allowed origins</div>' +
         '<div class="form-group"><label for="ai-origins">Browser origins allowed to call (one per line, <code>https://&lt;host&gt;[:port]</code>)</label>' +
         '<textarea id="ai-origins" name="allowed_origins" rows="3" class="code-editor" style="min-height:4rem" spellcheck="false">' + escapeHtml((s.allowed_origins || []).join('\n')) + '</textarea>' +
@@ -1525,13 +1532,19 @@
     }
 
     // ── the provider dialog ──
+    // The element focused before the dialog opened gets the focus back.
+    let aiModalOpener = null;
     function openAIModal(html) {
+      if (!document.getElementById('ai-modal').classList.contains('visible')) aiModalOpener = document.activeElement;
       document.getElementById('ai-modal-box').innerHTML = html;
       document.getElementById('ai-modal').classList.add('visible');
     }
     function closeAIModal() {
       document.getElementById('ai-modal').classList.remove('visible');
       document.getElementById('ai-modal-box').innerHTML = '';
+      const back = aiModalOpener;
+      aiModalOpener = null;
+      if (back && back.isConnected && typeof back.focus === 'function') back.focus();
     }
 
     // p: the provider to edit (null: add). focusField: a secret field to
@@ -1540,7 +1553,7 @@
       const kinds = p ? [p.kind] : aiOfferedKinds();
       let h = '<div class="inst-modal-head"><div class="inst-modal-title" id="ai-modal-title">' +
         (p ? 'Edit model provider <code>' + escapeHtml(p.name) + '</code>' : 'Add model provider') + '</div>' +
-        '<button type="button" class="detail-close" data-ai-modal-close title="Close">&times;</button></div>';
+        '<button type="button" class="detail-close" data-ai-modal-close title="Close" aria-label="Close">&times;</button></div>';
       if (!kinds.length) {
         openAIModal(h + '<div class="public-warn">No installed AI page supports a model provider kind: install an AI page app (a template with an AI page, e.g. ai-chat) first.</div>');
         return;
@@ -1688,7 +1701,8 @@
     // set_model_provider_secret form): the provider's dialog, that
     // secret's input focused. An unknown provider or field is said so.
     async function openProviderSecretAt(name, field) {
-      await loadAISettings();
+      // openSettingsForm clicked the Settings tab, which started the load.
+      await (aiLoading || loadAISettings());
       const root = document.getElementById('ai-root');
       const p = aiCtx.providers.find(x => x.name === name);
       const say = msg => { document.getElementById('ai-providers-result').innerHTML = '<div class="public-warn">' + escapeHtml(msg) + '</div>'; flash(root); };
@@ -1748,14 +1762,7 @@
       const t = catalogCache && catalogCache[id];
       return !!(t && t.enabled);
     }
-    function aiDecision(d) {
-      d = String(d || '');
-      if (d === 'allow') return '<span class="pill ok">✓ allowed</span>';
-      if (d === 'rate_limited') return '<span class="pill warn">rate limited</span>';
-      if (d.startsWith('confirm:')) return '<span class="pill info">⏸ waiting for confirmation</span>';
-      if (d.startsWith('deny:')) return '<span class="pill bad">✗ ' + escapeHtml(d.slice(5)) + '</span>';
-      return '<span class="pill">' + escapeHtml(d) + '</span>';
-    }
+    function aiDecision(d) { return PortcullisAI.decision(d, 'pill'); }
     function aiLink(url, text) {
       return /^https:\/\/[^\s"'<>]+$/.test(String(url || '')) ? '<a href="' + escapeHtml(url) + '" target="_blank" rel="noopener noreferrer">' + escapeHtml(text || url) + ' &#8599;</a>'
         : '<code>' + escapeHtml(url) + '</code>';
@@ -1799,7 +1806,9 @@
           '<a href="#app/' + encodeURIComponent(id) + '/settings">Open the app\'s settings</a> to change its access policy.</div>';
       }
       const running = aiInstanceEnabled(id);
-      if (running && !greyed) h += aiNote('The app is running: switching AI support on or off, or changing its mode, restarts it (its router labels change).');
+      // app_oauth companions add no router (the gate isn't in the path).
+      const routed = (v.companions || []).some(c => c.identity_mode !== 'app_oauth');
+      if (running && !greyed) h += aiNote('The app is running: switching AI support on or off, or changing its mode, restarts it' + (routed ? ' (its router labels change)' : '') + '.');
       for (const c of v.companions || []) h += aiCompanionHtml(id, v, c, greyed);
       h += '<div class="inst-section" data-ai-activity><h4>Recent AI activity</h4>';
       if (act && act.error) h += '<p class="settings-empty">' + escapeHtml(act.error.message || 'AI activity can\'t be read right now') + '</p>';
@@ -1844,9 +1853,14 @@
         h += '<span class="pill">' + escapeHtml(AI_MODE_LABEL[c.mode] || c.mode) + '</span>';
       }
       h += '<button type="button" class="btn btn-primary btn-sm" data-ai-save' + dis + '>Save</button></div>';
-      h += '<div class="inst-row"><input type="text" data-ai-revoke-user placeholder="username (empty: everyone)" aria-label="Revoke for" spellcheck="false">' +
-        '<button type="button" class="btn btn-danger btn-sm" data-ai-revoke>Revoke AI credentials now</button></div>' +
-        aiNote('Revoking ends the app-side AI credentials at once (the app\'s revoke hook); people\'s assistants get new ones on their next request while AI support is on.');
+      // identity_headers companions hold no app-side AI credential: nothing
+      // to revoke.
+      if (c.identity_mode !== 'identity_headers') {
+        h += '<div class="inst-row"><input type="text" data-ai-revoke-user placeholder="username (empty: everyone)" aria-label="Revoke for" spellcheck="false">' +
+          '<button type="button" class="btn btn-danger btn-sm" data-ai-revoke>Revoke AI credentials now</button></div>' +
+          aiNote(c.identity_mode === 'app_oauth' ? 'Revoking ends their AI access through the app\'s own sign-in; they sign in again in the app.'
+            : 'Revoking ends the app-side AI credentials at once (the app\'s revoke hook); people\'s assistants get new ones on their next request while AI support is on.');
+      }
       h += '<div data-ai-result></div></div>';
       return h;
     }
@@ -2784,7 +2798,7 @@
     }
     function modalHead(title) {
       return '<div class="inst-modal-head"><div class="inst-modal-title">' + title + '</div>' +
-        '<button type="button" class="detail-close" data-inst-close="1" title="Close">&times;</button></div>';
+        '<button type="button" class="detail-close" data-inst-close="1" title="Close" aria-label="Close">&times;</button></div>';
     }
 
     // ── create ───────────────────────────────────────────

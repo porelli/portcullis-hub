@@ -30,10 +30,29 @@ func TestAdminAIUIStatic(t *testing.T) {
 		`not vetted by Portcullis`,
 		`if (kind === 'litellm' && f === 'base_url') continue;`,
 		`i.value = '';`,
+		// Rotation is pinned off (contract §8): the note says so exactly.
+		`After that the person signs in again in their AI assistant. Access tokens last 5 minutes; refresh tokens don\'t rotate (Keycloak can\'t do it per client), so Disconnect and the limits above are what end a connection.`,
+		// aiLink only links an https:// URL (an alternative's or a
+		// companion's source); anything else is shown as code.
+		"return /^https:\\/\\/[^\\s\"'<>]+$/.test(String(url || ''))",
+		// No revoke row for identity_headers (nothing to revoke); app_oauth
+		// has its own note.
+		`if (c.identity_mode !== 'identity_headers') {`,
+		`Revoking ends their AI access through the app\'s own sign-in; they sign in again in the app.`,
+		// One decision rendering, shared with the audit view (directory.js).
+		`PortcullisAI.decision(d, 'pill')`,
+		`aria-label="Close"`,
 	} {
 		if !strings.Contains(ai, want) {
 			t.Errorf("the AI block lacks %q", want)
 		}
+	}
+	// "rotate" only ever in "don't rotate".
+	if n, ok := strings.Count(ai, "rotate"), strings.Count(ai, `don\'t rotate`); n != ok || n == 0 {
+		t.Errorf("the AI block says %q %d times, %d of them as \"don't rotate\"", "rotate", n, ok)
+	}
+	if !strings.Contains(webAsset(t, "directory.js"), "window.PortcullisAI = { decision: aiDecision };") {
+		t.Error("directory.js doesn't export PortcullisAI.decision")
 	}
 	if regexp.MustCompile(`(?i)\son[a-z]+\s*=`).MatchString(ai) {
 		t.Error("the AI block generates inline event handlers")

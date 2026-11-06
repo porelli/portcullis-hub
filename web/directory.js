@@ -1413,14 +1413,6 @@
   // 'ai' only those made through the Portcullis MCP (?via=ai), 'access'
   // those merged with the gate's access-log lines (&include=access).
   let auditFilter = '';
-  function auditDecision(d) {
-    d = String(d || '');
-    if (d === 'allow') return '<span class="pd-pill ok">allowed</span>';
-    if (d === 'rate_limited') return '<span class="pd-pill warn">rate limited</span>';
-    if (d.startsWith('confirm:')) return '<span class="pd-pill info">waiting for confirmation</span>';
-    if (d.startsWith('deny:')) return '<span class="pd-pill bad">denied: ' + esc(d.slice(5)) + '</span>';
-    return '<span class="pd-pill">' + esc(d) + '</span>';
-  }
   function auditEntryRow(e) {
     const cls = e.result === 'ok' ? 'ok' : (e.result === 'refused' ? 'warn' : 'bad');
     return '<tr><td class="pd-muted pd-nowrap">' + esc(fmtTime(e.time)) + '</td><td>' + esc(e.actor) +
@@ -1435,12 +1427,17 @@
     return '<tr class="pd-access"><td class="pd-muted pd-nowrap">' + esc(fmtTime(l.time)) + '</td><td>' + esc(l.user || '(no valid token)') +
       '<div><span class="pd-pill">AI request</span>' + (l.client ? '<span class="pd-muted">' + esc(l.client) + '</span>' : '') + '</div></td>' +
       '<td><code>' + esc(what) + '</code><div class="pd-muted">' + esc(l.via) + ' · ' + esc(l.method) + '</div></td><td>' + esc(l.resource) + '</td>' +
-      '<td>' + auditDecision(l.decision) + (l.upstream_status ? '<div class="pd-muted">app answered ' + esc(l.upstream_status) + '</div>' : '') + '</td></tr>';
+      '<td>' + aiDecision(l.decision, 'pd-pill') + (l.upstream_status ? '<div class="pd-muted">app answered ' + esc(l.upstream_status) + '</div>' : '') + '</td></tr>';
   }
   async function loadAudit() {
     const box = root.querySelector('.pd-audit');
     if (!box) return;
     const url = '/api/directory/audit' + (auditFilter === 'ai' ? '?via=ai' : auditFilter === 'access' ? '?via=ai&include=access' : '');
+    const head = root.querySelector('#pd-audit-h');
+    if (head) {
+      head.textContent = auditFilter === 'access' ? 'Audit log via AI and AI requests (last 100 of each)'
+        : auditFilter === 'ai' ? 'Audit log: changes made via AI (last 100)' : 'Audit log (last 100 changes)';
+    }
     let note = '';
     try {
       let items;
@@ -1457,7 +1454,9 @@
         box.innerHTML = note + '<p class="pd-muted">' + (auditFilter ? 'Nothing made via AI yet.' : 'No changes yet.') + '</p>';
         return;
       }
-      let h = note + '<table class="pd-table"><thead><tr><th scope="col">Time</th><th scope="col">Who</th><th scope="col">Action</th><th scope="col">Target</th><th scope="col">Result</th></tr></thead><tbody>';
+      const cols = auditFilter === 'access' && !note ? ['Time', 'Who (client)', 'Action or AI request', 'Target or resource', 'Result or decision']
+        : ['Time', 'Who', 'Action', 'Target', 'Result'];
+      let h = note + '<table class="pd-table"><thead><tr>' + cols.map(c => '<th scope="col">' + esc(c) + '</th>').join('') + '</tr></thead><tbody>';
       for (const it of items) {
         if (it.source === 'access') h += it.line ? auditAccessRow(it.line) : '';
         else h += auditEntryRow(it.source === 'audit' ? (it.entry || {}) : it);
@@ -2062,5 +2061,20 @@
     if (action === 'password' || action === 'invite') userAction(action, name);
   }
 
+  // An access-log decision (contract §15.8) as a pill: the one rendering
+  // the Hub page's AI tab and this audit view share (myai.js, the people
+  // card, has its own). cls: the pill class of the page ('pill' on
+  // index.html, 'pd-pill' here).
+  function aiDecision(d, cls) {
+    d = String(d || '');
+    cls = cls || 'pd-pill';
+    if (d === 'allow') return '<span class="' + cls + ' ok">✓ allowed</span>';
+    if (d === 'rate_limited') return '<span class="' + cls + ' warn">rate limited</span>';
+    if (d.startsWith('confirm:')) return '<span class="' + cls + ' info">⏸ waiting for confirmation</span>';
+    if (d.startsWith('deny:')) return '<span class="' + cls + ' bad">✗ denied: ' + esc(d.slice(5)) + '</span>';
+    return '<span class="' + cls + '">' + esc(d) + '</span>';
+  }
+
   window.PortcullisDirectory = { show, openAt, csvCell };
+  window.PortcullisAI = { decision: aiDecision };
 })();
