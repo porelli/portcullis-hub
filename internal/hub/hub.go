@@ -1122,6 +1122,11 @@ func (h *Hub) writePolicy() (attrsWritten bool, retErr error) {
 	errs = append(errs, writePortal(h.portalPath(), portal))
 	// The gate files follow in the same pass (contract §15.4).
 	errs = append(errs, h.writeGateFiles(dr.m, dr.mErr))
+	// Leavers' credentials are marked revoking in this same pass, from
+	// this snapshot (§15.5; no hook here: the AI reconcile loop revokes).
+	if dr.m != nil {
+		h.markLeavers(dr.m)
+	}
 	return attrsWritten, errors.Join(errs...)
 }
 

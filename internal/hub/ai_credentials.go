@@ -219,7 +219,10 @@ func (h *Hub) mint(ctx context.Context, resource, user string) (*MintResult, err
 		// Never Put over a revoking entry: its app-side credential must
 		// be revoked first (the entry is the only record of it). A
 		// failure keeps it and refuses the mint.
-		if err := h.revokeEntry(ctx, &t, c, user, revoking.ID); err != nil {
+		h.mu.RLock()
+		sw := h.st.AIInstances[r.Instance].Companions[r.Companion]
+		h.mu.RUnlock()
+		if err := h.revokeTokenEntry(ctx, &t, revokeHookOf(&t, r.Companion, sw), *revoking, actor); err != nil {
 			h.mintFailed(&t, c, actor, target, err.Error())
 			return nil, errMintFailed(c.Name)
 		}
@@ -291,34 +294,6 @@ type aiRevokeIn struct {
 	Action string   `json:"action"`
 	User   string   `json:"user"`
 	IDs    []string `json:"ids"`
-}
-
-// revokeEntry revokes the person's revoking entry id (the revoke hook
-// with ids [id]) and, on success, removes the entry; audited
-// ai.credential.revoke. Caller holds aiLock. The error is the redacted
-// hook error (or the store's), for LastError.
-func (h *Hub) revokeEntry(ctx context.Context, t *templates.Template, c *templates.Companion, user, id string) error {
-	target := t.ID + "/" + c.Name + "/" + user
-	if c.Identity.Revoke == "" {
-		err := fmt.Errorf("companion %s: no revoke hook for the revoking credential %s", c.Name, id)
-		h.auditAI(directory.Human(user), "ai.credential.revoke", target, "id "+id, err)
-		return err
-	}
-	stdin, _ := json.Marshal(aiRevokeIn{Action: "revoke", User: user, IDs: []string{id}})
-	out, u := h.runAIHook(ctx, t, c.Identity.Revoke, stdin)
-	clear(out)
-	if !u.OK {
-		err := errors.New(u.Error)
-		h.auditAI(directory.Human(user), "ai.credential.revoke", target, "id "+id, err)
-		return err
-	}
-	if err := h.creds().Remove(t.ID, c.Name, user); err != nil {
-		err = fmt.Errorf("companion %s: removing the revoked credential %s: %v", c.Name, id, err)
-		h.auditAI(directory.Human(user), "ai.credential.revoke", target, "id "+id, err)
-		return err
-	}
-	h.auditAI(directory.Human(user), "ai.credential.revoke", target, "id "+id, nil)
-	return nil
 }
 
 // revokeOrphan revokes a just-minted credential that couldn't be stored.

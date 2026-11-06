@@ -159,8 +159,16 @@ func (h *Hub) aiHoldersLocked(t *templates.Template, c *templates.Companion, s s
 // revokeHookOf is the hook that revokes companion name's credentials:
 // the template's own while it declares the companion, else the one it
 // was switched on with (state) while the template still has it ("": none
-// left — the entries stay revoking, AIRevokeProblems).
+// left — the entries stay revoking, AIRevokeProblems). A Pruned
+// companion's credentials are only ever revoked with the stored hook
+// (never the new definition's).
 func revokeHookOf(t *templates.Template, name string, s state.AICompanion) string {
+	if s.Pruned {
+		if s.RevokeHook != "" && aiHookExists(t, s.RevokeHook) {
+			return s.RevokeHook
+		}
+		return ""
+	}
 	if c := companionOf(t, name); c != nil && (s.IdentityMode == "" || c.Identity.Mode == s.IdentityMode) {
 		return c.Identity.Revoke
 	}
@@ -304,8 +312,22 @@ func (h *Hub) RevokeAICredentials(ctx context.Context, instance, companion, user
 	if user != "" {
 		target += "/" + user
 	}
-	if c.Identity.Revoke == "" {
-		err := statusErr(http.StatusConflict, "companion %s holds no app-side credentials (identity mode %s)", companion, c.Identity.Mode)
+	h.mu.RLock()
+	s := h.st.AIInstances[instance].Companions[companion]
+	h.mu.RUnlock()
+	// A companion a template update switched off is revoked with the hook
+	// it was switched on with, as the identity mode it had (fix round 1).
+	hook, mode := revokeHookOf(t, companion, s), c.Identity.Mode
+	if s.Pruned && s.IdentityMode != "" {
+		mode = s.IdentityMode
+	}
+	if hook == "" {
+		var err error
+		if s.Pruned {
+			err = statusErr(http.StatusConflict, "companion %s: its credentials can't be revoked: the template no longer has the hook it was switched on with", companion)
+		} else {
+			err = statusErr(http.StatusConflict, "companion %s holds no app-side credentials (identity mode %s)", companion, c.Identity.Mode)
+		}
 		h.auditAI(actor, "ai.credential.revoke", target, "", err)
 		return err
 	}
@@ -316,18 +338,23 @@ func (h *Hub) RevokeAICredentials(ctx context.Context, instance, companion, user
 		return err
 	}
 	defer unlock()
+	oauth := mode == templates.IdentityAppOAuth
 	if user == "" {
-		err := h.revokeAll(ctx, t, c)
+		err := h.revokeAllWith(ctx, t, companion, hook, oauth)
 		h.auditAI(actor, "ai.credential.revoke", target, "revoke_all", err)
 		if err != nil {
 			h.revokeFailed(instance, companion, err)
 			return err
 		}
+		if s.Pruned {
+			h.setPrunedProblem(target, "")
+			h.clearPruned(instance, companion)
+		}
 		h.revokeDone(t, companion)
 		return nil
 	}
-	if c.Identity.Mode == templates.IdentityAppOAuth {
-		err := h.runRevoke(ctx, t, c.Identity.Revoke, user, nil)
+	if oauth {
+		err := h.runRevoke(ctx, t, hook, user, nil)
 		if err == nil {
 			err = h.oauthSeenRemove(instance+"/"+companion, user)
 		}
@@ -349,7 +376,7 @@ func (h *Hub) RevokeAICredentials(ctx context.Context, instance, companion, user
 		h.auditAI(actor, "ai.credential.revoke", target, "nothing to revoke", nil)
 		return nil
 	}
-	if err := h.revokeTokenEntry(ctx, t, c.Identity.Revoke, *entry, actor); err != nil {
+	if err := h.revokeTokenEntry(ctx, t, hook, *entry, actor); err != nil {
 		h.revokeFailed(instance, companion, err)
 		return &StatusError{Status: http.StatusBadGateway, Err: err}
 	}
@@ -556,7 +583,14 @@ func (h *Hub) revokePruned(ctx context.Context) {
 			hook = o.s.RevokeHook
 		}
 		if hook == "" && o.s.RevokeHook == "" && !h.hasCredsOf(o.id, o.name) {
-			// Nothing was ever minted with a hook (identity_headers).
+			// A revoke_all was owed but no hook was ever recorded for it:
+			// nothing can run it. Never silently done (fix round 1): logged
+			// and audited as an error, then cleared (oauth-seen leftovers
+			// stay listed in AIRevokeProblems).
+			err := errors.New("owed revoke_all dropped: no hook recorded")
+			log.Printf("ai: %s: %v", target, err)
+			h.auditAI(aiHubActor, "ai.credential.revoke", target, "owed revoke_all dropped: no hook recorded", err)
+			h.setPrunedProblem(target, "")
 			h.clearPruned(o.id, o.name)
 			continue
 		}
@@ -678,6 +712,9 @@ type AIRevokeProblem struct {
 	Revoking int `json:"revoking"`
 	// Pruned: switched off by a template update, its revoke_all owed.
 	Pruned bool `json:"pruned"`
+	// Recorded: app_oauth people recorded in oauth-seen.json who are owed
+	// a revoke the template no longer has the hook for (fix round 1).
+	Recorded int `json:"recorded"`
 	// NoHook: the template no longer has the hook to revoke them.
 	NoHook bool   `json:"no_hook"`
 	Reason string `json:"reason"`
@@ -687,6 +724,7 @@ type AIRevokeProblem struct {
 // template-update revoke_all, sorted (Task 20 reads it).
 func (h *Hub) AIRevokeProblems() []AIRevokeProblem {
 	entries := h.creds().Entries()
+	seen, seenErr := h.oauthSeen()
 	byKey := map[string]*AIRevokeProblem{}
 	get := func(id, name string) *AIRevokeProblem {
 		k := id + "/" + name
@@ -710,6 +748,22 @@ func (h *Hub) AIRevokeProblems() []AIRevokeProblem {
 			}
 		}
 	}
+	// app_oauth records nothing can revoke any more: the template dropped
+	// the companion (or its app_oauth mode) and the hook it had.
+	for ref, users := range seen {
+		id, name, _ := strings.Cut(ref, "/")
+		t := h.findLocked(id)
+		if t == nil || len(users) == 0 {
+			continue
+		}
+		s := h.st.AIInstances[id].Companions[name]
+		if c := companionOf(t, name); c != nil && c.Identity.Mode == templates.IdentityAppOAuth && !s.Pruned {
+			continue // still its companion: reconcileOAuthSeen handles it
+		}
+		if revokeHookOf(t, name, s) == "" {
+			get(id, name).Recorded = len(users)
+		}
+	}
 	for _, p := range byKey {
 		var s state.AICompanion
 		if a, ok := h.st.AIInstances[p.Instance]; ok {
@@ -720,8 +774,14 @@ func (h *Hub) AIRevokeProblems() []AIRevokeProblem {
 		}
 	}
 	h.mu.RUnlock()
+	if seenErr != nil {
+		get("", oauthSeenName).Reason = seenErr.Error()
+	}
 	h.aiErrMu.Lock()
 	for k, p := range byKey {
+		if p.Reason != "" {
+			continue
+		}
 		if msg := h.aiPrunedErrs[k]; msg != "" {
 			p.Reason = msg
 		} else if msg := h.aiErrs[k]; msg != "" {
@@ -779,6 +839,37 @@ func (h *Hub) reconcileTokenCredentials(ctx context.Context, m *directory.Member
 		}
 		unlock()
 	}
+}
+
+// markLeavers marks the active app_token entries of people m no longer
+// lets hold them revoking (the gate stops using them at its next reload)
+// and kicks the reconcile loop, which runs the revoke hooks. It runs in
+// every policy write, right after the gate file (fix round 1 ruling):
+// never a hook, never a wait — an instance whose AI lock is held (a mint
+// or a lifecycle operation) is left to the loop, which judges again under
+// the lock.
+func (h *Hub) markLeavers(m *directory.Membership) {
+	work := h.tokenWork(h.creds().Entries(), m)
+	if len(work) == 0 {
+		return
+	}
+	for _, id := range slices.Sorted(maps.Keys(work)) {
+		unlock, ok := h.aiTryLock(id, 0)
+		if !ok {
+			continue
+		}
+		// Judged again under the lock: a mint may have just finished.
+		for _, w := range h.tokenWork(h.creds().Entries(), m)[id] {
+			if w.e.State != aigate.StateActive {
+				continue
+			}
+			if err := h.creds().MarkRevoking(w.e.Instance, w.e.Companion, w.e.User); err != nil {
+				log.Printf("ai: %s/%s/%s: marking the leaver's credential revoking failed (the reconcile retries): %v", w.e.Instance, w.e.Companion, w.e.User, err)
+			}
+		}
+		unlock()
+	}
+	h.TriggerAIReconcile()
 }
 
 type tokenWork struct {
@@ -1223,14 +1314,23 @@ func (h *Hub) reconcileConnections(ctx context.Context, m *directory.Membership)
 		return
 	}
 	h.mu.RLock()
-	busy := slices.ContainsFunc(h.instances, func(t templates.Template) bool { return h.instanceBusyLocked(t.ID) })
-	if !h.st.AI.Enabled || busy {
-		// Master off: connections are kept (§15.11). An instance being
-		// deleted or restored: its people aren't judged mid-operation.
+	if !h.st.AI.Enabled {
+		// Master off: connections are kept (§15.11).
 		h.mu.RUnlock()
 		return
 	}
 	eligible := h.aiEligibleLocked(m)
+	// An instance being deleted or restored: the people of its population
+	// aren't judged mid-operation (fix round 1: only them).
+	for i := range h.instances {
+		t := &h.instances[i]
+		if !h.instanceBusyLocked(t.ID) || len(h.st.AIInstances[t.ID].Companions) == 0 {
+			continue
+		}
+		for _, p := range h.populationLocked(t, m).People {
+			eligible[p.User] = true
+		}
+	}
 	clients := h.aiClientIDsLocked()
 	h.mu.RUnlock()
 	aiStoreMu.Lock()

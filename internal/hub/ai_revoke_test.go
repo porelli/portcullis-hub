@@ -587,7 +587,9 @@ func TestPruneAITemplateChanged(t *testing.T) {
 	ai.Companions["lost"] = state.AICompanion{Enabled: true, Mode: "read_write", IdentityMode: "app_token", RevokeHook: "no-such-hook"}
 	// tok was switched on as identity_headers: its mode changed.
 	c := ai.Companions["tok"]
-	c.IdentityMode, c.RevokeHook = "identity_headers", "tok-revoke"
+	// The old definition's revoke hook differs from the new one's
+	// (tok-revoke): the old hook must run (fix round 1).
+	c.IdentityMode, c.RevokeHook = "identity_headers", "ai-toggle"
 	ai.Companions["tok"] = c
 	a.h.st.AIInstances["aiapp"] = ai
 	a.h.mu.Unlock()
@@ -618,10 +620,14 @@ func TestPruneAITemplateChanged(t *testing.T) {
 	}
 	a.h.Wait()
 	n := len(a.stdins("/revoke"))
+	nt := len(a.stdins("/toggle"))
 	a.reconcile()
 	got := a.stdins("/revoke")[n:]
-	if len(got) != 2 || got[0] != `{"action":"revoke_all","prefix":"portcullis-ai-"}` {
-		t.Errorf("revokes = %q, want revoke_all for gone and tok", got)
+	if len(got) != 1 || got[0] != `{"action":"revoke_all","prefix":"portcullis-ai-"}` {
+		t.Errorf("tok-revoke runs = %q, want gone's revoke_all only", got)
+	}
+	if got := a.stdins("/toggle")[nt:]; !slices.Contains(got, `{"action":"revoke_all","prefix":"portcullis-ai-"}`) {
+		t.Errorf("the old hook (ai-toggle) runs = %q, want tok's revoke_all", got)
 	}
 	if _, ok := a.h.st.AIInstances["aiapp"].Companions["gone"]; ok {
 		t.Error("gone's state entry kept after its revoke_all")
@@ -659,10 +665,214 @@ func TestRestoreOwesRevokeAll(t *testing.T) {
 	if s := a.companion("aiapp", "tok"); !s.RevokePending {
 		t.Errorf("tok = %+v, want revoke pending", s)
 	}
-	for _, r := range a.gate(t).Resources {
-		if r.Companion == "tok" {
-			t.Error("tok listed before its revoke_all succeeded")
+	listed := func() bool {
+		if err := a.h.WritePolicy(); err != nil {
+			t.Fatal(err)
 		}
+		return slices.ContainsFunc(a.gate(t).Resources, func(r aigate.Resource) bool { return r.Companion == "tok" })
+	}
+	if listed() {
+		t.Error("tok listed before its revoke_all succeeded")
+	}
+	// Control: the revoke_all succeeds (the next restore) → listed again.
+	a.failHook("/revoke", 0, "")
+	if _, err := a.h.RestoreInstance("aiapp", entry.Archive, root); err != nil {
+		t.Fatal(err)
+	}
+	a.h.Wait()
+	if s := a.companion("aiapp", "tok"); s.RevokePending || !s.Enabled {
+		t.Errorf("tok after a good revoke_all = %+v", s)
+	}
+	if !listed() {
+		t.Error("tok not listed after its revoke_all succeeded")
+	}
+}
+
+// Fix round 1 (1): a Pruned companion can't be switched on until its
+// owed revocation succeeded; the AI tab shows it revoking even if the
+// state says enabled.
+func TestPrunedCompanionSwitchOnRefused(t *testing.T) {
+	a := newMintFixture(t)
+	a.h.mu.Lock()
+	ai := a.h.st.AIInstances["aiapp"]
+	c := ai.Companions["tok"]
+	c.IdentityMode, c.RevokeHook = "identity_headers", "tok-revoke"
+	ai.Companions["tok"] = c
+	a.h.mu.Unlock()
+	a.putCred(t, "aiapp", "tok", "alice")
+	a.failHook("/revoke", 1, "down")
+	a.h.pruneAI(false)
+	a.reconcile()
+	if s := a.companion("aiapp", "tok"); !s.Pruned {
+		t.Fatalf("tok = %+v, want still pruned", s)
+	}
+	err := a.h.SetAISupport(context.Background(), "aiapp", "tok", true, root)
+	if statusOf(err) != 409 || !strings.Contains(err.Error(), "revocation is still owed") {
+		t.Errorf("switch-on of a pruned companion = %v, want 409", err)
+	}
+	for _, enabled := range []bool{false, true} {
+		a.h.mu.Lock()
+		ai := a.h.st.AIInstances["aiapp"]
+		c := ai.Companions["tok"]
+		c.Enabled = enabled
+		ai.Companions["tok"] = c
+		a.h.mu.Unlock()
+		v, _ := a.h.InstanceAI("aiapp")
+		if v.Companions[0].Status != "revoking" {
+			t.Errorf("enabled=%v: status = %q, want revoking", enabled, v.Companions[0].Status)
+		}
+	}
+	// Once the revocation succeeds the switch-on works again.
+	a.h.mu.Lock()
+	ai = a.h.st.AIInstances["aiapp"]
+	c = ai.Companions["tok"]
+	c.Enabled = false
+	ai.Companions["tok"] = c
+	a.h.mu.Unlock()
+	a.failHook("/revoke", 0, "")
+	a.reconcile()
+	if err := a.h.SetAISupport(context.Background(), "aiapp", "tok", true, root); err != nil {
+		t.Errorf("switch-on after the revocation = %v", err)
+	}
+}
+
+// Fix round 1 (2): RevokeAICredentials on a Pruned companion runs the
+// hook it was switched on with, never the new definition's.
+func TestRevokePrunedUsesStoredHook(t *testing.T) {
+	a := newMintFixture(t)
+	a.h.mu.Lock()
+	ai := a.h.st.AIInstances["aiapp"]
+	ai.Companions["tok"] = state.AICompanion{Mode: "read_write", IdentityMode: "app_token", RevokeHook: "ai-toggle", Pruned: true}
+	a.h.mu.Unlock()
+	a.putCred(t, "aiapp", "tok", "alice")
+	if err := a.h.creds().MarkRevoking("aiapp", "tok", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.h.RevokeAICredentials(context.Background(), "aiapp", "tok", "alice", root); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.stdins("/toggle"); len(got) != 1 || got[0] != `{"action":"revoke","user":"alice","ids":["7"]}` {
+		t.Errorf("ai-toggle runs = %q", got)
+	}
+	if got := a.stdins("/revoke"); len(got) != 0 {
+		t.Errorf("the new definition's hook ran: %q", got)
+	}
+	a.putCred(t, "aiapp", "tok", "alice")
+	if err := a.h.RevokeAICredentials(context.Background(), "aiapp", "tok", "", root); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.stdins("/toggle"); len(got) != 2 || got[1] != `{"action":"revoke_all","prefix":"portcullis-ai-"}` {
+		t.Errorf("ai-toggle runs = %q", got)
+	}
+	if len(a.stdins("/revoke")) != 0 {
+		t.Error("the new definition's hook ran")
+	}
+	if s := a.companion("aiapp", "tok"); s.Pruned {
+		t.Errorf("tok still pruned after its revoke_all: %+v", s)
+	}
+	// No stored hook left: 409, nothing run.
+	a.h.mu.Lock()
+	a.h.st.AIInstances["aiapp"].Companions["tok"] = state.AICompanion{Mode: "read_write", IdentityMode: "app_token", RevokeHook: "gone-hook", Pruned: true}
+	a.h.mu.Unlock()
+	if err := a.h.RevokeAICredentials(context.Background(), "aiapp", "tok", "", root); statusOf(err) != 409 {
+		t.Errorf("no stored hook = %v, want 409", err)
+	}
+}
+
+// Fix round 1 (6): the policy write itself marks leavers revoking (no
+// hook); the loop revokes later.
+func TestLeaverMarkedByWritePolicy(t *testing.T) {
+	a := newMintFixture(t)
+	a.putCred(t, "aiapp", "tok", "alice")
+	a.people.removeMember("users_aiapp", "alice")
+	if err := a.h.WritePolicy(); err != nil {
+		t.Fatal(err)
+	}
+	if e := a.credFileEntry(t, "aiapp", "tok", "alice"); e == nil || e.State != aigate.StateRevoking || e.Age != "" {
+		t.Errorf("entry right after the policy write = %+v, want revoking", e)
+	}
+	if n := len(a.stdins("/revoke")); n != 0 {
+		t.Errorf("the policy write ran %d hooks", n)
+	}
+	select {
+	case <-a.h.aiReconKick:
+	default:
+		t.Error("the reconcile loop wasn't kicked")
+	}
+	// A held AI lock (a mint) leaves it to the loop.
+	a.putCred(t, "aiapp", "tok", "alice")
+	unlock := a.h.aiLock("aiapp")
+	if err := a.h.WritePolicy(); err != nil {
+		t.Fatal(err)
+	}
+	unlock()
+	if e := a.credFileEntry(t, "aiapp", "tok", "alice"); e == nil || e.State != aigate.StateActive {
+		t.Errorf("entry with the AI lock held = %+v, want left active", e)
+	}
+	a.reconcile()
+	if e := a.credFileEntry(t, "aiapp", "tok", "alice"); e != nil {
+		t.Errorf("entry after the loop = %+v", e)
+	}
+}
+
+// Fix round 1 (8): a pruned companion with an owed revoke_all and no
+// recorded hook is cleared, logged and audited as an error, never as done.
+func TestPrunedNoHookRecordedAudited(t *testing.T) {
+	a := newMintFixture(t)
+	a.h.mu.Lock()
+	a.h.st.AIInstances["aiapp"].Companions["old"] = state.AICompanion{Mode: "read_write", Pruned: true}
+	a.h.mu.Unlock()
+	a.reconcile()
+	got := a.auditsOf("ai.credential.revoke", "aiapp/old")
+	if len(got) != 1 || got[0].Result != "error" || got[0].Detail != "owed revoke_all dropped: no hook recorded" {
+		t.Errorf("audit = %+v", got)
+	}
+	if _, ok := a.h.st.AIInstances["aiapp"].Companions["old"]; ok {
+		t.Error("state entry kept")
+	}
+}
+
+// Fix round 1 (9): a busy instance spares only its own population from
+// the connection cleanup.
+func TestConnectionsCleanupBusyInstance(t *testing.T) {
+	a := newMintFixture(t) // tok on: alice in its population
+	a.h.mu.Lock()
+	a.h.st.AI.PortcullisPeople, a.h.st.AI.PortcullisAdmin = true, false
+	a.h.mu.Unlock()
+	a.reconcile() // alice, carol, … recorded
+	a.h.mu.Lock()
+	a.h.st.AI.PortcullisPeople = false
+	// aiapp is being restored, its companion state mid-change.
+	if a.h.st.Instances == nil {
+		a.h.st.Instances = map[string]state.Instance{}
+	}
+	e := a.h.st.Instances["aiapp"]
+	e.State = state.InstanceRestoring
+	a.h.st.Instances["aiapp"] = e
+	a.h.st.AIInstances["aiapp"].Companions["tok"] = state.AICompanion{Mode: "read_write"}
+	a.h.mu.Unlock()
+	a.reconcile()
+	got := a.kc.revokedList()
+	if slices.ContainsFunc(got, func(r string) bool { return strings.HasPrefix(r, "alice@") }) {
+		t.Errorf("alice (population of a restoring instance) judged: %v", got)
+	}
+	if !slices.Contains(got, "carol@"+keycloak.AIClientIDs.Claude) {
+		t.Errorf("carol (no AI resource, not in aiapp) not revoked: %v", got)
+	}
+}
+
+// Fix round 1 (10): app_oauth records nothing can revoke are listed.
+func TestRevokeProblemsListOAuthLeftovers(t *testing.T) {
+	a := newMintFixture(t)
+	if err := a.h.oauthSeenUpdate(func(s map[string][]string) bool {
+		s["aiapp/dropped"] = []string{"alice", "bob"}
+		return true
+	}); err != nil {
+		t.Fatal(err)
+	}
+	p := a.h.AIRevokeProblems()
+	if len(p) != 1 || p[0].Companion != "dropped" || p[0].Recorded != 2 || !p[0].NoHook {
+		t.Errorf("problems = %+v", p)
 	}
 }
 

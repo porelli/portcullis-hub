@@ -629,6 +629,11 @@ func (h *Hub) planAILocked(t *templates.Template, u InstanceAIUpdate, retry map[
 			ch.reapply = retry[name]
 		}
 		ch.modeOnly = !before.Enabled && !after.Enabled && before.Mode != after.Mode
+		if after.Enabled && before.Pruned {
+			// A template update switched it off and its revocation hasn't
+			// succeeded yet (revokePruned; fix round 1).
+			return nil, statusErr(http.StatusConflict, "companion %s: a template update's revocation is still owed: see the doctor", name)
+		}
 		if after.Enabled {
 			if !h.st.AI.Enabled {
 				return nil, statusErr(http.StatusConflict, "AI support is off on this Portcullis: switch it on in Settings → AI first")
@@ -1265,12 +1270,12 @@ func (h *Hub) InstanceAI(id string) (*InstanceAIView, error) {
 			}
 		}
 		switch {
+		case s.Pruned:
+			// Switched off by a template update; its revoke_all is owed
+			// (AIRevokeProblems), whatever else the state says.
+			cv.Status = "revoking"
 		case cv.LastError != "":
 			cv.Status = "failed"
-		case !s.Enabled && s.Pruned:
-			// Switched off by a template update; its revoke_all is owed
-			// (AIRevokeProblems).
-			cv.Status = "revoking"
 		case !s.Enabled && s.RevokePending:
 			// Off; its app-side credentials are revoked at the next start.
 			cv.Status = "revoking"
