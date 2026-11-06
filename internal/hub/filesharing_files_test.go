@@ -319,7 +319,7 @@ func TestShareRemovalChangesTheFile(t *testing.T) {
 
 func TestRequiresAnyOnSave(t *testing.T) {
 	c := credSvcFixture(t)
-	_, err := c.f.h.SaveSettings(smbID, SettingsUpdate{Values: vals("share1_folder", "/srv/share1")}, "root")
+	_, err := c.f.h.SaveSettings(smbID, SettingsUpdate{Values: vals("share1_folder", directory.Human("/srv/share1"))}, "root")
 	if statusOf(err) != 400 || !strings.Contains(err.Error(), "share1_folder") {
 		t.Fatalf("a folder without readers or writers = %v", err)
 	}
@@ -364,7 +364,7 @@ func TestLocalNetworksEnv(t *testing.T) {
 		t.Error("UsesLocalNetworks not cached at Discover")
 	}
 	before := len(f.runner.Calls())
-	if err := f.h.SetLocalNetworks([]string{}, "root"); err != nil {
+	if err := f.h.SetLocalNetworks([]string{}, directory.Human("root")); err != nil {
 		t.Fatalf("an empty list: %v", err)
 	}
 	f.h.Wait()
@@ -381,7 +381,7 @@ func TestLocalNetworksEnv(t *testing.T) {
 	if v, ok := envValue(t, f, smbID, templates.VarLocalNetworks); !ok || v != "" {
 		t.Errorf("saved empty: %s=%s (%v), want empty", templates.VarLocalNetworks, v, ok)
 	}
-	if err := f.h.SetLocalNetworks([]string{"192.168.1.0/24"}, "root"); err != nil {
+	if err := f.h.SetLocalNetworks([]string{"192.168.1.0/24"}, directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	f.h.Wait()
@@ -550,7 +550,7 @@ func TestShareGroupStalePanel(t *testing.T) {
 		Values:        vals("share1_readers", []string{"office_milan"}),
 		ValueGroupIDs: map[string]map[string]int{"share1_readers": {"office_milan": old}},
 	}
-	if _, err := c.f.h.SaveSettings(smbID, stale, "root"); statusOf(err) != 409 || !strings.Contains(err.Error(), "re-created since it was saved") {
+	if _, err := c.f.h.SaveSettings(smbID, stale, directory.Human("root")); statusOf(err) != 409 || !strings.Contains(err.Error(), "re-created since it was saved") {
 		t.Errorf("stale panel save = %v", err)
 	}
 	if _, err := c.f.h.PreviewSettings(context.Background(), smbID, stale); statusOf(err) != 409 {
@@ -568,7 +568,7 @@ func TestShareGroupStalePanel(t *testing.T) {
 		Values:        vals("share1_readers", []string{"office_milan", "users_" + smbID}),
 		ValueGroupIDs: map[string]map[string]int{"share1_readers": {"office_milan": c.people.id("office_milan")}},
 	}
-	if _, err := c.f.h.SaveSettings(smbID, cur, "root"); err != nil {
+	if _, err := c.f.h.SaveSettings(smbID, cur, directory.Human("root")); err != nil {
 		t.Errorf("the current id: %v", err)
 	}
 }
@@ -640,7 +640,7 @@ func TestLocalNetworksUnchangedNoRestart(t *testing.T) {
 		{"the same list", []string{"192.168.1.0/24"}, false},
 	} {
 		before := len(f.runner.Calls())
-		if err := f.h.SetLocalNetworks(step.cidrs, "root"); err != nil {
+		if err := f.h.SetLocalNetworks(step.cidrs, directory.Human("root")); err != nil {
 			t.Fatal(err)
 		}
 		f.h.Wait()

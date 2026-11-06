@@ -12,6 +12,7 @@ import (
 	"golang.org/x/text/message"
 
 	"github.com/portcullis/hub/internal/doctor"
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/folderfix"
 )
 
@@ -110,7 +111,7 @@ func (h *Hub) PreviewRecheck(ctx context.Context, id string) (*IdentityCheck, er
 // ("recheck …"). A different directory (another inode) needs
 // confirmDifferent (400 otherwise) and clears last_apply; a device-only
 // change keeps last_apply, recording the root its snapshot names.
-func (h *Hub) ApplyRecheck(ctx context.Context, id, planHash string, confirmDifferent bool, actor string) (view *FolderView, err error) {
+func (h *Hub) ApplyRecheck(ctx context.Context, id string, planHash string, confirmDifferent bool, actor directory.Actor) (view *FolderView, err error) {
 	detail := ""
 	defer func() {
 		if detail != "" || err != nil {

@@ -13,6 +13,7 @@ import (
 	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
+	"github.com/portcullis/hub/internal/directory"
 )
 
 // Guarded delete (contract §11.4).
@@ -44,14 +45,14 @@ func (h *Hub) SetGroups(g Groups) {
 // idempotent: after a failure (an *OpError, the instance stays
 // "deleting") the same call continues where it stopped, keeping the
 // first backup. Audited as instance.delete.
-func (h *Hub) DeleteInstance(id, confirm, actor string) (res *DeleteResult, err error) {
+func (h *Hub) DeleteInstance(id, confirm string, actor directory.Actor) (res *DeleteResult, err error) {
 	return h.deleteInstance(id, confirm, actor, nil)
 }
 
 // deleteInstance is DeleteInstance; ready (if set) is called once the
 // request is accepted (typed id, lock held, instance found, actor
 // resolved), before the delete's backup (StartDelete answers 202 then).
-func (h *Hub) deleteInstance(id, confirm, actor string, ready func()) (res *DeleteResult, err error) {
+func (h *Hub) deleteInstance(id, confirm string, actor directory.Actor, ready func()) (res *DeleteResult, err error) {
 	res = &DeleteResult{}
 	defer func() {
 		detail := "backup=" + res.Backup
@@ -126,7 +127,7 @@ func (h *Hub) deleteInstance(id, confirm, actor string, ready func()) (res *Dele
 }
 
 // deleteSteps runs steps 3–6 of §11.4. Caller holds the app lock.
-func (h *Hub) deleteSteps(id, actor string, res *DeleteResult) error {
+func (h *Hub) deleteSteps(id string, actor directory.Actor, res *DeleteResult) error {
 	ctx := context.Background()
 	h.mu.RLock()
 	tg, _ := h.targetLocked(id)
@@ -195,7 +196,7 @@ func (h *Hub) deleteSteps(id, actor string, res *DeleteResult) error {
 	for key, users := range h.st.Credentials[id] {
 		for u, c := range users {
 			if c.Active() {
-				gone = append(gone, revocation{key: key, user: u, by: actor, reason: state.CredentialReasonDeleted})
+				gone = append(gone, revocation{key: key, user: u, by: actor.User, reason: state.CredentialReasonDeleted})
 			}
 		}
 	}
@@ -212,7 +213,7 @@ func (h *Hub) deleteSteps(id, actor string, res *DeleteResult) error {
 		return gone[i].user < gone[j].user
 	})
 	for _, r := range gone {
-		h.auditOp(actor, revokeAuditAction(r.reason), id+"/"+r.key+"/"+r.user, credentialDetail(id, r.key, r.user, actor, r.reason), nil)
+		h.auditOp(actor, revokeAuditAction(r.reason), id+"/"+r.key+"/"+r.user, credentialDetail(id, r.key, r.user, actor.User, r.reason), nil)
 	}
 	if h.engine == nil {
 		res.Warnings = append(res.Warnings, "Docker is not available: the volumes of "+projectName(id)+" were not removed")

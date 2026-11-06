@@ -12,6 +12,7 @@ package hub
 // (CI), where that is a failure.
 
 import (
+	"github.com/portcullis/hub/internal/directory"
 	"bufio"
 	"bytes"
 	"context"

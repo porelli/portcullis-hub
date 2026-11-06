@@ -485,7 +485,7 @@ func (h *Hub) PreviewSettings(ctx context.Context, id string, u SettingsUpdate) 
 // The run is not cancelled with the request, and never waits for one in
 // progress (a hook can hold the delivery lock for its whole timeout):
 // busy = queued (TriggerRetry), reported as a busy unit; the panel polls.
-func (h *Hub) RetryDeliveries(ctx context.Context, id, actor string) (*DeliveryReport, error) {
+func (h *Hub) RetryDeliveries(ctx context.Context, id string, actor directory.Actor) (*DeliveryReport, error) {
 	if h.Template(id) == nil {
 		return nil, ErrNotFound
 	}

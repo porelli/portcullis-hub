@@ -128,7 +128,7 @@ func (s *Server) handlePutMyValue(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	me, err := s.Hub.SetPersonValue(r.Context(), r.PathValue("instance"), r.PathValue("key"), user, v, user)
+	me, err := s.Hub.SetPersonValue(r.Context(), r.PathValue("instance"), r.PathValue("key"), user, v, directory.Human(user))
 	if err != nil {
 		entryErr(w, user, err)
 		return
@@ -145,7 +145,7 @@ func (s *Server) handleDeleteMyValue(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no signed-in user (X-Forwarded-User)", http.StatusUnauthorized)
 		return
 	}
-	if err := s.Hub.ClearPersonValue(r.Context(), r.PathValue("instance"), r.PathValue("key"), user, user); err != nil {
+	if err := s.Hub.ClearPersonValue(r.Context(), r.PathValue("instance"), r.PathValue("key"), user, directory.Human(user)); err != nil {
 		entryErr(w, user, err)
 		return
 	}

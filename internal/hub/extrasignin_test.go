@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"github.com/portcullis/hub/internal/directory"
 	"strings"
 	"testing"
 
@@ -86,7 +87,7 @@ func TestExtraDomainSignInRendered(t *testing.T) {
 	}
 
 	// Back to the main domain: no sign-in router, portcullis-auth again.
-	if err := f.h.SetHosts("grafana-b", map[string]string{"grafana": "grafana-b.example.org"}, "alice"); err != nil {
+	if err := f.h.SetHosts("grafana-b", map[string]string{"grafana": "grafana-b.example.org"}, directory.Human("alice")); err != nil {
 		t.Fatal(err)
 	}
 	ov = readFile(t, f.h.overridePath("grafana-b"))
@@ -96,7 +97,7 @@ func TestExtraDomainSignInRendered(t *testing.T) {
 
 	// The default instance moved to the extra domain: its override (no
 	// label replacement) adds the same labels on the template's names.
-	if err := f.h.SetHosts("grafana", map[string]string{"grafana": "g.team-b.example.org"}, "alice"); err != nil {
+	if err := f.h.SetHosts("grafana", map[string]string{"grafana": "g.team-b.example.org"}, directory.Human("alice")); err != nil {
 		t.Fatal(err)
 	}
 	h.mu.RLock()

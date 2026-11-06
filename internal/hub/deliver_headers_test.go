@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"github.com/portcullis/hub/internal/directory"
 	"context"
 	"errors"
 	"os"
@@ -69,7 +70,7 @@ func headerFixture(t *testing.T, edit func(string) string) (*fixture, *fakePeopl
 // {{ADMIN_GROUP}} Admin (the template's row, kept), editors Editor.
 func headerEnable(t *testing.T, f *fixture) {
 	t.Helper()
-	if _, err := f.h.EnableAs(headerID, "root"); err != nil {
+	if _, err := f.h.EnableAs(headerID, directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	settle(f)
@@ -155,7 +156,7 @@ func TestHeaderRefusedWithNativeSignIn(t *testing.T) {
 		return strings.Replace(m, "  admin_group: admin_dash\n", "  admin_group: admin_dash\n  sso: false\n  native_login:\n    supported: true\n    note: its own accounts\n", 1)
 	})
 	headerEnable(t, f)
-	_, err := f.h.SaveSettings(headerID, SettingsUpdate{SignIn: strp(SignInNative)}, "admin")
+	_, err := f.h.SaveSettings(headerID, SettingsUpdate{SignIn: strp(SignInNative)}, directory.Human("admin"))
 	if statusOf(err) != 400 || !strings.Contains(err.Error(), "header") {
 		t.Fatalf("native sign-in with a header delivery: %v, want 400 naming the header", err)
 	}
@@ -440,7 +441,7 @@ func TestHeadersFollowSetHosts(t *testing.T) {
 	f.runner.mu.Lock()
 	f.runner.upErr = errors.New("up failed")
 	f.runner.mu.Unlock()
-	if err := f.h.SetHosts(headerID, map[string]string{"dash": moved, "dash-team": headerExtra, "dash-status": headerStatus}, "admin"); err == nil {
+	if err := f.h.SetHosts(headerID, map[string]string{"dash": moved, "dash-team": headerExtra, "dash-status": headerStatus}, directory.Human("admin")); err == nil {
 		t.Log("SetHosts: the restart did not fail")
 	}
 	settle(f)

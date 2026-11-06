@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"github.com/portcullis/hub/internal/directory"
 	"context"
 	"errors"
 	"maps"
@@ -684,7 +685,7 @@ func TestRebindRollbackKeepsConcurrentSave(t *testing.T) {
 				if calls == 1 {
 					// A settings save while the restart runs (it doesn't
 					// take the instance lock).
-					_, err := f.h.SaveSettings("samba", SettingsUpdate{Ports: map[string]string{"SAMBA_SMB_BIND": tc.bind, "SAMBA_WEB": "8099"}}, "bob")
+					_, err := f.h.SaveSettings("samba", SettingsUpdate{Ports: map[string]string{"SAMBA_SMB_BIND": tc.bind, "SAMBA_WEB": "8099"}}, directory.Human("bob"))
 					saved <- err
 					f.runner.upErr = &compose.Error{Command: "up", Err: errors.New("exit status 1"), Output: "cannot assign requested address"}
 				}

@@ -610,21 +610,21 @@ func TestEntriesInBackup(t *testing.T) {
 	f, people, _, _ := entryFixture(t)
 	mustSetEntry(t, f, entryID, "ext_id", "alice", aliceExt, "alice")
 	settle(f)
-	entry, err := f.h.BackupInstance(entryID, "root")
+	entry, err := f.h.BackupInstance(entryID, directory.Human("root"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := f.h.ClearPersonValue(context.Background(), entryID, "ext_id", "alice", "alice"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.h.RestoreInstance(entryID, entry.Archive, "root"); err != nil {
+	if _, err := f.h.RestoreInstance(entryID, entry.Archive, directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	settle(f)
 	if got := storedSettings(f, entryID).Entered["ext_id"]["alice"]; got.Value != aliceExt || got.UUID != people.uuidOf("alice") {
 		t.Errorf("after restore = %+v", got)
 	}
-	if _, err := f.h.RestoreInstanceAs(entry.Archive, "entryapp2", "root"); err != nil {
+	if _, err := f.h.RestoreInstanceAs(entry.Archive, "entryapp2", directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	if got := storedSettings(f, "entryapp2").Entered["ext_id"]["alice"]; got.Value != aliceExt {

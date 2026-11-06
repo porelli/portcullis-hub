@@ -153,12 +153,12 @@ type IdP interface {
 // need the groups (delete, restore into a new id), so a bad actor fails
 // before anything changes.
 type Groups interface {
-	ResolveActor(ctx context.Context, actor string) error
-	CreateInstanceGroup(ctx context.Context, actor, name string) (created bool, warnings []string, err error)
+	ResolveActor(ctx context.Context, actor directory.Actor) error
+	CreateInstanceGroup(ctx context.Context, actor directory.Actor, name string) (created bool, warnings []string, err error)
 	// MissingInstanceGroups returns the names that are no LLDAP group
 	// (read-only; an error: unknown, nothing is created).
 	MissingInstanceGroups(ctx context.Context, names []string) ([]string, error)
-	DeleteInstanceGroup(ctx context.Context, actor, name string) ([]string, error)
+	DeleteInstanceGroup(ctx context.Context, actor directory.Actor, name string) ([]string, error)
 }
 
 // People is the directory as per-person and per-group settings read it

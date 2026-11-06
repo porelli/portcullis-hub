@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"github.com/portcullis/hub/internal/directory"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -38,7 +39,7 @@ func TestFieldHeaderNeverReachesFreshInstance(t *testing.T) {
 	f, people, _ := headerFixture(t, nil)
 	sharedRoleField(f)
 	people.set(func(p *fakePeople) { p.err = errors.New("lldap down") })
-	if _, err := f.h.EnableAs(headerID, "root"); err != nil {
+	if _, err := f.h.EnableAs(headerID, directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	settle(f)
@@ -163,7 +164,7 @@ func TestSecretEnvLineAfterTemplateUpdate(t *testing.T) {
 				t.Errorf("%s: Expert Env shows %s=%q", when, k, v)
 			}
 		}
-		entry, err := f.h.BackupInstance("secretapp", "root")
+		entry, err := f.h.BackupInstance("secretapp", directory.Human("root"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -327,7 +328,7 @@ func TestRestartRefusalLeavesAppRunning(t *testing.T) {
 func TestOptionEnvFailsClosedPerVariable(t *testing.T) {
 	f, _, _ := privFixture(t)
 	const id = "privapp"
-	if _, err := f.h.SaveSettings(id, SettingsUpdate{Values: vals("motd", "hello", "banner", "world")}, "root"); err != nil {
+	if _, err := f.h.SaveSettings(id, SettingsUpdate{Values: vals("motd", "hello", "banner", directory.Human("world"))}, "root"); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.h.Enable(id); err != nil {
@@ -374,7 +375,7 @@ func TestSaveNeverBlocksOnDeliveryLock(t *testing.T) {
 	}
 	done := make(chan result, 1)
 	go func() {
-		res, err := f.h.SaveSettings(id, SettingsUpdate{Values: vals("motd", "busy save")}, "root")
+		res, err := f.h.SaveSettings(id, SettingsUpdate{Values: vals("motd", directory.Human("busy save"))}, "root")
 		done <- result{res, err}
 	}()
 	var r result
@@ -669,7 +670,7 @@ func TestBackupBlanksByValueOnlyOrphans(t *testing.T) {
 	if err := f.h.SaveEnv(id, map[string]string{"PUID": "1000", "OLD_KEY": "1000"}); err != nil {
 		t.Fatal(err)
 	}
-	entry, err := f.h.BackupInstance(id, "root")
+	entry, err := f.h.BackupInstance(id, directory.Human("root"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -710,7 +711,7 @@ func TestCommittedSaveWithEnvFailureDelivers(t *testing.T) {
 	if err := os.Chmod(dir, 0o555); err != nil {
 		t.Fatal(err)
 	}
-	res, err := f.h.SaveSettings(id, SettingsUpdate{Values: vals("motd", "hello")}, "root")
+	res, err := f.h.SaveSettings(id, SettingsUpdate{Values: vals("motd", directory.Human("hello"))}, "root")
 	os.Chmod(dir, 0o755)
 	if err != nil {
 		t.Fatalf("SaveSettings = %v, want the committed save answered with a warning", err)

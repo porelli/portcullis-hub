@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"github.com/portcullis/hub/internal/directory"
 	"context"
 	"encoding/json"
 	"errors"
@@ -324,7 +325,7 @@ func TestDeleteRefusedWhileAssigned(t *testing.T) {
 		t.Fatalf("audit %+v", e)
 	}
 	// Moved to the main domain: the delete goes through (warning passed on).
-	if err := f.h.SetHosts("grafana-b", map[string]string{"grafana": "grafana-b.example.org"}, "alice"); err != nil {
+	if err := f.h.SetHosts("grafana-b", map[string]string{"grafana": "grafana-b.example.org"}, directory.Human("alice")); err != nil {
 		t.Fatal(err)
 	}
 	api.warning = "some DNS records couldn't be removed"

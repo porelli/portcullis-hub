@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"github.com/portcullis/hub/internal/directory"
 	"context"
 	"encoding/json"
 	"os"
@@ -268,7 +269,7 @@ func TestLifecycleDownWaitsForDeliveryLock(t *testing.T) {
 	downs := countCalls(c.f, "down:"+smbProject)
 	done := make(chan error, 1)
 	backup := func() {
-		_, err := c.f.h.BackupInstance(smbID, "root")
+		_, err := c.f.h.BackupInstance(smbID, directory.Human("root"))
 		done <- err
 	}
 	go backup()
@@ -343,7 +344,7 @@ func TestRequiresAnyOnlyTouchedKeys(t *testing.T) {
 	c.people.deleteGroup("family")
 	c.f.h.PurgeGroupSettings(context.Background(), "root", "family", old)
 	settle(c.f)
-	if _, err := c.f.h.SaveSettings(smbID, SettingsUpdate{Values: vals("share2_name", "Photos")}, "root"); err != nil {
+	if _, err := c.f.h.SaveSettings(smbID, SettingsUpdate{Values: vals("share2_name", directory.Human("Photos"))}, "root"); err != nil {
 		t.Errorf("an unrelated save after the purge = %v", err)
 	}
 	// Touching the slot still judges it.

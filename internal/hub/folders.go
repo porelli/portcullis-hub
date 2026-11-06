@@ -617,7 +617,7 @@ func (h *Hub) probeAndCheck(ctx context.Context, id, p string, create bool) (*fo
 // 409), the gid (in.GID adopted, else the lowest never allocated, added
 // to folder_gids) and the save. The answer's warnings: an adopted gid's,
 // a filesystem the fixer won't write to.
-func (h *Hub) CreateFolder(ctx context.Context, in FolderInput, actor string) (view *FolderView, warnings []string, err error) {
+func (h *Hub) CreateFolder(ctx context.Context, in FolderInput, actor directory.Actor) (view *FolderView, warnings []string, err error) {
 	detail := ""
 	defer func() { h.auditFolder(actor, "folder.create", in.ID, detail, err) }()
 	p, err := h.folderPrechecks(ctx, in)
@@ -761,7 +761,7 @@ func usesText(uses []FolderUseView) string {
 // run again and the root's device, inode and mount root are stored again,
 // R41/R43; the last apply is forgotten: its snapshot is of another tree).
 // The id and gid never change (400). in.Path "" keeps the path.
-func (h *Hub) UpdateFolder(ctx context.Context, id string, in FolderInput, actor string) (view *FolderView, err error) {
+func (h *Hub) UpdateFolder(ctx context.Context, id string, in FolderInput, actor directory.Actor) (view *FolderView, err error) {
 	detail := ""
 	defer func() { h.auditFolder(actor, "folder.update", id, detail, err) }()
 	if in.ID != "" && in.ID != id {
@@ -861,7 +861,7 @@ func (h *Hub) UpdateFolder(ctx context.Context, id string, in FolderInput, actor
 // DeleteFolder removes a folder's definition: 409 while any setting value
 // names it (listing them). Files are never touched; its gid stays in
 // folder_gids.
-func (h *Hub) DeleteFolder(id, actor string) (err error) {
+func (h *Hub) DeleteFolder(id string, actor directory.Actor) (err error) {
 	detail := ""
 	defer func() { h.auditFolder(actor, "folder.delete", id, detail, err) }()
 	unlock, err := h.folderLock(id)
@@ -1047,7 +1047,7 @@ func rawErrorText(err error) string {
 	}
 }
 
-func (h *Hub) auditFolder(actor, action, id, detail string, err error, instances ...string) {
+func (h *Hub) auditFolder(actor directory.Actor, action, id, detail string, err error, instances ...string) {
 	h.mu.RLock()
 	a := h.audit
 	var users []string
@@ -1060,7 +1060,7 @@ func (h *Hub) auditFolder(actor, action, id, detail string, err error, instances
 	if a == nil {
 		return
 	}
-	e := directory.AuditEntry{Actor: actor, Action: action, Target: clip(id, 64), Detail: detail, Result: "ok"}
+	e := directory.AuditEntry{Actor: actor.User, Via: actor.Via, Client: actor.Client, Action: action, Target: clip(id, 64), Detail: detail, Result: "ok"}
 	if err != nil {
 		// Redacted like the op record (H3): the error's own redaction
 		// set, then every affected instance's and the folder's users'

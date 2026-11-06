@@ -68,14 +68,14 @@ func (h *Hub) SetAudit(a Auditor) {
 
 // auditOp records an instance operation; Result from err as the API does
 // (a 4xx StatusError is "refused").
-func (h *Hub) auditOp(actor, action, target, detail string, err error) {
+func (h *Hub) auditOp(actor directory.Actor, action, target, detail string, err error) {
 	h.mu.RLock()
 	a := h.audit
 	h.mu.RUnlock()
 	if a == nil {
 		return
 	}
-	e := directory.AuditEntry{Actor: actor, Action: action, Target: target, Detail: detail, Result: "ok"}
+	e := directory.AuditEntry{Actor: actor.User, Via: actor.Via, Client: actor.Client, Action: action, Target: target, Detail: detail, Result: "ok"}
 	if err != nil {
 		msg := err.Error()
 		// An instance's errors are redacted like its op records (stored
@@ -535,7 +535,7 @@ func hostsDetail(old, new map[string]string) string {
 // failure, SetHosts with the instance's current hostnames re-applies steps
 // 2–4 (Keycloak, files, policy, restart) instead of being a no-op, so
 // retrying the same change reconciles.
-func (h *Hub) SetHosts(instanceID string, hosts map[string]string, actor string) (err error) {
+func (h *Hub) SetHosts(instanceID string, hosts map[string]string, actor directory.Actor) (err error) {
 	detail := ""
 	defer func() {
 		var busy ErrBusy
@@ -543,7 +543,7 @@ func (h *Hub) SetHosts(instanceID string, hosts map[string]string, actor string)
 			h.auditOp(actor, "instance.update", instanceID, detail, err)
 		}
 	}()
-	if strings.TrimSpace(actor) == "" {
+	if strings.TrimSpace(actor.User) == "" {
 		return statusErr(400, "no signed-in user to audit the change as")
 	}
 	unlock, err := h.lockApp(instanceID)

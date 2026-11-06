@@ -202,7 +202,7 @@ func (s *Server) handleAdminRevokeCredential(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	if err := s.Hub.AdminRevokeCredential(r.Context(), id, key, user, actor(r)); err != nil {
+	if err := s.Hub.AdminRevokeCredential(r.Context(), id, key, user, requestActor(r)); err != nil {
 		var se *hub.StatusError
 		if errors.As(err, &se) {
 			http.Error(w, se.Error(), se.Status)

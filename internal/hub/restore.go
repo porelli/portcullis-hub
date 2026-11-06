@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/portcullis/hub/internal/docker"
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
@@ -204,7 +205,7 @@ func (h *Hub) configProblem(t *templates.Template, c *instanceConfig, archive st
 // enable (Keycloak clients, access role, callbacks, policy, compose up).
 // Any failure there puts the pre-restore backup back the same way (an
 // *OpError with rolled_back; op "restore"). Audited as instance.restore.
-func (h *Hub) RestoreInstance(id, archive, actor string) (res *RestoreResult, err error) {
+func (h *Hub) RestoreInstance(id, archive string, actor directory.Actor) (res *RestoreResult, err error) {
 	return h.restoreInstance(id, archive, actor, nil)
 }
 
@@ -213,7 +214,7 @@ func (h *Hub) RestoreInstance(id, archive, actor string) (res *RestoreResult, er
 // archive file exists), before the archive is verified (StartRestore
 // answers 202 then; a verification refusal is the operation's failure,
 // with nothing changed).
-func (h *Hub) restoreInstance(id, archive, actor string, ready func()) (res *RestoreResult, err error) {
+func (h *Hub) restoreInstance(id, archive string, actor directory.Actor, ready func()) (res *RestoreResult, err error) {
 	res = &RestoreResult{}
 	defer func() {
 		h.auditOp(actor, "instance.restore", id, "archive="+archive+" pre_restore="+res.PreRestoreBackup, err)
@@ -713,7 +714,7 @@ func (h *Hub) rollbackStaged(id string, view *templates.Template, pre *staged, w
 // settings, policy, public exceptions and env (each Keycloak client's
 // secret_env regenerated). A failure after the create removes what it
 // created. Audited as instance.restore.
-func (h *Hub) RestoreInstanceAs(archive, newID, actor string) (res *RestoreResult, err error) {
+func (h *Hub) RestoreInstanceAs(archive, newID string, actor directory.Actor) (res *RestoreResult, err error) {
 	return h.restoreInstanceAs(archive, newID, actor, nil, nil)
 }
 
@@ -722,7 +723,7 @@ func (h *Hub) RestoreInstanceAs(archive, newID, actor string) (res *RestoreResul
 // would (validated, collisions refused); the others default to the
 // archive's hostname for hosts.immutable routers, else the new id's
 // default on the main domain.
-func (h *Hub) RestoreInstanceAsWith(archive, newID, actor string, hosts map[string]string) (res *RestoreResult, err error) {
+func (h *Hub) RestoreInstanceAsWith(archive, newID string, actor directory.Actor, hosts map[string]string) (res *RestoreResult, err error) {
 	return h.restoreInstanceAs(archive, newID, actor, hosts, nil)
 }
 
@@ -730,7 +731,7 @@ func (h *Hub) RestoreInstanceAsWith(archive, newID, actor string, hosts map[stri
 // the request is accepted (archive name and new id valid, lock held, the
 // archive file exists, the actor resolves), before the archive is
 // verified (StartRestoreAs answers 202 then).
-func (h *Hub) restoreInstanceAs(archive, newID, actor string, hosts map[string]string, ready func()) (res *RestoreResult, err error) {
+func (h *Hub) restoreInstanceAs(archive, newID string, actor directory.Actor, hosts map[string]string, ready func()) (res *RestoreResult, err error) {
 	res = &RestoreResult{}
 	defer func() {
 		h.auditOp(actor, "instance.restore", newID, "archive="+archive+" new_instance=true", err)

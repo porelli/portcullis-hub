@@ -20,6 +20,7 @@ import (
 	"github.com/portcullis/hub/internal/settings"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
+	"github.com/portcullis/hub/internal/directory"
 )
 
 // The doctor's one-click fixes (contract §14.6, Task 12). A fix is
@@ -50,7 +51,7 @@ type FixPlan struct {
 type Fixer interface {
 	Kind() string
 	Preview(ctx context.Context, h *Hub, f doctor.Finding, params map[string]string) (*FixPlan, error)
-	Apply(h *Hub, f doctor.Finding, params map[string]string, planHash, actor string) (*AsyncOp, error)
+	Apply(h *Hub, f doctor.Finding, params map[string]string, planHash string, actor directory.Actor) (*AsyncOp, error)
 }
 
 // fixTargeter is an optional Fixer part: the ids doctor.fix's detail
@@ -173,10 +174,10 @@ func (h *Hub) PreviewFix(ctx context.Context, fp string, params map[string]strin
 // planHash (else 409): 202 semantics. Audited doctor.fix (target fp,
 // detail "fix=<kind> <ids> op=<op id>"; refusals refused) after the call
 // returns, never under a lock of the Hub's.
-func (h *Hub) ApplyFix(ctx context.Context, fp string, params map[string]string, planHash, actor string) (op *AsyncOp, err error) {
+func (h *Hub) ApplyFix(ctx context.Context, fp string, params map[string]string, planHash string, actor directory.Actor) (op *AsyncOp, err error) {
 	detail := ""
 	defer func() { h.auditDoctor(actor, "doctor.fix", fp, detail, err) }()
-	if actor == "" {
+	if actor.User == "" {
 		return nil, statusErr(http.StatusUnauthorized, "a fix needs a signed-in admin")
 	}
 	f, fx, err := h.findingFix(ctx, fp, params)
@@ -266,7 +267,7 @@ func (reapplyFolderFixer) Preview(ctx context.Context, h *Hub, f doctor.Finding,
 	return &FixPlan{Lines: plan.Lines, Warnings: plan.Warnings, Assign: plan, Hash: plan.Hash}, nil
 }
 
-func (reapplyFolderFixer) Apply(h *Hub, f doctor.Finding, params map[string]string, planHash, actor string) (*AsyncOp, error) {
+func (reapplyFolderFixer) Apply(h *Hub, f doctor.Finding, params map[string]string, planHash string, actor directory.Actor) (*AsyncOp, error) {
 	if err := checkFixParams(params); err != nil {
 		return nil, err
 	}
@@ -306,7 +307,7 @@ func (undoFolderFixer) Preview(ctx context.Context, h *Hub, f doctor.Finding, pa
 	return &FixPlan{Lines: plan.Lines, Warnings: plan.Warnings, Assign: plan, Hash: plan.Hash}, nil
 }
 
-func (undoFolderFixer) Apply(h *Hub, f doctor.Finding, params map[string]string, planHash, actor string) (*AsyncOp, error) {
+func (undoFolderFixer) Apply(h *Hub, f doctor.Finding, params map[string]string, planHash string, actor directory.Actor) (*AsyncOp, error) {
 	if err := checkFixParams(params); err != nil {
 		return nil, err
 	}
@@ -461,7 +462,7 @@ func (manageAsFolderFixer) Preview(ctx context.Context, h *Hub, f doctor.Finding
 // deletes the definition again (its gid stays used: never reused) and
 // answers the refusal. folder.create / folder.delete are audited after
 // the lock is released.
-func (manageAsFolderFixer) Apply(h *Hub, f doctor.Finding, params map[string]string, planHash, actor string) (op *AsyncOp, err error) {
+func (manageAsFolderFixer) Apply(h *Hub, f doctor.Finding, params map[string]string, planHash string, actor directory.Actor) (op *AsyncOp, err error) {
 	in, err := manageInput(f, params)
 	if err != nil {
 		return nil, err
@@ -683,14 +684,14 @@ func (rebindPortFixer) Preview(ctx context.Context, h *Hub, f doctor.Finding, pa
 // only when the old bind is back and running. A failed down alone (the
 // up worked) is a warning. Audited settings.change (ports)
 // after the lock is released.
-func (rebindPortFixer) Apply(h *Hub, f doctor.Finding, params map[string]string, planHash, actor string) (*AsyncOp, error) {
+func (rebindPortFixer) Apply(h *Hub, f doctor.Finding, params map[string]string, planHash string, actor directory.Actor) (*AsyncOp, error) {
 	ctx := context.Background()
 	c0, err := h.rebindPlan(ctx, f, params)
 	if err != nil {
 		return nil, err
 	}
 	inst := c0.port.Instance
-	return h.startAsync(inst, OpRebind, func(ready func()) (map[string]string, []string, error) {
+	return h.startAsync(inst, OpRebind, actor, func(ready func()) (map[string]string, []string, error) {
 		var changes []settingChange
 		var auditErr error
 		defer func() {

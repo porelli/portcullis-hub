@@ -437,7 +437,7 @@ func TestInstanceDeleteRevokesDeleted(t *testing.T) {
 	c := credSvcFixture(t)
 	addCred(t, c.f.h, smbB, "alice", credentials.NTHash([]byte("a")))
 	execs := len(c.f.engine.ExecCalls())
-	if _, err := c.f.h.DeleteInstance(smbB, smbB, "root"); err != nil {
+	if _, err := c.f.h.DeleteInstance(smbB, smbB, directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	settle(c.f)

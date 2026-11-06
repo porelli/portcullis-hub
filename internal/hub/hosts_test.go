@@ -135,7 +135,7 @@ func TestHostCollisions(t *testing.T) {
 		"grafana_c2.example.org":         {400, "not a valid hostname"},
 		"":                               {400, "not a valid hostname"},
 	} {
-		err := f.h.SetHosts("grafana-c", map[string]string{"grafana": host}, "alice")
+		err := f.h.SetHosts("grafana-c", map[string]string{"grafana": host}, directory.Human("alice"))
 		if statusOf(err) != want.status || !strings.Contains(err.Error(), want.why) {
 			t.Errorf("host %q: %v, want %d %q", host, err, want.status, want.why)
 		}
@@ -145,16 +145,16 @@ func TestHostCollisions(t *testing.T) {
 	}
 	// Other refusals: unknown host router, a missing one, no actor, a
 	// legacy template.
-	if err := f.h.SetHosts("grafana-c", map[string]string{"grafana": "ok.example.org", "nope": "x.example.org"}, "alice"); statusOf(err) != 400 {
+	if err := f.h.SetHosts("grafana-c", map[string]string{"grafana": "ok.example.org", "nope": "x.example.org"}, directory.Human("alice")); statusOf(err) != 400 {
 		t.Errorf("unknown host router: %v", err)
 	}
-	if err := f.h.SetHosts("grafana-c", map[string]string{}, "alice"); statusOf(err) != 400 {
+	if err := f.h.SetHosts("grafana-c", map[string]string{}, directory.Human("alice")); statusOf(err) != 400 {
 		t.Errorf("no hosts: %v", err)
 	}
-	if err := f.h.SetHosts("grafana-c", map[string]string{"grafana": "ok.example.org"}, ""); statusOf(err) != 400 {
+	if err := f.h.SetHosts("grafana-c", map[string]string{"grafana": "ok.example.org"}, directory.Human("")); statusOf(err) != 400 {
 		t.Errorf("no actor: %v", err)
 	}
-	if err := f.h.SetHosts("nope", map[string]string{"grafana": "ok.example.org"}, "alice"); statusOf(err) != 404 {
+	if err := f.h.SetHosts("nope", map[string]string{"grafana": "ok.example.org"}, directory.Human("alice")); statusOf(err) != 404 {
 		t.Errorf("unknown instance: %v", err)
 	}
 	// Refused before anything changes: state, files, policy, Keycloak,
@@ -181,7 +181,7 @@ func TestHostCollisions(t *testing.T) {
 		{"g.team-c.example.net", "g.team-c.example.net"},
 	} {
 		host, want := c[0], c[1]
-		if err := f.h.SetHosts("grafana-c", map[string]string{"grafana": host}, "alice"); err != nil {
+		if err := f.h.SetHosts("grafana-c", map[string]string{"grafana": host}, directory.Human("alice")); err != nil {
 			t.Fatalf("host %q: %v", host, err)
 		}
 		v := f.h.Template("grafana-c")
@@ -196,7 +196,7 @@ func TestHostCollisions(t *testing.T) {
 	// A domain that stops being assignable keeps its hostnames (§12.3),
 	// but receives no new ones.
 	doms.set(Domain{Name: "team-c.example.net", State: "error"})
-	if err := f.h.SetHosts("grafana-c", map[string]string{"grafana": "h.team-c.example.net"}, "alice"); statusOf(err) != 409 {
+	if err := f.h.SetHosts("grafana-c", map[string]string{"grafana": "h.team-c.example.net"}, directory.Human("alice")); statusOf(err) != 409 {
 		t.Errorf("non-assignable domain: %v", err)
 	}
 	if v := f.h.Template("grafana-c"); v == nil || v.Hosts["grafana"] != "g.team-c.example.net" {
@@ -245,7 +245,7 @@ func TestSetHostsUpdatesKeycloakRedirects(t *testing.T) {
 	kc.SetClientURIs(main.ID, []string{"https://chat-b.example.org/cb", "https://chat-b.example.org/extra"},
 		[]string{"https://chat-b.example.org", "+", "https://chat-b.example.org:8443"})
 
-	if err := f.h.SetHosts("chat-b", map[string]string{"chat": "talk.team-b.example.org"}, "alice"); err != nil {
+	if err := f.h.SetHosts("chat-b", map[string]string{"chat": "talk.team-b.example.org"}, directory.Human("alice")); err != nil {
 		t.Fatal(err)
 	}
 	main, admin = kc.ClientByClientID("chat-b"), kc.ClientByClientID("chat-b-chat-admin")
@@ -268,21 +268,21 @@ func TestSetHostsUpdatesKeycloakRedirects(t *testing.T) {
 
 	// grafana's router uses portcullis-auth: an extra-domain host gets its
 	// callback on portcullis-forward-auth, and loses it when it leaves.
-	if err := f.h.SetHosts("grafana-b", map[string]string{"grafana": "grafana.team-b.example.org"}, "alice"); err != nil {
+	if err := f.h.SetHosts("grafana-b", map[string]string{"grafana": "grafana.team-b.example.org"}, directory.Human("alice")); err != nil {
 		t.Fatal(err)
 	}
 	want := append(append([]string{}, coreCB...), "https://grafana.team-b.example.org/oauth2/callback")
 	if got := kc.ClientByClientID(keycloak.ForwardAuthClient).RedirectURIs; !reflect.DeepEqual(got, want) {
 		t.Errorf("forward-auth callbacks = %v, want %v", got, want)
 	}
-	if err := f.h.SetHosts("grafana-b", map[string]string{"grafana": "dash.team-b.example.org"}, "alice"); err != nil {
+	if err := f.h.SetHosts("grafana-b", map[string]string{"grafana": "dash.team-b.example.org"}, directory.Human("alice")); err != nil {
 		t.Fatal(err)
 	}
 	want = append(append([]string{}, coreCB...), "https://dash.team-b.example.org/oauth2/callback")
 	if got := kc.ClientByClientID(keycloak.ForwardAuthClient).RedirectURIs; !reflect.DeepEqual(got, want) {
 		t.Errorf("forward-auth callbacks after a move = %v, want %v", got, want)
 	}
-	if err := f.h.SetHosts("grafana-b", map[string]string{"grafana": "grafana-b2.example.org"}, "alice"); err != nil {
+	if err := f.h.SetHosts("grafana-b", map[string]string{"grafana": "grafana-b2.example.org"}, directory.Human("alice")); err != nil {
 		t.Fatal(err)
 	}
 	if got := kc.ClientByClientID(keycloak.ForwardAuthClient).RedirectURIs; !reflect.DeepEqual(got, coreCB) {
@@ -297,7 +297,7 @@ func TestSetHostsUpdatesKeycloakRedirects(t *testing.T) {
 	callsBefore := len(f.runner.Calls())
 	beforeMain := kc.ClientByClientID("chat-b")
 	kc.SetFailPrefix("PUT /admin/realms/portcullis/clients/" + admin.ID)
-	err := f.h.SetHosts("chat-b", map[string]string{"chat": "chat-new.example.org"}, "alice")
+	err := f.h.SetHosts("chat-b", map[string]string{"chat": "chat-new.example.org"}, directory.Human("alice"))
 	kc.SetFailPrefix("")
 	if statusOf(err) != 502 {
 		t.Fatalf("Keycloak failure: %v", err)
@@ -323,13 +323,13 @@ func TestSetHostsUpdatesKeycloakRedirects(t *testing.T) {
 	}
 	// A failing forward-auth update is undone the same way.
 	kc.SetFailPrefix("PUT /admin/realms/portcullis/clients/" + fa)
-	err = f.h.SetHosts("grafana-b", map[string]string{"grafana": "g.team-b.example.org"}, "alice")
+	err = f.h.SetHosts("grafana-b", map[string]string{"grafana": "g.team-b.example.org"}, directory.Human("alice"))
 	kc.SetFailPrefix("")
 	if statusOf(err) != 502 || f.h.Template("grafana-b").Hosts["grafana"] != "grafana-b2.example.org" {
 		t.Errorf("forward-auth failure: %v, hosts %v", err, f.h.Template("grafana-b").Hosts)
 	}
 	// Retrying converges.
-	if err := f.h.SetHosts("chat-b", map[string]string{"chat": "chat-new.example.org"}, "alice"); err != nil {
+	if err := f.h.SetHosts("chat-b", map[string]string{"chat": "chat-new.example.org"}, directory.Human("alice")); err != nil {
 		t.Fatal(err)
 	}
 	if got := strings.Join(kc.ClientByClientID("chat-b-chat-admin").RedirectURIs, ","); got != "https://chat-new.example.org/admin/cb" {
@@ -401,7 +401,7 @@ func TestSetHostsRewritesPublicShareHosts(t *testing.T) {
 	}
 	callsBefore := len(f.runner.Calls())
 
-	if err := f.h.SetHosts("cloud-b", map[string]string{"cloud": "files.example.org"}, "alice"); err != nil {
+	if err := f.h.SetHosts("cloud-b", map[string]string{"cloud": "files.example.org"}, directory.Human("alice")); err != nil {
 		t.Fatal(err)
 	}
 	// The share link keeps its token and moves to the new host; the old
@@ -438,14 +438,14 @@ func TestSetHostsRewritesPublicShareHosts(t *testing.T) {
 	}
 	// Same hosts again: nothing to do.
 	callsBefore = len(f.runner.Calls())
-	if err := f.h.SetHosts("cloud-b", map[string]string{"cloud": "FILES.example.org"}, "alice"); err != nil || len(f.runner.Calls()) != callsBefore {
+	if err := f.h.SetHosts("cloud-b", map[string]string{"cloud": "FILES.example.org"}, directory.Human("alice")); err != nil || len(f.runner.Calls()) != callsBefore {
 		t.Errorf("no-op change: %v, calls %v", err, f.runner.Calls()[callsBefore:])
 	}
 }
 
 func TestSetHostsDefaultInstance(t *testing.T) {
 	f := newInstanceFixture(t, nil)
-	if err := f.h.SetHosts("grafana", map[string]string{"grafana": "dash.example.org"}, "alice"); err != nil {
+	if err := f.h.SetHosts("grafana", map[string]string{"grafana": "dash.example.org"}, directory.Human("alice")); err != nil {
 		t.Fatal(err)
 	}
 	st, _ := state.Load(filepath.Join(f.data, "state.yaml"))
@@ -453,7 +453,7 @@ func TestSetHostsDefaultInstance(t *testing.T) {
 		t.Errorf("default instance entry = %+v", e)
 	}
 	// Back to its default: no entry needed any more.
-	if err := f.h.SetHosts("grafana", map[string]string{"grafana": "grafana.example.org"}, "alice"); err != nil {
+	if err := f.h.SetHosts("grafana", map[string]string{"grafana": "grafana.example.org"}, directory.Human("alice")); err != nil {
 		t.Fatal(err)
 	}
 	st, _ = state.Load(filepath.Join(f.data, "state.yaml"))
@@ -462,7 +462,7 @@ func TestSetHostsDefaultInstance(t *testing.T) {
 	}
 	// A legacy (${PORTCULLIS_DOMAIN}) template's hostnames are fixed.
 	g := newFixture(t)
-	if err := g.h.SetHosts("grafana", map[string]string{"grafana": "dash.example.org"}, "alice"); statusOf(err) != 409 {
+	if err := g.h.SetHosts("grafana", map[string]string{"grafana": "dash.example.org"}, directory.Human("alice")); statusOf(err) != 409 {
 		t.Errorf("legacy template: %v", err)
 	}
 }
@@ -510,7 +510,7 @@ func TestHostRulesWhateverTheClassification(t *testing.T) {
 		if host == "x.auth.example.org" || host == "x.hub.example.org" || host == "a.x.hub.example.org" {
 			want, why = 400, "deeper names need an enrolled domain"
 		}
-		err := f.h.SetHosts("grafana-c", map[string]string{"grafana": host}, "alice")
+		err := f.h.SetHosts("grafana-c", map[string]string{"grafana": host}, directory.Human("alice"))
 		if statusOf(err) != want || !strings.Contains(err.Error(), why) {
 			t.Errorf("host %s: %v, want %d %q", host, err, want, why)
 		}
@@ -520,14 +520,14 @@ func TestHostRulesWhateverTheClassification(t *testing.T) {
 	}
 	// Moved away, the team template's default hostname stays reserved —
 	// also for an extra-domain host on the enrolled team-a.<main>.
-	if err := f.h.SetHosts("team", map[string]string{"team": "t.example.org"}, "alice"); err != nil {
+	if err := f.h.SetHosts("team", map[string]string{"team": "t.example.org"}, directory.Human("alice")); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.h.SetHosts("grafana-c", map[string]string{"grafana": "team-a.example.org"}, "alice"); statusOf(err) != 409 || !strings.Contains(err.Error(), "default hostname of template team") {
+	if err := f.h.SetHosts("grafana-c", map[string]string{"grafana": "team-a.example.org"}, directory.Human("alice")); statusOf(err) != 409 || !strings.Contains(err.Error(), "default hostname of template team") {
 		t.Errorf("reserved default on an enrolled apex: %v", err)
 	}
 	// Other names on the enrolled team-a.<main> are fine (extra hosts).
-	if err := f.h.SetHosts("grafana-c", map[string]string{"grafana": "g.team-a.example.org"}, "alice"); err != nil {
+	if err := f.h.SetHosts("grafana-c", map[string]string{"grafana": "g.team-a.example.org"}, directory.Human("alice")); err != nil {
 		t.Fatal(err)
 	}
 	if v := f.h.Template("grafana-c"); len(v.ExtraHosts) != 1 || len(v.Subdomains) != 0 {
@@ -567,7 +567,7 @@ func TestSetHostsFileFailureBeforeCommit(t *testing.T) {
 	if err := os.Chmod(envDir, 0500); err != nil {
 		t.Fatal(err)
 	}
-	err := f.h.SetHosts("chat-b", map[string]string{"chat": "talk.example.org"}, "alice")
+	err := f.h.SetHosts("chat-b", map[string]string{"chat": "talk.example.org"}, directory.Human("alice"))
 	os.Chmod(envDir, 0755)
 	if statusOf(err) != 500 || !strings.Contains(err.Error(), "nothing changed") {
 		t.Fatalf("file failure: %v", err)
@@ -617,7 +617,7 @@ func TestSetHostsFailuresAfterCommit(t *testing.T) {
 			f := chatB(t)
 			fix := c.breakIt(f)
 			calls := len(f.runner.Calls())
-			err := f.h.SetHosts("chat-b", map[string]string{"chat": "talk.example.org"}, "alice")
+			err := f.h.SetHosts("chat-b", map[string]string{"chat": "talk.example.org"}, directory.Human("alice"))
 			var oe *OpError
 			if !errors.As(err, &oe) || oe.Record.Op != OpHosts || !strings.Contains(err.Error(), c.want) {
 				t.Fatalf("got %v", err)
@@ -641,7 +641,7 @@ func TestSetHostsFailuresAfterCommit(t *testing.T) {
 			// The same hostnames again re-apply everything.
 			fix()
 			calls = len(f.runner.Calls())
-			if err := f.h.SetHosts("chat-b", map[string]string{"chat": "talk.example.org"}, "alice"); err != nil {
+			if err := f.h.SetHosts("chat-b", map[string]string{"chat": "talk.example.org"}, directory.Human("alice")); err != nil {
 				t.Fatalf("retry: %v", err)
 			}
 			if len(f.idp.hostUpdates) != 4 || !strings.Contains(strings.Join(f.runner.Calls()[calls:], " "), "up:portcullis-chat-b") {
@@ -655,7 +655,7 @@ func TestSetHostsFailuresAfterCommit(t *testing.T) {
 			}
 			// Now it is a no-op again.
 			calls = len(f.runner.Calls())
-			if err := f.h.SetHosts("chat-b", map[string]string{"chat": "talk.example.org"}, "alice"); err != nil || len(f.runner.Calls()) != calls || len(f.idp.hostUpdates) != 4 {
+			if err := f.h.SetHosts("chat-b", map[string]string{"chat": "talk.example.org"}, directory.Human("alice")); err != nil || len(f.runner.Calls()) != calls || len(f.idp.hostUpdates) != 4 {
 				t.Errorf("no-op: %v", err)
 			}
 		})
@@ -682,7 +682,7 @@ func TestSetHostsLostRaceKeepsOthersCallbacks(t *testing.T) {
 		}
 	}
 	f.idp.mu.Unlock()
-	err := f.h.SetHosts("grafana-b", map[string]string{"grafana": "g.team-b.example.org"}, "alice")
+	err := f.h.SetHosts("grafana-b", map[string]string{"grafana": "g.team-b.example.org"}, directory.Human("alice"))
 	if statusOf(err) != 409 {
 		t.Fatalf("lost race: %v", err)
 	}
@@ -723,7 +723,7 @@ func TestSetHostsConcurrentCallbacks(t *testing.T) {
 		wg.Add(1)
 		go func(id string) {
 			defer wg.Done()
-			if err := f.h.SetHosts(id, map[string]string{"grafana": id + ".team-b.example.org"}, "alice"); err != nil {
+			if err := f.h.SetHosts(id, map[string]string{"grafana": id + ".team-b.example.org"}, directory.Human("alice")); err != nil {
 				t.Error(err)
 			}
 		}(id)
@@ -755,7 +755,7 @@ func TestSetHostsFailedRestartDeniesOldHost(t *testing.T) {
 		t.Fatalf("before: group = %q", g)
 	}
 	f.runner.upErr = errors.New("boom")
-	if err := f.h.SetHosts("chat-b", map[string]string{"chat": "talk.example.org"}, "alice"); err == nil {
+	if err := f.h.SetHosts("chat-b", map[string]string{"chat": "talk.example.org"}, directory.Human("alice")); err == nil {
 		t.Fatal("restart failure not reported")
 	}
 	f.h.Reconcile(context.Background())
@@ -768,7 +768,7 @@ func TestSetHostsFailedRestartDeniesOldHost(t *testing.T) {
 	}
 	// The restart succeeds: the old host leaves the runtime and the file.
 	f.runner.upErr = nil
-	if err := f.h.SetHosts("chat-b", map[string]string{"chat": "talk.example.org"}, "alice"); err != nil {
+	if err := f.h.SetHosts("chat-b", map[string]string{"chat": "talk.example.org"}, directory.Human("alice")); err != nil {
 		t.Fatal(err)
 	}
 	old.Labels["traefik.http.routers.chat-b_chat.rule"] = "Host(`talk.example.org`)"

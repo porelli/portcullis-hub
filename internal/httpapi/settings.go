@@ -42,7 +42,7 @@ func (s *Server) handlePutEntry(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	row, err := s.Hub.SetEntryAsAdmin(r.Context(), id, r.PathValue("key"), r.PathValue("user"), v, actor(r))
+	row, err := s.Hub.SetEntryAsAdmin(r.Context(), id, r.PathValue("key"), r.PathValue("user"), v, requestActor(r))
 	if err != nil {
 		writeErr(w, err, http.StatusInternalServerError)
 		return
@@ -57,7 +57,7 @@ func (s *Server) handleDeleteEntry(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.Hub.ClearEntryAsAdmin(r.Context(), id, r.PathValue("key"), r.PathValue("user"), actor(r)); err != nil {
+	if err := s.Hub.ClearEntryAsAdmin(r.Context(), id, r.PathValue("key"), r.PathValue("user"), requestActor(r)); err != nil {
 		writeErr(w, err, http.StatusInternalServerError)
 		return
 	}
@@ -95,7 +95,7 @@ const settingsUsage = `body must be {"values": {"<key>": <value>}, "value_group_
 
 // settingsAdmin: a signed-in admin (no user 401; see adminOnly).
 func (s *Server) settingsAdmin(w http.ResponseWriter, r *http.Request) (string, bool) {
-	if actor(r) == "" {
+	if requestActor(r).User == "" {
 		http.Error(w, "no signed-in user (X-Forwarded-User)", http.StatusUnauthorized)
 		return "", false
 	}
@@ -175,7 +175,7 @@ func (s *Server) handleSaveSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	before := s.Hub.SignInMode(id)
-	res, err := s.Hub.SaveSettings(id, u, actor(r))
+	res, err := s.Hub.SaveSettings(id, u, requestActor(r))
 	if u.SignIn != nil && (err != nil || s.Hub.SignInMode(id) != before) {
 		s.auditSignIn(r, id, before, *u.SignIn, err)
 	}
@@ -212,7 +212,7 @@ func (s *Server) handleRetryDeliveries(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	rep, err := s.Hub.RetryDeliveries(r.Context(), id, actor(r))
+	rep, err := s.Hub.RetryDeliveries(r.Context(), id, requestActor(r))
 	if err != nil {
 		writeErr(w, err, http.StatusInternalServerError)
 		return

@@ -28,6 +28,7 @@ import (
 	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
+	"github.com/portcullis/hub/internal/directory"
 )
 
 // Instance backups (contract §11.5): <data>/backups/<id>/<UTC>.tar, an
@@ -282,14 +283,14 @@ func (h *Hub) projectRunning(ctx context.Context, id string) (bool, error) {
 // busy / can't be restarted, 503 Docker unavailable, 500 otherwise (the
 // archive isn't written; a failed restart after a written backup is an
 // OpError that names the archive).
-func (h *Hub) BackupInstance(id, actor string) (entry *BackupEntry, err error) {
+func (h *Hub) BackupInstance(id string, actor directory.Actor) (entry *BackupEntry, err error) {
 	return h.backupInstance(id, actor, nil)
 }
 
 // backupInstance is BackupInstance; ready (if set) is called once the
 // request is accepted (lock held, instance found, Docker available) and
 // the backup itself starts (StartBackup answers 202 then).
-func (h *Hub) backupInstance(id, actor string, ready func()) (entry *BackupEntry, err error) {
+func (h *Hub) backupInstance(id string, actor directory.Actor, ready func()) (entry *BackupEntry, err error) {
 	defer func() {
 		detail := ""
 		if entry != nil {

@@ -108,7 +108,7 @@ func (s *Server) handleEnrollDomain(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	d, err := s.Hub.EnrollDomain(r.Context(), actor(r), b.Name, b.Provider, b.Credentials)
+	d, err := s.Hub.EnrollDomain(r.Context(), requestActor(r), b.Name, b.Provider, b.Credentials)
 	noStore(w)
 	if err != nil {
 		writeDomainsErr(w, err)
@@ -131,7 +131,7 @@ func (s *Server) handleDomainToken(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "name in the body differs from the path", http.StatusBadRequest)
 		return
 	}
-	d, err := s.Hub.ReplaceDomainToken(r.Context(), actor(r), r.PathValue("name"), b.Provider, b.Credentials)
+	d, err := s.Hub.ReplaceDomainToken(r.Context(), requestActor(r), r.PathValue("name"), b.Provider, b.Credentials)
 	noStore(w)
 	if err != nil {
 		writeDomainsErr(w, err)
@@ -146,7 +146,7 @@ func (s *Server) handleDeleteDomain(w http.ResponseWriter, r *http.Request) {
 	if !s.adminOnly(w, r) {
 		return
 	}
-	warning, err := s.Hub.DeleteDomain(r.Context(), actor(r), r.PathValue("name"))
+	warning, err := s.Hub.DeleteDomain(r.Context(), requestActor(r), r.PathValue("name"))
 	noStore(w)
 	if err != nil {
 		writeDomainsErr(w, err)

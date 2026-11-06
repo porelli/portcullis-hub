@@ -391,7 +391,7 @@ func TestCreateFolderRunsCheck(t *testing.T) {
 	if v := createFolder(t, f, "music", "/srv/music"); v.GID != 60001 {
 		t.Errorf("second gid = %d", v.GID)
 	}
-	if err := f.h.DeleteFolder("photos", "admin"); err != nil {
+	if err := f.h.DeleteFolder("photos", directory.Human("admin")); err != nil {
 		t.Fatal(err)
 	}
 	d.add("/srv/docs", "btrfs")
@@ -549,7 +549,7 @@ func TestDeleteFolderRefusedWhileUsed(t *testing.T) {
 	f.h.st.Settings["immich"] = s
 	f.h.mu.Unlock()
 	runs := len(f.engine.fx().Specs())
-	err := f.h.DeleteFolder("photos", "admin")
+	err := f.h.DeleteFolder("photos", directory.Human("admin"))
 	if statusOf(err) != 409 || !strings.Contains(err.Error(), "immich") {
 		t.Errorf("used: %v", err)
 	}
@@ -574,7 +574,7 @@ func TestDeleteFolderRefusedWhileUsed(t *testing.T) {
 	f.h.st.Settings["immich"] = state.InstanceSettings{}
 	f.h.st.Settings["gone"] = state.InstanceSettings{Values: map[string]any{"media": "folder:photos"}}
 	f.h.mu.Unlock()
-	if err := f.h.DeleteFolder("photos", "admin"); statusOf(err) != 409 || !strings.Contains(err.Error(), "gone") {
+	if err := f.h.DeleteFolder("photos", directory.Human("admin")); statusOf(err) != 409 || !strings.Contains(err.Error(), "gone") {
 		t.Errorf("template gone: %v", err)
 	}
 	f.h.mu.Lock()
@@ -582,10 +582,10 @@ func TestDeleteFolderRefusedWhileUsed(t *testing.T) {
 	// Another folder's ref and a non-path option's text don't count.
 	f.h.st.Settings["immich"] = state.InstanceSettings{Values: map[string]any{"library": "folder:music", "version": "folder:photos"}}
 	f.h.mu.Unlock()
-	if err := f.h.DeleteFolder("nope", "admin"); statusOf(err) != 404 {
+	if err := f.h.DeleteFolder("nope", directory.Human("admin")); statusOf(err) != 404 {
 		t.Errorf("unknown: %v", err)
 	}
-	if err := f.h.DeleteFolder("photos", "admin"); err != nil {
+	if err := f.h.DeleteFolder("photos", directory.Human("admin")); err != nil {
 		t.Fatalf("unused: %v", err)
 	}
 	if _, ok := storedFolder(f, "photos"); ok {
@@ -689,11 +689,11 @@ func TestFolderAudit(t *testing.T) {
 	if e := audit.last(); e.Action != "folder.update" || e.Result != "refused" {
 		t.Errorf("refused update = %+v", e)
 	}
-	f.h.DeleteFolder("nope", "admin")
+	f.h.DeleteFolder("nope", directory.Human("admin"))
 	if e := audit.last(); e.Action != "folder.delete" || e.Result != "refused" || e.Target != "nope" {
 		t.Errorf("refused delete = %+v", e)
 	}
-	if err := f.h.DeleteFolder("photos", "admin"); err != nil {
+	if err := f.h.DeleteFolder("photos", directory.Human("admin")); err != nil {
 		t.Fatal(err)
 	}
 	if e := audit.last(); e.Action != "folder.delete" || e.Target != "photos" || e.Result != "ok" || e.Detail != "gid=60000 path=/srv/photos" {
@@ -704,7 +704,7 @@ func TestFolderAudit(t *testing.T) {
 	f.h.SetAudit(lockingAudit{f.h, audit})
 	d.add("/srv/music", "ext4")
 	createFolder(t, f, "music", "/srv/music")
-	f.h.DeleteFolder("music", "admin")
+	f.h.DeleteFolder("music", directory.Human("admin"))
 }
 
 // lockingAudit takes the Hub's lock in Append (deadlocks if called under mu).
@@ -917,7 +917,7 @@ func TestFolderSaveFailure(t *testing.T) {
 	if fo, _ := storedFolder(f, "photos"); !reflect.DeepEqual(fo, before) {
 		t.Errorf("after a failed update: %+v", fo)
 	}
-	if err := f.h.DeleteFolder("photos", "admin"); statusOf(err) != 500 {
+	if err := f.h.DeleteFolder("photos", directory.Human("admin")); statusOf(err) != 500 {
 		t.Errorf("delete = %v, want 500", err)
 	}
 	if fo, ok := storedFolder(f, "photos"); !ok || !reflect.DeepEqual(fo, before) {

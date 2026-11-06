@@ -167,13 +167,13 @@ type Service struct {
 	// s.mu: the Hub purges the per-group setting rows that named it (spec
 	// call 19). It must not block on the directory. Its warnings are
 	// added to the delete's.
-	GroupDeleted func(ctx context.Context, actor, name string, id int) []string
+	GroupDeleted func(ctx context.Context, actor Actor, name string, id int) []string
 	// UserDeleted, if set, is called after DeleteUser deleted an account
 	// in LLDAP (the acting admin and the account's name), outside s.mu:
 	// the Hub deletes the person's person-entered setting values (spec
 	// call 32). It must not block on the directory. Its warnings are
 	// added to the delete's.
-	UserDeleted func(ctx context.Context, actor, name string) []string
+	UserDeleted func(ctx context.Context, actor Actor, name string) []string
 
 	mu sync.Mutex
 	// ruleState: each rule group's membership (lowercase) after the last
@@ -1347,7 +1347,7 @@ func (s *Service) DeleteUser(ctx context.Context, c *Caller, username, confirm s
 	// Only once the LLDAP delete succeeded, outside s.mu (the Hub takes
 	// its own lock: order s.mu → Hub.mu).
 	if deleted != "" && s.UserDeleted != nil {
-		res.Warnings = append(res.Warnings, s.UserDeleted(ctx, strings.ToLower(c.User), strings.ToLower(deleted))...)
+		res.Warnings = append(res.Warnings, s.UserDeleted(ctx, Actor{User: strings.ToLower(c.User), Via: c.Via, Client: c.Client}, strings.ToLower(deleted))...)
 	}
 	return res, err
 }
@@ -1746,7 +1746,7 @@ func (s *Service) DeleteGroup(ctx context.Context, c *Caller, name, confirm stri
 	// Only once the LLDAP delete succeeded, outside s.mu (the Hub takes
 	// its own lock: order s.mu → Hub.mu).
 	if deletedID >= 0 && s.GroupDeleted != nil {
-		res.Warnings = append(res.Warnings, s.GroupDeleted(ctx, strings.ToLower(c.User), name, deletedID)...)
+		res.Warnings = append(res.Warnings, s.GroupDeleted(ctx, Actor{User: strings.ToLower(c.User), Via: c.Via, Client: c.Client}, name, deletedID)...)
 	}
 	if err != nil {
 		return res, err

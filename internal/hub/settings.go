@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/portcullis/hub/internal/keycloak"
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/lldap"
 	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/settings"
@@ -804,7 +805,7 @@ func showPort(v string, ok bool) string {
 // declared option keys and ports are taken. Every changed (key, scope,
 // group) is audited as settings.change by actor (a refused save:
 // "refused").
-func (h *Hub) SaveSettings(id string, u SettingsUpdate, actor string) (_ *SaveResult, retErr error) {
+func (h *Hub) SaveSettings(id string, u SettingsUpdate, actor directory.Actor) (_ *SaveResult, retErr error) {
 	var changes []settingChange
 	var writeErr error
 	defer func() {
@@ -1278,7 +1279,7 @@ func settingsEmpty(v any) bool {
 // instance, detail "delivery") carrying that error; a save refused or
 // failed before its commit is one entry per requested key. Called with
 // no lock held (auditOp takes mu).
-func (h *Hub) auditSettings(id, actor string, u SettingsUpdate, changes []settingChange, err error) {
+func (h *Hub) auditSettings(id string, actor directory.Actor, u SettingsUpdate, changes []settingChange, err error) {
 	if len(changes) > 0 {
 		for _, c := range changes {
 			d := "scope=" + c.scope

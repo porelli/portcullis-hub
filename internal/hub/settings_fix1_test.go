@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"github.com/portcullis/hub/internal/directory"
 	"context"
 	"os"
 	"path/filepath"
@@ -118,7 +119,7 @@ func TestCommittedSaveAuditedOnDeliveryFailure(t *testing.T) {
 	os.Chmod(dir, 0500)
 	defer os.Chmod(dir, 0755)
 	n := len(audit.entries)
-	res, err := f.h.SaveSettings("immich", SettingsUpdate{Values: vals("uploads", "/srv/up")}, "alice")
+	res, err := f.h.SaveSettings("immich", SettingsUpdate{Values: vals("uploads", directory.Human("/srv/up"))}, "alice")
 	if err != nil || !strings.Contains(strings.Join(res.Warnings, "\n"), "override generation failed") {
 		t.Fatalf("err = %v, result %+v: want the override failure as a warning", err, res)
 	}
@@ -153,7 +154,7 @@ func TestEffectEnvAndDisabled(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := ups(f, "immich")
-	res, err := f.h.SaveSettings("immich", SettingsUpdate{Values: vals("banner", "c")}, "admin")
+	res, err := f.h.SaveSettings("immich", SettingsUpdate{Values: vals("banner", directory.Human("c"))}, "admin")
 	f.h.Wait()
 	if err != nil || res.Effect != settings.EffectRestart || ups(f, "immich") != before+1 {
 		t.Errorf("env-delivered live option: %+v %v, ups %d", res, err, ups(f, "immich")-before)
@@ -200,17 +201,17 @@ func TestSeedOnRestoreAndMissingGroups(t *testing.T) {
 		return ok && len(p.Rows) == 1 && p.Rows[0].Group == templates.PlaceholderAdminGroup
 	}
 	unseed("immich-b")
-	entry, err := f.h.BackupInstance("immich-b", "root")
+	entry, err := f.h.BackupInstance("immich-b", directory.Human("root"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.h.RestoreInstanceAs(entry.Archive, "immich-c", "root"); err != nil {
+	if _, err := f.h.RestoreInstanceAs(entry.Archive, "immich-c", directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	if !seeded("immich-c") {
 		t.Error("restore-as didn't seed")
 	}
-	if _, err := f.h.RestoreInstance("immich-b", entry.Archive, "root"); err != nil {
+	if _, err := f.h.RestoreInstance("immich-b", entry.Archive, directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	if !seeded("immich-b") {
@@ -220,7 +221,7 @@ func TestSeedOnRestoreAndMissingGroups(t *testing.T) {
 		t.Fatal(err)
 	}
 	unseed("immich-c")
-	if _, err := f.h.CreateMissingGroups(context.Background(), []string{"immich-c"}, "root"); err != nil {
+	if _, err := f.h.CreateMissingGroups(ctx, ids, directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	if !seeded("immich-c") {
@@ -233,7 +234,7 @@ func TestSeedOnRestoreAndMissingGroups(t *testing.T) {
 // refused, naming the instance.
 func TestRestoreRefusesLegacyFlatSettings(t *testing.T) {
 	f, _, _ := grafanaB(t)
-	entry, err := f.h.BackupInstance("grafana-b", "root")
+	entry, err := f.h.BackupInstance("grafana-b", directory.Human("root"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -244,11 +245,11 @@ func TestRestoreRefusesLegacyFlatSettings(t *testing.T) {
 		t.Fatalf("fixture already has settings:\n%s", cfg)
 	}
 	rewriteMember(t, p, "config/instance.yaml", []byte(cfg+"settings:\n  GRAFANA_PORT: \"3301\"\n  GRAFANA_PORT_BIND: 127.0.0.1\n"))
-	_, err = f.h.RestoreInstance("grafana-b", entry.Archive, "root")
+	_, err = f.h.RestoreInstance("grafana-b", entry.Archive, directory.Human("root"))
 	if err == nil || !strings.Contains(err.Error(), "grafana-b") || !strings.Contains(err.Error(), "old flat form") {
 		t.Fatalf("restore of flat settings = %v", err)
 	}
-	if _, err := f.h.RestoreInstanceAs(entry.Archive, "grafana-c", "root"); err == nil || !strings.Contains(err.Error(), "old flat form") {
+	if _, err := f.h.RestoreInstanceAs(entry.Archive, "grafana-c", directory.Human("root")); err == nil || !strings.Contains(err.Error(), "old flat form") {
 		t.Fatalf("restore-as of flat settings = %v", err)
 	}
 }

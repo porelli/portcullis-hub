@@ -1120,13 +1120,13 @@ func (g *fakeGroups) MissingInstanceGroups(ctx context.Context, names []string) 
 	return out, nil
 }
 
-func (g *fakeGroups) ResolveActor(ctx context.Context, actor string) error {
+func (g *fakeGroups) ResolveActor(ctx context.Context, actor directory.Actor) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return g.actorErr
 }
 
-func (g *fakeGroups) CreateInstanceGroup(ctx context.Context, actor, name string) (bool, []string, error) {
+func (g *fakeGroups) CreateInstanceGroup(ctx context.Context, actor directory.Actor, name string) (bool, []string, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.createErr != nil {
@@ -1134,7 +1134,7 @@ func (g *fakeGroups) CreateInstanceGroup(ctx context.Context, actor, name string
 			return false, nil, err
 		}
 	}
-	g.calls = append(g.calls, "+"+name+":"+actor)
+	g.calls = append(g.calls, "+"+name+":"+actor.User)
 	if g.existing == nil {
 		g.existing = map[string]bool{}
 	}
@@ -1150,13 +1150,13 @@ func (g *fakeGroups) CreateInstanceGroup(ctx context.Context, actor, name string
 	return true, nil, nil
 }
 
-func (g *fakeGroups) DeleteInstanceGroup(ctx context.Context, actor, name string) ([]string, error) {
+func (g *fakeGroups) DeleteInstanceGroup(ctx context.Context, actor directory.Actor, name string) ([]string, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.delErr != nil {
 		return nil, g.delErr
 	}
-	g.calls = append(g.calls, "-"+name+":"+actor)
+	g.calls = append(g.calls, "-"+name+":"+actor.User)
 	if g.people != nil {
 		g.people.deleteGroup(name)
 	}

@@ -52,12 +52,14 @@ type OpRecord struct {
 	// names the request, Running is true until it finished (At = start
 	// time while running), Result its outcome (archive, backup,
 	// pre_restore_backup, instance), Warnings as the synchronous answer
-	// had them, Status the HTTP status a failure stands for.
+	// had them, Status the HTTP status a failure stands for, Actor the
+	// user who started it (actor.User only, never via/client).
 	OpID     string            `json:"op_id,omitempty"`
 	Running  bool              `json:"running,omitempty"`
 	Result   map[string]string `json:"result,omitempty"`
 	Warnings []string          `json:"warnings,omitempty"`
 	Status   int               `json:"status,omitempty"`
+	Actor    string            `json:"actor,omitempty"`
 }
 
 // OpError is a failed lifecycle operation as the API returns it: the

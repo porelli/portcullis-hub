@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/portcullis/hub/internal/templates"
+	"github.com/portcullis/hub/internal/directory"
 )
 
 // Creating an instance from the API (contract §11.1–11.3, §11.7).
@@ -29,7 +30,7 @@ type CreateResult struct {
 // without Users & Groups the groups are a warning. A failure creating a
 // group removes the instance and the groups created so far. Takes the
 // per-instance lock; audited as instance.create.
-func (h *Hub) CreateInstanceAs(templateID, id string, hosts map[string]string, actor string) (res *CreateResult, err error) {
+func (h *Hub) CreateInstanceAs(templateID, id string, hosts map[string]string, actor directory.Actor) (res *CreateResult, err error) {
 	res = &CreateResult{}
 	defer func() {
 		detail := "template=" + templateID
@@ -41,7 +42,7 @@ func (h *Hub) CreateInstanceAs(templateID, id string, hosts map[string]string, a
 		}
 		h.auditOp(actor, "instance.create", id, detail, err)
 	}()
-	if strings.TrimSpace(actor) == "" {
+	if strings.TrimSpace(actor.User) == "" {
 		return res, statusErr(400, "no signed-in user to audit the change as")
 	}
 	if !templates.InstanceIDRe.MatchString(id) {

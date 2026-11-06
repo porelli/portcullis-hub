@@ -1169,7 +1169,7 @@ func (h *Hub) opSecrets(ids []string) []string {
 // StartAssign applies req to folder id in the background once the plan
 // recomputed under the locks has planHash (else 409, no operation): 202
 // semantics, the outcome in the folder's op record (_folder.<id>).
-func (h *Hub) StartAssign(id string, req AssignRequest, planHash, actor string) (*AsyncOp, error) {
+func (h *Hub) StartAssign(id string, req AssignRequest, planHash string, actor directory.Actor) (*AsyncOp, error) {
 	unlock, err := h.folderLock(id)
 	if err != nil {
 		return nil, err
@@ -1184,8 +1184,8 @@ func (h *Hub) StartAssign(id string, req AssignRequest, planHash, actor string) 
 // folder lock (manage_as_folder deletes its new definition there); an
 // accepted operation's error goes through onFailed (nil: as it is) before
 // it is recorded (manage_as_folder names the definition it leaves).
-func (h *Hub) startAssignHeld(id string, req AssignRequest, planHash, actor string, unlockFolder func(), onRefused func(error), onFailed func(error) error) (*AsyncOp, error) {
-	return h.startAsync(opKeyFolder(id), OpFolderAssign, func(accept func()) (result map[string]string, warnings []string, err error) {
+func (h *Hub) startAssignHeld(id string, req AssignRequest, planHash string, actor directory.Actor, unlockFolder func(), onRefused func(error), onFailed func(error) error) (*AsyncOp, error) {
+	return h.startAsync(opKeyFolder(id), OpFolderAssign, actor, func(accept func()) (result map[string]string, warnings []string, err error) {
 		accepted := false
 		ready := func() { accepted = true; accept() }
 		var deliverTo, auditInsts []string
@@ -1255,14 +1255,14 @@ func prefixed(run string, ws []string) []string {
 // runAssign is the apply after it was accepted (contract §14.3
 // sequence). It returns the op's result, warnings, the folder.assign
 // detail and the instances to deliver to.
-func (h *Hub) runAssign(id string, c *assignCalc, actor string) (map[string]string, []string, string, []string, error) {
+func (h *Hub) runAssign(id string, c *assignCalc, actor directory.Actor) (map[string]string, []string, string, []string, error) {
 	ctx := context.Background()
 	f, d := c.folder, c.plan.Disk
 	result := map[string]string{"add": strconv.Itoa(c.adds), "remove": strconv.Itoa(c.removes)}
 	warnings := slices.Clone(c.plan.Warnings)
 	detail := fmt.Sprintf("add=%d remove=%d", c.adds, c.removes)
 	secrets := h.opSecrets(c.affected)
-	fb := &failCtx{id: id, actor: actor, secrets: secrets}
+	fb := &failCtx{id: id, actor: actor.User, secrets: secrets}
 	m := &applyMarker{Kind: "apply", Folder: id, Instances: c.plan.Restarts, Phase: "disk", At: time.Now().UTC()}
 	fb.m = m
 	for _, e := range c.edits {
@@ -1499,7 +1499,7 @@ func (h *Hub) failBeforeState(fb *failCtx, cause error, snap string, diskChanged
 	sec = append(sec, secretsOf(startErr)...)
 	err := withSecrets(&StatusError{Status: status, Err: errors.New(b.String())}, sec)
 	if diskChanged {
-		h.auditFolder(fb.actor, "folder.apply", id, fmt.Sprintf("entries=%d snapshot=%s", fb.entries, snapshotTS(snap)), err)
+		h.auditFolder(directory.Human(fb.actor), "folder.apply", id, fmt.Sprintf("entries=%d snapshot=%s", fb.entries, snapshotTS(snap)), err)
 	}
 	return err
 }
@@ -1810,12 +1810,12 @@ func (h *Hub) PreviewUndo(ctx context.Context, id string) (*AssignPlan, error) {
 // planHash (else 409): stop → undo snapshot → restore → verify (a restore
 // dry run finds nothing left to rewrite) → state (last_apply cleared) →
 // start.
-func (h *Hub) StartUndo(id, planHash, actor string) (*AsyncOp, error) {
+func (h *Hub) StartUndo(id, planHash string, actor directory.Actor) (*AsyncOp, error) {
 	unlockFolder, err := h.folderLock(id)
 	if err != nil {
 		return nil, err
 	}
-	return h.startAsync(opKeyFolder(id), OpFolderUndo, func(ready func()) (result map[string]string, warnings []string, err error) {
+	return h.startAsync(opKeyFolder(id), OpFolderUndo, actor, func(ready func()) (result map[string]string, warnings []string, err error) {
 		detail := ""
 		defer func() {
 			if detail != "" || err != nil {

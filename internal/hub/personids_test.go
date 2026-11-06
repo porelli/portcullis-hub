@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"github.com/portcullis/hub/internal/directory"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -308,14 +309,14 @@ func TestPersonIDsSurviveRestore(t *testing.T) {
 	if _, err := f.h.allocPersonIDs(templates.PoolPOSIXUID, persons("alice", "bob"), map[string]string{"alice": "a", "bob": "b"}); err != nil {
 		t.Fatal(err)
 	}
-	entry, err := f.h.BackupInstance("grafana-b", "root")
+	entry, err := f.h.BackupInstance("grafana-b", directory.Human("root"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.h.RestoreInstanceAs(entry.Archive, "grafana-c", "root"); err != nil {
+	if _, err := f.h.RestoreInstanceAs(entry.Archive, "grafana-c", directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.h.RestoreInstance("grafana-b", entry.Archive, "root"); err != nil {
+	if _, err := f.h.RestoreInstance("grafana-b", entry.Archive, directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	if a, b := mustPersonID(t, f.h, "alice"), mustPersonID(t, f.h, "bob"); a != 20000 || b != 20001 {

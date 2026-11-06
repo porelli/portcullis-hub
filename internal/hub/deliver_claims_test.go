@@ -76,7 +76,7 @@ func settle(f *fixture) {
 // stores the quota rows: default 100GiB, office_milan 10GiB.
 func claimEnable(t *testing.T, f *fixture, id string) {
 	t.Helper()
-	if _, err := f.h.EnableAs(id, "root"); err != nil {
+	if _, err := f.h.EnableAs(id, directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	// The enable's claims: the background run found it busy and queued
@@ -359,7 +359,7 @@ func TestDeleteRemovesClaims(t *testing.T) {
 		t.Fatalf("immich-b claims = %+v", f.idp.settingClaims("immich-b"))
 	}
 
-	if _, err := f.h.DeleteInstance(claimID, claimID, "root"); err != nil {
+	if _, err := f.h.DeleteInstance(claimID, claimID, directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	for _, a := range mine {
@@ -399,7 +399,7 @@ func TestDeleteClaimsForeignClientWarns(t *testing.T) {
 	f.idp.mu.Lock()
 	f.idp.claimOwners = map[string]string{"immich": "someone"}
 	f.idp.mu.Unlock()
-	res, err := f.h.DeleteInstance(claimID, claimID, "root")
+	res, err := f.h.DeleteInstance(claimID, claimID, directory.Human("root"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -533,7 +533,7 @@ func TestStartDoesNotWaitOnClaims(t *testing.T) {
 	f.idp.mu.Unlock()
 	done := make(chan error, 1)
 	go func() {
-		_, err := f.h.EnableAs(claimID, "root")
+		_, err := f.h.EnableAs(claimID, directory.Human("root"))
 		done <- err
 	}()
 	select {
@@ -627,7 +627,7 @@ func TestDeleteWhileClaimsWaitLeavesNothing(t *testing.T) {
 	f.h.deliverClaimsAfterStart(claimID) // waits on the lock
 	delDone := make(chan error, 1)
 	go func() {
-		_, err := f.h.DeleteInstance(claimID, claimID, "root")
+		_, err := f.h.DeleteInstance(claimID, claimID, directory.Human("root"))
 		delDone <- err
 	}()
 	// Step 4 (the claims cleanup) takes the delivery lock too: the
@@ -837,7 +837,7 @@ func TestClaimsAfterRestore(t *testing.T) {
 	if v, _ := store.value("alice", quota); v != "10" {
 		t.Fatalf("alice = %q", v)
 	}
-	entry, err := f.h.BackupInstance(claimID, "root")
+	entry, err := f.h.BackupInstance(claimID, directory.Human("root"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -852,7 +852,7 @@ func TestClaimsAfterRestore(t *testing.T) {
 	if v, _ := store.value("alice", quota); v != "20" {
 		t.Fatalf("alice after the save = %q", v)
 	}
-	if _, err := f.h.RestoreInstance(claimID, entry.Archive, "root"); err != nil {
+	if _, err := f.h.RestoreInstance(claimID, entry.Archive, directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	settle(f)

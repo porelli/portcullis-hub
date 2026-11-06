@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"github.com/portcullis/hub/internal/directory"
 	"errors"
 	"strings"
 	"testing"
@@ -13,7 +14,7 @@ func TestCreateInstanceAsGroups(t *testing.T) {
 	g := &fakeGroups{}
 	f.h.SetGroups(g)
 
-	res, err := f.h.CreateInstanceAs("grafana", "grafana-team-a", nil, "alice")
+	res, err := f.h.CreateInstanceAs("grafana", "grafana-team-a", nil, directory.Human("alice"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,7 +31,7 @@ func TestCreateInstanceAsGroups(t *testing.T) {
 
 	// The actor must resolve first: nothing is created.
 	g.actorErr = errors.New("not an administrator")
-	if _, err := f.h.CreateInstanceAs("grafana", "grafana-b", nil, "dana"); err == nil || !strings.Contains(err.Error(), "nothing was created") {
+	if _, err := f.h.CreateInstanceAs("grafana", "grafana-b", nil, directory.Human("dana")); err == nil || !strings.Contains(err.Error(), "nothing was created") {
 		t.Fatalf("actor = %v", err)
 	}
 	if _, ok := f.h.InstanceView("grafana-b"); ok {
@@ -50,7 +51,7 @@ func TestCreateInstanceAsGroups(t *testing.T) {
 		}
 		return nil
 	}
-	_, err = f.h.CreateInstanceAs("grafana", "grafana-c", nil, "alice")
+	_, err = f.h.CreateInstanceAs("grafana", "grafana-c", nil, directory.Human("alice"))
 	if err == nil || !strings.Contains(err.Error(), "removed again") {
 		t.Fatalf("group failure = %v", err)
 	}
@@ -62,20 +63,20 @@ func TestCreateInstanceAsGroups(t *testing.T) {
 	}
 	// The id is free again.
 	g.createErr, g.createWarn = nil, nil
-	if _, err := f.h.CreateInstanceAs("grafana", "grafana-c", nil, "alice"); err != nil {
+	if _, err := f.h.CreateInstanceAs("grafana", "grafana-c", nil, directory.Human("alice")); err != nil {
 		t.Fatal(err)
 	}
 
 	// No actor, a single template: refused.
-	if _, err := f.h.CreateInstanceAs("grafana", "grafana-d", nil, ""); statusOf(err) != 400 {
+	if _, err := f.h.CreateInstanceAs("grafana", "grafana-d", nil, directory.Human("")); statusOf(err) != 400 {
 		t.Errorf("no actor = %v", err)
 	}
-	if _, err := f.h.CreateInstanceAs("disks", "disks-b", nil, "alice"); statusOf(err) != 409 {
+	if _, err := f.h.CreateInstanceAs("disks", "disks-b", nil, directory.Human("alice")); statusOf(err) != 409 {
 		t.Errorf("single = %v", err)
 	}
 	// Ids whose automatic Traefik names could equal another instance's.
 	for _, id := range []string{"grafana-portcullis-b", "grafana--b", "grafana-"} {
-		if _, err := f.h.CreateInstanceAs("grafana", id, nil, "alice"); statusOf(err) != 400 || !strings.Contains(err.Error(), "instance id") {
+		if _, err := f.h.CreateInstanceAs("grafana", id, nil, directory.Human("alice")); statusOf(err) != 400 || !strings.Contains(err.Error(), "instance id") {
 			t.Errorf("%s = %v", id, err)
 		}
 	}
@@ -83,12 +84,12 @@ func TestCreateInstanceAsGroups(t *testing.T) {
 
 func TestRestoreAsRefusesIDShape(t *testing.T) {
 	f, _, _ := grafanaB(t)
-	entry, err := f.h.BackupInstance("grafana-b", "root")
+	entry, err := f.h.BackupInstance("grafana-b", directory.Human("root"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, id := range []string{"grafana-portcullis-c", "team-portcullis", "grafana--c", "grafana-"} {
-		if _, err := f.h.RestoreInstanceAs(entry.Archive, id, "root"); statusOf(err) != 400 || !strings.Contains(err.Error(), "instance id") {
+		if _, err := f.h.RestoreInstanceAs(entry.Archive, id, directory.Human("root")); statusOf(err) != 400 || !strings.Contains(err.Error(), "instance id") {
 			t.Errorf("%s = %v", id, err)
 		}
 	}
@@ -115,13 +116,13 @@ func TestInstanceDomainsAndRouters(t *testing.T) {
 // a warning is still its own: a later failure deletes it again.
 func TestRestoreAsUndoesWarnedGroups(t *testing.T) {
 	f, _, groups := grafanaB(t)
-	entry, err := f.h.BackupInstance("grafana-b", "root")
+	entry, err := f.h.BackupInstance("grafana-b", directory.Human("root"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	groups.createWarn = func(name string) string { return "purged leftovers of an earlier group " + name }
 	f.engine.vol().copyToErr = func(string) error { return errors.New("disk full") }
-	_, err = f.h.RestoreInstanceAs(entry.Archive, "grafana-c", "root")
+	_, err = f.h.RestoreInstanceAs(entry.Archive, "grafana-c", directory.Human("root"))
 	if err == nil || !strings.Contains(err.Error(), "removed again") {
 		t.Fatalf("restore = %v", err)
 	}

@@ -52,7 +52,7 @@ const (
 // folderAdmin: a signed-in admin (no user 401; then adminOnly: no Users
 // & Groups 503, anyone else 403).
 func (s *Server) folderAdmin(w http.ResponseWriter, r *http.Request) bool {
-	if actor(r) == "" {
+	if requestActor(r).User == "" {
 		writeJSONError(w, http.StatusUnauthorized, "no signed-in user (X-Forwarded-User)")
 		return false
 	}
@@ -155,7 +155,7 @@ func (s *Server) handleCreateFolder(w http.ResponseWriter, r *http.Request) {
 	if !decodeAPI(w, r, &in, folderCreateUsage) {
 		return
 	}
-	view, warns, err := s.Hub.CreateFolder(r.Context(), in, actor(r))
+	view, warns, err := s.Hub.CreateFolder(r.Context(), in, requestActor(r))
 	if err != nil {
 		writeAPIErr(w, err)
 		return
@@ -182,7 +182,7 @@ func (s *Server) handleUpdateFolder(w http.ResponseWriter, r *http.Request) {
 	if !decodeAPI(w, r, &b, folderUpdateUsage) {
 		return
 	}
-	view, err := s.Hub.UpdateFolder(r.Context(), id, hub.FolderInput{Name: b.Name, Path: b.Path, Description: b.Description}, actor(r))
+	view, err := s.Hub.UpdateFolder(r.Context(), id, hub.FolderInput{Name: b.Name, Path: b.Path, Description: b.Description}, requestActor(r))
 	if err != nil {
 		writeAPIErr(w, err)
 		return
@@ -198,7 +198,7 @@ func (s *Server) handleDeleteFolder(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.Hub.DeleteFolder(id, actor(r)); err != nil {
+	if err := s.Hub.DeleteFolder(id, requestActor(r)); err != nil {
 		writeAPIErr(w, err)
 		return
 	}
@@ -285,7 +285,7 @@ func (s *Server) handleAssignApply(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	op, err := s.Hub.StartAssign(id, req, hash, actor(r))
+	op, err := s.Hub.StartAssign(id, req, hash, requestActor(r))
 	if err != nil {
 		writeAPIErr(w, err)
 		return
@@ -330,7 +330,7 @@ func (s *Server) handleUndoApply(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "body must be "+undoApplyUsage)
 		return
 	}
-	op, err := s.Hub.StartUndo(id, *b.PlanHash, actor(r))
+	op, err := s.Hub.StartUndo(id, *b.PlanHash, requestActor(r))
 	if err != nil {
 		writeAPIErr(w, err)
 		return
@@ -380,7 +380,7 @@ func (s *Server) handleRecheckApply(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "body must be "+recheckUsage)
 		return
 	}
-	v, err := s.Hub.ApplyRecheck(r.Context(), id, *b.PlanHash, b.ConfirmDifferent, actor(r))
+	v, err := s.Hub.ApplyRecheck(r.Context(), id, *b.PlanHash, b.ConfirmDifferent, requestActor(r))
 	if err != nil {
 		writeAPIErr(w, err)
 		return
@@ -440,7 +440,7 @@ func (s *Server) handleSetLocalNetworks(w http.ResponseWriter, r *http.Request) 
 	if string(b.Networks) != "null" && cidrs == nil {
 		cidrs = []string{}
 	}
-	if err := s.Hub.SetLocalNetworks(cidrs, actor(r)); err != nil {
+	if err := s.Hub.SetLocalNetworks(cidrs, requestActor(r)); err != nil {
 		writeAPIErr(w, err)
 		return
 	}

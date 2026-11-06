@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"github.com/portcullis/hub/internal/directory"
 	"context"
 	"encoding/json"
 	"errors"
@@ -110,7 +111,7 @@ func myAppsFixture(t *testing.T) (*fixture, *fakePeople) {
 	f.h.afterFunc, f.h.sleep = clk.afterFunc, clk.sleep
 	f.clk = clk
 	for _, id := range []string{claimID, "dash"} {
-		if _, err := f.h.EnableAs(id, "root"); err != nil {
+		if _, err := f.h.EnableAs(id, directory.Human("root")); err != nil {
 			t.Fatal(err)
 		}
 		settle(f)

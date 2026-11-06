@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/portcullis/hub/internal/doctor"
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/settings"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
@@ -85,7 +86,7 @@ func (h *Hub) LocalNetworksView() (cidrs []string, isDefault bool) {
 // [] = loopback only. At most 64 CIDRs, no host bits, no /0 (400 naming
 // the entry). Audited settings.local_networks "<N> networks" (N the
 // effective count), refusals "refused", after mu.
-func (h *Hub) SetLocalNetworks(cidrs []string, actor string) error {
+func (h *Hub) SetLocalNetworks(cidrs []string, actor directory.Actor) error {
 	n := len(cidrs)
 	if cidrs == nil {
 		n = len(DefaultLocalNetworks)
@@ -95,8 +96,8 @@ func (h *Hub) SetLocalNetworks(cidrs []string, actor string) error {
 	return err
 }
 
-func (h *Hub) setLocalNetworks(cidrs []string, actor string) error {
-	if actor == "" {
+func (h *Hub) setLocalNetworks(cidrs []string, actor directory.Actor) error {
+	if actor.User == "" {
 		return statusErr(http.StatusUnauthorized, "changing the local networks needs a signed-in admin")
 	}
 	var stored *[]string

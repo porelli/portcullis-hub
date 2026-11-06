@@ -234,7 +234,7 @@ func (revokeLeaverFixer) Preview(ctx context.Context, h *Hub, f doctor.Finding, 
 // revoke (§13.16: reason admin, revoked_by the admin, audited
 // credential.revoke with the admin as actor, applied live like every
 // revocation).
-func (revokeLeaverFixer) Apply(h *Hub, f doctor.Finding, params map[string]string, planHash, actor string) (*AsyncOp, error) {
+func (revokeLeaverFixer) Apply(h *Hub, f doctor.Finding, params map[string]string, planHash string, actor directory.Actor) (*AsyncOp, error) {
 	ctx := context.Background()
 	c, err := h.leaverPlan(ctx, f, params)
 	if err != nil {
@@ -243,11 +243,11 @@ func (revokeLeaverFixer) Apply(h *Hub, f doctor.Finding, params map[string]strin
 	if planHash == "" || c.hash != planHash {
 		return nil, errCredentialChanged()
 	}
-	return h.startAsync(c.inst, OpRevokeLeaver, func(ready func()) (map[string]string, []string, error) {
+	return h.startAsync(c.inst, OpRevokeLeaver, actor, func(ready func()) (map[string]string, []string, error) {
 		ready()
 		// Only the previewed credential (fix round 1): one regenerated or
 		// created since is left alone, under the same lock as the revoke.
-		if err := h.adminRevokeCredentialID(ctx, c.inst, c.key, c.user, actor, c.id); err != nil {
+		if err := h.adminRevokeCredentialID(ctx, c.inst, c.key, c.user, actor.User, c.id); err != nil {
 			return nil, nil, err
 		}
 		return map[string]string{"user": c.user, "key": c.key}, nil, nil
@@ -392,14 +392,14 @@ func (personTreeOwnerFixer) Preview(ctx context.Context, h *Hub, f doctor.Findin
 // O_DIRECTORY and refuses a symlink, a non-directory, another mount or
 // another inode), then the tree scanned again so the doctor sees the
 // result. Audited doctor.fix (ApplyFix).
-func (personTreeOwnerFixer) Apply(h *Hub, f doctor.Finding, params map[string]string, planHash, actor string) (*AsyncOp, error) {
+func (personTreeOwnerFixer) Apply(h *Hub, f doctor.Finding, params map[string]string, planHash string, actor directory.Actor) (*AsyncOp, error) {
 	ctx := context.Background()
 	c0, err := h.treePlan(ctx, f, params)
 	if err != nil {
 		return nil, err
 	}
 	inst := c0.inst
-	return h.startAsync(inst, OpPersonTreeOwner, func(ready func()) (map[string]string, []string, error) {
+	return h.startAsync(inst, OpPersonTreeOwner, actor, func(ready func()) (map[string]string, []string, error) {
 		unlock, err := h.lockApp(inst)
 		if err != nil {
 			return nil, nil, err

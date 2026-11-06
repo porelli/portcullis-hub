@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"github.com/portcullis/hub/internal/directory"
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
@@ -731,14 +732,14 @@ func TestAssignHoldsLocks(t *testing.T) {
 	}
 	busy("Enable", f.h.Enable("immich"))
 	busy("RestartApp", f.h.RestartApp("immich"))
-	_, err = f.h.SaveSettings("immich", SettingsUpdate{Values: map[string]json.RawMessage{"workers": json.RawMessage("4")}}, "admin")
+	_, err = f.h.SaveSettings("immich", SettingsUpdate{Values: map[string]json.RawMessage{"workers": json.RawMessage("4")}}, directory.Human("admin"))
 	busy("SaveSettings", err)
 	if err == nil || !strings.Contains(err.Error(), "shared folder Family media is being applied") {
 		t.Errorf("SaveSettings: %v", err)
 	}
 	_, err = f.h.PreviewSettings(context.Background(), "immich", SettingsUpdate{Values: map[string]json.RawMessage{"workers": json.RawMessage("4")}})
 	busy("PreviewSettings", err)
-	_, err = f.h.StartBackup("immich", "admin")
+	_, err = f.h.StartBackup("immich", directory.Human("admin"))
 	busy("StartBackup", err)
 	_, err = f.h.StartAssign("media", req, plan.Hash, "admin")
 	busy("second StartAssign", err)
@@ -748,7 +749,7 @@ func TestAssignHoldsLocks(t *testing.T) {
 	if rec := waitFolderOp(t, f, "media"); !rec.OK {
 		t.Fatalf("op = %+v", rec)
 	}
-	if _, err := f.h.SaveSettings("immich", SettingsUpdate{Values: map[string]json.RawMessage{"workers": json.RawMessage("4")}}, "admin"); err != nil {
+	if _, err := f.h.SaveSettings("immich", SettingsUpdate{Values: map[string]json.RawMessage{"workers": json.RawMessage("4")}}, directory.Human("admin")); err != nil {
 		t.Errorf("save after the apply: %v", err)
 	}
 }
@@ -767,7 +768,7 @@ func TestSaveRacesAssignment(t *testing.T) {
 			t.Errorf("assign = %+v", rec)
 		}
 	}
-	_, err := f.h.SaveSettings("immich", SettingsUpdate{Values: map[string]json.RawMessage{"extra": json.RawMessage(`"/srv/new"`)}}, "admin")
+	_, err := f.h.SaveSettings("immich", SettingsUpdate{Values: map[string]json.RawMessage{"extra": json.RawMessage(`"/srv/new"`)}}, directory.Human("admin"))
 	if statusOf(err) != 409 || !strings.Contains(err.Error(), "uses shared folder media") {
 		t.Fatalf("racing save = %v", err)
 	}
@@ -1112,7 +1113,7 @@ var libraryReq = AssignRequest{Uses: []FolderUse{{Instance: "immich", Key: "libr
 func TestPreviewRacesFolderDelete(t *testing.T) {
 	f, d, _ := assignFixture(t)
 	d.onScan = func(string) {
-		if err := f.h.DeleteFolder("media", "admin"); err != nil {
+		if err := f.h.DeleteFolder("media", directory.Human("admin")); err != nil {
 			t.Errorf("delete: %v", err)
 		}
 	}
@@ -1320,7 +1321,7 @@ func TestFailureKeepsRedaction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fb := &failCtx{id: "media", actor: "admin", m: &applyMarker{}, secrets: f.h.opSecrets([]string{"immich"})}
+	fb := &failCtx{id: "media", actor: directory.Human("admin"), m: &applyMarker{}, secrets: f.h.opSecrets([]string{"immich"})}
 	got := f.h.failBeforeState(fb, errors.New("boom"), "", false)
 	if !slices.Contains(secretsOf(got), "s3cr3t-token-value") {
 		t.Errorf("redaction set lost: %v", secretsOf(got))
@@ -1339,7 +1340,7 @@ func TestFolderAuditRedacted(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Through the error's redaction set (a disk-changed failure).
-	fb := &failCtx{id: "media", actor: "admin", m: &applyMarker{}, secrets: f.h.opSecrets([]string{"immich"})}
+	fb := &failCtx{id: "media", actor: directory.Human("admin"), m: &applyMarker{}, secrets: f.h.opSecrets([]string{"immich"})}
 	f.h.failBeforeState(fb, errors.New("compose up: API_TOKEN=s3cr3t-token-value rejected"), "", true)
 	e := audit.last()
 	if e.Action != "folder.apply" || e.Error == "" || strings.Contains(e.Error, "s3cr3t-token-value") || !strings.Contains(e.Error, "[redacted]") {

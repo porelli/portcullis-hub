@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"github.com/portcullis/hub/internal/directory"
 	"context"
 	"encoding/json"
 	"path/filepath"
@@ -322,7 +323,7 @@ func TestSaveGroupIDRoundTrip(t *testing.T) {
 // placeholders when the panel sends them back.
 func TestPanelPlaceholderRoundTrip(t *testing.T) {
 	f, _, people := privFixture(t)
-	if _, err := f.h.EnableAs("privapp", "root"); err != nil {
+	if _, err := f.h.EnableAs("privapp", directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	f.h.Wait()

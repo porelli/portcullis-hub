@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"github.com/portcullis/hub/internal/directory"
 	"context"
 	"errors"
 	"fmt"
@@ -73,7 +74,7 @@ func TestLocalNetworksValidate(t *testing.T) {
 		t.Fatalf("view = %v %v", nets, def)
 	}
 	for _, bad := range [][]string{{"0.0.0.0/0"}, {"::/0"}, {"10.0.0.1/8"}, {"10.0.0.0/8", "nonsense"}, {"10.0.0.0/8", "10.0.0.0/8"}} {
-		err := f.h.SetLocalNetworks(bad, "root")
+		err := f.h.SetLocalNetworks(bad, directory.Human("root"))
 		if statusOf(err) != 400 || !strings.Contains(err.Error(), bad[len(bad)-1]) {
 			t.Errorf("%v: err = %v, want 400 naming the entry", bad, err)
 		}
@@ -85,7 +86,7 @@ func TestLocalNetworksValidate(t *testing.T) {
 	for i := range many {
 		many[i] = fmt.Sprintf("10.%d.0.0/16", i)
 	}
-	if err := f.h.SetLocalNetworks(many, "root"); statusOf(err) != 400 {
+	if err := f.h.SetLocalNetworks(many, directory.Human("root")); statusOf(err) != 400 {
 		t.Errorf("65 entries: %v", err)
 	}
 	if err := f.h.SetLocalNetworks([]string{"10.0.0.0/8"}, ""); statusOf(err) != 401 {
@@ -93,7 +94,7 @@ func TestLocalNetworksValidate(t *testing.T) {
 	}
 
 	// [] = loopback only; it survives a restart.
-	if err := f.h.SetLocalNetworks([]string{}, "root"); err != nil {
+	if err := f.h.SetLocalNetworks([]string{}, directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	if e := audit.last(); e.Action != "settings.local_networks" || e.Result != "ok" || e.Detail != "0 networks" || e.Actor != "root" {
@@ -108,7 +109,7 @@ func TestLocalNetworksValidate(t *testing.T) {
 	}
 
 	// nil = the defaults.
-	if err := f.h.SetLocalNetworks(nil, "root"); err != nil {
+	if err := f.h.SetLocalNetworks(nil, directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	if e := audit.last(); e.Detail != "5 networks" || e.Result != "ok" {
@@ -124,7 +125,7 @@ func TestLocalNetworksValidate(t *testing.T) {
 		t.Errorf("nil stored as %v", *stored)
 	}
 
-	if err := f.h.SetLocalNetworks([]string{"192.168.1.0/24", "fd00::/8"}, "root"); err != nil {
+	if err := f.h.SetLocalNetworks([]string{"192.168.1.0/24", "fd00::/8"}, directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	if nets, def := f.h.LocalNetworksView(); def || strings.Join(nets, ",") != "192.168.1.0/24,fd00::/8" {

@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"github.com/portcullis/hub/internal/directory"
 	"context"
 	"encoding/json"
 	"os"
@@ -355,7 +356,7 @@ func TestLocalNetworksEmptyProblem(t *testing.T) {
 	if got := findingsOf(t, c.f, doctor.KindLocalNetworksEmpty); len(got) != 0 {
 		t.Fatalf("with the defaults: %+v", got)
 	}
-	if err := c.f.h.SetLocalNetworks([]string{}, "admin"); err != nil {
+	if err := c.f.h.SetLocalNetworks([]string{}, directory.Human("admin")); err != nil {
 		t.Fatal(err)
 	}
 	settle(c.f)
@@ -397,7 +398,7 @@ func TestGIDFromRefusesFolderValue(t *testing.T) {
 	e := treeFixture(t)
 	f := e.f
 	addFolder(t, f, e.d, "photos", "Photos", "/srv/photos", 60001)
-	_, err := f.h.SaveSettings(smbID, SettingsUpdate{Values: vals("homes", "folder:photos")}, "admin")
+	_, err := f.h.SaveSettings(smbID, SettingsUpdate{Values: vals("homes", directory.Human("folder:photos"))}, "admin")
 	if errStatus(err) != 409 || !strings.Contains(err.Error(), "per-person tree") {
 		t.Errorf("save folder:photos: %v, want 409 per-person tree", err)
 	}

@@ -57,7 +57,7 @@ func (s *Server) handleDoctorScan(w http.ResponseWriter, r *http.Request) {
 	if !s.folderAdmin(w, r) {
 		return
 	}
-	op, err := s.Hub.StartDoctorScan(actor(r))
+	op, err := s.Hub.StartDoctorScan(requestActor(r))
 	if err != nil {
 		writeAPIErr(w, err)
 		return
@@ -116,7 +116,7 @@ func (s *Server) handleFixApply(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "body must be "+fixApplyUsage)
 		return
 	}
-	op, err := s.Hub.ApplyFix(r.Context(), fp, b.Params, *b.PlanHash, actor(r))
+	op, err := s.Hub.ApplyFix(r.Context(), fp, b.Params, *b.PlanHash, requestActor(r))
 	if err != nil {
 		writeAPIErr(w, err)
 		return
@@ -139,7 +139,7 @@ func (s *Server) handleMute(w http.ResponseWriter, r *http.Request) {
 	if !decodeAPI(w, r, &b, muteUsage) {
 		return
 	}
-	if err := s.Hub.MuteFinding(r.Context(), fp, b.Reason, actor(r), b.Token); err != nil {
+	if err := s.Hub.MuteFinding(r.Context(), fp, b.Reason, requestActor(r), b.Token); err != nil {
 		writeAPIErr(w, err)
 		return
 	}
@@ -154,7 +154,7 @@ func (s *Server) handleUnmute(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.Hub.UnmuteFinding(fp, actor(r)); err != nil {
+	if err := s.Hub.UnmuteFinding(fp, requestActor(r)); err != nil {
 		writeAPIErr(w, err)
 		return
 	}

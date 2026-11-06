@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"github.com/portcullis/hub/internal/directory"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -36,7 +37,7 @@ func rewriteMember(t *testing.T, p, name string, content []byte) {
 // rules; refused (409, every problem listed) before anything changes.
 func TestRestoreRefusesInvalidConfig(t *testing.T) {
 	f, _, groups := grafanaB(t)
-	entry, err := f.h.BackupInstance("grafana-b", "root")
+	entry, err := f.h.BackupInstance("grafana-b", directory.Human("root"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,11 +46,11 @@ func TestRestoreRefusesInvalidConfig(t *testing.T) {
 	bad := strings.Replace(string(data["config/instance.yaml"]), "enabled: true", "enabled: true\nsign_in: native\npublic_mode: listed\nsettings:\n  values:\n    bad key: x", 1)
 	rewriteMember(t, p, "config/instance.yaml", []byte(bad))
 	n, hl := len(f.runner.Calls()), len(f.engine.vol().helperLog)
-	_, err = f.h.RestoreInstance("grafana-b", entry.Archive, "root")
+	_, err = f.h.RestoreInstance("grafana-b", entry.Archive, directory.Human("root"))
 	if statusOf(err) != 409 || !strings.Contains(err.Error(), `unknown setting "bad key"`) || !strings.Contains(err.Error(), "sign-in choice") || !strings.Contains(err.Error(), "public exceptions") {
 		t.Fatalf("same-instance restore of a bad config = %v", err)
 	}
-	_, err = f.h.RestoreInstanceAs(entry.Archive, "grafana-c", "root")
+	_, err = f.h.RestoreInstanceAs(entry.Archive, "grafana-c", directory.Human("root"))
 	if statusOf(err) != 409 || !strings.Contains(err.Error(), `unknown setting "bad key"`) {
 		t.Fatalf("new-id restore of a bad config = %v", err)
 	}
@@ -100,7 +101,7 @@ func TestInterruptedRestoreRolledBack(t *testing.T) {
 		"enable":   f.h.Enable("grafana-b"),
 		"settings": f.h.save("grafana-b", SettingsUpdate{}),
 		"env":      f.h.SaveEnv("grafana-b", map[string]string{"X": "y"}),
-		"hosts":    f.h.SetHosts("grafana-b", map[string]string{"grafana": "g2.example.org"}, "root"),
+		"hosts":    f.h.SetHosts("grafana-b", map[string]string{"grafana": "g2.example.org"}, directory.Human("root")),
 	} {
 		if statusOf(err) != 409 {
 			t.Errorf("%s while restoring = %v", name, err)
@@ -109,7 +110,7 @@ func TestInterruptedRestoreRolledBack(t *testing.T) {
 	if _, _, err := f.h.SaveUserOverride("grafana-b", ""); statusOf(err) != 409 {
 		t.Errorf("custom override while restoring = %v", err)
 	}
-	if _, err := f.h.BackupInstance("grafana-b", "root"); statusOf(err) != 409 {
+	if _, err := f.h.BackupInstance("grafana-b", directory.Human("root")); statusOf(err) != 409 {
 		t.Errorf("backup while restoring = %v", err)
 	}
 	f.h.mu.Lock()
@@ -156,7 +157,7 @@ func TestInterruptedRestoreRolledBack(t *testing.T) {
 // then restores what was asked.
 func TestRestoreAfterInterruptedRestore(t *testing.T) {
 	f, _, _ := grafanaB(t)
-	entry, err := f.h.BackupInstance("grafana-b", "root")
+	entry, err := f.h.BackupInstance("grafana-b", directory.Human("root"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,7 +170,7 @@ func TestRestoreAfterInterruptedRestore(t *testing.T) {
 	f.h.markRestoring("grafana-b", pre.Archive)
 	putFiles(f, "portcullis_grafana-b-grafana-data", fakeFile{Name: "garbage", Body: "x"})
 	unlock()
-	if _, err := f.h.RestoreInstance("grafana-b", entry.Archive, "root"); err != nil {
+	if _, err := f.h.RestoreInstance("grafana-b", entry.Archive, directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	files := f.engine.volumeFiles("portcullis_grafana-b-grafana-data")
@@ -197,7 +198,7 @@ func TestDeleteKeepsGroupsWithOtherNames(t *testing.T) {
 	if f.h.Template("media") == nil {
 		t.Fatal("media not loaded")
 	}
-	res, err := f.h.DeleteInstance("media", "media", "root")
+	res, err := f.h.DeleteInstance("media", "media", directory.Human("root"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,15 +214,15 @@ func TestDeleteKeepsGroupsWithOtherNames(t *testing.T) {
 // is deleted or created.
 func TestActorResolvedFirst(t *testing.T) {
 	f, _, groups := grafanaB(t)
-	entry, err := f.h.BackupInstance("grafana-b", "root")
+	entry, err := f.h.BackupInstance("grafana-b", directory.Human("root"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	groups.actorErr = errors.New("not an administrator")
-	if _, err := f.h.DeleteInstance("grafana-b", "grafana-b", "mallory"); err == nil || !strings.Contains(err.Error(), "nothing was deleted") {
+	if _, err := f.h.DeleteInstance("grafana-b", "grafana-b", directory.Human("mallory")); err == nil || !strings.Contains(err.Error(), "nothing was deleted") {
 		t.Fatalf("delete as an unknown actor = %v", err)
 	}
-	if _, err := f.h.RestoreInstanceAs(entry.Archive, "grafana-c", "mallory"); err == nil || !strings.Contains(err.Error(), "nothing was changed") {
+	if _, err := f.h.RestoreInstanceAs(entry.Archive, "grafana-c", directory.Human("mallory")); err == nil || !strings.Contains(err.Error(), "nothing was changed") {
 		t.Fatalf("restore as an unknown actor = %v", err)
 	}
 	if l, _ := f.h.ListBackups("grafana-b"); len(l) != 1 || f.h.Template("grafana-c") != nil || !f.h.IsEnabled("grafana-b") {
@@ -251,7 +252,7 @@ func TestDeleteMissingTemplateClients(t *testing.T) {
 	if f.h.Template("chat-b") != nil {
 		t.Fatal("chat-b still resolves")
 	}
-	res, err := f.h.DeleteInstance("chat-b", "chat-b", "root")
+	res, err := f.h.DeleteInstance("chat-b", "chat-b", directory.Human("root"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -262,7 +263,7 @@ func TestDeleteMissingTemplateClients(t *testing.T) {
 	g := newInstanceFixture(t, nil)
 	simulateCompose(g, 0)
 	g.h.idp = nil
-	res, err = g.h.DeleteInstance("grafana", "grafana", "root")
+	res, err = g.h.DeleteInstance("grafana", "grafana", directory.Human("root"))
 	if err != nil || !strings.Contains(strings.Join(res.Warnings, " "), "Keycloak is not configured") {
 		t.Errorf("delete without an IdP = %+v %v", res, err)
 	}
@@ -283,7 +284,7 @@ func TestFillVolumeRefusesForeignVolume(t *testing.T) {
 // startup; archives stay.
 func TestSweepBackupLeftovers(t *testing.T) {
 	f, _, _ := grafanaB(t)
-	entry, err := f.h.BackupInstance("grafana-b", "root")
+	entry, err := f.h.BackupInstance("grafana-b", directory.Human("root"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -310,7 +311,7 @@ func TestSweepBackupLeftovers(t *testing.T) {
 // Minor 4: too little free space refuses before anything stops.
 func TestBackupRestoreNeedFreeSpace(t *testing.T) {
 	f, _, _ := grafanaB(t)
-	entry, err := f.h.BackupInstance("grafana-b", "root")
+	entry, err := f.h.BackupInstance("grafana-b", directory.Human("root"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -318,13 +319,13 @@ func TestBackupRestoreNeedFreeSpace(t *testing.T) {
 	t.Cleanup(func() { freeSpace = old })
 	freeSpace = func(string) (uint64, error) { return 1 << 20, nil }
 	n := len(f.runner.Calls())
-	if _, err := f.h.BackupInstance("grafana-b", "root"); statusOf(err) != 507 || !strings.Contains(err.Error(), "free space") {
+	if _, err := f.h.BackupInstance("grafana-b", directory.Human("root")); statusOf(err) != 507 || !strings.Contains(err.Error(), "free space") {
 		t.Errorf("backup on a full disk = %v", err)
 	}
-	if _, err := f.h.RestoreInstance("grafana-b", entry.Archive, "root"); statusOf(err) != 507 {
+	if _, err := f.h.RestoreInstance("grafana-b", entry.Archive, directory.Human("root")); statusOf(err) != 507 {
 		t.Errorf("restore on a full disk = %v", err)
 	}
-	if _, err := f.h.RestoreInstanceAs(entry.Archive, "grafana-c", "root"); statusOf(err) != 507 {
+	if _, err := f.h.RestoreInstanceAs(entry.Archive, "grafana-c", directory.Human("root")); statusOf(err) != 507 {
 		t.Errorf("new-id restore on a full disk = %v", err)
 	}
 	if len(f.runner.Calls()) != n || !f.h.IsEnabled("grafana-b") {
@@ -336,12 +337,12 @@ func TestBackupRestoreNeedFreeSpace(t *testing.T) {
 // archive doesn't have (their data is in the pre-restore backup).
 func TestRestoreEmptiesVolumesNotInArchive(t *testing.T) {
 	f, _, _ := grafanaB(t)
-	entry, err := f.h.BackupInstance("grafana-b", "root")
+	entry, err := f.h.BackupInstance("grafana-b", directory.Human("root"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	f.engine.addVolume("portcullis_grafana-b-extra", "portcullis-grafana-b", "extra", 0, fakeFile{Name: "x", Body: "later"})
-	res, err := f.h.RestoreInstance("grafana-b", entry.Archive, "root")
+	res, err := f.h.RestoreInstance("grafana-b", entry.Archive, directory.Human("root"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -368,7 +369,7 @@ func TestDeletingIsDisabled(t *testing.T) {
 		f.runner.byNameErr = errors.New("compose down failed")
 		return nil
 	}
-	if _, err := f.h.DeleteInstance("grafana-b", "grafana-b", "root"); err == nil {
+	if _, err := f.h.DeleteInstance("grafana-b", "grafana-b", directory.Human("root")); err == nil {
 		t.Fatal("delete with a failing down succeeded")
 	}
 	f.runner.downErr, f.runner.byNameErr = nil, nil
@@ -408,11 +409,11 @@ func TestRestoreNewIDWarnsPathSettings(t *testing.T) {
 	if err := f.h.save("media-b", SettingsUpdate{Values: vals("library", "/srv/library")}); err != nil {
 		t.Fatal(err)
 	}
-	entry, err := f.h.BackupInstance("media-b", "root")
+	entry, err := f.h.BackupInstance("media-b", directory.Human("root"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err := f.h.RestoreInstanceAs(entry.Archive, "media-c", "root")
+	res, err := f.h.RestoreInstanceAs(entry.Archive, "media-c", directory.Human("root"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -432,11 +433,11 @@ func TestRecoverRefusesForeignArchive(t *testing.T) {
 	if err := f.h.CreateInstance("grafana", "grafana-c", nil); err != nil {
 		t.Fatal(err)
 	}
-	other, err := f.h.BackupInstance("grafana-c", "root")
+	other, err := f.h.BackupInstance("grafana-c", directory.Human("root"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	own, err := f.h.BackupInstance("grafana-b", "root") // reason manual
+	own, err := f.h.BackupInstance("grafana-b", directory.Human("root")) // reason manual
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -449,7 +450,7 @@ func TestRecoverRefusesForeignArchive(t *testing.T) {
 		f.h.mu.Unlock()
 		putFiles(f, "portcullis_grafana-b-grafana-data", fakeFile{Name: "now", Body: "keep"})
 		n, hl := len(f.runner.Calls()), len(f.engine.vol().helperLog)
-		_, err := f.h.RestoreInstance("grafana-b", own.Archive, "root")
+		_, err := f.h.RestoreInstance("grafana-b", own.Archive, directory.Human("root"))
 		if statusOf(err) != 409 {
 			t.Errorf("recorded %s: %v", rec, err)
 		}
@@ -468,7 +469,7 @@ func TestRestoreNormalisesPolicyKeepsCreated(t *testing.T) {
 	if err := f.h.CreateInstance("grafana", "grafana-b", nil); err != nil {
 		t.Fatal(err)
 	}
-	entry, err := f.h.BackupInstance("grafana-b", "root")
+	entry, err := f.h.BackupInstance("grafana-b", directory.Human("root"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -482,7 +483,7 @@ func TestRestoreNormalisesPolicyKeepsCreated(t *testing.T) {
 	f.h.mu.Lock()
 	f.h.st.LegacyPassword["grafana-b"] = true
 	f.h.mu.Unlock()
-	if _, err := f.h.RestoreInstance("grafana-b", entry.Archive, "root"); err != nil {
+	if _, err := f.h.RestoreInstance("grafana-b", entry.Archive, directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	f.h.mu.RLock()
@@ -531,7 +532,7 @@ func TestDeleteRestoringWarns(t *testing.T) {
 	}
 	f.h.markRestoring("grafana-b", pre.Archive)
 	unlock()
-	res, err := f.h.DeleteInstance("grafana-b", "grafana-b", "root")
+	res, err := f.h.DeleteInstance("grafana-b", "grafana-b", directory.Human("root"))
 	if err != nil {
 		t.Fatal(err)
 	}

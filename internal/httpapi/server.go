@@ -325,7 +325,7 @@ func (s *Server) handleEnable(w http.ResponseWriter, r *http.Request) {
 	}
 	// Missing users_<id> / admin_<id> groups are created first, as the
 	// signed-in admin (audited in Users & Groups).
-	res, err := s.Hub.EnableAs(req.ID, actor(r))
+	res, err := s.Hub.EnableAs(req.ID, requestActor(r))
 	if err != nil {
 		writeErr(w, err, http.StatusBadRequest)
 		return

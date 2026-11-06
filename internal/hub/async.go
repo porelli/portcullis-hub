@@ -13,6 +13,7 @@ import (
 
 	"github.com/portcullis/hub/internal/compose"
 	"github.com/portcullis/hub/internal/fsutil"
+	"github.com/portcullis/hub/internal/directory"
 )
 
 // OpBackup is a manual instance backup (the long operations below run in
@@ -53,13 +54,13 @@ func (h *Hub) archiveExists(archive string) error {
 // — and startAsync then returns the AsyncOp (the API answers 202). If fn
 // returns before ready, its error is the synchronous answer (a 4xx: bad
 // input, busy, not found). The outcome lands in the op record.
-func (h *Hub) startAsync(id, op string, fn func(ready func()) (map[string]string, []string, error)) (*AsyncOp, error) {
+func (h *Hub) startAsync(id, op string, actor directory.Actor, fn func(ready func()) (map[string]string, []string, error)) (*AsyncOp, error) {
 	a := &AsyncOp{OpID: newOpID(), Op: op, Instance: id}
 	accepted := make(chan struct{})
 	var once sync.Once
 	ready := func() {
 		once.Do(func() {
-			h.recordOp(id, OpRecord{Op: op, OpID: a.OpID, At: time.Now().UTC(), Running: true})
+			h.recordOp(id, OpRecord{Op: op, OpID: a.OpID, At: time.Now().UTC(), Running: true, Actor: actor.User})
 			close(accepted)
 		})
 	}
@@ -160,8 +161,8 @@ func newOpID() string {
 // StartBackup starts a manual backup of id in the background (§11.7):
 // refusals (busy, deleting / restoring, unknown, no Docker) are returned
 // at once; the archive name is the op record's result "archive".
-func (h *Hub) StartBackup(id, actor string) (*AsyncOp, error) {
-	return h.startAsync(id, OpBackup, func(ready func()) (map[string]string, []string, error) {
+func (h *Hub) StartBackup(id string, actor directory.Actor) (*AsyncOp, error) {
+	return h.startAsync(id, OpBackup, actor, func(ready func()) (map[string]string, []string, error) {
 		e, err := h.backupInstance(id, actor, ready)
 		if e != nil {
 			return map[string]string{"archive": e.Archive}, nil, err
@@ -172,8 +173,8 @@ func (h *Hub) StartBackup(id, actor string) (*AsyncOp, error) {
 
 // StartRestore starts a same-instance restore in the background; the
 // result holds "pre_restore_backup".
-func (h *Hub) StartRestore(id, archive, actor string) (*AsyncOp, error) {
-	return h.startAsync(id, OpRestore, func(ready func()) (map[string]string, []string, error) {
+func (h *Hub) StartRestore(id, archive string, actor directory.Actor) (*AsyncOp, error) {
+	return h.startAsync(id, OpRestore, actor, func(ready func()) (map[string]string, []string, error) {
 		res, err := h.restoreInstance(id, archive, actor, ready)
 		return restoreResult(res, archive, ""), restoreWarnings(res), err
 	})
@@ -181,8 +182,8 @@ func (h *Hub) StartRestore(id, archive, actor string) (*AsyncOp, error) {
 
 // StartRestoreAs starts a restore into the new instance newID in the
 // background (its op record is newID's); the result holds "instance".
-func (h *Hub) StartRestoreAs(archive, newID, actor string, hosts map[string]string) (*AsyncOp, error) {
-	return h.startAsync(newID, OpRestore, func(ready func()) (map[string]string, []string, error) {
+func (h *Hub) StartRestoreAs(archive, newID string, actor directory.Actor, hosts map[string]string) (*AsyncOp, error) {
+	return h.startAsync(newID, OpRestore, actor, func(ready func()) (map[string]string, []string, error) {
 		res, err := h.restoreInstanceAs(archive, newID, actor, hosts, ready)
 		return restoreResult(res, archive, newID), restoreWarnings(res), err
 	})
@@ -190,8 +191,8 @@ func (h *Hub) StartRestoreAs(archive, newID, actor string, hosts map[string]stri
 
 // StartDelete starts a guarded delete in the background (confirm = the
 // id typed: checked at once); the result holds "backup".
-func (h *Hub) StartDelete(id, confirm, actor string) (*AsyncOp, error) {
-	return h.startAsync(id, OpDelete, func(ready func()) (map[string]string, []string, error) {
+func (h *Hub) StartDelete(id, confirm string, actor directory.Actor) (*AsyncOp, error) {
+	return h.startAsync(id, OpDelete, actor, func(ready func()) (map[string]string, []string, error) {
 		res, err := h.deleteInstance(id, confirm, actor, ready)
 		if res == nil {
 			return nil, nil, err

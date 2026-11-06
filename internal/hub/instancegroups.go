@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/portcullis/hub/internal/templates"
+	"github.com/portcullis/hub/internal/directory"
 )
 
 // Instance groups on enable (contract §11.2): enabling an instance —
@@ -54,7 +55,7 @@ type EnableResult struct {
 // nothing happens), then the instance is enabled. A group created before
 // a failed enable stays (empty; the instance needs it anyway). Without
 // an actor (no X-Forwarded-User) no group is created: a warning.
-func (h *Hub) EnableAs(id, actor string) (*EnableResult, error) {
+func (h *Hub) EnableAs(id string, actor directory.Actor) (*EnableResult, error) {
 	res := &EnableResult{}
 	unlock, err := h.lockApp(id)
 	if err != nil {
@@ -85,7 +86,7 @@ func (h *Hub) EnableAs(id, actor string) (*EnableResult, error) {
 
 // ensureGroups creates id's missing derived groups as actor; a missing
 // group the Hub may not create is a warning. Caller holds id's lock.
-func (h *Hub) ensureGroups(ctx context.Context, id string, groups []instanceGroup, actor string) (created, warnings []string, err error) {
+func (h *Hub) ensureGroups(ctx context.Context, id string, groups []instanceGroup, actor directory.Actor) (created, warnings []string, err error) {
 	h.mu.RLock()
 	groupsAPI := h.groups
 	h.mu.RUnlock()
@@ -96,7 +97,7 @@ func (h *Hub) ensureGroups(ctx context.Context, id string, groups []instanceGrou
 	if groupsAPI == nil {
 		return nil, []string{fmt.Sprintf("groups %s were not checked: users & groups is not available — create them in Users & Groups if they are missing", strings.Join(names, ", "))}, nil
 	}
-	if strings.TrimSpace(actor) == "" {
+	if strings.TrimSpace(actor.User) == "" {
 		return nil, []string{fmt.Sprintf("groups %s were not checked: no signed-in user to create them as", strings.Join(names, ", "))}, nil
 	}
 	missing, err := groupsAPI.MissingInstanceGroups(ctx, names)
@@ -231,8 +232,8 @@ type CreateGroupsResult struct {
 // instances ids (empty: all of them) as actor, each under its instance's
 // lock. A busy or unknown instance is reported, not fatal; the actor must
 // resolve as an LLDAP admin (else nothing is created: the error).
-func (h *Hub) CreateMissingGroups(ctx context.Context, ids []string, actor string) ([]CreateGroupsResult, error) {
-	if strings.TrimSpace(actor) == "" {
+func (h *Hub) CreateMissingGroups(ctx context.Context, ids []string, actor directory.Actor) ([]CreateGroupsResult, error) {
+	if strings.TrimSpace(actor.User) == "" {
 		return nil, statusErr(400, "no signed-in user to create the groups as")
 	}
 	byID, groupsAPI := h.enabledGroups()

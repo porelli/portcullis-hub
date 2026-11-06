@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"github.com/portcullis/hub/internal/directory"
 	"context"
 	"errors"
 	"github.com/portcullis/hub/internal/state"
@@ -46,7 +47,7 @@ func TestMissingDomainKeptWhileUsed(t *testing.T) {
 		t.Fatalf("new host on a missing domain: %v", err)
 	}
 	// The instance's own host is kept (an unchanged SetHosts is fine).
-	if err := f.h.SetHosts("grafana-b", map[string]string{"grafana": "grafana.team-b.example.net"}, "alice"); err != nil {
+	if err := f.h.SetHosts("grafana-b", map[string]string{"grafana": "grafana.team-b.example.net"}, directory.Human("alice")); err != nil {
 		t.Fatalf("unchanged hosts: %v", err)
 	}
 	// Survives further refreshes.
@@ -63,7 +64,7 @@ func TestMissingDomainKeptWhileUsed(t *testing.T) {
 	// Moved away: the next refresh drops it.
 	api.set("team-b.example.net", true, time.Now().Add(60*24*time.Hour))
 	f.h.RefreshDomains(ctx)
-	if err := f.h.SetHosts("grafana-b", map[string]string{"grafana": "grafana-b.example.org"}, "alice"); err != nil {
+	if err := f.h.SetHosts("grafana-b", map[string]string{"grafana": "grafana-b.example.org"}, directory.Human("alice")); err != nil {
 		t.Fatal(err)
 	}
 	api.mu.Lock()
@@ -89,11 +90,11 @@ func TestHostCollisionRuntimeHosts(t *testing.T) {
 	if err := f.h.CreateInstance("grafana", "grafana-x", map[string]string{"grafana": "x.example.org"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.h.SetHosts("grafana-x", map[string]string{"grafana": "busy.example.org"}, "alice"); statusOf(err) != 409 {
+	if err := f.h.SetHosts("grafana-x", map[string]string{"grafana": "busy.example.org"}, directory.Human("alice")); statusOf(err) != 409 {
 		t.Fatalf("SetHosts onto a still-routed host: %v", err)
 	}
 	// Its own running project's hosts don't block it.
-	if err := f.h.SetHosts("grafana-x", map[string]string{"grafana": "own.example.org"}, "alice"); err != nil {
+	if err := f.h.SetHosts("grafana-x", map[string]string{"grafana": "own.example.org"}, directory.Human("alice")); err != nil {
 		t.Fatalf("own runtime host: %v", err)
 	}
 }
@@ -243,7 +244,7 @@ func TestInterruptedOpsAndRestoreAs(t *testing.T) {
 func TestSetHostsReapplyAfterOtherOp(t *testing.T) {
 	f := chatB(t)
 	f.runner.upErr = errors.New("boom")
-	if err := f.h.SetHosts("chat-b", map[string]string{"chat": "talk.example.org"}, "alice"); err == nil {
+	if err := f.h.SetHosts("chat-b", map[string]string{"chat": "talk.example.org"}, directory.Human("alice")); err == nil {
 		t.Fatal("restart did not fail")
 	}
 	f.runner.upErr = nil
@@ -251,7 +252,7 @@ func TestSetHostsReapplyAfterOtherOp(t *testing.T) {
 	f.h.recordOp("chat-b", OpRecord{Op: OpBackup, OK: true, At: time.Now()})
 	f.h.loadOps() // and it survives a restart
 	calls := len(f.runner.Calls())
-	if err := f.h.SetHosts("chat-b", map[string]string{"chat": "talk.example.org"}, "alice"); err != nil {
+	if err := f.h.SetHosts("chat-b", map[string]string{"chat": "talk.example.org"}, directory.Human("alice")); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(strings.Join(f.runner.Calls()[calls:], " "), "up:portcullis-chat-b") {
@@ -327,7 +328,7 @@ func TestChainReachingAuthRefusedOnExtra(t *testing.T) {
 	if statusOf(err) != 400 || !strings.Contains(err.Error(), "chain") {
 		t.Fatalf("create on an extra domain = %v", err)
 	}
-	if err := f.h.SetHosts("fwd", map[string]string{"fwd": "fwd.team-b.example.org"}, "alice"); statusOf(err) != 400 {
+	if err := f.h.SetHosts("fwd", map[string]string{"fwd": "fwd.team-b.example.org"}, directory.Human("alice")); statusOf(err) != 400 {
 		t.Fatalf("SetHosts onto an extra domain = %v", err)
 	}
 	// The main domain is fine.
@@ -369,7 +370,7 @@ func TestMixedHostsRefusedAtCreate(t *testing.T) {
 	if err := f.h.CreateInstance("fwd", "fwd-b", map[string]string{"fwd": "fwd.team-b.example.org", "api": "api.team-b.example.org"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.h.SetHosts("fwd-b", map[string]string{"fwd": "fwd.team-b.example.org", "api": "api-b.example.org"}, "alice"); statusOf(err) != 400 {
+	if err := f.h.SetHosts("fwd-b", map[string]string{"fwd": "fwd.team-b.example.org", "api": "api-b.example.org"}, directory.Human("alice")); statusOf(err) != 400 {
 		t.Fatalf("mixed SetHosts = %v", err)
 	}
 }
@@ -393,7 +394,7 @@ func TestDefaultImmutableHostsPinned(t *testing.T) {
 		t.Fatalf("not pinned: %+v", e)
 	}
 	// Not dropped by an unchanged-hosts no-op or a reload.
-	if err := f.h.SetHosts("chat", map[string]string{"chat": "chat.example.org"}, "alice"); err != nil {
+	if err := f.h.SetHosts("chat", map[string]string{"chat": "chat.example.org"}, directory.Human("alice")); err != nil {
 		t.Fatal(err)
 	}
 	// Main domain changes: the pinned hostname stays.

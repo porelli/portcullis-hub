@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"github.com/portcullis/hub/internal/directory"
 	"context"
 	"path/filepath"
 	"reflect"
@@ -248,13 +249,13 @@ func TestMuteAudited(t *testing.T) {
 		t.Errorf("changed inputs: muted %d", r.Muted)
 	}
 
-	if err := f.h.UnmuteFinding(fp, "root"); err != nil {
+	if err := f.h.UnmuteFinding(fp, directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	if e := audit.last(); e.Action != "doctor.unmute" || e.Target != fp || e.Result != "ok" {
 		t.Errorf("audit = %+v", e)
 	}
-	if err := f.h.UnmuteFinding(fp, "root"); statusOf(err) != 404 {
+	if err := f.h.UnmuteFinding(fp, directory.Human("root")); statusOf(err) != 404 {
 		t.Errorf("unmute again = %v", err)
 	}
 	f.h.mu.RLock()

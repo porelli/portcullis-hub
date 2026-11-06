@@ -227,7 +227,7 @@ func (h *Hub) createCredential(ctx context.Context, instance, key, user string, 
 	// refused name).
 	if okName, reason := credentials.CheckUsername(o.Username, user); !okName {
 		err := statusErr(http.StatusConflict, "%s %s", user, reason)
-		h.auditOp(user, "credential.create", target, credentialDetail(instance, key, user, user, reason), err)
+		h.auditOp(directory.Human(user), "credential.create", target, credentialDetail(instance, key, user, user, reason), err)
 		return nil, err
 	}
 	// 3. The account's uuid and the secrets volume (503, before the proof).
@@ -243,7 +243,7 @@ func (h *Hub) createCredential(ctx context.Context, instance, key, user string, 
 	// 4. The fresh-auth proof (outside mu: network calls). Audited with
 	// the verifier's reason only.
 	if _, reason, err := h.checkFreshAuth(ctx, p, user); err != nil {
-		h.auditOp(user, "credential.create", target, credentialDetail(instance, key, user, user, reason), err)
+		h.auditOp(directory.Human(user), "credential.create", target, credentialDetail(instance, key, user, user, reason), err)
 		return nil, err
 	}
 	// 5. The password and its hash; under mu the metadata, the hash file
@@ -310,7 +310,7 @@ func (h *Hub) createCredential(ctx context.Context, instance, key, user string, 
 		}
 		h.mu.Unlock()
 		credentials.Zero(pw)
-		h.auditOp(user, "credential.create", target, credentialDetail(instance, key, user, user, ""), werr)
+		h.auditOp(directory.Human(user), "credential.create", target, credentialDetail(instance, key, user, user, ""), werr)
 		if voided {
 			// The old password may still be live in the app.
 			h.applyRevocation(ctx, instance)
@@ -323,7 +323,7 @@ func (h *Hub) createCredential(ctx context.Context, instance, key, user string, 
 	if regen {
 		action = "credential.regenerate"
 	}
-	h.auditOp(user, action, target, credentialDetail(instance, key, user, user, ""), nil)
+	h.auditOp(directory.Human(user), action, target, credentialDetail(instance, key, user, user, ""), nil)
 	if regen {
 		// D-I4: the old hash's removal is applied like a revocation (hook
 		// ≤ 8 s, else the kill): the old password never stays live while
@@ -373,7 +373,7 @@ func (h *Hub) auditCreateRefused(instance, key, user, reason string) {
 		return
 	}
 	instance, key, user = clip(instance, 64), clip(key, 64), clip(user, 64)
-	e := directory.AuditEntry{Actor: user, Action: "credential.create", Target: instance + "/" + key + "/" + user,
+	e := directory.AuditEntry{Actor: user, Via: "", Client: "", Action: "credential.create", Target: instance + "/" + key + "/" + user,
 		Detail: credentialDetail(instance, key, user, user, reason), Result: "refused", Error: reason}
 	if err := a.Append(e); err != nil {
 		log.Printf("audit: %v", err)
@@ -409,7 +409,7 @@ func (h *Hub) RevokeOwnCredential(ctx context.Context, instance, key, user strin
 // AdminRevokeCredential revokes user's credential as admin actor (reason
 // admin, revoked_by actor). An unknown instance or a key that isn't a
 // person_secret option is 404; nothing active is no error.
-func (h *Hub) AdminRevokeCredential(ctx context.Context, instance, key, user, actor string) error {
+func (h *Hub) AdminRevokeCredential(ctx context.Context, instance, key, user string, actor directory.Actor) error {
 	h.mu.RLock()
 	t := h.findLocked(instance)
 	ok := t != nil && personSecretOption(t, key) != nil
@@ -417,7 +417,7 @@ func (h *Hub) AdminRevokeCredential(ctx context.Context, instance, key, user, ac
 	if !ok {
 		return ErrNotFound
 	}
-	return h.revokeCredentials(ctx, instance, []revocation{{key: key, user: strings.ToLower(user), by: strings.ToLower(actor), reason: state.CredentialReasonAdmin}})
+	return h.revokeCredentials(ctx, instance, []revocation{{key: key, user: strings.ToLower(user), by: strings.ToLower(actor.User), reason: state.CredentialReasonAdmin}})
 }
 
 // revokeAuditAction is a revocation's audit action (§13.16).
@@ -475,7 +475,7 @@ func (h *Hub) revokeCredentialsN(ctx context.Context, instance string, revs []re
 		if o.r.reason == state.CredentialReasonSelf {
 			actor = "self"
 		}
-		h.auditOp(o.r.by, revokeAuditAction(o.r.reason), instance+"/"+o.r.key+"/"+o.r.user, credentialDetail(instance, o.r.key, o.r.user, actor, o.r.reason), o.err)
+		h.auditOp(directory.Human(o.r.by), revokeAuditAction(o.r.reason), instance+"/"+o.r.key+"/"+o.r.user, credentialDetail(instance, o.r.key, o.r.user, actor, o.r.reason), o.err)
 		applied = true
 	}
 	if applied {

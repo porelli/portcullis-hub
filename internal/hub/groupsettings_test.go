@@ -219,7 +219,7 @@ func TestSavePersonRows(t *testing.T) {
 		"placeholder dup": {Person: map[string]PersonChange{"tier": {Default: raw("basic"), Rows: rows(templates.PlaceholderAdminGroup, "pro", "admin_privapp", "basic")}}},
 		"duplicate group": {Person: map[string]PersonChange{"tier": {Default: raw("basic"), Rows: rows("office_milan", "pro", "office_milan", "basic")}}},
 	} {
-		if _, err := f.h.SaveSettings("privapp", u, "root"); statusOf(err) != 400 {
+		if _, err := f.h.SaveSettings("privapp", u, directory.Human("root")); statusOf(err) != 400 {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
@@ -243,7 +243,7 @@ func TestSavePersonRows(t *testing.T) {
 
 func TestPlaceholderRowsBound(t *testing.T) {
 	f, _, people := privFixture(t)
-	res, err := f.h.CreateInstanceAs("privapp", "privapp2", nil, "root")
+	res, err := f.h.CreateInstanceAs("privapp", "privapp2", nil, directory.Human("root"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -268,7 +268,7 @@ func TestPlaceholderRowsBound(t *testing.T) {
 	}
 
 	// The default instance: bound by EnableAs after its groups exist.
-	if _, err := f.h.EnableAs("privapp", "root"); err != nil {
+	if _, err := f.h.EnableAs("privapp", directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	r = storedSettings(f, "privapp").Person["role"].Rows
@@ -372,7 +372,7 @@ func TestPurgeOnHubDelete(t *testing.T) {
 	f, audit, _ := privFixture(t)
 	dir, ll := hubDirectory(t, f)
 	ll.AddGroup("office_milan", "alice")
-	if _, err := f.h.CreateInstanceAs("privapp", "privapp2", nil, "root"); err != nil {
+	if _, err := f.h.CreateInstanceAs("privapp", "privapp2", nil, directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	for _, id := range []string{"privapp", "privapp2"} {
@@ -416,7 +416,7 @@ func TestPurgeOnHubDelete(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() {
-		_, err := f.h.DeleteInstance("privapp2", "privapp2", "root")
+		_, err := f.h.DeleteInstance("privapp2", "privapp2", directory.Human("root"))
 		done <- err
 	}()
 	select {
@@ -434,19 +434,19 @@ func TestPurgeOnHubDelete(t *testing.T) {
 
 func TestRestoreDropsMismatchedRows(t *testing.T) {
 	f, _, people := privFixture(t)
-	if _, err := f.h.CreateInstanceAs("privapp", "privapp2", nil, "root"); err != nil {
+	if _, err := f.h.CreateInstanceAs("privapp", "privapp2", nil, directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := f.h.SaveSettings("privapp2", SettingsUpdate{Person: map[string]PersonChange{"tier": {Default: raw("basic"), Rows: rows("office_milan", "pro", "users_privapp", "pro")}}}, "root"); err != nil {
 		t.Fatal(err)
 	}
-	entry, err := f.h.BackupInstance("privapp2", "root")
+	entry, err := f.h.BackupInstance("privapp2", directory.Human("root"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	people.deleteGroup("office_milan")
 	people.addGroup("office_milan", "alice")
-	res, err := f.h.RestoreInstance("privapp2", entry.Archive, "root")
+	res, err := f.h.RestoreInstance("privapp2", entry.Archive, directory.Human("root"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -457,7 +457,7 @@ func TestRestoreDropsMismatchedRows(t *testing.T) {
 		t.Errorf("warnings = %v", res.Warnings)
 	}
 	// Into a new id: the placeholder row is bound to the new id's group.
-	res, err = f.h.RestoreInstanceAs(entry.Archive, "privapp3", "root")
+	res, err = f.h.RestoreInstanceAs(entry.Archive, "privapp3", directory.Human("root"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -643,7 +643,7 @@ func TestGroupRecordsNeedTheDirectory(t *testing.T) {
 // re-creates that group; rows the admin entered never do.
 func TestReseedTemplateRows(t *testing.T) {
 	f, _, people := privFixture(t)
-	if _, err := f.h.EnableAs("privapp", "root"); err != nil {
+	if _, err := f.h.EnableAs("privapp", directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := f.h.SaveSettings("privapp", SettingsUpdate{Person: map[string]PersonChange{"role": {Default: raw("user"),
@@ -660,7 +660,7 @@ func TestReseedTemplateRows(t *testing.T) {
 		t.Fatalf("rows after the purge = %+v", r)
 	}
 	people.addGroup("office_milan")
-	res, err := f.h.CreateMissingGroups(context.Background(), nil, "root")
+	res, err := f.h.CreateMissingGroups(context.Background(), nil, directory.Human("root"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -680,7 +680,7 @@ func TestReseedTemplateRows(t *testing.T) {
 	s.Person["role"] = p
 	f.h.st.Settings["privapp"] = s
 	f.h.mu.Unlock()
-	if _, err := f.h.CreateMissingGroups(context.Background(), nil, "root"); err != nil {
+	if _, err := f.h.CreateMissingGroups(context.Background(), nil, directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	if r := storedSettings(f, "privapp").Person["role"].Rows; len(r) != 0 {
@@ -720,7 +720,7 @@ func TestPurgeMatchesExactName(t *testing.T) {
 // flake, made deterministic.
 func TestReconcileKeepsRowsBoundAfterSnapshot(t *testing.T) {
 	f, _, people := privFixture(t)
-	if _, err := f.h.EnableAs("privapp", "root"); err != nil {
+	if _, err := f.h.EnableAs("privapp", directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	f.h.Wait()

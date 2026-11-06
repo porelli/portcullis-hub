@@ -323,7 +323,7 @@ func scanPrincipals(uses []PathUsage) []folderfix.Principal {
 // Audited doctor.scan (target "disks"): a refusal (401, 503, 409) as
 // "refused", a finished scan with its counts — always after scanMu is
 // released (I1).
-func (h *Hub) StartDoctorScan(actor string) (*AsyncOp, error) {
+func (h *Hub) StartDoctorScan(actor directory.Actor) (*AsyncOp, error) {
 	op, err := h.startDoctorScan(actor)
 	if err != nil {
 		h.auditScan(actor, "", err)
@@ -334,14 +334,14 @@ func (h *Hub) StartDoctorScan(actor string) (*AsyncOp, error) {
 // auditScan writes the doctor.scan entry (after every lock): err set = the
 // scan was refused before it started (401, 503 and 409 alike: nothing
 // ran), recorded "refused" with its reason.
-func (h *Hub) auditScan(actor, detail string, err error) {
+func (h *Hub) auditScan(actor directory.Actor, detail string, err error) {
 	h.mu.RLock()
 	a := h.audit
 	h.mu.RUnlock()
 	if a == nil {
 		return
 	}
-	e := directory.AuditEntry{Actor: actor, Action: "doctor.scan", Target: "disks", Detail: detail, Result: "ok"}
+	e := directory.AuditEntry{Actor: actor.User, Via: actor.Via, Client: actor.Client, Action: "doctor.scan", Target: "disks", Detail: detail, Result: "ok"}
 	if err != nil {
 		e.Result, e.Error = "refused", err.Error()
 	}
@@ -350,8 +350,8 @@ func (h *Hub) auditScan(actor, detail string, err error) {
 	}
 }
 
-func (h *Hub) startDoctorScan(actor string) (*AsyncOp, error) {
-	if actor == "" {
+func (h *Hub) startDoctorScan(actor directory.Actor) (*AsyncOp, error) {
+	if actor.User == "" {
 		return nil, statusErr(http.StatusUnauthorized, "a disk check needs a signed-in admin")
 	}
 	h.mu.RLock()
@@ -363,7 +363,7 @@ func (h *Hub) startDoctorScan(actor string) (*AsyncOp, error) {
 	if h.engine == nil {
 		return nil, statusErr(http.StatusServiceUnavailable, "the disk check needs the Docker Engine API")
 	}
-	return h.startAsync(opKeyDoctor, OpDoctorScan, func(ready func()) (map[string]string, []string, error) {
+	return h.startAsync(opKeyDoctor, OpDoctorScan, actor, func(ready func()) (map[string]string, []string, error) {
 		if !h.scanMu.TryLock() {
 			return nil, nil, statusErr(http.StatusConflict, "a disk check is already running")
 		}

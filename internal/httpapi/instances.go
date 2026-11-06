@@ -49,7 +49,7 @@ func (s *Server) handleResumeUserSweep(w http.ResponseWriter, r *http.Request) {
 	if !decodeStrict(w, r, &b, `{"confirm": "resume"}`) {
 		return
 	}
-	st, err := s.Hub.ResumeUserSweep(r.Context(), actor(r), b.Confirm)
+	st, err := s.Hub.ResumeUserSweep(r.Context(), requestActor(r), b.Confirm)
 	if err != nil {
 		writeErr(w, err, http.StatusBadRequest)
 		return
@@ -72,7 +72,7 @@ func (s *Server) handleCreateMissingGroups(w http.ResponseWriter, r *http.Reques
 	if !decodeStrict(w, r, &b, `{"ids": ["<instance id>", ...]} (or {} for all)`) {
 		return
 	}
-	res, err := s.Hub.CreateMissingGroups(r.Context(), b.IDs, actor(r))
+	res, err := s.Hub.CreateMissingGroups(r.Context(), b.IDs, requestActor(r))
 	if err != nil {
 		writeErr(w, err, http.StatusBadRequest)
 		return
@@ -144,7 +144,7 @@ func (s *Server) handleCreateInstance(w http.ResponseWriter, r *http.Request) {
 	if len(b.Hosts) == 0 {
 		b.Hosts = nil // the defaults on the main domain
 	}
-	res, err := s.Hub.CreateInstanceAs(b.Template, b.ID, b.Hosts, actor(r))
+	res, err := s.Hub.CreateInstanceAs(b.Template, b.ID, b.Hosts, requestActor(r))
 	noStore(w)
 	if err != nil {
 		writeErr(w, err, http.StatusBadGateway)
@@ -208,7 +208,7 @@ func (s *Server) handleInstanceHosts(w http.ResponseWriter, r *http.Request) {
 	if !decodeStrict(w, r, &b, `{"hosts": {"<host router>": "<hostname>", ...}}`) {
 		return
 	}
-	err := s.Hub.SetHosts(id, b.Hosts, actor(r))
+	err := s.Hub.SetHosts(id, b.Hosts, requestActor(r))
 	noStore(w)
 	if err != nil {
 		writeErr(w, err, http.StatusBadGateway)
@@ -238,7 +238,7 @@ func (s *Server) handleDeleteInstance(w http.ResponseWriter, r *http.Request) {
 	if !decodeStrict(w, r, &b, `{"confirm": "<instance-id>"}`) {
 		return
 	}
-	op, err := s.Hub.StartDelete(id, b.Confirm, actor(r))
+	op, err := s.Hub.StartDelete(id, b.Confirm, requestActor(r))
 	noStore(w)
 	if err != nil {
 		writeErr(w, err, http.StatusBadGateway)
@@ -278,7 +278,7 @@ func (s *Server) handleBackupInstance(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	op, err := s.Hub.StartBackup(id, actor(r))
+	op, err := s.Hub.StartBackup(id, requestActor(r))
 	noStore(w)
 	if err != nil {
 		writeErr(w, err, http.StatusInternalServerError)
@@ -301,7 +301,7 @@ func (s *Server) handleRestoreInstance(w http.ResponseWriter, r *http.Request) {
 	if !decodeStrict(w, r, &b, `{"archive": "<instance-id>/<YYYYMMDDTHHMMSSZ>.tar"}`) {
 		return
 	}
-	op, err := s.Hub.StartRestore(id, b.Archive, actor(r))
+	op, err := s.Hub.StartRestore(id, b.Archive, requestActor(r))
 	noStore(w)
 	if err != nil {
 		writeErr(w, err, http.StatusInternalServerError)
@@ -322,7 +322,7 @@ func (s *Server) handleRestoreAs(w http.ResponseWriter, r *http.Request) {
 	if !decodeStrict(w, r, &b, `{"archive": "<instance-id>/<YYYYMMDDTHHMMSSZ>.tar", "id": "<new instance-id>", "hosts": {"<host router>": "<hostname>"} (optional)}`) {
 		return
 	}
-	op, err := s.Hub.StartRestoreAs(b.Archive, b.ID, actor(r), b.Hosts)
+	op, err := s.Hub.StartRestoreAs(b.Archive, b.ID, requestActor(r), b.Hosts)
 	noStore(w)
 	if err != nil {
 		writeErr(w, err, http.StatusInternalServerError)

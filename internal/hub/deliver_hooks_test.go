@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"github.com/portcullis/hub/internal/directory"
 	"context"
 	"encoding/json"
 	"errors"
@@ -65,7 +66,7 @@ func hookRuns(t *testing.T, f *fixture, cmd0 string, from int) []settings.HookIn
 
 func saveHook(t *testing.T, f *fixture, u SettingsUpdate) *SaveResult {
 	t.Helper()
-	res, err := f.h.SaveSettings(hookID, u, "admin")
+	res, err := f.h.SaveSettings(hookID, u, directory.Human("admin"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -435,7 +436,7 @@ func TestStartHookFailureKeepsHostsRecord(t *testing.T) {
 	f.engine.setExec(func(id string, in docker.ExecInput) (*docker.ExecResult, error) {
 		return &docker.ExecResult{Output: []byte("no\n"), ExitCode: 2, ExecID: "e2"}, nil
 	})
-	if err := f.h.SetHosts(hookID, map[string]string{"hookapp": "hooks-new.example.org"}, "admin"); err != nil {
+	if err := f.h.SetHosts(hookID, map[string]string{"hookapp": "hooks-new.example.org"}, directory.Human("admin")); err != nil {
 		t.Fatal(err)
 	}
 	f.h.Wait()
