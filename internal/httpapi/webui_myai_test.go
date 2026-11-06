@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"encoding/json"
+	"os"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -17,6 +18,9 @@ func myAICard(t *testing.T, view any) string {
 	t.Helper()
 	node, err := exec.LookPath("node")
 	if err != nil {
+		if os.Getenv("CI") != "" {
+			t.Fatal("node is required in CI for the card tests")
+		}
 		t.Skip("node not installed")
 	}
 	v, err := json.Marshal(view)
