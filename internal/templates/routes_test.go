@@ -119,13 +119,9 @@ func TestRealTemplates(t *testing.T) {
 	if dir == "" {
 		dir = filepath.Join("..", "..", "..", "portcullis-templates")
 	}
-	if _, err := os.ReadDir(dir); err != nil {
-		t.Skipf("no templates checkout at %s", dir)
-	}
-	dir = aiPendingDir(t, dir)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		t.Fatal(err)
+		t.Skipf("no templates checkout at %s", dir)
 	}
 	var want []string
 	for _, e := range entries {
