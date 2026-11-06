@@ -124,7 +124,7 @@ const pageSize = 100
 //
 // Only a client the instance may reconcile (MayReconcile) is touched.
 func (c *Client) EnsureClientAccess(ctx context.Context, s AccessSpec) error {
-	if protectedClients[s.ClientID] {
+	if protectedClient(s.ClientID) {
 		return &ConflictError{ClientID: s.ClientID, TemplateID: s.TemplateID, Owner: "core"}
 	}
 	if s.Group == "" {
@@ -372,7 +372,7 @@ func hardenAccessClient(cl *gocloak.Client, flowID string) bool {
 // client the instance may not reconcile is left alone (its flows are
 // still removed when unbound). Idempotent.
 func (c *Client) RemoveClientAccess(ctx context.Context, clientID, owner string, allowedHosts []string) error {
-	if protectedClients[clientID] {
+	if protectedClient(clientID) {
 		return &ConflictError{ClientID: clientID, TemplateID: owner, Owner: "core"}
 	}
 	tok, err := c.token(ctx)

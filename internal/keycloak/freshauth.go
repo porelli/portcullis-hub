@@ -146,7 +146,9 @@ func (c *Client) EnsureFreshAuthClient(ctx context.Context, redirectURI, webOrig
 	if err := c.ensureFreshAuthScopes(ctx, tok, existing); err != nil {
 		return err
 	}
-	return c.ensureFreshAuthMapper(ctx, tok, existing)
+	// Any other client mapper (a hardcoded amr claim would forge a
+	// proof) is deleted.
+	return c.ensureOnlyClientMapper(ctx, tok, existing, freshAuthMapper())
 }
 
 // ensureFreshAuthScopes makes the client's default scopes exactly
@@ -193,36 +195,6 @@ func (c *Client) ensureFreshAuthScopes(ctx context.Context, tok string, cl *gocl
 		if err := g.RemoveDefaultScopeFromClient(ctx, tok, Realm, cid, url.PathEscape(ids[s])); err != nil {
 			return opErr("detach default scope "+s+" from client "+name, err)
 		}
-	}
-	return nil
-}
-
-// ensureFreshAuthMapper leaves exactly the username mapper on the client:
-// any other client mapper (a hardcoded amr claim would forge a proof) is
-// deleted.
-func (c *Client) ensureFreshAuthMapper(ctx context.Context, tok string, cl *gocloak.Client) error {
-	g := c.api()
-	cid := url.PathEscape(str(cl.ID))
-	have, err := c.clientMappers(ctx, tok, cl)
-	if err != nil {
-		return err
-	}
-	want := freshAuthMapper()
-	kept := false
-	for _, m := range have {
-		if !kept && str(m.Name) == FreshAuthUsernameMapper && sameFreshMapper(m, want) {
-			kept = true
-			continue
-		}
-		if err := g.DeleteClientProtocolMapper(ctx, tok, Realm, cid, url.PathEscape(str(m.ID))); err != nil && statusCode(err) != http.StatusNotFound {
-			return opErr("delete protocol mapper "+str(m.Name)+" of client "+str(cl.ClientID), err)
-		}
-	}
-	if kept {
-		return nil
-	}
-	if _, err := g.CreateClientProtocolMapper(ctx, tok, Realm, cid, want); err != nil {
-		return opErr("create protocol mapper "+FreshAuthUsernameMapper, err)
 	}
 	return nil
 }

@@ -264,7 +264,9 @@ func (c *Client) ensureAttributesScope(ctx context.Context, tok string, want map
 }
 
 // attachAttributesScope makes the scope a default client scope of every
-// Hub-registered client (tagged with OwnerAttr). A client that has it as an
+// Hub-registered client (tagged with OwnerAttr) except protected ones and
+// AI clients (skipsAttributesScope: tagged AIOwner, or an ai_client —
+// AIClientAttr, set by EnsureAIClient; G9). A client that has it as an
 // optional scope gets it moved (Keycloak refuses a scope that is both).
 func (c *Client) attachAttributesScope(ctx context.Context, tok, scopeID string) []error {
 	g := c.api()
@@ -274,7 +276,7 @@ func (c *Client) attachAttributesScope(ctx context.Context, tok, scopeID string)
 	}
 	var errs []error
 	for _, cl := range clients {
-		if cl == nil || str(cl.ID) == "" || cl.Attributes[OwnerAttr] == "" || protectedClients[str(cl.ClientID)] {
+		if cl == nil || str(cl.ID) == "" || cl.Attributes[OwnerAttr] == "" || skipsAttributesScope(cl) {
 			continue
 		}
 		if containsName(cl.DefaultClientScopes, AttributesScope) {

@@ -89,7 +89,7 @@ func sameSettingMapper(have gocloak.ProtocolMapperRepresentation, want gocloak.P
 // ownedSettingClient finds clientID and checks it is tagged with owner
 // (core's clients and an empty owner never are).
 func (c *Client) ownedSettingClient(ctx context.Context, tok, clientID, owner string) (*gocloak.Client, error) {
-	if protectedClients[clientID] || owner == "" {
+	if protectedClient(clientID) || owner == "" {
 		return nil, &ConflictError{ClientID: clientID, TemplateID: owner, Owner: "core"}
 	}
 	cl, err := c.findClient(ctx, tok, clientID)
