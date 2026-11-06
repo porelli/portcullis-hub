@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/keycloak/kctest"
@@ -396,4 +398,186 @@ func TestMasterToggleRacesUpdateInstanceAI(t *testing.T) {
 		t.Errorf("saved across a master toggle: %+v", c)
 	}
 	a.h.Wait()
+}
+
+// ── 12b fix round 1 ─────────────────────────────────────
+
+// R1-1: the restarts a master toggle owes are in delivered.json before
+// the Keycloak pass runs (a crash there still repeats them at start).
+func TestMasterRestartOwedBeforeKeycloak(t *testing.T) {
+	a := newInstAIFixture(t, nil)
+	oauthWeb(a)
+	a.enable(t, "oauthapp")
+	if err := a.h.SetAISupport(context.Background(), "oauthapp", "oauth", true, root); err != nil {
+		t.Fatal(err)
+	}
+	saveAI(t, a, AISettingsUpdate{Enabled: ptr(false)})
+	a.kc.mu.Lock()
+	a.kc.block, a.kc.entered = make(chan struct{}), make(chan struct{}, 1)
+	block := a.kc.block
+	a.kc.mu.Unlock()
+	done := make(chan error, 1)
+	go func() { done <- a.h.SaveAISettings(AISettingsUpdate{Enabled: ptr(true)}, root) }()
+	<-a.kc.entered
+	if got := a.h.loadDelivered("oauthapp").Owed; got != "restart" {
+		t.Errorf("delivered.json owed = %q during the Keycloak pass, want restart", got)
+	}
+	a.kc.mu.Lock()
+	a.kc.block = nil
+	a.kc.mu.Unlock()
+	close(block)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	a.h.Wait()
+}
+
+// R1-2: the master off makes the Hub's clients unhealthy, so a switch-on
+// never publishes the health of before.
+func TestMasterOffClearsHealth(t *testing.T) {
+	a := newInstAIFixture(t, nil)
+	if _, err := a.h.syncAIClients(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	saveAI(t, a, AISettingsUpdate{Enabled: ptr(false)})
+	for id, ok := range a.h.aiClientHealth() {
+		if ok {
+			t.Errorf("%s healthy with the master off", id)
+		}
+	}
+	a.kc.setFailClient(keycloak.AIClientIDs.Claude, errors.New("keycloak 500"))
+	saveAI(t, a, AISettingsUpdate{Enabled: ptr(true)})
+	h := a.h.aiClientHealth()
+	if h[keycloak.AIClientIDs.Claude] || !h[keycloak.AIClientIDs.ClaudeCode] {
+		t.Errorf("health after the switch-on = %v", h)
+	}
+	if g := a.gate(t); slices.Contains(g.Clients, keycloak.AIClientIDs.Claude) {
+		t.Errorf("stale claude listed: %v", g.Clients)
+	}
+}
+
+// R1-4: the exact set. An existing scope whose ensure fails stays
+// attached and the client healthy; a scope that doesn't exist yet makes
+// the client unhealthy and leaves it as it was (12a's apply too).
+func TestExactScopesOnFailedEnsure(t *testing.T) {
+	a := newInstAIFixture(t, nil)
+	if _, err := a.h.syncAIClients(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	a.kc.mu.Lock()
+	a.kc.failEnsure = map[string]error{"mcp:all": errors.New("keycloak 500")}
+	a.kc.mu.Unlock()
+	if _, err := a.h.syncAIClients(context.Background()); err == nil || !strings.Contains(err.Error(), "mcp:all") {
+		t.Errorf("err = %v", err)
+	}
+	if !a.h.aiClientHealth()[keycloak.AIClientIDs.Claude] || !slices.Contains(a.kc.opt(keycloak.AIClientIDs.Claude), "mcp:all") {
+		t.Errorf("existing scope: health %v, claude %v", a.h.aiClientHealth(), a.kc.opt(keycloak.AIClientIDs.Claude))
+	}
+
+	// A new companion scope that can't be created.
+	a.kc.mu.Lock()
+	a.kc.failEnsure = map[string]error{"mcp:aiapp.tok": errors.New("keycloak 500")}
+	before := a.kc.clients[keycloak.AIClientIDs.Claude]
+	a.kc.mu.Unlock()
+	beforeOpt := a.kc.opt(keycloak.AIClientIDs.Claude)
+	a.enable(t, "aiapp")
+	var oe *OpError
+	// 12a asks for the exact set: Keycloak refuses the missing scope.
+	if err := a.h.SetAISupport(context.Background(), "aiapp", "tok", true, root); !errors.As(err, &oe) ||
+		!strings.Contains(err.Error(), "client "+keycloak.AIClientIDs.Claude+" scopes") {
+		t.Errorf("12a apply err = %v, want an OpError with the refused exact set", err)
+	}
+	if got := a.kc.opt(keycloak.AIClientIDs.Claude); !slices.Equal(got, beforeOpt) {
+		t.Errorf("12a changed claude to %v (was %v)", got, beforeOpt)
+	}
+	if _, err := a.h.syncAIClients(context.Background()); err == nil {
+		t.Error("no error for the missing scope")
+	}
+	a.kc.mu.Lock()
+	after := a.kc.clients[keycloak.AIClientIDs.Claude]
+	a.kc.mu.Unlock()
+	if a.h.aiClientHealth()[keycloak.AIClientIDs.Claude] || !slices.Equal(after.OptionalScopes, before.OptionalScopes) {
+		t.Errorf("missing scope: health %v, claude %v (was %v)", a.h.aiClientHealth(), after.OptionalScopes, before.OptionalScopes)
+	}
+}
+
+// R1-6: the sync loop's kick runs the client pass.
+func TestAttrSyncRunsAIClientPass(t *testing.T) {
+	a := newInstAIFixture(t, nil)
+	a.h.SetAIClientHealth(nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	kick := make(chan struct{}, 1)
+	done := make(chan struct{})
+	go func() {
+		a.h.runAttrSync(ctx, kick)
+		close(done)
+	}()
+	kick <- struct{}{}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		a.kc.mu.Lock()
+		calls := slices.Clone(a.kc.calls)
+		a.kc.mu.Unlock()
+		if slices.Contains(calls, "client:"+keycloak.AIClientIDs.Generic) && len(a.h.aiClientHealth()) == 3 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no AI client pass after the kick: %v", calls)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	if g := a.gate(t); len(g.Clients) != 3 {
+		t.Errorf("gate clients after the loop's pass = %v", g.Clients)
+	}
+}
+
+// R1-6: a failed save of a master toggle puts ai_instances and the
+// generation back.
+func TestMasterToggleFailedSaveRestores(t *testing.T) {
+	a := newInstAIFixture(t, nil)
+	oauthWeb(a)
+	a.enable(t, "oauthapp")
+	if err := a.h.SetAISupport(context.Background(), "oauthapp", "oauth", true, root); err != nil {
+		t.Fatal(err)
+	}
+	a.h.Wait()
+	a.h.mu.RLock()
+	gen, before := a.h.aiMasterGen, a.h.st.AIInstances["oauthapp"].Companions["oauth"]
+	a.h.mu.RUnlock()
+	if err := os.Chmod(a.data, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	err := a.h.SaveAISettings(AISettingsUpdate{Enabled: ptr(false)}, root)
+	os.Chmod(a.data, 0o755)
+	if err == nil {
+		t.Fatal("the save didn't fail")
+	}
+	a.h.mu.RLock()
+	defer a.h.mu.RUnlock()
+	if !a.h.st.AI.Enabled || a.h.aiMasterGen != gen || a.h.st.AIInstances["oauthapp"].Companions["oauth"] != before {
+		t.Errorf("not restored: enabled %v gen %d (was %d) oauth %+v (was %+v)", a.h.st.AI.Enabled, a.h.aiMasterGen, gen,
+			a.h.st.AIInstances["oauthapp"].Companions["oauth"], before)
+	}
+}
+
+// oauthWeb keeps a running web container for oauthapp's hooks after
+// every up.
+func oauthWeb(a *instAIFixture) {
+	up := a.runner.upHook
+	a.runner.upHook = func(p string) {
+		up(p)
+		if p != "portcullis-oauthapp" {
+			return
+		}
+		a.engine.mu.Lock()
+		defer a.engine.mu.Unlock()
+		for _, c := range a.engine.containers {
+			if c.Project() == p && c.Service() == "web" {
+				return
+			}
+		}
+		a.engine.containers = append(a.engine.containers, container("oauthapp-web", p, "web", "running"))
+	}
 }

@@ -97,10 +97,12 @@ func (h *Hub) prevResources() map[string]*aigate.Resource {
 func (h *Hub) gatePath() string  { return filepath.Join(h.cfg.DataDir, aigate.GateFileName) }
 func (h *Hub) credsPath() string { return filepath.Join(h.cfg.DataDir, aigate.CredsFileName) }
 
-// SetAIClientHealth records which AI client ids (the Hub's three and
-// every ai_client) the last Keycloak ensure left in place (true) — the
-// directory sync loop calls it (Task 12). Only those are listed in
-// mcp-gate.json; nil (not known yet) lists none.
+// SetAIClientHealth replaces the whole AI client health map (the Hub's
+// three and every ai_client: true = the last Keycloak ensure left it in
+// place; only those are listed in mcp-gate.json; nil = not known yet,
+// none listed). For tests only: the sync pass (ai_clients.go) and Task
+// 23's ai_client registration use mergeAIClientHealth, which sets only
+// the ids they own.
 func (h *Hub) SetAIClientHealth(healthy map[string]bool) {
 	h.mu.Lock()
 	if healthy == nil {

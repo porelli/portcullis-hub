@@ -280,7 +280,7 @@ func (h *Hub) runAttrSync(ctx context.Context, kick <-chan struct{}) {
 		// the master switch is on each offered one is re-asserted, its
 		// health recorded and the gate file rewritten when it changed
 		// (errors logged once per distinct text inside).
-		_, cerr := h.aiClientPass(sctx)
+		_, cerr := h.aiClientPass(ctx) // its own timeout
 		aerr := h.SyncClientAccess(sctx)
 		cancel()
 		if aerr != nil && ctx.Err() == nil {

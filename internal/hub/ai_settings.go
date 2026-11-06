@@ -121,6 +121,9 @@ func (h *Hub) SaveAISettings(u AISettingsUpdate, actor directory.Actor) error {
 		h.auditAI(actor, "settings.ai", "ai", strings.Join(changes, ", "), err)
 	}
 	if err == nil && len(changes) > 0 {
+		// The restarts a master toggle owes are recorded before anything
+		// else (a crash after the commit still repeats them at start).
+		h.oweMasterRestarts(restart)
 		// Keycloak follows now (a failure is logged and retried by the
 		// directory sync loop: an unhealthy client is never listed).
 		ctx, cancel := context.WithTimeout(context.Background(), attrSyncTimeout)
@@ -188,14 +191,16 @@ func (h *Hub) saveAISettings(u AISettingsUpdate, actor directory.Actor) ([]strin
 	var restart []string
 	var prevAI map[string]state.AIInstance
 	toggled := before.Enabled != next.Enabled
+	prevGen := h.aiMasterGen
 	if toggled {
 		restart, prevAI = h.masterToggleLocked(next.Enabled)
 	}
 	if err := h.saveStateLocked(); err != nil {
 		h.st.AI = before
 		if toggled {
+			// Nobody saw the new generation: mu was held throughout.
 			h.st.AIInstances = prevAI
-			h.aiMasterGen++
+			h.aiMasterGen = prevGen
 		}
 		return nil, nil, err
 	}

@@ -36,6 +36,8 @@ import (
 // when health changed. Errors are logged once per distinct text (inside)
 // and returned for the loop's retry.
 func (h *Hub) aiClientPass(ctx context.Context) (changed bool, err error) {
+	ctx, cancel := context.WithTimeout(ctx, attrSyncTimeout)
+	defer cancel()
 	changed, err = h.syncAIClients(ctx)
 	if changed {
 		h.writePolicyLogged()
@@ -49,21 +51,9 @@ func (h *Hub) syncAIClients(ctx context.Context) (changed bool, err error) {
 	h.aiKCMu.Lock()
 	defer h.aiKCMu.Unlock()
 	kc := h.aiKeycloak()
-	type want struct {
-		id      string
-		offered bool
-		scopes  []string
-	}
 	h.mu.RLock()
 	a := h.st.AI
-	ensure := h.companionScopesLocked()
-	for k, v := range h.fixedScopesLocked() {
-		ensure[k] = v
-	}
-	var wants []want
-	for _, c := range hubAIClients(a) {
-		wants = append(wants, want{c.id, c.c.Offered, h.wantedAIScopesLocked(c.id)})
-	}
+	plan := h.aiScopePlanLocked()
 	h.mu.RUnlock()
 
 	if kc == nil {
@@ -73,16 +63,10 @@ func (h *Hub) syncAIClients(ctx context.Context) (changed bool, err error) {
 	}
 	health := map[string]bool{}
 	var errs []error
-	ensured := map[string]bool{}
 	if a.Enabled {
-		for _, name := range slices.Sorted(maps.Keys(ensure)) {
-			if err := kc.EnsureMCPScope(ctx, ensure[name]); err != nil {
-				errs = append(errs, fmt.Errorf("Keycloak: client scope %s: %w", name, err))
-				continue
-			}
-			ensured[name] = true
-		}
+		errs = ensureAIScopes(ctx, kc, plan.ensure)
 	}
+	wants := plan.clients
 	for _, w := range wants {
 		var cerr error
 		switch {
@@ -94,10 +78,12 @@ func (h *Hub) syncAIClients(ctx context.Context) (changed bool, err error) {
 				cerr = fmt.Errorf("Keycloak: deleting AI client %s: %w", w.id, cerr)
 			}
 		case a.Enabled:
+			// The exact set (ruling): EnsureAIClient refuses a scope that
+			// doesn't exist — unhealthy, left as it was —; one whose ensure
+			// failed but that exists stays attached.
 			spec := keycloak.AIClientSpec{
 				ClientID: w.id, Public: true, RedirectURIs: keycloak.AIRedirectURIs(w.id),
-				// A client never names a scope that isn't in place.
-				OptionalScopes: slices.DeleteFunc(slices.Clone(w.scopes), func(n string) bool { return !ensured[n] }),
+				OptionalScopes: slices.Clone(w.scopes),
 				OfflineIdle:    time.Duration(a.OfflineIdleDays) * 24 * time.Hour,
 				OfflineMax:     time.Duration(a.OfflineMaxDays) * 24 * time.Hour,
 				Owner:          keycloak.AIOwner,
@@ -108,8 +94,10 @@ func (h *Hub) syncAIClients(ctx context.Context) (changed bool, err error) {
 				cerr = fmt.Errorf("Keycloak: AI client %s: %w", w.id, cerr)
 			}
 		default:
-			// Master off: the client is kept as it is (its health too; the
-			// gate file is enabled: false anyway).
+			// Master off: the client is kept as it is, but its health is
+			// unknown-bad until a pass with the master on re-asserts it
+			// (a switch-on never publishes stale health).
+			health[w.id] = false
 		}
 		h.logAIClientErr(w.id, cerr)
 		if cerr != nil {
@@ -117,6 +105,44 @@ func (h *Hub) syncAIClients(ctx context.Context) (changed bool, err error) {
 		}
 	}
 	return h.mergeAIClientHealth(health), errors.Join(errs...)
+}
+
+// aiScopePlan is what a pass over the AI clients applies, from state:
+// every mcp:* scope to ensure (companion and fixed) and each Hub client's
+// exact wanted set (wantedAIScopes).
+type aiScopePlan struct {
+	ensure  map[string]keycloak.MCPScope
+	clients []aiClientWant
+}
+
+type aiClientWant struct {
+	id      string
+	offered bool
+	scopes  []string
+}
+
+// aiScopePlanLocked builds the plan. Caller holds mu (read).
+func (h *Hub) aiScopePlanLocked() aiScopePlan {
+	p := aiScopePlan{ensure: h.companionScopesLocked()}
+	for k, v := range h.fixedScopesLocked() {
+		p.ensure[k] = v
+	}
+	for _, c := range hubAIClients(h.st.AI) {
+		p.clients = append(p.clients, aiClientWant{c.id, c.c.Offered, h.wantedAIScopesLocked(c.id)})
+	}
+	return p
+}
+
+// ensureAIScopes ensures every scope (sorted; each failure collected, the
+// others still ensured). Never under mu.
+func ensureAIScopes(ctx context.Context, kc AIKeycloak, ensure map[string]keycloak.MCPScope) []error {
+	var errs []error
+	for _, name := range slices.Sorted(maps.Keys(ensure)) {
+		if err := kc.EnsureMCPScope(ctx, ensure[name]); err != nil {
+			errs = append(errs, fmt.Errorf("Keycloak: client scope %s: %w", name, err))
+		}
+	}
+	return errs
 }
 
 // logAIClientErr logs a client's error once per distinct text (a
@@ -218,18 +244,25 @@ func (h *Hub) masterToggleLocked(on bool) (restart []string, prev map[string]sta
 	return restart, prev
 }
 
+// oweMasterRestarts records the restart each instance owes after a
+// master toggle (delivered.json: a Hub restart repeats it), right after
+// the commit and before any Keycloak call.
+func (h *Hub) oweMasterRestarts(ids []string) {
+	for _, id := range ids {
+		h.setOwed(id, settings.EffectRestart)
+	}
+}
+
 // restartForMaster re-renders and restarts each instance after a master
-// toggle: the restart owed first (delivered.json: a Hub restart repeats
-// it), then a background Restart, which waits for a busy lockApp (a
-// backup) up to restartWait; its start runs the owed on_change /
-// revoke_all under lockApp → aiLock (pendingAIAfterStart).
+// toggle (oweMasterRestarts first): a background Restart, which waits for
+// a busy lockApp (a backup) up to restartWait; its start runs the owed
+// on_change / revoke_all under lockApp → aiLock (pendingAIAfterStart).
 func (h *Hub) restartForMaster(ids []string) {
 	for _, id := range ids {
 		t := h.Template(id)
 		if t == nil {
 			continue
 		}
-		h.setOwed(id, settings.EffectRestart)
 		tc := *t
 		h.goBackground(func() { h.Restart(tc) })
 	}

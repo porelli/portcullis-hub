@@ -48,6 +48,10 @@ type fakeAIKC struct {
 	// 12b: the AI clients EnsureAIClient made, failClient per client id.
 	clients    map[string]keycloak.AIClientSpec
 	failClient map[string]error
+	// block, if set, makes EnsureMCPScope signal entered and wait for it
+	// to be closed (outside mu).
+	block   chan struct{}
+	entered chan struct{}
 }
 
 func newFakeAIKC() *fakeAIKC {
@@ -55,6 +59,16 @@ func newFakeAIKC() *fakeAIKC {
 }
 
 func (k *fakeAIKC) EnsureMCPScope(ctx context.Context, s keycloak.MCPScope) error {
+	k.mu.Lock()
+	block, entered := k.block, k.entered
+	k.mu.Unlock()
+	if block != nil {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		<-block
+	}
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	k.calls = append(k.calls, "ensure:"+s.Name)
@@ -1090,8 +1104,8 @@ func TestPendingAIWaitsBounded(t *testing.T) {
 	}
 }
 
-// R1-4: a failed ensure still applies the other scopes and deletes the
-// dropped ones.
+// R1-4: a failed ensure still applies the exact sets (an existing scope
+// stays attached) and deletes the dropped ones.
 func TestScopesApplyDespiteFailedEnsure(t *testing.T) {
 	a := newInstAIFixture(t, nil)
 	a.enable(t, "aiapp")
@@ -1109,8 +1123,10 @@ func TestScopesApplyDespiteFailedEnsure(t *testing.T) {
 	if !slices.Contains(a.kc.deleted, "mcp:aiapp.tok") {
 		t.Errorf("the dropped scope wasn't deleted: %v", a.kc.calls)
 	}
-	if got := a.kc.opt(keycloak.AIClientIDs.Generic); !slices.Equal(got, []string{"mcp:portcullis.people"}) {
-		t.Errorf("generic = %v (the ensured scopes only)", got)
+	// 12b ruling: the exact set — mcp:all exists (its ensure failed), so
+	// it stays attached.
+	if got := a.kc.opt(keycloak.AIClientIDs.Generic); !slices.Equal(got, []string{"mcp:all", "mcp:portcullis.people"}) {
+		t.Errorf("generic = %v (the exact set)", got)
 	}
 }
 

@@ -771,50 +771,31 @@ func (h *Hub) applyAIScopesFor(ctx context.Context, changes []aiChange, force bo
 	h.aiKCMu.Lock()
 	defer h.aiKCMu.Unlock()
 	h.mu.RLock()
-	ensure := h.companionScopesLocked()
-	for k, v := range h.fixedScopesLocked() {
-		ensure[k] = v
-	}
-	type set struct {
-		id     string
-		scopes []string
-	}
-	var sets []set
-	for _, c := range hubAIClients(h.st.AI) {
-		if c.c.Offered {
-			sets = append(sets, set{c.id, h.wantedAIScopesLocked(c.id)})
-		}
-	}
+	plan := h.aiScopePlanLocked()
 	for _, ch := range changes {
 		if !ch.after.Enabled && ch.c.Identity.Mode != templates.IdentityAppOAuth {
-			if _, still := ensure[ch.scope]; !still {
+			if _, still := plan.ensure[ch.scope]; !still {
 				drop = append(drop, ch.scope)
 			}
 		}
 	}
 	h.mu.RUnlock()
-	var errs []error
-	ensured := map[string]bool{}
-	for _, name := range slices.Sorted(maps.Keys(ensure)) {
-		if err := kc.EnsureMCPScope(ctx, ensure[name]); err != nil {
-			errs = append(errs, fmt.Errorf("Keycloak: client scope %s: %w", name, err))
+	errs := ensureAIScopes(ctx, kc, plan.ensure)
+	for _, w := range plan.clients {
+		if !w.offered {
 			continue
 		}
-		ensured[name] = true
-	}
-	for _, s := range sets {
-		// A client never names a scope that isn't in place: a failed
-		// ensure leaves it out of every set (the error is returned; the
-		// re-apply or the sync loop attaches it once it exists).
-		scopes := slices.DeleteFunc(slices.Clone(s.scopes), func(n string) bool { return !ensured[n] })
-		err := kc.SetOptionalScopes(ctx, s.id, scopes)
+		// The exact set (12b ruling): Keycloak refuses a scope that doesn't
+		// exist (the client is left as it was, the error returned); one
+		// whose ensure failed but that exists stays attached.
+		err := kc.SetOptionalScopes(ctx, w.id, w.scopes)
 		var conflict *keycloak.ConflictError
 		switch {
 		case err == nil:
 		case errors.Is(err, keycloak.ErrClientNotFound), errors.Is(err, keycloak.ErrNotAIClient), errors.As(err, &conflict):
-			log.Printf("ai: client %s not attached (%v): the directory sync applies its scopes", s.id, err)
+			log.Printf("ai: client %s not attached (%v): the directory sync applies its scopes", w.id, err)
 		default:
-			errs = append(errs, fmt.Errorf("Keycloak: client %s scopes: %w", s.id, err))
+			errs = append(errs, fmt.Errorf("Keycloak: client %s scopes: %w", w.id, err))
 		}
 	}
 	for _, name := range drop {
