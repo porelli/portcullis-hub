@@ -1015,11 +1015,12 @@ func checkTrustNetwork(w string, c *Companion, compose []byte, infos map[string]
 		Networks map[string]interface{} `yaml:"networks"`
 	}
 	_ = yaml.Unmarshal(compose, &doc)
+	// Exactly {internal: true}: no ipam, driver, driver_opts, enable_ipv6,
+	// attachable, labels, name or external — an address plan or driver
+	// option could make the subnet the app trusts cover other addresses.
 	n, _ := doc.Networks[trust].(map[string]interface{})
-	_, hasName := n["name"]
-	_, hasExt := n["external"]
-	if in, ok := n["internal"].(bool); !ok || !in || hasName || hasExt {
-		return fmt.Errorf("%s: the trust network %s must be declared at the top level with internal: true (and no name or external)", w, trust)
+	if in, ok := n["internal"].(bool); !ok || !in || len(n) != 1 {
+		return fmt.Errorf("%s: the trust network %s must be declared at the top level as exactly {internal: true} (no ipam, driver, driver_opts, enable_ipv6, attachable, labels, name or external)", w, trust)
 	}
 	want := map[string]bool{c.Service: true}
 	for svc, rs := range routes.Routers {
