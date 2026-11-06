@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -109,6 +110,13 @@ func writeAPIErr(w http.ResponseWriter, err error) {
 // polled at /api/folders/<id>/op, the doctor's (_doctor) at
 // /api/doctor/op, anything else (a rebind) at the instance's record.
 func writeOpAccepted(w http.ResponseWriter, op *hub.AsyncOp) {
+	noStore(w)
+	writeJSONStatus(w, http.StatusAccepted, opAcceptedBody(op))
+}
+
+// opAcceptedBody is writeOpAccepted's body (also the Portcullis MCP
+// tools' answer to a started operation).
+func opAcceptedBody(op *hub.AsyncOp) map[string]string {
 	body := map[string]string{"op_id": op.OpID, "op": op.Op, "instance": op.Instance}
 	switch fid, isFolder := strings.CutPrefix(op.Instance, "_folder."); {
 	case isFolder:
@@ -119,8 +127,7 @@ func writeOpAccepted(w http.ResponseWriter, op *hub.AsyncOp) {
 	default:
 		body["poll"] = "/api/instances/" + op.Instance + "/op"
 	}
-	noStore(w)
-	writeJSONStatus(w, http.StatusAccepted, body)
+	return body
 }
 
 // writeOpRecord answers the op record under key (404 when none).
@@ -156,7 +163,7 @@ func (s *Server) handleCreateFolder(w http.ResponseWriter, r *http.Request) {
 	if !decodeAPI(w, r, &in, folderCreateUsage) {
 		return
 	}
-	view, warns, err := s.Hub.CreateFolder(r.Context(), in, requestActor(r))
+	view, warns, err := s.createFolder(r.Context(), in, requestActor(r))
 	if err != nil {
 		writeAPIErr(w, err)
 		return
@@ -183,7 +190,7 @@ func (s *Server) handleUpdateFolder(w http.ResponseWriter, r *http.Request) {
 	if !decodeAPI(w, r, &b, folderUpdateUsage) {
 		return
 	}
-	view, err := s.Hub.UpdateFolder(r.Context(), id, hub.FolderInput{Name: b.Name, Path: b.Path, Description: b.Description}, requestActor(r))
+	view, err := s.updateFolder(r.Context(), id, hub.FolderInput{Name: b.Name, Path: b.Path, Description: b.Description}, requestActor(r))
 	if err != nil {
 		writeAPIErr(w, err)
 		return
@@ -199,7 +206,7 @@ func (s *Server) handleDeleteFolder(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.Hub.DeleteFolder(id, requestActor(r)); err != nil {
+	if err := s.deleteFolder(id, requestActor(r)); err != nil {
 		writeAPIErr(w, err)
 		return
 	}
@@ -286,7 +293,7 @@ func (s *Server) handleAssignApply(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	op, err := s.Hub.StartAssign(id, req, hash, requestActor(r))
+	op, err := s.startAssign(id, req, hash, requestActor(r))
 	if err != nil {
 		writeAPIErr(w, err)
 		return
@@ -331,7 +338,7 @@ func (s *Server) handleUndoApply(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "body must be "+undoApplyUsage)
 		return
 	}
-	op, err := s.Hub.StartUndo(id, *b.PlanHash, requestActor(r))
+	op, err := s.startUndo(id, *b.PlanHash, requestActor(r))
 	if err != nil {
 		writeAPIErr(w, err)
 		return
@@ -381,7 +388,7 @@ func (s *Server) handleRecheckApply(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "body must be "+recheckUsage)
 		return
 	}
-	v, err := s.Hub.ApplyRecheck(r.Context(), id, *b.PlanHash, b.ConfirmDifferent, requestActor(r))
+	v, err := s.applyRecheck(r.Context(), id, *b.PlanHash, b.ConfirmDifferent, requestActor(r))
 	if err != nil {
 		writeAPIErr(w, err)
 		return
@@ -465,4 +472,37 @@ func decodeAPI(w http.ResponseWriter, r *http.Request, v any, usage string) bool
 func (s *Server) setLocalNetworks(a directory.Actor, cidrs []string) error {
 	s.rec("SetLocalNetworks", cidrs)
 	return s.Hub.SetLocalNetworks(cidrs, a)
+}
+
+// The shared folders' shared work (route and Portcullis MCP tool, Task
+// 20): the same Hub call with the caller's actor; s.rec reports it.
+
+func (s *Server) createFolder(ctx context.Context, in hub.FolderInput, a directory.Actor) (*hub.FolderView, []string, error) {
+	s.rec("CreateFolder", in)
+	return s.Hub.CreateFolder(ctx, in, a)
+}
+
+func (s *Server) updateFolder(ctx context.Context, id string, in hub.FolderInput, a directory.Actor) (*hub.FolderView, error) {
+	s.rec("UpdateFolder", id, in)
+	return s.Hub.UpdateFolder(ctx, id, in, a)
+}
+
+func (s *Server) deleteFolder(id string, a directory.Actor) error {
+	s.rec("DeleteFolder", id)
+	return s.Hub.DeleteFolder(id, a)
+}
+
+func (s *Server) startAssign(id string, req hub.AssignRequest, planHash string, a directory.Actor) (*hub.AsyncOp, error) {
+	s.rec("StartAssign", id, req, planHash)
+	return s.Hub.StartAssign(id, req, planHash, a)
+}
+
+func (s *Server) startUndo(id, planHash string, a directory.Actor) (*hub.AsyncOp, error) {
+	s.rec("StartUndo", id, planHash)
+	return s.Hub.StartUndo(id, planHash, a)
+}
+
+func (s *Server) applyRecheck(ctx context.Context, id, planHash string, confirmDifferent bool, a directory.Actor) (*hub.FolderView, error) {
+	s.rec("ApplyRecheck", id, planHash, confirmDifferent)
+	return s.Hub.ApplyRecheck(ctx, id, planHash, confirmDifferent, a)
 }

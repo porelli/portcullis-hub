@@ -127,7 +127,11 @@ func TestViaAIReachesHubAudit(t *testing.T) {
 			t.Fatal(err)
 		}
 		n := auditLen(audit)
-		if _, err := f.h.StartAssign("media", req, plan.Hash, aiActor); err != nil {
+		// A widening assign from the AI needs the confirmation the tool
+		// consumed (Task 20).
+		confirmed := aiActor
+		confirmed.Confirmation = "AAAA-BBBB-CCCC"
+		if _, err := f.h.StartAssign("media", req, plan.Hash, confirmed); err != nil {
 			t.Fatal(err)
 		}
 		rec := waitFolderOp(t, f, "media")

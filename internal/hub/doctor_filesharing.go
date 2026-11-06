@@ -182,6 +182,9 @@ type revokeLeaverFixer struct{}
 
 func (revokeLeaverFixer) Kind() string { return doctor.FixRevokeLeaver }
 
+// TouchesData (G45): it revokes a credential.
+func (revokeLeaverFixer) TouchesData() bool { return true }
+
 func (revokeLeaverFixer) fixTarget(_ *Hub, f doctor.Finding, _ map[string]string) string {
 	if len(f.Instances) == 1 {
 		return f.Instances[0]
@@ -280,6 +283,9 @@ func (h *Hub) adminRevokeCredentialID(ctx context.Context, instance, key, user s
 type personTreeOwnerFixer struct{}
 
 func (personTreeOwnerFixer) Kind() string { return doctor.FixPersonTreeOwner }
+
+// TouchesData (G45): chown + chmod of a person\'s folder.
+func (personTreeOwnerFixer) TouchesData() bool { return true }
 
 func (personTreeOwnerFixer) fixTarget(_ *Hub, f doctor.Finding, _ map[string]string) string {
 	if len(f.Instances) == 1 && len(f.Paths) == 1 {

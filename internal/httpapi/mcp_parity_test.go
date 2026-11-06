@@ -37,30 +37,10 @@ var confirmationRoutes = map[string]string{
 }
 
 // pendingToolRoutes are the routes whose tools later tasks add: route →
-// the task. Each task removed its entries (T17b, T18); T20 leaves it
-// empty.
-var pendingToolRoutes = map[string]string{
-	// T20: doctor and shared folders.
-	"GET /api/doctor":                        "T20",
-	"POST /api/doctor/scan":                  "T20",
-	"GET /api/doctor/op":                     "T20",
-	"POST /api/doctor/findings/{fp}/preview": "T20",
-	"POST /api/doctor/findings/{fp}/apply":   "T20",
-	"POST /api/doctor/findings/{fp}/mute":    "T20",
-	"DELETE /api/doctor/findings/{fp}/mute":  "T20",
-	"GET /api/folders":                       "T20",
-	"POST /api/folders":                      "T20",
-	"PUT /api/folders/{id}":                  "T20",
-	"DELETE /api/folders/{id}":               "T20",
-	"POST /api/folders/check":                "T20",
-	"POST /api/folders/{id}/assign/preview":  "T20",
-	"POST /api/folders/{id}/assign/apply":    "T20",
-	"POST /api/folders/{id}/undo/preview":    "T20",
-	"POST /api/folders/{id}/undo/apply":      "T20",
-	"POST /api/folders/{id}/recheck/preview": "T20",
-	"POST /api/folders/{id}/recheck/apply":   "T20",
-	"GET /api/folders/{id}/op":               "T20",
-}
+// the task. Each task removed its entries (T17b, T18, T20): it is empty
+// now, and TestToolParity requires it to stay so — a new route gets its
+// tool (or a noToolRoutes reason) in the change that adds it.
+var pendingToolRoutes = map[string]string{}
 
 // destructiveTwins are the routes whose handler deletes, restores over,
 // revokes or runs code, or has a typed confirmation today (spec call 25,
@@ -88,6 +68,10 @@ var destructiveTwins = map[string]string{
 	"POST /api/directory/users/{username}/require-passkey": "forces a passkey registration: on another administrator it hands over their sign-in (§15.10 lists require_passkey as D)",
 	"DELETE /api/directory/groups/{group}":                 "deletes a group (typed name)",
 	"DELETE /api/directory/fields/{name}":                  "deletes a field and every value of it (typed name)",
+	// Task 20 (§15.10's D list, G45).
+	"DELETE /api/folders/{id}":             "deletes a shared folder's definition",
+	"POST /api/folders/{id}/undo/apply":    "restores a permissions snapshot over the folder's files",
+	"POST /api/doctor/findings/{fp}/apply": "a one-click fix: D when its plan touches data (a folder apply or undo, an ownership change, a revocation; G45)",
 }
 
 // accessWidening are the tools that are D only for some arguments (G37,
@@ -117,6 +101,9 @@ var accessWidening = map[string]string{
 	"remove_exception":  "D on a guarding group (deviation: dropping a kept-out exception lets the rule add them)",
 	"set_details":       "D when it sets a field a guarding group's rule uses (deviation)",
 	"import_apply":      "D when a row creates or deletes a person, or sets a field a guarding group's rule uses",
+	// Task 20.
+	"folder_apply":         "D unless the plan only removes uses and leaves the disk alone (AssignPlan.WidensAccess)",
+	"folder_recheck_apply": "D when it accepts a different directory (confirm_different_directory)",
 }
 
 // widensAlways are the D tools whose every call widens access (G37
@@ -162,9 +149,10 @@ func TestToolParity(t *testing.T) {
 		case n > 1:
 			t.Errorf("route %s is listed twice (twin %v, noTool %v, confirmation %v, pending %v)", r, twins[r], none, conf, pending)
 		}
-		if pending && task != "T20" {
-			t.Errorf("pending route %s: task %q", r, task)
-		}
+	}
+	// T20 emptied it: every route has its tool or a reason.
+	if len(pendingToolRoutes) != 0 {
+		t.Errorf("pendingToolRoutes = %v, want empty", pendingToolRoutes)
 	}
 	// noToolRoutes is exactly G15's list, each with a reason.
 	g15 := []string{"/", "/static/", "/healthz", "GET /api/portal/apps", "GET /api/directory/me", importReviewPath}
@@ -225,7 +213,9 @@ func TestToolParity(t *testing.T) {
 		// Task 18 (§15.10, G37).
 		"delete_person", "delete_group", "delete_field", "require_passkey", "remove_passkeys", "set_permission",
 		"create_instance", "remove_member", "update_field", "add_member", "set_member_expiry", "set_group_rule", "convert_group", "add_exception",
-		"remove_exception", "set_details", "import_apply"} {
+		"remove_exception", "set_details", "import_apply",
+		// Task 20 (§15.10, G15, G45).
+		"delete_folder", "folder_undo_apply", "doctor_apply_fix", "folder_apply", "folder_recheck_apply"} {
 		if byName[n].Class != ClassDestructive {
 			t.Errorf("tool %s: class %q, want D", n, byName[n].Class)
 		}
@@ -240,17 +230,38 @@ func TestToolParity(t *testing.T) {
 	// W (Task 17b): a backup can't widen access (the archive stays in the
 	// Hub's data; the instance comes back as it was); a sync pulls the
 	// sources the admin added.
-	for _, n := range []string{"backup_instance", "sync_sources", "update_person", "clear_actions", "create_group", "create_field"} {
+	for _, n := range []string{"backup_instance", "sync_sources", "update_person", "clear_actions", "create_group", "create_field",
+		"doctor_scan", "doctor_mute", "doctor_unmute", "create_folder", "update_folder"} {
 		if byName[n].Class != ClassWrite {
 			t.Errorf("tool %s: class %q, want W", n, byName[n].Class)
 		}
 	}
-	// The tools of both parts are all there.
-	for _, n := range append(append(slices.Clone(admin17a), admin17b...), admin18...) {
+	// doctor_apply_fix and folder_apply decide per call (G45; Task 20).
+	for _, n := range []string{"doctor_apply_fix", "folder_apply", "folder_recheck_apply"} {
+		if byName[n].ClassFor == nil {
+			t.Errorf("tool %s has no ClassFor", n)
+		}
+	}
+	// R (Task 20): reads and previews only.
+	for _, n := range []string{"doctor_findings", "doctor_op", "doctor_preview_fix", "list_folders", "check_folder_path", "folder_preview",
+		"folder_undo_preview", "folder_recheck_preview", "folder_op"} {
+		if byName[n].Class != ClassRead {
+			t.Errorf("tool %s: class %q, want R", n, byName[n].Class)
+		}
+	}
+	// The tools of every part are all there.
+	for _, n := range append(append(append(slices.Clone(admin17a), admin17b...), admin18...), admin20...) {
 		if _, ok := byName[n]; !ok {
 			t.Errorf("tool %s is not registered", n)
 		}
 	}
+}
+
+// admin20 are the doctor and shared-folder tools of T20.
+var admin20 = []string{
+	"doctor_findings", "doctor_scan", "doctor_op", "doctor_preview_fix", "doctor_apply_fix", "doctor_mute", "doctor_unmute",
+	"list_folders", "create_folder", "update_folder", "delete_folder", "check_folder_path",
+	"folder_preview", "folder_apply", "folder_undo_preview", "folder_undo_apply", "folder_recheck_preview", "folder_recheck_apply", "folder_op",
 }
 
 // admin18 are the users and groups tools of T18.

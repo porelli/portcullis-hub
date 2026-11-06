@@ -43,13 +43,23 @@ type FixPlan struct {
 	Warnings []string    `json:"warnings,omitempty"`
 	Assign   *AssignPlan `json:"assign,omitempty"`
 	Hash     string      `json:"plan_hash"`
+	// TouchesData (G45, contract §14.6 NEW): the fix changes data on
+	// disk, ownership, ACLs or credentials (Fixer.TouchesData; PreviewFix
+	// sets it). The Portcullis MCP's doctor_apply_fix is class D exactly
+	// when it is set, and ApplyFix refuses such a fix from the AI without
+	// a confirmation.
+	TouchesData bool `json:"touches_data"`
 }
 
 // Fixer is one kind of one-click fix (Project 3 registers more).
 // Preview changes nothing; Apply re-checks planHash and answers 202
-// semantics (an AsyncOp) or a synchronous refusal.
+// semantics (an AsyncOp) or a synchronous refusal. TouchesData declares
+// whether its apply changes files, ownership, ACLs or credentials
+// (G45; every fixer answers it — a new one is audited in
+// TestFixersDeclareTouchesData).
 type Fixer interface {
 	Kind() string
+	TouchesData() bool
 	Preview(ctx context.Context, h *Hub, f doctor.Finding, params map[string]string) (*FixPlan, error)
 	Apply(h *Hub, f doctor.Finding, params map[string]string, planHash string, actor directory.Actor) (*AsyncOp, error)
 }
@@ -120,6 +130,8 @@ func (h *Hub) findingFix(ctx context.Context, fp string, params map[string]strin
 			msg += ". " + strings.Join(f.Steps, " ")
 		}
 		return *f, nil, statusErr(http.StatusConflict, "%s", msg)
+	case f.Class == doctor.FixLink && f.Link != nil && f.Link.Tab != "":
+		return *f, nil, statusErr(http.StatusConflict, "this finding opens %s's %s tab: the doctor never changes AI support or settings itself", f.Link.Instance, strings.ToUpper(f.Link.Tab))
 	case f.Class == doctor.FixLink && f.Link != nil:
 		return *f, nil, statusErr(http.StatusConflict, "this finding opens the settings panel at %s's setting %s: the doctor never edits setting values itself", f.Link.Instance, f.Link.Option)
 	case f.Class != doctor.FixOneClick || f.FixKind == "":
@@ -164,6 +176,7 @@ func (h *Hub) PreviewFix(ctx context.Context, fp string, params map[string]strin
 		return nil, err
 	}
 	p.FP, p.Kind = fp, fx.Kind()
+	p.TouchesData = p.TouchesData || fx.TouchesData()
 	if p.Lines == nil {
 		p.Lines = []string{}
 	}
@@ -190,11 +203,42 @@ func (h *Hub) ApplyFix(ctx context.Context, fp string, params map[string]string,
 			detail += " " + ids
 		}
 	}
+	// G45, defence in depth: a fix that touches data, asked for through
+	// the AI, runs only with the confirmation the tool consumed.
+	if fx.TouchesData() && actor.Via == directory.ViaAI && actor.Confirmation == "" {
+		return nil, statusErr(http.StatusConflict, "fix %s changes data on disk or revokes access: through the AI it needs your confirmation in the browser", fx.Kind())
+	}
 	op, err = fx.Apply(h, f, params, planHash, actor)
 	if op != nil {
 		detail += " op=" + op.OpID
 	}
 	return op, err
+}
+
+// FixTouchesData re-derives finding fp's fix as ApplyFix would pick it
+// (findingFix: the current finding, its fix_kind or params "fix") and
+// says whether that fix touches data (G45; the Portcullis MCP's
+// doctor_apply_fix class, Task 20). A fixer that touches data answers
+// true without a preview; a config-only one is previewed and must have
+// planHash (its apply would refuse another). Any error — no such
+// finding, no fix, a preview that fails, another hash — is returned: the
+// caller treats it as touching data (fail closed). Nothing changes.
+func (h *Hub) FixTouchesData(ctx context.Context, fp string, params map[string]string, planHash string) (bool, error) {
+	f, fx, err := h.findingFix(ctx, fp, params)
+	if err != nil {
+		return true, err
+	}
+	if fx.TouchesData() {
+		return true, nil
+	}
+	p, err := fx.Preview(ctx, h, f, params)
+	if err != nil {
+		return true, err
+	}
+	if planHash == "" || p.Hash != planHash {
+		return true, errSetupChanged()
+	}
+	return p.TouchesData, nil
 }
 
 // fixHash is sha256 of v's JSON.
@@ -213,6 +257,9 @@ func fixHash(v any) string {
 type reapplyFolderFixer struct{}
 
 func (reapplyFolderFixer) Kind() string { return doctor.FixReapplyFolder }
+
+// TouchesData (G45): the fix changes group, mode and ACLs on disk.
+func (reapplyFolderFixer) TouchesData() bool { return true }
 
 func (reapplyFolderFixer) fixTarget(_ *Hub, f doctor.Finding, _ map[string]string) string {
 	return strings.Join(f.Folders, ",")
@@ -288,6 +335,9 @@ type undoFolderFixer struct{}
 
 func (undoFolderFixer) Kind() string { return doctor.FixUndoFolder }
 
+// TouchesData (G45): the fix changes group, mode and ACLs on disk.
+func (undoFolderFixer) TouchesData() bool { return true }
+
 func (undoFolderFixer) fixTarget(_ *Hub, f doctor.Finding, _ map[string]string) string {
 	return strings.Join(f.Folders, ",")
 }
@@ -323,6 +373,9 @@ func (undoFolderFixer) Apply(h *Hub, f doctor.Finding, params map[string]string,
 type manageAsFolderFixer struct{}
 
 func (manageAsFolderFixer) Kind() string { return doctor.FixManageAsFolder }
+
+// TouchesData (G45): the fix changes group, mode and ACLs on disk.
+func (manageAsFolderFixer) TouchesData() bool { return true }
 
 func (manageAsFolderFixer) fixTarget(_ *Hub, f doctor.Finding, params map[string]string) string {
 	if in, err := manageInput(f, params); err == nil {
@@ -543,6 +596,9 @@ func noteErr(err error, note string) error {
 type rebindPortFixer struct{}
 
 func (rebindPortFixer) Kind() string { return doctor.FixRebindPort }
+
+// TouchesData (G45): a port bind and a restart: no data, ownership or credential.
+func (rebindPortFixer) TouchesData() bool { return false }
 
 func (rebindPortFixer) fixTarget(h *Hub, f doctor.Finding, _ map[string]string) string {
 	h.mu.RLock()

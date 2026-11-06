@@ -63,7 +63,8 @@ func pathIn(u PathUsage) doctor.PathIn {
 // doctorInputs gathers the doctor's inputs: the directory snapshot first
 // (never under mu; unavailable = per-person rows not judged by
 // membership) and the main domain's addresses (domainAddrs: cached, 2 s
-// timeout; a failure = DomainErr, nothing escalates), then a copy of the
+// timeout; a failure = DomainErr, nothing escalates) and the AI
+// companions (aiDoctorInputs: Docker outside mu), then a copy of the
 // state under the read lock: paths, folders, folder_changed records,
 // per-person options, published ports (portInsLocked) and the local
 // networks, and the cached disk scans of the current targets with the
@@ -85,6 +86,9 @@ func (h *Hub) doctorInputs(ctx context.Context) (*doctor.Inputs, error) {
 	scans, rt := h.scanEntries(), h.scanRuntime()
 	// The stored hook reports (files, read before mu).
 	reports := h.fileSharingReports()
+	// The AI checks' inputs (Task 20): containers through Docker, never
+	// under mu.
+	aiIns := h.aiDoctorInputs(ctx)
 	addrs, derr := h.domainAddrs(ctx)
 	if derr != nil {
 		log.Printf("doctor: couldn't resolve %s (%v): exposure not checked against its addresses", h.cfg.Domain, derr)
@@ -94,7 +98,7 @@ func (h *Hub) doctorInputs(ctx context.Context) (*doctor.Inputs, error) {
 	defer h.mu.RUnlock()
 	in := &doctor.Inputs{Now: time.Now().UTC(), BindRoots: slices.Clone(h.bindRoots),
 		Domain: h.cfg.Domain, DomainAddrs: addrs, DomainErr: derr != nil,
-		LocalNetworks: h.localNetworksLocked(), Ports: h.portInsLocked()}
+		LocalNetworks: h.localNetworksLocked(), Ports: h.portInsLocked(), AI: aiIns}
 	for _, u := range h.pathUsagesLocked() {
 		in.Paths = append(in.Paths, pathIn(u))
 	}

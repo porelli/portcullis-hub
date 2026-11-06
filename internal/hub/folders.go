@@ -864,6 +864,9 @@ func (h *Hub) UpdateFolder(ctx context.Context, id string, in FolderInput, actor
 func (h *Hub) DeleteFolder(id string, actor directory.Actor) (err error) {
 	detail := ""
 	defer func() { h.auditFolder(actor, "folder.delete", id, detail, err) }()
+	if err := aiUnconfirmed(actor, "deleting shared folder "+id); err != nil {
+		return err
+	}
 	unlock, err := h.folderLock(id)
 	if err != nil {
 		return err

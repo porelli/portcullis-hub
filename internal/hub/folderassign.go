@@ -1137,6 +1137,34 @@ func (h *Hub) PreviewAssign(ctx context.Context, id string, req AssignRequest) (
 	return c.plan, nil
 }
 
+// WidensAccess: the plan grants more than the folder's uses have now —
+// it adds a use (an app gets the folder, or a write confirmation) or
+// changes anything on disk (group, setgid, ACLs: a disk plan). Only a
+// plan that removes uses and leaves the disk alone doesn't (Task 20: the
+// Portcullis MCP's folder_apply is class D otherwise). A nil plan
+// widens (fail closed).
+func (p *AssignPlan) WidensAccess() bool {
+	if p == nil || p.Disk != nil {
+		return true
+	}
+	for _, u := range p.Uses {
+		if u.Change != "remove" && u.Change != "keep" {
+			return true
+		}
+	}
+	return false
+}
+
+// aiUnconfirmed is the 409 of an operation the Portcullis MCP may run
+// only with a consumed confirmation (Task 20, defence in depth: the tool
+// asks for one first): an AI actor without one.
+func aiUnconfirmed(actor directory.Actor, what string) error {
+	if actor.Via == directory.ViaAI && actor.Confirmation == "" {
+		return statusErr(http.StatusConflict, "%s: through the AI it needs your confirmation in the browser", what)
+	}
+	return nil
+}
+
 // errSetupChanged is the 409 of an apply whose plan differs from the
 // preview's.
 func errSetupChanged() error {
@@ -1229,6 +1257,11 @@ func (h *Hub) startAssignHeld(id string, req AssignRequest, planHash string, act
 		}
 		if planHash == "" || c.plan.Hash != planHash {
 			return nil, nil, errSetupChanged()
+		}
+		if c.plan.WidensAccess() {
+			if err := aiUnconfirmed(actor, "this assignment widens access to shared folder "+id); err != nil {
+				return nil, nil, err
+			}
 		}
 		ready()
 		res, warns, dt, deliver, err := h.runAssign(id, c, actor)
@@ -1850,6 +1883,9 @@ func (h *Hub) StartUndo(id, planHash string, actor directory.Actor) (*AsyncOp, e
 		}
 		if !slices.Equal(u.affected, affected) || planHash == "" || u.plan.Hash != planHash {
 			return nil, nil, errSetupChanged()
+		}
+		if err := aiUnconfirmed(actor, "an undo rewrites shared folder "+id+"'s permissions"); err != nil {
+			return nil, nil, err
 		}
 		ready()
 		result, warnings, detail, err = h.runUndo(id, u)

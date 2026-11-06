@@ -630,6 +630,26 @@ var adminToolFixtures = []struct {
 	{"delete_group", map[string]any{"group": "eng"}},
 	{"delete_field", map[string]any{"name": "dept"}},
 	{"delete_person", map[string]any{"username": "erin"}},
+	// Task 20: the doctor and shared folders.
+	{"doctor_findings", nil},
+	{"doctor_scan", nil},
+	{"doctor_op", nil},
+	{"doctor_preview_fix", map[string]any{"fp": photosSMB, "address": "192.168.1.10"}},
+	{"doctor_apply_fix", map[string]any{"fp": photosSMB, "address": "192.168.1.10", "plan_hash": strings.Repeat("0", 64)}},
+	{"doctor_mute", map[string]any{"fp": photosSMB, "reason": "behind the router", "finding_token": "stale"}},
+	{"doctor_unmute", map[string]any{"fp": photosSMB}},
+	{"list_folders", nil},
+	{"check_folder_path", map[string]any{"path": "/srv/media"}},
+	{"create_folder", map[string]any{"id": "docs", "name": "Docs", "path": "/srv/docs"}},
+	{"update_folder", map[string]any{"id": "media", "name": "Media", "path": "/srv/media", "description": "photos"}},
+	{"folder_preview", map[string]any{"id": "media", "uses": []any{}}},
+	{"folder_apply", map[string]any{"id": "media", "uses": []any{}, "plan_hash": strings.Repeat("0", 64)}},
+	{"folder_undo_preview", map[string]any{"id": "media"}},
+	{"folder_undo_apply", map[string]any{"id": "media", "plan_hash": strings.Repeat("0", 64)}},
+	{"folder_recheck_preview", map[string]any{"id": "media"}},
+	{"folder_recheck_apply", map[string]any{"id": "media", "plan_hash": strings.Repeat("0", 64)}},
+	{"folder_op", map[string]any{"id": "media"}},
+	{"delete_folder", map[string]any{"id": "docs"}},
 	// At the end, over what the operations above left (fix round 1).
 	{"get_op", map[string]any{"id": "secretapp"}},
 	{"wait_for_op", map[string]any{"id": "secretapp"}},
@@ -655,10 +675,11 @@ var redactedAllowed = map[string]string{}
 func testToolsNotEchoed(t *testing.T) {
 	secrets := filepath.Join(t.TempDir(), "secrets")
 	os.MkdirAll(secrets, 0o700)
-	e := newToolEnvWith(t, mcpEnvOpts{
+	e := newToolEnvWith(t, withFolderSetup(mcpEnvOpts{
 		extra: map[string][2]string{"smbfixture": settingsFixture(t, "smbfixture"), "talk": {chatManifest, chatCompose}},
 		cfg:   func(c *hub.Config) { c.SecretsDir = secrets },
-	})
+	}))
+	scriptFolderDisk(t, e) // Task 20: the folder and doctor tools run on real targets
 	withDomains(t, e)
 	const (
 		dnsMarker      = "dns-TOOLMARKER-0123456789abcdef"
@@ -743,6 +764,10 @@ func testToolsNotEchoed(t *testing.T) {
 			}
 			args[k] = v
 		}
+		if f.tool == "create_folder" {
+			// Its own directory (another inode) while it is created.
+			scriptDisk(e.eng.fakeEngine, 303, "/srv/docs")
+		}
 		txt, isErr, _ := e.tool(t, f.tool, args)
 		check(f.tool, txt)
 		ok[f.tool] = !isErr
@@ -752,6 +777,8 @@ func testToolsNotEchoed(t *testing.T) {
 			ok[f.tool] = !isErr
 		}
 		switch f.tool {
+		case "create_folder":
+			scriptFolderDisk(t, e)
 		case "backup_instance", "restore_instance":
 			waitIdle(t, e.s.Hub, "secretapp")
 			list, err := e.s.Hub.ListBackups("secretapp")
@@ -775,7 +802,10 @@ func testToolsNotEchoed(t *testing.T) {
 		"list_credentials", "admin_revoke_credential", "delete_domain", "enroll_domain", "replace_domain_token", "get_env", "get_instance",
 		"set_model_provider_secret", "delete_model_provider", "get_op", "wait_for_op", "get_logs", "disable_instance",
 		// Task 18: the invite paths ran.
-		"create_person", "send_invite", "remove_passkeys", "import_apply", "directory_overview", "set_password", "audit_recent"} {
+		"create_person", "send_invite", "remove_passkeys", "import_apply", "directory_overview", "set_password", "audit_recent",
+		// Task 20.
+		"doctor_findings", "doctor_scan", "doctor_preview_fix", "list_folders", "check_folder_path", "create_folder", "update_folder",
+		"folder_preview", "folder_recheck_preview", "delete_folder"} {
 		if !ok[n] {
 			t.Errorf("%s didn't succeed: the fixture misses its success path", n)
 		}

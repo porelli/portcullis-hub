@@ -51,10 +51,12 @@ const (
 	FixNone     FixClass = ""
 )
 
-// Link opens the settings panel at an option.
+// Link opens the settings panel at an option, or (Tab set, contract
+// §14.5 NEW) a tab of the instance — today only "ai" (TabAI).
 type Link struct {
 	Instance string `json:"instance"`
 	Option   string `json:"option"`
+	Tab      string `json:"tab,omitempty"`
 }
 
 // Finding is one thing the doctor found.
@@ -216,6 +218,8 @@ type Inputs struct {
 	Unverifiable []UnverifiableIn
 	// FileSharing: the file-sharing instances (filesharing.go).
 	FileSharing []FileSharingIn
+	// AI: the companions the AI checks judge (ai.go, plan 4 Task 20).
+	AI []AIIn
 }
 
 // UnverifiableIn is one active credential the holder check can't verify

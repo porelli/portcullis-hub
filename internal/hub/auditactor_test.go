@@ -83,7 +83,11 @@ func TestRevokeLeaverFixCarriesActor(t *testing.T) {
 		t.Fatal(err)
 	}
 	n := auditLen(c.audit)
-	op, err := f.h.ApplyFix(ctx, got[0].FP, nil, plan.Hash, aiActor)
+	// A revocation touches data (G45, Task 20): from the AI it runs only
+	// with the confirmation the tool consumed.
+	confirmed := aiActor
+	confirmed.Confirmation = "AAAA-BBBB-CCCC"
+	op, err := f.h.ApplyFix(ctx, got[0].FP, nil, plan.Hash, confirmed)
 	if err != nil {
 		t.Fatal(err)
 	}

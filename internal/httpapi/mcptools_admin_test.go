@@ -16,6 +16,7 @@ import (
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
+	"github.com/portcullis/hub/internal/doctor"
 	"github.com/portcullis/hub/internal/hub"
 	"github.com/portcullis/hub/internal/templates"
 )
@@ -201,6 +202,10 @@ func (c *callRec) take() []string {
 
 var archiveTS = regexp.MustCompile(`\d{8}T\d{6}Z`)
 
+// opIDRe: an operation id in an audit detail (doctor.fix's "op=<id>"),
+// random per run.
+var opIDRe = regexp.MustCompile(`op=[0-9a-f]{16}`)
+
 // auditKey is an entry as both paths must write it (the confirmation id
 // and archive timestamps aside).
 func auditKey(a directory.AuditEntry) string {
@@ -208,6 +213,7 @@ func auditKey(a directory.AuditEntry) string {
 	if i := strings.LastIndex(d, "confirmation "); i >= 0 {
 		d = strings.TrimSuffix(strings.TrimSuffix(d[:i], "; "), " ")
 	}
+	d = opIDRe.ReplaceAllString(d, "op=ID")
 	return strings.Join([]string{a.Action, a.Target, archiveTS.ReplaceAllString(d, "TS"), a.Result, archiveTS.ReplaceAllString(a.Error, "TS")}, "|")
 }
 
@@ -219,6 +225,52 @@ type sameAsHTTPCase struct {
 	body         string
 	instance     string // an async op (or a background restart) to wait for ("" none)
 	plan         bool   // the tool needs preview_settings' plan_hash first
+	// vars (Task 20) are per-env values ({{name}} in body and args): a
+	// preview's plan hash, a finding's fp or token — each env's own.
+	vars func(t *testing.T, e *toolEnv) map[string]string
+}
+
+// substVars replaces every {{name}} of vars in s.
+func substVars(s string, vars map[string]string) string {
+	for k, v := range vars {
+		s = strings.ReplaceAll(s, "{{"+k+"}}", v)
+	}
+	return s
+}
+
+// folderHashVar: vars giving {{hash}} = the plan_hash of the preview at
+// path (a POST with body) in that env, made through the Hub directly
+// (no recorded call).
+func folderHashVar(path, body string) func(t *testing.T, e *toolEnv) map[string]string {
+	return func(t *testing.T, e *toolEnv) map[string]string {
+		t.Helper()
+		code, b := e.do(t, "root", "POST", path, body)
+		var p struct {
+			PlanHash string `json:"plan_hash"`
+		}
+		if json.Unmarshal([]byte(b), &p); code != 200 || p.PlanHash == "" {
+			t.Fatalf("preview %s = %d %s", path, code, b)
+		}
+		return map[string]string{"hash": p.PlanHash}
+	}
+}
+
+// fixVars: {{fp}}, {{token}} and {{hash}} of the finding of kind (the
+// fix previewed with params) in that env.
+func fixVars(kind string, params map[string]string) func(t *testing.T, e *toolEnv) map[string]string {
+	return func(t *testing.T, e *toolEnv) map[string]string {
+		t.Helper()
+		f := findingOfKind(t, e.s.Hub, kind)
+		v := map[string]string{"fp": f.FP, "token": f.Token}
+		if params != nil {
+			p, err := e.s.Hub.PreviewFix(context.Background(), f.FP, params)
+			if err != nil {
+				t.Fatalf("preview %s: %v", kind, err)
+			}
+			v["hash"] = p.Hash
+		}
+		return v
+	}
 }
 
 // sameAsHTTPPending are the admin W and D tools whose same-as-HTTP case a
@@ -233,9 +285,12 @@ var sameAsHTTPPending = map[string]string{}
 // entries — attributed via ai and the AI client (plus the consumed
 // confirmation for D tools) only for the tool.
 func TestAdminToolsSameAsHTTP(t *testing.T) {
-	httpEnv := newToolEnv(t, nil, nil)
-	toolE := newToolEnv(t, nil, nil)
+	// Both with the shared-folder fixture (Task 20: the folder and doctor
+	// tools).
+	httpEnv := newToolEnvWith(t, withFolderSetup(mcpEnvOpts{}))
+	toolE := newToolEnvWith(t, withFolderSetup(mcpEnvOpts{}))
 	for _, e := range []*toolEnv{httpEnv, toolE} {
+		scriptFolderDisk(t, e)
 		// Groups exist (enable creates none: the details stay equal); the
 		// secret is set (the save below needs it).
 		e.ll.AddGroup("users_secretapp")
@@ -252,7 +307,55 @@ func TestAdminToolsSameAsHTTP(t *testing.T) {
 	}
 	hr, tr := &callRec{}, &callRec{}
 	httpEnv.s.callHook, toolE.s.callHook = hr.hook, tr.hook
+	uses2 := `[{"instance":"photos","key":"extra"},{"instance":"photos","key":"library"}]`
 	cases := []sameAsHTTPCase{
+		// ── Task 20: the doctor and shared folders (first: the local
+		// networks cases below narrow what rebind_port accepts) ──
+		{tool: "create_folder", args: map[string]any{"id": "docs", "name": "Docs", "path": "/srv/docs", "description": "papers"},
+			method: "POST", path: "/api/folders", body: `{"id":"docs","name":"Docs","path":"/srv/docs","description":"papers"}`,
+			vars: func(_ *testing.T, e *toolEnv) map[string]string {
+				scriptDisk(e.eng.fakeEngine, 303, "/srv/docs") // its own directory while it is created
+				return nil
+			}},
+		{tool: "update_folder", args: map[string]any{"id": "media", "name": "Media", "path": "/srv/media", "description": "photos"},
+			method: "PUT", path: "/api/folders/media", body: `{"name":"Media","path":"/srv/media","description":"photos"}`,
+			vars: func(t *testing.T, e *toolEnv) map[string]string { scriptFolderDisk(t, e); return nil }},
+		{tool: "delete_folder", args: map[string]any{"id": "media"},
+			method: "DELETE", path: "/api/folders/media", body: ``},
+		{tool: "doctor_scan", args: map[string]any{},
+			method: "POST", path: "/api/doctor/scan", body: ``, instance: "_doctor"},
+		{tool: "doctor_mute", args: map[string]any{"fp": "{{fp}}", "reason": "behind the router", "finding_token": "{{token}}"},
+			method: "POST", path: "/api/doctor/findings/{{fp}}/mute", body: `{"reason":"behind the router","token":"{{token}}"}`,
+			vars: fixVars(doctor.KindLANOnlyExposed, nil)},
+		{tool: "doctor_unmute", args: map[string]any{"fp": "{{fp}}"},
+			method: "DELETE", path: "/api/doctor/findings/{{fp}}/mute", body: ``,
+			vars: fixVars(doctor.KindLANOnlyExposed, nil)},
+		// doctor_apply_fix: data (reapply_folder, D) and config only
+		// (rebind_port, W).
+		{tool: "doctor_apply_fix", args: map[string]any{"fp": "{{fp}}", "plan_hash": "{{hash}}"},
+			method: "POST", path: "/api/doctor/findings/{{fp}}/apply", body: `{"plan_hash":"{{hash}}"}`, instance: "_folder.media",
+			vars: fixVars(doctor.KindFolderOwner, map[string]string{})},
+		{tool: "doctor_apply_fix", args: map[string]any{"fp": "{{fp}}", "address": "192.168.1.10", "plan_hash": "{{hash}}"},
+			method: "POST", path: "/api/doctor/findings/{{fp}}/apply", body: `{"plan_hash":"{{hash}}","params":{"address":"192.168.1.10"}}`, instance: "photos",
+			vars: fixVars(doctor.KindLANOnlyExposed, map[string]string{"address": "192.168.1.10"})},
+		// folder_apply: adding a use (D), then removing every use (W).
+		{tool: "folder_apply", args: map[string]any{"id": "media", "uses": json.RawMessage(uses2), "plan_hash": "{{hash}}"},
+			method: "POST", path: "/api/folders/media/assign/apply", body: `{"plan_hash":"{{hash}}","uses":` + uses2 + `}`, instance: "_folder.media",
+			vars: folderHashVar("/api/folders/media/assign/preview", `{"uses":`+uses2+`}`)},
+		{tool: "folder_apply", args: map[string]any{"id": "media", "uses": []any{}, "plan_hash": "{{hash}}"},
+			method: "POST", path: "/api/folders/media/assign/apply", body: `{"plan_hash":"{{hash}}","uses":[]}`, instance: "_folder.media",
+			vars: folderHashVar("/api/folders/media/assign/preview", `{"uses":[]}`)},
+		{tool: "folder_recheck_apply", args: map[string]any{"id": "media", "plan_hash": "{{hash}}"},
+			method: "POST", path: "/api/folders/media/recheck/apply", body: `{"plan_hash":"{{hash}}"}`,
+			vars: folderHashVar("/api/folders/media/recheck/preview", ``)},
+		{tool: "folder_recheck_apply", args: map[string]any{"id": "media", "plan_hash": "{{hash}}", "confirm_different_directory": true},
+			method: "POST", path: "/api/folders/media/recheck/apply", body: `{"plan_hash":"{{hash}}","confirm_different_directory":true}`,
+			vars: folderHashVar("/api/folders/media/recheck/preview", ``)},
+		{tool: "folder_undo_apply", args: map[string]any{"id": "media", "plan_hash": strings.Repeat("0", 64)},
+			method: "POST", path: "/api/folders/media/undo/apply", body: `{"plan_hash":"` + strings.Repeat("0", 64) + `"}`},
+		{tool: "delete_folder", args: map[string]any{"id": "docs"},
+			method: "DELETE", path: "/api/folders/docs", body: ``},
+		// ── Task 17a ──
 		{tool: "create_instance", args: map[string]any{"template": "grafana", "id": "grafana-a"},
 			method: "POST", path: "/api/instances", body: `{"template":"grafana","id":"grafana-a"}`},
 		{tool: "create_instance", args: map[string]any{"template": "nope", "id": "nope-a"},
@@ -457,6 +560,14 @@ func TestAdminToolsSameAsHTTP(t *testing.T) {
 			tr.take()
 			args := maps.Clone(c.args.(map[string]any))
 			args["plan_hash"] = p.PlanHash
+			c.args = args
+		}
+		if c.vars != nil {
+			hv, tv := c.vars(t, httpEnv), c.vars(t, toolE)
+			c.path, c.body = substVars(c.path, hv), substVars(c.body, hv)
+			b, _ := json.Marshal(c.args)
+			var args map[string]any
+			json.Unmarshal([]byte(substVars(string(b), tv)), &args)
 			c.args = args
 		}
 		hn, tn := len(readAudit(t, httpEnv.audit)), len(readAudit(t, toolE.audit))

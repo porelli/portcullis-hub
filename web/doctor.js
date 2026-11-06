@@ -218,7 +218,8 @@
       }
     }
     if ((f.steps || []).length) h += '<button type="button" class="btn btn-secondary btn-sm" data-dr-explain>Explain</button>';
-    if (f.link && f.link.instance) h += '<button type="button" class="btn btn-secondary btn-sm" data-dr-open="' + esc(f.link.instance) + '" data-dr-option="' + esc(f.link.option || '') + '">Open setting</button>';
+    if (f.link && f.link.instance && f.link.tab) h += '<button type="button" class="btn btn-secondary btn-sm" data-dr-open-tab="' + esc(f.link.tab) + '" data-dr-open="' + esc(f.link.instance) + '">' + (f.link.tab === 'ai' ? 'Open AI tab' : 'Open app') + '</button>';
+    else if (f.link && f.link.instance) h += '<button type="button" class="btn btn-secondary btn-sm" data-dr-open="' + esc(f.link.instance) + '" data-dr-option="' + esc(f.link.option || '') + '">Open setting</button>';
     h += f.muted ? '<button type="button" class="btn btn-secondary btn-sm" data-dr-unmute>Unmute</button>'
       : '<button type="button" class="btn btn-secondary btn-sm" data-dr-mute>Mute</button>';
     h += '</div>';
@@ -393,6 +394,13 @@
       if (t.closest('[data-dr-cancel]')) { if (!(fixes[fp] && fixes[fp].busy)) { delete fixes[fp]; c.querySelector('[data-dr-panel]').innerHTML = ''; } return; }
       if (t.closest('[data-dr-reload]')) { render(el); return; }
       if (t.closest('[data-dr-explain]')) { const s = c.querySelector('[data-dr-steps]'); s.hidden = !s.hidden; return; }
+      // A tab link (AI findings): the app's tab when the page has one
+      // (openAppTab, the AI tab's task), else the app itself.
+      if ((b = t.closest('[data-dr-open-tab]'))) {
+        if (typeof window.openAppTab === 'function') window.openAppTab(b.dataset.drOpen, b.dataset.drOpenTab);
+        else window.openSettingAt(b.dataset.drOpen, '');
+        return;
+      }
       if ((b = t.closest('[data-dr-open]'))) { window.openSettingAt(b.dataset.drOpen, b.dataset.drOption); return; }
       if (t.closest('[data-dr-mute]')) { openMute(fp); return; }
       if (t.closest('[data-dr-mute-go]')) { mute(fp, true); return; }

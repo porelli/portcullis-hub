@@ -527,6 +527,7 @@ type composeServiceInfo struct {
 	netModeOf   string   // network_mode's value when a string
 	ports       bool     // ports: declared (published to the host)
 	named       []string // container_name / hostname present
+	image       string   // image: as written ("" = none or not a string)
 }
 
 func composeServiceInfos(compose []byte) map[string]composeServiceInfo {
@@ -554,6 +555,7 @@ func composeServiceInfos(compose []byte) map[string]composeServiceInfo {
 		_, info.networkMode = s["network_mode"]
 		info.netModeOf, _ = s["network_mode"].(string)
 		_, info.ports = s["ports"]
+		info.image, _ = s["image"].(string)
 		for _, f := range []string{"container_name", "hostname"} {
 			if _, ok := s[f]; ok {
 				info.named = append(info.named, f)
@@ -906,6 +908,25 @@ func ServiceNetworks(compose []byte) map[string]ServiceNet {
 		out[name] = ServiceNet{Networks: i.networks, NetworkMode: i.networkMode}
 	}
 	return out
+}
+
+// ServiceImages is, per compose service, its image: as written ("" when
+// it has none, e.g. a build-only service).
+func ServiceImages(compose []byte) map[string]string {
+	out := map[string]string{}
+	for name, i := range composeServiceInfos(compose) {
+		out[name] = i.image
+	}
+	return out
+}
+
+// ImageDigest is an image reference's pinned digest (the part after
+// "@", e.g. "sha256:…"; "" when it isn't pinned by digest).
+func ImageDigest(ref string) string {
+	if _, d, ok := strings.Cut(ref, "@"); ok {
+		return d
+	}
+	return ""
 }
 
 // ServiceNet is one service's network attachment as compose.yml declares it.

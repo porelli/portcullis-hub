@@ -118,6 +118,11 @@ func (h *Hub) ApplyRecheck(ctx context.Context, id string, planHash string, conf
 			h.auditFolder(actor, "folder.update", id, detail, err)
 		}
 	}()
+	if confirmDifferent {
+		if err := aiUnconfirmed(actor, "accepting another directory as shared folder "+id); err != nil {
+			return nil, err
+		}
+	}
 	unlock, err := h.folderLock(id)
 	if err != nil {
 		return nil, err
