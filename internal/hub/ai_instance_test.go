@@ -1292,3 +1292,94 @@ func TestOwedOnChangeAfterStoppedSwitchOff(t *testing.T) {
 		t.Errorf("flags kept: %+v", c)
 	}
 }
+
+// ── fix round 2 ─────────────────────────────────────────
+
+// R2-1: on a running instance the hooks that run after the up are owed
+// in the same commit: a crash right after the save leaves the flags.
+func TestOwedFlagsPersistedAtCommit(t *testing.T) {
+	a := newInstAIFixture(t, nil)
+	a.enable(t, "aiapp")
+	if err := a.h.SetAISupport(context.Background(), "aiapp", "tok", true, root); err != nil {
+		t.Fatal(err)
+	}
+	var atCommit state.AICompanion
+	a.h.testHookAIAfterSave = func() {
+		st, err := state.Load(a.h.statePath())
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		atCommit = st.AIInstances["aiapp"].Companions["tok"]
+	}
+	if err := a.h.SetAISupport(context.Background(), "aiapp", "tok", false, root); err != nil {
+		t.Fatal(err)
+	}
+	if !atCommit.RevokePending || !atCommit.OnChangePending || atCommit.Enabled {
+		t.Errorf("stored at the commit = %+v, want both owed", atCommit)
+	}
+	if c := a.companion("aiapp", "tok"); c.RevokePending || c.OnChangePending {
+		t.Errorf("flags kept after the hooks ran: %+v", c)
+	}
+	// A switch-on owes its on_change (its revoke_all ran before the save).
+	if err := a.h.SetAISupport(context.Background(), "aiapp", "tok", true, root); err != nil {
+		t.Fatal(err)
+	}
+	if atCommit.RevokePending || !atCommit.OnChangePending || !atCommit.Enabled {
+		t.Errorf("switch-on stored = %+v", atCommit)
+	}
+}
+
+// R2-2: re-sending the same PUT retries the owed hooks of a running
+// instance (here after a Hub restart: no in-memory re-apply set).
+func TestResentPUTRetriesOwedHooks(t *testing.T) {
+	a := newInstAIFixture(t, nil)
+	a.enable(t, "aiapp")
+	if err := a.h.SetAISupport(context.Background(), "aiapp", "tok", true, root); err != nil {
+		t.Fatal(err)
+	}
+	a.failHook("/toggle", 1, "nope\n")
+	if err := a.h.SetAISupport(context.Background(), "aiapp", "tok", false, root); err == nil {
+		t.Fatal("no error")
+	}
+	if c := a.companion("aiapp", "tok"); !c.OnChangePending {
+		t.Fatalf("state = %+v", c)
+	}
+	a.h.aiErrMu.Lock()
+	a.h.aiReapply = nil // as after a restart
+	a.h.aiErrMu.Unlock()
+	a.failHook("/toggle", 0, "")
+	n := len(a.stdins("/toggle"))
+	if err := a.h.SetAISupport(context.Background(), "aiapp", "tok", false, root); err != nil {
+		t.Fatal(err)
+	}
+	got := a.stdins("/toggle")
+	if len(got) != n+1 || got[len(got)-1] != `{"action":"on_change","enabled":false,"mode":"read_write","companion":"tok"}` {
+		t.Errorf("on_change = %v", got[n:])
+	}
+	if c := a.companion("aiapp", "tok"); c.OnChangePending || c.RevokePending {
+		t.Errorf("flags kept: %+v", c)
+	}
+}
+
+// R2-3: a companion owing a revoke_all gets no scope until it ran; then
+// the scope is ensured and attached.
+func TestScopeWaitsForOwedRevoke(t *testing.T) {
+	a := newInstAIFixture(t, nil)
+	if err := a.h.SetAISupport(context.Background(), "aiapp", "tok", true, root); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.h.wantedAIScopes(keycloak.AIClientIDs.Generic); slices.Contains(got, "mcp:aiapp.tok") {
+		t.Errorf("wanted = %v while revoke_all is owed", got)
+	}
+	if _, ok := a.kc.scope("mcp:aiapp.tok"); ok {
+		t.Error("scope ensured while revoke_all is owed")
+	}
+	a.enable(t, "aiapp")
+	if _, ok := a.kc.scope("mcp:aiapp.tok"); !ok {
+		t.Error("no scope after the owed revoke_all")
+	}
+	if got := a.kc.opt(keycloak.AIClientIDs.Generic); !slices.Contains(got, "mcp:aiapp.tok") {
+		t.Errorf("generic = %v", got)
+	}
+}

@@ -165,6 +165,7 @@ type aiChange struct {
 	after      state.AICompanion
 	hadEntry   bool
 	reapply    bool // unchanged, re-applied after a failed ai op
+	owed       bool // unchanged, re-applied: it owes hooks (pending flags)
 	modeOnly   bool // off → off, only the stored mode changes
 	detail     string
 	alias      string
@@ -286,7 +287,18 @@ func (h *Hub) updateInstanceAI(ctx context.Context, id string, u InstanceAIUpdat
 			}
 		}
 	}
-	work := slices.DeleteFunc(slices.Clone(changes), func(ch aiChange) bool { return !ch.reapply && ch.before == ch.after })
+	// On a running instance a companion still owing hooks (RevokePending /
+	// OnChangePending) is re-applied by the same request: runPendingAI
+	// runs what it owes.
+	if t.Enabled {
+		for i := range changes {
+			ch := &changes[i]
+			if ch.before == ch.after && ch.hadEntry && (ch.before.RevokePending || ch.before.OnChangePending) {
+				ch.owed = true
+			}
+		}
+	}
+	work := slices.DeleteFunc(slices.Clone(changes), func(ch aiChange) bool { return !ch.reapply && !ch.owed && ch.before == ch.after })
 	if len(work) == 0 {
 		changes = nil
 		audited = true
@@ -328,8 +340,21 @@ func (h *Hub) updateInstanceAI(ctx context.Context, id string, u InstanceAIUpdat
 			}
 			ch.after.RevokePending = false
 		}
-		if running {
-			ch.after.OnChangePending = false // runs after the up
+	}
+	// On a running instance what runs after the up is owed in the same
+	// commit (a crash before it leaves the flags; the success paths
+	// clear them): revoke_all of a companion switched (or re-applied) off,
+	// on_change of every change but a stored mode.
+	if running {
+		for i := range changes {
+			ch := &changes[i]
+			if ch.owed || ch.modeOnly {
+				continue
+			}
+			if ch.c.Identity.Revoke != "" && !ch.after.Enabled && (ch.switchingOff() || ch.reapply) {
+				ch.after.RevokePending = true
+			}
+			ch.after.OnChangePending = t.Manifest.AI.OnChange != ""
 		}
 	}
 
@@ -374,6 +399,9 @@ func (h *Hub) updateInstanceAI(ctx context.Context, id string, u InstanceAIUpdat
 		return nil, err
 	}
 	h.mu.Unlock()
+	if h.testHookAIAfterSave != nil {
+		h.testHookAIAfterSave()
+	}
 
 	// After the save: every step runs, the first error is the OpError; a
 	// companion a step failed for is re-applied by the same request
@@ -410,6 +438,9 @@ func (h *Hub) updateInstanceAI(ctx context.Context, id string, u InstanceAIUpdat
 			restarts = true
 		}
 		for _, ch := range changes {
+			if ch.owed {
+				continue // runPendingAI below
+			}
 			var cerrs []error
 			if ch.c.Identity.Revoke != "" && (ch.switchingOff() || (ch.reapply && !ch.after.Enabled)) {
 				if err := h.revokeAll(ctx, t, ch.c); err != nil {
@@ -446,11 +477,15 @@ func (h *Hub) updateInstanceAI(ctx context.Context, id string, u InstanceAIUpdat
 		// stopped, a failed one earlier): run now, render them after.
 		done := map[string]bool{} // just run above: never twice in one request
 		for _, ch := range changes {
-			done[ch.c.Name] = true
+			done[ch.c.Name] = !ch.owed
 		}
 		if again, perr := h.runPendingAI(ctx, t, done); perr != nil {
 			errs = append(errs, perr)
 		} else if again {
+			if err := h.syncAIScopes(ctx); err != nil {
+				errs = append(errs, err)
+				all()
+			}
 			if upErr := h.composeUp(t); upErr != nil {
 				errs = append(errs, statusErr500Wrap("compose up failed", upErr))
 				all()
@@ -611,7 +646,8 @@ func (h *Hub) companionScopesLocked() map[string]keycloak.MCPScope {
 		sw := h.st.AIInstances[t.ID].Companions
 		for j := range t.Manifest.AI.MCP {
 			c := &t.Manifest.AI.MCP[j]
-			if !sw[c.Name].Enabled || c.Identity.Mode == templates.IdentityAppOAuth {
+			// A companion owing a revoke_all is off for its scope too.
+			if !sw[c.Name].Enabled || sw[c.Name].RevokePending || c.Identity.Mode == templates.IdentityAppOAuth {
 				continue
 			}
 			if s, ok := companionScope(t, c); ok {
@@ -699,8 +735,16 @@ func (h *Hub) wantedAIScopesLocked(clientID string) []string {
 // exist yet or isn't the Hub's is left to the sync loop, logged), then
 // the scopes of switched-off companions deleted. Never under mu.
 func (h *Hub) applyAIScopes(ctx context.Context, changes []aiChange) error {
+	return h.applyAIScopesFor(ctx, changes, false)
+}
+
+// syncAIScopes makes Keycloak follow state with no change to drop (a
+// companion whose owed revoke_all just succeeded gets its scope).
+func (h *Hub) syncAIScopes(ctx context.Context) error { return h.applyAIScopesFor(ctx, nil, true) }
+
+func (h *Hub) applyAIScopesFor(ctx context.Context, changes []aiChange, force bool) error {
 	var drop []string
-	touches := false
+	touches := force
 	for _, ch := range changes {
 		if ch.c.Identity.Mode != templates.IdentityAppOAuth && !ch.modeOnly && !ch.modeChanged() {
 			touches = true
@@ -995,6 +1039,10 @@ func (h *Hub) pendingAIAfterStart(t *templates.Template) {
 		h.finishOpGuarded(t.ID, OpAI, err, false, true)
 	}
 	if again {
+		if err := h.syncAIScopes(context.Background()); err != nil {
+			log.Printf("ai: %s: scopes after the owed revoke_all: %v", t.ID, err)
+			h.finishOpGuarded(t.ID, OpAI, err, false, true)
+		}
 		h.writePolicyLogged()
 		tc := *t
 		h.goBackground(func() { h.Restart(tc) })

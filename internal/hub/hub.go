@@ -469,6 +469,9 @@ type Hub struct {
 	// testHookAIBeforeSave, if set, runs in UpdateInstanceAI right before
 	// its state commit (tests: a racing policy save).
 	testHookAIBeforeSave func()
+	// testHookAIAfterSave, if set, runs right after that commit (tests:
+	// the flags a crash there would leave).
+	testHookAIAfterSave func()
 	// testHookInit, if set, is called at Init's stages (tests: order).
 	testHookInit func(stage string)
 	// testHookApplyRestore, if set, runs at applyRestore's stages
