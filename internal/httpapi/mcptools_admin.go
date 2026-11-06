@@ -322,11 +322,11 @@ func (s *Server) registerAdminTools() {
 			ClassRead, "GET /api/instances/defaults", "", func(_ context.Context, _ directory.Actor, in defaultsArgs) (any, error) {
 				return s.instanceDefaults(in.Template, in.ID, in.Domain)
 			}),
-		admin("create_instance", "Create an instance of a multi-instance template (created stopped: review its settings, then enable it). Its users_<id> / admin_<id> groups are created.",
+		perCallCtx(admin("create_instance", "Create an instance of a multi-instance template (created stopped: review its settings, then enable it). Its users_<id> / admin_<id> groups are created. If one of them already exists with members, it needs your confirmation in the browser.",
 			ClassWrite, "POST /api/instances", "instance.create", func(_ context.Context, a directory.Actor, in createArgs) (any, error) {
 				return s.createInstance(a, in.Template, in.ID, in.Hosts)
-			}),
-		perCall(admin("enable_instance", "Enable (start) an instance; its missing groups are created first. Starting one whose public access is on or whose sign-in is the app's own login needs your confirmation in the browser.",
+			}), s.createClass, idOf, s.createConsequences),
+		perCallCtx(admin("enable_instance", "Enable (start) an instance; its missing groups are created first. Starting one whose public access is on, whose sign-in is the app's own login, or whose access / admin group already has members needs your confirmation in the browser.",
 			ClassWrite, "/api/templates/enable", "instance.enable", func(_ context.Context, a directory.Actor, in idArgs) (any, error) {
 				return s.enableInstance(a, in.ID)
 			}), s.enableClass, idOf, s.enableConsequences),
@@ -359,7 +359,7 @@ func (s *Server) registerAdminTools() {
 		{Name: "delete_instance", Description: "Delete an instance for good: a backup is taken first, then its containers, volumes, Keycloak clients and own groups go. Runs in the background: answers {op_id, op, instance, poll}; see wait_for_op.",
 			Class: ClassDestructive, Scope: ScopeAdmin, Twin: "DELETE /api/instances/{id}", Audit: "instance.delete", In: idArgs{},
 			Typed: idOf,
-			Consequences: func(args json.RawMessage) []string {
+			Consequences: func(_ context.Context, args json.RawMessage) []string {
 				lines, err := s.Hub.DeletePlan(idOf(args))
 				if err != nil {
 					return []string{"Deletes instance " + idOf(args) + " (" + err.Error() + ")."}
@@ -438,8 +438,8 @@ func (s *Server) registerAdminTools() {
 			}},
 		{Name: "set_policy", Description: "Set an instance's sign-in policy ({factors, op}), or inherit the Hub default. A policy that isn't stricter than the current one needs your confirmation in the browser.",
 			Class: ClassDestructive, Scope: ScopeAdmin, Twin: "PUT /api/instances/{id}/settings", Audit: "settings.change", In: policyArgs{},
-			ClassFor: s.policyClass, Typed: idOf,
-			Consequences: func(args json.RawMessage) []string {
+			ClassFor: noCtxClass(s.policyClass), Typed: idOf,
+			Consequences: func(_ context.Context, args json.RawMessage) []string {
 				a, _ := decode[policyArgs](args)
 				if a.Inherit {
 					return []string{"Drops " + a.ID + "'s own sign-in policy: the Hub default applies, which isn't stricter."}
@@ -462,14 +462,14 @@ func (s *Server) registerAdminTools() {
 			}},
 		{Name: "set_sign_in_mode", Description: "Set the sign-in mode of an app with its own login: gateway (Portcullis sign-in in front) or native (the app's own login only, needs your confirmation in the browser).",
 			Class: ClassDestructive, Scope: ScopeAdmin, Twin: "PUT /api/instances/{id}/settings", Audit: "app.sign_in", In: signInArgs{},
-			ClassFor: func(args json.RawMessage) ToolClass {
+			ClassFor: func(_ context.Context, args json.RawMessage) ToolClass {
 				if a, err := decode[signInArgs](args); err == nil && a.Mode == hub.SignInGateway {
 					return ClassWrite
 				}
 				return ClassDestructive
 			},
 			Typed: idOf,
-			Consequences: func(args json.RawMessage) []string {
+			Consequences: func(_ context.Context, args json.RawMessage) []string {
 				a, _ := decode[signInArgs](args)
 				return []string{"Removes Portcullis sign-in from in front of " + a.ID + ": only the app's own login protects it."}
 			},
@@ -482,8 +482,8 @@ func (s *Server) registerAdminTools() {
 			}},
 		{Name: "set_public_access", Description: "Switch an app's public exception (its share paths without sign-in) on, off or back to the template default, and its mode (all / listed). Turning it on needs your confirmation in the browser; listed shares are added on the Hub's page.",
 			Class: ClassDestructive, Scope: ScopeAdmin, Twin: "PUT /api/instances/{id}/settings", Audit: "settings.change", In: publicArgs{},
-			ClassFor: s.publicClass, Typed: idOf,
-			Consequences: func(args json.RawMessage) []string {
+			ClassFor: noCtxClass(s.publicClass), Typed: idOf,
+			Consequences: func(_ context.Context, args json.RawMessage) []string {
 				a, _ := decode[publicArgs](args)
 				line := "Opens " + a.ID + "'s public paths to anyone on the internet, without sign-in"
 				if a.Mode != "" {
@@ -527,7 +527,7 @@ func (s *Server) registerAdminTools() {
 		{Name: "exec", Description: "Run a shell command in a running container of an instance (needs your confirmation in the browser). The output comes back redacted.",
 			Class: ClassDestructive, Scope: ScopeAdmin, Twin: "/api/templates/exec/", Audit: "instance.exec", In: execArgs{},
 			Typed: idOf,
-			Consequences: func(args json.RawMessage) []string {
+			Consequences: func(_ context.Context, args json.RawMessage) []string {
 				a, _ := decode[execArgs](args)
 				return []string{"Runs /bin/sh -c in service " + a.Service + " of " + a.ID + ", as the container's user: " + a.Command,
 					"Its output goes back to the AI (secrets redacted)."}
@@ -560,7 +560,7 @@ func (s *Server) registerAdminTools() {
 		{Name: "save_env", Description: "Write variables to an instance's .env (Expert; applies on the next restart; needs your confirmation in the browser). Variables a setting or the Hub owns are refused, and so are secret-looking ones: secrets never pass through the AI.",
 			Class: ClassDestructive, Scope: ScopeAdmin, Twin: "/api/templates/env/", Audit: "app.env", In: envArgs{},
 			Typed: idOf,
-			Consequences: func(args json.RawMessage) []string {
+			Consequences: func(_ context.Context, args json.RawMessage) []string {
 				a, _ := decode[envArgs](args)
 				names := make([]string, 0, len(a.Variables))
 				for k := range a.Variables {
@@ -596,7 +596,7 @@ func (s *Server) registerAdminTools() {
 		{Name: "save_custom_override", Description: "Replace an instance's custom compose override (\"\" removes it; validated; applies on the next restart; needs your confirmation in the browser).",
 			Class: ClassDestructive, Scope: ScopeAdmin, Twin: "/api/templates/compose/", Audit: "app.compose_override", In: overrideArgs{},
 			Typed: idOf,
-			Consequences: func(args json.RawMessage) []string {
+			Consequences: func(_ context.Context, args json.RawMessage) []string {
 				a, _ := decode[overrideArgs](args)
 				if a.Content == "" {
 					return []string{"Removes " + a.ID + "'s custom compose override; the change applies at its next restart."}
@@ -621,7 +621,7 @@ func (s *Server) registerAdminTools() {
 		{Name: "resolve_drift", Description: "Resolve a drift item with one of its actions: start or apply (compose up with the Hub's configuration), adopt (enable running containers), disable (stop and disable). Needs your confirmation in the browser.",
 			Class: ClassDestructive, Scope: ScopeAdmin, Twin: "/api/drift/resolve", Audit: "drift.resolve", In: resolveArgs{},
 			Typed: idOf,
-			Consequences: func(args json.RawMessage) []string {
+			Consequences: func(_ context.Context, args json.RawMessage) []string {
 				a, _ := decode[resolveArgs](args)
 				switch a.Action {
 				case hub.ActionDisable:
@@ -687,7 +687,7 @@ func (s *Server) registerAdminTools() {
 		{Name: "admin_revoke_credential", Description: "Revoke a person's file-sharing credential for an instance now (needs your confirmation in the browser). Creating one is never a tool: the person does it on the People page.",
 			Class: ClassDestructive, Scope: ScopeAdmin, Twin: "DELETE /api/instances/{id}/credentials/{key}/{user}", Audit: "credential.revoke", In: credArgs{},
 			Typed: func(args json.RawMessage) string { a, _ := decode[credArgs](args); return strings.ToLower(a.User) },
-			Consequences: func(args json.RawMessage) []string {
+			Consequences: func(_ context.Context, args json.RawMessage) []string {
 				a, _ := decode[credArgs](args)
 				return []string{"Revokes " + strings.ToLower(a.User) + "'s " + a.Key + " credential for " + a.ID + " now: the app stops accepting it."}
 			},
@@ -730,6 +730,17 @@ func (s *Server) registerAdminTools() {
 // registers D with its typed check and consequences, and classFor says
 // W or D for each call's arguments.
 func perCall(t Tool, classFor func(json.RawMessage) ToolClass, typed func(json.RawMessage) string, consequences func(json.RawMessage) []string) Tool {
+	return perCallCtx(t, noCtxClass(classFor), typed, noCtx(consequences))
+}
+
+// noCtxClass adapts a class function that needs no call state.
+func noCtxClass(f func(json.RawMessage) ToolClass) func(context.Context, json.RawMessage) ToolClass {
+	return func(_ context.Context, a json.RawMessage) ToolClass { return f(a) }
+}
+
+// perCallCtx is perCall with class and consequences that read the call's
+// state (the memoised directory read, the caller: callMemo).
+func perCallCtx(t Tool, classFor func(context.Context, json.RawMessage) ToolClass, typed func(json.RawMessage) string, consequences func(context.Context, json.RawMessage) []string) Tool {
 	t.Class, t.ClassFor, t.Typed, t.Consequences = ClassDestructive, classFor, typed, consequences
 	return t
 }
@@ -861,8 +872,9 @@ func localNetsConsequences(args json.RawMessage) []string {
 // enableClass is enable_instance's class (fix round 1 ruling): D when the
 // instance starts reachable without Portcullis sign-in — its public
 // access is on, or its sign-in mode is the app's own login — or either
-// can't be read; else W.
-func (s *Server) enableClass(args json.RawMessage) ToolClass {
+// can't be read; D when its access / admin group already has members
+// (pre-staged groups, T18 fix round 1: prestaged); else W.
+func (s *Server) enableClass(ctx context.Context, args json.RawMessage) ToolClass {
 	id := idOf(args)
 	v, err := s.Hub.AppSettings(id)
 	if err != nil || v == nil {
@@ -871,10 +883,13 @@ func (s *Server) enableClass(args json.RawMessage) ToolClass {
 	if (v.PublicAccess != nil && (v.PublicAccess.Enabled || v.PublicAccess.Active)) || s.Hub.SignInMode(id) == hub.SignInNative {
 		return ClassDestructive
 	}
+	if pre, ok := s.prestaged(ctx, s.Hub.Template(id), id); !ok || len(pre) > 0 {
+		return ClassDestructive
+	}
 	return ClassWrite
 }
 
-func (s *Server) enableConsequences(args json.RawMessage) []string {
+func (s *Server) enableConsequences(ctx context.Context, args json.RawMessage) []string {
 	id := idOf(args)
 	var lines []string
 	if v, err := s.Hub.AppSettings(id); err == nil && v.PublicAccess != nil && (v.PublicAccess.Enabled || v.PublicAccess.Active) {
@@ -883,10 +898,31 @@ func (s *Server) enableConsequences(args json.RawMessage) []string {
 	if s.Hub.SignInMode(id) == hub.SignInNative {
 		lines = append(lines, "Starts "+id+" with only the app's own login in front of it: no Portcullis sign-in.")
 	}
+	lines = append(lines, s.prestagedLines(ctx, s.Hub.Template(id), id)...)
 	if len(lines) == 0 {
 		lines = append(lines, "Starts "+id+" (its access settings couldn't be read).")
 	}
 	return lines
+}
+
+// createClass is create_instance's class (T18 fix round 1): D when one of
+// the new instance's groups already exists with members, or that can't
+// be read (unknown template, directory down); else W.
+func (s *Server) createClass(ctx context.Context, args json.RawMessage) ToolClass {
+	a, err := decode[createArgs](args)
+	if err != nil {
+		return ClassDestructive
+	}
+	if pre, ok := s.prestaged(ctx, s.Hub.Template(a.Template), a.ID); !ok || len(pre) > 0 {
+		return ClassDestructive
+	}
+	return ClassWrite
+}
+
+func (s *Server) createConsequences(ctx context.Context, args json.RawMessage) []string {
+	a, _ := decode[createArgs](args)
+	lines := []string{"Creates instance " + a.ID + " of " + a.Template + "."}
+	return append(lines, s.prestagedLines(ctx, s.Hub.Template(a.Template), a.ID)...)
 }
 
 // update is the SettingsUpdate the arguments stand for (no secrets, no

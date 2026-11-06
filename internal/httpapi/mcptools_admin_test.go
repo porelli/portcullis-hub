@@ -241,6 +241,9 @@ func TestAdminToolsSameAsHTTP(t *testing.T) {
 		e.ll.AddGroup("users_secretapp")
 		e.ll.AddGroup("admin_secretapp")
 		e.ll.AddUser("bob2", "bob2@example.org", "Bob Two", "")
+		// create_person is U (fix round 1): the people the cases change exist.
+		e.ll.AddUser("erin", "erin@example.org", "Erin", "")
+		e.ll.AddUser("fred", "fred@example.org", "Fred", "", "helpers")
 		e.s.Directory.Invites = &markerInviter{} // T18: the same links on both
 		v := "s3cret-value-1"
 		if _, err := e.s.Hub.SaveSettings("secretapp", hub.SettingsUpdate{Secrets: map[string]hub.SecretChange{"api_key": {Value: &v}}}, directory.Human("root")); err != nil {
@@ -362,10 +365,6 @@ func TestAdminToolsSameAsHTTP(t *testing.T) {
 			method: "POST", path: "/api/directory/fields", body: `{"name":"clearance","label":"Clearance","kind":"text","admin_only":true}`},
 		{tool: "update_field", args: map[string]any{"name": "dept", "label": "Dept"},
 			method: "PUT", path: "/api/directory/fields/dept", body: `{"label":"Dept"}`},
-		{tool: "create_person", args: map[string]any{"username": "erin", "email": "erin@example.org", "display_name": "Erin"},
-			method: "POST", path: "/api/directory/users", body: `{"username":"erin","email":"erin@example.org","display_name":"Erin","onboarding":"invite"}`},
-		{tool: "create_person", args: map[string]any{"username": "fred", "email": "fred@example.org", "display_name": "Fred", "groups": []string{"helpers"}},
-			method: "POST", path: "/api/directory/users", body: `{"username":"fred","email":"fred@example.org","display_name":"Fred","groups":["helpers"],"onboarding":"invite"}`},
 		{tool: "update_person", args: map[string]any{"username": "erin", "display_name": "Erin E"},
 			method: "PUT", path: "/api/directory/users/erin", body: `{"display_name":"Erin E"}`},
 		{tool: "set_details", args: map[string]any{"username": "erin", "attrs": map[string]any{"dept": []string{"Eng"}}},
@@ -404,8 +403,10 @@ func TestAdminToolsSameAsHTTP(t *testing.T) {
 			method: "PUT", path: "/api/directory/groups/hr_edit/members/bob2/expiry", body: `{"until":null}`},
 		{tool: "remove_member", args: map[string]any{"group": "helpers", "username": "bob2"},
 			method: "DELETE", path: "/api/directory/groups/helpers/members/bob2", body: `{}`},
-		{tool: "send_invite", args: map[string]any{"username": "erin"},
-			method: "POST", path: "/api/directory/users/erin/invite", body: `{}`},
+		{tool: "remove_member", args: map[string]any{"group": "hr_edit", "username": "bob2"},
+			method: "DELETE", path: "/api/directory/groups/hr_edit/members/bob2", body: `{}`},
+		{tool: "update_field", args: map[string]any{"name": "clearance", "multi": false},
+			method: "PUT", path: "/api/directory/fields/clearance", body: `{"multi":false}`},
 		{tool: "clear_actions", args: map[string]any{"username": "erin"},
 			method: "POST", path: "/api/directory/users/erin/clear-actions", body: `{}`},
 		{tool: "require_passkey", args: map[string]any{"username": "erin"},
@@ -414,8 +415,8 @@ func TestAdminToolsSameAsHTTP(t *testing.T) {
 			method: "POST", path: "/api/directory/users/erin/remove-passkeys", body: `{"confirm":"erin"}`},
 		{tool: "import_apply", args: map[string]any{"rows": []any{map[string]any{"user": "erin", "display_name": "Erin Two"}}},
 			method: "POST", path: "/api/directory/import/apply", body: `{"rows":[{"user":"erin","display_name":"Erin Two"}]}`},
-		{tool: "import_apply", args: map[string]any{"rows": []any{map[string]any{"user": "gina", "create": true, "email": "gina@example.org", "display_name": "Gina"}}},
-			method: "POST", path: "/api/directory/import/apply", body: `{"rows":[{"user":"gina","create":true,"email":"gina@example.org","display_name":"Gina"}]}`},
+		{tool: "import_apply", args: map[string]any{"rows": []any{map[string]any{"user": "bob2", "remove": true}}},
+			method: "POST", path: "/api/directory/import/apply", body: `{"rows":[{"user":"bob2","remove":true}]}`},
 		{tool: "delete_person", args: map[string]any{"username": "fred"},
 			method: "DELETE", path: "/api/directory/users/fred", body: `{"confirm":"fred"}`},
 		{tool: "delete_person", args: map[string]any{"username": "admin"},

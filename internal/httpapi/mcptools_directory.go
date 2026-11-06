@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"net/http"
 	"net/url"
 	"slices"
@@ -16,6 +17,7 @@ import (
 	"github.com/portcullis/hub/internal/hub"
 	"github.com/portcullis/hub/internal/lldap"
 	"github.com/portcullis/hub/internal/rules"
+	"github.com/portcullis/hub/internal/templates"
 )
 
 // The Portcullis MCP's users and groups tools (plan 4 Task 18; contract
@@ -131,14 +133,14 @@ func dirTool[T any](s *Server, name, desc string, class ToolClass, twin, audit s
 }
 
 // dirD is a D directory tool (its typed check and consequences).
-func dirD(t Tool, typed func(json.RawMessage) string, consequences func(json.RawMessage) []string) Tool {
+func dirD(t Tool, typed func(json.RawMessage) string, consequences func(context.Context, json.RawMessage) []string) Tool {
 	t.Class, t.Typed, t.Consequences = ClassDestructive, typed, consequences
 	return t
 }
 
-// guards is the directory's view of who and what guards access, read for
-// a class decision (nil: it can't be read — the caller fails closed).
-func (s *Server) guards() *directory.Membership {
+// loadGuards reads the directory's view of who and what guards access
+// (nil: it can't be read — the caller fails closed).
+func (s *Server) loadGuards() *directory.Membership {
 	if s.Directory == nil {
 		return nil
 	}
@@ -150,6 +152,17 @@ func (s *Server) guards() *directory.Membership {
 		return nil
 	}
 	return m
+}
+
+// guards is loadGuards read once per tools/call (callMemo: the class,
+// the consequences and Run of one call see the same snapshot).
+func (s *Server) guards(ctx context.Context) *directory.Membership {
+	m := memoOf(ctx)
+	if m == nil {
+		return s.loadGuards()
+	}
+	m.once.Do(func() { m.m = s.loadGuards() })
+	return m.m
 }
 
 // groupGuard: why changing group's members, rule or exceptions can widen
@@ -173,53 +186,91 @@ func groupGuard(m *directory.Membership, group string) (why string, ok bool) {
 	return "", known
 }
 
+// membersOf is group's current members (case-insensitive name).
+func membersOf(m *directory.Membership, group string) []string {
+	if m == nil {
+		return nil
+	}
+	for g, mg := range m.Groups {
+		if strings.EqualFold(g, group) {
+			return mg.Members
+		}
+	}
+	return nil
+}
+
 // groupClass: W for a known group that guards nothing, else D (G37).
-func (s *Server) groupClass(args json.RawMessage) ToolClass {
-	if why, ok := groupGuard(s.guards(), argField(args, "group")); ok && why == "" {
+func (s *Server) groupClass(ctx context.Context, args json.RawMessage) ToolClass {
+	if why, ok := groupGuard(s.guards(ctx), argField(args, "group")); ok && why == "" {
 		return ClassWrite
 	}
 	return ClassDestructive
 }
 
-// groupConsequences names the group and why it widens access.
-func (s *Server) groupConsequences(what string) func(json.RawMessage) []string {
-	return func(args json.RawMessage) []string {
-		g := argField(args, "group")
-		line := fmt.Sprintf(what, g)
-		why, ok := groupGuard(s.guards(), g)
-		switch {
-		case !ok:
-			line += " (the directory couldn't say whether this group grants rights: treat it as one that does)"
-		case why != "":
-			line += " " + g + " is " + why + ": its members get rights through it."
-		}
+// peopleList words a list of usernames ("nobody" when empty).
+func peopleList(us []string) string {
+	if len(us) == 0 {
+		return "nobody"
+	}
+	return strings.Join(us, ", ")
+}
+
+// groupConsequences names the group, why it widens access and its
+// current members; rule, when given, adds who it matches now.
+func (s *Server) groupConsequences(ctx context.Context, args json.RawMessage, line string, rule string) []string {
+	g := argField(args, "group")
+	m := s.guards(ctx)
+	why, ok := groupGuard(m, g)
+	switch {
+	case !ok:
+		return []string{line, "The directory couldn't say whether " + g + " grants rights: treat it as one that does."}
+	case why == "":
 		return []string{line}
 	}
+	lines := []string{line, g + " is " + why + ": its members get rights through it. Members now: " + peopleList(membersOf(m, g)) + "."}
+	if rule != "" {
+		lines = append(lines, s.ruleMatches(ctx, rule))
+	}
+	return lines
 }
 
-// guardedField: why setting field can change a guarding group ("").
-func guardedField(m *directory.Membership, field string) string {
-	for f, g := range m.GuardedFields {
+// ruleMatches is who rule matches right now (PreviewRule as the caller).
+func (s *Server) ruleMatches(ctx context.Context, text string) string {
+	memo := memoOf(ctx)
+	rule, err := parseRuleText(text)
+	if err != nil || memo == nil || memo.c == nil || s.Directory == nil {
+		return "Who the rule matches couldn't be computed."
+	}
+	people, err := s.Directory.PreviewRule(ctx, memo.c, rule)
+	if err != nil {
+		return "Who the rule matches couldn't be computed."
+	}
+	return "The rule matches now: " + peopleList(people) + "."
+}
+
+// fieldGroups: the guarding groups whose rules use field.
+func fieldGroups(m *directory.Membership, field string) []string {
+	for f, gs := range m.GuardedFields {
 		if strings.EqualFold(f, field) {
-			return "the rule of " + g + " (" + m.Guarding[g] + ") uses " + f
+			return gs
 		}
 	}
-	return ""
+	return nil
 }
 
-// attrsClass: D when attrs set a field a guarding group's rule uses, or
-// the directory can't say.
-func (s *Server) attrsWiden(attrs map[string][]string) (string, bool) {
+// attrsWiden: why setting attrs can change a guarding group ("" = it
+// can't); ok false = the directory can't say.
+func (s *Server) attrsWiden(ctx context.Context, attrs map[string][]string) (string, bool) {
 	if len(attrs) == 0 {
 		return "", true
 	}
-	m := s.guards()
+	m := s.guards(ctx)
 	if m == nil {
 		return "", false
 	}
 	for f := range attrs {
-		if why := guardedField(m, f); why != "" {
-			return why, true
+		if gs := fieldGroups(m, f); len(gs) > 0 {
+			return "the rules of " + strings.Join(gs, ", ") + " use " + f, true
 		}
 	}
 	return "", true
@@ -227,22 +278,126 @@ func (s *Server) attrsWiden(attrs map[string][]string) (string, bool) {
 
 // isAdministrator: user is in an administrator group (unknown = true:
 // the consequences then warn).
-func (s *Server) isAdministrator(user string) bool {
-	m := s.guards()
+func (s *Server) isAdministrator(ctx context.Context, user string) bool {
+	m := s.guards(ctx)
 	return m == nil || m.Administrators[strings.ToLower(user)]
 }
 
 // personConsequences: the action on user, and that user is another
 // administrator (§9.5: the typed check is their name, plus the passkey).
-func (s *Server) personConsequences(what string) func(json.RawMessage) []string {
-	return func(args json.RawMessage) []string {
+func (s *Server) personConsequences(what string) func(context.Context, json.RawMessage) []string {
+	return func(ctx context.Context, args json.RawMessage) []string {
 		u := argField(args, "username")
 		lines := []string{fmt.Sprintf(what, u)}
-		if s.isAdministrator(u) {
+		if s.isAdministrator(ctx, u) {
 			lines = append(lines, u+" is an administrator (or couldn't be checked): this hands their account to whoever acts next — confirm only if you meant "+u+".")
 		}
 		return lines
 	}
+}
+
+// prestaged: the groups instance id of t would use (its access / admin
+// group: users_<id> / admin_<id>, or a default instance's manifest
+// groups) that already exist with members → those members (T18 fix round
+// 1: an AI that pre-staged admin_foo and then creates foo hands its
+// members the app's admin rights). ok false = can't say (no template,
+// the directory unreadable): fail closed.
+func (s *Server) prestaged(ctx context.Context, t *templates.Template, id string) (map[string][]string, bool) {
+	if t == nil {
+		return nil, false
+	}
+	m := s.guards(ctx)
+	if m == nil {
+		return nil, false
+	}
+	n := t.NamesFor(id)
+	out := map[string][]string{}
+	for _, g := range []string{n.AccessGroup, n.AdminGroup} {
+		if g == "" {
+			continue
+		}
+		if ms := membersOf(m, g); len(ms) > 0 {
+			out[g] = ms
+		}
+	}
+	return out, true
+}
+
+// prestagedLines are prestaged's consequences.
+func (s *Server) prestagedLines(ctx context.Context, t *templates.Template, id string) []string {
+	pre, ok := s.prestaged(ctx, t, id)
+	if !ok {
+		return []string{"Who is already in " + id + "'s groups couldn't be read: treat them as holding its access and admin rights."}
+	}
+	var lines []string
+	for _, g := range slices.Sorted(maps.Keys(pre)) {
+		lines = append(lines, g+" already exists with members "+peopleList(pre[g])+": they get what it gives in "+id+" at once.")
+	}
+	return lines
+}
+
+// inviteForm is the Hub page that issues (and shows) user's invite.
+func (s *Server) inviteForm(user string) string {
+	return s.mcpScope(ScopeAdmin).home + "#users/" + url.PathEscape(user) + "?invite"
+}
+
+// inviteTTL is core's invite lifetime (§9.4).
+const inviteTTL = 72 * time.Hour
+
+// inviteState is what the Hub knows about user's invite (send_invite's
+// and create_person's Run; never the client's accept): the newest ok
+// user.invite / invite-mode user.create entry of the audit log, and
+// whether they have passkeys now. pending = an invite younger than core's
+// 72 h and no passkey yet — evidence, not proof (core keeps invites in
+// memory: a restart of enroll drops them).
+func (s *Server) inviteState(ctx context.Context, c *directory.Caller, user string) map[string]any {
+	out := map[string]any{"username": user, "last_invite": nil, "pending": false,
+		"note": "from the audit log and Keycloak; core keeps invites in memory, so a restarted enroll drops them"}
+	var last *directory.AuditEntry
+	if l := s.auditLog(); l != nil {
+		if list, err := l.Recent(1000); err == nil {
+			for i := range list {
+				e := list[i]
+				if !strings.EqualFold(e.Target, user) || e.Result != "ok" {
+					continue
+				}
+				if e.Action == "user.invite" || (e.Action == "user.create" && strings.HasPrefix(e.Detail, "onboarding=invite")) {
+					last = &list[i]
+					break
+				}
+			}
+		}
+	}
+	if last != nil {
+		out["last_invite"] = map[string]any{"time": last.Time, "actor": last.Actor, "via": last.Via, "action": last.Action}
+		out["expires_at"] = last.Time.Add(inviteTTL)
+	}
+	if s.Directory == nil {
+		return out
+	}
+	ov, err := s.Directory.OverviewFor(ctx, c)
+	if err != nil {
+		out["pending"] = "unknown"
+		return out
+	}
+	for _, u := range ov.Users {
+		if !strings.EqualFold(u.Username, user) {
+			continue
+		}
+		out["exists"] = true
+		if u.Admin {
+			out["server_invite"] = serverInviteText(u.Username)
+		}
+		if u.Keycloak == nil || u.Keycloak.Error != "" {
+			out["pending"] = "unknown"
+			return out
+		}
+		out["passkeys"] = u.Keycloak.Passkeys
+		out["pending"] = last != nil && time.Now().Before(last.Time.Add(inviteTTL)) && u.Keycloak.Passkeys == 0
+		return out
+	}
+	out["exists"] = false
+	return out
 }
 
 // parseRuleText is the rule body's text form (400 as the route answers).
@@ -390,9 +545,20 @@ func (r importRow) apply() directory.ApplyRow {
 
 var usernameOf = argReader("username")
 
+// createForm is the Hub's new-person form, pre-filled (create_person).
+func (s *Server) createForm(a createPersonArgs) string {
+	q := url.Values{}
+	q.Set("username", a.Username)
+	q.Set("email", a.Email)
+	q.Set("display_name", a.DisplayName)
+	if len(a.Groups) > 0 {
+		q.Set("groups", strings.Join(a.Groups, ","))
+	}
+	return s.mcpScope(ScopeAdmin).home + "#users?create&" + q.Encode()
+}
+
 // registerDirectoryTools registers the users and groups tools.
 func (s *Server) registerDirectoryTools() {
-	const users = "POST /api/directory/users"
 	for _, t := range []Tool{
 		// ── Read ──
 		dirTool(s, "directory_overview", "Users & Groups: every person (groups, how each membership is held, Keycloak status, custom field values), every group (rules, exceptions, expiries), the fields, the delegated permissions and stale Keycloak records. Invite links and passwords are never shown.",
@@ -459,18 +625,27 @@ func (s *Server) registerDirectoryTools() {
 				return s.auditRecent(in)
 			}),
 		// ── People ──
-		perCall(dirTool(s, "create_person", "Create a person and invite them: core makes a one-time invite link (never shown to the AI: the Hub's page hands it over); administrators get no invite (run ./portcullis invite <user> on the server). With groups it needs your confirmation in the browser.",
-			ClassWrite, users, "user.create", func(ctx context.Context, c *directory.Caller, in createPersonArgs) (any, error) {
-				res, err := s.createUser(ctx, c, directory.CreateRequest{Username: in.Username, Email: in.Email, DisplayName: in.DisplayName,
-					Groups: in.Groups, Onboarding: directory.OnboardInvite})
-				if err != nil {
-					return nil, err
+		// create_person is U (fix round 1 ruling): the Service has no
+		// onboarding without an invite or a password, and both are
+		// secrets the AI never sees — the person is created on the Hub's
+		// pre-filled form, where the admin reviews it (groups included)
+		// and the invite link is shown.
+		{Name: "create_person", Description: "Create a person: the Hub's new-person form opens pre-filled with these details (and groups); you review it and create them there, where their one-time invite link is shown (administrators: ./portcullis invite <user> on the server). Afterwards this reports whether they exist.",
+			Class: ClassSecret, Scope: ScopeAdmin, Twin: "POST /api/directory/users", In: createPersonArgs{},
+			SecretForm: func(args json.RawMessage) string {
+				a, _ := decode[createPersonArgs](args)
+				return s.createForm(a)
+			},
+			Run: func(ctx context.Context, c *directory.Caller, args json.RawMessage) (any, error) {
+				// The accept is the client's word: what the directory says.
+				if s.Directory == nil {
+					return nil, errNoUserManagement
 				}
-				return s.safeResult(in.Username, "created", res), nil
-			}), createPersonClass, usernameOf, func(args json.RawMessage) []string {
-			a, _ := decode[createPersonArgs](args)
-			return []string{"Creates " + a.Username + " (" + a.Email + ") in " + strings.Join(a.Groups, ", ") + ": they get every right those groups give."}
-		}),
+				a, _ := decode[createPersonArgs](args)
+				out := s.inviteState(ctx, c, a.Username)
+				out["invite_form"] = s.inviteForm(a.Username)
+				return out, nil
+			}},
 		dirTool(s, "update_person", "Change a person's email or display name.",
 			ClassWrite, "PUT /api/directory/users/{username}", "user.update", func(ctx context.Context, c *directory.Caller, in updatePersonArgs) (any, error) {
 				if err := s.updateUser(ctx, c, in.Username, in.Email, in.DisplayName); err != nil {
@@ -478,7 +653,7 @@ func (s *Server) registerDirectoryTools() {
 				}
 				return map[string]string{"status": "saved"}, nil
 			}),
-		perCall(dirTool(s, "set_details", "Set a person's custom field values (rule groups follow). A field a guarding group's rule uses needs your confirmation in the browser.",
+		perCallCtx(dirTool(s, "set_details", "Set a person's custom field values (rule groups follow). A field a guarding group's rule uses needs your confirmation in the browser.",
 			ClassWrite, "PUT /api/directory/users/{username}/details", "user.details", func(ctx context.Context, c *directory.Caller, in detailsArgs) (any, error) {
 				if in.Attrs == nil {
 					return nil, badArg("attrs is required")
@@ -495,14 +670,21 @@ func (s *Server) registerDirectoryTools() {
 				}
 				return map[string]string{"status": "saved"}, nil
 			}), usernameOf, s.personConsequences("Makes %s register a new passkey at their next sign-in.")),
-		dirD(dirTool(s, "remove_passkeys", "Remove all of a person's passkeys and sign them out everywhere (optionally with a new invite, never shown to the AI). Needs your confirmation in the browser.",
-			ClassWrite, "POST /api/directory/users/{username}/remove-passkeys", "user.remove_passkeys", func(ctx context.Context, c *directory.Caller, in removePasskeysArgs) (any, error) {
-				// The typed check (the name) was the confirmation page's.
-				res, err := s.removePasskeys(ctx, c, in.Username, in.Username, in.Invite)
+		dirD(dirTool(s, "remove_passkeys", "Remove all of a person's passkeys and sign them out everywhere. Needs your confirmation in the browser. A new invite is given on the Hub's page (invite_form; administrators from the server).",
+			ClassWrite, "POST /api/directory/users/{username}/remove-passkeys", "user.remove_passkeys", func(ctx context.Context, c *directory.Caller, in personArgs) (any, error) {
+				// The typed check (the name) was the confirmation page's;
+				// never an invite here (fix round 1 ruling).
+				res, err := s.removePasskeys(ctx, c, in.Username, in.Username, false)
 				if err != nil {
 					return nil, err
 				}
-				return s.safeResult(in.Username, "removed", res), nil
+				out := s.safeResult(in.Username, "removed", res)
+				if m := s.guards(ctx); m != nil && m.Administrators[strings.ToLower(in.Username)] {
+					out["server_invite"] = serverInviteText(in.Username)
+				} else {
+					out["invite_form"] = s.inviteForm(in.Username)
+				}
+				return out, nil
 			}), usernameOf, s.personConsequences("Removes every passkey of %s and signs them out everywhere.")),
 		{Name: "set_password", Description: "Set a person's fallback password: it is typed (or generated and shown once) on the Hub's page, never in the chat. After you did it there, this reports the last password change the audit log records.",
 			Class: ClassSecret, Scope: ScopeAdmin, Twin: "POST /api/directory/users/{username}/password", In: personArgs{},
@@ -522,14 +704,22 @@ func (s *Server) registerDirectoryTools() {
 				}
 				return out, nil
 			}},
-		dirTool(s, "send_invite", "Create a new one-time invite for a person (earlier unused ones stop working). The link is never shown to the AI; administrators are invited from the server.",
-			ClassWrite, "POST /api/directory/users/{username}/invite", "user.invite", func(ctx context.Context, c *directory.Caller, in personArgs) (any, error) {
-				res, err := s.sendInvite(ctx, c, in.Username)
-				if err != nil {
-					return nil, err
+		// send_invite is U (fix round 1 ruling): the link is a secret, so
+		// the admin issues it on the Hub's page, where it is shown; Run
+		// only reports what the Hub knows.
+		{Name: "send_invite", Description: "Give a person a new one-time invite: it is issued on the Hub's page, where the link is shown (earlier unused ones stop working; administrators are invited from the server). Afterwards this reports whether an invite is pending.",
+			Class: ClassSecret, Scope: ScopeAdmin, Twin: "POST /api/directory/users/{username}/invite", In: personArgs{},
+			SecretForm: func(args json.RawMessage) string { return s.inviteForm(usernameOf(args)) },
+			Run: func(ctx context.Context, c *directory.Caller, args json.RawMessage) (any, error) {
+				if s.Directory == nil {
+					return nil, errNoUserManagement
 				}
-				return s.safeResult(in.Username, "invited", res), nil
-			}),
+				u := usernameOf(args)
+				if !lldap.ValidUsername(u) {
+					return nil, badArg("invalid username")
+				}
+				return s.inviteState(ctx, c, u), nil
+			}},
 		dirTool(s, "clear_actions", "Clear a person's pending Keycloak required actions.",
 			ClassWrite, "POST /api/directory/users/{username}/clear-actions", "user.clear_actions", func(ctx context.Context, c *directory.Caller, in personArgs) (any, error) {
 				if err := s.clearActions(ctx, c, in.Username); err != nil {
@@ -561,28 +751,31 @@ func (s *Server) registerDirectoryTools() {
 					return nil, err
 				}
 				return map[string]any{"status": "deleted", "warnings": res.Warnings}, nil
-			}), argReader("group"), func(args json.RawMessage) []string {
+			}), argReader("group"), func(ctx context.Context, args json.RawMessage) []string {
 			g := argField(args, "group")
-			return []string{"Deletes group " + g + ": its members lose what it gives, and its rule, exceptions, expiries, permission grants and app setting rows are removed."}
+			return []string{"Deletes group " + g + ": its members (" + peopleList(membersOf(s.guards(ctx), g)) + ") lose what it gives, and its rule, exceptions, expiries, permission grants and app setting rows are removed."}
 		}),
-		perCall(dirTool(s, "add_member", "Add a person to a manual group. Into an administrator, permission or other guarding group it needs your confirmation in the browser.",
+		perCallCtx(dirTool(s, "add_member", "Add a person to a manual group. Into an administrator, permission or other guarding group it needs your confirmation in the browser.",
 			ClassWrite, "POST /api/directory/groups/{group}/members", "group.add_member", func(ctx context.Context, c *directory.Caller, in memberArgs) (any, error) {
 				if err := s.addMember(ctx, c, in.Group, in.Username); err != nil {
 					return nil, err
 				}
 				return map[string]string{"status": "added"}, nil
-			}), s.groupClass, argReader("group"), func(args json.RawMessage) []string {
-			return s.groupConsequences("Adds " + argField(args, "username") + " to %s.")(args)
+			}), s.groupClass, argReader("group"), func(ctx context.Context, args json.RawMessage) []string {
+			return s.groupConsequences(ctx, args, "Adds "+argField(args, "username")+" to "+argField(args, "group")+".", "")
 		}),
-		dirTool(s, "remove_member", "Remove a person from a group (they are signed out of Keycloak).",
+		// remove_member is D from a guarding group (fix round 1 ruling).
+		perCallCtx(dirTool(s, "remove_member", "Remove a person from a group (they are signed out of Keycloak). From an administrator, permission or other guarding group it needs your confirmation in the browser.",
 			ClassWrite, "DELETE /api/directory/groups/{group}/members/{username}", "group.remove_member", func(ctx context.Context, c *directory.Caller, in memberArgs) (any, error) {
 				res, err := s.removeMember(ctx, c, in.Group, in.Username)
 				if err != nil {
 					return nil, err
 				}
 				return map[string]any{"status": "removed", "warnings": res.Warnings}, nil
-			}),
-		perCall(dirTool(s, "set_member_expiry", "Set or remove when a person's membership of a manual group ends. On an administrator, permission or other guarding group it needs your confirmation in the browser.",
+			}), s.groupClass, argReader("group"), func(ctx context.Context, args json.RawMessage) []string {
+			return s.groupConsequences(ctx, args, "Removes "+argField(args, "username")+" from "+argField(args, "group")+" and signs them out of Keycloak.", "")
+		}),
+		perCallCtx(dirTool(s, "set_member_expiry", "Set or remove when a person's membership of a manual group ends. On an administrator, permission or other guarding group it needs your confirmation in the browser.",
 			ClassWrite, "PUT /api/directory/groups/{group}/members/{username}/expiry", "group.expiry", func(ctx context.Context, c *directory.Caller, in expiryArgs) (any, error) {
 				until, err := parseUntil(in.Until)
 				if err != nil {
@@ -592,14 +785,14 @@ func (s *Server) registerDirectoryTools() {
 					return nil, err
 				}
 				return map[string]string{"status": "saved"}, nil
-			}), s.groupClass, argReader("group"), func(args json.RawMessage) []string {
+			}), s.groupClass, argReader("group"), func(ctx context.Context, args json.RawMessage) []string {
 			until := argField(args, "until")
 			if until == "" {
 				until = "no end"
 			}
-			return s.groupConsequences("Sets the end of " + argField(args, "username") + "'s membership of %s to " + until + ".")(args)
+			return s.groupConsequences(ctx, args, "Sets the end of "+argField(args, "username")+"'s membership of "+argField(args, "group")+" to "+until+".", "")
 		}),
-		perCall(dirTool(s, "set_group_rule", "Change a rule group's rule (text), or make it manual again. On a guarding group it needs your confirmation in the browser.",
+		perCallCtx(dirTool(s, "set_group_rule", "Change a rule group's rule (text), or make it manual again. On a guarding group it needs your confirmation in the browser.",
 			ClassWrite, "PUT /api/directory/groups/{group}/rule", "group.rule", func(ctx context.Context, c *directory.Caller, in groupRuleArgs) (any, error) {
 				var rule *rules.Expr
 				if in.Manual {
@@ -621,14 +814,15 @@ func (s *Server) registerDirectoryTools() {
 				out := ruleJSON(rule)
 				out["status"] = "saved"
 				return out, nil
-			}), s.groupClass, argReader("group"), func(args json.RawMessage) []string {
+			}), s.groupClass, argReader("group"), func(ctx context.Context, args json.RawMessage) []string {
 			r := argField(args, "rule")
+			line := "Sets the rule of " + argField(args, "group") + " to " + r + ": whoever it matches joins."
 			if r == "" {
-				r = "none (manual)"
+				line = "Makes " + argField(args, "group") + " manual: its current members stay."
 			}
-			return s.groupConsequences("Sets the rule of %s to " + r + ": whoever it matches joins.")(args)
+			return s.groupConsequences(ctx, args, line, r)
 		}),
-		perCall(dirTool(s, "convert_group", "Turn a manual group into a rule group as reviewed with convert_group_preview (send its answer back; a change since is refused). On a guarding group it needs your confirmation in the browser.",
+		perCallCtx(dirTool(s, "convert_group", "Turn a manual group into a rule group as reviewed with convert_group_preview (send its answer back; a change since is refused). On a guarding group it needs your confirmation in the browser.",
 			ClassWrite, "POST /api/directory/groups/{group}/convert", "group.rule", func(ctx context.Context, c *directory.Caller, in convertArgs) (any, error) {
 				rule, err := parseRuleText(in.Rule)
 				if err != nil {
@@ -640,11 +834,11 @@ func (s *Server) registerDirectoryTools() {
 				out := ruleJSON(rule)
 				out["status"] = "saved"
 				return out, nil
-			}), s.groupClass, argReader("group"), func(args json.RawMessage) []string {
+			}), s.groupClass, argReader("group"), func(ctx context.Context, args json.RawMessage) []string {
 			a, _ := decode[convertArgs](args)
-			return s.groupConsequences("Makes %s a rule group (" + a.Rule + "): joining " + strings.Join(a.Preview.Joining, ", ") + ".")(args)
+			return s.groupConsequences(ctx, args, "Makes "+a.Group+" a rule group ("+a.Rule+"): joining "+peopleList(a.Preview.Joining)+".", a.Rule)
 		}),
-		perCall(dirTool(s, "add_exception", "Add an exception to a rule group: a person added although the rule doesn't match them (include), or kept out although it does; a reason is required. On a guarding group it needs your confirmation in the browser.",
+		perCallCtx(dirTool(s, "add_exception", "Add an exception to a rule group: a person added although the rule doesn't match them (include), or kept out although it does; a reason is required. On a guarding group it needs your confirmation in the browser.",
 			ClassWrite, "POST /api/directory/groups/{group}/exceptions", "group.exception", func(ctx context.Context, c *directory.Caller, in exceptionArgs) (any, error) {
 				until, err := parseUntil(in.Until)
 				if err != nil {
@@ -654,34 +848,36 @@ func (s *Server) registerDirectoryTools() {
 					return nil, err
 				}
 				return map[string]string{"status": "saved"}, nil
-			}), s.groupClass, argReader("group"), func(args json.RawMessage) []string {
-			return s.groupConsequences("Adds an exception for " + argField(args, "user") + " to %s.")(args)
+			}), s.groupClass, argReader("group"), func(ctx context.Context, args json.RawMessage) []string {
+			return s.groupConsequences(ctx, args, "Adds an exception for "+argField(args, "user")+" to "+argField(args, "group")+".", "")
 		}),
-		perCall(dirTool(s, "remove_exception", "Remove a person's exception from a rule group (a kept-out person the rule matches joins). On a guarding group it needs your confirmation in the browser.",
+		perCallCtx(dirTool(s, "remove_exception", "Remove a person's exception from a rule group (a kept-out person the rule matches joins). On a guarding group it needs your confirmation in the browser.",
 			ClassWrite, "DELETE /api/directory/groups/{group}/exceptions/{username}", "group.exception", func(ctx context.Context, c *directory.Caller, in memberArgs) (any, error) {
 				if err := s.removeException(ctx, c, in.Group, in.Username); err != nil {
 					return nil, err
 				}
 				return map[string]string{"status": "removed"}, nil
-			}), s.groupClass, argReader("group"), func(args json.RawMessage) []string {
-			return s.groupConsequences("Removes " + argField(args, "username") + "'s exception from %s (kept out: they join if the rule matches).")(args)
+			}), s.groupClass, argReader("group"), func(ctx context.Context, args json.RawMessage) []string {
+			return s.groupConsequences(ctx, args, "Removes "+argField(args, "username")+"'s exception from "+argField(args, "group")+" (kept out: they join if the rule matches).", "")
 		}),
-		{Name: "set_permission", Description: "Grant a delegated permission (edit_details, invite, remove) to a group, or to nobody (group \"\"). Always needs your confirmation in the browser.",
-			Class: ClassDestructive, Scope: ScopeAdmin, Twin: "PUT /api/directory/permissions/{perm}", Audit: "permission.set", In: permissionArgs{},
-			Typed: argReader("perm"),
-			Consequences: func(args json.RawMessage) []string {
-				g := argField(args, "group")
-				if g == "" {
-					return []string{"Takes permission " + argField(args, "perm") + " from everybody."}
-				}
-				return []string{"Grants permission " + argField(args, "perm") + " to every member of " + g + " (now and later)."}
-			},
-			Run: dirTool(s, "set_permission", "", ClassWrite, "", "", func(ctx context.Context, c *directory.Caller, in permissionArgs) (any, error) {
+		dirD(dirTool(s, "set_permission", "Grant a delegated permission (edit_details, invite, remove) to a group, or to nobody (group \"\"). Always needs your confirmation in the browser.",
+			ClassWrite, "PUT /api/directory/permissions/{perm}", "permission.set", func(ctx context.Context, c *directory.Caller, in permissionArgs) (any, error) {
 				if err := s.setPermission(ctx, c, in.Perm, in.Group); err != nil {
 					return nil, err
 				}
 				return map[string]string{"status": "saved"}, nil
-			}).Run},
+			}), argReader("perm"), func(ctx context.Context, args json.RawMessage) []string {
+			g := argField(args, "group")
+			if g == "" {
+				return []string{"Takes permission " + argField(args, "perm") + " from everybody."}
+			}
+			m := s.guards(ctx)
+			who := "Members now: " + peopleList(membersOf(m, g)) + "."
+			if m == nil {
+				who = "Its members couldn't be read."
+			}
+			return []string{"Grants permission " + argField(args, "perm") + " to every member of " + g + " (now and later).", who}
+		}),
 		// ── Fields ──
 		dirTool(s, "create_field", "Create a custom person field (text, list or person; shared with apps unless share_with_apps is false).",
 			ClassWrite, "POST /api/directory/fields", "field.create", func(ctx context.Context, c *directory.Caller, in fieldArgs) (any, error) {
@@ -691,7 +887,9 @@ func (s *Server) registerDirectoryTools() {
 				}
 				return map[string]any{"status": "created", "name": f.Name}, nil
 			}),
-		dirTool(s, "update_field", "Change a custom field (label, kind, list values, multi, sharing, admin-only); what isn't given is kept.",
+		// update_field is D on a guarded field when it changes what the
+		// rules read (fix round 1, security hook).
+		perCallCtx(dirTool(s, "update_field", "Change a custom field (label, kind, list values, multi, sharing, admin-only); what isn't given is kept. On a field a guarding group's rule uses, changing its kind, values, multi or turning admin-only off needs your confirmation in the browser.",
 			ClassWrite, "PUT /api/directory/fields/{name}", "field.update", func(ctx context.Context, c *directory.Caller, in fieldArgs) (any, error) {
 				f, err := s.patchField(ctx, c, in.Name, directory.FieldPatch{Label: in.Label, Kind: in.Kind, Values: in.Values, Multi: in.Multi,
 					ShareWithApps: in.ShareWithApps, AdminOnly: in.AdminOnly})
@@ -699,21 +897,25 @@ func (s *Server) registerDirectoryTools() {
 					return nil, err
 				}
 				return map[string]any{"status": "saved", "field": f}, nil
-			}),
+			}), s.fieldClass, nameOf, s.fieldConsequences),
 		dirD(dirTool(s, "delete_field", "Delete a custom field and everyone's values of it. Needs your confirmation in the browser.",
 			ClassWrite, "DELETE /api/directory/fields/{name}", "field.delete", func(ctx context.Context, c *directory.Caller, in fieldRefArgs) (any, error) {
 				if err := s.deleteField(ctx, c, in.Name, in.Name); err != nil {
 					return nil, err
 				}
 				return map[string]string{"status": "deleted"}, nil
-			}), nameOf, func(args json.RawMessage) []string {
+			}), nameOf, func(_ context.Context, args json.RawMessage) []string {
 			return []string{"Deletes field " + nameOf(args) + " and every person's value of it."}
 		}),
 		// ── Import ──
-		perCall(dirTool(s, "import_apply", "Apply reviewed import rows (import_review): change details, create people (invited; links never shown to the AI) or delete them. Creating or deleting people, or setting a field a guarding group's rule uses, needs your confirmation in the browser.",
-			ClassWrite, "POST /api/directory/import/apply", "user.create", func(ctx context.Context, c *directory.Caller, in importApplyArgs) (any, error) {
+		perCallCtx(dirTool(s, "import_apply", "Apply reviewed import rows (import_review): change details or delete people. New people are created with create_person (their invites are given on the Hub's page). Deleting people, or setting a field a guarding group's rule uses, needs your confirmation in the browser.",
+			ClassWrite, "POST /api/directory/import/apply", "user.update", func(ctx context.Context, c *directory.Caller, in importApplyArgs) (any, error) {
 				req := directory.ApplyRequest{Rows: make([]directory.ApplyRow, len(in.Rows))}
 				for i, r := range in.Rows {
+					if r.Create {
+						// Fix round 1: no invite through the AI (a dead link).
+						return nil, badArg("row " + r.User + ": people are created with create_person (the Hub's form gives their invite), not through the AI's import")
+					}
 					req.Rows[i] = r.apply()
 				}
 				res, err := s.importApply(ctx, c, req)
@@ -738,40 +940,61 @@ func (s *Server) registerDirectoryTools() {
 	}
 }
 
-// createPersonClass: D with groups (G37), or arguments that don't decode.
-func createPersonClass(args json.RawMessage) ToolClass {
-	a, err := decode[createPersonArgs](args)
-	if err != nil || len(a.Groups) > 0 {
-		return ClassDestructive
-	}
-	return ClassWrite
-}
-
 // detailsClass: D when a field a guarding group's rule uses is set
 // (deviation, G37's intent), or the directory can't say.
-func (s *Server) detailsClass(args json.RawMessage) ToolClass {
+func (s *Server) detailsClass(ctx context.Context, args json.RawMessage) ToolClass {
 	a, err := decode[detailsArgs](args)
 	if err != nil {
 		return ClassDestructive
 	}
-	if why, ok := s.attrsWiden(a.Attrs); ok && why == "" {
+	if why, ok := s.attrsWiden(ctx, a.Attrs); ok && why == "" {
 		return ClassWrite
 	}
 	return ClassDestructive
 }
 
-func (s *Server) detailsConsequences(args json.RawMessage) []string {
+func (s *Server) detailsConsequences(ctx context.Context, args json.RawMessage) []string {
 	a, _ := decode[detailsArgs](args)
-	why, ok := s.attrsWiden(a.Attrs)
+	why, ok := s.attrsWiden(ctx, a.Attrs)
 	if !ok {
 		why = "the directory couldn't say which groups these fields decide"
 	}
-	return []string{"Sets " + a.Username + "'s details: " + why + ", so this can put them into that group."}
+	return []string{"Sets " + a.Username + "'s details: " + why + ", so this can put them into those groups."}
 }
 
-// importClass: D when a row creates or deletes a person, or sets a field
-// a guarding group's rule uses (or the directory can't say).
-func (s *Server) importClass(args json.RawMessage) ToolClass {
+// fieldChangesRules: the update changes what rules read of the field
+// (kind, values, multi) or lets delegates edit it (admin_only false).
+func fieldChangesRules(a fieldArgs) bool {
+	return (a.AdminOnly != nil && !*a.AdminOnly) || a.Kind != nil || a.Values != nil || a.Multi != nil
+}
+
+// fieldClass is update_field's class: D for a guarded field whose rules
+// the change affects, or when the directory can't say; else W.
+func (s *Server) fieldClass(ctx context.Context, args json.RawMessage) ToolClass {
+	a, err := decode[fieldArgs](args)
+	if err != nil {
+		return ClassDestructive
+	}
+	m := s.guards(ctx)
+	if m == nil || (len(fieldGroups(m, a.Name)) > 0 && fieldChangesRules(a)) {
+		return ClassDestructive
+	}
+	return ClassWrite
+}
+
+func (s *Server) fieldConsequences(ctx context.Context, args json.RawMessage) []string {
+	a, _ := decode[fieldArgs](args)
+	m := s.guards(ctx)
+	if m == nil {
+		return []string{"Changes field " + a.Name + " (the directory couldn't say which guarding groups use it)."}
+	}
+	return []string{"Changes field " + a.Name + ", which the rules of " + strings.Join(fieldGroups(m, a.Name), ", ") + " use: who is in them can change."}
+}
+
+// importClass: D when a row deletes a person or sets a field a guarding
+// group's rule uses (or the directory can't say). Create rows are
+// refused on the tool path.
+func (s *Server) importClass(ctx context.Context, args json.RawMessage) ToolClass {
 	a, err := decode[importApplyArgs](args)
 	if err != nil {
 		return ClassDestructive
@@ -785,34 +1008,40 @@ func (s *Server) importClass(args json.RawMessage) ToolClass {
 			attrs[f] = v
 		}
 	}
-	if why, ok := s.attrsWiden(attrs); ok && why == "" {
+	if why, ok := s.attrsWiden(ctx, attrs); ok && why == "" {
 		return ClassWrite
 	}
 	return ClassDestructive
 }
 
-func (s *Server) importConsequences(args json.RawMessage) []string {
+func (s *Server) importConsequences(ctx context.Context, args json.RawMessage) []string {
 	a, _ := decode[importApplyArgs](args)
-	var created, removed, changed []string
+	var removed, changed []string
+	attrs := map[string][]string{}
 	for _, r := range a.Rows {
 		switch {
-		case r.Create:
-			created = append(created, r.User)
 		case r.Remove:
 			removed = append(removed, r.User)
 		default:
 			changed = append(changed, r.User)
+			for f, v := range r.Attrs {
+				attrs[f] = v
+			}
 		}
 	}
 	var lines []string
-	if len(created) > 0 {
-		lines = append(lines, "Creates and invites "+strings.Join(created, ", ")+".")
-	}
 	if len(removed) > 0 {
 		lines = append(lines, "Deletes "+strings.Join(removed, ", ")+" from LLDAP and Keycloak; this can't be undone.")
 	}
 	if len(changed) > 0 {
-		lines = append(lines, "Changes the details of "+strings.Join(changed, ", ")+" (rule groups follow).")
+		line := "Changes the details of " + strings.Join(changed, ", ") + " (rule groups follow)."
+		if why, ok := s.attrsWiden(ctx, attrs); !ok || why != "" {
+			if !ok {
+				why = "the directory couldn't say which groups these fields decide"
+			}
+			line += " " + why + "."
+		}
+		lines = append(lines, line)
 	}
 	if len(lines) == 0 {
 		lines = []string{"Applies an empty import."}

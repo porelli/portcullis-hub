@@ -54,9 +54,9 @@ type Membership struct {
 	// MCP decides from it whether a membership, rule or exception change
 	// widens access (G37), so it never keeps a second list.
 	Guarding map[string]string
-	// GuardedFields: field → the guarding group whose rule uses it
-	// (guardedFields): setting it can change who is in that group.
-	GuardedFields map[string]string
+	// GuardedFields: field → the guarding groups whose rules use it
+	// (guardedFields, sorted): setting it can change who is in them.
+	GuardedFields map[string][]string
 	// Administrators: lowercase users in an administrator group
 	// (AdminGroups; the service account excluded) — the targets whose
 	// passkeys or password hand over an administrator's account.

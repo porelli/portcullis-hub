@@ -90,8 +90,10 @@ func newMCPTestEnv(t *testing.T) *mcpTestEnv {
 		Audit: "thing.save", In: thingArgs{}, Run: run("save_thing")})
 	s.registerTool(Tool{Name: "delete_thing", Description: "Delete a thing.", Class: ClassDestructive, Scope: ScopeAdmin, Twin: "DELETE /api/things/{id}",
 		Audit: "thing.delete", In: thingArgs{}, Typed: idOf,
-		Consequences: func(args json.RawMessage) []string { return []string{"Permanently removes thing " + idOf(args) + "."} },
-		Run:          run("delete_thing")})
+		Consequences: func(_ context.Context, args json.RawMessage) []string {
+			return []string{"Permanently removes thing " + idOf(args) + "."}
+		},
+		Run: run("delete_thing")})
 	s.registerTool(Tool{Name: "set_thing_secret", Description: "Set a thing's secret.", Class: ClassSecret, Scope: ScopeAdmin, Twin: "PUT /api/things/{id}/secret",
 		In: secretFormArgs{}, SecretForm: func(args json.RawMessage) string {
 			var a secretFormArgs

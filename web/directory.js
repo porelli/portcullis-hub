@@ -563,7 +563,10 @@
   }
 
   // ── invite dialog ───────────────────────────────────────
-  function openInvite() {
+  // openInvite opens the new-person form; pre (deep link #users?create&…,
+  // the Portcullis MCP's create_person form) pre-fills username, email,
+  // display name and ticks groups — the admin reviews and submits it here.
+  function openInvite(pre) {
     const admin = isAdmin();
     let h = '<div class="pd-grid">' +
       '<div><label for="nu-username">Username</label><input type="text" id="nu-username" autocomplete="off" placeholder="lowercase, e.g. alice" required></div>' +
@@ -589,7 +592,15 @@
     h += '<div class="pd-actions"><button type="button" class="pd-btn primary sm" data-act="invite-create">Create and invite</button>' +
       '<button type="button" class="pd-btn secondary sm" data-act="dialog-close">Cancel</button></div>';
     openDialog('Invite someone', h);
-    dialogBody().querySelector('#nu-username').focus();
+    const b = dialogBody();
+    if (pre) {
+      b.querySelector('#nu-username').value = pre.get('username') || '';
+      b.querySelector('#nu-email').value = pre.get('email') || '';
+      b.querySelector('#nu-display').value = pre.get('display_name') || '';
+      const want = (pre.get('groups') || '').split(',').filter(Boolean);
+      b.querySelectorAll('input[name="nu-group"]').forEach(i => { i.checked = want.includes(i.value); });
+    }
+    b.querySelector('#nu-username').focus();
   }
 
   async function createUser() {
@@ -1740,7 +1751,7 @@
       case 'copy-input': { const el = document.getElementById(b.dataset.input); if (el) copyText(el.value); return; }
       case 'open-user': return openUser(user);
       case 'save-user': return saveUser(user);
-      case 'invite-open': return openInvite();
+      case 'invite-open': return openInvite(null);
       case 'invite-create': return createUser();
       case 'invite': case 'require-passkey': case 'clear-actions': case 'reset-passkeys': case 'password': case 'delete-user':
         return userAction(a, user);
@@ -1992,11 +2003,13 @@
   }
 
   // openAt opens a person (deep link #users/<name>[?password|?invite],
-  // the Portcullis MCP's set_password form): after the current load, the
-  // person's dialog, then the action's own prompt — the secret is typed
-  // here, never passed in.
+  // the Portcullis MCP's set_password / send_invite forms): after the
+  // current load, the person's dialog, then the action's own prompt — the
+  // secret is typed (or the link shown) here, never passed through the
+  // AI. With URLSearchParams (#users?create&…): the new-person form.
   async function openAt(name, action) {
     if (loading) await loading;
+    if (action instanceof URLSearchParams) { openInvite(action); return; }
     if (!userByName(name)) return;
     openUser(name);
     if (action === 'password' || action === 'invite') userAction(action, name);

@@ -198,7 +198,7 @@ func (s *Server) registerAdminTools2() {
 		{Name: "add_source", Description: "Add a template source (a git repository): its templates join the catalog. Always needs your confirmation in the browser: a source decides what apps can run. A URL carrying credentials is refused (add it on the Hub's page).",
 			Class: ClassDestructive, Scope: ScopeAdmin, Twin: "/api/sources/add", Audit: "source.add", In: sourceArgs{},
 			Typed: nameOf,
-			Consequences: func(args json.RawMessage) []string {
+			Consequences: func(_ context.Context, args json.RawMessage) []string {
 				a, _ := decode[sourceArgs](args)
 				return []string{"Adds the template source " + a.Name + " (" + sourceDisplay(a.URL) + "): its templates join the catalog and can be installed; a later sync pulls whatever the repository then holds."}
 			},
@@ -212,7 +212,7 @@ func (s *Server) registerAdminTools2() {
 		{Name: "remove_source", Description: "Remove a template source: its enabled apps are disabled first, then its templates leave the catalog (needs your confirmation in the browser).",
 			Class: ClassDestructive, Scope: ScopeAdmin, Twin: "/api/sources/remove", Audit: "source.remove", In: sourceRefArgs{},
 			Typed: nameOf,
-			Consequences: func(args json.RawMessage) []string {
+			Consequences: func(_ context.Context, args json.RawMessage) []string {
 				n := nameOf(args)
 				return []string{"Removes the template source " + n + ": every enabled app from it is disabled (stopped) first, and its templates leave the catalog."}
 			},
@@ -245,7 +245,7 @@ func (s *Server) registerAdminTools2() {
 		{Name: "restore_instance", Description: "Restore an instance from one of its backups (a backup of its current state is taken first; its volumes, env, custom override and settings are replaced; hostnames kept). Needs your confirmation in the browser. Runs in the background: see wait_for_op.",
 			Class: ClassDestructive, Scope: ScopeAdmin, Twin: "POST /api/instances/{id}/restore", Audit: "instance.restore", In: restoreArgs{},
 			Typed: idOf,
-			Consequences: func(args json.RawMessage) []string {
+			Consequences: func(_ context.Context, args json.RawMessage) []string {
 				a, _ := decode[restoreArgs](args)
 				return []string{"Takes a backup of " + a.ID + ", then replaces its volumes, env, custom override and settings with the archive " + a.Archive + " (its hostnames are kept); an enabled instance restarts.",
 					"Whatever changed since that archive — data and settings, access settings included — is replaced (the pre-restore backup keeps it)."}
@@ -264,7 +264,7 @@ func (s *Server) registerAdminTools2() {
 		{Name: "restore_as", Description: "Restore a backup into a new instance (created stopped; its groups are created, its data and settings — access settings included — come from the archive). Needs your confirmation in the browser. Runs in the background: see wait_for_op on the new id.",
 			Class: ClassDestructive, Scope: ScopeAdmin, Twin: "POST /api/instances/restore", Audit: "instance.restore", In: restoreAsArgs{},
 			Typed: idOf,
-			Consequences: func(args json.RawMessage) []string {
+			Consequences: func(_ context.Context, args json.RawMessage) []string {
 				a, _ := decode[restoreAsArgs](args)
 				return []string{"Creates the instance " + a.ID + " from the archive " + a.Archive + ": its data, settings, sign-in policy, public access and per-person values come from the archive; its groups users_" + a.ID + " / admin_" + a.ID + " are created.",
 					"It is created stopped; enabling it later starts it with what the archive held (path settings share the archived host folders)."}
@@ -308,7 +308,7 @@ func (s *Server) registerAdminTools2() {
 		{Name: "delete_domain", Description: "Remove an enrolled domain (its records and certificate go; refused while any instance has a hostname on it). Needs your confirmation in the browser.",
 			Class: ClassDestructive, Scope: ScopeAdmin, Twin: "DELETE /api/domains/{name}", Audit: "domain.delete", In: domainArgs{},
 			Typed: func(args json.RawMessage) string { return hub.NormalizeHost(nameOf(args)) },
-			Consequences: func(args json.RawMessage) []string {
+			Consequences: func(_ context.Context, args json.RawMessage) []string {
 				return []string{"Removes the domain " + hub.NormalizeHost(nameOf(args)) + ": its DNS records and certificate are removed and no new hostname can go on it."}
 			},
 			Run: func(ctx context.Context, c *directory.Caller, args json.RawMessage) (any, error) {
@@ -352,7 +352,7 @@ func (s *Server) registerAdminTools2() {
 		{Name: "revoke_ai_access", Description: "Revoke one person's (or everyone's) AI credentials for a companion now; their AI clients lose access to it until a new credential is minted. Needs your confirmation in the browser.",
 			Class: ClassDestructive, Scope: ScopeAdmin, Twin: "POST /api/instances/{id}/ai/revoke", Audit: "ai.credential.revoke", In: revokeAIArgs{},
 			Typed: idOf,
-			Consequences: func(args json.RawMessage) []string {
+			Consequences: func(_ context.Context, args json.RawMessage) []string {
 				a, _ := decode[revokeAIArgs](args)
 				who := "everyone's"
 				if a.User != "" {
@@ -382,7 +382,7 @@ func (s *Server) registerAdminTools2() {
 		{Name: "add_model_provider", Description: "Add a model provider for the AI page (no secret: set its key with set_model_provider_secret). Always needs your confirmation in the browser: what people send on the AI page goes to it.",
 			Class: ClassDestructive, Scope: ScopeAdmin, Twin: "POST /api/ai/providers", Audit: "ai.provider.add", In: providerArgs{},
 			Typed:        nameOf,
-			Consequences: providerConsequences,
+			Consequences: noCtx(providerConsequences),
 			Run: func(ctx context.Context, c *directory.Caller, args json.RawMessage) (any, error) {
 				a, _ := decode[providerArgs](args)
 				v, err := s.addModelProvider(toolActor(ctx, c), a.model())
@@ -424,7 +424,7 @@ func (s *Server) registerAdminTools2() {
 		{Name: "delete_model_provider", Description: "Delete a model provider and its secrets (refused while an AI page uses it). Needs your confirmation in the browser.",
 			Class: ClassDestructive, Scope: ScopeAdmin, Twin: "DELETE /api/ai/providers/{name}", Audit: "ai.provider.delete", In: providerRefArgs{},
 			Typed: nameOf,
-			Consequences: func(args json.RawMessage) []string {
+			Consequences: func(_ context.Context, args json.RawMessage) []string {
 				return []string{"Deletes the model provider " + nameOf(args) + " and its stored secrets."}
 			},
 			Run: func(ctx context.Context, c *directory.Caller, args json.RawMessage) (any, error) {
@@ -473,7 +473,7 @@ func (s *Server) registerAdminTools2() {
 		{Name: "resume_user_sweep", Description: "Resume the paused Keycloak record clean-up: LLDAP's current user count becomes its new baseline (check LLDAP first: a broken LLDAP makes the clean-up remove real people's Keycloak records). Needs your confirmation in the browser.",
 			Class: ClassDestructive, Scope: ScopeAdmin, Twin: "POST /api/keycloak/user-sweep/resume", Audit: "keycloak.sweep_resume", In: noArgs{},
 			Typed: func(json.RawMessage) string { return hub.SweepResumeConfirm },
-			Consequences: func(json.RawMessage) []string {
+			Consequences: func(context.Context, json.RawMessage) []string {
 				st := s.Hub.UserSweep()
 				lines := []string{"Resumes the Keycloak record clean-up: LLDAP's current user count becomes the baseline, and Keycloak removes the records of anyone LLDAP no longer lists."}
 				if st.Reason != "" {
@@ -487,7 +487,7 @@ func (s *Server) registerAdminTools2() {
 		{Name: "remove_stale_keycloak_user", Description: "Delete the Keycloak record of a person LLDAP no longer has (refused for anyone LLDAP still lists). Needs your confirmation in the browser.",
 			Class: ClassDestructive, Scope: ScopeAdmin, Twin: "DELETE /api/directory/keycloak-stale/{username}", Audit: "keycloak.remove_stale", In: staleArgs{},
 			Typed: argReader("username"),
-			Consequences: func(args json.RawMessage) []string {
+			Consequences: func(_ context.Context, args json.RawMessage) []string {
 				return []string{"Deletes Keycloak's record of " + argField(args, "username") + " (passkeys, sessions, consents): LLDAP no longer has this person."}
 			},
 			Run: func(ctx context.Context, c *directory.Caller, args json.RawMessage) (any, error) {
@@ -576,13 +576,21 @@ func (s *Server) domainCheck(ctx context.Context, name, action string) (any, err
 	return out, nil
 }
 
-// lastAudit is the newest ok-or-not entry of action on target in the
-// Hub's audit log (nil: none in the recent entries or no log).
-func (s *Server) lastAudit(action, target string) *directory.AuditEntry {
-	l := s.Audit
-	if l == nil && s.Directory != nil {
-		l = s.Directory.Audit
+// auditLog is the Hub's audit log (nil: none).
+func (s *Server) auditLog() *directory.AuditLog {
+	if s.Audit != nil {
+		return s.Audit
 	}
+	if s.Directory != nil {
+		return s.Directory.Audit
+	}
+	return nil
+}
+
+// lastAudit is the newest ok-or-not entry of action on target (any case)
+// in the Hub's audit log (nil: none in the recent entries or no log).
+func (s *Server) lastAudit(action, target string) *directory.AuditEntry {
+	l := s.auditLog()
 	if l == nil {
 		return nil
 	}
@@ -590,10 +598,9 @@ func (s *Server) lastAudit(action, target string) *directory.AuditEntry {
 	if err != nil {
 		return nil
 	}
-	// Recent is newest first (T18: this loop used to walk it backwards,
-	// answering the oldest matching entry).
+	// Recent is newest first.
 	for i := range list {
-		if list[i].Action == action && list[i].Target == target {
+		if list[i].Action == action && strings.EqualFold(list[i].Target, target) {
 			return &list[i]
 		}
 	}

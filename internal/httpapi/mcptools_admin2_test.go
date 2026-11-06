@@ -622,14 +622,14 @@ var adminToolFixtures = []struct {
 	{"send_invite", map[string]any{"username": "erin"}},
 	{"clear_actions", map[string]any{"username": "erin"}},
 	{"require_passkey", map[string]any{"username": "erin"}},
-	{"remove_passkeys", map[string]any{"username": "erin", "invite": true}},
+	{"remove_passkeys", map[string]any{"username": "erin"}},
 	{"set_password", map[string]any{"username": "dana"}},
 	{"import_review", map[string]any{"header": []string{"username", "display_name"}, "rows": [][]string{{"erin", "Erin X"}, {"hana", "Hana"}}}},
-	{"import_apply", map[string]any{"rows": []any{map[string]any{"user": "hana", "create": true, "email": "hana@example.org", "display_name": "Hana"}}}},
+	{"import_apply", map[string]any{"rows": []any{map[string]any{"user": "erin", "display_name": "Erin Z"}}}},
 	{"audit_recent", map[string]any{"limit": 200}},
 	{"delete_group", map[string]any{"group": "eng"}},
 	{"delete_field", map[string]any{"name": "dept"}},
-	{"delete_person", map[string]any{"username": "hana"}},
+	{"delete_person", map[string]any{"username": "erin"}},
 	// At the end, over what the operations above left (fix round 1).
 	{"get_op", map[string]any{"id": "secretapp"}},
 	{"wait_for_op", map[string]any{"id": "secretapp"}},
@@ -711,6 +711,9 @@ func testToolsNotEchoed(t *testing.T) {
 	e.s.Directory.Invites = &markerInviter{}
 	const passwordMarker = "PWMARKER-tool-0123456789"
 	mustDo(t, e.hub, "root", "POST", "/api/directory/users/dana/password", `{"password":"`+passwordMarker+`"}`, 200)
+	// create_person is U (fix round 1): erin is created in the "browser",
+	// with a marker invite the tools then report on.
+	mustDo(t, e.hub, "root", "POST", "/api/directory/users", `{"username":"erin","email":"erin@example.org","display_name":"Erin"}`, 200)
 	markers := []string{dnsMarker, providerMarker, settingMarker, password, h, strings.ToLower(h), clientSecret, inviteMarker, passwordMarker, "[invite link hidden]",
 		testSecret, testMCPSecret, strings.Repeat("s", 40), "svc-password-0123456789"}
 	covered := map[string]bool{}

@@ -80,8 +80,10 @@ type Tool struct {
 	In any
 	// Typed is a D tool's typed check (the instance id, the person's or
 	// group's name, the domain); "" = the tool's name.
-	Typed        func(args json.RawMessage) string
-	Consequences func(args json.RawMessage) []string // D tools: the lines the page shows
+	Typed func(args json.RawMessage) string
+	// Consequences: D tools, the lines the page shows. ctx is the call's
+	// (callTool's per-call memo: callMemo).
+	Consequences func(ctx context.Context, args json.RawMessage) []string
 	// ClassFor decides the class per call (G37: set_public_access on,
 	// set_policy to a policy that isn't stricter, set_sign_in_mode to
 	// native; doctor_apply_fix when its plan touches data): nil = Class.
@@ -90,7 +92,7 @@ type Tool struct {
 	// ClassFor answers ClassWrite or ClassDestructive for the call's
 	// canonical arguments — anything else counts as D (fail closed); the
 	// confirmation applies when it says D.
-	ClassFor func(args json.RawMessage) ToolClass
+	ClassFor func(ctx context.Context, args json.RawMessage) ToolClass
 	// SecretForm is a U tool's Hub URL of the form, pre-filled with
 	// non-secret context. A U tool's Run runs only on a retry whose input
 	// reply is "accept" — but that reply is the client's word, not the
@@ -496,6 +498,7 @@ func (s *Server) callTool(ctx context.Context, scope string, t *mcpTool, call sd
 		s.auditToolRefusal(c, t, textNotAllowed)
 		return sdk.TextResult(textNotAllowed, true)
 	}
+	ctx = withCallMemo(ctx, c)
 	args, declared, refusal := checkArgs(t, call.Arguments)
 	if refusal != "" {
 		url := info.home
@@ -509,13 +512,13 @@ func (s *Server) callTool(ctx context.Context, scope string, t *mcpTool, call sd
 	}
 	class := t.Class
 	if t.ClassFor != nil {
-		if class = t.ClassFor(args); class != ClassWrite {
+		if class = t.ClassFor(ctx, args); class != ClassWrite {
 			class = ClassDestructive
 		}
 	}
 	switch class {
 	case ClassDestructive:
-		id, answer := s.confirmCall(c, t, info, args, call)
+		id, answer := s.confirmCall(ctx, c, t, info, args, call)
 		if answer != nil {
 			return answer
 		}
@@ -620,7 +623,7 @@ func checkArgs(t *mcpTool, raw json.RawMessage) (args, declared json.RawMessage,
 // URL elicitation gets an InputRequiredResult with the page's URL
 // elicitation, every other client the text (the Hub's MCP is stateless:
 // no elicitation/create; G17). Never form mode, never 401/403.
-func (s *Server) confirmCall(c *directory.Caller, t *mcpTool, info mcpScopeInfo, args json.RawMessage, call sdk.Call) (string, *sdk.CallToolResult) {
+func (s *Server) confirmCall(ctx context.Context, c *directory.Caller, t *mcpTool, info mcpScopeInfo, args json.RawMessage, call sdk.Call) (string, *sdk.CallToolResult) {
 	sum := sha256.Sum256(args)
 	digest := hex.EncodeToString(sum[:])
 	conf, err := s.Hub.ConsumeConfirmation(info.listener, c.User, info.resource, t.Name, digest)
@@ -646,7 +649,7 @@ func (s *Server) confirmCall(c *directory.Caller, t *mcpTool, info mcpScopeInfo,
 	}
 	conf, err = s.Hub.CreateConfirmation(c.Actor(), confirm.Request{
 		User: c.User, Client: c.Client, Resource: info.resource, Tool: t.Name, ArgsSHA256: digest, ArgsPreview: string(args),
-		Listener: info.listener, Typed: typed, Label: typed + " on " + info.label, Consequences: t.Consequences(args),
+		Listener: info.listener, Typed: typed, Label: typed + " on " + info.label, Consequences: t.Consequences(ctx, args),
 	})
 	if err != nil {
 		var se *hub.StatusError
@@ -797,4 +800,29 @@ func filesKey(paths []string) string {
 		fmt.Fprintf(&b, "%s:%d:%d:%d\n", p, fi.Size(), fi.ModTime().UnixNano(), ino)
 	}
 	return b.String()
+}
+
+type callMemoKey struct{}
+
+// callMemo is one tools/call's shared state (T18 fix round 1): the
+// caller, and the directory's Membership read once for the call's class,
+// consequences and Run (dirGuards).
+type callMemo struct {
+	c    *directory.Caller
+	once sync.Once
+	m    *directory.Membership
+}
+
+func withCallMemo(ctx context.Context, c *directory.Caller) context.Context {
+	return context.WithValue(ctx, callMemoKey{}, &callMemo{c: c})
+}
+
+func memoOf(ctx context.Context) *callMemo {
+	m, _ := ctx.Value(callMemoKey{}).(*callMemo)
+	return m
+}
+
+// noCtx adapts a consequences function that needs no call state.
+func noCtx(f func(json.RawMessage) []string) func(context.Context, json.RawMessage) []string {
+	return func(_ context.Context, args json.RawMessage) []string { return f(args) }
 }

@@ -100,7 +100,6 @@ func TestDirectoryToolsGuardrails(t *testing.T) {
 		{"set_details", map[string]any{"username": "portcullis-hub", "attrs": map[string]any{}}},
 		{"require_passkey", map[string]any{"username": "admin"}},
 		{"remove_passkeys", map[string]any{"username": "portcullis-hub"}},
-		{"send_invite", map[string]any{"username": "admin"}},
 		{"clear_actions", map[string]any{"username": "portcullis-hub"}},
 		{"add_member", map[string]any{"group": "helpers", "username": "admin"}},
 	} {
@@ -111,49 +110,80 @@ func TestDirectoryToolsGuardrails(t *testing.T) {
 	}
 }
 
-// TestCreatePersonNoInviteLink (G39, §15.10): create_person onboards by
-// invite (core is asked) but the result holds no link, url, token or
-// password — only that an invite was created and when it expires; into
-// an administrator group it says "run ./portcullis invite <user> on the
-// server" instead of the server-invite internals. send_invite, remove_passkeys
-// with an invite and import_apply's create rows drop the link too.
+// TestCreatePersonNoInviteLink (G39, fix round 1 ruling 3): no tool
+// issues an invite or a password. create_person and send_invite are U —
+// they answer the Hub's pre-filled forms (#users?create&…,
+// #users/<name>?invite), core is never asked, nobody is created; accepted,
+// they report the server-side state (exists, the newest invite in the
+// audit log, pending while no passkey and younger than 72 h), never the
+// client's word and never a link. remove_passkeys takes no invite
+// argument and answers the invite form; import_apply refuses create rows;
+// no result anywhere holds a link, a url / link / token / password key or
+// the server-invite internals.
 func TestCreatePersonNoInviteLink(t *testing.T) {
 	e, inv := directoryToolEnv(t)
-	txt, isErr, conf := e.tool(t, "create_person", map[string]any{"username": "erin", "email": "erin@example.org", "display_name": "Erin"})
-	if isErr || conf != "" {
-		t.Fatalf("create_person = %q %v (confirmation %q: no groups, W)", txt, isErr, conf)
+	args := map[string]any{"username": "erin", "email": "erin@example.org", "display_name": "Erin", "groups": []string{"helpers", "lldap_admin"}}
+	txt, isErr := resultText(e.call(t, "/mcp/admin", "root", "2025-11-25", "create_person", args, nil))
+	want := "https://hub.example.org/#users?create&display_name=Erin&email=erin%40example.org&groups=helpers%2Clldap_admin&username=erin"
+	if !isErr || !strings.Contains(txt, want) {
+		t.Errorf("create_person = %q, want the form %s", txt, want)
 	}
-	noInviteLink(t, "create_person", txt)
-	var res map[string]any
-	if err := json.Unmarshal([]byte(txt), &res); err != nil {
-		t.Fatal(err)
+	// Accepted before anything happened: nobody, no invite.
+	txt, isErr = e.accept(t, "create_person", args)
+	noInviteLink(t, "create_person (accepted)", txt)
+	if isErr || !strings.Contains(txt, `"exists":false`) || !strings.Contains(txt, `"last_invite":null`) ||
+		!strings.Contains(txt, `"invite_form":"https://hub.example.org/#users/erin?invite"`) {
+		t.Errorf("accepted create_person = %q %v", txt, isErr)
 	}
-	invRes, _ := res["invite"].(map[string]any)
-	if res["username"] != "erin" || invRes["created"] != true || invRes["expires_at"] == nil || !strings.Contains(invRes["note"].(string), "never shown to the AI") {
-		t.Errorf("create_person result = %s", txt)
+	if len(inv.users) != 0 || e.ll.HasUser("erin") {
+		t.Fatalf("the tool issued an invite %v or created erin", inv.users)
 	}
-	if len(inv.users) != 1 || inv.users[0] != "erin" || !e.ll.HasUser("erin") {
-		t.Errorf("invites %v, erin created %v", inv.users, e.ll.HasUser("erin"))
+	// The admin creates erin in the browser: now she exists, invite pending.
+	mustDo(t, e.hub, "root", "POST", "/api/directory/users", `{"username":"erin","email":"erin@example.org","display_name":"Erin"}`, 200)
+	txt, isErr = e.accept(t, "create_person", args)
+	noInviteLink(t, "create_person (after)", txt)
+	if isErr || !strings.Contains(txt, `"exists":true`) || !strings.Contains(txt, `"pending":true`) || !strings.Contains(txt, `"actor":"root"`) {
+		t.Errorf("accepted create_person after the form = %q %v", txt, isErr)
 	}
-	// Into an administrator group: D, no invite, the fixed server text.
-	txt, isErr, conf = e.tool(t, "create_person", map[string]any{"username": "olga", "email": "olga@example.org", "display_name": "Olga", "groups": []string{"lldap_admin"}})
-	if isErr || conf == "" {
-		t.Fatalf("create_person into lldap_admin = %q %v (confirmation %q)", txt, isErr, conf)
+	// send_invite: the form; accepted, the state; never an invite.
+	n := len(inv.users)
+	txt, isErr = resultText(e.call(t, "/mcp/admin", "root", "2025-11-25", "send_invite", map[string]any{"username": "erin"}, nil))
+	if !isErr || !strings.Contains(txt, "https://hub.example.org/#users/erin?invite") {
+		t.Errorf("send_invite = %q", txt)
 	}
-	noInviteLink(t, "create_person (admin)", txt)
-	if !strings.Contains(txt, `"server_invite":"run ./portcullis invite olga on the server"`) || strings.Contains(txt, `"./portcullis invite olga"`) {
-		t.Errorf("admin create_person = %s", txt)
+	txt, isErr = e.accept(t, "send_invite", map[string]any{"username": "erin"})
+	noInviteLink(t, "send_invite (accepted)", txt)
+	if isErr || !strings.Contains(txt, `"pending":true`) || len(inv.users) != n {
+		t.Errorf("accepted send_invite = %q %v (invites %v)", txt, isErr, inv.users)
 	}
-	if len(inv.users) != 1 {
-		t.Errorf("core was asked for an administrator's invite: %v", inv.users)
+	// An administrator: the server text.
+	e.ll.AddUser("olga", "olga@example.org", "Olga", "", "lldap_admin")
+	txt, _ = e.accept(t, "send_invite", map[string]any{"username": "olga"})
+	if !strings.Contains(txt, `"server_invite":"run ./portcullis invite olga on the server"`) {
+		t.Errorf("send_invite olga = %s", txt)
+	}
+	// remove_passkeys: no invite argument; the answer has the form.
+	if txt, isErr := resultText(e.call(t, "/mcp/admin", "root", "2025-11-25", "remove_passkeys", map[string]any{"username": "erin", "invite": true}, nil)); !isErr || !strings.HasPrefix(txt, textSecretArgs) {
+		t.Errorf("remove_passkeys with invite = %q %v", txt, isErr)
+	}
+	txt, isErr, _ = e.tool(t, "remove_passkeys", map[string]any{"username": "erin"})
+	noInviteLink(t, "remove_passkeys", txt)
+	if isErr || !strings.Contains(txt, `"invite_form":"https://hub.example.org/#users/erin?invite"`) || len(inv.users) != n {
+		t.Errorf("remove_passkeys = %q %v (invites %v)", txt, isErr, inv.users)
+	}
+	txt, isErr, _ = e.tool(t, "remove_passkeys", map[string]any{"username": "olga"})
+	if isErr || !strings.Contains(txt, `"server_invite":"run ./portcullis invite olga on the server"`) || strings.Contains(txt, "invite_form") {
+		t.Errorf("remove_passkeys olga = %q %v", txt, isErr)
+	}
+	// import_apply: create rows refused, nothing created.
+	txt, isErr, _ = e.tool(t, "import_apply", map[string]any{"rows": []any{map[string]any{"user": "gina", "create": true, "email": "gina@example.org", "display_name": "Gina"}}})
+	if !isErr || !strings.HasPrefix(txt, "400: ") || e.ll.HasUser("gina") || len(inv.users) != n {
+		t.Errorf("import_apply create = %q %v", txt, isErr)
 	}
 	for _, c := range []struct {
 		tool string
 		args map[string]any
 	}{
-		{"send_invite", map[string]any{"username": "erin"}},
-		{"remove_passkeys", map[string]any{"username": "erin", "invite": true}},
-		{"import_apply", map[string]any{"rows": []any{map[string]any{"user": "gina", "create": true, "email": "gina@example.org", "display_name": "Gina"}}}},
 		{"directory_overview", nil},
 		{"get_person", map[string]any{"username": "olga"}},
 	} {
@@ -163,10 +193,6 @@ func TestCreatePersonNoInviteLink(t *testing.T) {
 		}
 		noInviteLink(t, c.tool, txt)
 	}
-	if len(inv.users) != 4 {
-		t.Errorf("invites = %v, want erin, erin, erin, gina", inv.users)
-	}
-	// The overview's server invites are the fixed text too.
 	txt, _, _ = e.tool(t, "get_person", map[string]any{"username": "olga"})
 	if !strings.Contains(txt, `"server_invite":"run ./portcullis invite olga on the server"`) {
 		t.Errorf("get_person olga = %s", txt)
@@ -303,7 +329,7 @@ func TestDirectoryToolClassPerCall(t *testing.T) {
 		if tl.ClassFor == nil {
 			return tl.Class
 		}
-		return tl.ClassFor(b)
+		return tl.ClassFor(context.Background(), b)
 	}
 	rows := []struct {
 		tool string
@@ -327,8 +353,18 @@ func TestDirectoryToolClassPerCall(t *testing.T) {
 		{"add_exception", map[string]any{"group": "admin_secretapp", "user": "dana", "reason": "r", "include": true}, ClassDestructive},
 		{"remove_exception", map[string]any{"group": "helpers", "username": "dana"}, ClassWrite},
 		{"remove_exception", map[string]any{"group": "admin_secretapp", "username": "dana"}, ClassDestructive},
-		{"create_person", map[string]any{"username": "x", "email": "x@example.org", "display_name": "X"}, ClassWrite},
-		{"create_person", map[string]any{"username": "x", "email": "x@example.org", "display_name": "X", "groups": []string{"helpers"}}, ClassDestructive},
+		{"remove_member", map[string]any{"group": "helpers", "username": "dana"}, ClassWrite},
+		{"remove_member", map[string]any{"group": "lldap_admin", "username": "dana"}, ClassDestructive},
+		{"remove_member", map[string]any{"group": "hr_edit", "username": "dana"}, ClassDestructive},
+		{"update_field", map[string]any{"name": "dept", "multi": true, "values": []string{"a"}}, ClassWrite},
+		{"update_field", map[string]any{"name": "clearance", "label": "Level"}, ClassWrite},
+		{"update_field", map[string]any{"name": "clearance", "admin_only": true}, ClassWrite},
+		{"update_field", map[string]any{"name": "clearance", "admin_only": false}, ClassDestructive},
+		{"update_field", map[string]any{"name": "clearance", "kind": "list"}, ClassDestructive},
+		{"update_field", map[string]any{"name": "clearance", "values": []string{"top"}}, ClassDestructive},
+		{"update_field", map[string]any{"name": "clearance", "multi": false}, ClassDestructive},
+		{"create_instance", map[string]any{"template": "grafana", "id": "grafana-x"}, ClassWrite},
+		{"create_instance", map[string]any{"template": "nope", "id": "nope-x"}, ClassDestructive},
 		{"set_details", map[string]any{"username": "dana", "attrs": map[string]any{"dept": []string{"Eng"}}}, ClassWrite},
 		{"set_details", map[string]any{"username": "dana", "attrs": map[string]any{"clearance": []string{"top"}}}, ClassDestructive},
 		{"import_apply", map[string]any{"rows": []any{map[string]any{"user": "dana", "display_name": "D", "attrs": map[string]any{"dept": []string{"Eng"}}}}}, ClassWrite},
@@ -345,7 +381,7 @@ func TestDirectoryToolClassPerCall(t *testing.T) {
 	// The directory down: every per-call one fails closed.
 	e.s.Directory.LLDAP = brokenLLDAP{e.s.Directory.LLDAP}
 	for _, r := range rows {
-		if r.want == ClassWrite && r.tool != "create_person" {
+		if r.want == ClassWrite {
 			if got := class(r.tool, r.args); got != ClassDestructive {
 				t.Errorf("directory down: %s %v = %s, want D", r.tool, r.args, got)
 			}
@@ -417,5 +453,144 @@ func TestAuditRecentPaginated(t *testing.T) {
 		if txt, isErr, _ := e.tool(t, "audit_recent", bad); !isErr || !strings.HasPrefix(txt, "400: ") {
 			t.Errorf("audit_recent %v = %q %v", bad, txt, isErr)
 		}
+	}
+}
+
+// TestPrestagedGroupsNeedConfirmation (T18 fix round 1, item 1): an AI
+// that creates admin_<id>, puts someone in it (both W: the group guards
+// nothing yet) and then creates instance <id> would hand them the app's
+// admin rights; the third call needs a confirmation whose consequences
+// name the members — and so does enabling such an instance.
+func TestPrestagedGroupsNeedConfirmation(t *testing.T) {
+	e, _ := directoryToolEnv(t)
+	for _, c := range []struct {
+		tool string
+		args map[string]any
+	}{
+		{"create_group", map[string]any{"name": "admin_grafana-p"}},
+		{"add_member", map[string]any{"group": "admin_grafana-p", "username": "dana"}},
+	} {
+		if txt, isErr, conf := e.tool(t, c.tool, c.args); isErr || conf != "" {
+			t.Fatalf("%s = %q %v (confirmation %q)", c.tool, txt, isErr, conf)
+		}
+	}
+	txt, isErr := resultText(e.call(t, "/mcp/admin", "root", "2025-11-25", "create_instance", map[string]any{"template": "grafana", "id": "grafana-p"}, nil))
+	m := confirmTextRe.FindStringSubmatch(txt)
+	if !isErr || m == nil {
+		t.Fatalf("create_instance over a pre-staged admin group = %q, want a confirmation", txt)
+	}
+	v, err := e.s.Hub.ConfirmationPage(hub.ListenerHub, m[1], "root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(v.Consequences, " "); !strings.Contains(got, "admin_grafana-p already exists with members dana") {
+		t.Errorf("consequences %q", got)
+	}
+	if _, ok := e.s.Hub.InstanceView("grafana-p"); ok {
+		t.Errorf("the instance was created before the confirmation")
+	}
+	e.decide(t, m[1], v.Typed, true)
+	if txt, isErr := resultText(e.call(t, "/mcp/admin", "root", "2025-11-25", "create_instance", map[string]any{"template": "grafana", "id": "grafana-p"}, nil)); isErr {
+		t.Fatalf("approved create_instance = %q", txt)
+	}
+	// Enabling it: D too (its admin group has members).
+	byName := map[string]Tool{}
+	for _, tl := range e.s.tools(ScopeAdmin) {
+		byName[tl.Name] = tl
+	}
+	if c := byName["enable_instance"].ClassFor(context.Background(), json.RawMessage(`{"id":"grafana-p"}`)); c != ClassDestructive {
+		t.Errorf("enable over a pre-staged group = %s", c)
+	}
+	if got := strings.Join(byName["enable_instance"].Consequences(context.Background(), json.RawMessage(`{"id":"grafana-p"}`)), " "); !strings.Contains(got, "members dana") {
+		t.Errorf("enable consequences %q", got)
+	}
+	// Empty groups: W.
+	e.ll.RemoveMember("admin_grafana-p", "dana")
+	if c := byName["enable_instance"].ClassFor(context.Background(), json.RawMessage(`{"id":"grafana-p"}`)); c != ClassWrite {
+		t.Errorf("enable with empty groups = %s", c)
+	}
+}
+
+// TestLastAuditNewestAnyCase (T18 fix round 1, item 4): lastAudit answers
+// the newest matching entry, the target compared case-insensitively.
+func TestLastAuditNewestAnyCase(t *testing.T) {
+	e, _ := directoryToolEnv(t)
+	t0 := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	for i, target := range []string{"Dana", "dana"} {
+		if err := e.s.Audit.Append(directory.AuditEntry{Time: t0.Add(time.Duration(i) * time.Minute), Actor: []string{"old", "new"}[i], Action: "user.password", Target: target, Result: "ok"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a := e.s.lastAudit("user.password", "DANA")
+	if a == nil || a.Actor != "new" {
+		t.Errorf("lastAudit = %+v, want the newer entry", a)
+	}
+	if e.s.lastAudit("user.password", "nobody") != nil {
+		t.Errorf("lastAudit found a missing target")
+	}
+}
+
+// TestDirectoryConsequencesNamePeople (T18 fix round 1, item 6): a rule
+// change on a guarding group names who the rule matches now and the
+// group's members; set_permission names the group's members.
+func TestDirectoryConsequencesNamePeople(t *testing.T) {
+	e, _ := directoryToolEnv(t)
+	e.ll.AddGroup("hr_edit", "dana")
+	e.ll.AddGroup("admin_secretapp")
+	mustDo(t, e.hub, "root", "POST", "/api/directory/fields", `{"name":"clearance","label":"Clearance","kind":"text","admin_only":true}`, 200)
+	mustDo(t, e.hub, "root", "PUT", "/api/directory/users/root/details", `{"attrs":{"clearance":["secret"]}}`, 200)
+	mustDo(t, e.hub, "root", "POST", "/api/directory/groups/admin_secretapp/convert", `{"rule":"clearance = \"top\"","preview":{"matching":[],"kept_as_exception":[],"joining":[],"expiry_dropped":[]}}`, 200)
+	page := func(tool string, args map[string]any) string {
+		t.Helper()
+		txt, _ := resultText(e.call(t, "/mcp/admin", "root", "2025-11-25", tool, args, nil))
+		m := confirmTextRe.FindStringSubmatch(txt)
+		if m == nil {
+			t.Fatalf("%s = %q, want a confirmation", tool, txt)
+		}
+		v, err := e.s.Hub.ConfirmationPage(hub.ListenerHub, m[1], "root")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.Join(v.Consequences, " ")
+	}
+	if got := page("set_group_rule", map[string]any{"group": "admin_secretapp", "rule": `clearance = "secret"`}); !strings.Contains(got, "The rule matches now: root.") || !strings.Contains(got, "Members now: nobody.") {
+		t.Errorf("set_group_rule consequences %q", got)
+	}
+	if got := page("set_permission", map[string]any{"perm": "invite", "group": "hr_edit"}); !strings.Contains(got, "Members now: dana.") {
+		t.Errorf("set_permission consequences %q", got)
+	}
+}
+
+// countingLLDAP counts ListGroups (every Membership read makes one).
+type countingLLDAP struct {
+	directory.Directory
+	mu sync.Mutex
+	n  int
+}
+
+func (c *countingLLDAP) ListGroups(ctx context.Context) ([]lldap.Group, error) {
+	c.mu.Lock()
+	c.n++
+	c.mu.Unlock()
+	return c.Directory.ListGroups(ctx)
+}
+
+// TestGuardsReadOncePerCall (T18 fix round 1, item 5): one tools/call
+// reads Membership once for its class, consequences and Run.
+func TestGuardsReadOncePerCall(t *testing.T) {
+	e, _ := directoryToolEnv(t)
+	cl := &countingLLDAP{Directory: e.s.Directory.LLDAP}
+	e.s.Directory.LLDAP = cl
+	ctx := withCallMemo(context.Background(), nil)
+	for range 3 {
+		if e.s.guards(ctx) == nil {
+			t.Fatal("no guards")
+		}
+	}
+	if cl.n != 1 {
+		t.Errorf("Membership read %d times in one call", cl.n)
+	}
+	if e.s.guards(context.Background()); cl.n != 2 {
+		t.Errorf("without a memo: %d reads", cl.n)
 	}
 }

@@ -98,7 +98,7 @@ var accessWidening = map[string]string{
 	"set_public_access":  "D when it turns public access on (or widens it to all)",
 	"save_settings":      "D when it sets ports (host ports published, <KEY>_BIND changed)",
 	"set_local_networks": "D unless use_defaults or a list within the current one",
-	"enable_instance":    "D when the instance starts with public access on or the app's own login only (fix round 1)",
+	"enable_instance":    "D when the instance starts with public access on or the app's own login only (fix round 1), or its groups already have members (T18 fix round 1)",
 	// Task 17b.
 	"set_ai_support":      "D when it switches a companion on",
 	"set_ai_mode":         "D unless read_only",
@@ -106,7 +106,9 @@ var accessWidening = map[string]string{
 	"save_hub_settings":   "D when it turns AI or the people MCP on, changes clients or origins, or raises a limit or connection length",
 	"set_default_policy":  "D unless the new default is policy.Stricter than the current one",
 	// Task 18 (G37 ruling 2; the directory's Membership.Guarding).
-	"create_person":     "D with groups",
+	"create_instance":   "D when one of its groups already exists with members, or the template / directory can't be read (T18 fix round 1)",
+	"remove_member":     "D from an administrator, permission or guarding group (T18 fix round 1 ruling)",
+	"update_field":      "D on a guarded field when it changes kind, values, multi or turns admin-only off (T18 fix round 1)",
 	"add_member":        "D into an administrator, permission or guarding group (or one the directory can't place)",
 	"set_member_expiry": "D on an administrator, permission or guarding group",
 	"set_group_rule":    "D on a guarding group",
@@ -222,14 +224,15 @@ func TestToolParity(t *testing.T) {
 		"set_ai_support", "set_ai_mode", "save_model_provider", "save_hub_settings", "set_default_policy",
 		// Task 18 (§15.10, G37).
 		"delete_person", "delete_group", "delete_field", "require_passkey", "remove_passkeys", "set_permission",
-		"create_person", "add_member", "set_member_expiry", "set_group_rule", "convert_group", "add_exception",
+		"create_instance", "remove_member", "update_field", "add_member", "set_member_expiry", "set_group_rule", "convert_group", "add_exception",
 		"remove_exception", "set_details", "import_apply"} {
 		if byName[n].Class != ClassDestructive {
 			t.Errorf("tool %s: class %q, want D", n, byName[n].Class)
 		}
 	}
 	// U tools (Task 17b): domain tokens and provider secrets.
-	for _, n := range []string{"set_secret_setting", "enroll_domain", "replace_domain_token", "set_model_provider_secret", "set_password"} {
+	for _, n := range []string{"set_secret_setting", "enroll_domain", "replace_domain_token", "set_model_provider_secret", "set_password",
+		"create_person", "send_invite"} {
 		if byName[n].Class != ClassSecret {
 			t.Errorf("tool %s: class %q, want U", n, byName[n].Class)
 		}
@@ -237,8 +240,7 @@ func TestToolParity(t *testing.T) {
 	// W (Task 17b): a backup can't widen access (the archive stays in the
 	// Hub's data; the instance comes back as it was); a sync pulls the
 	// sources the admin added.
-	for _, n := range []string{"backup_instance", "sync_sources", "update_person", "send_invite", "clear_actions", "create_group",
-		"remove_member", "create_field", "update_field"} {
+	for _, n := range []string{"backup_instance", "sync_sources", "update_person", "clear_actions", "create_group", "create_field"} {
 		if byName[n].Class != ClassWrite {
 			t.Errorf("tool %s: class %q, want W", n, byName[n].Class)
 		}

@@ -443,7 +443,7 @@ func TestMembershipGuarding(t *testing.T) {
 	if _, ok := m.Guarding["editors"]; ok {
 		t.Errorf("editors is no guarding group: %v", m.Guarding)
 	}
-	if m.GuardedFields["clearance"] != "admin_immich" || m.GuardedFields["office_location"] != "" {
+	if strings.Join(m.GuardedFields["clearance"], ",") != "admin_immich" || m.GuardedFields["office_location"] != nil {
 		t.Errorf("guarded fields = %v", m.GuardedFields)
 	}
 	if !m.Administrators["root"] || !m.Administrators["ops"] || m.Administrators["alice"] || m.Administrators["portcullis-hub"] {
