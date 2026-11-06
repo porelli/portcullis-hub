@@ -42,6 +42,10 @@
     // The popup handed its result to My apps; close() may be refused.
     document.getElementById('people').textContent = 'Signed in. You can close this window.';
   } else {
+    // #invite?username=…&email=…&display_name=… (the Portcullis MCP's
+    // invite_person form): the invite dialog, pre-filled; the delegate
+    // creates the person here, where the one-time link is shown.
+    const inv = /^#invite(?:\?(.*))?$/.exec(location.hash);
     PortcullisDirectory.show(document.getElementById('people'), {
       listener: 'people',
       hashTabs: true,
@@ -51,6 +55,7 @@
         document.getElementById('who').hidden = !name;
       },
     });
+    if (inv) PortcullisDirectory.openAt('', new URLSearchParams(inv[1] || ''));
   }
 </script>
 </body>

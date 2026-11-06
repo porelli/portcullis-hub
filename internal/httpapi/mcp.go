@@ -125,22 +125,22 @@ const maxToolResult = 1 << 20
 
 // The texts of §15.6 / §15.10.
 const (
-	textSecretArgs     = "secrets are never passed through the AI; use "
-	textConfirmPrefix  = "This needs your confirmation in your browser: open "
-	textConfirmSuffix  = ", then ask me to try again."
-	textStillWaiting   = "Still waiting for your confirmation in your browser"
-	textDeclined       = "You declined this in your browser"
-	textCancelled      = "You cancelled the confirmation; nothing was done"
-	textTooMany        = "Too many confirmations requested; try again later"
-	textTooLong        = "these arguments are too long to confirm safely"
-	textAdminsOnly     = "admins only"
-	textNotAllowed     = "not allowed: you don't have the permission this needs"
-	textResultHidden   = "result hidden: secrets couldn't be read"
-	textNoDirectory    = "Users & Groups is unavailable right now; try again"
-	textInternal       = "internal error"
-	textClipped        = "\n[clipped: the result is over 1 MiB]"
-	confirmInputKey    = "portcullis_confirmation"
-	secretFormInputKey = "portcullis_secret_form"
+	textSecretArgs       = "secrets are never passed through the AI; use "
+	textConfirmPrefix    = "This needs your confirmation in your browser: open "
+	textConfirmSuffix    = ", then ask me to try again."
+	textStillWaiting     = "Still waiting for your confirmation in your browser"
+	textDeclined         = "You declined this in your browser"
+	textCancelled        = "You cancelled the confirmation; nothing was done"
+	textTooMany          = "Too many confirmations requested; try again later"
+	textTooLong          = "these arguments are too long to confirm safely"
+	textAdminsOnly       = "admins only"
+	textNotAllowedPrefix = "not allowed: needs "
+	textResultHidden     = "result hidden: secrets couldn't be read"
+	textNoDirectory      = "Users & Groups is unavailable right now; try again"
+	textInternal         = "internal error"
+	textClipped          = "\n[clipped: the result is over 1 MiB]"
+	confirmInputKey      = "portcullis_confirmation"
+	secretFormInputKey   = "portcullis_secret_form"
 )
 
 // mcpTool is a registered tool with what registration derived.
@@ -338,6 +338,7 @@ func (s *Server) registerMCPTools() {
 	s.registerAdminTools()
 	s.registerAdminTools2()
 	s.registerDirectoryTools()
+	s.registerPeopleTools()
 }
 
 // mcpScopeOf names the scope's resource URL, listener, page base and
@@ -495,8 +496,11 @@ func (s *Server) callTool(ctx context.Context, scope string, t *mcpTool, call sd
 		s.auditToolRefusal(c, t, textAdminsOnly)
 		return sdk.TextResult(textAdminsOnly, true)
 	case t.Perm != "" && !c.Admin && !c.Perms[t.Perm]:
-		s.auditToolRefusal(c, t, textNotAllowed)
-		return sdk.TextResult(textNotAllowed, true)
+		// The twin's own refusal (directory: 403 "not allowed: needs
+		// <perm>"), status-prefixed like every tool error.
+		why := textNotAllowedPrefix + t.Perm
+		s.auditToolRefusal(c, t, why)
+		return sdk.TextResult("403: "+why, true)
 	}
 	ctx = withCallMemo(ctx, c)
 	args, declared, refusal := checkArgs(t, call.Arguments)
@@ -551,10 +555,11 @@ func (s *Server) callTool(ctx context.Context, scope string, t *mcpTool, call sd
 	return toolResult(v, redact)
 }
 
-// auditToolRefusal records a refusal before Run of a W or D tool under
-// its twin's audit action, attributed via ai and the client.
+// auditToolRefusal records a refusal before Run of a tool with an audit
+// action (every W and D tool; a delegate U tool such as invite_person)
+// under its twin's action, attributed via ai and the client.
 func (s *Server) auditToolRefusal(c *directory.Caller, t *mcpTool, why string) {
-	if (t.Class != ClassWrite && t.Class != ClassDestructive) || s.Audit == nil {
+	if t.Audit == "" || s.Audit == nil {
 		return
 	}
 	a := c.Actor()
