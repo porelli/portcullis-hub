@@ -422,8 +422,10 @@ func (h *Hub) enableInner(id string, restoring bool) (rolledBack bool, err error
 		return false, err
 	}
 	// The template's starting per-person rows (after EnableAs created
-	// the instance's missing groups).
+	// the instance's missing groups), and an AI page's default provider
+	// selection when it never chose (Task 23).
 	h.seedSettingsLocked(&tmpl)
+	h.seedAIProvidersLocked(&tmpl)
 	if err := h.generateAppEnvLocked(&tmpl, members); err != nil {
 		h.mu.Unlock()
 		return false, statusErr(500, "env setup failed: %v", err)
@@ -445,7 +447,15 @@ func (h *Hub) enableInner(id string, restoring bool) (rolledBack bool, err error
 	// Phase 2 (no mu): network / docker work that may take minutes.
 	if h.idp != nil {
 		for _, c := range tmpl.Manifest.Clients {
-			err := h.idp.RegisterClient(context.Background(), h.clientSpec(&tmpl, c, acr))
+			var err error
+			if c.AIClient {
+				// The AI page's MCP client goes through the AI client path
+				// (G10): never RegisterClient. A failure leaves it unhealthy
+				// (out of mcp-gate.json's clients), retried by every pass.
+				err = h.ensureInstanceAIClient(context.Background(), &tmpl)
+			} else {
+				err = h.idp.RegisterClient(context.Background(), h.clientSpec(&tmpl, c, acr))
+			}
 			var conflict *keycloak.ConflictError
 			switch {
 			case errors.As(err, &conflict):

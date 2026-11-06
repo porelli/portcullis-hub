@@ -54,7 +54,7 @@ const (
 	providerUsage = `{"name", "label", "kind", "instance", "base_url", "region", "instance_name", "api_version", ` +
 		`"deployments": {"<deployment>": "<model>"}, "models": {"fetch": bool, "list": ["<model>", ...]}, "credentials": "admin"|"per_person"} (no secret fields)`
 	providerSecretUsage = `{"value": "<secret>"} or {"clear": true}`
-	instanceAIUsage     = `{"companions": {"<name>": {"enabled": bool, "mode": "read_only"|"read_write"}}}`
+	instanceAIUsage     = `{"companions": {"<name>": {"enabled": bool, "mode": "read_only"|"read_write"}}} or, for an AI page, {"providers": ["<provider>", ...]}`
 	revokeAIUsage       = `{"companion": "<name>", "user": "<username>"} (user omitted = everyone)`
 )
 
@@ -104,9 +104,9 @@ func (s *Server) handleInstanceAI(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleUpdateInstanceAI switches companions and modes (the Hub audits
-// ai.enable / ai.disable / ai.mode with the request's actor). The
-// provider selection (ai.chat) is Task 23's: "providers" is an unknown
-// field until then.
+// ai.enable / ai.disable / ai.mode with the request's actor), or sets an
+// AI page's model provider selection ("providers", ai.chat templates
+// only; audited ai.providers; Task 23).
 func (s *Server) handleUpdateInstanceAI(w http.ResponseWriter, r *http.Request) {
 	if !s.folderAdmin(w, r) {
 		return
@@ -186,13 +186,14 @@ func (s *Server) handleUpdateModelProvider(w http.ResponseWriter, r *http.Reques
 	if !decodeAPI(w, r, &p, providerUsage) {
 		return
 	}
-	v, err := s.updateModelProvider(requestActor(r), r.PathValue("name"), p)
+	v, restarts, err := s.updateModelProvider(requestActor(r), r.PathValue("name"), p)
 	if err != nil {
 		writeAPIErr(w, err)
 		return
 	}
 	noStore(w)
-	writeJSON(w, map[string]any{"provider": v})
+	// restarts: the AI pages re-delivered and restarted (§15.11).
+	writeJSON(w, map[string]any{"provider": v, "restarts": restarts})
 }
 
 func (s *Server) handleDeleteModelProvider(w http.ResponseWriter, r *http.Request) {
@@ -228,8 +229,9 @@ func (s *Server) handleProviderSecret(w http.ResponseWriter, r *http.Request) {
 	}()
 	name, field := r.PathValue("name"), r.PathValue("field")
 	var (
-		v   hub.SecretView
-		err error
+		v        hub.SecretView
+		restarts []string
+		err      error
 	)
 	switch {
 	case b.Value != nil && b.Clear == nil:
@@ -238,9 +240,9 @@ func (s *Server) handleProviderSecret(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusBadRequest, "body must be "+providerSecretUsage)
 			return
 		}
-		v, err = s.Hub.SetProviderSecret(name, field, val, requestActor(r))
+		v, restarts, err = s.Hub.SetProviderSecret(name, field, val, requestActor(r))
 	case b.Value == nil && b.Clear != nil && *b.Clear:
-		v, err = s.Hub.ClearProviderSecret(name, field, requestActor(r))
+		v, restarts, err = s.Hub.ClearProviderSecret(name, field, requestActor(r))
 	default:
 		writeJSONError(w, http.StatusBadRequest, "body must be "+providerSecretUsage)
 		return
@@ -250,7 +252,14 @@ func (s *Server) handleProviderSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	noStore(w)
-	writeJSON(w, v)
+	// {set, updated_at} plus the AI pages it restarted (Task 23).
+	writeJSON(w, providerSecretAnswer{SecretView: v, Restarts: restarts})
+}
+
+// providerSecretAnswer is the secret route's answer.
+type providerSecretAnswer struct {
+	hub.SecretView
+	Restarts []string `json:"restarts"`
 }
 
 // rawJSONString is the bytes of the JSON string raw (ok false: not a
@@ -378,7 +387,7 @@ func (s *Server) addModelProvider(a directory.Actor, p state.ModelProvider) (hub
 	return s.Hub.AddModelProvider(p, a)
 }
 
-func (s *Server) updateModelProvider(a directory.Actor, name string, p state.ModelProvider) (hub.ProviderView, error) {
+func (s *Server) updateModelProvider(a directory.Actor, name string, p state.ModelProvider) (hub.ProviderView, []string, error) {
 	s.rec("UpdateModelProvider", name, p)
 	return s.Hub.UpdateModelProvider(name, p, a)
 }

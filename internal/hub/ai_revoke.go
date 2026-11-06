@@ -1296,10 +1296,9 @@ func (h *Hub) aiClientIDsLocked() []string {
 	}
 	for i := range h.instances {
 		t := &h.instances[i]
-		for _, c := range t.Manifest.Clients {
-			if c.AIClient {
-				out = append(out, t.InstanceClientID(c.ClientID))
-			}
+		// An instance view's client ids are already the instance's.
+		if c := instanceAIClient(t); c != nil {
+			out = append(out, c.ClientID)
 		}
 	}
 	return sortedSet(out)

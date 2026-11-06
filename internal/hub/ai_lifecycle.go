@@ -155,14 +155,22 @@ func (h *Hub) restoredAILocked(t *templates.Template, a *aiArchive, aErr error, 
 			}
 			next.Companions[name] = s
 		}
-		for _, p := range a.Providers {
-			if t.Manifest.AI == nil || t.Manifest.AI.Chat == nil || h.providerIndexLocked(p) < 0 {
+		// The selection passes SetAIProviders' checks one provider at a
+		// time (Task 23): unknown, an undeclared kind, a second of a "one"
+		// kind — each dropped with a warning, never a refused restore.
+		for _, p := range slices.Sorted(slices.Values(a.Providers)) {
+			if slices.Contains(next.Providers, p) {
+				continue
+			}
+			if chatOf(t) == nil || h.providerIndexLocked(p) < 0 {
 				warnings = append(warnings, fmt.Sprintf("model provider %s of the archive doesn't exist here (or %s is no AI page): dropped from the selection", clipQuoted(p), t.TemplateID))
 				continue
 			}
-			if !slices.Contains(next.Providers, p) {
-				next.Providers = append(next.Providers, p)
+			if _, err := h.checkSelectionLocked(t, append(slices.Clone(next.Providers), p)); err != nil {
+				warnings = append(warnings, fmt.Sprintf("model provider %s of the archive dropped from the selection: %v", p, err))
+				continue
 			}
+			next.Providers = append(next.Providers, p)
 		}
 	}
 	return next, a != nil || len(next.Companions) > 0, warnings

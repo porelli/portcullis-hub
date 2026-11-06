@@ -448,6 +448,11 @@ func TestAdminToolsSameAsHTTP(t *testing.T) {
 			method: "PUT", path: "/api/ai/providers/ollama", body: strings.Replace(ollamaBody, `"llama3.3:70b"`, `"qwen3"`, 1)},
 		{tool: "save_model_provider", args: ollamaArgs(map[string]any{"base_url": "http://gpu2.lan:11434/v1"}),
 			method: "PUT", path: "/api/ai/providers/ollama", body: strings.Replace(ollamaBody, "gpu.lan", "gpu2.lan", 1)},
+		// Task 23: an AI page's selection — adding is D, emptying W.
+		{tool: "set_ai_providers", args: map[string]any{"id": "ai-chat", "providers": []string{"ollama"}},
+			method: "PUT", path: "/api/instances/ai-chat/ai", body: `{"providers":["ollama"]}`},
+		{tool: "set_ai_providers", args: map[string]any{"id": "ai-chat", "providers": []string{}},
+			method: "PUT", path: "/api/instances/ai-chat/ai", body: `{"providers":[]}`},
 		{tool: "delete_model_provider", args: map[string]any{"name": "ollama"},
 			method: "DELETE", path: "/api/ai/providers/ollama", body: ``},
 		{tool: "save_hub_settings", args: map[string]any{"limits": map[string]any{"resource_rpm": 100}},

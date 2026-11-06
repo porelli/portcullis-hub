@@ -130,9 +130,12 @@ type CompanionUpdate struct {
 	Mode    *string `json:"mode"`
 }
 
-// InstanceAIUpdate is PUT /api/instances/{id}/ai.
+// InstanceAIUpdate is PUT /api/instances/{id}/ai: companions (ai.mcp
+// templates) or, for an AI page (ai.chat), its model provider selection
+// (Task 23; nil = unchanged).
 type InstanceAIUpdate struct {
 	Companions map[string]CompanionUpdate `json:"companions"`
+	Providers  *[]string                  `json:"providers"`
 }
 
 // InstanceAIView is the instance's AI tab (GET /api/instances/{id}/ai).
@@ -145,6 +148,9 @@ type InstanceAIView struct {
 	Companions []CompanionView `json:"companions"`
 	// Providers: an ai.chat instance's provider selection (Task 23).
 	Providers []string `json:"providers"`
+	// ProviderKinds: an AI page's provider_kinds (kind → one|many; the
+	// tab's selection; null for any other template).
+	ProviderKinds map[string]string `json:"provider_kinds,omitempty"`
 }
 
 // CompanionView is one companion on the AI tab.
@@ -249,6 +255,22 @@ func (h *Hub) UpdateInstanceAI(ctx context.Context, id string, u InstanceAIUpdat
 }
 
 func (h *Hub) updateInstanceAI(ctx context.Context, id string, u InstanceAIUpdate, actor directory.Actor, offDetail string) (res *InstanceAIResult, retErr error) {
+	if u.Providers != nil {
+		// An AI page has no companions (ai.chat only with ai.unsupported):
+		// one part per request.
+		if len(u.Companions) > 0 {
+			return nil, statusErr(http.StatusBadRequest, "give companions or providers, not both")
+		}
+		restarts, err := h.setAIProviders(ctx, id, *u.Providers, actor)
+		if err != nil {
+			return nil, err
+		}
+		v, err := h.InstanceAI(id)
+		if err != nil {
+			return nil, err
+		}
+		return &InstanceAIResult{InstanceAIView: v, Restarts: restarts, Warnings: []string{}}, nil
+	}
 	var changes []aiChange
 	audited := false
 	auditAll := func(err error) {
@@ -278,7 +300,7 @@ func (h *Hub) updateInstanceAI(ctx context.Context, id string, u InstanceAIUpdat
 		return nil, err
 	}
 	if len(u.Companions) == 0 {
-		return nil, statusErr(http.StatusBadRequest, "nothing to change: give companions")
+		return nil, statusErr(http.StatusBadRequest, "nothing to change: give companions (or providers, for an AI page)")
 	}
 	if h.Template(id) == nil {
 		return nil, ErrNotFound
@@ -1265,6 +1287,10 @@ func (h *Hub) InstanceAI(id string) (*InstanceAIView, error) {
 		Companions: []CompanionView{}, Providers: slices.Clone(h.st.AIInstances[id].Providers)}
 	if v.Providers == nil {
 		v.Providers = []string{}
+	}
+	slices.Sort(v.Providers)
+	if ch := chatOf(t); ch != nil {
+		v.ProviderKinds = maps.Clone(ch.ProviderKinds)
 	}
 	if a.Unsupported == "" {
 		_, v.Refused = h.aiRefusalLocked(t)

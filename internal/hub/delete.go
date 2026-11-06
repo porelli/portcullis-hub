@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 
@@ -78,6 +79,16 @@ func (h *Hub) deleteInstance(id, confirm string, actor directory.Actor, ready fu
 	h.mu.RUnlock()
 	if !ok {
 		return res, statusErr(404, "instance not found: %s", id)
+	}
+	// A model provider pointing at it (a litellm provider's instance,
+	// §15.12) would point nowhere: refused until it is deleted or
+	// repointed (a delete in progress continues: nothing can point at a
+	// deleting instance, checkProviderLocked refuses it).
+	h.mu.RLock()
+	pointing := h.providersAtInstanceLocked(id)
+	h.mu.RUnlock()
+	if len(pointing) > 0 && tg.entry.State != state.InstanceDeleting {
+		return res, statusErr(409, "model provider %s uses instance %s: delete it or point it at another instance in Settings → AI first", strings.Join(pointing, ", "), id)
 	}
 	h.mu.RLock()
 	groupsAPI := h.groups
@@ -326,7 +337,13 @@ func (h *Hub) deleteSteps(id string, actor directory.Actor, res *DeleteResult) e
 	// deliverLock holder ever waits for lockApp).
 	dl := h.deliverLock(id)
 	dl.Lock()
-	err := h.removeInstanceClaims(ctx, h.idp, id, clients, h.instanceClaimAttrs(tg.view, id), res)
+	// The AI page's ai_client carries no setting claims (G10).
+	claimClients := clients
+	if tg.view != nil {
+		ai := instanceAIClientIDs(tg.view)
+		claimClients = slices.DeleteFunc(slices.Clone(clients), func(c string) bool { return ai[c] })
+	}
+	err := h.removeInstanceClaims(ctx, h.idp, id, claimClients, h.instanceClaimAttrs(tg.view, id), res)
 	dl.Unlock()
 	if err != nil {
 		return fmt.Errorf("setting claims: %w", err)
@@ -358,6 +375,8 @@ func (h *Hub) deleteSteps(id string, actor directory.Actor, res *DeleteResult) e
 			case err != nil:
 				return fmt.Errorf("deleting Keycloak client %s: %w", c, err)
 			}
+			// An ai_client's health goes with it (Task 23).
+			h.forgetAIClientHealth(c)
 		}
 		// Every host's callback (only extra-domain ones exist; removing
 		// an absent URI changes nothing).

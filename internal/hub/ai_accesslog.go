@@ -231,10 +231,8 @@ func (h *Hub) aiClientLabel(id string) string {
 	defer h.mu.RUnlock()
 	for i := range h.instances {
 		t := &h.instances[i]
-		for _, c := range t.Manifest.Clients {
-			if c.AIClient && t.InstanceClientID(c.ClientID) == id {
-				return instanceName(t)
-			}
+		if c := instanceAIClient(t); c != nil && c.ClientID == id {
+			return instanceName(t)
 		}
 	}
 	return id

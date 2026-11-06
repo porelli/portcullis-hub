@@ -1153,7 +1153,7 @@ func seedAIAdmin(t *testing.T, h *hub.Hub) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := h.SetProviderSecret("claude", "key", []byte("sk-ant-HARNESS-NEVER-SHOWN"), root); err != nil {
+	if _, _, err := h.SetProviderSecret("claude", "key", []byte("sk-ant-HARNESS-NEVER-SHOWN"), root); err != nil {
 		t.Fatal(err)
 	}
 	for _, id := range []string{"aiapp-off", "aiapp-mtls"} {

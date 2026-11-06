@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -606,8 +607,16 @@ func (h *Hub) SetHosts(instanceID string, hosts map[string]string, actor directo
 
 	runtime = h.runtimeCopy()
 	h.mu.Lock()
+	// AI pages whose litellm provider points at this instance render its
+	// new host (Task 23): re-delivered and restarted after the commit.
+	pagesBefore := h.aiPageDigestsLocked()
 	view, keep, saveErr, err := h.commitHostsLocked(ch, runtime)
+	var aiPages []string
+	if err == nil {
+		aiPages = slices.DeleteFunc(h.aiPageChangesLocked(pagesBefore), func(p string) bool { return p == instanceID })
+	}
 	h.mu.Unlock()
+	defer h.restartAIPages(aiPages)
 	if err != nil {
 		var se *StatusError
 		lostRace := errors.As(err, &se) && se.Status < 500
@@ -622,6 +631,17 @@ func (h *Hub) SetHosts(instanceID string, hosts map[string]string, actor directo
 	}
 
 	scopeUnlock()
+	// An AI page's ai_client: UpdateClientHosts moved its redirect URIs;
+	// EnsureAIClient re-asserts them exactly (T10 carry), in the
+	// background (it takes aiKCMu; the pass retries a failure).
+	if ch.enabled && instanceAIClient(&view) != nil {
+		v := view
+		h.goBackground(func() {
+			if err := h.ensureInstanceAIClient(context.Background(), &v); err != nil {
+				log.Printf("instance %s: re-asserting its AI client after the hostname change: %v", instanceID, err)
+			}
+		})
+	}
 	// Committed: from here on, report, never undo.
 	var errs []error
 	if saveErr != nil {

@@ -324,6 +324,7 @@ func (h *Hub) CreateInstance(templateID, id string, hosts map[string]string) err
 	h.rebuildLocked()
 	if v := h.findLocked(id); v != nil {
 		h.seedSettingsLocked(v)
+		h.seedAIProvidersLocked(v)
 	}
 	h.saveLocked()
 	log.Printf("instance %s of %s created (hosts %v)", id, templateID, view.Hosts)

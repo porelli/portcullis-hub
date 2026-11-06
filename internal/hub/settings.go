@@ -1127,6 +1127,9 @@ func (h *Hub) saveSettings(t *templates.Template, u SettingsUpdate, parsed *pars
 	if policyChanged && h.idp != nil {
 		acr := policy.ACR(effective)
 		for _, c := range t.Manifest.Clients {
+			if c.AIClient {
+				continue // EnsureAIClient's: its ACR is always hwk (G10)
+			}
 			if err := h.idp.UpdateClientACR(context.Background(), h.clientSpec(t, c, acr)); err != nil {
 				log.Printf("auth-policy: keycloak client %s update failed: %v", c.ClientID, err)
 			}
@@ -1589,6 +1592,9 @@ func (h *Hub) applyDefaultPolicy() {
 	for _, j := range jobs {
 		if h.idp != nil {
 			for _, c := range j.t.Manifest.Clients {
+				if c.AIClient {
+					continue // EnsureAIClient's: its ACR is always hwk (G10)
+				}
 				if err := h.idp.UpdateClientACR(context.Background(), h.clientSpec(&j.t, c, j.acr)); err != nil {
 					log.Printf("default-policy: keycloak client %s update failed: %v", c.ClientID, err)
 				}

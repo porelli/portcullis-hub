@@ -29,8 +29,9 @@ import (
 // unticked client is deleted when it is tagged portcullis-ai; an untagged
 // or foreign one is a conflict, left alone, logged and unhealthy. The
 // master switch off keeps the clients and scopes (the gate file says
-// enabled: false). ai_client clients (Task 23's) are never touched here,
-// and their health entries are kept. Never under mu.
+// enabled: false). Every enabled AI page's ai_client (Task 23) is
+// re-asserted in the same pass (EnsureAIClient, its instance's owner tag,
+// mcp:all only) and its health merged. Never under mu.
 
 // aiClientPass is one pass: syncAIClients, then the gate file rewritten
 // when health changed. Errors are logged once per distinct text (inside)
@@ -54,6 +55,7 @@ func (h *Hub) syncAIClients(ctx context.Context) (changed bool, err error) {
 	h.mu.RLock()
 	a := h.st.AI
 	plan := h.aiScopePlanLocked()
+	pages := h.instanceAIClientWantsLocked()
 	h.mu.RUnlock()
 
 	if kc == nil {
@@ -102,6 +104,26 @@ func (h *Hub) syncAIClients(ctx context.Context) (changed bool, err error) {
 			health[w.id] = false
 		}
 		h.logAIClientErr(w.id, cerr)
+		if cerr != nil {
+			errs = append(errs, cerr)
+		}
+	}
+	// Every enabled AI page's ai_client (Task 23, G10): re-asserted like
+	// the Hub's three while the master switch is on (mcp:all is among the
+	// scopes ensured above); off, kept as it is and unhealthy (not
+	// listed). Health merged per id, never replacing the map.
+	for _, w := range pages {
+		id := w.c.ClientID
+		if !a.Enabled {
+			health[id] = false
+			continue
+		}
+		cerr := kc.EnsureAIClient(ctx, h.instanceAIClientSpec(&w.t, w.c, a))
+		health[id] = cerr == nil
+		if cerr != nil {
+			cerr = fmt.Errorf("Keycloak: AI client %s of %s: %w", id, w.t.ID, cerr)
+		}
+		h.logAIClientErr(id, cerr)
 		if cerr != nil {
 			errs = append(errs, cerr)
 		}

@@ -108,11 +108,14 @@ func ProviderVar(name, field string) string {
 }
 
 // ProviderUse is one AI page instance that selects a provider: its access
-// group and how many people it reaches (nil: the directory is down).
+// group, how many people it reaches (nil: the directory is down) and
+// whether a change of the provider restarts it (enabled: Settings → AI's
+// save preview).
 type ProviderUse struct {
 	Instance string `json:"instance"`
 	Group    string `json:"group"`
 	People   *int   `json:"people"`
+	Restarts bool   `json:"restarts"`
 }
 
 // ProviderView is a provider as the API shows it: the definition (a
@@ -264,7 +267,7 @@ func (h *Hub) providerViewLocked(p state.ModelProvider, m *directory.Membership)
 		v.Secrets[f] = sv
 	}
 	for _, id := range h.selectingLocked(p.Name) {
-		u := ProviderUse{Instance: id}
+		u := ProviderUse{Instance: id, Restarts: h.st.IsEnabled(id) && !h.instanceBusyLocked(id)}
 		if t := h.findLocked(id); t != nil {
 			u.Group = accessGroupOf(t)
 			if m != nil {
@@ -321,24 +324,31 @@ func cloneProvider(p state.ModelProvider) state.ModelProvider {
 // name or a provider variable another provider already has. Audited
 // ai.provider.add.
 func (h *Hub) AddModelProvider(p state.ModelProvider, actor directory.Actor) (ProviderView, error) {
-	v, err := h.saveProvider("", p, actor)
+	v, _, err := h.saveProvider("", p, actor)
 	h.auditAI(actor, "ai.provider.add", p.Name, "kind="+clip(p.Kind, 64), err)
 	return v, err
 }
 
 // UpdateModelProvider replaces provider name's definition (its kind
 // can't change: 400; unknown 404; otherwise as AddModelProvider). Its
-// secrets are kept. Audited ai.provider.update. (Re-delivering the
-// selecting AI pages is Task 23's.)
-func (h *Hub) UpdateModelProvider(name string, p state.ModelProvider, actor directory.Actor) (ProviderView, error) {
-	v, err := h.saveProvider(name, p, actor)
-	h.auditAI(actor, "ai.provider.update", name, "kind="+clip(p.Kind, 64), err)
-	return v, err
+// secrets are kept. Audited ai.provider.update. The enabled AI pages
+// whose rendering changed are re-delivered and restarted (Task 23):
+// restarts lists them, sorted.
+func (h *Hub) UpdateModelProvider(name string, p state.ModelProvider, actor directory.Actor) (v ProviderView, restarts []string, err error) {
+	v, restarts, err = h.saveProvider(name, p, actor)
+	detail := "kind=" + clip(p.Kind, 64)
+	if len(restarts) > 0 {
+		detail += " restarts=" + clip(strings.Join(restarts, ","), 400)
+	}
+	h.auditAI(actor, "ai.provider.update", name, detail, err)
+	h.restartAIPages(restarts)
+	return v, restarts, err
 }
 
-func (h *Hub) saveProvider(name string, p state.ModelProvider, actor directory.Actor) (ProviderView, error) {
+func (h *Hub) saveProvider(name string, p state.ModelProvider, actor directory.Actor) (v ProviderView, restarts []string, err error) {
+	restarts = []string{}
 	if err := checkAIActor(actor); err != nil {
-		return ProviderView{}, err
+		return ProviderView{}, restarts, err
 	}
 	update := name != ""
 	if update {
@@ -346,27 +356,28 @@ func (h *Hub) saveProvider(name string, p state.ModelProvider, actor directory.A
 			p.Name = name
 		}
 		if p.Name != name {
-			return ProviderView{}, statusErr(http.StatusBadRequest, "a provider's name can't change (%s): add a new provider", clipQuoted(p.Name))
+			return ProviderView{}, restarts, statusErr(http.StatusBadRequest, "a provider's name can't change (%s): add a new provider", clipQuoted(p.Name))
 		}
 	}
 	p = normalizeProvider(p)
 	if err := checkProviderShape(&p); err != nil {
-		return ProviderView{}, err
+		return ProviderView{}, restarts, err
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	i := h.providerIndexLocked(p.Name)
 	switch {
 	case update && i < 0:
-		return ProviderView{}, statusErr(http.StatusNotFound, "no model provider %s", clipQuoted(p.Name))
+		return ProviderView{}, restarts, statusErr(http.StatusNotFound, "no model provider %s", clipQuoted(p.Name))
 	case !update && i >= 0:
-		return ProviderView{}, statusErr(http.StatusConflict, "a model provider named %s exists already", p.Name)
+		return ProviderView{}, restarts, statusErr(http.StatusConflict, "a model provider named %s exists already", p.Name)
 	case update && h.st.AI.Providers[i].Kind != p.Kind:
-		return ProviderView{}, statusErr(http.StatusBadRequest, "a provider's kind can't change (%s → %s): add a new provider", h.st.AI.Providers[i].Kind, p.Kind)
+		return ProviderView{}, restarts, statusErr(http.StatusBadRequest, "a provider's kind can't change (%s → %s): add a new provider", h.st.AI.Providers[i].Kind, p.Kind)
 	}
 	if err := h.checkProviderLocked(&p, !update); err != nil {
-		return ProviderView{}, err
+		return ProviderView{}, restarts, err
 	}
+	before := h.aiPageDigestsLocked()
 	prev := h.st.AI
 	prev.ProviderSecrets = maps.Clone(prev.ProviderSecrets)
 	next := slices.Clone(prev.Providers)
@@ -377,7 +388,7 @@ func (h *Hub) saveProvider(name string, p state.ModelProvider, actor directory.A
 		h.st.AI.ProviderSecrets = maps.Clone(h.st.AI.ProviderSecrets)
 		if err := h.dropProviderSecretsLocked(p.Name); err != nil {
 			h.st.AI = prev
-			return ProviderView{}, statusErr(http.StatusInternalServerError, "%v", err)
+			return ProviderView{}, restarts, statusErr(http.StatusInternalServerError, "%v", err)
 		}
 		next = append(next, p)
 		sort.Slice(next, func(a, b int) bool { return next[a].Name < next[b].Name })
@@ -385,9 +396,12 @@ func (h *Hub) saveProvider(name string, p state.ModelProvider, actor directory.A
 	h.st.AI.Providers = next
 	if err := h.saveStateLocked(); err != nil {
 		h.st.AI = prev
-		return ProviderView{}, err
+		return ProviderView{}, restarts, err
 	}
-	return h.providerViewLocked(p, nil), nil
+	if r := h.aiPageChangesLocked(before); len(r) > 0 {
+		restarts = r
+	}
+	return h.providerViewLocked(p, nil), restarts, nil
 }
 
 // dropProviderSecretsLocked removes provider name's entries from the store
@@ -464,74 +478,83 @@ func (h *Hub) deleteProvider(name string, actor directory.Actor) error {
 // SetProviderSecret stores value as provider name's secret field (404 an
 // unknown provider, 400 a field the kind doesn't have or a value an env
 // file can't carry — the error never quotes it). value is zeroed when it
-// returns. Audited ai.provider.secret "<field> replaced".
-func (h *Hub) SetProviderSecret(name, field string, value []byte, actor directory.Actor) (SecretView, error) {
+// returns. Audited ai.provider.secret "<field> replaced". The enabled AI
+// pages using it are re-delivered and restarted (restarts, sorted).
+func (h *Hub) SetProviderSecret(name, field string, value []byte, actor directory.Actor) (SecretView, []string, error) {
 	defer clear(value)
-	v, _, err := h.setProviderSecret(name, field, value, false, actor)
+	v, _, restarts, err := h.setProviderSecret(name, field, value, false, actor)
 	h.auditAI(actor, "ai.provider.secret", name, clip(field, 64)+" "+secretReplaced, err)
-	return v, err
+	h.restartAIPages(restarts)
+	return v, restarts, err
 }
 
 // ClearProviderSecret removes provider name's secret field. Audited
 // ai.provider.secret "<field> cleared"; a field that isn't set answers
-// {set: false} with no audit and no write (ruling 10a).
-func (h *Hub) ClearProviderSecret(name, field string, actor directory.Actor) (SecretView, error) {
-	v, changed, err := h.setProviderSecret(name, field, nil, true, actor)
+// {set: false} with no audit and no write (ruling 10a). Restarts as
+// SetProviderSecret.
+func (h *Hub) ClearProviderSecret(name, field string, actor directory.Actor) (SecretView, []string, error) {
+	v, changed, restarts, err := h.setProviderSecret(name, field, nil, true, actor)
 	if changed || err != nil {
 		h.auditAI(actor, "ai.provider.secret", name, clip(field, 64)+" "+secretCleared, err)
 	}
-	return v, err
+	h.restartAIPages(restarts)
+	return v, restarts, err
 }
 
 // setProviderSecret sets (or clears) the field; changed reports whether
-// anything was written.
-func (h *Hub) setProviderSecret(name, field string, value []byte, clearIt bool, actor directory.Actor) (SecretView, bool, error) {
-	v, err := h.setProviderSecretInner(name, field, value, clearIt, actor)
-	if errors.Is(err, errNothingToClear) {
-		return SecretView{}, false, nil
+// anything was written; restarts are the AI pages to restart.
+func (h *Hub) setProviderSecret(name, field string, value []byte, clearIt bool, actor directory.Actor) (SecretView, bool, []string, error) {
+	v, restarts, err := h.setProviderSecretInner(name, field, value, clearIt, actor)
+	if restarts == nil {
+		restarts = []string{}
 	}
-	return v, err == nil, err
+	if errors.Is(err, errNothingToClear) {
+		return SecretView{}, false, restarts, nil
+	}
+	return v, err == nil, restarts, err
 }
 
 // errNothingToClear: the field to clear is not set.
 var errNothingToClear = errors.New("not set")
 
-func (h *Hub) setProviderSecretInner(name, field string, value []byte, clearIt bool, actor directory.Actor) (SecretView, error) {
+func (h *Hub) setProviderSecretInner(name, field string, value []byte, clearIt bool, actor directory.Actor) (SecretView, []string, error) {
 	if err := checkAIActor(actor); err != nil {
-		return SecretView{}, err
+		return SecretView{}, nil, err
 	}
 	if !clearIt {
 		if err := checkSecretValue(value); err != nil {
-			return SecretView{}, err
+			return SecretView{}, nil, err
 		}
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	i := h.providerIndexLocked(name)
 	if i < 0 {
-		return SecretView{}, statusErr(http.StatusNotFound, "no model provider %s", clipQuoted(name))
+		return SecretView{}, nil, statusErr(http.StatusNotFound, "no model provider %s", clipQuoted(name))
 	}
 	kind := h.st.AI.Providers[i].Kind
 	if !slices.Contains(ProviderKinds[kind].SecretFields(), field) {
-		return SecretView{}, statusErr(http.StatusBadRequest, "%s is not a secret field of kind %s (%s)", clipQuoted(field), kind,
+		return SecretView{}, nil, statusErr(http.StatusBadRequest, "%s is not a secret field of kind %s (%s)", clipQuoted(field), kind,
 			strings.Join(ProviderKinds[kind].SecretFields(), ", "))
 	}
 	vals, err := h.providerSecrets()
 	if err != nil {
-		return SecretView{}, statusErr(http.StatusInternalServerError, "%v", err)
+		return SecretView{}, nil, statusErr(http.StatusInternalServerError, "%v", err)
 	}
 	key := state.ProviderSecretKey(name, field)
 	old, had := vals[key]
 	if _, meta := h.st.AI.ProviderSecrets[key]; clearIt && !had && !meta {
-		return SecretView{}, errNothingToClear
+		return SecretView{}, nil, errNothingToClear
 	}
+	// What the AI pages render now (the store as it was).
+	before := h.aiPageDigestsLocked()
 	if clearIt {
 		delete(vals, key)
 	} else {
 		vals[key] = string(value)
 	}
 	if err := h.writeProviderSecrets(vals); err != nil {
-		return SecretView{}, statusErr(http.StatusInternalServerError, "%v", err)
+		return SecretView{}, nil, statusErr(http.StatusInternalServerError, "%v", err)
 	}
 	prev := h.st.AI.ProviderSecrets
 	next := maps.Clone(prev)
@@ -555,12 +578,13 @@ func (h *Hub) setProviderSecretInner(name, field string, value []byte, clearIt b
 		if werr := h.writeProviderSecrets(vals); werr != nil {
 			log.Printf("ai: putting back the secret %s of provider %s failed: %v", field, name, werr)
 		}
-		return SecretView{}, err
+		return SecretView{}, nil, err
 	}
+	restarts := h.aiPageChangesLocked(before)
 	if clearIt {
-		return SecretView{}, nil
+		return SecretView{}, restarts, nil
 	}
-	return SecretView{Set: true, UpdatedAt: &at}, nil
+	return SecretView{Set: true, UpdatedAt: &at}, restarts, nil
 }
 
 // checkSecretValue: 1–8 KiB of UTF-8 without control characters, single

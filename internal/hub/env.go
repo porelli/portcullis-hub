@@ -73,6 +73,20 @@ func (h *Hub) generateAppEnvLocked(t *templates.Template, m *directory.Membershi
 	for k, v := range h.aiEnvLocked(t) {
 		vars[k] = v
 	}
+	// The model provider variables (§15.12, Task 23): exactly an AI page's
+	// selected, set secrets (single-quoted); never a stale or foreign one.
+	provEnv, err := h.providerEnvLocked(t)
+	if err != nil {
+		return err
+	}
+	for k := range vars {
+		if strings.HasPrefix(k, ProviderVarPrefix) {
+			delete(vars, k)
+		}
+	}
+	for k, v := range provEnv {
+		vars[k] = v
+	}
 	coreEnv := readEnvRaw(filepath.Join(h.cfg.ProjectDir, ".env"))
 	for ref := range templates.EnvRefs(string(t.ReadCompose())) {
 		if _, exists := vars[ref]; !exists {
@@ -93,7 +107,8 @@ func (h *Hub) generateAppEnvLocked(t *templates.Template, m *directory.Membershi
 	sort.Strings(keys)
 	for _, k := range keys {
 		_, quoted := optEnv[k]
-		lines = append(lines, envLine(k, vars[k], quoted))
+		_, prov := provEnv[k]
+		lines = append(lines, envLine(k, vars[k], quoted || prov))
 	}
 	// 0600: contains generated secrets.
 	return fsutil.WriteFileAtomic(envFile, []byte(strings.Join(lines, "\n")+"\n"), 0600)
@@ -599,7 +614,12 @@ func (h *Hub) refreshInstanceEnvLocked(t *templates.Template, m *directory.Membe
 	if err := setEnvVars(path, want, false); err != nil {
 		return err
 	}
-	return setEnvVars(path, opts, true)
+	if err := setEnvVars(path, opts, true); err != nil {
+		return err
+	}
+	// The model provider variables of the instance's own selection (a
+	// restore rewrites them from the store: G30(b)).
+	return h.syncProviderEnvLocked(t)
 }
 
 // aiEnvLocked are the AI variables of an ai.mcp template's instance

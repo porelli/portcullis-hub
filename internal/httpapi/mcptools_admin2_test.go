@@ -204,6 +204,10 @@ func TestToolClassPerCall17b(t *testing.T) {
 		{"save_model_provider", ollamaArgs(map[string]any{"region": "us-east-1"}), true},
 		{"save_model_provider", ollamaArgs(map[string]any{"name": "other"}), true},
 		{"add_model_provider", ollamaArgs(map[string]any{"name": "other"}), true},
+		// Task 23: adding a provider to an AI page is D; dropping W.
+		{"set_ai_providers", map[string]any{"id": "ai-chat", "providers": []string{"ollama"}}, true},
+		{"set_ai_providers", map[string]any{"id": "ai-chat", "providers": []string{}}, false},
+		{"set_ai_providers", map[string]any{"id": "aiapp", "providers": []string{}}, true},
 		// Hub settings: off and lower are W; on, clients, origins, higher D.
 		{"save_hub_settings", map[string]any{"enabled": true}, true},
 		{"save_hub_settings", map[string]any{"portcullis_people": true}, true},
@@ -239,7 +243,7 @@ func TestToolClassPerCall17b(t *testing.T) {
 	res, _ := a["result"].(map[string]any)
 	ts, _ := res["tools"].([]any)
 	want := map[string]bool{"set_ai_support": true, "set_ai_mode": true, "save_model_provider": true, "save_hub_settings": true,
-		"set_default_policy": true, "add_source": true, "add_model_provider": true, "restore_as": true, "revoke_ai_access": true,
+		"set_default_policy": true, "add_source": true, "add_model_provider": true, "restore_as": true, "revoke_ai_access": true, "set_ai_providers": true,
 		"backup_instance": false, "sync_sources": false, "enroll_domain": false}
 	for _, x := range ts {
 		tl := x.(map[string]any)
@@ -588,6 +592,7 @@ var adminToolFixtures = []struct {
 	{"add_model_provider", map[string]any{"name": "other", "label": "Other", "kind": "anthropic"}},
 	{"save_model_provider", map[string]any{"name": "ollama", "label": "Ollama", "kind": "openai_compatible", "base_url": "http://gpu.lan:11434/v1", "models": map[string]any{"fetch": false, "list": []string{"qwen3"}}}},
 	{"set_model_provider_secret", map[string]any{"name": "ollama", "field": "key"}},
+	{"set_ai_providers", map[string]any{"id": "ai-chat", "providers": []string{"ollama"}}},
 	{"delete_model_provider", map[string]any{"name": "other"}},
 	{"get_hub_settings", nil},
 	{"save_hub_settings", map[string]any{"limits": map[string]any{"resource_rpm": 100}}},
@@ -697,7 +702,7 @@ func testToolsNotEchoed(t *testing.T) {
 	if _, err := e.s.Hub.AddModelProvider(ollamaModel(), directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.s.Hub.SetProviderSecret("ollama", "key", []byte(providerMarker), directory.Human("root")); err != nil {
+	if _, _, err := e.s.Hub.SetProviderSecret("ollama", "key", []byte(providerMarker), directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	mustDo(t, e.hub, "root", "POST", "/api/domains", enrollBody("team-c.example.net", dnsMarker), 202)

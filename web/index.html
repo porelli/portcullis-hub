@@ -1496,7 +1496,7 @@
           const models = p.models || {};
           const ml = (models.fetch ? ['fetched from the provider'] : []).concat((models.list || []).map(m => '<code>' + escapeHtml(m) + '</code>'));
           const used = (p.used_by || []).map(u => '<div><code>' + escapeHtml(u.instance) + '</code> (' + escapeHtml(u.group || 'no access group') + ', ' +
-            (u.people == null ? 'people unknown' : escapeHtml(u.people) + ' people') + ')</div>').join('') || '<span class="settings-empty">no AI page</span>';
+            (u.people == null ? 'people unknown' : escapeHtml(u.people) + ' people') + (u.restarts ? ', running: a change restarts it' : '') + ')</div>').join('') || '<span class="settings-empty">no AI page</span>';
           const secrets = Object.keys(p.secrets || {}).map(f => '<div><code>' + escapeHtml(f) + '</code> ' + aiSecretStatus(p.secrets[f]) + '</div>').join('') || '—';
           h += '<tr data-ai-provider="' + escapeHtml(p.name) + '"><td><b>' + escapeHtml(p.label || p.name) + '</b> <code>' + escapeHtml(p.name) + '</code>' +
             aiNote(aiEgress(p.label || p.name)) + '</td>' +
@@ -1568,6 +1568,13 @@
       h += '<div class="form-group"><label for="ai-prov-label">Label (shown to people)</label><input type="text" id="ai-prov-label" name="label" maxlength="64" required value="' + escapeHtml(p ? p.label : '') + '"></div>';
       h += '<div class="public-warn" data-ai-egress>' + aiEgress((p && p.label) || 'this provider') + '</div>';
       h += '<div data-ai-kind-fields>' + aiKindFieldsHtml(kind, p) + '</div>';
+      // The save preview (Task 23): the running AI pages that select it
+      // are re-delivered and restarted by a change.
+      const restarting = p ? (p.used_by || []).filter(u => u.restarts).map(u => u.instance) : [];
+      if (restarting.length) {
+        h += '<div class="public-warn" data-ai-prov-restarts>Saving a change restarts ' + restarting.map(i => '<code>' + escapeHtml(i) + '</code>').join(', ') +
+          ' (the AI pages that select it): they read their providers and keys at start.</div>';
+      }
       h += '<div id="ai-prov-result"></div>';
       h += '<div class="inst-row"><button type="submit" class="btn btn-primary btn-sm">' + (p ? 'Save provider' : 'Add provider') + '</button>' +
         '<button type="button" class="btn btn-secondary btn-sm" data-ai-modal-close>Cancel</button></div></form>';
@@ -1664,8 +1671,10 @@
       const name = edit ? prev.name : body.name;
       const btn = form.querySelector('button[type="submit"]');
       btn.disabled = true;
+      const restarted = new Set();
+      const noteRestarts = res => { for (const i of (res && res.restarts) || []) restarted.add(i); };
       try {
-        if (edit) await apiPut('/api/ai/providers/' + encodeURIComponent(name), body);
+        if (edit) noteRestarts(await apiPut('/api/ai/providers/' + encodeURIComponent(name), body));
         else await apiPost('/api/ai/providers', body);
       } catch (err) {
         secrets.length = 0;
@@ -1678,23 +1687,25 @@
       for (const [f, value] of secrets) {
         try {
           const v = await apiPut('/api/ai/providers/' + encodeURIComponent(name) + '/secrets/' + encodeURIComponent(f), { value });
+          noteRestarts(v);
           const st = form.querySelector('[data-ai-secret-status="' + CSS.escape(f) + '"]');
           if (st) st.innerHTML = aiSecretStatus(v);
         } catch (err) { failed.push([f, err]); }
       }
       secrets.length = 0;
       for (const f of clears) {
-        try { await apiPut('/api/ai/providers/' + encodeURIComponent(name) + '/secrets/' + encodeURIComponent(f), { clear: true }); } catch (err) { failed.push([f, err]); }
+        try { noteRestarts(await apiPut('/api/ai/providers/' + encodeURIComponent(name) + '/secrets/' + encodeURIComponent(f), { clear: true })); } catch (err) { failed.push([f, err]); }
       }
       btn.disabled = false;
       await reloadAIProviders();
+      const restartNote = restarted.size ? ' Restarting: ' + [...restarted].sort().join(', ') + '.' : '';
       if (failed.length) {
-        out.innerHTML = '<div class="inst-ok">Provider saved.</div>' + failed.map(([f, err]) => errorBox(Object.assign(new Error('secret ' + f + ': ' + err.message), { status: err.status }))).join('') +
+        out.innerHTML = '<div class="inst-ok">Provider saved.' + escapeHtml(restartNote) + '</div>' + failed.map(([f, err]) => errorBox(Object.assign(new Error('secret ' + f + ': ' + err.message), { status: err.status }))).join('') +
           '<div class="op-hint">Type the failed secrets again.</div>';
         return;
       }
       closeAIModal();
-      showToast('Model provider ' + name + ' saved.', 'success');
+      showToast('Model provider ' + name + ' saved.' + restartNote, 'success');
     }
 
     // #settings/ai?provider=<name>&field=<field> (the Portcullis MCP's
@@ -1778,6 +1789,8 @@
       } catch (err) { pane.innerHTML = errorBox(err); return; }
       if (!v.unsupported) {
         try { act = await apiGet('/api/ai/activity?instance=' + encodeURIComponent(id) + '&n=20'); } catch (err) { act = { error: err }; }
+      } else if (v.provider_kinds) {
+        try { v.all_providers = (await apiGet('/api/ai/providers')).providers || []; } catch (err) { v.all_providers = []; v.all_providers_error = err.message || 'the providers can\'t be read right now'; }
       }
       pane.innerHTML = '<div class="ai-tab" data-ai-tab="' + escapeHtml(id) + '">' + aiTabHtml(id, v, act) + '</div>';
     }
@@ -1793,10 +1806,7 @@
             (a.note ? ' (' + escapeHtml(a.note) + ')' : '') + '. Portcullis doesn\'t run it or check what it does.</p>';
         }
         h += '</div>';
-        if ((v.providers || []).length || chat) {
-          h += '<div class="inst-section"><h4>AI page: model providers</h4><p>' + ((v.providers || []).length ? v.providers.map(p => '<code>' + escapeHtml(p) + '</code>').join(', ')
-            : 'None selected yet.') + ' Providers are defined in Settings → AI.</p></div>';
-        }
+        if (v.provider_kinds || chat) h += aiProvidersSelHtml(id, v);
         return h;
       }
       const greyed = v.master_off ? 'AI support is off on this Portcullis (Settings → AI).' : v.refused ? 'AI support can\'t be switched on: ' + v.refused : '';
@@ -1821,6 +1831,57 @@
       }
       h += '</div>';
       return h;
+    }
+
+    // An AI page's model provider selection (Task 23; PUT …/ai providers):
+    // the providers of a kind it supports, ticked when selected; a "one"
+    // kind takes at most one (the Hub refuses two). v.all_providers is
+    // GET /api/ai/providers' list (loadAITab).
+    function aiProvidersSelHtml(id, v) {
+      const kinds = v.provider_kinds || {};
+      const sel = new Set(v.providers || []);
+      const all = v.all_providers || [];
+      let h = '<div class="inst-section" data-ai-providers-sel><h4>AI page: model providers</h4>';
+      if (v.all_providers_error) h += '<p class="settings-empty">' + escapeHtml(v.all_providers_error) + '</p>';
+      const usable = all.filter(p => Object.prototype.hasOwnProperty.call(kinds, p.kind));
+      if (!usable.length) {
+        h += '<p class="settings-empty">No model provider of a kind this AI page supports (' + Object.keys(kinds).sort().map(k => escapeHtml(k)).join(', ') +
+          '). Add one in <a href="#settings" data-ai-goto-settings>Settings → AI</a>.</p>';
+      } else {
+        for (const p of usable) {
+          h += '<div><label class="policy-factor" style="margin:0"><input type="checkbox" data-ai-prov-sel value="' + escapeHtml(p.name) + '"' + (sel.has(p.name) ? ' checked' : '') + '> ' +
+            '<b>' + escapeHtml(p.label || p.name) + '</b> <code>' + escapeHtml(p.name) + '</code> · ' + escapeHtml((AI_KINDS[p.kind] || {}).label || p.kind) +
+            (kinds[p.kind] === 'one' ? ' (at most one of this kind)' : '') + '</label>' + aiNote(aiEgress(p.label || p.name)) + '</div>';
+        }
+      }
+      const gone = [...sel].filter(n => !usable.some(p => p.name === n));
+      if (gone.length) h += aiNote('Selected but not offered (deleted, or a kind it no longer supports): ' + gone.map(n => '<code>' + escapeHtml(n) + '</code>').join(', ') + '. Saving drops them.');
+      h += aiNote('Everyone who can open this AI page can use every provider selected for it; to give a group other providers, add another instance with its own access group.' +
+        (aiInstanceEnabled(id) ? ' The app is running: saving restarts it.' : ''));
+      h += '<div class="inst-row"><button type="button" class="btn btn-primary btn-sm" data-ai-prov-sel-save' + (usable.length || sel.size ? '' : ' disabled') + '>Save</button></div>' +
+        '<div data-ai-result></div></div>';
+      return h;
+    }
+
+    async function saveAIProviders(box, sec) {
+      const id = box.dataset.aiTab;
+      const out = sec.querySelector('[data-ai-result]');
+      const providers = [...sec.querySelectorAll('[data-ai-prov-sel]:checked')].map(c => c.value);
+      if (aiInstanceEnabled(id) && !confirm('The app is running: saving its model providers restarts it. Save?')) return;
+      const btn = sec.querySelector('[data-ai-prov-sel-save]');
+      btn.disabled = true;
+      out.innerHTML = '<p class="settings-empty">Saving…</p>';
+      try {
+        const res = await apiPut('/api/instances/' + encodeURIComponent(id) + '/ai', { providers });
+        try { res.all_providers = (await apiGet('/api/ai/providers')).providers || []; } catch (err) { res.all_providers = []; res.all_providers_error = err.message || 'the providers can\'t be read right now'; }
+        box.innerHTML = aiTabHtml(id, res, null);
+        const done = box.querySelector('[data-ai-providers-sel] [data-ai-result]');
+        if (done) done.innerHTML = '<div class="inst-ok">Saved' + (res.restarts ? ': the app restarts with them.' : '.') + '</div>' + warningsList(res.warnings);
+        showToast('Model providers of ' + id + ' saved.', 'success');
+      } catch (err) {
+        btn.disabled = false;
+        out.innerHTML = errorBox(err);
+      }
     }
 
     function aiCompanionHtml(id, v, c, greyed) {
@@ -1917,6 +1978,8 @@
         waitFor('#ai-settings-form').then(f => f && flash(f));
         return;
       }
+      const psec = t.closest('[data-ai-providers-sel]');
+      if (psec && t.closest('[data-ai-prov-sel-save]')) { saveAIProviders(box, psec); return; }
       const sec = t.closest('[data-ai-companion]');
       if (!sec) return;
       if (t.closest('[data-ai-save]')) { saveAICompanion(box, sec); return; }

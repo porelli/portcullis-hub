@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/portcullis/hub/internal/directory"
@@ -69,6 +70,10 @@ type (
 		ID        string `json:"id" jsonschema:"the instance id"`
 		Companion string `json:"companion" jsonschema:"the companion's name (ai_status lists them)"`
 		Enabled   bool   `json:"enabled" jsonschema:"true switches it on (needs your confirmation in the browser), false off"`
+	}
+	aiProvidersArgs struct {
+		ID        string   `json:"id" jsonschema:"the AI page instance id"`
+		Providers []string `json:"providers" jsonschema:"the model provider names to select (list_model_providers lists them); the whole selection, [] for none"`
 	}
 	aiModeArgs struct {
 		ID        string `json:"id" jsonschema:"the instance id"`
@@ -349,6 +354,14 @@ func (s *Server) registerAdminTools2() {
 			a, _ := decode[aiModeArgs](args)
 			return []string{"Sets the companion " + a.Companion + " of " + a.ID + " to mode " + a.Mode + ": AI clients may then change things in the app, not only read; existing AI credentials are revoked first."}
 		}),
+		perCall(admin("set_ai_providers", "Set which model providers an AI page (an instance of a template with an AI page, e.g. LibreChat) offers: the whole selection. Adding a provider needs your confirmation in the browser: what people send on the AI page then goes to it. A running AI page restarts.",
+			ClassWrite, "PUT /api/instances/{id}/ai", "ai.providers", func(ctx context.Context, a directory.Actor, in aiProvidersArgs) (any, error) {
+				if err := instanceIDOK(in.ID); err != nil {
+					return nil, err
+				}
+				names := append([]string{}, in.Providers...)
+				return s.updateInstanceAI(ctx, a, in.ID, hub.InstanceAIUpdate{Providers: &names})
+			}), s.aiProvidersClass, idOf, s.aiProvidersConsequences),
 		{Name: "revoke_ai_access", Description: "Revoke one person's (or everyone's) AI credentials for a companion now; their AI clients lose access to it until a new credential is minted. Needs your confirmation in the browser.",
 			Class: ClassDestructive, Scope: ScopeAdmin, Twin: "POST /api/instances/{id}/ai/revoke", Audit: "ai.credential.revoke", In: revokeAIArgs{},
 			Typed: idOf,
@@ -393,11 +406,11 @@ func (s *Server) registerAdminTools2() {
 			}},
 		perCall(admin("save_model_provider", "Update a model provider's definition (its kind can't change; its secrets are kept). Changing where model traffic goes (base_url, instance, instance_name, region), its label or its credentials mode (but admin → per_person) needs your confirmation in the browser.",
 			ClassWrite, "PUT /api/ai/providers/{name}", "ai.provider.update", func(_ context.Context, a directory.Actor, in providerArgs) (any, error) {
-				v, err := s.updateModelProvider(a, in.Name, in.model())
+				v, restarts, err := s.updateModelProvider(a, in.Name, in.model())
 				if err != nil {
 					return nil, err
 				}
-				return map[string]any{"provider": providerOut(v)}, nil
+				return map[string]any{"provider": providerOut(v), "restarts": restarts}, nil
 			}), s.providerClass, nameOf, providerConsequences),
 		{Name: "set_model_provider_secret", Description: "Set a model provider's secret (an API key): it is entered on the Hub's AI settings, never in the chat. After you saved it, this reports whether it is set and when.",
 			Class: ClassSecret, Scope: ScopeAdmin, Twin: "PUT /api/ai/providers/{name}/secrets/{field}", In: providerFieldArgs{},
@@ -680,6 +693,52 @@ func aiSupportClass(args json.RawMessage) ToolClass {
 		return ClassWrite
 	}
 	return ClassDestructive
+}
+
+// aiProvidersClass (Task 23): W only when the new selection drops
+// providers from the AI page's current one and adds none (people's data
+// goes nowhere new); anything else — an added provider, an instance that
+// can't be read, arguments that don't decode — D.
+func (s *Server) aiProvidersClass(args json.RawMessage) ToolClass {
+	a, err := decode[aiProvidersArgs](args)
+	if err != nil || instanceIDOK(a.ID) != nil {
+		return ClassDestructive
+	}
+	v, err := s.Hub.InstanceAI(a.ID)
+	if err != nil || v.ProviderKinds == nil {
+		return ClassDestructive
+	}
+	for _, p := range a.Providers {
+		if !slices.Contains(v.Providers, p) {
+			return ClassDestructive
+		}
+	}
+	return ClassWrite
+}
+
+// aiProvidersConsequences names the providers the selection adds (with
+// their labels: the data-egress note).
+func (s *Server) aiProvidersConsequences(args json.RawMessage) []string {
+	a, _ := decode[aiProvidersArgs](args)
+	cur := []string{}
+	if v, err := s.Hub.InstanceAI(a.ID); err == nil {
+		cur = v.Providers
+	}
+	var out []string
+	for _, p := range a.Providers {
+		if slices.Contains(cur, p) {
+			continue
+		}
+		label := p
+		if m, ok := s.Hub.ModelProvider(p); ok {
+			label = m.Label + " (" + p + ")"
+		}
+		out = append(out, "Adds the model provider "+label+" to the AI page "+a.ID+": what people send on it, and what their apps return to it, goes to "+label+".")
+	}
+	if len(a.Providers) == 0 {
+		out = append(out, "Leaves the AI page "+a.ID+" without model providers.")
+	}
+	return append(out, "A running "+a.ID+" restarts.")
 }
 
 // aiModeClass (G37: read_write is D): W only for exactly read_only.

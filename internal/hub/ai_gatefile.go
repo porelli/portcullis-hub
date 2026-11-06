@@ -219,10 +219,9 @@ func (h *Hub) gateFile(m *directory.Membership, healthy map[string]bool, prev ma
 		if !t.Enabled || t.Manifest.AI.Chat == nil || h.instanceBusyLocked(t.ID) {
 			continue
 		}
-		for _, c := range t.Manifest.Clients {
-			if id := t.InstanceClientID(c.ClientID); c.AIClient && ok(id) {
-				aiClients = append(aiClients, id)
-			}
+		// An instance view's client ids are already the instance's.
+		if c := instanceAIClient(t); c != nil && ok(c.ClientID) {
+			aiClients = append(aiClients, c.ClientID)
 		}
 	}
 	people := sortedSet(append(append([]string{}, offered...), aiClients...))

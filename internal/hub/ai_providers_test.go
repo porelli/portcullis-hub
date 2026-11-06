@@ -153,17 +153,17 @@ func TestProviderValidation(t *testing.T) {
 	// Update: kept name, label changed; kind can't change; unknown 404.
 	up := cloneProvider(ollama)
 	up.Label = "Ollama (office)"
-	if v, err := f.h.UpdateModelProvider("ollama", up, aiAdmin); err != nil || v.Label != "Ollama (office)" {
+	if v, _, err := f.h.UpdateModelProvider("ollama", up, aiAdmin); err != nil || v.Label != "Ollama (office)" {
 		t.Fatalf("update = %+v %v", v, err)
 	}
 	up.Kind, up.BaseURL = "anthropic", ""
-	if _, err := f.h.UpdateModelProvider("ollama", up, aiAdmin); statusOf(err) != 400 {
+	if _, _, err := f.h.UpdateModelProvider("ollama", up, aiAdmin); statusOf(err) != 400 {
 		t.Errorf("kind change = %v, want 400", err)
 	}
-	if _, err := f.h.UpdateModelProvider("nope", ollama, aiAdmin); statusOf(err) != 404 && statusOf(err) != 400 {
+	if _, _, err := f.h.UpdateModelProvider("nope", ollama, aiAdmin); statusOf(err) != 404 && statusOf(err) != 400 {
 		t.Errorf("unknown = %v, want 404", err)
 	}
-	if _, err := f.h.UpdateModelProvider("ghost", state.ModelProvider{Name: "ghost", Label: "G", Kind: "anthropic"}, aiAdmin); statusOf(err) != 404 {
+	if _, _, err := f.h.UpdateModelProvider("ghost", state.ModelProvider{Name: "ghost", Label: "G", Kind: "anthropic"}, aiAdmin); statusOf(err) != 404 {
 		t.Errorf("unknown = %v, want 404", err)
 	}
 	if _, err := f.h.AddModelProvider(ollama, directory.Actor{}); statusOf(err) != 401 {
@@ -227,7 +227,7 @@ func TestDeleteProviderInUse(t *testing.T) {
 	if _, err := f.h.AddModelProvider(ollama, aiAdmin); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.h.SetProviderSecret("ollama", "key", []byte("sk-DELETE-ME"), aiAdmin); err != nil {
+	if _, _, err := f.h.SetProviderSecret("ollama", "key", []byte("sk-DELETE-ME"), aiAdmin); err != nil {
 		t.Fatal(err)
 	}
 	vs := f.h.ModelProviders(t.Context())
@@ -281,7 +281,7 @@ func TestProviderSecretStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	buf := []byte("sk-MARKER-123")
-	v, err := f.h.SetProviderSecret("ollama", "key", buf, aiAdmin)
+	v, _, err := f.h.SetProviderSecret("ollama", "key", buf, aiAdmin)
 	if err != nil || !v.Set || v.UpdatedAt == nil {
 		t.Fatalf("set = %+v %v", v, err)
 	}
@@ -310,15 +310,15 @@ func TestProviderSecretStore(t *testing.T) {
 		{"key", "sk-MARKER-123\nx", 400},
 		{"key", "", 400},
 	} {
-		_, err := f.h.SetProviderSecret("ollama", c.field, []byte(c.value), aiAdmin)
+		_, _, err := f.h.SetProviderSecret("ollama", c.field, []byte(c.value), aiAdmin)
 		if statusOf(err) != c.status || strings.Contains(err.Error(), "MARKER") {
 			t.Errorf("%s=%q: %v, want %d without the value", c.field, c.value, err, c.status)
 		}
 	}
-	if _, err := f.h.SetProviderSecret("ghost", "key", []byte("sk-MARKER-123"), aiAdmin); statusOf(err) != 404 {
+	if _, _, err := f.h.SetProviderSecret("ghost", "key", []byte("sk-MARKER-123"), aiAdmin); statusOf(err) != 404 {
 		t.Errorf("unknown provider = %v", err)
 	}
-	v, err = f.h.ClearProviderSecret("ollama", "key", aiAdmin)
+	v, _, err = f.h.ClearProviderSecret("ollama", "key", aiAdmin)
 	if err != nil || v.Set {
 		t.Fatalf("clear = %+v %v", v, err)
 	}
@@ -348,7 +348,7 @@ func TestProviderSecretsMaskedAndRedacted(t *testing.T) {
 	if _, err := f.h.AddModelProvider(ollama, aiAdmin); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.h.SetProviderSecret("ollama", "key", []byte("sk-MARKER-123"), aiAdmin); err != nil {
+	if _, _, err := f.h.SetProviderSecret("ollama", "key", []byte("sk-MARKER-123"), aiAdmin); err != nil {
 		t.Fatal(err)
 	}
 	writeFile(t, f.h.envPath("grafana-b"), "PORTCULLIS_AI_PROVIDER_OLLAMA_KEY='sk-MARKER-123'\nCOPY=sk-MARKER-123\nPLAIN=hello\n")
@@ -397,7 +397,7 @@ func TestProviderSecretsDirPrivate(t *testing.T) {
 		t.Fatal(err)
 	}
 	os.Chmod(dir, 0755)
-	first, err := f.h.SetProviderSecret("ollama", "key", []byte("sk-MARKER-123"), aiAdmin)
+	first, _, err := f.h.SetProviderSecret("ollama", "key", []byte("sk-MARKER-123"), aiAdmin)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -410,7 +410,7 @@ func TestProviderSecretsDirPrivate(t *testing.T) {
 	if err := os.Symlink(other, dir); err != nil {
 		t.Fatal(err)
 	}
-	_, err = f.h.SetProviderSecret("ollama", "key", []byte("sk-MARKER-456"), aiAdmin)
+	_, _, err = f.h.SetProviderSecret("ollama", "key", []byte("sk-MARKER-456"), aiAdmin)
 	if statusOf(err) != 500 || strings.Contains(err.Error(), "MARKER") {
 		t.Fatalf("symlinked dir = %v, want 500 without the value", err)
 	}
@@ -432,10 +432,10 @@ func TestProviderAuditClipped(t *testing.T) {
 	if _, err := f.h.AddModelProvider(p, aiAdmin); statusOf(err) != 400 {
 		t.Fatalf("long name = %v", err)
 	}
-	if _, err := f.h.SetProviderSecret(long, long, []byte("sk-x"), aiAdmin); statusOf(err) != 404 {
+	if _, _, err := f.h.SetProviderSecret(long, long, []byte("sk-x"), aiAdmin); statusOf(err) != 404 {
 		t.Fatalf("long secret path = %v", err)
 	}
-	if _, err := f.h.UpdateModelProvider(long, ollama, aiAdmin); statusOf(err) != 400 {
+	if _, _, err := f.h.UpdateModelProvider(long, ollama, aiAdmin); statusOf(err) != 400 {
 		t.Fatalf("long update = %v", err)
 	}
 	if len(audit.entries) != 3 {
@@ -455,7 +455,7 @@ func TestProviderSecretMasksDeclaredVariable(t *testing.T) {
 	if _, err := f.h.AddModelProvider(ollama, aiAdmin); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.h.SetProviderSecret("ollama", "key", []byte("sk-MARKER-123"), aiAdmin); err != nil {
+	if _, _, err := f.h.SetProviderSecret("ollama", "key", []byte("sk-MARKER-123"), aiAdmin); err != nil {
 		t.Fatal(err)
 	}
 	if !declaredEnvNames(f.h.Template("grafana-b"))["GF_SECRET"] {
@@ -482,7 +482,7 @@ func TestClearUnsetProviderSecret(t *testing.T) {
 	before := readFile(t, statePath)
 	st0, _ := os.Stat(statePath)
 	n := len(audit.entries)
-	v, err := f.h.ClearProviderSecret("ollama", "key", aiAdmin)
+	v, _, err := f.h.ClearProviderSecret("ollama", "key", aiAdmin)
 	if err != nil || v.Set {
 		t.Fatalf("clear unset = %+v %v", v, err)
 	}
@@ -496,7 +496,7 @@ func TestClearUnsetProviderSecret(t *testing.T) {
 		t.Errorf("store written: %v", err)
 	}
 	// Refusals still count: an unknown field is a 400, audited.
-	if _, err := f.h.ClearProviderSecret("ollama", "nope", aiAdmin); statusOf(err) != 400 || len(audit.entries) != n+1 {
+	if _, _, err := f.h.ClearProviderSecret("ollama", "nope", aiAdmin); statusOf(err) != 400 || len(audit.entries) != n+1 {
 		t.Errorf("unknown field = %v, %d entries", err, len(audit.entries))
 	}
 }
@@ -518,7 +518,7 @@ func TestUpdateProviderWithoutChatSupport(t *testing.T) {
 	f.h.mu.Unlock()
 	up := cloneProvider(ollama)
 	up.Label = "Renamed"
-	if v, err := f.h.UpdateModelProvider("ollama", up, aiAdmin); err != nil || v.Label != "Renamed" {
+	if v, _, err := f.h.UpdateModelProvider("ollama", up, aiAdmin); err != nil || v.Label != "Renamed" {
 		t.Errorf("update = %+v %v", v.Label, err)
 	}
 	other := cloneProvider(ollama)

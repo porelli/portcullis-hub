@@ -84,8 +84,10 @@ var accessWidening = map[string]string{
 	"set_local_networks": "D unless use_defaults or a list within the current one",
 	"enable_instance":    "D when the instance starts with public access on or the app's own login only (fix round 1), or its groups already have members (T18 fix round 1)",
 	// Task 17b.
-	"set_ai_support":      "D when it switches a companion on",
-	"set_ai_mode":         "D unless read_only",
+	"set_ai_support": "D when it switches a companion on",
+	"set_ai_mode":    "D unless read_only",
+	// Task 23.
+	"set_ai_providers":    "D when it adds a model provider to an AI page (people's data goes to it)",
 	"save_model_provider": "D when it changes where model traffic goes (base_url, instance, instance_name, region) or names no stored provider",
 	"save_hub_settings":   "D when it turns AI or the people MCP on, changes clients or origins, or raises a limit or connection length",
 	"set_default_policy":  "D unless the new default is policy.Stricter than the current one",
@@ -211,6 +213,8 @@ func TestToolParity(t *testing.T) {
 		"add_source", "remove_source", "restore_instance", "restore_as", "delete_domain", "revoke_ai_access",
 		"add_model_provider", "delete_model_provider", "resume_user_sweep", "remove_stale_keycloak_user",
 		"set_ai_support", "set_ai_mode", "save_model_provider", "save_hub_settings", "set_default_policy",
+		// Task 23.
+		"set_ai_providers",
 		// Task 18 (§15.10, G37).
 		"delete_person", "delete_group", "delete_field", "require_passkey", "remove_passkeys", "set_permission",
 		"create_instance", "remove_member", "update_field", "add_member", "set_member_expiry", "set_group_rule", "convert_group", "add_exception",
@@ -280,7 +284,7 @@ var admin17b = []string{
 	"list_templates", "get_template", "list_sources", "sync_sources", "add_source", "remove_source",
 	"list_backups", "list_backups_all", "backup_instance", "restore_instance", "restore_as",
 	"list_domains", "enroll_domain", "replace_domain_token", "delete_domain",
-	"ai_status", "set_ai_support", "set_ai_mode", "revoke_ai_access", "ai_activity",
+	"ai_status", "set_ai_support", "set_ai_mode", "set_ai_providers", "revoke_ai_access", "ai_activity",
 	"list_model_providers", "add_model_provider", "save_model_provider", "set_model_provider_secret", "delete_model_provider",
 	"get_hub_settings", "save_hub_settings", "set_default_policy", "preview_default_policy",
 	"user_sweep_status", "resume_user_sweep", "remove_stale_keycloak_user",

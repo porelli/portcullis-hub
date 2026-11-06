@@ -53,7 +53,7 @@ func (s *Server) maskEnvForAI(id string, vars map[string]string) map[string]stri
 	secretNames := hub.SecretEnvNames(s.Hub.Template(id))
 	out := make(map[string]string, len(vars))
 	for k, v := range vars {
-		if v != "" && v != "[set]" && (secretNames[k] || (hub.SecretLookingEnvName(k) && !hub.HubPublicVar(k))) {
+		if v != "" && v != "[set]" && (secretNames[k] || strings.HasPrefix(k, hub.ProviderVarPrefix) || (hub.SecretLookingEnvName(k) && !hub.HubPublicVar(k))) {
 			v = envSecretMask
 		}
 		out[k] = v

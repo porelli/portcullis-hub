@@ -681,6 +681,11 @@ func (h *Hub) deliveryGenLocked(t *templates.Template) string {
 	// writes the old population after it.
 	acc := h.accessLocked(t)
 	pol, hasPol := h.st.AuthPolicies[t.ID]
+	// An AI page's ai-providers.json (Task 23; errors make it differ).
+	providers, perr := h.providersFileBytesLocked(t)
+	if perr != nil {
+		providers = []byte("error: " + perr.Error())
+	}
 	b, err := json.Marshal(struct {
 		Settings    state.InstanceSettings
 		Enabled     bool
@@ -695,8 +700,9 @@ func (h *Hub) deliveryGenLocked(t *templates.Template) string {
 		Public      any
 		PublicMode  any
 		Auth        templates.Auth
+		AIProviders []byte
 	}{h.st.Settings[t.ID], h.st.IsEnabled(t.ID), h.st.SignIn[t.ID], t.Manifest.Files, t.Manifest.Options(), t.Manifest.Reload, t.Manifest.Hooks,
-		acc.groupAccess(t), acc, policyOrNil(pol, hasPol), t.Public, h.st.PublicMode[t.ID], t.Manifest.Auth})
+		acc.groupAccess(t), acc, policyOrNil(pol, hasPol), t.Public, h.st.PublicMode[t.ID], t.Manifest.Auth, providers})
 	if err != nil {
 		// Never equal: the run can't prove it is current.
 		return "unmarshalable:" + err.Error() + time.Now().String()
@@ -842,6 +848,9 @@ type fileOutput struct {
 	people  bool   // needs the directory
 	skip    string // SkipDirectory: not built
 	err     error
+	// aiProviders: the AI page's ai-providers.json (Task 23): a change
+	// restarts the app (it reads its provider configuration at start).
+	aiProviders bool
 }
 
 // deliverOnce is deliver's body; superseded: a newer commit made the run
@@ -1070,6 +1079,11 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 			delivered.Hashes[u.Unit] = o.hash
 			if trig == TriggerMembership || trig == TriggerRetry || trig == TriggerCredential {
 				effects = append(effects, membershipEffect(o.file.OnMembershipChange))
+			}
+			if o.aiProviders {
+				// Any trigger (a lifecycle run ignores effects: compose
+				// creates the containers after it).
+				effects = append(effects, settings.EffectRestart)
 			}
 			// A changed hook-file runs its hooks in this run, whatever
 			// the trigger (a save of a file-only option included): the

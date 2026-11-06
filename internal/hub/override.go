@@ -116,6 +116,9 @@ func (h *Hub) renderOverrideIn(rv renderView, t *templates.Template, s state.Ins
 	for svc, mounts := range h.dataFileMounts(t) {
 		serviceMounts[svc] = append(serviceMounts[svc], mounts...)
 	}
+	// An AI page's selected provider variables, on ai.chat.env.service
+	// only (G31: the values are in its .env; compose interpolates them).
+	serviceEnv := h.providerOverrideEnvLocked(t)
 
 	// Per-person credentials (contract §6, §13.16): each person_secret
 	// option's hash directory, read-only, as a subpath of the external
@@ -193,6 +196,9 @@ func (h *Hub) renderOverrideIn(rv renderView, t *templates.Template, s state.Ins
 	for svc := range serviceGroups {
 		services[svc] = true
 	}
+	for svc := range serviceEnv {
+		services[svc] = true
+	}
 	for svc := range serviceRouters {
 		services[svc] = true
 	}
@@ -228,6 +234,12 @@ func (h *Hub) renderOverrideIn(rv renderView, t *templates.Template, s state.Ins
 			b.WriteString("    volumes:\n")
 			for _, m := range mounts {
 				fmt.Fprintf(&b, "      - %s\n", m)
+			}
+		}
+		if env := serviceEnv[svc]; len(env) > 0 {
+			b.WriteString("    environment:\n")
+			for _, l := range env {
+				fmt.Fprintf(&b, "      %s\n", l)
 			}
 		}
 		if gids := serviceGroups[svc]; len(gids) > 0 {

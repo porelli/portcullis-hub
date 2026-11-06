@@ -1,0 +1,13 @@
+services:
+  config:
+    image: chat-config
+  api:
+    image: chat
+    environment:
+      OPENID_CLIENT_ID: ${PORTCULLIS_OIDC_CLIENT_ID:-ai-chat}
+      MCP_CLIENT_SECRET: ${CHAT_MCP_SECRET}
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.ai-chat.rule: Host(`${PORTCULLIS_HOST_AI_CHAT:-chat.portcullis.local}`)
+      traefik.http.routers.ai-chat.entrypoints: websecure
+      traefik.http.services.ai-chat.loadbalancer.server.port: "3080"

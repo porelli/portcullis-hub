@@ -198,8 +198,9 @@ func TestProviderSecretsNeverEchoed(t *testing.T) {
 	b := call("PUT", "/api/ai/providers/ollama/secrets/key", `{"value":"`+marker+`"}`, 200)
 	var sv map[string]any
 	json.Unmarshal([]byte(b), &sv)
-	if sv["set"] != true || sv["updated_at"] == nil || len(sv) != 2 {
-		t.Errorf("answer = %s, want {set: true, updated_at}", b)
+	// restarts: the AI pages it restarted (Task 23; none select it here).
+	if r, ok := sv["restarts"].([]any); sv["set"] != true || sv["updated_at"] == nil || len(sv) != 3 || !ok || len(r) != 0 {
+		t.Errorf("answer = %s, want {set: true, updated_at, restarts: []}", b)
 	}
 	// Refusals carrying the marker never quote it.
 	call("PUT", "/api/ai/providers/ollama/secrets/secret_access_key", `{"value":"`+marker+`"}`, 400)
@@ -259,7 +260,7 @@ func TestProviderSecretsNeverEchoed(t *testing.T) {
 	}
 	// Clear.
 	b = call("PUT", "/api/ai/providers/ollama/secrets/key", `{"clear":true}`, 200)
-	if strings.TrimSpace(b) != `{"set":false}` {
+	if strings.TrimSpace(b) != `{"set":false,"restarts":[]}` {
 		t.Errorf("clear = %s", b)
 	}
 	if raw, _ := os.ReadFile(store); bytes.Contains(raw, []byte("MARKER")) {
@@ -277,7 +278,7 @@ func TestProviderSecretsNeverEchoed(t *testing.T) {
 	}
 	// Clearing again: nothing set, {set:false}, nothing audited.
 	n := len(readAudit(t, e.audit))
-	if b := call("PUT", "/api/ai/providers/ollama/secrets/key", `{"clear":true}`, 200); strings.TrimSpace(b) != `{"set":false}` {
+	if b := call("PUT", "/api/ai/providers/ollama/secrets/key", `{"clear":true}`, 200); strings.TrimSpace(b) != `{"set":false,"restarts":[]}` {
 		t.Errorf("clear unset = %s", b)
 	}
 	if len(readAudit(t, e.audit)) != n {
