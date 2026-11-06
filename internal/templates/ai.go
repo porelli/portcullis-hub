@@ -576,6 +576,7 @@ type composeServiceInfo struct {
 	networks    []string
 	networkMode bool
 	netModeOf   string   // network_mode's value when a string
+	pidOf       string   // pid's value when a string
 	ports       bool     // ports: declared (published to the host)
 	named       []string // container_name / hostname present
 	image       string   // image: as written ("" = none or not a string)
@@ -605,6 +606,7 @@ func composeServiceInfos(compose []byte) map[string]composeServiceInfo {
 		}
 		_, info.networkMode = s["network_mode"]
 		info.netModeOf, _ = s["network_mode"].(string)
+		info.pidOf, _ = s["pid"].(string)
 		_, info.ports = s["ports"]
 		info.image, _ = s["image"].(string)
 		for _, f := range []string{"container_name", "hostname"} {
@@ -729,6 +731,12 @@ func checkCompanions(t *Template, compose []byte, routes *Routes, named map[stri
 				if infos[name].netModeOf == "host" {
 					return fmt.Errorf("%s: service %s uses network_mode host: not allowed next to an identity_headers companion (it reaches the app from the host's addresses)", w, name)
 				}
+				if infos[name].pidOf == "host" {
+					return fmt.Errorf("%s: service %s uses pid host: not allowed next to an identity_headers companion (it sees every process of the host, the companion's included)", w, name)
+				}
+			}
+			if err := checkCallerSecretScope(w, c, compose); err != nil {
+				return err
 			}
 		}
 		serviceUse[c.Service] = c.Name
@@ -1050,6 +1058,46 @@ func checkTrustNetwork(w string, c *Companion, compose []byte, infos map[string]
 		}
 		if mode := infos[name].netModeOf; strings.HasPrefix(mode, "service:") && want[strings.TrimPrefix(mode, "service:")] {
 			return fmt.Errorf("%s: service %s uses network_mode %s: it would share an address on the trust network %s", w, name, mode, trust)
+		}
+		if pid := infos[name].pidOf; strings.HasPrefix(pid, "service:") && want[strings.TrimPrefix(pid, "service:")] {
+			return fmt.Errorf("%s: service %s uses pid %s: it would share the process namespace of a trust network member (%s)", w, name, pid, trust)
+		}
+	}
+	return nil
+}
+
+// checkCallerSecretScope: an identity_headers caller secret reaches only the
+// companion's service — no other service may interpolate it (${VAR…} or
+// $VAR, anywhere in its definition, nested defaults included).
+func checkCallerSecretScope(w string, c *Companion, compose []byte) error {
+	env := ""
+	if c.Identity.CallerSecret != nil {
+		env = c.Identity.CallerSecret.Env
+	}
+	if env == "" {
+		return nil
+	}
+	var doc struct {
+		Services map[string]interface{} `yaml:"services"`
+	}
+	if yaml.Unmarshal(compose, &doc) != nil {
+		return nil
+	}
+	for _, name := range slices.Sorted(maps.Keys(doc.Services)) {
+		if name == c.Service {
+			continue
+		}
+		var found bool
+		_ = walkStrings(doc.Services[name], func(s string) error {
+			for _, r := range rawVarRefs(s) {
+				if r.name == env {
+					found = true
+				}
+			}
+			return nil
+		})
+		if found {
+			return fmt.Errorf("%s: service %s reads the caller secret %s: only the companion service %s may", w, name, env, c.Service)
 		}
 	}
 	return nil

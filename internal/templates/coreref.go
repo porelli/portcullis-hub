@@ -296,15 +296,15 @@ func checkCoreRefs(compose []byte, hostVars map[string]string) error {
 		}
 		shared[k] = true
 	}
-	// internalNets: project networks declared internal: true (no name /
-	// external, checked above): like default, only the template's own
-	// services can be on them, so -internal names may live there too.
+	// internalNets: project networks declared exactly {internal: true}:
+	// like default, only the template's own services can be on them, so
+	// -internal names may live there too.
 	internalNets := map[string]bool{}
 	for _, k := range keys {
 		n, _ := nets[k].(map[string]interface{})
 		_, hasName := n["name"]
 		_, hasExt := n["external"]
-		if in, ok := n["internal"].(bool); ok && in && !hasName && !hasExt {
+		if in, ok := n["internal"].(bool); ok && in && !hasName && !hasExt && len(n) == 1 {
 			internalNets[k] = true
 		}
 	}
