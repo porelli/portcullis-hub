@@ -222,6 +222,9 @@ func (h *Hub) startUp(live *templates.Template) error {
 	// The start hooks (when: start) after the up, under the lifecycle
 	// lock still held: reported and op-recorded, never a rollback.
 	h.runStartHooks(context.Background(), live.ID)
+	// AI companions owing a revoke_all (switched while stopped): run it
+	// now, before they are rendered (contract §15.5).
+	h.pendingRevokesAfterStart(live)
 	// The claims (LLDAP and Keycloak) in the background: a start never
 	// waits for them.
 	h.deliverClaimsAfterStart(live.ID)

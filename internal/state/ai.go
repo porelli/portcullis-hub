@@ -96,6 +96,12 @@ type AIInstance struct {
 type AICompanion struct {
 	Enabled bool   `json:"enabled" yaml:"enabled"`
 	Mode    string `json:"mode" yaml:"mode"`
+	// RevokePending: the companion's app-side credentials still need a
+	// revoke_all (a switch or mode change while the instance was stopped,
+	// a failed revoke_all at switch-off; Task 13b: a restore). While set
+	// the companion is never rendered (alias, router, scale 1) nor listed
+	// in mcp-gate.json; the next start runs revoke_all and clears it.
+	RevokePending bool `json:"revoke_pending,omitempty" yaml:"revoke_pending,omitempty"`
 }
 
 // Connection length bounds and defaults (§15.11), in days.

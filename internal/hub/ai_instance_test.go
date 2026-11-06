@@ -847,3 +847,79 @@ func TestRetryRunsNoAIHookAIApp(t *testing.T) {
 		t.Errorf("%d AI hook runs from a retry", n)
 	}
 }
+
+// A switch or mode change on a stopped instance can't run revoke_all:
+// the Hub-side entries go at once, revoke_all is owed (RevokePending),
+// and the next start runs it before the companion is rendered or listed;
+// a failing one keeps the companion off.
+func TestRevokePendingOnStoppedInstance(t *testing.T) {
+	a := newInstAIFixture(t, nil)
+	a.enable(t, "aiapp")
+	if err := a.h.SetAISupport(context.Background(), "aiapp", "tok", true, root); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.h.Disable("aiapp"); err != nil {
+		t.Fatal(err)
+	}
+	a.h.Wait()
+	a.putCred(t, "aiapp", "tok", "alice")
+	// Each up records whether the router was rendered then.
+	up := a.runner.upHook
+	a.runner.upHook = func(p string) {
+		if strings.Contains(a.override(t, "aiapp"), tokOverrideMCP+"rule") {
+			a.seq.add("up-rendered")
+		}
+		up(p)
+	}
+	mark := len(a.seq.list())
+	if err := a.h.SetAIMode(context.Background(), "aiapp", "tok", "read_only", root); err != nil {
+		t.Fatal(err)
+	}
+	if c := a.companion("aiapp", "tok"); !c.RevokePending || c.Mode != "read_only" {
+		t.Fatalf("state = %+v, want revoke_pending", c)
+	}
+	if left := a.credsOf("aiapp", "tok"); len(left) != 0 {
+		t.Errorf("entries kept on a stopped instance: %+v", left)
+	}
+	if len(a.seq.list()) != mark {
+		t.Errorf("hooks or compose ran on a stopped instance: %v", a.seq.list()[mark:])
+	}
+	a.enable(t, "aiapp")
+	seq := a.seq.list()[mark:]
+	i, j := slices.Index(seq, "/revoke:revoke_all"), slices.Index(seq, "up-rendered")
+	if i < 0 || j < 0 || i > j {
+		t.Errorf("revoke_all not before the companion was rendered: %v", seq)
+	}
+	if c := a.companion("aiapp", "tok"); c.RevokePending {
+		t.Errorf("flag kept after a good revoke_all: %+v", c)
+	}
+	if r := resourceByURL(a.gate(t), "https://aiapp.example.com/mcp"); r == nil || r.Mode != "read_only" {
+		t.Errorf("gate = %v", urls(a.gate(t)))
+	}
+
+	// A failing owed revoke_all keeps it off.
+	if err := a.h.Disable("aiapp"); err != nil {
+		t.Fatal(err)
+	}
+	a.h.Wait()
+	if err := a.h.SetAIMode(context.Background(), "aiapp", "tok", "read_write", root); err != nil {
+		t.Fatal(err)
+	}
+	a.mu.Lock()
+	a.hookFail["/revoke"] = docker.ExecSplitResult{ExitCode: 5, Stderr: []byte("app down\n")}
+	a.mu.Unlock()
+	a.enable(t, "aiapp")
+	if c := a.companion("aiapp", "tok"); !c.RevokePending {
+		t.Errorf("flag cleared by a failed revoke_all: %+v", c)
+	}
+	if r := resourceByURL(a.gate(t), "https://aiapp.example.com/mcp"); r != nil {
+		t.Error("the gate lists a companion owing a revoke_all")
+	}
+	if ov := a.override(t, "aiapp"); strings.Contains(ov, "portcullis-mcp-aiapp--tok") || !strings.Contains(ov, "  tok-mcp:\n    scale: 0\n") {
+		t.Errorf("rendered while revoke_all is owed:\n%s", ov)
+	}
+	v, err := a.h.InstanceAI("aiapp")
+	if err != nil || !strings.Contains(v.Companions[0].LastError, "exited 5") {
+		t.Errorf("last error = %+v %v", v, err)
+	}
+}

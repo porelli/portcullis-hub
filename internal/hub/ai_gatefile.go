@@ -326,6 +326,9 @@ func (h *Hub) companionResourcesLocked(t *templates.Template, gp gatePeople, f *
 			continue
 		}
 		switch {
+		case sw.RevokePending:
+			skip(c.Name, "its app-side credentials still need a revoke_all")
+			continue
 		case !slices.Contains(c.Modes, sw.Mode):
 			skip(c.Name, fmt.Sprintf("mode %q is not one of its modes", sw.Mode))
 			continue

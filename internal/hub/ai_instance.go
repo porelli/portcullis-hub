@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"net/http"
 	"slices"
 	"sort"
@@ -116,8 +117,9 @@ type CompanionView struct {
 	Modes        []string `json:"modes"`
 	Mode         string   `json:"mode"`
 	Enabled      bool     `json:"enabled"`
-	// Status: off, on, failed (LastError set) or unavailable (on, but the
-	// master switch is off or the instance refuses AI now).
+	// Status: off, on, failed (LastError set), revoke_pending (on, but
+	// its owed revoke_all hasn't run yet: kept off) or unavailable (on, but
+	// the master switch is off or the instance refuses AI now).
 	Status      string `json:"status"`
 	LastError   string `json:"last_error"`
 	Population  int    `json:"population"`
@@ -278,15 +280,27 @@ func (h *Hub) updateInstanceAI(ctx context.Context, id string, u InstanceAIUpdat
 	running := t.Enabled
 
 	// revoke_all before every switch-on and every mode change (G34): a
-	// failure is a 502 and nothing changes.
-	if running {
-		for _, ch := range changes {
-			if ch.switchingOn() || ch.modeChanged() {
-				if err := h.revokeAll(ctx, t, ch.c); err != nil {
-					h.setAIError(id, ch.c.Name, err.Error())
-					return nil, h.finishOp(id, OpAI, err, false)
-				}
+	// failure is a 502 and nothing changes. On a stopped instance no hook
+	// can run: the companion's Hub-side entries are dropped at once and
+	// revoke_all is owed (RevokePending) — run by the next start, before
+	// the companion is rendered or listed.
+	for i := range changes {
+		ch := &changes[i]
+		if ch.c.Identity.Revoke == "" || !(ch.switchingOn() || ch.switchingOff() || ch.modeChanged()) {
+			continue
+		}
+		switch {
+		case !running:
+			if err := h.dropAIEntries(id, ch.c.Name); err != nil {
+				return nil, err
 			}
+			ch.after.RevokePending = true
+		case ch.switchingOn() || ch.modeChanged():
+			if err := h.revokeAll(ctx, t, ch.c); err != nil {
+				h.setAIError(id, ch.c.Name, err.Error())
+				return nil, h.finishOp(id, OpAI, err, false)
+			}
+			ch.after.RevokePending = false
 		}
 	}
 
@@ -343,6 +357,11 @@ func (h *Hub) updateInstanceAI(ctx context.Context, id string, u InstanceAIUpdat
 			if ch.switchingOff() || (ch.reapply && !ch.after.Enabled) {
 				if err := h.revokeAll(ctx, t, ch.c); err != nil {
 					cerrs = append(cerrs, err)
+					if serr := h.setRevokePending(id, ch.c.Name, true); serr != nil {
+						cerrs = append(cerrs, serr)
+					}
+				} else if serr := h.setRevokePending(id, ch.c.Name, false); serr != nil {
+					cerrs = append(cerrs, serr)
 				}
 			}
 			if !ch.modeOnly {
@@ -356,6 +375,20 @@ func (h *Hub) updateInstanceAI(ctx context.Context, id string, u InstanceAIUpdat
 				errs = append(errs, e)
 			} else {
 				h.setAIError(id, ch.c.Name, "")
+			}
+		}
+	}
+	if running && restarts {
+		// Companions still owing a revoke_all (switched while stopped,
+		// a failed one earlier): run now, render them after.
+		if again, perr := h.runPendingRevokes(ctx, t); perr != nil {
+			errs = append(errs, perr)
+		} else if again {
+			if upErr := h.composeUp(t); upErr != nil {
+				errs = append(errs, statusErr500Wrap("compose up failed", upErr))
+			}
+			if err := h.WritePolicy(); err != nil && !errors.Is(err, errGateDirectory) {
+				errs = append(errs, fmt.Errorf("gate files: %w", err))
 			}
 		}
 	}
@@ -719,6 +752,120 @@ func (h *Hub) revokeAll(ctx context.Context, t *templates.Template, c *templates
 	return nil
 }
 
+// dropAIEntries removes every Hub-side credential entry of a companion
+// (the gate stops using them at its next reload).
+func (h *Hub) dropAIEntries(id, companion string) error {
+	for _, e := range h.creds().Entries() {
+		if e.Instance == id && e.Companion == companion {
+			if err := h.creds().Remove(e.Instance, e.Companion, e.User); err != nil {
+				return statusErr(http.StatusInternalServerError, "companion %s: dropping its credentials: %v", companion, err)
+			}
+		}
+	}
+	return nil
+}
+
+// setRevokePending sets or clears a companion's RevokePending (saved).
+func (h *Hub) setRevokePending(id, companion string, pending bool) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	a, ok := h.st.AIInstances[id]
+	if !ok {
+		return nil
+	}
+	c, ok := a.Companions[companion]
+	if !ok || c.RevokePending == pending {
+		return nil
+	}
+	c.RevokePending = pending
+	a.Companions = maps.Clone(a.Companions)
+	a.Companions[companion] = c
+	h.st.AIInstances[id] = a
+	if err := h.saveStateLocked(); err != nil {
+		c.RevokePending = !pending
+		a.Companions[companion] = c
+		h.st.AIInstances[id] = a
+		return err
+	}
+	return nil
+}
+
+// runPendingRevokes runs revoke_all for every companion of t with
+// RevokePending (caller holds lockApp and aiLock; the containers are up,
+// the pending companions not rendered). A success clears the flag (and,
+// for a switched-on companion, runs on_change); a failure keeps it, sets
+// the companion's LastError and is returned. again: a switched-on
+// companion became renderable — compose up and the gate file again.
+func (h *Hub) runPendingRevokes(ctx context.Context, t *templates.Template) (again bool, err error) {
+	h.mu.RLock()
+	var pending []*templates.Companion
+	on := map[string]state.AICompanion{}
+	for name, c := range h.st.AIInstances[t.ID].Companions {
+		if !c.RevokePending {
+			continue
+		}
+		if comp := companionOf(t, name); comp != nil {
+			pending = append(pending, comp)
+			on[name] = c
+		}
+	}
+	h.mu.RUnlock()
+	sort.Slice(pending, func(i, j int) bool { return pending[i].Name < pending[j].Name })
+	var errs []error
+	for _, c := range pending {
+		if rerr := h.revokeAll(ctx, t, c); rerr != nil {
+			log.Printf("ai: %s/%s: the owed revoke_all failed (the companion stays off): %v", t.ID, c.Name, rerr)
+			h.setAIError(t.ID, c.Name, rerr.Error())
+			errs = append(errs, rerr)
+			continue
+		}
+		if serr := h.setRevokePending(t.ID, c.Name, false); serr != nil {
+			errs = append(errs, serr)
+			continue
+		}
+		h.setAIError(t.ID, c.Name, "")
+		if s := on[c.Name]; s.Enabled {
+			again = true
+			if oerr := h.onChange(ctx, t, c, s); oerr != nil {
+				h.setAIError(t.ID, c.Name, oerr.Error())
+				errs = append(errs, oerr)
+			}
+		}
+	}
+	return again, errors.Join(errs...)
+}
+
+// pendingRevokesAfterStart is startUp's step (after the up and the start
+// hooks, under lockApp): the owed revoke_alls, unless the instance's AI
+// lock is held — then its holder (UpdateInstanceAI) runs them itself. A
+// companion they made renderable is applied by a queued restart.
+func (h *Hub) pendingRevokesAfterStart(t *templates.Template) {
+	h.mu.RLock()
+	owed := false
+	for _, c := range h.st.AIInstances[t.ID].Companions {
+		owed = owed || c.RevokePending
+	}
+	h.mu.RUnlock()
+	if !owed {
+		return
+	}
+	m, _ := h.aiLocks.LoadOrStore(t.ID, &sync.Mutex{})
+	mu := m.(*sync.Mutex)
+	if !mu.TryLock() {
+		return
+	}
+	again, err := h.runPendingRevokes(context.Background(), t)
+	mu.Unlock()
+	if err != nil {
+		h.finishOp(t.ID, OpAI, err, false)
+	}
+	if again {
+		h.writePolicyLogged()
+		tc := *t
+		h.goBackground(func() { h.Restart(tc) })
+	}
+}
+
 // onChange runs the template's ai.on_change hook (none: nothing).
 func (h *Hub) onChange(ctx context.Context, t *templates.Template, c *templates.Companion, s state.AICompanion) error {
 	if t.Manifest.AI.OnChange == "" {
@@ -902,6 +1049,9 @@ func (h *Hub) InstanceAI(id string) (*InstanceAIView, error) {
 			cv.Status = "failed"
 		case !s.Enabled:
 			cv.Status = "off"
+		case s.RevokePending:
+			// Off until the next start's revoke_all succeeds.
+			cv.Status = "revoke_pending"
 		case v.MasterOff || v.Refused != "":
 			cv.Status = "unavailable"
 		default:
