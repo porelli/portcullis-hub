@@ -69,6 +69,10 @@ func (h *Hub) deleteInstance(id, confirm string, actor directory.Actor, ready fu
 		return res, err
 	}
 	defer unlock()
+	// lockApp → aiLock (G35, §15.5): a mint that holds it finishes first
+	// (its entry is dropped in step 6); one that waits sees the instance
+	// deleting, then gone.
+	defer h.lifecycleAILock(id)()
 	h.mu.RLock()
 	tg, ok := h.targetLocked(id)
 	h.mu.RUnlock()
@@ -314,6 +318,11 @@ func (h *Hub) deleteSteps(id string, actor directory.Actor, res *DeleteResult) e
 	// are in the delete's backup.
 	if err := h.removeSecrets(id); err != nil {
 		return fmt.Errorf("removing the settings store of %s: %w", id, err)
+	}
+	// Its AI credential entries (mcp-credentials.json): the app and its
+	// data are gone; the gate never sees them again.
+	if err := h.dropInstanceAIEntries(id); err != nil {
+		return fmt.Errorf("removing the AI credentials of %s: %w", id, err)
 	}
 	h.opsMu.Lock()
 	delete(h.ops, id)

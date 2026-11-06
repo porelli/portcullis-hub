@@ -52,7 +52,11 @@ func LoadMCPSecret(path string) (secret string, ok bool, err error) {
 	case errors.Is(err, fs.ErrNotExist):
 		return "", false, nil
 	case err != nil:
-		return "", false, fmt.Errorf("HUB_MCP_GATE_SECRET_FILE %s: %v", path, errors.Unwrap(err))
+		cause := errors.Unwrap(err)
+		if cause == nil {
+			cause = err
+		}
+		return "", false, fmt.Errorf("HUB_MCP_GATE_SECRET_FILE %s: %v", path, cause)
 	}
 	defer clear(b)
 	s := strings.TrimSpace(string(b))

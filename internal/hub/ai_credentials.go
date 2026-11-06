@@ -86,7 +86,16 @@ func (h *Hub) MintCredential(ctx context.Context, resource, user string) (*MintR
 		}
 		return nil, statusErr(http.StatusForbidden, "not in the population")
 	}
-	ch := h.mints.DoChan(resource+"\x00"+user, func() (any, error) {
+	ch := h.mints.DoChan(resource+"\x00"+user, func() (v any, err error) {
+		// A panic would otherwise kill the Hub (singleflight re-panics in
+		// a new goroutine with DoChan). The value is never formatted: it
+		// could hold hook output.
+		defer func() {
+			if recover() != nil {
+				log.Printf("ai: mint: internal error (panic recovered)")
+				v, err = nil, statusErr(http.StatusInternalServerError, "mint: internal error")
+			}
+		}()
 		mctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), mintTimeout)
 		defer cancel()
 		return h.mint(mctx, resource, user)
@@ -131,26 +140,49 @@ func (h *Hub) mintTarget(m *directory.Membership, resource, user string) (aigate
 	return r, nil
 }
 
-// mint is one flight of MintCredential.
-func (h *Hub) mint(ctx context.Context, resource, user string) (*MintResult, error) {
-	// A fresh directory snapshot: never the last gate file's population.
+// freshMembership is a directory snapshot for a mint (never the last
+// gate file's population): a directory problem is 503 — 502 is
+// mint_failed to the gate.
+func (h *Hub) freshMembership(ctx context.Context) (*directory.Membership, error) {
 	m, err := h.membership(ctx)
 	if err != nil {
 		var se *StatusError
 		if errors.As(err, &se) && se.Status != http.StatusServiceUnavailable {
-			// 502 is mint_failed to the gate: a directory problem is 503.
 			return nil, &StatusError{Status: http.StatusServiceUnavailable, Err: err}
 		}
+		return nil, err
+	}
+	return m, nil
+}
+
+// mint is one flight of MintCredential.
+func (h *Hub) mint(ctx context.Context, resource, user string) (*MintResult, error) {
+	m, err := h.freshMembership(ctx)
+	if err != nil {
 		return nil, err
 	}
 	r, err := h.mintTarget(m, resource, user)
 	if err != nil {
 		return nil, err
 	}
-	// The instance's AI lock (G35: never lockApp), then the same checks
-	// again: a switch-off, mode change or restore that held the lock may
-	// have changed the state meanwhile.
-	defer h.aiLock(r.Instance)()
+	// The instance's AI lock (G35: never lockApp; a lifecycle operation
+	// holds it for its whole run), waiting at most what is left of the
+	// mint's budget (503 then). Then everything again, from a NEW
+	// directory snapshot: the person may have left while we waited, and
+	// a switch-off, mode change, restore or delete that held the lock may
+	// have changed the state.
+	wait := mintTimeout
+	if dl, ok := ctx.Deadline(); ok {
+		wait = time.Until(dl)
+	}
+	unlock, ok := h.aiTryLock(r.Instance, wait)
+	if !ok {
+		return nil, statusErr(http.StatusServiceUnavailable, "companion %s: the instance is busy; try again", r.Companion)
+	}
+	defer unlock()
+	if m, err = h.freshMembership(ctx); err != nil {
+		return nil, err
+	}
 	again, err := h.mintTarget(m, resource, user)
 	if err != nil {
 		return nil, err
@@ -158,9 +190,13 @@ func (h *Hub) mint(ctx context.Context, resource, user string) (*MintResult, err
 	if again.Instance != r.Instance || again.Companion != r.Companion || again.Mode != r.Mode {
 		return nil, statusErr(http.StatusNotFound, "not a current app_token companion resource")
 	}
+	var revoking *aigate.Credential
 	for _, e := range h.creds().Entries() {
-		if e.Instance == r.Instance && e.Companion == r.Companion && e.User == user && e.State == aigate.StateActive {
-			return &MintResult{ID: e.ID}, nil
+		if e.Instance == r.Instance && e.Companion == r.Companion && e.User == user {
+			if e.State == aigate.StateActive {
+				return &MintResult{ID: e.ID}, nil
+			}
+			revoking = &e
 		}
 	}
 	h.mu.RLock()
@@ -177,6 +213,17 @@ func (h *Hub) mint(ctx context.Context, resource, user string) (*MintResult, err
 	if c == nil || c.Identity.Mode != templates.IdentityAppToken || c.Identity.Mint == "" {
 		return nil, statusErr(http.StatusNotFound, "not a current app_token companion resource")
 	}
+	target := r.Instance + "/" + r.Companion + "/" + user
+	actor := directory.Human(user)
+	if revoking != nil {
+		// Never Put over a revoking entry: its app-side credential must
+		// be revoked first (the entry is the only record of it). A
+		// failure keeps it and refuses the mint.
+		if err := h.revokeEntry(ctx, &t, c, user, revoking.ID); err != nil {
+			h.mintFailed(&t, c, actor, target, err.Error())
+			return nil, errMintFailed(c.Name)
+		}
+	}
 	name, err := mintName()
 	if err != nil {
 		return nil, statusErr(http.StatusInternalServerError, "companion %s: %v", c.Name, err)
@@ -186,8 +233,6 @@ func (h *Hub) mint(ctx context.Context, resource, user string) (*MintResult, err
 		scopes = []string{}
 	}
 	stdin, _ := json.Marshal(aiMintIn{Action: "mint", User: user, Instance: r.Instance, Companion: r.Companion, Name: name, Mode: r.Mode, Scopes: scopes})
-	target := r.Instance + "/" + r.Companion + "/" + user
-	actor := directory.Human(user)
 
 	out, exit, u := h.runAIHookExit(ctx, &t, c.Identity.Mint, stdin)
 	defer clear(out)
@@ -232,9 +277,11 @@ func (h *Hub) mintFailed(t *templates.Template, c *templates.Companion, actor di
 }
 
 // clearMintError clears the companion's last error if it was a mint's
-// (a lifecycle failure stays until the lifecycle step succeeds).
+// (or its revoke of a revoking entry); a lifecycle failure stays until
+// the lifecycle step succeeds.
 func (h *Hub) clearMintError(id string, c *templates.Companion) {
-	if strings.HasPrefix(h.aiError(id, c.Name), "hook "+c.Identity.Mint+":") {
+	e := h.aiError(id, c.Name)
+	if strings.HasPrefix(e, "hook "+c.Identity.Mint+":") || (c.Identity.Revoke != "" && strings.HasPrefix(e, "hook "+c.Identity.Revoke+":")) {
 		h.setAIError(id, c.Name, "")
 	}
 }
@@ -244,6 +291,34 @@ type aiRevokeIn struct {
 	Action string   `json:"action"`
 	User   string   `json:"user"`
 	IDs    []string `json:"ids"`
+}
+
+// revokeEntry revokes the person's revoking entry id (the revoke hook
+// with ids [id]) and, on success, removes the entry; audited
+// ai.credential.revoke. Caller holds aiLock. The error is the redacted
+// hook error (or the store's), for LastError.
+func (h *Hub) revokeEntry(ctx context.Context, t *templates.Template, c *templates.Companion, user, id string) error {
+	target := t.ID + "/" + c.Name + "/" + user
+	if c.Identity.Revoke == "" {
+		err := fmt.Errorf("companion %s: no revoke hook for the revoking credential %s", c.Name, id)
+		h.auditAI(directory.Human(user), "ai.credential.revoke", target, "id "+id, err)
+		return err
+	}
+	stdin, _ := json.Marshal(aiRevokeIn{Action: "revoke", User: user, IDs: []string{id}})
+	out, u := h.runAIHook(ctx, t, c.Identity.Revoke, stdin)
+	clear(out)
+	if !u.OK {
+		err := errors.New(u.Error)
+		h.auditAI(directory.Human(user), "ai.credential.revoke", target, "id "+id, err)
+		return err
+	}
+	if err := h.creds().Remove(t.ID, c.Name, user); err != nil {
+		err = fmt.Errorf("companion %s: removing the revoked credential %s: %v", c.Name, id, err)
+		h.auditAI(directory.Human(user), "ai.credential.revoke", target, "id "+id, err)
+		return err
+	}
+	h.auditAI(directory.Human(user), "ai.credential.revoke", target, "id "+id, nil)
+	return nil
 }
 
 // revokeOrphan revokes a just-minted credential that couldn't be stored.
@@ -384,4 +459,17 @@ func topLevelMembers(b []byte) int {
 		return -1
 	}
 	return members
+}
+
+// dropInstanceAIEntries removes every AI credential entry of instance id
+// (its delete; caller holds lockApp → aiLock).
+func (h *Hub) dropInstanceAIEntries(id string) error {
+	for _, e := range h.creds().Entries() {
+		if e.Instance == id {
+			if err := h.creds().Remove(e.Instance, e.Companion, e.User); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }

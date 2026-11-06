@@ -469,6 +469,9 @@ type Hub struct {
 	// companion's last error, redacted (under aiErrMu, memory only).
 	aiKC    AIKeycloak
 	aiLocks sync.Map
+	// aiHeld: instances whose AI lock a lifecycle operation holds
+	// (lifecycleAILock).
+	aiHeld  sync.Map
 	aiErrMu sync.Mutex
 	aiErrs  map[string]string
 	// aiReapply: per instance, the companions whose last change failed

@@ -1,10 +1,13 @@
 package httpapi
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net/http"
+	"slices"
 )
 
 // The gate ⇄ Hub internal API (contract §15.7), on the MCP listener only
@@ -25,25 +28,67 @@ func (s *Server) registerInternal(mux routeMux) {
 }
 
 // decodeInternal decodes r's body strictly into v; false = answered (400
-// a bad body, 413 over 64 KiB). The message never quotes the body.
-func decodeInternal(w http.ResponseWriter, r *http.Request, v any) bool {
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, internalBodyMax))
-	dec.DisallowUnknownFields()
-	err := dec.Decode(v)
-	if err == nil {
-		if err = dec.Decode(&struct{}{}); err == io.EOF {
-			return true
-		} else if err == nil {
-			err = errors.New("trailing data")
-		}
-	}
-	var tooBig *http.MaxBytesError
-	if errors.As(err, &tooBig) {
-		writeJSONStatus(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "body over 64 KiB"})
+// a bad body, 413 over 64 KiB). keys are v's exact JSON names: like the
+// gate's strict(), the top level must be one object whose keys are among
+// them, spelled exactly (encoding/json would match "User" or "USER" to
+// "user") and never repeated (it would keep the last); then
+// DisallowUnknownFields and no trailing data. The message never quotes
+// the body.
+func decodeInternal(w http.ResponseWriter, r *http.Request, v any, keys ...string) bool {
+	bad := func() bool {
+		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "body must be one JSON object with exactly the documented fields"})
 		return false
 	}
-	writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "body must be one JSON object with exactly the documented fields"})
-	return false
+	b, err := io.ReadAll(http.MaxBytesReader(w, r.Body, internalBodyMax))
+	if err != nil {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			writeJSONStatus(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "body over 64 KiB"})
+			return false
+		}
+		return bad()
+	}
+	if !exactKeys(b, keys) {
+		return bad()
+	}
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	if dec.Decode(v) != nil {
+		return bad()
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return bad()
+	}
+	return true
+}
+
+// exactKeys: b is one JSON object whose top-level keys are each in
+// allowed (exact spelling) and appear once.
+func exactKeys(b []byte, allowed []string) bool {
+	dec := json.NewDecoder(bytes.NewReader(b))
+	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
+		return false
+	}
+	seen := map[string]bool{}
+	for dec.More() {
+		t, err := dec.Token()
+		if err != nil {
+			return false
+		}
+		k, ok := t.(string)
+		if !ok || seen[k] || !slices.Contains(allowed, k) {
+			return false
+		}
+		seen[k] = true
+		var skip json.RawMessage
+		if dec.Decode(&skip) != nil {
+			return false
+		}
+	}
+	if t, err := dec.Token(); err != nil || t != json.Delim('}') {
+		return false
+	}
+	return true
 }
 
 // handleInternalCredentials: POST /internal/credentials {"resource",
@@ -56,7 +101,7 @@ func (s *Server) handleInternalCredentials(w http.ResponseWriter, r *http.Reques
 		Resource *string `json:"resource"`
 		User     *string `json:"user"`
 	}
-	if !decodeInternal(w, r, &req) {
+	if !decodeInternal(w, r, &req, "resource", "user") {
 		return
 	}
 	if req.Resource == nil || req.User == nil || *req.Resource == "" || *req.User == "" {
@@ -68,10 +113,13 @@ func (s *Server) handleInternalCredentials(w http.ResponseWriter, r *http.Reques
 		switch code := errStatus(err, http.StatusInternalServerError); code {
 		case http.StatusBadGateway:
 			writeJSONStatus(w, code, map[string]string{"code": "mint_failed"})
-		case http.StatusForbidden, http.StatusNotFound:
-			writeJSONStatus(w, code, map[string]string{"error": http.StatusText(code)})
 		default:
-			writeJSONStatus(w, code, map[string]string{"error": clipMessage(err.Error(), 500)})
+			// 403 / 404 and every answer outside the contract (503, 500):
+			// a fixed body; the detail only in the log.
+			if code != http.StatusForbidden && code != http.StatusNotFound {
+				log.Printf("internal api: credentials for %q: %d: %s", clipMessage(*req.User, 64), code, clipMessage(err.Error(), 500))
+			}
+			writeJSONStatus(w, code, map[string]string{"error": http.StatusText(code)})
 		}
 		return
 	}

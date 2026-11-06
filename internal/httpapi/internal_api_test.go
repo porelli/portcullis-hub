@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -585,6 +586,12 @@ func TestMintCredential(t *testing.T) {
 			t.Errorf("audit holds stdout: %+v", a)
 		}
 	}
+	// An answer outside the contract (the directory down: 503) has a
+	// fixed body; the detail is only logged.
+	e.s.Hub.SetPeople(nil)
+	if c, b := e.post(t, "/internal/credentials", e.mintBody("dave")); c != 503 || b != `{"error":"Service Unavailable"}` {
+		t.Errorf("directory down = %d %s", c, b)
+	}
 }
 
 // TestMintRefusedWhenOff: no mint (404) while the companion is off, owes
@@ -640,45 +647,100 @@ func TestMintRefusedWhenOff(t *testing.T) {
 
 // TestConcurrentMintSingleFlight (Review Focus 2): 4 concurrent POST
 // /internal/credentials for alice → one hook run, four 200 with the
-// same id.
+// same id; a failing hook → one run, four mint_failed, one error audit;
+// two people → two runs, each their own id.
 func TestConcurrentMintSingleFlight(t *testing.T) {
-	e := newMCPEnv(t, nil)
-	e.eng.script(mintAnswer(`{"credential":"c-shared","id":"42"}`))
-	gate := make(chan struct{})
-	e.eng.mu.Lock()
-	e.eng.gate = gate
-	e.eng.mu.Unlock()
 	type ans struct {
 		code int
 		body string
 	}
-	answers := make(chan ans, 4)
-	for range 4 {
-		go func() {
-			c, b := e.post(t, "/internal/credentials", e.mintBody("alice"))
-			answers <- ans{c, b}
-		}()
-	}
-	// Wait until the one flight is inside the hook, give the others time
-	// to join it, then let it finish.
-	deadline := time.Now().Add(10 * time.Second)
-	for len(e.eng.runs("/mint")) == 0 && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
-	}
-	time.Sleep(200 * time.Millisecond)
-	close(gate)
-	for range 4 {
-		a := <-answers
-		if a.code != 200 || a.body != `{"id":"42"}` {
-			t.Errorf("answer = %d %s", a.code, a.body)
+	// concurrently posts one mint per user (in that order) with the hook
+	// held until every flight that can start has, then released.
+	concurrently := func(e *mcpEnv, users ...string) []ans {
+		gate := make(chan struct{})
+		e.eng.mu.Lock()
+		e.eng.gate = gate
+		e.eng.mu.Unlock()
+		answers := make(chan ans, len(users))
+		for _, u := range users {
+			go func() {
+				c, b := e.post(t, "/internal/credentials", e.mintBody(u))
+				answers <- ans{c, b}
+			}()
 		}
+		deadline := time.Now().Add(10 * time.Second)
+		for len(e.eng.runs("/mint")) == 0 && time.Now().Before(deadline) {
+			time.Sleep(5 * time.Millisecond)
+		}
+		// Give the others time to join the flight (or queue on the AI
+		// lock), then let the hook run.
+		time.Sleep(300 * time.Millisecond)
+		close(gate)
+		var out []ans
+		for range users {
+			out = append(out, <-answers)
+		}
+		return out
 	}
-	if n := len(e.eng.runs("/mint")); n != 1 {
-		t.Errorf("mint hook ran %d times, want 1", n)
-	}
-	if n := len(e.auditOf(t, "ai.credential.mint")); n != 1 {
-		t.Errorf("%d mint audits, want 1", n)
-	}
+	t.Run("success", func(t *testing.T) {
+		e := newMCPEnv(t, nil)
+		e.eng.script(mintAnswer(`{"credential":"c-shared","id":"42"}`))
+		for _, a := range concurrently(e, "alice", "alice", "alice", "alice") {
+			if a.code != 200 || a.body != `{"id":"42"}` {
+				t.Errorf("answer = %d %s", a.code, a.body)
+			}
+		}
+		if n := len(e.eng.runs("/mint")); n != 1 {
+			t.Errorf("mint hook ran %d times, want 1", n)
+		}
+		if n := len(e.auditOf(t, "ai.credential.mint")); n != 1 {
+			t.Errorf("%d mint audits, want 1", n)
+		}
+	})
+	t.Run("failure", func(t *testing.T) {
+		e := newMCPEnv(t, nil)
+		e.eng.script(func(in docker.ExecInput) *docker.ExecSplitResult {
+			return &docker.ExecSplitResult{ExecID: "x", ExitCode: 1, Stderr: []byte("app down")}
+		})
+		for _, a := range concurrently(e, "alice", "alice", "alice", "alice") {
+			if a.code != 502 || a.body != `{"code":"mint_failed"}` {
+				t.Errorf("answer = %d %s", a.code, a.body)
+			}
+		}
+		if n := len(e.eng.runs("/mint")); n != 1 {
+			t.Errorf("mint hook ran %d times, want 1", n)
+		}
+		au := e.auditOf(t, "ai.credential.mint")
+		if len(au) != 1 || au[0].Result != "error" {
+			t.Errorf("mint audits = %+v, want one error", au)
+		}
+	})
+	t.Run("keys", func(t *testing.T) {
+		e := newMCPEnv(t, nil)
+		e.ll.AddUser("carol", "carol@example.org", "Carol", "", "users_aiapp")
+		e.eng.script(func(in docker.ExecInput) *docker.ExecSplitResult {
+			var v struct{ User string }
+			json.Unmarshal(in.Stdin, &v)
+			return &docker.ExecSplitResult{ExecID: "x", Stdout: []byte(`{"credential":"c-` + v.User + `","id":"id-` + v.User + `"}`)}
+		})
+		got := concurrently(e, "alice", "carol")
+		if got[0] == got[1] {
+			t.Errorf("both answers equal: %v", got)
+		}
+		ids := map[string]bool{}
+		for _, a := range got {
+			if a.code != 200 {
+				t.Errorf("answer = %d %s", a.code, a.body)
+			}
+			ids[a.body] = true
+		}
+		if !ids[`{"id":"id-alice"}`] || !ids[`{"id":"id-carol"}`] {
+			t.Errorf("answers = %v", got)
+		}
+		if n := len(e.eng.runs("/mint")); n != 2 {
+			t.Errorf("mint hook ran %d times, want 2", n)
+		}
+	})
 }
 
 // TestInternalAPIStrictJSON (§15.7): unknown fields, missing ones,
@@ -695,6 +757,12 @@ func TestInternalAPIStrictJSON(t *testing.T) {
 		`{"resource":1,"user":"alice"}`,
 		`{"resource":"` + aiappResource + `","user":null}`,
 		`[]`, `null`, ``, `{`,
+		// Case variants and duplicates (encoding/json would accept them).
+		`{"resource":"` + aiappResource + `","User":"alice"}`,
+		`{"Resource":"` + aiappResource + `","user":"alice"}`,
+		`{"resource":"` + aiappResource + `","USER":"alice"}`,
+		`{"resource":"` + aiappResource + `","user":"bob","user":"alice"}`,
+		`{"resource":"https://x.example.org/mcp","resource":"` + aiappResource + `","user":"alice"}`,
 	} {
 		if c, b := e.post(t, "/internal/credentials", body); c != 400 || strings.Contains(b, "alice") {
 			t.Errorf("%.60s = %d %s, want 400", body, c, b)

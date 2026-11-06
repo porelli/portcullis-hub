@@ -227,6 +227,7 @@ func (h *Hub) restoreInstance(id, archive string, actor directory.Actor, ready f
 		return res, err
 	}
 	defer unlock()
+	defer h.lifecycleAILock(id)() // lockApp → aiLock (G35, §15.5)
 	view, e, err := h.restoreTarget(id)
 	if err != nil {
 		return res, err
@@ -476,6 +477,7 @@ func (h *Hub) RecoverRestores() {
 				return
 			}
 			defer unlock()
+			defer h.lifecycleAILock(id)() // lockApp → aiLock (G35)
 			h.mu.RLock()
 			e := h.st.Instances[id]
 			h.mu.RUnlock()
@@ -751,6 +753,7 @@ func (h *Hub) restoreInstanceAs(archive, newID string, actor directory.Actor, ho
 		return res, err
 	}
 	defer unlock()
+	defer h.lifecycleAILock(newID)() // lockApp → aiLock (G35)
 	if ready != nil {
 		h.mu.RLock()
 		_, exists := h.st.Instances[newID]

@@ -38,8 +38,15 @@ import (
 // state-derived scopes and gate file) changes: no hook, no compose.
 //
 // Locks: lockApp (the lifecycle try-lock) → aiLock (a waiting per-instance
-// mutex; Task 13's mint and revoke take only it). Never Hub.mu across a
-// Keycloak, docker, hook or gate call.
+// mutex). Every lifecycle operation that changes what AI may use —
+// switching AI (UpdateInstanceAI), restore, restore-as, the restore
+// recovery, delete and disable — takes aiLock right after lockApp and
+// holds it to the end (lifecycleAILock; G35, §15.5); mint and revoke take
+// only aiLock (Task 13). Nothing holding aiLock ever waits for lockApp
+// (a restart they need is backgrounded), and a start inside such an
+// operation runs the owed AI hooks under the operation's hold
+// (pendingAIAfterStart, aiHeld). Never Hub.mu across a Keycloak, docker,
+// hook or gate call.
 
 // AIKeycloak is the Keycloak side of the mcp:* scopes and the Hub's AI
 // clients (keycloak.Client; ai_clients.go).
@@ -71,6 +78,19 @@ func (h *Hub) aiLock(id string) func() {
 	mu := m.(*sync.Mutex)
 	mu.Lock()
 	return mu.Unlock
+}
+
+// lifecycleAILock is aiLock for a lifecycle operation: the caller holds
+// lockApp(id). While it is held, aiHeld marks it, so the operation's own
+// start (pendingAIAfterStart, which runs under the same lockApp) doesn't
+// wait for the lock it already holds.
+func (h *Hub) lifecycleAILock(id string) func() {
+	unlock := h.aiLock(id)
+	h.aiHeld.Store(id, struct{}{})
+	return func() {
+		h.aiHeld.Delete(id)
+		unlock()
+	}
 }
 
 // aiTryLock takes instance id's AI lock, waiting at most d (polling every
@@ -1017,7 +1037,15 @@ func (h *Hub) pendingAIAfterStart(t *templates.Template) {
 	if _, applying := h.aiApplying.Load(t.ID); applying {
 		return
 	}
-	unlock, ok := h.aiTryLock(t.ID, aiPendingWait)
+	var unlock func()
+	ok := true
+	if _, held := h.aiHeld.Load(t.ID); held {
+		// The lifecycle operation this start belongs to (it holds
+		// lockApp, so nobody else can have set aiHeld) holds the AI lock.
+		unlock = func() {}
+	} else {
+		unlock, ok = h.aiTryLock(t.ID, aiPendingWait)
+	}
 	if !ok {
 		err := fmt.Errorf("the owed AI hooks (revoke_all / on_change) didn't run: the AI lock was busy for %s; they run at the next start (the companions stay off until then)", aiPendingWait)
 		log.Printf("ai: %s: %v", t.ID, err)

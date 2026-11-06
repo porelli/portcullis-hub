@@ -564,6 +564,7 @@ func (h *Hub) Disable(id string) error {
 		return err
 	}
 	defer unlock()
+	defer h.lifecycleAILock(id)() // lockApp → aiLock (G35): no mint meanwhile
 	return h.finishOp(id, OpDisable, h.disableLocked(id), false)
 }
 
