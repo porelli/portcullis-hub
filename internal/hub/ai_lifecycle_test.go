@@ -175,9 +175,23 @@ func TestSetHostsMovesMCPResource(t *testing.T) {
 	if resourceByURL(g, tokResource) != nil || resourceByURL(g, oldHdrURL) != nil {
 		t.Errorf("gate still lists the old URLs: %v", urls(g))
 	}
-	// My apps lists this app only once it has per-person parts (its AI
-	// card is Task 21's, built from the gate's resources above); the
-	// portal entry it links to follows the state.
+	// My apps' AI part (Task 21) shows the companions on the new host;
+	// the portal entry it links to follows the state.
+	mv, err := a.h.MyApps(context.Background(), "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gotURLs []string
+	for _, app := range mv.Apps {
+		if app.ID == "aiapp" && app.AI != nil {
+			for _, c := range app.AI.Companions {
+				gotURLs = append(gotURLs, c.URL)
+			}
+		}
+	}
+	if !slices.Equal(gotURLs, []string{movedTok, movedHdr}) {
+		t.Errorf("My apps' AI URLs after the move = %v, want %s and %s", gotURLs, movedTok, movedHdr)
+	}
 	portal, err := os.ReadFile(a.h.portalPath())
 	if err != nil {
 		t.Fatal(err)

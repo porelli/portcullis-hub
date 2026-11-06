@@ -28,17 +28,23 @@ import (
 var peopleSelfTools = []string{"directory", "disconnect_ai", "my_ai_connections", "my_apps", "my_file_share_password", "my_profile"}
 
 // peopleConnKC is the AI Keycloak with per-person connections (MyAI,
-// DisconnectAI): revokes are recorded as user/client.
+// DisconnectAI): revokes are recorded as user/client and drop the
+// connection.
 type peopleConnKC struct {
 	aiScopesKC
 	mu      sync.Mutex
 	conns   map[string][]keycloak.AIConnection
 	revoked []string
+	// err: AIConnections and RevokeAIConnection fail (Keycloak down).
+	err error
 }
 
 func (k *peopleConnKC) AIConnections(_ context.Context, user string, clients []string) ([]keycloak.AIConnection, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	if k.err != nil {
+		return nil, k.err
+	}
 	var out []keycloak.AIConnection
 	for _, c := range k.conns[user] {
 		if slices.Contains(clients, c.Client) {
@@ -51,7 +57,11 @@ func (k *peopleConnKC) AIConnections(_ context.Context, user string, clients []s
 func (k *peopleConnKC) RevokeAIConnection(_ context.Context, user, client string) error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	if k.err != nil {
+		return k.err
+	}
 	k.revoked = append(k.revoked, user+"/"+client)
+	k.conns[user] = slices.DeleteFunc(k.conns[user], func(c keycloak.AIConnection) bool { return c.Client == client })
 	return nil
 }
 
@@ -384,6 +394,9 @@ func TestInvitePersonForm(t *testing.T) {
 	}
 }
 
+// myAppsURL is an app link or companion URL of the test apps.
+var myAppsURL = regexp.MustCompile(`"url":"https://aiapp\.example\.org(/mcp|/hdr/mcp)?"`)
+
 // TestPeopleToolsStripped (G39, G1): directory and my_profile carry no
 // invite link, password or server-invite internals (a server invite is
 // the fixed text); my_file_share_password answers the People page's link
@@ -405,6 +418,12 @@ func TestPeopleToolsStripped(t *testing.T) {
 			txt, isErr := e.people(t, user, tool, map[string]any{})
 			if isErr {
 				t.Errorf("%s's %s = %q", user, tool, txt)
+			}
+			if tool == "my_apps" {
+				// Task 21 (G13): My apps lists AI apps, with the app's
+				// link and its companions' resource URLs; any other
+				// "url" (an invite link) still fails below.
+				txt = myAppsURL.ReplaceAllString(txt, "")
 			}
 			noInviteLink(t, tool, txt)
 			if strings.Contains(txt, p.Password) {

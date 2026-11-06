@@ -35,7 +35,10 @@ import (
 	"github.com/portcullis/hub/internal/folderfix"
 	"github.com/portcullis/hub/internal/freshauth"
 	"github.com/portcullis/hub/internal/hub"
+	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/state"
+
+	"filippo.io/age"
 )
 
 // TestHarness serves the Hub UI against the in-memory fakes (LLDAP,
@@ -89,6 +92,18 @@ import (
 //     message to its parent. A people-listener request's harness_user
 //     cookie picks the user (after X-Harness-User).
 //
+// AI support (plan 4 Task 21; My apps' "Connect your AI" card): the
+// master switch on with a gate recipient, all three AI clients offered
+// and healthy (Claude with the admin flag), the people MCP off (so a
+// person without an AI app sees no card; Settings → AI turns it on);
+// aiapp (Tokens: app_token read and write, Headers: identity_headers
+// read only; users_aiapp: alice, bob) and homeauto ("Home Assistant",
+// app_oauth; users_homeauto: alice) are enabled with every companion on.
+// The AI Keycloak is a fake holding alice's Claude and Claude Code
+// connections and bob's Claude one (Disconnect removes them); the
+// access log has alice's recent requests (one tool name carrying
+// markup) and one of bob's.
+//
 // The directory: root (admin), dana, alice, bob, carol, dave, erin and
 // user01-user55; groups office_milan (alice, bob, erin), it_staff (bob,
 // user07), helpers, and the fixtures' access and admin groups.
@@ -126,6 +141,10 @@ func TestHarness(t *testing.T) {
 	extra["photos"] = [2]string{folderAppManifest, folderAppCompose}
 	extra["samba"] = [2]string{harnessSambaManifest, harnessSambaCompose}
 	extra["smbfixture"] = harnessSMBFixture(t)
+	// AI support (plan 4 Task 21): aiapp and homeauto (an app_oauth app).
+	extra["aiapp"], extra["homeauto"] = harnessAIFixtures(t)
+	aiDir := t.TempDir()
+	aiRecipient, aiGateData := harnessAIFiles(t, aiDir)
 	paddr := os.Getenv("HUB_HARNESS_PEOPLE_ADDR")
 	if paddr == "" {
 		paddr = "127.0.0.1:18889"
@@ -143,8 +162,14 @@ func TestHarness(t *testing.T) {
 				running: map[string][]string{"hookapp": {"app"}, "entryapp": {"app"}, "photos": {"server"}, "samba": {"samba"}, "smbfixture": {"smb"}}}
 			return eng
 		},
-		cfg: func(c *hub.Config) { c.FixerImage = testFixerImage; c.SecretsDir = secrets },
+		cfg: func(c *hub.Config) {
+			c.FixerImage = testFixerImage
+			c.SecretsDir = secrets
+			c.MCPGateRecipientFile = aiRecipient
+			c.MCPGateDataDir = aiGateData
+		},
 		seed: func(st *state.AppState) {
+			seedAIState(st)
 			// alice's file-share password was voided by a restore.
 			voided := time.Now().UTC().Add(-26 * time.Hour)
 			st.Credentials = map[string]map[string]map[string]state.Credential{"smbfixture": {"share_password": {"alice": {
@@ -157,13 +182,14 @@ func TestHarness(t *testing.T) {
 		},
 	})
 	h := e.s.Hub
-	for _, id := range append(slices.Clone(harnessFixtures), "photos", "samba", "smbfixture") {
+	for _, id := range append(slices.Clone(harnessFixtures), "photos", "samba", "smbfixture", "aiapp", "homeauto") {
 		if h.Template(id) == nil {
 			t.Fatalf("fixture %s not loaded (see the log)", id)
 		}
 	}
 	seedDirectory(e)
 	h.SetPeople(harnessPeople{e.s.Directory})
+	seedAI(h)
 
 	// Seed: two extra instances, one enabled, with data; backups, one of
 	// a deleted instance.
@@ -278,6 +304,10 @@ func seedDirectory(e *instEnv) {
 		e.ll.AddGroup("users_"+id, "root", "alice", "bob", "carol")
 		e.ll.AddGroup("admin_"+id, "root", "dave")
 	}
+	e.ll.AddGroup("users_aiapp", "alice", "bob")
+	e.ll.AddGroup("admin_aiapp", "root")
+	e.ll.AddGroup("users_homeauto", "alice")
+	e.ll.AddGroup("admin_homeauto", "root")
 	e.ll.AddGroup("users_dash", "alice", "bob")
 	e.ll.AddGroup("admin_dash", "root")
 	e.ll.AddGroup("users_immich", "alice", "bob", "carol")
@@ -983,4 +1013,96 @@ if (window.parent !== window) window.parent.postMessage(m, '*');
 if (window.opener) window.opener.postMessage(m, '*');
 document.body.append(' posted');
 </script></body></html>`, state)
+}
+
+// harnessAIFixtures are the AI apps: the Hub's aiapp test template and
+// the templates package's app_oauth fixture as "Home Assistant" with an
+// access group.
+func harnessAIFixtures(t *testing.T) (aiapp, homeauto [2]string) {
+	t.Helper()
+	read := func(dir string) [2]string {
+		m, err := os.ReadFile(filepath.Join(dir, "manifest.yaml"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		c, err := os.ReadFile(filepath.Join(dir, "compose.yml"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return [2]string{string(m), string(c)}
+	}
+	aiapp = read(filepath.Join("..", "hub", "testdata", "ai", "aiapp"))
+	homeauto = read(filepath.Join("..", "templates", "testdata", "ai", "oauth"))
+	m := strings.Replace(homeauto[0], "name: OAuth App\n", "name: Home Assistant\n", 1)
+	m = strings.Replace(m, "      label: OAuth App\n", "      label: Home Assistant\n", 1)
+	m = strings.Replace(m, "  group_access: true\n", "  group_access: true\n  access_group: users_homeauto\n", 1)
+	m = strings.Replace(m, "      path: /mcp\n", "      path: /api/mcp\n", 1)
+	homeauto[0] = m
+	return aiapp, homeauto
+}
+
+// harnessAIFiles writes the gate's age recipient and its data directory
+// with the access log (alice's lines, newest last, and one of bob's).
+func harnessAIFiles(t *testing.T, dir string) (recipient, data string) {
+	t.Helper()
+	id, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	recipient = filepath.Join(dir, "age.pub")
+	if err := os.WriteFile(recipient, []byte(id.Recipient().String()+"\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	data = filepath.Join(dir, "mcp-gate-data")
+	if err := os.MkdirAll(data, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	var b strings.Builder
+	for i, l := range []struct{ user, via, instance, companion, resource, tool, decision string }{
+		{"alice", "aggregate", "aiapp", "tok", "https://aiapp.example.org/mcp", "list_issues", "allow"},
+		{"alice", "aggregate", "aiapp", "tok", "https://aiapp.example.org/mcp", "search_repos", "allow"},
+		{"bob", "direct", "aiapp", "tok", "https://aiapp.example.org/mcp", "tool_of_bob", "allow"},
+		{"alice", "direct", "aiapp", "hdr", "https://aiapp.example.org/hdr/mcp", "<img src=x onerror=alert('xss-activity')>", "deny:read_only"},
+		{"alice", "aggregate", "aiapp", "tok", "https://aiapp.example.org/mcp", "delete_repository", "confirm:ABCD-EFGH-IJKL-MNOP-QRST-UVWX-YZ"},
+		{"alice", "direct", "", "", "https://people.example.org/mcp", "my_apps", "allow"},
+	} {
+		line, _ := json.Marshal(map[string]any{"time": now.Add(time.Duration(i-6) * time.Minute).Format(time.RFC3339), "user": l.user,
+			"client": "portcullis-ai-claude", "resource": l.resource, "instance": l.instance, "companion": l.companion, "via": l.via,
+			"method": "tools/call", "tool": l.tool, "args_sha256": strings.Repeat("ab", 32), "decision": l.decision, "upstream_status": 200, "duration_ms": 42})
+		b.Write(append(line, '\n'))
+	}
+	if err := os.WriteFile(filepath.Join(data, hub.AccessLogName), []byte(b.String()), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	return recipient, data
+}
+
+// seedAIState switches AI support on (state): the master switch, Claude
+// with the admin flag, the people MCP off, aiapp and homeauto enabled
+// with every companion on.
+func seedAIState(st *state.AppState) {
+	st.AI.Enabled = true
+	st.AI.Clients.Claude.Admin = true
+	st.AI.PortcullisPeople = false
+	st.Enabled = append(st.Enabled, "aiapp", "homeauto")
+	st.AIInstances = map[string]state.AIInstance{
+		"aiapp":    {Companions: map[string]state.AICompanion{"tok": {Enabled: true, Mode: "read_write"}, "hdr": {Enabled: true, Mode: "read_only"}}},
+		"homeauto": {Companions: map[string]state.AICompanion{"oauth": {Enabled: true, Mode: "read_write"}}},
+	}
+}
+
+// seedAI wires the AI Keycloak fake (alice's and bob's connections) and
+// marks the three AI clients healthy.
+func seedAI(h *hub.Hub) {
+	now := time.Now().UTC()
+	at := func(d time.Duration) *time.Time { x := now.Add(d).Truncate(time.Second); return &x }
+	h.SetAIKeycloak(&peopleConnKC{conns: map[string][]keycloak.AIConnection{
+		"alice": {
+			{Client: keycloak.AIClientIDs.Claude, Consented: at(-72 * time.Hour), LastUsed: at(-2 * time.Minute), Expires: at(27 * 24 * time.Hour)},
+			{Client: keycloak.AIClientIDs.ClaudeCode, Consented: at(-26 * time.Hour), LastUsed: at(-5 * time.Hour), Expires: at(6 * 24 * time.Hour)},
+		},
+		"bob": {{Client: keycloak.AIClientIDs.Claude, Consented: at(-time.Hour), LastUsed: at(-time.Hour), Expires: at(29 * 24 * time.Hour)}},
+	}})
+	h.SetAIClientHealth(map[string]bool{keycloak.AIClientIDs.Claude: true, keycloak.AIClientIDs.ClaudeCode: true, keycloak.AIClientIDs.Generic: true})
 }

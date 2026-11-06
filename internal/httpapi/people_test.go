@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -98,13 +99,9 @@ var peopleAppRoutes = []string{
 	"DELETE /api/me/ai/connections/{client}",
 }
 
-// notYetPeopleRoutes are the peopleAppRoutes Task 21 registers: until it
-// lands the people listener registers the other seven. T21 empties this
-// list, so the test then requires all nine.
-var notYetPeopleRoutes = []string{
-	"GET /api/me/ai",
-	"DELETE /api/me/ai/connections/{client}",
-}
+// notYetPeopleRoutes are peopleAppRoutes not registered yet: none since
+// Task 21 (both allowlist tests require all nine).
+var notYetPeopleRoutes = []string{}
 
 // TestPeopleListenerHasNoAppRoutes: the people mux registers exactly the
 // directory API, peopleAppRoutes, /healthz, the page and its assets —
@@ -116,12 +113,6 @@ func TestPeopleListenerHasNoAppRoutes(t *testing.T) {
 	want := map[string]bool{"/healthz": true, "/": true, "/static/": true}
 	for _, p := range append(append([]string{}, dir.patterns...), peopleAppRoutes...) {
 		want[p] = true
-	}
-	// Task 21 flips this: its two /api/me/ai* routes aren't registered
-	// yet, so exactly seven of the nine are (and the missing two are
-	// those).
-	for _, p := range notYetPeopleRoutes {
-		delete(want, p)
 	}
 	got := map[string]bool{}
 	for _, p := range e.s.peopleMux().patterns {
@@ -147,6 +138,13 @@ func TestPeopleListenerHasNoAppRoutes(t *testing.T) {
 	}
 	if r, _ := doAs(t, e.hub, "root", "GET", "/api/me/apps", ""); r.StatusCode != 404 {
 		t.Errorf("hub GET /api/me/apps = %d, want 404", r.StatusCode)
+	}
+	// The two AI routes are people-only (G12; the confirmation routes are
+	// on both listeners: TestHubListenerConfirmRoutes).
+	for _, rt := range [][2]string{{"GET", "/api/me/ai"}, {"DELETE", "/api/me/ai/connections/portcullis-ai-claude"}} {
+		if r, _ := doAs(t, e.hub, "root", rt[0], rt[1], ""); r.StatusCode != 404 {
+			t.Errorf("hub %s %s = %d, want 404", rt[0], rt[1], r.StatusCode)
+		}
 	}
 	for _, path := range []string{"/api/templates", "/api/settings", "/api/drift", "/api/templates/compose/x",
 		"/api/status", "/api/sources", "/api/portal/apps", "/api/domains", "/api/instances", "/api/backups",
@@ -597,8 +595,8 @@ func TestDirectoryAssetsServed(t *testing.T) {
 
 // TestSettingsAssetHubOnly: the settings panel's script is served on the
 // Hub listener only; the people listener serves just its own assets
-// (directory.js, directory.css, myapps.js, and confirm.js for the
-// confirmation page).
+// (directory.js, directory.css, myapps.js, myai.js — the Connect your AI
+// card —, and confirm.js for the confirmation page).
 func TestSettingsAssetHubOnly(t *testing.T) {
 	e := newPeopleEnv(t)
 	var allow []string
@@ -608,8 +606,8 @@ func TestSettingsAssetHubOnly(t *testing.T) {
 		}
 	}
 	sort.Strings(allow)
-	if strings.Join(allow, ",") != "confirm.js,directory.css,directory.js,freshauth-callback.js,freshauth.js,myapps.js" {
-		t.Errorf("peopleStatic = %v, want exactly confirm.js, directory.css, directory.js, freshauth-callback.js, freshauth.js, myapps.js", allow)
+	if strings.Join(allow, ",") != "confirm.js,directory.css,directory.js,freshauth-callback.js,freshauth.js,myai.js,myapps.js" {
+		t.Errorf("peopleStatic = %v, want exactly confirm.js, directory.css, directory.js, freshauth-callback.js, freshauth.js, myai.js, myapps.js", allow)
 	}
 	if r, b := doAs(t, e.hub, "root", "GET", "/static/settings.js", ""); r.StatusCode != 200 || !strings.HasPrefix(r.Header.Get("Content-Type"), "text/javascript") || !strings.Contains(b, "PortcullisSettings") {
 		t.Errorf("hub settings.js = %d %q", r.StatusCode, r.Header.Get("Content-Type"))
@@ -617,9 +615,12 @@ func TestSettingsAssetHubOnly(t *testing.T) {
 	if r, b := doAs(t, e.people, "bob", "GET", "/static/myapps.js", ""); r.StatusCode != 200 || !strings.HasPrefix(r.Header.Get("Content-Type"), "text/javascript") || !strings.Contains(b, "PortcullisMyApps") {
 		t.Errorf("people myapps.js = %d %q", r.StatusCode, r.Header.Get("Content-Type"))
 	}
+	if r, b := doAs(t, e.people, "bob", "GET", "/static/myai.js", ""); r.StatusCode != 200 || !strings.HasPrefix(r.Header.Get("Content-Type"), "text/javascript") || !strings.Contains(b, "PortcullisMyAI") {
+		t.Errorf("people myai.js = %d %q", r.StatusCode, r.Header.Get("Content-Type"))
+	}
 	_, pb := doAs(t, e.people, "bob", "GET", "/", "")
-	if !strings.Contains(pb, `src="/static/myapps.js"`) || strings.Contains(pb, "settings.js") {
-		t.Error("the people page does not load myapps.js, or loads settings.js")
+	if !strings.Contains(pb, `src="/static/myapps.js"`) || !strings.Contains(pb, `src="/static/myai.js"`) || strings.Contains(pb, "settings.js") {
+		t.Error("the people page does not load myapps.js and myai.js, or loads settings.js")
 	}
 	// The shared folders and doctor UI (plan 2 Task 14): Hub only.
 	for _, a := range []struct{ file, global string }{{"folders.js", "PortcullisFolders"}, {"doctor.js", "PortcullisDoctor"}} {
@@ -703,5 +704,116 @@ func TestPagesMetaNoReferrer(t *testing.T) {
 		if !strings.HasPrefix(rest, `<meta name="referrer" content="no-referrer">`) {
 			t.Errorf("%s: the first element of <head> isn't the no-referrer meta tag", name)
 		}
+	}
+}
+
+// ── Task 21: GET /api/me/ai, DELETE /api/me/ai/connections/{client} ──
+
+// TestMyAICallerOnly: the caller's own connections and access-log lines
+// only (X-Forwarded-User case-folded), no-store; no caller 401; the Hub
+// listener 404; Keycloak down → 503 with the generic text. GET
+// /api/me/apps carries the top-level ai (master on, gate present).
+func TestMyAICallerOnly(t *testing.T) {
+	e, kc := peopleToolEnv(t)
+	for _, u := range []string{"alice", "ALICE"} {
+		r, b := doAs(t, e.ppl, u, "GET", "/api/me/ai", "")
+		if r.StatusCode != 200 || r.Header.Get("Cache-Control") != "no-store" {
+			t.Fatalf("%s: GET /api/me/ai = %d %q %s", u, r.StatusCode, r.Header.Get("Cache-Control"), b)
+		}
+		var v struct {
+			Connections []struct {
+				Client, Label string
+			} `json:"connections"`
+			Activity []struct {
+				User, Tool string
+			} `json:"activity"`
+		}
+		if err := json.Unmarshal([]byte(b), &v); err != nil {
+			t.Fatal(err)
+		}
+		if len(v.Connections) != 1 || v.Connections[0].Client != "portcullis-ai-claude" || v.Connections[0].Label != "Claude" {
+			t.Errorf("%s's connections = %s", u, b)
+		}
+		if len(v.Activity) != 1 || v.Activity[0].User != "alice" || v.Activity[0].Tool != "tool_of_alice" {
+			t.Errorf("%s's activity = %s", u, b)
+		}
+		if strings.Contains(b, "bob") || strings.Contains(b, "portcullis-ai-claude-code") {
+			t.Errorf("%s sees bob's data: %s", u, b)
+		}
+	}
+	if r, _ := doAs(t, e.ppl, "", "GET", "/api/me/ai", ""); r.StatusCode != 401 {
+		t.Errorf("no caller = %d, want 401", r.StatusCode)
+	}
+	if r, _ := doAs(t, e.hub, "root", "GET", "/api/me/ai", ""); r.StatusCode != 404 {
+		t.Errorf("hub listener = %d, want 404", r.StatusCode)
+	}
+	_, b := doAs(t, e.ppl, "alice", "GET", "/api/me/apps", "")
+	if !strings.Contains(b, `"ai":{"aggregate_url":"https://mcp.example.org/mcp"`) {
+		t.Errorf("alice's /api/me/apps has no top-level ai: %s", b)
+	}
+	kc.mu.Lock()
+	kc.err = errors.New("keycloak at 10.0.0.9 refused: secret-detail")
+	kc.mu.Unlock()
+	r, b := doAs(t, e.ppl, "alice", "GET", "/api/me/ai", "")
+	if r.StatusCode != 503 || strings.TrimSpace(b) != directory.GenericUnavailable {
+		t.Errorf("Keycloak down = %d %q, want 503 with the generic text", r.StatusCode, b)
+	}
+}
+
+// TestDisconnectAI: revokes only the caller's consent and offline
+// sessions for that AI client (204, audited ai.connection.revoke as a
+// human), a client id that isn't an AI client 404, no caller 401, the
+// Hub listener 404, Keycloak down 503 generic; refusals count toward the
+// people listener's refused-save limit (429).
+func TestDisconnectAI(t *testing.T) {
+	e, kc := peopleToolEnv(t)
+	if r, b := doAs(t, e.ppl, "Alice", "DELETE", "/api/me/ai/connections/portcullis-ai-claude", ""); r.StatusCode != 204 {
+		t.Fatalf("disconnect = %d %s", r.StatusCode, b)
+	}
+	kc.mu.Lock()
+	revoked := append([]string{}, kc.revoked...)
+	kc.mu.Unlock()
+	if strings.Join(revoked, ",") != "alice/portcullis-ai-claude" {
+		t.Errorf("revoked %v, want only alice's Claude connection", revoked)
+	}
+	var got *directory.AuditEntry
+	for _, a := range readAudit(t, e.audit) {
+		if a.Action == "ai.connection.revoke" {
+			got = &a
+		}
+	}
+	if got == nil || got.Actor != "alice" || got.Target != "alice" || got.Via != "" || got.Client != "" || got.Result != "ok" || got.Detail != "portcullis-ai-claude" {
+		t.Errorf("audit = %+v", got)
+	}
+	for _, c := range []string{"grafana", "portcullis-fresh-auth", "portcullis-forward-auth"} {
+		if r, _ := doAs(t, e.ppl, "alice", "DELETE", "/api/me/ai/connections/"+c, ""); r.StatusCode != 404 {
+			t.Errorf("disconnect %s = %d, want 404", c, r.StatusCode)
+		}
+	}
+	if r, _ := doAs(t, e.ppl, "", "DELETE", "/api/me/ai/connections/portcullis-ai-claude", ""); r.StatusCode != 401 {
+		t.Errorf("no caller = %d, want 401", r.StatusCode)
+	}
+	if r, _ := doAs(t, e.hub, "root", "DELETE", "/api/me/ai/connections/portcullis-ai-claude", ""); r.StatusCode != 404 {
+		t.Errorf("hub listener = %d, want 404", r.StatusCode)
+	}
+	kc.mu.Lock()
+	kc.err = errors.New("keycloak at 10.0.0.9 refused: secret-detail")
+	kc.mu.Unlock()
+	if r, b := doAs(t, e.ppl, "alice", "DELETE", "/api/me/ai/connections/portcullis-ai-claude-code", ""); r.StatusCode != 503 || strings.TrimSpace(b) != directory.GenericUnavailable {
+		t.Errorf("Keycloak down = %d %q, want 503 generic", r.StatusCode, b)
+	}
+	kc.mu.Lock()
+	kc.err = nil
+	kc.mu.Unlock()
+	// Ten refusals in the minute (three above), then 429 — also for a
+	// client that exists; bob is not affected.
+	for i := 0; i < 7; i++ {
+		doAs(t, e.ppl, "alice", "DELETE", "/api/me/ai/connections/nope", "")
+	}
+	if r, _ := doAs(t, e.ppl, "alice", "DELETE", "/api/me/ai/connections/portcullis-ai-claude", ""); r.StatusCode != 429 {
+		t.Errorf("after ten refusals = %d, want 429", r.StatusCode)
+	}
+	if r, _ := doAs(t, e.ppl, "bob", "DELETE", "/api/me/ai/connections/portcullis-ai-claude-code", ""); r.StatusCode != 204 {
+		t.Errorf("bob = %d, want 204", r.StatusCode)
 	}
 }

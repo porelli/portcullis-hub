@@ -323,7 +323,7 @@ func (s *Server) handlePeoplePage(w http.ResponseWriter, r *http.Request) {
 // peopleStatic are the assets people.html and the confirmation page
 // load: the people listener serves these only (never the Hub's
 // index.html or settings.js).
-var peopleStatic = map[string]bool{"directory.js": true, "directory.css": true, "myapps.js": true, "confirm.js": true, "freshauth.js": true, "freshauth-callback.js": true}
+var peopleStatic = map[string]bool{"directory.js": true, "directory.css": true, "myapps.js": true, "myai.js": true, "confirm.js": true, "freshauth.js": true, "freshauth-callback.js": true}
 
 // handlePeopleStatic serves only peopleStatic on the people listener.
 func (s *Server) handlePeopleStatic(w http.ResponseWriter, r *http.Request) {

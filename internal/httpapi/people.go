@@ -65,8 +65,7 @@ func decodeLarge(w http.ResponseWriter, r *http.Request, limit int64, v interfac
 // registerPeopleApps registers the caller-only app routes of the people
 // listener (never the Hub listener): the caller is X-Forwarded-User,
 // lowercased; nothing about anyone else is answered. Contract §5.1 /
-// G12: exactly nine routes — these seven, and Task 21's GET /api/me/ai
-// and DELETE /api/me/ai/connections/{client}.
+// G12: exactly these nine routes.
 func (s *Server) registerPeopleApps(mux routeMux) {
 	mux.HandleFunc("GET /api/me/apps", s.handleMyApps)
 	// The caller's own person-entered values (Task 15A, spec call 32).
@@ -75,9 +74,62 @@ func (s *Server) registerPeopleApps(mux routeMux) {
 	// The caller's own file-sharing credentials (Task 12, plan 3).
 	mux.HandleFunc("POST /api/me/apps/{instance}/credentials/{key}", s.handleCreateCredential)
 	mux.HandleFunc("DELETE /api/me/apps/{instance}/credentials/{key}", s.handleRevokeOwnCredential)
+	// The caller's own AI connections and activity (plan 4 Task 21):
+	// people listener only (404 on the Hub listener).
+	mux.HandleFunc("GET /api/me/ai", s.handleMyAI)
+	mux.HandleFunc("DELETE /api/me/ai/connections/{client}", s.handleDisconnectAI)
 	// The caller's own confirmations (plan 4 Task 14, §15.6): also on the
 	// Hub listener, each answering only for its own.
 	s.registerConfirm(mux)
+}
+
+// handleMyAI answers the caller's (X-Forwarded-User, lowercased) AI
+// connections and their own last 50 access-log lines → 200 hub.MyAIView,
+// no-store. No caller 401; a refusal of the Hub's (4xx) its text; any
+// other failure (Keycloak, the access log) 503 with the generic text,
+// the cause only logged.
+func (s *Server) handleMyAI(w http.ResponseWriter, r *http.Request) {
+	user := strings.ToLower(actor(r))
+	if user == "" {
+		http.Error(w, "no signed-in user (X-Forwarded-User)", http.StatusUnauthorized)
+		return
+	}
+	v, err := s.Hub.MyAI(r.Context(), user)
+	if err != nil {
+		myAIErr(w, "my AI of "+user, err)
+		return
+	}
+	noStore(w)
+	writeJSON(w, v)
+}
+
+// handleDisconnectAI revokes the caller's own consent and offline
+// sessions for one AI client → 204 (also when there was none). 404 for
+// anything but one of the Hub's AI client ids; 429 past the refusal
+// limit; 503 generic when Keycloak can't be changed.
+func (s *Server) handleDisconnectAI(w http.ResponseWriter, r *http.Request) {
+	user := strings.ToLower(actor(r))
+	if user == "" {
+		http.Error(w, "no signed-in user (X-Forwarded-User)", http.StatusUnauthorized)
+		return
+	}
+	if err := s.Hub.DisconnectAI(r.Context(), user, r.PathValue("client"), selfActor(r, user)); err != nil {
+		myAIErr(w, "disconnecting "+user, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// myAIErr: a 4xx StatusError with the Hub's text (it names no one
+// else); everything else 503 with the generic text, the cause logged.
+func myAIErr(w http.ResponseWriter, what string, err error) {
+	var se *hub.StatusError
+	if errors.As(err, &se) && se.Status >= 400 && se.Status < 500 {
+		http.Error(w, se.Error(), se.Status)
+		return
+	}
+	log.Printf("people: %s: %v", what, err)
+	http.Error(w, directory.GenericUnavailable, http.StatusServiceUnavailable)
 }
 
 // entryBody is a person-entered value's body: {"value": <json>}.

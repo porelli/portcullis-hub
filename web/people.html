@@ -24,7 +24,8 @@
 </head>
 <body>
 <!-- The people listener (people.<domain>): People, Groups, Org chart, My
-     apps (myapps.js: the caller's own app settings) and Setup for admins.
+     apps (myapps.js: the caller's own app settings; myai.js: its
+     "Connect your AI" card) and Setup for admins.
      No app or catalog UI here; the API decides what
      each signed-in user may see and do. -->
 <div class="container">
@@ -36,6 +37,7 @@
 </div>
 <script src="/static/directory.js"></script>
 <script src="/static/freshauth.js"></script>
+<script src="/static/myai.js"></script>
 <script src="/static/myapps.js"></script>
 <script>
   if (window.portcullisFreshAuthCallback) {

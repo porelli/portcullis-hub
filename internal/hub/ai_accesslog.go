@@ -22,7 +22,8 @@ import (
 
 // The gate's access log (contract §15.8), a person's AI connections and
 // Disconnect (§5.1 GET /api/me/ai, DELETE /api/me/ai/connections/{client};
-// §8 "Disconnecting"; plan 4 Task 13b). The HTTP routes are Task 21's.
+// §8 "Disconnecting"; plan 4 Task 13b). The HTTP routes are Task 21's
+// (httpapi/people.go, people listener only).
 
 // AccessLogName is the gate's access log in HUB_MCP_GATE_DATA_DIR.
 const AccessLogName = "access.jsonl"
@@ -283,12 +284,21 @@ func (h *Hub) MyAI(ctx context.Context, user string) (*MyAIView, error) {
 // DisconnectAI revokes user's consent and offline sessions for the AI
 // client client (§8): only one of the Hub's AI client ids (else 404);
 // nothing there is fine. Audited ai.connection.revoke (target the user,
-// detail the client).
-func (h *Hub) DisconnectAI(ctx context.Context, user, client string, actor directory.Actor) error {
+// detail the client). The whole call counts toward the people
+// listener's per-caller refusal limit (§5.1 common rules, 429).
+func (h *Hub) DisconnectAI(ctx context.Context, user, client string, actor directory.Actor) (err error) {
 	u, err := myUser(user)
 	if err != nil {
 		return err
 	}
+	if !h.entryLimit.reserve(u, h.entryClock()) {
+		return errEntryLimited
+	}
+	defer func() { h.entryLimit.release(u, h.entryClock(), isRefusal(err)) }()
+	return h.disconnectAI(ctx, u, client, actor)
+}
+
+func (h *Hub) disconnectAI(ctx context.Context, u, client string, actor directory.Actor) error {
 	if !slices.Contains(h.aiClientIDs(), client) {
 		return statusErr(http.StatusNotFound, "no such AI client")
 	}

@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -472,9 +471,8 @@ func TestCredentialRoutesOnCorrectListener(t *testing.T) {
 		}
 	}
 
-	// The allowlist is exactly nine routes (contract §5.1, G12); seven
-	// are registered until Task 21 adds its two /api/me/ai* routes
-	// (notYetPeopleRoutes; Task 21 empties it and this requires nine).
+	// The allowlist is exactly nine routes (contract §5.1, G12), all
+	// registered.
 	if len(peopleAppRoutes) != 9 {
 		t.Errorf("peopleAppRoutes has %d entries, want exactly 9 per contract §5.1", len(peopleAppRoutes))
 	}
@@ -486,12 +484,12 @@ func TestCredentialRoutesOnCorrectListener(t *testing.T) {
 	for _, p := range peopleAppRoutes {
 		if registered[p] {
 			n++
-		} else if !slices.Contains(notYetPeopleRoutes, p) {
+		} else {
 			t.Errorf("people listener lacks app route %q", p)
 		}
 	}
-	if n != 9-len(notYetPeopleRoutes) || len(notYetPeopleRoutes) != 2 {
-		t.Errorf("%d of the 9 app routes registered, want 7 until Task 21 (the missing two: %v)", n, notYetPeopleRoutes)
+	if n != 9 || len(notYetPeopleRoutes) != 0 {
+		t.Errorf("%d of the 9 app routes registered (not yet: %v), want all nine", n, notYetPeopleRoutes)
 	}
 
 	// Verify the credential routes are in the list

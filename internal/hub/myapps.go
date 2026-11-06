@@ -94,6 +94,9 @@ type MyApp struct {
 	Values      []MyValue      `json:"values"`
 	Entries     []MyEntry      `json:"entries"`
 	Credentials []MyCredential `json:"credentials"`
+	// AI: the caller's switched-on companions of this app (Task 21,
+	// contract §5.1); nil = none, or the ai key is off (myAITopLocked).
+	AI *MyAppAI `json:"ai,omitempty"`
 }
 
 // MyAppsView is GET /api/me/apps' answer (F21): the apps, and the
@@ -102,6 +105,10 @@ type MyApp struct {
 type MyAppsView struct {
 	Apps      []MyApp                  `json:"apps"`
 	FreshAuth *freshauth.AuthorizeInfo `json:"fresh_auth,omitempty"`
+	// AI: the aggregate, the offered AI clients and the admin URL (Task
+	// 21, G13); nil while the master switch is off, the gate isn't
+	// present or the caller has no AI resource.
+	AI *MyAITop `json:"ai,omitempty"`
 }
 
 // MyApps lists user's (any case) apps: enabled instances whose
@@ -110,9 +117,9 @@ type MyAppsView struct {
 // credential cards (one per person_secret option, listed for population
 // members even without values or entries: F21), and those whose
 // person-entered options' population holds them, with their own entries
-// (Task 15A); an app with none of them is left out. The directory
-// snapshot is taken before mu; an unavailable directory is the
-// membership error.
+// (Task 15A), and its AI part (Task 21: switched-on companions, G13); an
+// app with none of them is left out. The directory snapshot is taken
+// before mu; an unavailable directory is the membership error.
 func (h *Hub) MyApps(ctx context.Context, user string) (*MyAppsView, error) {
 	user = strings.ToLower(user)
 	m, err := h.membership(ctx)
@@ -120,10 +127,14 @@ func (h *Hub) MyApps(ctx context.Context, user string) (*MyAppsView, error) {
 		return nil, err
 	}
 	info := h.FreshAuthInfo()
+	gate := h.gatePresent()
+	healthy := h.aiClientHealth()
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	out := []MyApp{}
 	secretApps := false
+	aiOn := h.myAIOnLocked(gate)
+	companion := false
 	for i := range h.instances {
 		t := &h.instances[i]
 		if !t.Enabled {
@@ -170,7 +181,11 @@ func (h *Hub) MyApps(ctx context.Context, user string) (*MyAppsView, error) {
 		for _, o := range personSecretOptions(t) {
 			app.Credentials = append(app.Credentials, h.myCredentialLocked(t, o, user))
 		}
-		if len(app.Values) > 0 || len(app.Entries) > 0 || len(app.Credentials) > 0 {
+		if aiOn {
+			app.AI = h.myAppAILocked(t)
+			companion = companion || app.AI != nil
+		}
+		if len(app.Values) > 0 || len(app.Entries) > 0 || len(app.Credentials) > 0 || app.AI != nil {
 			secretApps = secretApps || len(app.Credentials) > 0
 			out = append(out, app)
 		}
@@ -179,6 +194,9 @@ func (h *Hub) MyApps(ctx context.Context, user string) (*MyAppsView, error) {
 	v := &MyAppsView{Apps: out}
 	if secretApps {
 		v.FreshAuth = info
+	}
+	if aiOn {
+		v.AI = h.myAITopLocked(m, user, companion, healthy)
 	}
 	return v, nil
 }

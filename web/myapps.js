@@ -14,8 +14,9 @@
 // password itself is never stored: it lives in one dialog, shown once,
 // and is dropped when the dialog closes or the cards reload), and revoke
 // it (DELETE, no fresh sign-in). Only the caller's own values are ever
-// shown. Registered
-// as an extra tab of PortcullisDirectory by people.html. Vanilla JS, no
+// shown. Apps listed for their AI support only (plan 4 Task 21) carry an
+// AI pill; the "Connect your AI" card above the list is myai.js's.
+// Registered as an extra tab of PortcullisDirectory by people.html. Vanilla JS, no
 // build step.
 //
 // Rules of this file (as directory.js):
@@ -366,7 +367,12 @@
     if (app.icon) h += '<span class="ma-icon" aria-hidden="true">' + esc(app.icon) + '</span>';
     h += '<h3 class="ma-name">' + (url ? '<a href="' + esc(url) + '" target="_blank" rel="noopener noreferrer">' + name + '</a>' : name) + '</h3>';
     if (!url) h += '<span class="pd-pill">No web page</span>';
-    h += '</div><dl class="ma-values">';
+    if (app.ai && (app.ai.companions || []).length) h += '<span class="pd-pill info" title="Use it from your AI assistant: see Connect your AI">AI</span>';
+    h += '</div>';
+    if (!(app.credentials || []).length && !(app.entries || []).length && !(app.values || []).length && app.ai) {
+      h += '<p class="pd-muted ma-applies">No personal settings. You can use it from your AI assistant: see Connect your AI above.</p>';
+    }
+    h += '<dl class="ma-values">';
     for (const c of app.credentials || []) h += credHtml(app, c);
     for (const e of app.entries || []) h += entryHtml(app.id, e);
     for (const v of app.values || []) {
@@ -403,13 +409,17 @@
       box.innerHTML = '<p class="pd-warn">Could not load your apps: ' + esc(text.trim() || ('HTTP ' + res.status)) + '</p>';
       return;
     }
-    let apps = [];
+    let apps = [], view = null;
     el.maFreshAuth = null;
     try {
-      const v = JSON.parse(text);
-      apps = v.apps || [];
-      el.maFreshAuth = v.fresh_auth || null;
-    } catch (_) { /* shown as empty */ }
+      view = JSON.parse(text);
+      apps = view.apps || [];
+      el.maFreshAuth = view.fresh_auth || null;
+    } catch (_) { view = null; /* shown as empty */ }
+    // The "Connect your AI" card (myai.js): none without AI apps and the
+    // aggregate.
+    const aiBox = el.querySelector('[data-mai-box]');
+    if (aiBox && window.PortcullisMyAI) window.PortcullisMyAI.render(aiBox, view);
     // The entries as last answered (a cleared row is redrawn from them).
     el.maEntries = new Map();
     for (const app of apps) for (const e of app.entries || []) el.maEntries.set(app.id + '\u0000' + e.key, e);
@@ -472,7 +482,7 @@
       el.innerHTML = '<div class="pd-head"><h2 class="pd-h3">My apps</h2>' +
         '<button type="button" class="pd-btn secondary sm" data-ma-act="reload">Refresh</button></div>' +
         '<p class="pd-muted ma-intro">Your own settings in the apps you can use, and where each comes from. Administrators set most of them; values with an input are yours to enter.</p>' +
-        '<div data-ma-list></div>';
+        '<div data-mai-box></div><div data-ma-list></div>';
       el.addEventListener('click', e => {
         const b = e.target.closest('[data-ma-act]');
         if (!b || !el.contains(b) || b.disabled) return;
