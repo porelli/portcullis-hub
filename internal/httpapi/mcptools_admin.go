@@ -110,6 +110,15 @@ func badArg(msg string) error {
 	return &hub.StatusError{Status: http.StatusBadRequest, Err: errors.New(msg)}
 }
 
+// appIDOK is the {id} rule of the /api/templates/<verb>/{id} routes
+// (appID: 404 for anything but a valid id).
+func appIDOK(id string) error {
+	if !templates.ValidID(id) {
+		return &hub.StatusError{Status: http.StatusNotFound, Err: errors.New("404 page not found")}
+	}
+	return nil
+}
+
 // instanceIDOK is the {id} rule of the instance routes (instanceID).
 func instanceIDOK(id string) error {
 	if !templates.InstanceIDRe.MatchString(id) && !templates.ValidID(id) {
@@ -120,7 +129,10 @@ func instanceIDOK(id string) error {
 
 // Argument types.
 type (
-	noArgs struct{}
+	noArgs     struct{}
+	statusArgs struct {
+		IncludeDoctor bool `json:"include_doctor,omitempty" jsonschema:"also run the doctor and show its counts (default false)"`
+	}
 	idArgs struct {
 		ID string `json:"id" jsonschema:"the instance id (a template id names its default instance)"`
 	}
@@ -226,9 +238,9 @@ type (
 func (s *Server) registerAdminTools() {
 	for _, t := range []Tool{
 		// ── Overview ──
-		admin("hub_status", "The Hub at a glance: domain, template / enabled / source counts, the last drift check, the doctor's counts and the instances whose last operation failed.",
-			ClassRead, "/api/status", "", func(ctx context.Context, _ directory.Actor, _ noArgs) (any, error) {
-				return s.hubStatus(ctx), nil
+		admin("hub_status", "The Hub at a glance: domain, template / enabled / source counts, the last drift check and the instances whose last operation failed; with include_doctor, the doctor's counts too (it runs the doctor's checks).",
+			ClassRead, "/api/status", "", func(ctx context.Context, _ directory.Actor, in statusArgs) (any, error) {
+				return s.hubStatus(ctx, in.IncludeDoctor), nil
 			}),
 		admin("explain_policy", "An instance's sign-in policy: what applies (its own or the Hub default, intersected with what the app can enforce), the safety score and level, why (notes), the TLS tier, the sign-in mode and public access.",
 			ClassRead, "GET /api/instances/{id}/settings", "", func(ctx context.Context, _ directory.Actor, in idArgs) (any, error) {
@@ -258,18 +270,18 @@ func (s *Server) registerAdminTools() {
 			ClassWrite, "POST /api/instances", "instance.create", func(_ context.Context, a directory.Actor, in createArgs) (any, error) {
 				return s.createInstance(a, in.Template, in.ID, in.Hosts)
 			}),
-		admin("enable_instance", "Enable (start) an instance; its missing groups are created first.",
+		perCall(admin("enable_instance", "Enable (start) an instance; its missing groups are created first. Starting one whose public access is on or whose sign-in is the app's own login needs your confirmation in the browser.",
 			ClassWrite, "/api/templates/enable", "instance.enable", func(_ context.Context, a directory.Actor, in idArgs) (any, error) {
 				return s.enableInstance(a, in.ID)
-			}),
+			}), s.enableClass, idOf, s.enableConsequences),
 		admin("disable_instance", "Disable (stop) an instance; its data is kept.",
 			ClassWrite, "/api/templates/disable", "instance.disable", func(_ context.Context, a directory.Actor, in idArgs) (any, error) {
 				return s.disableInstance(a, in.ID)
 			}),
 		admin("restart_instance", "Restart an enabled instance.",
 			ClassWrite, "/api/templates/restart/", "instance.restart", func(_ context.Context, a directory.Actor, in idArgs) (any, error) {
-				if !templates.ValidID(in.ID) {
-					return nil, &hub.StatusError{Status: http.StatusNotFound, Err: errors.New("404 page not found")}
+				if err := appIDOK(in.ID); err != nil {
+					return nil, err
 				}
 				return s.restartInstance(a, in.ID)
 			}),
@@ -335,17 +347,15 @@ func (s *Server) registerAdminTools() {
 				if err := instanceIDOK(in.ID); err != nil {
 					return nil, err
 				}
+				if in.PlanHash == "" {
+					return nil, badArg("plan_hash is required: preview_settings answers it")
+				}
+				// G46: SaveSettings recomputes the plan (409 when it
+				// differs) and re-checks its stored inputs at the commit.
 				u := in.update()
-				// G46: the plan the admin saw, recomputed now.
-				p, err := s.Hub.PreviewSettings(ctx, in.ID, u)
-				if err != nil {
-					return nil, err
-				}
-				if in.PlanHash == "" || p.PlanHash != in.PlanHash {
-					return nil, &hub.StatusError{Status: http.StatusConflict, Err: errors.New("the settings or who they reach changed since the preview (plan_hash differs): preview again")}
-				}
+				u.ExpectPlanHash = in.PlanHash
 				return s.saveSettings(a, in.ID, u)
-			}), settingsClass, idOf, settingsConsequences),
+			}), s.settingsClass, idOf, settingsConsequences),
 		{Name: "set_secret_setting", Description: "Set a secret setting: the value is entered on the Hub's settings page, never in the chat. After you entered it, this reports whether it is set and when.",
 			Class: ClassSecret, Scope: ScopeAdmin, Twin: "PUT /api/instances/{id}/settings", In: secretSettingArgs{},
 			SecretForm: func(args json.RawMessage) string {
@@ -397,7 +407,7 @@ func (s *Server) registerAdminTools() {
 		{Name: "set_sign_in_mode", Description: "Set the sign-in mode of an app with its own login: gateway (Portcullis sign-in in front) or native (the app's own login only, needs your confirmation in the browser).",
 			Class: ClassDestructive, Scope: ScopeAdmin, Twin: "PUT /api/instances/{id}/settings", Audit: "app.sign_in", In: signInArgs{},
 			ClassFor: func(args json.RawMessage) ToolClass {
-				if a, _ := decode[signInArgs](args); a.Mode != hub.SignInNative {
+				if a, err := decode[signInArgs](args); err == nil && a.Mode == hub.SignInGateway {
 					return ClassWrite
 				}
 				return ClassDestructive
@@ -452,8 +462,8 @@ func (s *Server) registerAdminTools() {
 			}),
 		admin("get_status", "An instance's containers and their state.",
 			ClassRead, "/api/templates/status/", "", func(ctx context.Context, _ directory.Actor, in idArgs) (any, error) {
-				if !templates.ValidID(in.ID) {
-					return nil, &hub.StatusError{Status: http.StatusNotFound, Err: errors.New("404 page not found")}
+				if err := appIDOK(in.ID); err != nil {
+					return nil, err
 				}
 				st, err := s.Hub.Status(ctx, in.ID)
 				return st, defaultStatus(err, http.StatusBadGateway)
@@ -468,22 +478,22 @@ func (s *Server) registerAdminTools() {
 			},
 			Run: func(ctx context.Context, c *directory.Caller, args json.RawMessage) (any, error) {
 				a, _ := decode[execArgs](args)
-				if !templates.ValidID(a.ID) {
-					return nil, &hub.StatusError{Status: http.StatusNotFound, Err: errors.New("404 page not found")}
+				if err := appIDOK(a.ID); err != nil {
+					return nil, err
 				}
 				return s.execInstance(ctx, toolActor(ctx, c), a.ID, a.Service, a.Command)
 			}},
 		admin("get_compose", "An instance's compose layers: the template's compose.yml, the Hub override (both read-only) and the custom override.",
 			ClassRead, "/api/templates/compose/", "", func(_ context.Context, _ directory.Actor, in idArgs) (any, error) {
-				if !templates.ValidID(in.ID) {
-					return nil, &hub.StatusError{Status: http.StatusNotFound, Err: errors.New("404 page not found")}
+				if err := appIDOK(in.ID); err != nil {
+					return nil, err
 				}
 				return s.Hub.ComposeFiles(in.ID)
 			}),
 		admin("get_env", "An instance's .env variables (secret options and secret-looking values hidden) and its compose services.",
 			ClassRead, "/api/templates/env/", "", func(_ context.Context, _ directory.Actor, in idArgs) (any, error) {
-				if !templates.ValidID(in.ID) {
-					return nil, &hub.StatusError{Status: http.StatusNotFound, Err: errors.New("404 page not found")}
+				if err := appIDOK(in.ID); err != nil {
+					return nil, err
 				}
 				vars, services, err := s.Hub.Env(in.ID)
 				if err != nil {
@@ -505,8 +515,8 @@ func (s *Server) registerAdminTools() {
 			},
 			Run: func(ctx context.Context, c *directory.Caller, args json.RawMessage) (any, error) {
 				a, _ := decode[envArgs](args)
-				if !templates.ValidID(a.ID) {
-					return nil, &hub.StatusError{Status: http.StatusNotFound, Err: errors.New("404 page not found")}
+				if err := appIDOK(a.ID); err != nil {
+					return nil, err
 				}
 				for _, k := range slices.Sorted(maps.Keys(a.Variables)) {
 					if hub.SecretLookingEnvName(k) && a.Variables[k] != "[set]" {
@@ -517,8 +527,8 @@ func (s *Server) registerAdminTools() {
 			}},
 		admin("get_custom_override", "An instance's custom compose override (Expert; \"\" = none).",
 			ClassRead, "/api/templates/compose/", "", func(_ context.Context, _ directory.Actor, in idArgs) (any, error) {
-				if !templates.ValidID(in.ID) {
-					return nil, &hub.StatusError{Status: http.StatusNotFound, Err: errors.New("404 page not found")}
+				if err := appIDOK(in.ID); err != nil {
+					return nil, err
 				}
 				v, err := s.Hub.ComposeFiles(in.ID)
 				if err != nil {
@@ -538,8 +548,8 @@ func (s *Server) registerAdminTools() {
 			},
 			Run: func(ctx context.Context, c *directory.Caller, args json.RawMessage) (any, error) {
 				a, _ := decode[overrideArgs](args)
-				if !templates.ValidID(a.ID) {
-					return nil, &hub.StatusError{Status: http.StatusNotFound, Err: errors.New("404 page not found")}
+				if err := appIDOK(a.ID); err != nil {
+					return nil, err
 				}
 				return s.saveUserOverride(toolActor(ctx, c), a.ID, a.Content)
 			}},
@@ -667,24 +677,69 @@ func perCall(t Tool, classFor func(json.RawMessage) ToolClass, typed func(json.R
 	return t
 }
 
-// settingsClass is save_settings' class (security review of T17a): D
-// whenever the call sets ports — they publish host ports and change
-// <KEY>_BIND —, W for settings only.
-func settingsClass(args json.RawMessage) ToolClass {
-	var a struct {
+// settingsClass is save_settings' class (security review of T17a, fix
+// round 1): D when the call sets ports (host ports published, <KEY>_BIND
+// changed), per-person rows / a default or group records of a privileged
+// option (who gets elevated values; this covers raising its default), a
+// group, groups or path value (who has access, what the app mounts), or
+// names an option the template doesn't declare; D when the arguments or
+// the template can't be read (fail closed); else W.
+func (s *Server) settingsClass(args json.RawMessage) ToolClass {
+	a, err := decode[saveSettingsArgs](args)
+	if err != nil {
+		return ClassDestructive
+	}
+	var raw struct {
 		Ports *json.RawMessage `json:"ports"`
 	}
-	if json.Unmarshal(args, &a) != nil || a.Ports != nil {
+	if json.Unmarshal(args, &raw) != nil || raw.Ports != nil || len(a.ValueGroupIDs) > 0 {
 		return ClassDestructive
+	}
+	t := s.Hub.Template(a.ID)
+	if t == nil {
+		return ClassDestructive
+	}
+	opts := map[string]*templates.Option{}
+	all := t.Manifest.Options()
+	for i := range all {
+		opts[all[i].Key] = &all[i]
+	}
+	for _, keys := range []iterKeys{maps.Keys(a.Person), maps.Keys(a.Groups)} {
+		for k := range keys {
+			if o := opts[k]; o == nil || o.Privileged {
+				return ClassDestructive
+			}
+		}
+	}
+	for k := range a.Values {
+		if o := opts[k]; o == nil || o.Privileged || o.Type == templates.TypeGroup || o.Type == templates.TypeGroups || o.Type == templates.TypePath {
+			return ClassDestructive
+		}
 	}
 	return ClassWrite
 }
 
+// iterKeys is a maps.Keys sequence.
+type iterKeys = func(func(string) bool)
+
 func settingsConsequences(args json.RawMessage) []string {
 	a, _ := decode[saveSettingsArgs](args)
 	keys := slices.Sorted(maps.Keys(a.Ports))
-	return []string{"Replaces " + a.ID + "'s port configuration (" + strings.Join(keys, ", ") + "): host ports may be published or bound to other addresses.",
-		"Saves the settings changes below too."}
+	var lines []string
+	if a.Ports != nil {
+		lines = append(lines, "Replaces "+a.ID+"'s port configuration ("+strings.Join(keys, ", ")+"): host ports may be published or bound to other addresses.")
+	}
+	var named []string
+	for _, m := range []iterKeys{maps.Keys(a.Person), maps.Keys(a.Groups), maps.Keys(a.Values)} {
+		for k := range m {
+			named = append(named, k)
+		}
+	}
+	slices.Sort(named)
+	if len(named) > 0 {
+		lines = append(lines, "Changes "+a.ID+"'s settings "+strings.Join(slices.Compact(named), ", ")+": they may decide who gets elevated values or access, or what the app mounts.")
+	}
+	return append(lines, "The arguments below are saved as previewed.")
 }
 
 // localNetsClass is set_local_networks' class (security review of T17a):
@@ -726,7 +781,45 @@ func (s *Server) localNetsClass(args json.RawMessage) ToolClass {
 
 func localNetsConsequences(args json.RawMessage) []string {
 	a, _ := decode[localNetsArgs](args)
-	return []string{"Sets the local networks to " + strings.Join(a.Networks, ", ") + ": LAN-only ports and file sharing accept connections from them, and the apps using them restart."}
+	list := strings.Join(a.Networks, ", ")
+	switch {
+	case a.UseDefaults:
+		list = strings.Join(hub.DefaultLocalNetworks, ", ") + " (the defaults)"
+	case len(a.Networks) == 0:
+		list = "loopback only"
+	}
+	return []string{"Sets the local networks to " + list + ": LAN-only ports and file sharing accept connections from them, and the apps using them restart."}
+}
+
+// enableClass is enable_instance's class (fix round 1 ruling): D when the
+// instance starts reachable without Portcullis sign-in — its public
+// access is on, or its sign-in mode is the app's own login — or either
+// can't be read; else W.
+func (s *Server) enableClass(args json.RawMessage) ToolClass {
+	id := idOf(args)
+	v, err := s.Hub.AppSettings(id)
+	if err != nil || v == nil {
+		return ClassDestructive
+	}
+	if (v.PublicAccess != nil && (v.PublicAccess.Enabled || v.PublicAccess.Active)) || s.Hub.SignInMode(id) == hub.SignInNative {
+		return ClassDestructive
+	}
+	return ClassWrite
+}
+
+func (s *Server) enableConsequences(args json.RawMessage) []string {
+	id := idOf(args)
+	var lines []string
+	if v, err := s.Hub.AppSettings(id); err == nil && v.PublicAccess != nil && (v.PublicAccess.Enabled || v.PublicAccess.Active) {
+		lines = append(lines, "Starts "+id+" with its public paths open to anyone on the internet, without sign-in.")
+	}
+	if s.Hub.SignInMode(id) == hub.SignInNative {
+		lines = append(lines, "Starts "+id+" with only the app's own login in front of it: no Portcullis sign-in.")
+	}
+	if len(lines) == 0 {
+		lines = append(lines, "Starts "+id+" (its access settings couldn't be read).")
+	}
+	return lines
 }
 
 // update is the SettingsUpdate the arguments stand for (no secrets, no
@@ -737,13 +830,16 @@ func (a settingsArgs) update() hub.SettingsUpdate {
 
 // hubStatus is hub_status: GET /api/status's counts, the last drift
 // check, the doctor's counts (when it can run) and failed operations.
-func (s *Server) hubStatus(ctx context.Context) map[string]any {
+func (s *Server) hubStatus(ctx context.Context, withDoctor bool) map[string]any {
 	nt, ne, ns := s.Hub.Counts()
 	d := s.Hub.Drift()
 	out := map[string]any{
 		"domain": s.Hub.Domain(), "templates": nt, "enabled": ne, "sources": ns,
 		"drift":      map[string]any{"checked_at": d.CheckedAt, "items": len(d.Items), "error": d.Error},
 		"failed_ops": s.Hub.FailedOps(),
+	}
+	if !withDoctor {
+		return out
 	}
 	if rep, err := s.Hub.Doctor(ctx); err != nil {
 		out["doctor"] = map[string]any{"error": err.Error()}
@@ -849,8 +945,8 @@ func (s *Server) waitForOp(ctx context.Context, id, opID string) (any, error) {
 // getLogs is get_logs: the logs route's call, at most maxLogLines, then
 // the op-record redaction of the instance.
 func (s *Server) getLogs(ctx context.Context, in logsArgs) (any, error) {
-	if !templates.ValidID(in.ID) {
-		return nil, &hub.StatusError{Status: http.StatusNotFound, Err: errors.New("404 page not found")}
+	if err := appIDOK(in.ID); err != nil {
+		return nil, err
 	}
 	lines := in.Lines
 	if lines == 0 {
@@ -922,19 +1018,24 @@ func (s *Server) policyClass(args json.RawMessage) ToolClass {
 	return ClassDestructive
 }
 
-// publicClass is set_public_access's class (G37): D when the call can
-// turn public access on or widen it — "on", the mode "all", or "default"
-// unless the template is known to be closed by default — else W.
+// publicClass is set_public_access's class (G37, fix round 1: fail
+// closed): W only for "off", or "default" on a template known to be
+// closed by default, with the mode empty or listed; anything else — "on",
+// the mode "all", a template that can't be read, arguments that don't
+// decode — D.
 func (s *Server) publicClass(args json.RawMessage) ToolClass {
 	a, err := decode[publicArgs](args)
-	if err != nil || a.Access == "on" || a.Mode == "all" {
+	if err != nil || (a.Mode != "" && a.Mode != "listed") {
 		return ClassDestructive
 	}
-	if a.Access == "default" {
+	switch a.Access {
+	case "off":
+		return ClassWrite
+	case "default":
 		v, err := s.Hub.AppSettings(a.ID)
-		if err != nil || v.PublicAccess == nil || v.PublicAccess.EnabledByDefault {
-			return ClassDestructive
+		if err == nil && v.PublicAccess != nil && !v.PublicAccess.EnabledByDefault {
+			return ClassWrite
 		}
 	}
-	return ClassWrite
+	return ClassDestructive
 }

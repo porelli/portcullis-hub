@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -76,11 +77,14 @@ func newToolEnv(t *testing.T, extra map[string][2]string, wrap func(hub.Engine) 
 		"secretapp": settingsFixture(t, "secretapp"),
 		"nativeapp": settingsFixture(t, "nativeapp"),
 		"cloud":     {cloudManifest, cloudCompose},
+		"privapp":   settingsFixture(t, "privapp"),
 	}
 	for k, v := range extra {
 		all[k] = v
 	}
 	ce := newConfirmEnvOpts(t, mcpEnvOpts{extra: all, wrap: wrap})
+	// Many confirmations per test (the hourly limit is TestMCPDestructive…'s).
+	ce.s.Hub.SetConfirmPerHourForTest(1000)
 	return &toolEnv{&mcpTestEnv{confirmEnv: ce, runs: map[string]int{}}}
 }
 
@@ -159,9 +163,23 @@ type sameAsHTTPCase struct {
 	method, path string
 	body         string
 	instance     string // an async op to wait for ("" none)
+	plan         bool   // the tool needs preview_settings' plan_hash first
 }
 
-// TestAdminToolsSameAsHTTP: every W and D tool of this part makes the
+// sameAsHTTPPending are the admin W and D tools whose same-as-HTTP case a
+// later task adds with the tool (T17b): none of them is registered yet;
+// each task drops its names when its tools land.
+var sameAsHTTPPending = map[string]string{
+	"sync_sources": "T17b", "add_source": "T17b", "remove_source": "T17b",
+	"backup_instance": "T17b", "restore_instance": "T17b", "restore_as": "T17b",
+	"enroll_domain": "T17b", "replace_domain_token": "T17b", "delete_domain": "T17b",
+	"set_ai_support": "T17b", "set_ai_mode": "T17b", "revoke_ai_access": "T17b",
+	"save_model_provider": "T17b", "set_model_provider_secret": "T17b", "delete_model_provider": "T17b",
+	"save_hub_settings": "T17b",
+}
+
+// TestAdminToolsSameAsHTTP: every registered admin W and D tool (but
+// sameAsHTTPPending's) — and both classes of each per-call one — makes the
 // same Hub call with the same arguments as its HTTP twin given the same
 // input, on two Hubs in the same state, and writes the same audit
 // entries — attributed via ai and the AI client (plus the consumed
@@ -188,18 +206,31 @@ func TestAdminToolsSameAsHTTP(t *testing.T) {
 			method: "POST", path: "/api/instances", body: `{"template":"nope","id":"nope-a"}`},
 		{tool: "set_hosts", args: map[string]any{"id": "grafana-a", "hosts": map[string]string{"grafana": "grafana-b.example.org"}},
 			method: "PUT", path: "/api/instances/grafana-a/hosts", body: `{"hosts":{"grafana":"grafana-b.example.org"}}`},
+		{tool: "save_settings", args: map[string]any{"id": "secretapp", "values": map[string]any{"api_url": "https://api.example.org"}},
+			method: "PUT", path: "/api/instances/secretapp/settings", body: `{"values":{"api_url":"https://api.example.org"}}`, plan: true},
+		{tool: "save_settings", args: map[string]any{"id": "secretapp", "ports": map[string]string{}},
+			method: "PUT", path: "/api/instances/secretapp/settings", body: `{"ports":{}}`, plan: true},
 		{tool: "enable_instance", args: map[string]any{"id": "secretapp"},
 			method: "POST", path: "/api/templates/enable", body: `{"id":"secretapp"}`},
+		// cloud is public by default: enabling it is D.
+		{tool: "enable_instance", args: map[string]any{"id": "cloud"},
+			method: "POST", path: "/api/templates/enable", body: `{"id":"cloud"}`},
 		{tool: "restart_instance", args: map[string]any{"id": "secretapp"},
 			method: "POST", path: "/api/templates/restart/secretapp", body: ``},
 		{tool: "set_policy", args: map[string]any{"id": "secretapp", "policy": map[string]any{"factors": []string{"webauthn"}, "op": "any"}},
 			method: "PUT", path: "/api/instances/secretapp/settings", body: `{"auth_policy":{"factors":["webauthn"],"op":"any"}}`},
 		{tool: "set_policy", args: map[string]any{"id": "secretapp", "policy": map[string]any{"factors": []string{"password"}, "op": "any"}},
 			method: "PUT", path: "/api/instances/secretapp/settings", body: `{"auth_policy":{"factors":["password"],"op":"any"}}`},
+		{tool: "set_policy", args: map[string]any{"id": "secretapp", "inherit": true},
+			method: "PUT", path: "/api/instances/secretapp/settings", body: `{"auth_policy_inherit":true}`},
 		{tool: "set_sign_in_mode", args: map[string]any{"id": "nativeapp", "mode": "native"},
 			method: "PUT", path: "/api/instances/nativeapp/settings", body: `{"sign_in":"native"}`},
+		{tool: "set_sign_in_mode", args: map[string]any{"id": "nativeapp", "mode": "gateway"},
+			method: "PUT", path: "/api/instances/nativeapp/settings", body: `{"sign_in":"gateway"}`},
 		{tool: "set_public_access", args: map[string]any{"id": "cloud", "access": "off"},
 			method: "PUT", path: "/api/instances/cloud/settings", body: `{"public_access":false}`},
+		{tool: "set_public_access", args: map[string]any{"id": "cloud", "access": "on"},
+			method: "PUT", path: "/api/instances/cloud/settings", body: `{"public_access":true}`},
 		{tool: "exec", args: map[string]any{"id": "secretapp", "service": "server", "command": "true"},
 			method: "POST", path: "/api/templates/exec/secretapp", body: `{"service":"server","command":"true"}`},
 		{tool: "save_env", args: map[string]any{"id": "secretapp", "variables": map[string]string{"FOO": "bar"}},
@@ -220,26 +251,55 @@ func TestAdminToolsSameAsHTTP(t *testing.T) {
 			method: "DELETE", path: "/api/instances/secretapp/credentials/api_key/dana", body: ``},
 		{tool: "set_local_networks", args: map[string]any{"networks": []string{"10.0.0.0/8"}},
 			method: "PUT", path: "/api/settings/local-networks", body: `{"networks":["10.0.0.0/8"]}`},
+		{tool: "set_local_networks", args: map[string]any{"networks": []string{"10.0.0.0/8", "203.0.113.0/24"}},
+			method: "PUT", path: "/api/settings/local-networks", body: `{"networks":["10.0.0.0/8","203.0.113.0/24"]}`},
 		{tool: "disable_instance", args: map[string]any{"id": "secretapp"},
 			method: "POST", path: "/api/templates/disable", body: `{"id":"secretapp"}`},
 		{tool: "delete_instance", args: map[string]any{"id": "grafana-a"},
 			method: "DELETE", path: "/api/instances/grafana-a", body: `{"confirm":"grafana-a"}`, instance: "grafana-a"},
 	}
-	// save_settings: the tool needs the preview's plan hash.
-	covered := map[string]bool{"save_settings": true}
+	covered := map[string]bool{}
 	for _, c := range cases {
 		covered[c.tool] = true
 	}
+	perCallTools := map[string]bool{}
 	for _, tl := range toolE.s.tools(ScopeAdmin) {
-		if (tl.Class == ClassWrite || tl.Class == ClassDestructive) && slices.Contains(admin17a, tl.Name) && !covered[tl.Name] {
+		if tl.ClassFor != nil {
+			perCallTools[tl.Name] = true
+		}
+		if (tl.Class == ClassWrite || tl.Class == ClassDestructive) && !covered[tl.Name] && sameAsHTTPPending[tl.Name] == "" {
 			t.Errorf("tool %s (%s) has no same-as-HTTP case", tl.Name, tl.Class)
 		}
+		if sameAsHTTPPending[tl.Name] != "" {
+			t.Errorf("tool %s is registered: move it from sameAsHTTPPending to a case", tl.Name)
+		}
 	}
+	branches := map[string]map[bool]bool{} // per-call tool → confirmed? → seen
 	run := func(c sameAsHTTPCase) {
 		t.Helper()
+		if c.plan {
+			// The tool needs the preview's plan hash (the HTTP twin none).
+			txt, isErr, _ := toolE.tool(t, "preview_settings", c.args)
+			var p struct {
+				PlanHash string `json:"plan_hash"`
+			}
+			if isErr || json.Unmarshal([]byte(txt), &p) != nil || len(p.PlanHash) != 64 {
+				t.Fatalf("preview = %s %v", txt, isErr)
+			}
+			tr.take()
+			args := maps.Clone(c.args.(map[string]any))
+			args["plan_hash"] = p.PlanHash
+			c.args = args
+		}
 		hn, tn := len(readAudit(t, httpEnv.audit)), len(readAudit(t, toolE.audit))
 		code, body := httpEnv.do(t, "root", c.method, c.path, c.body)
 		txt, isErr, conf := toolE.tool(t, c.tool, c.args)
+		if perCallTools[c.tool] {
+			if branches[c.tool] == nil {
+				branches[c.tool] = map[bool]bool{}
+			}
+			branches[c.tool][conf != ""] = true
+		}
 		if c.instance != "" {
 			waitIdle(t, httpEnv.s.Hub, c.instance)
 			waitIdle(t, toolE.s.Hub, c.instance)
@@ -280,21 +340,10 @@ func TestAdminToolsSameAsHTTP(t *testing.T) {
 	}
 	for _, c := range cases {
 		run(c)
-		if c.tool == "create_instance" && c.args.(map[string]any)["id"] == "grafana-a" {
-			// save_settings after the instance exists: preview, then save
-			// with its plan hash (the HTTP twin needs none).
-			args := map[string]any{"id": "secretapp", "values": map[string]any{"api_url": "https://api.example.org"}}
-			txt, isErr, _ := toolE.tool(t, "preview_settings", args)
-			var p struct {
-				PlanHash string `json:"plan_hash"`
-			}
-			if isErr || json.Unmarshal([]byte(txt), &p) != nil || len(p.PlanHash) != 64 {
-				t.Fatalf("preview = %s %v", txt, isErr)
-			}
-			tr.take()
-			args["plan_hash"] = p.PlanHash
-			run(sameAsHTTPCase{tool: "save_settings", args: args, method: "PUT", path: "/api/instances/secretapp/settings",
-				body: `{"values":{"api_url":"https://api.example.org"}}`})
+	}
+	for n := range perCallTools {
+		if !branches[n][false] || !branches[n][true] {
+			t.Errorf("per-call tool %s: cases cover W %v, D %v — want both", n, branches[n][false], branches[n][true])
 		}
 	}
 }
@@ -418,6 +467,10 @@ func TestToolClassPerCall(t *testing.T) {
 		args    map[string]any
 		confirm bool
 	}{
+		// enable_instance: D when it starts public (cloud is public by default) or with native sign-in.
+		{"enable_instance", map[string]any{"id": "secretapp"}, false},
+		{"enable_instance", map[string]any{"id": "cloud"}, true},
+		{"enable_instance", map[string]any{"id": "nope"}, true},
 		// The default is hwk-or-mtls (any); webauthn+mtls (all) is stricter.
 		{"set_policy", map[string]any{"id": "secretapp", "policy": map[string]any{"factors": []string{"mtls", "webauthn"}, "op": "all"}}, false},
 		{"set_policy", map[string]any{"id": "secretapp", "inherit": true}, true},
@@ -436,6 +489,17 @@ func TestToolClassPerCall(t *testing.T) {
 		// mismatch answers after the class decided).
 		{"save_settings", map[string]any{"id": "secretapp", "values": map[string]any{"api_url": "https://a.example.org"}, "plan_hash": "x"}, false},
 		{"save_settings", map[string]any{"id": "secretapp", "ports": map[string]string{}, "plan_hash": "x"}, true},
+		// Fix round 1: a privileged option's rows (privapp's role, as
+		// Grafana's role) → D; a plain value or a plain person option → W.
+		{"save_settings", map[string]any{"id": "privapp", "person": map[string]any{"role": map[string]any{"default": "user", "rows": []any{map[string]any{"group": "helpers", "value": "admin"}}}}, "plan_hash": "x"}, true},
+		{"save_settings", map[string]any{"id": "privapp", "values": map[string]any{"motd": "hello"}, "plan_hash": "x"}, false},
+		{"save_settings", map[string]any{"id": "privapp", "person": map[string]any{"tier": map[string]any{"default": "pro"}}, "plan_hash": "x"}, false},
+		{"save_settings", map[string]any{"id": "nope", "values": map[string]any{"motd": "hello"}, "plan_hash": "x"}, true},
+		// Fail closed: only gateway / off / a closed default are W.
+		{"set_sign_in_mode", map[string]any{"id": "nativeapp", "mode": "bogus"}, true},
+		{"set_public_access", map[string]any{"id": "cloud", "access": "default"}, true},
+		{"set_public_access", map[string]any{"id": "cloud", "access": "off", "mode": "all"}, true},
+		{"set_public_access", map[string]any{"id": "cloud", "access": "off", "mode": "listed"}, false},
 	} {
 		res := e.call(t, "/mcp/admin", "root", "2025-11-25", c.tool, c.args, nil)
 		txt, _ := resultText(res)
@@ -462,6 +526,21 @@ func TestToolClassPerCall(t *testing.T) {
 		if got := confirmTextRe.MatchString(txt); got != c.confirm {
 			t.Errorf("narrowed: set_local_networks %v: confirmation %v, want %v (%s)", c.args, got, c.confirm, txt)
 		}
+	}
+	// enable_instance of an app set to its own login only: D.
+	native := hub.SignInNative
+	if _, err := e.s.Hub.SaveSettings("nativeapp", hub.SettingsUpdate{SignIn: &native}, directory.Human("root")); err != nil {
+		t.Fatal(err)
+	}
+	if txt, _ := resultText(e.call(t, "/mcp/admin", "root", "2025-11-25", "enable_instance", map[string]any{"id": "nativeapp"}, nil)); !confirmTextRe.MatchString(txt) {
+		t.Errorf("enable_instance of a native-sign-in app = %q, want a confirmation", txt)
+	}
+	// The consequences name what the defaults are, and an empty list.
+	if got := strings.Join(localNetsConsequences(json.RawMessage(`{"use_defaults":true}`)), " "); !strings.Contains(got, strings.Join(hub.DefaultLocalNetworks, ", ")) {
+		t.Errorf("use_defaults consequences = %q", got)
+	}
+	if got := strings.Join(localNetsConsequences(json.RawMessage(`{"networks":[]}`)), " "); !strings.Contains(got, "loopback only") {
+		t.Errorf("[] consequences = %q", got)
 	}
 	code, a := e.rpc(t, rpcCall{path: "/mcp/admin", user: "root", version: "2025-11-25", method: "tools/list", params: map[string]any{}})
 	if code != 200 {
@@ -585,6 +664,7 @@ func TestReadToolsAnswer(t *testing.T) {
 		want string
 	}{
 		{"hub_status", nil, `"enabled"`},
+		{"hub_status", map[string]any{"include_doctor": true}, `"doctor"`},
 		{"explain_policy", map[string]any{"id": "secretapp"}, `"effective_policy"`},
 		{"list_instances", nil, `"aiapp"`},
 		{"get_instance", map[string]any{"id": "aiapp"}, `"state"`},
@@ -604,6 +684,9 @@ func TestReadToolsAnswer(t *testing.T) {
 		if isErr || !strings.Contains(txt, c.want) {
 			t.Errorf("%s = %q %v", c.tool, txt, isErr)
 		}
+	}
+	if txt, _, _ := e.tool(t, "hub_status", nil); strings.Contains(txt, `"doctor"`) {
+		t.Errorf("hub_status ran the doctor without include_doctor: %s", txt)
 	}
 	if txt, isErr, _ := e.tool(t, "get_logs", map[string]any{"id": "aiapp", "lines": 501}); !isErr || !strings.HasPrefix(txt, "400: ") {
 		t.Errorf("501 lines = %q %v", txt, isErr)

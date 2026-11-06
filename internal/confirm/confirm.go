@@ -16,6 +16,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"testing"
 	"time"
 )
 
@@ -85,6 +86,17 @@ type Store struct {
 	byID    map[string]*Confirmation // key: the 26 base32 characters
 	created map[string][]time.Time   // user → creation times within the last hour
 	perHour int
+}
+
+// SetPerHourForTest raises (or lowers) the per-person hourly creation
+// limit. Panics outside tests.
+func (s *Store) SetPerHourForTest(n int) {
+	if !testing.Testing() {
+		panic("SetPerHourForTest: tests only")
+	}
+	s.mu.Lock()
+	s.perHour = n
+	s.mu.Unlock()
 }
 
 // New is an empty store on the clock now (nil: time.Now).

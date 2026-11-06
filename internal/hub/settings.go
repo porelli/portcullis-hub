@@ -688,6 +688,13 @@ type SettingsUpdate struct {
 	// SignIn: SignInGateway or SignInNative (apps with auth.native_login);
 	// nil = unchanged.
 	SignIn *string
+	// ExpectPlanHash (G46; the Portcullis MCP's save_settings, never the
+	// HTTP save): the PlanHash of the preview the admin saw. SaveSettings
+	// recomputes the preview first (409 when its hash differs) and, in
+	// the commit's mu section, refuses (409) if the stored settings,
+	// sign-in mode or access choices it was computed against changed
+	// meanwhile. Not part of the update itself (json "-": never hashed).
+	ExpectPlanHash string `json:"-"`
 }
 
 // PersonChange is a per-person option's new configuration.
@@ -819,6 +826,24 @@ func (h *Hub) SaveSettings(id string, u SettingsUpdate, actor directory.Actor) (
 	if t == nil {
 		return nil, ErrNotFound
 	}
+	// G46: the plan the admin previewed, recomputed now; its stored
+	// inputs are checked again under the commit's mu (planGuard).
+	var planGuard func() error
+	if u.ExpectPlanHash != "" {
+		p, in, err := h.previewPlanned(context.Background(), id, u)
+		if err != nil {
+			return nil, err
+		}
+		if p.PlanHash != u.ExpectPlanHash {
+			return nil, statusErr(409, "the settings or who they reach changed since the preview (plan_hash differs): preview again")
+		}
+		planGuard = func() error {
+			if h.planInputsLocked(id).digest() != in.digest() {
+				return statusErr(409, "%s's settings changed while saving (plan_hash differs): preview again", id)
+			}
+			return nil
+		}
+	}
 	h.mu.RLock()
 	pendErr := h.pendingLocked(id)
 	native := h.st.SignIn[id] == state.SignInNative
@@ -875,7 +900,7 @@ func (h *Hub) SaveSettings(id string, u SettingsUpdate, actor directory.Actor) (
 	if h.testHookSave != nil {
 		h.testHookSave()
 	}
-	sv, enabled, err := h.saveSettings(t, u, parsed)
+	sv, enabled, err := h.saveSettings(t, u, parsed, planGuard)
 	changes = sv.changes
 	if err != nil {
 		return nil, err
@@ -919,7 +944,7 @@ type saved struct {
 
 // saveSettings is SaveSettings' state change: under the instance's lock
 // for a sign-in change, then mu.
-func (h *Hub) saveSettings(t *templates.Template, u SettingsUpdate, parsed *parsedSettings) (res saved, enabled bool, retErr error) {
+func (h *Hub) saveSettings(t *templates.Template, u SettingsUpdate, parsed *parsedSettings, planGuard func() error) (res saved, enabled bool, retErr error) {
 	id := t.ID
 	res.effect = settings.EffectNone
 	// A sign-in mode change holds the instance's lock (as enable, disable,
@@ -958,6 +983,12 @@ func (h *Hub) saveSettings(t *templates.Template, u SettingsUpdate, parsed *pars
 	if err := h.pendingLocked(id); err != nil {
 		h.mu.Unlock()
 		return res, false, err
+	}
+	if planGuard != nil {
+		if err := planGuard(); err != nil {
+			h.mu.Unlock()
+			return res, false, err
+		}
 	}
 	// AI support switched on since SaveSettings switched it off (G43):
 	// never commit a policy reaching LoA 3 with a companion on.

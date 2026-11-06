@@ -87,6 +87,15 @@ func (h *Hub) SetConfirmClockForTest(now func() time.Time) {
 	h.confirmStore = confirm.New(now)
 }
 
+// SetConfirmPerHourForTest sets the store's per-person hourly limit.
+// Panics outside tests.
+func (h *Hub) SetConfirmPerHourForTest(n int) {
+	if !testing.Testing() {
+		panic("SetConfirmPerHourForTest: tests only")
+	}
+	h.confirms().SetPerHourForTest(n)
+}
+
 // auditConfirm records ai.confirm: what (approved, declined, expired,
 // refused), the tool, the resource and args_sha256 — never the
 // arguments.

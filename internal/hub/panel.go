@@ -415,19 +415,38 @@ func previewDisplay(kinds *settings.Registry, o *templates.Option, r settings.Re
 // snapshot, which also gives the population every person option is
 // resolved for, under the draft and under the saved configuration.
 func (h *Hub) PreviewSettings(ctx context.Context, id string, u SettingsUpdate) (*Preview, error) {
+	p, _, err := h.previewPlanned(ctx, id, u)
+	return p, err
+}
+
+// planInputs are the stored state a preview was computed against (the
+// plan hash's stored part).
+type planInputs struct {
+	stored state.InstanceSettings
+	signIn string
+	acc    accessAudit
+}
+
+func (in planInputs) digest() string {
+	return doctor.Digest([]any{in.stored, in.signIn, in.acc.policy, in.acc.access, in.acc.mode, in.acc.tokens})
+}
+
+// planInputsLocked reads id's planInputs. Caller holds mu.
+func (h *Hub) planInputsLocked(id string) planInputs {
+	return planInputs{h.st.Settings[id].Clone(), h.st.SignIn[id], h.accessAuditLocked(id)}
+}
+
+// previewPlanned is PreviewSettings, also returning the stored inputs it
+// was computed against.
+func (h *Hub) previewPlanned(ctx context.Context, id string, u SettingsUpdate) (*Preview, planInputs, error) {
 	orig := u
-	var stored state.InstanceSettings
-	var signIn string
-	var acc accessAudit
-	p, err := h.previewSettings(ctx, id, u, func() {
-		// Under the read lock, with the preview's own reads.
-		stored, signIn, acc = h.st.Settings[id].Clone(), h.st.SignIn[id], h.accessAuditLocked(id)
-	})
+	var in planInputs
+	p, err := h.previewSettings(ctx, id, u, func() { in = h.planInputsLocked(id) })
 	if err != nil {
-		return nil, err
+		return nil, in, err
 	}
-	p.PlanHash = settingsPlanHash(orig, p, stored, signIn, acc)
-	return p, nil
+	p.PlanHash = settingsPlanHash(orig, p, in.stored, in.signIn, in.acc)
+	return p, in, nil
 }
 
 // previewSettings is PreviewSettings; snap runs under the read lock the

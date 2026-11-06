@@ -143,6 +143,7 @@ var accessWidening = map[string]string{
 	"set_public_access":  "D when it turns public access on (or widens it to all)",
 	"save_settings":      "D when it sets ports (host ports published, <KEY>_BIND changed)",
 	"set_local_networks": "D unless use_defaults or a list within the current one",
+	"enable_instance":    "D when the instance starts with public access on or the app's own login only (fix round 1)",
 }
 
 func TestToolParity(t *testing.T) {
@@ -230,7 +231,7 @@ func TestToolParity(t *testing.T) {
 		}
 	}
 	for _, n := range []string{"exec", "save_env", "save_custom_override", "resolve_drift", "delete_instance", "admin_revoke_credential",
-		"set_policy", "set_sign_in_mode", "set_public_access", "save_settings", "set_local_networks"} {
+		"set_policy", "set_sign_in_mode", "set_public_access", "save_settings", "set_local_networks", "enable_instance"} {
 		if byName[n].Class != ClassDestructive {
 			t.Errorf("tool %s: class %q, want D", n, byName[n].Class)
 		}
