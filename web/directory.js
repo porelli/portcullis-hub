@@ -1984,10 +1984,23 @@
       body.editor = null;
     });
   }
+  let loading = null;
   function show(el, opts) {
     mount(el, opts);
-    return load();
+    loading = load();
+    return loading;
   }
 
-  window.PortcullisDirectory = { show, csvCell };
+  // openAt opens a person (deep link #users/<name>[?password|?invite],
+  // the Portcullis MCP's set_password form): after the current load, the
+  // person's dialog, then the action's own prompt — the secret is typed
+  // here, never passed in.
+  async function openAt(name, action) {
+    if (loading) await loading;
+    if (!userByName(name)) return;
+    openUser(name);
+    if (action === 'password' || action === 'invite') userAction(action, name);
+  }
+
+  window.PortcullisDirectory = { show, openAt, csvCell };
 })();

@@ -590,7 +590,9 @@ func (s *Server) lastAudit(action, target string) *directory.AuditEntry {
 	if err != nil {
 		return nil
 	}
-	for i := len(list) - 1; i >= 0; i-- {
+	// Recent is newest first (T18: this loop used to walk it backwards,
+	// answering the oldest matching entry).
+	for i := range list {
 		if list[i].Action == action && list[i].Target == target {
 			return &list[i]
 		}

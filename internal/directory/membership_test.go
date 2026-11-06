@@ -406,3 +406,47 @@ func TestPublishCarriesMembership(t *testing.T) {
 		t.Errorf("Publish membership = %s, want %s", a, b)
 	}
 }
+
+// TestMembershipGuarding (plan 4 Task 18, G37): Membership names the
+// guarding groups with why, the fields their rules use and the
+// administrators — the directory's own definitions, which the Portcullis
+// MCP's per-call classes read (never a second list).
+func TestMembershipGuarding(t *testing.T) {
+	e, store := privEnv(t)
+	e.ll.AddGroup("admin_immich")
+	e.ll.AddGroup("hr_edit")
+	e.ll.AddGroup("office_milan")
+	e.ll.AddGroup("editors")
+	e.ll.AddUser("ops", "ops@example.org", "Ops", "", "lldap_admin")
+	cfg, _ := store.Load()
+	cfg.Permissions = map[string]string{directory.PermEditDetails: "hr_edit"}
+	cfg.Groups["admin_immich"] = &directory.GroupConfig{Rule: mustRule(t, `clearance = "top"`)}
+	if err := store.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	m, err := e.svc.Membership(ctx, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"lldap_admin":            "an administrator group",
+		"lldap_password_manager": "an administrator group",
+		"admin_immich":           "the admin group of app immich",
+		"office_milan":           "a privileged value of app immich",
+		"hr_edit":                "the edit_details permission group",
+	}
+	for g, why := range want {
+		if m.Guarding[g] != why {
+			t.Errorf("guarding %s = %q, want %q", g, m.Guarding[g], why)
+		}
+	}
+	if _, ok := m.Guarding["editors"]; ok {
+		t.Errorf("editors is no guarding group: %v", m.Guarding)
+	}
+	if m.GuardedFields["clearance"] != "admin_immich" || m.GuardedFields["office_location"] != "" {
+		t.Errorf("guarded fields = %v", m.GuardedFields)
+	}
+	if !m.Administrators["root"] || !m.Administrators["ops"] || m.Administrators["alice"] || m.Administrators["portcullis-hub"] {
+		t.Errorf("administrators = %v", m.Administrators)
+	}
+}

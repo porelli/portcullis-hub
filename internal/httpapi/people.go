@@ -265,7 +265,7 @@ func (s *Server) handleCreateField(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f := req.apply(directory.Field{ShareWithApps: true})
-	if err := s.Directory.CreateField(r.Context(), c, f); err != nil {
+	if err := s.createField(r.Context(), c, f); err != nil {
 		dirErr(w, err)
 		return
 	}
@@ -294,7 +294,7 @@ func (s *Server) handleUpdateField(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Merged with the stored field inside the service's lock.
-	f, err := s.Directory.PatchField(r.Context(), c, r.PathValue("name"), directory.FieldPatch{
+	f, err := s.patchField(r.Context(), c, r.PathValue("name"), directory.FieldPatch{
 		Label: req.Label, Kind: req.Kind, Values: req.Values, Multi: req.Multi, ShareWithApps: req.ShareWithApps, AdminOnly: req.AdminOnly})
 	if err != nil {
 		dirErr(w, err)
@@ -315,7 +315,7 @@ func (s *Server) handleDeleteField(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.Directory.DeleteField(r.Context(), c, r.PathValue("name"), req.Confirm); err != nil {
+	if err := s.deleteField(r.Context(), c, r.PathValue("name"), req.Confirm); err != nil {
 		dirErr(w, err)
 		return
 	}
@@ -342,7 +342,7 @@ func (s *Server) handleSetDetails(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.Directory.SetDetails(r.Context(), c, r.PathValue("username"), req.Attrs); err != nil {
+	if err := s.setDetails(r.Context(), c, r.PathValue("username"), req.Attrs); err != nil {
 		dirErr(w, err)
 		return
 	}
@@ -442,7 +442,7 @@ func (s *Server) handleSetGroupRule(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.Directory.SetGroupRule(r.Context(), c, r.PathValue("group"), rule); err != nil {
+	if err := s.setGroupRule(r.Context(), c, r.PathValue("group"), rule); err != nil {
 		dirErr(w, err)
 		return
 	}
@@ -505,7 +505,7 @@ func (s *Server) handleConvert(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.Directory.ConvertApplyReviewed(r.Context(), c, r.PathValue("group"), rule, req.Keep, req.Preview); err != nil {
+	if err := s.convertGroup(r.Context(), c, r.PathValue("group"), rule, req.Keep, req.Preview); err != nil {
 		dirErr(w, err)
 		return
 	}
@@ -534,7 +534,7 @@ func (s *Server) handleAddException(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ex := directory.Exception{User: req.User, Reason: req.Reason, Include: req.Include, Until: req.Until}
-	if err := s.Directory.AddException(r.Context(), c, r.PathValue("group"), ex); err != nil {
+	if err := s.addException(r.Context(), c, r.PathValue("group"), ex); err != nil {
 		dirErr(w, err)
 		return
 	}
@@ -553,7 +553,7 @@ func (s *Server) handleRemoveException(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.Directory.RemoveException(r.Context(), c, r.PathValue("group"), r.PathValue("username")); err != nil {
+	if err := s.removeException(r.Context(), c, r.PathValue("group"), r.PathValue("username")); err != nil {
 		dirErr(w, err)
 		return
 	}
@@ -574,7 +574,7 @@ func (s *Server) handleSetExpiry(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.Directory.SetMemberExpiry(r.Context(), c, r.PathValue("group"), r.PathValue("username"), req.Until); err != nil {
+	if err := s.setMemberExpiry(r.Context(), c, r.PathValue("group"), r.PathValue("username"), req.Until); err != nil {
 		dirErr(w, err)
 		return
 	}
@@ -595,7 +595,7 @@ func (s *Server) handleSetPermission(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.Directory.SetPermission(r.Context(), c, r.PathValue("perm"), req.Group); err != nil {
+	if err := s.setPermission(r.Context(), c, r.PathValue("perm"), req.Group); err != nil {
 		dirErr(w, err)
 		return
 	}
@@ -717,7 +717,7 @@ func (s *Server) handleImportApply(w http.ResponseWriter, r *http.Request) {
 	if !decodeLarge(w, r, maxImportJSON, &req) {
 		return
 	}
-	res, err := s.Directory.ImportApply(r.Context(), c, req)
+	res, err := s.importApply(r.Context(), c, req)
 	if err != nil {
 		dirErr(w, err)
 		return

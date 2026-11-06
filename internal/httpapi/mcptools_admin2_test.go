@@ -599,6 +599,37 @@ var adminToolFixtures = []struct {
 	{"admin_revoke_credential", map[string]any{"id": "smbfixture", "key": "share_password", "user": "alice"}},
 	{"delete_domain", map[string]any{"name": "team-c.example.net"}},
 	{"disable_instance", map[string]any{"id": "secretapp"}},
+	// Task 18: users and groups (marker invite links and a marker password are set up).
+	{"create_field", map[string]any{"name": "dept", "label": "Dept", "kind": "text"}},
+	{"update_field", map[string]any{"name": "dept", "label": "Department"}},
+	{"create_person", map[string]any{"username": "erin", "email": "erin@example.org", "display_name": "Erin"}},
+	{"create_person", map[string]any{"username": "olga", "email": "olga@example.org", "display_name": "Olga", "groups": []string{"lldap_admin"}}},
+	{"update_person", map[string]any{"username": "erin", "display_name": "Erin E"}},
+	{"set_details", map[string]any{"username": "erin", "attrs": map[string]any{"dept": []string{"Eng"}}}},
+	{"directory_overview", nil},
+	{"get_person", map[string]any{"username": "dana"}},
+	{"preview_rule", map[string]any{"rule": `dept = "Eng"`}},
+	{"create_group", map[string]any{"name": "eng"}},
+	{"convert_group_preview", map[string]any{"group": "eng", "rule": `dept = "Eng"`}},
+	{"convert_group", map[string]any{"group": "eng", "rule": `dept = "Eng"`, "preview": map[string]any{"matching": []string{"erin"}, "kept_as_exception": []string{}, "joining": []string{"erin"}, "expiry_dropped": []string{}}}},
+	{"set_group_rule", map[string]any{"group": "eng", "rule": `dept = "Ops"`}},
+	{"add_exception", map[string]any{"group": "eng", "user": "dana", "reason": "helps"}},
+	{"remove_exception", map[string]any{"group": "eng", "username": "dana"}},
+	{"add_member", map[string]any{"group": "helpers", "username": "erin"}},
+	{"set_member_expiry", map[string]any{"group": "helpers", "username": "erin", "until": "2099-01-01T00:00:00Z"}},
+	{"remove_member", map[string]any{"group": "helpers", "username": "erin"}},
+	{"set_permission", map[string]any{"perm": "invite", "group": ""}},
+	{"send_invite", map[string]any{"username": "erin"}},
+	{"clear_actions", map[string]any{"username": "erin"}},
+	{"require_passkey", map[string]any{"username": "erin"}},
+	{"remove_passkeys", map[string]any{"username": "erin", "invite": true}},
+	{"set_password", map[string]any{"username": "dana"}},
+	{"import_review", map[string]any{"header": []string{"username", "display_name"}, "rows": [][]string{{"erin", "Erin X"}, {"hana", "Hana"}}}},
+	{"import_apply", map[string]any{"rows": []any{map[string]any{"user": "hana", "create": true, "email": "hana@example.org", "display_name": "Hana"}}}},
+	{"audit_recent", map[string]any{"limit": 200}},
+	{"delete_group", map[string]any{"group": "eng"}},
+	{"delete_field", map[string]any{"name": "dept"}},
+	{"delete_person", map[string]any{"username": "hana"}},
 	// At the end, over what the operations above left (fix round 1).
 	{"get_op", map[string]any{"id": "secretapp"}},
 	{"wait_for_op", map[string]any{"id": "secretapp"}},
@@ -676,7 +707,11 @@ func testToolsNotEchoed(t *testing.T) {
 		t.Fatalf("talk-a's client secret %q", clientSecret)
 	}
 	h := strings.TrimSpace(string(hash))
-	markers := []string{dnsMarker, providerMarker, settingMarker, password, h, strings.ToLower(h), clientSecret,
+	// Task 18 (G39): marker invite links and a marker fallback password.
+	e.s.Directory.Invites = &markerInviter{}
+	const passwordMarker = "PWMARKER-tool-0123456789"
+	mustDo(t, e.hub, "root", "POST", "/api/directory/users/dana/password", `{"password":"`+passwordMarker+`"}`, 200)
+	markers := []string{dnsMarker, providerMarker, settingMarker, password, h, strings.ToLower(h), clientSecret, inviteMarker, passwordMarker, "[invite link hidden]",
 		testSecret, testMCPSecret, strings.Repeat("s", 40), "svc-password-0123456789"}
 	covered := map[string]bool{}
 	byName := map[string]Tool{}
@@ -735,7 +770,9 @@ func testToolsNotEchoed(t *testing.T) {
 	// The success paths ran (fix round 1: real targets).
 	for _, n := range []string{"create_instance", "set_hosts", "backup_instance", "restore_instance", "restore_as", "delete_instance",
 		"list_credentials", "admin_revoke_credential", "delete_domain", "enroll_domain", "replace_domain_token", "get_env", "get_instance",
-		"set_model_provider_secret", "delete_model_provider", "get_op", "wait_for_op", "get_logs", "disable_instance"} {
+		"set_model_provider_secret", "delete_model_provider", "get_op", "wait_for_op", "get_logs", "disable_instance",
+		// Task 18: the invite paths ran.
+		"create_person", "send_invite", "remove_passkeys", "import_apply", "directory_overview", "set_password", "audit_recent"} {
 		if !ok[n] {
 			t.Errorf("%s didn't succeed: the fixture misses its success path", n)
 		}

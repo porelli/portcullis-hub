@@ -37,37 +37,9 @@ var confirmationRoutes = map[string]string{
 }
 
 // pendingToolRoutes are the routes whose tools later tasks add: route →
-// the task ("T17b", "T18", "T20"). Each task removes its entries; T20
-// leaves it empty.
+// the task. Each task removed its entries (T17b, T18); T20 leaves it
+// empty.
 var pendingToolRoutes = map[string]string{
-	// T18: users and groups, the Keycloak user sweep.
-	"GET /api/directory":                                          "T18",
-	"GET /api/directory/audit":                                    "T18",
-	"POST /api/directory/users":                                   "T18",
-	"PUT /api/directory/users/{username}":                         "T18",
-	"DELETE /api/directory/users/{username}":                      "T18",
-	"POST /api/directory/users/{username}/password":               "T18",
-	"POST /api/directory/users/{username}/invite":                 "T18",
-	"POST /api/directory/users/{username}/require-passkey":        "T18",
-	"POST /api/directory/users/{username}/clear-actions":          "T18",
-	"POST /api/directory/users/{username}/remove-passkeys":        "T18",
-	"POST /api/directory/groups":                                  "T18",
-	"DELETE /api/directory/groups/{group}":                        "T18",
-	"POST /api/directory/groups/{group}/members":                  "T18",
-	"DELETE /api/directory/groups/{group}/members/{username}":     "T18",
-	"POST /api/directory/fields":                                  "T18",
-	"PUT /api/directory/fields/{name}":                            "T18",
-	"DELETE /api/directory/fields/{name}":                         "T18",
-	"PUT /api/directory/users/{username}/details":                 "T18",
-	"POST /api/directory/rules/preview":                           "T18",
-	"PUT /api/directory/groups/{group}/rule":                      "T18",
-	"POST /api/directory/groups/{group}/convert-preview":          "T18",
-	"POST /api/directory/groups/{group}/convert":                  "T18",
-	"POST /api/directory/groups/{group}/exceptions":               "T18",
-	"DELETE /api/directory/groups/{group}/exceptions/{username}":  "T18",
-	"PUT /api/directory/groups/{group}/members/{username}/expiry": "T18",
-	"PUT /api/directory/permissions/{perm}":                       "T18",
-	"POST /api/directory/import/apply":                            "T18",
 	// T20: doctor and shared folders.
 	"GET /api/doctor":                        "T20",
 	"POST /api/doctor/scan":                  "T20",
@@ -110,6 +82,12 @@ var destructiveTwins = map[string]string{
 	"DELETE /api/ai/providers/{name}":                 "deletes a model provider and its secrets",
 	"POST /api/keycloak/user-sweep/resume":            "typed confirmation (resume): Keycloak then removes records LLDAP lacks",
 	"DELETE /api/directory/keycloak-stale/{username}": "deletes a Keycloak record (typed username)",
+	// Task 18 (§15.10's D list).
+	"DELETE /api/directory/users/{username}":               "deletes a person (typed username)",
+	"POST /api/directory/users/{username}/remove-passkeys": "removes a person's passkeys (typed username)",
+	"POST /api/directory/users/{username}/require-passkey": "forces a passkey registration: on another administrator it hands over their sign-in (§15.10 lists require_passkey as D)",
+	"DELETE /api/directory/groups/{group}":                 "deletes a group (typed name)",
+	"DELETE /api/directory/fields/{name}":                  "deletes a field and every value of it (typed name)",
 }
 
 // accessWidening are the tools that are D only for some arguments (G37,
@@ -127,6 +105,16 @@ var accessWidening = map[string]string{
 	"save_model_provider": "D when it changes where model traffic goes (base_url, instance, instance_name, region) or names no stored provider",
 	"save_hub_settings":   "D when it turns AI or the people MCP on, changes clients or origins, or raises a limit or connection length",
 	"set_default_policy":  "D unless the new default is policy.Stricter than the current one",
+	// Task 18 (G37 ruling 2; the directory's Membership.Guarding).
+	"create_person":     "D with groups",
+	"add_member":        "D into an administrator, permission or guarding group (or one the directory can't place)",
+	"set_member_expiry": "D on an administrator, permission or guarding group",
+	"set_group_rule":    "D on a guarding group",
+	"convert_group":     "D on a guarding group",
+	"add_exception":     "D on a guarding group (deviation: an included exception is a membership)",
+	"remove_exception":  "D on a guarding group (deviation: dropping a kept-out exception lets the rule add them)",
+	"set_details":       "D when it sets a field a guarding group's rule uses (deviation)",
+	"import_apply":      "D when a row creates or deletes a person, or sets a field a guarding group's rule uses",
 }
 
 // widensAlways are the D tools whose every call widens access (G37
@@ -135,6 +123,7 @@ var accessWidening = map[string]string{
 var widensAlways = map[string]string{
 	"add_source":         "a source decides what apps can run (G37)",
 	"add_model_provider": "what people send on the AI page goes to it, and its secrets (Task 17b ruling)",
+	"set_permission":     "a delegated permission lets a group manage people (G37)",
 }
 
 func TestToolParity(t *testing.T) {
@@ -171,7 +160,7 @@ func TestToolParity(t *testing.T) {
 		case n > 1:
 			t.Errorf("route %s is listed twice (twin %v, noTool %v, confirmation %v, pending %v)", r, twins[r], none, conf, pending)
 		}
-		if pending && !slices.Contains([]string{"T17b", "T18", "T20"}, task) {
+		if pending && task != "T20" {
 			t.Errorf("pending route %s: task %q", r, task)
 		}
 	}
@@ -230,13 +219,17 @@ func TestToolParity(t *testing.T) {
 		// Task 17b (§15.10's D list, G37 and its rulings).
 		"add_source", "remove_source", "restore_instance", "restore_as", "delete_domain", "revoke_ai_access",
 		"add_model_provider", "delete_model_provider", "resume_user_sweep", "remove_stale_keycloak_user",
-		"set_ai_support", "set_ai_mode", "save_model_provider", "save_hub_settings", "set_default_policy"} {
+		"set_ai_support", "set_ai_mode", "save_model_provider", "save_hub_settings", "set_default_policy",
+		// Task 18 (§15.10, G37).
+		"delete_person", "delete_group", "delete_field", "require_passkey", "remove_passkeys", "set_permission",
+		"create_person", "add_member", "set_member_expiry", "set_group_rule", "convert_group", "add_exception",
+		"remove_exception", "set_details", "import_apply"} {
 		if byName[n].Class != ClassDestructive {
 			t.Errorf("tool %s: class %q, want D", n, byName[n].Class)
 		}
 	}
 	// U tools (Task 17b): domain tokens and provider secrets.
-	for _, n := range []string{"set_secret_setting", "enroll_domain", "replace_domain_token", "set_model_provider_secret"} {
+	for _, n := range []string{"set_secret_setting", "enroll_domain", "replace_domain_token", "set_model_provider_secret", "set_password"} {
 		if byName[n].Class != ClassSecret {
 			t.Errorf("tool %s: class %q, want U", n, byName[n].Class)
 		}
@@ -244,17 +237,27 @@ func TestToolParity(t *testing.T) {
 	// W (Task 17b): a backup can't widen access (the archive stays in the
 	// Hub's data; the instance comes back as it was); a sync pulls the
 	// sources the admin added.
-	for _, n := range []string{"backup_instance", "sync_sources"} {
+	for _, n := range []string{"backup_instance", "sync_sources", "update_person", "send_invite", "clear_actions", "create_group",
+		"remove_member", "create_field", "update_field"} {
 		if byName[n].Class != ClassWrite {
 			t.Errorf("tool %s: class %q, want W", n, byName[n].Class)
 		}
 	}
 	// The tools of both parts are all there.
-	for _, n := range append(slices.Clone(admin17a), admin17b...) {
+	for _, n := range append(append(slices.Clone(admin17a), admin17b...), admin18...) {
 		if _, ok := byName[n]; !ok {
 			t.Errorf("tool %s is not registered", n)
 		}
 	}
+}
+
+// admin18 are the users and groups tools of T18.
+var admin18 = []string{
+	"directory_overview", "get_person", "preview_rule", "convert_group_preview", "import_review", "audit_recent",
+	"create_person", "update_person", "set_details", "require_passkey", "remove_passkeys", "set_password", "send_invite",
+	"clear_actions", "delete_person", "create_group", "delete_group", "add_member", "remove_member", "set_member_expiry",
+	"set_group_rule", "convert_group", "add_exception", "remove_exception", "set_permission",
+	"create_field", "update_field", "delete_field", "import_apply",
 }
 
 // admin17b are the admin tools of T17b (catalog and sources, backups,

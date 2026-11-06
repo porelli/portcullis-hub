@@ -688,9 +688,17 @@
     // #settings/domains?enroll=<name>[&provider=<p>] and ?token=<name> open
     // the Domains forms (enroll_domain, replace_domain_token);
     // #settings/ai?provider=<name>&field=<field> a provider secret's form
-    // (set_model_provider_secret). Secrets are typed here, never passed in.
+    // (set_model_provider_secret); #users/<name>[?password|?invite] a
+    // person, with the password fallback's or the invite's own prompt
+    // (set_password, send_invite). Secrets are typed here, never passed in.
     window.addEventListener('load', () => {
       const t = location.hash.slice(1);
+      const usr = /^users\/([a-z0-9][a-z0-9._-]{0,63})(?:\?(password|invite))?$/.exec(t);
+      if (usr) {
+        document.querySelector('.tab[data-tab="users"]').click();
+        PortcullisDirectory.openAt(usr[1], usr[2] || '');
+        return;
+      }
       const app = /^app\/([a-z0-9-]+)\/settings(?:\/([A-Za-z0-9_.-]+))?$/.exec(t);
       if (app) { openSettingAt(app[1], app[2] || ''); return; }
       const sec = /^settings\/(domains|ai)\?(.*)$/.exec(t);

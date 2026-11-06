@@ -323,7 +323,8 @@ func (s *Server) tools(scope string) []Tool {
 }
 
 // registerMCPTools registers the real tools (Tasks 17–19), once per
-// Server: the admin tools (mcptools_admin.go).
+// Server: the admin tools (mcptools_admin.go, mcptools_admin2.go,
+// mcptools_directory.go).
 func (s *Server) registerMCPTools() {
 	s.mcp.mu.Lock()
 	done := s.mcp.registered
@@ -334,6 +335,7 @@ func (s *Server) registerMCPTools() {
 	}
 	s.registerAdminTools()
 	s.registerAdminTools2()
+	s.registerDirectoryTools()
 }
 
 // mcpScopeOf names the scope's resource URL, listener, page base and

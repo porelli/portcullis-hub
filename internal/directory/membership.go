@@ -49,6 +49,18 @@ type Membership struct {
 	// (contract §15.4 expiring: the gate refuses from that time on, even
 	// before the evaluator removes the membership).
 	Pending map[string]map[string]time.Time
+	// Guarding: group → why it guards (guardingGroups: administrator,
+	// permission, app admin and privileged-value groups). The Portcullis
+	// MCP decides from it whether a membership, rule or exception change
+	// widens access (G37), so it never keeps a second list.
+	Guarding map[string]string
+	// GuardedFields: field → the guarding group whose rule uses it
+	// (guardedFields): setting it can change who is in that group.
+	GuardedFields map[string]string
+	// Administrators: lowercase users in an administrator group
+	// (AdminGroups; the service account excluded) — the targets whose
+	// passkeys or password hand over an administrator's account.
+	Administrators map[string]bool
 }
 
 // Membership reads LLDAP and directory.yaml. LLDAP unavailable: 503;
@@ -78,7 +90,15 @@ func (s *Service) Membership(ctx context.Context, now time.Time) (*Membership, e
 func (s *Service) membershipOf(cfg *Config, sn *snapshot, now time.Time) *Membership {
 	svc := strings.ToLower(s.serviceUser())
 	m := &Membership{Users: map[string]map[string]int{}, Groups: map[string]MemberGroup{}, Expired: map[string]map[string]bool{}, Privilege: map[string]string{}, UUIDs: map[string]string{},
-		Emails: map[string]string{}, Pending: map[string]map[string]time.Time{}}
+		Emails: map[string]string{}, Pending: map[string]map[string]time.Time{},
+		Guarding: s.guardingGroups(cfg), GuardedFields: s.guardedFields(cfg), Administrators: map[string]bool{}}
+	for g := range s.adminGroups() {
+		for _, u := range sn.groups[g].Members() {
+			if u = strings.ToLower(u); u != svc {
+				m.Administrators[u] = true
+			}
+		}
+	}
 	for id, u := range sn.users {
 		if id != svc {
 			m.Users[id] = map[string]int{}
