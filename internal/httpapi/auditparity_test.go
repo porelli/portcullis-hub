@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -186,5 +187,49 @@ func TestDefaultPolicyUnchangedNotAudited(t *testing.T) {
 	mustDo(t, e.hub, "root", http.MethodPut, "/api/settings", body, 200)
 	if got := e.auditActions(t, "settings.default_policy"); len(got) != n {
 		t.Errorf("unchanged save audited: %q", got)
+	}
+}
+
+const cloudManifest = `name: Cloud
+category: productivity
+auth:
+  method: forward-auth
+  group_access: true
+  access_group: users_cloud
+  public_access:
+    enabled_by_default: true
+    description: Public share links
+    token_pattern: '^[A-Za-z0-9-]{1,32}$'
+    paths:
+      - prefix: "/s/{token}"
+        description: Share page
+`
+
+const cloudCompose = "services:\n  cloud:\n    image: nc\n    labels:\n" +
+	"      traefik.http.routers.cloud.rule: Host(`${PORTCULLIS_HOST_CLOUD:-cloud.portcullis.local}`)\n" +
+	"      traefik.http.services.cloud.loadbalancer.server.port: \"80\"\n"
+
+// TestRefusedPublicTokenNotInAuditFile (security review): a settings
+// save refused over its public tokens answers the admin the Hub's
+// message, but audit.jsonl holds no form of any token — raw, quoted or a
+// share URL's segment.
+func TestRefusedPublicTokenNotInAuditFile(t *testing.T) {
+	e := newInstEnvWith(t, t.TempDir(), map[string][2]string{"cloud": {cloudManifest, cloudCompose}}, nil)
+	if e.s.Hub.Template("cloud") == nil {
+		t.Fatal("cloud template not loaded")
+	}
+	for _, in := range []string{`raw tok!SECRET1`, `tok"SECRET2`, "https://cloud.example.org/s/seg!SECRET3", "https://other.example.org/x/SECRET4"} {
+		body, _ := json.Marshal(map[string]any{"public_mode": "listed", "public_tokens": []string{in}})
+		code, b := e.do(t, "root", "PUT", "/api/instances/cloud/settings", string(body))
+		if code != 400 {
+			t.Fatalf("%q: %d %s, want 400", in, code, b)
+		}
+	}
+	raw, _ := os.ReadFile(e.audit)
+	if strings.Contains(string(raw), "SECRET") {
+		t.Errorf("a token form in audit.jsonl:\n%s", raw)
+	}
+	if !strings.Contains(string(raw), "public token refused (400)") {
+		t.Errorf("no fixed refusal in audit.jsonl:\n%s", raw)
 	}
 }

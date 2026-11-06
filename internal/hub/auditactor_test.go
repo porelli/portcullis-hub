@@ -188,3 +188,36 @@ func TestAccessChangesAudited(t *testing.T) {
 		}
 	}
 }
+
+// TestRefusedPublicTokenNeverAudited (Task 7c fix round 1, security
+// review): a save refused while it carries public tokens audits a fixed
+// error ("public token refused" + the refusal class), never the error's
+// text — so no form of a submitted token (raw, %q-quoted, a URL's
+// segment) reaches the audit.
+func TestRefusedPublicTokenNeverAudited(t *testing.T) {
+	f := newCloudFixture(t)
+	audit := &fakeAudit{}
+	f.h.SetAudit(audit)
+	inputs := []string{`raw tok!SECRET1`, `tok"SECRET2`, "https://cloud.example.org/s/seg!SECRET3", "https://other.example.org/x/SECRET4"}
+	for _, in := range inputs {
+		n := auditLen(audit)
+		_, err := f.h.SaveSettings("cloud", SettingsUpdate{PublicMode: strp("listed"), PublicTokens: listp(in)}, aiActor)
+		if errStatus(err) != 400 {
+			t.Fatalf("%q: %v, want 400", in, err)
+		}
+		got := entriesSince(audit, n)
+		wantVia(t, in, got, "settings.change")
+		for _, e := range got {
+			if e.Result != "refused" || e.Error != "public token refused (400)" {
+				t.Errorf("%q: entry %s = %s %q, want refused with the fixed error", in, e.Target, e.Result, e.Error)
+			}
+		}
+	}
+	audit.mu.Lock()
+	defer audit.mu.Unlock()
+	for _, e := range audit.entries {
+		if strings.Contains(e.Detail+e.Error, "SECRET") {
+			t.Errorf("a token form in the audit: %+v", e)
+		}
+	}
+}

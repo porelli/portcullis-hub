@@ -177,7 +177,11 @@ func (s *Server) handleSaveSettings(w http.ResponseWriter, r *http.Request) {
 	before := s.Hub.SignInMode(id)
 	res, err := s.Hub.SaveSettings(id, u, requestActor(r))
 	if u.SignIn != nil && (err != nil || s.Hub.SignInMode(id) != before) {
-		s.auditSignIn(r, id, before, *u.SignIn, err)
+		aerr := err
+		if u.PublicTokens != nil {
+			aerr = hub.PublicTokenAuditErr(err) // never a token in the audit
+		}
+		s.auditSignIn(r, id, before, *u.SignIn, aerr)
 	}
 	if err != nil {
 		writeErr(w, err, http.StatusInternalServerError)

@@ -1316,8 +1316,9 @@ func (h *Hub) auditSettings(id string, actor directory.Actor, u SettingsUpdate, 
 		}
 		if u.PublicTokens != nil {
 			keys = append(keys, "public_tokens")
-			// The refusal may quote a submitted token: never in the audit.
-			err = withSecrets(err, tokenRedactions(*u.PublicTokens))
+			// The refusal may quote a submitted token in any form: the
+			// audit gets a fixed text, never err's.
+			err = PublicTokenAuditErr(err)
 		}
 		for k := range u.Ports {
 			keys = append(keys, k)
@@ -1412,20 +1413,16 @@ func tokenCount(n int) string {
 	return fmt.Sprintf("%d tokens", n)
 }
 
-// tokenRedactions: what a refusal of these public-token inputs may
-// quote (the input, trimmed, and its path segments of 3+ bytes).
-func tokenRedactions(in []string) []string {
-	var out []string
-	for _, v := range in {
-		v = strings.TrimSpace(v)
-		out = append(out, v)
-		for _, seg := range strings.Split(v, "/") {
-			if len(seg) >= 3 {
-				out = append(out, seg)
-			}
-		}
+// PublicTokenAuditErr is the error the audit records for a save refused
+// (or failed) while it carried public tokens: "public token refused" and
+// the refusal class (its status), never err's text, which may quote a
+// token in any form. The API answer keeps err (the admin sent the token).
+func PublicTokenAuditErr(err error) error {
+	if err == nil {
+		return nil
 	}
-	return out
+	st := errStatus(err)
+	return &StatusError{Status: st, Err: fmt.Errorf("public token refused (%d)", st)}
 }
 
 // signInCallbackChange: the callback URIs a sign-in mode change of
