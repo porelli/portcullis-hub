@@ -181,7 +181,7 @@ func (h *Hub) MyApps(ctx context.Context, user string) (*MyAppsView, error) {
 		for _, o := range personSecretOptions(t) {
 			app.Credentials = append(app.Credentials, h.myCredentialLocked(t, o, user))
 		}
-		if aiOn {
+		if aiOn && gateUser(user) {
 			app.AI = h.myAppAILocked(t)
 			companion = companion || app.AI != nil
 		}
@@ -190,13 +190,26 @@ func (h *Hub) MyApps(ctx context.Context, user string) (*MyAppsView, error) {
 			out = append(out, app)
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
-	v := &MyAppsView{Apps: out}
-	if secretApps {
-		v.FreshAuth = info
-	}
+	v := &MyAppsView{}
 	if aiOn {
 		v.AI = h.myAITopLocked(m, user, companion, healthy)
+	}
+	// The top-level ai decides (Task 21 fix round 1): without it there is
+	// no ai key anywhere, and apps listed only for their AI part go.
+	if v.AI == nil {
+		kept := out[:0]
+		for _, app := range out {
+			app.AI = nil
+			if len(app.Values) > 0 || len(app.Entries) > 0 || len(app.Credentials) > 0 {
+				kept = append(kept, app)
+			}
+		}
+		out = kept
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	v.Apps = out
+	if secretApps {
+		v.FreshAuth = info
 	}
 	return v, nil
 }

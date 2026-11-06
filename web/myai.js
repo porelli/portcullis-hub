@@ -43,6 +43,27 @@
     return s || 'portcullis-app';
   }
 
+  // serverNames gives every companion row of apps a Claude Code server
+  // name unique in the card (and never the aggregate's portcullis-apps):
+  // serverName(label), with -<instance id> appended when two rows (or the
+  // aggregate) would share it, and -<companion> after that if still
+  // needed. Keyed by instance id + NUL + companion name.
+  function serverNames(apps) {
+    const rows = [];
+    for (const a of apps) for (const c of a.ai.companions) rows.push({ key: a.id + '\u0000' + c.name, base: serverName(c.label), id: a.id, comp: c.name });
+    const count = new Map([['portcullis-apps', 1]]);
+    for (const r of rows) count.set(r.base, (count.get(r.base) || 0) + 1);
+    const out = new Map(), used = new Set(['portcullis-apps']);
+    for (const r of rows) {
+      let n = r.base;
+      if (count.get(n) > 1) n = serverName(n + '-' + r.id);
+      if (used.has(n)) n = serverName(n + '-' + r.comp);
+      used.add(n);
+      out.set(r.key, n);
+    }
+    return out;
+  }
+
   function joinNames(names) {
     if (names.length <= 1) return names.join('');
     return names.slice(0, -1).join(', ') + ' and ' + names[names.length - 1];
@@ -55,6 +76,9 @@
   }
 
   // ── the steps per client (tabs) ───────────────────────────
+
+  // tabSeq numbers tab sets, so every tab and panel has a unique id.
+  let tabSeq = 0;
 
   // steps is the three-tab block for one resource r: {url, name (Claude
   // Code server name), title (the connector's name in Claude), scope}.
@@ -87,13 +111,17 @@
         ' · no secret · PKCE S256 · redirect <code>' + esc(redirect) + '</code> · scope <code>' + esc(r.scope) + '</code></p>' });
     }
     if (!tabs.length) return '<p class="pd-muted">No AI client is offered right now; ask an administrator.</p>';
-    let h = '<div class="mai-tabset" data-mai-tabs><div class="pd-tabs mai-tabs" role="tablist">';
+    const set = 'mai-' + (++tabSeq);
+    let h = '<div class="mai-tabset" data-mai-tabs><div class="pd-tabs mai-tabs" role="tablist" aria-label="AI clients">';
     tabs.forEach((t, i) => {
-      h += '<button type="button" class="pd-tab' + (i === 0 ? ' active' : '') + '" role="tab" aria-selected="' + (i === 0) + '" data-mai-tab="' + esc(t.id) + '">' + esc(t.label) + '</button>';
+      h += '<button type="button" class="pd-tab' + (i === 0 ? ' active' : '') + '" role="tab" id="' + set + '-tab-' + esc(t.id) +
+        '" aria-controls="' + set + '-panel-' + esc(t.id) + '" aria-selected="' + (i === 0) + '" tabindex="' + (i === 0 ? '0' : '-1') +
+        '" data-mai-tab="' + esc(t.id) + '">' + esc(t.label) + '</button>';
     });
     h += '</div>';
     tabs.forEach((t, i) => {
-      h += '<div class="mai-panel" role="tabpanel" data-mai-panel="' + esc(t.id) + '"' + (i === 0 ? '' : ' hidden') + '>' + t.html + '</div>';
+      h += '<div class="mai-panel" role="tabpanel" id="' + set + '-panel-' + esc(t.id) + '" aria-labelledby="' + set + '-tab-' + esc(t.id) +
+        '" tabindex="0" data-mai-panel="' + esc(t.id) + '"' + (i === 0 ? '' : ' hidden') + '>' + t.html + '</div>';
     });
     return h + '</div>';
   }
@@ -103,7 +131,6 @@
   function oauthSteps(label, url, name) {
     const cmd = 'claude mcp add --transport http --scope user ' + name + ' ' + url;
     return '<div class="mai-oauth-steps">' +
-      '<p>Claude: add it as a custom connector with "Use Claude\'s published identity"; ' + esc(label) + ' asks you to sign in (passkey).</p>' +
       '<p>Claude Code: <code>' + esc(cmd) + '</code> ' + copyBtn(cmd, 'the command') + '</p>' +
       '<p>Other MCP clients: server URL <code>' + esc(url) + '</code> ' + copyBtn(url) + ' · ' + esc(label) + ' handles the sign-in.</p></div>';
   }
@@ -209,12 +236,15 @@
       '<p class="mai-intro">Use your apps from Claude or another AI assistant, as yourself. The AI can see and change only what you can. ' +
       'What it reads is sent to the AI provider you use. Deleting things always asks for your passkey in this browser.</p>';
 
+    const names = serverNames(apps);
     if (agg) {
+      // Only companions in "all my apps" (aggregate: true) are covered;
+      // the others (app_oauth, aggregate: false) are connected separately.
       const covered = [], separate = [];
       for (const a of apps) {
         for (const c of a.ai.companions) {
-          if (c.identity_mode === 'app_oauth') { if (separate.indexOf(c.label) < 0) separate.push(c.label); }
-          else if (covered.indexOf(a.name || a.id) < 0) covered.push(a.name || a.id);
+          if (c.aggregate === true) { if (covered.indexOf(a.name || a.id) < 0) covered.push(a.name || a.id); }
+          else if (separate.indexOf(c.label) < 0) separate.push(c.label);
         }
       }
       h += '<div class="mai-sec"><div class="mai-sec-title">All my apps</div>' +
@@ -241,8 +271,8 @@
               esc(c.label) + ' applies its own rules; Portcullis doesn\'t log or confirm its AI actions.</p>';
           }
           h += '<details class="mai-steps-box"><summary>Steps ▾</summary>' +
-            (oauth ? oauthSteps(c.label, url, serverName(c.label))
-              : steps(top || {}, { url: url, name: serverName(c.label), title: c.label, scope: 'mcp:' + a.id + '.' + c.name }, domain)) +
+            (oauth ? oauthSteps(c.label, url, names.get(a.id + '\u0000' + c.name))
+              : steps(top || {}, { url: url, name: names.get(a.id + '\u0000' + c.name), title: c.label, scope: 'mcp:' + a.id + '.' + c.name }, domain)) +
             '</details></li>';
         }
       }
@@ -304,23 +334,45 @@
     navigator.clipboard.writeText(v).then(() => done('Copied'), () => done('Copy failed'));
   }
 
+  // selectTab makes tab b the selected one of its set (and focuses it).
+  function selectTab(b, focus) {
+    const set = b.closest('[data-mai-tabs]');
+    set.querySelectorAll('[data-mai-tab]').forEach(t => {
+      const on = t === b;
+      t.classList.toggle('active', on);
+      t.setAttribute('aria-selected', String(on));
+      t.tabIndex = on ? 0 : -1;
+    });
+    set.querySelectorAll('[data-mai-panel]').forEach(p => { p.hidden = p.dataset.maiPanel !== b.dataset.maiTab; });
+    if (focus) b.focus();
+  }
+
   function bind(box) {
     if (box.dataset.maiBound) return;
     box.dataset.maiBound = '1';
+    // Arrow keys move between the tabs of one set (Home / End: first /
+    // last), as the WAI-ARIA tabs pattern does.
+    box.addEventListener('keydown', e => {
+      const b = e.target.closest && e.target.closest('[data-mai-tab]');
+      if (!b || !box.contains(b)) return;
+      const tabs = Array.from(b.parentElement.querySelectorAll('[data-mai-tab]'));
+      const i = tabs.indexOf(b);
+      let j = -1;
+      switch (e.key) {
+        case 'ArrowRight': j = (i + 1) % tabs.length; break;
+        case 'ArrowLeft': j = (i - 1 + tabs.length) % tabs.length; break;
+        case 'Home': j = 0; break;
+        case 'End': j = tabs.length - 1; break;
+        default: return;
+      }
+      e.preventDefault();
+      selectTab(tabs[j], true);
+    });
     box.addEventListener('click', e => {
       const b = e.target.closest('button');
       if (!b || !box.contains(b) || b.disabled) return;
       if (b.dataset.maiCopy !== undefined) { copy(b); return; }
-      if (b.dataset.maiTab) {
-        const set = b.closest('[data-mai-tabs]');
-        set.querySelectorAll('[data-mai-tab]').forEach(t => {
-          const on = t === b;
-          t.classList.toggle('active', on);
-          t.setAttribute('aria-selected', String(on));
-        });
-        set.querySelectorAll('[data-mai-panel]').forEach(p => { p.hidden = p.dataset.maiPanel !== b.dataset.maiTab; });
-        return;
-      }
+      if (b.dataset.maiTab) { selectTab(b, false); return; }
       const li = b.closest('[data-mai-conn]');
       if (!li) return;
       const panel = li.querySelector('[data-mai-conn-panel]');
@@ -348,5 +400,6 @@
     loadMine(box);
   }
 
-  window.PortcullisMyAI = { render, serverName };
+  // cardHtml and serverNames are exported for the tests (pure functions).
+  window.PortcullisMyAI = { render, serverName, serverNames, cardHtml };
 })();

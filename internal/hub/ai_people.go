@@ -27,7 +27,7 @@ type MyAppAI struct {
 
 // MyCompanion is one switched-on companion the caller may use: URL the
 // resource URL (§15.1; for app_oauth the app's own MCP route), Official
-// = upstream official.
+// = upstream official, Aggregate = in "all my apps".
 type MyCompanion struct {
 	Name         string `json:"name"`
 	Label        string `json:"label"`
@@ -35,6 +35,9 @@ type MyCompanion struct {
 	IdentityMode string `json:"identity_mode"`
 	Mode         string `json:"mode"`
 	Official     bool   `json:"official"`
+	// Aggregate: the companion is in "all my apps" (§15.9; always false
+	// for app_oauth).
+	Aggregate bool `json:"aggregate"`
 }
 
 // MyAITop is the top-level ai of GET /api/me/apps.
@@ -86,11 +89,12 @@ func (h *Hub) myAIOnLocked(gate bool) bool {
 }
 
 // myAppAILocked is t's AI part for a caller in its population (nil: no
-// companion to show). A companion is shown only while it is on, its
-// revoke_all isn't owed, it isn't pruned, its mode is one of its modes,
-// the instance's policy allows AI (LoA ≤ 2) and its router has a
-// hostname — any doubt leaves it out, as the gate file does. Caller
-// holds mu.
+// companion to show). A companion is shown only while it is on and
+// passes the gate's own per-companion check (companionUsable: no owed
+// revoke_all, not pruned, a mode of its modes, LoA ≤ 2, an alias that
+// fits, a usable identity, a router hostname); the instance must be
+// enabled, routed and not deleting or restoring — any doubt leaves it
+// out, as the gate file does. Caller holds mu.
 func (h *Hub) myAppAILocked(t *templates.Template) *MyAppAI {
 	if !t.Enabled || !t.HasAIMCP() || t.Manifest.Routerless() || h.instanceBusyLocked(t.ID) {
 		return nil
@@ -99,25 +103,20 @@ func (h *Hub) myAppAILocked(t *templates.Template) *MyAppAI {
 	if len(switches) == 0 {
 		return nil
 	}
-	if loa := policy.LoA(h.effectivePolicyLocked(t)); loa < 0 || loa > 2 {
-		return nil
-	}
+	loa := policy.LoA(h.effectivePolicyLocked(t))
 	var out []MyCompanion
 	for i := range t.Manifest.AI.MCP {
 		c := &t.Manifest.AI.MCP[i]
 		sw, ok := switches[c.Name]
-		if !ok || !sw.Enabled || sw.RevokePending || sw.Pruned || !slices.Contains(c.Modes, sw.Mode) {
+		if !ok || !sw.Enabled {
 			continue
 		}
-		if c.Identity.Mode != templates.IdentityAppOAuth && !templates.AliasFits(t.ID, c.Name) {
-			continue
-		}
-		host := NormalizeHost(t.Hosts[c.Router])
-		if host == "" || !templates.ValidHostname(host) {
+		host, why := companionUsable(t, c, sw, loa)
+		if why != "" {
 			continue
 		}
 		out = append(out, MyCompanion{Name: c.Name, Label: c.Label, URL: aigate.CompanionURL(host, c.EffectivePublicPath()),
-			IdentityMode: c.Identity.Mode, Mode: sw.Mode, Official: c.Upstream == templates.UpstreamOfficial})
+			IdentityMode: c.Identity.Mode, Mode: sw.Mode, Official: c.Upstream == templates.UpstreamOfficial, Aggregate: c.Aggregated()})
 	}
 	if len(out) == 0 {
 		return nil
@@ -125,13 +124,17 @@ func (h *Hub) myAppAILocked(t *templates.Template) *MyAppAI {
 	return &MyAppAI{Companions: out}
 }
 
+// gateUser: a username the gate file and the gate both accept (the
+// population filter of mcp-gate.json, validUsers, and the gate's own).
+func gateUser(u string) bool { return lldap.ValidUsername(u) && aigate.ValidUsername(u) }
+
 // myAITopLocked is the top-level ai for user (lowercase) given whether
 // they have a companion: nil without an AI resource (no companion and the
 // people MCP off) or outside LLDAP. Clients: offered and healthy
 // (healthy: the last Keycloak pass, nil = none). Caller holds mu.
 func (h *Hub) myAITopLocked(m *directory.Membership, user string, companion bool, healthy map[string]bool) *MyAITop {
 	ai := h.st.AI
-	if _, ok := m.Users[user]; !ok || !aigate.ValidUsername(user) {
+	if _, ok := m.Users[user]; !ok || !gateUser(user) {
 		return nil
 	}
 	if !companion && !ai.PortcullisPeople {

@@ -10,6 +10,7 @@ import (
 
 	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/state"
+	"github.com/portcullis/hub/internal/templates"
 )
 
 // Plan 4 Task 21: My apps' AI parts (contract §5.1): each app's
@@ -18,7 +19,8 @@ import (
 
 // newMyAIFixture: aiapp (tok app_token read_write, hdr identity_headers
 // read_only) and oauthapp (oauth app_oauth) enabled with every companion
-// on (oauthapp with the access group users_oauthapp); alice in both,
+// on (oauthapp with the access group users_oauthapp), and dash (no AI
+// support, a per-person theme; users_dash: alice); alice in all three,
 // root in lldap_admin, carol in nothing; Claude has the admin flag.
 func newMyAIFixture(t *testing.T, seed func(*state.AppState)) *instAIFixture {
 	t.Helper()
@@ -34,10 +36,15 @@ func newMyAIFixture(t *testing.T, seed func(*state.AppState)) *instAIFixture {
 		m := extra["oauthapp"]
 		m[0] = strings.Replace(m[0], "  group_access: true\n", "  group_access: true\n  access_group: users_oauthapp\n", 1)
 		extra["oauthapp"] = m
+		extra["dash"] = [2]string{myDashManifest, myDashCompose}
 	})
+	a.people.addGroup("users_dash", "alice")
+	a.people.addGroup("admin_dash")
+	a.h.SetGroups(&fakeGroups{people: a.people, existing: map[string]bool{"users_aiapp": true, "users_oauthapp": true, "users_dash": true, "admin_dash": true}})
 	a.setMintAnswer(nil)
 	a.enable(t, "aiapp")
 	a.enable(t, "oauthapp")
+	a.enable(t, "dash")
 	return a
 }
 
@@ -78,16 +85,20 @@ func TestMyAppsAI(t *testing.T) {
 		t.Fatalf("alice's aiapp = %+v (%s)", ai, raw)
 	}
 	want := []MyCompanion{
-		{Name: "tok", Label: "Tokens", URL: tokResource, IdentityMode: "app_token", Mode: "read_write", Official: true},
-		{Name: "hdr", Label: "Headers", URL: "https://aiapp.example.com/hdr/mcp", IdentityMode: "identity_headers", Mode: "read_only", Official: true},
+		{Name: "tok", Label: "Tokens", URL: tokResource, IdentityMode: "app_token", Mode: "read_write", Official: true, Aggregate: true},
+		{Name: "hdr", Label: "Headers", URL: "https://aiapp.example.com/hdr/mcp", IdentityMode: "identity_headers", Mode: "read_only", Official: true, Aggregate: true},
 	}
 	if !slices.Equal(ai.AI.Companions, want) {
 		t.Errorf("aiapp companions = %+v, want %+v", ai.AI.Companions, want)
 	}
 	oa := appOf(v, "oauthapp")
 	if oa == nil || oa.AI == nil || !slices.Equal(oa.AI.Companions, []MyCompanion{
-		{Name: "oauth", Label: "OAuth App", URL: "https://" + oauthHost + "/mcp", IdentityMode: "app_oauth", Mode: "read_write", Official: true}}) {
+		{Name: "oauth", Label: "OAuth App", URL: "https://" + oauthHost + "/mcp", IdentityMode: "app_oauth", Mode: "read_write", Official: true, Aggregate: false}}) {
 		t.Errorf("alice's oauthapp = %+v", oa)
+	}
+	// An app with values and no AI support is listed without an ai key.
+	if d := appOf(v, "dash"); d == nil || d.AI != nil || len(d.Values) == 0 {
+		t.Errorf("alice's dash = %+v", d)
 	}
 	top := v.AI
 	if top == nil {
@@ -111,7 +122,8 @@ func TestMyAppsAI(t *testing.T) {
 	for _, s := range []string{`"ai":{"aggregate_url":"https://mcp.example.com/mcp","clients":{"claude":{"client_id":"portcullis-ai-claude","admin":true},` +
 		`"claude_code":{"client_id":"portcullis-ai-claude-code","callback_port":33418,"admin":false},` +
 		`"generic":{"client_id":"portcullis-ai-generic","redirect_uris":["http://localhost:33418/callback","http://127.0.0.1:33418/callback"],"admin":false}}}`,
-		`"ai":{"companions":[{"name":"tok","label":"Tokens","url":"https://aiapp.example.com/mcp","identity_mode":"app_token","mode":"read_write","official":true},`} {
+		`"ai":{"companions":[{"name":"tok","label":"Tokens","url":"https://aiapp.example.com/mcp","identity_mode":"app_token","mode":"read_write","official":true,"aggregate":true},`,
+		`"identity_mode":"app_oauth","mode":"read_write","official":true,"aggregate":false}]}`} {
 		if !strings.Contains(raw, s) {
 			t.Errorf("alice's answer lacks %s:\n%s", s, raw)
 		}
@@ -123,6 +135,16 @@ func TestMyAppsAI(t *testing.T) {
 	if v.AI == nil || v.AI.AdminURL != "https://hub.example.com/mcp" || len(v.Apps) != 0 {
 		t.Errorf("root = %s", raw)
 	}
+	// An expired lldap_admin membership gives no admin_url.
+	a.people.mu.Lock()
+	a.people.expired["root"] = map[string]bool{"lldap_admin": true}
+	a.people.mu.Unlock()
+	if v, raw = myAIApps(t, a, "root"); v.AI == nil || v.AI.AdminURL != "" {
+		t.Errorf("expired admin: root = %s", raw)
+	}
+	a.people.mu.Lock()
+	delete(a.people.expired, "root")
+	a.people.mu.Unlock()
 	// carol (in nothing): the aggregate only.
 	if v, raw = myAIApps(t, a, "carol"); v.AI == nil || v.AI.AdminURL != "" || len(v.Apps) != 0 {
 		t.Errorf("carol = %s", raw)
@@ -188,6 +210,9 @@ func TestMyAppsAI(t *testing.T) {
 			t.Errorf("master off: %s = %s", u, raw)
 		}
 	}
+	if v, _ := myAIApps(t, a, "alice"); len(v.Apps) != 1 || v.Apps[0].ID != "dash" {
+		t.Errorf("master off: alice's apps = %+v, want only dash (values)", v.Apps)
+	}
 	setAI(func(s *state.AISettings) { s.Enabled = true })
 
 	// No gate (its recipient file gone): no ai anywhere.
@@ -212,5 +237,81 @@ func TestMyAppsAIPopulation(t *testing.T) {
 	}
 	if appOf(v, "oauthapp") != nil || strings.Contains(raw, "OAuth App") {
 		t.Errorf("bob (not in users_oauthapp) sees oauthapp: %s", raw)
+	}
+}
+
+// TestMyAppsAITopDecides (fix round 1): when the top-level ai can't be
+// built (here: the main domain isn't a hostname) there is no ai key
+// anywhere, and apps listed only for their AI part go; an app with values
+// stays.
+func TestMyAppsAITopDecides(t *testing.T) {
+	a := newMyAIFixture(t, nil)
+	a.h.mu.Lock()
+	a.h.cfg.Domain = "not a hostname"
+	a.h.mu.Unlock()
+	v, raw := myAIApps(t, a, "alice")
+	if strings.Contains(raw, `"ai"`) || len(v.Apps) != 1 || v.Apps[0].ID != "dash" {
+		t.Errorf("no top-level ai: %s", raw)
+	}
+}
+
+// TestMyAppsAIAggregateFlag: a companion with aggregate: false says so;
+// app_oauth is never aggregated.
+func TestMyAppsAIAggregateFlag(t *testing.T) {
+	a := newInstAIFixture(t, func(st *state.AppState) {
+		st.AIInstances = map[string]state.AIInstance{"aiapp": {Companions: map[string]state.AICompanion{"tok": {Enabled: true, Mode: "read_write"}, "hdr": {Enabled: true, Mode: "read_only"}}}}
+	}, func(extra map[string][2]string) {
+		m := extra["aiapp"]
+		m[0] = strings.Replace(m[0], "      public_path: /hdr/mcp\n", "      public_path: /hdr/mcp\n      aggregate: false\n", 1)
+		extra["aiapp"] = m
+	})
+	a.setMintAnswer(nil)
+	a.enable(t, "aiapp")
+	v, raw := myAIApps(t, a, "alice")
+	ai := appOf(v, "aiapp")
+	if ai == nil || ai.AI == nil || len(ai.AI.Companions) != 2 || !ai.AI.Companions[0].Aggregate || ai.AI.Companions[1].Aggregate {
+		t.Errorf("aggregate flags: %s", raw)
+	}
+}
+
+// TestCompanionUsable: the gate's per-companion check, shared with My
+// apps — an identity_headers companion without a caller secret, an
+// unknown identity, an owed revoke_all, a pruned one, a mode outside its
+// modes, LoA 3 and a missing host are all left out.
+func TestCompanionUsable(t *testing.T) {
+	a := newMyAIFixture(t, nil)
+	tm := a.h.Template("aiapp")
+	ok := state.AICompanion{Enabled: true, Mode: "read_only"}
+	hdr := *companionOf(tm, "hdr")
+	if host, why := companionUsable(tm, &hdr, ok, 2); why != "" || host != "aiapp.example.com" {
+		t.Fatalf("hdr = %q %q", host, why)
+	}
+	noSecret := hdr
+	noSecret.Identity.CallerSecret = nil
+	unknown := hdr
+	unknown.Identity.Mode = "shared_admin"
+	cases := []struct {
+		name string
+		c    *templates.Companion
+		sw   state.AICompanion
+		loa  int
+		want string
+	}{
+		{"no caller secret", &noSecret, ok, 2, "no caller secret"},
+		{"unknown identity", &unknown, ok, 2, "unknown identity mode"},
+		{"revoke pending", &hdr, state.AICompanion{Enabled: true, Mode: "read_only", RevokePending: true}, 2, "revoke_all"},
+		{"pruned", &hdr, state.AICompanion{Enabled: true, Mode: "read_only", Pruned: true}, 2, "template update"},
+		{"mode", &hdr, state.AICompanion{Enabled: true, Mode: "read_write"}, 2, "not one of its modes"},
+		{"loa 3", &hdr, ok, 3, "LoA 3"},
+	}
+	for _, c := range cases {
+		if _, why := companionUsable(tm, c.c, c.sw, c.loa); !strings.Contains(why, c.want) {
+			t.Errorf("%s: why = %q, want %q", c.name, why, c.want)
+		}
+	}
+	noHost := hdr
+	noHost.Router = "nope"
+	if _, why := companionUsable(tm, &noHost, ok, 2); why != "its router has no hostname" {
+		t.Errorf("no host: %q", why)
 	}
 }

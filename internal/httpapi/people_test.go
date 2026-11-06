@@ -99,10 +99,6 @@ var peopleAppRoutes = []string{
 	"DELETE /api/me/ai/connections/{client}",
 }
 
-// notYetPeopleRoutes are peopleAppRoutes not registered yet: none since
-// Task 21 (both allowlist tests require all nine).
-var notYetPeopleRoutes = []string{}
-
 // TestPeopleListenerHasNoAppRoutes: the people mux registers exactly the
 // directory API, peopleAppRoutes, /healthz, the page and its assets —
 // compared as sets of the patterns PeopleHandler registers.
@@ -796,6 +792,41 @@ func TestDisconnectAI(t *testing.T) {
 	if r, _ := doAs(t, e.hub, "root", "DELETE", "/api/me/ai/connections/portcullis-ai-claude", ""); r.StatusCode != 404 {
 		t.Errorf("hub listener = %d, want 404", r.StatusCode)
 	}
+	// The CSRF guard (fix round 1): no JSON Content-Type 415, a
+	// cross-origin request 403 — neither reaches Keycloak.
+	before := len(revoked)
+	for _, c := range []struct {
+		name, ctype, site, origin string
+		want                      int
+	}{
+		{"no content type", "", "", "", http.StatusUnsupportedMediaType},
+		{"text/plain", "text/plain", "", "", http.StatusUnsupportedMediaType},
+		{"cross-site", "application/json", "cross-site", "https://evil.example", http.StatusForbidden},
+	} {
+		req, _ := http.NewRequest("DELETE", e.ppl.URL+"/api/me/ai/connections/portcullis-ai-claude-code", nil)
+		req.Header.Set(ProxySecretHeader, testSecret)
+		req.Header.Set("X-Forwarded-User", "alice")
+		if c.ctype != "" {
+			req.Header.Set("Content-Type", c.ctype)
+		}
+		if c.site != "" {
+			req.Header.Set("Sec-Fetch-Site", c.site)
+			req.Header.Set("Origin", c.origin)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != c.want {
+			t.Errorf("%s: DELETE = %d, want %d", c.name, resp.StatusCode, c.want)
+		}
+	}
+	kc.mu.Lock()
+	if len(kc.revoked) != before {
+		t.Errorf("a refused request reached Keycloak: %v", kc.revoked)
+	}
+	kc.mu.Unlock()
 	kc.mu.Lock()
 	kc.err = errors.New("keycloak at 10.0.0.9 refused: secret-detail")
 	kc.mu.Unlock()

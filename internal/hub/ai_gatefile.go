@@ -328,23 +328,9 @@ func (h *Hub) companionResourcesLocked(t *templates.Template, gp gatePeople, f *
 		if !on || !sw.Enabled || c.Identity.Mode == templates.IdentityAppOAuth {
 			continue
 		}
-		switch {
-		case sw.RevokePending:
-			skip(c.Name, "its app-side credentials still need a revoke_all")
-			continue
-		case !slices.Contains(c.Modes, sw.Mode):
-			skip(c.Name, fmt.Sprintf("mode %q is not one of its modes", sw.Mode))
-			continue
-		case loa < 0 || loa > 2:
-			skip(c.Name, fmt.Sprintf("the instance's policy LoA %d can't get AI support", loa))
-			continue
-		case !templates.AliasFits(t.ID, c.Name):
-			skip(c.Name, "the alias is longer than one DNS label")
-			continue
-		}
-		host := NormalizeHost(t.Hosts[c.Router])
-		if host == "" || !templates.ValidHostname(host) {
-			skip(c.Name, "its router has no hostname")
+		host, unusable := companionUsable(t, c, sw, loa)
+		if unusable != "" {
+			skip(c.Name, unusable)
 			continue
 		}
 		r := aigate.Resource{
@@ -407,6 +393,44 @@ func (h *Hub) companionResourcesLocked(t *templates.Template, gp gatePeople, f *
 		out = append(out, r)
 	}
 	return out
+}
+
+// companionUsable is the per-companion check of a switched-on companion
+// c of t (switch sw, the instance's policy LoA loa) shared by the gate
+// file and My apps (Task 21): its router's host, or why it is left out —
+// a revoke_all still owed, pruned, a mode outside its modes, an LoA AI
+// can't get, an alias longer than one DNS label (gate-fronted modes), no
+// hostname, or an identity the gate can't apply (identity_headers
+// without a caller secret, an unknown mode). app_oauth companions pass
+// with their host (the gate isn't in their path; never in the file).
+func companionUsable(t *templates.Template, c *templates.Companion, sw state.AICompanion, loa int) (host, why string) {
+	switch {
+	case sw.RevokePending:
+		return "", "its app-side credentials still need a revoke_all"
+	case sw.Pruned:
+		return "", "switched off by a template update"
+	case !slices.Contains(c.Modes, sw.Mode):
+		return "", fmt.Sprintf("mode %q is not one of its modes", sw.Mode)
+	case loa < 0 || loa > 2:
+		return "", fmt.Sprintf("the instance's policy LoA %d can't get AI support", loa)
+	}
+	switch c.Identity.Mode {
+	case templates.IdentityAppOAuth:
+	case templates.IdentityAppToken, templates.IdentityHeaders:
+		if !templates.AliasFits(t.ID, c.Name) {
+			return "", "the alias is longer than one DNS label"
+		}
+		if c.Identity.Mode == templates.IdentityHeaders && c.Identity.CallerSecret == nil {
+			return "", "no caller secret"
+		}
+	default:
+		return "", "unknown identity mode"
+	}
+	host = NormalizeHost(t.Hosts[c.Router])
+	if host == "" || !templates.ValidHostname(host) {
+		return "", "its router has no hostname"
+	}
+	return host, ""
 }
 
 func orDefault(s, d string) string {

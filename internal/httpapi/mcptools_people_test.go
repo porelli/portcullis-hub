@@ -480,7 +480,7 @@ func TestDisconnectAIOwnOnly(t *testing.T) {
 }
 
 // TestPeopleToolParity (ruling 8): every people tool's twin is a people
-// listener route (or one Task 21 adds: notYetPeopleRoutes), never a
+// listener route, never a
 // Hub-only route; every caller-only app route of the people listener but
 // the confirmation routes and the credential routes has a tool; W and D
 // tools name their audit action; the classes are as ruled.
@@ -488,9 +488,6 @@ func TestPeopleToolParity(t *testing.T) {
 	e := newToolEnv(t, nil, nil)
 	routes := map[string]bool{}
 	for _, p := range e.s.peopleMux().patterns {
-		routes[p] = true
-	}
-	for _, p := range notYetPeopleRoutes {
 		routes[p] = true
 	}
 	tools := e.s.tools(ScopePeople)

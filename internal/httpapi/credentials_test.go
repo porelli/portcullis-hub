@@ -488,8 +488,8 @@ func TestCredentialRoutesOnCorrectListener(t *testing.T) {
 			t.Errorf("people listener lacks app route %q", p)
 		}
 	}
-	if n != 9 || len(notYetPeopleRoutes) != 0 {
-		t.Errorf("%d of the 9 app routes registered (not yet: %v), want all nine", n, notYetPeopleRoutes)
+	if n != 9 {
+		t.Errorf("%d of the 9 app routes registered, want all nine", n)
 	}
 
 	// Verify the credential routes are in the list
