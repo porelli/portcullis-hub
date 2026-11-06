@@ -55,10 +55,13 @@ type gatePeople struct {
 	now  time.Time
 }
 
-// kept fills r from the previous file (m nil); false = leave r out.
+// kept fills r from the previous file (m nil); false = leave r out. Only
+// the same resource is carried over — same URL, kind, scope, instance and
+// companion (a URL another instance had, e.g. after a hostname move,
+// carries nothing).
 func (g gatePeople) kept(r *aigate.Resource) bool {
 	p := g.prev[r.URL]
-	if p == nil {
+	if p == nil || p.Kind != r.Kind || p.Scope != r.Scope || p.Instance != r.Instance || p.Companion != r.Companion {
 		return false
 	}
 	r.Population = append([]string{}, p.Population...)
@@ -301,8 +304,12 @@ func (h *Hub) companionResourcesLocked(t *templates.Template, gp gatePeople, f *
 	hosts = sortedSet(hosts)
 	// The settings population (§13.3, call 27), once per instance; empty
 	// with a reason (sign_in native, no access group in LLDAP): nobody.
+	// A reason that state alone decides (why: sign_in native, routes
+	// without Portcullis identity) empties it on both paths — with the
+	// directory down too: it is never carried over.
+	why := h.populationWhyLocked(t)
 	var population []string
-	if gp.m != nil {
+	if gp.m != nil && why == "" {
 		pop := h.populationLocked(t, gp.m)
 		users := make([]string, 0, len(pop.People))
 		for _, p := range pop.People {
@@ -365,12 +372,15 @@ func (h *Hub) companionResourcesLocked(t *templates.Template, gp gatePeople, f *
 			skip(c.Name, "unknown identity mode")
 			continue
 		}
-		if gp.m == nil {
+		switch {
+		case why != "":
+			// Nobody: r keeps its empty population, expiring and people.
+		case gp.m == nil:
 			if !gp.kept(&r) {
 				skip(c.Name, "the directory is unavailable and the last file doesn't list it")
 				continue
 			}
-		} else {
+		default:
 			r.Population = append([]string{}, population...)
 			if group != "" {
 				r.Expiring = pendingOf(gp.m, group, r.Population, gp.now)

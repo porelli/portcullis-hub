@@ -1158,3 +1158,72 @@ func TestGateRulesMatchHub(t *testing.T) {
 		}
 	}
 }
+
+// ── fix round 2 ──────────────────────────────────────────
+
+// Item 1: with the directory down, a switch to native sign-in still
+// empties the population — nothing is carried over for an instance whose
+// routes now give nobody Portcullis identity.
+func TestGateFileDirectoryDownNativeSignIn(t *testing.T) {
+	g := newGateFixture(t, func(st *state.AppState) { st.SignIn = map[string]string{} })
+	if err := g.h.WritePolicy(); err != nil {
+		t.Fatal(err)
+	}
+	read := func() *aigate.File {
+		f, err := aigate.DecodeFile(mustRead(t, filepath.Join(g.data, aigate.GateFileName)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return f
+	}
+	if r := resourceByURL(read(), "https://native.example.com/mcp"); r == nil || !slices.Equal(r.Population, []string{"alice"}) {
+		t.Fatalf("gateway sign-in: %+v", r)
+	}
+	g.people.set(func(p *fakePeople) { p.err = &directory.Error{Status: 502, Msg: "unreachable"} })
+	g.h.mu.Lock()
+	g.h.st.SignIn = map[string]string{"native": state.SignInNative}
+	g.h.mu.Unlock()
+	if err := g.h.WritePolicy(); err == nil {
+		t.Error("the directory error was hidden")
+	}
+	r := resourceByURL(read(), "https://native.example.com/mcp")
+	if r == nil || len(r.Population) != 0 || len(r.Expiring) != 0 || r.People != nil {
+		t.Errorf("native sign-in with the directory down = %+v, want listed with nobody", r)
+	}
+}
+
+// Item 2: a previous entry is carried over only when it is the same
+// resource (kind, scope, instance, companion), not merely the same URL.
+func TestGateFileDirectoryDownURLReassigned(t *testing.T) {
+	g := newGateFixture(t, nil)
+	if err := g.h.WritePolicy(); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(g.data, aigate.GateFileName)
+	f, err := aigate.DecodeFile(mustRead(t, path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The last file had https://gitea.example.com/mcp as another
+	// instance's companion (a hostname moved meanwhile).
+	r := resourceByURL(f, "https://gitea.example.com/mcp")
+	r.Instance, r.Scope, r.Upstream = "gitea-b", "mcp:gitea-b.gitea", "http://portcullis-mcp-gitea-b--gitea:8080/mcp"
+	r.Population = []string{"alice", "bob", "carol"}
+	if err := aigate.WriteFile(path, f); err != nil {
+		t.Fatal(err)
+	}
+	g.people.set(func(p *fakePeople) { p.err = &directory.Error{Status: 502, Msg: "unreachable"} })
+	if err := g.h.WritePolicy(); err == nil {
+		t.Error("the directory error was hidden")
+	}
+	nf, err := aigate.DecodeFile(mustRead(t, path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := resourceByURL(nf, "https://gitea.example.com/mcp"); r != nil {
+		t.Errorf("another instance's population carried over: %+v", r)
+	}
+	if resourceByURL(nf, "https://mcp.example.com/mcp") == nil {
+		t.Error("the aggregate (same kind) wasn't carried over")
+	}
+}
