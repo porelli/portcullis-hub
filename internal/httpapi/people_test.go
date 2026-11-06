@@ -608,8 +608,8 @@ func TestSettingsAssetHubOnly(t *testing.T) {
 		}
 	}
 	sort.Strings(allow)
-	if strings.Join(allow, ",") != "confirm.js,directory.css,directory.js,myapps.js" {
-		t.Errorf("peopleStatic = %v, want exactly confirm.js, directory.css, directory.js, myapps.js", allow)
+	if strings.Join(allow, ",") != "confirm.js,directory.css,directory.js,freshauth-callback.js,freshauth.js,myapps.js" {
+		t.Errorf("peopleStatic = %v, want exactly confirm.js, directory.css, directory.js, freshauth-callback.js, freshauth.js, myapps.js", allow)
 	}
 	if r, b := doAs(t, e.hub, "root", "GET", "/static/settings.js", ""); r.StatusCode != 200 || !strings.HasPrefix(r.Header.Get("Content-Type"), "text/javascript") || !strings.Contains(b, "PortcullisSettings") {
 		t.Errorf("hub settings.js = %d %q", r.StatusCode, r.Header.Get("Content-Type"))
@@ -643,21 +643,36 @@ func TestSettingsAssetHubOnly(t *testing.T) {
 	}
 }
 
-// F20: people.html is the fresh-auth popup's landing page. It drops code
-// and state from the URL at once, posts only to a same-origin opener
-// (guarded read of opener.location.origin) with targetOrigin =
-// location.origin, and otherwise ignores the parameters. (Checked in a
-// browser against the harness: same-origin opener gets the message and
-// the popup closes; a cross-origin opener gets nothing.)
+// F20 / G11: people.html and index.html are the fresh-auth popup's
+// landing pages, with one callback source (freshauth-callback.js, fix
+// round 1 of plan 4 Task 14), loaded first in <head>. It drops code and
+// state from the URL at once, posts only to a same-origin opener (guarded
+// read of opener.location.origin) with targetOrigin = location.origin,
+// and otherwise ignores the parameters. (Checked in a browser against
+// the harness: same-origin opener gets the message and the popup closes;
+// a cross-origin opener gets nothing.) Every page carries
+// <meta name="referrer" content="no-referrer"> as the first element of
+// <head>: Traefik's security-headers@file may replace the Hub's header.
 func TestPeoplePageFreshAuthCallback(t *testing.T) {
 	e := newPeopleEnv(t)
 	_, pb := doAs(t, e.people, "bob", "GET", "/", "")
-	i := strings.Index(pb, "portcullisFreshAuthCallback = (function")
-	if i < 0 || i > strings.Index(pb, `src="/static/directory.js"`) {
-		t.Fatal("no popup callback before the page's scripts")
+	_, ib := doAs(t, e.hub, "root", "GET", "/", "")
+	tag := `<script src="/static/freshauth-callback.js"></script>`
+	for name, page := range map[string]string{"people.html": pb, "index.html": ib} {
+		i := strings.Index(page, tag)
+		if i < 0 || i > strings.Index(page, "<style>") || i > strings.Index(page, `src="/static/directory.js"`) {
+			t.Errorf("%s: the popup callback isn't loaded first in <head>", name)
+		}
+		if strings.Count(page, "portcullis-fresh-auth'") != 0 || strings.Contains(page, "window.opener.location.origin") {
+			t.Errorf("%s: an inline copy of the callback is left", name)
+		}
 	}
-	cb := pb[i:]
-	cb = cb[:strings.Index(cb, "</script>")]
+	for _, srv := range []*httptest.Server{e.people, e.hub} {
+		if r, b := doAs(t, srv, "bob", "GET", "/static/freshauth-callback.js", ""); r.StatusCode != 200 || !strings.Contains(b, "portcullisFreshAuthCallback") {
+			t.Errorf("%s freshauth-callback.js = %d", srv.URL, r.StatusCode)
+		}
+	}
+	cb := webAsset(t, "freshauth-callback.js")
 	for _, want := range []string{
 		"history.replaceState(null, '', location.pathname + location.hash);",
 		"try {",
@@ -669,7 +684,24 @@ func TestPeoplePageFreshAuthCallback(t *testing.T) {
 			t.Errorf("callback lacks %q", want)
 		}
 	}
-	if strings.Index(cb, "replaceState") > strings.Index(cb, "opener") || strings.Contains(cb, `"*"`) || strings.Contains(cb, "'*'") {
+	if strings.Index(cb, "history.replaceState(") > strings.Index(cb, "if (window.opener &&") || strings.Contains(cb, `"*"`) || strings.Contains(cb, "'*'") {
 		t.Error("the URL must be cleaned before the opener is looked at, and nothing posted to *")
+	}
+}
+
+// TestPagesMetaNoReferrer (fix round 1): index.html, people.html and
+// confirm.html carry <meta name="referrer" content="no-referrer"> as the
+// first element of <head>.
+func TestPagesMetaNoReferrer(t *testing.T) {
+	for _, name := range []string{"index.html", "people.html", "confirm.html"} {
+		page := webAsset(t, name)
+		i := strings.Index(page, "<head>")
+		if i < 0 {
+			t.Fatalf("%s: no <head>", name)
+		}
+		rest := strings.TrimSpace(page[i+len("<head>"):])
+		if !strings.HasPrefix(rest, `<meta name="referrer" content="no-referrer">`) {
+			t.Errorf("%s: the first element of <head> isn't the no-referrer meta tag", name)
+		}
 	}
 }

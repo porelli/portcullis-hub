@@ -8,8 +8,9 @@
 // Save and Clear (PUT / DELETE /api/me/apps/{app}/values/{key}) and a
 // status line. A person_secret option gets a credential card (plan 3
 // Task 14, contract §5.1 / §13.16): create / regenerate the person's
-// file-share password after a fresh passkey sign-in in a popup (PKCE,
-// state and nonce in sessionStorage until the popup answers; the
+// file-share password after a fresh passkey sign-in in a popup
+// (freshauth.js: PKCE, state and nonce kept in session storage until the popup
+// answers; the
 // password itself is never stored: it lives in one dialog, shown once,
 // and is dropped when the dialog closes or the cards reload), and revoke
 // it (DELETE, no fresh sign-in). Only the caller's own values are ever
@@ -198,26 +199,11 @@
     return h + '</dd></div>';
   }
 
-  // The fresh-auth flow in progress (one at a time) and the shown-once
-  // password dialog.
-  const FA_KEY = 'portcullis-fresh-auth';
-  let flow = null; // {el, row, instance, key, name, popup, timer}
+  // The fresh-auth flow in progress (PortcullisFreshAuth, freshauth.js:
+  // the popup, PKCE and the message checks) and the shown-once password
+  // dialog.
+  let flow = null; // {el, row, instance, key, name}
   let shown = null; // {close()}
-
-  function b64url(bytes) {
-    let s = '';
-    for (const b of bytes) s += String.fromCharCode(b);
-    return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-  }
-  function randomB64(n) {
-    const a = new Uint8Array(n);
-    crypto.getRandomValues(a);
-    return b64url(a);
-  }
-  async function s256(v) {
-    const d = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(v));
-    return b64url(new Uint8Array(d));
-  }
 
   function credStatus(row, text, warn, spin) {
     const s = row && row.querySelector('[data-ma-cred-status]');
@@ -230,128 +216,31 @@
     row.querySelectorAll('button').forEach(b => { b.disabled = on; });
   }
 
-  // endFlow forgets the flow in progress (and its sessionStorage entry).
-  function endFlow() {
-    sessionStorage.removeItem(FA_KEY);
-    if (!flow) return;
-    clearInterval(flow.timer);
-    flow = null;
-  }
-  // A flow never outlives the page: an entry a previous page left (closed
-  // mid-flow, reloaded) is dropped at load and when the page goes.
-  sessionStorage.removeItem(FA_KEY);
-  const FLOW_DEADLINE_MS = 10 * 60 * 1000;
-
   // startFreshAuth opens the fresh sign-in popup for row's credential.
-  // Called from the click itself: the popup is opened before any await,
-  // so pop-up blockers allow it.
-  async function startFreshAuth(el, row) {
-    const fa = el.maFreshAuth;
-    // https only, except on a plain-http page (the local harness).
-    const okURL = /^https:\/\//i.test((fa && fa.authorize_url) || '') ||
-      (location.protocol === 'http:' && /^http:\/\//i.test((fa && fa.authorize_url) || ''));
-    if (!fa || !okURL) {
-      credStatus(row, 'A fresh sign-in isn\'t available right now. Try again later.', true);
-      return;
-    }
-    if (flow && flow.popup && !flow.popup.closed) flow.popup.close();
-    endFlow();
-    const popup = window.open('', 'portcullis-fresh-auth', 'popup,width=520,height=720');
-    if (!popup) {
-      credStatus(row, 'Allow pop-ups for this page: the fresh sign-in opens in a small window.', true);
-      return;
-    }
-    const verifier = randomB64(64); // 86 characters (RFC 7636: 43–128)
-    const state = randomB64(32);
-    const nonce = randomB64(32);
-    const pending = { state, nonce, verifier, instance: row.dataset.maApp, key: row.dataset.maKey };
-    sessionStorage.setItem(FA_KEY, JSON.stringify(pending));
-    flow = { el, row, instance: pending.instance, key: pending.key, name: row.dataset.maName, popup, timer: 0 };
-    const mine = flow;
-    credBusy(row, true);
-    credStatus(row, 'Touch your passkey in the sign-in window to continue…', false, true);
-    let challenge;
-    try {
-      challenge = await s256(verifier);
-    } catch (err) {
-      popup.close();
-      endFlow();
-      credBusy(row, false);
-      credStatus(row, 'This browser can\'t start a secure sign-in: ' + err.message, true);
-      return;
-    }
-    if (flow !== mine) return;
-    const u = new URL(fa.authorize_url);
-    for (const [k, v] of [
-      ['response_type', 'code'],
-      ['client_id', fa.client_id],
-      ['redirect_uri', fa.redirect_uri],
-      ['scope', 'openid'],
-      ['prompt', 'login'],
-      ['max_age', '0'],
-      ['acr_values', 'hwk'],
-      ['state', state],
-      ['nonce', nonce],
-      ['code_challenge', challenge],
-      ['code_challenge_method', 'S256'],
-    ]) u.searchParams.set(k, v);
-    popup.location.href = u.toString();
-    // A popup closed without an answer cancels the flow (after a grace:
-    // the callback posts, then closes).
-    let closedAt = 0;
-    const deadline = Date.now() + FLOW_DEADLINE_MS;
-    mine.timer = setInterval(() => {
-      if (flow !== mine) { clearInterval(mine.timer); return; }
-      if (Date.now() > deadline) {
-        if (!popup.closed) popup.close();
-        endFlow();
-        credBusy(row, false);
-        credStatus(row, 'The sign-in took too long: nothing changed. Try again.', true);
-        return;
-      }
-      if (!popup.closed) return;
-      if (!closedAt) { closedAt = Date.now(); return; }
-      if (Date.now() - closedAt < 1000) return;
-      endFlow();
-      credBusy(row, false);
-      credStatus(row, 'The sign-in window was closed: nothing changed.', true);
-    }, 400);
+  // Called from the click itself (PortcullisFreshAuth.start opens the
+  // popup before any await, so pop-up blockers allow it).
+  function startFreshAuth(el, row) {
+    const f = { el, row, instance: row.dataset.maApp, key: row.dataset.maKey, name: row.dataset.maName };
+    flow = f;
+    PortcullisFreshAuth.start(el.maFreshAuth, {
+      ctx: { instance: f.instance, key: f.key },
+      status: (text, warn, spin) => credStatus(row, text, warn, spin),
+      busy: on => credBusy(row, on),
+      end: () => { if (flow === f) flow = null; },
+      proof: p => submitProof(f, p),
+    });
   }
-
-  // The popup callback (people.html) posts {type, code, state, error}.
-  // Accepted only from this origin, from the popup this page opened, of
-  // type portcullis-fresh-auth and with the stored state; the stored
-  // entry is then deleted and the proof posted.
-  window.addEventListener('message', ev => {
-    if (ev.origin !== location.origin) return;
-    const d = ev.data;
-    if (!d || typeof d !== 'object' || d.type !== 'portcullis-fresh-auth' || typeof d.state !== 'string') return;
-    let pending = null;
-    try { pending = JSON.parse(sessionStorage.getItem(FA_KEY) || 'null'); } catch (_) { pending = null; }
-    if (!pending || !pending.state || d.state !== pending.state) return;
-    if (!flow || ev.source !== flow.popup || flow.instance !== pending.instance || flow.key !== pending.key) return;
-    const f = flow;
-    sessionStorage.removeItem(FA_KEY);
-    clearInterval(f.timer);
-    flow = null;
-    if (d.error || !d.code) {
-      credBusy(f.row, false);
-      credStatus(f.row, 'The sign-in didn\'t complete' + (d.error ? ' (' + String(d.error).slice(0, 100) + ')' : '') + ': nothing changed.', true);
-      return;
-    }
-    submitProof(f, pending, d);
-  });
 
   // submitProof creates or regenerates the password with the proof, then
   // reloads the cards and shows the password once.
-  async function submitProof(f, pending, d) {
+  async function submitProof(f, p) {
     credStatus(f.row, 'Creating your password…', false, true);
     const url = '/api/me/apps/' + encodeURIComponent(f.instance) + '/credentials/' + encodeURIComponent(f.key);
     let res, text;
     try {
       res = await fetch(url, {
         method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code: d.code, code_verifier: pending.verifier, nonce: pending.nonce })
+        body: JSON.stringify({ code: p.code, code_verifier: p.code_verifier, nonce: p.nonce })
       });
       text = await res.text();
     } catch (err) {
@@ -416,11 +305,8 @@
     document.body.appendChild(dlg);
     dlg.showModal();
   }
-  window.addEventListener('pagehide', () => {
-    closeShown();
-    if (flow && flow.popup && !flow.popup.closed) flow.popup.close();
-    endFlow();
-  });
+  // Leaving the page drops the password (freshauth.js ends the flow).
+  window.addEventListener('pagehide', closeShown);
 
   // credConfirm opens an inline confirm panel on row (regenerate: the
   // spec's warning; revoke: what it does).
@@ -501,7 +387,7 @@
     const seq = (el.maSeq = (el.maSeq || 0) + 1);
     // A reload drops the shown-once password and any sign-in in progress.
     closeShown();
-    if (flow && flow.el === el) { if (flow.popup && !flow.popup.closed) flow.popup.close(); endFlow(); }
+    if (flow && flow.el === el) PortcullisFreshAuth.cancel();
     box.innerHTML = '<p class="pd-muted">Loading…</p>';
     let res, text;
     try {

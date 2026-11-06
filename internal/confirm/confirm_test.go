@@ -63,7 +63,7 @@ func TestConfirmStore(t *testing.T) {
 		t.Errorf("re-create = %v %v", again, err)
 	}
 	// Consume: pending, then approved → consumed once.
-	if _, err := s.Consume("alice", a.Resource, "delete_repo", d1); !errors.Is(err, ErrPending) {
+	if _, err := s.Consume(ListenerPeople, "alice", a.Resource, "delete_repo", d1); !errors.Is(err, ErrPending) {
 		t.Errorf("consume pending = %v", err)
 	}
 	c.add(9*time.Minute + 59*time.Second)
@@ -74,18 +74,18 @@ func TestConfirmStore(t *testing.T) {
 		t.Errorf("second decide = %v", err)
 	}
 	for _, bad := range [][3]string{{"bob", "delete_repo", d1}, {"alice", "delete_other", d1}, {"alice", "delete_repo", strings.Repeat("2", 64)}} {
-		if _, err := s.Consume(bad[0], a.Resource, bad[1], bad[2]); !errors.Is(err, ErrNotFound) {
+		if _, err := s.Consume(ListenerPeople, bad[0], a.Resource, bad[1], bad[2]); !errors.Is(err, ErrNotFound) {
 			t.Errorf("consume %v = %v", bad, err)
 		}
 	}
-	if _, err := s.Consume("alice", "https://other.example.org/mcp", "delete_repo", d1); !errors.Is(err, ErrNotFound) {
+	if _, err := s.Consume(ListenerPeople, "alice", "https://other.example.org/mcp", "delete_repo", d1); !errors.Is(err, ErrNotFound) {
 		t.Error("another resource consumed it")
 	}
-	got, err := s.Consume("alice", a.Resource, "delete_repo", d1)
+	got, err := s.Consume(ListenerPeople, "alice", a.Resource, "delete_repo", d1)
 	if err != nil || got.ID != a.ID || got.State != Consumed {
 		t.Fatalf("consume = %+v %v", got, err)
 	}
-	if _, err := s.Consume("alice", a.Resource, "delete_repo", d1); !errors.Is(err, ErrNotFound) {
+	if _, err := s.Consume(ListenerPeople, "alice", a.Resource, "delete_repo", d1); !errors.Is(err, ErrNotFound) {
 		t.Errorf("second consume = %v", err)
 	}
 
@@ -99,7 +99,7 @@ func TestConfirmStore(t *testing.T) {
 	if err := s.Decide(b.ID, "alice", true); !errors.Is(err, ErrNotPending) {
 		t.Errorf("expired decide = %v", err)
 	}
-	if _, err := s.Consume("alice", b.Resource, "delete_b", d1); !errors.Is(err, ErrNotFound) {
+	if _, err := s.Consume(ListenerPeople, "alice", b.Resource, "delete_b", d1); !errors.Is(err, ErrNotFound) {
 		t.Errorf("expired consume = %v", err)
 	}
 	ex := s.Sweep()
@@ -114,7 +114,7 @@ func TestConfirmStore(t *testing.T) {
 	if err := s.Decide(d.ID, "alice", false); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Consume("alice", d.Resource, "delete_d", d1); !errors.Is(err, ErrDeclined) {
+	if _, err := s.Consume(ListenerPeople, "alice", d.Resource, "delete_d", d1); !errors.Is(err, ErrDeclined) {
 		t.Errorf("declined consume = %v", err)
 	}
 
@@ -181,5 +181,46 @@ func TestConfirmLimits(t *testing.T) {
 	}
 	if _, err := g.Create(req("newcomer", "t", d1)); !errors.Is(err, ErrTooMany) {
 		t.Errorf("1001st pending = %v", err)
+	}
+}
+
+// TestConfirmListenerAndSweep (fix round 1): Consume matches only its
+// listener's confirmations (another listener's stays approved); a
+// pending confirmation long past its TTL is never pruned before Sweep
+// reports it, even when a later Create prunes; Typed is trimmed.
+func TestConfirmListenerAndSweep(t *testing.T) {
+	c := &clock{t: time.Date(2026, 11, 6, 10, 0, 0, 0, time.UTC)}
+	s := New(c.now)
+	h := req("root", "delete_instance", d1)
+	h.Listener = ListenerHub
+	h.Typed = "  grafana \t"
+	hc, err := s.Create(h)
+	if err != nil || hc.Typed != "grafana" {
+		t.Fatalf("create = %+v %v", hc, err)
+	}
+	if err := s.Decide(hc.ID, "root", true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Consume(ListenerPeople, "root", h.Resource, h.Tool, d1); !errors.Is(err, ErrNotFound) {
+		t.Errorf("people consume of a hub confirmation = %v", err)
+	}
+	if g, _ := s.Get(hc.ID, "root"); g.State != Approved {
+		t.Errorf("state after the other listener's consume = %s", g.State)
+	}
+	if got, err := s.Consume(ListenerHub, "root", h.Resource, h.Tool, d1); err != nil || got.ID != hc.ID {
+		t.Errorf("hub consume = %v %v", got, err)
+	}
+
+	first, _ := s.Create(req("alice", "delete_repo", d1))
+	c.add(20 * time.Minute)
+	if _, err := s.Create(req("alice", "delete_other", d1)); err != nil {
+		t.Fatal(err)
+	}
+	ex := s.Sweep()
+	if len(ex) != 1 || ex[0].ID != first.ID || ex[0].State != Expired {
+		t.Fatalf("sweep after a pruning create = %+v", ex)
+	}
+	if len(s.Sweep()) != 0 {
+		t.Error("swept twice")
 	}
 }

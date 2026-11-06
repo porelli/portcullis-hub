@@ -1,7 +1,11 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+  <meta name="referrer" content="no-referrer">
   <meta charset="UTF-8">
+  <!-- The fresh-auth popup callback (contract §5.1, G11): first, before
+       anything else loads; the one source shared with people.html. -->
+  <script src="/static/freshauth-callback.js"></script>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Portcullis Hub</title>
   <style>
@@ -417,41 +421,6 @@
   <link rel="stylesheet" href="/static/directory.css">
 </head>
 <body>
-  <script>
-    // Fresh-auth popup callback (contract §5.1 "Fresh auth", G11): the
-    // Hub listener's confirmation page (confirm.js) opens Keycloak in a
-    // popup whose redirect URI is this page; Keycloak sends it back here
-    // with ?code=…&state=… (or ?error=…). Exactly people.html's handler:
-    // the code and state are dropped from the URL and history at once,
-    // posted only to a same-origin opener (a guarded read of
-    // opener.location.origin: a cross-origin opener throws), to exactly
-    // this origin, and the popup closes. Without one, the parameters are
-    // ignored and the page loads as usual. Every Hub-listener answer is
-    // served with Referrer-Policy: no-referrer.
-    window.portcullisFreshAuthCallback = (function () {
-      var q = new URLSearchParams(location.search);
-      if (!q.has('code') && !q.has('state') && !q.has('error')) return false;
-      var msg = { type: 'portcullis-fresh-auth', code: q.get('code') || '', state: q.get('state') || '', error: q.get('error') || '' };
-      history.replaceState(null, '', location.pathname + location.hash);
-      var op = null;
-      try {
-        if (window.opener && window.opener !== window && window.opener.location.origin === location.origin) op = window.opener;
-      } catch (e) {
-        op = null;
-      }
-      if (!op) return false;
-      op.postMessage(msg, location.origin);
-      window.close();
-      // close() may be refused: show only a note, load nothing else.
-      if (window.stop) window.stop();
-      document.documentElement.style.visibility = 'hidden';
-      document.addEventListener('DOMContentLoaded', function () {
-        document.body.textContent = 'Signed in. You can close this window.';
-        document.documentElement.style.visibility = '';
-      });
-      return true;
-    })();
-  </script>
   <div class="container">
     <header>
       <h1><span>&#9906;</span> {{.PortalName}} Hub</h1>

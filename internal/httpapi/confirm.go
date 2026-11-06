@@ -36,6 +36,11 @@ func listenerOf(r *http.Request) string {
 	return hub.ListenerHub
 }
 
+// confirmCSP: the page loads only its own scripts (/static/), its inline
+// <style>, and fetches only its own origin; it can never be framed
+// (clickjacking an approval) and has no form or base to redirect.
+const confirmCSP = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+
 // confirmPageData is confirm.html's data (html/template escapes all of
 // it; confirm.js reads the data-* attributes with dataset and writes
 // only textContent).
@@ -74,6 +79,8 @@ func (s *Server) handleConfirmPage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("Content-Security-Policy", confirmCSP)
 	if err := t.Execute(w, d); err != nil {
 		log.Printf("render confirm page: %v", err)
 	}

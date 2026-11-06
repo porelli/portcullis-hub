@@ -133,11 +133,12 @@ func (h *Hub) CreateConfirmation(actor directory.Actor, r confirm.Request) (*con
 	return c, nil
 }
 
-// ConsumeConfirmation consumes the first approved confirmation of the
-// binding, in process (Tasks 15 / 16): confirm.ErrPending,
+// ConsumeConfirmation consumes the first approved confirmation of
+// listener (ListenerHub for admin tools, ListenerPeople for people tools)
+// with the binding, in process (Tasks 15 / 16): confirm.ErrPending,
 // confirm.ErrDeclined or confirm.ErrNotFound otherwise.
-func (h *Hub) ConsumeConfirmation(user, resource, tool, digest string) (*confirm.Confirmation, error) {
-	return h.confirms().Consume(user, resource, tool, digest)
+func (h *Hub) ConsumeConfirmation(listener, user, resource, tool, digest string) (*confirm.Confirmation, error) {
+	return h.confirms().Consume(listener, user, resource, tool, digest)
 }
 
 // ConfirmationURL is the page of c: https://<listener>.<domain>/confirm/<id>.
@@ -327,13 +328,12 @@ func (h *Hub) ConsumeCompanionConfirmation(ctx context.Context, user, resource, 
 		}
 		return "", "", err
 	}
-	c, err := h.confirms().Consume(user, resource, tool, digest)
+	// A companion's confirmation is the people listener's: a Hub-listener
+	// match is never seen, let alone consumed.
+	c, err := h.confirms().Consume(ListenerPeople, user, resource, tool, digest)
 	switch {
-	case err == nil && c.Listener == ListenerPeople:
-		return c.ID, ConsumeConsumed, nil
 	case err == nil:
-		// Never: a companion's confirmation is the people listener's.
-		return "", ConsumeNone, nil
+		return c.ID, ConsumeConsumed, nil
 	case errors.Is(err, confirm.ErrPending):
 		return "", ConsumePending, nil
 	case errors.Is(err, confirm.ErrDeclined):

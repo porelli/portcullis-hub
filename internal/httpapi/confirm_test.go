@@ -97,6 +97,17 @@ func consumeBody(user, tool, args string) string {
 	return string(b)
 }
 
+// wantConfirmCSP is the page's Content-Security-Policy (fix round 1).
+const wantConfirmCSP = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+
+// framingHeaders: the page can't be framed and runs only its own scripts.
+func framingHeaders(t *testing.T, where string, h interface{ Get(string) string }) {
+	t.Helper()
+	if h.Get("X-Frame-Options") != "DENY" || h.Get("Content-Security-Policy") != wantConfirmCSP {
+		t.Errorf("%s: X-Frame-Options %q, CSP %q", where, h.Get("X-Frame-Options"), h.Get("Content-Security-Policy"))
+	}
+}
+
 var confirmIDR = regexp.MustCompile(`^[A-Z2-7]{4}(-[A-Z2-7]{4}){5}-[A-Z2-7]{2}$`)
 
 // create makes a companion confirmation through the internal API → its id.
@@ -235,13 +246,31 @@ func TestInternalConfirmations(t *testing.T) {
 	if code, b := e.post(t, "/internal/confirmations/consume", string(pbody)); code != 404 {
 		t.Errorf("internal consume of a Portcullis confirmation = %d %s", code, b)
 	}
-	if c, err := e.s.Hub.ConsumeConfirmation("alice", "https://people.example.org/mcp", "delete_repo", sha(args)); err != nil || c.ID != pc.ID {
+	if c, err := e.s.Hub.ConsumeConfirmation(confirm.ListenerPeople, "alice", "https://people.example.org/mcp", "delete_repo", sha(args)); err != nil || c.ID != pc.ID {
 		t.Errorf("in-process consume = %v %v", c, err)
 	}
 
+	// A Hub-listener confirmation with a companion's exact binding is never
+	// matched by the internal consume (fix round 1): it stays approved.
+	hargs := `{"name":"hub-bound"}`
+	hc, err := e.s.Hub.CreateConfirmation(directory.Human("alice"), confirm.Request{User: "alice", Client: "portcullis-ai-claude",
+		Resource: aiappResource, Tool: "delete_repo", ArgsSHA256: sha(hargs), ArgsPreview: hargs, Listener: confirm.ListenerHub, Typed: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r, b := doAs(t, e.hub, "alice", "POST", "/api/me/confirmations/"+hc.ID, decision("approve", "x", "good-code")); r.StatusCode != 200 {
+		t.Fatalf("hub approve = %d %s", r.StatusCode, b)
+	}
+	if code, b := e.post(t, "/internal/confirmations/consume", consumeBody("alice", "delete_repo", hargs)); code != 404 {
+		t.Errorf("internal consume of a hub-listener confirmation = %d %s", code, b)
+	}
+	if c, err := e.s.Hub.ConsumeConfirmation(confirm.ListenerHub, "alice", aiappResource, "delete_repo", sha(hargs)); err != nil || c.ID != hc.ID {
+		t.Errorf("it was consumed by the internal path: %v %v", c, err)
+	}
+
 	// The hourly limit (G27): 10 created per person, over both paths.
-	// alice has created 4 (two companion, one destructive, one in process).
-	for i := 0; i < 6; i++ {
+	// alice has created 5 (two companion, one destructive, two in process).
+	for i := 0; i < 5; i++ {
 		e.create(t, "alice", "delete_"+string(rune('a'+i)), args)
 	}
 	code, b = e.post(t, "/internal/confirmations", createBody("alice", "delete_z", args, "confirm"))
@@ -293,6 +322,7 @@ func TestConfirmPage(t *testing.T) {
 			r.Header.Get("Referrer-Policy") != "no-referrer" {
 			t.Fatalf("alice GET = %d %v", r.StatusCode, r.Header)
 		}
+		framingHeaders(t, "people page", r.Header)
 		for _, want := range []string{"delete_repo", "Tokens on AI App (aiapp.example.org)", "Runs delete_repo once on AI App (aiapp.example.org) as you",
 			"AI App asks you to confirm every call of delete_repo.", "&lt;script&gt;alert(1)&lt;/script&gt;", strings.Repeat("x", 3000),
 			`data-typed="AI App"`, `data-authorize-url="https://auth.example.org/realms/portcullis/protocol/openid-connect/auth"`,
@@ -466,15 +496,29 @@ func TestConfirmApprove(t *testing.T) {
 	mu.Lock()
 	now = now.Add(10*time.Minute + time.Second)
 	mu.Unlock()
-	e.s.Hub.SweepConfirmations()
-	if a := e.confirmAudit(t); a[len(a)-1].Actor != "hub" || a[len(a)-1].Detail != "expired tool delete_old args_sha256 "+sha(args)+" confirmation "+id5 {
-		t.Errorf("expiry audit = %+v", a[len(a)-1])
-	}
+	// Past its TTL: the page and the API show it expired at once.
 	if code, b := post(id5, `{"decision":"decline"}`); code != 409 || b != `{"state":"expired"}` {
 		t.Errorf("expired decline = %d %s", code, b)
 	}
 	if _, b := doAs(t, e.ppl, "alice", "GET", "/confirm/"+id5, ""); !strings.Contains(b, `data-state="expired"`) {
 		t.Error("the page doesn't show expired")
+	}
+	// 20 min after creation a later create prunes the store: the expired
+	// one is still swept, and audited exactly once.
+	mu.Lock()
+	now = now.Add(10 * time.Minute)
+	mu.Unlock()
+	e.create(t, "alice", "delete_newer", args)
+	e.s.Hub.SweepConfirmations()
+	e.s.Hub.SweepConfirmations()
+	expired := 0
+	for _, a := range e.confirmAudit(t) {
+		if a.Detail == "expired tool delete_old args_sha256 "+sha(args)+" confirmation "+id5 && a.Actor == "hub" {
+			expired++
+		}
+	}
+	if expired != 1 {
+		t.Errorf("%d expiry audits of %s, want exactly 1", expired, id5)
 	}
 }
 
@@ -548,6 +592,7 @@ func TestHubListenerConfirmRoutes(t *testing.T) {
 		!strings.Contains(b, `data-redirect-uri="https://hub.example.org/"`) {
 		t.Fatalf("hub page = %d %v", r.StatusCode, r.Header)
 	}
+	framingHeaders(t, "hub page", r.Header)
 	pid := e.create(t, "alice", "delete_repo", args)
 	if r, _ := doAs(t, e.hub, "alice", "GET", "/confirm/"+pid, ""); r.StatusCode != 404 {
 		t.Errorf("people confirmation on hub = %d", r.StatusCode)
@@ -559,7 +604,7 @@ func TestHubListenerConfirmRoutes(t *testing.T) {
 	if e.hubFA.n() != 1 || e.people.n() != pc {
 		t.Errorf("verifiers: hub %d people %d", e.hubFA.n(), e.people.n()-pc)
 	}
-	if c, err := e.s.Hub.ConsumeConfirmation("root", "https://hub.example.org/mcp", "delete_instance", sha(args)); err != nil || c.ID != hc.ID {
+	if c, err := e.s.Hub.ConsumeConfirmation(confirm.ListenerHub, "root", "https://hub.example.org/mcp", "delete_instance", sha(args)); err != nil || c.ID != hc.ID {
 		t.Errorf("consume = %v %v", c, err)
 	}
 	// No-referrer on every Hub-listener answer; the callback in index.html.
@@ -569,7 +614,7 @@ func TestHubListenerConfirmRoutes(t *testing.T) {
 		}
 	}
 	_, idx := doAs(t, e.hub, "root", "GET", "/", "")
-	if !strings.Contains(idx, "window.portcullisFreshAuthCallback") || !strings.Contains(idx, "op.postMessage(msg, location.origin)") {
+	if !strings.Contains(idx, `<script src="/static/freshauth-callback.js"></script>`) {
 		t.Error("index.html lacks the fresh-auth popup callback")
 	}
 	if !slices.Contains(e.s.peopleMux().patterns, "GET /confirm/{id}") {
@@ -583,25 +628,32 @@ func TestHubListenerConfirmRoutes(t *testing.T) {
 // sessionStorage only while it runs, and never writes markup.
 func TestConfirmPageScript(t *testing.T) {
 	js := webAsset(t, "confirm.js")
+	// The flow is freshauth.js's (TestMyAppsFreshAuthOpener pins its
+	// parameters and checks); confirm.js starts it with its own ctx and
+	// posts the proof with the decision.
 	for _, want := range []string{
-		"crypto.getRandomValues(", "crypto.subtle.digest('SHA-256'",
-		"['response_type', 'code']", "['scope', 'openid']", "['prompt', 'login']", "['max_age', '0']",
-		"['acr_values', 'hwk']", "['code_challenge_method', 'S256']", "['code_challenge', challenge]",
-		"['client_id', fa.client_id]", "['redirect_uri', fa.redirect_uri]", "['state', state]", "['nonce', nonce]",
-		"if (ev.origin !== location.origin) return;", "ev.source !== flow.popup", "d.state !== pending.state",
-		"sessionStorage.removeItem(FA_KEY);", "decision: 'approve', typed: f.typed, code: d.code, code_verifier: pending.verifier, nonce: pending.nonce",
+		"PortcullisFreshAuth.start(fa, {",
+		"ctx: { confirmation: id },",
+		"send({ decision: 'approve', typed: t, code: p.code, code_verifier: p.code_verifier, nonce: p.nonce })",
 		"send({ decision: 'decline' })",
+		"PortcullisFreshAuth.cancel()",
+		"root.dataset.authorizeUrl", "root.dataset.clientId", "root.dataset.redirectUri",
 	} {
 		if !strings.Contains(js, want) {
 			t.Errorf("confirm.js lacks %q", want)
 		}
 	}
-	for _, bad := range []string{"innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "localStorage", "eval("} {
+	for _, bad := range []string{"innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "localStorage", "sessionStorage", "eval(", "window.open("} {
 		if strings.Contains(js, bad) {
 			t.Errorf("confirm.js uses %s", bad)
 		}
 	}
-	if n := strings.Count(js, "sessionStorage.setItem("); n != 1 {
-		t.Errorf("%d sessionStorage.setItem calls, want 1", n)
+	pg := webAsset(t, "confirm.html")
+	if i, j := strings.Index(pg, `src="/static/freshauth.js"`), strings.Index(pg, `src="/static/confirm.js"`); i < 0 || j < 0 || i > j {
+		t.Error("confirm.html must load freshauth.js before confirm.js")
+	}
+	// The CSP allows only same-origin scripts: no inline script on the page.
+	if strings.Contains(pg, "<script>") {
+		t.Error("confirm.html has an inline script (the CSP refuses it)")
 	}
 }

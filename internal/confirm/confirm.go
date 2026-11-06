@@ -185,14 +185,17 @@ func (s *Store) Create(r Request) (*Confirmation, error) {
 		}
 	}
 	r.Consequences = append([]string(nil), r.Consequences...)
+	r.Typed = strings.TrimSpace(r.Typed)
 	c := &Confirmation{ID: display(k), Request: r, State: Pending, Created: now, Expires: now.Add(TTL)}
 	s.byID[k] = c
 	s.created[r.User] = append(hour, now)
 	return s.copyAt(c, now), nil
 }
 
-// pruneLocked forgets creation times older than an hour and
-// confirmations past their retention.
+// pruneLocked forgets creation times older than an hour and decided
+// confirmations past their retention. A confirmation still stored as
+// pending or approved is never forgotten here, however old: Sweep records
+// it as expired (and reports it for the audit) first.
 func (s *Store) pruneLocked(now time.Time) {
 	for u, ts := range s.created {
 		i := 0
@@ -206,7 +209,7 @@ func (s *Store) pruneLocked(now time.Time) {
 		}
 	}
 	for k, c := range s.byID {
-		if stateAt(c, now) != Pending && stateAt(c, now) != Approved && now.Sub(c.Expires) >= retainAfterLife {
+		if c.State != Pending && c.State != Approved && now.Sub(c.Expires) >= retainAfterLife {
 			delete(s.byID, k)
 		}
 	}
@@ -258,18 +261,19 @@ func (s *Store) Decide(id, user string, approve bool) error {
 	return nil
 }
 
-// Consume uses the first approved, unexpired confirmation matching the
-// binding (it becomes consumed and is returned). Else ErrPending when a
+// Consume uses the first approved, unexpired confirmation of listener
+// matching the binding (it becomes consumed and is returned); another
+// listener's confirmation is never matched (nor consumed). Else ErrPending when a
 // pending one matches, ErrDeclined when a declined one does, ErrNotFound
 // otherwise (the caller creates a new one).
-func (s *Store) Consume(user, resource, tool, digest string) (*Confirmation, error) {
+func (s *Store) Consume(listener, user, resource, tool, digest string) (*Confirmation, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now()
 	var first *Confirmation
 	pending, declined := false, false
 	for _, c := range s.byID {
-		if c.User != user || c.Resource != resource || c.Tool != tool || c.ArgsSHA256 != digest {
+		if c.Listener != listener || c.User != user || c.Resource != resource || c.Tool != tool || c.ArgsSHA256 != digest {
 			continue
 		}
 		switch stateAt(c, now) {
