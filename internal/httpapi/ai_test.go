@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/portcullis/hub/internal/directory"
 )
 
 // aiEnv is the instance env with the AI page test template ai-chat
@@ -236,14 +238,18 @@ func TestProviderSecretsNeverEchoed(t *testing.T) {
 	if seen < 3 {
 		t.Errorf("only %d files in the data directory", seen)
 	}
-	var details []string
+	// The successful set is exactly one ok entry, by root, on ollama.
+	var oks []directory.AuditEntry
 	for _, a := range readAudit(t, e.audit) {
-		if a.Action == "ai.provider.secret" {
-			details = append(details, a.Detail+":"+a.Result)
+		if a.Action == "ai.provider.secret" && a.Result == "ok" {
+			oks = append(oks, a)
 		}
 	}
-	if !strings.Contains(strings.Join(details, ","), "key replaced:ok") {
-		t.Errorf("secret audits = %v", details)
+	if len(oks) != 1 {
+		t.Fatalf("ok secret audits = %+v, want exactly one", oks)
+	}
+	if a := oks[0]; a.Actor != "root" || a.Target != "ollama" || a.Detail != "key replaced" || a.Error != "" || a.Via != "" {
+		t.Errorf("secret audit = %+v", a)
 	}
 	// Clear.
 	b = call("PUT", "/api/ai/providers/ollama/secrets/key", `{"clear":true}`, 200)
@@ -254,8 +260,49 @@ func TestProviderSecretsNeverEchoed(t *testing.T) {
 		t.Error("cleared value still stored")
 	}
 	call("PUT", "/api/ai/providers/ollama/secrets/key", `{"clear":false}`, 400)
-	if a := readAudit(t, e.audit); a[len(a)-1].Detail != "key cleared" && a[len(a)-2].Detail != "key cleared" {
-		t.Errorf("clear audit = %+v", a[len(a)-2:])
+	var last directory.AuditEntry
+	for _, a := range readAudit(t, e.audit) {
+		if a.Action == "ai.provider.secret" {
+			last = a
+		}
+	}
+	if last.Detail != "key cleared" || last.Result != "ok" || last.Actor != "root" || last.Target != "ollama" {
+		t.Errorf("last secret audit = %+v, want key cleared ok by root", last)
+	}
+	// Clearing again: nothing set, {set:false}, nothing audited.
+	n := len(readAudit(t, e.audit))
+	if b := call("PUT", "/api/ai/providers/ollama/secrets/key", `{"clear":true}`, 200); strings.TrimSpace(b) != `{"set":false}` {
+		t.Errorf("clear unset = %s", b)
+	}
+	if len(readAudit(t, e.audit)) != n {
+		t.Error("clearing an unset field was audited")
+	}
+	// A store that can't be written (read-only <data>/ai): 500, the value
+	// in neither the answer, the audit nor the logs.
+	if strings.Contains(logs.String(), "MARKER") {
+		t.Errorf("a log line holds the secret:\n%s", logs.String())
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory modes: the write-failure part needs a non-root user")
+	}
+	os.WriteFile(store, []byte(`{}`), 0600)
+	os.Chmod(filepath.Dir(store), 0500)
+	t.Cleanup(func() { os.Chmod(filepath.Dir(store), 0700) })
+	b = call("PUT", "/api/ai/providers/ollama/secrets/key", `{"value":"`+marker+`"}`, 500)
+	if strings.Contains(b, "MARKER") || !strings.Contains(b, `"error":`) {
+		t.Errorf("write failure answer = %s", b)
+	}
+	var failed directory.AuditEntry
+	for _, a := range readAudit(t, e.audit) {
+		if a.Action == "ai.provider.secret" {
+			failed = a
+		}
+	}
+	if failed.Result != "error" || strings.Contains(failed.Error, "MARKER") || failed.Detail != "key replaced" {
+		t.Errorf("write failure audit = %+v", failed)
+	}
+	if e.s.Hub.ModelProviders(t.Context())[0].Secrets["key"].Set {
+		t.Error("a failed write marked the secret set")
 	}
 	if strings.Contains(logs.String(), "MARKER") {
 		t.Errorf("a log line holds the secret:\n%s", logs.String())

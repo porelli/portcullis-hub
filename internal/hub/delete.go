@@ -87,8 +87,8 @@ func (h *Hub) deleteInstance(id, confirm string, actor directory.Actor, ready fu
 		ready()
 	}
 	// The store and env are removed part-way: redact what they hold now.
-	extra := h.redactionSet(id)
-	defer func() { err = withSecrets(err, extra) }()
+	extra, unread := h.redactionSetErr(id)
+	defer func() { err = hideIfUnread(withSecrets(err, extra), unread) }()
 	if tg.entry.State == state.InstanceRestoring && tg.entry.RestoreAs != "" {
 		res.Warnings = append(res.Warnings, fmt.Sprintf("%s was being restored from %s and never finished: the delete backup holds its half-restored data", id, tg.entry.RestoreAs))
 	} else if tg.entry.State == state.InstanceRestoring {

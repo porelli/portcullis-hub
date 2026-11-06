@@ -382,3 +382,187 @@ func TestProviderSecretsMaskedAndRedacted(t *testing.T) {
 		t.Error("Env with an unreadable provider store must fail closed")
 	}
 }
+
+// TestProviderSecretsDirPrivate (fix round 1): a <data>/ai that is wider
+// than 0700 is made 0700 before the store is written; one that can't be a
+// private directory refuses the write (nothing stored, the value never in
+// the error).
+func TestProviderSecretsDirPrivate(t *testing.T) {
+	f, _ := aiFixture(t, "{openai_compatible: many}", nil)
+	if _, err := f.h.AddModelProvider(ollama, aiAdmin); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Dir(f.h.providerSecretsPath())
+	if err := os.Mkdir(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	os.Chmod(dir, 0755)
+	first, err := f.h.SetProviderSecret("ollama", "key", []byte("sk-MARKER-123"), aiAdmin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := os.Stat(dir); st == nil || st.Mode().Perm() != 0700 {
+		t.Errorf("dir mode = %v, want 0700", st.Mode().Perm())
+	}
+	// A symlink in its place is no private directory: refused.
+	os.RemoveAll(dir)
+	other := t.TempDir()
+	if err := os.Symlink(other, dir); err != nil {
+		t.Fatal(err)
+	}
+	_, err = f.h.SetProviderSecret("ollama", "key", []byte("sk-MARKER-456"), aiAdmin)
+	if statusOf(err) != 500 || strings.Contains(err.Error(), "MARKER") {
+		t.Fatalf("symlinked dir = %v, want 500 without the value", err)
+	}
+	if entries, _ := os.ReadDir(other); len(entries) != 0 {
+		t.Errorf("written through the symlink: %v", entries)
+	}
+	if at := f.h.ModelProviders(t.Context())[0].Secrets["key"].UpdatedAt; at == nil || !at.Equal(*first.UpdatedAt) {
+		t.Error("a refused write changed the secret's metadata")
+	}
+}
+
+// TestProviderAuditClipped (fix round 1): a 60 KiB name or field never
+// makes a 60 KiB audit entry (target ≤ 64 bytes + "…", detail clipped).
+func TestProviderAuditClipped(t *testing.T) {
+	f, audit := aiFixture(t, "{openai_compatible: many}", nil)
+	long := strings.Repeat("n", 60<<10)
+	p := cloneProvider(ollama)
+	p.Name, p.Kind = long, long
+	if _, err := f.h.AddModelProvider(p, aiAdmin); statusOf(err) != 400 {
+		t.Fatalf("long name = %v", err)
+	}
+	if _, err := f.h.SetProviderSecret(long, long, []byte("sk-x"), aiAdmin); statusOf(err) != 404 {
+		t.Fatalf("long secret path = %v", err)
+	}
+	if _, err := f.h.UpdateModelProvider(long, ollama, aiAdmin); statusOf(err) != 400 {
+		t.Fatalf("long update = %v", err)
+	}
+	if len(audit.entries) != 3 {
+		t.Fatalf("%d entries", len(audit.entries))
+	}
+	for _, e := range audit.entries {
+		if len(e.Target) > 64+len("…") || len(e.Detail) > 200 || len(e.Error) > 1000 {
+			t.Errorf("%s: target %d, detail %d, error %d bytes", e.Action, len(e.Target), len(e.Detail), len(e.Error))
+		}
+	}
+}
+
+// TestProviderSecretMasksDeclaredVariable (fix round 1): a variable the
+// template declares that holds a provider secret is masked too.
+func TestProviderSecretMasksDeclaredVariable(t *testing.T) {
+	f, _ := aiFixture(t, "{openai_compatible: many}", nil)
+	if _, err := f.h.AddModelProvider(ollama, aiAdmin); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.h.SetProviderSecret("ollama", "key", []byte("sk-MARKER-123"), aiAdmin); err != nil {
+		t.Fatal(err)
+	}
+	if !declaredEnvNames(f.h.Template("grafana-b"))["GF_SECRET"] {
+		t.Fatal("GF_SECRET is not declared by the fixture")
+	}
+	writeFile(t, f.h.envPath("grafana-b"), "GF_SECRET=sk-MARKER-123\nPLAIN=hello\n")
+	vars, _, err := f.h.Env("grafana-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if vars["GF_SECRET"] != "[set]" || vars["PLAIN"] != "hello" {
+		t.Errorf("Env = %v", vars)
+	}
+}
+
+// TestClearUnsetProviderSecret (ruling 10a): clearing a field that isn't
+// set answers {set: false}, audits nothing, writes nothing.
+func TestClearUnsetProviderSecret(t *testing.T) {
+	f, audit := aiFixture(t, "{openai_compatible: many}", nil)
+	if _, err := f.h.AddModelProvider(ollama, aiAdmin); err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(f.data, "state.yaml")
+	before := readFile(t, statePath)
+	st0, _ := os.Stat(statePath)
+	n := len(audit.entries)
+	v, err := f.h.ClearProviderSecret("ollama", "key", aiAdmin)
+	if err != nil || v.Set {
+		t.Fatalf("clear unset = %+v %v", v, err)
+	}
+	if len(audit.entries) != n {
+		t.Errorf("audited: %+v", audit.last())
+	}
+	if st1, _ := os.Stat(statePath); readFile(t, statePath) != before || !st1.ModTime().Equal(st0.ModTime()) {
+		t.Error("state.yaml was written")
+	}
+	if _, err := os.Stat(f.h.providerSecretsPath()); !os.IsNotExist(err) {
+		t.Errorf("store written: %v", err)
+	}
+	// Refusals still count: an unknown field is a 400, audited.
+	if _, err := f.h.ClearProviderSecret("ollama", "nope", aiAdmin); statusOf(err) != 400 || len(audit.entries) != n+1 {
+		t.Errorf("unknown field = %v, %d entries", err, len(audit.entries))
+	}
+}
+
+// TestUpdateProviderWithoutChatSupport (ruling 10b): once no installed AI
+// page supports the kind, an existing provider can still be edited; a new
+// one of that kind is refused.
+func TestUpdateProviderWithoutChatSupport(t *testing.T) {
+	f, _ := aiFixture(t, "{openai_compatible: many}", nil)
+	if _, err := f.h.AddModelProvider(ollama, aiAdmin); err != nil {
+		t.Fatal(err)
+	}
+	f.h.mu.Lock()
+	for i := range f.h.templates {
+		if ai := f.h.templates[i].Manifest.AI; ai != nil && ai.Chat != nil {
+			ai.Chat = &templates.Chat{ProviderKinds: map[string]string{"anthropic": "one"}}
+		}
+	}
+	f.h.mu.Unlock()
+	up := cloneProvider(ollama)
+	up.Label = "Renamed"
+	if v, err := f.h.UpdateModelProvider("ollama", up, aiAdmin); err != nil || v.Label != "Renamed" {
+		t.Errorf("update = %+v %v", v.Label, err)
+	}
+	other := cloneProvider(ollama)
+	other.Name = "other"
+	if _, err := f.h.AddModelProvider(other, aiAdmin); statusOf(err) != 400 || !strings.Contains(err.Error(), "no installed AI page supports kind openai_compatible") {
+		t.Errorf("add = %v", err)
+	}
+}
+
+// TestLiteLLMBaseURLRealTemplate (fix round 1): the real litellm template
+// has a host router named litellm, which is what base_url comes from; an
+// instance without that router gives none (no other router's host).
+func TestLiteLLMBaseURLRealTemplate(t *testing.T) {
+	dir := os.Getenv("PORTCULLIS_TEMPLATES_DIR")
+	if dir == "" {
+		dir = filepath.Join("..", "..", "..", "portcullis-templates")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "litellm", "manifest.yaml")); err != nil {
+		t.Skipf("no templates checkout at %s", dir)
+	}
+	real, err := templates.Load(dir, "litellm", "portcullis", "example.org", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := real.HostRouters[LiteLLMKind]; !ok {
+		t.Fatalf("the real litellm template has no host router %q: %v", LiteLLMKind, real.HostRouters)
+	}
+	f, _ := aiFixture(t, "{litellm: many}", nil)
+	f.h.mu.RLock()
+	got := f.h.liteLLMBaseURLLocked("litellm-lab")
+	f.h.mu.RUnlock()
+	if got != "https://"+f.h.Template("litellm-lab").Hosts[LiteLLMKind] {
+		t.Errorf("base_url = %q", got)
+	}
+	// Without the litellm router: nothing, never another router's host.
+	f.h.mu.Lock()
+	for i := range f.h.instances {
+		if f.h.instances[i].ID == "litellm-lab" {
+			f.h.instances[i].Hosts = map[string]string{"api": "api.example.org"}
+		}
+	}
+	got = f.h.liteLLMBaseURLLocked("litellm-lab")
+	f.h.mu.Unlock()
+	if got != "" {
+		t.Errorf("base_url without the litellm router = %q, want empty", got)
+	}
+}

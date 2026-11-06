@@ -3,6 +3,7 @@ package hub
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -298,12 +299,47 @@ func (h *Hub) secretRedactor(id string, extra ...[]string) func(string) string {
 	return func(s string) string { return redactValues(s, vals) }
 }
 
-// redactionSet is what secretRedactor(id) blanks as the instance is now
-// (an unreadable hash set leaves the hashes out: callers that must fail
-// closed use redactionSetErr).
-func (h *Hub) redactionSet(id string) []string {
-	vals, _ := h.redactionSetErr(id)
-	return vals
+// redactionSets is the union of ids' redaction sets (redactionSetErr);
+// err names the first instance whose set couldn't be read whole — the
+// caller hides its messages then (hideIfUnread).
+func (h *Hub) redactionSets(ids ...string) ([]string, error) {
+	var out []string
+	var first error
+	for _, id := range ids {
+		vals, err := h.redactionSetErr(id)
+		if err != nil && first == nil {
+			first = fmt.Errorf("%s: %w", id, err)
+		}
+		out = append(out, vals...)
+	}
+	return out, first
+}
+
+// hiddenErr is an error whose text is never shown: the secrets it might
+// hold couldn't be read to redact it (fail closed). Unwrap keeps its
+// status and the values it carries.
+type hiddenErr struct{ err, why error }
+
+func (e *hiddenErr) Error() string {
+	return "the message is hidden: secrets couldn't be read to redact it (" + e.why.Error() + ")"
+}
+func (e *hiddenErr) Unwrap() error { return e.err }
+
+// hideIfUnread is err with its message hidden when why (a redaction set
+// read error) is set; nil stays nil.
+func hideIfUnread(err, why error) error {
+	if err == nil || why == nil {
+		return err
+	}
+	return &hiddenErr{err: err, why: why}
+}
+
+// redactOrHide is s redacted with vals, or the hidden text when why is set.
+func redactOrHide(s string, vals []string, why error) string {
+	if why != nil {
+		return (&hiddenErr{why: why}).Error()
+	}
+	return redactValues(s, vals)
 }
 
 // redactionSetErr is redactionSet plus the instance's current NT hashes

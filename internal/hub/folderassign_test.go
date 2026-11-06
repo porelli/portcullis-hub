@@ -1321,10 +1321,41 @@ func TestFailureKeepsRedaction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fb := &failCtx{id: "media", actor: directory.Human("admin"), m: &applyMarker{}, secrets: f.h.opSecrets([]string{"immich"})}
+	secrets, unread := f.h.opSecrets([]string{"immich"})
+	if unread != nil {
+		t.Fatal(unread)
+	}
+	fb := &failCtx{id: "media", actor: directory.Human("admin"), m: &applyMarker{}, secrets: secrets}
 	got := f.h.failBeforeState(fb, errors.New("boom"), "", false)
 	if !slices.Contains(secretsOf(got), "s3cr3t-token-value") {
 		t.Errorf("redaction set lost: %v", secretsOf(got))
+	}
+}
+
+// TestFailureHiddenWhenSecretsUnreadable (T9 fix round 1): an affected
+// instance whose redaction set can't be read whole (here: an unreadable
+// model provider store) hides the op's failure message, keeping its
+// status; a stop failure of that instance is hidden too.
+func TestFailureHiddenWhenSecretsUnreadable(t *testing.T) {
+	f, _, _ := assignFixture(t)
+	enable(t, f, "immich")
+	writeFile(t, f.h.providerSecretsPath(), "not json")
+	secrets, unread := f.h.opSecrets([]string{"immich"})
+	if unread == nil {
+		t.Fatal("an unreadable provider store must be reported")
+	}
+	fb := &failCtx{id: "media", actor: directory.Human("admin"), m: &applyMarker{}, secrets: secrets, unread: unread}
+	got := f.h.failBeforeState(fb, statusErr(409, "boom s3cr3t-token-value"), "", false)
+	if msg := got.Error(); strings.Contains(msg, "boom") || !strings.Contains(msg, "the message is hidden") {
+		t.Errorf("message = %q, want it hidden", msg)
+	}
+	if statusOf(got) != 409 {
+		t.Errorf("status = %d, want 409 kept", statusOf(got))
+	}
+	f.runner.downErr = errors.New("down failed s3cr3t-token-value")
+	_, err := f.h.stopAll([]string{"immich"})
+	if err == nil || strings.Contains(err.Error(), "s3cr3t") || !strings.Contains(err.Error(), "the message is hidden") {
+		t.Errorf("stopAll = %v, want the message hidden", err)
 	}
 }
 
@@ -1340,7 +1371,8 @@ func TestFolderAuditRedacted(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Through the error's redaction set (a disk-changed failure).
-	fb := &failCtx{id: "media", actor: directory.Human("admin"), m: &applyMarker{}, secrets: f.h.opSecrets([]string{"immich"})}
+	secrets, _ := f.h.opSecrets([]string{"immich"})
+	fb := &failCtx{id: "media", actor: directory.Human("admin"), m: &applyMarker{}, secrets: secrets}
 	f.h.failBeforeState(fb, errors.New("compose up: API_TOKEN=s3cr3t-token-value rejected"), "", true)
 	e := audit.last()
 	if e.Action != "folder.apply" || e.Error == "" || strings.Contains(e.Error, "s3cr3t-token-value") || !strings.Contains(e.Error, "[redacted]") {

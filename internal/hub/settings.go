@@ -1564,18 +1564,22 @@ func (h *Hub) secretMask(t *templates.Template) (func(name, value string) bool, 
 		}
 	}
 	// G30(a): every provider variable (PORTCULLIS_AI_PROVIDER_*) is masked,
-	// and so is any other variable holding a provider secret's value.
+	// and so is any variable — declared or reserved too — holding a
+	// provider secret's value (a separate set: the instance's own stored
+	// values keep their narrower rule).
 	provider, err := h.providerSecretValues()
 	if err != nil {
 		return nil, err
 	}
+	providerStored := map[string]bool{}
 	for _, v := range provider {
-		stored[v] = true
+		providerStored[v] = true
 	}
 	names := secretOptionEnvNames(t)
 	declared := declaredEnvNames(t)
 	return func(n, v string) bool {
-		return v != "" && (names[n] || strings.HasPrefix(n, ProviderVarPrefix) || stored[v] && !declared[n] && !templates.ReservedVar(n))
+		return v != "" && (names[n] || strings.HasPrefix(n, ProviderVarPrefix) || providerStored[v] ||
+			stored[v] && !declared[n] && !templates.ReservedVar(n))
 	}, nil
 }
 

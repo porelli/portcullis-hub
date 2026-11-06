@@ -256,8 +256,9 @@ func (h *Hub) restoreInstance(id, archive string, actor directory.Actor, ready f
 	defer sb.cleanup()
 	// Redacted from here on: the values the instance has now and the
 	// archive's, whichever the instance holds when this ends.
-	extra := append(h.redactionSet(id), archiveSecrets(view, sb)...)
-	defer func() { err = withSecrets(err, extra) }()
+	cur, unread := h.redactionSetErr(id)
+	extra := append(cur, archiveSecrets(view, sb)...)
+	defer func() { err = hideIfUnread(withSecrets(err, extra), unread) }()
 	if sb.m.Template != view.TemplateID {
 		return res, statusErr(409, "archive %s is a backup of template %s, instance %s runs %s", archive, sb.m.Template, id, view.TemplateID)
 	}
@@ -780,7 +781,8 @@ func (h *Hub) restoreInstanceAs(archive, newID string, actor directory.Actor, ho
 	// Redacted from here on: the archive's values and (undo) the new
 	// instance's before it is removed.
 	var extra []string
-	defer func() { err = withSecrets(err, extra) }()
+	var undoUnread error // the new instance's redaction set couldn't be read during the undo
+	defer func() { err = hideIfUnread(withSecrets(err, extra), undoUnread) }()
 
 	h.mu.RLock()
 	t := h.catalogLocked(sb.m.Template)
@@ -872,7 +874,11 @@ func (h *Hub) restoreInstanceAs(archive, newID string, actor directory.Actor, ho
 	undo := func(cause error) error {
 		ctx := context.Background()
 		// Its regenerated secrets and env go with it: keep redacting them.
-		extra = append(extra, h.redactionSet(newID)...)
+		set, unread := h.redactionSetErr(newID)
+		extra = append(extra, set...)
+		if unread != nil {
+			undoUnread = unread
+		}
 		var errs []error
 		for _, v := range createdVols {
 			if err := h.engine.RemoveVolume(ctx, v); err != nil && !docker.IsNotFound(err) {

@@ -11,6 +11,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -57,63 +58,137 @@ func (h *Hub) secretValues(id string) (map[string]string, error) {
 	if !templates.ValidID(id) {
 		return map[string]string{}, nil
 	}
-	data, err := os.ReadFile(h.secretsPath(id))
-	if errors.Is(err, os.ErrNotExist) {
-		return map[string]string{}, nil
+	vals, err := readSecretStore(h.secretsPath(id), templates.OptionKeyRe, "an option key")
+	var se *storeErr
+	if errors.As(err, &se) && se.stage == storeRead {
+		return nil, fmt.Errorf("reading the secrets store of %s: %w", id, se.err)
 	}
-	if err != nil {
-		return nil, fmt.Errorf("reading the secrets store of %s: %w", id, err)
-	}
-	return parseSecrets(data)
+	return vals, err
 }
 
 // parseSecrets decodes a secrets store (or an archive's
 // config/settings-secrets.json). Its errors never quote the content.
 func parseSecrets(data []byte) (map[string]string, error) {
-	out := map[string]string{}
-	if err := json.Unmarshal(data, &out); err != nil {
-		return nil, errors.New("the secrets store is not a JSON object of strings")
-	}
-	for k := range out {
-		if !templates.OptionKeyRe.MatchString(k) {
-			return nil, errors.New("the secrets store has a key that is not an option key")
-		}
-	}
-	return out, nil
+	return parseSecretStore(data, templates.OptionKeyRe, "an option key")
 }
 
 // writeSecrets replaces instance id's store with vals (empty: the file is
 // removed).
 func (h *Hub) writeSecrets(id string, vals map[string]string) error {
-	if len(vals) == 0 {
-		if err := os.Remove(h.secretsPath(id)); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("removing the secrets store of %s: %w", id, err)
-		}
-		return nil
-	}
-	if err := h.ensureSecretsDir(id); err != nil {
+	err := writeSecretStore(h.secretsDirs(id), h.secretsPath(id), vals)
+	var se *storeErr
+	if !errors.As(err, &se) {
 		return err
 	}
-	data, err := json.MarshalIndent(vals, "", "  ")
-	if err != nil {
-		return err
+	switch se.stage {
+	case storeRemove:
+		return fmt.Errorf("removing the secrets store of %s: %w", id, se.err)
+	case storeDir:
+		return fmt.Errorf("secrets store directory of %s: %w", id, se.err)
 	}
-	if err := fsutil.WriteFileAtomic(h.secretsPath(id), data, 0600); err != nil {
-		return fmt.Errorf("writing the secrets store of %s failed", id)
-	}
-	return nil
+	return fmt.Errorf("writing the secrets store of %s failed", id)
+}
+
+// secretsDirs are <data>/settings and <data>/settings/<id>, parents first.
+func (h *Hub) secretsDirs(id string) []string {
+	return []string{filepath.Dir(h.secretsDir(id)), h.secretsDir(id)}
 }
 
 // ensureSecretsDir creates <data>/settings and <data>/settings/<id> as
 // 0700 (the mode set once, when created: MkdirAll applies the umask; a
 // failed chmod is logged, the store file itself is always 0600).
 func (h *Hub) ensureSecretsDir(id string) error {
-	for _, d := range []string{filepath.Dir(h.secretsDir(id)), h.secretsDir(id)} {
+	if err := ensureStoreDirs(h.secretsDirs(id)); err != nil {
+		return fmt.Errorf("secrets store directory of %s: %w", id, err)
+	}
+	return nil
+}
+
+// ── the secret store files (instance settings, model providers) ──
+
+// Stages of a secret store failure (storeErr): what the caller words.
+const (
+	storeRead   = "read"
+	storeParse  = "parse"
+	storeRemove = "remove"
+	storeDir    = "dir"
+	storeWrite  = "write"
+)
+
+// storeErr is a secret store failure at a stage. Its text never quotes
+// the store's content.
+type storeErr struct {
+	stage string
+	err   error
+}
+
+func (e *storeErr) Error() string { return e.err.Error() }
+func (e *storeErr) Unwrap() error { return e.err }
+
+// readSecretStore reads a JSON object of strings whose keys match keyRe
+// (keyDesc names them in the error); a missing file is an empty store.
+// The read buffer is zeroed after decoding. Errors: storeErr storeRead
+// (the os error) or storeParse (a fixed text).
+func readSecretStore(path string, keyRe *regexp.Regexp, keyDesc string) (map[string]string, error) {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return map[string]string{}, nil
+	}
+	if err != nil {
+		return nil, &storeErr{stage: storeRead, err: err}
+	}
+	defer clear(data)
+	return parseSecretStore(data, keyRe, keyDesc)
+}
+
+// parseSecretStore decodes a store's bytes (errors never quote them).
+func parseSecretStore(data []byte, keyRe *regexp.Regexp, keyDesc string) (map[string]string, error) {
+	out := map[string]string{}
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil, &storeErr{stage: storeParse, err: errors.New("the secrets store is not a JSON object of strings")}
+	}
+	for k := range out {
+		if !keyRe.MatchString(k) {
+			return nil, &storeErr{stage: storeParse, err: errors.New("the secrets store has a key that is not " + keyDesc)}
+		}
+	}
+	return out, nil
+}
+
+// writeSecretStore replaces the store at path with vals: empty = the file
+// removed; else dirs (parents first) created 0700 when missing
+// (ensureStoreDirs), the JSON written atomically 0600 and its buffer
+// zeroed. Errors are storeErr (storeRemove, storeDir, storeWrite).
+func writeSecretStore(dirs []string, path string, vals map[string]string) error {
+	if len(vals) == 0 {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return &storeErr{stage: storeRemove, err: err}
+		}
+		return nil
+	}
+	if err := ensureStoreDirs(dirs); err != nil {
+		return &storeErr{stage: storeDir, err: err}
+	}
+	data, err := json.MarshalIndent(vals, "", "  ")
+	if err != nil {
+		return &storeErr{stage: storeWrite, err: errors.New("encoding the secrets store failed")}
+	}
+	defer clear(data)
+	if err := fsutil.WriteFileAtomic(path, data, 0600); err != nil {
+		return &storeErr{stage: storeWrite, err: err}
+	}
+	return nil
+}
+
+// ensureStoreDirs creates each missing directory of dirs as 0700 (the
+// mode set once, when created; a failed chmod is logged).
+func ensureStoreDirs(dirs []string) error {
+	for _, d := range dirs {
 		if _, err := os.Stat(d); err == nil {
 			continue
 		}
 		if err := os.Mkdir(d, 0700); err != nil && !errors.Is(err, os.ErrExist) {
-			return fmt.Errorf("secrets store directory of %s: %w", id, err)
+			return err
 		}
 		if err := os.Chmod(d, 0700); err != nil {
 			log.Printf("settings: chmod 0700 %s: %v", d, err)

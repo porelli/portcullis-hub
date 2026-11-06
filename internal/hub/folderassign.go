@@ -1157,13 +1157,10 @@ func (h *Hub) markerPending(id string) error {
 }
 
 // opSecrets is every value the instances' errors must have redacted
-// (M5: the folder's op key has no secrets of its own).
-func (h *Hub) opSecrets(ids []string) []string {
-	var out []string
-	for _, inst := range ids {
-		out = append(out, h.redactionSet(inst)...)
-	}
-	return out
+// (M5: the folder's op key has no secrets of its own); err: a set
+// couldn't be read — the op's messages are hidden (hideIfUnread).
+func (h *Hub) opSecrets(ids []string) ([]string, error) {
+	return h.redactionSets(ids...)
 }
 
 // StartAssign applies req to folder id in the background once the plan
@@ -1261,8 +1258,8 @@ func (h *Hub) runAssign(id string, c *assignCalc, actor directory.Actor) (map[st
 	result := map[string]string{"add": strconv.Itoa(c.adds), "remove": strconv.Itoa(c.removes)}
 	warnings := slices.Clone(c.plan.Warnings)
 	detail := fmt.Sprintf("add=%d remove=%d", c.adds, c.removes)
-	secrets := h.opSecrets(c.affected)
-	fb := &failCtx{id: id, actor: actor, secrets: secrets}
+	secrets, unread := h.opSecrets(c.affected)
+	fb := &failCtx{id: id, actor: actor, secrets: secrets, unread: unread}
 	m := &applyMarker{Kind: "apply", Folder: id, Instances: c.plan.Restarts, Phase: "disk", At: time.Now().UTC()}
 	fb.m = m
 	for _, e := range c.edits {
@@ -1366,7 +1363,7 @@ func (h *Hub) runAssign(id string, c *assignCalc, actor directory.Actor) (map[st
 		warnings = append(warnings, fmt.Sprintf("%s is not running: its configuration was updated, it wasn't started", c.names[inst]))
 	}
 	for _, e := range regenErrs {
-		warnings = append(warnings, redactValues("regenerating "+e, secrets))
+		warnings = append(warnings, redactOrHide("regenerating "+e, secrets, unread))
 	}
 
 	// Start what was stopped, with the new configuration.
@@ -1392,7 +1389,7 @@ func (h *Hub) runAssign(id string, c *assignCalc, actor directory.Actor) (map[st
 	}
 	if startErr != nil {
 		err := statusErr(http.StatusInternalServerError, "the assignment was saved, but %v: start them from the app list", startErr)
-		return result, warnings, detail, deliver, withSecrets(err, append(secrets, secretsOf(startErr)...))
+		return result, warnings, detail, deliver, hideIfUnread(withSecrets(err, append(secrets, secretsOf(startErr)...)), unread)
 	}
 	return result, warnings, detail, deliver, nil
 }
@@ -1410,7 +1407,8 @@ func (h *Hub) stopAll(ids []string) ([]string, error) {
 		}
 		if err := h.composeDown(t); err != nil {
 			stopped = append(stopped, inst)
-			return stopped, fmt.Errorf("stopping %s failed: %w", inst, withSecrets(err, h.redactionSet(inst)))
+			set, unread := h.redactionSetErr(inst)
+			return stopped, hideIfUnread(fmt.Errorf("stopping %s failed: %w", inst, withSecrets(err, set)), unread)
 		}
 		stopped = append(stopped, inst)
 	}
@@ -1431,7 +1429,8 @@ func (h *Hub) startAll(ids []string) error {
 			if composeFailed(err) {
 				h.rollbackUp(t)
 			}
-			errs = append(errs, fmt.Errorf("%s didn't start: %w", inst, withSecrets(err, h.redactionSet(inst))))
+			set, unread := h.redactionSetErr(inst)
+			errs = append(errs, hideIfUnread(fmt.Errorf("%s didn't start: %w", inst, withSecrets(err, set)), unread))
 		}
 	}
 	return errors.Join(errs...)
@@ -1444,6 +1443,7 @@ type failCtx struct {
 	m       *applyMarker
 	stopped []string
 	secrets []string
+	unread  error // a redaction set couldn't be read: messages hidden
 	entries int64
 }
 
@@ -1498,7 +1498,7 @@ func (h *Hub) failBeforeState(fb *failCtx, cause error, snap string, diskChanged
 	}
 	sec := append(slices.Clone(fb.secrets), secretsOf(cause)...)
 	sec = append(sec, secretsOf(startErr)...)
-	err := withSecrets(&StatusError{Status: status, Err: errors.New(b.String())}, sec)
+	err := hideIfUnread(withSecrets(&StatusError{Status: status, Err: errors.New(b.String())}, sec), fb.unread)
 	if diskChanged {
 		h.auditFolder(fb.actor, "folder.apply", id, fmt.Sprintf("entries=%d snapshot=%s", fb.entries, snapshotTS(snap)), err)
 	}
@@ -1864,7 +1864,7 @@ func (h *Hub) runUndo(id string, u *undoCalc) (map[string]string, []string, stri
 	f := u.folder
 	result := map[string]string{"snapshot": u.apply.Snapshot}
 	var warnings []string
-	secrets := h.opSecrets(u.affected)
+	secrets, unread := h.opSecrets(u.affected)
 	detail := func() string {
 		d := "undo snapshot=" + snapshotTS(u.apply.Snapshot)
 		if s := result["undo_snapshot"]; s != "" {
@@ -1899,7 +1899,7 @@ func (h *Hub) runUndo(id string, u *undoCalc) (map[string]string, []string, stri
 		}
 		sec := append(slices.Clone(secrets), secretsOf(cause)...)
 		sec = append(sec, secretsOf(startErr)...)
-		return withSecrets(&StatusError{Status: status, Err: errors.New(msg)}, sec)
+		return hideIfUnread(withSecrets(&StatusError{Status: status, Err: errors.New(msg)}, sec), unread)
 	}
 	if err := h.writeMarker(id, m); err != nil {
 		return result, nil, detail(), fail(statusErr(http.StatusInternalServerError, "writing the undo marker: %v", err), false)
@@ -1980,7 +1980,7 @@ func (h *Hub) runUndo(id string, u *undoCalc) (map[string]string, []string, stri
 	d := fmt.Sprintf("%s entries=%d changed_since=%d", detail(), rep.Changed, rep.ChangedSince.N)
 	if startErr != nil {
 		err := statusErr(http.StatusInternalServerError, "the undo finished, but %v: start them from the app list", startErr)
-		return result, warnings, d, withSecrets(err, append(secrets, secretsOf(startErr)...))
+		return result, warnings, d, hideIfUnread(withSecrets(err, append(secrets, secretsOf(startErr)...)), unread)
 	}
 	return result, warnings, d, nil
 }

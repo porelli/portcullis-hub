@@ -3,8 +3,8 @@ package hub
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"maps"
 	"net/http"
@@ -19,7 +19,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/portcullis/hub/internal/directory"
-	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
 )
@@ -133,27 +132,18 @@ func (h *Hub) providerSecretsPath() string {
 }
 
 // providerSecrets are the stored provider secret values by
-// "<name>.<field>" (missing store = none). Never log, echo or audit them;
-// errors never quote the content.
+// "<name>.<field>" (missing store = none; readSecretStore). Never log,
+// echo or audit them; errors never quote the content.
 func (h *Hub) providerSecrets() (map[string]string, error) {
-	data, err := os.ReadFile(h.providerSecretsPath())
-	if errors.Is(err, os.ErrNotExist) {
-		return map[string]string{}, nil
-	}
-	if err != nil {
+	vals, err := readSecretStore(h.providerSecretsPath(), secretFieldKeyRe, "<provider>.<field>")
+	var se *storeErr
+	switch {
+	case err == nil:
+		return vals, nil
+	case errors.As(err, &se) && se.stage == storeRead:
 		return nil, errors.New("reading the AI provider secrets store failed")
 	}
-	defer clear(data)
-	out := map[string]string{}
-	if err := json.Unmarshal(data, &out); err != nil {
-		return nil, errors.New("the AI provider secrets store is not a JSON object of strings")
-	}
-	for k := range out {
-		if !secretFieldKeyRe.MatchString(k) {
-			return nil, errors.New("the AI provider secrets store has a key that is not <provider>.<field>")
-		}
-	}
-	return out, nil
+	return nil, errors.New("the AI provider secrets store: " + err.Error())
 }
 
 // providerSecretValues are the non-empty stored values (the redaction
@@ -173,32 +163,55 @@ func (h *Hub) providerSecretValues() ([]string, error) {
 }
 
 // writeProviderSecrets replaces the store with vals (empty: the file is
-// removed); <data>/ai is 0700, the file 0600, written atomically. The
-// encoded buffer is zeroed after the write.
+// removed; writeSecretStore otherwise: atomic, 0600, buffer zeroed).
+// <data>/ai is checked before every write: created 0700, set to 0700
+// when group or others can reach it, else the write is refused (fail
+// closed, fix round 1). Errors
+// are fixed texts.
 func (h *Hub) writeProviderSecrets(vals map[string]string) error {
 	path := h.providerSecretsPath()
-	if len(vals) == 0 {
-		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return errors.New("removing the AI provider secrets store failed")
+	if len(vals) > 0 {
+		if err := ensurePrivateDir(filepath.Dir(path)); err != nil {
+			log.Printf("ai: the provider secrets directory: %v", err)
+			return errors.New("the AI provider secrets directory is not private (0700) and can't be made so: nothing was written")
 		}
+	}
+	err := writeSecretStore(nil, path, vals)
+	var se *storeErr
+	switch {
+	case err == nil:
 		return nil
+	case errors.As(err, &se) && se.stage == storeRemove:
+		return errors.New("removing the AI provider secrets store failed")
 	}
-	dir := filepath.Dir(path)
-	if _, err := os.Stat(dir); err != nil {
-		if err := os.Mkdir(dir, 0700); err != nil && !errors.Is(err, os.ErrExist) {
-			return errors.New("creating the AI provider secrets directory failed")
-		}
-		if err := os.Chmod(dir, 0700); err != nil {
-			log.Printf("ai: chmod 0700 %s: %v", dir, err)
-		}
+	return errors.New("writing the AI provider secrets store failed")
+}
+
+// ensurePrivateDir makes dir a real directory (not a symlink) that only
+// its owner can reach: created 0700 when missing, chmodded to 0700 when
+// group or others have any bit; anything else is an error. (A narrower
+// mode, e.g. read-only 0500, is left: the write then fails.)
+func ensurePrivateDir(dir string) error {
+	if err := ensureStoreDirs([]string{dir}); err != nil {
+		return err
 	}
-	data, err := json.MarshalIndent(vals, "", "  ")
+	st, err := os.Lstat(dir)
 	if err != nil {
-		return errors.New("encoding the AI provider secrets store failed")
+		return err
 	}
-	defer clear(data)
-	if err := fsutil.WriteFileAtomic(path, data, 0600); err != nil {
-		return errors.New("writing the AI provider secrets store failed")
+	if !st.IsDir() {
+		return fmt.Errorf("%s is not a directory", dir)
+	}
+	if st.Mode().Perm()&0077 != 0 {
+		if err := os.Chmod(dir, 0700); err != nil {
+			return err
+		}
+		if st, err = os.Lstat(dir); err != nil {
+			return err
+		}
+		if st.Mode().Perm()&0077 != 0 {
+			return fmt.Errorf("%s stays %v after chmod 0700", dir, st.Mode().Perm())
+		}
 	}
 	return nil
 }
@@ -263,22 +276,21 @@ func (h *Hub) selectingLocked(name string) []string {
 	return out
 }
 
-// liteLLMBaseURLLocked is https://<the instance's host> ("" = no such
-// instance or no host): the host router named like the template, else
-// the only one, else the first by name. Caller holds mu.
+// liteLLMBaseURLLocked is https://<the host of the instance's router
+// litellm> ("" = no such instance or no such router: never another
+// router's host). Caller holds mu.
 func (h *Hub) liteLLMBaseURLLocked(id string) string {
 	t := h.findLocked(id)
-	if t == nil || len(t.Hosts) == 0 {
+	if t == nil || t.Hosts[LiteLLMKind] == "" {
 		return ""
 	}
-	host, ok := t.Hosts[LiteLLMKind]
-	if !ok {
-		host = t.Hosts[slices.Sorted(maps.Keys(t.Hosts))[0]]
-	}
-	if host == "" {
-		return ""
-	}
-	return "https://" + host
+	return "https://" + t.Hosts[LiteLLMKind]
+}
+
+// providerIndexLocked is provider name's index in state (-1: none).
+// Caller holds mu.
+func (h *Hub) providerIndexLocked(name string) int {
+	return slices.IndexFunc(h.st.AI.Providers, func(q state.ModelProvider) bool { return q.Name == name })
 }
 
 func cloneProvider(p state.ModelProvider) state.ModelProvider {
@@ -296,7 +308,7 @@ func cloneProvider(p state.ModelProvider) state.ModelProvider {
 // ai.provider.add.
 func (h *Hub) AddModelProvider(p state.ModelProvider, actor directory.Actor) (ProviderView, error) {
 	v, err := h.saveProvider("", p, actor)
-	h.auditAI(actor, "ai.provider.add", p.Name, "kind="+p.Kind, err)
+	h.auditAI(actor, "ai.provider.add", p.Name, "kind="+clip(p.Kind, 64), err)
 	return v, err
 }
 
@@ -306,7 +318,7 @@ func (h *Hub) AddModelProvider(p state.ModelProvider, actor directory.Actor) (Pr
 // selecting AI pages is Task 23's.)
 func (h *Hub) UpdateModelProvider(name string, p state.ModelProvider, actor directory.Actor) (ProviderView, error) {
 	v, err := h.saveProvider(name, p, actor)
-	h.auditAI(actor, "ai.provider.update", name, "kind="+p.Kind, err)
+	h.auditAI(actor, "ai.provider.update", name, "kind="+clip(p.Kind, 64), err)
 	return v, err
 }
 
@@ -329,16 +341,16 @@ func (h *Hub) saveProvider(name string, p state.ModelProvider, actor directory.A
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	i := slices.IndexFunc(h.st.AI.Providers, func(q state.ModelProvider) bool { return q.Name == p.Name })
+	i := h.providerIndexLocked(p.Name)
 	switch {
 	case update && i < 0:
-		return ProviderView{}, statusErr(http.StatusNotFound, "no model provider %s", p.Name)
+		return ProviderView{}, statusErr(http.StatusNotFound, "no model provider %s", clipQuoted(p.Name))
 	case !update && i >= 0:
 		return ProviderView{}, statusErr(http.StatusConflict, "a model provider named %s exists already", p.Name)
 	case update && h.st.AI.Providers[i].Kind != p.Kind:
 		return ProviderView{}, statusErr(http.StatusBadRequest, "a provider's kind can't change (%s → %s): add a new provider", h.st.AI.Providers[i].Kind, p.Kind)
 	}
-	if err := h.checkProviderLocked(&p); err != nil {
+	if err := h.checkProviderLocked(&p, !update); err != nil {
 		return ProviderView{}, err
 	}
 	prev := h.st.AI
@@ -404,7 +416,7 @@ func (h *Hub) deleteProvider(name string, actor directory.Actor) error {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	i := slices.IndexFunc(h.st.AI.Providers, func(q state.ModelProvider) bool { return q.Name == name })
+	i := h.providerIndexLocked(name)
 	if i < 0 {
 		return statusErr(http.StatusNotFound, "no model provider %s", clipQuoted(name))
 	}
@@ -415,7 +427,6 @@ func (h *Hub) deleteProvider(name string, actor directory.Actor) error {
 	if err != nil {
 		return statusErr(http.StatusInternalServerError, "%v", err)
 	}
-	defer clear(before)
 	prev := h.st.AI
 	prev.ProviderSecrets = maps.Clone(prev.ProviderSecrets)
 	h.st.AI.ProviderSecrets = maps.Clone(h.st.AI.ProviderSecrets)
@@ -442,20 +453,36 @@ func (h *Hub) deleteProvider(name string, actor directory.Actor) error {
 // returns. Audited ai.provider.secret "<field> replaced".
 func (h *Hub) SetProviderSecret(name, field string, value []byte, actor directory.Actor) (SecretView, error) {
 	defer clear(value)
-	v, err := h.setProviderSecret(name, field, value, false, actor)
-	h.auditAI(actor, "ai.provider.secret", name, field+" "+secretReplaced, err)
+	v, _, err := h.setProviderSecret(name, field, value, false, actor)
+	h.auditAI(actor, "ai.provider.secret", name, clip(field, 64)+" "+secretReplaced, err)
 	return v, err
 }
 
 // ClearProviderSecret removes provider name's secret field. Audited
-// ai.provider.secret "<field> cleared".
+// ai.provider.secret "<field> cleared"; a field that isn't set answers
+// {set: false} with no audit and no write (ruling 10a).
 func (h *Hub) ClearProviderSecret(name, field string, actor directory.Actor) (SecretView, error) {
-	v, err := h.setProviderSecret(name, field, nil, true, actor)
-	h.auditAI(actor, "ai.provider.secret", name, field+" "+secretCleared, err)
+	v, changed, err := h.setProviderSecret(name, field, nil, true, actor)
+	if changed || err != nil {
+		h.auditAI(actor, "ai.provider.secret", name, clip(field, 64)+" "+secretCleared, err)
+	}
 	return v, err
 }
 
-func (h *Hub) setProviderSecret(name, field string, value []byte, clearIt bool, actor directory.Actor) (SecretView, error) {
+// setProviderSecret sets (or clears) the field; changed reports whether
+// anything was written.
+func (h *Hub) setProviderSecret(name, field string, value []byte, clearIt bool, actor directory.Actor) (SecretView, bool, error) {
+	v, err := h.setProviderSecretInner(name, field, value, clearIt, actor)
+	if errors.Is(err, errNothingToClear) {
+		return SecretView{}, false, nil
+	}
+	return v, err == nil, err
+}
+
+// errNothingToClear: the field to clear is not set.
+var errNothingToClear = errors.New("not set")
+
+func (h *Hub) setProviderSecretInner(name, field string, value []byte, clearIt bool, actor directory.Actor) (SecretView, error) {
 	if err := checkAIActor(actor); err != nil {
 		return SecretView{}, err
 	}
@@ -466,7 +493,7 @@ func (h *Hub) setProviderSecret(name, field string, value []byte, clearIt bool, 
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	i := slices.IndexFunc(h.st.AI.Providers, func(q state.ModelProvider) bool { return q.Name == name })
+	i := h.providerIndexLocked(name)
 	if i < 0 {
 		return SecretView{}, statusErr(http.StatusNotFound, "no model provider %s", clipQuoted(name))
 	}
@@ -479,9 +506,11 @@ func (h *Hub) setProviderSecret(name, field string, value []byte, clearIt bool, 
 	if err != nil {
 		return SecretView{}, statusErr(http.StatusInternalServerError, "%v", err)
 	}
-	defer clear(vals)
 	key := state.ProviderSecretKey(name, field)
 	old, had := vals[key]
+	if _, meta := h.st.AI.ProviderSecrets[key]; clearIt && !had && !meta {
+		return SecretView{}, errNothingToClear
+	}
 	if clearIt {
 		delete(vals, key)
 	} else {
@@ -662,10 +691,11 @@ func validProviderURL(s string) bool {
 }
 
 // checkProviderLocked is what needs the Hub's state: a litellm
-// provider's instance (400), a kind an installed AI page supports (400)
+// provider's instance (400), a kind an installed AI page supports (400;
+// on add only — an existing provider stays editable, ruling 10b)
 // and the variable clash with other providers (409, G30(d)). Caller
 // holds mu.
-func (h *Hub) checkProviderLocked(p *state.ModelProvider) error {
+func (h *Hub) checkProviderLocked(p *state.ModelProvider, adding bool) error {
 	if p.Kind == LiteLLMKind {
 		if !h.installedInstanceLocked(p.Instance) {
 			return statusErr(http.StatusBadRequest, "instance %s: no such instance", clipQuoted(p.Instance))
@@ -677,7 +707,7 @@ func (h *Hub) checkProviderLocked(p *state.ModelProvider) error {
 			return statusErr(http.StatusBadRequest, "instance %s has no hostname to reach it by", p.Instance)
 		}
 	}
-	if !h.chatSupportsLocked(p.Kind) {
+	if adding && !h.chatSupportsLocked(p.Kind) {
 		return statusErr(http.StatusBadRequest, "no installed AI page supports kind %s", p.Kind)
 	}
 	mine := map[string]string{}
@@ -726,7 +756,8 @@ func (h *Hub) chatSupportsLocked(kind string) bool {
 // ── audit ──────────────────────────────────────────────
 
 // auditAI records an AI settings / provider change (Result from err as
-// the API answers it). The error is redacted with every provider secret;
+// the API answers it); the target is clipped to 64 bytes and the detail
+// to 600 runes (callers clip what they put in it, like auditFolder). The error is redacted with every provider secret;
 // a store that can't be read hides it (fail closed). Never under mu.
 func (h *Hub) auditAI(actor directory.Actor, action, target, detail string, err error) {
 	h.mu.RLock()
@@ -735,7 +766,7 @@ func (h *Hub) auditAI(actor directory.Actor, action, target, detail string, err 
 	if a == nil {
 		return
 	}
-	e := directory.AuditEntry{Actor: actor.User, Via: actor.Via, Client: actor.Client, Action: action, Target: target, Detail: detail, Result: "ok"}
+	e := directory.AuditEntry{Actor: actor.User, Via: actor.Via, Client: actor.Client, Action: action, Target: clip(target, 64), Detail: clipRunes(detail, 600), Result: "ok"}
 	if err != nil {
 		e.Result = "error"
 		var se *StatusError
