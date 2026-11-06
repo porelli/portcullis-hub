@@ -166,6 +166,9 @@ func (h *Hub) deleteSteps(id string, actor directory.Actor, res *DeleteResult) e
 		// The derived first client id (§11.2); further ones aren't known.
 		clients = []string{id}
 	}
+	// Named before step 3 drops AIInstances[id] (a retry names them from
+	// the template).
+	aiScopes := h.aiScopeNamesLocked(tg)
 	shared := map[string]string{}
 	for _, g := range groups {
 		if g != "" {
@@ -206,9 +209,18 @@ func (h *Hub) deleteSteps(id string, actor directory.Actor, res *DeleteResult) e
 	}
 	credErr := h.forgetCredentialsLocked(id)
 	h.mu.Unlock()
+	// Its AI state right then too (§11.4 step 3, G56): every AI
+	// credential entry (audited ai.credential.revoke reason deleted; no
+	// hook — the project is down and the app's tokens go with its
+	// volumes), its oauth-seen records and orphans, AIInstances[id]; the
+	// gate file below drops its resources.
+	aiErr := h.forgetInstanceAI(id, actor)
 	h.writePolicyLogged()
 	if credErr != nil {
 		return fmt.Errorf("removing the per-person passwords: %w", credErr)
+	}
+	if aiErr != nil {
+		return fmt.Errorf("removing the AI state: %w", aiErr)
 	}
 	sort.Slice(gone, func(i, j int) bool {
 		if gone[i].key != gone[j].key {
@@ -280,6 +292,16 @@ func (h *Hub) deleteSteps(id string, actor directory.Actor, res *DeleteResult) e
 		}
 	}
 
+	// Its mcp:<id>.* scopes (§8: detached from every client first, every
+	// consent naming them goes with them).
+	if h.aiKeycloak() == nil {
+		if len(aiScopes) > 0 {
+			res.Warnings = append(res.Warnings, fmt.Sprintf("Keycloak's AI scope calls are not configured: the client scopes mcp:%s.* were not removed", id))
+		}
+	} else if err := h.deleteAIScopes(ctx, id, aiScopes); err != nil {
+		return fmt.Errorf("Keycloak AI scopes: %w", err)
+	}
+
 	// 5. Groups, through the Users & Groups guardrails.
 	for _, g := range groups {
 		switch {
@@ -318,11 +340,6 @@ func (h *Hub) deleteSteps(id string, actor directory.Actor, res *DeleteResult) e
 	// are in the delete's backup.
 	if err := h.removeSecrets(id); err != nil {
 		return fmt.Errorf("removing the settings store of %s: %w", id, err)
-	}
-	// Its AI credential entries (mcp-credentials.json): the app and its
-	// data are gone; the gate never sees them again.
-	if err := h.dropInstanceAIEntries(id); err != nil {
-		return fmt.Errorf("removing the AI credentials of %s: %w", id, err)
 	}
 	h.opsMu.Lock()
 	delete(h.ops, id)

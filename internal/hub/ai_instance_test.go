@@ -44,6 +44,8 @@ type fakeAIKC struct {
 	failApply error
 	// failEnsure: scope name → the error EnsureMCPScope answers.
 	failEnsure map[string]error
+	// failDelete: scope name → the error DeleteMCPScope answers (Task 15).
+	failDelete map[string]error
 	deleted    []string
 	// 12b: the AI clients EnsureAIClient made, failClient per client id.
 	clients    map[string]keycloak.AIClientSpec
@@ -89,6 +91,9 @@ func (k *fakeAIKC) DeleteMCPScope(ctx context.Context, name string) error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	k.calls = append(k.calls, "delete:"+name)
+	if err := k.failDelete[name]; err != nil {
+		return err
+	}
 	k.deleted = append(k.deleted, name)
 	delete(k.scopes, name)
 	for c, l := range k.optional {

@@ -307,14 +307,24 @@ func (h *Hub) restoreInstance(id, archive string, actor directory.Actor, ready f
 	if e.State == state.InstanceCreated {
 		keep = state.InstanceCreated
 	}
-	applyErr := h.applyRestore(id, sb, plan, wasEnabled, true)
+	air, applyErr := h.applyRestore(id, sb, plan, wasEnabled, true, actor)
 	if applyErr == nil {
 		if cerr := h.clearRestoring(id, keep); cerr != nil {
 			res.Warnings = append(res.Warnings, cerr.Error())
 		}
+		// No longer restoring: the gate file lists its companions again
+		// (those whose revoke_all succeeded).
+		h.writePolicyLogged()
+		res.Warnings = append(res.Warnings, air.warnings...)
 		res.Warnings = append(res.Warnings, h.bindPlaceholderRows(context.Background(), id)...)
 		log.Printf("instance %s restored from %s (pre-restore backup %s)", id, archive, pre.Archive)
-		return res, h.finishOp(id, OpRestore, nil, false)
+		ferr := h.finishOp(id, OpRestore, nil, false)
+		if air.err != nil {
+			// The data is restored; a companion whose revoke_all failed is
+			// off (§11.6): the instance's record shows why.
+			h.finishOp(id, OpAI, withSecrets(air.err, extra), false)
+		}
+		return res, ferr
 	}
 	// Put the previous data back.
 	rerr := h.stagedRollback(id, view, pre.Archive, wasEnabled)
@@ -325,6 +335,7 @@ func (h *Hub) restoreInstance(id, archive string, actor directory.Actor, ready f
 	if cerr := h.clearRestoring(id, keep); cerr != nil {
 		res.Warnings = append(res.Warnings, cerr.Error())
 	}
+	h.writePolicyLogged()
 	applyErr = fmt.Errorf("restore from %s failed: %w — the previous data was put back (pre-restore backup %s)", archive, applyErr, pre.Archive)
 	return res, h.finishOp(id, OpRestore, withSecrets(applyErr, extra), true)
 }
@@ -538,6 +549,7 @@ func (h *Hub) removeUnfinishedRestoreAs(id, archive string) {
 		}
 	}
 	delete(h.st.Instances, id)
+	delete(h.st.AIInstances, id)
 	h.applyConfigLocked(id, instanceConfig{})
 	h.rebuildLocked()
 	h.saveLocked()
@@ -612,40 +624,67 @@ func composeVolume(id, key, name string) docker.Volume {
 // before the start: the restored start never sees an old account); then
 // it enables it again if it was enabled. It marks the instance disabled
 // while its data is replaced.
-func (h *Hub) applyRestore(id string, sb *staged, plan []volumePlan, wasEnabled, void bool) error {
+//
+// AI (§11.6): the instance's credential entries are deleted before the
+// volumes are replaced; the archive's AI state is put back through the
+// switch-on refusals (restoredAILocked: a failing companion off, with a
+// warning); every switched-on companion with a revoke hook owes
+// revoke_all, run by the start (under the restore's AI lock) before it
+// is listed again; one whose revoke_all failed is switched off
+// (restoreAIAfterStart); the scopes of companions now off are deleted.
+// The returned aiRestore holds the warnings and the AI failure for the
+// op record; actor audits the switch-offs.
+func (h *Hub) applyRestore(id string, sb *staged, plan []volumePlan, wasEnabled, void bool, actor directory.Actor) (air aiRestore, err error) {
 	ctx := context.Background()
 	h.mu.Lock()
 	h.st.SetEnabled(id, false)
 	h.rebuildLocked()
 	h.refreshPublishedLocked()
 	h.saveLocked()
+	scoped := h.scopedCompanionsLocked(id)
 	h.mu.Unlock()
 	h.writePolicyLogged()
+	// The restored app may hold credentials these entries name, or not:
+	// either way the gate never uses them again (revoke_all follows).
+	if err := h.dropInstanceAIEntries(id); err != nil {
+		return air, fmt.Errorf("removing the AI credentials of %s: %w", id, err)
+	}
+	defer func() {
+		if err == nil {
+			h.dropRestoredScopes(id, scoped)
+		}
+	}()
 	if len(plan) > 0 {
 		if err := h.engine.EnsureImage(ctx, HelperImage); err != nil {
-			return fmt.Errorf("helper image %s: %w", HelperImage, err)
+			return air, fmt.Errorf("helper image %s: %w", HelperImage, err)
 		}
 	}
 	for _, p := range plan {
 		if _, err := h.fillVolume(ctx, id, p.vol, p.existed, p.tar); err != nil {
-			return err
+			return air, err
 		}
 	}
 	if h.testHookApplyRestore != nil {
 		if err := h.testHookApplyRestore("volumes"); err != nil {
-			return err
+			return air, err
 		}
 	}
 	if err := writeOrRemove(h.envPath(id), sb.env); err != nil {
-		return fmt.Errorf("env: %w", err)
+		return air, fmt.Errorf("env: %w", err)
 	}
 	if err := writeOrRemove(h.userOverridePath(id), sb.user); err != nil {
-		return fmt.Errorf("custom override: %w", err)
+		return air, fmt.Errorf("custom override: %w", err)
 	}
 	members := h.groupSnapshot(id)
 	h.mu.Lock()
 	h.applyConfigLocked(id, sb.cfg)
 	h.rebuildLocked()
+	// The archive's AI state, judged against the restored policy.
+	if v := h.findLocked(id); v != nil {
+		next, has, w := h.restoredAILocked(v, sb.ai, sb.aiErr, false, h.st.AIInstances[id])
+		h.setRestoredAILocked(id, next, has)
+		air.warnings = append(air.warnings, w...)
+	}
 	// The app's data was replaced: its switched-on companions owe a
 	// revoke_all before they are rendered or listed again (§15.4; run by
 	// the start below, under this restore's AI lock).
@@ -672,16 +711,25 @@ func (h *Hub) applyRestore(id string, sb *staged, plan []volumePlan, wasEnabled,
 	}
 	h.mu.Unlock()
 	if err := errors.Join(secretsErr, envErr, saveErr, voidErr); err != nil {
-		return err
+		return air, err
 	}
 	if wasEnabled {
 		if _, err := h.enableInner(id, true); err != nil {
-			return err
+			return air, err
 		}
+		w, aerr := h.restoreAIAfterStart(id, actor)
+		air.warnings, air.err = append(air.warnings, w...), aerr
 	} else {
 		h.writePolicyLogged()
 	}
-	return nil
+	return air, nil
+}
+
+// aiRestore is what a restore's AI part reports: warnings for the
+// result, err for the op record (op ai).
+type aiRestore struct {
+	warnings []string
+	err      error
 }
 
 // stagedRollback puts the pre-restore backup preArchive back after a
@@ -706,7 +754,14 @@ func (h *Hub) rollbackStaged(id string, view *templates.Template, pre *staged, w
 	if err != nil {
 		return err
 	}
-	return h.applyRestore(id, pre, plan, wasEnabled, false)
+	air, err := h.applyRestore(id, pre, plan, wasEnabled, false, aiHubActor)
+	for _, w := range air.warnings {
+		log.Printf("instance %s: rollback: %s", id, w)
+	}
+	if err == nil && air.err != nil {
+		h.finishOp(id, OpAI, air.err, false)
+	}
+	return err
 }
 
 // RestoreInstanceAs restores archive (any listed one, a deleted
@@ -907,6 +962,7 @@ func (h *Hub) restoreInstanceAs(archive, newID string, actor directory.Actor, ho
 		}
 		h.mu.Lock()
 		delete(h.st.Instances, newID)
+		delete(h.st.AIInstances, newID)
 		h.applyConfigLocked(newID, instanceConfig{})
 		h.rebuildLocked()
 		h.saveLocked()
@@ -940,8 +996,14 @@ func (h *Hub) restoreInstanceAs(archive, newID string, actor directory.Actor, ho
 	h.mu.Lock()
 	h.applyConfigLocked(newID, sb.cfg)
 	h.rebuildLocked()
-	// A copy never gets listed before a revoke_all (§15.4; Task 15 starts
-	// its AI off anyway).
+	// Every companion off, modes and providers kept (§11.6); switching
+	// one on runs revoke_all first (G34). A copy is never listed before a
+	// revoke_all either way.
+	if v := h.findLocked(newID); v != nil {
+		next, has, w := h.restoredAILocked(v, sb.ai, sb.aiErr, true, state.AIInstance{})
+		h.setRestoredAILocked(newID, next, has)
+		res.Warnings = append(res.Warnings, w...)
+	}
 	h.oweAIRevokeLocked(newID)
 	if v := h.findLocked(newID); v != nil {
 		h.seedSettingsLocked(v)

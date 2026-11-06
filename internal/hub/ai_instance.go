@@ -687,23 +687,30 @@ func (h *Hub) checkAliasFree(ctx context.Context, t *templates.Template, ch aiCh
 func (h *Hub) companionScopesLocked() map[string]keycloak.MCPScope {
 	out := map[string]keycloak.MCPScope{}
 	for i := range h.instances {
-		t := &h.instances[i]
-		if !t.HasAIMCP() {
-			continue
-		}
-		sw := h.st.AIInstances[t.ID].Companions
-		for j := range t.Manifest.AI.MCP {
-			c := &t.Manifest.AI.MCP[j]
-			// A companion owing a revoke_all is off for its scope too.
-			if !sw[c.Name].Enabled || sw[c.Name].RevokePending || c.Identity.Mode == templates.IdentityAppOAuth {
-				continue
-			}
-			if s, ok := companionScope(t, c); ok {
-				out[s.Name] = s
-			}
-		}
+		h.instanceScopesLocked(&h.instances[i], out)
 	}
 	return out
+}
+
+// instanceScopesLocked adds the mcp:* scopes of t's switched-on
+// app_token / identity_headers companions to out, from t's hostnames (a
+// hostname change passes the old and the new view; Task 15). Caller
+// holds mu (read).
+func (h *Hub) instanceScopesLocked(t *templates.Template, out map[string]keycloak.MCPScope) {
+	if !t.HasAIMCP() {
+		return
+	}
+	sw := h.st.AIInstances[t.ID].Companions
+	for j := range t.Manifest.AI.MCP {
+		c := &t.Manifest.AI.MCP[j]
+		// A companion owing a revoke_all is off for its scope too.
+		if !sw[c.Name].Enabled || sw[c.Name].RevokePending || c.Identity.Mode == templates.IdentityAppOAuth {
+			continue
+		}
+		if s, ok := companionScope(t, c); ok {
+			out[s.Name] = s
+		}
+	}
 }
 
 // companionScope is c's scope (ok false: its router has no hostname).
