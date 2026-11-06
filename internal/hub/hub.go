@@ -461,6 +461,14 @@ type Hub struct {
 	aiLocks sync.Map
 	aiErrMu sync.Mutex
 	aiErrs  map[string]string
+	// aiReapply: per instance, the companions whose last change failed
+	// after its state save (under aiErrMu); aiApplying: instances an
+	// UpdateInstanceAI is applying (startUp leaves the owed hooks to it).
+	aiReapply  map[string]map[string]bool
+	aiApplying sync.Map
+	// testHookAIBeforeSave, if set, runs in UpdateInstanceAI right before
+	// its state commit (tests: a racing policy save).
+	testHookAIBeforeSave func()
 	// testHookInit, if set, is called at Init's stages (tests: order).
 	testHookInit func(stage string)
 	// testHookApplyRestore, if set, runs at applyRestore's stages

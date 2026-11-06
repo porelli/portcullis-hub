@@ -536,16 +536,8 @@ func (h *Hub) extraSignInLocked(t *templates.Template, rl *routeLabels) error {
 	if err != nil {
 		return err
 	}
-	maxBound := 0
 	for _, name := range names {
 		ri := rl.routes.Info[name]
-		bound := ri.Priority
-		if !ri.HasPriority {
-			bound = len(ri.Rule) + strings.Count(ri.Rule, "${")*253
-		}
-		if bound > maxBound {
-			maxBound = bound
-		}
 		var hosts []string
 		mainHosts := 0
 		seen := map[string]bool{}
@@ -612,7 +604,7 @@ func (h *Hub) extraSignInLocked(t *templates.Template, rl *routeLabels) error {
 	}
 	// Above every router of the instance and its public router (whose
 	// priority is the same bound + 1).
-	prio := strconv.Itoa(maxBound + 2)
+	prio := strconv.Itoa(rl.routes.MaxPriorityBound() + 2)
 	rl.signInService, rl.signInLabels = svc, map[string]string{}
 	for r, hosts := range rl.signIn {
 		match := make([]string, len(hosts))
@@ -751,7 +743,7 @@ func exposureLabel(id, k string, mw bool) bool {
 // label, the router's host known, the policy below LoA 3 — any doubt
 // renders nothing, fail closed). Caller holds mu.
 func (h *Hub) companionRenderedLocked(t *templates.Template, c *templates.Companion) bool {
-	if sw := h.st.AIInstances[t.ID].Companions[c.Name]; t.Manifest.AI.Unsupported != "" || !sw.Enabled || sw.RevokePending ||
+	if sw := h.st.AIInstances[t.ID].Companions[c.Name]; !t.HasAIMCP() || !sw.Enabled || sw.RevokePending ||
 		c.Identity.Mode == templates.IdentityAppOAuth || !templates.AliasFits(t.ID, c.Name) {
 		return false
 	}
@@ -784,15 +776,7 @@ func (h *Hub) mcpRoutersLocked(t *templates.Template, rl *routeLabels) error {
 	if svc == "" {
 		return fmt.Errorf("no service with traefik.enable=true for the MCP routers")
 	}
-	maxBound := 0
-	for _, ri := range rl.routes.Info {
-		bound := ri.Priority
-		if !ri.HasPriority {
-			bound = len(ri.Rule) + strings.Count(ri.Rule, "${")*253
-		}
-		maxBound = max(maxBound, bound)
-	}
-	prio := strconv.Itoa(maxBound + 3)
+	prio := strconv.Itoa(rl.routes.MaxPriorityBound() + 3)
 	rl.mcpService, rl.mcpLabels = svc, map[string]string{}
 	for _, c := range on {
 		host := NormalizeHost(t.Hosts[c.Router])
@@ -819,7 +803,7 @@ type companionService struct {
 // scale (kind companion) and the aliases of its rendered companions.
 // Caller holds mu.
 func (h *Hub) companionServicesLocked(t *templates.Template) map[string]*companionService {
-	if t.Manifest.AI.Unsupported != "" || len(t.Manifest.AI.MCP) == 0 {
+	if !t.HasAIMCP() {
 		return nil
 	}
 	nets := templates.ServiceNetworks(t.ReadCompose())

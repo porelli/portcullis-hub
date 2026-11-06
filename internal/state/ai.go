@@ -102,6 +102,10 @@ type AICompanion struct {
 	// the companion is never rendered (alias, router, scale 1) nor listed
 	// in mcp-gate.json; the next start runs revoke_all and clears it.
 	RevokePending bool `json:"revoke_pending,omitempty" yaml:"revoke_pending,omitempty"`
+	// OnChangePending: the template's ai.on_change is owed for the
+	// current state (a switch or mode change while the instance was
+	// stopped); the next start runs it, after an owed revoke_all.
+	OnChangePending bool `json:"on_change_pending,omitempty" yaml:"on_change_pending,omitempty"`
 }
 
 // Connection length bounds and defaults (§15.11), in days.

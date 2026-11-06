@@ -284,7 +284,7 @@ func companionOf(t *templates.Template, name string) *templates.Companion {
 // companionResourcesLocked: t's switched-on companions as resources. Any
 // doubt about one leaves it out (logged). Caller holds mu (read).
 func (h *Hub) companionResourcesLocked(t *templates.Template, gp gatePeople, f *aigate.File, clients []string) []aigate.Resource {
-	if !t.Enabled || t.Manifest.AI.Unsupported != "" || len(t.Manifest.AI.MCP) == 0 || t.Manifest.Routerless() || h.instanceBusyLocked(t.ID) {
+	if !t.Enabled || !t.HasAIMCP() || t.Manifest.Routerless() || h.instanceBusyLocked(t.ID) {
 		return nil
 	}
 	switches := h.st.AIInstances[t.ID].Companions

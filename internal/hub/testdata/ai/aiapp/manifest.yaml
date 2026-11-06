@@ -1,5 +1,6 @@
 name: AI App
 category: tools
+instances: multi
 auth:
   method: forward-auth
   group_access: true

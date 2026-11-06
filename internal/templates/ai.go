@@ -354,6 +354,20 @@ func ValidateAI(t *Template, compose []byte, routes *Routes) error {
 			return fmt.Errorf("hooks[%s]: when: [ai] but no ai: field names it (only ai.mcp[].identity.mint / revoke and ai.on_change run ai hooks)", h.Name)
 		}
 	}
+	// An ai hook never runs on a kind: companion service: that service is
+	// at scale 0 while its companion is off, so the revoke_all owed before
+	// a switch-on (and the on_change after a switch-off) could never run.
+	companionSvc := map[string]bool{}
+	for _, c := range a.MCP {
+		if c.Kind == CompanionKind {
+			companionSvc[c.Service] = true
+		}
+	}
+	for _, h := range m.Hooks {
+		if named[h.Name] && companionSvc[h.Service] {
+			return fmt.Errorf("hooks[%s]: an ai hook may not run on service %s: it backs a kind: companion companion, at scale 0 while AI support is off (run it on the app's own service)", h.Name, h.Service)
+		}
+	}
 	return nil
 }
 
@@ -898,4 +912,11 @@ func ServiceNetworks(compose []byte) map[string]ServiceNet {
 type ServiceNet struct {
 	Networks    []string
 	NetworkMode bool
+}
+
+// HasAIMCP reports whether t's template declares ai.mcp companions (not
+// ai.unsupported).
+func (t *Template) HasAIMCP() bool {
+	a := t.Manifest.AI
+	return a != nil && a.Unsupported == "" && len(a.MCP) > 0
 }

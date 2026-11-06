@@ -959,6 +959,12 @@ func (h *Hub) saveSettings(t *templates.Template, u SettingsUpdate, parsed *pars
 		h.mu.Unlock()
 		return res, false, err
 	}
+	// AI support switched on since SaveSettings switched it off (G43):
+	// never commit a policy reaching LoA 3 with a companion on.
+	if on := h.aiOffForSaveLocked(t, u); len(on) > 0 {
+		h.mu.Unlock()
+		return res, false, statusErr(409, "%s: AI support for %s was switched on meanwhile and the policy %s: save again", id, strings.Join(on, ", "), mtlsRefusal)
+	}
 	if err := folderSaveCheck(t, h.st.Settings[id], h.st.Folders, u); err != nil {
 		h.mu.Unlock()
 		return res, false, err
@@ -1495,6 +1501,13 @@ func (h *Hub) SetDefaultPolicy(p policy.AuthPolicy) (bool, error) {
 	}
 	norm := policy.Normalize(p)
 	h.mu.Lock()
+	// Inheriting instances must have AI support off first (G43:
+	// SetDefaultPolicyAs switches it off; a racing switch-on is refused).
+	if on := h.defaultPolicyAIOffLocked(norm); len(on) > 0 {
+		h.mu.Unlock()
+		ids := slices.Sorted(maps.Keys(on))
+		return false, statusErr(409, "AI support is on for %s, whose policy the new default %s: switch it off first (or save the default again)", strings.Join(ids, ", "), mtlsRefusal)
+	}
 	changed := !policy.Same(h.st.Default(), norm)
 	h.st.SetDefault(norm)
 	delete(h.st.LegacyPassword, "")

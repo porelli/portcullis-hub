@@ -42,6 +42,9 @@ type fakeAIKC struct {
 	// missing: clients that don't exist (SetOptionalScopes: not found).
 	missing   map[string]bool
 	failApply error
+	// failEnsure: scope name → the error EnsureMCPScope answers.
+	failEnsure map[string]error
+	deleted    []string
 }
 
 func newFakeAIKC() *fakeAIKC {
@@ -52,6 +55,9 @@ func (k *fakeAIKC) EnsureMCPScope(ctx context.Context, s keycloak.MCPScope) erro
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	k.calls = append(k.calls, "ensure:"+s.Name)
+	if err := k.failEnsure[s.Name]; err != nil {
+		return err
+	}
 	k.scopes[s.Name] = s
 	return nil
 }
@@ -60,6 +66,7 @@ func (k *fakeAIKC) DeleteMCPScope(ctx context.Context, name string) error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	k.calls = append(k.calls, "delete:"+name)
+	k.deleted = append(k.deleted, name)
 	delete(k.scopes, name)
 	for c, l := range k.optional {
 		k.optional[c] = slices.DeleteFunc(slices.Clone(l), func(s string) bool { return s == name })
@@ -191,6 +198,8 @@ func newInstAIFixture(t *testing.T, seed func(*state.AppState)) *instAIFixture {
 		r, fail := a.hookFail[in.Cmd[0]]
 		a.mu.Unlock()
 		if fail {
+			// Fresh buffers: the Hub zeroes the stdout it gets.
+			r.Stdout, r.Stderr = slices.Clone(r.Stdout), slices.Clone(r.Stderr)
 			return &r, nil
 		}
 		return &docker.ExecSplitResult{ExecID: "x"}, nil
@@ -921,5 +930,365 @@ func TestRevokePendingOnStoppedInstance(t *testing.T) {
 	v, err := a.h.InstanceAI("aiapp")
 	if err != nil || !strings.Contains(v.Companions[0].LastError, "exited 5") {
 		t.Errorf("last error = %+v %v", v, err)
+	}
+}
+
+// ── fix round 1 ─────────────────────────────────────────
+
+func (a *instAIFixture) failHook(cmd string, exit int, stderr string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if exit == 0 {
+		delete(a.hookFail, cmd)
+		return
+	}
+	a.hookFail[cmd] = docker.ExecSplitResult{ExitCode: exit, Stderr: []byte(stderr)}
+}
+
+func (a *instAIFixture) env(t *testing.T, id string) string {
+	t.Helper()
+	return readFile(t, a.h.envPath(id))
+}
+
+// R1-1: a companion owing a revoke_all counts as off in the env
+// (app_oauth too) until the owed revoke succeeds; then re-rendered.
+func TestRevokePendingEnvIsOff(t *testing.T) {
+	a := newInstAIFixture(t, nil)
+	if err := a.h.SetAISupport(context.Background(), "oauthapp", "oauth", true, root); err != nil {
+		t.Fatal(err)
+	}
+	if c := a.companion("oauthapp", "oauth"); !c.RevokePending || !c.OnChangePending {
+		t.Fatalf("state = %+v", c)
+	}
+	a.failHook("/revoke", 4, "app down\n")
+	a.runner.upHook = func(p string) {
+		a.engine.mu.Lock()
+		defer a.engine.mu.Unlock()
+		for _, c := range a.engine.containers {
+			if c.Project() == p {
+				return
+			}
+		}
+		a.engine.containers = append(a.engine.containers, container(p+"-web", p, "web", "running"))
+	}
+	a.enable(t, "oauthapp")
+	if env := a.env(t, "oauthapp"); !strings.Contains(env, "\nPORTCULLIS_AI_ENABLED=false\n") {
+		t.Errorf("env enabled while the revoke_all is owed:\n%s", env)
+	}
+	if c := a.companion("oauthapp", "oauth"); !c.RevokePending {
+		t.Errorf("state = %+v", c)
+	}
+	if got := a.stdins("/toggle"); len(got) != 0 {
+		t.Errorf("on_change ran before the owed revoke_all succeeded: %v", got)
+	}
+	a.failHook("/revoke", 0, "")
+	if err := a.h.RestartApp("oauthapp"); err != nil {
+		t.Fatal(err)
+	}
+	a.h.Wait()
+	if env := a.env(t, "oauthapp"); !strings.Contains(env, "\nPORTCULLIS_AI_ENABLED=true\n") {
+		t.Errorf("env not enabled after the owed revoke_all:\n%s", env)
+	}
+	if c := a.companion("oauthapp", "oauth"); c.RevokePending || c.OnChangePending {
+		t.Errorf("flags kept: %+v", c)
+	}
+	if got := a.stdins("/toggle"); !slices.Equal(got, []string{`{"action":"on_change","enabled":true,"mode":"read_write","companion":"oauth"}`}) {
+		t.Errorf("on_change = %v", got)
+	}
+}
+
+// R1-2a: a policy reaching LoA 3 saved while a switch-on is planned:
+// the switch-on's commit re-checks under mu and refuses (409).
+func TestAISwitchOnRacesPolicySave(t *testing.T) {
+	a := newInstAIFixture(t, nil)
+	a.enable(t, "aiapp")
+	a.h.testHookAIBeforeSave = func() {
+		a.h.mu.Lock()
+		a.h.st.AuthPolicies["aiapp"] = policy.AuthPolicy{Factors: []string{"mtls"}, Op: "any"}
+		a.h.mu.Unlock()
+	}
+	err := a.h.SetAISupport(context.Background(), "aiapp", "tok", true, root)
+	var se *StatusError
+	if !errors.As(err, &se) || se.Status != 409 || !strings.Contains(err.Error(), mtlsRefusal) {
+		t.Errorf("err = %v", err)
+	}
+	if c := a.companion("aiapp", "tok"); c.Enabled {
+		t.Errorf("AI switched on at LoA 3: %+v", c)
+	}
+	// The master switch turned off meanwhile.
+	a.h.testHookAIBeforeSave = func() {
+		a.h.mu.Lock()
+		delete(a.h.st.AuthPolicies, "aiapp")
+		a.h.st.AI.Enabled = false
+		a.h.mu.Unlock()
+	}
+	if err := a.h.SetAISupport(context.Background(), "aiapp", "tok", true, root); !errors.As(err, &se) || se.Status != 409 {
+		t.Errorf("master off: %v", err)
+	}
+}
+
+// R1-2b: a switch-on between SaveSettings' switch-off and its commit,
+// and a default policy saved while an inheriting companion is on: 409.
+func TestPolicySaveRacesSwitchOn(t *testing.T) {
+	a := newInstAIFixture(t, nil)
+	a.enable(t, "aiapp")
+	if err := a.h.SetAISupport(context.Background(), "aiapp", "tok", true, root); err != nil {
+		t.Fatal(err)
+	}
+	on := func() {
+		a.h.mu.Lock()
+		ai := a.h.st.AIInstances["aiapp"]
+		ai.Companions = maps.Clone(ai.Companions)
+		ai.Companions["tok"] = state.AICompanion{Enabled: true, Mode: "read_write"}
+		a.h.st.AIInstances["aiapp"] = ai
+		a.h.mu.Unlock()
+	}
+	a.h.testHookSave = on
+	mtls := &policy.AuthPolicy{Factors: []string{"mtls"}, Op: "any"}
+	_, err := a.h.SaveSettings("aiapp", SettingsUpdate{Policy: mtls}, root)
+	var se *StatusError
+	if !errors.As(err, &se) || se.Status != 409 {
+		t.Errorf("save = %v", err)
+	}
+	a.h.mu.RLock()
+	_, saved := a.h.st.AuthPolicies["aiapp"]
+	a.h.mu.RUnlock()
+	if saved {
+		t.Error("the LoA 3 policy was committed with AI on")
+	}
+	a.h.testHookSave = nil
+	if _, err := a.h.SetDefaultPolicy(*mtls); !errors.As(err, &se) || se.Status != 409 {
+		t.Errorf("default = %v", err)
+	}
+	if p := a.h.DefaultPolicy(); policy.LoA(p) == 3 {
+		t.Error("the default was saved")
+	}
+}
+
+// R1-3: a start that can't get the AI lock within aiPendingWait records
+// it (the companions' last error) and keeps the flags.
+func TestPendingAIWaitsBounded(t *testing.T) {
+	a := newInstAIFixture(t, nil)
+	if err := a.h.SetAISupport(context.Background(), "aiapp", "tok", true, root); err != nil {
+		t.Fatal(err)
+	}
+	old := aiPendingWait
+	aiPendingWait = 50 * time.Millisecond
+	t.Cleanup(func() { aiPendingWait = old })
+	unlock := a.h.aiLock("aiapp")
+	a.enable(t, "aiapp")
+	unlock()
+	v, err := a.h.InstanceAI("aiapp")
+	if err != nil || !strings.Contains(v.Companions[0].LastError, "AI lock was busy") || v.Companions[0].Status != "failed" {
+		t.Errorf("tab = %+v %v", v, err)
+	}
+	if c := a.companion("aiapp", "tok"); !c.RevokePending {
+		t.Errorf("flag lost: %+v", c)
+	}
+}
+
+// R1-4: a failed ensure still applies the other scopes and deletes the
+// dropped ones.
+func TestScopesApplyDespiteFailedEnsure(t *testing.T) {
+	a := newInstAIFixture(t, nil)
+	a.enable(t, "aiapp")
+	if err := a.h.SetAISupport(context.Background(), "aiapp", "tok", true, root); err != nil {
+		t.Fatal(err)
+	}
+	a.kc.mu.Lock()
+	a.kc.failEnsure = map[string]error{"mcp:all": errors.New("keycloak 500")}
+	a.kc.mu.Unlock()
+	err := a.h.SetAISupport(context.Background(), "aiapp", "tok", false, root)
+	var oe *OpError
+	if !errors.As(err, &oe) || !strings.Contains(err.Error(), "mcp:all") {
+		t.Errorf("err = %v", err)
+	}
+	if !slices.Contains(a.kc.deleted, "mcp:aiapp.tok") {
+		t.Errorf("the dropped scope wasn't deleted: %v", a.kc.calls)
+	}
+	if got := a.kc.opt(keycloak.AIClientIDs.Generic); !slices.Equal(got, []string{"mcp:portcullis.people"}) {
+		t.Errorf("generic = %v (the ensured scopes only)", got)
+	}
+}
+
+// R1-5: PORTCULLIS_MCP_GATE_IP is written only as an IP inside
+// PORTCULLIS_PROXY_SUBNET (when set).
+func TestGateIPChecked(t *testing.T) {
+	a := newInstAIFixture(t, nil)
+	core := filepath.Join(a.project, ".env")
+	for body, want := range map[string]string{
+		"PORTCULLIS_MCP_GATE_IP=172.31.250.3\nPORTCULLIS_PROXY_SUBNET=172.31.250.0/24\n": "172.31.250.3",
+		"PORTCULLIS_MCP_GATE_IP=172.31.250.3\nPORTCULLIS_PROXY_SUBNET=10.0.0.0/8\n":      "",
+		"PORTCULLIS_MCP_GATE_IP=not-an-ip\n":                                             "",
+		"PORTCULLIS_MCP_GATE_IP=172.31.250.3\n":                                          "172.31.250.3",
+	} {
+		writeFile(t, core, body)
+		if got := a.h.gateIP(); got != want {
+			t.Errorf("%q: gate IP = %q, want %q", body, got, want)
+		}
+	}
+}
+
+// R1-6: every portcullis-mcp- router key is an exposure label, and a
+// container still carrying an MCP router after AI went off is drift.
+func TestMCPRouterLeftOverIsDrift(t *testing.T) {
+	for _, k := range []string{"traefik.http.routers.portcullis-mcp-aiapp--tok.rule", "Traefik.HTTP.Routers.Portcullis-MCP-x--y.Service"} {
+		if !exposureLabel("aiapp", k, false) {
+			t.Errorf("%s is no exposure label", k)
+		}
+	}
+	a := newInstAIFixture(t, nil)
+	a.enable(t, "aiapp")
+	a.h.mu.RLock()
+	want, err := a.h.desiredRouteLabelsLocked(a.h.findLocked("aiapp"))
+	a.h.mu.RUnlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	labels := map[string]string{docker.LabelProject: "portcullis-aiapp", docker.LabelService: "app", docker.LabelNumber: "1"}
+	for k, v := range want["app"] {
+		labels[k] = v
+	}
+	labels[tokOverrideMCP+"rule"] = "Host(`aiapp.example.com`) && (Path(`/mcp`))"
+	labels[tokOverrideMCP+"service"] = "mcp-gate@docker"
+	a.engine.mu.Lock()
+	a.engine.containers = []docker.Container{{ID: "c1", Names: []string{"/portcullis-aiapp-app-1"}, State: "running", Labels: labels}}
+	a.engine.mu.Unlock()
+	var msg string
+	for _, d := range a.h.Reconcile(context.Background()).Items {
+		if d.ID == "aiapp" && d.Kind == DriftPublicAccess {
+			msg = d.Message
+		}
+	}
+	if !strings.Contains(msg, "unexpected routers.portcullis-mcp-aiapp--tok") {
+		t.Errorf("drift = %q", msg)
+	}
+}
+
+// R1-14: a switched-on companion's container without its alias is drift.
+func TestMCPAliasMissingIsDrift(t *testing.T) {
+	a := newInstAIFixture(t, nil)
+	a.enable(t, "aiapp")
+	if err := a.h.SetAISupport(context.Background(), "aiapp", "tok", true, root); err != nil {
+		t.Fatal(err)
+	}
+	a.h.mu.RLock()
+	want, _ := a.h.desiredRouteLabelsLocked(a.h.findLocked("aiapp"))
+	a.h.mu.RUnlock()
+	labels := map[string]string{docker.LabelProject: "portcullis-aiapp", docker.LabelService: "app", docker.LabelNumber: "1"}
+	for k, v := range want["app"] {
+		labels[k] = v
+	}
+	a.engine.mu.Lock()
+	a.engine.containers = []docker.Container{{ID: "c1", Names: []string{"/portcullis-aiapp-app-1"}, State: "running", Labels: labels},
+		{ID: "c2", Names: []string{"/portcullis-aiapp-tok-mcp-1"}, State: "running", Networks: map[string][]string{"portcullis-proxy": {"portcullis-aiapp-tok-mcp-1"}},
+			Labels: map[string]string{docker.LabelProject: "portcullis-aiapp", docker.LabelService: "tok-mcp", docker.LabelNumber: "1"}}}
+	a.engine.mu.Unlock()
+	var msg string
+	for _, d := range a.h.Reconcile(context.Background()).Items {
+		if d.ID == "aiapp" && d.Kind == DriftPublicAccess {
+			msg = d.Message
+		}
+	}
+	if !strings.Contains(msg, "missing network alias portcullis-mcp-aiapp--tok") {
+		t.Errorf("drift = %q", msg)
+	}
+}
+
+// R1-9: a non-default instance renders its own router name and alias,
+// service mcp-gate@docker untouched by the instance renaming.
+func TestMCPRouterNonDefaultInstance(t *testing.T) {
+	a := newInstAIFixture(t, nil)
+	if err := a.h.CreateInstance("aiapp", "aiapp-b", map[string]string{"aiapp": "aiapp-b.example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	a.people.addGroup("users_aiapp-b", "alice")
+	a.enable(t, "aiapp-b")
+	if err := a.h.SetAISupport(context.Background(), "aiapp-b", "tok", true, root); err != nil {
+		t.Fatal(err)
+	}
+	ov := a.override(t, "aiapp-b")
+	k := "traefik.http.routers.portcullis-mcp-aiapp-b--tok."
+	for _, want := range []string{
+		`"` + k + "rule\": \"Host(`aiapp-b.example.com`) && (Path(`/mcp`) || Path(`/.well-known/oauth-protected-resource/mcp`))\"",
+		`"` + k + `service": "mcp-gate@docker"`,
+		`"` + k + `middlewares": "rate-limit@file,security-headers@file"`,
+		"          - \"portcullis-mcp-aiapp-b--tok\"\n",
+	} {
+		if !strings.Contains(ov, want) {
+			t.Errorf("override lacks %q:\n%s", want, ov)
+		}
+	}
+	if strings.Contains(ov, "aiapp-b_portcullis-mcp") || strings.Contains(ov, "portcullis-mcp-aiapp--tok") {
+		t.Errorf("router renamed or the default's rendered:\n%s", ov)
+	}
+	if r := resourceByURL(a.gate(t), "https://aiapp-b.example.com/mcp"); r == nil || r.Upstream != "http://portcullis-mcp-aiapp-b--tok:8080/mcp" {
+		t.Errorf("gate = %v", urls(a.gate(t)))
+	}
+}
+
+// R1-10: a revoke_all failing before the save never makes the next
+// request re-apply companions that didn't change.
+func TestPreSaveFailureNoReapply(t *testing.T) {
+	a := newInstAIFixture(t, nil)
+	a.enable(t, "aiapp")
+	if err := a.h.SetAISupport(context.Background(), "aiapp", "tok", true, root); err != nil {
+		t.Fatal(err)
+	}
+	a.failHook("/revoke", 2, "down\n")
+	if err := a.h.SetAIMode(context.Background(), "aiapp", "tok", "read_only", root); err == nil {
+		t.Fatal("no error")
+	}
+	a.failHook("/revoke", 0, "")
+	ups, hooks := len(a.runner.Calls()), len(a.engine.SplitCalls())
+	if _, err := a.h.UpdateInstanceAI(context.Background(), "aiapp", InstanceAIUpdate{Companions: map[string]CompanionUpdate{"tok": {Enabled: ptr(true), Mode: ptr("read_write")}}}, root); err != nil {
+		t.Fatal(err)
+	}
+	if len(a.runner.Calls()) != ups || len(a.engine.SplitCalls()) != hooks {
+		t.Errorf("an unchanged companion was re-applied: compose %v, hooks %d → %d", a.runner.Calls()[ups:], hooks, len(a.engine.SplitCalls()))
+	}
+}
+
+// R1-11 / R1-13: a switch-off on a stopped instance owes revoke_all and
+// on_change false (the tab says revoking); the next start runs both.
+func TestOwedOnChangeAfterStoppedSwitchOff(t *testing.T) {
+	a := newInstAIFixture(t, nil)
+	a.enable(t, "aiapp")
+	if err := a.h.SetAISupport(context.Background(), "aiapp", "tok", true, root); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.h.Disable("aiapp"); err != nil {
+		t.Fatal(err)
+	}
+	a.h.Wait()
+	n := len(a.stdins("/toggle"))
+	if err := a.h.SetAISupport(context.Background(), "aiapp", "tok", false, root); err != nil {
+		t.Fatal(err)
+	}
+	if c := a.companion("aiapp", "tok"); !c.RevokePending || !c.OnChangePending || c.Enabled {
+		t.Fatalf("state = %+v", c)
+	}
+	v, _ := a.h.InstanceAI("aiapp")
+	if v.Companions[0].Status != "revoking" {
+		t.Errorf("status = %s, want revoking", v.Companions[0].Status)
+	}
+	a.enable(t, "aiapp")
+	got := a.stdins("/toggle")
+	if len(got) != n+1 || got[len(got)-1] != `{"action":"on_change","enabled":false,"mode":"read_write","companion":"tok"}` {
+		t.Errorf("on_change = %v", got)
+	}
+	seq := a.seq.list()
+	i := slices.Index(seq, "/revoke:revoke_all")
+	j := -1
+	for k, e := range seq {
+		if e == "/toggle:on_change" {
+			j = k
+		}
+	}
+	if i < 0 || j < i {
+		t.Errorf("sequence = %v", seq)
+	}
+	if c := a.companion("aiapp", "tok"); c.RevokePending || c.OnChangePending {
+		t.Errorf("flags kept: %+v", c)
 	}
 }

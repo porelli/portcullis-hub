@@ -454,15 +454,9 @@ func PlanPublic(m *Manifest, r *Routes) (*PublicPlan, error) {
 		names = append(names, name)
 	}
 	sort.Strings(names)
+	plan.Priority = r.MaxPriorityBound() + 1
 	for _, name := range names {
 		ri := r.Info[name]
-		bound := ri.Priority
-		if !ri.HasPriority {
-			bound = len(ri.Rule) + strings.Count(ri.Rule, "${")*maxDomainLen
-		}
-		if bound >= plan.Priority {
-			plan.Priority = bound + 1
-		}
 		shared := false
 		for _, s := range ri.Subdomains {
 			shared = shared || mine[s]
@@ -620,6 +614,27 @@ func GuardPaths(entries []string) [][2]string {
 		default:
 			out = append(out, [2]string{e, "prefix"})
 		}
+	}
+	return out
+}
+
+// PriorityBound is the highest priority router ri can have: its explicit
+// one, else Traefik's default (the rule's length) with every ${…} counted
+// as a full domain name.
+func (ri *RouterInfo) PriorityBound() int {
+	if ri.HasPriority {
+		return ri.Priority
+	}
+	return len(ri.Rule) + strings.Count(ri.Rule, "${")*maxDomainLen
+}
+
+// MaxPriorityBound is the highest PriorityBound of r's HTTP routers (0
+// without any): the Hub's public (+1), sign-in (+2) and MCP (+3) routers
+// go above it.
+func (r *Routes) MaxPriorityBound() int {
+	out := 0
+	for _, ri := range r.Info {
+		out = max(out, ri.PriorityBound())
 	}
 	return out
 }

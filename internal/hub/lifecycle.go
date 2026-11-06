@@ -224,7 +224,7 @@ func (h *Hub) startUp(live *templates.Template) error {
 	h.runStartHooks(context.Background(), live.ID)
 	// AI companions owing a revoke_all (switched while stopped): run it
 	// now, before they are rendered (contract §15.5).
-	h.pendingRevokesAfterStart(live)
+	h.pendingAIAfterStart(live)
 	// The claims (LLDAP and Keycloak) in the background: a start never
 	// waits for them.
 	h.deliverClaimsAfterStart(live.ID)

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"maps"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
@@ -603,12 +604,12 @@ func (h *Hub) refreshInstanceEnvLocked(t *templates.Template, m *directory.Membe
 
 // aiEnvLocked are the AI variables of an ai.mcp template's instance
 // (contract §3.1, G42): PORTCULLIS_AI_ENABLED true while one of its
-// companions is switched on, PORTCULLIS_AI_READONLY_<C> true unless C is
-// on in read_write, and core's PORTCULLIS_MCP_GATE_IP (from the core env
-// subset the Hub reads; absent there = not written). nil for every other
+// companions is switched on (one owing a revoke_all counts as off),
+// PORTCULLIS_AI_READONLY_<C> true unless C is on in read_write, and
+// core's PORTCULLIS_MCP_GATE_IP (gateIPLocked). nil for every other
 // template. Caller holds mu.
 func (h *Hub) aiEnvLocked(t *templates.Template) map[string]string {
-	if t.Manifest.AI.Unsupported != "" || len(t.Manifest.AI.MCP) == 0 {
+	if !t.HasAIMCP() {
 		return nil
 	}
 	sw := h.st.AIInstances[t.ID].Companions
@@ -616,7 +617,7 @@ func (h *Hub) aiEnvLocked(t *templates.Template) map[string]string {
 	for _, c := range t.Manifest.AI.MCP {
 		s := sw[c.Name]
 		ro := "true"
-		if s.Enabled {
+		if s.Enabled && !s.RevokePending {
 			out[templates.VarAIEnabled] = "true"
 			if s.Mode == templates.AIReadWrite {
 				ro = "false"
@@ -624,8 +625,33 @@ func (h *Hub) aiEnvLocked(t *templates.Template) map[string]string {
 		}
 		out[templates.ReadOnlyVar(c.Name)] = ro
 	}
-	if ip := readEnvRaw(filepath.Join(h.cfg.ProjectDir, ".env"))[templates.VarMCPGateIP]; ip != "" {
+	if ip := h.gateIP(); ip != "" {
 		out[templates.VarMCPGateIP] = ip
 	}
 	return out
+}
+
+// gateIP is core's PORTCULLIS_MCP_GATE_IP from the core env subset the
+// Hub reads (secrets/hub/core.env at <ProjectDir>/.env): an IP address,
+// inside PORTCULLIS_PROXY_SUBNET when that is set. Absent, unparsable or
+// outside the subnet = "" (not written; logged).
+func (h *Hub) gateIP() string {
+	core := readEnvRaw(filepath.Join(h.cfg.ProjectDir, ".env"))
+	raw := core[templates.VarMCPGateIP]
+	if raw == "" {
+		return ""
+	}
+	ip, err := netip.ParseAddr(raw)
+	if err != nil {
+		log.Printf("ai: the core env's %s %s is not an IP address: not written", templates.VarMCPGateIP, clipQuoted(raw))
+		return ""
+	}
+	if sub := core["PORTCULLIS_PROXY_SUBNET"]; sub != "" {
+		p, err := netip.ParsePrefix(sub)
+		if err != nil || !p.Contains(ip) {
+			log.Printf("ai: the core env's %s %s is not inside PORTCULLIS_PROXY_SUBNET %s: not written", templates.VarMCPGateIP, ip, clipQuoted(sub))
+			return ""
+		}
+	}
+	return ip.String()
 }

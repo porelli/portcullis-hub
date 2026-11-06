@@ -278,6 +278,9 @@ func TestHookAITrigger(t *testing.T) {
 		{"empty when names all five", "companion", []string{"when: [start, settings_change]", "when: []"}, nil, all},
 		{"option delivers to an ai hook", "companion", []string{"delivery: [{hook: apply}]", "delivery: [{hook: mcp-mint}]"}, nil, "ai hook"},
 		{"reload names an ai hook", "companion", []string{"settings:\n", "reload: {hook: mcp-mint}\nsettings:\n"}, nil, "ai hook"},
+		{"mint hook on the companion service", "companion", []string{"{name: mcp-mint, service: app,", "{name: mcp-mint, service: app-mcp,"}, nil, "hooks[mcp-mint]: an ai hook may not run on service app-mcp"},
+		{"revoke hook on the companion service", "companion", []string{"{name: mcp-revoke, service: app,", "{name: mcp-revoke, service: app-mcp,"}, nil, "hooks[mcp-revoke]: an ai hook may not run on service app-mcp"},
+		{"on_change hook on the companion service", "companion", []string{"ai:\n  mcp:", "ai:\n  on_change: ai-toggle\n  mcp:", "hooks:\n", "hooks:\n  - {name: ai-toggle, service: app-mcp, command: [/t], when: [ai]}\n"}, nil, "hooks[ai-toggle]: an ai hook may not run on service app-mcp"},
 	})
 }
 

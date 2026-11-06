@@ -100,8 +100,8 @@ urls:
   - label: Web
     url: "https://{{HOST_NATIVE}}"
 hooks:
-  - {name: mcp-mint, service: native-mcp, command: [/mint], when: [ai]}
-  - {name: mcp-revoke, service: native-mcp, command: [/revoke], when: [ai]}
+  - {name: mcp-mint, service: app, command: [/mint], when: [ai]}
+  - {name: mcp-revoke, service: app, command: [/revoke], when: [ai]}
 ai:
   mcp:
     - name: native

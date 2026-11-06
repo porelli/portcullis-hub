@@ -266,18 +266,30 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 			exposureDiff[c.id] = c.service + ": " + d
 		}
 		// A portcullis-mcp- alias the Hub doesn't render makes a container
-		// reachable as a companion (§5): exposure drift. A missing one only
-		// breaks the gate's path.
+		// reachable as a companion (§5), and a rendered one missing on a
+		// running companion breaks the gate's path: both exposure drift.
 		if want, ok := mcpAliases[c.id]; ok && exposureDiff[c.id] == "" {
-			var extra []string
+			var extra, missing []string
+			have := map[string]bool{}
 			for _, a := range c.mcpAliases {
+				have[a] = true
 				if !want[c.service][a] {
 					extra = append(extra, a)
 				}
 			}
-			if len(extra) > 0 {
-				sort.Strings(extra)
+			for a := range want[c.service] {
+				if !have[a] {
+					missing = append(missing, a)
+				}
+			}
+			sort.Strings(extra)
+			sort.Strings(missing)
+			switch {
+			case len(extra) > 0:
 				exposureDiff[c.id] = c.service + ": unexpected network alias " + strings.Join(extra, ", ")
+			case len(missing) > 0:
+				// A switched-on companion the gate can't reach by its alias.
+				exposureDiff[c.id] = c.service + ": missing network alias " + strings.Join(missing, ", ")
 			}
 		}
 		if keys, ok := expectedKeys[c.id]; ok && exposureDiff[c.id] == "" {
