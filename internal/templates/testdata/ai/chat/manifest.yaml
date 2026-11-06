@@ -1,0 +1,29 @@
+name: Chat
+category: ai
+instances: multi
+auth:
+  method: native-oidc
+  group_access: true
+  access_group: users_chat
+env:
+  - key: CHAT_OIDC_SECRET
+    generate: random
+  - key: CHAT_MCP_SECRET
+    generate: random
+urls:
+  - label: Chat
+    url: "https://{{HOST_CHAT}}"
+keycloak_clients:
+  - client_id: chat
+    secret_env: CHAT_OIDC_SECRET
+    redirect_uri: "https://{{HOST_CHAT}}/oauth/openid/callback"
+  - client_id: chat-mcp
+    secret_env: CHAT_MCP_SECRET
+    redirect_uri: "https://{{HOST_CHAT}}/api/mcp/callback"
+    ai_client: true
+ai:
+  unsupported: "An AI page: the AI acts in other apps, not in this one"
+  chat:
+    provider_kinds: {openai_compatible: many, anthropic: one}
+    file: {service: api, mount: /portcullis/ai}
+    env: {service: api}

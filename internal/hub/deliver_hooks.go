@@ -119,9 +119,11 @@ type hookOutput struct {
 	err   error
 }
 
-// sortedHooks are t's hooks by name.
+// sortedHooks are t's settings-engine hooks by name: never an ai hook
+// (when: [ai], contract §13.8, G5) — the engine neither builds its
+// input nor runs it, on no trigger, retry, forced or start run.
 func sortedHooks(t *templates.Template) []templates.Hook {
-	hs := slices.Clone(t.Manifest.Hooks)
+	hs := slices.DeleteFunc(slices.Clone(t.Manifest.Hooks), func(hk templates.Hook) bool { return hk.IsAI() })
 	slices.SortFunc(hs, func(a, b templates.Hook) int { return strings.Compare(a.Name, b.Name) })
 	return hs
 }

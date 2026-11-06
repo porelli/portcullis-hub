@@ -77,7 +77,7 @@ func TestPolicyFileV5KeyedByHost(t *testing.T) {
 func TestCoreHostsNeverPublished(t *testing.T) {
 	mainDomain := "portcullis.example.com"
 	core := CoreHosts(mainDomain)
-	if len(core) != 8 || !core[mainDomain] || !core["people."+mainDomain] || !core["metrics."+mainDomain] {
+	if len(core) != 9 || !core[mainDomain] || !core["mcp."+mainDomain] || !core["people."+mainDomain] || !core["metrics."+mainDomain] {
 		t.Fatalf("CoreHosts = %v", core)
 	}
 	all := map[string]string{"grafana." + mainDomain: "grafana." + mainDomain}

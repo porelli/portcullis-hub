@@ -34,7 +34,7 @@ const proxyNetwork = "portcullis-proxy"
 // file: the Hub renders portcullis-auth-ext and the
 // portcullis-oauth2-<id>_<router> sign-in routers to forward-auth-ext on
 // extra-domain hosts itself.
-var reservedRefs = []string{"forward-auth-ext", "portcullis-auth-ext", "portcullis-oauth2-"}
+var reservedRefs = []string{"forward-auth-ext", "portcullis-auth-ext", "portcullis-oauth2-", MCPNamePrefix}
 
 // coreServices are the services of core's docker-compose.yml (all
 // profiles), coreVolumes its volume keys (Docker names
@@ -247,6 +247,9 @@ func checkCoreRefs(compose []byte, hostVars map[string]string) error {
 		low, bare := FoldKey(s), FoldKey(withoutInterp(s))
 		for _, r := range reservedRefs {
 			if strings.Contains(low, r) || strings.Contains(bare, r) {
+				if r == MCPNamePrefix {
+					return fmt.Errorf("compose.yml references %q: names starting %s (routers, services, middlewares, aliases, container names, hostnames) are the Hub's AI companion routes and aliases (contract §3.2)", MCPNamePrefix, MCPNamePrefix)
+				}
 				return fmt.Errorf("compose.yml references %q: the extra-domain sign-in (forward-auth-ext, portcullis-auth-ext, portcullis-oauth2-*) is rendered by the Hub only", strings.TrimSuffix(r, "-"))
 			}
 		}

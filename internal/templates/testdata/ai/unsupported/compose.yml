@@ -1,0 +1,9 @@
+services:
+  web:
+    image: plain
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.plain.rule: Host(`${PORTCULLIS_HOST_PLAIN:-plain.portcullis.local}`)
+      traefik.http.routers.plain.entrypoints: websecure
+      traefik.http.routers.plain.middlewares: portcullis-auth@docker,portcullis-groups@docker
+      traefik.http.services.plain.loadbalancer.server.port: "80"

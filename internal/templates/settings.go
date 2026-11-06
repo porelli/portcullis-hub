@@ -524,10 +524,18 @@ const (
 	// HookCredentialChange: a person_secret credential was created,
 	// regenerated, revoked or voided (§13.8, §13.16).
 	HookCredentialChange = "credential_change"
+	// HookAI: run only by the AI machinery (mint, revoke, revoke_all,
+	// on_change; §13.8, §15.5), never by the settings delivery engine.
+	// Never combined with another trigger.
+	HookAI = "ai"
 )
 
 // HookTriggers are the accepted hooks[].when values.
-var HookTriggers = map[string]bool{HookStart: true, HookSettingsChange: true, HookMembershipChange: true, HookCredentialChange: true}
+var HookTriggers = map[string]bool{HookStart: true, HookSettingsChange: true, HookMembershipChange: true, HookCredentialChange: true, HookAI: true}
+
+// IsAI reports whether h is an ai hook (when: [ai]): the settings
+// delivery engine never builds its input nor runs it.
+func (h *Hook) IsAI() bool { return contains(h.When, HookAI) }
 
 // Claim JSON types.
 var claimJSONTypes = map[string]bool{"int": true, "string": true, "bool": true, "json": true}
@@ -926,12 +934,15 @@ func (v *specCheck) hooks() error {
 			return fmt.Errorf("%s: user contains control characters", w)
 		}
 		if len(h.When) == 0 {
-			return fmt.Errorf("%s: when must list at least one trigger (start, settings_change, membership_change, credential_change)", w)
+			return fmt.Errorf("%s: when must list at least one trigger (start, settings_change, membership_change, credential_change, ai)", w)
 		}
 		for _, tr := range h.When {
 			if !HookTriggers[tr] {
-				return fmt.Errorf("%s: when %q must be start, settings_change, membership_change or credential_change", w, tr)
+				return fmt.Errorf("%s: when %q must be start, settings_change, membership_change, credential_change or ai", w, tr)
 			}
+		}
+		if h.IsAI() && len(h.When) != 1 {
+			return fmt.Errorf("%s: when: ai can't be combined with another trigger (an ai hook is run only by the AI machinery): write exactly when: [ai]", w)
 		}
 		if h.Timeout < 0 || time.Duration(h.Timeout) > HookMaxTimeout {
 			return fmt.Errorf("%s: timeout %s must be between 0 (default %s) and %s", w, time.Duration(h.Timeout), HookDefaultTimeout, HookMaxTimeout)
@@ -952,6 +963,9 @@ func (v *specCheck) reload() error {
 	case r.Hook != "":
 		if v.hooks_[r.Hook] == nil {
 			return fmt.Errorf("reload: hook %s is not declared in hooks", r.Hook)
+		}
+		if v.hooks_[r.Hook].IsAI() {
+			return fmt.Errorf("reload: hook %s is an ai hook (when: [ai]): the settings engine never runs it", r.Hook)
 		}
 	default:
 		if !v.services[r.Service] {
@@ -1601,6 +1615,9 @@ func (v *specCheck) deliveries(o *Option) error {
 			perPerson, hook = true, true
 			if v.hooks_[d.Hook] == nil {
 				return fmt.Errorf("hook %s is not declared in hooks", d.Hook)
+			}
+			if v.hooks_[d.Hook].IsAI() {
+				return fmt.Errorf("hook %s is an ai hook (when: [ai]): no option delivers to it", d.Hook)
 			}
 		}
 	}

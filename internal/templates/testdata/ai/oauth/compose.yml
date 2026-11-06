@@ -1,0 +1,8 @@
+services:
+  web:
+    image: oauth
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.oauth.rule: Host(`${PORTCULLIS_HOST_OAUTH:-oauth.portcullis.local}`)
+      traefik.http.routers.oauth.entrypoints: websecure
+      traefik.http.services.oauth.loadbalancer.server.port: "8080"

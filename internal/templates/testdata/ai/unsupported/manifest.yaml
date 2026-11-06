@@ -1,0 +1,7 @@
+name: Plain
+category: tools
+auth:
+  method: forward-auth
+ai:
+  unsupported: "No official MCP server; community servers are small and not vetted by Portcullis"
+  alternative: {name: plain-mcp, source: "https://example.org/plain-mcp", note: "community, 12 stars, API token per person"}

@@ -1,0 +1,47 @@
+name: Companion App
+category: tools
+instances: multi
+auth:
+  method: forward-auth
+  group_access: true
+  access_group: users_companion
+urls:
+  - label: Web
+    url: "https://{{HOST_APP}}"
+hooks:
+  - {name: mcp-mint, service: app, command: [/mint], when: [ai]}
+  - {name: mcp-revoke, service: app, command: [/revoke], when: [ai]}
+  - {name: apply, service: app, command: [/apply], when: [start, settings_change]}
+settings:
+  options:
+    - key: motd
+      label: Message of the day
+      type: string
+      max_len: 200
+      applies: live
+      delivery: [{hook: apply}]
+ai:
+  mcp:
+    - name: app
+      label: App
+      kind: companion
+      service: app-mcp
+      port: 8080
+      router: app
+      upstream: official
+      source: https://example.org/app-mcp
+      protocol: ["2026-07-28", "2025-11-25"]
+      modes: [read_only, read_write]
+      default_mode: read_write
+      identity:
+        mode: app_token
+        format: "token {credential}"
+        mint: mcp-mint
+        revoke: mcp-revoke
+        scopes:
+          read_only: [read:repository]
+          read_write: [write:repository]
+      tools:
+        writes: ["create_*", "delete_*"]
+        confirm: ["delete_*", "repo_write:delete"]
+        never: []

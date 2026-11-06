@@ -366,7 +366,7 @@ func TestCredentialChangeTrigger(t *testing.T) {
 	}
 	runSettingsCases(t, []settingsCase{
 		{"credential_change only", only + opts(connectOpt, uidOpt, psOpt), smbCompose, "", ""},
-		{"unknown trigger", bad + opts(connectOpt), smbCompose, "", `when "credential" must be start, settings_change, membership_change or credential_change`},
+		{"unknown trigger", bad + opts(connectOpt), smbCompose, "", `when "credential" must be start, settings_change, membership_change, credential_change or ai`},
 	})
 }
 

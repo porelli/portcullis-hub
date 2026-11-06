@@ -29,6 +29,7 @@ func TestRealTemplatesInstances(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "grafana", "manifest.yaml")); err != nil {
 		t.Skipf("no templates checkout at %s", dir)
 	}
+	dir = aiPendingTemplatesDir(t, dir)
 	root := t.TempDir()
 	project, data := filepath.Join(root, "project"), filepath.Join(root, "data")
 	// Every variable a template reads from the core env, with a value.

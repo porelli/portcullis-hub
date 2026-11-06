@@ -158,6 +158,10 @@ type KeycloakClient struct {
 	// there when a session ends, so the app ends its own session too
 	// (e.g. Nextcloud user_oidc, Synapse).
 	BackchannelLogoutURL string `yaml:"backchannel_logout_url" json:"backchannel_logout_url,omitempty"`
+	// AIClient marks the AI page's MCP client (contract §3.2, §8): only in
+	// a template with ai.chat, exactly one there; the Hub registers it
+	// through the AI client path, not as an app client.
+	AIClient bool `yaml:"ai_client" json:"ai_client,omitempty"`
 }
 
 // SendsEmailVerified reports whether the client gets the email_verified
@@ -201,6 +205,9 @@ type Manifest struct {
 	Files  []DataFile `yaml:"files" json:"files,omitempty"`
 	Hooks  []Hook     `yaml:"hooks" json:"hooks,omitempty"`
 	Reload *Reload    `yaml:"reload" json:"reload,omitempty"`
+	// AI is the ai: block (contract §3.2), required: AI support through
+	// companions (ai.mcp) or why there is none (ai.unsupported).
+	AI *AI `yaml:"ai" json:"ai,omitempty"`
 
 	// routerless: compose.yml has no HTTP router (set by Discover;
 	// Routerless).
