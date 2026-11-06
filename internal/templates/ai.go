@@ -717,6 +717,11 @@ func checkCompanions(t *Template, compose []byte, routes *Routes, named map[stri
 				}
 			}
 		}
+		if c.Kind == CompanionKind && mode == IdentityHeaders {
+			if err := checkTrustNetwork(w, c, compose, infos, routes); err != nil {
+				return err
+			}
+		}
 		serviceUse[c.Service] = c.Name
 		if (mode != IdentityAppOAuth && c.Port < 1) || c.Port < 0 || c.Port > 65535 {
 			return fmt.Errorf("%s: port %d must be 1–65535", w, c.Port)
@@ -991,4 +996,51 @@ type ServiceNet struct {
 func (t *Template) HasAIMCP() bool {
 	a := t.Manifest.AI
 	return a != nil && a.Unsupported == "" && len(a.MCP) > 0
+}
+
+// checkTrustNetwork: an identity_headers companion service joins exactly one
+// network, its trust network — a project network other than default and
+// portcullis-proxy, declared internal: true, whose members are exactly the
+// companion and the services carrying its router (the app that trusts the
+// identity headers). No other service joins it or shares a member's network
+// namespace, so the app may trust the headers from that network's
+// addresses (contract §3.2) without pinning an address or a subnet.
+func checkTrustNetwork(w string, c *Companion, compose []byte, infos map[string]composeServiceInfo, routes *Routes) error {
+	nets := infos[c.Service].networks
+	if len(nets) != 1 || nets[0] == "default" || nets[0] == proxyNetwork {
+		return fmt.Errorf("%s: identity_headers companion service %s must join exactly one network, its trust network (an internal: true project network shared only with the app that trusts the headers), not %v", w, c.Service, nets)
+	}
+	trust := nets[0]
+	var doc struct {
+		Networks map[string]interface{} `yaml:"networks"`
+	}
+	_ = yaml.Unmarshal(compose, &doc)
+	n, _ := doc.Networks[trust].(map[string]interface{})
+	_, hasName := n["name"]
+	_, hasExt := n["external"]
+	if in, ok := n["internal"].(bool); !ok || !in || hasName || hasExt {
+		return fmt.Errorf("%s: the trust network %s must be declared at the top level with internal: true (and no name or external)", w, trust)
+	}
+	want := map[string]bool{c.Service: true}
+	for svc, rs := range routes.Routers {
+		if slices.Contains(rs, c.Router) {
+			want[svc] = true
+		}
+	}
+	if len(want) < 2 {
+		return fmt.Errorf("%s: no compose service carries router %s (the app that trusts the identity headers)", w, c.Router)
+	}
+	for _, name := range slices.Sorted(maps.Keys(infos)) {
+		in := slices.Contains(infos[name].networks, trust)
+		if in && !want[name] {
+			return fmt.Errorf("%s: service %s joins the trust network %s: only the companion %s and the service(s) of router %s may (any other member could send identity headers the app trusts)", w, name, trust, c.Service, c.Router)
+		}
+		if !in && want[name] {
+			return fmt.Errorf("%s: service %s (router %s) must join the trust network %s", w, name, c.Router, trust)
+		}
+		if mode := infos[name].netModeOf; strings.HasPrefix(mode, "service:") && want[strings.TrimPrefix(mode, "service:")] {
+			return fmt.Errorf("%s: service %s uses network_mode %s: it would share an address on the trust network %s", w, name, mode, trust)
+		}
+	}
+	return nil
 }

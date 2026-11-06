@@ -296,6 +296,18 @@ func checkCoreRefs(compose []byte, hostVars map[string]string) error {
 		}
 		shared[k] = true
 	}
+	// internalNets: project networks declared internal: true (no name /
+	// external, checked above): like default, only the template's own
+	// services can be on them, so -internal names may live there too.
+	internalNets := map[string]bool{}
+	for _, k := range keys {
+		n, _ := nets[k].(map[string]interface{})
+		_, hasName := n["name"]
+		_, hasExt := n["external"]
+		if in, ok := n["internal"].(bool); ok && in && !hasName && !hasExt {
+			internalNets[k] = true
+		}
+	}
 
 	if err := checkCoreVolumes(doc["volumes"]); err != nil {
 		return err
@@ -403,7 +415,7 @@ func checkCoreRefs(compose []byte, hostVars map[string]string) error {
 				return fmt.Errorf("service %s: %s: the DNS name %q is core's (reserved)", name, field, v)
 			}
 		}
-		if err := checkInternalNames(name, s); err != nil {
+		if err := checkInternalNames(name, s, internalNets); err != nil {
 			return err
 		}
 		switch sn := s["networks"].(type) {
@@ -498,10 +510,11 @@ func isInternalName(n string) bool {
 // checkInternalNames refuses a service that answers to a name ending in
 // -internal (service name, container_name, hostname — on every network it
 // joins — or a network alias) on any network but the project's own
-// default (top-level networks.default can't be named or external). A
+// default (top-level networks.default can't be named or external) and the
+// project networks declared internal: true (internal). A
 // service with network_mode (none, host, service:) has no DNS name of its
 // own. Shapes and literals were checked by the caller.
-func checkInternalNames(svc string, s map[string]interface{}) error {
+func checkInternalNames(svc string, s map[string]interface{}, internal map[string]bool) error {
 	if mode, _ := s["network_mode"].(string); mode != "" {
 		return nil
 	}
@@ -538,12 +551,12 @@ func checkInternalNames(svc string, s map[string]interface{}) error {
 	}
 	sort.Strings(keys)
 	for _, net := range keys {
-		if net == "default" {
+		if net == "default" || internal[net] {
 			continue
 		}
 		for _, n := range append(append([]string(nil), common...), nets[net]...) {
 			if isInternalName(n) {
-				return fmt.Errorf("service %s: the name %q ends in %s but is on network %s (gate upstream names are declared on the project's default network only)", svc, n, internalSuffix, net)
+				return fmt.Errorf("service %s: the name %q ends in %s but is on network %s (gate upstream names are declared on the project's default network or an internal: true project network only)", svc, n, internalSuffix, net)
 			}
 		}
 	}

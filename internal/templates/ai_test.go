@@ -65,7 +65,7 @@ func runAIRows(t *testing.T, rows []aiRow) {
 }
 
 func TestAIFixturesLoad(t *testing.T) {
-	for _, f := range []string{"companion", "headers", "oauth", "chat", "unsupported"} {
+	for _, f := range []string{"companion", "headers", "oauth", "chat", "unsupported", "trust"} {
 		tpl, err := buildAI(t, f, nil, nil)
 		if err != nil {
 			t.Errorf("%s: %v", f, err)
@@ -328,5 +328,25 @@ func TestReservedMCPNames(t *testing.T) {
 	m := "name: S\nauth:\n  method: custom\nai:\n  mcp:\n    - {name: s, label: S, kind: builtin, service: s, port: 1, router: s, upstream: official, source: \"https://example.org\", protocol: [\"2025-06-18\"], modes: [read_write], identity: {mode: app_token, format: \"Bearer {credential}\", mint: m, revoke: r}}\nhooks:\n  - {name: m, service: s, command: [/m], when: [ai]}\n  - {name: r, service: s, command: [/r], when: [ai]}\n"
 	if _, err := build("s", "src", "", []byte(m), []byte("services:\n  s:\n    image: x\n"), "example.org", nil); err == nil || !strings.Contains(err.Error(), "router-less") {
 		t.Errorf("router-less ai.mcp: err = %v", err)
+	}
+}
+
+// TestTrustNetwork: an identity_headers companion's trust network
+// (contract §3.2) holds exactly the companion and its router's service.
+func TestTrustNetwork(t *testing.T) {
+	const f = "trust"
+	runAIRows(t, []aiRow{
+		{"companion on default", f, nil, []string{"    networks: [mcp-trust]\n  db:", "  db:"}, "exactly one network"},
+		{"companion on two networks", f, nil, []string{"    networks: [mcp-trust]\n  db:", "    networks: [mcp-trust, default]\n  db:"}, "exactly one network"},
+		{"trust network not internal", f, nil, []string{"  mcp-trust:\n    internal: true\n", "  mcp-trust: {}\n"}, "internal: true"},
+		{"trust network internal false", f, nil, []string{"    internal: true\n", "    internal: false\n"}, "internal: true"},
+		{"a third member", f, nil, []string{"  db:\n    image: db\n", "  db:\n    image: db\n    networks: [default, mcp-trust]\n"}, "service db joins the trust network"},
+		{"app not on it", f, nil, []string{"      mcp-trust:\n        aliases: [web-internal]\n", ""}, "must join the trust network"},
+		{"sharing the app's namespace", f, nil, []string{"  db:\n    image: db\n", "  db:\n    image: db\n    network_mode: service:web\n"}, "share an address on the trust network"},
+	})
+	// The -internal alias of the app is allowed on the internal trust network
+	// (the fixture loads), never on a plain project network.
+	if _, err := buildAI(t, f, nil, []string{"  mcp-trust:\n    internal: true\n", "  mcp-trust: {}\n"}); err == nil || !strings.Contains(err.Error(), "-internal") {
+		t.Errorf("an -internal alias on a non-internal network: err = %v", err)
 	}
 }

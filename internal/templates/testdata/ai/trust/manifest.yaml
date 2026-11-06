@@ -1,0 +1,24 @@
+name: Trust App
+category: tools
+auth:
+  method: header-auth
+  group_access: true
+  access_group: users_trust
+env:
+  - key: MCP_SECRET
+    generate: random
+ai:
+  mcp:
+    - name: wiki
+      label: Wiki
+      kind: companion
+      service: wiki-mcp
+      port: 8000
+      router: wiki
+      upstream: official
+      source: https://example.org/wiki
+      protocol: ["2025-06-18"]
+      modes: [read_only]
+      identity:
+        mode: identity_headers
+        caller_secret: {env: MCP_SECRET}
