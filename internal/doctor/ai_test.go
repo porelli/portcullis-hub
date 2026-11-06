@@ -92,6 +92,10 @@ func TestAIDoctorChecks(t *testing.T) {
 		if len(got) != 1 || !strings.Contains(got[0].Title, "2 people") || !strings.Contains(got[0].Why, "own sign-in") || got[0].Class != FixExplain {
 			t.Fatalf("app_oauth leftovers = %+v", got)
 		}
+		// The hook's absence is said once (fix round 1).
+		if n := strings.Count(got[0].Why, "no longer has"); n != 1 {
+			t.Errorf("app_oauth leftovers name the missing hook %d times: %s", n, got[0].Why)
+		}
 		// The oauth-seen record unreadable (no instance): explained.
 		unread := AIIn{Companion: "oauth-seen.json", Reason: "reading oauth-seen.json: permission denied"}
 		got = of(t, KindAICredentialsRevoking, &Inputs{AI: []AIIn{unread}})

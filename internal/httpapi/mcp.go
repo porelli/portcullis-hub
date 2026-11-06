@@ -22,6 +22,7 @@ import (
 	"github.com/portcullis/hub/internal/aigate"
 	"github.com/portcullis/hub/internal/confirm"
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/doctor"
 	"github.com/portcullis/hub/internal/hub"
 	sdk "github.com/portcullis/hub/internal/mcpsdk"
 )
@@ -835,6 +836,11 @@ type callMemo struct {
 	c    *directory.Caller
 	once sync.Once
 	m    *directory.Membership
+	// The doctor's report, run once for the call's class and
+	// consequences (Task 20 fix round 1: doctorReport).
+	docOnce sync.Once
+	doc     *doctor.Report
+	docErr  error
 }
 
 func withCallMemo(ctx context.Context, c *directory.Caller) context.Context {

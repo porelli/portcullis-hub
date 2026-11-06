@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/doctor"
 	"github.com/portcullis/hub/internal/hub"
 	"github.com/portcullis/hub/internal/settings"
 )
@@ -177,16 +178,18 @@ func (s *Server) registerDoctorTools() {
 				}
 				return opAcceptedBody(op), nil
 			}), s.fixClass, argReader("fp"), s.fixConsequences),
-		admin("doctor_mute", "Mute a finding with a reason; it comes back as soon as what it judged changes. finding_token is the finding's token from doctor_findings (a finding that changed since is refused).",
+		perCallCtx(admin("doctor_mute", "Mute a finding with a reason; it comes back as soon as what it judged changes. finding_token is the finding's token from doctor_findings (a finding that changed since is refused). Muting a Problem or an AI revocation finding needs your confirmation in the browser.",
 			ClassWrite, "POST /api/doctor/findings/{fp}/mute", "doctor.mute", func(ctx context.Context, a directory.Actor, in muteArgs) (any, error) {
 				if err := fpOK(in.FP); err != nil {
 					return nil, err
 				}
+				// MuteFinding runs the doctor again: the token is checked
+				// against the finding as it is now.
 				if err := s.muteFinding(ctx, in.FP, in.Reason, a, in.FindingToken); err != nil {
 					return nil, apiErr(err)
 				}
 				return map[string]string{"status": "muted"}, nil
-			}),
+			}), s.muteClass, argReader("fp"), s.muteConsequences),
 		admin("doctor_unmute", "Unmute a finding.",
 			ClassWrite, "DELETE /api/doctor/findings/{fp}/mute", "doctor.unmute", func(_ context.Context, a directory.Actor, in fpArgs) (any, error) {
 				if err := fpOK(in.FP); err != nil {
@@ -246,7 +249,7 @@ func (s *Server) registerDoctorTools() {
 			}},
 		admin("check_folder_path", "Check a host path before defining a folder there: whether it exists, its filesystem, ACL and xattr support, the files, directories and owners, and problems in plain words. Nothing is created or changed.",
 			ClassRead, "POST /api/folders/check", "", func(ctx context.Context, _ directory.Actor, in checkPathArgs) (any, error) {
-				pc, err := s.Hub.CheckFolderPath(ctx, in.Path, false)
+				pc, err := s.checkFolderPath(ctx, in.Path, false)
 				return pc, apiErr(err)
 			}),
 		admin("folder_preview", "What assigning a shared folder to these uses would do (nothing changes): per use add / remove / keep with its access, the disk plan (files that change group, ACLs, a snapshot first), the apps restarted and the downtime, warnings, and the plan_hash folder_apply needs.",
@@ -345,7 +348,11 @@ func (s *Server) fixClass(ctx context.Context, args json.RawMessage) ToolClass {
 	if err != nil || fpOK(in.FP) != nil {
 		return ClassDestructive
 	}
-	touches, err := s.Hub.FixTouchesData(ctx, in.FP, in.params(), in.PlanHash)
+	rep, err := s.doctorReport(ctx)
+	if err != nil {
+		return ClassDestructive
+	}
+	touches, err := s.Hub.FixTouchesData(ctx, rep, in.FP, in.params(), in.PlanHash)
 	if err != nil || touches {
 		return ClassDestructive
 	}
@@ -354,7 +361,11 @@ func (s *Server) fixClass(ctx context.Context, args json.RawMessage) ToolClass {
 
 func (s *Server) fixConsequences(ctx context.Context, args json.RawMessage) []string {
 	in, _ := decode[applyFixArgs](args)
-	p, err := s.Hub.PreviewFix(ctx, in.FP, in.params())
+	rep, err := s.doctorReport(ctx)
+	var p *hub.FixPlan
+	if err == nil {
+		p, err = s.Hub.PreviewFixIn(ctx, rep, in.FP, in.params())
+	}
 	if err != nil {
 		return []string{"Applies the doctor's fix for finding " + in.FP + " (its preview fails now: " + clipMessage(err.Error(), 300) + ")."}
 	}
@@ -412,4 +423,67 @@ func recheckClass(args json.RawMessage) ToolClass {
 
 func recheckConsequences(args json.RawMessage) []string {
 	return []string{"Accepts a different directory as shared folder " + idOf(args) + ": the apps that use it get that directory at their next start, and Undo last fix is no longer offered. If you didn't move the folder, someone may have swapped it."}
+}
+
+// doctorReport is the doctor's report, run once per tool call (the
+// call's memo: class and consequences share it); without a memo, a run
+// of its own. Runs that must judge the current state — ApplyFix,
+// MuteFinding — run the doctor again inside the Hub.
+func (s *Server) doctorReport(ctx context.Context) (*doctor.Report, error) {
+	m := memoOf(ctx)
+	if m == nil {
+		return s.Hub.Doctor(ctx)
+	}
+	m.docOnce.Do(func() { m.doc, m.docErr = s.Hub.Doctor(ctx) })
+	return m.doc, m.docErr
+}
+
+// findingIn is fp's finding in r (nil when it isn't there).
+func findingIn(r *doctor.Report, fp string) *doctor.Finding {
+	if r == nil {
+		return nil
+	}
+	for i := range r.Findings {
+		if r.Findings[i].FP == fp {
+			return &r.Findings[i]
+		}
+	}
+	return nil
+}
+
+// muteClassOf (fix round 1 ruling): muting is D for a finding whose
+// current severity is problem, for ai_credentials_revoking (an owed
+// revocation), and for a finding that can't be located (fail closed);
+// otherwise W.
+func muteClassOf(r *doctor.Report, fp string) ToolClass {
+	f := findingIn(r, fp)
+	if f == nil || f.Severity == doctor.Problem || f.Kind == doctor.KindAICredentialsRevoking {
+		return ClassDestructive
+	}
+	return ClassWrite
+}
+
+func (s *Server) muteClass(ctx context.Context, args json.RawMessage) ToolClass {
+	in, err := decode[muteArgs](args)
+	if err != nil || fpOK(in.FP) != nil {
+		return ClassDestructive
+	}
+	rep, err := s.doctorReport(ctx)
+	if err != nil {
+		return ClassDestructive
+	}
+	return muteClassOf(rep, in.FP)
+}
+
+func (s *Server) muteConsequences(ctx context.Context, args json.RawMessage) []string {
+	in, _ := decode[muteArgs](args)
+	rep, _ := s.doctorReport(ctx)
+	f := findingIn(rep, in.FP)
+	if f == nil {
+		return []string{"Mutes finding " + in.FP + " (it isn't in the doctor's report now: the mute is refused unless it is)."}
+	}
+	return []string{
+		"Mutes the doctor's " + string(f.Severity) + " " + f.Kind + ": " + f.Title,
+		"It leaves the counts and stays hidden until what it judged changes. Reason: " + clipMessage(in.Reason, 200),
+	}
 }

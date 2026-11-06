@@ -110,9 +110,19 @@ const fixParamFix = "fix"
 // pick: explain-only and link findings, or none, are 409; a fix the
 // finding doesn't offer is 400.
 func (h *Hub) findingFix(ctx context.Context, fp string, params map[string]string) (doctor.Finding, Fixer, error) {
-	r, err := h.Doctor(ctx)
-	if err != nil {
-		return doctor.Finding{}, nil, err
+	return h.findingFixIn(ctx, nil, fp, params)
+}
+
+// findingFixIn is findingFix judged on report r (nil: a fresh Doctor
+// run). Only the Portcullis MCP's class and consequences pass a report
+// (one run per tool call, Task 20 fix round 1); ApplyFix always runs the
+// doctor again.
+func (h *Hub) findingFixIn(ctx context.Context, r *doctor.Report, fp string, params map[string]string) (doctor.Finding, Fixer, error) {
+	if r == nil {
+		var err error
+		if r, err = h.Doctor(ctx); err != nil {
+			return doctor.Finding{}, nil, err
+		}
 	}
 	var f *doctor.Finding
 	for i := range r.Findings {
@@ -167,7 +177,14 @@ func checkFixParams(params map[string]string, allowed ...string) error {
 // PreviewFix previews finding fp's fix with params (404 unknown fp, 409
 // explain-only or link, 400 bad params): nothing changes.
 func (h *Hub) PreviewFix(ctx context.Context, fp string, params map[string]string) (*FixPlan, error) {
-	f, fx, err := h.findingFix(ctx, fp, params)
+	return h.PreviewFixIn(ctx, nil, fp, params)
+}
+
+// PreviewFixIn is PreviewFix with the finding looked up in report r (nil:
+// a fresh Doctor run); the fixer's own preview still reads the current
+// state.
+func (h *Hub) PreviewFixIn(ctx context.Context, r *doctor.Report, fp string, params map[string]string) (*FixPlan, error) {
+	f, fx, err := h.findingFixIn(ctx, r, fp, params)
 	if err != nil {
 		return nil, err
 	}
@@ -205,8 +222,10 @@ func (h *Hub) ApplyFix(ctx context.Context, fp string, params map[string]string,
 	}
 	// G45, defence in depth: a fix that touches data, asked for through
 	// the AI, runs only with the confirmation the tool consumed.
-	if fx.TouchesData() && actor.Via == directory.ViaAI && actor.Confirmation == "" {
-		return nil, statusErr(http.StatusConflict, "fix %s changes data on disk or revokes access: through the AI it needs your confirmation in the browser", fx.Kind())
+	if fx.TouchesData() {
+		if err := aiUnconfirmed(actor, "fix "+fx.Kind()+" changes data on disk or revokes access"); err != nil {
+			return nil, err
+		}
 	}
 	op, err = fx.Apply(h, f, params, planHash, actor)
 	if op != nil {
@@ -223,8 +242,12 @@ func (h *Hub) ApplyFix(ctx context.Context, fp string, params map[string]string,
 // planHash (its apply would refuse another). Any error — no such
 // finding, no fix, a preview that fails, another hash — is returned: the
 // caller treats it as touching data (fail closed). Nothing changes.
-func (h *Hub) FixTouchesData(ctx context.Context, fp string, params map[string]string, planHash string) (bool, error) {
-	f, fx, err := h.findingFix(ctx, fp, params)
+//
+// r is the report to find fp in (nil: a fresh Doctor run): the MCP passes
+// the call's one run. ApplyFix itself never trusts it: it runs the doctor
+// again and recomputes the plan under the fix's locks.
+func (h *Hub) FixTouchesData(ctx context.Context, r *doctor.Report, fp string, params map[string]string, planHash string) (bool, error) {
+	f, fx, err := h.findingFixIn(ctx, r, fp, params)
 	if err != nil {
 		return true, err
 	}

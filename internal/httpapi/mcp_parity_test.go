@@ -104,6 +104,7 @@ var accessWidening = map[string]string{
 	// Task 20.
 	"folder_apply":         "D unless the plan only removes uses and leaves the disk alone (AssignPlan.WidensAccess)",
 	"folder_recheck_apply": "D when it accepts a different directory (confirm_different_directory)",
+	"doctor_mute":          "D for a Problem, an ai_credentials_revoking finding or one the report doesn't have (fix round 1 ruling)",
 }
 
 // widensAlways are the D tools whose every call widens access (G37
@@ -215,7 +216,7 @@ func TestToolParity(t *testing.T) {
 		"create_instance", "remove_member", "update_field", "add_member", "set_member_expiry", "set_group_rule", "convert_group", "add_exception",
 		"remove_exception", "set_details", "import_apply",
 		// Task 20 (§15.10, G15, G45).
-		"delete_folder", "folder_undo_apply", "doctor_apply_fix", "folder_apply", "folder_recheck_apply"} {
+		"delete_folder", "folder_undo_apply", "doctor_apply_fix", "folder_apply", "folder_recheck_apply", "doctor_mute"} {
 		if byName[n].Class != ClassDestructive {
 			t.Errorf("tool %s: class %q, want D", n, byName[n].Class)
 		}
@@ -231,13 +232,13 @@ func TestToolParity(t *testing.T) {
 	// Hub's data; the instance comes back as it was); a sync pulls the
 	// sources the admin added.
 	for _, n := range []string{"backup_instance", "sync_sources", "update_person", "clear_actions", "create_group", "create_field",
-		"doctor_scan", "doctor_mute", "doctor_unmute", "create_folder", "update_folder"} {
+		"doctor_scan", "doctor_unmute", "create_folder", "update_folder"} {
 		if byName[n].Class != ClassWrite {
 			t.Errorf("tool %s: class %q, want W", n, byName[n].Class)
 		}
 	}
 	// doctor_apply_fix and folder_apply decide per call (G45; Task 20).
-	for _, n := range []string{"doctor_apply_fix", "folder_apply", "folder_recheck_apply"} {
+	for _, n := range []string{"doctor_apply_fix", "folder_apply", "folder_recheck_apply", "doctor_mute"} {
 		if byName[n].ClassFor == nil {
 			t.Errorf("tool %s has no ClassFor", n)
 		}

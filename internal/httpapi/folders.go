@@ -224,7 +224,7 @@ func (s *Server) handleCheckFolderPath(w http.ResponseWriter, r *http.Request) {
 	if !decodeAPI(w, r, &b, folderCheckUsage) {
 		return
 	}
-	pc, err := s.Hub.CheckFolderPath(r.Context(), b.Path, b.Create)
+	pc, err := s.checkFolderPath(r.Context(), b.Path, b.Create)
 	if err != nil {
 		writeAPIErr(w, err)
 		return
@@ -505,4 +505,9 @@ func (s *Server) startUndo(id, planHash string, a directory.Actor) (*hub.AsyncOp
 func (s *Server) applyRecheck(ctx context.Context, id, planHash string, confirmDifferent bool, a directory.Actor) (*hub.FolderView, error) {
 	s.rec("ApplyRecheck", id, planHash, confirmDifferent)
 	return s.Hub.ApplyRecheck(ctx, id, planHash, confirmDifferent, a)
+}
+
+func (s *Server) checkFolderPath(ctx context.Context, p string, create bool) (*hub.PathCheck, error) {
+	s.rec("CheckFolderPath", p, create)
+	return s.Hub.CheckFolderPath(ctx, p, create)
 }

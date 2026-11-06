@@ -226,7 +226,10 @@ func (aiRevokingCheck) Run(in *Inputs) []Finding {
 		}
 		f.Why = strings.Join(why, " ")
 		if a.NoHook {
-			f.Why += " The template no longer has the hook the Hub would revoke them with."
+			// The app_oauth sentence already says the hook is gone.
+			if a.Recorded == 0 {
+				f.Why += " The template no longer has the hook the Hub would revoke them with."
+			}
 			f.Class = FixExplain
 			f.Steps = []string{
 				fmt.Sprintf("Revoke the access by hand in %s: its AI credentials are named portcullis-ai-… (app_oauth: the app's own OAuth grants of the people concerned).", a.app()),

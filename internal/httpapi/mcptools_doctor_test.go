@@ -321,8 +321,88 @@ func TestDoctorMuteTool(t *testing.T) {
 	if txt, isErr, _ := e.tool(t, "doctor_unmute", map[string]any{"fp": "zz"}); !isErr || !strings.HasPrefix(txt, "404: ") {
 		t.Errorf("bad fp = %s %v", txt, isErr)
 	}
-	// check_folder_path never creates anything: it has no create argument.
-	if txt, isErr := e.rawTool(t, "check_folder_path", map[string]any{"path": "/srv/docs", "create": true}); !isErr || !strings.HasPrefix(txt, textSecretArgs) {
-		t.Errorf("check_folder_path with create = %s %v, want the undeclared-argument refusal", txt, isErr)
+}
+
+// TestCheckFolderPathTool (fix round 1): check_folder_path never creates
+// anything, and it makes the route's Hub call.
+func TestCheckFolderPathTool(t *testing.T) {
+	e := newFolderToolEnv(t)
+	t.Run("no create argument", func(t *testing.T) {
+		if txt, isErr := e.rawTool(t, "check_folder_path", map[string]any{"path": "/srv/docs", "create": true}); !isErr || !strings.HasPrefix(txt, textSecretArgs) {
+			t.Errorf("check_folder_path with create = %s %v, want the undeclared-argument refusal", txt, isErr)
+		}
+	})
+	t.Run("never creates", func(t *testing.T) {
+		rec := &callRec{}
+		e.s.callHook = rec.hook
+		defer func() { e.s.callHook = nil }()
+		if txt, isErr := e.rawTool(t, "check_folder_path", map[string]any{"path": "/srv/media"}); isErr || !strings.Contains(txt, `"exists":true`) {
+			t.Errorf("check = %s %v", txt, isErr)
+		}
+		if got := rec.take(); len(got) != 1 || got[0] != `CheckFolderPath ["/srv/media",false]` {
+			t.Errorf("Hub calls = %q", got)
+		}
+	})
+}
+
+// TestDoctorMuteClass (fix round 1 ruling): doctor_mute is D for a
+// Problem, for ai_credentials_revoking and for a finding the report
+// doesn't have (or arguments that don't decode); W otherwise. One doctor
+// run serves the call's class and consequences.
+func TestDoctorMuteClass(t *testing.T) {
+	e := newToolEnvWith(t, withFolderSetup(mcpEnvOpts{seed: func(st *state.AppState) {
+		st.FolderChanged = map[string][]state.FolderChange{"photos": {{Instance: "photos", Key: "extra", Folder: "media", At: time.Now().UTC(),
+			Detail: "another directory"}}}
+	}}))
+	scriptFolderDisk(t, e)
+	ctx := context.Background()
+	raw := func(v any) json.RawMessage { b, _ := json.Marshal(v); return b }
+	warn := findingOfKind(t, e.s.Hub, doctor.KindLANOnlyExposed)
+	prob := findingOfKind(t, e.s.Hub, doctor.KindFolderChanged)
+	if warn.Severity != doctor.Warning || prob.Severity != doctor.Problem {
+		t.Fatalf("fixture severities %s / %s", warn.Severity, prob.Severity)
+	}
+	mute := func(fp string) json.RawMessage {
+		return raw(map[string]any{"fp": fp, "reason": "r", "finding_token": "t"})
+	}
+	revoking := &doctor.Report{Findings: []doctor.Finding{{FP: "aaaaaaaaaaaaaaaa", Kind: doctor.KindAICredentialsRevoking, Severity: doctor.Warning},
+		{FP: "bbbbbbbbbbbbbbbb", Kind: doctor.KindAICompanionImageOld, Severity: doctor.Warning}}}
+	for _, c := range []struct {
+		name      string
+		got, want ToolClass
+	}{
+		{"a warning", s(e).muteClass(ctx, mute(warn.FP)), ClassWrite},
+		{"a problem", s(e).muteClass(ctx, mute(prob.FP)), ClassDestructive},
+		{"unknown finding", s(e).muteClass(ctx, mute("0123456789abcdef")), ClassDestructive},
+		{"bad fp", s(e).muteClass(ctx, mute("nope")), ClassDestructive},
+		{"undecodable", s(e).muteClass(ctx, json.RawMessage(`[]`)), ClassDestructive},
+		{"ai_credentials_revoking (a warning)", muteClassOf(revoking, "aaaaaaaaaaaaaaaa"), ClassDestructive},
+		{"another AI warning", muteClassOf(revoking, "bbbbbbbbbbbbbbbb"), ClassWrite},
+		{"no report", muteClassOf(nil, "aaaaaaaaaaaaaaaa"), ClassDestructive},
+	} {
+		if c.got != c.want {
+			t.Errorf("%s: class %s, want %s", c.name, c.got, c.want)
+		}
+	}
+	// Through the tool: a Problem asks for a confirmation whose page names
+	// it; the warning mutes at once.
+	txt, isErr := e.rawTool(t, "doctor_mute", map[string]any{"fp": prob.FP, "reason": "known", "finding_token": prob.Token})
+	if !isErr || !strings.HasPrefix(txt, textConfirmPrefix) {
+		t.Fatalf("muting a problem = %s %v", txt, isErr)
+	}
+	m := confirmTextRe.FindStringSubmatch(txt)
+	v, err := e.s.Hub.ConfirmationPage(hub.ListenerHub, m[1], "root")
+	if err != nil || !strings.Contains(strings.Join(v.Consequences, " "), "problem folder_changed") {
+		t.Errorf("confirmation page = %+v %v", v, err)
+	}
+	if txt, isErr, conf := e.tool(t, "doctor_mute", map[string]any{"fp": warn.FP, "reason": "known", "finding_token": warn.Token}); isErr || conf != "" {
+		t.Errorf("muting a warning = %s %v %q", txt, isErr, conf)
+	}
+	// One doctor run per call: class and consequences share the memo.
+	mc := withCallMemo(ctx, &directory.Caller{User: "root"})
+	r1, _ := s(e).doctorReport(mc)
+	r2, _ := s(e).doctorReport(mc)
+	if r1 == nil || r1 != r2 {
+		t.Error("doctorReport ran twice within one call")
 	}
 }

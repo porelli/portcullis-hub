@@ -327,6 +327,12 @@ func TestAdminToolsSameAsHTTP(t *testing.T) {
 		{tool: "doctor_mute", args: map[string]any{"fp": "{{fp}}", "reason": "behind the router", "finding_token": "{{token}}"},
 			method: "POST", path: "/api/doctor/findings/{{fp}}/mute", body: `{"reason":"behind the router","token":"{{token}}"}`,
 			vars: fixVars(doctor.KindLANOnlyExposed, nil)},
+		// An fp the report doesn't have: D (fail closed), then 404 alike.
+		{tool: "doctor_mute", args: map[string]any{"fp": "0123456789abcdef", "reason": "gone", "finding_token": "x"},
+			method: "POST", path: "/api/doctor/findings/0123456789abcdef/mute", body: `{"reason":"gone","token":"x"}`},
+		// A read compared for parity too (fix round 1).
+		{tool: "check_folder_path", args: map[string]any{"path": "/srv/media"},
+			method: "POST", path: "/api/folders/check", body: `{"path":"/srv/media","create":false}`},
 		{tool: "doctor_unmute", args: map[string]any{"fp": "{{fp}}"},
 			method: "DELETE", path: "/api/doctor/findings/{{fp}}/mute", body: ``,
 			vars: fixVars(doctor.KindLANOnlyExposed, nil)},
