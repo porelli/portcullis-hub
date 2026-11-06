@@ -308,7 +308,8 @@ func (s *Server) handleAIActivity(w http.ResponseWriter, r *http.Request) {
 	n := 0
 	if v := q.Get("n"); v != "" {
 		var err error
-		if n, err = strconv.Atoi(v); err != nil {
+		// An explicit n is 1–200 (0 only means "the default" to aiActivity).
+		if n, err = strconv.Atoi(v); err != nil || n < 1 {
 			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("n must be 1-%d", maxActivity))
 			return
 		}

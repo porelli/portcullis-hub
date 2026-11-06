@@ -9,6 +9,8 @@ import (
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/state"
+
+	"filippo.io/age"
 )
 
 var aiAdmin = directory.Human("root")
@@ -39,16 +41,33 @@ func TestAISettingsDefaultsAndBounds(t *testing.T) {
 		t.Fatalf("defaults =\n%+v\nwant\n%+v", v, want)
 	}
 
-	// gate_present follows the recipient file.
+	// gate_present is what the gate file writer sees (gateRecipient, T22
+	// / T13a carry): a usable recipient file AND the MCP listener (a
+	// usable HUB_MCP_GATE_SECRET_FILE). Without either the gate can't
+	// work: mcp-gate.json says enabled: false.
 	rec := filepath.Join(t.TempDir(), "age.pub")
 	f.h.cfg.MCPGateRecipientFile = rec
+	f.h.cfg.MCPListener = true
 	if f.h.AISettings().GatePresent {
 		t.Error("gate_present without the recipient file")
 	}
 	os.WriteFile(rec, []byte("age1xyz\n"), 0640)
-	if !f.h.AISettings().GatePresent {
-		t.Error("gate_present false with the recipient file")
+	if f.h.AISettings().GatePresent {
+		t.Error("gate_present with an unparseable recipient file")
 	}
+	gateID, gerr := age.GenerateX25519Identity()
+	if gerr != nil {
+		t.Fatal(gerr)
+	}
+	os.WriteFile(rec, []byte(gateID.Recipient().String()+"\n"), 0640)
+	if !f.h.AISettings().GatePresent {
+		t.Error("gate_present false with the recipient file and the listener")
+	}
+	f.h.cfg.MCPListener = false
+	if f.h.AISettings().GatePresent {
+		t.Error("gate_present without the MCP listener (no gate secret)")
+	}
+	f.h.cfg.MCPListener = true
 
 	bad := map[string]AISettingsUpdate{
 		"idle 0":           {OfflineIdleDays: ptr(0)},

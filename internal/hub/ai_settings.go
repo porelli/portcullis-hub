@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -88,23 +87,13 @@ func (h *Hub) AISettings() AISettingsView {
 	}
 }
 
-// gatePresent: the gate's age recipient file is readable and not empty
-// (§15.4 "Without the gate").
-func (h *Hub) gatePresent() bool {
-	if h.cfg.MCPGateRecipientFile == "" {
-		return false
-	}
-	st, err := os.Stat(h.cfg.MCPGateRecipientFile)
-	if err != nil || !st.Mode().IsRegular() || st.Size() == 0 {
-		return false
-	}
-	f, err := os.Open(h.cfg.MCPGateRecipientFile)
-	if err != nil {
-		return false
-	}
-	f.Close()
-	return true
-}
+// gatePresent: the gate can work — exactly what the gate file writer
+// sees (gateRecipient): a readable, parseable HUB_MCP_GATE_RECIPIENT_FILE
+// (§15.4 "Without the gate") and the MCP listener (a usable
+// HUB_MCP_GATE_SECRET_FILE, §15.7: without it the gate can't reach the
+// Hub). false: mcp-gate.json says enabled: false and Settings → AI says
+// "This core has no mcp-gate".
+func (h *Hub) gatePresent() bool { return h.gateRecipient() != nil }
 
 // SaveAISettings applies u (400 outside the bounds: idle 1–30, max 1–90
 // days, idle ≤ max, limits positive (fanout ≤ 4), origins

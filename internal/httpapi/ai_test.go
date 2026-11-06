@@ -4,14 +4,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/hub"
 	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/state"
 )
@@ -401,5 +404,177 @@ func TestInstanceAIAPI(t *testing.T) {
 	b := mustDo(t, e.hub, "root", "POST", "/api/settings/preview", `{"default_auth_policy":{"factors":["mtls"],"op":"any"}}`, 200)
 	if !strings.Contains(b, "aiapp: AI support for tok") {
 		t.Errorf("preview = %s", b)
+	}
+}
+
+// writeAccessLog writes the gate's access log in dir: one line per
+// (user, instance, tool), one second apart, the last newest.
+func writeAccessLog(t *testing.T, dir string, now time.Time, lines [][3]string) {
+	t.Helper()
+	var b strings.Builder
+	for i, l := range lines {
+		line, _ := json.Marshal(map[string]any{"time": now.Add(time.Duration(i) * time.Second).Format(time.RFC3339), "user": l[0], "client": mcpClient,
+			"resource": aiappResource, "instance": l[1], "companion": "tok", "via": "direct", "method": "tools/call",
+			"tool": l[2], "args_sha256": strings.Repeat("a", 64), "decision": "allow", "upstream_status": 200, "duration_ms": 3})
+		b.Write(append(line, '\n'))
+	}
+	if err := os.WriteFile(filepath.Join(dir, hub.AccessLogName), []byte(b.String()), 0o640); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestAIActivityAdminOnly (§15.11, Task 22): GET /api/ai/activity is
+// admins only on the Hub listener (delegates 403, no user 401, people
+// 404); instance= and user= filter (both together too), newest first;
+// n is 1–200 (an explicit 0, a negative or 201 is 400, 200 is fine).
+func TestAIActivityAdminOnly(t *testing.T) {
+	gate := t.TempDir()
+	e := newMCPEnvOpts(t, mcpEnvOpts{cfg: func(c *hub.Config) { c.MCPGateDataDir = gate }})
+	now := time.Now().UTC().Truncate(time.Second).Add(-time.Hour)
+	var lines [][3]string
+	for i := 0; i < 210; i++ {
+		lines = append(lines, [3]string{"carol", "other", fmt.Sprintf("bulk_%d", i)})
+	}
+	lines = append(lines, [3]string{"alice", "aiapp", "list_things"}, [3]string{"bob", "aiapp", "create_thing"},
+		[3]string{"alice", "other", "x"}, [3]string{"alice", "aiapp", "newest_of_alice"})
+	writeAccessLog(t, gate, now, lines)
+	checkAdminOnly(t, e.instEnv, []route{{"GET", "/api/ai/activity", ""}, {"GET", "/api/ai/activity?instance=aiapp&user=alice&n=5", ""}})
+	type act struct {
+		Lines []hub.AccessLine `json:"lines"`
+	}
+	get := func(q string) []hub.AccessLine {
+		t.Helper()
+		var a act
+		if err := json.Unmarshal([]byte(mustDo(t, e.hub, "root", "GET", "/api/ai/activity"+q, "", 200)), &a); err != nil {
+			t.Fatal(err)
+		}
+		return a.Lines
+	}
+	tools := func(ls []hub.AccessLine) string {
+		var s []string
+		for _, l := range ls {
+			s = append(s, l.User+"/"+l.Instance+"/"+l.Tool)
+		}
+		return strings.Join(s, " ")
+	}
+	if got := tools(get("?instance=aiapp")); got != "alice/aiapp/newest_of_alice bob/aiapp/create_thing alice/aiapp/list_things" {
+		t.Errorf("instance=aiapp: %s", got)
+	}
+	if got := tools(get("?user=ALICE")); got != "alice/aiapp/newest_of_alice alice/other/x alice/aiapp/list_things" {
+		t.Errorf("user=ALICE: %s", got)
+	}
+	if got := tools(get("?instance=aiapp&user=alice&n=1")); got != "alice/aiapp/newest_of_alice" {
+		t.Errorf("instance+user n=1: %s", got)
+	}
+	if got := get(""); len(got) != 50 {
+		t.Errorf("default n: %d lines, want 50", len(got))
+	}
+	if got := get("?n=200"); len(got) != 200 || got[0].Tool != "newest_of_alice" {
+		t.Errorf("n=200: %d lines", len(got))
+	}
+	for _, q := range []string{"?n=201", "?n=0", "?n=-1", "?n=x", "?n=1e2"} {
+		mustDo(t, e.hub, "root", "GET", "/api/ai/activity"+q, "", 400)
+	}
+}
+
+// TestAuditViaFilter (§9.5, §15.11, Task 22): GET /api/directory/audit
+// ?via=ai returns only the entries made through the Portcullis MCP;
+// with include=access they are merged with the gate's access-log lines,
+// newest first, each item tagged with its source. Without via the
+// answer is the plain list as before. A bad via / include is 400;
+// include=access needs via=ai. Admins only (delegates 403).
+func TestAuditViaFilter(t *testing.T) {
+	gate := t.TempDir()
+	e := newMCPEnvOpts(t, mcpEnvOpts{cfg: func(c *hub.Config) { c.MCPGateDataDir = gate }})
+	base := time.Now().UTC().Truncate(time.Second).Add(-time.Hour)
+	for i, en := range []directory.AuditEntry{
+		{Actor: "root", Action: "group.add_member", Target: "office", Result: "ok"},
+		{Actor: "root", Action: "instance.update", Target: "aiapp", Result: "ok", Via: directory.ViaAI, Client: mcpClient},
+		{Actor: "root", Action: "settings.ai", Target: "settings", Result: "refused", Via: directory.ViaAI, Client: "portcullis-ai-claude-code"},
+		{Actor: "dana", Action: "user.update", Target: "bob", Result: "ok"},
+	} {
+		en.Time = base.Add(time.Duration(2*i) * time.Second)
+		if err := e.s.Directory.Audit.Append(en); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Access lines at base+1s, base+3s, base+5s, base+7s.
+	var b strings.Builder
+	for i, tool := range []string{"a1", "a2", "a3", "a4"} {
+		line, _ := json.Marshal(map[string]any{"time": base.Add(time.Duration(2*i+1) * time.Second).Format(time.RFC3339), "user": "alice", "client": mcpClient,
+			"resource": aiappResource, "instance": "aiapp", "companion": "tok", "via": "aggregate", "method": "tools/call",
+			"tool": tool, "args_sha256": strings.Repeat("a", 64), "decision": "allow", "upstream_status": 200, "duration_ms": 3})
+		b.Write(append(line, '\n'))
+	}
+	os.WriteFile(filepath.Join(gate, hub.AccessLogName), []byte(b.String()), 0o640)
+
+	// Unfiltered: every entry, the plain list.
+	var all []directory.AuditEntry
+	json.Unmarshal([]byte(mustDo(t, e.hub, "root", "GET", "/api/directory/audit", "", 200)), &all)
+	n := 0
+	for _, a := range all {
+		if a.Action == "group.add_member" || a.Action == "user.update" {
+			n++
+		}
+	}
+	if n != 2 {
+		t.Errorf("unfiltered audit lacks the human entries: %+v", all)
+	}
+	// via=ai: only the two AI entries, newest first.
+	var via []directory.AuditEntry
+	json.Unmarshal([]byte(mustDo(t, e.hub, "root", "GET", "/api/directory/audit?via=ai", "", 200)), &via)
+	if len(via) != 2 || via[0].Action != "settings.ai" || via[1].Action != "instance.update" {
+		t.Fatalf("via=ai = %+v", via)
+	}
+	for _, a := range via {
+		if a.Via != "ai" || a.Client == "" {
+			t.Errorf("via=ai entry %+v", a)
+		}
+	}
+	// include=access: merged, newest first, tagged.
+	var merged []struct {
+		Source string                `json:"source"`
+		Time   time.Time             `json:"time"`
+		Entry  *directory.AuditEntry `json:"entry"`
+		Line   *hub.AccessLine       `json:"line"`
+	}
+	json.Unmarshal([]byte(mustDo(t, e.hub, "root", "GET", "/api/directory/audit?via=ai&include=access", "", 200)), &merged)
+	var order []string
+	for i, m := range merged {
+		switch {
+		case m.Source == "audit" && m.Entry != nil && m.Line == nil:
+			order = append(order, m.Entry.Action)
+			if m.Entry.Via != "ai" {
+				t.Errorf("merged audit entry not via ai: %+v", m.Entry)
+			}
+		case m.Source == "access" && m.Line != nil && m.Entry == nil:
+			order = append(order, m.Line.Tool)
+		default:
+			t.Fatalf("item %d = %+v", i, m)
+		}
+		if i > 0 && m.Time.After(merged[i-1].Time) {
+			t.Errorf("not newest first at %d", i)
+		}
+	}
+	if got := strings.Join(order, " "); got != "a4 a3 settings.ai a2 instance.update a1" {
+		t.Errorf("merged = %s", got)
+	}
+	for _, q := range []string{"?via=human", "?include=access", "?via=ai&include=everything", "?via=AI"} {
+		mustDo(t, e.hub, "root", "GET", "/api/directory/audit"+q, "", 400)
+	}
+	checkAuditAdminOnly(t, e.instEnv, "/api/directory/audit?via=ai&include=access")
+}
+
+// checkAuditAdminOnly: the audit route is admins only (a delegate 403;
+// no user 403, as every Users & Groups route: s.caller refuses an
+// unattributable request).
+func checkAuditAdminOnly(t *testing.T, e *instEnv, path string) {
+	t.Helper()
+	doAs(t, e.hub, "root", "PUT", "/api/directory/permissions/invite", `{"group":"helpers"}`)
+	if code, b := e.do(t, "dana", "GET", path, ""); code != 403 {
+		t.Errorf("delegate %s = %d %s, want 403", path, code, b)
+	}
+	if code, b := e.do(t, "", "GET", path, ""); code != 403 {
+		t.Errorf("no user %s = %d %s, want 403", path, code, b)
 	}
 }

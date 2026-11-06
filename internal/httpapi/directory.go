@@ -5,9 +5,11 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/hub"
 	"github.com/portcullis/hub/internal/rules"
 )
 
@@ -147,7 +149,23 @@ func (s *Server) handleDirectory(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, out)
 }
 
-// handleAudit: administrators only.
+// auditShown is how many entries the audit view shows (the last 100).
+const auditShown = 100
+
+// auditItem is one item of the merged "via AI" view (?via=ai&include=
+// access, contract §15.11): an audit entry or an access-log line (§15.8),
+// tagged with its source.
+type auditItem struct {
+	Source string                `json:"source"` // "audit" or "access"
+	Time   time.Time             `json:"time"`
+	Entry  *directory.AuditEntry `json:"entry,omitempty"`
+	Line   *hub.AccessLine       `json:"line,omitempty"`
+}
+
+// handleAudit: administrators only. The last 100 entries; ?via=ai only
+// those made through the Portcullis MCP (§9.5); with &include=access
+// merged with the gate's access-log lines, newest first, as auditItems
+// (at most 100 of each).
 func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 	if !s.dirReady(w) {
 		return
@@ -160,13 +178,54 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not allowed: admins only", http.StatusForbidden)
 		return
 	}
-	entries, err := s.Directory.Recent(100)
+	q := r.URL.Query()
+	via, include := q.Get("via"), q.Get("include")
+	switch {
+	case via != "" && via != directory.ViaAI:
+		http.Error(w, `via must be "ai" or absent`, http.StatusBadRequest)
+		return
+	case include != "" && include != "access":
+		http.Error(w, `include must be "access" or absent`, http.StatusBadRequest)
+		return
+	case include != "" && via == "":
+		http.Error(w, "include=access needs via=ai", http.StatusBadRequest)
+		return
+	}
+	n := auditShown
+	if via != "" {
+		n = maxAuditScan // filtered below to the last 100 AI entries
+	}
+	entries, err := s.Directory.Recent(n)
 	if err != nil {
 		http.Error(w, "read audit log: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	if via != "" {
+		entries = slices.DeleteFunc(entries, func(e directory.AuditEntry) bool { return e.Via != via })
+		entries = entries[:min(len(entries), auditShown)]
+	}
+	if include == "" {
+		noStore(w)
+		writeJSON(w, entries)
+		return
+	}
+	lines, err := s.Hub.AccessLog(nil, auditShown)
+	if err != nil {
+		writeAPIErr(w, err)
+		return
+	}
+	items := make([]auditItem, 0, len(entries)+len(lines))
+	for i := range entries {
+		items = append(items, auditItem{Source: "audit", Time: entries[i].Time, Entry: &entries[i]})
+	}
+	for i := range lines {
+		items = append(items, auditItem{Source: "access", Time: lines[i].Time, Line: &lines[i]})
+	}
+	// Both lists are newest first; a stable sort keeps each one's order
+	// among equal times.
+	slices.SortStableFunc(items, func(a, b auditItem) int { return b.Time.Compare(a.Time) })
 	noStore(w)
-	writeJSON(w, entries)
+	writeJSON(w, items)
 }
 
 func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {

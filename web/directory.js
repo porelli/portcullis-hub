@@ -1395,7 +1395,9 @@
         '<td><button type="button" class="pd-btn secondary xs" data-act="perm-save" data-perm="' + perm + '">Save</button></td></tr>';
     }
     h += '</tbody></table></section>';
-    h += '<section class="pd-sec" aria-labelledby="pd-audit-h"><div class="pd-head"><h3 class="pd-h3" id="pd-audit-h">Audit log (last 100 changes)</h3><button type="button" class="pd-btn secondary xs" data-act="audit-reload">Refresh</button></div><div class="pd-audit"><p class="pd-muted">Loading…</p></div></section>';
+    h += '<section class="pd-sec" aria-labelledby="pd-audit-h"><div class="pd-head"><h3 class="pd-h3" id="pd-audit-h">Audit log (last 100 changes)</h3><div class="pd-inline"><label for="pd-audit-filter">Show</label><select id="pd-audit-filter" data-on="audit-filter">' +
+      [['', 'all changes'], ['ai', 'changes made via AI'], ['access', 'via AI, with the AI requests (access log)']].map(([v, l]) => '<option value="' + v + '"' + (auditFilter === v ? ' selected' : '') + '>' + esc(l) + '</option>').join('') +
+      '</select><button type="button" class="pd-btn secondary xs" data-act="audit-reload">Refresh</button></div></div><div class="pd-audit"><p class="pd-muted">Loading…</p></div></section>';
     box.innerHTML = h;
     syncNewFieldForm();
   }
@@ -1407,18 +1409,58 @@
     form.multi.disabled = kind === 'person';
     if (kind === 'person') form.multi.checked = false;
   }
+  // The audit view's filter (contract §9.5, §15.11): '' every change,
+  // 'ai' only those made through the Portcullis MCP (?via=ai), 'access'
+  // those merged with the gate's access-log lines (&include=access).
+  let auditFilter = '';
+  function auditDecision(d) {
+    d = String(d || '');
+    if (d === 'allow') return '<span class="pd-pill ok">allowed</span>';
+    if (d === 'rate_limited') return '<span class="pd-pill warn">rate limited</span>';
+    if (d.startsWith('confirm:')) return '<span class="pd-pill info">waiting for confirmation</span>';
+    if (d.startsWith('deny:')) return '<span class="pd-pill bad">denied: ' + esc(d.slice(5)) + '</span>';
+    return '<span class="pd-pill">' + esc(d) + '</span>';
+  }
+  function auditEntryRow(e) {
+    const cls = e.result === 'ok' ? 'ok' : (e.result === 'refused' ? 'warn' : 'bad');
+    return '<tr><td class="pd-muted pd-nowrap">' + esc(fmtTime(e.time)) + '</td><td>' + esc(e.actor) +
+      (e.via === 'ai' ? '<div><span class="pd-pill info" title="Made through the Portcullis MCP">via AI</span>' + (e.client ? '<span class="pd-muted">' + esc(e.client) + '</span>' : '') + '</div>' : '') +
+      '</td><td>' + esc(e.action) + (e.detail ? '<div class="pd-muted">' + esc(e.detail) + '</div>' : '') + '</td><td>' + esc(e.target) + '</td>' +
+      '<td><span class="pd-pill ' + cls + '">' + esc(e.result) + '</span>' + (e.error ? '<div class="pd-muted">' + esc(e.error) + '</div>' : '') + '</td></tr>';
+  }
+  // An access-log line (§15.8): who, through which client, what (the
+  // aggregate's <instance>__<tool> name, or the method), the decision.
+  function auditAccessRow(l) {
+    const what = l.tool ? (l.instance ? l.instance + '__' + l.tool : l.tool) : l.method;
+    return '<tr class="pd-access"><td class="pd-muted pd-nowrap">' + esc(fmtTime(l.time)) + '</td><td>' + esc(l.user || '(no valid token)') +
+      '<div><span class="pd-pill">AI request</span>' + (l.client ? '<span class="pd-muted">' + esc(l.client) + '</span>' : '') + '</div></td>' +
+      '<td><code>' + esc(what) + '</code><div class="pd-muted">' + esc(l.via) + ' · ' + esc(l.method) + '</div></td><td>' + esc(l.resource) + '</td>' +
+      '<td>' + auditDecision(l.decision) + (l.upstream_status ? '<div class="pd-muted">app answered ' + esc(l.upstream_status) + '</div>' : '') + '</td></tr>';
+  }
   async function loadAudit() {
     const box = root.querySelector('.pd-audit');
     if (!box) return;
+    const url = '/api/directory/audit' + (auditFilter === 'ai' ? '?via=ai' : auditFilter === 'access' ? '?via=ai&include=access' : '');
+    let note = '';
     try {
-      const entries = await api('GET', '/api/directory/audit');
-      if (!entries.length) { box.innerHTML = '<p class="pd-muted">No changes yet.</p>'; return; }
-      let h = '<table class="pd-table"><thead><tr><th scope="col">Time</th><th scope="col">Who</th><th scope="col">Action</th><th scope="col">Target</th><th scope="col">Result</th></tr></thead><tbody>';
-      for (const e of entries) {
-        const cls = e.result === 'ok' ? 'ok' : (e.result === 'refused' ? 'warn' : 'bad');
-        h += '<tr><td class="pd-muted pd-nowrap">' + esc(fmtTime(e.time)) + '</td><td>' + esc(e.actor) + '</td><td>' + esc(e.action) +
-          (e.detail ? '<div class="pd-muted">' + esc(e.detail) + '</div>' : '') + '</td><td>' + esc(e.target) + '</td>' +
-          '<td><span class="pd-pill ' + cls + '">' + esc(e.result) + '</span>' + (e.error ? '<div class="pd-muted">' + esc(e.error) + '</div>' : '') + '</td></tr>';
+      let items;
+      try {
+        items = await api('GET', url);
+      } catch (err) {
+        // The gate's access log can't be read (no gate data directory,
+        // 503): the audit entries alone, said so.
+        if (auditFilter !== 'access' || err.status !== 503) throw err;
+        note = '<p class="pd-muted">The AI access log can\'t be read right now (' + esc(errText(err)) + '): showing the changes made via AI only.</p>';
+        items = await api('GET', '/api/directory/audit?via=ai');
+      }
+      if (!items.length) {
+        box.innerHTML = note + '<p class="pd-muted">' + (auditFilter ? 'Nothing made via AI yet.' : 'No changes yet.') + '</p>';
+        return;
+      }
+      let h = note + '<table class="pd-table"><thead><tr><th scope="col">Time</th><th scope="col">Who</th><th scope="col">Action</th><th scope="col">Target</th><th scope="col">Result</th></tr></thead><tbody>';
+      for (const it of items) {
+        if (it.source === 'access') h += it.line ? auditAccessRow(it.line) : '';
+        else h += auditEntryRow(it.source === 'audit' ? (it.entry || {}) : it);
       }
       box.innerHTML = h + '</tbody></table>';
     } catch (err) {
@@ -1886,6 +1928,7 @@
     if (t.name === 'kind' && t.form && t.form.dataset.form === 'new-field') { syncNewFieldForm(); return; }
     const on = t.dataset && t.dataset.on;
     if (on === 'org-field') { orgField = t.value; renderOrg(); return; }
+    if (on === 'audit-filter') { auditFilter = t.value; loadAudit(); return; }
     if (!imp) return;
     if (on === 'imp-show') { imp.show[t.value] = t.checked; renderImport(); }
     else if (on === 'imp-tick') {

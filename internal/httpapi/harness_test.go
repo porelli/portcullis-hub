@@ -36,6 +36,7 @@ import (
 	"github.com/portcullis/hub/internal/freshauth"
 	"github.com/portcullis/hub/internal/hub"
 	"github.com/portcullis/hub/internal/keycloak"
+	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/state"
 
 	"filippo.io/age"
@@ -104,6 +105,17 @@ import (
 // access log has alice's recent requests (one tool name carrying
 // markup) and one of bob's.
 //
+// Admin AI UI (plan 4 Task 22): the MCP listener is on (gate_present);
+// ai-chat (the templates package's AI page fixture: openai_compatible and
+// anthropic) selects two model providers, "ollama" (no key: optional)
+// and "claude" (a label carrying markup, its key set); users_ai-chat:
+// alice, bob, carol. The AI tab's four states: plain (the templates
+// package's unsupported fixture, with an alternative not vetted by
+// Portcullis), aiapp-off (an enabled aiapp instance, companions off),
+// aiapp (on) and aiapp-mtls (policy mTLS: refused, LoA 3). Two audit
+// entries via AI (Claude Code): aiapp-off's mode change and the
+// refused switch-on of aiapp-mtls.
+//
 // The directory: root (admin), dana, alice, bob, carol, dave, erin and
 // user01-user55; groups office_milan (alice, bob, erin), it_staff (bob,
 // user07), helpers, and the fixtures' access and admin groups.
@@ -143,6 +155,7 @@ func TestHarness(t *testing.T) {
 	extra["smbfixture"] = harnessSMBFixture(t)
 	// AI support (plan 4 Task 21): aiapp and homeauto (an app_oauth app).
 	extra["aiapp"], extra["homeauto"] = harnessAIFixtures(t)
+	extra["ai-chat"], extra["plain"] = harnessAIPageFixtures(t)
 	aiDir := t.TempDir()
 	aiRecipient, aiGateData := harnessAIFiles(t, aiDir)
 	paddr := os.Getenv("HUB_HARNESS_PEOPLE_ADDR")
@@ -159,7 +172,10 @@ func TestHarness(t *testing.T) {
 		extra: extra,
 		engine: func(f *fakeEngine) hub.Engine {
 			eng = &harnessEngine{fakeEngine: f, disk: disk,
-				running: map[string][]string{"hookapp": {"app"}, "entryapp": {"app"}, "photos": {"server"}, "samba": {"samba"}, "smbfixture": {"smb"}}}
+				running: map[string][]string{"hookapp": {"app"}, "entryapp": {"app"}, "photos": {"server"}, "samba": {"samba"}, "smbfixture": {"smb"},
+					// aiapp's hooks run in its app service (the tok-mcp
+					// companion isn't running: the doctor's AI finding).
+					"aiapp": {"app"}}}
 			return eng
 		},
 		cfg: func(c *hub.Config) {
@@ -167,6 +183,7 @@ func TestHarness(t *testing.T) {
 			c.SecretsDir = secrets
 			c.MCPGateRecipientFile = aiRecipient
 			c.MCPGateDataDir = aiGateData
+			c.MCPListener = true
 		},
 		seed: func(st *state.AppState) {
 			seedAIState(st)
@@ -182,7 +199,7 @@ func TestHarness(t *testing.T) {
 		},
 	})
 	h := e.s.Hub
-	for _, id := range append(slices.Clone(harnessFixtures), "photos", "samba", "smbfixture", "aiapp", "homeauto") {
+	for _, id := range append(slices.Clone(harnessFixtures), "photos", "samba", "smbfixture", "aiapp", "homeauto", "ai-chat", "plain") {
 		if h.Template(id) == nil {
 			t.Fatalf("fixture %s not loaded (see the log)", id)
 		}
@@ -210,6 +227,7 @@ func TestHarness(t *testing.T) {
 	if _, err := h.DeleteInstance("grafana-old", "grafana-old", directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
+	seedAIAdmin(t, h)
 	seedSettings(t, h, eng)
 	seedEntries(t, e)
 	seedFolders(t, h, disk)
@@ -307,6 +325,9 @@ func seedDirectory(e *instEnv) {
 	e.ll.AddGroup("users_aiapp", "alice", "bob")
 	e.ll.AddGroup("admin_aiapp", "root")
 	e.ll.AddGroup("users_homeauto", "alice")
+	e.ll.AddGroup("users_ai-chat", "alice", "bob", "carol")
+	e.ll.AddGroup("users_aiapp-off", "alice", "carol")
+	e.ll.AddGroup("users_aiapp-mtls", "bob")
 	e.ll.AddGroup("admin_homeauto", "root")
 	e.ll.AddGroup("users_dash", "alice", "bob")
 	e.ll.AddGroup("admin_dash", "root")
@@ -1089,8 +1110,74 @@ func seedAIState(st *state.AppState) {
 	st.AIInstances = map[string]state.AIInstance{
 		"aiapp":    {Companions: map[string]state.AICompanion{"tok": {Enabled: true, Mode: "read_write"}, "hdr": {Enabled: true, Mode: "read_only"}}},
 		"homeauto": {Companions: map[string]state.AICompanion{"oauth": {Enabled: true, Mode: "read_write"}}},
+		// The AI page's provider selection (Task 23 writes it through the
+		// API; seedAIAdmin adds the providers).
+		"ai-chat": {Providers: []string{"ollama", "claude"}},
 	}
 }
+
+// harnessAIPageFixtures: the templates package's AI page (ai-chat, with
+// an access group) and its unsupported fixture (plain).
+func harnessAIPageFixtures(t *testing.T) (chat, plain [2]string) {
+	t.Helper()
+	read := func(dir string) [2]string {
+		m, err := os.ReadFile(filepath.Join("..", "templates", "testdata", "ai", dir, "manifest.yaml"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		c, err := os.ReadFile(filepath.Join("..", "templates", "testdata", "ai", dir, "compose.yml"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return [2]string{string(m), string(c)}
+	}
+	chat, plain = read("chat"), read("unsupported")
+	chat[0] = strings.Replace(chat[0], "access_group: users_chat", "access_group: users_ai-chat", 1)
+	return chat, plain
+}
+
+// seedAIAdmin seeds the admin AI UI (Task 22): two model providers (the
+// claude one with its key set) selected by ai-chat, the instances
+// aiapp-off (enabled, companions off) and aiapp-mtls (policy mTLS), and
+// two audit entries made via AI.
+func seedAIAdmin(t *testing.T, h *hub.Hub) {
+	t.Helper()
+	root := directory.Human("root")
+	for _, p := range []state.ModelProvider{
+		{Name: "ollama", Label: "Ollama on the GPU box", Kind: "openai_compatible", BaseURL: "http://gpu.lan:11434/v1",
+			Models: state.ProviderModels{Fetch: true, List: []string{"llama3.3:70b", "qwen3:32b"}}, Credentials: "admin"},
+		{Name: "claude", Label: "Anthropic <b>Claude</b>", Kind: "anthropic",
+			Models: state.ProviderModels{List: []string{"claude-opus-4-5"}}, Credentials: "admin"},
+	} {
+		if _, err := h.AddModelProvider(p, root); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := h.SetProviderSecret("claude", "key", []byte("sk-ant-HARNESS-NEVER-SHOWN"), root); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"aiapp-off", "aiapp-mtls"} {
+		if _, err := h.CreateInstanceAs("aiapp", id, nil, root); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := h.Enable("aiapp-off"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.SaveSettings("aiapp-mtls", hub.SettingsUpdate{Policy: &policy.AuthPolicy{Factors: []string{"mtls"}, Op: "any"}}, root); err != nil {
+		t.Fatal(err)
+	}
+	viaAI := directory.Actor{User: "root", Via: directory.ViaAI, Client: keycloak.AIClientIDs.ClaudeCode}
+	ctx := context.Background()
+	if _, err := h.UpdateInstanceAI(ctx, "aiapp-off", hub.InstanceAIUpdate{Companions: map[string]hub.CompanionUpdate{"tok": {Mode: ptrTo("read_only")}}}, viaAI); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.UpdateInstanceAI(ctx, "aiapp-mtls", hub.InstanceAIUpdate{Companions: map[string]hub.CompanionUpdate{"tok": {Enabled: ptrTo(true)}}}, viaAI); err == nil {
+		t.Fatal("aiapp-mtls: switching AI on was not refused")
+	}
+}
+
+func ptrTo[T any](v T) *T { return &v }
 
 // seedAI wires the AI Keycloak fake (alice's and bob's connections) and
 // marks the three AI clients healthy.
