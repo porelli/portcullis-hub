@@ -8,7 +8,6 @@ import (
 	"maps"
 	"net/http"
 	"net/url"
-	"slices"
 
 	"github.com/Nerzal/gocloak/v14"
 
@@ -152,56 +151,23 @@ func (c *Client) EnsureFreshAuthClient(ctx context.Context, redirectURI, webOrig
 }
 
 // ensureFreshAuthScopes makes the client's default scopes exactly
-// FreshAuthScopes and its optional scopes none (attach first, then detach).
+// FreshAuthScopes and its optional scopes none.
 func (c *Client) ensureFreshAuthScopes(ctx context.Context, tok string, cl *gocloak.Client) error {
-	g := c.api()
-	realmScopes, err := g.GetClientScopes(ctx, tok, Realm)
+	ids, err := c.scopeIDs(ctx, tok)
 	if err != nil {
-		return opErr("list client scopes", err)
-	}
-	ids := map[string]string{}
-	for _, sc := range realmScopes {
-		if sc != nil {
-			ids[str(sc.Name)] = str(sc.ID)
-		}
-	}
-	cid, name := url.PathEscape(str(cl.ID)), str(cl.ClientID)
-	for _, s := range FreshAuthScopes {
-		if ids[s] == "" {
-			return fmt.Errorf("client %s: the Keycloak realm has no %q client scope (run `portcullis keycloak configure`); fresh auth refuses every proof until it exists", name, s)
-		}
-	}
-	// Optional scopes go first: Keycloak refuses a scope that is both.
-	for _, s := range cl.OptionalClientScopes {
-		if ids[s] == "" {
-			continue
-		}
-		if err := g.RemoveOptionalScopeFromClient(ctx, tok, Realm, cid, url.PathEscape(ids[s])); err != nil {
-			return opErr("detach optional scope "+s+" from client "+name, err)
-		}
+		return err
 	}
 	for _, s := range FreshAuthScopes {
-		if slices.Contains(cl.DefaultClientScopes, s) {
-			continue
-		}
-		if err := g.AddDefaultScopeToClient(ctx, tok, Realm, cid, url.PathEscape(ids[s])); err != nil {
-			return opErr("attach scope "+s+" to client "+name, err)
+		if ids[s] == "" {
+			return fmt.Errorf("client %s: the Keycloak realm has no %q client scope (run `portcullis keycloak configure`); fresh auth refuses every proof until it exists", str(cl.ClientID), s)
 		}
 	}
-	for _, s := range cl.DefaultClientScopes {
-		if slices.Contains(FreshAuthScopes, s) || ids[s] == "" {
-			continue
-		}
-		if err := g.RemoveDefaultScopeFromClient(ctx, tok, Realm, cid, url.PathEscape(ids[s])); err != nil {
-			return opErr("detach default scope "+s+" from client "+name, err)
-		}
-	}
-	return nil
+	return c.exactScopes(ctx, tok, cl, ids, FreshAuthScopes, nil)
 }
 
-// sameFreshMapper: the same type and exactly want's config values (keys
+// sameMapper: the same type and exactly want's config values (keys
 // Keycloak adds itself are ignored).
-func sameFreshMapper(have, want gocloak.ProtocolMapperRepresentation) bool {
+func sameMapper(have, want gocloak.ProtocolMapperRepresentation) bool {
 	if str(have.ProtocolMapper) != str(want.ProtocolMapper) || str(have.Protocol) != str(want.Protocol) {
 		return false
 	}

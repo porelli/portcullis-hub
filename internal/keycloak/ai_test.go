@@ -158,6 +158,7 @@ func TestEnsureAIClient(t *testing.T) {
 		{ClientID: keycloak.AIClientIDs.Claude, Public: true, RedirectURIs: claude, OfflineIdle: time.Hour, OfflineMax: month, Owner: keycloak.AIOwner},
 		{ClientID: keycloak.AIClientIDs.Claude, Public: true, RedirectURIs: claude, OfflineIdle: week, OfflineMax: 91 * 24 * time.Hour, Owner: keycloak.AIOwner},
 		{ClientID: keycloak.AIClientIDs.Claude, Public: true, RedirectURIs: claude, OfflineIdle: week, OfflineMax: month, Owner: keycloak.AIOwner, OptionalScopes: []string{"profile"}},
+		{ClientID: keycloak.AIClientIDs.Claude, Public: true, RedirectURIs: claude, OfflineIdle: 20 * 24 * time.Hour, OfflineMax: 10 * 24 * time.Hour, Owner: keycloak.AIOwner},
 		{ClientID: "portcullis-ai-other", Secret: "s", RedirectURIs: []string{"https://chat.example.org/cb"}, OfflineIdle: week, OfflineMax: month, Owner: "chat"},
 		{ClientID: keycloak.ForwardAuthClient, Secret: "s", RedirectURIs: []string{"https://chat.example.org/cb"}, OfflineIdle: week, OfflineMax: month, Owner: "chat"},
 		{ClientID: "chat", Public: true, RedirectURIs: []string{"https://chat.example.org/cb"}, OfflineIdle: week, OfflineMax: month, Owner: "chat"},
@@ -244,6 +245,14 @@ func TestEnsureAIClientAppClient(t *testing.T) {
 	}
 	if err := c.UpdateClientACR(ctx, app); !errors.As(err, &ce) {
 		t.Errorf("UpdateClientACR(ai_client) = %v, want *ConflictError", err)
+	}
+	// Nor do the setting claims (G9: no claim but the username; a
+	// claim mapper would be deleted again by every ensure).
+	if err := c.EnsureSettingClaims(ctx, "librechat-mcp", "librechat", []keycloak.SettingClaim{{Attr: "ps-0123456789ab", Claim: "quota", JSONType: "int"}}); !errors.As(err, &ce) {
+		t.Errorf("EnsureSettingClaims(ai_client) = %v, want *ConflictError", err)
+	}
+	if err := c.RemoveSettingClaims(ctx, "librechat-mcp", "librechat", []string{"ps-0123456789ab"}); !errors.As(err, &ce) {
+		t.Errorf("RemoveSettingClaims(ai_client) = %v, want *ConflictError", err)
 	}
 	_ = c.EnsureAttributeMappers(ctx, []keycloak.AttrField{{Name: "office"}})
 	checkAIClient(t, kc, "librechat-mcp", false, "librechat", spec.RedirectURIs, []string{"mcp:all"})
@@ -504,11 +513,14 @@ func TestAIConnectionsAndRevoke(t *testing.T) {
 	if cc := conns[1]; cc.Client != keycloak.AIClientIDs.ClaudeCode || cc.Consented != nil || cc.LastUsed == nil {
 		t.Errorf("claude-code connection %+v", cc)
 	}
-	// The max lifespan caps the idle time.
-	kc.AddOfflineSession("alice", t0.Add(-29*24*time.Hour), last, claude)
-	conns, _ = c.AIConnections(ctx, "alice", all[:1])
-	if len(conns) != 1 || !conns[0].Expires.Equal(last.Add(week)) {
-		t.Errorf("expires %+v", conns)
+	// The max lifespan caps the idle time: carol's only session started
+	// 29 days ago, so it ends at start + 30 days, before last use + 7.
+	kc.Import("carol")
+	start := t0.Add(-29 * 24 * time.Hour)
+	kc.AddOfflineSession("carol", start, last, claude)
+	conns, err = c.AIConnections(ctx, "carol", all[:1])
+	if err != nil || len(conns) != 1 || conns[0].Expires == nil || !conns[0].Expires.Equal(start.Add(month)) {
+		t.Errorf("capped session: %s, want expires %v", fmtConns(conns), start.Add(month))
 	}
 	if conns, err := c.AIConnections(ctx, "nobody", all); err != nil || len(conns) != 0 {
 		t.Errorf("unknown user: %v %v", conns, err)
@@ -548,5 +560,52 @@ func TestAIConnectionsAndRevoke(t *testing.T) {
 	}
 	if got := strings.Join(kc.UserConsents("alice"), ","); got != "gitea" {
 		t.Errorf("gitea consent touched: %s", got)
+	}
+}
+
+// A scope or mapper step that fails on a client still holding a scope it
+// must not have leaves it disabled; the next good ensure re-enables it.
+func TestEnsureAIClientFailsClosed(t *testing.T) {
+	ctx := context.Background()
+	kc := aiRealm(t)
+	c := keycloak.New(kc.HTTP.URL, "admin", "admin")
+	id := keycloak.AIClientIDs.Claude
+	if err := c.EnsureAIClient(ctx, hubAISpec(id)); err != nil {
+		t.Fatal(err)
+	}
+	uuid := kc.ClientByClientID(id).ID
+	enabled := func() bool { e := kc.ClientByClientID(id).Enabled; return e != nil && *e }
+	if !enabled() {
+		t.Fatal("not enabled")
+	}
+	kc.UpdateClient(uuid, func(cl *kctest.Client) { cl.DefaultClientScopes = append(cl.DefaultClientScopes, "profile", "groups") })
+	kc.SetFailPrefix("DELETE /admin/realms/portcullis/clients/" + uuid + "/default-client-scopes")
+	if err := c.EnsureAIClient(ctx, hubAISpec(id)); err == nil {
+		t.Fatal("failing detach: no error")
+	}
+	if enabled() {
+		t.Error("client with profile/groups left enabled after a failed detach")
+	}
+	// A failing mapper step with an extra mapper: disabled too.
+	kc.SetFailPrefix("")
+	if err := c.EnsureAIClient(ctx, hubAISpec(id)); err != nil {
+		t.Fatal(err)
+	}
+	if !enabled() {
+		t.Error("not re-enabled by a good ensure")
+	}
+	checkAIClient(t, kc, id, true, keycloak.AIOwner, keycloak.ClaudeRedirectURIs, nil)
+	kc.AddClientMapper(uuid, "groups", "oidc-group-membership-mapper", nil)
+	kc.SetFailPrefix("DELETE /admin/realms/portcullis/clients/" + uuid + "/protocol-mappers")
+	if err := c.EnsureAIClient(ctx, hubAISpec(id)); err == nil || enabled() {
+		t.Errorf("failing mapper delete: %v, enabled %v", err, enabled())
+	}
+	// A failure on a clean client (a missing mcp scope) keeps it enabled.
+	kc.SetFailPrefix("")
+	if err := c.EnsureAIClient(ctx, hubAISpec(id)); err != nil || !enabled() {
+		t.Fatalf("re-enable: %v", err)
+	}
+	if err := c.EnsureAIClient(ctx, hubAISpec(id, "mcp:nothere")); err == nil || !enabled() {
+		t.Errorf("clean client, missing scope: %v, enabled %v", err, enabled())
 	}
 }

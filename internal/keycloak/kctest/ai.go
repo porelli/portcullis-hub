@@ -121,7 +121,8 @@ func ms(t time.Time) int64 { return t.UnixMilli() }
 // sessions, like Keycloak:
 //   - GET/PUT/DELETE /default-default-client-scopes[/{id}] and
 //     /default-optional-client-scopes[/{id}];
-//   - GET /users/{id}/consents; DELETE /users/{id}/consents/{clientId}
+//   - GET /users/{id}/consents (also, like Keycloak, an entry without
+//     createdDate for each client holding only offline tokens); DELETE /users/{id}/consents/{clientId}
 //     revokes the consent AND the client's offline tokens (404 when
 //     there was neither);
 //   - GET /users/{id}/offline-sessions/{clientUuid}.
@@ -200,6 +201,18 @@ func (s *Server) serveAI(w http.ResponseWriter, r *http.Request) bool {
 			out = append(out, map[string]interface{}{"clientId": k, "grantedClientScopes": scopes,
 				"createdDate": ms(c.Created), "lastUpdatedDate": ms(c.Updated)})
 		}
+		offlineOnly := map[string]bool{}
+		for _, os := range u.OfflineSessions {
+			for _, cid := range os.Clients {
+				if u.Consents[cid] == nil {
+					offlineOnly[cid] = true
+				}
+			}
+		}
+		for _, cid := range sortedSet(offlineOnly) {
+			out = append(out, map[string]interface{}{"clientId": cid, "grantedClientScopes": []string{},
+				"additionalGrants": []map[string]string{{"client": "Offline Token", "key": "Offline Token"}}})
+		}
 		json.NewEncoder(w).Encode(out)
 	case parts[1] == "consents" && len(parts) == 3 && r.Method == "DELETE":
 		clientID := parts[2]
@@ -240,6 +253,15 @@ func (s *Server) serveAI(w http.ResponseWriter, r *http.Request) bool {
 		http.NotFound(w, r)
 	}
 	return true
+}
+
+func sortedSet(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func (s *Server) scopeByName(name string) *ClientScope {

@@ -102,6 +102,7 @@ type Client struct {
 	StandardFlowEnabled                *bool             `json:"standardFlowEnabled,omitempty"`
 	FullScopeAllowed                   *bool             `json:"fullScopeAllowed,omitempty"`
 	ConsentRequired                    *bool             `json:"consentRequired,omitempty"`
+	Enabled                            *bool             `json:"enabled,omitempty"`
 	BearerOnly                         *bool             `json:"bearerOnly,omitempty"`
 	// ProtocolMappers: the client's own protocol mappers (a client PUT
 	// keeps them; the protocol-mappers sub-resource changes them).

@@ -230,6 +230,9 @@ func checkAISpec(s AIClientSpec) error {
 	if s.OfflineMax < MinOfflineMax || s.OfflineMax > MaxOfflineMax || s.OfflineMax%time.Second != 0 {
 		return fmt.Errorf("client %s: offline max %v outside 1–90 days", id, s.OfflineMax)
 	}
+	if s.OfflineIdle > s.OfflineMax {
+		return fmt.Errorf("client %s: offline idle %v longer than the max %v", id, s.OfflineIdle, s.OfflineMax)
+	}
 	return checkMCPSet(id, isHubAIClient(id), s.OptionalScopes)
 }
 
@@ -334,7 +337,11 @@ func (c *Client) putClientExact(ctx context.Context, tok string, cl *gocloak.Cli
 // the Hub's three get no flow overrides. An existing client of that id
 // tagged with anyone but s.Owner (or untagged) is a *ConflictError, left
 // alone. A realm without basic, acr, offline_access or one of the mcp:*
-// scopes is an error (EnsureMCPScope them first).
+// scopes is an error (EnsureMCPScope them first). Scopes and mapper are
+// reconciled before the client PUT; if one of those steps fails while the
+// client still holds a disallowed scope or mapper, it is PUT disabled and
+// the error returned (re-enabled by the next successful ensure). Any
+// error: the caller keeps the client out of mcp-gate.json's clients.
 func (c *Client) EnsureAIClient(ctx context.Context, s AIClientSpec) error {
 	if err := checkAISpec(s); err != nil {
 		return err
@@ -365,19 +372,63 @@ func (c *Client) EnsureAIClient(ctx context.Context, s AIClientSpec) error {
 	if owner := existing.Attributes[OwnerAttr]; owner != s.Owner {
 		return &ConflictError{ClientID: s.ClientID, TemplateID: s.Owner, Owner: owner}
 	}
-	withAISettings(existing, s)
-	existing.ProtocolMappers = nil // the sub-resource below does those
-	if err := c.putClientExact(ctx, tok, existing); err != nil {
-		return err
+	// Scopes and mapper first, then the PUT that keeps it enabled: a
+	// client with a scope or mapper it must not have is never (re-)enabled.
+	def, opt := AIDefaultScopes, append([]string{OfflineAccessScope}, s.OptionalScopes...)
+	if err := c.reconcileAIScopesAndMapper(ctx, tok, existing, def, opt); err != nil {
+		return c.disableIfDisallowed(ctx, tok, s, def, opt, err)
 	}
+	withAISettings(existing, s)
+	existing.ProtocolMappers = nil // the sub-resource above does those
+	return c.putClientExact(ctx, tok, existing)
+}
+
+func (c *Client) reconcileAIScopesAndMapper(ctx context.Context, tok string, cl *gocloak.Client, def, opt []string) error {
 	ids, err := c.scopeIDs(ctx, tok)
 	if err != nil {
 		return err
 	}
-	if err := c.exactScopes(ctx, tok, existing, ids, AIDefaultScopes, append([]string{OfflineAccessScope}, s.OptionalScopes...)); err != nil {
+	if err := c.exactScopes(ctx, tok, cl, ids, def, opt); err != nil {
 		return err
 	}
-	return c.ensureOnlyClientMapper(ctx, tok, existing, aiUsernameMapper())
+	return c.ensureOnlyClientMapper(ctx, tok, cl, aiUsernameMapper())
+}
+
+// disableIfDisallowed: a failed scope or mapper step (cause) leaves the
+// client disabled when, read back, it still holds a scope outside
+// def/opt or any client mapper but the username mapper (or can't be read
+// back): fail closed until the next successful ensure re-enables it.
+// cause is returned either way.
+func (c *Client) disableIfDisallowed(ctx context.Context, tok string, s AIClientSpec, def, opt []string, cause error) error {
+	cl, err := c.findClient(ctx, tok, s.ClientID)
+	if err != nil {
+		return errors.Join(cause, err)
+	}
+	bad := false
+	for _, n := range cl.DefaultClientScopes {
+		bad = bad || !slices.Contains(def, n)
+	}
+	for _, n := range cl.OptionalClientScopes {
+		bad = bad || !slices.Contains(opt, n)
+	}
+	ms, err := c.clientMappers(ctx, tok, cl)
+	if err != nil {
+		bad = true
+	}
+	for _, m := range ms {
+		bad = bad || str(m.Name) != AIUsernameMapper
+	}
+	if !bad {
+		return cause
+	}
+	withAISettings(cl, s)
+	cl.Enabled = gocloak.BoolP(false)
+	cl.ProtocolMappers = nil
+	if err := c.putClientExact(ctx, tok, cl); err != nil {
+		return errors.Join(cause, err)
+	}
+	log.Printf("Keycloak AI client %s disabled: it keeps a scope or mapper it must not have", s.ClientID)
+	return fmt.Errorf("client %s disabled (a scope or mapper it must not have is left): %w", s.ClientID, cause)
 }
 
 // scopeIDs maps the realm's client scope names to ids.
@@ -451,7 +502,7 @@ func (c *Client) ensureOnlyClientMapper(ctx context.Context, tok string, cl *goc
 	}
 	kept := false
 	for _, m := range have {
-		if !kept && str(m.Name) == str(want.Name) && sameFreshMapper(m, want) {
+		if !kept && str(m.Name) == str(want.Name) && sameMapper(m, want) {
 			kept = true
 			continue
 		}
@@ -673,7 +724,7 @@ func (c *Client) ensureOnlyScopeMapper(ctx context.Context, tok, sid, name strin
 	}
 	kept := false
 	for _, m := range have {
-		if !kept && str(m.Name) == str(want.Name) && sameFreshMapper(m, want) {
+		if !kept && str(m.Name) == str(want.Name) && sameMapper(m, want) {
 			kept = true
 			continue
 		}
