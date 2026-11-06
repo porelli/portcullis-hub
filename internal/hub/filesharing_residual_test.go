@@ -1,7 +1,6 @@
 package hub
 
 import (
-	"github.com/portcullis/hub/internal/directory"
 	"context"
 	"os"
 	"path/filepath"
@@ -13,6 +12,7 @@ import (
 	"time"
 
 	"github.com/portcullis/hub/internal/credentials"
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/templates"

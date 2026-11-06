@@ -462,7 +462,7 @@ func (h *Hub) auditVoidLocked(instance string, n int) {
 	if h.audit == nil {
 		return
 	}
-	e := directory.AuditEntry{Actor: purgeActor, Via: "", Client: "", Action: "credential.void_restore", Target: instance, Detail: fmt.Sprintf("count=%d reason=%s", n, state.CredentialReasonRestore), Result: "ok"}
+	e := directory.AuditEntry{Actor: purgeActor, Action: "credential.void_restore", Target: instance, Detail: fmt.Sprintf("count=%d reason=%s", n, state.CredentialReasonRestore), Result: "ok"}
 	if err := h.audit.Append(e); err != nil {
 		log.Printf("audit: %v", err)
 	}

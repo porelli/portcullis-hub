@@ -8,8 +8,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/portcullis/hub/internal/templates"
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/templates"
 )
 
 // Creating an instance from the API (contract §11.1–11.3, §11.7).
@@ -72,7 +72,7 @@ func (h *Hub) CreateInstanceAs(templateID, id string, hosts map[string]string, a
 	}
 	if groupsAPI != nil && len(groups) > 0 {
 		if err := groupsAPI.ResolveActor(context.Background(), actor); err != nil {
-			return res, fmt.Errorf("the acting admin %q can't create the instance's groups — nothing was created: %w", actor, err)
+			return res, fmt.Errorf("the acting admin %q can't create the instance's groups — nothing was created: %w", actor.User, err)
 		}
 	}
 	if err := h.CreateInstance(templateID, id, hosts); err != nil {
@@ -117,7 +117,7 @@ func (h *Hub) CreateInstanceAs(templateID, id string, hosts map[string]string, a
 	if v, ok := h.InstanceView(id); ok {
 		res.InstanceView = v
 	}
-	log.Printf("instance %s of %s created by %s", id, templateID, actor)
+	log.Printf("instance %s of %s created by %s", id, templateID, actor.User)
 	return res, nil
 }
 

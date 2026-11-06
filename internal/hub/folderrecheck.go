@@ -11,8 +11,8 @@ import (
 	"golang.org/x/text/language"
 	"golang.org/x/text/message"
 
-	"github.com/portcullis/hub/internal/doctor"
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/doctor"
 	"github.com/portcullis/hub/internal/folderfix"
 )
 

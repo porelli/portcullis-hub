@@ -1,7 +1,6 @@
 package hub
 
 import (
-	"github.com/portcullis/hub/internal/directory"
 	"context"
 	"errors"
 	"os"
@@ -12,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/settings"
 	"github.com/portcullis/hub/internal/templates"
@@ -76,7 +76,7 @@ func headerEnable(t *testing.T, f *fixture) {
 	settle(f)
 	if _, err := f.h.SaveSettings(headerID, SettingsUpdate{Person: map[string]PersonChange{
 		"role": {Default: raw("Viewer"), Rows: rows("{{ADMIN_GROUP}}", "Admin", "editors", "Editor")},
-	}}, "admin"); err != nil {
+	}}, directory.Human("admin")); err != nil {
 		t.Fatal(err)
 	}
 	settle(f)
@@ -222,7 +222,7 @@ func TestHeaderDeliveryNoRestart(t *testing.T) {
 	before := len(f.runner.Calls())
 	res, err := f.h.SaveSettings(headerID, SettingsUpdate{Person: map[string]PersonChange{
 		"role": {Default: raw("Viewer"), Rows: rows("{{ADMIN_GROUP}}", "Admin", "editors", "Admin")},
-	}}, "admin")
+	}}, directory.Human("admin"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -415,7 +415,7 @@ func TestHeaderDemotionWithDirectoryStateDown(t *testing.T) {
 	}, nil)
 	res, err := f.h.SaveSettings(headerID, SettingsUpdate{Person: map[string]PersonChange{
 		"role": {Default: raw("Viewer"), Rows: rows("{{ADMIN_GROUP}}", "Admin")},
-	}}, "admin")
+	}}, directory.Human("admin"))
 	if err != nil {
 		t.Fatal(err)
 	}

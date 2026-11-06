@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/portcullis/hub/internal/domains"
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/domains"
 	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"

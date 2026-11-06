@@ -1,7 +1,6 @@
 package hub
 
 import (
-	"github.com/portcullis/hub/internal/directory"
 	"bytes"
 	"encoding/json"
 	"errors"
@@ -12,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/settings"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
@@ -182,7 +182,7 @@ func TestSaveRestartsOnlyWhenNeeded(t *testing.T) {
 	f.h.Wait()
 	before := ups(f, "immich")
 
-	res, err := f.h.SaveSettings("immich", SettingsUpdate{Values: vals("motd", directory.Human("hello"))}, "admin")
+	res, err := f.h.SaveSettings("immich", SettingsUpdate{Values: vals("motd", "hello")}, directory.Human("admin"))
 	f.h.Wait()
 	if err != nil {
 		t.Fatal(err)
@@ -194,7 +194,7 @@ func TestSaveRestartsOnlyWhenNeeded(t *testing.T) {
 		t.Errorf("a live option restarted the app (%d ups, was %d)", n, before)
 	}
 
-	res, err = f.h.SaveSettings("immich", SettingsUpdate{Values: vals("motd", "bye", "trash_days", 30)}, "admin")
+	res, err = f.h.SaveSettings("immich", SettingsUpdate{Values: vals("motd", "bye", "trash_days", 30)}, directory.Human("admin"))
 	f.h.Wait()
 	if err != nil {
 		t.Fatal(err)
@@ -207,7 +207,7 @@ func TestSaveRestartsOnlyWhenNeeded(t *testing.T) {
 	}
 
 	// Unchanged values, and a disabled instance: no restart.
-	res, err = f.h.SaveSettings("immich", SettingsUpdate{Values: vals("trash_days", 30)}, "admin")
+	res, err = f.h.SaveSettings("immich", SettingsUpdate{Values: vals("trash_days", 30)}, directory.Human("admin"))
 	f.h.Wait()
 	if err != nil || res.Effect != settings.EffectNone || len(res.Changed) != 0 || ups(f, "immich") != before+1 {
 		t.Errorf("unchanged: %+v %v", res, err)
@@ -218,7 +218,7 @@ func TestSaveRestartsOnlyWhenNeeded(t *testing.T) {
 	if err != nil || res.Effect != settings.EffectRestart || ups(f, "immich") != before+2 {
 		t.Errorf("port: %+v %v", res, err)
 	}
-	res, err = f.h.SaveSettings("immich", SettingsUpdate{Values: vals("uploads", directory.Human("/srv/up"))}, "admin")
+	res, err = f.h.SaveSettings("immich", SettingsUpdate{Values: vals("uploads", "/srv/up")}, directory.Human("admin"))
 	f.h.Wait()
 	if err != nil || res.Effect != settings.EffectRestart || ups(f, "immich") != before+3 {
 		t.Errorf("path: %+v %v", res, err)
@@ -390,7 +390,7 @@ func TestSettingsAudited(t *testing.T) {
 	if err := f.h.save("immich", SettingsUpdate{Values: vals("trash_days", 30)}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.h.SaveSettings("immich", SettingsUpdate{Values: vals("trash_days", 60)}, "alice"); err != nil {
+	if _, err := f.h.SaveSettings("immich", SettingsUpdate{Values: vals("trash_days", 60)}, directory.Human("alice")); err != nil {
 		t.Fatal(err)
 	}
 	e := audit.last()
@@ -404,7 +404,7 @@ func TestSettingsAudited(t *testing.T) {
 		t.Errorf("port entry = %+v", e)
 	}
 	n := len(audit.entries)
-	if _, err := f.h.SaveSettings("immich", SettingsUpdate{Values: vals("trash_days", directory.Human("x"))}, "bob"); statusOf(err) != 400 {
+	if _, err := f.h.SaveSettings("immich", SettingsUpdate{Values: vals("trash_days", "x")}, directory.Human("bob")); statusOf(err) != 400 {
 		t.Fatal(err)
 	}
 	if e := audit.last(); len(audit.entries) != n+1 || e.Action != "settings.change" || e.Target != "immich/trash_days" || e.Result != "refused" || e.Actor != "bob" {
@@ -412,7 +412,7 @@ func TestSettingsAudited(t *testing.T) {
 	}
 	// One entry per changed key; nothing for an unchanged one.
 	n = len(audit.entries)
-	if _, err := f.h.SaveSettings("immich", SettingsUpdate{Values: vals("trash_days", 60, "motd", "hi", "ml", true)}, "alice"); err != nil {
+	if _, err := f.h.SaveSettings("immich", SettingsUpdate{Values: vals("trash_days", 60, "motd", "hi", "ml", true)}, directory.Human("alice")); err != nil {
 		t.Fatal(err)
 	}
 	var got []string

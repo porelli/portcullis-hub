@@ -1262,7 +1262,7 @@ func (h *Hub) runAssign(id string, c *assignCalc, actor directory.Actor) (map[st
 	warnings := slices.Clone(c.plan.Warnings)
 	detail := fmt.Sprintf("add=%d remove=%d", c.adds, c.removes)
 	secrets := h.opSecrets(c.affected)
-	fb := &failCtx{id: id, actor: actor.User, secrets: secrets}
+	fb := &failCtx{id: id, actor: actor, secrets: secrets}
 	m := &applyMarker{Kind: "apply", Folder: id, Instances: c.plan.Restarts, Phase: "disk", At: time.Now().UTC()}
 	fb.m = m
 	for _, e := range c.edits {
@@ -1439,11 +1439,12 @@ func (h *Hub) startAll(ids []string) error {
 
 // failCtx is what failBeforeState needs of the running apply.
 type failCtx struct {
-	id, actor string
-	m         *applyMarker
-	stopped   []string
-	secrets   []string
-	entries   int64
+	id      string
+	actor   directory.Actor
+	m       *applyMarker
+	stopped []string
+	secrets []string
+	entries int64
 }
 
 // failBeforeState handles a failure before the state save: the stopped
@@ -1499,7 +1500,7 @@ func (h *Hub) failBeforeState(fb *failCtx, cause error, snap string, diskChanged
 	sec = append(sec, secretsOf(startErr)...)
 	err := withSecrets(&StatusError{Status: status, Err: errors.New(b.String())}, sec)
 	if diskChanged {
-		h.auditFolder(directory.Human(fb.actor), "folder.apply", id, fmt.Sprintf("entries=%d snapshot=%s", fb.entries, snapshotTS(snap)), err)
+		h.auditFolder(fb.actor, "folder.apply", id, fmt.Sprintf("entries=%d snapshot=%s", fb.entries, snapshotTS(snap)), err)
 	}
 	return err
 }
@@ -2010,7 +2011,7 @@ func (h *Hub) recoverFolderApply(id string) {
 	prev := h.LastOp(key)
 	rec := OpRecord{Op: OpFolderAssign, At: time.Now().UTC(), Status: http.StatusInternalServerError}
 	if prev != nil {
-		rec.Op, rec.OpID = prev.Op, prev.OpID
+		rec.Op, rec.OpID, rec.Actor = prev.Op, prev.OpID, prev.Actor
 	}
 	data, err := os.ReadFile(h.markerPath(id))
 	var m applyMarker

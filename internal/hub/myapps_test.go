@@ -1,7 +1,6 @@
 package hub
 
 import (
-	"github.com/portcullis/hub/internal/directory"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/settings"
 	"github.com/portcullis/hub/internal/templates"
 )
@@ -121,7 +121,7 @@ func myAppsFixture(t *testing.T) (*fixture, *fakePeople) {
 		Person:  map[string]PersonChange{"storage_quota": {Default: raw("100GiB"), Rows: rows("office_milan", "10GiB", "it_staff", "20GiB")}},
 		Values:  vals("trash_days", 7),
 		Secrets: map[string]SecretChange{"api_key": {Value: &tok}},
-	}, "admin"); err != nil {
+	}, directory.Human("admin")); err != nil {
 		t.Fatal(err)
 	}
 	settle(f)

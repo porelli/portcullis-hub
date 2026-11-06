@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/keycloak/kctest"
 )
 

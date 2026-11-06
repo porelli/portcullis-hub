@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/portcullis/hub/internal/docker"
-	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/state"
 )

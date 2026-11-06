@@ -16,11 +16,11 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/doctor"
 	"github.com/portcullis/hub/internal/settings"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
-	"github.com/portcullis/hub/internal/directory"
 )
 
 // The doctor's one-click fixes (contract §14.6, Task 12). A fix is

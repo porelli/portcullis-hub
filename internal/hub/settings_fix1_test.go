@@ -1,7 +1,6 @@
 package hub
 
 import (
-	"github.com/portcullis/hub/internal/directory"
 	"context"
 	"os"
 	"path/filepath"
@@ -9,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/compose-spec/compose-go/v2/dotenv"
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/settings"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
@@ -119,7 +119,7 @@ func TestCommittedSaveAuditedOnDeliveryFailure(t *testing.T) {
 	os.Chmod(dir, 0500)
 	defer os.Chmod(dir, 0755)
 	n := len(audit.entries)
-	res, err := f.h.SaveSettings("immich", SettingsUpdate{Values: vals("uploads", directory.Human("/srv/up"))}, "alice")
+	res, err := f.h.SaveSettings("immich", SettingsUpdate{Values: vals("uploads", "/srv/up")}, directory.Human("alice"))
 	if err != nil || !strings.Contains(strings.Join(res.Warnings, "\n"), "override generation failed") {
 		t.Fatalf("err = %v, result %+v: want the override failure as a warning", err, res)
 	}
@@ -141,7 +141,7 @@ func TestCommittedSaveAuditedOnDeliveryFailure(t *testing.T) {
 func TestEffectEnvAndDisabled(t *testing.T) {
 	f, _ := immichFixture(t)
 	for k, v := range map[string]any{"motd": "hi", "banner": "b", "uploads": "/srv/up"} {
-		res, err := f.h.SaveSettings("immich", SettingsUpdate{Values: vals(k, v)}, "admin")
+		res, err := f.h.SaveSettings("immich", SettingsUpdate{Values: vals(k, v)}, directory.Human("admin"))
 		want := settings.EffectNone
 		if k == "uploads" {
 			want = settings.EffectRestart // a path applies at restart
@@ -154,7 +154,7 @@ func TestEffectEnvAndDisabled(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := ups(f, "immich")
-	res, err := f.h.SaveSettings("immich", SettingsUpdate{Values: vals("banner", directory.Human("c"))}, "admin")
+	res, err := f.h.SaveSettings("immich", SettingsUpdate{Values: vals("banner", "c")}, directory.Human("admin"))
 	f.h.Wait()
 	if err != nil || res.Effect != settings.EffectRestart || ups(f, "immich") != before+1 {
 		t.Errorf("env-delivered live option: %+v %v, ups %d", res, err, ups(f, "immich")-before)
@@ -221,7 +221,7 @@ func TestSeedOnRestoreAndMissingGroups(t *testing.T) {
 		t.Fatal(err)
 	}
 	unseed("immich-c")
-	if _, err := f.h.CreateMissingGroups(ctx, ids, directory.Human("root")); err != nil {
+	if _, err := f.h.CreateMissingGroups(context.Background(), []string{"immich-c"}, directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	if !seeded("immich-c") {

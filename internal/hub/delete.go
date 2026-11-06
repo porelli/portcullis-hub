@@ -9,11 +9,11 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
-	"github.com/portcullis/hub/internal/directory"
 )
 
 // Guarded delete (contract §11.4).
@@ -80,7 +80,7 @@ func (h *Hub) deleteInstance(id, confirm string, actor directory.Actor, ready fu
 	h.mu.RUnlock()
 	if groupsAPI != nil {
 		if err := groupsAPI.ResolveActor(context.Background(), actor); err != nil {
-			return res, fmt.Errorf("the acting admin %q can't delete the instance's groups — nothing was deleted: %w", actor, err)
+			return res, fmt.Errorf("the acting admin %q can't delete the instance's groups — nothing was deleted: %w", actor.User, err)
 		}
 	}
 	if ready != nil {

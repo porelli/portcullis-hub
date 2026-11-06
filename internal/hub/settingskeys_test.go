@@ -1,13 +1,13 @@
 package hub
 
 import (
-	"github.com/portcullis/hub/internal/directory"
 	"reflect"
 	"testing"
 	"time"
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/state"
 )
 

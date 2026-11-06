@@ -19,18 +19,18 @@ func TestInstanceGroups(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.ll.AddGroup("inviters")
-	if err := e.svc.ResolveActor(ctx, "root"); err != nil {
+	if err := e.svc.ResolveActor(ctx, directory.Human("root")); err != nil {
 		t.Errorf("ResolveActor(root) = %v", err)
 	}
 	for _, a := range []string{"alice", "", "nobody"} {
-		if err := e.svc.ResolveActor(ctx, a); err == nil {
+		if err := e.svc.ResolveActor(ctx, directory.Human(a)); err == nil {
 			t.Errorf("ResolveActor(%q) accepted", a)
 		}
 	}
-	if made, w, err := e.svc.CreateInstanceGroup(ctx, "root", "users_grafana-b"); err != nil || !made || len(w) != 0 || !e.ll.HasGroup("users_grafana-b") {
+	if made, w, err := e.svc.CreateInstanceGroup(ctx, directory.Human("root"), "users_grafana-b"); err != nil || !made || len(w) != 0 || !e.ll.HasGroup("users_grafana-b") {
 		t.Fatalf("create: %v %v %v", made, w, err)
 	}
-	if made, w, err := e.svc.CreateInstanceGroup(ctx, "root", "users_grafana-b"); err != nil || made || len(w) != 1 || !strings.Contains(w[0], "already exists") {
+	if made, w, err := e.svc.CreateInstanceGroup(ctx, directory.Human("root"), "users_grafana-b"); err != nil || made || len(w) != 1 || !strings.Contains(w[0], "already exists") {
 		t.Errorf("create existing: %v %v %v", made, w, err)
 	}
 	// Purged leftovers are a warning, but the group was created (an undo
@@ -40,22 +40,22 @@ func TestInstanceGroups(t *testing.T) {
 	if err := store.Save(cfg); err != nil {
 		t.Fatal(err)
 	}
-	if made, w, err := e.svc.CreateInstanceGroup(ctx, "root", "users_grafana-c"); err != nil || !made || len(w) != 1 || !strings.Contains(w[0], "purged leftovers") {
+	if made, w, err := e.svc.CreateInstanceGroup(ctx, directory.Human("root"), "users_grafana-c"); err != nil || !made || len(w) != 1 || !strings.Contains(w[0], "purged leftovers") {
 		t.Errorf("create with leftovers: %v %v %v", made, w, err)
 	}
 	e.ll.AddGroup("admin_grafana-b", "alice")
-	if w, err := e.svc.DeleteInstanceGroup(ctx, "root", "admin_grafana-b"); err != nil || len(w) != 0 || e.ll.HasGroup("admin_grafana-b") {
+	if w, err := e.svc.DeleteInstanceGroup(ctx, directory.Human("root"), "admin_grafana-b"); err != nil || len(w) != 0 || e.ll.HasGroup("admin_grafana-b") {
 		t.Fatalf("delete: %v %v", w, err)
 	}
 	if a := newestAudit(t, e, "group.delete"); a.Actor != "root" || a.Target != "admin_grafana-b" || !strings.Contains(a.Detail, "sign_out=alice") {
 		t.Errorf("audit = %+v", a)
 	}
-	if w, err := e.svc.DeleteInstanceGroup(ctx, "root", "admin_grafana-b"); err != nil || len(w) != 0 {
+	if w, err := e.svc.DeleteInstanceGroup(ctx, directory.Human("root"), "admin_grafana-b"); err != nil || len(w) != 0 {
 		t.Errorf("delete again: %v %v", w, err)
 	}
 	for _, g := range []string{"lldap_admin", "extra_admins", "ops_admins", "inviters"} {
 		e.ll.AddGroup(g)
-		w, err := e.svc.DeleteInstanceGroup(ctx, "root", g)
+		w, err := e.svc.DeleteInstanceGroup(ctx, directory.Human("root"), g)
 		if err != nil || len(w) != 1 || !strings.Contains(w[0], "kept") || !e.ll.HasGroup(g) {
 			t.Errorf("%s: %v %v", g, w, err)
 		}
@@ -63,12 +63,12 @@ func TestInstanceGroups(t *testing.T) {
 	// A rule group is kept too (its membership is an admin's rule).
 	e.ll.AddGroup("milan")
 	setRule(t, store, "milan", `city = "Milan"`)
-	if w, err := e.svc.DeleteInstanceGroup(ctx, "root", "milan"); err != nil || len(w) != 1 || !strings.Contains(w[0], "rule group") || !e.ll.HasGroup("milan") {
+	if w, err := e.svc.DeleteInstanceGroup(ctx, directory.Human("root"), "milan"); err != nil || len(w) != 1 || !strings.Contains(w[0], "rule group") || !e.ll.HasGroup("milan") {
 		t.Errorf("rule group: %v %v", w, err)
 	}
 	// Not an admin: refused like the Users & Groups page.
 	e.ll.AddGroup("users_x")
-	if _, err := e.svc.DeleteInstanceGroup(ctx, "alice", "users_x"); err == nil || !e.ll.HasGroup("users_x") {
+	if _, err := e.svc.DeleteInstanceGroup(ctx, directory.Human("alice"), "users_x"); err == nil || !e.ll.HasGroup("users_x") {
 		t.Errorf("non-admin delete: %v", err)
 	}
 }

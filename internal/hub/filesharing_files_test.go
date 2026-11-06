@@ -50,7 +50,7 @@ func shareSetup(t *testing.T, c *credSvc) *SaveResult {
 		"share1_name", "Family",
 		"share1_readers", []string{"office_milan"},
 		"share1_writers", []string{"users_" + smbID},
-	)}, "root")
+	)}, directory.Human("root"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +189,7 @@ func TestExpandMembersPopulationOnly(t *testing.T) {
 		t.Errorf("share1_readers bound to %d, want %d (%+v)", got, c.people.id("office_milan"), s.GroupIDs)
 	}
 	// Unknown groups are refused.
-	if _, err := c.f.h.SaveSettings(smbID, SettingsUpdate{Values: vals("share2_readers", []string{"nope"})}, "root"); statusOf(err) != 400 || !strings.Contains(err.Error(), "nope") {
+	if _, err := c.f.h.SaveSettings(smbID, SettingsUpdate{Values: vals("share2_readers", []string{"nope"})}, directory.Human("root")); statusOf(err) != 400 || !strings.Contains(err.Error(), "nope") {
 		t.Errorf("unknown group = %v", err)
 	}
 	// What the holder check compares is what the file holds.
@@ -231,7 +231,7 @@ func TestShareGroupRecreatedGrantsNothing(t *testing.T) {
 	if len(got["share1_readers"]) != 0 {
 		t.Errorf("expandedMembersLocked = %v", got)
 	}
-	_, err := c.f.h.SaveSettings(smbID, SettingsUpdate{Values: vals("share1_readers", []string{"office_milan", "users_" + smbID})}, "root")
+	_, err := c.f.h.SaveSettings(smbID, SettingsUpdate{Values: vals("share1_readers", []string{"office_milan", "users_" + smbID})}, directory.Human("root"))
 	if statusOf(err) != 409 || !strings.Contains(err.Error(), "office_milan was re-created") {
 		t.Errorf("stale rebind = %v", err)
 	}
@@ -245,7 +245,7 @@ func TestShareGroupPurged(t *testing.T) {
 	shareSetup(t, c)
 	old := c.people.id("office_milan")
 	c.people.deleteGroup("office_milan")
-	if w := c.f.h.PurgeGroupSettings(context.Background(), "root", "office_milan", old); len(w) != 0 {
+	if w := c.f.h.PurgeGroupSettings(context.Background(), directory.Human("root"), "office_milan", old); len(w) != 0 {
 		t.Fatalf("warnings %v", w)
 	}
 	settle(c.f)
@@ -319,15 +319,15 @@ func TestShareRemovalChangesTheFile(t *testing.T) {
 
 func TestRequiresAnyOnSave(t *testing.T) {
 	c := credSvcFixture(t)
-	_, err := c.f.h.SaveSettings(smbID, SettingsUpdate{Values: vals("share1_folder", directory.Human("/srv/share1"))}, "root")
+	_, err := c.f.h.SaveSettings(smbID, SettingsUpdate{Values: vals("share1_folder", "/srv/share1")}, directory.Human("root"))
 	if statusOf(err) != 400 || !strings.Contains(err.Error(), "share1_folder") {
 		t.Fatalf("a folder without readers or writers = %v", err)
 	}
 	c.people.addGroup("office_milan", "alice")
-	if _, err := c.f.h.SaveSettings(smbID, SettingsUpdate{Values: vals("share1_folder", "/srv/share1", "share1_writers", []string{"office_milan"})}, "root"); err != nil {
+	if _, err := c.f.h.SaveSettings(smbID, SettingsUpdate{Values: vals("share1_folder", "/srv/share1", "share1_writers", []string{"office_milan"})}, directory.Human("root")); err != nil {
 		t.Fatalf("with writers: %v", err)
 	}
-	_, err = c.f.h.SaveSettings(smbID, SettingsUpdate{Values: vals("share1_writers", []string{})}, "root")
+	_, err = c.f.h.SaveSettings(smbID, SettingsUpdate{Values: vals("share1_writers", []string{})}, directory.Human("root"))
 	if statusOf(err) != 400 || !strings.Contains(err.Error(), "share1_folder") {
 		t.Errorf("emptying the last group = %v", err)
 	}
@@ -543,7 +543,7 @@ func TestShareGroupStalePanel(t *testing.T) {
 	}
 	// Purged and re-created meanwhile; the panel resends what it showed.
 	c.people.deleteGroup("office_milan")
-	c.f.h.PurgeGroupSettings(context.Background(), "root", "office_milan", old)
+	c.f.h.PurgeGroupSettings(context.Background(), directory.Human("root"), "office_milan", old)
 	c.people.addGroup("office_milan", "alice")
 	settle(c.f)
 	stale := SettingsUpdate{
@@ -557,7 +557,7 @@ func TestShareGroupStalePanel(t *testing.T) {
 		t.Errorf("stale panel preview = %v", err)
 	}
 	// Without an id: a new name, bound to the group's current id.
-	if _, err := c.f.h.SaveSettings(smbID, SettingsUpdate{Values: vals("share1_readers", []string{"office_milan"})}, "root"); err != nil {
+	if _, err := c.f.h.SaveSettings(smbID, SettingsUpdate{Values: vals("share1_readers", []string{"office_milan"})}, directory.Human("root")); err != nil {
 		t.Fatalf("a new name: %v", err)
 	}
 	if got := storedSettings(c.f, smbID).GroupIDs["share1_readers"]["office_milan"]; got != c.people.id("office_milan") {
@@ -660,7 +660,7 @@ func TestSaveOfHookFileRunsItsHooks(t *testing.T) {
 	c := credSvcFixture(t)
 	shareSetup(t, c)
 	execs := len(c.f.engine.ExecCalls())
-	res, err := c.f.h.SaveSettings(smbID, SettingsUpdate{Values: vals("share1_writers", []string{})}, "root")
+	res, err := c.f.h.SaveSettings(smbID, SettingsUpdate{Values: vals("share1_writers", []string{})}, directory.Human("root"))
 	if err != nil {
 		t.Fatal(err)
 	}

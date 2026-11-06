@@ -23,12 +23,12 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
-	"github.com/portcullis/hub/internal/directory"
 )
 
 // Instance backups (contract §11.5): <data>/backups/<id>/<UTC>.tar, an

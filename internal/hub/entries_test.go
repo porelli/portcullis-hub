@@ -69,7 +69,7 @@ func entryFixture(t *testing.T) (*fixture, *fakePeople, *fakeClock, *fakeAudit) 
 
 // setEntry is SetPersonValue with ctx and v marshalled.
 func setEntry(f *fixture, id, key, user string, v any, actor string) (*MyEntry, error) {
-	return f.h.SetPersonValue(context.Background(), id, key, user, raw(v), actor)
+	return f.h.SetPersonValue(context.Background(), id, key, user, raw(v), directory.Human(actor))
 }
 
 func mustSetEntry(t *testing.T, f *fixture, id, key, user string, v any, actor string) *MyEntry {
@@ -181,7 +181,7 @@ func TestEntryValidation(t *testing.T) {
 		t.Errorf("audit = %+v", pv)
 	}
 	// null is no value: DELETE clears.
-	if _, err := f.h.SetPersonValue(context.Background(), entryID, "ext_id", "alice", json.RawMessage("null"), "alice"); statusOf(err) != 400 {
+	if _, err := f.h.SetPersonValue(context.Background(), entryID, "ext_id", "alice", json.RawMessage("null"), directory.Human("alice")); statusOf(err) != 400 {
 		t.Errorf("null = %v", err)
 	}
 }
@@ -260,7 +260,7 @@ func TestEntryUniqueRace(t *testing.T) {
 			t.Fatalf("ok %d, 409 %d, stored %d (%v)", ok, conflict, n, errs)
 		}
 		for _, u := range []string{"alice", "bob"} {
-			if err := f.h.ClearPersonValue(context.Background(), entryID, "ext_id", u, u); err != nil {
+			if err := f.h.ClearPersonValue(context.Background(), entryID, "ext_id", u, directory.Human(u)); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -543,7 +543,7 @@ func TestAccountDeletePurgesEntries(t *testing.T) {
 
 func TestAdminOverrideAndClear(t *testing.T) {
 	f, _, _, audit := entryFixture(t)
-	if _, err := f.h.SetEntryAsAdmin(context.Background(), entryID, "ext_id", "alice", raw(aliceExt), "root"); err != nil {
+	if _, err := f.h.SetEntryAsAdmin(context.Background(), entryID, "ext_id", "alice", raw(aliceExt), directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	if got := storedSettings(f, entryID).Entered["ext_id"]["alice"]; got.SetBy != "root" {
@@ -570,7 +570,7 @@ func TestAdminOverrideAndClear(t *testing.T) {
 	}
 	// An admin can always clear, even without admin_override.
 	mustSetEntry(t, f, entryID, "nick", "alice", "Ali", "alice")
-	if err := f.h.ClearPersonValue(context.Background(), entryID, "nick", "alice", "root"); err != nil {
+	if err := f.h.ClearPersonValue(context.Background(), entryID, "nick", "alice", directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := storedSettings(f, entryID).Entered["nick"]["alice"]; ok {
@@ -583,7 +583,7 @@ func TestClearOwnValue(t *testing.T) {
 	mustSetEntry(t, f, entryID, "ext_id", "alice", aliceExt, "alice")
 	mustSetEntry(t, f, entryID, "ext_id", "bob", bobExt, "bob")
 	settle(f)
-	if err := f.h.ClearPersonValue(context.Background(), entryID, "ext_id", "alice", "alice"); err != nil {
+	if err := f.h.ClearPersonValue(context.Background(), entryID, "ext_id", "alice", directory.Human("alice")); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := storedSettings(f, entryID).Entered["ext_id"]["alice"]; ok {
@@ -594,7 +594,7 @@ func TestClearOwnValue(t *testing.T) {
 		t.Errorf("audit = %+v", last)
 	}
 	// Nothing set: no error, nothing audited.
-	if err := f.h.ClearPersonValue(context.Background(), entryID, "ext_id", "alice", "alice"); err != nil {
+	if err := f.h.ClearPersonValue(context.Background(), entryID, "ext_id", "alice", directory.Human("alice")); err != nil {
 		t.Fatal(err)
 	}
 	if len(auditsOf(audit, "settings.person_value")) != len(pv) {
@@ -614,7 +614,7 @@ func TestEntriesInBackup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := f.h.ClearPersonValue(context.Background(), entryID, "ext_id", "alice", "alice"); err != nil {
+	if err := f.h.ClearPersonValue(context.Background(), entryID, "ext_id", "alice", directory.Human("alice")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := f.h.RestoreInstance(entryID, entry.Archive, directory.Human("root")); err != nil {
@@ -694,7 +694,7 @@ func TestEntryDirectoryDown(t *testing.T) {
 	if _, err := setEntry(f, entryID, "ext_id", "bob", bobExt, "bob"); statusOf(err) != 503 {
 		t.Errorf("save = %v, want 503", err)
 	}
-	if err := f.h.ClearPersonValue(context.Background(), entryID, "ext_id", "alice", "alice"); statusOf(err) != 503 {
+	if err := f.h.ClearPersonValue(context.Background(), entryID, "ext_id", "alice", directory.Human("alice")); statusOf(err) != 503 {
 		t.Errorf("clear = %v, want 503", err)
 	}
 	deliverNow(t, f, entryID, TriggerMembership)
@@ -867,20 +867,20 @@ func TestClearOwnValueOutsidePopulation(t *testing.T) {
 	mustSetEntry(t, f, entryID, "ext_id", "alice", aliceExt, "alice")
 	mustSetEntry(t, f, entryID, "nick", "alice", "Ali", "alice")
 	people.removeMember(entryID, "alice")
-	if err := f.h.ClearPersonValue(context.Background(), entryID, "ext_id", "alice", "alice"); err != nil {
+	if err := f.h.ClearPersonValue(context.Background(), entryID, "ext_id", "alice", directory.Human("alice")); err != nil {
 		t.Fatalf("outside the population: %v", err)
 	}
 	if err := f.h.Disable(entryID); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.h.ClearPersonValue(context.Background(), entryID, "nick", "alice", "alice"); err != nil {
+	if err := f.h.ClearPersonValue(context.Background(), entryID, "nick", "alice", directory.Human("alice")); err != nil {
 		t.Fatalf("disabled instance: %v", err)
 	}
 	if len(storedSettings(f, entryID).Entered) != 0 {
 		t.Errorf("stored = %+v", storedSettings(f, entryID).Entered)
 	}
 	// Nothing of hers stored: still the one 404 outside the population.
-	if err := f.h.ClearPersonValue(context.Background(), entryID, "nick", "alice", "alice"); statusOf(err) != 404 {
+	if err := f.h.ClearPersonValue(context.Background(), entryID, "nick", "alice", directory.Human("alice")); statusOf(err) != 404 {
 		t.Errorf("nothing stored, outside = %v", err)
 	}
 }
@@ -888,7 +888,7 @@ func TestClearOwnValueOutsidePopulation(t *testing.T) {
 // Fix round 1 M2: re-saving an admin's value makes it the person's.
 func TestResaveTakesOverAdminValue(t *testing.T) {
 	f, _, _, audit := entryFixture(t)
-	if _, err := f.h.SetEntryAsAdmin(context.Background(), entryID, "ext_id", "alice", raw(aliceExt), "root"); err != nil {
+	if _, err := f.h.SetEntryAsAdmin(context.Background(), entryID, "ext_id", "alice", raw(aliceExt), directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	e := mustSetEntry(t, f, entryID, "ext_id", "alice", aliceExt, "alice")
@@ -959,7 +959,7 @@ func TestEntryRefusalsRateLimited(t *testing.T) {
 		t.Errorf("after ten 404s = %v, want 429", err)
 	}
 	// Admins are never limited.
-	if _, err := f.h.SetEntryAsAdmin(context.Background(), entryID, "ext_id", "alice", raw(aliceExt), "root"); err != nil {
+	if _, err := f.h.SetEntryAsAdmin(context.Background(), entryID, "ext_id", "alice", raw(aliceExt), directory.Human("root")); err != nil {
 		t.Errorf("admin = %v", err)
 	}
 }

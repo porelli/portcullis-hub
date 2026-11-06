@@ -1,10 +1,10 @@
 package hub
 
 import (
-	"github.com/portcullis/hub/internal/directory"
 	"strings"
 	"testing"
 
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/state"
 )
 

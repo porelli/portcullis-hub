@@ -1,7 +1,6 @@
 package hub
 
 import (
-	"github.com/portcullis/hub/internal/directory"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -12,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"

@@ -1,11 +1,12 @@
 package hub
 
 import (
-	"github.com/portcullis/hub/internal/directory"
 	"os"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/portcullis/hub/internal/directory"
 )
 
 // waitOp polls id's op record until operation opID finished.
@@ -76,10 +77,12 @@ func TestAsyncInstanceOps(t *testing.T) {
 
 	// Synchronous refusals: nothing is started, no record replaced.
 	for name, start := range map[string]func() (*AsyncOp, error){
-		"unknown backup":      func() (*AsyncOp, error) { return h.StartBackup("nope", directory.Human("root")) },
-		"untyped delete":      func() (*AsyncOp, error) { return h.StartDelete("grafana-b", "grafana", directory.Human("root")) },
-		"bad archive":         func() (*AsyncOp, error) { return h.StartRestore("grafana-b", "../x.tar", directory.Human("root")) },
-		"missing archive":     func() (*AsyncOp, error) { return h.StartRestore("grafana-b", "grafana-b/20201102T153000Z.tar", directory.Human("root")) },
+		"unknown backup": func() (*AsyncOp, error) { return h.StartBackup("nope", directory.Human("root")) },
+		"untyped delete": func() (*AsyncOp, error) { return h.StartDelete("grafana-b", "grafana", directory.Human("root")) },
+		"bad archive":    func() (*AsyncOp, error) { return h.StartRestore("grafana-b", "../x.tar", directory.Human("root")) },
+		"missing archive": func() (*AsyncOp, error) {
+			return h.StartRestore("grafana-b", "grafana-b/20201102T153000Z.tar", directory.Human("root"))
+		},
 		"restore onto exists": func() (*AsyncOp, error) { return h.StartRestoreAs(archive, "grafana-b", directory.Human("root"), nil) },
 		"bad new id":          func() (*AsyncOp, error) { return h.StartRestoreAs(archive, "Bad", directory.Human("root"), nil) },
 	} {

@@ -1,9 +1,10 @@
 package hub
 
 import (
-	"github.com/portcullis/hub/internal/directory"
 	"encoding/json"
 	"testing"
+
+	"github.com/portcullis/hub/internal/directory"
 )
 
 // save is SaveSettings as admin, the error only.

@@ -1,7 +1,6 @@
 package hub
 
 import (
-	"github.com/portcullis/hub/internal/directory"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -14,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/settings"
 	"github.com/portcullis/hub/internal/state"
@@ -328,7 +328,7 @@ func TestRestartRefusalLeavesAppRunning(t *testing.T) {
 func TestOptionEnvFailsClosedPerVariable(t *testing.T) {
 	f, _, _ := privFixture(t)
 	const id = "privapp"
-	if _, err := f.h.SaveSettings(id, SettingsUpdate{Values: vals("motd", "hello", "banner", directory.Human("world"))}, "root"); err != nil {
+	if _, err := f.h.SaveSettings(id, SettingsUpdate{Values: vals("motd", "hello", "banner", "world")}, directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.h.Enable(id); err != nil {
@@ -375,7 +375,7 @@ func TestSaveNeverBlocksOnDeliveryLock(t *testing.T) {
 	}
 	done := make(chan result, 1)
 	go func() {
-		res, err := f.h.SaveSettings(id, SettingsUpdate{Values: vals("motd", directory.Human("busy save"))}, "root")
+		res, err := f.h.SaveSettings(id, SettingsUpdate{Values: vals("motd", "busy save")}, directory.Human("root"))
 		done <- result{res, err}
 	}()
 	var r result
@@ -711,7 +711,7 @@ func TestCommittedSaveWithEnvFailureDelivers(t *testing.T) {
 	if err := os.Chmod(dir, 0o555); err != nil {
 		t.Fatal(err)
 	}
-	res, err := f.h.SaveSettings(id, SettingsUpdate{Values: vals("motd", directory.Human("hello"))}, "root")
+	res, err := f.h.SaveSettings(id, SettingsUpdate{Values: vals("motd", "hello")}, directory.Human("root"))
 	os.Chmod(dir, 0o755)
 	if err != nil {
 		t.Fatalf("SaveSettings = %v, want the committed save answered with a warning", err)
@@ -858,7 +858,7 @@ func TestRetryNeverBlocksOnDeliveryLock(t *testing.T) {
 	l.Lock()
 	done := make(chan *DeliveryReport, 1)
 	go func() {
-		rep, _ := f.h.RetryDeliveries(context.Background(), headerID, "admin")
+		rep, _ := f.h.RetryDeliveries(context.Background(), headerID, directory.Human("admin"))
 		done <- rep
 	}()
 	var rep *DeliveryReport
@@ -964,7 +964,7 @@ func TestBusyRetryMergedKeepsForceAll(t *testing.T) {
 	l := f.h.deliverLock(hookID)
 	l.Lock()
 	n := len(f.engine.ExecCalls())
-	if _, err := f.h.RetryDeliveries(context.Background(), hookID, "admin"); err != nil {
+	if _, err := f.h.RetryDeliveries(context.Background(), hookID, directory.Human("admin")); err != nil {
 		l.Unlock()
 		t.Fatal(err)
 	}

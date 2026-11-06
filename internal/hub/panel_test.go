@@ -1,7 +1,6 @@
 package hub
 
 import (
-	"github.com/portcullis/hub/internal/directory"
 	"context"
 	"encoding/json"
 	"path/filepath"
@@ -9,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/settings"
 )
 
@@ -227,7 +227,7 @@ func TestPrivilegedGroupChoices(t *testing.T) {
 
 func TestPanelContents(t *testing.T) {
 	f, _, people := panelFixture(t)
-	if _, err := f.h.SaveSettings("panelapp", SettingsUpdate{Values: vals("trash_days", 14), Secrets: map[string]SecretChange{"api_key": {Value: strp("s3cr3t-panel-value")}}}, "root"); err != nil {
+	if _, err := f.h.SaveSettings("panelapp", SettingsUpdate{Values: vals("trash_days", 14), Secrets: map[string]SecretChange{"api_key": {Value: strp("s3cr3t-panel-value")}}}, directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	p, err := f.h.SettingsPanel(context.Background(), "panelapp")
@@ -302,7 +302,7 @@ func TestSaveGroupIDRoundTrip(t *testing.T) {
 	}
 	// Purged (the group deleted and re-created): the stale panel resends
 	// the old id.
-	f.h.PurgeGroupSettings(context.Background(), "root", "office_milan", milan)
+	f.h.PurgeGroupSettings(context.Background(), directory.Human("root"), "office_milan", milan)
 	people.deleteGroup("office_milan")
 	people.addGroup("office_milan", "alice")
 	if err := f.h.save("panelapp", withID(milan)); statusOf(err) != 409 {
@@ -350,7 +350,7 @@ func TestRetryAudited(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.h.Wait()
-	rep, err := f.h.RetryDeliveries(context.Background(), "panelapp", "root")
+	rep, err := f.h.RetryDeliveries(context.Background(), "panelapp", directory.Human("root"))
 	if err != nil || rep == nil || rep.Instance != "panelapp" {
 		t.Fatalf("retry = %+v, %v", rep, err)
 	}
@@ -358,7 +358,7 @@ func TestRetryAudited(t *testing.T) {
 	if len(es) != 1 || es[0].Actor != "root" || es[0].Target != "panelapp" || es[0].Result != "ok" {
 		t.Errorf("audit = %+v", es)
 	}
-	if _, err := f.h.RetryDeliveries(context.Background(), "nope", "root"); statusOf(err) != 404 {
+	if _, err := f.h.RetryDeliveries(context.Background(), "nope", directory.Human("root")); statusOf(err) != 404 {
 		t.Errorf("unknown instance = %v", err)
 	}
 }
@@ -367,7 +367,7 @@ func TestRetryAudited(t *testing.T) {
 // variables are skipped when unchanged; a changed one is still refused.
 func TestSaveEnvSkipsUnchangedOwned(t *testing.T) {
 	f, _, _ := panelFixture(t)
-	if _, err := f.h.SaveSettings("panelapp", SettingsUpdate{Values: vals("trash_days", 14), Secrets: map[string]SecretChange{"api_key": {Value: strp("s3cr3t-panel-value")}}}, "root"); err != nil {
+	if _, err := f.h.SaveSettings("panelapp", SettingsUpdate{Values: vals("trash_days", 14), Secrets: map[string]SecretChange{"api_key": {Value: strp("s3cr3t-panel-value")}}}, directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	vars, _, err := f.h.Env("panelapp")

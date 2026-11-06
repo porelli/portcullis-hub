@@ -1,7 +1,6 @@
 package hub
 
 import (
-	"github.com/portcullis/hub/internal/directory"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/settings"
 )
@@ -128,7 +128,7 @@ func tmConfigure(t *testing.T, f *fixture) *SaveResult {
 	t.Helper()
 	res, err := f.h.SaveSettings(tmID, SettingsUpdate{Person: map[string]PersonChange{
 		"size_limit": {Default: raw("1GiB"), Rows: rows("tm_small", "10GiB", "tm_big", "500GiB")},
-	}}, "admin")
+	}}, directory.Human("admin"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -338,7 +338,7 @@ func TestReloadSignal(t *testing.T) {
 	}
 	f.h.Wait()
 	before := restarts(f)
-	res, err := f.h.SaveSettings(tmID, SettingsUpdate{Values: vals("greeting", directory.Human("hello"))}, "admin")
+	res, err := f.h.SaveSettings(tmID, SettingsUpdate{Values: vals("greeting", "hello")}, directory.Human("admin"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -363,7 +363,7 @@ func TestReloadSignal(t *testing.T) {
 
 	// Exited after the signal: failed, with an op record.
 	clk.onSleep = func(time.Duration) { f.engine.setState(ProjectPrefix+tmID+"-c", docker.State{Running: false}) }
-	res, err = f.h.SaveSettings(tmID, SettingsUpdate{Values: vals("greeting", directory.Human("hello again"))}, "admin")
+	res, err = f.h.SaveSettings(tmID, SettingsUpdate{Values: vals("greeting", "hello again")}, directory.Human("admin"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -377,7 +377,7 @@ func TestReloadSignal(t *testing.T) {
 	clk.onSleep = func(time.Duration) {
 		f.engine.setState(ProjectPrefix+tmID+"-c", docker.State{Running: true, Health: "unhealthy"})
 	}
-	res, _ = f.h.SaveSettings(tmID, SettingsUpdate{Values: vals("greeting", directory.Human("hello 3"))}, "admin")
+	res, _ = f.h.SaveSettings(tmID, SettingsUpdate{Values: vals("greeting", "hello 3")}, directory.Human("admin"))
 	if u, _ := unit(res.Deliveries, "reload"); u.OK || !strings.Contains(u.Error, "unhealthy") {
 		t.Errorf("unhealthy: reload unit = %+v", u)
 	}
@@ -385,7 +385,7 @@ func TestReloadSignal(t *testing.T) {
 	f.h.opsMu.Lock()
 	f.h.ops[tmID] = OpRecord{Op: OpBackup, Running: true}
 	f.h.opsMu.Unlock()
-	res, _ = f.h.SaveSettings(tmID, SettingsUpdate{Values: vals("greeting", directory.Human("hello 4"))}, "admin")
+	res, _ = f.h.SaveSettings(tmID, SettingsUpdate{Values: vals("greeting", "hello 4")}, directory.Human("admin"))
 	if op := f.h.LastOp(tmID); op == nil || op.Op != OpBackup || !op.Running {
 		t.Errorf("running op record replaced: %+v", op)
 	}
@@ -401,7 +401,7 @@ func TestReloadSignal(t *testing.T) {
 	}
 	f.engine.mu.Unlock()
 	n := len(f.engine.Kills())
-	res, _ = f.h.SaveSettings(tmID, SettingsUpdate{Values: vals("greeting", directory.Human("hello 5"))}, "admin")
+	res, _ = f.h.SaveSettings(tmID, SettingsUpdate{Values: vals("greeting", "hello 5")}, directory.Human("admin"))
 	if len(f.engine.Kills()) != n {
 		t.Error("signal sent to a stopped app")
 	}
@@ -420,7 +420,7 @@ func TestFilesWrittenBeforeReload(t *testing.T) {
 		d := readDoc(t, f.appFile(tmID, "people"))
 		order = append(order, "kill(greeting="+d.Values["greeting"].(string)+")")
 	}
-	if _, err := f.h.SaveSettings(tmID, SettingsUpdate{Values: vals("greeting", directory.Human("new"))}, "admin"); err != nil {
+	if _, err := f.h.SaveSettings(tmID, SettingsUpdate{Values: vals("greeting", "new")}, directory.Human("admin")); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Join(order, ",") != "kill(greeting=new)" {
@@ -466,7 +466,7 @@ func TestStaleDeliveryDoesNotOverwrite(t *testing.T) {
 	if err := f.h.Enable(tmID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.h.SaveSettings(tmID, SettingsUpdate{Values: vals("greeting", directory.Human("a"))}, "admin"); err != nil {
+	if _, err := f.h.SaveSettings(tmID, SettingsUpdate{Values: vals("greeting", "a")}, directory.Human("admin")); err != nil {
 		t.Fatal(err)
 	}
 	blocked, release := make(chan struct{}), make(chan struct{})
@@ -486,14 +486,14 @@ func TestStaleDeliveryDoesNotOverwrite(t *testing.T) {
 	}
 	first := make(chan out, 1)
 	go func() {
-		r, err := f.h.SaveSettings(tmID, SettingsUpdate{Values: vals("greeting", directory.Human("b"))}, "admin")
+		r, err := f.h.SaveSettings(tmID, SettingsUpdate{Values: vals("greeting", "b")}, directory.Human("admin"))
 		first <- out{r, err}
 	}()
 	<-blocked
 	// A newer save commits meanwhile (its delivery waits for the lock).
 	second := make(chan out, 1)
 	go func() {
-		r, err := f.h.SaveSettings(tmID, SettingsUpdate{Values: vals("greeting", directory.Human("c"))}, "admin")
+		r, err := f.h.SaveSettings(tmID, SettingsUpdate{Values: vals("greeting", "c")}, directory.Human("admin"))
 		second <- out{r, err}
 	}()
 	for storedSettings(f, tmID).Values["greeting"] != "c" {
@@ -526,7 +526,7 @@ func TestStaleDeliveryDoesNotOverwrite(t *testing.T) {
 func TestDisabledInstanceDeliversNothing(t *testing.T) {
 	f, _, _ := tmFixture(t)
 	tmConfigure(t, f)
-	if _, err := f.h.SaveSettings(tmID, SettingsUpdate{Values: vals("greeting", directory.Human("hi"))}, "admin"); err != nil {
+	if _, err := f.h.SaveSettings(tmID, SettingsUpdate{Values: vals("greeting", "hi")}, directory.Human("admin")); err != nil {
 		t.Fatal(err)
 	}
 	rep, err := f.h.Deliver(context.Background(), tmID, TriggerRetry)
@@ -749,7 +749,7 @@ func TestStaleMembershipRunKeepsItsRestart(t *testing.T) {
 	// A save with no restart of its own commits meanwhile.
 	saved := make(chan error, 1)
 	go func() {
-		_, err := f.h.SaveSettings(tmID, SettingsUpdate{Values: vals("greeting", directory.Human("meanwhile"))}, "admin")
+		_, err := f.h.SaveSettings(tmID, SettingsUpdate{Values: vals("greeting", "meanwhile")}, directory.Human("admin"))
 		saved <- err
 	}()
 	for storedSettings(f, tmID).Values["greeting"] != "meanwhile" {

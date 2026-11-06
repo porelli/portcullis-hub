@@ -17,8 +17,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/lldap"
 	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/settings"

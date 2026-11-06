@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"github.com/portcullis/hub/internal/compose"
-	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/fsutil"
 )
 
 // OpBackup is a manual instance backup (the long operations below run in
@@ -74,7 +74,7 @@ func (h *Hub) startAsync(id, op string, actor directory.Actor, fn func(ready fun
 		result, warnings, err := fn(ready)
 		select {
 		case <-accepted:
-			h.finishAsync(id, op, a.OpID, result, warnings, err)
+			h.finishAsync(id, op, a.OpID, actor.User, result, warnings, err)
 		default:
 		}
 		done <- err
@@ -97,9 +97,9 @@ func (h *Hub) startAsync(id, op string, actor directory.Actor, fn func(ready fun
 
 // finishAsync records the outcome of an accepted operation: the
 // operation's own OpError record when it has one (compose output, hint,
-// rolled back), plus the op id, result, warnings and the HTTP status the
+// rolled back), plus the op id, actor (the user), result, warnings and the HTTP status the
 // error stands for.
-func (h *Hub) finishAsync(id, op, opID string, result map[string]string, warnings []string, err error) {
+func (h *Hub) finishAsync(id, op, opID, actor string, result map[string]string, warnings []string, err error) {
 	r := OpRecord{Op: op, At: time.Now().UTC(), OK: err == nil}
 	var oe *OpError
 	if errors.As(err, &oe) {
@@ -114,7 +114,7 @@ func (h *Hub) finishAsync(id, op, opID string, result map[string]string, warning
 		}
 		r.Hint = opHint(r.Error + "\n" + r.Output)
 	}
-	r.OpID, r.Running, r.Result, r.Warnings = opID, false, result, warnings
+	r.OpID, r.Running, r.Result, r.Warnings, r.Actor = opID, false, result, warnings, actor
 	if err != nil {
 		r.Status = errStatus(err)
 		log.Printf("%s %s failed: %s", op, id, r.Error)

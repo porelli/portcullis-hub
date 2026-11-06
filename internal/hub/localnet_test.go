@@ -1,7 +1,6 @@
 package hub
 
 import (
-	"github.com/portcullis/hub/internal/directory"
 	"context"
 	"errors"
 	"fmt"
@@ -11,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/doctor"
 )
 
@@ -89,7 +89,7 @@ func TestLocalNetworksValidate(t *testing.T) {
 	if err := f.h.SetLocalNetworks(many, directory.Human("root")); statusOf(err) != 400 {
 		t.Errorf("65 entries: %v", err)
 	}
-	if err := f.h.SetLocalNetworks([]string{"10.0.0.0/8"}, ""); statusOf(err) != 401 {
+	if err := f.h.SetLocalNetworks([]string{"10.0.0.0/8"}, directory.Human("")); statusOf(err) != 401 {
 		t.Errorf("no actor: %v", err)
 	}
 

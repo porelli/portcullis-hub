@@ -239,8 +239,8 @@ func TestGroupDeletedHook(t *testing.T) {
 		id          int
 	}
 	var calls []call
-	e.svc.GroupDeleted = func(_ context.Context, actor, name string, gid int) []string {
-		calls = append(calls, call{actor, name, gid})
+	e.svc.GroupDeleted = func(_ context.Context, actor directory.Actor, name string, gid int) []string {
+		calls = append(calls, call{actor.User, name, gid})
 		return []string{"purged rows"}
 	}
 	// A failing LLDAP delete: no call.
@@ -301,8 +301,8 @@ func TestUserDeletedHook(t *testing.T) {
 	e := newEnv(t)
 	type call struct{ actor, name string }
 	var calls []call
-	e.svc.UserDeleted = func(_ context.Context, actor, name string) []string {
-		calls = append(calls, call{actor, name})
+	e.svc.UserDeleted = func(_ context.Context, actor directory.Actor, name string) []string {
+		calls = append(calls, call{actor.User, name})
 		return []string{"purged entries"}
 	}
 	real := e.svc.LLDAP

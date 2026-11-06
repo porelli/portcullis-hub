@@ -14,8 +14,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
@@ -764,7 +764,7 @@ func (h *Hub) restoreInstanceAs(archive, newID string, actor directory.Actor, ho
 		}
 		if groupsAPI != nil {
 			if err := groupsAPI.ResolveActor(context.Background(), actor); err != nil {
-				return res, fmt.Errorf("the acting admin %q can't create the instance's groups — nothing was changed: %w", actor, err)
+				return res, fmt.Errorf("the acting admin %q can't create the instance's groups — nothing was changed: %w", actor.User, err)
 			}
 		}
 		ready()
@@ -834,7 +834,7 @@ func (h *Hub) restoreInstanceAs(archive, newID string, actor directory.Actor, ho
 	h.mu.RUnlock()
 	if groupsAPI != nil && (names.AccessGroup != "" || names.AdminGroup != "") {
 		if err := groupsAPI.ResolveActor(context.Background(), actor); err != nil {
-			return res, fmt.Errorf("the acting admin %q can't create the instance's groups — nothing was changed: %w", actor, err)
+			return res, fmt.Errorf("the acting admin %q can't create the instance's groups — nothing was changed: %w", actor.User, err)
 		}
 	}
 	// Host paths are shared, not copied: say so.

@@ -1,7 +1,6 @@
 package hub
 
 import (
-	"github.com/portcullis/hub/internal/directory"
 	"archive/tar"
 	"bytes"
 	"crypto/sha256"
@@ -19,6 +18,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/keycloak/kctest"

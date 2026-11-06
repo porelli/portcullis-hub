@@ -47,13 +47,13 @@ func (s *Service) keptGroupReason(name string) (string, error) {
 }
 
 // ResolveActor checks that actor can run the instance group operations:
-// an LLDAP administrator (as CallerFor resolves it). Users & Groups not
+// an LLDAP administrator (as CallerAs resolves it). Users & Groups not
 // available is no error (the group steps are warnings then).
 func (s *Service) ResolveActor(ctx context.Context, actor Actor) error {
 	if s.LLDAP.Available() != nil {
 		return nil
 	}
-	c, err := s.CallerFor(ctx, actor.User)
+	c, err := s.CallerAs(ctx, actor)
 	if err != nil {
 		return err
 	}
@@ -81,7 +81,7 @@ func (s *Service) DeleteInstanceGroup(ctx context.Context, actor Actor, name str
 	if why != "" {
 		return []string{fmt.Sprintf("group %s was kept: %s", name, why)}, nil
 	}
-	c, err := s.CallerFor(ctx, actor.User)
+	c, err := s.CallerAs(ctx, actor)
 	if err != nil {
 		return nil, err
 	}
@@ -108,7 +108,7 @@ func (s *Service) CreateInstanceGroup(ctx context.Context, actor Actor, name str
 	if aerr := s.LLDAP.Available(); aerr != nil {
 		return false, []string{fmt.Sprintf("group %s was not created: users & groups is not available (%v)", name, aerr)}, nil
 	}
-	c, err := s.CallerFor(ctx, actor.User)
+	c, err := s.CallerAs(ctx, actor)
 	if err != nil {
 		return false, nil, err
 	}

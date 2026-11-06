@@ -1,7 +1,6 @@
 package directory
 
 import (
-	"github.com/portcullis/hub/internal/directory"
 	"os"
 	"path/filepath"
 	"reflect"

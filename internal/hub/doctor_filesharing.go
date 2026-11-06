@@ -247,7 +247,7 @@ func (revokeLeaverFixer) Apply(h *Hub, f doctor.Finding, params map[string]strin
 		ready()
 		// Only the previewed credential (fix round 1): one regenerated or
 		// created since is left alone, under the same lock as the revoke.
-		if err := h.adminRevokeCredentialID(ctx, c.inst, c.key, c.user, actor.User, c.id); err != nil {
+		if err := h.adminRevokeCredentialID(ctx, c.inst, c.key, c.user, actor, c.id); err != nil {
 			return nil, nil, err
 		}
 		return map[string]string{"user": c.user, "key": c.key}, nil, nil
@@ -261,11 +261,11 @@ func errCredentialChanged() error {
 
 // adminRevokeCredentialID is the admin revoke of exactly credential id
 // (409 when the active credential is another one, or none).
-func (h *Hub) adminRevokeCredentialID(ctx context.Context, instance, key, user, actor, id string) error {
+func (h *Hub) adminRevokeCredentialID(ctx context.Context, instance, key, user string, actor directory.Actor, id string) error {
 	if id == "" {
 		return errCredentialChanged()
 	}
-	n, err := h.revokeCredentialsN(ctx, instance, []revocation{{key: key, user: user, by: strings.ToLower(actor), reason: state.CredentialReasonAdmin, id: id}})
+	n, err := h.revokeCredentialsN(ctx, instance, []revocation{{key: key, user: user, by: strings.ToLower(actor.User), reason: state.CredentialReasonAdmin, id: id, via: actor.Via, client: actor.Client}})
 	if err != nil {
 		return err
 	}

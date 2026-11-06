@@ -311,7 +311,7 @@ func TestEnableCreatesMissingGroups(t *testing.T) {
 		t.Errorf("missing = %d %s", r.StatusCode, b)
 	}
 	// Deleted straight in LLDAP.
-	if _, err := s.Directory.DeleteInstanceGroup(context.Background(), "root", "users_demo"); err != nil {
+	if _, err := s.Directory.DeleteInstanceGroup(context.Background(), directory.Human("root"), "users_demo"); err != nil {
 		t.Fatal(err)
 	}
 	if r, b := doAs(t, srv, "root", "GET", "/api/instances/missing-groups", ""); r.StatusCode != 200 || !strings.Contains(b, `{"instance":"demo","creatable":["users_demo"]}`) {

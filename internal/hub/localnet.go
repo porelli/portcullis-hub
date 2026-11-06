@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/portcullis/hub/internal/doctor"
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/doctor"
 	"github.com/portcullis/hub/internal/settings"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"

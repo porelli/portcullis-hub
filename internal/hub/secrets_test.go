@@ -1,7 +1,6 @@
 package hub
 
 import (
-	"github.com/portcullis/hub/internal/directory"
 	"bytes"
 	"encoding/json"
 	"errors"
@@ -12,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/portcullis/hub/internal/compose"
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/templates"
 )
 
@@ -195,8 +195,8 @@ func TestSecretNeverEchoed(t *testing.T) {
 	opJSON, _ := json.Marshal(oe.Record)
 	stored, _ := os.ReadFile(f.h.opPath("secretapp"))
 	// The API answers the error the same way (httpapi audits it too).
-	f.h.auditOp("admin", "instance.enable", "secretapp", "", err)
-	f.h.auditOp("admin", "instance.backup", "secretapp", "", errors.New("raw "+key+" and "+tok))
+	f.h.auditOp(directory.Human("admin"), "instance.enable", "secretapp", "", err)
+	f.h.auditOp(directory.Human("admin"), "instance.backup", "secretapp", "", errors.New("raw "+key+" and "+tok))
 	for name, s := range map[string]string{"error": oe.Error(), "op JSON": string(opJSON), "op record": string(stored), "audit": auditText(audit), "log": logs.String()} {
 		if strings.Contains(s, key) || strings.Contains(s, tok) || strings.Contains(s, tok[:8]) {
 			t.Errorf("%s echoes a secret: %s", name, s)

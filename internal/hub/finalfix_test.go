@@ -1,9 +1,9 @@
 package hub
 
 import (
-	"github.com/portcullis/hub/internal/directory"
 	"context"
 	"errors"
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/state"
 	"os"
 	"path/filepath"
@@ -55,7 +55,7 @@ func TestMissingDomainKeptWhileUsed(t *testing.T) {
 		t.Fatalf("second refresh: %v %+v", err, f.h.KnownDomains())
 	}
 	// Re-enrolling succeeds: the hosts on it are its own.
-	if _, err := f.h.EnrollDomain(ctx, "alice", "team-b.example.net", "cloudflare", creds()); err != nil {
+	if _, err := f.h.EnrollDomain(ctx, directory.Human("alice"), "team-b.example.net", "cloudflare", creds()); err != nil {
 		t.Fatalf("re-enroll: %v", err)
 	}
 	if k := f.h.KnownDomains(); len(k) != 1 || k[0].State == DomainMissing {

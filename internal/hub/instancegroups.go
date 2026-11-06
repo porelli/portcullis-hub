@@ -7,8 +7,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/portcullis/hub/internal/templates"
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/templates"
 )
 
 // Instance groups on enable (contract §11.2): enabling an instance —
@@ -125,7 +125,7 @@ func (h *Hub) ensureGroups(ctx context.Context, id string, groups []instanceGrou
 		return nil, warnings, nil
 	}
 	if err := groupsAPI.ResolveActor(ctx, actor); err != nil {
-		return nil, warnings, fmt.Errorf("the acting admin %q can't create the missing groups %s of %s — nothing was changed: %w", actor, strings.Join(todo, ", "), id, err)
+		return nil, warnings, fmt.Errorf("the acting admin %q can't create the missing groups %s of %s — nothing was changed: %w", actor.User, strings.Join(todo, ", "), id, err)
 	}
 	for _, g := range todo {
 		made, w, err := groupsAPI.CreateInstanceGroup(ctx, actor, g)
@@ -138,7 +138,7 @@ func (h *Hub) ensureGroups(ctx context.Context, id string, groups []instanceGrou
 		}
 	}
 	if len(created) > 0 {
-		log.Printf("instance %s: groups %s created by %s", id, strings.Join(created, ", "), actor)
+		log.Printf("instance %s: groups %s created by %s", id, strings.Join(created, ", "), actor.User)
 	}
 	return created, warnings, nil
 }
@@ -241,7 +241,7 @@ func (h *Hub) CreateMissingGroups(ctx context.Context, ids []string, actor direc
 		return nil, statusErr(503, "users & groups is not available")
 	}
 	if err := groupsAPI.ResolveActor(ctx, actor); err != nil {
-		return nil, fmt.Errorf("the acting admin %q can't create groups — nothing was changed: %w", actor, err)
+		return nil, fmt.Errorf("the acting admin %q can't create groups — nothing was changed: %w", actor.User, err)
 	}
 	if len(ids) == 0 {
 		for id := range byID {

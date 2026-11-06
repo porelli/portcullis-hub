@@ -1,7 +1,6 @@
 package hub
 
 import (
-	"github.com/portcullis/hub/internal/directory"
 	"context"
 	"errors"
 	"path/filepath"
@@ -10,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/settings"
 	"github.com/portcullis/hub/internal/state"
@@ -447,7 +447,7 @@ func TestSaveSettingsRefusesFolderRefs(t *testing.T) {
 		}
 	}
 	set := "set by shared folder Family media (gid 60001)"
-	if _, err := f.h.SaveSettings("jellyfin", SettingsUpdate{Values: vals("pgid", 1001)}, "admin"); statusOf(err) != 409 || !strings.Contains(err.Error(), set) {
+	if _, err := f.h.SaveSettings("jellyfin", SettingsUpdate{Values: vals("pgid", 1001)}, directory.Human("admin")); statusOf(err) != 409 || !strings.Contains(err.Error(), set) {
 		t.Errorf("pgid = %v", err)
 	}
 	if _, err := f.h.PreviewSettings(ctx, "jellyfin", SettingsUpdate{Values: vals("pgid", 1001)}); statusOf(err) != 409 || !strings.Contains(err.Error(), set) {
@@ -473,7 +473,7 @@ func TestSaveSettingsRefusesFolderGIDRange(t *testing.T) {
 	reserved := "gid 60000–60999 is reserved for shared folder groups"
 	for _, key := range []string{"pgid", "media_gid"} {
 		for _, n := range []int{60000, 60999} {
-			if _, err := f.h.SaveSettings("jellyfin", SettingsUpdate{Values: vals(key, n)}, "admin"); statusOf(err) != 409 || !strings.Contains(err.Error(), reserved) {
+			if _, err := f.h.SaveSettings("jellyfin", SettingsUpdate{Values: vals(key, n)}, directory.Human("admin")); statusOf(err) != 409 || !strings.Contains(err.Error(), reserved) {
 				t.Errorf("save %s=%d = %v", key, n, err)
 			}
 			if _, err := f.h.PreviewSettings(context.Background(), "jellyfin", SettingsUpdate{Values: vals(key, n)}); statusOf(err) != 409 || !strings.Contains(err.Error(), reserved) {

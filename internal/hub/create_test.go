@@ -1,10 +1,11 @@
 package hub
 
 import (
-	"github.com/portcullis/hub/internal/directory"
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/portcullis/hub/internal/directory"
 )
 
 func TestCreateInstanceAsGroups(t *testing.T) {

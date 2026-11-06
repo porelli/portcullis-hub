@@ -1,7 +1,6 @@
 package hub
 
 import (
-	"github.com/portcullis/hub/internal/directory"
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
@@ -23,6 +22,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/folderfix"
 	"github.com/portcullis/hub/internal/state"
@@ -383,7 +383,7 @@ func assign(t *testing.T, f *fixture, id string, req AssignRequest) (*AssignPlan
 	if err != nil {
 		t.Fatalf("preview: %v", err)
 	}
-	if _, err := f.h.StartAssign(id, req, plan.Hash, "admin"); err != nil {
+	if _, err := f.h.StartAssign(id, req, plan.Hash, directory.Human("admin")); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	return plan, waitFolderOp(t, f, id)
@@ -552,7 +552,7 @@ func TestApplyHashMismatch(t *testing.T) {
 	s.Values["workers"] = int64(5)
 	f.h.st.Settings["immich"] = s
 	f.h.mu.Unlock()
-	_, err = f.h.StartAssign("media", req, plan.Hash, "admin")
+	_, err = f.h.StartAssign("media", req, plan.Hash, directory.Human("admin"))
 	if statusOf(err) != 409 || !strings.Contains(err.Error(), "the setup changed since the preview") {
 		t.Fatalf("apply = %v", err)
 	}
@@ -569,10 +569,10 @@ func TestApplyHashMismatch(t *testing.T) {
 	s.Ports["X_BIND"] = "127.0.0.1"
 	f.h.st.Settings["immich"] = s
 	f.h.mu.Unlock()
-	if _, err := f.h.StartAssign("media", req, plan.Hash, "admin"); statusOf(err) != 409 {
+	if _, err := f.h.StartAssign("media", req, plan.Hash, directory.Human("admin")); statusOf(err) != 409 {
 		t.Fatalf("port change: %v", err)
 	}
-	if _, err := f.h.StartAssign("media", req, "", "admin"); statusOf(err) != 409 {
+	if _, err := f.h.StartAssign("media", req, "", directory.Human("admin")); statusOf(err) != 409 {
 		t.Fatalf("no hash: %v", err)
 	}
 }
@@ -716,7 +716,7 @@ func TestAssignHoldsLocks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.h.StartAssign("media", req, plan.Hash, "admin"); err != nil {
+	if _, err := f.h.StartAssign("media", req, plan.Hash, directory.Human("admin")); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -741,9 +741,9 @@ func TestAssignHoldsLocks(t *testing.T) {
 	busy("PreviewSettings", err)
 	_, err = f.h.StartBackup("immich", directory.Human("admin"))
 	busy("StartBackup", err)
-	_, err = f.h.StartAssign("media", req, plan.Hash, "admin")
+	_, err = f.h.StartAssign("media", req, plan.Hash, directory.Human("admin"))
 	busy("second StartAssign", err)
-	_, err = f.h.StartUndo("media", "x", "admin")
+	_, err = f.h.StartUndo("media", "x", directory.Human("admin"))
 	busy("StartUndo", err)
 	close(d.applyGate)
 	if rec := waitFolderOp(t, f, "media"); !rec.OK {
@@ -903,7 +903,7 @@ func TestUndo(t *testing.T) {
 		t.Errorf("lines:\n%s", text)
 	}
 	n0 := len(d.Events())
-	if _, err := f.h.StartUndo("media", plan.Hash, "admin"); err != nil {
+	if _, err := f.h.StartUndo("media", plan.Hash, directory.Human("admin")); err != nil {
 		t.Fatal(err)
 	}
 	rec = waitFolderOp(t, f, "media")
@@ -1219,7 +1219,7 @@ func TestMarkerWriteFailures(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.h.StartUndo("media", plan.Hash, "admin"); err != nil {
+	if _, err := f.h.StartUndo("media", plan.Hash, directory.Human("admin")); err != nil {
 		t.Fatal(err)
 	}
 	rec = waitFolderOp(t, f, "media")
@@ -1251,7 +1251,7 @@ func TestApplyTemplateChanged(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeFile(t, filepath.Join(f.src, "immich", "notes.txt"), "changed\n")
-	if _, err := f.h.StartAssign("media", libraryReq, plan.Hash, "admin"); statusOf(err) != 409 || !strings.Contains(err.Error(), "setup changed") {
+	if _, err := f.h.StartAssign("media", libraryReq, plan.Hash, directory.Human("admin")); statusOf(err) != 409 || !strings.Contains(err.Error(), "setup changed") {
 		t.Fatalf("apply = %v", err)
 	}
 }
@@ -1299,7 +1299,7 @@ func TestUndoVerifyFindsLeftovers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.h.StartUndo("media", plan.Hash, "admin"); err != nil {
+	if _, err := f.h.StartUndo("media", plan.Hash, directory.Human("admin")); err != nil {
 		t.Fatal(err)
 	}
 	rec := waitFolderOp(t, f, "media")
@@ -1347,12 +1347,12 @@ func TestFolderAuditRedacted(t *testing.T) {
 		t.Errorf("folder.apply audit = %+v", e)
 	}
 	// Through the affected instances, the error carrying no set.
-	f.h.auditFolder("admin", "folder.assign", "media", "", errors.New("start immich: s3cr3t-token-value"), "immich")
+	f.h.auditFolder(directory.Human("admin"), "folder.assign", "media", "", errors.New("start immich: s3cr3t-token-value"), "immich")
 	if e := audit.last(); strings.Contains(e.Error, "s3cr3t-token-value") || !strings.Contains(e.Error, "[redacted]") {
 		t.Errorf("folder.assign audit = %+v", e)
 	}
 	// Clipped.
-	f.h.auditFolder("admin", "folder.assign", "media", "", errors.New(strings.Repeat("x", 5000)))
+	f.h.auditFolder(directory.Human("admin"), "folder.assign", "media", "", errors.New(strings.Repeat("x", 5000)))
 	if e := audit.last(); len([]rune(e.Error)) > 601 {
 		t.Errorf("unclipped audit error: %d runes", len([]rune(e.Error)))
 	}
@@ -1425,21 +1425,21 @@ func TestRecheckFolderIdentity(t *testing.T) {
 	if fo, _ := storedFolder(f, "media"); fo.Dev != 2049 {
 		t.Fatal("the preview stored the identity")
 	}
-	if _, err := f.h.ApplyRecheck(ctx, "media", strings.Repeat("0", 64), false, "admin"); statusOf(err) != 409 {
+	if _, err := f.h.ApplyRecheck(ctx, "media", strings.Repeat("0", 64), false, directory.Human("admin")); statusOf(err) != 409 {
 		t.Errorf("stale hash = %v", err)
 	}
 	// Busy: the folder's lock, or a user's app lock.
 	unlock, _ := f.h.folderLock("media")
-	if _, err := f.h.ApplyRecheck(ctx, "media", chk.Hash, false, "admin"); statusOf(err) != 409 {
+	if _, err := f.h.ApplyRecheck(ctx, "media", chk.Hash, false, directory.Human("admin")); statusOf(err) != 409 {
 		t.Errorf("folder busy = %v", err)
 	}
 	unlock()
 	unlockApp, _ := f.h.lockApp("immich")
-	if _, err := f.h.ApplyRecheck(ctx, "media", chk.Hash, false, "admin"); statusOf(err) != 409 {
+	if _, err := f.h.ApplyRecheck(ctx, "media", chk.Hash, false, directory.Human("admin")); statusOf(err) != 409 {
 		t.Errorf("app busy = %v", err)
 	}
 	unlockApp()
-	v, err := f.h.ApplyRecheck(ctx, "media", chk.Hash, false, "admin")
+	v, err := f.h.ApplyRecheck(ctx, "media", chk.Hash, false, directory.Human("admin"))
 	if err != nil || v == nil || v.ID != "media" {
 		t.Fatalf("apply = %+v %v", v, err)
 	}
@@ -1460,7 +1460,7 @@ func TestRecheckFolderIdentity(t *testing.T) {
 	d.mu.Lock()
 	d.paths["/srv/media"].dev = 2051
 	d.mu.Unlock()
-	if _, err := f.h.ApplyRecheck(ctx, "media", chk.Hash, false, "admin"); statusOf(err) != 409 {
+	if _, err := f.h.ApplyRecheck(ctx, "media", chk.Hash, false, directory.Human("admin")); statusOf(err) != 409 {
 		t.Errorf("changed since the preview = %v", err)
 	}
 	if _, err := f.h.PreviewRecheck(ctx, "nope"); statusOf(err) != 404 {
@@ -1553,7 +1553,7 @@ func TestUndoAfterDeviceOnlyRecheck(t *testing.T) {
 	if err != nil || chk.DifferentDirectory {
 		t.Fatalf("preview = %+v %v", chk, err)
 	}
-	if _, err := f.h.ApplyRecheck(ctx, "media", chk.Hash, false, "admin"); err != nil {
+	if _, err := f.h.ApplyRecheck(ctx, "media", chk.Hash, false, directory.Human("admin")); err != nil {
 		t.Fatal(err)
 	}
 	fo, _ := storedFolder(f, "media")
@@ -1572,7 +1572,7 @@ func TestUndoAfterDeviceOnlyRecheck(t *testing.T) {
 	if v, _ := argValue(d.Argv("restore"), "expect-dev"); v != "2050" {
 		t.Errorf("dry run --expect-dev = %q", v)
 	}
-	if _, err := f.h.StartUndo("media", plan.Hash, "admin"); err != nil {
+	if _, err := f.h.StartUndo("media", plan.Hash, directory.Human("admin")); err != nil {
 		t.Fatal(err)
 	}
 	if rec := waitFolderOp(t, f, "media"); !rec.OK {
@@ -1611,13 +1611,13 @@ func TestRecheckDifferentDirectory(t *testing.T) {
 	if !strings.Contains(text, swappedText) || !strings.Contains(text, "Undo last fix") {
 		t.Errorf("lines:\n%s", text)
 	}
-	if _, err := f.h.ApplyRecheck(ctx, "media", chk.Hash, false, "admin"); statusOf(err) != 400 || !strings.Contains(err.Error(), "confirm") {
+	if _, err := f.h.ApplyRecheck(ctx, "media", chk.Hash, false, directory.Human("admin")); statusOf(err) != 400 || !strings.Contains(err.Error(), "confirm") {
 		t.Errorf("apply without the second confirmation = %v", err)
 	}
 	if fo, _ := storedFolder(f, "media"); fo.Ino == 777 {
 		t.Fatal("stored without the confirmation")
 	}
-	if _, err := f.h.ApplyRecheck(ctx, "media", chk.Hash, true, "admin"); err != nil {
+	if _, err := f.h.ApplyRecheck(ctx, "media", chk.Hash, true, directory.Human("admin")); err != nil {
 		t.Fatal(err)
 	}
 	if fo, _ := storedFolder(f, "media"); fo.Ino != 777 || fo.LastApply != nil {
@@ -1639,7 +1639,7 @@ func TestFolderAuditOverlappingSecrets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.h.auditFolder("admin", "folder.assign", "media", "", withSecrets(errors.New("PASSWORD=hunter2-long-secret"), []string{"hunter2"}), "immich")
+	f.h.auditFolder(directory.Human("admin"), "folder.assign", "media", "", withSecrets(errors.New("PASSWORD=hunter2-long-secret"), []string{"hunter2"}), "immich")
 	if e := audit.last(); e.Error != "PASSWORD=[redacted]" {
 		t.Errorf("audit error = %q", e.Error)
 	}
@@ -1675,10 +1675,10 @@ func TestRecheckDeviceAndMountRootIsDifferentDirectory(t *testing.T) {
 	if strings.Contains(text, "same device number") || !strings.Contains(text, swappedText) || !strings.Contains(text, "mount root") {
 		t.Errorf("lines:\n%s", text)
 	}
-	if _, err := f.h.ApplyRecheck(ctx, "media", chk.Hash, false, "admin"); statusOf(err) != 400 {
+	if _, err := f.h.ApplyRecheck(ctx, "media", chk.Hash, false, directory.Human("admin")); statusOf(err) != 400 {
 		t.Errorf("without the confirm = %v", err)
 	}
-	if _, err := f.h.ApplyRecheck(ctx, "media", chk.Hash, true, "admin"); err != nil {
+	if _, err := f.h.ApplyRecheck(ctx, "media", chk.Hash, true, directory.Human("admin")); err != nil {
 		t.Fatal(err)
 	}
 	if fo, _ := storedFolder(f, "media"); fo.LastApply != nil || fo.MountRoot != "/@other" {
@@ -1767,10 +1767,10 @@ func TestUnrecoveredMarker(t *testing.T) {
 	if err := f.h.writeMarker("media", m); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.h.StartAssign("media", libraryReq, "x", "admin"); statusOf(err) != 409 || !strings.Contains(err.Error(), "hasn't been recovered") {
+	if _, err := f.h.StartAssign("media", libraryReq, "x", directory.Human("admin")); statusOf(err) != 409 || !strings.Contains(err.Error(), "hasn't been recovered") {
 		t.Errorf("assign = %v", err)
 	}
-	if _, err := f.h.StartUndo("media", plan.Hash, "admin"); statusOf(err) != 409 || !strings.Contains(err.Error(), "hasn't been recovered") {
+	if _, err := f.h.StartUndo("media", plan.Hash, directory.Human("admin")); statusOf(err) != 409 || !strings.Contains(err.Error(), "hasn't been recovered") {
 		t.Errorf("undo = %v", err)
 	}
 	unlock, err := f.h.lockApp("immich")

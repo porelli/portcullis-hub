@@ -116,6 +116,14 @@ func entryErr(w http.ResponseWriter, who string, err error) {
 	http.Error(w, directory.GenericUnavailable, http.StatusServiceUnavailable)
 }
 
+// selfActor is the caller acting on their own entry: requestActor's
+// via / client, the user lowercased (user = strings.ToLower(actor(r))).
+func selfActor(r *http.Request, user string) directory.Actor {
+	a := requestActor(r)
+	a.User = user
+	return a
+}
+
 // handlePutMyValue stores the caller's (X-Forwarded-User, lowercased)
 // own value → 200 hub.MyEntry. No caller 401.
 func (s *Server) handlePutMyValue(w http.ResponseWriter, r *http.Request) {
@@ -128,7 +136,7 @@ func (s *Server) handlePutMyValue(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	me, err := s.Hub.SetPersonValue(r.Context(), r.PathValue("instance"), r.PathValue("key"), user, v, directory.Human(user))
+	me, err := s.Hub.SetPersonValue(r.Context(), r.PathValue("instance"), r.PathValue("key"), user, v, selfActor(r, user))
 	if err != nil {
 		entryErr(w, user, err)
 		return
@@ -145,7 +153,7 @@ func (s *Server) handleDeleteMyValue(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no signed-in user (X-Forwarded-User)", http.StatusUnauthorized)
 		return
 	}
-	if err := s.Hub.ClearPersonValue(r.Context(), r.PathValue("instance"), r.PathValue("key"), user, directory.Human(user)); err != nil {
+	if err := s.Hub.ClearPersonValue(r.Context(), r.PathValue("instance"), r.PathValue("key"), user, selfActor(r, user)); err != nil {
 		entryErr(w, user, err)
 		return
 	}

@@ -84,7 +84,7 @@ func claimEnable(t *testing.T, f *fixture, id string) {
 	settle(f)
 	if _, err := f.h.SaveSettings(id, SettingsUpdate{Person: map[string]PersonChange{
 		"storage_quota": {Default: raw("100GiB"), Rows: rows("office_milan", "10GiB")},
-	}}, "admin"); err != nil {
+	}}, directory.Human("admin")); err != nil {
 		t.Fatal(err)
 	}
 	f.h.Wait()
@@ -711,7 +711,7 @@ func TestClaimValueMustFitJSONType(t *testing.T) {
 	claimEnable(t, f, claimID)
 	if _, err := f.h.SaveSettings(claimID, SettingsUpdate{Person: map[string]PersonChange{
 		"uploads": {Default: raw(5), Rows: rows("office_milan", 3000000000)},
-	}}, "admin"); err != nil {
+	}}, directory.Human("admin")); err != nil {
 		t.Fatal(err)
 	}
 	rep := deliverNow(t, f, claimID, TriggerRetry)
@@ -845,7 +845,7 @@ func TestClaimsAfterRestore(t *testing.T) {
 	settle(f)
 	if _, err := f.h.SaveSettings(claimID, SettingsUpdate{Person: map[string]PersonChange{
 		"storage_quota": {Default: raw("100GiB"), Rows: rows("office_milan", "20GiB")},
-	}}, "admin"); err != nil {
+	}}, directory.Human("admin")); err != nil {
 		t.Fatal(err)
 	}
 	f.h.Wait()

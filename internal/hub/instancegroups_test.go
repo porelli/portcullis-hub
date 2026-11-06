@@ -1,12 +1,13 @@
 package hub
 
 import (
-	"github.com/portcullis/hub/internal/directory"
 	"context"
 	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/portcullis/hub/internal/directory"
 )
 
 // otherOwnPort moves template other off grafana's default port (both can
@@ -189,11 +190,11 @@ func TestMissingGroupsCreate(t *testing.T) {
 		t.Errorf("actor: %v %v", err, g.Calls())
 	}
 	g.actorErr = nil
-	if _, err := f.h.CreateMissingGroups(context.Background(), nil, ""); err == nil {
+	if _, err := f.h.CreateMissingGroups(context.Background(), nil, directory.Human("")); err == nil {
 		t.Error("no actor accepted")
 	}
 	// One instance, then all.
-	res, err := f.h.CreateMissingGroups(ctx, ids, directory.Human("alice"))
+	res, err := f.h.CreateMissingGroups(context.Background(), []string{"other"}, directory.Human("alice"))
 	if err != nil || len(res) != 1 || strings.Join(res[0].Created, ",") != "users_other" {
 		t.Fatalf("other: %+v %v", res, err)
 	}
@@ -208,7 +209,7 @@ func TestMissingGroupsCreate(t *testing.T) {
 		t.Errorf("still missing: %+v", rep)
 	}
 	// Not enabled: refused per instance.
-	if res, _ := f.h.CreateMissingGroups(ctx, ids, directory.Human("alice")); len(res) != 1 || res[0].Error == "" {
+	if res, _ := f.h.CreateMissingGroups(context.Background(), []string{"nope"}, directory.Human("alice")); len(res) != 1 || res[0].Error == "" {
 		t.Errorf("unknown: %+v", res)
 	}
 }
