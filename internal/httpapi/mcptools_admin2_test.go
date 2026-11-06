@@ -746,3 +746,82 @@ func testToolsNotEchoed(t *testing.T) {
 		}
 	}
 }
+
+// keeperManifest: a native-oidc template whose Keycloak client secret
+// lives in an innocuously named variable (no generate entry).
+const keeperManifest = `name: Keeper
+category: misc
+instances: multi
+ai: {unsupported: "test fixture"}
+auth:
+  method: native-oidc
+  sso: true
+  group_access: true
+  access_group: users_keeper
+keycloak_clients:
+  - client_id: keeper
+    secret_env: OIDC_CLIENT_VALUE
+    redirect_uri: https://{{HOST_KEEPER}}/cb
+`
+
+const keeperCompose = "services:\n  web:\n    image: x\n    environment:\n      V: ${OIDC_CLIENT_VALUE}\n    labels:\n" +
+	"      traefik.http.routers.keeper.rule: Host(`${PORTCULLIS_HOST_KEEPER:-keeper.portcullis.local}`)\n"
+
+// TestClientSecretEnvAlwaysSecret (fix round 1, security review): a
+// Keycloak client's secret_env, a secret option's env name and a
+// generated entry are secrets whatever their name — get_env masks them,
+// save_env refuses them on the tool path (even "[set]", which would be
+// written literally), and the redaction set holds the value.
+func TestClientSecretEnvAlwaysSecret(t *testing.T) {
+	e := newToolEnv(t, map[string][2]string{"keeper": {keeperManifest, keeperCompose}}, nil)
+	e.ll.AddGroup("users_keeper")
+	if err := e.s.Hub.Enable("keeper"); err != nil {
+		t.Fatal(err)
+	}
+	const val = "client-VALUE-0123456789"
+	if err := e.s.Hub.SaveEnv("keeper", map[string]string{"OIDC_CLIENT_VALUE": val}); err != nil {
+		t.Fatal(err)
+	}
+	txt, isErr, _ := e.tool(t, "get_env", map[string]any{"id": "keeper"})
+	if isErr || !strings.Contains(txt, `"OIDC_CLIENT_VALUE":"[secret]"`) || strings.Contains(txt, val) {
+		t.Errorf("get_env = %q %v", txt, isErr)
+	}
+	for _, v := range []string{"other-value-1", "[set]", "[secret]"} {
+		txt, isErr, _ := e.tool(t, "save_env", map[string]any{"id": "keeper", "variables": map[string]string{"OIDC_CLIENT_VALUE": v}})
+		if !isErr || !strings.HasPrefix(txt, "400: ") {
+			t.Errorf("save_env %q = %q %v", v, txt, isErr)
+		}
+	}
+	if got := readEnvValue(t, filepath.Join(e.data, "env", "keeper.env"), "OIDC_CLIENT_VALUE"); got != val {
+		t.Errorf("the env changed: %q", got)
+	}
+	// The secret option's [set] is still taken back as unchanged.
+	e.ll.AddGroup("users_secretapp")
+	e.ll.AddGroup("admin_secretapp")
+	sv := "s3cret-value-1"
+	if _, err := e.s.Hub.SaveSettings("secretapp", hub.SettingsUpdate{Secrets: map[string]hub.SecretChange{"api_key": {Value: &sv}}}, directory.Human("root")); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.s.Hub.Enable("secretapp"); err != nil {
+		t.Fatal(err)
+	}
+	if txt, isErr, _ := e.tool(t, "save_env", map[string]any{"id": "secretapp", "variables": map[string]string{"HEADSCALE_API_KEY": "[set]"}}); isErr {
+		t.Errorf("secret option [set] = %q", txt)
+	}
+	// In the redaction set: a result quoting it is redacted.
+	redact, err := e.s.toolRedactor()
+	if err != nil || strings.Contains(redact("x "+val+" y"), val) {
+		t.Errorf("redactor %v", err)
+	}
+	for _, n := range []string{"OIDC_CLIENT_VALUE"} {
+		if !hub.SecretEnvNames(e.s.Hub.Template("keeper"))[n] {
+			t.Errorf("%s isn't a secret env name", n)
+		}
+	}
+	if sn := hub.SecretEnvNames(e.s.Hub.Template("secretapp")); !sn["HEADSCALE_API_KEY"] {
+		t.Errorf("secretapp's secret option isn't listed: %v", sn)
+	}
+	if sn := hub.SecretEnvNames(e.s.Hub.Template("aiapp")); !sn["HDR_SECRET"] {
+		t.Errorf("aiapp's generated entry isn't listed: %v", sn)
+	}
+}

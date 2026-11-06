@@ -43,27 +43,39 @@ var (
 // mask written back).
 const envSecretMask = "[secret]"
 
-// maskEnvForAI is vars with every generated or secret-looking value
-// (hub.SecretLookingEnvName, the Hub's public instance variables aside)
-// replaced by envSecretMask; "[set]" (a secret option's mask) and empty
-// values stay.
+// maskEnvForAI is vars with every value that holds a secret replaced by
+// envSecretMask: a variable hub.SecretEnvNames lists (Keycloak client
+// secret_envs, secret options, generated entries — whatever its name),
+// or one named like a secret (hub.SecretLookingEnvName) that isn't a
+// Hub-set public instance variable. "[set]" (Env's mask of a secret
+// option) and empty values stay as they are.
 func (s *Server) maskEnvForAI(id string, vars map[string]string) map[string]string {
-	generated := map[string]bool{}
-	if t := s.Hub.Template(id); t != nil {
-		for _, e := range t.Manifest.Env {
-			if e.Generate != "" && e.Generate != "none" {
-				generated[e.Key] = true
-			}
-		}
-	}
+	secretNames := hub.SecretEnvNames(s.Hub.Template(id))
 	out := make(map[string]string, len(vars))
 	for k, v := range vars {
-		if v != "" && v != "[set]" && (generated[k] || (hub.SecretLookingEnvName(k) && !hub.HubPublicVar(k))) {
+		if v != "" && v != "[set]" && (secretNames[k] || (hub.SecretLookingEnvName(k) && !hub.HubPublicVar(k))) {
 			v = envSecretMask
 		}
 		out[k] = v
 	}
 	return out
+}
+
+// envSecretRefusal is save_env's tool-path refusal of variable k with
+// value v (""= allowed): get_env's mask written back; a client secret or
+// generated variable with any value ("[set]" would be written literally);
+// a secret option's variable with anything but "[set]" (unchanged); any
+// other secret-looking name but "[set]".
+func envSecretRefusal(t *templates.Template, k, v string) string {
+	switch {
+	case v == envSecretMask:
+		return k + ": " + envSecretMask + " is get_env's mask, not a value: leave the variable out to keep it"
+	case hub.SecretEnvNames(t)[k] && !(hub.SecretOptionEnvNames(t)[k] && v == "[set]"):
+		return k + " holds a secret"
+	case hub.SecretLookingEnvName(k) && v != "[set]":
+		return k + " looks like a secret"
+	}
+	return ""
 }
 
 // maxLogLines is get_logs' bound (spec call 25).
@@ -562,12 +574,10 @@ func (s *Server) registerAdminTools() {
 				if err := appIDOK(a.ID); err != nil {
 					return nil, err
 				}
+				t := s.Hub.Template(a.ID)
 				for _, k := range slices.Sorted(maps.Keys(a.Variables)) {
-					if a.Variables[k] == envSecretMask {
-						return nil, badArg(k + ": " + envSecretMask + " is get_env's mask, not a value: leave the variable out to keep it")
-					}
-					if hub.SecretLookingEnvName(k) && a.Variables[k] != "[set]" {
-						return nil, badArg(k + " looks like a secret: secrets never pass through the AI; set it on the Hub's page (" + s.mcpScope(ScopeAdmin).home + "#app/" + a.ID + "/settings)")
+					if why := envSecretRefusal(t, k, a.Variables[k]); why != "" {
+						return nil, badArg(why + ": secrets never pass through the AI; set it on the Hub's page (" + s.mcpScope(ScopeAdmin).home + "#app/" + a.ID + "/settings)")
 					}
 				}
 				return s.saveEnv(toolActor(ctx, c), a.ID, a.Variables)
