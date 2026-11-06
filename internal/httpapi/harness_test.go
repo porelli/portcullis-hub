@@ -166,7 +166,7 @@ func TestHarness(t *testing.T) {
 	// Seed: two extra instances, one enabled, with data; backups, one of
 	// a deleted instance.
 	for _, c := range []struct{ tmpl, id string }{{"grafana", "grafana-team-a"}, {"home", "home-b"}, {"grafana", "grafana-old"}} {
-		if _, err := h.CreateInstanceAs(c.tmpl, c.id, nil, "root"); err != nil {
+		if _, err := h.CreateInstanceAs(c.tmpl, c.id, nil, directory.Human("root")); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -175,11 +175,11 @@ func TestHarness(t *testing.T) {
 	if err := h.Enable("grafana-team-a"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.BackupInstance("grafana-team-a", "root"); err != nil {
+	if _, err := h.BackupInstance("grafana-team-a", directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(1100 * time.Millisecond)
-	if _, err := h.DeleteInstance("grafana-old", "grafana-old", "root"); err != nil {
+	if _, err := h.DeleteInstance("grafana-old", "grafana-old", directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	seedSettings(t, h, eng)
@@ -300,7 +300,7 @@ func seedEntries(t *testing.T, e *instEnv) {
 	if err := h.Enable("entryapp"); err != nil {
 		t.Fatalf("enabling entryapp: %v", err)
 	}
-	if _, err := h.SetPersonValue(context.Background(), "entryapp", "ext_id", "carol", json.RawMessage(`"`+harnessCarolExt+`"`), "carol"); err != nil {
+	if _, err := h.SetPersonValue(context.Background(), "entryapp", "ext_id", "carol", json.RawMessage(`"`+harnessCarolExt+`"`), directory.Human("carol")); err != nil {
 		t.Fatalf("seeding carol's ext_id: %v", err)
 	}
 	e.ll.RemoveMember("entryapp", "carol")
@@ -322,18 +322,18 @@ func seedSettings(t *testing.T, h *hub.Hub, eng *harnessEngine) {
 		}}},
 		Values:  map[string]json.RawMessage{"greeting": raw("Welcome back")},
 		Secrets: map[string]hub.SecretChange{"api_token": {Value: &tok}},
-	}, "root"); err != nil {
+	}, directory.Human("root")); err != nil {
 		t.Fatalf("seeding tmfixture: %v", err)
 	}
 	if _, err := h.SaveSettings("privapp", hub.SettingsUpdate{
 		Groups: map[string][]hub.GroupValueInput{"libraries": {{Group: "office_milan", Value: raw([]string{"photos", "projects"})}}},
 		Values: map[string]json.RawMessage{"motd": raw("Maintenance on Sunday")},
-	}, "root"); err != nil {
+	}, directory.Human("root")); err != nil {
 		t.Fatalf("seeding privapp: %v", err)
 	}
 	// Enabled once, so its person options are seeded (the {{ADMIN_GROUP}}
 	// row of role), then disabled again.
-	if _, err := h.EnableAs("privapp", "root"); err != nil {
+	if _, err := h.EnableAs("privapp", directory.Human("root")); err != nil {
 		t.Fatalf("enabling privapp: %v", err)
 	}
 	if err := h.Disable("privapp"); err != nil {
@@ -345,7 +345,7 @@ func seedSettings(t *testing.T, h *hub.Hub, eng *harnessEngine) {
 		Person: map[string]hub.PersonChange{"seats": {Default: raw(1), Rows: []hub.GroupValueInput{
 			{Group: "office_milan", Value: raw(3)}, {Group: "it_staff", Value: raw(5)},
 		}}},
-	}, "root"); err != nil {
+	}, directory.Human("root")); err != nil {
 		t.Fatalf("seeding hookapp: %v", err)
 	}
 	eng.hookOK.Store(true)
@@ -354,7 +354,7 @@ func seedSettings(t *testing.T, h *hub.Hub, eng *harnessEngine) {
 	}
 	h.Wait()
 	eng.hookOK.Store(false)
-	if _, err := h.RetryDeliveries(context.Background(), "hookapp", "root"); err != nil {
+	if _, err := h.RetryDeliveries(context.Background(), "hookapp", directory.Human("root")); err != nil {
 		t.Logf("hookapp delivery (expected to fail): %v", err)
 	}
 }
@@ -489,7 +489,7 @@ func seedFolders(t *testing.T, h *hub.Hub, disk *harnessDisk) {
 	}
 	// samba-office: a second (disabled) writer, free for the browser's
 	// assignment.
-	if _, err := h.CreateInstanceAs("samba", "samba-office", nil, "root"); err != nil {
+	if _, err := h.CreateInstanceAs("samba", "samba-office", nil, directory.Human("root")); err != nil {
 		t.Fatalf("creating samba-office: %v", err)
 	}
 	for _, p := range []string{"/srv/media", "/srv/scans", "/srv/photos", "/srv/projects"} {
@@ -503,7 +503,7 @@ func seedFolders(t *testing.T, h *hub.Hub, disk *harnessDisk) {
 		{"media", "Family media", "/srv/media", "Photos and videos of the family.", []hub.FolderUse{{Instance: "photos", Key: "extra"}}},
 		{"scans", "Old <b>scans</b>", "/srv/scans", "Scanned <i>letters</i>.", []hub.FolderUse{{Instance: "samba", Key: "share", Subpath: "letters"}}},
 	} {
-		if _, _, err := h.CreateFolder(ctx, hub.FolderInput{ID: f.id, Name: f.name, Path: f.path, Description: f.desc}, "root"); err != nil {
+		if _, _, err := h.CreateFolder(ctx, hub.FolderInput{ID: f.id, Name: f.name, Path: f.path, Description: f.desc}, directory.Human("root")); err != nil {
 			t.Fatalf("creating folder %s: %v", f.id, err)
 		}
 		req := hub.AssignRequest{Uses: f.uses}
@@ -511,7 +511,7 @@ func seedFolders(t *testing.T, h *hub.Hub, disk *harnessDisk) {
 		if err != nil {
 			t.Fatalf("previewing %s: %v", f.id, err)
 		}
-		op, err := h.StartAssign(f.id, req, plan.Hash, "root")
+		op, err := h.StartAssign(f.id, req, plan.Hash, directory.Human("root"))
 		if err != nil {
 			t.Fatalf("assigning %s: %v", f.id, err)
 		}
@@ -520,7 +520,7 @@ func seedFolders(t *testing.T, h *hub.Hub, disk *harnessDisk) {
 		}
 	}
 	disk.drift("/srv/scans", 37)
-	op, err := h.StartDoctorScan("root")
+	op, err := h.StartDoctorScan(directory.Human("root"))
 	if err != nil {
 		t.Fatalf("doctor scan: %v", err)
 	}
@@ -796,7 +796,7 @@ func seedFileSharing(t *testing.T, h *hub.Hub, paddr string) *harnessFreshAuth {
 	h.SetFreshAuth(fa)
 	h.SetFreshAuthReadyForTest(true)
 	raw, _ := json.Marshal("nas.home.arpa")
-	if _, err := h.SaveSettings("smbfixture", hub.SettingsUpdate{Values: map[string]json.RawMessage{"connect_address": raw}}, "root"); err != nil {
+	if _, err := h.SaveSettings("smbfixture", hub.SettingsUpdate{Values: map[string]json.RawMessage{"connect_address": raw}}, directory.Human("root")); err != nil {
 		t.Fatalf("seeding smbfixture: %v", err)
 	}
 	if err := h.Enable("smbfixture"); err != nil {

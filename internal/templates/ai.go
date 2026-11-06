@@ -235,7 +235,11 @@ const (
 
 // forbiddenHeaders may never carry a companion credential (folded).
 var (
-	forbiddenHeaders        = set("host", "cookie", "content-type", "accept", "proxy-authorization", "mcp-protocol-version", "mcp-session-id")
+	// A superset of mcp-gate's forbiddenHeader (core
+	// mcp-gate/internal/config/config.go): a name the gate refuses would
+	// make it refuse the whole mcp-gate.json.
+	forbiddenHeaders = set("host", "cookie", "content-type", "accept", "proxy-authorization", "mcp-protocol-version", "mcp-session-id",
+		"content-length", "transfer-encoding", "connection", "te", "upgrade", "keep-alive", "trailer", "proxy-connection")
 	forbiddenHeaderPrefixes = []string{"mcp-", "x-forwarded-", "x-auth-request-", "remote-", "x-portcullis-"}
 )
 
@@ -256,7 +260,7 @@ func validMCPPath(p string) bool { return mcpPathRe.MatchString(p) && path.Clean
 func checkAIHeader(where, h string) error {
 	low := strings.ToLower(h)
 	if !aiHeaderRe.MatchString(h) || forbiddenHeaders[low] {
-		return fmt.Errorf("%s %q must match %s and not be Host, Cookie, Content-Type, Accept, Proxy-Authorization, Mcp-*, MCP-Protocol-Version, Mcp-Session-Id, X-Forwarded-*, X-Auth-Request-*, Remote-* or X-Portcullis-*", where, h, aiHeaderRe)
+		return fmt.Errorf("%s %q must match %s and not be Host, Cookie, Content-Type, Accept, Content-Length, Transfer-Encoding, Connection, TE, Upgrade, Keep-Alive, Trailer, Proxy-Connection, Proxy-Authorization, Mcp-*, MCP-Protocol-Version, Mcp-Session-Id, X-Forwarded-*, X-Auth-Request-*, Remote-* or X-Portcullis-*", where, h, aiHeaderRe)
 	}
 	for _, p := range forbiddenHeaderPrefixes {
 		if strings.HasPrefix(low, p) {
@@ -505,6 +509,7 @@ func rawVarRefs(s string) []rawRef {
 type composeServiceInfo struct {
 	networks    []string
 	networkMode bool
+	ports       bool     // ports: declared (published to the host)
 	named       []string // container_name / hostname present
 }
 
@@ -531,6 +536,7 @@ func composeServiceInfos(compose []byte) map[string]composeServiceInfo {
 			}
 		}
 		_, info.networkMode = s["network_mode"]
+		_, info.ports = s["ports"]
 		for _, f := range []string{"container_name", "hostname"} {
 			if _, ok := s[f]; ok {
 				info.named = append(info.named, f)
@@ -578,8 +584,9 @@ func checkCompanions(t *Template, compose []byte, routes *Routes, named map[stri
 		}
 	}
 	names := map[string]bool{}
-	serviceUse := map[string]string{}  // service → companion
-	publicPaths := map[string]string{} // router + path → companion
+	serviceUse := map[string]string{} // service → companion
+	type routedPath struct{ path, name string }
+	publicPaths := map[string][]routedPath{} // router → endpoint paths
 	for i := range m.AI.MCP {
 		c := &m.AI.MCP[i]
 		w := fmt.Sprintf("ai.mcp[%s]", c.Name)
@@ -612,10 +619,10 @@ func checkCompanions(t *Template, compose []byte, routes *Routes, named map[stri
 		if mode == IdentityAppOAuth && c.Kind != BuiltinKind {
 			return fmt.Errorf("%s: app_oauth needs kind builtin (the app is its own MCP authorization server)", w)
 		}
+		if o, ok := serviceUse[c.Service]; ok && (c.Kind == CompanionKind || kindOf(m, o) == CompanionKind) {
+			return fmt.Errorf("%s: companion service %s already backs companion %s", w, c.Service, o)
+		}
 		if c.Kind == CompanionKind {
-			if o, ok := serviceUse[c.Service]; ok {
-				return fmt.Errorf("%s: companion service %s already backs companion %s", w, c.Service, o)
-			}
 			if routes.TraefikLabelled[c.Service] {
 				return fmt.Errorf("%s: companion service %s may have no traefik.* label (the Hub routes it)", w, c.Service)
 			}
@@ -629,15 +636,12 @@ func checkCompanions(t *Template, compose []byte, routes *Routes, named map[stri
 			if len(info.named) > 0 {
 				return fmt.Errorf("%s: companion service %s may not set %s", w, c.Service, strings.Join(info.named, " or "))
 			}
-		}
-		if o, ok := serviceUse[c.Service]; ok && (c.Kind == CompanionKind || kindOf(m, o) == CompanionKind) {
-			return fmt.Errorf("%s: service %s already backs companion %s", w, c.Service, o)
+			if info.ports {
+				return fmt.Errorf("%s: companion service %s may not publish ports (the gate is the only way in)", w, c.Service)
+			}
 		}
 		serviceUse[c.Service] = c.Name
-		if mode != IdentityAppOAuth && (c.Port < 1 || c.Port > 65535) {
-			return fmt.Errorf("%s: port %d must be 1–65535", w, c.Port)
-		}
-		if c.Port < 0 || c.Port > 65535 {
+		if (mode != IdentityAppOAuth && c.Port < 1) || c.Port < 0 || c.Port > 65535 {
 			return fmt.Errorf("%s: port %d must be 1–65535", w, c.Port)
 		}
 		if c.Path != "" && !validMCPPath(c.Path) {
@@ -646,21 +650,23 @@ func checkCompanions(t *Template, compose []byte, routes *Routes, named map[stri
 		if _, ok := routes.HostRouters[c.Router]; !ok {
 			return fmt.Errorf("%s: router %q is not a host router of the template (a router whose rule is Host() alone)", w, c.Router)
 		}
-		if mode == IdentityAppOAuth {
-			if c.PublicPath != "" {
-				return fmt.Errorf("%s: public_path is refused on an app_oauth companion (its endpoint is the app's own route https://<host><path>)", w)
-			}
-		} else {
-			pp := c.EffectivePublicPath()
+		if mode == IdentityAppOAuth && c.PublicPath != "" {
+			return fmt.Errorf("%s: public_path is refused on an app_oauth companion (its endpoint is the app's own route https://<host><path>)", w)
+		}
+		// The endpoint path on the router's host: public_path, or an
+		// app_oauth companion's own path; no two companions share one.
+		pp := c.EffectivePublicPath()
+		if mode != IdentityAppOAuth {
 			if err := checkPublicPath(w, pp, publicPrefixes); err != nil {
 				return err
 			}
-			key := c.Router + "\x00" + pp
-			if o, ok := publicPaths[key]; ok {
-				return fmt.Errorf("%s: public_path %s on router %s is already companion %s's", w, pp, c.Router, o)
-			}
-			publicPaths[key] = c.Name
 		}
+		for _, o := range publicPaths[c.Router] {
+			if nested(pp, o.path) {
+				return fmt.Errorf("%s: endpoint path (public_path, or path for app_oauth) %s on router %s overlaps companion %s's %s", w, pp, c.Router, o.name, o.path)
+			}
+		}
+		publicPaths[c.Router] = append(publicPaths[c.Router], routedPath{pp, c.Name})
 		if err := checkModes(w, c); err != nil {
 			return err
 		}
@@ -849,9 +855,6 @@ func checkIdentity(w string, m *Manifest, c *Companion, randomEnv, named map[str
 		if err := extra(fu{"header", id.Header != ""}, fu{"format", id.Format != ""}, fu{"basic", id.Basic != nil},
 			fu{"mint", id.Mint != ""}, fu{"scopes", id.Scopes != nil}, fu{"caller_secret", id.CallerSecret != nil}); err != nil {
 			return err
-		}
-		if c.Kind != BuiltinKind {
-			return fmt.Errorf("%s: app_oauth needs kind builtin (the app is its own MCP authorization server)", w)
 		}
 		if id.Revoke == "" {
 			return fmt.Errorf("%s: identity.revoke (a hook) is required for app_oauth", w)
