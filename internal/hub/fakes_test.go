@@ -1190,10 +1190,14 @@ type fakePeople struct {
 	privilege map[string]string
 	// uuids: LLDAP account uuids (default "uuid-<user>"; recreate gives
 	// a new one).
-	uuids  map[string]string
-	err    error
-	nextID int
-	calls  int
+	uuids map[string]string
+	// emails / pending: Membership.Emails and Membership.Pending (the gate
+	// file's people and expiring, plan 4 T11).
+	emails  map[string]string
+	pending map[string]map[string]time.Time
+	err     error
+	nextID  int
+	calls   int
 	// onMembership, if set, runs once after the next snapshot is taken
 	// (without p.mu): something changing between snapshot and use.
 	onMembership func()
@@ -1308,6 +1312,18 @@ func (p *fakePeople) Membership(ctx context.Context, now time.Time) (*directory.
 		m.Groups[g] = mg
 		if why := p.privilege[g]; why != "" {
 			m.Privilege[g] = why
+		}
+	}
+	m.Emails, m.Pending = map[string]string{}, map[string]map[string]time.Time{}
+	for u, e := range p.emails {
+		if _, ok := m.Users[u]; ok {
+			m.Emails[u] = e
+		}
+	}
+	for u, gs := range p.pending {
+		m.Pending[u] = map[string]time.Time{}
+		for g, at := range gs {
+			m.Pending[u][g] = at
 		}
 	}
 	for u, gs := range p.expired {

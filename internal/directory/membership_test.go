@@ -343,3 +343,37 @@ func TestFieldNameLDAPAliasesRefused(t *testing.T) {
 		wantStatus(t, "CreateField "+n, err, 400)
 	}
 }
+
+// Plan 4 T11: the gate file's inputs — each user's LLDAP email and the
+// earliest expiry still ahead per membership (contract §15.4 expiring,
+// people).
+func TestMembershipEmailsAndPending(t *testing.T) {
+	e := newEnv(t)
+	store := &directory.Store{Path: filepath.Join(t.TempDir(), "directory.yaml")}
+	e.svc.Store = store
+	e.ll.AddUser("Bob", "bob@example.org", "Bob", "")
+	e.ll.AddGroup("users_app", "alice", "Bob", "portcullis-hub")
+	cfg, _ := store.Load()
+	now := time.Now().UTC().Truncate(time.Second)
+	soon, past := now.Add(48*time.Hour), now.Add(-time.Hour)
+	cfg.Groups["users_app"] = &directory.GroupConfig{Expiry: map[string]time.Time{"bob": soon, "alice": past}}
+	if err := store.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	m, err := e.svc.Membership(ctx, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Emails["bob"] != "bob@example.org" {
+		t.Errorf("emails = %+v", m.Emails)
+	}
+	if _, ok := m.Emails["portcullis-hub"]; ok {
+		t.Error("service account's email listed")
+	}
+	if !m.Pending["bob"]["users_app"].Equal(soon) {
+		t.Errorf("pending = %+v", m.Pending)
+	}
+	if _, ok := m.Pending["alice"]; ok || !m.Expired["alice"]["users_app"] {
+		t.Errorf("a past expiry is Expired, never Pending: %+v %+v", m.Pending, m.Expired)
+	}
+}

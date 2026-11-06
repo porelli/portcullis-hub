@@ -442,6 +442,16 @@ type Hub struct {
 	// between the judgement and the revocations (tests: a change racing
 	// the check).
 	testHookHolderJudged func()
+	// AI gate files (ai_gatefile.go, ai_credstore.go): aiHealth = the AI
+	// client ids the last Keycloak ensure left in place (under mu; nil =
+	// unknown: none listed); gateStale = the last gate write failed (the
+	// directory sync loop retries); callerDigests = sha256 of each caller
+	// secret last encrypted (under policyWriteMu); aiCreds the store.
+	aiHealth      map[string]bool
+	gateStale     atomic.Bool
+	callerDigests map[string]string
+	credsOnce     sync.Once
+	aiCreds       *aiCredStore
 	// testHookInit, if set, is called at Init's stages (tests: order).
 	testHookInit func(stage string)
 	// testHookApplyRestore, if set, runs at applyRestore's stages
@@ -574,6 +584,8 @@ func (h *Hub) Init() {
 	// The header deliveries group-gate serves now: what the first policy
 	// write publishes again (P13).
 	h.seedHostHeaders()
+	// G74: only the files other containers read may be group-readable.
+	h.checkDataDirModes()
 	if err := h.WritePolicy(); err != nil {
 		log.Printf("auth-policy: initial group-gate policy write failed: %v", err)
 	}
@@ -887,8 +899,10 @@ func (h *Hub) IsEnabled(id string) bool {
 
 // ── group-gate policy file ───────────────────────────────
 
-// WritePolicy regenerates group-gate-policy.json from current state. Takes
-// mu itself — callers must NOT hold it.
+// WritePolicy regenerates group-gate-policy.json from current state, and
+// in the same pass mcp-gate.json and the caller secrets of
+// mcp-credentials.json (ai_gatefile.go). Takes mu itself — callers must
+// NOT hold it.
 func (h *Hub) WritePolicy() error {
 	_, err := h.writePolicy()
 	return err
@@ -903,6 +917,8 @@ func (h *Hub) writePolicy() (attrsWritten bool, retErr error) {
 	defer h.policyWriteMu.Unlock()
 	// Directory state first: it is network I/O, never under h.mu.
 	expiring, attrs, keepAttrs := h.directoryState()
+	// The gate file's directory snapshot, also before mu (G47).
+	gateM, gateMErr := h.gateMembership()
 	h.driftMu.Lock()
 	runtime := make(map[string][]string, len(h.runtimeHosts))
 	for id, hosts := range h.runtimeHosts {
@@ -1044,6 +1060,8 @@ func (h *Hub) writePolicy() (attrsWritten bool, retErr error) {
 	// The landing portal's app list (contract §10) changes exactly when
 	// the policy does: enable, disable, template sync.
 	errs = append(errs, writePortal(h.portalPath(), portal))
+	// The gate files follow in the same pass (contract §15.4).
+	errs = append(errs, h.writeGateFiles(gateM, gateMErr))
 	return attrsWritten, errors.Join(errs...)
 }
 

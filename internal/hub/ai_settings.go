@@ -115,6 +115,11 @@ func (h *Hub) SaveAISettings(u AISettingsUpdate, actor directory.Actor) error {
 	if err != nil || len(changes) > 0 {
 		h.auditAI(actor, "settings.ai", "ai", strings.Join(changes, ", "), err)
 	}
+	if err == nil && len(changes) > 0 {
+		// The gate file follows at once (contract §15.4); its failure is
+		// logged and retried by the directory sync loop.
+		h.writePolicyLogged()
+	}
 	return err
 }
 

@@ -3,6 +3,7 @@ module github.com/portcullis/hub
 go 1.27
 
 require (
+	filippo.io/age v1.3.2
 	github.com/Nerzal/gocloak/v14 v14.0.4
 	github.com/alecthomas/participle/v2 v2.1.4
 	github.com/compose-spec/compose-go/v2 v2.16.2
@@ -28,6 +29,7 @@ require (
 )
 
 require (
+	filippo.io/hpke v0.4.0 // indirect
 	github.com/Azure/go-ntlmssp v0.1.1 // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/coder/websocket v1.8.14 // indirect

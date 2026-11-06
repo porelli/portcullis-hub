@@ -41,6 +41,14 @@ type Membership struct {
 	// 32: a person-entered value is bound to the uuid it was entered
 	// under).
 	UUIDs map[string]string
+	// Emails: lowercase user → LLDAP email (the service account
+	// excluded; "" = none). Only the gate file's people (identity_headers,
+	// contract §15.4) uses it: identity is the username, never the email.
+	Emails map[string]string
+	// Pending: user → group → the earliest expiry still ahead of now
+	// (contract §15.4 expiring: the gate refuses from that time on, even
+	// before the evaluator removes the membership).
+	Pending map[string]map[string]time.Time
 }
 
 // Membership reads LLDAP and directory.yaml. LLDAP unavailable: 503;
@@ -62,11 +70,13 @@ func (s *Service) Membership(ctx context.Context, now time.Time) (*Membership, e
 		return nil, err
 	}
 	svc := strings.ToLower(s.serviceUser())
-	m := &Membership{Users: map[string]map[string]int{}, Groups: map[string]MemberGroup{}, Expired: map[string]map[string]bool{}, Privilege: map[string]string{}, UUIDs: map[string]string{}}
+	m := &Membership{Users: map[string]map[string]int{}, Groups: map[string]MemberGroup{}, Expired: map[string]map[string]bool{}, Privilege: map[string]string{}, UUIDs: map[string]string{},
+		Emails: map[string]string{}, Pending: map[string]map[string]time.Time{}}
 	for id, u := range sn.users {
 		if id != svc {
 			m.Users[id] = map[string]int{}
 			m.UUIDs[id] = u.UUID
+			m.Emails[id] = u.Email
 		}
 	}
 	for name, g := range sn.groups {
@@ -89,6 +99,12 @@ func (s *Service) Membership(ctx context.Context, now time.Time) (*Membership, e
 	}
 	for _, e := range s.publishedExpiring(cfg, sn, now) {
 		if e.At.After(now) {
+			if m.Pending[e.User] == nil {
+				m.Pending[e.User] = map[string]time.Time{}
+			}
+			if at, ok := m.Pending[e.User][e.Group]; !ok || e.At.Before(at) {
+				m.Pending[e.User][e.Group] = e.At
+			}
 			continue
 		}
 		if m.Expired[e.User] == nil {

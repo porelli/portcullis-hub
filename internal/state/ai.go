@@ -83,10 +83,19 @@ type ProviderModels struct {
 }
 
 // AIInstance is one instance's AI state (state.yaml ai_instances, §15.11).
-// Providers: an ai.chat instance's provider selection (§15.12).
-// (Task 23 sets it; the companions' switches come with Task 12.)
+// Companions: companion name → its switch and mode (Task 12's PUT
+// /api/instances/{id}/ai writes it; Task 11's gate file reads it).
+// Providers: an ai.chat instance's provider selection (§15.12; Task 23).
 type AIInstance struct {
-	Providers []string `json:"providers,omitempty" yaml:"providers,omitempty"`
+	Companions map[string]AICompanion `json:"companions,omitempty" yaml:"companions,omitempty"`
+	Providers  []string               `json:"providers,omitempty" yaml:"providers,omitempty"`
+}
+
+// AICompanion is one companion's AI switch and the admin's mode
+// (read_only or read_write; one of the companion's modes).
+type AICompanion struct {
+	Enabled bool   `json:"enabled" yaml:"enabled"`
+	Mode    string `json:"mode" yaml:"mode"`
 }
 
 // Connection length bounds and defaults (§15.11), in days.

@@ -177,9 +177,15 @@ func (h *Hub) RunDirectorySync(ctx context.Context) {
 		case attrKick <- struct{}{}:
 		default:
 		}
+		// A gate file kept because the directory failed (§15.4): retried.
+		var retry <-chan time.Time
+		if h.gateStale.Load() {
+			retry = time.After(directorySyncRetry)
+		}
 		select {
 		case <-ctx.Done():
 			return
+		case <-retry:
 		case <-h.dirKick:
 			select {
 			case <-ctx.Done():
