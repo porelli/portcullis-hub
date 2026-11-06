@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -93,10 +94,12 @@ func (h *Hub) ToolRedactionKey() string {
 		if t == nil {
 			continue
 		}
-		for _, e := range t.Manifest.Env {
-			if e.Generate != "" && e.Generate != "none" {
-				fmt.Fprintf(&b, "gen %s\n", e.Key)
-			}
+		// Every name whose value is always secret (SecretEnvNames: client
+		// secret_envs, secret options, generated entries), sorted: a
+		// template change adding one invalidates the cached set (Task 17b
+		// fix round 1).
+		for _, n := range slices.Sorted(maps.Keys(SecretEnvNames(t))) {
+			fmt.Fprintf(&b, "secret-env %s\n", n)
 		}
 		for _, o := range personSecretOptions(t) {
 			fmt.Fprintf(&b, "person_secret %s\n", o.Key)

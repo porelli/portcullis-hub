@@ -825,3 +825,36 @@ func TestClientSecretEnvAlwaysSecret(t *testing.T) {
 		t.Errorf("aiapp's generated entry isn't listed: %v", sn)
 	}
 }
+
+// TestRedactionKeyFollowsSecretEnvNames (fix round 1, security review):
+// the cached tool redaction set is rebuilt when a template change makes a
+// variable secret (a new client secret_env): the next result redacts its
+// value.
+func TestRedactionKeyFollowsSecretEnvNames(t *testing.T) {
+	plain := strings.Replace(keeperManifest, "    secret_env: OIDC_CLIENT_VALUE\n", "", 1)
+	e := newToolEnv(t, map[string][2]string{"keeper": {plain, keeperCompose}}, nil)
+	const val = "client-VALUE-0123456789"
+	if err := e.s.Hub.SaveEnv("keeper", map[string]string{"OIDC_CLIENT_VALUE": val}); err != nil {
+		t.Fatal(err)
+	}
+	redact, err := e.s.toolRedactor()
+	if err != nil || !strings.Contains(redact(val), val) {
+		t.Fatalf("before: a plain variable is redacted (%v)", err)
+	}
+	// The template update: its client now keeps its secret there.
+	src := filepath.Join(filepath.Dir(e.data), "src", "keeper", "manifest.yaml")
+	if err := os.WriteFile(src, []byte(keeperManifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e.s.Hub.Discover()
+	if !hub.SecretEnvNames(e.s.Hub.Template("keeper"))["OIDC_CLIENT_VALUE"] {
+		t.Fatal("the template change wasn't discovered")
+	}
+	redact, err = e.s.toolRedactor()
+	if err != nil || strings.Contains(redact("x "+val+" y"), val) {
+		t.Errorf("after: the new client secret isn't redacted (%v)", err)
+	}
+	if txt, _, _ := e.tool(t, "list_instances", nil); strings.Contains(txt, val) {
+		t.Errorf("a result holds it: %s", txt)
+	}
+}
