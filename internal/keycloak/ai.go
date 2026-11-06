@@ -376,7 +376,7 @@ func (c *Client) EnsureAIClient(ctx context.Context, s AIClientSpec) error {
 	// client with a scope or mapper it must not have is never (re-)enabled.
 	def, opt := AIDefaultScopes, append([]string{OfflineAccessScope}, s.OptionalScopes...)
 	if err := c.reconcileAIScopesAndMapper(ctx, tok, existing, def, opt); err != nil {
-		return c.disableIfDisallowed(ctx, tok, s, def, opt, err)
+		return c.disableIfDisallowed(ctx, tok, existing, s, def, opt, err)
 	}
 	withAISettings(existing, s)
 	existing.ProtocolMappers = nil // the sub-resource above does those
@@ -396,39 +396,46 @@ func (c *Client) reconcileAIScopesAndMapper(ctx context.Context, tok string, cl 
 
 // disableIfDisallowed: a failed scope or mapper step (cause) leaves the
 // client disabled when, read back, it still holds a scope outside
-// def/opt or any client mapper but the username mapper (or can't be read
-// back): fail closed until the next successful ensure re-enables it.
-// cause is returned either way.
-func (c *Client) disableIfDisallowed(ctx context.Context, tok string, s AIClientSpec, def, opt []string, cause error) error {
+// def/opt or its mappers aren't exactly the username mapper
+// (onlyMapper), or when it can't be read back — then existing (the
+// representation EnsureAIClient holds) is PUT disabled by its id. Fail
+// closed until the next successful ensure re-enables it. cause is
+// returned either way, joined with any error on the way.
+func (c *Client) disableIfDisallowed(ctx context.Context, tok string, existing *gocloak.Client, s AIClientSpec, def, opt []string, cause error) error {
+	errs := []error{cause}
 	cl, err := c.findClient(ctx, tok, s.ClientID)
-	if err != nil {
-		return errors.Join(cause, err)
-	}
 	bad := false
-	for _, n := range cl.DefaultClientScopes {
-		bad = bad || !slices.Contains(def, n)
-	}
-	for _, n := range cl.OptionalClientScopes {
-		bad = bad || !slices.Contains(opt, n)
-	}
-	ms, err := c.clientMappers(ctx, tok, cl)
 	if err != nil {
-		bad = true
-	}
-	for _, m := range ms {
-		bad = bad || str(m.Name) != AIUsernameMapper
+		errs = append(errs, err)
+		cl, bad = existing, true
+	} else {
+		for _, n := range cl.DefaultClientScopes {
+			bad = bad || !slices.Contains(def, n)
+		}
+		for _, n := range cl.OptionalClientScopes {
+			bad = bad || !slices.Contains(opt, n)
+		}
+		ms, err := c.clientMappers(ctx, tok, cl)
+		if err != nil {
+			errs = append(errs, err)
+			bad = true
+		} else if !onlyMapper(ms, aiUsernameMapper()) {
+			bad = true
+		}
 	}
 	if !bad {
 		return cause
 	}
-	withAISettings(cl, s)
-	cl.Enabled = gocloak.BoolP(false)
-	cl.ProtocolMappers = nil
-	if err := c.putClientExact(ctx, tok, cl); err != nil {
-		return errors.Join(cause, err)
+	off := *cl
+	off.Attributes = maps.Clone(cl.Attributes)
+	withAISettings(&off, s)
+	off.Enabled = gocloak.BoolP(false)
+	off.ProtocolMappers = nil
+	if err := c.putClientExact(ctx, tok, &off); err != nil {
+		return errors.Join(append(errs, err)...)
 	}
-	log.Printf("Keycloak AI client %s disabled: it keeps a scope or mapper it must not have", s.ClientID)
-	return fmt.Errorf("client %s disabled (a scope or mapper it must not have is left): %w", s.ClientID, cause)
+	log.Printf("Keycloak AI client %s disabled: it may keep a scope or mapper it must not have", s.ClientID)
+	return fmt.Errorf("client %s disabled (a scope or mapper it must not have may be left): %w", s.ClientID, errors.Join(errs...))
 }
 
 // scopeIDs maps the realm's client scope names to ids.
@@ -491,6 +498,13 @@ func (c *Client) exactScopes(ctx context.Context, tok string, cl *gocloak.Client
 	return nil
 }
 
+// onlyMapper: ms is exactly one mapper, named like want and sameMapper
+// as want — the state ensureOnlyClientMapper produces and the one
+// disableIfDisallowed accepts.
+func onlyMapper(ms []gocloak.ProtocolMapperRepresentation, want gocloak.ProtocolMapperRepresentation) bool {
+	return len(ms) == 1 && str(ms[0].Name) == str(want.Name) && sameMapper(ms[0], want)
+}
+
 // ensureOnlyClientMapper leaves exactly want on the client: any other
 // client mapper (a hardcoded claim, a group mapper) is deleted.
 func (c *Client) ensureOnlyClientMapper(ctx context.Context, tok string, cl *gocloak.Client, want gocloak.ProtocolMapperRepresentation) error {
@@ -499,6 +513,9 @@ func (c *Client) ensureOnlyClientMapper(ctx context.Context, tok string, cl *goc
 	have, err := c.clientMappers(ctx, tok, cl)
 	if err != nil {
 		return err
+	}
+	if onlyMapper(have, want) {
+		return nil
 	}
 	kept := false
 	for _, m := range have {

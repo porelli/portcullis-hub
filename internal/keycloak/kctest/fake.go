@@ -140,6 +140,9 @@ type Server struct {
 	// FailPrefix, if set, makes every request whose "METHOD path" starts
 	// with it answer 500.
 	FailPrefix string
+	// FailFunc, if set, makes every request it returns true for answer
+	// 500 (called under the fake's lock with the method and path).
+	FailFunc func(method, path string) bool
 
 	// Authentication flows, authenticator configs, groups and client
 	// roles (access.go).
@@ -340,6 +343,13 @@ func (s *Server) SetClientURIs(id string, redirects, origins []string) {
 	}
 }
 
+// SetFailFunc sets FailFunc under the fake's lock.
+func (s *Server) SetFailFunc(f func(method, path string) bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.FailFunc = f
+}
+
 // SetFailPrefix sets FailPrefix under the fake's lock.
 func (s *Server) SetFailPrefix(p string) {
 	s.mu.Lock()
@@ -484,7 +494,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(401)
 		return
 	}
-	if s.FailPrefix != "" && strings.HasPrefix(r.Method+" "+r.URL.Path, s.FailPrefix) {
+	if (s.FailPrefix != "" && strings.HasPrefix(r.Method+" "+r.URL.Path, s.FailPrefix)) || (s.FailFunc != nil && s.FailFunc(r.Method, r.URL.Path)) {
 		w.WriteHeader(500)
 		return
 	}

@@ -609,3 +609,85 @@ func TestEnsureAIClientFailsClosed(t *testing.T) {
 		t.Errorf("clean client, missing scope: %v, enabled %v", err, enabled())
 	}
 }
+
+// The disable check is the reconciler's: a username mapper with the
+// right name but another config counts as disallowed.
+func TestEnsureAIClientFailsClosedOnAlteredMapper(t *testing.T) {
+	ctx := context.Background()
+	kc := aiRealm(t)
+	c := keycloak.New(kc.HTTP.URL, "admin", "admin")
+	id := keycloak.AIClientIDs.Generic
+	if err := c.EnsureAIClient(ctx, hubAISpec(id)); err != nil {
+		t.Fatal(err)
+	}
+	uuid := kc.ClientByClientID(id).ID
+	kc.UpdateClient(uuid, func(cl *kctest.Client) {
+		for i := range cl.ProtocolMappers {
+			cl.ProtocolMappers[i].Config["user.attribute"] = "email" // same name, leaks the email
+		}
+	})
+	kc.SetFailPrefix("DELETE /admin/realms/portcullis/clients/" + uuid + "/protocol-mappers")
+	if err := c.EnsureAIClient(ctx, hubAISpec(id)); err == nil {
+		t.Fatal("failing mapper delete: no error")
+	}
+	if e := kc.ClientByClientID(id).Enabled; e == nil || *e {
+		t.Error("client with an altered username mapper left enabled")
+	}
+	kc.SetFailPrefix("")
+	if err := c.EnsureAIClient(ctx, hubAISpec(id)); err != nil {
+		t.Fatal(err)
+	}
+	if e := kc.ClientByClientID(id).Enabled; e == nil || !*e {
+		t.Error("not re-enabled")
+	}
+	checkAIClient(t, kc, id, true, keycloak.AIOwner, keycloak.LoopbackRedirectURIs, nil)
+}
+
+// A failed read-back disables the client through the representation
+// EnsureAIClient already holds; a failing disable PUT joins every error.
+func TestEnsureAIClientFailsClosedOnFailedReadback(t *testing.T) {
+	ctx := context.Background()
+	kc := aiRealm(t)
+	c := keycloak.New(kc.HTTP.URL, "admin", "admin")
+	id := keycloak.AIClientIDs.ClaudeCode
+	if err := c.EnsureAIClient(ctx, hubAISpec(id)); err != nil {
+		t.Fatal(err)
+	}
+	uuid := kc.ClientByClientID(id).ID
+	kc.UpdateClient(uuid, func(cl *kctest.Client) { cl.DefaultClientScopes = append(cl.DefaultClientScopes, "profile") })
+	failing := func(failPut bool) func(method, path string) bool {
+		lists := 0
+		return func(method, path string) bool {
+			switch {
+			case method == "DELETE" && strings.HasPrefix(path, "/admin/realms/portcullis/clients/"+uuid+"/default-client-scopes"):
+				return true
+			case method == "GET" && path == "/admin/realms/portcullis/clients":
+				lists++
+				return lists > 1 // the first lookup works, the read-back fails
+			case method == "PUT" && path == "/admin/realms/portcullis/clients/"+uuid:
+				return failPut
+			}
+			return false
+		}
+	}
+	kc.SetFailFunc(failing(false))
+	if err := c.EnsureAIClient(ctx, hubAISpec(id)); err == nil {
+		t.Fatal("no error")
+	}
+	if e := kc.ClientByClientID(id).Enabled; e == nil || *e {
+		t.Error("client left enabled after a failed read-back")
+	}
+	// The disable PUT failing too: every error comes back.
+	kc.SetFailFunc(nil)
+	if err := c.EnsureAIClient(ctx, hubAISpec(id)); err != nil {
+		t.Fatal(err)
+	}
+	kc.UpdateClient(uuid, func(cl *kctest.Client) { cl.DefaultClientScopes = append(cl.DefaultClientScopes, "profile") })
+	kc.SetFailFunc(failing(true))
+	err := c.EnsureAIClient(ctx, hubAISpec(id))
+	if err == nil || !strings.Contains(err.Error(), "detach default scope profile") || !strings.Contains(err.Error(), "client lookup") ||
+		!strings.Contains(err.Error(), "update client") {
+		t.Errorf("joined errors: %v", err)
+	}
+	kc.SetFailFunc(nil)
+}
