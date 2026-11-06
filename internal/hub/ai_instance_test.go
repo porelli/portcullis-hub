@@ -121,6 +121,12 @@ func (k *fakeAIKC) SetOptionalScopes(ctx context.Context, clientID string, scope
 	return nil
 }
 
+func (k *fakeAIKC) MCPScopeNames(ctx context.Context) ([]string, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return slices.Sorted(maps.Keys(k.scopes)), nil
+}
+
 func (k *fakeAIKC) opt(client string) []string {
 	k.mu.Lock()
 	defer k.mu.Unlock()
@@ -168,7 +174,7 @@ type instAIFixture struct {
 // (Claude with the admin flag), the core env with PORTCULLIS_MCP_GATE_IP,
 // the aiapp test template (and the oauth fixture as oauthapp), alice in
 // users_aiapp, the Hub's AI clients healthy.
-func newInstAIFixture(t *testing.T, seed func(*state.AppState)) *instAIFixture {
+func newInstAIFixture(t *testing.T, seed func(*state.AppState), mutate ...func(extra map[string][2]string)) *instAIFixture {
 	t.Helper()
 	id, err := age.GenerateX25519Identity()
 	if err != nil {
@@ -178,6 +184,9 @@ func newInstAIFixture(t *testing.T, seed func(*state.AppState)) *instAIFixture {
 	extra := map[string][2]string{
 		"aiapp":    readFixture(t, filepath.Join("testdata", "ai", "aiapp")),
 		"oauthapp": readFixture(t, filepath.Join("..", "templates", "testdata", "ai", "oauth")),
+	}
+	for _, m := range mutate {
+		m(extra)
 	}
 	a.fixture = newInstanceFixtureCfg(t, func(st *state.AppState) {
 		st.AI.Enabled = true

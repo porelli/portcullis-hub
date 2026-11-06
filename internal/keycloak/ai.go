@@ -660,6 +660,28 @@ func mcpScopeAttrs(s MCPScope) *gocloak.ClientScopeAttributes {
 	}
 }
 
+// MCPScopeNames lists the realm's client scopes named mcp:* (sorted):
+// a delete finds an instance's scopes by prefix when its template is
+// gone (plan 4 Task 15).
+func (c *Client) MCPScopeNames(ctx context.Context) ([]string, error) {
+	tok, err := c.token(ctx)
+	if err != nil {
+		return nil, err
+	}
+	scopes, err := c.api().GetClientScopes(ctx, tok, Realm)
+	if err != nil {
+		return nil, opErr("list client scopes", err)
+	}
+	var out []string
+	for _, sc := range scopes {
+		if sc != nil && ValidMCPScope(str(sc.Name)) {
+			out = append(out, str(sc.Name))
+		}
+	}
+	slices.Sort(out)
+	return out, nil
+}
+
 func (c *Client) findScope(ctx context.Context, tok, name string) (*gocloak.ClientScope, error) {
 	scopes, err := c.api().GetClientScopes(ctx, tok, Realm)
 	if err != nil {

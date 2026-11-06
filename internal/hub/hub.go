@@ -507,6 +507,9 @@ type Hub struct {
 	aiKCMu       sync.Mutex
 	aiMasterGen  uint64
 	aiClientErrs map[string]string
+	// aiOwedDrops: mcp:* scopes whose delete failed (under aiKCMu;
+	// memory): every client pass retries them while still unwanted.
+	aiOwedDrops map[string]bool
 	// testHookAIBeforeSave, if set, runs in UpdateInstanceAI right before
 	// its state commit (tests: a racing policy save).
 	testHookAIBeforeSave func()

@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/portcullis/hub/internal/aigate"
 	"github.com/portcullis/hub/internal/docker"
+	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/state"
 )
@@ -37,14 +39,14 @@ const (
 
 // newLifecycleFixture: aiapp enabled with tok (read_write) and hdr on,
 // both scopes in Keycloak.
-func newLifecycleFixture(t *testing.T) *instAIFixture {
+func newLifecycleFixture(t *testing.T, mutate ...func(map[string][2]string)) *instAIFixture {
 	t.Helper()
 	a := newInstAIFixture(t, func(st *state.AppState) {
 		st.AIInstances = map[string]state.AIInstance{"aiapp": {Companions: map[string]state.AICompanion{
 			"tok": {Enabled: true, Mode: "read_write"},
 			"hdr": {Enabled: true, Mode: "read_only"},
 		}}}
-	})
+	}, mutate...)
 	a.h.lockPoll = 5 * time.Millisecond
 	a.enable(t, "aiapp")
 	a.setMintAnswer(nil)
@@ -75,19 +77,47 @@ func (a *instAIFixture) wantScope(t *testing.T, name, audience, host string) {
 // consent text move in the Keycloak step (undone with the redirect URIs
 // on a later failure); router rule, gate file and MyApps follow the state.
 func TestSetHostsMovesMCPResource(t *testing.T) {
-	a := newLifecycleFixture(t)
+	// aiapp with a Keycloak client on its router (fix round 1): the
+	// redirect URIs and the forward-auth callbacks move and come back
+	// with the scopes.
+	a := newLifecycleFixture(t, func(extra map[string][2]string) {
+		m := extra["aiapp"]
+		m[0] = strings.Replace(m[0], "env:\n", "keycloak_clients:\n  - client_id: aiapp\n    redirect_uri: https://{{HOST_AIAPP}}/cb\nenv:\n", 1)
+		extra["aiapp"] = m
+	})
+	doms := &fakeDomains{}
+	doms.set(Domain{Name: "example.net", State: DomainReady})
+	a.h.SetDomainSource(doms)
 	envDir := filepath.Dir(a.h.envPath("aiapp"))
+	const extraHost = "tools.example.net"
+	newCB := keycloak.CallbackURI(extraHost)
+	// keycloakBack: the last Keycloak calls moved the client and the
+	// callbacks back to the old host.
+	keycloakBack := func(phase string) {
+		t.Helper()
+		a.idp.mu.Lock()
+		defer a.idp.mu.Unlock()
+		hu, cb := a.idp.hostUpdates, a.idp.callbacks
+		if len(hu) < 2 || hu[len(hu)-2] != "aiapp:https://aiapp.example.com/cb -> https://"+extraHost+"/cb" ||
+			hu[len(hu)-1] != "aiapp:https://"+extraHost+"/cb -> https://aiapp.example.com/cb" {
+			t.Errorf("%s: client host updates = %q", phase, hu)
+		}
+		if len(cb) < 2 || cb[len(cb)-2] != "+"+newCB+" -" || cb[len(cb)-1] != "+ -"+newCB {
+			t.Errorf("%s: callbacks = %q", phase, cb)
+		}
+	}
 
 	// A failure after the Keycloak step (the env can't be rewritten):
-	// both scopes are moved back, nothing else changed.
+	// both scopes, the client and the callbacks are moved back.
 	if err := os.Chmod(envDir, 0o500); err != nil {
 		t.Fatal(err)
 	}
-	err := a.h.SetHosts("aiapp", map[string]string{"aiapp": "tools.example.com"}, root)
+	err := a.h.SetHosts("aiapp", map[string]string{"aiapp": extraHost}, root)
 	os.Chmod(envDir, 0o755)
 	if statusOf(err) != 500 || !strings.Contains(err.Error(), "nothing changed") {
 		t.Fatalf("file failure = %v", err)
 	}
+	keycloakBack("commit failure")
 	a.wantScope(t, tokScope, tokResource, "aiapp.example.com")
 	a.wantScope(t, hdrScope, oldHdrURL, "aiapp.example.com")
 	moved := 0
@@ -107,11 +137,13 @@ func TestSetHostsMovesMCPResource(t *testing.T) {
 	a.kc.mu.Lock()
 	a.kc.failEnsure = map[string]error{tokScope: errors.New("keycloak down")}
 	a.kc.mu.Unlock()
-	err = a.h.SetHosts("aiapp", map[string]string{"aiapp": "tools.example.com"}, root)
+	err = a.h.SetHosts("aiapp", map[string]string{"aiapp": extraHost}, root)
 	if statusOf(err) != 502 || !strings.Contains(err.Error(), tokScope) {
 		t.Fatalf("scope failure = %v", err)
 	}
 	a.wantScope(t, hdrScope, oldHdrURL, "aiapp.example.com")
+	a.wantScope(t, tokScope, tokResource, "aiapp.example.com")
+	keycloakBack("scope failure")
 	if a.h.Template("aiapp").Hosts["aiapp"] != "aiapp.example.com" {
 		t.Error("hostnames changed after a failed scope step")
 	}
@@ -419,6 +451,37 @@ func TestRestoreAIStateRefusals(t *testing.T) {
 		}
 	}
 
+	// Over the cap (fix round 1): one warning, AI off, the restore goes on.
+	var many strings.Builder
+	many.WriteString(`{"companions":{`)
+	for i := 0; i <= aiArchiveMax; i++ {
+		if i > 0 {
+			many.WriteString(",")
+		}
+		fmt.Fprintf(&many, `"c%d":{"enabled":true,"mode":"read_only"}`, i)
+	}
+	many.WriteString(`,"hdr":{"enabled":true,"mode":"read_only"}},"providers":[]}`)
+	rewriteArchiveMember(t, a, entry.Archive, aiMember, []byte(many.String()))
+	res, err = a.h.RestoreInstance("aiapp", entry.Archive, root)
+	if err != nil {
+		t.Fatalf("restore over the cap = %v", err)
+	}
+	if s := a.companion("aiapp", "hdr"); s.Enabled {
+		t.Errorf("hdr over the cap = %+v", s)
+	}
+	n := 0
+	for _, w := range res.Warnings {
+		if strings.Contains(w, aiMember) {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("warnings over the cap = %q, want one naming %s", res.Warnings, aiMember)
+	}
+	if err := a.h.SetAISupport(context.Background(), "aiapp", "hdr", true, root); err != nil {
+		t.Fatal(err)
+	}
+
 	// The master switch off: every companion restored off, warned.
 	entry2, err := a.h.BackupInstance("aiapp", root)
 	if err != nil {
@@ -580,15 +643,32 @@ func TestDeleteRemovesAI(t *testing.T) {
 		}
 	}
 
-	// The retry finishes step 4 from the template's companions.
+	// The retry with the template gone too (and the AI state gone with
+	// step 3): every realm scope named mcp:aiapp.* goes by prefix — tok
+	// and a leftover no template or state names —, another instance's
+	// mcp:aiapp-b.* stays.
+	if err := os.RemoveAll(filepath.Join(a.src, "aiapp")); err != nil {
+		t.Fatal(err)
+	}
+	a.h.Discover()
+	if a.h.Template("aiapp") != nil {
+		t.Fatal("aiapp still resolves")
+	}
 	a.kc.mu.Lock()
 	a.kc.failDelete = nil
+	a.kc.scopes["mcp:aiapp.old"] = keycloak.MCPScope{Name: "mcp:aiapp.old"}
+	a.kc.scopes["mcp:aiapp-b.tok"] = keycloak.MCPScope{Name: "mcp:aiapp-b.tok"}
 	a.kc.mu.Unlock()
 	if _, err := a.h.DeleteInstance("aiapp", "aiapp", root); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := a.kc.scope(tokScope); ok {
-		t.Error("tok's scope kept")
+	for _, s := range []string{tokScope, "mcp:aiapp.old"} {
+		if _, ok := a.kc.scope(s); ok {
+			t.Errorf("%s kept", s)
+		}
+	}
+	if _, ok := a.kc.scope("mcp:aiapp-b.tok"); !ok {
+		t.Error("another instance's scope was deleted")
 	}
 	for _, c := range []string{"portcullis-ai-claude", "portcullis-ai-claude-code", "portcullis-ai-generic"} {
 		if o := a.kc.opt(c); slices.Contains(o, tokScope) || slices.Contains(o, hdrScope) {
@@ -597,5 +677,77 @@ func TestDeleteRemovesAI(t *testing.T) {
 	}
 	if got := a.auditsOf("ai.credential.revoke", "aiapp/tok/alice"); len(got) != 1 {
 		t.Errorf("audits after the retry = %+v", got)
+	}
+}
+
+// Fix round 1 (2, 3): a restore's scope drop that fails is owed and the
+// next AI client pass deletes it; a companion owing a revoke_all (the
+// restored instance isn't running) loses its scope too.
+func TestRestoreScopeDropOwed(t *testing.T) {
+	a := newLifecycleFixture(t)
+	entry, err := a.h.BackupInstance("aiapp", root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.h.Disable("aiapp"); err != nil {
+		t.Fatal(err)
+	}
+	a.h.Wait()
+	if err := a.h.syncAIScopes(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	a.kc.mu.Lock()
+	a.kc.scopes[tokScope] = keycloak.MCPScope{Name: tokScope, Audience: tokResource}
+	a.kc.failDelete = map[string]error{tokScope: errors.New("keycloak down")}
+	a.kc.mu.Unlock()
+	if _, err := a.h.RestoreInstance("aiapp", entry.Archive, root); err != nil {
+		t.Fatal(err)
+	}
+	if s := a.companion("aiapp", "tok"); !s.Enabled || !s.RevokePending {
+		t.Fatalf("tok = %+v, want on with a revoke_all owed", s)
+	}
+	if _, ok := a.kc.scope(tokScope); !ok {
+		t.Fatal("the fake deleted the scope it was told to fail")
+	}
+	a.h.aiKCMu.Lock()
+	owed := a.h.aiOwedDrops[tokScope]
+	a.h.aiKCMu.Unlock()
+	if !owed {
+		t.Fatal("the failed drop isn't owed")
+	}
+	a.kc.mu.Lock()
+	a.kc.failDelete = nil
+	a.kc.mu.Unlock()
+	if _, err := a.h.syncAIClients(context.Background()); err != nil {
+		t.Logf("pass: %v", err)
+	}
+	if _, ok := a.kc.scope(tokScope); ok {
+		t.Error("the owed drop wasn't retried")
+	}
+	a.h.aiKCMu.Lock()
+	left := len(a.h.aiOwedDrops)
+	a.h.aiKCMu.Unlock()
+	if left != 0 {
+		t.Errorf("owed drops left: %d", left)
+	}
+}
+
+// Fix round 1 (7): a corrupt oauth-seen.json stops the delete with an
+// error naming the file and what the admin must do.
+func TestDeleteCorruptOAuthSeen(t *testing.T) {
+	a := newLifecycleFixture(t)
+	p := filepath.Join(a.h.cfg.DataDir, "ai", oauthSeenName)
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := a.h.DeleteInstance("aiapp", "aiapp", root)
+	if err == nil || !strings.Contains(err.Error(), p) || !strings.Contains(err.Error(), "fix or remove") {
+		t.Fatalf("delete = %v", err)
+	}
+	if b, _ := os.ReadFile(p); string(b) != "{not json" {
+		t.Error("the corrupt file was replaced")
 	}
 }

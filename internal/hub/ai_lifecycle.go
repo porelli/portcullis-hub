@@ -8,12 +8,13 @@ import (
 	"fmt"
 	"log"
 	"maps"
+	"path/filepath"
 	"slices"
 	"strings"
 
 	"github.com/portcullis/hub/internal/aigate"
 	"github.com/portcullis/hub/internal/directory"
-	"github.com/portcullis/hub/internal/policy"
+	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
 )
@@ -74,6 +75,10 @@ func (h *Hub) aiArchiveLocked(tg *target) []byte {
 	return append(b, '\n')
 }
 
+// aiArchiveMax caps config/ai.json's companions and providers (more =
+// the member is refused: AI restored off with one warning).
+const aiArchiveMax = 64
+
 // parseAIArchive decodes config/ai.json strictly (one document, known
 // keys only).
 func parseAIArchive(b []byte) (*aiArchive, error) {
@@ -85,6 +90,9 @@ func parseAIArchive(b []byte) (*aiArchive, error) {
 	}
 	if dec.More() {
 		return nil, errors.New("trailing data")
+	}
+	if len(a.Companions) > aiArchiveMax || len(a.Providers) > aiArchiveMax {
+		return nil, fmt.Errorf("more than %d companions or providers", aiArchiveMax)
 	}
 	return &a, nil
 }
@@ -168,11 +176,8 @@ func (h *Hub) aiRestoreRefusalLocked(t *templates.Template, c *templates.Compani
 	if !h.st.AI.Enabled {
 		return "AI support is off on this Portcullis"
 	}
-	if !t.HasAIMCP() {
-		return fmt.Sprintf("%s has no AI support: %s", t.TemplateID, t.Manifest.AI.Unsupported)
-	}
-	if policy.LoA(h.effectivePolicyLocked(t)) == 3 {
-		return fmt.Sprintf("%s's sign-in policy %s", t.ID, mtlsRefusal)
+	if why := h.aiTemplateRefusalLocked(t); why != "" {
+		return why
 	}
 	if c.Identity.Mode != templates.IdentityAppOAuth {
 		if err := checkAliasFits(t.ID, c.Name); err != nil {
@@ -222,7 +227,10 @@ func (h *Hub) dropRestoredScopes(id string, had map[string]*templates.Companion)
 	sw := h.st.AIInstances[id].Companions
 	var changes []aiChange
 	for _, name := range slices.Sorted(maps.Keys(had)) {
-		if s := sw[name]; !s.Enabled {
+		// Off, or owing a revoke_all (its scope is ensured again once that
+		// succeeded: syncAIScopes).
+		if s := sw[name]; !s.Enabled || s.RevokePending {
+			s.Enabled = false
 			changes = append(changes, aiChange{c: had[name], before: state.AICompanion{Enabled: true}, after: s, scope: aigate.CompanionScope(id, name)})
 		}
 	}
@@ -231,8 +239,42 @@ func (h *Hub) dropRestoredScopes(id string, had map[string]*templates.Companion)
 		return
 	}
 	if err := h.applyAIScopes(context.Background(), changes); err != nil {
-		log.Printf("ai: %s: the scopes of companions a restore switched off: %v (the sync loop retries)", id, err)
+		// A delete that didn't run (no Keycloak, an earlier error) is owed
+		// like one that failed; every client pass retries it.
+		h.aiKCMu.Lock()
+		for _, ch := range changes {
+			h.oweScopeDropLocked(ch.scope)
+		}
+		h.aiKCMu.Unlock()
+		log.Printf("ai: %s: the scopes of companions a restore switched off: %v (owed: every AI client pass retries the delete)", id, err)
 	}
+}
+
+// oweScopeDropLocked records an mcp:* scope whose delete is owed.
+// Caller holds aiKCMu.
+func (h *Hub) oweScopeDropLocked(name string) {
+	if h.aiOwedDrops == nil {
+		h.aiOwedDrops = map[string]bool{}
+	}
+	h.aiOwedDrops[name] = true
+}
+
+// retryOwedDropsLocked deletes every owed scope that is still unwanted
+// (one wanted again is forgotten). Caller holds aiKCMu.
+func (h *Hub) retryOwedDropsLocked(ctx context.Context, kc AIKeycloak, ensure map[string]keycloak.MCPScope) []error {
+	var errs []error
+	for _, name := range slices.Sorted(maps.Keys(h.aiOwedDrops)) {
+		if _, wanted := ensure[name]; wanted {
+			delete(h.aiOwedDrops, name)
+			continue
+		}
+		if err := kc.DeleteMCPScope(ctx, name); err != nil {
+			errs = append(errs, fmt.Errorf("Keycloak: deleting client scope %s (owed): %w", name, err))
+			continue
+		}
+		delete(h.aiOwedDrops, name)
+	}
+	return errs
 }
 
 // restoreAIAfterStart switches off every companion of id whose owed
@@ -313,14 +355,14 @@ func (h *Hub) forgetInstanceAI(id string, actor directory.Actor) error {
 		}
 		return changed
 	}); err != nil {
-		return fmt.Errorf("removing its app_oauth records: %w", err)
+		return fmt.Errorf("removing its app_oauth records from %s failed (%w): an administrator must fix or remove that file, then delete again", filepath.Join(h.cfg.DataDir, "ai", oauthSeenName), err)
 	}
 	if _, err := h.orphansUpdate(func(l []aiOrphanID) ([]aiOrphanID, bool) {
 		n := len(l)
 		l = slices.DeleteFunc(l, func(o aiOrphanID) bool { return o.Instance == id })
 		return l, len(l) != n
 	}); err != nil {
-		return fmt.Errorf("removing its unstored-credential records: %w", err)
+		return fmt.Errorf("removing its unstored-credential records from %s failed (%w): an administrator must fix or remove that file, then delete again", filepath.Join(h.cfg.DataDir, "ai", orphansName), err)
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -344,20 +386,35 @@ func (h *Hub) forgetInstanceAI(id string, actor directory.Actor) error {
 // (names), detached from every client first (DeleteMCPScope; missing =
 // nothing).
 func (h *Hub) deleteAIScopes(ctx context.Context, id string, names []string) error {
-	if len(names) == 0 {
-		return nil
-	}
 	kc := h.aiKeycloak()
 	if kc == nil {
 		return errors.New("Keycloak: the AI scope calls are not configured")
 	}
 	h.aiKCMu.Lock()
 	defer h.aiKCMu.Unlock()
-	var errs []error
+	// Plus every realm scope named mcp:<id>.* (a retry whose template and
+	// AI state are gone; ids and companion names hold no dot, so the
+	// prefix is exact).
+	listed, err := kc.MCPScopeNames(ctx)
+	if err != nil {
+		return fmt.Errorf("listing the mcp:* client scopes: %w", err)
+	}
+	set := map[string]bool{}
 	for _, name := range names {
-		scope := aigate.CompanionScope(id, name)
+		set[aigate.CompanionScope(id, name)] = true
+	}
+	prefix := "mcp:" + id + "."
+	for _, s := range listed {
+		if strings.HasPrefix(s, prefix) {
+			set[s] = true
+		}
+	}
+	var errs []error
+	for _, scope := range slices.Sorted(maps.Keys(set)) {
 		if err := kc.DeleteMCPScope(ctx, scope); err != nil {
 			errs = append(errs, fmt.Errorf("deleting client scope %s: %w", scope, err))
+		} else {
+			delete(h.aiOwedDrops, scope)
 		}
 	}
 	return errors.Join(errs...)

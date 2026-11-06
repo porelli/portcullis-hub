@@ -592,6 +592,8 @@ func (h *Hub) SetHosts(instanceID string, hosts map[string]string, actor directo
 	// committed or the move is undone: a pass in between would put the
 	// state's old audience back. Released before the restart (its start
 	// syncs scopes).
+	// The directory snapshot first: never a directory call under aiKCMu.
+	ch.members = h.groupSnapshot(instanceID)
 	scopeUnlock := func() {}
 	if len(ch.scopesNew)+len(ch.scopesOld) > 0 {
 		h.aiKCMu.Lock()
@@ -603,7 +605,6 @@ func (h *Hub) SetHosts(instanceID string, hosts map[string]string, actor directo
 	}
 
 	runtime = h.runtimeCopy()
-	ch.members = h.groupSnapshot(instanceID)
 	h.mu.Lock()
 	view, keep, saveErr, err := h.commitHostsLocked(ch, runtime)
 	h.mu.Unlock()

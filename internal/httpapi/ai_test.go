@@ -320,6 +320,7 @@ func (aiScopesKC) DeleteMCPScope(context.Context, string) error                {
 func (aiScopesKC) SetOptionalScopes(context.Context, string, []string) error   { return nil }
 func (aiScopesKC) EnsureAIClient(context.Context, keycloak.AIClientSpec) error { return nil }
 func (aiScopesKC) DeleteAIClient(context.Context, string, string) error        { return nil }
+func (aiScopesKC) MCPScopeNames(context.Context) ([]string, error)             { return nil, nil }
 
 // aiAppEnv: the Hub's AI test template aiapp (disabled), master switch on.
 func aiAppEnv(t *testing.T) *instEnv {

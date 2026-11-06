@@ -691,3 +691,22 @@ func TestEnsureAIClientFailsClosedOnFailedReadback(t *testing.T) {
 	}
 	kc.SetFailFunc(nil)
 }
+
+// TestMCPScopeNames lists only mcp:* scopes, sorted (plan 4 Task 15).
+func TestMCPScopeNames(t *testing.T) {
+	ctx := context.Background()
+	kc := aiRealm(t)
+	c := keycloak.New(kc.HTTP.URL, "admin", "admin")
+	for _, n := range []string{"mcp:b.x", "mcp:a.y"} {
+		if err := c.EnsureMCPScope(ctx, keycloak.MCPScope{Name: n, Audience: "https://a.example.com/mcp", ConsentText: "Use A (a.example.com) as you"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := c.MCPScopeNames(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(got, ",") != "mcp:a.y,mcp:b.x" {
+		t.Errorf("names = %v", got)
+	}
+}

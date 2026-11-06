@@ -66,6 +66,8 @@ func (h *Hub) syncAIClients(ctx context.Context) (changed bool, err error) {
 	if a.Enabled {
 		errs = ensureAIScopes(ctx, kc, plan.ensure)
 	}
+	// Scope deletes that failed or never ran (Task 15), any master state.
+	errs = append(errs, h.retryOwedDropsLocked(ctx, kc, plan.ensure)...)
 	wants := plan.clients
 	for _, w := range wants {
 		var cerr error

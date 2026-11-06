@@ -56,6 +56,9 @@ type AIKeycloak interface {
 	SetOptionalScopes(ctx context.Context, clientID string, scopes []string) error
 	EnsureAIClient(ctx context.Context, s keycloak.AIClientSpec) error
 	DeleteAIClient(ctx context.Context, clientID, owner string) error
+	// MCPScopeNames lists the realm's mcp:* scopes (a delete's
+	// prefix sweep, Task 15).
+	MCPScopeNames(ctx context.Context) ([]string, error)
 }
 
 // SetAIKeycloak wires the scope calls (nil: a switch that changes a scope
@@ -576,13 +579,27 @@ func (h *Hub) aiRefusalLocked(t *templates.Template) (int, string) {
 	if err := h.pendingLocked(t.ID); err != nil {
 		return http.StatusConflict, err.Error()
 	}
-	if !t.HasAIMCP() {
-		return http.StatusConflict, fmt.Sprintf("%s has no AI support: %s", t.ID, t.Manifest.AI.Unsupported)
-	}
-	if policy.LoA(h.effectivePolicyLocked(t)) == 3 {
-		return http.StatusConflict, fmt.Sprintf("%s's sign-in policy %s", t.ID, mtlsRefusal)
+	if why := h.aiTemplateRefusalLocked(t); why != "" {
+		return http.StatusConflict, why
 	}
 	return 0, ""
+}
+
+// aiTemplateRefusalLocked is the refusal switching on and restoring
+// share ("" = none): ai.unsupported, or an effective policy at LoA 3.
+// Caller holds mu.
+func (h *Hub) aiTemplateRefusalLocked(t *templates.Template) string {
+	if !t.HasAIMCP() {
+		unsupported := ""
+		if t.Manifest.AI != nil {
+			unsupported = t.Manifest.AI.Unsupported
+		}
+		return fmt.Sprintf("%s has no AI support: %s", t.ID, unsupported)
+	}
+	if policy.LoA(h.effectivePolicyLocked(t)) == 3 {
+		return fmt.Sprintf("%s's sign-in policy %s", t.ID, mtlsRefusal)
+	}
+	return ""
 }
 
 // checkAliasFits refuses an alias longer than one DNS label (409).
@@ -847,6 +864,9 @@ func (h *Hub) applyAIScopesFor(ctx context.Context, changes []aiChange, force bo
 	for _, name := range drop {
 		if err := kc.DeleteMCPScope(ctx, name); err != nil {
 			errs = append(errs, fmt.Errorf("Keycloak: deleting client scope %s: %w", name, err))
+			h.oweScopeDropLocked(name)
+		} else {
+			delete(h.aiOwedDrops, name)
 		}
 	}
 	return errors.Join(errs...)
