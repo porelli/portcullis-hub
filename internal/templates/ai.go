@@ -2,6 +2,7 @@ package templates
 
 import (
 	"fmt"
+	"maps"
 	"net/url"
 	"path"
 	"regexp"
@@ -509,6 +510,7 @@ func rawVarRefs(s string) []rawRef {
 type composeServiceInfo struct {
 	networks    []string
 	networkMode bool
+	netModeOf   string   // network_mode's value when a string
 	ports       bool     // ports: declared (published to the host)
 	named       []string // container_name / hostname present
 }
@@ -536,6 +538,7 @@ func composeServiceInfos(compose []byte) map[string]composeServiceInfo {
 			}
 		}
 		_, info.networkMode = s["network_mode"]
+		info.netModeOf, _ = s["network_mode"].(string)
 		_, info.ports = s["ports"]
 		for _, f := range []string{"container_name", "hostname"} {
 			if _, ok := s[f]; ok {
@@ -638,6 +641,13 @@ func checkCompanions(t *Template, compose []byte, routes *Routes, named map[stri
 			}
 			if info.ports {
 				return fmt.Errorf("%s: companion service %s may not publish ports (the gate is the only way in)", w, c.Service)
+			}
+			// A service sharing the companion's network namespace would
+			// reach it (and be reached) past the gate.
+			for _, name := range slices.Sorted(maps.Keys(infos)) {
+				if infos[name].netModeOf == "service:"+c.Service {
+					return fmt.Errorf("%s: service %s uses network_mode service:%s, the companion service's network namespace (it would reach the companion past the gate)", w, name, c.Service)
+				}
 			}
 		}
 		serviceUse[c.Service] = c.Name
