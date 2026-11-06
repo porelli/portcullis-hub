@@ -124,9 +124,10 @@ func (h *Hub) aiClientHealth() map[string]bool {
 }
 
 // gateRecipient is the gate's age recipient (nil: no gate — a missing,
-// unreadable or unparseable HUB_MCP_GATE_RECIPIENT_FILE).
+// unreadable or unparseable HUB_MCP_GATE_RECIPIENT_FILE — or no MCP
+// listener for it to call: HUB_MCP_GATE_SECRET_FILE missing).
 func (h *Hub) gateRecipient() *age.X25519Recipient {
-	if h.cfg.MCPGateRecipientFile == "" {
+	if h.cfg.MCPGateRecipientFile == "" || !h.cfg.MCPListener {
 		return nil
 	}
 	r, err := aigate.ParseRecipientFile(h.cfg.MCPGateRecipientFile)

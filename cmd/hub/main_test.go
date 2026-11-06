@@ -149,3 +149,29 @@ func TestWireDirectoryHooks(t *testing.T) {
 		t.Errorf("OnEvaluated: syncs %d checks %d", h.syncs, h.checks)
 	}
 }
+
+// TestMCPListenerFromEnv (contract §15.7): defaults :8890 and core's
+// mount; a missing secret file = no listener (no error); under 32
+// characters refuses the start without quoting the value.
+func TestMCPListenerFromEnv(t *testing.T) {
+	dir := t.TempDir()
+	envOf := func(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
+	l, err := mcpListenerFromEnv(envOf(map[string]string{"HUB_MCP_GATE_SECRET_FILE": filepath.Join(dir, "missing")}))
+	if err != nil || l.on || l.secret != "" || l.addr != ":8890" {
+		t.Errorf("missing = %+v %v", l, err)
+	}
+	if l, _ := mcpListenerFromEnv(envOf(nil)); l.file != "/run/portcullis/mcp-gate/hub-secret" {
+		t.Errorf("default file = %q", l.file)
+	}
+	short := filepath.Join(dir, "short")
+	os.WriteFile(short, []byte(strings.Repeat("q", 31)+"\n"), 0o600)
+	if _, err := mcpListenerFromEnv(envOf(map[string]string{"HUB_MCP_GATE_SECRET_FILE": short})); err == nil || strings.Contains(err.Error(), "qqqq") {
+		t.Errorf("short = %v", err)
+	}
+	good := filepath.Join(dir, "good")
+	os.WriteFile(good, []byte(strings.Repeat("q", 48)+"\n"), 0o600)
+	l, err = mcpListenerFromEnv(envOf(map[string]string{"HUB_MCP_GATE_SECRET_FILE": good, "HUB_MCP_ADDR": ":9999"}))
+	if err != nil || !l.on || l.secret != strings.Repeat("q", 48) || l.addr != ":9999" {
+		t.Errorf("good = %v %v %q", l.on, err, l.addr)
+	}
+}

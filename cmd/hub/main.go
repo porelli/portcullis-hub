@@ -110,6 +110,14 @@ func main() {
 		log.Fatalf("refusing to start: %v", err)
 	}
 
+	// The MCP listener's secret (contract §15.7): read once, here. A
+	// missing file = no listener and AI support off; a short or
+	// unreadable one refuses the start. Never logged.
+	mcp, err := mcpListenerFromEnv(os.Getenv)
+	if err != nil {
+		log.Fatalf("refusing to start: %v", err)
+	}
+
 	projectDir := env("PROJECT_DIR", "/project")
 	cfg := hub.Config{
 		ProjectDir:          projectDir,
@@ -136,6 +144,7 @@ func main() {
 		// The gate's age recipient (contract §15.4): readable = the core
 		// has an mcp-gate (Settings → AI gate_present).
 		MCPGateRecipientFile: env("HUB_MCP_GATE_RECIPIENT_FILE", "/run/portcullis/mcp-gate/age.pub"),
+		MCPListener:          mcp.on,
 	}
 	fixerImage, err := fixerImageFromEnv(os.Getenv)
 	if err != nil {
@@ -266,6 +275,7 @@ func main() {
 		Audit:      dir.Audit,
 		PortalName: os.Getenv("PORTAL_DISPLAY_NAME"),
 		Secret:     secret,
+		MCPSecret:  mcp.secret,
 		Web:        web.FS,
 	}
 	handler, err := srv.Handler()
@@ -319,6 +329,19 @@ func main() {
 	addr := env("HUB_LISTEN_ADDR", ":8888")
 	peopleAddr := env("HUB_PEOPLE_ADDR", ":8889")
 	servers := []*http.Server{newHTTPServer(addr, handler), newHTTPServer(peopleAddr, peopleHandler)}
+	// The MCP listener (mcp-gate only, contract §15.7): only with its
+	// secret. It listens on every Hub network; the secret protects it
+	// and no Traefik router targets it (G36).
+	if mcp.on {
+		mcpHandler, err := srv.MCPHandler()
+		if err != nil {
+			log.Fatalf("mcp listener: %v", err)
+		}
+		servers = append(servers, newHTTPServer(mcp.addr, mcpHandler))
+		log.Printf("MCP listener on %s (mcp-gate only)", mcp.addr)
+	} else {
+		log.Printf("MCP listener not started: %s is missing — AI support is off", mcp.file)
+	}
 	go func() {
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -343,6 +366,29 @@ func main() {
 	if !h.WaitTimeout(shutdownWait) {
 		log.Printf("shutdown: background instance operations still running after %s — they are marked interrupted at the next start", shutdownWait)
 	}
+}
+
+// mcpListener is the MCP listener's configuration (contract §15.7).
+type mcpListener struct {
+	addr, file, secret string
+	on                 bool
+}
+
+// mcpListenerFromEnv reads HUB_MCP_ADDR (default :8890) and
+// HUB_MCP_GATE_SECRET_FILE (default /run/portcullis/mcp-gate/hub-secret,
+// core's mount): a missing file = off; a short or unreadable one is an
+// error (the Hub refuses to start).
+func mcpListenerFromEnv(getenv func(string) string) (mcpListener, error) {
+	l := mcpListener{addr: getenv("HUB_MCP_ADDR"), file: getenv("HUB_MCP_GATE_SECRET_FILE")}
+	if l.addr == "" {
+		l.addr = ":8890"
+	}
+	if l.file == "" {
+		l.file = "/run/portcullis/mcp-gate/hub-secret"
+	}
+	var err error
+	l.secret, l.on, err = httpapi.LoadMCPSecret(l.file)
+	return l, err
 }
 
 // userRevalidateInterval: how often Keycloak's users are listed (each

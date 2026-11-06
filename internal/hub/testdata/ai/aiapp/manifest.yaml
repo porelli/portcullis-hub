@@ -34,6 +34,9 @@ ai:
         format: "Bearer {credential}"
         mint: tok-mint
         revoke: tok-revoke
+        scopes:
+          read_only: ["read:repository"]
+          read_write: ["read:repository", "write:repository"]
       tools:
         writes: ["create_*"]
         confirm: ["delete_*"]

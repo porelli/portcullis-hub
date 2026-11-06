@@ -92,8 +92,8 @@ func TestForgedAIHeadersIgnored(t *testing.T) {
 // mcpAIHeaderFiles are the only non-test Go files (relative to the repo
 // root) allowed to name X-Portcullis-AI-*: the MCP listener (Task 13),
 // which takes them from the gate behind the MCP secret and turns them into
-// an mcpIdentity. None exist yet.
-var mcpAIHeaderFiles = map[string]bool{}
+// an mcpIdentity.
+var mcpAIHeaderFiles = map[string]bool{"internal/httpapi/mcplistener.go": true}
 
 // TestNoAIHeaderReads (G41): no Hub code outside the MCP listener's
 // identity seam names an X-Portcullis-AI-* header. Task 13's listener

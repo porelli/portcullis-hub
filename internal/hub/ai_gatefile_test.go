@@ -196,6 +196,7 @@ func newGateFixture(t *testing.T, seed func(*state.AppState)) *gateFixture {
 			t.Fatal(err)
 		}
 		c.MCPGateRecipientFile = g.recip
+		c.MCPListener = true
 	})
 	for _, tid := range []string{"gitea", "wiki", "aichat", "native", "unsup"} {
 		if g.h.Template(tid) == nil {

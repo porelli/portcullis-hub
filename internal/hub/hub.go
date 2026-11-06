@@ -22,6 +22,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"golang.org/x/sync/singleflight"
+
 	"github.com/portcullis/hub/internal/compose"
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
@@ -80,6 +82,11 @@ type Config struct {
 	// recipient (contract §15.4; "" or unreadable = no gate: Settings → AI
 	// shows gate_present false).
 	MCPGateRecipientFile string
+	// MCPListener: the MCP listener (HUB_MCP_ADDR, contract §15.7) runs —
+	// main read a usable HUB_MCP_GATE_SECRET_FILE. false = the gate can't
+	// reach the Hub (no mint, no Portcullis MCP), so AI support is off:
+	// mcp-gate.json says enabled: false.
+	MCPListener bool
 }
 
 // Engine is the part of the Docker Engine API the Hub uses.
@@ -454,6 +461,9 @@ type Hub struct {
 	callerDigests map[string]string
 	credsOnce     sync.Once
 	aiCreds       *aiCredStore
+	// mints: single flight per (resource, user) of MintCredential
+	// (ai_credentials.go, G35).
+	mints singleflight.Group
 	// Per-instance AI support (ai_instance.go): aiKC the mcp:* scope calls
 	// (under mu); aiLocks the per-instance AI locks (waiting); aiErrs each
 	// companion's last error, redacted (under aiErrMu, memory only).

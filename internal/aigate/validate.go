@@ -84,6 +84,9 @@ func ValidUsername(s string) bool { return usernameR.MatchString(s) }
 
 func validUser(s string) bool { return ValidUsername(s) }
 
+// ValidCredentialID: an app-side credential id as §15.4 allows it.
+func ValidCredentialID(s string) bool { return credID.MatchString(s) }
+
 // Clients that may never use an MCP resource (§15.2).
 var forbiddenClients = []string{"portcullis-forward-auth", "portcullis-fresh-auth"}
 

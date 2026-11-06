@@ -1077,6 +1077,15 @@ func (h *Hub) onChange(ctx context.Context, t *templates.Template, c *templates.
 // exit code and stderr only, redacted (the instance's secrets and every
 // piece of stdout) and then clipped. Never parsed for PORTCULLIS-REPORT.
 func (h *Hub) runAIHook(ctx context.Context, t *templates.Template, name string, stdin []byte) (stdout []byte, res UnitResult) {
+	stdout, _, res = h.runAIHookExit(ctx, t, name, stdin)
+	return stdout, res
+}
+
+// runAIHookExit is runAIHook with the hook's exit code (-1: it didn't
+// run to an exit — not found, no container, an Engine error or a
+// timeout).
+func (h *Hub) runAIHookExit(ctx context.Context, t *templates.Template, name string, stdin []byte) (stdout []byte, exit int, res UnitResult) {
+	exit = -1
 	res = UnitResult{Unit: "ai:" + name, At: time.Now().UTC()}
 	var hk *templates.Hook
 	for i := range t.Manifest.Hooks {
@@ -1086,21 +1095,21 @@ func (h *Hub) runAIHook(ctx context.Context, t *templates.Template, name string,
 	}
 	if hk == nil {
 		res.Error = fmt.Sprintf("hook %s: not an ai hook of the template", clip(name, 64))
-		return nil, res
+		return nil, exit, res
 	}
 	if h.engine == nil {
 		res.Error = fmt.Sprintf("hook %s: no Docker engine", name)
-		return nil, res
+		return nil, exit, res
 	}
 	cs, _, err := h.appContainers(ctx, t)
 	if err != nil {
 		res.Error = clipRunes(h.secretRedactor(t.ID)(fmt.Sprintf("hook %s: listing the %s containers: %v", name, hk.Service, err)), unitErrorMax)
-		return nil, res
+		return nil, exit, res
 	}
 	c := runningContainer(cs, hk.Service)
 	if c == nil {
 		res.Error = fmt.Sprintf("hook %s: no running container of service %s", name, hk.Service)
-		return nil, res
+		return nil, exit, res
 	}
 	r, err := h.engine.ExecStdinSplit(ctx, c.ID, docker.ExecInput{Cmd: slices.Clone(hk.Command), User: hk.User, Stdin: append(slices.Clone(stdin), '\n'), Timeout: hk.EffectiveTimeout()})
 	var why string
@@ -1112,10 +1121,11 @@ func (h *Hub) runAIHook(ctx context.Context, t *templates.Template, name string,
 	case r.TimedOut:
 		why = fmt.Sprintf("timed out after %s (the process may still run)", hk.EffectiveTimeout())
 	case r.ExitCode != 0:
+		exit = r.ExitCode
 		why = fmt.Sprintf("exited %d", r.ExitCode)
 	default:
 		res.OK, res.Message = true, "exit 0"
-		return r.Stdout, res
+		return r.Stdout, 0, res
 	}
 	var out, errText []byte
 	if r != nil {
@@ -1128,7 +1138,7 @@ func (h *Hub) runAIHook(ctx context.Context, t *templates.Template, name string,
 		msg += ": stderr: " + s
 	}
 	res.Error = clipRunes(redact(msg), unitErrorMax)
-	return nil, res
+	return nil, exit, res
 }
 
 // stdoutPieces are the redaction values of a hook's stdout: the whole of

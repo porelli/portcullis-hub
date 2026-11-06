@@ -29,7 +29,10 @@ type Server struct {
 	Audit      *directory.AuditLog
 	PortalName string
 	Secret     string // HUB_PROXY_SECRET
-	Web        fs.FS  // contains index.html
+	// MCPSecret is HUB_MCP_GATE_SECRET (the MCP listener, MCPHandler;
+	// "" = no MCP listener).
+	MCPSecret string
+	Web       fs.FS // contains index.html
 
 	index *template.Template
 }

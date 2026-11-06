@@ -181,6 +181,7 @@ func newInstAIFixture(t *testing.T, seed func(*state.AppState)) *instAIFixture {
 			t.Fatal(err)
 		}
 		c.MCPGateRecipientFile = recip
+		c.MCPListener = true
 		writeFile(t, filepath.Join(c.ProjectDir, ".env"), "CORE_VAR=core-value\nPORTCULLIS_MCP_GATE_IP=172.31.250.3\n")
 	})
 	for _, tid := range []string{"aiapp", "oauthapp"} {
