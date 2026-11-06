@@ -722,6 +722,15 @@ func checkCompanions(t *Template, compose []byte, routes *Routes, named map[stri
 				return err
 			}
 		}
+		if mode == IdentityHeaders {
+			// A host-network service sends from the host's addresses, the
+			// trust network's gateway side included.
+			for _, name := range slices.Sorted(maps.Keys(infos)) {
+				if infos[name].netModeOf == "host" {
+					return fmt.Errorf("%s: service %s uses network_mode host: not allowed next to an identity_headers companion (it reaches the app from the host's addresses)", w, name)
+				}
+			}
+		}
 		serviceUse[c.Service] = c.Name
 		if (mode != IdentityAppOAuth && c.Port < 1) || c.Port < 0 || c.Port > 65535 {
 			return fmt.Errorf("%s: port %d must be 1–65535", w, c.Port)

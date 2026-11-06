@@ -350,6 +350,8 @@ func TestTrustNetwork(t *testing.T) {
 		{"trust network with external", f, nil, []string{"  mcp-trust:\n    internal: true\n", "  mcp-trust:\n    internal: true\n    external: false\n"}, "name and external are allowed only"},
 		{"a third member", f, nil, []string{"  db:\n    image: db\n", "  db:\n    image: db\n    networks: [default, mcp-trust]\n"}, "service db joins the trust network"},
 		{"app not on it", f, nil, []string{"      mcp-trust:\n        aliases: [web-internal]\n", ""}, "must join the trust network"},
+		{"a host-network service", f, nil, []string{"  db:\n    image: db\n", "  db:\n    image: db\n    network_mode: host\n"}, "uses network_mode host: not allowed next to an identity_headers companion"},
+		{"a host-network service next to a builtin identity_headers companion", "headers", nil, []string{"services:\n", "services:\n  side:\n    image: x\n    network_mode: host\n"}, "uses network_mode host"},
 		{"sharing the app's namespace", f, nil, []string{"  db:\n    image: db\n", "  db:\n    image: db\n    network_mode: service:web\n"}, "share an address on the trust network"},
 	})
 	// The -internal alias of the app is allowed on the internal trust network
