@@ -289,7 +289,7 @@ func (h *Hub) secretRedactor(id string, extra ...[]string) func(string) string {
 	if err != nil {
 		// F44, fail closed: a person_secret instance whose hashes can't be
 		// read shows no text that could hold one — only why.
-		msg := "the message is hidden: " + id + "'s password hashes couldn't be read to redact it (" + err.Error() + ")"
+		msg := "the message is hidden: " + id + "'s secrets couldn't be read to redact it (" + err.Error() + ")"
 		return func(string) string { return msg }
 	}
 	for _, x := range extra {
@@ -307,7 +307,8 @@ func (h *Hub) redactionSet(id string) []string {
 }
 
 // redactionSetErr is redactionSet plus the instance's current NT hashes
-// (upper and lower case, F44); err: they exist but can't be read.
+// (upper and lower case, F44) and every model provider secret (G30(c));
+// err: they exist but can't be read.
 func (h *Hub) redactionSetErr(id string) ([]string, error) {
 	t := h.Template(id)
 	var vals []string
@@ -315,8 +316,11 @@ func (h *Hub) redactionSetErr(id string) ([]string, error) {
 		vals = append(vals, envSecrets(t, readEnvFile(p))...)
 	}
 	vals = append(vals, h.knownSecrets(id)...)
+	// G30(c): every model provider secret, whichever instance selects it.
+	ps, perr := h.providerSecretValues()
+	vals = append(vals, ps...)
 	hs, err := h.credentialHashes(id, t)
-	return append(vals, hs...), err
+	return append(vals, hs...), errors.Join(err, perr)
 }
 
 // envSecrets are the values in vars (an env file, unquoted) that look

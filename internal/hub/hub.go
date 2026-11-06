@@ -76,6 +76,10 @@ type Config struct {
 	// "" = DefaultSecretsVolume), mounted into apps by subpath.
 	SecretsDir    string
 	SecretsVolume string
+	// MCPGateRecipientFile is HUB_MCP_GATE_RECIPIENT_FILE, the gate's age
+	// recipient (contract §15.4; "" or unreadable = no gate: Settings → AI
+	// shows gate_present false).
+	MCPGateRecipientFile string
 }
 
 // Engine is the part of the Docker Engine API the Hub uses.

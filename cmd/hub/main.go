@@ -133,6 +133,9 @@ func main() {
 		// Hub's uid, 0700); unusable = those apps refuse to start.
 		SecretsDir:    env("HUB_SECRETS_DIR", "/secrets"),
 		SecretsVolume: env("HUB_SECRETS_VOLUME", hub.DefaultSecretsVolume),
+		// The gate's age recipient (contract §15.4): readable = the core
+		// has an mcp-gate (Settings → AI gate_present).
+		MCPGateRecipientFile: env("HUB_MCP_GATE_RECIPIENT_FILE", "/run/portcullis/mcp-gate/age.pub"),
 	}
 	fixerImage, err := fixerImageFromEnv(os.Getenv)
 	if err != nil {

@@ -1084,7 +1084,7 @@ func (h *Hub) auditFolder(actor directory.Actor, action, id, detail string, err 
 		e.Result, e.Error = "error", clipRunes(redactValues(rawErrorText(err), vals), 600)
 		if hidden != nil {
 			// F44, fail closed: a person_secret instance's hashes unread.
-			e.Error = clipRunes("the message is hidden: password hashes couldn't be read to redact it ("+hidden.Error()+")", 600)
+			e.Error = clipRunes("the message is hidden: secrets couldn't be read to redact it ("+hidden.Error()+")", 600)
 		}
 		var se *StatusError
 		if errors.As(err, &se) && se.Status < 500 {

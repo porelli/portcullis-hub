@@ -1549,7 +1549,9 @@ func (h *Hub) applyDefaultPolicy() {
 // option's env name, or of a variable the template doesn't declare
 // (declaredEnvNames, Hub-set names included) holding a stored secret's
 // value — a line a template update left behind (an env variable renamed,
-// an option no longer secret), or an admin's copy of a secret.
+// an option no longer secret), or an admin's copy of a secret —, every
+// PORTCULLIS_AI_PROVIDER_* value and any variable holding a model
+// provider secret (G30(a)).
 func (h *Hub) secretMask(t *templates.Template) (func(name, value string) bool, error) {
 	secrets, err := h.secretValues(t.ID)
 	if err != nil {
@@ -1561,10 +1563,19 @@ func (h *Hub) secretMask(t *templates.Template) (func(name, value string) bool, 
 			stored[v] = true
 		}
 	}
+	// G30(a): every provider variable (PORTCULLIS_AI_PROVIDER_*) is masked,
+	// and so is any other variable holding a provider secret's value.
+	provider, err := h.providerSecretValues()
+	if err != nil {
+		return nil, err
+	}
+	for _, v := range provider {
+		stored[v] = true
+	}
 	names := secretOptionEnvNames(t)
 	declared := declaredEnvNames(t)
 	return func(n, v string) bool {
-		return v != "" && (names[n] || stored[v] && !declared[n] && !templates.ReservedVar(n))
+		return v != "" && (names[n] || strings.HasPrefix(n, ProviderVarPrefix) || stored[v] && !declared[n] && !templates.ReservedVar(n))
 	}, nil
 }
 

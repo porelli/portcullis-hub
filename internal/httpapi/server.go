@@ -79,6 +79,7 @@ func (s *Server) hubMux() *recordingMux {
 	s.registerSettings(mux)
 	s.registerFolders(mux)
 	s.registerDoctor(mux)
+	s.registerAI(mux)
 	return mux
 }
 
