@@ -52,10 +52,16 @@ type fakeAIKC struct {
 	// to be closed (outside mu).
 	block   chan struct{}
 	entered chan struct{}
+	// 13b: AI connections per user, the RevokeAIConnection calls
+	// ("user@client") and the errors they answer.
+	conns     map[string][]keycloak.AIConnection
+	revoked   []string
+	revokeErr error
+	connErr   error
 }
 
 func newFakeAIKC() *fakeAIKC {
-	return &fakeAIKC{scopes: map[string]keycloak.MCPScope{}, optional: map[string][]string{}, missing: map[string]bool{}}
+	return &fakeAIKC{scopes: map[string]keycloak.MCPScope{}, optional: map[string][]string{}, missing: map[string]bool{}, conns: map[string][]keycloak.AIConnection{}}
 }
 
 func (k *fakeAIKC) EnsureMCPScope(ctx context.Context, s keycloak.MCPScope) error {

@@ -303,6 +303,9 @@ func (h *Hub) backupInstance(id string, actor directory.Actor, ready func()) (en
 		return nil, err
 	}
 	defer unlock()
+	// lockApp → aiLock (G35, 13a carry): no mint or revoke runs a hook
+	// while the backup stops and copies the app.
+	defer h.lifecycleAILock(id)()
 	if err := h.pending(id); err != nil {
 		return nil, err
 	}

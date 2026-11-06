@@ -87,6 +87,10 @@ type Config struct {
 	// reach the Hub (no mint, no Portcullis MCP), so AI support is off:
 	// mcp-gate.json says enabled: false.
 	MCPListener bool
+	// MCPGateDataDir is HUB_MCP_GATE_DATA_DIR (core mounts mcp_gate_data
+	// read-only at /mcp-gate-data): the gate's access.jsonl (§15.8) is
+	// read there ("" = no access log: MyAI / AccessLog answer 503).
+	MCPGateDataDir string
 }
 
 // Engine is the part of the Docker Engine API the Hub uses.
@@ -479,6 +483,14 @@ type Hub struct {
 	// UpdateInstanceAI is applying (startUp leaves the owed hooks to it).
 	aiReapply  map[string]map[string]bool
 	aiApplying sync.Map
+	// Revocation reconcile (ai_revoke.go, Task 13b): aiReconKick kicks
+	// runAIReconcile, aiReconMu serialises passes; aiRevokeErrs the last
+	// audited failure per revocation and aiPrunedErrs per Pruned companion
+	// (both under aiErrMu, memory only).
+	aiReconKick  chan struct{}
+	aiReconMu    sync.Mutex
+	aiRevokeErrs map[string]string
+	aiPrunedErrs map[string]string
 	// Keycloak AI clients (ai_clients.go): aiKCMu serialises every pass
 	// over the AI clients and mcp:* scopes (the sync loop, a Settings → AI
 	// save, applyAIScopes), each reading state after taking it — a leaf
@@ -552,6 +564,7 @@ func New(cfg Config, runner compose.Runner, engine Engine, idp IdP) (*Hub, error
 		lifecycleDeliverWait: lifecycleDeliverWaitDefault,
 		kick:                 make(chan struct{}, 1),
 		dirKick:              make(chan struct{}, 1),
+		aiReconKick:          make(chan struct{}, 1),
 		credKick:             make(chan struct{}, 1),
 		driftKey:             map[string]string{},
 		afterFunc:            realAfterFunc,
@@ -618,6 +631,9 @@ func (h *Hub) Init() {
 	// After the final Discover: stored settings of options the templates
 	// removed, retyped or rescoped are dropped (audited; P9).
 	h.pruneSettings()
+	// Companions the templates dropped or changed are switched off and
+	// their credentials revoked (G33); the restart is owed (requeueOwed).
+	h.pruneAI(false)
 	// Interrupted same-instance restores are rolled back (background).
 	h.RecoverRestores()
 	// Interrupted shared-folder applies and undos: their stopped apps are

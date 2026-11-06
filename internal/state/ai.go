@@ -106,6 +106,18 @@ type AICompanion struct {
 	// current state (a switch or mode change while the instance was
 	// stopped); the next start runs it, after an owed revoke_all.
 	OnChangePending bool `json:"on_change_pending,omitempty" yaml:"on_change_pending,omitempty"`
+	// IdentityMode and RevokeHook: the companion's identity mode and
+	// revoke hook when it was last switched on (Task 13b, G33: a template
+	// update that drops the companion or changes its mode is detected,
+	// and the app-side credentials are revoked with the hook that minted
+	// them).
+	IdentityMode string `json:"identity_mode,omitempty" yaml:"identity_mode,omitempty"`
+	RevokeHook   string `json:"revoke_hook,omitempty" yaml:"revoke_hook,omitempty"`
+	// Pruned: switched off by a template update (pruneAI, G33); a
+	// revoke_all with RevokeHook is still owed (its entries are revoking).
+	// Cleared once it succeeded; while the template lacks that hook it
+	// stays (AIRevokeProblems, the doctor's ai_credentials_revoking).
+	Pruned bool `json:"pruned,omitempty" yaml:"pruned,omitempty"`
 }
 
 // Connection length bounds and defaults (§15.11), in days.

@@ -145,6 +145,7 @@ func main() {
 		// has an mcp-gate (Settings → AI gate_present).
 		MCPGateRecipientFile: env("HUB_MCP_GATE_RECIPIENT_FILE", "/run/portcullis/mcp-gate/age.pub"),
 		MCPListener:          mcp.on,
+		MCPGateDataDir:       env("HUB_MCP_GATE_DATA_DIR", "/mcp-gate-data"),
 	}
 	fixerImage, err := fixerImageFromEnv(os.Getenv)
 	if err != nil {

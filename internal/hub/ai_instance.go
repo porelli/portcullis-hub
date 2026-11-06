@@ -412,7 +412,12 @@ func (h *Hub) updateInstanceAI(ctx context.Context, id string, u InstanceAIUpdat
 		next.Companions[k] = v
 	}
 	for _, ch := range changes {
-		next.Companions[ch.c.Name] = ch.after
+		a := ch.after
+		if a.Enabled {
+			// What a template update is compared with (pruneAI, G33).
+			a.IdentityMode, a.RevokeHook = ch.c.Identity.Mode, ch.c.Identity.Revoke
+		}
+		next.Companions[ch.c.Name] = a
 	}
 	if h.st.AIInstances == nil {
 		h.st.AIInstances = map[string]state.AIInstance{}
@@ -428,6 +433,15 @@ func (h *Hub) updateInstanceAI(ctx context.Context, id string, u InstanceAIUpdat
 		return nil, err
 	}
 	h.mu.Unlock()
+	for _, ch := range changes {
+		if ch.switchingOff() {
+			// A mint's (or a revoke's) last error belongs to the companion
+			// being on (13a carry).
+			h.clearMintError(id, ch.c)
+		}
+	}
+	// app_oauth leavers, revocations a switch leaves behind (Task 13b).
+	defer h.TriggerAIReconcile()
 	if h.testHookAIAfterSave != nil {
 		h.testHookAIAfterSave()
 	}
@@ -848,29 +862,9 @@ func (h *Hub) revokeAll(ctx context.Context, t *templates.Template, c *templates
 	if c.Identity.Revoke == "" {
 		return nil
 	}
-	var mine []aigate.Credential
-	for _, e := range h.creds().Entries() {
-		if e.Instance == t.ID && e.Companion == c.Name {
-			mine = append(mine, e)
-		}
-	}
-	for _, e := range mine {
-		if err := h.creds().MarkRevoking(e.Instance, e.Companion, e.User); err != nil {
-			return statusErr(http.StatusInternalServerError, "companion %s: marking its credentials revoking: %v", c.Name, err)
-		}
-	}
-	stdin, _ := json.Marshal(aiRevokeAllIn{Action: "revoke_all", Prefix: templates.AIClientPrefix})
-	out, u := h.runAIHook(ctx, t, c.Identity.Revoke, stdin)
-	clear(out)
-	if !u.OK {
-		return &StatusError{Status: http.StatusBadGateway, Err: fmt.Errorf("companion %s: revoke_all failed: %s", c.Name, u.Error)}
-	}
-	for _, e := range mine {
-		if err := h.creds().Remove(e.Instance, e.Companion, e.User); err != nil {
-			return statusErr(http.StatusInternalServerError, "companion %s: removing its revoked credentials: %v", c.Name, err)
-		}
-	}
-	return nil
+	// app_oauth: everyone's MCP tokens are revoked, so nobody recorded in
+	// oauth-seen.json owes a revoke any more (Task 13b).
+	return h.revokeAllWith(ctx, t, c.Name, c.Identity.Revoke, c.Identity.Mode == templates.IdentityAppOAuth)
 }
 
 // dropAIEntries removes every Hub-side credential entry of a companion
@@ -1273,6 +1267,10 @@ func (h *Hub) InstanceAI(id string) (*InstanceAIView, error) {
 		switch {
 		case cv.LastError != "":
 			cv.Status = "failed"
+		case !s.Enabled && s.Pruned:
+			// Switched off by a template update; its revoke_all is owed
+			// (AIRevokeProblems).
+			cv.Status = "revoking"
 		case !s.Enabled && s.RevokePending:
 			// Off; its app-side credentials are revoked at the next start.
 			cv.Status = "revoking"

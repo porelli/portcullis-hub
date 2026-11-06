@@ -201,6 +201,8 @@ func (h *Hub) RunDirectorySync(ctx context.Context) {
 	defer func() { <-done }()
 	for {
 		h.writePolicyLogged()
+		// Leavers' AI credentials and connections (Task 13b; its own loop).
+		h.TriggerAIReconcile()
 		// Membership may have changed: per-person, per-group and
 		// person-entered deliveries follow (debounced per instance).
 		h.TriggerMembershipDelivery()

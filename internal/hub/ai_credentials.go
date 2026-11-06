@@ -255,8 +255,8 @@ func (h *Hub) mint(ctx context.Context, resource, user string) (*MintResult, err
 	// Put encrypts to the gate and zeroes cred (always).
 	if err := h.creds().Put(aigate.Credential{Instance: r.Instance, Companion: r.Companion, User: user, ID: id, MintedAt: aigate.At(time.Now())}, cred); err != nil {
 		h.mintFailed(&t, c, actor, target, "hook "+c.Identity.Mint+": the credential couldn't be stored: "+err.Error())
-		// The app holds a credential nobody can use: revoke it now
-		// (best effort; never retried — it is in no file).
+		// The app holds a credential nobody can use: its id (never the
+		// credential) is recorded for the reconcile, then revoked now.
 		h.revokeOrphan(ctx, &t, c, user, id)
 		return nil, errMintFailed(c.Name)
 	}
@@ -322,16 +322,22 @@ func (h *Hub) revokeEntry(ctx context.Context, t *templates.Template, c *templat
 }
 
 // revokeOrphan revokes a just-minted credential that couldn't be stored.
+// Its id is recorded first (orphans.json, ids only), so a failure here is
+// retried by every reconcile (retryOrphans).
 func (h *Hub) revokeOrphan(ctx context.Context, t *templates.Template, c *templates.Companion, user, id string) {
+	o := aiOrphanID{Instance: t.ID, Companion: c.Name, User: user, ID: id}
+	h.recordOrphan(o)
 	if c.Identity.Revoke == "" {
 		return
 	}
-	stdin, _ := json.Marshal(aiRevokeIn{Action: "revoke", User: user, IDs: []string{id}})
-	out, u := h.runAIHook(ctx, t, c.Identity.Revoke, stdin)
-	clear(out)
-	if !u.OK {
-		log.Printf("ai: %s/%s: revoking the unstored credential %s of %s failed: %s", t.ID, c.Name, id, user, u.Error)
+	err := h.runRevoke(ctx, t, c.Identity.Revoke, user, []string{id})
+	if err == nil {
+		err = h.dropOrphan(o)
 	}
+	if err != nil {
+		log.Printf("ai: %s/%s: revoking the unstored credential %s of %s failed (retried at every reconcile): %v", t.ID, c.Name, id, user, err)
+	}
+	h.revokeAudit(directory.Human(user), "orphan:"+t.ID+"/"+c.Name+"/"+user+":"+id, t.ID+"/"+c.Name+"/"+user, "id "+id+" (unstored)", err)
 }
 
 // mintName is portcullis-ai-<12 random [a-z0-9]> (§15.5), unbiased.

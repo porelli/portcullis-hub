@@ -646,6 +646,10 @@ func (h *Hub) applyRestore(id string, sb *staged, plan []volumePlan, wasEnabled,
 	h.mu.Lock()
 	h.applyConfigLocked(id, sb.cfg)
 	h.rebuildLocked()
+	// The app's data was replaced: its switched-on companions owe a
+	// revoke_all before they are rendered or listed again (§15.4; run by
+	// the start below, under this restore's AI lock).
+	h.oweAIRevokeLocked(id)
 	// The secrets store as archived (config/settings-secrets.json; none =
 	// no secrets), before the env is written from it.
 	var secretsErr error
@@ -936,6 +940,9 @@ func (h *Hub) restoreInstanceAs(archive, newID string, actor directory.Actor, ho
 	h.mu.Lock()
 	h.applyConfigLocked(newID, sb.cfg)
 	h.rebuildLocked()
+	// A copy never gets listed before a revoke_all (§15.4; Task 15 starts
+	// its AI off anyway).
+	h.oweAIRevokeLocked(newID)
 	if v := h.findLocked(newID); v != nil {
 		h.seedSettingsLocked(v)
 	}

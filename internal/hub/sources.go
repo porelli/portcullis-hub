@@ -331,6 +331,8 @@ func (h *Hub) syncSources(trigger string, timeout time.Duration) SourceSyncStatu
 	}
 	// Only after the final Discover (a rolled-back update drops nothing).
 	h.pruneSettings()
+	// AI companions the templates dropped or changed (G33).
+	h.pruneAI(true)
 	// The data files, claims, headers and hooks follow a template that
 	// changed what they render.
 	h.redeliverChanged(gens)

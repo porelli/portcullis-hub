@@ -141,6 +141,8 @@ func computeDrift(enabled, known, snapshot map[string]bool, counts map[string]pr
 // Reconcile checks state against Docker once, stores and returns the report.
 // It never changes anything; drift is logged when it appears or clears.
 func (h *Hub) Reconcile(ctx context.Context) DriftReport {
+	// Revoking AI credentials are retried at every reconcile (§15.5).
+	h.TriggerAIReconcile()
 	rep := DriftReport{CheckedAt: time.Now().UTC(), Items: []Drift{}}
 	if h.engine == nil {
 		rep.Error = "docker engine not configured"
@@ -380,6 +382,7 @@ func (h *Hub) RunReconciler(ctx context.Context) {
 	if h.engine != nil {
 		go h.watchEvents(ctx)
 	}
+	go h.runAIReconcile(ctx)
 	h.Reconcile(ctx)
 	tick := time.NewTicker(h.cfg.ReconcileInterval)
 	defer tick.Stop()
