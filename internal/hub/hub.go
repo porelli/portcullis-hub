@@ -107,6 +107,8 @@ type Engine interface {
 	// closed, no TTY; ExecRunning: a timed-out exec still runs (Docker
 	// can't kill it: the next hook run waits for it).
 	ExecStdin(ctx context.Context, id string, in docker.ExecInput) (*docker.ExecResult, error)
+	// ExecStdinSplit runs an AI hook (§15.5, G6): stdout and stderr apart.
+	ExecStdinSplit(ctx context.Context, id string, in docker.ExecInput) (*docker.ExecSplitResult, error)
 	ExecRunning(ctx context.Context, execID string) (bool, error)
 	// RunHelper runs the shared-folder fixer, a STARTED helper (contract
 	// §6, fixer.go); InspectContainer finds the Hub's own image;
@@ -452,6 +454,13 @@ type Hub struct {
 	callerDigests map[string]string
 	credsOnce     sync.Once
 	aiCreds       *aiCredStore
+	// Per-instance AI support (ai_instance.go): aiKC the mcp:* scope calls
+	// (under mu); aiLocks the per-instance AI locks (waiting); aiErrs each
+	// companion's last error, redacted (under aiErrMu, memory only).
+	aiKC    AIKeycloak
+	aiLocks sync.Map
+	aiErrMu sync.Mutex
+	aiErrs  map[string]string
 	// testHookInit, if set, is called at Init's stages (tests: order).
 	testHookInit func(stage string)
 	// testHookApplyRestore, if set, runs at applyRestore's stages

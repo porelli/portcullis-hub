@@ -1,0 +1,20 @@
+services:
+  app:
+    image: app
+    environment:
+      APP_AI: ${PORTCULLIS_AI_ENABLED:-false}
+      HDR_SECRET: ${HDR_SECRET}
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.aiapp.rule: Host(`${PORTCULLIS_HOST_AIAPP:-aiapp.portcullis.local}`)
+      traefik.http.routers.aiapp.entrypoints: websecure
+      traefik.http.routers.aiapp.middlewares: portcullis-auth@docker,portcullis-groups@docker
+      traefik.http.services.aiapp.loadbalancer.server.port: "3000"
+    networks: [default, portcullis-proxy]
+  tok-mcp:
+    image: tok-mcp
+    environment:
+      READONLY: ${PORTCULLIS_AI_READONLY_TOK:-true}
+networks:
+  portcullis-proxy:
+    external: true

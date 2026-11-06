@@ -159,6 +159,8 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 	type running struct {
 		id, service string
 		labels      map[string]string
+		// mcpAliases: its portcullis-mcp- names on portcullis-proxy.
+		mcpAliases []string
 	}
 	var live []running
 	for _, c := range cs {
@@ -194,7 +196,13 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 			if _, ok := c.Labels["traefik.http.routers."+PublicRouterName(id)+".rule"]; ok {
 				havePublic[id] = true
 			}
-			live = append(live, running{id, c.Labels[docker.LabelService], c.Labels})
+			var aliases []string
+			for _, n := range c.Networks[aiProxyNetwork] {
+				if strings.HasPrefix(strings.ToLower(n), templates.MCPNamePrefix) {
+					aliases = append(aliases, strings.ToLower(n))
+				}
+			}
+			live = append(live, running{id, c.Labels[docker.LabelService], c.Labels, aliases})
 		}
 		counts[id] = pc
 	}
@@ -207,6 +215,7 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 	blockedPublic := map[string]string{}
 	desired := map[string]map[string]map[string]string{}
 	expectedKeys := map[string]map[string]map[string]bool{}
+	mcpAliases := map[string]map[string]map[string]bool{}
 	signInSet := map[string]bool{} // the Hub sets the routers' middlewares
 	nativeOnly := map[string]bool{}
 	for i := range h.instances {
@@ -224,6 +233,7 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 			if k, err := h.expectedTraefikKeysLocked(t); err == nil {
 				expectedKeys[t.ID] = k
 			}
+			mcpAliases[t.ID] = h.desiredMCPAliasesLocked(t)
 			if d, err := h.desiredRouteLabelsLocked(t); err == nil {
 				desired[t.ID] = d
 			} else {
@@ -254,6 +264,21 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 		}
 		if d := diffExposure(c.id, want[c.service], c.labels, signInSet[c.id]); d != "" && exposureDiff[c.id] == "" {
 			exposureDiff[c.id] = c.service + ": " + d
+		}
+		// A portcullis-mcp- alias the Hub doesn't render makes a container
+		// reachable as a companion (§5): exposure drift. A missing one only
+		// breaks the gate's path.
+		if want, ok := mcpAliases[c.id]; ok && exposureDiff[c.id] == "" {
+			var extra []string
+			for _, a := range c.mcpAliases {
+				if !want[c.service][a] {
+					extra = append(extra, a)
+				}
+			}
+			if len(extra) > 0 {
+				sort.Strings(extra)
+				exposureDiff[c.id] = c.service + ": unexpected network alias " + strings.Join(extra, ", ")
+			}
 		}
 		if keys, ok := expectedKeys[c.id]; ok && exposureDiff[c.id] == "" {
 			if extra := extraTraefikKeys(keys[c.service], c.labels); len(extra) > 0 {

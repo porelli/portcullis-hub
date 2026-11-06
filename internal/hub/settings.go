@@ -855,6 +855,23 @@ func (h *Hub) SaveSettings(id string, u SettingsUpdate, actor directory.Actor) (
 	if err != nil {
 		return nil, err
 	}
+	// A policy reaching LoA 3 switches AI support off first (G43,
+	// contract §15.11; audited ai.disable "policy needs mTLS").
+	aiWarnings := []string{}
+	h.mu.RLock()
+	aiOff := h.aiOffForSaveLocked(t, u)
+	h.mu.RUnlock()
+	if len(aiOff) > 0 {
+		if err := h.switchAIOff(context.Background(), id, aiOff, actor, aiPolicyOffDetail); err != nil {
+			var oe *OpError
+			if !errors.As(err, &oe) {
+				return nil, err
+			}
+			// Off in state and in the gate file; the rest is recorded.
+			aiWarnings = append(aiWarnings, h.redactUnitError(id, err))
+		}
+		aiWarnings = append(aiWarnings, aiOffWarning(id, aiOff))
+	}
 	if h.testHookSave != nil {
 		h.testHookSave()
 	}
@@ -863,7 +880,7 @@ func (h *Hub) SaveSettings(id string, u SettingsUpdate, actor directory.Actor) (
 	if err != nil {
 		return nil, err
 	}
-	out := &SaveResult{Effect: sv.effect, Changed: sv.keys, Warnings: append(append([]string{}, bindWarnings...), h.noAccessWarnings(t, sv.keys)...)}
+	out := &SaveResult{Effect: sv.effect, Changed: sv.keys, Warnings: append(append(aiWarnings, bindWarnings...), h.noAccessWarnings(t, sv.keys)...)}
 	if len(sv.writeErrs) > 0 {
 		writeErr = errors.Join(sv.writeErrs...)
 		for _, e := range sv.writeErrs {

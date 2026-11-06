@@ -253,6 +253,8 @@ func main() {
 		// The token endpoint never redirects; a redirect is refused.
 		HTTP: &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
 	}))
+	// Per-instance AI support (contract §8): the mcp:* scopes.
+	h.SetAIKeycloak(kc)
 	h.SetFreshAuthClient(func(ctx context.Context) error {
 		return kc.EnsureFreshAuthClient(ctx, fa.RedirectURI, fa.WebOrigin)
 	})

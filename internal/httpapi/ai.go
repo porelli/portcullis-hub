@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/portcullis/hub/internal/hub"
+	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/state"
 )
 
@@ -28,6 +29,11 @@ func (s *Server) registerAI(mux routeMux) {
 	mux.HandleFunc("PUT /api/ai/providers/{name}", s.handleUpdateModelProvider)
 	mux.HandleFunc("DELETE /api/ai/providers/{name}", s.handleDeleteModelProvider)
 	mux.HandleFunc("PUT /api/ai/providers/{name}/secrets/{field}", s.handleProviderSecret)
+	// Per-instance AI support (Task 12a, §15.11).
+	mux.HandleFunc("GET /api/instances/{id}/ai", s.handleInstanceAI)
+	mux.HandleFunc("PUT /api/instances/{id}/ai", s.handleUpdateInstanceAI)
+	// What saving a Hub default policy would switch off first (G43).
+	mux.HandleFunc("POST /api/settings/preview", s.handleDefaultPolicyPreview)
 }
 
 const (
@@ -38,7 +44,71 @@ const (
 	providerUsage = `{"name", "label", "kind", "instance", "base_url", "region", "instance_name", "api_version", ` +
 		`"deployments": {"<deployment>": "<model>"}, "models": {"fetch": bool, "list": ["<model>", ...]}, "credentials": "admin"|"per_person"} (no secret fields)`
 	providerSecretUsage = `{"value": "<secret>"} or {"clear": true}`
+	instanceAIUsage     = `{"companions": {"<name>": {"enabled": bool, "mode": "read_only"|"read_write"}}}`
 )
+
+// handleDefaultPolicyPreview: {"default_auth_policy"} → {"warnings"}
+// (nothing stored).
+func (s *Server) handleDefaultPolicyPreview(w http.ResponseWriter, r *http.Request) {
+	if !s.folderAdmin(w, r) {
+		return
+	}
+	var b struct {
+		DefaultAuthPolicy *policy.AuthPolicy `json:"default_auth_policy"`
+	}
+	if !decodeAPI(w, r, &b, `{"default_auth_policy": {"factors": [...], "op": "any"|"all"}}`) {
+		return
+	}
+	if b.DefaultAuthPolicy == nil {
+		writeJSONError(w, http.StatusBadRequest, "body must be {\"default_auth_policy\": {...}}")
+		return
+	}
+	noStore(w)
+	writeJSON(w, map[string]any{"warnings": append([]string{}, s.Hub.DefaultPolicyAIWarnings(*b.DefaultAuthPolicy)...)})
+}
+
+// handleInstanceAI is the instance's AI tab.
+func (s *Server) handleInstanceAI(w http.ResponseWriter, r *http.Request) {
+	if !s.folderAdmin(w, r) {
+		return
+	}
+	id, ok := instanceID(w, r)
+	if !ok {
+		return
+	}
+	v, err := s.Hub.InstanceAI(id)
+	if err != nil {
+		writeAPIErr(w, err)
+		return
+	}
+	noStore(w)
+	writeJSON(w, v)
+}
+
+// handleUpdateInstanceAI switches companions and modes (the Hub audits
+// ai.enable / ai.disable / ai.mode with the request's actor). The
+// provider selection (ai.chat) is Task 23's: "providers" is an unknown
+// field until then.
+func (s *Server) handleUpdateInstanceAI(w http.ResponseWriter, r *http.Request) {
+	if !s.folderAdmin(w, r) {
+		return
+	}
+	id, ok := instanceID(w, r)
+	if !ok {
+		return
+	}
+	var u hub.InstanceAIUpdate
+	if !decodeAPI(w, r, &u, instanceAIUsage) {
+		return
+	}
+	res, err := s.Hub.UpdateInstanceAI(r.Context(), id, u, requestActor(r))
+	if err != nil {
+		writeAPIErr(w, err)
+		return
+	}
+	noStore(w)
+	writeJSON(w, res)
+}
 
 func (s *Server) handleAISettings(w http.ResponseWriter, r *http.Request) {
 	if !s.folderAdmin(w, r) {

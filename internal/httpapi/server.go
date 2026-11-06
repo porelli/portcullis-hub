@@ -605,7 +605,9 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		before := s.Hub.DefaultPolicy()
-		changed, err := s.Hub.SetDefaultPolicy(*req.DefaultAuthPolicy)
+		// Inheriting instances the new default puts at LoA 3 get AI
+		// support switched off first (G43; listed in the answer).
+		changed, warnings, err := s.Hub.SetDefaultPolicyAs(*req.DefaultAuthPolicy, requestActor(r))
 		after := *req.DefaultAuthPolicy
 		if err == nil {
 			after = policy.Normalize(after)
@@ -619,10 +621,10 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if !changed {
-			writeJSON(w, map[string]string{"status": "unchanged"})
+			writeJSON(w, map[string]any{"status": "unchanged", "warnings": warnings})
 			return
 		}
-		writeJSON(w, map[string]string{"status": "saved"})
+		writeJSON(w, map[string]any{"status": "saved", "warnings": warnings})
 	default:
 		http.Error(w, "GET or PUT only", http.StatusMethodNotAllowed)
 	}

@@ -69,6 +69,9 @@ func (h *Hub) generateAppEnvLocked(t *templates.Template, m *directory.Membershi
 	for k, v := range t.InstanceEnv {
 		vars[k] = v
 	}
+	for k, v := range h.aiEnvLocked(t) {
+		vars[k] = v
+	}
 	coreEnv := readEnvRaw(filepath.Join(h.cfg.ProjectDir, ".env"))
 	for ref := range templates.EnvRefs(string(t.ReadCompose())) {
 		if _, exists := vars[ref]; !exists {
@@ -579,6 +582,9 @@ func (h *Hub) refreshInstanceEnvLocked(t *templates.Template, m *directory.Membe
 	for k, v := range t.InstanceEnv {
 		want[k] = v
 	}
+	for k, v := range h.aiEnvLocked(t) {
+		want[k] = v
+	}
 	for k, v := range want {
 		if c, ok := cur[k]; ok && c == v {
 			delete(want, k)
@@ -593,4 +599,33 @@ func (h *Hub) refreshInstanceEnvLocked(t *templates.Template, m *directory.Membe
 		return err
 	}
 	return setEnvVars(path, opts, true)
+}
+
+// aiEnvLocked are the AI variables of an ai.mcp template's instance
+// (contract §3.1, G42): PORTCULLIS_AI_ENABLED true while one of its
+// companions is switched on, PORTCULLIS_AI_READONLY_<C> true unless C is
+// on in read_write, and core's PORTCULLIS_MCP_GATE_IP (from the core env
+// subset the Hub reads; absent there = not written). nil for every other
+// template. Caller holds mu.
+func (h *Hub) aiEnvLocked(t *templates.Template) map[string]string {
+	if t.Manifest.AI.Unsupported != "" || len(t.Manifest.AI.MCP) == 0 {
+		return nil
+	}
+	sw := h.st.AIInstances[t.ID].Companions
+	out := map[string]string{templates.VarAIEnabled: "false"}
+	for _, c := range t.Manifest.AI.MCP {
+		s := sw[c.Name]
+		ro := "true"
+		if s.Enabled {
+			out[templates.VarAIEnabled] = "true"
+			if s.Mode == templates.AIReadWrite {
+				ro = "false"
+			}
+		}
+		out[templates.ReadOnlyVar(c.Name)] = ro
+	}
+	if ip := readEnvRaw(filepath.Join(h.cfg.ProjectDir, ".env"))[templates.VarMCPGateIP]; ip != "" {
+		out[templates.VarMCPGateIP] = ip
+	}
+	return out
 }

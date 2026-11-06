@@ -176,6 +176,36 @@ type fakeEngine struct {
 	execFn func(id string, cmd []string) (*docker.ExecResult, error)
 	// apiVersion: APIVersion's answer ("" = 1.47).
 	apiVersion string
+	// ExecStdinSplit (AI hooks, G6): every call in splitCalls; execSplit
+	// (if set, called without mu) answers it, else exit 0, no output.
+	splitCalls []execCall
+	execSplit  func(id string, in docker.ExecInput) (*docker.ExecSplitResult, error)
+}
+
+func (e *fakeEngine) ExecStdinSplit(ctx context.Context, id string, in docker.ExecInput) (*docker.ExecSplitResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	e.mu.Lock()
+	e.splitCalls = append(e.splitCalls, execCall{container: id, in: in})
+	fn := e.execSplit
+	e.mu.Unlock()
+	if fn != nil {
+		return fn(id, in)
+	}
+	return &docker.ExecSplitResult{ExecID: "x"}, nil
+}
+
+func (e *fakeEngine) SplitCalls() []execCall {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]execCall(nil), e.splitCalls...)
+}
+
+func (e *fakeEngine) setExecSplit(fn func(id string, in docker.ExecInput) (*docker.ExecSplitResult, error)) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.execSplit = fn
 }
 
 type execCall struct {

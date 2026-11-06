@@ -34,6 +34,8 @@ const (
 	// OpCredentials: a revocation that could not be applied live
 	// stopped the instance (credentials.go, contract §13.16 step 3).
 	OpCredentials = "credentials"
+	// OpAI: a per-instance AI support change (ai_instance.go, §15.11).
+	OpAI = "ai"
 )
 
 // OpRecord is an app's last lifecycle operation, kept in

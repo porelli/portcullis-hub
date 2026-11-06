@@ -1,0 +1,54 @@
+name: AI App
+category: tools
+auth:
+  method: forward-auth
+  group_access: true
+  access_group: users_aiapp
+urls:
+  - label: Web
+    url: "https://{{HOST_AIAPP}}"
+env:
+  - key: HDR_SECRET
+    generate: random
+hooks:
+  - {name: tok-mint, service: app, command: [/mint], when: [ai]}
+  - {name: tok-revoke, service: app, command: [/revoke], when: [ai]}
+  - {name: ai-toggle, service: app, command: [/toggle], when: [ai]}
+ai:
+  on_change: ai-toggle
+  mcp:
+    - name: tok
+      label: Tokens
+      kind: companion
+      service: tok-mcp
+      port: 8080
+      router: aiapp
+      upstream: official
+      source: https://example.org/tok-mcp
+      protocol: ["2025-11-25"]
+      modes: [read_only, read_write]
+      default_mode: read_write
+      identity:
+        mode: app_token
+        format: "Bearer {credential}"
+        mint: tok-mint
+        revoke: tok-revoke
+      tools:
+        writes: ["create_*"]
+        confirm: ["delete_*"]
+        never: ["drop_*"]
+    - name: hdr
+      label: Headers
+      kind: builtin
+      service: app
+      port: 3000
+      path: /api/mcp
+      router: aiapp
+      public_path: /hdr/mcp
+      upstream: official
+      source: https://example.org/app
+      protocol: ["2025-06-18"]
+      modes: [read_only]
+      identity:
+        mode: identity_headers
+        caller_secret: {env: HDR_SECRET, header: X-Mcp-Secret, format: "{secret}"}

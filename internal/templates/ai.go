@@ -881,3 +881,21 @@ func checkIdentity(w string, m *Manifest, c *Companion, randomEnv, named map[str
 	}
 	return nil
 }
+
+// ServiceNetworks reports, per compose service, the networks it declares
+// (nil: none, so it is on the project's default network) and whether it
+// sets network_mode (the Hub's override adds a companion's alias only to
+// a service that can join networks).
+func ServiceNetworks(compose []byte) map[string]ServiceNet {
+	out := map[string]ServiceNet{}
+	for name, i := range composeServiceInfos(compose) {
+		out[name] = ServiceNet{Networks: i.networks, NetworkMode: i.networkMode}
+	}
+	return out
+}
+
+// ServiceNet is one service's network attachment as compose.yml declares it.
+type ServiceNet struct {
+	Networks    []string
+	NetworkMode bool
+}

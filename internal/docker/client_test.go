@@ -549,3 +549,57 @@ func TestExecStdinTimeout(t *testing.T) {
 		t.Errorf("ExecRunning = %v, %v", running, err)
 	}
 }
+
+// ExecStdinSplit (G6): stdout and stderr come back apart, each capped
+// (the first bytes kept), with the exit code.
+func TestExecStdinSplit(t *testing.T) {
+	big := strings.Repeat("e", MaxRunStderr+100)
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && r.URL.Path == "/containers/c1/exec":
+			io.Copy(io.Discard, r.Body)
+			w.WriteHeader(201)
+			fmt.Fprint(w, `{"Id":"e1"}`)
+		case r.Method == "POST" && r.URL.Path == "/exec/e1/start":
+			conn, rw := hijack(t, w, r)
+			if conn == nil {
+				return
+			}
+			io.ReadAll(rw)
+			rw.Write(frame(Stdout, "TOKEN-MARKER\n"))
+			rw.Write(frame(Stderr, "oops\n"))
+			rw.Write(frame(Stderr, big))
+			rw.Flush()
+			conn.Close()
+		case r.URL.Path == "/exec/e1/json":
+			fmt.Fprint(w, `{"Running":false,"ExitCode":1}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	res, err := c.ExecStdinSplit(context.Background(), "c1", ExecInput{Cmd: []string{"/hook"}, Stdin: []byte("{}\n"), Timeout: 5 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(res.Stdout) != "TOKEN-MARKER\n" || res.StdoutTruncated || res.ExitCode != 1 || res.ExecID != "e1" {
+		t.Errorf("stdout = %q (%v), exit %d", res.Stdout, res.StdoutTruncated, res.ExitCode)
+	}
+	if !strings.HasPrefix(string(res.Stderr), "oops\n") || len(res.Stderr) != MaxRunStderr || !res.StderrTruncated || strings.Contains(string(res.Stderr), "TOKEN") {
+		t.Errorf("stderr = %d bytes (%v)", len(res.Stderr), res.StderrTruncated)
+	}
+}
+
+// ListContainers keeps each network's aliases and DNS names.
+func TestListContainersNetworks(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `[{"Id":"abc","Names":["/x"],"State":"running","Labels":{},
+			"NetworkSettings":{"Networks":{"portcullis-proxy":{"Aliases":["portcullis-mcp-a--b"],"DNSNames":["x","abc","portcullis-mcp-a--b"]}}}}]`)
+	}))
+	cs, err := c.ListContainers(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cs) != 1 || strings.Join(cs[0].Networks["portcullis-proxy"], ",") != "portcullis-mcp-a--b,x,abc" {
+		t.Errorf("networks = %v", cs)
+	}
+}

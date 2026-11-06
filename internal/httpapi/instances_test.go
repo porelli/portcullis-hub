@@ -138,6 +138,9 @@ func (e *fakeEngine) ContainerKill(context.Context, string, string) error { retu
 func (e *fakeEngine) ExecStdin(context.Context, string, docker.ExecInput) (*docker.ExecResult, error) {
 	return nil, cerrdefs.ErrNotFound.WithMessage("no such container")
 }
+func (e *fakeEngine) ExecStdinSplit(context.Context, string, docker.ExecInput) (*docker.ExecSplitResult, error) {
+	return nil, cerrdefs.ErrNotFound.WithMessage("no such container")
+}
 func (e *fakeEngine) ExecRunning(context.Context, string) (bool, error) { return false, nil }
 func (e *fakeEngine) ContainerState(context.Context, string) (docker.State, error) {
 	return docker.State{}, cerrdefs.ErrNotFound.WithMessage("no such container")

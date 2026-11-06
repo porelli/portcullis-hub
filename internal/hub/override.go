@@ -3,9 +3,11 @@ package hub
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net"
 	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -201,6 +203,14 @@ func (h *Hub) renderOverrideIn(rv renderView, t *templates.Template, s state.Ins
 	if len(rl.signInLabels) > 0 {
 		services[rl.signInService] = true
 	}
+	if len(rl.mcpLabels) > 0 {
+		services[rl.mcpService] = true
+	}
+	// Companion services: scale, the alias on portcullis-proxy (§3.2).
+	companionSvcs := h.companionServicesLocked(t)
+	for svc := range companionSvcs {
+		services[svc] = true
+	}
 	names := make([]string, 0, len(services))
 	for svc := range services {
 		names = append(names, svc)
@@ -233,6 +243,21 @@ func (h *Hub) renderOverrideIn(rv renderView, t *templates.Template, s state.Ins
 				fmt.Fprintf(&b, "      - %s\n", p)
 			}
 		}
+		if cs, ok := companionSvcs[svc]; ok {
+			if cs.scale != nil {
+				fmt.Fprintf(&b, "    scale: %d\n", *cs.scale)
+			}
+			if len(cs.aliases) > 0 {
+				b.WriteString("    networks:\n")
+				if cs.addDefault {
+					b.WriteString("      default: {}\n")
+				}
+				fmt.Fprintf(&b, "      %s:\n        aliases:\n", aiProxyNetwork)
+				for _, a := range cs.aliases {
+					fmt.Fprintf(&b, "          - %s\n", yamlQuote(a))
+				}
+			}
+		}
 		if replaced != nil {
 			if labels := replaced[svc]; len(labels) > 0 {
 				b.WriteString("    labels: !override\n")
@@ -250,7 +275,8 @@ func (h *Hub) renderOverrideIn(rv renderView, t *templates.Template, s state.Ins
 		routers := serviceRouters[svc]
 		public := plan != nil && svc == plan.Service && len(publicLines) > 0
 		signIn := svc == rl.signInService && len(rl.signInLabels) > 0
-		if len(routers) > 0 || public || signIn {
+		mcp := svc == rl.mcpService && len(rl.mcpLabels) > 0
+		if len(routers) > 0 || public || signIn || mcp {
 			b.WriteString("    labels:\n")
 			for _, r := range routers {
 				fmt.Fprintf(&b, "      traefik.http.routers.%s.tls.options: %s\n", r, tier)
@@ -271,6 +297,11 @@ func (h *Hub) renderOverrideIn(rv renderView, t *templates.Template, s state.Ins
 				sort.Strings(keys)
 				for _, k := range keys {
 					fmt.Fprintf(&b, "      %s: %s\n", yamlQuote(k), yamlQuote(rl.signInLabels[k]))
+				}
+			}
+			if mcp {
+				for _, k := range slices.Sorted(maps.Keys(rl.mcpLabels)) {
+					fmt.Fprintf(&b, "      %s: %s\n", yamlQuote(k), yamlQuote(rl.mcpLabels[k]))
 				}
 			}
 		}
@@ -345,6 +376,14 @@ func hubLabels(rl *routeLabels) (map[string]map[string]string, error) {
 			out[rl.signInService][k] = v
 		}
 	}
+	if len(rl.mcpLabels) > 0 {
+		if out[rl.mcpService] == nil {
+			out[rl.mcpService] = map[string]string{}
+		}
+		for k, v := range rl.mcpLabels {
+			out[rl.mcpService][k] = v
+		}
+	}
 	if rl.plan != nil {
 		for _, l := range rl.public {
 			k, v, _ := strings.Cut(l, ": ")
@@ -414,6 +453,10 @@ type routeLabels struct {
 	signIn        map[string][]string
 	signInService string
 	signInLabels  map[string]string
+	// mcpService carries the MCP routers' labels (mcpLabels, full keys) —
+	// the first compose service with traefik.enable=true (contract §5).
+	mcpService string
+	mcpLabels  map[string]string
 }
 
 // ExtAuthMiddleware is core's forwardAuth middleware for extra-domain
@@ -456,6 +499,9 @@ func (h *Hub) routeLabelsLocked(t *templates.Template) (*routeLabels, error) {
 		}
 	}
 	if err := h.extraSignInLocked(t, rl); err != nil {
+		return nil, err
+	}
+	if err := h.mcpRoutersLocked(t, rl); err != nil {
 		return nil, err
 	}
 	if pub.Active() {
@@ -686,15 +732,137 @@ func expandComposeValue(v, domain string, instanceEnv map[string]string) string 
 }
 
 // exposureLabel reports whether a label key decides an app's exposure:
-// a router's tls.options, anything of its public router / middleware or
-// of its extra-domain sign-in routers and,
+// a router's tls.options, anything of its public router / middleware, of
+// its extra-domain sign-in routers or of any portcullis-mcp-* router and,
 // for apps whose sign-in the Hub sets (mw), every router's middlewares.
 func exposureLabel(id, k string, mw bool) bool {
 	// Folded like Traefik's decoder, so an odd-cased key counts too.
 	k = templates.FoldKey(k)
 	return strings.HasPrefix(k, "traefik.http.routers."+PublicRouterName(id)+".") ||
+		strings.HasPrefix(k, "traefik.http.routers."+templates.MCPNamePrefix) ||
 		strings.HasPrefix(k, "traefik.http.routers."+SignInRouterName(id, "")) ||
 		(mw && strings.HasPrefix(k, "traefik.http.routers.") && strings.HasSuffix(k, ".middlewares")) ||
 		strings.HasPrefix(k, "traefik.http.middlewares."+PublicStripMiddleware(id)+".") ||
 		(strings.HasPrefix(k, "traefik.http.routers.") && strings.HasSuffix(k, ".tls.options"))
+}
+
+// companionRenderedLocked: companion c of t is switched on and gets its
+// alias and router (app_token / identity_headers only, the alias one DNS
+// label, the router's host known, the policy below LoA 3 — any doubt
+// renders nothing, fail closed). Caller holds mu.
+func (h *Hub) companionRenderedLocked(t *templates.Template, c *templates.Companion) bool {
+	if t.Manifest.AI.Unsupported != "" || !h.st.AIInstances[t.ID].Companions[c.Name].Enabled ||
+		c.Identity.Mode == templates.IdentityAppOAuth || !templates.AliasFits(t.ID, c.Name) {
+		return false
+	}
+	if host := NormalizeHost(t.Hosts[c.Router]); host == "" || !templates.ValidHostname(host) {
+		return false
+	}
+	return policy.LoA(h.effectivePolicyLocked(t)) <= 2
+}
+
+// mcpRoutersLocked renders one router per rendered companion (contract
+// §5): portcullis-mcp-<id>--<c>, exact Path matchers on its router's
+// host, the host's tier, a priority above every router of the instance,
+// its public and sign-in routers, service mcp-gate@docker, middlewares
+// rate-limit + security-headers; on the first traefik.enable service.
+// Caller holds mu.
+func (h *Hub) mcpRoutersLocked(t *templates.Template, rl *routeLabels) error {
+	var on []*templates.Companion
+	for i := range t.Manifest.AI.MCP {
+		if c := &t.Manifest.AI.MCP[i]; h.companionRenderedLocked(t, c) {
+			on = append(on, c)
+		}
+	}
+	if len(on) == 0 {
+		return nil
+	}
+	svc, err := templates.FirstEnabledService(t.ReadCompose())
+	if err != nil {
+		return err
+	}
+	if svc == "" {
+		return fmt.Errorf("no service with traefik.enable=true for the MCP routers")
+	}
+	maxBound := 0
+	for _, ri := range rl.routes.Info {
+		bound := ri.Priority
+		if !ri.HasPriority {
+			bound = len(ri.Rule) + strings.Count(ri.Rule, "${")*253
+		}
+		maxBound = max(maxBound, bound)
+	}
+	prio := strconv.Itoa(maxBound + 3)
+	rl.mcpService, rl.mcpLabels = svc, map[string]string{}
+	for _, c := range on {
+		host := NormalizeHost(t.Hosts[c.Router])
+		pp := c.EffectivePublicPath()
+		k := "traefik.http.routers." + templates.MCPAlias(t.ID, c.Name) + "."
+		rl.mcpLabels[k+"rule"] = "Host(`" + host + "`) && (Path(`" + pp + "`) || Path(`/.well-known/oauth-protected-resource" + pp + "`))"
+		rl.mcpLabels[k+"entrypoints"] = "websecure"
+		rl.mcpLabels[k+"tls.options"] = rl.tier
+		rl.mcpLabels[k+"priority"] = prio
+		rl.mcpLabels[k+"service"] = "mcp-gate@docker"
+		rl.mcpLabels[k+"middlewares"] = "rate-limit@file,security-headers@file"
+	}
+	return nil
+}
+
+// companionService is what the override sets on a companion's service.
+type companionService struct {
+	scale      *int     // kind companion: 1 on, 0 off
+	aliases    []string // portcullis-mcp-<id>--<c> on portcullis-proxy
+	addDefault bool     // the service declares no networks: keep default
+}
+
+// companionServicesLocked: per compose service backing a companion, its
+// scale (kind companion) and the aliases of its rendered companions.
+// Caller holds mu.
+func (h *Hub) companionServicesLocked(t *templates.Template) map[string]*companionService {
+	if t.Manifest.AI.Unsupported != "" || len(t.Manifest.AI.MCP) == 0 {
+		return nil
+	}
+	nets := templates.ServiceNetworks(t.ReadCompose())
+	out := map[string]*companionService{}
+	get := func(svc string) *companionService {
+		if out[svc] == nil {
+			out[svc] = &companionService{}
+		}
+		return out[svc]
+	}
+	for i := range t.Manifest.AI.MCP {
+		c := &t.Manifest.AI.MCP[i]
+		on := h.companionRenderedLocked(t, c)
+		if c.Kind == templates.CompanionKind {
+			n := 0
+			if on {
+				n = 1
+			}
+			get(c.Service).scale = &n
+		}
+		if on && !nets[c.Service].NetworkMode {
+			cs := get(c.Service)
+			cs.aliases = append(cs.aliases, templates.MCPAlias(t.ID, c.Name))
+			cs.addDefault = len(nets[c.Service].Networks) == 0
+		}
+	}
+	for _, cs := range out {
+		sort.Strings(cs.aliases)
+	}
+	return out
+}
+
+// desiredMCPAliasesLocked: per compose service, the portcullis-mcp-
+// aliases the override gives it (exposure drift, §5). Caller holds mu.
+func (h *Hub) desiredMCPAliasesLocked(t *templates.Template) map[string]map[string]bool {
+	out := map[string]map[string]bool{}
+	for svc, cs := range h.companionServicesLocked(t) {
+		for _, a := range cs.aliases {
+			if out[svc] == nil {
+				out[svc] = map[string]bool{}
+			}
+			out[svc][a] = true
+		}
+	}
+	return out
 }

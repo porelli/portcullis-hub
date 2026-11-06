@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/moby/moby/api/pkg/stdcopy"
@@ -54,6 +55,41 @@ func (c *Client) ExecStdin(ctx context.Context, id string, in ExecInput) (*ExecR
 	return c.exec(ctx, id, opts, stdin, in.Timeout)
 }
 
+// ExecSplitResult is the outcome of ExecStdinSplit: stdout and stderr
+// apart, each capped (MaxRunStdout / MaxRunStderr, the first bytes kept).
+type ExecSplitResult struct {
+	Stdout          []byte
+	Stderr          []byte
+	StdoutTruncated bool
+	StderrTruncated bool
+	ExitCode        int // -1 if unknown (timeout / still running)
+	TimedOut        bool
+	ExecID          string
+}
+
+// ExecStdinSplit is ExecStdin with stdout and stderr demultiplexed into
+// two capped buffers (an AI hook, contract §6 / §15.5: stdout may carry a
+// credential and goes back to the caller only; stderr is what a failure
+// may show, redacted).
+func (c *Client) ExecStdinSplit(ctx context.Context, id string, in ExecInput) (*ExecSplitResult, error) {
+	opts := client.ExecCreateOptions{AttachStdin: true, AttachStdout: true, AttachStderr: true, Cmd: in.Cmd, User: in.User}
+	stdin := in.Stdin
+	if stdin == nil {
+		stdin = []byte{}
+	}
+	stdout := &limitedBuffer{max: MaxRunStdout}
+	stderr := &limitedBuffer{max: MaxRunStderr}
+	run, err := c.execTo(ctx, id, opts, stdin, in.Timeout, stdout, stderr)
+	if run == nil {
+		clear(stdout.buf)
+		return nil, err
+	}
+	return &ExecSplitResult{
+		Stdout: stdout.buf, Stderr: stderr.buf, StdoutTruncated: stdout.truncated, StderrTruncated: stderr.truncated,
+		ExitCode: run.ExitCode, TimedOut: run.TimedOut, ExecID: run.ExecID,
+	}, err
+}
+
 // ExecRunning reports whether exec instance execID still runs.
 func (c *Client) ExecRunning(ctx context.Context, execID string) (bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
@@ -65,8 +101,20 @@ func (c *Client) ExecRunning(ctx context.Context, execID string) (bool, error) {
 	return info.Running, nil
 }
 
-// exec is Exec / ExecStdin; stdin nil = not attached.
+// exec is Exec / ExecStdin; stdin nil = not attached. Both streams go to
+// one capped buffer.
 func (c *Client) exec(ctx context.Context, id string, opts client.ExecCreateOptions, stdin []byte, timeout time.Duration) (*ExecResult, error) {
+	out := &limitedBuffer{max: maxExecOutput}
+	res, err := c.execTo(ctx, id, opts, stdin, timeout, out, out)
+	if res != nil {
+		res.Output, res.Truncated = out.buf, out.truncated
+	}
+	return res, err
+}
+
+// execTo runs the exec with stdout and stderr demultiplexed into the two
+// writers (they may be the same one); the result's Output is unset.
+func (c *Client) execTo(ctx context.Context, id string, opts client.ExecCreateOptions, stdin []byte, timeout time.Duration, stdout, stderr io.Writer) (*ExecResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -107,8 +155,7 @@ func (c *Client) exec(ctx context.Context, id string, opts client.ExecCreateOpti
 			stdinErr <- werr
 		}()
 	}
-	out := &limitedBuffer{max: maxExecOutput}
-	_, streamErr := stdcopy.StdCopy(out, out, att.Reader)
+	_, streamErr := stdcopy.StdCopy(stdout, stderr, att.Reader)
 	stop()
 	att.Close()
 	if stdinErr != nil {
@@ -117,7 +164,7 @@ func (c *Client) exec(ctx context.Context, id string, opts client.ExecCreateOpti
 		<-stdinErr
 	}
 
-	res := &ExecResult{Output: out.buf, ExitCode: -1, Truncated: out.truncated, ExecID: created.ID}
+	res := &ExecResult{ExitCode: -1, ExecID: created.ID}
 	if ctx.Err() != nil {
 		res.TimedOut = ctx.Err() == context.DeadlineExceeded
 		return res, nil

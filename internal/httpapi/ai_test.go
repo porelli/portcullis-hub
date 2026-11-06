@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io/fs"
 	"log"
@@ -11,6 +12,8 @@ import (
 	"testing"
 
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/keycloak"
+	"github.com/portcullis/hub/internal/state"
 )
 
 // aiEnv is the instance env with the AI page test template ai-chat
@@ -306,5 +309,94 @@ func TestProviderSecretsNeverEchoed(t *testing.T) {
 	}
 	if strings.Contains(logs.String(), "MARKER") {
 		t.Errorf("a log line holds the secret:\n%s", logs.String())
+	}
+}
+
+// aiScopesKC accepts every mcp:* scope call.
+type aiScopesKC struct{}
+
+func (aiScopesKC) EnsureMCPScope(context.Context, keycloak.MCPScope) error   { return nil }
+func (aiScopesKC) DeleteMCPScope(context.Context, string) error              { return nil }
+func (aiScopesKC) SetOptionalScopes(context.Context, string, []string) error { return nil }
+
+// aiAppEnv: the Hub's AI test template aiapp (disabled), master switch on.
+func aiAppEnv(t *testing.T) *instEnv {
+	t.Helper()
+	dir := filepath.Join("..", "hub", "testdata", "ai", "aiapp")
+	m, err := os.ReadFile(filepath.Join(dir, "manifest.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := os.ReadFile(filepath.Join(dir, "compose.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := newInstEnvOpts(t, t.TempDir(), instEnvOpts{extra: map[string][2]string{"aiapp": {string(m), string(c)}},
+		seed: func(st *state.AppState) { st.AI.Enabled = true }})
+	if e.s.Hub.Template("aiapp") == nil {
+		t.Fatal("aiapp not loaded (see the log)")
+	}
+	e.s.Hub.SetAIKeycloak(aiScopesKC{})
+	return e
+}
+
+// TestInstanceAIAPI (§15.11): admins only, Hub listener only; GET the
+// tab; PUT on a disabled instance saves state only (restarts false);
+// 404 unknown companion, 400 a mode outside modes or a bad body; audited.
+func TestInstanceAIAPI(t *testing.T) {
+	e := aiAppEnv(t)
+	checkAdminOnly(t, e, []route{
+		{"GET", "/api/instances/aiapp/ai", ""},
+		{"PUT", "/api/instances/aiapp/ai", `{"companions":{"tok":{"enabled":true}}}`},
+		{"POST", "/api/settings/preview", `{"default_auth_policy":{"factors":["mtls"],"op":"any"}}`},
+	})
+	if a := e.auditActions(t, "ai."); len(a) != 0 {
+		t.Fatalf("refused requests reached the Hub: %v", a)
+	}
+	n := map[string]int{}
+	for _, p := range e.s.hubMux().patterns {
+		n[p]++
+	}
+	for _, p := range []string{"GET /api/instances/{id}/ai", "PUT /api/instances/{id}/ai", "POST /api/settings/preview"} {
+		if n[p] != 1 {
+			t.Errorf("hub listener registers %q %d times", p, n[p])
+		}
+	}
+	var v struct {
+		MasterOff  bool `json:"master_off"`
+		Companions []struct {
+			Name, Mode, Status, URL string
+			Enabled                 bool
+			Modes                   []string
+		} `json:"companions"`
+	}
+	json.Unmarshal([]byte(mustDo(t, e.hub, "root", "GET", "/api/instances/aiapp/ai", "", 200)), &v)
+	if v.MasterOff || len(v.Companions) != 2 || v.Companions[0].Name != "tok" || v.Companions[0].Mode != "read_write" ||
+		v.Companions[0].Status != "off" || v.Companions[0].URL != "https://aiapp.example.org/mcp" {
+		t.Fatalf("tab = %+v", v)
+	}
+	var res map[string]any
+	json.Unmarshal([]byte(mustDo(t, e.hub, "root", "PUT", "/api/instances/aiapp/ai", `{"companions":{"tok":{"enabled":true,"mode":"read_only"}}}`, 200)), &res)
+	if res["restarts"] != false {
+		t.Errorf("answer = %v", res)
+	}
+	for body, want := range map[string]int{
+		`{"companions":{"nope":{"enabled":true}}}`:     404,
+		`{"companions":{"hdr":{"mode":"read_write"}}}`: 400,
+		`{"companions":{"tok":{"enabled":1}}}`:         400,
+		`{"providers":["x"]}`:                          400,
+	} {
+		if r, b := doAs(t, e.hub, "root", "PUT", "/api/instances/aiapp/ai", body); r.StatusCode != want || !strings.Contains(b, `"error":`) {
+			t.Errorf("%s = %d %s, want %d", body, r.StatusCode, b, want)
+		}
+	}
+	got := strings.Join(e.auditActions(t, "ai."), " ")
+	if !strings.Contains(got, "ai.enable:ok:root:aiapp/tok") || !strings.Contains(got, "ai.enable:refused:root:aiapp/nope") {
+		t.Errorf("audit = %s", got)
+	}
+	// The default-policy preview lists the instance (G43).
+	b := mustDo(t, e.hub, "root", "POST", "/api/settings/preview", `{"default_auth_policy":{"factors":["mtls"],"op":"any"}}`, 200)
+	if !strings.Contains(b, "aiapp: AI support for tok") {
+		t.Errorf("preview = %s", b)
 	}
 }

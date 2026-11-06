@@ -146,6 +146,9 @@ type Preview struct {
 	Effect     string                   `json:"effect"`
 	Options    map[string]OptionPreview `json:"options"`
 	Population PopulationView           `json:"population"`
+	// Warnings: what the save does first (AI support switched off by a
+	// policy needing mTLS, G43).
+	Warnings []string `json:"warnings"`
 }
 
 // withPlaceholders maps rows the panel sent with the instance's group
@@ -429,7 +432,10 @@ func (h *Hub) PreviewSettings(ctx context.Context, id string, u SettingsUpdate) 
 	if err != nil {
 		return nil, err
 	}
-	out := &Preview{Effect: settings.Strongest(own...), Options: map[string]OptionPreview{}}
+	out := &Preview{Effect: settings.Strongest(own...), Options: map[string]OptionPreview{}, Warnings: []string{}}
+	if off := h.aiOffForSaveLocked(live, u); len(off) > 0 {
+		out.Warnings = append(out.Warnings, aiOffWarning(id, off))
+	}
 	if live.Enabled {
 		out.Effect = settings.Strongest(effects...)
 	}
