@@ -1060,7 +1060,7 @@ func (h *Hub) auditFolder(actor directory.Actor, action, id, detail string, err 
 	if a == nil {
 		return
 	}
-	e := directory.AuditEntry{Actor: actor.User, Via: actor.Via, Client: actor.Client, Action: action, Target: clip(id, 64), Detail: detail, Result: "ok"}
+	e := directory.AuditEntry{Actor: actor.User, Via: actor.Via, Client: actor.Client, Action: action, Target: clip(id, 64), Detail: actor.AuditDetail(detail), Result: "ok"}
 	if err != nil {
 		// Redacted like the op record (H3): the error's own redaction
 		// set, then every affected instance's and the folder's users'

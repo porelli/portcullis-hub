@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"html/template"
@@ -48,6 +49,10 @@ type Server struct {
 	RedactLiterals []string
 	// mcp: the Portcullis MCP's registry, servers and redactor cache.
 	mcp mcpState
+	// callHook, when set (tests), records every Hub call the shared work
+	// of a route and its Portcullis MCP tool makes (rec): the twin and the
+	// tool must make the same call with the same arguments.
+	callHook func(method string, args ...any)
 
 	index *template.Template
 	// confirmPage: confirm.html, parsed on first use (confirm.go).
@@ -163,6 +168,13 @@ func (m *recordingMux) HandleFunc(pattern string, handler func(http.ResponseWrit
 }
 
 // ── helpers ──────────────────────────────────────────────
+
+// rec reports a Hub call to callHook (tests; nil = nothing).
+func (s *Server) rec(method string, args ...any) {
+	if s.callHook != nil {
+		s.callHook(method, args...)
+	}
+}
 
 func writeJSON(w http.ResponseWriter, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
@@ -356,23 +368,33 @@ func (s *Server) handleEnable(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if !templates.ValidID(req.ID) {
-		http.Error(w, "invalid id", http.StatusBadRequest)
-		return
-	}
-	// Missing users_<id> / admin_<id> groups are created first, as the
-	// signed-in admin (audited in Users & Groups).
-	res, err := s.Hub.EnableAs(req.ID, requestActor(r))
-	detail := ""
-	if res != nil && len(res.GroupsCreated) > 0 {
-		detail = "groups_created=" + strings.Join(res.GroupsCreated, ",")
-	}
-	s.auditOp(r, req.ID, directory.AuditEntry{Action: "instance.enable", Target: req.ID, Detail: detail}, err, http.StatusBadRequest)
+	res, err := s.enableInstance(requestActor(r), req.ID)
 	if err != nil {
 		writeErr(w, err, http.StatusBadRequest)
 		return
 	}
-	writeJSON(w, map[string]interface{}{"status": "enabled", "id": req.ID, "groups_created": res.GroupsCreated, "warnings": res.Warnings})
+	writeJSON(w, res)
+}
+
+// enableInstance is the enable's work (the route and the Portcullis
+// MCP's enable_instance): missing users_<id> / admin_<id> groups are
+// created first, as the admin (audited in Users & Groups); audited
+// instance.enable.
+func (s *Server) enableInstance(a directory.Actor, id string) (map[string]any, error) {
+	if !templates.ValidID(id) {
+		return nil, &hub.StatusError{Status: http.StatusBadRequest, Err: errors.New("invalid id")}
+	}
+	s.rec("EnableAs", id)
+	res, err := s.Hub.EnableAs(id, a)
+	detail := ""
+	if res != nil && len(res.GroupsCreated) > 0 {
+		detail = "groups_created=" + strings.Join(res.GroupsCreated, ",")
+	}
+	s.auditOpAs(a, id, directory.AuditEntry{Action: "instance.enable", Target: id, Detail: detail}, err, http.StatusBadRequest)
+	if err != nil {
+		return nil, defaultStatus(err, http.StatusBadRequest)
+	}
+	return map[string]any{"status": "enabled", "id": id, "groups_created": res.GroupsCreated, "warnings": res.Warnings}, nil
 }
 
 func (s *Server) handleDisable(w http.ResponseWriter, r *http.Request) {
@@ -385,17 +407,27 @@ func (s *Server) handleDisable(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if !templates.ValidID(req.ID) {
-		http.Error(w, "invalid id", http.StatusBadRequest)
-		return
-	}
-	err := s.Hub.Disable(req.ID)
-	s.auditOp(r, req.ID, directory.AuditEntry{Action: "instance.disable", Target: req.ID}, err, http.StatusBadRequest)
+	res, err := s.disableInstance(requestActor(r), req.ID)
 	if err != nil {
 		writeErr(w, err, http.StatusBadRequest)
 		return
 	}
-	writeJSON(w, map[string]string{"status": "disabled", "id": req.ID})
+	writeJSON(w, res)
+}
+
+// disableInstance is the disable's work (route and disable_instance);
+// audited instance.disable.
+func (s *Server) disableInstance(a directory.Actor, id string) (map[string]string, error) {
+	if !templates.ValidID(id) {
+		return nil, &hub.StatusError{Status: http.StatusBadRequest, Err: errors.New("invalid id")}
+	}
+	s.rec("Disable", id)
+	err := s.Hub.Disable(id)
+	s.auditOpAs(a, id, directory.AuditEntry{Action: "instance.disable", Target: id}, err, http.StatusBadRequest)
+	if err != nil {
+		return nil, defaultStatus(err, http.StatusBadRequest)
+	}
+	return map[string]string{"status": "disabled", "id": id}, nil
 }
 
 func (s *Server) handleTemplateRestart(w http.ResponseWriter, r *http.Request) {
@@ -406,13 +438,24 @@ func (s *Server) handleTemplateRestart(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	err := s.Hub.RestartApp(id)
-	s.auditOp(r, id, directory.AuditEntry{Action: "instance.restart", Target: id}, err, http.StatusInternalServerError)
+	res, err := s.restartInstance(requestActor(r), id)
 	if err != nil {
 		writeErr(w, err, http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, map[string]string{"status": "restarted"})
+	writeJSON(w, res)
+}
+
+// restartInstance is the restart's work (route and restart_instance);
+// audited instance.restart.
+func (s *Server) restartInstance(a directory.Actor, id string) (map[string]string, error) {
+	s.rec("RestartApp", id)
+	err := s.Hub.RestartApp(id)
+	s.auditOpAs(a, id, directory.AuditEntry{Action: "instance.restart", Target: id}, err, http.StatusInternalServerError)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]string{"status": "restarted"}, nil
 }
 
 // handleTemplateLastOp returns the app's last lifecycle operation (JSON
@@ -466,15 +509,26 @@ func (s *Server) handleDriftResolve(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	err := s.Hub.ResolveDrift(req.ID, req.Action)
-	if templates.ValidID(req.ID) {
-		s.auditOp(r, req.ID, directory.AuditEntry{Action: "drift.resolve", Target: req.ID, Detail: clipMessage(req.Action, 64)}, err, http.StatusInternalServerError)
-	}
+	res, err := s.resolveDrift(requestActor(r), req.ID, req.Action)
 	if err != nil {
 		writeErr(w, err, http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, map[string]string{"status": "ok", "id": req.ID, "action": req.Action})
+	writeJSON(w, res)
+}
+
+// resolveDrift is the drift action's work (route and resolve_drift);
+// audited drift.resolve.
+func (s *Server) resolveDrift(a directory.Actor, id, action string) (map[string]string, error) {
+	s.rec("ResolveDrift", id, action)
+	err := s.Hub.ResolveDrift(id, action)
+	if templates.ValidID(id) {
+		s.auditOpAs(a, id, directory.AuditEntry{Action: "drift.resolve", Target: id, Detail: clipMessage(action, 64)}, err, http.StatusInternalServerError)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return map[string]string{"status": "ok", "id": id, "action": action}, nil
 }
 
 // ── sources ──────────────────────────────────────────────
@@ -551,6 +605,11 @@ func (s *Server) handleSyncSources(w http.ResponseWriter, r *http.Request) {
 // mode in the Hub's audit log: switching to the app's own login removes
 // Portcullis from in front of it.
 func (s *Server) auditSignIn(r *http.Request, id, before, want string, err error) {
+	s.auditSignInAs(requestActor(r), id, before, want, err)
+}
+
+// auditSignInAs is auditSignIn attributed to a.
+func (s *Server) auditSignInAs(a directory.Actor, id, before, want string, err error) {
 	e := directory.AuditEntry{
 		Action: "app.sign_in",
 		Target: id,
@@ -560,7 +619,7 @@ func (s *Server) auditSignIn(r *http.Request, id, before, want string, err error
 	if want == hub.SignInNative {
 		e.Detail += " (app's own login only: no Portcullis sign-in)"
 	}
-	s.auditAs(requestActor(r), e, err)
+	s.auditAs(a, e, err)
 }
 
 // auditAs appends e to the Hub's audit log, attributed to a (Actor, Via,
@@ -582,15 +641,22 @@ func (s *Server) auditAs(a directory.Actor, e directory.AuditEntry, err error) {
 // Handlers call it after the Hub call returned: never under Hub.mu.
 // Details never hold a secret: callers pass names, never values.
 func (s *Server) auditOp(r *http.Request, instance string, e directory.AuditEntry, err error, def int) {
+	s.auditOpAs(requestActor(r), instance, e, err, def)
+}
+
+// auditOpAs is auditOp attributed to a (the shared work of a route and
+// its Portcullis MCP tool).
+func (s *Server) auditOpAs(a directory.Actor, instance string, e directory.AuditEntry, err error, def int) {
 	msg := ""
 	if err != nil {
 		msg = clipMessage(s.Hub.RedactErr(instance, err), 600)
 	}
-	s.appendAudit(requestActor(r), e, errStatus(err, def), err, msg)
+	s.appendAudit(a, e, errStatus(err, def), err, msg)
 }
 
 func (s *Server) appendAudit(a directory.Actor, e directory.AuditEntry, status int, err error, msg string) {
 	e.Actor, e.Via, e.Client = a.User, a.Via, a.Client
+	e.Detail = a.AuditDetail(e.Detail)
 	l := s.Audit
 	if l == nil && s.Directory != nil {
 		l = s.Directory.Audit
@@ -713,19 +779,29 @@ func (s *Server) handleTemplateExec(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	res, err := s.Hub.Exec(r.Context(), id, req.Service, req.Command)
-	// The service and the exit code only: the command and its output
-	// may hold anything.
-	detail := "service=" + clipMessage(req.Service, 64)
-	if res != nil {
-		detail += " exit=" + strconv.Itoa(res.ExitCode)
-	}
-	s.auditOp(r, id, directory.AuditEntry{Action: "instance.exec", Target: id, Detail: detail}, err, http.StatusBadGateway)
+	res, err := s.execInstance(r.Context(), requestActor(r), id, req.Service, req.Command)
 	if err != nil {
 		writeErr(w, err, http.StatusBadGateway)
 		return
 	}
 	writeJSON(w, res)
+}
+
+// execInstance is the exec's work (route and exec); audited
+// instance.exec with the service and the exit code only: the command and
+// its output may hold anything.
+func (s *Server) execInstance(ctx context.Context, a directory.Actor, id, service, command string) (*hub.ExecResult, error) {
+	s.rec("Exec", id, service, command)
+	res, err := s.Hub.Exec(ctx, id, service, command)
+	detail := "service=" + clipMessage(service, 64)
+	if res != nil {
+		detail += " exit=" + strconv.Itoa(res.ExitCode)
+	}
+	s.auditOpAs(a, id, directory.AuditEntry{Action: "instance.exec", Target: id, Detail: detail}, err, http.StatusBadGateway)
+	if err != nil {
+		return nil, defaultStatus(err, http.StatusBadGateway)
+	}
+	return res, nil
 }
 
 // ── expert mode ──────────────────────────────────────────
@@ -759,19 +835,12 @@ func (s *Server) handleTemplateCompose(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "expected {user_override: \"…\"} (the template's compose.yml and the Hub override are read-only)", http.StatusBadRequest)
 			return
 		}
-		restart, detail, err := s.Hub.SaveUserOverride(id, *req.UserOverride)
-		if !errors.Is(err, hub.ErrNotFound) {
-			s.auditAs(requestActor(r), directory.AuditEntry{Action: "app.compose_override", Target: id, Detail: detail}, err)
-		}
+		res, err := s.saveUserOverride(requestActor(r), id, *req.UserOverride)
 		if err != nil {
 			writeErr(w, err, http.StatusInternalServerError)
 			return
 		}
-		status := "saved"
-		if detail == "removed" {
-			status = "removed"
-		}
-		writeJSON(w, map[string]interface{}{"status": status, "restart_required": restart})
+		writeJSON(w, res)
 	default:
 		http.Error(w, "GET or PUT only", http.StatusMethodNotAllowed)
 	}
@@ -795,19 +864,61 @@ func (s *Server) handleTemplateEnv(w http.ResponseWriter, r *http.Request) {
 		if !decodeJSON(w, r, &req) {
 			return
 		}
-		keys, err := s.Hub.SaveEnvChanged(id, req)
-		if !errors.Is(err, hub.ErrNotFound) {
-			// Variable names only, never values.
-			s.auditOp(r, id, directory.AuditEntry{Action: "app.env", Target: id, Detail: clipMessage(strings.Join(keys, ","), 600)}, err, http.StatusInternalServerError)
-		}
+		res, err := s.saveEnv(requestActor(r), id, req)
 		if err != nil {
 			writeErr(w, err, http.StatusInternalServerError)
 			return
 		}
-		writeJSON(w, map[string]string{"status": "saved"})
+		writeJSON(w, res)
 	default:
 		http.Error(w, "GET or PUT only", http.StatusMethodNotAllowed)
 	}
+}
+
+// saveUserOverride is the custom override save's work (route and
+// save_custom_override); audited app.compose_override, never with the
+// content (it may hold env values).
+func (s *Server) saveUserOverride(a directory.Actor, id, content string) (map[string]any, error) {
+	s.rec("SaveUserOverride", id, content)
+	restart, detail, err := s.Hub.SaveUserOverride(id, content)
+	if !errors.Is(err, hub.ErrNotFound) {
+		s.auditAs(a, directory.AuditEntry{Action: "app.compose_override", Target: id, Detail: detail}, err)
+	}
+	if err != nil {
+		return nil, err
+	}
+	status := "saved"
+	if detail == "removed" {
+		status = "removed"
+	}
+	return map[string]any{"status": status, "restart_required": restart}, nil
+}
+
+// saveEnv is the Expert env save's work (route and save_env); audited
+// app.env with the variable names only, never values.
+func (s *Server) saveEnv(a directory.Actor, id string, vars map[string]string) (map[string]string, error) {
+	s.rec("SaveEnvChanged", id, vars)
+	keys, err := s.Hub.SaveEnvChanged(id, vars)
+	if !errors.Is(err, hub.ErrNotFound) {
+		s.auditOpAs(a, id, directory.AuditEntry{Action: "app.env", Target: id, Detail: clipMessage(strings.Join(keys, ","), 600)}, err, http.StatusInternalServerError)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return map[string]string{"status": "saved"}, nil
+}
+
+// defaultStatus gives a plain error (no StatusError, no ErrBusy, no
+// OpError) the status its route answers it with, so the Portcullis MCP's
+// tool error carries the same status as the HTTP twin.
+func defaultStatus(err error, def int) error {
+	var se *hub.StatusError
+	var busy hub.ErrBusy
+	var oe *hub.OpError
+	if err == nil || errors.As(err, &se) || errors.As(err, &busy) || errors.As(err, &oe) {
+		return err
+	}
+	return &hub.StatusError{Status: def, Err: err}
 }
 
 // sourceURLDetail is a source URL as an audit detail. A URL with a

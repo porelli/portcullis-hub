@@ -680,9 +680,13 @@
         history.replaceState(null, '', tab.dataset.tab === 'catalog' ? location.pathname : '#' + tab.dataset.tab);
       });
     });
-    // Deep links: hub.<domain>/#users (directory.<domain> redirects there).
+    // Deep links: hub.<domain>/#users (directory.<domain> redirects there);
+    // #app/<id>/settings[/<option>] opens an instance's settings at an
+    // option (the Portcullis MCP's set_secret_setting form).
     window.addEventListener('load', () => {
       const t = location.hash.slice(1);
+      const app = /^app\/([a-z0-9-]+)\/settings(?:\/([A-Za-z0-9_.-]+))?$/.exec(t);
+      if (app) { openSettingAt(app[1], app[2] || ''); return; }
       const tab = t && document.querySelector('.tab[data-tab="' + CSS.escape(t) + '"]');
       if (tab) tab.click();
     });

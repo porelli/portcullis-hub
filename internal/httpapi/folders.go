@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/hub"
 	"github.com/portcullis/hub/internal/settings"
 )
@@ -440,7 +441,7 @@ func (s *Server) handleSetLocalNetworks(w http.ResponseWriter, r *http.Request) 
 	if string(b.Networks) != "null" && cidrs == nil {
 		cidrs = []string{}
 	}
-	if err := s.Hub.SetLocalNetworks(cidrs, requestActor(r)); err != nil {
+	if err := s.setLocalNetworks(requestActor(r), cidrs); err != nil {
 		writeAPIErr(w, err)
 		return
 	}
@@ -456,4 +457,12 @@ func decodeAPI(w http.ResponseWriter, r *http.Request, v any, usage string) bool
 		return false
 	}
 	return true
+}
+
+// setLocalNetworks is the local networks save (route and
+// set_local_networks; nil = back to the defaults, [] = loopback only);
+// audited settings.local_networks by the Hub.
+func (s *Server) setLocalNetworks(a directory.Actor, cidrs []string) error {
+	s.rec("SetLocalNetworks", cidrs)
+	return s.Hub.SetLocalNetworks(cidrs, a)
 }

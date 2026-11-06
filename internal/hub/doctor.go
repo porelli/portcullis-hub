@@ -296,7 +296,7 @@ func (h *Hub) auditDoctor(actor directory.Actor, action, fp, detail string, err 
 	if a == nil {
 		return
 	}
-	e := directory.AuditEntry{Actor: actor.User, Via: actor.Via, Client: actor.Client, Action: action, Target: clip(fp, 32), Detail: detail, Result: "ok"}
+	e := directory.AuditEntry{Actor: actor.User, Via: actor.Via, Client: actor.Client, Action: action, Target: clip(fp, 32), Detail: actor.AuditDetail(detail), Result: "ok"}
 	if err != nil {
 		e.Result, e.Error = "error", err.Error()
 		var se *StatusError

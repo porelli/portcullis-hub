@@ -1,0 +1,585 @@
+package httpapi
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"regexp"
+	"slices"
+	"strconv"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/docker"
+	"github.com/portcullis/hub/internal/hub"
+)
+
+// Plan 4 Task 17a: the admin tools of the Portcullis MCP — overview,
+// instances, settings, runtime, drift and their G15 tools (contract
+// §15.10, spec call 25; G14–G17, G37, G46).
+
+// notesManifest: a multi native-oidc template with one Keycloak client
+// (TestDeleteInstanceTool's instance x).
+const notesManifest = `name: Notes
+category: tools
+instances: multi
+ai: {unsupported: "test fixture"}
+auth:
+  method: native-oidc
+  sso: true
+  group_access: true
+  access_group: users_notes
+  admin_group: admin_notes
+keycloak_clients:
+  - client_id: notes
+    redirect_uri: https://{{HOST_NOTES}}/auth
+urls:
+  - label: Web
+    url: "https://{{HOST_NOTES}}"
+`
+
+const notesCompose = "services:\n  web:\n    image: notes\n    labels:\n" +
+	"      traefik.enable: \"true\"\n" +
+	"      traefik.http.routers.notes.rule: Host(`${PORTCULLIS_HOST_NOTES:-notes.portcullis.local}`)\n" +
+	"      traefik.http.services.notes.loadbalancer.server.port: \"80\"\n"
+
+// settingsFixture reads a template of the Hub's settings testdata.
+func settingsFixture(t *testing.T, id string) [2]string {
+	t.Helper()
+	dir := filepath.Join("..", "hub", "testdata", "settings", id)
+	m, err := os.ReadFile(filepath.Join(dir, "manifest.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := os.ReadFile(filepath.Join(dir, "compose.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return [2]string{string(m), string(c)}
+}
+
+// toolEnv: the MCP listener with the real admin tools, confirmations
+// decidable (newConfirmEnv), the fixtures notes, secretapp, nativeapp and
+// cloud besides grafana, home and aiapp.
+type toolEnv struct {
+	*mcpTestEnv
+}
+
+func newToolEnv(t *testing.T, extra map[string][2]string, wrap func(hub.Engine) hub.Engine) *toolEnv {
+	t.Helper()
+	all := map[string][2]string{
+		"notes":     {notesManifest, notesCompose},
+		"secretapp": settingsFixture(t, "secretapp"),
+		"nativeapp": settingsFixture(t, "nativeapp"),
+		"cloud":     {cloudManifest, cloudCompose},
+	}
+	for k, v := range extra {
+		all[k] = v
+	}
+	ce := newConfirmEnvOpts(t, mcpEnvOpts{extra: all, wrap: wrap})
+	return &toolEnv{&mcpTestEnv{confirmEnv: ce, runs: map[string]int{}}}
+}
+
+var confirmTextRe = regexp.MustCompile(`open https://hub\.example\.org/confirm/([A-Z2-7-]+), then ask me to try again\.$`)
+
+// tool calls an admin tool as root (2025-11-25: the text forms); a
+// confirmation it asks for is approved with its typed check and the call
+// retried. → the text, isError, the confirmation id ("" = none asked).
+func (e *toolEnv) tool(t *testing.T, name string, args any) (string, bool, string) {
+	t.Helper()
+	txt, isErr := resultText(e.call(t, "/mcp/admin", "root", "2025-11-25", name, args, nil))
+	m := confirmTextRe.FindStringSubmatch(txt)
+	if m == nil {
+		return txt, isErr, ""
+	}
+	v, err := e.s.Hub.ConfirmationPage(hub.ListenerHub, m[1], "root")
+	if err != nil {
+		t.Fatalf("%s: confirmation page: %v", name, err)
+	}
+	e.decide(t, m[1], v.Typed, true)
+	txt, isErr = resultText(e.call(t, "/mcp/admin", "root", "2025-11-25", name, args, nil))
+	return txt, isErr, v.ID
+}
+
+// waitIdle waits until instance id's op record isn't running.
+func waitIdle(t *testing.T, h *hub.Hub, id string) {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		if r := h.LastOp(id); r == nil || !r.Running {
+			h.Wait()
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("%s: op still running", id)
+}
+
+// callRec records the Hub calls of the shared route/tool work (callHook).
+type callRec struct {
+	mu    sync.Mutex
+	calls []string
+}
+
+func (c *callRec) hook(method string, args ...any) {
+	b, _ := json.Marshal(args)
+	c.mu.Lock()
+	c.calls = append(c.calls, method+" "+string(b))
+	c.mu.Unlock()
+}
+
+func (c *callRec) take() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := c.calls
+	c.calls = nil
+	return out
+}
+
+var archiveTS = regexp.MustCompile(`\d{8}T\d{6}Z`)
+
+// auditKey is an entry as both paths must write it (the confirmation id
+// and archive timestamps aside).
+func auditKey(a directory.AuditEntry) string {
+	d := a.Detail
+	if i := strings.LastIndex(d, "confirmation "); i >= 0 {
+		d = strings.TrimSuffix(strings.TrimSuffix(d[:i], "; "), " ")
+	}
+	return strings.Join([]string{a.Action, a.Target, archiveTS.ReplaceAllString(d, "TS"), a.Result, archiveTS.ReplaceAllString(a.Error, "TS")}, "|")
+}
+
+// sameAsHTTPCase: one W or D tool and its HTTP twin with the same input.
+type sameAsHTTPCase struct {
+	tool         string
+	args         any
+	method, path string
+	body         string
+	instance     string // an async op to wait for ("" none)
+}
+
+// TestAdminToolsSameAsHTTP: every W and D tool of this part makes the
+// same Hub call with the same arguments as its HTTP twin given the same
+// input, on two Hubs in the same state, and writes the same audit
+// entries — attributed via ai and the AI client (plus the consumed
+// confirmation for D tools) only for the tool.
+func TestAdminToolsSameAsHTTP(t *testing.T) {
+	httpEnv := newToolEnv(t, nil, nil)
+	toolE := newToolEnv(t, nil, nil)
+	for _, e := range []*toolEnv{httpEnv, toolE} {
+		// Groups exist (enable creates none: the details stay equal); the
+		// secret is set (the save below needs it).
+		e.ll.AddGroup("users_secretapp")
+		e.ll.AddGroup("admin_secretapp")
+		v := "s3cret-value-1"
+		if _, err := e.s.Hub.SaveSettings("secretapp", hub.SettingsUpdate{Secrets: map[string]hub.SecretChange{"api_key": {Value: &v}}}, directory.Human("root")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	hr, tr := &callRec{}, &callRec{}
+	httpEnv.s.callHook, toolE.s.callHook = hr.hook, tr.hook
+	cases := []sameAsHTTPCase{
+		{tool: "create_instance", args: map[string]any{"template": "grafana", "id": "grafana-a"},
+			method: "POST", path: "/api/instances", body: `{"template":"grafana","id":"grafana-a"}`},
+		{tool: "create_instance", args: map[string]any{"template": "nope", "id": "nope-a"},
+			method: "POST", path: "/api/instances", body: `{"template":"nope","id":"nope-a"}`},
+		{tool: "set_hosts", args: map[string]any{"id": "grafana-a", "hosts": map[string]string{"grafana": "grafana-b.example.org"}},
+			method: "PUT", path: "/api/instances/grafana-a/hosts", body: `{"hosts":{"grafana":"grafana-b.example.org"}}`},
+		{tool: "enable_instance", args: map[string]any{"id": "secretapp"},
+			method: "POST", path: "/api/templates/enable", body: `{"id":"secretapp"}`},
+		{tool: "restart_instance", args: map[string]any{"id": "secretapp"},
+			method: "POST", path: "/api/templates/restart/secretapp", body: ``},
+		{tool: "set_policy", args: map[string]any{"id": "secretapp", "policy": map[string]any{"factors": []string{"webauthn"}, "op": "any"}},
+			method: "PUT", path: "/api/instances/secretapp/settings", body: `{"auth_policy":{"factors":["webauthn"],"op":"any"}}`},
+		{tool: "set_policy", args: map[string]any{"id": "secretapp", "policy": map[string]any{"factors": []string{"password"}, "op": "any"}},
+			method: "PUT", path: "/api/instances/secretapp/settings", body: `{"auth_policy":{"factors":["password"],"op":"any"}}`},
+		{tool: "set_sign_in_mode", args: map[string]any{"id": "nativeapp", "mode": "native"},
+			method: "PUT", path: "/api/instances/nativeapp/settings", body: `{"sign_in":"native"}`},
+		{tool: "set_public_access", args: map[string]any{"id": "cloud", "access": "off"},
+			method: "PUT", path: "/api/instances/cloud/settings", body: `{"public_access":false}`},
+		{tool: "exec", args: map[string]any{"id": "secretapp", "service": "server", "command": "true"},
+			method: "POST", path: "/api/templates/exec/secretapp", body: `{"service":"server","command":"true"}`},
+		{tool: "save_env", args: map[string]any{"id": "secretapp", "variables": map[string]string{"FOO": "bar"}},
+			method: "PUT", path: "/api/templates/env/secretapp", body: `{"FOO":"bar"}`},
+		{tool: "save_custom_override", args: map[string]any{"id": "secretapp", "content": ""},
+			method: "PUT", path: "/api/templates/compose/secretapp", body: `{"user_override":""}`},
+		{tool: "resolve_drift", args: map[string]any{"id": "secretapp", "action": "apply"},
+			method: "POST", path: "/api/drift/resolve", body: `{"id":"secretapp","action":"apply"}`},
+		{tool: "retry_deliveries", args: map[string]any{"id": "secretapp"},
+			method: "POST", path: "/api/instances/secretapp/settings/retry", body: `{}`},
+		{tool: "set_person_value", args: map[string]any{"id": "secretapp", "key": "api_url", "user": "dana", "value": "x"},
+			method: "PUT", path: "/api/instances/secretapp/settings/entries/api_url/dana", body: `{"value":"x"}`},
+		{tool: "clear_person_value", args: map[string]any{"id": "secretapp", "key": "api_url", "user": "dana"},
+			method: "DELETE", path: "/api/instances/secretapp/settings/entries/api_url/dana", body: ``},
+		{tool: "create_missing_groups", args: map[string]any{"ids": []string{"secretapp"}},
+			method: "POST", path: "/api/instances/missing-groups", body: `{"ids":["secretapp"]}`},
+		{tool: "admin_revoke_credential", args: map[string]any{"id": "secretapp", "key": "api_key", "user": "dana"},
+			method: "DELETE", path: "/api/instances/secretapp/credentials/api_key/dana", body: ``},
+		{tool: "set_local_networks", args: map[string]any{"networks": []string{"10.0.0.0/8"}},
+			method: "PUT", path: "/api/settings/local-networks", body: `{"networks":["10.0.0.0/8"]}`},
+		{tool: "disable_instance", args: map[string]any{"id": "secretapp"},
+			method: "POST", path: "/api/templates/disable", body: `{"id":"secretapp"}`},
+		{tool: "delete_instance", args: map[string]any{"id": "grafana-a"},
+			method: "DELETE", path: "/api/instances/grafana-a", body: `{"confirm":"grafana-a"}`, instance: "grafana-a"},
+	}
+	// save_settings: the tool needs the preview's plan hash.
+	covered := map[string]bool{"save_settings": true}
+	for _, c := range cases {
+		covered[c.tool] = true
+	}
+	for _, tl := range toolE.s.tools(ScopeAdmin) {
+		if (tl.Class == ClassWrite || tl.Class == ClassDestructive) && slices.Contains(admin17a, tl.Name) && !covered[tl.Name] {
+			t.Errorf("tool %s (%s) has no same-as-HTTP case", tl.Name, tl.Class)
+		}
+	}
+	run := func(c sameAsHTTPCase) {
+		t.Helper()
+		hn, tn := len(readAudit(t, httpEnv.audit)), len(readAudit(t, toolE.audit))
+		code, body := httpEnv.do(t, "root", c.method, c.path, c.body)
+		txt, isErr, conf := toolE.tool(t, c.tool, c.args)
+		if c.instance != "" {
+			waitIdle(t, httpEnv.s.Hub, c.instance)
+			waitIdle(t, toolE.s.Hub, c.instance)
+		}
+		hc, tc := hr.take(), tr.take()
+		if len(hc) == 0 || !slices.Equal(hc, tc) {
+			t.Errorf("%s: Hub calls differ:\n http %q\n tool %q", c.tool, hc, tc)
+		}
+		if (code >= 400) != isErr {
+			t.Errorf("%s: http %d %s, tool isError %v %s", c.tool, code, body, isErr, txt)
+		}
+		if isErr && !strings.HasPrefix(txt, strings.Split(body, "\n")[0]) && !strings.HasPrefix(txt, strconv.Itoa(code)+": ") {
+			t.Errorf("%s: tool error %q, http %d %q", c.tool, txt, code, body)
+		}
+		ha, ta := readAudit(t, httpEnv.audit)[hn:], readAudit(t, toolE.audit)[tn:]
+		var hk, tk []string
+		for _, a := range ha {
+			if a.Via != "" || a.Client != "" {
+				t.Errorf("%s: http audit %+v attributed to AI", c.tool, a)
+			}
+			hk = append(hk, auditKey(a))
+		}
+		for _, a := range ta {
+			if a.Action == "ai.confirm" {
+				continue
+			}
+			if a.Actor == "root" && (a.Via != "ai" || a.Client != mcpClient) {
+				t.Errorf("%s: tool audit %+v without via ai / client", c.tool, a)
+			}
+			if conf != "" && a.Actor == "root" && !strings.HasSuffix(a.Detail, "confirmation "+conf) {
+				t.Errorf("%s: tool audit %+v without the confirmation %s", c.tool, a, conf)
+			}
+			tk = append(tk, auditKey(a))
+		}
+		if !slices.Equal(hk, tk) {
+			t.Errorf("%s: audit differs:\n http %q\n tool %q", c.tool, hk, tk)
+		}
+	}
+	for _, c := range cases {
+		run(c)
+		if c.tool == "create_instance" && c.args.(map[string]any)["id"] == "grafana-a" {
+			// save_settings after the instance exists: preview, then save
+			// with its plan hash (the HTTP twin needs none).
+			args := map[string]any{"id": "secretapp", "values": map[string]any{"api_url": "https://api.example.org"}}
+			txt, isErr, _ := toolE.tool(t, "preview_settings", args)
+			var p struct {
+				PlanHash string `json:"plan_hash"`
+			}
+			if isErr || json.Unmarshal([]byte(txt), &p) != nil || len(p.PlanHash) != 64 {
+				t.Fatalf("preview = %s %v", txt, isErr)
+			}
+			tr.take()
+			args["plan_hash"] = p.PlanHash
+			run(sameAsHTTPCase{tool: "save_settings", args: args, method: "PUT", path: "/api/instances/secretapp/settings",
+				body: `{"values":{"api_url":"https://api.example.org"}}`})
+		}
+	}
+}
+
+// TestDeleteInstanceTool (§15.6, §15.10): delete_instance asks for a
+// confirmation whose page shows the Hub's plan and the typed check x;
+// approved, the retry answers the twin's 202 body; the delete is audited
+// instance.delete via ai, the client and the consumed confirmation.
+func TestDeleteInstanceTool(t *testing.T) {
+	e := newToolEnv(t, nil, nil)
+	if _, err := e.s.Hub.CreateInstanceAs("notes", "x", nil, directory.Human("root")); err != nil {
+		t.Fatal(err)
+	}
+	if !e.ll.HasGroup("users_x") || !e.ll.HasGroup("admin_x") {
+		t.Fatal("instance x has no groups")
+	}
+	res := e.call(t, "/mcp/admin", "root", "2026-07-28", "delete_instance", map[string]any{"id": "x"}, urlElicit)
+	el := elicitation(t, res, confirmInputKey)
+	m := confirmURLRe.FindStringSubmatch(el["url"].(string))
+	if m == nil {
+		t.Fatalf("elicitation %v", el)
+	}
+	v, err := e.s.Hub.ConfirmationPage(hub.ListenerHub, m[1], "root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"Takes a backup, then permanently removes its containers, volumes, Keycloak client and groups users_x, admin_x."}
+	if v.Typed != "x" || v.Tool != "delete_instance" || !slices.Equal(v.Consequences, want) {
+		t.Fatalf("confirmation typed %q tool %q consequences %q, want %q", v.Typed, v.Tool, v.Consequences, want)
+	}
+	if _, ok := e.s.Hub.InstanceView("x"); !ok {
+		t.Fatal("deleted before the confirmation")
+	}
+	e.decide(t, m[1], "x", true)
+	res = e.call(t, "/mcp/admin", "root", "2026-07-28", "delete_instance", map[string]any{"id": "x"}, urlElicit)
+	txt, isErr := resultText(res)
+	var op OpStarted
+	if isErr || json.Unmarshal([]byte(txt), &op) != nil || op.OpID == "" || op.Op != "delete" || op.Instance != "x" || op.Poll != "/api/instances/x/op" {
+		t.Fatalf("approved retry = %q %v", txt, isErr)
+	}
+	// wait_for_op shows the outcome.
+	txt, isErr, _ = e.tool(t, "wait_for_op", map[string]any{"id": "x", "op_id": op.OpID})
+	var w struct {
+		Done   bool         `json:"done"`
+		Record hub.OpRecord `json:"record"`
+	}
+	if isErr || json.Unmarshal([]byte(txt), &w) != nil || !w.Done || !w.Record.OK || w.Record.OpID != op.OpID {
+		t.Fatalf("wait_for_op = %s %v", txt, isErr)
+	}
+	if _, ok := e.s.Hub.InstanceView("x"); ok {
+		t.Error("instance x still listed")
+	}
+	var del []directory.AuditEntry
+	for _, a := range readAudit(t, e.audit) {
+		if a.Action == "instance.delete" {
+			del = append(del, a)
+		}
+	}
+	if len(del) != 1 || del[0].Result != "ok" || del[0].Actor != "root" || del[0].Via != "ai" || del[0].Client != mcpClient ||
+		!strings.Contains(del[0].Detail, "confirmation "+m[1]) {
+		t.Errorf("instance.delete audit = %+v", del)
+	}
+}
+
+// blockingEngine holds ListVolumes while armed (a backup mid-way).
+type blockingEngine struct {
+	hub.Engine
+	mu      sync.Mutex
+	gate    chan struct{}
+	reached chan struct{}
+}
+
+func (b *blockingEngine) ListVolumes(ctx context.Context, f docker.Filters) ([]docker.Volume, error) {
+	b.mu.Lock()
+	gate, reached := b.gate, b.reached
+	b.mu.Unlock()
+	if gate != nil {
+		select {
+		case reached <- struct{}{}:
+		default:
+		}
+		<-gate
+	}
+	return b.Engine.ListVolumes(ctx, f)
+}
+
+// TestBusyIsToolError (§15.10): an instance mid-backup → enable_instance
+// is an isError result with the 409 reason, never a protocol error.
+func TestBusyIsToolError(t *testing.T) {
+	var be *blockingEngine
+	e := newToolEnv(t, nil, func(eng hub.Engine) hub.Engine { be = &blockingEngine{Engine: eng}; return be })
+	be.mu.Lock()
+	be.gate, be.reached = make(chan struct{}), make(chan struct{}, 1)
+	be.mu.Unlock()
+	release := sync.OnceFunc(func() {
+		be.mu.Lock()
+		close(be.gate)
+		be.gate = nil
+		be.mu.Unlock()
+	})
+	defer release()
+	if _, err := e.s.Hub.StartBackup("grafana", directory.Human("root")); err != nil {
+		t.Fatal(err)
+	}
+	<-be.reached
+	txt, isErr, _ := e.tool(t, "enable_instance", map[string]any{"id": "grafana"})
+	if !isErr || !strings.HasPrefix(txt, "409: ") || !strings.Contains(txt, "in progress") {
+		t.Errorf("enable while busy = %q %v", txt, isErr)
+	}
+	release()
+	waitIdle(t, e.s.Hub, "grafana")
+}
+
+// TestToolClassPerCall (G37): set_policy, set_sign_in_mode and
+// set_public_access are D (confirmation) only for the access-widening
+// arguments, W otherwise; their annotations say destructive.
+func TestToolClassPerCall(t *testing.T) {
+	e := newToolEnv(t, nil, nil)
+	for _, c := range []struct {
+		tool    string
+		args    map[string]any
+		confirm bool
+	}{
+		// The default is hwk-or-mtls (any); webauthn+mtls (all) is stricter.
+		{"set_policy", map[string]any{"id": "secretapp", "policy": map[string]any{"factors": []string{"mtls", "webauthn"}, "op": "all"}}, false},
+		{"set_policy", map[string]any{"id": "secretapp", "inherit": true}, true},
+		{"set_sign_in_mode", map[string]any{"id": "nativeapp", "mode": "gateway"}, false},
+		{"set_sign_in_mode", map[string]any{"id": "nativeapp", "mode": "native"}, true},
+		{"set_public_access", map[string]any{"id": "cloud", "access": "off"}, false},
+		{"set_public_access", map[string]any{"id": "cloud", "access": "on"}, true},
+	} {
+		res := e.call(t, "/mcp/admin", "root", "2025-11-25", c.tool, c.args, nil)
+		txt, _ := resultText(res)
+		if got := confirmTextRe.MatchString(txt); got != c.confirm {
+			t.Errorf("%s %v: confirmation %v, want %v (%s)", c.tool, c.args, got, c.confirm, txt)
+		}
+	}
+	code, a := e.rpc(t, rpcCall{path: "/mcp/admin", user: "root", version: "2025-11-25", method: "tools/list", params: map[string]any{}})
+	if code != 200 {
+		t.Fatal(code)
+	}
+	res, _ := a["result"].(map[string]any)
+	ts, _ := res["tools"].([]any)
+	seen := 0
+	for _, x := range ts {
+		tl := x.(map[string]any)
+		ann, _ := tl["annotations"].(map[string]any)
+		switch tl["name"] {
+		case "set_policy", "set_sign_in_mode", "set_public_access", "delete_instance", "exec":
+			seen++
+			if ann["destructiveHint"] != true {
+				t.Errorf("%s annotations %v", tl["name"], ann)
+			}
+		case "get_settings":
+			if ann["readOnlyHint"] != true {
+				t.Errorf("get_settings annotations %v", ann)
+			}
+		}
+	}
+	if seen != 5 {
+		t.Errorf("listed %d of the D tools", seen)
+	}
+}
+
+// TestSaveSettingsPlanHash (G46): save_settings needs the preview's
+// plan_hash — another one, or a change since the preview, is a 409 — and
+// never takes a secret's value (secrets go through set_secret_setting).
+func TestSaveSettingsPlanHash(t *testing.T) {
+	e := newToolEnv(t, nil, nil)
+	v := "s3cret-value-1"
+	if _, err := e.s.Hub.SaveSettings("secretapp", hub.SettingsUpdate{Secrets: map[string]hub.SecretChange{"api_key": {Value: &v}}}, directory.Human("root")); err != nil {
+		t.Fatal(err)
+	}
+	args := map[string]any{"id": "secretapp", "values": map[string]any{"api_url": "https://a.example.org"}}
+	preview := func() string {
+		txt, isErr, _ := e.tool(t, "preview_settings", args)
+		var p struct {
+			PlanHash string `json:"plan_hash"`
+		}
+		if isErr || json.Unmarshal([]byte(txt), &p) != nil || len(p.PlanHash) != 64 {
+			t.Fatalf("preview = %s %v", txt, isErr)
+		}
+		return p.PlanHash
+	}
+	h1 := preview()
+	if h2 := preview(); h2 != h1 {
+		t.Fatalf("the plan hash isn't stable: %s %s", h1, h2)
+	}
+	save := func(hash string) (string, bool) {
+		a := map[string]any{"id": "secretapp", "values": args["values"], "plan_hash": hash}
+		txt, isErr, _ := e.tool(t, "save_settings", a)
+		return txt, isErr
+	}
+	if txt, isErr := save(strings.Repeat("0", 64)); !isErr || !strings.HasPrefix(txt, "409: ") {
+		t.Errorf("wrong hash = %q %v", txt, isErr)
+	}
+	// Something changed since the preview (another value saved): 409.
+	mustDo(t, e.hub, "root", "PUT", "/api/instances/secretapp/settings", `{"values":{"api_url":"https://b.example.org"}}`, 200)
+	if txt, isErr := save(h1); !isErr || !strings.HasPrefix(txt, "409: ") {
+		t.Errorf("stale hash = %q %v", txt, isErr)
+	}
+	if txt, isErr := save(preview()); isErr || !strings.Contains(txt, `"changed"`) {
+		t.Errorf("save = %q %v", txt, isErr)
+	}
+	panel, _ := e.s.Hub.SettingsPanel(context.Background(), "secretapp")
+	if panel.Instance["api_url"] != "https://a.example.org" {
+		t.Errorf("api_url = %v", panel.Instance["api_url"])
+	}
+	// A secret's value is refused by the Hub, a secrets field by the schema.
+	bad := map[string]any{"id": "secretapp", "values": map[string]any{"api_key": "leak-me-123"}}
+	if txt, isErr, _ := e.tool(t, "preview_settings", bad); !isErr || !strings.HasPrefix(txt, "400: ") || strings.Contains(txt, "leak-me") {
+		t.Errorf("secret value = %q %v", txt, isErr)
+	}
+	sec := map[string]any{"id": "secretapp", "secrets": map[string]any{"api_key": map[string]any{"value": "x"}}, "plan_hash": h1}
+	if txt, isErr, _ := e.tool(t, "save_settings", sec); !isErr || !strings.HasPrefix(txt, textSecretArgs) {
+		t.Errorf("secrets field = %q %v", txt, isErr)
+	}
+}
+
+// TestSecretSettingForm: set_secret_setting (U) takes no value: it
+// answers the settings form's URL; after the person's accept it reports
+// what the Hub stores ({set, updated_at}), never a value.
+func TestSecretSettingForm(t *testing.T) {
+	e := newToolEnv(t, nil, nil)
+	args := map[string]any{"id": "secretapp", "option": "api_key"}
+	res := e.call(t, "/mcp/admin", "root", "2026-07-28", "set_secret_setting", args, urlElicit)
+	el := elicitation(t, res, secretFormInputKey)
+	if el["url"] != "https://hub.example.org/#app/secretapp/settings/api_key" {
+		t.Errorf("form url %v", el["url"])
+	}
+	v := "s3cret-value-1"
+	if _, err := e.s.Hub.SaveSettings("secretapp", hub.SettingsUpdate{Secrets: map[string]hub.SecretChange{"api_key": {Value: &v}}}, directory.Human("root")); err != nil {
+		t.Fatal(err)
+	}
+	res = e.call(t, "/mcp/admin", "root", "2026-07-28", "set_secret_setting", args, urlElicit,
+		map[string]any{"inputResponses": map[string]any{secretFormInputKey: map[string]any{"action": "accept"}}})
+	txt, isErr := resultText(res)
+	if isErr || !strings.Contains(txt, `"set":true`) || strings.Contains(txt, v) {
+		t.Errorf("after accept = %q %v", txt, isErr)
+	}
+	// get_env shows it as [set]; get_settings has no value.
+	for _, tool := range []string{"get_env", "get_settings"} {
+		txt, isErr, _ := e.tool(t, tool, map[string]any{"id": "secretapp"})
+		if isErr || strings.Contains(txt, v) {
+			t.Errorf("%s = %q %v", tool, txt, isErr)
+		}
+	}
+}
+
+// TestReadToolsAnswer: the R tools answer (a smoke test over each), get_logs
+// keeps to 500 lines.
+func TestReadToolsAnswer(t *testing.T) {
+	e := newToolEnv(t, nil, nil)
+	for _, c := range []struct {
+		tool string
+		args map[string]any
+		want string
+	}{
+		{"hub_status", nil, `"enabled"`},
+		{"explain_policy", map[string]any{"id": "secretapp"}, `"effective_policy"`},
+		{"list_instances", nil, `"aiapp"`},
+		{"get_instance", map[string]any{"id": "aiapp"}, `"state"`},
+		{"instance_defaults", map[string]any{"template": "grafana", "id": "grafana-z"}, `grafana-z.example.org`},
+		{"get_op", map[string]any{"id": "aiapp"}, `"op"`},
+		{"get_settings", map[string]any{"id": "secretapp"}, `"options"`},
+		{"get_logs", map[string]any{"id": "aiapp", "lines": 10}, `"logs"`},
+		{"get_status", map[string]any{"id": "aiapp"}, `[`},
+		{"get_compose", map[string]any{"id": "aiapp"}, `"compose"`},
+		{"get_env", map[string]any{"id": "aiapp"}, `"variables"`},
+		{"get_custom_override", map[string]any{"id": "aiapp"}, `"user_override"`},
+		{"list_drift", nil, `"items"`},
+		{"missing_groups", nil, `{`},
+		{"get_local_networks", nil, `"networks"`},
+	} {
+		txt, isErr, _ := e.tool(t, c.tool, c.args)
+		if isErr || !strings.Contains(txt, c.want) {
+			t.Errorf("%s = %q %v", c.tool, txt, isErr)
+		}
+	}
+	if txt, isErr, _ := e.tool(t, "get_logs", map[string]any{"id": "aiapp", "lines": 501}); !isErr || !strings.HasPrefix(txt, "400: ") {
+		t.Errorf("501 lines = %q %v", txt, isErr)
+	}
+	// aiapp's generated HDR_SECRET never shows (secret-looking: redacted).
+	sec := readEnvValue(t, filepath.Join(e.data, "env", "aiapp.env"), "HDR_SECRET")
+	if txt, _, _ := e.tool(t, "get_env", map[string]any{"id": "aiapp"}); sec == "" || strings.Contains(txt, sec) {
+		t.Errorf("get_env shows HDR_SECRET (%q): %s", sec, txt)
+	}
+}

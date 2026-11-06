@@ -868,6 +868,7 @@ func (s *Service) run(ctx context.Context, c *Caller, perm, action, target strin
 		if detail != nil {
 			e.Detail = clipN(*detail, maxAuditDetail)
 		}
+		e.Detail = c.Actor().AuditDetail(e.Detail)
 		var de *Error
 		switch {
 		case errors.As(err, &de) && de.Status < 500:
@@ -1347,7 +1348,7 @@ func (s *Service) DeleteUser(ctx context.Context, c *Caller, username, confirm s
 	// Only once the LLDAP delete succeeded, outside s.mu (the Hub takes
 	// its own lock: order s.mu → Hub.mu).
 	if deleted != "" && s.UserDeleted != nil {
-		res.Warnings = append(res.Warnings, s.UserDeleted(ctx, Actor{User: strings.ToLower(c.User), Via: c.Via, Client: c.Client}, strings.ToLower(deleted))...)
+		res.Warnings = append(res.Warnings, s.UserDeleted(ctx, Actor{User: strings.ToLower(c.User), Via: c.Via, Client: c.Client, Confirmation: c.Confirmation}, strings.ToLower(deleted))...)
 	}
 	return res, err
 }
@@ -1746,7 +1747,7 @@ func (s *Service) DeleteGroup(ctx context.Context, c *Caller, name, confirm stri
 	// Only once the LLDAP delete succeeded, outside s.mu (the Hub takes
 	// its own lock: order s.mu → Hub.mu).
 	if deletedID >= 0 && s.GroupDeleted != nil {
-		res.Warnings = append(res.Warnings, s.GroupDeleted(ctx, Actor{User: strings.ToLower(c.User), Via: c.Via, Client: c.Client}, name, deletedID)...)
+		res.Warnings = append(res.Warnings, s.GroupDeleted(ctx, Actor{User: strings.ToLower(c.User), Via: c.Via, Client: c.Client, Confirmation: c.Confirmation}, name, deletedID)...)
 	}
 	if err != nil {
 		return res, err

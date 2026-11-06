@@ -71,7 +71,13 @@ type confirmEnv struct {
 
 func newConfirmEnv(t *testing.T) *confirmEnv {
 	t.Helper()
-	e := newMCPEnv(t, nil)
+	return newConfirmEnvOpts(t, mcpEnvOpts{})
+}
+
+// newConfirmEnvOpts is newConfirmEnv over newMCPEnvOpts.
+func newConfirmEnvOpts(t *testing.T, o mcpEnvOpts) *confirmEnv {
+	t.Helper()
+	e := newMCPEnvOpts(t, o)
 	pfa := &confirmFA{base: "https://people.example.org/"}
 	hfa := &confirmFA{base: "https://hub.example.org/"}
 	e.s.Hub.SetFreshAuth(hub.ListenerPeople, pfa)

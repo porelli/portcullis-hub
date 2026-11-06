@@ -36,6 +36,9 @@ type Caller struct {
 	Perms  map[string]bool
 	Via    string
 	Client string
+	// Confirmation: the confirmation a Portcullis MCP class-D call
+	// consumed (Actor.Confirmation; set only by CallerAs).
+	Confirmation string
 }
 
 // Actor is who an audited change is attributed to: the person (User, the
@@ -44,6 +47,23 @@ type Caller struct {
 // actors (op records, created_by, logs) use User only.
 type Actor struct {
 	User, Via, Client string
+	// Confirmation is the id of the confirmation a Portcullis MCP class-D
+	// call consumed (§15.6), set only on that tool path: every audit
+	// entry of the call carries "confirmation <id>" in its detail
+	// (AuditDetail). Never part of the attribution checks.
+	Confirmation string
+}
+
+// AuditDetail is detail as a's audit entry holds it: with
+// "confirmation <id>" appended when a carries a consumed confirmation.
+func (a Actor) AuditDetail(detail string) string {
+	if a.Confirmation == "" {
+		return detail
+	}
+	if detail == "" {
+		return "confirmation " + a.Confirmation
+	}
+	return detail + "; confirmation " + a.Confirmation
 }
 
 // ViaAI is Actor.Via / AuditEntry.Via for changes made through the AI.
@@ -58,7 +78,7 @@ func (c *Caller) Actor() Actor {
 	if c == nil {
 		return Actor{}
 	}
-	return Actor{User: c.User, Via: c.Via, Client: c.Client}
+	return Actor{User: c.User, Via: c.Via, Client: c.Client, Confirmation: c.Confirmation}
 }
 
 // Check refuses (403) an actor without a user, a Via other than "" or
@@ -142,7 +162,7 @@ func (s *Service) CallerAs(ctx context.Context, a Actor) (*Caller, error) {
 	if err != nil {
 		return nil, err
 	}
-	c.Via, c.Client = a.Via, a.Client
+	c.Via, c.Client, c.Confirmation = a.Via, a.Client, a.Confirmation
 	return c, nil
 }
 

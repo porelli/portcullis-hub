@@ -111,3 +111,11 @@ func (h *Hub) ToolRedactionKey() string {
 // RedactValues replaces every one of secrets in s (and its JSON string
 // forms) with [redacted] (redactValues). Redact, then clip.
 func RedactValues(s string, secrets []string) string { return redactValues(s, secrets) }
+
+// RedactText is s redacted like instance id's op records (secretRedactor:
+// its stored secret settings, secret-looking env values, provider
+// secrets, credential hashes; a set that can't be read hides s whole) —
+// the Portcullis MCP's get_logs.
+func (h *Hub) RedactText(id, s string) string {
+	return h.secretRedactor(id)(s)
+}

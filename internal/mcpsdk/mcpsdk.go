@@ -166,7 +166,11 @@ func writeRPCError(w http.ResponseWriter, status int, code int64, msg string) {
 // additionalProperties: false; fields without omitempty are required),
 // its top-level property names, and a validator for decoded arguments.
 func Schema(t reflect.Type) (raw json.RawMessage, props []string, validate func(any) error, err error) {
-	s, err := jsonschema.ForType(t, nil)
+	// json.RawMessage is any JSON value (a setting's value), not the
+	// byte slice it is in Go.
+	s, err := jsonschema.ForType(t, &jsonschema.ForOptions{TypeSchemas: map[reflect.Type]*jsonschema.Schema{
+		reflect.TypeFor[json.RawMessage](): {},
+	}})
 	if err != nil {
 		return nil, nil, nil, err
 	}

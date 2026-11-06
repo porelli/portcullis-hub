@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/doctor"
 	"github.com/portcullis/hub/internal/settings"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
@@ -149,6 +150,48 @@ type Preview struct {
 	// Warnings: what the save does first (AI support switched off by a
 	// policy needing mTLS, G43).
 	Warnings []string `json:"warnings"`
+	// PlanHash (G46) is doctor.Digest of the update (secret values never:
+	// only which secret changes how), this preview and the instance's
+	// stored settings, sign-in mode and access choices it was computed
+	// against. The Portcullis MCP's save_settings requires it and
+	// recomputes it before saving (409 when it differs); the HTTP save
+	// ignores it.
+	PlanHash string `json:"plan_hash"`
+}
+
+// planUpdate is a SettingsUpdate as the plan hash takes it: a secret
+// change only as what it does, never its value.
+type planUpdate struct {
+	SettingsUpdate
+	Secrets map[string]string
+}
+
+// settingsPlanHash is PlanHash (Preview, G46).
+func settingsPlanHash(u SettingsUpdate, p *Preview, stored state.InstanceSettings, signIn string, acc accessAudit) string {
+	pu := planUpdate{SettingsUpdate: u}
+	pu.SettingsUpdate.Secrets = nil
+	if len(u.Secrets) > 0 {
+		pu.Secrets = map[string]string{}
+		for k, c := range u.Secrets {
+			switch {
+			case c.Clear:
+				pu.Secrets[k] = "clear"
+			case c.Generate:
+				pu.Secrets[k] = "generate"
+			default:
+				pu.Secrets[k] = "value"
+			}
+		}
+	}
+	cp := *p
+	cp.PlanHash = ""
+	return doctor.Digest(struct {
+		Update  planUpdate
+		Preview Preview
+		Stored  state.InstanceSettings
+		SignIn  string
+		Access  []any
+	}{pu, cp, stored, signIn, []any{acc.policy, acc.access, acc.mode, acc.tokens}})
 }
 
 // withPlaceholders maps rows the panel sent with the instance's group
@@ -372,6 +415,24 @@ func previewDisplay(kinds *settings.Registry, o *templates.Option, r settings.Re
 // snapshot, which also gives the population every person option is
 // resolved for, under the draft and under the saved configuration.
 func (h *Hub) PreviewSettings(ctx context.Context, id string, u SettingsUpdate) (*Preview, error) {
+	orig := u
+	var stored state.InstanceSettings
+	var signIn string
+	var acc accessAudit
+	p, err := h.previewSettings(ctx, id, u, func() {
+		// Under the read lock, with the preview's own reads.
+		stored, signIn, acc = h.st.Settings[id].Clone(), h.st.SignIn[id], h.accessAuditLocked(id)
+	})
+	if err != nil {
+		return nil, err
+	}
+	p.PlanHash = settingsPlanHash(orig, p, stored, signIn, acc)
+	return p, nil
+}
+
+// previewSettings is PreviewSettings; snap runs under the read lock the
+// preview is computed under (the plan hash's stored inputs).
+func (h *Hub) previewSettings(ctx context.Context, id string, u SettingsUpdate, snap func()) (*Preview, error) {
 	t := h.Template(id)
 	if t == nil {
 		return nil, ErrNotFound
@@ -427,6 +488,7 @@ func (h *Hub) PreviewSettings(ctx context.Context, id string, u SettingsUpdate) 
 	if live == nil {
 		return nil, ErrNotFound
 	}
+	snap()
 	cur := h.st.Settings[id]
 	next, effects, own, _, err := h.nextSettingsLocked(live, cur, parsed)
 	if err != nil {

@@ -60,6 +60,11 @@ type mcpTestEnv struct {
 func newMCPTestEnv(t *testing.T) *mcpTestEnv {
 	t.Helper()
 	e := &mcpTestEnv{confirmEnv: newConfirmEnv(t), runs: map[string]int{}}
+	// Only the test tools below (the real ones have their own tests).
+	e.s.mcp.mu.Lock()
+	e.s.mcp.tools = nil
+	e.s.mcp.gen++
+	e.s.mcp.mu.Unlock()
 	run := func(name string) func(context.Context, *directory.Caller, json.RawMessage) (any, error) {
 		return func(ctx context.Context, c *directory.Caller, args json.RawMessage) (any, error) {
 			e.mu.Lock()

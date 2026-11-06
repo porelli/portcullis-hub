@@ -115,6 +115,21 @@ type mcpEnv struct {
 // prep, if any, scripts the engine before the instance starts.
 func newMCPEnv(t *testing.T, seed func(*state.AppState), prep ...func(*aiHookEngine)) *mcpEnv {
 	t.Helper()
+	return newMCPEnvOpts(t, mcpEnvOpts{seed: seed, prep: prep})
+}
+
+// mcpEnvOpts: newMCPEnv's seed and prep, plus extra templates (id →
+// manifest, compose) and an engine wrapper around the AI hook engine.
+type mcpEnvOpts struct {
+	seed  func(*state.AppState)
+	prep  []func(*aiHookEngine)
+	extra map[string][2]string
+	wrap  func(hub.Engine) hub.Engine
+}
+
+func newMCPEnvOpts(t *testing.T, o mcpEnvOpts) *mcpEnv {
+	t.Helper()
+	seed, prep := o.seed, o.prep
 	dir := filepath.Join("..", "hub", "testdata", "ai", "aiapp")
 	m, err := os.ReadFile(filepath.Join(dir, "manifest.yaml"))
 	if err != nil {
@@ -134,9 +149,19 @@ func newMCPEnv(t *testing.T, seed func(*state.AppState), prep ...func(*aiHookEng
 	os.MkdirAll(filepath.Join(root, "project"), 0o755)
 	os.WriteFile(filepath.Join(root, "project", ".env"), []byte("PORTCULLIS_MCP_GATE_IP=172.31.250.3\n"), 0o644)
 	var eng *aiHookEngine
+	extra := map[string][2]string{"aiapp": {string(m), string(c)}}
+	for k, v := range o.extra {
+		extra[k] = v
+	}
 	e := newInstEnvOpts(t, root, instEnvOpts{
-		extra:  map[string][2]string{"aiapp": {string(m), string(c)}},
-		engine: func(f *fakeEngine) hub.Engine { eng = &aiHookEngine{fakeEngine: f}; return eng },
+		extra: extra,
+		engine: func(f *fakeEngine) hub.Engine {
+			eng = &aiHookEngine{fakeEngine: f}
+			if o.wrap != nil {
+				return o.wrap(eng)
+			}
+			return eng
+		},
 		cfg: func(cfg *hub.Config) {
 			cfg.MCPGateRecipientFile = recip
 			cfg.MCPListener = true

@@ -82,6 +82,15 @@ type Tool struct {
 	// group's name, the domain); "" = the tool's name.
 	Typed        func(args json.RawMessage) string
 	Consequences func(args json.RawMessage) []string // D tools: the lines the page shows
+	// ClassFor decides the class per call (G37: set_public_access on,
+	// set_policy to a policy that isn't stricter, set_sign_in_mode to
+	// native; doctor_apply_fix when its plan touches data): nil = Class.
+	// A tool with one registers Class D (the strongest it can be: the
+	// annotations, the parity rules and the D fields go by it) and
+	// ClassFor answers ClassWrite or ClassDestructive for the call's
+	// canonical arguments — anything else counts as D (fail closed); the
+	// confirmation applies when it says D.
+	ClassFor func(args json.RawMessage) ToolClass
 	// SecretForm is a U tool's Hub URL of the form, pre-filled with
 	// non-secret context. A U tool's Run runs only on a retry whose input
 	// reply is "accept" — but that reply is the client's word, not the
@@ -148,6 +157,8 @@ type mcpState struct {
 	tools   map[string][]*mcpTool // scope → tools in registration order
 	gen     int
 	servers map[string]mcpBuilt
+	// registered: registerMCPTools ran (the real tools are registered once).
+	registered bool
 
 	redactMu  sync.Mutex
 	redactKey string
@@ -191,6 +202,9 @@ func checkTool(t Tool, existing []*mcpTool) (*mcpTool, error) {
 		}
 	default:
 		return nil, fmt.Errorf("tool %s: class %q", t.Name, t.Class)
+	}
+	if t.ClassFor != nil && t.Class != ClassDestructive {
+		return nil, fmt.Errorf("tool %s: a tool with ClassFor registers class D (the strongest it can be)", t.Name)
 	}
 	if t.Perm != "" && (t.Scope != ScopePeople ||
 		!slices.Contains([]string{directory.PermEditDetails, directory.PermInvite, directory.PermRemove}, t.Perm)) {
@@ -308,8 +322,18 @@ func (s *Server) tools(scope string) []Tool {
 	return out
 }
 
-// registerMCPTools registers the real tools (Tasks 17–19); none yet.
-func (s *Server) registerMCPTools() {}
+// registerMCPTools registers the real tools (Tasks 17–19), once per
+// Server: the admin tools (mcptools_admin.go).
+func (s *Server) registerMCPTools() {
+	s.mcp.mu.Lock()
+	done := s.mcp.registered
+	s.mcp.registered = true
+	s.mcp.mu.Unlock()
+	if done {
+		return
+	}
+	s.registerAdminTools()
+}
 
 // mcpScopeOf names the scope's resource URL, listener, page base and
 // label for the person's messages.
@@ -480,7 +504,13 @@ func (s *Server) callTool(ctx context.Context, scope string, t *mcpTool, call sd
 		}
 		return s.errResult(refusal)
 	}
-	switch t.Class {
+	class := t.Class
+	if t.ClassFor != nil {
+		if class = t.ClassFor(args); class != ClassWrite {
+			class = ClassDestructive
+		}
+	}
+	switch class {
 	case ClassDestructive:
 		id, answer := s.confirmCall(c, t, info, args, call)
 		if answer != nil {

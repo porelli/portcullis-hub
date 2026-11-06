@@ -398,6 +398,7 @@ func credentialDirectoryErr(err error) error {
 type revocation struct {
 	key, user, by, reason, id string
 	via, client               string
+	confirmation              string // the consumed confirmation (a Portcullis MCP call)
 }
 
 // RevokeOwnCredential revokes user's own credential (reason self, no
@@ -419,7 +420,7 @@ func (h *Hub) AdminRevokeCredential(ctx context.Context, instance, key, user str
 	if !ok {
 		return ErrNotFound
 	}
-	return h.revokeCredentials(ctx, instance, []revocation{{key: key, user: strings.ToLower(user), by: strings.ToLower(actor.User), reason: state.CredentialReasonAdmin, via: actor.Via, client: actor.Client}})
+	return h.revokeCredentials(ctx, instance, []revocation{{key: key, user: strings.ToLower(user), by: strings.ToLower(actor.User), reason: state.CredentialReasonAdmin, via: actor.Via, client: actor.Client, confirmation: actor.Confirmation}})
 }
 
 // revokeAuditAction is a revocation's audit action (§13.16).
@@ -477,7 +478,7 @@ func (h *Hub) revokeCredentialsN(ctx context.Context, instance string, revs []re
 		if o.r.reason == state.CredentialReasonSelf {
 			actor = "self"
 		}
-		h.auditOp(directory.Actor{User: o.r.by, Via: o.r.via, Client: o.r.client}, revokeAuditAction(o.r.reason), instance+"/"+o.r.key+"/"+o.r.user, credentialDetail(instance, o.r.key, o.r.user, actor, o.r.reason), o.err)
+		h.auditOp(directory.Actor{User: o.r.by, Via: o.r.via, Client: o.r.client, Confirmation: o.r.confirmation}, revokeAuditAction(o.r.reason), instance+"/"+o.r.key+"/"+o.r.user, credentialDetail(instance, o.r.key, o.r.user, actor, o.r.reason), o.err)
 		applied = true
 	}
 	if applied {

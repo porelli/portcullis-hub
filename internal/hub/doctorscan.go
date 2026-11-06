@@ -341,7 +341,7 @@ func (h *Hub) auditScan(actor directory.Actor, detail string, err error) {
 	if a == nil {
 		return
 	}
-	e := directory.AuditEntry{Actor: actor.User, Via: actor.Via, Client: actor.Client, Action: "doctor.scan", Target: "disks", Detail: detail, Result: "ok"}
+	e := directory.AuditEntry{Actor: actor.User, Via: actor.Via, Client: actor.Client, Action: "doctor.scan", Target: "disks", Detail: actor.AuditDetail(detail), Result: "ok"}
 	if err != nil {
 		e.Result, e.Error = "refused", err.Error()
 	}

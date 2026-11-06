@@ -431,3 +431,8 @@ func clipRunes(s string, n int) string {
 	}
 	return s[:n] + "…"
 }
+
+// SecretLookingEnvName: name looks like a secret's variable (the rule
+// envSecrets redacts values by) — the Portcullis MCP's save_env refuses
+// writing one (secrets never pass through the AI).
+func SecretLookingEnvName(name string) bool { return secretKeyRe.MatchString(name) }

@@ -766,7 +766,7 @@ func (h *Hub) auditAI(actor directory.Actor, action, target, detail string, err 
 	if a == nil {
 		return
 	}
-	e := directory.AuditEntry{Actor: actor.User, Via: actor.Via, Client: actor.Client, Action: action, Target: clip(target, 64), Detail: clipRunes(detail, 600), Result: "ok"}
+	e := directory.AuditEntry{Actor: actor.User, Via: actor.Via, Client: actor.Client, Action: action, Target: clip(target, 64), Detail: actor.AuditDetail(clipRunes(detail, 600)), Result: "ok"}
 	if err != nil {
 		e.Result = "error"
 		var se *StatusError

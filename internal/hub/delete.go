@@ -130,13 +130,25 @@ func (h *Hub) deleteInstance(id, confirm string, actor directory.Actor, ready fu
 	return res, nil
 }
 
-// deleteSteps runs steps 3–6 of §11.4. Caller holds the app lock.
-func (h *Hub) deleteSteps(id string, actor directory.Actor, res *DeleteResult) error {
-	ctx := context.Background()
-	h.mu.RLock()
-	tg, _ := h.targetLocked(id)
-	snap, hasSnap := h.st.Published[id]
-	groupsAPI := h.groups
+// deleteTargets is what a delete of an instance removes (§11.4): its
+// hosts, Keycloak clients and groups, and which groups another instance
+// or template shares (kept). Shared by deleteSteps and DeletePlan.
+type deleteTargets struct {
+	tg      *target
+	snap    state.PublishedApp
+	hasSnap bool
+	hosts   []string
+	clients []string
+	groups  []string
+	shared  map[string]string // group → who else uses it
+}
+
+// deleteTargetsLocked computes id's deleteTargets. Caller holds mu (read).
+func (h *Hub) deleteTargetsLocked(id string) deleteTargets {
+	var d deleteTargets
+	d.tg, _ = h.targetLocked(id)
+	d.snap, d.hasSnap = h.st.Published[id]
+	tg, snap, hasSnap := d.tg, d.snap, d.hasSnap
 	var hosts []string
 	switch {
 	case tg.view != nil:
@@ -166,9 +178,6 @@ func (h *Hub) deleteSteps(id string, actor directory.Actor, res *DeleteResult) e
 		// The derived first client id (§11.2); further ones aren't known.
 		clients = []string{id}
 	}
-	// Named before step 3 drops AIInstances[id] (a retry names them from
-	// the template).
-	aiScopes := h.aiScopeNamesLocked(tg)
 	shared := map[string]string{}
 	for _, g := range groups {
 		if g != "" {
@@ -177,6 +186,71 @@ func (h *Hub) deleteSteps(id string, actor directory.Actor, res *DeleteResult) e
 			}
 		}
 	}
+	d.hosts, d.clients, d.groups, d.shared = hosts, clients, groups, shared
+	return d
+}
+
+// DeletePlan is what deleting instance id would do, as the lines a
+// confirmation shows (§15.6, the Portcullis MCP's delete_instance):
+// "Takes a backup, then permanently removes its containers, volumes,
+// Keycloak client and groups users_x, admin_x", then the groups it would
+// keep and why. Nothing changes. Unknown instance: 404.
+func (h *Hub) DeletePlan(id string) ([]string, error) {
+	h.mu.RLock()
+	_, ok := h.targetLocked(id)
+	if !ok {
+		h.mu.RUnlock()
+		return nil, statusErr(404, "instance not found: %s", id)
+	}
+	d := h.deleteTargetsLocked(id)
+	h.mu.RUnlock()
+	parts := []string{"containers", "volumes"}
+	switch len(d.clients) {
+	case 0:
+	case 1:
+		parts = append(parts, "Keycloak client")
+	default:
+		parts = append(parts, "Keycloak clients")
+	}
+	var del, kept []string
+	for _, g := range d.groups {
+		switch {
+		case g == "":
+		case g != "users_"+id && g != "admin_"+id:
+			kept = append(kept, fmt.Sprintf("Keeps group %s: it isn't named users_%s / admin_%s.", g, id, id))
+		case d.shared[g] != "":
+			kept = append(kept, fmt.Sprintf("Keeps group %s: %s uses it too.", g, d.shared[g]))
+		default:
+			del = append(del, g)
+		}
+	}
+	what := strings.Join(parts, ", ")
+	if len(del) > 0 {
+		group := "group"
+		if len(del) > 1 {
+			group = "groups"
+		}
+		what = strings.Join(parts, ", ") + " and " + group + " " + strings.Join(del, ", ")
+	} else if len(parts) > 1 {
+		what = strings.Join(parts[:len(parts)-1], ", ") + " and " + parts[len(parts)-1]
+	}
+	lines := []string{"Takes a backup, then permanently removes its " + what + "."}
+	if d.tg.entry.State == state.InstanceDeleting {
+		lines[0] = "Continues an unfinished delete (its backup " + d.tg.entry.Backup + " is kept), permanently removing its " + what + "."
+	}
+	return append(lines, kept...), nil
+}
+
+// deleteSteps runs steps 3–6 of §11.4. Caller holds the app lock.
+func (h *Hub) deleteSteps(id string, actor directory.Actor, res *DeleteResult) error {
+	ctx := context.Background()
+	h.mu.RLock()
+	dt := h.deleteTargetsLocked(id)
+	tg, snap, hasSnap, hosts, clients, groups, shared := dt.tg, dt.snap, dt.hasSnap, dt.hosts, dt.clients, dt.groups, dt.shared
+	groupsAPI := h.groups
+	// Named before step 3 drops AIInstances[id] (a retry names them from
+	// the template).
+	aiScopes := h.aiScopeNamesLocked(tg)
 	h.mu.RUnlock()
 	if tg.view == nil && (!hasSnap || len(snap.Clients) == 0) {
 		if id != tg.templateID {
