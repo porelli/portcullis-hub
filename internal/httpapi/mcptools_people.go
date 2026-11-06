@@ -121,7 +121,7 @@ func (s *Server) peopleDirectory(ctx context.Context, c *directory.Caller) (any,
 // log (an invite-mode user.create or a user.invite, result ok) with
 // core's 72 h expiry — never another person's actions, never a link.
 func (s *Server) peopleInviteState(ctx context.Context, c *directory.Caller, user string) (map[string]any, error) {
-	out := map[string]any{"username": user, "exists": false, "last_invite": nil,
+	out := map[string]any{"username": user, "exists": false, "last_invite": nil, "pending": false,
 		"note": "the one-time invite link is shown only on the People page, never to the AI; core keeps invites in memory, so a restarted enroll drops them"}
 	ov, err := s.Directory.PeopleOverview(ctx, c)
 	if err != nil {
@@ -135,20 +135,10 @@ func (s *Server) peopleInviteState(ctx context.Context, c *directory.Caller, use
 			}
 		}
 	}
-	if l := s.auditLog(); l != nil {
-		if list, err := l.Recent(1000); err == nil {
-			for _, e := range list {
-				if !strings.EqualFold(e.Target, user) || !strings.EqualFold(e.Actor, c.User) || e.Result != "ok" {
-					continue
-				}
-				if e.Action == "user.invite" || (e.Action == "user.create" && strings.HasPrefix(e.Detail, "onboarding=invite")) {
-					out["last_invite"] = map[string]any{"time": e.Time, "via": e.Via, "action": e.Action}
-					out["expires_at"] = e.Time.Add(inviteTTL)
-					out["pending"] = time.Now().Before(e.Time.Add(inviteTTL))
-					break
-				}
-			}
-		}
+	if e := s.lastInvite(user, c.User); e != nil {
+		out["last_invite"] = map[string]any{"time": e.Time, "via": e.Via, "action": e.Action}
+		out["expires_at"] = e.Time.Add(inviteTTL)
+		out["pending"] = time.Now().Before(e.Time.Add(inviteTTL))
 	}
 	return out, nil
 }
@@ -235,6 +225,17 @@ func (s *Server) registerPeopleTools() {
 				return s.safeResult(in.Username, "deleted", res), nil
 			}), usernameOf, s.personConsequences("Deletes %s from LLDAP and Keycloak; this can't be undone.")),
 	} {
+		if t.Name == "delete_person" {
+			// A target the directory refuses a delegate (an administrator,
+			// a protected account, a permission holder, themselves) is
+			// refused at once: no confirmation for a call that can't run.
+			t.Precheck = func(ctx context.Context, c *directory.Caller, args json.RawMessage) error {
+				if s.Directory == nil {
+					return errNoUserManagement
+				}
+				return s.Directory.CheckDelegate(ctx, c, directory.PermRemove, usernameOf(args))
+			}
+		}
 		s.registerTool(t)
 	}
 }

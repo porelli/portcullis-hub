@@ -480,7 +480,10 @@ var nonUserOps = map[string]bool{"Overview": true, "Membership": true, "Privileg
 	// Read-only views for the Hub's publishing (policy expiring, user attributes).
 	"Publish": true, "SharedFields": true,
 	// App instance groups: CreateGroup / DeleteGroup as the actor, never a user.
-	"CreateInstanceGroup": true, "DeleteInstanceGroup": true, "ResolveActor": true, "MissingInstanceGroups": true}
+	"CreateInstanceGroup": true, "DeleteInstanceGroup": true, "ResolveActor": true, "MissingInstanceGroups": true,
+	// Read only: gate's decision for a delegate before a Portcullis MCP
+	// confirmation (checked in TestProtectedAccountsParity); it changes nothing.
+	"CheckDelegate": true}
 
 func TestProtectedAccountsParity(t *testing.T) {
 	e := newEnv(t)
@@ -552,6 +555,32 @@ func TestProtectedAccountsParity(t *testing.T) {
 	}
 	if len(e.invites.users) != 0 || e.kc.Get("admin") != nil || e.kc.Get("portcullis-hub") != nil {
 		t.Errorf("invites %v / keycloak touched for protected accounts", e.invites.users)
+	}
+	// CheckDelegate (plan 4 Task 19 fix round 1): the same answer, read
+	// only — 403 for the delegate on every guarded target, nil on an
+	// ordinary person; an admin gets the protected accounts' 409.
+	e.ll.AddUser("ordinary", "ordinary@example.org", "", "")
+	before = len(e.ll.Mutations)
+	for _, target := range []string{directory.CoreAdmin, "portcullis-hub", "root", "otto", "pm", "inv", "hera", "HERA"} {
+		if err := e.svc.CheckDelegate(ctx, hera, directory.PermRemove, target); status(err) != 403 {
+			t.Errorf("CheckDelegate(hera, %s) = %v, want 403", target, err)
+		}
+	}
+	if err := e.svc.CheckDelegate(ctx, hera, directory.PermRemove, "ordinary"); err != nil {
+		t.Errorf("CheckDelegate(hera, ordinary) = %v", err)
+	}
+	inv, _ := e.svc.CallerFor(ctx, "inv")
+	if err := e.svc.CheckDelegate(ctx, inv, directory.PermRemove, "ordinary"); status(err) != 403 {
+		t.Errorf("CheckDelegate(inv without remove) = %v, want 403", err)
+	}
+	if err := e.svc.CheckDelegate(ctx, asRoot, directory.PermRemove, directory.CoreAdmin); status(err) != 409 {
+		t.Errorf("CheckDelegate(root, admin) = %v, want 409", err)
+	}
+	if err := e.svc.CheckDelegate(ctx, asRoot, directory.PermRemove, "ordinary"); err != nil {
+		t.Errorf("CheckDelegate(root, ordinary) = %v", err)
+	}
+	if got := e.ll.Mutations[before:]; len(got) != 0 {
+		t.Errorf("CheckDelegate changed LLDAP: %v", got)
 	}
 }
 

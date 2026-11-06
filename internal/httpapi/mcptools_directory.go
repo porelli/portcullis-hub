@@ -344,6 +344,30 @@ func (s *Server) inviteForm(user string) string {
 // inviteTTL is core's invite lifetime (§9.4).
 const inviteTTL = 72 * time.Hour
 
+// lastInvite is the newest ok invite of user in the audit log (a
+// user.invite, or an invite-mode user.create; any case), made by actor
+// ("" = by anyone); nil when there is none (or no log).
+func (s *Server) lastInvite(user, actor string) *directory.AuditEntry {
+	l := s.auditLog()
+	if l == nil {
+		return nil
+	}
+	list, err := l.Recent(1000)
+	if err != nil {
+		return nil
+	}
+	for i := range list {
+		e := list[i]
+		if !strings.EqualFold(e.Target, user) || e.Result != "ok" || (actor != "" && !strings.EqualFold(e.Actor, actor)) {
+			continue
+		}
+		if e.Action == "user.invite" || (e.Action == "user.create" && strings.HasPrefix(e.Detail, "onboarding=invite")) {
+			return &list[i]
+		}
+	}
+	return nil
+}
+
 // inviteState is what the Hub knows about user's invite (send_invite's
 // and create_person's Run; never the client's accept): the newest ok
 // user.invite / invite-mode user.create entry of the audit log, and
@@ -353,21 +377,7 @@ const inviteTTL = 72 * time.Hour
 func (s *Server) inviteState(ctx context.Context, c *directory.Caller, user string) map[string]any {
 	out := map[string]any{"username": user, "last_invite": nil, "pending": false,
 		"note": "from the audit log and Keycloak; core keeps invites in memory, so a restarted enroll drops them"}
-	var last *directory.AuditEntry
-	if l := s.auditLog(); l != nil {
-		if list, err := l.Recent(1000); err == nil {
-			for i := range list {
-				e := list[i]
-				if !strings.EqualFold(e.Target, user) || e.Result != "ok" {
-					continue
-				}
-				if e.Action == "user.invite" || (e.Action == "user.create" && strings.HasPrefix(e.Detail, "onboarding=invite")) {
-					last = &list[i]
-					break
-				}
-			}
-		}
-	}
+	last := s.lastInvite(user, "")
 	if last != nil {
 		out["last_invite"] = map[string]any{"time": last.Time, "actor": last.Actor, "via": last.Via, "action": last.Action}
 		out["expires_at"] = last.Time.Add(inviteTTL)

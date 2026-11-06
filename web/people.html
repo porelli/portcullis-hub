@@ -55,7 +55,13 @@
         document.getElementById('who').hidden = !name;
       },
     });
-    if (inv) PortcullisDirectory.openAt('', new URLSearchParams(inv[1] || ''));
+    if (inv) {
+      // Only these three keys: a delegate's invite has no groups, and no
+      // other key of the link is ever pre-filled.
+      const given = new URLSearchParams(inv[1] || ''), pre = new URLSearchParams();
+      for (const k of ['username', 'email', 'display_name']) if (given.has(k)) pre.set(k, given.get(k));
+      PortcullisDirectory.openAt('', pre);
+    }
   }
 </script>
 </body>

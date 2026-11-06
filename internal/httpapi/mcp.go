@@ -99,7 +99,13 @@ type Tool struct {
 	// person's: Run must read the server-side state (was the secret set,
 	// when) and never treat the accept as proof that anything happened.
 	SecretForm func(args json.RawMessage) string
-	Run        func(ctx context.Context, c *directory.Caller, args json.RawMessage) (any, error)
+	// Precheck (optional) runs after the arguments are checked and before
+	// the class decision: an error is the tool's answer at once (audited
+	// refused under Audit), so a call the twin would refuse never gets a
+	// confirmation (delete_person on a guarded target). Run still makes
+	// its own checks.
+	Precheck func(ctx context.Context, c *directory.Caller, args json.RawMessage) error
+	Run      func(ctx context.Context, c *directory.Caller, args json.RawMessage) (any, error)
 }
 
 // secretArgRe is the secret-looking argument name rule (§15.10).
@@ -513,6 +519,18 @@ func (s *Server) callTool(ctx context.Context, scope string, t *mcpTool, call sd
 			return sdk.TextResult(textSecretArgs+url, true)
 		}
 		return s.errResult(refusal)
+	}
+	if t.Precheck != nil {
+		if err := t.Precheck(ctx, c, args); err != nil {
+			redact, rerr := s.toolRedactor()
+			if rerr != nil {
+				log.Printf("mcp: %s: redaction set: %v", t.Name, rerr)
+				return sdk.TextResult(textResultHidden, true)
+			}
+			res := toolError(err, redact)
+			s.auditToolRefusal(c, t, sdk.TextOf(res))
+			return res
+		}
 	}
 	class := t.Class
 	if t.ClassFor != nil {

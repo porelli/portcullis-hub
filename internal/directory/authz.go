@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 
@@ -200,6 +201,28 @@ func (s *Service) gate(ctx context.Context, c *Caller, perm, target string) erro
 		return forbidden("not allowed: needs %s", perm)
 	}
 	return s.authorize(c, perm, target, sn, cfg)
+}
+
+// CheckDelegate is gate's decision for perm on target, read only (no
+// lock, no audit, nothing changed): nil when c may run the operation
+// now, else the refusal the operation itself would answer (403). The
+// Portcullis MCP's delegate tools ask it before a confirmation, so a
+// refused target never gets one; the operation still runs gate itself.
+// perm must be a delegated permission.
+func (s *Service) CheckDelegate(ctx context.Context, c *Caller, perm, target string) error {
+	if c == nil {
+		return errNoActor()
+	}
+	if !slices.Contains(delegatedPerms, perm) {
+		return forbidden("not allowed: admins only")
+	}
+	if err := s.LLDAP.Available(); err != nil {
+		return &Error{Status: http.StatusServiceUnavailable, Msg: err.Error()}
+	}
+	if err := s.gate(ctx, c, perm, target); err != nil {
+		return err
+	}
+	return s.checkTarget(target)
 }
 
 // authorize decides whether c may run an operation needing perm on the

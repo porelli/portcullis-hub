@@ -2009,7 +2009,11 @@
   // AI. With URLSearchParams (#users?create&…): the new-person form.
   async function openAt(name, action) {
     if (loading) await loading;
-    if (action instanceof URLSearchParams) { openInvite(action); return; }
+    if (action instanceof URLSearchParams) {
+      // Only for someone who may invite (the server refuses anyway).
+      if (can('invite')) openInvite(action);
+      return;
+    }
     if (!userByName(name)) return;
     openUser(name);
     if (action === 'password' || action === 'invite') userAction(action, name);

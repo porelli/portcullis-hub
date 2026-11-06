@@ -314,15 +314,21 @@ func TestDelegateDeleteNeedsConfirmation(t *testing.T) {
 		!strings.HasSuffix(a.Detail, "confirmation "+id) {
 		t.Errorf("delete audit %+v", a)
 	}
-	// An administrator: confirmed, then refused by the directory.
-	txt, _ = e.people(t, "dana", "delete_person", map[string]any{"username": "root"})
-	m = peopleConfirmTextRe.FindStringSubmatch(txt)
-	if m == nil {
-		t.Fatalf("delete_person root = %q", txt)
+	// A guarded target (fix round 1): refused at once with the
+	// directory's 403, audited refused via ai, no confirmation made.
+	for _, target := range []string{"root", "dana", "admin", "portcullis-hub"} {
+		n := len(readAudit(t, e.audit))
+		txt, isErr := e.people(t, "dana", "delete_person", map[string]any{"username": target})
+		if !isErr || !strings.HasPrefix(txt, "403: not allowed") || strings.Contains(txt, "/confirm/") {
+			t.Errorf("dana's delete_person %s = %q %v, want the 403 at once", target, txt, isErr)
+		}
+		got := readAudit(t, e.audit)[n:]
+		if len(got) != 1 || got[0].Action != "user.delete" || got[0].Result != "refused" || got[0].Via != "ai" || got[0].Client != mcpClient {
+			t.Errorf("delete_person %s audit = %+v", target, got)
+		}
 	}
-	decidePeople(t, e, m[1], "dana", "root")
-	if txt, isErr := e.people(t, "dana", "delete_person", map[string]any{"username": "root"}); !isErr || !strings.HasPrefix(txt, "403: not allowed") {
-		t.Errorf("dana's delete_person root = %q %v", txt, isErr)
+	if txt, _ := e.people(t, "dana", "delete_person", map[string]any{"username": "root"}); !strings.Contains(txt, "root is an administrator") {
+		t.Errorf("delete_person root = %q", txt)
 	}
 	if !e.ll.HasUser("root") {
 		t.Error("root was deleted by a delegate")
@@ -358,7 +364,7 @@ func TestInvitePersonForm(t *testing.T) {
 	}
 	txt, isErr = e.peopleAccept(t, "dana", "invite_person", args)
 	var st map[string]any
-	if isErr || json.Unmarshal([]byte(txt), &st) != nil || st["exists"] != false || st["last_invite"] != nil {
+	if isErr || json.Unmarshal([]byte(txt), &st) != nil || st["exists"] != false || st["last_invite"] != nil || st["pending"] != false {
 		t.Errorf("accepted before anything was done = %s", txt)
 	}
 	if len(inv.users) != 0 || e.ll.HasUser("frank") {
@@ -369,7 +375,7 @@ func TestInvitePersonForm(t *testing.T) {
 	txt, isErr = e.peopleAccept(t, "dana", "invite_person", args)
 	noInviteLink(t, "invite_person", txt)
 	st = nil
-	if isErr || json.Unmarshal([]byte(txt), &st) != nil || st["exists"] != true || st["last_invite"] == nil {
+	if isErr || json.Unmarshal([]byte(txt), &st) != nil || st["exists"] != true || st["last_invite"] == nil || st["pending"] != true {
 		t.Errorf("accepted after the invite = %s", txt)
 	}
 	// A secret-looking argument is refused with the form.
@@ -390,7 +396,9 @@ func TestPeopleToolsStripped(t *testing.T) {
 	var p struct {
 		Password string `json:"password"`
 	}
-	json.Unmarshal([]byte(pw), &p)
+	if json.Unmarshal([]byte(pw), &p) != nil || p.Password == "" {
+		t.Fatalf("no generated password: %s", pw)
+	}
 	srvInv := regexp.MustCompile(`"server_invite":"([^"]*)"`)
 	for _, user := range []string{"root", "alice"} {
 		for _, tool := range []string{"directory", "my_profile", "my_apps", "my_ai_connections"} {
@@ -399,7 +407,7 @@ func TestPeopleToolsStripped(t *testing.T) {
 				t.Errorf("%s's %s = %q", user, tool, txt)
 			}
 			noInviteLink(t, tool, txt)
-			if p.Password != "" && strings.Contains(txt, p.Password) {
+			if strings.Contains(txt, p.Password) {
 				t.Errorf("%s's %s holds the password", user, tool)
 			}
 			for _, m := range srvInv.FindAllStringSubmatch(txt, -1) {
@@ -546,5 +554,39 @@ func TestCoreAggregateDelegatesComplete(t *testing.T) {
 	}
 	if !slices.Equal(sorted(gate), sorted(peopleDelegateTools)) {
 		t.Errorf("the gate filters %v, the Hub's delegate tools are %v", gate, peopleDelegateTools)
+	}
+}
+
+// TestPeopleToolsInjectedArgs (fix round 1): a caller-only tool given
+// another person's name (or any undeclared argument) is refused — the
+// schema has no such field — and nothing runs or changes.
+func TestPeopleToolsInjectedArgs(t *testing.T) {
+	e, kc := peopleToolEnv(t)
+	n := len(readAudit(t, e.audit))
+	for _, c := range []struct {
+		tool string
+		args map[string]any
+	}{
+		{"my_apps", map[string]any{"username": "bob"}},
+		{"my_profile", map[string]any{"user": "bob"}},
+		{"my_ai_connections", map[string]any{"username": "bob"}},
+		{"disconnect_ai", map[string]any{"client": keycloak.AIClientIDs.ClaudeCode, "user": "bob"}},
+		{"directory", map[string]any{"as": "root"}},
+	} {
+		txt, isErr := e.people(t, "alice", c.tool, c.args)
+		if !isErr || strings.Contains(txt, "bob@example.org") || strings.Contains(txt, "tool_of_bob") {
+			t.Errorf("%s %v = %q %v, want a refusal", c.tool, c.args, txt, isErr)
+		}
+	}
+	kc.mu.Lock()
+	revoked := slices.Clone(kc.revoked)
+	kc.mu.Unlock()
+	if len(revoked) != 0 {
+		t.Errorf("revoked %v", revoked)
+	}
+	for _, a := range readAudit(t, e.audit)[n:] {
+		if a.Result == "ok" {
+			t.Errorf("an injected call changed something: %+v", a)
+		}
 	}
 }
