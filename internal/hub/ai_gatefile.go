@@ -1,8 +1,7 @@
 package hub
 
 import (
-	"filippo.io/age"
-
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -16,6 +15,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"filippo.io/age"
 
 	"github.com/portcullis/hub/internal/aigate"
 	"github.com/portcullis/hub/internal/directory"
@@ -33,14 +34,62 @@ import (
 //
 // Fail closed throughout: with the master switch off or no gate
 // recipient the file says enabled: false; a directory that can't be read
-// keeps the last file (and the sync loop retries); every input doubt —
+// keeps the last file's populations, while every state change still
+// reaches the gate (and the sync loop retries); every input doubt —
 // an unknown LoA, a mode the companion doesn't offer, a missing host, a
 // client whose Keycloak ensure failed, a username the gate wouldn't take —
 // leaves the resource, the person or the client out, never in.
 
-// errGateDirectory: populations can't be computed (the directory is
-// unavailable); the last gate file is kept.
-var errGateDirectory = errors.New("mcp-gate.json: the directory is unavailable — keeping the last file")
+// errGateDirectory: populations couldn't be read (the directory is
+// unavailable): the file was rebuilt from state with the last file's
+// populations, and the sync loop retries.
+var errGateDirectory = errors.New("mcp-gate.json: the directory is unavailable — populations kept from the last file")
+
+// gatePeople supplies the resources' populations: from the directory
+// snapshot m or, while it is unavailable (m nil), from prev — the last
+// gate file's resource with the same URL (none there: the resource is
+// left out, never published with a population it couldn't compute).
+type gatePeople struct {
+	m    *directory.Membership
+	prev map[string]*aigate.Resource
+	now  time.Time
+}
+
+// kept fills r from the previous file (m nil); false = leave r out.
+func (g gatePeople) kept(r *aigate.Resource) bool {
+	p := g.prev[r.URL]
+	if p == nil {
+		return false
+	}
+	r.Population = append([]string{}, p.Population...)
+	r.Expiring = maps.Clone(p.Expiring)
+	if r.Expiring == nil {
+		r.Expiring = map[string]aigate.Time{}
+	}
+	r.People = nil
+	if r.Identity.Mode == aigate.IdentityHeaders && p.Identity.Mode == aigate.IdentityHeaders {
+		r.People = maps.Clone(p.People)
+	}
+	return true
+}
+
+// prevResources indexes the gate file on disk by URL (nil: none or
+// unreadable — then nothing is kept).
+func (h *Hub) prevResources() map[string]*aigate.Resource {
+	b, err := os.ReadFile(h.gatePath())
+	if err != nil {
+		return nil
+	}
+	f, err := aigate.DecodeFile(b)
+	if err != nil || !f.Enabled {
+		return nil
+	}
+	out := make(map[string]*aigate.Resource, len(f.Resources))
+	for i := range f.Resources {
+		out[f.Resources[i].URL] = &f.Resources[i]
+	}
+	return out
+}
 
 func (h *Hub) gatePath() string  { return filepath.Join(h.cfg.DataDir, aigate.GateFileName) }
 func (h *Hub) credsPath() string { return filepath.Join(h.cfg.DataDir, aigate.CredsFileName) }
@@ -108,10 +157,12 @@ type callerSecretSource struct {
 	ref, envFile, key string
 }
 
-// gateFile builds mcp-gate.json from state and m (the directory snapshot
-// taken before mu; G47) with the AI clients healthy lists (nil = none).
-// Takes mu (read) itself. m nil with AI on: errGateDirectory.
-func (h *Hub) gateFile(m *directory.Membership, healthy map[string]bool) (*aigate.File, []callerSecretSource, error) {
+// gateFile builds mcp-gate.json from state and m (WritePolicy's one
+// directory snapshot, taken before mu; G47) with the AI clients healthy
+// lists (nil = none). m nil: populations come from prev (the last file's
+// resources by URL; a resource missing there is left out). Takes mu
+// (read) itself.
+func (h *Hub) gateFile(m *directory.Membership, healthy map[string]bool, prev map[string]*aigate.Resource) (*aigate.File, []callerSecretSource, error) {
 	present := h.gateRecipient() != nil
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -138,9 +189,6 @@ func (h *Hub) gateFile(m *directory.Membership, healthy map[string]bool) (*aigat
 	if !ai.Enabled || !present {
 		// Every request 503 "AI support is off": nothing else published.
 		return f, nil, nil
-	}
-	if m == nil {
-		return nil, nil, errGateDirectory
 	}
 	f.Enabled = true
 	ok := func(id string) bool { return healthy[id] }
@@ -174,12 +222,12 @@ func (h *Hub) gateFile(m *directory.Membership, healthy map[string]bool) (*aigat
 	people := sortedSet(append(append([]string{}, offered...), aiClients...))
 	f.Clients = people
 	admin := sortedSet(adminClients)
-	now := time.Now().UTC()
+	gp := gatePeople{m: m, prev: prev, now: time.Now().UTC()}
 
 	var secrets []callerSecretSource
 	for i := range h.instances {
 		t := &h.instances[i]
-		for _, r := range h.companionResourcesLocked(t, m, f, people, now) {
+		for _, r := range h.companionResourcesLocked(t, gp, f, people) {
 			f.Resources = append(f.Resources, r)
 			if r.Identity.Mode == aigate.IdentityHeaders {
 				c := companionOf(t, r.Companion)
@@ -187,15 +235,28 @@ func (h *Hub) gateFile(m *directory.Membership, healthy map[string]bool) (*aigat
 			}
 		}
 	}
-	everyone := validUsers(slices.Collect(maps.Keys(m.Users)))
-	f.Resources = append(f.Resources, fixedResource(aigate.KindAggregate, aigate.AggregateURL(domain), aigate.ScopeAll, aigate.LabelAggregate, "mcp."+domain, people, everyone, false))
+	// The fixed resources: everyone (the service account is never in a
+	// Membership), lldap_admin members for the admin resource.
+	fixed := func(r aigate.Resource, group string) {
+		if m == nil {
+			if !gp.kept(&r) {
+				log.Printf("mcp-gate: %s left out of mcp-gate.json: the directory is unavailable and the last file doesn't list it", r.URL)
+				return
+			}
+		} else if group == "" {
+			r.Population = validUsers(slices.Collect(maps.Keys(m.Users)))
+		} else {
+			r.Population = groupMembers(m, group)
+			r.Expiring = pendingOf(m, group, r.Population, gp.now)
+		}
+		f.Resources = append(f.Resources, r)
+	}
+	fixed(fixedResource(aigate.KindAggregate, aigate.AggregateURL(domain), aigate.ScopeAll, aigate.LabelAggregate, "mcp."+domain, people, false), "")
 	if ai.PortcullisAdmin && len(admin) > 0 {
-		adm := fixedResource(aigate.KindAdmin, aigate.AdminURL(domain), aigate.ScopeAdmin, aigate.LabelAdmin, "hub."+domain, admin, groupMembers(m, lldap.AdminGroup), false)
-		adm.Expiring = pendingOf(m, lldap.AdminGroup, adm.Population, now)
-		f.Resources = append(f.Resources, adm)
+		fixed(fixedResource(aigate.KindAdmin, aigate.AdminURL(domain), aigate.ScopeAdmin, aigate.LabelAdmin, "hub."+domain, admin, false), lldap.AdminGroup)
 	}
 	if ai.PortcullisPeople {
-		f.Resources = append(f.Resources, fixedResource(aigate.KindPeople, aigate.PeopleURL(domain), aigate.ScopePeople, aigate.LabelPeople, "people."+domain, people, everyone, true))
+		fixed(fixedResource(aigate.KindPeople, aigate.PeopleURL(domain), aigate.ScopePeople, aigate.LabelPeople, "people."+domain, people, true), "")
 	}
 	sort.Slice(f.Resources, func(i, j int) bool { return f.Resources[i].URL < f.Resources[j].URL })
 	return f, secrets, nil
@@ -219,7 +280,7 @@ func companionOf(t *templates.Template, name string) *templates.Companion {
 
 // companionResourcesLocked: t's switched-on companions as resources. Any
 // doubt about one leaves it out (logged). Caller holds mu (read).
-func (h *Hub) companionResourcesLocked(t *templates.Template, m *directory.Membership, f *aigate.File, clients []string, now time.Time) []aigate.Resource {
+func (h *Hub) companionResourcesLocked(t *templates.Template, gp gatePeople, f *aigate.File, clients []string) []aigate.Resource {
 	if !t.Enabled || t.Manifest.AI.Unsupported != "" || len(t.Manifest.AI.MCP) == 0 || t.Manifest.Routerless() || h.instanceBusyLocked(t.ID) {
 		return nil
 	}
@@ -238,6 +299,18 @@ func (h *Hub) companionResourcesLocked(t *templates.Template, m *directory.Membe
 		}
 	}
 	hosts = sortedSet(hosts)
+	// The settings population (§13.3, call 27), once per instance; empty
+	// with a reason (sign_in native, no access group in LLDAP): nobody.
+	var population []string
+	if gp.m != nil {
+		pop := h.populationLocked(t, gp.m)
+		users := make([]string, 0, len(pop.People))
+		for _, p := range pop.People {
+			users = append(users, p.User)
+		}
+		population = validUsers(users)
+	}
+	group := accessGroupOf(t)
 	var out []aigate.Resource
 	for i := range t.Manifest.AI.MCP {
 		c := &t.Manifest.AI.MCP[i]
@@ -292,19 +365,19 @@ func (h *Hub) companionResourcesLocked(t *templates.Template, m *directory.Membe
 			skip(c.Name, "unknown identity mode")
 			continue
 		}
-		// The settings population (§13.3, call 27); empty with a reason
-		// (sign_in native, no access group in LLDAP): nobody gets in.
-		pop := h.populationLocked(t, m)
-		users := make([]string, 0, len(pop.People))
-		for _, p := range pop.People {
-			users = append(users, p.User)
-		}
-		r.Population = validUsers(users)
-		if g := accessGroupOf(t); g != "" {
-			r.Expiring = pendingOf(m, g, r.Population, now)
-		}
-		if r.Identity.Mode == aigate.IdentityHeaders {
-			r.People = peopleOf(m, r.Population)
+		if gp.m == nil {
+			if !gp.kept(&r) {
+				skip(c.Name, "the directory is unavailable and the last file doesn't list it")
+				continue
+			}
+		} else {
+			r.Population = append([]string{}, population...)
+			if group != "" {
+				r.Expiring = pendingOf(gp.m, group, r.Population, gp.now)
+			}
+			if r.Identity.Mode == aigate.IdentityHeaders {
+				r.People = peopleOf(gp.m, r.Population)
+			}
 		}
 		// The gate refuses the whole file for one bad resource: check
 		// this one alone first and leave it out instead.
@@ -328,12 +401,12 @@ func orDefault(s, d string) string {
 }
 
 // fixedResource is one of the three Portcullis-wide resources.
-func fixedResource(kind, url, scope, label, host string, clients, population []string, aggregate bool) aigate.Resource {
+func fixedResource(kind, url, scope, label, host string, clients []string, aggregate bool) aigate.Resource {
 	return aigate.Resource{
 		URL: url, Scope: scope, Clients: append([]string{}, clients...), Kind: kind, Label: label, Host: host,
 		Hosts: []string{}, MinLoA: 2, Protocol: []string{}, Identity: aigate.Identity{Mode: aigate.IdentityNone},
 		Tools:     aigate.Tools{Writes: []string{}, Confirm: []string{}, Never: []string{}},
-		Aggregate: aggregate, Population: population, Expiring: map[string]aigate.Time{},
+		Aggregate: aggregate, Population: []string{}, Expiring: map[string]aigate.Time{},
 	}
 }
 
@@ -404,35 +477,71 @@ func sortedSet(in []string) []string {
 }
 
 // writeGateFiles is WritePolicy's gate pass (caller holds
-// policyWriteMu): mcp-gate.json from m (taken before mu), then the
-// caller secrets of the companions it lists. A directory failure keeps
-// the last gate file and marks it for the sync loop's retry.
+// policyWriteMu): mcp-gate.json from m (WritePolicy's directory
+// snapshot), then the caller secrets of the companions it lists.
+//
+//   - m nil with mErr (the directory failed): rebuilt from state with the
+//     last file's populations, marked for the sync loop's retry, and
+//     errGateDirectory returned.
+//   - A file the gate's rules refuse: enabled: false is written instead
+//     (logged); never the old file, never a refused one.
 func (h *Hub) writeGateFiles(m *directory.Membership, mErr error) error {
-	f, secrets, err := h.gateFile(m, h.aiClientHealth())
+	var prev map[string]*aigate.Resource
+	if m == nil && mErr != nil {
+		prev = h.prevResources()
+	}
+	h.gateStale.Store(mErr != nil)
+	f, secrets, err := h.gateFile(m, h.aiClientHealth(), prev)
 	if err != nil {
-		h.gateStale.Store(true)
-		if mErr != nil {
-			log.Printf("mcp-gate: directory unavailable, keeping the last %s: %v", aigate.GateFileName, mErr)
+		// Nothing valid can be built (the main domain): no gate file at
+		// all is "AI support is off".
+		log.Printf("mcp-gate: %v — removing %s", err, aigate.GateFileName)
+		if rerr := os.Remove(h.gatePath()); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+			err = errors.Join(err, rerr)
 		}
 		return err
 	}
 	if err := aigate.WriteFile(h.gatePath(), f); err != nil {
-		h.gateStale.Store(true)
+		log.Printf("mcp-gate: the gate would refuse the built file (%v) — writing enabled: false", err)
+		off := *f
+		off.Enabled, off.Clients, off.AllowedOrigins, off.Resources = false, []string{}, []string{}, []aigate.Resource{}
+		if werr := aigate.WriteFile(h.gatePath(), &off); werr != nil {
+			log.Printf("mcp-gate: writing enabled: false failed too (%v) — removing %s", werr, aigate.GateFileName)
+			if rerr := os.Remove(h.gatePath()); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+				werr = errors.Join(werr, rerr)
+			}
+			return errors.Join(err, werr)
+		}
 		return err
 	}
-	h.gateStale.Store(false)
-	return h.syncCallerSecrets(f, secrets)
+	if serr := h.syncCallerSecrets(f, secrets); serr != nil {
+		mErr = errors.Join(mErr, serr)
+		if m != nil {
+			return serr
+		}
+	}
+	if mErr != nil {
+		log.Printf("mcp-gate: directory unavailable, %s rebuilt with the last populations: %v", aigate.GateFileName, mErr)
+		return errGateDirectory
+	}
+	return nil
 }
 
 // syncCallerSecrets keeps mcp-credentials.json's caller_secrets equal to
 // the identity_headers companions f lists: each value read from the
-// instance's env file and encrypted only when it changed (a digest kept
-// in memory, never on disk); a companion no longer listed loses its
-// entry. Caller holds policyWriteMu.
+// instance's env file as bytes and encrypted only when it, or the
+// recipient, changed (a digest kept in memory, never on disk); a
+// companion no longer listed loses its entry. Caller holds
+// policyWriteMu.
 func (h *Hub) syncCallerSecrets(f *aigate.File, sources []callerSecretSource) error {
 	if !f.Enabled {
 		return nil // entries of unlisted resources are ignored by the gate
 	}
+	recipient := h.gateRecipient()
+	if recipient == nil {
+		return nil // enabled implies a recipient; it vanished meanwhile
+	}
+	rcpt := []byte(recipient.String())
 	if h.callerDigests == nil {
 		h.callerDigests = map[string]string{}
 	}
@@ -440,18 +549,18 @@ func (h *Hub) syncCallerSecrets(f *aigate.File, sources []callerSecretSource) er
 	var errs []error
 	for _, s := range sources {
 		want[s.ref] = true
-		v := readEnvFile(s.envFile)[s.key]
-		if v == "" {
+		v := envValueBytes(s.envFile, s.key)
+		if len(v) == 0 {
 			// No secret yet: the companion refuses every caller.
 			log.Printf("mcp-gate: %s has no caller secret %s yet", s.ref, s.key)
 			continue
 		}
-		sum := sha256.Sum256([]byte(s.ref + "\x00" + v))
-		d := hex.EncodeToString(sum[:])
+		d := callerDigest(s.ref, rcpt, v)
 		if h.callerDigests[s.ref] == d && h.creds().HasCallerSecret(s.ref) {
+			clear(v)
 			continue
 		}
-		if err := h.creds().PutCallerSecret(s.ref, []byte(v)); err != nil {
+		if err := h.creds().PutCallerSecret(s.ref, v); err != nil { // zeroes v
 			errs = append(errs, err)
 			delete(h.callerDigests, s.ref)
 			continue
@@ -467,6 +576,49 @@ func (h *Hub) syncCallerSecrets(f *aigate.File, sources []callerSecretSource) er
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// callerDigest is sha256(ref, recipient, value): a new recipient
+// re-encrypts even an unchanged value.
+func callerDigest(ref string, recipient, value []byte) string {
+	d := sha256.New()
+	for _, b := range [][]byte{[]byte(ref), recipient, value} {
+		var n [8]byte
+		for i, l := 0, len(b); i < 8; i, l = i+1, l>>8 {
+			n[i] = byte(l)
+		}
+		d.Write(n[:])
+		d.Write(b)
+	}
+	return hex.EncodeToString(d.Sum(nil))
+}
+
+// envValueBytes is key's value in the env file as readEnvFile reads it
+// (the Hub's single quotes removed), as a fresh byte slice the caller
+// clears; the file buffer is cleared before returning. Missing = nil.
+func envValueBytes(path, key string) []byte {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	defer clear(data)
+	var out []byte
+	for _, line := range bytes.Split(data, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 || line[0] == '#' {
+			continue
+		}
+		k, v, ok := bytes.Cut(line, []byte("="))
+		if !ok || string(k) != key {
+			continue
+		}
+		if len(v) >= 2 && v[0] == '\'' && v[len(v)-1] == '\'' && !bytes.ContainsAny(v[1:len(v)-1], "'\\") {
+			v = v[1 : len(v)-1]
+		}
+		clear(out)
+		out = append([]byte(nil), v...) // the last line wins, as in parseEnvRaw
+	}
+	return out
 }
 
 // ── G74: group-readable files in the data directory ──────
@@ -512,7 +664,12 @@ func (h *Hub) checkDataDirModes() {
 		listed = listed && filepath.Dir(p) == root
 		switch {
 		case listed && want == 0:
-			return nil
+			// group-gate reads these world-readable (0644): never
+			// writable by anyone but the Hub.
+			if perm&0o022 == 0 {
+				return nil
+			}
+			want = perm &^ 0o022
 		case listed:
 			if perm == want {
 				return nil

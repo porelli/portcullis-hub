@@ -253,19 +253,31 @@ func WriteJSON(path string, v any) error {
 	return fsutil.WriteFileAtomic(path, b, FileMode)
 }
 
-// WriteFile validates f with the gate's rules, then writes it; an
-// invalid file is never written (the previous one stays).
+// WriteFile encodes f and decodes the bytes back with the gate's strict
+// decoder and rules before writing exactly those bytes (a nil list —
+// encoded null — or any other value the gate refuses is never written;
+// the previous file stays).
 func WriteFile(path string, f *File) error {
-	if err := f.Validate(); err != nil {
+	b, err := f.Encode()
+	if err != nil {
 		return fmt.Errorf("%s: %w", GateFileName, err)
 	}
-	return WriteJSON(path, f)
+	if _, err := DecodeFile(b); err != nil {
+		return fmt.Errorf("%s: %w", GateFileName, err)
+	}
+	return fsutil.WriteFileAtomic(path, b, FileMode)
 }
 
-// WriteCredFile validates c with the gate's rules, then writes it.
+// WriteCredFile is WriteFile for mcp-credentials.json. The encoded
+// buffer (ciphertexts only) is cleared after the write.
 func WriteCredFile(path string, c *CredFile) error {
-	if err := c.Validate(); err != nil {
+	b, err := c.Encode()
+	if err != nil {
 		return fmt.Errorf("%s: %w", CredsFileName, err)
 	}
-	return WriteJSON(path, c)
+	defer clear(b)
+	if _, err := DecodeCredFile(b); err != nil {
+		return fmt.Errorf("%s: %w", CredsFileName, err)
+	}
+	return fsutil.WriteFileAtomic(path, b, FileMode)
 }

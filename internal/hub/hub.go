@@ -916,9 +916,10 @@ func (h *Hub) writePolicy() (attrsWritten bool, retErr error) {
 	h.policyWriteMu.Lock()
 	defer h.policyWriteMu.Unlock()
 	// Directory state first: it is network I/O, never under h.mu.
-	expiring, attrs, keepAttrs := h.directoryState()
-	// The gate file's directory snapshot, also before mu (G47).
-	gateM, gateMErr := h.gateMembership()
+	// One directory read, never under mu (G47): the policy file and the
+	// gate file are built from the same snapshot.
+	dr := h.directoryState()
+	expiring, attrs, keepAttrs := dr.expiring, dr.attrs, dr.keepAttrs
 	h.driftMu.Lock()
 	runtime := make(map[string][]string, len(h.runtimeHosts))
 	for id, hosts := range h.runtimeHosts {
@@ -1061,7 +1062,7 @@ func (h *Hub) writePolicy() (attrsWritten bool, retErr error) {
 	// the policy does: enable, disable, template sync.
 	errs = append(errs, writePortal(h.portalPath(), portal))
 	// The gate files follow in the same pass (contract §15.4).
-	errs = append(errs, h.writeGateFiles(gateM, gateMErr))
+	errs = append(errs, h.writeGateFiles(dr.m, dr.mErr))
 	return attrsWritten, errors.Join(errs...)
 }
 

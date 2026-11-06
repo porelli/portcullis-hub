@@ -13,12 +13,21 @@ import (
 	"github.com/portcullis/hub/internal/policy"
 )
 
-// DirectoryState returns what the policy writer publishes from the
-// directory: the pending membership expiries (contract §4 expiring) and the
-// user-attributes.json document (§4.1; nil: no file). An error makes the
-// writer keep the last published expiries and the existing attributes file
-// (fail closed).
-type DirectoryState func(ctx context.Context) ([]policy.Expiring, *policy.UserAttributesDocument, error)
+// DirectorySnapshot is what the policy writer publishes from ONE
+// directory read: the pending membership expiries (contract §4
+// expiring), the user-attributes.json document (§4.1; nil: no file) and
+// the Membership the gate file is built from (§15.4; nil: none), so the
+// policy file and mcp-gate.json never disagree.
+type DirectorySnapshot struct {
+	Expiring   []policy.Expiring
+	Attrs      *policy.UserAttributesDocument
+	Membership *directory.Membership
+}
+
+// DirectoryState reads a DirectorySnapshot. An error makes the writer
+// keep the last published expiries, the existing attributes file and the
+// last gate file's populations (fail closed).
+type DirectoryState func(ctx context.Context) (DirectorySnapshot, error)
 
 // directoryStateTimeout bounds one DirectoryState call.
 const directoryStateTimeout = 10 * time.Second
@@ -32,20 +41,41 @@ func (h *Hub) SetDirectory(state DirectoryState, attrSync func(ctx context.Conte
 	h.dirState, h.attrSync = state, attrSync
 }
 
+// dirRead is one directory read for WritePolicy.
+type dirRead struct {
+	expiring  []policy.Expiring
+	attrs     *policy.UserAttributesDocument
+	keepAttrs bool // leave user-attributes.json as it is
+	// m is the gate file's membership (nil with mErr: unavailable; nil
+	// without: not needed).
+	m    *directory.Membership
+	mErr error
+}
+
 // directoryState runs the hook for WritePolicy (caller holds
-// policyWriteMu). keepAttrs: leave user-attributes.json as it is.
-func (h *Hub) directoryState() (expiring []policy.Expiring, attrs *policy.UserAttributesDocument, keepAttrs bool) {
+// policyWriteMu; never under mu). Without a hook (tests, no directory)
+// the gate's membership comes from People, only when the gate needs it.
+func (h *Hub) directoryState() dirRead {
 	if h.dirState == nil {
-		return []policy.Expiring{}, nil, false
+		m, err := h.gateMembership()
+		return dirRead{expiring: []policy.Expiring{}, m: m, mErr: err}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), directoryStateTimeout)
 	defer cancel()
-	exp, attrs, err := h.dirState(ctx)
+	snap, err := h.dirState(ctx)
 	if err != nil {
 		log.Printf("auth-policy: directory unavailable, keeping the last published membership expiries and user attributes: %v", err)
-		return h.publishedExpiring(), nil, true
+		r := dirRead{expiring: h.publishedExpiring(), keepAttrs: true}
+		if h.gateWanted() {
+			r.mErr = err // the gate keeps the last populations and retries
+		}
+		return r
 	}
-	return normalizeExpiring(exp), attrs, false
+	r := dirRead{expiring: normalizeExpiring(snap.Expiring), attrs: snap.Attrs, m: snap.Membership}
+	if r.m == nil && h.gateWanted() {
+		r.mErr = errors.New("the directory gave no membership")
+	}
+	return r
 }
 
 // publishedExpiring is the expiring list last written: in memory, else
@@ -116,12 +146,13 @@ func normalizeExpiring(in []policy.Expiring) []policy.Expiring {
 	return out
 }
 
-// DirectoryStateOf adapts the directory service to DirectoryState.
+// DirectoryStateOf adapts the directory service to DirectoryState (one
+// Publish call: expiries, attributes and the membership of one read).
 func DirectoryStateOf(d *directory.Service) DirectoryState {
-	return func(ctx context.Context) ([]policy.Expiring, *policy.UserAttributesDocument, error) {
+	return func(ctx context.Context) (DirectorySnapshot, error) {
 		pub, err := d.Publish(ctx, time.Now().UTC())
 		if err != nil {
-			return nil, nil, err
+			return DirectorySnapshot{}, err
 		}
 		exp := make([]policy.Expiring, 0, len(pub.Expiring))
 		for _, e := range pub.Expiring {
@@ -133,7 +164,7 @@ func DirectoryStateOf(d *directory.Service) DirectoryState {
 		}
 		// The hosts section (header deliveries) is merged in WritePolicy.
 		doc := policy.BuildUserAttributes(fields, pub.Users, nil)
-		return exp, &doc, nil
+		return DirectorySnapshot{Expiring: exp, Attrs: &doc, Membership: pub.Membership}, nil
 	}
 }
 

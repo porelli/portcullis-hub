@@ -21,6 +21,7 @@ import (
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/lldap"
+	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/state"
 )
 
@@ -1466,4 +1467,14 @@ func (f *fixerFake) Specs() []docker.RunSpec {
 	f.fmu.Lock()
 	defer f.fmu.Unlock()
 	return append([]docker.RunSpec(nil), f.specs...)
+}
+
+// dirStateOf adapts a test's (expiring, attributes) function to
+// DirectoryState: no membership (the gate file then keeps the last
+// file's populations, like a failing directory).
+func dirStateOf(f func(context.Context) ([]policy.Expiring, *policy.UserAttributesDocument, error)) DirectoryState {
+	return func(ctx context.Context) (DirectorySnapshot, error) {
+		exp, attrs, err := f(ctx)
+		return DirectorySnapshot{Expiring: exp, Attrs: attrs}, err
+	}
 }

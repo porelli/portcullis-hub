@@ -3,11 +3,16 @@ package hub
 import (
 	"bytes"
 	"context"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -19,8 +24,10 @@ import (
 	"github.com/portcullis/hub/internal/aigate"
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/keycloak"
+	"github.com/portcullis/hub/internal/lldap"
 	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/state"
+	"github.com/portcullis/hub/internal/templates"
 )
 
 // Plan 4 Task 11: the gate files (contract §15.4). The test templates use
@@ -215,7 +222,7 @@ func (g *gateFixture) build(t *testing.T) *aigate.File {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f, _, err := g.h.gateFile(m, g.h.aiClientHealth())
+	f, _, err := g.h.gateFile(m, g.h.aiClientHealth(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -547,19 +554,27 @@ func TestGateFileFollowsSettings(t *testing.T) {
 }
 
 // A membership change through the directory sync loop rewrites the
-// policy file and the gate file in the same WritePolicy; a failing
-// directory keeps the last gate file (fail closed, like expiring).
+// policy file and the gate file in the same WritePolicy, from one read; a
+// failing directory keeps the last gate file's populations (fail closed,
+// like expiring) — with no state change the file is byte-identical.
 func TestGateFileWrittenWithPolicy(t *testing.T) {
 	g := newGateFixture(t, nil)
 	var dirCalls atomic.Int32
 	carolIn := atomic.Bool{}
 	far := time.Now().UTC().Add(240 * time.Hour).Format(time.RFC3339)
-	g.h.SetDirectory(func(context.Context) ([]policy.Expiring, *policy.UserAttributesDocument, error) {
+	// ONE directory read per WritePolicy feeds both files (fix round 1,
+	// item 4): the snapshot carries the membership.
+	g.h.SetDirectory(func(ctx context.Context) (DirectorySnapshot, error) {
 		dirCalls.Add(1)
-		if carolIn.Load() {
-			return []policy.Expiring{{User: "carol", Group: "users_gitea", At: far}}, nil, nil
+		m, err := g.people.Membership(ctx, time.Now().UTC())
+		if err != nil {
+			return DirectorySnapshot{}, err
 		}
-		return nil, nil, nil
+		var exp []policy.Expiring
+		if carolIn.Load() {
+			exp = []policy.Expiring{{User: "carol", Group: "users_gitea", At: far}}
+		}
+		return DirectorySnapshot{Expiring: exp, Membership: m}, nil
 	}, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -624,8 +639,14 @@ func TestGateFileWrittenWithPolicy(t *testing.T) {
 		t.Error("WritePolicy hid the kept gate file")
 	}
 	g.people.set(func(p *fakePeople) { p.err = nil })
+	var calls0, calls1 int
+	g.people.set(func(p *fakePeople) { calls0 = p.calls })
 	if err := g.h.WritePolicy(); err != nil || slices.Contains(giteaPop(), "carol") || g.h.gateStale.Load() {
 		t.Errorf("after recovery: %v %v", err, giteaPop())
+	}
+	g.people.set(func(p *fakePeople) { calls1 = p.calls })
+	if n := calls1 - calls0; n != 1 {
+		t.Errorf("one WritePolicy read the directory %d times, want 1 (one snapshot for both files)", n)
 	}
 }
 
@@ -723,27 +744,86 @@ func TestCredentialsEncryptedHubCantRead(t *testing.T) {
 	}
 }
 
-// The Hub holds no age identity: no code path outside tests decrypts or
-// parses one.
+// The Hub holds no age identity (fix round 1, item 7): every non-test Go
+// file of every package of the module (go list ./...) is parsed; imports
+// of filippo.io/age and filippo.io/age/armor are resolved under whatever
+// name they get, and every selector on that name must be in the
+// allowlist (encrypting only). Any other filippo.io/age/... package and
+// dot or blank imports of these are refused.
 func TestHubHoldsNoAgeIdentity(t *testing.T) {
-	forbidden := regexp.MustCompile(`age\.(ParseX25519Identity|ParseIdentities|Decrypt|GenerateX25519Identity|NewScryptIdentity|ParseHybridIdentity|GenerateHybridIdentity)\b|AGE-SECRET-KEY`)
-	for _, dir := range []string{".", filepath.Join("..", "aigate"), filepath.Join("..", "..", "cmd", "hub")} {
+	allowed := map[string]map[string]bool{
+		"filippo.io/age":       {"ParseX25519Recipient": true, "Encrypt": true, "X25519Recipient": true, "Recipient": true},
+		"filippo.io/age/armor": {"NewWriter": true},
+	}
+	out, err := exec.Command("go", "list", "-f", "{{.Dir}}", "github.com/portcullis/hub/...").Output()
+	if err != nil {
+		t.Fatalf("go list: %v", err)
+	}
+	dirs := strings.Fields(string(out))
+	if len(dirs) < 10 {
+		t.Fatalf("go list found only %d packages", len(dirs))
+	}
+	users := 0
+	for _, dir := range dirs {
 		files, _ := filepath.Glob(filepath.Join(dir, "*.go"))
-		if len(files) == 0 {
-			t.Fatalf("no Go files in %s", dir)
-		}
 		for _, p := range files {
 			if strings.HasSuffix(p, "_test.go") {
 				continue
 			}
-			if loc := forbidden.FindString(string(mustRead(t, p))); loc != "" {
-				t.Errorf("%s: %s (the Hub must hold no age identity)", p, loc)
+			fset := token.NewFileSet()
+			file, err := parser.ParseFile(fset, p, nil, parser.SkipObjectResolution)
+			if err != nil {
+				t.Fatalf("%s: %v", p, err)
 			}
+			names := map[string]string{} // local name → import path
+			for _, imp := range file.Imports {
+				path, _ := strconv.Unquote(imp.Path.Value)
+				if path != "filippo.io/age" && !strings.HasPrefix(path, "filippo.io/age/") {
+					continue
+				}
+				if allowed[path] == nil {
+					t.Errorf("%s imports %s", p, path)
+					continue
+				}
+				name := filepath.Base(path)
+				if imp.Name != nil {
+					name = imp.Name.Name
+				}
+				if name == "." || name == "_" {
+					t.Errorf("%s: %s imported as %q", p, path, name)
+					continue
+				}
+				names[name] = path
+			}
+			if len(names) == 0 {
+				continue
+			}
+			users++
+			ast.Inspect(file, func(n ast.Node) bool {
+				sel, ok := n.(*ast.SelectorExpr)
+				if !ok {
+					return true
+				}
+				id, ok := sel.X.(*ast.Ident)
+				if !ok {
+					return true
+				}
+				if path, ok := names[id.Name]; ok && !allowed[path][sel.Sel.Name] {
+					t.Errorf("%s: %s.%s (%s) — the Hub must hold no age identity", fset.Position(sel.Pos()), id.Name, sel.Sel.Name, path)
+				}
+				return true
+			})
 		}
+	}
+	if users == 0 {
+		t.Fatal("no file imports age: the walk found nothing to check")
 	}
 }
 
-// Global Constraints: no template id in the Hub's AI code.
+// Global Constraints: no template id in the Hub's AI code. The kind name
+// litellm in ai_providers.go (Task 9: a litellm provider names an
+// installed instance of the template whose id is the kind name) is a
+// known exception and deliberately not in the list.
 func TestGateFileHasNoTemplateIDs(t *testing.T) {
 	ids := regexp.MustCompile(`(?i)gitea|grafana|homeassistant|librechat`)
 	files, _ := filepath.Glob("ai*.go")
@@ -849,5 +929,232 @@ func TestGateFileRewrittenOnAISettingsSave(t *testing.T) {
 	}
 	if f := read(); f.Enabled || len(f.Resources) != 0 {
 		t.Errorf("master switch off not written: %v %v", f.Enabled, urls(f))
+	}
+}
+
+// ── fix round 1 ──────────────────────────────────────────
+
+// Item 1: a credential or caller secret the gate would refuse once
+// decrypted is refused before encryption, zeroed, never quoted, and
+// nothing is written.
+func TestCredentialValueRefused(t *testing.T) {
+	g := newGateFixture(t, nil)
+	c := aigate.Credential{Instance: "gitea", Companion: "gitea", User: "alice", ID: "7", MintedAt: aigate.At(time.Now())}
+	for name, v := range map[string][]byte{
+		"empty":   {},
+		"64KiB+1": bytes.Repeat([]byte("a"), 64<<10+1),
+		"newline": []byte("abc\ndef"),
+		"NUL":     []byte("abc\x00def"),
+		"DEL":     []byte("abc\x7fdef"),
+		"tab":     []byte("abc\tdef"),
+		"bad UTF": []byte("abc\xffdef"),
+	} {
+		buf := append([]byte(nil), v...)
+		err := g.h.creds().Put(c, buf)
+		if err == nil {
+			t.Errorf("%s: accepted", name)
+			continue
+		}
+		if len(v) > 3 && strings.Contains(err.Error(), string(v[:3])) {
+			t.Errorf("%s: the error quotes the value: %v", name, err)
+		}
+		if !bytes.Equal(buf, make([]byte, len(buf))) {
+			t.Errorf("%s: not zeroed", name)
+		}
+		if err := g.h.creds().PutCallerSecret("wiki/wiki", append([]byte(nil), v...)); err == nil {
+			t.Errorf("%s: caller secret accepted", name)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(g.data, aigate.CredsFileName)); err == nil {
+		t.Error("a refused value wrote the credentials file")
+	}
+	// The bounds themselves are accepted.
+	if err := g.h.creds().Put(c, bytes.Repeat([]byte("a"), 64<<10)); err != nil {
+		t.Errorf("64 KiB: %v", err)
+	}
+	if err := g.h.creds().Put(c, []byte("ünïcode-tøken")); err != nil {
+		t.Errorf("UTF-8: %v", err)
+	}
+}
+
+// Item 2 (ruling): with the directory down the file is rebuilt from state;
+// populations come from the last file's resource of the same URL, a
+// resource the last file lacks is left out, and every state change still
+// reaches the gate.
+func TestGateFileDirectoryDownFollowsState(t *testing.T) {
+	g := newGateFixture(t, func(st *state.AppState) {
+		st.AIInstances["wiki"] = state.AIInstance{} // off at first
+	})
+	if err := g.h.WritePolicy(); err != nil {
+		t.Fatal(err)
+	}
+	read := func() *aigate.File {
+		f, err := aigate.DecodeFile(mustRead(t, filepath.Join(g.data, aigate.GateFileName)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return f
+	}
+	first := read()
+	gitea0 := resourceByURL(first, "https://gitea.example.com/mcp")
+	if gitea0 == nil || resourceByURL(first, "https://wiki.example.com/mcp") != nil {
+		t.Fatalf("first file: %v", urls(first))
+	}
+	// The directory goes down, and the people change meanwhile (unseen).
+	g.people.addGroup("users_gitea", "carol")
+	g.people.set(func(p *fakePeople) { p.err = &directory.Error{Status: 502, Msg: "unreachable"} })
+	// State changes: gitea's companion off, native's instance disabled,
+	// wiki switched on (no previous entry), Claude unticked, Claude Code's
+	// admin flag off (Claude's was the other one), Generic unhealthy.
+	g.h.mu.Lock()
+	g.h.st.AIInstances["gitea"] = state.AIInstance{Companions: map[string]state.AICompanion{"gitea": {Enabled: false, Mode: "read_write"}}}
+	g.h.st.AIInstances["wiki"] = state.AIInstance{Companions: map[string]state.AICompanion{"wiki": {Enabled: true, Mode: "read_only"}}}
+	g.h.st.Enabled = slices.DeleteFunc(slices.Clone(g.h.st.Enabled), func(s string) bool { return s == "native" })
+	g.h.st.AI.Clients.Claude.Offered = false
+	g.h.st.AI.Clients.ClaudeCode.Admin = false
+	g.h.mu.Unlock()
+	g.h.Discover()
+	health := g.allHealthy()
+	health[keycloak.AIClientIDs.Generic] = false
+	g.h.SetAIClientHealth(health)
+	if err := g.h.WritePolicy(); err == nil || !g.h.gateStale.Load() {
+		t.Errorf("WritePolicy = %v, stale %v: want the directory error and a retry", err, g.h.gateStale.Load())
+	}
+	f := read()
+	if !f.Enabled {
+		t.Fatal("disabled")
+	}
+	for _, u := range []string{"https://gitea.example.com/mcp", "https://native.example.com/mcp", "https://wiki.example.com/mcp", "https://hub.example.com/mcp"} {
+		if resourceByURL(f, u) != nil {
+			t.Errorf("%s still listed with the directory down", u)
+		}
+	}
+	code := keycloak.AIClientIDs.ClaudeCode
+	want := sortedSet([]string{code, g.chatClient})
+	if !slices.Equal(f.Clients, want) {
+		t.Errorf("clients = %v, want %v", f.Clients, want)
+	}
+	all, all0 := resourceByURL(f, "https://mcp.example.com/mcp"), resourceByURL(first, "https://mcp.example.com/mcp")
+	if all == nil || !slices.Equal(all.Population, all0.Population) || slices.Contains(all.Population, "carol") && !slices.Contains(all0.Population, "carol") || !slices.Equal(all.Clients, want) {
+		t.Errorf("aggregate = %+v, want the last population %v and clients %v", all, all0.Population, want)
+	}
+	// Back: the directory's populations again.
+	g.people.set(func(p *fakePeople) { p.err = nil })
+	g.h.mu.Lock()
+	g.h.st.AIInstances["gitea"] = state.AIInstance{Companions: map[string]state.AICompanion{"gitea": {Enabled: true, Mode: "read_write"}}}
+	g.h.mu.Unlock()
+	if err := g.h.WritePolicy(); err != nil || g.h.gateStale.Load() {
+		t.Fatal(err)
+	}
+	if r := resourceByURL(read(), "https://gitea.example.com/mcp"); r == nil || !slices.Contains(r.Population, "carol") {
+		t.Errorf("after recovery: %+v", r)
+	}
+}
+
+// Item 2: a built file the gate's rules refuse is never written; the
+// Hub writes enabled: false (no origins, clients or resources) instead
+// of keeping the old file.
+func TestGateFileRefusedWritesDisabled(t *testing.T) {
+	g := newGateFixture(t, nil)
+	if err := g.h.WritePolicy(); err != nil {
+		t.Fatal(err)
+	}
+	g.h.mu.Lock()
+	g.h.st.AI.AllowedOrigins = []string{"http://not-https.example.org"} // the gate refuses it
+	g.h.mu.Unlock()
+	if err := g.h.WritePolicy(); err == nil {
+		t.Error("WritePolicy hid the refused file")
+	}
+	f, err := aigate.DecodeFile(mustRead(t, filepath.Join(g.data, aigate.GateFileName)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.Enabled || len(f.Resources) != 0 || len(f.Clients) != 0 || len(f.AllowedOrigins) != 0 {
+		t.Errorf("file = enabled %v resources %v clients %v origins %v", f.Enabled, urls(f), f.Clients, f.AllowedOrigins)
+	}
+}
+
+// Item 3: a new gate recipient re-encrypts the caller secrets, though the
+// value is unchanged.
+func TestCallerSecretFollowsRecipient(t *testing.T) {
+	g := newGateFixture(t, nil)
+	envFile := filepath.Join(g.data, "env", "wiki.env")
+	if err := os.WriteFile(envFile, []byte("MCP_SECRET='wiki-caller-secret-value'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.h.WritePolicy(); err != nil {
+		t.Fatal(err)
+	}
+	open := func(id age.Identity) string {
+		cf, err := aigate.DecodeCredFile(mustRead(t, filepath.Join(g.data, aigate.CredsFileName)))
+		if err != nil || len(cf.CallerSecrets) != 1 {
+			t.Fatalf("creds: %v %+v", err, cf)
+		}
+		r, err := age.Decrypt(armor.NewReader(strings.NewReader(cf.CallerSecrets[0].Age)), id)
+		if err != nil {
+			return ""
+		}
+		b, _ := io.ReadAll(r)
+		return string(b)
+	}
+	if open(g.id) != "wiki-caller-secret-value" {
+		t.Fatal("not encrypted to the first recipient")
+	}
+	if err := g.h.WritePolicy(); err != nil { // unchanged: not rewritten
+		t.Fatal(err)
+	}
+	next, _ := age.GenerateX25519Identity()
+	if err := os.WriteFile(g.recip, []byte(next.Recipient().String()+"\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.h.WritePolicy(); err != nil {
+		t.Fatal(err)
+	}
+	if open(next) != "wiki-caller-secret-value" {
+		t.Error("the caller secret wasn't re-encrypted to the new recipient")
+	}
+}
+
+// Item 6: the three world-readable files keep 0644: group or other write
+// bits are cleared.
+func TestDataDirSharedFilesNotWritable(t *testing.T) {
+	g := newGateFixture(t, nil)
+	for _, name := range []string{"group-gate-policy.json", "portal-apps.json", "user-attributes.json"} {
+		p := filepath.Join(g.data, name)
+		if err := os.WriteFile(p, []byte("{}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(p, 0o666); err != nil {
+			t.Fatal(err)
+		}
+	}
+	g.h.checkDataDirModes()
+	for _, name := range []string{"group-gate-policy.json", "portal-apps.json", "user-attributes.json"} {
+		if st, _ := os.Stat(filepath.Join(g.data, name)); st.Mode().Perm() != 0o644 {
+			t.Errorf("%s: %o, want 0644", name, st.Mode().Perm())
+		}
+	}
+}
+
+// Item 9: the gate's username rule is exactly the Hub's, and every
+// hostname the Hub accepts the gate accepts (the Hub is stricter only on
+// single-label names).
+func TestGateRulesMatchHub(t *testing.T) {
+	long := strings.Repeat("a", 63)
+	for _, s := range []string{"", "a", "alice", "Alice", "a.b", "a_b", "a-b", "-a", ".a", "_a", "a@b", "a+b", "a b", "bök", "Kim",
+		strings.Repeat("a", 64), strings.Repeat("a", 65), "a\n", "1abc", "a..b", "a."} {
+		if aigate.ValidUsername(s) != lldap.ValidUsername(s) {
+			t.Errorf("username %q: gate %v, Hub %v", s, aigate.ValidUsername(s), lldap.ValidUsername(s))
+		}
+	}
+	for _, s := range []string{"", "a", "example.com", "Example.com", "a.b.c", "a-b.c", "-a.b", "a-.b", "a..b", "a.", ".a", "a_b.c",
+		long + ".com", long + "a.com", strings.Repeat(long+".", 4) + "com", "xn--bcher-kva.example", "1.2.3.4", "a b.c", "bück.de"} {
+		// Every hostname the Hub accepts, the gate accepts; the only
+		// difference is that the Hub also needs two labels (a dotless
+		// name never reaches the file).
+		gate, hub := aigate.ValidHostname(s), templates.ValidHostname(s)
+		if hub && !gate || gate != hub && strings.Contains(s, ".") {
+			t.Errorf("hostname %q: gate %v, Hub %v", s, gate, hub)
+		}
 	}
 }

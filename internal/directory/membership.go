@@ -69,6 +69,13 @@ func (s *Service) Membership(ctx context.Context, now time.Time) (*Membership, e
 	if err != nil {
 		return nil, err
 	}
+	return s.membershipOf(cfg, sn, now), nil
+}
+
+// membershipOf is Membership from one directory.yaml and LLDAP read
+// (Publish shares it, so the policy file and the gate file are built
+// from the same snapshot).
+func (s *Service) membershipOf(cfg *Config, sn *snapshot, now time.Time) *Membership {
 	svc := strings.ToLower(s.serviceUser())
 	m := &Membership{Users: map[string]map[string]int{}, Groups: map[string]MemberGroup{}, Expired: map[string]map[string]bool{}, Privilege: map[string]string{}, UUIDs: map[string]string{},
 		Emails: map[string]string{}, Pending: map[string]map[string]time.Time{}}
@@ -112,7 +119,7 @@ func (s *Service) Membership(ctx context.Context, now time.Time) (*Membership, e
 		}
 		m.Expired[e.User][e.Group] = true
 	}
-	return m, nil
+	return m
 }
 
 // PrivilegeProblem says why group can't hold a privileged option's

@@ -331,10 +331,10 @@ func TestHeaderNilPlanUnchanged(t *testing.T) {
 	f, _, _ := headerFixture(t, nil)
 	headerEnable(t, f)
 	calls := 0
-	f.h.SetDirectory(func(context.Context) ([]policy.Expiring, *policy.UserAttributesDocument, error) {
+	f.h.SetDirectory(dirStateOf(func(context.Context) ([]policy.Expiring, *policy.UserAttributesDocument, error) {
 		calls++
 		return nil, nil, nil
-	}, nil)
+	}), nil)
 	h := f.h
 	h.mu.Lock()
 	delete(h.hostHeaders, headerID)
@@ -403,16 +403,16 @@ func TestHeaderNilPlanAfterFailedWrite(t *testing.T) {
 func TestHeaderDemotionWithDirectoryStateDown(t *testing.T) {
 	f, _, _ := headerFixture(t, nil)
 	attrs := policy.BuildUserAttributes([]policy.AttrField{{Name: "cost_center"}}, map[string]map[string][]string{"carol": {"cost_center": {"CC-1"}}}, nil)
-	f.h.SetDirectory(func(context.Context) ([]policy.Expiring, *policy.UserAttributesDocument, error) {
+	f.h.SetDirectory(dirStateOf(func(context.Context) ([]policy.Expiring, *policy.UserAttributesDocument, error) {
 		return nil, &attrs, nil
-	}, nil)
+	}), nil)
 	headerEnable(t, f)
 	if got := attrHosts(t, f)[headerMain][hdrSuffix]["carol"]; got != "Editor" {
 		t.Fatalf("carol = %q, want Editor", got)
 	}
-	f.h.SetDirectory(func(context.Context) ([]policy.Expiring, *policy.UserAttributesDocument, error) {
+	f.h.SetDirectory(dirStateOf(func(context.Context) ([]policy.Expiring, *policy.UserAttributesDocument, error) {
 		return nil, nil, errors.New("directory publish failed")
-	}, nil)
+	}), nil)
 	res, err := f.h.SaveSettings(headerID, SettingsUpdate{Person: map[string]PersonChange{
 		"role": {Default: raw("Viewer"), Rows: rows("{{ADMIN_GROUP}}", "Admin")},
 	}}, directory.Human("admin"))

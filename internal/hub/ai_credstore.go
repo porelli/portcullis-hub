@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"filippo.io/age"
 
@@ -92,9 +93,34 @@ func credIndex(f *aigate.CredFile, instance, companion, user string) int {
 	})
 }
 
-// encrypt encrypts plaintext to the gate and zeroes it (always).
+// maxCredentialBytes bounds a credential or caller secret.
+const maxCredentialBytes = 64 << 10
+
+// errBadSecretValue: a value the gate would refuse once decrypted (it
+// refuses the whole file then). Never quotes the value.
+var errBadSecretValue = errors.New("AI credential refused: empty, over 64 KiB, not UTF-8 or with control characters")
+
+// checkCredentialValue: 1 byte – 64 KiB of UTF-8 without control characters
+// (r < 0x20 or 0x7f), what the gate accepts as a header value source.
+func checkCredentialValue(b []byte) error {
+	if len(b) == 0 || len(b) > maxCredentialBytes || !utf8.Valid(b) {
+		return errBadSecretValue
+	}
+	for _, c := range b {
+		if c < 0x20 || c == 0x7f {
+			return errBadSecretValue
+		}
+	}
+	return nil
+}
+
+// encrypt encrypts plaintext to the gate and zeroes it (always); a value
+// the gate would refuse is refused here.
 func (s *aiCredStore) encrypt(plaintext []byte) (string, error) {
 	defer clear(plaintext)
+	if err := checkCredentialValue(plaintext); err != nil {
+		return "", err
+	}
 	r, err := s.recipient()
 	if err != nil {
 		return "", err

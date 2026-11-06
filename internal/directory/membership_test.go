@@ -377,3 +377,32 @@ func TestMembershipEmailsAndPending(t *testing.T) {
 		t.Errorf("a past expiry is Expired, never Pending: %+v %+v", m.Pending, m.Expired)
 	}
 }
+
+// Fix round 1 (T11, item 4): Publish carries the Membership of its own
+// read, equal to what Membership reads.
+func TestPublishCarriesMembership(t *testing.T) {
+	e := newEnv(t)
+	store := &directory.Store{Path: filepath.Join(t.TempDir(), "directory.yaml")}
+	e.svc.Store = store
+	e.ll.AddUser("Bob", "bob@example.org", "Bob", "")
+	e.ll.AddGroup("users_app", "alice", "Bob", "portcullis-hub")
+	cfg, _ := store.Load()
+	now := time.Now().UTC().Truncate(time.Second)
+	cfg.Groups["users_app"] = &directory.GroupConfig{Expiry: map[string]time.Time{"bob": now.Add(time.Hour)}}
+	if err := store.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	pub, err := e.svc.Publish(ctx, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := e.svc.Membership(ctx, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, _ := json.Marshal(pub.Membership)
+	b, _ := json.Marshal(m)
+	if pub.Membership == nil || string(a) != string(b) {
+		t.Errorf("Publish membership = %s, want %s", a, b)
+	}
+}

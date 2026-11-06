@@ -284,3 +284,26 @@ func TestAt(t *testing.T) {
 		t.Errorf("At = %v", got)
 	}
 }
+
+// Fix round 1, item 5: the write path encodes, decodes strictly and only
+// then writes: a nil list (encoded null, which Validate alone passes) is
+// never written.
+func TestWriteRefusesNilSlice(t *testing.T) {
+	dir := t.TempDir()
+	f, _ := DecodeFile(vector(t, "mcp-gate.json"))
+	f.AllowedOrigins = nil
+	if err := f.Validate(); err != nil {
+		t.Fatalf("Validate alone already refuses it (%v): the test needs another case", err)
+	}
+	if err := WriteFile(filepath.Join(dir, GateFileName), f); err == nil {
+		t.Error("a file with a null list written")
+	}
+	cf, _ := DecodeCredFile(vector(t, "mcp-credentials.json"))
+	cf.CallerSecrets = nil
+	if err := WriteCredFile(filepath.Join(dir, CredsFileName), cf); err == nil {
+		t.Error("a credentials file with a null list written")
+	}
+	if ents, _ := os.ReadDir(dir); len(ents) != 0 {
+		t.Errorf("files written: %v", ents)
+	}
+}

@@ -557,6 +557,9 @@ type Published struct {
 	// Users: every LLDAP user except the service account (lowercase), with
 	// their values of the shared fields only (users without any omitted).
 	Users map[string]map[string][]string
+	// Membership is the same read as Membership (plan 4 T11: the Hub's
+	// gate file uses it, so it never disagrees with the policy file).
+	Membership *Membership
 }
 
 // SharedFields returns the fields shared with apps, sorted by name.
@@ -594,7 +597,8 @@ func (s *Service) Publish(ctx context.Context, now time.Time) (*Published, error
 	if err != nil {
 		return nil, err
 	}
-	out := &Published{Expiring: s.publishedExpiring(cfg, sn, now), Fields: sharedFields(cfg), Users: map[string]map[string][]string{}}
+	out := &Published{Expiring: s.publishedExpiring(cfg, sn, now), Fields: sharedFields(cfg), Users: map[string]map[string][]string{},
+		Membership: s.membershipOf(cfg, sn, now)}
 	svc := strings.ToLower(s.serviceUser())
 	for id, u := range sn.users {
 		if id == svc {

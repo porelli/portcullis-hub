@@ -97,9 +97,9 @@ func TestFreshAuthRefusalsCountTowardLimit(t *testing.T) {
 func TestRunDirectorySyncEnsuresFreshAuthClient(t *testing.T) {
 	f := newFixture(t)
 	var syncs, ensures atomic.Int32
-	f.h.SetDirectory(func(context.Context) ([]policy.Expiring, *policy.UserAttributesDocument, error) {
+	f.h.SetDirectory(dirStateOf(func(context.Context) ([]policy.Expiring, *policy.UserAttributesDocument, error) {
 		return nil, nil, nil
-	}, func(context.Context) error { syncs.Add(1); return nil })
+	}), func(context.Context) error { syncs.Add(1); return nil })
 	f.h.SetFreshAuthClient(func(context.Context) error { ensures.Add(1); return errors.New("keycloak down") })
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -129,9 +129,9 @@ func TestFreshAuthRefusedUntilClientInPlace(t *testing.T) {
 	var ensureErr atomic.Value
 	ensureErr.Store(errBox{&keycloak.ConflictError{ClientID: freshauth.ClientID}})
 	var ensures atomic.Int32
-	f.h.SetDirectory(func(context.Context) ([]policy.Expiring, *policy.UserAttributesDocument, error) {
+	f.h.SetDirectory(dirStateOf(func(context.Context) ([]policy.Expiring, *policy.UserAttributesDocument, error) {
 		return nil, nil, nil
-	}, nil)
+	}), nil)
 	f.h.SetFreshAuthClient(func(context.Context) error { ensures.Add(1); return ensureErr.Load().(errBox).err })
 	check := func(label string, wantOK bool) {
 		t.Helper()

@@ -27,9 +27,9 @@ import (
 // delegate-set value Admin for alice.
 func sharedRoleField(f *fixture) {
 	attrs := policy.BuildUserAttributes([]policy.AttrField{{Name: "grafana_role"}}, map[string]map[string][]string{"alice": {"grafana_role": {"Admin"}}}, nil)
-	f.h.SetDirectory(func(context.Context) ([]policy.Expiring, *policy.UserAttributesDocument, error) {
+	f.h.SetDirectory(dirStateOf(func(context.Context) ([]policy.Expiring, *policy.UserAttributesDocument, error) {
 		return nil, &attrs, nil
-	}, nil)
+	}), nil)
 }
 
 // H7: a freshly enabled instance whose first header delivery has not run
@@ -78,9 +78,9 @@ func TestFieldHeaderSuppressedWhenHostsUnknown(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The directory state down (the kept file's fields and users).
-	f.h.SetDirectory(func(context.Context) ([]policy.Expiring, *policy.UserAttributesDocument, error) {
+	f.h.SetDirectory(dirStateOf(func(context.Context) ([]policy.Expiring, *policy.UserAttributesDocument, error) {
 		return nil, nil, errors.New("directory publish failed")
-	}, nil)
+	}), nil)
 	f.h.writePolicyLogged()
 	doc, _ := readAttrs(t, f)
 	if _, ok := doc.Fields["grafana_role"]; ok {
