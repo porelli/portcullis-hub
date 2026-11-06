@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -109,29 +110,41 @@ func (h *Hub) gatePresent() bool {
 // days, idle ≤ max, limits positive (fanout ≤ 4), origins
 // https://<host>[:port]); no actor 401. Audited settings.ai with the
 // changed keys ("key: before -> after", refusals "refused"), after mu;
-// nothing changed = no entry.
+// nothing changed = no entry. A saved change runs the AI client pass at
+// once (ai_clients.go: clients, scopes, health), then the gate file; a
+// master switch change also re-renders and restarts every enabled
+// instance with a switched-on companion (its owed app_oauth on_change
+// runs at that start).
 func (h *Hub) SaveAISettings(u AISettingsUpdate, actor directory.Actor) error {
-	changes, err := h.saveAISettings(u, actor)
+	changes, restart, err := h.saveAISettings(u, actor)
 	if err != nil || len(changes) > 0 {
 		h.auditAI(actor, "settings.ai", "ai", strings.Join(changes, ", "), err)
 	}
 	if err == nil && len(changes) > 0 {
+		// Keycloak follows now (a failure is logged and retried by the
+		// directory sync loop: an unhealthy client is never listed).
+		ctx, cancel := context.WithTimeout(context.Background(), attrSyncTimeout)
+		if _, cerr := h.syncAIClients(ctx); cerr != nil {
+			h.TriggerDirectorySync()
+		}
+		cancel()
 		// The gate file follows at once (contract §15.4); its failure is
 		// logged and retried by the directory sync loop.
 		h.writePolicyLogged()
+		h.restartForMaster(restart)
 	}
 	return err
 }
 
-func (h *Hub) saveAISettings(u AISettingsUpdate, actor directory.Actor) ([]string, error) {
+func (h *Hub) saveAISettings(u AISettingsUpdate, actor directory.Actor) ([]string, []string, error) {
 	if err := checkAIActor(actor); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var origins []string
 	if u.AllowedOrigins != nil {
 		var err error
 		if origins, err = normalizeOrigins(*u.AllowedOrigins); err != nil {
-			return nil, statusErr(http.StatusBadRequest, "allowed_origins: %v", err)
+			return nil, nil, statusErr(http.StatusBadRequest, "allowed_origins: %v", err)
 		}
 	}
 	h.mu.Lock()
@@ -161,21 +174,32 @@ func (h *Hub) saveAISettings(u AISettingsUpdate, actor directory.Actor) ([]strin
 		next.AllowedOrigins = origins
 	}
 	if err := next.CheckDays(); err != nil {
-		return nil, statusErr(http.StatusBadRequest, "%v", err)
+		return nil, nil, statusErr(http.StatusBadRequest, "%v", err)
 	}
 	if err := next.Limits.CheckLimits(); err != nil {
-		return nil, statusErr(http.StatusBadRequest, "%v", err)
+		return nil, nil, statusErr(http.StatusBadRequest, "%v", err)
 	}
 	changes := aiSettingChanges(before, next)
 	if len(changes) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	h.st.AI = next
+	// The master switch's app side is owed in the same commit (12b).
+	var restart []string
+	var prevAI map[string]state.AIInstance
+	toggled := before.Enabled != next.Enabled
+	if toggled {
+		restart, prevAI = h.masterToggleLocked(next.Enabled)
+	}
 	if err := h.saveStateLocked(); err != nil {
 		h.st.AI = before
-		return nil, err
+		if toggled {
+			h.st.AIInstances = prevAI
+			h.aiMasterGen++
+		}
+		return nil, nil, err
 	}
-	return changes, nil
+	return changes, restart, nil
 }
 
 // checkAIActor: a signed-in, well-attributed actor (401 / 403).

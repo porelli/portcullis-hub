@@ -276,12 +276,17 @@ func (h *Hub) runAttrSync(ctx context.Context, kick <-chan struct{}) {
 				lastFreshErr = ""
 			}
 		}
+		// The AI clients (contract §8), like the fresh-auth client: while
+		// the master switch is on each offered one is re-asserted, its
+		// health recorded and the gate file rewritten when it changed
+		// (errors logged once per distinct text inside).
+		_, cerr := h.aiClientPass(sctx)
 		aerr := h.SyncClientAccess(sctx)
 		cancel()
 		if aerr != nil && ctx.Err() == nil {
 			log.Printf("keycloak: access role sync incomplete (retrying in %s): %v", directorySyncRetry, aerr)
 		}
-		if (err != nil || aerr != nil || ferr != nil) && ctx.Err() == nil {
+		if (err != nil || aerr != nil || ferr != nil || cerr != nil) && ctx.Err() == nil {
 			retry = time.After(directorySyncRetry)
 		}
 	}

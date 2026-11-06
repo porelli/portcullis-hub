@@ -466,6 +466,16 @@ type Hub struct {
 	// UpdateInstanceAI is applying (startUp leaves the owed hooks to it).
 	aiReapply  map[string]map[string]bool
 	aiApplying sync.Map
+	// Keycloak AI clients (ai_clients.go): aiKCMu serialises every pass
+	// over the AI clients and mcp:* scopes (the sync loop, a Settings → AI
+	// save, applyAIScopes), each reading state after taking it — a leaf
+	// lock, only mu (read) inside; aiMasterGen counts master switch
+	// changes (under mu: UpdateInstanceAI's commit refuses a plan made
+	// before one); aiClientErrs the last logged error per client (under
+	// aiKCMu: logged once per distinct text).
+	aiKCMu       sync.Mutex
+	aiMasterGen  uint64
+	aiClientErrs map[string]string
 	// testHookAIBeforeSave, if set, runs in UpdateInstanceAI right before
 	// its state commit (tests: a racing policy save).
 	testHookAIBeforeSave func()

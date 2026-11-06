@@ -605,7 +605,9 @@ func (h *Hub) refreshInstanceEnvLocked(t *templates.Template, m *directory.Membe
 // aiEnvLocked are the AI variables of an ai.mcp template's instance
 // (contract §3.1, G42): PORTCULLIS_AI_ENABLED true while one of its
 // companions is switched on (one owing a revoke_all counts as off),
-// PORTCULLIS_AI_READONLY_<C> true unless C is on in read_write, and
+// PORTCULLIS_AI_READONLY_<C> true unless C is on in read_write — all off
+// while the master switch is off or the effective policy is at LoA 3
+// (aiOnLocked) —, and
 // core's PORTCULLIS_MCP_GATE_IP (gateIPLocked). nil for every other
 // template. Caller holds mu.
 func (h *Hub) aiEnvLocked(t *templates.Template) map[string]string {
@@ -614,10 +616,13 @@ func (h *Hub) aiEnvLocked(t *templates.Template) map[string]string {
 	}
 	sw := h.st.AIInstances[t.ID].Companions
 	out := map[string]string{templates.VarAIEnabled: "false"}
+	// Master switch off or LoA 3: off in the app too (12b), whatever the
+	// companions' switches say.
+	on := h.aiOnLocked(t)
 	for _, c := range t.Manifest.AI.MCP {
 		s := sw[c.Name]
 		ro := "true"
-		if s.Enabled && !s.RevokePending {
+		if on && s.Enabled && !s.RevokePending {
 			out[templates.VarAIEnabled] = "true"
 			if s.Mode == templates.AIReadWrite {
 				ro = "false"

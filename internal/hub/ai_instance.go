@@ -41,12 +41,14 @@ import (
 // mutex; Task 13's mint and revoke take only it). Never Hub.mu across a
 // Keycloak, docker, hook or gate call.
 
-// AIKeycloak is the Keycloak side of the mcp:* scopes
-// (keycloak.Client). Task 12b extends it with the AI clients.
+// AIKeycloak is the Keycloak side of the mcp:* scopes and the Hub's AI
+// clients (keycloak.Client; ai_clients.go).
 type AIKeycloak interface {
 	EnsureMCPScope(ctx context.Context, s keycloak.MCPScope) error
 	DeleteMCPScope(ctx context.Context, name string) error
 	SetOptionalScopes(ctx context.Context, clientID string, scopes []string) error
+	EnsureAIClient(ctx context.Context, s keycloak.AIClientSpec) error
+	DeleteAIClient(ctx context.Context, clientID, owner string) error
 }
 
 // SetAIKeycloak wires the scope calls (nil: a switch that changes a scope
@@ -274,6 +276,7 @@ func (h *Hub) updateInstanceAI(ctx context.Context, id string, u InstanceAIUpdat
 	// The plan and the refusals, under the read lock.
 	h.mu.RLock()
 	changes, err = h.planAILocked(t, u, retry, offDetail)
+	masterGen := h.aiMasterGen
 	h.mu.RUnlock()
 	if err != nil {
 		changes = nil
@@ -365,6 +368,12 @@ func (h *Hub) updateInstanceAI(ctx context.Context, id string, u InstanceAIUpdat
 		h.testHookAIBeforeSave()
 	}
 	h.mu.Lock()
+	if h.aiMasterGen != masterGen {
+		// The master switch changed since the plan: its commit set owed
+		// hooks this plan doesn't know about (12b).
+		h.mu.Unlock()
+		return nil, statusErr(http.StatusConflict, "AI support was switched on or off meanwhile: try again")
+	}
 	if lt := h.findLocked(id); lt != nil && slices.ContainsFunc(changes, func(ch aiChange) bool { return ch.after.Enabled }) {
 		var refuse error
 		if !h.st.AI.Enabled {
@@ -757,6 +766,10 @@ func (h *Hub) applyAIScopesFor(ctx context.Context, changes []aiChange, force bo
 	if kc == nil {
 		return errors.New("Keycloak: the AI scope calls are not configured")
 	}
+	// One pass at a time over the clients and scopes (ai_clients.go),
+	// each reading state after taking the lock.
+	h.aiKCMu.Lock()
+	defer h.aiKCMu.Unlock()
 	h.mu.RLock()
 	ensure := h.companionScopesLocked()
 	for k, v := range h.fixedScopesLocked() {
@@ -1054,7 +1067,18 @@ func (h *Hub) onChange(ctx context.Context, t *templates.Template, c *templates.
 	if t.Manifest.AI.OnChange == "" {
 		return nil
 	}
-	stdin, _ := json.Marshal(aiOnChangeIn{Action: "on_change", Enabled: s.Enabled, Mode: s.Mode, Companion: c.Name})
+	// What the app is told is what it may do now: switched on (and not
+	// owing a revoke_all) in the current state, with the master switch on
+	// and the policy below LoA 3 (12b); the per-companion state is kept.
+	h.mu.RLock()
+	live := h.st.AIInstances[t.ID].Companions[c.Name]
+	lt := h.findLocked(t.ID)
+	if lt == nil {
+		lt = t
+	}
+	enabled := s.Enabled && live.Enabled && !live.RevokePending && h.aiOnLocked(lt)
+	h.mu.RUnlock()
+	stdin, _ := json.Marshal(aiOnChangeIn{Action: "on_change", Enabled: enabled, Mode: s.Mode, Companion: c.Name})
 	out, u := h.runAIHook(ctx, t, t.Manifest.AI.OnChange, stdin)
 	clear(out)
 	if !u.OK {

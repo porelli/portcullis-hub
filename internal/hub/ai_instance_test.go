@@ -45,6 +45,9 @@ type fakeAIKC struct {
 	// failEnsure: scope name → the error EnsureMCPScope answers.
 	failEnsure map[string]error
 	deleted    []string
+	// 12b: the AI clients EnsureAIClient made, failClient per client id.
+	clients    map[string]keycloak.AIClientSpec
+	failClient map[string]error
 }
 
 func newFakeAIKC() *fakeAIKC {
