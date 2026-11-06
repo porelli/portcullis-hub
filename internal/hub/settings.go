@@ -1490,27 +1490,34 @@ func (h *Hub) Env(id string) (map[string]string, []string, error) {
 // when it was changed — options are set under Settings, which writes
 // them.
 func (h *Hub) SaveEnv(id string, vars map[string]string) error {
+	_, err := h.SaveEnvChanged(id, vars)
+	return err
+}
+
+// SaveEnvChanged is SaveEnv, also returning the names of the variables it
+// wrote (sorted; never their values): the API's audit detail.
+func (h *Hub) SaveEnvChanged(id string, vars map[string]string) ([]string, error) {
 	t := h.Template(id)
 	if t == nil {
-		return ErrNotFound
+		return nil, ErrNotFound
 	}
 	owners := optionEnvOwners(t)
 	masked, err := h.secretMask(t)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	// The read-modify-write under mu, as every other .env writer's.
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if err := h.pendingLocked(id); err != nil {
-		return err
+		return nil, err
 	}
 	cur := readEnvFile(h.envPath(id))
 	write := map[string]string{}
 	for _, k := range slices.Sorted(maps.Keys(vars)) {
 		v := vars[k]
 		if !templates.EnvKeyRe.MatchString(k) || templates.HasControlChars(v) {
-			return statusErr(400, "invalid variable %q (keys: [A-Za-z_][A-Za-z0-9_]*, values: no newlines)", k)
+			return nil, statusErr(400, "invalid variable %q (keys: [A-Za-z_][A-Za-z0-9_]*, values: no newlines)", k)
 		}
 		if v == cur[k] || (v == settings.SecretShown && masked(k, cur[k])) {
 			continue // posted back unchanged (a masked value as Env showed it)
@@ -1523,14 +1530,14 @@ func (h *Hub) SaveEnv(id string, vars map[string]string) error {
 		}
 		// Routing, hostnames and names come from the Hub, never the env.
 		if hubSet {
-			return statusErr(400, "%s is set by the Hub", k)
+			return nil, statusErr(400, "%s is set by the Hub", k)
 		}
-		return statusErr(400, "%s belongs to the setting %s: set it under Settings", k, o)
+		return nil, statusErr(400, "%s belongs to the setting %s: set it under Settings", k, o)
 	}
 	if err := setEnvVars(h.envPath(id), write, false); err != nil {
-		return statusErr(500, "failed to write env: %v", err)
+		return nil, statusErr(500, "failed to write env: %v", err)
 	}
-	return nil
+	return slices.Sorted(maps.Keys(write)), nil
 }
 
 // seedPlaceholders are the group_values placeholders in the order their

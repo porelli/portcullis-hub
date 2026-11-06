@@ -77,21 +77,31 @@ func (h *Hub) auditOp(actor directory.Actor, action, target, detail string, err 
 	}
 	e := directory.AuditEntry{Actor: actor.User, Via: actor.Via, Client: actor.Client, Action: action, Target: target, Detail: detail, Result: "ok"}
 	if err != nil {
-		msg := err.Error()
-		// An instance's errors are redacted like its op records (stored
-		// secret settings, secret-looking env values).
-		if inst, _, _ := strings.Cut(target, "/"); templates.ValidID(inst) {
-			msg = h.secretRedactor(inst, secretsOf(err))(msg)
-		}
-		e.Result, e.Error = "error", msg
+		inst, _, _ := strings.Cut(target, "/")
+		e.Result, e.Error = "error", h.RedactErr(inst, err)
 		var se *StatusError
-		if errors.As(err, &se) && se.Status < 500 {
+		var busy ErrBusy
+		if (errors.As(err, &se) && se.Status < 500) || errors.As(err, &busy) {
 			e.Result = "refused"
 		}
 	}
 	if aerr := a.Append(e); aerr != nil {
 		log.Printf("audit: %v", aerr)
 	}
+}
+
+// RedactErr is err's text as an audit entry may hold it: for an instance
+// id, redacted like its op records (stored secret settings,
+// secret-looking env values, credential hashes); else unchanged.
+func (h *Hub) RedactErr(instance string, err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := err.Error()
+	if templates.ValidID(instance) {
+		msg = h.secretRedactor(instance, secretsOf(err))(msg)
+	}
+	return msg
 }
 
 // NormalizeHost lowercases a hostname and drops surrounding space and one

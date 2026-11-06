@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -143,15 +144,7 @@ func writeJSON(w http.ResponseWriter, v interface{}) {
 // A failed lifecycle operation (*hub.OpError) is answered as JSON
 // {error, op, output, hint, rolled_back}: compose's output is the cause.
 func writeErr(w http.ResponseWriter, err error, def int) {
-	code := def
-	var se *hub.StatusError
-	var busy hub.ErrBusy
-	switch {
-	case errors.As(err, &se):
-		code = se.Status
-	case errors.As(err, &busy):
-		code = http.StatusConflict
-	}
+	code := errStatus(err, def)
 	var oe *hub.OpError
 	if errors.As(err, &oe) {
 		w.Header().Set("Content-Type", "application/json")
@@ -170,6 +163,20 @@ func writeErr(w http.ResponseWriter, err error, def int) {
 	// (finishOp); anything else is clipped here for display (nothing in it
 	// is redacted, so clipping can't let a redaction slip).
 	http.Error(w, clipMessage(err.Error(), 2000), code)
+}
+
+// errStatus is the HTTP status writeErr answers for err: a StatusError's,
+// 409 for ErrBusy, else def.
+func errStatus(err error, def int) int {
+	var se *hub.StatusError
+	var busy hub.ErrBusy
+	switch {
+	case errors.As(err, &se):
+		return se.Status
+	case errors.As(err, &busy):
+		return http.StatusConflict
+	}
+	return def
 }
 
 // clipMessage shortens s to at most n bytes on a rune boundary.
@@ -326,6 +333,11 @@ func (s *Server) handleEnable(w http.ResponseWriter, r *http.Request) {
 	// Missing users_<id> / admin_<id> groups are created first, as the
 	// signed-in admin (audited in Users & Groups).
 	res, err := s.Hub.EnableAs(req.ID, requestActor(r))
+	detail := ""
+	if res != nil && len(res.GroupsCreated) > 0 {
+		detail = "groups_created=" + strings.Join(res.GroupsCreated, ",")
+	}
+	s.auditOp(r, req.ID, directory.AuditEntry{Action: "instance.enable", Target: req.ID, Detail: detail}, err, http.StatusBadRequest)
 	if err != nil {
 		writeErr(w, err, http.StatusBadRequest)
 		return
@@ -347,7 +359,9 @@ func (s *Server) handleDisable(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid id", http.StatusBadRequest)
 		return
 	}
-	if err := s.Hub.Disable(req.ID); err != nil {
+	err := s.Hub.Disable(req.ID)
+	s.auditOp(r, req.ID, directory.AuditEntry{Action: "instance.disable", Target: req.ID}, err, http.StatusBadRequest)
+	if err != nil {
 		writeErr(w, err, http.StatusBadRequest)
 		return
 	}
@@ -362,7 +376,9 @@ func (s *Server) handleTemplateRestart(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.Hub.RestartApp(id); err != nil {
+	err := s.Hub.RestartApp(id)
+	s.auditOp(r, id, directory.AuditEntry{Action: "instance.restart", Target: id}, err, http.StatusInternalServerError)
+	if err != nil {
 		writeErr(w, err, http.StatusInternalServerError)
 		return
 	}
@@ -420,7 +436,11 @@ func (s *Server) handleDriftResolve(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if err := s.Hub.ResolveDrift(req.ID, req.Action); err != nil {
+	err := s.Hub.ResolveDrift(req.ID, req.Action)
+	if templates.ValidID(req.ID) {
+		s.auditOp(r, req.ID, directory.AuditEntry{Action: "drift.resolve", Target: req.ID, Detail: clipMessage(req.Action, 64)}, err, http.StatusInternalServerError)
+	}
+	if err != nil {
 		writeErr(w, err, http.StatusInternalServerError)
 		return
 	}
@@ -448,7 +468,9 @@ func (s *Server) handleAddSource(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "name and url required", http.StatusBadRequest)
 		return
 	}
-	if err := s.Hub.AddSource(req.Name, req.URL); err != nil {
+	err := s.Hub.AddSource(req.Name, req.URL)
+	s.auditOp(r, "", directory.AuditEntry{Action: "source.add", Target: clipMessage(req.Name, 64), Detail: sourceURLDetail(req.URL)}, err, http.StatusBadRequest)
+	if err != nil {
 		writeErr(w, err, http.StatusBadRequest)
 		return
 	}
@@ -465,7 +487,9 @@ func (s *Server) handleRemoveSource(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if err := s.Hub.RemoveSource(req.Name); err != nil {
+	err := s.Hub.RemoveSource(req.Name)
+	s.auditOp(r, "", directory.AuditEntry{Action: "source.remove", Target: clipMessage(req.Name, 64)}, err, http.StatusBadRequest)
+	if err != nil {
 		writeErr(w, err, http.StatusBadRequest)
 		return
 	}
@@ -482,7 +506,9 @@ func (s *Server) handleSyncSources(w http.ResponseWriter, r *http.Request) {
 	if !methodIs(w, r, http.MethodPost) {
 		return
 	}
-	if err := s.Hub.SyncSources(); err != nil {
+	err := s.Hub.SyncSources()
+	s.auditOp(r, "", directory.AuditEntry{Action: "source.sync", Target: "sources"}, err, http.StatusInternalServerError)
+	if err != nil {
 		writeErr(w, err, http.StatusInternalServerError)
 		return
 	}
@@ -508,8 +534,32 @@ func (s *Server) auditSignIn(r *http.Request, id, before, want string, err error
 }
 
 // auditAs appends e to the Hub's audit log, attributed to a (Actor, Via,
-// Client), with Result from err ("refused" for a 4xx StatusError).
+// Client), with Result from err ("refused" for a 4xx StatusError or
+// ErrBusy).
 func (s *Server) auditAs(a directory.Actor, e directory.AuditEntry, err error) {
+	msg := ""
+	if err != nil {
+		msg = err.Error()
+	}
+	s.appendAudit(a, e, errStatus(err, http.StatusInternalServerError), err, msg)
+}
+
+// auditOp audits a mutation a handler answered (ruling G57, contract
+// §9.5): attributed to requestActor(r) — the MCP identity's via / client
+// when r carries one —, Result from the status the answer stands for
+// (def for a plain error: 4xx refused, 5xx error), the error redacted like
+// instance's op records (Hub.RedactErr; "" = not an instance) and clipped.
+// Handlers call it after the Hub call returned: never under Hub.mu.
+// Details never hold a secret: callers pass names, never values.
+func (s *Server) auditOp(r *http.Request, instance string, e directory.AuditEntry, err error, def int) {
+	msg := ""
+	if err != nil {
+		msg = clipMessage(s.Hub.RedactErr(instance, err), 600)
+	}
+	s.appendAudit(requestActor(r), e, errStatus(err, def), err, msg)
+}
+
+func (s *Server) appendAudit(a directory.Actor, e directory.AuditEntry, status int, err error, msg string) {
 	e.Actor, e.Via, e.Client = a.User, a.Via, a.Client
 	l := s.Audit
 	if l == nil && s.Directory != nil {
@@ -520,9 +570,8 @@ func (s *Server) auditAs(a directory.Actor, e directory.AuditEntry, err error) {
 	}
 	e.Result = "ok"
 	if err != nil {
-		e.Result, e.Error = "error", err.Error()
-		var se *hub.StatusError
-		if errors.As(err, &se) && se.Status < 500 {
+		e.Result, e.Error = "error", msg
+		if status < 500 {
 			e.Result = "refused"
 		}
 	}
@@ -554,7 +603,16 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "expected {default_auth_policy: {factors, op}}", http.StatusBadRequest)
 			return
 		}
+		before := s.Hub.DefaultPolicy()
 		changed, err := s.Hub.SetDefaultPolicy(*req.DefaultAuthPolicy)
+		after := *req.DefaultAuthPolicy
+		if err == nil {
+			after = policy.Normalize(after)
+		}
+		if changed || err != nil {
+			s.auditOp(r, "", directory.AuditEntry{Action: "settings.default_policy", Target: "default",
+				Detail: policyDetail(before) + " -> " + policyDetail(after)}, err, http.StatusInternalServerError)
+		}
 		if err != nil {
 			writeErr(w, err, http.StatusInternalServerError)
 			return
@@ -624,6 +682,8 @@ func (s *Server) handleTemplateExec(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res, err := s.Hub.Exec(r.Context(), id, req.Service, req.Command)
+	// The service only: the command and its output may hold anything.
+	s.auditOp(r, id, directory.AuditEntry{Action: "instance.exec", Target: id, Detail: clipMessage(req.Service, 64)}, err, http.StatusBadGateway)
 	if err != nil {
 		writeErr(w, err, http.StatusBadGateway)
 		return
@@ -698,7 +758,12 @@ func (s *Server) handleTemplateEnv(w http.ResponseWriter, r *http.Request) {
 		if !decodeJSON(w, r, &req) {
 			return
 		}
-		if err := s.Hub.SaveEnv(id, req); err != nil {
+		keys, err := s.Hub.SaveEnvChanged(id, req)
+		if !errors.Is(err, hub.ErrNotFound) {
+			// Variable names only, never values.
+			s.auditOp(r, id, directory.AuditEntry{Action: "app.env", Target: id, Detail: clipMessage(strings.Join(keys, ","), 600)}, err, http.StatusInternalServerError)
+		}
+		if err != nil {
 			writeErr(w, err, http.StatusInternalServerError)
 			return
 		}
@@ -706,4 +771,27 @@ func (s *Server) handleTemplateEnv(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "GET or PUT only", http.StatusMethodNotAllowed)
 	}
+}
+
+// sourceURLDetail is a source URL as an audit detail: an http(s) / ssh
+// URL without its user info (it may hold a token); the scp-like
+// user@host:path form as given (its user is the ssh login, no secret).
+func sourceURLDetail(raw string) string {
+	if u, err := url.Parse(raw); err == nil && u.Scheme != "" {
+		u.User = nil
+		return clipMessage(u.String(), 300)
+	}
+	if strings.Contains(raw, "://") {
+		return "(unparsable URL)"
+	}
+	return clipMessage(raw, 300)
+}
+
+// policyDetail is an auth policy as an audit detail ("f1,f2 (op)").
+func policyDetail(p policy.AuthPolicy) string {
+	d := strings.Join(p.Factors, ",")
+	if p.Op != "" {
+		d += " (" + p.Op + ")"
+	}
+	return clipMessage(d, 200)
 }
