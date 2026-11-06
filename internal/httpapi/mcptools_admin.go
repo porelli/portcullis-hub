@@ -677,13 +677,28 @@ func perCall(t Tool, classFor func(json.RawMessage) ToolClass, typed func(json.R
 	return t
 }
 
+// inertSettingTypes are the option types save_settings may change as W
+// (fix round 1, security review: an allowlist, failing closed by type):
+// scalars that grant nobody anything and mount nothing.
+// Every other type — user, users, group, groups, path, secret,
+// person_secret, person_id, list, table, a type added later — is D.
+var inertSettingTypes = map[string]bool{
+	templates.TypeString: true, templates.TypeInt: true, templates.TypeSize: true, templates.TypeDuration: true,
+	templates.TypeBool: true, templates.TypeEnum: true, templates.TypeMultiEnum: true,
+}
+
+// inertOption: o exists, isn't privileged and has an inert type.
+func inertOption(o *templates.Option) bool {
+	return o != nil && !o.Privileged && inertSettingTypes[o.Type]
+}
+
 // settingsClass is save_settings' class (security review of T17a, fix
-// round 1): D when the call sets ports (host ports published, <KEY>_BIND
-// changed), per-person rows / a default or group records of a privileged
-// option (who gets elevated values; this covers raising its default), a
-// group, groups or path value (who has access, what the app mounts), or
-// names an option the template doesn't declare; D when the arguments or
-// the template can't be read (fail closed); else W.
+// round 1): W only when every values / person / groups key is a
+// non-privileged option of the template whose type is in
+// inertSettingTypes, and the call sets no ports (host ports published,
+// <KEY>_BIND changed) and no value_group_ids; anything else — a
+// privileged option (raising its default included), another type, an
+// unknown key, arguments or a template that can't be read — D.
 func (s *Server) settingsClass(args json.RawMessage) ToolClass {
 	a, err := decode[saveSettingsArgs](args)
 	if err != nil {
@@ -704,16 +719,11 @@ func (s *Server) settingsClass(args json.RawMessage) ToolClass {
 	for i := range all {
 		opts[all[i].Key] = &all[i]
 	}
-	for _, keys := range []iterKeys{maps.Keys(a.Person), maps.Keys(a.Groups)} {
+	for _, keys := range []iterKeys{maps.Keys(a.Person), maps.Keys(a.Groups), maps.Keys(a.Values)} {
 		for k := range keys {
-			if o := opts[k]; o == nil || o.Privileged {
+			if !inertOption(opts[k]) {
 				return ClassDestructive
 			}
-		}
-	}
-	for k := range a.Values {
-		if o := opts[k]; o == nil || o.Privileged || o.Type == templates.TypeGroup || o.Type == templates.TypeGroups || o.Type == templates.TypePath {
-			return ClassDestructive
 		}
 	}
 	return ClassWrite

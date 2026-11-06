@@ -17,6 +17,7 @@ import (
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/hub"
+	"github.com/portcullis/hub/internal/templates"
 )
 
 // Plan 4 Task 17a: the admin tools of the Portcullis MCP — overview,
@@ -48,6 +49,23 @@ const notesCompose = "services:\n  web:\n    image: notes\n    labels:\n" +
 	"      traefik.http.routers.notes.rule: Host(`${PORTCULLIS_HOST_NOTES:-notes.portcullis.local}`)\n" +
 	"      traefik.http.services.notes.loadbalancer.server.port: \"80\"\n"
 
+// teamManifest: users and list options (save_settings' allowlist rows).
+const teamManifest = `name: Team
+category: tools
+ai: {unsupported: "test fixture"}
+auth:
+  method: forward-auth
+  group_access: true
+  access_group: users_teamapp
+settings:
+  options:
+    - {key: owners, label: Owners, type: users, applies: restart, delivery: [{env: TEAM_OWNERS}]}
+    - {key: title, label: Title, type: string, applies: restart, delivery: [{env: TEAM_TITLE}]}
+`
+
+const teamCompose = "services:\n  web:\n    image: team\n    environment:\n      OWNERS: ${TEAM_OWNERS}\n      TITLE: ${TEAM_TITLE}\n    labels:\n" +
+	"      traefik.http.routers.teamapp.rule: Host(`${PORTCULLIS_HOST_TEAMAPP:-teamapp.portcullis.local}`)\n"
+
 // settingsFixture reads a template of the Hub's settings testdata.
 func settingsFixture(t *testing.T, id string) [2]string {
 	t.Helper()
@@ -78,6 +96,7 @@ func newToolEnv(t *testing.T, extra map[string][2]string, wrap func(hub.Engine) 
 		"nativeapp": settingsFixture(t, "nativeapp"),
 		"cloud":     {cloudManifest, cloudCompose},
 		"privapp":   settingsFixture(t, "privapp"),
+		"teamapp":   {teamManifest, teamCompose},
 	}
 	for k, v := range extra {
 		all[k] = v
@@ -461,7 +480,10 @@ func TestBusyIsToolError(t *testing.T) {
 // set_public_access are D (confirmation) only for the access-widening
 // arguments, W otherwise; their annotations say destructive.
 func TestToolClassPerCall(t *testing.T) {
-	e := newToolEnv(t, nil, nil)
+	// smbfixture (person_id, groups, path): its person_secret makes every
+	// result "hidden" here (no secrets volume), but the class is decided
+	// before Run.
+	e := newToolEnv(t, map[string][2]string{"smbfixture": settingsFixture(t, "smbfixture")}, nil)
 	for _, c := range []struct {
 		tool    string
 		args    map[string]any
@@ -495,6 +517,14 @@ func TestToolClassPerCall(t *testing.T) {
 		{"save_settings", map[string]any{"id": "privapp", "values": map[string]any{"motd": "hello"}, "plan_hash": "x"}, false},
 		{"save_settings", map[string]any{"id": "privapp", "person": map[string]any{"tier": map[string]any{"default": "pro"}}, "plan_hash": "x"}, false},
 		{"save_settings", map[string]any{"id": "nope", "values": map[string]any{"motd": "hello"}, "plan_hash": "x"}, true},
+		// The allowlist by type (security review): users, person_id,
+		// groups, an unknown key → D; an inert string → W.
+		{"save_settings", map[string]any{"id": "teamapp", "values": map[string]any{"owners": []string{"dana"}}, "plan_hash": "x"}, true},
+		{"save_settings", map[string]any{"id": "teamapp", "values": map[string]any{"title": "Ops"}, "plan_hash": "x"}, false},
+		{"save_settings", map[string]any{"id": "teamapp", "values": map[string]any{"nosuch": "x"}, "plan_hash": "x"}, true},
+		{"save_settings", map[string]any{"id": "smbfixture", "person": map[string]any{"uid": map[string]any{"default": 1, "rows": []any{}}}, "plan_hash": "x"}, true},
+		{"save_settings", map[string]any{"id": "smbfixture", "values": map[string]any{"share1_readers": []string{"helpers"}}, "plan_hash": "x"}, true},
+		{"save_settings", map[string]any{"id": "smbfixture", "values": map[string]any{"share1_name": "Docs"}, "plan_hash": "x"}, false},
 		// Fail closed: only gateway / off / a closed default are W.
 		{"set_sign_in_mode", map[string]any{"id": "nativeapp", "mode": "bogus"}, true},
 		{"set_public_access", map[string]any{"id": "cloud", "access": "default"}, true},
@@ -566,6 +596,23 @@ func TestToolClassPerCall(t *testing.T) {
 	}
 	if seen != 7 {
 		t.Errorf("listed %d of the D tools", seen)
+	}
+}
+
+// TestInertOptionAllowlist: save_settings is W only for the inert types;
+// every other built-in type, and a type this Hub doesn't know, is D.
+func TestInertOptionAllowlist(t *testing.T) {
+	inert := []string{"string", "int", "size", "duration", "bool", "enum", "multi_enum"}
+	for typ := range templates.BuiltinTypes {
+		if got := inertOption(&templates.Option{Key: "k", Type: typ}); got != slices.Contains(inert, typ) {
+			t.Errorf("type %s: inert %v", typ, got)
+		}
+	}
+	for _, o := range []*templates.Option{nil, {Key: "k", Type: "hologram"}, {Key: "k", Type: "string", Privileged: true},
+		{Key: "k", Type: "users"}, {Key: "k", Type: "person_id"}} {
+		if inertOption(o) {
+			t.Errorf("%+v counts as inert", o)
+		}
 	}
 }
 
