@@ -242,6 +242,11 @@ func TestChatRules(t *testing.T) {
 		{"provider var map key lowercase", chat, nil, []string{"OPENID_CLIENT_ID: ${PORTCULLIS_OIDC_CLIENT_ID:-chat}", "OPENID_CLIENT_ID: ${PORTCULLIS_OIDC_CLIENT_ID:-chat}\n      portcullis_ai_provider_x_key: sk-literal"}, "PORTCULLIS_AI_PROVIDER_"},
 		{"provider var list bare", chat, nil, []string{"      OPENID_CLIENT_ID: ${PORTCULLIS_OIDC_CLIENT_ID:-chat}", "      - OPENID_CLIENT_ID=${PORTCULLIS_OIDC_CLIENT_ID:-chat}\n      - PORTCULLIS_AI_PROVIDER_X_KEY"}, "sets PORTCULLIS_AI_PROVIDER_X_KEY"},
 		{"provider var list assignment", chat, nil, []string{"      OPENID_CLIENT_ID: ${PORTCULLIS_OIDC_CLIENT_ID:-chat}", "      - OPENID_CLIENT_ID=${PORTCULLIS_OIDC_CLIENT_ID:-chat}\n      - Portcullis_AI_Provider_X_KEY=sk-literal"}, "PORTCULLIS_AI_PROVIDER_"},
+		// Security review: names built by interpolation, AI names in defaults.
+		{"env name interpolated", chat, nil, []string{"OPENID_CLIENT_ID: ${PORTCULLIS_OIDC_CLIENT_ID:-chat}", "OPENID_CLIENT_ID: ${PORTCULLIS_OIDC_CLIENT_ID:-chat}\n      PORTCULLIS_AI_${X}: sk-literal"}, "built by interpolation"},
+		{"env list name interpolated", chat, nil, []string{"      OPENID_CLIENT_ID: ${PORTCULLIS_OIDC_CLIENT_ID:-chat}", "      - OPENID_CLIENT_ID=${PORTCULLIS_OIDC_CLIENT_ID:-chat}\n      - PORTCULLIS_AI_${X}PROVIDER_X_KEY=sk"}, "built by interpolation"},
+		{"AI name in a default", chat, nil, []string{"OPENID_CLIENT_ID: ${PORTCULLIS_OIDC_CLIENT_ID:-chat}", "OPENID_CLIENT_ID: ${PORTCULLIS_OIDC_CLIENT_ID:-chat}\n      KEY: ${FOO:-PORTCULLIS_AI_PROVIDER_X_KEY}"}, "a default or alternate value"},
+		{"AI name in an alternate", chat, nil, []string{"OPENID_CLIENT_ID: ${PORTCULLIS_OIDC_CLIENT_ID:-chat}", "OPENID_CLIENT_ID: ${PORTCULLIS_OIDC_CLIENT_ID:-chat}\n      KEY: ${FOO:+portcullis_ai_x}"}, "a default or alternate value"},
 		{"ai-providers file", "companion", []string{"hooks:\n", "files:\n  - {name: ai-providers, service: app, mount: /data}\nhooks:\n"}, nil, "ai-providers"},
 	})
 }

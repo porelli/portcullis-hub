@@ -458,6 +458,11 @@ func checkAIVarRefs(m *Manifest, compose []byte) error {
 	mcp := len(m.AI.MCP) > 0
 	for _, s := range scalars {
 		for _, r := range rawVarRefs(s) {
+			// A default or alternate text naming an AI variable (${X:-PORTCULLIS_AI_…},
+			// any case) could build one (fix round 1, security review).
+			if rest := r.text[min(len(r.text), 1+len(r.name)+1):]; strings.HasPrefix(r.text, "${") && strings.Contains(strings.ToUpper(rest), varAIPrefix) {
+				return fmt.Errorf("compose.yml: %s: a default or alternate value naming %s* is refused (the AI variables are the Hub's)", r.text, varAIPrefix)
+			}
 			if !strings.HasPrefix(r.name, varAIPrefix) {
 				continue
 			}
@@ -482,6 +487,9 @@ func checkAIVarRefs(m *Manifest, compose []byte) error {
 	// secret's place (G31, Task 23 fix round 1).
 	for _, svc := range sortedMapKeys(mapping(mapping(doc)["services"])) {
 		for _, k := range environmentKeys(mapping(mapping(doc)["services"])[svc]) {
+			if strings.Contains(k, "$") {
+				return fmt.Errorf("compose.yml: service %s: the environment variable name %q is built by interpolation: names are written out", svc, k)
+			}
 			if strings.HasPrefix(strings.ToUpper(k), varAIProviderPref) {
 				return fmt.Errorf("compose.yml: service %s sets %s: PORTCULLIS_AI_PROVIDER_* variables are set only by the Hub (on ai.chat.env's service)", svc, k)
 			}
