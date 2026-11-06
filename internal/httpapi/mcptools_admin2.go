@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 
 	"github.com/portcullis/hub/internal/directory"
@@ -150,14 +151,6 @@ func (a providerArgs) model() state.ModelProvider {
 		Models: a.Models, Credentials: a.Credentials}
 }
 
-func nameOf(args json.RawMessage) string {
-	var a struct {
-		Name string `json:"name"`
-	}
-	json.Unmarshal(args, &a)
-	return a.Name
-}
-
 // registerAdminTools2 registers part 2 of the admin tools.
 func (s *Server) registerAdminTools2() {
 	for _, t := range []Tool{
@@ -207,7 +200,7 @@ func (s *Server) registerAdminTools2() {
 			Typed: nameOf,
 			Consequences: func(args json.RawMessage) []string {
 				a, _ := decode[sourceArgs](args)
-				return []string{"Adds the template source " + a.Name + " (" + sourceURLDetail(a.URL) + "): its templates join the catalog and can be installed; a later sync pulls whatever the repository then holds."}
+				return []string{"Adds the template source " + a.Name + " (" + sourceDisplay(a.URL) + "): its templates join the catalog and can be installed; a later sync pulls whatever the repository then holds."}
 			},
 			Run: func(ctx context.Context, c *directory.Caller, args json.RawMessage) (any, error) {
 				a, _ := decode[sourceArgs](args)
@@ -344,10 +337,7 @@ func (s *Server) registerAdminTools2() {
 				}
 				on := in.Enabled
 				return s.updateInstanceAI(ctx, a, in.ID, hub.InstanceAIUpdate{Companions: map[string]hub.CompanionUpdate{in.Companion: {Enabled: &on}}})
-			}), aiSupportClass, idOf, func(args json.RawMessage) []string {
-			a, _ := decode[aiSupportArgs](args)
-			return []string{"Switches the companion " + a.Companion + " of " + a.ID + " on: AI clients of the people who can use " + a.ID + " get its tools, acting in the app as them; an enabled instance restarts."}
-		}),
+			}), aiSupportClass, idOf, s.aiSupportConsequences),
 		perCall(admin("set_ai_mode", "Change a companion's mode: read_only, or read_write (needs your confirmation in the browser). Existing AI credentials are revoked first.",
 			ClassWrite, "PUT /api/instances/{id}/ai", "ai.mode", func(ctx context.Context, a directory.Actor, in aiModeArgs) (any, error) {
 				if err := instanceIDOK(in.ID); err != nil {
@@ -401,7 +391,7 @@ func (s *Server) registerAdminTools2() {
 				}
 				return map[string]any{"provider": providerOut(v)}, nil
 			}},
-		perCall(admin("save_model_provider", "Update a model provider's definition (its kind can't change; its secrets are kept). Changing where model traffic goes (base_url, instance, instance_name, region) needs your confirmation in the browser.",
+		perCall(admin("save_model_provider", "Update a model provider's definition (its kind can't change; its secrets are kept). Changing where model traffic goes (base_url, instance, instance_name, region), its label or its credentials mode (but admin → per_person) needs your confirmation in the browser.",
 			ClassWrite, "PUT /api/ai/providers/{name}", "ai.provider.update", func(_ context.Context, a directory.Actor, in providerArgs) (any, error) {
 				v, err := s.updateModelProvider(a, in.Name, in.model())
 				if err != nil {
@@ -496,13 +486,12 @@ func (s *Server) registerAdminTools2() {
 			}},
 		{Name: "remove_stale_keycloak_user", Description: "Delete the Keycloak record of a person LLDAP no longer has (refused for anyone LLDAP still lists). Needs your confirmation in the browser.",
 			Class: ClassDestructive, Scope: ScopeAdmin, Twin: "DELETE /api/directory/keycloak-stale/{username}", Audit: "keycloak.remove_stale", In: staleArgs{},
-			Typed: func(args json.RawMessage) string { a, _ := decode[staleArgs](args); return a.Username },
+			Typed: argReader("username"),
 			Consequences: func(args json.RawMessage) []string {
-				a, _ := decode[staleArgs](args)
-				return []string{"Deletes Keycloak's record of " + a.Username + " (passkeys, sessions, consents): LLDAP no longer has this person."}
+				return []string{"Deletes Keycloak's record of " + argField(args, "username") + " (passkeys, sessions, consents): LLDAP no longer has this person."}
 			},
 			Run: func(ctx context.Context, c *directory.Caller, args json.RawMessage) (any, error) {
-				a, _ := decode[staleArgs](args)
+				username := argField(args, "username")
 				if s.Directory == nil {
 					return nil, &hub.StatusError{Status: http.StatusServiceUnavailable, Err: errors.New("user management not configured")}
 				}
@@ -510,25 +499,43 @@ func (s *Server) registerAdminTools2() {
 				if err != nil {
 					return nil, err
 				}
-				if err := s.removeStale(ctx, dc, a.Username, a.Username); err != nil {
+				if err := s.removeStale(ctx, dc, username, username); err != nil {
 					return nil, err
 				}
-				return map[string]string{"status": "removed", "username": a.Username}, nil
+				return map[string]string{"status": "removed", "username": username}, nil
 			}},
 	} {
 		s.registerTool(t)
 	}
 }
 
-// urlHasCredentials: a source URL with a password in its user info or a
-// query string (either may carry a token) — the tool path refuses it.
+// urlHasCredentials: a source URL the tool path refuses — on http(s) any
+// user info (a user name alone can be a token: https://<token>@host/…),
+// elsewhere a password; and on any URL a query string or fragment
+// (either may carry a token). scp-style user@host:path names a login
+// user, no secret.
 func urlHasCredentials(raw string) bool {
 	u, err := url.Parse(raw)
 	if err != nil || u.Scheme == "" {
-		return false // scp-style user@host:path: a user name, no password
+		return false
 	}
 	_, pw := u.User.Password()
-	return pw || u.RawQuery != "" || u.Fragment != ""
+	web := u.Scheme == "http" || u.Scheme == "https"
+	return pw || (web && u.User != nil) || u.RawQuery != "" || u.Fragment != ""
+}
+
+// scpSourceRe is an scp-style source: user@host:path.
+var scpSourceRe = regexp.MustCompile(`^[^@/:\s]+@([^@/:\s]+):(\S+)$`)
+
+// sourceDisplay is a source URL as add_source's confirmation shows it:
+// a URL as sourceURLDetail (user info, query and fragment dropped), an
+// scp-style one as host:path (the user@ dropped). The audit detail stays
+// sourceURLDetail's.
+func sourceDisplay(raw string) string {
+	if m := scpSourceRe.FindStringSubmatch(raw); m != nil {
+		return clipMessage(m[1]+":"+m[2], 300)
+	}
+	return sourceURLDetail(raw)
 }
 
 // domainForm is the Domains section's deep link with q
@@ -637,6 +644,25 @@ func providerConsequences(args json.RawMessage) []string {
 	return []string{"Model provider " + a.Name + " (" + a.Kind + ") sends what people type on the AI page, and what their apps return to it, to " + dest + "; its secrets go there too."}
 }
 
+// aiSupportConsequences names the mode the companion switches on in (fix
+// round 1): its stored mode — what UpdateInstanceAI keeps — or, unknown,
+// says so.
+func (s *Server) aiSupportConsequences(args json.RawMessage) []string {
+	a, _ := decode[aiSupportArgs](args)
+	mode := "its stored mode (it couldn't be read)"
+	if v, err := s.Hub.InstanceAI(a.ID); err == nil {
+		for _, c := range v.Companions {
+			if c.Name == a.Companion && c.Mode != "" {
+				mode = "mode " + c.Mode
+				if c.Mode == "read_write" {
+					mode += " (AI clients may change things in the app, not only read)"
+				}
+			}
+		}
+	}
+	return []string{"Switches the companion " + a.Companion + " of " + a.ID + " on in " + mode + ": AI clients of the people who can use " + a.ID + " get its tools, acting in the app as them; an enabled instance restarts."}
+}
+
 // aiSupportClass (Task 17b ruling, fail closed): switching off is W;
 // switching on (AI clients act in the app as its people) or anything
 // that doesn't decode, D.
@@ -655,11 +681,14 @@ func aiModeClass(args json.RawMessage) ToolClass {
 	return ClassDestructive
 }
 
-// providerClass is save_model_provider's class (Task 17b ruling): W only
-// for a provider that exists whose kind and destination (base_url,
-// instance, instance_name, region — where model traffic and its secrets
-// go) stay as stored; a new name, a changed destination or arguments that
-// don't decode, D.
+// providerClass is save_model_provider's class (Task 17b ruling, fix
+// round 1): W only for a provider that exists whose kind, destination
+// (base_url, instance, instance_name, region — where model traffic and
+// its secrets go), label (the data-egress note people read names it) and
+// credentials mode stay as stored — credentials may only go from admin
+// to per_person (the Hub's key no longer goes out); "" counts as admin,
+// the Hub's default. A new name, any other change of those, or arguments
+// that don't decode, D.
 func (s *Server) providerClass(args json.RawMessage) ToolClass {
 	a, err := decode[providerArgs](args)
 	if err != nil {
@@ -667,10 +696,22 @@ func (s *Server) providerClass(args json.RawMessage) ToolClass {
 	}
 	cur, ok := s.Hub.ModelProvider(a.Name)
 	if !ok || cur.Kind != a.Kind || cur.BaseURL != a.BaseURL || cur.Instance != a.Instance ||
-		cur.InstanceName != a.InstanceName || cur.Region != a.Region {
+		cur.InstanceName != a.InstanceName || cur.Region != a.Region || cur.Label != a.Label {
+		return ClassDestructive
+	}
+	if from, to := credentialsMode(cur.Credentials), credentialsMode(a.Credentials); from != to && (from != "admin" || to != "per_person") {
 		return ClassDestructive
 	}
 	return ClassWrite
+}
+
+// credentialsMode is a provider's credentials with "" as the Hub's
+// default, admin.
+func credentialsMode(c string) string {
+	if c == "" {
+		return "admin"
+	}
+	return c
 }
 
 // hubSettingsClass is save_hub_settings' class (G37 + Task 17b ruling,
@@ -692,6 +733,13 @@ func (s *Server) hubSettingsClass(args json.RawMessage) ToolClass {
 		u.Clients != nil || u.AllowedOrigins != nil {
 		return ClassDestructive
 	}
+	// The stored values are read now, not at the commit. A concurrent save
+	// lowering a value between this decision and Run lets this W call put
+	// back at most what was stored when it was judged — a value an admin
+	// had in force a moment earlier, within SaveAISettings' bounds (idle
+	// 1–30, max 1–90 days, limits 1–1,000,000, fanout ≤ 4) — and the call
+	// still can't turn anything on, change a client or an origin. That is
+	// harmless (Task 17b fix round 1: the race is accepted).
 	cur := s.Hub.AISettings()
 	raises := func(next *int, now int) bool { return next != nil && *next > now }
 	if raises(u.OfflineIdleDays, cur.OfflineIdleDays) || raises(u.OfflineMaxDays, cur.OfflineMaxDays) {

@@ -375,11 +375,43 @@ func envSecrets(t *templates.Template, vars map[string]string) []string {
 	}
 	var vals []string
 	for k, v := range vars {
-		if len(v) >= 6 && (generated[k] || secretKeyRe.MatchString(k)) {
+		if len(v) >= 6 && (generated[k] || (secretKeyRe.MatchString(k) && !HubPublicVar(k))) {
 			vals = append(vals, v)
 		}
 	}
 	return vals
+}
+
+// hubPublicVars / hubPublicPrefixes are the instance variables the Hub
+// writes into every instance's .env (contract §3.1) whose values are
+// never secrets: hostnames, ids, group names, client ids, the local
+// networks and the AI switches. Templates may not declare them (reserved
+// names), so a name matching secretKeyRe here (PORTCULLIS_HOST_SECRETAPP,
+// PORTCULLIS_INSTANCE of an id with "token" in it) is still not a
+// secret's variable. PORTCULLIS_AI_PROVIDER_* are secrets and stay out.
+var (
+	hubPublicVars = map[string]bool{
+		"PORTCULLIS_DOMAIN": true, "PORTCULLIS_INSTANCE": true, "PORTCULLIS_OIDC_CLIENT_ID": true,
+		"PORTCULLIS_ACCESS_GROUP": true, "PORTCULLIS_ADMIN_GROUP": true, "PORTCULLIS_LOCAL_NETWORKS": true,
+		"PORTCULLIS_AI_ENABLED": true,
+	}
+	hubPublicPrefixes = []string{"PORTCULLIS_HOST_", "PORTCULLIS_OIDC_CLIENT_ID_", "PORTCULLIS_AI_READONLY_"}
+)
+
+// HubPublicVar: name is a Hub-set instance variable whose value is no
+// secret (hubPublicVars): never redacted for its name (Task 17b fix
+// round 1 — the global tool redactor blanked hostnames of instances
+// whose id looks secret).
+func HubPublicVar(name string) bool {
+	if hubPublicVars[name] {
+		return true
+	}
+	for _, p := range hubPublicPrefixes {
+		if strings.HasPrefix(name, p) && len(name) > len(p) {
+			return true
+		}
+	}
+	return false
 }
 
 // secretsErr is an error carrying the values its operation must redact

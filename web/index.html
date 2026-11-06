@@ -857,17 +857,35 @@
       if (kind === 'ai' && q.get('provider') && q.get('field')) renderProviderSecretForm(q.get('provider'), q.get('field'));
     }
 
-    // A model provider's secret field: typed into a password input,
-    // cleared on submit, never rendered back (the answer is {set,
-    // updated_at}). The full Settings → AI page is Task 22's.
-    function renderProviderSecretForm(name, field) {
+    // A model provider's secret field: the provider is read first (an
+    // unknown provider or field is refused, its kind and destination
+    // shown), then the value is typed into a password input, cleared on
+    // submit, never rendered back (the answer is {set, updated_at}). The
+    // full Settings → AI page is Task 22's.
+    async function renderProviderSecretForm(name, field) {
       const root = document.getElementById('ai-secret-root');
+      let p;
+      try {
+        p = ((await apiGet('/api/ai/providers')).providers || []).find(x => x.name === name);
+      } catch (err) {
+        root.innerHTML = '<div class="public-warn">' + escapeHtml(err.message || 'The model providers can\'t be read.') + '</div>';
+        return;
+      }
+      if (!p) { root.innerHTML = '<div class="public-warn">No model provider ' + escapeHtml(name) + '.</div>'; flash(root); return; }
+      if (!p.secrets || !Object.prototype.hasOwnProperty.call(p.secrets, field)) {
+        root.innerHTML = '<div class="public-warn">Model provider ' + escapeHtml(name) + ' has no secret field ' + escapeHtml(field) + '.</div>';
+        flash(root);
+        return;
+      }
+      const dest = p.base_url || ('the ' + p.kind + ' default endpoint');
+      const cur = p.secrets[field] || {};
       root.innerHTML = '<div class="category-title" style="margin: 0 0 1rem;">Model provider secret</div>' +
         '<form class="settings-form" id="ai-secret-form" style="max-width:32rem">' +
-        '<div class="form-group"><label>' + escapeHtml(field) + ' of provider <code>' + escapeHtml(name) + '</code></label>' +
-        '<small>Write-only: stored on the Hub, never shown again.</small>' +
+        '<div class="form-group"><label>' + escapeHtml(field) + ' of ' + escapeHtml(p.label || name) + ' (<code>' + escapeHtml(name) + '</code>, ' + escapeHtml(p.kind) + ')</label>' +
+        '<small>This key is sent to <code>' + escapeHtml(dest) + '</code>. Write-only: stored on the Hub, never shown again.</small>' +
         '<input type="password" id="ai-secret-value" required autocomplete="off" spellcheck="false"></div>' +
-        '<button type="submit" class="btn btn-primary btn-sm">Save secret</button> <span id="ai-secret-status"></span></form>';
+        '<button type="submit" class="btn btn-primary btn-sm">Save secret</button> <span id="ai-secret-status">' +
+        escapeHtml(cur.set ? 'Set ' + fmtTime(cur.updated_at) + '.' : 'Not set.') + '</span></form>';
       const form = document.getElementById('ai-secret-form');
       form.addEventListener('submit', async e => {
         e.preventDefault();
@@ -898,17 +916,8 @@
         await openInstance(id, { tab: 'settings' });
         paneSel = '#inst-modal-box [data-ipane="settings"]';
       }
-      const want = key ? paneSel + ' [data-opt="' + CSS.escape(key) + '"]' : paneSel;
-      for (let i = 0; i < 50; i++) {
-        const el = document.querySelector(want);
-        if (el) {
-          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          el.classList.add('flash-target');
-          setTimeout(() => el.classList.remove('flash-target'), 2500);
-          return;
-        }
-        await new Promise(r => setTimeout(r, 100));
-      }
+      const el = await waitFor(key ? paneSel + ' [data-opt="' + CSS.escape(key) + '"]' : paneSel);
+      if (el) flash(el);
     }
 
     function closeDetail(e) {

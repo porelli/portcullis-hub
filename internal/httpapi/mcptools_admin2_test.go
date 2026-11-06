@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/domains"
+	"github.com/portcullis/hub/internal/freshauth"
 	"github.com/portcullis/hub/internal/hub"
 	"github.com/portcullis/hub/internal/state"
 )
@@ -190,7 +192,13 @@ func TestToolClassPerCall17b(t *testing.T) {
 		{"set_ai_mode", map[string]any{"id": "aiapp", "companion": "tok", "mode": "read_only"}, false},
 		{"set_ai_support", map[string]any{"id": "aiapp", "companion": "tok", "enabled": false}, false},
 		// Providers: the stored one's label → W; its destination, or a new name → D.
-		{"save_model_provider", ollamaArgs(map[string]any{"label": "Ollama 2"}), false},
+		{"save_model_provider", ollamaArgs(map[string]any{"models": map[string]any{"fetch": false, "list": []string{"qwen3"}}}), false},
+		{"save_model_provider", ollamaArgs(map[string]any{"credentials": "admin"}), false}, // "" stored = admin
+		{"save_model_provider", ollamaArgs(map[string]any{"label": "Ollama 2"}), true},     // the egress note names it
+		{"save_model_provider", ollamaArgs(map[string]any{"credentials": "bogus"}), true},
+		{"save_model_provider", ollamaArgs(map[string]any{"credentials": "per_person"}), false}, // admin → per_person: runs
+		{"save_model_provider", ollamaArgs(map[string]any{"credentials": "admin"}), true},       // per_person → admin
+		{"save_model_provider", ollamaArgs(nil), true},                                          // "" = admin, from per_person
 		{"save_model_provider", ollamaArgs(map[string]any{"base_url": "https://evil.example.com/v1"}), true},
 		{"save_model_provider", ollamaArgs(map[string]any{"instance": "litellm"}), true},
 		{"save_model_provider", ollamaArgs(map[string]any{"region": "us-east-1"}), true},
@@ -216,8 +224,12 @@ func TestToolClassPerCall17b(t *testing.T) {
 		{"sync_sources", map[string]any{}, false},
 	} {
 		txt, _ := resultText(e.call(t, "/mcp/admin", "root", "2025-11-25", c.tool, c.args, nil))
-		if got := confirmTextRe.MatchString(txt); got != c.confirm {
+		m := confirmTextRe.FindStringSubmatch(txt)
+		if got := m != nil; got != c.confirm {
 			t.Errorf("%s %v: confirmation %v, want %v (%s)", c.tool, c.args, got, c.confirm, txt)
+		}
+		if m != nil {
+			e.decide(t, m[1], "", false) // declined: the pending ones stay few (G27)
 		}
 	}
 	code, a := e.rpc(t, rpcCall{path: "/mcp/admin", user: "root", version: "2025-11-25", method: "tools/list", params: map[string]any{}})
@@ -243,6 +255,24 @@ func TestToolClassPerCall17b(t *testing.T) {
 	}
 	if len(want) != 0 {
 		t.Errorf("not listed: %v", want)
+	}
+}
+
+// TestAISupportConsequencesNameMode (fix round 1): switching a companion
+// on names the mode it comes on in.
+func TestAISupportConsequencesNameMode(t *testing.T) {
+	e := newToolEnv(t, nil, nil)
+	for mode, want := range map[string]string{"read_only": "on in mode read_only:", "read_write": "on in mode read_write (AI clients may change things"} {
+		if err := e.s.Hub.SetAIMode(context.Background(), "aiapp", "tok", mode, directory.Human("root")); err != nil {
+			t.Fatal(err)
+		}
+		got := strings.Join(e.s.aiSupportConsequences(json.RawMessage(`{"id":"aiapp","companion":"tok","enabled":true}`)), " ")
+		if !strings.Contains(got, want) {
+			t.Errorf("%s: consequences %q", mode, got)
+		}
+	}
+	if got := strings.Join(e.s.aiSupportConsequences(json.RawMessage(`{"id":"nope","companion":"tok","enabled":true}`)), " "); !strings.Contains(got, "couldn't be read") {
+		t.Errorf("unknown instance: %q", got)
 	}
 }
 
@@ -280,9 +310,32 @@ func TestSourceToolsHideCredentials(t *testing.T) {
 	if calls := rec.take(); len(calls) != 0 {
 		t.Errorf("the refusal reached the Hub: %v", calls)
 	}
-	if urlHasCredentials("git@github.com:porelli/x.git") || urlHasCredentials("https://example.org/x.git") ||
-		!urlHasCredentials("https://example.org/x.git?token=1") {
-		t.Error("urlHasCredentials")
+	for u, want := range map[string]bool{
+		"git@github.com:porelli/x.git": false, "https://example.org/x.git": false, "ssh://git@example.org/x.git": false,
+		"https://example.org/x.git?token=1": true, "https://ghp_tok@example.org/x.git": true, "http://bot@example.org/x.git": true,
+		"ssh://git:pw@example.org/x.git": true, "https://example.org/x.git#frag": true,
+	} {
+		if urlHasCredentials(u) != want {
+			t.Errorf("urlHasCredentials(%s) = %v", u, !want)
+		}
+	}
+	// The confirmation shows scp-style sources as host:path, URLs without
+	// user info; the audit detail stays sourceURLDetail's.
+	for u, want := range map[string]string{
+		"git@github.com:porelli/x.git":  "github.com:porelli/x.git",
+		"https://example.org/x.git?a=1": "https://example.org/x.git",
+	} {
+		if got := sourceDisplay(u); got != want {
+			t.Errorf("sourceDisplay(%s) = %q, want %q", u, got, want)
+		}
+	}
+	if got := sourceURLDetail("git@github.com:porelli/x.git"); got != "(scp-style source)" {
+		t.Errorf("audit detail %q", got)
+	}
+	res = e.call(t, "/mcp/admin", "root", "2026-07-28", "add_source", map[string]any{"name": "scp", "url": "deploy@git.example.org:team/t.git"}, urlElicit)
+	m = confirmURLRe.FindStringSubmatch(elicitation(t, res, confirmInputKey)["url"].(string))
+	if v, err := e.s.Hub.ConfirmationPage(hub.ListenerHub, m[1], "root"); err != nil || !strings.Contains(v.Consequences[0], "(git.example.org:team/t.git)") || strings.Contains(v.Consequences[0], "deploy@") {
+		t.Errorf("scp consequences %v %v", v, err)
 	}
 	txt, isErr, _ = e.tool(t, "list_sources", nil)
 	if isErr || !strings.Contains(txt, `"name":"local"`) {
@@ -412,6 +465,28 @@ func TestReadTools17bAnswer(t *testing.T) {
 			t.Errorf("%s = %q %v", c.tool, txt, isErr)
 		}
 	}
+	// Fix round 1: Hub-set instance variables aren't secrets by name —
+	// secretapp's hostname shows (PORTCULLIS_HOST_SECRETAPP, written into
+	// its env by the enable).
+	if err := e.s.Hub.Enable("secretapp"); err != nil {
+		t.Fatal(err)
+	}
+	if readEnvValue(t, filepath.Join(e.data, "env", "secretapp.env"), "PORTCULLIS_HOST_SECRETAPP") != "secretapp.example.org" {
+		t.Fatal("secretapp's env has no hostname")
+	}
+	if txt, isErr, _ := e.tool(t, "get_template", map[string]any{"id": "secretapp"}); isErr || !strings.Contains(txt, `"hosts":{"secretapp":"secretapp.example.org"}`) {
+		t.Errorf("get_template secretapp = %q %v", txt, isErr)
+	}
+	// get_env hides generated / secret-looking values from the AI (and
+	// save_env refuses the mask written back); public instance variables show.
+	sec := readEnvValue(t, filepath.Join(e.data, "env", "aiapp.env"), "HDR_SECRET")
+	if txt, _, _ := e.tool(t, "get_env", map[string]any{"id": "aiapp"}); !strings.Contains(txt, `"HDR_SECRET":"[secret]"`) ||
+		strings.Contains(txt, sec) || !strings.Contains(txt, `"PORTCULLIS_INSTANCE":"aiapp"`) {
+		t.Errorf("get_env = %s", txt)
+	}
+	if txt, isErr, _ := e.tool(t, "save_env", map[string]any{"id": "aiapp", "variables": map[string]string{"HDR_SECRET": "[secret]"}}); !isErr || !strings.HasPrefix(txt, "400: ") {
+		t.Errorf("save_env [secret] = %q %v", txt, isErr)
+	}
 	// get_template leaves secret defaults out; an unknown template is 404.
 	if txt, isErr, _ := e.tool(t, "get_template", map[string]any{"id": "nope"}); !isErr || !strings.HasPrefix(txt, "404: ") {
 		t.Errorf("unknown template = %q %v", txt, isErr)
@@ -422,8 +497,36 @@ func TestReadTools17bAnswer(t *testing.T) {
 	}
 }
 
+// chatManifest: a multi native-oidc template whose Keycloak client has
+// a secret (generated into CHAT_SECRET; TestTokenNotEchoed's marker).
+const chatManifest = `name: Chat
+category: misc
+instances: multi
+ai: {unsupported: "test fixture"}
+auth:
+  method: native-oidc
+  sso: true
+  group_access: true
+  access_group: users_talk
+keycloak_clients:
+  - client_id: talk
+    secret_env: CHAT_SECRET
+    redirect_uri: https://{{HOST_TALK}}/cb
+env:
+  - key: CHAT_SECRET
+    generate: random
+`
+
+const chatCompose = "services:\n  web:\n    image: x\n    environment:\n      SECRET: ${CHAT_SECRET}\n    labels:\n" +
+	"      traefik.http.routers.talk.rule: Host(`${PORTCULLIS_HOST_TALK:-talk.portcullis.local}`)\n"
+
+// archivePH in a fixture's arguments is replaced by secretapp's newest
+// backup (backup_instance runs first).
+const archivePH = "{{archive}}"
+
 // adminToolFixtures are fixture arguments for every admin tool
-// (TestTokenNotEchoed runs each once, in this order).
+// (TestTokenNotEchoed runs each once, in this order; real targets where
+// the success path can run).
 var adminToolFixtures = []struct {
 	tool string
 	args map[string]any
@@ -431,15 +534,12 @@ var adminToolFixtures = []struct {
 	{"hub_status", map[string]any{"include_doctor": true}},
 	{"explain_policy", map[string]any{"id": "secretapp"}},
 	{"list_instances", nil},
-	{"get_instance", map[string]any{"id": "secretapp"}},
+	{"get_instance", map[string]any{"id": "talk-a"}},
 	{"instance_defaults", map[string]any{"template": "grafana", "id": "grafana-z"}},
-	{"create_instance", map[string]any{"template": "nope", "id": "nope-a"}},
+	{"create_instance", map[string]any{"template": "grafana", "id": "grafana-q"}},
 	{"enable_instance", map[string]any{"id": "secretapp"}},
 	{"restart_instance", map[string]any{"id": "secretapp"}},
-	{"set_hosts", map[string]any{"id": "nope-a", "hosts": map[string]string{}}},
-	{"get_op", map[string]any{"id": "secretapp"}},
-	{"wait_for_op", map[string]any{"id": "secretapp"}},
-	{"delete_instance", map[string]any{"id": "nope-a"}},
+	{"set_hosts", map[string]any{"id": "grafana-q", "hosts": map[string]string{"grafana": "grafana-r.example.org"}}},
 	{"get_settings", map[string]any{"id": "secretapp"}},
 	{"preview_settings", map[string]any{"id": "secretapp", "values": map[string]any{"api_url": "https://a.example.org"}}},
 	{"save_settings", map[string]any{"id": "secretapp", "values": map[string]any{"api_url": "https://a.example.org"}, "plan_hash": strings.Repeat("0", 64)}},
@@ -447,11 +547,10 @@ var adminToolFixtures = []struct {
 	{"set_policy", map[string]any{"id": "secretapp", "policy": map[string]any{"factors": []string{"webauthn"}, "op": "any"}}},
 	{"set_sign_in_mode", map[string]any{"id": "nativeapp", "mode": "gateway"}},
 	{"set_public_access", map[string]any{"id": "cloud", "access": "off"}},
-	{"get_logs", map[string]any{"id": "secretapp"}},
-	{"get_status", map[string]any{"id": "secretapp"}},
-	{"exec", map[string]any{"id": "secretapp", "service": "server", "command": "env"}},
-	{"get_compose", map[string]any{"id": "secretapp"}},
-	{"get_env", map[string]any{"id": "secretapp"}},
+	{"get_status", map[string]any{"id": "smbfixture"}},
+	{"exec", map[string]any{"id": "smbfixture", "service": "smb", "command": "env"}},
+	{"get_compose", map[string]any{"id": "talk-a"}},
+	{"get_env", map[string]any{"id": "talk-a"}},
 	{"save_env", map[string]any{"id": "secretapp", "variables": map[string]string{"FOO": "bar"}}},
 	{"get_custom_override", map[string]any{"id": "secretapp"}},
 	{"save_custom_override", map[string]any{"id": "secretapp", "content": ""}},
@@ -459,12 +558,10 @@ var adminToolFixtures = []struct {
 	{"resolve_drift", map[string]any{"id": "nope-a", "action": "apply"}},
 	{"set_person_value", map[string]any{"id": "secretapp", "key": "api_url", "user": "dana", "value": "x"}},
 	{"clear_person_value", map[string]any{"id": "secretapp", "key": "api_url", "user": "dana"}},
-	{"retry_deliveries", map[string]any{"id": "secretapp"}},
-	{"disable_instance", map[string]any{"id": "nope-a"}},
+	{"retry_deliveries", map[string]any{"id": "smbfixture"}},
 	{"missing_groups", nil},
 	{"create_missing_groups", map[string]any{"ids": []string{"secretapp"}}},
-	{"list_credentials", map[string]any{"id": "secretapp"}},
-	{"admin_revoke_credential", map[string]any{"id": "secretapp", "key": "api_key", "user": "dana"}},
+	{"list_credentials", map[string]any{"id": "smbfixture"}},
 	{"get_local_networks", nil},
 	{"set_local_networks", map[string]any{"use_defaults": true}},
 	{"list_templates", nil},
@@ -473,15 +570,15 @@ var adminToolFixtures = []struct {
 	{"sync_sources", nil},
 	{"add_source", map[string]any{"name": "more", "url": "https://bot:pw@example.org/more.git"}},
 	{"remove_source", map[string]any{"name": "nosuch"}},
+	{"backup_instance", map[string]any{"id": "secretapp"}},
 	{"list_backups", map[string]any{"id": "secretapp"}},
 	{"list_backups_all", nil},
-	{"backup_instance", map[string]any{"id": "secretapp"}},
-	{"restore_instance", map[string]any{"id": "secretapp", "archive": "secretapp/20990101T000000Z.tar"}},
-	{"restore_as", map[string]any{"archive": "secretapp/20990101T000000Z.tar", "id": "notes-b"}},
+	{"restore_instance", map[string]any{"id": "secretapp", "archive": archivePH}},
+	{"restore_as", map[string]any{"archive": archivePH, "id": "secretapp-b"}},
+	{"delete_instance", map[string]any{"id": "secretapp-b"}},
 	{"list_domains", nil},
 	{"enroll_domain", map[string]any{"name": "team-c.example.net"}},
 	{"replace_domain_token", map[string]any{"name": "team-c.example.net"}},
-	{"delete_domain", map[string]any{"name": "nosuch.example.net"}},
 	{"ai_status", map[string]any{"id": "aiapp"}},
 	{"set_ai_mode", map[string]any{"id": "aiapp", "companion": "tok", "mode": "read_only"}},
 	{"set_ai_support", map[string]any{"id": "aiapp", "companion": "tok", "enabled": true}},
@@ -489,9 +586,9 @@ var adminToolFixtures = []struct {
 	{"ai_activity", nil},
 	{"list_model_providers", nil},
 	{"add_model_provider", map[string]any{"name": "other", "label": "Other", "kind": "anthropic"}},
-	{"save_model_provider", map[string]any{"name": "ollama", "label": "Ollama 2", "kind": "openai_compatible", "base_url": "http://gpu.lan:11434/v1"}},
+	{"save_model_provider", map[string]any{"name": "ollama", "label": "Ollama", "kind": "openai_compatible", "base_url": "http://gpu.lan:11434/v1", "models": map[string]any{"fetch": false, "list": []string{"qwen3"}}}},
 	{"set_model_provider_secret", map[string]any{"name": "ollama", "field": "key"}},
-	{"delete_model_provider", map[string]any{"name": "nosuch"}},
+	{"delete_model_provider", map[string]any{"name": "other"}},
 	{"get_hub_settings", nil},
 	{"save_hub_settings", map[string]any{"limits": map[string]any{"resource_rpm": 100}}},
 	{"set_default_policy", map[string]any{"policy": map[string]any{"factors": []string{"webauthn", "mtls"}, "op": "any"}}},
@@ -499,24 +596,48 @@ var adminToolFixtures = []struct {
 	{"user_sweep_status", nil},
 	{"resume_user_sweep", nil},
 	{"remove_stale_keycloak_user", map[string]any{"username": "ghost"}},
+	{"admin_revoke_credential", map[string]any{"id": "smbfixture", "key": "share_password", "user": "alice"}},
+	{"delete_domain", map[string]any{"name": "team-c.example.net"}},
+	{"disable_instance", map[string]any{"id": "secretapp"}},
+	// At the end, over what the operations above left (fix round 1).
+	{"get_op", map[string]any{"id": "secretapp"}},
+	{"wait_for_op", map[string]any{"id": "secretapp"}},
+	{"get_logs", map[string]any{"id": "smbfixture"}},
 }
 
+// redactedAllowed are the admin tools whose results may show
+// "[redacted]" (the global redactor blanked something), each with why:
+// any other "[redacted]" means a tool put a secret in its result and only
+// the redactor caught it (TestTokenNotEchoed fails).
+var redactedAllowed = map[string]string{}
+
 // testToolsNotEchoed (TestTokenNotEchoed over every admin tool, Task 17b
-// ruling 6): the Hub's stores hold marker secrets — a domain token (sent
-// to the domains service), a provider secret, a secret setting, the
-// proxy, gate and invite secrets — and every admin tool runs once with
-// fixture arguments (D tools confirmed, U tools also accepted): no marker
-// is in any result or error.
+// ruling 6 and fix round 1): the Hub's stores hold marker secrets — a
+// domain token (sent to the domains service), a provider secret, a secret
+// setting, a person_secret credential (its password and NT hash), a
+// Keycloak client secret, the proxy, gate, invite and LLDAP secrets — and
+// every admin tool runs with fixture arguments on real targets (D tools
+// confirmed, U tools also accepted; a backup restored over its instance
+// and into a new one): no marker is in any result or error, and no result
+// shows "[redacted]" outside redactedAllowed — so the tools, not the
+// redactor, keep the secrets out.
 func testToolsNotEchoed(t *testing.T) {
-	e := newToolEnv(t, nil, nil)
+	secrets := filepath.Join(t.TempDir(), "secrets")
+	os.MkdirAll(secrets, 0o700)
+	e := newToolEnvWith(t, mcpEnvOpts{
+		extra: map[string][2]string{"smbfixture": settingsFixture(t, "smbfixture"), "talk": {chatManifest, chatCompose}},
+		cfg:   func(c *hub.Config) { c.SecretsDir = secrets },
+	})
 	withDomains(t, e)
 	const (
 		dnsMarker      = "dns-TOOLMARKER-0123456789abcdef"
 		providerMarker = "sk-TOOLMARKER-provider-0123"
 		settingMarker  = "TOOLMARKER-setting-0123456"
 	)
-	e.ll.AddGroup("users_secretapp")
-	e.ll.AddGroup("admin_secretapp")
+	for _, g := range []string{"users_secretapp", "admin_secretapp", "admin_smbfixture", "users_talk"} {
+		e.ll.AddGroup(g)
+	}
+	e.ll.AddGroup("users_smbfixture", "alice", "bob")
 	v := settingMarker
 	if _, err := e.s.Hub.SaveSettings("secretapp", hub.SettingsUpdate{Secrets: map[string]hub.SecretChange{"api_key": {Value: &v}}}, directory.Human("root")); err != nil {
 		t.Fatal(err)
@@ -529,7 +650,34 @@ func testToolsNotEchoed(t *testing.T) {
 	}
 	mustDo(t, e.hub, "root", "POST", "/api/domains", enrollBody("team-c.example.net", dnsMarker), 202)
 	mustDo(t, e.hub, "root", "POST", "/api/domains/team-c.example.net/token", `{"provider":"cloudflare","credentials":{"api_token":"`+dnsMarker+`"}}`, 202)
-	markers := []string{dnsMarker, providerMarker, settingMarker, testSecret, testMCPSecret, strings.Repeat("s", 40), "svc-password-0123456789"}
+	// A person_secret credential: its password (shown once to alice) and its NT hash.
+	if err := e.s.Hub.Enable("smbfixture"); err != nil {
+		t.Fatal(err)
+	}
+	cred, err := e.s.Hub.CreateCredential(context.Background(), "smbfixture", "share_password", "alice",
+		freshauth.Proof{Code: "good-code", CodeVerifier: strings.Repeat("v", 43), Nonce: "n0nce"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	password := string(cred.Password)
+	hash, err := os.ReadFile(filepath.Join(secrets, "smbfixture", "share_password", "alice.nt"))
+	if err != nil || len(strings.TrimSpace(string(hash))) != 32 {
+		t.Fatalf("hash file %q %v", hash, err)
+	}
+	// A Keycloak client secret (generated into the instance's env).
+	if _, err := e.s.Hub.CreateInstanceAs("talk", "talk-a", nil, directory.Human("root")); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.s.Hub.Enable("talk-a"); err != nil {
+		t.Fatal(err)
+	}
+	clientSecret := readEnvValue(t, filepath.Join(e.data, "env", "talk-a.env"), "CHAT_SECRET")
+	if len(clientSecret) < 16 {
+		t.Fatalf("talk-a's client secret %q", clientSecret)
+	}
+	h := strings.TrimSpace(string(hash))
+	markers := []string{dnsMarker, providerMarker, settingMarker, password, h, strings.ToLower(h), clientSecret,
+		testSecret, testMCPSecret, strings.Repeat("s", 40), "svc-password-0123456789"}
 	covered := map[string]bool{}
 	byName := map[string]Tool{}
 	for _, tl := range e.s.tools(ScopeAdmin) {
@@ -542,26 +690,59 @@ func testToolsNotEchoed(t *testing.T) {
 				t.Errorf("%s: the result holds a secret (%.6s…): %s", tool, m, txt)
 			}
 		}
+		if strings.Contains(txt, "[redacted]") && redactedAllowed[tool] == "" {
+			t.Errorf("%s: the redactor had to blank something: %s", tool, txt)
+		}
 	}
+	archive := ""
+	ok := map[string]bool{}
 	for _, f := range adminToolFixtures {
 		covered[f.tool] = true
-		args := f.args
-		if args == nil {
-			args = map[string]any{}
+		args := map[string]any{}
+		for k, v := range f.args {
+			if v == archivePH {
+				v = archive
+			}
+			args[k] = v
 		}
-		txt, _, _ := e.tool(t, f.tool, args)
+		txt, isErr, _ := e.tool(t, f.tool, args)
 		check(f.tool, txt)
+		ok[f.tool] = !isErr
 		if byName[f.tool].Class == ClassSecret {
-			txt, _ := e.accept(t, f.tool, args)
+			txt, isErr := e.accept(t, f.tool, args)
 			check(f.tool+" (accepted)", txt)
+			ok[f.tool] = !isErr
 		}
-		if f.tool == "backup_instance" {
+		switch f.tool {
+		case "backup_instance", "restore_instance":
 			waitIdle(t, e.s.Hub, "secretapp")
+			list, err := e.s.Hub.ListBackups("secretapp")
+			if err != nil || len(list) == 0 {
+				t.Fatalf("backups %v %v", list, err)
+			}
+			if archive == "" {
+				archive = list[0].Archive
+			}
+		case "restore_as", "delete_instance":
+			waitIdle(t, e.s.Hub, "secretapp-b")
 		}
 	}
 	for n := range byName {
 		if !covered[n] {
 			t.Errorf("admin tool %s has no fixture in adminToolFixtures", n)
+		}
+	}
+	// The success paths ran (fix round 1: real targets).
+	for _, n := range []string{"create_instance", "set_hosts", "backup_instance", "restore_instance", "restore_as", "delete_instance",
+		"list_credentials", "admin_revoke_credential", "delete_domain", "enroll_domain", "replace_domain_token", "get_env", "get_instance",
+		"set_model_provider_secret", "delete_model_provider", "get_op", "wait_for_op", "get_logs", "disable_instance"} {
+		if !ok[n] {
+			t.Errorf("%s didn't succeed: the fixture misses its success path", n)
+		}
+	}
+	for _, id := range []string{"secretapp", "secretapp-b"} {
+		if r := e.s.Hub.LastOp(id); r == nil || !r.OK {
+			t.Errorf("%s's last op = %+v", id, r)
 		}
 	}
 }
