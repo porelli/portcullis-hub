@@ -56,14 +56,22 @@ const errMintOutput = "mint hook output refused: want exactly {\"credential\", \
 
 // aiMintIn is the mint hook's stdin, keys in §15.5's order.
 type aiMintIn struct {
-	Action    string   `json:"action"`
-	User      string   `json:"user"`
+	Action string `json:"action"`
+	User   string `json:"user"`
+	// Sub: the person's Keycloak user id, checked against their LLDAP
+	// account (lookupSub): a re-created name is another sub, so the hook
+	// never hands it the former person's app credential.
+	Sub       string   `json:"sub"`
 	Instance  string   `json:"instance"`
 	Companion string   `json:"companion"`
 	Name      string   `json:"name"`
 	Mode      string   `json:"mode"`
 	Scopes    []string `json:"scopes"`
 }
+
+// errMintNoSub is a mint's LastError when the person's Keycloak id
+// couldn't be looked up or didn't match their LLDAP account.
+const errMintNoSub = "the person's Keycloak id couldn't be checked"
 
 // errMintFailed: the hook failed or its output was refused (502
 // mint_failed; the details are on the AI tab and the op record).
@@ -227,6 +235,14 @@ func (h *Hub) mint(ctx context.Context, resource, user string) (*MintResult, err
 			return nil, errMintFailed(c.Name)
 		}
 	}
+	// The person's Keycloak id, from the fresh snapshot's LLDAP uuid
+	// (LDAP_ID checked): never a mint without one.
+	sub, err := h.lookupSub(ctx, user, m.UUIDs[user])
+	if err != nil {
+		log.Printf("ai: %s: mint for %s: the Keycloak id lookup failed: %v", target, user, err)
+		h.mintFailed(&t, c, actor, target, errMintNoSub)
+		return nil, errMintFailed(c.Name)
+	}
 	name, err := mintName()
 	if err != nil {
 		return nil, statusErr(http.StatusInternalServerError, "companion %s: %v", c.Name, err)
@@ -235,7 +251,7 @@ func (h *Hub) mint(ctx context.Context, resource, user string) (*MintResult, err
 	if scopes == nil {
 		scopes = []string{}
 	}
-	stdin, _ := json.Marshal(aiMintIn{Action: "mint", User: user, Instance: r.Instance, Companion: r.Companion, Name: name, Mode: r.Mode, Scopes: scopes})
+	stdin, _ := json.Marshal(aiMintIn{Action: "mint", User: user, Sub: sub, Instance: r.Instance, Companion: r.Companion, Name: name, Mode: r.Mode, Scopes: scopes})
 
 	out, exit, u := h.runAIHookExit(ctx, &t, c.Identity.Mint, stdin)
 	defer clear(out)
@@ -284,7 +300,7 @@ func (h *Hub) mintFailed(t *templates.Template, c *templates.Companion, actor di
 // the lifecycle step succeeds.
 func (h *Hub) clearMintError(id string, c *templates.Companion) {
 	e := h.aiError(id, c.Name)
-	if strings.HasPrefix(e, "hook "+c.Identity.Mint+":") || (c.Identity.Revoke != "" && strings.HasPrefix(e, "hook "+c.Identity.Revoke+":")) {
+	if e == errMintNoSub || strings.HasPrefix(e, "hook "+c.Identity.Mint+":") || (c.Identity.Revoke != "" && strings.HasPrefix(e, "hook "+c.Identity.Revoke+":")) {
 		h.setAIError(id, c.Name, "")
 	}
 }

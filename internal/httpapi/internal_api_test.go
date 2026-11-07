@@ -2,7 +2,10 @@ package httpapi
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -106,6 +109,37 @@ type mcpEnv struct {
 	mcp   *httptest.Server
 	ident *age.X25519Identity
 	data  string
+	kc    *mintIDsKC
+}
+
+// mintIDsKC is aiScopesKC with the Keycloak id lookup a mint needs
+// (lookupSub): sub = mintSub(user), LDAP_ID = the fake LLDAP's uuid of
+// the account; err fails every lookup, ldap overrides a user's LDAP_ID
+// (a Keycloak copy of another, older account).
+type mintIDsKC struct {
+	aiScopesKC
+	uuid func(user string) string
+	mu   sync.Mutex
+	err  error
+	ldap map[string]string
+}
+
+func (k *mintIDsKC) ImportUserLink(_ context.Context, user string) (string, string, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.err != nil {
+		return "", "", k.err
+	}
+	if l, ok := k.ldap[user]; ok {
+		return mintSub(user), l, nil
+	}
+	return mintSub(user), k.uuid(user), nil
+}
+
+// mintSub is the fake Keycloak id of user.
+func mintSub(user string) string {
+	h := fmt.Sprintf("%x", sha256.Sum256([]byte(user)))
+	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
 }
 
 // newMCPEnv: the aiapp template enabled, its tok companion (app_token)
@@ -178,7 +212,8 @@ func newMCPEnvOpts(t *testing.T, o mcpEnvOpts) *mcpEnv {
 			}
 		},
 	})
-	e.s.Hub.SetAIKeycloak(aiScopesKC{})
+	kc := &mintIDsKC{uuid: e.ll.UUIDOf}
+	e.s.Hub.SetAIKeycloak(kc)
 	e.s.Hub.SetAIClientHealth(map[string]bool{keycloak.AIClientIDs.Claude: true, keycloak.AIClientIDs.ClaudeCode: true, keycloak.AIClientIDs.Generic: true})
 	e.ll.AddUser("alice", "alice@example.org", "Alice", "")
 	e.ll.AddUser("bob", "bob@example.org", "Bob", "")
@@ -197,7 +232,7 @@ func newMCPEnvOpts(t *testing.T, o mcpEnvOpts) *mcpEnv {
 	if err != nil {
 		t.Fatal(err)
 	}
-	me := &mcpEnv{instEnv: e, eng: eng, mcp: httptest.NewServer(h), ident: id, data: filepath.Join(root, "data")}
+	me := &mcpEnv{instEnv: e, eng: eng, mcp: httptest.NewServer(h), ident: id, data: filepath.Join(root, "data"), kc: kc}
 	t.Cleanup(me.mcp.Close)
 	return me
 }
@@ -496,7 +531,7 @@ func TestMCPListenerSecret(t *testing.T) {
 	}
 }
 
-var mintStdinR = regexp.MustCompile(`^\{"action":"mint","user":"alice","instance":"aiapp","companion":"tok","name":"portcullis-ai-[a-z0-9]{12}","mode":"read_write","scopes":\["read:repository","write:repository"\]\}$`)
+var mintStdinR = regexp.MustCompile(`^\{"action":"mint","user":"alice","sub":"` + mintSub("alice") + `","instance":"aiapp","companion":"tok","name":"portcullis-ai-[a-z0-9]{12}","mode":"read_write","scopes":\["read:repository","write:repository"\]\}$`)
 
 // TestMintCredential (§15.5, §15.7): in the population → the mint hook's
 // stdin exactly; stdout {"credential":"c","id":"7"} → the entry written
@@ -816,4 +851,60 @@ func TestInternalAPIStrictJSON(t *testing.T) {
 // armorReader reads an ASCII-armored age ciphertext.
 func armorReader(s string) io.Reader {
 	return armor.NewReader(strings.NewReader(s))
+}
+
+// Templates review I1: the mint carries the person's Keycloak id (sub),
+// checked against their LLDAP account; a lookup that fails, or a Keycloak
+// copy linked to another LLDAP account (a re-created name), fails the
+// mint — 502 mint_failed, no hook run, LastError "the person's Keycloak
+// id couldn't be checked" — and a later good mint clears it.
+func TestMintNeedsCheckedSub(t *testing.T) {
+	e := newMCPEnv(t, nil)
+	lastError := func() string {
+		v, err := e.s.Hub.InstanceAI("aiapp")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, c := range v.Companions {
+			if c.Name == "tok" {
+				return c.LastError
+			}
+		}
+		return "?"
+	}
+	for name, set := range map[string]func(){
+		"lookup fails":     func() { e.kc.err = errors.New("keycloak down") },
+		"LDAP_ID mismatch": func() { e.kc.ldap = map[string]string{"alice": "11111111-2222-3333-4444-555555555555"} },
+	} {
+		e.kc.mu.Lock()
+		e.kc.err, e.kc.ldap = nil, nil
+		set()
+		e.kc.mu.Unlock()
+		n := len(e.eng.runs("/mint"))
+		if c, b := e.post(t, "/internal/credentials", e.mintBody("alice")); c != 502 || b != `{"code":"mint_failed"}` {
+			t.Errorf("%s: mint = %d %s, want 502 mint_failed", name, c, b)
+		}
+		if got := len(e.eng.runs("/mint")) - n; got != 0 {
+			t.Errorf("%s: the mint hook ran %d times without a checked sub", name, got)
+		}
+		if got := lastError(); got != "the person's Keycloak id couldn't be checked" {
+			t.Errorf("%s: LastError = %q", name, got)
+		}
+		if _, err := os.Stat(filepath.Join(e.data, aigate.CredsFileName)); err == nil {
+			t.Errorf("%s: a credential was stored", name)
+		}
+	}
+	e.kc.mu.Lock()
+	e.kc.err, e.kc.ldap = nil, nil
+	e.kc.mu.Unlock()
+	e.eng.script(mintAnswer(`{"credential":"c0nfidential-app-credential","id":"8"}`))
+	if c, b := e.post(t, "/internal/credentials", e.mintBody("alice")); c != 200 || b != `{"id":"8"}` {
+		t.Fatalf("mint after the fix = %d %s", c, b)
+	}
+	if runs := e.eng.runs("/mint"); len(runs) == 0 || !mintStdinR.MatchString(runs[len(runs)-1]) {
+		t.Errorf("mint stdin = %q", runs)
+	}
+	if got := lastError(); got != "" {
+		t.Errorf("LastError after a good mint = %q", got)
+	}
 }
