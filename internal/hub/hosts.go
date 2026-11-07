@@ -659,7 +659,7 @@ func (h *Hub) SetHosts(instanceID string, hosts map[string]string, actor directo
 	}
 	if ch.enabled {
 		defer h.TriggerReconcile()
-		if rerr := h.restartLocked(&view); rerr != nil {
+		if rerr := h.restartLocked(context.Background(), &view); rerr != nil {
 			errs = append(errs, rerr)
 		}
 	}

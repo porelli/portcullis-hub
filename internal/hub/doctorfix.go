@@ -850,7 +850,7 @@ func (rebindPortFixer) Apply(h *Hub, f doctor.Finding, params map[string]string,
 		changes = ch
 		ready()
 
-		stopped, downErr, rerr := h.restartSteps(t)
+		stopped, downErr, rerr := h.restartSteps(context.Background(), t)
 		if rerr == nil {
 			// The up with the new bind worked: a failed down before it
 			// is no failed rebind (M2).

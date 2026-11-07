@@ -39,6 +39,9 @@ type fakeRunner struct {
 	creates    []string
 	createHook func(project string)
 	upHook     func(project string) // runs inside Up (after begin)
+	// upCtxHook runs inside Up before upHook with Up's context (a killed
+	// up — its context cancelled meanwhile — returns its error).
+	upCtxHook func(ctx context.Context)
 	// gate, if set, blocks Up until closed; entered receives the project
 	// name when Up starts.
 	gate    chan struct{}
@@ -99,6 +102,12 @@ func (f *fakeRunner) Up(ctx context.Context, p compose.Project) error {
 	}
 	f.begin("up", p.Name, p)
 	defer f.end(p.Name)
+	if f.upCtxHook != nil {
+		f.upCtxHook(ctx)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
 	if f.upHook != nil {
 		f.upHook(p.Name)
 	}

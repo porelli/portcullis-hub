@@ -5,12 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"slices"
 	"strings"
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/keycloak"
+	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
 )
 
@@ -248,8 +250,10 @@ func (h *Hub) volumeSet(ctx context.Context, id string) (map[string]bool, error)
 
 // recordExpectedVolumes writes into p's ledger, before compose create,
 // every named volume of t's rendered project (loadRendered: not
-// external, not the Hub's secrets volume) that isn't in before. A
-// project that doesn't load is logged: the after-listing
+// external, not the Hub's secrets volume) that isn't in before and
+// doesn't exist yet (one that does, without the project's label, is
+// someone else's: never in the ledger). A project that doesn't load is
+// logged: the after-listing
 // (recordCreatedVolumes) still records what the create made.
 func (h *Hub) recordExpectedVolumes(ctx context.Context, p *Progress, t *templates.Template, before map[string]bool) {
 	proj, err := loadRendered(ctx, h.project(t), h.cfg.ProjectDir)
@@ -272,6 +276,14 @@ func (h *Hub) recordExpectedVolumes(ctx context.Context, p *Progress, t *templat
 	}
 	slices.Sort(names)
 	for _, v := range names {
+		// A volume of that name that exists already is no project volume
+		// (before lists those): someone else's, never this operation's.
+		if _, err := h.engine.InspectVolume(ctx, v); !docker.IsNotFound(err) {
+			if err != nil {
+				log.Printf("instance %s: volume %s could not be inspected before the create (%v): not recorded unless the create makes it", t.ID, v, err)
+			}
+			continue
+		}
 		p.Created(CreatedVolumes, v)
 	}
 }
@@ -300,8 +312,8 @@ func (h *Hub) recordCreatedVolumes(ctx context.Context, p *Progress, id string, 
 	}
 }
 
-// enableUndo is one undo step of an enable.
-type enableUndo struct {
+// undoStep is one undo step of an operation (undo:<name>).
+type undoStep struct {
 	key, label string
 	// reverses: the forward steps it reverses (undone once it is done,
 	// those that ran).
@@ -327,15 +339,7 @@ func (h *Hub) undoEnable(id string, p *Progress) error {
 	if created == nil {
 		created = &Created{}
 	}
-	state := func(key string) string {
-		for _, s := range rec.Steps {
-			if s.Key == key {
-				return s.State
-			}
-		}
-		return ""
-	}
-	ran := func(key string) bool { st := state(key); return st != "" && st != StepWaiting }
+	ran := func(key string) bool { return stepRan(rec, key) }
 	h.mu.RLock()
 	var tmpl *templates.Template
 	if t := h.findLocked(id); t != nil {
@@ -345,9 +349,9 @@ func (h *Hub) undoEnable(id string, p *Progress) error {
 	groupsAPI := h.groups
 	h.mu.RUnlock()
 
-	var steps []enableUndo
+	var steps []undoStep
 	if ran(StepCreate) || ran(StepStart) || ran(StepHealthy) || ran(StepSettings) {
-		steps = append(steps, enableUndo{UndoDown, "Removing the containers", []string{StepCreate, StepStart, StepHealthy, StepSettings}, func() error {
+		steps = append(steps, undoStep{UndoDown, "Removing the containers", []string{StepCreate, StepStart, StepHealthy, StepSettings}, func() error {
 			var err error
 			if tmpl != nil {
 				err = h.rollbackUp(tmpl)
@@ -361,17 +365,17 @@ func (h *Hub) undoEnable(id string, p *Progress) error {
 		}})
 	}
 	if len(created.Volumes) > 0 {
-		steps = append(steps, enableUndo{UndoVolumes, "Removing the volumes it created", nil, func() error {
+		steps = append(steps, undoStep{UndoVolumes, "Removing the volumes it created", nil, func() error {
 			return h.undoVolumes(ctx, p, id, created.Volumes)
 		}})
 	}
 	if len(created.KeycloakClients) > 0 || ran(StepKeycloak) {
-		steps = append(steps, enableUndo{UndoKeycloak, "Removing the sign-in client", []string{StepKeycloak}, func() error {
+		steps = append(steps, undoStep{UndoKeycloak, "Removing the sign-in client", []string{StepKeycloak}, func() error {
 			return h.undoKeycloak(ctx, p, id, tmpl, created.KeycloakClients)
 		}})
 	}
 	if len(created.Groups) > 0 {
-		steps = append(steps, enableUndo{UndoGroups, "Removing the groups it created", []string{StepGroups}, func() error {
+		steps = append(steps, undoStep{UndoGroups, "Removing the groups it created", []string{StepGroups}, func() error {
 			if groupsAPI == nil {
 				return statusErr(503, "users & groups is not available: groups %s were not deleted", strings.Join(created.Groups, ", "))
 			}
@@ -400,24 +404,8 @@ func (h *Hub) undoEnable(id string, p *Progress) error {
 			return nil
 		}})
 	}
-	for _, u := range steps {
-		p.AddStep(u.key, u.label)
-	}
-	for _, u := range steps {
-		if state(u.key) == StepDone {
-			continue
-		}
-		p.Start(u.key)
-		if err := u.run(); err != nil {
-			p.Fail(u.key, err)
-			return err
-		}
-		p.Done(u.key)
-		for _, k := range u.reverses {
-			if ran(k) {
-				p.Undone(k)
-			}
-		}
+	if err := runUndo(p, rec, steps); err != nil {
+		return err
 	}
 	// Not enabled, as before: only an enable that may have committed (its
 	// settings step ran, then the Hub stopped) — never an instance that
@@ -436,6 +424,233 @@ func (h *Hub) undoEnable(id string, p *Progress) error {
 	}
 	h.TriggerReconcile()
 	return nil
+}
+
+// stepState is key's state in rec ("" = not one of its steps).
+func stepState(rec OpRecord, key string) string {
+	for _, s := range rec.Steps {
+		if s.Key == key {
+			return s.State
+		}
+	}
+	return ""
+}
+
+// stepRan: key is one of rec's steps and it started (any state but
+// waiting: a stopped or failed step may have done part of its work).
+func stepRan(rec OpRecord, key string) bool {
+	st := stepState(rec, key)
+	return st != "" && st != StepWaiting
+}
+
+// runUndo runs an operation's undo steps into p (rec: the record they
+// were planned from): every step listed before any runs, each recorded
+// as it ends and skipped when rec shows it done (Stop again), the
+// forward steps it reverses that ran then undone. The first failure
+// stops it: that step failed, its error returned.
+func runUndo(p *Progress, rec OpRecord, steps []undoStep) error {
+	for _, u := range steps {
+		p.AddStep(u.key, u.label)
+	}
+	for _, u := range steps {
+		if stepState(rec, u.key) == StepDone {
+			continue
+		}
+		p.Start(u.key)
+		if err := u.run(); err != nil {
+			p.Fail(u.key, err)
+			return err
+		}
+		p.Done(u.key)
+		for _, k := range u.reverses {
+			if stepRan(rec, k) {
+				p.Undone(k)
+			}
+		}
+	}
+	return nil
+}
+
+// settleOp ends a stoppable operation after its forward work (err its
+// outcome): unless a Stop came first, the commit gate is closed
+// (CloseStop: a later Stop is refused "finishing") and the operation
+// ends as it is — an error as its *OpError; when a Stop was accepted
+// its undo runs (the caller still holds the lock) and it returns
+// ErrStopped, or the undo's error. Operations whose commit sits inside
+// their forward work close the gate there (CloseStop is idempotent).
+func (h *Hub) settleOp(id, op string, p *Progress, err error) error {
+	if p.CloseStop() {
+		var oe *OpError
+		if err == nil || errors.As(err, &oe) {
+			return err
+		}
+		return &OpError{Record: h.opRecordOf(id, op, err, false), Err: err}
+	}
+	if uerr := h.undoerFor(op)(id, p); uerr != nil {
+		return uerr
+	}
+	return ErrStopped
+}
+
+// Undo step keys of a disable, a restart and an AI switch (contract
+// §11.7 "Stop").
+const (
+	UndoStart     = UndoPrefix + "start"
+	UndoCallbacks = UndoPrefix + "callbacks"
+	UndoSwitch    = UndoPrefix + "switch"
+)
+
+// undoDisable turns the app back on (contract §11.7 "Disable"), from p's
+// record: its extra-domain sign-in callbacks added back when the
+// callbacks step ran (what an enable adds), then — the stop step ran —
+// the project brought up with its current files while the instance is
+// still enabled (a disable stopped before its commit), or the instance
+// enabled again exactly like an enable (enableInner: a disable the Hub
+// stopped after its commit). Nothing new is created. Caller holds id's
+// lock.
+func (h *Hub) undoDisable(id string, p *Progress) error {
+	ctx := context.Background()
+	rec := p.snapshot()
+	h.mu.RLock()
+	var tmpl *templates.Template
+	var callbacks []string
+	if t := h.findLocked(id); t != nil {
+		c := *t
+		tmpl = &c
+		callbacks = callbackURIs(h.signInExtraHostsLocked(tmpl))
+	}
+	idp := h.idp
+	h.mu.RUnlock()
+	var steps []undoStep
+	if stepRan(rec, StepCallbacks) {
+		steps = append(steps, undoStep{UndoCallbacks, "Adding the sign-in callbacks back", []string{StepCallbacks}, func() error {
+			if len(callbacks) == 0 {
+				return nil
+			}
+			if idp == nil {
+				return statusErr(503, "Keycloak is not configured: the %s callbacks of %s were not added back", keycloak.ForwardAuthClient, id)
+			}
+			if err := idp.UpdateForwardAuthCallbacks(ctx, callbacks, nil); err != nil {
+				return &StatusError{Status: 502, Err: fmt.Errorf("Keycloak %s callbacks: %w", keycloak.ForwardAuthClient, err)}
+			}
+			return nil
+		}})
+	}
+	if stepRan(rec, StepStop) {
+		steps = append(steps, undoStep{UndoStart, "Starting the app again", []string{StepStop}, func() error {
+			if tmpl == nil {
+				return statusErr(409, "the template of %s is gone: it can't be started again", id)
+			}
+			if !h.IsEnabled(id) {
+				_, err := h.enableInner(ctx, id, false)
+				return err
+			}
+			if err := h.composeUp(ctx, tmpl); err != nil {
+				if composeFailed(err) {
+					return fmt.Errorf("compose up failed: %w", err)
+				}
+				return err
+			}
+			return nil
+		}})
+	}
+	defer h.TriggerReconcile()
+	return runUndo(p, rec, steps)
+}
+
+// undoRestart puts the app back as it was before the restart (contract
+// §11.7 "Restart"), from p's record (Before "running"): running before —
+// brought up again with its current files (prepareUp + startUp without a
+// reporter: no own pull, compose up --pull never; never anything newer
+// than what ran); not running and the restart started it — taken down
+// again. Caller holds id's lock.
+func (h *Hub) undoRestart(id string, p *Progress) error {
+	rec := p.snapshot()
+	wasRunning := rec.Before["running"] != "false"
+	tmpl := h.Template(id)
+	started := stepRan(rec, StepStart) || stepRan(rec, StepHealthy) || stepRan(rec, StepSettings)
+	var steps []undoStep
+	switch {
+	case wasRunning && (stepRan(rec, StepDown) || started):
+		steps = append(steps, undoStep{UndoStart, "Starting the app again", []string{StepDown}, func() error {
+			if tmpl == nil {
+				return statusErr(409, "the template of %s is gone: it can't be started again", id)
+			}
+			if !h.IsEnabled(id) {
+				return nil // disabled meanwhile: nothing to bring back
+			}
+			live, err := h.prepareUp(tmpl)
+			if err != nil {
+				return err
+			}
+			if err := h.startUp(context.Background(), live); err != nil {
+				if composeFailed(err) {
+					return fmt.Errorf("compose up failed: %w", err)
+				}
+				return err
+			}
+			return nil
+		}})
+	case !wasRunning && started:
+		steps = append(steps, undoStep{UndoDown, "Stopping the app again", []string{StepStart, StepHealthy, StepSettings}, func() error {
+			var err error
+			if tmpl != nil {
+				h.awaitDelivery(id)
+				err = h.rollbackUp(tmpl)
+			} else {
+				h.awaitDelivery(id)
+				err = h.compose.DownByName(context.Background(), projectName(id))
+			}
+			if err != nil {
+				return fmt.Errorf("compose down: %w", err)
+			}
+			return nil
+		}})
+	}
+	defer h.TriggerReconcile()
+	return runUndo(p, rec, steps)
+}
+
+// aiBeforeKey prefixes an AI switch's Before entries: one per companion
+// it changes, "on <mode>" / "off <mode>" (aiBeforeValue).
+const aiBeforeKey = "companion:"
+
+func aiBeforeValue(c state.AICompanion) string {
+	if c.Enabled {
+		return "on " + c.Mode
+	}
+	return "off " + c.Mode
+}
+
+// undoAI puts the companions of a stopped AI switch back to their
+// previous {enabled, mode} (contract §11.7 "AI switch", §15.11), from p's
+// record (Before), through the same switch path as the stopping admin
+// (revoke_all, state, scopes, gate file, compose up, on_change; the owed
+// flags as that path keeps them). Credentials the stopped switch revoked
+// are not brought back: they are minted again lazily. A switch that
+// never saved finds nothing to change. Caller holds id's lock (never the
+// AI lock: the switch takes it).
+func (h *Hub) undoAI(id string, p *Progress) error {
+	rec := p.snapshot()
+	stopper := p.stopActor()
+	u := InstanceAIUpdate{Companions: map[string]CompanionUpdate{}}
+	for k, v := range rec.Before {
+		name, ok := strings.CutPrefix(k, aiBeforeKey)
+		if !ok {
+			continue
+		}
+		onOff, mode, _ := strings.Cut(v, " ")
+		on := onOff == "on"
+		u.Companions[name] = CompanionUpdate{Enabled: &on, Mode: &mode}
+	}
+	var steps []undoStep
+	if len(u.Companions) > 0 {
+		steps = append(steps, undoStep{UndoSwitch, "Switching AI support back", []string{StepScopes, StepRestart, StepHooks}, func() error {
+			_, err := h.aiSwitch(context.Background(), id, u, stopper, "", aiRun{locked: true})
+			return err
+		}})
+	}
+	return runUndo(p, rec, steps)
 }
 
 // undoVolumes removes the ledger's volumes; one that is gone is done, one
@@ -527,12 +742,20 @@ func (h *Hub) undoKeycloak(ctx context.Context, p *Progress, id string, t *templ
 	return nil
 }
 
-// undoers are the operations a Stop of a record that no longer runs
-// (interrupted, or its undo failed) can undo from the record.
+// undoerFor is op's undo, run from its record: by a Stop of the running
+// operation (settleOp, runEnable) and of a record that no longer runs
+// (interrupted, or its undo failed: resumeStop). nil: op can't be
+// stopped.
 func (h *Hub) undoerFor(op string) func(id string, p *Progress) error {
 	switch op {
 	case OpEnable:
 		return h.undoEnable
+	case OpDisable:
+		return h.undoDisable
+	case OpRestart:
+		return h.undoRestart
+	case OpAI:
+		return h.undoAI
 	}
 	return nil
 }
@@ -656,6 +879,7 @@ func (h *Hub) resumeStop(id string, rec OpRecord, actor directory.Actor, undo fu
 	r := rec
 	r.Steps = slices.Clone(rec.Steps)
 	r.Created = rec.Created.clone()
+	r.Before = maps.Clone(rec.Before)
 	if r.Created == nil {
 		r.Created = &Created{}
 	}

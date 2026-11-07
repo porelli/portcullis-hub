@@ -258,13 +258,74 @@ func (h *Hub) SetAIMode(ctx context.Context, id, companion, mode string, actor d
 	return err
 }
 
-// UpdateInstanceAI applies u to instance id (PUT /api/instances/{id}/ai).
-// Every change is audited (ai.enable, ai.disable, ai.mode "a -> b").
+// AI switch steps (contract §11.7 "Steps per operation", §15.11).
+const (
+	StepRevoke  = "revoke"
+	StepScopes  = "scopes"
+	StepRestart = "restart"
+	StepHooks   = "hooks"
+)
+
+// aiPlan is an AI switch's steps on an enabled instance.
+func aiPlan() []Step {
+	return []Step{
+		{Key: StepRevoke, Label: "Revoking AI credentials"},
+		{Key: StepScopes, Label: "Keycloak scopes and the gate"},
+		{Key: StepRestart, Label: "Restarting the app"},
+		{Key: StepHooks, Label: "Running the app's AI hooks"},
+	}
+}
+
+// errAINothing: an AI switch with nothing to change (aiSwitch as an
+// operation answers it before ready: no operation, the tab).
+var errAINothing = errors.New("ai: nothing to change")
+
+// aiInBackground: u is a companion switch or mode change on an enabled
+// instance — the AI switch that runs as an operation (contract §15.11);
+// on a disabled instance and for the provider selection it stays
+// synchronous.
+func (h *Hub) aiInBackground(id string, u InstanceAIUpdate) bool {
+	if u.Providers != nil || len(u.Companions) == 0 {
+		return false
+	}
+	t := h.Template(id)
+	return t != nil && t.Enabled
+}
+
+// StartInstanceAI is PUT /api/instances/{id}/ai: on an enabled instance a
+// companion switch or mode change starts in the background (the
+// AsyncOp, 202) once its refusals are checked and the lock is held; a
+// refusal is the error, nothing recorded. Anything else — a disabled
+// instance, the provider selection, nothing to change — runs (or
+// answers) at once: the tab (200).
+func (h *Hub) StartInstanceAI(id string, u InstanceAIUpdate, actor directory.Actor) (*AsyncOp, *InstanceAIResult, error) {
+	if !h.aiInBackground(id, u) {
+		res, err := h.updateInstanceAI(context.Background(), id, u, actor, "")
+		return nil, res, err
+	}
+	var res *InstanceAIResult
+	a, err := h.startAsync(id, OpAI, actor, aiPlan(), func(ctx context.Context, ready func()) (map[string]string, []string, error) {
+		r, err := h.aiSwitch(ctx, id, u, actor, "", aiRun{ready: ready})
+		if errors.Is(err, errAINothing) {
+			res = r // read once startAsync returned the error (before ready)
+		}
+		return nil, nil, err
+	})
+	if errors.Is(err, errAINothing) {
+		return nil, res, nil
+	}
+	return a, nil, err
+}
+
+// UpdateInstanceAI applies u to instance id and answers the tab, run to
+// its end: on an enabled instance a companion switch is StartInstanceAI's
+// operation (runOpSync: the same lock, record, steps and Stop). Every
+// change is audited (ai.enable, ai.disable, ai.mode "a -> b").
 func (h *Hub) UpdateInstanceAI(ctx context.Context, id string, u InstanceAIUpdate, actor directory.Actor) (*InstanceAIResult, error) {
 	return h.updateInstanceAI(ctx, id, u, actor, "")
 }
 
-func (h *Hub) updateInstanceAI(ctx context.Context, id string, u InstanceAIUpdate, actor directory.Actor, offDetail string) (res *InstanceAIResult, retErr error) {
+func (h *Hub) updateInstanceAI(ctx context.Context, id string, u InstanceAIUpdate, actor directory.Actor, offDetail string) (*InstanceAIResult, error) {
 	if u.Providers != nil {
 		// An AI page has no companions (ai.chat only with ai.unsupported):
 		// one part per request.
@@ -281,6 +342,36 @@ func (h *Hub) updateInstanceAI(ctx context.Context, id string, u InstanceAIUpdat
 		}
 		return &InstanceAIResult{InstanceAIView: v, Restarts: restarts, Warnings: []string{}}, nil
 	}
+	if !h.aiInBackground(id, u) {
+		return h.aiSwitch(ctx, id, u, actor, offDetail, aiRun{})
+	}
+	var res *InstanceAIResult
+	_, _, err := h.runOpSync(id, OpAI, actor, aiPlan(), func(octx context.Context, ready func()) (map[string]string, []string, error) {
+		r, err := h.aiSwitch(octx, id, u, actor, offDetail, aiRun{ready: ready})
+		res = r
+		return nil, nil, err
+	})
+	if errors.Is(err, errAINothing) {
+		return res, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
+// aiRun is how aiSwitch runs: ready set — as an operation (StartInstanceAI
+// / runOpSync: ready once accepted; steps into ctx's reporter, the
+// operation's own record, a Stop's undo before the lock is released);
+// locked — a Stop's undo (the caller holds lockApp and owns the record);
+// neither — synchronous, the op record written as before (finishOp).
+type aiRun struct {
+	ready  func()
+	locked bool
+}
+
+// aiSwitch is the companion switch (contract §15.11 "Switching on").
+func (h *Hub) aiSwitch(ctx context.Context, id string, u InstanceAIUpdate, actor directory.Actor, offDetail string, run aiRun) (res *InstanceAIResult, retErr error) {
 	var changes []aiChange
 	audited := false
 	auditAll := func(err error) {
@@ -315,11 +406,45 @@ func (h *Hub) updateInstanceAI(ctx context.Context, id string, u InstanceAIUpdat
 	if h.Template(id) == nil {
 		return nil, ErrNotFound
 	}
-	unlock, err := h.lockApp(id)
-	if err != nil {
-		return nil, err
+	if !run.locked {
+		unlock, err := h.lockApp(id)
+		if err != nil {
+			return nil, h.busyErr(id, err)
+		}
+		defer unlock()
 	}
-	defer unlock()
+	var err error
+	// As an operation: its record, never finishOp's; a Stop accepted
+	// while it ran is undone here, the AI lock released and the
+	// instance's lock still held (registered before aiLock: runs after
+	// its release). The commit gate closes once everything ran.
+	inOp := run.ready != nil || run.locked
+	prog := progressFrom(ctx)
+	if run.ready != nil {
+		defer func() {
+			if prog.CloseStop() {
+				return
+			}
+			if uerr := h.undoAI(id, prog); uerr != nil {
+				res, retErr = nil, uerr
+				return
+			}
+			res, retErr = nil, ErrStopped
+		}()
+	}
+	opFail := func(err error) error {
+		if !inOp {
+			return h.finishOp(id, OpAI, err, false)
+		}
+		var oe *OpError
+		if err == nil || errors.As(err, &oe) {
+			return err
+		}
+		return &OpError{Record: h.opRecordOf(id, OpAI, err, false), Err: err}
+	}
+	// A Stop accepted (the operation's context cancelled): the switch
+	// stops between its steps.
+	stopped := func() bool { return prog != nil && ctx.Err() != nil }
 	defer h.aiLock(id)()
 	live := h.Template(id)
 	if live == nil {
@@ -361,10 +486,21 @@ func (h *Hub) updateInstanceAI(ctx context.Context, id string, u InstanceAIUpdat
 		changes = nil
 		audited = true
 		v, err := h.InstanceAI(id)
+		if err == nil && run.ready != nil {
+			err = errAINothing
+		}
 		return &InstanceAIResult{InstanceAIView: v, Warnings: []string{}}, err
 	}
 	changes = work
 	running := t.Enabled
+	if run.ready != nil {
+		run.ready()
+		// What a Stop puts back: each companion's {enabled, mode}.
+		for _, ch := range changes {
+			prog.Before(aiBeforeKey+ch.c.Name, aiBeforeValue(ch.before))
+		}
+	}
+	prog.Start(StepRevoke)
 	// startUp leaves the owed revoke_alls of this instance to us.
 	h.aiApplying.Store(id, true)
 	defer h.aiApplying.Delete(id)
@@ -403,7 +539,8 @@ func (h *Hub) updateInstanceAI(ctx context.Context, id string, u InstanceAIUpdat
 		case ch.c.Identity.Revoke != "" && (ch.switchingOn() || ch.modeChanged()):
 			if err := h.revokeAll(ctx, t, ch.c, false); err != nil {
 				h.setAIError(id, ch.c.Name, err.Error())
-				return nil, h.finishOp(id, OpAI, err, false)
+				prog.Fail(StepRevoke, err)
+				return nil, opFail(err)
 			}
 			ch.after.RevokePending = false
 		case ch.c.Identity.Revoke != "" && ch.switchingOff() && ch.c.Identity.Mode != templates.IdentityAppOAuth:
@@ -414,6 +551,10 @@ func (h *Hub) updateInstanceAI(ctx context.Context, id string, u InstanceAIUpdat
 			ch.revoked = true
 			ch.after.RevokePending = false
 		}
+	}
+	prog.Done(StepRevoke)
+	if stopped() {
+		return nil, ctx.Err()
 	}
 	// On a running instance what runs after the up is owed in the same
 	// commit (a crash before it leaves the flags; the success paths
@@ -514,6 +655,20 @@ func (h *Hub) updateInstanceAI(ctx context.Context, id string, u InstanceAIUpdat
 			failed[ch.c.Name] = true
 		}
 	}
+	// endStep ends a step with the errors it added (since n).
+	endStep := func(key string, n int) {
+		if len(errs) > n {
+			prog.Fail(key, errors.Join(errs[n:]...))
+		} else {
+			prog.Done(key)
+		}
+	}
+	// compose on the operation's context (a Stop kills it); else as before.
+	upCtx := context.Background()
+	if run.ready != nil {
+		upCtx = ctx
+	}
+	prog.Start(StepScopes)
 	if err := h.applyAIScopes(ctx, changes); err != nil {
 		errs = append(errs, err)
 		all()
@@ -522,13 +677,19 @@ func (h *Hub) updateInstanceAI(ctx context.Context, id string, u InstanceAIUpdat
 		errs = append(errs, fmt.Errorf("gate files: %w", err))
 		all()
 	}
+	endStep(StepScopes, 0)
+	if stopped() {
+		return nil, ctx.Err()
+	}
 	restarts := false
 	// Only a stored mode of a switched-off companion changed: nothing runs.
 	if running && slices.ContainsFunc(changes, func(ch aiChange) bool { return !ch.modeOnly }) {
 		if t2 := h.Template(id); t2 != nil {
 			t = t2
 		}
-		upErr := h.composeUp(context.Background(), t)
+		prog.Start(StepRestart)
+		n := len(errs)
+		upErr := h.composeUp(upCtx, t)
 		if composeFailed(upErr) {
 			upErr = statusErr500Wrap("compose up failed", upErr)
 		}
@@ -538,6 +699,13 @@ func (h *Hub) updateInstanceAI(ctx context.Context, id string, u InstanceAIUpdat
 		} else {
 			restarts = true
 		}
+		endStep(StepRestart, n)
+		if stopped() {
+			return nil, ctx.Err()
+		}
+		prog.Start(StepHooks)
+		n = len(errs)
+		defer endStep(StepHooks, n)
 		for _, ch := range changes {
 			if ch.owed {
 				continue // runPendingAI below
@@ -572,6 +740,11 @@ func (h *Hub) updateInstanceAI(ctx context.Context, id string, u InstanceAIUpdat
 				h.setAIError(id, ch.c.Name, "")
 			}
 		}
+	} else {
+		prog.Detail(StepRestart, "not needed")
+		prog.Done(StepRestart)
+		prog.Detail(StepHooks, "not needed")
+		prog.Done(StepHooks)
 	}
 	if running && restarts {
 		// Companions still owing a revoke_all / on_change (switched while
@@ -587,7 +760,7 @@ func (h *Hub) updateInstanceAI(ctx context.Context, id string, u InstanceAIUpdat
 				errs = append(errs, err)
 				all()
 			}
-			if upErr := h.composeUp(context.Background(), t); upErr != nil {
+			if upErr := h.composeUp(upCtx, t); upErr != nil {
 				errs = append(errs, statusErr500Wrap("compose up failed", upErr))
 				all()
 			}
@@ -597,10 +770,13 @@ func (h *Hub) updateInstanceAI(ctx context.Context, id string, u InstanceAIUpdat
 			}
 		}
 	}
+	if stopped() {
+		return nil, ctx.Err()
+	}
 	h.setAIReapply(id, changes, failed)
 	err = errors.Join(errs...)
 	if running || err != nil {
-		err = h.finishOp(id, OpAI, err, false)
+		err = opFail(err)
 	}
 	if running {
 		h.TriggerReconcile()

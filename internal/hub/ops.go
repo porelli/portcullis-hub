@@ -76,6 +76,11 @@ type OpRecord struct {
 	StoppedBy       string     `json:"stopped_by,omitempty"`
 	StoppedAt       *time.Time `json:"stopped_at,omitempty"`
 	Interrupted     bool       `json:"interrupted,omitempty"`
+	// Before: what a Stop puts back, written before the operation changes
+	// anything (Progress.Before), so a Stop of an interrupted record undoes
+	// from it: a restart's "running" (true / false), an AI switch's
+	// "companion:<name>" ("on <mode>" / "off <mode>").
+	Before map[string]string `json:"before,omitempty"`
 }
 
 // Stopped: the operation ended because a Stop was accepted and its undo
@@ -247,10 +252,10 @@ func (h *Hub) finishOpGuarded(id, op string, err error, rolledBack, keepRunning 
 		if op == OpHook {
 			if err != nil {
 				if h.heldHook == nil {
-					h.heldHook = map[string]OpRecord{}
+					h.heldHook = map[string]heldHookRec{}
 				}
-				h.heldHook[id] = r
-			} else {
+				h.heldHook[id] = heldHookRec{opID: cur.OpID, rec: r}
+			} else if h.heldHook[id].opID == cur.OpID {
 				delete(h.heldHook, id)
 			}
 		}

@@ -173,14 +173,25 @@ func (h *Hub) finishAsync(id, op string, p *Progress, result map[string]string, 
 	// A hook that failed while this operation's record was running: its
 	// failure becomes the instance's record once the operation ended ok
 	// (and no other operation took the record meanwhile).
+	// Only this operation's held failure: one held for an operation that
+	// started in the gap after this one released its lock stays its own.
 	h.opsMu.Lock()
 	held, ok := h.heldHook[id]
-	delete(h.heldHook, id)
+	ok = ok && held.opID == opID
+	if ok {
+		delete(h.heldHook, id)
+	}
 	if cur := h.ops[id]; ok && err == nil && cur.OpID == opID && !cur.Running {
-		h.recordOpLocked(id, held)
+		h.recordOpLocked(id, held.rec)
 		log.Printf("ops: %s %s succeeded; the failure of a hook that ran during it stays recorded", op, id)
 	}
 	h.opsMu.Unlock()
+}
+
+// heldHookRec is a hook failure held for the running operation opID.
+type heldHookRec struct {
+	opID string
+	rec  OpRecord
 }
 
 // recordOp stores r as id's op record (memory and <data>/ops/<id>.json),

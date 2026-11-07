@@ -9,11 +9,13 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/portcullis/hub/internal/compose"
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/policy"
@@ -197,7 +199,10 @@ func (h *Hub) startUp(opCtx context.Context, live *templates.Template) error {
 				return err
 			}
 		}
-		if h.engine != nil {
+		// Only an operation that plans the create keeps its volumes (an
+		// enable: its Stop removes them); a restart's or an AI switch's
+		// Stop never removes a volume.
+		if h.engine != nil && p.keys[StepCreate] {
 			if volsBefore, err = h.volumeSet(ctx, live.ID); err != nil {
 				return statusErr(502, "listing the volumes of %s before creating it: %v", projectName(live.ID), err)
 			}
@@ -730,20 +735,65 @@ func (h *Hub) copyConfigFiles(t *templates.Template) {
 	}
 }
 
-// Disable stops the app and marks it disabled once its containers are gone.
-// If the template is gone or its compose file is broken, it falls back to
-// stopping by project name.
+// Disable steps (contract §11.7 "Steps per operation"; stop.go has
+// the undo).
+const (
+	StepStop      = "stop"
+	StepCallbacks = "callbacks"
+	StepDown      = "down"
+)
+
+// disablePlan is a disable's steps: stop, then callbacks (the
+// extra-domain sign-in callbacks) when Keycloak is wired.
+func (h *Hub) disablePlan() []Step {
+	steps := []Step{{Key: StepStop, Label: "Stopping the app"}}
+	h.mu.RLock()
+	idp := h.idp != nil
+	h.mu.RUnlock()
+	if idp {
+		steps = append(steps, Step{Key: StepCallbacks, Label: "Keycloak callbacks"})
+	}
+	return steps
+}
+
+// StartDisable starts disabling instance id as actor in the background
+// (202, contract §11.7). Refused at once, nothing recorded: busy
+// (*BusyError), an unknown instance (404), one not enabled (400). A Stop
+// before its commit turns the app back on (undoDisable).
+func (h *Hub) StartDisable(id string, actor directory.Actor) (*AsyncOp, error) {
+	return h.startAsync(id, OpDisable, actor, h.disablePlan(), func(ctx context.Context, ready func()) (map[string]string, []string, error) {
+		return nil, nil, h.runDisable(ctx, id, ready)
+	})
+}
+
+// Disable stops the app and marks it disabled once its containers are
+// gone — StartDisable's operation run to its end (runOpSync: the same
+// lock, record, steps and Stop), started by the Hub (no actor). If the
+// template is gone or its compose file is broken, it falls back to
+// stopping by project name. An unknown instance is the 400 "not
+// enabled", as it always was.
 func (h *Hub) Disable(id string) error {
+	_, _, err := h.runOpSync(id, OpDisable, directory.Actor{}, h.disablePlan(), func(ctx context.Context, ready func()) (map[string]string, []string, error) {
+		return nil, nil, h.runDisable(ctx, id, ready)
+	})
+	var se *StatusError
+	var oe *OpError
+	if !errors.As(err, &oe) && errors.As(err, &se) && se.Status == 404 {
+		err = statusErr(400, "app not enabled: %s", id)
+	}
+	return err
+}
+
+// runDisable is the disable StartDisable and Disable run: lock (lockApp
+// → aiLock for the whole run, G35), the refusals, ready, the steps, then
+// the commit — or, a Stop accepted first, the undo (settleOp).
+func (h *Hub) runDisable(ctx context.Context, id string, ready func()) error {
 	unlock, err := h.lockApp(id)
 	if err != nil {
-		return err
+		return h.busyErr(id, err)
 	}
 	defer unlock()
 	defer h.lifecycleAILock(id)() // lockApp → aiLock (G35): no mint meanwhile
-	return h.finishOp(id, OpDisable, h.disableLocked(id), false)
-}
-
-func (h *Hub) disableLocked(id string) error {
 	h.mu.RLock()
 	enabled := h.st.IsEnabled(id)
 	var tmpl *templates.Template
@@ -752,9 +802,26 @@ func (h *Hub) disableLocked(id string) error {
 		tmpl = &c
 	}
 	h.mu.RUnlock()
-	if !enabled {
+	switch {
+	case tmpl == nil && !enabled:
+		return statusErr(404, "app instance not found: %s", id)
+	case !enabled:
 		return statusErr(400, "app not enabled: %s", id)
 	}
+	ready()
+	p := progressFrom(ctx)
+	return h.settleOp(id, OpDisable, p, h.disableSteps(ctx, p, id, tmpl))
+}
+
+// disableSteps: stop (compose down; by project name when the template is
+// gone or the files fail), callbacks (its extra-domain sign-in callbacks
+// go with it; a Keycloak failure is a warning, as it always was), then
+// the commit gate and the commit: not enabled, policy and portal
+// rewritten. A Stop is checked between the steps (the down itself runs
+// to its end: a Stop never cuts a take-down short). Caller holds id's
+// lock.
+func (h *Hub) disableSteps(ctx context.Context, p *Progress, id string, tmpl *templates.Template) error {
+	p.Start(StepStop)
 	var downErr error
 	if tmpl != nil {
 		downErr = h.composeDown(tmpl)
@@ -766,8 +833,36 @@ func (h *Hub) disableLocked(id string) error {
 			if downErr == nil {
 				downErr = err
 			}
-			return fmt.Errorf("compose down failed (app left enabled, retry): %w", downErr)
+			err := fmt.Errorf("compose down failed (app left enabled, retry): %w", downErr)
+			p.Fail(StepStop, err)
+			return err
 		}
+	}
+	p.Done(StepStop)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	cb := p.planned(StepCallbacks)
+	cb.Start(StepCallbacks)
+	if tmpl != nil {
+		if err := h.removeCallbacks(tmpl); err != nil {
+			p.Warn(fmt.Sprintf("the %s callbacks of %s could not be removed (%v): they go with its delete", keycloak.ForwardAuthClient, id, err))
+		}
+	}
+	cb.Done(StepCallbacks)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// The commit gate (atomic with cancelOp): a Stop accepted before it is
+	// undone, one after it refused "finishing".
+	if h.testHookCommit != nil {
+		h.testHookCommit(id, "disable")
+	}
+	if !p.CloseStop() {
+		return fmt.Errorf("stopped before the commit: %w", context.Canceled)
+	}
+	if h.testHookCommit != nil {
+		h.testHookCommit(id, "disable:after")
 	}
 	h.mu.Lock()
 	h.st.SetEnabled(id, false)
@@ -776,53 +871,87 @@ func (h *Hub) disableLocked(id string) error {
 	h.saveLocked()
 	h.mu.Unlock()
 	h.writePolicyLogged()
-	// Its extra-domain sign-in callbacks go with it (enable adds them).
-	if tmpl != nil {
-		h.removeCallbacks(tmpl)
-	}
 	h.TriggerReconcile()
 	return nil
 }
 
-// Restart recreates an app's containers (down + up) so new env, override
-// and labels take effect. It waits for any in-flight operation on the app
-// instead of dropping the restart: that operation may have read the old
-// files, and compose reads them at run time, so a queued restart always
-// applies the latest ones. The outcome is recorded (LastOp).
-func (h *Hub) Restart(t templates.Template) {
-	deadline := time.Now().Add(h.restartWait)
-	var unlock func()
-	for {
-		u, err := h.lockApp(t.ID)
-		if err == nil {
-			unlock = u
-			break
-		}
-		if time.Now().After(deadline) {
-			// Recorded (never over another operation's running record);
-			// the restart stays owed: Init queues it again.
-			log.Printf("restart %s gave up: %v", t.ID, err)
-			h.finishOpGuarded(t.ID, OpRestart, fmt.Errorf("the restart gave up after waiting %s for another operation (%s): restart the app", h.restartWait, err.Error()), false, true)
-			return
-		}
-		time.Sleep(h.lockPoll)
+// restartPlan is a restart's steps (create is no step of it: unplanned,
+// startUp doesn't report it).
+func restartPlan() []Step {
+	return []Step{
+		{Key: StepDown, Label: "Stopping the app"},
+		{Key: StepImages, Label: "Downloading images"},
+		{Key: StepStart, Label: "Starting services"},
+		{Key: StepHealthy, Label: "Waiting until healthy"},
+		{Key: StepSettings, Label: "Applying settings"},
 	}
-	defer unlock()
-	if !h.IsEnabled(t.ID) {
-		return // disabled while we waited
-	}
-	seq := h.owedSeqOf(t.ID)
-	h.finishOp(t.ID, OpRestart, h.restartLocked(&t), false)
-	h.clearOwed(t.ID, seq, settings.EffectRestart)
-	h.TriggerReconcile()
 }
 
-// RestartApp restarts an enabled app now and returns the outcome (the API's
-// Restart button: its error carries compose's output).
+// StartRestart starts restarting instance id as actor in the background
+// (202, contract §11.7). Refused at once, nothing recorded: busy
+// (*BusyError), unknown (404), not enabled (400). A Stop leaves the app
+// running as before (undoRestart).
+func (h *Hub) StartRestart(id string, actor directory.Actor) (*AsyncOp, error) {
+	return h.startAsync(id, OpRestart, actor, restartPlan(), func(ctx context.Context, ready func()) (map[string]string, []string, error) {
+		return nil, nil, h.runRestartApp(ctx, id, ready)
+	})
+}
+
+// Restart recreates an app's containers (down + up) so new env, override
+// and labels take effect — StartRestart's operation started by the Hub
+// (the delivery engine, revocations, the master switch: no actor) and
+// run to its end. It waits for any in-flight operation on the app
+// instead of dropping the restart: that operation may have read the old
+// files, and compose reads them at run time, so a queued restart always
+// applies the latest ones. The outcome is recorded (LastOp); like any
+// restart it can be stopped.
+func (h *Hub) Restart(t templates.Template) {
+	h.runOpSync(t.ID, OpRestart, directory.Actor{}, restartPlan(), func(ctx context.Context, ready func()) (map[string]string, []string, error) {
+		deadline := time.Now().Add(h.restartWait)
+		var unlock func()
+		for {
+			u, err := h.lockApp(t.ID)
+			if err == nil {
+				unlock = u
+				break
+			}
+			if time.Now().After(deadline) {
+				// Recorded (never over another operation's running
+				// record); the restart stays owed: Init queues it again.
+				log.Printf("restart %s gave up: %v", t.ID, err)
+				err = fmt.Errorf("the restart gave up after waiting %s for another operation (%s): restart the app", h.restartWait, err.Error())
+				h.finishOpGuarded(t.ID, OpRestart, err, false, true)
+				return nil, nil, err
+			}
+			time.Sleep(h.lockPoll)
+		}
+		defer unlock()
+		if !h.IsEnabled(t.ID) {
+			return nil, nil, statusErr(400, "app not enabled: %s", t.ID) // disabled while we waited
+		}
+		seq := h.owedSeqOf(t.ID)
+		ready()
+		err := h.restartOp(ctx, &t)
+		h.clearOwed(t.ID, seq, settings.EffectRestart)
+		h.TriggerReconcile()
+		return nil, nil, err
+	})
+}
+
+// RestartApp restarts an enabled app now and returns the outcome
+// (StartRestart's operation run to its end: its error carries compose's
+// output).
 func (h *Hub) RestartApp(id string) error {
+	_, _, err := h.runOpSync(id, OpRestart, directory.Actor{}, restartPlan(), func(ctx context.Context, ready func()) (map[string]string, []string, error) {
+		return nil, nil, h.runRestartApp(ctx, id, ready)
+	})
+	return err
+}
+
+func (h *Hub) runRestartApp(ctx context.Context, id string, ready func()) error {
 	unlock, err := h.lockApp(id)
 	if err != nil {
-		return err
+		return h.busyErr(id, err)
 	}
 	defer unlock()
 	t := h.Template(id)
@@ -833,11 +962,27 @@ func (h *Hub) RestartApp(id string) error {
 		return statusErr(400, "app not enabled")
 	}
 	defer h.TriggerReconcile()
-	return h.finishOp(id, OpRestart, h.restartLocked(t), false)
+	ready()
+	return h.restartOp(ctx, t)
 }
 
-func (h *Hub) restartLocked(t *templates.Template) error {
-	_, downErr, err := h.restartSteps(t)
+// restartOp is an accepted restart: whether the app runs now (what a
+// Stop puts back: OpRecord.Before "running"), the restart, then
+// settleOp. Caller holds t's lock.
+func (h *Hub) restartOp(ctx context.Context, t *templates.Template) error {
+	p := progressFrom(ctx)
+	running := true // not known (no Docker, a failed listing): a Stop starts it again
+	if h.engine != nil {
+		if r, err := h.projectRunning(context.Background(), t.ID); err == nil {
+			running = r
+		}
+	}
+	p.Before("running", strconv.FormatBool(running))
+	return h.settleOp(t.ID, OpRestart, p, h.restartLocked(ctx, t))
+}
+
+func (h *Hub) restartLocked(ctx context.Context, t *templates.Template) error {
+	_, downErr, err := h.restartSteps(ctx, t)
 	if err != nil {
 		return err
 	}
@@ -850,8 +995,11 @@ func (h *Hub) restartLocked(t *templates.Template) error {
 // restartSteps is restartLocked telling apart what happened: stopped
 // false = refused before anything was stopped (the app runs as it was);
 // downErr = compose down failed but the up that followed worked (err
-// nil).
-func (h *Hub) restartSteps(t *templates.Template) (stopped bool, downErr, err error) {
+// nil). ctx carries the operation's reporter (the down step, startUp's
+// steps) and its Stop, checked between the steps (the pull and compose
+// up are killed); its commit gate (CloseStop) is right after the start,
+// before the owed restart is cleared.
+func (h *Hub) restartSteps(ctx context.Context, t *templates.Template) (stopped bool, downErr, err error) {
 	// Refuse before stopping anything: an override that no longer fits
 	// the template would leave the app down.
 	if err := h.checkUserOverride(t); err != nil {
@@ -884,12 +1032,28 @@ func (h *Hub) restartSteps(t *templates.Template) (stopped bool, downErr, err er
 			return false, nil, err
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return false, nil, err
+	}
+	prog := progressFrom(ctx)
+	dp := prog.planned(StepDown)
+	dp.Start(StepDown)
 	downErr = h.composeDown(t)
-	if err := h.startUp(context.Background(), live); err != nil {
+	if downErr != nil {
+		dp.Detail(StepDown, "compose down failed: "+downErr.Error())
+	}
+	dp.Done(StepDown)
+	if err := ctx.Err(); err != nil {
+		return true, downErr, err
+	}
+	if err := h.startUp(ctx, live); err != nil {
 		if composeFailed(err) {
 			return true, downErr, fmt.Errorf("compose up failed: %w", err)
 		}
 		return true, downErr, err
+	}
+	if !prog.CloseStop() {
+		return true, downErr, fmt.Errorf("stopped before the commit: %w", context.Canceled)
 	}
 	h.clearOwed(t.ID, seq, settings.EffectRestart)
 	return true, downErr, nil

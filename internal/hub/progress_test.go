@@ -63,7 +63,7 @@ func TestProgressPersisted(t *testing.T) {
 	f.h.progressNow = clk.now
 	var flushes []func()
 	var waits []time.Duration
-	f.h.afterFunc = func(d time.Duration, fn func()) func() bool {
+	f.h.progressAfter = func(d time.Duration, fn func()) func() bool {
 		waits = append(waits, d)
 		flushes = append(flushes, fn)
 		return func() bool { return true }
@@ -410,7 +410,7 @@ func TestProgressPercentStartsAtOnce(t *testing.T) {
 	f := newFixture(t)
 	clk := &testClock{t: time.Date(2026, 11, 7, 10, 0, 0, 0, time.UTC)}
 	f.h.progressNow = clk.now
-	f.h.afterFunc = func(time.Duration, func()) func() bool { return func() bool { return true } }
+	f.h.progressAfter = func(time.Duration, func()) func() bool { return func() bool { return true } }
 	p := f.h.newProgress("grafana", OpEnable, enableSteps())
 	p.begin("op1", "alice", nil)
 	p.Done("groups")

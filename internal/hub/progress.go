@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -283,6 +284,7 @@ func (p *Progress) snapshot() OpRecord {
 	r := p.rec
 	r.Created = p.rec.Created.clone()
 	r.Steps = slices.Clone(p.rec.Steps)
+	r.Before = maps.Clone(p.rec.Before)
 	return r
 }
 
@@ -395,6 +397,25 @@ func (p *Progress) Created(kind, name string) {
 	p.writeLocked()
 }
 
+// Before records what a Stop puts back (key → value), persisted at once
+// (OpRecord.Before): an undo — also of an interrupted record — reads it
+// from the record.
+func (p *Progress) Before(key, value string) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.rec.Before == nil {
+		p.rec.Before = map[string]string{}
+	}
+	if v, ok := p.rec.Before[key]; ok && v == value {
+		return
+	}
+	p.rec.Before[key] = value
+	p.writeLocked()
+}
+
 // NoReturn marks the operation past its point of no return
 // (point_of_no_return true, stoppable false). When a Stop was accepted
 // first it changes nothing: cancelOp cancels the context under the same
@@ -463,8 +484,8 @@ func (p *Progress) throttledLocked() {
 	}
 	p.flushArmed = true
 	after := realAfterFunc
-	if p.h != nil && p.h.afterFunc != nil {
-		after = p.h.afterFunc
+	if p.h != nil && p.h.progressAfter != nil {
+		after = p.h.progressAfter
 	}
 	after(wait, p.flush)
 }
@@ -494,6 +515,7 @@ func (p *Progress) writeLocked() {
 func (p *Progress) recordLocked() OpRecord {
 	r := p.rec
 	r.Created = p.rec.Created.clone()
+	r.Before = maps.Clone(p.rec.Before)
 	if p.rec.Steps != nil {
 		r.Steps = make([]Step, len(p.rec.Steps))
 		copy(r.Steps, p.rec.Steps)
@@ -570,7 +592,7 @@ func (p *Progress) finish(r OpRecord, err error) {
 		}
 		s.EndedAt = &end
 	}
-	r.OpID, r.Steps, r.Created = cur.OpID, cur.Steps, cur.Created
+	r.OpID, r.Steps, r.Created, r.Before = cur.OpID, cur.Steps, cur.Created, cur.Before
 	for _, w := range cur.Warnings {
 		if !slices.Contains(r.Warnings, w) {
 			r.Warnings = append(r.Warnings, w)

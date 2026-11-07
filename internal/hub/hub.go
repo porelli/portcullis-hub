@@ -418,15 +418,19 @@ type Hub struct {
 	startHookFailed map[string]bool
 	// heldHook: a hook's failure record held while another operation's
 	// record was running (finishOpGuarded), written by finishAsync once
-	// that operation ended ok; under opsMu.
-	heldHook map[string]OpRecord
+	// that operation ended ok; under opsMu. Each is that operation's
+	// (opID): another operation's end never drops or writes it.
+	heldHook map[string]heldHookRec
 	// opRuns: the stop registry (progress.go) — each running background
 	// operation by its record key, with its reporter and cancel; under
-	// opRunsMu, a leaf lock. progressNow: the reporter's clock (nil:
-	// time.Now; test-settable).
-	opRunsMu    sync.Mutex
-	opRuns      map[string]*opRun
-	progressNow func() time.Time
+	// opRunsMu, a leaf lock. progressNow / progressAfter: the reporter's
+	// clock and its throttle timer (nil: time.Now / time.AfterFunc;
+	// test-settable — apart from the delivery engine's afterFunc, whose
+	// tests count its timers).
+	opRunsMu      sync.Mutex
+	opRuns        map[string]*opRun
+	progressNow   func() time.Time
+	progressAfter func(d time.Duration, f func()) (stop func() bool)
 	// testHookStepStart, if set, runs at the end of every Progress.Start
 	// (op, step key), without any lock held (tests block a step there).
 	testHookStepStart func(op, key string)

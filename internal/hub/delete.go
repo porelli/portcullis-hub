@@ -521,11 +521,13 @@ func (h *Hub) groupUserLocked(g, id string) string {
 
 // removeCallbacks drops t's extra-domain sign-in callbacks (disable,
 // contract §5); failures are logged (the next enable or delete retries).
-func (h *Hub) removeCallbacks(t *templates.Template) {
+func (h *Hub) removeCallbacks(t *templates.Template) error {
 	if h.idp == nil || len(t.ExtraHosts) == 0 {
-		return
+		return nil
 	}
 	if err := h.idp.UpdateForwardAuthCallbacks(context.Background(), nil, callbackURIs(t.ExtraHosts)); err != nil {
 		log.Printf("Warning: instance %s: removing its %s callbacks failed (removed on delete; harmless while no other instance holds its hosts): %v", t.ID, keycloak.ForwardAuthClient, err)
+		return err
 	}
+	return nil
 }

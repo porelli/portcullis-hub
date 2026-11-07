@@ -86,3 +86,21 @@ func TestMissingInstanceGroups(t *testing.T) {
 		t.Error("the check created a group")
 	}
 }
+
+// TestDeleteInstanceGroupKeptUnavailable: the warning DeleteInstanceGroup
+// gives while Users & Groups doesn't answer is the one KeptUnavailable
+// recognises (an enable's Stop retries it); a protected group's isn't.
+func TestDeleteInstanceGroupKeptUnavailable(t *testing.T) {
+	e := newEnv(t)
+	e.ll.AddGroup("lldap_admin")
+	w, err := e.svc.DeleteInstanceGroup(ctx, directory.Human("root"), "lldap_admin")
+	if err != nil || len(w) != 1 || directory.KeptUnavailable(w[0]) {
+		t.Fatalf("protected: %v %v", w, err)
+	}
+	e.ll.AddGroup("users_x")
+	e.svc.LLDAP = brokenDir{e.svc.LLDAP}
+	w, err = e.svc.DeleteInstanceGroup(ctx, directory.Human("root"), "users_x")
+	if err != nil || len(w) != 1 || !directory.KeptUnavailable(w[0]) {
+		t.Fatalf("unavailable: %v %v", w, err)
+	}
+}
