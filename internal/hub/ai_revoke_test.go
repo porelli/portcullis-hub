@@ -336,10 +336,7 @@ func TestAppOAuthLeaverRevoked(t *testing.T) {
 	}
 	// Recorded people of a companion that is off are revoked one by one
 	// (a record left by a failed switch-off revoke_all).
-	if err := a.h.oauthSeenUpdate(func(s map[string][]string) bool {
-		s["oauthapp/oauth"] = []string{"alice", "dave"}
-		return true
-	}); err != nil {
+	if err := a.h.oauthSeenAdd(map[string]map[string]string{"oauthapp/oauth": {"alice": fakeSub("alice"), "dave": fakeSub("dave")}}); err != nil {
 		t.Fatal(err)
 	}
 	n = len(a.stdins("/revoke"))
@@ -354,21 +351,31 @@ func TestAppOAuthLeaverRevoked(t *testing.T) {
 	}
 }
 
-// TestAppOAuthRevokeSub (T27, contract §15.5): recording a person
-// stores their Keycloak id; a leaver gone from LLDAP and Keycloak is
-// revoked with the stored id; with none stored and the lookup failing
-// nothing runs and the person stays recorded (retried), then a working
-// lookup revokes them.
+// TestAppOAuthRevokeSub (T27, contract §15.5): a person is recorded only
+// together with their Keycloak id (a failed lookup: not recorded now, on
+// the next pass); a leaver gone from LLDAP and Keycloak is revoked with the
+// stored id; a record without one is never retried or looked up by name:
+// it is listed in AIRevokeProblems and audited once.
 func TestAppOAuthRevokeSub(t *testing.T) {
 	a := newInstAIFixture(t, nil)
 	a.h.lockPoll = 5 * time.Millisecond
 	oauthWeb(a)
 	a.people.addGroup("users_oauthapp", "bob", "dave")
 	a.enable(t, "oauthapp")
+	a.kc.mu.Lock()
+	a.kc.subErr = errors.New("keycloak down")
+	a.kc.mu.Unlock()
 	if err := a.h.SetAISupport(context.Background(), "oauthapp", "oauth", true, root); err != nil {
 		t.Fatal(err)
 	}
 	a.h.Wait()
+	a.reconcile()
+	if seen, _ := a.h.oauthSeen(); len(seen["oauthapp/oauth"]) != 0 {
+		t.Fatalf("recorded without a Keycloak id: %v", seen)
+	}
+	a.kc.mu.Lock()
+	a.kc.subErr = nil
+	a.kc.mu.Unlock()
 	a.reconcile()
 	aiStoreMu.Lock()
 	f, err := a.h.oauthSeenFileLocked()
@@ -376,7 +383,10 @@ func TestAppOAuthRevokeSub(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, u := range []string{"alice", "bob", "carol"} {
+	if got := f.Companions["oauthapp/oauth"]; !slices.Contains(got, "bob") || !slices.Contains(got, "alice") {
+		t.Fatalf("recorded on the next pass = %v", got)
+	}
+	for _, u := range f.Companions["oauthapp/oauth"] {
 		if got := f.Subs["oauthapp/oauth"][u]; got != fakeSub(u) {
 			t.Errorf("stored sub of %s = %q, want %q", u, got, fakeSub(u))
 		}
@@ -397,16 +407,14 @@ func TestAppOAuthRevokeSub(t *testing.T) {
 	if len(got) != 1 || got[0] != `{"action":"revoke","user":"bob","sub":"`+fakeSub("bob")+`","ids":[]}` {
 		t.Fatalf("revoke stdin of a deleted person = %q", got)
 	}
-	if seen, _ := a.h.oauthSeen(); slices.Contains(seen["oauthapp/oauth"], "bob") {
-		t.Error("bob still recorded after his revoke")
-	}
 	aiStoreMu.Lock()
 	f, _ = a.h.oauthSeenFileLocked()
 	aiStoreMu.Unlock()
-	if _, ok := f.Subs["oauthapp/oauth"]["bob"]; ok {
-		t.Error("bob's id kept after his record went")
+	if slices.Contains(f.Companions["oauthapp/oauth"], "bob") || f.Subs["oauthapp/oauth"]["bob"] != "" {
+		t.Error("bob's record or id kept after his revoke")
 	}
-	// No id stored and the lookup failing: no hook run, kept, retried.
+	// A record without an id (shouldn't exist): no hook, no lookup, kept,
+	// listed, audited once.
 	if err := a.h.oauthSeenUpdate(func(s map[string][]string) bool {
 		s["oauthapp/oauth"] = append(s["oauthapp/oauth"], "erin")
 		return true
@@ -414,30 +422,44 @@ func TestAppOAuthRevokeSub(t *testing.T) {
 		t.Fatal(err)
 	}
 	a.kc.mu.Lock()
-	a.kc.subErr = errors.New("keycloak down")
+	lookups := a.kc.lookups
 	a.kc.mu.Unlock()
 	n = len(a.stdins("/revoke"))
+	a.reconcile()
 	a.reconcile()
 	if got := a.stdins("/revoke")[n:]; len(got) != 0 {
 		t.Fatalf("a revoke ran without a sub: %q", got)
 	}
+	a.kc.mu.Lock()
+	if a.kc.lookups != lookups {
+		t.Errorf("erin was looked up by name (%d lookups)", a.kc.lookups-lookups)
+	}
+	a.kc.mu.Unlock()
 	if seen, _ := a.h.oauthSeen(); !slices.Contains(seen["oauthapp/oauth"], "erin") {
-		t.Fatal("erin dropped although her revoke never ran")
+		t.Fatal("erin's record dropped although her tokens were never revoked")
 	}
 	if au := a.auditsOf("ai.credential.revoke", "oauthapp/oauth/erin"); len(au) != 1 || au[0].Result == "ok" {
 		t.Errorf("audits = %+v", au)
 	}
-	a.kc.mu.Lock()
-	a.kc.subErr = nil
-	a.kc.mu.Unlock()
-	n = len(a.stdins("/revoke"))
-	a.reconcile()
-	got = a.stdins("/revoke")[n:]
-	if len(got) != 1 || got[0] != `{"action":"revoke","user":"erin","sub":"`+fakeSub("erin")+`","ids":[]}` {
-		t.Fatalf("retry stdin = %q", got)
+	want := "erin on oauthapp: app-side tokens can't be matched (no Keycloak id recorded); switch the companion off and on, which revokes everyone"
+	var found *AIRevokeProblem
+	for _, p := range a.h.AIRevokeProblems() {
+		if p.Instance == "oauthapp" && p.Companion == "oauth" {
+			found = &p
+		}
 	}
-	if seen, _ := a.h.oauthSeen(); slices.Contains(seen["oauthapp/oauth"], "erin") {
-		t.Error("erin still recorded after her revoke")
+	if found == nil || !slices.Equal(found.Unmatched, []string{"erin"}) || found.Reason != want {
+		t.Fatalf("AIRevokeProblems = %+v", found)
+	}
+	// Switching off (revoke_all) clears it.
+	if err := a.h.SetAISupport(context.Background(), "oauthapp", "oauth", false, root); err != nil {
+		t.Fatal(err)
+	}
+	a.h.Wait()
+	for _, p := range a.h.AIRevokeProblems() {
+		if p.Instance == "oauthapp" && len(p.Unmatched) > 0 {
+			t.Errorf("still listed after the switch-off: %+v", p)
+		}
 	}
 }
 
