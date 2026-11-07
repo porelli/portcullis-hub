@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"regexp"
@@ -13,12 +14,15 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/portcullis/hub/internal/aigate"
 	"github.com/portcullis/hub/internal/confirm"
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/freshauth"
+	sdk "github.com/portcullis/hub/internal/mcpsdk"
+	"github.com/portcullis/hub/internal/templates"
 )
 
 // Confirmations (contract §15.6, §15.7, §5.1; plan 4 Task 14; G11, G26,
@@ -269,6 +273,11 @@ func (h *Hub) CreateCompanionConfirmation(ctx context.Context, q CompanionConfir
 	if sum := sha256.Sum256([]byte(q.ArgsPreview)); hex.EncodeToString(sum[:]) != q.ArgsSHA256 {
 		return nil, statusErr(http.StatusBadRequest, "args_preview is not the arguments of args_sha256")
 	}
+	// And it is that canonical form (RFC 8785, the gate's rules): what the
+	// person reads is what the upstream parses (final review M1).
+	if c, err := sdk.CanonicalArguments(json.RawMessage(q.ArgsPreview)); err != nil || string(c) != q.ArgsPreview {
+		return nil, statusErr(http.StatusBadRequest, "args_preview is not canonical JSON arguments")
+	}
 	if q.Resource == aigate.AdminURL(NormalizeHost(h.Domain())) || q.Resource == aigate.PeopleURL(NormalizeHost(h.Domain())) {
 		return nil, statusErr(http.StatusNotFound, "not a current companion resource")
 	}
@@ -375,9 +384,67 @@ func (h *Hub) ConfirmationPage(listener, id, user string) (*ConfirmationView, er
 	if err != nil || c.Listener != listener {
 		return nil, errNoConfirmation
 	}
-	return &ConfirmationView{ID: c.ID, State: c.State, Tool: c.Tool, Target: c.Label, Resource: c.Resource, Client: c.Client,
-		Consequences: c.Consequences, Arguments: c.ArgsPreview, Typed: c.Typed, Created: c.Created, Expires: c.Expires,
+	// Every displayed field with its invisible characters made visible
+	// (final review I3): bidi controls, zero-width and other format
+	// characters, control characters and line separators never reorder or
+	// hide what the person approves. The typed check is compared raw: one
+	// holding such a character can't be typed, so it can't be approved.
+	cons := make([]string, len(c.Consequences))
+	for i, l := range c.Consequences {
+		cons[i] = VisibleText(l)
+	}
+	return &ConfirmationView{ID: c.ID, State: c.State, Tool: VisibleText(c.Tool), Target: VisibleText(c.Label), Resource: VisibleText(c.Resource), Client: VisibleText(c.Client),
+		Consequences: cons, Arguments: VisibleText(c.ArgsPreview), Typed: VisibleText(c.Typed), Created: c.Created, Expires: c.Expires,
 		FreshAuth: h.FreshAuthInfoFor(listener)}, nil
+}
+
+// VisibleText is s with every character that could hide or reorder text
+// on the confirmation page written as an escape: \uXXXX (\U00XXXXXX
+// above the BMP) for control (Cc), format (Cf: bidi controls, zero-width
+// characters, U+FEFF, …), line and paragraph separators, spaces other
+// than U+0020, variation selectors and the other default-ignorable code
+// points; a backslash stays as it is. Invalid UTF-8 shows as U+FFFD.
+func VisibleText(s string) string {
+	if !needsEscape(s) {
+		return s
+	}
+	var b strings.Builder
+	for _, r := range s {
+		if hiddenRune(r) {
+			if r > 0xFFFF {
+				fmt.Fprintf(&b, "\\U%08X", r)
+			} else {
+				fmt.Fprintf(&b, "\\u%04X", r)
+			}
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+func needsEscape(s string) bool {
+	if !utf8.ValidString(s) {
+		return true
+	}
+	for _, r := range s {
+		if hiddenRune(r) {
+			return true
+		}
+	}
+	return false
+}
+
+func hiddenRune(r rune) bool {
+	switch {
+	case r == ' ':
+		return false
+	case unicode.Is(unicode.Cc, r), unicode.Is(unicode.Cf, r), unicode.Is(unicode.Zl, r), unicode.Is(unicode.Zp, r), unicode.Is(unicode.Zs, r),
+		unicode.Is(unicode.Variation_Selector, r), unicode.Is(unicode.Other_Default_Ignorable_Code_Point, r),
+		unicode.Is(unicode.Co, r), unicode.Is(unicode.Cs, r):
+		return true
+	}
+	return templates.IsControlRune(r)
 }
 
 // Decision is POST /api/me/confirmations/{id}'s body, decoded.
@@ -421,7 +488,7 @@ func (h *Hub) decideConfirmation(ctx context.Context, listener, id, user string,
 	}
 	if d.Approve {
 		if strings.TrimSpace(d.Typed) != c.Typed || c.Typed == "" {
-			return refuse("typed check didn't match", statusErr(http.StatusConflict, "type %s to confirm", c.Typed))
+			return refuse("typed check didn't match", statusErr(http.StatusConflict, "type %s to confirm", VisibleText(c.Typed)))
 		}
 		res, reason, err := h.checkFreshAuthOn(ctx, listener, d.Proof, user)
 		if err != nil {

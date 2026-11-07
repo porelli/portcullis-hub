@@ -663,3 +663,67 @@ func TestConfirmPageScript(t *testing.T) {
 		t.Error("confirm.html has an inline script (the CSP refuses it)")
 	}
 }
+
+// Final review hub-mcp I3: bidi controls, zero-width and other invisible
+// characters never reach the page raw — not in the arguments, the
+// consequences, the target or the typed check — on both listeners; they
+// are shown as \uXXXX. M1: a companion preview that isn't canonical JSON
+// is refused (400).
+func TestConfirmPageShowsInvisibleCharacters(t *testing.T) {
+	e := newConfirmEnv(t)
+	const rlo, zwj, lri = "\u202e", "\u200d", "\u2066"
+	hidden := []string{rlo, zwj, lri, "\u200b", "\ufeff", "\u00a0"}
+	noneRaw := func(where, body string) {
+		t.Helper()
+		for _, h := range hidden {
+			if strings.Contains(body, h) {
+				t.Errorf("%s: raw %U on the page", where, []rune(h)[0])
+			}
+		}
+	}
+	// A companion confirmation: the gate's canonical preview (JCS keeps
+	// U+202E and U+200D raw).
+	args := `{"name":"repo` + rlo + `1-txt.exe` + zwj + `"}`
+	id := e.create(t, "alice", "delete_repo", args)
+	r, b := doAs(t, e.ppl, "alice", "GET", "/confirm/"+id, "")
+	if r.StatusCode != 200 {
+		t.Fatalf("page = %d", r.StatusCode)
+	}
+	noneRaw("companion page", b)
+	if !strings.Contains(b, `\u202E`) || !strings.Contains(b, `\u200D`) {
+		t.Errorf("companion page doesn't show the escapes: %s", b)
+	}
+	// A Portcullis tool's confirmation: consequences and label too.
+	hargs := `{"command":"echo ok #` + rlo + `mr- fr- mr","id":"grafana"}`
+	hc, err := e.s.Hub.CreateConfirmation(directory.Actor{User: "root", Via: directory.ViaAI, Client: "portcullis-ai-claude"}, confirm.Request{
+		User: "root", Client: "portcullis-ai-claude", Resource: "https://hub.example.org/mcp", Tool: "exec", ArgsSHA256: sha(hargs),
+		ArgsPreview: hargs, Listener: confirm.ListenerHub, Typed: "grafana", Label: "instance graf" + zwj + "ana",
+		Consequences: []string{"Runs echo ok #" + rlo + "mr- fr- mr in grafana" + lri + "."}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, b = doAs(t, e.hub, "root", "GET", "/confirm/"+hc.ID, "")
+	if r.StatusCode != 200 {
+		t.Fatalf("hub page = %d", r.StatusCode)
+	}
+	noneRaw("hub page", b)
+	if !strings.Contains(b, `echo ok #\u202Emr- fr- mr in grafana\u2066.`) || !strings.Contains(b, `graf\u200Dana`) {
+		t.Errorf("hub page doesn't show the escapes: %s", b)
+	}
+	v, err := e.s.Hub.ConfirmationPage(hub.ListenerHub, hc.ID, "root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range append([]string{v.Arguments, v.Target, v.Typed, v.Tool}, v.Consequences...) {
+		noneRaw("view", s)
+	}
+	if got := hub.VisibleText("a\\b" + "\U000E0001" + " c"); got != `a\b\U000E0001 c` {
+		t.Errorf("VisibleText = %q", got)
+	}
+	// M1: not the canonical form.
+	for _, p := range []string{`{"b":1,"a":2}`, `{"a":1,"a":2}`, `{ "a":1}`, `{"a":1.0}`} {
+		if code, b := e.post(t, "/internal/confirmations", createBody("alice", "delete_repo", p, "confirm")); code != 400 {
+			t.Errorf("preview %s = %d %s, want 400", p, code, b)
+		}
+	}
+}
