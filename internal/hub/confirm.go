@@ -389,8 +389,10 @@ func (h *Hub) ConfirmationPage(listener, id, user string) (*ConfirmationView, er
 	// Every displayed field with its invisible characters made visible
 	// (final review I3): bidi controls, zero-width and other format
 	// characters, control characters and line separators never reorder or
-	// hide what the person approves. The typed check is compared raw: one
-	// holding such a character can't be typed, so it can't be approved.
+	// hide what the person approves. The typed check is stored already
+	// escaped where the request is built (confirmCall and
+	// CreateCompanionConfirmation run VisibleText on it), so what is shown
+	// is what is compared: the person types it as displayed.
 	cons := make([]string, len(c.Consequences))
 	for i, l := range c.Consequences {
 		cons[i] = VisibleText(l)
