@@ -644,6 +644,23 @@ func checkAliasFits(id, companion string) error {
 	return nil
 }
 
+// aliasesFitInstance: every aliased companion of t (all but app_oauth)
+// gets an alias of at most one DNS label under instance id id — checked
+// at instance create and restore-as (400 naming the limit and the
+// companion, contract §3.2): ids are immutable, so an instance whose
+// companions could never be switched on is refused up front.
+func aliasesFitInstance(t *templates.Template, id string) error {
+	for i := range t.Manifest.AI.MCP {
+		c := &t.Manifest.AI.MCP[i]
+		if c.Identity.Mode == templates.IdentityAppOAuth || templates.AliasFits(id, c.Name) {
+			continue
+		}
+		return statusErr(http.StatusBadRequest, "instance id %s: companion %s's alias %s would be %d characters, longer than one DNS label (at most %d): use a shorter instance id",
+			id, c.Name, templates.MCPAlias(id, c.Name), len(templates.MCPAlias(id, c.Name)), templates.MaxAliasLen)
+	}
+	return nil
+}
+
 // aiPlanStaleLocked: 409 when a change no longer matches the live view —
 // the template gone, the companion gone, its identity mode or revoke hook
 // changed, or its stored entry no longer the one planned from (pruned,

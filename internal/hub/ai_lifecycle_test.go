@@ -765,3 +765,44 @@ func TestDeleteCorruptOAuthSeen(t *testing.T) {
 		t.Error("the corrupt file was replaced")
 	}
 }
+
+// Final review I4: an instance id whose companion alias wouldn't fit one
+// DNS label is refused at create and at restore-as (400 naming the
+// companion and the limit); app_oauth companions have no alias.
+func TestCreateAndRestoreAsRefuseLongAlias(t *testing.T) {
+	const long = "hdr-with-a-quite-long-name" // 26
+	a := newInstAIFixture(t, nil, func(extra map[string][2]string) {
+		m := extra["aiapp"]
+		m[0] = strings.Replace(m[0], "    - name: hdr\n", "    - name: "+long+"\n", 1)
+		extra["aiapp"] = m
+	})
+	if companionOf(a.h.Template("aiapp"), long) == nil {
+		t.Fatal("fixture: companion not renamed")
+	}
+	tooLong := "aiapp-with-a-long-id-abcd" // 15+25+2+26 = 68
+	err := a.h.CreateInstance("aiapp", tooLong, nil)
+	if statusOf(err) != 400 || !strings.Contains(err.Error(), long) || !strings.Contains(err.Error(), "at most 63") {
+		t.Errorf("create = %v", err)
+	}
+	entry, err := a.h.BackupInstance("aiapp", root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.h.RestoreInstanceAs(entry.Archive, tooLong, root); statusOf(err) != 400 || !strings.Contains(err.Error(), long) {
+		t.Errorf("restore-as = %v", err)
+	}
+	a.h.mu.RLock()
+	_, exists := a.h.st.Instances[tooLong]
+	a.h.mu.RUnlock()
+	if exists {
+		t.Error("instance created anyway")
+	}
+	// One that fits is fine.
+	if err := a.h.CreateInstance("aiapp", "aiapp-b", nil); err != nil {
+		t.Errorf("create aiapp-b = %v", err)
+	}
+	// app_oauth companions are never aliased.
+	if err := aliasesFitInstance(a.h.Template("oauthapp"), "oauthapp-with-a-long-id-abc"); err != nil {
+		t.Errorf("app_oauth: %v", err)
+	}
+}

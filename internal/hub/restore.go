@@ -874,6 +874,9 @@ func (h *Hub) restoreInstanceAs(archive, newID string, actor directory.Actor, ho
 	if !tmpl.Manifest.Multi() {
 		return res, statusErr(409, "template %s is instances: single — restore the archive into its default instance instead", tmpl.ID)
 	}
+	if err := aliasesFitInstance(&tmpl, newID); err != nil {
+		return res, err
+	}
 	want, err := restoreAsHosts(&tmpl, newID, domain, sb.cfg.Hosts, hosts)
 	if err != nil {
 		return res, err
