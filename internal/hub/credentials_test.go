@@ -412,6 +412,20 @@ func assertKilled(t *testing.T, c *credSvc, downs int) {
 	}
 }
 
+// holdRestarts holds smbID's lifecycle lock (a revocation never takes
+// it: its hooks and kill run as without), so the background Restart a
+// kill queues can't write its running record over the credentials one
+// before assertCredentialsOp reads it (a race since restarts record their
+// progress from the start). Release it before settle.
+func holdRestarts(t *testing.T, c *credSvc) func() {
+	t.Helper()
+	unlock, err := c.f.h.lockApp(smbID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return unlock
+}
+
 func assertCredentialsOp(t *testing.T, c *credSvc) {
 	t.Helper()
 	r := c.f.h.LastOp(smbID)
@@ -479,6 +493,7 @@ func TestRevokeWhileDeliveryBusy(t *testing.T) {
 	c := credSvcFixture(t)
 	cc := c.create(t, "alice")
 	credentials.Zero(cc.Password)
+	unlock := holdRestarts(t, c)
 	l := c.f.h.deliverLock(smbID)
 	l.Lock()
 	downs := countCalls(c.f, "down:"+smbProject)
@@ -497,6 +512,7 @@ func TestRevokeWhileDeliveryBusy(t *testing.T) {
 	}
 	assertKilled(t, c, downs)
 	assertCredentialsOp(t, c)
+	unlock()
 	settle(c.f)
 }
 
@@ -509,6 +525,7 @@ func TestRevokeWhilePreviousHookStuck(t *testing.T) {
 	c.f.h.hookExecs = map[string]timedOutExec{smbID: {execID: "stuck", timeout: time.Minute}}
 	c.f.h.deliveryMu.Unlock()
 	c.f.engine.setExecRunning("stuck", true)
+	unlock := holdRestarts(t, c)
 	downs := countCalls(c.f, "down:"+smbProject)
 	execs := len(c.f.engine.ExecCalls())
 	start := time.Now()
@@ -529,6 +546,7 @@ func TestRevokeWhilePreviousHookStuck(t *testing.T) {
 	}
 	assertKilled(t, c, downs)
 	assertCredentialsOp(t, c)
+	unlock()
 	c.f.engine.setExecRunning("stuck", false)
 	settle(c.f)
 }
@@ -577,6 +595,7 @@ func TestRevokeZeroHooksKills(t *testing.T) {
 		}
 	}
 	c.f.h.mu.Unlock()
+	unlock := holdRestarts(t, c)
 	downs := countCalls(c.f, "down:"+smbProject)
 	execs := len(c.f.engine.ExecCalls())
 	if err := c.f.h.RevokeOwnCredential(context.Background(), smbID, smbKey, "alice"); err != nil {
@@ -587,6 +606,7 @@ func TestRevokeZeroHooksKills(t *testing.T) {
 	}
 	assertKilled(t, c, downs)
 	assertCredentialsOp(t, c)
+	unlock()
 	settle(c.f)
 }
 
@@ -1097,6 +1117,7 @@ func TestRevokeWhenDirectoryBlips(t *testing.T) {
 		t.Fatal("the hook doesn't need people")
 	}
 	c.people.set(func(p *fakePeople) { p.err = errors.New("ldap blip") })
+	unlock := holdRestarts(t, c)
 	downs := countCalls(c.f, "down:"+smbProject)
 	execs := len(c.f.engine.ExecCalls())
 	if err := c.f.h.RevokeOwnCredential(context.Background(), smbID, smbKey, "alice"); err != nil {
@@ -1107,6 +1128,7 @@ func TestRevokeWhenDirectoryBlips(t *testing.T) {
 	}
 	assertKilled(t, c, downs)
 	assertCredentialsOp(t, c)
+	unlock()
 	c.people.set(func(p *fakePeople) { p.err = nil })
 	settle(c.f)
 }
