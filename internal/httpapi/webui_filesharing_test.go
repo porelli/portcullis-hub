@@ -23,14 +23,16 @@ func webAsset(t *testing.T, name string) string {
 }
 
 // TestMyAppsFreshAuthOpener: the opener side of the fresh-auth popup
-// (contract §5.1, F20). The authorize request carries every required
-// parameter, the verifier comes from crypto.getRandomValues and its S256
-// challenge from crypto.subtle; a message is accepted only from this
-// origin, of type portcullis-fresh-auth and with the stored state; the
-// sessionStorage entry is deleted before the POST of {code, code_verifier,
-// nonce}.
+// (contract §5.1, F20), shared by My apps and the confirmation page
+// (freshauth.js, fix round 1 of plan 4 Task 14). The authorize request
+// carries every required parameter, the verifier comes from
+// crypto.getRandomValues and its S256 challenge from crypto.subtle; a
+// message is accepted only from this origin, from the popup the page
+// opened, of type portcullis-fresh-auth, with the stored state and the
+// flow's own ctx; the sessionStorage entry is deleted before the proof is
+// handed on. myapps.js uses it and posts {code, code_verifier, nonce}.
 func TestMyAppsFreshAuthOpener(t *testing.T) {
-	js := webAsset(t, "myapps.js")
+	fa := webAsset(t, "freshauth.js")
 	for _, want := range []string{
 		"crypto.getRandomValues(",
 		"crypto.subtle.digest('SHA-256'",
@@ -47,42 +49,70 @@ func TestMyAppsFreshAuthOpener(t *testing.T) {
 		"['nonce', nonce]",
 		"ev.origin !== location.origin",
 		"ev.source !== flow.popup",
+		"flow.ctx !== pending.ctx",
 		"/^https:\\/\\//i.test(",
 		"location.protocol === 'http:'",
 		"FLOW_DEADLINE_MS = 10 * 60 * 1000",
-		"This is the only time it is shown.",
 		"d.type !== 'portcullis-fresh-auth'",
 		"d.state !== pending.state",
 		"sessionStorage.removeItem(FA_KEY)",
-		"JSON.stringify({ code: d.code, code_verifier: pending.verifier, nonce: pending.nonce })",
+		"f.h.proof({ code: d.code, code_verifier: pending.verifier, nonce: pending.nonce })",
+		"window.addEventListener('pagehide', cancel)",
+		"window.PortcullisFreshAuth = { start, cancel }",
+	} {
+		if !strings.Contains(fa, want) {
+			t.Errorf("freshauth.js lacks %q", want)
+		}
+	}
+	// The verifier: 64 random bytes base64url = 86 characters (43–128).
+	if !strings.Contains(fa, "randomB64(64)") {
+		t.Error("the PKCE verifier must be randomB64(64) (86 characters)")
+	}
+	// The stored entry is removed before the proof is handed on.
+	if i, j := strings.LastIndex(fa, "sessionStorage.removeItem(FA_KEY)"), strings.Index(fa, "f.h.proof("); i < 0 || j < 0 || i > j {
+		t.Error("sessionStorage must be cleared before the proof is handed on")
+	}
+	if n := strings.Count(fa, "sessionStorage.setItem("); n != 1 {
+		t.Errorf("freshauth.js: sessionStorage.setItem used %d times, want exactly once (the PKCE state)", n)
+	}
+	for _, bad := range []string{"localStorage", "innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval("} {
+		if strings.Contains(fa, bad) {
+			t.Errorf("freshauth.js uses %s", bad)
+		}
+	}
+
+	js := webAsset(t, "myapps.js")
+	for _, want := range []string{
+		"PortcullisFreshAuth.start(el.maFreshAuth, {",
+		"ctx: { instance: f.instance, key: f.key },",
+		"proof: p => submitProof(f, p),",
+		"JSON.stringify({ code: p.code, code_verifier: p.code_verifier, nonce: p.nonce })",
+		"PortcullisFreshAuth.cancel()",
+		"This is the only time it is shown.",
 		"method: 'DELETE'",
 	} {
 		if !strings.Contains(js, want) {
 			t.Errorf("myapps.js lacks %q", want)
 		}
 	}
-	// The verifier: 64 random bytes base64url = 86 characters (43–128).
-	if !strings.Contains(js, "randomB64(64)") {
-		t.Error("the PKCE verifier must be randomB64(64) (86 characters)")
+	// myapps.js no longer runs a flow of its own.
+	for _, bad := range []string{"window.open(", "sessionStorage", "addEventListener('message'", "localStorage"} {
+		if strings.Contains(js, bad) {
+			t.Errorf("myapps.js uses %s: the flow is freshauth.js's", bad)
+		}
 	}
-	// The stored entry is removed before the code is posted.
-	if i, j := strings.Index(js, "sessionStorage.removeItem(FA_KEY)"), strings.Index(js, "code_verifier: pending.verifier"); i < 0 || j < 0 || i > j {
-		t.Error("sessionStorage must be cleared before the POST")
-	}
-	// The password is never stored anywhere but one closure, and never in
-	// a URL.
-	if strings.Contains(js, "localStorage") {
-		t.Error("myapps.js must not use localStorage")
-	}
-	if n := strings.Count(js, "sessionStorage.setItem("); n != 1 {
-		t.Errorf("sessionStorage.setItem used %d times, want exactly once (the PKCE state)", n)
-	}
-	if regexp.MustCompile(`sessionStorage\.setItem\([^)]*(password|pw)`).MatchString(js) {
+	// The password never reaches storage or a URL.
+	if regexp.MustCompile(`sessionStorage\.setItem\([^)]*(password|pw)`).MatchString(js + fa) {
 		t.Error("the password must never reach sessionStorage")
 	}
 	// No inline handlers in generated markup.
 	if regexp.MustCompile(`\son[a-z]+=`).MatchString(js) {
 		t.Error("myapps.js generates inline event handlers")
+	}
+	// people.html loads the opener before myapps.js.
+	pg := webAsset(t, "people.html")
+	if i, j := strings.Index(pg, `src="/static/freshauth.js"`), strings.Index(pg, `src="/static/myapps.js"`); i < 0 || j < 0 || i > j {
+		t.Error("people.html must load freshauth.js before myapps.js")
 	}
 }
 

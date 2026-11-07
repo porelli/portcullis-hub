@@ -17,6 +17,7 @@ import (
 
 const cloudManifest = `name: Cloud
 category: productivity
+ai: {unsupported: "test fixture"}
 auth:
   method: forward-auth
   group_access: true

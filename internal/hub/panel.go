@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/doctor"
 	"github.com/portcullis/hub/internal/settings"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
@@ -146,6 +147,51 @@ type Preview struct {
 	Effect     string                   `json:"effect"`
 	Options    map[string]OptionPreview `json:"options"`
 	Population PopulationView           `json:"population"`
+	// Warnings: what the save does first (AI support switched off by a
+	// policy needing mTLS, G43).
+	Warnings []string `json:"warnings"`
+	// PlanHash (G46) is doctor.Digest of the update (secret values never:
+	// only which secret changes how), this preview and the instance's
+	// stored settings, sign-in mode and access choices it was computed
+	// against. The Portcullis MCP's save_settings requires it and
+	// recomputes it before saving (409 when it differs); the HTTP save
+	// ignores it.
+	PlanHash string `json:"plan_hash"`
+}
+
+// planUpdate is a SettingsUpdate as the plan hash takes it: a secret
+// change only as what it does, never its value.
+type planUpdate struct {
+	SettingsUpdate
+	Secrets map[string]string
+}
+
+// settingsPlanHash is PlanHash (Preview, G46).
+func settingsPlanHash(u SettingsUpdate, p *Preview, stored state.InstanceSettings, signIn string, acc accessAudit) string {
+	pu := planUpdate{SettingsUpdate: u}
+	pu.SettingsUpdate.Secrets = nil
+	if len(u.Secrets) > 0 {
+		pu.Secrets = map[string]string{}
+		for k, c := range u.Secrets {
+			switch {
+			case c.Clear:
+				pu.Secrets[k] = "clear"
+			case c.Generate:
+				pu.Secrets[k] = "generate"
+			default:
+				pu.Secrets[k] = "value"
+			}
+		}
+	}
+	cp := *p
+	cp.PlanHash = ""
+	return doctor.Digest(struct {
+		Update  planUpdate
+		Preview Preview
+		Stored  state.InstanceSettings
+		SignIn  string
+		Access  []any
+	}{pu, cp, stored, signIn, []any{acc.policy, acc.access, acc.mode, acc.tokens}})
 }
 
 // withPlaceholders maps rows the panel sent with the instance's group
@@ -369,6 +415,43 @@ func previewDisplay(kinds *settings.Registry, o *templates.Option, r settings.Re
 // snapshot, which also gives the population every person option is
 // resolved for, under the draft and under the saved configuration.
 func (h *Hub) PreviewSettings(ctx context.Context, id string, u SettingsUpdate) (*Preview, error) {
+	p, _, err := h.previewPlanned(ctx, id, u)
+	return p, err
+}
+
+// planInputs are the stored state a preview was computed against (the
+// plan hash's stored part).
+type planInputs struct {
+	stored state.InstanceSettings
+	signIn string
+	acc    accessAudit
+}
+
+func (in planInputs) digest() string {
+	return doctor.Digest([]any{in.stored, in.signIn, in.acc.policy, in.acc.access, in.acc.mode, in.acc.tokens})
+}
+
+// planInputsLocked reads id's planInputs. Caller holds mu.
+func (h *Hub) planInputsLocked(id string) planInputs {
+	return planInputs{h.st.Settings[id].Clone(), h.st.SignIn[id], h.accessAuditLocked(id)}
+}
+
+// previewPlanned is PreviewSettings, also returning the stored inputs it
+// was computed against.
+func (h *Hub) previewPlanned(ctx context.Context, id string, u SettingsUpdate) (*Preview, planInputs, error) {
+	orig := u
+	var in planInputs
+	p, err := h.previewSettings(ctx, id, u, func() { in = h.planInputsLocked(id) })
+	if err != nil {
+		return nil, in, err
+	}
+	p.PlanHash = settingsPlanHash(orig, p, in.stored, in.signIn, in.acc)
+	return p, in, nil
+}
+
+// previewSettings is PreviewSettings; snap runs under the read lock the
+// preview is computed under (the plan hash's stored inputs).
+func (h *Hub) previewSettings(ctx context.Context, id string, u SettingsUpdate, snap func()) (*Preview, error) {
 	t := h.Template(id)
 	if t == nil {
 		return nil, ErrNotFound
@@ -424,12 +507,16 @@ func (h *Hub) PreviewSettings(ctx context.Context, id string, u SettingsUpdate) 
 	if live == nil {
 		return nil, ErrNotFound
 	}
+	snap()
 	cur := h.st.Settings[id]
 	next, effects, own, _, err := h.nextSettingsLocked(live, cur, parsed)
 	if err != nil {
 		return nil, err
 	}
-	out := &Preview{Effect: settings.Strongest(own...), Options: map[string]OptionPreview{}}
+	out := &Preview{Effect: settings.Strongest(own...), Options: map[string]OptionPreview{}, Warnings: []string{}}
+	if off := h.aiOffForSaveLocked(live, u); len(off) > 0 {
+		out.Warnings = append(out.Warnings, aiOffWarning(id, off))
+	}
 	if live.Enabled {
 		out.Effect = settings.Strongest(effects...)
 	}
@@ -485,7 +572,7 @@ func (h *Hub) PreviewSettings(ctx context.Context, id string, u SettingsUpdate) 
 // The run is not cancelled with the request, and never waits for one in
 // progress (a hook can hold the delivery lock for its whole timeout):
 // busy = queued (TriggerRetry), reported as a busy unit; the panel polls.
-func (h *Hub) RetryDeliveries(ctx context.Context, id, actor string) (*DeliveryReport, error) {
+func (h *Hub) RetryDeliveries(ctx context.Context, id string, actor directory.Actor) (*DeliveryReport, error) {
 	if h.Template(id) == nil {
 		return nil, ErrNotFound
 	}

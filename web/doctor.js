@@ -218,7 +218,12 @@
       }
     }
     if ((f.steps || []).length) h += '<button type="button" class="btn btn-secondary btn-sm" data-dr-explain>Explain</button>';
-    if (f.link && f.link.instance) h += '<button type="button" class="btn btn-secondary btn-sm" data-dr-open="' + esc(f.link.instance) + '" data-dr-option="' + esc(f.link.option || '') + '">Open setting</button>';
+    (f.dismiss || []).forEach(d => {
+      h += '<button type="button" class="btn btn-danger btn-sm" data-dr-dismiss data-dr-dis-inst="' + esc(d.instance) + '" data-dr-dis-comp="' + esc(d.companion) +
+        '" data-dr-dis-user="' + esc(d.user) + '">Dismiss ' + esc(d.user) + '</button>';
+    });
+    if (f.link && f.link.instance && f.link.tab) h += '<button type="button" class="btn btn-secondary btn-sm" data-dr-open-tab="' + esc(f.link.tab) + '" data-dr-open="' + esc(f.link.instance) + '">' + (f.link.tab === 'ai' ? 'Open AI tab' : 'Open app') + '</button>';
+    else if (f.link && f.link.instance) h += '<button type="button" class="btn btn-secondary btn-sm" data-dr-open="' + esc(f.link.instance) + '" data-dr-option="' + esc(f.link.option || '') + '">Open setting</button>';
     h += f.muted ? '<button type="button" class="btn btn-secondary btn-sm" data-dr-unmute>Unmute</button>'
       : '<button type="button" class="btn btn-secondary btn-sm" data-dr-mute>Mute</button>';
     h += '</div>';
@@ -355,6 +360,17 @@
     }
   }
 
+  // dismiss: an app_oauth leaver the Hub couldn't match (T27), once the
+  // administrator dealt with their account in the app.
+  async function dismiss(c, instance, companion, user) {
+    if (!confirm('Dismiss ' + user + '? Only do this once their account was deactivated or deleted in the app: otherwise they keep their access to it.')) return;
+    const out = c.querySelector('[data-dr-op]') || c.querySelector('[data-dr-panel]');
+    try {
+      await window.apiPost('/api/instances/' + enc(instance) + '/ai/dismiss', { user, companion });
+      render(rootEl);
+    } catch (err) { out.innerHTML = window.errorBox(err); }
+  }
+
   // ── scan ───────────────────────────────────────────────────────────
 
   async function scan(btn) {
@@ -393,7 +409,15 @@
       if (t.closest('[data-dr-cancel]')) { if (!(fixes[fp] && fixes[fp].busy)) { delete fixes[fp]; c.querySelector('[data-dr-panel]').innerHTML = ''; } return; }
       if (t.closest('[data-dr-reload]')) { render(el); return; }
       if (t.closest('[data-dr-explain]')) { const s = c.querySelector('[data-dr-steps]'); s.hidden = !s.hidden; return; }
+      // A tab link (AI findings): the app's tab when the page has one
+      // (openAppTab, the AI tab's task), else the app itself.
+      if ((b = t.closest('[data-dr-open-tab]'))) {
+        if (typeof window.openAppTab === 'function') window.openAppTab(b.dataset.drOpen, b.dataset.drOpenTab);
+        else window.openSettingAt(b.dataset.drOpen, '');
+        return;
+      }
       if ((b = t.closest('[data-dr-open]'))) { window.openSettingAt(b.dataset.drOpen, b.dataset.drOption); return; }
+      if ((b = t.closest('[data-dr-dismiss]'))) { dismiss(c, b.dataset.drDisInst, b.dataset.drDisComp, b.dataset.drDisUser); return; }
       if (t.closest('[data-dr-mute]')) { openMute(fp); return; }
       if (t.closest('[data-dr-mute-go]')) { mute(fp, true); return; }
       if (t.closest('[data-dr-unmute]')) { mute(fp, false); }

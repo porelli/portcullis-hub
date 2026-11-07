@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/templates"
 )
 
@@ -29,7 +30,7 @@ type CreateResult struct {
 // without Users & Groups the groups are a warning. A failure creating a
 // group removes the instance and the groups created so far. Takes the
 // per-instance lock; audited as instance.create.
-func (h *Hub) CreateInstanceAs(templateID, id string, hosts map[string]string, actor string) (res *CreateResult, err error) {
+func (h *Hub) CreateInstanceAs(templateID, id string, hosts map[string]string, actor directory.Actor) (res *CreateResult, err error) {
 	res = &CreateResult{}
 	defer func() {
 		detail := "template=" + templateID
@@ -41,7 +42,7 @@ func (h *Hub) CreateInstanceAs(templateID, id string, hosts map[string]string, a
 		}
 		h.auditOp(actor, "instance.create", id, detail, err)
 	}()
-	if strings.TrimSpace(actor) == "" {
+	if strings.TrimSpace(actor.User) == "" {
 		return res, statusErr(400, "no signed-in user to audit the change as")
 	}
 	if !templates.InstanceIDRe.MatchString(id) {
@@ -71,7 +72,7 @@ func (h *Hub) CreateInstanceAs(templateID, id string, hosts map[string]string, a
 	}
 	if groupsAPI != nil && len(groups) > 0 {
 		if err := groupsAPI.ResolveActor(context.Background(), actor); err != nil {
-			return res, fmt.Errorf("the acting admin %q can't create the instance's groups — nothing was created: %w", actor, err)
+			return res, fmt.Errorf("the acting admin %q can't create the instance's groups — nothing was created: %w", actor.User, err)
 		}
 	}
 	if err := h.CreateInstance(templateID, id, hosts); err != nil {
@@ -116,7 +117,7 @@ func (h *Hub) CreateInstanceAs(templateID, id string, hosts map[string]string, a
 	if v, ok := h.InstanceView(id); ok {
 		res.InstanceView = v
 	}
-	log.Printf("instance %s of %s created by %s", id, templateID, actor)
+	log.Printf("instance %s of %s created by %s", id, templateID, actor.User)
 	return res, nil
 }
 

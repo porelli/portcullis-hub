@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/domains"
 	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/state"
@@ -494,10 +495,10 @@ func (h *Hub) knownLocked(name string) bool {
 // EnrollDomain enrolls name (contract §12.3): validated against the known
 // domains and hosts, forwarded once with the credentials, recorded without
 // them. Audited as domain.enroll (provider only).
-func (h *Hub) EnrollDomain(ctx context.Context, actor, name, provider string, creds map[string]string) (d domains.Domain, err error) {
+func (h *Hub) EnrollDomain(ctx context.Context, actor directory.Actor, name, provider string, creds map[string]string) (d domains.Domain, err error) {
 	name = NormalizeHost(name)
 	defer func() { h.auditOp(actor, "domain.enroll", name, providerDetail(provider), err) }()
-	if strings.TrimSpace(actor) == "" {
+	if strings.TrimSpace(actor.User) == "" {
 		return d, statusErr(400, "no signed-in user to audit the change as")
 	}
 	if !templates.ValidHostname(name) {
@@ -551,10 +552,10 @@ func (h *Hub) EnrollDomain(ctx context.Context, actor, name, provider string, cr
 
 // ReplaceDomainToken replaces an enrolled domain's credentials. Audited as
 // domain.token (provider only).
-func (h *Hub) ReplaceDomainToken(ctx context.Context, actor, name, provider string, creds map[string]string) (d domains.Domain, err error) {
+func (h *Hub) ReplaceDomainToken(ctx context.Context, actor directory.Actor, name, provider string, creds map[string]string) (d domains.Domain, err error) {
 	name = NormalizeHost(name)
 	defer func() { h.auditOp(actor, "domain.token", name, providerDetail(provider), err) }()
-	if strings.TrimSpace(actor) == "" {
+	if strings.TrimSpace(actor.User) == "" {
 		return d, statusErr(400, "no signed-in user to audit the change as")
 	}
 	if !knownProviders[provider] {
@@ -624,10 +625,10 @@ func (h *Hub) domainUsersLocked(name string) []string {
 // hostname on it (the Hub is the authority on assignments, §12.3).
 // Audited as domain.delete. warning: DNS records the service couldn't
 // remove.
-func (h *Hub) DeleteDomain(ctx context.Context, actor, name string) (warning string, err error) {
+func (h *Hub) DeleteDomain(ctx context.Context, actor directory.Actor, name string) (warning string, err error) {
 	name = NormalizeHost(name)
 	defer func() { h.auditOp(actor, "domain.delete", name, warning, err) }()
-	if strings.TrimSpace(actor) == "" {
+	if strings.TrimSpace(actor.User) == "" {
 		return "", statusErr(400, "no signed-in user to audit the change as")
 	}
 	h.domainOpMu.Lock()

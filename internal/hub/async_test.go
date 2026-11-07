@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/portcullis/hub/internal/directory"
 )
 
 // waitOp polls id's op record until operation opID finished.
@@ -43,7 +45,7 @@ func TestAsyncInstanceOps(t *testing.T) {
 			prev(p)
 		}
 	}
-	op, err := h.StartBackup("grafana-b", "root")
+	op, err := h.StartBackup("grafana-b", directory.Human("root"))
 	if err != nil || op.Op != OpBackup || op.Instance != "grafana-b" || len(op.OpID) != 16 {
 		t.Fatalf("StartBackup = %+v %v", op, err)
 	}
@@ -56,10 +58,10 @@ func TestAsyncInstanceOps(t *testing.T) {
 		t.Errorf("record while running = %+v", r)
 	}
 	// Concurrent requests on the same instance: busy, at once.
-	if _, err := h.StartBackup("grafana-b", "root"); err == nil || errStatus(err) != 409 {
+	if _, err := h.StartBackup("grafana-b", directory.Human("root")); err == nil || errStatus(err) != 409 {
 		t.Errorf("second backup = %v, want 409 busy", err)
 	}
-	if _, err := h.StartDelete("grafana-b", "grafana-b", "root"); err == nil || errStatus(err) != 409 {
+	if _, err := h.StartDelete("grafana-b", "grafana-b", directory.Human("root")); err == nil || errStatus(err) != 409 {
 		t.Errorf("delete while backing up = %v, want 409 busy", err)
 	}
 	close(release)
@@ -75,12 +77,14 @@ func TestAsyncInstanceOps(t *testing.T) {
 
 	// Synchronous refusals: nothing is started, no record replaced.
 	for name, start := range map[string]func() (*AsyncOp, error){
-		"unknown backup":      func() (*AsyncOp, error) { return h.StartBackup("nope", "root") },
-		"untyped delete":      func() (*AsyncOp, error) { return h.StartDelete("grafana-b", "grafana", "root") },
-		"bad archive":         func() (*AsyncOp, error) { return h.StartRestore("grafana-b", "../x.tar", "root") },
-		"missing archive":     func() (*AsyncOp, error) { return h.StartRestore("grafana-b", "grafana-b/20201102T153000Z.tar", "root") },
-		"restore onto exists": func() (*AsyncOp, error) { return h.StartRestoreAs(archive, "grafana-b", "root", nil) },
-		"bad new id":          func() (*AsyncOp, error) { return h.StartRestoreAs(archive, "Bad", "root", nil) },
+		"unknown backup": func() (*AsyncOp, error) { return h.StartBackup("nope", directory.Human("root")) },
+		"untyped delete": func() (*AsyncOp, error) { return h.StartDelete("grafana-b", "grafana", directory.Human("root")) },
+		"bad archive":    func() (*AsyncOp, error) { return h.StartRestore("grafana-b", "../x.tar", directory.Human("root")) },
+		"missing archive": func() (*AsyncOp, error) {
+			return h.StartRestore("grafana-b", "grafana-b/20201102T153000Z.tar", directory.Human("root"))
+		},
+		"restore onto exists": func() (*AsyncOp, error) { return h.StartRestoreAs(archive, "grafana-b", directory.Human("root"), nil) },
+		"bad new id":          func() (*AsyncOp, error) { return h.StartRestoreAs(archive, "Bad", directory.Human("root"), nil) },
 	} {
 		if op, err := start(); err == nil || op != nil || statusOf(err) < 400 || statusOf(err) >= 500 {
 			t.Errorf("%s = %+v %v, want a synchronous 4xx", name, op, err)
@@ -97,7 +101,7 @@ func TestAsyncInstanceOps(t *testing.T) {
 	if err := os.WriteFile(archivePath(f, bad), []byte("not a tar"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	op2, err := h.StartRestore("grafana-b", bad, "root")
+	op2, err := h.StartRestore("grafana-b", bad, directory.Human("root"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +110,7 @@ func TestAsyncInstanceOps(t *testing.T) {
 	}
 
 	// Restore into a new id: the new id's record.
-	op3, err := h.StartRestoreAs(archive, "grafana-c", "root", nil)
+	op3, err := h.StartRestoreAs(archive, "grafana-c", directory.Human("root"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +119,7 @@ func TestAsyncInstanceOps(t *testing.T) {
 	}
 
 	// Delete: the record outlives the instance.
-	op4, err := h.StartDelete("grafana-b", "grafana-b", "root")
+	op4, err := h.StartDelete("grafana-b", "grafana-b", directory.Human("root"))
 	if err != nil {
 		t.Fatal(err)
 	}

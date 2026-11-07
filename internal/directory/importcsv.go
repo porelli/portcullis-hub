@@ -474,6 +474,10 @@ func (s *Service) reviewRow(ctx context.Context, c *Caller, user string, row []s
 		// New user validation
 		rr.Status = "new"
 
+		if s.reservedName(user) {
+			rr.Problems = append(rr.Problems, reservedMsg(user))
+		}
+
 		// Check invite permission
 		if !c.Admin && !c.Perms[PermInvite] {
 			rr.Problems = append(rr.Problems, "creating new users requires the invite permission")

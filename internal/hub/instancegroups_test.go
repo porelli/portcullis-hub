@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/portcullis/hub/internal/directory"
 )
 
 // otherOwnPort moves template other off grafana's default port (both can
@@ -23,7 +25,7 @@ func TestEnableAsCreatesMissingDefaultGroups(t *testing.T) {
 	f := newFixture(t)
 	g := &fakeGroups{}
 	f.h.SetGroups(g)
-	res, err := f.h.EnableAs("grafana", "alice")
+	res, err := f.h.EnableAs("grafana", directory.Human("alice"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,7 +44,7 @@ func TestEnableAsKeepsExistingGroups(t *testing.T) {
 	f := newFixture(t)
 	g := &fakeGroups{existing: map[string]bool{"users_grafana": true}}
 	f.h.SetGroups(g)
-	res, err := f.h.EnableAs("grafana", "alice")
+	res, err := f.h.EnableAs("grafana", directory.Human("alice"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +55,7 @@ func TestEnableAsKeepsExistingGroups(t *testing.T) {
 		t.Errorf("result = %+v", res)
 	}
 	// Enabled already, all there: nothing.
-	if res, err := f.h.EnableAs("grafana", "alice"); err != nil || len(res.GroupsCreated)+len(res.Warnings) != 0 || len(g.Calls()) != 1 {
+	if res, err := f.h.EnableAs("grafana", directory.Human("alice")); err != nil || len(res.GroupsCreated)+len(res.Warnings) != 0 || len(g.Calls()) != 1 {
 		t.Errorf("again: %+v %v %v", res, err, g.Calls())
 	}
 }
@@ -65,7 +67,7 @@ func TestEnableAsInstanceGroups(t *testing.T) {
 	}
 	g := &fakeGroups{}
 	f.h.SetGroups(g)
-	if _, err := f.h.EnableAs("grafana-b", "alice"); err != nil {
+	if _, err := f.h.EnableAs("grafana-b", directory.Human("alice")); err != nil {
 		t.Fatal(err)
 	}
 	if got := strings.Join(g.Calls(), ","); got != "+users_grafana-b:alice,+admin_grafana-b:alice" {
@@ -80,7 +82,7 @@ func TestEnableAsActorRefused(t *testing.T) {
 	f := newFixture(t)
 	g := &fakeGroups{actorErr: errors.New("not an administrator")}
 	f.h.SetGroups(g)
-	if _, err := f.h.EnableAs("grafana", "dana"); err == nil || !strings.Contains(err.Error(), "nothing was changed") {
+	if _, err := f.h.EnableAs("grafana", directory.Human("dana")); err == nil || !strings.Contains(err.Error(), "nothing was changed") {
 		t.Fatalf("err = %v", err)
 	}
 	if f.h.IsEnabled("grafana") || len(g.Calls()) != 0 {
@@ -97,7 +99,7 @@ func TestEnableAsGroupFailureNotEnabled(t *testing.T) {
 		return nil
 	}}
 	f.h.SetGroups(g)
-	res, err := f.h.EnableAs("grafana", "alice")
+	res, err := f.h.EnableAs("grafana", directory.Human("alice"))
 	if err == nil || !strings.Contains(err.Error(), "admin_grafana") {
 		t.Fatalf("err = %v", err)
 	}
@@ -116,18 +118,18 @@ func TestEnableAsWarnings(t *testing.T) {
 	otherOwnPort(t, f)
 	g := &fakeGroups{}
 	f.h.SetGroups(g)
-	res, err := f.h.EnableAs("grafana", "")
+	res, err := f.h.EnableAs("grafana", directory.Human(""))
 	if err != nil || len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], "no signed-in user") || len(g.Calls()) != 0 || !f.h.IsEnabled("grafana") {
 		t.Errorf("no actor: %+v %v %v", res, err, g.Calls())
 	}
 	g.missingErr = errors.New("lldap down")
-	res, err = f.h.EnableAs("other", "alice")
+	res, err = f.h.EnableAs("other", directory.Human("alice"))
 	if err != nil || len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], "Create missing groups") || len(g.Calls()) != 0 {
 		t.Errorf("check failing: %+v %v %v", res, err, g.Calls())
 	}
 
 	f2 := newFixture(t)
-	res, err = f2.h.EnableAs("grafana", "alice")
+	res, err = f2.h.EnableAs("grafana", directory.Human("alice"))
 	if err != nil || len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], "not available") {
 		t.Errorf("no users & groups: %+v %v", res, err)
 	}
@@ -147,7 +149,7 @@ func TestEnableAsSharedGroupOnlyWarned(t *testing.T) {
 	}
 	g := &fakeGroups{}
 	f.h.SetGroups(g)
-	res, err := f.h.EnableAs("shared", "alice")
+	res, err := f.h.EnableAs("shared", directory.Human("alice"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +168,7 @@ func TestMissingGroupsCreate(t *testing.T) {
 	g := &fakeGroups{existing: map[string]bool{"users_grafana": true, "admin_grafana": true, "users_other": true}}
 	f.h.SetGroups(g)
 	for _, id := range []string{"grafana", "other"} {
-		if _, err := f.h.EnableAs(id, "alice"); err != nil {
+		if _, err := f.h.EnableAs(id, directory.Human("alice")); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -184,19 +186,19 @@ func TestMissingGroupsCreate(t *testing.T) {
 	}
 	// The actor must resolve: nothing created.
 	g.actorErr = errors.New("not an administrator")
-	if _, err := f.h.CreateMissingGroups(context.Background(), nil, "dana"); err == nil || len(g.Calls()) != 0 {
+	if _, err := f.h.CreateMissingGroups(context.Background(), nil, directory.Human("dana")); err == nil || len(g.Calls()) != 0 {
 		t.Errorf("actor: %v %v", err, g.Calls())
 	}
 	g.actorErr = nil
-	if _, err := f.h.CreateMissingGroups(context.Background(), nil, ""); err == nil {
+	if _, err := f.h.CreateMissingGroups(context.Background(), nil, directory.Human("")); err == nil {
 		t.Error("no actor accepted")
 	}
 	// One instance, then all.
-	res, err := f.h.CreateMissingGroups(context.Background(), []string{"other"}, "alice")
+	res, err := f.h.CreateMissingGroups(context.Background(), []string{"other"}, directory.Human("alice"))
 	if err != nil || len(res) != 1 || strings.Join(res[0].Created, ",") != "users_other" {
 		t.Fatalf("other: %+v %v", res, err)
 	}
-	res, err = f.h.CreateMissingGroups(context.Background(), nil, "alice")
+	res, err = f.h.CreateMissingGroups(context.Background(), nil, directory.Human("alice"))
 	if err != nil || len(res) != 2 || strings.Join(res[0].Created, ",") != "users_grafana" || len(res[1].Created) != 0 {
 		t.Fatalf("all: %+v %v", res, err)
 	}
@@ -207,7 +209,7 @@ func TestMissingGroupsCreate(t *testing.T) {
 		t.Errorf("still missing: %+v", rep)
 	}
 	// Not enabled: refused per instance.
-	if res, _ := f.h.CreateMissingGroups(context.Background(), []string{"nope"}, "alice"); len(res) != 1 || res[0].Error == "" {
+	if res, _ := f.h.CreateMissingGroups(context.Background(), []string{"nope"}, directory.Human("alice")); len(res) != 1 || res[0].Error == "" {
 		t.Errorf("unknown: %+v", res)
 	}
 }

@@ -231,3 +231,32 @@
 .ma-pw { font-size: 1.25rem; letter-spacing: 0.05em; background: #0f172a; border: 1px solid #334155; border-radius: 0.375rem; padding: 0.5rem 0.75rem; user-select: all; }
 .ma-pw-note { font-size: 0.875rem; margin: 0 0 0.5rem; }
 .ma-pw-actions { display: flex; justify-content: flex-end; margin-top: 0.75rem; }
+/* Connect your AI (myai.js, people.<domain> My apps) */
+.mai-card { margin-bottom: 1rem; }
+.mai-head { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+.mai-what summary { cursor: pointer; color: #60a5fa; font-size: 0.8125rem; }
+.mai-what p { max-width: 36rem; font-size: 0.8125rem; margin: 0.25rem 0 0; }
+.mai-intro { font-size: 0.875rem; margin: 0.5rem 0 0.75rem; max-width: 52rem; }
+.mai-sec { border-top: 1px solid #334155; padding: 0.625rem 0; }
+.mai-sec-title { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; color: #94a3b8; margin-bottom: 0.375rem; }
+.mai-sec p { font-size: 0.875rem; margin: 0.25rem 0; }
+.mai-url, .mai-cmd { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.mai-card code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.8125rem; background: #0f172a; border: 1px solid #334155; border-radius: 0.25rem; padding: 0.0625rem 0.375rem; overflow-wrap: anywhere; }
+.mai-tabs { margin: 0.5rem 0 0.25rem; }
+.mai-panel { font-size: 0.875rem; padding: 0.25rem 0; }
+.mai-steps { margin: 0 0 0 1.25rem; display: grid; gap: 0.25rem; }
+.mai-note { font-size: 0.8125rem; }
+.mai-apps { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.5rem; }
+.mai-app-row { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; font-size: 0.875rem; }
+.mai-app-name { min-width: 8rem; color: #f1f5f9; }
+.mai-steps-box summary { cursor: pointer; color: #60a5fa; font-size: 0.8125rem; }
+.mai-steps-box > *:not(summary) { margin-left: 0.75rem; }
+.mai-conns { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.375rem; font-size: 0.875rem; }
+.mai-conn-name { color: #f1f5f9; }
+.mai-activity { display: flex; gap: 0.75rem; align-items: baseline; flex-wrap: wrap; font-size: 0.875rem; margin-top: 0.5rem; }
+.mai-act-title { color: #94a3b8; min-width: 9rem; }
+.mai-lines { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 0.25rem 1rem; }
+.mai-all summary { cursor: pointer; color: #60a5fa; font-size: 0.8125rem; }
+.mai-mark.ok { color: #4ade80; }
+.mai-mark.warn { color: #f59e0b; }
+.mai-mark.bad { color: #fca5a5; }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -35,6 +36,10 @@ var lldapBuiltins = map[string]bool{
 // (no leading, trailing or doubled '_'), so the header mapping ('_' → '-')
 // is injective and always gives a valid header name. Length: maxFieldName.
 var fieldNameRe = regexp.MustCompile(`^[a-z][a-z0-9]*(_[a-z0-9]+)*$`)
+
+// IsFieldName reports whether name is a valid custom field name (the
+// Portcullis MCP checks names before a confirmation shows them).
+func IsFieldName(name string) bool { return validFieldName(name) }
 
 // maxFieldName bounds a field name's length.
 const maxFieldName = 31
@@ -239,8 +244,8 @@ func (s *Service) PatchField(ctx context.Context, c *Caller, name string, p Fiel
 		// Check if turning off AdminOnly while field is guarded
 		if existing.AdminOnly && !f.AdminOnly {
 			guarded := s.guardedFields(cfg)
-			if group, ok := guarded[f.Name]; ok {
-				return refuse("cannot turn off admin-only: field is used by %s (a protected/permission/app-admin group)", group)
+			if groups, ok := guarded[f.Name]; ok {
+				return refuse("cannot turn off admin-only: field is used by %s (a protected/permission/app-admin group)", strings.Join(groups, ", "))
 			}
 		}
 
@@ -379,28 +384,25 @@ func (s *Service) DeleteField(ctx context.Context, c *Caller, name, confirm stri
 	})
 }
 
-// guardedFields returns a map of field → group name for fields that are referenced
-// by rules of protected groups (admin groups), permission groups, or app admin groups.
-// These fields must remain admin-only.
-func (s *Service) guardedFields(cfg *Config) map[string]string {
-	guarded := make(map[string]string)
-
-	// Guarding groups: administrator, permission and app admin groups.
-	guardingGroups := s.guardingGroups(cfg)
-
-	// Find fields used by guarding groups that have rules
-	for groupName := range guardingGroups {
+// guardedFields maps each field referenced by the rule of a guarding
+// group (administrator, permission, app admin or privileged-value group)
+// to those groups, sorted. These fields must remain admin-only.
+func (s *Service) guardedFields(cfg *Config) map[string][]string {
+	guarded := make(map[string][]string)
+	for groupName := range s.guardingGroups(cfg) {
 		gc := cfg.Groups[groupName]
 		if gc == nil || gc.Rule == nil {
 			continue
 		}
 		for _, field := range rules.Fields(gc.Rule) {
-			if _, already := guarded[field]; !already {
-				guarded[field] = groupName
+			if !slices.Contains(guarded[field], groupName) {
+				guarded[field] = append(guarded[field], groupName)
 			}
 		}
 	}
-
+	for f := range guarded {
+		sort.Strings(guarded[f])
+	}
 	return guarded
 }
 

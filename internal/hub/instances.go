@@ -307,6 +307,9 @@ func (h *Hub) CreateInstance(templateID, id string, hosts map[string]string) err
 	if c := templates.CoreContainerClash(id, t.Services); c != "" {
 		return statusErr(409, "instance id %s: its container %s would be a core service's container name", id, c)
 	}
+	if err := aliasesFitInstance(t, id); err != nil {
+		return err
+	}
 	if hosts == nil {
 		var err error
 		if hosts, err = defaultHostsFor(t, id, h.cfg.Domain); err != nil {
@@ -324,6 +327,7 @@ func (h *Hub) CreateInstance(templateID, id string, hosts map[string]string) err
 	h.rebuildLocked()
 	if v := h.findLocked(id); v != nil {
 		h.seedSettingsLocked(v)
+		h.seedAIProvidersLocked(v)
 	}
 	h.saveLocked()
 	log.Printf("instance %s of %s created (hosts %v)", id, templateID, view.Hosts)

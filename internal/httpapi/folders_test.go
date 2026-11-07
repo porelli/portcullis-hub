@@ -23,6 +23,7 @@ import (
 const folderAppManifest = `name: Photos
 category: media
 instances: multi
+ai: {unsupported: "test fixture"}
 auth:
   method: header-auth
   group_access: true

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/settings"
 	"github.com/portcullis/hub/internal/state"
@@ -21,6 +22,7 @@ import (
 const jellyfinManifest = `name: Jellyfin
 category: media
 instances: multi
+ai: {unsupported: "test fixture"}
 auth:
   method: header-auth
   group_access: true
@@ -432,7 +434,7 @@ func TestSaveSettingsRefusesFolderRefs(t *testing.T) {
 		{Values: vals("movies", "folder:media")},
 		{Values: vals("tv", "folder:media/tv")},
 	} {
-		if _, err := f.h.SaveSettings("jellyfin", u, "admin"); statusOf(err) != 409 || !strings.Contains(err.Error(), assign) {
+		if _, err := f.h.SaveSettings("jellyfin", u, directory.Human("admin")); statusOf(err) != 409 || !strings.Contains(err.Error(), assign) {
 			t.Errorf("save %v = %v", u.Values, err)
 		}
 		if _, err := f.h.PreviewSettings(ctx, "jellyfin", u); statusOf(err) != 409 || !strings.Contains(err.Error(), assign) {
@@ -441,12 +443,12 @@ func TestSaveSettingsRefusesFolderRefs(t *testing.T) {
 	}
 	setStored(f, "jellyfin", "movies", "folder:media", "library", "folder:media/lib")
 	for _, u := range []SettingsUpdate{{Values: vals("movies", "/srv/films")}, {Values: vals("movies", nil)}} {
-		if _, err := f.h.SaveSettings("jellyfin", u, "admin"); statusOf(err) != 409 || !strings.Contains(err.Error(), assign) {
+		if _, err := f.h.SaveSettings("jellyfin", u, directory.Human("admin")); statusOf(err) != 409 || !strings.Contains(err.Error(), assign) {
 			t.Errorf("replace %s = %v", u.Values["movies"], err)
 		}
 	}
 	set := "set by shared folder Family media (gid 60001)"
-	if _, err := f.h.SaveSettings("jellyfin", SettingsUpdate{Values: vals("pgid", 1001)}, "admin"); statusOf(err) != 409 || !strings.Contains(err.Error(), set) {
+	if _, err := f.h.SaveSettings("jellyfin", SettingsUpdate{Values: vals("pgid", 1001)}, directory.Human("admin")); statusOf(err) != 409 || !strings.Contains(err.Error(), set) {
 		t.Errorf("pgid = %v", err)
 	}
 	if _, err := f.h.PreviewSettings(ctx, "jellyfin", SettingsUpdate{Values: vals("pgid", 1001)}); statusOf(err) != 409 || !strings.Contains(err.Error(), set) {
@@ -472,7 +474,7 @@ func TestSaveSettingsRefusesFolderGIDRange(t *testing.T) {
 	reserved := "gid 60000–60999 is reserved for shared folder groups"
 	for _, key := range []string{"pgid", "media_gid"} {
 		for _, n := range []int{60000, 60999} {
-			if _, err := f.h.SaveSettings("jellyfin", SettingsUpdate{Values: vals(key, n)}, "admin"); statusOf(err) != 409 || !strings.Contains(err.Error(), reserved) {
+			if _, err := f.h.SaveSettings("jellyfin", SettingsUpdate{Values: vals(key, n)}, directory.Human("admin")); statusOf(err) != 409 || !strings.Contains(err.Error(), reserved) {
 				t.Errorf("save %s=%d = %v", key, n, err)
 			}
 			if _, err := f.h.PreviewSettings(context.Background(), "jellyfin", SettingsUpdate{Values: vals(key, n)}); statusOf(err) != 409 || !strings.Contains(err.Error(), reserved) {
@@ -669,14 +671,14 @@ func TestRestoreClearsMissingFolderRefs(t *testing.T) {
 	simulateCompose(f, 0)
 	addFolder(t, f, d, "gone", "Gone", "/srv/gone", 60002)
 	setStored(f, "jellyfin", "movies", "folder:gone", "tv", "folder:media/tv")
-	entry, err := f.h.BackupInstance("jellyfin", "root")
+	entry, err := f.h.BackupInstance("jellyfin", directory.Human("root"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	f.h.mu.Lock()
 	delete(f.h.st.Folders, "gone")
 	f.h.mu.Unlock()
-	res, err := f.h.RestoreInstance("jellyfin", entry.Archive, "root")
+	res, err := f.h.RestoreInstance("jellyfin", entry.Archive, directory.Human("root"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -689,7 +691,7 @@ func TestRestoreClearsMissingFolderRefs(t *testing.T) {
 	if _, ok := v["movies"]; ok || v["tv"] != "folder:media/tv" {
 		t.Errorf("restored values = %v", v)
 	}
-	res, err = f.h.RestoreInstanceAs(entry.Archive, "jellyfin-c", "root")
+	res, err = f.h.RestoreInstanceAs(entry.Archive, "jellyfin-c", directory.Human("root"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -718,7 +720,7 @@ func TestDeleteInstanceDropsAssignments(t *testing.T) {
 	fo.WriteConfirmed = map[string]bool{"jellyfin-b/tv": true, "jellyfin/tv": true}
 	f.h.st.Folders["media"] = fo
 	f.h.mu.Unlock()
-	if _, err := f.h.DeleteInstance("jellyfin-b", "jellyfin-b", "root"); err != nil {
+	if _, err := f.h.DeleteInstance("jellyfin-b", "jellyfin-b", directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	for _, u := range f.h.Folders()[0].Uses {
@@ -889,7 +891,7 @@ func TestFolderChangeCleared(t *testing.T) {
 	if err := f.h.Enable("jellyfin"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.h.DeleteInstance("jellyfin-b", "jellyfin-b", "root"); err != nil {
+	if _, err := f.h.DeleteInstance("jellyfin-b", "jellyfin-b", directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	if ch := f.h.FolderChanges(); len(ch) != 0 {

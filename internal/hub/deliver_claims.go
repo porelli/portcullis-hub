@@ -152,7 +152,10 @@ type claimPlan struct {
 // directory unavailable — skipped, nothing cleared). Caller holds mu
 // (read).
 func (h *Hub) buildClaimsLocked(t *templates.Template, m *directory.Membership) claimPlan {
-	plan := claimPlan{clients: map[string][]keycloak.SettingClaim{}, all: t.NamesFor(t.ID).Clients}
+	// Never the AI page's ai_client (EnsureAIClient's: exactly the username
+	// mapper; EnsureSettingClaims refuses it, G9/G10).
+	ai := instanceAIClientIDs(t)
+	plan := claimPlan{clients: map[string][]keycloak.SettingClaim{}, all: withoutAIClients(t, t.NamesFor(t.ID).Clients)}
 	opts := claimOptions(t)
 	if len(opts) == 0 {
 		return plan
@@ -176,6 +179,10 @@ func (h *Hub) buildClaimsLocked(t *templates.Template, m *directory.Membership) 
 			cid := t.InstanceClientID(d.Claim.Client)
 			if cid == "" {
 				out.err = fmt.Errorf("setting %s: claim %s names client %s, which the template doesn't declare", o.Key, d.Claim.Name, d.Claim.Client)
+				break
+			}
+			if ai[cid] {
+				out.err = fmt.Errorf("setting %s: claim %s names client %s, the AI page's MCP client, which carries no setting claims", o.Key, d.Claim.Name, d.Claim.Client)
 				break
 			}
 			plan.clients[cid] = append(plan.clients[cid], keycloak.SettingClaim{Attr: out.attr, Claim: d.Claim.Name, JSONType: d.Claim.JSONType})

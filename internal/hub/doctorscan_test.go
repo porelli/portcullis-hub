@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/doctor"
 	"github.com/portcullis/hub/internal/folderfix"
@@ -164,11 +165,11 @@ func TestDoctorScanBusy(t *testing.T) {
 		}
 		return d.run(s, out)
 	}
-	if _, err := f.h.StartDoctorScan("admin"); err != nil {
+	if _, err := f.h.StartDoctorScan(directory.Human("admin")); err != nil {
 		t.Fatal(err)
 	}
 	<-entered
-	if _, err := f.h.StartDoctorScan("admin"); errStatus(err) != 409 {
+	if _, err := f.h.StartDoctorScan(directory.Human("admin")); errStatus(err) != 409 {
 		t.Errorf("second scan: %v", err)
 	}
 	close(gate)
@@ -176,7 +177,7 @@ func TestDoctorScanBusy(t *testing.T) {
 		t.Fatalf("op = %+v", r)
 	}
 	// Free again.
-	if _, err := f.h.StartDoctorScan("admin"); err != nil {
+	if _, err := f.h.StartDoctorScan(directory.Human("admin")); err != nil {
 		t.Errorf("third scan: %v", err)
 	}
 	waitDoctorOp(t, f.h)
@@ -185,14 +186,14 @@ func TestDoctorScanBusy(t *testing.T) {
 func TestDoctorScanNeedsDirectory(t *testing.T) {
 	f, _ := scanFixture(t)
 	f.h.SetPeople(nil)
-	if _, err := f.h.StartDoctorScan("admin"); errStatus(err) != 503 {
+	if _, err := f.h.StartDoctorScan(directory.Human("admin")); errStatus(err) != 503 {
 		t.Errorf("err = %v", err)
 	}
 }
 
 func TestScanCacheSurvivesRestart(t *testing.T) {
 	f, _ := scanFixture(t)
-	if _, err := f.h.StartDoctorScan("admin"); err != nil {
+	if _, err := f.h.StartDoctorScan(directory.Human("admin")); err != nil {
 		t.Fatal(err)
 	}
 	if r := waitDoctorOp(t, f.h); !r.OK {
@@ -521,11 +522,11 @@ func TestDoctorScanAudited(t *testing.T) {
 	f, d := scanFixture(t)
 	audit := &fakeAudit{}
 	f.h.SetAudit(audit)
-	if _, err := f.h.StartDoctorScan(""); errStatus(err) != 401 {
+	if _, err := f.h.StartDoctorScan(directory.Human("")); errStatus(err) != 401 {
 		t.Fatalf("no actor: %v", err)
 	}
 	f.h.SetPeople(nil)
-	if _, err := f.h.StartDoctorScan("admin"); errStatus(err) != 503 {
+	if _, err := f.h.StartDoctorScan(directory.Human("admin")); errStatus(err) != 503 {
 		t.Fatalf("no directory: %v", err)
 	}
 	f.h.SetPeople(newFakePeople())
@@ -542,11 +543,11 @@ func TestDoctorScanAudited(t *testing.T) {
 		}
 		return d.run(s, out)
 	}
-	if _, err := f.h.StartDoctorScan("admin"); err != nil {
+	if _, err := f.h.StartDoctorScan(directory.Human("admin")); err != nil {
 		t.Fatal(err)
 	}
 	<-entered
-	if _, err := f.h.StartDoctorScan("admin"); errStatus(err) != 409 {
+	if _, err := f.h.StartDoctorScan(directory.Human("admin")); errStatus(err) != 409 {
 		t.Fatalf("busy: %v", err)
 	}
 	unlocked.Do(func() { close(gate) })

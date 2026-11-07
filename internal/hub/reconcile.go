@@ -141,6 +141,8 @@ func computeDrift(enabled, known, snapshot map[string]bool, counts map[string]pr
 // Reconcile checks state against Docker once, stores and returns the report.
 // It never changes anything; drift is logged when it appears or clears.
 func (h *Hub) Reconcile(ctx context.Context) DriftReport {
+	// Revoking AI credentials are retried at every reconcile (§15.5).
+	h.TriggerAIReconcile()
 	rep := DriftReport{CheckedAt: time.Now().UTC(), Items: []Drift{}}
 	if h.engine == nil {
 		rep.Error = "docker engine not configured"
@@ -159,6 +161,8 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 	type running struct {
 		id, service string
 		labels      map[string]string
+		// mcpAliases: its portcullis-mcp- names on portcullis-proxy.
+		mcpAliases []string
 	}
 	var live []running
 	for _, c := range cs {
@@ -194,7 +198,13 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 			if _, ok := c.Labels["traefik.http.routers."+PublicRouterName(id)+".rule"]; ok {
 				havePublic[id] = true
 			}
-			live = append(live, running{id, c.Labels[docker.LabelService], c.Labels})
+			var aliases []string
+			for _, n := range c.Networks[aiProxyNetwork] {
+				if strings.HasPrefix(strings.ToLower(n), templates.MCPNamePrefix) {
+					aliases = append(aliases, strings.ToLower(n))
+				}
+			}
+			live = append(live, running{id, c.Labels[docker.LabelService], c.Labels, aliases})
 		}
 		counts[id] = pc
 	}
@@ -207,6 +217,7 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 	blockedPublic := map[string]string{}
 	desired := map[string]map[string]map[string]string{}
 	expectedKeys := map[string]map[string]map[string]bool{}
+	mcpAliases := map[string]map[string]map[string]bool{}
 	signInSet := map[string]bool{} // the Hub sets the routers' middlewares
 	nativeOnly := map[string]bool{}
 	for i := range h.instances {
@@ -224,6 +235,7 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 			if k, err := h.expectedTraefikKeysLocked(t); err == nil {
 				expectedKeys[t.ID] = k
 			}
+			mcpAliases[t.ID] = h.desiredMCPAliasesLocked(t)
 			if d, err := h.desiredRouteLabelsLocked(t); err == nil {
 				desired[t.ID] = d
 			} else {
@@ -254,6 +266,33 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 		}
 		if d := diffExposure(c.id, want[c.service], c.labels, signInSet[c.id]); d != "" && exposureDiff[c.id] == "" {
 			exposureDiff[c.id] = c.service + ": " + d
+		}
+		// A portcullis-mcp- alias the Hub doesn't render makes a container
+		// reachable as a companion (§5), and a rendered one missing on a
+		// running companion breaks the gate's path: both exposure drift.
+		if want, ok := mcpAliases[c.id]; ok && exposureDiff[c.id] == "" {
+			var extra, missing []string
+			have := map[string]bool{}
+			for _, a := range c.mcpAliases {
+				have[a] = true
+				if !want[c.service][a] {
+					extra = append(extra, a)
+				}
+			}
+			for a := range want[c.service] {
+				if !have[a] {
+					missing = append(missing, a)
+				}
+			}
+			sort.Strings(extra)
+			sort.Strings(missing)
+			switch {
+			case len(extra) > 0:
+				exposureDiff[c.id] = c.service + ": unexpected network alias " + strings.Join(extra, ", ")
+			case len(missing) > 0:
+				// A switched-on companion the gate can't reach by its alias.
+				exposureDiff[c.id] = c.service + ": missing network alias " + strings.Join(missing, ", ")
+			}
 		}
 		if keys, ok := expectedKeys[c.id]; ok && exposureDiff[c.id] == "" {
 			if extra := extraTraefikKeys(keys[c.service], c.labels); len(extra) > 0 {
@@ -343,6 +382,8 @@ func (h *Hub) RunReconciler(ctx context.Context) {
 	if h.engine != nil {
 		go h.watchEvents(ctx)
 	}
+	go h.runAIReconcile(ctx)
+	go h.runConfirmSweeper(ctx)
 	h.Reconcile(ctx)
 	tick := time.NewTicker(h.cfg.ReconcileInterval)
 	defer tick.Stop()

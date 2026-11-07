@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/settings"
 	"github.com/portcullis/hub/internal/state"
@@ -26,9 +27,9 @@ import (
 // delegate-set value Admin for alice.
 func sharedRoleField(f *fixture) {
 	attrs := policy.BuildUserAttributes([]policy.AttrField{{Name: "grafana_role"}}, map[string]map[string][]string{"alice": {"grafana_role": {"Admin"}}}, nil)
-	f.h.SetDirectory(func(context.Context) ([]policy.Expiring, *policy.UserAttributesDocument, error) {
+	f.h.SetDirectory(dirStateOf(func(context.Context) ([]policy.Expiring, *policy.UserAttributesDocument, error) {
 		return nil, &attrs, nil
-	}, nil)
+	}), nil)
 }
 
 // H7: a freshly enabled instance whose first header delivery has not run
@@ -38,7 +39,7 @@ func TestFieldHeaderNeverReachesFreshInstance(t *testing.T) {
 	f, people, _ := headerFixture(t, nil)
 	sharedRoleField(f)
 	people.set(func(p *fakePeople) { p.err = errors.New("lldap down") })
-	if _, err := f.h.EnableAs(headerID, "root"); err != nil {
+	if _, err := f.h.EnableAs(headerID, directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	settle(f)
@@ -77,9 +78,9 @@ func TestFieldHeaderSuppressedWhenHostsUnknown(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The directory state down (the kept file's fields and users).
-	f.h.SetDirectory(func(context.Context) ([]policy.Expiring, *policy.UserAttributesDocument, error) {
+	f.h.SetDirectory(dirStateOf(func(context.Context) ([]policy.Expiring, *policy.UserAttributesDocument, error) {
 		return nil, nil, errors.New("directory publish failed")
-	}, nil)
+	}), nil)
 	f.h.writePolicyLogged()
 	doc, _ := readAttrs(t, f)
 	if _, ok := doc.Fields["grafana_role"]; ok {
@@ -163,7 +164,7 @@ func TestSecretEnvLineAfterTemplateUpdate(t *testing.T) {
 				t.Errorf("%s: Expert Env shows %s=%q", when, k, v)
 			}
 		}
-		entry, err := f.h.BackupInstance("secretapp", "root")
+		entry, err := f.h.BackupInstance("secretapp", directory.Human("root"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -327,7 +328,7 @@ func TestRestartRefusalLeavesAppRunning(t *testing.T) {
 func TestOptionEnvFailsClosedPerVariable(t *testing.T) {
 	f, _, _ := privFixture(t)
 	const id = "privapp"
-	if _, err := f.h.SaveSettings(id, SettingsUpdate{Values: vals("motd", "hello", "banner", "world")}, "root"); err != nil {
+	if _, err := f.h.SaveSettings(id, SettingsUpdate{Values: vals("motd", "hello", "banner", "world")}, directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.h.Enable(id); err != nil {
@@ -374,7 +375,7 @@ func TestSaveNeverBlocksOnDeliveryLock(t *testing.T) {
 	}
 	done := make(chan result, 1)
 	go func() {
-		res, err := f.h.SaveSettings(id, SettingsUpdate{Values: vals("motd", "busy save")}, "root")
+		res, err := f.h.SaveSettings(id, SettingsUpdate{Values: vals("motd", "busy save")}, directory.Human("root"))
 		done <- result{res, err}
 	}()
 	var r result
@@ -669,7 +670,7 @@ func TestBackupBlanksByValueOnlyOrphans(t *testing.T) {
 	if err := f.h.SaveEnv(id, map[string]string{"PUID": "1000", "OLD_KEY": "1000"}); err != nil {
 		t.Fatal(err)
 	}
-	entry, err := f.h.BackupInstance(id, "root")
+	entry, err := f.h.BackupInstance(id, directory.Human("root"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -710,7 +711,7 @@ func TestCommittedSaveWithEnvFailureDelivers(t *testing.T) {
 	if err := os.Chmod(dir, 0o555); err != nil {
 		t.Fatal(err)
 	}
-	res, err := f.h.SaveSettings(id, SettingsUpdate{Values: vals("motd", "hello")}, "root")
+	res, err := f.h.SaveSettings(id, SettingsUpdate{Values: vals("motd", "hello")}, directory.Human("root"))
 	os.Chmod(dir, 0o755)
 	if err != nil {
 		t.Fatalf("SaveSettings = %v, want the committed save answered with a warning", err)
@@ -857,7 +858,7 @@ func TestRetryNeverBlocksOnDeliveryLock(t *testing.T) {
 	l.Lock()
 	done := make(chan *DeliveryReport, 1)
 	go func() {
-		rep, _ := f.h.RetryDeliveries(context.Background(), headerID, "admin")
+		rep, _ := f.h.RetryDeliveries(context.Background(), headerID, directory.Human("admin"))
 		done <- rep
 	}()
 	var rep *DeliveryReport
@@ -963,7 +964,7 @@ func TestBusyRetryMergedKeepsForceAll(t *testing.T) {
 	l := f.h.deliverLock(hookID)
 	l.Lock()
 	n := len(f.engine.ExecCalls())
-	if _, err := f.h.RetryDeliveries(context.Background(), hookID, "admin"); err != nil {
+	if _, err := f.h.RetryDeliveries(context.Background(), hookID, directory.Human("admin")); err != nil {
 		l.Unlock()
 		t.Fatal(err)
 	}

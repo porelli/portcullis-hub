@@ -452,21 +452,22 @@ func (h *Hub) entriesViewLocked(t *templates.Template, m *directory.Membership) 
 // unique against every other stored value (409, never naming the
 // holder); stored with the uuid; audited after mu; then the debounced
 // membership delivery. An unchanged value stores and audits nothing.
-func (h *Hub) SetPersonValue(ctx context.Context, instance, key, user string, raw json.RawMessage, actor string) (*MyEntry, error) {
-	me, _, err := h.setEntry(ctx, instance, key, user, raw, actor, !strings.EqualFold(actor, user))
+func (h *Hub) SetPersonValue(ctx context.Context, instance, key, user string, raw json.RawMessage, actor directory.Actor) (*MyEntry, error) {
+	me, _, err := h.setEntry(ctx, instance, key, user, raw, actor, !strings.EqualFold(actor.User, user))
 	return me, err
 }
 
 // SetEntryAsAdmin is SetPersonValue by an admin on the Hub listener
 // (always the admin path: admin_override needed), answering the panel's
 // row.
-func (h *Hub) SetEntryAsAdmin(ctx context.Context, instance, key, user string, raw json.RawMessage, actor string) (*EntryRow, error) {
+func (h *Hub) SetEntryAsAdmin(ctx context.Context, instance, key, user string, raw json.RawMessage, actor directory.Actor) (*EntryRow, error) {
 	_, row, err := h.setEntry(ctx, instance, key, user, raw, actor, true)
 	return row, err
 }
 
-func (h *Hub) setEntry(ctx context.Context, instance, key, user string, raw json.RawMessage, actor string, admin bool) (*MyEntry, *EntryRow, error) {
-	user, actor = strings.ToLower(user), strings.ToLower(actor)
+func (h *Hub) setEntry(ctx context.Context, instance, key, user string, raw json.RawMessage, actor directory.Actor, admin bool) (*MyEntry, *EntryRow, error) {
+	user = strings.ToLower(user)
+	actor = directory.Actor{User: strings.ToLower(actor.User), Via: actor.Via, Client: actor.Client}
 	target := instance + "/" + key + "/" + user
 	// The refusal limit first (a 429 stays cheap): a slot is reserved
 	// for this save and released when it ends — as a refusal only for a
@@ -597,9 +598,9 @@ func (h *Hub) setEntry(ctx context.Context, instance, key, user string, raw json
 // entrySetBy is what a value stored by actor records: "" for the person,
 // else the admin's name (a person re-saving an admin's value makes it
 // theirs: a change).
-func entrySetBy(admin bool, actor string) string {
+func entrySetBy(admin bool, actor directory.Actor) string {
 	if admin {
-		return actor
+		return actor.User
 	}
 	return ""
 }
@@ -641,18 +642,19 @@ func entryDeliverable(o *templates.Option, v settings.Value) error {
 // (the population check as for a save; the directory down 503); else an
 // admin, who can always clear (any instance state, any person). Audited
 // "cleared"; then the debounced membership delivery.
-func (h *Hub) ClearPersonValue(ctx context.Context, instance, key, user, actor string) error {
-	return h.clearEntry(ctx, instance, key, user, actor, !strings.EqualFold(actor, user))
+func (h *Hub) ClearPersonValue(ctx context.Context, instance, key, user string, actor directory.Actor) error {
+	return h.clearEntry(ctx, instance, key, user, actor, !strings.EqualFold(actor.User, user))
 }
 
 // ClearEntryAsAdmin is ClearPersonValue by an admin on the Hub listener
 // (always the admin path).
-func (h *Hub) ClearEntryAsAdmin(ctx context.Context, instance, key, user, actor string) error {
+func (h *Hub) ClearEntryAsAdmin(ctx context.Context, instance, key, user string, actor directory.Actor) error {
 	return h.clearEntry(ctx, instance, key, user, actor, true)
 }
 
-func (h *Hub) clearEntry(ctx context.Context, instance, key, user, actor string, admin bool) error {
-	user, actor = strings.ToLower(user), strings.ToLower(actor)
+func (h *Hub) clearEntry(ctx context.Context, instance, key, user string, actor directory.Actor, admin bool) error {
+	user = strings.ToLower(user)
+	actor = directory.Actor{User: strings.ToLower(actor.User), Via: actor.Via, Client: actor.Client}
 	var m *directory.Membership
 	if !admin {
 		var err error
@@ -722,7 +724,7 @@ func dropEntry(s *state.InstanceSettings, key, user string) {
 // LLDAP through the Hub). Audited "deleted" by the admin (actor), after
 // mu; the affected instances' deliveries are triggered (background:
 // never inline). Never holds mu across a network call.
-func (h *Hub) PurgePersonValues(ctx context.Context, actor, user string) []string {
+func (h *Hub) PurgePersonValues(ctx context.Context, actor directory.Actor, user string) []string {
 	user = strings.ToLower(user)
 	h.mu.Lock()
 	var targets []string
@@ -841,7 +843,7 @@ func (h *Hub) purgeStaleEntries(ctx context.Context, id string, m *directory.Mem
 	h.mu.Unlock()
 	for _, t := range targets {
 		log.Printf("settings: %s: the account changed outside the Hub: value purged", t)
-		h.auditOp(purgeActor, "settings.person_value", t, "purged", nil)
+		h.auditOp(directory.Human(purgeActor), "settings.person_value", t, "purged", nil)
 	}
 }
 
@@ -865,7 +867,7 @@ func (h *Hub) pruneEntriesLocked(id string, t *templates.Template, s *state.Inst
 			log.Printf("settings: %s/%s/%s: stored value dropped: %s", id, k, u, why)
 			dropEntry(s, k, u)
 			target := id + "/" + k + "/" + u
-			audits = append(audits, func() { h.auditOp(purgeActor, "settings.person_value", target, "invalidated", nil) })
+			audits = append(audits, func() { h.auditOp(directory.Human(purgeActor), "settings.person_value", target, "invalidated", nil) })
 		}
 	}
 	return audits

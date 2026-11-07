@@ -1,11 +1,13 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/hub"
 )
 
@@ -108,7 +110,7 @@ func (s *Server) handleEnrollDomain(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	d, err := s.Hub.EnrollDomain(r.Context(), actor(r), b.Name, b.Provider, b.Credentials)
+	d, err := s.Hub.EnrollDomain(r.Context(), requestActor(r), b.Name, b.Provider, b.Credentials)
 	noStore(w)
 	if err != nil {
 		writeDomainsErr(w, err)
@@ -131,7 +133,7 @@ func (s *Server) handleDomainToken(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "name in the body differs from the path", http.StatusBadRequest)
 		return
 	}
-	d, err := s.Hub.ReplaceDomainToken(r.Context(), actor(r), r.PathValue("name"), b.Provider, b.Credentials)
+	d, err := s.Hub.ReplaceDomainToken(r.Context(), requestActor(r), r.PathValue("name"), b.Provider, b.Credentials)
 	noStore(w)
 	if err != nil {
 		writeDomainsErr(w, err)
@@ -146,7 +148,7 @@ func (s *Server) handleDeleteDomain(w http.ResponseWriter, r *http.Request) {
 	if !s.adminOnly(w, r) {
 		return
 	}
-	warning, err := s.Hub.DeleteDomain(r.Context(), actor(r), r.PathValue("name"))
+	warning, err := s.deleteDomain(r.Context(), requestActor(r), r.PathValue("name"))
 	noStore(w)
 	if err != nil {
 		writeDomainsErr(w, err)
@@ -157,4 +159,26 @@ func (s *Server) handleDeleteDomain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// deleteDomain is the removal's work (route and delete_domain); audited
+// domain.delete by the Hub. A plain error is the route's 502.
+func (s *Server) deleteDomain(ctx context.Context, a directory.Actor, name string) (string, error) {
+	s.rec("DeleteDomain", name)
+	warning, err := s.Hub.DeleteDomain(ctx, a, name)
+	return warning, defaultStatus(err, http.StatusBadGateway)
+}
+
+// domainsView is GET /api/domains' answer as a value (list_domains): the
+// service's list, or — disabled or unreachable — the reason and the last
+// known list.
+func (s *Server) domainsView(ctx context.Context) map[string]any {
+	if err := s.Hub.DomainsAvailable(); err != nil {
+		return map[string]any{"error": "domains disabled: " + err.Error(), "disabled": true, "domains": s.Hub.KnownDomains()}
+	}
+	list, err := s.Hub.RefreshDomains(ctx)
+	if err != nil {
+		return map[string]any{"error": err.Error(), "domains": s.Hub.KnownDomains()}
+	}
+	return map[string]any{"domains": list}
 }

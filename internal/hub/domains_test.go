@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/domains"
 )
 
@@ -167,7 +168,7 @@ func assertNoSecret(t *testing.T, f *fixture, audit *fakeAudit, extra ...string)
 func TestEnrollDomain(t *testing.T) {
 	f, api, audit := newDomainsFixture(t)
 	ctx := context.Background()
-	d, err := f.h.EnrollDomain(ctx, "alice", "Team-B.Example.net.", "cloudflare", creds())
+	d, err := f.h.EnrollDomain(ctx, directory.Human("alice"), "Team-B.Example.net.", "cloudflare", creds())
 	if err != nil || d.Name != "team-b.example.net" || d.State != "pending" {
 		t.Fatalf("enroll = %+v, %v", d, err)
 	}
@@ -200,7 +201,7 @@ func TestEnrollDomain(t *testing.T) {
 		"*.example.com":            {400, "not a valid hostname"},
 		"https://team-c.example.n": {400, "not a valid hostname"},
 	} {
-		_, err := f.h.EnrollDomain(ctx, "alice", name, "cloudflare", creds())
+		_, err := f.h.EnrollDomain(ctx, directory.Human("alice"), name, "cloudflare", creds())
 		if statusOf(err) != want.status || !strings.Contains(err.Error(), want.why) {
 			t.Errorf("enroll %s: %v, want %d %q", name, err, want.status, want.why)
 		}
@@ -212,10 +213,10 @@ func TestEnrollDomain(t *testing.T) {
 		t.Fatalf("refusal audit %+v", e)
 	}
 	// Allowed: other names under the main domain, deeper ones too.
-	if _, err := f.h.EnrollDomain(ctx, "alice", "lab.team-a.example.org", "cloudflare", creds()); err != nil {
+	if _, err := f.h.EnrollDomain(ctx, directory.Human("alice"), "lab.team-a.example.org", "cloudflare", creds()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.h.EnrollDomain(ctx, "", "z.example.net", "cloudflare", creds()); statusOf(err) != 400 {
+	if _, err := f.h.EnrollDomain(ctx, directory.Human(""), "z.example.net", "cloudflare", creds()); statusOf(err) != 400 {
 		t.Fatalf("no actor: %v", err)
 	}
 	assertNoSecret(t, f, audit)
@@ -236,7 +237,7 @@ func TestEnrollReclassify(t *testing.T) {
 	f.h.runtimeHosts = map[string][]string{"portcullis-old": {"svc.team-r.example.org"}}
 	f.h.driftMu.Unlock()
 	for name, why := range map[string]string{"team-q.example.org": "published", "team-r.example.org": "running project"} {
-		if _, err := f.h.EnrollDomain(context.Background(), "alice", name, "cloudflare", creds()); statusOf(err) != 409 || !strings.Contains(err.Error(), why) {
+		if _, err := f.h.EnrollDomain(context.Background(), directory.Human("alice"), name, "cloudflare", creds()); statusOf(err) != 409 || !strings.Contains(err.Error(), why) {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
@@ -245,7 +246,7 @@ func TestEnrollReclassify(t *testing.T) {
 func TestAssignRequiresValidCert(t *testing.T) {
 	f, api, _ := newDomainsFixture(t)
 	ctx := context.Background()
-	if _, err := f.h.EnrollDomain(ctx, "alice", "team-b.example.net", "cloudflare", creds()); err != nil {
+	if _, err := f.h.EnrollDomain(ctx, directory.Human("alice"), "team-b.example.net", "cloudflare", creds()); err != nil {
 		t.Fatal(err)
 	}
 	host := map[string]string{"grafana": "grafana.team-b.example.net"}
@@ -280,10 +281,10 @@ func TestAssignRequiresValidCert(t *testing.T) {
 	if err := f.h.CreateInstance("grafana", "grafana-q", map[string]string{"grafana": "other.team-b.example.net"}); statusOf(err) != 503 {
 		t.Fatalf("new host while down: %v", err)
 	}
-	if _, err := f.h.EnrollDomain(ctx, "alice", "team-z.example.net", "cloudflare", creds()); statusOf(err) != 503 {
+	if _, err := f.h.EnrollDomain(ctx, directory.Human("alice"), "team-z.example.net", "cloudflare", creds()); statusOf(err) != 503 {
 		t.Fatalf("enroll while down: %v", err)
 	}
-	if _, err := f.h.DeleteDomain(ctx, "alice", "team-b.example.net"); statusOf(err) != 503 {
+	if _, err := f.h.DeleteDomain(ctx, directory.Human("alice"), "team-b.example.net"); statusOf(err) != 503 {
 		t.Fatalf("delete while down: %v", err)
 	}
 	if err := f.h.WritePolicy(); err != nil {
@@ -307,13 +308,13 @@ func TestAssignRequiresValidCert(t *testing.T) {
 func TestDeleteRefusedWhileAssigned(t *testing.T) {
 	f, api, audit := newDomainsFixture(t)
 	ctx := context.Background()
-	f.h.EnrollDomain(ctx, "alice", "team-b.example.net", "cloudflare", creds())
+	f.h.EnrollDomain(ctx, directory.Human("alice"), "team-b.example.net", "cloudflare", creds())
 	api.set("team-b.example.net", true, time.Now().Add(60*24*time.Hour))
 	f.h.RefreshDomains(ctx)
 	if err := f.h.CreateInstance("grafana", "grafana-b", map[string]string{"grafana": "team-b.example.net"}); err != nil {
 		t.Fatal(err)
 	}
-	_, err := f.h.DeleteDomain(ctx, "alice", "team-b.example.net")
+	_, err := f.h.DeleteDomain(ctx, directory.Human("alice"), "team-b.example.net")
 	if statusOf(err) != 409 || !strings.Contains(err.Error(), "grafana-b") {
 		t.Fatalf("delete while assigned: %v", err)
 	}
@@ -324,11 +325,11 @@ func TestDeleteRefusedWhileAssigned(t *testing.T) {
 		t.Fatalf("audit %+v", e)
 	}
 	// Moved to the main domain: the delete goes through (warning passed on).
-	if err := f.h.SetHosts("grafana-b", map[string]string{"grafana": "grafana-b.example.org"}, "alice"); err != nil {
+	if err := f.h.SetHosts("grafana-b", map[string]string{"grafana": "grafana-b.example.org"}, directory.Human("alice")); err != nil {
 		t.Fatal(err)
 	}
 	api.warning = "some DNS records couldn't be removed"
-	w, err := f.h.DeleteDomain(ctx, "alice", "team-b.example.net")
+	w, err := f.h.DeleteDomain(ctx, directory.Human("alice"), "team-b.example.net")
 	if err != nil || w != api.warning {
 		t.Fatalf("delete = %q, %v", w, err)
 	}
@@ -338,7 +339,7 @@ func TestDeleteRefusedWhileAssigned(t *testing.T) {
 	if doc := readPolicy(t, f); len(doc.ExtraDomains) != 0 {
 		t.Fatalf("extra_domains after delete: %v", doc.ExtraDomains)
 	}
-	if _, err := f.h.DeleteDomain(ctx, "alice", "team-b.example.net"); statusOf(err) != 404 {
+	if _, err := f.h.DeleteDomain(ctx, directory.Human("alice"), "team-b.example.net"); statusOf(err) != 404 {
 		t.Fatalf("delete unknown: %v", err)
 	}
 }
@@ -346,15 +347,15 @@ func TestDeleteRefusedWhileAssigned(t *testing.T) {
 func TestReplaceDomainToken(t *testing.T) {
 	f, api, audit := newDomainsFixture(t)
 	ctx := context.Background()
-	f.h.EnrollDomain(ctx, "alice", "team-b.example.net", "cloudflare", creds())
-	d, err := f.h.ReplaceDomainToken(ctx, "alice", "team-b.example.net", "porkbun", map[string]string{"api_key": secretToken, "secret_api_key": secretToken + "2"})
+	f.h.EnrollDomain(ctx, directory.Human("alice"), "team-b.example.net", "cloudflare", creds())
+	d, err := f.h.ReplaceDomainToken(ctx, directory.Human("alice"), "team-b.example.net", "porkbun", map[string]string{"api_key": secretToken, "secret_api_key": secretToken + "2"})
 	if err != nil || d.Provider != "porkbun" {
 		t.Fatalf("token = %+v, %v", d, err)
 	}
 	if e := audit.last(); e.Action != "domain.token" || e.Detail != "provider porkbun" || e.Result != "ok" {
 		t.Fatalf("audit %+v", e)
 	}
-	if _, err := f.h.ReplaceDomainToken(ctx, "alice", "nope.example.net", "cloudflare", creds()); statusOf(err) != 404 {
+	if _, err := f.h.ReplaceDomainToken(ctx, directory.Human("alice"), "nope.example.net", "cloudflare", creds()); statusOf(err) != 404 {
 		t.Fatalf("unknown: %v", err)
 	}
 	if len(api.creds) != 2 {
@@ -367,7 +368,7 @@ func TestReplaceDomainToken(t *testing.T) {
 // Hub that starts while the service is down still publishes it.
 func TestKnownDomainsSurviveRestart(t *testing.T) {
 	f, _, _ := newDomainsFixture(t)
-	f.h.EnrollDomain(context.Background(), "alice", "team-b.example.net", "cloudflare", creds())
+	f.h.EnrollDomain(context.Background(), directory.Human("alice"), "team-b.example.net", "cloudflare", creds())
 	h2, err := New(f.h.cfg, f.runner, f.engine, f.idp)
 	if err != nil {
 		t.Fatal(err)
@@ -391,7 +392,7 @@ func TestKnownDomainsSurviveRestart(t *testing.T) {
 
 func readyDomain(t *testing.T, f *fixture, api *fakeDomainsAPI, name string) {
 	t.Helper()
-	if _, err := f.h.EnrollDomain(context.Background(), "alice", name, "cloudflare", creds()); err != nil {
+	if _, err := f.h.EnrollDomain(context.Background(), directory.Human("alice"), name, "cloudflare", creds()); err != nil {
 		t.Fatal(err)
 	}
 	api.set(name, true, time.Now().Add(60*24*time.Hour))
@@ -409,7 +410,10 @@ func TestDeleteMarksDeleting(t *testing.T) {
 	inDelete, release := make(chan struct{}), make(chan error)
 	api.deleteHook = func() error { close(inDelete); return <-release }
 	done := make(chan error)
-	go func() { _, err := f.h.DeleteDomain(context.Background(), "alice", "team-b.example.net"); done <- err }()
+	go func() {
+		_, err := f.h.DeleteDomain(context.Background(), directory.Human("alice"), "team-b.example.net")
+		done <- err
+	}()
 	<-inDelete
 	err := f.h.CreateInstance("grafana", "grafana-d", map[string]string{"grafana": "grafana.team-b.example.net"})
 	if statusOf(err) != 409 || !strings.Contains(err.Error(), "deleting") {
@@ -438,7 +442,7 @@ func TestRefreshDropsStaleList(t *testing.T) {
 	api.mu.Lock()
 	api.listHook = nil
 	api.mu.Unlock()
-	if _, err := f.h.EnrollDomain(context.Background(), "alice", "team-b.example.net", "cloudflare", creds()); err != nil {
+	if _, err := f.h.EnrollDomain(context.Background(), directory.Human("alice"), "team-b.example.net", "cloudflare", creds()); err != nil {
 		t.Fatal(err)
 	}
 	close(release)
@@ -460,7 +464,7 @@ func TestEnrollRecheckIgnoresOwnEntry(t *testing.T) {
 		return nil
 	}
 	api.listHook = nil
-	d, err := f.h.EnrollDomain(ctx, "alice", "team-b.example.net", "cloudflare", creds())
+	d, err := f.h.EnrollDomain(ctx, directory.Human("alice"), "team-b.example.net", "cloudflare", creds())
 	if err != nil || d.Name != "team-b.example.net" {
 		t.Fatalf("enroll with a cancelled request = %+v, %v", d, err)
 	}
@@ -510,7 +514,7 @@ func TestServiceListValidated(t *testing.T) {
 
 func TestUnknownProviderRefused(t *testing.T) {
 	f, api, audit := newDomainsFixture(t)
-	if _, err := f.h.EnrollDomain(context.Background(), "alice", "team-b.example.net", "evil\nprovider "+secretToken, creds()); statusOf(err) != 400 {
+	if _, err := f.h.EnrollDomain(context.Background(), directory.Human("alice"), "team-b.example.net", "evil\nprovider "+secretToken, creds()); statusOf(err) != 400 {
 		t.Fatalf("unknown provider: %v", err)
 	}
 	if len(api.enrolled) != 0 {
@@ -529,7 +533,7 @@ func TestDeleteNoAnswerStaysDeleting(t *testing.T) {
 	f, api, _ := newDomainsFixture(t)
 	readyDomain(t, f, api, "team-b.example.net")
 	api.deleteHook = func() error { return fmt.Errorf("%w (timeout)", domains.ErrUnreachable) }
-	if _, err := f.h.DeleteDomain(context.Background(), "alice", "team-b.example.net"); statusOf(err) != 502 || !strings.Contains(err.Error(), "stays marked deleting") {
+	if _, err := f.h.DeleteDomain(context.Background(), directory.Human("alice"), "team-b.example.net"); statusOf(err) != 502 || !strings.Contains(err.Error(), "stays marked deleting") {
 		t.Fatalf("delete without answer = %v", err)
 	}
 	if err := f.h.CreateInstance("grafana", "grafana-e", map[string]string{"grafana": "grafana.team-b.example.net"}); statusOf(err) != 409 {

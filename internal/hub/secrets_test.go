@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/portcullis/hub/internal/compose"
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/templates"
 )
 
@@ -36,7 +37,7 @@ func setSecret(v string) SecretChange { return SecretChange{Value: &v} }
 
 func saveSecret(t *testing.T, f *fixture, id, key string, c SecretChange) {
 	t.Helper()
-	if _, err := f.h.SaveSettings(id, SettingsUpdate{Secrets: map[string]SecretChange{key: c}}, "admin"); err != nil {
+	if _, err := f.h.SaveSettings(id, SettingsUpdate{Secrets: map[string]SecretChange{key: c}}, directory.Human("admin")); err != nil {
 		t.Fatalf("saving secret %s: %v", key, err)
 	}
 }
@@ -74,7 +75,7 @@ func TestSecretWriteOnly(t *testing.T) {
 	if b := mustRead(t, filepath.Join(f.data, "state.yaml")); bytes.Contains(b, []byte("s3cr3t")) {
 		t.Errorf("state.yaml holds the secret:\n%s", b)
 	}
-	entry, err := f.h.BackupInstance("secretapp", "root")
+	entry, err := f.h.BackupInstance("secretapp", directory.Human("root"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +145,7 @@ func TestSecretGenerateAndClear(t *testing.T) {
 		"two actions": {"token", SecretChange{Generate: true, Clear: true}, "exactly one"},
 		"nothing":     {"token", SecretChange{}, "exactly one"},
 	} {
-		_, err := f.h.SaveSettings("secretapp", SettingsUpdate{Secrets: map[string]SecretChange{c.key: c.c}}, "admin")
+		_, err := f.h.SaveSettings("secretapp", SettingsUpdate{Secrets: map[string]SecretChange{c.key: c.c}}, directory.Human("admin"))
 		if statusOf(err) != 400 || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%s: %v", name, err)
 		}
@@ -194,8 +195,8 @@ func TestSecretNeverEchoed(t *testing.T) {
 	opJSON, _ := json.Marshal(oe.Record)
 	stored, _ := os.ReadFile(f.h.opPath("secretapp"))
 	// The API answers the error the same way (httpapi audits it too).
-	f.h.auditOp("admin", "instance.enable", "secretapp", "", err)
-	f.h.auditOp("admin", "instance.backup", "secretapp", "", errors.New("raw "+key+" and "+tok))
+	f.h.auditOp(directory.Human("admin"), "instance.enable", "secretapp", "", err)
+	f.h.auditOp(directory.Human("admin"), "instance.backup", "secretapp", "", errors.New("raw "+key+" and "+tok))
 	for name, s := range map[string]string{"error": oe.Error(), "op JSON": string(opJSON), "op record": string(stored), "audit": auditText(audit), "log": logs.String()} {
 		if strings.Contains(s, key) || strings.Contains(s, tok) || strings.Contains(s, tok[:8]) {
 			t.Errorf("%s echoes a secret: %s", name, s)
@@ -219,7 +220,7 @@ func TestSecretRedactedInAsyncOp(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.engine.vol().imageErr = errors.New("pull refused for " + tok)
-	op, err := f.h.StartBackup("secretapp", "root")
+	op, err := f.h.StartBackup("secretapp", directory.Human("root"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -248,7 +249,7 @@ func TestEnvValueQuotingRoundTrip(t *testing.T) {
 		}
 	}
 	for _, v := range []string{"it's", `x\`, "a\nb"} {
-		_, err := f.h.SaveSettings("secretapp", SettingsUpdate{Secrets: map[string]SecretChange{"api_key": setSecret(v)}}, "admin")
+		_, err := f.h.SaveSettings("secretapp", SettingsUpdate{Secrets: map[string]SecretChange{"api_key": setSecret(v)}}, directory.Human("admin"))
 		if statusOf(err) != 400 || !strings.Contains(err.Error(), "api_key") || strings.Contains(err.Error(), v) {
 			t.Errorf("%q: %v", v, err)
 		}
@@ -312,7 +313,7 @@ func TestSecretsInBackup(t *testing.T) {
 	if err := f.h.Enable("secretapp-b"); err != nil {
 		t.Fatal(err)
 	}
-	entry, err := f.h.BackupInstance("secretapp-b", "root")
+	entry, err := f.h.BackupInstance("secretapp-b", directory.Human("root"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -334,7 +335,7 @@ func TestSecretsInBackup(t *testing.T) {
 	saveSecret(t, f, "secretapp-b", "api_key", setSecret("changed-key"))
 	saveSecret(t, f, "secretapp-b", "token", SecretChange{Clear: true})
 	f.h.Wait()
-	if _, err := f.h.RestoreInstance("secretapp-b", entry.Archive, "root"); err != nil {
+	if _, err := f.h.RestoreInstance("secretapp-b", entry.Archive, directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	if got := storedSecrets(t, f, "secretapp-b"); got["api_key"] != key || got["token"] != tok {
@@ -351,7 +352,7 @@ func TestSecretsInBackup(t *testing.T) {
 	}
 
 	// A new id: copied, generate-declared ones regenerated.
-	if _, err := f.h.RestoreInstanceAs(entry.Archive, "secretapp-c", "root"); err != nil {
+	if _, err := f.h.RestoreInstanceAs(entry.Archive, "secretapp-c", directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	got := storedSecrets(t, f, "secretapp-c")
@@ -367,7 +368,7 @@ func TestSecretsInBackup(t *testing.T) {
 	}
 
 	// Delete removes the store.
-	if _, err := f.h.DeleteInstance("secretapp-c", "secretapp-c", "root"); err != nil {
+	if _, err := f.h.DeleteInstance("secretapp-c", "secretapp-c", directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(f.h.secretsDir("secretapp-c")); !os.IsNotExist(err) {
@@ -389,7 +390,7 @@ func TestSecretRedactedInFailedRestore(t *testing.T) {
 	if err := f.h.Enable("secretapp-b"); err != nil {
 		t.Fatal(err)
 	}
-	entry, err := f.h.BackupInstance("secretapp-b", "root")
+	entry, err := f.h.BackupInstance("secretapp-b", directory.Human("root"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -397,7 +398,7 @@ func TestSecretRedactedInFailedRestore(t *testing.T) {
 	f.h.Wait()
 	f.runner.upErr = &compose.Error{Command: "up", Err: errors.New("exit status 1"),
 		Output: "env API_KEY=" + archived + "\nError: failed\n"}
-	op, err := f.h.StartRestore("secretapp-b", entry.Archive, "root")
+	op, err := f.h.StartRestore("secretapp-b", entry.Archive, directory.Human("root"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -414,7 +415,7 @@ func TestSecretRedactedInFailedRestore(t *testing.T) {
 		t.Errorf("audit = %s", a)
 	}
 	// The synchronous path too.
-	_, err = f.h.RestoreInstance("secretapp-b", entry.Archive, "root")
+	_, err = f.h.RestoreInstance("secretapp-b", entry.Archive, directory.Human("root"))
 	if err == nil || strings.Contains(err.Error(), archived) {
 		t.Errorf("sync restore = %v", err)
 	}
@@ -433,7 +434,7 @@ func TestSecretRedactedInFailedRestoreAs(t *testing.T) {
 	if err := f.h.Enable("secretapp-b"); err != nil {
 		t.Fatal(err)
 	}
-	entry, err := f.h.BackupInstance("secretapp-b", "root")
+	entry, err := f.h.BackupInstance("secretapp-b", directory.Human("root"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -443,7 +444,7 @@ func TestSecretRedactedInFailedRestoreAs(t *testing.T) {
 		regenerated = vals["token"]
 		return errors.New("disk full writing " + key + " / " + regenerated)
 	}
-	op, err := f.h.StartRestoreAs(entry.Archive, "secretapp-c", "root", nil)
+	op, err := f.h.StartRestoreAs(entry.Archive, "secretapp-c", directory.Human("root"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -477,7 +478,7 @@ func TestRequiresSecret(t *testing.T) {
 	if err := f.h.save("secretapp", SettingsUpdate{Values: vals("api_url", "https://x.example")}); err != nil {
 		t.Errorf("api_url with api_key set = %v", err)
 	}
-	_, err := f.h.SaveSettings("secretapp", SettingsUpdate{Secrets: map[string]SecretChange{"api_key": {Clear: true}}}, "admin")
+	_, err := f.h.SaveSettings("secretapp", SettingsUpdate{Secrets: map[string]SecretChange{"api_key": {Clear: true}}}, directory.Human("admin"))
 	if statusOf(err) != 400 || !strings.Contains(err.Error(), "api_url") || !strings.Contains(err.Error(), "api_key") {
 		t.Errorf("clearing a required secret = %v", err)
 	}

@@ -1,0 +1,28 @@
+name: Headers App
+category: tools
+auth:
+  method: header-auth
+  group_access: true
+  access_group: users_headers
+env:
+  - key: MCP_SECRET
+    generate: random
+  - key: PLAIN
+ai:
+  mcp:
+    - name: wiki
+      label: Wiki
+      kind: builtin
+      service: web
+      port: 8080
+      path: /api/mcp
+      router: wiki
+      public_path: /mcp
+      upstream: official
+      source: https://example.org/wiki
+      protocol: ["2025-06-18"]
+      modes: [read_only]
+      aggregate: false
+      identity:
+        mode: identity_headers
+        caller_secret: {env: MCP_SECRET, header: X-Mcp-Secret, format: "{secret}"}

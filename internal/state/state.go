@@ -175,6 +175,12 @@ type AppState struct {
 	// mismatch (a core restore, a crash between the two writes) voids
 	// every credential.
 	SecretsEpoch string `json:"secrets_epoch,omitempty" yaml:"secrets_epoch,omitempty"`
+	// AI is Settings → AI and the model provider definitions (contract
+	// §15.11–15.12; never a secret). Load starts from DefaultAISettings,
+	// so keys a file lacks keep a new install's values.
+	AI AISettings `json:"ai" yaml:"ai"`
+	// AIInstances: instance id → its AI state (§15.11 ai_instances).
+	AIInstances map[string]AIInstance `json:"ai_instances,omitempty" yaml:"ai_instances,omitempty"`
 
 	// LegacyPassword lists, after Load, the policies that named the removed
 	// "password" factor and were normalised ("" = the global default). Not
@@ -531,7 +537,7 @@ const SignInNative = "native"
 
 // New returns an empty state with initialised maps.
 func New() *AppState {
-	s := &AppState{}
+	s := &AppState{AI: DefaultAISettings()}
 	s.init()
 	return s
 }
@@ -569,6 +575,9 @@ func (s *AppState) init() {
 	}
 	if s.Credentials == nil {
 		s.Credentials = make(map[string]map[string]map[string]Credential)
+	}
+	if s.AI.AllowedOrigins == nil {
+		s.AI.AllowedOrigins = []string{}
 	}
 }
 
@@ -624,7 +633,7 @@ func Load(path string) (*AppState, error) {
 			return nil, fmt.Errorf("%s: the settings of %s are in the old flat form (before contract v3): they are not migrated — remove them from settings: and re-enter them (ports and bind addresses included) after the upgrade", path, strings.Join(legacy, ", "))
 		}
 	}
-	s := &AppState{}
+	s := &AppState{AI: DefaultAISettings()}
 	if err := yaml.Unmarshal(data, s); err != nil {
 		return nil, fmt.Errorf("corrupt %s (%v) — fix or move it aside, then restart", path, err)
 	}
@@ -638,6 +647,12 @@ func Load(path string) (*AppState, error) {
 		if _, err := ParseLocalNetworks(*s.LocalNetworks); err != nil {
 			return nil, fmt.Errorf("corrupt %s (local_networks: %v) — fix or move it aside, then restart", path, err)
 		}
+	}
+	if err := s.AI.CheckDays(); err != nil {
+		return nil, fmt.Errorf("corrupt %s (ai: %v) — fix or move it aside, then restart", path, err)
+	}
+	if err := s.AI.Limits.CheckLimits(); err != nil {
+		return nil, fmt.Errorf("corrupt %s (ai: %v) — fix or move it aside, then restart", path, err)
 	}
 	s.init()
 	s.normalizeLegacy()

@@ -1,0 +1,10 @@
+services:
+  api:
+    image: chat
+    environment:
+      OPENID_CLIENT_ID: ${PORTCULLIS_OIDC_CLIENT_ID:-chat}
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.chat.rule: Host(`${PORTCULLIS_HOST_CHAT:-chat.portcullis.local}`)
+      traefik.http.routers.chat.entrypoints: websecure
+      traefik.http.services.chat.loadbalancer.server.port: "3080"

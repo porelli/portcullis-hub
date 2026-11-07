@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/portcullis/hub/internal/credentials"
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
 )
@@ -166,7 +167,7 @@ func TestHashFileLayout(t *testing.T) {
 	// F11: neither the hash (either case) nor the password in state.yaml
 	// or the instance archive's instance.yaml.
 	st := readFile(t, filepath.Join(f.data, "state.yaml"))
-	entry, err := f.h.BackupInstance(smbB, "root")
+	entry, err := f.h.BackupInstance(smbB, directory.Human("root"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -438,7 +439,7 @@ func TestBackupExcludesCredentials(t *testing.T) {
 	f, _, _ := credFixture(t)
 	hash := credentials.NTHash([]byte(testPass))
 	addCred(t, f.h, smbB, "alice", hash)
-	entry, err := f.h.BackupInstance(smbB, "root")
+	entry, err := f.h.BackupInstance(smbB, directory.Human("root"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -469,7 +470,7 @@ func TestBackupExcludesHubSecretsVolume(t *testing.T) {
 	if err := f.h.Enable(smbB); err != nil {
 		t.Fatal(err)
 	}
-	entry, err := f.h.BackupInstance(smbB, "root")
+	entry, err := f.h.BackupInstance(smbB, directory.Human("root"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -482,10 +483,10 @@ func TestBackupExcludesHubSecretsVolume(t *testing.T) {
 	if strings.Contains(string(data["MANIFEST.json"]), DefaultSecretsVolume) {
 		t.Error("the manifest lists the secrets volume")
 	}
-	if _, err := f.h.RestoreInstance(smbB, entry.Archive, "root"); err != nil {
+	if _, err := f.h.RestoreInstance(smbB, entry.Archive, directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.h.DeleteInstance(smbB, smbB, "root"); err != nil {
+	if _, err := f.h.DeleteInstance(smbB, smbB, directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	if !slicesContain(f.engine.volumeNames(), DefaultSecretsVolume) {
@@ -515,7 +516,7 @@ func TestRestoreVoidsCredentials(t *testing.T) {
 	addCred(t, f.h, smbB, "alice", credentials.NTHash([]byte("a")))
 	addCred(t, f.h, smbB, "bob", credentials.NTHash([]byte("b")))
 	addCred(t, f.h, smbID, "carol", credentials.NTHash([]byte("c")))
-	entry, err := f.h.BackupInstance(smbB, "root")
+	entry, err := f.h.BackupInstance(smbB, directory.Human("root"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -529,7 +530,7 @@ func TestRestoreVoidsCredentials(t *testing.T) {
 		}
 		prev(project)
 	}
-	if _, err := f.h.RestoreInstance(smbB, entry.Archive, "root"); err != nil {
+	if _, err := f.h.RestoreInstance(smbB, entry.Archive, directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	if len(atCreate) != 0 {
@@ -555,7 +556,7 @@ func TestRestoreVoidsCredentials(t *testing.T) {
 		t.Errorf("audits = %v", got)
 	}
 	// Into a new id: no credentials, nothing audited.
-	if _, err := f.h.RestoreInstanceAs(entry.Archive, smbID+"-c", "root"); err != nil {
+	if _, err := f.h.RestoreInstanceAs(entry.Archive, smbID+"-c", directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	f.h.mu.RLock()
@@ -568,7 +569,7 @@ func TestRestoreVoidsCredentials(t *testing.T) {
 		t.Errorf("audits = %v", got)
 	}
 	// A second restore voids nothing more (none active): no audit.
-	if _, err := f.h.RestoreInstance(smbB, entry.Archive, "root"); err != nil {
+	if _, err := f.h.RestoreInstance(smbB, entry.Archive, directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	if got := voidAudits(audit); len(got) != 1 {
@@ -580,11 +581,11 @@ func TestRestoreDoesNotTouchHubSecrets(t *testing.T) {
 	f, _, secrets := credFixture(t)
 	hubSecretsVolume(f)
 	addCred(t, f.h, smbID, "carol", credentials.NTHash([]byte("c")))
-	entry, err := f.h.BackupInstance(smbB, "root")
+	entry, err := f.h.BackupInstance(smbB, directory.Human("root"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.h.RestoreInstance(smbB, entry.Archive, "root"); err != nil {
+	if _, err := f.h.RestoreInstance(smbB, entry.Archive, directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	if !slicesContain(f.engine.volumeNames(), DefaultSecretsVolume) {
@@ -613,7 +614,7 @@ func TestInstanceDeleteRevokes(t *testing.T) {
 	f.idp.mu.Lock()
 	f.idp.callbackErr = errors.New("keycloak down")
 	f.idp.mu.Unlock()
-	if _, err := f.h.DeleteInstance(smbB, smbB, "root"); err == nil {
+	if _, err := f.h.DeleteInstance(smbB, smbB, directory.Human("root")); err == nil {
 		t.Fatal("the delete didn't fail part-way")
 	}
 	if len(atDown) == 0 {
@@ -642,7 +643,7 @@ func TestInstanceDeleteRevokes(t *testing.T) {
 func TestDeleteRemovesSecrets(t *testing.T) {
 	f, _, secrets := credFixture(t)
 	addCred(t, f.h, smbB, "alice", credentials.NTHash([]byte("a")))
-	if _, err := f.h.DeleteInstance(smbB, smbB, "root"); err != nil {
+	if _, err := f.h.DeleteInstance(smbB, smbB, directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(secrets, smbB)); !errors.Is(err, fs.ErrNotExist) {
@@ -656,7 +657,7 @@ func TestDeleteRemovesSecrets(t *testing.T) {
 func TestDeleteKeepsHubSecretsVolume(t *testing.T) {
 	f, _, _ := credFixture(t)
 	hubSecretsVolume(f)
-	if _, err := f.h.DeleteInstance(smbB, smbB, "root"); err != nil {
+	if _, err := f.h.DeleteInstance(smbB, smbB, directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	if !slicesContain(f.engine.volumeNames(), DefaultSecretsVolume) {
@@ -696,14 +697,14 @@ func TestPathSettingDockerRoot(t *testing.T) {
 	if err := f.h.save("immich", SettingsUpdate{Values: vals("library", "/srv/photos")}); err != nil {
 		t.Fatal(err)
 	}
-	entry, err := f.h.BackupInstance("immich", "root")
+	entry, err := f.h.BackupInstance("immich", directory.Human("root"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	fx.fmu.Lock()
 	fx.dockerRoot = "/srv/photos/docker"
 	fx.fmu.Unlock()
-	_, err = f.h.RestoreInstance("immich", entry.Archive, "root")
+	_, err = f.h.RestoreInstance("immich", entry.Archive, directory.Human("root"))
 	if !errors.As(err, &se) || se.Status != 400 {
 		t.Errorf("restore = %v, want 400", err)
 	}
@@ -848,7 +849,7 @@ func TestRestoreRolledBackBeforeVoid(t *testing.T) {
 		t.Fatal(err)
 	}
 	addCred(t, f.h, smbB, "alice", credentials.NTHash([]byte("a")))
-	entry, err := f.h.BackupInstance(smbB, "root")
+	entry, err := f.h.BackupInstance(smbB, directory.Human("root"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -860,7 +861,7 @@ func TestRestoreRolledBackBeforeVoid(t *testing.T) {
 		}
 		return nil
 	}
-	if _, err := f.h.RestoreInstance(smbB, entry.Archive, "root"); err == nil {
+	if _, err := f.h.RestoreInstance(smbB, entry.Archive, directory.Human("root")); err == nil {
 		t.Fatal("the restore didn't fail")
 	}
 	if c, _ := credOf(f.h, smbB, "alice"); !c.Active() {
@@ -883,13 +884,13 @@ func TestRestoreVoidErrorNeverStartsOldHashes(t *testing.T) {
 		t.Fatal(err)
 	}
 	addCred(t, f.h, smbB, "alice", credentials.NTHash([]byte("a")))
-	entry, err := f.h.BackupInstance(smbB, "root")
+	entry, err := f.h.BackupInstance(smbB, directory.Human("root"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	unlock := lockDir(t, filepath.Join(secrets, smbB, smbKey))
 	before := createsOf(f, smbB)
-	if _, err := f.h.RestoreInstance(smbB, entry.Archive, "root"); err == nil {
+	if _, err := f.h.RestoreInstance(smbB, entry.Archive, directory.Human("root")); err == nil {
 		t.Fatal("the restore didn't fail")
 	}
 	if createsOf(f, smbB) != before || f.h.IsEnabled(smbB) {

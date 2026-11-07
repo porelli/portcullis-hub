@@ -23,6 +23,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/policy"
@@ -106,6 +107,10 @@ type BackupEntry struct {
 // secretsMember is the archive member with the instance's secret settings
 // (its secrets store; 0600 like every member, the archive is 0600 too).
 const secretsMember = "config/settings-secrets.json"
+
+// aiMember is the archive member with the instance's AI state (§11.5;
+// switches, modes and provider selection — never a credential).
+const aiMember = "config/ai.json"
 
 // instanceConfig is config/instance.yaml: the instance's state entry.
 type instanceConfig struct {
@@ -282,14 +287,14 @@ func (h *Hub) projectRunning(ctx context.Context, id string) (bool, error) {
 // busy / can't be restarted, 503 Docker unavailable, 500 otherwise (the
 // archive isn't written; a failed restart after a written backup is an
 // OpError that names the archive).
-func (h *Hub) BackupInstance(id, actor string) (entry *BackupEntry, err error) {
+func (h *Hub) BackupInstance(id string, actor directory.Actor) (entry *BackupEntry, err error) {
 	return h.backupInstance(id, actor, nil)
 }
 
 // backupInstance is BackupInstance; ready (if set) is called once the
 // request is accepted (lock held, instance found, Docker available) and
 // the backup itself starts (StartBackup answers 202 then).
-func (h *Hub) backupInstance(id, actor string, ready func()) (entry *BackupEntry, err error) {
+func (h *Hub) backupInstance(id string, actor directory.Actor, ready func()) (entry *BackupEntry, err error) {
 	defer func() {
 		detail := ""
 		if entry != nil {
@@ -302,6 +307,9 @@ func (h *Hub) backupInstance(id, actor string, ready func()) (entry *BackupEntry
 		return nil, err
 	}
 	defer unlock()
+	// lockApp → aiLock (G35, 13a carry): no mint or revoke runs a hook
+	// while the backup stops and copies the app.
+	defer h.lifecycleAILock(id)()
 	if err := h.pending(id); err != nil {
 		return nil, err
 	}
@@ -329,6 +337,7 @@ func (h *Hub) backupLocked(id, reason string, keepStopped bool) (*BackupEntry, e
 	h.mu.RLock()
 	tg, ok := h.targetLocked(id)
 	cfg := h.instanceConfigLocked(tg)
+	aiCfg := h.aiArchiveLocked(tg)
 	h.mu.RUnlock()
 	if !ok {
 		return nil, statusErr(404, "instance not found: %s", id)
@@ -393,6 +402,11 @@ func (h *Hub) backupLocked(id, reason string, keepStopped bool) (*BackupEntry, e
 	if err := add("config/instance.yaml", inst); err != nil {
 		return nil, statusErr(500, "backup: %v", err)
 	}
+	if aiCfg != nil {
+		if err := add(aiMember, aiCfg); err != nil {
+			return nil, statusErr(500, "backup: %v", err)
+		}
+	}
 	// Secret settings are in config/settings-secrets.json only: their
 	// env variables are blanked in config/env (a restore writes them
 	// from the store again).
@@ -423,7 +437,7 @@ func (h *Hub) backupLocked(id, reason string, keepStopped bool) (*BackupEntry, e
 		}
 		if err == nil {
 			if member == "config/env" {
-				data = blankEnvNamesExcept(data, secretEnv, secrets, declared)
+				data = blankEnvNamesExcept(data, withProviderVars(secretEnv, data), secrets, declared)
 			}
 			err = add(member, data)
 		}
@@ -823,7 +837,7 @@ func (m *BackupManifest) validate() error {
 			return fmt.Errorf("%s: bad sha256 for %s", manifestMember, name)
 		}
 		switch name {
-		case "config/instance.yaml", "config/env", "config/override.yml", "config/user.yml", secretsMember:
+		case "config/instance.yaml", "config/env", "config/override.yml", "config/user.yml", secretsMember, aiMember:
 			continue
 		}
 		key, ok := strings.CutPrefix(name, "volumes/")
@@ -855,6 +869,10 @@ type staged struct {
 	user    []byte            // nil: no config/user.yml
 	secrets []byte            // nil: no config/settings-secrets.json
 	volumes map[string]string // key → staged inner tar
+	// ai: config/ai.json (nil: none); aiErr: it didn't decode (the
+	// restore turns AI off with a warning, never refuses: §11.6).
+	ai    *aiArchive
+	aiErr error
 }
 
 func (s *staged) cleanup() {
@@ -975,6 +993,8 @@ func (s *staged) unpack(tr *tar.Reader) error {
 			s.env = data
 		case "config/user.yml":
 			s.user = data
+		case aiMember:
+			s.ai, s.aiErr = parseAIArchive(data)
 		case secretsMember:
 			if _, err := parseSecrets(data); err != nil {
 				return fmt.Errorf("%s: %w", secretsMember, err)

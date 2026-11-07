@@ -5,8 +5,12 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"slices"
+	"time"
 
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/hub"
+	"github.com/portcullis/hub/internal/rules"
 )
 
 // User & group management (contract §9). Every route is keyed by LLDAP
@@ -47,12 +51,14 @@ func (s *Server) registerDirectory(mux routeMux) {
 	mux.HandleFunc("POST /api/directory/import/apply", s.handleImportApply)
 }
 
-func actor(r *http.Request) string { return r.Header.Get("X-Forwarded-User") }
+// actor is the username r's changes are attributed to (requestActor's
+// User: X-Forwarded-User, or the MCP listener's identity).
+func actor(r *http.Request) string { return requestActor(r).User }
 
 // caller resolves the request's Caller (who, admin, delegated
 // permissions) once per request; on failure it has written the response.
 func (s *Server) caller(w http.ResponseWriter, r *http.Request) (*directory.Caller, bool) {
-	c, err := s.Directory.CallerFor(r.Context(), actor(r))
+	c, err := s.Directory.CallerAs(r.Context(), requestActor(r))
 	if err != nil {
 		// On the people listener (any signed-in user) an unavailable
 		// directory is reported generically; the detail is logged.
@@ -143,7 +149,23 @@ func (s *Server) handleDirectory(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, out)
 }
 
-// handleAudit: administrators only.
+// auditShown is how many entries the audit view shows (the last 100).
+const auditShown = 100
+
+// auditItem is one item of the merged "via AI" view (?via=ai&include=
+// access, contract §15.11): an audit entry or an access-log line (§15.8),
+// tagged with its source.
+type auditItem struct {
+	Source string                `json:"source"` // "audit" or "access"
+	Time   time.Time             `json:"time"`
+	Entry  *directory.AuditEntry `json:"entry,omitempty"`
+	Line   *hub.AccessLine       `json:"line,omitempty"`
+}
+
+// handleAudit: administrators only. The last 100 entries; ?via=ai only
+// those made through the Portcullis MCP (§9.5); with &include=access
+// merged with the gate's access-log lines, newest first, as auditItems
+// (at most 100 of each).
 func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 	if !s.dirReady(w) {
 		return
@@ -156,13 +178,54 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not allowed: admins only", http.StatusForbidden)
 		return
 	}
-	entries, err := s.Directory.Recent(100)
+	q := r.URL.Query()
+	via, include := q.Get("via"), q.Get("include")
+	switch {
+	case via != "" && via != directory.ViaAI:
+		http.Error(w, `via must be "ai" or absent`, http.StatusBadRequest)
+		return
+	case include != "" && include != "access":
+		http.Error(w, `include must be "access" or absent`, http.StatusBadRequest)
+		return
+	case include != "" && via == "":
+		http.Error(w, "include=access needs via=ai", http.StatusBadRequest)
+		return
+	}
+	n := auditShown
+	if via != "" {
+		n = maxAuditScan // filtered below to the last 100 AI entries
+	}
+	entries, err := s.Directory.Recent(n)
 	if err != nil {
 		http.Error(w, "read audit log: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	if via != "" {
+		entries = slices.DeleteFunc(entries, func(e directory.AuditEntry) bool { return e.Via != via })
+		entries = entries[:min(len(entries), auditShown)]
+	}
+	if include == "" {
+		noStore(w)
+		writeJSON(w, entries)
+		return
+	}
+	lines, err := s.Hub.AccessLog(nil, auditShown)
+	if err != nil {
+		writeAPIErr(w, err)
+		return
+	}
+	items := make([]auditItem, 0, len(entries)+len(lines))
+	for i := range entries {
+		items = append(items, auditItem{Source: "audit", Time: entries[i].Time, Entry: &entries[i]})
+	}
+	for i := range lines {
+		items = append(items, auditItem{Source: "access", Time: lines[i].Time, Line: &lines[i]})
+	}
+	// Both lists are newest first; a stable sort keeps each one's order
+	// among equal times.
+	slices.SortStableFunc(items, func(a, b auditItem) int { return b.Time.Compare(a.Time) })
 	noStore(w)
-	writeJSON(w, entries)
+	writeJSON(w, items)
 }
 
 func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
@@ -177,7 +240,7 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	res, err := s.Directory.CreateUser(r.Context(), c, req)
+	res, err := s.createUser(r.Context(), c, req)
 	if err != nil {
 		dirErr(w, err)
 		return
@@ -201,7 +264,7 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.Directory.UpdateUser(r.Context(), c, r.PathValue("username"), req.Email, req.DisplayName); err != nil {
+	if err := s.updateUser(r.Context(), c, r.PathValue("username"), req.Email, req.DisplayName); err != nil {
 		dirErr(w, err)
 		return
 	}
@@ -224,7 +287,7 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	res, err := s.Directory.DeleteUser(r.Context(), c, r.PathValue("username"), req.Confirm)
+	res, err := s.deleteUser(r.Context(), c, r.PathValue("username"), req.Confirm)
 	if err != nil {
 		dirErr(w, err)
 		return
@@ -245,11 +308,19 @@ func (s *Server) handleRemoveStale(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.Directory.RemoveStaleKeycloakUser(r.Context(), c, r.PathValue("username"), req.Confirm); err != nil {
+	if err := s.removeStale(r.Context(), c, r.PathValue("username"), req.Confirm); err != nil {
 		dirErr(w, err)
 		return
 	}
 	writeJSON(w, map[string]string{"status": "removed"})
+}
+
+// removeStale is the stale Keycloak record's removal (route and
+// remove_stale_keycloak_user; confirm = the username typed); audited
+// keycloak.remove_stale by Users & Groups.
+func (s *Server) removeStale(ctx context.Context, c *directory.Caller, username, confirm string) error {
+	s.rec("RemoveStaleKeycloakUser", username, confirm)
+	return s.Directory.RemoveStaleKeycloakUser(ctx, c, username, confirm)
 }
 
 func (s *Server) handleSetPassword(w http.ResponseWriter, r *http.Request) {
@@ -289,7 +360,7 @@ func (s *Server) handleInvite(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	res, err := s.Directory.SendInvite(r.Context(), c, r.PathValue("username"))
+	res, err := s.sendInvite(r.Context(), c, r.PathValue("username"))
 	if err != nil {
 		dirErr(w, err)
 		return
@@ -310,7 +381,7 @@ func (s *Server) handleRequirePasskey(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.Directory.RequirePasskey(r.Context(), c, r.PathValue("username")); err != nil {
+	if err := s.requirePasskey(r.Context(), c, r.PathValue("username")); err != nil {
 		dirErr(w, err)
 		return
 	}
@@ -329,7 +400,7 @@ func (s *Server) handleClearActions(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.Directory.ClearActions(r.Context(), c, r.PathValue("username")); err != nil {
+	if err := s.clearActions(r.Context(), c, r.PathValue("username")); err != nil {
 		dirErr(w, err)
 		return
 	}
@@ -351,7 +422,7 @@ func (s *Server) handleRemovePasskeys(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	res, err := s.Directory.RemovePasskeys(r.Context(), c, r.PathValue("username"), req.Confirm, req.Invite)
+	res, err := s.removePasskeys(r.Context(), c, r.PathValue("username"), req.Confirm, req.Invite)
 	if err != nil {
 		dirErr(w, err)
 		return
@@ -374,7 +445,7 @@ func (s *Server) handleCreateGroup(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	res, err := s.Directory.CreateGroup(r.Context(), c, req.Name)
+	res, err := s.createGroup(r.Context(), c, req.Name)
 	if err != nil {
 		dirErr(w, err)
 		return
@@ -394,7 +465,7 @@ func (s *Server) handleDeleteGroup(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	res, err := s.Directory.DeleteGroup(r.Context(), c, r.PathValue("group"), req.Confirm)
+	res, err := s.deleteGroup(r.Context(), c, r.PathValue("group"), req.Confirm)
 	if err != nil {
 		dirErr(w, err)
 		return
@@ -416,7 +487,7 @@ func (s *Server) handleAddMember(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.Directory.AddMember(r.Context(), c, r.PathValue("group"), req.Username); err != nil {
+	if err := s.addMember(r.Context(), c, r.PathValue("group"), req.Username); err != nil {
 		dirErr(w, err)
 		return
 	}
@@ -435,7 +506,7 @@ func (s *Server) handleRemoveMember(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	res, err := s.Directory.RemoveMember(r.Context(), c, r.PathValue("group"), r.PathValue("username"))
+	res, err := s.removeMember(r.Context(), c, r.PathValue("group"), r.PathValue("username"))
 	if err != nil {
 		dirErr(w, err)
 		return
@@ -447,4 +518,121 @@ func (s *Server) handleRemoveMember(w http.ResponseWriter, r *http.Request) {
 // the same document the Hub writes to portal-apps.json.
 func (s *Server) handlePortalApps(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, s.Hub.Portal())
+}
+
+// ── shared route / tool work (plan 4 Task 18) ───────────
+//
+// The directory call of each /api/directory mutation, shared by its
+// handler and its Portcullis MCP tool (mcptools_directory.go): the same
+// Service method with the same arguments (no HTTP loopback, no logic of
+// its own), reported to rec for the parity test — never a password.
+
+func (s *Server) createUser(ctx context.Context, c *directory.Caller, req directory.CreateRequest) (*directory.Result, error) {
+	s.rec("CreateUser", req.Username, req.Email, req.DisplayName, req.Groups, req.Onboarding, req.Generate, req.RequirePasskey)
+	return s.Directory.CreateUser(ctx, c, req)
+}
+
+func (s *Server) updateUser(ctx context.Context, c *directory.Caller, username string, email, displayName *string) error {
+	s.rec("UpdateUser", username, email, displayName)
+	return s.Directory.UpdateUser(ctx, c, username, email, displayName)
+}
+
+func (s *Server) deleteUser(ctx context.Context, c *directory.Caller, username, confirm string) (*directory.Result, error) {
+	s.rec("DeleteUser", username, confirm)
+	return s.Directory.DeleteUser(ctx, c, username, confirm)
+}
+
+func (s *Server) sendInvite(ctx context.Context, c *directory.Caller, username string) (*directory.Result, error) {
+	s.rec("SendInvite", username)
+	return s.Directory.SendInvite(ctx, c, username)
+}
+
+func (s *Server) requirePasskey(ctx context.Context, c *directory.Caller, username string) error {
+	s.rec("RequirePasskey", username)
+	return s.Directory.RequirePasskey(ctx, c, username)
+}
+
+func (s *Server) clearActions(ctx context.Context, c *directory.Caller, username string) error {
+	s.rec("ClearActions", username)
+	return s.Directory.ClearActions(ctx, c, username)
+}
+
+func (s *Server) removePasskeys(ctx context.Context, c *directory.Caller, username, confirm string, withInvite bool) (*directory.Result, error) {
+	s.rec("RemovePasskeys", username, confirm, withInvite)
+	return s.Directory.RemovePasskeys(ctx, c, username, confirm, withInvite)
+}
+
+func (s *Server) createGroup(ctx context.Context, c *directory.Caller, name string) (*directory.Result, error) {
+	s.rec("CreateGroup", name)
+	return s.Directory.CreateGroup(ctx, c, name)
+}
+
+func (s *Server) deleteGroup(ctx context.Context, c *directory.Caller, name, confirm string) (*directory.Result, error) {
+	s.rec("DeleteGroup", name, confirm)
+	return s.Directory.DeleteGroup(ctx, c, name, confirm)
+}
+
+func (s *Server) addMember(ctx context.Context, c *directory.Caller, group, username string) error {
+	s.rec("AddMember", group, username)
+	return s.Directory.AddMember(ctx, c, group, username)
+}
+
+func (s *Server) removeMember(ctx context.Context, c *directory.Caller, group, username string) (*directory.Result, error) {
+	s.rec("RemoveMember", group, username)
+	return s.Directory.RemoveMember(ctx, c, group, username)
+}
+
+func (s *Server) createField(ctx context.Context, c *directory.Caller, f directory.Field) error {
+	s.rec("CreateField", f)
+	return s.Directory.CreateField(ctx, c, f)
+}
+
+func (s *Server) patchField(ctx context.Context, c *directory.Caller, name string, p directory.FieldPatch) (*directory.Field, error) {
+	s.rec("PatchField", name, p)
+	return s.Directory.PatchField(ctx, c, name, p)
+}
+
+func (s *Server) deleteField(ctx context.Context, c *directory.Caller, name, confirm string) error {
+	s.rec("DeleteField", name, confirm)
+	return s.Directory.DeleteField(ctx, c, name, confirm)
+}
+
+func (s *Server) setDetails(ctx context.Context, c *directory.Caller, username string, attrs map[string][]string) error {
+	s.rec("SetDetails", username, attrs)
+	return s.Directory.SetDetails(ctx, c, username, attrs)
+}
+
+func (s *Server) setGroupRule(ctx context.Context, c *directory.Caller, group string, rule *rules.Expr) error {
+	s.rec("SetGroupRule", group, rule)
+	return s.Directory.SetGroupRule(ctx, c, group, rule)
+}
+
+func (s *Server) convertGroup(ctx context.Context, c *directory.Caller, group string, rule *rules.Expr, keep []string, reviewed *directory.ConvertPreview) error {
+	s.rec("ConvertApplyReviewed", group, rule, keep, reviewed)
+	return s.Directory.ConvertApplyReviewed(ctx, c, group, rule, keep, reviewed)
+}
+
+func (s *Server) addException(ctx context.Context, c *directory.Caller, group string, ex directory.Exception) error {
+	s.rec("AddException", group, ex)
+	return s.Directory.AddException(ctx, c, group, ex)
+}
+
+func (s *Server) removeException(ctx context.Context, c *directory.Caller, group, username string) error {
+	s.rec("RemoveException", group, username)
+	return s.Directory.RemoveException(ctx, c, group, username)
+}
+
+func (s *Server) setMemberExpiry(ctx context.Context, c *directory.Caller, group, username string, until *time.Time) error {
+	s.rec("SetMemberExpiry", group, username, until)
+	return s.Directory.SetMemberExpiry(ctx, c, group, username, until)
+}
+
+func (s *Server) setPermission(ctx context.Context, c *directory.Caller, perm, group string) error {
+	s.rec("SetPermission", perm, group)
+	return s.Directory.SetPermission(ctx, c, perm, group)
+}
+
+func (s *Server) importApply(ctx context.Context, c *directory.Caller, req directory.ApplyRequest) (*directory.ApplyResult, error) {
+	s.rec("ImportApply", req)
+	return s.Directory.ImportApply(ctx, c, req)
 }

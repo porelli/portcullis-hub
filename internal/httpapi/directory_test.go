@@ -51,7 +51,7 @@ func newDirFixture(t *testing.T, adjust func(*directory.Service)) (*Server, *lld
 	root := t.TempDir()
 	src := filepath.Join(root, "src", "demo")
 	os.MkdirAll(src, 0755)
-	os.WriteFile(filepath.Join(src, "manifest.yaml"), []byte("name: Demo\ncategory: test\nicon: x\nurls:\n  - label: Demo\n    url: https://demo.{{DOMAIN}}\nauth:\n  method: forward-auth\n  group_access: true\n  access_group: users_demo\n  admin_group: admin_demo\n"), 0644)
+	os.WriteFile(filepath.Join(src, "manifest.yaml"), []byte("name: Demo\ncategory: test\nicon: x\nurls:\n  - label: Demo\n    url: https://demo.{{DOMAIN}}\nai: {unsupported: test fixture}\nauth:\n  method: forward-auth\n  group_access: true\n  access_group: users_demo\n  admin_group: admin_demo\n"), 0644)
 	os.WriteFile(filepath.Join(src, "compose.yml"), []byte("services:\n  web:\n    image: x\n    labels:\n      traefik.http.routers.demo.rule: Host(`demo.${PORTCULLIS_DOMAIN}`)\n"), 0644)
 	data := filepath.Join(root, "data")
 	os.MkdirAll(data, 0755)
@@ -73,6 +73,7 @@ func newDirFixture(t *testing.T, adjust func(*directory.Service)) (*Server, *lld
 	os.WriteFile(filepath.Join(cred, "password"), []byte("svc-password-0123456789"), 0600)
 	kc := kctest.New(t)
 	kc.Importable = ll.HasUser
+	kc.LDAPUUID = ll.UUIDOf
 	inv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req struct{ Username string }
 		json.NewDecoder(r.Body).Decode(&req)
@@ -311,7 +312,7 @@ func TestEnableCreatesMissingGroups(t *testing.T) {
 		t.Errorf("missing = %d %s", r.StatusCode, b)
 	}
 	// Deleted straight in LLDAP.
-	if _, err := s.Directory.DeleteInstanceGroup(context.Background(), "root", "users_demo"); err != nil {
+	if _, err := s.Directory.DeleteInstanceGroup(context.Background(), directory.Human("root"), "users_demo"); err != nil {
 		t.Fatal(err)
 	}
 	if r, b := doAs(t, srv, "root", "GET", "/api/instances/missing-groups", ""); r.StatusCode != 200 || !strings.Contains(b, `{"instance":"demo","creatable":["users_demo"]}`) {

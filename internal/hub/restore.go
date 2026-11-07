@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/state"
@@ -204,7 +205,7 @@ func (h *Hub) configProblem(t *templates.Template, c *instanceConfig, archive st
 // enable (Keycloak clients, access role, callbacks, policy, compose up).
 // Any failure there puts the pre-restore backup back the same way (an
 // *OpError with rolled_back; op "restore"). Audited as instance.restore.
-func (h *Hub) RestoreInstance(id, archive, actor string) (res *RestoreResult, err error) {
+func (h *Hub) RestoreInstance(id, archive string, actor directory.Actor) (res *RestoreResult, err error) {
 	return h.restoreInstance(id, archive, actor, nil)
 }
 
@@ -213,7 +214,7 @@ func (h *Hub) RestoreInstance(id, archive, actor string) (res *RestoreResult, er
 // archive file exists), before the archive is verified (StartRestore
 // answers 202 then; a verification refusal is the operation's failure,
 // with nothing changed).
-func (h *Hub) restoreInstance(id, archive, actor string, ready func()) (res *RestoreResult, err error) {
+func (h *Hub) restoreInstance(id, archive string, actor directory.Actor, ready func()) (res *RestoreResult, err error) {
 	res = &RestoreResult{}
 	defer func() {
 		h.auditOp(actor, "instance.restore", id, "archive="+archive+" pre_restore="+res.PreRestoreBackup, err)
@@ -226,6 +227,7 @@ func (h *Hub) restoreInstance(id, archive, actor string, ready func()) (res *Res
 		return res, err
 	}
 	defer unlock()
+	defer h.lifecycleAILock(id)() // lockApp → aiLock (G35, §15.5)
 	view, e, err := h.restoreTarget(id)
 	if err != nil {
 		return res, err
@@ -255,8 +257,9 @@ func (h *Hub) restoreInstance(id, archive, actor string, ready func()) (res *Res
 	defer sb.cleanup()
 	// Redacted from here on: the values the instance has now and the
 	// archive's, whichever the instance holds when this ends.
-	extra := append(h.redactionSet(id), archiveSecrets(view, sb)...)
-	defer func() { err = withSecrets(err, extra) }()
+	cur, unread := h.redactionSetErr(id)
+	extra := append(cur, archiveSecrets(view, sb)...)
+	defer func() { err = hideIfUnread(withSecrets(err, extra), unread) }()
 	if sb.m.Template != view.TemplateID {
 		return res, statusErr(409, "archive %s is a backup of template %s, instance %s runs %s", archive, sb.m.Template, id, view.TemplateID)
 	}
@@ -304,14 +307,24 @@ func (h *Hub) restoreInstance(id, archive, actor string, ready func()) (res *Res
 	if e.State == state.InstanceCreated {
 		keep = state.InstanceCreated
 	}
-	applyErr := h.applyRestore(id, sb, plan, wasEnabled, true)
+	air, applyErr := h.applyRestore(id, sb, plan, wasEnabled, true, actor)
 	if applyErr == nil {
 		if cerr := h.clearRestoring(id, keep); cerr != nil {
 			res.Warnings = append(res.Warnings, cerr.Error())
 		}
+		// No longer restoring: the gate file lists its companions again
+		// (those whose revoke_all succeeded).
+		h.writePolicyLogged()
+		res.Warnings = append(res.Warnings, air.warnings...)
 		res.Warnings = append(res.Warnings, h.bindPlaceholderRows(context.Background(), id)...)
 		log.Printf("instance %s restored from %s (pre-restore backup %s)", id, archive, pre.Archive)
-		return res, h.finishOp(id, OpRestore, nil, false)
+		ferr := h.finishOp(id, OpRestore, nil, false)
+		if air.err != nil {
+			// The data is restored; a companion whose revoke_all failed is
+			// off (§11.6): the instance's record shows why.
+			h.finishOp(id, OpAI, withSecrets(air.err, extra), false)
+		}
+		return res, ferr
 	}
 	// Put the previous data back.
 	rerr := h.stagedRollback(id, view, pre.Archive, wasEnabled)
@@ -322,6 +335,7 @@ func (h *Hub) restoreInstance(id, archive, actor string, ready func()) (res *Res
 	if cerr := h.clearRestoring(id, keep); cerr != nil {
 		res.Warnings = append(res.Warnings, cerr.Error())
 	}
+	h.writePolicyLogged()
 	applyErr = fmt.Errorf("restore from %s failed: %w — the previous data was put back (pre-restore backup %s)", archive, applyErr, pre.Archive)
 	return res, h.finishOp(id, OpRestore, withSecrets(applyErr, extra), true)
 }
@@ -474,6 +488,7 @@ func (h *Hub) RecoverRestores() {
 				return
 			}
 			defer unlock()
+			defer h.lifecycleAILock(id)() // lockApp → aiLock (G35)
 			h.mu.RLock()
 			e := h.st.Instances[id]
 			h.mu.RUnlock()
@@ -534,6 +549,7 @@ func (h *Hub) removeUnfinishedRestoreAs(id, archive string) {
 		}
 	}
 	delete(h.st.Instances, id)
+	delete(h.st.AIInstances, id)
 	h.applyConfigLocked(id, instanceConfig{})
 	h.rebuildLocked()
 	h.saveLocked()
@@ -608,40 +624,79 @@ func composeVolume(id, key, name string) docker.Volume {
 // before the start: the restored start never sees an old account); then
 // it enables it again if it was enabled. It marks the instance disabled
 // while its data is replaced.
-func (h *Hub) applyRestore(id string, sb *staged, plan []volumePlan, wasEnabled, void bool) error {
+//
+// AI (§11.6): the instance's credential entries are deleted before the
+// volumes are replaced; the archive's AI state is put back through the
+// switch-on refusals (restoredAILocked: a failing companion off, with a
+// warning); every switched-on companion with a revoke hook owes
+// revoke_all, run by the start (under the restore's AI lock) before it
+// is listed again; one whose revoke_all failed is switched off
+// (restoreAIAfterStart); the scopes of companions now off are deleted.
+// The returned aiRestore holds the warnings and the AI failure for the
+// op record; actor audits the switch-offs.
+func (h *Hub) applyRestore(id string, sb *staged, plan []volumePlan, wasEnabled, void bool, actor directory.Actor) (air aiRestore, err error) {
 	ctx := context.Background()
 	h.mu.Lock()
 	h.st.SetEnabled(id, false)
 	h.rebuildLocked()
 	h.refreshPublishedLocked()
 	h.saveLocked()
+	scoped := h.scopedCompanionsLocked(id)
 	h.mu.Unlock()
 	h.writePolicyLogged()
+	// The restored app may hold credentials these entries name, or not:
+	// either way the gate never uses them again (revoke_all follows).
+	if err := h.dropInstanceAIEntries(id); err != nil {
+		return air, fmt.Errorf("removing the AI credentials of %s: %w", id, err)
+	}
+	defer func() {
+		if err == nil {
+			h.dropRestoredScopes(id, scoped)
+		}
+	}()
 	if len(plan) > 0 {
 		if err := h.engine.EnsureImage(ctx, HelperImage); err != nil {
-			return fmt.Errorf("helper image %s: %w", HelperImage, err)
+			return air, fmt.Errorf("helper image %s: %w", HelperImage, err)
 		}
 	}
 	for _, p := range plan {
 		if _, err := h.fillVolume(ctx, id, p.vol, p.existed, p.tar); err != nil {
-			return err
+			return air, err
 		}
 	}
 	if h.testHookApplyRestore != nil {
 		if err := h.testHookApplyRestore("volumes"); err != nil {
-			return err
+			return air, err
 		}
 	}
 	if err := writeOrRemove(h.envPath(id), sb.env); err != nil {
-		return fmt.Errorf("env: %w", err)
+		return air, fmt.Errorf("env: %w", err)
 	}
 	if err := writeOrRemove(h.userOverridePath(id), sb.user); err != nil {
-		return fmt.Errorf("custom override: %w", err)
+		return air, fmt.Errorf("custom override: %w", err)
 	}
 	members := h.groupSnapshot(id)
 	h.mu.Lock()
 	h.applyConfigLocked(id, sb.cfg)
 	h.rebuildLocked()
+	// The archive's AI state, judged against the restored policy.
+	if v := h.findLocked(id); v != nil {
+		next, has, w := h.restoredAILocked(v, sb.ai, sb.aiErr, false, h.st.AIInstances[id])
+		h.setRestoredAILocked(id, next, has)
+		air.warnings = append(air.warnings, w...)
+	}
+	// The app's data was replaced: its switched-on companions owe a
+	// revoke_all before they are rendered or listed again (§15.4; run by
+	// the start below, under this restore's AI lock).
+	h.oweAIRevokeLocked(id)
+	// app_oauth companions restored off (archive off, or refused) owe the
+	// revoked leavers' replay too, and a revoke_all when the archive had
+	// them on (final review I3); collected here, the replay marked after mu.
+	archived := sb.ai
+	if sb.aiErr != nil {
+		archived = nil
+	}
+	oauthRefs := h.oweAIRestoredOffLocked(id, archived)
 	// The secrets store as archived (config/settings-secrets.json; none =
 	// no secrets), before the env is written from it.
 	var secretsErr error
@@ -663,17 +718,27 @@ func (h *Hub) applyRestore(id string, sb *staged, plan []volumePlan, wasEnabled,
 		_, voidErr = h.voidCredentialsLocked(id, state.CredentialReasonRestore)
 	}
 	h.mu.Unlock()
+	h.markOAuthReplay(oauthRefs)
 	if err := errors.Join(secretsErr, envErr, saveErr, voidErr); err != nil {
-		return err
+		return air, err
 	}
 	if wasEnabled {
 		if _, err := h.enableInner(id, true); err != nil {
-			return err
+			return air, err
 		}
+		w, aerr := h.restoreAIAfterStart(id, actor)
+		air.warnings, air.err = append(air.warnings, w...), aerr
 	} else {
 		h.writePolicyLogged()
 	}
-	return nil
+	return air, nil
+}
+
+// aiRestore is what a restore's AI part reports: warnings for the
+// result, err for the op record (op ai).
+type aiRestore struct {
+	warnings []string
+	err      error
 }
 
 // stagedRollback puts the pre-restore backup preArchive back after a
@@ -698,7 +763,14 @@ func (h *Hub) rollbackStaged(id string, view *templates.Template, pre *staged, w
 	if err != nil {
 		return err
 	}
-	return h.applyRestore(id, pre, plan, wasEnabled, false)
+	air, err := h.applyRestore(id, pre, plan, wasEnabled, false, aiHubActor)
+	for _, w := range air.warnings {
+		log.Printf("instance %s: rollback: %s", id, w)
+	}
+	if err == nil && air.err != nil {
+		h.finishOp(id, OpAI, air.err, false)
+	}
+	return err
 }
 
 // RestoreInstanceAs restores archive (any listed one, a deleted
@@ -713,7 +785,7 @@ func (h *Hub) rollbackStaged(id string, view *templates.Template, pre *staged, w
 // settings, policy, public exceptions and env (each Keycloak client's
 // secret_env regenerated). A failure after the create removes what it
 // created. Audited as instance.restore.
-func (h *Hub) RestoreInstanceAs(archive, newID, actor string) (res *RestoreResult, err error) {
+func (h *Hub) RestoreInstanceAs(archive, newID string, actor directory.Actor) (res *RestoreResult, err error) {
 	return h.restoreInstanceAs(archive, newID, actor, nil, nil)
 }
 
@@ -722,7 +794,7 @@ func (h *Hub) RestoreInstanceAs(archive, newID, actor string) (res *RestoreResul
 // would (validated, collisions refused); the others default to the
 // archive's hostname for hosts.immutable routers, else the new id's
 // default on the main domain.
-func (h *Hub) RestoreInstanceAsWith(archive, newID, actor string, hosts map[string]string) (res *RestoreResult, err error) {
+func (h *Hub) RestoreInstanceAsWith(archive, newID string, actor directory.Actor, hosts map[string]string) (res *RestoreResult, err error) {
 	return h.restoreInstanceAs(archive, newID, actor, hosts, nil)
 }
 
@@ -730,7 +802,7 @@ func (h *Hub) RestoreInstanceAsWith(archive, newID, actor string, hosts map[stri
 // the request is accepted (archive name and new id valid, lock held, the
 // archive file exists, the actor resolves), before the archive is
 // verified (StartRestoreAs answers 202 then).
-func (h *Hub) restoreInstanceAs(archive, newID, actor string, hosts map[string]string, ready func()) (res *RestoreResult, err error) {
+func (h *Hub) restoreInstanceAs(archive, newID string, actor directory.Actor, hosts map[string]string, ready func()) (res *RestoreResult, err error) {
 	res = &RestoreResult{}
 	defer func() {
 		h.auditOp(actor, "instance.restore", newID, "archive="+archive+" new_instance=true", err)
@@ -749,6 +821,7 @@ func (h *Hub) restoreInstanceAs(archive, newID, actor string, hosts map[string]s
 		return res, err
 	}
 	defer unlock()
+	defer h.lifecycleAILock(newID)() // lockApp → aiLock (G35)
 	if ready != nil {
 		h.mu.RLock()
 		_, exists := h.st.Instances[newID]
@@ -763,7 +836,7 @@ func (h *Hub) restoreInstanceAs(archive, newID, actor string, hosts map[string]s
 		}
 		if groupsAPI != nil {
 			if err := groupsAPI.ResolveActor(context.Background(), actor); err != nil {
-				return res, fmt.Errorf("the acting admin %q can't create the instance's groups — nothing was changed: %w", actor, err)
+				return res, fmt.Errorf("the acting admin %q can't create the instance's groups — nothing was changed: %w", actor.User, err)
 			}
 		}
 		ready()
@@ -779,7 +852,8 @@ func (h *Hub) restoreInstanceAs(archive, newID, actor string, hosts map[string]s
 	// Redacted from here on: the archive's values and (undo) the new
 	// instance's before it is removed.
 	var extra []string
-	defer func() { err = withSecrets(err, extra) }()
+	var undoUnread error // the new instance's redaction set couldn't be read during the undo
+	defer func() { err = hideIfUnread(withSecrets(err, extra), undoUnread) }()
 
 	h.mu.RLock()
 	t := h.catalogLocked(sb.m.Template)
@@ -799,6 +873,9 @@ func (h *Hub) restoreInstanceAs(archive, newID, actor string, hosts map[string]s
 	}
 	if !tmpl.Manifest.Multi() {
 		return res, statusErr(409, "template %s is instances: single — restore the archive into its default instance instead", tmpl.ID)
+	}
+	if err := aliasesFitInstance(&tmpl, newID); err != nil {
+		return res, err
 	}
 	want, err := restoreAsHosts(&tmpl, newID, domain, sb.cfg.Hosts, hosts)
 	if err != nil {
@@ -833,7 +910,7 @@ func (h *Hub) restoreInstanceAs(archive, newID, actor string, hosts map[string]s
 	h.mu.RUnlock()
 	if groupsAPI != nil && (names.AccessGroup != "" || names.AdminGroup != "") {
 		if err := groupsAPI.ResolveActor(context.Background(), actor); err != nil {
-			return res, fmt.Errorf("the acting admin %q can't create the instance's groups — nothing was changed: %w", actor, err)
+			return res, fmt.Errorf("the acting admin %q can't create the instance's groups — nothing was changed: %w", actor.User, err)
 		}
 	}
 	// Host paths are shared, not copied: say so.
@@ -871,7 +948,11 @@ func (h *Hub) restoreInstanceAs(archive, newID, actor string, hosts map[string]s
 	undo := func(cause error) error {
 		ctx := context.Background()
 		// Its regenerated secrets and env go with it: keep redacting them.
-		extra = append(extra, h.redactionSet(newID)...)
+		set, unread := h.redactionSetErr(newID)
+		extra = append(extra, set...)
+		if unread != nil {
+			undoUnread = unread
+		}
 		var errs []error
 		for _, v := range createdVols {
 			if err := h.engine.RemoveVolume(ctx, v); err != nil && !docker.IsNotFound(err) {
@@ -893,6 +974,7 @@ func (h *Hub) restoreInstanceAs(archive, newID, actor string, hosts map[string]s
 		}
 		h.mu.Lock()
 		delete(h.st.Instances, newID)
+		delete(h.st.AIInstances, newID)
 		h.applyConfigLocked(newID, instanceConfig{})
 		h.rebuildLocked()
 		h.saveLocked()
@@ -926,6 +1008,15 @@ func (h *Hub) restoreInstanceAs(archive, newID, actor string, hosts map[string]s
 	h.mu.Lock()
 	h.applyConfigLocked(newID, sb.cfg)
 	h.rebuildLocked()
+	// Every companion off, modes and providers kept (§11.6); switching
+	// one on runs revoke_all first (G34). A copy is never listed before a
+	// revoke_all either way.
+	if v := h.findLocked(newID); v != nil {
+		next, has, w := h.restoredAILocked(v, sb.ai, sb.aiErr, true, state.AIInstance{})
+		h.setRestoredAILocked(newID, next, has)
+		res.Warnings = append(res.Warnings, w...)
+	}
+	h.oweAIRevokeLocked(newID)
 	if v := h.findLocked(newID); v != nil {
 		h.seedSettingsLocked(v)
 	}
@@ -997,6 +1088,11 @@ func (h *Hub) restoreInstanceAs(archive, newID, actor string, hosts map[string]s
 	}
 	// Its starting rows, bound to the new id's groups.
 	res.Warnings = append(res.Warnings, h.bindPlaceholderRows(context.Background(), newID)...)
+	if v := h.Template(newID); v != nil {
+		if w := h.oauthCopyForRestoreAs(v, sb.m.Instance, newID); w != "" {
+			res.Warnings = append(res.Warnings, w)
+		}
+	}
 	h.writePolicyLogged()
 	log.Printf("instance %s of %s restored from %s", newID, tmpl.ID, archive)
 	return res, nil

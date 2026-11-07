@@ -63,7 +63,8 @@ func pathIn(u PathUsage) doctor.PathIn {
 // doctorInputs gathers the doctor's inputs: the directory snapshot first
 // (never under mu; unavailable = per-person rows not judged by
 // membership) and the main domain's addresses (domainAddrs: cached, 2 s
-// timeout; a failure = DomainErr, nothing escalates), then a copy of the
+// timeout; a failure = DomainErr, nothing escalates) and the AI
+// companions (aiDoctorInputs: Docker outside mu), then a copy of the
 // state under the read lock: paths, folders, folder_changed records,
 // per-person options, published ports (portInsLocked) and the local
 // networks, and the cached disk scans of the current targets with the
@@ -85,6 +86,9 @@ func (h *Hub) doctorInputs(ctx context.Context) (*doctor.Inputs, error) {
 	scans, rt := h.scanEntries(), h.scanRuntime()
 	// The stored hook reports (files, read before mu).
 	reports := h.fileSharingReports()
+	// The AI checks' inputs (Task 20): containers through Docker, never
+	// under mu.
+	aiIns := h.aiDoctorInputs(ctx)
 	addrs, derr := h.domainAddrs(ctx)
 	if derr != nil {
 		log.Printf("doctor: couldn't resolve %s (%v): exposure not checked against its addresses", h.cfg.Domain, derr)
@@ -94,7 +98,7 @@ func (h *Hub) doctorInputs(ctx context.Context) (*doctor.Inputs, error) {
 	defer h.mu.RUnlock()
 	in := &doctor.Inputs{Now: time.Now().UTC(), BindRoots: slices.Clone(h.bindRoots),
 		Domain: h.cfg.Domain, DomainAddrs: addrs, DomainErr: derr != nil,
-		LocalNetworks: h.localNetworksLocked(), Ports: h.portInsLocked()}
+		LocalNetworks: h.localNetworksLocked(), Ports: h.portInsLocked(), AI: aiIns}
 	for _, u := range h.pathUsagesLocked() {
 		in.Paths = append(in.Paths, pathIn(u))
 	}
@@ -205,16 +209,16 @@ func (h *Hub) personInputsLocked(t *templates.Template, m *directory.Membership)
 // a finding the admin didn't see). The mute keeps the finding's inputs
 // digest: it lapses when they change. Audited doctor.mute (detail: the
 // reason).
-func (h *Hub) MuteFinding(ctx context.Context, fp, reason, actor, token string) error {
+func (h *Hub) MuteFinding(ctx context.Context, fp, reason string, actor directory.Actor, token string) error {
 	err := h.muteFinding(ctx, fp, reason, actor, token)
 	h.auditDoctor(actor, "doctor.mute", fp, firstRunes(strings.TrimSpace(reason), muteReasonMax), err)
 	return err
 }
 
-func (h *Hub) muteFinding(ctx context.Context, fp, reason, actor, token string) error {
+func (h *Hub) muteFinding(ctx context.Context, fp, reason string, actor directory.Actor, token string) error {
 	reason = strings.TrimSpace(reason)
 	switch {
-	case actor == "":
+	case actor.User == "":
 		return statusErr(http.StatusUnauthorized, "a mute needs a signed-in admin")
 	case reason == "":
 		return statusErr(http.StatusBadRequest, "a mute needs a reason")
@@ -247,7 +251,7 @@ func (h *Hub) muteFinding(ctx context.Context, fp, reason, actor, token string) 
 	if h.st.DoctorMutes == nil {
 		h.st.DoctorMutes = map[string]state.DoctorMute{}
 	}
-	h.st.DoctorMutes[fp] = state.DoctorMute{Reason: reason, Actor: actor, At: time.Now().UTC(), Inputs: found.Inputs}
+	h.st.DoctorMutes[fp] = state.DoctorMute{Reason: reason, Actor: actor.User, At: time.Now().UTC(), Inputs: found.Inputs}
 	if err := h.saveStateLocked(); err != nil {
 		if had {
 			h.st.DoctorMutes[fp] = prev
@@ -261,9 +265,9 @@ func (h *Hub) muteFinding(ctx context.Context, fp, reason, actor, token string) 
 
 // UnmuteFinding removes fp's mute (404 when it has none). Audited
 // doctor.unmute.
-func (h *Hub) UnmuteFinding(fp, actor string) error {
+func (h *Hub) UnmuteFinding(fp string, actor directory.Actor) error {
 	var err error
-	if actor == "" {
+	if actor.User == "" {
 		err = statusErr(http.StatusUnauthorized, "an unmute needs a signed-in admin")
 	} else {
 		err = h.unmuteFinding(fp)
@@ -289,14 +293,14 @@ func (h *Hub) unmuteFinding(fp string) error {
 
 // auditDoctor writes a doctor.* audit entry (after mu; refusals
 // "refused").
-func (h *Hub) auditDoctor(actor, action, fp, detail string, err error) {
+func (h *Hub) auditDoctor(actor directory.Actor, action, fp, detail string, err error) {
 	h.mu.RLock()
 	a := h.audit
 	h.mu.RUnlock()
 	if a == nil {
 		return
 	}
-	e := directory.AuditEntry{Actor: actor, Action: action, Target: clip(fp, 32), Detail: detail, Result: "ok"}
+	e := directory.AuditEntry{Actor: actor.User, Via: actor.Via, Client: actor.Client, Action: action, Target: clip(fp, 32), Detail: actor.AuditDetail(detail), Result: "ok"}
 	if err != nil {
 		e.Result, e.Error = "error", err.Error()
 		var se *StatusError

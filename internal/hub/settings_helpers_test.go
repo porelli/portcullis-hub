@@ -3,11 +3,13 @@ package hub
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/portcullis/hub/internal/directory"
 )
 
 // save is SaveSettings as admin, the error only.
 func (h *Hub) save(id string, u SettingsUpdate) error {
-	_, err := h.SaveSettings(id, u, "admin")
+	_, err := h.SaveSettings(id, u, directory.Human("admin"))
 	return err
 }
 

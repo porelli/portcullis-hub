@@ -1,7 +1,11 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+  <meta name="referrer" content="no-referrer">
   <meta charset="UTF-8">
+  <!-- The fresh-auth popup callback (contract §5.1, G11): first, before
+       anything else loads; the one source shared with people.html. -->
+  <script src="/static/freshauth-callback.js"></script>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Portcullis Hub</title>
   <style>
@@ -88,7 +92,7 @@
     .settings-form .form-group { margin-bottom: 1rem; }
     .settings-form label { display: block; font-size: 0.8125rem; font-weight: 500; margin-bottom: 0.25rem; }
     .settings-form small { display: block; color: #64748b; font-size: 0.75rem; margin-bottom: 0.375rem; }
-    .settings-form input[type="text"], .settings-form select { width: 100%; padding: 0.5rem 0.75rem; background: #0f172a; border: 1px solid #334155; border-radius: 0.375rem; color: #e2e8f0; font-size: 0.875rem; font-family: inherit; }
+    .settings-form input[type="text"], .settings-form input[type="password"], .settings-form select { width: 100%; padding: 0.5rem 0.75rem; background: #0f172a; border: 1px solid #334155; border-radius: 0.375rem; color: #e2e8f0; font-size: 0.875rem; font-family: inherit; }
     .settings-form input:focus, .settings-form select:focus { outline: none; border-color: #3b82f6; }
     .settings-form input::placeholder { color: #475569; }
     .settings-empty { color: #64748b; font-size: 0.875rem; }
@@ -263,7 +267,7 @@
     .host-row input[readonly] { background: #0b1220; color: #94a3b8; border-style: dashed; cursor: not-allowed; }
     .host-row small { grid-column: 2; color: #64748b; font-size: 0.75rem; margin-top: -0.25rem; }
     .inst-form label.block { display: block; font-size: 0.8125rem; font-weight: 500; margin-bottom: 0.25rem; }
-    .inst-form input[type="text"], .inst-form select { width: 100%; padding: 0.5rem 0.75rem; background: #1e293b; border: 1px solid #334155; border-radius: 0.375rem; color: #e2e8f0; font-size: 0.875rem; font-family: inherit; margin-bottom: 0.25rem; }
+    .inst-form input[type="text"], .inst-form input[type="password"], .inst-form select { width: 100%; padding: 0.5rem 0.75rem; background: #1e293b; border: 1px solid #334155; border-radius: 0.375rem; color: #e2e8f0; font-size: 0.875rem; font-family: inherit; margin-bottom: 0.25rem; }
     .inst-form small { display: block; color: #64748b; font-size: 0.75rem; margin-bottom: 0.75rem; }
     .inst-row { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; margin-top: 0.5rem; }
     .inst-table { width: 100%; border-collapse: collapse; font-size: 0.8125rem; }
@@ -274,6 +278,10 @@
     .inst-warns { color: #fde68a; background: #f59e0b11; border: 1px solid #f59e0b44; border-radius: 0.375rem; padding: 0.5rem 0.75rem 0.5rem 1.75rem; margin-bottom: 0.5rem; }
     .inst-danger { border-color: #ef444466; }
     .inst-panel { margin-top: 0.75rem; padding: 0.75rem 1rem; border: 1px solid #3b82f655; border-radius: 0.5rem; background: #1e293b; }
+    .ai-tab select, .ai-tab input[type="text"] { padding: 0.375rem 0.5rem; background: #1e293b; border: 1px solid #334155; border-radius: 0.375rem; color: #e2e8f0; font-size: 0.8125rem; font-family: inherit; }
+    .ai-tab input[type="text"] { width: 16rem; max-width: 100%; }
+    .ai-tab a, #ai-root a { color: #93c5fd; }
+    .ai-tab button:disabled, .ai-tab select:disabled, .ai-tab input:disabled { opacity: 0.5; cursor: not-allowed; }
     .inst-panel ul { margin: 0.25rem 0 0.5rem 1.25rem; color: #94a3b8; }
 
     /* Settings panel (web/settings.js) */
@@ -520,6 +528,7 @@
               {{if .Manifest.HasPersonSecret}}
               <span class="detail-tab" data-dtab="filesharing" data-app="{{.ID}}">File sharing</span>
               {{end}}
+              <span class="detail-tab" data-dtab="ai" data-app="{{.ID}}">AI support</span>
               <span class="detail-tab" data-dtab="expert" data-app="{{.ID}}">Expert</span>
               <span class="detail-tab" data-dtab="instances" data-app="{{.ID}}">Instances</span>
             </div>
@@ -527,6 +536,7 @@
             <div class="detail-content" id="detail-status-{{.ID}}"></div>
             <div class="detail-content" id="detail-logs-{{.ID}}"></div>
             {{if .Manifest.HasPersonSecret}}<div class="detail-content" id="detail-filesharing-{{.ID}}"></div>{{end}}
+            <div class="detail-content" id="detail-ai-{{.ID}}"></div>
             <div class="detail-content" id="detail-expert-{{.ID}}"></div>
             <div class="detail-content" id="detail-instances-{{.ID}}"></div>
           </div>
@@ -612,6 +622,14 @@
       </p>
       <div id="global-policy-form"></div>
 
+      <div class="category-title" style="margin: 2rem 0 1rem;">AI support</div>
+      <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
+        People's AI assistants (Claude, Claude Code, other MCP clients) can use their apps as them, through core's
+        <code style="background: #0f172a; padding: 0.125rem 0.375rem; border-radius: 0.25rem;">mcp-gate</code>: each app's
+        <b>AI support</b> tab switches it on for that app. Model providers are where the AI page apps send what people type there.
+      </p>
+      <div id="ai-root"></div>
+
       <div class="category-title" style="margin: 2rem 0 1rem;">Domains</div>
       <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
         Extra domains or subdomains for app instances (never for the portal, Hub, people or sign-in pages).
@@ -655,6 +673,11 @@
     <div class="op-modal-box inst-modal-box" id="inst-modal-box"></div>
   </div>
 
+  <!-- Settings → AI: add / edit a model provider -->
+  <div class="op-modal" id="ai-modal" role="dialog" aria-modal="true" aria-labelledby="ai-modal-title">
+    <div class="op-modal-box inst-modal-box" id="ai-modal-box"></div>
+  </div>
+
   <script src="/static/directory.js"></script>
   <script src="/static/folders.js"></script>
   <script src="/static/doctor.js"></script>
@@ -667,7 +690,7 @@
         tab.classList.add('active');
         document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
         if (tab.dataset.tab === 'settings') {
-          loadGlobalSettings(); loadDomains();
+          loadGlobalSettings(); loadDomains(); loadAISettings();
           PortcullisFolders.render(document.getElementById('folders-root'));
           PortcullisFolders.renderLocalNetworks(document.getElementById('localnets-root'));
         }
@@ -676,12 +699,44 @@
         history.replaceState(null, '', tab.dataset.tab === 'catalog' ? location.pathname : '#' + tab.dataset.tab);
       });
     });
-    // Deep links: hub.<domain>/#users (directory.<domain> redirects there).
-    window.addEventListener('load', () => {
+    // Deep links: hub.<domain>/#users (directory.<domain> redirects there);
+    // #app/<id>/settings[/<option>] opens an instance's settings at an
+    // option (the Portcullis MCP's set_secret_setting form);
+    // #settings/domains?enroll=<name>[&provider=<p>] and ?token=<name> open
+    // the Domains forms (enroll_domain, replace_domain_token);
+    // #settings/ai?provider=<name>&field=<field> a provider secret's form
+    // (set_model_provider_secret); #users/<name>[?password|?invite] a
+    // person, with the password fallback's or the invite's own prompt
+    // (set_password, send_invite); #users?create&username=&email=&
+    // display_name=&groups=a,b the new-person form pre-filled
+    // (create_person); #app/<id>/ai an instance's AI support tab. Secrets
+    // are typed here, never passed in. Routed at load and on a hash change
+    // (the AI tab links to #app/<id>/settings).
+    window.addEventListener('load', routeHash);
+    window.addEventListener('hashchange', routeHash);
+    function routeHash() {
       const t = location.hash.slice(1);
+      const usr = /^users\/([a-z0-9][a-z0-9._-]{0,63})(?:\?(password|invite))?$/.exec(t);
+      if (usr) {
+        document.querySelector('.tab[data-tab="users"]').click();
+        PortcullisDirectory.openAt(usr[1], usr[2] || '');
+        return;
+      }
+      const nu = /^users\?create(?:&(.*))?$/.exec(t);
+      if (nu) {
+        document.querySelector('.tab[data-tab="users"]').click();
+        PortcullisDirectory.openAt('', new URLSearchParams(nu[1] || ''));
+        return;
+      }
+      const app = /^app\/([a-z0-9-]+)\/settings(?:\/([A-Za-z0-9_.-]+))?$/.exec(t);
+      if (app) { openSettingAt(app[1], app[2] || ''); return; }
+      const aiTab = /^app\/([a-z0-9-]+)\/ai$/.exec(t);
+      if (aiTab) { openAppTab(aiTab[1], 'ai'); return; }
+      const sec = /^settings\/(domains|ai)\?(.*)$/.exec(t);
+      if (sec) { openSettingsForm(sec[1], new URLSearchParams(sec[2])); return; }
       const tab = t && document.querySelector('.tab[data-tab="' + CSS.escape(t) + '"]');
       if (tab) tab.click();
-    });
+    }
 
     // Detail tab switching
     document.querySelectorAll('.detail-tab').forEach(tab => {
@@ -699,6 +754,7 @@
         if (tab.dataset.dtab === 'expert') loadExpert(appId);
         if (tab.dataset.dtab === 'instances') loadTemplateInstances(appId);
         if (tab.dataset.dtab === 'filesharing') loadFileSharing(appId, document.getElementById('detail-filesharing-' + appId));
+        if (tab.dataset.dtab === 'ai') loadAITab(appId, document.getElementById('detail-ai-' + appId));
       });
     });
 
@@ -796,6 +852,51 @@
       el.innerHTML = await PortcullisDoctor.lineFor(id);
     }
 
+    // Waits (up to 5 s) for an element matching sel.
+    async function waitFor(sel) {
+      for (let i = 0; i < 50; i++) {
+        const el = document.querySelector(sel);
+        if (el) return el;
+        await new Promise(r => setTimeout(r, 100));
+      }
+      return null;
+    }
+
+    function flash(el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      el.classList.add('flash-target');
+      setTimeout(() => el.classList.remove('flash-target'), 2500);
+    }
+
+    // The Settings tab's forms the Portcullis MCP's U tools link to:
+    // domains enroll / token, a model provider's secret.
+    async function openSettingsForm(kind, q) {
+      document.querySelector('.tab[data-tab="settings"]').click();
+      if (kind === 'domains' && q.get('enroll')) {
+        const form = await waitFor('#domain-enroll-form');
+        if (!form) return;
+        document.getElementById('domain-name').value = q.get('enroll');
+        const sel = form.querySelector('.domain-provider');
+        const p = q.get('provider');
+        if (p && sel && [...sel.options].some(o => o.value === p)) {
+          sel.value = p;
+          sel.dispatchEvent(new Event('change'));
+        }
+        flash(form);
+        form.querySelector('[data-cred]')?.focus();
+        return;
+      }
+      if (kind === 'domains' && q.get('token')) {
+        const btn = await waitFor('[data-domain-token="' + CSS.escape(q.get('token')) + '"]');
+        if (!btn) { showToast('No enrolled domain ' + q.get('token') + '.', 'error'); return; }
+        btn.click();
+        const row = document.querySelector('[data-token-row="' + CSS.escape(q.get('token')) + '"]');
+        if (row) { flash(row); row.querySelector('[data-cred]')?.focus(); }
+        return;
+      }
+      if (kind === 'ai' && q.get('provider') && q.get('field')) openProviderSecretAt(q.get('provider'), q.get('field'));
+    }
+
     // Opens instance id's settings panel scrolled to option key (the
     // doctor's "Open setting"): the app's card for a default instance,
     // the instance dialog otherwise.
@@ -810,17 +911,8 @@
         await openInstance(id, { tab: 'settings' });
         paneSel = '#inst-modal-box [data-ipane="settings"]';
       }
-      const want = key ? paneSel + ' [data-opt="' + CSS.escape(key) + '"]' : paneSel;
-      for (let i = 0; i < 50; i++) {
-        const el = document.querySelector(want);
-        if (el) {
-          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          el.classList.add('flash-target');
-          setTimeout(() => el.classList.remove('flash-target'), 2500);
-          return;
-        }
-        await new Promise(r => setTimeout(r, 100));
-      }
+      const el = await waitFor(key ? paneSel + ' [data-opt="' + CSS.escape(key) + '"]' : paneSel);
+      if (el) flash(el);
     }
 
     function closeDetail(e) {
@@ -1201,13 +1293,737 @@
       const form = e.target;
       const { policy } = collectPolicy(form, 'global');
       try {
-        await apiPut('/api/settings', { default_auth_policy: policy });
+        // G43: what this default would switch off first (AI support on
+        // inheriting instances whose policy then needs mTLS).
+        const pre = await apiPost('/api/settings/preview', { default_auth_policy: policy });
+        if ((pre.warnings || []).length && !confirm('Saving this default policy:\n\n' + pre.warnings.join('\n') + '\n\nSave anyway?')) return;
+        const res = await apiPut('/api/settings', { default_auth_policy: policy });
+        await loadGlobalSettings();
+        const ws = (res && res.warnings) || [];
+        if (ws.length) document.getElementById('global-policy-form').insertAdjacentHTML('beforeend', warningsList(ws));
         showToast('Default policy saved.', 'success');
-        loadGlobalSettings();
       } catch (err) {
         showToast(err.message || 'Failed to save default', 'error');
       }
     }
+
+    // ── Settings → AI (contract §15.11–15.12, plan 4 Task 22) ──
+    // Only the existing audited routes: GET / PUT /api/ai/settings (PUT
+    // only what changed), the provider routes and the secret route.
+    // Provider secrets are write-only: type=password inputs, cleared on
+    // submit, never rendered back (the API shows {set, updated_at} only).
+    // A litellm provider's base_url is the Hub's (from its instance): it is
+    // shown, never posted back (a posted one is a 400).
+    const AI_CLIENTS = [
+      ['claude', 'Claude (claude.ai, Claude desktop, mobile)', 'portcullis-ai-claude'],
+      ['claude_code', 'Claude Code', 'portcullis-ai-claude-code'],
+      ['generic', 'Other MCP clients', 'portcullis-ai-generic'],
+    ];
+    const AI_LIMITS = [
+      ['resource_rpm', 'Requests per minute, per person and app'],
+      ['resource_burst', 'Burst, per person and app'],
+      ['person_rpm', 'Requests per minute, per person across apps'],
+      ['tool_calls_rpm', 'Tool calls per minute, per person and app'],
+      ['confirmations_per_hour', 'Confirmations started, per person per hour'],
+      ['mints_per_minute', 'App credentials created, per person per minute'],
+      ['fanout', 'Parallel app calls per "all my apps" request (at most 4)'],
+    ];
+    // The provider kinds of §15.12 (= hub.ProviderKinds): non-secret
+    // fields, required ones, secret fields (optional ones apart), and
+    // whether the model list can be fetched.
+    const AI_KINDS = {
+      litellm: { label: 'LiteLLM (installed here)', fields: ['instance'], required: ['instance'], secrets: ['key'], optional: [], fetch: true },
+      openai_compatible: { label: 'OpenAI-compatible (Ollama, vLLM, LocalAI, OpenRouter, Mistral, …)', fields: ['base_url'], required: ['base_url'], secrets: [], optional: ['key'], fetch: true },
+      anthropic: { label: 'Anthropic', fields: ['base_url'], required: [], secrets: ['key'], optional: [], fetch: false },
+      openai: { label: 'OpenAI', fields: ['base_url'], required: [], secrets: ['key'], optional: [], fetch: true },
+      google: { label: 'Google', fields: ['base_url'], required: [], secrets: ['key'], optional: [], fetch: false },
+      bedrock: { label: 'Amazon Bedrock', fields: ['region'], required: ['region'], secrets: ['access_key_id', 'secret_access_key'], optional: [], fetch: false },
+      azure_openai: { label: 'Azure OpenAI', fields: ['instance_name', 'base_url', 'api_version', 'deployments'], required: ['api_version', 'deployments'], secrets: ['key'], optional: [], fetch: false },
+    };
+    const AI_FIELD_LABELS = {
+      instance: 'LiteLLM instance', base_url: 'Base URL', region: 'AWS region', instance_name: 'Azure resource name (or a base URL)',
+      api_version: 'API version', deployments: 'Deployments (one per line: deployment = model)',
+    };
+    const AI_SECRET_LABELS = { key: 'API key', access_key_id: 'Access key ID', secret_access_key: 'Secret access key' };
+    let aiCtx = { settings: null, providers: [] };
+
+    function aiNote(text) { return '<small style="display:block;color:#64748b;font-size:0.75rem;margin-top:0.25rem;">' + text + '</small>'; }
+    function aiEgress(label) {
+      return 'What people send on the AI page, and what their apps return to it, goes to ' + escapeHtml(label) + '.';
+    }
+    function aiSecretStatus(sv) {
+      return sv && sv.set ? 'set · updated ' + escapeHtml(fmtDay(sv.updated_at) || fmtTime(sv.updated_at)) : 'not set';
+    }
+    // The kinds an installed AI page (a template with ai.chat) declares:
+    // the Hub offers no other (400 "no installed AI page supports kind").
+    function aiOfferedKinds() {
+      const out = new Set();
+      for (const t of Object.values(catalogCache || {})) {
+        const pk = t.manifest && t.manifest.ai && t.manifest.ai.chat && t.manifest.ai.chat.provider_kinds;
+        for (const k of Object.keys(pk || {})) if (AI_KINDS[k]) out.add(k);
+      }
+      return [...out];
+    }
+
+    // The page's load in flight (the Settings tab's click and the deep
+    // link share it).
+    let aiLoading = null;
+    function loadAISettings() {
+      aiLoading = loadAISettingsNow().finally(() => { aiLoading = null; });
+      return aiLoading;
+    }
+    async function loadAISettingsNow() {
+      const root = document.getElementById('ai-root');
+      if (!root) return;
+      let s, p;
+      try {
+        [s, p] = await Promise.all([apiGet('/api/ai/settings'), apiGet('/api/ai/providers'), loadCatalogInfo().catch(() => null)]);
+      } catch (err) { root.innerHTML = errorBox(err); return; }
+      aiCtx = { settings: s, providers: p.providers || [] };
+      root.innerHTML = aiSettingsHtml(s) + '<div id="ai-providers">' + aiProvidersHtml(aiCtx.providers) + '</div>';
+    }
+
+    function aiSettingsHtml(s) {
+      const c = s.clients || {};
+      let h = '';
+      if (!s.gate_present) {
+        h += '<div class="public-warn" data-ai-no-gate><b>This core has no mcp-gate.</b> The Hub has no usable gate recipient ' +
+          '(<code>HUB_MCP_GATE_RECIPIENT_FILE</code>) or gate secret (<code>HUB_MCP_GATE_SECRET_FILE</code>), so the gate file says AI support is off ' +
+          'and every AI request is refused. These settings are kept and apply once the gate is there.</div>';
+      }
+      h += '<form class="settings-form" id="ai-settings-form">';
+      h += '<div class="policy-section"><div class="policy-title">AI support</div>' +
+        '<label class="policy-factor"><input type="checkbox" name="enabled"' + (s.enabled ? ' checked' : '') + '> AI support (master switch)</label>' +
+        aiNote('Off: the gate refuses every AI request ("AI support is off on this Portcullis"), the apps\' AI switches are greyed out and people\'s ' +
+          '"Connect your AI" cards are hidden; the AI clients and scopes are kept. Switching it on or off restarts every enabled app whose AI support is switched on.') +
+        '</div>';
+      h += '<div class="policy-section"><div class="policy-title">AI clients offered</div>' +
+        '<table class="inst-table"><thead><tr><th>Client</th><th>Offered</th><th>Portcullis admin MCP</th></tr></thead><tbody>' +
+        AI_CLIENTS.map(([k, label, id]) => {
+          const v = c[k] || {};
+          return '<tr><td>' + escapeHtml(label) + ' <code>' + escapeHtml(id) + '</code></td>' +
+            '<td><input type="checkbox" data-ai-client="' + k + '" data-ai-flag="offered" aria-label="' + escapeHtml(label) + ' offered"' + (v.offered ? ' checked' : '') + '></td>' +
+            '<td><input type="checkbox" data-ai-client="' + k + '" data-ai-flag="admin" aria-label="' + escapeHtml(label) + ' may use the Portcullis admin MCP"' + (v.admin ? ' checked' : '') + '></td></tr>';
+        }).join('') + '</tbody></table>' +
+        aiNote('Each offered client is a Keycloak client people\'s AI assistants sign in with. Unticking one deletes it, and everyone\'s connections through it end. ' +
+          'The Portcullis admin MCP is off for every client by default: the administrator enables it client by client (administrators only, and only through the clients ticked here).') +
+        '</div>';
+      h += '<div class="policy-section"><div class="policy-title">Portcullis MCP</div>' +
+        '<label class="policy-factor"><input type="checkbox" name="portcullis_admin"' + (s.portcullis_admin ? ' checked' : '') + '> For administrators (<code>hub.' + escapeHtml(MAIN_DOMAIN) + '/mcp</code>)</label>' +
+        '<label class="policy-factor"><input type="checkbox" name="portcullis_people"' + (s.portcullis_people ? ' checked' : '') + '> For people (<code>people.' + escapeHtml(MAIN_DOMAIN) + '/mcp</code>: their own account and apps)</label>' +
+        '</div>';
+      h += '<div class="policy-section"><div class="policy-title">Connection length</div>' +
+        '<div class="form-group"><label for="ai-idle">Unused for at most (days, 1–30)</label><input type="number" id="ai-idle" name="offline_idle_days" min="1" max="30" value="' + escapeHtml(s.offline_idle_days) + '"></div>' +
+        '<div class="form-group"><label for="ai-max">At most (days, 1–90)</label><input type="number" id="ai-max" name="offline_max_days" min="1" max="90" value="' + escapeHtml(s.offline_max_days) + '"></div>' +
+        aiNote('After that the person signs in again in their AI assistant. Access tokens last 5 minutes; refresh tokens don\'t rotate (Keycloak can\'t do it per client), so Disconnect and the limits above are what end a connection.') + '</div>';
+      h += '<div class="policy-section"><div class="policy-title">Rate limits</div>' +
+        AI_LIMITS.map(([k, label]) => '<div class="form-group"><label for="ai-lim-' + k + '">' + escapeHtml(label) + '</label>' +
+          '<input type="number" id="ai-lim-' + k + '" data-ai-limit="' + k + '" min="1" max="' + (k === 'fanout' ? 4 : 1000000) + '" value="' + escapeHtml((s.limits || {})[k]) + '"></div>').join('') + '</div>';
+      h += '<div class="policy-section"><div class="policy-title">Allowed origins</div>' +
+        '<div class="form-group"><label for="ai-origins">Browser origins allowed to call (one per line, <code>https://&lt;host&gt;[:port]</code>)</label>' +
+        '<textarea id="ai-origins" name="allowed_origins" rows="3" class="code-editor" style="min-height:4rem" spellcheck="false">' + escapeHtml((s.allowed_origins || []).join('\n')) + '</textarea>' +
+        aiNote('Empty: a request carrying an Origin header is refused. Desktop and command-line clients send none.') + '</div></div>';
+      h += '<div class="public-warn" data-ai-reach>Claude desktop and claude.ai connect from Anthropic\'s servers (160.79.104.0/21): <code>auth.' + escapeHtml(MAIN_DOMAIN) +
+        '</code> and every app host must be reachable from the internet.</div>';
+      h += '<button type="submit" class="btn btn-primary btn-sm">Save AI settings</button><div id="ai-settings-result" style="margin-top:0.75rem"></div></form>';
+      return h;
+    }
+
+    // The settings form's changes against the stored settings (only what
+    // changed is sent).
+    function aiSettingsChanges(form, s) {
+      const u = {};
+      const el = form.elements;
+      for (const k of ['enabled', 'portcullis_admin', 'portcullis_people']) if (el[k].checked !== !!s[k]) u[k] = el[k].checked;
+      const clients = {};
+      for (const [k] of AI_CLIENTS) {
+        for (const f of ['offered', 'admin']) {
+          const v = form.querySelector('[data-ai-client="' + k + '"][data-ai-flag="' + f + '"]').checked;
+          if (v !== !!((s.clients || {})[k] || {})[f]) (clients[k] = clients[k] || {})[f] = v;
+        }
+      }
+      if (Object.keys(clients).length) u.clients = clients;
+      const num = (v, what) => {
+        if (!/^[0-9]+$/.test(String(v).trim())) throw new Error(what + ' must be a whole number');
+        return parseInt(v, 10);
+      };
+      for (const k of ['offline_idle_days', 'offline_max_days']) {
+        const v = num(el[k].value, k === 'offline_idle_days' ? 'Unused for at most' : 'At most');
+        if (v !== s[k]) u[k] = v;
+      }
+      const limits = {};
+      for (const [k, label] of AI_LIMITS) {
+        const v = num(form.querySelector('[data-ai-limit="' + k + '"]').value, label);
+        if (v !== (s.limits || {})[k]) limits[k] = v;
+      }
+      if (Object.keys(limits).length) u.limits = limits;
+      const origins = el.allowed_origins.value.split('\n').map(x => x.trim()).filter(Boolean);
+      if (origins.join('\n') !== (s.allowed_origins || []).join('\n')) u.allowed_origins = origins;
+      return u;
+    }
+
+    async function saveAISettings(form) {
+      const out = document.getElementById('ai-settings-result');
+      let u;
+      try { u = aiSettingsChanges(form, aiCtx.settings); } catch (err) { out.innerHTML = errorBox(Object.assign(err, { status: 400 })); return; }
+      if (!Object.keys(u).length) { showToast('Nothing changed.'); return; }
+      const warn = [];
+      if ('enabled' in u) {
+        warn.push(u.enabled ? 'Switching AI support on restarts every enabled app whose AI support is switched on.'
+          : 'Switching AI support off refuses every AI request and restarts every enabled app whose AI support is switched on.');
+      }
+      for (const [k, label] of AI_CLIENTS) {
+        if (u.clients && u.clients[k] && u.clients[k].offered === false) warn.push('Unticking ' + label + ' deletes its Keycloak client: everyone\'s connections through it end.');
+      }
+      if (warn.length && !confirm(warn.join('\n\n') + '\n\nSave?')) return;
+      try {
+        await apiPut('/api/ai/settings', u);
+        await loadAISettings();
+        document.getElementById('ai-settings-result').innerHTML = '<div class="inst-ok">Saved.</div>';
+        showToast('AI settings saved.', 'success');
+      } catch (err) { out.innerHTML = errorBox(err); }
+    }
+
+    function aiProvidersHtml(list) {
+      let h = '<div class="category-title" style="margin: 1.5rem 0 0.75rem;">Model providers</div>' +
+        '<p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 0.75rem;">The AI page apps (a template with an AI page, e.g. LibreChat) offer the models of the providers selected for them. ' +
+        'Secrets are write-only: stored on the Hub and in the selecting AI pages\' environment only, never shown again.</p>';
+      if (!list.length) {
+        h += '<p class="settings-empty">No model provider yet. An AI page without one shows "No model provider configured; ask your administrator".</p>';
+      } else {
+        h += '<table class="inst-table" data-ai-providers><thead><tr><th>Provider</th><th>Kind</th><th>Models</th><th>Credentials</th><th>Secrets</th><th>Used by</th><th></th></tr></thead><tbody>';
+        for (const p of list) {
+          const models = p.models || {};
+          const ml = (models.fetch ? ['fetched from the provider'] : []).concat((models.list || []).map(m => '<code>' + escapeHtml(m) + '</code>'));
+          const used = (p.used_by || []).map(u => '<div><code>' + escapeHtml(u.instance) + '</code> (' + escapeHtml(u.group || 'no access group') + ', ' +
+            (u.people == null ? 'people unknown' : escapeHtml(u.people) + ' people') + (u.restarts ? ', running: a change restarts it' : '') + ')</div>').join('') || '<span class="settings-empty">no AI page</span>';
+          const secrets = Object.keys(p.secrets || {}).map(f => '<div><code>' + escapeHtml(f) + '</code> ' + aiSecretStatus(p.secrets[f]) + '</div>').join('') || '—';
+          h += '<tr data-ai-provider="' + escapeHtml(p.name) + '"><td><b>' + escapeHtml(p.label || p.name) + '</b> <code>' + escapeHtml(p.name) + '</code>' +
+            aiNote(aiEgress(p.label || p.name)) + '</td>' +
+            '<td>' + escapeHtml((AI_KINDS[p.kind] || {}).label || p.kind) + (p.base_url ? aiNote('<code>' + escapeHtml(p.base_url) + '</code>') : '') + '</td>' +
+            '<td>' + (ml.join(', ') || '—') + '</td>' +
+            '<td>' + (p.credentials === 'per_person' ? 'each person\'s own key' : 'the secrets here') + '</td>' +
+            '<td>' + secrets + '</td><td>' + used + '</td>' +
+            '<td style="white-space:nowrap"><button type="button" class="btn btn-secondary btn-sm" data-ai-prov-edit="' + escapeHtml(p.name) + '">Edit</button> ' +
+            '<button type="button" class="btn btn-danger btn-sm" data-ai-prov-del="' + escapeHtml(p.name) + '">Delete</button></td></tr>';
+        }
+        h += '</tbody></table>';
+      }
+      h += '<div class="inst-row"><button type="button" class="btn btn-secondary btn-sm" data-ai-prov-add>+ Add model provider</button></div><div id="ai-providers-result"></div>';
+      return h;
+    }
+
+    async function reloadAIProviders() {
+      try {
+        aiCtx.providers = (await apiGet('/api/ai/providers')).providers || [];
+        document.getElementById('ai-providers').innerHTML = aiProvidersHtml(aiCtx.providers);
+      } catch (err) { document.getElementById('ai-providers').innerHTML = errorBox(err); }
+    }
+
+    async function deleteAIProvider(name) {
+      const p = aiCtx.providers.find(x => x.name === name);
+      if (!p) return;
+      if (!confirm('Delete model provider ' + (p.label || name) + ' (' + name + ')? Its secrets are removed. Refused while an AI page selects it.')) return;
+      try {
+        await apiCall('/api/ai/providers/' + encodeURIComponent(name), 'DELETE');
+        showToast('Model provider ' + name + ' deleted.', 'success');
+        await reloadAIProviders();
+      } catch (err) { document.getElementById('ai-providers-result').innerHTML = errorBox(err); }
+    }
+
+    // ── the provider dialog ──
+    // The element focused before the dialog opened gets the focus back.
+    let aiModalOpener = null;
+    function openAIModal(html) {
+      if (!document.getElementById('ai-modal').classList.contains('visible')) aiModalOpener = document.activeElement;
+      document.getElementById('ai-modal-box').innerHTML = html;
+      document.getElementById('ai-modal').classList.add('visible');
+    }
+    function closeAIModal() {
+      document.getElementById('ai-modal').classList.remove('visible');
+      document.getElementById('ai-modal-box').innerHTML = '';
+      const back = aiModalOpener;
+      aiModalOpener = null;
+      if (back && back.isConnected && typeof back.focus === 'function') back.focus();
+    }
+
+    // p: the provider to edit (null: add). focusField: a secret field to
+    // focus (the Portcullis MCP's set_model_provider_secret link).
+    function openProviderDialog(p, focusField) {
+      const kinds = p ? [p.kind] : aiOfferedKinds();
+      let h = '<div class="inst-modal-head"><div class="inst-modal-title" id="ai-modal-title">' +
+        (p ? 'Edit model provider <code>' + escapeHtml(p.name) + '</code>' : 'Add model provider') + '</div>' +
+        '<button type="button" class="detail-close" data-ai-modal-close title="Close" aria-label="Close">&times;</button></div>';
+      if (!kinds.length) {
+        openAIModal(h + '<div class="public-warn">No installed AI page supports a model provider kind: install an AI page app (a template with an AI page, e.g. ai-chat) first.</div>');
+        return;
+      }
+      const kind = p ? p.kind : kinds[0];
+      h += '<form class="settings-form inst-form" id="ai-prov-form" data-mode="' + (p ? 'edit' : 'add') + '"' + (p ? ' data-name="' + escapeHtml(p.name) + '"' : '') + ' autocomplete="off">';
+      h += '<div class="form-group"><label for="ai-prov-kind">Kind</label><select id="ai-prov-kind" name="kind"' + (p ? ' disabled' : '') + '>' +
+        kinds.map(k => '<option value="' + escapeHtml(k) + '"' + (k === kind ? ' selected' : '') + '>' + escapeHtml((AI_KINDS[k] || {}).label || k) + '</option>').join('') + '</select>' +
+        (p ? '<small>The kind and the name can\'t change: add another provider instead.</small>' : '<small>Only the kinds an installed AI page supports.</small>') + '</div>';
+      h += '<div class="form-group"><label for="ai-prov-name">Name</label><input type="text" id="ai-prov-name" name="name" pattern="[a-z][a-z0-9-]{0,30}" maxlength="31" required spellcheck="false"' +
+        (p ? ' value="' + escapeHtml(p.name) + '" disabled' : ' placeholder="e.g. ollama"') + '><small>Lowercase letters, digits and -, starting with a letter.</small></div>';
+      h += '<div class="form-group"><label for="ai-prov-label">Label (shown to people)</label><input type="text" id="ai-prov-label" name="label" maxlength="64" required value="' + escapeHtml(p ? p.label : '') + '"></div>';
+      h += '<div class="public-warn" data-ai-egress>' + aiEgress((p && p.label) || 'this provider') + '</div>';
+      h += '<div data-ai-kind-fields>' + aiKindFieldsHtml(kind, p) + '</div>';
+      // The save preview (Task 23): the running AI pages that select it
+      // are re-delivered and restarted by a change.
+      const restarting = p ? (p.used_by || []).filter(u => u.restarts).map(u => u.instance) : [];
+      if (restarting.length) {
+        h += '<div class="public-warn" data-ai-prov-restarts>Saving a change restarts ' + restarting.map(i => '<code>' + escapeHtml(i) + '</code>').join(', ') +
+          ' (the AI pages that select it): they read their providers and keys at start.</div>';
+      }
+      h += '<div id="ai-prov-result"></div>';
+      h += '<div class="inst-row"><button type="submit" class="btn btn-primary btn-sm">' + (p ? 'Save provider' : 'Add provider') + '</button>' +
+        '<button type="button" class="btn btn-secondary btn-sm" data-ai-modal-close>Cancel</button></div></form>';
+      openAIModal(h);
+      const target = focusField && document.querySelector('#ai-prov-form [data-ai-secret="' + CSS.escape(focusField) + '"]');
+      if (target) { flash(target.closest('.form-group')); target.focus(); }
+      else document.getElementById(p ? 'ai-prov-label' : 'ai-prov-name').focus();
+    }
+
+    function aiKindFieldsHtml(kind, p) {
+      const k = AI_KINDS[kind];
+      if (!k) return '<div class="public-warn">Unknown kind ' + escapeHtml(kind) + '.</div>';
+      let h = '';
+      for (const f of k.fields) {
+        const req = k.required.includes(f);
+        const label = escapeHtml(AI_FIELD_LABELS[f] || f) + (req ? '' : ' (optional)');
+        if (f === 'instance') {
+          const opts = (instancesCache || []).filter(i => i.template === 'litellm').map(i => i.id);
+          if (catalogCache && catalogCache.litellm && !opts.includes('litellm')) opts.unshift('litellm');
+          if (p && p.instance && !opts.includes(p.instance)) opts.push(p.instance);
+          h += '<div class="form-group"><label for="ai-prov-instance">' + label + '</label><select id="ai-prov-instance" data-ai-field="instance">' +
+            '<option value="">— pick an installed LiteLLM —</option>' +
+            opts.map(o => '<option value="' + escapeHtml(o) + '"' + (p && p.instance === o ? ' selected' : '') + '>' + escapeHtml(o) + '</option>').join('') + '</select>' +
+            '<small>The Hub fills in its API URL' + (p && p.base_url ? ': <code>' + escapeHtml(p.base_url) + '</code>' : '') + ' (never typed here). ' +
+            'The key is a virtual key you create in LiteLLM with the models and budget you want.</small></div>';
+        } else if (f === 'deployments') {
+          const v = Object.entries((p && p.deployments) || {}).map(([d, m]) => d + ' = ' + m).join('\n');
+          h += '<div class="form-group"><label for="ai-prov-deployments">' + label + '</label><textarea id="ai-prov-deployments" data-ai-field="deployments" rows="3" class="code-editor" style="min-height:4rem" spellcheck="false">' + escapeHtml(v) + '</textarea></div>';
+        } else {
+          h += '<div class="form-group"><label for="ai-prov-' + f + '">' + label + '</label><input type="text" id="ai-prov-' + f + '" data-ai-field="' + f + '" spellcheck="false" value="' +
+            escapeHtml((p && p[f]) || '') + '"' + (f === 'base_url' ? ' placeholder="https://…"' : '') + '></div>';
+        }
+      }
+      const models = (p && p.models) || {};
+      h += '<div class="form-group"><label for="ai-prov-models">Models (one per line)</label><textarea id="ai-prov-models" data-ai-models rows="3" class="code-editor" style="min-height:4rem" spellcheck="false">' +
+        escapeHtml((models.list || []).join('\n')) + '</textarea>' +
+        (k.fetch ? '<label class="policy-factor"><input type="checkbox" data-ai-fetch' + (models.fetch ? ' checked' : '') + '> Also fetch the model list from the provider</label>' : '') + '</div>';
+      h += '<div class="form-group"><label for="ai-prov-cred">Credentials</label><select id="ai-prov-cred" data-ai-cred>' +
+        '<option value="admin"' + (!p || p.credentials !== 'per_person' ? ' selected' : '') + '>The secrets below (shared by everyone who can open the AI page)</option>' +
+        '<option value="per_person"' + (p && p.credentials === 'per_person' ? ' selected' : '') + '>Each person enters their own key on the AI page</option></select></div>';
+      const secretFields = k.secrets.concat(k.optional);
+      if (secretFields.length) {
+        h += '<div class="policy-section"><div class="policy-title">Secrets</div>' +
+          aiNote('Write-only: typed here, stored on the Hub, never shown again. Leave a field empty to keep it.');
+        for (const f of secretFields) {
+          const sv = p && p.secrets ? p.secrets[f] : null;
+          const label = escapeHtml(f === 'key' && kind === 'litellm' ? 'Virtual key' : (AI_SECRET_LABELS[f] || f)) + ' <code>' + escapeHtml(f) + '</code>' +
+            (k.optional.includes(f) ? ' (optional' + (kind === 'openai_compatible' ? ': Ollama needs none' : '') + ')' : '');
+          h += '<div class="form-group"><label for="ai-sec-' + f + '">' + label + '</label>' +
+            '<input type="password" id="ai-sec-' + f + '" data-ai-secret="' + f + '" autocomplete="new-password" spellcheck="false">' +
+            '<small><span data-ai-secret-status="' + f + '">' + aiSecretStatus(sv) + '</span>' +
+            (sv && sv.set ? ' · <label style="display:inline;font-weight:normal"><input type="checkbox" data-ai-secret-clear="' + f + '"> clear it</label>' : '') + '</small></div>';
+        }
+        h += '</div>';
+      }
+      return h;
+    }
+
+    // The dialog's provider body: the kind's fields only; a litellm
+    // provider's base_url is never sent.
+    function aiProviderBody(form, kind) {
+      const k = AI_KINDS[kind];
+      const body = { name: form.elements.name.value.trim(), label: form.elements.label.value.trim(), kind,
+        models: { fetch: !!(form.querySelector('[data-ai-fetch]') || {}).checked, list: form.querySelector('[data-ai-models]').value.split('\n').map(x => x.trim()).filter(Boolean) },
+        credentials: form.querySelector('[data-ai-cred]').value };
+      for (const f of k.fields) {
+        if (kind === 'litellm' && f === 'base_url') continue;
+        const el = form.querySelector('[data-ai-field="' + f + '"]');
+        if (!el) continue;
+        if (f === 'deployments') {
+          const d = {};
+          for (const line of el.value.split('\n').map(x => x.trim()).filter(Boolean)) {
+            const m = /^([^=\s]+)\s*=\s*(\S+)$/.exec(line);
+            if (!m) throw Object.assign(new Error('Deployments: write one "deployment = model" per line (' + line + ')'), { status: 400 });
+            d[m[1]] = m[2];
+          }
+          if (Object.keys(d).length) body.deployments = d;
+        } else if (el.value.trim()) body[f] = el.value.trim();
+      }
+      return body;
+    }
+
+    async function submitProvider(form) {
+      const out = document.getElementById('ai-prov-result');
+      const edit = form.dataset.mode === 'edit';
+      const prev = edit ? aiCtx.providers.find(x => x.name === form.dataset.name) : null;
+      const kind = edit ? prev.kind : form.elements.kind.value;
+      // Secrets: read, then cleared at once (never kept in the form).
+      const secrets = [];
+      form.querySelectorAll('[data-ai-secret]').forEach(i => { if (i.value) secrets.push([i.dataset.aiSecret, i.value]); i.value = ''; });
+      const clears = [...form.querySelectorAll('[data-ai-secret-clear]:checked')].map(c => c.dataset.aiSecretClear).filter(f => !secrets.some(x => x[0] === f));
+      let body;
+      try { body = aiProviderBody(form, kind); } catch (err) { secrets.length = 0; out.innerHTML = errorBox(err) + '<div class="op-hint">Type the secrets again.</div>'; return; }
+      const name = edit ? prev.name : body.name;
+      const btn = form.querySelector('button[type="submit"]');
+      btn.disabled = true;
+      const restarted = new Set();
+      const noteRestarts = res => { for (const i of (res && res.restarts) || []) restarted.add(i); };
+      try {
+        if (edit) noteRestarts(await apiPut('/api/ai/providers/' + encodeURIComponent(name), body));
+        else await apiPost('/api/ai/providers', body);
+      } catch (err) {
+        secrets.length = 0;
+        btn.disabled = false;
+        out.innerHTML = errorBox(err) + (form.querySelector('[data-ai-secret]') ? '<div class="op-hint">Nothing was saved; type the secrets again.</div>' : '');
+        return;
+      }
+      if (!edit) { form.dataset.mode = 'edit'; form.dataset.name = name; }
+      const failed = [];
+      for (const [f, value] of secrets) {
+        try {
+          const v = await apiPut('/api/ai/providers/' + encodeURIComponent(name) + '/secrets/' + encodeURIComponent(f), { value });
+          noteRestarts(v);
+          const st = form.querySelector('[data-ai-secret-status="' + CSS.escape(f) + '"]');
+          if (st) st.innerHTML = aiSecretStatus(v);
+        } catch (err) { failed.push([f, err]); }
+      }
+      secrets.length = 0;
+      for (const f of clears) {
+        try { noteRestarts(await apiPut('/api/ai/providers/' + encodeURIComponent(name) + '/secrets/' + encodeURIComponent(f), { clear: true })); } catch (err) { failed.push([f, err]); }
+      }
+      btn.disabled = false;
+      await reloadAIProviders();
+      const restartNote = restarted.size ? ' Restarting: ' + [...restarted].sort().join(', ') + '.' : '';
+      if (failed.length) {
+        out.innerHTML = '<div class="inst-ok">Provider saved.' + escapeHtml(restartNote) + '</div>' + failed.map(([f, err]) => errorBox(Object.assign(new Error('secret ' + f + ': ' + err.message), { status: err.status }))).join('') +
+          '<div class="op-hint">Type the failed secrets again.</div>';
+        return;
+      }
+      closeAIModal();
+      showToast('Model provider ' + name + ' saved.' + restartNote, 'success');
+    }
+
+    // #settings/ai?provider=<name>&field=<field> (the Portcullis MCP's
+    // set_model_provider_secret form): the provider's dialog, that
+    // secret's input focused. An unknown provider or field is said so.
+    async function openProviderSecretAt(name, field) {
+      // openSettingsForm clicked the Settings tab, which started the load.
+      await (aiLoading || loadAISettings());
+      const root = document.getElementById('ai-root');
+      const p = aiCtx.providers.find(x => x.name === name);
+      const say = msg => { document.getElementById('ai-providers-result').innerHTML = '<div class="public-warn">' + escapeHtml(msg) + '</div>'; flash(root); };
+      if (!aiCtx.settings) return;
+      if (!p) { say('No model provider ' + name + '.'); return; }
+      if (!p.secrets || !Object.prototype.hasOwnProperty.call(p.secrets, field)) { say('Model provider ' + name + ' has no secret field ' + field + '.'); return; }
+      openProviderDialog(p, field);
+    }
+
+    document.addEventListener('submit', e => {
+      if (e.target.id === 'ai-settings-form') { e.preventDefault(); saveAISettings(e.target); }
+      if (e.target.id === 'ai-prov-form') { e.preventDefault(); submitProvider(e.target); }
+    });
+    document.addEventListener('click', e => {
+      const t = e.target;
+      let el;
+      if (t.closest('[data-ai-prov-add]')) { openProviderDialog(null); return; }
+      if ((el = t.closest('[data-ai-prov-edit]'))) { openProviderDialog(aiCtx.providers.find(x => x.name === el.dataset.aiProvEdit) || null); return; }
+      if ((el = t.closest('[data-ai-prov-del]'))) { deleteAIProvider(el.dataset.aiProvDel); return; }
+      if (t.id === 'ai-modal' || t.closest('[data-ai-modal-close]')) { closeAIModal(); }
+    });
+    document.addEventListener('input', e => {
+      if (e.target.id === 'ai-prov-label') {
+        const n = document.querySelector('#ai-prov-form [data-ai-egress]');
+        if (n) n.innerHTML = aiEgress(e.target.value.trim() || 'this provider');
+      }
+    });
+    document.addEventListener('change', e => {
+      if (e.target.id === 'ai-prov-kind') document.querySelector('#ai-prov-form [data-ai-kind-fields]').innerHTML = aiKindFieldsHtml(e.target.value, null);
+    });
+    document.addEventListener('keydown', e => {
+      if (e.key === 'Escape' && document.getElementById('ai-modal').classList.contains('visible')) closeAIModal();
+    });
+
+    // ── an instance's AI support tab (§15.11, plan 4 Task 22) ──
+    // GET /api/instances/{id}/ai; PUT …/ai per companion (the switch and
+    // the mode); POST …/ai/revoke; GET /api/ai/activity?instance=.
+    const AI_STATUS = {
+      off: ['', 'Off.'],
+      on: ['ok', 'On: AI assistants of the people below can use it.'],
+      failed: ['bad', 'Failed.'],
+      revoking: ['warn', 'Off, revoking: the app\'s AI credentials are owed a revocation (revoke_all) — at the app\'s next start, or after a template update (see the Doctor). ' +
+        'A template update\'s revocation must succeed before it can be switched on again.'],
+      revoke_pending: ['warn', 'On, but kept off until the app\'s next start revokes its earlier AI credentials (revoke_all).'],
+      unavailable: ['warn', 'On, but unavailable now:'],
+    };
+    const AI_IDENTITY = {
+      app_token: 'a per-person credential the Hub creates in the app, used by the gate',
+      identity_headers: 'the gate tells the app who the person is (identity headers)',
+      app_oauth: 'the app\'s own sign-in (the gate isn\'t in the path)',
+    };
+    const AI_MODE_LABEL = { read_only: 'read only', read_write: 'read and write' };
+    // instance id is running (G49: switching AI then restarts the app).
+    function aiInstanceEnabled(id) {
+      const inst = (instancesCache || []).find(i => i.id === id);
+      if (inst) return inst.state === 'enabled';
+      const t = catalogCache && catalogCache[id];
+      return !!(t && t.enabled);
+    }
+    function aiDecision(d) { return PortcullisAI.decision(d, 'pill'); }
+    function aiLink(url, text) {
+      return /^https:\/\/[^\s"'<>]+$/.test(String(url || '')) ? '<a href="' + escapeHtml(url) + '" target="_blank" rel="noopener noreferrer">' + escapeHtml(text || url) + ' &#8599;</a>'
+        : '<code>' + escapeHtml(url) + '</code>';
+    }
+
+    async function loadAITab(id, pane) {
+      if (!pane) return;
+      pane.innerHTML = '<p class="settings-empty">Loading…</p>';
+      let v, act;
+      try {
+        await loadCatalogInfo().catch(() => null);
+        v = await apiGet('/api/instances/' + encodeURIComponent(id) + '/ai');
+      } catch (err) { pane.innerHTML = errorBox(err); return; }
+      if (!v.unsupported) {
+        try { act = await apiGet('/api/ai/activity?instance=' + encodeURIComponent(id) + '&n=20'); } catch (err) { act = { error: err }; }
+      } else if (v.provider_kinds) {
+        try { v.all_providers = (await apiGet('/api/ai/providers')).providers || []; } catch (err) { v.all_providers = []; v.all_providers_error = err.message || 'the providers can\'t be read right now'; }
+      }
+      pane.innerHTML = '<div class="ai-tab" data-ai-tab="' + escapeHtml(id) + '">' + aiTabHtml(id, v, act) + '</div>';
+    }
+
+    function aiTabHtml(id, v, act) {
+      const chat = catalogCache && catalogCache[id] ? (catalogCache[id].manifest.ai || {}).chat : null;
+      let h = '';
+      if (v.unsupported) {
+        h += '<div class="inst-section" data-ai-unsupported><h4>AI support</h4><p>Not available for this app: ' + escapeHtml(v.unsupported) + '</p>';
+        const a = v.alternative;
+        if (a && (a.name || a.source)) {
+          h += '<p style="margin-top:0.5rem">An alternative <b>not vetted by Portcullis</b>: ' + escapeHtml(a.name || '') + (a.source ? ' — ' + aiLink(a.source) : '') +
+            (a.note ? ' (' + escapeHtml(a.note) + ')' : '') + '. Portcullis doesn\'t run it or check what it does.</p>';
+        }
+        h += '</div>';
+        if (v.provider_kinds || chat) h += aiProvidersSelHtml(id, v);
+        return h;
+      }
+      const greyed = v.master_off ? 'AI support is off on this Portcullis (Settings → AI).' : v.refused ? 'AI support can\'t be switched on: ' + v.refused : '';
+      if (v.master_off) h += '<div class="public-warn" data-ai-greyed>AI support is off on this Portcullis: the switches are greyed out. <a href="#settings" data-ai-goto-settings>Settings → AI</a></div>';
+      else if (v.refused) {
+        h += '<div class="public-warn" data-ai-greyed>AI support can\'t be switched on: ' + escapeHtml(v.refused) + '. ' +
+          '<a href="#app/' + encodeURIComponent(id) + '/settings">Open the app\'s settings</a> to change its access policy.</div>';
+      }
+      const running = aiInstanceEnabled(id);
+      // app_oauth companions add no router (the gate isn't in the path).
+      const routed = (v.companions || []).some(c => c.identity_mode !== 'app_oauth');
+      if (running && !greyed) h += aiNote('The app is running: switching AI support on or off, or changing its mode, restarts it' + (routed ? ' (its router labels change)' : '') + '.');
+      for (const c of v.companions || []) h += aiCompanionHtml(id, v, c, greyed);
+      h += '<div class="inst-section" data-ai-activity><h4>Recent AI activity</h4>';
+      if (act && act.error) h += '<p class="settings-empty">' + escapeHtml(act.error.message || 'AI activity can\'t be read right now') + '</p>';
+      else if (!act || !(act.lines || []).length) h += '<p class="settings-empty">No AI requests yet.</p>';
+      else {
+        h += '<table class="inst-table"><thead><tr><th>Time</th><th>Person</th><th>Client</th><th>What</th><th>Decision</th></tr></thead><tbody>' +
+          act.lines.map(l => '<tr><td style="white-space:nowrap">' + escapeHtml(fmtTime(l.time)) + '</td><td>' + escapeHtml(l.user || '(no valid token)') + '</td><td><code>' + escapeHtml(l.client) + '</code></td>' +
+            '<td><code>' + escapeHtml(l.tool ? id + '__' + l.tool : l.method) + '</code>' + aiNote(escapeHtml(l.companion) + ' · ' + escapeHtml(l.via)) + '</td><td>' + aiDecision(l.decision) + '</td></tr>').join('') +
+          '</tbody></table>' + aiNote('The newest 20 requests from the gate\'s access log (never the arguments or results). All of them: Users &amp; Groups → Setup → Audit log, "via AI".');
+      }
+      h += '</div>';
+      return h;
+    }
+
+    // An AI page's model provider selection (Task 23; PUT …/ai providers):
+    // the providers of a kind it supports, ticked when selected; a "one"
+    // kind takes at most one (the Hub refuses two). v.all_providers is
+    // GET /api/ai/providers' list (loadAITab).
+    function aiProvidersSelHtml(id, v) {
+      const kinds = v.provider_kinds || {};
+      const sel = new Set(v.providers || []);
+      const all = v.all_providers || [];
+      let h = '<div class="inst-section" data-ai-providers-sel><h4>AI page: model providers</h4>';
+      if (v.all_providers_error) h += '<p class="settings-empty">' + escapeHtml(v.all_providers_error) + '</p>';
+      const usable = all.filter(p => Object.prototype.hasOwnProperty.call(kinds, p.kind));
+      if (!usable.length) {
+        h += '<p class="settings-empty">No model provider of a kind this AI page supports (' + Object.keys(kinds).sort().map(k => escapeHtml(k)).join(', ') +
+          '). Add one in <a href="#settings" data-ai-goto-settings>Settings → AI</a>.</p>';
+      } else {
+        for (const p of usable) {
+          h += '<div><label class="policy-factor" style="margin:0"><input type="checkbox" data-ai-prov-sel value="' + escapeHtml(p.name) + '"' + (sel.has(p.name) ? ' checked' : '') + '> ' +
+            '<b>' + escapeHtml(p.label || p.name) + '</b> <code>' + escapeHtml(p.name) + '</code> · ' + escapeHtml((AI_KINDS[p.kind] || {}).label || p.kind) +
+            (kinds[p.kind] === 'one' ? ' (at most one of this kind)' : '') + '</label>' + aiNote(aiEgress(p.label || p.name)) + '</div>';
+        }
+      }
+      const gone = [...sel].filter(n => !usable.some(p => p.name === n));
+      if (gone.length) h += aiNote('Selected but not offered (deleted, or a kind it no longer supports): ' + gone.map(n => '<code>' + escapeHtml(n) + '</code>').join(', ') + '. Saving drops them.');
+      h += aiNote('Everyone who can open this AI page can use every provider selected for it; to give a group other providers, add another instance with its own access group.' +
+        (aiInstanceEnabled(id) ? ' The app is running: saving restarts it.' : ''));
+      h += '<div class="inst-row"><button type="button" class="btn btn-primary btn-sm" data-ai-prov-sel-save' + (usable.length || sel.size ? '' : ' disabled') + '>Save</button></div>' +
+        '<div data-ai-result></div></div>';
+      return h;
+    }
+
+    async function saveAIProviders(box, sec) {
+      const id = box.dataset.aiTab;
+      const out = sec.querySelector('[data-ai-result]');
+      const providers = [...sec.querySelectorAll('[data-ai-prov-sel]:checked')].map(c => c.value);
+      if (aiInstanceEnabled(id) && !confirm('The app is running: saving its model providers restarts it. Save?')) return;
+      const btn = sec.querySelector('[data-ai-prov-sel-save]');
+      btn.disabled = true;
+      out.innerHTML = '<p class="settings-empty">Saving…</p>';
+      try {
+        const res = await apiPut('/api/instances/' + encodeURIComponent(id) + '/ai', { providers });
+        try { res.all_providers = (await apiGet('/api/ai/providers')).providers || []; } catch (err) { res.all_providers = []; res.all_providers_error = err.message || 'the providers can\'t be read right now'; }
+        box.innerHTML = aiTabHtml(id, res, null);
+        const done = box.querySelector('[data-ai-providers-sel] [data-ai-result]');
+        if (done) done.innerHTML = '<div class="inst-ok">Saved' + (res.restarts ? ': the app restarts with them.' : '.') + '</div>' + warningsList(res.warnings);
+        showToast('Model providers of ' + id + ' saved.', 'success');
+      } catch (err) {
+        btn.disabled = false;
+        out.innerHTML = errorBox(err);
+      }
+    }
+
+    function aiCompanionHtml(id, v, c, greyed) {
+      const [cls, text] = AI_STATUS[c.status] || ['', c.status];
+      let h = '<div class="inst-section" data-ai-companion="' + escapeHtml(c.name) + '"><h4>' + escapeHtml(c.label || c.name) + ' <code>' + escapeHtml(c.name) + '</code></h4>';
+      h += '<div style="margin-bottom:0.5rem"><span class="pill ' + cls + '">' + escapeHtml(c.status) + '</span>' +
+        '<span class="pill ' + (c.upstream === 'official' ? 'info' : 'warn') + '" title="' + (c.upstream === 'official' ? 'The app\'s or its upstream\'s own MCP server' : 'A community MCP server, vetted for this template') + '">' +
+        escapeHtml(c.upstream === 'official' ? 'official' : 'community') + '</span>' + escapeHtml(text) +
+        (c.status === 'unavailable' ? ' ' + escapeHtml(v.master_off ? 'AI support is off on this Portcullis.' : v.refused) : '') + '</div>';
+      if (c.last_error) h += '<div class="op-msg inst-error">Last error: ' + escapeHtml(c.last_error) + '</div>';
+      h += '<dl class="inst-facts">' +
+        (c.url ? '<dt>MCP URL</dt><dd><code>' + escapeHtml(c.url) + '</code></dd>' : '') +
+        '<dt>Server</dt><dd>' + escapeHtml(c.kind === 'builtin' ? 'built into the app' : 'a companion container') + (c.source ? ' · ' + aiLink(c.source, 'source') : '') + '</dd>' +
+        '<dt>Identity</dt><dd>' + escapeHtml(AI_IDENTITY[c.identity_mode] || c.identity_mode) + '</dd>' +
+        '<dt>People</dt><dd>' + escapeHtml(c.population) + ' (the app\'s settings population: who can use it with AI)</dd>' +
+        (c.identity_mode === 'app_token' ? '<dt>Credentials</dt><dd>' + escapeHtml(c.credentials) + ' active' + (c.revoking ? ', ' + escapeHtml(c.revoking) + ' being revoked' : '') + '</dd>' : '') +
+        ((c.confirm || []).length ? '<dt>Asks to confirm</dt><dd>' + c.confirm.map(x => '<code>' + escapeHtml(x) + '</code>').join(', ') + '</dd>' : '') +
+        ((c.never || []).length ? '<dt>Never allowed</dt><dd>' + c.never.map(x => '<code>' + escapeHtml(x) + '</code>').join(', ') + '</dd>' : '') +
+        '</dl>';
+      if ((c.unmatched || []).length) {
+        h += '<div class="inst-error op-msg" data-ai-unmatched><strong>Left before their account could be matched</strong> — their other sessions and tokens in the app remain: ' +
+          'deactivate or delete them in ' + escapeHtml(c.label || c.name) + ' (Settings &gt; People), then dismiss.<ul>' +
+          c.unmatched.map(u => '<li><code>' + escapeHtml(u) + '</code> <button type="button" class="btn btn-danger btn-sm" data-ai-dismiss data-user="' + escapeHtml(u) + '">Dismiss</button></li>').join('') +
+          '</ul></div>';
+      }
+      if (c.own_rules) {
+        h += '<div class="public-warn" data-ai-own-rules>' + escapeHtml(c.label || c.name) + ' applies its own rules: people sign in to it with the app\'s own sign-in, ' +
+          'and Portcullis doesn\'t log or confirm its AI actions.</div>';
+      }
+      const dis = greyed ? ' disabled title="' + escapeHtml(greyed) + '"' : '';
+      h += '<div class="inst-row"><label class="policy-factor" style="margin:0"><input type="checkbox" data-ai-sw' + (c.enabled ? ' checked' : '') + dis + '> AI support</label>';
+      if ((c.modes || []).length > 1) {
+        h += '<select data-ai-mode aria-label="Mode"' + dis + '>' + c.modes.map(m => '<option value="' + escapeHtml(m) + '"' + (m === c.mode ? ' selected' : '') + '>' +
+          escapeHtml(AI_MODE_LABEL[m] || m) + '</option>').join('') + '</select>';
+      } else {
+        h += '<span class="pill">' + escapeHtml(AI_MODE_LABEL[c.mode] || c.mode) + '</span>';
+      }
+      h += '<button type="button" class="btn btn-primary btn-sm" data-ai-save' + dis + '>Save</button></div>';
+      // identity_headers companions hold no app-side AI credential: nothing
+      // to revoke.
+      if (c.identity_mode !== 'identity_headers') {
+        h += '<div class="inst-row"><input type="text" data-ai-revoke-user placeholder="username (empty: everyone)" aria-label="Revoke for" spellcheck="false">' +
+          '<button type="button" class="btn btn-danger btn-sm" data-ai-revoke>Revoke AI credentials now</button></div>' +
+          aiNote(c.identity_mode === 'app_oauth' ? 'Revoking ends their AI access through the app\'s own sign-in; they sign in again in the app.'
+            : 'Revoking ends the app-side AI credentials at once (the app\'s revoke hook); people\'s assistants get new ones on their next request while AI support is on.');
+      }
+      h += '<div data-ai-result></div></div>';
+      return h;
+    }
+
+    async function saveAICompanion(box, sec) {
+      const id = box.dataset.aiTab, name = sec.dataset.aiCompanion;
+      const out = sec.querySelector('[data-ai-result]');
+      const enabled = sec.querySelector('[data-ai-sw]').checked;
+      const modeEl = sec.querySelector('[data-ai-mode]');
+      const body = { enabled };
+      if (modeEl) body.mode = modeEl.value;
+      if (aiInstanceEnabled(id) && !confirm('The app is running: saving AI support for ' + name + ' restarts it. Save?')) return;
+      const btn = sec.querySelector('[data-ai-save]');
+      btn.disabled = true;
+      out.innerHTML = '<p class="settings-empty">Saving…</p>';
+      try {
+        const res = await apiPut('/api/instances/' + encodeURIComponent(id) + '/ai', { companions: { [name]: body } });
+        let act;
+        try { act = await apiGet('/api/ai/activity?instance=' + encodeURIComponent(id) + '&n=20'); } catch (err) { act = { error: err }; }
+        box.innerHTML = aiTabHtml(id, res, act);
+        const done = box.querySelector('[data-ai-companion="' + CSS.escape(name) + '"] [data-ai-result]');
+        if (done) done.innerHTML = '<div class="inst-ok">Saved' + (res.restarts ? ': the app restarted.' : '.') + '</div>' + warningsList(res.warnings);
+        showToast('AI support for ' + name + ' saved.', 'success');
+      } catch (err) {
+        btn.disabled = false;
+        out.innerHTML = errorBox(err) + (err.status === 409 && /meanwhile/.test(err.message || '') ? '<div class="op-hint">Reload the tab and try again.</div>' : '');
+      }
+    }
+
+    async function revokeAICompanion(box, sec) {
+      const id = box.dataset.aiTab, name = sec.dataset.aiCompanion;
+      const out = sec.querySelector('[data-ai-result]');
+      const user = sec.querySelector('[data-ai-revoke-user]').value.trim().toLowerCase();
+      if (!confirm(user ? 'Revoke ' + user + '\'s AI credentials for ' + name + ' now?' : 'Revoke everyone\'s AI credentials for ' + name + ' now (revoke_all)?')) return;
+      const body = { companion: name };
+      if (user) body.user = user;
+      try {
+        await apiPost('/api/instances/' + encodeURIComponent(id) + '/ai/revoke', body);
+        await loadAITab(id, box.parentElement);
+        const done = document.querySelector('[data-ai-tab="' + CSS.escape(id) + '"] [data-ai-companion="' + CSS.escape(name) + '"] [data-ai-result]');
+        if (done) done.innerHTML = '<div class="inst-ok">Revoked for ' + escapeHtml(user || 'everyone') + '.</div>';
+        showToast('AI credentials revoked.', 'success');
+      } catch (err) { out.innerHTML = errorBox(err); }
+    }
+
+    async function dismissAIUser(box, sec, user) {
+      const id = box.dataset.aiTab, name = sec.dataset.aiCompanion;
+      const out = sec.querySelector('[data-ai-result]');
+      if (!confirm('Dismiss ' + user + '? Only do this once their account was deactivated or deleted in the app: otherwise they keep their access to it.')) return;
+      try {
+        await apiPost('/api/instances/' + encodeURIComponent(id) + '/ai/dismiss', { user, companion: name });
+        await loadAITab(id, box.parentElement);
+        showToast(user + ' dismissed.', 'success');
+      } catch (err) { out.innerHTML = errorBox(err); }
+    }
+
+    document.addEventListener('click', e => {
+      const t = e.target;
+      const box = t.closest('[data-ai-tab]');
+      if (!box) return;
+      if (t.closest('[data-ai-goto-settings]')) {
+        e.preventDefault();
+        if (document.getElementById('inst-modal').classList.contains('visible')) closeInstModal();
+        document.querySelector('.tab[data-tab="settings"]').click();
+        waitFor('#ai-settings-form').then(f => f && flash(f));
+        return;
+      }
+      const psec = t.closest('[data-ai-providers-sel]');
+      if (psec && t.closest('[data-ai-prov-sel-save]')) { saveAIProviders(box, psec); return; }
+      const sec = t.closest('[data-ai-companion]');
+      if (!sec) return;
+      if (t.closest('[data-ai-save]')) { saveAICompanion(box, sec); return; }
+      const dis = t.closest('[data-ai-dismiss]');
+      if (dis) { dismissAIUser(box, sec, dis.dataset.user); return; }
+      if (t.closest('[data-ai-revoke]')) revokeAICompanion(box, sec);
+    });
+
+    // openAppTab(id, tab): the app's tab — the card's for a default
+    // instance, the instance dialog's otherwise (the doctor's "Open AI
+    // tab", #app/<id>/ai). Any tab but "ai" opens the app's settings.
+    async function openAppTab(id, tab) {
+      if (tab !== 'ai') { openSettingAt(id, ''); return; }
+      const card = document.querySelector('.app-card[data-id="' + CSS.escape(id) + '"]');
+      let pane;
+      if (card) {
+        document.querySelector('.tab[data-tab="catalog"]').click();
+        if (openDetailId !== id) card.click();
+        document.querySelector('.detail-tab[data-dtab="ai"][data-app="' + CSS.escape(id) + '"]')?.click();
+        pane = await waitFor('#detail-ai-' + CSS.escape(id) + ' [data-ai-tab]');
+      } else {
+        await openInstance(id, { tab: 'ai' });
+        pane = await waitFor('#inst-modal-box [data-ipane="ai"] [data-ai-tab]');
+      }
+      if (pane) flash(pane);
+    }
+    window.openAppTab = openAppTab;
 
     // ── Users & groups (contract §9): web/directory.js ────
     // The tab is the directory UI (People | Groups | Org chart | Setup),
@@ -1922,7 +2738,7 @@
 
     // Error text as the Hub said it, with what the status means.
     function errorBox(err) {
-      const pre = { 400: 'Invalid: ', 403: 'Not allowed: ', 404: 'Not found: ', 409: 'Refused: ', 503: 'Unavailable: ',
+      const pre = { 400: 'Invalid: ', 403: 'Not allowed: ', 404: 'Not found: ', 409: 'Refused: ', 502: 'Failed in the app: ', 503: 'Unavailable: ',
         507: 'Not enough free space on the Hub\'s data volume: ' }[err && err.status] || '';
       let h = '<div class="op-msg inst-error">' + escapeHtml(pre + ((err && err.message) || String(err))) +
         (err && err.rolled_back ? ' — rolled back: the previous data was put back.' : '') + '</div>';
@@ -2064,7 +2880,7 @@
     }
     function modalHead(title) {
       return '<div class="inst-modal-head"><div class="inst-modal-title">' + title + '</div>' +
-        '<button type="button" class="detail-close" data-inst-close="1" title="Close">&times;</button></div>';
+        '<button type="button" class="detail-close" data-inst-close="1" title="Close" aria-label="Close">&times;</button></div>';
     }
 
     // ── create ───────────────────────────────────────────
@@ -2140,6 +2956,7 @@
       const tabs = [['overview', 'Overview']];
       if (!inst.default) tabs.push(['settings', 'Settings'], ['logs', 'Logs'], ['expert', 'Expert']);
       if (!inst.default && templateHasPersonSecret(inst.template)) tabs.push(['filesharing', 'File sharing']);
+      if (!inst.default) tabs.push(['ai', 'AI support']);
       tabs.push(['backups', 'Backups'], ['delete', 'Delete']);
       instCtx = { kind: 'instance', id, inst, tab: (opts && opts.tab) || 'overview' };
       let h = modalHead(escapeHtml(templateLabel(inst.template)) + ' · <code>' + escapeHtml(id) + '</code> ' + statePill(inst.state));
@@ -2167,6 +2984,7 @@
       if (k === 'expert') loadExpert(id);
       if (k === 'backups') loadBackups(pane, id);
       if (k === 'filesharing') loadFileSharing(id, pane);
+      if (k === 'ai') loadAITab(id, pane);
       if (k === 'delete') renderInstDelete(pane);
     }
 

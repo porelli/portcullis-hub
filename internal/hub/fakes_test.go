@@ -21,6 +21,7 @@ import (
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/lldap"
+	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/state"
 )
 
@@ -175,6 +176,36 @@ type fakeEngine struct {
 	execFn func(id string, cmd []string) (*docker.ExecResult, error)
 	// apiVersion: APIVersion's answer ("" = 1.47).
 	apiVersion string
+	// ExecStdinSplit (AI hooks, G6): every call in splitCalls; execSplit
+	// (if set, called without mu) answers it, else exit 0, no output.
+	splitCalls []execCall
+	execSplit  func(id string, in docker.ExecInput) (*docker.ExecSplitResult, error)
+}
+
+func (e *fakeEngine) ExecStdinSplit(ctx context.Context, id string, in docker.ExecInput) (*docker.ExecSplitResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	e.mu.Lock()
+	e.splitCalls = append(e.splitCalls, execCall{container: id, in: in})
+	fn := e.execSplit
+	e.mu.Unlock()
+	if fn != nil {
+		return fn(id, in)
+	}
+	return &docker.ExecSplitResult{ExecID: "x"}, nil
+}
+
+func (e *fakeEngine) SplitCalls() []execCall {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]execCall(nil), e.splitCalls...)
+}
+
+func (e *fakeEngine) setExecSplit(fn func(id string, in docker.ExecInput) (*docker.ExecSplitResult, error)) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.execSplit = fn
 }
 
 type execCall struct {
@@ -667,6 +698,7 @@ func (f *fakeIdP) UpdateForwardAuthCallbacks(ctx context.Context, add, remove []
 
 const grafanaManifest = `name: Grafana
 category: monitoring
+ai: {unsupported: "test fixture"}
 auth:
   method: header-auth
   group_access: true
@@ -698,6 +730,7 @@ const grafanaCompose = "services:\n  web:\n    image: grafana\n    environment:\
 
 const otherManifest = `name: Other
 category: misc
+ai: {unsupported: "test fixture"}
 auth:
   method: native-oidc
   sso: true
@@ -1120,13 +1153,13 @@ func (g *fakeGroups) MissingInstanceGroups(ctx context.Context, names []string) 
 	return out, nil
 }
 
-func (g *fakeGroups) ResolveActor(ctx context.Context, actor string) error {
+func (g *fakeGroups) ResolveActor(ctx context.Context, actor directory.Actor) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return g.actorErr
 }
 
-func (g *fakeGroups) CreateInstanceGroup(ctx context.Context, actor, name string) (bool, []string, error) {
+func (g *fakeGroups) CreateInstanceGroup(ctx context.Context, actor directory.Actor, name string) (bool, []string, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.createErr != nil {
@@ -1134,7 +1167,7 @@ func (g *fakeGroups) CreateInstanceGroup(ctx context.Context, actor, name string
 			return false, nil, err
 		}
 	}
-	g.calls = append(g.calls, "+"+name+":"+actor)
+	g.calls = append(g.calls, "+"+name+":"+actor.User)
 	if g.existing == nil {
 		g.existing = map[string]bool{}
 	}
@@ -1150,13 +1183,13 @@ func (g *fakeGroups) CreateInstanceGroup(ctx context.Context, actor, name string
 	return true, nil, nil
 }
 
-func (g *fakeGroups) DeleteInstanceGroup(ctx context.Context, actor, name string) ([]string, error) {
+func (g *fakeGroups) DeleteInstanceGroup(ctx context.Context, actor directory.Actor, name string) ([]string, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.delErr != nil {
 		return nil, g.delErr
 	}
-	g.calls = append(g.calls, "-"+name+":"+actor)
+	g.calls = append(g.calls, "-"+name+":"+actor.User)
 	if g.people != nil {
 		g.people.deleteGroup(name)
 	}
@@ -1188,10 +1221,14 @@ type fakePeople struct {
 	privilege map[string]string
 	// uuids: LLDAP account uuids (default "uuid-<user>"; recreate gives
 	// a new one).
-	uuids  map[string]string
-	err    error
-	nextID int
-	calls  int
+	uuids map[string]string
+	// emails / pending: Membership.Emails and Membership.Pending (the gate
+	// file's people and expiring, plan 4 T11).
+	emails  map[string]string
+	pending map[string]map[string]time.Time
+	err     error
+	nextID  int
+	calls   int
 	// onMembership, if set, runs once after the next snapshot is taken
 	// (without p.mu): something changing between snapshot and use.
 	onMembership func()
@@ -1306,6 +1343,18 @@ func (p *fakePeople) Membership(ctx context.Context, now time.Time) (*directory.
 		m.Groups[g] = mg
 		if why := p.privilege[g]; why != "" {
 			m.Privilege[g] = why
+		}
+	}
+	m.Emails, m.Pending = map[string]string{}, map[string]map[string]time.Time{}
+	for u, e := range p.emails {
+		if _, ok := m.Users[u]; ok {
+			m.Emails[u] = e
+		}
+	}
+	for u, gs := range p.pending {
+		m.Pending[u] = map[string]time.Time{}
+		for g, at := range gs {
+			m.Pending[u][g] = at
 		}
 	}
 	for u, gs := range p.expired {
@@ -1448,4 +1497,14 @@ func (f *fixerFake) Specs() []docker.RunSpec {
 	f.fmu.Lock()
 	defer f.fmu.Unlock()
 	return append([]docker.RunSpec(nil), f.specs...)
+}
+
+// dirStateOf adapts a test's (expiring, attributes) function to
+// DirectoryState: no membership (the gate file then keeps the last
+// file's populations, like a failing directory).
+func dirStateOf(f func(context.Context) ([]policy.Expiring, *policy.UserAttributesDocument, error)) DirectoryState {
+	return func(ctx context.Context) (DirectorySnapshot, error) {
+		exp, attrs, err := f(ctx)
+		return DirectorySnapshot{Expiring: exp, Attrs: attrs}, err
+	}
 }

@@ -182,6 +182,9 @@ type revokeLeaverFixer struct{}
 
 func (revokeLeaverFixer) Kind() string { return doctor.FixRevokeLeaver }
 
+// TouchesData (G45): it revokes a credential.
+func (revokeLeaverFixer) TouchesData() bool { return true }
+
 func (revokeLeaverFixer) fixTarget(_ *Hub, f doctor.Finding, _ map[string]string) string {
 	if len(f.Instances) == 1 {
 		return f.Instances[0]
@@ -234,7 +237,7 @@ func (revokeLeaverFixer) Preview(ctx context.Context, h *Hub, f doctor.Finding, 
 // revoke (§13.16: reason admin, revoked_by the admin, audited
 // credential.revoke with the admin as actor, applied live like every
 // revocation).
-func (revokeLeaverFixer) Apply(h *Hub, f doctor.Finding, params map[string]string, planHash, actor string) (*AsyncOp, error) {
+func (revokeLeaverFixer) Apply(h *Hub, f doctor.Finding, params map[string]string, planHash string, actor directory.Actor) (*AsyncOp, error) {
 	ctx := context.Background()
 	c, err := h.leaverPlan(ctx, f, params)
 	if err != nil {
@@ -243,7 +246,7 @@ func (revokeLeaverFixer) Apply(h *Hub, f doctor.Finding, params map[string]strin
 	if planHash == "" || c.hash != planHash {
 		return nil, errCredentialChanged()
 	}
-	return h.startAsync(c.inst, OpRevokeLeaver, func(ready func()) (map[string]string, []string, error) {
+	return h.startAsync(c.inst, OpRevokeLeaver, actor, func(ready func()) (map[string]string, []string, error) {
 		ready()
 		// Only the previewed credential (fix round 1): one regenerated or
 		// created since is left alone, under the same lock as the revoke.
@@ -261,11 +264,11 @@ func errCredentialChanged() error {
 
 // adminRevokeCredentialID is the admin revoke of exactly credential id
 // (409 when the active credential is another one, or none).
-func (h *Hub) adminRevokeCredentialID(ctx context.Context, instance, key, user, actor, id string) error {
+func (h *Hub) adminRevokeCredentialID(ctx context.Context, instance, key, user string, actor directory.Actor, id string) error {
 	if id == "" {
 		return errCredentialChanged()
 	}
-	n, err := h.revokeCredentialsN(ctx, instance, []revocation{{key: key, user: user, by: strings.ToLower(actor), reason: state.CredentialReasonAdmin, id: id}})
+	n, err := h.revokeCredentialsN(ctx, instance, []revocation{{key: key, user: user, by: strings.ToLower(actor.User), reason: state.CredentialReasonAdmin, id: id, via: actor.Via, client: actor.Client}})
 	if err != nil {
 		return err
 	}
@@ -280,6 +283,9 @@ func (h *Hub) adminRevokeCredentialID(ctx context.Context, instance, key, user, 
 type personTreeOwnerFixer struct{}
 
 func (personTreeOwnerFixer) Kind() string { return doctor.FixPersonTreeOwner }
+
+// TouchesData (G45): chown + chmod of a person\'s folder.
+func (personTreeOwnerFixer) TouchesData() bool { return true }
 
 func (personTreeOwnerFixer) fixTarget(_ *Hub, f doctor.Finding, _ map[string]string) string {
 	if len(f.Instances) == 1 && len(f.Paths) == 1 {
@@ -392,14 +398,14 @@ func (personTreeOwnerFixer) Preview(ctx context.Context, h *Hub, f doctor.Findin
 // O_DIRECTORY and refuses a symlink, a non-directory, another mount or
 // another inode), then the tree scanned again so the doctor sees the
 // result. Audited doctor.fix (ApplyFix).
-func (personTreeOwnerFixer) Apply(h *Hub, f doctor.Finding, params map[string]string, planHash, actor string) (*AsyncOp, error) {
+func (personTreeOwnerFixer) Apply(h *Hub, f doctor.Finding, params map[string]string, planHash string, actor directory.Actor) (*AsyncOp, error) {
 	ctx := context.Background()
 	c0, err := h.treePlan(ctx, f, params)
 	if err != nil {
 		return nil, err
 	}
 	inst := c0.inst
-	return h.startAsync(inst, OpPersonTreeOwner, func(ready func()) (map[string]string, []string, error) {
+	return h.startAsync(inst, OpPersonTreeOwner, actor, func(ready func()) (map[string]string, []string, error) {
 		unlock, err := h.lockApp(inst)
 		if err != nil {
 			return nil, nil, err

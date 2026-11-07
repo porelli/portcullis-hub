@@ -107,6 +107,10 @@ func (h *Hub) dataFileMounts(t *templates.Template) map[string][]string {
 		b, _ := json.Marshal(vol)
 		out[f.Service] = append(out[f.Service], string(b))
 	}
+	// The AI page's ai-providers directory (§3.2, Task 23).
+	if svc, entry := h.providersFileMount(t); entry != "" {
+		out[svc] = append(out[svc], entry)
+	}
 	return out
 }
 
@@ -192,6 +196,11 @@ func (h *Hub) buildFilesLocked(t *templates.Template, m *directory.Membership) [
 			}
 			o.hash = hex.EncodeToString(sum.Sum(nil))
 		}
+		out = append(out, o)
+	}
+	// The AI page's ai-providers.json (unit file:ai-providers; the name is
+	// reserved, so no template file shares it).
+	if o, ok := h.providersFileOutputLocked(t); ok {
 		out = append(out, o)
 	}
 	return out

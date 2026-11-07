@@ -222,6 +222,9 @@ func (h *Hub) startUp(live *templates.Template) error {
 	// The start hooks (when: start) after the up, under the lifecycle
 	// lock still held: reported and op-recorded, never a rollback.
 	h.runStartHooks(context.Background(), live.ID)
+	// AI companions owing a revoke_all (switched while stopped): run it
+	// now, before they are rendered (contract §15.5).
+	h.pendingAIAfterStart(live)
 	// The claims (LLDAP and Keycloak) in the background: a start never
 	// waits for them.
 	h.deliverClaimsAfterStart(live.ID)
@@ -335,15 +338,7 @@ func (h *Hub) redirectURIs(c templates.KeycloakClient) []string {
 func (h *Hub) clientSpec(t *templates.Template, c templates.KeycloakClient, acr string) keycloak.ClientSpec {
 	bcl := strings.ReplaceAll(c.BackchannelLogoutURL, "{{DOMAIN}}", h.cfg.Domain)
 	// Secret: per-app .env first, then core .env.
-	secret := ""
-	if c.SecretEnv != "" {
-		for _, p := range []string{h.envPath(t.ID), filepath.Join(h.cfg.ProjectDir, ".env")} {
-			if v := readEnvFile(p)[c.SecretEnv]; v != "" {
-				secret = v
-				break
-			}
-		}
-	}
+	secret := h.clientSecret(t, c)
 	hosts := make([]string, 0, len(t.Hosts))
 	for _, host := range t.Hosts {
 		hosts = append(hosts, host)
@@ -419,8 +414,10 @@ func (h *Hub) enableInner(id string, restoring bool) (rolledBack bool, err error
 		return false, err
 	}
 	// The template's starting per-person rows (after EnableAs created
-	// the instance's missing groups).
+	// the instance's missing groups), and an AI page's default provider
+	// selection when it never chose (Task 23).
 	h.seedSettingsLocked(&tmpl)
+	h.seedAIProvidersLocked(&tmpl)
 	if err := h.generateAppEnvLocked(&tmpl, members); err != nil {
 		h.mu.Unlock()
 		return false, statusErr(500, "env setup failed: %v", err)
@@ -442,7 +439,15 @@ func (h *Hub) enableInner(id string, restoring bool) (rolledBack bool, err error
 	// Phase 2 (no mu): network / docker work that may take minutes.
 	if h.idp != nil {
 		for _, c := range tmpl.Manifest.Clients {
-			err := h.idp.RegisterClient(context.Background(), h.clientSpec(&tmpl, c, acr))
+			var err error
+			if c.AIClient {
+				// The AI page's MCP client goes through the AI client path
+				// (G10): never RegisterClient. A failure leaves it unhealthy
+				// (out of mcp-gate.json's clients), retried by every pass.
+				err = h.ensureInstanceAIClient(context.Background(), &tmpl)
+			} else {
+				err = h.idp.RegisterClient(context.Background(), h.clientSpec(&tmpl, c, acr))
+			}
 			var conflict *keycloak.ConflictError
 			switch {
 			case errors.As(err, &conflict):
@@ -561,6 +566,7 @@ func (h *Hub) Disable(id string) error {
 		return err
 	}
 	defer unlock()
+	defer h.lifecycleAILock(id)() // lockApp → aiLock (G35): no mint meanwhile
 	return h.finishOp(id, OpDisable, h.disableLocked(id), false)
 }
 

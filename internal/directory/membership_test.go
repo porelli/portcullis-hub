@@ -239,8 +239,8 @@ func TestGroupDeletedHook(t *testing.T) {
 		id          int
 	}
 	var calls []call
-	e.svc.GroupDeleted = func(_ context.Context, actor, name string, gid int) []string {
-		calls = append(calls, call{actor, name, gid})
+	e.svc.GroupDeleted = func(_ context.Context, actor directory.Actor, name string, gid int) []string {
+		calls = append(calls, call{actor.User, name, gid})
 		return []string{"purged rows"}
 	}
 	// A failing LLDAP delete: no call.
@@ -301,8 +301,8 @@ func TestUserDeletedHook(t *testing.T) {
 	e := newEnv(t)
 	type call struct{ actor, name string }
 	var calls []call
-	e.svc.UserDeleted = func(_ context.Context, actor, name string) []string {
-		calls = append(calls, call{actor, name})
+	e.svc.UserDeleted = func(_ context.Context, actor directory.Actor, name string) []string {
+		calls = append(calls, call{actor.User, name})
 		return []string{"purged entries"}
 	}
 	real := e.svc.LLDAP
@@ -341,5 +341,112 @@ func TestFieldNameLDAPAliasesRefused(t *testing.T) {
 	for _, n := range []string{"givenname", "sn", "cn", "objectclass", "memberof", "ismemberof", "entryuuid", "entrydn", "dn", "distinguishedname", "uid", "id", "mail", "email", "displayname", "firstname", "lastname", "jpegphoto", "createtimestamp", "creationdate", "modifytimestamp", "modifydate", "modified_date", "pwdchangedtime", "passwordmodifydate", "password_modified_date"} {
 		err := e.svc.CreateField(ctx, asRoot, directory.Field{Name: n, Label: "X", Kind: directory.FieldKindText})
 		wantStatus(t, "CreateField "+n, err, 400)
+	}
+}
+
+// Plan 4 T11: the gate file's inputs — each user's LLDAP email and the
+// earliest expiry still ahead per membership (contract §15.4 expiring,
+// people).
+func TestMembershipEmailsAndPending(t *testing.T) {
+	e := newEnv(t)
+	store := &directory.Store{Path: filepath.Join(t.TempDir(), "directory.yaml")}
+	e.svc.Store = store
+	e.ll.AddUser("Bob", "bob@example.org", "Bob", "")
+	e.ll.AddGroup("users_app", "alice", "Bob", "portcullis-hub")
+	cfg, _ := store.Load()
+	now := time.Now().UTC().Truncate(time.Second)
+	soon, past := now.Add(48*time.Hour), now.Add(-time.Hour)
+	cfg.Groups["users_app"] = &directory.GroupConfig{Expiry: map[string]time.Time{"bob": soon, "alice": past}}
+	if err := store.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	m, err := e.svc.Membership(ctx, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Emails["bob"] != "bob@example.org" {
+		t.Errorf("emails = %+v", m.Emails)
+	}
+	if _, ok := m.Emails["portcullis-hub"]; ok {
+		t.Error("service account's email listed")
+	}
+	if !m.Pending["bob"]["users_app"].Equal(soon) {
+		t.Errorf("pending = %+v", m.Pending)
+	}
+	if _, ok := m.Pending["alice"]; ok || !m.Expired["alice"]["users_app"] {
+		t.Errorf("a past expiry is Expired, never Pending: %+v %+v", m.Pending, m.Expired)
+	}
+}
+
+// Fix round 1 (T11, item 4): Publish carries the Membership of its own
+// read, equal to what Membership reads.
+func TestPublishCarriesMembership(t *testing.T) {
+	e := newEnv(t)
+	store := &directory.Store{Path: filepath.Join(t.TempDir(), "directory.yaml")}
+	e.svc.Store = store
+	e.ll.AddUser("Bob", "bob@example.org", "Bob", "")
+	e.ll.AddGroup("users_app", "alice", "Bob", "portcullis-hub")
+	cfg, _ := store.Load()
+	now := time.Now().UTC().Truncate(time.Second)
+	cfg.Groups["users_app"] = &directory.GroupConfig{Expiry: map[string]time.Time{"bob": now.Add(time.Hour)}}
+	if err := store.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	pub, err := e.svc.Publish(ctx, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := e.svc.Membership(ctx, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, _ := json.Marshal(pub.Membership)
+	b, _ := json.Marshal(m)
+	if pub.Membership == nil || string(a) != string(b) {
+		t.Errorf("Publish membership = %s, want %s", a, b)
+	}
+}
+
+// TestMembershipGuarding (plan 4 Task 18, G37): Membership names the
+// guarding groups with why, the fields their rules use and the
+// administrators — the directory's own definitions, which the Portcullis
+// MCP's per-call classes read (never a second list).
+func TestMembershipGuarding(t *testing.T) {
+	e, store := privEnv(t)
+	e.ll.AddGroup("admin_immich")
+	e.ll.AddGroup("hr_edit")
+	e.ll.AddGroup("office_milan")
+	e.ll.AddGroup("editors")
+	e.ll.AddUser("ops", "ops@example.org", "Ops", "", "lldap_admin")
+	cfg, _ := store.Load()
+	cfg.Permissions = map[string]string{directory.PermEditDetails: "hr_edit"}
+	cfg.Groups["admin_immich"] = &directory.GroupConfig{Rule: mustRule(t, `clearance = "top"`)}
+	if err := store.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	m, err := e.svc.Membership(ctx, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"lldap_admin":            "an administrator group",
+		"lldap_password_manager": "an administrator group",
+		"admin_immich":           "the admin group of app immich",
+		"office_milan":           "a privileged value of app immich",
+		"hr_edit":                "the edit_details permission group",
+	}
+	for g, why := range want {
+		if m.Guarding[g] != why {
+			t.Errorf("guarding %s = %q, want %q", g, m.Guarding[g], why)
+		}
+	}
+	if _, ok := m.Guarding["editors"]; ok {
+		t.Errorf("editors is no guarding group: %v", m.Guarding)
+	}
+	if strings.Join(m.GuardedFields["clearance"], ",") != "admin_immich" || m.GuardedFields["office_location"] != nil {
+		t.Errorf("guarded fields = %v", m.GuardedFields)
+	}
+	if !m.Administrators["root"] || !m.Administrators["ops"] || m.Administrators["alice"] || m.Administrators["portcullis-hub"] {
+		t.Errorf("administrators = %v", m.Administrators)
 	}
 }

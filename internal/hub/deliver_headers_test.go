@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/settings"
 	"github.com/portcullis/hub/internal/templates"
@@ -69,13 +70,13 @@ func headerFixture(t *testing.T, edit func(string) string) (*fixture, *fakePeopl
 // {{ADMIN_GROUP}} Admin (the template's row, kept), editors Editor.
 func headerEnable(t *testing.T, f *fixture) {
 	t.Helper()
-	if _, err := f.h.EnableAs(headerID, "root"); err != nil {
+	if _, err := f.h.EnableAs(headerID, directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	settle(f)
 	if _, err := f.h.SaveSettings(headerID, SettingsUpdate{Person: map[string]PersonChange{
 		"role": {Default: raw("Viewer"), Rows: rows("{{ADMIN_GROUP}}", "Admin", "editors", "Editor")},
-	}}, "admin"); err != nil {
+	}}, directory.Human("admin")); err != nil {
 		t.Fatal(err)
 	}
 	settle(f)
@@ -155,7 +156,7 @@ func TestHeaderRefusedWithNativeSignIn(t *testing.T) {
 		return strings.Replace(m, "  admin_group: admin_dash\n", "  admin_group: admin_dash\n  sso: false\n  native_login:\n    supported: true\n    note: its own accounts\n", 1)
 	})
 	headerEnable(t, f)
-	_, err := f.h.SaveSettings(headerID, SettingsUpdate{SignIn: strp(SignInNative)}, "admin")
+	_, err := f.h.SaveSettings(headerID, SettingsUpdate{SignIn: strp(SignInNative)}, directory.Human("admin"))
 	if statusOf(err) != 400 || !strings.Contains(err.Error(), "header") {
 		t.Fatalf("native sign-in with a header delivery: %v, want 400 naming the header", err)
 	}
@@ -221,7 +222,7 @@ func TestHeaderDeliveryNoRestart(t *testing.T) {
 	before := len(f.runner.Calls())
 	res, err := f.h.SaveSettings(headerID, SettingsUpdate{Person: map[string]PersonChange{
 		"role": {Default: raw("Viewer"), Rows: rows("{{ADMIN_GROUP}}", "Admin", "editors", "Admin")},
-	}}, "admin")
+	}}, directory.Human("admin"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -330,10 +331,10 @@ func TestHeaderNilPlanUnchanged(t *testing.T) {
 	f, _, _ := headerFixture(t, nil)
 	headerEnable(t, f)
 	calls := 0
-	f.h.SetDirectory(func(context.Context) ([]policy.Expiring, *policy.UserAttributesDocument, error) {
+	f.h.SetDirectory(dirStateOf(func(context.Context) ([]policy.Expiring, *policy.UserAttributesDocument, error) {
 		calls++
 		return nil, nil, nil
-	}, nil)
+	}), nil)
 	h := f.h
 	h.mu.Lock()
 	delete(h.hostHeaders, headerID)
@@ -402,19 +403,19 @@ func TestHeaderNilPlanAfterFailedWrite(t *testing.T) {
 func TestHeaderDemotionWithDirectoryStateDown(t *testing.T) {
 	f, _, _ := headerFixture(t, nil)
 	attrs := policy.BuildUserAttributes([]policy.AttrField{{Name: "cost_center"}}, map[string]map[string][]string{"carol": {"cost_center": {"CC-1"}}}, nil)
-	f.h.SetDirectory(func(context.Context) ([]policy.Expiring, *policy.UserAttributesDocument, error) {
+	f.h.SetDirectory(dirStateOf(func(context.Context) ([]policy.Expiring, *policy.UserAttributesDocument, error) {
 		return nil, &attrs, nil
-	}, nil)
+	}), nil)
 	headerEnable(t, f)
 	if got := attrHosts(t, f)[headerMain][hdrSuffix]["carol"]; got != "Editor" {
 		t.Fatalf("carol = %q, want Editor", got)
 	}
-	f.h.SetDirectory(func(context.Context) ([]policy.Expiring, *policy.UserAttributesDocument, error) {
+	f.h.SetDirectory(dirStateOf(func(context.Context) ([]policy.Expiring, *policy.UserAttributesDocument, error) {
 		return nil, nil, errors.New("directory publish failed")
-	}, nil)
+	}), nil)
 	res, err := f.h.SaveSettings(headerID, SettingsUpdate{Person: map[string]PersonChange{
 		"role": {Default: raw("Viewer"), Rows: rows("{{ADMIN_GROUP}}", "Admin")},
-	}}, "admin")
+	}}, directory.Human("admin"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -440,7 +441,7 @@ func TestHeadersFollowSetHosts(t *testing.T) {
 	f.runner.mu.Lock()
 	f.runner.upErr = errors.New("up failed")
 	f.runner.mu.Unlock()
-	if err := f.h.SetHosts(headerID, map[string]string{"dash": moved, "dash-team": headerExtra, "dash-status": headerStatus}, "admin"); err == nil {
+	if err := f.h.SetHosts(headerID, map[string]string{"dash": moved, "dash-team": headerExtra, "dash-status": headerStatus}, directory.Human("admin")); err == nil {
 		t.Log("SetHosts: the restart did not fail")
 	}
 	settle(f)

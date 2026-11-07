@@ -191,14 +191,14 @@ func (h *Hub) RunUserSweep(ctx context.Context) bool {
 // = SweepResumeConfirm): LLDAP's current user count becomes the new
 // baseline. The account checks still apply to every run. Audited as
 // keycloak.sweep_resume.
-func (h *Hub) ResumeUserSweep(ctx context.Context, actor, confirm string) (st UserSweepStatus, err error) {
+func (h *Hub) ResumeUserSweep(ctx context.Context, actor directory.Actor, confirm string) (st UserSweepStatus, err error) {
 	s := h.sweep
 	detail := ""
 	defer func() { h.auditOp(actor, "keycloak.sweep_resume", "stale-record cleanup", detail, err) }()
 	if s == nil {
 		return st, statusErr(503, "the stale-record cleanup is not configured")
 	}
-	if strings.TrimSpace(actor) == "" {
+	if strings.TrimSpace(actor.User) == "" {
 		return st, statusErr(400, "no signed-in user to audit the change as")
 	}
 	if confirm != SweepResumeConfirm {
@@ -211,7 +211,7 @@ func (h *Hub) ResumeUserSweep(ctx context.Context, actor, confirm string) (st Us
 		return st, statusErr(503, "users & groups is not available")
 	}
 	if err := groupsAPI.ResolveActor(ctx, actor); err != nil {
-		return st, &StatusError{Status: 403, Err: fmt.Errorf("%s can't resume the cleanup: %w", actor, err)}
+		return st, &StatusError{Status: 403, Err: fmt.Errorf("%s can't resume the cleanup: %w", actor.User, err)}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -224,9 +224,9 @@ func (h *Hub) ResumeUserSweep(ctx context.Context, actor, confirm string) (st Us
 		return st, &StatusError{Status: 503, Err: fmt.Errorf("LLDAP is unreachable: %w", lerr)}
 	}
 	detail = fmt.Sprintf("was paused: %s; new baseline %d users", st.Reason, len(users))
-	st = UserSweepStatus{LastOKCount: len(users), LastOKAt: st.LastOKAt, ResumedBy: actor, ResumedAt: time.Now().UTC()}
+	st = UserSweepStatus{LastOKCount: len(users), LastOKAt: st.LastOKAt, ResumedBy: actor.User, ResumedAt: time.Now().UTC()}
 	s.save(st)
-	log.Printf("keycloak: stale-record cleanup resumed by %s (baseline %d LLDAP users)", actor, len(users))
+	log.Printf("keycloak: stale-record cleanup resumed by %s (baseline %d LLDAP users)", actor.User, len(users))
 	st.Configured = true
 	return st, nil
 }

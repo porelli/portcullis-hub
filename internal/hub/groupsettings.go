@@ -712,7 +712,7 @@ func withoutGroups(values map[string]any, key string, removed []string) map[stri
 // only changes state and queues the deliveries (TriggerDelivery, in the
 // background): it runs inside DeleteInstance's per-instance lock, so a
 // delivery or restart here would deadlock. Never call it holding mu.
-func (h *Hub) PurgeGroupSettings(ctx context.Context, actor, name string, id int) []string {
+func (h *Hub) PurgeGroupSettings(ctx context.Context, actor directory.Actor, name string, id int) []string {
 	h.mu.Lock()
 	var all []purged
 	affected := map[string]bool{}
@@ -828,7 +828,7 @@ func (h *Hub) reconcileGroupRows(ctx context.Context, id string) []string {
 	for _, p := range ps {
 		log.Printf("settings: %s: %s purged", p.target, p.detail)
 		warnings = append(warnings, fmt.Sprintf("setting %s: the row was dropped (%s)", p.target, p.detail))
-		h.auditOp(purgeActor, "settings.purge", p.target, p.detail, nil)
+		h.auditOp(directory.Human(purgeActor), "settings.purge", p.target, p.detail, nil)
 	}
 	if len(ps) > 0 {
 		h.TriggerDelivery(id, TriggerMembership, true)
@@ -959,7 +959,7 @@ func (h *Hub) pruneSettingsLocked() (audits []func()) {
 			delete(s.GroupIDs, key)
 			log.Printf("settings: %s: stored %s dropped: %s", id, key, why)
 			target, detail := id+"/"+key, why
-			audits = append(audits, func() { h.auditOp(purgeActor, "settings.purge", target, detail, nil) })
+			audits = append(audits, func() { h.auditOp(directory.Human(purgeActor), "settings.purge", target, detail, nil) })
 		}
 		for _, k := range slices.Sorted(maps.Keys(s.Values)) {
 			o := optionByKey(t, k)
@@ -1003,7 +1003,7 @@ func (h *Hub) pruneSettingsLocked() (audits []func()) {
 			}
 			for _, u := range slices.Sorted(maps.Keys(s.Entered[k])) {
 				target := id + "/" + k + "/" + u
-				audits = append(audits, func() { h.auditOp(purgeActor, "settings.person_value", target, "invalidated", nil) })
+				audits = append(audits, func() { h.auditOp(directory.Human(purgeActor), "settings.person_value", target, "invalidated", nil) })
 			}
 			delete(s.Entered, k)
 			drop(k, why)

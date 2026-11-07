@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/portcullis/hub/internal/credentials"
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/freshauth"
 	"github.com/portcullis/hub/internal/settings"
@@ -59,7 +60,7 @@ func credSvcFixture(t *testing.T) *credSvc {
 	}
 	settle(f)
 	fa := &fakeFreshAuth{}
-	f.h.SetFreshAuth(fa)
+	f.h.SetFreshAuth(ListenerPeople, fa)
 	f.h.freshAuthReady.Store(true)
 	var n atomic.Int32
 	f.h.credentialCheck = func() { n.Add(1) }
@@ -239,7 +240,7 @@ func TestCreateUnavailable503(t *testing.T) {
 	}
 
 	f := credFixtureWith(t, func(root string, cfg *Config) { cfg.SecretsDir = filepath.Join(root, "missing") })
-	f.h.SetFreshAuth(c.fa)
+	f.h.SetFreshAuth(ListenerPeople, c.fa)
 	f.h.freshAuthReady.Store(true)
 	if err := f.h.Enable(smbB); err == nil {
 		t.Fatal("enabled without a secrets volume")
@@ -324,7 +325,7 @@ func TestAdminRevoke(t *testing.T) {
 	c := credSvcFixture(t)
 	cc := c.create(t, "alice")
 	credentials.Zero(cc.Password)
-	if err := c.f.h.AdminRevokeCredential(context.Background(), smbID, smbKey, "alice", "root"); err != nil {
+	if err := c.f.h.AdminRevokeCredential(context.Background(), smbID, smbKey, "alice", directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	settle(c.f)
@@ -338,10 +339,10 @@ func TestAdminRevoke(t *testing.T) {
 	if a := credAudits(c.audit, "credential.revoke"); len(a) != 1 || !strings.HasPrefix(a[0], "root ") || !strings.Contains(a[0], "actor=root") || !strings.Contains(a[0], "reason=admin") {
 		t.Errorf("audit = %v", a)
 	}
-	if err := c.f.h.AdminRevokeCredential(context.Background(), "nope", smbKey, "alice", "root"); statusOf(err) != 404 {
+	if err := c.f.h.AdminRevokeCredential(context.Background(), "nope", smbKey, "alice", directory.Human("root")); statusOf(err) != 404 {
 		t.Errorf("unknown instance: %v", err)
 	}
-	if err := c.f.h.AdminRevokeCredential(context.Background(), smbID, "connect_address", "alice", "root"); statusOf(err) != 404 {
+	if err := c.f.h.AdminRevokeCredential(context.Background(), smbID, "connect_address", "alice", directory.Human("root")); statusOf(err) != 404 {
 		t.Errorf("not a person_secret: %v", err)
 	}
 }
@@ -847,7 +848,7 @@ func TestMyAppsCredentialStatuses(t *testing.T) {
 		t.Errorf("root: %+v", cr)
 	}
 	// Another host port: :4450.
-	if _, err := c.f.h.SaveSettings(smbID, SettingsUpdate{Ports: map[string]string{"SMB": "4450"}}, "admin"); err != nil {
+	if _, err := c.f.h.SaveSettings(smbID, SettingsUpdate{Ports: map[string]string{"SMB": "4450"}}, directory.Human("admin")); err != nil {
 		t.Fatal(err)
 	}
 	settle(c.f)
@@ -908,7 +909,7 @@ func TestHubSetOptionsSkipped(t *testing.T) {
 		"secret share_password": {Secrets: map[string]SecretChange{smbKey: {Clear: true}}},
 		"groups uid":            {Groups: map[string][]GroupValueInput{"uid": {{Group: "users_" + smbID, Value: raw(1)}}}},
 	} {
-		if _, err := h.SaveSettings(smbID, u, "admin"); statusOf(err) != 400 || (!strings.HasPrefix(name, "secret") && !strings.Contains(err.Error(), "set by the Hub")) {
+		if _, err := h.SaveSettings(smbID, u, directory.Human("admin")); statusOf(err) != 400 || (!strings.HasPrefix(name, "secret") && !strings.Contains(err.Error(), "set by the Hub")) {
 			t.Errorf("%s: %v, want 400 (set by the Hub)", name, err)
 		}
 	}

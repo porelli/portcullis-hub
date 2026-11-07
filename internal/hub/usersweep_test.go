@@ -9,6 +9,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/lldap"
 )
 
@@ -184,26 +185,26 @@ func TestUserSweepResume(t *testing.T) {
 	f.h.SetGroups(g)
 	ctx := context.Background()
 	f.h.RunUserSweep(ctx)
-	if _, err := f.h.ResumeUserSweep(ctx, "alice", SweepResumeConfirm); err == nil {
+	if _, err := f.h.ResumeUserSweep(ctx, directory.Human("alice"), SweepResumeConfirm); err == nil {
 		t.Error("resumed a sweep that isn't paused")
 	}
 	ll.set(people(5)...)
 	f.h.RunUserSweep(ctx)
-	if _, err := f.h.ResumeUserSweep(ctx, "alice", "yes"); err == nil || !f.h.UserSweep().Paused {
+	if _, err := f.h.ResumeUserSweep(ctx, directory.Human("alice"), "yes"); err == nil || !f.h.UserSweep().Paused {
 		t.Errorf("wrong confirm: %v", err)
 	}
 	if e := audit.last(); e.Action != "keycloak.sweep_resume" || e.Result != "refused" {
 		t.Errorf("audit = %+v", e)
 	}
-	if _, err := f.h.ResumeUserSweep(ctx, "", SweepResumeConfirm); err == nil {
+	if _, err := f.h.ResumeUserSweep(ctx, directory.Human(""), SweepResumeConfirm); err == nil {
 		t.Error("no actor accepted")
 	}
 	g.actorErr = errors.New("not an administrator")
-	if _, err := f.h.ResumeUserSweep(ctx, "dana", SweepResumeConfirm); err == nil || !f.h.UserSweep().Paused {
+	if _, err := f.h.ResumeUserSweep(ctx, directory.Human("dana"), SweepResumeConfirm); err == nil || !f.h.UserSweep().Paused {
 		t.Errorf("non-admin: %v", err)
 	}
 	g.actorErr = nil
-	st, err := f.h.ResumeUserSweep(ctx, "alice", SweepResumeConfirm)
+	st, err := f.h.ResumeUserSweep(ctx, directory.Human("alice"), SweepResumeConfirm)
 	if err != nil || st.Paused || st.LastOKCount != 7 || st.ResumedBy != "alice" {
 		t.Fatalf("resume: %+v %v", st, err)
 	}

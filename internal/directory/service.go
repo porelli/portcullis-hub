@@ -32,6 +32,26 @@ const CoreAdmin = "admin"
 // DefaultServiceUser is the Hub's own LLDAP account (§9).
 const DefaultServiceUser = "portcullis-hub"
 
+// ReservedUserPrefix starts the template-internal app accounts (Gitea's
+// and Home Assistant's portcullis-hooks / portcullis-breakglass admins):
+// a person signing in under such a name could claim that app account, so
+// the Hub never creates, invites or sets a password for one. The Hub's
+// own service account (portcullis-hub) shares the prefix and is protected
+// by checkTarget instead.
+const ReservedUserPrefix = "portcullis-"
+
+// reservedName reports whether user may never be created, invited or
+// given a password from the Hub: the service account, the bootstrap
+// admin and every portcullis-* name (case-insensitive).
+func (s *Service) reservedName(user string) bool {
+	l := strings.ToLower(user)
+	return l == strings.ToLower(s.serviceUser()) || l == CoreAdmin || l == DefaultServiceUser || strings.HasPrefix(l, ReservedUserPrefix)
+}
+
+func reservedMsg(user string) string {
+	return fmt.Sprintf("%q is reserved: names starting with %q are the Hub's and the apps' internal accounts", user, ReservedUserPrefix)
+}
+
 // builtinGroups are LLDAP's own groups; the Hub never deletes them.
 var builtinGroups = map[string]bool{lldap.AdminGroup: true, "lldap_password_manager": true, "lldap_strict_readonly": true}
 
@@ -167,13 +187,13 @@ type Service struct {
 	// s.mu: the Hub purges the per-group setting rows that named it (spec
 	// call 19). It must not block on the directory. Its warnings are
 	// added to the delete's.
-	GroupDeleted func(ctx context.Context, actor, name string, id int) []string
+	GroupDeleted func(ctx context.Context, actor Actor, name string, id int) []string
 	// UserDeleted, if set, is called after DeleteUser deleted an account
 	// in LLDAP (the acting admin and the account's name), outside s.mu:
 	// the Hub deletes the person's person-entered setting values (spec
 	// call 32). It must not block on the directory. Its warnings are
 	// added to the delete's.
-	UserDeleted func(ctx context.Context, actor, name string) []string
+	UserDeleted func(ctx context.Context, actor Actor, name string) []string
 
 	mu sync.Mutex
 	// ruleState: each rule group's membership (lowercase) after the last
@@ -864,10 +884,11 @@ func (s *Service) run(ctx context.Context, c *Caller, perm, action, target strin
 		done = err == nil
 	}
 	if s.Audit != nil {
-		e := AuditEntry{Actor: clip(c.User), Action: action, Target: clip(target), Result: "ok"}
+		e := AuditEntry{Actor: clip(c.User), Action: action, Target: clip(target), Result: "ok", Via: clip(c.Via), Client: clip(c.Client)}
 		if detail != nil {
 			e.Detail = clipN(*detail, maxAuditDetail)
 		}
+		e.Detail = c.Actor().AuditDetail(e.Detail)
 		var de *Error
 		switch {
 		case errors.As(err, &de) && de.Status < 500:
@@ -967,6 +988,9 @@ func (s *Service) invitesAvailable() error {
 
 // newInvite asks core for a link; caller holds s.mu.
 func (s *Service) newInvite(ctx context.Context, username string) (*invite.Invite, error) {
+	if s.reservedName(username) {
+		return nil, refuse("%s", reservedMsg(username))
+	}
 	if err := s.invitesAvailable(); err != nil {
 		return nil, &Error{Status: http.StatusServiceUnavailable, Msg: err.Error()}
 	}
@@ -995,8 +1019,8 @@ func (s *Service) CreateUser(ctx context.Context, c *Caller, req CreateRequest) 
 		switch {
 		case !lldap.ValidUsername(req.Username):
 			return invalid("invalid username: use 1-64 lowercase letters, digits, '.', '_' or '-', starting with a letter or digit")
-		case strings.EqualFold(req.Username, s.serviceUser()) || req.Username == CoreAdmin || req.Username == DefaultServiceUser:
-			return invalid("%q is reserved", req.Username)
+		case s.reservedName(req.Username):
+			return invalid("%s", reservedMsg(req.Username))
 		case !lldap.ValidEmail(req.Email):
 			return invalid("invalid email address")
 		case !lldap.ValidDisplayName(req.DisplayName):
@@ -1347,7 +1371,7 @@ func (s *Service) DeleteUser(ctx context.Context, c *Caller, username, confirm s
 	// Only once the LLDAP delete succeeded, outside s.mu (the Hub takes
 	// its own lock: order s.mu → Hub.mu).
 	if deleted != "" && s.UserDeleted != nil {
-		res.Warnings = append(res.Warnings, s.UserDeleted(ctx, strings.ToLower(c.User), strings.ToLower(deleted))...)
+		res.Warnings = append(res.Warnings, s.UserDeleted(ctx, Actor{User: strings.ToLower(c.User), Via: c.Via, Client: c.Client, Confirmation: c.Confirmation}, strings.ToLower(deleted))...)
 	}
 	return res, err
 }
@@ -1402,6 +1426,9 @@ func (s *Service) SetPassword(ctx context.Context, c *Caller, username, password
 	err := s.run(ctx, c, permAdmin, "user.password", username, &detail, func() error {
 		if err := s.checkTarget(username); err != nil {
 			return err
+		}
+		if s.reservedName(username) {
+			return refuse("%s", reservedMsg(username))
 		}
 		if !generate && !lldap.ValidPassword(password) {
 			return invalid("password must be %d-%d characters without control characters", lldap.MinPasswordLen, lldap.MaxPasswordLen)
@@ -1507,6 +1534,9 @@ func (s *Service) RemovePasskeys(ctx context.Context, c *Caller, username, confi
 			// left without passkeys and without an invite.
 			if err := s.checkInvitable(sn, id); err != nil {
 				return err
+			}
+			if s.reservedName(id) {
+				return refuse("%s", reservedMsg(id))
 			}
 			if err := s.invitesAvailable(); err != nil {
 				return &Error{Status: http.StatusServiceUnavailable, Msg: err.Error()}
@@ -1746,7 +1776,7 @@ func (s *Service) DeleteGroup(ctx context.Context, c *Caller, name, confirm stri
 	// Only once the LLDAP delete succeeded, outside s.mu (the Hub takes
 	// its own lock: order s.mu → Hub.mu).
 	if deletedID >= 0 && s.GroupDeleted != nil {
-		res.Warnings = append(res.Warnings, s.GroupDeleted(ctx, strings.ToLower(c.User), name, deletedID)...)
+		res.Warnings = append(res.Warnings, s.GroupDeleted(ctx, Actor{User: strings.ToLower(c.User), Via: c.Via, Client: c.Client, Confirmation: c.Confirmation}, name, deletedID)...)
 	}
 	if err != nil {
 		return res, err

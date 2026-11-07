@@ -108,7 +108,7 @@ func TestValidatePublicAccess(t *testing.T) {
 
 func TestValidateManifestPublicAccess(t *testing.T) {
 	var m Manifest
-	src := "auth:\n  method: forward-auth\n  public_access:\n    enabled_by_default: true\n    token_pattern: '^[A-Za-z0-9]{6,32}$'\n    paths:\n      - {prefix: \"/s/{token}/\", description: Share page}\n      - {prefix: /dist, description: Assets, supporting: true}\n"
+	src := "ai: {unsupported: test fixture}\nauth:\n  method: forward-auth\n  public_access:\n    enabled_by_default: true\n    token_pattern: '^[A-Za-z0-9]{6,32}$'\n    paths:\n      - {prefix: \"/s/{token}/\", description: Share page}\n      - {prefix: /dist, description: Assets, supporting: true}\n"
 	if err := yaml.Unmarshal([]byte(src), &m); err != nil {
 		t.Fatal(err)
 	}

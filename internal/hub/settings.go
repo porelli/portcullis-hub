@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/lldap"
 	"github.com/portcullis/hub/internal/policy"
@@ -687,6 +688,13 @@ type SettingsUpdate struct {
 	// SignIn: SignInGateway or SignInNative (apps with auth.native_login);
 	// nil = unchanged.
 	SignIn *string
+	// ExpectPlanHash (G46; the Portcullis MCP's save_settings, never the
+	// HTTP save): the PlanHash of the preview the admin saw. SaveSettings
+	// recomputes the preview first (409 when its hash differs) and, in
+	// the commit's mu section, refuses (409) if the stored settings,
+	// sign-in mode or access choices it was computed against changed
+	// meanwhile. Not part of the update itself (json "-": never hashed).
+	ExpectPlanHash string `json:"-"`
 }
 
 // PersonChange is a per-person option's new configuration.
@@ -804,7 +812,7 @@ func showPort(v string, ok bool) string {
 // declared option keys and ports are taken. Every changed (key, scope,
 // group) is audited as settings.change by actor (a refused save:
 // "refused").
-func (h *Hub) SaveSettings(id string, u SettingsUpdate, actor string) (_ *SaveResult, retErr error) {
+func (h *Hub) SaveSettings(id string, u SettingsUpdate, actor directory.Actor) (_ *SaveResult, retErr error) {
 	var changes []settingChange
 	var writeErr error
 	defer func() {
@@ -817,6 +825,24 @@ func (h *Hub) SaveSettings(id string, u SettingsUpdate, actor string) (_ *SaveRe
 	t := h.Template(id)
 	if t == nil {
 		return nil, ErrNotFound
+	}
+	// G46: the plan the admin previewed, recomputed now; its stored
+	// inputs are checked again under the commit's mu (planGuard).
+	var planGuard func() error
+	if u.ExpectPlanHash != "" {
+		p, in, err := h.previewPlanned(context.Background(), id, u)
+		if err != nil {
+			return nil, err
+		}
+		if p.PlanHash != u.ExpectPlanHash {
+			return nil, statusErr(409, "the settings or who they reach changed since the preview (plan_hash differs): preview again")
+		}
+		planGuard = func() error {
+			if h.planInputsLocked(id).digest() != in.digest() {
+				return statusErr(409, "%s's settings changed while saving (plan_hash differs): preview again", id)
+			}
+			return nil
+		}
 	}
 	h.mu.RLock()
 	pendErr := h.pendingLocked(id)
@@ -854,15 +880,32 @@ func (h *Hub) SaveSettings(id string, u SettingsUpdate, actor string) (_ *SaveRe
 	if err != nil {
 		return nil, err
 	}
+	// A policy reaching LoA 3 switches AI support off first (G43,
+	// contract §15.11; audited ai.disable "policy needs mTLS").
+	aiWarnings := []string{}
+	h.mu.RLock()
+	aiOff := h.aiOffForSaveLocked(t, u)
+	h.mu.RUnlock()
+	if len(aiOff) > 0 {
+		if err := h.switchAIOff(context.Background(), id, aiOff, actor, aiPolicyOffDetail); err != nil {
+			var oe *OpError
+			if !errors.As(err, &oe) {
+				return nil, err
+			}
+			// Off in state and in the gate file; the rest is recorded.
+			aiWarnings = append(aiWarnings, h.redactUnitError(id, err))
+		}
+		aiWarnings = append(aiWarnings, aiOffWarning(id, aiOff))
+	}
 	if h.testHookSave != nil {
 		h.testHookSave()
 	}
-	sv, enabled, err := h.saveSettings(t, u, parsed)
+	sv, enabled, err := h.saveSettings(t, u, parsed, planGuard)
 	changes = sv.changes
 	if err != nil {
 		return nil, err
 	}
-	out := &SaveResult{Effect: sv.effect, Changed: sv.keys, Warnings: append(append([]string{}, bindWarnings...), h.noAccessWarnings(t, sv.keys)...)}
+	out := &SaveResult{Effect: sv.effect, Changed: sv.keys, Warnings: append(append(aiWarnings, bindWarnings...), h.noAccessWarnings(t, sv.keys)...)}
 	if len(sv.writeErrs) > 0 {
 		writeErr = errors.Join(sv.writeErrs...)
 		for _, e := range sv.writeErrs {
@@ -901,7 +944,7 @@ type saved struct {
 
 // saveSettings is SaveSettings' state change: under the instance's lock
 // for a sign-in change, then mu.
-func (h *Hub) saveSettings(t *templates.Template, u SettingsUpdate, parsed *parsedSettings) (res saved, enabled bool, retErr error) {
+func (h *Hub) saveSettings(t *templates.Template, u SettingsUpdate, parsed *parsedSettings, planGuard func() error) (res saved, enabled bool, retErr error) {
 	id := t.ID
 	res.effect = settings.EffectNone
 	// A sign-in mode change holds the instance's lock (as enable, disable,
@@ -940,6 +983,18 @@ func (h *Hub) saveSettings(t *templates.Template, u SettingsUpdate, parsed *pars
 	if err := h.pendingLocked(id); err != nil {
 		h.mu.Unlock()
 		return res, false, err
+	}
+	if planGuard != nil {
+		if err := planGuard(); err != nil {
+			h.mu.Unlock()
+			return res, false, err
+		}
+	}
+	// AI support switched on since SaveSettings switched it off (G43):
+	// never commit a policy reaching LoA 3 with a companion on.
+	if on := h.aiOffForSaveLocked(t, u); len(on) > 0 {
+		h.mu.Unlock()
+		return res, false, statusErr(409, "%s: AI support for %s was switched on meanwhile and the policy %s: save again", id, strings.Join(on, ", "), mtlsRefusal)
 	}
 	if err := folderSaveCheck(t, h.st.Settings[id], h.st.Folders, u); err != nil {
 		h.mu.Unlock()
@@ -997,6 +1052,7 @@ func (h *Hub) saveSettings(t *templates.Template, u SettingsUpdate, parsed *pars
 		h.mu.Unlock()
 		return res, false, err
 	}
+	accBefore := h.accessAuditLocked(id)
 	publicChanged, err := h.applyPublicUpdateLocked(t, u)
 	if err != nil {
 		restoreSecrets()
@@ -1017,6 +1073,7 @@ func (h *Hub) saveSettings(t *templates.Template, u SettingsUpdate, parsed *pars
 	if policyChanged {
 		delete(h.st.LegacyPassword, id)
 	}
+	accChanges := accessChanges(accBefore, h.accessAuditLocked(id))
 	if signInChanged {
 		if h.accessLocked(t).SignIn == SignInNative {
 			log.Printf("settings: WARNING: %s now uses the app's own login only — its routers have no Portcullis sign-in (TLS tier public@file)", id)
@@ -1045,6 +1102,9 @@ func (h *Hub) saveSettings(t *templates.Template, u SettingsUpdate, parsed *pars
 			res.keys = append(res.keys, c.key)
 		}
 	}
+	// The policy and public-exception changes are audited too (G37), but
+	// aren't settings keys (Changed, warnings).
+	res.changes = append(res.changes, accChanges...)
 	// A disabled instance restarts nothing: its effect is the changed
 	// options' own (applies).
 	if enabled {
@@ -1067,6 +1127,9 @@ func (h *Hub) saveSettings(t *templates.Template, u SettingsUpdate, parsed *pars
 	if policyChanged && h.idp != nil {
 		acr := policy.ACR(effective)
 		for _, c := range t.Manifest.Clients {
+			if c.AIClient {
+				continue // EnsureAIClient's: its ACR is always hwk (G10)
+			}
 			if err := h.idp.UpdateClientACR(context.Background(), h.clientSpec(t, c, acr)); err != nil {
 				log.Printf("auth-policy: keycloak client %s update failed: %v", c.ClientID, err)
 			}
@@ -1278,7 +1341,7 @@ func settingsEmpty(v any) bool {
 // instance, detail "delivery") carrying that error; a save refused or
 // failed before its commit is one entry per requested key. Called with
 // no lock held (auditOp takes mu).
-func (h *Hub) auditSettings(id, actor string, u SettingsUpdate, changes []settingChange, err error) {
+func (h *Hub) auditSettings(id string, actor directory.Actor, u SettingsUpdate, changes []settingChange, err error) {
 	if len(changes) > 0 {
 		for _, c := range changes {
 			d := "scope=" + c.scope
@@ -1299,6 +1362,21 @@ func (h *Hub) auditSettings(id, actor string, u SettingsUpdate, changes []settin
 	}
 	if err != nil {
 		var keys []string
+		if u.Policy != nil || u.Inherit {
+			keys = append(keys, "auth_policy")
+		}
+		if u.PublicAccess != nil || u.PublicAccessDefault {
+			keys = append(keys, "public_access")
+		}
+		if u.PublicMode != nil {
+			keys = append(keys, "public_mode")
+		}
+		if u.PublicTokens != nil {
+			keys = append(keys, "public_tokens")
+			// The refusal may quote a submitted token in any form: the
+			// audit gets a fixed text, never err's.
+			err = PublicTokenAuditErr(err)
+		}
 		for k := range u.Ports {
 			keys = append(keys, k)
 		}
@@ -1319,6 +1397,89 @@ func (h *Hub) auditSettings(id, actor string, u SettingsUpdate, changes []settin
 			h.auditOp(actor, "settings.change", id+"/"+clip(k, 64), "", err)
 		}
 	}
+}
+
+// accessAudit is an instance's policy and public exceptions as the audit
+// shows them (G37): never a token, only how many.
+type accessAudit struct {
+	policy, access, mode string
+	tokens               []string
+}
+
+// accessAuditLocked reads id's stored policy and public choices. Caller
+// holds mu.
+func (h *Hub) accessAuditLocked(id string) accessAudit {
+	a := accessAudit{policy: "inherited", access: "default", mode: "default"}
+	if p, ok := h.st.AuthPolicies[id]; ok {
+		a.policy = showPolicy(p)
+	}
+	if on, ok := h.st.PublicAccess[id]; ok {
+		a.access = "off"
+		if on {
+			a.access = "on"
+		}
+	}
+	if m, ok := h.st.PublicMode[id]; ok && m != "" {
+		a.mode = m
+	}
+	a.tokens = slices.Sorted(slices.Values(h.st.PublicTokens[id]))
+	return a
+}
+
+// ShowPolicy is an auth policy as the audit shows it ("f1,f2 (op)").
+func ShowPolicy(p policy.AuthPolicy) string { return showPolicy(p) }
+
+func showPolicy(p policy.AuthPolicy) string {
+	d := strings.Join(p.Factors, ",")
+	if d == "" {
+		d = "none"
+	}
+	if p.Op != "" {
+		d += " (" + p.Op + ")"
+	}
+	return clip(d, 200)
+}
+
+// accessChanges: the settings.change entries (scope policy / public)
+// between two accessAudits.
+func accessChanges(a, b accessAudit) []settingChange {
+	var out []settingChange
+	if a.policy != b.policy {
+		out = append(out, settingChange{key: "auth_policy", scope: "policy", before: a.policy, after: b.policy})
+	}
+	if a.access != b.access {
+		out = append(out, settingChange{key: "public_access", scope: "public", before: a.access, after: b.access})
+	}
+	if a.mode != b.mode {
+		out = append(out, settingChange{key: "public_mode", scope: "public", before: a.mode, after: b.mode})
+	}
+	if !slices.Equal(a.tokens, b.tokens) {
+		after := tokenCount(len(b.tokens))
+		if len(a.tokens) == len(b.tokens) {
+			after += " (changed)"
+		}
+		out = append(out, settingChange{key: "public_tokens", scope: "public", before: tokenCount(len(a.tokens)), after: after})
+	}
+	return out
+}
+
+func tokenCount(n int) string {
+	if n == 1 {
+		return "1 token"
+	}
+	return fmt.Sprintf("%d tokens", n)
+}
+
+// PublicTokenAuditErr is the error the audit records for a save refused
+// (or failed) while it carried public tokens: "public token refused" and
+// the refusal class (its status), never err's text, which may quote a
+// token in any form. The API answer keeps err (the admin sent the token).
+func PublicTokenAuditErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	st := errStatus(err)
+	return &StatusError{Status: st, Err: fmt.Errorf("public token refused (%d)", st)}
 }
 
 // signInCallbackChange: the callback URIs a sign-in mode change of
@@ -1374,6 +1535,13 @@ func (h *Hub) SetDefaultPolicy(p policy.AuthPolicy) (bool, error) {
 	}
 	norm := policy.Normalize(p)
 	h.mu.Lock()
+	// Inheriting instances must have AI support off first (G43:
+	// SetDefaultPolicyAs switches it off; a racing switch-on is refused).
+	if on := h.defaultPolicyAIOffLocked(norm); len(on) > 0 {
+		h.mu.Unlock()
+		ids := slices.Sorted(maps.Keys(on))
+		return false, statusErr(409, "AI support is on for %s, whose policy the new default %s: switch it off first (or save the default again)", strings.Join(ids, ", "), mtlsRefusal)
+	}
 	changed := !policy.Same(h.st.Default(), norm)
 	h.st.SetDefault(norm)
 	delete(h.st.LegacyPassword, "")
@@ -1424,6 +1592,9 @@ func (h *Hub) applyDefaultPolicy() {
 	for _, j := range jobs {
 		if h.idp != nil {
 			for _, c := range j.t.Manifest.Clients {
+				if c.AIClient {
+					continue // EnsureAIClient's: its ACR is always hwk (G10)
+				}
 				if err := h.idp.UpdateClientACR(context.Background(), h.clientSpec(&j.t, c, j.acr)); err != nil {
 					log.Printf("default-policy: keycloak client %s update failed: %v", c.ClientID, err)
 				}
@@ -1445,7 +1616,9 @@ func (h *Hub) applyDefaultPolicy() {
 // option's env name, or of a variable the template doesn't declare
 // (declaredEnvNames, Hub-set names included) holding a stored secret's
 // value — a line a template update left behind (an env variable renamed,
-// an option no longer secret), or an admin's copy of a secret.
+// an option no longer secret), or an admin's copy of a secret —, every
+// PORTCULLIS_AI_PROVIDER_* value and any variable holding a model
+// provider secret (G30(a)).
 func (h *Hub) secretMask(t *templates.Template) (func(name, value string) bool, error) {
 	secrets, err := h.secretValues(t.ID)
 	if err != nil {
@@ -1457,10 +1630,23 @@ func (h *Hub) secretMask(t *templates.Template) (func(name, value string) bool, 
 			stored[v] = true
 		}
 	}
+	// G30(a): every provider variable (PORTCULLIS_AI_PROVIDER_*) is masked,
+	// and so is any variable — declared or reserved too — holding a
+	// provider secret's value (a separate set: the instance's own stored
+	// values keep their narrower rule).
+	provider, err := h.providerSecretValues()
+	if err != nil {
+		return nil, err
+	}
+	providerStored := map[string]bool{}
+	for _, v := range provider {
+		providerStored[v] = true
+	}
 	names := secretOptionEnvNames(t)
 	declared := declaredEnvNames(t)
 	return func(n, v string) bool {
-		return v != "" && (names[n] || stored[v] && !declared[n] && !templates.ReservedVar(n))
+		return v != "" && (names[n] || strings.HasPrefix(n, ProviderVarPrefix) || providerStored[v] ||
+			stored[v] && !declared[n] && !templates.ReservedVar(n))
 	}, nil
 }
 
@@ -1482,36 +1668,55 @@ func (h *Hub) Env(id string) (map[string]string, []string, error) {
 	return vars, templates.Services(t.ReadCompose()), nil
 }
 
+// EnvSecretMask is get_env's mask of a secret value on the Portcullis
+// MCP's tool path (settings.SecretShown, "[set]", is Expert Env's).
+const EnvSecretMask = "[secret]"
+
+// isEnvMask: v is one of the masks Env or get_env show instead of a
+// value, never a value to write.
+func isEnvMask(v string) bool { return v == settings.SecretShown || v == EnvSecretMask }
+
 // SaveEnv sets variables in an app's .env. The Expert UI posts every
 // variable back: a variable an option owns (its env delivery) or the Hub
 // sets (instance variables, PORTCULLIS_*) is skipped when its value is
 // unchanged (a set secret's [set] counts as unchanged) and refused (400)
 // when it was changed — options are set under Settings, which writes
-// them.
+// them. A mask ([set] or [secret]) posted for a variable that always
+// holds a secret (SecretEnvNames: a Keycloak client's secret_env, a
+// generated entry, a secret option) counts as unchanged too: it is never
+// written literally over the secret.
 func (h *Hub) SaveEnv(id string, vars map[string]string) error {
+	_, err := h.SaveEnvChanged(id, vars)
+	return err
+}
+
+// SaveEnvChanged is SaveEnv, also returning the names of the variables it
+// wrote (sorted; never their values): the API's audit detail.
+func (h *Hub) SaveEnvChanged(id string, vars map[string]string) ([]string, error) {
 	t := h.Template(id)
 	if t == nil {
-		return ErrNotFound
+		return nil, ErrNotFound
 	}
 	owners := optionEnvOwners(t)
+	secretNames := SecretEnvNames(t)
 	masked, err := h.secretMask(t)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	// The read-modify-write under mu, as every other .env writer's.
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if err := h.pendingLocked(id); err != nil {
-		return err
+		return nil, err
 	}
 	cur := readEnvFile(h.envPath(id))
 	write := map[string]string{}
 	for _, k := range slices.Sorted(maps.Keys(vars)) {
 		v := vars[k]
 		if !templates.EnvKeyRe.MatchString(k) || templates.HasControlChars(v) {
-			return statusErr(400, "invalid variable %q (keys: [A-Za-z_][A-Za-z0-9_]*, values: no newlines)", k)
+			return nil, statusErr(400, "invalid variable %q (keys: [A-Za-z_][A-Za-z0-9_]*, values: no newlines)", k)
 		}
-		if v == cur[k] || (v == settings.SecretShown && masked(k, cur[k])) {
+		if v == cur[k] || (v == settings.SecretShown && masked(k, cur[k])) || (secretNames[k] && isEnvMask(v)) {
 			continue // posted back unchanged (a masked value as Env showed it)
 		}
 		o, owned := owners[k]
@@ -1522,14 +1727,14 @@ func (h *Hub) SaveEnv(id string, vars map[string]string) error {
 		}
 		// Routing, hostnames and names come from the Hub, never the env.
 		if hubSet {
-			return statusErr(400, "%s is set by the Hub", k)
+			return nil, statusErr(400, "%s is set by the Hub", k)
 		}
-		return statusErr(400, "%s belongs to the setting %s: set it under Settings", k, o)
+		return nil, statusErr(400, "%s belongs to the setting %s: set it under Settings", k, o)
 	}
 	if err := setEnvVars(h.envPath(id), write, false); err != nil {
-		return statusErr(500, "failed to write env: %v", err)
+		return nil, statusErr(500, "failed to write env: %v", err)
 	}
-	return nil
+	return slices.Sorted(maps.Keys(write)), nil
 }
 
 // seedPlaceholders are the group_values placeholders in the order their

@@ -34,7 +34,7 @@ const proxyNetwork = "portcullis-proxy"
 // file: the Hub renders portcullis-auth-ext and the
 // portcullis-oauth2-<id>_<router> sign-in routers to forward-auth-ext on
 // extra-domain hosts itself.
-var reservedRefs = []string{"forward-auth-ext", "portcullis-auth-ext", "portcullis-oauth2-"}
+var reservedRefs = []string{"forward-auth-ext", "portcullis-auth-ext", "portcullis-oauth2-", MCPNamePrefix}
 
 // coreServices are the services of core's docker-compose.yml (all
 // profiles), coreVolumes its volume keys (Docker names
@@ -43,9 +43,9 @@ var reservedRefs = []string{"forward-auth-ext", "portcullis-auth-ext", "portcull
 var (
 	coreServices = set("socket-proxy-traefik", "socket-proxy-hub", "traefik", "postgres", "vault", "lldap", "keycloak",
 		"forward-auth", "forward-auth-ext", "group-gate", "hub", "enroll", "domains", "prometheus", "alertmanager", "blackbox",
-		"textfile-exporter", "grafana")
+		"textfile-exporter", "grafana", "mcp-gate")
 	coreVolumes = set("postgres_data", "vault_data", "lldap_data", "hub_data", "traefik_acme", "domains_data",
-		"prometheus_data", "alertmanager_data", "grafana_data", "hub_secrets")
+		"prometheus_data", "alertmanager_data", "grafana_data", "hub_secrets", "mcp_gate_data")
 	// coreContainerRe: compose's container names for core's services.
 	coreContainerRe = regexp.MustCompile(`^portcullis[-_](.+)[-_][0-9]+$`)
 )
@@ -247,6 +247,9 @@ func checkCoreRefs(compose []byte, hostVars map[string]string) error {
 		low, bare := FoldKey(s), FoldKey(withoutInterp(s))
 		for _, r := range reservedRefs {
 			if strings.Contains(low, r) || strings.Contains(bare, r) {
+				if r == MCPNamePrefix {
+					return fmt.Errorf("compose.yml references %q: names starting %s (routers, services, middlewares, aliases, container names, hostnames) are the Hub's AI companion routes and aliases (contract §3.2)", MCPNamePrefix, MCPNamePrefix)
+				}
 				return fmt.Errorf("compose.yml references %q: the extra-domain sign-in (forward-auth-ext, portcullis-auth-ext, portcullis-oauth2-*) is rendered by the Hub only", strings.TrimSuffix(r, "-"))
 			}
 		}
@@ -292,6 +295,18 @@ func checkCoreRefs(compose []byte, hostVars map[string]string) error {
 			}
 		}
 		shared[k] = true
+	}
+	// internalNets: project networks declared exactly {internal: true}:
+	// like default, only the template's own services can be on them, so
+	// -internal names may live there too.
+	internalNets := map[string]bool{}
+	for _, k := range keys {
+		n, _ := nets[k].(map[string]interface{})
+		_, hasName := n["name"]
+		_, hasExt := n["external"]
+		if in, ok := n["internal"].(bool); ok && in && !hasName && !hasExt && len(n) == 1 {
+			internalNets[k] = true
+		}
 	}
 
 	if err := checkCoreVolumes(doc["volumes"]); err != nil {
@@ -400,7 +415,7 @@ func checkCoreRefs(compose []byte, hostVars map[string]string) error {
 				return fmt.Errorf("service %s: %s: the DNS name %q is core's (reserved)", name, field, v)
 			}
 		}
-		if err := checkInternalNames(name, s); err != nil {
+		if err := checkInternalNames(name, s, internalNets); err != nil {
 			return err
 		}
 		switch sn := s["networks"].(type) {
@@ -495,10 +510,11 @@ func isInternalName(n string) bool {
 // checkInternalNames refuses a service that answers to a name ending in
 // -internal (service name, container_name, hostname — on every network it
 // joins — or a network alias) on any network but the project's own
-// default (top-level networks.default can't be named or external). A
+// default (top-level networks.default can't be named or external) and the
+// project networks declared internal: true (internal). A
 // service with network_mode (none, host, service:) has no DNS name of its
 // own. Shapes and literals were checked by the caller.
-func checkInternalNames(svc string, s map[string]interface{}) error {
+func checkInternalNames(svc string, s map[string]interface{}, internal map[string]bool) error {
 	if mode, _ := s["network_mode"].(string); mode != "" {
 		return nil
 	}
@@ -535,12 +551,12 @@ func checkInternalNames(svc string, s map[string]interface{}) error {
 	}
 	sort.Strings(keys)
 	for _, net := range keys {
-		if net == "default" {
+		if net == "default" || internal[net] {
 			continue
 		}
 		for _, n := range append(append([]string(nil), common...), nets[net]...) {
 			if isInternalName(n) {
-				return fmt.Errorf("service %s: the name %q ends in %s but is on network %s (gate upstream names are declared on the project's default network only)", svc, n, internalSuffix, net)
+				return fmt.Errorf("service %s: the name %q ends in %s but is on network %s (gate upstream names are declared on the project's default network or an internal: true project network only)", svc, n, internalSuffix, net)
 			}
 		}
 	}
@@ -798,10 +814,10 @@ var (
 	// both, or merges them).
 	coreTraefikNames = map[string]map[string]bool{
 		"routers": set("dashboard", "enroll", "enroll-invite", "enroll-self", "grafana-metrics", "hub", "keycloak", "keycloak-admin",
-			"keycloak-resources", "lldap", "oauth2-callback", "people", "portal"),
+			"keycloak-resources", "lldap", "oauth2-callback", "people", "portal", "mcp", "hub-mcp", "people-mcp"),
 		"middlewares": set("directory-redirect", "hub-proxy-secret", "portal-path", "portcullis-auth", "portcullis-auth-console",
 			"portcullis-auth-ext", "portcullis-groups", "portcullis-public-guard", "portcullis-self"),
-		"services": set("enroll", "forward-auth", "forward-auth-ext", "grafana-metrics", "group-gate", "hub", "hub-people", "keycloak", "lldap"),
+		"services": set("enroll", "forward-auth", "forward-auth-ext", "grafana-metrics", "group-gate", "hub", "hub-people", "keycloak", "lldap", "mcp-gate"),
 	}
 	// routerAttrRe: no tls.certresolver / tls.domains (certificates are
 	// core's: a template asking ACME for names it doesn't route).

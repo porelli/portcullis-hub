@@ -22,7 +22,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"golang.org/x/sync/singleflight"
+
 	"github.com/portcullis/hub/internal/compose"
+	"github.com/portcullis/hub/internal/confirm"
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/keycloak"
@@ -76,6 +79,19 @@ type Config struct {
 	// "" = DefaultSecretsVolume), mounted into apps by subpath.
 	SecretsDir    string
 	SecretsVolume string
+	// MCPGateRecipientFile is HUB_MCP_GATE_RECIPIENT_FILE, the gate's age
+	// recipient (contract §15.4; "" or unreadable = no gate: Settings → AI
+	// shows gate_present false).
+	MCPGateRecipientFile string
+	// MCPListener: the MCP listener (HUB_MCP_ADDR, contract §15.7) runs —
+	// main read a usable HUB_MCP_GATE_SECRET_FILE. false = the gate can't
+	// reach the Hub (no mint, no Portcullis MCP), so AI support is off:
+	// mcp-gate.json says enabled: false.
+	MCPListener bool
+	// MCPGateDataDir is HUB_MCP_GATE_DATA_DIR (core mounts mcp_gate_data
+	// read-only at /mcp-gate-data): the gate's access.jsonl (§15.8) is
+	// read there ("" = no access log: MyAI / AccessLog answer 503).
+	MCPGateDataDir string
 }
 
 // Engine is the part of the Docker Engine API the Hub uses.
@@ -103,6 +119,8 @@ type Engine interface {
 	// closed, no TTY; ExecRunning: a timed-out exec still runs (Docker
 	// can't kill it: the next hook run waits for it).
 	ExecStdin(ctx context.Context, id string, in docker.ExecInput) (*docker.ExecResult, error)
+	// ExecStdinSplit runs an AI hook (§15.5, G6): stdout and stderr apart.
+	ExecStdinSplit(ctx context.Context, id string, in docker.ExecInput) (*docker.ExecSplitResult, error)
 	ExecRunning(ctx context.Context, execID string) (bool, error)
 	// RunHelper runs the shared-folder fixer, a STARTED helper (contract
 	// §6, fixer.go); InspectContainer finds the Hub's own image;
@@ -153,12 +171,12 @@ type IdP interface {
 // need the groups (delete, restore into a new id), so a bad actor fails
 // before anything changes.
 type Groups interface {
-	ResolveActor(ctx context.Context, actor string) error
-	CreateInstanceGroup(ctx context.Context, actor, name string) (created bool, warnings []string, err error)
+	ResolveActor(ctx context.Context, actor directory.Actor) error
+	CreateInstanceGroup(ctx context.Context, actor directory.Actor, name string) (created bool, warnings []string, err error)
 	// MissingInstanceGroups returns the names that are no LLDAP group
 	// (read-only; an error: unknown, nothing is created).
 	MissingInstanceGroups(ctx context.Context, names []string) ([]string, error)
-	DeleteInstanceGroup(ctx context.Context, actor, name string) ([]string, error)
+	DeleteInstanceGroup(ctx context.Context, actor directory.Actor, name string) ([]string, error)
 }
 
 // People is the directory as per-person and per-group settings read it
@@ -260,8 +278,9 @@ type Hub struct {
 	// people reads LLDAP membership for per-person settings (SetPeople;
 	// nil = not available). Guarded by mu.
 	people People
-	// freshAuth verifies fresh-auth proofs (freshauth.go; nil: refused).
-	freshAuth FreshAuth
+	// freshAuth verifies fresh-auth proofs, per listener (freshauth.go;
+	// none: refused).
+	freshAuth map[string]FreshAuth
 	// freshAuthReady: the last ensure of the fresh-auth Keycloak client
 	// succeeded (runAttrSync); false at start and after any failure —
 	// e.g. an untagged client of that id (*keycloak.ConflictError) — so
@@ -438,6 +457,79 @@ type Hub struct {
 	// between the judgement and the revocations (tests: a change racing
 	// the check).
 	testHookHolderJudged func()
+	// AI gate files (ai_gatefile.go, ai_credstore.go): aiHealth = the AI
+	// client ids the last Keycloak ensure left in place (under mu; nil =
+	// unknown: none listed); gateStale = the last gate write failed (the
+	// directory sync loop retries); callerDigests = sha256 of each caller
+	// secret last encrypted (under policyWriteMu); aiCreds the store.
+	aiHealth      map[string]bool
+	gateStale     atomic.Bool
+	callerDigests map[string]string
+	credsOnce     sync.Once
+	aiCreds       *aiCredStore
+	// confirmStore: the confirmations (confirm.go; in memory, created on
+	// first use under confirmOnce).
+	confirmOnce  sync.Once
+	confirmStore *confirm.Store
+	// mints: single flight per (resource, user) of MintCredential
+	// (ai_credentials.go, G35).
+	mints singleflight.Group
+	// Per-instance AI support (ai_instance.go): aiKC the mcp:* scope calls
+	// (under mu); aiLocks the per-instance AI locks (waiting); aiErrs each
+	// companion's last error, redacted (under aiErrMu, memory only).
+	aiKC    AIKeycloak
+	aiLocks sync.Map
+	// aiHeld: instances whose AI lock a lifecycle operation holds
+	// (lifecycleAILock).
+	aiHeld  sync.Map
+	aiErrMu sync.Mutex
+	aiErrs  map[string]string
+	// aiReapply: per instance, the companions whose last change failed
+	// after its state save (under aiErrMu); aiApplying: instances an
+	// UpdateInstanceAI is applying (startUp leaves the owed hooks to it).
+	aiReapply  map[string]map[string]bool
+	aiApplying sync.Map
+	// Revocation reconcile (ai_revoke.go, Task 13b): aiReconKick kicks
+	// runAIReconcile, aiReconMu serialises passes; aiRevokeErrs the last
+	// audited failure per revocation and aiPrunedErrs per Pruned companion
+	// (both under aiErrMu, memory only).
+	aiReconKick  chan struct{}
+	aiReconMu    sync.Mutex
+	aiRevokeErrs map[string]string
+	aiPrunedErrs map[string]string
+	// app_oauth reconcile memory (T27; the records themselves are all in
+	// oauth-seen.json): aiOwedRevokeAll — per companion, the unverifiable
+	// leavers whose revoke_all failed at the last pass (wording only: the
+	// cause stays on disk); aiPendingPasses — per companion and person,
+	// passes their Keycloak id lookup failed; aiSeenUnwritten — holders a
+	// failed oauth-seen.json write left unrecorded (recorded unverifiable
+	// by the next write) and that write's error.
+	aiOwedRevokeAll  map[string][]string
+	aiPendingPasses  map[string]map[string]int
+	aiSeenUnwritten  map[string][]string
+	aiSeenWriteError string
+	// Keycloak AI clients (ai_clients.go): aiKCMu serialises every pass
+	// over the AI clients and mcp:* scopes (the sync loop, a Settings → AI
+	// save, applyAIScopes), each reading state after taking it — a leaf
+	// lock, only mu (read) inside; aiMasterGen counts master switch
+	// changes (under mu: UpdateInstanceAI's commit refuses a plan made
+	// before one); aiClientErrs the last logged error per client (under
+	// aiKCMu: logged once per distinct text).
+	aiKCMu       sync.Mutex
+	aiMasterGen  uint64
+	aiClientErrs map[string]string
+	// aiOwedDrops: mcp:* scopes whose delete failed (under aiKCMu;
+	// memory): every client pass retries them while still unwanted.
+	aiOwedDrops map[string]bool
+	// testHookDeleteBackedUp, if set, runs in a delete right after its
+	// backup, before the deleting state is committed (Task 23 fix round 1).
+	testHookDeleteBackedUp func(id string)
+	// testHookAIBeforeSave, if set, runs in UpdateInstanceAI right before
+	// its state commit (tests: a racing policy save).
+	testHookAIBeforeSave func()
+	// testHookAIAfterSave, if set, runs right after that commit (tests:
+	// the flags a crash there would leave).
+	testHookAIAfterSave func()
 	// testHookInit, if set, is called at Init's stages (tests: order).
 	testHookInit func(stage string)
 	// testHookApplyRestore, if set, runs at applyRestore's stages
@@ -495,6 +587,7 @@ func New(cfg Config, runner compose.Runner, engine Engine, idp IdP) (*Hub, error
 		lifecycleDeliverWait: lifecycleDeliverWaitDefault,
 		kick:                 make(chan struct{}, 1),
 		dirKick:              make(chan struct{}, 1),
+		aiReconKick:          make(chan struct{}, 1),
 		credKick:             make(chan struct{}, 1),
 		driftKey:             map[string]string{},
 		afterFunc:            realAfterFunc,
@@ -561,6 +654,9 @@ func (h *Hub) Init() {
 	// After the final Discover: stored settings of options the templates
 	// removed, retyped or rescoped are dropped (audited; P9).
 	h.pruneSettings()
+	// Companions the templates dropped or changed are switched off and
+	// their credentials revoked (G33); the restart is owed (requeueOwed).
+	h.pruneAI(false)
 	// Interrupted same-instance restores are rolled back (background).
 	h.RecoverRestores()
 	// Interrupted shared-folder applies and undos: their stopped apps are
@@ -570,13 +666,40 @@ func (h *Hub) Init() {
 	// The header deliveries group-gate serves now: what the first policy
 	// write publishes again (P13).
 	h.seedHostHeaders()
+	// G74: only the files other containers read may be group-readable.
+	h.checkDataDirModes()
 	if err := h.WritePolicy(); err != nil {
 		log.Printf("auth-policy: initial group-gate policy write failed: %v", err)
 	}
 	// Reloads and restarts committed changes still owe (the previous run
 	// stopped before applying them): queued again.
 	h.initStage("requeue")
+	// AI hooks a running instance still owes (a crash between a switch's
+	// or the master toggle's commit and the up that runs them): the
+	// containers kept running with the old env, so a restart is owed;
+	// its start runs the owed revoke_all / on_change (final review I2).
+	h.oweAIPendingRestarts()
 	h.requeueOwed()
+}
+
+// oweAIPendingRestarts owes a restart to every enabled instance with a
+// companion carrying RevokePending or OnChangePending.
+func (h *Hub) oweAIPendingRestarts() {
+	var ids []string
+	h.mu.RLock()
+	for _, id := range h.st.Enabled {
+		for _, c := range h.st.AIInstances[id].Companions {
+			if c.RevokePending || c.OnChangePending {
+				ids = append(ids, id)
+				break
+			}
+		}
+	}
+	h.mu.RUnlock()
+	for _, id := range ids {
+		log.Printf("ai: %s: AI hooks are still owed: restart queued", id)
+		h.setOwed(id, settings.EffectRestart)
+	}
 }
 
 // initStage calls testHookInit (tests).
@@ -883,8 +1006,10 @@ func (h *Hub) IsEnabled(id string) bool {
 
 // ── group-gate policy file ───────────────────────────────
 
-// WritePolicy regenerates group-gate-policy.json from current state. Takes
-// mu itself — callers must NOT hold it.
+// WritePolicy regenerates group-gate-policy.json from current state, and
+// in the same pass mcp-gate.json and the caller secrets of
+// mcp-credentials.json (ai_gatefile.go). Takes mu itself — callers must
+// NOT hold it.
 func (h *Hub) WritePolicy() error {
 	_, err := h.writePolicy()
 	return err
@@ -898,7 +1023,10 @@ func (h *Hub) writePolicy() (attrsWritten bool, retErr error) {
 	h.policyWriteMu.Lock()
 	defer h.policyWriteMu.Unlock()
 	// Directory state first: it is network I/O, never under h.mu.
-	expiring, attrs, keepAttrs := h.directoryState()
+	// One directory read, never under mu (G47): the policy file and the
+	// gate file are built from the same snapshot.
+	dr := h.directoryState()
+	expiring, attrs, keepAttrs := dr.expiring, dr.attrs, dr.keepAttrs
 	h.driftMu.Lock()
 	runtime := make(map[string][]string, len(h.runtimeHosts))
 	for id, hosts := range h.runtimeHosts {
@@ -1040,6 +1168,13 @@ func (h *Hub) writePolicy() (attrsWritten bool, retErr error) {
 	// The landing portal's app list (contract §10) changes exactly when
 	// the policy does: enable, disable, template sync.
 	errs = append(errs, writePortal(h.portalPath(), portal))
+	// The gate files follow in the same pass (contract §15.4).
+	errs = append(errs, h.writeGateFiles(dr.m, dr.mErr))
+	// Leavers' credentials are marked revoking in this same pass, from
+	// this snapshot (§15.5; no hook here: the AI reconcile loop revokes).
+	if dr.m != nil {
+		h.markLeavers(dr.m)
+	}
 	return attrsWritten, errors.Join(errs...)
 }
 

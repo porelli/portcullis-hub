@@ -68,9 +68,12 @@ func fixerImageFromEnv(getenv func(string) string) (string, error) {
 // authorize endpoint are public (HUB_KEYCLOAK_PUBLIC_URL, default
 // https://auth.<domain>: Keycloak runs with that --hostname, so it is the
 // tokens' iss), the code exchange and keys go to Keycloak internally
-// (KEYCLOAK_URL); the popup lands on https://people.<domain>/.
+// (KEYCLOAK_URL). The popup lands on the listener that started it:
+// https://people.<domain>/ (My apps, people confirmations) or
+// https://hub.<domain>/ (admin confirmations, G11): one verifier each.
 type freshAuthSetup struct {
 	Issuer, TokenURL, JWKSURL, AuthorizeURL, RedirectURI, WebOrigin string
+	HubRedirectURI, HubWebOrigin                                    string
 }
 
 func freshAuthFromEnv(getenv func(string) string, domain, keycloakURL string) (freshAuthSetup, error) {
@@ -85,12 +88,14 @@ func freshAuthFromEnv(getenv func(string) string, domain, keycloakURL string) (f
 	public := "https://" + u.Host + "/realms/" + keycloak.Realm
 	internal := strings.TrimRight(keycloakURL, "/") + "/realms/" + keycloak.Realm + "/protocol/openid-connect"
 	return freshAuthSetup{
-		Issuer:       public,
-		TokenURL:     internal + "/token",
-		JWKSURL:      internal + "/certs",
-		AuthorizeURL: public + "/protocol/openid-connect/auth",
-		RedirectURI:  "https://people." + domain + "/",
-		WebOrigin:    "https://people." + domain,
+		Issuer:         public,
+		TokenURL:       internal + "/token",
+		JWKSURL:        internal + "/certs",
+		AuthorizeURL:   public + "/protocol/openid-connect/auth",
+		RedirectURI:    "https://people." + domain + "/",
+		WebOrigin:      "https://people." + domain,
+		HubRedirectURI: "https://hub." + domain + "/",
+		HubWebOrigin:   "https://hub." + domain,
 	}, nil
 }
 
@@ -107,6 +112,14 @@ func main() {
 
 	secret := os.Getenv("HUB_PROXY_SECRET")
 	if err := httpapi.CheckSecret(secret); err != nil {
+		log.Fatalf("refusing to start: %v", err)
+	}
+
+	// The MCP listener's secret (contract §15.7): read once, here. A
+	// missing file = no listener and AI support off; a short or
+	// unreadable one refuses the start. Never logged.
+	mcp, err := mcpListenerFromEnv(os.Getenv)
+	if err != nil {
 		log.Fatalf("refusing to start: %v", err)
 	}
 
@@ -133,6 +146,11 @@ func main() {
 		// Hub's uid, 0700); unusable = those apps refuse to start.
 		SecretsDir:    env("HUB_SECRETS_DIR", "/secrets"),
 		SecretsVolume: env("HUB_SECRETS_VOLUME", hub.DefaultSecretsVolume),
+		// The gate's age recipient (contract §15.4): readable = the core
+		// has an mcp-gate (Settings → AI gate_present).
+		MCPGateRecipientFile: env("HUB_MCP_GATE_RECIPIENT_FILE", "/run/portcullis/mcp-gate/age.pub"),
+		MCPListener:          mcp.on,
+		MCPGateDataDir:       env("HUB_MCP_GATE_DATA_DIR", "/mcp-gate-data"),
 	}
 	fixerImage, err := fixerImageFromEnv(os.Getenv)
 	if err != nil {
@@ -242,16 +260,23 @@ func main() {
 		}
 		return kc.EnsureAttributeMappers(ctx, fields)
 	})
-	// Fresh auth (contract §8): the verifier for file-share password
-	// creates, and its Keycloak client, ensured in the directory sync loop.
-	h.SetFreshAuth(freshauth.New(freshauth.Config{
-		Issuer: fa.Issuer, TokenURL: fa.TokenURL, JWKSURL: fa.JWKSURL,
-		AuthorizeURL: fa.AuthorizeURL, RedirectURI: fa.RedirectURI,
-		// The token endpoint never redirects; a redirect is refused.
-		HTTP: &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
-	}))
+	// Fresh auth (contract §8): one verifier per listener (file-share
+	// passwords and people confirmations on people.<d>, admin
+	// confirmations on hub.<d>), and their one Keycloak client, ensured in
+	// the directory sync loop.
+	faHTTP := &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	for listener, redirect := range map[string]string{hub.ListenerPeople: fa.RedirectURI, hub.ListenerHub: fa.HubRedirectURI} {
+		h.SetFreshAuth(listener, freshauth.New(freshauth.Config{
+			Issuer: fa.Issuer, TokenURL: fa.TokenURL, JWKSURL: fa.JWKSURL,
+			AuthorizeURL: fa.AuthorizeURL, RedirectURI: redirect,
+			// The token endpoint never redirects; a redirect is refused.
+			HTTP: faHTTP,
+		}))
+	}
+	// Per-instance AI support (contract §8): the mcp:* scopes.
+	h.SetAIKeycloak(kc)
 	h.SetFreshAuthClient(func(ctx context.Context) error {
-		return kc.EnsureFreshAuthClient(ctx, fa.RedirectURI, fa.WebOrigin)
+		return kc.EnsureFreshAuthClient(ctx, []string{fa.RedirectURI, fa.HubRedirectURI}, []string{fa.WebOrigin, fa.HubWebOrigin})
 	})
 	h.Init()
 
@@ -261,7 +286,12 @@ func main() {
 		Audit:      dir.Audit,
 		PortalName: os.Getenv("PORTAL_DISPLAY_NAME"),
 		Secret:     secret,
+		MCPSecret:  mcp.secret,
 		Web:        web.FS,
+		Docs:       web.Docs,
+		// The Portcullis MCP redacts every result with these too (G40).
+		RedactFiles:    []string{invites.SecretFile, dom.SecretFile, filepath.Join(ll.CredentialsDir, "password")},
+		RedactLiterals: []string{os.Getenv("KEYCLOAK_ADMIN_PASSWORD")},
 	}
 	handler, err := srv.Handler()
 	if err != nil {
@@ -314,6 +344,19 @@ func main() {
 	addr := env("HUB_LISTEN_ADDR", ":8888")
 	peopleAddr := env("HUB_PEOPLE_ADDR", ":8889")
 	servers := []*http.Server{newHTTPServer(addr, handler), newHTTPServer(peopleAddr, peopleHandler)}
+	// The MCP listener (mcp-gate only, contract §15.7): only with its
+	// secret. It listens on every Hub network; the secret protects it
+	// and no Traefik router targets it (G36).
+	if mcp.on {
+		mcpHandler, err := srv.MCPHandler()
+		if err != nil {
+			log.Fatalf("mcp listener: %v", err)
+		}
+		servers = append(servers, newHTTPServer(mcp.addr, mcpHandler))
+		log.Printf("MCP listener on %s (mcp-gate only)", mcp.addr)
+	} else {
+		log.Printf("MCP listener not started: %s is missing — AI support is off", mcp.file)
+	}
 	go func() {
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -338,6 +381,29 @@ func main() {
 	if !h.WaitTimeout(shutdownWait) {
 		log.Printf("shutdown: background instance operations still running after %s — they are marked interrupted at the next start", shutdownWait)
 	}
+}
+
+// mcpListener is the MCP listener's configuration (contract §15.7).
+type mcpListener struct {
+	addr, file, secret string
+	on                 bool
+}
+
+// mcpListenerFromEnv reads HUB_MCP_ADDR (default :8890) and
+// HUB_MCP_GATE_SECRET_FILE (default /run/portcullis/mcp-gate/hub-secret,
+// core's mount): a missing file = off; a short or unreadable one is an
+// error (the Hub refuses to start).
+func mcpListenerFromEnv(getenv func(string) string) (mcpListener, error) {
+	l := mcpListener{addr: getenv("HUB_MCP_ADDR"), file: getenv("HUB_MCP_GATE_SECRET_FILE")}
+	if l.addr == "" {
+		l.addr = ":8890"
+	}
+	if l.file == "" {
+		l.file = "/run/portcullis/mcp-gate/hub-secret"
+	}
+	var err error
+	l.secret, l.on, err = httpapi.LoadMCPSecret(l.file)
+	return l, err
 }
 
 // userRevalidateInterval: how often Keycloak's users are listed (each

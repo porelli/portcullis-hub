@@ -43,6 +43,11 @@ var protectedClients = map[string]bool{
 	"broker": true, "realm-management": true, "security-admin-console": true,
 }
 
+// protectedClient: protectedClients, and every id with the Hub's AI
+// prefix AIClientPrefix (any case; G8): EnsureAIClient alone manages
+// those, so RegisterClient never adopts one and no other sync touches it.
+func protectedClient(id string) bool { return protectedClients[id] || hasAIPrefix(id) }
+
 // DefaultScopes are attached to every client the Hub manages: "acr" puts
 // acr/amr in tokens (step-up), "groups" (created by `portcullis init`, claim
 // "groups", group names without path) lets apps map users_<app>/admin_<app>
@@ -315,7 +320,8 @@ func (c *Client) UpdateClientACR(ctx context.Context, s ClientSpec) error {
 	if err != nil {
 		return err
 	}
-	if !mayReconcile(existing, s.TemplateID, s.AllowedHosts) {
+	// An ai_client is EnsureAIClient's (its ACR is hwk, its scopes exact).
+	if !mayReconcile(existing, s.TemplateID, s.AllowedHosts) || existing.Attributes[AIClientAttr] == "true" {
 		return &ConflictError{ClientID: s.ClientID, TemplateID: s.TemplateID, Owner: existing.Attributes[OwnerAttr]}
 	}
 	withACR(existing, s.ACR)
@@ -346,7 +352,7 @@ func MayReconcile(existing map[string]interface{}, id string, allowedHosts []str
 }
 
 func mayReconcile(existing *gocloak.Client, id string, allowedHosts []string) bool {
-	if protectedClients[str(existing.ClientID)] {
+	if protectedClient(str(existing.ClientID)) {
 		return false
 	}
 	if owner := existing.Attributes[OwnerAttr]; owner != "" {
@@ -450,7 +456,7 @@ func withBackchannel(client *gocloak.Client, s ClientSpec) {
 // RegisterClient creates (or, if it already exists and the template owns
 // it, reconciles) an OIDC client.
 func (c *Client) RegisterClient(ctx context.Context, s ClientSpec) error {
-	if protectedClients[s.ClientID] {
+	if protectedClient(s.ClientID) {
 		return &ConflictError{ClientID: s.ClientID, TemplateID: s.TemplateID, Owner: "core"}
 	}
 	tok, err := c.token(ctx)
@@ -492,7 +498,7 @@ func (c *Client) RegisterClient(ctx context.Context, s ClientSpec) error {
 		if err != nil {
 			return err
 		}
-		if !mayReconcile(existing, s.TemplateID, s.AllowedHosts) {
+		if !mayReconcile(existing, s.TemplateID, s.AllowedHosts) || existing.Attributes[AIClientAttr] == "true" {
 			return &ConflictError{ClientID: s.ClientID, TemplateID: s.TemplateID, Owner: existing.Attributes[OwnerAttr]}
 		}
 		if existing.Attributes == nil {
@@ -528,7 +534,7 @@ func (c *Client) RegisterClient(ctx context.Context, s ClientSpec) error {
 // s.AllowedHosts, which should hold the old and the new hosts) is
 // touched; a missing client is ErrClientNotFound.
 func (c *Client) UpdateClientHosts(ctx context.Context, s ClientSpec, oldURIs []string, hostMap map[string]string) error {
-	if protectedClients[s.ClientID] {
+	if protectedClient(s.ClientID) {
 		return &ConflictError{ClientID: s.ClientID, TemplateID: s.TemplateID, Owner: "core"}
 	}
 	tok, err := c.token(ctx)
@@ -633,7 +639,7 @@ func moveURLHost(raw string, hostMap map[string]string) string {
 // another owner is a *ConflictError and is left alone; core's clients are
 // never deleted.
 func (c *Client) DeleteClient(ctx context.Context, clientID, owner string) error {
-	if protectedClients[clientID] || owner == "" {
+	if protectedClient(clientID) || owner == "" {
 		return &ConflictError{ClientID: clientID, TemplateID: owner, Owner: "core"}
 	}
 	tok, err := c.token(ctx)
@@ -945,6 +951,28 @@ func (c *Client) ImportUser(ctx context.Context, username string) (string, error
 		return "", err
 	}
 	return str(u.ID), nil
+}
+
+// LDAPIDAttribute is the attribute holding an LDAP-imported user's link:
+// LLDAP's account uuid (core's federation links by entryUUID).
+const LDAPIDAttribute = "LDAP_ID"
+
+// ImportUserLink is ImportUser plus the user's LDAP link (LDAPIDAttribute,
+// LLDAP's uuid of the account Keycloak's copy belongs to; "" when it has
+// none or more than one value).
+func (c *Client) ImportUserLink(ctx context.Context, username string) (id, ldapID string, err error) {
+	tok, err := c.token(ctx)
+	if err != nil {
+		return "", "", err
+	}
+	u, err := c.importUser(ctx, tok, username)
+	if err != nil {
+		return "", "", err
+	}
+	if v := u.Attributes[LDAPIDAttribute]; len(v) == 1 {
+		ldapID = v[0]
+	}
+	return str(u.ID), ldapID, nil
 }
 
 // SetUserRequiredActions imports username if needed and replaces its

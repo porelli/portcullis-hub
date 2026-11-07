@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/portcullis/hub/internal/credentials"
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/templates"
@@ -85,11 +86,11 @@ func TestLifecycleDownWaitsOnce(t *testing.T) {
 				defer close(done)
 				switch op {
 				case "backup":
-					c.f.h.BackupInstance(smbID, "root")
+					c.f.h.BackupInstance(smbID, directory.Human("root"))
 				case "disable":
 					c.f.h.Disable(smbID)
 				case "delete":
-					c.f.h.DeleteInstance(smbID, smbID, "root")
+					c.f.h.DeleteInstance(smbID, smbID, directory.Human("root"))
 				}
 			}()
 			if !within(10*time.Second, func() bool {

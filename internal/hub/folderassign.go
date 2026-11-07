@@ -809,7 +809,11 @@ func skippedWarnings(rep *folderfix.Report) []string {
 		}
 		w := p.Sprintf("%d %s: left alone", c.N, what)
 		if len(c.Sample) > 0 {
-			w += " (" + strings.Join(c.Sample[:min(len(c.Sample), 3)], ", ") + ")"
+			var quoted []string
+			for _, smp := range c.Sample[:min(len(c.Sample), 3)] {
+				quoted = append(quoted, strconv.Quote(smp))
+			}
+			w += " (" + strings.Join(quoted, ", ") + ")"
 		}
 		out = append(out, w)
 	}
@@ -976,9 +980,9 @@ func (h *Hub) assignText(c *assignCalc) {
 	f, pl := c.folder, c.plan
 	var lines []string
 	if f.Adopted {
-		lines = append(lines, fmt.Sprintf("gid %d is this folder's adopted group (shown as *%s*).", f.GID, f.Name))
+		lines = append(lines, fmt.Sprintf("gid %d is this folder's adopted group (shown as %q).", f.GID, f.Name))
 	} else {
-		lines = append(lines, fmt.Sprintf("gid %d is allocated for this folder (shown as *%s*).", f.GID, f.Name))
+		lines = append(lines, fmt.Sprintf("gid %d is allocated for this folder (shown as %q).", f.GID, f.Name))
 	}
 	if d := pl.Disk; d != nil && d.Counts != nil && c.scan != nil {
 		k := d.Counts
@@ -1026,18 +1030,20 @@ func (h *Hub) assignText(c *assignCalc) {
 			lines = append(lines, "Files get group read (every app only reads it).")
 		}
 		for _, m := range d.Mkdir {
-			lines = append(lines, fmt.Sprintf("%s is created.", m))
+			lines = append(lines, fmt.Sprintf("%q is created.", m))
 		}
 	}
 	for _, up := range pl.Uses {
 		name := c.names[up.Instance]
-		where := up.Label
+		// Values that came with the request (or were typed in) are
+		// quoted: a plan line reaches the confirmation page.
+		where := strconv.Quote(up.Label)
 		if up.Subpath != "" {
-			where += ", " + up.Subpath
+			where += ", subfolder " + strconv.Quote(up.Subpath)
 		}
 		switch {
 		case up.Change == "remove":
-			lines = append(lines, fmt.Sprintf("%s stops using it (%s goes back to its default).", name, up.Label))
+			lines = append(lines, fmt.Sprintf("%s stops using it (%q goes back to its default).", name, up.Label))
 		case up.ReadOnly:
 			lines = append(lines, fmt.Sprintf("%s mounts it read-only (%s).", name, where))
 		case pl.Disk != nil && pl.Disk.OwnerUID != nil && up.Declared && c.isOwner(up):
@@ -1137,6 +1143,34 @@ func (h *Hub) PreviewAssign(ctx context.Context, id string, req AssignRequest) (
 	return c.plan, nil
 }
 
+// WidensAccess: the plan grants more than the folder's uses have now —
+// it adds a use (an app gets the folder, or a write confirmation) or
+// changes anything on disk (group, setgid, ACLs: a disk plan). Only a
+// plan that removes uses and leaves the disk alone doesn't (Task 20: the
+// Portcullis MCP's folder_apply is class D otherwise). A nil plan
+// widens (fail closed).
+func (p *AssignPlan) WidensAccess() bool {
+	if p == nil || p.Disk != nil {
+		return true
+	}
+	for _, u := range p.Uses {
+		if u.Change != "remove" && u.Change != "keep" {
+			return true
+		}
+	}
+	return false
+}
+
+// aiUnconfirmed is the 409 of an operation the Portcullis MCP may run
+// only with a consumed confirmation (Task 20, defence in depth: the tool
+// asks for one first): an AI actor without one.
+func aiUnconfirmed(actor directory.Actor, what string) error {
+	if actor.Via == directory.ViaAI && actor.Confirmation == "" {
+		return statusErr(http.StatusConflict, "%s: through the AI it needs your confirmation in the browser", what)
+	}
+	return nil
+}
+
 // errSetupChanged is the 409 of an apply whose plan differs from the
 // preview's.
 func errSetupChanged() error {
@@ -1157,19 +1191,16 @@ func (h *Hub) markerPending(id string) error {
 }
 
 // opSecrets is every value the instances' errors must have redacted
-// (M5: the folder's op key has no secrets of its own).
-func (h *Hub) opSecrets(ids []string) []string {
-	var out []string
-	for _, inst := range ids {
-		out = append(out, h.redactionSet(inst)...)
-	}
-	return out
+// (M5: the folder's op key has no secrets of its own); err: a set
+// couldn't be read — the op's messages are hidden (hideIfUnread).
+func (h *Hub) opSecrets(ids []string) ([]string, error) {
+	return h.redactionSets(ids...)
 }
 
 // StartAssign applies req to folder id in the background once the plan
 // recomputed under the locks has planHash (else 409, no operation): 202
 // semantics, the outcome in the folder's op record (_folder.<id>).
-func (h *Hub) StartAssign(id string, req AssignRequest, planHash, actor string) (*AsyncOp, error) {
+func (h *Hub) StartAssign(id string, req AssignRequest, planHash string, actor directory.Actor) (*AsyncOp, error) {
 	unlock, err := h.folderLock(id)
 	if err != nil {
 		return nil, err
@@ -1184,8 +1215,8 @@ func (h *Hub) StartAssign(id string, req AssignRequest, planHash, actor string) 
 // folder lock (manage_as_folder deletes its new definition there); an
 // accepted operation's error goes through onFailed (nil: as it is) before
 // it is recorded (manage_as_folder names the definition it leaves).
-func (h *Hub) startAssignHeld(id string, req AssignRequest, planHash, actor string, unlockFolder func(), onRefused func(error), onFailed func(error) error) (*AsyncOp, error) {
-	return h.startAsync(opKeyFolder(id), OpFolderAssign, func(accept func()) (result map[string]string, warnings []string, err error) {
+func (h *Hub) startAssignHeld(id string, req AssignRequest, planHash string, actor directory.Actor, unlockFolder func(), onRefused func(error), onFailed func(error) error) (*AsyncOp, error) {
+	return h.startAsync(opKeyFolder(id), OpFolderAssign, actor, func(accept func()) (result map[string]string, warnings []string, err error) {
 		accepted := false
 		ready := func() { accepted = true; accept() }
 		var deliverTo, auditInsts []string
@@ -1233,6 +1264,11 @@ func (h *Hub) startAssignHeld(id string, req AssignRequest, planHash, actor stri
 		if planHash == "" || c.plan.Hash != planHash {
 			return nil, nil, errSetupChanged()
 		}
+		if c.plan.WidensAccess() {
+			if err := aiUnconfirmed(actor, "this assignment widens access to shared folder "+id); err != nil {
+				return nil, nil, err
+			}
+		}
 		ready()
 		res, warns, dt, deliver, err := h.runAssign(id, c, actor)
 		detail, deliverTo = dt, deliver
@@ -1255,14 +1291,14 @@ func prefixed(run string, ws []string) []string {
 // runAssign is the apply after it was accepted (contract §14.3
 // sequence). It returns the op's result, warnings, the folder.assign
 // detail and the instances to deliver to.
-func (h *Hub) runAssign(id string, c *assignCalc, actor string) (map[string]string, []string, string, []string, error) {
+func (h *Hub) runAssign(id string, c *assignCalc, actor directory.Actor) (map[string]string, []string, string, []string, error) {
 	ctx := context.Background()
 	f, d := c.folder, c.plan.Disk
 	result := map[string]string{"add": strconv.Itoa(c.adds), "remove": strconv.Itoa(c.removes)}
 	warnings := slices.Clone(c.plan.Warnings)
 	detail := fmt.Sprintf("add=%d remove=%d", c.adds, c.removes)
-	secrets := h.opSecrets(c.affected)
-	fb := &failCtx{id: id, actor: actor, secrets: secrets}
+	secrets, unread := h.opSecrets(c.affected)
+	fb := &failCtx{id: id, actor: actor, secrets: secrets, unread: unread}
 	m := &applyMarker{Kind: "apply", Folder: id, Instances: c.plan.Restarts, Phase: "disk", At: time.Now().UTC()}
 	fb.m = m
 	for _, e := range c.edits {
@@ -1366,7 +1402,7 @@ func (h *Hub) runAssign(id string, c *assignCalc, actor string) (map[string]stri
 		warnings = append(warnings, fmt.Sprintf("%s is not running: its configuration was updated, it wasn't started", c.names[inst]))
 	}
 	for _, e := range regenErrs {
-		warnings = append(warnings, redactValues("regenerating "+e, secrets))
+		warnings = append(warnings, redactOrHide("regenerating "+e, secrets, unread))
 	}
 
 	// Start what was stopped, with the new configuration.
@@ -1392,7 +1428,7 @@ func (h *Hub) runAssign(id string, c *assignCalc, actor string) (map[string]stri
 	}
 	if startErr != nil {
 		err := statusErr(http.StatusInternalServerError, "the assignment was saved, but %v: start them from the app list", startErr)
-		return result, warnings, detail, deliver, withSecrets(err, append(secrets, secretsOf(startErr)...))
+		return result, warnings, detail, deliver, hideIfUnread(withSecrets(err, append(secrets, secretsOf(startErr)...)), unread)
 	}
 	return result, warnings, detail, deliver, nil
 }
@@ -1410,7 +1446,8 @@ func (h *Hub) stopAll(ids []string) ([]string, error) {
 		}
 		if err := h.composeDown(t); err != nil {
 			stopped = append(stopped, inst)
-			return stopped, fmt.Errorf("stopping %s failed: %w", inst, withSecrets(err, h.redactionSet(inst)))
+			set, unread := h.redactionSetErr(inst)
+			return stopped, hideIfUnread(fmt.Errorf("stopping %s failed: %w", inst, withSecrets(err, set)), unread)
 		}
 		stopped = append(stopped, inst)
 	}
@@ -1431,7 +1468,8 @@ func (h *Hub) startAll(ids []string) error {
 			if composeFailed(err) {
 				h.rollbackUp(t)
 			}
-			errs = append(errs, fmt.Errorf("%s didn't start: %w", inst, withSecrets(err, h.redactionSet(inst))))
+			set, unread := h.redactionSetErr(inst)
+			errs = append(errs, hideIfUnread(fmt.Errorf("%s didn't start: %w", inst, withSecrets(err, set)), unread))
 		}
 	}
 	return errors.Join(errs...)
@@ -1439,11 +1477,13 @@ func (h *Hub) startAll(ids []string) error {
 
 // failCtx is what failBeforeState needs of the running apply.
 type failCtx struct {
-	id, actor string
-	m         *applyMarker
-	stopped   []string
-	secrets   []string
-	entries   int64
+	id      string
+	actor   directory.Actor
+	m       *applyMarker
+	stopped []string
+	secrets []string
+	unread  error // a redaction set couldn't be read: messages hidden
+	entries int64
 }
 
 // failBeforeState handles a failure before the state save: the stopped
@@ -1497,7 +1537,7 @@ func (h *Hub) failBeforeState(fb *failCtx, cause error, snap string, diskChanged
 	}
 	sec := append(slices.Clone(fb.secrets), secretsOf(cause)...)
 	sec = append(sec, secretsOf(startErr)...)
-	err := withSecrets(&StatusError{Status: status, Err: errors.New(b.String())}, sec)
+	err := hideIfUnread(withSecrets(&StatusError{Status: status, Err: errors.New(b.String())}, sec), fb.unread)
 	if diskChanged {
 		h.auditFolder(fb.actor, "folder.apply", id, fmt.Sprintf("entries=%d snapshot=%s", fb.entries, snapshotTS(snap)), err)
 	}
@@ -1764,7 +1804,7 @@ func (h *Hub) computeUndo(ctx context.Context, id string) (*undoCalc, error) {
 		"The setting values don't change.",
 	}
 	for _, x := range uses {
-		lines = append(lines, fmt.Sprintf("%s (%s) may lose access to the restored entries: they go back to their previous group.", u.names[x.Instance], x.Label))
+		lines = append(lines, fmt.Sprintf("%s (%q) may lose access to the restored entries: they go back to their previous group.", u.names[x.Instance], x.Label))
 	}
 	pl.Warnings = append(pl.Warnings, prefixed("check", skippedWarnings(dry))...)
 	pl.Downtime = "none"
@@ -1810,12 +1850,12 @@ func (h *Hub) PreviewUndo(ctx context.Context, id string) (*AssignPlan, error) {
 // planHash (else 409): stop → undo snapshot → restore → verify (a restore
 // dry run finds nothing left to rewrite) → state (last_apply cleared) →
 // start.
-func (h *Hub) StartUndo(id, planHash, actor string) (*AsyncOp, error) {
+func (h *Hub) StartUndo(id, planHash string, actor directory.Actor) (*AsyncOp, error) {
 	unlockFolder, err := h.folderLock(id)
 	if err != nil {
 		return nil, err
 	}
-	return h.startAsync(opKeyFolder(id), OpFolderUndo, func(ready func()) (result map[string]string, warnings []string, err error) {
+	return h.startAsync(opKeyFolder(id), OpFolderUndo, actor, func(ready func()) (result map[string]string, warnings []string, err error) {
 		detail := ""
 		defer func() {
 			if detail != "" || err != nil {
@@ -1850,6 +1890,9 @@ func (h *Hub) StartUndo(id, planHash, actor string) (*AsyncOp, error) {
 		if !slices.Equal(u.affected, affected) || planHash == "" || u.plan.Hash != planHash {
 			return nil, nil, errSetupChanged()
 		}
+		if err := aiUnconfirmed(actor, "an undo rewrites shared folder "+id+"'s permissions"); err != nil {
+			return nil, nil, err
+		}
 		ready()
 		result, warnings, detail, err = h.runUndo(id, u)
 		return result, warnings, err
@@ -1863,7 +1906,7 @@ func (h *Hub) runUndo(id string, u *undoCalc) (map[string]string, []string, stri
 	f := u.folder
 	result := map[string]string{"snapshot": u.apply.Snapshot}
 	var warnings []string
-	secrets := h.opSecrets(u.affected)
+	secrets, unread := h.opSecrets(u.affected)
 	detail := func() string {
 		d := "undo snapshot=" + snapshotTS(u.apply.Snapshot)
 		if s := result["undo_snapshot"]; s != "" {
@@ -1898,7 +1941,7 @@ func (h *Hub) runUndo(id string, u *undoCalc) (map[string]string, []string, stri
 		}
 		sec := append(slices.Clone(secrets), secretsOf(cause)...)
 		sec = append(sec, secretsOf(startErr)...)
-		return withSecrets(&StatusError{Status: status, Err: errors.New(msg)}, sec)
+		return hideIfUnread(withSecrets(&StatusError{Status: status, Err: errors.New(msg)}, sec), unread)
 	}
 	if err := h.writeMarker(id, m); err != nil {
 		return result, nil, detail(), fail(statusErr(http.StatusInternalServerError, "writing the undo marker: %v", err), false)
@@ -1979,7 +2022,7 @@ func (h *Hub) runUndo(id string, u *undoCalc) (map[string]string, []string, stri
 	d := fmt.Sprintf("%s entries=%d changed_since=%d", detail(), rep.Changed, rep.ChangedSince.N)
 	if startErr != nil {
 		err := statusErr(http.StatusInternalServerError, "the undo finished, but %v: start them from the app list", startErr)
-		return result, warnings, d, withSecrets(err, append(secrets, secretsOf(startErr)...))
+		return result, warnings, d, hideIfUnread(withSecrets(err, append(secrets, secretsOf(startErr)...)), unread)
 	}
 	return result, warnings, d, nil
 }
@@ -2010,7 +2053,7 @@ func (h *Hub) recoverFolderApply(id string) {
 	prev := h.LastOp(key)
 	rec := OpRecord{Op: OpFolderAssign, At: time.Now().UTC(), Status: http.StatusInternalServerError}
 	if prev != nil {
-		rec.Op, rec.OpID = prev.Op, prev.OpID
+		rec.Op, rec.OpID, rec.Actor = prev.Op, prev.OpID, prev.Actor
 	}
 	data, err := os.ReadFile(h.markerPath(id))
 	var m applyMarker

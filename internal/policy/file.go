@@ -16,7 +16,7 @@ const FileVersion = 5
 
 // coreSubdomains are the core subdomain labels (group-gate-map.conf uses
 // `<sub>=<group>` entries; contract §4).
-var coreSubdomains = []string{"auth", "traefik", "hub", "directory", "enroll", "metrics", "people"}
+var coreSubdomains = []string{"auth", "traefik", "hub", "directory", "enroll", "metrics", "people", "mcp"}
 
 // CoreSubdomains returns the core subdomain labels as a set.
 func CoreSubdomains() map[string]bool {

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/settings"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
@@ -25,6 +26,7 @@ import (
 const immichManifest = `name: Immich
 category: media
 instances: multi
+ai: {unsupported: "test fixture"}
 auth:
   method: header-auth
   group_access: true
@@ -181,7 +183,7 @@ func TestSaveRestartsOnlyWhenNeeded(t *testing.T) {
 	f.h.Wait()
 	before := ups(f, "immich")
 
-	res, err := f.h.SaveSettings("immich", SettingsUpdate{Values: vals("motd", "hello")}, "admin")
+	res, err := f.h.SaveSettings("immich", SettingsUpdate{Values: vals("motd", "hello")}, directory.Human("admin"))
 	f.h.Wait()
 	if err != nil {
 		t.Fatal(err)
@@ -193,7 +195,7 @@ func TestSaveRestartsOnlyWhenNeeded(t *testing.T) {
 		t.Errorf("a live option restarted the app (%d ups, was %d)", n, before)
 	}
 
-	res, err = f.h.SaveSettings("immich", SettingsUpdate{Values: vals("motd", "bye", "trash_days", 30)}, "admin")
+	res, err = f.h.SaveSettings("immich", SettingsUpdate{Values: vals("motd", "bye", "trash_days", 30)}, directory.Human("admin"))
 	f.h.Wait()
 	if err != nil {
 		t.Fatal(err)
@@ -206,18 +208,18 @@ func TestSaveRestartsOnlyWhenNeeded(t *testing.T) {
 	}
 
 	// Unchanged values, and a disabled instance: no restart.
-	res, err = f.h.SaveSettings("immich", SettingsUpdate{Values: vals("trash_days", 30)}, "admin")
+	res, err = f.h.SaveSettings("immich", SettingsUpdate{Values: vals("trash_days", 30)}, directory.Human("admin"))
 	f.h.Wait()
 	if err != nil || res.Effect != settings.EffectNone || len(res.Changed) != 0 || ups(f, "immich") != before+1 {
 		t.Errorf("unchanged: %+v %v", res, err)
 	}
 	// A port or path change is always a restart.
-	res, err = f.h.SaveSettings("immich", SettingsUpdate{Ports: map[string]string{"IMMICH_PORT": "2290"}}, "admin")
+	res, err = f.h.SaveSettings("immich", SettingsUpdate{Ports: map[string]string{"IMMICH_PORT": "2290"}}, directory.Human("admin"))
 	f.h.Wait()
 	if err != nil || res.Effect != settings.EffectRestart || ups(f, "immich") != before+2 {
 		t.Errorf("port: %+v %v", res, err)
 	}
-	res, err = f.h.SaveSettings("immich", SettingsUpdate{Values: vals("uploads", "/srv/up")}, "admin")
+	res, err = f.h.SaveSettings("immich", SettingsUpdate{Values: vals("uploads", "/srv/up")}, directory.Human("admin"))
 	f.h.Wait()
 	if err != nil || res.Effect != settings.EffectRestart || ups(f, "immich") != before+3 {
 		t.Errorf("path: %+v %v", res, err)
@@ -244,7 +246,7 @@ func TestSaveValidatesTypes(t *testing.T) {
 		"person default": {SettingsUpdate{Person: map[string]PersonChange{"quota": {Default: json.RawMessage(`"lots"`)}}}, []string{"quota", "default"}},
 		"duplicate rows": {SettingsUpdate{Person: map[string]PersonChange{"quota": {Default: json.RawMessage(`"1GiB"`), Rows: []GroupValueInput{{Group: "staff", Value: json.RawMessage(`"2GiB"`)}, {Group: "staff", Value: json.RawMessage(`"3GiB"`)}}}}}, []string{"quota", "staff", "more than one row"}},
 	} {
-		_, err := f.h.SaveSettings("immich", c.u, "admin")
+		_, err := f.h.SaveSettings("immich", c.u, directory.Human("admin"))
 		if statusOf(err) != 400 {
 			t.Errorf("%s: err = %v, want 400", name, err)
 			continue
@@ -389,21 +391,21 @@ func TestSettingsAudited(t *testing.T) {
 	if err := f.h.save("immich", SettingsUpdate{Values: vals("trash_days", 30)}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.h.SaveSettings("immich", SettingsUpdate{Values: vals("trash_days", 60)}, "alice"); err != nil {
+	if _, err := f.h.SaveSettings("immich", SettingsUpdate{Values: vals("trash_days", 60)}, directory.Human("alice")); err != nil {
 		t.Fatal(err)
 	}
 	e := audit.last()
 	if e.Action != "settings.change" || e.Target != "immich/trash_days" || e.Detail != "scope=instance: 30 -> 60" || e.Actor != "alice" || e.Result != "ok" {
 		t.Errorf("entry = %+v", e)
 	}
-	if _, err := f.h.SaveSettings("immich", SettingsUpdate{Ports: map[string]string{"IMMICH_PORT": "2290"}}, "alice"); err != nil {
+	if _, err := f.h.SaveSettings("immich", SettingsUpdate{Ports: map[string]string{"IMMICH_PORT": "2290"}}, directory.Human("alice")); err != nil {
 		t.Fatal(err)
 	}
 	if e := audit.last(); e.Target != "immich/IMMICH_PORT" || e.Detail != "scope=port: default -> 2290" {
 		t.Errorf("port entry = %+v", e)
 	}
 	n := len(audit.entries)
-	if _, err := f.h.SaveSettings("immich", SettingsUpdate{Values: vals("trash_days", "x")}, "bob"); statusOf(err) != 400 {
+	if _, err := f.h.SaveSettings("immich", SettingsUpdate{Values: vals("trash_days", "x")}, directory.Human("bob")); statusOf(err) != 400 {
 		t.Fatal(err)
 	}
 	if e := audit.last(); len(audit.entries) != n+1 || e.Action != "settings.change" || e.Target != "immich/trash_days" || e.Result != "refused" || e.Actor != "bob" {
@@ -411,7 +413,7 @@ func TestSettingsAudited(t *testing.T) {
 	}
 	// One entry per changed key; nothing for an unchanged one.
 	n = len(audit.entries)
-	if _, err := f.h.SaveSettings("immich", SettingsUpdate{Values: vals("trash_days", 60, "motd", "hi", "ml", true)}, "alice"); err != nil {
+	if _, err := f.h.SaveSettings("immich", SettingsUpdate{Values: vals("trash_days", 60, "motd", "hi", "ml", true)}, directory.Human("alice")); err != nil {
 		t.Fatal(err)
 	}
 	var got []string
@@ -497,7 +499,7 @@ func TestBackupCarriesTypedSettings(t *testing.T) {
 		t.Fatalf("no secret metadata: %+v", want.Secrets)
 	}
 
-	entry, err := f.h.BackupInstance("immich-b", "root")
+	entry, err := f.h.BackupInstance("immich-b", directory.Human("root"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -520,7 +522,7 @@ func TestBackupCarriesTypedSettings(t *testing.T) {
 	}
 	// The size row is not valid for quota without allow_unlimited:
 	// refused on restore, nothing changes.
-	if _, err := f.h.RestoreInstanceAs(entry.Archive, "immich-c", "root"); statusOf(err) != 409 || !strings.Contains(err.Error(), "quota") {
+	if _, err := f.h.RestoreInstanceAs(entry.Archive, "immich-c", directory.Human("root")); statusOf(err) != 409 || !strings.Contains(err.Error(), "quota") {
 		t.Fatalf("restore with an invalid row = %v", err)
 	}
 	f.h.mu.Lock()
@@ -530,10 +532,10 @@ func TestBackupCarriesTypedSettings(t *testing.T) {
 	f.h.saveLocked()
 	f.h.mu.Unlock()
 	want.Person["quota"] = state.PersonSetting{Default: int64(5 << 30), Resolve: "max", Rows: []state.GroupValue{{Group: "staff", GroupID: 7, Value: int64(2 << 30)}}}
-	if entry, err = f.h.BackupInstance("immich-b", "root"); err != nil {
+	if entry, err = f.h.BackupInstance("immich-b", directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.h.RestoreInstanceAs(entry.Archive, "immich-c", "root"); err != nil {
+	if _, err := f.h.RestoreInstanceAs(entry.Archive, "immich-c", directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	f.h.mu.RLock()
@@ -552,7 +554,7 @@ func TestBackupCarriesTypedSettings(t *testing.T) {
 	if err := f.h.save("immich-b", SettingsUpdate{Values: vals("trash_days", 99)}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.h.RestoreInstance("immich-b", entry.Archive, "root"); err != nil {
+	if _, err := f.h.RestoreInstance("immich-b", entry.Archive, directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	f.h.mu.RLock()

@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -183,6 +184,17 @@ func (s *Server) handleAdminCredentials(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, views)
 }
 
+// adminRevokeCredential is the admin revoke's work (route and
+// admin_revoke_credential): the existing audited path (credential.revoke).
+func (s *Server) adminRevokeCredential(ctx context.Context, a directory.Actor, id, key, user string) error {
+	user = strings.ToLower(user)
+	if user == "" {
+		return &hub.StatusError{Status: http.StatusBadRequest, Err: errors.New("user is required")}
+	}
+	s.rec("AdminRevokeCredential", id, key, user)
+	return s.Hub.AdminRevokeCredential(ctx, id, key, user, a)
+}
+
 // handleAdminRevokeCredential revokes a person's credential (admin; Hub
 // listener, adminOnly). Audited with actor. → 204.
 func (s *Server) handleAdminRevokeCredential(w http.ResponseWriter, r *http.Request) {
@@ -195,20 +207,13 @@ func (s *Server) handleAdminRevokeCredential(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	key := r.PathValue("key")
-	user := strings.ToLower(r.PathValue("user"))
-	if user == "" {
-		http.Error(w, "user is required", http.StatusBadRequest)
-		return
-	}
-
-	if err := s.Hub.AdminRevokeCredential(r.Context(), id, key, user, actor(r)); err != nil {
+	if err := s.adminRevokeCredential(r.Context(), requestActor(r), id, r.PathValue("key"), r.PathValue("user")); err != nil {
 		var se *hub.StatusError
 		if errors.As(err, &se) {
 			http.Error(w, se.Error(), se.Status)
 			return
 		}
-		log.Printf("admin: revoke credential %s/%s/%s: %v", id, key, user, err)
+		log.Printf("admin: revoke credential %s/%s/%s: %v", id, r.PathValue("key"), strings.ToLower(r.PathValue("user")), err)
 		http.Error(w, directory.GenericUnavailable, http.StatusServiceUnavailable)
 		return
 	}

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/portcullis/hub/internal/compose"
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/doctor"
 	"github.com/portcullis/hub/internal/folderfix"
@@ -96,7 +97,7 @@ func TestRebindPreviewText(t *testing.T) {
 		if _, err := f.h.PreviewFix(ctx, smbFP, map[string]string{"address": bad}); statusOf(err) != 400 {
 			t.Errorf("address %q: %v", bad, err)
 		}
-		if _, err := f.h.ApplyFix(ctx, smbFP, map[string]string{"address": bad}, plan.Hash, "admin"); statusOf(err) != 400 {
+		if _, err := f.h.ApplyFix(ctx, smbFP, map[string]string{"address": bad}, plan.Hash, directory.Human("admin")); statusOf(err) != 400 {
 			t.Errorf("apply address %q: %v", bad, err)
 		}
 	}
@@ -116,7 +117,7 @@ func TestRebindApply(t *testing.T) {
 		t.Fatal(err)
 	}
 	ups := countCalls(f, "up:"+projectName("samba"))
-	op, err := f.h.ApplyFix(ctx, smbFP, map[string]string{"address": "192.168.1.10"}, plan.Hash, "admin")
+	op, err := f.h.ApplyFix(ctx, smbFP, map[string]string{"address": "192.168.1.10"}, plan.Hash, directory.Human("admin"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +146,7 @@ func TestRebindApply(t *testing.T) {
 		t.Errorf("settings.change = %v", got)
 	}
 	// The finding is gone; a stale apply is 404.
-	if _, err := f.h.ApplyFix(ctx, smbFP, map[string]string{"address": "192.168.1.10"}, plan.Hash, "admin"); statusOf(err) != 404 {
+	if _, err := f.h.ApplyFix(ctx, smbFP, map[string]string{"address": "192.168.1.10"}, plan.Hash, directory.Human("admin")); statusOf(err) != 404 {
 		t.Errorf("second apply: %v", err)
 	}
 }
@@ -172,7 +173,7 @@ func TestRebindRollback(t *testing.T) {
 			f.runner.upErr = nil
 		}
 	}
-	op, err := f.h.ApplyFix(ctx, smbFP, map[string]string{"address": "192.168.1.10"}, plan.Hash, "admin")
+	op, err := f.h.ApplyFix(ctx, smbFP, map[string]string{"address": "192.168.1.10"}, plan.Hash, directory.Human("admin"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -288,12 +289,12 @@ func TestManageAsFolder(t *testing.T) {
 	}
 	text := strings.Join(plan.Lines, "\n")
 	for _, want := range []string{
-		"Shared folder *media* (id media) is defined at /srv/media.",
-		"gid 60000 is allocated for this folder (shown as *media*).",
-		"Jellyfin's Media: /srv/media → folder:media.",
-		"Writer's Data: /srv/media → folder:media.",
-		"Jellyfin mounts it read-only (Media).",
-		"Writer mounts it read/write (Data).",
+		"Shared folder \"media\" (id media) is defined at \"/srv/media\".",
+		"gid 60000 is allocated for this folder (shown as \"media\").",
+		"Jellyfin's \"Media\": \"/srv/media\" → \"folder:media\".",
+		"Writer's \"Data\": \"/srv/media\" → \"folder:media\".",
+		"Jellyfin mounts it read-only (\"Media\").",
+		"Writer mounts it read/write (\"Data\").",
 		"A permissions snapshot is saved first.",
 	} {
 		if !strings.Contains(text, want) {
@@ -312,7 +313,7 @@ func TestManageAsFolder(t *testing.T) {
 	}
 	// Params: another name and id.
 	named, err := f.h.PreviewFix(ctx, mediaFP, map[string]string{"name": "Family media", "id": "family"})
-	if err != nil || named.Assign.Folder != "family" || !strings.Contains(strings.Join(named.Lines, "\n"), "Shared folder *Family media* (id family)") || named.Hash == plan.Hash {
+	if err != nil || named.Assign.Folder != "family" || !strings.Contains(strings.Join(named.Lines, "\n"), "Shared folder \"Family media\" (id family)") || named.Hash == plan.Hash {
 		t.Errorf("named = %+v, %v", named, err)
 	}
 	for _, bad := range []map[string]string{{"id": "Bad id"}, {"name": strings.Repeat("x", 65)}, {"name": "a\nb"}, {"bogus": "x"}} {
@@ -321,7 +322,7 @@ func TestManageAsFolder(t *testing.T) {
 		}
 	}
 
-	op, err := f.h.ApplyFix(ctx, mediaFP, nil, plan.Hash, "admin")
+	op, err := f.h.ApplyFix(ctx, mediaFP, nil, plan.Hash, directory.Human("admin"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -369,17 +370,17 @@ func TestFixHashMismatch(t *testing.T) {
 		s.Ports = map[string]string{"SAMBA_WEB": "8081"}
 		f.h.st.Settings["samba"] = s
 		f.h.mu.Unlock()
-		_, err = f.h.ApplyFix(ctx, smbFP, map[string]string{"address": "192.168.1.10"}, plan.Hash, "admin")
+		_, err = f.h.ApplyFix(ctx, smbFP, map[string]string{"address": "192.168.1.10"}, plan.Hash, directory.Human("admin"))
 		if statusOf(err) != 409 || !strings.Contains(err.Error(), "changed since the preview") {
 			t.Fatalf("apply after a port change: %v", err)
 		}
 		if p := storedPorts(f, "samba"); p["SAMBA_SMB_BIND"] != "" || countCalls(f, "up:"+projectName("samba")) != ups {
 			t.Errorf("changed: %v", p)
 		}
-		if _, err := f.h.ApplyFix(ctx, smbFP, map[string]string{"address": "10.0.0.5"}, plan.Hash, "admin"); statusOf(err) != 409 {
+		if _, err := f.h.ApplyFix(ctx, smbFP, map[string]string{"address": "10.0.0.5"}, plan.Hash, directory.Human("admin")); statusOf(err) != 409 {
 			t.Errorf("another address: %v", err)
 		}
-		if _, err := f.h.ApplyFix(ctx, smbFP, map[string]string{"address": "192.168.1.10"}, "", "admin"); statusOf(err) != 409 {
+		if _, err := f.h.ApplyFix(ctx, smbFP, map[string]string{"address": "192.168.1.10"}, "", directory.Human("admin")); statusOf(err) != 409 {
 			t.Errorf("no hash: %v", err)
 		}
 		if got := auditOf(audit, "doctor.fix"); len(got) != 3 || !strings.HasPrefix(got[0], smbFP+" refused") {
@@ -393,10 +394,10 @@ func TestFixHashMismatch(t *testing.T) {
 			t.Fatal(err)
 		}
 		// Another folder takes the predicted gid.
-		if _, _, err := f.h.CreateFolder(ctx, FolderInput{ID: "other", Name: "Other", Path: "/srv/other"}, "admin"); err != nil {
+		if _, _, err := f.h.CreateFolder(ctx, FolderInput{ID: "other", Name: "Other", Path: "/srv/other"}, directory.Human("admin")); err != nil {
 			t.Fatal(err)
 		}
-		_, err = f.h.ApplyFix(ctx, mediaFP, nil, plan.Hash, "admin")
+		_, err = f.h.ApplyFix(ctx, mediaFP, nil, plan.Hash, directory.Human("admin"))
 		if statusOf(err) != 409 || !strings.Contains(err.Error(), "changed since the preview") {
 			t.Fatalf("apply: %v", err)
 		}
@@ -438,7 +439,7 @@ func TestManageAsFolderRefusalDeletesDefinition(t *testing.T) {
 		f.h.st.Settings["writer"] = s
 		f.h.mu.Unlock()
 	}
-	_, err = f.h.ApplyFix(ctx, mediaFP, nil, plan.Hash, "admin")
+	_, err = f.h.ApplyFix(ctx, mediaFP, nil, plan.Hash, directory.Human("admin"))
 	if statusOf(err) != 409 {
 		t.Fatalf("apply: %v", err)
 	}
@@ -489,7 +490,7 @@ func TestExplainOnlyHasNoPreview(t *testing.T) {
 	if statusOf(err) != 409 || !strings.Contains(err.Error(), "explain-only") || !strings.Contains(err.Error(), fd.Steps[0]) {
 		t.Errorf("preview: %v", err)
 	}
-	if _, err := f.h.ApplyFix(ctx, fd.FP, nil, "x", "admin"); statusOf(err) != 409 || !strings.Contains(err.Error(), "explain-only") {
+	if _, err := f.h.ApplyFix(ctx, fd.FP, nil, "x", directory.Human("admin")); statusOf(err) != 409 || !strings.Contains(err.Error(), "explain-only") {
 		t.Errorf("apply: %v", err)
 	}
 	// The shared path with a custom-override use is explain-only too now.
@@ -510,10 +511,10 @@ func TestFixAudited(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.h.ApplyFix(ctx, smbFP, map[string]string{"address": "192.168.1.10"}, plan.Hash, ""); statusOf(err) != 401 {
+	if _, err := f.h.ApplyFix(ctx, smbFP, map[string]string{"address": "192.168.1.10"}, plan.Hash, directory.Human("")); statusOf(err) != 401 {
 		t.Errorf("no actor: %v", err)
 	}
-	op, err := f.h.ApplyFix(ctx, smbFP, map[string]string{"address": "192.168.1.10"}, plan.Hash, "admin")
+	op, err := f.h.ApplyFix(ctx, smbFP, map[string]string{"address": "192.168.1.10"}, plan.Hash, directory.Human("admin"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -571,7 +572,7 @@ func TestReapplyAndUndoFixes(t *testing.T) {
 		t.Fatalf("reapply plan = %+v / %+v", plan, plan.Assign)
 	}
 	snaps := len(f.h.listSnapshots("media"))
-	if _, err := f.h.ApplyFix(ctx, fp, nil, plan.Hash, "admin"); err != nil {
+	if _, err := f.h.ApplyFix(ctx, fp, nil, plan.Hash, directory.Human("admin")); err != nil {
 		t.Fatal(err)
 	}
 	if rec := waitFolderOp(t, f, "media"); !rec.OK || rec.Op != OpFolderAssign {
@@ -595,10 +596,10 @@ func TestReapplyAndUndoFixes(t *testing.T) {
 	if undo.Kind != doctor.FixUndoFolder || undo.Assign == nil || !strings.Contains(strings.Join(undo.Lines, "\n"), "12,720 entries go back") {
 		t.Fatalf("undo plan = %+v", undo)
 	}
-	if _, err := f.h.ApplyFix(ctx, fp, map[string]string{"fix": doctor.FixUndoFolder}, plan.Hash, "admin"); statusOf(err) != 409 {
+	if _, err := f.h.ApplyFix(ctx, fp, map[string]string{"fix": doctor.FixUndoFolder}, plan.Hash, directory.Human("admin")); statusOf(err) != 409 {
 		t.Errorf("the reapply's hash on the undo: %v", err)
 	}
-	if _, err := f.h.ApplyFix(ctx, fp, map[string]string{"fix": doctor.FixUndoFolder}, undo.Hash, "admin"); err != nil {
+	if _, err := f.h.ApplyFix(ctx, fp, map[string]string{"fix": doctor.FixUndoFolder}, undo.Hash, directory.Human("admin")); err != nil {
 		t.Fatal(err)
 	}
 	if rec := waitFolderOp(t, f, "media"); !rec.OK || rec.Op != OpFolderUndo {
@@ -656,7 +657,7 @@ func applyRebind(t *testing.T, f *fixture, addr string) *OpRecord {
 	if err != nil {
 		t.Fatal(err)
 	}
-	op, err := f.h.ApplyFix(ctx, smbFP, map[string]string{"address": addr}, plan.Hash, "admin")
+	op, err := f.h.ApplyFix(ctx, smbFP, map[string]string{"address": addr}, plan.Hash, directory.Human("admin"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -684,7 +685,7 @@ func TestRebindRollbackKeepsConcurrentSave(t *testing.T) {
 				if calls == 1 {
 					// A settings save while the restart runs (it doesn't
 					// take the instance lock).
-					_, err := f.h.SaveSettings("samba", SettingsUpdate{Ports: map[string]string{"SAMBA_SMB_BIND": tc.bind, "SAMBA_WEB": "8099"}}, "bob")
+					_, err := f.h.SaveSettings("samba", SettingsUpdate{Ports: map[string]string{"SAMBA_SMB_BIND": tc.bind, "SAMBA_WEB": "8099"}}, directory.Human("bob"))
 					saved <- err
 					f.runner.upErr = &compose.Error{Command: "up", Err: errors.New("exit status 1"), Output: "cannot assign requested address"}
 				}
@@ -750,7 +751,7 @@ func TestRebindRefusedBeforeStop(t *testing.T) {
 	// The custom override no longer fits: restartLocked refuses first.
 	writeFile(t, f.h.userOverridePath("samba"), "services:\n  worker:\n    image: x\n")
 	calls := len(f.runner.Calls())
-	op, err := f.h.ApplyFix(ctx, smbFP, map[string]string{"address": "192.168.1.10"}, plan.Hash, "admin")
+	op, err := f.h.ApplyFix(ctx, smbFP, map[string]string{"address": "192.168.1.10"}, plan.Hash, directory.Human("admin"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -788,7 +789,7 @@ func TestManageAsFolderFailedOpNamesDefinition(t *testing.T) {
 		t.Fatal(err)
 	}
 	d.applyExit = 1
-	if _, err := f.h.ApplyFix(ctx, mediaFP, nil, plan.Hash, "admin"); err != nil {
+	if _, err := f.h.ApplyFix(ctx, mediaFP, nil, plan.Hash, directory.Human("admin")); err != nil {
 		t.Fatal(err)
 	}
 	rec := waitFolderOp(t, f, "media")

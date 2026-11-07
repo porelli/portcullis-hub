@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/doctor"
 	"github.com/portcullis/hub/internal/settings"
 	"github.com/portcullis/hub/internal/state"
@@ -42,15 +43,25 @@ type FixPlan struct {
 	Warnings []string    `json:"warnings,omitempty"`
 	Assign   *AssignPlan `json:"assign,omitempty"`
 	Hash     string      `json:"plan_hash"`
+	// TouchesData (G45, contract §14.6 NEW): the fix changes data on
+	// disk, ownership, ACLs or credentials (Fixer.TouchesData; PreviewFix
+	// sets it). The Portcullis MCP's doctor_apply_fix is class D exactly
+	// when it is set, and ApplyFix refuses such a fix from the AI without
+	// a confirmation.
+	TouchesData bool `json:"touches_data"`
 }
 
 // Fixer is one kind of one-click fix (Project 3 registers more).
 // Preview changes nothing; Apply re-checks planHash and answers 202
-// semantics (an AsyncOp) or a synchronous refusal.
+// semantics (an AsyncOp) or a synchronous refusal. TouchesData declares
+// whether its apply changes files, ownership, ACLs or credentials
+// (G45; every fixer answers it — a new one is audited in
+// TestFixersDeclareTouchesData).
 type Fixer interface {
 	Kind() string
+	TouchesData() bool
 	Preview(ctx context.Context, h *Hub, f doctor.Finding, params map[string]string) (*FixPlan, error)
-	Apply(h *Hub, f doctor.Finding, params map[string]string, planHash, actor string) (*AsyncOp, error)
+	Apply(h *Hub, f doctor.Finding, params map[string]string, planHash string, actor directory.Actor) (*AsyncOp, error)
 }
 
 // fixTargeter is an optional Fixer part: the ids doctor.fix's detail
@@ -99,9 +110,19 @@ const fixParamFix = "fix"
 // pick: explain-only and link findings, or none, are 409; a fix the
 // finding doesn't offer is 400.
 func (h *Hub) findingFix(ctx context.Context, fp string, params map[string]string) (doctor.Finding, Fixer, error) {
-	r, err := h.Doctor(ctx)
-	if err != nil {
-		return doctor.Finding{}, nil, err
+	return h.findingFixIn(ctx, nil, fp, params)
+}
+
+// findingFixIn is findingFix judged on report r (nil: a fresh Doctor
+// run). Only the Portcullis MCP's class and consequences pass a report
+// (one run per tool call, Task 20 fix round 1); ApplyFix always runs the
+// doctor again.
+func (h *Hub) findingFixIn(ctx context.Context, r *doctor.Report, fp string, params map[string]string) (doctor.Finding, Fixer, error) {
+	if r == nil {
+		var err error
+		if r, err = h.Doctor(ctx); err != nil {
+			return doctor.Finding{}, nil, err
+		}
 	}
 	var f *doctor.Finding
 	for i := range r.Findings {
@@ -119,6 +140,8 @@ func (h *Hub) findingFix(ctx context.Context, fp string, params map[string]strin
 			msg += ". " + strings.Join(f.Steps, " ")
 		}
 		return *f, nil, statusErr(http.StatusConflict, "%s", msg)
+	case f.Class == doctor.FixLink && f.Link != nil && f.Link.Tab != "":
+		return *f, nil, statusErr(http.StatusConflict, "this finding opens %s's %s tab: the doctor never changes AI support or settings itself", f.Link.Instance, strings.ToUpper(f.Link.Tab))
 	case f.Class == doctor.FixLink && f.Link != nil:
 		return *f, nil, statusErr(http.StatusConflict, "this finding opens the settings panel at %s's setting %s: the doctor never edits setting values itself", f.Link.Instance, f.Link.Option)
 	case f.Class != doctor.FixOneClick || f.FixKind == "":
@@ -154,7 +177,14 @@ func checkFixParams(params map[string]string, allowed ...string) error {
 // PreviewFix previews finding fp's fix with params (404 unknown fp, 409
 // explain-only or link, 400 bad params): nothing changes.
 func (h *Hub) PreviewFix(ctx context.Context, fp string, params map[string]string) (*FixPlan, error) {
-	f, fx, err := h.findingFix(ctx, fp, params)
+	return h.PreviewFixIn(ctx, nil, fp, params)
+}
+
+// PreviewFixIn is PreviewFix with the finding looked up in report r (nil:
+// a fresh Doctor run); the fixer's own preview still reads the current
+// state.
+func (h *Hub) PreviewFixIn(ctx context.Context, r *doctor.Report, fp string, params map[string]string) (*FixPlan, error) {
+	f, fx, err := h.findingFixIn(ctx, r, fp, params)
 	if err != nil {
 		return nil, err
 	}
@@ -163,6 +193,7 @@ func (h *Hub) PreviewFix(ctx context.Context, fp string, params map[string]strin
 		return nil, err
 	}
 	p.FP, p.Kind = fp, fx.Kind()
+	p.TouchesData = p.TouchesData || fx.TouchesData()
 	if p.Lines == nil {
 		p.Lines = []string{}
 	}
@@ -173,10 +204,10 @@ func (h *Hub) PreviewFix(ctx context.Context, fp string, params map[string]strin
 // planHash (else 409): 202 semantics. Audited doctor.fix (target fp,
 // detail "fix=<kind> <ids> op=<op id>"; refusals refused) after the call
 // returns, never under a lock of the Hub's.
-func (h *Hub) ApplyFix(ctx context.Context, fp string, params map[string]string, planHash, actor string) (op *AsyncOp, err error) {
+func (h *Hub) ApplyFix(ctx context.Context, fp string, params map[string]string, planHash string, actor directory.Actor) (op *AsyncOp, err error) {
 	detail := ""
 	defer func() { h.auditDoctor(actor, "doctor.fix", fp, detail, err) }()
-	if actor == "" {
+	if actor.User == "" {
 		return nil, statusErr(http.StatusUnauthorized, "a fix needs a signed-in admin")
 	}
 	f, fx, err := h.findingFix(ctx, fp, params)
@@ -189,11 +220,48 @@ func (h *Hub) ApplyFix(ctx context.Context, fp string, params map[string]string,
 			detail += " " + ids
 		}
 	}
+	// G45, defence in depth: a fix that touches data, asked for through
+	// the AI, runs only with the confirmation the tool consumed.
+	if fx.TouchesData() {
+		if err := aiUnconfirmed(actor, "fix "+fx.Kind()+" changes data on disk or revokes access"); err != nil {
+			return nil, err
+		}
+	}
 	op, err = fx.Apply(h, f, params, planHash, actor)
 	if op != nil {
 		detail += " op=" + op.OpID
 	}
 	return op, err
+}
+
+// FixTouchesData re-derives finding fp's fix as ApplyFix would pick it
+// (findingFix: the current finding, its fix_kind or params "fix") and
+// says whether that fix touches data (G45; the Portcullis MCP's
+// doctor_apply_fix class, Task 20). A fixer that touches data answers
+// true without a preview; a config-only one is previewed and must have
+// planHash (its apply would refuse another). Any error — no such
+// finding, no fix, a preview that fails, another hash — is returned: the
+// caller treats it as touching data (fail closed). Nothing changes.
+//
+// r is the report to find fp in (nil: a fresh Doctor run): the MCP passes
+// the call's one run. ApplyFix itself never trusts it: it runs the doctor
+// again and recomputes the plan under the fix's locks.
+func (h *Hub) FixTouchesData(ctx context.Context, r *doctor.Report, fp string, params map[string]string, planHash string) (bool, error) {
+	f, fx, err := h.findingFixIn(ctx, r, fp, params)
+	if err != nil {
+		return true, err
+	}
+	if fx.TouchesData() {
+		return true, nil
+	}
+	p, err := fx.Preview(ctx, h, f, params)
+	if err != nil {
+		return true, err
+	}
+	if planHash == "" || p.Hash != planHash {
+		return true, errSetupChanged()
+	}
+	return p.TouchesData, nil
 }
 
 // fixHash is sha256 of v's JSON.
@@ -212,6 +280,9 @@ func fixHash(v any) string {
 type reapplyFolderFixer struct{}
 
 func (reapplyFolderFixer) Kind() string { return doctor.FixReapplyFolder }
+
+// TouchesData (G45): the fix changes group, mode and ACLs on disk.
+func (reapplyFolderFixer) TouchesData() bool { return true }
 
 func (reapplyFolderFixer) fixTarget(_ *Hub, f doctor.Finding, _ map[string]string) string {
 	return strings.Join(f.Folders, ",")
@@ -266,7 +337,7 @@ func (reapplyFolderFixer) Preview(ctx context.Context, h *Hub, f doctor.Finding,
 	return &FixPlan{Lines: plan.Lines, Warnings: plan.Warnings, Assign: plan, Hash: plan.Hash}, nil
 }
 
-func (reapplyFolderFixer) Apply(h *Hub, f doctor.Finding, params map[string]string, planHash, actor string) (*AsyncOp, error) {
+func (reapplyFolderFixer) Apply(h *Hub, f doctor.Finding, params map[string]string, planHash string, actor directory.Actor) (*AsyncOp, error) {
 	if err := checkFixParams(params); err != nil {
 		return nil, err
 	}
@@ -287,6 +358,9 @@ type undoFolderFixer struct{}
 
 func (undoFolderFixer) Kind() string { return doctor.FixUndoFolder }
 
+// TouchesData (G45): the fix changes group, mode and ACLs on disk.
+func (undoFolderFixer) TouchesData() bool { return true }
+
 func (undoFolderFixer) fixTarget(_ *Hub, f doctor.Finding, _ map[string]string) string {
 	return strings.Join(f.Folders, ",")
 }
@@ -306,7 +380,7 @@ func (undoFolderFixer) Preview(ctx context.Context, h *Hub, f doctor.Finding, pa
 	return &FixPlan{Lines: plan.Lines, Warnings: plan.Warnings, Assign: plan, Hash: plan.Hash}, nil
 }
 
-func (undoFolderFixer) Apply(h *Hub, f doctor.Finding, params map[string]string, planHash, actor string) (*AsyncOp, error) {
+func (undoFolderFixer) Apply(h *Hub, f doctor.Finding, params map[string]string, planHash string, actor directory.Actor) (*AsyncOp, error) {
 	if err := checkFixParams(params); err != nil {
 		return nil, err
 	}
@@ -322,6 +396,9 @@ func (undoFolderFixer) Apply(h *Hub, f doctor.Finding, params map[string]string,
 type manageAsFolderFixer struct{}
 
 func (manageAsFolderFixer) Kind() string { return doctor.FixManageAsFolder }
+
+// TouchesData (G45): the fix changes group, mode and ACLs on disk.
+func (manageAsFolderFixer) TouchesData() bool { return true }
 
 func (manageAsFolderFixer) fixTarget(_ *Hub, f doctor.Finding, params map[string]string) string {
 	if in, err := manageInput(f, params); err == nil {
@@ -424,9 +501,9 @@ func (h *Hub) managePlan(ctx context.Context, in FolderInput) (*manageCalc, erro
 	if c.assign, err = h.computeAssignFor(ctx, in.ID, c.req, &c.folder); err != nil {
 		return nil, err
 	}
-	c.lines = append(c.lines, fmt.Sprintf("Shared folder *%s* (id %s) is defined at %s.", in.Name, in.ID, p))
+	c.lines = append(c.lines, fmt.Sprintf("Shared folder %q (id %s) is defined at %q.", in.Name, in.ID, p))
 	for _, e := range c.assign.edits {
-		c.lines = append(c.lines, fmt.Sprintf("%s's %s: %s → %s.", c.assign.names[e.Instance], e.label, e.before, e.Value))
+		c.lines = append(c.lines, fmt.Sprintf("%s's %q: %q → %q.", c.assign.names[e.Instance], e.label, e.before, e.Value))
 	}
 	c.lines = append(c.lines, c.assign.plan.Lines...)
 	c.warns = append(c.warns, c.assign.plan.Warnings...)
@@ -461,7 +538,7 @@ func (manageAsFolderFixer) Preview(ctx context.Context, h *Hub, f doctor.Finding
 // deletes the definition again (its gid stays used: never reused) and
 // answers the refusal. folder.create / folder.delete are audited after
 // the lock is released.
-func (manageAsFolderFixer) Apply(h *Hub, f doctor.Finding, params map[string]string, planHash, actor string) (op *AsyncOp, err error) {
+func (manageAsFolderFixer) Apply(h *Hub, f doctor.Finding, params map[string]string, planHash string, actor directory.Actor) (op *AsyncOp, err error) {
 	in, err := manageInput(f, params)
 	if err != nil {
 		return nil, err
@@ -542,6 +619,9 @@ func noteErr(err error, note string) error {
 type rebindPortFixer struct{}
 
 func (rebindPortFixer) Kind() string { return doctor.FixRebindPort }
+
+// TouchesData (G45): a port bind and a restart: no data, ownership or credential.
+func (rebindPortFixer) TouchesData() bool { return false }
 
 func (rebindPortFixer) fixTarget(h *Hub, f doctor.Finding, _ map[string]string) string {
 	h.mu.RLock()
@@ -683,14 +763,14 @@ func (rebindPortFixer) Preview(ctx context.Context, h *Hub, f doctor.Finding, pa
 // only when the old bind is back and running. A failed down alone (the
 // up worked) is a warning. Audited settings.change (ports)
 // after the lock is released.
-func (rebindPortFixer) Apply(h *Hub, f doctor.Finding, params map[string]string, planHash, actor string) (*AsyncOp, error) {
+func (rebindPortFixer) Apply(h *Hub, f doctor.Finding, params map[string]string, planHash string, actor directory.Actor) (*AsyncOp, error) {
 	ctx := context.Background()
 	c0, err := h.rebindPlan(ctx, f, params)
 	if err != nil {
 		return nil, err
 	}
 	inst := c0.port.Instance
-	return h.startAsync(inst, OpRebind, func(ready func()) (map[string]string, []string, error) {
+	return h.startAsync(inst, OpRebind, actor, func(ready func()) (map[string]string, []string, error) {
 		var changes []settingChange
 		var auditErr error
 		defer func() {

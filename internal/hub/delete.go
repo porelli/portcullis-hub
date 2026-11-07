@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/state"
@@ -44,14 +45,14 @@ func (h *Hub) SetGroups(g Groups) {
 // idempotent: after a failure (an *OpError, the instance stays
 // "deleting") the same call continues where it stopped, keeping the
 // first backup. Audited as instance.delete.
-func (h *Hub) DeleteInstance(id, confirm, actor string) (res *DeleteResult, err error) {
+func (h *Hub) DeleteInstance(id, confirm string, actor directory.Actor) (res *DeleteResult, err error) {
 	return h.deleteInstance(id, confirm, actor, nil)
 }
 
 // deleteInstance is DeleteInstance; ready (if set) is called once the
 // request is accepted (typed id, lock held, instance found, actor
 // resolved), before the delete's backup (StartDelete answers 202 then).
-func (h *Hub) deleteInstance(id, confirm, actor string, ready func()) (res *DeleteResult, err error) {
+func (h *Hub) deleteInstance(id, confirm string, actor directory.Actor, ready func()) (res *DeleteResult, err error) {
 	res = &DeleteResult{}
 	defer func() {
 		detail := "backup=" + res.Backup
@@ -68,26 +69,40 @@ func (h *Hub) deleteInstance(id, confirm, actor string, ready func()) (res *Dele
 		return res, err
 	}
 	defer unlock()
+	// lockApp → aiLock (G35, §15.5): a mint that holds it finishes first
+	// (its entry is dropped in step 6); one that waits sees the instance
+	// deleting, then gone.
+	defer h.lifecycleAILock(id)()
 	h.mu.RLock()
 	tg, ok := h.targetLocked(id)
 	h.mu.RUnlock()
 	if !ok {
 		return res, statusErr(404, "instance not found: %s", id)
 	}
+	// A model provider pointing at it (a litellm provider's instance,
+	// §15.12) would point nowhere: refused until it is deleted or
+	// repointed (a delete in progress continues: nothing can point at a
+	// deleting instance, checkProviderLocked refuses it).
+	h.mu.RLock()
+	pointing := h.providersAtInstanceLocked(id)
+	h.mu.RUnlock()
+	if len(pointing) > 0 && tg.entry.State != state.InstanceDeleting {
+		return res, statusErr(409, "model provider %s uses instance %s: delete it or point it at another instance in Settings → AI first", strings.Join(pointing, ", "), id)
+	}
 	h.mu.RLock()
 	groupsAPI := h.groups
 	h.mu.RUnlock()
 	if groupsAPI != nil {
 		if err := groupsAPI.ResolveActor(context.Background(), actor); err != nil {
-			return res, fmt.Errorf("the acting admin %q can't delete the instance's groups — nothing was deleted: %w", actor, err)
+			return res, fmt.Errorf("the acting admin %q can't delete the instance's groups — nothing was deleted: %w", actor.User, err)
 		}
 	}
 	if ready != nil {
 		ready()
 	}
 	// The store and env are removed part-way: redact what they hold now.
-	extra := h.redactionSet(id)
-	defer func() { err = withSecrets(err, extra) }()
+	extra, unread := h.redactionSetErr(id)
+	defer func() { err = hideIfUnread(withSecrets(err, extra), unread) }()
 	if tg.entry.State == state.InstanceRestoring && tg.entry.RestoreAs != "" {
 		res.Warnings = append(res.Warnings, fmt.Sprintf("%s was being restored from %s and never finished: the delete backup holds its half-restored data", id, tg.entry.RestoreAs))
 	} else if tg.entry.State == state.InstanceRestoring {
@@ -101,7 +116,24 @@ func (h *Hub) deleteInstance(id, confirm, actor string, ready func()) (res *Dele
 			return res, fmt.Errorf("the backup before the delete failed — nothing was deleted: %w", berr)
 		}
 		res.Backup = entry.Archive
+		if h.testHookDeleteBackedUp != nil {
+			h.testHookDeleteBackedUp(id)
+		}
 		h.mu.Lock()
+		// Again under the write lock that commits deleting (fix round 1):
+		// a litellm provider added while the backup ran would point at a
+		// deleted instance. Refused before any state change; the instance
+		// runs again as it did (the backup is kept).
+		if pointing := h.providersAtInstanceLocked(id); len(pointing) > 0 {
+			h.mu.Unlock()
+			err := statusErr(409, "model provider %s uses instance %s: delete it or point it at another instance in Settings → AI first (the backup %s was kept)", strings.Join(pointing, ", "), id, entry.Archive)
+			if tg.enabled && tg.view != nil {
+				if serr := h.startAgain(tg.view); serr != nil {
+					return res, fmt.Errorf("%w — and starting %s again failed: %v", err, id, serr)
+				}
+			}
+			return res, err
+		}
 		e := h.st.Instances[id]
 		if e.ID == "" {
 			e = state.Instance{ID: id, Template: tg.templateID}
@@ -125,13 +157,25 @@ func (h *Hub) deleteInstance(id, confirm, actor string, ready func()) (res *Dele
 	return res, nil
 }
 
-// deleteSteps runs steps 3–6 of §11.4. Caller holds the app lock.
-func (h *Hub) deleteSteps(id, actor string, res *DeleteResult) error {
-	ctx := context.Background()
-	h.mu.RLock()
-	tg, _ := h.targetLocked(id)
-	snap, hasSnap := h.st.Published[id]
-	groupsAPI := h.groups
+// deleteTargets is what a delete of an instance removes (§11.4): its
+// hosts, Keycloak clients and groups, and which groups another instance
+// or template shares (kept). Shared by deleteSteps and DeletePlan.
+type deleteTargets struct {
+	tg      *target
+	snap    state.PublishedApp
+	hasSnap bool
+	hosts   []string
+	clients []string
+	groups  []string
+	shared  map[string]string // group → who else uses it
+}
+
+// deleteTargetsLocked computes id's deleteTargets. Caller holds mu (read).
+func (h *Hub) deleteTargetsLocked(id string) deleteTargets {
+	var d deleteTargets
+	d.tg, _ = h.targetLocked(id)
+	d.snap, d.hasSnap = h.st.Published[id]
+	tg, snap, hasSnap := d.tg, d.snap, d.hasSnap
 	var hosts []string
 	switch {
 	case tg.view != nil:
@@ -169,6 +213,71 @@ func (h *Hub) deleteSteps(id, actor string, res *DeleteResult) error {
 			}
 		}
 	}
+	d.hosts, d.clients, d.groups, d.shared = hosts, clients, groups, shared
+	return d
+}
+
+// DeletePlan is what deleting instance id would do, as the lines a
+// confirmation shows (§15.6, the Portcullis MCP's delete_instance):
+// "Takes a backup, then permanently removes its containers, volumes,
+// Keycloak client and groups users_x, admin_x", then the groups it would
+// keep and why. Nothing changes. Unknown instance: 404.
+func (h *Hub) DeletePlan(id string) ([]string, error) {
+	h.mu.RLock()
+	_, ok := h.targetLocked(id)
+	if !ok {
+		h.mu.RUnlock()
+		return nil, statusErr(404, "instance not found: %s", id)
+	}
+	d := h.deleteTargetsLocked(id)
+	h.mu.RUnlock()
+	parts := []string{"containers", "volumes"}
+	switch len(d.clients) {
+	case 0:
+	case 1:
+		parts = append(parts, "Keycloak client")
+	default:
+		parts = append(parts, "Keycloak clients")
+	}
+	var del, kept []string
+	for _, g := range d.groups {
+		switch {
+		case g == "":
+		case g != "users_"+id && g != "admin_"+id:
+			kept = append(kept, fmt.Sprintf("Keeps group %s: it isn't named users_%s / admin_%s.", g, id, id))
+		case d.shared[g] != "":
+			kept = append(kept, fmt.Sprintf("Keeps group %s: %s uses it too.", g, d.shared[g]))
+		default:
+			del = append(del, g)
+		}
+	}
+	what := strings.Join(parts, ", ")
+	if len(del) > 0 {
+		group := "group"
+		if len(del) > 1 {
+			group = "groups"
+		}
+		what = strings.Join(parts, ", ") + " and " + group + " " + strings.Join(del, ", ")
+	} else if len(parts) > 1 {
+		what = strings.Join(parts[:len(parts)-1], ", ") + " and " + parts[len(parts)-1]
+	}
+	lines := []string{"Takes a backup, then permanently removes its " + what + "."}
+	if d.tg.entry.State == state.InstanceDeleting {
+		lines[0] = "Continues an unfinished delete (its backup " + d.tg.entry.Backup + " is kept), permanently removing its " + what + "."
+	}
+	return append(lines, kept...), nil
+}
+
+// deleteSteps runs steps 3–6 of §11.4. Caller holds the app lock.
+func (h *Hub) deleteSteps(id string, actor directory.Actor, res *DeleteResult) error {
+	ctx := context.Background()
+	h.mu.RLock()
+	dt := h.deleteTargetsLocked(id)
+	tg, snap, hasSnap, hosts, clients, groups, shared := dt.tg, dt.snap, dt.hasSnap, dt.hosts, dt.clients, dt.groups, dt.shared
+	groupsAPI := h.groups
+	// Named before step 3 drops AIInstances[id] (a retry names them from
+	// the template).
+	aiScopes := h.aiScopeNamesLocked(tg)
 	h.mu.RUnlock()
 	if tg.view == nil && (!hasSnap || len(snap.Clients) == 0) {
 		if id != tg.templateID {
@@ -195,15 +304,24 @@ func (h *Hub) deleteSteps(id, actor string, res *DeleteResult) error {
 	for key, users := range h.st.Credentials[id] {
 		for u, c := range users {
 			if c.Active() {
-				gone = append(gone, revocation{key: key, user: u, by: actor, reason: state.CredentialReasonDeleted})
+				gone = append(gone, revocation{key: key, user: u, by: actor.User, reason: state.CredentialReasonDeleted})
 			}
 		}
 	}
 	credErr := h.forgetCredentialsLocked(id)
 	h.mu.Unlock()
+	// Its AI state right then too (§11.4 step 3, G56): every AI
+	// credential entry (audited ai.credential.revoke reason deleted; no
+	// hook — the project is down and the app's tokens go with its
+	// volumes), its oauth-seen records and orphans, AIInstances[id]; the
+	// gate file below drops its resources.
+	aiErr := h.forgetInstanceAI(id, actor)
 	h.writePolicyLogged()
 	if credErr != nil {
 		return fmt.Errorf("removing the per-person passwords: %w", credErr)
+	}
+	if aiErr != nil {
+		return fmt.Errorf("removing the AI state: %w", aiErr)
 	}
 	sort.Slice(gone, func(i, j int) bool {
 		if gone[i].key != gone[j].key {
@@ -212,7 +330,7 @@ func (h *Hub) deleteSteps(id, actor string, res *DeleteResult) error {
 		return gone[i].user < gone[j].user
 	})
 	for _, r := range gone {
-		h.auditOp(actor, revokeAuditAction(r.reason), id+"/"+r.key+"/"+r.user, credentialDetail(id, r.key, r.user, actor, r.reason), nil)
+		h.auditOp(actor, revokeAuditAction(r.reason), id+"/"+r.key+"/"+r.user, credentialDetail(id, r.key, r.user, actor.User, r.reason), nil)
 	}
 	if h.engine == nil {
 		res.Warnings = append(res.Warnings, "Docker is not available: the volumes of "+projectName(id)+" were not removed")
@@ -235,7 +353,8 @@ func (h *Hub) deleteSteps(id, actor string, res *DeleteResult) error {
 	// deliverLock holder ever waits for lockApp).
 	dl := h.deliverLock(id)
 	dl.Lock()
-	err := h.removeInstanceClaims(ctx, h.idp, id, clients, h.instanceClaimAttrs(tg.view, id), res)
+	// The AI page's ai_client carries no setting claims (G10).
+	err := h.removeInstanceClaims(ctx, h.idp, id, withoutAIClients(tg.view, clients), h.instanceClaimAttrs(tg.view, id), res)
 	dl.Unlock()
 	if err != nil {
 		return fmt.Errorf("setting claims: %w", err)
@@ -267,12 +386,24 @@ func (h *Hub) deleteSteps(id, actor string, res *DeleteResult) error {
 			case err != nil:
 				return fmt.Errorf("deleting Keycloak client %s: %w", c, err)
 			}
+			// An ai_client's health goes with it (Task 23).
+			h.forgetAIClientHealth(c)
 		}
 		// Every host's callback (only extra-domain ones exist; removing
 		// an absent URI changes nothing).
 		if err := h.idp.UpdateForwardAuthCallbacks(ctx, nil, callbackURIs(hosts)); err != nil {
 			return fmt.Errorf("Keycloak %s callbacks: %w", keycloak.ForwardAuthClient, err)
 		}
+	}
+
+	// Its mcp:<id>.* scopes (§8: detached from every client first, every
+	// consent naming them goes with them).
+	if h.aiKeycloak() == nil {
+		if len(aiScopes) > 0 {
+			res.Warnings = append(res.Warnings, fmt.Sprintf("Keycloak's AI scope calls are not configured: the client scopes mcp:%s.* were not removed", id))
+		}
+	} else if err := h.deleteAIScopes(ctx, id, aiScopes); err != nil {
+		return fmt.Errorf("Keycloak AI scopes: %w", err)
 	}
 
 	// 5. Groups, through the Users & Groups guardrails.

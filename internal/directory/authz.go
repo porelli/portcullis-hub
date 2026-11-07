@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 
@@ -28,11 +29,73 @@ var delegatedPerms = []string{PermEditDetails, PermInvite, PermRemove}
 
 // Caller is who is making a request, resolved once per request by
 // CallerFor. Admin: member of lldap_admin. Perms: the delegated
-// permissions whose group they are in.
+// permissions whose group they are in. Via / Client: the AI attribution
+// (Actor), set only by CallerAs from the MCP listener's identity.
 type Caller struct {
-	User  string
-	Admin bool
-	Perms map[string]bool
+	User   string
+	Admin  bool
+	Perms  map[string]bool
+	Via    string
+	Client string
+	// Confirmation: the confirmation a Portcullis MCP class-D call
+	// consumed (Actor.Confirmation; set only by CallerAs).
+	Confirmation string
+}
+
+// Actor is who an audited change is attributed to: the person (User, the
+// LLDAP username) and, for changes made through the Portcullis MCP, Via
+// ViaAI and Client (the AI client, the token's azp). Stored or displayed
+// actors (op records, created_by, logs) use User only.
+type Actor struct {
+	User, Via, Client string
+	// Confirmation is the id of the confirmation a Portcullis MCP class-D
+	// call consumed (§15.6), set only on that tool path: every audit
+	// entry of the call carries "confirmation <id>" in its detail
+	// (AuditDetail). Never part of the attribution checks.
+	Confirmation string
+}
+
+// AuditDetail is detail as a's audit entry holds it: with
+// "confirmation <id>" appended when a carries a consumed confirmation.
+func (a Actor) AuditDetail(detail string) string {
+	if a.Confirmation == "" {
+		return detail
+	}
+	if detail == "" {
+		return "confirmation " + a.Confirmation
+	}
+	return detail + "; confirmation " + a.Confirmation
+}
+
+// ViaAI is Actor.Via / AuditEntry.Via for changes made through the AI.
+const ViaAI = "ai"
+
+// Human is the actor of a request made by a person in a browser (or the
+// Hub itself): no AI attribution.
+func Human(user string) Actor { return Actor{User: user} }
+
+// Actor returns c's attribution (zero for a nil Caller).
+func (c *Caller) Actor() Actor {
+	if c == nil {
+		return Actor{}
+	}
+	return Actor{User: c.User, Via: c.Via, Client: c.Client, Confirmation: c.Confirmation}
+}
+
+// Check refuses (403) an actor without a user, a Via other than "" or
+// ViaAI, an AI actor without a client and a client without Via.
+func (a Actor) Check() error {
+	switch {
+	case strings.TrimSpace(a.User) == "":
+		return errNoActor()
+	case a.Via != "" && a.Via != ViaAI:
+		return forbidden("unknown attribution via %q", clip(a.Via))
+	case a.Via == ViaAI && strings.TrimSpace(a.Client) == "":
+		return forbidden("an AI change without its AI client — refusing an unattributable change")
+	case a.Via == "" && a.Client != "":
+		return forbidden("an AI client without via ai — refusing a mis-attributed change")
+	}
+	return nil
 }
 
 func forbidden(format string, a ...interface{}) error {
@@ -88,6 +151,22 @@ func (s *Service) CallerFor(ctx context.Context, user string) (*Caller, error) {
 	return c, nil
 }
 
+// CallerAs is CallerFor for an Actor (the MCP listener's identity): the
+// permissions are resolved from a.User exactly as CallerFor does, and the
+// Caller keeps a.Via / a.Client so every audit entry of the request is
+// attributed to the AI client. An invalid actor is refused (Actor.Check).
+func (s *Service) CallerAs(ctx context.Context, a Actor) (*Caller, error) {
+	if err := a.Check(); err != nil {
+		return nil, err
+	}
+	c, err := s.CallerFor(ctx, a.User)
+	if err != nil {
+		return nil, err
+	}
+	c.Via, c.Client, c.Confirmation = a.Via, a.Client, a.Confirmation
+	return c, nil
+}
+
 // gate is the authorization step of every mutation (called by run, inside
 // the lock and the audited section). The Caller was resolved before the
 // lock, so admin membership and delegated permissions are re-checked
@@ -122,6 +201,28 @@ func (s *Service) gate(ctx context.Context, c *Caller, perm, target string) erro
 		return forbidden("not allowed: needs %s", perm)
 	}
 	return s.authorize(c, perm, target, sn, cfg)
+}
+
+// CheckDelegate is gate's decision for perm on target, read only (no
+// lock, no audit, nothing changed): nil when c may run the operation
+// now, else the refusal the operation itself would answer (403). The
+// Portcullis MCP's delegate tools ask it before a confirmation, so a
+// refused target never gets one; the operation still runs gate itself.
+// perm must be a delegated permission.
+func (s *Service) CheckDelegate(ctx context.Context, c *Caller, perm, target string) error {
+	if c == nil {
+		return errNoActor()
+	}
+	if !slices.Contains(delegatedPerms, perm) {
+		return forbidden("not allowed: admins only")
+	}
+	if err := s.LLDAP.Available(); err != nil {
+		return &Error{Status: http.StatusServiceUnavailable, Msg: err.Error()}
+	}
+	if err := s.gate(ctx, c, perm, target); err != nil {
+		return err
+	}
+	return s.checkTarget(target)
 }
 
 // authorize decides whether c may run an operation needing perm on the

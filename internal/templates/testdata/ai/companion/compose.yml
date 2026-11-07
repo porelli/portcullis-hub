@@ -1,0 +1,20 @@
+services:
+  app:
+    image: app
+    environment:
+      APP_AI: ${PORTCULLIS_AI_ENABLED:-false}
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.app.rule: Host(`${PORTCULLIS_HOST_APP:-app.portcullis.local}`)
+      traefik.http.routers.app.entrypoints: websecure
+      traefik.http.routers.app.middlewares: portcullis-auth@docker,portcullis-groups@docker
+      traefik.http.services.app.loadbalancer.server.port: "3000"
+    networks: [default, portcullis-proxy]
+  app-mcp:
+    image: app-mcp
+    environment:
+      READONLY: ${PORTCULLIS_AI_READONLY_APP:-true}
+    networks: [default]
+networks:
+  portcullis-proxy:
+    external: true

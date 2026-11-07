@@ -51,10 +51,12 @@ const (
 	FixNone     FixClass = ""
 )
 
-// Link opens the settings panel at an option.
+// Link opens the settings panel at an option, or (Tab set, contract
+// §14.5 NEW) a tab of the instance — today only "ai" (TabAI).
 type Link struct {
 	Instance string `json:"instance"`
 	Option   string `json:"option"`
+	Tab      string `json:"tab,omitempty"`
 }
 
 // Finding is one thing the doctor found.
@@ -77,6 +79,9 @@ type Finding struct {
 	Steps     []string `json:"steps,omitempty"` // explain-only instructions
 	Link      *Link    `json:"link,omitempty"`
 	Partial   bool     `json:"partial,omitempty"`
+	// Dismiss: people the finding lists who an administrator dismisses
+	// once handled (POST /api/instances/{id}/ai/dismiss; T27).
+	Dismiss []Dismiss `json:"dismiss,omitempty"`
 	// Inputs is the digest of what produced the finding; Run folds the
 	// severity in, so a mute never hides a finding whose severity rose.
 	Inputs string `json:"-"`
@@ -85,6 +90,13 @@ type Finding struct {
 	// changed since (H8).
 	Token string `json:"token"`
 	Muted *Mute  `json:"muted,omitempty"`
+}
+
+// Dismiss is one dismissable person of a finding.
+type Dismiss struct {
+	Instance  string `json:"instance"`
+	Companion string `json:"companion"`
+	User      string `json:"user"`
 }
 
 // Mute is an admin's mute of a finding: it holds while the finding's
@@ -216,6 +228,8 @@ type Inputs struct {
 	Unverifiable []UnverifiableIn
 	// FileSharing: the file-sharing instances (filesharing.go).
 	FileSharing []FileSharingIn
+	// AI: the companions the AI checks judge (ai.go, plan 4 Task 20).
+	AI []AIIn
 }
 
 // UnverifiableIn is one active credential the holder check can't verify
@@ -251,6 +265,21 @@ func checks() []Check {
 	regMu.RLock()
 	defer regMu.RUnlock()
 	return append([]Check(nil), registry...)
+}
+
+// Kinds is the check catalogue: every registered kind, sorted, once
+// each (the Portcullis MCP's portcullis://doctor/checks resource).
+func Kinds() []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, c := range checks() {
+		if k := c.Kind(); !seen[k] {
+			seen[k] = true
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // Fingerprint is the first 16 hex digits of sha256(kind \x00 subjects

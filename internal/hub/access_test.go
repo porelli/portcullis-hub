@@ -14,6 +14,7 @@ import (
 
 const plexManifest = `name: Plex
 category: media
+ai: {unsupported: "test fixture"}
 auth:
   method: custom
   sso: false
@@ -27,11 +28,11 @@ auth:
 
 const plexCompose = "services:\n  plex:\n    image: x\n    labels:\n      traefik.http.routers.plex.rule: Host(`plex.${PORTCULLIS_DOMAIN:-x}`)\n      traefik.http.routers.plex.entrypoints: websecure\n      traefik.http.routers.plex.tls.options: public@file\n      traefik.http.routers.plex.middlewares: security-headers@file\n"
 
-const vaultManifest = "name: Vault\ncategory: security\nauth:\n  method: mtls\n  sso: false\n"
+const vaultManifest = "name: Vault\ncategory: security\nai: {unsupported: test fixture}\nauth:\n  method: mtls\n  sso: false\n"
 
 const vaultCompose = "services:\n  v:\n    image: x\n    labels:\n      traefik.http.routers.vault.rule: Host(`vault.${PORTCULLIS_DOMAIN}`)\n      traefik.http.routers.vault.tls.options: protected@file\n"
 
-const docsManifest = "name: Docs\ncategory: public\nauth:\n  method: public\n  sso: false\n"
+const docsManifest = "name: Docs\ncategory: public\nai: {unsupported: test fixture}\nauth:\n  method: public\n  sso: false\n"
 
 const docsCompose = "services:\n  d:\n    image: x\n    labels:\n      traefik.http.routers.docs.rule: Host(`docs.${PORTCULLIS_DOMAIN}`)\n"
 

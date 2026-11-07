@@ -9,8 +9,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/portcullis/hub/internal/confirm"
 	"html"
 	"io"
 	"maps"
@@ -33,7 +35,11 @@ import (
 	"github.com/portcullis/hub/internal/folderfix"
 	"github.com/portcullis/hub/internal/freshauth"
 	"github.com/portcullis/hub/internal/hub"
+	"github.com/portcullis/hub/internal/keycloak"
+	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/state"
+
+	"filippo.io/age"
 )
 
 // TestHarness serves the Hub UI against the in-memory fakes (LLDAP,
@@ -87,6 +93,29 @@ import (
 //     message to its parent. A people-listener request's harness_user
 //     cookie picks the user (after X-Harness-User).
 //
+// AI support (plan 4 Task 21; My apps' "Connect your AI" card): the
+// master switch on with a gate recipient, all three AI clients offered
+// and healthy (Claude with the admin flag), the people MCP off (so a
+// person without an AI app sees no card; Settings → AI turns it on);
+// aiapp (Tokens: app_token read and write, Headers: identity_headers
+// read only; users_aiapp: alice, bob) and homeauto ("Home Assistant",
+// app_oauth; users_homeauto: alice) are enabled with every companion on.
+// The AI Keycloak is a fake holding alice's Claude and Claude Code
+// connections and bob's Claude one (Disconnect removes them); the
+// access log has alice's recent requests (one tool name carrying
+// markup) and one of bob's.
+//
+// Admin AI UI (plan 4 Task 22): the MCP listener is on (gate_present);
+// ai-chat (the templates package's AI page fixture: openai_compatible and
+// anthropic) selects two model providers, "ollama" (no key: optional)
+// and "claude" (a label carrying markup, its key set); users_ai-chat:
+// alice, bob, carol. The AI tab's four states: plain (the templates
+// package's unsupported fixture, with an alternative not vetted by
+// Portcullis), aiapp-off (an enabled aiapp instance, companions off),
+// aiapp (on) and aiapp-mtls (policy mTLS: refused, LoA 3). Two audit
+// entries via AI (Claude Code): aiapp-off's mode change and the
+// refused switch-on of aiapp-mtls.
+//
 // The directory: root (admin), dana, alice, bob, carol, dave, erin and
 // user01-user55; groups office_milan (alice, bob, erin), it_staff (bob,
 // user07), helpers, and the fixtures' access and admin groups.
@@ -124,6 +153,11 @@ func TestHarness(t *testing.T) {
 	extra["photos"] = [2]string{folderAppManifest, folderAppCompose}
 	extra["samba"] = [2]string{harnessSambaManifest, harnessSambaCompose}
 	extra["smbfixture"] = harnessSMBFixture(t)
+	// AI support (plan 4 Task 21): aiapp and homeauto (an app_oauth app).
+	extra["aiapp"], extra["homeauto"] = harnessAIFixtures(t)
+	extra["ai-chat"], extra["plain"] = harnessAIPageFixtures(t)
+	aiDir := t.TempDir()
+	aiRecipient, aiGateData := harnessAIFiles(t, aiDir)
 	paddr := os.Getenv("HUB_HARNESS_PEOPLE_ADDR")
 	if paddr == "" {
 		paddr = "127.0.0.1:18889"
@@ -138,11 +172,21 @@ func TestHarness(t *testing.T) {
 		extra: extra,
 		engine: func(f *fakeEngine) hub.Engine {
 			eng = &harnessEngine{fakeEngine: f, disk: disk,
-				running: map[string][]string{"hookapp": {"app"}, "entryapp": {"app"}, "photos": {"server"}, "samba": {"samba"}, "smbfixture": {"smb"}}}
+				running: map[string][]string{"hookapp": {"app"}, "entryapp": {"app"}, "photos": {"server"}, "samba": {"samba"}, "smbfixture": {"smb"},
+					// aiapp's hooks run in its app service (the tok-mcp
+					// companion isn't running: the doctor's AI finding).
+					"aiapp": {"app"}}}
 			return eng
 		},
-		cfg: func(c *hub.Config) { c.FixerImage = testFixerImage; c.SecretsDir = secrets },
+		cfg: func(c *hub.Config) {
+			c.FixerImage = testFixerImage
+			c.SecretsDir = secrets
+			c.MCPGateRecipientFile = aiRecipient
+			c.MCPGateDataDir = aiGateData
+			c.MCPListener = true
+		},
 		seed: func(st *state.AppState) {
+			seedAIState(st)
 			// alice's file-share password was voided by a restore.
 			voided := time.Now().UTC().Add(-26 * time.Hour)
 			st.Credentials = map[string]map[string]map[string]state.Credential{"smbfixture": {"share_password": {"alice": {
@@ -155,18 +199,19 @@ func TestHarness(t *testing.T) {
 		},
 	})
 	h := e.s.Hub
-	for _, id := range append(slices.Clone(harnessFixtures), "photos", "samba", "smbfixture") {
+	for _, id := range append(slices.Clone(harnessFixtures), "photos", "samba", "smbfixture", "aiapp", "homeauto", "ai-chat", "plain") {
 		if h.Template(id) == nil {
 			t.Fatalf("fixture %s not loaded (see the log)", id)
 		}
 	}
 	seedDirectory(e)
 	h.SetPeople(harnessPeople{e.s.Directory})
+	seedAI(h)
 
 	// Seed: two extra instances, one enabled, with data; backups, one of
 	// a deleted instance.
 	for _, c := range []struct{ tmpl, id string }{{"grafana", "grafana-team-a"}, {"home", "home-b"}, {"grafana", "grafana-old"}} {
-		if _, err := h.CreateInstanceAs(c.tmpl, c.id, nil, "root"); err != nil {
+		if _, err := h.CreateInstanceAs(c.tmpl, c.id, nil, directory.Human("root")); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -175,17 +220,19 @@ func TestHarness(t *testing.T) {
 	if err := h.Enable("grafana-team-a"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.BackupInstance("grafana-team-a", "root"); err != nil {
+	if _, err := h.BackupInstance("grafana-team-a", directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(1100 * time.Millisecond)
-	if _, err := h.DeleteInstance("grafana-old", "grafana-old", "root"); err != nil {
+	if _, err := h.DeleteInstance("grafana-old", "grafana-old", directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
+	seedAIAdmin(t, h)
 	seedSettings(t, h, eng)
 	seedEntries(t, e)
 	seedFolders(t, h, disk)
 	fa := seedFileSharing(t, h, paddr)
+	hfa := seedConfirmations(t, h, addr, paddr)
 
 	d, err := time.ParseDuration(os.Getenv("HUB_HARNESS_FOR"))
 	if err != nil {
@@ -202,6 +249,7 @@ func TestHarness(t *testing.T) {
 		fmt.Fprintln(w, "hook apply now exits 1")
 	})
 	mux.HandleFunc("GET /harness/evil", harnessEvilPage)
+	mux.HandleFunc("GET /harness/authorize", hfa.authorizePage)
 	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		r.Header.Set(ProxySecretHeader, testSecret)
 		r.Header.Set("X-Forwarded-User", "root")
@@ -274,6 +322,13 @@ func seedDirectory(e *instEnv) {
 		e.ll.AddGroup("users_"+id, "root", "alice", "bob", "carol")
 		e.ll.AddGroup("admin_"+id, "root", "dave")
 	}
+	e.ll.AddGroup("users_aiapp", "alice", "bob")
+	e.ll.AddGroup("admin_aiapp", "root")
+	e.ll.AddGroup("users_homeauto", "alice")
+	e.ll.AddGroup("users_ai-chat", "alice", "bob", "carol")
+	e.ll.AddGroup("users_aiapp-off", "alice", "carol")
+	e.ll.AddGroup("users_aiapp-mtls", "bob")
+	e.ll.AddGroup("admin_homeauto", "root")
 	e.ll.AddGroup("users_dash", "alice", "bob")
 	e.ll.AddGroup("admin_dash", "root")
 	e.ll.AddGroup("users_immich", "alice", "bob", "carol")
@@ -300,7 +355,7 @@ func seedEntries(t *testing.T, e *instEnv) {
 	if err := h.Enable("entryapp"); err != nil {
 		t.Fatalf("enabling entryapp: %v", err)
 	}
-	if _, err := h.SetPersonValue(context.Background(), "entryapp", "ext_id", "carol", json.RawMessage(`"`+harnessCarolExt+`"`), "carol"); err != nil {
+	if _, err := h.SetPersonValue(context.Background(), "entryapp", "ext_id", "carol", json.RawMessage(`"`+harnessCarolExt+`"`), directory.Human("carol")); err != nil {
 		t.Fatalf("seeding carol's ext_id: %v", err)
 	}
 	e.ll.RemoveMember("entryapp", "carol")
@@ -322,18 +377,18 @@ func seedSettings(t *testing.T, h *hub.Hub, eng *harnessEngine) {
 		}}},
 		Values:  map[string]json.RawMessage{"greeting": raw("Welcome back")},
 		Secrets: map[string]hub.SecretChange{"api_token": {Value: &tok}},
-	}, "root"); err != nil {
+	}, directory.Human("root")); err != nil {
 		t.Fatalf("seeding tmfixture: %v", err)
 	}
 	if _, err := h.SaveSettings("privapp", hub.SettingsUpdate{
 		Groups: map[string][]hub.GroupValueInput{"libraries": {{Group: "office_milan", Value: raw([]string{"photos", "projects"})}}},
 		Values: map[string]json.RawMessage{"motd": raw("Maintenance on Sunday")},
-	}, "root"); err != nil {
+	}, directory.Human("root")); err != nil {
 		t.Fatalf("seeding privapp: %v", err)
 	}
 	// Enabled once, so its person options are seeded (the {{ADMIN_GROUP}}
 	// row of role), then disabled again.
-	if _, err := h.EnableAs("privapp", "root"); err != nil {
+	if _, err := h.EnableAs("privapp", directory.Human("root")); err != nil {
 		t.Fatalf("enabling privapp: %v", err)
 	}
 	if err := h.Disable("privapp"); err != nil {
@@ -345,7 +400,7 @@ func seedSettings(t *testing.T, h *hub.Hub, eng *harnessEngine) {
 		Person: map[string]hub.PersonChange{"seats": {Default: raw(1), Rows: []hub.GroupValueInput{
 			{Group: "office_milan", Value: raw(3)}, {Group: "it_staff", Value: raw(5)},
 		}}},
-	}, "root"); err != nil {
+	}, directory.Human("root")); err != nil {
 		t.Fatalf("seeding hookapp: %v", err)
 	}
 	eng.hookOK.Store(true)
@@ -354,7 +409,7 @@ func seedSettings(t *testing.T, h *hub.Hub, eng *harnessEngine) {
 	}
 	h.Wait()
 	eng.hookOK.Store(false)
-	if _, err := h.RetryDeliveries(context.Background(), "hookapp", "root"); err != nil {
+	if _, err := h.RetryDeliveries(context.Background(), "hookapp", directory.Human("root")); err != nil {
 		t.Logf("hookapp delivery (expected to fail): %v", err)
 	}
 }
@@ -445,6 +500,7 @@ func (p harnessPeople) PrivilegeProblem(ctx context.Context, group string) (stri
 const harnessSambaManifest = `name: Samba
 category: files
 instances: multi
+ai: {unsupported: "test fixture"}
 auth:
   method: header-auth
   group_access: true
@@ -488,7 +544,7 @@ func seedFolders(t *testing.T, h *hub.Hub, disk *harnessDisk) {
 	}
 	// samba-office: a second (disabled) writer, free for the browser's
 	// assignment.
-	if _, err := h.CreateInstanceAs("samba", "samba-office", nil, "root"); err != nil {
+	if _, err := h.CreateInstanceAs("samba", "samba-office", nil, directory.Human("root")); err != nil {
 		t.Fatalf("creating samba-office: %v", err)
 	}
 	for _, p := range []string{"/srv/media", "/srv/scans", "/srv/photos", "/srv/projects"} {
@@ -502,7 +558,7 @@ func seedFolders(t *testing.T, h *hub.Hub, disk *harnessDisk) {
 		{"media", "Family media", "/srv/media", "Photos and videos of the family.", []hub.FolderUse{{Instance: "photos", Key: "extra"}}},
 		{"scans", "Old <b>scans</b>", "/srv/scans", "Scanned <i>letters</i>.", []hub.FolderUse{{Instance: "samba", Key: "share", Subpath: "letters"}}},
 	} {
-		if _, _, err := h.CreateFolder(ctx, hub.FolderInput{ID: f.id, Name: f.name, Path: f.path, Description: f.desc}, "root"); err != nil {
+		if _, _, err := h.CreateFolder(ctx, hub.FolderInput{ID: f.id, Name: f.name, Path: f.path, Description: f.desc}, directory.Human("root")); err != nil {
 			t.Fatalf("creating folder %s: %v", f.id, err)
 		}
 		req := hub.AssignRequest{Uses: f.uses}
@@ -510,7 +566,7 @@ func seedFolders(t *testing.T, h *hub.Hub, disk *harnessDisk) {
 		if err != nil {
 			t.Fatalf("previewing %s: %v", f.id, err)
 		}
-		op, err := h.StartAssign(f.id, req, plan.Hash, "root")
+		op, err := h.StartAssign(f.id, req, plan.Hash, directory.Human("root"))
 		if err != nil {
 			t.Fatalf("assigning %s: %v", f.id, err)
 		}
@@ -519,7 +575,7 @@ func seedFolders(t *testing.T, h *hub.Hub, disk *harnessDisk) {
 		}
 	}
 	disk.drift("/srv/scans", 37)
-	op, err := h.StartDoctorScan("root")
+	op, err := h.StartDoctorScan(directory.Human("root"))
 	if err != nil {
 		t.Fatalf("doctor scan: %v", err)
 	}
@@ -792,10 +848,10 @@ func harnessSMBFixture(t *testing.T) [2]string {
 func seedFileSharing(t *testing.T, h *hub.Hub, paddr string) *harnessFreshAuth {
 	t.Helper()
 	fa := &harnessFreshAuth{base: "http://" + paddr, codes: map[string]harnessCode{}}
-	h.SetFreshAuth(fa)
+	h.SetFreshAuth(hub.ListenerPeople, fa)
 	h.SetFreshAuthReadyForTest(true)
 	raw, _ := json.Marshal("nas.home.arpa")
-	if _, err := h.SaveSettings("smbfixture", hub.SettingsUpdate{Values: map[string]json.RawMessage{"connect_address": raw}}, "root"); err != nil {
+	if _, err := h.SaveSettings("smbfixture", hub.SettingsUpdate{Values: map[string]json.RawMessage{"connect_address": raw}}, directory.Human("root")); err != nil {
 		t.Fatalf("seeding smbfixture: %v", err)
 	}
 	if err := h.Enable("smbfixture"); err != nil {
@@ -816,6 +872,52 @@ func seedFileSharing(t *testing.T, h *hub.Hub, paddr string) *harnessFreshAuth {
 	return fa
 }
 
+// seedConfirmations (plan 4 Task 14) wires the Hub listener's fake fresh
+// auth (its own /harness/authorize, signing in root) and seeds four
+// pending confirmations: two companion-style ones for the people user
+// (an argument carrying markup; typed check "AI App") and two admin ones
+// for root on the Hub listener (typed check "grafana-team-a"). Their
+// local URLs are logged.
+func seedConfirmations(t *testing.T, h *hub.Hub, addr, paddr string) *harnessFreshAuth {
+	t.Helper()
+	hfa := &harnessFreshAuth{base: "http://" + addr, as: "root", codes: map[string]harnessCode{}}
+	h.SetFreshAuth(hub.ListenerHub, hfa)
+	puser := os.Getenv("HUB_HARNESS_PEOPLE_USER")
+	if puser == "" {
+		puser = "alice"
+	}
+	digest := func(s string) string { sum := sha256.Sum256([]byte(s)); return hex.EncodeToString(sum[:]) }
+	for i, c := range []struct {
+		user, listener, tool, args, typed, label, base string
+		cons                                           []string
+	}{
+		{puser, hub.ListenerPeople, "delete_repo", `{"name":"<script>alert('xss-confirm')</script>","owner":"alice"}`, "AI App", "Tokens on AI App (aiapp.example.org)", paddr,
+			[]string{"Runs delete_repo once on AI App (aiapp.example.org) as you, with exactly the arguments below.", "AI App asks you to confirm every call of delete_repo."}},
+		{puser, hub.ListenerPeople, "delete_branch", `{"branch":"feature/x","repo":"site"}`, "AI App", "Tokens on AI App (aiapp.example.org)", paddr,
+			[]string{"Runs delete_branch once on AI App (aiapp.example.org) as you, with exactly the arguments below."}},
+		{"root", hub.ListenerHub, "delete_instance", `{"id":"grafana-team-a"}`, "grafana-team-a", "instance grafana-team-a", addr,
+			[]string{"Takes a backup, then permanently removes its containers, volumes, Keycloak client and groups users_grafana-team-a, admin_grafana-team-a"}},
+		{"root", hub.ListenerHub, "restore_instance", `{"backup":"2026-11-06T10:00:00Z","id":"grafana-team-a"}`, "grafana-team-a", "instance grafana-team-a", addr,
+			[]string{"Stops grafana-team-a and replaces its data with the backup's."}},
+	} {
+		res := "https://people.example.org/mcp"
+		if c.listener == hub.ListenerHub {
+			res = "https://hub.example.org/mcp"
+		}
+		if c.listener == hub.ListenerPeople {
+			res = "https://aiapp.example.org/mcp"
+		}
+		cf, err := h.CreateConfirmation(directory.Actor{User: c.user, Via: directory.ViaAI, Client: "portcullis-ai-claude"}, confirm.Request{
+			User: c.user, Client: "portcullis-ai-claude", Resource: res, Tool: c.tool, ArgsSHA256: digest(c.args), ArgsPreview: c.args,
+			Listener: c.listener, Typed: c.typed, Label: c.label, Consequences: c.cons})
+		if err != nil {
+			t.Fatalf("seeding confirmation %d: %v", i, err)
+		}
+		t.Logf("confirmation %d (%s, %s): http://%s/confirm/%s", i, c.user, c.tool, c.base, cf.ID)
+	}
+	return hfa
+}
+
 // harnessCode is one code the fake sign-in page handed out.
 type harnessCode struct{ challenge, nonce, user string }
 
@@ -824,7 +926,10 @@ type harnessCode struct{ challenge, nonce, user string }
 // accepts a code that page issued, once, when the posted verifier's S256
 // is the code's challenge and the nonce is the one the page was given.
 type harnessFreshAuth struct {
-	base  string // the people listener, http://host:port
+	base string // the listener, http://host:port
+	// as: the user the fake page signs in (""= the people listener's:
+	// the harness_user cookie, HUB_HARNESS_PEOPLE_USER, else alice).
+	as    string
 	mu    sync.Mutex
 	codes map[string]harnessCode
 	n     int
@@ -892,6 +997,9 @@ func (f *harnessFreshAuth) authorizePage(w http.ResponseWriter, r *http.Request)
 	if u := os.Getenv("HUB_HARNESS_PEOPLE_USER"); u != "" && user == "alice" {
 		user = u
 	}
+	if f.as != "" {
+		user = f.as
+	}
 	f.mu.Lock()
 	f.n++
 	code := fmt.Sprintf("harness-code-%d-%d", f.n, time.Now().UnixNano())
@@ -926,4 +1034,162 @@ if (window.parent !== window) window.parent.postMessage(m, '*');
 if (window.opener) window.opener.postMessage(m, '*');
 document.body.append(' posted');
 </script></body></html>`, state)
+}
+
+// harnessAIFixtures are the AI apps: the Hub's aiapp test template and
+// the templates package's app_oauth fixture as "Home Assistant" with an
+// access group.
+func harnessAIFixtures(t *testing.T) (aiapp, homeauto [2]string) {
+	t.Helper()
+	read := func(dir string) [2]string {
+		m, err := os.ReadFile(filepath.Join(dir, "manifest.yaml"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		c, err := os.ReadFile(filepath.Join(dir, "compose.yml"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return [2]string{string(m), string(c)}
+	}
+	aiapp = read(filepath.Join("..", "hub", "testdata", "ai", "aiapp"))
+	homeauto = read(filepath.Join("..", "templates", "testdata", "ai", "oauth"))
+	m := strings.Replace(homeauto[0], "name: OAuth App\n", "name: Home Assistant\n", 1)
+	m = strings.Replace(m, "      label: OAuth App\n", "      label: Home Assistant\n", 1)
+	m = strings.Replace(m, "  group_access: true\n", "  group_access: true\n  access_group: users_homeauto\n", 1)
+	m = strings.Replace(m, "      path: /mcp\n", "      path: /api/mcp\n", 1)
+	homeauto[0] = m
+	return aiapp, homeauto
+}
+
+// harnessAIFiles writes the gate's age recipient and its data directory
+// with the access log (alice's lines, newest last, and one of bob's).
+func harnessAIFiles(t *testing.T, dir string) (recipient, data string) {
+	t.Helper()
+	id, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	recipient = filepath.Join(dir, "age.pub")
+	if err := os.WriteFile(recipient, []byte(id.Recipient().String()+"\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	data = filepath.Join(dir, "mcp-gate-data")
+	if err := os.MkdirAll(data, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	var b strings.Builder
+	for i, l := range []struct{ user, via, instance, companion, resource, tool, decision string }{
+		{"alice", "aggregate", "aiapp", "tok", "https://aiapp.example.org/mcp", "list_issues", "allow"},
+		{"alice", "aggregate", "aiapp", "tok", "https://aiapp.example.org/mcp", "search_repos", "allow"},
+		{"bob", "direct", "aiapp", "tok", "https://aiapp.example.org/mcp", "tool_of_bob", "allow"},
+		{"alice", "direct", "aiapp", "hdr", "https://aiapp.example.org/hdr/mcp", "<img src=x onerror=alert('xss-activity')>", "deny:read_only"},
+		{"alice", "aggregate", "aiapp", "tok", "https://aiapp.example.org/mcp", "delete_repository", "confirm:ABCD-EFGH-IJKL-MNOP-QRST-UVWX-YZ"},
+		{"alice", "direct", "", "", "https://people.example.org/mcp", "my_apps", "allow"},
+	} {
+		line, _ := json.Marshal(map[string]any{"time": now.Add(time.Duration(i-6) * time.Minute).Format(time.RFC3339), "user": l.user,
+			"client": "portcullis-ai-claude", "resource": l.resource, "instance": l.instance, "companion": l.companion, "via": l.via,
+			"method": "tools/call", "tool": l.tool, "args_sha256": strings.Repeat("ab", 32), "decision": l.decision, "upstream_status": 200, "duration_ms": 42})
+		b.Write(append(line, '\n'))
+	}
+	if err := os.WriteFile(filepath.Join(data, hub.AccessLogName), []byte(b.String()), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	return recipient, data
+}
+
+// seedAIState switches AI support on (state): the master switch, Claude
+// with the admin flag, the people MCP off, aiapp and homeauto enabled
+// with every companion on.
+func seedAIState(st *state.AppState) {
+	st.AI.Enabled = true
+	st.AI.Clients.Claude.Admin = true
+	st.AI.PortcullisPeople = false
+	st.Enabled = append(st.Enabled, "aiapp", "homeauto")
+	st.AIInstances = map[string]state.AIInstance{
+		"aiapp":    {Companions: map[string]state.AICompanion{"tok": {Enabled: true, Mode: "read_write"}, "hdr": {Enabled: true, Mode: "read_only"}}},
+		"homeauto": {Companions: map[string]state.AICompanion{"oauth": {Enabled: true, Mode: "read_write"}}},
+		// The AI page's provider selection (Task 23 writes it through the
+		// API; seedAIAdmin adds the providers).
+		"ai-chat": {Providers: []string{"ollama", "claude"}},
+	}
+}
+
+// harnessAIPageFixtures: the templates package's AI page (ai-chat, with
+// an access group) and its unsupported fixture (plain).
+func harnessAIPageFixtures(t *testing.T) (chat, plain [2]string) {
+	t.Helper()
+	read := func(dir string) [2]string {
+		m, err := os.ReadFile(filepath.Join("..", "templates", "testdata", "ai", dir, "manifest.yaml"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		c, err := os.ReadFile(filepath.Join("..", "templates", "testdata", "ai", dir, "compose.yml"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return [2]string{string(m), string(c)}
+	}
+	chat, plain = read("chat"), read("unsupported")
+	chat[0] = strings.Replace(chat[0], "access_group: users_chat", "access_group: users_ai-chat", 1)
+	return chat, plain
+}
+
+// seedAIAdmin seeds the admin AI UI (Task 22): two model providers (the
+// claude one with its key set) selected by ai-chat, the instances
+// aiapp-off (enabled, companions off) and aiapp-mtls (policy mTLS), and
+// two audit entries made via AI.
+func seedAIAdmin(t *testing.T, h *hub.Hub) {
+	t.Helper()
+	root := directory.Human("root")
+	for _, p := range []state.ModelProvider{
+		{Name: "ollama", Label: "Ollama on the GPU box", Kind: "openai_compatible", BaseURL: "http://gpu.lan:11434/v1",
+			Models: state.ProviderModels{Fetch: true, List: []string{"llama3.3:70b", "qwen3:32b"}}, Credentials: "admin"},
+		{Name: "claude", Label: "Anthropic <b>Claude</b>", Kind: "anthropic",
+			Models: state.ProviderModels{List: []string{"claude-opus-4-5"}}, Credentials: "admin"},
+	} {
+		if _, err := h.AddModelProvider(p, root); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, _, err := h.SetProviderSecret("claude", "key", []byte("sk-ant-HARNESS-NEVER-SHOWN"), root); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"aiapp-off", "aiapp-mtls"} {
+		if _, err := h.CreateInstanceAs("aiapp", id, nil, root); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := h.Enable("aiapp-off"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.SaveSettings("aiapp-mtls", hub.SettingsUpdate{Policy: &policy.AuthPolicy{Factors: []string{"mtls"}, Op: "any"}}, root); err != nil {
+		t.Fatal(err)
+	}
+	viaAI := directory.Actor{User: "root", Via: directory.ViaAI, Client: keycloak.AIClientIDs.ClaudeCode}
+	ctx := context.Background()
+	if _, err := h.UpdateInstanceAI(ctx, "aiapp-off", hub.InstanceAIUpdate{Companions: map[string]hub.CompanionUpdate{"tok": {Mode: ptrTo("read_only")}}}, viaAI); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.UpdateInstanceAI(ctx, "aiapp-mtls", hub.InstanceAIUpdate{Companions: map[string]hub.CompanionUpdate{"tok": {Enabled: ptrTo(true)}}}, viaAI); err == nil {
+		t.Fatal("aiapp-mtls: switching AI on was not refused")
+	}
+}
+
+func ptrTo[T any](v T) *T { return &v }
+
+// seedAI wires the AI Keycloak fake (alice's and bob's connections) and
+// marks the three AI clients healthy.
+func seedAI(h *hub.Hub) {
+	now := time.Now().UTC()
+	at := func(d time.Duration) *time.Time { x := now.Add(d).Truncate(time.Second); return &x }
+	h.SetAIKeycloak(&peopleConnKC{conns: map[string][]keycloak.AIConnection{
+		"alice": {
+			{Client: keycloak.AIClientIDs.Claude, Consented: at(-72 * time.Hour), LastUsed: at(-2 * time.Minute), Expires: at(27 * 24 * time.Hour)},
+			{Client: keycloak.AIClientIDs.ClaudeCode, Consented: at(-26 * time.Hour), LastUsed: at(-5 * time.Hour), Expires: at(6 * 24 * time.Hour)},
+		},
+		"bob": {{Client: keycloak.AIClientIDs.Claude, Consented: at(-time.Hour), LastUsed: at(-time.Hour), Expires: at(29 * 24 * time.Hour)}},
+	}})
+	h.SetAIClientHealth(map[string]bool{keycloak.AIClientIDs.Claude: true, keycloak.AIClientIDs.ClaudeCode: true, keycloak.AIClientIDs.Generic: true})
 }

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/doctor"
 	"github.com/portcullis/hub/internal/state"
@@ -208,24 +209,24 @@ func TestMuteAudited(t *testing.T) {
 	}
 	// H8: the token is the finding as the admin saw it; another one (the
 	// finding changed since) is 409, a missing one 400.
-	if err := f.h.MuteFinding(ctx, fp, "known", "root", strings.Repeat("0", 64)); statusOf(err) != 409 || !strings.Contains(err.Error(), "the finding changed since you saw it") {
+	if err := f.h.MuteFinding(ctx, fp, "known", directory.Human("root"), strings.Repeat("0", 64)); statusOf(err) != 409 || !strings.Contains(err.Error(), "the finding changed since you saw it") {
 		t.Errorf("stale token = %v", err)
 	}
-	if err := f.h.MuteFinding(ctx, fp, "known", "root", ""); statusOf(err) != 400 {
+	if err := f.h.MuteFinding(ctx, fp, "known", directory.Human("root"), ""); statusOf(err) != 400 {
 		t.Errorf("no token = %v", err)
 	}
 
-	if err := f.h.MuteFinding(ctx, fp, "  ", "root", token); statusOf(err) != 400 {
+	if err := f.h.MuteFinding(ctx, fp, "  ", directory.Human("root"), token); statusOf(err) != 400 {
 		t.Errorf("empty reason = %v", err)
 	}
-	if err := f.h.MuteFinding(ctx, fp, strings.Repeat("x", 201), "root", token); statusOf(err) != 400 {
+	if err := f.h.MuteFinding(ctx, fp, strings.Repeat("x", 201), directory.Human("root"), token); statusOf(err) != 400 {
 		t.Errorf("long reason = %v", err)
 	}
-	if err := f.h.MuteFinding(ctx, "0123456789abcdef", "known", "root", token); statusOf(err) != 404 {
+	if err := f.h.MuteFinding(ctx, "0123456789abcdef", "known", directory.Human("root"), token); statusOf(err) != 404 {
 		t.Errorf("unknown fp = %v", err)
 	}
 	reason := strings.Repeat("é", 200)
-	if err := f.h.MuteFinding(ctx, fp, reason, "root", token); err != nil {
+	if err := f.h.MuteFinding(ctx, fp, reason, directory.Human("root"), token); err != nil {
 		t.Fatal(err)
 	}
 	e := audit.last()
@@ -248,13 +249,13 @@ func TestMuteAudited(t *testing.T) {
 		t.Errorf("changed inputs: muted %d", r.Muted)
 	}
 
-	if err := f.h.UnmuteFinding(fp, "root"); err != nil {
+	if err := f.h.UnmuteFinding(fp, directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	if e := audit.last(); e.Action != "doctor.unmute" || e.Target != fp || e.Result != "ok" {
 		t.Errorf("audit = %+v", e)
 	}
-	if err := f.h.UnmuteFinding(fp, "root"); statusOf(err) != 404 {
+	if err := f.h.UnmuteFinding(fp, directory.Human("root")); statusOf(err) != 404 {
 		t.Errorf("unmute again = %v", err)
 	}
 	f.h.mu.RLock()

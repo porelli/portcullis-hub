@@ -13,6 +13,7 @@ import (
 // the population; a tsv people file and a sync hook on service smb.
 const smbHead = `name: Files
 instances: multi
+ai: {unsupported: "test fixture"}
 auth:
   method: custom
   group_access: true
@@ -200,6 +201,7 @@ func TestTimeMachineBlock(t *testing.T) {
 	const m = `name: Time Machine
 description: Mac backups over SMB, one share per person
 instances: multi
+ai: {unsupported: "test fixture"}
 auth:
   method: custom
   group_access: true
@@ -364,7 +366,7 @@ func TestCredentialChangeTrigger(t *testing.T) {
 	}
 	runSettingsCases(t, []settingsCase{
 		{"credential_change only", only + opts(connectOpt, uidOpt, psOpt), smbCompose, "", ""},
-		{"unknown trigger", bad + opts(connectOpt), smbCompose, "", `when "credential" must be start, settings_change, membership_change or credential_change`},
+		{"unknown trigger", bad + opts(connectOpt), smbCompose, "", `when "credential" must be start, settings_change, membership_change, credential_change or ai`},
 	})
 }
 

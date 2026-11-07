@@ -63,12 +63,12 @@ func writeTemplate(t *testing.T, dir, id, manifest string) {
 
 func TestDiscover(t *testing.T) {
 	dir := t.TempDir()
-	writeTemplate(t, dir, "good", "name: Good\ncategory: b\nurls:\n  - label: x\n    url: https://good.{{DOMAIN}}\nauth:\n  method: forward-auth\n  admin_group: admin_good\n  admin_paths: [/admin/]\n")
-	writeTemplate(t, dir, "alpha", "name: Alpha\ncategory: a\nauth:\n  method: public\n")
+	writeTemplate(t, dir, "good", "name: Good\ncategory: b\nurls:\n  - label: x\n    url: https://good.{{DOMAIN}}\nai: {unsupported: test fixture}\nauth:\n  method: forward-auth\n  admin_group: admin_good\n  admin_paths: [/admin/]\n")
+	writeTemplate(t, dir, "alpha", "name: Alpha\ncategory: a\nai: {unsupported: test fixture}\nauth:\n  method: public\n")
 	writeTemplate(t, dir, "Bad_ID", "name: Bad\n")
 	writeTemplate(t, dir, "badkey", "name: X\nsettings:\n  - key: 'A=B'\n")
 	writeTemplate(t, dir, "badyaml", "name: [unclosed\n")
-	writeTemplate(t, dir, "badpath", "name: X\nauth:\n  admin_group: g\n  admin_paths: [/../etc]\n")
+	writeTemplate(t, dir, "badpath", "name: X\nai: {unsupported: test fixture}\nauth:\n  admin_group: g\n  admin_paths: [/../etc]\n")
 	os.MkdirAll(filepath.Join(dir, "nomanifest"), 0755)
 	os.WriteFile(filepath.Join(dir, "file.txt"), nil, 0644)
 

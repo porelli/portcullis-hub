@@ -11,6 +11,7 @@ import (
 	"golang.org/x/text/language"
 	"golang.org/x/text/message"
 
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/doctor"
 	"github.com/portcullis/hub/internal/folderfix"
 )
@@ -110,13 +111,18 @@ func (h *Hub) PreviewRecheck(ctx context.Context, id string) (*IdentityCheck, er
 // ("recheck …"). A different directory (another inode) needs
 // confirmDifferent (400 otherwise) and clears last_apply; a device-only
 // change keeps last_apply, recording the root its snapshot names.
-func (h *Hub) ApplyRecheck(ctx context.Context, id, planHash string, confirmDifferent bool, actor string) (view *FolderView, err error) {
+func (h *Hub) ApplyRecheck(ctx context.Context, id string, planHash string, confirmDifferent bool, actor directory.Actor) (view *FolderView, err error) {
 	detail := ""
 	defer func() {
 		if detail != "" || err != nil {
 			h.auditFolder(actor, "folder.update", id, detail, err)
 		}
 	}()
+	if confirmDifferent {
+		if err := aiUnconfirmed(actor, "accepting another directory as shared folder "+id); err != nil {
+			return nil, err
+		}
+	}
 	unlock, err := h.folderLock(id)
 	if err != nil {
 		return nil, err
@@ -246,10 +252,10 @@ func (h *Hub) computeRecheck(ctx context.Context, id string) (*IdentityCheck, er
 	c.Changed = c.Old != c.New
 	c.DifferentDirectory = c.Changed && differentDirectory(c.Old.Dev, c.Old.Ino, c.Old.MountRoot, c.New.Dev, c.New.Ino, c.New.MountRoot)
 	show := func(i FolderIdentity) string {
-		return fmt.Sprintf("device %d, inode %d, mounted from `%s`", i.Dev, i.Ino, i.MountRoot)
+		return fmt.Sprintf("device %d, inode %d, mounted from %q", i.Dev, i.Ino, i.MountRoot)
 	}
 	c.Lines = []string{"Stored: " + show(c.Old) + ".", "Now: " + show(c.New) + "."}
-	counts := message.NewPrinter(language.English).Sprintf("`%s` holds %d %s and %d %s on %s", f.Path, c.Files, plural(c.Files, "file", "files"), c.Dirs, plural(c.Dirs, "folder", "folders"), c.FSType)
+	counts := message.NewPrinter(language.English).Sprintf("%q holds %d %s and %d %s on %s", f.Path, c.Files, plural(c.Files, "file", "files"), c.Dirs, plural(c.Dirs, "folder", "folders"), c.FSType)
 	if c.Partial {
 		counts += " (a partial count)"
 	}

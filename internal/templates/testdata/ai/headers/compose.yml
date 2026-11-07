@@ -1,0 +1,11 @@
+services:
+  web:
+    image: wiki
+    environment:
+      MCP_SECRET: ${MCP_SECRET}
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.wiki.rule: Host(`${PORTCULLIS_HOST_WIKI:-wiki.portcullis.local}`)
+      traefik.http.routers.wiki.entrypoints: websecure
+      traefik.http.routers.wiki.middlewares: portcullis-auth@docker,portcullis-groups@docker
+      traefik.http.services.wiki.loadbalancer.server.port: "8080"

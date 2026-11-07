@@ -7,6 +7,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/state"
 )
 
@@ -39,7 +40,7 @@ func fullInstanceSettings(t *testing.T) state.InstanceSettings {
 // the old flat form.
 func TestStageArchiveEveryInstanceSettingsField(t *testing.T) {
 	f, _, _ := grafanaB(t)
-	entry, err := f.h.BackupInstance("grafana-b", "root")
+	entry, err := f.h.BackupInstance("grafana-b", directory.Human("root"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,11 +82,11 @@ func TestRestoreWithShareGroupBinding(t *testing.T) {
 	if _, err := state.Load(f.h.statePath()); err != nil {
 		t.Fatalf("state.yaml with group_ids = %v", err)
 	}
-	entry, err := f.h.BackupInstance(smbID, "root")
+	entry, err := f.h.BackupInstance(smbID, directory.Human("root"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.h.RestoreInstance(smbID, entry.Archive, "root"); err != nil {
+	if _, err := f.h.RestoreInstance(smbID, entry.Archive, directory.Human("root")); err != nil {
 		t.Fatalf("restore of its own archive = %v", err)
 	}
 	f.h.mu.RLock()

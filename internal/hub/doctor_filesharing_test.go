@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/doctor"
 	"github.com/portcullis/hub/internal/folderfix"
@@ -69,7 +70,7 @@ func TestCanaryFindsUnrevokedHolder(t *testing.T) {
 	if !slices.Equal(plan.Lines, []string{"revoke bob's file-share password for SMB Fixture"}) || plan.Hash == "" {
 		t.Fatalf("preview = %+v", plan)
 	}
-	if _, err := f.h.ApplyFix(context.Background(), fd.FP, nil, strings.Repeat("0", 64), "admin"); errStatus(err) != 409 || !strings.Contains(err.Error(), "the credential changed since the preview") {
+	if _, err := f.h.ApplyFix(context.Background(), fd.FP, nil, strings.Repeat("0", 64), directory.Human("admin")); errStatus(err) != 409 || !strings.Contains(err.Error(), "the credential changed since the preview") {
 		t.Fatalf("wrong hash: %v, want 409 the credential changed", err)
 	}
 	// Fix round 1: bob's credential regenerated since the preview (a new
@@ -80,12 +81,12 @@ func TestCanaryFindsUnrevokedHolder(t *testing.T) {
 	cred.ID = "c-bob-new"
 	f.h.st.Credentials[smbID][smbKey]["bob"] = cred
 	f.h.mu.Unlock()
-	if _, err := f.h.ApplyFix(context.Background(), fd.FP, nil, plan.Hash, "admin"); errStatus(err) != 409 || !strings.Contains(err.Error(), "the credential changed since the preview") {
+	if _, err := f.h.ApplyFix(context.Background(), fd.FP, nil, plan.Hash, directory.Human("admin")); errStatus(err) != 409 || !strings.Contains(err.Error(), "the credential changed since the preview") {
 		t.Fatalf("regenerated credential: %v, want 409", err)
 	}
 	// The revoke itself is bound to the id (a regenerate between the
 	// check and the revoke).
-	if err := f.h.adminRevokeCredentialID(context.Background(), smbID, smbKey, "bob", "admin", prevID); errStatus(err) != 409 {
+	if err := f.h.adminRevokeCredentialID(context.Background(), smbID, smbKey, "bob", directory.Human("admin"), prevID); errStatus(err) != 409 {
 		t.Fatalf("stale id: %v, want 409", err)
 	}
 	f.h.mu.Lock()
@@ -97,7 +98,7 @@ func TestCanaryFindsUnrevokedHolder(t *testing.T) {
 	if !active {
 		t.Fatal("a stale-id revoke revoked the newer credential")
 	}
-	op, err := f.h.ApplyFix(context.Background(), fd.FP, nil, plan.Hash, "admin")
+	op, err := f.h.ApplyFix(context.Background(), fd.FP, nil, plan.Hash, directory.Human("admin"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +161,7 @@ func treeFixture(t *testing.T) *treeEnv {
 
 func (e *treeEnv) scan(t *testing.T) {
 	t.Helper()
-	if _, err := e.f.h.StartDoctorScan("admin"); err != nil {
+	if _, err := e.f.h.StartDoctorScan(directory.Human("admin")); err != nil {
 		t.Fatal(err)
 	}
 	if r := waitDoctorOp(t, e.f.h); !r.OK {
@@ -234,7 +235,7 @@ func TestPersonTreeOwnerFix(t *testing.T) {
 	if _, err := f.h.PreviewFix(context.Background(), fd.FP, nil); errStatus(err) != 409 || !strings.Contains(err.Error(), "explain-only") {
 		t.Fatalf("another owner: preview %v, want 409 explain-only", err)
 	}
-	if _, err := f.h.ApplyFix(context.Background(), fd.FP, nil, plan.Hash, "admin"); errStatus(err) != 409 || !strings.Contains(err.Error(), "explain-only") {
+	if _, err := f.h.ApplyFix(context.Background(), fd.FP, nil, plan.Hash, directory.Human("admin")); errStatus(err) != 409 || !strings.Contains(err.Error(), "explain-only") {
 		t.Fatalf("another owner: apply %v, want 409 explain-only", err)
 	}
 	e.d.mu.Lock()
@@ -244,14 +245,14 @@ func TestPersonTreeOwnerFix(t *testing.T) {
 	e.d.mu.Lock()
 	e.d.paths["/srv/homes/alice"].ino++
 	e.d.mu.Unlock()
-	if _, err := f.h.ApplyFix(context.Background(), fd.FP, nil, plan.Hash, "admin"); errStatus(err) != 409 {
+	if _, err := f.h.ApplyFix(context.Background(), fd.FP, nil, plan.Hash, directory.Human("admin")); errStatus(err) != 409 {
 		t.Fatalf("moved child: %v, want 409", err)
 	}
 	e.d.mu.Lock()
 	e.d.paths["/srv/homes/alice"].ino--
 	e.d.mu.Unlock()
 
-	op, err := f.h.ApplyFix(context.Background(), fd.FP, nil, plan.Hash, "admin")
+	op, err := f.h.ApplyFix(context.Background(), fd.FP, nil, plan.Hash, directory.Human("admin"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -355,7 +356,7 @@ func TestLocalNetworksEmptyProblem(t *testing.T) {
 	if got := findingsOf(t, c.f, doctor.KindLocalNetworksEmpty); len(got) != 0 {
 		t.Fatalf("with the defaults: %+v", got)
 	}
-	if err := c.f.h.SetLocalNetworks([]string{}, "admin"); err != nil {
+	if err := c.f.h.SetLocalNetworks([]string{}, directory.Human("admin")); err != nil {
 		t.Fatal(err)
 	}
 	settle(c.f)
@@ -397,7 +398,7 @@ func TestGIDFromRefusesFolderValue(t *testing.T) {
 	e := treeFixture(t)
 	f := e.f
 	addFolder(t, f, e.d, "photos", "Photos", "/srv/photos", 60001)
-	_, err := f.h.SaveSettings(smbID, SettingsUpdate{Values: vals("homes", "folder:photos")}, "admin")
+	_, err := f.h.SaveSettings(smbID, SettingsUpdate{Values: vals("homes", "folder:photos")}, directory.Human("admin"))
 	if errStatus(err) != 409 || !strings.Contains(err.Error(), "per-person tree") {
 		t.Errorf("save folder:photos: %v, want 409 per-person tree", err)
 	}

@@ -225,7 +225,7 @@ func storedFolder(f *fixture, id string) (state.Folder, bool) {
 
 func createFolder(t *testing.T, f *fixture, id, p string) *FolderView {
 	t.Helper()
-	v, _, err := f.h.CreateFolder(context.Background(), FolderInput{ID: id, Name: "Folder " + id, Path: p}, "admin")
+	v, _, err := f.h.CreateFolder(context.Background(), FolderInput{ID: id, Name: "Folder " + id, Path: p}, directory.Human("admin"))
 	if err != nil {
 		t.Fatalf("create %s at %s: %v", id, p, err)
 	}
@@ -260,7 +260,7 @@ func TestFolderPathRules(t *testing.T) {
 		"":                     "host path",
 		"/":                    "bind root",
 	} {
-		_, _, err := f.h.CreateFolder(context.Background(), FolderInput{ID: "x", Name: "X", Path: p}, "admin")
+		_, _, err := f.h.CreateFolder(context.Background(), FolderInput{ID: "x", Name: "X", Path: p}, directory.Human("admin"))
 		if statusOf(err) != 400 || !strings.Contains(err.Error(), why) {
 			t.Errorf("%q: %v, want 400 naming %q", p, err, why)
 		}
@@ -293,13 +293,13 @@ func TestFolderPathNormalised(t *testing.T) {
 		t.Errorf("state %q", fo.Path)
 	}
 	for _, p := range []string{"/srv//photos", "/srv/photos/2026", "/srv/photos/./2026/"} {
-		_, _, err := f.h.CreateFolder(context.Background(), FolderInput{ID: "other", Name: "O", Path: p}, "admin")
+		_, _, err := f.h.CreateFolder(context.Background(), FolderInput{ID: "other", Name: "O", Path: p}, directory.Human("admin"))
 		if statusOf(err) != 409 || !strings.Contains(err.Error(), "photos") {
 			t.Errorf("%q: %v, want 409 overlap", p, err)
 		}
 	}
 	createFolder(t, f, "tv", "/srv/media/tv")
-	if _, _, err := f.h.CreateFolder(context.Background(), FolderInput{ID: "media", Name: "M", Path: "/srv/media"}, "admin"); statusOf(err) != 409 {
+	if _, _, err := f.h.CreateFolder(context.Background(), FolderInput{ID: "media", Name: "M", Path: "/srv/media"}, directory.Human("admin")); statusOf(err) != 409 {
 		t.Errorf("a folder above another: %v", err)
 	}
 	// Check path reports the overlap as a problem.
@@ -313,7 +313,7 @@ func TestFolderPathNormalised(t *testing.T) {
 func TestFolderPathSymlinkRefused(t *testing.T) {
 	f, _, d := folderFixture(t)
 	d.symlinks["/srv/photos"] = true
-	_, _, err := f.h.CreateFolder(context.Background(), FolderInput{ID: "photos", Name: "P", Path: "/srv/photos"}, "admin")
+	_, _, err := f.h.CreateFolder(context.Background(), FolderInput{ID: "photos", Name: "P", Path: "/srv/photos"}, directory.Human("admin"))
 	if statusOf(err) != 409 || err.Error() != "/srv/photos is a symlink; give the real path" {
 		t.Errorf("err = %v", err)
 	}
@@ -346,18 +346,18 @@ func TestFolderPathSymlinkRefused(t *testing.T) {
 func TestCreateFolderRunsCheck(t *testing.T) {
 	f, _, d := folderFixture(t)
 	d.add("/srv/nas", "nfs")
-	_, _, err := f.h.CreateFolder(context.Background(), FolderInput{ID: "nas", Name: "NAS", Path: "/srv/nas"}, "admin")
+	_, _, err := f.h.CreateFolder(context.Background(), FolderInput{ID: "nas", Name: "NAS", Path: "/srv/nas"}, directory.Human("admin"))
 	if statusOf(err) != 409 || !strings.Contains(err.Error(), "nfs") || !strings.Contains(err.Error(), "file server") {
 		t.Errorf("nfs: %v", err)
 	}
 	for _, fs := range []string{"cifs", "fuse", "overlay", "tmpfs"} {
 		d.add("/srv/"+fs, fs)
-		if _, _, err := f.h.CreateFolder(context.Background(), FolderInput{ID: fs, Name: fs, Path: "/srv/" + fs}, "admin"); statusOf(err) != 409 || !strings.Contains(err.Error(), fs) {
+		if _, _, err := f.h.CreateFolder(context.Background(), FolderInput{ID: fs, Name: fs, Path: "/srv/" + fs}, directory.Human("admin")); statusOf(err) != 409 || !strings.Contains(err.Error(), fs) {
 			t.Errorf("%s: %v", fs, err)
 		}
 	}
 	// A missing path without Create is refused; nothing was created.
-	if _, _, err := f.h.CreateFolder(context.Background(), FolderInput{ID: "new", Name: "N", Path: "/srv/new"}, "admin"); statusOf(err) != 409 || !strings.Contains(err.Error(), "doesn't exist") {
+	if _, _, err := f.h.CreateFolder(context.Background(), FolderInput{ID: "new", Name: "N", Path: "/srv/new"}, directory.Human("admin")); statusOf(err) != 409 || !strings.Contains(err.Error(), "doesn't exist") {
 		t.Errorf("missing: %v", err)
 	}
 	f.engine.fx().fmu.Lock()
@@ -391,7 +391,7 @@ func TestCreateFolderRunsCheck(t *testing.T) {
 	if v := createFolder(t, f, "music", "/srv/music"); v.GID != 60001 {
 		t.Errorf("second gid = %d", v.GID)
 	}
-	if err := f.h.DeleteFolder("photos", "admin"); err != nil {
+	if err := f.h.DeleteFolder("photos", directory.Human("admin")); err != nil {
 		t.Fatal(err)
 	}
 	d.add("/srv/docs", "btrfs")
@@ -412,12 +412,12 @@ func TestCreateFolderRunsCheck(t *testing.T) {
 	// The path changed between probe and scan: refused.
 	d.add("/srv/swap", "ext4")
 	d.scanDev = 7
-	if _, _, err := f.h.CreateFolder(context.Background(), FolderInput{ID: "swap", Name: "S", Path: "/srv/swap"}, "admin"); statusOf(err) != 409 || !strings.Contains(err.Error(), "changed") {
+	if _, _, err := f.h.CreateFolder(context.Background(), FolderInput{ID: "swap", Name: "S", Path: "/srv/swap"}, directory.Human("admin")); statusOf(err) != 409 || !strings.Contains(err.Error(), "changed") {
 		t.Errorf("swapped: %v", err)
 	}
 	d.scanDev = 0
 	// Create makes a missing path through the probe.
-	if _, _, err := f.h.CreateFolder(context.Background(), FolderInput{ID: "fresh", Name: "F", Path: "/srv/fresh/one", Create: true}, "admin"); err != nil {
+	if _, _, err := f.h.CreateFolder(context.Background(), FolderInput{ID: "fresh", Name: "F", Path: "/srv/fresh/one", Create: true}, directory.Human("admin")); err != nil {
 		t.Errorf("create a missing path: %v", err)
 	}
 }
@@ -427,7 +427,7 @@ func TestAdoptGID(t *testing.T) {
 	d.add("/srv/music", "ext4")
 	d.add("/srv/docs", "ext4")
 	adopt := func(id, p string, gid int) (*FolderView, []string, error) {
-		return f.h.CreateFolder(context.Background(), FolderInput{ID: id, Name: id, Path: p, GID: &gid}, "admin")
+		return f.h.CreateFolder(context.Background(), FolderInput{ID: id, Name: id, Path: p, GID: &gid}, directory.Human("admin"))
 	}
 	for _, gid := range []int{999, 65534, 60500, 60000, 60999, 10001, 10002, -1, 0} {
 		if _, _, err := adopt("photos", "/srv/photos", gid); statusOf(err) != 400 {
@@ -466,7 +466,7 @@ func TestGIDRangeExhausted(t *testing.T) {
 		f.h.st.FolderGIDs = append(f.h.st.FolderGIDs, g)
 	}
 	f.h.mu.Unlock()
-	_, _, err := f.h.CreateFolder(context.Background(), FolderInput{ID: "photos", Name: "P", Path: "/srv/photos"}, "admin")
+	_, _, err := f.h.CreateFolder(context.Background(), FolderInput{ID: "photos", Name: "P", Path: "/srv/photos"}, directory.Human("admin"))
 	if statusOf(err) != 409 || !strings.Contains(err.Error(), "no free folder group") {
 		t.Errorf("err = %v", err)
 	}
@@ -549,7 +549,7 @@ func TestDeleteFolderRefusedWhileUsed(t *testing.T) {
 	f.h.st.Settings["immich"] = s
 	f.h.mu.Unlock()
 	runs := len(f.engine.fx().Specs())
-	err := f.h.DeleteFolder("photos", "admin")
+	err := f.h.DeleteFolder("photos", directory.Human("admin"))
 	if statusOf(err) != 409 || !strings.Contains(err.Error(), "immich") {
 		t.Errorf("used: %v", err)
 	}
@@ -574,7 +574,7 @@ func TestDeleteFolderRefusedWhileUsed(t *testing.T) {
 	f.h.st.Settings["immich"] = state.InstanceSettings{}
 	f.h.st.Settings["gone"] = state.InstanceSettings{Values: map[string]any{"media": "folder:photos"}}
 	f.h.mu.Unlock()
-	if err := f.h.DeleteFolder("photos", "admin"); statusOf(err) != 409 || !strings.Contains(err.Error(), "gone") {
+	if err := f.h.DeleteFolder("photos", directory.Human("admin")); statusOf(err) != 409 || !strings.Contains(err.Error(), "gone") {
 		t.Errorf("template gone: %v", err)
 	}
 	f.h.mu.Lock()
@@ -582,10 +582,10 @@ func TestDeleteFolderRefusedWhileUsed(t *testing.T) {
 	// Another folder's ref and a non-path option's text don't count.
 	f.h.st.Settings["immich"] = state.InstanceSettings{Values: map[string]any{"library": "folder:music", "version": "folder:photos"}}
 	f.h.mu.Unlock()
-	if err := f.h.DeleteFolder("nope", "admin"); statusOf(err) != 404 {
+	if err := f.h.DeleteFolder("nope", directory.Human("admin")); statusOf(err) != 404 {
 		t.Errorf("unknown: %v", err)
 	}
-	if err := f.h.DeleteFolder("photos", "admin"); err != nil {
+	if err := f.h.DeleteFolder("photos", directory.Human("admin")); err != nil {
 		t.Fatalf("unused: %v", err)
 	}
 	if _, ok := storedFolder(f, "photos"); ok {
@@ -605,7 +605,7 @@ func TestUpdateFolder(t *testing.T) {
 	f, _, d := folderFixture(t)
 	createFolder(t, f, "photos", "/srv/photos")
 	before, _ := storedFolder(f, "photos")
-	v, err := f.h.UpdateFolder(context.Background(), "photos", FolderInput{Name: "Family photos", Description: "since 2001"}, "admin")
+	v, err := f.h.UpdateFolder(context.Background(), "photos", FolderInput{Name: "Family photos", Description: "since 2001"}, directory.Human("admin"))
 	if err != nil || v.Name != "Family photos" || v.Description != "since 2001" || v.Path != "/srv/photos" || v.ID != "photos" {
 		t.Fatalf("update = %+v, %v", v, err)
 	}
@@ -618,11 +618,11 @@ func TestUpdateFolder(t *testing.T) {
 		"gid change": {Name: "P", GID: new(int)},
 		"bad path":   {Name: "P", Path: "/etc/photos"},
 	} {
-		if _, err := f.h.UpdateFolder(context.Background(), "photos", in, "admin"); statusOf(err) != 400 {
+		if _, err := f.h.UpdateFolder(context.Background(), "photos", in, directory.Human("admin")); statusOf(err) != 400 {
 			t.Errorf("%s: %v, want 400", name, err)
 		}
 	}
-	if _, err := f.h.UpdateFolder(context.Background(), "nope", FolderInput{Name: "N"}, "admin"); statusOf(err) != 404 {
+	if _, err := f.h.UpdateFolder(context.Background(), "nope", FolderInput{Name: "N"}, directory.Human("admin")); statusOf(err) != 404 {
 		t.Errorf("unknown: %v", err)
 	}
 	// A path change while used: 409.
@@ -630,11 +630,11 @@ func TestUpdateFolder(t *testing.T) {
 	f.h.mu.Lock()
 	f.h.st.Settings["immich"] = state.InstanceSettings{Values: map[string]any{"library": "folder:photos"}}
 	f.h.mu.Unlock()
-	if _, err := f.h.UpdateFolder(context.Background(), "photos", FolderInput{Name: "P", Path: "/srv/pictures"}, "admin"); statusOf(err) != 409 || !strings.Contains(err.Error(), "immich") {
+	if _, err := f.h.UpdateFolder(context.Background(), "photos", FolderInput{Name: "P", Path: "/srv/pictures"}, directory.Human("admin")); statusOf(err) != 409 || !strings.Contains(err.Error(), "immich") {
 		t.Errorf("path change while used: %v", err)
 	}
 	// Names may change while used.
-	if _, err := f.h.UpdateFolder(context.Background(), "photos", FolderInput{Name: "Pics", Path: "/srv/photos/"}, "admin"); err != nil {
+	if _, err := f.h.UpdateFolder(context.Background(), "photos", FolderInput{Name: "Pics", Path: "/srv/photos/"}, directory.Human("admin")); err != nil {
 		t.Errorf("rename while used: %v", err)
 	}
 	f.h.mu.Lock()
@@ -644,7 +644,7 @@ func TestUpdateFolder(t *testing.T) {
 	f.h.st.Folders["photos"] = fo
 	f.h.mu.Unlock()
 	runs := len(f.engine.fx().Specs())
-	v, err = f.h.UpdateFolder(context.Background(), "photos", FolderInput{Name: "Pics", Path: "/srv/pictures"}, "admin")
+	v, err = f.h.UpdateFolder(context.Background(), "photos", FolderInput{Name: "Pics", Path: "/srv/pictures"}, directory.Human("admin"))
 	if err != nil || v.Path != "/srv/pictures" || v.ID != "photos" || v.GID != before.GID {
 		t.Fatalf("path change = %+v, %v", v, err)
 	}
@@ -659,7 +659,7 @@ func TestUpdateFolder(t *testing.T) {
 	d.add("/srv/pictures/raw", "ext4")
 	d.add("/srv/other", "ext4")
 	createFolder(t, f, "other", "/srv/other")
-	if _, err := f.h.UpdateFolder(context.Background(), "other", FolderInput{Name: "O", Path: "/srv/pictures/raw"}, "admin"); statusOf(err) != 409 {
+	if _, err := f.h.UpdateFolder(context.Background(), "other", FolderInput{Name: "O", Path: "/srv/pictures/raw"}, directory.Human("admin")); statusOf(err) != 409 {
 		t.Errorf("overlap: %v", err)
 	}
 }
@@ -670,30 +670,30 @@ func TestFolderAudit(t *testing.T) {
 	if e := audit.last(); e.Action != "folder.create" || e.Target != "photos" || e.Detail != "gid=60000 path=/srv/photos" || e.Result != "ok" || e.Actor != "admin" {
 		t.Errorf("create = %+v", e)
 	}
-	if _, err := f.h.UpdateFolder(context.Background(), "photos", FolderInput{Name: "Family"}, "admin"); err != nil {
+	if _, err := f.h.UpdateFolder(context.Background(), "photos", FolderInput{Name: "Family"}, directory.Human("admin")); err != nil {
 		t.Fatal(err)
 	}
 	if e := audit.last(); e.Action != "folder.update" || e.Target != "photos" || e.Result != "ok" || !strings.Contains(e.Detail, "name") {
 		t.Errorf("update = %+v", e)
 	}
-	_, _, err := f.h.CreateFolder(context.Background(), FolderInput{ID: "etc", Name: "E", Path: "/etc/x"}, "admin")
+	_, _, err := f.h.CreateFolder(context.Background(), FolderInput{ID: "etc", Name: "E", Path: "/etc/x"}, directory.Human("admin"))
 	if e := audit.last(); err == nil || e.Action != "folder.create" || e.Result != "refused" || e.Target != "etc" || e.Error == "" {
 		t.Errorf("refused create = %+v", e)
 	}
 	d.symlinks["/srv/link"] = true
-	f.h.CreateFolder(context.Background(), FolderInput{ID: "link", Name: "L", Path: "/srv/link"}, "admin")
+	f.h.CreateFolder(context.Background(), FolderInput{ID: "link", Name: "L", Path: "/srv/link"}, directory.Human("admin"))
 	if e := audit.last(); e.Result != "refused" || !strings.Contains(e.Error, "symlink") {
 		t.Errorf("refused symlink = %+v", e)
 	}
-	f.h.UpdateFolder(context.Background(), "photos", FolderInput{Name: ""}, "admin")
+	f.h.UpdateFolder(context.Background(), "photos", FolderInput{Name: ""}, directory.Human("admin"))
 	if e := audit.last(); e.Action != "folder.update" || e.Result != "refused" {
 		t.Errorf("refused update = %+v", e)
 	}
-	f.h.DeleteFolder("nope", "admin")
+	f.h.DeleteFolder("nope", directory.Human("admin"))
 	if e := audit.last(); e.Action != "folder.delete" || e.Result != "refused" || e.Target != "nope" {
 		t.Errorf("refused delete = %+v", e)
 	}
-	if err := f.h.DeleteFolder("photos", "admin"); err != nil {
+	if err := f.h.DeleteFolder("photos", directory.Human("admin")); err != nil {
 		t.Fatal(err)
 	}
 	if e := audit.last(); e.Action != "folder.delete" || e.Target != "photos" || e.Result != "ok" || e.Detail != "gid=60000 path=/srv/photos" {
@@ -704,7 +704,7 @@ func TestFolderAudit(t *testing.T) {
 	f.h.SetAudit(lockingAudit{f.h, audit})
 	d.add("/srv/music", "ext4")
 	createFolder(t, f, "music", "/srv/music")
-	f.h.DeleteFolder("music", "admin")
+	f.h.DeleteFolder("music", directory.Human("admin"))
 }
 
 // lockingAudit takes the Hub's lock in Append (deadlocks if called under mu).
@@ -778,7 +778,7 @@ func TestCreateFolderLostRace(t *testing.T) {
 	f, _, d := folderFixture(t)
 	d.add("/srv/photos/2026", "ext4")
 	d.onScan = func(string) { createFolder(t, f, "year", "/srv/photos/2026") }
-	_, _, err := f.h.CreateFolder(context.Background(), FolderInput{ID: "photos", Name: "P", Path: "/srv/photos"}, "admin")
+	_, _, err := f.h.CreateFolder(context.Background(), FolderInput{ID: "photos", Name: "P", Path: "/srv/photos"}, directory.Human("admin"))
 	if statusOf(err) != 409 || !strings.Contains(err.Error(), "year") {
 		t.Errorf("lost overlap race: %v", err)
 	}
@@ -790,17 +790,17 @@ func TestCreateFolderLostRace(t *testing.T) {
 	d.add("/srv/b", "ext4")
 	d.onScan = func(string) {
 		g := gid
-		if _, _, err := f.h.CreateFolder(context.Background(), FolderInput{ID: "b", Name: "B", Path: "/srv/b", GID: &g}, "admin"); err != nil {
+		if _, _, err := f.h.CreateFolder(context.Background(), FolderInput{ID: "b", Name: "B", Path: "/srv/b", GID: &g}, directory.Human("admin")); err != nil {
 			t.Errorf("winner: %v", err)
 		}
 	}
-	if _, _, err := f.h.CreateFolder(context.Background(), FolderInput{ID: "a", Name: "A", Path: "/srv/a", GID: &gid}, "admin"); statusOf(err) != 409 || !strings.Contains(err.Error(), "gid 2000") {
+	if _, _, err := f.h.CreateFolder(context.Background(), FolderInput{ID: "a", Name: "A", Path: "/srv/a", GID: &gid}, directory.Human("admin")); statusOf(err) != 409 || !strings.Contains(err.Error(), "gid 2000") {
 		t.Errorf("lost gid race: %v", err)
 	}
 	// The same id twice at once: the second is busy or exists.
 	d.add("/srv/c", "ext4")
 	d.onScan = func(string) {
-		if _, _, err := f.h.CreateFolder(context.Background(), FolderInput{ID: "c", Name: "C", Path: "/srv/c"}, "admin"); statusOf(err) != 409 {
+		if _, _, err := f.h.CreateFolder(context.Background(), FolderInput{ID: "c", Name: "C", Path: "/srv/c"}, directory.Human("admin")); statusOf(err) != 409 {
 			t.Errorf("same id meanwhile: %v", err)
 		}
 	}
@@ -832,7 +832,7 @@ func TestFolderSameDirectoryRefused(t *testing.T) {
 	orig := d.paths["/srv/photos"]
 	alias := d.add("/mnt/alias", "ext4")
 	alias.dev, alias.ino = orig.dev, orig.ino
-	_, _, err := f.h.CreateFolder(context.Background(), FolderInput{ID: "alias", Name: "A", Path: "/mnt/alias"}, "admin")
+	_, _, err := f.h.CreateFolder(context.Background(), FolderInput{ID: "alias", Name: "A", Path: "/mnt/alias"}, directory.Human("admin"))
 	if statusOf(err) != 409 || !strings.Contains(err.Error(), "photos") {
 		t.Errorf("same dev/ino: %v", err)
 	}
@@ -842,7 +842,7 @@ func TestFolderSameDirectoryRefused(t *testing.T) {
 	// An update onto it too.
 	d.add("/srv/other", "ext4")
 	createFolder(t, f, "other", "/srv/other")
-	if _, err := f.h.UpdateFolder(context.Background(), "other", FolderInput{Name: "O", Path: "/mnt/alias"}, "admin"); statusOf(err) != 409 || !strings.Contains(err.Error(), "photos") {
+	if _, err := f.h.UpdateFolder(context.Background(), "other", FolderInput{Name: "O", Path: "/mnt/alias"}, directory.Human("admin")); statusOf(err) != 409 || !strings.Contains(err.Error(), "photos") {
 		t.Errorf("update onto the same directory: %v", err)
 	}
 	// Its own directory again (a rename of the path that probes the
@@ -850,7 +850,7 @@ func TestFolderSameDirectoryRefused(t *testing.T) {
 	self := d.add("/mnt/self", "ext4")
 	o := d.paths["/srv/other"]
 	self.dev, self.ino = o.dev, o.ino
-	if _, err := f.h.UpdateFolder(context.Background(), "other", FolderInput{Name: "O", Path: "/mnt/self"}, "admin"); err != nil {
+	if _, err := f.h.UpdateFolder(context.Background(), "other", FolderInput{Name: "O", Path: "/mnt/self"}, directory.Human("admin")); err != nil {
 		t.Errorf("own inode: %v", err)
 	}
 }
@@ -871,12 +871,12 @@ func TestFolderPathFolded(t *testing.T) {
 	d.add("/srv/strasse", "ext4")
 	createFolder(t, f, "strasse", "/srv/strasse")
 	for _, p := range []string{"/srv/Photos", "/srv/PHOTOS/2026", "/srv/café", "/srv/CAFÉ/x", "/srv/Straße"} {
-		if _, _, err := f.h.CreateFolder(context.Background(), FolderInput{ID: "x", Name: "X", Path: p}, "admin"); statusOf(err) != 409 {
+		if _, _, err := f.h.CreateFolder(context.Background(), FolderInput{ID: "x", Name: "X", Path: p}, directory.Human("admin")); statusOf(err) != 409 {
 			t.Errorf("%q: %v, want 409 overlap", p, err)
 		}
 	}
 	for _, p := range []string{"/srv/Data/AppFiles/x", "/srv/DATA", "/srv/Core/x", "/srv/CORE"} {
-		if _, _, err := f.h.CreateFolder(context.Background(), FolderInput{ID: "x", Name: "X", Path: p}, "admin"); statusOf(err) != 400 {
+		if _, _, err := f.h.CreateFolder(context.Background(), FolderInput{ID: "x", Name: "X", Path: p}, directory.Human("admin")); statusOf(err) != 400 {
 			t.Errorf("%q: %v, want 400", p, err)
 		}
 	}
@@ -897,7 +897,7 @@ func TestFolderSaveFailure(t *testing.T) {
 	fixState := func() { os.Remove(f.h.statePath()) }
 	breakState()
 	d.add("/srv/music", "ext4")
-	if _, _, err := f.h.CreateFolder(context.Background(), FolderInput{ID: "music", Name: "M", Path: "/srv/music"}, "admin"); statusOf(err) != 500 {
+	if _, _, err := f.h.CreateFolder(context.Background(), FolderInput{ID: "music", Name: "M", Path: "/srv/music"}, directory.Human("admin")); statusOf(err) != 500 {
 		t.Errorf("create = %v, want 500", err)
 	}
 	if e := audit.last(); e.Action != "folder.create" || e.Result != "error" {
@@ -911,13 +911,13 @@ func TestFolderSaveFailure(t *testing.T) {
 		t.Errorf("after a failed create: kept %v, gids %v", kept, gids)
 	}
 	d.add("/srv/pictures", "ext4")
-	if _, err := f.h.UpdateFolder(context.Background(), "photos", FolderInput{Name: "Renamed", Path: "/srv/pictures"}, "admin"); statusOf(err) != 500 {
+	if _, err := f.h.UpdateFolder(context.Background(), "photos", FolderInput{Name: "Renamed", Path: "/srv/pictures"}, directory.Human("admin")); statusOf(err) != 500 {
 		t.Errorf("update = %v, want 500", err)
 	}
 	if fo, _ := storedFolder(f, "photos"); !reflect.DeepEqual(fo, before) {
 		t.Errorf("after a failed update: %+v", fo)
 	}
-	if err := f.h.DeleteFolder("photos", "admin"); statusOf(err) != 500 {
+	if err := f.h.DeleteFolder("photos", directory.Human("admin")); statusOf(err) != 500 {
 		t.Errorf("delete = %v, want 500", err)
 	}
 	if fo, ok := storedFolder(f, "photos"); !ok || !reflect.DeepEqual(fo, before) {
@@ -939,7 +939,7 @@ func TestFolderDockerRootRefused(t *testing.T) {
 	fx.fmu.Unlock()
 	for _, p := range []string{"/mnt/ssd/docker", "/mnt/ssd/docker/volumes/x", "/mnt/ssd", "/mnt/SSD"} {
 		d.add(p, "ext4")
-		if _, _, err := f.h.CreateFolder(context.Background(), FolderInput{ID: "x", Name: "X", Path: p}, "admin"); statusOf(err) != 400 || !strings.Contains(err.Error(), "Docker") {
+		if _, _, err := f.h.CreateFolder(context.Background(), FolderInput{ID: "x", Name: "X", Path: p}, directory.Human("admin")); statusOf(err) != 400 || !strings.Contains(err.Error(), "Docker") {
 			t.Errorf("create %q: %v, want 400", p, err)
 		}
 		if _, err := f.h.CheckFolderPath(context.Background(), p, false); statusOf(err) != 400 {
@@ -950,14 +950,14 @@ func TestFolderDockerRootRefused(t *testing.T) {
 		t.Errorf("%d fixer runs", n)
 	}
 	createFolder(t, f, "photos", "/srv/photos")
-	if _, err := f.h.UpdateFolder(context.Background(), "photos", FolderInput{Name: "P", Path: "/mnt/ssd/docker/x"}, "admin"); statusOf(err) != 400 {
+	if _, err := f.h.UpdateFolder(context.Background(), "photos", FolderInput{Name: "P", Path: "/mnt/ssd/docker/x"}, directory.Human("admin")); statusOf(err) != 400 {
 		t.Errorf("update into it: %v", err)
 	}
 	fx.fmu.Lock()
 	fx.dockerRoot, fx.rootErr = "", errors.New("daemon down")
 	fx.fmu.Unlock()
 	d.add("/srv/music", "ext4")
-	if _, _, err := f.h.CreateFolder(context.Background(), FolderInput{ID: "music", Name: "M", Path: "/srv/music"}, "admin"); statusOf(err) != 503 {
+	if _, _, err := f.h.CreateFolder(context.Background(), FolderInput{ID: "music", Name: "M", Path: "/srv/music"}, directory.Human("admin")); statusOf(err) != 503 {
 		t.Errorf("unreadable root: %v, want 503", err)
 	}
 	if _, err := f.h.CheckFolderPath(context.Background(), "/srv/music", false); statusOf(err) != 503 {
@@ -966,7 +966,7 @@ func TestFolderDockerRootRefused(t *testing.T) {
 	fx.fmu.Lock()
 	fx.dockerRoot, fx.rootErr = "relative", nil
 	fx.fmu.Unlock()
-	if _, _, err := f.h.CreateFolder(context.Background(), FolderInput{ID: "music", Name: "M", Path: "/srv/music"}, "admin"); statusOf(err) != 503 {
+	if _, _, err := f.h.CreateFolder(context.Background(), FolderInput{ID: "music", Name: "M", Path: "/srv/music"}, directory.Human("admin")); statusOf(err) != 503 {
 		t.Errorf("relative root: %v, want 503", err)
 	}
 }
@@ -1030,7 +1030,7 @@ func TestFolderRefusedFilesystems(t *testing.T) {
 	}
 	for _, fs := range []string{"9p", "virtiofs", "ceph", "ramfs", "ecryptfs"} {
 		d.add("/srv/"+fs, fs)
-		if _, _, err := f.h.CreateFolder(context.Background(), FolderInput{ID: "f" + fs, Name: fs, Path: "/srv/" + fs}, "admin"); statusOf(err) != 409 || !strings.Contains(err.Error(), fs) {
+		if _, _, err := f.h.CreateFolder(context.Background(), FolderInput{ID: "f" + fs, Name: fs, Path: "/srv/" + fs}, directory.Human("admin")); statusOf(err) != 409 || !strings.Contains(err.Error(), fs) {
 			t.Errorf("%s: %v", fs, err)
 		}
 	}

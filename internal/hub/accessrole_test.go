@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/keycloak/kctest"
 )
@@ -14,6 +15,7 @@ import (
 const vpnManifest = `name: VPN
 category: network
 instances: multi
+ai: {unsupported: "test fixture"}
 auth:
   method: native-oidc
   sso: true
@@ -31,6 +33,7 @@ const vpnCompose = "services:\n  web:\n    image: x\n    labels:\n" +
 const homeManifest = `name: Home
 category: chat
 instances: multi
+ai: {unsupported: "test fixture"}
 auth:
   method: native-oidc
   sso: true
@@ -218,7 +221,7 @@ func TestImmutableHostRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	clientBefore := kc.ClientByClientID("home-b")
-	err := f.h.SetHosts("home-b", map[string]string{"home": "chat-b.example.org", "media": "media-b.example.org"}, "alice")
+	err := f.h.SetHosts("home-b", map[string]string{"home": "chat-b.example.org", "media": "media-b.example.org"}, directory.Human("alice"))
 	if statusOf(err) != 409 || !strings.Contains(err.Error(), "can't change") {
 		t.Fatalf("immutable change: %v", err)
 	}
@@ -230,10 +233,10 @@ func TestImmutableHostRefused(t *testing.T) {
 	}
 	// The other host router may move; the default instance's immutable
 	// host is fixed too.
-	if err := f.h.SetHosts("home-b", map[string]string{"home": "matrix-b.example.org", "media": "files-b.example.org"}, "alice"); err != nil {
+	if err := f.h.SetHosts("home-b", map[string]string{"home": "matrix-b.example.org", "media": "files-b.example.org"}, directory.Human("alice")); err != nil {
 		t.Errorf("mutable router: %v", err)
 	}
-	if err := f.h.SetHosts("home", map[string]string{"home": "matrix.example.org", "media": "media.example.org"}, "alice"); statusOf(err) != 409 || !strings.Contains(err.Error(), "can't change") {
+	if err := f.h.SetHosts("home", map[string]string{"home": "matrix.example.org", "media": "media.example.org"}, directory.Human("alice")); statusOf(err) != 409 || !strings.Contains(err.Error(), "can't change") {
 		t.Errorf("default instance: %v", err)
 	}
 }

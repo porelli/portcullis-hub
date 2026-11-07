@@ -12,9 +12,12 @@ import (
 	"github.com/portcullis/hub/internal/keycloak/kctest"
 )
 
-const (
-	faRedirect = "https://people.example.org/"
-	faOrigin   = "https://people.example.org"
+// The fresh-auth client's two hosts (contract §8, G11): people and hub.
+var (
+	faRedirects = []string{"https://people.example.org/", "https://hub.example.org/"}
+	faOrigins   = []string{"https://people.example.org", "https://hub.example.org"}
+	faRedirect  = faRedirects[0]
+	faOrigin    = faOrigins[0]
 )
 
 // freshRealm is a fake realm with the scopes core keeps (basic, acr with
@@ -58,7 +61,7 @@ func checkFreshClient(t *testing.T, kc *kctest.Server) {
 			t.Errorf("attribute %s = %q, want %q", k, got.Attributes[k], want)
 		}
 	}
-	if !slices.Equal(got.RedirectURIs, []string{faRedirect}) || !slices.Equal(got.WebOrigins, []string{faOrigin}) {
+	if !slices.Equal(got.RedirectURIs, faRedirects) || !slices.Equal(got.WebOrigins, faOrigins) {
 		t.Errorf("redirect URIs %v web origins %v", got.RedirectURIs, got.WebOrigins)
 	}
 	if s := kc.ClientScopes(got.ID); strings.Join(s, ",") != "acr,basic" {
@@ -87,14 +90,14 @@ func TestEnsureFreshAuthClient(t *testing.T) {
 	ctx := context.Background()
 	kc := freshRealm(t)
 	c := keycloak.New(kc.HTTP.URL, "admin", "admin")
-	if err := c.EnsureFreshAuthClient(ctx, faRedirect, faOrigin); err != nil {
+	if err := c.EnsureFreshAuthClient(ctx, faRedirects, faOrigins); err != nil {
 		t.Fatal(err)
 	}
 	checkFreshClient(t, kc)
 	id := kc.ClientByClientID(freshauth.ClientID).ID
 
 	// Idempotent: the same client, still exactly so.
-	if err := c.EnsureFreshAuthClient(ctx, faRedirect, faOrigin); err != nil {
+	if err := c.EnsureFreshAuthClient(ctx, faRedirects, faOrigins); err != nil {
 		t.Fatal(err)
 	}
 	checkFreshClient(t, kc)
@@ -118,7 +121,7 @@ func TestEnsureFreshAuthClient(t *testing.T) {
 		cl.AuthenticationFlowBindingOverrides = map[string]string{"browser": "weak-flow"}
 	})
 	kc.AddClientMapper(id, "amr-forged", "oidc-hardcoded-claim-mapper", map[string]string{"claim.name": "amr", "claim.value": "hwk"})
-	if err := c.EnsureFreshAuthClient(ctx, faRedirect, faOrigin); err != nil {
+	if err := c.EnsureFreshAuthClient(ctx, faRedirects, faOrigins); err != nil {
 		t.Fatal(err)
 	}
 	checkFreshClient(t, kc)
@@ -126,7 +129,7 @@ func TestEnsureFreshAuthClient(t *testing.T) {
 	// A realm without the acr scope (no amr: every proof refused): an error.
 	kc2 := kctest.New(t)
 	kc2.AddScope("basic")
-	if err := keycloak.New(kc2.HTTP.URL, "admin", "admin").EnsureFreshAuthClient(ctx, faRedirect, faOrigin); err == nil || !strings.Contains(err.Error(), "acr") {
+	if err := keycloak.New(kc2.HTTP.URL, "admin", "admin").EnsureFreshAuthClient(ctx, faRedirects, faOrigins); err == nil || !strings.Contains(err.Error(), "acr") {
 		t.Errorf("realm without acr: %v", err)
 	}
 
@@ -140,7 +143,7 @@ func TestEnsureFreshAuthClient(t *testing.T) {
 		{faRedirect, "*"},
 		{"", ""},
 	} {
-		if err := c.EnsureFreshAuthClient(ctx, bad[0], bad[1]); err == nil {
+		if err := c.EnsureFreshAuthClient(ctx, []string{bad[0]}, []string{bad[1]}); err == nil {
 			t.Errorf("EnsureFreshAuthClient(%q, %q) accepted", bad[0], bad[1])
 		}
 	}
@@ -153,7 +156,7 @@ func TestEnsureFreshAuthClientConflict(t *testing.T) {
 		id := kc.AddClient(freshauth.ClientID, attrs, "profile", "groups")
 		c := keycloak.New(kc.HTTP.URL, "admin", "admin")
 		var ce *keycloak.ConflictError
-		if err := c.EnsureFreshAuthClient(ctx, faRedirect, faOrigin); !errors.As(err, &ce) {
+		if err := c.EnsureFreshAuthClient(ctx, faRedirects, faOrigins); !errors.As(err, &ce) {
 			t.Fatalf("existing client %v: %v, want *ConflictError", attrs, err)
 		}
 		// Left alone.
@@ -173,7 +176,7 @@ func TestFreshAuthClientLeftAloneByOtherSyncs(t *testing.T) {
 	ctx := context.Background()
 	kc := freshRealm(t)
 	c := keycloak.New(kc.HTTP.URL, "admin", "admin")
-	if err := c.EnsureFreshAuthClient(ctx, faRedirect, faOrigin); err != nil {
+	if err := c.EnsureFreshAuthClient(ctx, faRedirects, faOrigins); err != nil {
 		t.Fatal(err)
 	}
 	app := kc.AddClient("someapp", map[string]string{keycloak.OwnerAttr: "someapp"})
@@ -188,4 +191,48 @@ func TestFreshAuthClientLeftAloneByOtherSyncs(t *testing.T) {
 		t.Errorf("RegisterClient(%s) = %v, want *ConflictError", freshauth.ClientID, err)
 	}
 	checkFreshClient(t, kc)
+}
+
+// TestEnsureFreshAuthClientTwoHosts (contract §8, G11): the client gets
+// exactly both redirect URIs and web origins (people and hub, in that
+// order), idempotently; a client left with only the people host (file
+// sharing's original shape) is widened in place; malformed lists never
+// reach Keycloak.
+func TestEnsureFreshAuthClientTwoHosts(t *testing.T) {
+	ctx := context.Background()
+	kc := freshRealm(t)
+	c := keycloak.New(kc.HTTP.URL, "admin", "admin")
+	for i := 0; i < 2; i++ {
+		if err := c.EnsureFreshAuthClient(ctx, faRedirects, faOrigins); err != nil {
+			t.Fatal(err)
+		}
+		checkFreshClient(t, kc)
+	}
+	id := kc.ClientByClientID(freshauth.ClientID).ID
+	kc.UpdateClient(id, func(cl *kctest.Client) {
+		cl.RedirectURIs = []string{faRedirect}
+		cl.WebOrigins = []string{faOrigin}
+	})
+	if err := c.EnsureFreshAuthClient(ctx, faRedirects, faOrigins); err != nil {
+		t.Fatal(err)
+	}
+	checkFreshClient(t, kc)
+	if kc.ClientByClientID(freshauth.ClientID).ID != id {
+		t.Error("client re-created")
+	}
+	puts := kc.CountCalls("PUT")
+	for _, bad := range [][2][]string{
+		{nil, nil},
+		{faRedirects, faOrigins[:1]},
+		{faRedirects, []string{faOrigins[1], faOrigins[0]}},
+		{[]string{faRedirect, faRedirect}, []string{faOrigin, faOrigin}},
+		{[]string{faRedirect, "https://hub.example.org/x"}, faOrigins},
+	} {
+		if err := c.EnsureFreshAuthClient(ctx, bad[0], bad[1]); err == nil {
+			t.Errorf("EnsureFreshAuthClient(%q, %q) accepted", bad[0], bad[1])
+		}
+	}
+	if kc.CountCalls("PUT") != puts {
+		t.Error("a refused call reached Keycloak")
+	}
 }

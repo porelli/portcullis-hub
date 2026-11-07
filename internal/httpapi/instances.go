@@ -1,10 +1,13 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/hub"
 	"github.com/portcullis/hub/internal/templates"
 )
@@ -49,12 +52,20 @@ func (s *Server) handleResumeUserSweep(w http.ResponseWriter, r *http.Request) {
 	if !decodeStrict(w, r, &b, `{"confirm": "resume"}`) {
 		return
 	}
-	st, err := s.Hub.ResumeUserSweep(r.Context(), actor(r), b.Confirm)
+	st, err := s.resumeUserSweep(r.Context(), requestActor(r), b.Confirm)
 	if err != nil {
 		writeErr(w, err, http.StatusBadRequest)
 		return
 	}
 	writeJSON(w, st)
+}
+
+// resumeUserSweep is the resume's work (route and resume_user_sweep);
+// audited keycloak.sweep_resume by the Hub.
+func (s *Server) resumeUserSweep(ctx context.Context, a directory.Actor, confirm string) (hub.UserSweepStatus, error) {
+	s.rec("ResumeUserSweep", confirm)
+	st, err := s.Hub.ResumeUserSweep(ctx, a, confirm)
+	return st, defaultStatus(err, http.StatusBadRequest)
 }
 
 // handleMissingGroups lists the enabled instances whose access / admin
@@ -72,12 +83,20 @@ func (s *Server) handleCreateMissingGroups(w http.ResponseWriter, r *http.Reques
 	if !decodeStrict(w, r, &b, `{"ids": ["<instance id>", ...]} (or {} for all)`) {
 		return
 	}
-	res, err := s.Hub.CreateMissingGroups(r.Context(), b.IDs, actor(r))
+	res, err := s.createMissingGroups(r.Context(), requestActor(r), b.IDs)
 	if err != nil {
 		writeErr(w, err, http.StatusBadRequest)
 		return
 	}
 	writeJSON(w, map[string]interface{}{"results": res})
+}
+
+// createMissingGroups is the banner's work (route and
+// create_missing_groups).
+func (s *Server) createMissingGroups(ctx context.Context, a directory.Actor, ids []string) ([]hub.CreateGroupsResult, error) {
+	s.rec("CreateMissingGroups", ids)
+	res, err := s.Hub.CreateMissingGroups(ctx, ids, a)
+	return res, defaultStatus(err, http.StatusBadRequest)
 }
 
 // decodeStrict decodes a small JSON body into v (unknown fields refused);
@@ -137,20 +156,27 @@ func (s *Server) handleCreateInstance(w http.ResponseWriter, r *http.Request) {
 	if !decodeStrict(w, r, &b, `{"template": "<template>", "id": "<instance-id>", "hosts": {"<host router>": "<hostname>", ...}}`) {
 		return
 	}
-	if !templates.ValidID(b.Template) {
-		http.Error(w, "invalid template id", http.StatusBadRequest)
-		return
-	}
-	if len(b.Hosts) == 0 {
-		b.Hosts = nil // the defaults on the main domain
-	}
-	res, err := s.Hub.CreateInstanceAs(b.Template, b.ID, b.Hosts, actor(r))
+	res, err := s.createInstance(requestActor(r), b.Template, b.ID, b.Hosts)
 	noStore(w)
 	if err != nil {
 		writeErr(w, err, http.StatusBadGateway)
 		return
 	}
 	writeJSONStatus(w, http.StatusCreated, res)
+}
+
+// createInstance is the create's work (route and create_instance);
+// audited instance.create by the Hub.
+func (s *Server) createInstance(a directory.Actor, template, id string, hosts map[string]string) (*hub.CreateResult, error) {
+	if !templates.ValidID(template) {
+		return nil, &hub.StatusError{Status: http.StatusBadRequest, Err: errors.New("invalid template id")}
+	}
+	if len(hosts) == 0 {
+		hosts = nil // the defaults on the main domain
+	}
+	s.rec("CreateInstanceAs", template, id, hosts)
+	res, err := s.Hub.CreateInstanceAs(template, id, hosts, a)
+	return res, defaultStatus(err, http.StatusBadGateway)
 }
 
 // handleInstanceDefaults feeds the hostname editor: a template's host
@@ -162,15 +188,25 @@ func (s *Server) handleInstanceDefaults(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	q := r.URL.Query()
-	tid, id, domain := q.Get("template"), q.Get("id"), hub.NormalizeHost(q.Get("domain"))
-	if !templates.ValidID(tid) {
-		http.Error(w, "invalid template id", http.StatusBadRequest)
+	v, err := s.instanceDefaults(q.Get("template"), q.Get("id"), q.Get("domain"))
+	if err != nil {
+		writeErr(w, err, http.StatusBadRequest)
 		return
+	}
+	noStore(w)
+	writeJSON(w, v)
+}
+
+// instanceDefaults is the hostname editor's data (route and
+// instance_defaults).
+func (s *Server) instanceDefaults(tid, id, domain string) (map[string]any, error) {
+	domain = hub.NormalizeHost(domain)
+	if !templates.ValidID(tid) {
+		return nil, &hub.StatusError{Status: http.StatusBadRequest, Err: errors.New("invalid template id")}
 	}
 	routers, multi, legacy, ok := s.Hub.HostRouters(tid)
 	if !ok {
-		http.Error(w, "template not found: "+tid, http.StatusNotFound)
-		return
+		return nil, &hub.StatusError{Status: http.StatusNotFound, Err: errors.New("template not found: " + tid)}
 	}
 	domains := s.Hub.InstanceDomains()
 	if domain != "" {
@@ -179,19 +215,17 @@ func (s *Server) handleInstanceDefaults(w http.ResponseWriter, r *http.Request) 
 			known = known || d.Name == domain
 		}
 		if !known {
-			http.Error(w, "unknown domain: "+domain, http.StatusBadRequest)
-			return
+			return nil, &hub.StatusError{Status: http.StatusBadRequest, Err: errors.New("unknown domain: " + domain)}
 		}
 	}
 	hosts := map[string]string{}
 	if id == tid || templates.InstanceIDRe.MatchString(id) {
 		hosts = s.Hub.DefaultHosts(tid, id, domain)
 	}
-	noStore(w)
-	writeJSON(w, map[string]interface{}{
+	return map[string]any{
 		"template": tid, "id": id, "domain": domain, "multi": multi, "legacy": legacy,
 		"routers": routers, "domains": domains, "hosts": hosts,
-	})
+	}, nil
 }
 
 func (s *Server) handleInstanceHosts(w http.ResponseWriter, r *http.Request) {
@@ -208,20 +242,28 @@ func (s *Server) handleInstanceHosts(w http.ResponseWriter, r *http.Request) {
 	if !decodeStrict(w, r, &b, `{"hosts": {"<host router>": "<hostname>", ...}}`) {
 		return
 	}
-	err := s.Hub.SetHosts(id, b.Hosts, actor(r))
+	v, err := s.setHosts(requestActor(r), id, b.Hosts)
 	noStore(w)
 	if err != nil {
 		writeErr(w, err, http.StatusBadGateway)
 		return
 	}
+	writeJSON(w, v)
+}
+
+// setHosts is the hostname change's work (route and set_hosts); audited
+// instance.update by the Hub. Changed but no longer resolvable (e.g. a
+// concurrent delete) is a 409, never a zero-value answer.
+func (s *Server) setHosts(a directory.Actor, id string, hosts map[string]string) (*hub.InstanceView, error) {
+	s.rec("SetHosts", id, hosts)
+	if err := s.Hub.SetHosts(id, hosts, a); err != nil {
+		return nil, defaultStatus(err, http.StatusBadGateway)
+	}
 	v, ok := s.Hub.InstanceView(id)
 	if !ok {
-		// Changed but no longer resolvable (e.g. a concurrent delete):
-		// never a zero-value 200.
-		http.Error(w, "hostnames changed, but instance "+id+" can no longer be listed", http.StatusConflict)
-		return
+		return nil, &hub.StatusError{Status: http.StatusConflict, Err: errors.New("hostnames changed, but instance " + id + " can no longer be listed")}
 	}
-	writeJSON(w, v)
+	return &v, nil
 }
 
 func (s *Server) handleDeleteInstance(w http.ResponseWriter, r *http.Request) {
@@ -238,13 +280,21 @@ func (s *Server) handleDeleteInstance(w http.ResponseWriter, r *http.Request) {
 	if !decodeStrict(w, r, &b, `{"confirm": "<instance-id>"}`) {
 		return
 	}
-	op, err := s.Hub.StartDelete(id, b.Confirm, actor(r))
+	op, err := s.startDelete(requestActor(r), id, b.Confirm)
 	noStore(w)
 	if err != nil {
 		writeErr(w, err, http.StatusBadGateway)
 		return
 	}
 	writeAccepted(w, op)
+}
+
+// startDelete is the guarded delete's work (route and delete_instance;
+// confirm = the id typed); audited instance.delete by the Hub.
+func (s *Server) startDelete(a directory.Actor, id, confirm string) (*hub.AsyncOp, error) {
+	s.rec("StartDelete", id, confirm)
+	op, err := s.Hub.StartDelete(id, confirm, a)
+	return op, defaultStatus(err, http.StatusBadGateway)
 }
 
 func (s *Server) handleBackups(w http.ResponseWriter, r *http.Request) {
@@ -258,16 +308,26 @@ func (s *Server) handleBackups(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	list, err := s.Hub.ListBackups(id)
+	list, err := s.listBackups(id)
 	noStore(w)
 	if err != nil {
 		writeErr(w, err, http.StatusInternalServerError)
 		return
 	}
+	writeJSON(w, list)
+}
+
+// listBackups is the backups list (routes, list_backups and
+// list_backups_all; id "" = every instance's, deleted ones included).
+func (s *Server) listBackups(id string) ([]hub.BackupEntry, error) {
+	list, err := s.Hub.ListBackups(id)
+	if err != nil {
+		return nil, defaultStatus(err, http.StatusInternalServerError)
+	}
 	if list == nil {
 		list = []hub.BackupEntry{}
 	}
-	writeJSON(w, list)
+	return list, nil
 }
 
 func (s *Server) handleBackupInstance(w http.ResponseWriter, r *http.Request) {
@@ -278,7 +338,7 @@ func (s *Server) handleBackupInstance(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	op, err := s.Hub.StartBackup(id, actor(r))
+	op, err := s.startBackup(requestActor(r), id)
 	noStore(w)
 	if err != nil {
 		writeErr(w, err, http.StatusInternalServerError)
@@ -301,7 +361,7 @@ func (s *Server) handleRestoreInstance(w http.ResponseWriter, r *http.Request) {
 	if !decodeStrict(w, r, &b, `{"archive": "<instance-id>/<YYYYMMDDTHHMMSSZ>.tar"}`) {
 		return
 	}
-	op, err := s.Hub.StartRestore(id, b.Archive, actor(r))
+	op, err := s.startRestore(requestActor(r), id, b.Archive)
 	noStore(w)
 	if err != nil {
 		writeErr(w, err, http.StatusInternalServerError)
@@ -322,7 +382,7 @@ func (s *Server) handleRestoreAs(w http.ResponseWriter, r *http.Request) {
 	if !decodeStrict(w, r, &b, `{"archive": "<instance-id>/<YYYYMMDDTHHMMSSZ>.tar", "id": "<new instance-id>", "hosts": {"<host router>": "<hostname>"} (optional)}`) {
 		return
 	}
-	op, err := s.Hub.StartRestoreAs(b.Archive, b.ID, actor(r), b.Hosts)
+	op, err := s.startRestoreAs(requestActor(r), b.Archive, b.ID, b.Hosts)
 	noStore(w)
 	if err != nil {
 		writeErr(w, err, http.StatusInternalServerError)
@@ -331,14 +391,38 @@ func (s *Server) handleRestoreAs(w http.ResponseWriter, r *http.Request) {
 	writeAccepted(w, op)
 }
 
+// startBackup, startRestore and startRestoreAs are the background
+// operations' work (routes and backup_instance / restore_instance /
+// restore_as); audited instance.backup|restore by the Hub.
+func (s *Server) startBackup(a directory.Actor, id string) (*hub.AsyncOp, error) {
+	s.rec("StartBackup", id)
+	op, err := s.Hub.StartBackup(id, a)
+	return op, defaultStatus(err, http.StatusInternalServerError)
+}
+
+func (s *Server) startRestore(a directory.Actor, id, archive string) (*hub.AsyncOp, error) {
+	s.rec("StartRestore", id, archive)
+	op, err := s.Hub.StartRestore(id, archive, a)
+	return op, defaultStatus(err, http.StatusInternalServerError)
+}
+
+func (s *Server) startRestoreAs(a directory.Actor, archive, id string, hosts map[string]string) (*hub.AsyncOp, error) {
+	s.rec("StartRestoreAs", archive, id, hosts)
+	op, err := s.Hub.StartRestoreAs(archive, id, a, hosts)
+	return op, defaultStatus(err, http.StatusInternalServerError)
+}
+
 // writeAccepted answers a long operation the Hub runs in the background
 // (backup, restore, delete; contract §11.7): 202 with the op id and where
 // to poll its op record.
 func writeAccepted(w http.ResponseWriter, op *hub.AsyncOp) {
-	writeJSONStatus(w, http.StatusAccepted, map[string]string{
-		"op_id": op.OpID, "op": op.Op, "instance": op.Instance,
-		"poll": "/api/instances/" + op.Instance + "/op",
-	})
+	writeJSONStatus(w, http.StatusAccepted, acceptedBody(op))
+}
+
+// acceptedBody is a long operation's 202 body (the Portcullis MCP's
+// OpStarted too).
+func acceptedBody(op *hub.AsyncOp) OpStarted {
+	return OpStarted{OpID: op.OpID, Op: op.Op, Instance: op.Instance, Poll: "/api/instances/" + op.Instance + "/op"}
 }
 
 // handleInstanceOp is an instance's op record (also of a deleted

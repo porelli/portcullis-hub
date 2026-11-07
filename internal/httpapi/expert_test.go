@@ -31,7 +31,7 @@ func newExpertServer(t *testing.T, runner compose.Runner) (http.Handler, *direct
 	root := t.TempDir()
 	src := filepath.Join(root, "src", "demo")
 	os.MkdirAll(src, 0755)
-	os.WriteFile(filepath.Join(src, "manifest.yaml"), []byte("name: Demo\ncategory: test\nauth:\n  method: forward-auth\n"), 0644)
+	os.WriteFile(filepath.Join(src, "manifest.yaml"), []byte("name: Demo\ncategory: test\nai: {unsupported: test fixture}\nauth:\n  method: forward-auth\n"), 0644)
 	os.WriteFile(filepath.Join(src, "compose.yml"), []byte("services:\n  web:\n    image: x\n    labels:\n      traefik.http.routers.demo.rule: Host(`demo.${PORTCULLIS_DOMAIN}`)\n"), 0644)
 	data := filepath.Join(root, "data")
 	os.MkdirAll(data, 0755)
@@ -135,8 +135,14 @@ func TestExpertComposeAPI(t *testing.T) {
 	if r := call(h, "POST", "/api/templates/restart/demo", "{}"); r.Code != 200 || !strings.Contains(r.Body.String(), "restarted") {
 		t.Errorf("restart = %d %s", r.Code, r.Body)
 	}
-	es, _ := audit.Recent(10)
-	if len(es) != 3 || es[2].Result != "refused" || es[1].Result != "ok" || !strings.HasPrefix(es[1].Detail, "saved (") ||
+	all, _ := audit.Recent(10)
+	var es []directory.AuditEntry // the enable and restart are audited too (instance.*)
+	for _, e := range all {
+		if e.Action == "app.compose_override" {
+			es = append(es, e)
+		}
+	}
+	if len(all) != 5 || len(es) != 3 || es[2].Result != "refused" || es[1].Result != "ok" || !strings.HasPrefix(es[1].Detail, "saved (") ||
 		es[0].Detail != "removed" || es[0].Action != "app.compose_override" || es[0].Actor != "alice" || es[0].Target != "demo" {
 		t.Errorf("audit = %+v", es)
 	}

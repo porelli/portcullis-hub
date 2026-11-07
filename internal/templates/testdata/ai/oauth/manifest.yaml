@@ -1,0 +1,25 @@
+name: OAuth App
+category: tools
+auth:
+  method: native-oidc
+  group_access: true
+keycloak_clients:
+  - client_id: oauthapp
+    redirect_uri: "https://{{HOST_OAUTH}}/cb"
+hooks:
+  - {name: revoke-all, service: web, command: [/revoke], when: [ai]}
+  - {name: toggle, service: web, command: [/toggle], when: [ai]}
+ai:
+  on_change: toggle
+  mcp:
+    - name: oauth
+      label: OAuth App
+      kind: builtin
+      service: web
+      path: /mcp
+      router: oauth
+      upstream: official
+      source: https://example.org/oauth
+      protocol: ["2025-11-25"]
+      modes: [read_write]
+      identity: {mode: app_oauth, revoke: revoke-all}

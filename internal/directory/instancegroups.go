@@ -47,18 +47,18 @@ func (s *Service) keptGroupReason(name string) (string, error) {
 }
 
 // ResolveActor checks that actor can run the instance group operations:
-// an LLDAP administrator (as CallerFor resolves it). Users & Groups not
+// an LLDAP administrator (as CallerAs resolves it). Users & Groups not
 // available is no error (the group steps are warnings then).
-func (s *Service) ResolveActor(ctx context.Context, actor string) error {
+func (s *Service) ResolveActor(ctx context.Context, actor Actor) error {
 	if s.LLDAP.Available() != nil {
 		return nil
 	}
-	c, err := s.CallerFor(ctx, actor)
+	c, err := s.CallerAs(ctx, actor)
 	if err != nil {
 		return err
 	}
 	if !c.Admin {
-		return forbidden("%s is not an administrator", actor)
+		return forbidden("%s is not an administrator", actor.User)
 	}
 	return nil
 }
@@ -67,7 +67,7 @@ func (s *Service) ResolveActor(ctx context.Context, actor string) error {
 // actor. Missing = nothing to do (retries). A protected or permission
 // group is kept, with a warning. Users & Groups not configured (no LLDAP
 // credentials) is a warning too: the group stays in LLDAP.
-func (s *Service) DeleteInstanceGroup(ctx context.Context, actor, name string) (warnings []string, err error) {
+func (s *Service) DeleteInstanceGroup(ctx context.Context, actor Actor, name string) (warnings []string, err error) {
 	if name == "" {
 		return nil, nil
 	}
@@ -81,7 +81,7 @@ func (s *Service) DeleteInstanceGroup(ctx context.Context, actor, name string) (
 	if why != "" {
 		return []string{fmt.Sprintf("group %s was kept: %s", name, why)}, nil
 	}
-	c, err := s.CallerFor(ctx, actor)
+	c, err := s.CallerAs(ctx, actor)
 	if err != nil {
 		return nil, err
 	}
@@ -101,14 +101,14 @@ func (s *Service) DeleteInstanceGroup(ctx context.Context, actor, name string) (
 // get access to the instance). created reports that this call created
 // the group (its warnings, e.g. purged leftovers, don't change that): an
 // undo deletes exactly the groups created.
-func (s *Service) CreateInstanceGroup(ctx context.Context, actor, name string) (created bool, warnings []string, err error) {
+func (s *Service) CreateInstanceGroup(ctx context.Context, actor Actor, name string) (created bool, warnings []string, err error) {
 	if name == "" {
 		return false, nil, nil
 	}
 	if aerr := s.LLDAP.Available(); aerr != nil {
 		return false, []string{fmt.Sprintf("group %s was not created: users & groups is not available (%v)", name, aerr)}, nil
 	}
-	c, err := s.CallerFor(ctx, actor)
+	c, err := s.CallerAs(ctx, actor)
 	if err != nil {
 		return false, nil, err
 	}

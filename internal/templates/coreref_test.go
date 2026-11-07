@@ -17,6 +17,9 @@ func TestCheckCoreRefs(t *testing.T) {
 		"services:\n  web:\n    image: x\n    networks: [portcullis-proxy, default]\nnetworks:\n  portcullis-proxy:\n    external: true\n",
 		"services:\n  web:\n    networks:\n      internal:\n        aliases: [web-int]\n      default:\n        aliases: [web-internal]\nnetworks:\n  internal: {}\n",
 		"services:\n  web:\n    network_mode: host\n",
+		// -internal names on an internal: true project network (an AI
+		// companion's trust network) as on default.
+		"services:\n  web:\n    networks:\n      trust:\n        aliases: [web-internal]\nnetworks:\n  trust:\n    internal: true\n",
 		// A template's own (project-scoped) network may reuse a core key.
 		"services:\n  web:\n    networks: [monitoring]\nnetworks:\n  monitoring: {}\n",
 		"services:\n  web:\n    hostname: ${PORTCULLIS_HOST_GITLAB:-git.portcullis.local}\n",
@@ -32,19 +35,22 @@ func TestCheckCoreRefs(t *testing.T) {
 		}
 	}
 	bad := map[string]string{
-		"forward-auth-ext":       "services:\n  web:\n    labels:\n      traefik.http.routers.x.service: forward-auth-ext@docker\n",
-		"portcullis-auth-ext":    "services:\n  web:\n    labels:\n      traefik.http.routers.x.middlewares: portcullis-auth-ext@docker\n",
-		"portcullis-oauth2":      "services:\n  web:\n    labels:\n      traefik.http.routers.portcullis-oauth2-x.rule: Host(`a.b`)\n",
-		"external core":          "services:\n  web:\n    networks: [portcullis-certs]\nnetworks:\n  portcullis-certs:\n    external: true\n",
-		"external prefixed":      "services:\n  web:\n    networks: [n]\nnetworks:\n  n:\n    external: true\n    name: portcullis_portcullis-domains\n",
-		"named core":             "services:\n  web:\n    networks: [n]\nnetworks:\n  n:\n    name: portcullis-auth\n",
-		"external name (legacy)": "services:\n  web:\n    networks: [n]\nnetworks:\n  n:\n    external:\n      name: portcullis\n",
-		"service named domains":  "services:\n  domains:\n    image: x\n",
-		"container_name domains": "services:\n  web:\n    container_name: domains\n",
-		"alias domains":          "services:\n  web:\n    networks:\n      portcullis-proxy:\n        aliases: [Domains]\nnetworks:\n  portcullis-proxy:\n    external: true\n",
-		"network_mode container": "services:\n  web:\n    network_mode: container:portcullis-hub-1\n",
-		"internal alias own net": "services:\n  web:\n    networks:\n      internal:\n        aliases: [web-internal]\nnetworks:\n  internal: {}\n",
-		"socket proxy network":   "services:\n  web:\n    networks: [s]\nnetworks:\n  s:\n    external: true\n    name: portcullis_socket-proxy-hub\n",
+		"forward-auth-ext":                 "services:\n  web:\n    labels:\n      traefik.http.routers.x.service: forward-auth-ext@docker\n",
+		"portcullis-auth-ext":              "services:\n  web:\n    labels:\n      traefik.http.routers.x.middlewares: portcullis-auth-ext@docker\n",
+		"portcullis-oauth2":                "services:\n  web:\n    labels:\n      traefik.http.routers.portcullis-oauth2-x.rule: Host(`a.b`)\n",
+		"external core":                    "services:\n  web:\n    networks: [portcullis-certs]\nnetworks:\n  portcullis-certs:\n    external: true\n",
+		"external prefixed":                "services:\n  web:\n    networks: [n]\nnetworks:\n  n:\n    external: true\n    name: portcullis_portcullis-domains\n",
+		"named core":                       "services:\n  web:\n    networks: [n]\nnetworks:\n  n:\n    name: portcullis-auth\n",
+		"external name (legacy)":           "services:\n  web:\n    networks: [n]\nnetworks:\n  n:\n    external:\n      name: portcullis\n",
+		"service named domains":            "services:\n  domains:\n    image: x\n",
+		"container_name domains":           "services:\n  web:\n    container_name: domains\n",
+		"alias domains":                    "services:\n  web:\n    networks:\n      portcullis-proxy:\n        aliases: [Domains]\nnetworks:\n  portcullis-proxy:\n    external: true\n",
+		"network_mode container":           "services:\n  web:\n    network_mode: container:portcullis-hub-1\n",
+		"internal alias own net":           "services:\n  web:\n    networks:\n      internal:\n        aliases: [web-internal]\nnetworks:\n  internal: {}\n",
+		"internal alias internal + ipam":   "services:\n  web:\n    networks:\n      trust:\n        aliases: [web-internal]\nnetworks:\n  trust:\n    internal: true\n    ipam:\n      config: [{subnet: 10.9.0.0/24}]\n",
+		"internal alias internal + driver": "services:\n  web:\n    networks:\n      trust:\n        aliases: [web-internal]\nnetworks:\n  trust:\n    internal: true\n    driver: bridge\n",
+		"internal alias internal false":    "services:\n  web:\n    networks:\n      trust:\n        aliases: [web-internal]\nnetworks:\n  trust:\n    internal: false\n",
+		"socket proxy network":             "services:\n  web:\n    networks: [s]\nnetworks:\n  s:\n    external: true\n    name: portcullis_socket-proxy-hub\n",
 	}
 	for what, c := range bad {
 		if err := checkCoreRefs([]byte(c), map[string]string{"gitlab": "PORTCULLIS_HOST_GITLAB"}); err == nil {
@@ -73,9 +79,9 @@ func TestSingleDocument(t *testing.T) {
 	}
 	// Discover skips such a template although its first document is clean.
 	dir := t.TempDir()
-	writeTpl(t, dir, "multi", "name: Multi\ncategory: test\nicon: x\nauth:\n  method: public\n", two)
-	writeTpl(t, dir, "multiman", "name: A\ncategory: test\nicon: x\nauth:\n  method: public\n---\nname: B\n", "services:\n  web:\n    image: x\n")
-	writeTpl(t, dir, "single", "name: Single\ncategory: test\nicon: x\nauth:\n  method: custom\n", "services:\n  web:\n    image: x\n")
+	writeTpl(t, dir, "multi", "name: Multi\ncategory: test\nicon: x\nai: {unsupported: test fixture}\nauth:\n  method: public\n", two)
+	writeTpl(t, dir, "multiman", "name: A\ncategory: test\nicon: x\nai: {unsupported: test fixture}\nauth:\n  method: public\n---\nname: B\n", "services:\n  web:\n    image: x\n")
+	writeTpl(t, dir, "single", "name: Single\ncategory: test\nicon: x\nai: {unsupported: test fixture}\nauth:\n  method: custom\n", "services:\n  web:\n    image: x\n")
 	loaded := map[string]bool{}
 	for _, tp := range Discover(dir, "local", "example.org", nil) {
 		loaded[tp.ID] = true
@@ -298,7 +304,7 @@ func TestCheckCoreRefsUnicodeFolding(t *testing.T) {
 // duplicate or a missing rule); the controls load.
 func TestDiscoverRefusesBypasses(t *testing.T) {
 	dir := t.TempDir()
-	manifest := "name: App\ncategory: test\nicon: x\nauth:\n  method: forward-auth\n"
+	manifest := "name: App\ncategory: test\nicon: x\nai: {unsupported: test fixture}\nauth:\n  method: forward-auth\n"
 	baseLabels := [][2]string{
 		{"traefik.enable", "\"true\""},
 		{"traefik.http.routers.app.rule", "Host(`app.${PORTCULLIS_DOMAIN}`)"},
@@ -427,7 +433,7 @@ func TestDiscoverRefusesBypasses(t *testing.T) {
 		writeTpl(t, dir, id, manifest, build("web", nil, "    volumes: [db:/x]\n", top))
 		ids[id] = top
 	}
-	multiManifest := "name: App\ncategory: test\nicon: x\ninstances: multi\nauth:\n  method: forward-auth\n"
+	multiManifest := "name: App\ncategory: test\nicon: x\ninstances: multi\nai: {unsupported: test fixture}\nauth:\n  method: forward-auth\n"
 	multiCompose := func(lines []string, top string) string {
 		return strings.Replace(build("web", lines, "", top), "Host(`app.${PORTCULLIS_DOMAIN}`)", "Host(`${PORTCULLIS_HOST_APP:-app.portcullis.local}`)", 1)
 	}

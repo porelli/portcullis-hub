@@ -437,7 +437,7 @@ func TestInstanceDeleteRevokesDeleted(t *testing.T) {
 	c := credSvcFixture(t)
 	addCred(t, c.f.h, smbB, "alice", credentials.NTHash([]byte("a")))
 	execs := len(c.f.engine.ExecCalls())
-	if _, err := c.f.h.DeleteInstance(smbB, smbB, "root"); err != nil {
+	if _, err := c.f.h.DeleteInstance(smbB, smbB, directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	settle(c.f)
@@ -483,7 +483,7 @@ func (r *raceFreshAuth) Verify(ctx context.Context, p freshauth.Proof, user stri
 func TestCreateRaceRevokedByRecheck(t *testing.T) {
 	c := credSvcFixture(t)
 	runChecks(t, c.f.h)
-	c.f.h.SetFreshAuth(&raceFreshAuth{onVerify: func() { c.people.removeMember("users_"+smbID, "bob") }})
+	c.f.h.SetFreshAuth(ListenerPeople, &raceFreshAuth{onVerify: func() { c.people.removeMember("users_"+smbID, "bob") }})
 	cc, err := c.f.h.CreateCredential(context.Background(), smbID, smbKey, "bob", testProof)
 	if err != nil {
 		t.Fatal(err)

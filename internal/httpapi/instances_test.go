@@ -138,6 +138,9 @@ func (e *fakeEngine) ContainerKill(context.Context, string, string) error { retu
 func (e *fakeEngine) ExecStdin(context.Context, string, docker.ExecInput) (*docker.ExecResult, error) {
 	return nil, cerrdefs.ErrNotFound.WithMessage("no such container")
 }
+func (e *fakeEngine) ExecStdinSplit(context.Context, string, docker.ExecInput) (*docker.ExecSplitResult, error) {
+	return nil, cerrdefs.ErrNotFound.WithMessage("no such container")
+}
 func (e *fakeEngine) ExecRunning(context.Context, string) (bool, error) { return false, nil }
 func (e *fakeEngine) ContainerState(context.Context, string) (docker.State, error) {
 	return docker.State{}, cerrdefs.ErrNotFound.WithMessage("no such container")
@@ -344,6 +347,7 @@ category: monitoring
 icon: "📊"
 description: Dashboards
 instances: multi
+ai: {unsupported: "test fixture"}
 auth:
   method: header-auth
   group_access: true
@@ -363,6 +367,7 @@ category: chat
 icon: "💬"
 description: Synapse-like homeserver (its server name is fixed)
 instances: multi
+ai: {unsupported: "test fixture"}
 auth:
   method: forward-auth
   group_access: true
@@ -466,6 +471,7 @@ func newInstEnvOpts(t *testing.T, root string, o instEnvOpts) *instEnv {
 	os.WriteFile(filepath.Join(cred, "password"), []byte("svc-password-0123456789"), 0600)
 	kc := kctest.New(t)
 	kc.Importable = ll.HasUser
+	kc.LDAPUUID = ll.UUIDOf
 	secret := filepath.Join(root, "invite-secret")
 	os.WriteFile(secret, []byte(strings.Repeat("s", 40)), 0600)
 	dir := &directory.Service{

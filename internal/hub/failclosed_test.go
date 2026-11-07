@@ -283,7 +283,7 @@ func TestDirectoryStateFailsClosed(t *testing.T) {
 			{User: "alice", Group: "contractors", At: "2027-01-01T00:00:00Z"},
 		}, &attrs, nil
 	}
-	f.h.SetDirectory(state, nil)
+	f.h.SetDirectory(dirStateOf(state), nil)
 	if err := f.h.WritePolicy(); err != nil {
 		t.Fatal(err)
 	}
@@ -316,16 +316,16 @@ func TestDirectoryStateFailsClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(h2.Wait)
-	h2.SetDirectory(state, nil)
+	h2.SetDirectory(dirStateOf(state), nil)
 	h2.Init()
 	f.h = h2
 	check("restart, directory failing")
 
 	// Directory back, nothing shared, no attributes document: file removed.
 	fail.Store(false)
-	f.h.SetDirectory(func(context.Context) ([]policy.Expiring, *policy.UserAttributesDocument, error) {
+	f.h.SetDirectory(dirStateOf(func(context.Context) ([]policy.Expiring, *policy.UserAttributesDocument, error) {
 		return nil, nil, nil
-	}, nil)
+	}), nil)
 	if err := f.h.WritePolicy(); err != nil {
 		t.Fatal(err)
 	}
@@ -342,10 +342,10 @@ func TestDirectoryStateFailsClosed(t *testing.T) {
 func TestRunDirectorySync(t *testing.T) {
 	f := newFixture(t)
 	var states, syncs atomic.Int32
-	f.h.SetDirectory(func(context.Context) ([]policy.Expiring, *policy.UserAttributesDocument, error) {
+	f.h.SetDirectory(dirStateOf(func(context.Context) ([]policy.Expiring, *policy.UserAttributesDocument, error) {
 		states.Add(1)
 		return []policy.Expiring{{User: "u", Group: "g", At: "2030-01-01T00:00:00Z"}}, nil, nil
-	}, func(context.Context) error {
+	}), func(context.Context) error {
 		syncs.Add(1)
 		return errors.New("keycloak down")
 	})
@@ -378,10 +378,10 @@ func TestDirectorySyncSlowKeycloak(t *testing.T) {
 	f := newFixture(t)
 	var states atomic.Int32
 	release := make(chan struct{})
-	f.h.SetDirectory(func(context.Context) ([]policy.Expiring, *policy.UserAttributesDocument, error) {
+	f.h.SetDirectory(dirStateOf(func(context.Context) ([]policy.Expiring, *policy.UserAttributesDocument, error) {
 		states.Add(1)
 		return nil, nil, nil
-	}, func(ctx context.Context) error {
+	}), func(ctx context.Context) error {
 		select {
 		case <-release:
 		case <-ctx.Done():

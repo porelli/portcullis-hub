@@ -7,8 +7,10 @@ import (
 	"log"
 	"os"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/fsutil"
@@ -67,31 +69,41 @@ func (h *Hub) SetAudit(a Auditor) {
 }
 
 // auditOp records an instance operation; Result from err as the API does
-// (a 4xx StatusError is "refused").
-func (h *Hub) auditOp(actor, action, target, detail string, err error) {
+// (a 4xx StatusError or ErrBusy is "refused").
+func (h *Hub) auditOp(actor directory.Actor, action, target, detail string, err error) {
 	h.mu.RLock()
 	a := h.audit
 	h.mu.RUnlock()
 	if a == nil {
 		return
 	}
-	e := directory.AuditEntry{Actor: actor, Action: action, Target: target, Detail: detail, Result: "ok"}
+	e := directory.AuditEntry{Actor: actor.User, Via: actor.Via, Client: actor.Client, Action: action, Target: target, Detail: actor.AuditDetail(detail), Result: "ok"}
 	if err != nil {
-		msg := err.Error()
-		// An instance's errors are redacted like its op records (stored
-		// secret settings, secret-looking env values).
-		if inst, _, _ := strings.Cut(target, "/"); templates.ValidID(inst) {
-			msg = h.secretRedactor(inst, secretsOf(err))(msg)
-		}
-		e.Result, e.Error = "error", msg
+		inst, _, _ := strings.Cut(target, "/")
+		e.Result, e.Error = "error", h.RedactErr(inst, err)
 		var se *StatusError
-		if errors.As(err, &se) && se.Status < 500 {
+		var busy ErrBusy
+		if (errors.As(err, &se) && se.Status < 500) || errors.As(err, &busy) {
 			e.Result = "refused"
 		}
 	}
 	if aerr := a.Append(e); aerr != nil {
 		log.Printf("audit: %v", aerr)
 	}
+}
+
+// RedactErr is err's text as an audit entry may hold it: for an instance
+// id, redacted like its op records (stored secret settings,
+// secret-looking env values, credential hashes); else unchanged.
+func (h *Hub) RedactErr(instance string, err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := err.Error()
+	if templates.ValidID(instance) {
+		msg = h.secretRedactor(instance, secretsOf(err))(msg)
+	}
+	return msg
 }
 
 // NormalizeHost lowercases a hostname and drops surrounding space and one
@@ -483,6 +495,11 @@ type hostsChange struct {
 	// members: the directory snapshot the env's group records are
 	// checked against (fetched before mu; nil = none delivered).
 	members *directory.Membership
+	// scopesOld / scopesNew: the mcp:* scopes of the instance's
+	// switched-on companions for the old and the new hostnames (§8
+	// "Follows the resource": moved in the Keycloak step, undone with
+	// the redirect URIs).
+	scopesOld, scopesNew map[string]keycloak.MCPScope
 }
 
 type clientHosts struct {
@@ -535,7 +552,7 @@ func hostsDetail(old, new map[string]string) string {
 // failure, SetHosts with the instance's current hostnames re-applies steps
 // 2–4 (Keycloak, files, policy, restart) instead of being a no-op, so
 // retrying the same change reconciles.
-func (h *Hub) SetHosts(instanceID string, hosts map[string]string, actor string) (err error) {
+func (h *Hub) SetHosts(instanceID string, hosts map[string]string, actor directory.Actor) (err error) {
 	detail := ""
 	defer func() {
 		var busy ErrBusy
@@ -543,7 +560,7 @@ func (h *Hub) SetHosts(instanceID string, hosts map[string]string, actor string)
 			h.auditOp(actor, "instance.update", instanceID, detail, err)
 		}
 	}()
-	if strings.TrimSpace(actor) == "" {
+	if strings.TrimSpace(actor.User) == "" {
 		return statusErr(400, "no signed-in user to audit the change as")
 	}
 	unlock, err := h.lockApp(instanceID)
@@ -551,6 +568,9 @@ func (h *Hub) SetHosts(instanceID string, hosts map[string]string, actor string)
 		return err
 	}
 	defer unlock()
+	// lockApp → aiLock (G35): no mint runs against the companion URLs
+	// while they move.
+	defer h.lifecycleAILock(instanceID)()
 
 	runtime := h.runtimeCopy() // driftMu before mu
 	h.mu.Lock()
@@ -569,15 +589,34 @@ func (h *Hub) SetHosts(instanceID string, hosts map[string]string, actor string)
 		return err
 	}
 
+	// The scope passes (aiKCMu) wait until the new hostnames are
+	// committed or the move is undone: a pass in between would put the
+	// state's old audience back. Released before the restart (its start
+	// syncs scopes).
+	// The directory snapshot first: never a directory call under aiKCMu.
+	ch.members = h.groupSnapshot(instanceID)
+	scopeUnlock := func() {}
+	if len(ch.scopesNew)+len(ch.scopesOld) > 0 {
+		h.aiKCMu.Lock()
+		scopeUnlock = sync.OnceFunc(h.aiKCMu.Unlock)
+		defer scopeUnlock()
+	}
 	if err := h.applyKeycloakHosts(ch); err != nil {
 		return h.finishOp(instanceID, OpHosts, err, false)
 	}
 
 	runtime = h.runtimeCopy()
-	ch.members = h.groupSnapshot(instanceID)
 	h.mu.Lock()
+	// AI pages whose litellm provider points at this instance render its
+	// new host (Task 23): re-delivered and restarted after the commit.
+	pagesBefore := h.aiPageDigestsLocked()
 	view, keep, saveErr, err := h.commitHostsLocked(ch, runtime)
+	var aiPages []string
+	if err == nil {
+		aiPages = slices.DeleteFunc(h.aiPageChangesLocked(pagesBefore), func(p string) bool { return p == instanceID })
+	}
 	h.mu.Unlock()
+	defer h.restartAIPages(aiPages)
 	if err != nil {
 		var se *StatusError
 		lostRace := errors.As(err, &se) && se.Status < 500
@@ -591,6 +630,18 @@ func (h *Hub) SetHosts(instanceID string, hosts map[string]string, actor string)
 		return h.finishOp(instanceID, OpHosts, err, false)
 	}
 
+	scopeUnlock()
+	// An AI page's ai_client: UpdateClientHosts moved its redirect URIs;
+	// EnsureAIClient re-asserts them exactly (T10 carry), in the
+	// background (it takes aiKCMu; the pass retries a failure).
+	if ch.enabled && instanceAIClient(&view) != nil {
+		v := view
+		h.goBackground(func() {
+			if err := h.ensureInstanceAIClient(context.Background(), &v); err != nil {
+				log.Printf("instance %s: re-asserting its AI client after the hostname change: %v", instanceID, err)
+			}
+		})
+	}
 	// Committed: from here on, report, never undo.
 	var errs []error
 	if saveErr != nil {
@@ -679,6 +730,9 @@ func (h *Hub) planHostsLocked(id string, hosts map[string]string, runtime map[st
 		ch.clients = append(ch.clients, clientHosts{clientID: c.ClientID,
 			oldURIs: h.redirectURIs(cur.Manifest.Clients[i]), newURIs: h.redirectURIs(c)})
 	}
+	ch.scopesOld, ch.scopesNew = map[string]keycloak.MCPScope{}, map[string]keycloak.MCPScope{}
+	h.instanceScopesLocked(cur, ch.scopesOld)
+	h.instanceScopesLocked(&view, ch.scopesNew)
 	oldCB, newCB := callbackURIs(h.signInExtraHostsLocked(cur)), callbackURIs(h.signInExtraHostsLocked(&view))
 	ch.cbRemove = minus(oldCB, newCB)
 	if ch.enabled {
@@ -707,10 +761,41 @@ func (ch *hostsChange) spec(i int, back bool) (keycloak.ClientSpec, []string, ma
 // client that doesn't exist yet (never enabled) is skipped: enable
 // registers it with the new hostnames.
 func (h *Hub) applyKeycloakHosts(ch *hostsChange) error {
+	ctx := context.Background()
+	if err := h.applyKeycloakClientHosts(ctx, ch); err != nil {
+		return err
+	}
+	return h.moveAIScopes(ctx, ch)
+}
+
+// moveAIScopes rewrites the audience and consent text of the instance's
+// companion scopes for the new hostnames (12a's ensureAIScopes; §8
+// "Follows the resource"). A failure undoes every Keycloak step of the
+// change (the scopes back to the old hostnames included). Caller holds
+// aiKCMu.
+func (h *Hub) moveAIScopes(ctx context.Context, ch *hostsChange) error {
+	if len(ch.scopesNew) == 0 {
+		return nil
+	}
+	kc := h.aiKeycloak()
+	var errs []error
+	if kc == nil {
+		errs = []error{errors.New("Keycloak: the AI scope calls are not configured")}
+	} else {
+		errs = ensureAIScopes(ctx, kc, ch.scopesNew)
+	}
+	if len(errs) == 0 {
+		return nil
+	}
+	h.revertKeycloakHosts(ch, len(ch.clients), true, nil)
+	return &StatusError{Status: 502, Err: fmt.Errorf("%w — nothing changed, the old hostnames stay in force", errors.Join(errs...))}
+}
+
+// applyKeycloakClientHosts is the clients' and callbacks' part.
+func (h *Hub) applyKeycloakClientHosts(ctx context.Context, ch *hostsChange) error {
 	if h.idp == nil {
 		return nil
 	}
-	ctx := context.Background()
 	for i := range ch.clients {
 		s, oldURIs, m := ch.spec(i, false)
 		err := h.idp.UpdateClientHosts(ctx, s, oldURIs, m)
@@ -739,10 +824,19 @@ func (h *Hub) applyKeycloakHosts(ch *hostsChange) error {
 // holds callback URIs not to remove (their host now belongs to another
 // instance).
 func (h *Hub) revertKeycloakHosts(ch *hostsChange, n int, callbacks bool, keep map[string]bool) {
+	ctx := context.Background()
+	if callbacks && len(ch.scopesOld) > 0 {
+		// The whole Keycloak step ran (or its scope part failed): the
+		// companion scopes go back to the old hostnames too.
+		if kc := h.aiKeycloak(); kc != nil {
+			for _, err := range ensureAIScopes(ctx, kc, ch.scopesOld) {
+				log.Printf("instance %s: undoing the hostname change on an AI scope failed (retry the hostname change): %v", ch.id, err)
+			}
+		}
+	}
 	if h.idp == nil {
 		return
 	}
-	ctx := context.Background()
 	if callbacks {
 		var drop []string
 		for _, u := range ch.cbAdd {

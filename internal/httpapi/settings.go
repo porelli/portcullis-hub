@@ -2,10 +2,12 @@ package httpapi
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/hub"
 	"github.com/portcullis/hub/internal/policy"
 )
@@ -42,7 +44,7 @@ func (s *Server) handlePutEntry(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	row, err := s.Hub.SetEntryAsAdmin(r.Context(), id, r.PathValue("key"), r.PathValue("user"), v, actor(r))
+	row, err := s.setEntry(r.Context(), requestActor(r), id, r.PathValue("key"), r.PathValue("user"), v)
 	if err != nil {
 		writeErr(w, err, http.StatusInternalServerError)
 		return
@@ -57,11 +59,24 @@ func (s *Server) handleDeleteEntry(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.Hub.ClearEntryAsAdmin(r.Context(), id, r.PathValue("key"), r.PathValue("user"), actor(r)); err != nil {
+	if err := s.clearEntry(r.Context(), requestActor(r), id, r.PathValue("key"), r.PathValue("user")); err != nil {
 		writeErr(w, err, http.StatusInternalServerError)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// setEntry is the admin's entry save (route and set_person_value);
+// audited settings.person_value by the Hub.
+func (s *Server) setEntry(ctx context.Context, a directory.Actor, id, key, user string, v json.RawMessage) (*hub.EntryRow, error) {
+	s.rec("SetEntryAsAdmin", id, key, user, string(v))
+	return s.Hub.SetEntryAsAdmin(ctx, id, key, user, v, a)
+}
+
+// clearEntry is the admin's entry clear (route and clear_person_value).
+func (s *Server) clearEntry(ctx context.Context, a directory.Actor, id, key, user string) error {
+	s.rec("ClearEntryAsAdmin", id, key, user)
+	return s.Hub.ClearEntryAsAdmin(ctx, id, key, user, a)
 }
 
 // settingsBody is the PUT / preview body.
@@ -95,7 +110,7 @@ const settingsUsage = `body must be {"values": {"<key>": <value>}, "value_group_
 
 // settingsAdmin: a signed-in admin (no user 401; see adminOnly).
 func (s *Server) settingsAdmin(w http.ResponseWriter, r *http.Request) (string, bool) {
-	if actor(r) == "" {
+	if requestActor(r).User == "" {
 		http.Error(w, "no signed-in user (X-Forwarded-User)", http.StatusUnauthorized)
 		return "", false
 	}
@@ -174,16 +189,30 @@ func (s *Server) handleSaveSettings(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	before := s.Hub.SignInMode(id)
-	res, err := s.Hub.SaveSettings(id, u, actor(r))
-	if u.SignIn != nil && (err != nil || s.Hub.SignInMode(id) != before) {
-		s.auditSignIn(r, id, before, *u.SignIn, err)
-	}
+	res, err := s.saveSettings(requestActor(r), id, u)
 	if err != nil {
 		writeErr(w, err, http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, res)
+}
+
+// saveSettings is the settings save's work (route; save_settings,
+// set_policy, set_sign_in_mode, set_public_access): the Hub audits
+// settings.change; a sign-in mode change (or refused change) is audited
+// app.sign_in too.
+func (s *Server) saveSettings(a directory.Actor, id string, u hub.SettingsUpdate) (*hub.SaveResult, error) {
+	s.rec("SaveSettings", id, u)
+	before := s.Hub.SignInMode(id)
+	res, err := s.Hub.SaveSettings(id, u, a)
+	if u.SignIn != nil && (err != nil || s.Hub.SignInMode(id) != before) {
+		aerr := err
+		if u.PublicTokens != nil {
+			aerr = hub.PublicTokenAuditErr(err) // never a token in the audit
+		}
+		s.auditSignInAs(a, id, before, *u.SignIn, aerr)
+	}
+	return res, err
 }
 
 // handlePreviewSettings: what saving the body would do (nothing stored).
@@ -212,10 +241,17 @@ func (s *Server) handleRetryDeliveries(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	rep, err := s.Hub.RetryDeliveries(r.Context(), id, actor(r))
+	rep, err := s.retryDeliveries(r.Context(), requestActor(r), id)
 	if err != nil {
 		writeErr(w, err, http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, rep)
+}
+
+// retryDeliveries is the panel's Retry (route and retry_deliveries);
+// audited settings.retry by the Hub.
+func (s *Server) retryDeliveries(ctx context.Context, a directory.Actor, id string) (*hub.DeliveryReport, error) {
+	s.rec("RetryDeliveries", id)
+	return s.Hub.RetryDeliveries(ctx, id, a)
 }

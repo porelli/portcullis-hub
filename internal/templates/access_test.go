@@ -38,6 +38,7 @@ func TestAccessRoleEnforced(t *testing.T) {
 func TestAccessManifestFields(t *testing.T) {
 	good := `name: X
 instances: multi
+ai: {unsupported: "test fixture"}
 auth:
   method: native-oidc
   group_access: true
@@ -70,16 +71,16 @@ keycloak_clients:
 	}
 
 	bad := map[string]string{
-		"access role on forward-auth": "name: X\nauth:\n  method: forward-auth\n  keycloak_access_role: true\n  access_group: users_x\n",
-		"access role without group":   "name: X\nauth:\n  method: native-oidc\n  group_access: true\n  keycloak_access_role: true\nkeycloak_clients:\n  - client_id: x\n",
-		"backchannel http":            "name: X\nauth:\n  method: native-oidc\n  group_access: true\nkeycloak_clients:\n  - {client_id: x, backchannel_logout_url: \"http://{{HOST_APP}}/bc\"}\n",
-		"backchannel foreign host":    "name: X\nauth:\n  method: native-oidc\n  group_access: true\nkeycloak_clients:\n  - {client_id: x, backchannel_logout_url: \"https://evil.example.com/bc\"}\n",
-		"backchannel query":           "name: X\nauth:\n  method: native-oidc\n  group_access: true\nkeycloak_clients:\n  - {client_id: x, backchannel_logout_url: \"https://{{HOST_APP}}/bc?x=1\"}\n",
-		"backchannel unknown router":  "name: X\nauth:\n  method: native-oidc\n  group_access: true\nkeycloak_clients:\n  - {client_id: x, backchannel_logout_url: \"https://{{HOST_NOPE}}/bc\"}\n",
-		"multi backchannel on DOMAIN": "name: X\ninstances: multi\nauth:\n  method: native-oidc\n  group_access: true\nkeycloak_clients:\n  - {client_id: x, backchannel_logout_url: \"https://app.{{DOMAIN}}/bc\"}\n",
-		"native-oidc open, no group":  "name: X\nauth:\n  method: native-oidc\nkeycloak_clients:\n  - client_id: x\n",
-		"immutable unknown router":    "name: X\nauth:\n  method: forward-auth\nhosts:\n  immutable: [nope]\n",
-		"immutable empty":             "name: X\nauth:\n  method: forward-auth\nhosts:\n  immutable: []\n",
+		"access role on forward-auth": "name: X\nai: {unsupported: test fixture}\nauth:\n  method: forward-auth\n  keycloak_access_role: true\n  access_group: users_x\n",
+		"access role without group":   "name: X\nai: {unsupported: test fixture}\nauth:\n  method: native-oidc\n  group_access: true\n  keycloak_access_role: true\nkeycloak_clients:\n  - client_id: x\n",
+		"backchannel http":            "name: X\nai: {unsupported: test fixture}\nauth:\n  method: native-oidc\n  group_access: true\nkeycloak_clients:\n  - {client_id: x, backchannel_logout_url: \"http://{{HOST_APP}}/bc\"}\n",
+		"backchannel foreign host":    "name: X\nai: {unsupported: test fixture}\nauth:\n  method: native-oidc\n  group_access: true\nkeycloak_clients:\n  - {client_id: x, backchannel_logout_url: \"https://evil.example.com/bc\"}\n",
+		"backchannel query":           "name: X\nai: {unsupported: test fixture}\nauth:\n  method: native-oidc\n  group_access: true\nkeycloak_clients:\n  - {client_id: x, backchannel_logout_url: \"https://{{HOST_APP}}/bc?x=1\"}\n",
+		"backchannel unknown router":  "name: X\nai: {unsupported: test fixture}\nauth:\n  method: native-oidc\n  group_access: true\nkeycloak_clients:\n  - {client_id: x, backchannel_logout_url: \"https://{{HOST_NOPE}}/bc\"}\n",
+		"multi backchannel on DOMAIN": "name: X\ninstances: multi\nai: {unsupported: test fixture}\nauth:\n  method: native-oidc\n  group_access: true\nkeycloak_clients:\n  - {client_id: x, backchannel_logout_url: \"https://app.{{DOMAIN}}/bc\"}\n",
+		"native-oidc open, no group":  "name: X\nai: {unsupported: test fixture}\nauth:\n  method: native-oidc\nkeycloak_clients:\n  - client_id: x\n",
+		"immutable unknown router":    "name: X\nai: {unsupported: test fixture}\nauth:\n  method: forward-auth\nhosts:\n  immutable: [nope]\n",
+		"immutable empty":             "name: X\nai: {unsupported: test fixture}\nauth:\n  method: forward-auth\nhosts:\n  immutable: []\n",
 	}
 	for name, m := range bad {
 		if got := discoverOne(t, m, accessCompose); len(got) != 0 {

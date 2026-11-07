@@ -3,9 +3,12 @@ package directory
 import (
 	"context"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/portcullis/hub/internal/rules"
 )
 
 // What the Hub's app settings need from the directory (contract §13,
@@ -41,6 +44,39 @@ type Membership struct {
 	// 32: a person-entered value is bound to the uuid it was entered
 	// under).
 	UUIDs map[string]string
+	// Emails: lowercase user → LLDAP email (the service account
+	// excluded; "" = none). Only the gate file's people (identity_headers,
+	// contract §15.4) uses it: identity is the username, never the email.
+	Emails map[string]string
+	// Pending: user → group → the earliest expiry still ahead of now
+	// (contract §15.4 expiring: the gate refuses from that time on, even
+	// before the evaluator removes the membership).
+	Pending map[string]map[string]time.Time
+	// Guarding: group → why it guards (guardingGroups: administrator,
+	// permission, app admin and privileged-value groups). The Portcullis
+	// MCP decides from it whether a membership, rule or exception change
+	// widens access (G37), so it never keeps a second list.
+	Guarding map[string]string
+	// GuardedFields: field → the guarding groups whose rules use it
+	// (guardedFields, sorted): setting it can change who is in them.
+	GuardedFields map[string][]string
+	// Administrators: lowercase users in an administrator group
+	// (AdminGroups; the service account excluded) — the targets whose
+	// passkeys or password hand over an administrator's account.
+	Administrators map[string]bool
+	// Staged: group → who directory.yaml would put in it now, before the
+	// evaluator runs (final review hub-mcp I1): for every group with a
+	// rule, the people the rule matches plus its active include
+	// exceptions minus the kept-out ones; for any group with active
+	// include exceptions, at least those people. Sorted, lowercase. A
+	// group with a rule is listed even when nobody matches yet (empty
+	// list). The Portcullis MCP counts these with Groups' members: a
+	// group that is pre-staged this way hands its people what it gives
+	// the moment an app makes it guard.
+	Staged map[string][]string
+	// RuleFields: field → every group whose rule uses it (sorted): setting
+	// it can change who is in them, guarding or not.
+	RuleFields map[string][]string
 }
 
 // Membership reads LLDAP and directory.yaml. LLDAP unavailable: 503;
@@ -61,12 +97,29 @@ func (s *Service) Membership(ctx context.Context, now time.Time) (*Membership, e
 	if err != nil {
 		return nil, err
 	}
+	return s.membershipOf(cfg, sn, now), nil
+}
+
+// membershipOf is Membership from one directory.yaml and LLDAP read
+// (Publish shares it, so the policy file and the gate file are built
+// from the same snapshot).
+func (s *Service) membershipOf(cfg *Config, sn *snapshot, now time.Time) *Membership {
 	svc := strings.ToLower(s.serviceUser())
-	m := &Membership{Users: map[string]map[string]int{}, Groups: map[string]MemberGroup{}, Expired: map[string]map[string]bool{}, Privilege: map[string]string{}, UUIDs: map[string]string{}}
+	m := &Membership{Users: map[string]map[string]int{}, Groups: map[string]MemberGroup{}, Expired: map[string]map[string]bool{}, Privilege: map[string]string{}, UUIDs: map[string]string{},
+		Emails: map[string]string{}, Pending: map[string]map[string]time.Time{},
+		Guarding: s.guardingGroups(cfg), GuardedFields: s.guardedFields(cfg), Administrators: map[string]bool{}}
+	for g := range s.adminGroups() {
+		for _, u := range sn.groups[g].Members() {
+			if u = strings.ToLower(u); u != svc {
+				m.Administrators[u] = true
+			}
+		}
+	}
 	for id, u := range sn.users {
 		if id != svc {
 			m.Users[id] = map[string]int{}
 			m.UUIDs[id] = u.UUID
+			m.Emails[id] = u.Email
 		}
 	}
 	for name, g := range sn.groups {
@@ -89,6 +142,12 @@ func (s *Service) Membership(ctx context.Context, now time.Time) (*Membership, e
 	}
 	for _, e := range s.publishedExpiring(cfg, sn, now) {
 		if e.At.After(now) {
+			if m.Pending[e.User] == nil {
+				m.Pending[e.User] = map[string]time.Time{}
+			}
+			if at, ok := m.Pending[e.User][e.Group]; !ok || e.At.Before(at) {
+				m.Pending[e.User][e.Group] = e.At
+			}
 			continue
 		}
 		if m.Expired[e.User] == nil {
@@ -96,7 +155,65 @@ func (s *Service) Membership(ctx context.Context, now time.Time) (*Membership, e
 		}
 		m.Expired[e.User][e.Group] = true
 	}
-	return m, nil
+	m.Staged = s.stagedMembers(cfg, sn, now)
+	m.RuleFields = ruleFields(cfg)
+	return m
+}
+
+// ruleFields is Membership.RuleFields.
+func ruleFields(cfg *Config) map[string][]string {
+	out := map[string][]string{}
+	for name, gc := range cfg.Groups {
+		if gc == nil || gc.Rule == nil {
+			continue
+		}
+		for _, f := range rules.Fields(gc.Rule) {
+			if !slices.Contains(out[f], name) {
+				out[f] = append(out[f], name)
+			}
+		}
+	}
+	for f := range out {
+		sort.Strings(out[f])
+	}
+	return out
+}
+
+// stagedMembers is Membership.Staged.
+func (s *Service) stagedMembers(cfg *Config, sn *snapshot, now time.Time) map[string][]string {
+	out := map[string][]string{}
+	var d *rules.Directory
+	for name, gc := range cfg.Groups {
+		if gc == nil {
+			continue
+		}
+		people := map[string]bool{}
+		if gc.Rule != nil {
+			if d == nil {
+				d = ruleDirectory(cfg, sn)
+			}
+			for u := range s.evalGroup(gc, d, sn, now).desired {
+				people[u] = true
+			}
+		}
+		includes := false
+		for _, ex := range gc.Exceptions {
+			if ex.Include && (ex.Until == nil || !expired(*ex.Until, now)) {
+				people[strings.ToLower(ex.User)] = true
+				includes = true
+			}
+		}
+		if gc.Rule == nil && !includes {
+			continue
+		}
+		list := make([]string, 0, len(people))
+		for u := range people {
+			list = append(list, u)
+		}
+		sort.Strings(list)
+		out[name] = list
+	}
+	return out
 }
 
 // PrivilegeProblem says why group can't hold a privileged option's

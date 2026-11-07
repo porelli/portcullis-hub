@@ -88,7 +88,7 @@ func TestFolderGIDVarForms(t *testing.T) {
 		{"another folder prefix", m, envCompose("smb", "${PORTCULLIS_FOLDER_X}"), "", "PORTCULLIS_FOLDER_X"},
 	})
 	// No settings at all: still refused.
-	if _, err := build("app", "src", "", []byte("name: X\nauth: {method: custom}\n"), []byte(envCompose("smb", "${PORTCULLIS_FOLDER_GID_X}")), "example.org", nil); err == nil || !strings.Contains(err.Error(), "PORTCULLIS_FOLDER_GID_X") {
+	if _, err := build("app", "src", "", []byte("name: X\nai: {unsupported: test fixture}\nauth: {method: custom}\n"), []byte(envCompose("smb", "${PORTCULLIS_FOLDER_GID_X}")), "example.org", nil); err == nil || !strings.Contains(err.Error(), "PORTCULLIS_FOLDER_GID_X") {
 		t.Errorf("a settings-less template referencing a folder variable: %v", err)
 	}
 }

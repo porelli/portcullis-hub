@@ -23,6 +23,7 @@ import (
 // per-person size (data file). plex: an app with its own login.
 const setVaultManifest = `name: Vault
 category: tools
+ai: {unsupported: "test fixture"}
 auth:
   method: header-auth
   group_access: true
@@ -59,7 +60,7 @@ const setVaultCompose = "services:\n  app:\n    image: vault\n    environment:\n
 	"      traefik.http.routers.vault.rule: Host(`vault.${PORTCULLIS_DOMAIN}`)\n" +
 	"      traefik.http.routers.vault.middlewares: portcullis-auth@docker,portcullis-groups@docker\n"
 
-const setPlexManifest = "name: Plex\nauth:\n  method: custom\n  sso: false\n  native_login: {supported: true, allow_without_gateway: true}\n"
+const setPlexManifest = "name: Plex\nai: {unsupported: test fixture}\nauth:\n  method: custom\n  sso: false\n  native_login: {supported: true, allow_without_gateway: true}\n"
 
 const setPlexCompose = "services:\n  web:\n    image: x\n    labels:\n      traefik.http.routers.plex.rule: Host(`plex.${PORTCULLIS_DOMAIN}`)\n"
 
@@ -123,6 +124,7 @@ func newSetEnvWith(t *testing.T, extra map[string][2]string) *setEnv {
 	os.WriteFile(filepath.Join(cred, "password"), []byte("svc-password-0123456789"), 0600)
 	kc := kctest.New(t)
 	kc.Importable = ll.HasUser
+	kc.LDAPUUID = ll.UUIDOf
 	secret := filepath.Join(root, "invite-secret")
 	os.WriteFile(secret, []byte(strings.Repeat("s", 40)), 0600)
 	dir := &directory.Service{

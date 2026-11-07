@@ -56,16 +56,34 @@ const (
 	VarLocalNetworks  = "PORTCULLIS_LOCAL_NETWORKS"
 	varHostPrefix     = "PORTCULLIS_HOST_"
 	varClientIDPrefix = VarOIDCClientID + "_"
+	// VarAIEnabled (AI support, §3.1): true while one of the instance's
+	// companions has AI support on; written only for templates with
+	// ai.mcp. Compose reads it only as ${PORTCULLIS_AI_ENABLED:-false}.
+	VarAIEnabled = "PORTCULLIS_AI_ENABLED"
+	// VarMCPGateIP is core's mcp-gate address on portcullis-proxy (§2).
+	VarMCPGateIP = "PORTCULLIS_MCP_GATE_IP"
+	// varAIPrefix: every PORTCULLIS_AI_* name is the Hub's (ENABLED,
+	// READONLY_<COMPANION>, PROVIDER_<NAME>_<FIELD>).
+	varAIPrefix       = "PORTCULLIS_AI_"
+	varAIReadOnly     = varAIPrefix + "READONLY_"
+	varAIProviderPref = varAIPrefix + "PROVIDER_"
 )
+
+// ReadOnlyVar is companion's PORTCULLIS_AI_READONLY_<COMPANION> (§3.1):
+// true unless the companion is on in mode read_write.
+func ReadOnlyVar(companion string) string {
+	return varAIReadOnly + strings.ToUpper(strings.ReplaceAll(companion, "-", "_"))
+}
 
 // ReservedVar reports whether k is an instance variable name a manifest
 // may not declare in env, settings or ports.
 func ReservedVar(k string) bool {
 	switch k {
-	case VarInstance, VarOIDCClientID, VarAccessGroup, VarAdminGroup, VarLocalNetworks:
+	case VarInstance, VarOIDCClientID, VarAccessGroup, VarAdminGroup, VarLocalNetworks, VarMCPGateIP:
 		return true
 	}
-	return strings.HasPrefix(k, varHostPrefix) || strings.HasPrefix(k, varClientIDPrefix) || strings.HasPrefix(k, varFolderPrefix)
+	return strings.HasPrefix(k, varHostPrefix) || strings.HasPrefix(k, varClientIDPrefix) || strings.HasPrefix(k, varFolderPrefix) ||
+		strings.HasPrefix(k, varAIPrefix)
 }
 
 // domainUseRe matches a {{DOMAIN}} with the host characters before it
@@ -337,6 +355,14 @@ func (t *Template) InstanceOn(id string, hosts map[string]string, domain string,
 			env[VarOIDCClientID] = names.Clients[i]
 		}
 		env[varClientIDPrefix+VarSuffix(kc.ClientID)] = names.Clients[i]
+	}
+	// AI variables (§3.1): the fail-closed values until the Hub's AI
+	// state says otherwise.
+	if raw.AI != nil && len(raw.AI.MCP) > 0 {
+		env[VarAIEnabled] = "false"
+		for _, comp := range raw.AI.MCP {
+			env[ReadOnlyVar(comp.Name)] = "true"
+		}
 	}
 	c.InstanceEnv = env
 	return c, nil

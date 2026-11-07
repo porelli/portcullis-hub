@@ -18,6 +18,11 @@ type AuditEntry struct {
 	Detail string    `json:"detail,omitempty"`
 	Result string    `json:"result"` // "ok", "refused" or "error"
 	Error  string    `json:"error,omitempty"`
+	// Via is "ai" (ViaAI) on entries made through the Portcullis MCP, else
+	// absent; Client is then the AI client (the token's azp). Set only from
+	// the identity the gate sent on the MCP listener (contract §9.5, §15.7).
+	Via    string `json:"via,omitempty"`
+	Client string `json:"client,omitempty"`
 }
 
 // AuditLog appends JSON lines to a file (mode 0600).

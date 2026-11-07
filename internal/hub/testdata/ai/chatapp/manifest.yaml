@@ -1,0 +1,44 @@
+name: AI Chat
+category: ai
+instances: multi
+auth:
+  method: native-oidc
+  group_access: true
+  access_group: users_ai-chat
+  keycloak_access_role: true
+env:
+  - key: CHAT_OIDC_SECRET
+    generate: random
+  - key: CHAT_MCP_SECRET
+    generate: random
+urls:
+  - label: Chat
+    url: "https://{{HOST_AI_CHAT}}"
+keycloak_clients:
+  - client_id: ai-chat
+    secret_env: CHAT_OIDC_SECRET
+    redirect_uri: "https://{{HOST_AI_CHAT}}/oauth/openid/callback"
+  - client_id: ai-chat-mcp
+    name: AI Chat (MCP)
+    secret_env: CHAT_MCP_SECRET
+    redirect_uri: "https://{{HOST_AI_CHAT}}/api/mcp/callback"
+    ai_client: true
+ai:
+  unsupported: "An AI page: the AI acts in other apps, not in this one"
+  chat:
+    provider_kinds: {openai_compatible: many, litellm: many, anthropic: one}
+    file: {service: config, mount: /portcullis/ai}
+    env: {service: api}
+settings:
+  options:
+    - key: role
+      label: Role
+      type: enum
+      scope: person
+      options:
+        - {value: user, label: User}
+        - {value: admin, label: Administrator}
+      default: user
+      resolve: max
+      applies: next_sign_in
+      delivery: [{claim: {client: ai-chat, name: chat_role}}]

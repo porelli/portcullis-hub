@@ -1,5 +1,7 @@
 # AI support: MCP companions, "Connect your AI", the AI page, one "all my apps" endpoint, and the Portcullis MCP
 
+Amended 2026-11-05 by the plan 4 preflight rulings (G1–G76) and the Task 1 contract; the contract §15 is the binding form.
+
 Status: approved (2026-11-02)
 
 Evidence base: `.superpowers/sdd/ai-brainstorm-context.md` (the user's
@@ -641,17 +643,20 @@ AI page (LibreChat) ────────────────┤
      3. asks for the existing typed confirmation where one exists (the
         instance id, the person's name);
      4. asks for a **fresh passkey touch**: a fresh Keycloak sign-in
-        through the Hub's own confirmation client, verified on a new ID
-        token (`auth_time` within 5 minutes, `amr` passkey or a `pki_int`
-        certificate, never a file certificate) — the certificates spec's
-        fresh-authentication pattern (its call 8);
+        through the Hub's own confirmation client (the Hub-listener page
+        uses the popup flow with `index.html` as the callback), verified
+        on a new ID token (`auth_time ≥ created − 60 s`, `amr` passkey or
+        a `pki_int` certificate, never a file certificate) — the
+        certificates spec's fresh-authentication pattern (its call 8);
      5. records approve or decline.
    - A confirmation is bound to (person, resource, tool, SHA-256 of the
      canonical JSON arguments), single use, valid 10 minutes, and
      consumed by the first matching retry. A retry with any other argument
-     gets a new confirmation. The URL holds only an unguessable id (128
-     bits), never a credential; opening it unauthenticated just leads to
-     sign-in.
+     gets a new confirmation. Refused approvals count toward the limit.
+     The URL holds only an unguessable id (128 bits), never a credential;
+     opening it unauthenticated just leads to sign-in.
+   - For 2025-11-25 clients only the gate sends `elicitation/create`; the
+     stateless Hub MCP gives text only.
    - Form-mode elicitation is never accepted as a confirmation: a client
      (or a scripted client such as `claude -p`) can answer it without the
      person.
@@ -743,7 +748,7 @@ AI page (LibreChat) ────────────────┤
      scope="<the resource's scope>"`.
    - **Routing.** For app companions the Hub's override renders a router
      per companion, like the extra-domain sign-in router does for
-     `forward-auth-ext@docker`: `portcullis-mcp-<instance-id>_<companion>`,
+     `forward-auth-ext@docker`: `portcullis-mcp-<instance-id>--<companion>`,
      rule `Host(<the router's hosts>) && (Path(<path>) ||
      Path(/.well-known/oauth-protected-resource<path>))`, the host's TLS
      tier, a priority above every router of the instance and its public
@@ -751,11 +756,13 @@ AI page (LibreChat) ────────────────┤
      `rate-limit@file,security-headers@file` only (no forward-auth). The
      name prefix `portcullis-mcp-` is reserved for the Hub (templates may
      not use it). Its labels are exposure labels (drift). The template's
-     own routers never see `/mcp` requests on that host.
+     own routers never see `/mcp` requests on that host. Companion service
+     names must match `^[a-z0-9]+(-[a-z0-9]+)*$`.
    - Core adds routers for `mcp.<domain>` (all paths → `mcp-gate`) and for
      `hub.<domain>` / `people.<domain>` with `Path(/mcp) ||
      Path(/.well-known/oauth-protected-resource/mcp)` → `mcp-gate`, at a
-     priority above the `hub` and `people` routers, `authaware@file`.
+     priority above the `hub` and `people` routers, with `tls.options` equal
+     to those of the `hub` / `people` routers.
    - Extra-domain instances work the same: the resource is on the extra
      domain, the authorization server stays `auth.<main domain>`.
 6. **What the gate accepts (audience separation).** A request is served
@@ -764,13 +771,14 @@ AI page (LibreChat) ────────────────┤
    - `Authorization: Bearer <JWT>` only; no token in the query; no cookie
      is read.
    - Signature valid against the realm's JWKS (cached, refreshed on an
-     unknown `kid`); `iss` exactly the realm issuer; `exp`, `nbf`, `iat`
-     with 60 s skew; `typ` `Bearer`.
+     unknown `kid`, at most once per 60 s); `iss` exactly the realm issuer;
+     `exp`, `nbf`, `iat` with 60 s skew; `typ` `Bearer`. The token is
+     validated against the `Host` header only, never `X-Forwarded-*`.
    - `azp` is one of the Hub's AI clients (from `mcp-gate.json`), never
      `portcullis-forward-auth` or an app's client.
-   - **`aud` contains this resource's URL and no other MCP resource URL**
-     (a token minted for several companions at once is refused
-     everywhere), and `scope` contains this resource's scope.
+   - **`aud` contains this resource's URL and no other `http(s)://` value**
+     (non-URL values are ignored; a token minted for several companions at
+     once is refused everywhere), and `scope` contains this resource's scope.
    - `acr` meets the resource's minimum level (call 8).
    - `preferred_username` (lowercased) is in the resource's current
      population in `mcp-gate.json`, minus anyone in an active `expiring`
@@ -792,16 +800,21 @@ AI page (LibreChat) ────────────────┤
      Audience mapper whose included custom audience is the resource URL
      (access token only), "include in token scope" on, and a consent
      screen text ("Use Gitea (gitea.example.com) as you", "Use all your
-     Portcullis apps as you", "Manage Portcullis as you — administrator").
+     Portcullis apps as you", "Use your Portcullis account as you",
+     "Manage Portcullis as you — administrator").
      This is Keycloak's documented workaround for `resource`; the
      experimental resource-indicators feature is not needed and not
      enabled.
+   - AI clients have default scopes exactly `basic` + `acr`, a username
+     mapper in the access and ID tokens, and no profile/email/roles/groups/
+     web-origins mappers; the attribute sync skips them. The `ai_client`
+     entry gets only `mcp:all` and keeps the access role.
    - The scopes are attached as **optional** scopes to every AI client
-     (the admin scope only to the clients the admin enabled it for, call
-     28), never to app clients or `portcullis-forward-auth`, never as
-     realm defaults. They carry no group or attribute mappers: the
-     token has `preferred_username`, `acr` and `amr`, nothing else
-     Portcullis-specific.
+     (the admin scope is granted per AI client: the admin enables it
+     client by client, call 28), never to app clients or
+     `portcullis-forward-auth`, never as realm defaults. They carry no
+     group or attribute mappers: the token has `preferred_username`, `acr`
+     and `amr`, nothing else Portcullis-specific.
    - A hostname change (contract §11.3) renames the resource: the Hub
      updates the audience mapper and consent text in the same step as the
      redirect URIs; old tokens stop matching. A deleted instance or AI
@@ -812,15 +825,15 @@ AI page (LibreChat) ────────────────┤
 8. **Sign-in strength, and apps that need a certificate.**
    - The AI clients' default ACR is `hwk`, so an AI sign-in is a passkey
      (or hardware certificate) touch, like a browser sign-in. The gate
-     requires the resource's LoA from its effective policy (default
-     policy or the app's override, `policy.Resolve`).
+     checks `policy.LoA(resolved) == 3` for the resource's effective policy
+     (default policy or the app's override, `policy.Resolve`).
    - An instance whose effective policy needs `mtls` on every request
-     (`mtls` alone, or `all` of `mtls` and `webauthn`; TLS tier
-     `protected@file`) **can't get AI support**: no MCP client can present
-     the person's certificate (Claude desktop's requests come from
-     Anthropic's cloud). Switching AI on is a `409` with that reason, and
-     changing such an instance's policy to need mTLS switches AI support
-     off first (with a warning in the save preview).
+     (`mtls` alone, or `all` of `mtls` and `webauthn`) **can't get AI
+     support**: no MCP client can present the person's certificate (Claude
+     desktop's requests come from Anthropic's cloud). Switching AI on is a
+     `409` with that reason, and changing such an instance's policy to need
+     mTLS switches AI support off first (with a warning in the save preview).
+     Saving the Hub default policy also switches AI off on inheriting instances.
    - **No exception.** An admin can't let AI use such an app with a passkey
      sign-in only: that would serve the app's data at a lower level than its
      policy demands, which the standing rule "never weaken access control"
@@ -834,8 +847,9 @@ AI page (LibreChat) ────────────────┤
    it when listed), so a connection survives the browser session:
    offline session idle 7 days, max 30 days, then the person touches their
    passkey again. Access tokens live 5 minutes (realm default). Refresh
-   tokens rotate (Keycloak "Revoke refresh token", reuse 0), so a stolen
-   refresh token is detected at the next use.
+   tokens rotate per AI client when Keycloak 26.8 allows it, otherwise
+   realm-wide, with the e2e concurrency check (Keycloak "Revoke refresh
+   token", reuse 0), so a stolen refresh token is detected at the next use.
 10. **No crossing between MCP tokens and browser sessions.**
     - MCP routers have no forward-auth; browser routers keep
       oauth2-proxy, which never accepts bearer tokens (core keeps
@@ -916,14 +930,20 @@ AI page (LibreChat) ────────────────┤
     - Validator (Hub and `validate.py`): exactly one of `ai.mcp` and
       `ai.unsupported` (a non-empty string ≤ 200 characters);
       `ai.alternative` only with `ai.unsupported`; `ai.on_change` only
-      with `ai.mcp`; for each companion, `source` is set; the service exists; a
-      `companion` service has no Traefik labels and doesn't join
-      `portcullis-proxy` itself (the override adds it, with the alias
-      `portcullis-mcp-<instance-id>-<companion>`; aliases with that prefix
-      are reserved); `router` is a host router; `public_path` doesn't
-      collide with another companion's; hooks named exist; an
-      `app_oauth` companion is `builtin` and has a `revoke` hook; an
-      `identity_headers` companion declares a `caller_secret` (call 12).
+      with `ai.mcp`; for each companion, `source` is set; the service exists;
+      companion service names match `^[a-z0-9]+(-[a-z0-9]+)*$`; a `companion`
+      service has no Traefik labels and doesn't join `portcullis-proxy` itself
+      (the override adds it, with the alias `portcullis-mcp-<instance-id>--<companion>`;
+      aliases with that prefix are reserved); `router` is a host router;
+      `public_path` doesn't collide with another companion's and isn't used on
+      `app_oauth` companions; hooks named exist; an `app_oauth` companion is
+      `builtin` and has a `revoke` hook; an `identity_headers` companion
+      declares a `caller_secret` (call 12); `ai.mcp` is refused on `auth.method`
+      `public` or `mtls`, and on router-less templates; `ai.chat.env` names
+      a service; `ai.chat.file` names a service and mount; `ai.mcp` with
+      `admin_paths` is refused; `portcullis-mcp-` prefixes on service/
+      `container_name`/`hostname`/aliases are reserved; `portcullis-ai-`
+      client id prefixes are reserved.
     - A template with `ai.unsupported` has no AI tab switch: the tab shows
       the reason and the alternative, and the instance never appears in
       `mcp-gate.json` or a People card.
@@ -931,14 +951,18 @@ AI page (LibreChat) ────────────────┤
     The template picks one per companion:
     - **`app_token`** — a per-person app credential, minted by the Hub
       through the template's `mint` hook, injected by the gate on every
-      request. Parameters: `header` (default `Authorization`) and `format`
-      with `{credential}` / `{username}` placeholders (`"token
-      {credential}"` for Gitea, `"Bearer {credential}"`, or
-      `basic: {user: "{username}", password: "{credential}"}` for
-      Nextcloud app passwords), `scopes` per mode (passed to the hook),
-      and `revoke` hook. The credential exists only for this purpose
-      (named `portcullis-ai-…` in the app), only for people who used AI on
-      that app, and never leaves Portcullis. The `mint` and `revoke`
+      request. Parameters: `header` (default `Authorization`, matching
+      `^[A-Za-z0-9-]{1,64}$` with a blacklist: Host, Cookie, Content-Type,
+      Accept, Proxy-Authorization, Mcp-*, MCP-Protocol-Version, Mcp-Session-Id,
+      X-Forwarded-*, X-Auth-Request-*, Remote-*, X-Portcullis-*) and `format`
+      (matching `^[A-Za-z][A-Za-z0-9-]{0,31} \{credential\}$`) with
+      `{credential}` / `{username}` placeholders (`"token {credential}"` for
+      Gitea, `"Bearer {credential}"`, or `basic: {user, password}` where user
+      is `{username}` or a literal without `:`, `{`, `}`, and password is
+      exactly `{credential}` for Nextcloud app passwords), `scopes` per mode
+      (passed to the hook), and `revoke` hook. The credential exists only for
+      this purpose (named `portcullis-ai-…` in the app), only for people who
+      used AI on that app, and never leaves Portcullis. The `mint` and `revoke`
       hooks are template glue: a short script that calls the app's own
       CLI or API (e.g. `gitea admin user generate-access-token`) and prints
       the result. They are not MCP servers, never receive tool traffic and
@@ -949,11 +973,12 @@ AI page (LibreChat) ────────────────┤
       `X-Forwarded-Attr-*` headers (same values group-gate would send) and
       the companion passes them to an app that trusts an auth proxy. The
       companion must refuse callers other than the gate: the template
-      declares `caller_secret: {env: <VAR>, header: Authorization, format:
-      "Bearer {secret}"}` (a `generate: random` env entry the Hub shares
-      with the gate; mcp-grafana's `--server-auth-token` is exactly this),
-      and the app must trust the header only from the companion (template
-      responsibility, see "Left to the builder"). Used by: Grafana.
+      declares `caller_secret: {env: <VAR>, header, format}` (header matching
+      `^[A-Za-z0-9-]{1,64}$` with the same blacklist; format matching
+      `^<Scheme> \{secret\}$` or exactly `{secret}`; a `generate: random` env
+      entry the Hub shares with the gate; mcp-grafana's `--server-auth-token`
+      is exactly this), and the app must trust the header only from the companion
+      (template responsibility, see "Left to the builder"). Used by: Grafana.
     - **`app_oauth`** — the app is its own MCP authorization server and
       signs people in through its own login, which on Portcullis is
       Keycloak (native-oidc). The gate is not in the path: the endpoint is
@@ -984,16 +1009,17 @@ AI page (LibreChat) ────────────────┤
       (public key) the Hub reads. The Hub encrypts each credential and
       each `caller_secret` to that recipient immediately and keeps no
       plaintext: `mcp-credentials.json` holds `{instance, companion, user,
-      id, minted_at, age_ciphertext}` entries. The Hub can replace or
-      delete an entry but can't read one back. The hook's stdout is never
-      logged, put in an op record or audited (redact, then clip).
-    - **Revoked.** Deleting an entry stops its use at the gate's next
-      reload (seconds). The Hub then runs the `revoke` hook with
-      `{"action": "revoke", "user", "ids": [...]}`; a failure keeps the
-      entry as `revoking` (the gate already refuses it), retries on every
-      reconcile and shows on the AI tab. `{"action": "revoke_all",
-      "prefix": "portcullis-ai-"}` is used when AI support goes off, after
-      a restore (call 29) and on a mode change.
+      id, minted_at, age, state}` entries, where `state` is `active` or
+      `revoking`, and a `revoking` entry has an empty `age`. The Hub can
+      replace or delete an entry but can't read one back. The hook's stdout
+      is never logged, put in an op record or audited (redact, then clip).
+    - **Revoked.** Revocation marks the entry `revoking` first, then runs
+      the `revoke` hook with `{"action": "revoke", "user", "ids": [...]}`,
+      then removes the entry. A failure keeps the entry as `revoking` (the
+      gate already refuses it), retries on every reconcile and shows on the
+      AI tab. `{"action": "revoke_all", "prefix": "portcullis-ai-"}` is used
+      when AI support goes off, before every switch-on, after a restore
+      (call 29) and on a mode change.
     - Audited `ai.credential.mint` / `ai.credential.revoke` (instance,
       companion, person, app-side id; never the credential).
 14. **Who may use a companion, and what happens when someone leaves.**
@@ -1014,9 +1040,10 @@ AI page (LibreChat) ────────────────┤
       without waiting for token expiry.
     - On leaving (rule evaluator, admin removal, expiry, user delete,
       group delete, instance disabled or deleted, AI support off) the Hub
-      also: revokes that person's credentials for the instance (call 13);
-      for `app_oauth` companions runs the `revoke` hook; and, when the
-      person can no longer use **any** AI resource, deletes their consents
+      also: marks that person's credential entries for the instance `revoking`
+      in the same pass as the gate-file write, then revokes through the hook
+      (call 13); for `app_oauth` companions runs the `revoke` hook; and, when
+      the person can no longer use **any** AI resource, deletes their consents
       and offline sessions for the AI clients (Keycloak admin API). The
       existing sign-out on group removal (contract §4) already sets the
       person's not-before, which every refresh checks, offline tokens
@@ -1028,13 +1055,15 @@ AI page (LibreChat) ────────────────┤
       health, last error), the population count, active credentials and
       connections, the tools the template marks `confirm` and `never`,
       and recent AI activity on this instance (call 19).
-    - Switching on: the Hub creates the scope (call 7), adds the
-      companion to `mcp-gate.json`, renders the override (companion
-      `scale: 1`, its `portcullis-proxy` alias, the `portcullis-mcp-…`
-      router), and starts it (`compose up` of the instance, which
-      recreates only changed services), then runs `on_change`. Refused
-      (`409`) while the instance is `deleting`/`restoring`, for mTLS
-      policies (call 8), and when the global AI switch is off (call 28).
+    - Switching on: the Hub runs `revoke_all` first (a failure is a `502`
+      and AI stays off); then creates the scope (call 7), adds the companion
+      to `mcp-gate.json`, renders the override (companion `scale: 1`, its
+      `portcullis-proxy` alias, the `portcullis-mcp-…` router), and starts it
+      (`compose up` of the instance, which recreates only changed services),
+      then runs `on_change`. On an enabled instance it also restarts the app
+      and answers `restarts: true`. Refused (`409`) while the instance is
+      `deleting`/`restoring`, for mTLS policies (call 8), and when the global
+      AI switch is off (call 28).
     - Switching off reverses it: router and scope removed, `scale: 0`,
       `revoke_all`, entries deleted. A mode change re-mints lazily
       (`revoke_all` first), because the app-side scopes of a credential
@@ -1052,15 +1081,16 @@ AI page (LibreChat) ────────────────┤
       scopes.
     - Tool annotations from the companion (`destructiveHint`,
       `readOnlyHint`) are hints only; the gate never relaxes a template
-      rule because of them. It may add a `confirm` for a tool annotated
-      destructive that the template forgot (logged as a template
-      warning), never remove one.
+      rule because of them. Tool patterns are case-folded globs, every call
+      is decided on policy, and annotations come from the gate's own cache.
+      It may add a `confirm` for a tool annotated destructive that the
+      template forgot (logged as a template warning), never remove one.
     - Server-to-client requests from companions: **sampling** and
       **roots** requests are declined by the gate (a companion must not
       drive the person's model or see their files); **form elicitation**
       passes through; **URL elicitation** passes only when the URL's host
-      is the companion's own instance host or a core host, otherwise it
-      is declined and logged.
+      is the instance's own hosts or `people.<domain>`, never other core
+      hosts, otherwise it is declined and logged.
     - Sessions of 2025-xx companions (`Mcp-Session-Id`) are bound to the
       person: the gate hands clients its own opaque session ids mapped to
       (person, resource, upstream id), so one person can't use another's
@@ -1068,11 +1098,12 @@ AI page (LibreChat) ────────────────┤
 17. **Confirmations for app companions.** Same page and rules as call 2,
     on `people.<domain>/confirm/<id>`, created by the gate through the
     Hub's internal API (`POST /internal/confirmations {user, resource,
-    tool, args_digest, args_preview}`), checked and consumed on the retry.
+    tool, args_sha256, args_preview, client, reason}`), where `reason` is
+    `confirm` or `destructive`, checked and consumed on the retry.
     The page shows the app, the tool and the arguments as JSON (clipped,
-    escaped), and the typed check is the app's name. Rate-limited (call
-    18). Audited `ai.confirm` (approved/declined/expired; no arguments,
-    only the digest).
+    escaped), and the typed check is the instance label. Hub-side limits
+    apply (call 18). Audited `ai.confirm` (approved/declined/expired; no
+    arguments, only the digest).
 18. **Rate limits** (defaults, editable in Hub Settings → AI; per person,
     not per IP, because Claude desktop traffic comes from one Anthropic
     range):
@@ -1088,12 +1119,13 @@ AI page (LibreChat) ────────────────┤
     Over the limit: HTTP `429` with `Retry-After` (not 401/403). Core's
     `rate-limit@file` stays in front as the per-IP backstop.
 19. **The access log ("via AI" for apps).** The gate appends one JSON line
-    per MCP request to `mcp_gate_data/access.jsonl`: time, person, `azp`,
-    resource, instance, companion, method, tool name, SHA-256 of the
-    arguments, decision (`allow`, `deny:<reason>`, `confirm:<id>`,
-    `rate_limited`), upstream status, duration. Never the arguments, the
-    result, a token or a credential. The Hub reads it (read-only mount)
-    for the AI tab, the admin's audit view (merged with `audit.jsonl`,
+    per MCP request to `mcp_gate_data/access.jsonl` (file mode 0640, group
+    10001, directory 0750): time, person, `azp`, resource, instance, companion,
+    method, tool name, SHA-256 of the arguments, decision (`allow`,
+    `deny:<reason>`, `confirm:<id>`, `rate_limited`), upstream status, duration.
+    Never the arguments, the result, a token or a credential. Unloggable
+    `tools/call` requests are refused with `503`. The Hub reads it (read-only
+    mount) for the AI tab, the admin's audit view (merged with `audit.jsonl`,
     filtered by `via: ai`) and the person's own "Recent AI activity" on
     the People page (their lines only). Retention: 90 days (the sign-in
     history's default), pruned by the gate.
@@ -1135,13 +1167,15 @@ AI page (LibreChat) ────────────────┤
     - `tools/list` for a person = the union, over enabled companions with
       `aggregate: true` whose population includes them, of the tools the
       per-app endpoint would show them (same filtering, call 16), plus the
-      people-scope Portcullis tools. Tool names are
-      `<instance-id>__<tool>` (`gitea__list_issues`,
-      `grafana-team-a__search_dashboards`, `portcullis__my_apps`); names
-      over 64 characters (Anthropic's tool-name limit, also Open WebUI's)
-      are shortened with a stable 8-character hash suffix. Descriptions
-      are prefixed with the app's label and host ("[Gitea ·
-      gitea.example.com] …"). Resources and prompts get the same prefix.
+      people-scope Portcullis tools (delegate tools are not in the
+      aggregate). Tool names are `<instance-id>__<tool>` (`gitea__list_issues`,
+      `grafana-team-a__search_dashboards`, `portcullis__my_apps`); name
+      collisions drop both tools; names over 64 characters (Anthropic's
+      tool-name limit, also Open WebUI's) are shortened with a stable
+      8-character hash suffix. Descriptions are prefixed with the app's
+      label and host ("[Gitea · gitea.example.com] …") or for
+      people-scope Portcullis tools `[Portcullis · people.<d>] `.
+      Resources and prompts get the same prefix.
     - Calls are routed to the upstream with the person's identity exactly
       as on the per-app route (lazy minting included), and every rule of
       calls 6–19 applies per upstream: an aggregate call to Gitea is
@@ -1155,21 +1189,22 @@ AI page (LibreChat) ────────────────┤
     - `app_oauth` companions are never in the aggregate (the gate holds
       no credential for them); the People card lists them separately.
 22. **The People page.**
-    - `GET /api/me/apps` (settings spec call 15) gains an `ai` object per
-      instance with AI support on and the caller in the population:
-      `{"companions": [{"name", "label", "url", "identity_mode",
-      "mode", "official"}]}`; and a top-level `ai` object: `{"aggregate_url",
-      "clients": {"claude": {"client_id"}, "claude_code": {"client_id",
-      "callback_port"}, "generic": {"client_id", "redirect_uris"}},
+    - `GET /api/me/apps` (settings spec call 15) answers `{apps, fresh_auth,
+      ai}`, where each app gains an `ai` object when it has AI support on
+      and the caller is in the population: `{"companions": [{"name", "label",
+      "url", "identity_mode", "mode", "official"}]}`. Apps with AI support
+      on are listed even without values. The top-level `ai` object holds
+      `{"aggregate_url", "clients": {"claude": {"client_id"}, "claude_code":
+      {"client_id", "callback_port"}, "generic": {"client_id", "redirect_uris"}},
       "admin_url"` (only for admins)`}`. Nothing for instances the caller
       can't use.
-    - New people-listener routes (contract §5.1, the allowlist test):
-      `GET /api/me/ai` (the caller's AI connections: per AI client, when
-      consented, last used, offline session expiry; and their last 50
-      access-log lines), `DELETE /api/me/ai/connections/{client}`
-      (revokes the caller's consent and offline sessions for that
-      client; audited `ai.connection.revoke`), `GET /confirm/{id}` and
-      `POST /api/me/confirmations/{id}` (call 2). Each answers only for
+    - New people-listener routes (exactly nine; contract §5.1, the allowlist
+      test): `GET /api/me/ai` (shape: `{connections: [{client, label,
+      consented_at, last_used_at, expires_at}], activity: […]}`),
+      `DELETE /api/me/ai/connections/{client}` (revokes the caller's consent
+      and offline sessions for that client; audited `ai.connection.revoke`),
+      `GET /confirm/{id}` and `POST /api/me/confirmations/{id}` (call 2; the
+      confirm routes also exist on the Hub listener). Each answers only for
       the caller.
     - The card's content per client is in the example below. Commands and
       URLs are rendered from `GET /api/me/apps`, escaped, with copy
@@ -1207,19 +1242,20 @@ AI page (LibreChat) ────────────────┤
       azure_openai: many, anthropic: one, openai: one, google: one,
       bedrock: one}` (LibreChat: custom endpoints are a list, Azure has
       deployment groups, the other native endpoints exist once per
-      instance). Each AI page instance has a Hub-rendered setting
-      `providers` (a multi-select of provider names whose kind the
-      template supports; default: every such provider; selecting two
-      `one`-kind providers of the same kind is a `400`).
+      instance). Provider selection is set on each AI page instance's AI
+      tab (`PUT /api/instances/{id}/ai providers`, a multi-select of
+      provider names whose kind the template supports; default: every such
+      provider; selecting two `one`-kind providers of the same kind is a
+      `400`).
     - **Delivery, no provider-specific Hub code.** For the selected
       providers the Hub writes the data file `ai-providers.json` (name,
       label, kind, base URL, region, deployments, model list, `fetch`,
-      `credentials` mode; never a secret) and puts each secret in the
-      instance's env file only (0600) as
-      `PORTCULLIS_AI_PROVIDER_<NAME>_<FIELD>` (`<NAME>` upper-cased, `-`
-      → `_`; reserved variables, contract §3.1). The template's start hook
-      renders `librechat.yaml` from the data file: `litellm` and
-      `openai_compatible` become `endpoints.custom[]` entries (`name` =
+      `credentials` mode; never a secret) and delivers secrets through
+      `ai.chat.env` (the instance's env file, 0600, as
+      `PORTCULLIS_AI_PROVIDER_<NAME>_<FIELD>`, `<NAME>` upper-cased, `-`
+      → `_`; reserved variables, contract §3.1). The template's `config`
+      init service renders `librechat.yaml` from the data file: `litellm`
+      and `openai_compatible` become `endpoints.custom[]` entries (`name` =
       the provider's label, `baseURL`, `models`), `azure_openai` an
       `endpoints.azureOpenAI.groups[]` entry, the others LibreChat's
       native endpoint variables. Every key is an env reference
@@ -1263,12 +1299,12 @@ AI page (LibreChat) ────────────────┤
     domains, Hub settings, folders and the doctor, certificates. It has
     no tools that act inside an app (no "create a Gitea issue"): app
     actions go only through that app's upstream companion.
-    - A third listener, `HUB_MCP_ADDR` (`:8890`), reachable only on the
-      `portcullis` network (no Traefik router points at it). It requires
-      `X-Portcullis-MCP-Secret` = `HUB_MCP_GATE_SECRET` (a file secret ≥ 32
-      chars from `portcullis init`, shared only with `mcp-gate`; constant
-      time, like `ProxySecret`), and serves only `/mcp/admin`,
-      `/mcp/people` and `/internal/*` (credentials, confirmations).
+    - A third listener, `HUB_MCP_ADDR` (`:8890`), listens on all Hub
+      networks, protected by the secret only; core CI checks no router
+      targets it. It requires `X-Portcullis-MCP-Secret` = `HUB_MCP_GATE_SECRET`
+      (a file secret ≥ 32 chars from `portcullis init`, shared only with
+      `mcp-gate`; constant time, like `ProxySecret`), and serves only
+      `/mcp/admin`, `/mcp/people` and `/internal/*` (credentials, confirmations).
       `/healthz` as today.
     - The gate forwards with `X-Forwarded-User` (the validated
       `preferred_username`), `X-Portcullis-AI-Client` (`azp`) and
@@ -1276,7 +1312,8 @@ AI page (LibreChat) ────────────────┤
       listener. No CSRF guard there (no browser can reach it), strict
       JSON-RPC bodies.
     - Built on the official MCP Go SDK server (Streamable HTTP, stateless,
-      2026-07-28 with 2025-11-25 fallback). Each tool is a thin Hub function
+      2026-07-28 with 2025-11-25 fallback; on 2025-11-25 the Hub MCP gives
+      text only, not elicitation/create). Each tool is a thin Hub function
       that resolves the `directory.Caller` with `CallerFor` and calls the
       **same Hub / directory methods** the HTTP handlers call (not HTTP
       loopback), so authorization, guardrails, locks, errors and audit are
@@ -1307,8 +1344,8 @@ AI page (LibreChat) ────────────────┤
     | Drift | `list_drift` R, `resolve_drift` D |
     | Backups | `list_backups` R, `backup_instance` W, `restore_instance` D, `restore_as` W |
     | Domains | `list_domains` R, `enroll_domain` U (the DNS token is entered on the Hub's page, never in the chat), `replace_domain_token` U, `delete_domain` D |
-    | Users and groups | `directory_overview` R, `get_person` R, `create_person` W (invite by email; the link is never returned), `update_person` W, `set_details` W, `require_passkey` D, `remove_passkeys` D, `set_password` U, `delete_person` D, `create_group` W, `delete_group` D, `add_member` W, `remove_member` W, `set_member_expiry` W, `set_group_rule` W, `preview_rule` R, `add_exception` W, `remove_exception` W, `convert_group` W (preview + apply), `create_field` W, `update_field` W, `delete_field` D, `set_permission` W, `import_review` R, `import_apply` W, `audit_recent` R |
-    | Doctor and folders (project 2) | `doctor_findings` R, `doctor_scan` W, `doctor_preview_fix` R, `doctor_apply_fix` W (D when the plan touches data), `doctor_mute` W, `list_folders` R, `folder_preview` R, `folder_apply` W |
+    | Users and groups | `directory_overview` R, `get_person` R, `create_person` W (invite by email; the link is never returned), `update_person` W, `set_details` W, `require_passkey` D, `remove_passkeys` D, `set_password` U, `delete_person` D, `create_group` W, `delete_group` D, `add_member` D, `remove_member` W, `set_member_expiry` W, `set_group_rule` W, `preview_rule` R, `add_exception` W, `remove_exception` D, `convert_group` D (preview + apply), `create_field` W, `update_field` W, `delete_field` D, `set_permission` D, `import_review` R, `import_apply` W, `audit_recent` R, `admin_revoke_credential` D, `resume_user_sweep` D, `remove_stale_keycloak_user` D |
+    | Doctor and folders (project 2) | `doctor_findings` R, `doctor_scan` W, `doctor_preview_fix` R, `doctor_apply_fix` D (when `touches_data`), `doctor_mute` W, `list_folders` R, `folder_preview` R, `folder_apply` D, `delete_folder` D, `folder_undo_apply` D |
     | Certificates (certificates spec) | `list_certificates` R, `revoke_certificate` D, `sign_in_history` R |
     | AI | `ai_status` R, `set_ai_support` W, `set_ai_mode` W, `revoke_ai_access` D (one person or everyone, one instance), `ai_activity` R, `list_model_providers` R (secrets as `{set, updated_at}`), `save_model_provider` W (no secret fields), `set_model_provider_secret` U, `delete_model_provider` D |
     | Hub settings | `get_hub_settings` R, `save_hub_settings` W (AI settings included; turning the Portcullis admin MCP off is allowed, turning it on from MCP is not, since it would already be on) |
@@ -1333,12 +1370,17 @@ AI page (LibreChat) ────────────────┤
       for it, pre-filled with the non-secret context; the admin types the
       secret there. The tool's schema has no field for it, and the Hub
       refuses tool arguments whose names look like secrets (`*token*`,
-      `*password*`, `*secret*`, `*key*`) on those tools.
-    - Outputs: every tool result goes through the same rules as the API
-      (secret settings as `{set, updated_at}`, credentials never echoed,
-      env and logs redacted, then clipped) plus: no invite links, no
-      file-share passwords, no share tokens (public access shows `listed`
-      tokens as `•••` with their path), no `HUB_*` secret.
+      `*password*`, `*secret*`, `*key*`) on U tools and undeclared arguments
+      on every tool, with a reviewed allowlist (`finding_token`, entry `key`,
+      custom-field values).
+    - Outputs: every tool result goes through a global redactor (union of
+      all secrets, redact then clip; failure text on error), then the same
+      rules as the API (secret settings as `{set, updated_at}`, credentials
+      never echoed, env and logs redacted, then clipped) plus: no invite
+      links (the fixed `./portcullis invite` text only), no fallback passwords
+      or server-invite internals, no file-share passwords, no share tokens
+      (public access shows `listed` tokens as `•••` with their path), no
+      `HUB_*` secret.
 27. **Long operations.** Tools whose HTTP twin answers `202` return
     `{op_id, op, instance, poll}` immediately, plus progress notifications
     on the request's SSE stream when the client asked for a stream; the
@@ -1384,9 +1426,12 @@ AI page (LibreChat) ────────────────┤
     - **Provider secrets are write-only, like the domains tokens.**
       Entered in `type=password` inputs, cleared on submit, never rendered
       back: the API answers `{set, updated_at}` per secret field. Stored
-      in the Hub's secret store (as secret settings, settings spec), never
-      in `state.yaml`, logs, the audit, op records, errors or answers, and
-      written only into the env files of the AI page instances that
+      in `<data>/ai/provider-secrets.json` (file mode 0600, atomic), never
+      in `state.yaml`, logs, the audit, op records, errors or answers.
+      Masked in views, blanked on instance restore-as (the restored instance
+      is rewritten for its own provider selection), redacted from tool
+      results. A collision with an existing provider name is a `409`.
+      Written only into the env files of the AI page instances that
       selected the provider (call 23). Replace or delete, never read
       back. A provider in use can be deleted only after it is deselected
       from every instance (`409` listing them).
@@ -1400,16 +1445,18 @@ AI page (LibreChat) ────────────────┤
       replaced, never the value), `ai.provider.delete`.
 29. **Instances, backups, restore, delete** (contract §11).
     - AI configuration (switch, mode per companion) is per instance, in
-      `state.yaml`, and part of an instance backup like its settings.
-      Credentials are **not** in backups: they live in the Hub's data,
-      encrypted to the gate, and are re-minted lazily.
+      `state.yaml`, and part of an instance backup (backup member
+      `config/ai.json`) like its settings. Credentials are **not** in
+      backups: they live in the Hub's data, encrypted to the gate, and
+      are re-minted lazily.
     - A same-instance restore and a restore into a new id run
       `revoke_all` in the restored app before AI traffic is allowed again
       (the restored app database may hold credentials the gate no longer
-      knows). A restore into a new id starts with AI support **off**.
-    - Delete: step 4 also removes the instance's `mcp:*` scopes; step 6
-      its credential entries and AI state (the app's tokens die with its
-      volumes).
+      knows; revoke_all at switch-on handles restore-as tokens). A restore
+      into a new id starts with AI support **off**.
+    - Delete: step 3 removes the instance's AI entries, `oauth-seen` and
+      `AIInstances` state with the project down; step 4 also removes the
+      instance's `mcp:*` scopes (the app's tokens die with its volumes).
     - The default instance and other instances get distinct resources
       (their own hosts) and scopes (`mcp:<instance-id>.<companion>`).
 30. **Contract changes (integration-contracts.md first).**
@@ -1488,6 +1535,8 @@ AI page (LibreChat) ────────────────┤
     template's docs page. Moving a template from `ai.unsupported` to
     `ai.mcp` later is a normal template update (shown in the update
     preview); it never means Portcullis writes the server.
+
+    Note that the default subdomain `mcp` is reserved.
 32. **Testing.**
     - Unit: token validation matrix (wrong `aud`, two MCP audiences, wrong
       `azp`, expired, `none` alg, unknown `kid`, low `acr`, person not in
@@ -1544,21 +1593,24 @@ gets built. All are **Controller's call**.
 34. **Hook `when: ai`.** The settings spec's `when` list (`start`,
     `settings_change`, `membership_change`) gains `ai`: a hook marked
     `ai` runs only when the AI machinery calls it (`mint`, `revoke`,
-    `revoke_all`, `on_change`), never on the settings triggers, and the
-    validator requires it for every hook an `ai:` block names. These hooks
-    get the AI stdin of calls 13/11 instead of the settings spec's full
-    desired state. Their **stdout is never stored**: on success it is
-    parsed and dropped; on failure the op record and the AI tab get the
-    exit code and the redacted, clipped stderr only.
+    `revoke_all`, `on_change`), never on the settings triggers (the
+    settings engine never runs `ai` hooks, including on Retry and forced
+    runs), can't be combined with other triggers, and the validator
+    requires it for every hook an `ai:` block names. These hooks get the
+    AI stdin of calls 13/11 instead of the settings spec's full desired
+    state. stdout/stderr are split by an exec with `Tty: false`. Their
+    **stdout is never stored**: on success it is parsed and dropped; on
+    failure the op record and the AI tab get the exit code and the
+    redacted, clipped stderr only.
 35. **Identity headers without groups in the token.** MCP tokens carry no
     group or attribute claims (call 7) and the gate has no LLDAP access, so
     for `identity_headers` companions the Hub writes, per population
-    member, the email and the groups group-gate would forward
-    (`X-Auth-Request-Groups`, same filtering) into `mcp-gate.json` on every
-    `WritePolicy`; the gate reads attribute headers from the existing
-    `user-attributes.json` (contract §4.1), the same file group-gate
-    reads. A person missing from either file gets no header for it, never
-    a stale one.
+    member, the email and `people.groups` (LLDAP groups minus memberships
+    past their expiry, same as `X-Auth-Request-Groups` group-gate would
+    forward) into `mcp-gate.json` on every `WritePolicy`; the gate reads
+    attribute headers from the existing `user-attributes.json` (contract
+    §4.1), the same file group-gate reads. A person missing from either
+    file gets no header for it, never a stale one.
 36. **`app_oauth` companions are outside the gate's guarantees, and say
     so.** For Home Assistant the gate isn't in the path, so the gate's
     per-request population check, tool filtering, confirmations, rate
@@ -1658,7 +1710,7 @@ services:
     read_only: true
     tmpfs: [/tmp]
     networks: [default]            # the Hub's override adds portcullis-proxy + alias
-    # no Traefik labels: the Hub renders portcullis-mcp-gitea_gitea → mcp-gate@docker
+    # no Traefik labels: the Hub renders portcullis-mcp-gitea--gitea → mcp-gate@docker
 ```
 
 The Hub's override for the default instance with AI support on adds
@@ -1670,15 +1722,15 @@ services:
     scale: 1                       # 0 while AI support is off
     networks:
       portcullis-proxy:
-        aliases: [portcullis-mcp-gitea-gitea]
+        aliases: [portcullis-mcp-gitea--gitea]
   gitea:
     labels:                        # merged with the template's labels (default instance)
-      traefik.http.routers.portcullis-mcp-gitea_gitea.rule: Host(`gitea.example.com`) && (Path(`/mcp`) || Path(`/.well-known/oauth-protected-resource/mcp`))
-      traefik.http.routers.portcullis-mcp-gitea_gitea.entrypoints: websecure
-      traefik.http.routers.portcullis-mcp-gitea_gitea.tls.options: authaware@file
-      traefik.http.routers.portcullis-mcp-gitea_gitea.priority: "<above every router of the instance>"
-      traefik.http.routers.portcullis-mcp-gitea_gitea.service: mcp-gate@docker
-      traefik.http.routers.portcullis-mcp-gitea_gitea.middlewares: rate-limit@file,security-headers@file
+      traefik.http.routers.portcullis-mcp-gitea--gitea.rule: Host(`gitea.example.com`) && (Path(`/mcp`) || Path(`/.well-known/oauth-protected-resource/mcp`))
+      traefik.http.routers.portcullis-mcp-gitea--gitea.entrypoints: websecure
+      traefik.http.routers.portcullis-mcp-gitea--gitea.tls.options: authaware@file
+      traefik.http.routers.portcullis-mcp-gitea--gitea.priority: "<above every router of the instance>"
+      traefik.http.routers.portcullis-mcp-gitea--gitea.service: mcp-gate@docker
+      traefik.http.routers.portcullis-mcp-gitea--gitea.middlewares: rate-limit@file,security-headers@file
 ```
 
 Grafana (identity headers, abridged):
@@ -1873,7 +1925,7 @@ root: Add them, and back it up first.
 → preview_rule {"group": "users_grafana", "rule": "member of design_team or member of ops"}
 ← +3 people (dana, eli, fay), −0
 → set_group_rule {"group": "users_grafana", "rule": "member of design_team or member of ops"}
-← ok · audited directory.set_rule (actor root, via ai, client portcullis-ai-claude-code)
+← ok · audited group.rule (actor root, via ai, client portcullis-ai-claude-code)
 → backup_instance {"id": "grafana"}
 ← 202 {op_id: "a41f…", poll: "/api/instances/grafana/op"}
 → wait_for_op {"id": "grafana"}

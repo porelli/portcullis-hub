@@ -1,6 +1,7 @@
 name: SMB Fixture
 category: tools
 instances: multi
+ai: {unsupported: "test fixture"}
 auth:
   method: custom
   group_access: true

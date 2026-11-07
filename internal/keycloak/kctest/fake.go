@@ -35,6 +35,9 @@ type User struct {
 	// FederationLink: LDAPProviderID for users imported from LDAP (the
 	// default), "" for local users.
 	FederationLink string
+	// LDAPID is the LDAP_ID attribute of an imported user: LLDAP's
+	// account uuid (the federation links by entryUUID), set at import.
+	LDAPID string
 	// CredentialsStatus, if non-zero, is the HTTP status GET
 	// /users/{id}/credentials answers (Keycloak gives 404 or 500 for a
 	// federated user whose LDAP entry is gone).
@@ -44,6 +47,9 @@ type User struct {
 	// uuid → role names).
 	Groups      []string
 	ClientRoles map[string][]string
+	// Consents by clientId and offline sessions (ai.go).
+	Consents        map[string]*Consent
+	OfflineSessions []*OfflineSession
 }
 
 // LDAPProviderID is the id of the fake's LDAP user storage provider.
@@ -70,10 +76,11 @@ type ProtocolMapper struct {
 
 // ClientScope is a fake client scope.
 type ClientScope struct {
-	ID       string           `json:"id"`
-	Name     string           `json:"name"`
-	Protocol string           `json:"protocol"`
-	Mappers  []ProtocolMapper `json:"-"`
+	ID         string            `json:"id"`
+	Name       string            `json:"name"`
+	Protocol   string            `json:"protocol"`
+	Attributes map[string]string `json:"attributes,omitempty"`
+	Mappers    []ProtocolMapper  `json:"-"`
 }
 
 // Client is a fake OIDC client.
@@ -97,6 +104,9 @@ type Client struct {
 	PublicClient                       *bool             `json:"publicClient,omitempty"`
 	StandardFlowEnabled                *bool             `json:"standardFlowEnabled,omitempty"`
 	FullScopeAllowed                   *bool             `json:"fullScopeAllowed,omitempty"`
+	ConsentRequired                    *bool             `json:"consentRequired,omitempty"`
+	Enabled                            *bool             `json:"enabled,omitempty"`
+	BearerOnly                         *bool             `json:"bearerOnly,omitempty"`
 	// ProtocolMappers: the client's own protocol mappers (a client PUT
 	// keeps them; the protocol-mappers sub-resource changes them).
 	ProtocolMappers []ProtocolMapper `json:"protocolMappers,omitempty"`
@@ -107,6 +117,10 @@ type Server struct {
 	HTTP *httptest.Server
 	// Importable reports whether LDAP has username (nil: nobody).
 	Importable func(username string) bool
+	// LDAPUUID is LDAP's account uuid of username, an imported user's
+	// LDAP_ID (Keycloak links by LLDAP's entryUUID); nil or "" = a fresh
+	// uuid per import.
+	LDAPUUID func(username string) string
 	// Down makes every request answer 503 (Keycloak outage).
 	Down bool
 	// RemoveInvalid: listing users drops the LDAP-linked ones Importable
@@ -133,6 +147,9 @@ type Server struct {
 	// FailPrefix, if set, makes every request whose "METHOD path" starts
 	// with it answer 500.
 	FailPrefix string
+	// FailFunc, if set, makes every request it returns true for answer
+	// 500 (called under the fake's lock with the method and path).
+	FailFunc func(method, path string) bool
 
 	// Authentication flows, authenticator configs, groups and client
 	// roles (access.go).
@@ -151,6 +168,11 @@ type Server struct {
 	RealmRoles map[string]string
 	// Composites: role id → the ids of the roles it contains.
 	Composites map[string][]string
+	// RealmDefaultScopes / RealmOptionalScopes: the realm's default
+	// client scopes (names) a new client gets when its representation
+	// names none (ai.go).
+	RealmDefaultScopes  []string
+	RealmOptionalScopes []string
 }
 
 const (
@@ -178,7 +200,14 @@ func (s *Server) Import(username string, creds ...Credential) *User {
 }
 
 func (s *Server) importLocked(username string, creds ...Credential) *User {
-	u := &User{ID: fmt.Sprintf("00000000-0000-0000-0000-%012d", s.nextID), Username: username, Enabled: true, RequiredActions: []string{}, Credentials: creds, Sessions: 1, FederationLink: LDAPProviderID}
+	ldapID := ""
+	if s.LDAPUUID != nil {
+		ldapID = s.LDAPUUID(username)
+	}
+	if ldapID == "" {
+		ldapID = fmt.Sprintf("00000000-0000-4000-9000-%012d", s.nextID)
+	}
+	u := &User{ID: fmt.Sprintf("00000000-0000-0000-0000-%012d", s.nextID), Username: username, Enabled: true, RequiredActions: []string{}, Credentials: creds, Sessions: 1, FederationLink: LDAPProviderID, LDAPID: ldapID}
 	s.nextID++
 	s.Users[username] = u
 	return u
@@ -328,6 +357,13 @@ func (s *Server) SetClientURIs(id string, redirects, origins []string) {
 	}
 }
 
+// SetFailFunc sets FailFunc under the fake's lock.
+func (s *Server) SetFailFunc(f func(method, path string) bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.FailFunc = f
+}
+
 // SetFailPrefix sets FailPrefix under the fake's lock.
 func (s *Server) SetFailPrefix(p string) {
 	s.mu.Lock()
@@ -448,7 +484,11 @@ func (s *Server) byID(id string) *User {
 }
 
 func rep(u *User) map[string]interface{} {
-	return map[string]interface{}{"id": u.ID, "username": u.Username, "enabled": u.Enabled, "requiredActions": u.RequiredActions, "federationLink": u.FederationLink, "attributes": map[string]interface{}{"LDAP_ID": []string{u.Username}}}
+	attrs := map[string]interface{}{}
+	if u.LDAPID != "" {
+		attrs["LDAP_ID"] = []string{u.LDAPID}
+	}
+	return map[string]interface{}{"id": u.ID, "username": u.Username, "enabled": u.Enabled, "requiredActions": u.RequiredActions, "federationLink": u.FederationLink, "attributes": attrs}
 }
 
 func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
@@ -472,11 +512,14 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(401)
 		return
 	}
-	if s.FailPrefix != "" && strings.HasPrefix(r.Method+" "+r.URL.Path, s.FailPrefix) {
+	if (s.FailPrefix != "" && strings.HasPrefix(r.Method+" "+r.URL.Path, s.FailPrefix)) || (s.FailFunc != nil && s.FailFunc(r.Method, r.URL.Path)) {
 		w.WriteHeader(500)
 		return
 	}
 	if s.serveAccess(w, r) {
+		return
+	}
+	if s.serveAI(w, r) {
 		return
 	}
 	if strings.HasPrefix(r.URL.Path, realm+"/components") {
@@ -676,6 +719,53 @@ func (s *Server) serveScopes(w http.ResponseWriter, r *http.Request) {
 		sc.ID = s.newID("scope")
 		s.Scopes[sc.ID] = &sc
 		created(w, r, sc.ID)
+	case len(parts) == 1 && r.Method == "GET":
+		sc := s.Scopes[parts[0]]
+		if sc == nil {
+			http.NotFound(w, r)
+			return
+		}
+		json.NewEncoder(w).Encode(sc)
+	case len(parts) == 1 && r.Method == "PUT":
+		sc := s.Scopes[parts[0]]
+		var in ClientScope
+		if sc == nil {
+			http.NotFound(w, r)
+			return
+		}
+		if json.NewDecoder(r.Body).Decode(&in) != nil || in.Name == "" {
+			w.WriteHeader(400)
+			return
+		}
+		// Keycloak renames the scope in every client's lists; the Hub
+		// never renames, so a rename is refused here.
+		if in.Name != sc.Name {
+			w.WriteHeader(400)
+			return
+		}
+		sc.Protocol, sc.Attributes = in.Protocol, in.Attributes
+		w.WriteHeader(204)
+	case len(parts) == 1 && r.Method == "DELETE":
+		sc := s.Scopes[parts[0]]
+		if sc == nil {
+			http.NotFound(w, r)
+			return
+		}
+		// Keycloak refuses to delete a scope still linked to a client
+		// (400 "Cannot remove client scope, it is currently in use") or
+		// to the realm's defaults.
+		for _, c := range s.Clients {
+			if contains(c.DefaultClientScopes, sc.Name) || contains(c.OptionalClientScopes, sc.Name) {
+				w.WriteHeader(400)
+				return
+			}
+		}
+		if contains(s.RealmDefaultScopes, sc.Name) || contains(s.RealmOptionalScopes, sc.Name) {
+			w.WriteHeader(400)
+			return
+		}
+		delete(s.Scopes, sc.ID)
+		w.WriteHeader(204)
 	case len(parts) >= 3 && parts[1] == "protocol-mappers" && parts[2] == "models":
 		sc := s.Scopes[parts[0]]
 		if sc == nil {
@@ -757,13 +847,25 @@ func (s *Server) serveClients(w http.ResponseWriter, r *http.Request) {
 		for _, sc := range s.Scopes {
 			known[sc.Name] = true
 		}
-		scopes := []string{}
+		// A list the representation leaves out is the realm's defaults.
+		if c.DefaultClientScopes == nil {
+			c.DefaultClientScopes = append([]string{}, s.RealmDefaultScopes...)
+		}
+		if c.OptionalClientScopes == nil {
+			c.OptionalClientScopes = append([]string{}, s.RealmOptionalScopes...)
+		}
+		scopes, optional := []string{}, []string{}
 		for _, n := range c.DefaultClientScopes {
 			if known[n] {
 				scopes = append(scopes, n)
 			}
 		}
-		c.ID, c.DefaultClientScopes, c.OptionalClientScopes = s.newID("client"), scopes, nil
+		for _, n := range c.OptionalClientScopes {
+			if known[n] && !contains(scopes, n) {
+				optional = append(optional, n)
+			}
+		}
+		c.ID, c.DefaultClientScopes, c.OptionalClientScopes = s.newID("client"), scopes, optional
 		for i := range c.ProtocolMappers {
 			c.ProtocolMappers[i].ID = s.newID("cpm")
 		}
@@ -850,6 +952,20 @@ func (s *Server) serveClients(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		c.DefaultClientScopes = kept
+		w.WriteHeader(204)
+	case len(parts) == 3 && parts[1] == "optional-client-scopes" && r.Method == "PUT":
+		c, sc := s.Clients[parts[0]], s.Scopes[parts[2]]
+		if c == nil || sc == nil {
+			http.NotFound(w, r)
+			return
+		}
+		if contains(c.DefaultClientScopes, sc.Name) {
+			w.WriteHeader(409) // Keycloak: already linked as default
+			return
+		}
+		if !contains(c.OptionalClientScopes, sc.Name) {
+			c.OptionalClientScopes = append(c.OptionalClientScopes, sc.Name)
+		}
 		w.WriteHeader(204)
 	case len(parts) == 3 && parts[1] == "optional-client-scopes" && r.Method == "DELETE":
 		c, sc := s.Clients[parts[0]], s.Scopes[parts[2]]

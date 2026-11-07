@@ -18,10 +18,12 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
 	cerrdefs "github.com/containerd/errdefs"
+	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/client"
 )
 
@@ -126,6 +128,9 @@ type Container struct {
 	State  string            `json:"State"`  // running, exited, restarting, …
 	Status string            `json:"Status"` // "Up 3 minutes (healthy)"
 	Labels map[string]string `json:"Labels"`
+	// Networks: each network the container is attached to → the names
+	// it answers to there (its aliases and DNS names, deduplicated).
+	Networks map[string][]string `json:"-"`
 }
 
 // Name returns the primary container name without the leading "/".
@@ -155,9 +160,29 @@ func (c *Client) ListContainers(ctx context.Context, f Filters) ([]Container, er
 	}
 	out := make([]Container, 0, len(res.Items))
 	for _, s := range res.Items {
-		out = append(out, Container{ID: s.ID, Names: s.Names, Image: s.Image, State: string(s.State), Status: s.Status, Labels: s.Labels})
+		out = append(out, Container{ID: s.ID, Names: s.Names, Image: s.Image, State: string(s.State), Status: s.Status, Labels: s.Labels, Networks: networkNames(s.NetworkSettings)})
 	}
 	return out, nil
+}
+
+// networkNames: per network, the endpoint's aliases and DNS names.
+func networkNames(ns *container.NetworkSettingsSummary) map[string][]string {
+	if ns == nil || len(ns.Networks) == 0 {
+		return nil
+	}
+	out := make(map[string][]string, len(ns.Networks))
+	for name, ep := range ns.Networks {
+		var names []string
+		if ep != nil {
+			for _, n := range append(slices.Clone(ep.Aliases), ep.DNSNames...) {
+				if n != "" && !slices.Contains(names, n) {
+					names = append(names, n)
+				}
+			}
+		}
+		out[name] = names
+	}
+	return out
 }
 
 // ProjectFilter selects the containers of one compose project.

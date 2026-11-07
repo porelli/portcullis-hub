@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/portcullis/hub/internal/credentials"
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/freshauth"
 	"github.com/portcullis/hub/internal/policy"
@@ -268,7 +269,7 @@ func TestLifecycleDownWaitsForDeliveryLock(t *testing.T) {
 	downs := countCalls(c.f, "down:"+smbProject)
 	done := make(chan error, 1)
 	backup := func() {
-		_, err := c.f.h.BackupInstance(smbID, "root")
+		_, err := c.f.h.BackupInstance(smbID, directory.Human("root"))
 		done <- err
 	}
 	go backup()
@@ -336,18 +337,18 @@ func TestHardUsernameRulesUnavailable(t *testing.T) {
 func TestRequiresAnyOnlyTouchedKeys(t *testing.T) {
 	c := credSvcFixture(t)
 	c.people.addGroup("family", "alice")
-	if _, err := c.f.h.SaveSettings(smbID, SettingsUpdate{Values: vals("share1_folder", "/srv/share1", "share1_readers", []string{"family"})}, "root"); err != nil {
+	if _, err := c.f.h.SaveSettings(smbID, SettingsUpdate{Values: vals("share1_folder", "/srv/share1", "share1_readers", []string{"family"})}, directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	old := c.people.id("family")
 	c.people.deleteGroup("family")
-	c.f.h.PurgeGroupSettings(context.Background(), "root", "family", old)
+	c.f.h.PurgeGroupSettings(context.Background(), directory.Human("root"), "family", old)
 	settle(c.f)
-	if _, err := c.f.h.SaveSettings(smbID, SettingsUpdate{Values: vals("share2_name", "Photos")}, "root"); err != nil {
+	if _, err := c.f.h.SaveSettings(smbID, SettingsUpdate{Values: vals("share2_name", "Photos")}, directory.Human("root")); err != nil {
 		t.Errorf("an unrelated save after the purge = %v", err)
 	}
 	// Touching the slot still judges it.
-	if _, err := c.f.h.SaveSettings(smbID, SettingsUpdate{Values: vals("share1_writers", []string{})}, "root"); statusOf(err) != 400 {
+	if _, err := c.f.h.SaveSettings(smbID, SettingsUpdate{Values: vals("share1_writers", []string{})}, directory.Human("root")); statusOf(err) != 400 {
 		t.Errorf("touching the slot = %v, want 400", err)
 	}
 	settle(c.f)

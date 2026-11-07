@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"maps"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
@@ -69,6 +70,23 @@ func (h *Hub) generateAppEnvLocked(t *templates.Template, m *directory.Membershi
 	for k, v := range t.InstanceEnv {
 		vars[k] = v
 	}
+	for k, v := range h.aiEnvLocked(t) {
+		vars[k] = v
+	}
+	// The model provider variables (§15.12, Task 23): exactly an AI page's
+	// selected, set secrets (single-quoted); never a stale or foreign one.
+	provEnv, err := h.providerEnvLocked(t)
+	if err != nil {
+		return err
+	}
+	for k := range vars {
+		if strings.HasPrefix(k, ProviderVarPrefix) {
+			delete(vars, k)
+		}
+	}
+	for k, v := range provEnv {
+		vars[k] = v
+	}
 	coreEnv := readEnvRaw(filepath.Join(h.cfg.ProjectDir, ".env"))
 	for ref := range templates.EnvRefs(string(t.ReadCompose())) {
 		if _, exists := vars[ref]; !exists {
@@ -89,7 +107,8 @@ func (h *Hub) generateAppEnvLocked(t *templates.Template, m *directory.Membershi
 	sort.Strings(keys)
 	for _, k := range keys {
 		_, quoted := optEnv[k]
-		lines = append(lines, envLine(k, vars[k], quoted))
+		_, prov := provEnv[k]
+		lines = append(lines, envLine(k, vars[k], quoted || prov))
 	}
 	// 0600: contains generated secrets.
 	return fsutil.WriteFileAtomic(envFile, []byte(strings.Join(lines, "\n")+"\n"), 0600)
@@ -579,6 +598,9 @@ func (h *Hub) refreshInstanceEnvLocked(t *templates.Template, m *directory.Membe
 	for k, v := range t.InstanceEnv {
 		want[k] = v
 	}
+	for k, v := range h.aiEnvLocked(t) {
+		want[k] = v
+	}
 	for k, v := range want {
 		if c, ok := cur[k]; ok && c == v {
 			delete(want, k)
@@ -592,5 +614,69 @@ func (h *Hub) refreshInstanceEnvLocked(t *templates.Template, m *directory.Membe
 	if err := setEnvVars(path, want, false); err != nil {
 		return err
 	}
-	return setEnvVars(path, opts, true)
+	if err := setEnvVars(path, opts, true); err != nil {
+		return err
+	}
+	// The model provider variables of the instance's own selection (a
+	// restore rewrites them from the store: G30(b)).
+	return h.syncProviderEnvLocked(t)
+}
+
+// aiEnvLocked are the AI variables of an ai.mcp template's instance
+// (contract §3.1, G42): PORTCULLIS_AI_ENABLED true while one of its
+// companions is switched on (one owing a revoke_all counts as off),
+// PORTCULLIS_AI_READONLY_<C> true unless C is on in read_write — all off
+// while the master switch is off or the effective policy is at LoA 3
+// (aiOnLocked) —, and
+// core's PORTCULLIS_MCP_GATE_IP (gateIPLocked). nil for every other
+// template. Caller holds mu.
+func (h *Hub) aiEnvLocked(t *templates.Template) map[string]string {
+	if !t.HasAIMCP() {
+		return nil
+	}
+	sw := h.st.AIInstances[t.ID].Companions
+	out := map[string]string{templates.VarAIEnabled: "false"}
+	// Master switch off or LoA 3: off in the app too (12b), whatever the
+	// companions' switches say.
+	on := h.aiOnLocked(t)
+	for _, c := range t.Manifest.AI.MCP {
+		s := sw[c.Name]
+		ro := "true"
+		if on && s.Enabled && !s.RevokePending {
+			out[templates.VarAIEnabled] = "true"
+			if s.Mode == templates.AIReadWrite {
+				ro = "false"
+			}
+		}
+		out[templates.ReadOnlyVar(c.Name)] = ro
+	}
+	if ip := h.gateIP(); ip != "" {
+		out[templates.VarMCPGateIP] = ip
+	}
+	return out
+}
+
+// gateIP is core's PORTCULLIS_MCP_GATE_IP from the core env subset the
+// Hub reads (secrets/hub/core.env at <ProjectDir>/.env): an IP address,
+// inside PORTCULLIS_PROXY_SUBNET when that is set. Absent, unparsable or
+// outside the subnet = "" (not written; logged).
+func (h *Hub) gateIP() string {
+	core := readEnvRaw(filepath.Join(h.cfg.ProjectDir, ".env"))
+	raw := core[templates.VarMCPGateIP]
+	if raw == "" {
+		return ""
+	}
+	ip, err := netip.ParseAddr(raw)
+	if err != nil {
+		log.Printf("ai: the core env's %s %s is not an IP address: not written", templates.VarMCPGateIP, clipQuoted(raw))
+		return ""
+	}
+	if sub := core["PORTCULLIS_PROXY_SUBNET"]; sub != "" {
+		p, err := netip.ParsePrefix(sub)
+		if err != nil || !p.Contains(ip) {
+			log.Printf("ai: the core env's %s %s is not inside PORTCULLIS_PROXY_SUBNET %s: not written", templates.VarMCPGateIP, ip, clipQuoted(sub))
+			return ""
+		}
+	}
+	return ip.String()
 }

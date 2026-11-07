@@ -22,6 +22,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/folderfix"
 	"github.com/portcullis/hub/internal/state"
@@ -34,7 +35,7 @@ import (
 // options (indented YAML list items) and services (the router's service
 // first).
 func folderApp(name, id, options, svc, extraServices string) [2]string {
-	m := "name: " + name + "\ncategory: media\ninstances: multi\nauth:\n  method: header-auth\n  group_access: true\n" +
+	m := "name: " + name + "\ncategory: media\ninstances: multi\nai: {unsupported: test fixture}\nauth:\n  method: header-auth\n  group_access: true\n" +
 		"  access_group: users_" + id + "\n  admin_group: admin_" + id + "\nurls:\n  - label: Web\n    url: \"https://{{HOST_" + strings.ToUpper(id) + "}}\"\n" +
 		"settings:\n  options:\n" + options
 	c := "services:\n" + svc +
@@ -382,7 +383,7 @@ func assign(t *testing.T, f *fixture, id string, req AssignRequest) (*AssignPlan
 	if err != nil {
 		t.Fatalf("preview: %v", err)
 	}
-	if _, err := f.h.StartAssign(id, req, plan.Hash, "admin"); err != nil {
+	if _, err := f.h.StartAssign(id, req, plan.Hash, directory.Human("admin")); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	return plan, waitFolderOp(t, f, id)
@@ -442,12 +443,12 @@ func TestPreviewAssignText(t *testing.T) {
 	}
 	text := strings.Join(plan.Lines, "\n")
 	for _, want := range []string{
-		"gid 60001 is allocated for this folder (shown as *Family media*).",
+		"gid 60001 is allocated for this folder (shown as \"Family media\").",
 		"12,410 files and 312 folders change group 1000 → 60001.",
 		"Group 1000 keeps the access it has now through an ACL on 12,723 entries.",
 		"313 folders get setgid and a default ACL",
-		"Immich mounts it read-only (Library).",
-		"Samba mounts it read/write and owns it (Share).",
+		"Immich mounts it read-only (\"Library\").",
+		"Samba mounts it read/write and owns it (\"Share\").",
 		"Immich and Samba are stopped for under a minute, then started.",
 		"A permissions snapshot is saved first.",
 	} {
@@ -551,7 +552,7 @@ func TestApplyHashMismatch(t *testing.T) {
 	s.Values["workers"] = int64(5)
 	f.h.st.Settings["immich"] = s
 	f.h.mu.Unlock()
-	_, err = f.h.StartAssign("media", req, plan.Hash, "admin")
+	_, err = f.h.StartAssign("media", req, plan.Hash, directory.Human("admin"))
 	if statusOf(err) != 409 || !strings.Contains(err.Error(), "the setup changed since the preview") {
 		t.Fatalf("apply = %v", err)
 	}
@@ -568,10 +569,10 @@ func TestApplyHashMismatch(t *testing.T) {
 	s.Ports["X_BIND"] = "127.0.0.1"
 	f.h.st.Settings["immich"] = s
 	f.h.mu.Unlock()
-	if _, err := f.h.StartAssign("media", req, plan.Hash, "admin"); statusOf(err) != 409 {
+	if _, err := f.h.StartAssign("media", req, plan.Hash, directory.Human("admin")); statusOf(err) != 409 {
 		t.Fatalf("port change: %v", err)
 	}
-	if _, err := f.h.StartAssign("media", req, "", "admin"); statusOf(err) != 409 {
+	if _, err := f.h.StartAssign("media", req, "", directory.Human("admin")); statusOf(err) != 409 {
 		t.Fatalf("no hash: %v", err)
 	}
 }
@@ -715,7 +716,7 @@ func TestAssignHoldsLocks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.h.StartAssign("media", req, plan.Hash, "admin"); err != nil {
+	if _, err := f.h.StartAssign("media", req, plan.Hash, directory.Human("admin")); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -731,24 +732,24 @@ func TestAssignHoldsLocks(t *testing.T) {
 	}
 	busy("Enable", f.h.Enable("immich"))
 	busy("RestartApp", f.h.RestartApp("immich"))
-	_, err = f.h.SaveSettings("immich", SettingsUpdate{Values: map[string]json.RawMessage{"workers": json.RawMessage("4")}}, "admin")
+	_, err = f.h.SaveSettings("immich", SettingsUpdate{Values: map[string]json.RawMessage{"workers": json.RawMessage("4")}}, directory.Human("admin"))
 	busy("SaveSettings", err)
 	if err == nil || !strings.Contains(err.Error(), "shared folder Family media is being applied") {
 		t.Errorf("SaveSettings: %v", err)
 	}
 	_, err = f.h.PreviewSettings(context.Background(), "immich", SettingsUpdate{Values: map[string]json.RawMessage{"workers": json.RawMessage("4")}})
 	busy("PreviewSettings", err)
-	_, err = f.h.StartBackup("immich", "admin")
+	_, err = f.h.StartBackup("immich", directory.Human("admin"))
 	busy("StartBackup", err)
-	_, err = f.h.StartAssign("media", req, plan.Hash, "admin")
+	_, err = f.h.StartAssign("media", req, plan.Hash, directory.Human("admin"))
 	busy("second StartAssign", err)
-	_, err = f.h.StartUndo("media", "x", "admin")
+	_, err = f.h.StartUndo("media", "x", directory.Human("admin"))
 	busy("StartUndo", err)
 	close(d.applyGate)
 	if rec := waitFolderOp(t, f, "media"); !rec.OK {
 		t.Fatalf("op = %+v", rec)
 	}
-	if _, err := f.h.SaveSettings("immich", SettingsUpdate{Values: map[string]json.RawMessage{"workers": json.RawMessage("4")}}, "admin"); err != nil {
+	if _, err := f.h.SaveSettings("immich", SettingsUpdate{Values: map[string]json.RawMessage{"workers": json.RawMessage("4")}}, directory.Human("admin")); err != nil {
 		t.Errorf("save after the apply: %v", err)
 	}
 }
@@ -767,7 +768,7 @@ func TestSaveRacesAssignment(t *testing.T) {
 			t.Errorf("assign = %+v", rec)
 		}
 	}
-	_, err := f.h.SaveSettings("immich", SettingsUpdate{Values: map[string]json.RawMessage{"extra": json.RawMessage(`"/srv/new"`)}}, "admin")
+	_, err := f.h.SaveSettings("immich", SettingsUpdate{Values: map[string]json.RawMessage{"extra": json.RawMessage(`"/srv/new"`)}}, directory.Human("admin"))
 	if statusOf(err) != 409 || !strings.Contains(err.Error(), "uses shared folder media") {
 		t.Fatalf("racing save = %v", err)
 	}
@@ -898,11 +899,11 @@ func TestUndo(t *testing.T) {
 	}
 	at := fo.LastApply.At.UTC().Format("2006-01-02 15:04 UTC")
 	if !strings.Contains(text, "fix of "+at+": snapshot "+snapshotTS(applySnap)+" recorded 12,723 entries") ||
-		!strings.Contains(text, "Immich (Library) may lose access") || !strings.Contains(text, "Immich is stopped for") {
+		!strings.Contains(text, "Immich (\"Library\") may lose access") || !strings.Contains(text, "Immich is stopped for") {
 		t.Errorf("lines:\n%s", text)
 	}
 	n0 := len(d.Events())
-	if _, err := f.h.StartUndo("media", plan.Hash, "admin"); err != nil {
+	if _, err := f.h.StartUndo("media", plan.Hash, directory.Human("admin")); err != nil {
 		t.Fatal(err)
 	}
 	rec = waitFolderOp(t, f, "media")
@@ -1112,7 +1113,7 @@ var libraryReq = AssignRequest{Uses: []FolderUse{{Instance: "immich", Key: "libr
 func TestPreviewRacesFolderDelete(t *testing.T) {
 	f, d, _ := assignFixture(t)
 	d.onScan = func(string) {
-		if err := f.h.DeleteFolder("media", "admin"); err != nil {
+		if err := f.h.DeleteFolder("media", directory.Human("admin")); err != nil {
 			t.Errorf("delete: %v", err)
 		}
 	}
@@ -1218,7 +1219,7 @@ func TestMarkerWriteFailures(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.h.StartUndo("media", plan.Hash, "admin"); err != nil {
+	if _, err := f.h.StartUndo("media", plan.Hash, directory.Human("admin")); err != nil {
 		t.Fatal(err)
 	}
 	rec = waitFolderOp(t, f, "media")
@@ -1250,7 +1251,7 @@ func TestApplyTemplateChanged(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeFile(t, filepath.Join(f.src, "immich", "notes.txt"), "changed\n")
-	if _, err := f.h.StartAssign("media", libraryReq, plan.Hash, "admin"); statusOf(err) != 409 || !strings.Contains(err.Error(), "setup changed") {
+	if _, err := f.h.StartAssign("media", libraryReq, plan.Hash, directory.Human("admin")); statusOf(err) != 409 || !strings.Contains(err.Error(), "setup changed") {
 		t.Fatalf("apply = %v", err)
 	}
 }
@@ -1298,7 +1299,7 @@ func TestUndoVerifyFindsLeftovers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.h.StartUndo("media", plan.Hash, "admin"); err != nil {
+	if _, err := f.h.StartUndo("media", plan.Hash, directory.Human("admin")); err != nil {
 		t.Fatal(err)
 	}
 	rec := waitFolderOp(t, f, "media")
@@ -1320,10 +1321,41 @@ func TestFailureKeepsRedaction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fb := &failCtx{id: "media", actor: "admin", m: &applyMarker{}, secrets: f.h.opSecrets([]string{"immich"})}
+	secrets, unread := f.h.opSecrets([]string{"immich"})
+	if unread != nil {
+		t.Fatal(unread)
+	}
+	fb := &failCtx{id: "media", actor: directory.Human("admin"), m: &applyMarker{}, secrets: secrets}
 	got := f.h.failBeforeState(fb, errors.New("boom"), "", false)
 	if !slices.Contains(secretsOf(got), "s3cr3t-token-value") {
 		t.Errorf("redaction set lost: %v", secretsOf(got))
+	}
+}
+
+// TestFailureHiddenWhenSecretsUnreadable (T9 fix round 1): an affected
+// instance whose redaction set can't be read whole (here: an unreadable
+// model provider store) hides the op's failure message, keeping its
+// status; a stop failure of that instance is hidden too.
+func TestFailureHiddenWhenSecretsUnreadable(t *testing.T) {
+	f, _, _ := assignFixture(t)
+	enable(t, f, "immich")
+	writeFile(t, f.h.providerSecretsPath(), "not json")
+	secrets, unread := f.h.opSecrets([]string{"immich"})
+	if unread == nil {
+		t.Fatal("an unreadable provider store must be reported")
+	}
+	fb := &failCtx{id: "media", actor: directory.Human("admin"), m: &applyMarker{}, secrets: secrets, unread: unread}
+	got := f.h.failBeforeState(fb, statusErr(409, "boom s3cr3t-token-value"), "", false)
+	if msg := got.Error(); strings.Contains(msg, "boom") || !strings.Contains(msg, "the message is hidden") {
+		t.Errorf("message = %q, want it hidden", msg)
+	}
+	if statusOf(got) != 409 {
+		t.Errorf("status = %d, want 409 kept", statusOf(got))
+	}
+	f.runner.downErr = errors.New("down failed s3cr3t-token-value")
+	_, err := f.h.stopAll([]string{"immich"})
+	if err == nil || strings.Contains(err.Error(), "s3cr3t") || !strings.Contains(err.Error(), "the message is hidden") {
+		t.Errorf("stopAll = %v, want the message hidden", err)
 	}
 }
 
@@ -1339,19 +1371,20 @@ func TestFolderAuditRedacted(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Through the error's redaction set (a disk-changed failure).
-	fb := &failCtx{id: "media", actor: "admin", m: &applyMarker{}, secrets: f.h.opSecrets([]string{"immich"})}
+	secrets, _ := f.h.opSecrets([]string{"immich"})
+	fb := &failCtx{id: "media", actor: directory.Human("admin"), m: &applyMarker{}, secrets: secrets}
 	f.h.failBeforeState(fb, errors.New("compose up: API_TOKEN=s3cr3t-token-value rejected"), "", true)
 	e := audit.last()
 	if e.Action != "folder.apply" || e.Error == "" || strings.Contains(e.Error, "s3cr3t-token-value") || !strings.Contains(e.Error, "[redacted]") {
 		t.Errorf("folder.apply audit = %+v", e)
 	}
 	// Through the affected instances, the error carrying no set.
-	f.h.auditFolder("admin", "folder.assign", "media", "", errors.New("start immich: s3cr3t-token-value"), "immich")
+	f.h.auditFolder(directory.Human("admin"), "folder.assign", "media", "", errors.New("start immich: s3cr3t-token-value"), "immich")
 	if e := audit.last(); strings.Contains(e.Error, "s3cr3t-token-value") || !strings.Contains(e.Error, "[redacted]") {
 		t.Errorf("folder.assign audit = %+v", e)
 	}
 	// Clipped.
-	f.h.auditFolder("admin", "folder.assign", "media", "", errors.New(strings.Repeat("x", 5000)))
+	f.h.auditFolder(directory.Human("admin"), "folder.assign", "media", "", errors.New(strings.Repeat("x", 5000)))
 	if e := audit.last(); len([]rune(e.Error)) > 601 {
 		t.Errorf("unclipped audit error: %d runes", len([]rune(e.Error)))
 	}
@@ -1424,21 +1457,21 @@ func TestRecheckFolderIdentity(t *testing.T) {
 	if fo, _ := storedFolder(f, "media"); fo.Dev != 2049 {
 		t.Fatal("the preview stored the identity")
 	}
-	if _, err := f.h.ApplyRecheck(ctx, "media", strings.Repeat("0", 64), false, "admin"); statusOf(err) != 409 {
+	if _, err := f.h.ApplyRecheck(ctx, "media", strings.Repeat("0", 64), false, directory.Human("admin")); statusOf(err) != 409 {
 		t.Errorf("stale hash = %v", err)
 	}
 	// Busy: the folder's lock, or a user's app lock.
 	unlock, _ := f.h.folderLock("media")
-	if _, err := f.h.ApplyRecheck(ctx, "media", chk.Hash, false, "admin"); statusOf(err) != 409 {
+	if _, err := f.h.ApplyRecheck(ctx, "media", chk.Hash, false, directory.Human("admin")); statusOf(err) != 409 {
 		t.Errorf("folder busy = %v", err)
 	}
 	unlock()
 	unlockApp, _ := f.h.lockApp("immich")
-	if _, err := f.h.ApplyRecheck(ctx, "media", chk.Hash, false, "admin"); statusOf(err) != 409 {
+	if _, err := f.h.ApplyRecheck(ctx, "media", chk.Hash, false, directory.Human("admin")); statusOf(err) != 409 {
 		t.Errorf("app busy = %v", err)
 	}
 	unlockApp()
-	v, err := f.h.ApplyRecheck(ctx, "media", chk.Hash, false, "admin")
+	v, err := f.h.ApplyRecheck(ctx, "media", chk.Hash, false, directory.Human("admin"))
 	if err != nil || v == nil || v.ID != "media" {
 		t.Fatalf("apply = %+v %v", v, err)
 	}
@@ -1459,7 +1492,7 @@ func TestRecheckFolderIdentity(t *testing.T) {
 	d.mu.Lock()
 	d.paths["/srv/media"].dev = 2051
 	d.mu.Unlock()
-	if _, err := f.h.ApplyRecheck(ctx, "media", chk.Hash, false, "admin"); statusOf(err) != 409 {
+	if _, err := f.h.ApplyRecheck(ctx, "media", chk.Hash, false, directory.Human("admin")); statusOf(err) != 409 {
 		t.Errorf("changed since the preview = %v", err)
 	}
 	if _, err := f.h.PreviewRecheck(ctx, "nope"); statusOf(err) != 404 {
@@ -1552,7 +1585,7 @@ func TestUndoAfterDeviceOnlyRecheck(t *testing.T) {
 	if err != nil || chk.DifferentDirectory {
 		t.Fatalf("preview = %+v %v", chk, err)
 	}
-	if _, err := f.h.ApplyRecheck(ctx, "media", chk.Hash, false, "admin"); err != nil {
+	if _, err := f.h.ApplyRecheck(ctx, "media", chk.Hash, false, directory.Human("admin")); err != nil {
 		t.Fatal(err)
 	}
 	fo, _ := storedFolder(f, "media")
@@ -1571,7 +1604,7 @@ func TestUndoAfterDeviceOnlyRecheck(t *testing.T) {
 	if v, _ := argValue(d.Argv("restore"), "expect-dev"); v != "2050" {
 		t.Errorf("dry run --expect-dev = %q", v)
 	}
-	if _, err := f.h.StartUndo("media", plan.Hash, "admin"); err != nil {
+	if _, err := f.h.StartUndo("media", plan.Hash, directory.Human("admin")); err != nil {
 		t.Fatal(err)
 	}
 	if rec := waitFolderOp(t, f, "media"); !rec.OK {
@@ -1610,13 +1643,13 @@ func TestRecheckDifferentDirectory(t *testing.T) {
 	if !strings.Contains(text, swappedText) || !strings.Contains(text, "Undo last fix") {
 		t.Errorf("lines:\n%s", text)
 	}
-	if _, err := f.h.ApplyRecheck(ctx, "media", chk.Hash, false, "admin"); statusOf(err) != 400 || !strings.Contains(err.Error(), "confirm") {
+	if _, err := f.h.ApplyRecheck(ctx, "media", chk.Hash, false, directory.Human("admin")); statusOf(err) != 400 || !strings.Contains(err.Error(), "confirm") {
 		t.Errorf("apply without the second confirmation = %v", err)
 	}
 	if fo, _ := storedFolder(f, "media"); fo.Ino == 777 {
 		t.Fatal("stored without the confirmation")
 	}
-	if _, err := f.h.ApplyRecheck(ctx, "media", chk.Hash, true, "admin"); err != nil {
+	if _, err := f.h.ApplyRecheck(ctx, "media", chk.Hash, true, directory.Human("admin")); err != nil {
 		t.Fatal(err)
 	}
 	if fo, _ := storedFolder(f, "media"); fo.Ino != 777 || fo.LastApply != nil {
@@ -1638,7 +1671,7 @@ func TestFolderAuditOverlappingSecrets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.h.auditFolder("admin", "folder.assign", "media", "", withSecrets(errors.New("PASSWORD=hunter2-long-secret"), []string{"hunter2"}), "immich")
+	f.h.auditFolder(directory.Human("admin"), "folder.assign", "media", "", withSecrets(errors.New("PASSWORD=hunter2-long-secret"), []string{"hunter2"}), "immich")
 	if e := audit.last(); e.Error != "PASSWORD=[redacted]" {
 		t.Errorf("audit error = %q", e.Error)
 	}
@@ -1674,10 +1707,10 @@ func TestRecheckDeviceAndMountRootIsDifferentDirectory(t *testing.T) {
 	if strings.Contains(text, "same device number") || !strings.Contains(text, swappedText) || !strings.Contains(text, "mount root") {
 		t.Errorf("lines:\n%s", text)
 	}
-	if _, err := f.h.ApplyRecheck(ctx, "media", chk.Hash, false, "admin"); statusOf(err) != 400 {
+	if _, err := f.h.ApplyRecheck(ctx, "media", chk.Hash, false, directory.Human("admin")); statusOf(err) != 400 {
 		t.Errorf("without the confirm = %v", err)
 	}
-	if _, err := f.h.ApplyRecheck(ctx, "media", chk.Hash, true, "admin"); err != nil {
+	if _, err := f.h.ApplyRecheck(ctx, "media", chk.Hash, true, directory.Human("admin")); err != nil {
 		t.Fatal(err)
 	}
 	if fo, _ := storedFolder(f, "media"); fo.LastApply != nil || fo.MountRoot != "/@other" {
@@ -1766,10 +1799,10 @@ func TestUnrecoveredMarker(t *testing.T) {
 	if err := f.h.writeMarker("media", m); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.h.StartAssign("media", libraryReq, "x", "admin"); statusOf(err) != 409 || !strings.Contains(err.Error(), "hasn't been recovered") {
+	if _, err := f.h.StartAssign("media", libraryReq, "x", directory.Human("admin")); statusOf(err) != 409 || !strings.Contains(err.Error(), "hasn't been recovered") {
 		t.Errorf("assign = %v", err)
 	}
-	if _, err := f.h.StartUndo("media", plan.Hash, "admin"); statusOf(err) != 409 || !strings.Contains(err.Error(), "hasn't been recovered") {
+	if _, err := f.h.StartUndo("media", plan.Hash, directory.Human("admin")); statusOf(err) != 409 || !strings.Contains(err.Error(), "hasn't been recovered") {
 		t.Errorf("undo = %v", err)
 	}
 	unlock, err := f.h.lockApp("immich")

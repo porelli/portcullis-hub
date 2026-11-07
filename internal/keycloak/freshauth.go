@@ -8,7 +8,6 @@ import (
 	"maps"
 	"net/http"
 	"net/url"
-	"slices"
 
 	"github.com/Nerzal/gocloak/v14"
 
@@ -55,21 +54,32 @@ func freshAuthMapper() gocloak.ProtocolMapperRepresentation {
 	}
 }
 
-// checkFreshAuthURIs: redirectURI is https://<host>/ exactly and webOrigin
-// https://<the same host>.
-func checkFreshAuthURIs(redirectURI, webOrigin string) error {
-	u, err := url.Parse(redirectURI)
-	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.Path != "/" || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" {
-		return fmt.Errorf("fresh-auth client: redirect URI %q must be https://<host>/", redirectURI)
+// checkFreshAuthURIs: redirectURIs[i] is https://<host>/ exactly and
+// webOrigins[i] https://<the same host>; at least one pair, the same
+// number of each, no host twice (contract §8: the people and hub hosts).
+func checkFreshAuthURIs(redirectURIs, webOrigins []string) error {
+	if len(redirectURIs) == 0 || len(redirectURIs) != len(webOrigins) {
+		return fmt.Errorf("fresh-auth client: want one web origin per redirect URI, got %d and %d", len(redirectURIs), len(webOrigins))
 	}
-	if webOrigin != "https://"+u.Host {
-		return fmt.Errorf("fresh-auth client: web origin %q must be https://%s", webOrigin, u.Host)
+	seen := map[string]bool{}
+	for i, redirectURI := range redirectURIs {
+		u, err := url.Parse(redirectURI)
+		if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.Path != "/" || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" {
+			return fmt.Errorf("fresh-auth client: redirect URI %q must be https://<host>/", redirectURI)
+		}
+		if webOrigins[i] != "https://"+u.Host {
+			return fmt.Errorf("fresh-auth client: web origin %q must be https://%s", webOrigins[i], u.Host)
+		}
+		if seen[u.Host] {
+			return fmt.Errorf("fresh-auth client: host %s listed twice", u.Host)
+		}
+		seen[u.Host] = true
 	}
 	return nil
 }
 
 // withFreshAuthSettings sets every asserted setting on rep.
-func withFreshAuthSettings(rep *gocloak.Client, redirectURI, webOrigin string) {
+func withFreshAuthSettings(rep *gocloak.Client, redirectURIs, webOrigins []string) {
 	rep.Name = gocloak.StringP("Portcullis fresh sign-in")
 	rep.Enabled = gocloak.BoolP(true)
 	rep.Protocol = gocloak.StringP(oidcProtocol)
@@ -83,8 +93,8 @@ func withFreshAuthSettings(rep *gocloak.Client, redirectURI, webOrigin string) {
 	rep.AuthorizationServicesEnabled = gocloak.BoolP(false)
 	rep.FullScopeAllowed = gocloak.BoolP(false)
 	rep.Secret = nil
-	rep.RedirectURIs = []string{redirectURI}
-	rep.WebOrigins = []string{webOrigin}
+	rep.RedirectURIs = append([]string{}, redirectURIs...)
+	rep.WebOrigins = append([]string{}, webOrigins...)
 	rep.RootURL, rep.BaseURL, rep.AdminURL = nil, nil, nil
 	if rep.Attributes == nil {
 		rep.Attributes = map[string]string{}
@@ -99,14 +109,16 @@ func withFreshAuthSettings(rep *gocloak.Client, redirectURI, webOrigin string) {
 // freshauth.ClientID (contract §8): owner-tagged; public, standard flow
 // only, PKCE S256; no direct grants, implicit flow, service accounts,
 // device or CIBA grant, token exchange or refresh tokens; redirect URIs
-// exactly [redirectURI], web origins exactly [webOrigin]; default scopes
+// exactly redirectURIs, web origins exactly webOrigins (the Hub passes
+// [https://people.<d>/, https://hub.<d>/] and their origins: one
+// verifier per listener, contract §8 / G11); default scopes
 // exactly FreshAuthScopes, no optional scopes; exactly one protocol mapper
 // (FreshAuthUsernameMapper); no flow overrides. An existing client of that
 // id without the tag (or tagged by anyone else) is a *ConflictError and
 // left alone: fresh auth then fails closed. A realm without one of the
 // scopes is an error (without acr there is no amr: every proof refused).
-func (c *Client) EnsureFreshAuthClient(ctx context.Context, redirectURI, webOrigin string) error {
-	if err := checkFreshAuthURIs(redirectURI, webOrigin); err != nil {
+func (c *Client) EnsureFreshAuthClient(ctx context.Context, redirectURIs, webOrigins []string) error {
+	if err := checkFreshAuthURIs(redirectURIs, webOrigins); err != nil {
 		return err
 	}
 	tok, err := c.token(ctx)
@@ -119,7 +131,7 @@ func (c *Client) EnsureFreshAuthClient(ctx context.Context, redirectURI, webOrig
 	if errors.Is(err, ErrClientNotFound) {
 		rep := gocloak.Client{ClientID: gocloak.StringP(id), DefaultClientScopes: append([]string{}, FreshAuthScopes...),
 			ProtocolMappers: []gocloak.ProtocolMapperRepresentation{freshAuthMapper()}}
-		withFreshAuthSettings(&rep, redirectURI, webOrigin)
+		withFreshAuthSettings(&rep, redirectURIs, webOrigins)
 		rep.AuthenticationFlowBindingOverrides = nil
 		_, err = g.CreateClient(ctx, tok, Realm, rep)
 		if err != nil && statusCode(err) != http.StatusConflict {
@@ -138,7 +150,7 @@ func (c *Client) EnsureFreshAuthClient(ctx context.Context, redirectURI, webOrig
 	if owner := existing.Attributes[OwnerAttr]; owner != id {
 		return &ConflictError{ClientID: id, TemplateID: id, Owner: owner}
 	}
-	withFreshAuthSettings(existing, redirectURI, webOrigin)
+	withFreshAuthSettings(existing, redirectURIs, webOrigins)
 	existing.ProtocolMappers = nil // the sub-resource below does those
 	if err := c.putClient(ctx, tok, existing); err != nil {
 		return err
@@ -146,90 +158,29 @@ func (c *Client) EnsureFreshAuthClient(ctx context.Context, redirectURI, webOrig
 	if err := c.ensureFreshAuthScopes(ctx, tok, existing); err != nil {
 		return err
 	}
-	return c.ensureFreshAuthMapper(ctx, tok, existing)
+	// Any other client mapper (a hardcoded amr claim would forge a
+	// proof) is deleted.
+	return c.ensureOnlyClientMapper(ctx, tok, existing, freshAuthMapper())
 }
 
 // ensureFreshAuthScopes makes the client's default scopes exactly
-// FreshAuthScopes and its optional scopes none (attach first, then detach).
+// FreshAuthScopes and its optional scopes none.
 func (c *Client) ensureFreshAuthScopes(ctx context.Context, tok string, cl *gocloak.Client) error {
-	g := c.api()
-	realmScopes, err := g.GetClientScopes(ctx, tok, Realm)
-	if err != nil {
-		return opErr("list client scopes", err)
-	}
-	ids := map[string]string{}
-	for _, sc := range realmScopes {
-		if sc != nil {
-			ids[str(sc.Name)] = str(sc.ID)
-		}
-	}
-	cid, name := url.PathEscape(str(cl.ID)), str(cl.ClientID)
-	for _, s := range FreshAuthScopes {
-		if ids[s] == "" {
-			return fmt.Errorf("client %s: the Keycloak realm has no %q client scope (run `portcullis keycloak configure`); fresh auth refuses every proof until it exists", name, s)
-		}
-	}
-	// Optional scopes go first: Keycloak refuses a scope that is both.
-	for _, s := range cl.OptionalClientScopes {
-		if ids[s] == "" {
-			continue
-		}
-		if err := g.RemoveOptionalScopeFromClient(ctx, tok, Realm, cid, url.PathEscape(ids[s])); err != nil {
-			return opErr("detach optional scope "+s+" from client "+name, err)
-		}
-	}
-	for _, s := range FreshAuthScopes {
-		if slices.Contains(cl.DefaultClientScopes, s) {
-			continue
-		}
-		if err := g.AddDefaultScopeToClient(ctx, tok, Realm, cid, url.PathEscape(ids[s])); err != nil {
-			return opErr("attach scope "+s+" to client "+name, err)
-		}
-	}
-	for _, s := range cl.DefaultClientScopes {
-		if slices.Contains(FreshAuthScopes, s) || ids[s] == "" {
-			continue
-		}
-		if err := g.RemoveDefaultScopeFromClient(ctx, tok, Realm, cid, url.PathEscape(ids[s])); err != nil {
-			return opErr("detach default scope "+s+" from client "+name, err)
-		}
-	}
-	return nil
-}
-
-// ensureFreshAuthMapper leaves exactly the username mapper on the client:
-// any other client mapper (a hardcoded amr claim would forge a proof) is
-// deleted.
-func (c *Client) ensureFreshAuthMapper(ctx context.Context, tok string, cl *gocloak.Client) error {
-	g := c.api()
-	cid := url.PathEscape(str(cl.ID))
-	have, err := c.clientMappers(ctx, tok, cl)
+	ids, err := c.scopeIDs(ctx, tok)
 	if err != nil {
 		return err
 	}
-	want := freshAuthMapper()
-	kept := false
-	for _, m := range have {
-		if !kept && str(m.Name) == FreshAuthUsernameMapper && sameFreshMapper(m, want) {
-			kept = true
-			continue
-		}
-		if err := g.DeleteClientProtocolMapper(ctx, tok, Realm, cid, url.PathEscape(str(m.ID))); err != nil && statusCode(err) != http.StatusNotFound {
-			return opErr("delete protocol mapper "+str(m.Name)+" of client "+str(cl.ClientID), err)
+	for _, s := range FreshAuthScopes {
+		if ids[s] == "" {
+			return fmt.Errorf("client %s: the Keycloak realm has no %q client scope (run `portcullis keycloak configure`); fresh auth refuses every proof until it exists", str(cl.ClientID), s)
 		}
 	}
-	if kept {
-		return nil
-	}
-	if _, err := g.CreateClientProtocolMapper(ctx, tok, Realm, cid, want); err != nil {
-		return opErr("create protocol mapper "+FreshAuthUsernameMapper, err)
-	}
-	return nil
+	return c.exactScopes(ctx, tok, cl, ids, FreshAuthScopes, nil)
 }
 
-// sameFreshMapper: the same type and exactly want's config values (keys
+// sameMapper: the same type and exactly want's config values (keys
 // Keycloak adds itself are ignored).
-func sameFreshMapper(have, want gocloak.ProtocolMapperRepresentation) bool {
+func sameMapper(have, want gocloak.ProtocolMapperRepresentation) bool {
 	if str(have.ProtocolMapper) != str(want.ProtocolMapper) || str(have.Protocol) != str(want.Protocol) {
 		return false
 	}
