@@ -22,6 +22,7 @@ import (
 	"filippo.io/age/armor"
 
 	"github.com/portcullis/hub/internal/aigate"
+	"github.com/portcullis/hub/internal/compose"
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/hub"
@@ -160,6 +161,8 @@ type mcpEnvOpts struct {
 	extra map[string][2]string
 	wrap  func(hub.Engine) hub.Engine
 	cfg   func(*hub.Config) // more configuration (after the MCP's)
+	// runner: the compose runner (nil: nopRunner).
+	runner compose.Runner
 }
 
 func newMCPEnvOpts(t *testing.T, o mcpEnvOpts) *mcpEnv {
@@ -189,7 +192,8 @@ func newMCPEnvOpts(t *testing.T, o mcpEnvOpts) *mcpEnv {
 		extra[k] = v
 	}
 	e := newInstEnvOpts(t, root, instEnvOpts{
-		extra: extra,
+		runner: o.runner,
+		extra:  extra,
 		engine: func(f *fakeEngine) hub.Engine {
 			eng = &aiHookEngine{fakeEngine: f}
 			if o.wrap != nil {

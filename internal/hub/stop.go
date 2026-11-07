@@ -624,6 +624,15 @@ func (h *Hub) undoRestart(id string, p *Progress) error {
 	return runUndo(p, rec, steps)
 }
 
+// BeforeEnabled and BeforeCompanion are the op record's Before keys a
+// Stop's caller reads to know what the undo turns back on (the Portcullis
+// MCP's stop_op class): a delete's "enabled" ("true" / "false") and an
+// AI switch's "companion:<name>" entries ("on <mode>" / "off <mode>").
+const (
+	BeforeEnabled   = beforeEnabled
+	BeforeCompanion = aiBeforeKey
+)
+
 // aiBeforeKey prefixes an AI switch's Before entries: one per companion
 // it changes, "on <mode>" / "off <mode>" (aiBeforeValue).
 const aiBeforeKey = "companion:"

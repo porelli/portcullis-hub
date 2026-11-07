@@ -21,6 +21,7 @@ import (
 
 	cerrdefs "github.com/containerd/errdefs"
 
+	"github.com/portcullis/hub/internal/compose"
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/hub"
@@ -421,6 +422,7 @@ type instEnvOpts struct {
 	engine func(*fakeEngine) hub.Engine
 	cfg    func(*hub.Config)
 	seed   func(*state.AppState)
+	runner compose.Runner // nil: nopRunner
 }
 
 func newInstEnvOpts(t *testing.T, root string, o instEnvOpts) *instEnv {
@@ -453,7 +455,11 @@ func newInstEnvOpts(t *testing.T, root string, o instEnvOpts) *instEnv {
 	if o.cfg != nil {
 		o.cfg(&cfg)
 	}
-	h, err := hub.New(cfg, nopRunner{}, he, nil)
+	var runner compose.Runner = nopRunner{}
+	if o.runner != nil {
+		runner = o.runner
+	}
+	h, err := hub.New(cfg, runner, he, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

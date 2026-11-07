@@ -108,6 +108,8 @@ var accessWidening = map[string]string{
 	"folder_apply":         "D unless the plan only removes uses and leaves the disk alone (AssignPlan.WidensAccess)",
 	"folder_recheck_apply": "D when it accepts a different directory (confirm_different_directory)",
 	"doctor_mute":          "D for a Problem, an ai_credentials_revoking finding or one the report doesn't have (fix round 1 ruling)",
+	// Operation progress (Task 7 security review).
+	"stop_op": "D when the undo turns something back on: a disable's (enable_instance's class), a delete's of an enabled instance, an AI switch-off's (set_ai_support on)",
 }
 
 // widensAlways are the D tools whose every call widens access (G37
@@ -221,7 +223,9 @@ func TestToolParity(t *testing.T) {
 		"create_instance", "remove_member", "update_field", "add_member", "set_member_expiry", "set_group_rule", "convert_group", "add_exception",
 		"remove_exception", "set_details", "import_apply",
 		// Task 20 (§15.10, G15, G45).
-		"delete_folder", "folder_undo_apply", "doctor_apply_fix", "folder_apply", "folder_recheck_apply", "doctor_mute"} {
+		"delete_folder", "folder_undo_apply", "doctor_apply_fix", "folder_apply", "folder_recheck_apply", "doctor_mute",
+		// Task 7 security review.
+		"stop_op"} {
 		if byName[n].Class != ClassDestructive {
 			t.Errorf("tool %s: class %q, want D", n, byName[n].Class)
 		}
@@ -240,7 +244,7 @@ func TestToolParity(t *testing.T) {
 		"doctor_scan", "doctor_unmute", "create_folder", "update_folder",
 		// Operation progress (§15.10): a Stop only reverses what the
 		// running operation did; the long operations' tools stay W / per call.
-		"stop_op", "disable_instance", "restart_instance"} {
+		"disable_instance", "restart_instance"} {
 		if byName[n].Class != ClassWrite {
 			t.Errorf("tool %s: class %q, want W", n, byName[n].Class)
 		}

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/portcullis/hub/internal/compose"
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/hub"
 )
@@ -357,5 +358,176 @@ func TestAISwitchRouteAnswers202(t *testing.T) {
 	opDone(t, e.hub, "root", "POST", "/api/templates/disable", `{"id":"aiapp"}`)
 	if code, b := e.do(t, "root", "PUT", "/api/instances/aiapp/ai", `{"companions":{"tok":{"enabled":false}}}`); code != 200 || !strings.Contains(b, `"companions"`) {
 		t.Errorf("disabled instance = %d %s", code, b)
+	}
+}
+
+// blockingDown is the compose runner whose Down waits while armed (a
+// disable held on its stop step).
+type blockingDown struct {
+	nopRunner
+	mu      sync.Mutex
+	gate    chan struct{}
+	reached chan struct{}
+}
+
+func (b *blockingDown) arm() {
+	b.mu.Lock()
+	b.gate, b.reached = make(chan struct{}), make(chan struct{}, 1)
+	b.mu.Unlock()
+}
+
+func (b *blockingDown) release() {
+	b.mu.Lock()
+	if b.gate != nil {
+		close(b.gate)
+		b.gate = nil
+	}
+	b.mu.Unlock()
+}
+
+func (b *blockingDown) Down(ctx context.Context, p compose.Project) error {
+	b.mu.Lock()
+	gate, reached := b.gate, b.reached
+	b.mu.Unlock()
+	if gate != nil {
+		select {
+		case reached <- struct{}{}:
+		default:
+		}
+		<-gate
+	}
+	return nil
+}
+
+// stopAsked calls stop_op as root (text form) with id and opID and wants
+// a confirmation: it is declined (which blocks those arguments until it
+// expires), and the operation keeps running, not stopping.
+func stopAsked(t *testing.T, e *toolEnv, id, opID string) {
+	t.Helper()
+	txt, isErr := resultText(e.call(t, "/mcp/admin", "root", "2025-11-25", "stop_op", map[string]any{"id": id, "op_id": opID}, nil))
+	m := confirmTextRe.FindStringSubmatch(txt)
+	if m == nil {
+		t.Fatalf("stop_op without a confirmation = %s %v", txt, isErr)
+	}
+	e.decide(t, m[1], "", false)
+	if r := e.s.Hub.LastOp(id); r == nil || !r.Running || r.Stopping {
+		t.Fatalf("a declined stop_op stopped it: %+v", r)
+	}
+}
+
+// stop_op's class follows what the undo turns back on (Task 7 security
+// review): stopping a disable (the app back on) or an AI switch-off (the
+// companion back on) needs the confirmation enable_instance /
+// set_ai_support would; declined, nothing stops; confirmed, it stops. An
+// admin's HTTP Stop is unaffected. op_id binds the call.
+func TestStopOpClassFollowsTheUndo(t *testing.T) {
+	br := &blockingDown{}
+	e := newToolEnvWith(t, mcpEnvOpts{runner: br})
+	defer br.release()
+	waitDown := func() {
+		t.Helper()
+		select {
+		case <-br.reached:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the disable never reached compose down")
+		}
+	}
+
+	// A disable: its undo enables aiapp again, whose access group has
+	// members (enable_instance would be D).
+	br.arm()
+	txt, isErr, conf := e.tool(t, "disable_instance", map[string]any{"id": "aiapp"})
+	var op OpStarted
+	if isErr || conf != "" || json.Unmarshal([]byte(txt), &op) != nil || op.Op != "disable" {
+		t.Fatalf("disable_instance = %s %v %q", txt, isErr, conf)
+	}
+	waitDown()
+	stopAsked(t, e, "aiapp", op.OpID)
+	// An op_id that isn't the running one: refused, nothing stopped.
+	if txt, isErr, _ = e.tool(t, "stop_op", map[string]any{"id": "aiapp", "op_id": "0123456789abcdef"}); !isErr || !strings.HasPrefix(txt, "409: ") || !strings.Contains(txt, "changed") {
+		t.Errorf("stop_op of another op = %s %v", txt, isErr)
+	}
+	if r := e.s.Hub.LastOp("aiapp"); !r.Running || r.Stopping {
+		t.Fatalf("a refused stop_op stopped it: %+v", r)
+	}
+	txt, isErr, conf = e.tool(t, "stop_op", map[string]any{"id": "aiapp"})
+	var rec hub.OpRecord
+	if isErr || conf == "" || json.Unmarshal([]byte(txt), &rec) != nil || !rec.Stopping || rec.OpID != op.OpID {
+		t.Fatalf("confirmed stop_op = %s %v %q", txt, isErr, conf)
+	}
+	br.release()
+	waitIdle(t, e.s.Hub, "aiapp")
+	if r := e.s.Hub.LastOp("aiapp"); r.OK || r.Running || r.StoppedBy != "root" || !e.s.Hub.IsEnabled("aiapp") {
+		t.Fatalf("stopped disable = %+v enabled %v", r, e.s.Hub.IsEnabled("aiapp"))
+	}
+	var stop directory.AuditEntry
+	for _, a := range readAudit(t, e.audit) {
+		if a.Action == "disable.stop" && a.Result == "ok" {
+			stop = a
+		}
+	}
+	if stop.Via != "ai" || !strings.HasSuffix(stop.Detail, "confirmation "+conf) {
+		t.Errorf("disable.stop audit = %+v, want via ai with confirmation %s", stop, conf)
+	}
+
+	// An AI switch-off (W): held on its revoke_all hook; its undo
+	// switches tok back on in read_write (set_ai_support on: D).
+	gate := make(chan struct{})
+	e.eng.mu.Lock()
+	e.eng.gate, e.eng.calls = gate, nil
+	e.eng.mu.Unlock()
+	released := false
+	defer func() {
+		if !released {
+			close(gate)
+		}
+	}()
+	txt, isErr, conf = e.tool(t, "set_ai_support", map[string]any{"id": "aiapp", "companion": "tok", "enabled": false})
+	if isErr || conf != "" || json.Unmarshal([]byte(txt), &op) != nil || op.Op != "ai" {
+		t.Fatalf("set_ai_support off = %s %v %q", txt, isErr, conf)
+	}
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		e.eng.mu.Lock()
+		n := len(e.eng.calls)
+		e.eng.mu.Unlock()
+		if n > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the switch-off never ran its revoke hook")
+		}
+	}
+	stopAsked(t, e, "aiapp", op.OpID)
+	txt, isErr, conf = e.tool(t, "stop_op", map[string]any{"id": "aiapp"})
+	rec = hub.OpRecord{}
+	if isErr || conf == "" || json.Unmarshal([]byte(txt), &rec) != nil || !rec.Stopping || rec.Op != "ai" {
+		t.Fatalf("confirmed stop_op of the switch-off = %s %v %q", txt, isErr, conf)
+	}
+	close(gate)
+	released = true
+	waitIdle(t, e.s.Hub, "aiapp")
+	v, err := e.s.Hub.InstanceAI("aiapp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range v.Companions {
+		if c.Name == "tok" && (!c.Enabled || c.Mode != "read_write") {
+			t.Errorf("tok after the stopped switch-off = %+v", c)
+		}
+	}
+
+	// The admin's HTTP Stop of a disable: no confirmation, 202.
+	br.arm()
+	if code, b := e.do(t, "root", "POST", "/api/templates/disable", `{"id":"aiapp"}`); code != 202 {
+		t.Fatalf("disable = %d %s", code, b)
+	}
+	waitDown()
+	if code, b := e.do(t, "root", "POST", "/api/instances/aiapp/op/stop", `{}`); code != 202 || !strings.Contains(b, `"stopping":true`) {
+		t.Errorf("HTTP stop = %d %s", code, b)
+	}
+	br.release()
+	waitIdle(t, e.s.Hub, "aiapp")
+	if !e.s.Hub.IsEnabled("aiapp") {
+		t.Error("the stopped disable left aiapp disabled")
 	}
 }

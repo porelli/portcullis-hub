@@ -876,6 +876,10 @@ type callMemo struct {
 	docOnce sync.Once
 	doc     *doctor.Report
 	docErr  error
+	// stop_op: the op id of the record its class judged ("" none), so
+	// Run refuses another operation (stopStillAsClassified).
+	stopOnce sync.Once
+	stopOpID string
 }
 
 func withCallMemo(ctx context.Context, c *directory.Caller) context.Context {
