@@ -403,7 +403,7 @@ func TestDeleteRemovesEverything(t *testing.T) {
 		t.Errorf("groups = %s", got)
 	}
 	// Files (generated secrets included), ops record, state.
-	for _, p := range []string{f.h.envPath("chat-b"), f.h.overridePath("chat-b"), f.h.userOverridePath("chat-b"), f.h.opPath("chat-b")} {
+	for _, p := range []string{f.h.envPath("chat-b"), f.h.overridePath("chat-b"), f.h.userOverridePath("chat-b")} {
 		if _, err := os.Stat(p); !errors.Is(err, os.ErrNotExist) {
 			t.Errorf("%s still there", p)
 		}
@@ -413,8 +413,13 @@ func TestDeleteRemovesEverything(t *testing.T) {
 	_, b := st.Settings["chat-b"]
 	_, c := st.PublicTokens["chat-b"]
 	_, d := st.Published["chat-b"]
-	if a || b || c || d || st.IsEnabled("chat-b") || f.h.LastOp("chat-b") != nil {
+	if a || b || c || d || st.IsEnabled("chat-b") {
 		t.Errorf("state left: %+v", st)
+	}
+	// The delete's own record is kept (contract §11.7: a deleted
+	// instance's record outlives it; DeleteInstance runs the operation).
+	if r := f.h.LastOp("chat-b"); r == nil || r.Op != OpDelete || !r.OK || r.Running {
+		t.Errorf("op record = %+v", r)
 	}
 	for _, v := range f.h.Instances() {
 		if v.ID == "chat-b" {

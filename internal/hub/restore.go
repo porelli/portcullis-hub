@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -206,15 +207,49 @@ func (h *Hub) configProblem(t *templates.Template, c *instanceConfig, archive st
 // Any failure there puts the pre-restore backup back the same way (an
 // *OpError with rolled_back; op "restore"). Audited as instance.restore.
 func (h *Hub) RestoreInstance(id, archive string, actor directory.Actor) (res *RestoreResult, err error) {
-	return h.restoreInstance(id, archive, actor, nil)
+	res = &RestoreResult{}
+	_, _, err = h.runOpSync(id, OpRestore, actor, []Step{}, func(ctx context.Context, ready func()) (map[string]string, []string, error) {
+		var rerr error
+		res, rerr = h.restoreInstance(ctx, id, archive, actor, ready)
+		return nil, nil, rerr
+	})
+	return res, err
 }
 
-// restoreInstance is RestoreInstance; ready (if set) is called once the
-// request is accepted (archive name, lock held, instance restorable, the
-// archive file exists), before the archive is verified (StartRestore
-// answers 202 then; a verification refusal is the operation's failure,
-// with nothing changed).
-func (h *Hub) restoreInstance(id, archive string, actor directory.Actor, ready func()) (res *RestoreResult, err error) {
+// Restore step keys (contract §11.7 "Steps per operation"): a same-
+// instance restore is verify, pre_backup, volumes, config, start (only
+// for an enabled instance); a restore into a new id verify, instance,
+// groups, volumes, config.
+const (
+	StepVerify    = "verify"
+	StepPreBackup = "pre_backup"
+	StepVolumes   = "volumes"
+	StepConfig    = "config"
+	StepInstance  = "instance"
+)
+
+// The op record's Before keys of a restore (what its Stop puts back):
+// enabled ("true" / "false") and the entry's state when it started, the
+// pre-restore backup once written, restoring "true" once state.yaml says
+// so (from then on a Stop rolls back), new_id "true" for a restore into
+// a new id.
+const (
+	beforeEnabled    = "enabled"
+	beforeState      = "state"
+	beforePreRestore = "pre_restore_backup"
+	beforeRestoring  = "restoring"
+	beforeNewID      = "new_id"
+)
+
+// restoreInstance is the same-instance restore StartRestore and
+// RestoreInstance run; ready is called once the request is accepted
+// (archive name, lock held, instance restorable, the archive file
+// exists), before the archive is verified (StartRestore answers 202
+// then; a verification refusal is the operation's failure, with nothing
+// changed). A Stop accepted before the commit runs its undo (settleOp:
+// rolled back from the pre-restore backup once anything changed, else
+// the app started again).
+func (h *Hub) restoreInstance(ctx context.Context, id, archive string, actor directory.Actor, ready func()) (res *RestoreResult, err error) {
 	res = &RestoreResult{}
 	defer func() {
 		h.auditOp(actor, "instance.restore", id, "archive="+archive+" pre_restore="+res.PreRestoreBackup, err)
@@ -224,7 +259,7 @@ func (h *Hub) restoreInstance(id, archive string, actor directory.Actor, ready f
 	}
 	unlock, err := h.lockApp(id)
 	if err != nil {
-		return res, err
+		return res, h.busyErr(id, err)
 	}
 	defer unlock()
 	defer h.lifecycleAILock(id)() // lockApp → aiLock (G35, §15.5)
@@ -232,82 +267,130 @@ func (h *Hub) restoreInstance(id, archive string, actor directory.Actor, ready f
 	if err != nil {
 		return res, err
 	}
-	if ready != nil {
-		if err := h.archiveExists(archive); err != nil {
-			return res, err
-		}
-		ready()
+	if err := h.archiveExists(archive); err != nil {
+		return res, err
 	}
+	p := progressFrom(ctx)
+	p.AddStep(StepVerify, "Checking the archive")
+	p.AddStep(StepPreBackup, "Backing up the current data")
+	p.AddStep(StepVolumes, "Restoring the volumes")
+	p.AddStep(StepConfig, "Restoring the settings")
+	if view.Enabled {
+		p.AddStep(StepStart, "Starting the app")
+	}
+	ready()
+	err = h.restoreSteps(ctx, p, id, archive, actor, view, e, res)
+	return res, h.settleOp(id, OpRestore, p, err)
+}
+
+// restoreSteps is the accepted same-instance restore (caller holds id's
+// lock): verify, pre_backup, volumes, config, start. Its failure path
+// (the pre-restore backup put back) runs here unless a Stop was accepted
+// first: then it returns ctx's error and settleOp runs the undo.
+func (h *Hub) restoreSteps(ctx context.Context, p *Progress, id, archive string, actor directory.Actor, view *templates.Template, e state.Instance, res *RestoreResult) (err error) {
+	p.Start(StepVerify)
 	if e.State == state.InstanceRestoring {
 		// An interrupted restore: put its pre-restore backup back first.
 		if err := h.recoverRestoreLocked(id, view, e.Backup); err != nil {
-			return res, err
+			return err
 		}
 		if view, e, err = h.restoreTarget(id); err != nil {
-			return res, err
+			return err
 		}
 	}
 	if err := h.checkFree(archivePathOf(h, archive), "staging the archive"); err != nil {
-		return res, err
+		return err
 	}
-	sb, err := h.stageArchive(archive)
+	sb, err := h.stageArchiveCtx(ctx, archive, func(done, total int64) {
+		p.Percent(StepVerify, pctOf(done, total), mib(done)+" of "+mib(total)+" checked")
+	})
 	if err != nil {
-		return res, err
+		return err
 	}
 	defer sb.cleanup()
 	// Redacted from here on: the values the instance has now and the
 	// archive's, whichever the instance holds when this ends.
 	cur, unread := h.redactionSetErr(id)
 	extra := append(cur, archiveSecrets(view, sb)...)
+	p.Redact(extra)
 	defer func() { err = hideIfUnread(withSecrets(err, extra), unread) }()
 	if sb.m.Template != view.TemplateID {
-		return res, statusErr(409, "archive %s is a backup of template %s, instance %s runs %s", archive, sb.m.Template, id, view.TemplateID)
+		return statusErr(409, "archive %s is a backup of template %s, instance %s runs %s", archive, sb.m.Template, id, view.TemplateID)
 	}
 	// Values naming a shared folder that is gone are cleared (§11.6,
 	// §13.15: restores never refuse folder values).
 	res.Warnings = append(res.Warnings, dropMissingFolderRefs(&sb.cfg, h.folderDefs())...)
 	if err := h.configProblem(view, &sb.cfg, archive); err != nil {
-		return res, err
+		return err
 	}
 	if sb.cfg.Settings != nil {
 		if err := h.dockerRootValuesRule(context.Background(), view, sb.cfg.Settings.Values); err != nil {
-			return res, err
+			return err
 		}
 	}
 	res.Warnings = append(res.Warnings, h.checkArchivedRows(context.Background(), view, sb.cfg.Settings, false)...)
 	plan, err := h.restorePlan(id, view, sb)
 	if err != nil {
-		return res, err
+		return err
 	}
-	for _, p := range plan {
-		if p.tar == "" {
-			res.Warnings = append(res.Warnings, fmt.Sprintf("volume %s is not in the archive: it was emptied (its data is in the pre-restore backup)", p.vol.Name))
+	for _, pl := range plan {
+		if pl.tar == "" {
+			res.Warnings = append(res.Warnings, fmt.Sprintf("volume %s is not in the archive: it was emptied (its data is in the pre-restore backup)", pl.vol.Name))
 		}
 	}
 	wasEnabled := view.Enabled
+	p.Before(beforeEnabled, strconv.FormatBool(wasEnabled))
+	p.Before(beforeState, e.State)
+	p.Done(StepVerify)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	// Back up what is there now (stops the instance; restarted by
-	// backupLocked if the backup fails).
-	pre, err := h.backupLocked(id, BackupRestore, true)
+	// backupCtx if the backup fails, by the Stop's undo if stopped).
+	p.Start(StepPreBackup)
+	pre, err := h.backupCtx(ctx, id, BackupRestore, true)
 	if err != nil {
-		return res, fmt.Errorf("the backup before the restore failed — nothing was restored: %w", err)
+		if cerr := ctx.Err(); cerr != nil {
+			return fmt.Errorf("%v: %w", err, cerr)
+		}
+		return fmt.Errorf("the backup before the restore failed — nothing was restored: %w", err)
 	}
 	res.PreRestoreBackup = pre.Archive
+	p.Before(beforePreRestore, pre.Archive)
+	p.Detail(StepPreBackup, pre.Archive)
+	p.Done(StepPreBackup)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	p.Start(StepVolumes)
 	// The record survives a crash from here on.
 	if err := h.markRestoring(id, pre.Archive); err != nil {
+		if !p.CloseStop() {
+			return context.Canceled // the Stop's undo starts it again
+		}
 		if wasEnabled {
 			if rerr := h.startAgain(view); rerr != nil {
 				log.Printf("instance %s: starting again after a refused restore: %v", id, rerr)
 			}
 		}
-		return res, statusErr(500, "recording the restore failed — nothing was restored: %v", err)
+		return statusErr(500, "recording the restore failed — nothing was restored: %v", err)
 	}
+	p.Before(beforeRestoring, "true")
 	// A never-enabled instance is "created" again afterwards.
 	keep := ""
 	if e.State == state.InstanceCreated {
 		keep = state.InstanceCreated
 	}
-	air, applyErr := h.applyRestore(id, sb, plan, wasEnabled, true, actor)
+	air, applyErr := h.applyRestore(ctx, id, sb, plan, wasEnabled, true, actor, p)
+	// The commit gate: a Stop accepted until here is rolled back by its
+	// undo; none is accepted after (a failure's rollback below included).
+	if !p.CloseStop() {
+		if applyErr == nil {
+			applyErr = context.Canceled
+		}
+		return applyErr
+	}
 	if applyErr == nil {
 		if cerr := h.clearRestoring(id, keep); cerr != nil {
 			res.Warnings = append(res.Warnings, cerr.Error())
@@ -318,26 +401,51 @@ func (h *Hub) restoreInstance(id, archive string, actor directory.Actor, ready f
 		res.Warnings = append(res.Warnings, air.warnings...)
 		res.Warnings = append(res.Warnings, h.bindPlaceholderRows(context.Background(), id)...)
 		log.Printf("instance %s restored from %s (pre-restore backup %s)", id, archive, pre.Archive)
-		ferr := h.finishOp(id, OpRestore, nil, false)
 		if air.err != nil {
 			// The data is restored; a companion whose revoke_all failed is
-			// off (§11.6): the instance's record shows why.
-			h.finishOp(id, OpAI, withSecrets(air.err, extra), false)
+			// off (§11.6): the instance's record shows why, once the
+			// restore's own record is written (held for it).
+			h.recordAfterOp(id, OpAI, withSecrets(air.err, extra))
 		}
-		return res, ferr
+		return nil
 	}
 	// Put the previous data back.
 	rerr := h.stagedRollback(id, view, pre.Archive, wasEnabled)
 	if rerr != nil {
 		applyErr = fmt.Errorf("restore from %s failed: %w — putting the pre-restore backup %s back failed too: %v (it stays \"restoring\": restore again once the cause is fixed, the pre-restore backup is put back first)", archive, applyErr, pre.Archive, rerr)
-		return res, h.finishOp(id, OpRestore, withSecrets(applyErr, extra), false)
+		return h.finishOp(id, OpRestore, withSecrets(applyErr, extra), false)
 	}
 	if cerr := h.clearRestoring(id, keep); cerr != nil {
 		res.Warnings = append(res.Warnings, cerr.Error())
 	}
 	h.writePolicyLogged()
 	applyErr = fmt.Errorf("restore from %s failed: %w — the previous data was put back (pre-restore backup %s)", archive, applyErr, pre.Archive)
-	return res, h.finishOp(id, OpRestore, withSecrets(applyErr, extra), true)
+	return h.finishOp(id, OpRestore, withSecrets(applyErr, extra), true)
+}
+
+// recordAfterOp records op's failure err on id after the running
+// operation's own final record (finishAsync writes it once that ended
+// ok, as a start hook's failure is), or at once when nothing runs.
+func (h *Hub) recordAfterOp(id, op string, err error) {
+	r := h.opRecordOf(id, op, err, false)
+	h.opsMu.Lock()
+	defer h.opsMu.Unlock()
+	if cur, ok := h.ops[id]; ok && cur.Running {
+		if h.heldHook == nil {
+			h.heldHook = map[string]heldHookRec{}
+		}
+		h.heldHook[id] = heldHookRec{opID: cur.OpID, rec: r}
+		return
+	}
+	h.recordOpLocked(id, r)
+}
+
+// pctOf is done of total in percent (0 for an unknown total).
+func pctOf(done, total int64) int {
+	if total <= 0 {
+		return 0
+	}
+	return int(done * 100 / total)
 }
 
 func archivePathOf(h *Hub, archive string) string {
@@ -634,8 +742,12 @@ func composeVolume(id, key, name string) docker.Volume {
 // (restoreAIAfterStart); the scopes of companions now off are deleted.
 // The returned aiRestore holds the warnings and the AI failure for the
 // op record; actor audits the switch-offs.
-func (h *Hub) applyRestore(id string, sb *staged, plan []volumePlan, wasEnabled, void bool, actor directory.Actor) (air aiRestore, err error) {
-	ctx := context.Background()
+//
+// rep (nil for a rollback) gets a restore's volumes (with the bytes
+// written of the archived volumes' size), config and start steps; a
+// cancelled ctx (a Stop) ends it between them — and aborts a volume's
+// upload — with ctx's error, nothing rolled back here.
+func (h *Hub) applyRestore(ctx context.Context, id string, sb *staged, plan []volumePlan, wasEnabled, void bool, actor directory.Actor, rep *Progress) (air aiRestore, err error) {
 	h.mu.Lock()
 	h.st.SetEnabled(id, false)
 	h.rebuildLocked()
@@ -659,8 +771,27 @@ func (h *Hub) applyRestore(id string, sb *staged, plan []volumePlan, wasEnabled,
 			return air, fmt.Errorf("helper image %s: %w", HelperImage, err)
 		}
 	}
+	var total, sent int64
 	for _, p := range plan {
-		if _, err := h.fillVolume(ctx, id, p.vol, p.existed, p.tar); err != nil {
+		if p.tar != "" {
+			if fi, err := os.Stat(p.tar); err == nil {
+				total += fi.Size()
+			}
+		}
+	}
+	for _, p := range plan {
+		if err := ctx.Err(); err != nil {
+			return air, err
+		}
+		base := sent
+		_, err := h.fillVolumeWith(ctx, id, p.vol, p.existed, p.tar, fillOpts{count: func(n int64) {
+			sent = base + n
+			rep.Percent(StepVolumes, pctOf(sent, total), mib(sent)+" of "+mib(total)+" written")
+		}})
+		if err != nil {
+			if cerr := ctx.Err(); cerr != nil {
+				return air, fmt.Errorf("%v: %w", err, cerr)
+			}
 			return air, err
 		}
 	}
@@ -669,6 +800,12 @@ func (h *Hub) applyRestore(id string, sb *staged, plan []volumePlan, wasEnabled,
 			return air, err
 		}
 	}
+	rep.Percent(StepVolumes, 100, mib(total)+" written")
+	rep.Done(StepVolumes)
+	if err := ctx.Err(); err != nil {
+		return air, err
+	}
+	rep.Start(StepConfig)
 	if err := writeOrRemove(h.envPath(id), sb.env); err != nil {
 		return air, fmt.Errorf("env: %w", err)
 	}
@@ -722,10 +859,18 @@ func (h *Hub) applyRestore(id string, sb *staged, plan []volumePlan, wasEnabled,
 	if err := errors.Join(secretsErr, envErr, saveErr, voidErr); err != nil {
 		return air, err
 	}
+	rep.Done(StepConfig)
+	if err := ctx.Err(); err != nil {
+		return air, err
+	}
 	if wasEnabled {
-		if _, err := h.enableInner(context.Background(), id, true); err != nil {
+		rep.Start(StepStart)
+		// The enable reports nothing into the restore's record (its own
+		// commit gate is not the restore's) but stops with it.
+		if _, err := h.enableInner(withProgress(ctx, nil), id, true); err != nil {
 			return air, err
 		}
+		rep.Done(StepStart)
 		w, aerr := h.restoreAIAfterStart(id, actor)
 		air.warnings, air.err = append(air.warnings, w...), aerr
 	} else {
@@ -763,7 +908,7 @@ func (h *Hub) rollbackStaged(id string, view *templates.Template, pre *staged, w
 	if err != nil {
 		return err
 	}
-	air, err := h.applyRestore(id, pre, plan, wasEnabled, false, aiHubActor)
+	air, err := h.applyRestore(context.Background(), id, pre, plan, wasEnabled, false, aiHubActor, nil)
 	for _, w := range air.warnings {
 		log.Printf("instance %s: rollback: %s", id, w)
 	}
@@ -786,23 +931,35 @@ func (h *Hub) rollbackStaged(id string, view *templates.Template, pre *staged, w
 // secret_env regenerated). A failure after the create removes what it
 // created. Audited as instance.restore.
 func (h *Hub) RestoreInstanceAs(archive, newID string, actor directory.Actor) (res *RestoreResult, err error) {
-	return h.restoreInstanceAs(archive, newID, actor, nil, nil)
+	return h.RestoreInstanceAsWith(archive, newID, actor, nil)
 }
 
 // RestoreInstanceAsWith is RestoreInstanceAs with hostnames (host router
 // → hostname) for the new instance: given ones are used as CreateInstance
 // would (validated, collisions refused); the others default to the
 // archive's hostname for hosts.immutable routers, else the new id's
-// default on the main domain.
+// default on the main domain. StartRestoreAs's operation run to its end
+// (runOpSync; the op record is newID's).
 func (h *Hub) RestoreInstanceAsWith(archive, newID string, actor directory.Actor, hosts map[string]string) (res *RestoreResult, err error) {
-	return h.restoreInstanceAs(archive, newID, actor, hosts, nil)
+	res = &RestoreResult{}
+	_, _, err = h.runOpSync(newID, OpRestore, actor, []Step{}, func(ctx context.Context, ready func()) (map[string]string, []string, error) {
+		var rerr error
+		res, rerr = h.restoreInstanceAs(ctx, archive, newID, actor, hosts, ready)
+		return nil, nil, rerr
+	})
+	return res, err
 }
 
-// restoreInstanceAs is RestoreInstanceAs; ready (if set) is called once
-// the request is accepted (archive name and new id valid, lock held, the
-// archive file exists, the actor resolves), before the archive is
-// verified (StartRestoreAs answers 202 then).
-func (h *Hub) restoreInstanceAs(archive, newID string, actor directory.Actor, hosts map[string]string, ready func()) (res *RestoreResult, err error) {
+// restoreInstanceAs is the restore into a new id StartRestoreAs and
+// RestoreInstanceAsWith run; ready is called once the request is
+// accepted (archive name and new id valid, lock held, the archive file
+// exists, the actor resolves), before the archive is verified
+// (StartRestoreAs answers 202 then). Its steps are verify, instance,
+// groups, volumes and config; the groups and volumes it creates are the
+// record's Created ledger, written as they exist. A Stop accepted before
+// the commit (the instance marked complete) removes the new instance
+// completely (settleOp → undoRestoreAs).
+func (h *Hub) restoreInstanceAs(ctx context.Context, archive, newID string, actor directory.Actor, hosts map[string]string, ready func()) (res *RestoreResult, err error) {
 	res = &RestoreResult{}
 	defer func() {
 		h.auditOp(actor, "instance.restore", newID, "archive="+archive+" new_instance=true", err)
@@ -818,35 +975,52 @@ func (h *Hub) restoreInstanceAs(archive, newID string, actor directory.Actor, ho
 	}
 	unlock, err := h.lockApp(newID)
 	if err != nil {
-		return res, err
+		return res, h.busyErr(newID, err)
 	}
 	defer unlock()
 	defer h.lifecycleAILock(newID)() // lockApp → aiLock (G35)
-	if ready != nil {
-		h.mu.RLock()
-		_, exists := h.st.Instances[newID]
-		exists = exists || h.findLocked(newID) != nil
-		groupsAPI := h.groups
-		h.mu.RUnlock()
-		if exists {
-			return res, statusErr(409, "instance %s already exists", newID)
-		}
-		if err := h.archiveExists(archive); err != nil {
-			return res, err
-		}
-		if groupsAPI != nil {
-			if err := groupsAPI.ResolveActor(context.Background(), actor); err != nil {
-				return res, fmt.Errorf("the acting admin %q can't create the instance's groups — nothing was changed: %w", actor.User, err)
-			}
-		}
-		ready()
+	h.mu.RLock()
+	_, exists := h.st.Instances[newID]
+	exists = exists || h.findLocked(newID) != nil
+	groupsAPI := h.groups
+	h.mu.RUnlock()
+	if exists {
+		return res, statusErr(409, "instance %s already exists", newID)
 	}
+	if err := h.archiveExists(archive); err != nil {
+		return res, err
+	}
+	if groupsAPI != nil {
+		if err := groupsAPI.ResolveActor(context.Background(), actor); err != nil {
+			return res, fmt.Errorf("the acting admin %q can't create the instance's groups — nothing was changed: %w", actor.User, err)
+		}
+	}
+	p := progressFrom(ctx)
+	p.AddStep(StepVerify, "Checking the archive")
+	p.AddStep(StepInstance, "Creating the instance")
+	p.AddStep(StepGroups, "Groups")
+	p.AddStep(StepVolumes, "Restoring the volumes")
+	p.AddStep(StepConfig, "Restoring the settings")
+	p.Before(beforeNewID, "true")
+	ready()
+	err = h.restoreAsSteps(ctx, p, archive, newID, actor, hosts, res)
+	return res, h.settleOp(newID, OpRestore, p, err)
+}
+
+// restoreAsSteps is the accepted restore into newID (caller holds its
+// lock). A failure after the create removes what it created (its own
+// undo, below) unless a Stop was accepted first: then it returns ctx's
+// error and the Stop's undo removes it from the record.
+func (h *Hub) restoreAsSteps(ctx context.Context, p *Progress, archive, newID string, actor directory.Actor, hosts map[string]string, res *RestoreResult) (err error) {
+	p.Start(StepVerify)
 	if err := h.checkFree(archivePathOf(h, archive), "staging the archive"); err != nil {
-		return res, err
+		return err
 	}
-	sb, err := h.stageArchive(archive)
+	sb, err := h.stageArchiveCtx(ctx, archive, func(done, total int64) {
+		p.Percent(StepVerify, pctOf(done, total), mib(done)+" of "+mib(total)+" checked")
+	})
 	if err != nil {
-		return res, err
+		return err
 	}
 	defer sb.cleanup()
 	// Redacted from here on: the archive's values and (undo) the new
@@ -868,36 +1042,37 @@ func (h *Hub) restoreInstanceAs(archive, newID string, actor directory.Actor, ho
 	} else {
 		extra = archiveSecrets(nil, sb)
 	}
+	p.Redact(extra)
 	if t == nil {
-		return res, statusErr(409, "template %s of archive %s is not in the catalog", sb.m.Template, archive)
+		return statusErr(409, "template %s of archive %s is not in the catalog", sb.m.Template, archive)
 	}
 	if !tmpl.Manifest.Multi() {
-		return res, statusErr(409, "template %s is instances: single — restore the archive into its default instance instead", tmpl.ID)
+		return statusErr(409, "template %s is instances: single — restore the archive into its default instance instead", tmpl.ID)
 	}
 	if err := aliasesFitInstance(&tmpl, newID); err != nil {
-		return res, err
+		return err
 	}
 	want, err := restoreAsHosts(&tmpl, newID, domain, sb.cfg.Hosts, hosts)
 	if err != nil {
-		return res, err
+		return err
 	}
 	names := tmpl.NamesFor(newID)
 	for k := range sb.volumes {
 		if _, ok := names.Volumes[k]; !ok {
-			return res, statusErr(409, "the archive has volume %s, which template %s no longer defines", k, tmpl.ID)
+			return statusErr(409, "the archive has volume %s, which template %s no longer defines", k, tmpl.ID)
 		}
 	}
 	if len(sb.volumes) > 0 && h.engine == nil {
-		return res, statusErr(503, "Docker is not available: cannot restore volumes")
+		return statusErr(503, "Docker is not available: cannot restore volumes")
 	}
 	defs := h.folderDefs()
 	res.Warnings = append(res.Warnings, dropMissingFolderRefs(&sb.cfg, defs)...)
 	if err := h.configProblem(&tmpl, &sb.cfg, archive); err != nil {
-		return res, err
+		return err
 	}
 	if sb.cfg.Settings != nil {
 		if err := h.dockerRootValuesRule(context.Background(), &tmpl, sb.cfg.Settings.Values); err != nil {
-			return res, err
+			return err
 		}
 	}
 	res.Warnings = append(res.Warnings, h.checkArchivedRows(context.Background(), &tmpl, sb.cfg.Settings, true)...)
@@ -910,7 +1085,7 @@ func (h *Hub) restoreInstanceAs(archive, newID string, actor directory.Actor, ho
 	h.mu.RUnlock()
 	if groupsAPI != nil && (names.AccessGroup != "" || names.AdminGroup != "") {
 		if err := groupsAPI.ResolveActor(context.Background(), actor); err != nil {
-			return res, fmt.Errorf("the acting admin %q can't create the instance's groups — nothing was changed: %w", actor.User, err)
+			return fmt.Errorf("the acting admin %q can't create the instance's groups — nothing was changed: %w", actor.User, err)
 		}
 	}
 	// Host paths are shared, not copied: say so.
@@ -921,12 +1096,17 @@ func (h *Hub) restoreInstanceAs(archive, newID string, actor directory.Actor, ho
 			}
 		}
 	}
+	p.Done(StepVerify)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	// Validated as CreateInstance validates any hostname: an immutable
 	// router's archived hostname that is taken or no longer placeable is
 	// refused here (nothing created).
+	p.Start(StepInstance)
 	if err := h.CreateInstance(tmpl.ID, newID, want); err != nil {
-		return res, err
+		return err
 	}
 	// Marked "restoring" (restore_as) until complete: an interrupted one
 	// is removed at the next start (RecoverRestores).
@@ -946,6 +1126,11 @@ func (h *Hub) restoreInstanceAs(archive, newID string, actor directory.Actor, ho
 	var createdVols []string
 	var createdGroups []string
 	undo := func(cause error) error {
+		// A Stop accepted first: its undo removes the instance from the
+		// record (settleOp); none is accepted after this.
+		if !p.CloseStop() {
+			return fmt.Errorf("%v: %w", cause, context.Canceled)
+		}
 		ctx := context.Background()
 		// Its regenerated secrets and env go with it: keep redacting them.
 		set, unread := h.redactionSetErr(newID)
@@ -964,21 +1149,9 @@ func (h *Hub) restoreInstanceAs(archive, newID string, actor directory.Actor, ho
 				errs = append(errs, err)
 			}
 		}
-		for _, p := range []string{h.envPath(newID), h.overridePath(newID), h.userOverridePath(newID)} {
-			if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
-				errs = append(errs, err)
-			}
-		}
-		if err := h.removeSecrets(newID); err != nil {
+		if err := h.removeNewInstance(newID); err != nil {
 			errs = append(errs, err)
 		}
-		h.mu.Lock()
-		delete(h.st.Instances, newID)
-		delete(h.st.AIInstances, newID)
-		h.applyConfigLocked(newID, instanceConfig{})
-		h.rebuildLocked()
-		h.saveLocked()
-		h.mu.Unlock()
 		if err := errors.Join(errs...); err != nil {
 			return fmt.Errorf("%w — removing the half-restored instance failed too: %v", cause, err)
 		}
@@ -986,10 +1159,11 @@ func (h *Hub) restoreInstanceAs(archive, newID string, actor directory.Actor, ho
 	}
 
 	if markErr != nil {
-		return res, undo(statusErr(500, "recording the restore failed: %v", markErr))
+		return undo(statusErr(500, "recording the restore failed: %v", markErr))
 	}
-
-	// Settings, env (client secrets regenerated), custom override.
+	// Settings, env (client secrets regenerated), custom override: the
+	// instance step's (its state entry, env and generated secrets, as a
+	// create's), before its groups and volumes.
 	if sb.env != nil {
 		env := parseEnvRaw(sb.env)
 		for _, c := range tmpl.Manifest.Clients {
@@ -998,11 +1172,11 @@ func (h *Hub) restoreInstanceAs(archive, newID string, actor directory.Actor, ho
 			}
 		}
 		if err := writeEnvMap(h.envPath(newID), env); err != nil {
-			return res, undo(statusErr(500, "env: %v", err))
+			return undo(statusErr(500, "env: %v", err))
 		}
 	}
 	if err := writeOrRemove(h.userOverridePath(newID), sb.user); err != nil {
-		return res, undo(statusErr(500, "custom override: %v", err))
+		return undo(statusErr(500, "custom override: %v", err))
 	}
 	members := h.groupSnapshot(newID)
 	h.mu.Lock()
@@ -1031,10 +1205,16 @@ func (h *Hub) restoreInstanceAs(archive, newID string, actor directory.Actor, ho
 	saveErr := h.st.Save(h.statePath())
 	h.mu.Unlock()
 	if err := errors.Join(envErr, saveErr); err != nil {
-		return res, undo(statusErr(500, "%v", err))
+		return undo(statusErr(500, "%v", err))
+	}
+	p.Done(StepInstance)
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	// New empty groups.
+	p.Start(StepGroups)
+	var made []string
 	for _, g := range []string{names.AccessGroup, names.AdminGroup} {
 		if g == "" {
 			continue
@@ -1043,36 +1223,80 @@ func (h *Hub) restoreInstanceAs(archive, newID string, actor directory.Actor, ho
 			res.Warnings = append(res.Warnings, fmt.Sprintf("group %s was not created: users & groups is not available", g))
 			continue
 		}
-		made, w, err := groupsAPI.CreateInstanceGroup(context.Background(), actor, g)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		ok, w, err := groupsAPI.CreateInstanceGroup(context.Background(), actor, g)
 		res.Warnings = append(res.Warnings, w...)
-		if made {
+		if ok {
 			createdGroups = append(createdGroups, g)
+			made = append(made, g)
+			p.Created(CreatedGroups, g)
 		}
 		if err != nil {
-			return res, undo(fmt.Errorf("creating group %s: %w", g, err))
+			return undo(fmt.Errorf("creating group %s: %w", g, err))
 		}
+	}
+	if len(made) > 0 {
+		p.Detail(StepGroups, strings.Join(made, ", ")+" created")
+	}
+	p.Done(StepGroups)
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	// New volumes.
+	p.Start(StepVolumes)
 	keys := make([]string, 0, len(sb.volumes))
+	var total, sent int64
 	for k := range sb.volumes {
 		keys = append(keys, k)
+		if fi, err := os.Stat(sb.volumes[k]); err == nil {
+			total += fi.Size()
+		}
 	}
 	sort.Strings(keys)
 	if len(keys) > 0 {
 		if err := h.engine.EnsureImage(context.Background(), HelperImage); err != nil {
-			return res, undo(statusErr(503, "helper image %s: %v", HelperImage, err))
+			return undo(statusErr(503, "helper image %s: %v", HelperImage, err))
 		}
 	}
 	for _, k := range keys {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		v := composeVolume(newID, k, names.Volumes[k])
-		created, err := h.fillVolume(context.Background(), newID, v, false, sb.volumes[k])
+		base := sent
+		created, err := h.fillVolumeWith(ctx, newID, v, false, sb.volumes[k], fillOpts{
+			created: func(n string) { p.Created(CreatedVolumes, n) },
+			count: func(n int64) {
+				sent = base + n
+				p.Percent(StepVolumes, pctOf(sent, total), mib(sent)+" of "+mib(total)+" written")
+			},
+		})
 		if created {
 			createdVols = append(createdVols, v.Name)
 		}
 		if err != nil {
-			return res, undo(statusErr(500, "%v", err))
+			if cerr := ctx.Err(); cerr != nil {
+				return fmt.Errorf("%v: %w", err, cerr)
+			}
+			return undo(statusErr(500, "%v", err))
 		}
+	}
+	p.Percent(StepVolumes, 100, mib(total)+" written")
+	p.Done(StepVolumes)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	// The commit: the instance complete (its settings were restored with
+	// it, in the instance step).
+	p.Start(StepConfig)
+	// The commit gate: a Stop accepted until here removes the instance
+	// (its undo), none is accepted after.
+	if !p.CloseStop() {
+		return context.Canceled
 	}
 	// Complete: a new instance, never enabled.
 	h.mu.Lock()
@@ -1084,8 +1308,9 @@ func (h *Hub) restoreInstanceAs(archive, newID string, actor directory.Actor, ho
 	saveErr = h.st.Save(h.statePath())
 	h.mu.Unlock()
 	if saveErr != nil {
-		return res, undo(statusErr(500, "recording the completed restore failed: %v", saveErr))
+		return undo(statusErr(500, "recording the completed restore failed: %v", saveErr))
 	}
+	p.Done(StepConfig)
 	// Its starting rows, bound to the new id's groups.
 	res.Warnings = append(res.Warnings, h.bindPlaceholderRows(context.Background(), newID)...)
 	if v := h.Template(newID); v != nil {
@@ -1095,7 +1320,40 @@ func (h *Hub) restoreInstanceAs(archive, newID string, actor directory.Actor, ho
 	}
 	h.writePolicyLogged()
 	log.Printf("instance %s of %s restored from %s", newID, tmpl.ID, archive)
-	return res, nil
+	return nil
+}
+
+// removeNewInstance removes a new instance a restore into a new id (or a
+// create) made: its files, settings store, per-instance state, AI state
+// and state entry — never one that runs or completed (state "restoring"
+// or, for a create, "created", or no entry: done). Caller holds id's
+// lock.
+func (h *Hub) removeNewInstance(id string) error {
+	h.mu.RLock()
+	e, ok := h.st.Instances[id]
+	enabled := h.st.IsEnabled(id)
+	h.mu.RUnlock()
+	if ok && (enabled || (e.State != state.InstanceRestoring && e.State != state.InstanceCreated)) {
+		return statusErr(409, "instance %s is no longer new (state %q, enabled %v): it was not removed", id, e.State, enabled)
+	}
+	var errs []error
+	for _, p := range []string{h.envPath(id), h.overridePath(id), h.userOverridePath(id)} {
+		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, err)
+		}
+	}
+	if err := h.removeSecrets(id); err != nil {
+		errs = append(errs, err)
+	}
+	h.mu.Lock()
+	delete(h.st.Instances, id)
+	delete(h.st.AIInstances, id)
+	h.applyConfigLocked(id, instanceConfig{})
+	h.rebuildLocked()
+	saveErr := h.st.Save(h.statePath())
+	h.mu.Unlock()
+	h.writePolicyLogged()
+	return errors.Join(append(errs, saveErr)...)
 }
 
 // restoreAsHosts are the hostnames of a restore into the new id newID:

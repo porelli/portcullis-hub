@@ -17,6 +17,7 @@ import (
 	"reflect"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -286,15 +287,24 @@ func (h *Hub) projectRunning(ctx context.Context, id string) (bool, error) {
 // again. Audited as instance.backup. Errors: 404 unknown, 409 deleting /
 // busy / can't be restarted, 503 Docker unavailable, 500 otherwise (the
 // archive isn't written; a failed restart after a written backup is an
-// OpError that names the archive).
+// OpError that names the archive). StartBackup's operation run to its
+// end (runOpSync: the same lock, record, steps and Stop).
 func (h *Hub) BackupInstance(id string, actor directory.Actor) (entry *BackupEntry, err error) {
-	return h.backupInstance(id, actor, nil)
+	_, _, err = h.runOpSync(id, OpBackup, actor, []Step{}, func(ctx context.Context, ready func()) (map[string]string, []string, error) {
+		var berr error
+		entry, berr = h.backupInstance(ctx, id, actor, ready)
+		return nil, nil, berr
+	})
+	return entry, err
 }
 
-// backupInstance is BackupInstance; ready (if set) is called once the
-// request is accepted (lock held, instance found, Docker available) and
-// the backup itself starts (StartBackup answers 202 then).
-func (h *Hub) backupInstance(id string, actor directory.Actor, ready func()) (entry *BackupEntry, err error) {
+// backupInstance is the manual backup StartBackup and BackupInstance
+// run: ready is called once the request is accepted (lock held, instance
+// found, Docker available) and the backup itself starts (StartBackup
+// answers 202 then); a Stop accepted before the archive's rename runs
+// its undo (settleOp: the partial archive deleted, the app started again
+// if it ran).
+func (h *Hub) backupInstance(ctx context.Context, id string, actor directory.Actor, ready func()) (entry *BackupEntry, err error) {
 	defer func() {
 		detail := ""
 		if entry != nil {
@@ -304,7 +314,7 @@ func (h *Hub) backupInstance(id string, actor directory.Actor, ready func()) (en
 	}()
 	unlock, err := h.lockApp(id)
 	if err != nil {
-		return nil, err
+		return nil, h.busyErr(id, err)
 	}
 	defer unlock()
 	// lockApp → aiLock (G35, 13a carry): no mint or revoke runs a hook
@@ -313,27 +323,55 @@ func (h *Hub) backupInstance(id string, actor directory.Actor, ready func()) (en
 	if err := h.pending(id); err != nil {
 		return nil, err
 	}
-	if ready != nil {
-		h.mu.RLock()
-		_, ok := h.targetLocked(id)
-		h.mu.RUnlock()
-		if !ok {
-			return nil, statusErr(404, "instance not found: %s", id)
-		}
-		if h.engine == nil {
-			return nil, statusErr(503, "Docker is not available: cannot back up %s", id)
-		}
-		ready()
+	h.mu.RLock()
+	_, ok := h.targetLocked(id)
+	h.mu.RUnlock()
+	if !ok {
+		return nil, statusErr(404, "instance not found: %s", id)
 	}
-	return h.backupLocked(id, BackupManual, false)
+	if h.engine == nil {
+		return nil, statusErr(503, "Docker is not available: cannot back up %s", id)
+	}
+	ready()
+	p := progressFrom(ctx)
+	entry, err = h.backupCtx(ctx, id, BackupManual, false)
+	if serr := h.settleOp(id, OpBackup, p, err); serr != err {
+		return nil, serr
+	}
+	return entry, err
 }
 
-// backupLocked writes a backup of id (caller holds its app lock). A
-// running instance is stopped first; it is started again afterwards
-// unless keepStopped (delete, restore) — after a failure always, so a
-// failed backup leaves the instance as it was.
+// Backup step keys (contract §11.7 "Steps per operation"): stop, one
+// volume:<key> per volume, archive, start.
+const (
+	StepArchive      = "archive"
+	StepVolumePrefix = "volume:"
+)
+
+// beforeRunning: the op record's Before key saying whether the project
+// ran when the backup started ("true" / "false"; a Stop starts it again).
+const beforeRunning = "running"
+
+// backupLocked is backupCtx without a reporter or a Stop.
 func (h *Hub) backupLocked(id, reason string, keepStopped bool) (*BackupEntry, error) {
-	ctx := context.Background()
+	return h.backupCtx(context.Background(), id, reason, keepStopped)
+}
+
+// backupCtx writes a backup of id (caller holds its app lock). A running
+// instance is stopped first; it is started again afterwards unless
+// keepStopped (delete, restore) — after a failure always, so a failed
+// backup leaves the instance as it was — except after a Stop (ctx
+// cancelled): the archive isn't written and the Stop's undo starts it.
+// Whether it ran is the op record's Before "running". A manual backup
+// reports its own steps (stop, volume:<key>, archive, start) into ctx's
+// reporter and closes its Stop gate right before the archive's rename
+// (its commit); a delete's or restore's is one step of theirs.
+func (h *Hub) backupCtx(ctx context.Context, id, reason string, keepStopped bool) (*BackupEntry, error) {
+	op := progressFrom(ctx)
+	var p *Progress // the backup's own steps: a manual backup's only
+	if reason == BackupManual {
+		p = op
+	}
 	h.mu.RLock()
 	tg, ok := h.targetLocked(id)
 	cfg := h.instanceConfigLocked(tg)
@@ -353,9 +391,21 @@ func (h *Hub) backupLocked(id, reason string, keepStopped bool) (*BackupEntry, e
 	if err != nil {
 		return nil, statusErr(503, "cannot check whether %s runs: %v", id, err)
 	}
+	op.Before(beforeRunning, strconv.FormatBool(running))
 	restart := running && tg.enabled
 	if restart && tg.view == nil && !keepStopped {
 		return nil, statusErr(409, "instance %s can't be resolved (its template is missing or no longer fits): it would not start again after the backup — delete it, or fix its template first", id)
+	}
+	keys := sortedVolumeKeys(vols)
+	if running {
+		p.AddStep(StepStop, "Stopping the app")
+	}
+	for _, k := range keys {
+		p.AddStep(StepVolumePrefix+k, "Copying volume "+k)
+	}
+	p.AddStep(StepArchive, "Writing the archive")
+	if restart && !keepStopped {
+		p.AddStep(StepStart, "Starting the app again")
 	}
 	if len(vols) > 0 {
 		if err := h.engine.EnsureImage(ctx, HelperImage); err != nil {
@@ -446,22 +496,40 @@ func (h *Hub) backupLocked(id, reason string, keepStopped bool) (*BackupEntry, e
 		}
 	}
 
-	if running {
-		if err := h.stopProject(tg); err != nil {
-			return nil, statusErr(500, "stopping %s for the backup failed (nothing was written): %v", id, err)
-		}
+	if err := ctx.Err(); err != nil {
+		return nil, err // stopped before anything was stopped
 	}
-	entry, err := h.writeBackup(ctx, id, dir, stage, m, vols)
+	if running {
+		p.Start(StepStop)
+		if err := h.stopProject(tg); err != nil {
+			err = statusErr(500, "stopping %s for the backup failed (nothing was written): %v", id, err)
+			p.Fail(StepStop, err)
+			return nil, err
+		}
+		p.Done(StepStop)
+	}
+	// The commit gate (a manual backup's): a Stop accepted before the
+	// rename is undone (the partial archive deleted), none is accepted
+	// after it.
+	commit := func() bool { return ctx.Err() == nil && p.CloseStop() }
+	entry, err := h.writeBackup(ctx, p, id, dir, stage, m, vols, commit)
+	if err != nil && (ctx.Err() != nil || p.Stopping()) {
+		// Stopped: nothing written; the Stop's undo starts it again.
+		return nil, fmt.Errorf("%v: %w", err, context.Canceled)
+	}
 	if err != nil || (!keepStopped && restart) {
 		if restart {
+			p.Start(StepStart)
 			if rerr := h.startAgain(tg.view); rerr != nil {
 				if err == nil {
 					err = fmt.Errorf("the backup %s was written, but starting %s again failed: %w", entry.Archive, id, rerr)
 				} else {
 					err = fmt.Errorf("%w — and starting %s again failed: %v", err, id, rerr)
 				}
+				p.Fail(StepStart, rerr)
 				return entry, h.finishOp(id, OpRestart, err, false)
 			}
+			p.Done(StepStart)
 		}
 	}
 	if err != nil {
@@ -512,26 +580,45 @@ func (h *Hub) startAgain(t *templates.Template) error {
 	return nil
 }
 
-// writeBackup copies the volumes into stage and assembles the archive.
-func (h *Hub) writeBackup(ctx context.Context, id, dir, stage string, m *BackupManifest, vols map[string]docker.Volume) (*BackupEntry, error) {
-	keys := make([]string, 0, len(vols))
-	for k := range vols {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
+// writeBackup copies the volumes into stage and assembles the archive,
+// reporting each volume:<key> step and the archive step into p (nil:
+// none). commit is called right before the archive's rename: false (a
+// Stop) leaves no archive.
+func (h *Hub) writeBackup(ctx context.Context, p *Progress, id, dir, stage string, m *BackupManifest, vols map[string]docker.Volume, commit func() bool) (*BackupEntry, error) {
+	for _, k := range sortedVolumeKeys(vols) {
+		key := StepVolumePrefix + k
 		member := "volumes/" + k + ".tar"
-		p := filepath.Join(stage, "volumes", k+".tar")
-		os.MkdirAll(filepath.Dir(p), 0700)
-		sum, err := h.copyVolumeOut(ctx, id, vols[k].Name, p)
-		if err != nil {
-			return nil, statusErr(500, "backup of volume %s failed (no archive written): %v", vols[k].Name, err)
+		dst := filepath.Join(stage, "volumes", k+".tar")
+		os.MkdirAll(filepath.Dir(dst), 0700)
+		p.Start(key)
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
+		var copied int64
+		sum, err := h.copyVolumeOut(ctx, id, vols[k].Name, dst, func(n int64) {
+			copied = n
+			p.DetailThrottled(key, mib(n)+" copied")
+		})
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			err = statusErr(500, "backup of volume %s failed (no archive written): %v", vols[k].Name, err)
+			p.Fail(key, err)
+			return nil, err
+		}
+		p.Detail(key, mib(copied)+" copied")
+		p.Done(key)
 		m.Volumes[k] = vols[k].Name
 		m.Files[member] = sum
 	}
+	p.Start(StepArchive)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	// Assembling copies the staged members once more.
 	if err := needFree(dir, dirSize(stage), "the backup archive of "+id); err != nil {
+		p.Fail(StepArchive, err)
 		return nil, err
 	}
 	now := time.Now().UTC().Truncate(time.Second)
@@ -547,20 +634,38 @@ func (h *Hub) writeBackup(ctx context.Context, id, dir, stage string, m *BackupM
 		now = now.Add(time.Second)
 	}
 	m.CreatedAt = now
-	if err := assembleArchive(final, stage, m); err != nil {
-		return nil, statusErr(500, "writing the backup archive failed: %v", err)
+	if err := assembleArchive(final, stage, m, commit); err != nil {
+		if errors.Is(err, errUncommitted) {
+			return nil, context.Canceled
+		}
+		err = statusErr(500, "writing the backup archive failed: %v", err)
+		p.Fail(StepArchive, err)
+		return nil, err
 	}
 	fi, err := os.Stat(final)
 	if err != nil {
 		return nil, statusErr(500, "backup archive: %v", err)
 	}
+	p.Detail(StepArchive, id+"/"+filepath.Base(final))
+	p.Done(StepArchive)
 	return &BackupEntry{Archive: id + "/" + filepath.Base(final), Instance: id, Template: m.Template,
 		CreatedAt: m.CreatedAt, Reason: m.Reason, Size: fi.Size(), InstanceExists: true}, nil
 }
 
+// errUncommitted: assembleArchive's commit said no (a Stop): the partial
+// archive was removed, nothing renamed.
+var errUncommitted = errors.New("the archive was not committed")
+
+// mib is n bytes as "12.3 MB" (1 MB = 2^20 bytes, as the images step).
+func mib(n int64) string {
+	return fmt.Sprintf("%.1f MB", float64(n)/(1<<20))
+}
+
 // assembleArchive writes final (via final.partial + rename): MANIFEST.json
-// first, then every member of m.Files from stage, sorted by path.
-func assembleArchive(final, stage string, m *BackupManifest) (err error) {
+// first, then every member of m.Files from stage, sorted by path. commit
+// (nil: always) is asked right before the rename: false removes the
+// partial archive and returns errUncommitted.
+func assembleArchive(final, stage string, m *BackupManifest, commit func() bool) (err error) {
 	mj, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
 		return err
@@ -618,6 +723,10 @@ func assembleArchive(final, stage string, m *BackupManifest) (err error) {
 	if err := f.Close(); err != nil {
 		return err
 	}
+	if commit != nil && !commit() {
+		os.Remove(tmp)
+		return errUncommitted
+	}
 	if err := os.Rename(tmp, final); err != nil {
 		return err
 	}
@@ -644,8 +753,10 @@ func (h *Hub) withHelper(ctx context.Context, id, name string, readOnly bool, fn
 }
 
 // copyVolumeOut streams volume name into the file dst (an inner tar) and
-// returns its sha256; every entry is checked (checkVolumeEntry).
-func (h *Hub) copyVolumeOut(ctx context.Context, id, name, dst string) (string, error) {
+// returns its sha256; every entry is checked (checkVolumeEntry). count
+// (nil: none) gets the bytes copied so far; a cancelled ctx ends the
+// copy at once.
+func (h *Hub) copyVolumeOut(ctx context.Context, id, name, dst string, count func(int64)) (string, error) {
 	var sum string
 	err := h.withHelper(ctx, id, name, true, func(hid string) error {
 		rc, err := h.engine.CopyFromContainer(ctx, hid, helperMount)
@@ -659,7 +770,7 @@ func (h *Hub) copyVolumeOut(ctx context.Context, id, name, dst string) (string, 
 		}
 		defer f.Close()
 		hash := sha256.New()
-		tee := io.TeeReader(rc, io.MultiWriter(f, hash))
+		tee := io.TeeReader(&ctxReader{ctx: ctx, r: rc, count: count}, io.MultiWriter(f, hash))
 		tr := tar.NewReader(tee)
 		for {
 			hdr, err := tr.Next()
@@ -683,6 +794,27 @@ func (h *Hub) copyVolumeOut(ctx context.Context, id, name, dst string) (string, 
 		return f.Close()
 	})
 	return sum, err
+}
+
+// ctxReader reads r until ctx is cancelled (then ctx's error), telling
+// count (nil: nobody) the bytes read so far.
+type ctxReader struct {
+	ctx   context.Context
+	r     io.Reader
+	count func(int64)
+	n     int64
+}
+
+func (c *ctxReader) Read(b []byte) (int, error) {
+	if err := c.ctx.Err(); err != nil {
+		return 0, err
+	}
+	n, err := c.r.Read(b)
+	c.n += int64(n)
+	if n > 0 && c.count != nil {
+		c.count(c.n)
+	}
+	return n, err
 }
 
 // checkVolumeEntry accepts the entries of a volume archive: under "data"
@@ -888,6 +1020,13 @@ func (s *staged) cleanup() {
 // naming the same instance and template — and unpacks it into a staging
 // directory. 400 bad name, 404 missing, 409 anything that doesn't verify.
 func (h *Hub) stageArchive(archive string) (*staged, error) {
+	return h.stageArchiveCtx(context.Background(), archive, nil)
+}
+
+// stageArchiveCtx is stageArchive; report (nil: none) gets the bytes of
+// the archive read (checked) so far and its size, and a cancelled ctx
+// ends it (nothing staged).
+func (h *Hub) stageArchiveCtx(ctx context.Context, archive string, report func(done, total int64)) (*staged, error) {
 	mm := archiveRe.FindStringSubmatch(archive)
 	if mm == nil {
 		return nil, statusErr(400, "archive must be <instance-id>/<YYYYMMDDTHHMMSSZ>.tar, relative to the backups directory")
@@ -905,7 +1044,11 @@ func (h *Hub) stageArchive(archive string) (*staged, error) {
 		return nil, statusErr(500, "archive %s: %v", archive, err)
 	}
 	defer f.Close()
-	tr := tar.NewReader(f)
+	var count func(int64)
+	if report != nil {
+		count = func(n int64) { report(n, fi.Size()) }
+	}
+	tr := tar.NewReader(&ctxReader{ctx: ctx, r: f, count: count})
 	m, _, err := nextManifest(tr)
 	if err != nil {
 		return nil, statusErr(409, "archive %s refused: %v", archive, err)
@@ -924,6 +1067,9 @@ func (h *Hub) stageArchive(archive string) (*staged, error) {
 	s := &staged{archive: archive, dir: dir, m: m, volumes: map[string]string{}}
 	if err := s.unpack(tr); err != nil {
 		s.cleanup()
+		if cerr := ctx.Err(); cerr != nil {
+			return nil, cerr
+		}
 		return nil, statusErr(409, "archive %s refused (nothing was changed): %v", archive, err)
 	}
 	return s, nil
@@ -1046,6 +1192,20 @@ func checkVolumeArchive(p string) error {
 // at "/" of a never-started helper mounting it at helperMount (owners,
 // modes, mtimes and the volume root's own metadata as archived).
 func (h *Hub) fillVolume(ctx context.Context, id string, v docker.Volume, existed bool, tarPath string) (created bool, err error) {
+	return h.fillVolumeWith(ctx, id, v, existed, tarPath, fillOpts{})
+}
+
+// fillOpts are fillVolumeWith's reporting hooks (each may be nil):
+// created gets the volume's name the moment it was created (a restore
+// into a new id's ledger), count the bytes of the inner tar sent so far.
+type fillOpts struct {
+	created func(name string)
+	count   func(n int64)
+}
+
+// fillVolumeWith is fillVolume with o's hooks; a cancelled ctx ends the
+// upload at once.
+func (h *Hub) fillVolumeWith(ctx context.Context, id string, v docker.Volume, existed bool, tarPath string, o fillOpts) (created bool, err error) {
 	if existed {
 		if err := h.engine.RemoveVolume(ctx, v.Name); err != nil && !docker.IsNotFound(err) {
 			return false, fmt.Errorf("emptying volume %s: %w", v.Name, err)
@@ -1061,6 +1221,9 @@ func (h *Hub) fillVolume(ctx context.Context, id string, v docker.Volume, existe
 	}
 	if err := h.engine.CreateVolume(ctx, v); err != nil {
 		return false, fmt.Errorf("creating volume %s: %w", v.Name, err)
+	}
+	if o.created != nil && !existed {
+		o.created(v.Name)
 	}
 	got, err := h.engine.InspectVolume(ctx, v.Name)
 	if err != nil {
@@ -1078,7 +1241,7 @@ func (h *Hub) fillVolume(ctx context.Context, id string, v docker.Volume, existe
 			return err
 		}
 		defer f.Close()
-		if err := h.engine.CopyToContainer(ctx, hid, "/", f); err != nil {
+		if err := h.engine.CopyToContainer(ctx, hid, "/", &ctxReader{ctx: ctx, r: f, count: o.count}); err != nil {
 			return fmt.Errorf("restoring volume %s: %w", v.Name, err)
 		}
 		return nil

@@ -340,6 +340,48 @@ func (p *Progress) endLocked(key, state string, err error) {
 	p.writeLocked()
 }
 
+// DetailThrottled sets a running step's one-line detail like Percent
+// does, without a percentage (an indeterminate step: a backup's volume
+// copy, whose size isn't known): written at most every progressThrottle.
+func (p *Progress) DetailThrottled(key, detail string) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	s := p.stepLocked(key, false)
+	if s == nil || s.State != StepRunning {
+		return
+	}
+	s.Detail = detail
+	p.throttledLocked()
+}
+
+// Redact adds values to redact from every detail and warning of the
+// record from now on (a restore's archive secrets, a deleted instance's
+// values once its files are gone), like the extras of the errors it is
+// given.
+func (p *Progress) Redact(values []string) {
+	if p == nil || len(values) == 0 {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.extra = append(p.extra, values...)
+}
+
+// RolledBack marks the record rolled_back (a stopped restore was rolled
+// back from its pre-restore backup, §11.6): kept in the stopped record.
+func (p *Progress) RolledBack() {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.rec.RolledBack = true
+	p.writeLocked()
+}
+
 // Has: key is one of the operation's steps (planned or added).
 func (p *Progress) Has(key string) bool {
 	if p == nil {
@@ -593,6 +635,16 @@ func (p *Progress) finish(r OpRecord, err error) {
 		s.EndedAt = &end
 	}
 	r.OpID, r.Steps, r.Created, r.Before = cur.OpID, cur.Steps, cur.Created, cur.Before
+	// The operation's own warnings are redacted like the record's (a
+	// restore's archive secrets: Redact, the errors' extras).
+	if len(r.Warnings) > 0 && cur.Steps != nil {
+		redact := p.h.secretRedactor(p.id, p.extra)
+		ws := make([]string, len(r.Warnings))
+		for i, w := range r.Warnings {
+			ws[i] = clipRunes(redact(w), 600)
+		}
+		r.Warnings = ws
+	}
 	for _, w := range cur.Warnings {
 		if !slices.Contains(r.Warnings, w) {
 			r.Warnings = append(r.Warnings, w)
@@ -602,7 +654,9 @@ func (p *Progress) finish(r OpRecord, err error) {
 	r.Running, r.Stopping, r.Stoppable, r.Interrupted = false, false, false, false
 	switch {
 	case stopped:
-		r.OK, r.Error, r.Output, r.Hint, r.Status, r.RolledBack = false, "", "", "", 0, false
+		// A stopped restore rolled back from its pre-restore backup keeps
+		// rolled_back (RolledBack); nothing else does.
+		r.OK, r.Error, r.Output, r.Hint, r.Status, r.RolledBack = false, "", "", "", 0, cur.RolledBack
 	case undoFailed:
 		// The undo failed: Stop again retries it.
 		r.Stoppable = cur.Steps != nil

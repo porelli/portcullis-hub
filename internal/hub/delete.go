@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/portcullis/hub/internal/directory"
@@ -46,13 +47,40 @@ func (h *Hub) SetGroups(g Groups) {
 // "deleting") the same call continues where it stopped, keeping the
 // first backup. Audited as instance.delete.
 func (h *Hub) DeleteInstance(id, confirm string, actor directory.Actor) (res *DeleteResult, err error) {
-	return h.deleteInstance(id, confirm, actor, nil)
+	res = &DeleteResult{}
+	_, _, err = h.runOpSync(id, OpDelete, actor, []Step{}, func(ctx context.Context, ready func()) (map[string]string, []string, error) {
+		var derr error
+		res, derr = h.deleteInstance(ctx, id, confirm, actor, ready)
+		return nil, nil, derr
+	})
+	return res, err
 }
 
-// deleteInstance is DeleteInstance; ready (if set) is called once the
-// request is accepted (typed id, lock held, instance found, actor
-// resolved), before the delete's backup (StartDelete answers 202 then).
-func (h *Hub) deleteInstance(id, confirm string, actor directory.Actor, ready func()) (res *DeleteResult, err error) {
+// Delete step keys (contract §11.7 "Steps per operation"): backup (not
+// on a retry: the first backup is kept), stop, volumes (the point of no
+// return), keycloak, groups, files.
+const (
+	StepBackup = "backup"
+	StepFiles  = "files"
+)
+
+// The op record's Before keys of a delete besides beforeEnabled,
+// beforeState and beforeRunning: the entry's backup and restore_as, and
+// whether the instance had a state entry at all (a default instance may
+// not).
+const (
+	beforeStateBackup = "state_backup"
+	beforeRestoreAs   = "state_restore_as"
+	beforeHadEntry    = "had_entry"
+)
+
+// deleteInstance is the guarded delete StartDelete and DeleteInstance
+// run; ready is called once the request is accepted (typed id, lock
+// held, instance found, actor resolved), before the delete's backup
+// (StartDelete answers 202 then). A Stop accepted before the point of no
+// return (the volumes step) cancels it (settleOp → undoDelete); after
+// it, it runs to its end.
+func (h *Hub) deleteInstance(ctx context.Context, id, confirm string, actor directory.Actor, ready func()) (res *DeleteResult, err error) {
 	res = &DeleteResult{}
 	defer func() {
 		detail := "backup=" + res.Backup
@@ -66,7 +94,7 @@ func (h *Hub) deleteInstance(id, confirm string, actor directory.Actor, ready fu
 	}
 	unlock, err := h.lockApp(id)
 	if err != nil {
-		return res, err
+		return res, h.busyErr(id, err)
 	}
 	defer unlock()
 	// lockApp → aiLock (G35, §15.5): a mint that holds it finishes first
@@ -97,12 +125,34 @@ func (h *Hub) deleteInstance(id, confirm string, actor directory.Actor, ready fu
 			return res, fmt.Errorf("the acting admin %q can't delete the instance's groups — nothing was deleted: %w", actor.User, err)
 		}
 	}
-	if ready != nil {
-		ready()
+	p := progressFrom(ctx)
+	retry := tg.entry.State == state.InstanceDeleting
+	if !retry {
+		p.AddStep(StepBackup, "Backing up")
 	}
+	p.AddStep(StepStop, "Stopping the app")
+	p.AddStep(StepVolumes, "Removing the data")
+	p.AddStep(StepKeycloak, "Sign-in clients in Keycloak")
+	p.AddStep(StepGroups, "Groups")
+	p.AddStep(StepFiles, "Removing its files")
+	ready()
+	err = h.deleteRun(ctx, p, id, actor, tg, res)
+	return res, h.settleOp(id, OpDelete, p, err)
+}
+
+// deleteRun is the accepted delete (caller holds id's lock): the backup
+// and the deleting record (steps 1–2), then deleteSteps.
+func (h *Hub) deleteRun(ctx context.Context, p *Progress, id string, actor directory.Actor, tg *target, res *DeleteResult) (err error) {
 	// The store and env are removed part-way: redact what they hold now.
 	extra, unread := h.redactionSetErr(id)
+	p.Redact(extra)
 	defer func() { err = hideIfUnread(withSecrets(err, extra), unread) }()
+	// What a Stop puts back.
+	p.Before(beforeEnabled, strconv.FormatBool(tg.enabled))
+	p.Before(beforeState, tg.entry.State)
+	p.Before(beforeStateBackup, tg.entry.Backup)
+	p.Before(beforeRestoreAs, tg.entry.RestoreAs)
+	p.Before(beforeHadEntry, strconv.FormatBool(tg.inState))
 	if tg.entry.State == state.InstanceRestoring && tg.entry.RestoreAs != "" {
 		res.Warnings = append(res.Warnings, fmt.Sprintf("%s was being restored from %s and never finished: the delete backup holds its half-restored data", id, tg.entry.RestoreAs))
 	} else if tg.entry.State == state.InstanceRestoring {
@@ -111,9 +161,13 @@ func (h *Hub) deleteInstance(id, confirm string, actor directory.Actor, ready fu
 	if tg.entry.State == state.InstanceDeleting {
 		res.Backup = tg.entry.Backup
 	} else {
-		entry, berr := h.backupLocked(id, BackupDelete, true)
+		p.Start(StepBackup)
+		entry, berr := h.backupCtx(ctx, id, BackupDelete, true)
 		if berr != nil {
-			return res, fmt.Errorf("the backup before the delete failed — nothing was deleted: %w", berr)
+			if cerr := ctx.Err(); cerr != nil {
+				return fmt.Errorf("%v: %w", berr, cerr) // the Stop's undo starts it again
+			}
+			return fmt.Errorf("the backup before the delete failed — nothing was deleted: %w", berr)
 		}
 		res.Backup = entry.Archive
 		if h.testHookDeleteBackedUp != nil {
@@ -129,10 +183,10 @@ func (h *Hub) deleteInstance(id, confirm string, actor directory.Actor, ready fu
 			err := statusErr(409, "model provider %s uses instance %s: delete it or point it at another instance in Settings → AI first (the backup %s was kept)", strings.Join(pointing, ", "), id, entry.Archive)
 			if tg.enabled && tg.view != nil {
 				if serr := h.startAgain(tg.view); serr != nil {
-					return res, fmt.Errorf("%w — and starting %s again failed: %v", err, id, serr)
+					return fmt.Errorf("%w — and starting %s again failed: %v", err, id, serr)
 				}
 			}
-			return res, err
+			return err
 		}
 		e := h.st.Instances[id]
 		if e.ID == "" {
@@ -149,12 +203,20 @@ func (h *Hub) deleteInstance(id, confirm string, actor directory.Actor, ready fu
 		h.mu.Unlock()
 		h.writePolicyLogged()
 		log.Printf("instance %s: deleting (backup %s)", id, entry.Archive)
+		p.Detail(StepBackup, entry.Archive)
+		p.Done(StepBackup)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 	}
-	if err := h.deleteSteps(id, actor, res); err != nil {
-		return res, h.finishOp(id, OpDelete, withSecrets(fmt.Errorf("delete of %s stopped part-way (it stays \"deleting\"; delete again to continue, the backup %s is kept): %w", id, res.Backup, err), extra), false)
+	if err := h.deleteSteps(ctx, p, id, actor, res); err != nil {
+		if isStopErr(err) && p.Stopping() {
+			return err // stopped before the point of no return: undoDelete
+		}
+		return h.finishOp(id, OpDelete, withSecrets(fmt.Errorf("delete of %s stopped part-way (it stays \"deleting\"; delete again to continue, the backup %s is kept): %w", id, res.Backup, err), extra), false)
 	}
 	log.Printf("instance %s deleted (backup %s)", id, res.Backup)
-	return res, nil
+	return nil
 }
 
 // deleteTargets is what a delete of an instance removes (§11.4): its
@@ -268,8 +330,12 @@ func (h *Hub) DeletePlan(id string) ([]string, error) {
 	return append(lines, kept...), nil
 }
 
-// deleteSteps runs steps 3–6 of §11.4. Caller holds the app lock.
-func (h *Hub) deleteSteps(id string, actor directory.Actor, res *DeleteResult) error {
+// deleteSteps runs steps 3–6 of §11.4 (stop, volumes, keycloak, groups,
+// files) into p. Up to the volumes step a Stop (ctx cancelled) ends it
+// with ctx's error; from the volumes step on it is past the point of no
+// return (NoReturn) and runs to its end whatever ctx says. Caller holds
+// the app lock.
+func (h *Hub) deleteSteps(stopCtx context.Context, p *Progress, id string, actor directory.Actor, res *DeleteResult) error {
 	ctx := context.Background()
 	h.mu.RLock()
 	dt := h.deleteTargetsLocked(id)
@@ -288,6 +354,7 @@ func (h *Hub) deleteSteps(id string, actor directory.Actor, res *DeleteResult) e
 	}
 
 	// 3. Project down, then its volumes.
+	p.Start(StepStop)
 	if err := h.stopProject(tg); err != nil {
 		return fmt.Errorf("compose down: %w", err)
 	}
@@ -295,6 +362,19 @@ func (h *Hub) deleteSteps(id string, actor directory.Actor, res *DeleteResult) e
 	h.st.SetEnabled(id, false)
 	h.rebuildLocked()
 	h.saveLocked()
+	h.mu.Unlock()
+	p.Done(StepStop)
+	if err := stopCtx.Err(); err != nil {
+		return err
+	}
+	// The point of no return (§11.4): from the first removal on a Stop is
+	// refused. A Stop accepted first left NoReturn without effect: undone.
+	p.Start(StepVolumes)
+	p.NoReturn()
+	if err := stopCtx.Err(); err != nil {
+		return err
+	}
+	h.mu.Lock()
 	// Its per-person secrets right after the down (§11.4 step 3, F13):
 	// a delete that fails later leaves no credential behind. The project
 	// is down, so no hook runs (§13.16: instance delete revokes at once);
@@ -345,6 +425,8 @@ func (h *Hub) deleteSteps(id string, actor directory.Actor, res *DeleteResult) e
 			}
 		}
 	}
+	p.Done(StepVolumes)
+	p.Start(StepKeycloak)
 
 	// 4. Keycloak: access role and flow, setting claims (with their LLDAP
 	// attributes), clients, forward-auth callbacks.
@@ -406,7 +488,10 @@ func (h *Hub) deleteSteps(id string, actor directory.Actor, res *DeleteResult) e
 		return fmt.Errorf("Keycloak AI scopes: %w", err)
 	}
 
+	p.Done(StepKeycloak)
+
 	// 5. Groups, through the Users & Groups guardrails.
+	p.Start(StepGroups)
 	for _, g := range groups {
 		switch {
 		case g == "":
@@ -427,7 +512,10 @@ func (h *Hub) deleteSteps(id string, actor directory.Actor, res *DeleteResult) e
 		}
 	}
 
+	p.Done(StepGroups)
+
 	// 6. Files, ops record, state; policy and portal.
+	p.Start(StepFiles)
 	for _, p := range []string{h.envPath(id), h.overridePath(id), h.userOverridePath(id), h.opPath(id), h.hostsOpPath(id)} {
 		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("removing %s: %w", p, err)
@@ -468,6 +556,7 @@ func (h *Hub) deleteSteps(id string, actor directory.Actor, res *DeleteResult) e
 	if err := h.WritePolicy(); err != nil {
 		res.Warnings = append(res.Warnings, "the policy file write failed (it is retried with the next change): "+err.Error())
 	}
+	p.Done(StepFiles)
 	h.TriggerReconcile()
 	return nil
 }

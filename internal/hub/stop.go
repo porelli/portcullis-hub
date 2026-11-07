@@ -376,32 +376,7 @@ func (h *Hub) undoEnable(id string, p *Progress) error {
 	}
 	if len(created.Groups) > 0 {
 		steps = append(steps, undoStep{UndoGroups, "Removing the groups it created", []string{StepGroups}, func() error {
-			if groupsAPI == nil {
-				return statusErr(503, "users & groups is not available: groups %s were not deleted", strings.Join(created.Groups, ", "))
-			}
-			missing, err := groupsAPI.MissingInstanceGroups(ctx, created.Groups)
-			if err != nil {
-				return fmt.Errorf("checking groups %s: %w", strings.Join(created.Groups, ", "), err)
-			}
-			for _, g := range created.Groups {
-				if slices.Contains(missing, g) {
-					continue // gone already (a retry)
-				}
-				w, err := groupsAPI.DeleteInstanceGroup(ctx, stopper, g)
-				if err != nil {
-					return fmt.Errorf("deleting group %s as %s: %w", g, stopper.User, err)
-				}
-				for _, x := range w {
-					// Kept because Users & Groups didn't answer: not
-					// done (Stop again retries); kept because it is
-					// protected or shared: done, with the warning.
-					if directory.KeptUnavailable(x) {
-						return statusErr(503, "%s", x)
-					}
-					p.Warn(x)
-				}
-			}
-			return nil
+			return h.undoGroups(ctx, p, groupsAPI, stopper, created.Groups)
 		}})
 	}
 	if err := runUndo(p, rec, steps); err != nil {
@@ -423,6 +398,37 @@ func (h *Hub) undoEnable(id string, p *Progress) error {
 		h.writePolicyLogged()
 	}
 	h.TriggerReconcile()
+	return nil
+}
+
+// undoGroups deletes the ledger's groups through the Users & Groups
+// guardrails as the stopping admin; one gone already is done (a retry).
+func (h *Hub) undoGroups(ctx context.Context, p *Progress, groupsAPI Groups, stopper directory.Actor, names []string) error {
+	if groupsAPI == nil {
+		return statusErr(503, "users & groups is not available: groups %s were not deleted", strings.Join(names, ", "))
+	}
+	missing, err := groupsAPI.MissingInstanceGroups(ctx, names)
+	if err != nil {
+		return fmt.Errorf("checking groups %s: %w", strings.Join(names, ", "), err)
+	}
+	for _, g := range names {
+		if slices.Contains(missing, g) {
+			continue // gone already (a retry)
+		}
+		w, err := groupsAPI.DeleteInstanceGroup(ctx, stopper, g)
+		if err != nil {
+			return fmt.Errorf("deleting group %s as %s: %w", g, stopper.User, err)
+		}
+		for _, x := range w {
+			// Kept because Users & Groups didn't answer: not done (Stop
+			// again retries); kept because it is protected or shared:
+			// done, with the warning.
+			if directory.KeptUnavailable(x) {
+				return statusErr(503, "%s", x)
+			}
+			p.Warn(x)
+		}
+	}
 	return nil
 }
 
@@ -768,6 +774,14 @@ func (h *Hub) undoerFor(op string) func(id string, p *Progress) error {
 		return h.undoRestart
 	case OpAI:
 		return h.undoAI
+	case OpBackup:
+		return h.undoBackup
+	case OpRestore:
+		return h.undoRestore
+	case OpCreate:
+		return h.undoCreate
+	case OpDelete:
+		return h.undoDelete
 	}
 	return nil
 }

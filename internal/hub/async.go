@@ -249,10 +249,12 @@ func newOpID() string {
 
 // StartBackup starts a manual backup of id in the background (§11.7):
 // refusals (busy, deleting / restoring, unknown, no Docker) are returned
-// at once; the archive name is the op record's result "archive".
+// at once; the archive name is the op record's result "archive". Its
+// steps are stop, volume:<key> per volume, archive and start (those that
+// apply); a Stop deletes the partial archive and starts the app again.
 func (h *Hub) StartBackup(id string, actor directory.Actor) (*AsyncOp, error) {
-	return h.startAsync(id, OpBackup, actor, nil, func(_ context.Context, ready func()) (map[string]string, []string, error) {
-		e, err := h.backupInstance(id, actor, ready)
+	return h.startAsync(id, OpBackup, actor, []Step{}, func(ctx context.Context, ready func()) (map[string]string, []string, error) {
+		e, err := h.backupInstance(ctx, id, actor, ready)
 		if e != nil {
 			return map[string]string{"archive": e.Archive}, nil, err
 		}
@@ -261,28 +263,32 @@ func (h *Hub) StartBackup(id string, actor directory.Actor) (*AsyncOp, error) {
 }
 
 // StartRestore starts a same-instance restore in the background; the
-// result holds "pre_restore_backup".
+// result holds "pre_restore_backup". Steps verify, pre_backup, volumes,
+// config, start; a Stop rolls it back from the pre-restore backup.
 func (h *Hub) StartRestore(id, archive string, actor directory.Actor) (*AsyncOp, error) {
-	return h.startAsync(id, OpRestore, actor, nil, func(_ context.Context, ready func()) (map[string]string, []string, error) {
-		res, err := h.restoreInstance(id, archive, actor, ready)
+	return h.startAsync(id, OpRestore, actor, []Step{}, func(ctx context.Context, ready func()) (map[string]string, []string, error) {
+		res, err := h.restoreInstance(ctx, id, archive, actor, ready)
 		return restoreResult(res, archive, ""), restoreWarnings(res), err
 	})
 }
 
 // StartRestoreAs starts a restore into the new instance newID in the
 // background (its op record is newID's); the result holds "instance".
+// Steps verify, instance, groups, volumes, config; a Stop removes the new
+// instance completely.
 func (h *Hub) StartRestoreAs(archive, newID string, actor directory.Actor, hosts map[string]string) (*AsyncOp, error) {
-	return h.startAsync(newID, OpRestore, actor, nil, func(_ context.Context, ready func()) (map[string]string, []string, error) {
-		res, err := h.restoreInstanceAs(archive, newID, actor, hosts, ready)
+	return h.startAsync(newID, OpRestore, actor, []Step{}, func(ctx context.Context, ready func()) (map[string]string, []string, error) {
+		res, err := h.restoreInstanceAs(ctx, archive, newID, actor, hosts, ready)
 		return restoreResult(res, archive, newID), restoreWarnings(res), err
 	})
 }
 
 // StartDelete starts a guarded delete in the background (confirm = the
-// id typed: checked at once); the result holds "backup".
+// id typed: checked at once); the result holds "backup". Steps backup,
+// stop, volumes (the point of no return), keycloak, groups, files.
 func (h *Hub) StartDelete(id, confirm string, actor directory.Actor) (*AsyncOp, error) {
-	return h.startAsync(id, OpDelete, actor, nil, func(_ context.Context, ready func()) (map[string]string, []string, error) {
-		res, err := h.deleteInstance(id, confirm, actor, ready)
+	return h.startAsync(id, OpDelete, actor, []Step{}, func(ctx context.Context, ready func()) (map[string]string, []string, error) {
+		res, err := h.deleteInstance(ctx, id, confirm, actor, ready)
 		if res == nil {
 			return nil, nil, err
 		}

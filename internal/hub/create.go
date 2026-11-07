@@ -21,6 +21,10 @@ type CreateResult struct {
 	Warnings []string `json:"warnings,omitempty"`
 }
 
+// OpCreate is an instance create (POST /api/instances; contract §11.7):
+// steps instance, groups.
+const OpCreate = "create"
+
 // CreateInstanceAs creates instance id of templateID (CreateInstance:
 // state "created", not enabled; hosts nil = the defaults on the main
 // domain) as actor, then its empty access / admin groups users_<id> /
@@ -29,8 +33,40 @@ type CreateResult struct {
 // that already exists is kept with a warning (its members get access);
 // without Users & Groups the groups are a warning. A failure creating a
 // group removes the instance and the groups created so far. Takes the
-// per-instance lock; audited as instance.create.
+// per-instance lock; audited as instance.create. StartCreate's operation
+// run to its end (runOpSync: the same lock, record, steps and Stop; the
+// record is id's).
 func (h *Hub) CreateInstanceAs(templateID, id string, hosts map[string]string, actor directory.Actor) (res *CreateResult, err error) {
+	res = &CreateResult{}
+	_, _, err = h.runOpSync(id, OpCreate, actor, []Step{}, func(ctx context.Context, ready func()) (map[string]string, []string, error) {
+		var cerr error
+		res, cerr = h.createInstance(ctx, templateID, id, hosts, actor, ready)
+		return nil, nil, cerr
+	})
+	return res, err
+}
+
+// StartCreate starts CreateInstanceAs in the background (202, op create,
+// the record is id's): every refusal before the instance exists — a bad
+// or taken id, its collisions, the actor — is answered at once, nothing
+// recorded. The result holds "instance", the warnings are the record's.
+func (h *Hub) StartCreate(templateID, id string, hosts map[string]string, actor directory.Actor) (*AsyncOp, error) {
+	return h.startAsync(id, OpCreate, actor, []Step{}, func(ctx context.Context, ready func()) (map[string]string, []string, error) {
+		res, err := h.createInstance(ctx, templateID, id, hosts, actor, ready)
+		if err != nil {
+			return nil, res.Warnings, err
+		}
+		return map[string]string{"instance": id}, res.Warnings, nil
+	})
+}
+
+// createInstance is the create CreateInstanceAs and StartCreate run: the
+// instance step (CreateInstance) before ready — its refusals are the
+// synchronous answer —, then the groups step, each group created written
+// into the record's Created ledger. A Stop accepted before the commit
+// (the groups done) removes the instance and exactly those groups
+// (settleOp → undoCreate).
+func (h *Hub) createInstance(ctx context.Context, templateID, id string, hosts map[string]string, actor directory.Actor, ready func()) (res *CreateResult, err error) {
 	res = &CreateResult{}
 	defer func() {
 		detail := "template=" + templateID
@@ -53,7 +89,7 @@ func (h *Hub) CreateInstanceAs(templateID, id string, hosts map[string]string, a
 	}
 	unlock, err := h.lockApp(id)
 	if err != nil {
-		return res, err
+		return res, h.busyErr(id, err)
 	}
 	defer unlock()
 
@@ -75,29 +111,53 @@ func (h *Hub) CreateInstanceAs(templateID, id string, hosts map[string]string, a
 			return res, fmt.Errorf("the acting admin %q can't create the instance's groups — nothing was created: %w", actor.User, err)
 		}
 	}
+	p := progressFrom(ctx)
+	p.AddStep(StepInstance, "Creating the instance")
+	if len(groups) > 0 {
+		p.AddStep(StepGroups, "Groups")
+	}
+	// The instance step before the operation is accepted: its refusals
+	// (an id taken, its collisions) are the synchronous answer.
+	p.Start(StepInstance)
 	if err := h.CreateInstance(templateID, id, hosts); err != nil {
 		return res, err
 	}
+	p.Done(StepInstance)
+	ready()
+	err = h.createSteps(ctx, p, templateID, id, groups, groupsAPI, actor, res)
+	return res, h.settleOp(id, OpCreate, p, err)
+}
 
+// createSteps is a create's groups step and commit (caller holds id's
+// lock): a failure creating a group removes the instance and the groups
+// created so far, unless a Stop was accepted first (its undo does).
+func (h *Hub) createSteps(ctx context.Context, p *Progress, templateID, id string, groups []string, groupsAPI Groups, actor directory.Actor, res *CreateResult) error {
 	var created []string
 	undo := func(cause error) error {
+		if !p.CloseStop() {
+			return fmt.Errorf("%v: %w", cause, context.Canceled)
+		}
 		var errs []error
 		for _, g := range created {
 			if _, err := groupsAPI.DeleteInstanceGroup(context.Background(), actor, g); err != nil {
 				errs = append(errs, err)
 			}
 		}
-		h.mu.Lock()
-		delete(h.st.Instances, id)
-		h.rebuildLocked()
-		saveErr := h.st.Save(h.statePath())
-		h.mu.Unlock()
-		if err := errors.Join(append(errs, saveErr)...); err != nil {
+		if err := h.removeNewInstance(id); err != nil {
+			errs = append(errs, err)
+		}
+		if err := errors.Join(errs...); err != nil {
 			return fmt.Errorf("%w — removing the new instance %s again failed too: %v", cause, id, err)
 		}
 		return fmt.Errorf("%w — the new instance %s was removed again", cause, id)
 	}
+	if len(groups) > 0 {
+		p.Start(StepGroups)
+	}
 	for _, g := range groups {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if groupsAPI == nil {
 			res.Warnings = append(res.Warnings, fmt.Sprintf("group %s was not created: users & groups is not available", g))
 			continue
@@ -106,10 +166,23 @@ func (h *Hub) CreateInstanceAs(templateID, id string, hosts map[string]string, a
 		res.Warnings = append(res.Warnings, w...)
 		if made {
 			created = append(created, g)
+			// Written at once: a Stop — also after a Hub restart — deletes
+			// exactly the groups this create made.
+			p.Created(CreatedGroups, g)
 		}
 		if err != nil {
-			return res, undo(fmt.Errorf("creating group %s: %w", g, err))
+			return undo(fmt.Errorf("creating group %s: %w", g, err))
 		}
+	}
+	if len(groups) > 0 {
+		p.Detail(StepGroups, groupsDetail(nil, created, groups))
+	}
+	// The commit gate: a Stop accepted until here removes the instance.
+	if !p.CloseStop() {
+		return context.Canceled
+	}
+	if len(groups) > 0 {
+		p.Done(StepGroups)
 	}
 	// The template's starting rows (seeded by CreateInstance), bound to
 	// the groups just created.
@@ -118,7 +191,7 @@ func (h *Hub) CreateInstanceAs(templateID, id string, hosts map[string]string, a
 		res.InstanceView = v
 	}
 	log.Printf("instance %s of %s created by %s", id, templateID, actor.User)
-	return res, nil
+	return nil
 }
 
 // InstanceView returns one instance as GET /api/instances lists it. A
