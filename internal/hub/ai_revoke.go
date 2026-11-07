@@ -2260,3 +2260,66 @@ func (h *Hub) oweAIRevokeLocked(id string) {
 	a.Companions = next
 	h.st.AIInstances[id] = a
 }
+
+// oweAIRestoredOffLocked: a same-instance restore brought the app's data
+// back, so the people revoked since the backup hold working tokens again
+// whatever the companion's switch. Every app_oauth companion of the
+// template is returned (its replay is marked by markOAuthReplay, outside
+// mu: reconcileOAuthRef replays regardless of the switch), and one the
+// archive had on but that was restored off owes a revoke_all
+// (RevokePending; runPendingAI runs it for an off companion too). Caller
+// holds mu and saves.
+func (h *Hub) oweAIRestoredOffLocked(id string, archived *aiArchive) []string {
+	t := h.findLocked(id)
+	if t == nil {
+		return nil
+	}
+	a := h.st.AIInstances[id]
+	var refs []string
+	next := maps.Clone(a.Companions)
+	changed := false
+	for i := range t.Manifest.AI.MCP {
+		c := &t.Manifest.AI.MCP[i]
+		if c.Identity.Mode != templates.IdentityAppOAuth {
+			continue
+		}
+		refs = append(refs, id+"/"+c.Name)
+		s, ok := a.Companions[c.Name]
+		// An archive whose AI state can't be read (or has none) may have
+		// had it on: owed too (fail closed).
+		hadOn := archived == nil || archived.Companions[c.Name].Enabled
+		if c.Identity.Revoke == "" || !hadOn || (ok && (s.Enabled || s.Pruned)) {
+			continue
+		}
+		if s.Mode == "" {
+			s.Mode = defaultMode(c)
+		}
+		s.RevokePending = true
+		if next == nil {
+			next = map[string]state.AICompanion{}
+		}
+		next[c.Name] = s
+		changed = true
+	}
+	if changed {
+		a.Companions = next
+		if h.st.AIInstances == nil {
+			h.st.AIInstances = map[string]state.AIInstance{}
+		}
+		h.st.AIInstances[id] = a
+	}
+	return refs
+}
+
+// markOAuthReplay marks each app_oauth companion's revoked leavers owed
+// again (a restore) and kicks the reconcile.
+func (h *Hub) markOAuthReplay(refs []string) {
+	for _, ref := range refs {
+		if err := h.oauthSeenSetReplay(ref); err != nil {
+			log.Printf("ai: %s: marking the revoked leavers owed again after a restore failed: %v", ref, err)
+		}
+	}
+	if len(refs) > 0 {
+		h.TriggerAIReconcile()
+	}
+}

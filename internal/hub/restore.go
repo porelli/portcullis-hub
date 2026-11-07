@@ -689,6 +689,14 @@ func (h *Hub) applyRestore(id string, sb *staged, plan []volumePlan, wasEnabled,
 	// revoke_all before they are rendered or listed again (§15.4; run by
 	// the start below, under this restore's AI lock).
 	h.oweAIRevokeLocked(id)
+	// app_oauth companions restored off (archive off, or refused) owe the
+	// revoked leavers' replay too, and a revoke_all when the archive had
+	// them on (final review I3); collected here, the replay marked after mu.
+	archived := sb.ai
+	if sb.aiErr != nil {
+		archived = nil
+	}
+	oauthRefs := h.oweAIRestoredOffLocked(id, archived)
 	// The secrets store as archived (config/settings-secrets.json; none =
 	// no secrets), before the env is written from it.
 	var secretsErr error
@@ -710,6 +718,7 @@ func (h *Hub) applyRestore(id string, sb *staged, plan []volumePlan, wasEnabled,
 		_, voidErr = h.voidCredentialsLocked(id, state.CredentialReasonRestore)
 	}
 	h.mu.Unlock()
+	h.markOAuthReplay(oauthRefs)
 	if err := errors.Join(secretsErr, envErr, saveErr, voidErr); err != nil {
 		return air, err
 	}

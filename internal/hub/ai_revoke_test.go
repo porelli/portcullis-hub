@@ -718,6 +718,66 @@ func TestOAuthRestoreReplay(t *testing.T) {
 	}
 }
 
+// Final review I3: a same-instance restore that ends with the app_oauth
+// companion off still replays the revoked leavers, and owes a revoke_all
+// when the archive had it on.
+func TestOAuthRestoreOffReplay(t *testing.T) {
+	a := oauthT27(t, nil)
+	a.reconcile()
+	a.leave("bob")
+	if got := a.revokeRuns(); len(got) != 1 || !strings.Contains(got[0], `"user":"bob"`) {
+		t.Fatalf("bob's revoke = %q", got)
+	}
+	if err := a.h.SetAISupport(context.Background(), "oauthapp", "oauth", false, root); err != nil {
+		t.Fatal(err)
+	}
+	a.h.Wait()
+	a.reconcile()
+	// The restore: the archive had it on, it is restored off.
+	a.h.mu.Lock()
+	refs := a.h.oweAIRestoredOffLocked("oauthapp", &aiArchive{Companions: map[string]aiArchiveCompanion{"oauth": {Enabled: true, Mode: "read_write"}}})
+	a.h.mu.Unlock()
+	if c := a.companion("oauthapp", "oauth"); c.Enabled || !c.RevokePending {
+		t.Fatalf("restored off = %+v, want off with a revoke_all owed", c)
+	}
+	a.h.markOAuthReplay(refs)
+	if f := a.seenFile(t); !f.Replay["oauthapp/oauth"] {
+		t.Fatalf("no replay owed after a restore that ends off: %+v", f.Replay)
+	}
+	n := len(a.stdins("/revoke"))
+	if err := a.h.RestartApp("oauthapp"); err != nil {
+		t.Fatal(err)
+	}
+	a.h.Wait()
+	if runs := a.stdins("/revoke")[n:]; len(runs) == 0 || !strings.Contains(runs[0], `"revoke_all"`) {
+		t.Fatalf("owed revoke_all = %q", runs)
+	}
+	if c := a.companion("oauthapp", "oauth"); c.RevokePending || c.Enabled {
+		t.Errorf("after the start: %+v", c)
+	}
+	a.reconcile()
+	a.h.Wait()
+	a.reconcile()
+	f := a.seenFile(t)
+	if f.Replay["oauthapp/oauth"] {
+		t.Errorf("replay not run with the companion off: %+v", f.Replay)
+	}
+	found := false
+	for _, in := range a.stdins("/revoke")[n:] {
+		found = found || in == `{"action":"revoke","user":"bob","sub":"`+fakeSub("bob")+`","ids":[]}`
+	}
+	if !found {
+		t.Errorf("bob not revoked again: %q", a.stdins("/revoke")[n:])
+	}
+	// An archive that had it off: nothing owed, the replay still marked.
+	a.h.mu.Lock()
+	refs = a.h.oweAIRestoredOffLocked("oauthapp", &aiArchive{Companions: map[string]aiArchiveCompanion{"oauth": {Mode: "read_write"}}})
+	a.h.mu.Unlock()
+	if c := a.companion("oauthapp", "oauth"); c.RevokePending || len(refs) != 1 {
+		t.Errorf("archive off: %+v, refs %v", c, refs)
+	}
+}
+
 // TestOAuthRestoreAsCopy (T27 fix round 2): a restore into a new id copies
 // the source's people; those outside the new population are unmatched.
 func TestOAuthRestoreAsCopy(t *testing.T) {
