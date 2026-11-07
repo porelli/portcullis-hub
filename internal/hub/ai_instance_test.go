@@ -1472,3 +1472,46 @@ func TestScopeWaitsForOwedRevoke(t *testing.T) {
 		t.Errorf("generic = %v", got)
 	}
 }
+
+// Final review I1: a template prune landing between the plan and the
+// commit is never clobbered by the switch-on (409, Pruned kept); and a
+// companion stamped with another identity mode is neither listed nor
+// rendered.
+func TestAISwitchOnRacesPrune(t *testing.T) {
+	a := newInstAIFixture(t, nil)
+	a.enable(t, "aiapp")
+	a.h.testHookAIBeforeSave = func() {
+		a.h.testHookAIBeforeSave = nil
+		a.h.mu.Lock()
+		ai := a.h.st.AIInstances["aiapp"]
+		ai.Companions = maps.Clone(ai.Companions)
+		if ai.Companions == nil {
+			ai.Companions = map[string]state.AICompanion{}
+		}
+		ai.Companions["tok"] = state.AICompanion{Mode: "read_write", Pruned: true, IdentityMode: "identity_headers", RevokeHook: "old-revoke"}
+		if a.h.st.AIInstances == nil {
+			a.h.st.AIInstances = map[string]state.AIInstance{}
+		}
+		a.h.st.AIInstances["aiapp"] = ai
+		a.h.mu.Unlock()
+	}
+	err := a.h.SetAISupport(context.Background(), "aiapp", "tok", true, root)
+	var se *StatusError
+	if !errors.As(err, &se) || se.Status != 409 || !strings.Contains(err.Error(), "template changed meanwhile") {
+		t.Fatalf("err = %v", err)
+	}
+	if c := a.companion("aiapp", "tok"); c.Enabled || !c.Pruned || c.RevokeHook != "old-revoke" {
+		t.Errorf("prune clobbered: %+v", c)
+	}
+
+	tpl := a.h.Template("aiapp")
+	c := companionOf(tpl, "tok")
+	sw := state.AICompanion{Enabled: true, Mode: c.Modes[0], IdentityMode: "identity_headers"}
+	if c.Identity.Mode == "identity_headers" {
+		sw.IdentityMode = "app_token"
+	}
+	if _, why := companionUsable(tpl, c, sw, 0); why == "" {
+		t.Error("companion stamped with another identity mode is usable")
+	}
+}
+

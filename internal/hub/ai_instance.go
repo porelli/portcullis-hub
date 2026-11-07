@@ -423,6 +423,13 @@ func (h *Hub) updateInstanceAI(ctx context.Context, id string, u InstanceAIUpdat
 		h.mu.Unlock()
 		return nil, statusErr(http.StatusConflict, "AI support was switched on or off meanwhile: try again")
 	}
+	// A template update (pruneAI takes only mu) may have landed since the
+	// plan: the companion gone, its identity changed, or its entry
+	// pruned. Committing the plan would clobber that (final review I1).
+	if err := h.aiPlanStaleLocked(id, changes); err != nil {
+		h.mu.Unlock()
+		return nil, err
+	}
 	if lt := h.findLocked(id); lt != nil && slices.ContainsFunc(changes, func(ch aiChange) bool { return ch.after.Enabled }) {
 		var refuse error
 		if !h.st.AI.Enabled {
@@ -633,6 +640,33 @@ func checkAliasFits(id, companion string) error {
 	if !templates.AliasFits(id, companion) {
 		return statusErr(http.StatusConflict, "the alias %s is longer than one DNS label (%d characters, at most %d): use a shorter instance id",
 			templates.MCPAlias(id, companion), len(templates.MCPAlias(id, companion)), templates.MaxAliasLen)
+	}
+	return nil
+}
+
+// aiPlanStaleLocked: 409 when a change no longer matches the live view —
+// the template gone, the companion gone, its identity mode or revoke hook
+// changed, or its stored entry no longer the one planned from (pruned,
+// flags changed). Caller holds mu.
+func (h *Hub) aiPlanStaleLocked(id string, changes []aiChange) error {
+	stale := statusErr(http.StatusConflict, "the template changed meanwhile: try again")
+	lt := h.findLocked(id)
+	if lt == nil {
+		return stale
+	}
+	cur := h.st.AIInstances[id].Companions
+	for _, ch := range changes {
+		c := companionOf(lt, ch.c.Name)
+		if c == nil || c.Identity.Mode != ch.c.Identity.Mode || c.Identity.Revoke != ch.c.Identity.Revoke {
+			return stale
+		}
+		s, had := cur[ch.c.Name]
+		if s.Mode == "" {
+			s.Mode = defaultMode(ch.c)
+		}
+		if had != ch.hadEntry || s != ch.before {
+			return stale
+		}
 	}
 	return nil
 }

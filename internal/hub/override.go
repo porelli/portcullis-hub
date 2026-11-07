@@ -755,8 +755,8 @@ func exposureLabel(id, k string, mw bool) bool {
 // label, the router's host known, the policy below LoA 3 — any doubt
 // renders nothing, fail closed). Caller holds mu.
 func (h *Hub) companionRenderedLocked(t *templates.Template, c *templates.Companion) bool {
-	if sw := h.st.AIInstances[t.ID].Companions[c.Name]; !t.HasAIMCP() || !sw.Enabled || sw.RevokePending ||
-		c.Identity.Mode == templates.IdentityAppOAuth || !templates.AliasFits(t.ID, c.Name) {
+	if sw := h.st.AIInstances[t.ID].Companions[c.Name]; !t.HasAIMCP() || !sw.Enabled || sw.RevokePending || sw.Pruned ||
+		(sw.IdentityMode != "" && sw.IdentityMode != c.Identity.Mode) || c.Identity.Mode == templates.IdentityAppOAuth || !templates.AliasFits(t.ID, c.Name) {
 		return false
 	}
 	if host := NormalizeHost(t.Hosts[c.Router]); host == "" || !templates.ValidHostname(host) {

@@ -408,6 +408,9 @@ func companionUsable(t *templates.Template, c *templates.Companion, sw state.AIC
 		return "", "its app-side credentials still need a revoke_all"
 	case sw.Pruned:
 		return "", "switched off by a template update"
+	case sw.IdentityMode != "" && sw.IdentityMode != c.Identity.Mode:
+		// Switched on under another identity mode (pruneAI not yet run).
+		return "", "its identity mode changed since it was switched on"
 	case !slices.Contains(c.Modes, sw.Mode):
 		return "", fmt.Sprintf("mode %q is not one of its modes", sw.Mode)
 	case loa < 0 || loa > 2:
