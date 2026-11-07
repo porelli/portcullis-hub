@@ -109,7 +109,7 @@ var accessWidening = map[string]string{
 	"folder_recheck_apply": "D when it accepts a different directory (confirm_different_directory)",
 	"doctor_mute":          "D for a Problem, an ai_credentials_revoking finding or one the report doesn't have (fix round 1 ruling)",
 	// Operation progress (Task 7 security review).
-	"stop_op": "D when the undo turns something back on: a disable's (enable_instance's class), a delete's of an enabled instance, an AI switch-off's (set_ai_support on)",
+	"stop_op": "D when the undo turns something back on: a disable's (enable_instance's class), a delete's of an enabled instance, a same-instance restore's of an enabled instance or once its rollback is armed, an AI switch-off's (set_ai_support on)",
 }
 
 // widensAlways are the D tools whose every call widens access (G37

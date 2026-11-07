@@ -423,6 +423,8 @@ type instEnvOpts struct {
 	cfg    func(*hub.Config)
 	seed   func(*state.AppState)
 	runner compose.Runner // nil: nopRunner
+	// data writes files into the data directory before the Hub loads it.
+	data func(dir string)
 }
 
 func newInstEnvOpts(t *testing.T, root string, o instEnvOpts) *instEnv {
@@ -444,6 +446,9 @@ func newInstEnvOpts(t *testing.T, root string, o instEnvOpts) *instEnv {
 	st.Sources = []state.Source{{Name: "local", Path: src}}
 	if o.seed != nil {
 		o.seed(st)
+	}
+	if o.data != nil {
+		o.data(data)
 	}
 	st.Save(filepath.Join(data, "state.yaml"))
 	eng := newFakeEngine()

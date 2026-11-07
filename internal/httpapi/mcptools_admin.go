@@ -1054,11 +1054,11 @@ func (s *Server) stopOpTool() Tool {
 	t := perCallCtx(admin("stop_op", "Stop an instance's running operation and undo what it did (an enable's containers, volumes, sign-in clients and groups it created; a disable turns the app back on; …). Answers the record (stopping: true); poll with wait_for_op. op_id (from get_op) stops only that operation; it is required when the undo turns something back on (a disable, a delete or restore of an enabled instance, an AI switch-off), which needs your confirmation in the browser. Refused (409, with the record) when nothing runs, the operation is already stopping or changed, or a delete is past its point of no return.",
 		ClassWrite, "POST /api/instances/{id}/op/stop", "op.stop", func(ctx context.Context, a directory.Actor, in stopArgs) (any, error) {
 			if err := instanceIDOK(in.ID); err != nil {
-				return nil, err
+				return nil, s.refuseStop(a, in.ID, err)
 			}
 			expected, err := s.stopExpected(ctx, in)
 			if err != nil {
-				return nil, err
+				return nil, s.refuseStop(a, in.ID, err)
 			}
 			return s.stopOp(a, in.ID, expected)
 		}), s.stopClass, idOf, s.stopConsequences)
@@ -1088,7 +1088,9 @@ func (s *Server) stopClass(ctx context.Context, args json.RawMessage) ToolClass 
 	}
 	rec := s.Hub.LastOp(a.ID)
 	opID := opNone
-	if rec != nil {
+	if rec != nil && rec.OpID != "" {
+		// A record without an op id (finishOp's: hook, hosts, reload,
+		// credentials, drift) is opNone too, never "" (= any).
 		opID = rec.OpID
 	}
 	if m := memoOf(ctx); m != nil {
@@ -1136,10 +1138,17 @@ func (s *Server) undoClass(ctx context.Context, id string, rec *hub.OpRecord) To
 		}
 		return ClassDestructive
 	case hub.OpAI:
+		seen := false
 		for k, v := range rec.Before {
-			if strings.HasPrefix(k, hub.BeforeCompanion) && !strings.HasPrefix(v, "off ") {
-				return ClassDestructive // back on (or unreadable): set_ai_support on
+			if strings.HasPrefix(k, hub.BeforeCompanion) {
+				seen = true
+				if !strings.HasPrefix(v, "off ") {
+					return ClassDestructive // back on (or unreadable): set_ai_support on
+				}
 			}
+		}
+		if !seen {
+			return ClassDestructive // Before not written: unknown, fail closed
 		}
 	}
 	return ClassWrite
@@ -1163,6 +1172,19 @@ func (s *Server) stopExpected(ctx context.Context, a stopArgs) (string, error) {
 		return "", hub.ErrOpChanged
 	}
 	return expected, nil
+}
+
+// refuseStop is a stop_op refusal of Run's own (refusal: an invalid id,
+// an undo needing a confirmation the call didn't get), through the Hub:
+// audited <op>.stop refused, a 409 answered with the current record
+// (recordError), anything else as it is.
+func (s *Server) refuseStop(a directory.Actor, id string, refusal error) error {
+	s.rec("RefuseStop", id)
+	rec, err := s.Hub.RefuseStop(id, a, refusal)
+	if rec != nil && errStatus(err, http.StatusInternalServerError) == http.StatusConflict {
+		return &recordError{err: err, rec: rec}
+	}
+	return err
 }
 
 func idArgsJSON(id string) json.RawMessage {

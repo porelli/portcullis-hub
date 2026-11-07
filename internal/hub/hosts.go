@@ -80,7 +80,8 @@ func (h *Hub) auditOp(actor directory.Actor, action, target, detail string, err 
 	e := directory.AuditEntry{Actor: actor.User, Via: actor.Via, Client: actor.Client, Action: action, Target: target, Detail: actor.AuditDetail(detail), Result: "ok"}
 	if err != nil {
 		inst, _, _ := strings.Cut(target, "/")
-		e.Result, e.Error = "error", h.RedactErr(inst, err)
+		// Redact, then clip (600 runes, as the routes' audits do).
+		e.Result, e.Error = "error", clipRunes(h.RedactErr(inst, err), 600)
 		var se *StatusError
 		var busy ErrBusy
 		if (errors.As(err, &se) && se.Status < 500) || errors.As(err, &busy) {

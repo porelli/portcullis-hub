@@ -494,16 +494,19 @@ func (h *Hub) aiSwitch(ctx context.Context, id string, u InstanceAIUpdate, actor
 	changes = work
 	running := t.Enabled
 	if run.ready != nil {
+		// What a Stop puts back: each companion's {enabled, mode} — set
+		// before ready, so the first record the operation writes (begin)
+		// already holds it: a Stop's caller never sees an AI record
+		// without its Before (the Portcullis MCP's stop_op class).
+		for _, ch := range changes {
+			prog.Before(aiBeforeKey+ch.c.Name, aiBeforeValue(ch.before))
+		}
 		run.ready()
 		if offDetail == aiPolicyOffDetail {
 			// The Hub's own switch-off for a policy that needs mTLS (a
 			// policy save, the LoA-3 reconcile) is never stopped: undone,
 			// it would switch the companion back on where that is refused.
 			prog.CloseStop()
-		}
-		// What a Stop puts back: each companion's {enabled, mode}.
-		for _, ch := range changes {
-			prog.Before(aiBeforeKey+ch.c.Name, aiBeforeValue(ch.before))
 		}
 	}
 	prog.Start(StepRevoke)

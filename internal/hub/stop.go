@@ -855,6 +855,24 @@ func (h *Hub) StopOpExpect(id string, actor directory.Actor, expectedOpID string
 	return out, err
 }
 
+// RefuseStop is a Stop of id refused by its caller before StopOpExpect
+// (the Portcullis MCP's stop_op: an invalid id, an undo that needs a
+// confirmation the call didn't get): audited like StopOp's refusals —
+// <op>.stop refused with the running step (op.stop without a record) —
+// and answered with the current record (nil: none) and why.
+func (h *Hub) RefuseStop(id string, actor directory.Actor, why error) (*OpRecord, error) {
+	var rec *OpRecord
+	if templates.ValidID(id) || templates.InstanceIDRe.MatchString(id) {
+		rec = h.LastOp(id)
+	}
+	if rec == nil {
+		h.auditOp(actor, "op.stop", id, "", why)
+		return nil, why
+	}
+	h.auditOp(actor, rec.Op+".stop", id, stopDetail(*rec), why)
+	return rec, why
+}
+
 func (h *Hub) stopOp(id string, rec OpRecord, actor directory.Actor, expectedOpID string) (*OpRecord, error) {
 	if strings.TrimSpace(actor.User) == "" {
 		return &rec, statusErr(401, "no acting user")

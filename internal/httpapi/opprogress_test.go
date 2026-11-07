@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -506,6 +508,10 @@ func TestStopOpClassFollowsTheUndo(t *testing.T) {
 		if isErr || conf != "" || json.Unmarshal([]byte(txt), &op) != nil || op.Op != "ai" {
 			t.Fatalf("set_ai_support off = %s %v %q", txt, isErr, conf)
 		}
+		// Its Before is in the very first record (written before ready).
+		if r := e.s.Hub.LastOp("aiapp"); r == nil || r.OpID != op.OpID || r.Before[hub.BeforeCompanion+"tok"] != "on read_write" {
+			t.Fatalf("first AI record = %+v", r)
+		}
 		for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
 			e.eng.mu.Lock()
 			n := len(e.eng.calls)
@@ -596,9 +602,57 @@ func TestStopUndoClass(t *testing.T) {
 		{"AI switch-off", "aiapp", &hub.OpRecord{Op: hub.OpAI, Before: before(hub.BeforeCompanion+"tok", "on read_only")}, ClassDestructive},
 		{"AI switch-on", "aiapp", &hub.OpRecord{Op: hub.OpAI, Before: before(hub.BeforeCompanion+"tok", "off read_write")}, ClassWrite},
 		{"AI, unreadable entry", "aiapp", &hub.OpRecord{Op: hub.OpAI, Before: before(hub.BeforeCompanion+"tok", "?")}, ClassDestructive},
+		{"AI, Before not written yet", "aiapp", &hub.OpRecord{Op: hub.OpAI}, ClassDestructive},
 	} {
 		if got := e.s.undoClass(ctx, c.id, c.rec); got != c.want {
 			t.Errorf("%s: %s, want %s", c.name, got, c.want)
 		}
+	}
+
+	// Run's own refusals go through the Hub (fix round 1): audited
+	// <op>.stop refused, a 409 answered with the current record.
+	rec := e.s.Hub.LastOp("aiapp")
+	if rec == nil {
+		t.Fatal("aiapp has no record")
+	}
+	err := e.s.refuseStop(directory.Human("root"), "aiapp", hub.ErrOpChanged)
+	if got := opRecordOf(err); got == nil || got.OpID != rec.OpID || errStatus(err, 500) != 409 {
+		t.Errorf("refuseStop = %v (record %+v)", err, got)
+	}
+	audits := readAudit(t, e.audit)
+	if a := audits[len(audits)-1]; a.Action != rec.Op+".stop" || a.Result != "refused" || a.Target != "aiapp" {
+		t.Errorf("refuseStop audit = %+v", a)
+	}
+	err = e.s.refuseStop(directory.Human("root"), "Bad_ID", badArg("invalid instance id"))
+	audits = readAudit(t, e.audit)
+	if a := audits[len(audits)-1]; errStatus(err, 500) != 400 || a.Action != "op.stop" || a.Result != "refused" {
+		t.Errorf("refuseStop of an invalid id = %v, audit %+v", err, a)
+	}
+}
+
+// A record without an op id (finishOp's: hook, hosts, reload,
+// credentials, drift) is judged as "no operation" (opNone), never as
+// "any": stop_op then stops nothing that starts meanwhile.
+func TestStopClassRecordWithoutOpID(t *testing.T) {
+	e := newInstEnvOpts(t, t.TempDir(), instEnvOpts{data: func(dir string) {
+		os.MkdirAll(filepath.Join(dir, "ops"), 0700)
+		os.WriteFile(filepath.Join(dir, "ops", "grafana.json"), []byte(`{"op":"hook","at":"2026-11-07T10:00:00Z","ok":false,"error":"hook failed"}`), 0600)
+	}})
+	rec := e.s.Hub.LastOp("grafana")
+	if rec == nil || rec.OpID != "" || rec.Op != "hook" {
+		t.Fatalf("seeded record = %+v", rec)
+	}
+	ctx := withCallMemo(context.Background(), &directory.Caller{User: "root", Admin: true})
+	e.s.stopClass(ctx, json.RawMessage(`{"id":"grafana"}`))
+	if got := memoOf(ctx).stopOpID; got != opNone {
+		t.Errorf("classified op id = %q, want opNone", got)
+	}
+	exp, err := e.s.stopExpected(ctx, stopArgs{ID: "grafana"})
+	if err != nil || exp != opNone {
+		t.Fatalf("expected = %q %v, want opNone", exp, err)
+	}
+	// The Hub refuses it (the record isn't operation opNone's).
+	if _, err := e.s.Hub.StopOpExpect("grafana", directory.Human("root"), exp); errStatus(err, 500) != 409 {
+		t.Errorf("StopOpExpect(opNone) = %v, want 409", err)
 	}
 }
