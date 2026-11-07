@@ -1170,7 +1170,7 @@ The Hub cancels the operation (a running compose command is killed, an Engine ca
 
 - **Stopped:** `running: false`, `stopping: false`, `stoppable: false`, `ok: false`, no `error`. A stopped operation is no failure: the instance is not in state `error` and the record is not listed as a failed operation.
 - **Undo failed:** `running: false`, `stopping: false`, `ok: false`, `error` / `hint` / `output` / `status` of the failed undo step (which is `failed`), and `stoppable: true`. The instance is in state `error`. Stop again retries the undo, skipping the undo steps already `done`.
-- **Restart:** a failed or stopped restart leaves an owed restart owed (queued via `TriggerDelivery`), so the app is restarted once a delivery can run (the app not busy, not restoring or deleting).
+- **Restart:** a failed or stopped restart never clears an owed restart (§13.6): only a restart that commits does. A stopped restart's undo brings the app up again with the current files, which applies what was owed; the owed flag stays as a safety net and is queued again at the next Hub start, and so is a failed restart's (it is not retried before then).
 
 | Operation | Stop does | Stop unavailable |
 |---|---|---|
