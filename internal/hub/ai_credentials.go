@@ -198,12 +198,21 @@ func (h *Hub) mint(ctx context.Context, resource, user string) (*MintResult, err
 	if again.Instance != r.Instance || again.Companion != r.Companion || again.Mode != r.Mode {
 		return nil, statusErr(http.StatusNotFound, "not a current app_token companion resource")
 	}
+	// The LLDAP account the person is now (the fresh snapshot): an
+	// existing entry is theirs only when it was minted for that account
+	// (scoped re-review N1). One minted for another account (the name was
+	// deleted and re-created) or with no account recorded is revoked as a
+	// leaver's, then a fresh one is minted (with the sub check).
+	uuid := m.UUIDs[user]
+	rec, recErr := h.credUUIDs()
 	var revoking *aigate.Credential
+	leaver := false
 	for _, e := range h.creds().Entries() {
 		if e.Instance == r.Instance && e.Companion == r.Companion && e.User == user {
-			if e.State == aigate.StateActive {
+			if e.State == aigate.StateActive && recErr == nil && credMintedFor(rec, e, uuid) {
 				return &MintResult{ID: e.ID}, nil
 			}
+			leaver = e.State == aigate.StateActive
 			revoking = &e
 		}
 	}
@@ -230,14 +239,26 @@ func (h *Hub) mint(ctx context.Context, resource, user string) (*MintResult, err
 		h.mu.RLock()
 		sw := h.st.AIInstances[r.Instance].Companions[r.Companion]
 		h.mu.RUnlock()
-		if err := h.revokeTokenEntry(ctx, &t, revokeHookOf(&t, r.Companion, sw), *revoking, actor); err != nil {
+		by := actor
+		if leaver {
+			// Another account's (or an unverifiable) credential: revoked
+			// by the Hub, like a leaver's.
+			by = aiHubActor
+		}
+		if err := h.revokeTokenEntry(ctx, &t, revokeHookOf(&t, r.Companion, sw), *revoking, by); err != nil {
 			h.mintFailed(&t, c, actor, target, err.Error())
 			return nil, errMintFailed(c.Name)
 		}
 	}
+	if recErr != nil {
+		// The account record can't be read: a new credential couldn't be
+		// recorded either (never a credential without it).
+		h.mintFailed(&t, c, actor, target, recErr.Error())
+		return nil, errMintFailed(c.Name)
+	}
 	// The person's Keycloak id, from the fresh snapshot's LLDAP uuid
 	// (LDAP_ID checked): never a mint without one.
-	sub, err := h.lookupSub(ctx, user, m.UUIDs[user])
+	sub, err := h.lookupSub(ctx, user, uuid)
 	if err != nil {
 		log.Printf("ai: %s: mint for %s: the Keycloak id lookup failed: %v", target, user, err)
 		h.mintFailed(&t, c, actor, target, errMintNoSub)
@@ -277,6 +298,16 @@ func (h *Hub) mint(ctx context.Context, resource, user string) (*MintResult, err
 		// The app holds a credential nobody can use: its id (never the
 		// credential) is recorded for the reconcile, then revoked now.
 		h.revokeOrphan(ctx, &t, c, user, id)
+		return nil, errMintFailed(c.Name)
+	}
+	stored := aigate.Credential{Instance: r.Instance, Companion: r.Companion, User: user, ID: id, State: aigate.StateActive}
+	if err := h.recordCredUUID(stored, uuid); err != nil {
+		// Never an entry without its account: revoked at once (the
+		// reconcile retries a failure: unrecorded entries are leavers').
+		h.mintFailed(&t, c, actor, target, "the credential's account couldn't be recorded: "+err.Error())
+		if rerr := h.revokeTokenEntry(ctx, &t, c.Identity.Revoke, stored, aiHubActor); rerr != nil {
+			log.Printf("ai: %s: revoking the unrecorded credential %s failed (the reconcile retries): %v", target, id, rerr)
+		}
 		return nil, errMintFailed(c.Name)
 	}
 	h.clearMintError(r.Instance, c)

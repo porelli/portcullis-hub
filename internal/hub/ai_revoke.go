@@ -995,6 +995,9 @@ type tokenWork struct {
 func (h *Hub) tokenWork(entries []aigate.Credential, m *directory.Membership) map[string][]tokenWork {
 	now := time.Now()
 	out := map[string][]tokenWork{}
+	// The account each entry was minted for (N1): read before mu; an
+	// unreadable record leaves every entry unverifiable.
+	rec, recErr := h.credUUIDs()
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	type key struct{ id, name string }
@@ -1026,6 +1029,16 @@ func (h *Hub) tokenWork(entries []aigate.Credential, m *directory.Membership) ma
 		}
 		if known[k] && !holders[k][e.User] {
 			out[e.Instance] = append(out[e.Instance], tokenWork{e, hook})
+			continue
+		}
+		// A holder by name whose LLDAP account isn't the one the entry was
+		// minted for (deleted and re-created, or never recorded): the
+		// former person's credential, a leaver's. A current account LLDAP
+		// gives no uuid for proves nothing either way.
+		if known[k] && m != nil {
+			if cur := m.UUIDs[e.User]; cur != "" && (recErr != nil || !credMintedFor(rec, e, cur)) {
+				out[e.Instance] = append(out[e.Instance], tokenWork{e, hook})
+			}
 		}
 	}
 	return out

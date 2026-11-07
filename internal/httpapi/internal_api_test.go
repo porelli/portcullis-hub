@@ -908,3 +908,67 @@ func TestMintNeedsCheckedSub(t *testing.T) {
 		t.Errorf("LastError after a good mint = %q", got)
 	}
 }
+
+// Scoped re-review N1: a credential entry belongs to the LLDAP account it
+// was minted for. A name deleted and re-created (another uuid) never gets
+// the former person's credential: the mint revokes it (a leaver's) and
+// mints a fresh one; an entry with no account recorded is revoked and
+// re-minted too; the reconcile revokes a re-created name's entry on its
+// own.
+func TestMintRecreatedNameNeverGetsOldCredential(t *testing.T) {
+	e := newMCPEnv(t, nil)
+	mint := func(id string) {
+		t.Helper()
+		e.eng.script(mintAnswer(`{"credential":"cred-` + id + `-value","id":"` + id + `"}`))
+		if c, b := e.post(t, "/internal/credentials", e.mintBody("alice")); c != 200 || b != `{"id":"`+id+`"}` {
+			t.Fatalf("mint = %d %s, want id %s", c, b, id)
+		}
+	}
+	entry := func() (string, string) {
+		t.Helper()
+		f := e.creds(t)
+		if len(f.Credentials) != 1 {
+			t.Fatalf("credentials = %+v", f.Credentials)
+		}
+		return f.Credentials[0].ID, string(f.Credentials[0].State)
+	}
+	revokes := func() []string { return e.eng.runs("/revoke") }
+	mint("7")
+	// Same account again: the entry, no hook.
+	n := len(e.eng.runs("/mint"))
+	if c, b := e.post(t, "/internal/credentials", e.mintBody("alice")); c != 200 || b != `{"id":"7"}` || len(e.eng.runs("/mint")) != n {
+		t.Fatalf("same account = %d %s", c, b)
+	}
+	// alice deleted and re-created (a new uuid), still in users_aiapp.
+	e.ll.AddUser("alice", "alice@example.org", "Alice", "")
+	r0 := len(revokes())
+	mint("8")
+	if got := revokes()[r0:]; len(got) != 1 || got[0] != `{"action":"revoke","user":"alice","ids":["7"]}` {
+		t.Errorf("former person's credential revoke = %q", got)
+	}
+	if id, st := entry(); id != "8" || st != string(aigate.StateActive) {
+		t.Errorf("entry = %s %s, want the new person's 8", id, st)
+	}
+	// No account recorded: unverifiable, revoked and re-minted.
+	if err := os.Remove(filepath.Join(e.data, "ai", "credential-uuids.json")); err != nil {
+		t.Fatal(err)
+	}
+	r0 = len(revokes())
+	mint("9")
+	if got := revokes()[r0:]; len(got) != 1 || got[0] != `{"action":"revoke","user":"alice","ids":["8"]}` {
+		t.Errorf("unrecorded credential revoke = %q", got)
+	}
+	if id, _ := entry(); id != "9" {
+		t.Errorf("entry = %s, want 9", id)
+	}
+	// The reconcile alone: re-created again, the entry is a leaver's.
+	e.ll.AddUser("alice", "alice@example.org", "Alice", "")
+	r0 = len(revokes())
+	e.s.Hub.ReconcileAICredentials(context.Background())
+	if got := revokes()[r0:]; len(got) != 1 || got[0] != `{"action":"revoke","user":"alice","ids":["9"]}` {
+		t.Errorf("reconcile revoke = %q", got)
+	}
+	if f := e.creds(t); len(f.Credentials) != 0 {
+		t.Errorf("credentials after the reconcile = %+v", f.Credentials)
+	}
+}

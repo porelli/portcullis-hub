@@ -665,6 +665,11 @@ func TestCredentialsEncryptedHubCantRead(t *testing.T) {
 	if !bytes.Equal(plain, make([]byte, len(plain))) {
 		t.Error("plaintext not zeroed")
 	}
+	// Minted for alice's account (N1: otherwise the policy pass's leaver
+	// judgement marks it revoking).
+	if err := g.h.recordCredUUID(aigate.Credential{Instance: "gitea", Companion: "gitea", User: "alice", ID: "7"}, "uuid-alice"); err != nil {
+		t.Fatal(err)
+	}
 	if err := g.h.WritePolicy(); err != nil { // the caller secret
 		t.Fatal(err)
 	}

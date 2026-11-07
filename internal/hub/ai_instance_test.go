@@ -356,6 +356,10 @@ func (a *instAIFixture) putCred(t *testing.T, id, companion, user string) {
 	if err := a.h.creds().Put(aigate.Credential{Instance: id, Companion: companion, User: user, ID: "7", MintedAt: aigate.At(time.Now())}, []byte("app-credential-value")); err != nil {
 		t.Fatal(err)
 	}
+	// Minted for the fake directory's account of user (N1).
+	if err := a.h.recordCredUUID(aigate.Credential{Instance: id, Companion: companion, User: user, ID: "7"}, "uuid-"+user); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func (a *instAIFixture) credsOf(id, companion string) []aigate.Credential {
