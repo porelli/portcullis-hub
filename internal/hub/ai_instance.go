@@ -29,10 +29,13 @@ import (
 //
 // A switch-on runs revoke_all → state saved → scopes ensured and
 // attached → gate files → override + compose up (enabled instance) →
-// on_change; a switch-off reverses it (state → scopes → gate files →
-// override + up → revoke_all → entries removed → on_change false); a mode
-// change runs revoke_all before anything else. A failure before the
-// state save changes nothing (a revoke_all failure is a 502); a failure
+// on_change; a switch-off reverses it (revoke_all → entries removed →
+// state → scopes → gate files → override + up → on_change false; an
+// app_oauth companion's revoke_all, or one that failed before the save,
+// runs after the up); a mode change runs revoke_all before anything else.
+// A hook that runs right after the up waits for its service to answer
+// (runAIHookAfterUp). A failure before the state save changes nothing (a
+// switch-on's or mode change's revoke_all failure is a 502); a failure
 // after it is an OpError (op ai), and the same request re-applies every
 // step after the save. On a disabled instance only state (and the
 // state-derived scopes and gate file) changes: no hook, no compose.
@@ -206,6 +209,9 @@ type aiChange struct {
 	alias      string
 	needsAlias bool
 	scope      string // the companion's mcp:* scope name
+	// revoked: a switch-off's revoke_all already ran before the save,
+	// while the app still ran as it was (nothing owed after the up).
+	revoked bool
 }
 
 func (ch aiChange) switchingOn() bool  { return !ch.before.Enabled && ch.after.Enabled }
@@ -364,10 +370,19 @@ func (h *Hub) updateInstanceAI(ctx context.Context, id string, u InstanceAIUpdat
 	defer h.aiApplying.Delete(id)
 
 	// revoke_all before every switch-on and every mode change (G34): a
-	// failure is a 502 and nothing changes. On a stopped instance no hook
-	// can run: the companion's Hub-side entries are dropped at once and
-	// revoke_all (and on_change) is owed — RevokePending / OnChangePending,
-	// run by the next start, before the companion is rendered or listed.
+	// failure is a 502 and nothing changes. A switch-off's revoke_all runs
+	// here too, while the app still runs as it was and answers its hooks
+	// (the up below recreates it, and a recreated app may not listen for
+	// a while): this request holds aiLock, and a mint takes it and
+	// re-checks the state, so no new credential appears before the save.
+	// A failure there doesn't stop the switch-off: the revoke_all is owed
+	// (RevokePending at the commit) and run again after the up. Not for
+	// app_oauth: the app itself grants its tokens while it runs with the
+	// companion on, so its revoke_all runs after the up that switches the
+	// app's side off. On a stopped instance no hook can run: the
+	// companion's Hub-side entries are dropped at once and revoke_all
+	// (and on_change) is owed — RevokePending / OnChangePending, run by
+	// the next start, before the companion is rendered or listed.
 	for i := range changes {
 		ch := &changes[i]
 		switched := ch.switchingOn() || ch.switchingOff() || ch.modeChanged()
@@ -386,10 +401,17 @@ func (h *Hub) updateInstanceAI(ctx context.Context, id string, u InstanceAIUpdat
 				ch.after.OnChangePending = true
 			}
 		case ch.c.Identity.Revoke != "" && (ch.switchingOn() || ch.modeChanged()):
-			if err := h.revokeAll(ctx, t, ch.c); err != nil {
+			if err := h.revokeAll(ctx, t, ch.c, false); err != nil {
 				h.setAIError(id, ch.c.Name, err.Error())
 				return nil, h.finishOp(id, OpAI, err, false)
 			}
+			ch.after.RevokePending = false
+		case ch.c.Identity.Revoke != "" && ch.switchingOff() && ch.c.Identity.Mode != templates.IdentityAppOAuth:
+			if err := h.revokeAll(ctx, t, ch.c, false); err != nil {
+				log.Printf("ai: %s/%s: revoke_all before the switch-off failed (run again after the up): %v", id, ch.c.Name, err)
+				continue
+			}
+			ch.revoked = true
 			ch.after.RevokePending = false
 		}
 	}
@@ -403,7 +425,7 @@ func (h *Hub) updateInstanceAI(ctx context.Context, id string, u InstanceAIUpdat
 			if ch.owed || ch.modeOnly {
 				continue
 			}
-			if ch.c.Identity.Revoke != "" && !ch.after.Enabled && (ch.switchingOff() || ch.reapply) {
+			if ch.c.Identity.Revoke != "" && !ch.after.Enabled && (ch.switchingOff() || ch.reapply) && !ch.revoked {
 				ch.after.RevokePending = true
 			}
 			ch.after.OnChangePending = t.Manifest.AI.OnChange != ""
@@ -521,8 +543,8 @@ func (h *Hub) updateInstanceAI(ctx context.Context, id string, u InstanceAIUpdat
 				continue // runPendingAI below
 			}
 			var cerrs []error
-			if ch.c.Identity.Revoke != "" && (ch.switchingOff() || (ch.reapply && !ch.after.Enabled)) {
-				if err := h.revokeAll(ctx, t, ch.c); err != nil {
+			if ch.c.Identity.Revoke != "" && (ch.switchingOff() || (ch.reapply && !ch.after.Enabled)) && !ch.revoked {
+				if err := h.revokeAll(ctx, t, ch.c, true); err != nil {
 					cerrs = append(cerrs, err)
 					if serr := h.setAIPending(id, ch.c.Name, pendRevoke, true); serr != nil {
 						cerrs = append(cerrs, serr)
@@ -966,14 +988,16 @@ type aiOnChangeIn struct {
 // revokeAll runs c's revoke hook with revoke_all (none: nothing to do —
 // identity_headers holds no credential): the companion's entries marked
 // revoking first, removed only after success. A failure is a 502 with
-// the redacted stderr.
-func (h *Hub) revokeAll(ctx context.Context, t *templates.Template, c *templates.Companion) error {
+// the redacted stderr. afterUp: a compose up has just recreated or
+// started the app, so the hook waits for its service first
+// (runAIHookAfterUp).
+func (h *Hub) revokeAll(ctx context.Context, t *templates.Template, c *templates.Companion, afterUp bool) error {
 	if c.Identity.Revoke == "" {
 		return nil
 	}
 	// app_oauth: everyone's AI clients' tokens are revoked; oauth-seen.json
 	// is kept (T27: recorded people who leave still get their own revoke).
-	return h.revokeAllWith(ctx, t, c.Name, c.Identity.Revoke)
+	return h.revokeAllRun(ctx, t, c.Name, c.Identity.Revoke, afterUp)
 }
 
 // dropAIEntries removes every Hub-side credential entry of a companion
@@ -985,7 +1009,7 @@ func (h *Hub) dropAIEntries(id, companion string) error {
 	}
 	for _, e := range entries {
 		if e.Instance == id && e.Companion == companion {
-			if err := h.creds().Remove(e.Instance, e.Companion, e.User); err != nil {
+			if err := h.removeCred(e.Instance, e.Companion, e.User); err != nil {
 				return statusErr(http.StatusInternalServerError, "companion %s: dropping its credentials: %v", companion, err)
 			}
 		}
@@ -1087,7 +1111,7 @@ func (h *Hub) runPendingAI(ctx context.Context, t *templates.Template, skip map[
 	for _, c := range pending {
 		s := states[c.Name]
 		if s.RevokePending {
-			if rerr := h.revokeAll(ctx, t, c); rerr != nil {
+			if rerr := h.revokeAll(ctx, t, c, true); rerr != nil {
 				log.Printf("ai: %s/%s: the owed revoke_all failed (the companion stays off): %v", t.ID, c.Name, rerr)
 				h.setAIError(t.ID, c.Name, rerr.Error())
 				errs = append(errs, rerr)
@@ -1186,7 +1210,10 @@ func (h *Hub) pendingAIAfterStart(t *templates.Template) {
 	}
 }
 
-// onChange runs the template's ai.on_change hook (none: nothing).
+// onChange runs the template's ai.on_change hook (none: nothing). It
+// always runs right after a compose up (the app is told what its new
+// configuration allows), so it waits for its service first
+// (runAIHookAfterUp).
 func (h *Hub) onChange(ctx context.Context, t *templates.Template, c *templates.Companion, s state.AICompanion) error {
 	if t.Manifest.AI.OnChange == "" {
 		return nil
@@ -1203,7 +1230,7 @@ func (h *Hub) onChange(ctx context.Context, t *templates.Template, c *templates.
 	enabled := s.Enabled && live.Enabled && !live.RevokePending && h.aiOnLocked(lt)
 	h.mu.RUnlock()
 	stdin, _ := json.Marshal(aiOnChangeIn{Action: "on_change", Enabled: enabled, Mode: s.Mode, Companion: c.Name})
-	out, u := h.runAIHook(ctx, t, t.Manifest.AI.OnChange, stdin)
+	out, u := h.runAIHookAfterUp(ctx, t, t.Manifest.AI.OnChange, stdin)
 	clear(out)
 	if !u.OK {
 		return &StatusError{Status: http.StatusBadGateway, Err: fmt.Errorf("companion %s: on_change failed: %s", c.Name, u.Error)}
@@ -1228,6 +1255,13 @@ func (h *Hub) runAIHook(ctx context.Context, t *templates.Template, name string,
 // run to an exit — not found, no container, an Engine error or a
 // timeout).
 func (h *Hub) runAIHookExit(ctx context.Context, t *templates.Template, name string, stdin []byte) (stdout []byte, exit int, res UnitResult) {
+	stdout, exit, res, _ = h.execAIHook(ctx, t, name, stdin)
+	return stdout, exit, res
+}
+
+// execAIHook is runAIHookExit with whether the run timed out (the
+// process may still run: never repeated).
+func (h *Hub) execAIHook(ctx context.Context, t *templates.Template, name string, stdin []byte) (stdout []byte, exit int, res UnitResult, timedOut bool) {
 	exit = -1
 	res = UnitResult{Unit: "ai:" + name, At: time.Now().UTC()}
 	var hk *templates.Hook
@@ -1238,21 +1272,21 @@ func (h *Hub) runAIHookExit(ctx context.Context, t *templates.Template, name str
 	}
 	if hk == nil {
 		res.Error = fmt.Sprintf("hook %s: not an ai hook of the template", clip(name, 64))
-		return nil, exit, res
+		return nil, exit, res, false
 	}
 	if h.engine == nil {
 		res.Error = fmt.Sprintf("hook %s: no Docker engine", name)
-		return nil, exit, res
+		return nil, exit, res, false
 	}
 	cs, _, err := h.appContainers(ctx, t)
 	if err != nil {
 		res.Error = clipRunes(h.secretRedactor(t.ID)(fmt.Sprintf("hook %s: listing the %s containers: %v", name, hk.Service, err)), unitErrorMax)
-		return nil, exit, res
+		return nil, exit, res, false
 	}
 	c := runningContainer(cs, hk.Service)
 	if c == nil {
 		res.Error = fmt.Sprintf("hook %s: no running container of service %s", name, hk.Service)
-		return nil, exit, res
+		return nil, exit, res, false
 	}
 	r, err := h.engine.ExecStdinSplit(ctx, c.ID, docker.ExecInput{Cmd: slices.Clone(hk.Command), User: hk.User, Stdin: append(slices.Clone(stdin), '\n'), Timeout: hk.EffectiveTimeout()})
 	var why string
@@ -1268,7 +1302,7 @@ func (h *Hub) runAIHookExit(ctx context.Context, t *templates.Template, name str
 		why = fmt.Sprintf("exited %d", r.ExitCode)
 	default:
 		res.OK, res.Message = true, "exit 0"
-		return r.Stdout, 0, res
+		return r.Stdout, 0, res, false
 	}
 	var out, errText []byte
 	if r != nil {
@@ -1281,7 +1315,7 @@ func (h *Hub) runAIHookExit(ctx context.Context, t *templates.Template, name str
 		msg += ": stderr: " + s
 	}
 	res.Error = clipRunes(redact(msg), unitErrorMax)
-	return nil, exit, res
+	return nil, exit, res, r != nil && r.TimedOut
 }
 
 // stdoutPieces are the redaction values of a hook's stdout: the whole of

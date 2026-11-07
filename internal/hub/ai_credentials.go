@@ -499,7 +499,7 @@ func (h *Hub) dropInstanceAIEntries(id string) error {
 	}
 	for _, e := range entries {
 		if e.Instance == id {
-			if err := h.creds().Remove(e.Instance, e.Companion, e.User); err != nil {
+			if err := h.removeCred(e.Instance, e.Companion, e.User); err != nil {
 				return err
 			}
 		}

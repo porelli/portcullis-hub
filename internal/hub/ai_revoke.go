@@ -277,7 +277,7 @@ func (h *Hub) revokeTokenEntry(ctx context.Context, t *templates.Template, hook 
 		h.revokeAudit(actor, key, target, detail, err)
 		return err
 	}
-	if err := h.creds().Remove(e.Instance, e.Companion, e.User); err != nil {
+	if err := h.removeCred(e.Instance, e.Companion, e.User); err != nil {
 		err = fmt.Errorf("companion %s: removing the revoked credential %s: %v", e.Companion, e.ID, err)
 		h.revokeAudit(actor, key, target, detail, err)
 		return err
@@ -708,6 +708,12 @@ func (h *Hub) setPrunedProblem(target, msg string) {
 // entries marked revoking first, removed after success (an app_oauth
 // companion's oauth-seen record is kept). Caller holds the AI lock.
 func (h *Hub) revokeAllWith(ctx context.Context, t *templates.Template, name, hook string) error {
+	return h.revokeAllRun(ctx, t, name, hook, false)
+}
+
+// revokeAllRun is revokeAllWith; afterUp: the hook runs right after a
+// compose up recreated or started the app (runAIHookAfterUp).
+func (h *Hub) revokeAllRun(ctx context.Context, t *templates.Template, name, hook string, afterUp bool) error {
 	var mine []aigate.Credential
 	for _, e := range h.creds().Entries() {
 		if e.Instance == t.ID && e.Companion == name {
@@ -720,13 +726,17 @@ func (h *Hub) revokeAllWith(ctx context.Context, t *templates.Template, name, ho
 		}
 	}
 	stdin, _ := json.Marshal(aiRevokeAllIn{Action: "revoke_all", Prefix: templates.AIClientPrefix})
-	out, u := h.runAIHook(ctx, t, hook, stdin)
+	run := h.runAIHook
+	if afterUp {
+		run = h.runAIHookAfterUp
+	}
+	out, u := run(ctx, t, hook, stdin)
 	clear(out)
 	if !u.OK {
 		return &StatusError{Status: http.StatusBadGateway, Err: fmt.Errorf("companion %s: revoke_all failed: %s", name, u.Error)}
 	}
 	for _, e := range mine {
-		if err := h.creds().Remove(e.Instance, e.Companion, e.User); err != nil {
+		if err := h.removeCred(e.Instance, e.Companion, e.User); err != nil {
 			return statusErr(http.StatusInternalServerError, "companion %s: removing its revoked credentials: %v", name, err)
 		}
 	}
@@ -2348,4 +2358,64 @@ func (h *Hub) markOAuthReplay(refs []string) {
 	if len(refs) > 0 {
 		h.TriggerAIReconcile()
 	}
+}
+
+// ForgetDeletedPerson is the AI part of a person's deletion through the
+// Hub (the directory's UserDeleted, after the LLDAP delete): a person
+// recorded in connections-seen.json has every AI client's consent and
+// offline sessions removed (none are left when Keycloak's copy went with
+// the account), then is dropped from the record (task 32 concern 2: with
+// the master switch off the reconcile keeps the record, so a deleted
+// person stayed listed). A failure keeps them recorded — the reconcile
+// retries while AI is on — and is returned as a warning. Their credential
+// entries are revoked by the reconcile (a leaver), which drops their
+// records (removeCred). Never holds mu or aiStoreMu across a Keycloak call.
+func (h *Hub) ForgetDeletedPerson(ctx context.Context, actor directory.Actor, user string) []string {
+	user = strings.ToLower(user)
+	aiStoreMu.Lock()
+	f := connSeenFile{Version: 1, People: []string{}}
+	err := h.readAIStore(connSeenName, &f)
+	aiStoreMu.Unlock()
+	if err != nil {
+		log.Printf("ai: %s: %v", connSeenName, err)
+		return []string{fmt.Sprintf("checking %s's AI connections: %s: %v", user, connSeenName, err)}
+	}
+	if !slices.Contains(f.People, user) {
+		return nil
+	}
+	kc := h.aiConnector()
+	if kc == nil {
+		return []string{fmt.Sprintf("%s's AI connections were not checked (Keycloak's AI calls are not configured): they stay recorded", user)}
+	}
+	var errs []error
+	for _, cl := range h.aiClientIDs() {
+		if err := revokeConnection(ctx, kc, user, cl); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if err := errors.Join(errs...); err != nil {
+		h.auditAI(actor, "ai.connection.revoke", user, "person deleted", err)
+		return []string{fmt.Sprintf("removing %s's AI connections failed (retried by the AI reconcile while AI is on): %v", user, err)}
+	}
+	h.auditAI(actor, "ai.connection.revoke", user, "person deleted", nil)
+	aiStoreMu.Lock()
+	defer aiStoreMu.Unlock()
+	f = connSeenFile{Version: 1, People: []string{}}
+	if err := h.readAIStore(connSeenName, &f); err != nil {
+		return []string{fmt.Sprintf("dropping %s from %s: %v", user, connSeenName, err)}
+	}
+	next := slices.DeleteFunc(slices.Clone(f.People), func(u string) bool { return u == user })
+	if len(next) == len(f.People) {
+		return nil
+	}
+	if err := h.writeAIStore(connSeenName, connSeenFile{Version: 1, People: next}); err != nil {
+		return []string{fmt.Sprintf("dropping %s from %s: %v", user, connSeenName, err)}
+	}
+	return nil
+}
+
+// PersonDeleted is the directory's UserDeleted: the person's entered
+// values (PurgePersonValues), then their AI records (ForgetDeletedPerson).
+func (h *Hub) PersonDeleted(ctx context.Context, actor directory.Actor, user string) []string {
+	return append(h.PurgePersonValues(ctx, actor, user), h.ForgetDeletedPerson(ctx, actor, user)...)
 }

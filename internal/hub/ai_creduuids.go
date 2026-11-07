@@ -2,6 +2,7 @@ package hub
 
 import (
 	"fmt"
+	"log"
 	"strings"
 
 	"github.com/portcullis/hub/internal/aigate"
@@ -87,4 +88,49 @@ func (h *Hub) recordCredUUID(e aigate.Credential, uuid string) error {
 func credMintedFor(rec map[string]credUUID, e aigate.Credential, current string) bool {
 	r, ok := rec[credUUIDKey(e)]
 	return ok && r.ID == e.ID && r.UUID != "" && current != "" && strings.EqualFold(r.UUID, current)
+}
+
+// pruneCredUUIDs drops the records of entries the store no longer has —
+// a credential revoked or dropped, a deleted instance's — by the rule
+// recordCredUUID applies (task 32 concern 2: they stayed until the next
+// mint). An unreadable file is never replaced (an error).
+func (h *Hub) pruneCredUUIDs() error {
+	aiStoreMu.Lock()
+	defer aiStoreMu.Unlock()
+	rec, err := h.credUUIDsLocked()
+	if err != nil {
+		return err
+	}
+	entries, err := h.creds().EntriesErr()
+	if err != nil {
+		return err
+	}
+	keep := map[string]bool{}
+	for _, c := range entries {
+		keep[credUUIDKey(c)] = true
+	}
+	changed := false
+	for k := range rec {
+		if !keep[k] {
+			delete(rec, k)
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	return h.writeAIStore(credUUIDsName, credUUIDFile{Version: 1, Entries: rec})
+}
+
+// removeCred removes one credential entry, then the records of entries
+// gone (pruneCredUUIDs; its failure is only logged: a record without its
+// entry is never used).
+func (h *Hub) removeCred(instance, companion, user string) error {
+	if err := h.creds().Remove(instance, companion, user); err != nil {
+		return err
+	}
+	if err := h.pruneCredUUIDs(); err != nil {
+		log.Printf("ai: %s: dropping the records of removed credentials: %v", credUUIDsName, err)
+	}
+	return nil
 }

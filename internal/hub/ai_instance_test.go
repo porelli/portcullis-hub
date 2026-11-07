@@ -1391,6 +1391,8 @@ func TestOwedOnChangeAfterStoppedSwitchOff(t *testing.T) {
 
 // R2-1: on a running instance the hooks that run after the up are owed
 // in the same commit: a crash right after the save leaves the flags.
+// Task 32: a switch-off's revoke_all runs before the save (nothing owed
+// for it); one that failed there runs after the up, so it is owed.
 func TestOwedFlagsPersistedAtCommit(t *testing.T) {
 	a := newInstAIFixture(t, nil)
 	a.enable(t, "aiapp")
@@ -1398,6 +1400,7 @@ func TestOwedFlagsPersistedAtCommit(t *testing.T) {
 		t.Fatal(err)
 	}
 	var atCommit state.AICompanion
+	var revokesAtCommit int
 	a.h.testHookAIAfterSave = func() {
 		st, err := state.Load(a.h.statePath())
 		if err != nil {
@@ -1405,12 +1408,35 @@ func TestOwedFlagsPersistedAtCommit(t *testing.T) {
 			return
 		}
 		atCommit = st.AIInstances["aiapp"].Companions["tok"]
+		revokesAtCommit = len(a.stdins("/revoke"))
 	}
+	revokes := len(a.stdins("/revoke"))
 	if err := a.h.SetAISupport(context.Background(), "aiapp", "tok", false, root); err != nil {
 		t.Fatal(err)
 	}
+	if atCommit.RevokePending || !atCommit.OnChangePending || atCommit.Enabled || revokesAtCommit != revokes+1 {
+		t.Errorf("stored at the commit = %+v after %d revoke_all, want on_change owed after the one revoke_all", atCommit, revokesAtCommit-revokes)
+	}
+	if c := a.companion("aiapp", "tok"); c.RevokePending || c.OnChangePending {
+		t.Errorf("flags kept after the hooks ran: %+v", c)
+	}
+	// A revoke_all failing before the save: both owed at the commit.
+	if err := a.h.SetAISupport(context.Background(), "aiapp", "tok", true, root); err != nil {
+		t.Fatal(err)
+	}
+	a.failHook("/revoke", 7, "curl: (7) Failed to connect\n")
+	if err := a.h.SetAISupport(context.Background(), "aiapp", "tok", false, root); err == nil {
+		t.Fatal("no error with revoke_all failing")
+	}
 	if !atCommit.RevokePending || !atCommit.OnChangePending || atCommit.Enabled {
 		t.Errorf("stored at the commit = %+v, want both owed", atCommit)
+	}
+	if c := a.companion("aiapp", "tok"); !c.RevokePending || c.Enabled {
+		t.Errorf("revoke_all not owed after it failed: %+v", c)
+	}
+	a.failHook("/revoke", 0, "")
+	if err := a.h.SetAISupport(context.Background(), "aiapp", "tok", false, root); err != nil {
+		t.Fatal(err)
 	}
 	if c := a.companion("aiapp", "tok"); c.RevokePending || c.OnChangePending {
 		t.Errorf("flags kept after the hooks ran: %+v", c)

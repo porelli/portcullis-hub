@@ -348,8 +348,9 @@ func (h *Hub) restoreAIAfterStart(id string, actor directory.Actor) ([]string, e
 // forgetInstanceAI is delete step 3's AI part (§11.4, G56): with the
 // project down, every AI credential entry of id is removed (each audited
 // ai.credential.revoke reason deleted, actor the deleting admin; no hook
-// runs: the app's tokens go with its volumes), then its oauth-seen
-// records and orphans, then AIInstances[id]. Idempotent. The caller
+// runs: the app's tokens go with its volumes), then the credential
+// records (credential-uuids.json) of entries gone, its oauth-seen records
+// and orphans, then AIInstances[id]. Idempotent. The caller
 // rewrites the gate file.
 func (h *Hub) forgetInstanceAI(id string, actor directory.Actor) error {
 	entries, err := h.creds().EntriesErr()
@@ -360,10 +361,15 @@ func (h *Hub) forgetInstanceAI(id string, actor directory.Actor) error {
 		if e.Instance != id {
 			continue
 		}
-		if err := h.creds().Remove(e.Instance, e.Companion, e.User); err != nil {
+		if err := h.removeCred(e.Instance, e.Companion, e.User); err != nil {
 			return fmt.Errorf("removing the AI credential of %s/%s/%s: %w", e.Instance, e.Companion, e.User, err)
 		}
 		h.auditAI(actor, "ai.credential.revoke", e.Instance+"/"+e.Companion+"/"+e.User, "id "+e.ID+" reason deleted", nil)
+	}
+	// The records of credentials gone (this instance's, and any an
+	// earlier revoke left).
+	if err := h.pruneCredUUIDs(); err != nil {
+		return fmt.Errorf("removing its credential records from %s failed (%w): an administrator must fix or remove that file, then delete again", filepath.Join(h.cfg.DataDir, "ai", credUUIDsName), err)
 	}
 	prefix := id + "/"
 	if err := h.oauthSeenUpdateFile(func(f *oauthSeenFile) bool {
