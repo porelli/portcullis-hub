@@ -11,6 +11,7 @@ import (
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/settings"
+	"github.com/portcullis/hub/internal/state"
 )
 
 // Disable, restart and the AI switches report their steps and can be
@@ -460,6 +461,38 @@ func TestAISwitchDisabledStaysSync(t *testing.T) {
 	}
 }
 
+// TestStopAISwitchKeepsOwed: a switch stopped after its save (before its
+// hooks ran) never clears what it owes: the owed on_change of the switch
+// stays until a switch path runs it.
+func TestStopAISwitchKeepsOwed(t *testing.T) {
+	a := newInstAIFixture(t, nil)
+	a.enable(t, "aiapp")
+	reached, release := blockStep(t, a.h, StepHooks)
+	var mid state.AICompanion
+	a.h.testHookAIAfterSave = func() { mid = a.companion("aiapp", "tok") }
+	op, _, err := a.h.StartInstanceAI("aiapp", InstanceAIUpdate{Companions: map[string]CompanionUpdate{"tok": {Enabled: ptr(true)}}}, root)
+	if err != nil || op == nil {
+		t.Fatal(err)
+	}
+	<-reached
+	if !mid.Enabled || !mid.OnChangePending {
+		t.Fatalf("the switch's commit owes no on_change: %+v", mid)
+	}
+	if _, err := a.h.StopOp("aiapp", directory.Human("bob")); err != nil {
+		t.Fatal(err)
+	}
+	// The switch back's on_change fails: still owed afterwards.
+	a.failHook("/toggle", 1, "toggle broke")
+	close(release)
+	r := waitOp(t, a.h, "aiapp", op.OpID)
+	if r.Stopped() {
+		t.Fatalf("record %+v", r)
+	}
+	if c := a.companion("aiapp", "tok"); !c.OnChangePending {
+		t.Errorf("owed on_change dropped: %+v", c)
+	}
+}
+
 // TestStopAISwitchOn: a Stop of a switch-on at any step puts the
 // companion back off through the switch path (revoke_all, scope dropped,
 // router gone, on_change false); audited ai.stop.
@@ -560,6 +593,11 @@ func TestStopAIUndoFailsThenRetries(t *testing.T) {
 	if r.Stopped() || !r.Stoppable || stepOf(r, UndoSwitch).State != StepFailed {
 		t.Fatalf("record %+v", r)
 	}
+	// The on_change the failed switch back owes stays owed (never cleared
+	// by a failed or stopped switch).
+	if c := a.companion("aiapp", "tok"); c.Enabled || !c.OnChangePending {
+		t.Errorf("after the failed undo: %+v", c)
+	}
 	a.mu.Lock()
 	delete(a.hookFail, "/toggle")
 	a.mu.Unlock()
@@ -615,3 +653,60 @@ func TestHeldHookOwnOp(t *testing.T) {
 type errFake string
 
 func (e errFake) Error() string { return string(e) }
+
+// TestStoppedRestartStaysOwed: a Stop (or a failure) of a restart the
+// delivery engine owes leaves the restart owed — never dropped — and a
+// later run applies and clears it.
+func TestStoppedRestartStaysOwed(t *testing.T) {
+	f := stopFixture(t)
+	f.runningOther(t)
+	owed := func() string {
+		f.h.owedMu.Lock()
+		defer f.h.owedMu.Unlock()
+		return f.h.owedLocked("other")
+	}
+	f.h.setOwed("other", settings.EffectRestart)
+	reached, release := blockStep(t, f.h, StepStart)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f.h.Restart(*f.h.Template("other"))
+	}()
+	<-reached
+	if _, err := f.h.StopOp("other", directory.Human("bob")); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	<-done
+	if r := f.h.LastOp("other"); r == nil || !r.Stopped() {
+		t.Fatalf("record %+v", r)
+	}
+	if got := owed(); got != settings.EffectRestart {
+		t.Fatalf("owed %q after a stopped restart, want %q", got, settings.EffectRestart)
+	}
+	// A failed restart leaves it owed too.
+	f.h.testHookStepStart = nil
+	f.runner.mu.Lock()
+	f.runner.upErr = errFake("up broke")
+	f.runner.mu.Unlock()
+	f.h.Restart(*f.h.Template("other"))
+	if r := f.h.LastOp("other"); r == nil || r.OK || owed() != settings.EffectRestart {
+		t.Fatalf("failed restart: %+v owed %q", r, owed())
+	}
+	f.runner.mu.Lock()
+	f.runner.upErr = nil
+	f.runner.mu.Unlock()
+	// The next start queues it again; it runs and clears it.
+	f.h.requeueOwed()
+	deadline := time.Now().Add(10 * time.Second)
+	for owed() != "" && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	f.h.Wait()
+	if got := owed(); got != "" {
+		t.Fatalf("still owed after the re-queued restart: %q", got)
+	}
+	if r := f.h.LastOp("other"); r == nil || !r.OK || r.Op != OpRestart {
+		t.Errorf("record %+v", r)
+	}
+}

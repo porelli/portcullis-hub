@@ -904,7 +904,8 @@ func (h *Hub) StartRestart(id string, actor directory.Actor) (*AsyncOp, error) {
 // instead of dropping the restart: that operation may have read the old
 // files, and compose reads them at run time, so a queued restart always
 // applies the latest ones. The outcome is recorded (LastOp); like any
-// restart it can be stopped.
+// restart it can be stopped. Only a restart that committed clears the
+// owed restart.
 func (h *Hub) Restart(t templates.Template) {
 	h.runOpSync(t.ID, OpRestart, directory.Actor{}, restartPlan(), func(ctx context.Context, ready func()) (map[string]string, []string, error) {
 		deadline := time.Now().Add(h.restartWait)
@@ -929,10 +930,12 @@ func (h *Hub) Restart(t templates.Template) {
 		if !h.IsEnabled(t.ID) {
 			return nil, nil, statusErr(400, "app not enabled: %s", t.ID) // disabled while we waited
 		}
-		seq := h.owedSeqOf(t.ID)
 		ready()
+		// The owed restart is cleared only by a restart that committed
+		// (restartSteps, right after its gate): a refused, failed or
+		// stopped one leaves it owed — queued again (requeueOwed), never
+		// dropped (fail closed: it may carry a revoked value).
 		err := h.restartOp(ctx, &t)
-		h.clearOwed(t.ID, seq, settings.EffectRestart)
 		h.TriggerReconcile()
 		return nil, nil, err
 	})
