@@ -319,12 +319,14 @@ func TestProviderSecretsNeverEchoed(t *testing.T) {
 // aiScopesKC accepts every mcp:* scope and AI client call.
 type aiScopesKC struct{}
 
-func (aiScopesKC) EnsureMCPScope(context.Context, keycloak.MCPScope) error     { return nil }
-func (aiScopesKC) DeleteMCPScope(context.Context, string) error                { return nil }
-func (aiScopesKC) SetOptionalScopes(context.Context, string, []string) error   { return nil }
-func (aiScopesKC) EnsureAIClient(context.Context, keycloak.AIClientSpec) error { return nil }
-func (aiScopesKC) DeleteAIClient(context.Context, string, string) error        { return nil }
-func (aiScopesKC) MCPScopeNames(context.Context) ([]string, error)             { return nil, nil }
+func (aiScopesKC) EnsureMCPScope(context.Context, keycloak.MCPScope) error   { return nil }
+func (aiScopesKC) DeleteMCPScope(context.Context, string) error              { return nil }
+func (aiScopesKC) SetOptionalScopes(context.Context, string, []string) error { return nil }
+func (aiScopesKC) EnsureAIClient(context.Context, keycloak.AIClientSpec) (bool, error) {
+	return false, nil
+}
+func (aiScopesKC) DeleteAIClient(context.Context, string, string) error { return nil }
+func (aiScopesKC) MCPScopeNames(context.Context) ([]string, error)      { return nil, nil }
 
 // aiAppEnv: the Hub's AI test template aiapp (disabled), master switch on.
 func aiAppEnv(t *testing.T) *instEnv {

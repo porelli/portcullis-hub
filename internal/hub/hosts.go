@@ -637,7 +637,7 @@ func (h *Hub) SetHosts(instanceID string, hosts map[string]string, actor directo
 	if ch.enabled && instanceAIClient(&view) != nil {
 		v := view
 		h.goBackground(func() {
-			if err := h.ensureInstanceAIClient(context.Background(), &v); err != nil {
+			if _, err := h.ensureInstanceAIClient(context.Background(), &v); err != nil {
 				log.Printf("instance %s: re-asserting its AI client after the hostname change: %v", instanceID, err)
 			}
 		})

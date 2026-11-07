@@ -342,7 +342,14 @@ func (c *Client) putClientExact(ctx context.Context, tok string, cl *gocloak.Cli
 // client still holds a disallowed scope or mapper, it is PUT disabled and
 // the error returned (re-enabled by the next successful ensure). Any
 // error: the caller keeps the client out of mcp-gate.json's clients.
-func (c *Client) EnsureAIClient(ctx context.Context, s AIClientSpec) error {
+// created: this call created the client (an enable's Stop deletes only
+// those) — also when a later step of the call failed.
+func (c *Client) EnsureAIClient(ctx context.Context, s AIClientSpec) (created bool, err error) {
+	err = c.ensureAIClient(ctx, s, &created)
+	return created, err
+}
+
+func (c *Client) ensureAIClient(ctx context.Context, s AIClientSpec, created *bool) error {
 	if err := checkAISpec(s); err != nil {
 		return err
 	}
@@ -362,6 +369,7 @@ func (c *Client) EnsureAIClient(ctx context.Context, s AIClientSpec) error {
 			return opErr("create client "+s.ClientID, err)
 		}
 		if err == nil {
+			*created = true
 			log.Printf("Registered Keycloak AI client %s", s.ClientID)
 		}
 		existing, err = c.findClient(ctx, tok, s.ClientID)

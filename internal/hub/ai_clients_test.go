@@ -21,24 +21,25 @@ import (
 
 // fakeAIKC's client side (12b): EnsureAIClient records the spec;
 // failClient makes it fail; DeleteAIClient records the delete.
-func (k *fakeAIKC) EnsureAIClient(ctx context.Context, s keycloak.AIClientSpec) error {
+func (k *fakeAIKC) EnsureAIClient(ctx context.Context, s keycloak.AIClientSpec) (bool, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	k.calls = append(k.calls, "client:"+s.ClientID)
 	if err := k.failClient[s.ClientID]; err != nil {
-		return err
+		return false, err
 	}
 	for _, sc := range s.OptionalScopes {
 		if _, ok := k.scopes[sc]; !ok {
-			return fmt.Errorf("client scope %s does not exist", sc)
+			return false, fmt.Errorf("client scope %s does not exist", sc)
 		}
 	}
 	if k.clients == nil {
 		k.clients = map[string]keycloak.AIClientSpec{}
 	}
+	_, existed := k.clients[s.ClientID]
 	k.clients[s.ClientID] = s
 	k.optional[s.ClientID] = slices.Sorted(slices.Values(s.OptionalScopes))
-	return nil
+	return !existed, nil
 }
 
 func (k *fakeAIKC) DeleteAIClient(ctx context.Context, clientID, owner string) error {

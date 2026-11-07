@@ -115,7 +115,7 @@ func TestEnsureAIClient(t *testing.T) {
 	ids := map[string]string{}
 	for _, round := range []string{"create", "idempotent"} {
 		for id, redirects := range want {
-			if err := c.EnsureAIClient(ctx, hubAISpec(id, "mcp:all")); err != nil {
+			if _, err := c.EnsureAIClient(ctx, hubAISpec(id, "mcp:all")); err != nil {
 				t.Fatalf("%s %s: %v", round, id, err)
 			}
 			uuid := checkAIClient(t, kc, id, true, keycloak.AIOwner, redirects, []string{"mcp:all"})
@@ -144,7 +144,7 @@ func TestEnsureAIClient(t *testing.T) {
 		cl.AuthenticationFlowBindingOverrides = map[string]string{"browser": "weak-flow"}
 	})
 	kc.AddClientMapper(id, "groups", "oidc-group-membership-mapper", nil)
-	if err := c.EnsureAIClient(ctx, hubAISpec(keycloak.AIClientIDs.ClaudeCode, "mcp:all")); err != nil {
+	if _, err := c.EnsureAIClient(ctx, hubAISpec(keycloak.AIClientIDs.ClaudeCode, "mcp:all")); err != nil {
 		t.Fatal(err)
 	}
 	checkAIClient(t, kc, keycloak.AIClientIDs.ClaudeCode, true, keycloak.AIOwner, loop, []string{"mcp:all"})
@@ -166,7 +166,7 @@ func TestEnsureAIClient(t *testing.T) {
 		{ClientID: "chat", Secret: "s", RedirectURIs: []string{"https://chat.example.org/cb"}, OfflineIdle: week, OfflineMax: month, Owner: "chat", OptionalScopes: []string{"mcp:portcullis.admin"}},
 	}
 	for i, s := range bad {
-		if err := c.EnsureAIClient(ctx, s); err == nil {
+		if _, err := c.EnsureAIClient(ctx, s); err == nil {
 			t.Errorf("bad spec %d accepted: %+v", i, s)
 		}
 	}
@@ -175,7 +175,7 @@ func TestEnsureAIClient(t *testing.T) {
 	}
 
 	// A realm without the scope asked for: an error.
-	if err := c.EnsureAIClient(ctx, hubAISpec(keycloak.AIClientIDs.Generic, "mcp:nothere")); err == nil || !strings.Contains(err.Error(), "mcp:nothere") {
+	if _, err := c.EnsureAIClient(ctx, hubAISpec(keycloak.AIClientIDs.Generic, "mcp:nothere")); err == nil || !strings.Contains(err.Error(), "mcp:nothere") {
 		t.Errorf("missing scope: %v", err)
 	}
 }
@@ -187,7 +187,7 @@ func TestEnsureAIClientConflict(t *testing.T) {
 		id := kc.AddClient(keycloak.AIClientIDs.Claude, attrs, "profile", "groups")
 		c := keycloak.New(kc.HTTP.URL, "admin", "admin")
 		var ce *keycloak.ConflictError
-		if err := c.EnsureAIClient(ctx, hubAISpec(keycloak.AIClientIDs.Claude)); !errors.As(err, &ce) {
+		if _, err := c.EnsureAIClient(ctx, hubAISpec(keycloak.AIClientIDs.Claude)); !errors.As(err, &ce) {
 			t.Fatalf("existing client %v: %v, want *ConflictError", attrs, err)
 		}
 		if kc.CountCalls("PUT") != 0 || kc.CountCalls("DELETE") != 0 || kc.CountCalls("POST /admin") != 0 {
@@ -219,14 +219,14 @@ func TestEnsureAIClientAppClient(t *testing.T) {
 	ensureScope(t, c, "mcp:portcullis.admin", "https://hub.example.org/mcp", "Manage Portcullis as you — administrator")
 	spec := keycloak.AIClientSpec{ClientID: "librechat-mcp", Name: "LibreChat", Secret: "s3cret", RedirectURIs: []string{"https://chat.example.org/api/mcp/cb"},
 		OptionalScopes: []string{"mcp:all"}, OfflineIdle: week, OfflineMax: month, Owner: "librechat"}
-	if err := c.EnsureAIClient(ctx, spec); err != nil {
+	if _, err := c.EnsureAIClient(ctx, spec); err != nil {
 		t.Fatal(err)
 	}
 	id := checkAIClient(t, kc, "librechat-mcp", false, "librechat", spec.RedirectURIs, []string{"mcp:all"})
 	// The access role's flow binding survives a re-assert.
 	flow := kc.AddFlow("portcullis-client-access-librechat-mcp-x", "")
 	kc.UpdateClient(id, func(cl *kctest.Client) { cl.AuthenticationFlowBindingOverrides = map[string]string{"browser": flow} })
-	if err := c.EnsureAIClient(ctx, spec); err != nil {
+	if _, err := c.EnsureAIClient(ctx, spec); err != nil {
 		t.Fatal(err)
 	}
 	if got := kc.ClientByClientID("librechat-mcp").AuthenticationFlowBindingOverrides["browser"]; got != flow {
@@ -278,7 +278,7 @@ func TestAIClientsProtected(t *testing.T) {
 	ctx := context.Background()
 	kc := aiRealm(t)
 	c := keycloak.New(kc.HTTP.URL, "admin", "admin")
-	if err := c.EnsureAIClient(ctx, hubAISpec(keycloak.AIClientIDs.Generic)); err != nil {
+	if _, err := c.EnsureAIClient(ctx, hubAISpec(keycloak.AIClientIDs.Generic)); err != nil {
 		t.Fatal(err)
 	}
 	var ce *keycloak.ConflictError
@@ -365,7 +365,7 @@ func TestEnsureMCPScope(t *testing.T) {
 	// delete a linked scope).
 	ensureScope(t, c, "mcp:all", "https://mcp.example.org/mcp", "Use all your Portcullis apps as you")
 	for _, id := range []string{keycloak.AIClientIDs.Claude, keycloak.AIClientIDs.Generic} {
-		if err := c.EnsureAIClient(ctx, hubAISpec(id, "mcp:all", name)); err != nil {
+		if _, err := c.EnsureAIClient(ctx, hubAISpec(id, "mcp:all", name)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -407,7 +407,7 @@ func TestOptionalScopesExact(t *testing.T) {
 	ensureScope(t, c, "mcp:all", "https://mcp.example.org/mcp", "Use all your Portcullis apps as you")
 	ensureScope(t, c, "mcp:gitea.gitea", "https://git.example.org/mcp", "Use Gitea (git.example.org) as you")
 	id := keycloak.AIClientIDs.Claude
-	if err := c.EnsureAIClient(ctx, hubAISpec(id)); err != nil {
+	if _, err := c.EnsureAIClient(ctx, hubAISpec(id)); err != nil {
 		t.Fatal(err)
 	}
 	if err := c.SetOptionalScopes(ctx, id, []string{"mcp:all", "mcp:gitea.gitea"}); err != nil {
@@ -480,7 +480,7 @@ func TestAIConnectionsAndRevoke(t *testing.T) {
 	c := keycloak.New(kc.HTTP.URL, "admin", "admin")
 	ensureScope(t, c, "mcp:all", "https://mcp.example.org/mcp", "Use all your Portcullis apps as you")
 	for _, id := range []string{keycloak.AIClientIDs.Claude, keycloak.AIClientIDs.ClaudeCode} {
-		if err := c.EnsureAIClient(ctx, hubAISpec(id, "mcp:all")); err != nil {
+		if _, err := c.EnsureAIClient(ctx, hubAISpec(id, "mcp:all")); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -570,7 +570,7 @@ func TestEnsureAIClientFailsClosed(t *testing.T) {
 	kc := aiRealm(t)
 	c := keycloak.New(kc.HTTP.URL, "admin", "admin")
 	id := keycloak.AIClientIDs.Claude
-	if err := c.EnsureAIClient(ctx, hubAISpec(id)); err != nil {
+	if _, err := c.EnsureAIClient(ctx, hubAISpec(id)); err != nil {
 		t.Fatal(err)
 	}
 	uuid := kc.ClientByClientID(id).ID
@@ -580,7 +580,7 @@ func TestEnsureAIClientFailsClosed(t *testing.T) {
 	}
 	kc.UpdateClient(uuid, func(cl *kctest.Client) { cl.DefaultClientScopes = append(cl.DefaultClientScopes, "profile", "groups") })
 	kc.SetFailPrefix("DELETE /admin/realms/portcullis/clients/" + uuid + "/default-client-scopes")
-	if err := c.EnsureAIClient(ctx, hubAISpec(id)); err == nil {
+	if _, err := c.EnsureAIClient(ctx, hubAISpec(id)); err == nil {
 		t.Fatal("failing detach: no error")
 	}
 	if enabled() {
@@ -588,7 +588,7 @@ func TestEnsureAIClientFailsClosed(t *testing.T) {
 	}
 	// A failing mapper step with an extra mapper: disabled too.
 	kc.SetFailPrefix("")
-	if err := c.EnsureAIClient(ctx, hubAISpec(id)); err != nil {
+	if _, err := c.EnsureAIClient(ctx, hubAISpec(id)); err != nil {
 		t.Fatal(err)
 	}
 	if !enabled() {
@@ -597,15 +597,15 @@ func TestEnsureAIClientFailsClosed(t *testing.T) {
 	checkAIClient(t, kc, id, true, keycloak.AIOwner, keycloak.ClaudeRedirectURIs, nil)
 	kc.AddClientMapper(uuid, "groups", "oidc-group-membership-mapper", nil)
 	kc.SetFailPrefix("DELETE /admin/realms/portcullis/clients/" + uuid + "/protocol-mappers")
-	if err := c.EnsureAIClient(ctx, hubAISpec(id)); err == nil || enabled() {
+	if _, err := c.EnsureAIClient(ctx, hubAISpec(id)); err == nil || enabled() {
 		t.Errorf("failing mapper delete: %v, enabled %v", err, enabled())
 	}
 	// A failure on a clean client (a missing mcp scope) keeps it enabled.
 	kc.SetFailPrefix("")
-	if err := c.EnsureAIClient(ctx, hubAISpec(id)); err != nil || !enabled() {
+	if _, err := c.EnsureAIClient(ctx, hubAISpec(id)); err != nil || !enabled() {
 		t.Fatalf("re-enable: %v", err)
 	}
-	if err := c.EnsureAIClient(ctx, hubAISpec(id, "mcp:nothere")); err == nil || !enabled() {
+	if _, err := c.EnsureAIClient(ctx, hubAISpec(id, "mcp:nothere")); err == nil || !enabled() {
 		t.Errorf("clean client, missing scope: %v, enabled %v", err, enabled())
 	}
 }
@@ -617,7 +617,7 @@ func TestEnsureAIClientFailsClosedOnAlteredMapper(t *testing.T) {
 	kc := aiRealm(t)
 	c := keycloak.New(kc.HTTP.URL, "admin", "admin")
 	id := keycloak.AIClientIDs.Generic
-	if err := c.EnsureAIClient(ctx, hubAISpec(id)); err != nil {
+	if _, err := c.EnsureAIClient(ctx, hubAISpec(id)); err != nil {
 		t.Fatal(err)
 	}
 	uuid := kc.ClientByClientID(id).ID
@@ -627,14 +627,14 @@ func TestEnsureAIClientFailsClosedOnAlteredMapper(t *testing.T) {
 		}
 	})
 	kc.SetFailPrefix("DELETE /admin/realms/portcullis/clients/" + uuid + "/protocol-mappers")
-	if err := c.EnsureAIClient(ctx, hubAISpec(id)); err == nil {
+	if _, err := c.EnsureAIClient(ctx, hubAISpec(id)); err == nil {
 		t.Fatal("failing mapper delete: no error")
 	}
 	if e := kc.ClientByClientID(id).Enabled; e == nil || *e {
 		t.Error("client with an altered username mapper left enabled")
 	}
 	kc.SetFailPrefix("")
-	if err := c.EnsureAIClient(ctx, hubAISpec(id)); err != nil {
+	if _, err := c.EnsureAIClient(ctx, hubAISpec(id)); err != nil {
 		t.Fatal(err)
 	}
 	if e := kc.ClientByClientID(id).Enabled; e == nil || !*e {
@@ -650,7 +650,7 @@ func TestEnsureAIClientFailsClosedOnFailedReadback(t *testing.T) {
 	kc := aiRealm(t)
 	c := keycloak.New(kc.HTTP.URL, "admin", "admin")
 	id := keycloak.AIClientIDs.ClaudeCode
-	if err := c.EnsureAIClient(ctx, hubAISpec(id)); err != nil {
+	if _, err := c.EnsureAIClient(ctx, hubAISpec(id)); err != nil {
 		t.Fatal(err)
 	}
 	uuid := kc.ClientByClientID(id).ID
@@ -671,7 +671,7 @@ func TestEnsureAIClientFailsClosedOnFailedReadback(t *testing.T) {
 		}
 	}
 	kc.SetFailFunc(failing(false))
-	if err := c.EnsureAIClient(ctx, hubAISpec(id)); err == nil {
+	if _, err := c.EnsureAIClient(ctx, hubAISpec(id)); err == nil {
 		t.Fatal("no error")
 	}
 	if e := kc.ClientByClientID(id).Enabled; e == nil || *e {
@@ -679,12 +679,12 @@ func TestEnsureAIClientFailsClosedOnFailedReadback(t *testing.T) {
 	}
 	// The disable PUT failing too: every error comes back.
 	kc.SetFailFunc(nil)
-	if err := c.EnsureAIClient(ctx, hubAISpec(id)); err != nil {
+	if _, err := c.EnsureAIClient(ctx, hubAISpec(id)); err != nil {
 		t.Fatal(err)
 	}
 	kc.UpdateClient(uuid, func(cl *kctest.Client) { cl.DefaultClientScopes = append(cl.DefaultClientScopes, "profile") })
 	kc.SetFailFunc(failing(true))
-	err := c.EnsureAIClient(ctx, hubAISpec(id))
+	_, err := c.EnsureAIClient(ctx, hubAISpec(id))
 	if err == nil || !strings.Contains(err.Error(), "detach default scope profile") || !strings.Contains(err.Error(), "client lookup") ||
 		!strings.Contains(err.Error(), "update client") {
 		t.Errorf("joined errors: %v", err)

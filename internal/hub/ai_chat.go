@@ -648,18 +648,18 @@ func (h *Hub) instanceAIClientSpec(t *templates.Template, c templates.KeycloakCl
 // (mcp:all ensured first, under aiKCMu) and merges its health: healthy
 // only when the ensure succeeded and the master switch is on. The gate
 // file is rewritten when the health changed. nil: t has no ai_client.
-// Never under mu.
-func (h *Hub) ensureInstanceAIClient(ctx context.Context, t *templates.Template) error {
+// Never under mu. created: this call created the client in Keycloak (an
+// enable writes it to its Created ledger).
+func (h *Hub) ensureInstanceAIClient(ctx context.Context, t *templates.Template) (created bool, err error) {
 	c := instanceAIClient(t)
 	if c == nil {
-		return nil
+		return false, nil
 	}
 	kc := h.aiKeycloak()
 	h.mu.RLock()
 	a := h.st.AI
 	all := h.fixedScopesLocked()[aigate.ScopeAll]
 	h.mu.RUnlock()
-	var err error
 	if kc == nil {
 		err = errors.New("Keycloak: the AI client calls are not configured")
 	} else {
@@ -667,7 +667,7 @@ func (h *Hub) ensureInstanceAIClient(ctx context.Context, t *templates.Template)
 		h.aiKCMu.Lock()
 		if err = kc.EnsureMCPScope(ctx, all); err != nil {
 			err = fmt.Errorf("Keycloak: client scope %s: %w", all.Name, err)
-		} else if err = kc.EnsureAIClient(ctx, spec); err != nil {
+		} else if created, err = kc.EnsureAIClient(ctx, spec); err != nil {
 			err = fmt.Errorf("Keycloak: AI client %s: %w", c.ClientID, err)
 		}
 		h.logAIClientErr(c.ClientID, err)
@@ -676,7 +676,7 @@ func (h *Hub) ensureInstanceAIClient(ctx context.Context, t *templates.Template)
 	if h.mergeAIClientHealth(map[string]bool{c.ClientID: err == nil && a.Enabled}) {
 		h.writePolicyLogged()
 	}
-	return err
+	return created, err
 }
 
 // instanceAIClientWant is one enabled AI page's ai_client for a pass.

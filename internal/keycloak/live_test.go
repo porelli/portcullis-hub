@@ -353,7 +353,7 @@ func TestLiveAIObjects(t *testing.T) {
 		for _, id := range ids {
 			spec := keycloak.AIClientSpec{ClientID: id, Public: true, RedirectURIs: keycloak.AIRedirectURIs(id), OptionalScopes: []string{"mcp:all", "mcp:gitea.gitea"},
 				OfflineIdle: 7 * 24 * time.Hour, OfflineMax: 30 * 24 * time.Hour, Owner: keycloak.AIOwner}
-			if err := c.EnsureAIClient(ctx, spec); err != nil {
+			if _, err := c.EnsureAIClient(ctx, spec); err != nil {
 				t.Fatal(err)
 			}
 			e.checkLiveAIClient(t, id, []string{"mcp:all", "mcp:gitea.gitea", "offline_access"})

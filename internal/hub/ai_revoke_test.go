@@ -1037,7 +1037,7 @@ func (n noUserIDsKC) DeleteMCPScope(ctx context.Context, name string) error {
 func (n noUserIDsKC) SetOptionalScopes(ctx context.Context, c string, s []string) error {
 	return n.k.SetOptionalScopes(ctx, c, s)
 }
-func (n noUserIDsKC) EnsureAIClient(ctx context.Context, s keycloak.AIClientSpec) error {
+func (n noUserIDsKC) EnsureAIClient(ctx context.Context, s keycloak.AIClientSpec) (bool, error) {
 	return n.k.EnsureAIClient(ctx, s)
 }
 func (n noUserIDsKC) DeleteAIClient(ctx context.Context, c, o string) error {
