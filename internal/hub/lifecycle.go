@@ -146,9 +146,13 @@ func (h *Hub) prepareUp(t *templates.Template) (*templates.Template, error) {
 // With a reporter in opCtx (progressFrom) it reports the steps images
 // (every image compose would pull, downloaded first through the Engine
 // API: create then finds them present), create, start and healthy
-// (startprogress.go) — each only when the operation planned it; an
-// unplanned images / healthy step is not run at all (compose pulls, no
-// wait) —, and a Stop (opCtx cancelled) ends it between them
+// (startprogress.go) — each only when the operation planned it. An
+// unplanned images step means no own pre-pull (compose pulls); healthy's
+// project-wide wait exists only to be reported, so it runs only when
+// planned — it never existed without a reporter. Every wait that ran
+// before still runs, reporter or not, planned or not: the AI hooks'
+// post-up readiness wait (runAIHookAfterUp, from pendingAIAfterStart
+// below) never looks at the reporter —, and a Stop (opCtx cancelled) ends it between them
 // — the downloads stop at once — with opCtx's error (isStopErr), nothing
 // rolled back. Without one (Background) it pulls nothing itself and waits
 // for nothing: compose does what it always did. Every Docker and compose
