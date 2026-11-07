@@ -400,7 +400,12 @@ What the design does not cover, stated plainly:
   `portcullis-proxy` can send the companion wrong credentials; Nextcloud's
   brute-force protection counts them against the companion's address, which
   every AI request comes from, so it can slow everyone's AI requests down
-  (sign-in itself still holds).
+  (sign-in itself still holds). **Re-used usernames:** Nextcloud keys
+  accounts on the username (user_oidc stores no Keycloak id, so the mint
+  ignores the `sub` the Hub sends): a deleted person's username given to
+  someone new gets the former person's Nextcloud account, on the web and
+  through AI alike. Delete the former person's Nextcloud account
+  (`occ user:delete`) before re-using a username.
 - **Grafana's trust network**: Grafana trusts identity headers from its
   companion's private network. A container that runs with host networking
   **and** `NET_RAW` (Docker's default capabilities include it) can forge
@@ -432,9 +437,13 @@ What the design does not cover, stated plainly:
   consents or AI connections carry over). An app that matches accounts by
   `preferred_username` or email instead of `sub` would attach the newcomer to
   the old app account; templates key on `sub`
-  ([hardening](hardening.md#header-spoofing-protections)). Gitea's AI
-  credential mint is the exception: it finds the account by username
-  ([Gitea](#ai-gitea)).
+  ([hardening](hardening.md#header-spoofing-protections)). Nextcloud is the
+  exception ([Nextcloud](#ai-nextcloud)). An AI credential belongs to the
+  LLDAP account it was minted for: a re-created name gets a new one, and the
+  former holder's is revoked, never reused. The Hub keeps that link in
+  `<data>/ai/credential-uuids.json`; if the file can't be read, every app_token
+  credential counts as unverifiable: the next pass revokes them all and mints
+  fail until the file is fixed or removed (no doctor entry names it yet).
 - **Local networks through the admin MCP.** `set_local_networks` is a plain
   write only when every network is inside the current list (narrowing);
   anything wider needs a confirmation, and so does going back to the defaults
@@ -471,12 +480,13 @@ its AI support section; these are the notes behind them.
   secrets is never offered (the value would pass through the model). File
   deletions through `create_or_update_file` are commits, without a
   confirmation.
-- **Re-used usernames (residual).** The mint finds the Gitea account by
-  username: the Hub doesn't send the person's Keycloak id to the hook. If a
-  person is deleted and their username is given to someone new, the
-  newcomer's AI requests run as the former person's Gitea account (their
-  web sign-in is refused). Before re-using a username, delete or rename the
-  former person's Gitea account (Site Administration → User Accounts).
+- **Re-used usernames.** The Hub sends the person's checked Keycloak id
+  (`sub`) with every mint, and the hook mints only for the Gitea account
+  Gitea signs that id in to. If a person is deleted and their username is
+  given to someone new, the newcomer gets no token for the former person's
+  account: the mint fails (shown on the AI tab), as their web sign-in does.
+  Delete or rename the former person's Gitea account (Site Administration →
+  User Accounts), then the newcomer signs in once.
 - While AI support is on, `https://<host>/mcp` is the AI endpoint, so a Gitea
   user or organisation named `mcp` loses its profile page (its repositories
   stay reachable): don't use that name.
