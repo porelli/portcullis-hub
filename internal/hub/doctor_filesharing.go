@@ -246,7 +246,7 @@ func (revokeLeaverFixer) Apply(h *Hub, f doctor.Finding, params map[string]strin
 	if planHash == "" || c.hash != planHash {
 		return nil, errCredentialChanged()
 	}
-	return h.startAsync(c.inst, OpRevokeLeaver, actor, func(ready func()) (map[string]string, []string, error) {
+	return h.startAsync(c.inst, OpRevokeLeaver, actor, nil, func(_ context.Context, ready func()) (map[string]string, []string, error) {
 		ready()
 		// Only the previewed credential (fix round 1): one regenerated or
 		// created since is left alone, under the same lock as the revoke.
@@ -405,7 +405,7 @@ func (personTreeOwnerFixer) Apply(h *Hub, f doctor.Finding, params map[string]st
 		return nil, err
 	}
 	inst := c0.inst
-	return h.startAsync(inst, OpPersonTreeOwner, actor, func(ready func()) (map[string]string, []string, error) {
+	return h.startAsync(inst, OpPersonTreeOwner, actor, nil, func(_ context.Context, ready func()) (map[string]string, []string, error) {
 		unlock, err := h.lockApp(inst)
 		if err != nil {
 			return nil, nil, err

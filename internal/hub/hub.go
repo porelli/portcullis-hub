@@ -411,6 +411,13 @@ type Hub struct {
 	// holding the instance's lock (composeUp): that operation's success
 	// keeps the hook's failure record (cleared when the lock is released).
 	startHookFailed map[string]bool
+	// opRuns: the stop registry (progress.go) — each running background
+	// operation by its record key, with its reporter and cancel; under
+	// opRunsMu, a leaf lock. progressNow: the reporter's clock (nil:
+	// time.Now; test-settable).
+	opRunsMu    sync.Mutex
+	opRuns      map[string]*opRun
+	progressNow func() time.Time
 
 	// Directory publishing (SetDirectory). lastExpiring is the expiring
 	// list last written (guarded by policyWriteMu; nil: not yet known).

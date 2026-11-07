@@ -63,7 +63,31 @@ type OpRecord struct {
 	Warnings []string          `json:"warnings,omitempty"`
 	Status   int               `json:"status,omitempty"`
 	Actor    string            `json:"actor,omitempty"`
+	// Progress (progress.go, contract §11.7 "The op record"): the
+	// operation's steps in order, what it created (written as it
+	// happens), and its Stop state. StoppedBy / StoppedAt: who pressed
+	// Stop and when (the user only). Interrupted: the Hub stopped while
+	// it ran (loadOps).
+	Steps           []Step     `json:"steps,omitempty"`
+	Created         *Created   `json:"created,omitempty"`
+	Stopping        bool       `json:"stopping,omitempty"`
+	Stoppable       bool       `json:"stoppable,omitempty"`
+	PointOfNoReturn bool       `json:"point_of_no_return,omitempty"`
+	StoppedBy       string     `json:"stopped_by,omitempty"`
+	StoppedAt       *time.Time `json:"stopped_at,omitempty"`
+	Interrupted     bool       `json:"interrupted,omitempty"`
 }
+
+// Stopped: the operation ended because a Stop was accepted and its undo
+// finished (contract §11.7 "Stopped": ok false, no error). A stopped
+// operation is no failure.
+func (r OpRecord) Stopped() bool {
+	return !r.Running && !r.OK && r.StoppedAt != nil && r.Error == ""
+}
+
+// Failed: the operation ended and failed — not running, not ok and not
+// stopped (FailedOps, the instance's state "error").
+func (r OpRecord) Failed() bool { return !r.OK && !r.Running && !r.Stopped() }
 
 // OpError is a failed lifecycle operation as the API returns it: the
 // message plus compose's output and a hint. It unwraps to the cause (for
@@ -112,8 +136,7 @@ func (h *Hub) loadOps() {
 		if r.Running {
 			// The Hub stopped while it ran: it never finished. Restores
 			// are recovered by RecoverRestores, deletes stay "deleting".
-			r.Running, r.OK, r.Status = false, false, 500
-			r.Error = "interrupted: the Hub stopped while this " + r.Op + " was running — check the instance and run it again"
+			markInterrupted(&r)
 			if out, err := json.MarshalIndent(r, "", "  "); err == nil {
 				if err := fsutil.WriteFileAtomic(filepath.Join(h.opsDir(), e.Name()), out, 0600); err != nil {
 					log.Printf("ops: cannot mark %s %s interrupted: %v", r.Op, id, err)
@@ -123,6 +146,25 @@ func (h *Hub) loadOps() {
 		}
 		h.ops[id] = r
 	}
+}
+
+// markInterrupted rewrites a record still running at load (contract
+// §11.7 "Shutdown and interruption"): running false, interrupted, ok
+// false, status 500; the running step is stopped, the other steps and
+// created stay as last written. It is stoppable (a Stop undoes from the
+// record) only when it has steps to undo from, and never for the three
+// cases recovered at start: a restore (same instance: rolled back;
+// into a new id: removed, both RecoverRestores) and a delete past its
+// point of no return (stays "deleting").
+func markInterrupted(r *OpRecord) {
+	r.Running, r.OK, r.Status, r.Interrupted, r.Stopping = false, false, 500, true, false
+	r.Error = "interrupted: the Hub stopped while this " + r.Op + " was running — check the instance and run it again"
+	for i := range r.Steps {
+		if r.Steps[i].State == StepRunning {
+			r.Steps[i].State = StepStopped
+		}
+	}
+	r.Stoppable = len(r.Steps) > 0 && r.Op != OpRestore && !(r.Op == OpDelete && r.PointOfNoReturn)
 }
 
 // validOpKey: an op record key loadOps keeps — an instance id, a shared
@@ -165,7 +207,7 @@ func (h *Hub) FailedOps() map[string]string {
 		if strings.HasPrefix(id, "_") {
 			continue
 		}
-		if !r.OK && !r.Running {
+		if r.Failed() {
 			out[id] = r.Op
 		}
 	}

@@ -195,7 +195,7 @@ func (h *Hub) Instances() []InstanceView {
 			v.State = StateDeleting
 		case e.State == state.InstanceRestoring:
 			v.State = StateRestoring
-		case hasOp && !op.OK && !op.Running:
+		case hasOp && op.Failed():
 			v.State = StateError
 		case t.Enabled:
 			v.State = StateEnabled

@@ -1216,7 +1216,7 @@ func (h *Hub) StartAssign(id string, req AssignRequest, planHash string, actor d
 // accepted operation's error goes through onFailed (nil: as it is) before
 // it is recorded (manage_as_folder names the definition it leaves).
 func (h *Hub) startAssignHeld(id string, req AssignRequest, planHash string, actor directory.Actor, unlockFolder func(), onRefused func(error), onFailed func(error) error) (*AsyncOp, error) {
-	return h.startAsync(opKeyFolder(id), OpFolderAssign, actor, func(accept func()) (result map[string]string, warnings []string, err error) {
+	return h.startAsync(opKeyFolder(id), OpFolderAssign, actor, nil, func(_ context.Context, accept func()) (result map[string]string, warnings []string, err error) {
 		accepted := false
 		ready := func() { accepted = true; accept() }
 		var deliverTo, auditInsts []string
@@ -1855,7 +1855,7 @@ func (h *Hub) StartUndo(id, planHash string, actor directory.Actor) (*AsyncOp, e
 	if err != nil {
 		return nil, err
 	}
-	return h.startAsync(opKeyFolder(id), OpFolderUndo, actor, func(ready func()) (result map[string]string, warnings []string, err error) {
+	return h.startAsync(opKeyFolder(id), OpFolderUndo, actor, nil, func(_ context.Context, ready func()) (result map[string]string, warnings []string, err error) {
 		detail := ""
 		defer func() {
 			if detail != "" || err != nil {
