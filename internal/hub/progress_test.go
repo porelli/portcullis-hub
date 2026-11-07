@@ -354,6 +354,7 @@ func TestInterruptedKeepsLedger(t *testing.T) {
 	f.h.recordOp("a-del", running(OpDelete, true))
 	f.h.recordOp("b-del", running(OpDelete, false))
 	f.h.recordOp("c-plain", OpRecord{Op: OpRebind, OpID: "x", At: t0, Running: true})
+	f.h.recordOp("d-backup", running(OpBackup, true)) // any op past its point of no return
 	f.h.loadOps()
 	for _, r := range []OpRecord{*f.h.LastOp("grafana"), opFile(t, f.h, "grafana")} {
 		if r.Running || r.OK || !r.Interrupted || !r.Stoppable || r.Status != 500 || !strings.HasPrefix(r.Error, "interrupted:") || r.Actor != "alice" {
@@ -369,7 +370,7 @@ func TestInterruptedKeepsLedger(t *testing.T) {
 			t.Fatalf("created: %+v", r.Created)
 		}
 	}
-	for id, want := range map[string]bool{"other": false, "a-del": false, "b-del": true, "c-plain": false} {
+	for id, want := range map[string]bool{"other": false, "a-del": false, "b-del": true, "c-plain": false, "d-backup": false} {
 		if r := f.h.LastOp(id); r == nil || !r.Interrupted || r.Stoppable != want {
 			t.Fatalf("%s: stoppable want %v: %+v", id, want, r)
 		}
@@ -377,5 +378,102 @@ func TestInterruptedKeepsLedger(t *testing.T) {
 	// An interrupted operation is a failure (state error, FailedOps).
 	if f.h.FailedOps()["grafana"] != OpEnable {
 		t.Fatal("interrupted enable not listed as failed")
+	}
+}
+
+// TestProgressRedactsExtras: the values an error carries for redaction
+// (withSecrets: a restore's archive secrets) never reach a step detail,
+// in memory or on disk — also in later writes.
+func TestProgressRedactsExtras(t *testing.T) {
+	f := newFixture(t)
+	p := f.h.newProgress("grafana", OpRestore, enableSteps())
+	p.begin("op1", "alice", nil)
+	p.Fail("groups", withSecrets(errors.New("x s3cret-archive-value"), []string{"s3cret-archive-value"}))
+	p.Start("images")
+	p.Percent("images", 50, "copying s3cret-archive-value")
+	p.Done("images")
+	b, _ := os.ReadFile(f.h.opPath("grafana"))
+	mem, _ := json.Marshal(f.h.LastOp("grafana"))
+	for _, out := range []string{string(b), string(mem)} {
+		if strings.Contains(out, "s3cret") {
+			t.Fatalf("an extra secret in the record: %s", out)
+		}
+	}
+	if s := stepOf(opFile(t, f.h, "grafana"), "groups"); s.State != StepFailed || !strings.HasPrefix(s.Detail, "x ") {
+		t.Fatalf("failed step: %+v", s)
+	}
+}
+
+// TestProgressPercentStartsAtOnce: a Percent that moves a waiting step
+// to running is written at once, even within the throttle.
+func TestProgressPercentStartsAtOnce(t *testing.T) {
+	f := newFixture(t)
+	clk := &testClock{t: time.Date(2026, 11, 7, 10, 0, 0, 0, time.UTC)}
+	f.h.progressNow = clk.now
+	f.h.afterFunc = func(time.Duration, func()) func() bool { return func() bool { return true } }
+	p := f.h.newProgress("grafana", OpEnable, enableSteps())
+	p.begin("op1", "alice", nil)
+	p.Done("groups")
+	p.Percent("images", 5, "pulling")
+	s := stepOf(opFile(t, f.h, "grafana"), "images")
+	if s.State != StepRunning || s.Percent == nil || *s.Percent != 5 || s.StartedAt == nil {
+		t.Fatalf("waiting → running not written at once: %+v", s)
+	}
+	p.Percent("images", 6, "pulling")
+	if s := stepOf(opFile(t, f.h, "grafana"), "images"); *s.Percent != 5 {
+		t.Fatalf("a running step's percent not throttled: %+v", s)
+	}
+}
+
+// TestFinalRecordKeepsNextOp: an operation's fn releases the instance's
+// lock before its final record is written; an operation accepted in
+// between keeps its running record (the first one's outcome is only
+// logged).
+func TestFinalRecordKeepsNextOp(t *testing.T) {
+	f := newFixture(t)
+	released, bStarted, releaseB := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var relOnce sync.Once
+	freeB := func() { relOnce.Do(func() { close(releaseB) }) }
+	defer freeB() // a failure never leaves B blocking the fixture's Wait
+	_, aDone, err := f.h.startOp("grafana", OpBackup, directory.Human("alice"), enableSteps(), func(ctx context.Context, ready func()) (map[string]string, []string, error) {
+		unlock, err := f.h.lockApp("grafana")
+		if err != nil {
+			return nil, nil, err
+		}
+		ready()
+		progressFrom(ctx).Start("groups")
+		unlock()
+		close(released)
+		<-bStarted // B accepted between A's lock release and A's final record
+		return nil, nil, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-released
+	b, err := f.h.startAsync("grafana", OpEnable, directory.Human("bob"), enableSteps(), func(ctx context.Context, ready func()) (map[string]string, []string, error) {
+		unlock, err := f.h.lockApp("grafana")
+		if err != nil {
+			return nil, nil, err
+		}
+		defer unlock()
+		ready()
+		close(bStarted)
+		<-releaseB
+		return nil, nil, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-aDone // A's final record was attempted
+	for _, r := range []OpRecord{*f.h.LastOp("grafana"), opFile(t, f.h, "grafana")} {
+		if r.OpID != b.OpID || !r.Running || r.Actor != "bob" {
+			t.Fatalf("B's running record overwritten: %+v", r)
+		}
+	}
+	freeB()
+	f.h.Wait()
+	if r := opFile(t, f.h, "grafana"); r.OpID != b.OpID || r.Running || !r.OK {
+		t.Fatalf("B's final: %+v", r)
 	}
 }

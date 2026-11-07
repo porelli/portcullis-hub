@@ -165,7 +165,7 @@ func (h *Hub) finishAsync(id, op string, p *Progress, result map[string]string, 
 	r.OpID, r.Running, r.Result, r.Warnings, r.Actor = opID, false, result, warnings, actor
 	if err != nil {
 		r.Status = errStatus(err)
-		if !isStopErr(err) {
+		if !(isStopErr(err) && p.stopAccepted()) {
 			log.Printf("%s %s failed: %s", op, id, r.Error)
 		}
 	}
@@ -180,6 +180,11 @@ func (h *Hub) finishAsync(id, op string, p *Progress, result map[string]string, 
 func (h *Hub) recordOp(id string, r OpRecord) {
 	h.opsMu.Lock()
 	defer h.opsMu.Unlock()
+	h.recordOpLocked(id, r)
+}
+
+// recordOpLocked is recordOp; the caller holds opsMu.
+func (h *Hub) recordOpLocked(id string, r OpRecord) {
 	if data, err := json.MarshalIndent(r, "", "  "); err == nil {
 		os.MkdirAll(filepath.Dir(h.opPath(id)), 0700)
 		if err := fsutil.WriteFileAtomic(h.opPath(id), data, 0600); err != nil {
@@ -187,6 +192,18 @@ func (h *Hub) recordOp(id string, r OpRecord) {
 		}
 	}
 	h.ops[id] = r
+}
+
+// recordOpUnlessOther is recordOp, except over a running record of
+// another operation (another op id), which it leaves in place: false.
+func (h *Hub) recordOpUnlessOther(id string, r OpRecord) bool {
+	h.opsMu.Lock()
+	defer h.opsMu.Unlock()
+	if cur, ok := h.ops[id]; ok && cur.Running && cur.OpID != r.OpID {
+		return false
+	}
+	h.recordOpLocked(id, r)
+	return true
 }
 
 // errStatus is the HTTP status an operation error stands for.
