@@ -319,35 +319,37 @@ func TestAppOAuthLeaverRevoked(t *testing.T) {
 	if got := a.auditsOf("ai.credential.revoke", "oauthapp/oauth/bob"); len(got) != 2 || got[1].Result != "ok" || got[1].Detail != "ids []" {
 		t.Errorf("audits = %+v", got)
 	}
-	// Switched off: everyone recorded is revoked (the switch-off's
-	// revoke_all; and once the record was rebuilt, per person).
+	// Switched off: the switch-off's revoke_all ends AI clients' tokens;
+	// switching AI off is no leaving, so the record stays (T27) and
+	// nobody still in the population gets a revoke.
 	n = len(a.stdins("/revoke"))
 	if err := a.h.SetAISupport(context.Background(), "oauthapp", "oauth", false, root); err != nil {
 		t.Fatal(err)
 	}
 	a.h.Wait()
 	a.reconcile()
-	off := strings.Join(a.stdins("/revoke")[n:], "\n")
-	if !strings.Contains(off, `"revoke_all"`) {
-		t.Errorf("switch-off runs = %q, want revoke_all", off)
+	off := a.stdins("/revoke")[n:]
+	if len(off) != 1 || !strings.Contains(off[0], `"revoke_all"`) {
+		t.Errorf("switch-off runs = %q, want only the revoke_all", off)
 	}
-	if seen, _ := a.h.oauthSeen(); len(seen["oauthapp/oauth"]) != 0 {
+	if seen, _ := a.h.oauthSeen(); !slices.Equal(seen["oauthapp/oauth"], []string{"admin", "alice", "carol", "dave", "root"}) {
 		t.Errorf("oauth-seen after the switch-off = %v", seen)
 	}
-	// Recorded people of a companion that is off are revoked one by one
-	// (a record left by a failed switch-off revoke_all).
-	if err := a.h.oauthSeenAdd(map[string]map[string]string{"oauthapp/oauth": {"alice": "uuid-alice", "dave": "uuid-dave"}},
-		map[string]map[string]string{"oauthapp/oauth": {"alice": fakeSub("alice"), "dave": fakeSub("dave")}}); err != nil {
-		t.Fatal(err)
-	}
+	// A recorded person who leaves while the companion is off still gets
+	// their own revoke.
+	a.people.set(func(p *fakePeople) {
+		delete(p.users, "dave")
+		for _, ms := range p.members {
+			delete(ms, "dave")
+		}
+	})
 	n = len(a.stdins("/revoke"))
 	a.reconcile()
 	got = a.stdins("/revoke")[n:]
-	if !slices.Equal(got, []string{`{"action":"revoke","user":"alice","sub":"` + fakeSub("alice") + `","ids":[]}`,
-		`{"action":"revoke","user":"dave","sub":"` + fakeSub("dave") + `","ids":[]}`}) {
-		t.Errorf("revokes for a companion that is off = %q", got)
+	if !slices.Equal(got, []string{`{"action":"revoke","user":"dave","sub":"` + fakeSub("dave") + `","ids":[]}`}) {
+		t.Errorf("revokes for a leaver of a companion that is off = %q", got)
 	}
-	if seen, _ := a.h.oauthSeen(); len(seen) != 0 {
+	if seen, _ := a.h.oauthSeen(); slices.Contains(seen["oauthapp/oauth"], "dave") || !slices.Contains(seen["oauthapp/oauth"], "alice") {
 		t.Errorf("oauth-seen = %v", seen)
 	}
 }
@@ -410,7 +412,7 @@ func TestOAuthVerifiedLeaver(t *testing.T) {
 	a.reconcile()
 	f := a.seenFile(t)
 	for _, u := range []string{"alice", "bob", "dave"} {
-		if f.UUIDs["oauthapp/oauth"][u] != "uuid-"+u || f.Subs["oauthapp/oauth"][u] != fakeSub(u) {
+		if f.UUIDs["oauthapp/oauth"][u] != "uuid-"+u || !slices.Equal(f.Subs["oauthapp/oauth"][u], []string{fakeSub(u)}) {
 			t.Fatalf("%s not verified: %+v", u, f)
 		}
 	}
@@ -422,7 +424,7 @@ func TestOAuthVerifiedLeaver(t *testing.T) {
 	if len(got) != 1 || got[0] != `{"action":"revoke","user":"bob","sub":"`+fakeSub("bob")+`","ids":[]}` {
 		t.Fatalf("verified leaver: runs = %q", got)
 	}
-	if f = a.seenFile(t); slices.Contains(f.Companions["oauthapp/oauth"], "bob") || f.Subs["oauthapp/oauth"]["bob"] != "" {
+	if f = a.seenFile(t); slices.Contains(f.Companions["oauthapp/oauth"], "bob") || len(f.Subs["oauthapp/oauth"]["bob"]) != 0 {
 		t.Error("bob's record kept after his revoke")
 	}
 }
@@ -434,7 +436,7 @@ func TestOAuthVerifiedLeaver(t *testing.T) {
 func TestOAuthRestartUnverifiableLeaver(t *testing.T) {
 	a := oauthT27(t, nil)
 	a.reconcile()
-	if err := a.h.oauthSeenAdd(map[string]map[string]string{"oauthapp/oauth": {"erin": "uuid-erin"}}, nil); err != nil {
+	if err := a.h.oauthSeenAdd("oauthapp/oauth", map[string]string{"erin": "uuid-erin"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	a.h.aiErrMu.Lock()
@@ -445,7 +447,7 @@ func TestOAuthRestartUnverifiableLeaver(t *testing.T) {
 		t.Fatalf("runs = %q, want one revoke_all", got)
 	}
 	au := a.auditsOf("ai.credential.revoke", "oauthapp/oauth/erin")
-	if len(au) != 1 || au[0].Result == "ok" || !strings.Contains(au[0].Detail, "can't be verified") {
+	if len(au) != 1 || au[0].Result == "ok" || !strings.Contains(au[0].Detail, "before their Home Assistant account could be matched") {
 		t.Errorf("audits = %+v", au)
 	}
 	var found *AIRevokeProblem
@@ -454,21 +456,162 @@ func TestOAuthRestartUnverifiableLeaver(t *testing.T) {
 			found = &p
 		}
 	}
-	if found == nil || !slices.Equal(found.Unmatched, []string{"erin"}) || !slices.Contains(found.Unverifiable, "erin") {
+	if found == nil || !strings.Contains(found.Reason, "revoke_all owed for erin") {
 		t.Fatalf("AIRevokeProblems = %+v", found)
 	}
 	a.failHook("/revoke", 0, "")
 	if got := a.revokeRuns(); !isRevokeAll(got) {
 		t.Fatalf("retry runs = %q", got)
 	}
+	a.kc.mu.Lock()
+	if n := a.kc.looked["erin"]; n != 0 {
+		t.Errorf("erin (no longer a holder) was looked up %d times", n)
+	}
+	a.kc.mu.Unlock()
 	f := a.seenFile(t)
-	if slices.Contains(f.Companions["oauthapp/oauth"], "erin") || f.Subs["oauthapp/oauth"]["alice"] != fakeSub("alice") || f.UUIDs["oauthapp/oauth"]["alice"] != "uuid-alice" {
+	if slices.Contains(f.Companions["oauthapp/oauth"], "erin") || !slices.Equal(f.Subs["oauthapp/oauth"]["alice"], []string{fakeSub("alice")}) || f.UUIDs["oauthapp/oauth"]["alice"] != "uuid-alice" {
 		t.Errorf("record after the revoke_all = %+v", f)
 	}
+	// The revoke_all ended only AI clients' tokens: erin stays listed
+	// until an administrator dismisses her.
+	want := "erin left oauthapp before their Home Assistant account could be matched: their web, Companion and long-lived tokens remain; deactivate or delete erin in Home Assistant (Settings > People), then dismiss"
+	found = nil
 	for _, p := range a.h.AIRevokeProblems() {
-		if p.Instance == "oauthapp" && (len(p.Unmatched) > 0 || len(p.Unverifiable) > 0) {
-			t.Errorf("still listed: %+v", p)
+		if p.Instance == "oauthapp" && p.Companion == "oauth" {
+			found = &p
 		}
+	}
+	if found == nil || !slices.Equal(found.Unmatched, []string{"erin"}) || len(found.Unverifiable) != 0 || found.Reason != want {
+		t.Fatalf("after the revoke_all: %+v", found)
+	}
+	if err := a.h.AIRevokeDismiss("oauthapp", "oauth", "erin", root); err != nil {
+		t.Fatal(err)
+	}
+	if au := a.auditsOf("ai.credential.revoke", "oauthapp/oauth/erin"); len(au) != 3 || !strings.HasPrefix(au[2].Detail, "dismissed") {
+		t.Errorf("audits = %+v", au)
+	}
+	for _, p := range a.h.AIRevokeProblems() {
+		if p.Instance == "oauthapp" {
+			t.Errorf("still listed after the dismissal: %+v", p)
+		}
+	}
+	if err := a.h.AIRevokeDismiss("oauthapp", "oauth", "erin", root); err == nil {
+		t.Error("dismissing twice succeeded")
+	}
+}
+
+// TestOAuthMixedLeavers (T27): one unverifiable and one verified leaver
+// in the same pass: the revoke_all runs and the verified one still gets
+// their own revoke (all of their tokens).
+func TestOAuthMixedLeavers(t *testing.T) {
+	a := oauthT27(t, nil)
+	a.reconcile()
+	if err := a.h.oauthSeenAdd("oauthapp/oauth", map[string]string{"erin": "uuid-erin"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	a.leave("bob")
+	got := a.revokeRuns()
+	all := strings.Join(got, "\n")
+	if len(got) != 2 || !strings.Contains(all, `"revoke_all"`) ||
+		!strings.Contains(all, `{"action":"revoke","user":"bob","sub":"`+fakeSub("bob")+`","ids":[]}`) {
+		t.Fatalf("runs = %q, want bob's revoke and one revoke_all", got)
+	}
+	f := a.seenFile(t)
+	if slices.Contains(f.Companions["oauthapp/oauth"], "bob") || slices.Contains(f.Companions["oauthapp/oauth"], "erin") || !slices.Contains(f.Companions["oauthapp/oauth"], "alice") {
+		t.Errorf("record = %v", f.Companions)
+	}
+	if !slices.Equal(f.Unmatched["oauthapp/oauth"], []string{"erin"}) {
+		t.Errorf("unmatched = %v (bob was revoked by his ids)", f.Unmatched)
+	}
+}
+
+// TestOAuthIDHistory (T27): a holder's Keycloak id changes (the realm's
+// ids follow the LDAP uid): the new one is added; leaving revokes both.
+func TestOAuthIDHistory(t *testing.T) {
+	a := oauthT27(t, nil)
+	a.reconcile()
+	a.kc.mu.Lock()
+	a.kc.subOverride = map[string]string{"bob": "00000000-0000-4000-8000-00000000b0b2"}
+	a.kc.mu.Unlock()
+	a.reconcile()
+	f := a.seenFile(t)
+	if want := sortedSet([]string{fakeSub("bob"), "00000000-0000-4000-8000-00000000b0b2"}); !slices.Equal(f.Subs["oauthapp/oauth"]["bob"], want) {
+		t.Fatalf("bob's ids = %v, want %v", f.Subs["oauthapp/oauth"]["bob"], want)
+	}
+	a.leave("bob")
+	got := a.revokeRuns()
+	if len(got) != 2 || !strings.Contains(got[0]+got[1], fakeSub("bob")) || !strings.Contains(got[0]+got[1], "00000000-0000-4000-8000-00000000b0b2") {
+		t.Fatalf("runs = %q, want one revoke per id", got)
+	}
+}
+
+// TestOAuthWriteFailure (T27): a failed oauth-seen.json write is listed;
+// the holders it left unrecorded are recorded unverifiable by the next
+// successful write.
+func TestOAuthWriteFailure(t *testing.T) {
+	a := oauthT27(t, nil)
+	a.reconcile()
+	dir := filepath.Join(a.h.cfg.DataDir, "ai")
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	a.people.addGroup("users_oauthapp", "frank")
+	a.people.set(func(p *fakePeople) { p.users["frank"] = true })
+	a.reconcile()
+	listed := false
+	for _, p := range a.h.AIRevokeProblems() {
+		if p.Instance == "oauthapp" && strings.Contains(p.Reason, "recording oauth-seen.json failed") && strings.Contains(p.Reason, "frank") {
+			listed = true
+		}
+	}
+	if !listed {
+		t.Fatalf("the failed write isn't listed: %+v", a.h.AIRevokeProblems())
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	a.reconcile()
+	f := a.seenFile(t)
+	if !slices.Contains(f.Companions["oauthapp/oauth"], "frank") || f.UUIDs["oauthapp/oauth"]["frank"] != "" {
+		t.Fatalf("frank's record = %v uuid %q (want unverifiable)", f.Companions, f.UUIDs["oauthapp/oauth"]["frank"])
+	}
+	for _, p := range a.h.AIRevokeProblems() {
+		if strings.Contains(p.Reason, "recording oauth-seen.json failed") {
+			t.Errorf("still listed after a write succeeded: %+v", p)
+		}
+	}
+}
+
+// TestOAuthPendingAfterThreePasses (T27): a holder whose id lookup keeps
+// failing is listed only after 3 passes.
+func TestOAuthPendingAfterThreePasses(t *testing.T) {
+	a := oauthT27(t, func(a *instAIFixture) {
+		a.kc.subErr = errors.New("keycloak down")
+	})
+	listed := func() bool {
+		for _, p := range a.h.AIRevokeProblems() {
+			if p.Instance == "oauthapp" && slices.Contains(p.Unverifiable, "alice") {
+				return true
+			}
+		}
+		return false
+	}
+	a.reconcile()
+	a.reconcile()
+	if listed() {
+		t.Fatal("listed after 2 passes")
+	}
+	a.reconcile()
+	if !listed() {
+		t.Fatal("not listed after 3 passes")
+	}
+	a.kc.mu.Lock()
+	a.kc.subErr = nil
+	a.kc.mu.Unlock()
+	a.reconcile()
+	if listed() {
+		t.Error("still listed once the id was found")
 	}
 }
 
@@ -480,7 +623,7 @@ func TestOAuthMissingUUIDLeaver(t *testing.T) {
 	})
 	a.reconcile()
 	f := a.seenFile(t)
-	if !slices.Contains(f.Companions["oauthapp/oauth"], "dave") || f.UUIDs["oauthapp/oauth"]["dave"] != "" || f.Subs["oauthapp/oauth"]["dave"] != "" {
+	if !slices.Contains(f.Companions["oauthapp/oauth"], "dave") || f.UUIDs["oauthapp/oauth"]["dave"] != "" || len(f.Subs["oauthapp/oauth"]["dave"]) != 0 {
 		t.Fatalf("dave's record = %+v", f)
 	}
 	a.leave("dave")
@@ -504,17 +647,17 @@ func TestOAuthNeverVerifiedLater(t *testing.T) {
 	a.reconcile()
 	a.people.set(func(p *fakePeople) { delete(p.uuids, "dave") }) // now uuid-dave
 	a.kc.mu.Lock()
-	lookups := a.kc.lookups
+	lookups := a.kc.looked["dave"]
 	a.kc.mu.Unlock()
 	a.reconcile()
 	a.reconcile()
 	f := a.seenFile(t)
-	if f.UUIDs["oauthapp/oauth"]["dave"] != "" || f.Subs["oauthapp/oauth"]["dave"] != "" {
-		t.Fatalf("dave became verified by backfill: uuid %q sub %q", f.UUIDs["oauthapp/oauth"]["dave"], f.Subs["oauthapp/oauth"]["dave"])
+	if f.UUIDs["oauthapp/oauth"]["dave"] != "" || len(f.Subs["oauthapp/oauth"]["dave"]) != 0 {
+		t.Fatalf("dave became verified by backfill: uuid %q sub %v", f.UUIDs["oauthapp/oauth"]["dave"], f.Subs["oauthapp/oauth"]["dave"])
 	}
 	a.kc.mu.Lock()
-	if a.kc.lookups != lookups {
-		t.Errorf("%d lookups for an unverifiable record", a.kc.lookups-lookups)
+	if a.kc.looked["dave"] != lookups {
+		t.Errorf("%d lookups for an unverifiable record", a.kc.looked["dave"]-lookups)
 	}
 	a.kc.mu.Unlock()
 	ok := false
@@ -542,10 +685,10 @@ func TestOAuthUUIDMismatch(t *testing.T) {
 		t.Errorf("audits = %+v", au)
 	}
 	f := a.seenFile(t)
-	if f.UUIDs["oauthapp/oauth"]["dave"] != a.people.uuidOf("dave") || f.Subs["oauthapp/oauth"]["dave"] != fakeSub("dave") {
-		t.Errorf("new account's record = uuid %q sub %q", f.UUIDs["oauthapp/oauth"]["dave"], f.Subs["oauthapp/oauth"]["dave"])
+	if f.UUIDs["oauthapp/oauth"]["dave"] != a.people.uuidOf("dave") || !slices.Equal(f.Subs["oauthapp/oauth"]["dave"], []string{fakeSub("dave")}) {
+		t.Errorf("new account's record = uuid %q sub %v", f.UUIDs["oauthapp/oauth"]["dave"], f.Subs["oauthapp/oauth"]["dave"])
 	}
-	if f.Subs["oauthapp/oauth"]["alice"] != fakeSub("alice") {
+	if !slices.Equal(f.Subs["oauthapp/oauth"]["alice"], []string{fakeSub("alice")}) {
 		t.Errorf("alice's record = %+v", f)
 	}
 }

@@ -916,9 +916,9 @@ func (h *Hub) revokeAll(ctx context.Context, t *templates.Template, c *templates
 	if c.Identity.Revoke == "" {
 		return nil
 	}
-	// app_oauth: everyone's MCP tokens are revoked, so nobody recorded in
-	// oauth-seen.json owes a revoke any more (Task 13b).
-	return h.revokeAllWith(ctx, t, c.Name, c.Identity.Revoke, c.Identity.Mode == templates.IdentityAppOAuth)
+	// app_oauth: everyone's AI clients' tokens are revoked; oauth-seen.json
+	// is kept (T27: recorded people who leave still get their own revoke).
+	return h.revokeAllWith(ctx, t, c.Name, c.Identity.Revoke)
 }
 
 // dropAIEntries removes every Hub-side credential entry of a companion

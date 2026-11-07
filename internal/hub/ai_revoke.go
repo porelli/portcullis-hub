@@ -208,18 +208,6 @@ func (h *Hub) runRevoke(ctx context.Context, t *templates.Template, hook, user s
 	return nil
 }
 
-// runRevokeOAuth runs an app_oauth companion's hook with
-// {"action":"revoke","user","sub","ids":[]} for the person recorded in
-// ref (contract §15.5): sub is their stored Keycloak user id (oauthSub);
-// without one it fails with errNoSub, nothing runs.
-func (h *Hub) runRevokeOAuth(ctx context.Context, t *templates.Template, ref, hook, user string) error {
-	sub, err := h.oauthSub(ref, user)
-	if err != nil {
-		return err
-	}
-	return h.runRevokeOAuthSub(ctx, t, hook, user, sub)
-}
-
 // runRevokeOAuthSub runs an app_oauth hook's revoke for user with sub
 // (never empty).
 func (h *Hub) runRevokeOAuthSub(ctx context.Context, t *templates.Template, hook, user, sub string) error {
@@ -368,7 +356,7 @@ func (h *Hub) RevokeAICredentials(ctx context.Context, instance, companion, user
 	defer unlock()
 	oauth := mode == templates.IdentityAppOAuth
 	if user == "" {
-		err := h.revokeAllWith(ctx, t, companion, hook, oauth)
+		err := h.revokeAllWith(ctx, t, companion, hook)
 		h.auditAI(actor, "ai.credential.revoke", target, "revoke_all", err)
 		if err != nil {
 			h.revokeFailed(instance, companion, err)
@@ -382,14 +370,27 @@ func (h *Hub) RevokeAICredentials(ctx context.Context, instance, companion, user
 		return nil
 	}
 	if oauth {
-		err := h.runRevokeOAuth(ctx, t, instance+"/"+companion, hook, user)
-		var noSub errNoSub
-		if errors.As(err, &noSub) {
-			h.auditAI(actor, "ai.credential.revoke", target, "ids [] (no Keycloak id recorded)", err)
-			return &StatusError{Status: http.StatusConflict, Err: err}
+		ref := instance + "/" + companion
+		f, err := h.oauthSeenRead()
+		if err == nil && !slices.Contains(f.Companions[ref], user) {
+			err = &StatusError{Status: http.StatusConflict, Err: fmt.Errorf("%s has no recorded Home Assistant account", user)}
+		} else if err == nil && !f.verified(ref, user) {
+			err = &StatusError{Status: http.StatusConflict, Err: fmt.Errorf("%s's Home Assistant account can't be matched (no Keycloak id or LLDAP uuid recorded): revoke everyone instead", user)}
+		}
+		var se *StatusError
+		if errors.As(err, &se) {
+			h.auditAI(actor, "ai.credential.revoke", target, "ids []", err)
+			return err
 		}
 		if err == nil {
-			err = h.oauthSeenRemove(instance+"/"+companion, user)
+			for _, sub := range f.Subs[ref][user] {
+				if err = h.runRevokeOAuthSub(ctx, t, hook, user, sub); err != nil {
+					break
+				}
+			}
+		}
+		if err == nil {
+			err = h.oauthSeenRemoveUsers(ref, []string{user})
 		}
 		h.auditAI(actor, "ai.credential.revoke", target, "ids []", err)
 		if err != nil {
@@ -638,7 +639,11 @@ func (h *Hub) revokePruned(ctx context.Context) {
 			h.setPrunedProblem(target, "the instance's AI lock stayed busy; retried at the next reconcile")
 			continue
 		}
-		err := h.revokeAllWith(ctx, t, o.name, hook, true)
+		err := h.revokeAllWith(ctx, t, o.name, hook)
+		if err == nil {
+			// The template dropped (or changed) the companion: its record goes.
+			err = h.oauthSeenDrop(target)
+		}
 		unlock()
 		h.revokeAudit(aiHubActor, key, target, "revoke_all (template changed)", err)
 		if err != nil {
@@ -700,10 +705,9 @@ func (h *Hub) setPrunedProblem(target, msg string) {
 }
 
 // revokeAllWith runs revoke_all with hook for companion name of t: its
-// entries marked revoking first, removed after success, its oauth-seen
-// record dropped (oauth: the companion is app_oauth). Caller holds the AI
-// lock.
-func (h *Hub) revokeAllWith(ctx context.Context, t *templates.Template, name, hook string, oauth bool) error {
+// entries marked revoking first, removed after success (an app_oauth
+// companion's oauth-seen record is kept). Caller holds the AI lock.
+func (h *Hub) revokeAllWith(ctx context.Context, t *templates.Template, name, hook string) error {
 	var mine []aigate.Credential
 	for _, e := range h.creds().Entries() {
 		if e.Instance == t.ID && e.Companion == name {
@@ -726,15 +730,9 @@ func (h *Hub) revokeAllWith(ctx context.Context, t *templates.Template, name, ho
 			return statusErr(http.StatusInternalServerError, "companion %s: removing its revoked credentials: %v", name, err)
 		}
 	}
-	if oauth {
-		// Everyone's MCP tokens are gone: nobody recorded owes a revoke.
-		if err := h.oauthSeenDrop(t.ID + "/" + name); err != nil {
-			return statusErr(http.StatusInternalServerError, "companion %s: %v", name, err)
-		}
-		h.aiErrMu.Lock()
-		delete(h.aiOwedRevokeAll, t.ID+"/"+name)
-		h.aiErrMu.Unlock()
-	}
+	// app_oauth: oauth-seen.json is kept (T27): revoke_all ends only AI
+	// clients' tokens, so a recorded person who leaves later still gets
+	// their own revoke (revokePruned drops a pruned companion's record).
 	return nil
 }
 
@@ -753,11 +751,12 @@ type AIRevokeProblem struct {
 	Recorded int `json:"recorded"`
 	// NoHook: the template no longer has the hook to revoke them.
 	NoHook bool `json:"no_hook"`
-	// Unmatched: app_oauth leavers with unverifiable records whose
-	// revoke_all is owed (it failed at the last pass; retried; T27).
+	// Unmatched: app_oauth people who left before their app account could
+	// be matched: the revoke_all ended only AI clients' tokens; listed
+	// until an administrator dismisses them (AIRevokeDismiss; T27).
 	Unmatched []string `json:"unmatched,omitempty"`
-	// Unverifiable: app_oauth people recorded without both an LLDAP uuid
-	// and a Keycloak id: if one leaves, the companion's revoke_all runs.
+	// Unverifiable: app_oauth people recorded without an LLDAP uuid, or
+	// whose Keycloak id lookup failed 3 passes running.
 	Unverifiable []string `json:"unverifiable,omitempty"`
 	Reason       string   `json:"reason"`
 }
@@ -770,7 +769,20 @@ func (h *Hub) AIRevokeProblems() []AIRevokeProblem {
 	seenFile, seenErr := h.oauthSeenFileLocked()
 	aiStoreMu.Unlock()
 	seen := seenFile.Companions
-	unverifiable := oauthUnverifiable(seenFile)
+	// Unverifiable: no uuid (for good), or a uuid whose id lookups failed
+	// three passes running.
+	unverifiable := map[string][]string{}
+	h.aiErrMu.Lock()
+	for ref, users := range seenFile.Companions {
+		for _, u := range users {
+			if seenFile.UUIDs[ref][u] == "" || (len(seenFile.Subs[ref][u]) == 0 && h.aiPendingPasses[ref][u] >= 3) {
+				unverifiable[ref] = append(unverifiable[ref], u)
+			}
+		}
+	}
+	seenWriteErr := h.aiSeenWriteError
+	unwritten := maps.Clone(h.aiSeenUnwritten)
+	h.aiErrMu.Unlock()
 	byKey := map[string]*AIRevokeProblem{}
 	get := func(id, name string) *AIRevokeProblem {
 		k := id + "/" + name
@@ -810,18 +822,37 @@ func (h *Hub) AIRevokeProblems() []AIRevokeProblem {
 			get(id, name).Recorded = len(users)
 		}
 	}
-	h.aiErrMu.Lock()
-	for ref, users := range h.aiOwedRevokeAll {
+	notes := map[string][]string{}
+	note := func(ref, text string) {
+		id, name, _ := strings.Cut(ref, "/")
+		if h.findLocked(id) != nil {
+			get(id, name)
+			notes[ref] = append(notes[ref], text)
+		}
+	}
+	for ref, users := range seenFile.Unmatched {
 		id, name, _ := strings.Cut(ref, "/")
 		if h.findLocked(id) != nil {
 			get(id, name).Unmatched = slices.Clone(users)
+			for _, u := range users {
+				note(ref, unmatchedText(u, id))
+			}
 		}
 	}
+	h.aiErrMu.Lock()
+	for ref, users := range h.aiOwedRevokeAll {
+		id, _, _ := strings.Cut(ref, "/")
+		note(ref, fmt.Sprintf("revoke_all owed for %s (they left %s before their Home Assistant account could be matched); it failed and is retried at every reconcile: %s", strings.Join(users, ", "), id, h.aiErrs[ref]))
+	}
 	h.aiErrMu.Unlock()
+	for ref, users := range unwritten {
+		note(ref, fmt.Sprintf("recording %s failed (%s): %s will be recorded unverifiable once a write succeeds", oauthSeenName, seenWriteErr, strings.Join(users, ", ")))
+	}
 	for ref, users := range unverifiable {
 		id, name, _ := strings.Cut(ref, "/")
 		if h.findLocked(id) != nil {
 			get(id, name).Unverifiable = sortedSet(users)
+			note(ref, fmt.Sprintf("%d recorded people can't be verified (no LLDAP uuid recorded, or their Keycloak id lookup keeps failing): if one leaves, everyone's AI grants for %s end (revoke_all) and they must be handled in Home Assistant", len(users), id))
 		}
 	}
 	// No way to look Keycloak ids up while an app_oauth companion is on:
@@ -854,19 +885,8 @@ func (h *Hub) AIRevokeProblems() []AIRevokeProblem {
 		if p.Reason != "" {
 			continue
 		}
-		if len(p.Unmatched) > 0 {
-			var texts []string
-			for _, u := range p.Unmatched {
-				texts = append(texts, errNoSub{user: u, instance: p.Instance}.Error())
-			}
-			if msg := h.aiErrs[k]; msg != "" {
-				texts = append(texts, "the revoke_all failed (retried at every reconcile): "+msg)
-			}
-			p.Reason = strings.Join(texts, "\n")
-			continue
-		}
-		if len(p.Unverifiable) > 0 && p.Revoking == 0 && !p.Pruned && p.Recorded == 0 {
-			p.Reason = fmt.Sprintf("%d recorded people can't be verified (no Keycloak id or LLDAP uuid recorded): if one leaves, everyone's AI grants for %s end (revoke_all)", len(p.Unverifiable), p.Instance)
+		if n := notes[k]; len(n) > 0 {
+			p.Reason = strings.Join(n, "\n")
 			continue
 		}
 		if msg := h.aiPrunedErrs[k]; msg != "" {
@@ -1050,24 +1070,30 @@ func (h *Hub) writeAIStore(name string, v any) error {
 }
 
 // oauthSeenFile is <data>/ai/oauth-seen.json: per app_oauth companion
-// ("<instance>/<companion>") everyone who was a holder of its population
-// while AI was on (who may hold app-side MCP tokens), sorted, with the
-// LLDAP uuid they had when first recorded (UUIDs) and their Keycloak user
-// id (Subs: the app_oauth revoke's "sub", contract §15.5, which the app
-// matches its accounts by, still known once the person is gone). A record
-// is verified when both are stored, else unverifiable (T27): a uuid is
-// never filled in later; a missing sub is backfilled only while the live
-// account's uuid equals the stored one. Everything is on disk.
+// ("<instance>/<companion>") everyone who was a holder of its instance's
+// population while the companion was on (who may hold app-side tokens),
+// sorted, with the LLDAP uuid they had when first recorded (UUIDs, absent
+// when LLDAP gave none) and every Keycloak user id seen for them while
+// they held (Subs: the app_oauth revoke's "sub", contract §15.5; a list
+// because the realm's ids follow the LDAP uid). A record is verified when
+// it has a uuid and at least one id, else unverifiable (T27): a uuid is
+// never filled in later; ids are added only while the live account's
+// uuid equals the stored one. Unmatched: people who left before their
+// account could be matched, listed until an administrator dismisses them
+// (AIRevokeDismiss). Everything is on disk.
 type oauthSeenFile struct {
-	Version    int                          `json:"version"`
-	Companions map[string][]string          `json:"companions"`
-	Subs       map[string]map[string]string `json:"subs,omitempty"`
-	// UUIDs: ref → user → the LLDAP account uuid they were first recorded
-	// with (Membership.UUIDs; absent when LLDAP gave none).
-	UUIDs map[string]map[string]string `json:"uuids,omitempty"`
+	Version    int                            `json:"version"`
+	Companions map[string][]string            `json:"companions"`
+	UUIDs      map[string]map[string]string   `json:"uuids,omitempty"`
+	Subs       map[string]map[string][]string `json:"subs,omitempty"`
+	Unmatched  map[string][]string            `json:"unmatched,omitempty"`
 }
 
 const oauthSeenName = "oauth-seen.json"
+
+func (f oauthSeenFile) verified(ref, user string) bool {
+	return f.UUIDs[ref][user] != "" && len(f.Subs[ref][user]) > 0
+}
 
 func (h *Hub) oauthSeen() (map[string][]string, error) {
 	aiStoreMu.Lock()
@@ -1076,25 +1102,34 @@ func (h *Hub) oauthSeen() (map[string][]string, error) {
 	return f.Companions, err
 }
 
+func (h *Hub) oauthSeenRead() (oauthSeenFile, error) {
+	aiStoreMu.Lock()
+	defer aiStoreMu.Unlock()
+	return h.oauthSeenFileLocked()
+}
+
 func (h *Hub) oauthSeenFileLocked() (oauthSeenFile, error) {
-	f := oauthSeenFile{Version: 1, Companions: map[string][]string{}}
+	f := oauthSeenFile{Version: 1}
 	if err := h.readAIStore(oauthSeenName, &f); err != nil {
 		return oauthSeenFile{}, err
 	}
 	if f.Companions == nil {
 		f.Companions = map[string][]string{}
 	}
-	if f.Subs == nil {
-		f.Subs = map[string]map[string]string{}
-	}
 	if f.UUIDs == nil {
 		f.UUIDs = map[string]map[string]string{}
+	}
+	if f.Subs == nil {
+		f.Subs = map[string]map[string][]string{}
+	}
+	if f.Unmatched == nil {
+		f.Unmatched = map[string][]string{}
 	}
 	return f, nil
 }
 
 // oauthSeenUpdate applies fn to the record and writes it when fn reports
-// a change. The Keycloak ids of people no longer recorded go with them.
+// a change. The uuids and ids of people no longer recorded go with them.
 func (h *Hub) oauthSeenUpdate(fn func(map[string][]string) bool) error {
 	return h.oauthSeenUpdateFile(func(f *oauthSeenFile) bool { return fn(f.Companions) })
 }
@@ -1109,116 +1144,117 @@ func (h *Hub) oauthSeenUpdateFile(fn func(*oauthSeenFile) bool) error {
 	if !fn(&f) {
 		return nil
 	}
-	seen := f.Companions
-	for k, v := range seen {
-		if len(v) == 0 {
-			delete(seen, k)
-		} else {
-			seen[k] = sortedSet(v)
-		}
-	}
-	for _, perRef := range []map[string]map[string]string{f.Subs, f.UUIDs} {
-		for ref, vals := range perRef {
-			for u := range vals {
-				if !slices.Contains(seen[ref], u) {
-					delete(vals, u)
-				}
-			}
-			if len(vals) == 0 {
-				delete(perRef, ref)
+	for _, lists := range []map[string][]string{f.Companions, f.Unmatched} {
+		for k, v := range lists {
+			if len(v) == 0 {
+				delete(lists, k)
+			} else {
+				lists[k] = sortedSet(v)
 			}
 		}
 	}
-	out := oauthSeenFile{Version: 1, Companions: seen}
+	for ref, vals := range f.UUIDs {
+		for u, v := range vals {
+			if v == "" || !slices.Contains(f.Companions[ref], u) {
+				delete(vals, u)
+			}
+		}
+		if len(vals) == 0 {
+			delete(f.UUIDs, ref)
+		}
+	}
+	for ref, vals := range f.Subs {
+		for u, v := range vals {
+			if len(v) == 0 || !slices.Contains(f.Companions[ref], u) {
+				delete(vals, u)
+			} else {
+				vals[u] = sortedSet(v)
+			}
+		}
+		if len(vals) == 0 {
+			delete(f.Subs, ref)
+		}
+	}
+	out := oauthSeenFile{Version: 1, Companions: f.Companions}
+	if len(f.UUIDs) > 0 {
+		out.UUIDs = f.UUIDs
+	}
 	if len(f.Subs) > 0 {
 		out.Subs = f.Subs
 	}
-	if len(f.UUIDs) > 0 {
-		out.UUIDs = f.UUIDs
+	if len(f.Unmatched) > 0 {
+		out.Unmatched = f.Unmatched
 	}
 	return h.writeAIStore(oauthSeenName, out)
 }
 
-// oauthSeenAdd records people (ref → user → LLDAP uuid, "" when LLDAP
-// gave none: unverifiable for good) and stores the Keycloak ids found
-// (ref → user → id) for recorded people that have none; a stored id or
-// uuid is never replaced or filled in.
-func (h *Hub) oauthSeenAdd(add, subs map[string]map[string]string) error {
+// oauthSeenAdd records people of ref (user → LLDAP uuid; "" when LLDAP
+// gave none, or when they must be unverifiable: never filled in later)
+// and adds the Keycloak ids found (user → id) to recorded people whose
+// stored uuid is non-empty.
+func (h *Hub) oauthSeenAdd(ref string, add, subs map[string]string) error {
 	return h.oauthSeenUpdateFile(func(f *oauthSeenFile) bool {
 		changed := false
-		for ref, people := range add {
-			for u, uuid := range people {
-				if slices.Contains(f.Companions[ref], u) {
-					continue
-				}
-				f.Companions[ref] = append(f.Companions[ref], u)
-				if uuid != "" {
-					if f.UUIDs[ref] == nil {
-						f.UUIDs[ref] = map[string]string{}
-					}
-					f.UUIDs[ref][u] = uuid
-				}
-				changed = true
+		for u, uuid := range add {
+			if slices.Contains(f.Companions[ref], u) {
+				continue
 			}
+			f.Companions[ref] = append(f.Companions[ref], u)
+			if uuid != "" {
+				if f.UUIDs[ref] == nil {
+					f.UUIDs[ref] = map[string]string{}
+				}
+				f.UUIDs[ref][u] = uuid
+			}
+			changed = true
 		}
-		for ref, people := range subs {
-			for u, sub := range people {
-				if sub == "" || !slices.Contains(f.Companions[ref], u) || f.Subs[ref][u] != "" || f.UUIDs[ref][u] == "" {
-					continue
-				}
-				if f.Subs[ref] == nil {
-					f.Subs[ref] = map[string]string{}
-				}
-				f.Subs[ref][u] = sub
-				changed = true
+		for u, sub := range subs {
+			if sub == "" || !slices.Contains(f.Companions[ref], u) || f.UUIDs[ref][u] == "" || slices.Contains(f.Subs[ref][u], sub) {
+				continue
 			}
+			if f.Subs[ref] == nil {
+				f.Subs[ref] = map[string][]string{}
+			}
+			f.Subs[ref][u] = append(f.Subs[ref][u], sub)
+			changed = true
 		}
 		return changed
 	})
 }
 
-// oauthSeenRebuild replaces ref's record with holders (user → live uuid,
-// "" = none) and the ids found (user → id), in one update: the record
-// after a revoke_all, which ended everyone's tokens.
-func (h *Hub) oauthSeenRebuild(ref string, holders, subs map[string]string) error {
+// oauthSeenEntry is one person's record (rebuild input).
+type oauthSeenEntry struct {
+	uuid string
+	subs []string
+}
+
+// oauthSeenRebuild replaces ref's record with keep and adds unmatched to
+// ref's Unmatched list, in one update: the record after a revoke_all.
+func (h *Hub) oauthSeenRebuild(ref string, keep map[string]oauthSeenEntry, unmatched []string) error {
 	return h.oauthSeenUpdateFile(func(f *oauthSeenFile) bool {
-		f.Companions[ref] = slices.Sorted(maps.Keys(holders))
+		f.Companions[ref] = slices.Sorted(maps.Keys(keep))
 		delete(f.UUIDs, ref)
 		delete(f.Subs, ref)
-		for u, uuid := range holders {
-			if uuid == "" {
+		for u, e := range keep {
+			if e.uuid == "" {
 				continue
 			}
 			if f.UUIDs[ref] == nil {
 				f.UUIDs[ref] = map[string]string{}
 			}
-			f.UUIDs[ref][u] = uuid
-			if sub := subs[u]; sub != "" {
+			f.UUIDs[ref][u] = e.uuid
+			if len(e.subs) > 0 {
 				if f.Subs[ref] == nil {
-					f.Subs[ref] = map[string]string{}
+					f.Subs[ref] = map[string][]string{}
 				}
-				f.Subs[ref][u] = sub
+				f.Subs[ref][u] = slices.Clone(e.subs)
 			}
 		}
+		f.Unmatched[ref] = append(f.Unmatched[ref], unmatched...)
 		return true
 	})
 }
 
-// oauthUnverifiable lists, per ref, the recorded people whose record lacks
-// its uuid or its sub.
-func oauthUnverifiable(f oauthSeenFile) map[string][]string {
-	out := map[string][]string{}
-	for ref, users := range f.Companions {
-		for _, u := range users {
-			if f.UUIDs[ref][u] == "" || f.Subs[ref][u] == "" {
-				out[ref] = append(out[ref], u)
-			}
-		}
-	}
-	return out
-}
-
-// oauthSeenRemoveUsers removes users from ref's record in one update.
 func (h *Hub) oauthSeenRemoveUsers(ref string, users []string) error {
 	return h.oauthSeenUpdate(func(seen map[string][]string) bool {
 		n := len(seen[ref])
@@ -1227,14 +1263,7 @@ func (h *Hub) oauthSeenRemoveUsers(ref string, users []string) error {
 	})
 }
 
-func (h *Hub) oauthSeenRemove(ref, user string) error {
-	return h.oauthSeenUpdate(func(seen map[string][]string) bool {
-		n := len(seen[ref])
-		seen[ref] = slices.DeleteFunc(seen[ref], func(u string) bool { return u == user })
-		return len(seen[ref]) != n
-	})
-}
-
+// oauthSeenDrop removes ref's whole record (its Unmatched list stays).
 func (h *Hub) oauthSeenDrop(ref string) error {
 	return h.oauthSeenUpdate(func(seen map[string][]string) bool {
 		if _, ok := seen[ref]; !ok {
@@ -1248,17 +1277,17 @@ func (h *Hub) oauthSeenDrop(ref string) error {
 // AIUserIDs looks a person's Keycloak user id up by exact username
 // (keycloak.Client.ImportUser). The AIKeycloak wired with SetAIKeycloak
 // provides it when it implements it (main's does); else every app_oauth
-// person stays pending, a leaver costs a revoke_all, and AIRevokeProblems
-// lists it.
+// record stays unverifiable and AIRevokeProblems lists it.
 type AIUserIDs interface {
 	ImportUser(ctx context.Context, username string) (string, error)
 }
 
 // errNoUserIDs: no Keycloak lookup is wired (AIRevokeProblems, log).
-var errNoUserIDs = errors.New("Keycloak is not configured: app_oauth people's Keycloak ids can't be recorded, so every leaver ends everyone's AI grants for the app (revoke_all)")
+var errNoUserIDs = errors.New("Keycloak is not configured: app_oauth people's Keycloak ids can't be recorded, so every leaver ends everyone's AI grants for the app (revoke_all) and can't be matched")
 
 // lookupSub is user's Keycloak user id, now: only ever called for a
-// current holder (in the population this pass), never to revoke.
+// current holder whose live LLDAP uuid is the one recorded (or being
+// recorded), never to revoke.
 func (h *Hub) lookupSub(ctx context.Context, user string) (string, error) {
 	kc, _ := h.aiKeycloak().(AIUserIDs)
 	if kc == nil {
@@ -1275,31 +1304,31 @@ func (h *Hub) lookupSub(ctx context.Context, user string) (string, error) {
 	return sub, nil
 }
 
-// errNoSub: a recorded app_oauth person whose Keycloak id is still
-// pending. Nothing can match their app-side tokens; a person who is no
-// longer a holder is never looked up by name (the name may belong to
-// someone else by now): the companion's revoke_all covers them.
-type errNoSub struct{ user, instance string }
-
-func (e errNoSub) Error() string {
-	return fmt.Sprintf("%s on %s: app-side tokens can't be matched (no Keycloak id recorded); revoking everyone's (revoke_all)", e.user, e.instance)
+// unmatchedText is the AIRevokeProblems line for a person who left before
+// their Home Assistant account could be matched.
+func unmatchedText(user, instance string) string {
+	return fmt.Sprintf("%s left %s before their Home Assistant account could be matched: their web, Companion and long-lived tokens remain; deactivate or delete %s in Home Assistant (Settings > People), then dismiss", user, instance, user)
 }
 
-// oauthSub is the "sub" of user's app_oauth revoke for ref: the Keycloak
-// id stored when they were recorded. None = errNoSub; there is no lookup.
-func (h *Hub) oauthSub(ref, user string) (string, error) {
-	aiStoreMu.Lock()
-	f, err := h.oauthSeenFileLocked()
-	aiStoreMu.Unlock()
-	if err != nil {
-		return "", err
+// AIRevokeDismiss clears user from companion's unmatched leavers once an
+// administrator has dealt with their remaining app-side tokens
+// (POST /api/instances/{id}/ai/revoke/dismiss; the doctor). Audited
+// ai.credential.revoke detail "dismissed".
+func (h *Hub) AIRevokeDismiss(instance, companion, user string, actor directory.Actor) error {
+	ref := instance + "/" + companion
+	target := ref + "/" + user
+	found := false
+	err := h.oauthSeenUpdateFile(func(f *oauthSeenFile) bool {
+		n := len(f.Unmatched[ref])
+		f.Unmatched[ref] = slices.DeleteFunc(f.Unmatched[ref], func(u string) bool { return u == user })
+		found = len(f.Unmatched[ref]) != n
+		return found
+	})
+	if err == nil && !found {
+		err = &StatusError{Status: http.StatusNotFound, Err: fmt.Errorf("%s is not listed as unmatched on %s", user, ref)}
 	}
-	sub := f.Subs[ref][user]
-	if sub == "" || f.UUIDs[ref][user] == "" {
-		id, _, _ := strings.Cut(ref, "/")
-		return "", errNoSub{user: user, instance: id}
-	}
-	return sub, nil
+	h.auditAI(actor, "ai.credential.revoke", target, "dismissed: an administrator handled the remaining app-side tokens", err)
+	return err
 }
 
 // orphansFile is <data>/ai/orphans.json: credentials a mint hook created
@@ -1402,24 +1431,26 @@ func (h *Hub) retryOrphans(ctx context.Context) {
 // ── 5. app_oauth leavers ──────────────────────────────────
 
 // reconcileOAuthSeen keeps oauth-seen.json for each app_oauth companion
-// and revokes what its leavers may hold (T27). One rule: a record is
-// verified (LLDAP uuid and Keycloak id both stored) or unverifiable.
-//   - Every holder is recorded at once, with their live uuid ("" when
-//     LLDAP gives none); a uuid is never filled in later. Ids are looked
-//     up only for current holders whose stored uuid equals the live one.
+// and revokes what its leavers may hold (T27). A record is verified (LLDAP
+// uuid and at least one Keycloak id) or unverifiable.
+//   - The holders are the instance's population (also while the companion
+//     is off: switching AI off is no leaving); new holders are recorded
+//     only while the companion is on, at once, with their live uuid ("" =
+//     unverifiable for good). Ids are looked up every pass for current
+//     holders whose live uuid is the stored, non-empty one, and added.
 //   - A verified person who left gets {"action":"revoke","user","sub",
-//     "ids":[]}, the record removed on success.
-//   - An unverifiable person who left, or a recorded name whose live
-//     uuid differs (another account), makes the companion's revoke_all
-//     run; then the record is rebuilt from this pass's holders in one
-//     update (full data = verified, the rest unverifiable). A failure is
-//     retried at every pass: the cause stays on disk.
+//     "ids":[]} for every stored id (all of their Home Assistant tokens),
+//     the record removed once all succeed.
+//   - An unverifiable person who left, or a recorded name whose live uuid
+//     differs (another account), makes the companion's revoke_all run
+//     (AI clients' tokens only); then the record is rebuilt from this
+//     pass's holders (plus verified leavers whose revoke failed) in one
+//     update and the person is listed unmatched until dismissed. A
+//     failure is retried every pass: the cause stays on disk.
 //
 // With the directory unreadable or the master switch off nobody is judged.
 func (h *Hub) reconcileOAuthSeen(ctx context.Context, m *directory.Membership) {
-	aiStoreMu.Lock()
-	file, err := h.oauthSeenFileLocked()
-	aiStoreMu.Unlock()
+	file, err := h.oauthSeenRead()
 	if err != nil {
 		log.Printf("ai: app_oauth revocations skipped: %v", err)
 		return
@@ -1449,24 +1480,17 @@ func (h *Hub) reconcileOAuthSeen(ctx context.Context, m *directory.Membership) {
 		if s.Pruned {
 			continue // revokePruned's revoke_all
 		}
-		c := companionOf(t, name)
-		var hold map[string]bool
-		known := false
-		if c != nil && c.Identity.Mode == templates.IdentityAppOAuth {
-			hold, known = h.aiHoldersLocked(t, c, s, m, now)
-		} else {
-			hold, known = map[string]bool{}, true
-		}
-		if !known {
-			continue
-		}
 		p := oauthPass{ref: ref, name: name, hook: revokeHookOf(t, name, s), holders: map[string]string{}}
-		for u := range hold {
-			if m != nil {
-				p.holders[u] = m.UUIDs[u]
-			} else {
-				p.holders[u] = ""
+		c := companionOf(t, name)
+		if c != nil && c.Identity.Mode == templates.IdentityAppOAuth {
+			hold, known := h.aiOAuthHoldersLocked(t, s, m, now)
+			if !known {
+				continue
 			}
+			for u := range hold {
+				p.holders[u] = m.UUIDs[u]
+			}
+			p.recordNew = s.Enabled && slices.Contains(c.Modes, s.Mode)
 		}
 		passes = append(passes, p)
 	}
@@ -1477,11 +1501,51 @@ func (h *Hub) reconcileOAuthSeen(ctx context.Context, m *directory.Membership) {
 	}
 }
 
+// aiOAuthHoldersLocked: an app_oauth companion's holders are its
+// instance's population whether the companion is on or off (aiHoldersLocked
+// without the companion switch); nobody while the instance is disabled or
+// its policy reaches LoA 3. Not known (false) with the master switch off,
+// a revoke_all owed, or no directory snapshot.
+func (h *Hub) aiOAuthHoldersLocked(t *templates.Template, s state.AICompanion, m *directory.Membership, now time.Time) (map[string]bool, bool) {
+	if !h.st.AI.Enabled || s.RevokePending || s.Pruned {
+		return nil, false
+	}
+	nobody := map[string]bool{}
+	if !t.Enabled {
+		return nobody, true
+	}
+	if loa := policy.LoA(h.effectivePolicyLocked(t)); loa < 0 || loa > 2 {
+		return nobody, true
+	}
+	if h.populationWhyLocked(t) != "" {
+		return nobody, true
+	}
+	if m == nil {
+		return nil, false
+	}
+	pop := h.populationLocked(t, m)
+	users := make([]string, 0, len(pop.People))
+	for _, p := range pop.People {
+		users = append(users, p.User)
+	}
+	group := accessGroupOf(t)
+	out := map[string]bool{}
+	for _, u := range validUsers(users) {
+		if at, ok := m.Pending[u][group]; group != "" && ok && !now.Before(at) {
+			continue
+		}
+		out[u] = true
+	}
+	return out, true
+}
+
 // oauthPass is one app_oauth companion's holders this pass (user → live
-// LLDAP uuid, "" = none).
+// LLDAP uuid, "" = none); recordNew: the companion is on (new holders are
+// recorded).
 type oauthPass struct {
 	ref, name, hook string
 	holders         map[string]string
+	recordNew       bool
 }
 
 func (h *Hub) reconcileOAuthRef(ctx context.Context, f oauthSeenFile, p oauthPass) {
@@ -1490,122 +1554,219 @@ func (h *Hub) reconcileOAuthRef(ctx context.Context, f oauthSeenFile, p oauthPas
 	if t == nil {
 		return
 	}
-	verified := func(u string) bool { return f.UUIDs[p.ref][u] != "" && f.Subs[p.ref][u] != "" }
-	var owe, gone []string // unverifiable leavers / replaced; verified leavers
-	for _, u := range f.Companions[p.ref] {
+	recorded := f.Companions[p.ref]
+	h.aiErrMu.Lock()
+	unwritten := slices.Clone(h.aiSeenUnwritten[p.ref])
+	h.aiErrMu.Unlock()
+	var owe, gone []string // unverifiable leavers or replaced names; verified leavers
+	for _, u := range recorded {
 		stored := f.UUIDs[p.ref][u]
 		live, holds := p.holders[u]
-		replaced := holds && stored != "" && live != "" && stored != live
 		switch {
-		case replaced, !holds && !verified(u):
+		case holds && stored != "" && live != "" && stored != live, !holds && !f.verified(p.ref, u):
 			owe = append(owe, u)
 		case !holds:
 			gone = append(gone, u)
 		}
 	}
-	// lookups: ids of current holders whose live uuid is non-empty and is
-	// the stored one (new holders: the uuid they are recorded with now).
-	lookup := func(users []string) map[string]string {
-		out := map[string]string{}
-		for _, u := range users {
-			sub, err := h.lookupSub(ctx, u)
-			if err != nil {
-				log.Printf("ai: %s: the Keycloak id of %s is pending (looked up again at the next reconcile): %v", p.ref, u, err)
-				continue
-			}
-			out[u] = sub
+	for _, u := range unwritten {
+		if _, holds := p.holders[u]; !holds && !slices.Contains(recorded, u) {
+			owe = append(owe, u) // left before a write could record them
 		}
-		return out
 	}
-	if len(owe) > 0 {
-		h.revokeAllForUnverifiable(ctx, t, p, owe, gone, lookup)
-		return
-	}
+	// 1. Every verified leaver gets their own revoke, even when a
+	// revoke_all runs too (it only ends AI clients' tokens).
+	var revoked []string
+	failed := map[string]bool{}
 	for _, u := range sortedSet(gone) {
-		target := p.ref + "/" + u
-		key := "oauth:" + target
-		if p.hook == "" {
-			h.revokeAudit(aiHubActor, key, target, "ids []", errNoRevokeHook(p.name))
-			continue
+		if h.revokeVerified(ctx, t, p, u, f.Subs[p.ref][u]) {
+			revoked = append(revoked, u)
+		} else {
+			failed[u] = true
 		}
-		unlock, ok := h.aiTryLock(id, aiRevokeLockWait)
-		if !ok {
-			continue
-		}
-		err := h.runRevokeOAuthSub(ctx, t, p.hook, u, f.Subs[p.ref][u])
-		unlock()
-		if err == nil {
-			err = h.oauthSeenRemoveUsers(p.ref, []string{u})
-		}
-		h.revokeAudit(aiHubActor, key, target, "ids []", err)
-		if err != nil {
-			if companionOf(t, p.name) != nil {
-				h.revokeFailed(id, p.name, err)
-			}
-			continue
-		}
-		h.revokeDone(t, p.name)
 	}
+	// 2. Keycloak ids of current holders whose live account is the
+	// recorded one (or who are being recorded now with a uuid).
 	add := map[string]string{}
 	var want []string
 	for u, live := range p.holders {
-		if !slices.Contains(f.Companions[p.ref], u) {
+		inRec := slices.Contains(recorded, u)
+		switch {
+		case slices.Contains(unwritten, u) && !inRec:
+			add[u] = "" // unverifiable: unrecorded while the write failed
+		case !inRec && p.recordNew:
 			add[u] = live
 			if live != "" {
 				want = append(want, u)
 			}
-		} else if stored := f.UUIDs[p.ref][u]; f.Subs[p.ref][u] == "" && stored != "" && stored == live {
+		case inRec && live != "" && f.UUIDs[p.ref][u] == live:
 			want = append(want, u)
 		}
 	}
-	subs := lookup(sortedSet(want))
-	if len(add) > 0 || len(subs) > 0 {
-		if err := h.oauthSeenAdd(map[string]map[string]string{p.ref: add}, map[string]map[string]string{p.ref: subs}); err != nil {
-			log.Printf("ai: recording %s failed: %v", p.ref, err)
+	subs := h.lookupHolders(ctx, p.ref, sortedSet(want))
+	if len(owe) > 0 {
+		h.revokeAllForUnverifiable(ctx, t, p, f, sortedSet(owe), failed, subs)
+		return
+	}
+	if len(revoked) > 0 {
+		if err := h.oauthSeenRemoveUsers(p.ref, revoked); err != nil {
+			h.seenWriteFailed(p.ref, nil, err)
 		}
+	}
+	if len(add) > 0 || len(subs) > 0 {
+		if err := h.oauthSeenAdd(p.ref, add, subs); err != nil {
+			h.seenWriteFailed(p.ref, slices.Collect(maps.Keys(add)), err)
+			return
+		}
+	}
+	h.seenWriteDone(p.ref)
+}
+
+// revokeVerified runs the targeted revoke for every stored id of user
+// (audited); true once all succeeded.
+func (h *Hub) revokeVerified(ctx context.Context, t *templates.Template, p oauthPass, user string, subs []string) bool {
+	target := p.ref + "/" + user
+	key := "oauth:" + target
+	if p.hook == "" {
+		h.revokeAudit(aiHubActor, key, target, "ids []", errNoRevokeHook(p.name))
+		return false
+	}
+	unlock, ok := h.aiTryLock(t.ID, aiRevokeLockWait)
+	if !ok {
+		return false
+	}
+	var err error
+	for _, sub := range subs {
+		if err = h.runRevokeOAuthSub(ctx, t, p.hook, user, sub); err != nil {
+			break
+		}
+	}
+	unlock()
+	h.revokeAudit(aiHubActor, key, target, "ids []", err)
+	if err != nil {
+		if companionOf(t, p.name) != nil {
+			h.revokeFailed(t.ID, p.name, err)
+		}
+		return false
+	}
+	h.revokeDone(t, p.name)
+	return true
+}
+
+// lookupHolders looks the Keycloak ids of users (current holders) up;
+// a failure counts a pending pass (AIRevokeProblems after 3).
+func (h *Hub) lookupHolders(ctx context.Context, ref string, users []string) map[string]string {
+	out := map[string]string{}
+	h.aiErrMu.Lock()
+	if h.aiPendingPasses == nil {
+		h.aiPendingPasses = map[string]map[string]int{}
+	}
+	if h.aiPendingPasses[ref] == nil {
+		h.aiPendingPasses[ref] = map[string]int{}
+	}
+	h.aiErrMu.Unlock()
+	for _, u := range users {
+		sub, err := h.lookupSub(ctx, u)
+		h.aiErrMu.Lock()
+		if err != nil {
+			h.aiPendingPasses[ref][u]++
+		} else {
+			delete(h.aiPendingPasses[ref], u)
+			out[u] = sub
+		}
+		h.aiErrMu.Unlock()
+		if err != nil {
+			log.Printf("ai: %s: looking up the Keycloak id of %s failed (retried at the next reconcile): %v", ref, u, err)
+		}
+	}
+	return out
+}
+
+// seenWriteFailed keeps users (holders a failed write left unrecorded;
+// recorded unverifiable by the next successful write) and the error for
+// AIRevokeProblems.
+func (h *Hub) seenWriteFailed(ref string, users []string, err error) {
+	log.Printf("ai: ERROR: writing %s for %s failed: %v", oauthSeenName, ref, err)
+	h.aiErrMu.Lock()
+	defer h.aiErrMu.Unlock()
+	if h.aiSeenUnwritten == nil {
+		h.aiSeenUnwritten = map[string][]string{}
+	}
+	h.aiSeenUnwritten[ref] = sortedSet(append(h.aiSeenUnwritten[ref], users...))
+	h.aiSeenWriteError = err.Error()
+}
+
+func (h *Hub) seenWriteDone(ref string) {
+	h.aiErrMu.Lock()
+	defer h.aiErrMu.Unlock()
+	delete(h.aiSeenUnwritten, ref)
+	if len(h.aiSeenUnwritten) == 0 {
+		h.aiSeenWriteError = ""
 	}
 }
 
-// revokeAllForUnverifiable runs p's revoke_all because leavers owe (an
-// unverifiable record, or a name now on another account) can't be
-// matched; it covers the verified leavers gone too. On success the record
-// is rebuilt from this pass's holders in one update. Audited per person
-// with the reason; a failure is kept for AIRevokeProblems
-// (aiOwedRevokeAll) and retried at the next pass (the record still says
-// so).
-func (h *Hub) revokeAllForUnverifiable(ctx context.Context, t *templates.Template, p oauthPass, owe, gone []string, lookup func([]string) map[string]string) {
+// revokeAllForUnverifiable runs p's revoke_all because owe (unverifiable
+// leavers, re-used names) can't be matched. It ends AI clients' tokens
+// only: each is then listed unmatched until an administrator dismisses
+// them. On success the record is rebuilt in one update from this pass's
+// holders (fresh: live uuid + the ids just found, earlier ids kept while
+// the uuid matches) and the verified leavers whose own revoke failed.
+// Audited per person; a failure is retried every pass (the cause stays on
+// disk; aiOwedRevokeAll words AIRevokeProblems).
+func (h *Hub) revokeAllForUnverifiable(ctx context.Context, t *templates.Template, p oauthPass, f oauthSeenFile, owe []string, failed map[string]bool, subs map[string]string) {
 	var err error
 	if p.hook == "" {
 		err = errNoRevokeHook(p.name)
 	} else if unlock, ok := h.aiTryLock(t.ID, aiRevokeLockWait); !ok {
 		err = errors.New("the instance's AI lock stayed busy; retried at the next reconcile")
 	} else {
-		err = h.revokeAllWith(ctx, t, p.name, p.hook, false)
+		err = h.revokeAllWith(ctx, t, p.name, p.hook)
 		unlock()
 	}
 	if err == nil {
-		var want []string
+		// The rebuilt record is a fresh recording: ids for every holder
+		// with a live uuid (found ones kept).
+		var more []string
 		for u, live := range p.holders {
-			if live != "" {
-				want = append(want, u)
+			if live != "" && subs[u] == "" && (p.recordNew || slices.Contains(f.Companions[p.ref], u)) {
+				more = append(more, u)
 			}
 		}
-		err = h.oauthSeenRebuild(p.ref, p.holders, lookup(sortedSet(want)))
+		maps.Copy(subs, h.lookupHolders(ctx, p.ref, sortedSet(more)))
+		keep := map[string]oauthSeenEntry{}
+		for u, live := range p.holders {
+			if !p.recordNew && !slices.Contains(f.Companions[p.ref], u) {
+				continue
+			}
+			e := oauthSeenEntry{uuid: live}
+			if live != "" && f.UUIDs[p.ref][u] == live {
+				e.subs = slices.Clone(f.Subs[p.ref][u])
+			}
+			if live != "" && subs[u] != "" && !slices.Contains(e.subs, subs[u]) {
+				e.subs = append(e.subs, subs[u])
+			}
+			keep[u] = e
+		}
+		for u := range failed {
+			keep[u] = oauthSeenEntry{uuid: f.UUIDs[p.ref][u], subs: f.Subs[p.ref][u]}
+		}
+		if err = h.oauthSeenRebuild(p.ref, keep, owe); err != nil {
+			h.seenWriteFailed(p.ref, nil, err)
+		} else {
+			h.seenWriteDone(p.ref)
+		}
 	}
-	for _, u := range sortedSet(owe) {
+	for _, u := range owe {
 		target := p.ref + "/" + u
-		h.revokeAudit(aiHubActor, "oauth:"+target, target, "revoke_all: "+u+"'s record can't be verified (no Keycloak id or LLDAP uuid recorded, or the name is on another account now)", err)
-	}
-	for _, u := range sortedSet(gone) {
-		target := p.ref + "/" + u
-		h.revokeAudit(aiHubActor, "oauth:"+target, target, "revoke_all (another leaver of this app can't be verified)", err)
+		h.revokeAudit(aiHubActor, "oauth:"+target, target,
+			"revoke_all (AI clients' tokens only): "+u+" left before their Home Assistant account could be matched; their web, Companion and long-lived tokens remain", err)
 	}
 	h.aiErrMu.Lock()
 	if h.aiOwedRevokeAll == nil {
 		h.aiOwedRevokeAll = map[string][]string{}
 	}
 	if err != nil {
-		h.aiOwedRevokeAll[p.ref] = sortedSet(owe)
+		h.aiOwedRevokeAll[p.ref] = owe
 	} else {
 		delete(h.aiOwedRevokeAll, p.ref)
 	}

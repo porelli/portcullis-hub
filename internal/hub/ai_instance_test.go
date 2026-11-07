@@ -66,6 +66,10 @@ type fakeAIKC struct {
 	gone    map[string]bool
 	subErr  error
 	lookups int
+	// subOverride: a user's current id when it isn't fakeSub(user) (the
+	// realm's ids follow the LDAP uid: they can change).
+	subOverride map[string]string
+	looked      map[string]int
 }
 
 // fakeSub is the fake Keycloak id of user.
@@ -78,11 +82,18 @@ func (k *fakeAIKC) ImportUser(ctx context.Context, username string) (string, err
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	k.lookups++
+	if k.looked == nil {
+		k.looked = map[string]int{}
+	}
+	k.looked[username]++
 	if k.subErr != nil {
 		return "", k.subErr
 	}
 	if k.gone[username] {
 		return "", keycloak.ErrUserNotFound
+	}
+	if sub := k.subOverride[username]; sub != "" {
+		return sub, nil
 	}
 	return fakeSub(username), nil
 }

@@ -497,11 +497,17 @@ type Hub struct {
 	aiReconMu    sync.Mutex
 	aiRevokeErrs map[string]string
 	aiPrunedErrs map[string]string
-	// aiOwedRevokeAll: per app_oauth companion ("<inst>/<comp>"), the
-	// unverifiable leavers whose revoke_all failed at the last pass (T27;
-	// the owed revoke_all itself is recomputed from oauth-seen.json each
-	// pass, so a restart loses nothing).
-	aiOwedRevokeAll map[string][]string
+	// app_oauth reconcile memory (T27; the records themselves are all in
+	// oauth-seen.json): aiOwedRevokeAll — per companion, the unverifiable
+	// leavers whose revoke_all failed at the last pass (wording only: the
+	// cause stays on disk); aiPendingPasses — per companion and person,
+	// passes their Keycloak id lookup failed; aiSeenUnwritten — holders a
+	// failed oauth-seen.json write left unrecorded (recorded unverifiable
+	// by the next write) and that write's error.
+	aiOwedRevokeAll  map[string][]string
+	aiPendingPasses  map[string]map[string]int
+	aiSeenUnwritten  map[string][]string
+	aiSeenWriteError string
 	// Keycloak AI clients (ai_clients.go): aiKCMu serialises every pass
 	// over the AI clients and mcp:* scopes (the sync loop, a Settings → AI
 	// save, applyAIScopes), each reading state after taking it — a leaf

@@ -200,6 +200,17 @@ func (aiRevokingCheck) Run(in *Inputs) []Finding {
 		if reason == "" {
 			reason = "revocation pending"
 		}
+		if a.Revoking == 0 && a.Recorded == 0 && !a.Pruned {
+			// app_oauth (T27): people who left before their app account
+			// could be matched, unverifiable records, a failed record
+			// write; the reason lines say what to do.
+			f.Title = fmt.Sprintf("%s: the AI sign-ins of %s need attention.", a.app(), a.companion())
+			f.Why = reason
+			f.Fix = "Do what each line says in the app (Settings > People there), then dismiss the entry."
+			f.Class, f.Link = FixLink, aiLink(a)
+			out = append(out, f)
+			continue
+		}
 		switch {
 		case a.Recorded > 0 && a.Revoking == 0:
 			f.Title = fmt.Sprintf("%s: %d %s connected %s with the app's own sign-in and can't be revoked.", a.app(), a.Recorded,
