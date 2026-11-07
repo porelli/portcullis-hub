@@ -319,6 +319,14 @@ func TestStopRestart(t *testing.T) {
 			if stepOf(r, UndoStart).State != StepDone || stepOf(r, StepDown).State != StepUndone {
 				t.Errorf("steps %+v", r.Steps)
 			}
+			for _, k := range []string{StepStart, StepHealthy, StepSettings} {
+				if s := stepOf(r, k).State; s != StepWaiting && s != StepUndone {
+					t.Errorf("step %s: %s (ran, not undone)", k, s)
+				}
+			}
+			if stepOf(r, StepImages).State == StepUndone {
+				t.Error("images undone")
+			}
 			if e := f.audit.last(); e.Action != "restart.stop" || e.Detail != at || e.Result != "ok" {
 				t.Errorf("audit %+v", e)
 			}
@@ -708,5 +716,61 @@ func TestStoppedRestartStaysOwed(t *testing.T) {
 	}
 	if r := f.h.LastOp("other"); r == nil || !r.OK || r.Op != OpRestart {
 		t.Errorf("record %+v", r)
+	}
+}
+
+// TestPolicyAIOffNotStoppable: the Hub's switch-off for a policy that
+// needs mTLS can't be stopped (409): it runs to its end.
+func TestPolicyAIOffNotStoppable(t *testing.T) {
+	a := newInstAIFixture(t, nil)
+	a.enable(t, "aiapp")
+	if err := a.h.SetAISupport(context.Background(), "aiapp", "tok", true, root); err != nil {
+		t.Fatal(err)
+	}
+	reached, release := blockStep(t, a.h, StepRestart)
+	done := make(chan error, 1)
+	go func() {
+		done <- a.h.switchAIOff(context.Background(), "aiapp", []string{"tok"}, aiHubActor, aiPolicyOffDetail)
+	}()
+	<-reached
+	rec, err := a.h.StopOp("aiapp", directory.Human("bob"))
+	if statusOf(err) != 409 || rec == nil || !rec.Running || rec.Stoppable {
+		t.Fatalf("stop: %+v %v", rec, err)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if c := a.companion("aiapp", "tok"); c.Enabled {
+		t.Errorf("still on: %+v", c)
+	}
+	if r := a.h.LastOp("aiapp"); r == nil || !r.OK || r.StoppedBy != "" {
+		t.Errorf("record %+v", r)
+	}
+}
+
+// TestStopAIModeGoneFallsBack: a Stop whose previous mode the template no
+// longer has switches back with the default mode, with a warning.
+func TestStopAIModeGoneFallsBack(t *testing.T) {
+	a := newInstAIFixture(t, nil)
+	a.enable(t, "aiapp")
+	if err := a.h.SetAISupport(context.Background(), "aiapp", "tok", true, root); err != nil {
+		t.Fatal(err)
+	}
+	t0 := time.Date(2026, 11, 7, 10, 0, 0, 0, time.UTC)
+	a.h.recordOp("aiapp", OpRecord{Op: OpAI, OpID: "crashed2", At: t0, Running: true, Actor: "root", Stoppable: true,
+		Steps:  []Step{{Key: StepRevoke, Label: "r", State: StepDone}, {Key: StepScopes, Label: "s", State: StepRunning}, {Key: StepRestart, Label: "x", State: StepWaiting}, {Key: StepHooks, Label: "h", State: StepWaiting}},
+		Before: map[string]string{aiBeforeKey + "tok": "off gone_mode"}})
+	a.h.loadOps()
+	if _, err := a.h.StopOp("aiapp", directory.Human("bob")); err != nil {
+		t.Fatal(err)
+	}
+	r := waitOp(t, a.h, "aiapp", "crashed2")
+	if !r.Stopped() || !slices.ContainsFunc(r.Warnings, func(w string) bool { return strings.Contains(w, "gone_mode") }) {
+		t.Fatalf("record %+v", r)
+	}
+	c := a.companion("aiapp", "tok")
+	if c.Enabled || c.Mode != defaultMode(companionOf(a.h.Template("aiapp"), "tok")) {
+		t.Errorf("state %+v", c)
 	}
 }

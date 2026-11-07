@@ -495,6 +495,12 @@ func (h *Hub) aiSwitch(ctx context.Context, id string, u InstanceAIUpdate, actor
 	running := t.Enabled
 	if run.ready != nil {
 		run.ready()
+		if offDetail == aiPolicyOffDetail {
+			// The Hub's own switch-off for a policy that needs mTLS (a
+			// policy save, the LoA-3 reconcile) is never stopped: undone,
+			// it would switch the companion back on where that is refused.
+			prog.CloseStop()
+		}
 		// What a Stop puts back: each companion's {enabled, mode}.
 		for _, ch := range changes {
 			prog.Before(aiBeforeKey+ch.c.Name, aiBeforeValue(ch.before))
@@ -780,6 +786,11 @@ func (h *Hub) aiSwitch(ctx context.Context, id string, u InstanceAIUpdate, actor
 	}
 	if running {
 		h.TriggerReconcile()
+	}
+	// The gate before the audit: a Stop accepted after the last check is
+	// undone (the deferred handler) and audited with the stop, never ok.
+	if run.ready != nil && !prog.CloseStop() {
+		return nil, ErrStopped
 	}
 	auditAll(err)
 	v, verr := h.InstanceAI(id)

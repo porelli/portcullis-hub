@@ -572,7 +572,9 @@ func (h *Hub) undoRestart(id string, p *Progress) error {
 	var steps []undoStep
 	switch {
 	case wasRunning && (stepRan(rec, StepDown) || started):
-		steps = append(steps, undoStep{UndoStart, "Starting the app again", []string{StepDown}, func() error {
+		// The app back as it ran: the take-down and the cut-short start
+		// are both reversed (images never: downloaded images are kept).
+		steps = append(steps, undoStep{UndoStart, "Starting the app again", []string{StepDown, StepStart, StepHealthy, StepSettings}, func() error {
 			if tmpl == nil {
 				return statusErr(409, "the template of %s is gone: it can't be started again", id)
 			}
@@ -633,14 +635,24 @@ func aiBeforeValue(c state.AICompanion) string {
 func (h *Hub) undoAI(id string, p *Progress) error {
 	rec := p.snapshot()
 	stopper := p.stopActor()
+	tmpl := h.Template(id)
 	u := InstanceAIUpdate{Companions: map[string]CompanionUpdate{}}
-	for k, v := range rec.Before {
+	for _, k := range slices.Sorted(maps.Keys(rec.Before)) {
 		name, ok := strings.CutPrefix(k, aiBeforeKey)
 		if !ok {
 			continue
 		}
-		onOff, mode, _ := strings.Cut(v, " ")
+		onOff, mode, _ := strings.Cut(rec.Before[k], " ")
 		on := onOff == "on"
+		// A template update meanwhile may have dropped the old mode: the
+		// companion's default mode instead, with a warning.
+		if tmpl != nil {
+			if c := companionOf(tmpl, name); c != nil && !slices.Contains(c.Modes, mode) {
+				d := defaultMode(c)
+				p.Warn(fmt.Sprintf("companion %s: mode %s is no longer one of %s: switched back with mode %s", name, mode, strings.Join(c.Modes, ", "), d))
+				mode = d
+			}
+		}
 		u.Companions[name] = CompanionUpdate{Enabled: &on, Mode: &mode}
 	}
 	var steps []undoStep
