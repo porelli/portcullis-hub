@@ -116,6 +116,11 @@ import (
 // entries via AI (Claude Code): aiapp-off's mode change and the
 // refused switch-on of aiapp-mtls.
 //
+// The progress panel (operation progress Task 8): gitea, gitea-warn,
+// grafana-scratch and nativeapp's interrupted enable, with POST
+// /harness/op/break-undo and /harness/op/fix-undo
+// (harness_progress_test.go).
+//
 // The directory: root (admin), dana, alice, bob, carol, dave, erin and
 // user01-user55; groups office_milan (alice, bob, erin), it_staff (bob,
 // user07), helpers, and the fixtures' access and admin groups.
@@ -156,6 +161,9 @@ func TestHarness(t *testing.T) {
 	// AI support (plan 4 Task 21): aiapp and homeauto (an app_oauth app).
 	extra["aiapp"], extra["homeauto"] = harnessAIFixtures(t)
 	extra["ai-chat"], extra["plain"] = harnessAIPageFixtures(t)
+	// The progress panel (operation progress Task 8).
+	extra["gitea"] = [2]string{harnessGiteaManifest, harnessGiteaCompose}
+	hrun := &harnessRunner{}
 	aiDir := t.TempDir()
 	aiRecipient, aiGateData := harnessAIFiles(t, aiDir)
 	paddr := os.Getenv("HUB_HARNESS_PEOPLE_ADDR")
@@ -169,9 +177,11 @@ func TestHarness(t *testing.T) {
 	var eng *harnessEngine
 	disk := newHarnessDisk()
 	e := newInstEnvOpts(t, t.TempDir(), instEnvOpts{
-		extra: extra,
+		extra:  extra,
+		runner: hrun,
+		data:   func(dir string) { seedInterruptedOp(t, dir) },
 		engine: func(f *fakeEngine) hub.Engine {
-			eng = &harnessEngine{fakeEngine: f, disk: disk,
+			eng = &harnessEngine{fakeEngine: f, disk: disk, prog: newHarnessProgress(),
 				running: map[string][]string{"hookapp": {"app"}, "entryapp": {"app"}, "photos": {"server"}, "samba": {"samba"}, "smbfixture": {"smb"},
 					// aiapp's hooks run in its app service (the tok-mcp
 					// companion isn't running: the doctor's AI finding).
@@ -198,8 +208,9 @@ func TestHarness(t *testing.T) {
 				At: time.Now().UTC(), Detail: "/srv/media/inbox is a symlink"}}}
 		},
 	})
+	hrun.eng = eng
 	h := e.s.Hub
-	for _, id := range append(slices.Clone(harnessFixtures), "photos", "samba", "smbfixture", "aiapp", "homeauto", "ai-chat", "plain") {
+	for _, id := range append(slices.Clone(harnessFixtures), "photos", "samba", "smbfixture", "aiapp", "homeauto", "ai-chat", "plain", "gitea") {
 		if h.Template(id) == nil {
 			t.Fatalf("fixture %s not loaded (see the log)", id)
 		}
@@ -249,6 +260,7 @@ func TestHarness(t *testing.T) {
 		fmt.Fprintln(w, "hook apply now exits 1")
 	})
 	mux.HandleFunc("GET /harness/evil", harnessEvilPage)
+	seedProgress(t, e, mux)
 	mux.HandleFunc("GET /harness/authorize", hfa.authorizePage)
 	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		r.Header.Set(ProxySecretHeader, testSecret)
@@ -419,9 +431,14 @@ func seedSettings(t *testing.T, h *hub.Hub, eng *harnessEngine) {
 // hook apply that exits 1 until hookOK.
 type harnessEngine struct {
 	*fakeEngine
-	running map[string][]string // instance id → services
+	runMu   sync.Mutex
+	running map[string][]string // instance id → services (runMu)
 	hookOK  atomic.Bool
 	disk    *harnessDisk
+	// The progress panel's fixtures (harness_progress_test.go): image
+	// pulls and volume removals that take a while, and instances whose
+	// containers never get healthy.
+	prog harnessProgress
 }
 
 // RunHelper answers the shared-folder fixer's runs from the fake disk.
@@ -434,11 +451,17 @@ func (e *harnessEngine) ListContainers(ctx context.Context, f docker.Filters) ([
 	if err != nil {
 		return nil, err
 	}
+	e.runMu.Lock()
+	defer e.runMu.Unlock()
 	for id, services := range e.running {
 		project := hub.ProjectPrefix + id
 		for _, svc := range services {
+			status := "Up 2 hours"
+			if e.prog.unhealthy[id] {
+				status = "Up 1 minute (health: starting)"
+			}
 			c := docker.Container{
-				ID: project + "-" + svc, Names: []string{"/" + project + "-" + svc + "-1"}, State: "running", Status: "Up 2 hours",
+				ID: project + "-" + svc, Names: []string{"/" + project + "-" + svc + "-1"}, State: "running", Status: status,
 				Labels: map[string]string{docker.LabelProject: project, docker.LabelService: svc, docker.LabelNumber: "1"},
 			}
 			if matchLabels(c.Labels, f) {
@@ -450,9 +473,14 @@ func (e *harnessEngine) ListContainers(ctx context.Context, f docker.Filters) ([
 }
 
 func (e *harnessEngine) ContainerState(ctx context.Context, id string) (docker.State, error) {
+	e.runMu.Lock()
+	defer e.runMu.Unlock()
 	for inst, services := range e.running {
 		for _, svc := range services {
 			if id == hub.ProjectPrefix+inst+"-"+svc {
+				if e.prog.unhealthy[inst] {
+					return docker.State{Running: true, Status: "running", Health: "starting"}, nil
+				}
 				return docker.State{Running: true}, nil
 			}
 		}

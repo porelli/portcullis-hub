@@ -246,6 +246,47 @@
     .op-modal-title { font-weight: 600; margin-bottom: 0.75rem; color: #ef4444; }
     .op-modal-actions { display: flex; gap: 0.5rem; justify-content: flex-end; margin-top: 0.75rem; }
 
+    /* Operation progress panel (contract §11.7): every app operation */
+    .opp { margin: auto; background: #1e293b; color: #e2e8f0; border: 1px solid #334155; border-radius: 0.75rem; padding: 1.125rem 1.375rem; width: min(560px, calc(100vw - 2rem)); max-height: 90vh; overflow-y: auto; font-size: 0.875rem; }
+    .opp::backdrop { background: #020617cc; }
+    .opp-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 0.75rem; }
+    .opp-title { font-size: 1rem; font-weight: 600; margin: 0 0 0.125rem; outline: none; }
+    .opp-sub { color: #94a3b8; font-size: 0.75rem; margin-bottom: 0.75rem; }
+    .opp-steps { list-style: none; margin: 0; padding: 0; }
+    .opp-step { padding: 0.3125rem 0; }
+    .opp-row { display: flex; align-items: baseline; gap: 0.625rem; }
+    .opp-ic { width: 1.125rem; flex-shrink: 0; text-align: center; font-weight: 700; }
+    .opp-lbl { flex: 1; }
+    .opp-pct { color: #94a3b8; font-variant-numeric: tabular-nums; min-width: 3.25rem; text-align: right; font-size: 0.8125rem; }
+    .opp-ok .opp-ic { color: #4ade80; }
+    .opp-run .opp-ic { color: #60a5fa; }
+    .opp-wait .opp-ic, .opp-wait .opp-lbl { color: #64748b; }
+    .opp-stop .opp-ic { color: #f87171; }
+    .opp-bad .opp-ic, .opp-bad .opp-lbl { color: #f87171; }
+    .opp-undone .opp-ic, .opp-undone .opp-lbl { color: #94a3b8; }
+    .opp-undone .opp-lbl { text-decoration: line-through; text-decoration-color: #64748b; }
+    .opp-undo.opp-run .opp-ic { color: #fbbf24; }
+    .opp-bar { height: 5px; background: #334155; border-radius: 3px; margin: 0.25rem 0 0.25rem 1.75rem; overflow: hidden; }
+    .opp-bar i { display: block; height: 100%; background: #60a5fa; transition: width 0.4s; }
+    .opp-undo .opp-bar i { background: #fbbf24; }
+    .opp-det { margin-left: 1.75rem; color: #94a3b8; font-size: 0.75rem; word-break: break-word; }
+    .opp-sep { color: #64748b; font-size: 0.6875rem; text-transform: uppercase; letter-spacing: 0.05em; margin: 0.5rem 0 0.125rem; padding-top: 0.375rem; border-top: 1px solid #334155; }
+    .opp-note { color: #93c5fd; background: #3b82f611; border: 1px solid #3b82f644; border-radius: 0.375rem; padding: 0.4375rem 0.75rem; margin: 0.625rem 0; font-size: 0.8125rem; }
+    .opp-note.warn { color: #fde68a; background: #f59e0b11; border-color: #f59e0b44; }
+    .opp-note.bad { color: #fca5a5; background: #ef444411; border-color: #ef444455; }
+    .opp-err { margin-top: 0.75rem; }
+    .opp-err details summary { cursor: pointer; color: #94a3b8; font-size: 0.8125rem; margin-bottom: 0.25rem; }
+    .opp-result { margin-top: 0.625rem; font-size: 0.8125rem; }
+    .opp-result code { font-family: 'SF Mono', 'Fira Code', monospace; color: #e2e8f0; }
+    .opp-actions { display: flex; gap: 0.5rem; justify-content: flex-end; align-items: center; flex-wrap: wrap; margin-top: 1rem; }
+    .opp-actions p { flex: 1 1 100%; margin: 0 0 0.25rem; font-weight: 500; }
+    .opp-stop-btn { background: #7f1d1d; color: #fecaca; }
+    .opp-stop-btn:hover { background: #ef4444; color: #fff; }
+    .opp-sr { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+    .opp-link { background: none; border: none; color: #93c5fd; cursor: pointer; font: inherit; padding: 0; text-decoration: underline; }
+    .op-card-progress { color: #93c5fd; }
+    .op-banner.running { background: #3b82f611; border-color: #3b82f655; color: #93c5fd; }
+
     /* App instances (contract §11) */
     .app-instances { display: flex; flex-wrap: wrap; gap: 0.375rem; align-items: center; margin-bottom: 0.75rem; font-size: 0.75rem; }
     .app-instances:empty { display: none; }
@@ -678,6 +719,10 @@
     <div class="op-modal-box inst-modal-box" id="ai-modal-box"></div>
   </div>
 
+  <!-- Operation progress (contract §11.7): the steps of every app
+       operation, Stop and Close (renderOpPanel) -->
+  <dialog class="opp" id="op-panel" aria-labelledby="opp-title"></dialog>
+
   <script src="/static/directory.js"></script>
   <script src="/static/folders.js"></script>
   <script src="/static/doctor.js"></script>
@@ -781,8 +826,11 @@
       if ((res.headers.get('Content-Type') || '').includes('application/json')) {
         try {
           const j = await res.json();
-          const err = new Error(j.error || ('HTTP ' + res.status));
+          // A busy 409's body is the running op record (contract §11.7).
+          const busy = res.status === 409 && j && j.running === true && j.op_id;
+          const err = new Error(busy ? 'busy: ' + (j.op || 'an operation') + ' is running on this app' : (j.error || ('HTTP ' + res.status)));
           Object.assign(err, { status: res.status, op: j.op, output: j.output || '', hint: j.hint || '', rolled_back: !!j.rolled_back });
+          if (busy) err.record = j;
           return err;
         } catch (e) { /* fall through */ }
       }
@@ -791,22 +839,39 @@
       return err;
     }
     async function apiPost(url, body) { return (await apiCall(url, 'POST', body)).json(); }
-    // Long instance operations (backup, restore, delete; contract §11.7)
-    // answer 202 {op_id, poll}: poll the op record until that operation
-    // finished, then return its record ({result, warnings}) or throw an
-    // error shaped like apiError's (status, output, hint, rolled_back).
-    async function runInstanceOp(url, method, body) {
-      const acc = await (await apiCall(url, method, body)).json();
-      for (;;) {
-        await new Promise(r => setTimeout(r, 1500));
-        let rec;
-        try { rec = await apiGet(acc.poll); } catch (e) { if (e.status === 404) continue; throw e; }
-        if (!rec || rec.op_id !== acc.op_id || rec.running) continue;
-        if (rec.ok) return { result: rec.result || {}, warnings: rec.warnings || [] };
-        const err = new Error(rec.error || (acc.op + ' failed'));
-        Object.assign(err, { status: rec.status || 500, op: rec.op, output: rec.output || '', hint: rec.hint || '', rolled_back: !!rec.rolled_back });
-        throw err;
-      }
+    // Long instance operations (contract §11.7: enable, disable, restart,
+    // an AI switch, create, backup, restore, delete) answer 202 {op_id,
+    // op, instance, poll}: the progress panel opens on it and the call
+    // waits for that operation to end, returning its record's {result,
+    // warnings} or throwing an error shaped like apiError's (status,
+    // output, hint, rolled_back; stopped: ended by a Stop; shown: the
+    // panel shows it). A busy instance (409 with its running record) opens
+    // the panel on the running operation instead. id: the instance.
+    async function runInstanceOp(url, method, body, id) {
+      let acc;
+      try { acc = await (await apiCall(url, method, body)).json(); } catch (err) { opBusy(id, err); throw err; }
+      return awaitOp(acc.instance || id, acc.op_id, acc.op);
+    }
+    // A busy 409's running record opens the panel on it (true).
+    function opBusy(id, err) {
+      if (!err || !err.record || !id) return false;
+      openOpPanel(id, err.record);
+      err.shown = true;
+      return true;
+    }
+    function awaitOp(id, opId, op) {
+      return new Promise((resolve, reject) => {
+        const tr = trackOp(id, opId, { op, op_id: opId, running: true, steps: [] });
+        tr.waiters.push(rec => {
+          if (!rec) { reject(Object.assign(new Error(op + ': its record was replaced by a newer operation'), { shown: true })); return; }
+          if (rec.ok) { resolve({ result: rec.result || {}, warnings: rec.warnings || [], rec }); return; }
+          const stopped = oppPhase(rec) === 'stopped';
+          const err = new Error(stopped ? op + ' stopped' : (rec.error || (op + ' failed')));
+          Object.assign(err, { status: rec.status || 500, op: rec.op, output: rec.output || '', hint: rec.hint || '', rolled_back: !!rec.rolled_back, stopped, shown: true, rec });
+          reject(err);
+        });
+        openOpPanel(id);
+      });
     }
     async function apiPut(url, body) { return (await apiCall(url, 'PUT', body)).json(); }
     async function apiGet(url) { return (await apiCall(url, 'GET')).json(); }
@@ -819,11 +884,418 @@
         .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
     }
 
+    // ── Operation progress panel (contract §11.7) ─────────
+    // One dialog for every app operation: the op record's steps (✓ done
+    // with its duration, ◐ running with percent, bar and detail lines,
+    // ○ waiting, ■ stopped, ✗ failed, ↺ undone; each with its state as
+    // text too), Stop (only while stoppable and not stopping; a confirm
+    // step, then POST …/op/stop) and Close ("it keeps going"). The record
+    // is polled every second while the panel shows it, else at the list
+    // refresh's pace (15 s). Everything rendered goes through escapeHtml;
+    // the percent is a clamped number.
+    const OP_WORDS = {
+      enable:  { ing: 'Enabling', ed: 'enabled', short: 'Enabling' },
+      disable: { ing: 'Disabling', ed: 'disabled', short: 'Disabling' },
+      restart: { ing: 'Restarting', ed: 'restarted', short: 'Restarting' },
+      ai:      { ing: 'Switching AI support for', ed: 'switched', short: 'Switching AI' },
+      backup:  { ing: 'Backing up', ed: 'backed up', short: 'Backing up', stopped: 'the partial archive was deleted; the app is back as before' },
+      restore: { ing: 'Restoring', ed: 'restored', short: 'Restoring', stopped: 'rolled back: everything is back as before' },
+      create:  { ing: 'Creating', ed: 'created', short: 'Creating', stopped: 'the new instance was removed' },
+      delete:  { ing: 'Deleting', ed: 'deleted', short: 'Deleting', stopped: 'the delete was cancelled; the app is back as before' },
+    };
+    const OPP_STATES = {
+      done: ['✓', 'ok', 'done'], running: ['◐', 'run', 'running'], waiting: ['○', 'wait', 'waiting'],
+      stopped: ['■', 'stop', 'stopped'], failed: ['✗', 'bad', 'failed'], undone: ['↺', 'undone', 'undone'],
+    };
+    const OPP_RESULT = { archive: 'Archive', backup: 'Automatic backup', pre_restore_backup: 'Pre-restore backup', instance: 'Instance', groups_created: 'Groups created' };
+    const OPP_UNDO_NOTE = { enable: 'Only what this enable created is undone. Images already downloaded are kept.' };
+    const opTracks = {};  // instance id → { id, opId, rec, waiters, timer, ended }
+    const opRunning = {}; // instance id → its running record (cards, chips, tables)
+    const opp = { id: null, confirm: false, notice: '', stopSent: {}, sending: false, reloadOnClose: false, sig: {} };
+    let oppReturnFocus = null;
+    let pageReloadOwed = false;
+
+    function opWords(op) {
+      return OP_WORDS[op] || { ing: 'Running ' + (op || 'an operation') + ' on', ed: 'done', short: 'Working' };
+    }
+    function lcFirst(s) { return s.charAt(0).toLowerCase() + s.slice(1); }
+    // The app's name ("Gitea"; "Grafana (grafana-team-a)" for an extra
+    // instance).
+    function opAppName(id) {
+      const inst = instancesCache.find(i => i.id === id);
+      const tid = inst ? inst.template : id;
+      const t = catalogCache && catalogCache[tid];
+      const card = document.querySelector('.app-card[data-id="' + CSS.escape(tid) + '"] .app-name');
+      const name = t ? (t.manifest.name || tid) : (card ? card.textContent.trim() : tid);
+      return id === tid ? name : name + ' (' + id + ')';
+    }
+    function oppClock(s) {
+      const d = new Date(s);
+      if (!s || isNaN(d)) return '';
+      return d.toDateString() === new Date().toDateString()
+        ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        : d.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
+    }
+    function oppDur(a, b) {
+      const ms = new Date(b) - new Date(a);
+      if (!(ms >= 0)) return '';
+      const s = ms / 1000;
+      if (s < 10) return s.toFixed(1) + ' s';
+      if (s < 60) return Math.round(s) + ' s';
+      const m = Math.floor(s / 60);
+      return m + ' min ' + Math.round(s - m * 60) + ' s';
+    }
+    function oppPct(p) {
+      if (p == null || p === '') return null;
+      const n = Number(p);
+      return isFinite(n) ? Math.max(0, Math.min(100, Math.round(n))) : null;
+    }
+    // A detail may hold several lines (newlines, or "; " between images).
+    function oppLines(d) { return String(d || '').split(/\n|; /).map(x => x.trim()).filter(Boolean); }
+    function oppPhase(r) {
+      if (r.running) return r.stopping ? 'stopping' : 'running';
+      if (r.ok) return 'ok';
+      if (r.stopped_at && !r.error) return 'stopped';
+      if (r.stopped_at) return 'undo_failed';
+      if (r.interrupted) return 'interrupted';
+      return 'failed';
+    }
+    function oppStarted(r) {
+      const s = (r.steps || []).find(x => x.started_at);
+      return 'Started by ' + (r.actor || 'the Hub') + ' at ' + oppClock(s ? s.started_at : r.at);
+    }
+    function oppStoppedBy(r) { return 'Stopped by ' + (r.stopped_by || 'the Hub') + ' at ' + oppClock(r.stopped_at); }
+    // The panel's title for r (also the toast when it ends unseen).
+    function oppTitle(r, app) {
+      const w = opWords(r.op);
+      switch (oppPhase(r)) {
+        case 'running': return w.ing + ' ' + app;
+        case 'stopping': return 'Stopping ' + app + ' — undoing';
+        case 'ok': return r.op === 'ai' ? 'AI support for ' + app + ' is switched' : app + ' is ' + w.ed;
+        case 'stopped': return r.op === 'ai' ? 'AI support for ' + app + ' was not switched' : app + ' was not ' + w.ed;
+        case 'undo_failed': return 'Stopping ' + app + ' — the undo failed';
+        case 'interrupted': return w.ing + ' ' + app + ' was interrupted';
+      }
+      return w.ing + ' ' + app + ' failed';
+    }
+    function oppStepHtml(s) {
+      const undo = String(s.key || '').startsWith('undo:');
+      const [icon, cls, text] = OPP_STATES[s.state] || OPP_STATES.waiting;
+      const pct = oppPct(s.percent);
+      let label = escapeHtml(s.label || s.key);
+      if (s.state === 'stopped') label += ' — stopped' + (pct != null ? ' at ' + pct + '%' : '');
+      if (s.state === 'undone') label += ' — undone';
+      if (s.state === 'failed') label += ' — failed';
+      let right = '';
+      if (s.state === 'done' && s.started_at && s.ended_at) right = oppDur(s.started_at, s.ended_at);
+      else if (s.state === 'running' && pct != null) right = pct + '%';
+      let h = '<li class="opp-step opp-' + cls + (undo ? ' opp-undo' : '') + '"><div class="opp-row">' +
+        '<span class="opp-ic" aria-hidden="true">' + icon + '</span><span class="opp-sr">' + escapeHtml(text) + ': </span>' +
+        '<span class="opp-lbl">' + label + '</span><span class="opp-pct">' + escapeHtml(right) + '</span></div>';
+      if (s.state === 'running' && pct != null) {
+        h += '<div class="opp-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + pct + '" aria-label="' + escapeHtml(s.label || s.key) + '">' +
+          '<i style="width:' + pct + '%"></i></div>';
+      }
+      const lines = s.state === 'waiting' ? [] : oppLines(s.detail);
+      if (lines.length) h += '<div class="opp-det">' + lines.map(escapeHtml).join('<br>') + '</div>';
+      return h + '</li>';
+    }
+    function oppErrorHtml(r) {
+      let h = '<div class="opp-err">';
+      if (r.error) h += '<div class="op-msg inst-error">' + escapeHtml(r.error) + (r.rolled_back ? ' — rolled back: the previous state was put back.' : '') + '</div>';
+      if (r.hint) h += '<div class="op-hint">' + escapeHtml(r.hint) + '</div>';
+      if (r.output) h += '<details><summary>Output</summary><pre class="log-viewer op-output">' + escapeHtml(r.output) + '</pre></details>';
+      return h + '</div>';
+    }
+    function oppSkeleton() {
+      return '<div class="opp-head"><div><h3 class="opp-title" id="opp-title" tabindex="-1"></h3><div class="opp-sub" id="opp-sub"></div></div>' +
+        '<button type="button" class="detail-close" data-opp-close title="Close" aria-label="Close">&times;</button></div>' +
+        '<p class="opp-sr" aria-live="polite" id="opp-live"></p>' +
+        '<div id="opp-body"></div><div class="opp-actions" id="opp-actions"></div>';
+    }
+    function renderOpPanel() {
+      const dlg = document.getElementById('op-panel');
+      if (!dlg.open || !opp.id) return;
+      const tr = opTracks[opp.id];
+      const r = tr && tr.rec;
+      const app = opAppName(opp.id);
+      const title = dlg.querySelector('#opp-title'), sub = dlg.querySelector('#opp-sub');
+      const body = dlg.querySelector('#opp-body'), acts = dlg.querySelector('#opp-actions');
+      if (!r || !r.op) {
+        title.textContent = app;
+        sub.textContent = tr && tr.err ? 'The operation can\'t be read right now: ' + (tr.err.message || tr.err) : 'Loading…';
+        return;
+      }
+      const phase = oppPhase(r), w = opWords(r.op);
+      title.textContent = oppTitle(r, app);
+      const keepGoing = 'you can close this, it keeps going';
+      let subText;
+      switch (phase) {
+        case 'running': subText = oppStarted(r) + ' · ' + keepGoing; break;
+        case 'stopping': subText = oppStoppedBy(r) + ' · ' + keepGoing; break;
+        case 'stopped': subText = oppStoppedBy(r) + ' · ' + (w.stopped || 'everything is back as before'); break;
+        case 'undo_failed': subText = oppStoppedBy(r); break;
+        default: subText = oppStarted(r) + (r.at ? ' · ended at ' + oppClock(r.at) : '');
+      }
+      sub.textContent = subText;
+      if (opp.sig.live !== phase) { dlg.querySelector('#opp-live').textContent = title.textContent; opp.sig.live = phase; }
+
+      let h = '';
+      if (phase === 'running' && r.point_of_no_return) h += '<div class="opp-note warn">past the point of no return — finishing</div>';
+      else if (phase === 'running' && !r.stoppable && (r.steps || []).length) h += '<div class="opp-note">finishing — it can\'t be stopped any more</div>';
+      if (phase === 'stopping' && OPP_UNDO_NOTE[r.op]) h += '<div class="opp-note">' + escapeHtml(OPP_UNDO_NOTE[r.op]) + '</div>';
+      if (phase === 'ok' && (r.stopped_by || opp.stopSent[r.op_id])) h += '<div class="opp-note">finished before Stop took effect</div>';
+      if (phase === 'interrupted') {
+        h += '<div class="opp-note warn">interrupted: the Hub stopped while this ran.' +
+          (r.stoppable ? ' Stop undoes what it did.' : ' It can\'t be stopped from here.') + '</div>';
+      }
+      if (opp.notice) h += '<div class="opp-note bad" role="status">' + escapeHtml(opp.notice) + '</div>';
+      const steps = r.steps || [];
+      const fwd = steps.filter(s => !String(s.key).startsWith('undo:')), undo = steps.filter(s => String(s.key).startsWith('undo:'));
+      h += '<ul class="opp-steps" aria-label="Steps">' + fwd.map(oppStepHtml).join('') + '</ul>';
+      if (undo.length) h += '<div class="opp-sep">Undo</div><ul class="opp-steps" aria-label="Undo steps">' + undo.map(oppStepHtml).join('') + '</ul>';
+      if (phase === 'undo_failed') {
+        const left = undo.filter(s => s.state !== 'done').map(s => s.label || s.key);
+        h += '<div class="opp-note bad">Not undone yet: ' + escapeHtml(left.join(', ') || 'see the error') + '. ' +
+          (r.stoppable ? 'Stop again retries what is left.' : '') + '</div>';
+      }
+      if (phase === 'failed' || phase === 'undo_failed' || phase === 'interrupted') h += oppErrorHtml(r);
+      if (phase === 'ok') {
+        const res = r.result || {};
+        const keys = Object.keys(res).filter(k => res[k]).sort();
+        if (keys.length) h += '<div class="opp-result">' + keys.map(k => escapeHtml(OPP_RESULT[k] || k) + ': <code>' + escapeHtml(res[k]) + '</code>').join('<br>') + '</div>';
+      }
+      if ((phase === 'ok' || phase === 'stopped') && (r.warnings || []).length) h += '<h4 class="opp-sep">Warnings</h4>' + warningsList(r.warnings);
+      // Re-rendered only when it changed (an open <details> stays open).
+      const sigBody = JSON.stringify(r) + '|' + opp.notice + '|' + app;
+      if (opp.sig.body !== sigBody) { body.innerHTML = h; opp.sig.body = sigBody; }
+
+      const canStop = !!r.stoppable && !r.stopping;
+      const sigActs = [canStop, opp.confirm, opp.sending, phase].join('|');
+      if (opp.sig.acts === sigActs) return;
+      const hadFocus = acts.contains(document.activeElement);
+      opp.sig.acts = sigActs;
+      let a = '';
+      if (canStop && opp.confirm) {
+        a = '<p id="opp-confirm-q">Stop ' + escapeHtml(lcFirst(w.ing)) + ' ' + escapeHtml(app) + ' and undo what it did?</p>' +
+          '<button type="button" class="btn btn-secondary btn-sm" data-opp-stop-cancel>Keep going</button>' +
+          '<button type="button" class="btn btn-sm opp-stop-btn" data-opp-stop-go aria-describedby="opp-confirm-q">Yes, stop</button>';
+      } else {
+        if (canStop) a += '<button type="button" class="btn btn-sm opp-stop-btn" data-opp-stop' + (opp.sending ? ' disabled' : '') + '>' + (opp.sending ? 'Stopping…' : (phase === 'undo_failed' ? 'Stop again' : 'Stop')) + '</button>';
+        a += '<button type="button" class="btn btn-secondary btn-sm" data-opp-close>Close</button>';
+      }
+      acts.innerHTML = a;
+      if (opp.confirm) acts.querySelector('[data-opp-stop-go]')?.focus();
+      else if (hadFocus) (acts.querySelector('[data-opp-stop]:not([disabled])') || acts.querySelector('[data-opp-close]')).focus();
+    }
+
+    // Opens the panel on id's operation (rec: a record already in hand,
+    // e.g. a busy 409's).
+    function openOpPanel(id, rec) {
+      const dlg = document.getElementById('op-panel');
+      trackOp(id, rec && rec.op_id, rec);
+      if (opp.id !== id) { opp.confirm = false; opp.notice = ''; }
+      opp.id = id;
+      opp.sig = {};
+      if (!dlg.open) {
+        oppReturnFocus = document.activeElement;
+        dlg.innerHTML = oppSkeleton();
+        dlg.showModal();
+      }
+      renderOpPanel();
+      dlg.querySelector('#opp-title').focus();
+      scheduleTrack(opTracks[id], 0);
+    }
+    function closeOpPanel() {
+      const dlg = document.getElementById('op-panel');
+      if (dlg.open) dlg.close();
+    }
+    document.getElementById('op-panel').addEventListener('close', () => {
+      opp.id = null;
+      opp.confirm = false;
+      const dlg = document.getElementById('op-panel');
+      dlg.innerHTML = '';
+      if (oppReturnFocus && document.contains(oppReturnFocus)) oppReturnFocus.focus();
+      oppReturnFocus = null;
+      if (opp.reloadOnClose || pageReloadOwed) { opp.reloadOnClose = false; reloadWhenIdle(); }
+    });
+    // Esc closes the panel, or leaves the Stop confirm step first.
+    document.getElementById('op-panel').addEventListener('cancel', e => {
+      if (!opp.confirm) return;
+      e.preventDefault();
+      opp.confirm = false;
+      renderOpPanel();
+      document.querySelector('#op-panel [data-opp-stop]')?.focus();
+    });
+    document.getElementById('op-panel').addEventListener('click', e => {
+      const t = e.target;
+      if (t.closest('[data-opp-close]')) { closeOpPanel(); return; }
+      if (t.closest('[data-opp-stop]')) { opp.confirm = true; opp.notice = ''; renderOpPanel(); return; }
+      if (t.closest('[data-opp-stop-cancel]')) { opp.confirm = false; renderOpPanel(); document.querySelector('#op-panel [data-opp-stop]')?.focus(); return; }
+      if (t.closest('[data-opp-stop-go]')) oppStop();
+    });
+    function oppOpen() { return document.getElementById('op-panel').open; }
+
+    // Stop: 202 with the record (stopping), or 409 with the record and
+    // why (nothing to stop, past the point of no return, finishing).
+    async function oppStop() {
+      const id = opp.id, tr = opTracks[id];
+      if (!tr || !tr.rec) return;
+      opp.confirm = false;
+      opp.sending = true;
+      opp.notice = '';
+      opp.stopSent[tr.rec.op_id] = true;
+      renderOpPanel();
+      let rec = null, status = 0;
+      try {
+        const res = await fetch('/api/instances/' + encodeURIComponent(id) + '/op/stop', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+        status = res.status;
+        if ((res.headers.get('Content-Type') || '').includes('application/json')) rec = await res.json();
+        else opp.notice = 'Stop failed: ' + ((await res.text()).trim() || 'HTTP ' + status);
+      } catch (e) { opp.notice = 'Stop failed: ' + (e.message || e); }
+      opp.sending = false;
+      if (rec && rec.op) {
+        setTrackRec(tr, rec);
+        if (rec.running) { tr.ended = false; scheduleTrack(tr, 1000); }
+        else if (!tr.ended) endTrack(tr);
+      }
+      if (status === 409) opp.notice = 'Stop refused: ' + oppStopRefusal(rec);
+      if (opp.id === id) renderOpPanel();
+    }
+    function oppStopRefusal(r) {
+      if (!r || !r.op) return 'the Hub refused it';
+      if (!r.running) return r.ok ? 'it finished before Stop took effect' : 'nothing to stop, the operation already ended';
+      if (r.point_of_no_return) return 'past the point of no return — finishing';
+      if (r.stopping) return 'it is already stopping';
+      return 'it is finishing and can\'t be stopped any more';
+    }
+
+    // ── tracking: one poller per instance ──
+    function trackOp(id, opId, rec) {
+      let tr = opTracks[id];
+      if (!tr || (opId && tr.opId && tr.opId !== opId)) {
+        if (tr) { clearTimeout(tr.timer); tr.waiters.splice(0).forEach(w => w(null)); }
+        tr = opTracks[id] = { id, opId: opId || '', rec: null, waiters: [], timer: null, ended: false };
+      }
+      if (rec && rec.op && (!tr.rec || !tr.rec.op_id || rec.op_id === tr.rec.op_id)) {
+        setTrackRec(tr, rec);
+        if (!rec.running && !tr.ended && (rec.steps || []).length) endTrack(tr);
+      }
+      if (!tr.ended && !tr.timer) scheduleTrack(tr, 0);
+      return tr;
+    }
+    function scheduleTrack(tr, ms) {
+      clearTimeout(tr.timer);
+      tr.timer = setTimeout(() => pollTrack(tr), ms != null ? ms : (opp.id === tr.id && oppOpen() ? 1000 : 15000));
+    }
+    async function pollTrack(tr) {
+      tr.timer = null;
+      if (opTracks[tr.id] !== tr) return;
+      let rec = null;
+      try { rec = await apiGet('/api/instances/' + encodeURIComponent(tr.id) + '/op'); tr.err = null; } catch (e) { tr.err = e; }
+      if (opTracks[tr.id] !== tr) return;
+      if (rec && rec.op_id && tr.opId && rec.op_id !== tr.opId) {
+        // A newer operation replaced the record: ours ended unseen.
+        tr.waiters.splice(0).forEach(w => w(null));
+        tr.opId = rec.op_id;
+        tr.ended = false;
+      }
+      if (rec && rec.op) setTrackRec(tr, rec);
+      if (tr.rec && tr.rec.op && !tr.rec.running && !tr.err) endTrack(tr);
+      else if (!tr.ended) scheduleTrack(tr);
+      if (opp.id === tr.id) renderOpPanel();
+    }
+    function setTrackRec(tr, rec) {
+      tr.rec = rec;
+      if (!tr.opId) tr.opId = rec.op_id || '';
+      const was = !!opRunning[tr.id];
+      if (rec.running) { opRunning[tr.id] = rec; tr.seenRunning = true; } else delete opRunning[tr.id];
+      opCardState(tr.id);
+      if (was !== !!rec.running) renderInstanceLists();
+    }
+    function endTrack(tr) {
+      if (tr.ended) return;
+      tr.ended = true;
+      clearTimeout(tr.timer);
+      tr.timer = null;
+      const r = tr.rec;
+      const ws = tr.waiters.splice(0);
+      if (!(opp.id === tr.id && oppOpen()) && tr.seenRunning) {
+        const ph = oppPhase(r);
+        showToast(oppTitle(r, opAppName(tr.id)), ph === 'ok' || ph === 'stopped' ? 'success' : 'error');
+      }
+      ws.forEach(w => w(r));
+      if (openDetailId === tr.id) loadOpBanner(tr.id);
+    }
+    // A reload (server-rendered cards) once no dialog is open.
+    function reloadWhenIdle() {
+      const busy = oppOpen() || document.getElementById('inst-modal').classList.contains('visible') ||
+        document.getElementById('ai-modal').classList.contains('visible') || document.querySelector('dialog[open]');
+      if (busy) { pageReloadOwed = true; return; }
+      location.reload();
+    }
+    // An operation that changes a card (enable / disable of a default
+    // instance, a failed enable's badge) reloads the page when it ends:
+    // once the panel is closed if it shows it.
+    function opReloadAfter(id) {
+      if (opp.id === id && oppOpen()) opp.reloadOnClose = true;
+      else reloadWhenIdle();
+    }
+
+    // ── the card / chip / table state: "Enabling… show progress" ──
+    function opCardText(r) { return (r.stopping ? 'Stopping…' : opWords(r.op).short + '…') + ' show progress'; }
+    function opCardState(id) {
+      const card = document.querySelector('.app-card[data-id="' + CSS.escape(id) + '"]');
+      const foot = card && card.querySelector('.app-footer');
+      if (!foot) return;
+      const tog = foot.querySelector('.toggle');
+      let b = foot.querySelector('[data-op-show]');
+      const r = opRunning[id];
+      if (r) {
+        if (!b) {
+          b = document.createElement('button');
+          b.type = 'button';
+          b.className = 'btn btn-secondary btn-sm op-card-progress';
+          b.dataset.opShow = id;
+          if (tog) tog.before(b); else foot.appendChild(b);
+        }
+        b.textContent = opCardText(r);
+        if (tog) tog.style.display = 'none';
+      } else {
+        if (b) b.remove();
+        if (tog) tog.style.display = '';
+      }
+    }
+    function opShowButton(id, cls) {
+      const r = opRunning[id];
+      return r ? '<button type="button" class="' + cls + ' op-card-progress" data-op-show="' + escapeHtml(id) + '">' + escapeHtml(opCardText(r)) + '</button>' : '';
+    }
+    // On page load and each refresh of the app list: every app whose
+    // operation runs gets its card state (and a slow poller).
+    async function scanOps() {
+      const ids = new Set();
+      document.querySelectorAll('.app-card[data-id]').forEach(c => ids.add(c.dataset.id));
+      instancesCache.forEach(i => ids.add(i.id));
+      await Promise.all([...ids].map(async id => {
+        let r = null;
+        try { r = await apiGet('/api/templates/lastop/' + encodeURIComponent(id)); } catch (e) { return; }
+        if (r && r.running) trackOp(id, r.op_id, r);
+      }));
+    }
+    // Opening an app (its detail or instance dialog) while its operation
+    // runs opens the panel.
+    async function opAutoOpen(id) {
+      if (opRunning[id]) { openOpPanel(id); return; }
+      let r = null;
+      try { r = await apiGet('/api/templates/lastop/' + encodeURIComponent(id)); } catch (e) { return; }
+      if (r && r.running) openOpPanel(id, r);
+    }
+
     // ── Detail panel ──────────────────────────────────────
     let openDetailId = null;
 
     function toggleDetail(id, e) {
-      if (e.target.closest('.toggle, .app-url, .detail-close, [data-add-instance], [data-open-instance]')) return;
+      if (e.target.closest('.toggle, .app-url, .detail-close, [data-add-instance], [data-open-instance], [data-op-show]')) return;
       const panel = document.getElementById('detail-' + id);
       const card = document.querySelector(`.app-card[data-id="${id}"]`);
 
@@ -842,6 +1314,7 @@
       loadSettings(id);
       loadOpBanner(id);
       loadDoctorLine(id);
+      opAutoOpen(id);
     }
 
     // The app detail's "Doctor: 1 warning" line (web/doctor.js), linking
@@ -1745,7 +2218,7 @@
       if (e.target.id === 'ai-prov-kind') document.querySelector('#ai-prov-form [data-ai-kind-fields]').innerHTML = aiKindFieldsHtml(e.target.value, null);
     });
     document.addEventListener('keydown', e => {
-      if (e.key === 'Escape' && document.getElementById('ai-modal').classList.contains('visible')) closeAIModal();
+      if (e.key === 'Escape' && !oppOpen() && document.getElementById('ai-modal').classList.contains('visible')) closeAIModal();
     });
 
     // ── an instance's AI support tab (§15.11, plan 4 Task 22) ──
@@ -1873,6 +2346,11 @@
       out.innerHTML = '<p class="settings-empty">Saving…</p>';
       try {
         const res = await apiPut('/api/instances/' + encodeURIComponent(id) + '/ai', { providers });
+        if (res && res.op_id) {
+          try { await awaitOp(res.instance || id, res.op_id, res.op); } catch (err) { if (!err.shown) throw err; }
+          loadAITab(id, box.parentElement);
+          return;
+        }
         try { res.all_providers = (await apiGet('/api/ai/providers')).providers || []; } catch (err) { res.all_providers = []; res.all_providers_error = err.message || 'the providers can\'t be read right now'; }
         box.innerHTML = aiTabHtml(id, res, null);
         const done = box.querySelector('[data-ai-providers-sel] [data-ai-result]');
@@ -1880,6 +2358,7 @@
         showToast('Model providers of ' + id + ' saved.', 'success');
       } catch (err) {
         btn.disabled = false;
+        if (opBusy(id, err)) { out.innerHTML = ''; return; }
         out.innerHTML = errorBox(err);
       }
     }
@@ -1944,7 +2423,13 @@
       btn.disabled = true;
       out.innerHTML = '<p class="settings-empty">Saving…</p>';
       try {
-        const res = await apiPut('/api/instances/' + encodeURIComponent(id) + '/ai', { companions: { [name]: body } });
+        let res = await apiPut('/api/instances/' + encodeURIComponent(id) + '/ai', { companions: { [name]: body } });
+        if (res && res.op_id) {
+          // An enabled instance: the switch runs in the background (202).
+          try { await awaitOp(res.instance || id, res.op_id, res.op); } catch (err) { if (!err.shown) throw err; }
+          loadAITab(id, box.parentElement);
+          return;
+        }
         let act;
         try { act = await apiGet('/api/ai/activity?instance=' + encodeURIComponent(id) + '&n=20'); } catch (err) { act = { error: err }; }
         box.innerHTML = aiTabHtml(id, res, act);
@@ -1953,6 +2438,7 @@
         showToast('AI support for ' + name + ' saved.', 'success');
       } catch (err) {
         btn.disabled = false;
+        if (opBusy(id, err)) { out.innerHTML = ''; return; }
         out.innerHTML = errorBox(err) + (err.status === 409 && /meanwhile/.test(err.message || '') ? '<div class="op-hint">Reload the tab and try again.</div>' : '');
       }
     }
@@ -2179,13 +2665,6 @@
       btn.classList.remove('loading');
       loadMissingGroups();
     }
-    // An enable answers the groups it created and any warnings.
-    function enableNotice(id, res) {
-      const parts = [];
-      if (res && (res.groups_created || []).length) parts.push('created ' + res.groups_created.join(', '));
-      if (res && (res.warnings || []).length) parts.push(res.warnings.join('; '));
-      return id + ' enabled' + (parts.length ? ' — ' + parts.join(' — ') : '');
-    }
     loadMissingGroups();
     setInterval(loadMissingGroups, 60000);
 
@@ -2229,10 +2708,14 @@
       if (!r) return '';
       let h = '<div class="op-record">';
       if (withTitle !== false) {
+        // A running or stopped operation is no failure (contract §11.7).
+        const ph = oppPhase(r);
+        const [pc, pt] = r.ok ? ['ok', 'ok'] : ph === 'running' || ph === 'stopping' ? ['info', 'running'] : ph === 'stopped' ? ['', 'stopped'] : ['bad', 'failed'];
         h += '<div class="op-record-head"><strong>Last operation: ' + escapeHtml(r.op) + '</strong>' +
-          '<span class="pill ' + (r.ok ? 'ok' : 'bad') + '">' + (r.ok ? 'ok' : 'failed') + '</span>' +
+          '<span class="pill ' + pc + '">' + pt + '</span>' +
           (r.rolled_back ? '<span class="pill info" title="compose down: containers and network removed, volumes kept">rolled back</span>' : '') +
-          '<span class="settings-empty">' + escapeHtml(fmtTime(r.at)) + '</span></div>';
+          '<span class="settings-empty">' + escapeHtml(fmtTime(r.at)) + '</span>' +
+          ((r.steps || []).length ? '<button type="button" class="opp-link" data-op-show="' + escapeHtml(id) + '">' + (r.running ? 'show progress' : 'show steps') + '</button>' : '') + '</div>';
       }
       if (r.error) h += '<div class="op-msg">' + escapeHtml(r.error) + '</div>';
       if (r.hint) {
@@ -2288,9 +2771,15 @@
       if (!el) return;
       try {
         const r = await apiGet('/api/templates/lastop/' + id);
-        if (r && !r.ok) {
+        const ph = r ? oppPhase(r) : '';
+        el.classList.toggle('running', ph === 'running' || ph === 'stopping');
+        if (ph === 'running' || ph === 'stopping') {
+          el.innerHTML = '<button type="button" class="opp-link" data-op-show="' + escapeHtml(id) + '">' + escapeHtml(opCardText(r)) + '</button>';
+          el.classList.add('visible');
+        } else if (r && !r.ok && ph !== 'stopped') {
           el.innerHTML = 'Last ' + escapeHtml(r.op) + ' failed (' + escapeHtml(fmtTime(r.at)) + '): ' + escapeHtml(r.error) +
-            ' <a onclick="event.stopPropagation(); showLogsTab(\'' + escapeHtml(id) + '\')">Details</a>';
+            ' <a onclick="event.stopPropagation(); showLogsTab(\'' + escapeHtml(id) + '\')">Details</a>' +
+            ((r.steps || []).length ? ' · <button type="button" class="opp-link" data-op-show="' + escapeHtml(id) + '">' + (r.stoppable ? 'show steps and Stop' : 'show steps') + '</button>' : '');
           el.classList.add('visible');
         } else {
           el.classList.remove('visible');
@@ -2479,14 +2968,13 @@
     }
 
     async function restartApp(id, btn) {
-      if (btn) { btn.classList.add('loading'); btn.textContent = 'Restarting...'; }
+      if (btn) btn.disabled = true;
       try {
-        await apiPost('/api/templates/restart/' + id, {});
-        showToast(id + ' restarted', 'success');
+        await runInstanceOp('/api/templates/restart/' + encodeURIComponent(id), 'POST', {}, id);
       } catch (e) {
-        reportError(id, e, 'Restart failed: ');
+        if (!e.shown) reportError(id, e, 'Restart failed: ');
       } finally {
-        if (btn) { btn.classList.remove('loading'); btn.textContent = 'Restart app'; }
+        if (btn) btn.disabled = false;
         loadOpBanner(id);
       }
     }
@@ -2528,17 +3016,16 @@
         btn.disabled = false;
         if (!go) return;
       }
-      btn.classList.add('loading');
-      btn.textContent = enable ? 'Enabling...' : 'Disabling...';
+      // The progress panel shows the operation; the card shows
+      // "Enabling… show progress" while it runs (opCardState).
+      btn.disabled = true;
       try {
-        const endpoint = enable ? '/api/templates/enable' : '/api/templates/disable';
-        const res = await apiPost(endpoint, { id });
-        showToast(enable ? enableNotice(id, res) : `${id} disabled`, enable && res && (res.warnings || []).length ? 'error' : 'success');
-        setTimeout(() => location.reload(), enable && res && ((res.warnings || []).length || (res.groups_created || []).length) ? 4000 : 500);
+        await runInstanceOp(enable ? '/api/templates/enable' : '/api/templates/disable', 'POST', { id }, id);
+        opReloadAfter(id);
       } catch (err) {
-        reportError(id, err);
-        btn.classList.remove('loading');
-        btn.textContent = enable ? 'Enable' : 'Disable';
+        btn.disabled = false;
+        if (!err.shown) reportError(id, err);
+        else if (!err.stopped && err.rec) opReloadAfter(id); // the card gains its failure badge
       }
     }
 
@@ -2806,12 +3293,14 @@
     async function refreshInstances() {
       try { instancesCache = await apiGet('/api/instances'); } catch (e) { instancesCache = []; }
       renderInstanceLists();
+      scanOps();
     }
     function renderInstanceLists() {
       document.querySelectorAll('[data-instances-of]').forEach(el => {
         const mine = instancesCache.filter(i => i.template === el.dataset.instancesOf && !i.default);
         el.innerHTML = mine.length ? '<span class="settings-empty">Instances</span>' + mine.map(i =>
-          '<button type="button" class="inst-chip" data-open-instance="' + escapeHtml(i.id) + '">' + escapeHtml(i.id) + statePill(i.state) + '</button>').join('') : '';
+          '<button type="button" class="inst-chip" data-open-instance="' + escapeHtml(i.id) + '">' + escapeHtml(i.id) + statePill(i.state) + '</button>' +
+          opShowButton(i.id, 'inst-chip')).join('') : '';
       });
       renderInstancesOverview();
       if (openDetailId) {
@@ -2825,7 +3314,7 @@
       for (const i of list) {
         h += '<tr><td><code>' + escapeHtml(i.id) + '</code>' + (i.default ? ' <span class="settings-empty">default</span>' : '') + '</td>' +
           (withTemplate ? '<td>' + escapeHtml(templateLabel(i.template)) + '</td>' : '') +
-          '<td>' + statePill(i.state) + (i.error ? ' <span class="settings-empty">' + escapeHtml(i.error) + '</span>' : '') + '</td>' +
+          '<td>' + statePill(i.state) + (i.error ? ' <span class="settings-empty">' + escapeHtml(i.error) + '</span>' : '') + ' ' + opShowButton(i.id, 'btn btn-secondary btn-sm') + '</td>' +
           '<td>' + Object.keys(i.hosts || {}).sort().map(r => '<code>' + escapeHtml(i.hosts[r]) + '</code>').join('<br>') + '</td>' +
           '<td style="text-align:right"><button type="button" class="btn btn-secondary btn-sm" data-open-instance="' + escapeHtml(i.id) + '">Open</button></td></tr>';
       }
@@ -2877,6 +3366,7 @@
       document.getElementById('inst-modal-box').innerHTML = '';
       instCtx = null;
       refreshInstances();
+      if (pageReloadOwed) reloadWhenIdle();
     }
     function modalHead(title) {
       return '<div class="inst-modal-head"><div class="inst-modal-title">' + title + '</div>' +
@@ -2937,13 +3427,17 @@
       const hosts = collectHosts(document.getElementById('inst-new-hosts'));
       const problems = Object.keys(hosts).sort().map(r => hostProblem(r, hosts[r], ctx.domains || [], false)).filter(Boolean);
       if (problems.length) { out.innerHTML = '<div class="op-msg inst-error">' + problems.map(escapeHtml).join('<br>') + '</div>'; return; }
-      out.innerHTML = '<p class="settings-empty">Creating…</p>';
+      out.innerHTML = '';
+      const go = out.closest('form').querySelector('[type="submit"]');
+      go.disabled = true;
       try {
-        const res = await apiPost('/api/instances', { template: ctx.tid, id, hosts });
-        showToast('Instance ' + id + ' created', 'success');
+        const res = await runInstanceOp('/api/instances', 'POST', { template: ctx.tid, id, hosts }, id);
         await refreshInstances();
         openInstance(id, { notice: 'Created. It is stopped: review its settings, then enable it.', warnings: res.warnings });
-      } catch (err) { out.innerHTML = errorBox(err); }
+      } catch (err) {
+        go.disabled = false;
+        if (!err.shown) out.innerHTML = errorBox(err);
+      }
     }
 
     // ── instance detail ──────────────────────────────────
@@ -2969,6 +3463,7 @@
       }
       openInstModal(h);
       showInstTab(instCtx.tab);
+      opAutoOpen(id);
     }
 
     function showInstTab(k) {
@@ -3082,15 +3577,15 @@
         btn.disabled = false;
         if (!go) return;
       }
-      btn.classList.add('loading');
-      btn.textContent = enable ? 'Enabling…' : 'Disabling…';
+      // The progress panel shows it (over this dialog); the dialog is
+      // refreshed when it ends.
+      btn.disabled = true;
       try {
-        const res = await apiPost(enable ? '/api/templates/enable' : '/api/templates/disable', { id });
-        showToast(enable ? enableNotice(id, res) : id + ' disabled', enable && res && (res.warnings || []).length ? 'error' : 'success');
-        openInstance(id);
+        await runInstanceOp(enable ? '/api/templates/enable' : '/api/templates/disable', 'POST', { id }, id);
+        if (instCtx && instCtx.id === id) openInstance(id);
       } catch (err) {
-        btn.classList.remove('loading');
-        btn.textContent = enable ? 'Enable' : 'Disable';
+        if (err.shown) { if (instCtx && instCtx.id === id && !err.record) openInstance(id); else btn.disabled = false; return; }
+        btn.disabled = false;
         btn.closest('.inst-section').insertAdjacentHTML('beforeend', errorBox(err));
       }
     }
@@ -3118,9 +3613,9 @@
       const out = document.getElementById('inst-del-result');
       if (confirmVal !== id) { out.innerHTML = errorBox(new Error('type the instance id (' + id + ') to confirm')); return; }
       btn.disabled = true;
-      btn.textContent = 'Backing up and deleting…';
+      out.innerHTML = '';
       try {
-        const op = await runInstanceOp('/api/instances/' + encodeURIComponent(id), 'DELETE', { confirm: confirmVal });
+        const op = await runInstanceOp('/api/instances/' + encodeURIComponent(id), 'DELETE', { confirm: confirmVal }, id);
         const res = { backup: op.result.backup, warnings: op.warnings };
         const inst = instCtx.inst;
         instCtx = { kind: 'deleted', id };
@@ -3131,9 +3626,8 @@
         showToast(id + ' deleted', 'success');
         refreshInstances();
       } catch (err) {
-        out.innerHTML = errorBox(err);
+        if (!err.shown) out.innerHTML = errorBox(err);
         btn.disabled = false;
-        btn.textContent = 'Back up and delete ' + id;
       }
     }
 
@@ -3224,9 +3718,9 @@
         body = { archive: btn.dataset.bkGoSame };
       }
       panel.querySelectorAll('button').forEach(b => b.disabled = true);
-      out.innerHTML = '<p class="settings-empty">Restoring… (this can take a while)</p>';
+      out.innerHTML = '';
       try {
-        const op = await runInstanceOp(url, 'POST', body);
+        const op = await runInstanceOp(url, 'POST', body, target);
         const res = { pre_restore_backup: op.result.pre_restore_backup, warnings: op.warnings };
         out.innerHTML = '<div class="inst-ok">Restored into <code>' + escapeHtml(target) + '</code>.' +
           (res.pre_restore_backup ? ' Pre-restore backup: <code>' + escapeHtml(res.pre_restore_backup) + '</code>.' : '') + '</div>' +
@@ -3235,7 +3729,7 @@
         showToast('Restored into ' + target, 'success');
         refreshInstances();
       } catch (err) {
-        out.innerHTML = errorBox(err);
+        if (!err.shown) out.innerHTML = errorBox(err);
         panel.querySelectorAll('button').forEach(b => b.disabled = false);
       }
     }
@@ -3244,9 +3738,8 @@
       const id = instCtx.id;
       const out = document.getElementById('inst-bk-result');
       btn.disabled = true;
-      btn.textContent = 'Backing up…';
       try {
-        const op = await runInstanceOp('/api/instances/' + encodeURIComponent(id) + '/backups', 'POST');
+        const op = await runInstanceOp('/api/instances/' + encodeURIComponent(id) + '/backups', 'POST', undefined, id);
         const archive = op.result.archive || '';
         showToast('Backup ' + archive + ' written', 'success');
         const pane = btn.closest('[data-ipane]');
@@ -3256,9 +3749,8 @@
         const res = document.getElementById('inst-bk-result');
         if (res) res.innerHTML = '<div class="inst-ok">Backup <code>' + escapeHtml(archive) + '</code> written' + (entry ? ' (' + escapeHtml(fmtSize(entry.size)) + ')' : '') + '.</div>';
       } catch (err) {
-        out.innerHTML = errorBox(err);
+        if (!err.shown) out.innerHTML = errorBox(err);
         btn.disabled = false;
-        btn.textContent = 'Back up now';
       }
     }
 
@@ -3266,6 +3758,7 @@
     document.addEventListener('click', e => {
       const t = e.target;
       let el;
+      if ((el = t.closest('[data-op-show]'))) { e.stopPropagation(); openOpPanel(el.dataset.opShow); return; }
       if ((el = t.closest('[data-add-instance]'))) { e.stopPropagation(); openCreateInstance(el.dataset.addInstance); return; }
       if ((el = t.closest('[data-open-instance]'))) { e.stopPropagation(); openInstance(el.dataset.openInstance); return; }
       if (t.closest('[data-all-backups]')) { openAllBackups(); return; }
@@ -3302,7 +3795,7 @@
       if (e.target.id === 'inst-create-form') { e.preventDefault(); submitCreateInstance(); }
     });
     document.addEventListener('keydown', e => {
-      if (e.key === 'Escape' && document.getElementById('inst-modal').classList.contains('visible')) closeInstModal();
+      if (e.key === 'Escape' && !oppOpen() && document.getElementById('inst-modal').classList.contains('visible')) closeInstModal();
     });
     loadCatalogInfo().catch(() => {});
     refreshInstances();
