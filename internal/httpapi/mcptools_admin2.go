@@ -210,7 +210,7 @@ func (s *Server) registerAdminTools2() {
 			Typed: nameOf,
 			Consequences: func(_ context.Context, args json.RawMessage) []string {
 				a, _ := decode[sourceArgs](args)
-				return []string{"Adds the template source " + a.Name + " (" + sourceDisplay(a.URL) + "): its templates join the catalog and can be installed; a later sync pulls whatever the repository then holds."}
+				return []string{"Adds the template source " + q(a.Name) + " (" + q(sourceDisplay(a.URL)) + "): its templates join the catalog and can be installed; a later sync pulls whatever the repository then holds."}
 			},
 			Run: func(ctx context.Context, c *directory.Caller, args json.RawMessage) (any, error) {
 				a, _ := decode[sourceArgs](args)
@@ -224,7 +224,7 @@ func (s *Server) registerAdminTools2() {
 			Typed: nameOf,
 			Consequences: func(_ context.Context, args json.RawMessage) []string {
 				n := nameOf(args)
-				return []string{"Removes the template source " + n + ": every enabled app from it is disabled (stopped) first, and its templates leave the catalog."}
+				return []string{"Removes the template source " + q(n) + ": every enabled app from it is disabled (stopped) first, and its templates leave the catalog."}
 			},
 			Run: func(ctx context.Context, c *directory.Caller, args json.RawMessage) (any, error) {
 				return s.removeSource(toolActor(ctx, c), nameOf(args))
@@ -257,7 +257,7 @@ func (s *Server) registerAdminTools2() {
 			Typed: idOf,
 			Consequences: func(_ context.Context, args json.RawMessage) []string {
 				a, _ := decode[restoreArgs](args)
-				return []string{"Takes a backup of " + a.ID + ", then replaces its volumes, env, custom override and settings with the archive " + a.Archive + " (its hostnames are kept); an enabled instance restarts.",
+				return []string{"Takes a backup of " + a.ID + ", then replaces its volumes, env, custom override and settings with the archive " + q(a.Archive) + " (its hostnames are kept); an enabled instance restarts.",
 					"Whatever changed since that archive — data and settings, access settings included — is replaced (the pre-restore backup keeps it)."}
 			},
 			Run: func(ctx context.Context, c *directory.Caller, args json.RawMessage) (any, error) {
@@ -276,7 +276,7 @@ func (s *Server) registerAdminTools2() {
 			Typed: idOf,
 			Consequences: func(_ context.Context, args json.RawMessage) []string {
 				a, _ := decode[restoreAsArgs](args)
-				return []string{"Creates the instance " + a.ID + " from the archive " + a.Archive + ": its data, settings, sign-in policy, public access and per-person values come from the archive; its groups users_" + a.ID + " / admin_" + a.ID + " are created.",
+				return []string{"Creates the instance " + a.ID + " from the archive " + q(a.Archive) + ": its data, settings, sign-in policy, public access and per-person values come from the archive; its groups users_" + a.ID + " / admin_" + a.ID + " are created.",
 					"It is created stopped; enabling it later starts it with what the archive held (path settings share the archived host folders)."}
 			},
 			Run: func(ctx context.Context, c *directory.Caller, args json.RawMessage) (any, error) {
@@ -319,7 +319,7 @@ func (s *Server) registerAdminTools2() {
 			Class: ClassDestructive, Scope: ScopeAdmin, Twin: "DELETE /api/domains/{name}", Audit: "domain.delete", In: domainArgs{},
 			Typed: func(args json.RawMessage) string { return hub.NormalizeHost(nameOf(args)) },
 			Consequences: func(_ context.Context, args json.RawMessage) []string {
-				return []string{"Removes the domain " + hub.NormalizeHost(nameOf(args)) + ": its DNS records and certificate are removed and no new hostname can go on it."}
+				return []string{"Removes the domain " + q(hub.NormalizeHost(nameOf(args))) + ": its DNS records and certificate are removed and no new hostname can go on it."}
 			},
 			Run: func(ctx context.Context, c *directory.Caller, args json.RawMessage) (any, error) {
 				warning, err := s.deleteDomain(ctx, toolActor(ctx, c), nameOf(args))
@@ -357,7 +357,7 @@ func (s *Server) registerAdminTools2() {
 				return s.updateInstanceAI(ctx, a, in.ID, hub.InstanceAIUpdate{Companions: map[string]hub.CompanionUpdate{in.Companion: {Mode: &mode}}})
 			}), aiModeClass, idOf, func(args json.RawMessage) []string {
 			a, _ := decode[aiModeArgs](args)
-			return []string{"Sets the companion " + a.Companion + " of " + a.ID + " to mode " + a.Mode + ": AI clients may then change things in the app, not only read; existing AI credentials are revoked first."}
+			return []string{"Sets the companion " + q(a.Companion) + " of " + a.ID + " to mode " + q(a.Mode) + ": AI clients may then change things in the app, not only read; existing AI credentials are revoked first."}
 		}),
 		perCall(admin("set_ai_providers", "Set which model providers an AI page (an instance of a template with an AI page, e.g. LibreChat) offers: the whole selection. Adding a provider needs your confirmation in the browser: what people send on the AI page then goes to it. A running AI page restarts.",
 			ClassWrite, "PUT /api/instances/{id}/ai", "ai.providers", func(ctx context.Context, a directory.Actor, in aiProvidersArgs) (any, error) {
@@ -376,7 +376,7 @@ func (s *Server) registerAdminTools2() {
 				if a.User != "" {
 					who = strings.ToLower(a.User) + "'s"
 				}
-				return []string{"Revokes " + who + " AI credentials for the companion " + a.Companion + " of " + a.ID + " now, in the app itself."}
+				return []string{"Revokes " + who + " AI credentials for the companion " + q(a.Companion) + " of " + a.ID + " now, in the app itself."}
 			},
 			Run: func(ctx context.Context, c *directory.Caller, args json.RawMessage) (any, error) {
 				a, _ := decode[revokeAIArgs](args)
@@ -457,7 +457,7 @@ func (s *Server) registerAdminTools2() {
 			Class: ClassDestructive, Scope: ScopeAdmin, Twin: "DELETE /api/ai/providers/{name}", Audit: "ai.provider.delete", In: providerRefArgs{},
 			Typed: nameOf,
 			Consequences: func(_ context.Context, args json.RawMessage) []string {
-				return []string{"Deletes the model provider " + nameOf(args) + " and its stored secrets."}
+				return []string{"Deletes the model provider " + q(nameOf(args)) + " and its stored secrets."}
 			},
 			Run: func(ctx context.Context, c *directory.Caller, args json.RawMessage) (any, error) {
 				if err := s.deleteModelProvider(toolActor(ctx, c), nameOf(args)); err != nil {
@@ -680,18 +680,18 @@ func providersOut(list []hub.ProviderView) []map[string]any {
 
 func providerConsequences(args json.RawMessage) []string {
 	a, _ := decode[providerArgs](args)
-	dest := a.BaseURL
+	dest := q(a.BaseURL)
 	switch {
 	case a.Instance != "":
-		dest = "the instance " + a.Instance
+		dest = "the instance " + q(a.Instance)
 	case a.InstanceName != "":
-		dest = "the Azure resource " + a.InstanceName
+		dest = "the Azure resource " + q(a.InstanceName)
 	case a.Region != "":
-		dest = "AWS region " + a.Region
-	case dest == "":
-		dest = "the " + a.Kind + " default endpoint"
+		dest = "AWS region " + q(a.Region)
+	case a.BaseURL == "":
+		dest = "the " + q(a.Kind) + " default endpoint"
 	}
-	return []string{"Model provider " + a.Name + " (" + a.Kind + ") sends what people type on the AI page, and what their apps return to it, to " + dest + "; its secrets go there too."}
+	return []string{"Model provider " + q(a.Name) + " (" + q(a.Kind) + ") sends what people type on the AI page, and what their apps return to it, to " + dest + "; its secrets go there too."}
 }
 
 // aiSupportConsequences names the mode the companion switches on in (fix
@@ -710,7 +710,7 @@ func (s *Server) aiSupportConsequences(args json.RawMessage) []string {
 			}
 		}
 	}
-	return []string{"Switches the companion " + a.Companion + " of " + a.ID + " on in " + mode + ": AI clients of the people who can use " + a.ID + " get its tools, acting in the app as them; an enabled instance restarts."}
+	return []string{"Switches the companion " + q(a.Companion) + " of " + a.ID + " on in " + mode + ": AI clients of the people who can use " + a.ID + " get its tools, acting in the app as them; an enabled instance restarts."}
 }
 
 // aiSupportClass (Task 17b ruling, fail closed): switching off is W;
@@ -756,9 +756,9 @@ func (s *Server) aiProvidersConsequences(args json.RawMessage) []string {
 		if slices.Contains(cur, p) {
 			continue
 		}
-		label := p
+		label := q(p)
 		if m, ok := s.Hub.ModelProvider(p); ok {
-			label = m.Label + " (" + p + ")"
+			label = q(m.Label) + " (" + q(p) + ")"
 		}
 		out = append(out, "Adds the model provider "+label+" to the AI page "+a.ID+": what people send on it, and what their apps return to it, goes to "+label+".")
 	}
@@ -882,7 +882,7 @@ func hubSettingsConsequences(args json.RawMessage) []string {
 		}
 	}
 	if u.AllowedOrigins != nil {
-		o := strings.Join(*u.AllowedOrigins, ", ")
+		o := strings.Join(quoteAll(*u.AllowedOrigins), ", ")
 		if o == "" {
 			o = "none"
 		}

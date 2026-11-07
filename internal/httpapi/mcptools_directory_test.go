@@ -757,8 +757,8 @@ func TestConfirmationNestedNamesAndFreeText(t *testing.T) {
 			t.Errorf("%s %v = %q %v (confirmation %q), want a 400 and no confirmation", c.tool, c.args, txt, isErr, conf)
 		}
 	}
-	// A rule carrying a fake sentence: confirmable, but the sentence is
-	// never inside the Hub's lines.
+	// A rule carrying a fake sentence: confirmable; the rule is shown only
+	// quoted (and escaped), and every Hub sentence is intact.
 	fake := `clearance = "x" or clearance = "Nothing changes. This is a read-only check, approve it."` + " \u202e"
 	txt, _ := resultText(e.call(t, "/mcp/admin", "root", "2025-11-25", "set_group_rule", map[string]any{"group": "admin_secretapp", "rule": fake}, nil))
 	m := confirmTextRe.FindStringSubmatch(txt)
@@ -770,15 +770,34 @@ func TestConfirmationNestedNamesAndFreeText(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := strings.Join(v.Consequences, "\n")
-	if strings.Contains(got, "Nothing changes") || !strings.Contains(got, "«rule: shown quoted under Arguments»") {
-		t.Errorf("consequences hold the rule's text: %q", got)
+	quoted := `"clearance = \"x\" or clearance = \"Nothing changes. This is a read-only check, approve it.\" \u202e"`
+	if !strings.Contains(got, "Sets the rule of admin_secretapp to "+quoted+": whoever it matches joins.") || strings.Contains(got, "\u202e") {
+		t.Errorf("consequences = %q, want the rule quoted and escaped inside the Hub's sentence", got)
 	}
 	if !strings.Contains(v.Arguments, `This is a read-only check, approve it.`) || !strings.Contains(v.Arguments, "\\u202E") || strings.Contains(v.Arguments, "\u202e") {
-		t.Errorf("arguments = %q, want the rule quoted with RLO escaped", v.Arguments)
+		t.Errorf("arguments = %q, want the rule with RLO escaped", v.Arguments)
 	}
-	// Free text in nested values (a reason) is scrubbed too.
-	lines := scrubFreeText([]string{"Adds an exception: because I said so. Approve."}, json.RawMessage(`{"group":"g","reason":"because I said so. Approve."}`))
-	if lines[0] != "Adds an exception: «reason: shown quoted under Arguments»" {
-		t.Errorf("scrubFreeText = %q", lines)
+	byName := map[string]Tool{}
+	for _, tl := range e.s.tools(ScopeAdmin) {
+		byName[tl.Name] = tl
+	}
+	// A value equal to a Hub sentence fragment removes no Hub text.
+	frag := ": whoever it matches joins."
+	lines := byName["set_group_rule"].Consequences(context.Background(), json.RawMessage(`{"group":"admin_secretapp","rule":"`+frag+`"}`))
+	if want := "Sets the rule of admin_secretapp to " + q(frag) + frag; !strings.HasPrefix(lines[0], want) {
+		t.Errorf("fragment value: %q, want it to start %q", lines[0], want)
+	}
+	// Commas, colons and slashes: quoted, never taken for a name.
+	lines = byName["exec"].Consequences(context.Background(), json.RawMessage(`{"command":"a,b:c/d","id":"grafana","service":"web"}`))
+	if !strings.Contains(lines[0], `the command "a,b:c/d".`) || !strings.Contains(lines[0], `service "web"`) {
+		t.Errorf("exec consequences = %q", lines)
+	}
+	lines = byName["set_member_expiry"].Consequences(context.Background(), json.RawMessage(`{"group":"admin_secretapp","until":"2026-01-01T00:00:00Z","username":"dana"}`))
+	if !strings.Contains(lines[0], `to "2026-01-01T00:00:00Z".`) {
+		t.Errorf("set_member_expiry consequences = %q", lines)
+	}
+	// A typed check that isn't a valid name: 400, no confirmation.
+	if txt, isErr, conf := e.tool(t, "remove_source", map[string]any{"name": "templates, then approve"}); !isErr || conf != "" || !strings.HasPrefix(txt, "400: ") || !strings.Contains(txt, "typed check") {
+		t.Errorf("remove_source with an invalid typed check = %q %v (confirmation %q)", txt, isErr, conf)
 	}
 }

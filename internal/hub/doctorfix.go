@@ -501,7 +501,7 @@ func (h *Hub) managePlan(ctx context.Context, in FolderInput) (*manageCalc, erro
 	if c.assign, err = h.computeAssignFor(ctx, in.ID, c.req, &c.folder); err != nil {
 		return nil, err
 	}
-	c.lines = append(c.lines, fmt.Sprintf("Shared folder *%s* (id %s) is defined at %s.", in.Name, in.ID, p))
+	c.lines = append(c.lines, fmt.Sprintf("Shared folder %q (id %s) is defined at %s.", in.Name, in.ID, p))
 	for _, e := range c.assign.edits {
 		c.lines = append(c.lines, fmt.Sprintf("%s's %s: %s → %s.", c.assign.names[e.Instance], e.label, e.before, e.Value))
 	}

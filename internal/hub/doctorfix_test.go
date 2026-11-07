@@ -289,7 +289,7 @@ func TestManageAsFolder(t *testing.T) {
 	}
 	text := strings.Join(plan.Lines, "\n")
 	for _, want := range []string{
-		"Shared folder *media* (id media) is defined at /srv/media.",
+		"Shared folder \"media\" (id media) is defined at /srv/media.",
 		"gid 60000 is allocated for this folder (shown as *media*).",
 		"Jellyfin's Media: /srv/media → folder:media.",
 		"Writer's Data: /srv/media → folder:media.",
@@ -313,7 +313,7 @@ func TestManageAsFolder(t *testing.T) {
 	}
 	// Params: another name and id.
 	named, err := f.h.PreviewFix(ctx, mediaFP, map[string]string{"name": "Family media", "id": "family"})
-	if err != nil || named.Assign.Folder != "family" || !strings.Contains(strings.Join(named.Lines, "\n"), "Shared folder *Family media* (id family)") || named.Hash == plan.Hash {
+	if err != nil || named.Assign.Folder != "family" || !strings.Contains(strings.Join(named.Lines, "\n"), "Shared folder \"Family media\" (id family)") || named.Hash == plan.Hash {
 		t.Errorf("named = %+v, %v", named, err)
 	}
 	for _, bad := range []map[string]string{{"id": "Bad id"}, {"name": strings.Repeat("x", 65)}, {"name": "a\nb"}, {"bogus": "x"}} {

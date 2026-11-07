@@ -876,9 +876,9 @@ func (s *Server) registerDirectoryTools() {
 				}
 				return map[string]string{"status": "saved"}, nil
 			}), s.groupClass, argReader("group"), func(ctx context.Context, args json.RawMessage) []string {
-			until := argField(args, "until")
-			if until == "" {
-				until = "no end"
+			until := "no end"
+			if u := argField(args, "until"); u != "" {
+				until = q(u)
 			}
 			return s.groupConsequences(ctx, args, "Sets the end of "+argField(args, "username")+"'s membership of "+argField(args, "group")+" to "+until+".", "")
 		}),
@@ -906,7 +906,7 @@ func (s *Server) registerDirectoryTools() {
 				return out, nil
 			}), s.ruleClass, argReader("group"), func(ctx context.Context, args json.RawMessage) []string {
 			r := argField(args, "rule")
-			line := "Sets the rule of " + argField(args, "group") + " to " + r + ": whoever it matches joins."
+			line := "Sets the rule of " + argField(args, "group") + " to " + q(r) + ": whoever it matches joins."
 			if r == "" {
 				line = "Makes " + argField(args, "group") + " manual: its current members stay."
 			}
@@ -926,7 +926,7 @@ func (s *Server) registerDirectoryTools() {
 				return out, nil
 			}), s.ruleClass, argReader("group"), func(ctx context.Context, args json.RawMessage) []string {
 			a, _ := decode[convertArgs](args)
-			return s.groupConsequences(ctx, args, "Makes "+a.Group+" a rule group ("+a.Rule+"): joining "+peopleList(a.Preview.Joining)+".", a.Rule)
+			return s.groupConsequences(ctx, args, "Makes "+a.Group+" a rule group ("+q(a.Rule)+"): joining "+peopleList(a.Preview.Joining)+".", a.Rule)
 		}),
 		perCallCtx(dirTool(s, "add_exception", "Add an exception to a rule group: a person added although the rule doesn't match them (include), or kept out although it does; a reason is required. On a guarding group it needs your confirmation in the browser.",
 			ClassWrite, "POST /api/directory/groups/{group}/exceptions", "group.exception", func(ctx context.Context, c *directory.Caller, in exceptionArgs) (any, error) {
@@ -959,14 +959,14 @@ func (s *Server) registerDirectoryTools() {
 			}), argReader("perm"), func(ctx context.Context, args json.RawMessage) []string {
 			g := argField(args, "group")
 			if g == "" {
-				return []string{"Takes permission " + argField(args, "perm") + " from everybody."}
+				return []string{"Takes permission " + q(argField(args, "perm")) + " from everybody."}
 			}
 			m := s.guards(ctx)
 			who := "Members now: " + peopleList(membersOf(m, g)) + "."
 			if m == nil {
 				who = "Its members couldn't be read."
 			}
-			return []string{"Grants permission " + argField(args, "perm") + " to every member of " + g + " (now and later).", who}
+			return []string{"Grants permission " + q(argField(args, "perm")) + " to every member of " + g + " (now and later).", who}
 		}),
 		// ── Fields ──
 		dirTool(s, "create_field", "Create a custom person field (text, list or person; shared with apps unless share_with_apps is false).",
@@ -1242,6 +1242,16 @@ func (s *Server) checkNameArgs(ctx context.Context, tool string, args json.RawMe
 					check("group", k, e)
 				case k == "name" && nameIs != "":
 					check(nameIs, k, e)
+				case k == "id" || k == "template":
+					// Instance, template, folder and project ids: the
+					// routes' own rule (appIDOK: 404, as the twin answers).
+					if str, ok := e.(string); ok && str != "" && bad == nil {
+						bad = appIDOK(str)
+					}
+				case k == "fp":
+					if str, ok := e.(string); ok && str != "" && bad == nil {
+						bad = fpOK(str)
+					}
 				case k == "attrs":
 					if m, ok := e.(map[string]any); ok {
 						for f := range m {
@@ -1274,4 +1284,17 @@ func knownGroup(m *directory.Membership, g string) bool {
 	}
 	_, ok := m.Groups[g]
 	return ok
+}
+
+// validTyped: a confirmation's typed check is a name the person can read
+// and type exactly — an instance / template / folder id, a username, a
+// group name, a hostname — or one the directory knows (a group whose
+// name predates the Hub's rule). Anything else is refused (400) before
+// a confirmation is created.
+func (s *Server) validTyped(ctx context.Context, typed string) bool {
+	switch {
+	case templates.ValidID(typed), lldap.ValidUsername(typed), lldap.ValidGroupName(typed), templates.ValidHostname(typed):
+		return true
+	}
+	return knownGroup(s.guards(ctx), typed) || knownUser(s.guards(ctx), typed)
 }

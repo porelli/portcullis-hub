@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/netip"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -149,6 +150,22 @@ func argField(args json.RawMessage, key string) string {
 		json.Unmarshal(m[key], &v)
 	}
 	return v
+}
+
+// q is how a consequence line shows an argument value that isn't a
+// validated name (checkNameArgs: usernames, group, field and instance
+// ids): quoted (Go syntax, so a quote inside can't end it), with every
+// invisible, bidi or control character as \uXXXX — never as the Hub's
+// own words (security review of the final fix).
+func q(v string) string { return hub.VisibleText(strconv.Quote(v)) }
+
+// quoteAll is q over a list.
+func quoteAll(vs []string) []string {
+	out := make([]string, len(vs))
+	for i, v := range vs {
+		out[i] = q(v)
+	}
+	return out
 }
 
 // argReader is argField(·, key) as a function (a Typed check).
@@ -487,7 +504,7 @@ func (s *Server) registerAdminTools() {
 				a, _ := decode[publicArgs](args)
 				line := "Opens " + a.ID + "'s public paths to anyone on the internet, without sign-in"
 				if a.Mode != "" {
-					line += " (mode " + a.Mode + ")"
+					line += " (mode " + q(a.Mode) + ")"
 				}
 				return []string{line + "."}
 			},
@@ -529,7 +546,7 @@ func (s *Server) registerAdminTools() {
 			Typed: idOf,
 			Consequences: func(_ context.Context, args json.RawMessage) []string {
 				a, _ := decode[execArgs](args)
-				return []string{"Runs /bin/sh -c in service " + a.Service + " of " + a.ID + ", as the container's user: " + a.Command,
+				return []string{"Runs /bin/sh -c in service " + q(a.Service) + " of " + a.ID + ", as the container's user, the command " + q(a.Command) + ".",
 					"Its output goes back to the AI (secrets redacted)."}
 			},
 			Run: func(ctx context.Context, c *directory.Caller, args json.RawMessage) (any, error) {
@@ -564,7 +581,7 @@ func (s *Server) registerAdminTools() {
 				a, _ := decode[envArgs](args)
 				names := make([]string, 0, len(a.Variables))
 				for k := range a.Variables {
-					names = append(names, k)
+					names = append(names, q(k))
 				}
 				slices.Sort(names)
 				return []string{"Writes " + strings.Join(names, ", ") + " to " + a.ID + "'s .env; the app reads it at its next restart."}
@@ -629,7 +646,7 @@ func (s *Server) registerAdminTools() {
 				case hub.ActionAdopt:
 					return []string{"Enables " + a.ID + ", adopting the containers that run."}
 				default:
-					return []string{"Runs compose up for " + a.ID + " with the Hub's configuration (action " + a.Action + "): containers may be recreated."}
+					return []string{"Runs compose up for " + a.ID + " with the Hub's configuration (action " + q(a.Action) + "): containers may be recreated."}
 				}
 			},
 			Run: func(ctx context.Context, c *directory.Caller, args json.RawMessage) (any, error) {
@@ -689,7 +706,7 @@ func (s *Server) registerAdminTools() {
 			Typed: func(args json.RawMessage) string { a, _ := decode[credArgs](args); return strings.ToLower(a.User) },
 			Consequences: func(_ context.Context, args json.RawMessage) []string {
 				a, _ := decode[credArgs](args)
-				return []string{"Revokes " + strings.ToLower(a.User) + "'s " + a.Key + " credential for " + a.ID + " now: the app stops accepting it."}
+				return []string{"Revokes " + strings.ToLower(a.User) + "'s " + q(a.Key) + " credential for " + a.ID + " now: the app stops accepting it."}
 			},
 			Run: func(ctx context.Context, c *directory.Caller, args json.RawMessage) (any, error) {
 				a, _ := decode[credArgs](args)
@@ -805,7 +822,7 @@ func settingsConsequences(args json.RawMessage) []string {
 	keys := slices.Sorted(maps.Keys(a.Ports))
 	var lines []string
 	if a.Ports != nil {
-		lines = append(lines, "Replaces "+a.ID+"'s port configuration ("+strings.Join(keys, ", ")+"): host ports may be published or bound to other addresses.")
+		lines = append(lines, "Replaces "+a.ID+"'s port configuration ("+strings.Join(quoteAll(keys), ", ")+"): host ports may be published or bound to other addresses.")
 	}
 	var named []string
 	for _, m := range []iterKeys{maps.Keys(a.Person), maps.Keys(a.Groups), maps.Keys(a.Values)} {
@@ -815,7 +832,7 @@ func settingsConsequences(args json.RawMessage) []string {
 	}
 	slices.Sort(named)
 	if len(named) > 0 {
-		lines = append(lines, "Changes "+a.ID+"'s settings "+strings.Join(slices.Compact(named), ", ")+": they may decide who gets elevated values or access, or what the app mounts.")
+		lines = append(lines, "Changes "+a.ID+"'s settings "+strings.Join(quoteAll(slices.Compact(named)), ", ")+": they may decide who gets elevated values or access, or what the app mounts.")
 	}
 	return append(lines, "The arguments below are saved as previewed.")
 }
@@ -859,7 +876,7 @@ func (s *Server) localNetsClass(args json.RawMessage) ToolClass {
 
 func localNetsConsequences(args json.RawMessage) []string {
 	a, _ := decode[localNetsArgs](args)
-	list := strings.Join(a.Networks, ", ")
+	list := strings.Join(quoteAll(a.Networks), ", ")
 	switch {
 	case a.UseDefaults:
 		list = strings.Join(hub.DefaultLocalNetworks, ", ") + " (the defaults)"

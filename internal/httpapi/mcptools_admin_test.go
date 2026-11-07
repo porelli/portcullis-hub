@@ -418,8 +418,11 @@ func TestAdminToolsSameAsHTTP(t *testing.T) {
 		// ── Task 17b ──
 		{tool: "sync_sources", args: map[string]any{},
 			method: "POST", path: "/api/sources/sync", body: ``},
-		{tool: "add_source", args: map[string]any{"name": "Bad Name", "url": "https://example.org/t.git"},
-			method: "POST", path: "/api/sources/add", body: `{"name":"Bad Name","url":"https://example.org/t.git"}`},
+		// A name refused by the Hub (its URL rule): a name that isn't one
+		// at all is the tool's typed-check 400 before any Hub call
+		// (TestConfirmationNestedNamesAndFreeText).
+		{tool: "add_source", args: map[string]any{"name": "bad-url", "url": "ftp://example.org/t.git"},
+			method: "POST", path: "/api/sources/add", body: `{"name":"bad-url","url":"ftp://example.org/t.git"}`},
 		{tool: "remove_source", args: map[string]any{"name": "nosuch"},
 			method: "POST", path: "/api/sources/remove", body: `{"name":"nosuch"}`},
 		{tool: "backup_instance", args: map[string]any{"id": "secretapp"},

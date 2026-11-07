@@ -367,7 +367,7 @@ func (s *Server) fixConsequences(ctx context.Context, args json.RawMessage) []st
 		p, err = s.Hub.PreviewFixIn(ctx, rep, in.FP, in.params())
 	}
 	if err != nil {
-		return []string{"Applies the doctor's fix for finding " + in.FP + " (its preview fails now: " + clipMessage(err.Error(), 300) + ")."}
+		return []string{"Applies the doctor's fix for finding " + in.FP + " (its preview fails now: " + q(clipMessage(err.Error(), 300)) + ")."}
 	}
 	lines := []string{"Applies the doctor's fix " + p.Kind + " for finding " + in.FP + ":"}
 	if p.TouchesData {
@@ -397,7 +397,7 @@ func (s *Server) assignConsequences(ctx context.Context, args json.RawMessage) [
 	in, _ := decode[assignApplyArgs](args)
 	p, err := s.Hub.PreviewAssign(ctx, in.ID, hub.AssignRequest{Uses: in.Uses})
 	if err != nil {
-		return []string{"Applies an assignment of shared folder " + in.ID + " (its preview fails now: " + clipMessage(err.Error(), 300) + ")."}
+		return []string{"Applies an assignment of shared folder " + in.ID + " (its preview fails now: " + q(clipMessage(err.Error(), 300)) + ")."}
 	}
 	return append(append([]string{"Applies this assignment of shared folder " + in.ID + ":"}, p.Lines...), p.Warnings...)
 }
@@ -406,7 +406,7 @@ func (s *Server) undoConsequences(ctx context.Context, args json.RawMessage) []s
 	in, _ := decode[planHashArgs](args)
 	p, err := s.Hub.PreviewUndo(ctx, in.ID)
 	if err != nil {
-		return []string{"Undoes shared folder " + in.ID + "'s last permissions fix (its preview fails now: " + clipMessage(err.Error(), 300) + ")."}
+		return []string{"Undoes shared folder " + in.ID + "'s last permissions fix (its preview fails now: " + q(clipMessage(err.Error(), 300)) + ")."}
 	}
 	return append(append([]string{"Undoes shared folder " + in.ID + "'s last permissions fix (it can't be undone itself):"}, p.Lines...), p.Warnings...)
 }
@@ -484,6 +484,6 @@ func (s *Server) muteConsequences(ctx context.Context, args json.RawMessage) []s
 	}
 	return []string{
 		"Mutes the doctor's " + string(f.Severity) + " " + f.Kind + ": " + f.Title,
-		"It leaves the counts and stays hidden until what it judged changes. Reason: " + clipMessage(in.Reason, 200),
+		"It leaves the counts and stays hidden until what it judged changes. Reason: " + q(clipMessage(in.Reason, 200)) + ".",
 	}
 }

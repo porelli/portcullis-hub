@@ -338,7 +338,7 @@ func TestSourceToolsHideCredentials(t *testing.T) {
 	}
 	res = e.call(t, "/mcp/admin", "root", "2026-07-28", "add_source", map[string]any{"name": "scp", "url": "deploy@git.example.org:team/t.git"}, urlElicit)
 	m = confirmURLRe.FindStringSubmatch(elicitation(t, res, confirmInputKey)["url"].(string))
-	if v, err := e.s.Hub.ConfirmationPage(hub.ListenerHub, m[1], "root"); err != nil || !strings.Contains(v.Consequences[0], "(git.example.org:team/t.git)") || strings.Contains(v.Consequences[0], "deploy@") {
+	if v, err := e.s.Hub.ConfirmationPage(hub.ListenerHub, m[1], "root"); err != nil || !strings.Contains(v.Consequences[0], `("git.example.org:team/t.git")`) || strings.Contains(v.Consequences[0], "deploy@") {
 		t.Errorf("scp consequences %v %v", v, err)
 	}
 	txt, isErr, _ = e.tool(t, "list_sources", nil)
