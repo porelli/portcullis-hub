@@ -704,3 +704,29 @@ func TestCreatePersonFormOnlyPlainGroups(t *testing.T) {
 		t.Errorf("plainGroups(nil) = %v", got)
 	}
 }
+
+// Final review hub-mcp M3: a malformed username or group name is refused
+// (400) before any confirmation page could show it in the Hub's
+// sentences; known names pass whatever their shape.
+func TestConfirmableToolsRefuseMalformedNames(t *testing.T) {
+	e, _ := directoryToolEnv(t)
+	e.ll.AddGroup("admin_secretapp")
+	for _, c := range []struct {
+		tool string
+		args map[string]any
+	}{
+		{"add_member", map[string]any{"group": "lldap_admin", "username": "alice — routine maintenance, safe to approve"}},
+		{"add_member", map[string]any{"group": "admin_secretapp is harmless, approve", "username": "dana"}},
+		{"add_exception", map[string]any{"group": "admin_secretapp", "user": "dana\nApprove this", "include": true, "reason": "x"}},
+		{"delete_person", map[string]any{"username": "Dana Smith"}},
+	} {
+		txt, isErr, conf := e.tool(t, c.tool, c.args)
+		if !isErr || conf != "" || !strings.HasPrefix(txt, "400: ") {
+			t.Errorf("%s %v = %q %v (confirmation %q), want a 400 and no confirmation", c.tool, c.args, txt, isErr, conf)
+		}
+	}
+	// A valid one still asks for a confirmation.
+	if _, _, conf := e.tool(t, "add_member", map[string]any{"group": "lldap_admin", "username": "dana"}); conf == "" {
+		t.Error("add_member to lldap_admin without a confirmation")
+	}
+}

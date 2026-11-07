@@ -522,8 +522,23 @@ func (s *Server) callTool(ctx context.Context, scope string, t *mcpTool, call sd
 		}
 		return s.errResult(refusal)
 	}
-	if t.Precheck != nil {
-		if err := t.Precheck(ctx, c, args); err != nil {
+	precheck := t.Precheck
+	if t.Consequences != nil {
+		// A tool that may ask for a confirmation: names the page would
+		// show are checked first (final review M3).
+		own := t.Precheck
+		precheck = func(ctx context.Context, c *directory.Caller, args json.RawMessage) error {
+			if err := s.checkNameArgs(ctx, args); err != nil {
+				return err
+			}
+			if own != nil {
+				return own(ctx, c, args)
+			}
+			return nil
+		}
+	}
+	if precheck != nil {
+		if err := precheck(ctx, c, args); err != nil {
 			redact, rerr := s.toolRedactor()
 			if rerr != nil {
 				log.Printf("mcp: %s: redaction set: %v", t.Name, rerr)

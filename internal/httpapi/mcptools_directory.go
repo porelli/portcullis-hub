@@ -1171,3 +1171,49 @@ func (s *Server) auditRecent(in auditArgs) (any, error) {
 	}
 	return out, nil
 }
+
+// checkNameArgs (final review M3): the username / user / group arguments
+// of a tool that may ask for a confirmation are a valid username / group
+// name (lldap.ValidUsername / ValidGroupName), or one the directory
+// knows, before any confirmation page shows them inside the Hub's
+// sentences; "" is left to the tool. 400 otherwise (the directory
+// unreadable: only the valid forms pass).
+func (s *Server) checkNameArgs(ctx context.Context, args json.RawMessage) error {
+	var m map[string]json.RawMessage
+	if json.Unmarshal(args, &m) != nil {
+		return nil // checkArgs decoded them already
+	}
+	str := func(k string) (string, bool) {
+		var v string
+		raw, ok := m[k]
+		if !ok || json.Unmarshal(raw, &v) != nil || v == "" {
+			return "", false
+		}
+		return v, true
+	}
+	for _, k := range []string{"username", "user"} {
+		if u, ok := str(k); ok && !lldap.ValidUsername(strings.ToLower(u)) && !knownUser(s.guards(ctx), u) {
+			return badArg(k + " is not a valid username")
+		}
+	}
+	if g, ok := str("group"); ok && !lldap.ValidGroupName(g) && !knownGroup(s.guards(ctx), g) {
+		return badArg("group is not a valid group name")
+	}
+	return nil
+}
+
+func knownUser(m *directory.Membership, u string) bool {
+	if m == nil {
+		return false
+	}
+	_, ok := m.Users[strings.ToLower(u)]
+	return ok
+}
+
+func knownGroup(m *directory.Membership, g string) bool {
+	if m == nil {
+		return false
+	}
+	_, ok := m.Groups[g]
+	return ok
+}
