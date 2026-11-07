@@ -497,6 +497,10 @@ type Hub struct {
 	aiReconMu    sync.Mutex
 	aiRevokeErrs map[string]string
 	aiPrunedErrs map[string]string
+	// aiPendingLeavers: per app_oauth companion ("<inst>/<comp>"), people
+	// who left while their Keycloak id was still pending; the revoke_all
+	// that covers them failed and is retried (AIRevokeProblems, T27).
+	aiPendingLeavers map[string][]string
 	// Keycloak AI clients (ai_clients.go): aiKCMu serialises every pass
 	// over the AI clients and mcp:* scopes (the sync loop, a Settings → AI
 	// save, applyAIScopes), each reading state after taking it — a leaf
