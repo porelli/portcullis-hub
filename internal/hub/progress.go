@@ -721,6 +721,13 @@ func (h *Hub) unregisterOp(key string, run *opRun) {
 // point of no return, when it can't be stopped or is already stopping;
 // 401 without an actor. The HTTP route and the audit are StopOp's.
 func (h *Hub) cancelOp(id string, actor directory.Actor) error {
+	return h.cancelOpExpect(id, actor, "")
+}
+
+// cancelOpExpect is cancelOp of operation expectedOpID only ("" = any):
+// another one running is ErrOpChanged, judged under p.mu, so a Stop never
+// lands on an operation its caller didn't see.
+func (h *Hub) cancelOpExpect(id string, actor directory.Actor, expectedOpID string) error {
 	if actor.User == "" {
 		return statusErr(401, "no acting user")
 	}
@@ -734,6 +741,8 @@ func (h *Hub) cancelOp(id string, actor directory.Actor) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	switch {
+	case expectedOpID != "" && p.rec.OpID != expectedOpID:
+		return ErrOpChanged
 	case !p.live || p.closed || !p.rec.Running:
 		return statusErr(409, "no operation is running on %s", id)
 	case p.rec.Stopping:

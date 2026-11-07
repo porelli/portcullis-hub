@@ -790,3 +790,39 @@ func TestStartHookFailureAsyncEnable(t *testing.T) {
 		t.Errorf("failed ops = %v", fo)
 	}
 }
+
+// TestStopOpExpect (Task 7 security review): a Stop meant for one
+// operation never lands on another — refused 409 ErrOpChanged with the
+// current record, nothing stopped, audited refused; the right op id stops
+// it. "" is any (the HTTP route).
+func TestStopOpExpect(t *testing.T) {
+	f := stopFixture(t)
+	reached, release := f.blockAt("images")
+	a, err := f.h.StartEnable("other", directory.Human("alice"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-reached
+	rec, err := f.h.StopOpExpect("other", directory.Human("bob"), "0123456789abcdef")
+	if !errors.Is(err, ErrOpChanged) || errStatus(err) != 409 || rec == nil || rec.OpID != a.OpID {
+		t.Fatalf("another op id: %v %+v", err, rec)
+	}
+	// Under p.mu too (the record read first, then another run's).
+	if err := f.h.cancelOpExpect("other", directory.Human("bob"), "0123456789abcdef"); !errors.Is(err, ErrOpChanged) {
+		t.Fatalf("cancelOpExpect: %v", err)
+	}
+	if r := f.h.LastOp("other"); !r.Running || r.Stopping {
+		t.Fatalf("stopped by a refused Stop: %+v", r)
+	}
+	if e := f.audit.lastOf("enable.stop"); e.Result != "refused" || e.Actor != "bob" {
+		t.Errorf("audit %+v", e)
+	}
+	rec, err = f.h.StopOpExpect("other", directory.Human("bob"), a.OpID)
+	if err != nil || !rec.Stopping {
+		t.Fatalf("the right op id: %v %+v", err, rec)
+	}
+	close(release)
+	if r := waitOp(t, f.h, "other", a.OpID); r.OK || r.StoppedBy != "bob" {
+		t.Fatalf("record %+v", r)
+	}
+}

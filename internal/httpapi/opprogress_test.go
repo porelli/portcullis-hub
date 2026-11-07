@@ -417,9 +417,10 @@ func stopAsked(t *testing.T, e *toolEnv, id, opID string) {
 
 // stop_op's class follows what the undo turns back on (Task 7 security
 // review): stopping a disable (the app back on) or an AI switch-off (the
-// companion back on) needs the confirmation enable_instance /
-// set_ai_support would; declined, nothing stops; confirmed, it stops. An
-// admin's HTTP Stop is unaffected. op_id binds the call.
+// companion back on) needs op_id and the confirmation enable_instance /
+// set_ai_support would; declined, nothing stops; confirmed, it stops. A
+// confirmation for one operation never stops another. An admin's HTTP
+// Stop is unaffected.
 func TestStopOpClassFollowsTheUndo(t *testing.T) {
 	br := &blockingDown{}
 	e := newToolEnvWith(t, mcpEnvOpts{runner: br})
@@ -432,25 +433,39 @@ func TestStopOpClassFollowsTheUndo(t *testing.T) {
 			t.Fatal("the disable never reached compose down")
 		}
 	}
-
+	startDisable := func() OpStarted {
+		t.Helper()
+		br.arm()
+		txt, isErr, conf := e.tool(t, "disable_instance", map[string]any{"id": "aiapp"})
+		var op OpStarted
+		if isErr || conf != "" || json.Unmarshal([]byte(txt), &op) != nil || op.Op != "disable" {
+			t.Fatalf("disable_instance = %s %v %q", txt, isErr, conf)
+		}
+		waitDown()
+		return op
+	}
 	// A disable: its undo enables aiapp again, whose access group has
 	// members (enable_instance would be D).
-	br.arm()
-	txt, isErr, conf := e.tool(t, "disable_instance", map[string]any{"id": "aiapp"})
-	var op OpStarted
-	if isErr || conf != "" || json.Unmarshal([]byte(txt), &op) != nil || op.Op != "disable" {
-		t.Fatalf("disable_instance = %s %v %q", txt, isErr, conf)
+	op := startDisable()
+	if txt, isErr, _ := e.tool(t, "stop_op", map[string]any{"id": "aiapp"}); !isErr || !strings.HasPrefix(txt, "400: ") || !strings.Contains(txt, "op_id") {
+		t.Errorf("D stop_op without op_id = %s %v", txt, isErr)
 	}
-	waitDown()
 	stopAsked(t, e, "aiapp", op.OpID)
-	// An op_id that isn't the running one: refused, nothing stopped.
-	if txt, isErr, _ = e.tool(t, "stop_op", map[string]any{"id": "aiapp", "op_id": "0123456789abcdef"}); !isErr || !strings.HasPrefix(txt, "409: ") || !strings.Contains(txt, "changed") {
+	// An op_id that isn't the running one: refused (409 with the current
+	// record), nothing stopped.
+	if txt, isErr, _ := e.tool(t, "stop_op", map[string]any{"id": "aiapp", "op_id": "0123456789abcdef"}); !isErr || !strings.HasPrefix(txt, "409: {") || !strings.Contains(txt, op.OpID) {
 		t.Errorf("stop_op of another op = %s %v", txt, isErr)
 	}
 	if r := e.s.Hub.LastOp("aiapp"); !r.Running || r.Stopping {
 		t.Fatalf("a refused stop_op stopped it: %+v", r)
 	}
-	txt, isErr, conf = e.tool(t, "stop_op", map[string]any{"id": "aiapp"})
+	br.release()
+	waitIdle(t, e.s.Hub, "aiapp")
+	opOK(t, e.hub, "POST", "/api/templates/enable", `{"id":"aiapp"}`)
+
+	// Confirmed: it stops, aiapp is enabled again.
+	op = startDisable()
+	txt, isErr, conf := e.tool(t, "stop_op", map[string]any{"id": "aiapp", "op_id": op.OpID})
 	var rec hub.OpRecord
 	if isErr || conf == "" || json.Unmarshal([]byte(txt), &rec) != nil || !rec.Stopping || rec.OpID != op.OpID {
 		t.Fatalf("confirmed stop_op = %s %v %q", txt, isErr, conf)
@@ -472,56 +487,69 @@ func TestStopOpClassFollowsTheUndo(t *testing.T) {
 
 	// An AI switch-off (W): held on its revoke_all hook; its undo
 	// switches tok back on in read_write (set_ai_support on: D).
-	gate := make(chan struct{})
-	e.eng.mu.Lock()
-	e.eng.gate, e.eng.calls = gate, nil
-	e.eng.mu.Unlock()
-	released := false
-	defer func() {
-		if !released {
-			close(gate)
-		}
-	}()
-	txt, isErr, conf = e.tool(t, "set_ai_support", map[string]any{"id": "aiapp", "companion": "tok", "enabled": false})
-	if isErr || conf != "" || json.Unmarshal([]byte(txt), &op) != nil || op.Op != "ai" {
-		t.Fatalf("set_ai_support off = %s %v %q", txt, isErr, conf)
-	}
-	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+	holdHooks := func() func() {
+		gate := make(chan struct{})
 		e.eng.mu.Lock()
-		n := len(e.eng.calls)
+		e.eng.gate, e.eng.calls = gate, nil
 		e.eng.mu.Unlock()
-		if n > 0 {
-			break
+		return sync.OnceFunc(func() {
+			e.eng.mu.Lock()
+			e.eng.gate = nil
+			e.eng.mu.Unlock()
+			close(gate)
+		})
+	}
+	switchOff := func() OpStarted {
+		t.Helper()
+		txt, isErr, conf := e.tool(t, "set_ai_support", map[string]any{"id": "aiapp", "companion": "tok", "enabled": false})
+		var op OpStarted
+		if isErr || conf != "" || json.Unmarshal([]byte(txt), &op) != nil || op.Op != "ai" {
+			t.Fatalf("set_ai_support off = %s %v %q", txt, isErr, conf)
 		}
-		if time.Now().After(deadline) {
-			t.Fatal("the switch-off never ran its revoke hook")
+		for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+			e.eng.mu.Lock()
+			n := len(e.eng.calls)
+			e.eng.mu.Unlock()
+			if n > 0 {
+				return op
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("the switch-off never ran its revoke hook")
+			}
 		}
 	}
+	release := holdHooks()
+	defer release()
+	op = switchOff()
 	stopAsked(t, e, "aiapp", op.OpID)
-	txt, isErr, conf = e.tool(t, "stop_op", map[string]any{"id": "aiapp"})
-	rec = hub.OpRecord{}
-	if isErr || conf == "" || json.Unmarshal([]byte(txt), &rec) != nil || !rec.Stopping || rec.Op != "ai" {
-		t.Fatalf("confirmed stop_op of the switch-off = %s %v %q", txt, isErr, conf)
-	}
-	close(gate)
-	released = true
+	release()
 	waitIdle(t, e.s.Hub, "aiapp")
-	v, err := e.s.Hub.InstanceAI("aiapp")
-	if err != nil {
-		t.Fatal(err)
+
+	// A confirmation for operation A, used once A ended and B runs:
+	// refused, B untouched.
+	opOK(t, e.hub, "PUT", "/api/instances/aiapp/ai", `{"companions":{"tok":{"enabled":true}}}`)
+	release = holdHooks()
+	defer release()
+	a := switchOff()
+	args := map[string]any{"id": "aiapp", "op_id": a.OpID}
+	txt, _ = resultText(e.call(t, "/mcp/admin", "root", "2025-11-25", "stop_op", args, nil))
+	m := confirmTextRe.FindStringSubmatch(txt)
+	if m == nil {
+		t.Fatalf("stop_op of the switch-off = %s", txt)
 	}
-	for _, c := range v.Companions {
-		if c.Name == "tok" && (!c.Enabled || c.Mode != "read_write") {
-			t.Errorf("tok after the stopped switch-off = %+v", c)
-		}
+	e.decide(t, m[1], "aiapp", true)
+	release()
+	waitIdle(t, e.s.Hub, "aiapp")
+	b := startDisable()
+	txt, isErr = resultText(e.call(t, "/mcp/admin", "root", "2025-11-25", "stop_op", args, nil))
+	if !isErr || !strings.HasPrefix(txt, "409: {") || !strings.Contains(txt, b.OpID) {
+		t.Errorf("A's confirmation used on B = %s %v", txt, isErr)
+	}
+	if r := e.s.Hub.LastOp("aiapp"); !r.Running || r.Stopping || r.OpID != b.OpID {
+		t.Fatalf("B stopped by A's confirmation: %+v", r)
 	}
 
 	// The admin's HTTP Stop of a disable: no confirmation, 202.
-	br.arm()
-	if code, b := e.do(t, "root", "POST", "/api/templates/disable", `{"id":"aiapp"}`); code != 202 {
-		t.Fatalf("disable = %d %s", code, b)
-	}
-	waitDown()
 	if code, b := e.do(t, "root", "POST", "/api/instances/aiapp/op/stop", `{}`); code != 202 || !strings.Contains(b, `"stopping":true`) {
 		t.Errorf("HTTP stop = %d %s", code, b)
 	}
@@ -529,5 +557,48 @@ func TestStopOpClassFollowsTheUndo(t *testing.T) {
 	waitIdle(t, e.s.Hub, "aiapp")
 	if !e.s.Hub.IsEnabled("aiapp") {
 		t.Error("the stopped disable left aiapp disabled")
+	}
+}
+
+// undoClass per operation (Task 7 security review): what the undo turns
+// back on decides; cloud is public by default (its enable is D), secretapp
+// isn't (W).
+func TestStopUndoClass(t *testing.T) {
+	e := newToolEnv(t, nil, nil)
+	ctx := withCallMemo(context.Background(), &directory.Caller{User: "root", Admin: true})
+	before := func(kv ...string) map[string]string {
+		m := map[string]string{}
+		for i := 0; i+1 < len(kv); i += 2 {
+			m[kv[i]] = kv[i+1]
+		}
+		return m
+	}
+	for _, c := range []struct {
+		name, id string
+		rec      *hub.OpRecord
+		want     ToolClass
+	}{
+		{"no record", "cloud", nil, ClassWrite},
+		{"enable", "cloud", &hub.OpRecord{Op: hub.OpEnable}, ClassWrite},
+		{"restart", "cloud", &hub.OpRecord{Op: hub.OpRestart, Before: before("running", "true")}, ClassWrite},
+		{"backup", "cloud", &hub.OpRecord{Op: hub.OpBackup, Before: before("running", "true")}, ClassWrite},
+		{"create", "cloud", &hub.OpRecord{Op: hub.OpCreate}, ClassWrite},
+		{"disable, public app", "cloud", &hub.OpRecord{Op: hub.OpDisable}, ClassDestructive},
+		{"disable, plain app", "secretapp", &hub.OpRecord{Op: hub.OpDisable}, ClassWrite},
+		{"delete of an enabled public app", "cloud", &hub.OpRecord{Op: hub.OpDelete, Before: before(hub.BeforeEnabled, "true")}, ClassDestructive},
+		{"delete, Before not written yet", "cloud", &hub.OpRecord{Op: hub.OpDelete}, ClassDestructive},
+		{"delete of a disabled app", "cloud", &hub.OpRecord{Op: hub.OpDelete, Before: before(hub.BeforeEnabled, "false")}, ClassWrite},
+		{"restore of an enabled app", "secretapp", &hub.OpRecord{Op: hub.OpRestore, Before: before(hub.BeforeEnabled, "true")}, ClassDestructive},
+		{"restore, rollback armed", "secretapp", &hub.OpRecord{Op: hub.OpRestore, Before: before(hub.BeforeEnabled, "false", hub.BeforeRestoring, "true")}, ClassDestructive},
+		{"restore, Before not written yet", "secretapp", &hub.OpRecord{Op: hub.OpRestore}, ClassDestructive},
+		{"restore of a disabled app", "secretapp", &hub.OpRecord{Op: hub.OpRestore, Before: before(hub.BeforeEnabled, "false")}, ClassWrite},
+		{"restore into a new id", "secretapp", &hub.OpRecord{Op: hub.OpRestore, Before: before(hub.BeforeNewID, "true", hub.BeforeEnabled, "true")}, ClassWrite},
+		{"AI switch-off", "aiapp", &hub.OpRecord{Op: hub.OpAI, Before: before(hub.BeforeCompanion+"tok", "on read_only")}, ClassDestructive},
+		{"AI switch-on", "aiapp", &hub.OpRecord{Op: hub.OpAI, Before: before(hub.BeforeCompanion+"tok", "off read_write")}, ClassWrite},
+		{"AI, unreadable entry", "aiapp", &hub.OpRecord{Op: hub.OpAI, Before: before(hub.BeforeCompanion+"tok", "?")}, ClassDestructive},
+	} {
+		if got := e.s.undoClass(ctx, c.id, c.rec); got != c.want {
+			t.Errorf("%s: %s, want %s", c.name, got, c.want)
+		}
 	}
 }

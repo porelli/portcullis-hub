@@ -631,6 +631,11 @@ func (h *Hub) undoRestart(id string, p *Progress) error {
 const (
 	BeforeEnabled   = beforeEnabled
 	BeforeCompanion = aiBeforeKey
+	// A restore's: restoring "true" once state.yaml says so (a Stop rolls
+	// back from the pre-restore backup), new_id "true" for a restore into
+	// a new id (a Stop only removes it).
+	BeforeRestoring = beforeRestoring
+	BeforeNewID     = beforeNewID
 )
 
 // aiBeforeKey prefixes an AI switch's Before entries: one per companion
@@ -813,6 +818,22 @@ func (h *Hub) undoerFor(op string) func(id string, p *Progress) error {
 // is audited <op>.stop: target id, detail the running step's key, actor
 // the stopping admin (via / client kept), result ok or refused.
 func (h *Hub) StopOp(id string, actor directory.Actor) (*OpRecord, error) {
+	return h.StopOpExpect(id, actor, "")
+}
+
+// ErrOpChanged: a Stop meant for one operation (StopOpExpect) found
+// another as the instance's operation.
+var ErrOpChanged = statusErr(409, "the operation changed, ask again")
+
+// StopOpExpect is StopOp of operation expectedOpID only ("" = whatever
+// runs: the HTTP route): the instance's record must be that operation's —
+// checked first, again under the running operation's p.mu before it is
+// cancelled (cancelOpExpect) and under the instance's lock before an undo
+// starts from the record (resumeStop) — else 409 ErrOpChanged with the
+// current record, nothing stopped (audited <op>.stop refused). The
+// Portcullis MCP's stop_op passes the op id its class and confirmation
+// were for.
+func (h *Hub) StopOpExpect(id string, actor directory.Actor, expectedOpID string) (*OpRecord, error) {
 	var rec *OpRecord
 	err := statusErr(404, "app instance not found: %s", id)
 	if templates.ValidID(id) && h.Template(id) != nil {
@@ -825,12 +846,16 @@ func (h *Hub) StopOp(id string, actor directory.Actor) (*OpRecord, error) {
 		return nil, err
 	}
 	detail := stopDetail(*rec)
-	out, err := h.stopOp(id, *rec, actor)
+	if expectedOpID != "" && rec.OpID != expectedOpID {
+		h.auditOp(actor, rec.Op+".stop", id, detail, ErrOpChanged)
+		return rec, ErrOpChanged
+	}
+	out, err := h.stopOp(id, *rec, actor, expectedOpID)
 	h.auditOp(actor, rec.Op+".stop", id, detail, err)
 	return out, err
 }
 
-func (h *Hub) stopOp(id string, rec OpRecord, actor directory.Actor) (*OpRecord, error) {
+func (h *Hub) stopOp(id string, rec OpRecord, actor directory.Actor, expectedOpID string) (*OpRecord, error) {
 	if strings.TrimSpace(actor.User) == "" {
 		return &rec, statusErr(401, "no acting user")
 	}
@@ -843,7 +868,7 @@ func (h *Hub) stopOp(id string, rec OpRecord, actor directory.Actor) (*OpRecord,
 		}
 	}
 	if rec.Running {
-		if err := h.cancelOp(id, actor); err != nil {
+		if err := h.cancelOpExpect(id, actor, expectedOpID); err != nil {
 			return h.LastOp(id), err
 		}
 		return h.LastOp(id), nil

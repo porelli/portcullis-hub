@@ -380,16 +380,7 @@ func (s *Server) registerAdminTools() {
 		// an enabled instance enables it again. Those take the class the
 		// direct tool would (enable_instance, set_ai_support / set_ai_mode);
 		// every other undo is W (stopClass).
-		perCallCtx(admin("stop_op", "Stop an instance's running operation and undo what it did (an enable's containers, volumes, sign-in clients and groups it created; a disable turns the app back on; …). Answers the record (stopping: true); poll with wait_for_op. Pass op_id (from get_op) to stop only that operation. Refused (409, with the record) when nothing runs, the operation is already stopping, or a delete is past its point of no return. Stopping a disable, a delete of an enabled instance or an AI switch-off can need your confirmation in the browser (the undo turns things back on).",
-			ClassWrite, "POST /api/instances/{id}/op/stop", "op.stop", func(ctx context.Context, a directory.Actor, in stopArgs) (any, error) {
-				if err := instanceIDOK(in.ID); err != nil {
-					return nil, err
-				}
-				if err := s.stopStillAsClassified(ctx, in); err != nil {
-					return nil, err
-				}
-				return s.stopOp(a, in.ID)
-			}), s.stopClass, idOf, s.stopConsequences),
+		s.stopOpTool(),
 		{Name: "delete_instance", Description: "Delete an instance for good: a backup is taken first, then its containers, volumes, Keycloak clients and own groups go. Runs in the background: answers {op_id, op, instance, poll}; see wait_for_op.",
 			Class: ClassDestructive, Scope: ScopeAdmin, Twin: "DELETE /api/instances/{id}", Audit: "instance.delete", In: idArgs{},
 			Typed: idOf,
@@ -1050,26 +1041,53 @@ type stopArgs struct {
 	OpID string `json:"op_id,omitempty" jsonschema:"the operation to stop (get_op's op_id): refused when another one is the instance's now"`
 }
 
-// errOpChanged: the instance's operation isn't the one the call was
-// classified (and possibly confirmed) for.
-var errOpChanged = &hub.StatusError{Status: http.StatusConflict, Err: errors.New("the operation changed, ask again")}
+// stopOpTool is stop_op, D or W per call (security review of Task 7):
+// a Stop reverses what the running operation did, and some undos turn
+// things back on — stopping a disable enables the app again, stopping a
+// delete or a same-instance restore of an enabled instance brings it back
+// as it was, stopping an AI switch-off switches the companion back on.
+// Those take the class the direct tool would (stopClass) and need op_id:
+// the confirmation's arguments name the operation, and the Hub stops only
+// that one (StopOpExpect). Every other undo is W, bound to the operation
+// its class was judged on.
+func (s *Server) stopOpTool() Tool {
+	t := perCallCtx(admin("stop_op", "Stop an instance's running operation and undo what it did (an enable's containers, volumes, sign-in clients and groups it created; a disable turns the app back on; …). Answers the record (stopping: true); poll with wait_for_op. op_id (from get_op) stops only that operation; it is required when the undo turns something back on (a disable, a delete or restore of an enabled instance, an AI switch-off), which needs your confirmation in the browser. Refused (409, with the record) when nothing runs, the operation is already stopping or changed, or a delete is past its point of no return.",
+		ClassWrite, "POST /api/instances/{id}/op/stop", "op.stop", func(ctx context.Context, a directory.Actor, in stopArgs) (any, error) {
+			if err := instanceIDOK(in.ID); err != nil {
+				return nil, err
+			}
+			expected, err := s.stopExpected(ctx, in)
+			if err != nil {
+				return nil, err
+			}
+			return s.stopOp(a, in.ID, expected)
+		}), s.stopClass, idOf, s.stopConsequences)
+	t.Precheck = func(ctx context.Context, _ *directory.Caller, args json.RawMessage) error {
+		a, err := decode[stopArgs](args)
+		if err == nil && a.OpID == "" && s.stopClass(ctx, args) == ClassDestructive {
+			return badArg("stopping this operation turns something back on: pass its op_id (from get_op), so the confirmation names that operation")
+		}
+		return nil
+	}
+	return t
+}
+
+// opNone is an expected op id no operation has: the class judged "no
+// record", so any operation found by then is another.
+const opNone = "-"
 
 // stopClass is stop_op's class: the class of what the undo of the
-// instance's current operation turns on — a disable's undo enables the
-// app (enableClass), a delete's of an instance that was (or may have
-// been) enabled too, an AI switch's switches each companion back to its
-// Before {enabled, mode} (back on: D, as set_ai_support on is); anything
-// else W. Arguments that don't decode, or an op_id that isn't the
-// current operation's, D (fail closed: Run refuses the latter). The
-// operation it judged is kept in the call memo: Run refuses another
-// (stopStillAsClassified).
+// instance's current operation turns on (undoClass). Arguments that
+// don't decode, or an op_id that isn't the current operation's, D (fail
+// closed: the Hub refuses the latter). The operation it judged is kept
+// in the call memo: Run stops only that one (stopExpected).
 func (s *Server) stopClass(ctx context.Context, args json.RawMessage) ToolClass {
 	a, err := decode[stopArgs](args)
 	if err != nil || instanceIDOK(a.ID) != nil {
 		return ClassDestructive
 	}
 	rec := s.Hub.LastOp(a.ID)
-	opID := ""
+	opID := opNone
 	if rec != nil {
 		opID = rec.OpID
 	}
@@ -1083,7 +1101,20 @@ func (s *Server) stopClass(ctx context.Context, args json.RawMessage) ToolClass 
 }
 
 // undoClass is the class of what a Stop of rec would turn back on (nil:
-// no record, nothing to undo: W).
+// no record, nothing to undo: W):
+//   - disable: the app enabled again — enable_instance's class;
+//   - delete: cancelled, the app as before — enable_instance's class
+//     unless Before says it wasn't enabled;
+//   - restore into the same instance: rolled back from the pre-restore
+//     backup — enabled app, AI companions, policy and public access as
+//     they were — D when it was (or may have been) enabled or the
+//     rollback is armed (restoring); a restore into a new id only removes
+//     it: W;
+//   - AI switch: each companion back to its Before {enabled, mode} — D
+//     when one goes back on (set_ai_support on), W when all go back off;
+//   - everything else W: an enable's, a create's and a restore-as's undo
+//     remove what they made, a restart's and a backup's start only what
+//     was running.
 func (s *Server) undoClass(ctx context.Context, id string, rec *hub.OpRecord) ToolClass {
 	if rec == nil {
 		return ClassWrite
@@ -1096,6 +1127,14 @@ func (s *Server) undoClass(ctx context.Context, id string, rec *hub.OpRecord) To
 			return ClassWrite
 		}
 		return s.enableClass(ctx, idArgsJSON(id))
+	case hub.OpRestore:
+		switch {
+		case rec.Before[hub.BeforeNewID] == "true":
+			return ClassWrite
+		case rec.Before[hub.BeforeEnabled] == "false" && rec.Before[hub.BeforeRestoring] == "":
+			return ClassWrite
+		}
+		return ClassDestructive
 	case hub.OpAI:
 		for k, v := range rec.Before {
 			if strings.HasPrefix(k, hub.BeforeCompanion) && !strings.HasPrefix(v, "off ") {
@@ -1106,28 +1145,24 @@ func (s *Server) undoClass(ctx context.Context, id string, rec *hub.OpRecord) To
 	return ClassWrite
 }
 
-// stopStillAsClassified (Run): the instance's operation is still the one
-// stopClass judged — and op_id's, when given — and its undo needs no
-// more than the call got (a D undo without a confirmation is refused):
-// else 409 "the operation changed, ask again".
-func (s *Server) stopStillAsClassified(ctx context.Context, a stopArgs) error {
-	rec := s.Hub.LastOp(a.ID)
-	opID := ""
-	if rec != nil {
-		opID = rec.OpID
-	}
+// stopExpected (Run) is the op id stop_op stops: op_id when given, else
+// the one its class judged (opNone: none) — the Hub refuses any other
+// (ErrOpChanged). A D undo the call has no confirmation for is refused
+// at once.
+func (s *Server) stopExpected(ctx context.Context, a stopArgs) (string, error) {
 	m := memoOf(ctx)
-	if m == nil || a.OpID != "" && a.OpID != opID {
-		return errOpChanged
+	if m == nil {
+		return "", hub.ErrOpChanged
 	}
-	m.stopOnce.Do(func() { m.stopOpID = "\x00unclassified" })
-	if m.stopOpID != opID {
-		return errOpChanged
+	m.stopOnce.Do(func() { m.stopOpID = opNone })
+	expected := a.OpID
+	if expected == "" {
+		expected = m.stopOpID
 	}
-	if s.undoClass(ctx, a.ID, rec) == ClassDestructive && confirmationID(ctx) == "" {
-		return errOpChanged
+	if s.undoClass(ctx, a.ID, s.Hub.LastOp(a.ID)) == ClassDestructive && confirmationID(ctx) == "" {
+		return "", hub.ErrOpChanged
 	}
-	return nil
+	return expected, nil
 }
 
 func idArgsJSON(id string) json.RawMessage {
@@ -1150,6 +1185,10 @@ func (s *Server) stopConsequences(ctx context.Context, args json.RawMessage) []s
 	case hub.OpDelete:
 		if rec.Before[hub.BeforeEnabled] != "false" {
 			return append([]string{head + ": the delete is cancelled and " + a.ID + " is turned back on."}, s.enableConsequences(ctx, idArgsJSON(a.ID))...)
+		}
+	case hub.OpRestore:
+		if rec.Before[hub.BeforeNewID] != "true" {
+			return []string{head + ": " + a.ID + " is rolled back from its pre-restore backup — its data, settings, sign-in and public access, AI support and, if it was running, the app itself come back as they were before the restore."}
 		}
 	case hub.OpAI:
 		var lines []string

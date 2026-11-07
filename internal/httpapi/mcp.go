@@ -877,7 +877,7 @@ type callMemo struct {
 	doc     *doctor.Report
 	docErr  error
 	// stop_op: the op id of the record its class judged ("" none), so
-	// Run refuses another operation (stopStillAsClassified).
+	// Run stops only that one (stopExpected, Hub.StopOpExpect).
 	stopOnce sync.Once
 	stopOpID string
 }

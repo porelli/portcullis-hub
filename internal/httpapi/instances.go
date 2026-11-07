@@ -466,7 +466,7 @@ func (s *Server) handleStopOp(w http.ResponseWriter, r *http.Request) {
 	if !decodeStrict(w, r, &b, `{}`) {
 		return
 	}
-	rec, err := s.stopOp(requestActor(r), id)
+	rec, err := s.stopOp(requestActor(r), id, "")
 	noStore(w)
 	if err != nil {
 		writeErr(w, err, http.StatusInternalServerError)
@@ -475,11 +475,15 @@ func (s *Server) handleStopOp(w http.ResponseWriter, r *http.Request) {
 	writeJSONStatus(w, http.StatusAccepted, rec)
 }
 
-// stopOp is the Stop's work (route and stop_op): a 409 refusal carries
-// the current record (recordError: the body / the tool error's JSON).
-func (s *Server) stopOp(a directory.Actor, id string) (*hub.OpRecord, error) {
+// stopOp is the Stop's work (route and stop_op): expectedOpID "" stops
+// whatever runs (the route), else only that operation (stop_op: the one
+// its class and confirmation were for; another is 409 "the operation
+// changed", judged by the Hub under the operation's lock). A 409 refusal
+// carries the current record (recordError: the body / the tool error's
+// JSON).
+func (s *Server) stopOp(a directory.Actor, id, expectedOpID string) (*hub.OpRecord, error) {
 	s.rec("StopOp", id)
-	rec, err := s.Hub.StopOp(id, a)
+	rec, err := s.Hub.StopOpExpect(id, a, expectedOpID)
 	if err != nil {
 		if rec != nil && errStatus(err, http.StatusInternalServerError) == http.StatusConflict {
 			return nil, &recordError{err: err, rec: rec}

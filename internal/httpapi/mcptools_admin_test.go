@@ -386,11 +386,14 @@ func TestAdminToolsSameAsHTTP(t *testing.T) {
 		// stop_op is D when the undo turns something back on (Task 7
 		// security review): cloud's last op is a disable, whose undo
 		// would enable it with its public paths open. Nothing runs: 409
-		// on both, after the confirmation.
+		// on both, after the confirmation (a D stop names its op_id).
 		{tool: "disable_instance", args: map[string]any{"id": "cloud"},
 			method: "POST", path: "/api/templates/disable", body: `{"id":"cloud"}`, instance: "cloud"},
-		{tool: "stop_op", args: map[string]any{"id": "cloud"},
-			method: "POST", path: "/api/instances/cloud/op/stop", body: `{}`, instance: "cloud"},
+		{tool: "stop_op", args: map[string]any{"id": "cloud", "op_id": "{{op}}"},
+			method: "POST", path: "/api/instances/cloud/op/stop", body: `{}`, instance: "cloud",
+			vars: func(_ *testing.T, e *toolEnv) map[string]string {
+				return map[string]string{"op": e.s.Hub.LastOp("cloud").OpID}
+			}},
 		{tool: "set_policy", args: map[string]any{"id": "secretapp", "policy": map[string]any{"factors": []string{"webauthn"}, "op": "any"}},
 			method: "PUT", path: "/api/instances/secretapp/settings", body: `{"auth_policy":{"factors":["webauthn"],"op":"any"}}`},
 		{tool: "set_policy", args: map[string]any{"id": "secretapp", "policy": map[string]any{"factors": []string{"password"}, "op": "any"}},
