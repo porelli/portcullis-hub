@@ -240,6 +240,20 @@ func (h *Hub) finishOpGuarded(id, op string, err error, rolledBack, keepRunning 
 	r := h.opRecordOf(id, op, err, rolledBack)
 	h.opsMu.Lock()
 	if cur := h.ops[id]; keepRunning && cur.Running {
+		// A hook's outcome under a running operation's record is held
+		// and written once that operation ended ok (heldHook,
+		// finishAsync): a failed start hook still becomes the instance's
+		// record, as startHookFailed keeps it for a synchronous one.
+		if op == OpHook {
+			if err != nil {
+				if h.heldHook == nil {
+					h.heldHook = map[string]OpRecord{}
+				}
+				h.heldHook[id] = r
+			} else {
+				delete(h.heldHook, id)
+			}
+		}
 		h.opsMu.Unlock()
 		log.Printf("ops: %s %s not recorded: %s is running (%s)", op, id, cur.Op, r.Error)
 		if err == nil {

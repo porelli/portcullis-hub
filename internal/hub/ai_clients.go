@@ -92,7 +92,7 @@ func (h *Hub) syncAIClients(ctx context.Context) (changed bool, err error) {
 				OfflineMax:     time.Duration(a.OfflineMaxDays) * 24 * time.Hour,
 				Owner:          keycloak.AIOwner,
 			}
-			cerr = kc.EnsureAIClient(ctx, spec)
+			_, cerr = kc.EnsureAIClient(ctx, spec)
 			health[w.id] = cerr == nil
 			if cerr != nil {
 				cerr = fmt.Errorf("Keycloak: AI client %s: %w", w.id, cerr)
@@ -118,7 +118,7 @@ func (h *Hub) syncAIClients(ctx context.Context) (changed bool, err error) {
 			health[id] = false
 			continue
 		}
-		cerr := kc.EnsureAIClient(ctx, h.instanceAIClientSpec(&w.t, w.c, a))
+		_, cerr := kc.EnsureAIClient(ctx, h.instanceAIClientSpec(&w.t, w.c, a))
 		health[id] = cerr == nil
 		if cerr != nil {
 			cerr = fmt.Errorf("Keycloak: AI client %s of %s: %w", id, w.t.ID, cerr)

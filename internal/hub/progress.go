@@ -102,6 +102,9 @@ type Progress struct {
 	// stopper: the admin whose Stop was accepted (cancelOp; with via /
 	// client) — the undo acts as them (an enable's undo:groups).
 	stopper directory.Actor
+	// finishing: the operation passed its commit gate (CloseStop): a Stop
+	// is refused "finishing" from then on.
+	finishing bool
 	// The percent throttle.
 	lastWrite  time.Time
 	dirty      bool
@@ -199,7 +202,10 @@ func (p *Progress) Start(key string) {
 	}
 	p.mu.Lock()
 	s := p.stepLocked(key, true)
-	if !frozen(s) {
+	// While a Stop's undo runs, no forward step starts any more (only
+	// the undo's own steps).
+	idle := p.rec.Stopping && s.State == StepWaiting && !strings.HasPrefix(key, UndoPrefix)
+	if !frozen(s) && !idle {
 		t := p.now()
 		s.State, s.StartedAt, s.EndedAt, s.Percent, s.Detail = StepRunning, &t, nil, nil, ""
 		p.writeLocked()
@@ -405,6 +411,29 @@ func (p *Progress) NoReturn() {
 	}
 	p.rec.PointOfNoReturn, p.rec.Stoppable = true, false
 	p.writeLocked()
+}
+
+// CloseStop is the commit gate of an operation that can't be undone
+// once it commits (an enable's commit): false when a Stop was accepted
+// first (the caller runs the undo instead of committing); else the
+// operation is no longer stoppable (stoppable false, written) and a
+// Stop is refused 409 "finishing" — atomically with cancelOp, under
+// p.mu. Idempotent; a nil reporter (no Stop possible) is true.
+func (p *Progress) CloseStop() bool {
+	if p == nil {
+		return true
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.rec.Stopping {
+		return false
+	}
+	if !p.finishing {
+		p.finishing = true
+		p.rec.Stoppable = false
+		p.writeLocked()
+	}
+	return true
 }
 
 // Stopping: a Stop was accepted (the operation runs its undo).
@@ -633,6 +662,8 @@ func (h *Hub) cancelOp(id string, actor directory.Actor) error {
 		return statusErr(409, "no operation is running on %s", id)
 	case p.rec.Stopping:
 		return statusErr(409, "the %s of %s is already stopping", p.op, id)
+	case p.finishing:
+		return statusErr(409, "the %s of %s is finishing — it can no longer be stopped", p.op, id)
 	case p.rec.PointOfNoReturn:
 		return statusErr(409, "the %s of %s is past the point of no return — finishing", p.op, id)
 	case !p.rec.Stoppable:

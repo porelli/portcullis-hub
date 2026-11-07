@@ -57,7 +57,7 @@ type AIKeycloak interface {
 	EnsureMCPScope(ctx context.Context, s keycloak.MCPScope) error
 	DeleteMCPScope(ctx context.Context, name string) error
 	SetOptionalScopes(ctx context.Context, clientID string, scopes []string) error
-	EnsureAIClient(ctx context.Context, s keycloak.AIClientSpec) error
+	EnsureAIClient(ctx context.Context, s keycloak.AIClientSpec) (created bool, err error)
 	DeleteAIClient(ctx context.Context, clientID, owner string) error
 	// MCPScopeNames lists the realm's mcp:* scopes (a delete's
 	// prefix sweep, Task 15).

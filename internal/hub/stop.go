@@ -128,7 +128,10 @@ func (h *Hub) runEnable(ctx context.Context, id string, actor directory.Actor, r
 	ready()
 	p := progressFrom(ctx)
 	rolledBack, err := h.enableSteps(ctx, p, id, actor, todo, res)
-	if err == nil {
+	// An enable that commits closed stopping at its gate (enableInner);
+	// one with nothing to commit (enabled already) closes it here: a Stop
+	// accepted before is undone, none is accepted after.
+	if err == nil && p.CloseStop() {
 		return res, nil
 	}
 	if p.Stopping() {
@@ -243,9 +246,41 @@ func (h *Hub) volumeSet(ctx context.Context, id string) (map[string]bool, error)
 	return out, nil
 }
 
+// recordExpectedVolumes writes into p's ledger, before compose create,
+// every named volume of t's rendered project (loadRendered: not
+// external, not the Hub's secrets volume) that isn't in before. A
+// project that doesn't load is logged: the after-listing
+// (recordCreatedVolumes) still records what the create made.
+func (h *Hub) recordExpectedVolumes(ctx context.Context, p *Progress, t *templates.Template, before map[string]bool) {
+	proj, err := loadRendered(ctx, h.project(t), h.cfg.ProjectDir)
+	if err != nil {
+		log.Printf("instance %s: the project's volumes could not be read before the create (%v): only the ones listed after it are recorded", t.ID, clip(h.secretRedactor(t.ID)(err.Error()), 300))
+		return
+	}
+	var names []string
+	for key, v := range proj.Volumes {
+		if bool(v.External) {
+			continue
+		}
+		name := v.Name
+		if name == "" {
+			name = proj.Name + "_" + key
+		}
+		if name != h.cfg.SecretsVolume && !before[name] {
+			names = append(names, name)
+		}
+	}
+	slices.Sort(names)
+	for _, v := range names {
+		p.Created(CreatedVolumes, v)
+	}
+}
+
 // recordCreatedVolumes writes into p's ledger every volume of id's
-// project that wasn't in before (the create made it). Listing them
-// failing is a warning: those volumes are then not the operation's.
+// project that wasn't in before (the create made it): the
+// reconciliation of recordExpectedVolumes (a volume compose makes under
+// another name is added; an expected one it didn't make stays — undo
+// treats it as removed). Listing them failing is a warning.
 func (h *Hub) recordCreatedVolumes(ctx context.Context, p *Progress, id string, before map[string]bool) {
 	after, err := h.volumeSet(ctx, id)
 	if err != nil {
@@ -349,11 +384,17 @@ func (h *Hub) undoEnable(id string, p *Progress) error {
 					continue // gone already (a retry)
 				}
 				w, err := groupsAPI.DeleteInstanceGroup(ctx, stopper, g)
-				for _, x := range w {
-					p.Warn(x)
-				}
 				if err != nil {
 					return fmt.Errorf("deleting group %s as %s: %w", g, stopper.User, err)
+				}
+				for _, x := range w {
+					// Kept because Users & Groups didn't answer: not
+					// done (Stop again retries); kept because it is
+					// protected or shared: done, with the warning.
+					if directory.KeptUnavailable(x) {
+						return statusErr(503, "%s", x)
+					}
+					p.Warn(x)
 				}
 			}
 			return nil
@@ -378,9 +419,11 @@ func (h *Hub) undoEnable(id string, p *Progress) error {
 			}
 		}
 	}
-	// Not enabled, as before (an enable interrupted after its commit).
+	// Not enabled, as before: only an enable that may have committed (its
+	// settings step ran, then the Hub stopped) — never an instance that
+	// was enabled already (its enable planned no start steps).
 	h.mu.Lock()
-	wasEnabled := h.st.IsEnabled(id)
+	wasEnabled := ran(StepSettings) && h.st.IsEnabled(id)
 	if wasEnabled {
 		h.st.SetEnabled(id, false)
 		h.rebuildLocked()
@@ -434,9 +477,37 @@ func (h *Hub) undoKeycloak(ctx context.Context, p *Progress, id string, t *templ
 	if t != nil {
 		hosts = instanceHosts(t)
 	}
+	var aiClient string
+	if t != nil {
+		if c := instanceAIClient(t); c != nil {
+			aiClient = c.ClientID
+		}
+	}
 	for _, c := range clients {
+		// Its access role and flow first (enable's ensureAccess covers
+		// every client of the template, the ai_client too).
 		if err := h.idp.RemoveClientAccess(ctx, c, id, hosts); err != nil {
 			return fmt.Errorf("Keycloak access role of client %s: %w", c, err)
+		}
+		if c == aiClient {
+			// The AI page's ai_client (G10): through the AI client calls,
+			// owner-tagged with the instance only.
+			kc := h.aiKeycloak()
+			if kc == nil {
+				return statusErr(503, "Keycloak's AI client calls are not configured: client %s was not deleted", c)
+			}
+			h.aiKCMu.Lock()
+			err := kc.DeleteAIClient(ctx, c, id)
+			h.aiKCMu.Unlock()
+			var ce *keycloak.ConflictError
+			switch {
+			case errors.As(err, &ce):
+				p.Warn(fmt.Sprintf("Keycloak client %s was kept: it is not tagged as owned by %s", c, id))
+			case err != nil:
+				return fmt.Errorf("deleting Keycloak AI client %s: %w", c, err)
+			}
+			h.forgetAIClientHealth(c)
+			continue
 		}
 		err := h.idp.DeleteClient(ctx, c, id)
 		var ce *keycloak.ConflictError
@@ -552,6 +623,9 @@ func stopDetail(r OpRecord) string {
 // done skipped, then ended as a Stop ends (stopped, or the undo's error
 // and stoppable again). Answers the stopping record.
 func (h *Hub) resumeStop(id string, rec OpRecord, actor directory.Actor, undo func(string, *Progress) error) (*OpRecord, error) {
+	if h.testHookResume != nil {
+		h.testHookResume(id)
+	}
 	unlock, err := h.lockApp(id)
 	if err != nil {
 		berr := h.busyErr(id, err)
@@ -561,6 +635,21 @@ func (h *Hub) resumeStop(id string, rec OpRecord, actor directory.Actor, undo fu
 		}
 		return &rec, berr
 	}
+	// The record StopOp judged may be stale (another Stop, or another
+	// operation, ran in between): only that same record, still ended,
+	// stoppable and not stopping, is undone.
+	cur := h.LastOp(id)
+	if cur == nil || cur.OpID != rec.OpID || cur.Running || !cur.Stoppable || cur.Stopping {
+		unlock()
+		if cur == nil {
+			return nil, statusErr(409, "no operation is running on %s", id)
+		}
+		if cur.OpID == rec.OpID && !cur.Running && !cur.Stoppable {
+			return cur, statusErr(409, "no operation is running on %s", id)
+		}
+		return cur, statusErr(409, "the operation of %s changed meanwhile: look again", id)
+	}
+	rec = *cur
 	p := h.newProgress(id, rec.Op, nil)
 	now := p.now()
 	p.mu.Lock()

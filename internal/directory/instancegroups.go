@@ -72,7 +72,7 @@ func (s *Service) DeleteInstanceGroup(ctx context.Context, actor Actor, name str
 		return nil, nil
 	}
 	if aerr := s.LLDAP.Available(); aerr != nil {
-		return []string{fmt.Sprintf("group %s was kept: users & groups is not available (%v) — delete it on the Users & Groups page", name, aerr)}, nil
+		return []string{fmt.Sprintf("group %s was kept: %s (%v) — delete it on the Users & Groups page", name, keptUnavailable, aerr)}, nil
 	}
 	why, err := s.keptGroupReason(name)
 	if err != nil {
@@ -94,6 +94,18 @@ func (s *Service) DeleteInstanceGroup(ctx context.Context, actor Actor, name str
 		warnings = append(warnings, res.Warnings...)
 	}
 	return warnings, err
+}
+
+// keptUnavailable is the reason in DeleteInstanceGroup's warning when
+// Users & Groups didn't answer (KeptUnavailable).
+const keptUnavailable = "users & groups is not available"
+
+// KeptUnavailable: w is DeleteInstanceGroup's warning that it kept the
+// group only because Users & Groups didn't answer — nothing was decided
+// (an enable's Stop retries it), unlike a group kept because it is
+// protected or shared.
+func KeptUnavailable(w string) bool {
+	return strings.Contains(w, " was kept: "+keptUnavailable)
 }
 
 // CreateInstanceGroup creates an instance's (empty, manual) group as

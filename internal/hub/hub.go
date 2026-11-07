@@ -416,6 +416,10 @@ type Hub struct {
 	// holding the instance's lock (composeUp): that operation's success
 	// keeps the hook's failure record (cleared when the lock is released).
 	startHookFailed map[string]bool
+	// heldHook: a hook's failure record held while another operation's
+	// record was running (finishOpGuarded), written by finishAsync once
+	// that operation ended ok; under opsMu.
+	heldHook map[string]OpRecord
 	// opRuns: the stop registry (progress.go) — each running background
 	// operation by its record key, with its reporter and cancel; under
 	// opRunsMu, a leaf lock. progressNow: the reporter's clock (nil:
@@ -426,6 +430,12 @@ type Hub struct {
 	// testHookStepStart, if set, runs at the end of every Progress.Start
 	// (op, step key), without any lock held (tests block a step there).
 	testHookStepStart func(op, key string)
+	// testHookCommit, if set, runs right before ("before") and right
+	// after ("after") an enable's commit gate, no lock held.
+	testHookCommit func(id, stage string)
+	// testHookResume, if set, runs in resumeStop before it takes the
+	// instance's lock (tests interleave a second request there).
+	testHookResume func(id string)
 
 	// Directory publishing (SetDirectory). lastExpiring is the expiring
 	// list last written (guarded by policyWriteMu; nil: not yet known).

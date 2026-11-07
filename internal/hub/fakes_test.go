@@ -83,7 +83,8 @@ func (f *fakeRunner) Create(ctx context.Context, p compose.Project) error {
 	if hook != nil {
 		hook(p.Name)
 	}
-	return nil
+	// Killed while it ran (the hook made what it made): its error.
+	return ctx.Err()
 }
 
 func (f *fakeRunner) Creates() []string {
@@ -447,6 +448,9 @@ type fakeIdP struct {
 	// clients: the clients Keycloak has (RegisterClient adds, DeleteClient
 	// removes); RegisterClient reports created for one not listed.
 	clients map[string]bool
+	// registerHook, if set, runs at the end of RegisterClient (the
+	// client made), without f.mu.
+	registerHook func(clientID string)
 }
 
 func (f *fakeIdP) claimAllCalls() []string {
@@ -709,6 +713,11 @@ func (f *fakeIdP) RegisterClient(ctx context.Context, s keycloak.ClientSpec) (bo
 	}
 	created := !f.clients[s.ClientID]
 	f.clients[s.ClientID] = true
+	if hook := f.registerHook; hook != nil {
+		f.mu.Unlock()
+		hook(s.ClientID)
+		f.mu.Lock()
+	}
 	return created, nil
 }
 
@@ -1187,6 +1196,9 @@ type fakeGroups struct {
 	missingErr error
 	// people, if set, gets the groups created and deleted here.
 	people *fakePeople
+	// delWarn, if set and answering a warning, keeps the group (deletes
+	// nothing) with that warning.
+	delWarn func(name string) string
 }
 
 func (g *fakeGroups) MissingInstanceGroups(ctx context.Context, names []string) ([]string, error) {
@@ -1240,7 +1252,13 @@ func (g *fakeGroups) DeleteInstanceGroup(ctx context.Context, actor directory.Ac
 	if g.delErr != nil {
 		return nil, g.delErr
 	}
+	if g.delWarn != nil {
+		if w := g.delWarn(name); w != "" {
+			return []string{w}, nil
+		}
+	}
 	g.calls = append(g.calls, "-"+name+":"+actor.User)
+	delete(g.existing, name)
 	if g.people != nil {
 		g.people.deleteGroup(name)
 	}

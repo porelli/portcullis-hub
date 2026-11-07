@@ -201,6 +201,10 @@ func (h *Hub) startUp(opCtx context.Context, live *templates.Template) error {
 			if volsBefore, err = h.volumeSet(ctx, live.ID); err != nil {
 				return statusErr(502, "listing the volumes of %s before creating it: %v", projectName(live.ID), err)
 			}
+			// The volumes the create will make, in the ledger before it
+			// runs: a Hub stop mid-create still knows them (undo treats a
+			// volume that doesn't exist as removed).
+			h.recordExpectedVolumes(ctx, p.p, live, volsBefore)
 		}
 		if err := opCtx.Err(); err != nil {
 			return err
@@ -574,7 +578,12 @@ func (h *Hub) enableInner(ctx context.Context, id string, restoring bool) (rolle
 				// The AI page's MCP client goes through the AI client path
 				// (G10): never RegisterClient. A failure leaves it unhealthy
 				// (out of mcp-gate.json's clients), retried by every pass.
-				err = h.ensureInstanceAIClient(context.Background(), &tmpl)
+				var created bool
+				created, err = h.ensureInstanceAIClient(context.Background(), &tmpl)
+				if created {
+					prog.Created(CreatedKeycloakClients, c.ClientID)
+					made = append(made, c.ClientID)
+				}
 			} else {
 				var created bool
 				created, err = h.idp.RegisterClient(context.Background(), h.clientSpec(&tmpl, c, acr))
@@ -639,11 +648,21 @@ func (h *Hub) enableInner(ctx context.Context, id string, restoring bool) (rolle
 		return true, &StatusError{Status: 500, Err: fmt.Errorf("compose up failed: %w — rolled back: its containers and network were removed (volumes kept), the app stays disabled", err)}
 	}
 
-	// Phase 3 (under mu): commit — unless a Stop came first (its undo
-	// takes the started project down; a Stop after this point finds the
-	// operation finished).
+	// Phase 3 (under mu): commit — unless a Stop came first: the commit
+	// gate (CloseStop, atomic with cancelOp) either finds the Stop (its
+	// undo takes the started project down) or closes stopping for good
+	// (a later Stop is refused "finishing").
+	if h.testHookCommit != nil {
+		h.testHookCommit(id, "before")
+	}
+	if !prog.CloseStop() {
+		return false, fmt.Errorf("stopped before the commit: %w", context.Canceled)
+	}
 	if err := ctx.Err(); err != nil {
 		return false, err
+	}
+	if h.testHookCommit != nil {
+		h.testHookCommit(id, "after")
 	}
 	h.mu.Lock()
 	h.st.SetEnabled(id, true)
