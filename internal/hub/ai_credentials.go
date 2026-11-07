@@ -293,6 +293,7 @@ func (h *Hub) clearMintError(id string, c *templates.Companion) {
 type aiRevokeIn struct {
 	Action string   `json:"action"`
 	User   string   `json:"user"`
+	Sub    string   `json:"sub,omitempty"` // app_oauth only: the person's Keycloak user id
 	IDs    []string `json:"ids"`
 }
 

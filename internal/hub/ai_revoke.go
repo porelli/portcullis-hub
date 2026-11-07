@@ -20,6 +20,7 @@ import (
 	"github.com/portcullis/hub/internal/aigate"
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/fsutil"
+	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/lldap"
 	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/state"
@@ -190,8 +191,8 @@ func aiHookExists(t *templates.Template, name string) bool {
 
 // ── hook runs ─────────────────────────────────────────────
 
-// runRevoke runs hook with {"action":"revoke","user","ids"} (ids []
-// for app_oauth: every app-side token the person holds for MCP). Caller
+// runRevoke runs an app_token companion's hook with
+// {"action":"revoke","user","ids"} (app_oauth: runRevokeOAuth). Caller
 // holds the instance's AI lock. The error is the redacted, clipped hook
 // error.
 func (h *Hub) runRevoke(ctx context.Context, t *templates.Template, hook, user string, ids []string) error {
@@ -199,6 +200,24 @@ func (h *Hub) runRevoke(ctx context.Context, t *templates.Template, hook, user s
 		ids = []string{}
 	}
 	stdin, _ := json.Marshal(aiRevokeIn{Action: "revoke", User: user, IDs: ids})
+	out, u := h.runAIHook(ctx, t, hook, stdin)
+	clear(out)
+	if !u.OK {
+		return errors.New(u.Error)
+	}
+	return nil
+}
+
+// runRevokeOAuth runs an app_oauth companion's hook with
+// {"action":"revoke","user","sub","ids":[]} for the person recorded in
+// ref (contract §15.5): sub is their Keycloak user id (oauthSub); without
+// one it fails, nothing runs.
+func (h *Hub) runRevokeOAuth(ctx context.Context, t *templates.Template, ref, hook, user string) error {
+	sub, err := h.oauthSub(ctx, ref, user)
+	if err != nil {
+		return err
+	}
+	stdin, _ := json.Marshal(aiRevokeIn{Action: "revoke", User: user, Sub: sub, IDs: []string{}})
 	out, u := h.runAIHook(ctx, t, hook, stdin)
 	clear(out)
 	if !u.OK {
@@ -354,7 +373,7 @@ func (h *Hub) RevokeAICredentials(ctx context.Context, instance, companion, user
 		return nil
 	}
 	if oauth {
-		err := h.runRevoke(ctx, t, hook, user, nil)
+		err := h.runRevokeOAuth(ctx, t, instance+"/"+companion, hook, user)
 		if err == nil {
 			err = h.oauthSeenRemove(instance+"/"+companion, user)
 		}
@@ -545,6 +564,47 @@ func (h *Hub) pruneAI(restartNow bool) {
 		}
 	}
 	h.TriggerAIReconcile()
+}
+
+// recordOAuthSubs stores the Keycloak id of every recorded holder of
+// each ref who has none yet (looked up by exact username, outside mu). A
+// failed lookup is logged and retried at the next pass; the revoke looks
+// it up again if it is still missing then.
+func (h *Hub) recordOAuthSubs(ctx context.Context, holders map[string][]string) {
+	if len(holders) == 0 {
+		return
+	}
+	aiStoreMu.Lock()
+	f, err := h.oauthSeenFileLocked()
+	aiStoreMu.Unlock()
+	if err != nil {
+		return
+	}
+	found := map[string]string{} // one lookup per person per pass
+	for _, ref := range slices.Sorted(maps.Keys(holders)) {
+		subs := map[string]string{}
+		for _, u := range holders[ref] {
+			if !slices.Contains(f.Companions[ref], u) || f.Subs[ref][u] != "" {
+				continue
+			}
+			sub, ok := found[u]
+			if !ok {
+				var err error
+				if sub, err = h.lookupSub(ctx, u); err != nil {
+					log.Printf("ai: %s: looking up the Keycloak id of %s failed (retried): %v", ref, u, err)
+				}
+				found[u] = sub
+			}
+			if sub != "" {
+				subs[u] = sub
+			}
+		}
+		if len(subs) > 0 {
+			if err := h.oauthSeenSetSubs(ref, subs); err != nil {
+				log.Printf("ai: storing Keycloak ids for %s failed: %v", ref, err)
+			}
+		}
+	}
 }
 
 // revokePruned runs the revoke_all every Pruned companion owes, with the
@@ -964,10 +1024,15 @@ func (h *Hub) writeAIStore(name string, v any) error {
 
 // oauthSeenFile is <data>/ai/oauth-seen.json: per app_oauth companion
 // ("<instance>/<companion>") the people who were in its population while
-// AI was on (who may hold app-side MCP tokens), sorted.
+// AI was on (who may hold app-side MCP tokens), sorted; Subs keeps each
+// recorded person's Keycloak user id (ref → user → id), looked up when
+// they are recorded: the app_oauth revoke's "sub" (contract §15.5), which
+// the app matches its accounts by, still known once the person is gone
+// from LLDAP and Keycloak.
 type oauthSeenFile struct {
-	Version    int                 `json:"version"`
-	Companions map[string][]string `json:"companions"`
+	Version    int                          `json:"version"`
+	Companions map[string][]string          `json:"companions"`
+	Subs       map[string]map[string]string `json:"subs,omitempty"`
 }
 
 const oauthSeenName = "oauth-seen.json"
@@ -975,32 +1040,41 @@ const oauthSeenName = "oauth-seen.json"
 func (h *Hub) oauthSeen() (map[string][]string, error) {
 	aiStoreMu.Lock()
 	defer aiStoreMu.Unlock()
-	return h.oauthSeenLocked()
+	f, err := h.oauthSeenFileLocked()
+	return f.Companions, err
 }
 
-func (h *Hub) oauthSeenLocked() (map[string][]string, error) {
+func (h *Hub) oauthSeenFileLocked() (oauthSeenFile, error) {
 	f := oauthSeenFile{Version: 1, Companions: map[string][]string{}}
 	if err := h.readAIStore(oauthSeenName, &f); err != nil {
-		return nil, err
+		return oauthSeenFile{}, err
 	}
 	if f.Companions == nil {
 		f.Companions = map[string][]string{}
 	}
-	return f.Companions, nil
+	if f.Subs == nil {
+		f.Subs = map[string]map[string]string{}
+	}
+	return f, nil
 }
 
 // oauthSeenUpdate applies fn to the record and writes it when fn reports
-// a change.
+// a change. The Keycloak ids of people no longer recorded go with them.
 func (h *Hub) oauthSeenUpdate(fn func(map[string][]string) bool) error {
+	return h.oauthSeenUpdateFile(func(f *oauthSeenFile) bool { return fn(f.Companions) })
+}
+
+func (h *Hub) oauthSeenUpdateFile(fn func(*oauthSeenFile) bool) error {
 	aiStoreMu.Lock()
 	defer aiStoreMu.Unlock()
-	seen, err := h.oauthSeenLocked()
+	f, err := h.oauthSeenFileLocked()
 	if err != nil {
 		return err
 	}
-	if !fn(seen) {
+	if !fn(&f) {
 		return nil
 	}
+	seen := f.Companions
 	for k, v := range seen {
 		if len(v) == 0 {
 			delete(seen, k)
@@ -1008,7 +1082,51 @@ func (h *Hub) oauthSeenUpdate(fn func(map[string][]string) bool) error {
 			seen[k] = sortedSet(v)
 		}
 	}
-	return h.writeAIStore(oauthSeenName, oauthSeenFile{Version: 1, Companions: seen})
+	for ref, subs := range f.Subs {
+		for u := range subs {
+			if !slices.Contains(seen[ref], u) {
+				delete(subs, u)
+			}
+		}
+		if len(subs) == 0 {
+			delete(f.Subs, ref)
+		}
+	}
+	out := oauthSeenFile{Version: 1, Companions: seen}
+	if len(f.Subs) > 0 {
+		out.Subs = f.Subs
+	}
+	return h.writeAIStore(oauthSeenName, out)
+}
+
+// oauthSeenSetSubs stores Keycloak ids of recorded people of ref that
+// have none yet (a stored id is never replaced: a re-created account with
+// the same name is another person).
+func (h *Hub) oauthSeenSetSubs(ref string, subs map[string]string) error {
+	return h.oauthSeenUpdateFile(func(f *oauthSeenFile) bool {
+		changed := false
+		for u, sub := range subs {
+			if !slices.Contains(f.Companions[ref], u) || f.Subs[ref][u] != "" {
+				continue
+			}
+			if f.Subs[ref] == nil {
+				f.Subs[ref] = map[string]string{}
+			}
+			f.Subs[ref][u] = sub
+			changed = true
+		}
+		return changed
+	})
+}
+
+func (h *Hub) oauthSeenSub(ref, user string) (string, error) {
+	aiStoreMu.Lock()
+	defer aiStoreMu.Unlock()
+	f, err := h.oauthSeenFileLocked()
+	if err != nil {
+		return "", err
+	}
+	return f.Subs[ref][user], nil
 }
 
 func (h *Hub) oauthSeenRemove(ref, user string) error {
@@ -1027,6 +1145,51 @@ func (h *Hub) oauthSeenDrop(ref string) error {
 		delete(seen, ref)
 		return true
 	})
+}
+
+// AIUserIDs looks a person's Keycloak user id up by exact username
+// (keycloak.Client.ImportUser). The AIKeycloak wired with SetAIKeycloak
+// provides it when it implements it (main's does); else app_oauth
+// revokes fail (retried): they never run without a sub.
+type AIUserIDs interface {
+	ImportUser(ctx context.Context, username string) (string, error)
+}
+
+// lookupSub is user's Keycloak user id, now.
+func (h *Hub) lookupSub(ctx context.Context, user string) (string, error) {
+	kc, _ := h.aiKeycloak().(AIUserIDs)
+	if kc == nil {
+		return "", errors.New("Keycloak is not configured")
+	}
+	sub, err := kc.ImportUser(ctx, user)
+	if err != nil {
+		return "", err
+	}
+	if !keycloak.ValidUserID(sub) {
+		return "", errors.New("Keycloak answered an invalid user id")
+	}
+	return sub, nil
+}
+
+// oauthSub is the "sub" of user's app_oauth revoke for ref: the id stored
+// when they were recorded, else (stored once found) a lookup now. No id =
+// an error: the revoke fails and is retried, never sent without one.
+func (h *Hub) oauthSub(ctx context.Context, ref, user string) (string, error) {
+	sub, err := h.oauthSeenSub(ref, user)
+	if err != nil {
+		return "", err
+	}
+	if sub != "" {
+		return sub, nil
+	}
+	sub, err = h.lookupSub(ctx, user)
+	if err != nil {
+		return "", fmt.Errorf("the Keycloak id of %s is unknown (none stored, lookup failed: %v)", user, err)
+	}
+	if err := h.oauthSeenSetSubs(ref, map[string]string{user: sub}); err != nil {
+		log.Printf("ai: storing the Keycloak id of %s for %s failed: %v", user, ref, err)
+	}
+	return sub, nil
 }
 
 // orphansFile is <data>/ai/orphans.json: credentials a mint hook created
@@ -1142,6 +1305,7 @@ func (h *Hub) reconcileOAuthSeen(ctx context.Context, m *directory.Membership) {
 	now := time.Now()
 	type leaver struct{ ref, name, hook, user string }
 	add := map[string][]string{}
+	holders := map[string][]string{}
 	var leavers []leaver
 	h.mu.RLock()
 	refs := map[string]bool{}
@@ -1178,6 +1342,7 @@ func (h *Hub) reconcileOAuthSeen(ctx context.Context, m *directory.Membership) {
 			continue
 		}
 		var recorded = seen[ref]
+		holders[ref] = slices.Sorted(maps.Keys(hold))
 		for u := range hold {
 			if !slices.Contains(recorded, u) {
 				add[ref] = append(add[ref], u)
@@ -1201,6 +1366,7 @@ func (h *Hub) reconcileOAuthSeen(ctx context.Context, m *directory.Membership) {
 			log.Printf("ai: recording the app_oauth populations failed: %v", err)
 		}
 	}
+	h.recordOAuthSubs(ctx, holders)
 	sort.Slice(leavers, func(i, j int) bool { return leavers[i].ref+"/"+leavers[i].user < leavers[j].ref+"/"+leavers[j].user })
 	for _, l := range leavers {
 		id, _, _ := strings.Cut(l.ref, "/")
@@ -1218,7 +1384,7 @@ func (h *Hub) reconcileOAuthSeen(ctx context.Context, m *directory.Membership) {
 		if !ok {
 			continue
 		}
-		err := h.runRevoke(ctx, t, l.hook, l.user, nil)
+		err := h.runRevokeOAuth(ctx, t, l.ref, l.hook, l.user)
 		unlock()
 		if err == nil {
 			err = h.oauthSeenRemove(l.ref, l.user)

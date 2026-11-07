@@ -2,6 +2,7 @@ package hub
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -60,6 +61,30 @@ type fakeAIKC struct {
 	revoked   []string
 	revokeErr error
 	connErr   error
+	// T27: ImportUser (the app_oauth revoke's sub): gone users are unknown,
+	// subErr fails every lookup; lookups counts them.
+	gone    map[string]bool
+	subErr  error
+	lookups int
+}
+
+// fakeSub is the fake Keycloak id of user.
+func fakeSub(user string) string {
+	h := fmt.Sprintf("%x", sha256.Sum256([]byte(user)))
+	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
+}
+
+func (k *fakeAIKC) ImportUser(ctx context.Context, username string) (string, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.lookups++
+	if k.subErr != nil {
+		return "", k.subErr
+	}
+	if k.gone[username] {
+		return "", keycloak.ErrUserNotFound
+	}
+	return fakeSub(username), nil
 }
 
 func newFakeAIKC() *fakeAIKC {

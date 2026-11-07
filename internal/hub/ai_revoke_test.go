@@ -305,7 +305,7 @@ func TestAppOAuthLeaverRevoked(t *testing.T) {
 	a.failHook("/revoke", 1, "ha down")
 	a.reconcile()
 	got := a.stdins("/revoke")[n:]
-	if len(got) != 1 || got[0] != `{"action":"revoke","user":"bob","ids":[]}` {
+	if len(got) != 1 || got[0] != `{"action":"revoke","user":"bob","sub":"`+fakeSub("bob")+`","ids":[]}` {
 		t.Fatalf("revoke stdin = %q", got)
 	}
 	if seen, _ := a.h.oauthSeen(); !slices.Contains(seen["oauthapp/oauth"], "bob") {
@@ -345,11 +345,99 @@ func TestAppOAuthLeaverRevoked(t *testing.T) {
 	n = len(a.stdins("/revoke"))
 	a.reconcile()
 	got = a.stdins("/revoke")[n:]
-	if !slices.Equal(got, []string{`{"action":"revoke","user":"alice","ids":[]}`, `{"action":"revoke","user":"dave","ids":[]}`}) {
+	if !slices.Equal(got, []string{`{"action":"revoke","user":"alice","sub":"` + fakeSub("alice") + `","ids":[]}`,
+		`{"action":"revoke","user":"dave","sub":"` + fakeSub("dave") + `","ids":[]}`}) {
 		t.Errorf("revokes for a companion that is off = %q", got)
 	}
 	if seen, _ := a.h.oauthSeen(); len(seen) != 0 {
 		t.Errorf("oauth-seen = %v", seen)
+	}
+}
+
+// TestAppOAuthRevokeSub (T27, contract §15.5): recording a person
+// stores their Keycloak id; a leaver gone from LLDAP and Keycloak is
+// revoked with the stored id; with none stored and the lookup failing
+// nothing runs and the person stays recorded (retried), then a working
+// lookup revokes them.
+func TestAppOAuthRevokeSub(t *testing.T) {
+	a := newInstAIFixture(t, nil)
+	a.h.lockPoll = 5 * time.Millisecond
+	oauthWeb(a)
+	a.people.addGroup("users_oauthapp", "bob", "dave")
+	a.enable(t, "oauthapp")
+	if err := a.h.SetAISupport(context.Background(), "oauthapp", "oauth", true, root); err != nil {
+		t.Fatal(err)
+	}
+	a.h.Wait()
+	a.reconcile()
+	aiStoreMu.Lock()
+	f, err := a.h.oauthSeenFileLocked()
+	aiStoreMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, u := range []string{"alice", "bob", "carol"} {
+		if got := f.Subs["oauthapp/oauth"][u]; got != fakeSub(u) {
+			t.Errorf("stored sub of %s = %q, want %q", u, got, fakeSub(u))
+		}
+	}
+	// bob leaves LLDAP and Keycloak: the stored id is used.
+	a.kc.mu.Lock()
+	a.kc.gone = map[string]bool{"bob": true}
+	a.kc.mu.Unlock()
+	a.people.set(func(p *fakePeople) {
+		delete(p.users, "bob")
+		for _, ms := range p.members {
+			delete(ms, "bob")
+		}
+	})
+	n := len(a.stdins("/revoke"))
+	a.reconcile()
+	got := a.stdins("/revoke")[n:]
+	if len(got) != 1 || got[0] != `{"action":"revoke","user":"bob","sub":"`+fakeSub("bob")+`","ids":[]}` {
+		t.Fatalf("revoke stdin of a deleted person = %q", got)
+	}
+	if seen, _ := a.h.oauthSeen(); slices.Contains(seen["oauthapp/oauth"], "bob") {
+		t.Error("bob still recorded after his revoke")
+	}
+	aiStoreMu.Lock()
+	f, _ = a.h.oauthSeenFileLocked()
+	aiStoreMu.Unlock()
+	if _, ok := f.Subs["oauthapp/oauth"]["bob"]; ok {
+		t.Error("bob's id kept after his record went")
+	}
+	// No id stored and the lookup failing: no hook run, kept, retried.
+	if err := a.h.oauthSeenUpdate(func(s map[string][]string) bool {
+		s["oauthapp/oauth"] = append(s["oauthapp/oauth"], "erin")
+		return true
+	}); err != nil {
+		t.Fatal(err)
+	}
+	a.kc.mu.Lock()
+	a.kc.subErr = errors.New("keycloak down")
+	a.kc.mu.Unlock()
+	n = len(a.stdins("/revoke"))
+	a.reconcile()
+	if got := a.stdins("/revoke")[n:]; len(got) != 0 {
+		t.Fatalf("a revoke ran without a sub: %q", got)
+	}
+	if seen, _ := a.h.oauthSeen(); !slices.Contains(seen["oauthapp/oauth"], "erin") {
+		t.Fatal("erin dropped although her revoke never ran")
+	}
+	if au := a.auditsOf("ai.credential.revoke", "oauthapp/oauth/erin"); len(au) != 1 || au[0].Result == "ok" {
+		t.Errorf("audits = %+v", au)
+	}
+	a.kc.mu.Lock()
+	a.kc.subErr = nil
+	a.kc.mu.Unlock()
+	n = len(a.stdins("/revoke"))
+	a.reconcile()
+	got = a.stdins("/revoke")[n:]
+	if len(got) != 1 || got[0] != `{"action":"revoke","user":"erin","sub":"`+fakeSub("erin")+`","ids":[]}` {
+		t.Fatalf("retry stdin = %q", got)
+	}
+	if seen, _ := a.h.oauthSeen(); slices.Contains(seen["oauthapp/oauth"], "erin") {
+		t.Error("erin still recorded after her revoke")
 	}
 }
 
