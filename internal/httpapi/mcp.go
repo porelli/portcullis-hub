@@ -528,7 +528,7 @@ func (s *Server) callTool(ctx context.Context, scope string, t *mcpTool, call sd
 		// show are checked first (final review M3).
 		own := t.Precheck
 		precheck = func(ctx context.Context, c *directory.Caller, args json.RawMessage) error {
-			if err := s.checkNameArgs(ctx, t.Name, args); err != nil {
+			if err := s.checkNameArgs(ctx, t.Name, t.In, args); err != nil {
 				return err
 			}
 			if t.Typed != nil {

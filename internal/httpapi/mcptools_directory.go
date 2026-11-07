@@ -9,6 +9,7 @@ import (
 	"maps"
 	"net/http"
 	"net/url"
+	"reflect"
 	"slices"
 	"strings"
 	"time"
@@ -1172,17 +1173,19 @@ func (s *Server) auditRecent(in auditArgs) (any, error) {
 	return out, nil
 }
 
-// checkNameArgs (final review M3, and the security review of the final
-// fix): every username, group name and field name of a tool that may ask
-// for a confirmation — at any depth (import rows, convert_group's
-// preview, attrs keys) — is a valid one (lldap.ValidUsername /
-// ValidGroupName, the directory's field-name rule) or one the directory
-// knows, before any confirmation page could show it; "" is left to the
-// tool. 400 otherwise (the directory unreadable: only the valid forms
-// pass).
-func (s *Server) checkNameArgs(ctx context.Context, tool string, args json.RawMessage) error {
+// checkNameArgs (final review M3; the security review of the final fix;
+// scoped re-review N2): the usernames, group names, field names, ids and
+// fingerprints a tool that may ask for a confirmation takes are valid
+// (lldap.ValidUsername / ValidGroupName, the directory's field-name rule,
+// appIDOK, fpOK) or known to the directory, before any confirmation page
+// could show them; "" is left to the tool; 400 (or the id rule's 404)
+// otherwise. Only the tool's schema paths are judged — the fields of its
+// argument type (In), followed into nested structs and lists of them
+// (import rows, convert_group's preview), and attrs' keys — never the
+// keys or values of a data map (save_settings' values, person rows…).
+func (s *Server) checkNameArgs(ctx context.Context, tool string, in any, args json.RawMessage) error {
 	var v any
-	if json.Unmarshal(args, &v) != nil {
+	if in == nil || json.Unmarshal(args, &v) != nil {
 		return nil // checkArgs decoded them already
 	}
 	nameIs := ""
@@ -1194,6 +1197,9 @@ func (s *Server) checkNameArgs(ctx context.Context, tool string, args json.RawMe
 	}
 	var bad error
 	check := func(kind, key string, x any) {
+		if bad != nil {
+			return
+		}
 		var list []string
 		switch y := x.(type) {
 		case string:
@@ -1202,13 +1208,8 @@ func (s *Server) checkNameArgs(ctx context.Context, tool string, args json.RawMe
 			for _, e := range y {
 				if str, ok := e.(string); ok {
 					list = append(list, str)
-				} else {
-					bad = badArg(key + " must hold names")
-					return
 				}
 			}
-		default:
-			return // the schema decides
 		}
 		for _, n := range list {
 			if n == "" || bad != nil {
@@ -1227,47 +1228,79 @@ func (s *Server) checkNameArgs(ctx context.Context, tool string, args json.RawMe
 				if !directory.IsFieldName(n) {
 					bad = badArg(key + " is not a valid field name")
 				}
+			case "id":
+				bad = appIDOK(n)
+			case "fp":
+				bad = fpOK(n)
 			}
 		}
 	}
-	var walk func(v any)
-	walk = func(v any) {
-		switch x := v.(type) {
-		case map[string]any:
-			for k, e := range x {
-				switch {
-				case k == "username" || k == "user" || k == "keep" || k == "matching" || k == "joining" || k == "kept_as_exception" || k == "expiry_dropped":
-					check("user", k, e)
-				case k == "group" || k == "groups":
-					check("group", k, e)
-				case k == "name" && nameIs != "":
-					check(nameIs, k, e)
-				case k == "id" || k == "template":
-					// Instance, template, folder and project ids: the
-					// routes' own rule (appIDOK: 404, as the twin answers).
-					if str, ok := e.(string); ok && str != "" && bad == nil {
-						bad = appIDOK(str)
-					}
-				case k == "fp":
-					if str, ok := e.(string); ok && str != "" && bad == nil {
-						bad = fpOK(str)
-					}
-				case k == "attrs":
+	kindOf := func(key string) string {
+		switch key {
+		case "username", "user", "keep", "matching", "joining", "kept_as_exception", "expiry_dropped":
+			return "user"
+		case "group", "groups":
+			return "group"
+		case "id", "template":
+			return "id"
+		case "fp":
+			return "fp"
+		case "name":
+			return nameIs
+		}
+		return ""
+	}
+	var walk func(t reflect.Type, v any)
+	walk = func(t reflect.Type, v any) {
+		for t.Kind() == reflect.Pointer {
+			t = t.Elem()
+		}
+		switch t.Kind() {
+		case reflect.Struct:
+			obj, ok := v.(map[string]any)
+			if !ok {
+				return
+			}
+			for _, f := range reflect.VisibleFields(t) {
+				if f.Anonymous || !f.IsExported() {
+					continue
+				}
+				key, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+				if key == "" || key == "-" {
+					continue
+				}
+				e, present := obj[key]
+				if !present {
+					continue
+				}
+				ft := f.Type
+				for ft.Kind() == reflect.Pointer {
+					ft = ft.Elem()
+				}
+				if k := kindOf(key); k != "" && (ft.Kind() == reflect.String || ft.Kind() == reflect.Slice && ft.Elem().Kind() == reflect.String) {
+					check(k, key, e)
+					continue
+				}
+				if key == "attrs" && ft.Kind() == reflect.Map {
 					if m, ok := e.(map[string]any); ok {
-						for f := range m {
-							check("field", "attrs", f)
+						for name := range m {
+							check("field", "attrs", name)
 						}
 					}
+					continue
 				}
-				walk(e)
+				walk(ft, e)
 			}
-		case []any:
-			for _, e := range x {
-				walk(e)
+		case reflect.Slice, reflect.Array:
+			if list, ok := v.([]any); ok {
+				for _, e := range list {
+					walk(t.Elem(), e)
+				}
 			}
 		}
+		// Maps (data maps) and scalars: not judged.
 	}
-	walk(v)
+	walk(reflect.TypeOf(in), v)
 	return bad
 }
 func knownUser(m *directory.Membership, u string) bool {

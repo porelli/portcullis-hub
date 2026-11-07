@@ -801,3 +801,29 @@ func TestConfirmationNestedNamesAndFreeText(t *testing.T) {
 		t.Errorf("remove_source with an invalid typed check = %q %v (confirmation %q)", txt, isErr, conf)
 	}
 }
+
+// Scoped re-review N2: checkNameArgs judges the tool's schema paths only:
+// a data map's keys and values (save_settings' values, a person option's
+// rows) are never taken for names; nested schema fields still are.
+func TestCheckNameArgsSchemaPathsOnly(t *testing.T) {
+	e, _ := directoryToolEnv(t)
+	ctx := context.Background()
+	if err := e.s.checkNameArgs(ctx, "save_settings", saveSettingsArgs{}, json.RawMessage(`{"id":"secretapp","plan_hash":"x","values":{"user":"two words, free text","group":"a b","name":"c d"}}`)); err != nil {
+		t.Errorf("save_settings data map judged: %v", err)
+	}
+	if err := e.s.checkNameArgs(ctx, "save_settings", saveSettingsArgs{}, json.RawMessage(`{"id":"Not An Id","values":{}}`)); err == nil {
+		t.Error("save_settings' id not judged")
+	}
+	if err := e.s.checkNameArgs(ctx, "import_apply", importApplyArgs{}, json.RawMessage(`{"rows":[{"user":"bad name","remove":true}]}`)); err == nil {
+		t.Error("an import row's user not judged")
+	}
+	if err := e.s.checkNameArgs(ctx, "import_apply", importApplyArgs{}, json.RawMessage(`{"rows":[{"user":"dana","attrs":{"bad field":["x"]}}]}`)); err == nil {
+		t.Error("an attrs key not judged")
+	}
+	if err := e.s.checkNameArgs(ctx, "import_apply", importApplyArgs{}, json.RawMessage(`{"rows":[{"user":"dana","attrs":{"team":["any value, with spaces"]}}]}`)); err != nil {
+		t.Errorf("an attrs value judged: %v", err)
+	}
+	if err := e.s.checkNameArgs(ctx, "convert_group", convertArgs{}, json.RawMessage(`{"group":"g","rule":"x = \"y\"","preview":{"matching":[],"kept_as_exception":[],"joining":["not a user"],"expiry_dropped":[]}}`)); err == nil {
+		t.Error("the preview's joining not judged")
+	}
+}
