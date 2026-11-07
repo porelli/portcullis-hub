@@ -309,11 +309,13 @@ func (h *Hub) CreateCompanionConfirmation(ctx context.Context, q CompanionConfir
 	return h.CreateConfirmation(directory.Actor{User: q.User, Via: directory.ViaAI, Client: q.Client}, confirm.Request{
 		User: q.User, Client: q.Client, Resource: q.Resource, Tool: q.Tool, ArgsSHA256: q.ArgsSHA256, ArgsPreview: q.ArgsPreview,
 		Listener: ListenerPeople,
-		Typed:    label,
-		Label:    r.Label + " on " + label + " (" + r.Host + ")",
+		// Every shown string made visible where the request is built
+		// (and again on display).
+		Typed: VisibleText(label),
+		Label: VisibleText(r.Label + " on " + label + " (" + r.Host + ")"),
 		Consequences: []string{
-			"Runs " + q.Tool + " once on " + label + " (" + r.Host + ") as you, with exactly the arguments below.",
-			why,
+			VisibleText("Runs " + q.Tool + " once on " + label + " (" + r.Host + ") as you, with exactly the arguments below."),
+			VisibleText(why),
 		},
 	})
 }

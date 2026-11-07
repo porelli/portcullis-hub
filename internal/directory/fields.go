@@ -37,6 +37,10 @@ var lldapBuiltins = map[string]bool{
 // is injective and always gives a valid header name. Length: maxFieldName.
 var fieldNameRe = regexp.MustCompile(`^[a-z][a-z0-9]*(_[a-z0-9]+)*$`)
 
+// IsFieldName reports whether name is a valid custom field name (the
+// Portcullis MCP checks names before a confirmation shows them).
+func IsFieldName(name string) bool { return validFieldName(name) }
+
 // maxFieldName bounds a field name's length.
 const maxFieldName = 31
 

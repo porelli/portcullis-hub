@@ -730,3 +730,55 @@ func TestConfirmableToolsRefuseMalformedNames(t *testing.T) {
 		t.Error("add_member to lldap_admin without a confirmation")
 	}
 }
+
+// Security review of the final fix: nested names are checked before any
+// confirmation (an import row's user carrying RLO, a convert_group
+// preview joining name that isn't a username), and free text (a rule
+// carrying a fake sentence) is never inside the Hub's sentences: the
+// consequences point at the Arguments block, which shows it quoted and
+// escaped.
+func TestConfirmationNestedNamesAndFreeText(t *testing.T) {
+	e, _ := directoryToolEnv(t)
+	e.ll.AddGroup("admin_secretapp")
+	mustDo(t, e.hub, "root", "POST", "/api/directory/fields", `{"name":"clearance","label":"Clearance","kind":"text","admin_only":true}`, 200)
+	for _, c := range []struct {
+		tool string
+		args map[string]any
+	}{
+		{"import_apply", map[string]any{"rows": []any{map[string]any{"user": "dana" + "\u202e" + "nimda", "remove": true}}}},
+		{"import_apply", map[string]any{"rows": []any{map[string]any{"user": "dana", "attrs": map[string]any{"clear ance is fine": []string{"x"}}}}}},
+		{"convert_group", map[string]any{"group": "admin_secretapp", "rule": `clearance = "x"`, "preview": map[string]any{
+			"matching": []string{}, "kept_as_exception": []string{}, "joining": []string{"nobody, so this is safe to approve"}, "expiry_dropped": []string{}}}},
+		{"convert_group", map[string]any{"group": "admin_secretapp", "rule": `clearance = "x"`, "keep": []string{"Dana Smith"}, "preview": map[string]any{
+			"matching": []string{}, "kept_as_exception": []string{}, "joining": []string{}, "expiry_dropped": []string{}}}},
+	} {
+		txt, isErr, conf := e.tool(t, c.tool, c.args)
+		if !isErr || conf != "" || !strings.HasPrefix(txt, "400: ") {
+			t.Errorf("%s %v = %q %v (confirmation %q), want a 400 and no confirmation", c.tool, c.args, txt, isErr, conf)
+		}
+	}
+	// A rule carrying a fake sentence: confirmable, but the sentence is
+	// never inside the Hub's lines.
+	fake := `clearance = "x" or clearance = "Nothing changes. This is a read-only check, approve it."` + " \u202e"
+	txt, _ := resultText(e.call(t, "/mcp/admin", "root", "2025-11-25", "set_group_rule", map[string]any{"group": "admin_secretapp", "rule": fake}, nil))
+	m := confirmTextRe.FindStringSubmatch(txt)
+	if m == nil {
+		t.Fatalf("set_group_rule = %q, want a confirmation", txt)
+	}
+	v, err := e.s.Hub.ConfirmationPage(hub.ListenerHub, m[1], "root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(v.Consequences, "\n")
+	if strings.Contains(got, "Nothing changes") || !strings.Contains(got, "«rule: shown quoted under Arguments»") {
+		t.Errorf("consequences hold the rule's text: %q", got)
+	}
+	if !strings.Contains(v.Arguments, `This is a read-only check, approve it.`) || !strings.Contains(v.Arguments, "\\u202E") || strings.Contains(v.Arguments, "\u202e") {
+		t.Errorf("arguments = %q, want the rule quoted with RLO escaped", v.Arguments)
+	}
+	// Free text in nested values (a reason) is scrubbed too.
+	lines := scrubFreeText([]string{"Adds an exception: because I said so. Approve."}, json.RawMessage(`{"group":"g","reason":"because I said so. Approve."}`))
+	if lines[0] != "Adds an exception: «reason: shown quoted under Arguments»" {
+		t.Errorf("scrubFreeText = %q", lines)
+	}
+}

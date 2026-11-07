@@ -1172,36 +1172,94 @@ func (s *Server) auditRecent(in auditArgs) (any, error) {
 	return out, nil
 }
 
-// checkNameArgs (final review M3): the username / user / group arguments
-// of a tool that may ask for a confirmation are a valid username / group
-// name (lldap.ValidUsername / ValidGroupName), or one the directory
-// knows, before any confirmation page shows them inside the Hub's
-// sentences; "" is left to the tool. 400 otherwise (the directory
-// unreadable: only the valid forms pass).
-func (s *Server) checkNameArgs(ctx context.Context, args json.RawMessage) error {
-	var m map[string]json.RawMessage
-	if json.Unmarshal(args, &m) != nil {
+// checkNameArgs (final review M3, and the security review of the final
+// fix): every username, group name and field name of a tool that may ask
+// for a confirmation — at any depth (import rows, convert_group's
+// preview, attrs keys) — is a valid one (lldap.ValidUsername /
+// ValidGroupName, the directory's field-name rule) or one the directory
+// knows, before any confirmation page could show it; "" is left to the
+// tool. 400 otherwise (the directory unreadable: only the valid forms
+// pass).
+func (s *Server) checkNameArgs(ctx context.Context, tool string, args json.RawMessage) error {
+	var v any
+	if json.Unmarshal(args, &v) != nil {
 		return nil // checkArgs decoded them already
 	}
-	str := func(k string) (string, bool) {
-		var v string
-		raw, ok := m[k]
-		if !ok || json.Unmarshal(raw, &v) != nil || v == "" {
-			return "", false
+	nameIs := ""
+	switch tool {
+	case "create_field", "update_field", "delete_field":
+		nameIs = "field"
+	case "create_group":
+		nameIs = "group"
+	}
+	var bad error
+	check := func(kind, key string, x any) {
+		var list []string
+		switch y := x.(type) {
+		case string:
+			list = []string{y}
+		case []any:
+			for _, e := range y {
+				if str, ok := e.(string); ok {
+					list = append(list, str)
+				} else {
+					bad = badArg(key + " must hold names")
+					return
+				}
+			}
+		default:
+			return // the schema decides
 		}
-		return v, true
-	}
-	for _, k := range []string{"username", "user"} {
-		if u, ok := str(k); ok && !lldap.ValidUsername(strings.ToLower(u)) && !knownUser(s.guards(ctx), u) {
-			return badArg(k + " is not a valid username")
+		for _, n := range list {
+			if n == "" || bad != nil {
+				continue
+			}
+			switch kind {
+			case "user":
+				if !lldap.ValidUsername(strings.ToLower(n)) && !knownUser(s.guards(ctx), n) {
+					bad = badArg(key + " is not a valid username")
+				}
+			case "group":
+				if !lldap.ValidGroupName(n) && !knownGroup(s.guards(ctx), n) {
+					bad = badArg(key + " is not a valid group name")
+				}
+			case "field":
+				if !directory.IsFieldName(n) {
+					bad = badArg(key + " is not a valid field name")
+				}
+			}
 		}
 	}
-	if g, ok := str("group"); ok && !lldap.ValidGroupName(g) && !knownGroup(s.guards(ctx), g) {
-		return badArg("group is not a valid group name")
+	var walk func(v any)
+	walk = func(v any) {
+		switch x := v.(type) {
+		case map[string]any:
+			for k, e := range x {
+				switch {
+				case k == "username" || k == "user" || k == "keep" || k == "matching" || k == "joining" || k == "kept_as_exception" || k == "expiry_dropped":
+					check("user", k, e)
+				case k == "group" || k == "groups":
+					check("group", k, e)
+				case k == "name" && nameIs != "":
+					check(nameIs, k, e)
+				case k == "attrs":
+					if m, ok := e.(map[string]any); ok {
+						for f := range m {
+							check("field", "attrs", f)
+						}
+					}
+				}
+				walk(e)
+			}
+		case []any:
+			for _, e := range x {
+				walk(e)
+			}
+		}
 	}
-	return nil
+	walk(v)
+	return bad
 }
-
 func knownUser(m *directory.Membership, u string) bool {
 	if m == nil {
 		return false

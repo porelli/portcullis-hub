@@ -13,6 +13,7 @@ import (
 	"reflect"
 	"regexp"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -528,7 +529,7 @@ func (s *Server) callTool(ctx context.Context, scope string, t *mcpTool, call sd
 		// show are checked first (final review M3).
 		own := t.Precheck
 		precheck = func(ctx context.Context, c *directory.Caller, args json.RawMessage) error {
-			if err := s.checkNameArgs(ctx, args); err != nil {
+			if err := s.checkNameArgs(ctx, t.Name, args); err != nil {
 				return err
 			}
 			if own != nil {
@@ -683,13 +684,23 @@ func (s *Server) confirmCall(ctx context.Context, c *directory.Caller, t *mcpToo
 	if len(args) > 4<<10 {
 		return "", sdk.TextResult(textTooLong, true)
 	}
-	typed := strings.TrimSpace(t.Typed(args))
+	// Everything the page shows is built here, once (security review of
+	// the final fix): free text from the arguments never sits inside the
+	// Hub's sentences (scrubFreeText: it is shown quoted, under
+	// Arguments), and every string is made visible (hub.VisibleText:
+	// bidi, zero-width, format and control characters as \uXXXX). The
+	// typed check is stored as shown, so what is typed is what is read.
+	typed := hub.VisibleText(strings.TrimSpace(t.Typed(args)))
 	if typed == "" {
 		typed = t.Name
 	}
+	cons := scrubFreeText(t.Consequences(ctx, args), args)
+	for i := range cons {
+		cons[i] = hub.VisibleText(cons[i])
+	}
 	conf, err = s.Hub.CreateConfirmation(c.Actor(), confirm.Request{
 		User: c.User, Client: c.Client, Resource: info.resource, Tool: t.Name, ArgsSHA256: digest, ArgsPreview: string(args),
-		Listener: info.listener, Typed: typed, Label: typed + " on " + info.label, Consequences: t.Consequences(ctx, args),
+		Listener: info.listener, Typed: typed, Label: typed + " on " + hub.VisibleText(info.label), Consequences: cons,
 	})
 	if err != nil {
 		var se *hub.StatusError
@@ -870,4 +881,57 @@ func memoOf(ctx context.Context) *callMemo {
 // noCtx adapts a consequences function that needs no call state.
 func noCtx(f func(json.RawMessage) []string) func(context.Context, json.RawMessage) []string {
 	return func(_ context.Context, args json.RawMessage) []string { return f(args) }
+}
+
+// identifierText: a string that can't read as a sentence — no space, only
+// letters, digits and . _ - @ : / + = , (names, ids, emails, times,
+// CIDRs), at most 128 bytes.
+var identifierText = regexp.MustCompile(`^[\p{L}\p{N}._@:/+=,-]{1,128}$`)
+
+// scrubFreeText replaces, in the consequence lines, every free-text string
+// of args (any string value — at any depth — that isn't identifierText:
+// a rule, a reason, a command, a label) with a pointer to the Arguments
+// block, where the page shows it quoted (canonical JSON). Longer strings
+// first; its trimmed and lowercased forms too.
+func scrubFreeText(lines []string, args json.RawMessage) []string {
+	type text struct{ key, s string }
+	var texts []text
+	var walk func(key string, v any)
+	walk = func(key string, v any) {
+		switch x := v.(type) {
+		case string:
+			if !identifierText.MatchString(x) {
+				for _, f := range []string{x, strings.TrimSpace(x), strings.ToLower(x), strings.ToLower(strings.TrimSpace(x))} {
+					if len(f) >= 2 {
+						texts = append(texts, text{key, f})
+					}
+				}
+			}
+		case map[string]any:
+			for k, e := range x {
+				walk(k, e)
+			}
+		case []any:
+			for _, e := range x {
+				walk(key, e)
+			}
+		}
+	}
+	var v any
+	if json.Unmarshal(args, &v) != nil {
+		return lines
+	}
+	walk("arguments", v)
+	if len(texts) == 0 {
+		return lines
+	}
+	sort.SliceStable(texts, func(i, j int) bool { return len(texts[i].s) > len(texts[j].s) })
+	out := make([]string, len(lines))
+	for i, l := range lines {
+		for _, t := range texts {
+			l = strings.ReplaceAll(l, t.s, "«"+t.key+": shown quoted under Arguments»")
+		}
+		out[i] = l
+	}
+	return out
 }
