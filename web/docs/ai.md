@@ -106,8 +106,10 @@ Each app's detail panel has an **AI support** tab (deep link
   tool patterns.
 - **AI support** and the **mode**: *read and write* or *read only*, where the
   template offers both. Read-only hides and refuses the template's write tools
-  at the gate, and the companion is started read-only too
-  (`PORTCULLIS_AI_READONLY_<NAME>`, read-only credential scopes).
+  at the gate, and, where the app supports it, the companion is started
+  read-only too (`PORTCULLIS_AI_READONLY_<NAME>`, read-only credential
+  scopes). Nextcloud supports neither: there the gate alone enforces
+  read-only (see [Residuals](#residuals)).
 - **Switching on or off, or changing the mode, restarts a running app**
   (its router labels change); the tab says so before you save. On a disabled
   app the switch only saves the state.
@@ -200,7 +202,11 @@ touch:
   `https://hub.<domain>/confirm/<id>` for admin tools) or a URL elicitation
   its client opens. The page shows what the Hub renders from the stored
   request — the action, its target, consequences and the exact arguments —
-  never text the model wrote.
+  never text the model wrote. Values taken from the request are quoted, and
+  every invisible or reordering character (bidi controls, zero-width
+  characters, unusual spaces) shows as `\u…`, so nothing on the page can be
+  hidden. A request whose user, group or field names aren't valid is
+  refused before any confirmation is created.
 - The person types the check (the app's name for companion tools; the
   instance id, the person's or group's name, or the domain for admin tools)
   and touches their passkey. A sign-in from before the request never
@@ -358,16 +364,43 @@ What the design does not cover, stated plainly:
       the LAN included), not loopback;
     - backups of its `/config` carry the hook user's token, rotated at the next
       container start after a restore.
-- **Read-only is enforced by the gate** where the app can't scope a
-  credential (Nextcloud app passwords): the gate hides and refuses write
-  tools; the credential itself could write.
+- **Read-only is enforced by the gate alone** where the app can't scope a
+  credential or start its companion read-only (Nextcloud: its app passwords
+  are full-scope): the gate hides and refuses write tools; the credential
+  itself could write.
+- **Losing `secrets/mcp-gate/age.key` takes all AI support down.** The AI
+  credentials the Hub stores are encrypted to that key. `./portcullis up`
+  (or `init`, `upgrade`, `restore`) generates a new key when it is missing,
+  and from then on the gate can't decrypt the stored credentials, so it
+  refuses the whole credentials file: every AI resource answers `503`
+  (every app's MCP, the Portcullis MCP and "All my apps"), and
+  `./portcullis status` shows "mcp-gate: refusing every AI request (503)"
+  with the reason. Restore the key from a backup of `secrets/` if you can.
+  Otherwise:
+    - the Hub re-encrypts the identity-header companions' caller secrets to
+      the new key at its next configuration write, with nothing to do;
+    - app credentials can't be re-encrypted (the Hub never holds them in
+      clear): on each app's **AI support** tab, switch each companion that
+      uses app credentials (`app_token`) off, save, then on again. Switching
+      off revokes its credentials in the app and drops them, and each
+      person's credential is minted again on their next request. Switching
+      the master switch off and on doesn't drop them.
+- **A settings change through the admin MCP can race a membership change.**
+  `save_settings` recomputes the preview (`plan_hash`) just before it saves,
+  which catches a directory change up to then; one landing in the short
+  moment between that recompute and the save isn't caught (the save
+  re-checks the stored inputs, not the directory).
 - **Nextcloud**: its companion answers a few routes without a credential to
   any container on `portcullis-proxy` (`GET /api/v1/status` with the version,
   `/app/` and its sub-pages, `/health/live`, `/health/ready`); they show no
   person's data but disclose the version. A person whose username is longer
   than 64 characters can't use Nextcloud's AI support. The AI can't share or
   read shares. A revoked app password works for up to 10 s (Nextcloud's
-  token cache). The companion is maintained by one person.
+  token cache). The companion is maintained by one person. Any container on
+  `portcullis-proxy` can send the companion wrong credentials; Nextcloud's
+  brute-force protection counts them against the companion's address, which
+  every AI request comes from, so it can slow everyone's AI requests down
+  (sign-in itself still holds).
 - **Grafana's trust network**: Grafana trusts identity headers from its
   companion's private network. A container that runs with host networking
   **and** `NET_RAW` (Docker's default capabilities include it) can forge
@@ -399,7 +432,9 @@ What the design does not cover, stated plainly:
   consents or AI connections carry over). An app that matches accounts by
   `preferred_username` or email instead of `sub` would attach the newcomer to
   the old app account; templates key on `sub`
-  ([hardening](hardening.md#header-spoofing-protections)).
+  ([hardening](hardening.md#header-spoofing-protections)). Gitea's AI
+  credential mint is the exception: it finds the account by username
+  ([Gitea](#ai-gitea)).
 - **Local networks through the admin MCP.** `set_local_networks` is a plain
   write only when every network is inside the current list (narrowing);
   anything wider needs a confirmation, and so does going back to the defaults
@@ -436,6 +471,15 @@ its AI support section; these are the notes behind them.
   secrets is never offered (the value would pass through the model). File
   deletions through `create_or_update_file` are commits, without a
   confirmation.
+- **Re-used usernames (residual).** The mint finds the Gitea account by
+  username: the Hub doesn't send the person's Keycloak id to the hook. If a
+  person is deleted and their username is given to someone new, the
+  newcomer's AI requests run as the former person's Gitea account (their
+  web sign-in is refused). Before re-using a username, delete or rename the
+  former person's Gitea account (Site Administration → User Accounts).
+- While AI support is on, `https://<host>/mcp` is the AI endpoint, so a Gitea
+  user or organisation named `mcp` loses its profile page (its repositories
+  stay reachable): don't use that name.
 - Git over SSH: a second Gitea instance needs another host port or none.
 
 ### Grafana {#ai-grafana}
