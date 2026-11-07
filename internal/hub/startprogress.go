@@ -30,6 +30,13 @@ const (
 	StepCreate  = "create"
 	StepStart   = "start"
 	StepHealthy = "healthy"
+	// StepSettings: the start hooks (and the owed AI hooks) after the up;
+	// the data files are written before the create (prepareUp).
+	StepSettings = "settings"
+	// StepGroups / StepKeycloak: an enable's derived groups and sign-in
+	// clients (stop.go, lifecycle.go).
+	StepGroups   = "groups"
+	StepKeycloak = "keycloak"
 )
 
 // pullRefs are the images compose would pull for t's project, as the
@@ -75,7 +82,7 @@ type startSteps struct {
 
 func newStartSteps(p *Progress) *startSteps {
 	s := &startSteps{p: p, keys: map[string]bool{}}
-	for _, k := range []string{StepImages, StepCreate, StepStart, StepHealthy} {
+	for _, k := range []string{StepImages, StepCreate, StepStart, StepHealthy, StepSettings} {
 		s.keys[k] = p.Has(k)
 	}
 	return s
@@ -92,6 +99,8 @@ func (s *startSteps) Percent(key string, pct int, detail string) {
 		s.p.Percent(key, pct, detail)
 	}
 }
+
+func (s *startSteps) Warn(text string) { s.p.Warn(text) }
 
 func (s *startSteps) Done(key string) {
 	if s.keys[key] {
@@ -276,7 +285,9 @@ func (h *Hub) watchStart(ctx context.Context, p *startSteps, t *templates.Templa
 		if n, m, _, err := h.countContainers(ctx, t, containerStarted); err == nil && ctx.Err() == nil {
 			p.Percent(StepStart, percentOf(n, m), fmt.Sprintf("Starting services (%d of %d)", n, m))
 		}
-		if h.sleep(ctx, aiReadyPoll) != nil {
+		// ctx checked too: a sleep that returns at once (a test clock)
+		// must not keep the watcher spinning after compose up returned.
+		if h.sleep(ctx, aiReadyPoll) != nil || ctx.Err() != nil {
 			return
 		}
 	}

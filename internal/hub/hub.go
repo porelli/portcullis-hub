@@ -141,7 +141,9 @@ type Engine interface {
 
 // IdP manages the OIDC clients templates declare.
 type IdP interface {
-	RegisterClient(ctx context.Context, s keycloak.ClientSpec) error
+	// RegisterClient creates or reconciles a client; created: this call
+	// created it (an enable's Stop deletes only those).
+	RegisterClient(ctx context.Context, s keycloak.ClientSpec) (created bool, err error)
 	UpdateClientACR(ctx context.Context, s keycloak.ClientSpec) error
 	// UpdateClientHosts moves an instance client's redirect URIs and web
 	// origins to new hostnames (keycloak.Client.UpdateClientHosts).
@@ -421,6 +423,9 @@ type Hub struct {
 	opRunsMu    sync.Mutex
 	opRuns      map[string]*opRun
 	progressNow func() time.Time
+	// testHookStepStart, if set, runs at the end of every Progress.Start
+	// (op, step key), without any lock held (tests block a step there).
+	testHookStepStart func(op, key string)
 
 	// Directory publishing (SetDirectory). lastExpiring is the expiring
 	// list last written (guarded by policyWriteMu; nil: not yet known).

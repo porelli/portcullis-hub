@@ -454,14 +454,16 @@ func withBackchannel(client *gocloak.Client, s ClientSpec) {
 }
 
 // RegisterClient creates (or, if it already exists and the template owns
-// it, reconciles) an OIDC client.
-func (c *Client) RegisterClient(ctx context.Context, s ClientSpec) error {
+// it, reconciles) an OIDC client. created: this call created it (an
+// enable's Stop deletes only those, contract §11.7) — also when a later
+// step of the call failed; false for an existing client it updated.
+func (c *Client) RegisterClient(ctx context.Context, s ClientSpec) (created bool, err error) {
 	if protectedClient(s.ClientID) {
-		return &ConflictError{ClientID: s.ClientID, TemplateID: s.TemplateID, Owner: "core"}
+		return false, &ConflictError{ClientID: s.ClientID, TemplateID: s.TemplateID, Owner: "core"}
 	}
 	tok, err := c.token(ctx)
 	if err != nil {
-		return err
+		return false, err
 	}
 	wantEmail, _ := s.emailScopes()
 	rep := gocloak.Client{
@@ -486,20 +488,20 @@ func (c *Client) RegisterClient(ctx context.Context, s ClientSpec) error {
 	case err == nil:
 		log.Printf("Registered Keycloak client %s", s.ClientID)
 		// Keycloak silently drops unknown scope names on create; verify.
-		created, err := c.findClient(ctx, tok, s.ClientID)
+		made, err := c.findClient(ctx, tok, s.ClientID)
 		if err != nil {
-			return err
+			return true, err
 		}
-		return c.ensureDefaultScopes(ctx, tok, created, s)
+		return true, c.ensureDefaultScopes(ctx, tok, made, s)
 	case code == http.StatusConflict:
 		// Already exists: reconcile secret, redirect URIs and ACR so the
 		// app's .env and Keycloak agree.
 		existing, err := c.findClient(ctx, tok, s.ClientID)
 		if err != nil {
-			return err
+			return false, err
 		}
 		if !mayReconcile(existing, s.TemplateID, s.AllowedHosts) || existing.Attributes[AIClientAttr] == "true" {
-			return &ConflictError{ClientID: s.ClientID, TemplateID: s.TemplateID, Owner: existing.Attributes[OwnerAttr]}
+			return false, &ConflictError{ClientID: s.ClientID, TemplateID: s.TemplateID, Owner: existing.Attributes[OwnerAttr]}
 		}
 		if existing.Attributes == nil {
 			existing.Attributes = map[string]string{}
@@ -514,14 +516,14 @@ func (c *Client) RegisterClient(ctx context.Context, s ClientSpec) error {
 		withACR(existing, s.ACR)
 		withBackchannel(existing, s)
 		if err := c.putClient(ctx, tok, existing); err != nil {
-			return err
+			return false, err
 		}
 		log.Printf("Updated existing Keycloak client %s", s.ClientID)
-		return c.ensureDefaultScopes(ctx, tok, existing, s)
+		return false, c.ensureDefaultScopes(ctx, tok, existing, s)
 	case code != 0:
-		return fmt.Errorf("client %s registration: unexpected HTTP %d", s.ClientID, code)
+		return false, fmt.Errorf("client %s registration: unexpected HTTP %d", s.ClientID, code)
 	default:
-		return fmt.Errorf("client registration failed: %w", err)
+		return false, fmt.Errorf("client registration failed: %w", err)
 	}
 }
 

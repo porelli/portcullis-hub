@@ -2,6 +2,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"sort"
@@ -50,43 +51,48 @@ type EnableResult struct {
 	Warnings      []string `json:"warnings,omitempty"`
 }
 
-// EnableAs is Enable as actor: first the instance's missing derived
-// groups are created as actor (who must resolve as an LLDAP admin; else
-// nothing happens), then the instance is enabled. A group created before
-// a failed enable stays (empty; the instance needs it anyway). Without
-// an actor (no X-Forwarded-User) no group is created: a warning.
+// EnableAs is Enable as actor, run to its end: StartEnable's code (the
+// same lock, op record, steps and Stop) waited for (runOpSync). First
+// the instance's missing derived groups are created as actor (who must
+// resolve as an LLDAP admin; else nothing happens), then the instance is
+// enabled. A group created before a failed enable stays (empty; the
+// instance needs it anyway) — only a Stop removes it. Without an actor
+// (no X-Forwarded-User) no group is created: a warning. A failure after
+// the enable was accepted is an *OpError (its record); a busy instance
+// a *BusyError carrying the running record.
 func (h *Hub) EnableAs(id string, actor directory.Actor) (*EnableResult, error) {
 	res := &EnableResult{}
-	unlock, err := h.lockApp(id)
-	if err != nil {
-		return res, err
+	_, _, err := h.runOpSync(id, OpEnable, actor, h.enablePlan(id), func(ctx context.Context, ready func()) (map[string]string, []string, error) {
+		r, err := h.runEnable(ctx, id, actor, ready)
+		res = r
+		return nil, r.Warnings, err
+	})
+	// The synchronous enable route answers an unknown instance 400, as it
+	// always did (StartEnable's is 404, contract §11.7).
+	var se *StatusError
+	var oe *OpError
+	if !errors.As(err, &oe) && errors.As(err, &se) && se.Status == 404 {
+		err = &StatusError{Status: 400, Err: se.Err}
 	}
-	defer unlock()
-	h.mu.RLock()
-	var groups []instanceGroup
-	if t := h.findLocked(id); t != nil {
-		groups = instanceGroups(t)
-	}
-	h.mu.RUnlock()
-	if len(groups) > 0 {
-		created, warnings, err := h.ensureGroups(context.Background(), id, groups, actor)
-		res.GroupsCreated, res.Warnings = created, warnings
-		if err != nil {
-			return res, err
-		}
-	}
-	// The template's starting rows, bound to the groups that now exist
-	// (P7: a default instance has no CreateInstance to seed them).
-	h.seedSettings(id)
-	h.reseedPlaceholderRows(id, res.GroupsCreated)
-	res.Warnings = append(res.Warnings, h.bindPlaceholderRows(context.Background(), id)...)
-	rolledBack, err := h.enableLocked(id)
-	return res, h.finishOp(id, OpEnable, err, rolledBack)
+	return res, err
 }
 
 // ensureGroups creates id's missing derived groups as actor; a missing
 // group the Hub may not create is a warning. Caller holds id's lock.
 func (h *Hub) ensureGroups(ctx context.Context, id string, groups []instanceGroup, actor directory.Actor) (created, warnings []string, err error) {
+	todo, warnings, err := h.planGroups(ctx, id, groups, actor)
+	if err != nil || len(todo) == 0 {
+		return nil, warnings, err
+	}
+	created, w, err := h.createGroups(ctx, nil, id, todo, actor)
+	return created, append(warnings, w...), err
+}
+
+// planGroups is the read-only half of ensureGroups: the derived groups
+// to create (todo) — the actor resolved when there are any (else the
+// error: nothing was changed) — and the warnings (not checked, a missing
+// group the Hub may not create).
+func (h *Hub) planGroups(ctx context.Context, id string, groups []instanceGroup, actor directory.Actor) (todo, warnings []string, err error) {
 	h.mu.RLock()
 	groupsAPI := h.groups
 	h.mu.RUnlock()
@@ -111,7 +117,6 @@ func (h *Hub) ensureGroups(ctx context.Context, id string, groups []instanceGrou
 	for _, g := range missing {
 		isMissing[g] = true
 	}
-	var todo []string
 	for _, g := range groups {
 		switch {
 		case !isMissing[g.Name]:
@@ -127,11 +132,32 @@ func (h *Hub) ensureGroups(ctx context.Context, id string, groups []instanceGrou
 	if err := groupsAPI.ResolveActor(ctx, actor); err != nil {
 		return nil, warnings, fmt.Errorf("the acting admin %q can't create the missing groups %s of %s — nothing was changed: %w", actor.User, strings.Join(todo, ", "), id, err)
 	}
+	return todo, warnings, nil
+}
+
+// createGroups creates todo as actor, each one written to p's Created
+// ledger the moment it exists (a Stop deletes exactly those). A Stop
+// (stopCtx cancelled) ends it before the next group with stopCtx's
+// error; nil: never stopped. LLDAP calls run on their own context.
+func (h *Hub) createGroups(stopCtx context.Context, p *Progress, id string, todo []string, actor directory.Actor) (created, warnings []string, err error) {
+	if len(todo) == 0 {
+		return nil, nil, nil
+	}
+	h.mu.RLock()
+	groupsAPI := h.groups
+	h.mu.RUnlock()
+	if groupsAPI == nil {
+		return nil, nil, statusErr(503, "users & groups is not available")
+	}
 	for _, g := range todo {
-		made, w, err := groupsAPI.CreateInstanceGroup(ctx, actor, g)
+		if stopCtx != nil && stopCtx.Err() != nil {
+			return created, warnings, stopCtx.Err()
+		}
+		made, w, err := groupsAPI.CreateInstanceGroup(context.Background(), actor, g)
 		warnings = append(warnings, w...)
 		if made {
 			created = append(created, g)
+			p.Created(CreatedGroups, g)
 		}
 		if err != nil {
 			return created, warnings, fmt.Errorf("creating group %s of %s: %w", g, id, err)

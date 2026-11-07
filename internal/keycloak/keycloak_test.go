@@ -141,8 +141,8 @@ func TestRegisterClient(t *testing.T) {
 	ctx := context.Background()
 	spec := ClientSpec{ClientID: "app", Secret: "s3cret", RedirectURIs: []string{"https://app.example.org/cb"}, TemplateID: "app", ACR: "hwk", AllowedHosts: []string{"app.example.org"}}
 
-	if err := c.RegisterClient(ctx, spec); err != nil || fk.posts != 1 {
-		t.Fatalf("create: %v (posts %d)", err, fk.posts)
+	if created, err := c.RegisterClient(ctx, spec); err != nil || fk.posts != 1 || !created {
+		t.Fatalf("create: %v %v (posts %d)", created, err, fk.posts)
 	}
 	if got := fmt.Sprint(fk.created["defaultClientScopes"]); got != "[openid profile email acr groups portcullis-attributes]" {
 		t.Errorf("create scopes = %s", got)
@@ -155,14 +155,14 @@ func TestRegisterClient(t *testing.T) {
 	// Exists and owned by another template: left untouched.
 	fk.existing = map[string]interface{}{"id": "u1", "clientId": "app", "attributes": map[string]interface{}{OwnerAttr: "other"}}
 	var ce *ConflictError
-	if err := c.RegisterClient(ctx, spec); !errors.As(err, &ce) || ce.Owner != "other" || len(fk.puts) != 0 {
+	if _, err := c.RegisterClient(ctx, spec); !errors.As(err, &ce) || ce.Owner != "other" || len(fk.puts) != 0 {
 		t.Errorf("foreign client: err %v, puts %v", err, fk.puts)
 	}
 	if err := c.UpdateClientACR(ctx, spec); !errors.As(err, &ce) || len(fk.puts) != 0 {
 		t.Errorf("UpdateClientACR on foreign client: %v", err)
 	}
 	fk.existing = map[string]interface{}{"id": "u0", "clientId": "app", "redirectUris": []interface{}{"https://evil.example.com/cb"}}
-	if err := c.RegisterClient(ctx, spec); !errors.As(err, &ce) || ce.Owner != "" || !strings.Contains(err.Error(), "not tagged") || len(fk.puts) != 0 {
+	if _, err := c.RegisterClient(ctx, spec); !errors.As(err, &ce) || ce.Owner != "" || !strings.Contains(err.Error(), "not tagged") || len(fk.puts) != 0 {
 		t.Errorf("untagged foreign client: %v", err)
 	}
 
@@ -171,8 +171,8 @@ func TestRegisterClient(t *testing.T) {
 	// ignores defaultClientScopes).
 	fk.scopes = map[string]string{"acr": "s-acr", "groups": "s-groups", "profile": "s-profile"}
 	fk.existing = map[string]interface{}{"id": "u1", "clientId": "app", "attributes": map[string]interface{}{OwnerAttr: "app"}, "defaultClientScopes": []interface{}{"openid", "acr"}}
-	if err := c.RegisterClient(ctx, spec); err != nil || len(fk.puts) != 1 {
-		t.Fatalf("reconcile: %v %v", err, fk.puts)
+	if created, err := c.RegisterClient(ctx, spec); err != nil || len(fk.puts) != 1 || created {
+		t.Fatalf("reconcile: %v %v %v", created, err, fk.puts)
 	}
 	p := fk.puts[0]
 	attrs := p["attributes"].(map[string]interface{})
@@ -189,15 +189,15 @@ func TestRegisterClient(t *testing.T) {
 
 	// Fresh create with the scope present in the realm: nothing to attach.
 	fk.existing, fk.attached = nil, nil
-	if err := c.RegisterClient(ctx, spec); err != nil || len(fk.attached) != 0 {
+	if _, err := c.RegisterClient(ctx, spec); err != nil || len(fk.attached) != 0 {
 		t.Errorf("create with groups scope: %v, attached %v", err, fk.attached)
 	}
 
-	if err := c.RegisterClient(ctx, ClientSpec{ClientID: "admin-cli", TemplateID: "app"}); !errors.As(err, &ce) {
+	if _, err := c.RegisterClient(ctx, ClientSpec{ClientID: "admin-cli", TemplateID: "app"}); !errors.As(err, &ce) {
 		t.Errorf("protected client: %v", err)
 	}
 	bad := New(srv.URL, "admin", "wrong")
-	if err := bad.RegisterClient(ctx, spec); err == nil {
+	if _, err := bad.RegisterClient(ctx, spec); err == nil {
 		t.Error("bad credentials accepted")
 	}
 	if err := c.DeleteUserByID(ctx, "../../x"); err == nil {
@@ -217,7 +217,7 @@ func TestRegisterClientEmailUnverified(t *testing.T) {
 
 	// Create: email-unverified instead of email, nothing to fix afterwards.
 	fk.scopes = all
-	if err := c.RegisterClient(ctx, spec); err != nil {
+	if _, err := c.RegisterClient(ctx, spec); err != nil {
 		t.Fatal(err)
 	}
 	if got := fmt.Sprint(fk.created["defaultClientScopes"]); got != "[openid profile email-unverified acr groups portcullis-attributes]" {
@@ -231,7 +231,7 @@ func TestRegisterClientEmailUnverified(t *testing.T) {
 	// optional): attach email-unverified first, then detach email.
 	fk.existing = map[string]interface{}{"id": "u1", "clientId": "vw", "attributes": map[string]interface{}{OwnerAttr: "vw"},
 		"defaultClientScopes": []interface{}{"profile", "email", "acr", "groups"}, "optionalClientScopes": []interface{}{"email"}}
-	if err := c.RegisterClient(ctx, spec); err != nil {
+	if _, err := c.RegisterClient(ctx, spec); err != nil {
 		t.Fatal(err)
 	}
 	if fmt.Sprint(fk.attached) != "[u1/s-eu]" || len(fk.detached) != 2 || !strings.Contains(fmt.Sprint(fk.detached), "u1/default/s-email") || !strings.Contains(fmt.Sprint(fk.detached), "u1/optional/s-email") {
@@ -248,14 +248,14 @@ func TestRegisterClientEmailUnverified(t *testing.T) {
 	fk.existing["defaultClientScopes"] = []interface{}{"profile", EmailUnverifiedScope, "acr", "groups"}
 	delete(fk.existing, "optionalClientScopes")
 	fk.attached, fk.detached = nil, nil
-	if err := c.RegisterClient(ctx, spec); err != nil || len(fk.attached)+len(fk.detached) != 0 {
+	if _, err := c.RegisterClient(ctx, spec); err != nil || len(fk.attached)+len(fk.detached) != 0 {
 		t.Errorf("settled: %v, attached %v, detached %v", err, fk.attached, fk.detached)
 	}
 
 	// Back to the default: email returns, email-unverified goes.
 	def := spec
 	def.OmitEmailVerified = false
-	if err := c.RegisterClient(ctx, def); err != nil || fmt.Sprint(fk.attached) != "[u1/s-email]" || fmt.Sprint(fk.detached) != "[u1/default/s-eu]" {
+	if _, err := c.RegisterClient(ctx, def); err != nil || fmt.Sprint(fk.attached) != "[u1/s-email]" || fmt.Sprint(fk.detached) != "[u1/default/s-eu]" {
 		t.Errorf("default again: %v, attached %v, detached %v", err, fk.attached, fk.detached)
 	}
 
@@ -264,7 +264,7 @@ func TestRegisterClientEmailUnverified(t *testing.T) {
 	fk.scopes = map[string]string{"acr": "s-acr", "groups": "s-groups", "email": "s-email"}
 	fk.existing["defaultClientScopes"] = []interface{}{"profile", "email", "acr", "groups"}
 	fk.attached, fk.detached = nil, nil
-	if err := c.RegisterClient(ctx, spec); err == nil || !strings.Contains(err.Error(), "keycloak configure") || len(fk.detached) != 0 {
+	if _, err := c.RegisterClient(ctx, spec); err == nil || !strings.Contains(err.Error(), "keycloak configure") || len(fk.detached) != 0 {
 		t.Errorf("missing scope: %v, detached %v", err, fk.detached)
 	}
 
@@ -273,7 +273,7 @@ func TestRegisterClientEmailUnverified(t *testing.T) {
 		"defaultClientScopes": []interface{}{"email"}}
 	fk.attached, fk.detached, fk.puts = nil, nil, nil
 	var ce *ConflictError
-	if err := c.RegisterClient(ctx, spec); !errors.As(err, &ce) || len(fk.attached)+len(fk.detached)+len(fk.puts) != 0 {
+	if _, err := c.RegisterClient(ctx, spec); !errors.As(err, &ce) || len(fk.attached)+len(fk.detached)+len(fk.puts) != 0 {
 		t.Errorf("foreign client: %v, attached %v, detached %v", err, fk.attached, fk.detached)
 	}
 	if err := c.UpdateClientACR(ctx, spec); !errors.As(err, &ce) || len(fk.attached)+len(fk.detached) != 0 {

@@ -474,13 +474,16 @@ func (h *Hub) waitPreviousHook(ctx context.Context, id string) bool {
 // up (composeUp, under the lifecycle lock; lockApp → deliverLock). A
 // failure is reported (status) and op-recorded — the up is not rolled
 // back, and the lifecycle operation's success keeps that record. A hook
-// skipped because a timed-out run still runs is re-queued.
-func (h *Hub) runStartHooks(ctx context.Context, id string) {
+// skipped because a timed-out run still runs is re-queued. failures: one
+// line per failed hook — a background operation's running record keeps
+// the hook's own record from being written, so startUp makes each an
+// operation warning instead (Progress.Warn).
+func (h *Hub) runStartHooks(ctx context.Context, id string) (failures []string) {
 	h.mu.RLock()
 	t := h.findLocked(id)
 	if t == nil || len(t.Manifest.Hooks) == 0 {
 		h.mu.RUnlock()
-		return
+		return nil
 	}
 	tmpl := *t
 	h.mu.RUnlock()
@@ -489,7 +492,7 @@ func (h *Hub) runStartHooks(ctx context.Context, id string) {
 		start = start || slices.Contains(hk.When, templates.HookStart)
 	}
 	if !start {
-		return
+		return nil
 	}
 	l := h.deliverLock(id)
 	l.Lock()
@@ -514,7 +517,10 @@ func (h *Hub) runStartHooks(ctx context.Context, id string) {
 	failed := false
 	recordUnits(id, &delivered, r.units)
 	for _, u := range r.units {
-		failed = failed || (!u.OK && u.Skipped == "")
+		if !u.OK && u.Skipped == "" {
+			failed = true
+			failures = append(failures, fmt.Sprintf("start %s failed: %s", u.Unit, clip(u.Error, 300)))
+		}
 	}
 	h.saveDelivered(id, delivered)
 	if failed {
@@ -530,6 +536,7 @@ func (h *Hub) runStartHooks(ctx context.Context, id string) {
 	// Skipped start hooks (still running, directory down) are forced in
 	// the re-queued run, whatever trigger it merges into.
 	h.requeueHooks(id, TriggerStart, settings.EffectNone, r, false)
+	return failures
 }
 
 // forceList are force's hook names, sorted.

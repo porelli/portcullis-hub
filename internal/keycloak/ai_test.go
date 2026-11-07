@@ -240,7 +240,7 @@ func TestEnsureAIClientAppClient(t *testing.T) {
 	// attach profile, email, groups and the attributes scope).
 	var ce *keycloak.ConflictError
 	app := keycloak.ClientSpec{ClientID: "librechat-mcp", TemplateID: "librechat", Secret: "s3cret", RedirectURIs: spec.RedirectURIs, ACR: "pwd"}
-	if err := c.RegisterClient(ctx, app); !errors.As(err, &ce) {
+	if _, err := c.RegisterClient(ctx, app); !errors.As(err, &ce) {
 		t.Errorf("RegisterClient(ai_client) = %v, want *ConflictError", err)
 	}
 	if err := c.UpdateClientACR(ctx, app); !errors.As(err, &ce) {
@@ -290,7 +290,7 @@ func TestAIClientsProtected(t *testing.T) {
 			kc.SetClientURIs(cid, []string{"https://app.example.org/cb"}, nil)
 		}
 		s := keycloak.ClientSpec{ClientID: id, TemplateID: "app", Secret: "x", RedirectURIs: []string{"https://app.example.org/cb"}, AllowedHosts: []string{"app.example.org"}}
-		if err := c.RegisterClient(ctx, s); !errors.As(err, &ce) {
+		if _, err := c.RegisterClient(ctx, s); !errors.As(err, &ce) {
 			t.Errorf("RegisterClient(%s) = %v, want *ConflictError", id, err)
 		}
 		if err := c.UpdateClientHosts(ctx, s, nil, nil); !errors.As(err, &ce) {

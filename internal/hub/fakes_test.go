@@ -72,6 +72,10 @@ func (f *fakeRunner) end(name string) {
 // the up/down sequence); createHook can change the fake engine's
 // containers as compose would.
 func (f *fakeRunner) Create(ctx context.Context, p compose.Project) error {
+	// A Stop kills a running compose: cancelled, it does nothing.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	f.mu.Lock()
 	f.creates = append(f.creates, p.Name)
 	hook := f.createHook
@@ -89,6 +93,9 @@ func (f *fakeRunner) Creates() []string {
 }
 
 func (f *fakeRunner) Up(ctx context.Context, p compose.Project) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	f.begin("up", p.Name, p)
 	defer f.end(p.Name)
 	if f.upHook != nil {
@@ -437,6 +444,9 @@ type fakeIdP struct {
 	// claimFail: per client, EnsureSettingClaims fails with it.
 	claimAll  []string
 	claimFail map[string]error
+	// clients: the clients Keycloak has (RegisterClient adds, DeleteClient
+	// removes); RegisterClient reports created for one not listed.
+	clients map[string]bool
 }
 
 func (f *fakeIdP) claimAllCalls() []string {
@@ -662,6 +672,7 @@ func (f *fakeIdP) DeleteClient(ctx context.Context, clientID, owner string) erro
 		return f.deleteErr
 	}
 	f.deleted = append(f.deleted, clientID+":"+owner)
+	delete(f.clients, clientID)
 	return nil
 }
 
@@ -685,15 +696,20 @@ func (f *fakeIdP) accessCalls() []string {
 	return append([]string(nil), f.access...)
 }
 
-func (f *fakeIdP) RegisterClient(ctx context.Context, s keycloak.ClientSpec) error {
+func (f *fakeIdP) RegisterClient(ctx context.Context, s keycloak.ClientSpec) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.registerErr != nil {
-		return f.registerErr
+		return false, f.registerErr
 	}
 	f.specs = append(f.specs, s)
 	f.registered = append(f.registered, fmt.Sprintf("%s:%s:%s:%s:%s", s.ClientID, s.TemplateID, s.ACR, s.Secret, strings.Join(s.AllowedHosts, ",")))
-	return nil
+	if f.clients == nil {
+		f.clients = map[string]bool{}
+	}
+	created := !f.clients[s.ClientID]
+	f.clients[s.ClientID] = true
+	return created, nil
 }
 
 func (f *fakeIdP) UpdateClientACR(ctx context.Context, s keycloak.ClientSpec) error {

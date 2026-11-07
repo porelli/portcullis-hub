@@ -155,10 +155,14 @@ func (h *Hub) prepareUp(t *templates.Template) (*templates.Template, error) {
 // below) never looks at the reporter —, and a Stop (opCtx cancelled) ends it between them
 // — the downloads stop at once — with opCtx's error (isStopErr), nothing
 // rolled back. Without one (Background) it pulls nothing itself and waits
-// for nothing: compose does what it always did. Every Docker and compose
-// call but the downloads and the health wait still runs on its own
-// Background context: a Stop never cuts a create, an up or a take-down
-// short.
+// for nothing: compose does what it always did. compose create and up
+// run on opCtx too: a Stop kills them (the undo's compose down removes
+// whatever they made). With a reporter the project's volumes are listed
+// before and after the create, the new ones written to the operation's
+// Created ledger (recordCreatedVolumes), and the start hooks are the
+// settings step (a failure an operation warning). Every other Docker
+// call — probes, take-downs, the label checks — runs on its own
+// Background context: a Stop never cuts a take-down short.
 func (h *Hub) startUp(opCtx context.Context, live *templates.Template) error {
 	ctx := context.Background()
 	var p *startSteps
@@ -183,18 +187,39 @@ func (h *Hub) startUp(opCtx context.Context, live *templates.Template) error {
 			return err
 		}
 	}
+	// The project's volumes before the create (with a reporter): the ones
+	// the create adds are the operation's (Created) — a Stop removes only
+	// those. Not knowing them is a refusal: an undo must never guess.
+	var volsBefore map[string]bool
 	if p != nil {
 		if p.keys[StepImages] {
 			if err := h.pullImages(opCtx, p, live); err != nil {
 				return err
 			}
 		}
+		if h.engine != nil {
+			if volsBefore, err = h.volumeSet(ctx, live.ID); err != nil {
+				return statusErr(502, "listing the volumes of %s before creating it: %v", projectName(live.ID), err)
+			}
+		}
+		if err := opCtx.Err(); err != nil {
+			return err
+		}
 		p.Start(StepCreate)
 	}
 	// Create without starting, inspect the labels (image LABELs merge in),
-	// only then start: an image-label router is never live.
-	if err := h.compose.Create(ctx, h.project(live)); err != nil {
-		return err
+	// only then start: an image-label router is never live. On the
+	// operation's context: a Stop kills compose (compose down — the
+	// undo's — removes whatever it had made).
+	createErr := h.compose.Create(opCtx, h.project(live))
+	if volsBefore != nil {
+		h.recordCreatedVolumes(ctx, p.p, live.ID, volsBefore)
+	}
+	if createErr != nil {
+		if err := opCtx.Err(); err != nil {
+			return fmt.Errorf("compose create: %w", err)
+		}
+		return createErr
 	}
 	if p != nil {
 		p.Done(StepCreate)
@@ -236,11 +261,11 @@ func (h *Hub) startUp(opCtx context.Context, live *templates.Template) error {
 		} else {
 			close(watched)
 		}
-		upErr = h.compose.Up(ctx, h.project(live))
+		upErr = h.compose.Up(opCtx, h.project(live))
 		stopWatch()
 		<-watched
 	} else {
-		upErr = h.compose.Up(ctx, h.project(live))
+		upErr = h.compose.Up(opCtx, h.project(live))
 	}
 	if err := upErr; err != nil {
 		if len(probes) > 0 {
@@ -254,6 +279,9 @@ func (h *Hub) startUp(opCtx context.Context, live *templates.Template) error {
 			if derr := h.forceDown(ctx, live); derr != nil {
 				return statusErr(500, "compose up of %s failed (%v) and taking it down failed too: the project may still be running (%v)", live.ID, err, derr)
 			}
+		}
+		if cerr := opCtx.Err(); cerr != nil {
+			return fmt.Errorf("compose up: %w", cerr)
 		}
 		return err
 	}
@@ -288,11 +316,22 @@ func (h *Hub) startUp(opCtx context.Context, live *templates.Template) error {
 		}
 	}
 	// The start hooks (when: start) after the up, under the lifecycle
-	// lock still held: reported and op-recorded, never a rollback.
-	h.runStartHooks(context.Background(), live.ID)
+	// lock still held: reported and op-recorded, never a rollback (with a
+	// reporter, whose running record keeps the hook's own from being
+	// written: each failure an operation warning).
+	if p != nil {
+		p.Start(StepSettings)
+	}
+	failures := h.runStartHooks(context.Background(), live.ID)
 	// AI companions owing a revoke_all (switched while stopped): run it
 	// now, before they are rendered (contract §15.5).
 	h.pendingAIAfterStart(live)
+	if p != nil {
+		for _, f := range failures {
+			p.Warn(f)
+		}
+		p.Done(StepSettings)
+	}
 	// The claims (LLDAP and Keycloak) in the background: a start never
 	// waits for them.
 	h.deliverClaimsAfterStart(live.ID)
@@ -442,12 +481,19 @@ func (h *Hub) Enable(id string) error {
 }
 
 func (h *Hub) enableLocked(id string) (rolledBack bool, err error) {
-	return h.enableInner(id, false)
+	return h.enableInner(context.Background(), id, false)
 }
 
 // enableInner is enableLocked; restoring lets a restore enable the
-// instance it is restoring (state "restoring").
-func (h *Hub) enableInner(id string, restoring bool) (rolledBack bool, err error) {
+// instance it is restoring (state "restoring"). ctx carries the
+// operation's reporter (the keycloak step and startUp's, each only when
+// planned; the clients this call created go into its Created ledger)
+// and its Stop: a cancelled ctx ends it between the steps — and kills a
+// running compose — with ctx's error (isStopErr), nothing rolled back
+// here (the Stop's undo does it) and nothing committed.
+func (h *Hub) enableInner(ctx context.Context, id string, restoring bool) (rolledBack bool, err error) {
+	prog := progressFrom(ctx)
+	kc := prog.planned(StepKeycloak)
 
 	// Phase 1 (under mu): validate and write local files — fast filesystem
 	// work that needs a consistent view of state. The directory snapshot
@@ -505,8 +551,24 @@ func (h *Hub) enableInner(id string, restoring bool) (rolledBack bool, err error
 	h.copyConfigFiles(&tmpl)
 
 	// Phase 2 (no mu): network / docker work that may take minutes.
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
 	if h.idp != nil {
+		kc.Start(StepKeycloak)
+		kcEnded := false
+		defer func() {
+			// Ended here before the step did: it failed (a Stop's stopped
+			// step is frozen).
+			if err != nil && !kcEnded && !isStopErr(err) {
+				kc.Fail(StepKeycloak, err)
+			}
+		}()
+		var made []string
 		for _, c := range tmpl.Manifest.Clients {
+			if err := ctx.Err(); err != nil {
+				return false, err
+			}
 			var err error
 			if c.AIClient {
 				// The AI page's MCP client goes through the AI client path
@@ -514,7 +576,14 @@ func (h *Hub) enableInner(id string, restoring bool) (rolledBack bool, err error
 				// (out of mcp-gate.json's clients), retried by every pass.
 				err = h.ensureInstanceAIClient(context.Background(), &tmpl)
 			} else {
-				err = h.idp.RegisterClient(context.Background(), h.clientSpec(&tmpl, c, acr))
+				var created bool
+				created, err = h.idp.RegisterClient(context.Background(), h.clientSpec(&tmpl, c, acr))
+				if created {
+					// Written at once: a Stop — also after a Hub restart —
+					// deletes exactly the clients this enable made.
+					prog.Created(CreatedKeycloakClients, c.ClientID)
+					made = append(made, c.ClientID)
+				}
 			}
 			var conflict *keycloak.ConflictError
 			switch {
@@ -546,8 +615,20 @@ func (h *Hub) enableInner(id string, restoring bool) (rolledBack bool, err error
 				log.Printf("instance %s: removing the %s callbacks after a failed enable failed: %v", id, keycloak.ForwardAuthClient, cerr)
 			}
 		}()
+		if len(made) > 0 {
+			kc.Detail(StepKeycloak, strings.Join(made, ", ")+" created")
+		}
+		kc.Done(StepKeycloak)
+		kcEnded = true
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
 	}
-	if err := h.composeUp(context.Background(), &tmpl); err != nil {
+	if err := h.composeUp(ctx, &tmpl); err != nil {
+		if cerr := ctx.Err(); cerr != nil {
+			// Stopped: the Stop's undo takes the project down.
+			return false, fmt.Errorf("%v: %w", err, cerr)
+		}
 		if !composeFailed(err) {
 			return false, err
 		}
@@ -558,7 +639,12 @@ func (h *Hub) enableInner(id string, restoring bool) (rolledBack bool, err error
 		return true, &StatusError{Status: 500, Err: fmt.Errorf("compose up failed: %w — rolled back: its containers and network were removed (volumes kept), the app stays disabled", err)}
 	}
 
-	// Phase 3 (under mu): commit.
+	// Phase 3 (under mu): commit — unless a Stop came first (its undo
+	// takes the started project down; a Stop after this point finds the
+	// operation finished).
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
 	h.mu.Lock()
 	h.st.SetEnabled(id, true)
 	if e, ok := h.st.Instances[id]; ok && e.State == state.InstanceCreated {

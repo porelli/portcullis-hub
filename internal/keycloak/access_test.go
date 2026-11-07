@@ -485,7 +485,7 @@ func TestBackchannelLogoutURL(t *testing.T) {
 	c := keycloak.New(kc.HTTP.URL, "admin", "admin")
 	url := "https://cloud.example.org/index.php/apps/user_oidc/backchannel-logout/Portcullis"
 	spec := keycloak.ClientSpec{ClientID: "nextcloud", TemplateID: "nextcloud", RedirectURIs: []string{"https://cloud.example.org/cb"}, BackchannelLogoutURL: url}
-	if err := c.RegisterClient(ctx, spec); err != nil {
+	if _, err := c.RegisterClient(ctx, spec); err != nil {
 		t.Fatal(err)
 	}
 	a := kc.ClientByClientID("nextcloud").Attributes
@@ -498,14 +498,14 @@ func TestBackchannelLogoutURL(t *testing.T) {
 			cl.Attributes["backchannel.logout.url"] = "https://stale.example.org/x"
 		}
 	})
-	if err := c.RegisterClient(ctx, spec); err != nil {
+	if _, err := c.RegisterClient(ctx, spec); err != nil {
 		t.Fatal(err)
 	}
 	if got := kc.ClientByClientID("nextcloud").Attributes["backchannel.logout.url"]; got != url {
 		t.Errorf("reconciled: %s", got)
 	}
 	spec.BackchannelLogoutURL = ""
-	if err := c.RegisterClient(ctx, spec); err != nil {
+	if _, err := c.RegisterClient(ctx, spec); err != nil {
 		t.Fatal(err)
 	}
 	if got := kc.ClientByClientID("nextcloud").Attributes["backchannel.logout.url"]; got != url {

@@ -723,7 +723,7 @@ func (h *Hub) applyRestore(id string, sb *staged, plan []volumePlan, wasEnabled,
 		return air, err
 	}
 	if wasEnabled {
-		if _, err := h.enableInner(id, true); err != nil {
+		if _, err := h.enableInner(context.Background(), id, true); err != nil {
 			return air, err
 		}
 		w, aerr := h.restoreAIAfterStart(id, actor)
