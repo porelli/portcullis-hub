@@ -51,7 +51,7 @@ func (h *Hub) DeleteInstance(id, confirm string, actor directory.Actor) (res *De
 	_, _, err = h.runOpSync(id, OpDelete, actor, []Step{}, func(ctx context.Context, ready func()) (map[string]string, []string, error) {
 		var derr error
 		res, derr = h.deleteInstance(ctx, id, confirm, actor, ready)
-		return nil, nil, derr
+		return deleteResult(res, derr)
 	})
 	return res, err
 }
@@ -371,6 +371,9 @@ func (h *Hub) deleteSteps(stopCtx context.Context, p *Progress, id string, actor
 	// refused. A Stop accepted first left NoReturn without effect: undone.
 	p.Start(StepVolumes)
 	p.NoReturn()
+	if h.testHookCommit != nil {
+		h.testHookCommit(id, "no_return")
+	}
 	if err := stopCtx.Err(); err != nil {
 		return err
 	}

@@ -211,7 +211,7 @@ func (h *Hub) RestoreInstance(id, archive string, actor directory.Actor) (res *R
 	_, _, err = h.runOpSync(id, OpRestore, actor, []Step{}, func(ctx context.Context, ready func()) (map[string]string, []string, error) {
 		var rerr error
 		res, rerr = h.restoreInstance(ctx, id, archive, actor, ready)
-		return nil, nil, rerr
+		return restoreResult(res, archive, ""), restoreWarnings(res), rerr
 	})
 	return res, err
 }
@@ -945,7 +945,7 @@ func (h *Hub) RestoreInstanceAsWith(archive, newID string, actor directory.Actor
 	_, _, err = h.runOpSync(newID, OpRestore, actor, []Step{}, func(ctx context.Context, ready func()) (map[string]string, []string, error) {
 		var rerr error
 		res, rerr = h.restoreInstanceAs(ctx, archive, newID, actor, hosts, ready)
-		return nil, nil, rerr
+		return restoreResult(res, archive, newID), restoreWarnings(res), rerr
 	})
 	return res, err
 }

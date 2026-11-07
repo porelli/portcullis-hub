@@ -41,7 +41,7 @@ func (h *Hub) CreateInstanceAs(templateID, id string, hosts map[string]string, a
 	_, _, err = h.runOpSync(id, OpCreate, actor, []Step{}, func(ctx context.Context, ready func()) (map[string]string, []string, error) {
 		var cerr error
 		res, cerr = h.createInstance(ctx, templateID, id, hosts, actor, ready)
-		return nil, nil, cerr
+		return createResult(res, id, cerr)
 	})
 	return res, err
 }
@@ -53,11 +53,17 @@ func (h *Hub) CreateInstanceAs(templateID, id string, hosts map[string]string, a
 func (h *Hub) StartCreate(templateID, id string, hosts map[string]string, actor directory.Actor) (*AsyncOp, error) {
 	return h.startAsync(id, OpCreate, actor, []Step{}, func(ctx context.Context, ready func()) (map[string]string, []string, error) {
 		res, err := h.createInstance(ctx, templateID, id, hosts, actor, ready)
-		if err != nil {
-			return nil, res.Warnings, err
-		}
-		return map[string]string{"instance": id}, res.Warnings, nil
+		return createResult(res, id, err)
 	})
+}
+
+// createResult is a create's op record result ("instance" once it
+// succeeded) and warnings.
+func createResult(res *CreateResult, id string, err error) (map[string]string, []string, error) {
+	if err != nil {
+		return nil, res.Warnings, err
+	}
+	return map[string]string{"instance": id}, res.Warnings, nil
 }
 
 // createInstance is the create CreateInstanceAs and StartCreate run: the

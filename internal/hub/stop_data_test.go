@@ -132,7 +132,7 @@ func TestStopInterruptedBackup(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "20261107T100000Z.tar.partial"), []byte("x"), 0600)
 	t0 := time.Date(2026, 11, 7, 10, 0, 0, 0, time.UTC)
 	f.h.recordOp("grafana-b", OpRecord{Op: OpBackup, OpID: "crashed2", At: t0, Running: true, Actor: "alice", Stoppable: true,
-		Before: map[string]string{"running": "true"},
+		Before: map[string]string{"running": "true", "stopped": "true"},
 		Steps: []Step{{Key: StepStop, Label: "s", State: StepDone}, {Key: "volume:grafana-data", Label: "v", State: StepRunning},
 			{Key: StepArchive, Label: "a", State: StepWaiting}, {Key: StepStart, Label: "st", State: StepWaiting}},
 		Created: &Created{}})
@@ -315,6 +315,38 @@ func (b *blockingGroups) CreateInstanceGroup(ctx context.Context, actor director
 	return b.fakeGroups.CreateInstanceGroup(ctx, actor, name)
 }
 
+// TestSyncWrappersKeepResult: the synchronous methods' records carry
+// the same result and warnings as the background operations'.
+func TestSyncWrappersKeepResult(t *testing.T) {
+	f, _, _ := grafanaB(t)
+	e, err := f.h.BackupInstance("grafana-b", directory.Human("root"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := f.h.LastOp("grafana-b"); r.Result["archive"] != e.Archive {
+		t.Errorf("backup record %+v", r)
+	}
+	if _, err := f.h.RestoreInstanceAs(e.Archive, "grafana-c", directory.Human("root")); err != nil {
+		t.Fatal(err)
+	}
+	if r := f.h.LastOp("grafana-c"); r.Result["instance"] != "grafana-c" || r.Result["archive"] != e.Archive {
+		t.Errorf("restore-as record %+v", r)
+	}
+	if _, err := f.h.CreateInstanceAs("grafana", "grafana-d", nil, directory.Human("root")); err != nil {
+		t.Fatal(err)
+	}
+	if r := f.h.LastOp("grafana-d"); r.Result["instance"] != "grafana-d" {
+		t.Errorf("create record %+v", r)
+	}
+	res, err := f.h.DeleteInstance("grafana-c", "grafana-c", directory.Human("root"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := f.h.LastOp("grafana-c"); r.Result["backup"] != res.Backup || r.Op != OpDelete {
+		t.Errorf("delete record %+v", r)
+	}
+}
+
 func TestCreateSteps(t *testing.T) {
 	f := newInstanceFixture(t, nil)
 	g := &fakeGroups{}
@@ -392,8 +424,35 @@ func TestDeleteSteps(t *testing.T) {
 
 // TestStopDeleteBeforeNoReturn: the delete is cancelled and the app is
 // back as before; the delete's backup stays listed.
+// seedPersonState gives grafana-b a credential's metadata and an AI
+// state entry (removed only from the volumes step on).
+func seedPersonState(f *fixture) {
+	f.h.mu.Lock()
+	defer f.h.mu.Unlock()
+	f.h.st.Credentials["grafana-b"] = map[string]map[string]state.Credential{"pw": {"alice": {ID: "c1", Version: 1, UUID: "u1", CreatedBy: "alice"}}}
+	if f.h.st.AIInstances == nil {
+		f.h.st.AIInstances = map[string]state.AIInstance{}
+	}
+	f.h.st.AIInstances["grafana-b"] = state.AIInstance{Providers: []string{"p1"}}
+	f.h.saveLocked()
+}
+
+// personStateKept: seedPersonState's entries are still there.
+func personStateKept(t *testing.T, f *fixture) {
+	t.Helper()
+	f.h.mu.RLock()
+	defer f.h.mu.RUnlock()
+	if c := f.h.st.Credentials["grafana-b"]["pw"]["alice"]; c.ID != "c1" {
+		t.Errorf("credential gone: %+v", f.h.st.Credentials)
+	}
+	if _, ok := f.h.st.AIInstances["grafana-b"]; !ok {
+		t.Error("AI state gone")
+	}
+}
+
 func TestStopDeleteBeforeNoReturn(t *testing.T) {
 	f, audit, groups := grafanaB(t)
+	seedPersonState(f)
 	reached, release := blockStep(t, f.h, StepStop)
 	a, err := f.h.StartDelete("grafana-b", "grafana-b", directory.Human("alice"))
 	if err != nil {
@@ -418,6 +477,55 @@ func TestStopDeleteBeforeNoReturn(t *testing.T) {
 	if e := auditEntry(audit, "delete.stop"); e.Result != "ok" || e.Detail != StepStop {
 		t.Errorf("audit %+v", e)
 	}
+	personStateKept(t, f)
+}
+
+// TestStopDeleteAtVolumesStart: a Stop accepted at the start of the
+// volumes step before NoReturn leaves NoReturn without effect and the
+// delete is cancelled (nothing removed); one after NoReturn is refused
+// 409 and the delete completes.
+func TestStopDeleteAtVolumesStart(t *testing.T) {
+	t.Run("stop first", func(t *testing.T) {
+		f, _, _ := grafanaB(t)
+		seedPersonState(f)
+		reached, release := blockStep(t, f.h, StepVolumes) // Start runs the hook before NoReturn
+		a, err := f.h.StartDelete("grafana-b", "grafana-b", directory.Human("alice"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := stopAndWait(t, f.h, "grafana-b", a.OpID, reached, release)
+		if !r.Stopped() || r.PointOfNoReturn {
+			t.Fatalf("record %+v", r)
+		}
+		personStateKept(t, f)
+		if f.engine.volumeFiles("portcullis_grafana-b-grafana-data")["grafana.db"].Body != "v1" || !f.h.IsEnabled("grafana-b") || !grafanaRunning(f) {
+			t.Error("not back as before")
+		}
+	})
+	t.Run("no return first", func(t *testing.T) {
+		f, _, _ := grafanaB(t)
+		reached, release := make(chan struct{}), make(chan struct{})
+		f.h.testHookCommit = func(id, stage string) {
+			if stage == "no_return" {
+				close(reached)
+				<-release
+			}
+		}
+		a, err := f.h.StartDelete("grafana-b", "grafana-b", directory.Human("alice"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		<-reached
+		rec, err := f.h.StopOp("grafana-b", directory.Human("bob"))
+		if statusOf(err) != 409 || !strings.Contains(err.Error(), "past the point of no return") || rec == nil || !rec.PointOfNoReturn {
+			t.Errorf("stop: %+v %v", rec, err)
+		}
+		close(release)
+		r := waitOp(t, f.h, "grafana-b", a.OpID)
+		if !r.OK || r.StoppedAt != nil || f.h.Template("grafana-b") != nil {
+			t.Fatalf("record %+v", r)
+		}
+	})
 }
 
 // TestStopDeleteAfterNoReturn: from the volumes step a Stop is refused
@@ -462,7 +570,7 @@ func TestStopInterruptedDeleteBeforeNoReturn(t *testing.T) {
 	f.runner.onDown(projectName("grafana-b"))
 	t0 := time.Date(2026, 11, 7, 10, 0, 0, 0, time.UTC)
 	f.h.recordOp("grafana-b", OpRecord{Op: OpDelete, OpID: "crashed3", At: t0, Running: true, Actor: "alice", Stoppable: true,
-		Before: map[string]string{"running": "true", "enabled": "true", "state": "", "had_entry": "true"},
+		Before: map[string]string{"running": "true", "stopped": "true", "enabled": "true", "state": "", "had_entry": "true"},
 		Steps: []Step{{Key: StepBackup, Label: "b", State: StepDone}, {Key: StepStop, Label: "s", State: StepRunning},
 			{Key: StepVolumes, Label: "v", State: StepWaiting}},
 		Created: &Created{}})
@@ -502,10 +610,70 @@ func TestInterruptedNotStoppable(t *testing.T) {
 		{OpRecord{Op: OpCreate, Steps: steps}, true},
 	} {
 		r := c.r
-		r.Running = true
+		r.Running, r.Stoppable = true, true
 		markInterrupted(&r)
 		if r.Stoppable != c.want {
 			t.Errorf("%s %v: stoppable %v", c.r.Op, c.r.Before, r.Stoppable)
 		}
+	}
+	// A record whose gate was closed (it committed: stoppable false while
+	// running, not stopping) stays not stoppable, whatever the op; one
+	// interrupted while its undo ran (stopping) is stoppable again.
+	for _, op := range []string{OpCreate, OpBackup, OpDelete, OpEnable, OpDisable} {
+		r := OpRecord{Op: op, Steps: steps, Running: true}
+		markInterrupted(&r)
+		if r.Stoppable {
+			t.Errorf("committed %s: stoppable", op)
+		}
+		r = OpRecord{Op: op, Steps: steps, Running: true, Stopping: true}
+		markInterrupted(&r)
+		if !r.Stoppable {
+			t.Errorf("stopping %s: not stoppable", op)
+		}
+	}
+}
+
+// TestCommittedCreateNotStoppableAfterRestart: a create interrupted
+// after its gate closed comes back stoppable false (the gate persisted).
+func TestCommittedCreateNotStoppableAfterRestart(t *testing.T) {
+	f := newInstanceFixture(t, nil)
+	f.h.SetGroups(&fakeGroups{})
+	a, err := f.h.StartCreate("grafana", "grafana-b", nil, directory.Human("alice"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := waitOp(t, f.h, "grafana-b", a.OpID)
+	// As written while it ran past its gate: running, stoppable false.
+	r.Running, r.OK = true, false
+	f.h.recordOp("grafana-b", r)
+	f.h.loadOps()
+	if got := f.h.LastOp("grafana-b"); !got.Interrupted || got.Stoppable {
+		t.Fatalf("record %+v", got)
+	}
+	if _, err := f.h.StopOp("grafana-b", directory.Human("bob")); statusOf(err) != 409 {
+		t.Errorf("stop: %v", err)
+	}
+	if f.h.Template("grafana-b") == nil {
+		t.Error("the committed instance was removed")
+	}
+}
+
+// TestStopBackupNotRunningStartsNothing: a backup that never took the
+// app down (it wasn't running) starts nothing when stopped.
+func TestStopBackupNotRunningStartsNothing(t *testing.T) {
+	f, _, _ := grafanaB(t)
+	f.runner.onDown(projectName("grafana-b"))
+	reached, release := blockStep(t, f.h, "volume:grafana-data")
+	a, err := f.h.StartBackup("grafana-b", directory.Human("alice"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := len(f.runner.Calls())
+	r := stopAndWait(t, f.h, "grafana-b", a.OpID, reached, release)
+	if !r.Stopped() || r.Before["stopped"] != "" || stepOf(r, UndoStart).Key != "" {
+		t.Fatalf("record %+v", r)
+	}
+	if calls := f.runner.Calls()[n:]; len(calls) != 0 || grafanaRunning(f) {
+		t.Errorf("started: %v", calls)
 	}
 }

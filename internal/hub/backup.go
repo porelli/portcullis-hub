@@ -293,6 +293,9 @@ func (h *Hub) BackupInstance(id string, actor directory.Actor) (entry *BackupEnt
 	_, _, err = h.runOpSync(id, OpBackup, actor, []Step{}, func(ctx context.Context, ready func()) (map[string]string, []string, error) {
 		var berr error
 		entry, berr = h.backupInstance(ctx, id, actor, ready)
+		if entry != nil {
+			return map[string]string{"archive": entry.Archive}, nil, berr
+		}
 		return nil, nil, berr
 	})
 	return entry, err
@@ -351,6 +354,11 @@ const (
 // beforeRunning: the op record's Before key saying whether the project
 // ran when the backup started ("true" / "false"; a Stop starts it again).
 const beforeRunning = "running"
+
+// beforeStopped: the op record's Before key set ("true") right before
+// the operation's backup takes the running project down: only then does
+// a Stop start it again.
+const beforeStopped = "stopped"
 
 // backupLocked is backupCtx without a reporter or a Stop.
 func (h *Hub) backupLocked(id, reason string, keepStopped bool) (*BackupEntry, error) {
@@ -501,6 +509,7 @@ func (h *Hub) backupCtx(ctx context.Context, id, reason string, keepStopped bool
 	}
 	if running {
 		p.Start(StepStop)
+		op.Before(beforeStopped, "true")
 		if err := h.stopProject(tg); err != nil {
 			err = statusErr(500, "stopping %s for the backup failed (nothing was written): %v", id, err)
 			p.Fail(StepStop, err)

@@ -162,6 +162,9 @@ func (h *Hub) loadOps() {
 // into a new id: removed, both RecoverRestores) and any operation past
 // its point of no return (a delete stays "deleting").
 func markInterrupted(r *OpRecord) {
+	// Its Stop gate was closed (CloseStop wrote stoppable false while it
+	// ran, not stopping): it committed, nothing is undone any more.
+	committed := r.Running && !r.Stoppable && !r.Stopping
 	r.Running, r.OK, r.Status, r.Interrupted, r.Stopping = false, false, 500, true, false
 	r.Error = "interrupted: the Hub stopped while this " + r.Op + " was running — check the instance and run it again"
 	for i := range r.Steps {
@@ -169,7 +172,7 @@ func markInterrupted(r *OpRecord) {
 			r.Steps[i].State = StepStopped
 		}
 	}
-	r.Stoppable = len(r.Steps) > 0 && r.Op != OpRestore && !r.PointOfNoReturn
+	r.Stoppable = len(r.Steps) > 0 && r.Op != OpRestore && !r.PointOfNoReturn && !committed
 }
 
 // validOpKey: an op record key loadOps keeps — an instance id, a shared

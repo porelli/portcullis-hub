@@ -288,16 +288,20 @@ func (h *Hub) StartRestoreAs(archive, newID string, actor directory.Actor, hosts
 // stop, volumes (the point of no return), keycloak, groups, files.
 func (h *Hub) StartDelete(id, confirm string, actor directory.Actor) (*AsyncOp, error) {
 	return h.startAsync(id, OpDelete, actor, []Step{}, func(ctx context.Context, ready func()) (map[string]string, []string, error) {
-		res, err := h.deleteInstance(ctx, id, confirm, actor, ready)
-		if res == nil {
-			return nil, nil, err
-		}
-		var result map[string]string
-		if res.Backup != "" {
-			result = map[string]string{"backup": res.Backup}
-		}
-		return result, res.Warnings, err
+		return deleteResult(h.deleteInstance(ctx, id, confirm, actor, ready))
 	})
+}
+
+// deleteResult is a delete's op record result ("backup") and warnings.
+func deleteResult(res *DeleteResult, err error) (map[string]string, []string, error) {
+	if res == nil {
+		return nil, nil, err
+	}
+	var result map[string]string
+	if res.Backup != "" {
+		result = map[string]string{"backup": res.Backup}
+	}
+	return result, res.Warnings, err
 }
 
 func restoreResult(res *RestoreResult, archive, newID string) map[string]string {

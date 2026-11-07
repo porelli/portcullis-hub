@@ -90,7 +90,7 @@ func (h *Hub) undoBackup(id string, p *Progress) error {
 	steps := []undoStep{{UndoArchive, "Deleting the partial archive", copied, func() error {
 		return h.removePartialBackups(id)
 	}}}
-	if rec.Before[beforeRunning] == "true" && stepRan(rec, StepStop) {
+	if rec.Before[beforeStopped] == "true" {
 		steps = append(steps, undoStep{UndoStart, "Starting the app again", []string{StepStop}, func() error {
 			return h.startAgainIfEnabled(id)
 		}})
@@ -141,7 +141,7 @@ func (h *Hub) undoRestore(id string, p *Progress) error {
 				return h.removePartialBackups(id)
 			}})
 		}
-		if rec.Before[beforeRunning] == "true" && stepRan(rec, StepPreBackup) {
+		if rec.Before[beforeStopped] == "true" {
 			steps = append(steps, undoStep{UndoStart, "Starting the app again", []string{StepPreBackup}, func() error {
 				return h.startAgainIfEnabled(id)
 			}})
@@ -251,7 +251,7 @@ func (h *Hub) undoDelete(id string, p *Progress) error {
 				_, err := h.enableInner(context.Background(), id, false)
 				return err
 			}
-			if b[beforeRunning] == "true" {
+			if b[beforeStopped] == "true" {
 				return h.startAgainIfEnabled(id)
 			}
 			return nil
