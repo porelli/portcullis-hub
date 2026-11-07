@@ -221,6 +221,9 @@ func (s *Server) groupConsequences(ctx context.Context, args json.RawMessage, li
 	g := argField(args, "group")
 	m := s.guards(ctx)
 	why, ok := groupGuard(m, g)
+	if why == "" && ok {
+		why = s.instanceGroupOf(g)
+	}
 	switch {
 	case !ok:
 		return []string{line, "The directory couldn't say whether " + g + " grants rights: treat it as one that does."}
@@ -272,6 +275,17 @@ func (s *Server) attrsWiden(ctx context.Context, attrs map[string][]string) (str
 		if gs := fieldGroups(m, f); len(gs) > 0 {
 			return "the rules of " + strings.Join(gs, ", ") + " use " + f, true
 		}
+		// A rule of an instance's access or admin group (final review I1).
+		for rf, gs := range m.RuleFields {
+			if !strings.EqualFold(rf, f) {
+				continue
+			}
+			for _, g := range gs {
+				if why := s.instanceGroupOf(g); why != "" {
+					return "the rule of " + g + " (" + why + ") uses " + f, true
+				}
+			}
+		}
 	}
 	return "", true
 }
@@ -298,10 +312,13 @@ func (s *Server) personConsequences(what string) func(context.Context, json.RawM
 
 // prestaged: the groups instance id of t would use (its access / admin
 // group: users_<id> / admin_<id>, or a default instance's manifest
-// groups) that already exist with members → those members (T18 fix round
-// 1: an AI that pre-staged admin_foo and then creates foo hands its
-// members the app's admin rights). ok false = can't say (no template,
-// the directory unreadable): fail closed.
+// groups) that already have people → those people (T18 fix round 1: an
+// AI that pre-staged admin_foo and then creates foo hands them the app's
+// admin rights). People = current members ∪ who directory.yaml puts in
+// it before the evaluator runs (Membership.Staged: rule matches, include
+// exceptions — final review I1); a group with a rule counts as staged
+// even when it matches nobody yet. ok false = can't say (no template, the
+// directory unreadable): fail closed.
 func (s *Server) prestaged(ctx context.Context, t *templates.Template, id string) (map[string][]string, bool) {
 	if t == nil {
 		return nil, false
@@ -316,11 +333,57 @@ func (s *Server) prestaged(ctx context.Context, t *templates.Template, id string
 		if g == "" {
 			continue
 		}
-		if ms := membersOf(m, g); len(ms) > 0 {
-			out[g] = ms
+		people := slices.Clone(membersOf(m, g))
+		staged, has := stagedOf(m, g)
+		people = append(people, staged...)
+		slices.Sort(people)
+		people = slices.Compact(people)
+		if len(people) > 0 || has {
+			out[g] = people
 		}
 	}
 	return out, true
+}
+
+// stagedOf is Membership.Staged for group (case-insensitive); has: the
+// group has a rule or include exceptions.
+func stagedOf(m *directory.Membership, group string) (people []string, has bool) {
+	for g, ps := range m.Staged {
+		if strings.EqualFold(g, group) {
+			people = append(people, ps...)
+			has = true
+		}
+	}
+	return people, has
+}
+
+// instanceGroupOf: why group is an existing instance's derived group
+// (its access or admin group; "" = it isn't). Adding people to one by a
+// rule or an exception hands them that app at once (final review I1).
+func (s *Server) instanceGroupOf(group string) string {
+	if group == "" {
+		return ""
+	}
+	for _, a := range s.Hub.DirectoryApps() {
+		switch {
+		case a.AdminGroup != "" && strings.EqualFold(a.AdminGroup, group):
+			return "the admin group of app " + a.ID
+		case a.AccessGroup != "" && strings.EqualFold(a.AccessGroup, group):
+			return "the access group of app " + a.ID
+		}
+	}
+	return ""
+}
+
+// ruleClass: set_group_rule, convert_group, add_exception and
+// remove_exception — groupClass, and D on an instance's access or admin
+// group (a rule or an exception adds people there without a member
+// call).
+func (s *Server) ruleClass(ctx context.Context, args json.RawMessage) ToolClass {
+	if s.instanceGroupOf(argField(args, "group")) != "" {
+		return ClassDestructive
+	}
+	return s.groupClass(ctx, args)
 }
 
 // prestagedLines are prestaged's consequences.
@@ -331,7 +394,7 @@ func (s *Server) prestagedLines(ctx context.Context, t *templates.Template, id s
 	}
 	var lines []string
 	for _, g := range slices.Sorted(maps.Keys(pre)) {
-		lines = append(lines, g+" already exists with members "+peopleList(pre[g])+": they get what it gives in "+id+" at once.")
+		lines = append(lines, g+" already exists with members "+peopleList(pre[g])+" (current members, rule matches and include exceptions): they get what it gives in "+id+" at once, and whoever its rule matches later too.")
 	}
 	return lines
 }
@@ -824,7 +887,7 @@ func (s *Server) registerDirectoryTools() {
 				out := ruleJSON(rule)
 				out["status"] = "saved"
 				return out, nil
-			}), s.groupClass, argReader("group"), func(ctx context.Context, args json.RawMessage) []string {
+			}), s.ruleClass, argReader("group"), func(ctx context.Context, args json.RawMessage) []string {
 			r := argField(args, "rule")
 			line := "Sets the rule of " + argField(args, "group") + " to " + r + ": whoever it matches joins."
 			if r == "" {
@@ -844,7 +907,7 @@ func (s *Server) registerDirectoryTools() {
 				out := ruleJSON(rule)
 				out["status"] = "saved"
 				return out, nil
-			}), s.groupClass, argReader("group"), func(ctx context.Context, args json.RawMessage) []string {
+			}), s.ruleClass, argReader("group"), func(ctx context.Context, args json.RawMessage) []string {
 			a, _ := decode[convertArgs](args)
 			return s.groupConsequences(ctx, args, "Makes "+a.Group+" a rule group ("+a.Rule+"): joining "+peopleList(a.Preview.Joining)+".", a.Rule)
 		}),
@@ -858,7 +921,7 @@ func (s *Server) registerDirectoryTools() {
 					return nil, err
 				}
 				return map[string]string{"status": "saved"}, nil
-			}), s.groupClass, argReader("group"), func(ctx context.Context, args json.RawMessage) []string {
+			}), s.ruleClass, argReader("group"), func(ctx context.Context, args json.RawMessage) []string {
 			return s.groupConsequences(ctx, args, "Adds an exception for "+argField(args, "user")+" to "+argField(args, "group")+".", "")
 		}),
 		perCallCtx(dirTool(s, "remove_exception", "Remove a person's exception from a rule group (a kept-out person the rule matches joins). On a guarding group it needs your confirmation in the browser.",
@@ -867,7 +930,7 @@ func (s *Server) registerDirectoryTools() {
 					return nil, err
 				}
 				return map[string]string{"status": "removed"}, nil
-			}), s.groupClass, argReader("group"), func(ctx context.Context, args json.RawMessage) []string {
+			}), s.ruleClass, argReader("group"), func(ctx context.Context, args json.RawMessage) []string {
 			return s.groupConsequences(ctx, args, "Removes "+argField(args, "username")+"'s exception from "+argField(args, "group")+" (kept out: they join if the rule matches).", "")
 		}),
 		dirD(dirTool(s, "set_permission", "Grant a delegated permission (edit_details, invite, remove) to a group, or to nobody (group \"\"). Always needs your confirmation in the browser.",

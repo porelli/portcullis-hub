@@ -594,3 +594,80 @@ func TestGuardsReadOncePerCall(t *testing.T) {
 		t.Errorf("without a memo: %d reads", cl.n)
 	}
 }
+
+// Final review hub-mcp I1: a pre-staged group counts its rule matches and
+// include exceptions, not only its members — the evaluator hasn't run yet
+// — so create_instance / enable_instance over it is D; and a rule or
+// exception change on an existing instance's access or admin group is D.
+func TestPrestagedRuleAndExceptionsNeedConfirmation(t *testing.T) {
+	e, _ := directoryToolEnv(t)
+	mustDo(t, e.hub, "root", "POST", "/api/directory/fields", `{"name":"clearance","label":"Clearance","kind":"text","admin_only":true}`, 200)
+	e.ll.AddGroup("admin_grafana-r")
+	e.ll.AddGroup("admin_grafana-x")
+	for _, g := range []string{"admin_grafana-r", "admin_grafana-x"} {
+		mustDo(t, e.hub, "root", "POST", "/api/directory/groups/"+g+"/convert", `{"rule":"clearance = \"x\"","preview":{"matching":[],"kept_as_exception":[],"joining":[],"expiry_dropped":[]}}`, 200)
+	}
+	// Rule match: set_details is W (nothing guarding uses the field yet).
+	if txt, isErr, conf := e.tool(t, "set_details", map[string]any{"username": "dana", "attrs": map[string]any{"clearance": []string{"x"}}}); isErr || conf != "" {
+		t.Fatalf("set_details = %q %v (confirmation %q)", txt, isErr, conf)
+	}
+	// Include exception: a rule group whose rule matches nobody.
+	e.ll.AddGroup("admin_grafana-y")
+	mustDo(t, e.hub, "root", "POST", "/api/directory/groups/admin_grafana-y/convert", `{"rule":"clearance = \"never\"","preview":{"matching":[],"kept_as_exception":[],"joining":[],"expiry_dropped":[]}}`, 200)
+	if txt, isErr, conf := e.tool(t, "add_exception", map[string]any{"group": "admin_grafana-y", "user": "dana", "include": true, "reason": "test"}); isErr || conf != "" {
+		t.Fatalf("add_exception = %q %v (confirmation %q)", txt, isErr, conf)
+	}
+	if got := membersOf(e.s.loadGuards(), "admin_grafana-r"); len(got) != 0 {
+		t.Fatalf("the evaluator ran: members %v", got)
+	}
+	for _, id := range []string{"grafana-r", "grafana-y"} {
+		txt, isErr := resultText(e.call(t, "/mcp/admin", "root", "2025-11-25", "create_instance", map[string]any{"template": "grafana", "id": id}, nil))
+		m := confirmTextRe.FindStringSubmatch(txt)
+		if !isErr || m == nil {
+			t.Fatalf("create_instance %s over a staged admin group = %q, want a confirmation", id, txt)
+		}
+		v, err := e.s.Hub.ConfirmationPage(hub.ListenerHub, m[1], "root")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Join(v.Consequences, " "); !strings.Contains(got, "admin_"+id+" already exists with members dana") {
+			t.Errorf("%s consequences %q", id, got)
+		}
+	}
+	// A rule matching nobody yet still counts as staged.
+	e.ll.AddGroup("admin_grafana-z")
+	mustDo(t, e.hub, "root", "POST", "/api/directory/groups/admin_grafana-z/convert", `{"rule":"clearance = \"none\"","preview":{"matching":[],"kept_as_exception":[],"joining":[],"expiry_dropped":[]}}`, 200)
+	byName := map[string]Tool{}
+	for _, tl := range e.s.tools(ScopeAdmin) {
+		byName[tl.Name] = tl
+	}
+	if c := byName["create_instance"].ClassFor(context.Background(), json.RawMessage(`{"template":"grafana","id":"grafana-z"}`)); c != ClassDestructive {
+		t.Errorf("create over a rule group = %s", c)
+	}
+	if c := byName["create_instance"].ClassFor(context.Background(), json.RawMessage(`{"template":"grafana","id":"grafana-q"}`)); c != ClassWrite {
+		t.Errorf("create with no groups = %s", c)
+	}
+	// An existing instance's access group: rule and exception changes are D.
+	if err := e.s.Hub.CreateInstance("grafana", "grafana-q", nil); err != nil {
+		t.Fatal(err)
+	}
+	e.ll.AddGroup("users_grafana-q")
+	for _, c := range []struct {
+		tool string
+		args string
+	}{
+		{"add_exception", `{"group":"users_grafana-q","user":"dana","include":true,"reason":"x"}`},
+		{"remove_exception", `{"group":"users_grafana-q","username":"dana"}`},
+		{"set_group_rule", `{"group":"users_grafana-q","rule":"clearance = \"x\""}`},
+		{"convert_group", `{"group":"users_grafana-q","rule":"clearance = \"x\"","preview":{"matching":[],"kept_as_exception":[],"joining":[],"expiry_dropped":[]}}`},
+	} {
+		if cl := byName[c.tool].ClassFor(context.Background(), json.RawMessage(c.args)); cl != ClassDestructive {
+			t.Errorf("%s on an instance's access group = %s", c.tool, cl)
+		}
+	}
+	// set_details on a field the rule of an instance's group uses: D.
+	mustDo(t, e.hub, "root", "POST", "/api/directory/groups/users_grafana-q/convert", `{"rule":"clearance = \"q\"","preview":{"matching":[],"kept_as_exception":[],"joining":[],"expiry_dropped":[]}}`, 200)
+	if cl := byName["set_details"].ClassFor(context.Background(), json.RawMessage(`{"username":"dana","attrs":{"clearance":["q"]}}`)); cl != ClassDestructive {
+		t.Errorf("set_details on a field an instance group's rule uses = %s", cl)
+	}
+}

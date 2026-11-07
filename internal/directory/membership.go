@@ -3,9 +3,12 @@ package directory
 import (
 	"context"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/portcullis/hub/internal/rules"
 )
 
 // What the Hub's app settings need from the directory (contract §13,
@@ -61,6 +64,19 @@ type Membership struct {
 	// (AdminGroups; the service account excluded) — the targets whose
 	// passkeys or password hand over an administrator's account.
 	Administrators map[string]bool
+	// Staged: group → who directory.yaml would put in it now, before the
+	// evaluator runs (final review hub-mcp I1): for every group with a
+	// rule, the people the rule matches plus its active include
+	// exceptions minus the kept-out ones; for any group with active
+	// include exceptions, at least those people. Sorted, lowercase. A
+	// group with a rule is listed even when nobody matches yet (empty
+	// list). The Portcullis MCP counts these with Groups' members: a
+	// group that is pre-staged this way hands its people what it gives
+	// the moment an app makes it guard.
+	Staged map[string][]string
+	// RuleFields: field → every group whose rule uses it (sorted): setting
+	// it can change who is in them, guarding or not.
+	RuleFields map[string][]string
 }
 
 // Membership reads LLDAP and directory.yaml. LLDAP unavailable: 503;
@@ -139,7 +155,65 @@ func (s *Service) membershipOf(cfg *Config, sn *snapshot, now time.Time) *Member
 		}
 		m.Expired[e.User][e.Group] = true
 	}
+	m.Staged = s.stagedMembers(cfg, sn, now)
+	m.RuleFields = ruleFields(cfg)
 	return m
+}
+
+// ruleFields is Membership.RuleFields.
+func ruleFields(cfg *Config) map[string][]string {
+	out := map[string][]string{}
+	for name, gc := range cfg.Groups {
+		if gc == nil || gc.Rule == nil {
+			continue
+		}
+		for _, f := range rules.Fields(gc.Rule) {
+			if !slices.Contains(out[f], name) {
+				out[f] = append(out[f], name)
+			}
+		}
+	}
+	for f := range out {
+		sort.Strings(out[f])
+	}
+	return out
+}
+
+// stagedMembers is Membership.Staged.
+func (s *Service) stagedMembers(cfg *Config, sn *snapshot, now time.Time) map[string][]string {
+	out := map[string][]string{}
+	var d *rules.Directory
+	for name, gc := range cfg.Groups {
+		if gc == nil {
+			continue
+		}
+		people := map[string]bool{}
+		if gc.Rule != nil {
+			if d == nil {
+				d = ruleDirectory(cfg, sn)
+			}
+			for u := range s.evalGroup(gc, d, sn, now).desired {
+				people[u] = true
+			}
+		}
+		includes := false
+		for _, ex := range gc.Exceptions {
+			if ex.Include && (ex.Until == nil || !expired(*ex.Until, now)) {
+				people[strings.ToLower(ex.User)] = true
+				includes = true
+			}
+		}
+		if gc.Rule == nil && !includes {
+			continue
+		}
+		list := make([]string, 0, len(people))
+		for u := range people {
+			list = append(list, u)
+		}
+		sort.Strings(list)
+		out[name] = list
+	}
+	return out
 }
 
 // PrivilegeProblem says why group can't hold a privileged option's
