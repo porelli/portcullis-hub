@@ -26,6 +26,7 @@ import (
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/policy"
+	"github.com/portcullis/hub/internal/settings"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
 )
@@ -1515,3 +1516,26 @@ func TestAISwitchOnRacesPrune(t *testing.T) {
 	}
 }
 
+// Final review I2: a crash between a switch's commit and the up leaves
+// the owed flags on a running instance; Init owes it a restart (whose
+// start runs the owed hooks).
+func TestInitOwesRestartForPendingAI(t *testing.T) {
+	a := newInstAIFixture(t, nil)
+	a.enable(t, "oauthapp")
+	a.enable(t, "aiapp")
+	a.h.mu.Lock()
+	if a.h.st.AIInstances == nil {
+		a.h.st.AIInstances = map[string]state.AIInstance{}
+	}
+	a.h.st.AIInstances["oauthapp"] = state.AIInstance{Companions: map[string]state.AICompanion{
+		"oauth": {Mode: "read_write", RevokePending: true, OnChangePending: true},
+	}}
+	a.h.mu.Unlock()
+	a.h.oweAIPendingRestarts()
+	a.h.owedMu.Lock()
+	got, other := a.h.owedLocked("oauthapp"), a.h.owedLocked("aiapp")
+	a.h.owedMu.Unlock()
+	if got != settings.EffectRestart || other != "" {
+		t.Errorf("owed = %q / %q, want restart for oauthapp only", got, other)
+	}
+}

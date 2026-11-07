@@ -674,7 +674,32 @@ func (h *Hub) Init() {
 	// Reloads and restarts committed changes still owe (the previous run
 	// stopped before applying them): queued again.
 	h.initStage("requeue")
+	// AI hooks a running instance still owes (a crash between a switch's
+	// or the master toggle's commit and the up that runs them): the
+	// containers kept running with the old env, so a restart is owed;
+	// its start runs the owed revoke_all / on_change (final review I2).
+	h.oweAIPendingRestarts()
 	h.requeueOwed()
+}
+
+// oweAIPendingRestarts owes a restart to every enabled instance with a
+// companion carrying RevokePending or OnChangePending.
+func (h *Hub) oweAIPendingRestarts() {
+	var ids []string
+	h.mu.RLock()
+	for _, id := range h.st.Enabled {
+		for _, c := range h.st.AIInstances[id].Companions {
+			if c.RevokePending || c.OnChangePending {
+				ids = append(ids, id)
+				break
+			}
+		}
+	}
+	h.mu.RUnlock()
+	for _, id := range ids {
+		log.Printf("ai: %s: AI hooks are still owed: restart queued", id)
+		h.setOwed(id, settings.EffectRestart)
+	}
 }
 
 // initStage calls testHookInit (tests).
