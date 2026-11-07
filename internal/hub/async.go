@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -53,14 +54,33 @@ func (h *Hub) archiveExists(archive string) error {
 // is accepted — validated, the actor resolved, the per-instance lock held
 // — and startAsync then returns the AsyncOp (the API answers 202). If fn
 // returns before ready, its error is the synchronous answer (a 4xx: bad
-// input, busy, not found). The outcome lands in the op record.
-func (h *Hub) startAsync(id, op string, actor directory.Actor, fn func(ready func()) (map[string]string, []string, error)) (*AsyncOp, error) {
-	a := &AsyncOp{OpID: newOpID(), Op: op, Instance: id}
+// input, busy, not found) and nothing is recorded. The outcome lands in
+// the op record.
+//
+// steps are the operation's planned steps (contract §11.7 "Steps per
+// operation"); nil: it reports no progress and can't be stopped. ctx
+// carries the reporter (progressFrom) and is cancelled by a Stop
+// (cancelOp): fn then runs its undo and returns ErrStopped (or ctx's
+// error) once it is done.
+func (h *Hub) startAsync(id, op string, actor directory.Actor, steps []Step, fn func(ctx context.Context, ready func()) (map[string]string, []string, error)) (*AsyncOp, error) {
+	a, _, err := h.startOp(id, op, actor, steps, fn)
+	return a, err
+}
+
+// startOp is startAsync; finished is closed once the accepted operation's
+// final record is written.
+func (h *Hub) startOp(id, op string, actor directory.Actor, steps []Step, fn func(ctx context.Context, ready func()) (map[string]string, []string, error)) (a *AsyncOp, finished <-chan struct{}, err error) {
+	a = &AsyncOp{OpID: newOpID(), Op: op, Instance: id}
+	p := h.newProgress(id, op, steps)
+	ctx, cancel := context.WithCancel(withProgress(context.Background(), p))
+	run := &opRun{opID: a.OpID, p: p}
 	accepted := make(chan struct{})
+	fin := make(chan struct{})
 	var once sync.Once
 	ready := func() {
 		once.Do(func() {
-			h.recordOp(id, OpRecord{Op: op, OpID: a.OpID, At: time.Now().UTC(), Running: true, Actor: actor.User})
+			h.registerOp(id, run)
+			p.begin(a.OpID, actor.User, cancel)
 			close(accepted)
 		})
 	}
@@ -71,35 +91,60 @@ func (h *Hub) startAsync(id, op string, actor directory.Actor, fn func(ready fun
 	h.bg.Add(1)
 	go func() {
 		defer h.bg.Done()
-		result, warnings, err := fn(ready)
+		defer cancel()
+		result, warnings, err := fn(ctx, ready)
 		select {
 		case <-accepted:
-			h.finishAsync(id, op, a.OpID, actor.User, result, warnings, err)
+			h.finishAsync(id, op, p, result, warnings, err)
+			h.unregisterOp(id, run)
+			close(fin)
 		default:
 		}
 		done <- err
 	}()
 	select {
 	case <-accepted:
-		return a, nil
+		return a, fin, nil
 	case err := <-done:
 		select {
 		case <-accepted: // accepted and already finished
-			return a, nil
+			return a, fin, nil
 		default:
 		}
 		if err == nil {
 			err = statusErr(500, "%s %s finished without starting", op, id)
 		}
-		return nil, err
+		return nil, nil, err
 	}
+}
+
+// runOpSync is the synchronous form of startAsync for the Hub's own
+// callers (tests, the MCP): the same lock, record and stop registry —
+// one code path — then it waits for the operation to end and returns
+// fn's own answer (a refusal before ready as startAsync returns it).
+func (h *Hub) runOpSync(id, op string, actor directory.Actor, steps []Step, fn func(ctx context.Context, ready func()) (map[string]string, []string, error)) (map[string]string, []string, error) {
+	var (
+		result   map[string]string
+		warnings []string
+		ferr     error
+	)
+	_, finished, err := h.startOp(id, op, actor, steps, func(ctx context.Context, ready func()) (map[string]string, []string, error) {
+		result, warnings, ferr = fn(ctx, ready)
+		return result, warnings, ferr
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	<-finished
+	return result, warnings, ferr
 }
 
 // finishAsync records the outcome of an accepted operation: the
 // operation's own OpError record when it has one (compose output, hint,
-// rolled back), plus the op id, actor (the user), result, warnings and the HTTP status the
-// error stands for.
-func (h *Hub) finishAsync(id, op, opID, actor string, result map[string]string, warnings []string, err error) {
+// rolled back), plus the op id, actor (the user), result, warnings, the
+// HTTP status the error stands for and its progress (Progress.finish:
+// steps, created, the Stop state).
+func (h *Hub) finishAsync(id, op string, p *Progress, result map[string]string, warnings []string, err error) {
 	r := OpRecord{Op: op, At: time.Now().UTC(), OK: err == nil}
 	var oe *OpError
 	if errors.As(err, &oe) {
@@ -114,12 +159,17 @@ func (h *Hub) finishAsync(id, op, opID, actor string, result map[string]string, 
 		}
 		r.Hint = opHint(r.Error + "\n" + r.Output)
 	}
+	p.mu.Lock()
+	opID, actor := p.rec.OpID, p.rec.Actor
+	p.mu.Unlock()
 	r.OpID, r.Running, r.Result, r.Warnings, r.Actor = opID, false, result, warnings, actor
 	if err != nil {
 		r.Status = errStatus(err)
-		log.Printf("%s %s failed: %s", op, id, r.Error)
+		if !isStopErr(err) {
+			log.Printf("%s %s failed: %s", op, id, r.Error)
+		}
 	}
-	h.recordOp(id, r)
+	p.finish(r, err)
 }
 
 // recordOp stores r as id's op record (memory and <data>/ops/<id>.json),
@@ -162,7 +212,7 @@ func newOpID() string {
 // refusals (busy, deleting / restoring, unknown, no Docker) are returned
 // at once; the archive name is the op record's result "archive".
 func (h *Hub) StartBackup(id string, actor directory.Actor) (*AsyncOp, error) {
-	return h.startAsync(id, OpBackup, actor, func(ready func()) (map[string]string, []string, error) {
+	return h.startAsync(id, OpBackup, actor, nil, func(_ context.Context, ready func()) (map[string]string, []string, error) {
 		e, err := h.backupInstance(id, actor, ready)
 		if e != nil {
 			return map[string]string{"archive": e.Archive}, nil, err
@@ -174,7 +224,7 @@ func (h *Hub) StartBackup(id string, actor directory.Actor) (*AsyncOp, error) {
 // StartRestore starts a same-instance restore in the background; the
 // result holds "pre_restore_backup".
 func (h *Hub) StartRestore(id, archive string, actor directory.Actor) (*AsyncOp, error) {
-	return h.startAsync(id, OpRestore, actor, func(ready func()) (map[string]string, []string, error) {
+	return h.startAsync(id, OpRestore, actor, nil, func(_ context.Context, ready func()) (map[string]string, []string, error) {
 		res, err := h.restoreInstance(id, archive, actor, ready)
 		return restoreResult(res, archive, ""), restoreWarnings(res), err
 	})
@@ -183,7 +233,7 @@ func (h *Hub) StartRestore(id, archive string, actor directory.Actor) (*AsyncOp,
 // StartRestoreAs starts a restore into the new instance newID in the
 // background (its op record is newID's); the result holds "instance".
 func (h *Hub) StartRestoreAs(archive, newID string, actor directory.Actor, hosts map[string]string) (*AsyncOp, error) {
-	return h.startAsync(newID, OpRestore, actor, func(ready func()) (map[string]string, []string, error) {
+	return h.startAsync(newID, OpRestore, actor, nil, func(_ context.Context, ready func()) (map[string]string, []string, error) {
 		res, err := h.restoreInstanceAs(archive, newID, actor, hosts, ready)
 		return restoreResult(res, archive, newID), restoreWarnings(res), err
 	})
@@ -192,7 +242,7 @@ func (h *Hub) StartRestoreAs(archive, newID string, actor directory.Actor, hosts
 // StartDelete starts a guarded delete in the background (confirm = the
 // id typed: checked at once); the result holds "backup".
 func (h *Hub) StartDelete(id, confirm string, actor directory.Actor) (*AsyncOp, error) {
-	return h.startAsync(id, OpDelete, actor, func(ready func()) (map[string]string, []string, error) {
+	return h.startAsync(id, OpDelete, actor, nil, func(_ context.Context, ready func()) (map[string]string, []string, error) {
 		res, err := h.deleteInstance(id, confirm, actor, ready)
 		if res == nil {
 			return nil, nil, err

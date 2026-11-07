@@ -770,7 +770,7 @@ func (rebindPortFixer) Apply(h *Hub, f doctor.Finding, params map[string]string,
 		return nil, err
 	}
 	inst := c0.port.Instance
-	return h.startAsync(inst, OpRebind, actor, func(ready func()) (map[string]string, []string, error) {
+	return h.startAsync(inst, OpRebind, actor, nil, func(_ context.Context, ready func()) (map[string]string, []string, error) {
 		var changes []settingChange
 		var auditErr error
 		defer func() {

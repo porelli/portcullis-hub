@@ -363,7 +363,7 @@ func (h *Hub) startDoctorScan(actor directory.Actor) (*AsyncOp, error) {
 	if h.engine == nil {
 		return nil, statusErr(http.StatusServiceUnavailable, "the disk check needs the Docker Engine API")
 	}
-	return h.startAsync(opKeyDoctor, OpDoctorScan, actor, func(ready func()) (map[string]string, []string, error) {
+	return h.startAsync(opKeyDoctor, OpDoctorScan, actor, nil, func(_ context.Context, ready func()) (map[string]string, []string, error) {
 		if !h.scanMu.TryLock() {
 			return nil, nil, statusErr(http.StatusConflict, "a disk check is already running")
 		}
