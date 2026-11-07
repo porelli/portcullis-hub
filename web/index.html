@@ -849,13 +849,14 @@
     // the panel on the running operation instead. id: the instance.
     async function runInstanceOp(url, method, body, id) {
       let acc;
-      try { acc = await (await apiCall(url, method, body)).json(); } catch (err) { opBusy(id, err); throw err; }
+      const seq = id ? opBegin(id) : 0;
+      try { acc = await (await apiCall(url, method, body)).json(); } catch (err) { opBusy(id, err, seq); throw err; }
       return awaitOp(acc.instance || id, acc.op_id, acc.op);
     }
     // A busy 409's running record opens the panel on it (true).
-    function opBusy(id, err) {
+    function opBusy(id, err, seq) {
       if (!err || !err.record || !id) return false;
-      openOpPanel(id, err.record);
+      openOpPanel(id, err.record, seq || undefined);
       err.shown = true;
       return true;
     }
@@ -962,7 +963,9 @@
     }
     function oppStarted(r) {
       const s = (r.steps || []).find(x => x.started_at);
-      return 'Started by ' + (r.actor || 'the Hub') + ' at ' + oppClock(s ? s.started_at : r.at);
+      const at = s ? s.started_at : r.at;
+      if (!at) return 'Starting…'; // the 202's placeholder, before the first poll
+      return 'Started by ' + (r.actor || 'the Hub') + ' at ' + oppClock(at);
     }
     function oppStoppedBy(r) { return 'Stopped by ' + (r.stopped_by || 'the Hub') + ' at ' + oppClock(r.stopped_at); }
     // The panel's title for r (also the toast when it ends unseen).
@@ -1002,7 +1005,9 @@
     }
     function oppErrorHtml(r) {
       let h = '<div class="opp-err">';
-      if (r.error) h += '<div class="op-msg inst-error">' + escapeHtml(r.error) + (r.rolled_back ? ' — rolled back: the previous state was put back.' : '') + '</div>';
+      // A failed undo step already shows the error as its detail.
+      const shown = (r.steps || []).some(s => s.state === 'failed' && String(s.key).startsWith('undo:') && String(s.detail || '').trim() === String(r.error || '').trim());
+      if (r.error && !shown) h += '<div class="op-msg inst-error">' + escapeHtml(r.error) + (r.rolled_back ? ' — rolled back: the previous state was put back.' : '') + '</div>';
       if (r.hint) h += '<div class="op-hint">' + escapeHtml(r.hint) + '</div>';
       if (r.output) h += '<details><summary>Output</summary><pre class="log-viewer op-output">' + escapeHtml(r.output) + '</pre></details>';
       return h + '</div>';
@@ -1035,6 +1040,7 @@
         case 'stopping': subText = oppStoppedBy(r) + ' · ' + keepGoing; break;
         case 'stopped': subText = oppStoppedBy(r) + ' · ' + (w.stopped || 'everything is back as before'); break;
         case 'undo_failed': subText = oppStoppedBy(r); break;
+        case 'interrupted': subText = oppStarted(r); break;
         default: subText = oppStarted(r) + (r.at ? ' · ended at ' + oppClock(r.at) : '');
       }
       sub.textContent = subText;
@@ -1085,15 +1091,15 @@
         a += '<button type="button" class="btn btn-secondary btn-sm" data-opp-close>Close</button>';
       }
       acts.innerHTML = a;
-      if (opp.confirm) acts.querySelector('[data-opp-stop-go]')?.focus();
+      if (opp.confirm) acts.querySelector('[data-opp-stop-cancel]')?.focus();
       else if (hadFocus) (acts.querySelector('[data-opp-stop]:not([disabled])') || acts.querySelector('[data-opp-close]')).focus();
     }
 
     // Opens the panel on id's operation (rec: a record already in hand,
     // e.g. a busy 409's).
-    function openOpPanel(id, rec) {
+    function openOpPanel(id, rec, seq) {
       const dlg = document.getElementById('op-panel');
-      trackOp(id, rec && rec.op_id, rec);
+      trackOp(id, rec && rec.op_id, rec, seq);
       if (opp.id !== id) { opp.confirm = false; opp.notice = ''; }
       opp.id = id;
       opp.sig = {};
@@ -1147,6 +1153,7 @@
       opp.stopSent[tr.rec.op_id] = true;
       renderOpPanel();
       let rec = null, status = 0;
+      const seq = opBegin(id);
       try {
         const res = await fetch('/api/instances/' + encodeURIComponent(id) + '/op/stop', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
         status = res.status;
@@ -1154,7 +1161,8 @@
         else opp.notice = 'Stop failed: ' + ((await res.text()).trim() || 'HTTP ' + status);
       } catch (e) { opp.notice = 'Stop failed: ' + (e.message || e); }
       opp.sending = false;
-      if (rec && rec.op) {
+      if (rec && rec.op && status === 202) opEnded.delete(id + '/' + rec.op_id); // resumed: its undo runs
+      if (rec && rec.op && opFresh(id, seq) && !opSeenEnded(id, rec)) {
         setTrackRec(tr, rec);
         if (rec.running) { tr.ended = false; scheduleTrack(tr, 1000); }
         else if (!tr.ended) endTrack(tr);
@@ -1171,7 +1179,35 @@
     }
 
     // ── tracking: one poller per instance ──
-    function trackOp(id, opId, rec) {
+    // Answers are applied in the order their requests started: every
+    // fetch of an instance's record (poll, scan, auto-open, Stop, the
+    // operation's own request) takes a sequence number first (opBegin),
+    // and an answer older than the last one applied is dropped
+    // (opFresh). A running record of an operation already seen ending is
+    // ignored too (opEnded) — unless a later Stop resumed it (a failed
+    // undo or an interrupted operation: stopping, with a newer
+    // stopped_at).
+    const opSeq = {};          // instance id → { issued, applied }
+    const opEnded = new Map(); // "<id>/<op_id>" → its stopped_at (ms, 0: none) when seen ending
+    function opBegin(id) {
+      const q = opSeq[id] || (opSeq[id] = { issued: 0, applied: 0 });
+      return ++q.issued;
+    }
+    function opFresh(id, seq) {
+      const q = opSeq[id] || (opSeq[id] = { issued: 0, applied: 0 });
+      if (seq < q.applied) return false;
+      q.applied = seq;
+      return true;
+    }
+    function opSeenEnded(id, rec) {
+      const k = id + '/' + (rec && rec.op_id);
+      if (!rec || !rec.running || !opEnded.has(k)) return false;
+      return !(rec.stopping && Date.parse(rec.stopped_at || '') > opEnded.get(k));
+    }
+    // rec: a record in hand, seq: its request's sequence number (none: a
+    // record made here, newest by definition).
+    function trackOp(id, opId, rec, seq) {
+      if (rec && (!opFresh(id, seq != null ? seq : opBegin(id)) || opSeenEnded(id, rec))) { rec = null; opId = ''; }
       let tr = opTracks[id];
       if (!tr || (opId && tr.opId && tr.opId !== opId)) {
         if (tr) { clearTimeout(tr.timer); tr.waiters.splice(0).forEach(w => w(null)); }
@@ -1179,6 +1215,7 @@
       }
       if (rec && rec.op && (!tr.rec || !tr.rec.op_id || rec.op_id === tr.rec.op_id)) {
         setTrackRec(tr, rec);
+        if (rec.running) tr.ended = false; // a Stop resumed it
         if (!rec.running && !tr.ended && (rec.steps || []).length) endTrack(tr);
       }
       if (!tr.ended && !tr.timer) scheduleTrack(tr, 0);
@@ -1192,8 +1229,12 @@
       tr.timer = null;
       if (opTracks[tr.id] !== tr) return;
       let rec = null;
+      const seq = opBegin(tr.id);
       try { rec = await apiGet('/api/instances/' + encodeURIComponent(tr.id) + '/op'); tr.err = null; } catch (e) { tr.err = e; }
       if (opTracks[tr.id] !== tr) return;
+      // A newer answer was applied meanwhile (it scheduled what follows).
+      if (rec && !opFresh(tr.id, seq)) return;
+      if (opSeenEnded(tr.id, rec)) rec = null;
       if (rec && rec.op_id && tr.opId && rec.op_id !== tr.opId) {
         // A newer operation replaced the record: ours ended unseen.
         tr.waiters.splice(0).forEach(w => w(null));
@@ -1216,6 +1257,7 @@
     function endTrack(tr) {
       if (tr.ended) return;
       tr.ended = true;
+      if (tr.rec && tr.rec.op_id) opEnded.set(tr.id + '/' + tr.rec.op_id, Date.parse(tr.rec.stopped_at || '') || 0);
       clearTimeout(tr.timer);
       tr.timer = null;
       const r = tr.rec;
@@ -1278,8 +1320,9 @@
       instancesCache.forEach(i => ids.add(i.id));
       await Promise.all([...ids].map(async id => {
         let r = null;
+        const seq = opBegin(id);
         try { r = await apiGet('/api/templates/lastop/' + encodeURIComponent(id)); } catch (e) { return; }
-        if (r && r.running) trackOp(id, r.op_id, r);
+        if (r && r.running) trackOp(id, r.op_id, r, seq);
       }));
     }
     // Opening an app (its detail or instance dialog) while its operation
@@ -1287,8 +1330,9 @@
     async function opAutoOpen(id) {
       if (opRunning[id]) { openOpPanel(id); return; }
       let r = null;
+      const seq = opBegin(id);
       try { r = await apiGet('/api/templates/lastop/' + encodeURIComponent(id)); } catch (e) { return; }
-      if (r && r.running) openOpPanel(id, r);
+      if (r && r.running && !opSeenEnded(id, r)) openOpPanel(id, r, seq);
     }
 
     // ── Detail panel ──────────────────────────────────────

@@ -249,7 +249,7 @@ func TestHarness(t *testing.T) {
 	if err != nil {
 		d = 30 * time.Minute
 	}
-	handler := e.hub.Config.Handler
+	handler := harnessDelayed(e.hub.Config.Handler)
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /harness/hook/fix", func(w http.ResponseWriter, r *http.Request) {
 		eng.hookOK.Store(true)

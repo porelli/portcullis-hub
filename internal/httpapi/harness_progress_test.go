@@ -8,9 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -39,6 +42,9 @@ import (
 //     takes 30 s, so a delete stays past its point of no return.
 //   - nativeapp: an enable interrupted by a Hub stop (seeded running
 //     before the Hub loaded it): stoppable, Stop undoes it.
+//   - POST /harness/op/delay-lastop?id=<id>&ms=<n>: the next GET
+//     /api/templates/lastop/<id> is answered n ms after the Hub read the
+//     record (a late, stale answer: the panel's ordering check).
 
 // harnessProgress is the engine side of the fixtures.
 type harnessProgress struct {
@@ -228,8 +234,54 @@ func seedProgress(t *testing.T, e *instEnv, mux *http.ServeMux) {
 		broken.Store(true)
 		fmt.Fprintln(w, "deleting a group now fails (a Stop's undo of an enable fails)")
 	})
+	mux.HandleFunc("POST /harness/op/delay-lastop", func(w http.ResponseWriter, r *http.Request) {
+		ms, err := strconv.Atoi(r.URL.Query().Get("ms"))
+		id := r.URL.Query().Get("id")
+		if err != nil || ms <= 0 || ms > 60000 || id == "" {
+			http.Error(w, "want ?id=<instance>&ms=<1..60000>", http.StatusBadRequest)
+			return
+		}
+		harnessLastopDelay.Lock()
+		harnessLastopDelay.path, harnessLastopDelay.d = "/api/templates/lastop/"+id, time.Duration(ms)*time.Millisecond
+		harnessLastopDelay.Unlock()
+		fmt.Fprintf(w, "the next lastop answer of %s comes %d ms late\n", id, ms)
+	})
 	mux.HandleFunc("POST /harness/op/fix-undo", func(w http.ResponseWriter, r *http.Request) {
 		broken.Store(false)
 		fmt.Fprintln(w, "deleting a group works again")
+	})
+}
+
+// harnessLastopDelay is the one-shot late lastop answer
+// (POST /harness/op/delay-lastop).
+var harnessLastopDelay struct {
+	sync.Mutex
+	path string
+	d    time.Duration
+}
+
+// harnessDelayed answers the armed lastop request d after the Hub
+// handled it (the record read before the wait).
+func harnessDelayed(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		harnessLastopDelay.Lock()
+		d := time.Duration(0)
+		if r.Method == http.MethodGet && harnessLastopDelay.path != "" && r.URL.Path == harnessLastopDelay.path {
+			d = harnessLastopDelay.d
+			harnessLastopDelay.path = ""
+		}
+		harnessLastopDelay.Unlock()
+		if d == 0 {
+			next.ServeHTTP(w, r)
+			return
+		}
+		rec := httptest.NewRecorder()
+		next.ServeHTTP(rec, r)
+		time.Sleep(d)
+		for k, v := range rec.Header() {
+			w.Header()[k] = v
+		}
+		w.WriteHeader(rec.Code)
+		w.Write(rec.Body.Bytes())
 	})
 }
