@@ -283,6 +283,32 @@ func (p *Progress) endLocked(key, state string, err error) {
 	p.writeLocked()
 }
 
+// Has: key is one of the operation's steps (planned or added).
+func (p *Progress) Has(key string) bool {
+	if p == nil {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.stepLocked(key, false) != nil
+}
+
+// Warn adds a warning to the operation's record, written at once and
+// kept in its final record after the operation's own warnings (once
+// each; redacted like the details).
+func (p *Progress) Warn(text string) {
+	if p == nil || text == "" {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if slices.Contains(p.rec.Warnings, text) {
+		return
+	}
+	p.rec.Warnings = append(p.rec.Warnings, text)
+	p.writeLocked()
+}
+
 // Created records something the operation made (kind CreatedVolumes,
 // CreatedKeycloakClients or CreatedGroups), persisted at once: a Stop —
 // also of an interrupted operation — undoes exactly these.
@@ -395,6 +421,13 @@ func (p *Progress) recordLocked() OpRecord {
 		copy(r.Steps, p.rec.Steps)
 	}
 	var redact func(string) string
+	if p.rec.Warnings != nil {
+		r.Warnings = make([]string, len(p.rec.Warnings))
+		redact = p.h.secretRedactor(p.id, p.extra)
+		for i, w := range p.rec.Warnings {
+			r.Warnings[i] = clipRunes(redact(w), 600)
+		}
+	}
 	for i := range r.Steps {
 		s := &r.Steps[i]
 		if s.Percent != nil {
@@ -460,6 +493,11 @@ func (p *Progress) finish(r OpRecord, err error) {
 		s.EndedAt = &end
 	}
 	r.OpID, r.Steps, r.Created = cur.OpID, cur.Steps, cur.Created
+	for _, w := range cur.Warnings {
+		if !slices.Contains(r.Warnings, w) {
+			r.Warnings = append(r.Warnings, w)
+		}
+	}
 	r.StoppedBy, r.StoppedAt, r.PointOfNoReturn = cur.StoppedBy, cur.StoppedAt, cur.PointOfNoReturn
 	r.Running, r.Stopping, r.Stoppable, r.Interrupted = false, false, false, false
 	switch {

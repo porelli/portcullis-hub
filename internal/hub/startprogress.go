@@ -19,7 +19,8 @@ import (
 // create, the create, the start (compose up) and the wait until the
 // services are healthy. Only with a reporter in the context
 // (progressFrom): without one startUp pulls nothing itself and waits for
-// nothing, exactly as before.
+// nothing, exactly as before. Only the steps the operation planned are
+// reported (startSteps): a key it didn't list is left out, never appended.
 const (
 	StepImages  = "images"
 	StepCreate  = "create"
@@ -61,10 +62,48 @@ func pullable(s types.ServiceConfig) bool {
 	return true
 }
 
+// startSteps reports startUp's steps into p, only those p lists (Has, at
+// the start: a step added later — an undo step — is never one of these).
+type startSteps struct {
+	p    *Progress
+	keys map[string]bool
+}
+
+func newStartSteps(p *Progress) *startSteps {
+	s := &startSteps{p: p, keys: map[string]bool{}}
+	for _, k := range []string{StepImages, StepCreate, StepStart, StepHealthy} {
+		s.keys[k] = p.Has(k)
+	}
+	return s
+}
+
+func (s *startSteps) Start(key string) {
+	if s.keys[key] {
+		s.p.Start(key)
+	}
+}
+
+func (s *startSteps) Percent(key string, pct int, detail string) {
+	if s.keys[key] {
+		s.p.Percent(key, pct, detail)
+	}
+}
+
+func (s *startSteps) Done(key string) {
+	if s.keys[key] {
+		s.p.Done(key)
+	}
+}
+
+// percentCap: the images step's percent while some layer's size isn't
+// known yet (the total can still grow).
+const percentCap = 95
+
 // imagePull is one image of the images step.
 type imagePull struct {
 	ref, label  string
 	done, total int64
+	sized       bool
 	state       string // "" waiting, pulling, done, left (to compose)
 }
 
@@ -100,12 +139,14 @@ func imageLabel(ref string) string {
 // pullImages is the images step: every pullRefs image pulled in
 // parallel through the Engine API (PullWithProgress; an image already
 // present is done at once), the step's percent the bytes done of the
-// bytes known summed over every image's layers (never going back), its
-// detail one entry per image. A pull that fails is left to compose's
-// create, which pulls it as before (logged): never an error. Cancelling
-// ctx (a Stop) stops the pulls — downloaded layers are kept — and
-// returns ctx's error (isStopErr); the step is then the Stop's (stopped).
-func (h *Hub) pullImages(ctx context.Context, p *Progress, t *templates.Template) error {
+// bytes known summed over every image's layers (never going back; at
+// most percentCap while a layer seen has no size yet, below 100 until
+// every image is through), its detail one entry per image. A pull that
+// fails — or whose stream ends unfinished — is left to compose's create,
+// which pulls it as before (logged): never an error. Cancelling ctx (a
+// Stop) stops the pulls — downloaded layers are kept — and returns ctx's
+// error (isStopErr); the step is then the Stop's (stopped).
+func (h *Hub) pullImages(ctx context.Context, p *startSteps, t *templates.Template) error {
 	p.Start(StepImages)
 	var refs []string
 	if h.engine != nil {
@@ -121,15 +162,22 @@ func (h *Hub) pullImages(ctx context.Context, p *Progress, t *templates.Template
 	report := func() {
 		var done, total int64
 		lines := make([]string, len(imgs))
+		limit := 100
 		for i, ip := range imgs {
 			done, total = done+ip.done, total+ip.total
 			lines[i] = ip.line()
+			switch {
+			case ip.state == "pulling" && !ip.sized:
+				limit = min(limit, percentCap)
+			case ip.state == "" || ip.state == "pulling":
+				limit = min(limit, 99)
+			}
 		}
 		pct := 0
 		if total > 0 {
 			pct = int(done * 100 / total)
 		}
-		last = max(last, pct)
+		last = max(last, min(pct, limit))
 		p.Percent(StepImages, last, strings.Join(lines, "; "))
 	}
 	mu.Lock()
@@ -139,17 +187,17 @@ func (h *Hub) pullImages(ctx context.Context, p *Progress, t *templates.Template
 	var wg sync.WaitGroup
 	for _, ip := range imgs {
 		wg.Go(func() {
-			err := h.engine.PullWithProgress(ctx, ip.ref, func(done, total int64) {
+			err := h.engine.PullWithProgress(ctx, ip.ref, func(done, total int64, sized bool) {
 				mu.Lock()
 				defer mu.Unlock()
-				ip.state, ip.done, ip.total = "pulling", done, total
+				ip.state, ip.done, ip.total, ip.sized = "pulling", done, total, sized
 				report()
 			})
 			mu.Lock()
 			defer mu.Unlock()
 			switch {
 			case err == nil:
-				ip.state, ip.done = "done", ip.total
+				ip.state, ip.done, ip.sized = "done", ip.total, true
 			case ctx.Err() != nil:
 				return
 			default:
@@ -186,8 +234,7 @@ func containerReady(st docker.State) bool {
 }
 
 // countContainers is, over t's project containers (appContainers), how
-// many ok says yes to, of how many, and the names of the others with
-// their state ("web starting").
+// many ok says yes to, of how many, and the services of the others.
 func (h *Hub) countContainers(ctx context.Context, t *templates.Template, ok func(docker.State) bool) (n, m int, others []string, err error) {
 	cs, _, err := h.appContainers(ctx, t)
 	if err != nil {
@@ -203,14 +250,9 @@ func (h *Hub) countContainers(ctx context.Context, t *templates.Template, ok fun
 			n++
 			continue
 		}
-		what := st.Health
-		if what == "" || !st.Running {
-			what = st.Status
+		if !slices.Contains(others, c.Service()) {
+			others = append(others, c.Service())
 		}
-		if what == "" {
-			what = "not running"
-		}
-		others = append(others, c.Service()+" "+what)
 	}
 	return n, m, others, nil
 }
@@ -223,24 +265,21 @@ func percentOf(n, m int) int {
 }
 
 // watchStart reports the start step while compose up runs: "Starting
-// services (n of m)" every aiReadyPoll until stop is closed.
-func (h *Hub) watchStart(ctx context.Context, p *Progress, t *templates.Template, stop <-chan struct{}) {
+// services (n of m)" every aiReadyPoll (h.sleep) until ctx ends (the
+// caller cancels it once compose up returned).
+func (h *Hub) watchStart(ctx context.Context, p *startSteps, t *templates.Template) {
 	for {
-		if n, m, _, err := h.countContainers(ctx, t, containerStarted); err == nil {
+		if n, m, _, err := h.countContainers(ctx, t, containerStarted); err == nil && ctx.Err() == nil {
 			p.Percent(StepStart, percentOf(n, m), fmt.Sprintf("Starting services (%d of %d)", n, m))
 		}
-		select {
-		case <-stop:
+		if h.sleep(ctx, aiReadyPoll) != nil {
 			return
-		case <-ctx.Done():
-			return
-		case <-time.After(aiReadyPoll):
 		}
 	}
 }
 
 // startStepDone ends the start step once compose up returned.
-func (h *Hub) startStepDone(ctx context.Context, p *Progress, t *templates.Template) {
+func (h *Hub) startStepDone(ctx context.Context, p *startSteps, t *templates.Template) {
 	if n, m, _, err := h.countContainers(ctx, t, containerStarted); err == nil {
 		p.Percent(StepStart, percentOf(n, m), fmt.Sprintf("Starting services (%d of %d)", n, m))
 	}
@@ -250,10 +289,11 @@ func (h *Hub) startStepDone(ctx context.Context, p *Progress, t *templates.Templ
 // waitHealthy is the healthy step: "Waiting until healthy (n of m)",
 // polled with ContainerState every aiReadyPoll for at most aiReadyWait —
 // the readiness bounds the AI hooks after an up use (ai_ready.go). Every
-// container ready (containerReady) = done; the wait spent = the step
-// failed naming the services still not ready, and the start goes on (a
-// start never failed on health before). Cancelling ctx returns its error.
-func (h *Hub) waitHealthy(ctx context.Context, p *Progress, t *templates.Template) error {
+// container ready (containerReady) = done; the wait spent = done too,
+// its detail "not ready after <wait>: web starting, …" and the same text
+// an operation warning (Progress.Warn), and the start goes on (a start
+// never failed on health). Cancelling ctx returns its error.
+func (h *Hub) waitHealthy(ctx context.Context, p *startSteps, t *templates.Template) error {
 	p.Start(StepHealthy)
 	var slept time.Duration
 	begin := time.Now()
@@ -270,15 +310,17 @@ func (h *Hub) waitHealthy(ctx context.Context, p *Progress, t *templates.Templat
 			return fmt.Errorf("waiting until healthy: %w", cerr)
 		}
 		if slept >= aiReadyWait || time.Since(begin) >= aiReadyWait {
-			var why error
+			var why string
 			switch {
 			case err != nil:
-				why = fmt.Errorf("the services' health can't be read: %w", err)
+				why = fmt.Sprintf("health not read after %g s: %v", aiReadyWait.Seconds(), err)
 			default:
-				why = fmt.Errorf("%d of %d services healthy after %s (%s); the app goes on starting", n, m, aiReadyWait, strings.Join(others, ", "))
+				why = fmt.Sprintf("not ready after %g s: %s", aiReadyWait.Seconds(), strings.Join(others, ", "))
 			}
-			log.Printf("instance %s: %v", t.ID, why)
-			p.Fail(StepHealthy, why)
+			log.Printf("instance %s: %s", t.ID, why)
+			p.Percent(StepHealthy, percentOf(n, m), why)
+			p.Done(StepHealthy)
+			p.p.Warn(why)
 			return nil
 		}
 		if err := h.sleep(ctx, aiReadyPoll); err != nil {

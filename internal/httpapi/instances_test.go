@@ -241,7 +241,7 @@ func (e *fakeEngine) RemoveVolume(ctx context.Context, name string) error {
 
 func (e *fakeEngine) EnsureImage(context.Context, string) error { return nil }
 
-func (e *fakeEngine) PullWithProgress(context.Context, string, func(int64, int64)) error {
+func (e *fakeEngine) PullWithProgress(context.Context, string, func(int64, int64, bool)) error {
 	return nil
 }
 

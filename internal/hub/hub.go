@@ -109,7 +109,7 @@ type Engine interface {
 	EnsureImage(ctx context.Context, ref string) error
 	// PullWithProgress downloads ref unless present (docker/pull.go):
 	// startUp's images step, before compose create.
-	PullWithProgress(ctx context.Context, ref string, onBytes func(done, total int64)) error
+	PullWithProgress(ctx context.Context, ref string, onBytes func(done, total int64, sized bool)) error
 	CreateHelper(ctx context.Context, s docker.HelperSpec) (string, error)
 	RemoveContainer(ctx context.Context, id string) error
 	CopyFromContainer(ctx context.Context, id, path string) (io.ReadCloser, error)
