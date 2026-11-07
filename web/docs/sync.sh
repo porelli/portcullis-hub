@@ -10,6 +10,7 @@ set -eu
 src="${PORTCULLIS_DOCS_DIR:-../../portcullis-docs}/docs"
 dst="$(dirname "$0")"
 for f in guides/integration-contracts.md operations/hub.md operations/auth-policies.md \
-	operations/groups.md operations/backups.md operations/file-sharing.md; do
+	operations/groups.md operations/backups.md operations/file-sharing.md operations/ai.md \
+	guides/connect-your-ai.md; do
 	cp "$src/$f" "$dst/$(basename "$f")"
 done

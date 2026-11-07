@@ -28,7 +28,7 @@ storage. `./portcullis backup verify` proves that a backup can be restored, and
 | Vault (CA keys, issued-cert records, CRL, AppRole) | Raft snapshot (`sys/storage/raft/snapshot`, root token) → `vault.snap` | Consistent point-in-time copy without stopping Vault |
 | Keycloak database | `pg_dump -Fc` → `postgres.dump` | A raw copy of a running Postgres data directory is not consistent |
 | LLDAP (`lldap_data`) | Files, with every SQLite database copied through SQLite's online backup API → `lldap_data.tar.gz` | Consistent while LLDAP runs. Keeps `private_key` (password hashing) |
-| Hub state (`hub_data`), ACME account and certs (`traefik_acme`) | Same → `hub_data.tar.gz`, `traefik_acme.tar.gz` | |
+| Hub state (`hub_data`), ACME account and certs (`traefik_acme`), the AI access log (`mcp_gate_data`) | Same → `hub_data.tar.gz`, `traefik_acme.tar.gz`, `mcp_gate_data.tar.gz` | `hub_data` includes the AI model provider keys in clear (`ai/provider-secrets.json`) and the AI app credentials encrypted to the gate's key, which is in `secrets/mcp-gate/` |
 | `.env`, `certs/`, `secrets/`, `config/`, `keycloak/realm-export.json`, `headscale/config.yaml`, `docker-compose.override.yml` | Copied | |
 | **File-share credentials (`hub_secrets`)** | **Never backed up** | Hashes are voided by every restore ([File Sharing](file-sharing.md#restores)) |
 | `MANIFEST.json` | Format, time, core version, Hub image, sha256 of every file | `verify` and `restore` refuse a backup whose files changed |
@@ -45,6 +45,7 @@ Back those up per app instance in the Hub (**instance backups**): the Hub's
 
 - the instance's Docker volumes (via helper containers, with owner uid/gid preserved)
 - its state, settings, `.env` (including generated secrets), custom override and published policy
+- its AI state (`config/ai.json`: which companions are on, their modes, an AI page's provider selection). Never an AI credential: model provider variables are blanked in the archived `.env` and rewritten from the Hub's store on restore, and every restore revokes the app's earlier AI credentials (`revoke_all`) before its companions are used again. The app's own data can still carry what the app keeps there: Home Assistant's `/config` holds the hook user's token, rotated at the next container start after a restore
 
 **File-share credentials are never in instance backups:** the `hub_secrets` volume is external to the instance's project, so it is never archived, replaced or removed by a backup, restore or delete of the instance. An instance restore voids every active credential (`reason: restore`): people create new ones on My apps. See [File Sharing](file-sharing.md#restores).
 

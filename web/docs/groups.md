@@ -77,7 +77,7 @@ For each rule-based group (skipping administrator and built-in groups):
 
 Rules of **protected groups** may only reference **admin-only fields**:
 
-- **Administrator groups**: `lldap_admin`, `lldap_password_manager`, core-subdomain groups (`auth`, `traefik`, `hub`, `directory`, `enroll`, `people`, `metrics`), `INVITE_PROTECTED_GROUPS`
+- **Administrator groups**: `lldap_admin`, `lldap_password_manager`, core-subdomain groups (`auth`, `traefik`, `hub`, `directory`, `enroll`, `people`, `metrics`, `mcp`), `INVITE_PROTECTED_GROUPS`
 - **Permission groups**: the groups holding a delegated permission (`edit_details`, `invite`, `remove`)
 - **App admin groups**: any group used as an app's `admin_group` or in `path_groups`
 - **Privileged setting groups**: any group with a row in an app's [privileged option](hub.md#per-group-values) (a role or admin flag, e.g. Grafana's or Immich's role). The Hub works these out from the apps' current settings; the reason shown is "a privileged value of app <id>"
@@ -158,7 +158,7 @@ the Hub refuses a hostname another instance uses, and rejects templates whose
 `Host()` rules it can't fully resolve (see
 [Hub → Template rules](hub.md#template-rules-enforced-by-the-hub)).
 
-**Core subdomains** (`auth`, `traefik`, `hub`, `directory`, `enroll`, `people`, `metrics`, on the main domain) always
+**Core subdomains** (`auth`, `traefik`, `hub`, `directory`, `enroll`, `people`, `metrics`, `mcp`, on the main domain) always
 come from the map file. The Hub never publishes them, and group-gate ignores
 them in the policy file. If they are missing from the map file they default to
 `lldap_admin`.

@@ -145,6 +145,13 @@ its last operation failed.
 When the [doctor](#doctor) has findings about the app, the panel shows a
 "Doctor: …" line that opens the Doctor tab.
 
+Every app also has an **AI support** tab (deep link `#app/<id>/ai`): whether
+the AI can act in the app, its companions, the switch and mode, the people
+who can use it, a revoke button and the recent AI activity; for an AI page,
+its model providers. Templates without AI support show the reason and, when
+the template names one, an alternative "not vetted by Portcullis". See
+[AI support](ai.md#switching-an-app-on).
+
 ### Settings
 
 - The **Sign-in** block, only for apps whose manifest declares
@@ -1059,7 +1066,13 @@ disabling it did before instances existed.
   restarts only the apps whose Traefik TLS tier actually changed. Saving an
   unchanged default does nothing.
 
-The tab also has **Domains** ([Enrolling extra domains](#enrolling-extra-domains)),
+Saving a default that would switch AI support off somewhere (a policy that
+needs mTLS) first asks, listing the instances (`POST /api/settings/preview`).
+
+The tab also has **AI support** (the master switch, AI clients, the
+Portcullis MCP, connection length, rate limits, allowed origins and the model
+providers: [AI support → Settings → AI](ai.md#settings-ai)),
+**Domains** ([Enrolling extra domains](#enrolling-extra-domains)),
 **Shared folders** ([below](#shared-folders)) and **Local networks**
 ([below](#local-networks)).
 
@@ -1487,7 +1500,10 @@ Everyone can see everyone's details and the org chart.
 ### My apps
 
 On `people.<domain>`, every signed-in person also has a **My apps** tab
-(after Org chart). It lists the enabled apps they can reach that have
+(after Org chart). While AI support is on and they can use an app (or their
+Portcullis account) with AI, it starts with the **Connect your AI** card:
+the addresses, the steps per AI client, their connections with Disconnect and
+their recent AI activity ([Connect your AI](../guides/connect-your-ai.md)). It lists the enabled apps they can reach that have
 something personal for them, sorted by id, each with its link:
 
 - their **per-person values** with where each comes from: "from
@@ -1630,7 +1646,7 @@ The Hub writes shared fields (those with share-with-apps on) into `user-attribut
 Members of these groups are **administrators**:
 
 - `lldap_admin` and `lldap_password_manager`
-- the groups of the core subdomains (`auth`, `traefik`, `hub`, `directory`, `enroll`, `people`, `metrics`) in `group-gate/group-gate-map.conf` (Hub: `HUB_GATE_MAP_FILE`)
+- the groups of the core subdomains (`auth`, `traefik`, `hub`, `directory`, `enroll`, `people`, `metrics`, `mcp`) in `group-gate/group-gate-map.conf` (Hub: `HUB_GATE_MAP_FILE`)
 - any group listed in `INVITE_PROTECTED_GROUPS`
 
 This is the same set core's invite API uses. An invite hands the account to whoever holds the link, so core refuses invites for administrators, and the Hub doesn't offer them. Invite or recover an administrator on the server with `./portcullis invite <user>`. If core refuses an invite for a group the Hub doesn't know about, the Hub shows "administrators are recovered from the server: `./portcullis invite <user>`".
@@ -1639,7 +1655,7 @@ This is the same set core's invite API uses. An invite hands the account to whoe
 
 - `portcullis-hub` (the Hub's own account) and `admin` (the bootstrap LLDAP admin) are untouchable: no edits, passwords, invites, passkey actions, group changes or deletion. An invite for `admin` would hand over the root account, so recover it on the server: `./portcullis invite admin`.
 - [Administrators](#administrators) get no invites from the Hub. Resetting another administrator's passkeys or setting their password lets you take over their account: you must type their username to confirm, and the audit entry is flagged (`target_is_lldap_admin=true`).
-- `admin` and `portcullis-hub` can't be created. `lldap_*` group names are reserved. Built-in groups can't be deleted or made rule-based.
+- `admin` and every name starting with `portcullis-` are reserved: `portcullis-hub` is the Hub's protected service account, and apps use the prefix for their internal accounts. The Hub won't create such a user, import one from a CSV, invite one or set a password for one, even if the account was made in the LLDAP console. `lldap_*` group names are reserved. Built-in groups can't be deleted or made rule-based.
 - You can't delete yourself or remove yourself from `lldap_admin`.
 - The last human member of `lldap_admin` (every member except `portcullis-hub`) can't be deleted or removed from it.
 - Email addresses are unique (case-insensitive).
@@ -1865,6 +1881,23 @@ sources you trust.
   header after forward-auth, so a container that reaches the Hub directly on
   the `portcullis` network can't impersonate an admin by sending
   `X-Forwarded-User`. See [Security & Hardening](hardening.md#hub-proxy-secret).
+- **MCP listener.** A third listener, `HUB_MCP_ADDR` (`:8890`), serves only
+  the Portcullis MCP (`/mcp/admin`, `/mcp/people`) and the gate's internal
+  API (credentials, confirmations) to `mcp-gate`. Every request but
+  `GET /healthz` needs `X-Portcullis-MCP-Secret`
+  (`HUB_MCP_GATE_SECRET_FILE`); it is bound on all the Hub's interfaces, so
+  the secret is the only protection, and no Traefik router targets it.
+  Without the secret file the listener doesn't start and AI support stays
+  off. See [Security & Hardening → AI support](hardening.md#ai-support-mcp-gate).
+- **AI files.** The Hub writes `mcp-gate.json` and `mcp-credentials.json`
+  (0640, group 10001) for the gate, and keeps `<data>/ai/` (provider secrets,
+  the `app_oauth` records, minted-but-unstored ids, who could use AI; 0600).
+  At start it sets every other file of its data directory with a group or
+  other bit to 0600 (the policy, portal and attribute files stay 0644
+  without write bits). A hostname change moves the companion scopes' audience
+  with the Keycloak redirect URIs and holds the AI scope pass until it
+  commits. Instance backups carry `config/ai.json` (switches, modes and the
+  provider selection, never a credential or an internal flag).
 - **Portal list.** Next to the policy file the Hub writes `portal-apps.json`:
   enabled apps with name, icon, URLs and required group, for core's landing
   portal ([Integration Contracts §10](../guides/integration-contracts.md#10-landing-portal-app-list-hub-core)).

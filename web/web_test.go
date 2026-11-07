@@ -15,6 +15,7 @@ import (
 var docsPages = []string{
 	"guides/integration-contracts.md", "operations/hub.md", "operations/auth-policies.md",
 	"operations/groups.md", "operations/backups.md", "operations/file-sharing.md",
+	"operations/ai.md", "guides/connect-your-ai.md",
 }
 
 // TestDocsCopies: every page sync.sh copies is embedded, non-empty and a
