@@ -29,6 +29,7 @@ func (s *Server) registerInstances(mux routeMux) {
 	mux.HandleFunc("POST /api/instances/{id}/restore", s.handleRestoreInstance)
 	mux.HandleFunc("POST /api/instances/restore", s.handleRestoreAs)
 	mux.HandleFunc("GET /api/instances/{id}/op", s.handleInstanceOp)
+	mux.HandleFunc("POST /api/instances/{id}/op/stop", s.handleStopOp)
 	mux.HandleFunc("GET /api/instances/missing-groups", s.handleMissingGroups)
 	mux.HandleFunc("POST /api/instances/missing-groups", s.handleCreateMissingGroups)
 	mux.HandleFunc("GET /api/keycloak/user-sweep", s.handleUserSweep)
@@ -156,27 +157,29 @@ func (s *Server) handleCreateInstance(w http.ResponseWriter, r *http.Request) {
 	if !decodeStrict(w, r, &b, `{"template": "<template>", "id": "<instance-id>", "hosts": {"<host router>": "<hostname>", ...}}`) {
 		return
 	}
-	res, err := s.createInstance(requestActor(r), b.Template, b.ID, b.Hosts)
+	op, err := s.createInstance(requestActor(r), b.Template, b.ID, b.Hosts)
 	noStore(w)
 	if err != nil {
 		writeErr(w, err, http.StatusBadGateway)
 		return
 	}
-	writeJSONStatus(w, http.StatusCreated, res)
+	writeAccepted(w, op)
 }
 
-// createInstance is the create's work (route and create_instance);
-// audited instance.create by the Hub.
-func (s *Server) createInstance(a directory.Actor, template, id string, hosts map[string]string) (*hub.CreateResult, error) {
+// createInstance is the create's work (route and create_instance), in
+// the background (202, op create, the new id's record; its result
+// "instance", the warnings the record's); audited instance.create by the
+// Hub.
+func (s *Server) createInstance(a directory.Actor, template, id string, hosts map[string]string) (*hub.AsyncOp, error) {
 	if !templates.ValidID(template) {
 		return nil, &hub.StatusError{Status: http.StatusBadRequest, Err: errors.New("invalid template id")}
 	}
 	if len(hosts) == 0 {
 		hosts = nil // the defaults on the main domain
 	}
-	s.rec("CreateInstanceAs", template, id, hosts)
-	res, err := s.Hub.CreateInstanceAs(template, id, hosts, a)
-	return res, defaultStatus(err, http.StatusBadGateway)
+	s.rec("StartCreate", template, id, hosts)
+	op, err := s.Hub.StartCreate(template, id, hosts, a)
+	return op, defaultStatus(err, http.StatusBadGateway)
 }
 
 // handleInstanceDefaults feeds the hostname editor: a template's host
@@ -413,8 +416,9 @@ func (s *Server) startRestoreAs(a directory.Actor, archive, id string, hosts map
 }
 
 // writeAccepted answers a long operation the Hub runs in the background
-// (backup, restore, delete; contract §11.7): 202 with the op id and where
-// to poll its op record.
+// (enable, disable, restart, an AI switch, create, backup, restore,
+// delete; contract §11.7): 202 with the op id and where to poll its op
+// record.
 func writeAccepted(w http.ResponseWriter, op *hub.AsyncOp) {
 	writeJSONStatus(w, http.StatusAccepted, acceptedBody(op))
 }
@@ -443,4 +447,44 @@ func (s *Server) handleInstanceOp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, rec)
+}
+
+// handleStopOp stops the instance's operation and undoes what it did
+// (contract §11.7 "Stop"; body {}): 202 with the record (stopping); 409
+// with the record when nothing runs, past the point of no return or
+// already stopping; 404 for an unknown instance or no record. Audited
+// <op>.stop by the Hub.
+func (s *Server) handleStopOp(w http.ResponseWriter, r *http.Request) {
+	if !s.adminOnly(w, r) {
+		return
+	}
+	id, ok := instanceID(w, r)
+	if !ok {
+		return
+	}
+	var b struct{}
+	if !decodeStrict(w, r, &b, `{}`) {
+		return
+	}
+	rec, err := s.stopOp(requestActor(r), id)
+	noStore(w)
+	if err != nil {
+		writeErr(w, err, http.StatusInternalServerError)
+		return
+	}
+	writeJSONStatus(w, http.StatusAccepted, rec)
+}
+
+// stopOp is the Stop's work (route and stop_op): a 409 refusal carries
+// the current record (recordError: the body / the tool error's JSON).
+func (s *Server) stopOp(a directory.Actor, id string) (*hub.OpRecord, error) {
+	s.rec("StopOp", id)
+	rec, err := s.Hub.StopOp(id, a)
+	if err != nil {
+		if rec != nil && errStatus(err, http.StatusInternalServerError) == http.StatusConflict {
+			return nil, &recordError{err: err, rec: rec}
+		}
+		return nil, defaultStatus(err, http.StatusInternalServerError)
+	}
+	return rec, nil
 }

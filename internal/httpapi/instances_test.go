@@ -538,6 +538,7 @@ func TestInstanceRoutesAdminOnly(t *testing.T) {
 		{"POST", "/api/instances/grafana/restore", `{"archive":"grafana/20261102T153000Z.tar"}`},
 		{"POST", "/api/instances/restore", `{"archive":"grafana/20261102T153000Z.tar","id":"grafana-c"}`},
 		{"GET", "/api/instances/grafana/op", ""},
+		{"POST", "/api/instances/grafana/op/stop", "{}"},
 	}
 	for _, user := range []string{"dana", "nobody", ""} {
 		for _, r := range routes {
@@ -594,14 +595,14 @@ func TestCreateInstanceRoute(t *testing.T) {
 	}
 
 	// Create with explicit hosts on the enrolled domain.
-	code, b = e.do(t, "root", "POST", "/api/instances", `{"template":"grafana","id":"grafana-team-a","hosts":{"grafana":"grafana.team-b.example.net"}}`)
-	if code != 201 {
-		t.Fatalf("create = %d %s", code, b)
+	// In the background (202, op create, §11.7): the result names it.
+	rec := e.runOp(t, "POST", "/api/instances", `{"template":"grafana","id":"grafana-team-a","hosts":{"grafana":"grafana.team-b.example.net"}}`)
+	if !rec.OK || rec.Op != "create" || rec.Result["instance"] != "grafana-team-a" {
+		t.Fatalf("create = %+v", rec)
 	}
-	var v hub.CreateResult
-	json.Unmarshal([]byte(b), &v)
+	v, _ := e.s.Hub.InstanceView("grafana-team-a")
 	if v.ID != "grafana-team-a" || v.State != "created" || v.Hosts["grafana"] != "grafana.team-b.example.net" || v.AccessGroup != "users_grafana-team-a" {
-		t.Errorf("created = %s", b)
+		t.Errorf("created = %+v", v)
 	}
 	// Its groups exist in LLDAP (created as root, through the guardrails).
 	for _, g := range []string{"users_grafana-team-a", "admin_grafana-team-a"} {
@@ -610,8 +611,9 @@ func TestCreateInstanceRoute(t *testing.T) {
 		}
 	}
 	// Hosts omitted = the defaults on the main domain.
-	if code, b := e.do(t, "root", "POST", "/api/instances", `{"template":"grafana","id":"grafana-lab"}`); code != 201 || !strings.Contains(b, `"grafana":"grafana-lab.example.org"`) {
-		t.Fatalf("default hosts = %d %s", code, b)
+	e.runOp(t, "POST", "/api/instances", `{"template":"grafana","id":"grafana-lab"}`)
+	if v, _ := e.s.Hub.InstanceView("grafana-lab"); v.Hosts["grafana"] != "grafana-lab.example.org" {
+		t.Fatalf("default hosts = %+v", v)
 	}
 	// Refusals: bad id, duplicate, deeper name, not-ready domain, unknown field.
 	for _, c := range []struct {
@@ -645,7 +647,7 @@ func TestCreateInstanceRoute(t *testing.T) {
 
 func TestUpdateHostsRoute(t *testing.T) {
 	e := newInstEnv(t)
-	mustDo(t, e.hub, "root", "POST", "/api/instances", `{"template":"home","id":"home-b","hosts":{"home":"matrix-b.example.org","media":"media-b.example.org"}}`, 201)
+	e.runOp(t, "POST", "/api/instances", `{"template":"home","id":"home-b","hosts":{"home":"matrix-b.example.org","media":"media-b.example.org"}}`)
 	// A mutable host moves; the answer is the instance.
 	code, b := e.do(t, "root", "PUT", "/api/instances/home-b/hosts", `{"hosts":{"home":"matrix-b.example.org","media":"media.team-b.example.net"}}`)
 	if code != 200 || !strings.Contains(b, `"media":"media.team-b.example.net"`) {
@@ -675,7 +677,7 @@ func TestUpdateHostsRoute(t *testing.T) {
 
 func TestDeleteNeedsTypedID(t *testing.T) {
 	e := newInstEnv(t)
-	mustDo(t, e.hub, "root", "POST", "/api/instances", `{"template":"grafana","id":"grafana-team-a"}`, 201)
+	e.runOp(t, "POST", "/api/instances", `{"template":"grafana","id":"grafana-team-a"}`)
 	e.engine.addVolume("portcullis_grafana-team-a-grafana-data", "portcullis-grafana-team-a", "grafana-data", map[string]string{"grafana.db": "rows"})
 	for _, body := range []string{`{}`, `{"confirm":""}`, `{"confirm":"grafana"}`, `{"confirm":"GRAFANA-TEAM-A"}`, `{"confirm":" grafana-team-a "}`, `{"confirm":"grafana-team-a\n"}`} {
 		if code, b := e.do(t, "root", "DELETE", "/api/instances/grafana-team-a", body); code != 400 || !strings.Contains(b, "type the instance id") {
@@ -723,7 +725,7 @@ func TestDeleteNeedsTypedID(t *testing.T) {
 
 func TestBackupRestoreRoutes(t *testing.T) {
 	e := newInstEnv(t)
-	mustDo(t, e.hub, "root", "POST", "/api/instances", `{"template":"grafana","id":"grafana-team-a"}`, 201)
+	e.runOp(t, "POST", "/api/instances", `{"template":"grafana","id":"grafana-team-a"}`)
 	vol := "portcullis_grafana-team-a-grafana-data"
 	e.engine.addVolume(vol, "portcullis-grafana-team-a", "grafana-data", map[string]string{"grafana.db": "v1"})
 	rec := e.runOp(t, "POST", "/api/instances/grafana-team-a/backups", "")

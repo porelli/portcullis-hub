@@ -160,8 +160,13 @@ func TestStopDisable(t *testing.T) {
 			if at == StepCallbacks && stepOf(r, UndoCallbacks).State != StepDone {
 				t.Errorf("undo:callbacks %+v", stepOf(r, UndoCallbacks))
 			}
-			if e := f.audit.last(); e.Action != "disable.stop" || e.Detail != at || e.Actor != "bob" || e.Result != "ok" {
+			if e := f.audit.lastOf("disable.stop"); e.Action != "disable.stop" || e.Detail != at || e.Actor != "bob" || e.Result != "ok" {
 				t.Errorf("audit %+v", e)
+			}
+			// The started disable's own audit (Task 7): its outcome, a Stop
+			// = refused, by the admin who started it.
+			if e := f.audit.lastOf("instance.disable"); e.Result != "refused" || e.Actor != "alice" || e.Target != "other" {
+				t.Errorf("instance.disable audit %+v", e)
 			}
 			if st := f.instanceState("other"); st != StateEnabled {
 				t.Errorf("state %q", st)
@@ -327,7 +332,7 @@ func TestStopRestart(t *testing.T) {
 			if stepOf(r, StepImages).State == StepUndone {
 				t.Error("images undone")
 			}
-			if e := f.audit.last(); e.Action != "restart.stop" || e.Detail != at || e.Result != "ok" {
+			if e := f.audit.lastOf("restart.stop"); e.Action != "restart.stop" || e.Detail != at || e.Result != "ok" {
 				t.Errorf("audit %+v", e)
 			}
 		})

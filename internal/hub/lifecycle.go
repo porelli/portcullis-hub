@@ -759,10 +759,13 @@ func (h *Hub) disablePlan() []Step {
 // StartDisable starts disabling instance id as actor in the background
 // (202, contract §11.7). Refused at once, nothing recorded: busy
 // (*BusyError), an unknown instance (404), one not enabled (400). A Stop
-// before its commit turns the app back on (undoDisable).
+// before its commit turns the app back on (undoDisable). Audited
+// instance.disable with the outcome (a refusal at once, else at its end).
 func (h *Hub) StartDisable(id string, actor directory.Actor) (*AsyncOp, error) {
 	return h.startAsync(id, OpDisable, actor, h.disablePlan(), func(ctx context.Context, ready func()) (map[string]string, []string, error) {
-		return nil, nil, h.runDisable(ctx, id, ready)
+		err := h.runDisable(ctx, id, ready)
+		h.auditOp(actor, "instance.disable", id, "", err)
+		return nil, nil, err
 	})
 }
 
@@ -890,10 +893,13 @@ func restartPlan() []Step {
 // StartRestart starts restarting instance id as actor in the background
 // (202, contract §11.7). Refused at once, nothing recorded: busy
 // (*BusyError), unknown (404), not enabled (400). A Stop leaves the app
-// running as before (undoRestart).
+// running as before (undoRestart). Audited instance.restart with the
+// outcome (a refusal at once, else at its end).
 func (h *Hub) StartRestart(id string, actor directory.Actor) (*AsyncOp, error) {
 	return h.startAsync(id, OpRestart, actor, restartPlan(), func(ctx context.Context, ready func()) (map[string]string, []string, error) {
-		return nil, nil, h.runRestartApp(ctx, id, ready)
+		err := h.runRestartApp(ctx, id, ready)
+		h.auditOp(actor, "instance.restart", id, "", err)
+		return nil, nil, err
 	})
 }
 

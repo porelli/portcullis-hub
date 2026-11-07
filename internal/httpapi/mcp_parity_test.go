@@ -237,7 +237,10 @@ func TestToolParity(t *testing.T) {
 	// Hub's data; the instance comes back as it was); a sync pulls the
 	// sources the admin added.
 	for _, n := range []string{"backup_instance", "sync_sources", "update_person", "clear_actions", "create_group", "create_field",
-		"doctor_scan", "doctor_unmute", "create_folder", "update_folder"} {
+		"doctor_scan", "doctor_unmute", "create_folder", "update_folder",
+		// Operation progress (§15.10): a Stop only reverses what the
+		// running operation did; the long operations' tools stay W / per call.
+		"stop_op", "disable_instance", "restart_instance"} {
 		if byName[n].Class != ClassWrite {
 			t.Errorf("tool %s: class %q, want W", n, byName[n].Class)
 		}
@@ -296,7 +299,7 @@ var admin17b = []string{
 var admin17a = []string{
 	"hub_status", "explain_policy",
 	"list_instances", "get_instance", "instance_defaults", "create_instance", "enable_instance", "disable_instance",
-	"restart_instance", "set_hosts", "get_op", "wait_for_op", "delete_instance",
+	"restart_instance", "set_hosts", "get_op", "wait_for_op", "stop_op", "delete_instance",
 	"get_settings", "preview_settings", "save_settings", "set_secret_setting", "set_policy", "set_sign_in_mode", "set_public_access",
 	"get_logs", "get_status", "exec", "get_compose", "get_env", "save_env", "get_custom_override", "save_custom_override",
 	"list_drift", "resolve_drift",

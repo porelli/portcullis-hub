@@ -59,6 +59,20 @@ func (a *fakeAudit) last() directory.AuditEntry {
 	return a.entries[len(a.entries)-1]
 }
 
+// lastOf is the newest entry with action (the zero entry when none): a
+// Stop's <op>.stop is followed by the stopped operation's own outcome
+// (instance.disable / instance.restart, refused) once it ended.
+func (a *fakeAudit) lastOf(action string) directory.AuditEntry {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for i := len(a.entries) - 1; i >= 0; i-- {
+		if a.entries[i].Action == action {
+			return a.entries[i]
+		}
+	}
+	return directory.AuditEntry{}
+}
+
 func TestDefaultHosts(t *testing.T) {
 	f := newInstanceFixture(t, nil)
 	for _, c := range []struct {

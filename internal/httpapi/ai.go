@@ -129,6 +129,10 @@ func (s *Server) handleUpdateInstanceAI(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	noStore(w)
+	if op, ok := res.(OpStarted); ok {
+		writeJSONStatus(w, http.StatusAccepted, op)
+		return
+	}
 	writeJSON(w, res)
 }
 
@@ -401,11 +405,22 @@ func (s *Server) revokeAI(ctx context.Context, a directory.Actor, id, companion,
 	return map[string]any{"status": "revoked", "instance": id, "companion": companion, "user": who}, nil
 }
 
-// updateInstanceAI is the AI tab's save (route, set_ai_support and
-// set_ai_mode); audited ai.enable / ai.disable / ai.mode by the Hub.
-func (s *Server) updateInstanceAI(ctx context.Context, a directory.Actor, id string, u hub.InstanceAIUpdate) (*hub.InstanceAIResult, error) {
-	s.rec("UpdateInstanceAI", id, u)
-	return s.Hub.UpdateInstanceAI(ctx, id, u, a)
+// updateInstanceAI is the AI tab's save (route, set_ai_support,
+// set_ai_mode and set_ai_providers); audited ai.enable / ai.disable /
+// ai.mode / ai.providers by the Hub. A companion switch or mode change
+// on an enabled instance runs in the background: the 202 body
+// (OpStarted, contract §15.11); anything else answers the tab
+// (*hub.InstanceAIResult, 200).
+func (s *Server) updateInstanceAI(_ context.Context, a directory.Actor, id string, u hub.InstanceAIUpdate) (any, error) {
+	s.rec("StartInstanceAI", id, u)
+	op, res, err := s.Hub.StartInstanceAI(id, u, a)
+	if err != nil {
+		return nil, err
+	}
+	if op != nil {
+		return acceptedBody(op), nil
+	}
+	return res, nil
 }
 
 // saveAISettings is Settings → AI's save (route and save_hub_settings);

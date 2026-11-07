@@ -166,7 +166,7 @@ func TestPeopleToolsCallerOnly(t *testing.T) {
 	// quota from office_milan; bob's apps aren't hers).
 	e.ll.AddGroup("users_vault", "alice", "bob")
 	e.ll.AddGroup("office_milan", "alice")
-	mustDo(t, e.hub, "root", "POST", "/api/templates/enable", `{"id":"vault"}`, 200)
+	opOK(t, e.hub, "POST", "/api/templates/enable", `{"id":"vault"}`)
 	mustDo(t, e.hub, "root", "PUT", "/api/instances/vault/settings", `{"person":{"storage_quota":{"default":"10GiB","rows":[{"group":"office_milan","value":"1TiB"}]}}}`, 200)
 	e.s.Hub.Wait()
 	txt, isErr := e.people(t, "alice", "my_apps", map[string]any{})

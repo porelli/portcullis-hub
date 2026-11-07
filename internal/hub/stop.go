@@ -98,14 +98,19 @@ func (h *Hub) enablePlan(id string) []Step {
 // (deleting, restoring, a folder apply), its port and hostname
 // collisions (409), and an actor who can't create its missing groups.
 // The groups created are the op record's result "groups_created"
-// (comma-separated), the warnings its warnings.
+// (comma-separated), the warnings its warnings. Audited instance.enable
+// (detail groups_created=…) with the outcome — a refusal at once, else
+// when the operation ended (a Stop: refused).
 func (h *Hub) StartEnable(id string, actor directory.Actor) (*AsyncOp, error) {
 	return h.startAsync(id, OpEnable, actor, h.enablePlan(id), func(ctx context.Context, ready func()) (map[string]string, []string, error) {
 		res, err := h.runEnable(ctx, id, actor, ready)
 		var result map[string]string
+		detail := ""
 		if len(res.GroupsCreated) > 0 {
 			result = map[string]string{"groups_created": strings.Join(res.GroupsCreated, ",")}
+			detail = "groups_created=" + result["groups_created"]
 		}
+		h.auditOp(actor, "instance.enable", id, detail, err)
 		return result, res.Warnings, err
 	})
 }

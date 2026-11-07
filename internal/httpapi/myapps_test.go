@@ -15,9 +15,7 @@ import (
 func myAppsEnv(t *testing.T) *setEnv {
 	t.Helper()
 	e := newSetEnv(t)
-	if code, b := e.do(t, "root", "POST", "/api/templates/enable", `{"id":"vault"}`); code != 200 {
-		t.Fatalf("enable = %d %s", code, b)
-	}
+	opOK(t, e.hub, "POST", "/api/templates/enable", `{"id":"vault"}`)
 	if code, b := e.do(t, "root", "PUT", "/api/instances/vault/settings", `{"person":{"storage_quota":{"default":"10GiB","rows":[{"group":"office_milan","value":"1TiB"}]}}}`); code != 200 {
 		t.Fatalf("save = %d %s", code, b)
 	}

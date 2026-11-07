@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/portcullis/hub/internal/compose"
 	"github.com/portcullis/hub/internal/hub"
@@ -120,9 +121,9 @@ func TestServerRoutes(t *testing.T) {
 		method, path, body string
 		want               int
 	}{
-		{"POST", "/api/templates/enable", `{"id":"demo"}`, 200},
+		{"POST", "/api/templates/enable", `{"id":"demo"}`, 202}, // in the background (§11.7)
 		{"POST", "/api/templates/enable", `{"id":"../etc"}`, 400},
-		{"POST", "/api/templates/enable", `{"id":"missing"}`, 400},
+		{"POST", "/api/templates/enable", `{"id":"missing"}`, 404},
 		{"POST", "/api/templates/enable", `not json`, 400},
 		{"GET", "/api/templates/enable", "", 405},
 		{"GET", "/api/templates/status/demo", "", 502}, // no docker engine in this test
@@ -135,7 +136,7 @@ func TestServerRoutes(t *testing.T) {
 		{"POST", "/api/directory/users", `{}`, 503},
 		{"GET", "/api/directory/users", "", 404}, // wrong method falls through to "/"
 		{"GET", "/api/portal/apps", "", 200},
-		{"POST", "/api/templates/disable", `{"id":"demo"}`, 200},
+		{"POST", "/api/templates/disable", `{"id":"demo"}`, 202},
 		{"POST", "/api/templates/disable", `{"id":"demo"}`, 400},
 		{"GET", "/nope", "", 404},
 	}
@@ -143,10 +144,30 @@ func TestServerRoutes(t *testing.T) {
 		if r, b := do(t, srv, c.method, c.path, c.body, true); r.StatusCode != c.want {
 			t.Errorf("%s %s = %d (%s), want %d", c.method, c.path, r.StatusCode, strings.TrimSpace(b), c.want)
 		}
+		if c.want == 202 {
+			waitLastOp(t, srv, "demo")
+		}
 	}
 	// Oversized body is refused.
 	big := `{"id":"` + strings.Repeat("a", maxBodyBytes+10) + `"}`
 	if r, _ := do(t, srv, "POST", "/api/templates/enable", big, true); r.StatusCode != 400 {
 		t.Errorf("oversized body = %d", r.StatusCode)
 	}
+}
+
+// waitLastOp polls /api/templates/lastop/<id> until its record no longer
+// runs.
+func waitLastOp(t *testing.T, srv *httptest.Server, id string) hub.OpRecord {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		r, b := do(t, srv, "GET", "/api/templates/lastop/"+id, "", true)
+		var rec hub.OpRecord
+		if r.StatusCode == 200 && json.Unmarshal([]byte(b), &rec) == nil && rec.Op != "" && !rec.Running {
+			return rec
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("%s: op still running", id)
+	return hub.OpRecord{}
 }

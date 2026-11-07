@@ -235,6 +235,11 @@ func TestToolClassPerCall17b(t *testing.T) {
 		if m != nil {
 			e.decide(t, m[1], "", false) // declined: the pending ones stay few (G27)
 		}
+		// An AI switch on an enabled instance runs in the background
+		// (202): the next case sees it ended.
+		if id, ok := c.args["id"].(string); ok {
+			waitIdle(t, e.s.Hub, id)
+		}
 	}
 	code, a := e.rpc(t, rpcCall{path: "/mcp/admin", user: "root", version: "2025-11-25", method: "tools/list", params: map[string]any{}})
 	if code != 200 {
@@ -551,6 +556,7 @@ var adminToolFixtures = []struct {
 	{"create_instance", map[string]any{"template": "grafana", "id": "grafana-q"}},
 	{"enable_instance", map[string]any{"id": "secretapp"}},
 	{"restart_instance", map[string]any{"id": "secretapp"}},
+	{"stop_op", map[string]any{"id": "secretapp"}}, // nothing runs: 409 with the record
 	{"set_hosts", map[string]any{"id": "grafana-q", "hosts": map[string]string{"grafana": "grafana-r.example.org"}}},
 	{"get_settings", map[string]any{"id": "secretapp"}},
 	{"preview_settings", map[string]any{"id": "secretapp", "values": map[string]any{"api_url": "https://a.example.org"}}},
@@ -789,6 +795,11 @@ func testToolsNotEchoed(t *testing.T) {
 			txt, isErr := e.accept(t, f.tool, args)
 			check(f.tool+" (accepted)", txt)
 			ok[f.tool] = !isErr
+		}
+		// The long operations run in the background (202): the next
+		// fixture sees them ended.
+		if id, ok := args["id"].(string); ok {
+			waitIdle(t, e.s.Hub, id)
 		}
 		switch f.tool {
 		case "create_folder":

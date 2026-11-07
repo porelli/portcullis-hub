@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/portcullis/hub/internal/compose"
 	"github.com/portcullis/hub/internal/directory"
@@ -45,6 +46,7 @@ func newExpertServer(t *testing.T, runner compose.Runner) (http.Handler, *direct
 	h.Init()
 	t.Cleanup(h.Wait)
 	audit := &directory.AuditLog{Path: filepath.Join(data, "audit.jsonl")}
+	h.SetAudit(audit) // the Hub audits instance.enable / restart (as main wires it)
 	s := &Server{Hub: h, Audit: audit, Secret: testSecret, Web: web.FS}
 	handler, err := s.Handler()
 	if err != nil {
@@ -72,25 +74,15 @@ func TestEnableErrorCarriesOutput(t *testing.T) {
 	if r := call(h, "GET", "/api/templates/lastop/demo", ""); r.Code != 200 || strings.TrimSpace(r.Body.String()) != "null" {
 		t.Errorf("lastop before = %d %s", r.Code, r.Body)
 	}
+	// In the background (202, §11.7): the failure is the op record's.
 	r := call(h, "POST", "/api/templates/enable", `{"id":"demo"}`)
-	if r.Code != 500 || !strings.HasPrefix(r.Header().Get("Content-Type"), "application/json") {
+	if r.Code != 202 {
 		t.Fatalf("enable = %d %q %s", r.Code, r.Header().Get("Content-Type"), r.Body)
 	}
-	var body struct {
-		Error, Op, Output, Hint string
-		RolledBack              bool `json:"rolled_back"`
-	}
-	if err := json.Unmarshal(r.Body.Bytes(), &body); err != nil {
-		t.Fatal(err)
-	}
-	if body.Op != "enable" || !body.RolledBack || !strings.Contains(body.Error, "address already in use") ||
-		!strings.Contains(body.Output, "Container portcullis-demo-web-1  Created") || !strings.Contains(body.Hint, "0.0.0.0:53/tcp") {
-		t.Errorf("body = %+v", body)
-	}
-	r = call(h, "GET", "/api/templates/lastop/demo", "")
-	var rec hub.OpRecord
-	if r.Code != 200 || json.Unmarshal(r.Body.Bytes(), &rec) != nil || rec.OK || rec.Output != body.Output {
-		t.Errorf("lastop = %d %s", r.Code, r.Body)
+	rec := waitHandlerOp(t, h, "demo")
+	if rec.Op != "enable" || rec.OK || rec.Running || !rec.RolledBack || rec.Status != 500 || !strings.Contains(rec.Error, "address already in use") ||
+		!strings.Contains(rec.Output, "Container portcullis-demo-web-1  Created") || !strings.Contains(rec.Hint, "0.0.0.0:53/tcp") {
+		t.Errorf("lastop = %+v", rec)
 	}
 	if r := call(h, "GET", "/api/templates/lastop/missing", ""); r.Code != 404 {
 		t.Errorf("lastop unknown = %d", r.Code)
@@ -125,16 +117,18 @@ func TestExpertComposeAPI(t *testing.T) {
 	if r.Code != 200 || !strings.Contains(r.Body.String(), `"restart_required":false`) || !strings.Contains(r.Body.String(), `"saved"`) {
 		t.Errorf("save = %d %s", r.Code, r.Body)
 	}
-	if r := call(h, "POST", "/api/templates/enable", `{"id":"demo"}`); r.Code != 200 {
+	if r := call(h, "POST", "/api/templates/enable", `{"id":"demo"}`); r.Code != 202 {
 		t.Fatalf("enable = %d %s", r.Code, r.Body)
 	}
+	waitHandlerOp(t, h, "demo")
 	r = call(h, "PUT", "/api/templates/compose/demo", `{"user_override":""}`)
 	if r.Code != 200 || !strings.Contains(r.Body.String(), `"removed"`) || !strings.Contains(r.Body.String(), `"restart_required":true`) {
 		t.Errorf("remove = %d %s", r.Code, r.Body)
 	}
-	if r := call(h, "POST", "/api/templates/restart/demo", "{}"); r.Code != 200 || !strings.Contains(r.Body.String(), "restarted") {
+	if r := call(h, "POST", "/api/templates/restart/demo", "{}"); r.Code != 202 || !strings.Contains(r.Body.String(), `"op":"restart"`) {
 		t.Errorf("restart = %d %s", r.Code, r.Body)
 	}
+	waitHandlerOp(t, h, "demo")
 	all, _ := audit.Recent(10)
 	var es []directory.AuditEntry // the enable and restart are audited too (instance.*)
 	for _, e := range all {
@@ -150,4 +144,19 @@ func TestExpertComposeAPI(t *testing.T) {
 	if strings.Contains(string(raw), "hunter2") {
 		t.Error("override content in the audit log")
 	}
+}
+
+// waitHandlerOp polls h's /api/templates/lastop/<id> until its record no
+// longer runs.
+func waitHandlerOp(t *testing.T, h http.Handler, id string) hub.OpRecord {
+	t.Helper()
+	for deadline := time.Now().Add(20 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		r := call(h, "GET", "/api/templates/lastop/"+id, "")
+		var rec hub.OpRecord
+		if r.Code == 200 && json.Unmarshal(r.Body.Bytes(), &rec) == nil && rec.Op != "" && !rec.Running {
+			return rec
+		}
+	}
+	t.Fatalf("%s: op still running", id)
+	return hub.OpRecord{}
 }

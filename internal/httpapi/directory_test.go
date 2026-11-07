@@ -265,9 +265,7 @@ func TestDirectoryDelegates(t *testing.T) {
 
 func TestPortalApps(t *testing.T) {
 	srv, _, _ := newDirServer(t)
-	if r, b := doAs(t, srv, "root", "POST", "/api/templates/enable", `{"id":"demo"}`); r.StatusCode != 200 {
-		t.Fatalf("enable = %d %s", r.StatusCode, b)
-	}
+	opOK(t, srv, "POST", "/api/templates/enable", `{"id":"demo"}`)
 	r, b := doAs(t, srv, "", "GET", "/api/portal/apps", "")
 	var doc hub.PortalDocument
 	if err := json.Unmarshal([]byte(b), &doc); err != nil || r.StatusCode != 200 {
@@ -291,9 +289,8 @@ func TestEnableCreatesMissingGroups(t *testing.T) {
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
 
-	r, b := doAs(t, srv, "root", "POST", "/api/templates/enable", `{"id":"demo"}`)
-	if r.StatusCode != 200 || !strings.Contains(b, `"groups_created":["users_demo","admin_demo"]`) {
-		t.Fatalf("enable = %d %s", r.StatusCode, b)
+	if rec := opOK(t, srv, "POST", "/api/templates/enable", `{"id":"demo"}`); rec.Result["groups_created"] != "users_demo,admin_demo" {
+		t.Fatalf("enable = %+v", rec)
 	}
 	if !ll.HasGroup("users_demo") || !ll.HasGroup("admin_demo") {
 		t.Fatal("groups not created in LLDAP")

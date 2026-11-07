@@ -298,9 +298,7 @@ func TestPreviewRoute(t *testing.T) {
 
 func TestPutAnswersSaveResult(t *testing.T) {
 	e := newSetEnv(t)
-	if code, b := e.do(t, "root", "POST", "/api/templates/enable", `{"id":"vault"}`); code != 200 {
-		t.Fatalf("enable = %d %s", code, b)
-	}
+	opOK(t, e.hub, "POST", "/api/templates/enable", `{"id":"vault"}`)
 	code, b := e.do(t, "root", "PUT", "/api/instances/vault/settings", `{"values":{"trash_days":7},"ports":{}}`)
 	if code != 200 {
 		t.Fatalf("save = %d %s", code, b)

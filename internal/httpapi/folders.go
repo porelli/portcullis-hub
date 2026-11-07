@@ -79,12 +79,13 @@ func writeJSONError(w http.ResponseWriter, code int, msg string) {
 
 // writeAPIErr maps a Hub error to its status (StatusError, ErrBusy 409,
 // else 500) as {"error"}; a failed operation (*hub.OpError) is
-// {error, op, output, hint, rolled_back} like writeErr's. Hub messages
+// {error, op, output, hint, rolled_back} like writeErr's, a busy
+// instance's refusal its running op record (opRecordOf). Hub messages
 // carry ids, paths and counts, never secrets (op records are redacted
 // before they are clipped); clipped for display.
 func writeAPIErr(w http.ResponseWriter, err error) {
 	var oe *hub.OpError
-	if errors.As(err, &oe) {
+	if errors.As(err, &oe) || opRecordOf(err) != nil {
 		writeErr(w, err, http.StatusInternalServerError)
 		return
 	}

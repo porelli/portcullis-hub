@@ -186,6 +186,10 @@ func writeJSON(w http.ResponseWriter, v interface{}) {
 // {error, op, output, hint, rolled_back}: compose's output is the cause.
 func writeErr(w http.ResponseWriter, err error, def int) {
 	code := errStatus(err, def)
+	if rec := opRecordOf(err); rec != nil {
+		writeRecordErr(w, code, rec)
+		return
+	}
 	var oe *hub.OpError
 	if errors.As(err, &oe) {
 		w.Header().Set("Content-Type", "application/json")
@@ -204,6 +208,39 @@ func writeErr(w http.ResponseWriter, err error, def int) {
 	// (finishOp); anything else is clipped here for display (nothing in it
 	// is redacted, so clipping can't let a redaction slip).
 	http.Error(w, clipMessage(err.Error(), 2000), code)
+}
+
+// recordError is a refusal that answers an op record as its body: a
+// Stop refused (409 with the current record, contract §11.7 "Stop").
+type recordError struct {
+	err error
+	rec *hub.OpRecord
+}
+
+func (e *recordError) Error() string { return e.err.Error() }
+func (e *recordError) Unwrap() error { return e.err }
+
+// opRecordOf is the op record a refusal answers as its JSON body (nil:
+// none): a busy instance's running record (*hub.BusyError, contract §11.7
+// "One operation per instance"; a lock held by work with no record stays
+// the plain-text busy refusal) or a refused Stop's (recordError).
+func opRecordOf(err error) *hub.OpRecord {
+	var re *recordError
+	if errors.As(err, &re) && re.rec != nil {
+		return re.rec
+	}
+	var be *hub.BusyError
+	if errors.As(err, &be) && be.Record != nil {
+		return be.Record
+	}
+	return nil
+}
+
+// writeRecordErr answers code with rec (redacted when it was written) as
+// JSON.
+func writeRecordErr(w http.ResponseWriter, code int, rec *hub.OpRecord) {
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	writeJSONStatus(w, code, rec)
 }
 
 // errStatus is the HTTP status writeErr answers for err: a StatusError's,
@@ -368,33 +405,28 @@ func (s *Server) handleEnable(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	res, err := s.enableInstance(requestActor(r), req.ID)
+	op, err := s.enableInstance(requestActor(r), req.ID)
 	if err != nil {
 		writeErr(w, err, http.StatusBadRequest)
 		return
 	}
-	writeJSON(w, res)
+	writeAccepted(w, op)
 }
 
 // enableInstance is the enable's work (the route and the Portcullis
-// MCP's enable_instance): missing users_<id> / admin_<id> groups are
-// created first, as the admin (audited in Users & Groups); audited
-// instance.enable.
-func (s *Server) enableInstance(a directory.Actor, id string) (map[string]any, error) {
+// MCP's enable_instance), in the background (202, contract §11.7):
+// missing users_<id> / admin_<id> groups are created first, as the admin
+// (audited in Users & Groups); audited instance.enable by the Hub (an
+// invalid id here).
+func (s *Server) enableInstance(a directory.Actor, id string) (*hub.AsyncOp, error) {
 	if !templates.ValidID(id) {
-		return nil, &hub.StatusError{Status: http.StatusBadRequest, Err: errors.New("invalid id")}
+		err := &hub.StatusError{Status: http.StatusBadRequest, Err: errors.New("invalid id")}
+		s.auditOpAs(a, id, directory.AuditEntry{Action: "instance.enable", Target: id}, err, http.StatusBadRequest)
+		return nil, err
 	}
-	s.rec("EnableAs", id)
-	res, err := s.Hub.EnableAs(id, a)
-	detail := ""
-	if res != nil && len(res.GroupsCreated) > 0 {
-		detail = "groups_created=" + strings.Join(res.GroupsCreated, ",")
-	}
-	s.auditOpAs(a, id, directory.AuditEntry{Action: "instance.enable", Target: id, Detail: detail}, err, http.StatusBadRequest)
-	if err != nil {
-		return nil, defaultStatus(err, http.StatusBadRequest)
-	}
-	return map[string]any{"status": "enabled", "id": id, "groups_created": res.GroupsCreated, "warnings": res.Warnings}, nil
+	s.rec("StartEnable", id)
+	op, err := s.Hub.StartEnable(id, a)
+	return op, defaultStatus(err, http.StatusBadRequest)
 }
 
 func (s *Server) handleDisable(w http.ResponseWriter, r *http.Request) {
@@ -407,27 +439,26 @@ func (s *Server) handleDisable(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	res, err := s.disableInstance(requestActor(r), req.ID)
+	op, err := s.disableInstance(requestActor(r), req.ID)
 	if err != nil {
 		writeErr(w, err, http.StatusBadRequest)
 		return
 	}
-	writeJSON(w, res)
+	writeAccepted(w, op)
 }
 
-// disableInstance is the disable's work (route and disable_instance);
-// audited instance.disable.
-func (s *Server) disableInstance(a directory.Actor, id string) (map[string]string, error) {
+// disableInstance is the disable's work (route and disable_instance), in
+// the background (202); audited instance.disable by the Hub (an invalid
+// id here).
+func (s *Server) disableInstance(a directory.Actor, id string) (*hub.AsyncOp, error) {
 	if !templates.ValidID(id) {
-		return nil, &hub.StatusError{Status: http.StatusBadRequest, Err: errors.New("invalid id")}
+		err := &hub.StatusError{Status: http.StatusBadRequest, Err: errors.New("invalid id")}
+		s.auditOpAs(a, id, directory.AuditEntry{Action: "instance.disable", Target: id}, err, http.StatusBadRequest)
+		return nil, err
 	}
-	s.rec("Disable", id)
-	err := s.Hub.Disable(id)
-	s.auditOpAs(a, id, directory.AuditEntry{Action: "instance.disable", Target: id}, err, http.StatusBadRequest)
-	if err != nil {
-		return nil, defaultStatus(err, http.StatusBadRequest)
-	}
-	return map[string]string{"status": "disabled", "id": id}, nil
+	s.rec("StartDisable", id)
+	op, err := s.Hub.StartDisable(id, a)
+	return op, defaultStatus(err, http.StatusBadRequest)
 }
 
 func (s *Server) handleTemplateRestart(w http.ResponseWriter, r *http.Request) {
@@ -438,24 +469,20 @@ func (s *Server) handleTemplateRestart(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	res, err := s.restartInstance(requestActor(r), id)
+	op, err := s.restartInstance(requestActor(r), id)
 	if err != nil {
 		writeErr(w, err, http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, res)
+	writeAccepted(w, op)
 }
 
-// restartInstance is the restart's work (route and restart_instance);
-// audited instance.restart.
-func (s *Server) restartInstance(a directory.Actor, id string) (map[string]string, error) {
-	s.rec("RestartApp", id)
-	err := s.Hub.RestartApp(id)
-	s.auditOpAs(a, id, directory.AuditEntry{Action: "instance.restart", Target: id}, err, http.StatusInternalServerError)
-	if err != nil {
-		return nil, err
-	}
-	return map[string]string{"status": "restarted"}, nil
+// restartInstance is the restart's work (route and restart_instance), in
+// the background (202); audited instance.restart by the Hub.
+func (s *Server) restartInstance(a directory.Actor, id string) (*hub.AsyncOp, error) {
+	s.rec("StartRestart", id)
+	op, err := s.Hub.StartRestart(id, a)
+	return op, defaultStatus(err, http.StatusInternalServerError)
 }
 
 // handleTemplateLastOp returns the app's last lifecycle operation (JSON

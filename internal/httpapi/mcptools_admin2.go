@@ -340,7 +340,7 @@ func (s *Server) registerAdminTools2() {
 				}
 				return s.Hub.InstanceAI(in.ID)
 			}),
-		perCall(admin("set_ai_support", "Switch a companion (an app's MCP server) on or off for an instance. Switching on needs your confirmation in the browser: AI clients can then act in the app as the people who use it. An enabled instance restarts.",
+		perCall(admin("set_ai_support", "Switch a companion (an app's MCP server) on or off for an instance. Switching on needs your confirmation in the browser: AI clients can then act in the app as the people who use it. An enabled instance restarts, in the background: then it answers {op_id, op, instance, poll} (see wait_for_op); a disabled one answers the AI tab.",
 			ClassWrite, "PUT /api/instances/{id}/ai", "ai.enable", func(ctx context.Context, a directory.Actor, in aiSupportArgs) (any, error) {
 				if err := instanceIDOK(in.ID); err != nil {
 					return nil, err
@@ -348,7 +348,7 @@ func (s *Server) registerAdminTools2() {
 				on := in.Enabled
 				return s.updateInstanceAI(ctx, a, in.ID, hub.InstanceAIUpdate{Companions: map[string]hub.CompanionUpdate{in.Companion: {Enabled: &on}}})
 			}), aiSupportClass, idOf, s.aiSupportConsequences),
-		perCall(admin("set_ai_mode", "Change a companion's mode: read_only, or read_write (needs your confirmation in the browser). Existing AI credentials are revoked first.",
+		perCall(admin("set_ai_mode", "Change a companion's mode: read_only, or read_write (needs your confirmation in the browser). Existing AI credentials are revoked first. On an enabled instance it runs in the background: answers {op_id, op, instance, poll} (see wait_for_op); a disabled one answers the AI tab.",
 			ClassWrite, "PUT /api/instances/{id}/ai", "ai.mode", func(ctx context.Context, a directory.Actor, in aiModeArgs) (any, error) {
 				if err := instanceIDOK(in.ID); err != nil {
 					return nil, err

@@ -740,6 +740,12 @@ func toolError(err error, redact func(string) string) *sdk.CallToolResult {
 		code = de.Status
 	}
 	prefix := strconv.Itoa(code) + ": "
+	if rec := opRecordOf(err); rec != nil {
+		// A busy instance's running record, a refused Stop's record
+		// (§15.10): "409: <record JSON>".
+		b, _ := json.Marshal(rec)
+		return sdk.TextResult(prefix+clipResult(redact(string(b))), true)
+	}
 	var oe *hub.OpError
 	if errors.As(err, &oe) {
 		b, _ := json.Marshal(map[string]any{"error": oe.Record.Error, "op": oe.Record.Op, "output": oe.Record.Output,

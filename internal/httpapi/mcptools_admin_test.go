@@ -363,7 +363,7 @@ func TestAdminToolsSameAsHTTP(t *testing.T) {
 			method: "DELETE", path: "/api/folders/docs", body: ``},
 		// ── Task 17a ──
 		{tool: "create_instance", args: map[string]any{"template": "grafana", "id": "grafana-a"},
-			method: "POST", path: "/api/instances", body: `{"template":"grafana","id":"grafana-a"}`},
+			method: "POST", path: "/api/instances", body: `{"template":"grafana","id":"grafana-a"}`, instance: "grafana-a"},
 		{tool: "create_instance", args: map[string]any{"template": "nope", "id": "nope-a"},
 			method: "POST", path: "/api/instances", body: `{"template":"nope","id":"nope-a"}`},
 		{tool: "set_hosts", args: map[string]any{"id": "grafana-a", "hosts": map[string]string{"grafana": "grafana-b.example.org"}},
@@ -373,12 +373,16 @@ func TestAdminToolsSameAsHTTP(t *testing.T) {
 		{tool: "save_settings", args: map[string]any{"id": "secretapp", "ports": map[string]string{}},
 			method: "PUT", path: "/api/instances/secretapp/settings", body: `{"ports":{}}`, plan: true},
 		{tool: "enable_instance", args: map[string]any{"id": "secretapp"},
-			method: "POST", path: "/api/templates/enable", body: `{"id":"secretapp"}`},
+			method: "POST", path: "/api/templates/enable", body: `{"id":"secretapp"}`, instance: "secretapp"},
 		// cloud is public by default: enabling it is D.
 		{tool: "enable_instance", args: map[string]any{"id": "cloud"},
-			method: "POST", path: "/api/templates/enable", body: `{"id":"cloud"}`},
+			method: "POST", path: "/api/templates/enable", body: `{"id":"cloud"}`, instance: "cloud"},
 		{tool: "restart_instance", args: map[string]any{"id": "secretapp"},
-			method: "POST", path: "/api/templates/restart/secretapp", body: ``},
+			method: "POST", path: "/api/templates/restart/secretapp", body: ``, instance: "secretapp"},
+		// Nothing runs on secretapp now: 409 with the record on both
+		// (a Stop of a running operation: TestStopOpTool).
+		{tool: "stop_op", args: map[string]any{"id": "secretapp"},
+			method: "POST", path: "/api/instances/secretapp/op/stop", body: `{}`, instance: "secretapp"},
 		{tool: "set_policy", args: map[string]any{"id": "secretapp", "policy": map[string]any{"factors": []string{"webauthn"}, "op": "any"}},
 			method: "PUT", path: "/api/instances/secretapp/settings", body: `{"auth_policy":{"factors":["webauthn"],"op":"any"}}`},
 		{tool: "set_policy", args: map[string]any{"id": "secretapp", "policy": map[string]any{"factors": []string{"password"}, "op": "any"}},
@@ -434,13 +438,13 @@ func TestAdminToolsSameAsHTTP(t *testing.T) {
 		{tool: "delete_domain", args: map[string]any{"name": "team-b.example.net"},
 			method: "DELETE", path: "/api/domains/team-b.example.net", body: ``},
 		{tool: "set_ai_mode", args: map[string]any{"id": "aiapp", "companion": "tok", "mode": "read_only"},
-			method: "PUT", path: "/api/instances/aiapp/ai", body: `{"companions":{"tok":{"mode":"read_only"}}}`},
+			method: "PUT", path: "/api/instances/aiapp/ai", body: `{"companions":{"tok":{"mode":"read_only"}}}`, instance: "aiapp"},
 		{tool: "set_ai_mode", args: map[string]any{"id": "aiapp", "companion": "tok", "mode": "read_write"},
-			method: "PUT", path: "/api/instances/aiapp/ai", body: `{"companions":{"tok":{"mode":"read_write"}}}`},
+			method: "PUT", path: "/api/instances/aiapp/ai", body: `{"companions":{"tok":{"mode":"read_write"}}}`, instance: "aiapp"},
 		{tool: "set_ai_support", args: map[string]any{"id": "aiapp", "companion": "tok", "enabled": false},
-			method: "PUT", path: "/api/instances/aiapp/ai", body: `{"companions":{"tok":{"enabled":false}}}`},
+			method: "PUT", path: "/api/instances/aiapp/ai", body: `{"companions":{"tok":{"enabled":false}}}`, instance: "aiapp"},
 		{tool: "set_ai_support", args: map[string]any{"id": "aiapp", "companion": "tok", "enabled": true},
-			method: "PUT", path: "/api/instances/aiapp/ai", body: `{"companions":{"tok":{"enabled":true}}}`},
+			method: "PUT", path: "/api/instances/aiapp/ai", body: `{"companions":{"tok":{"enabled":true}}}`, instance: "aiapp"},
 		{tool: "revoke_ai_access", args: map[string]any{"id": "aiapp", "companion": "tok"},
 			method: "POST", path: "/api/instances/aiapp/ai/revoke", body: `{"companion":"tok"}`},
 		{tool: "revoke_ai_access", args: map[string]any{"id": "aiapp", "companion": "hdr", "user": "alice"},
@@ -474,7 +478,7 @@ func TestAdminToolsSameAsHTTP(t *testing.T) {
 		{tool: "set_default_policy", args: map[string]any{"policy": map[string]any{"factors": []string{"webauthn", "mtls"}, "op": "any"}},
 			method: "PUT", path: "/api/settings", body: `{"default_auth_policy":{"factors":["webauthn","mtls"],"op":"any"}}`, instance: "secretapp"},
 		{tool: "disable_instance", args: map[string]any{"id": "secretapp"},
-			method: "POST", path: "/api/templates/disable", body: `{"id":"secretapp"}`},
+			method: "POST", path: "/api/templates/disable", body: `{"id":"secretapp"}`, instance: "secretapp"},
 		{tool: "delete_instance", args: map[string]any{"id": "grafana-a"},
 			method: "DELETE", path: "/api/instances/grafana-a", body: `{"confirm":"grafana-a"}`, instance: "grafana-a"},
 		// ── Task 18: users and groups (both branches of every per-call one) ──
@@ -745,7 +749,10 @@ func TestBusyIsToolError(t *testing.T) {
 	}
 	<-be.reached
 	txt, isErr, _ := e.tool(t, "enable_instance", map[string]any{"id": "grafana"})
-	if !isErr || !strings.HasPrefix(txt, "409: ") || !strings.Contains(txt, "in progress") {
+	// The running record (§15.10, operation progress), not a message.
+	var rec hub.OpRecord
+	if !isErr || !strings.HasPrefix(txt, "409: ") || json.Unmarshal([]byte(strings.TrimPrefix(txt, "409: ")), &rec) != nil ||
+		rec.Op != "backup" || !rec.Running || rec.Actor != "root" {
 		t.Errorf("enable while busy = %q %v", txt, isErr)
 	}
 	release()

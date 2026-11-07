@@ -118,9 +118,12 @@ func TestUnauditedMutationsNowAudited(t *testing.T) {
 		code                 int // expected HTTP status
 		action, target, want string
 	}{
-		{"enable", ai, "POST", "/api/templates/enable", `{"id":"grafana"}`, 200, "instance.enable", "grafana", ""},
-		{"enable unknown (human)", directory.Human("root"), "POST", "/api/templates/enable", `{"id":"missing"}`, 400, "instance.enable", "missing", ""},
-		{"restart", ai, "POST", "/api/templates/restart/grafana", `{}`, 200, "instance.restart", "grafana", ""},
+		// Enable, restart and disable run in the background (202, §11.7):
+		// audited by the Hub with the outcome, once the operation ended.
+		{"enable", ai, "POST", "/api/templates/enable", `{"id":"grafana"}`, 202, "instance.enable", "grafana", ""},
+		{"enable unknown (human)", directory.Human("root"), "POST", "/api/templates/enable", `{"id":"missing"}`, 404, "instance.enable", "missing", ""},
+		{"enable invalid id", ai, "POST", "/api/templates/enable", `{"id":"Bad_ID"}`, 400, "instance.enable", "Bad_ID", ""},
+		{"restart", ai, "POST", "/api/templates/restart/grafana", `{}`, 202, "instance.restart", "grafana", ""},
 		{"restart unknown", ai, "POST", "/api/templates/restart/nosuch", `{}`, 404, "instance.restart", "nosuch", ""},
 		{"exec", ai, "POST", "/api/templates/exec/grafana", `{"service":"web","command":"` + secretCmd + `"}`, 200, "instance.exec", "grafana", "service=web exit=0"},
 		{"exec non-zero exit", ai, "POST", "/api/templates/exec/grafana", `{"service":"web","command":"` + secretCmd + ` exit3"}`, 200, "instance.exec", "grafana", "service=web exit=3"},
@@ -129,7 +132,7 @@ func TestUnauditedMutationsNowAudited(t *testing.T) {
 		{"env save Hub-set", ai, "PUT", "/api/templates/env/grafana", `{"PORTCULLIS_DOMAIN":"` + secretVal + `"}`, 400, "app.env", "grafana", ""},
 		{"drift resolve", ai, "POST", "/api/drift/resolve", `{"id":"grafana","action":"apply"}`, 200, "drift.resolve", "grafana", "apply"},
 		{"drift resolve bogus", ai, "POST", "/api/drift/resolve", `{"id":"grafana","action":"bogus"}`, 400, "drift.resolve", "grafana", "bogus"},
-		{"disable", ai, "POST", "/api/templates/disable", `{"id":"grafana"}`, 200, "instance.disable", "grafana", ""},
+		{"disable", ai, "POST", "/api/templates/disable", `{"id":"grafana"}`, 202, "instance.disable", "grafana", ""},
 		{"disable again", ai, "POST", "/api/templates/disable", `{"id":"grafana"}`, 400, "instance.disable", "grafana", ""},
 		{"source add", ai, "POST", "/api/sources/add", `{"name":"extra","url":"` + url + `"}`, 200, "source.add", "extra", url},
 		{"source add bad url", ai, "POST", "/api/sources/add", `{"name":"other","url":"file:///etc"}`, 400, "source.add", "other", ""},
@@ -145,6 +148,12 @@ func TestUnauditedMutationsNowAudited(t *testing.T) {
 		code := call(s.actor, s.method, s.path, s.body)
 		if code != s.code {
 			t.Errorf("%s: HTTP %d, want %d", s.name, code, s.code)
+		}
+		if code == http.StatusAccepted {
+			waitIdle(t, e.s.Hub, s.target)
+			if r := e.s.Hub.LastOp(s.target); r == nil || !r.OK {
+				t.Errorf("%s: the operation failed: %+v", s.name, r)
+			}
 		}
 		var mine []directory.AuditEntry
 		for _, a := range readAudit(t, e.audit)[before:] {

@@ -40,9 +40,7 @@ func entryEnv(t *testing.T) *setEnv {
 	e.ll.AddUser("alice2", "alice2@example.org", "Alice 2", "")
 	e.ll.AddGroup("entryapp", "alice", "alice2", "bob")
 	mustDo(t, e.hub, "root", "PUT", "/api/directory/permissions/"+directory.PermEditDetails, `{"group":"helpers"}`, 200)
-	if code, b := e.do(t, "root", "POST", "/api/templates/enable", `{"id":"entryapp"}`); code != 200 {
-		t.Fatalf("enable = %d %s", code, b)
-	}
+	opOK(t, e.hub, "POST", "/api/templates/enable", `{"id":"entryapp"}`)
 	e.s.Hub.Wait()
 	return e
 }

@@ -339,24 +339,24 @@ func (s *Server) registerAdminTools() {
 			ClassRead, "GET /api/instances/defaults", "", func(_ context.Context, _ directory.Actor, in defaultsArgs) (any, error) {
 				return s.instanceDefaults(in.Template, in.ID, in.Domain)
 			}),
-		perCallCtx(admin("create_instance", "Create an instance of a multi-instance template (created stopped: review its settings, then enable it). Its users_<id> / admin_<id> groups are created. If one of them already exists with members, it needs your confirmation in the browser.",
+		perCallCtx(admin("create_instance", "Create an instance of a multi-instance template (created stopped: review its settings, then enable it). Its users_<id> / admin_<id> groups are created. If one of them already exists with members, it needs your confirmation in the browser. Runs in the background: answers {op_id, op, instance, poll}; see wait_for_op.",
 			ClassWrite, "POST /api/instances", "instance.create", func(_ context.Context, a directory.Actor, in createArgs) (any, error) {
-				return s.createInstance(a, in.Template, in.ID, in.Hosts)
+				return started(s.createInstance(a, in.Template, in.ID, in.Hosts))
 			}), s.createClass, idOf, s.createConsequences),
-		perCallCtx(admin("enable_instance", "Enable (start) an instance; its missing groups are created first. Starting one whose public access is on, whose sign-in is the app's own login, or whose access / admin group already has members needs your confirmation in the browser.",
+		perCallCtx(admin("enable_instance", "Enable (start) an instance; its missing groups are created first. Starting one whose public access is on, whose sign-in is the app's own login, or whose access / admin group already has members needs your confirmation in the browser. Runs in the background: answers {op_id, op, instance, poll}; see wait_for_op.",
 			ClassWrite, "/api/templates/enable", "instance.enable", func(_ context.Context, a directory.Actor, in idArgs) (any, error) {
-				return s.enableInstance(a, in.ID)
+				return started(s.enableInstance(a, in.ID))
 			}), s.enableClass, idOf, s.enableConsequences),
-		admin("disable_instance", "Disable (stop) an instance; its data is kept.",
+		admin("disable_instance", "Disable (stop) an instance; its data is kept. Runs in the background: answers {op_id, op, instance, poll}; see wait_for_op.",
 			ClassWrite, "/api/templates/disable", "instance.disable", func(_ context.Context, a directory.Actor, in idArgs) (any, error) {
-				return s.disableInstance(a, in.ID)
+				return started(s.disableInstance(a, in.ID))
 			}),
-		admin("restart_instance", "Restart an enabled instance.",
+		admin("restart_instance", "Restart an enabled instance. Runs in the background: answers {op_id, op, instance, poll}; see wait_for_op.",
 			ClassWrite, "/api/templates/restart/", "instance.restart", func(_ context.Context, a directory.Actor, in idArgs) (any, error) {
 				if err := appIDOK(in.ID); err != nil {
 					return nil, err
 				}
-				return s.restartInstance(a, in.ID)
+				return started(s.restartInstance(a, in.ID))
 			}),
 		admin("set_hosts", "Change an instance's hostnames (every host router; immutable ones can't change).",
 			ClassWrite, "PUT /api/instances/{id}/hosts", "instance.update", func(_ context.Context, a directory.Actor, in hostsArgs) (any, error) {
@@ -365,13 +365,22 @@ func (s *Server) registerAdminTools() {
 				}
 				return s.setHosts(a, in.ID, in.Hosts)
 			}),
-		admin("get_op", "An instance's last operation record (running, then ok / error with the result and warnings).",
+		admin("get_op", "An instance's last operation record: its steps (state, percent, detail, times), what it created, whether it can be stopped, then ok / error with the result and warnings.",
 			ClassRead, "GET /api/instances/{id}/op", "", func(_ context.Context, _ directory.Actor, in idArgs) (any, error) {
 				return s.getOp(in.ID)
 			}),
-		admin("wait_for_op", "Wait (polling every 2 s, at most 60 s) until an instance's operation is done; answers {done, record}.",
+		admin("wait_for_op", "Wait (polling every 2 s, at most 60 s) until an instance's operation is done; answers {done, record} (the record with its steps and what it created).",
 			ClassRead, "GET /api/instances/{id}/op", "", func(ctx context.Context, _ directory.Actor, in waitArgs) (any, error) {
 				return s.waitForOp(ctx, in.ID, in.OpID)
+			}),
+		// W (§15.10): a Stop only reverses what the running operation did;
+		// a delete past its point of no return answers 409.
+		admin("stop_op", "Stop an instance's running operation and undo what it did (an enable's containers, volumes, sign-in clients and groups it created; a disable turns the app back on; …). Answers the record (stopping: true); poll with wait_for_op. Refused (409, with the record) when nothing runs, the operation is already stopping, or a delete is past its point of no return.",
+			ClassWrite, "POST /api/instances/{id}/op/stop", "op.stop", func(_ context.Context, a directory.Actor, in idArgs) (any, error) {
+				if err := instanceIDOK(in.ID); err != nil {
+					return nil, err
+				}
+				return s.stopOp(a, in.ID)
 			}),
 		{Name: "delete_instance", Description: "Delete an instance for good: a backup is taken first, then its containers, volumes, Keycloak clients and own groups go. Runs in the background: answers {op_id, op, instance, poll}; see wait_for_op.",
 			Class: ClassDestructive, Scope: ScopeAdmin, Twin: "DELETE /api/instances/{id}", Audit: "instance.delete", In: idArgs{},
@@ -1024,6 +1033,14 @@ func (s *Server) getInstance(id string) (any, error) {
 		out["ai"] = map[string]string{"error": err.Error()}
 	}
 	return out, nil
+}
+
+// started is a long operation's tool answer: the twin's 202 body.
+func started(op *hub.AsyncOp, err error) (any, error) {
+	if err != nil {
+		return nil, err
+	}
+	return acceptedBody(op), nil
 }
 
 // getOp is GET /api/instances/{id}/op's answer.
