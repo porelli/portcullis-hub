@@ -497,14 +497,11 @@ type Hub struct {
 	aiReconMu    sync.Mutex
 	aiRevokeErrs map[string]string
 	aiPrunedErrs map[string]string
-	// aiPendingLeavers: per app_oauth companion ("<inst>/<comp>"), people
-	// who left while their Keycloak id was still pending; the revoke_all
-	// that covers them failed and is retried (AIRevokeProblems, T27).
-	aiPendingLeavers map[string][]string
-	// aiOAuthUnrecorded: per app_oauth companion, holders seen while
-	// LLDAP gave no uuid for them (not recorded yet); if one leaves first,
-	// the companion's revoke_all still runs (T27).
-	aiOAuthUnrecorded map[string]map[string]bool
+	// aiOwedRevokeAll: per app_oauth companion ("<inst>/<comp>"), the
+	// unverifiable leavers whose revoke_all failed at the last pass (T27;
+	// the owed revoke_all itself is recomputed from oauth-seen.json each
+	// pass, so a restart loses nothing).
+	aiOwedRevokeAll map[string][]string
 	// Keycloak AI clients (ai_clients.go): aiKCMu serialises every pass
 	// over the AI clients and mcp:* scopes (the sync loop, a Settings → AI
 	// save, applyAIScopes), each reading state after taking it — a leaf
