@@ -99,6 +99,9 @@ type Progress struct {
 	closed bool // ended: nothing is written any more
 	// cancel cancels the operation's context (cancelOp).
 	cancel context.CancelFunc
+	// stopper: the admin whose Stop was accepted (cancelOp; with via /
+	// client) — the undo acts as them (an enable's undo:groups).
+	stopper directory.Actor
 	// The percent throttle.
 	lastWrite  time.Time
 	dirty      bool
@@ -195,14 +198,16 @@ func (p *Progress) Start(key string) {
 		return
 	}
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	s := p.stepLocked(key, true)
-	if frozen(s) {
-		return
+	if !frozen(s) {
+		t := p.now()
+		s.State, s.StartedAt, s.EndedAt, s.Percent, s.Detail = StepRunning, &t, nil, nil, ""
+		p.writeLocked()
 	}
-	t := p.now()
-	s.State, s.StartedAt, s.EndedAt, s.Percent, s.Detail = StepRunning, &t, nil, nil, ""
-	p.writeLocked()
+	p.mu.Unlock()
+	if p.h != nil && p.h.testHookStepStart != nil {
+		p.h.testHookStepStart(p.op, key)
+	}
 }
 
 // Percent sets a running step's percentage (clamped to 0–100) and its
@@ -229,6 +234,50 @@ func (p *Progress) Percent(key string, pct int, detail string) {
 		return
 	}
 	p.throttledLocked()
+}
+
+// Detail sets a step's one-line detail (no percent), written at once.
+func (p *Progress) Detail(key, detail string) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if s := p.stepLocked(key, false); s != nil && !frozen(s) {
+		s.Detail = detail
+		p.writeLocked()
+	}
+}
+
+// planned is p when key is one of its steps, else nil (a nil reporter's
+// methods are no-ops): code shared by several operations reports a step
+// only into the one that planned it (Start would append it).
+func (p *Progress) planned(key string) *Progress {
+	if p.Has(key) {
+		return p
+	}
+	return nil
+}
+
+// stopActor is the admin whose Stop was accepted.
+func (p *Progress) stopActor() directory.Actor {
+	if p == nil {
+		return directory.Actor{}
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.stopper
+}
+
+// snapshot is a copy of the running record (steps and created cloned,
+// details unredacted).
+func (p *Progress) snapshot() OpRecord {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	r := p.rec
+	r.Created = p.rec.Created.clone()
+	r.Steps = slices.Clone(p.rec.Steps)
+	return r
 }
 
 // Done marks key done (a measured step at 100 %).
@@ -591,6 +640,7 @@ func (h *Hub) cancelOp(id string, actor directory.Actor) error {
 	}
 	t := p.now()
 	p.rec.Stopping, p.rec.Stoppable, p.rec.StoppedBy, p.rec.StoppedAt = true, false, actor.User, &t
+	p.stopper = actor
 	for i := range p.rec.Steps {
 		if s := &p.rec.Steps[i]; s.State == StepRunning {
 			s.State, s.EndedAt = StepStopped, &t

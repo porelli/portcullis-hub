@@ -93,7 +93,7 @@ func liveSetup(t *testing.T) (*liveEnv, *keycloak.Client) {
 	}
 	c := keycloak.New(base, user, pass)
 	for _, id := range []string{"app", "other"} {
-		if err := c.RegisterClient(ctx, keycloak.ClientSpec{ClientID: id, TemplateID: id, Secret: "s-" + id, RedirectURIs: []string{liveRedirect}}); err != nil {
+		if _, err := c.RegisterClient(ctx, keycloak.ClientSpec{ClientID: id, TemplateID: id, Secret: "s-" + id, RedirectURIs: []string{liveRedirect}}); err != nil {
 			t.Fatal(err)
 		}
 	}

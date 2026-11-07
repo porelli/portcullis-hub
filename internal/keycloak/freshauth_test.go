@@ -186,7 +186,7 @@ func TestFreshAuthClientLeftAloneByOtherSyncs(t *testing.T) {
 	}
 	checkFreshClient(t, kc)
 	var ce *keycloak.ConflictError
-	err := c.RegisterClient(ctx, keycloak.ClientSpec{ClientID: freshauth.ClientID, TemplateID: freshauth.ClientID, RedirectURIs: []string{faRedirect}})
+	_, err := c.RegisterClient(ctx, keycloak.ClientSpec{ClientID: freshauth.ClientID, TemplateID: freshauth.ClientID, RedirectURIs: []string{faRedirect}})
 	if !errors.As(err, &ce) {
 		t.Errorf("RegisterClient(%s) = %v, want *ConflictError", freshauth.ClientID, err)
 	}
