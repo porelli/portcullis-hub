@@ -1605,7 +1605,7 @@ func (h *Hub) reconcileOAuthRef(ctx context.Context, f oauthSeenFile, p oauthPas
 	}
 	subs := h.lookupHolders(ctx, p.ref, sortedSet(want))
 	if len(owe) > 0 {
-		h.revokeAllForUnverifiable(ctx, t, p, f, sortedSet(owe), failed, subs)
+		h.revokeAllForUnverifiable(ctx, t, p, f, sortedSet(owe), failed, subs, unwritten)
 		return
 	}
 	if len(revoked) > 0 {
@@ -1619,7 +1619,7 @@ func (h *Hub) reconcileOAuthRef(ctx context.Context, f oauthSeenFile, p oauthPas
 			return
 		}
 	}
-	h.seenWriteDone(p.ref)
+	h.seenWriteDone(p.ref, slices.Collect(maps.Keys(add)))
 }
 
 // revokeVerified runs the targeted revoke for every stored id of user
@@ -1696,10 +1696,16 @@ func (h *Hub) seenWriteFailed(ref string, users []string, err error) {
 	h.aiSeenWriteError = err.Error()
 }
 
-func (h *Hub) seenWriteDone(ref string) {
+// seenWriteDone forgets the users a successful write recorded (written)
+// from ref's unwritten holders.
+func (h *Hub) seenWriteDone(ref string, written []string) {
 	h.aiErrMu.Lock()
 	defer h.aiErrMu.Unlock()
-	delete(h.aiSeenUnwritten, ref)
+	if left := slices.DeleteFunc(h.aiSeenUnwritten[ref], func(u string) bool { return slices.Contains(written, u) }); len(left) > 0 {
+		h.aiSeenUnwritten[ref] = left
+	} else {
+		delete(h.aiSeenUnwritten, ref)
+	}
 	if len(h.aiSeenUnwritten) == 0 {
 		h.aiSeenWriteError = ""
 	}
@@ -1713,7 +1719,7 @@ func (h *Hub) seenWriteDone(ref string) {
 // the uuid matches) and the verified leavers whose own revoke failed.
 // Audited per person; a failure is retried every pass (the cause stays on
 // disk; aiOwedRevokeAll words AIRevokeProblems).
-func (h *Hub) revokeAllForUnverifiable(ctx context.Context, t *templates.Template, p oauthPass, f oauthSeenFile, owe []string, failed map[string]bool, subs map[string]string) {
+func (h *Hub) revokeAllForUnverifiable(ctx context.Context, t *templates.Template, p oauthPass, f oauthSeenFile, owe []string, failed map[string]bool, subs map[string]string, unwritten []string) {
 	var err error
 	if p.hook == "" {
 		err = errNoRevokeHook(p.name)
@@ -1735,6 +1741,12 @@ func (h *Hub) revokeAllForUnverifiable(ctx context.Context, t *templates.Templat
 		maps.Copy(subs, h.lookupHolders(ctx, p.ref, sortedSet(more)))
 		keep := map[string]oauthSeenEntry{}
 		for u, live := range p.holders {
+			if slices.Contains(unwritten, u) && !slices.Contains(f.Companions[p.ref], u) {
+				// A failed write left them unrecorded: unverifiable for
+				// good, whether or not new holders are recorded now.
+				keep[u] = oauthSeenEntry{}
+				continue
+			}
 			if !p.recordNew && !slices.Contains(f.Companions[p.ref], u) {
 				continue
 			}
@@ -1753,7 +1765,7 @@ func (h *Hub) revokeAllForUnverifiable(ctx context.Context, t *templates.Templat
 		if err = h.oauthSeenRebuild(p.ref, keep, owe); err != nil {
 			h.seenWriteFailed(p.ref, nil, err)
 		} else {
-			h.seenWriteDone(p.ref)
+			h.seenWriteDone(p.ref, append(slices.Collect(maps.Keys(keep)), owe...))
 		}
 	}
 	for _, u := range owe {

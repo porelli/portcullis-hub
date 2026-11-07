@@ -583,6 +583,52 @@ func TestOAuthWriteFailure(t *testing.T) {
 	}
 }
 
+// TestOAuthUnwrittenSurvivesRebuild (T27): a write fails for holder
+// frank while the companion is off (no new recording), then an
+// unverifiable leaver's revoke_all rebuilds the record: frank is kept,
+// unverifiable, and no longer listed as unwritten.
+func TestOAuthUnwrittenSurvivesRebuild(t *testing.T) {
+	a := oauthT27(t, nil)
+	a.reconcile()
+	dir := filepath.Join(a.h.cfg.DataDir, "ai")
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	a.people.addGroup("users_oauthapp", "frank")
+	a.people.set(func(p *fakePeople) { p.users["frank"] = true })
+	a.reconcile()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	a.h.aiErrMu.Lock()
+	if !slices.Contains(a.h.aiSeenUnwritten["oauthapp/oauth"], "frank") {
+		t.Fatalf("frank isn't tracked as unwritten: %v", a.h.aiSeenUnwritten)
+	}
+	a.h.aiErrMu.Unlock()
+	// Switched off (holders still the population, nobody new recorded),
+	// then an unverifiable record's person leaves: revoke_all + rebuild.
+	if err := a.h.SetAISupport(context.Background(), "oauthapp", "oauth", false, root); err != nil {
+		t.Fatal(err)
+	}
+	a.h.Wait()
+	if err := a.h.oauthSeenAdd("oauthapp/oauth", map[string]string{"erin": ""}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.revokeRuns(); !isRevokeAll(got) {
+		t.Fatalf("runs = %q, want one revoke_all", got)
+	}
+	f := a.seenFile(t)
+	if !slices.Contains(f.Companions["oauthapp/oauth"], "frank") || f.UUIDs["oauthapp/oauth"]["frank"] != "" {
+		t.Fatalf("frank after the rebuild: record %v uuid %q", f.Companions["oauthapp/oauth"], f.UUIDs["oauthapp/oauth"]["frank"])
+	}
+	a.h.aiErrMu.Lock()
+	defer a.h.aiErrMu.Unlock()
+	if len(a.h.aiSeenUnwritten["oauthapp/oauth"]) != 0 || a.h.aiSeenWriteError != "" {
+		t.Errorf("still unwritten after the rebuild wrote frank: %v %q", a.h.aiSeenUnwritten, a.h.aiSeenWriteError)
+	}
+}
+
 // TestOAuthPendingAfterThreePasses (T27): a holder whose id lookup keeps
 // failing is listed only after 3 passes.
 func TestOAuthPendingAfterThreePasses(t *testing.T) {
