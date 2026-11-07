@@ -448,6 +448,9 @@ func TestContainerState(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		if strings.Contains(tc.body, `"exited"`) && (st.Status != "exited" || st.ExitCode != 1) {
+			t.Errorf("%s: status %q exit %d", tc.body, st.Status, st.ExitCode)
+		}
 		if gotPath != "/containers/c1/json" || st.Running != tc.running || st.Health != tc.health {
 			t.Errorf("%s: path %s, state %+v", tc.body, gotPath, st)
 		}

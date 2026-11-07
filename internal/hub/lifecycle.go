@@ -67,8 +67,9 @@ func (h *Hub) project(t *templates.Template) compose.Project {
 // composeUp regenerates the Hub override, re-checks the custom override
 // against the template as it is now, syncs the template's files and runs
 // compose up. Failures before compose are *StatusError; anything else
-// came from compose (it may have created containers).
-func (h *Hub) composeUp(t *templates.Template) error {
+// came from compose (it may have created containers). ctx carries the
+// operation's reporter (startUp's steps; Background: none) and its Stop.
+func (h *Hub) composeUp(ctx context.Context, t *templates.Template) error {
 	if _, err := os.Stat(t.ComposePath()); err != nil {
 		return nil
 	}
@@ -77,7 +78,7 @@ func (h *Hub) composeUp(t *templates.Template) error {
 	if err != nil {
 		return err
 	}
-	if err := h.startUp(live); err != nil {
+	if err := h.startUp(ctx, live); err != nil {
 		return err
 	}
 	// The containers run what is configured now: nothing is owed.
@@ -141,8 +142,20 @@ func (h *Hub) prepareUp(t *templates.Template) (*templates.Template, error) {
 // (the folder root always, H1; a subpath with it, one run per folder)
 // are probed before anything is created, again right before the up and
 // right after it (ruling 24, R44).
-func (h *Hub) startUp(live *templates.Template) error {
+//
+// With a reporter in opCtx (progressFrom) it reports the steps images
+// (every image compose would pull, downloaded first through the Engine
+// API: create then finds them present), create, start and healthy
+// (startprogress.go), and a Stop (opCtx cancelled) ends it between them
+// — the downloads stop at once — with opCtx's error (isStopErr), nothing
+// rolled back. Without one (Background) it pulls nothing itself and waits
+// for nothing: compose does what it always did. Every Docker and compose
+// call but the downloads and the health wait still runs on its own
+// Background context: a Stop never cuts a create, an up or a take-down
+// short.
+func (h *Hub) startUp(opCtx context.Context, live *templates.Template) error {
 	ctx := context.Background()
+	p := progressFrom(opCtx)
 	// Read under mu, probed outside it.
 	h.mu.RLock()
 	probes, err := h.folderProbesLocked(live)
@@ -161,10 +174,22 @@ func (h *Hub) startUp(live *templates.Template) error {
 			return err
 		}
 	}
+	if p != nil {
+		if err := h.pullImages(opCtx, p, live); err != nil {
+			return err
+		}
+		p.Start(StepCreate)
+	}
 	// Create without starting, inspect the labels (image LABELs merge in),
 	// only then start: an image-label router is never live.
 	if err := h.compose.Create(ctx, h.project(live)); err != nil {
 		return err
+	}
+	if p != nil {
+		p.Done(StepCreate)
+		if err := opCtx.Err(); err != nil {
+			return err
+		}
 	}
 	if p := h.imageLabelProblem(live); p != "" {
 		return h.refuseImageLabels(live, p, "was not started")
@@ -184,7 +209,25 @@ func (h *Hub) startUp(live *templates.Template) error {
 		}
 		return err
 	}
-	if err := h.compose.Up(ctx, h.project(live)); err != nil {
+	var upErr error
+	if p != nil {
+		if err := opCtx.Err(); err != nil {
+			return err
+		}
+		p.Start(StepStart)
+		stop := make(chan struct{})
+		watched := make(chan struct{})
+		go func() {
+			defer close(watched)
+			h.watchStart(opCtx, p, live, stop)
+		}()
+		upErr = h.compose.Up(ctx, h.project(live))
+		close(stop)
+		<-watched
+	} else {
+		upErr = h.compose.Up(ctx, h.project(live))
+	}
+	if err := upErr; err != nil {
 		if len(probes) > 0 {
 			// Some services may have started on a swapped subpath: probe
 			// again (record a change) and always take the project down.
@@ -219,6 +262,12 @@ func (h *Hub) startUp(live *templates.Template) error {
 	}
 	h.startedAt[live.ID] = time.Now().UTC()
 	h.mu.Unlock()
+	if p != nil {
+		h.startStepDone(ctx, p, live)
+		if err := h.waitHealthy(opCtx, p, live); err != nil {
+			return err
+		}
+	}
 	// The start hooks (when: start) after the up, under the lifecycle
 	// lock still held: reported and op-recorded, never a rollback.
 	h.runStartHooks(context.Background(), live.ID)
@@ -479,7 +528,7 @@ func (h *Hub) enableInner(id string, restoring bool) (rolledBack bool, err error
 			}
 		}()
 	}
-	if err := h.composeUp(&tmpl); err != nil {
+	if err := h.composeUp(context.Background(), &tmpl); err != nil {
 		if !composeFailed(err) {
 			return false, err
 		}
@@ -712,7 +761,7 @@ func (h *Hub) restartSteps(t *templates.Template) (stopped bool, downErr, err er
 		}
 	}
 	downErr = h.composeDown(t)
-	if err := h.startUp(live); err != nil {
+	if err := h.startUp(context.Background(), live); err != nil {
 		if composeFailed(err) {
 			return true, downErr, fmt.Errorf("compose up failed: %w", err)
 		}

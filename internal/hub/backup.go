@@ -500,7 +500,7 @@ func (h *Hub) startAgain(t *templates.Template) error {
 	if t == nil {
 		return errors.New("its template can't be resolved")
 	}
-	if err := h.composeUp(t); err != nil {
+	if err := h.composeUp(context.Background(), t); err != nil {
 		if !composeFailed(err) {
 			return err
 		}

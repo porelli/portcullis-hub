@@ -473,7 +473,7 @@ func (h *Hub) ResolveDrift(id, action string) error {
 		if action == ActionApply {
 			op = OpApply
 		}
-		err = h.composeUp(t)
+		err = h.composeUp(context.Background(), t)
 		if composeFailed(err) {
 			err = statusErr500Wrap("compose up failed", err)
 		}

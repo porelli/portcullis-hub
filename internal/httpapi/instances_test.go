@@ -241,6 +241,10 @@ func (e *fakeEngine) RemoveVolume(ctx context.Context, name string) error {
 
 func (e *fakeEngine) EnsureImage(context.Context, string) error { return nil }
 
+func (e *fakeEngine) PullWithProgress(context.Context, string, func(int64, int64)) error {
+	return nil
+}
+
 func (e *fakeEngine) CreateHelper(ctx context.Context, s docker.HelperSpec) (string, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
