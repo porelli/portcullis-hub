@@ -41,7 +41,7 @@ var (
 // secret — e.g. a Keycloak client secret. Expert Env shows the admin these
 // values in the browser; the AI never gets them (and save_env refuses the
 // mask written back).
-const envSecretMask = "[secret]"
+const envSecretMask = hub.EnvSecretMask
 
 // maskEnvForAI is vars with every value that holds a secret replaced by
 // envSecretMask: a variable hub.SecretEnvNames lists (Keycloak client

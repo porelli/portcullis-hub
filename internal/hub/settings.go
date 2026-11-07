@@ -1668,12 +1668,23 @@ func (h *Hub) Env(id string) (map[string]string, []string, error) {
 	return vars, templates.Services(t.ReadCompose()), nil
 }
 
+// EnvSecretMask is get_env's mask of a secret value on the Portcullis
+// MCP's tool path (settings.SecretShown, "[set]", is Expert Env's).
+const EnvSecretMask = "[secret]"
+
+// isEnvMask: v is one of the masks Env or get_env show instead of a
+// value, never a value to write.
+func isEnvMask(v string) bool { return v == settings.SecretShown || v == EnvSecretMask }
+
 // SaveEnv sets variables in an app's .env. The Expert UI posts every
 // variable back: a variable an option owns (its env delivery) or the Hub
 // sets (instance variables, PORTCULLIS_*) is skipped when its value is
 // unchanged (a set secret's [set] counts as unchanged) and refused (400)
 // when it was changed — options are set under Settings, which writes
-// them.
+// them. A mask ([set] or [secret]) posted for a variable that always
+// holds a secret (SecretEnvNames: a Keycloak client's secret_env, a
+// generated entry, a secret option) counts as unchanged too: it is never
+// written literally over the secret.
 func (h *Hub) SaveEnv(id string, vars map[string]string) error {
 	_, err := h.SaveEnvChanged(id, vars)
 	return err
@@ -1687,6 +1698,7 @@ func (h *Hub) SaveEnvChanged(id string, vars map[string]string) ([]string, error
 		return nil, ErrNotFound
 	}
 	owners := optionEnvOwners(t)
+	secretNames := SecretEnvNames(t)
 	masked, err := h.secretMask(t)
 	if err != nil {
 		return nil, err
@@ -1704,7 +1716,7 @@ func (h *Hub) SaveEnvChanged(id string, vars map[string]string) ([]string, error
 		if !templates.EnvKeyRe.MatchString(k) || templates.HasControlChars(v) {
 			return nil, statusErr(400, "invalid variable %q (keys: [A-Za-z_][A-Za-z0-9_]*, values: no newlines)", k)
 		}
-		if v == cur[k] || (v == settings.SecretShown && masked(k, cur[k])) {
+		if v == cur[k] || (v == settings.SecretShown && masked(k, cur[k])) || (secretNames[k] && isEnvMask(v)) {
 			continue // posted back unchanged (a masked value as Env showed it)
 		}
 		o, owned := owners[k]
