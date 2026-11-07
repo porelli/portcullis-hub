@@ -373,9 +373,9 @@ func (h *Hub) RevokeAICredentials(ctx context.Context, instance, companion, user
 		ref := instance + "/" + companion
 		f, err := h.oauthSeenRead()
 		if err == nil && !slices.Contains(f.Companions[ref], user) {
-			err = &StatusError{Status: http.StatusConflict, Err: fmt.Errorf("%s has no recorded Home Assistant account", user)}
+			err = &StatusError{Status: http.StatusConflict, Err: fmt.Errorf("%s has no recorded %s account", user, appNameOf(t))}
 		} else if err == nil && !f.verified(ref, user) {
-			err = &StatusError{Status: http.StatusConflict, Err: fmt.Errorf("%s's Home Assistant account can't be matched (no Keycloak id or LLDAP uuid recorded): revoke everyone instead", user)}
+			err = &StatusError{Status: http.StatusConflict, Err: fmt.Errorf("%s's %s account can't be matched (no Keycloak id or LLDAP uuid recorded): revoke everyone instead", user, appNameOf(t))}
 		}
 		var se *StatusError
 		if errors.As(err, &se) {
@@ -835,14 +835,14 @@ func (h *Hub) AIRevokeProblems() []AIRevokeProblem {
 		if h.findLocked(id) != nil {
 			get(id, name).Unmatched = slices.Clone(users)
 			for _, u := range users {
-				note(ref, unmatchedText(u, id))
+				note(ref, unmatchedText(u, id, appNameOf(h.findLocked(id))))
 			}
 		}
 	}
 	h.aiErrMu.Lock()
 	for ref, users := range h.aiOwedRevokeAll {
 		id, _, _ := strings.Cut(ref, "/")
-		note(ref, fmt.Sprintf("revoke_all owed for %s (they left %s before their Home Assistant account could be matched); it failed and is retried at every reconcile: %s", strings.Join(users, ", "), id, h.aiErrs[ref]))
+		note(ref, fmt.Sprintf("revoke_all owed for %s (they left %s before their %s account could be matched); it failed and is retried at every reconcile: %s", strings.Join(users, ", "), id, appNameOf(h.findLocked(id)), h.aiErrs[ref]))
 	}
 	h.aiErrMu.Unlock()
 	for ref, users := range unwritten {
@@ -852,7 +852,7 @@ func (h *Hub) AIRevokeProblems() []AIRevokeProblem {
 		id, name, _ := strings.Cut(ref, "/")
 		if h.findLocked(id) != nil {
 			get(id, name).Unverifiable = sortedSet(users)
-			note(ref, fmt.Sprintf("%d recorded people can't be verified (no LLDAP uuid recorded, or their Keycloak id lookup keeps failing): if one leaves, everyone's AI grants for %s end (revoke_all) and they must be handled in Home Assistant", len(users), id))
+			note(ref, fmt.Sprintf("%d recorded people can't be verified (no LLDAP uuid recorded, or their Keycloak id lookup keeps failing): if one leaves, everyone's AI grants for %s end (revoke_all) and they must be handled in %s", len(users), id, appNameOf(h.findLocked(id))))
 		}
 	}
 	// No way to look Keycloak ids up while an app_oauth companion is on:
@@ -1436,9 +1436,18 @@ func (h *Hub) lookupSub(ctx context.Context, user, uuid string) (string, error) 
 }
 
 // unmatchedText is the AIRevokeProblems line for a person who left before
-// their Home Assistant account could be matched.
-func unmatchedText(user, instance string) string {
-	return fmt.Sprintf("%s left %s before their Home Assistant account could be matched: their web, Companion and long-lived tokens remain; deactivate or delete %s in Home Assistant (Settings > People), then dismiss", user, instance, user)
+// their account in app (the template's name) could be matched.
+func unmatchedText(user, instance, app string) string {
+	return fmt.Sprintf("%s left %s before their %s account could be matched: their other sessions and tokens in it remain; deactivate or delete %s in %s, then dismiss", user, instance, app, user, app)
+}
+
+// appNameOf is the app's name for guidance text (never a template id
+// in Hub code, §15: the name is the template's); nil = "the app".
+func appNameOf(t *templates.Template) string {
+	if t == nil || t.Manifest.Name == "" {
+		return "the app"
+	}
+	return t.Manifest.Name
 }
 
 // AIRevokeDismiss clears user from the unmatched leavers of instance's
@@ -2006,7 +2015,7 @@ func (h *Hub) revokeAllForUnverifiable(ctx context.Context, t *templates.Templat
 	for _, u := range owe {
 		target := p.ref + "/" + u
 		h.revokeAudit(aiHubActor, "oauth:"+target, target,
-			"revoke_all (AI clients' tokens only): "+u+" left before their Home Assistant account could be matched; their web, Companion and long-lived tokens remain", err)
+			"revoke_all (AI clients' tokens only): "+u+" left before their "+appNameOf(t)+" account could be matched; their other sessions and tokens in it remain", err)
 	}
 	h.aiErrMu.Lock()
 	if h.aiOwedRevokeAll == nil {

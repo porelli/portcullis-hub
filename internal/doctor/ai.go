@@ -209,7 +209,7 @@ func (aiRevokingCheck) Run(in *Inputs) []Finding {
 			// write; the reason lines say what to do.
 			f.Title = fmt.Sprintf("%s: the AI sign-ins of %s need attention.", a.app(), a.companion())
 			f.Why = reason
-			f.Fix = "Do what each line says in the app (Settings > People there), then dismiss the entry."
+			f.Fix = "Do what each line says in the app (its people or user settings), then dismiss the entry."
 			f.Class, f.Link = FixLink, aiLink(a)
 			for _, u := range a.Unmatched {
 				f.Dismiss = append(f.Dismiss, Dismiss{Instance: a.Instance, Companion: a.Companion, User: u})

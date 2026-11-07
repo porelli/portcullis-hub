@@ -1902,7 +1902,7 @@
         ((c.never || []).length ? '<dt>Never allowed</dt><dd>' + c.never.map(x => '<code>' + escapeHtml(x) + '</code>').join(', ') + '</dd>' : '') +
         '</dl>';
       if ((c.unmatched || []).length) {
-        h += '<div class="inst-error op-msg" data-ai-unmatched><strong>Left before their account could be matched</strong> — their web, Companion and long-lived tokens remain: ' +
+        h += '<div class="inst-error op-msg" data-ai-unmatched><strong>Left before their account could be matched</strong> — their other sessions and tokens in the app remain: ' +
           'deactivate or delete them in ' + escapeHtml(c.label || c.name) + ' (Settings &gt; People), then dismiss.<ul>' +
           c.unmatched.map(u => '<li><code>' + escapeHtml(u) + '</code> <button type="button" class="btn btn-danger btn-sm" data-ai-dismiss data-user="' + escapeHtml(u) + '">Dismiss</button></li>').join('') +
           '</ul></div>';

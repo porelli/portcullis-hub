@@ -826,7 +826,7 @@ func TestHubHoldsNoAgeIdentity(t *testing.T) {
 // installed instance of the template whose id is the kind name) is a
 // known exception and deliberately not in the list.
 func TestGateFileHasNoTemplateIDs(t *testing.T) {
-	ids := regexp.MustCompile(`(?i)gitea|grafana|homeassistant|librechat`)
+	ids := regexp.MustCompile(`(?i)gitea|grafana|home ?assistant|librechat|settings > people`)
 	files, _ := filepath.Glob("ai*.go")
 	more, _ := filepath.Glob(filepath.Join("..", "aigate", "*.go"))
 	files = append(files, more...)

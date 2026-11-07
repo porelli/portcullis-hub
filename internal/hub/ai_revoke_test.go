@@ -447,7 +447,7 @@ func TestOAuthRestartUnverifiableLeaver(t *testing.T) {
 		t.Fatalf("runs = %q, want one revoke_all", got)
 	}
 	au := a.auditsOf("ai.credential.revoke", "oauthapp/oauth/erin")
-	if len(au) != 1 || au[0].Result == "ok" || !strings.Contains(au[0].Detail, "before their Home Assistant account could be matched") {
+	if len(au) != 1 || au[0].Result == "ok" || !strings.Contains(au[0].Detail, "before their OAuth App account could be matched") {
 		t.Errorf("audits = %+v", au)
 	}
 	var found *AIRevokeProblem
@@ -474,7 +474,7 @@ func TestOAuthRestartUnverifiableLeaver(t *testing.T) {
 	}
 	// The revoke_all ended only AI clients' tokens: erin stays listed
 	// until an administrator dismisses her.
-	want := "erin left oauthapp before their Home Assistant account could be matched: their web, Companion and long-lived tokens remain; deactivate or delete erin in Home Assistant (Settings > People), then dismiss"
+	want := "erin left oauthapp before their OAuth App account could be matched: their other sessions and tokens in it remain; deactivate or delete erin in OAuth App, then dismiss"
 	found = nil
 	for _, p := range a.h.AIRevokeProblems() {
 		if p.Instance == "oauthapp" && p.Companion == "oauth" {
