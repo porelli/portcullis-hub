@@ -146,7 +146,9 @@ func (h *Hub) prepareUp(t *templates.Template) (*templates.Template, error) {
 // With a reporter in opCtx (progressFrom) it reports the steps images
 // (every image compose would pull, downloaded first through the Engine
 // API: create then finds them present), create, start and healthy
-// (startprogress.go), and a Stop (opCtx cancelled) ends it between them
+// (startprogress.go) — each only when the operation planned it; an
+// unplanned images / healthy step is not run at all (compose pulls, no
+// wait) —, and a Stop (opCtx cancelled) ends it between them
 // — the downloads stop at once — with opCtx's error (isStopErr), nothing
 // rolled back. Without one (Background) it pulls nothing itself and waits
 // for nothing: compose does what it always did. Every Docker and compose
@@ -155,7 +157,10 @@ func (h *Hub) prepareUp(t *templates.Template) (*templates.Template, error) {
 // short.
 func (h *Hub) startUp(opCtx context.Context, live *templates.Template) error {
 	ctx := context.Background()
-	p := progressFrom(opCtx)
+	var p *startSteps
+	if pr := progressFrom(opCtx); pr != nil {
+		p = newStartSteps(pr)
+	}
 	// Read under mu, probed outside it.
 	h.mu.RLock()
 	probes, err := h.folderProbesLocked(live)
@@ -175,8 +180,10 @@ func (h *Hub) startUp(opCtx context.Context, live *templates.Template) error {
 		}
 	}
 	if p != nil {
-		if err := h.pullImages(opCtx, p, live); err != nil {
-			return err
+		if p.keys[StepImages] {
+			if err := h.pullImages(opCtx, p, live); err != nil {
+				return err
+			}
 		}
 		p.Start(StepCreate)
 	}
@@ -215,14 +222,18 @@ func (h *Hub) startUp(opCtx context.Context, live *templates.Template) error {
 			return err
 		}
 		p.Start(StepStart)
-		stop := make(chan struct{})
+		wctx, stopWatch := context.WithCancel(opCtx)
 		watched := make(chan struct{})
-		go func() {
-			defer close(watched)
-			h.watchStart(opCtx, p, live, stop)
-		}()
+		if p.keys[StepStart] {
+			go func() {
+				defer close(watched)
+				h.watchStart(wctx, p, live)
+			}()
+		} else {
+			close(watched)
+		}
 		upErr = h.compose.Up(ctx, h.project(live))
-		close(stop)
+		stopWatch()
 		<-watched
 	} else {
 		upErr = h.compose.Up(ctx, h.project(live))
@@ -263,9 +274,13 @@ func (h *Hub) startUp(opCtx context.Context, live *templates.Template) error {
 	h.startedAt[live.ID] = time.Now().UTC()
 	h.mu.Unlock()
 	if p != nil {
-		h.startStepDone(ctx, p, live)
-		if err := h.waitHealthy(opCtx, p, live); err != nil {
-			return err
+		if p.keys[StepStart] {
+			h.startStepDone(ctx, p, live)
+		}
+		if p.keys[StepHealthy] {
+			if err := h.waitHealthy(opCtx, p, live); err != nil {
+				return err
+			}
 		}
 	}
 	// The start hooks (when: start) after the up, under the lifecycle

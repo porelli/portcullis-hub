@@ -58,7 +58,9 @@ func TestPullProgressSumsLayers(t *testing.T) {
 	}))
 	var pcts []int64
 	var last [2]int64
-	err := c.PullWithProgress(context.Background(), "postgres:17", func(done, total int64) {
+	var sizedSeq []bool
+	err := c.PullWithProgress(context.Background(), "postgres:17", func(done, total int64, sized bool) {
+		sizedSeq = append(sizedSeq, sized)
 		if done < last[0] {
 			t.Errorf("done went back: %d after %d", done, last[0])
 		}
@@ -82,6 +84,11 @@ func TestPullProgressSumsLayers(t *testing.T) {
 	if len(pcts) < 3 || pcts[len(pcts)-1] != 100 {
 		t.Fatalf("percents = %v", pcts)
 	}
+	// Unsized while bbb hadn't reported its size (the first download of
+	// aaa), sized from then on and at the end.
+	if len(sizedSeq) < 2 || sizedSeq[0] || !sizedSeq[len(sizedSeq)-1] {
+		t.Fatalf("sized = %v", sizedSeq)
+	}
 	// Both layers' totals are known from the first downloads on: the
 	// percent only grows.
 	for i := 1; i < len(pcts); i++ {
@@ -93,7 +100,7 @@ func TestPullProgressSumsLayers(t *testing.T) {
 	// Already present: no pull, no byte counts.
 	present, pulled = true, nil
 	called := false
-	if err := c.PullWithProgress(context.Background(), "postgres:17", func(int64, int64) { called = true }); err != nil || len(pulled) != 0 || called {
+	if err := c.PullWithProgress(context.Background(), "postgres:17", func(int64, int64, bool) { called = true }); err != nil || len(pulled) != 0 || called {
 		t.Fatalf("present: err %v, pulled %v, called %v", err, pulled, called)
 	}
 }
@@ -110,8 +117,28 @@ func TestPullStreamError(t *testing.T) {
 			fmt.Fprint(w, `{"status":"Pulling from x/y","id":"1"}`+"\n"+`{"errorDetail":{"message":"manifest unknown"},"error":"manifest unknown"}`+"\n")
 		}
 	}))
-	err := c.PullWithProgress(context.Background(), "x/y:1", func(int64, int64) {})
+	err := c.PullWithProgress(context.Background(), "x/y:1", func(int64, int64, bool) {})
 	if err == nil || !strings.Contains(err.Error(), "manifest unknown") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+// A stream that ends without the daemon's closing Digest: / Status: line
+// didn't finish the pull: an error, never a success.
+func TestPullStreamUnfinished(t *testing.T) {
+	cut := pullStream[:strings.Index(pullStream, `{"status":"Digest`)]
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/_ping":
+		case r.Method == "GET":
+			w.WriteHeader(404)
+			fmt.Fprint(w, `{"message":"No such image"}`)
+		default:
+			fmt.Fprint(w, cut)
+		}
+	}))
+	err := c.PullWithProgress(context.Background(), "postgres:17", func(int64, int64, bool) {})
+	if !errors.Is(err, errPullUnfinished) {
 		t.Fatalf("err = %v", err)
 	}
 }
@@ -139,7 +166,7 @@ func TestPullWithProgressCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { <-started; cancel() }()
 	done := make(chan error, 1)
-	go func() { done <- c.PullWithProgress(ctx, "x/y:1", func(int64, int64) {}) }()
+	go func() { done <- c.PullWithProgress(ctx, "x/y:1", func(int64, int64, bool) {}) }()
 	select {
 	case err := <-done:
 		if !errors.Is(err, context.Canceled) {

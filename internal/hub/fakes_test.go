@@ -185,11 +185,11 @@ type fakeEngine struct {
 	// onBytes, else the image is already present. stateHook (if set,
 	// called without mu) changes what ContainerState answers.
 	pulls     []string
-	pullFn    func(ctx context.Context, ref string, onBytes func(done, total int64)) error
+	pullFn    func(ctx context.Context, ref string, onBytes func(done, total int64, sized bool)) error
 	stateHook func(id string, st docker.State) docker.State
 }
 
-func (e *fakeEngine) PullWithProgress(ctx context.Context, ref string, onBytes func(done, total int64)) error {
+func (e *fakeEngine) PullWithProgress(ctx context.Context, ref string, onBytes func(done, total int64, sized bool)) error {
 	e.mu.Lock()
 	e.pulls = append(e.pulls, ref)
 	fn := e.pullFn
