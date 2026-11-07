@@ -467,3 +467,48 @@ func TestDeletedPersonLeavesConnectionsSeen(t *testing.T) {
 		t.Errorf("revoked for a person never recorded: %v", got)
 	}
 }
+
+// A reporter whose plan has no healthy step (the AI switch's: revoke,
+// scopes, restart, hooks) never skips the post-up readiness wait: the
+// owed hooks wait for the app exactly as without a reporter
+// (TestOwedHooksAtStartWaitForApp), and none of startUp's steps is
+// appended to that plan.
+func TestUnplannedHealthyKeepsReadinessWait(t *testing.T) {
+	withReadyWait(t, 60*time.Second, 7*time.Millisecond)
+	a := newInstAIFixture(t, nil)
+	a.enable(t, "aiapp")
+	if err := a.h.SetAISupport(context.Background(), "aiapp", "tok", true, root); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.h.Disable("aiapp"); err != nil {
+		t.Fatal(err)
+	}
+	a.h.Wait()
+	if err := a.h.SetAISupport(context.Background(), "aiapp", "tok", false, root); err != nil {
+		t.Fatal(err)
+	}
+	app := a.slowApp(t, "portcullis-aiapp", "portcullis-aiapp-c", false, 2)
+	app.arm()
+	n := len(a.seq.list())
+	plan := []Step{{Key: "revoke", Label: "Revoking"}, {Key: "scopes", Label: "Scopes"}, {Key: "restart", Label: "Restarting"}, {Key: "hooks", Label: "Hooks"}}
+	p := a.h.newProgress("aiapp", OpAI, plan)
+	p.begin("op1", "root", nil)
+	if err := a.h.composeUp(withProgress(context.Background(), p), a.h.Template("aiapp")); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"up:portcullis-aiapp", "/revoke:revoke_all:down", "/revoke:revoke_all:down", "/revoke:revoke_all", "/toggle:on_change"}
+	if got := a.since(n); !slices.Equal(got, want) {
+		t.Errorf("sequence = %v, want %v", got, want)
+	}
+	if c := a.companion("aiapp", "tok"); c.RevokePending || c.OnChangePending {
+		t.Errorf("flags kept: %+v", c)
+	}
+	r := opFile(t, a.h, "aiapp")
+	var keys []string
+	for _, s := range r.Steps {
+		keys = append(keys, s.Key)
+	}
+	if !slices.Equal(keys, []string{"revoke", "scopes", "restart", "hooks"}) {
+		t.Errorf("steps = %v", keys)
+	}
+}

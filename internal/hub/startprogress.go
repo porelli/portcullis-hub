@@ -21,6 +21,10 @@ import (
 // (progressFrom): without one startUp pulls nothing itself and waits for
 // nothing, exactly as before. Only the steps the operation planned are
 // reported (startSteps): a key it didn't list is left out, never appended.
+// An unplanned step hides only reporting: the pre-pull, the start watcher
+// and the healthy wait exist only to report and are skipped with their
+// step, while every wait that ran before (the AI hooks' post-up
+// readiness wait, runAIHookAfterUp) runs whatever the plan.
 const (
 	StepImages  = "images"
 	StepCreate  = "create"
