@@ -214,10 +214,14 @@ func (c *Client) ContainerKill(ctx context.Context, id, signal string) error {
 }
 
 // State is a container's run state: running, and its healthcheck status
-// ("" = no healthcheck; else starting, healthy or unhealthy).
+// ("" = no healthcheck; else starting, healthy or unhealthy); Status is
+// the daemon's (created, running, exited, restarting, …) and ExitCode the
+// last exit's (a finished one-shot: exited, 0).
 type State struct {
-	Running bool
-	Health  string
+	Running  bool
+	Health   string
+	Status   string
+	ExitCode int
 }
 
 // ContainerState inspects container id's run state.
@@ -230,7 +234,7 @@ func (c *Client) ContainerState(ctx context.Context, id string) (State, error) {
 	}
 	var st State
 	if s := res.Container.State; s != nil {
-		st.Running = s.Running
+		st.Running, st.Status, st.ExitCode = s.Running, string(s.Status), s.ExitCode
 		if s.Health != nil {
 			st.Health = string(s.Health.Status)
 		}

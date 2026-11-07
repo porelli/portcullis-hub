@@ -528,7 +528,7 @@ func (h *Hub) updateInstanceAI(ctx context.Context, id string, u InstanceAIUpdat
 		if t2 := h.Template(id); t2 != nil {
 			t = t2
 		}
-		upErr := h.composeUp(t)
+		upErr := h.composeUp(context.Background(), t)
 		if composeFailed(upErr) {
 			upErr = statusErr500Wrap("compose up failed", upErr)
 		}
@@ -587,7 +587,7 @@ func (h *Hub) updateInstanceAI(ctx context.Context, id string, u InstanceAIUpdat
 				errs = append(errs, err)
 				all()
 			}
-			if upErr := h.composeUp(t); upErr != nil {
+			if upErr := h.composeUp(context.Background(), t); upErr != nil {
 				errs = append(errs, statusErr500Wrap("compose up failed", upErr))
 				all()
 			}

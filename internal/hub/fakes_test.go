@@ -180,6 +180,30 @@ type fakeEngine struct {
 	// (if set, called without mu) answers it, else exit 0, no output.
 	splitCalls []execCall
 	execSplit  func(id string, in docker.ExecInput) (*docker.ExecSplitResult, error)
+	// PullWithProgress (startUp's images step): every ref in pulls;
+	// pullFn (if set, called without mu) serves the pull stream through
+	// onBytes, else the image is already present. stateHook (if set,
+	// called without mu) changes what ContainerState answers.
+	pulls     []string
+	pullFn    func(ctx context.Context, ref string, onBytes func(done, total int64)) error
+	stateHook func(id string, st docker.State) docker.State
+}
+
+func (e *fakeEngine) PullWithProgress(ctx context.Context, ref string, onBytes func(done, total int64)) error {
+	e.mu.Lock()
+	e.pulls = append(e.pulls, ref)
+	fn := e.pullFn
+	e.mu.Unlock()
+	if fn != nil {
+		return fn(ctx, ref, onBytes)
+	}
+	return nil
+}
+
+func (e *fakeEngine) Pulls() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]string(nil), e.pulls...)
 }
 
 func (e *fakeEngine) ExecStdinSplit(ctx context.Context, id string, in docker.ExecInput) (*docker.ExecSplitResult, error) {
@@ -276,6 +300,17 @@ func (e *fakeEngine) ContainerKill(ctx context.Context, id, signal string) error
 }
 
 func (e *fakeEngine) ContainerState(ctx context.Context, id string) (docker.State, error) {
+	st, err := e.containerState(id)
+	e.mu.Lock()
+	hook := e.stateHook
+	e.mu.Unlock()
+	if err == nil && hook != nil {
+		st = hook(id, st)
+	}
+	return st, err
+}
+
+func (e *fakeEngine) containerState(id string) (docker.State, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if st, ok := e.states[id]; ok {
@@ -283,7 +318,7 @@ func (e *fakeEngine) ContainerState(ctx context.Context, id string) (docker.Stat
 	}
 	for _, c := range e.containers {
 		if c.ID == id {
-			return docker.State{Running: c.State == "running"}, nil
+			return docker.State{Running: c.State == "running", Status: c.State}, nil
 		}
 	}
 	return docker.State{}, errors.New("no such container")

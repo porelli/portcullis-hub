@@ -1464,7 +1464,7 @@ func (h *Hub) startAll(ids []string) error {
 			errs = append(errs, fmt.Errorf("%s has no template now", inst))
 			continue
 		}
-		if err := h.composeUp(t); err != nil {
+		if err := h.composeUp(context.Background(), t); err != nil {
 			if composeFailed(err) {
 				h.rollbackUp(t)
 			}

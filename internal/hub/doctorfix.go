@@ -883,7 +883,7 @@ func (rebindPortFixer) Apply(h *Hub, f doctor.Finding, params map[string]string,
 		h.mu.Unlock()
 		var uerr error
 		if stopped {
-			uerr = h.composeUp(t)
+			uerr = h.composeUp(context.Background(), t)
 		}
 		name := appName(t)
 		var cfg, start string
