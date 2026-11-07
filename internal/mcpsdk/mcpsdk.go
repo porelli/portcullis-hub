@@ -310,7 +310,8 @@ const (
 
 // AdminOnly is receiving middleware for the admin server (§15.10: admins
 // only): every method but initialize, ping and notifications/* asks
-// admin(ctx). An error is a JSON-RPC error with unavailable as its text;
+// admin(ctx). An error is a JSON-RPC error with unavailable as its text
+// (tools/call goes on to the tool, which answers isError itself);
 // a non-admin gets empty lists from the list methods, the JSON-RPC error
 // "admins only" from resources/read, prompts/get and anything else, and
 // reaches tools/call (the tool answers isError "admins only" and audits
@@ -323,6 +324,11 @@ func AdminOnly(admin func(ctx context.Context) (bool, error), unavailable string
 			}
 			ok, err := admin(ctx)
 			if err != nil {
+				if method == "tools/call" {
+					// A tool answer is always a tool result (§15.10): the
+					// tool resolves the caller itself and answers isError.
+					return next(ctx, method, req)
+				}
 				return nil, &jsonrpc.Error{Code: codeUnavailable, Message: unavailable}
 			}
 			if ok {

@@ -480,11 +480,20 @@ func (s *Server) registerAdminTools2() {
 				a := toolActor(ctx, c)
 				if in.PortcullisAdmin != nil && *in.PortcullisAdmin {
 					// §15.10 / the brief: off, never on (the Hub's page only).
-					err := &hub.StatusError{Status: http.StatusForbidden, Err: errors.New("the Portcullis admin MCP can't be turned on through the AI: turn it on in Settings → AI on the Hub's page (" + s.mcpScope(ScopeAdmin).home + "#settings)")}
+					err := s.adminMCPOnRefusal()
 					s.auditAs(a, directory.AuditEntry{Action: "settings.ai", Target: "ai", Detail: "portcullis_admin: on (through the AI)"}, err)
 					return nil, err
 				}
 				return s.saveAISettings(a, in)
+			},
+			// The refusal is answered (and audited refused) before any
+			// class is decided (final review M5): the class never relies
+			// on Run's body.
+			Precheck: func(_ context.Context, _ *directory.Caller, args json.RawMessage) error {
+				if in, err := decode[hub.AISettingsUpdate](args); err == nil && in.PortcullisAdmin != nil && *in.PortcullisAdmin {
+					return s.adminMCPOnRefusal()
+				}
+				return nil
 			}}, s.hubSettingsClass, func(json.RawMessage) string { return "settings" }, hubSettingsConsequences),
 		perCall(admin("set_default_policy", "Set the Hub default sign-in policy ({factors, op}) every instance without its own uses. One that isn't stricter than the current default needs your confirmation in the browser. Inheriting instances the new default puts at mTLS only get AI support switched off first.",
 			ClassWrite, "/api/settings", "settings.default_policy", func(_ context.Context, a directory.Actor, in defaultPolicyArgs) (any, error) {
@@ -806,14 +815,15 @@ func credentialsMode(c string) string {
 // the stored ones; turning AI or the people MCP on, any client change,
 // any origins change, a higher limit or a longer connection, or
 // arguments that don't decode, D. portcullis_admin true is refused by
-// Run outright (no confirmation for a refusal: nothing runs).
+// the Precheck outright (no confirmation for a refusal: nothing runs);
+// were it ever reached, D.
 func (s *Server) hubSettingsClass(args json.RawMessage) ToolClass {
 	u, err := decode[hub.AISettingsUpdate](args)
 	if err != nil {
 		return ClassDestructive
 	}
 	if u.PortcullisAdmin != nil && *u.PortcullisAdmin {
-		return ClassWrite // refused by Run before any Hub call
+		return ClassDestructive // refused by the Precheck before any class
 	}
 	if (u.Enabled != nil && *u.Enabled) || (u.PortcullisPeople != nil && *u.PortcullisPeople) ||
 		u.Clients != nil || u.AllowedOrigins != nil {
@@ -895,4 +905,10 @@ func (s *Server) defaultPolicyClass(args json.RawMessage) ToolClass {
 		return ClassWrite
 	}
 	return ClassDestructive
+}
+
+// adminMCPOnRefusal: the Portcullis admin MCP is turned on only on the
+// Hub's page (§15.10).
+func (s *Server) adminMCPOnRefusal() error {
+	return &hub.StatusError{Status: http.StatusForbidden, Err: errors.New("the Portcullis admin MCP can't be turned on through the AI: turn it on in Settings → AI on the Hub's page (" + s.mcpScope(ScopeAdmin).home + "#settings)")}
 }

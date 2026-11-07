@@ -505,6 +505,24 @@ func TestPeopleToolParity(t *testing.T) {
 			t.Errorf("route %s has no people tool", r)
 		}
 	}
+	// Final review hub-mcp M4: every people-listener route has a people
+	// tool or a stated reason, so a new route can't pass silently.
+	for r := range routes {
+		why, none := peopleNoToolRoutes[r]
+		switch {
+		case twins[r] && none:
+			t.Errorf("route %s has a people tool and is in peopleNoToolRoutes (%s)", r, why)
+		case !twins[r] && !none:
+			t.Errorf("people route %s: no people tool has it as Twin, and it isn't in peopleNoToolRoutes", r)
+		case none && strings.TrimSpace(why) == "":
+			t.Errorf("peopleNoToolRoutes %s: no reason", r)
+		}
+	}
+	for r := range peopleNoToolRoutes {
+		if !routes[r] {
+			t.Errorf("peopleNoToolRoutes %s is no people-listener route", r)
+		}
+	}
 	want := map[string]ToolClass{
 		"my_apps": ClassRead, "my_profile": ClassRead, "directory": ClassRead, "my_ai_connections": ClassRead,
 		"my_file_share_password": ClassRead, "disconnect_ai": ClassWrite,
@@ -606,3 +624,36 @@ func TestPeopleToolsInjectedArgs(t *testing.T) {
 		}
 	}
 }
+
+// peopleNoToolRoutes: people-listener routes without a people tool, each
+// with its reason (TestPeopleToolParity).
+var peopleNoToolRoutes = func() map[string]string {
+	const delegate = "a delegate directory route the people MCP has no tool for: delegates use the people page (the admin MCP has the tool)"
+	m := map[string]string{
+		"/healthz":                        "health check, no data",
+		"/":                               "the people page itself",
+		"/static/":                        "the page's static assets",
+		"GET /confirm/{id}":               "a confirmation page: only the person, in the browser, never the AI",
+		"POST /api/me/confirmations/{id}": "a confirmation decision: only the person, in the browser, with a fresh passkey",
+		"PUT /api/me/apps/{instance}/values/{key}":         "a person-entered value: the person enters it on the page",
+		"DELETE /api/me/apps/{instance}/values/{key}":      "a person-entered value: cleared on the page",
+		"DELETE /api/me/apps/{instance}/credentials/{key}": "a credential revoke: the person does it on the page (credentials never go through the AI)",
+		"GET /api/directory/audit":                         "the delegate audit view: on the page only",
+	}
+	for _, r := range []string{
+		"POST /api/directory/users/{username}/password", "POST /api/directory/users/{username}/invite",
+		"POST /api/directory/users/{username}/require-passkey", "POST /api/directory/users/{username}/clear-actions",
+		"POST /api/directory/users/{username}/remove-passkeys", "DELETE /api/directory/keycloak-stale/{username}",
+		"POST /api/directory/groups", "DELETE /api/directory/groups/{group}",
+		"POST /api/directory/groups/{group}/members", "DELETE /api/directory/groups/{group}/members/{username}",
+		"POST /api/directory/fields", "PUT /api/directory/fields/{name}", "DELETE /api/directory/fields/{name}",
+		"PUT /api/directory/users/{username}/details", "POST /api/directory/rules/preview",
+		"PUT /api/directory/groups/{group}/rule", "POST /api/directory/groups/{group}/convert-preview",
+		"POST /api/directory/groups/{group}/convert", "POST /api/directory/groups/{group}/exceptions",
+		"DELETE /api/directory/groups/{group}/exceptions/{username}", "PUT /api/directory/groups/{group}/members/{username}/expiry",
+		"PUT /api/directory/permissions/{perm}", "POST /api/directory/import/review", "POST /api/directory/import/apply",
+	} {
+		m[r] = delegate
+	}
+	return m
+}()
