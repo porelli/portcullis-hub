@@ -619,15 +619,32 @@ func (r importRow) apply() directory.ApplyRow {
 var usernameOf = argReader("username")
 
 // createForm is the Hub's new-person form, pre-filled (create_person).
+// Only plain groups are pre-ticked (final review I2): an administrator,
+// permission or other guarding group — or one the directory can't judge
+// (unknown, directory down) — is left out of the link, so one click on a
+// dialog the person doesn't re-read never creates an admin; the AI adds
+// those with add_member (D) afterwards.
 func (s *Server) createForm(a createPersonArgs) string {
 	q := url.Values{}
 	q.Set("username", a.Username)
 	q.Set("email", a.Email)
 	q.Set("display_name", a.DisplayName)
-	if len(a.Groups) > 0 {
-		q.Set("groups", strings.Join(a.Groups, ","))
+	if gs := plainGroups(s.loadGuards(), a.Groups); len(gs) > 0 {
+		q.Set("groups", strings.Join(gs, ","))
 	}
 	return s.mcpScope(ScopeAdmin).home + "#users?create&" + q.Encode()
+}
+
+// plainGroups: the groups of gs that are known and guard nothing
+// (groupGuard; m nil = none).
+func plainGroups(m *directory.Membership, gs []string) []string {
+	var out []string
+	for _, g := range gs {
+		if why, ok := groupGuard(m, g); ok && why == "" && !slices.Contains(out, g) {
+			out = append(out, g)
+		}
+	}
+	return out
 }
 
 // registerDirectoryTools registers the users and groups tools.
@@ -703,7 +720,7 @@ func (s *Server) registerDirectoryTools() {
 		// secrets the AI never sees — the person is created on the Hub's
 		// pre-filled form, where the admin reviews it (groups included)
 		// and the invite link is shown.
-		{Name: "create_person", Description: "Create a person: the Hub's new-person form opens pre-filled with these details (and groups); you review it and create them there, where their one-time invite link is shown (administrators: ./portcullis invite <user> on the server). Afterwards this reports whether they exist.",
+		{Name: "create_person", Description: "Create a person: the Hub's new-person form opens pre-filled with these details (and groups that grant no rights: administrator, permission and other guarding groups are never pre-ticked — add them with add_member afterwards); you review it and create them there, where their one-time invite link is shown (administrators: ./portcullis invite <user> on the server). Afterwards this reports whether they exist.",
 			Class: ClassSecret, Scope: ScopeAdmin, Twin: "POST /api/directory/users", In: createPersonArgs{},
 			SecretForm: func(args json.RawMessage) string {
 				a, _ := decode[createPersonArgs](args)

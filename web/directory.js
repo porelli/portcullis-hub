@@ -597,8 +597,14 @@
       b.querySelector('#nu-username').value = pre.get('username') || '';
       b.querySelector('#nu-email').value = pre.get('email') || '';
       b.querySelector('#nu-display').value = pre.get('display_name') || '';
+      // Only plain groups (the Hub's link already leaves out guarding
+      // ones): never an administrator or permission group from a link.
       const want = (pre.get('groups') || '').split(',').filter(Boolean);
-      b.querySelectorAll('input[name="nu-group"]').forEach(i => { i.checked = want.includes(i.value); });
+      const perm = new Set(Object.values((dir && dir.permissions) || {}).map(g => String(g).toLowerCase()));
+      const adminG = new Set(groups().filter(g => g.admin).map(g => g.name));
+      b.querySelectorAll('input[name="nu-group"]').forEach(i => {
+        i.checked = want.includes(i.value) && !adminG.has(i.value) && !perm.has(i.value.toLowerCase());
+      });
     }
     b.querySelector('#nu-username').focus();
   }

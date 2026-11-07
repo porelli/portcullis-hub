@@ -124,7 +124,9 @@ func TestCreatePersonNoInviteLink(t *testing.T) {
 	e, inv := directoryToolEnv(t)
 	args := map[string]any{"username": "erin", "email": "erin@example.org", "display_name": "Erin", "groups": []string{"helpers", "lldap_admin"}}
 	txt, isErr := resultText(e.call(t, "/mcp/admin", "root", "2025-11-25", "create_person", args, nil))
-	want := "https://hub.example.org/#users?create&display_name=Erin&email=erin%40example.org&groups=helpers%2Clldap_admin&username=erin"
+	// lldap_admin (an administrator group) is never pre-ticked (final
+	// review I2: TestCreatePersonFormOnlyPlainGroups).
+	want := "https://hub.example.org/#users?create&display_name=Erin&email=erin%40example.org&groups=helpers&username=erin"
 	if !isErr || !strings.Contains(txt, want) {
 		t.Errorf("create_person = %q, want the form %s", txt, want)
 	}
@@ -669,5 +671,36 @@ func TestPrestagedRuleAndExceptionsNeedConfirmation(t *testing.T) {
 	mustDo(t, e.hub, "root", "POST", "/api/directory/groups/users_grafana-q/convert", `{"rule":"clearance = \"q\"","preview":{"matching":[],"kept_as_exception":[],"joining":[],"expiry_dropped":[]}}`, 200)
 	if cl := byName["set_details"].ClassFor(context.Background(), json.RawMessage(`{"username":"dana","attrs":{"clearance":["q"]}}`)); cl != ClassDestructive {
 		t.Errorf("set_details on a field an instance group's rule uses = %s", cl)
+	}
+}
+
+// Final review hub-mcp I2: create_person's form link pre-ticks only plain
+// groups — never an administrator, permission or app admin (guarding)
+// group, nor one the directory doesn't know.
+func TestCreatePersonFormOnlyPlainGroups(t *testing.T) {
+	e, _ := directoryToolEnv(t)
+	e.ll.AddGroup("hr_edit")
+	e.ll.AddGroup("admin_grafana")
+	mustDo(t, e.hub, "root", "PUT", "/api/directory/permissions/invite", `{"group":"hr_edit"}`, 200)
+	m := e.s.loadGuards()
+	if why, ok := groupGuard(m, "admin_grafana"); !ok || why == "" {
+		t.Fatalf("fixture: admin_grafana doesn't guard (%q %v)", why, ok)
+	}
+	args := map[string]any{"username": "erin", "email": "erin@example.org", "display_name": "Erin",
+		"groups": []string{"lldap_admin", "hr_edit", "admin_grafana", "no-such-group", "helpers"}}
+	txt, isErr := resultText(e.call(t, "/mcp/admin", "root", "2025-11-25", "create_person", args, nil))
+	want := "https://hub.example.org/#users?create&display_name=Erin&email=erin%40example.org&groups=helpers&username=erin"
+	if !isErr || !strings.Contains(txt, want) {
+		t.Errorf("create_person = %q, want the form %s", txt, want)
+	}
+	// Only guarding groups: no groups parameter at all.
+	args["groups"] = []string{"lldap_admin", "hr_edit"}
+	txt, _ = resultText(e.call(t, "/mcp/admin", "root", "2025-11-25", "create_person", args, nil))
+	if strings.Contains(txt, "groups=") {
+		t.Errorf("create_person with guarding groups only = %q", txt)
+	}
+	// The directory can't judge: nothing pre-ticked.
+	if got := plainGroups(nil, []string{"helpers"}); len(got) != 0 {
+		t.Errorf("plainGroups(nil) = %v", got)
 	}
 }
