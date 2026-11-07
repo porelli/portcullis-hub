@@ -103,15 +103,17 @@ type Progress struct {
 	lastWrite  time.Time
 	dirty      bool
 	flushArmed bool
-	// red caches each step's redacted detail (key → raw, redacted).
-	red map[string][2]string
+	// extra: the values the errors it was given carry for redaction
+	// (secretsOf: a restore's archive secrets), redacted from every
+	// detail together with the instance's set.
+	extra []string
 }
 
 // newProgress is the reporter for op on id with its planned steps (each
 // "waiting" unless set). steps nil: an operation that reports no
 // progress and can't be stopped.
 func (h *Hub) newProgress(id, op string, steps []Step) *Progress {
-	p := &Progress{h: h, id: id, op: op, red: map[string][2]string{}}
+	p := &Progress{h: h, id: id, op: op}
 	p.rec.Op = op
 	if steps != nil {
 		p.rec.Steps = make([]Step, len(steps))
@@ -216,12 +218,16 @@ func (p *Progress) Percent(key string, pct int, detail string) {
 	if s == nil || (s.State != StepRunning && s.State != StepWaiting) {
 		return
 	}
-	if s.State == StepWaiting {
-		t := p.now()
-		s.State, s.StartedAt = StepRunning, &t
-	}
 	pct = min(max(pct, 0), 100)
 	s.Percent, s.Detail = &pct, detail
+	if s.State == StepWaiting {
+		// A change of state is written at once; only the percent and
+		// detail of a running step are throttled.
+		t := p.now()
+		s.State, s.StartedAt = StepRunning, &t
+		p.writeLocked()
+		return
+	}
 	p.throttledLocked()
 }
 
@@ -271,6 +277,7 @@ func (p *Progress) endLocked(key, state string, err error) {
 		s.Percent = &hundred
 	}
 	if err != nil {
+		p.extra = append(p.extra, secretsOf(err)...)
 		s.Detail = err.Error()
 	}
 	p.writeLocked()
@@ -373,7 +380,8 @@ func (p *Progress) writeLocked() {
 	if !p.live || p.closed {
 		return
 	}
-	p.h.recordOp(p.id, p.recordLocked())
+	// Never over another operation's running record (finish).
+	p.h.recordOpUnlessOther(p.id, p.recordLocked())
 	p.lastWrite, p.dirty = p.now(), false
 }
 
@@ -396,16 +404,10 @@ func (p *Progress) recordLocked() OpRecord {
 		if s.Detail == "" {
 			continue
 		}
-		if c, ok := p.red[s.Key]; ok && c[0] == s.Detail {
-			s.Detail = c[1]
-			continue
-		}
 		if redact == nil {
-			redact = p.h.secretRedactor(p.id)
+			redact = p.h.secretRedactor(p.id, p.extra)
 		}
-		raw := s.Detail
-		s.Detail = clipRunes(oneLine(redact(raw)), detailMax)
-		p.red[s.Key] = [2]string{raw, s.Detail}
+		s.Detail = clipRunes(oneLine(redact(s.Detail)), detailMax)
 	}
 	return r
 }
@@ -422,7 +424,11 @@ func (p *Progress) begin(opID, actor string, cancel context.CancelFunc) {
 	p.rec.OpID, p.rec.Actor, p.rec.At, p.rec.Running = opID, actor, p.now(), true
 	p.cancel = cancel
 	p.live = true
-	p.writeLocked()
+	// The lock is held: this operation's record replaces whatever is
+	// there (a finished one, or one an earlier operation is still
+	// writing after its lock release).
+	p.h.recordOp(p.id, p.recordLocked())
+	p.lastWrite = p.now()
 }
 
 // finish merges the operation's progress into its final record r and
@@ -453,7 +459,7 @@ func (p *Progress) finish(r OpRecord, err error) {
 		}
 		s.EndedAt = &end
 	}
-	r.Steps, r.Created = cur.Steps, cur.Created
+	r.OpID, r.Steps, r.Created = cur.OpID, cur.Steps, cur.Created
 	r.StoppedBy, r.StoppedAt, r.PointOfNoReturn = cur.StoppedBy, cur.StoppedAt, cur.PointOfNoReturn
 	r.Running, r.Stopping, r.Stoppable, r.Interrupted = false, false, false, false
 	switch {
@@ -464,7 +470,20 @@ func (p *Progress) finish(r OpRecord, err error) {
 		r.Stoppable = cur.Steps != nil
 	}
 	p.closed = true
-	p.h.recordOp(p.id, r)
+	// fn released the instance's lock before returning: another
+	// operation may already have accepted and written its running
+	// record. Never overwrite it (its poller and the busy answer read
+	// it); this operation's outcome is then only logged.
+	if !p.h.recordOpUnlessOther(p.id, r) {
+		log.Printf("ops: %s %s (%s) ended (ok=%v %s) after another operation started; its record is kept", p.op, p.id, r.OpID, r.OK, r.Error)
+	}
+}
+
+// stopAccepted: a Stop of this operation was accepted.
+func (p *Progress) stopAccepted() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.rec.StoppedAt != nil
 }
 
 // isStopErr: the operation ended because its context was cancelled by
@@ -478,12 +497,12 @@ func isStopErr(err error) bool {
 var ErrStopped = statusErr(409, "the operation was stopped")
 
 // opRun is a running operation in the stop registry (Hub.opRuns, keyed
-// by the record's key — the instance id): its op id, its reporter (whose
-// cancel cancels its context) and the actor whose Stop was accepted.
+// by the record's key — the instance id): its op id and its reporter
+// (whose cancel cancels its context; the stopping actor is the record's
+// stopped_by).
 type opRun struct {
-	opID      string
-	p         *Progress
-	stoppedBy string
+	opID string
+	p    *Progress
 }
 
 func (h *Hub) registerOp(key string, run *opRun) {
@@ -539,9 +558,6 @@ func (h *Hub) cancelOp(id string, actor directory.Actor) error {
 			s.State, s.EndedAt = StepStopped, &t
 		}
 	}
-	h.opRunsMu.Lock()
-	run.stoppedBy = actor.User
-	h.opRunsMu.Unlock()
 	p.writeLocked()
 	// Under p.mu: a NoReturn after this sees Stopping, one before it was
 	// refused above.

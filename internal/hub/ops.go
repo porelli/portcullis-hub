@@ -154,8 +154,8 @@ func (h *Hub) loadOps() {
 // created stay as last written. It is stoppable (a Stop undoes from the
 // record) only when it has steps to undo from, and never for the three
 // cases recovered at start: a restore (same instance: rolled back;
-// into a new id: removed, both RecoverRestores) and a delete past its
-// point of no return (stays "deleting").
+// into a new id: removed, both RecoverRestores) and any operation past
+// its point of no return (a delete stays "deleting").
 func markInterrupted(r *OpRecord) {
 	r.Running, r.OK, r.Status, r.Interrupted, r.Stopping = false, false, 500, true, false
 	r.Error = "interrupted: the Hub stopped while this " + r.Op + " was running — check the instance and run it again"
@@ -164,7 +164,7 @@ func markInterrupted(r *OpRecord) {
 			r.Steps[i].State = StepStopped
 		}
 	}
-	r.Stoppable = len(r.Steps) > 0 && r.Op != OpRestore && !(r.Op == OpDelete && r.PointOfNoReturn)
+	r.Stoppable = len(r.Steps) > 0 && r.Op != OpRestore && !r.PointOfNoReturn
 }
 
 // validOpKey: an op record key loadOps keeps — an instance id, a shared
