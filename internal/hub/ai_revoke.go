@@ -764,7 +764,7 @@ type AIRevokeProblem struct {
 // AIRevokeProblems lists every companion with revoking entries or an owed
 // template-update revoke_all, sorted (Task 20 reads it).
 func (h *Hub) AIRevokeProblems() []AIRevokeProblem {
-	entries := h.creds().Entries()
+	entries, credsErr := h.creds().EntriesErr()
 	aiStoreMu.Lock()
 	seenFile, seenErr := h.oauthSeenFileLocked()
 	aiStoreMu.Unlock()
@@ -879,6 +879,10 @@ func (h *Hub) AIRevokeProblems() []AIRevokeProblem {
 	h.mu.RUnlock()
 	if seenErr != nil {
 		get("", oauthSeenName).Reason = seenErr.Error()
+	}
+	if credsErr != nil {
+		// Owed app-side revocations can't be judged (final review M3).
+		get("", aigate.CredsFileName).Reason = credsErr.Error() + ": owed revocations are on hold until it is fixed or removed"
 	}
 	h.aiErrMu.Lock()
 	for k, p := range byKey {

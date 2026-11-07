@@ -352,7 +352,11 @@ func (h *Hub) restoreAIAfterStart(id string, actor directory.Actor) ([]string, e
 // records and orphans, then AIInstances[id]. Idempotent. The caller
 // rewrites the gate file.
 func (h *Hub) forgetInstanceAI(id string, actor directory.Actor) error {
-	for _, e := range h.creds().Entries() {
+	entries, err := h.creds().EntriesErr()
+	if err != nil {
+		return fmt.Errorf("reading the AI credential store (fix or remove it): %w", err)
+	}
+	for _, e := range entries {
 		if e.Instance != id {
 			continue
 		}

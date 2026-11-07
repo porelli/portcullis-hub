@@ -806,3 +806,36 @@ func TestCreateAndRestoreAsRefuseLongAlias(t *testing.T) {
 		t.Errorf("app_oauth: %v", err)
 	}
 }
+
+// Final review hub-core M3: an mcp-credentials.json that doesn't decode
+// never passes for an empty store: the delete stops (nothing removed,
+// nothing audited clean) and AIRevokeProblems names the file.
+func TestCorruptCredStoreNotEmpty(t *testing.T) {
+	a := newLifecycleFixture(t)
+	p := a.h.credsPath()
+	if err := os.WriteFile(p, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a.h.creds().mu.Lock()
+	a.h.creds().file = nil // read again from disk
+	a.h.creds().mu.Unlock()
+	if _, err := a.h.creds().EntriesErr(); err == nil {
+		t.Fatal("EntriesErr on a corrupt store = nil")
+	}
+	if err := a.h.forgetInstanceAI("aiapp", root); err == nil || !strings.Contains(err.Error(), "doesn't decode") {
+		t.Errorf("forgetInstanceAI = %v", err)
+	}
+	if err := a.h.dropAIEntries("aiapp", "tok"); err == nil {
+		t.Error("dropAIEntries on a corrupt store = nil")
+	}
+	found := false
+	for _, pr := range a.h.AIRevokeProblems() {
+		found = found || (pr.Instance == "" && pr.Companion == aigate.CredsFileName && strings.Contains(pr.Reason, "doesn't decode"))
+	}
+	if !found {
+		t.Errorf("AIRevokeProblems = %+v", a.h.AIRevokeProblems())
+	}
+	if b, _ := os.ReadFile(p); string(b) != "{not json" {
+		t.Error("the corrupt file was replaced")
+	}
+}

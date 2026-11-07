@@ -446,7 +446,11 @@ func topLevelMembers(b []byte) int {
 // dropInstanceAIEntries removes every AI credential entry of instance id
 // (its delete; caller holds lockApp → aiLock).
 func (h *Hub) dropInstanceAIEntries(id string) error {
-	for _, e := range h.creds().Entries() {
+	entries, err := h.creds().EntriesErr()
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
 		if e.Instance == id {
 			if err := h.creds().Remove(e.Instance, e.Companion, e.User); err != nil {
 				return err

@@ -979,7 +979,11 @@ func (h *Hub) revokeAll(ctx context.Context, t *templates.Template, c *templates
 // dropAIEntries removes every Hub-side credential entry of a companion
 // (the gate stops using them at its next reload).
 func (h *Hub) dropAIEntries(id, companion string) error {
-	for _, e := range h.creds().Entries() {
+	entries, err := h.creds().EntriesErr()
+	if err != nil {
+		return statusErr(http.StatusInternalServerError, "companion %s: reading the AI credential store: %v", companion, err)
+	}
+	for _, e := range entries {
 		if e.Instance == id && e.Companion == companion {
 			if err := h.creds().Remove(e.Instance, e.Companion, e.User); err != nil {
 				return statusErr(http.StatusInternalServerError, "companion %s: dropping its credentials: %v", companion, err)

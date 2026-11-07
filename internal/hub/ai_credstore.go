@@ -184,18 +184,27 @@ func (s *aiCredStore) Remove(instance, companion, user string) error {
 	return s.commitLocked(next)
 }
 
-// Entries are the credentials' metadata — never the ciphertext.
+// Entries are the credentials' metadata — never the ciphertext. A store
+// that can't be read gives none: callers that remove entries or must
+// not report success use EntriesErr.
 func (s *aiCredStore) Entries() []aigate.Credential {
+	out, _ := s.EntriesErr()
+	return out
+}
+
+// EntriesErr is Entries, with the store's read error (final review M3: a
+// file that doesn't decode never passes for an empty store).
+func (s *aiCredStore) EntriesErr() ([]aigate.Credential, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.loadLocked() != nil {
-		return nil
+	if err := s.loadLocked(); err != nil {
+		return nil, err
 	}
 	out := slices.Clone(s.file.Credentials)
 	for i := range out {
 		out[i].Age = ""
 	}
-	return out
+	return out, nil
 }
 
 // PutCallerSecret stores ref's (<instance>/<companion>) caller secret;
