@@ -362,11 +362,25 @@ func (h *Hub) forgetInstanceAI(id string, actor directory.Actor) error {
 		h.auditAI(actor, "ai.credential.revoke", e.Instance+"/"+e.Companion+"/"+e.User, "id "+e.ID+" reason deleted", nil)
 	}
 	prefix := id + "/"
-	if err := h.oauthSeenUpdate(func(seen map[string][]string) bool {
+	if err := h.oauthSeenUpdateFile(func(f *oauthSeenFile) bool {
 		changed := false
-		for ref := range seen {
+		for _, by := range []map[string][]string{f.Companions, f.Unmatched, f.Copied} {
+			for ref := range by {
+				if strings.HasPrefix(ref, prefix) {
+					delete(by, ref)
+					changed = true
+				}
+			}
+		}
+		for ref := range f.Revoked {
 			if strings.HasPrefix(ref, prefix) {
-				delete(seen, ref)
+				delete(f.Revoked, ref)
+				changed = true
+			}
+		}
+		for ref := range f.Replay {
+			if strings.HasPrefix(ref, prefix) {
+				delete(f.Replay, ref)
 				changed = true
 			}
 		}

@@ -179,6 +179,10 @@ type CompanionView struct {
 	Confirm     []string `json:"confirm"`
 	Never       []string `json:"never"`
 	OwnRules    bool     `json:"own_rules"`
+	// Unmatched (app_oauth, T27): people who left before their app
+	// account could be matched; their non-AI tokens remain until an
+	// administrator deals with them in the app and dismisses them.
+	Unmatched []string `json:"unmatched,omitempty"`
 }
 
 // InstanceAIResult is PUT's answer: the tab plus whether the app was
@@ -1038,6 +1042,14 @@ func (h *Hub) runPendingAI(ctx context.Context, t *templates.Template, skip map[
 				errs = append(errs, serr)
 				continue
 			}
+			if c.Identity.Mode == templates.IdentityAppOAuth {
+				// A restore brought the app's data back: the revoked
+				// leavers' tokens too (T27). The reconcile replays them.
+				if rerr := h.oauthSeenSetReplay(t.ID + "/" + c.Name); rerr != nil {
+					log.Printf("ai: %s/%s: marking the revoked leavers owed again failed: %v", t.ID, c.Name, rerr)
+				}
+				h.TriggerAIReconcile()
+			}
 			s.RevokePending = false
 			again = again || s.Enabled
 		}
@@ -1300,6 +1312,7 @@ func (h *Hub) InstanceAI(id string) (*InstanceAIView, error) {
 		pop = len(h.populationLocked(t, m).People)
 	}
 	sw := h.st.AIInstances[id].Companions
+	seen, _ := h.oauthSeenRead()
 	for i := range a.MCP {
 		c := &a.MCP[i]
 		s := sw[c.Name]
@@ -1310,6 +1323,9 @@ func (h *Hub) InstanceAI(id string) (*InstanceAIView, error) {
 			Source: c.Source, Modes: slices.Clone(c.Modes), Mode: s.Mode, Enabled: s.Enabled, LastError: h.aiError(id, c.Name),
 			Population: pop, Confirm: append([]string{}, c.Tools.Confirm...), Never: append([]string{}, c.Tools.Never...),
 			OwnRules: c.Identity.Mode == templates.IdentityAppOAuth}
+		if cv.OwnRules {
+			cv.Unmatched = slices.Clone(seen.Unmatched[id+"/"+c.Name])
+		}
 		if host := NormalizeHost(t.Hosts[c.Router]); host != "" {
 			cv.URL = aigate.CompanionURL(host, c.EffectivePublicPath())
 		}

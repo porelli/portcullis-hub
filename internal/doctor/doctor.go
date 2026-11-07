@@ -79,6 +79,9 @@ type Finding struct {
 	Steps     []string `json:"steps,omitempty"` // explain-only instructions
 	Link      *Link    `json:"link,omitempty"`
 	Partial   bool     `json:"partial,omitempty"`
+	// Dismiss: people the finding lists who an administrator dismisses
+	// once handled (POST /api/instances/{id}/ai/dismiss; T27).
+	Dismiss []Dismiss `json:"dismiss,omitempty"`
 	// Inputs is the digest of what produced the finding; Run folds the
 	// severity in, so a mute never hides a finding whose severity rose.
 	Inputs string `json:"-"`
@@ -87,6 +90,13 @@ type Finding struct {
 	// changed since (H8).
 	Token string `json:"token"`
 	Muted *Mute  `json:"muted,omitempty"`
+}
+
+// Dismiss is one dismissable person of a finding.
+type Dismiss struct {
+	Instance  string `json:"instance"`
+	Companion string `json:"companion"`
+	User      string `json:"user"`
 }
 
 // Mute is an admin's mute of a finding: it holds while the finding's

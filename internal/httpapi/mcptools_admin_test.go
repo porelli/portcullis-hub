@@ -442,6 +442,8 @@ func TestAdminToolsSameAsHTTP(t *testing.T) {
 			method: "POST", path: "/api/instances/aiapp/ai/revoke", body: `{"companion":"tok"}`},
 		{tool: "revoke_ai_access", args: map[string]any{"id": "aiapp", "companion": "hdr", "user": "alice"},
 			method: "POST", path: "/api/instances/aiapp/ai/revoke", body: `{"companion":"hdr","user":"alice"}`},
+		{tool: "dismiss_ai_revoke_problem", args: map[string]any{"id": "aiapp", "user": "Alice"},
+			method: "POST", path: "/api/instances/aiapp/ai/dismiss", body: `{"user":"Alice"}`},
 		{tool: "add_model_provider", args: ollamaArgs(nil),
 			method: "POST", path: "/api/ai/providers", body: ollamaBody},
 		{tool: "save_model_provider", args: ollamaArgs(map[string]any{"models": map[string]any{"fetch": false, "list": []string{"qwen3"}}}),

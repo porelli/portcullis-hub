@@ -59,6 +59,7 @@ var destructiveTwins = map[string]string{
 	"POST /api/instances/restore":                     "restores an archive into a new instance (data and access settings from the archive)",
 	"DELETE /api/domains/{name}":                      "deletes a domain (records, certificate)",
 	"POST /api/instances/{id}/ai/revoke":              "revokes AI credentials in the app",
+	"POST /api/instances/{id}/ai/dismiss":             "hides a leaver whose app tokens the Hub couldn't revoke (T27)",
 	"DELETE /api/ai/providers/{name}":                 "deletes a model provider and its secrets",
 	"POST /api/keycloak/user-sweep/resume":            "typed confirmation (resume): Keycloak then removes records LLDAP lacks",
 	"DELETE /api/directory/keycloak-stale/{username}": "deletes a Keycloak record (typed username)",
@@ -210,7 +211,7 @@ func TestToolParity(t *testing.T) {
 	for _, n := range []string{"exec", "save_env", "save_custom_override", "resolve_drift", "delete_instance", "admin_revoke_credential",
 		"set_policy", "set_sign_in_mode", "set_public_access", "save_settings", "set_local_networks", "enable_instance",
 		// Task 17b (§15.10's D list, G37 and its rulings).
-		"add_source", "remove_source", "restore_instance", "restore_as", "delete_domain", "revoke_ai_access",
+		"add_source", "remove_source", "restore_instance", "restore_as", "delete_domain", "revoke_ai_access", "dismiss_ai_revoke_problem",
 		"add_model_provider", "delete_model_provider", "resume_user_sweep", "remove_stale_keycloak_user",
 		"set_ai_support", "set_ai_mode", "save_model_provider", "save_hub_settings", "set_default_policy",
 		// Task 23.
@@ -284,7 +285,7 @@ var admin17b = []string{
 	"list_templates", "get_template", "list_sources", "sync_sources", "add_source", "remove_source",
 	"list_backups", "list_backups_all", "backup_instance", "restore_instance", "restore_as",
 	"list_domains", "enroll_domain", "replace_domain_token", "delete_domain",
-	"ai_status", "set_ai_support", "set_ai_mode", "set_ai_providers", "revoke_ai_access", "ai_activity",
+	"ai_status", "set_ai_support", "set_ai_mode", "set_ai_providers", "revoke_ai_access", "dismiss_ai_revoke_problem", "ai_activity",
 	"list_model_providers", "add_model_provider", "save_model_provider", "set_model_provider_secret", "delete_model_provider",
 	"get_hub_settings", "save_hub_settings", "set_default_policy", "preview_default_policy",
 	"user_sweep_status", "resume_user_sweep", "remove_stale_keycloak_user",

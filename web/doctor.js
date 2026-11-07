@@ -218,6 +218,10 @@
       }
     }
     if ((f.steps || []).length) h += '<button type="button" class="btn btn-secondary btn-sm" data-dr-explain>Explain</button>';
+    (f.dismiss || []).forEach(d => {
+      h += '<button type="button" class="btn btn-danger btn-sm" data-dr-dismiss data-dr-dis-inst="' + esc(d.instance) + '" data-dr-dis-comp="' + esc(d.companion) +
+        '" data-dr-dis-user="' + esc(d.user) + '">Dismiss ' + esc(d.user) + '</button>';
+    });
     if (f.link && f.link.instance && f.link.tab) h += '<button type="button" class="btn btn-secondary btn-sm" data-dr-open-tab="' + esc(f.link.tab) + '" data-dr-open="' + esc(f.link.instance) + '">' + (f.link.tab === 'ai' ? 'Open AI tab' : 'Open app') + '</button>';
     else if (f.link && f.link.instance) h += '<button type="button" class="btn btn-secondary btn-sm" data-dr-open="' + esc(f.link.instance) + '" data-dr-option="' + esc(f.link.option || '') + '">Open setting</button>';
     h += f.muted ? '<button type="button" class="btn btn-secondary btn-sm" data-dr-unmute>Unmute</button>'
@@ -356,6 +360,17 @@
     }
   }
 
+  // dismiss: an app_oauth leaver the Hub couldn't match (T27), once the
+  // administrator dealt with their account in the app.
+  async function dismiss(c, instance, companion, user) {
+    if (!confirm('Dismiss ' + user + '? Only do this once their account was deactivated or deleted in the app: otherwise they keep their access to it.')) return;
+    const out = c.querySelector('[data-dr-op]') || c.querySelector('[data-dr-panel]');
+    try {
+      await window.apiPost('/api/instances/' + enc(instance) + '/ai/dismiss', { user, companion });
+      render(rootEl);
+    } catch (err) { out.innerHTML = window.errorBox(err); }
+  }
+
   // ── scan ───────────────────────────────────────────────────────────
 
   async function scan(btn) {
@@ -402,6 +417,7 @@
         return;
       }
       if ((b = t.closest('[data-dr-open]'))) { window.openSettingAt(b.dataset.drOpen, b.dataset.drOption); return; }
+      if ((b = t.closest('[data-dr-dismiss]'))) { dismiss(c, b.dataset.drDisInst, b.dataset.drDisComp, b.dataset.drDisUser); return; }
       if (t.closest('[data-dr-mute]')) { openMute(fp); return; }
       if (t.closest('[data-dr-mute-go]')) { mute(fp, true); return; }
       if (t.closest('[data-dr-unmute]')) { mute(fp, false); }

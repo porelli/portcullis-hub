@@ -1076,6 +1076,11 @@ func (h *Hub) restoreInstanceAs(archive, newID string, actor directory.Actor, ho
 	}
 	// Its starting rows, bound to the new id's groups.
 	res.Warnings = append(res.Warnings, h.bindPlaceholderRows(context.Background(), newID)...)
+	if v := h.Template(newID); v != nil {
+		if w := h.oauthCopyForRestoreAs(v, sb.m.Instance, newID); w != "" {
+			res.Warnings = append(res.Warnings, w)
+		}
+	}
 	h.writePolicyLogged()
 	log.Printf("instance %s of %s restored from %s", newID, tmpl.ID, archive)
 	return res, nil

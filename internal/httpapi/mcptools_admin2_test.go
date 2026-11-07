@@ -436,6 +436,14 @@ func TestAIRevokeAndActivityRoutes(t *testing.T) {
 	if len(act.Lines) != 1 || act.Lines[0].Instance != "other" {
 		t.Errorf("activity = %+v", act.Lines)
 	}
+	// POST …/ai/dismiss (T27): admins only on the Hub listener; nothing
+	// listed = 404, a bad username or body = 400 (the listed case is the
+	// Hub's TestOAuthRestartUnverifiableLeaver).
+	checkAdminOnly(t, e.instEnv, []route{{"POST", "/api/instances/aiapp/ai/dismiss", `{"user":"alice"}`}})
+	mustDo(t, e.hub, "root", "POST", "/api/instances/aiapp/ai/dismiss", `{"user":"alice"}`, 404)
+	mustDo(t, e.hub, "root", "POST", "/api/instances/aiapp/ai/dismiss", `{"user":"not a user"}`, 400)
+	mustDo(t, e.hub, "root", "POST", "/api/instances/aiapp/ai/dismiss", `{"user":"alice","x":1}`, 400)
+	mustDo(t, e.hub, "root", "POST", "/api/instances/nope/ai/dismiss", `{"user":"alice"}`, 404)
 	mustDo(t, e.hub, "root", "GET", "/api/ai/activity?n=201", "", 400)
 	mustDo(t, e.hub, "root", "GET", "/api/ai/activity?n=x", "", 400)
 }
@@ -587,6 +595,7 @@ var adminToolFixtures = []struct {
 	{"set_ai_mode", map[string]any{"id": "aiapp", "companion": "tok", "mode": "read_only"}},
 	{"set_ai_support", map[string]any{"id": "aiapp", "companion": "tok", "enabled": true}},
 	{"revoke_ai_access", map[string]any{"id": "aiapp", "companion": "tok"}},
+	{"dismiss_ai_revoke_problem", map[string]any{"id": "aiapp", "user": "alice"}},
 	{"ai_activity", nil},
 	{"list_model_providers", nil},
 	{"add_model_provider", map[string]any{"name": "other", "label": "Other", "kind": "anthropic"}},

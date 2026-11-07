@@ -45,6 +45,9 @@ type AIIn struct {
 	Pruned, NoHook bool
 	Recorded       int
 	Reason         string
+	// Unmatched: app_oauth people who left before their app account could
+	// be matched (T27): each gets a Dismiss in the finding.
+	Unmatched []string
 }
 
 // Kinds of this file.
@@ -208,6 +211,9 @@ func (aiRevokingCheck) Run(in *Inputs) []Finding {
 			f.Why = reason
 			f.Fix = "Do what each line says in the app (Settings > People there), then dismiss the entry."
 			f.Class, f.Link = FixLink, aiLink(a)
+			for _, u := range a.Unmatched {
+				f.Dismiss = append(f.Dismiss, Dismiss{Instance: a.Instance, Companion: a.Companion, User: u})
+			}
 			out = append(out, f)
 			continue
 		}

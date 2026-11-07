@@ -85,6 +85,11 @@ type (
 		Companion string `json:"companion" jsonschema:"the companion's name"`
 		User      string `json:"user,omitempty" jsonschema:"one person's username (default: everyone)"`
 	}
+	dismissAIArgs struct {
+		ID        string `json:"id" jsonschema:"the instance id"`
+		User      string `json:"user" jsonschema:"the username listed as unmatched"`
+		Companion string `json:"companion,omitempty" jsonschema:"the companion's name (default: every companion)"`
+	}
 	activityArgs struct {
 		Instance string `json:"instance,omitempty" jsonschema:"only this instance's lines"`
 		User     string `json:"user,omitempty" jsonschema:"only this person's lines"`
@@ -379,6 +384,20 @@ func (s *Server) registerAdminTools2() {
 					return nil, err
 				}
 				return s.revokeAI(ctx, toolActor(ctx, c), a.ID, a.Companion, a.User)
+			}},
+		{Name: "dismiss_ai_revoke_problem", Description: "Dismiss a person listed as having left an app with its own sign-in (app_oauth) before their app account could be matched, once you dealt with their remaining tokens in the app (deactivated or deleted them there). Dismissing hides them: if you didn't, they keep their access to the app. Needs your confirmation in the browser.",
+			Class: ClassDestructive, Scope: ScopeAdmin, Twin: "POST /api/instances/{id}/ai/dismiss", Audit: "ai.credential.revoke", In: dismissAIArgs{},
+			Typed: idOf,
+			Consequences: func(_ context.Context, args json.RawMessage) []string {
+				a, _ := decode[dismissAIArgs](args)
+				return []string{"Stops listing " + strings.ToLower(a.User) + " on " + a.ID + " as having left with app-side tokens the Hub couldn't revoke. Only do this once their account was deactivated or deleted in the app: otherwise they keep their access to it."}
+			},
+			Run: func(ctx context.Context, c *directory.Caller, args json.RawMessage) (any, error) {
+				a, _ := decode[dismissAIArgs](args)
+				if err := instanceIDOK(a.ID); err != nil {
+					return nil, err
+				}
+				return s.dismissAI(toolActor(ctx, c), a.ID, a.Companion, a.User)
 			}},
 		admin("ai_activity", "The gate's access log, newest first (who used which AI resource and tool, the decision; never arguments or results), filtered by instance and person.",
 			ClassRead, "GET /api/ai/activity", "", func(_ context.Context, _ directory.Actor, in activityArgs) (any, error) {

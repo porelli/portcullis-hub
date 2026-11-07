@@ -40,6 +40,9 @@ func (s *Server) registerAI(mux routeMux) {
 	// Revoke AI credentials now (§15.11; Task 17b: the twin of the
 	// Portcullis MCP's revoke_ai_access).
 	mux.HandleFunc("POST /api/instances/{id}/ai/revoke", s.handleRevokeAI)
+	// Dismiss an unmatched app_oauth leaver once handled in the app (T27;
+	// the twin of dismiss_ai_revoke_problem).
+	mux.HandleFunc("POST /api/instances/{id}/ai/dismiss", s.handleDismissAI)
 	// The gate's access log (§15.8, §15.11; Task 17b: ai_activity's twin).
 	mux.HandleFunc("GET /api/ai/activity", s.handleAIActivity)
 	// What saving a Hub default policy would switch off first (G43).
@@ -56,6 +59,7 @@ const (
 	providerSecretUsage = `{"value": "<secret>"} or {"clear": true}`
 	instanceAIUsage     = `{"companions": {"<name>": {"enabled": bool, "mode": "read_only"|"read_write"}}} or, for an AI page, {"providers": ["<provider>", ...]}`
 	revokeAIUsage       = `{"companion": "<name>", "user": "<username>"} (user omitted = everyone)`
+	dismissAIUsage      = `{"user": "<username>", "companion": "<name>"} (companion omitted = every companion)`
 )
 
 // maxActivity is GET /api/ai/activity's largest n (§15.11); defActivity
@@ -305,6 +309,42 @@ func (s *Server) handleRevokeAI(w http.ResponseWriter, r *http.Request) {
 	}
 	noStore(w)
 	writeJSON(w, res)
+}
+
+// handleDismissAI dismisses an unmatched app_oauth leaver (T27; audited
+// ai.credential.revoke "dismissed" by the Hub).
+func (s *Server) handleDismissAI(w http.ResponseWriter, r *http.Request) {
+	if !s.folderAdmin(w, r) {
+		return
+	}
+	id, ok := instanceID(w, r)
+	if !ok {
+		return
+	}
+	var b struct {
+		User      string `json:"user"`
+		Companion string `json:"companion"`
+	}
+	if !decodeAPI(w, r, &b, dismissAIUsage) {
+		return
+	}
+	res, err := s.dismissAI(requestActor(r), id, b.Companion, b.User)
+	if err != nil {
+		writeAPIErr(w, err)
+		return
+	}
+	noStore(w)
+	writeJSON(w, res)
+}
+
+// dismissAI is the dismissal's work (route and dismiss_ai_revoke_problem).
+func (s *Server) dismissAI(a directory.Actor, id, companion, user string) (map[string]any, error) {
+	user = strings.ToLower(user)
+	s.rec("AIRevokeDismiss", id, companion, user)
+	if err := s.Hub.AIRevokeDismiss(id, companion, user, a); err != nil {
+		return nil, err
+	}
+	return map[string]any{"status": "dismissed", "instance": id, "user": user}, nil
 }
 
 // handleAIActivity: the access log's lines, newest first, filtered by

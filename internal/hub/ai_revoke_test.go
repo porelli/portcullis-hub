@@ -629,6 +629,152 @@ func TestOAuthUnwrittenSurvivesRebuild(t *testing.T) {
 	}
 }
 
+// TestOAuthNoLeavingByPolicy (T27 fix round 2): a policy reaching LoA 3,
+// a population emptied by state (here: the template's sign-in losing its
+// identity, like native sign-in) and a disabled instance each revoke
+// nobody: the records stay.
+func TestOAuthNoLeavingByPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(a *instAIFixture)
+	}{
+		{"loa3", func(a *instAIFixture) {
+			a.h.mu.Lock()
+			a.h.st.AuthPolicies["oauthapp"] = policy.AuthPolicy{Factors: []string{"mtls"}, Op: "any"}
+			a.h.mu.Unlock()
+		}},
+		{"no identity", func(a *instAIFixture) {
+			a.h.mu.Lock()
+			for i := range a.h.instances {
+				if a.h.instances[i].ID == "oauthapp" {
+					a.h.instances[i].Manifest.Auth.Method = "public"
+				}
+			}
+			a.h.mu.Unlock()
+		}},
+		{"disabled", func(a *instAIFixture) {
+			if err := a.h.Disable("oauthapp"); err != nil {
+				t.Fatal(err)
+			}
+			a.h.Wait()
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := oauthT27(t, nil)
+			a.reconcile()
+			before := a.seenFile(t).Companions["oauthapp/oauth"]
+			tc.change(a)
+			n := len(a.stdins("/revoke"))
+			a.reconcile()
+			a.h.Wait()
+			a.reconcile()
+			for _, in := range a.stdins("/revoke")[n:] {
+				if strings.Contains(in, `"action":"revoke",`) {
+					t.Errorf("a targeted revoke ran: %s", in)
+				}
+			}
+			if got := a.seenFile(t).Companions["oauthapp/oauth"]; !slices.Equal(got, before) {
+				t.Errorf("record = %v, want %v", got, before)
+			}
+		})
+	}
+}
+
+// TestOAuthRestoreReplay (T27 fix round 2): a revoked leaver stays marked
+// revoked; after a same-instance restore's owed revoke_all succeeds the
+// reconcile revokes them again (they aren't a holder) and the replay is
+// cleared; the mark stays.
+func TestOAuthRestoreReplay(t *testing.T) {
+	a := oauthT27(t, nil)
+	a.reconcile()
+	a.leave("bob")
+	if got := a.revokeRuns(); len(got) != 1 || !strings.Contains(got[0], `"user":"bob"`) {
+		t.Fatalf("bob's revoke = %q", got)
+	}
+	if f := a.seenFile(t); !slices.Equal(f.Revoked["oauthapp/oauth"]["bob"], []string{fakeSub("bob")}) {
+		t.Fatalf("revoked marks = %v", f.Revoked)
+	}
+	a.h.mu.Lock()
+	a.h.oweAIRevokeLocked("oauthapp")
+	a.h.mu.Unlock()
+	if err := a.h.RestartApp("oauthapp"); err != nil {
+		t.Fatal(err)
+	}
+	a.h.Wait()
+	if f := a.seenFile(t); !f.Replay["oauthapp/oauth"] {
+		t.Fatalf("no replay owed after the restore's revoke_all: %+v", f.Replay)
+	}
+	got := a.revokeRuns()
+	if len(got) != 1 || got[0] != `{"action":"revoke","user":"bob","sub":"`+fakeSub("bob")+`","ids":[]}` {
+		t.Fatalf("replay runs = %q", got)
+	}
+	f := a.seenFile(t)
+	if f.Replay["oauthapp/oauth"] || len(f.Revoked["oauthapp/oauth"]["bob"]) == 0 {
+		t.Errorf("after the replay: replay %v, revoked %v", f.Replay, f.Revoked)
+	}
+	if got := a.revokeRuns(); len(got) != 0 {
+		t.Errorf("replayed again: %q", got)
+	}
+}
+
+// TestOAuthRestoreAsCopy (T27 fix round 2): a restore into a new id copies
+// the source's people; those outside the new population are unmatched.
+func TestOAuthRestoreAsCopy(t *testing.T) {
+	a := oauthT27(t, nil)
+	if err := a.h.oauthSeenUpdateFile(func(f *oauthSeenFile) bool {
+		f.Companions["oldapp/oauth"] = []string{"alice", "zed"}
+		f.Revoked["oldapp/oauth"] = map[string][]string{"yan": {fakeSub("yan")}}
+		return true
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if w := a.h.oauthCopyForRestoreAs(a.h.Template("oauthapp"), "oldapp", "oauthapp"); !strings.Contains(w, "3 people") {
+		t.Errorf("warning = %q", w)
+	}
+	a.reconcile()
+	f := a.seenFile(t)
+	if !slices.Equal(f.Unmatched["oauthapp/oauth"], []string{"yan", "zed"}) || len(f.Copied) != 0 {
+		t.Fatalf("unmatched %v copied %v", f.Unmatched["oauthapp/oauth"], f.Copied)
+	}
+	listed := false
+	for _, p := range a.h.AIRevokeProblems() {
+		if p.Instance == "oauthapp" && slices.Equal(p.Unmatched, []string{"yan", "zed"}) {
+			listed = true
+		}
+	}
+	if !listed {
+		t.Errorf("AIRevokeProblems = %+v", a.h.AIRevokeProblems())
+	}
+}
+
+// TestOAuthPolicyPassRecords (T27 fix round 2): the policy write records
+// a new holder at once (uuid, id pending) without calling Keycloak.
+func TestOAuthPolicyPassRecords(t *testing.T) {
+	a := oauthT27(t, nil)
+	a.reconcile()
+	a.people.addGroup("users_oauthapp", "frank")
+	a.people.set(func(p *fakePeople) { p.users["frank"] = true })
+	a.kc.mu.Lock()
+	lookups := a.kc.lookups
+	a.kc.mu.Unlock()
+	if err := a.h.WritePolicy(); err != nil {
+		t.Fatal(err)
+	}
+	f := a.seenFile(t)
+	if !slices.Contains(f.Companions["oauthapp/oauth"], "frank") || f.UUIDs["oauthapp/oauth"]["frank"] != "uuid-frank" || len(f.Subs["oauthapp/oauth"]["frank"]) != 0 {
+		t.Fatalf("frank after the policy pass: %v uuid %q subs %v", f.Companions, f.UUIDs["oauthapp/oauth"]["frank"], f.Subs["oauthapp/oauth"]["frank"])
+	}
+	a.kc.mu.Lock()
+	if a.kc.lookups != lookups {
+		t.Errorf("the policy pass called Keycloak %d times", a.kc.lookups-lookups)
+	}
+	a.kc.mu.Unlock()
+	a.reconcile()
+	if f = a.seenFile(t); !slices.Equal(f.Subs["oauthapp/oauth"]["frank"], []string{fakeSub("frank")}) {
+		t.Errorf("not backfilled: %v", f.Subs["oauthapp/oauth"]["frank"])
+	}
+}
+
 // TestOAuthPendingAfterThreePasses (T27): a holder whose id lookup keeps
 // failing is listed only after 3 passes.
 func TestOAuthPendingAfterThreePasses(t *testing.T) {
@@ -724,14 +870,21 @@ func TestOAuthUUIDMismatch(t *testing.T) {
 	a := oauthT27(t, nil)
 	a.reconcile()
 	a.people.recreate("dave")
+	const newDave = "00000000-0000-4000-8000-0000000da7e2"
+	a.kc.mu.Lock()
+	a.kc.subOverride = map[string]string{"dave": newDave}
+	a.kc.mu.Unlock()
 	if got := a.revokeRuns(); !isRevokeAll(got) {
 		t.Fatalf("runs = %q, want one revoke_all", got)
+	}
+	if f := a.seenFile(t); !slices.Equal(f.Unmatched["oauthapp/oauth"], []string{"dave"}) {
+		t.Errorf("unmatched = %v, want [dave]", f.Unmatched["oauthapp/oauth"])
 	}
 	if au := a.auditsOf("ai.credential.revoke", "oauthapp/oauth/dave"); len(au) != 1 || au[0].Result != "ok" {
 		t.Errorf("audits = %+v", au)
 	}
 	f := a.seenFile(t)
-	if f.UUIDs["oauthapp/oauth"]["dave"] != a.people.uuidOf("dave") || !slices.Equal(f.Subs["oauthapp/oauth"]["dave"], []string{fakeSub("dave")}) {
+	if f.UUIDs["oauthapp/oauth"]["dave"] != a.people.uuidOf("dave") || !slices.Equal(f.Subs["oauthapp/oauth"]["dave"], []string{newDave}) {
 		t.Errorf("new account's record = uuid %q sub %v", f.UUIDs["oauthapp/oauth"]["dave"], f.Subs["oauthapp/oauth"]["dave"])
 	}
 	if !slices.Equal(f.Subs["oauthapp/oauth"]["alice"], []string{fakeSub("alice")}) {

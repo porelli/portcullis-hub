@@ -86,6 +86,15 @@ func TestAIDoctorChecks(t *testing.T) {
 			!strings.Contains(strings.Join(got[0].Steps, " "), "by hand") || !strings.Contains(got[0].Why, "no longer has") {
 			t.Fatalf("lost hook = %+v", got)
 		}
+		// app_oauth unmatched leavers (T27): the reason lines and a Dismiss
+		// per person.
+		um := AIIn{Instance: "ha", Label: "Home", Companion: "homeassistant", Unmatched: []string{"erin"},
+			Reason: "erin left ha before their Home Assistant account could be matched: …"}
+		got = of(t, KindAICredentialsRevoking, &Inputs{AI: []AIIn{um}})
+		if len(got) != 1 || !strings.Contains(got[0].Title, "need attention") || got[0].Why != um.Reason ||
+			len(got[0].Dismiss) != 1 || got[0].Dismiss[0] != (Dismiss{Instance: "ha", Companion: "homeassistant", User: "erin"}) {
+			t.Fatalf("unmatched = %+v", got)
+		}
 		// app_oauth leftovers: people recorded, no hook left.
 		left := AIIn{Instance: "aiapp", Label: "AI App", Companion: "dropped", Recorded: 2, NoHook: true}
 		got = of(t, KindAICredentialsRevoking, &Inputs{AI: []AIIn{left}})

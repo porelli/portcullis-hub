@@ -563,6 +563,8 @@ func (h *Hub) writeGateFiles(m *directory.Membership, mErr error) error {
 		log.Printf("mcp-gate: directory unavailable, %s rebuilt with the last populations: %v", aigate.GateFileName, mErr)
 		return errGateDirectory
 	}
+	// app_oauth: everyone in a published population is recorded now (T27).
+	h.recordOAuthHolders(m)
 	return nil
 }
 

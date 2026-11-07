@@ -1901,6 +1901,12 @@
         ((c.confirm || []).length ? '<dt>Asks to confirm</dt><dd>' + c.confirm.map(x => '<code>' + escapeHtml(x) + '</code>').join(', ') + '</dd>' : '') +
         ((c.never || []).length ? '<dt>Never allowed</dt><dd>' + c.never.map(x => '<code>' + escapeHtml(x) + '</code>').join(', ') + '</dd>' : '') +
         '</dl>';
+      if ((c.unmatched || []).length) {
+        h += '<div class="inst-error op-msg" data-ai-unmatched><strong>Left before their account could be matched</strong> — their web, Companion and long-lived tokens remain: ' +
+          'deactivate or delete them in ' + escapeHtml(c.label || c.name) + ' (Settings &gt; People), then dismiss.<ul>' +
+          c.unmatched.map(u => '<li><code>' + escapeHtml(u) + '</code> <button type="button" class="btn btn-danger btn-sm" data-ai-dismiss data-user="' + escapeHtml(u) + '">Dismiss</button></li>').join('') +
+          '</ul></div>';
+      }
       if (c.own_rules) {
         h += '<div class="public-warn" data-ai-own-rules>' + escapeHtml(c.label || c.name) + ' applies its own rules: people sign in to it with the app\'s own sign-in, ' +
           'and Portcullis doesn\'t log or confirm its AI actions.</div>';
@@ -1967,6 +1973,17 @@
       } catch (err) { out.innerHTML = errorBox(err); }
     }
 
+    async function dismissAIUser(box, sec, user) {
+      const id = box.dataset.aiTab, name = sec.dataset.aiCompanion;
+      const out = sec.querySelector('[data-ai-result]');
+      if (!confirm('Dismiss ' + user + '? Only do this once their account was deactivated or deleted in the app: otherwise they keep their access to it.')) return;
+      try {
+        await apiPost('/api/instances/' + encodeURIComponent(id) + '/ai/dismiss', { user, companion: name });
+        await loadAITab(id, box.parentElement);
+        showToast(user + ' dismissed.', 'success');
+      } catch (err) { out.innerHTML = errorBox(err); }
+    }
+
     document.addEventListener('click', e => {
       const t = e.target;
       const box = t.closest('[data-ai-tab]');
@@ -1983,6 +2000,8 @@
       const sec = t.closest('[data-ai-companion]');
       if (!sec) return;
       if (t.closest('[data-ai-save]')) { saveAICompanion(box, sec); return; }
+      const dis = t.closest('[data-ai-dismiss]');
+      if (dis) { dismissAIUser(box, sec, dis.dataset.user); return; }
       if (t.closest('[data-ai-revoke]')) revokeAICompanion(box, sec);
     });
 

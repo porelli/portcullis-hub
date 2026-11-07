@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"log"
+	"slices"
 	"sort"
 	"strings"
 
@@ -124,6 +125,7 @@ func (h *Hub) aiDoctorInputs(ctx context.Context) []doctor.AIIn {
 			keys = append(keys, k)
 		}
 		in.Revoking, in.Pruned, in.NoHook, in.Recorded, in.Reason = p.Revoking, p.Pruned, p.NoHook, p.Recorded, p.Reason
+		in.Unmatched = slices.Clone(p.Unmatched)
 	}
 	sort.Strings(keys)
 	out := make([]doctor.AIIn, 0, len(keys))
