@@ -217,6 +217,15 @@ func (h *Hub) runRevokeOAuth(ctx context.Context, t *templates.Template, ref, ho
 	if err != nil {
 		return err
 	}
+	return h.runRevokeOAuthSub(ctx, t, hook, user, sub)
+}
+
+// runRevokeOAuthSub runs an app_oauth hook's revoke for user with sub
+// (never empty).
+func (h *Hub) runRevokeOAuthSub(ctx context.Context, t *templates.Template, hook, user, sub string) error {
+	if sub == "" {
+		return errors.New("no Keycloak id: not sent")
+	}
 	stdin, _ := json.Marshal(aiRevokeIn{Action: "revoke", User: user, Sub: sub, IDs: []string{}})
 	out, u := h.runAIHook(ctx, t, hook, stdin)
 	clear(out)
@@ -722,6 +731,10 @@ func (h *Hub) revokeAllWith(ctx context.Context, t *templates.Template, name, ho
 		if err := h.oauthSeenDrop(t.ID + "/" + name); err != nil {
 			return statusErr(http.StatusInternalServerError, "companion %s: %v", name, err)
 		}
+		h.aiErrMu.Lock()
+		delete(h.aiOAuthUnrecorded, t.ID+"/"+name)
+		delete(h.aiPendingLeavers, t.ID+"/"+name)
+		h.aiErrMu.Unlock()
 	}
 	return nil
 }
@@ -1029,11 +1042,16 @@ func (h *Hub) writeAIStore(name string, v any) error {
 // is recorded at once; their id is looked up (and backfilled) only while
 // they are a current holder, so the username is that live account's. No
 // id yet = pending: if they leave pending, the companion's revoke_all
-// runs instead (fails closed).
+// runs instead (fails closed). A person is recorded only with their LLDAP
+// uuid, and an id is backfilled only while the live account's uuid is the
+// recorded one.
 type oauthSeenFile struct {
 	Version    int                          `json:"version"`
 	Companions map[string][]string          `json:"companions"`
 	Subs       map[string]map[string]string `json:"subs,omitempty"`
+	// UUIDs: ref → user → the LLDAP account uuid they were recorded with
+	// (Membership.UUIDs): a name re-used by a new account is not theirs.
+	UUIDs map[string]map[string]string `json:"uuids,omitempty"`
 }
 
 const oauthSeenName = "oauth-seen.json"
@@ -1055,6 +1073,9 @@ func (h *Hub) oauthSeenFileLocked() (oauthSeenFile, error) {
 	}
 	if f.Subs == nil {
 		f.Subs = map[string]map[string]string{}
+	}
+	if f.UUIDs == nil {
+		f.UUIDs = map[string]map[string]string{}
 	}
 	return f, nil
 }
@@ -1083,36 +1104,46 @@ func (h *Hub) oauthSeenUpdateFile(fn func(*oauthSeenFile) bool) error {
 			seen[k] = sortedSet(v)
 		}
 	}
-	for ref, subs := range f.Subs {
-		for u := range subs {
-			if !slices.Contains(seen[ref], u) {
-				delete(subs, u)
+	for _, perRef := range []map[string]map[string]string{f.Subs, f.UUIDs} {
+		for ref, vals := range perRef {
+			for u := range vals {
+				if !slices.Contains(seen[ref], u) {
+					delete(vals, u)
+				}
 			}
-		}
-		if len(subs) == 0 {
-			delete(f.Subs, ref)
+			if len(vals) == 0 {
+				delete(perRef, ref)
+			}
 		}
 	}
 	out := oauthSeenFile{Version: 1, Companions: seen}
 	if len(f.Subs) > 0 {
 		out.Subs = f.Subs
 	}
+	if len(f.UUIDs) > 0 {
+		out.UUIDs = f.UUIDs
+	}
 	return h.writeAIStore(oauthSeenName, out)
 }
 
-// oauthSeenAdd records people (ref → users) at once and stores the
-// Keycloak ids found (ref → user → id) for recorded people that have
-// none; a stored id is never replaced (a re-created account with the
-// same name is another person).
-func (h *Hub) oauthSeenAdd(add map[string][]string, subs map[string]map[string]string) error {
+// oauthSeenAdd records people (ref → user → LLDAP uuid, never empty)
+// with their uuid, and stores the Keycloak ids found (ref → user → id)
+// for recorded people that have none; a stored id or uuid is never
+// replaced (a re-created account with the same name is another person).
+func (h *Hub) oauthSeenAdd(add, subs map[string]map[string]string) error {
 	return h.oauthSeenUpdateFile(func(f *oauthSeenFile) bool {
 		changed := false
-		for ref, users := range add {
-			for _, u := range users {
-				if !slices.Contains(f.Companions[ref], u) {
-					f.Companions[ref] = append(f.Companions[ref], u)
-					changed = true
+		for ref, people := range add {
+			for u, uuid := range people {
+				if uuid == "" || slices.Contains(f.Companions[ref], u) {
+					continue
 				}
+				f.Companions[ref] = append(f.Companions[ref], u)
+				if f.UUIDs[ref] == nil {
+					f.UUIDs[ref] = map[string]string{}
+				}
+				f.UUIDs[ref][u] = uuid
+				changed = true
 			}
 		}
 		for ref, people := range subs {
@@ -1128,6 +1159,15 @@ func (h *Hub) oauthSeenAdd(add map[string][]string, subs map[string]map[string]s
 			}
 		}
 		return changed
+	})
+}
+
+// oauthSeenRemoveUsers removes users from ref's record in one update.
+func (h *Hub) oauthSeenRemoveUsers(ref string, users []string) error {
+	return h.oauthSeenUpdate(func(seen map[string][]string) bool {
+		n := len(seen[ref])
+		seen[ref] = slices.DeleteFunc(seen[ref], func(u string) bool { return slices.Contains(users, u) })
+		return len(seen[ref]) != n
 	})
 }
 
@@ -1313,13 +1353,16 @@ func (h *Hub) retryOrphans(ctx context.Context) {
 // ── 5. app_oauth leavers ──────────────────────────────────
 
 // reconcileOAuthSeen records each switched-on app_oauth companion's
-// population and revokes ({"action":"revoke","user","ids":[]}) everyone
-// recorded who may no longer hold its tokens: left the population, or
-// everyone once the companion is off (or its template dropped it). With
-// the directory unreadable or the master switch off nobody new is judged.
-// leaver is an app_oauth person recorded for ref who is no longer a holder.
-type leaver struct{ ref, name, hook, user string }
-
+// holders (with their LLDAP uuid; their Keycloak id looked up, or
+// backfilled later, only while the live account's uuid is the recorded
+// one) and revokes everyone who may no longer hold its tokens: a recorded
+// person who left the population (everyone once the companion is off or
+// its template dropped it), or whose name now belongs to another account.
+// A leaver with a stored id gets {"action":"revoke","user","sub","ids":[]};
+// one whose id is pending, or a holder seen without a uuid who left
+// before being recorded, makes the companion's revoke_all run instead.
+// With the directory unreadable or the master switch off nobody new is
+// judged.
 func (h *Hub) reconcileOAuthSeen(ctx context.Context, m *directory.Membership) {
 	aiStoreMu.Lock()
 	file, err := h.oauthSeenFileLocked()
@@ -1329,13 +1372,30 @@ func (h *Hub) reconcileOAuthSeen(ctx context.Context, m *directory.Membership) {
 		return
 	}
 	seen := file.Companions
+	uuidOf := func(u string) string {
+		if m == nil {
+			return ""
+		}
+		return m.UUIDs[u]
+	}
+	h.aiErrMu.Lock()
+	prevUnrec := map[string][]string{}
+	for ref, us := range h.aiOAuthUnrecorded {
+		prevUnrec[ref] = slices.Sorted(maps.Keys(us))
+	}
+	h.aiErrMu.Unlock()
 	now := time.Now()
-	add := map[string][]string{}
-	backfill := map[string][]string{} // current holders whose id is pending
+	add := map[string]map[string]string{} // ref → user → uuid
+	backfill := map[string][]string{}     // current holders whose id is pending
+	unrec := map[string][]string{}        // holders without a uuid this pass
+	judged := map[string]bool{}
 	var leavers []leaver
 	h.mu.RLock()
 	refs := map[string]bool{}
 	for ref := range seen {
+		refs[ref] = true
+	}
+	for ref := range prevUnrec {
 		refs[ref] = true
 	}
 	for i := range h.instances {
@@ -1367,25 +1427,66 @@ func (h *Hub) reconcileOAuthSeen(ctx context.Context, m *directory.Membership) {
 		if !known {
 			continue
 		}
-		var recorded = seen[ref]
+		judged[ref] = true
+		recorded := seen[ref]
+		hook := revokeHookOf(t, name, s)
 		for u := range hold {
+			live := uuidOf(u)
 			if !slices.Contains(recorded, u) {
-				add[ref] = append(add[ref], u)
+				if live == "" {
+					unrec[ref] = append(unrec[ref], u)
+					continue
+				}
+				if add[ref] == nil {
+					add[ref] = map[string]string{}
+				}
+				add[ref][u] = live
 				backfill[ref] = append(backfill[ref], u)
-			} else if file.Subs[ref][u] == "" {
+				continue
+			}
+			if rec := file.UUIDs[ref][u]; file.Subs[ref][u] == "" && rec != "" && live == rec {
 				backfill[ref] = append(backfill[ref], u)
 			}
 		}
-		hook := revokeHookOf(t, name, s)
 		for _, u := range recorded {
-			if !hold[u] {
-				leavers = append(leavers, leaver{ref, name, hook, u})
+			rec, live := file.UUIDs[ref][u], uuidOf(u)
+			replaced := hold[u] && rec != "" && live != "" && rec != live
+			if !hold[u] || replaced {
+				leavers = append(leavers, leaver{ref: ref, name: name, hook: hook, user: u, sub: file.Subs[ref][u], recorded: true})
+			}
+		}
+		for _, u := range prevUnrec[ref] {
+			if !hold[u] && !slices.Contains(recorded, u) {
+				leavers = append(leavers, leaver{ref: ref, name: name, hook: hook, user: u})
 			}
 		}
 	}
 	h.mu.RUnlock()
-	// Everyone holding is recorded at once; ids are looked up only for
-	// current holders (their username is that live account's).
+	// Holders seen without a uuid stay in memory (with the unrecorded
+	// leavers still owed a revoke_all) until recorded or revoked.
+	h.aiErrMu.Lock()
+	if h.aiOAuthUnrecorded == nil {
+		h.aiOAuthUnrecorded = map[string]map[string]bool{}
+	}
+	for ref := range judged {
+		next := map[string]bool{}
+		for _, u := range unrec[ref] {
+			next[u] = true
+		}
+		for _, l := range leavers {
+			if l.ref == ref && !l.recorded {
+				next[l.user] = true
+			}
+		}
+		if len(next) == 0 {
+			delete(h.aiOAuthUnrecorded, ref)
+		} else {
+			h.aiOAuthUnrecorded[ref] = next
+		}
+	}
+	h.aiErrMu.Unlock()
+	// Ids are looked up only for current holders whose live account is the
+	// recorded one.
 	subs := map[string]map[string]string{}
 	found := map[string]string{} // one lookup per person per pass
 	for _, ref := range slices.Sorted(maps.Keys(backfill)) {
@@ -1411,19 +1512,23 @@ func (h *Hub) reconcileOAuthSeen(ctx context.Context, m *directory.Membership) {
 			log.Printf("ai: recording the app_oauth populations failed: %v", err)
 		}
 	}
-	// A leaver whose id is pending can't be matched: the companion's
-	// revoke_all covers everyone (they sign in again), retried until it
-	// succeeds; it also covers that companion's other leavers.
+	// A companion with a leaver nobody can match (id pending, or never
+	// recorded) gets one revoke_all covering all of its leavers.
 	pending := map[string][]leaver{}
 	for _, l := range leavers {
-		if file.Subs[l.ref][l.user] == "" {
+		if l.sub == "" {
+			pending[l.ref] = nil
+		}
+	}
+	for _, l := range leavers {
+		if _, ok := pending[l.ref]; ok {
 			pending[l.ref] = append(pending[l.ref], l)
 		}
 	}
 	for _, ref := range slices.Sorted(maps.Keys(pending)) {
 		h.revokeAllForPending(ctx, ref, pending[ref])
 	}
-	leavers = slices.DeleteFunc(leavers, func(l leaver) bool { return pending[l.ref] != nil })
+	leavers = slices.DeleteFunc(leavers, func(l leaver) bool { _, ok := pending[l.ref]; return ok })
 	sort.Slice(leavers, func(i, j int) bool { return leavers[i].ref+"/"+leavers[i].user < leavers[j].ref+"/"+leavers[j].user })
 	for _, l := range leavers {
 		id, _, _ := strings.Cut(l.ref, "/")
@@ -1441,10 +1546,10 @@ func (h *Hub) reconcileOAuthSeen(ctx context.Context, m *directory.Membership) {
 		if !ok {
 			continue
 		}
-		err := h.runRevokeOAuth(ctx, t, l.ref, l.hook, l.user)
+		err := h.runRevokeOAuthSub(ctx, t, l.hook, l.user, l.sub)
 		unlock()
 		if err == nil {
-			err = h.oauthSeenRemove(l.ref, l.user)
+			err = h.oauthSeenRemoveUsers(l.ref, []string{l.user})
 		}
 		h.revokeAudit(aiHubActor, key, target, "ids []", err)
 		if err != nil {
@@ -1457,47 +1562,71 @@ func (h *Hub) reconcileOAuthSeen(ctx context.Context, m *directory.Membership) {
 	}
 }
 
-// revokeAllForPending runs ref's revoke_all because people (ls) left
-// while their Keycloak id was pending: audited per person with the
-// reason; a failure is kept (aiPendingLeavers → AIRevokeProblems) and
-// retried at the next reconcile like any failed revoke.
+// leaver is an app_oauth person of ref owed a revoke: recorded and no
+// longer a holder (or whose name now belongs to another account), or
+// seen without a uuid and gone before being recorded.
+type leaver struct {
+	ref, name, hook, user string
+	sub                   string // the stored Keycloak id; "" = can't be matched
+	recorded              bool   // in oauth-seen.json (else only in aiOAuthUnrecorded)
+}
+
+// revokeAllForPending runs ref's revoke_all because some of its leavers
+// (ls) can't be matched (id pending, or never recorded), keeping the
+// record of everyone else: only the leavers are removed (recorded ones
+// from oauth-seen.json in one update, unrecorded ones from memory).
+// Audited per person with the reason; a failure is kept
+// (aiPendingLeavers → AIRevokeProblems) and retried at the next reconcile
+// like any failed revoke.
 func (h *Hub) revokeAllForPending(ctx context.Context, ref string, ls []leaver) {
 	id, name, _ := strings.Cut(ref, "/")
-	users := make([]string, 0, len(ls))
+	var users, recorded, unmatched []string
 	for _, l := range ls {
 		users = append(users, l.user)
+		if l.recorded {
+			recorded = append(recorded, l.user)
+		}
+		if l.sub == "" {
+			unmatched = append(unmatched, l.user)
+		}
 	}
-	users = sortedSet(users)
+	users, unmatched = sortedSet(users), sortedSet(unmatched)
 	t := h.Template(id)
+	if t == nil {
+		return
+	}
 	hook := ls[0].hook
 	var err error
-	switch {
-	case t == nil:
-		return
-	case hook == "":
+	if hook == "" {
 		err = errNoRevokeHook(name)
-	default:
-		unlock, ok := h.aiTryLock(id, aiRevokeLockWait)
-		if !ok {
-			err = errors.New("the instance's AI lock stayed busy; retried at the next reconcile")
-		} else {
-			err = h.revokeAllWith(ctx, t, name, hook, true)
-			unlock()
-		}
+	} else if unlock, ok := h.aiTryLock(id, aiRevokeLockWait); !ok {
+		err = errors.New("the instance's AI lock stayed busy; retried at the next reconcile")
+	} else {
+		err = h.revokeAllWith(ctx, t, name, hook, false)
+		unlock()
+	}
+	if err == nil && len(recorded) > 0 {
+		err = h.oauthSeenRemoveUsers(ref, recorded)
 	}
 	for _, u := range users {
 		target := ref + "/" + u
-		h.revokeAudit(aiHubActor, "oauth:"+target, target,
-			"revoke_all: "+u+" left before their Keycloak id was recorded", err)
+		detail := "revoke_all: " + u + " left before their Keycloak id was recorded"
+		if !slices.Contains(unmatched, u) {
+			detail = "revoke_all (another leaver of this app can't be matched)"
+		}
+		h.revokeAudit(aiHubActor, "oauth:"+target, target, detail, err)
 	}
 	h.aiErrMu.Lock()
 	if h.aiPendingLeavers == nil {
 		h.aiPendingLeavers = map[string][]string{}
 	}
 	if err != nil {
-		h.aiPendingLeavers[ref] = users
+		h.aiPendingLeavers[ref] = unmatched
 	} else {
 		delete(h.aiPendingLeavers, ref)
+		for _, u := range users {
+			delete(h.aiOAuthUnrecorded[ref], u)
+		}
 	}
 	h.aiErrMu.Unlock()
 	if err != nil {
