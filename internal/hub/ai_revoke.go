@@ -1074,11 +1074,14 @@ func (h *Hub) writeAIStore(name string, v any) error {
 // population while the companion was on (who may hold app-side tokens),
 // sorted, with the LLDAP uuid they had when first recorded (UUIDs, absent
 // when LLDAP gave none) and every Keycloak user id seen for them while
-// they held (Subs: the app_oauth revoke's "sub", contract §15.5; a list
-// because the realm's ids follow the LDAP uid). A record is verified when
-// it has a uuid and at least one id, else unverifiable (T27): a uuid is
-// never filled in later; ids are added only while the live account's
-// uuid equals the stored one. Unmatched: people who left before their
+// they held (Subs: the app_oauth revoke's "sub", contract §15.5; only ids
+// of Keycloak copies whose LDAP_ID is that uuid; a list because a
+// person's Keycloak id changes whenever Keycloak removes and re-imports
+// their copy, and changed once when core switched the link to entryUUID;
+// a re-created name is a new person with a new uuid). A record is
+// verified when it has a uuid and at least one id, else unverifiable
+// (T27): a uuid is never filled in later; ids are added only while the
+// live account's uuid equals the stored one. Unmatched: people who left before their
 // account could be matched, listed until an administrator dismisses them
 // (AIRevokeDismiss). Revoked: leavers whose targeted revoke succeeded,
 // with their ids, kept so a same-instance restore (which brings their
@@ -1392,12 +1395,13 @@ func (h *Hub) oauthSeenDrop(ref string) error {
 	})
 }
 
-// AIUserIDs looks a person's Keycloak user id up by exact username
-// (keycloak.Client.ImportUser). The AIKeycloak wired with SetAIKeycloak
-// provides it when it implements it (main's does); else every app_oauth
-// record stays unverifiable and AIRevokeProblems lists it.
+// AIUserIDs looks a person's Keycloak user id and LDAP link (LDAP_ID:
+// the LLDAP uuid of the account the copy belongs to) up by exact
+// username (keycloak.Client.ImportUserLink). The AIKeycloak wired with
+// SetAIKeycloak provides it when it implements it (main's does); else
+// every app_oauth record stays unverifiable and AIRevokeProblems lists it.
 type AIUserIDs interface {
-	ImportUser(ctx context.Context, username string) (string, error)
+	ImportUserLink(ctx context.Context, username string) (id, ldapID string, err error)
 }
 
 // errNoUserIDs: no Keycloak lookup is wired (AIRevokeProblems, log).
@@ -1405,19 +1409,28 @@ var errNoUserIDs = errors.New("Keycloak is not configured: app_oauth people's Ke
 
 // lookupSub is user's Keycloak user id, now: only ever called for a
 // current holder whose live LLDAP uuid is the one recorded (or being
-// recorded), never to revoke.
-func (h *Hub) lookupSub(ctx context.Context, user string) (string, error) {
+// recorded), never to revoke. The Keycloak copy must be linked to that
+// account (its LDAP_ID is uuid, the recorded LLDAP uuid): a copy of
+// another account under the name (re-created between the directory read
+// and the lookup) or without a link gives an error, so no id is stored.
+func (h *Hub) lookupSub(ctx context.Context, user, uuid string) (string, error) {
 	kc, _ := h.aiKeycloak().(AIUserIDs)
 	if kc == nil {
 		log.Printf("ai: ERROR: %v", errNoUserIDs)
 		return "", errNoUserIDs
 	}
-	sub, err := kc.ImportUser(ctx, user)
+	if uuid == "" {
+		return "", errors.New("no LLDAP uuid recorded")
+	}
+	sub, ldapID, err := kc.ImportUserLink(ctx, user)
 	if err != nil {
 		return "", err
 	}
 	if !keycloak.ValidUserID(sub) {
 		return "", errors.New("Keycloak answered an invalid user id")
+	}
+	if !strings.EqualFold(ldapID, uuid) {
+		return "", fmt.Errorf("Keycloak's copy of %s is linked to LLDAP account %s, not the recorded %s", user, clipQuoted(ldapID), uuid)
 	}
 	return sub, nil
 }
@@ -1789,7 +1802,7 @@ func (h *Hub) reconcileOAuthRef(ctx context.Context, p oauthPass) {
 	// 3. Keycloak ids of current holders whose live account is the
 	// recorded one (or who are being recorded now with a uuid).
 	add := map[string]string{}
-	var want []string
+	want := map[string]string{} // holder → the uuid their record has or gets
 	for u, live := range p.holders {
 		inRec := slices.Contains(recorded, u)
 		switch {
@@ -1798,13 +1811,13 @@ func (h *Hub) reconcileOAuthRef(ctx context.Context, p oauthPass) {
 		case !inRec && p.recordNew:
 			add[u] = live
 			if live != "" {
-				want = append(want, u)
+				want[u] = live
 			}
 		case inRec && live != "" && f.UUIDs[p.ref][u] == live:
-			want = append(want, u)
+			want[u] = f.UUIDs[p.ref][u]
 		}
 	}
-	subs := h.lookupHolders(ctx, p.ref, sortedSet(want))
+	subs := h.lookupHolders(ctx, p.ref, want)
 	if len(owe) > 0 {
 		h.revokeAllForUnverifiable(ctx, t, p, f, sortedSet(owe), failed, revoked, subs, unwritten)
 		return
@@ -1849,15 +1862,18 @@ func (h *Hub) revokeVerified(ctx context.Context, t *templates.Template, p oauth
 	return true
 }
 
-// lookupHolders looks the Keycloak ids of users (current holders) up; a
-// failure counts a pending pass (AIRevokeProblems after 3). The directory
-// is read again afterwards: ids of people whose LLDAP uuid changed
-// meanwhile (or all, if it can't be read) are dropped.
-func (h *Hub) lookupHolders(ctx context.Context, ref string, users []string) map[string]string {
+// lookupHolders looks the Keycloak ids of want's people (current
+// holders → the LLDAP uuid their record has or gets) up; the Keycloak
+// copy must be linked to that uuid (lookupSub). A failure counts a
+// pending pass (AIRevokeProblems after 3). The directory is read before
+// and again afterwards: ids of people whose live LLDAP uuid isn't
+// want's (or all, if it can't be read) are dropped.
+func (h *Hub) lookupHolders(ctx context.Context, ref string, want map[string]string) map[string]string {
 	out := map[string]string{}
-	if len(users) == 0 {
+	if len(want) == 0 {
 		return out
 	}
+	users := slices.Sorted(maps.Keys(want))
 	mctx, cancel := context.WithTimeout(ctx, directoryStateTimeout)
 	before, err := h.membership(mctx)
 	cancel()
@@ -1873,7 +1889,7 @@ func (h *Hub) lookupHolders(ctx context.Context, ref string, users []string) map
 	}
 	h.aiErrMu.Unlock()
 	for _, u := range users {
-		sub, err := h.lookupSub(ctx, u)
+		sub, err := h.lookupSub(ctx, u, want[u])
 		h.aiErrMu.Lock()
 		if err != nil {
 			h.aiPendingPasses[ref][u]++
@@ -1893,7 +1909,7 @@ func (h *Hub) lookupHolders(ctx context.Context, ref string, users []string) map
 		return map[string]string{}
 	}
 	for u := range out {
-		if b, a := before.UUIDs[u], after.UUIDs[u]; b == "" || a != b {
+		if b, a := before.UUIDs[u], after.UUIDs[u]; b == "" || a != b || b != want[u] {
 			delete(out, u)
 		}
 	}
@@ -1949,13 +1965,13 @@ func (h *Hub) revokeAllForUnverifiable(ctx context.Context, t *templates.Templat
 	if err == nil {
 		// The rebuilt record is a fresh recording: ids for every holder
 		// with a live uuid (found ones kept).
-		var more []string
+		more := map[string]string{} // rebuilt with their live uuid
 		for u, live := range p.holders {
 			if live != "" && subs[u] == "" && (p.recordNew || slices.Contains(f.Companions[p.ref], u)) {
-				more = append(more, u)
+				more[u] = live
 			}
 		}
-		maps.Copy(subs, h.lookupHolders(ctx, p.ref, sortedSet(more)))
+		maps.Copy(subs, h.lookupHolders(ctx, p.ref, more))
 		keep := map[string]oauthSeenEntry{}
 		for u, live := range p.holders {
 			if slices.Contains(unwritten, u) && !slices.Contains(f.Companions[p.ref], u) {

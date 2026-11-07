@@ -663,6 +663,11 @@ func checkProviderShape(p *state.ModelProvider) error {
 	if p.Kind == "azure_openai" && !set[pfInstanceName] && !set[pfBaseURL] {
 		return bad("kind azure_openai needs instance_name or base_url")
 	}
+	if p.Kind == "azure_openai" && p.Credentials == ProviderCredentialsPerPerson {
+		// The AI page has no per-person key for Azure: its Azure endpoint
+		// refuses a user-provided key and the page wouldn't start.
+		return bad("kind azure_openai can't use credentials %s: the AI page can't take each person's own Azure key, and it wouldn't start; use %s", ProviderCredentialsPerPerson, ProviderCredentialsAdmin)
+	}
 	if p.BaseURL != "" && !validProviderURL(p.BaseURL) {
 		return bad("base_url: an http or https URL without user, password, query or fragment")
 	}

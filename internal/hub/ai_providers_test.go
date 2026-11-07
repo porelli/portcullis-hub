@@ -127,6 +127,10 @@ func TestProviderValidation(t *testing.T) {
 		{"azure bad api_version", with(func(p *state.ModelProvider) {
 			p.Kind, p.BaseURL, p.InstanceName, p.APIVersion, p.Deployments = "azure_openai", "", "acme", "latest", map[string]string{"gpt4o": "gpt-4o"}
 		}), 400, "api_version"},
+		{"azure per person", with(func(p *state.ModelProvider) {
+			p.Kind, p.BaseURL, p.InstanceName, p.APIVersion, p.Deployments = "azure_openai", "", "acme", "2024-10-21", map[string]string{"gpt4o": "gpt-4o"}
+			p.Credentials = ProviderCredentialsPerPerson
+		}), 400, "kind azure_openai can't use credentials per_person"},
 	} {
 		err := add(c.p)
 		if statusOf(err) != c.status || !strings.Contains(err.Error(), c.why) {
@@ -149,6 +153,18 @@ func TestProviderValidation(t *testing.T) {
 	if err := add(state.ModelProvider{Name: "azure", Label: "Azure", Kind: "azure_openai", InstanceName: "acme", APIVersion: "2024-10-01-preview",
 		Deployments: map[string]string{"gpt4o": "gpt-4o"}}); err != nil {
 		t.Fatal(err)
+	}
+	// Azure can't switch to per-person keys either; the stored definition
+	// is unchanged.
+	az := state.ModelProvider{Name: "azure", Label: "Azure", Kind: "azure_openai", InstanceName: "acme", APIVersion: "2024-10-01-preview",
+		Deployments: map[string]string{"gpt4o": "gpt-4o"}, Credentials: ProviderCredentialsPerPerson}
+	if _, _, err := f.h.UpdateModelProvider("azure", az, aiAdmin); statusOf(err) != 400 || !strings.Contains(err.Error(), "can't take each person's own Azure key") {
+		t.Errorf("azure per_person update = %v, want 400", err)
+	}
+	for _, p := range f.h.ModelProviders(t.Context()) {
+		if p.Name == "azure" && p.Credentials != ProviderCredentialsAdmin {
+			t.Errorf("azure credentials = %q after a refused update", p.Credentials)
+		}
 	}
 	// Update: kept name, label changed; kind can't change; unknown 404.
 	up := cloneProvider(ollama)

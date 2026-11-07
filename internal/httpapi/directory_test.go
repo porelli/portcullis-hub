@@ -73,6 +73,7 @@ func newDirFixture(t *testing.T, adjust func(*directory.Service)) (*Server, *lld
 	os.WriteFile(filepath.Join(cred, "password"), []byte("svc-password-0123456789"), 0600)
 	kc := kctest.New(t)
 	kc.Importable = ll.HasUser
+	kc.LDAPUUID = ll.UUIDOf
 	inv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req struct{ Username string }
 		json.NewDecoder(r.Body).Decode(&req)

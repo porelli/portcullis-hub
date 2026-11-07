@@ -471,6 +471,7 @@ func newInstEnvOpts(t *testing.T, root string, o instEnvOpts) *instEnv {
 	os.WriteFile(filepath.Join(cred, "password"), []byte("svc-password-0123456789"), 0600)
 	kc := kctest.New(t)
 	kc.Importable = ll.HasUser
+	kc.LDAPUUID = ll.UUIDOf
 	secret := filepath.Join(root, "invite-secret")
 	os.WriteFile(secret, []byte(strings.Repeat("s", 40)), 0600)
 	dir := &directory.Service{

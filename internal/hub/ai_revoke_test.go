@@ -525,8 +525,9 @@ func TestOAuthMixedLeavers(t *testing.T) {
 	}
 }
 
-// TestOAuthIDHistory (T27): a holder's Keycloak id changes (the realm's
-// ids follow the LDAP uid): the new one is added; leaving revokes both.
+// TestOAuthIDHistory (T27): a holder's Keycloak id changes (Keycloak
+// removed and re-imported their copy; same LDAP_ID): the new one is
+// added; leaving revokes both.
 func TestOAuthIDHistory(t *testing.T) {
 	a := oauthT27(t, nil)
 	a.reconcile()
@@ -892,6 +893,56 @@ func TestOAuthUUIDMismatch(t *testing.T) {
 	}
 }
 
+// main wires a *keycloak.Client: it must provide the lookup, or every
+// record would silently stay unverifiable.
+var _ AIUserIDs = (*keycloak.Client)(nil)
+
+// TestOAuthLDAPIDMismatch: an id is stored only when the Keycloak copy's
+// LDAP_ID is the recorded LLDAP uuid. dave's copy belongs to another
+// account: his record stays unverifiable (listed after 3 passes) until
+// the copy is his. bob's copy turning up unlinked, with a new id, adds
+// nothing to his verified record.
+func TestOAuthLDAPIDMismatch(t *testing.T) {
+	a := oauthT27(t, func(a *instAIFixture) {
+		a.kc.ldapOverride = map[string]string{"dave": "uuid-someone-else"}
+	})
+	listed := func() bool {
+		for _, p := range a.h.AIRevokeProblems() {
+			if p.Instance == "oauthapp" && slices.Contains(p.Unverifiable, "dave") {
+				return true
+			}
+		}
+		return false
+	}
+	a.reconcile()
+	a.reconcile()
+	a.reconcile()
+	f := a.seenFile(t)
+	if f.UUIDs["oauthapp/oauth"]["dave"] != "uuid-dave" || len(f.Subs["oauthapp/oauth"]["dave"]) != 0 || f.verified("oauthapp/oauth", "dave") {
+		t.Fatalf("dave's record = uuid %q subs %v, want no id", f.UUIDs["oauthapp/oauth"]["dave"], f.Subs["oauthapp/oauth"]["dave"])
+	}
+	if !listed() {
+		t.Fatalf("dave isn't listed unverifiable: %+v", a.h.AIRevokeProblems())
+	}
+	if !f.verified("oauthapp/oauth", "bob") {
+		t.Fatalf("bob = %+v", f)
+	}
+
+	const newBob = "00000000-0000-4000-8000-00000000b0b2"
+	a.kc.mu.Lock()
+	a.kc.ldapOverride = map[string]string{"bob": ""}
+	a.kc.subOverride = map[string]string{"bob": newBob}
+	a.kc.mu.Unlock()
+	a.reconcile()
+	f = a.seenFile(t)
+	if !slices.Equal(f.Subs["oauthapp/oauth"]["bob"], []string{fakeSub("bob")}) {
+		t.Errorf("bob's ids = %v: an unlinked copy's id was stored", f.Subs["oauthapp/oauth"]["bob"])
+	}
+	if !slices.Equal(f.Subs["oauthapp/oauth"]["dave"], []string{fakeSub("dave")}) || listed() {
+		t.Errorf("dave's ids = %v (listed %v), want his own copy's id once linked", f.Subs["oauthapp/oauth"]["dave"], listed())
+	}
+}
+
 // TestAppOAuthNoUserIDs (T27): with no Keycloak lookup wired while an
 // app_oauth companion is on, AIRevokeProblems says so.
 func TestAppOAuthNoUserIDs(t *testing.T) {
@@ -914,7 +965,7 @@ func TestAppOAuthNoUserIDs(t *testing.T) {
 	}
 }
 
-// noUserIDsKC is an AIKeycloak without ImportUser.
+// noUserIDsKC is an AIKeycloak without ImportUserLink.
 type noUserIDsKC struct{ k *fakeAIKC }
 
 func (n noUserIDsKC) EnsureMCPScope(ctx context.Context, s keycloak.MCPScope) error {

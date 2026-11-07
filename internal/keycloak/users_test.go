@@ -159,3 +159,25 @@ func TestDeleteUserByID5xxButGone(t *testing.T) {
 		t.Errorf("500 and still there = %v", err)
 	}
 }
+
+// TestImportUserLink: the id and the LDAP link (LDAP_ID = LLDAP's uuid,
+// imported on lookup); none for a user without one.
+func TestImportUserLink(t *testing.T) {
+	f := kctest.New(t)
+	f.Importable = func(u string) bool { return u == "carol" }
+	f.LDAPUUID = func(u string) string { return "148d3233-69a7-30ad-bb6f-e305b3891f0a" }
+	c := keycloak.New(f.HTTP.URL, "admin", "admin")
+	ctx := context.Background()
+	id, link, err := c.ImportUserLink(ctx, "carol")
+	if err != nil || id != f.Get("carol").ID || link != "148d3233-69a7-30ad-bb6f-e305b3891f0a" {
+		t.Errorf("ImportUserLink(carol) = %q %q %v", id, link, err)
+	}
+	f.Import("local")
+	f.Update("local", func(u *kctest.User) { u.LDAPID = "" })
+	if id, link, err := c.ImportUserLink(ctx, "local"); err != nil || id == "" || link != "" {
+		t.Errorf("ImportUserLink(local) = %q %q %v", id, link, err)
+	}
+	if _, _, err := c.ImportUserLink(ctx, "nobody"); !errors.Is(err, keycloak.ErrUserNotFound) {
+		t.Errorf("ImportUserLink(nobody) = %v", err)
+	}
+}

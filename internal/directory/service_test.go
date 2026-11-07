@@ -83,6 +83,7 @@ func newEnv(t *testing.T) *env {
 	os.WriteFile(filepath.Join(credDir, "password"), []byte(svcPass+"\n"), 0600)
 	kc := kctest.New(t)
 	kc.Importable = ll.HasUser
+	kc.LDAPUUID = ll.UUIDOf
 	inv := newInvites(t)
 	secretFile := filepath.Join(t.TempDir(), "secret")
 	os.WriteFile(secretFile, []byte(inviteSecret+"\n"), 0600)
@@ -893,5 +894,90 @@ func TestDeleteUserKeycloak500AfterDelete(t *testing.T) {
 	}
 	if entries, _ := e.svc.Recent(1); entries[0].Detail != "keycloak_copy=removed" {
 		t.Errorf("audit = %+v", entries[0])
+	}
+}
+
+// TestReservedPortcullisNames: no portcullis-* name (Gitea's and Home
+// Assistant's template-internal portcullis-hooks / portcullis-breakglass
+// admins) can be created, imported, invited or given a password; one made
+// outside the Hub can still be removed. portcullis-hub stays protected.
+func TestReservedPortcullisNames(t *testing.T) {
+	e := newEnv(t)
+	e.svc.Store = &directory.Store{Path: filepath.Join(t.TempDir(), "directory.yaml")}
+	before := len(e.ll.Mutations)
+	for _, name := range []string{"portcullis-hooks", "portcullis-breakglass", "portcullis-x", "portcullis-hub"} {
+		_, err := e.svc.CreateUser(ctx, asRoot, directory.CreateRequest{Username: name, Email: name + "@example.org", DisplayName: "X"})
+		if status(err) != 400 || !strings.Contains(err.Error(), "is reserved") {
+			t.Errorf("CreateUser(%s) = %v (status %d), want 400 reserved", name, err, status(err))
+		}
+		_, err = e.svc.CreateUser(ctx, asRoot, directory.CreateRequest{Username: name, Email: name + "@example.org", DisplayName: "X", Onboarding: directory.OnboardPassword, Generate: true})
+		if status(err) != 400 {
+			t.Errorf("CreateUser(%s, password) = %v, want 400", name, err)
+		}
+	}
+	// Names that merely look alike are ordinary.
+	for _, name := range []string{"portcullis", "portcullisfan", "my-portcullis-x"} {
+		if _, err := e.svc.CreateUser(ctx, asRoot, directory.CreateRequest{Username: name, Email: name + "@example.org", DisplayName: "X"}); err != nil {
+			t.Errorf("CreateUser(%s) = %v", name, err)
+		}
+	}
+
+	// CSV import: the review lists the problem, the apply refuses the row.
+	header, rows, err := directory.ParseCSV(strings.NewReader("username,display_name,email\nportcullis-hooks,Hooks,hooks@example.org\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	review, err := e.svc.ImportReview(ctx, asRoot, header, rows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, r := range review.Rows {
+		if r.User == "portcullis-hooks" {
+			found = r.Status == "new" && len(r.Problems) == 1 && strings.Contains(r.Problems[0], "is reserved")
+		}
+	}
+	if !found {
+		t.Errorf("review rows = %+v, want portcullis-hooks with a reserved problem", review.Rows)
+	}
+	ar, err := e.svc.ImportApply(ctx, asRoot, directory.ApplyRequest{Rows: []directory.ApplyRow{{User: "portcullis-breakglass", Create: true, DisplayName: "B", Email: "bg@example.org"}}})
+	if err != nil || ar.Rows[0].OK || !strings.Contains(ar.Rows[0].Error, "is reserved") {
+		t.Errorf("ImportApply = %+v %v, want the row refused", ar, err)
+	}
+	for _, name := range []string{"portcullis-hooks", "portcullis-breakglass", "portcullis-x"} {
+		if e.ll.HasUser(name) {
+			t.Errorf("%s was created", name)
+		}
+	}
+	for _, m := range e.ll.Mutations[before:] {
+		if strings.Contains(m, " portcullis-") {
+			t.Errorf("mutation %q", m)
+		}
+	}
+
+	// An account made outside the Hub (LLDAP console): never invited or
+	// given a password from the Hub, but it can be deleted.
+	e.ll.AddUser("portcullis-hooks", "hooks@example.org", "Hooks", "")
+	e.kc.Import("portcullis-hooks")
+	e.invites.mu.Lock()
+	e.invites.users = nil
+	e.invites.mu.Unlock()
+	if _, err := e.svc.SendInvite(ctx, asRoot, "portcullis-hooks"); status(err) != 409 || !strings.Contains(err.Error(), "is reserved") {
+		t.Errorf("SendInvite = %v (status %d), want 409 reserved", err, status(err))
+	}
+	if _, err := e.svc.RemovePasskeys(ctx, asRoot, "portcullis-hooks", "portcullis-hooks", true); status(err) != 409 {
+		t.Errorf("RemovePasskeys(with invite) = %v (status %d), want 409", err, status(err))
+	}
+	if _, err := e.svc.SetPassword(ctx, asRoot, "portcullis-hooks", "", true, "portcullis-hooks"); status(err) != 409 {
+		t.Errorf("SetPassword = %v (status %d), want 409", err, status(err))
+	}
+	e.invites.mu.Lock()
+	got := e.invites.users
+	e.invites.mu.Unlock()
+	if len(got) != 0 {
+		t.Errorf("core was asked for invites: %v", got)
+	}
+	if _, err := e.svc.DeleteUser(ctx, asRoot, "portcullis-hooks", "portcullis-hooks"); err != nil || e.ll.HasUser("portcullis-hooks") {
+		t.Errorf("DeleteUser = %v", err)
 	}
 }

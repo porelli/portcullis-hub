@@ -61,15 +61,20 @@ type fakeAIKC struct {
 	revoked   []string
 	revokeErr error
 	connErr   error
-	// T27: ImportUser (the app_oauth revoke's sub): gone users are unknown,
-	// subErr fails every lookup; lookups counts them.
+	// T27: ImportUserLink (the app_oauth revoke's sub): gone users are
+	// unknown, subErr fails every lookup; lookups counts them. ldapID is
+	// a user's LDAP_ID (LLDAP's uuid of the account the Keycloak copy
+	// belongs to; nil = the fake directory's default "uuid-<user>");
+	// ldapOverride replaces it per user (a copy linked to another account).
 	gone    map[string]bool
 	subErr  error
 	lookups int
-	// subOverride: a user's current id when it isn't fakeSub(user) (the
-	// realm's ids follow the LDAP uid: they can change).
-	subOverride map[string]string
-	looked      map[string]int
+	// subOverride: a user's current id when it isn't fakeSub(user) (a
+	// re-imported copy gets a new id).
+	subOverride  map[string]string
+	looked       map[string]int
+	ldapID       func(user string) string
+	ldapOverride map[string]string
 }
 
 // fakeSub is the fake Keycloak id of user.
@@ -78,7 +83,7 @@ func fakeSub(user string) string {
 	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
 }
 
-func (k *fakeAIKC) ImportUser(ctx context.Context, username string) (string, error) {
+func (k *fakeAIKC) ImportUserLink(ctx context.Context, username string) (string, string, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	k.lookups++
@@ -87,15 +92,22 @@ func (k *fakeAIKC) ImportUser(ctx context.Context, username string) (string, err
 	}
 	k.looked[username]++
 	if k.subErr != nil {
-		return "", k.subErr
+		return "", "", k.subErr
 	}
 	if k.gone[username] {
-		return "", keycloak.ErrUserNotFound
+		return "", "", keycloak.ErrUserNotFound
+	}
+	link := "uuid-" + username
+	if k.ldapID != nil {
+		link = k.ldapID(username)
+	}
+	if l, ok := k.ldapOverride[username]; ok {
+		link = l
 	}
 	if sub := k.subOverride[username]; sub != "" {
-		return sub, nil
+		return sub, link, nil
 	}
-	return fakeSub(username), nil
+	return fakeSub(username), link, nil
 }
 
 func newFakeAIKC() *fakeAIKC {
@@ -254,6 +266,7 @@ func newInstAIFixture(t *testing.T, seed func(*state.AppState), mutate ...func(e
 	a.h.SetGroups(&fakeGroups{people: a.people, existing: map[string]bool{"users_aiapp": true, "users_oauthapp": true}})
 	a.h.SetPeople(a.people)
 	a.h.SetUserSweep(a.people, nil)
+	a.kc.ldapID = a.people.uuidOf
 	a.h.SetAIKeycloak(a.kc)
 	a.h.SetAIClientHealth(map[string]bool{keycloak.AIClientIDs.Claude: true, keycloak.AIClientIDs.ClaudeCode: true, keycloak.AIClientIDs.Generic: true})
 	simulateCompose(a.fixture, 0)

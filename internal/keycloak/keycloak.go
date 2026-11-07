@@ -953,6 +953,28 @@ func (c *Client) ImportUser(ctx context.Context, username string) (string, error
 	return str(u.ID), nil
 }
 
+// LDAPIDAttribute is the attribute holding an LDAP-imported user's link:
+// LLDAP's account uuid (core's federation links by entryUUID).
+const LDAPIDAttribute = "LDAP_ID"
+
+// ImportUserLink is ImportUser plus the user's LDAP link (LDAPIDAttribute,
+// LLDAP's uuid of the account Keycloak's copy belongs to; "" when it has
+// none or more than one value).
+func (c *Client) ImportUserLink(ctx context.Context, username string) (id, ldapID string, err error) {
+	tok, err := c.token(ctx)
+	if err != nil {
+		return "", "", err
+	}
+	u, err := c.importUser(ctx, tok, username)
+	if err != nil {
+		return "", "", err
+	}
+	if v := u.Attributes[LDAPIDAttribute]; len(v) == 1 {
+		ldapID = v[0]
+	}
+	return str(u.ID), ldapID, nil
+}
+
 // SetUserRequiredActions imports username if needed and replaces its
 // required actions.
 func (c *Client) SetUserRequiredActions(ctx context.Context, username string, actions []string) error {
