@@ -252,10 +252,10 @@ func (h *Hub) computeRecheck(ctx context.Context, id string) (*IdentityCheck, er
 	c.Changed = c.Old != c.New
 	c.DifferentDirectory = c.Changed && differentDirectory(c.Old.Dev, c.Old.Ino, c.Old.MountRoot, c.New.Dev, c.New.Ino, c.New.MountRoot)
 	show := func(i FolderIdentity) string {
-		return fmt.Sprintf("device %d, inode %d, mounted from `%s`", i.Dev, i.Ino, i.MountRoot)
+		return fmt.Sprintf("device %d, inode %d, mounted from %q", i.Dev, i.Ino, i.MountRoot)
 	}
 	c.Lines = []string{"Stored: " + show(c.Old) + ".", "Now: " + show(c.New) + "."}
-	counts := message.NewPrinter(language.English).Sprintf("`%s` holds %d %s and %d %s on %s", f.Path, c.Files, plural(c.Files, "file", "files"), c.Dirs, plural(c.Dirs, "folder", "folders"), c.FSType)
+	counts := message.NewPrinter(language.English).Sprintf("%q holds %d %s and %d %s on %s", f.Path, c.Files, plural(c.Files, "file", "files"), c.Dirs, plural(c.Dirs, "folder", "folders"), c.FSType)
 	if c.Partial {
 		counts += " (a partial count)"
 	}

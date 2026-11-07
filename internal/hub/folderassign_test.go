@@ -443,12 +443,12 @@ func TestPreviewAssignText(t *testing.T) {
 	}
 	text := strings.Join(plan.Lines, "\n")
 	for _, want := range []string{
-		"gid 60001 is allocated for this folder (shown as *Family media*).",
+		"gid 60001 is allocated for this folder (shown as \"Family media\").",
 		"12,410 files and 312 folders change group 1000 → 60001.",
 		"Group 1000 keeps the access it has now through an ACL on 12,723 entries.",
 		"313 folders get setgid and a default ACL",
-		"Immich mounts it read-only (Library).",
-		"Samba mounts it read/write and owns it (Share).",
+		"Immich mounts it read-only (\"Library\").",
+		"Samba mounts it read/write and owns it (\"Share\").",
 		"Immich and Samba are stopped for under a minute, then started.",
 		"A permissions snapshot is saved first.",
 	} {
@@ -899,7 +899,7 @@ func TestUndo(t *testing.T) {
 	}
 	at := fo.LastApply.At.UTC().Format("2006-01-02 15:04 UTC")
 	if !strings.Contains(text, "fix of "+at+": snapshot "+snapshotTS(applySnap)+" recorded 12,723 entries") ||
-		!strings.Contains(text, "Immich (Library) may lose access") || !strings.Contains(text, "Immich is stopped for") {
+		!strings.Contains(text, "Immich (\"Library\") may lose access") || !strings.Contains(text, "Immich is stopped for") {
 		t.Errorf("lines:\n%s", text)
 	}
 	n0 := len(d.Events())

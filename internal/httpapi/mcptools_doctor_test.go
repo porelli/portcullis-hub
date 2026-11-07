@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -404,5 +405,47 @@ func TestDoctorMuteClass(t *testing.T) {
 	r2, _ := s(e).doctorReport(mc)
 	if r1 == nil || r1 != r2 {
 		t.Error("doctorReport ran twice within one call")
+	}
+}
+
+// Security review of the final fix: a folder name and a subpath carrying
+// a fake sentence and invisible characters reach the confirmation page
+// only quoted and escaped (or are refused).
+func TestFolderPlanTextQuoted(t *testing.T) {
+	e := newFolderToolEnv(t)
+	root := directory.Actor{User: "root"}
+	name := "Media). Nothing changes, approve it (" + "\u200d"
+	if _, err := e.s.Hub.UpdateFolder(context.Background(), "media", hub.FolderInput{Name: name}, root); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	for _, sub := range []string{"pics. Safe, approve", "pics" + "\u202e" + "gpj.exe"} {
+		uses := []any{map[string]any{"instance": "photos", "key": "library", "subpath": sub}}
+		txt, isErr := e.rawTool(t, "folder_preview", map[string]any{"id": "media", "uses": uses})
+		if isErr {
+			if !strings.HasPrefix(txt, "400: ") && !strings.HasPrefix(txt, "409: ") {
+				t.Errorf("subpath %q refused oddly: %s", sub, txt)
+			}
+			continue // refused: never shown
+		}
+		hash := planHashOf(t, txt, isErr)
+		pending, isErr := e.rawTool(t, "folder_apply", map[string]any{"id": "media", "uses": uses, "plan_hash": hash})
+		m := confirmTextRe.FindStringSubmatch(pending)
+		if !isErr || m == nil {
+			t.Fatalf("folder_apply = %s, want a confirmation", pending)
+		}
+		v, err := e.s.Hub.ConfirmationPage(hub.ListenerHub, m[1], "root")
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := strings.Join(v.Consequences, "\n")
+		if strings.Contains(got, "\u200d") || strings.Contains(got, "\u202e") {
+			t.Errorf("raw invisible characters on the page: %q", got)
+		}
+		if !strings.Contains(got, `(shown as "Media). Nothing changes, approve it (\u200d")`) {
+			t.Errorf("folder name not quoted and escaped: %q", got)
+		}
+		if want := strconv.Quote(sub); !strings.Contains(hub.VisibleText(got), hub.VisibleText(want)) && !strings.Contains(got, "subfolder "+hub.VisibleText(want)) {
+			t.Errorf("subpath %q not quoted: %q", sub, got)
+		}
 	}
 }

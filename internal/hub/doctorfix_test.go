@@ -289,12 +289,12 @@ func TestManageAsFolder(t *testing.T) {
 	}
 	text := strings.Join(plan.Lines, "\n")
 	for _, want := range []string{
-		"Shared folder \"media\" (id media) is defined at /srv/media.",
-		"gid 60000 is allocated for this folder (shown as *media*).",
-		"Jellyfin's Media: /srv/media → folder:media.",
-		"Writer's Data: /srv/media → folder:media.",
-		"Jellyfin mounts it read-only (Media).",
-		"Writer mounts it read/write (Data).",
+		"Shared folder \"media\" (id media) is defined at \"/srv/media\".",
+		"gid 60000 is allocated for this folder (shown as \"media\").",
+		"Jellyfin's \"Media\": \"/srv/media\" → \"folder:media\".",
+		"Writer's \"Data\": \"/srv/media\" → \"folder:media\".",
+		"Jellyfin mounts it read-only (\"Media\").",
+		"Writer mounts it read/write (\"Data\").",
 		"A permissions snapshot is saved first.",
 	} {
 		if !strings.Contains(text, want) {

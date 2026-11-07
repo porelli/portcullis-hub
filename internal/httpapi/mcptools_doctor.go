@@ -483,7 +483,7 @@ func (s *Server) muteConsequences(ctx context.Context, args json.RawMessage) []s
 		return []string{"Mutes finding " + in.FP + " (it isn't in the doctor's report now: the mute is refused unless it is)."}
 	}
 	return []string{
-		"Mutes the doctor's " + string(f.Severity) + " " + f.Kind + ": " + f.Title,
+		"Mutes the doctor's " + string(f.Severity) + " " + f.Kind + ": " + q(f.Title) + ".",
 		"It leaves the counts and stays hidden until what it judged changes. Reason: " + q(clipMessage(in.Reason, 200)) + ".",
 	}
 }

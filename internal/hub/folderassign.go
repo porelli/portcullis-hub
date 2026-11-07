@@ -809,7 +809,11 @@ func skippedWarnings(rep *folderfix.Report) []string {
 		}
 		w := p.Sprintf("%d %s: left alone", c.N, what)
 		if len(c.Sample) > 0 {
-			w += " (" + strings.Join(c.Sample[:min(len(c.Sample), 3)], ", ") + ")"
+			var quoted []string
+			for _, smp := range c.Sample[:min(len(c.Sample), 3)] {
+				quoted = append(quoted, strconv.Quote(smp))
+			}
+			w += " (" + strings.Join(quoted, ", ") + ")"
 		}
 		out = append(out, w)
 	}
@@ -976,9 +980,9 @@ func (h *Hub) assignText(c *assignCalc) {
 	f, pl := c.folder, c.plan
 	var lines []string
 	if f.Adopted {
-		lines = append(lines, fmt.Sprintf("gid %d is this folder's adopted group (shown as *%s*).", f.GID, f.Name))
+		lines = append(lines, fmt.Sprintf("gid %d is this folder's adopted group (shown as %q).", f.GID, f.Name))
 	} else {
-		lines = append(lines, fmt.Sprintf("gid %d is allocated for this folder (shown as *%s*).", f.GID, f.Name))
+		lines = append(lines, fmt.Sprintf("gid %d is allocated for this folder (shown as %q).", f.GID, f.Name))
 	}
 	if d := pl.Disk; d != nil && d.Counts != nil && c.scan != nil {
 		k := d.Counts
@@ -1026,18 +1030,20 @@ func (h *Hub) assignText(c *assignCalc) {
 			lines = append(lines, "Files get group read (every app only reads it).")
 		}
 		for _, m := range d.Mkdir {
-			lines = append(lines, fmt.Sprintf("%s is created.", m))
+			lines = append(lines, fmt.Sprintf("%q is created.", m))
 		}
 	}
 	for _, up := range pl.Uses {
 		name := c.names[up.Instance]
-		where := up.Label
+		// Values that came with the request (or were typed in) are
+		// quoted: a plan line reaches the confirmation page.
+		where := strconv.Quote(up.Label)
 		if up.Subpath != "" {
-			where += ", " + up.Subpath
+			where += ", subfolder " + strconv.Quote(up.Subpath)
 		}
 		switch {
 		case up.Change == "remove":
-			lines = append(lines, fmt.Sprintf("%s stops using it (%s goes back to its default).", name, up.Label))
+			lines = append(lines, fmt.Sprintf("%s stops using it (%q goes back to its default).", name, up.Label))
 		case up.ReadOnly:
 			lines = append(lines, fmt.Sprintf("%s mounts it read-only (%s).", name, where))
 		case pl.Disk != nil && pl.Disk.OwnerUID != nil && up.Declared && c.isOwner(up):
@@ -1798,7 +1804,7 @@ func (h *Hub) computeUndo(ctx context.Context, id string) (*undoCalc, error) {
 		"The setting values don't change.",
 	}
 	for _, x := range uses {
-		lines = append(lines, fmt.Sprintf("%s (%s) may lose access to the restored entries: they go back to their previous group.", u.names[x.Instance], x.Label))
+		lines = append(lines, fmt.Sprintf("%s (%q) may lose access to the restored entries: they go back to their previous group.", u.names[x.Instance], x.Label))
 	}
 	pl.Warnings = append(pl.Warnings, prefixed("check", skippedWarnings(dry))...)
 	pl.Downtime = "none"
