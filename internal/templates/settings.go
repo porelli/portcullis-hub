@@ -78,6 +78,13 @@ type Option struct {
 	RequiresAny []string   `yaml:"requires_any" json:"requires_any,omitempty"`
 	Delivery    Deliveries `yaml:"delivery" json:"delivery,omitempty"`
 
+	// Setup options (§13.18): asked before the first start; a fixed one
+	// can't change after it; an enum's value → the compose profiles it
+	// starts (ProfilesFor).
+	Setup           bool                `yaml:"setup" json:"setup,omitempty"`
+	FixedAfterStart bool                `yaml:"fixed_after_start" json:"fixed_after_start,omitempty"`
+	Profiles        map[string][]string `yaml:"profiles" json:"profiles,omitempty"`
+
 	// Shared folders (§13.15): a path option's folder block (it replaces
 	// mode, needs and writes_as) and the option's doctor checks.
 	Folder *FolderSpec `yaml:"folder" json:"folder,omitempty"`

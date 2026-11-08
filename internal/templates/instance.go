@@ -79,7 +79,7 @@ func ReadOnlyVar(companion string) string {
 // may not declare in env, settings or ports.
 func ReservedVar(k string) bool {
 	switch k {
-	case VarInstance, VarOIDCClientID, VarAccessGroup, VarAdminGroup, VarLocalNetworks, VarMCPGateIP:
+	case VarInstance, VarOIDCClientID, VarAccessGroup, VarAdminGroup, VarLocalNetworks, VarMCPGateIP, VarComposeProfiles:
 		return true
 	}
 	return strings.HasPrefix(k, varHostPrefix) || strings.HasPrefix(k, varClientIDPrefix) || strings.HasPrefix(k, varFolderPrefix) ||

@@ -947,8 +947,8 @@ func set(names ...string) map[string]bool {
 // Compose keys a template may use (top level and per service). Anything
 // else is refused — e.g. label_file (compose ≥ 2.32) adds labels the Hub
 // never sees, deploy.labels, annotations, build, env_file, configs,
-// secrets, profiles, links. Grown from what the templates use plus
-// harmless runtime settings.
+// secrets, links. Grown from what the templates use plus harmless
+// runtime settings; profiles only as validateSetup allows (§13.18).
 var (
 	topLevelKeys = set("services", "volumes", "networks", "name")
 	serviceKeys  = set("image", "volumes", "restart", "environment", "networks", "security_opt", "cap_drop", "cap_add",
@@ -957,7 +957,7 @@ var (
 		"hostname", "devices", "container_name", "ports", "expose", "ulimits", "stop_grace_period", "stop_signal", "init",
 		"privileged", "sysctls", "logging", "tty", "stdin_open", "dns", "dns_search", "extra_hosts", "platform", "pull_policy",
 		"pid", "ipc", "volumes_from", "domainname", "mac_address", "oom_score_adj", "storage_opt", "userns_mode",
-		"device_cgroup_rules", "gpus", "runtime", "isolation", "blkio_config", "cgroup", "cgroup_parent", "cpuset")
+		"device_cgroup_rules", "gpus", "runtime", "isolation", "blkio_config", "cgroup", "cgroup_parent", "cpuset", "profiles")
 )
 
 // checkComposeKeys: only allowlisted top-level and service keys (x-*

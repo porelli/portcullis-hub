@@ -134,6 +134,9 @@ func build(id, source, path string, data, compose []byte, domain string, kinds K
 	if err := ValidateSettingsSpec(&t, compose, routes, kinds); err != nil {
 		return Template{}, err
 	}
+	if err := validateSetup(&t.Manifest, compose, routes); err != nil {
+		return Template{}, err
+	}
 	if err := ValidateAI(&t, compose, routes); err != nil {
 		return Template{}, err
 	}
