@@ -61,11 +61,11 @@ type PersonAppsView struct {
 
 // PersonApps is user's (any case) apps — My apps' (MyApps) without
 // credentials or AI, and with the apps that give them no value: every
-// enabled instance whose population holds them (Via: their groups that
-// grant it, with each membership's end), or whose person-entered options'
-// population holds them with an entry; and the values MyApps shows them
-// (self-visible person options, never secrets or Hub-set ones) plus
-// their entries. 404 for an unknown person, 503 while the directory is
+// enabled instance whose population holds them, or whose person-entered
+// options' population holds them with an entry (Via: the access group
+// that lets them in, with the membership's end); and their resolved
+// person options — an admin view: self_visible: false ones too, never
+// secrets, person_secret or person_id — plus their entries. 404 for an unknown person, 503 while the directory is
 // down.
 func (h *Hub) PersonApps(ctx context.Context, user string) (*PersonAppsView, error) {
 	user = strings.ToLower(user)
@@ -111,7 +111,9 @@ func (h *Hub) PersonApps(ctx context.Context, user string) (*PersonAppsView, err
 			var own []PersonValue
 			for j := range opts {
 				o := &opts[j]
-				if o.EffectiveScope() != templates.ScopePerson || o.Type == templates.TypeSecret || hubSetOption(o) || (o.SelfVisible != nil && !*o.SelfVisible) {
+				// An admin view: self_visible: false options too, never
+				// secrets, person_secret or person_id (hubSetOption).
+				if o.EffectiveScope() != templates.ScopePerson || o.Type == templates.TypeSecret || hubSetOption(o) {
 					continue
 				}
 				r, ok := resolved[o.Key]
@@ -123,7 +125,14 @@ func (h *Hub) PersonApps(ctx context.Context, user string) (*PersonAppsView, err
 			vals = append(own, vals...)
 		}
 		app := PersonApp{Instance: t.ID, Name: name, Via: []PersonVia{}}
-		if g := accessGroupOf(t); g != "" && groups != nil {
+		// The group that lets them in: the access group of the
+		// population, or (an app listed for an entry only) the one of the
+		// entry population (entryPopulationLocked).
+		g := accessGroupOf(t)
+		if groups == nil {
+			g = t.NamesFor(t.ID).AccessGroup
+		}
+		if _, member := m.Users[user][g]; g != "" && member && !m.Expired[user][g] {
 			via := PersonVia{Group: g}
 			if at, ok := m.Pending[user][g]; ok {
 				via.Until = &at
@@ -266,8 +275,11 @@ func (h *Hub) GroupUses(ctx context.Context, group string) (*GroupUsesView, erro
 			return ""
 		})
 		for _, r := range rows {
-			gs := GroupSetting{Instance: inst, App: inst, Key: r.key, Label: r.key, Scope: r.scope, Value: fmt.Sprint(r.value)}
+			// Without the template the stored value can't be displayed
+			// (nor judged secret-free): never shown raw.
+			gs := GroupSetting{Instance: inst, App: inst, Key: r.key, Label: r.key, Scope: r.scope, Value: "(template missing)"}
 			if t != nil {
+				gs.Value = fmt.Sprint(r.value)
 				gs.App = instanceName(t)
 				if o := optionByKey(t, r.key); o != nil {
 					gs.Label = o.Label

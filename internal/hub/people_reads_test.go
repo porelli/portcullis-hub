@@ -120,3 +120,51 @@ func TestAccessEnd(t *testing.T) {
 		t.Errorf("end = %v", e)
 	}
 }
+
+// TestGroupUsesTemplateMissing (fix round 1): a row of an instance whose
+// template is gone is listed, its value never printed raw.
+func TestGroupUsesTemplateMissing(t *testing.T) {
+	f, _, people := privFixture(t)
+	f.h.mu.Lock()
+	f.h.st.Settings["ghost"] = state.InstanceSettings{Person: map[string]state.PersonSetting{
+		"token": {Default: "x", Rows: []state.GroupValue{{Group: "office_milan", GroupID: people.id("office_milan"), Value: "s3cr3t-looking"}}},
+	}}
+	f.h.mu.Unlock()
+	v, err := f.h.GroupUses(context.Background(), "office_milan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(v.Settings) != 1 || v.Settings[0] != (GroupSetting{Instance: "ghost", App: "ghost", Key: "token", Label: "token", Scope: "person", Value: "(template missing)"}) {
+		t.Errorf("settings = %+v", v.Settings)
+	}
+}
+
+// TestPersonAppsEntryOnlyVia (fix round 1): an app listed for a person's
+// entry only (entryapp: custom sign-in, the entry population is its
+// access group) names that group in via, with the membership's end.
+func TestPersonAppsEntryOnlyVia(t *testing.T) {
+	f, people, _, _ := entryFixture(t)
+	mustSetEntry(t, f, entryID, "ext_id", "alice", aliceExt, "alice")
+	end := time.Date(2099, 5, 6, 7, 8, 9, 0, time.UTC)
+	people.set(func(p *fakePeople) { p.pending = map[string]map[string]time.Time{"alice": {entryID: end}} })
+	v, err := f.h.PersonApps(context.Background(), "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var app *PersonApp
+	for i := range v.Apps {
+		if v.Apps[i].Instance == entryID {
+			app = &v.Apps[i]
+		}
+	}
+	if app == nil || len(app.Via) != 1 || app.Via[0].Group != entryID || app.Via[0].Until == nil || !app.Via[0].Until.Equal(end) || app.Until == nil || !app.Until.Equal(end) {
+		t.Fatalf("entryapp = %+v (apps %+v)", app, v.Apps)
+	}
+	found := false
+	for _, val := range v.Values {
+		found = found || val.Instance == entryID && val.Key == "ext_id" && val.From == "own entry"
+	}
+	if !found {
+		t.Errorf("values = %+v", v.Values)
+	}
+}

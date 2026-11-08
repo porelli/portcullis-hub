@@ -280,11 +280,15 @@ func (s *Server) peopleReads() peopleReads {
 	return s.Hub
 }
 
-// adminRead resolves the caller of an admin-only read: 403 for anyone
-// but an administrator (delegates included), 503 while the directory or
+// adminRead resolves the caller of an admin-only read: 401 without an
+// identity, 403 for anyone but an administrator (delegates included), 503 while the directory or
 // the Hub is unavailable; on false it has written the answer.
 func (s *Server) adminRead(w http.ResponseWriter, r *http.Request) (*directory.Caller, peopleReads, bool) {
 	if !s.dirReady(w) {
+		return nil, nil, false
+	}
+	if requestActor(r).User == "" {
+		http.Error(w, "no signed-in user (X-Forwarded-User)", http.StatusUnauthorized)
 		return nil, nil, false
 	}
 	c, err := s.Directory.CallerAs(r.Context(), requestActor(r))

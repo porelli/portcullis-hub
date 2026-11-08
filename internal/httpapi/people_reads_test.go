@@ -112,6 +112,30 @@ func TestAuditUserFilter(t *testing.T) {
 	mustDo(t, e.people, "bob", "GET", "/api/directory/audit?user=bob", "", 403)
 }
 
+// teamsManifest: a per-person value people don't see themselves
+// (self_visible: false) — an admin does (PersonApps).
+const teamsManifest = `name: Teams
+category: tools
+ai: {unsupported: test fixture}
+auth:
+  method: forward-auth
+  group_access: true
+  access_group: users_teams
+files:
+  - {name: team, service: web, mount: /portcullis}
+settings:
+  options:
+    - key: cost_center
+      label: Cost center
+      type: string
+      scope: person
+      default: CC-1
+      resolve: priority
+      self_visible: false
+      applies: next_sign_in
+      delivery: [{file: {name: team}}]
+`
+
 // readsEnv: myAppsEnv (vault: storage_quota default 10GiB, office_milan
 // 1TiB; bob in users_vault and office_milan) plus notes (access group
 // users_notes, no options: bob has access but no values), dana a
@@ -122,15 +146,18 @@ func readsEnv(t *testing.T) *setEnv {
 	e := newSetEnvWith(t, map[string][2]string{"notes": {
 		"name: Notes\ncategory: tools\nai: {unsupported: test fixture}\nauth:\n  method: forward-auth\n  group_access: true\n  access_group: users_notes\n",
 		"services:\n  web:\n    image: x\n    labels:\n      traefik.enable: \"true\"\n      traefik.http.routers.notes.rule: Host(`notes.${PORTCULLIS_DOMAIN}`)\n      traefik.http.routers.notes.middlewares: portcullis-auth@docker,portcullis-groups@docker\n",
-	}})
+	}, "teams": {teamsManifest, "services:\n  web:\n    image: x\n    labels:\n      traefik.enable: \"true\"\n      traefik.http.routers.teams.rule: Host(`teams.${PORTCULLIS_DOMAIN}`)\n      traefik.http.routers.teams.middlewares: portcullis-auth@docker,portcullis-groups@docker\n"}})
 	e.ll.AddGroup("users_notes", "bob")
+	e.ll.AddGroup("users_teams", "dana")
 	opOK(t, e.hub, "POST", "/api/templates/enable", `{"id":"vault"}`)
 	opOK(t, e.hub, "POST", "/api/templates/enable", `{"id":"notes"}`)
+	opOK(t, e.hub, "POST", "/api/templates/enable", `{"id":"teams"}`)
 	if code, b := e.do(t, "root", "PUT", "/api/instances/vault/settings", `{"person":{"storage_quota":{"default":"10GiB","rows":[{"group":"office_milan","value":"1TiB"}]}}}`); code != 200 {
 		t.Fatalf("save = %d %s", code, b)
 	}
 	e.s.Hub.Wait()
 	mustDo(t, e.hub, "root", "PUT", "/api/directory/permissions/edit_details", `{"group":"helpers"}`, 200)
+	e.ll.AddUser("erin", "erin@example.org", "Erin", "")
 	mustDo(t, e.hub, "root", "PUT", "/api/directory/groups/users_vault/members/bob/expiry", `{"until":"2099-01-02T03:04:05Z"}`, 200)
 	return e
 }
@@ -166,12 +193,28 @@ func TestPersonAppsRoute(t *testing.T) {
 		if !strings.Contains(b, `"value":"10 GiB","from":"default"`) {
 			t.Errorf("root's apps = %s", b)
 		}
-		// dana: no apps, empty lists (never null).
-		if b := strings.TrimSpace(mustDo(t, srv, "root", "GET", "/api/directory/users/dana/apps", "", 200)); b != `{"apps":[],"values":[]}` {
+		// dana (users_teams): the self_visible: false value an admin
+		// sees, which her own My apps never shows.
+		if b := strings.TrimSpace(mustDo(t, srv, "root", "GET", "/api/directory/users/dana/apps", "", 200)); b != `{"apps":[{"instance":"teams","name":"Teams","via":[{"group":"users_teams","until":null}],"until":null}],"values":[{"instance":"teams","app":"Teams","key":"cost_center","label":"Cost center","value":"CC-1","from":"default"}]}` {
 			t.Errorf("dana's apps = %s", b)
+		}
+		// erin, in no group: empty lists (never null).
+		if b := strings.TrimSpace(mustDo(t, srv, "root", "GET", "/api/directory/users/erin/apps", "", 200)); b != `{"apps":[],"values":[]}` {
+			t.Errorf("erin's apps = %s", b)
 		}
 		mustDo(t, srv, "root", "GET", "/api/directory/users/nobody/apps", "", 404)
 		mustDo(t, srv, "root", "GET", "/api/directory/users/-bad/apps", "", 400)
+	}
+	if strings.Contains(mustDo(t, e.ppl, "dana", "GET", "/api/me/apps", "", 200), "cost_center") {
+		t.Error("dana's own My apps shows the self_visible: false value")
+	}
+	// No identity: 401 for both reads, on both listeners.
+	for _, srv := range []*httptest.Server{e.hub, e.ppl} {
+		for _, path := range []string{"/api/directory/users/bob/apps", "/api/directory/groups/office_milan/uses"} {
+			if r, b := doAs(t, srv, "", "GET", path, ""); r.StatusCode != 401 {
+				t.Errorf("no identity GET %s = %d %s, want 401", path, r.StatusCode, b)
+			}
+		}
 	}
 	// A delegate (dana holds edit_details) and anyone else: 403.
 	mustDo(t, e.ppl, "dana", "GET", "/api/directory/users/bob/apps", "", 403)
