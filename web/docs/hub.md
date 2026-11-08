@@ -609,7 +609,8 @@ and the value they would get with the panel as it is now, before you save:
 "10 GiB from office_milan", "2 TiB largest of office_milan (10 GiB),
 it_staff (2 TiB)", "500 GiB everyone else with access". It updates a moment
 after each edit, has a search box and shows 50 people per page. Each group
-it names links to the group's page on `people.<domain>`. The save bar adds
+it names links to the group's page on `people.<domain>`, in a new tab (an
+unsaved draft stays where it is). The save bar adds
 "Changes: N people get a new value".
 
 "With access" means:
@@ -1544,7 +1545,7 @@ apps** (each person's own app settings, see [My apps](#my-apps)) and
 | `people.<domain>/#groups` | the groups list |
 | `people.<domain>/#groups/<group>` | a [group's page](groups.md#group-pages), the only place membership changes |
 | `people.<domain>/#people/<name>` | a [person's page](#a-persons-page) (any spelling of the username: `#people/Carol` opens `carol`) |
-| `people.<domain>/#invite?username=&email=&display_name=&groups=` | the invite form, pre-filled (`groups` ticks only plain groups, and only for an admin) |
+| `people.<domain>/#invite?username=&email=&display_name=&groups=` | the invite form, pre-filled (`groups` ticks only groups the directory reports as not guarding — never an administrator, permission, app admin or privileged-value group — and only for an admin) |
 
 **Old Hub links keep working.** `hub.<domain>` sends them to the people page
 (same tab, replacing the Hub's entry in the history):
@@ -1564,13 +1565,15 @@ in the same forms.
 ### Group names link to their pages
 
 Every group name the Hub shows links to that group's page on the people
-page (same tab): the access and admin group of an instance (Overview, the
-Sign-in section, the Delete summary), the rows of
-[Who gets what](#who-gets-what) ("from office_milan", "largest of …",
-"combined from …") and its "N members of office_milan have no access"
-warnings, a privileged option's refused groups, a model provider's **Used
-by** (Settings → AI) and the names in the App Catalog's
-[Missing groups](#missing-groups) banner. On the people page, every group a
+page (`https://people.<main domain>/`, from the configured domain whatever
+address the Hub was opened at): the access and admin group of an instance
+(Overview, the Sign-in section, the Delete summary), a model provider's
+**Used by** (Settings → AI) and the names in the App Catalog's
+[Missing groups](#missing-groups) banner open in the same tab; the settings
+panel's — the rows of [Who gets what](#who-gets-what) ("from office_milan",
+"largest of …", "combined from …"), its "N members of office_milan have no
+access" warnings and a privileged option's refused groups — always open in
+a new tab, so following one never drops an unsaved draft. On the people page, every group a
 person page or the Used by panel names links to its page too, including each
 group of a combined value's "from".
 
