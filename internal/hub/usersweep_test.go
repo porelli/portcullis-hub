@@ -109,7 +109,7 @@ func TestUserSweepPausesOnCountDrop(t *testing.T) {
 		t.Fatal("swept after a 25 % drop")
 	}
 	st := f.h.UserSweep()
-	if !st.Paused || !strings.Contains(st.Reason, "15 users, 20 at the last cleanup") {
+	if !st.Paused || !strings.Contains(st.Reason, "15 users, 20 at the last cleanup") || st.Skipped != "" || !st.SkippedSince.IsZero() {
 		t.Errorf("status = %+v", st)
 	}
 	// Sticky: LLDAP back to normal doesn't resume by itself.
@@ -151,19 +151,39 @@ func TestUserSweepSkipsWhileUnreachable(t *testing.T) {
 	if f.h.RunUserSweep(context.Background()) || kc.count() != 0 {
 		t.Fatal("swept with LLDAP down")
 	}
-	if st := f.h.UserSweep(); st.Paused || !strings.Contains(st.Skipped, "unreachable") {
+	st := f.h.UserSweep()
+	if st.Paused || !strings.Contains(st.Skipped, "unreachable") || st.SkippedSince.IsZero() {
 		t.Errorf("status = %+v", st)
+	}
+	firstSkippedSince := st.SkippedSince
+	// A second skip keeps the same SkippedSince.
+	if f.h.RunUserSweep(context.Background()) {
+		t.Error("swept with LLDAP still down")
+	}
+	st = f.h.UserSweep()
+	if st.SkippedSince != firstSkippedSince {
+		t.Errorf("SkippedSince changed: %v -> %v", firstSkippedSince, st.SkippedSince)
 	}
 	ll.err = nil
 	if !f.h.RunUserSweep(context.Background()) {
 		t.Error("not swept after LLDAP came back")
 	}
-	if st := f.h.UserSweep(); st.Skipped != "" {
+	st = f.h.UserSweep()
+	if st.Skipped != "" || !st.SkippedSince.IsZero() {
 		t.Errorf("skip not cleared: %+v", st)
 	}
 	kc.err = errors.New("keycloak down")
 	if f.h.RunUserSweep(context.Background()) || !strings.Contains(f.h.UserSweep().Skipped, "keycloak down") {
 		t.Error("Keycloak failure not reported")
+	}
+	// Success clears Keycloak skip too.
+	kc.err = nil
+	if !f.h.RunUserSweep(context.Background()) {
+		t.Error("not swept after Keycloak came back")
+	}
+	st = f.h.UserSweep()
+	if st.Skipped != "" || !st.SkippedSince.IsZero() {
+		t.Errorf("Keycloak skip not cleared: %+v", st)
 	}
 }
 

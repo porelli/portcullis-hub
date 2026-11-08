@@ -2851,16 +2851,35 @@
     // ── Guarded Keycloak stale-record cleanup ──────────────
     // Paused when LLDAP looks wrong (admin / service account missing, user
     // count dropped): nothing is removed from Keycloak until an admin
-    // checks LLDAP and resumes (typed confirm, audited).
+    // checks LLDAP and resumes (typed confirm, audited). Skipped when
+    // unreachable: retries every minute, banner shown only if it lasts > ~5 min.
     function renderUserSweep(st) {
       const box = document.getElementById('user-sweep');
       if (!st || !st.configured || (!st.paused && !st.skipped)) { box.classList.remove('visible'); box.innerHTML = ''; return; }
-      let html = '<div class="drift-title"><span>LLDAP looks wrong — stale-record cleanup ' + (st.paused ? 'paused' : 'skipped') + '</span></div>';
-      html += '<div class="drift-item"><span class="drift-msg">' + escapeHtml(st.paused ? st.reason : st.skipped) +
-        ' &middot; Keycloak keeps every user meanwhile. Check LLDAP (restore it from a backup if it lost users) before resuming.</span></div>';
+
+      // A skip shows no banner if it's recent (< ~5 min after Hub start or last success).
+      if (st.skipped && !st.paused) {
+        const skipAge = Date.now() - Date.parse(st.skipped_since || 0);
+        const startAge = Date.now() - Date.parse(st.last_ok_at || 0);
+        // Show only if skipped for > 5 min, or if never succeeded and > 5 min since start.
+        if (skipAge < 5 * 60 * 1000 || (skipAge < 5 * 60 * 1000 && startAge < 5 * 60 * 1000)) {
+          box.classList.remove('visible');
+          box.innerHTML = '';
+          return;
+        }
+      }
+
+      let html = '';
       if (st.paused) {
+        html = '<div class="drift-title"><span>LLDAP looks wrong — stale-record cleanup paused</span></div>';
+        html += '<div class="drift-item"><span class="drift-msg">' + escapeHtml(st.reason) +
+          ' &middot; Keycloak keeps every user meanwhile. Check LLDAP (restore it from a backup if it lost users) before resuming.</span></div>';
         html += '<div class="drift-item"><input type="text" id="user-sweep-confirm" placeholder="type resume" autocomplete="off">' +
           '<button class="btn btn-danger btn-sm" data-user-sweep-resume="">Resume cleanup</button></div>';
+      } else {
+        html = '<div class="drift-title"><span>Removing people deleted in LLDAP is waiting</span></div>';
+        html += '<div class="drift-item"><span class="drift-msg">' + escapeHtml(st.skipped) +
+          '. It retries every minute.</span></div>';
       }
       box.innerHTML = html;
       box.classList.add('visible');

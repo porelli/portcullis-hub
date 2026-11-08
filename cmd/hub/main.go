@@ -318,13 +318,11 @@ func main() {
 	// sync never removes users): list them all periodically. Keycloak
 	// decides per user against LDAP; the Hub deletes nothing. Guarded: an
 	// LLDAP that looks wrong (unreachable, admin or service account
-	// missing, user count dropped) pauses it (hub/usersweep.go).
+	// missing, user count dropped) pauses it (hub/usersweep.go). An
+	// unreachable skip retries every minute until success or pause; a
+	// success or pause goes back to the normal 15-min interval.
 	h.SetUserSweep(ll, kc)
-	go runEvery(ctx, time.Minute, userRevalidateInterval, func() {
-		rctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-		defer cancel()
-		h.RunUserSweep(rctx)
-	})
+	go runUserSweep(ctx, time.Minute, userRevalidateInterval, h)
 	// SIGHUP syncs the template sources (core's `./portcullis upgrade`
 	// sends it and reads the outcome from <data>/source-sync.json).
 	go runOnSignal(ctx, hup, func() {
@@ -421,6 +419,32 @@ func runEvery(ctx context.Context, first, interval time.Duration, fn func()) {
 		case <-t.C:
 			fn()
 			t.Reset(interval)
+		}
+	}
+}
+
+// runUserSweep runs the guarded sweep with adaptive retry: after an
+// unreachable skip, it retries every hub.sweepRetry (1 minute) until a run
+// completes or pauses, then goes back to the normal interval.
+func runUserSweep(ctx context.Context, first, normalInterval time.Duration, h *hub.Hub) {
+	t := time.NewTimer(first)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			rctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+			h.RunUserSweep(rctx)
+			cancel()
+			st := h.UserSweep()
+			// An unreachable skip retries soon; a success or pause goes
+			// back to the normal interval.
+			next := normalInterval
+			if st.Skipped != "" {
+				next = hub.SweepRetryInterval()
+			}
+			t.Reset(next)
 		}
 	}
 }
