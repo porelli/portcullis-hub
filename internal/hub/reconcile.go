@@ -65,9 +65,11 @@ type DriftReport struct {
 
 type projectCount struct {
 	running, total  int
-	failedJobs      int      // jobs that exited non-zero
-	missingJobs     []string // jobs with no container
-	missingJobCount int      // len(missingJobs), for drift message
+	failedJobs      []string       // jobs that exited non-zero, dead, or ContainerState error
+	failedJobCount  int            // len(failedJobs)
+	failedJobCodes  map[string]int // job service → exit code (0 if unknown)
+	missingJobs     []string       // jobs with no container
+	missingJobCount int            // len(missingJobs), for drift message
 }
 
 // computeDrift compares enabled apps with project container counts.
@@ -139,13 +141,19 @@ func computeDrift(enabled, known, snapshot map[string]bool, counts map[string]pr
 			d.Kind = DriftPublicAccess
 			d.Message = blockedPublic[id] + " (in the app's settings)"
 			d.Actions = []string{}
-		case enabled[id] && c.failedJobs > 0:
+		case enabled[id] && c.failedJobCount > 0:
 			d.Kind = DriftJobFailed
-			if c.failedJobs == 1 {
-				d.Message = "1 job failed"
-			} else {
-				d.Message = fmt.Sprintf("%d jobs failed", c.failedJobs)
+			var msgs []string
+			for _, svc := range c.failedJobs {
+				code := c.failedJobCodes[svc]
+				if code == 0 {
+					// Unknown exit code (ContainerState error or dead).
+					msgs = append(msgs, fmt.Sprintf("job %s failed", svc))
+				} else {
+					msgs = append(msgs, fmt.Sprintf("job %s failed (exit %d)", svc, code))
+				}
 			}
+			d.Message = strings.Join(msgs, "; ")
 			d.Actions = []string{ActionStart, ActionDisable}
 		case enabled[id] && c.missingJobCount > 0:
 			d.Kind = DriftJobMissing
@@ -185,6 +193,7 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 	h.mu.RLock()
 	jobs := map[string]map[string]bool{}        // instance id → service name → is job
 	allServices := map[string]map[string]bool{} // instance id → service name → in compose
+	profiled := map[string]map[string]bool{}    // instance id → service name → has profiles
 	for i := range h.instances {
 		t := &h.instances[i]
 		jobs[t.ID] = t.Jobs
@@ -193,6 +202,12 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 			svcs[s] = true
 		}
 		allServices[t.ID] = svcs
+		// Mark profiled services (missing-job detection skips them).
+		prof := make(map[string]bool)
+		for s := range t.ProfiledServices {
+			prof[s] = true
+		}
+		profiled[t.ID] = prof
 	}
 	h.mu.RUnlock()
 	counts := map[string]projectCount{}
@@ -241,16 +256,31 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 		servicesSeen[id][service] = true
 		isJob := jobs[id][service]
 		isRunning := c.State == "running" || c.State == "restarting"
-		// A done job (exited 0) counts as running; a failed job (exit non-zero) is drift.
+		// A done job (exited 0) counts as running; a failed job (exit non-zero, dead,
+		// or ContainerState error) is drift (fail closed).
 		isDoneJob := false
-		if isJob && c.State == "exited" {
-			// Check exit code via ContainerState.
-			if st, err := h.engine.ContainerState(ctx, c.ID); err == nil && st.Status == "exited" {
+		if isJob && (c.State == "exited" || c.State == "dead") {
+			// Check exit code via ContainerState (fail closed: error or dead → failed).
+			st, err := h.engine.ContainerState(ctx, c.ID)
+			if err != nil || st.Status == "dead" {
+				// ContainerState error or dead: count as failed (fail closed).
+				if pc.failedJobCodes == nil {
+					pc.failedJobCodes = make(map[string]int)
+				}
+				pc.failedJobs = append(pc.failedJobs, service)
+				pc.failedJobCodes[service] = 0 // unknown exit code
+				pc.failedJobCount++
+			} else if st.Status == "exited" {
 				if st.ExitCode == 0 {
 					isDoneJob = true
 					isRunning = true
 				} else {
-					pc.failedJobs++
+					if pc.failedJobCodes == nil {
+						pc.failedJobCodes = make(map[string]int)
+					}
+					pc.failedJobs = append(pc.failedJobs, service)
+					pc.failedJobCodes[service] = st.ExitCode
+					pc.failedJobCount++
 				}
 			}
 		}
@@ -285,6 +315,9 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 		seen := servicesSeen[id]
 		for jobSvc := range jobSet {
 			// Skip profiled services (treat any profiled service as not active).
+			if profiled[id][jobSvc] {
+				continue
+			}
 			if allServices[id][jobSvc] && !seen[jobSvc] {
 				// Job service exists in compose but has no container.
 				pc.missingJobs = append(pc.missingJobs, jobSvc)

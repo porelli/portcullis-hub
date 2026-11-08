@@ -310,6 +310,9 @@ type Template struct {
 	// jobs plus services with depends_on condition service_completed_successfully;
 	// computed once at discovery (shared, read-only).
 	Jobs map[string]bool `json:"-"`
+	// ProfiledServices are the services with compose `profiles:` (service → profiles);
+	// computed once at discovery (shared, read-only). Missing-job detection skips them.
+	ProfiledServices map[string][]string `json:"-"`
 	// UsesLocalNetworks: compose.yml reads ${PORTCULLIS_LOCAL_NETWORKS}
 	// (found at discovery): saving Local networks restarts its enabled
 	// instances (F35).

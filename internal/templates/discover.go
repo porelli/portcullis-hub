@@ -147,6 +147,9 @@ func build(id, source, path string, data, compose []byte, domain string, kinds K
 		return Template{}, err
 	}
 	t.Jobs = JobServices(&t.Manifest, compose)
+	if t.ProfiledServices, err = ServiceProfiles(compose); err != nil {
+		return Template{}, err
+	}
 	t.UsesLocalNetworks = ReferencesLocalNetworks(compose)
 	// The catalog entry shows the default instance.
 	return t.Instance(t.ID, nil, domain)

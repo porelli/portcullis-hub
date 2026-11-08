@@ -238,18 +238,19 @@ func containerStarted(st docker.State, isJob bool) bool {
 	return st.Running || (st.Status != "" && st.Status != "created")
 }
 
-// containerReady: a non-job is ready when running and healthy (or no
-// healthcheck); a job is ready only when exited 0 (I2).
+// containerReady: a job is ready only when exited 0; a non-job is ready when
+// running and healthy (or no healthcheck), or when it exited 0 (ruling: real
+// templates have one-shots not declared as jobs).
 func containerReady(st docker.State, isJob bool) bool {
 	if isJob {
 		// Job ready only when exited 0.
 		return st.Status == "exited" && st.ExitCode == 0
 	}
-	// Non-job: must be running and healthy (exited-0 non-job is not ready).
+	// Non-job: running+healthy OR exited 0 (the pre-task behavior).
 	if st.Running {
 		return st.Status != "restarting" && (st.Health == "" || st.Health == "healthy")
 	}
-	return false
+	return st.Status == "exited" && st.ExitCode == 0
 }
 
 // renderedServices are the services of t's project as the Hub renders it

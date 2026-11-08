@@ -96,9 +96,9 @@ func (h *Hub) Status(ctx context.Context, id string) ([]ContainerStatus, error) 
 					Status:   c.State,
 					ExitCode: 0, // unknown, but Status parsing below handles it
 				})
-				// Parse exit code from Status for exited containers.
+				// Parse exit code from Status for exited containers (prefix check).
 				if c.State == "exited" {
-					if strings.Contains(c.Status, "(0)") {
+					if strings.HasPrefix(c.Status, "Exited (0)") {
 						status.JobState = "done"
 					} else {
 						status.JobState = "failed"

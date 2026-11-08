@@ -273,45 +273,26 @@ func TestHealthyStepJobDone(t *testing.T) {
 		t.Errorf("failed job: others = %v, should contain setup", others)
 	}
 
-	// Case 3: Exited-0 non-job (worker) is not ready (I2: non-job must be running).
-	// Add a worker service (non-job) to the compose for this test.
-	writeFile(t, f.src+"/jobapp/compose.yml", jobAppCompose+`  worker:
-    image: example.org/worker:1.0
-`)
-	f.h.Discover()
-	t1 = f.h.Template("jobapp")
-	services = f.h.renderedServices(context.Background(), t1)
-
+	// Case 3: Missing job (no container) is not ready; wait doesn't end early.
 	f.engine.containers = []docker.Container{
 		container("w3", "portcullis-jobapp", "web", "running"),
-		func() docker.Container {
-			c := container("s3", "portcullis-jobapp", "setup", "exited")
-			c.Status = "Exited (0) 1 minute ago"
-			return c
-		}(),
-		func() docker.Container {
-			c := container("k3", "portcullis-jobapp", "worker", "exited")
-			c.Status = "Exited (0) done"
-			return c
-		}(),
+		// setup job has no container
 	}
 	f.engine.states = map[string]docker.State{
 		"w3": {Running: true, Status: "running", Health: "healthy"},
-		"s3": {Running: false, Status: "exited", ExitCode: 0},
-		"k3": {Running: false, Status: "exited", ExitCode: 0},
 	}
 	n, m, others, failedJobs, err = f.h.countContainers(context.Background(), t1, services)
 	if err != nil {
-		t.Fatalf("countContainers (exited-0 non-job): %v", err)
+		t.Fatalf("countContainers (missing job): %v", err)
 	}
-	if m != 3 {
-		t.Errorf("exited-0 non-job: m = %d, want 3", m)
+	if m != 1 {
+		t.Errorf("missing job: m = %d, want 1 (only web exists)", m)
 	}
-	if n != 2 {
-		t.Errorf("exited-0 non-job: n = %d, want 2 (web and setup ready, worker not)", n)
+	if n != 1 {
+		t.Errorf("missing job: n = %d, want 1 (only web ready)", n)
 	}
-	if !contains(others, "worker") {
-		t.Errorf("exited-0 non-job: others = %v, should contain worker", others)
+	if len(failedJobs) > 0 {
+		t.Errorf("missing job: failedJobs = %v, want none (no container to report)", failedJobs)
 	}
 }
 
@@ -361,5 +342,116 @@ func TestJobNeverRan(t *testing.T) {
 	}
 	if !strings.Contains(drift.Message, "setup") || !strings.Contains(drift.Message, "never ran") {
 		t.Errorf("drift message = %q, should mention setup never ran", drift.Message)
+	}
+}
+
+// TestProfiledJobMissing: a profiled job with no container does not trigger
+// job_missing drift (profiled services are skipped until Task 4).
+func TestProfiledJobMissing(t *testing.T) {
+	// Create a template with a profiled job.
+	f := newFixture(t)
+	manifest := `name: Profiled Job App
+auth:
+  method: forward-auth
+  group_access: true
+access_group: users_profiledapp
+ai:
+  unsupported: true
+urls:
+  - url: https://profiledapp.{{DOMAIN}}
+    group: users_profiledapp
+jobs: [setup]
+settings:
+  options:
+    - key: mode
+      label: Mode
+      type: enum
+      scope: instance
+      setup: true
+      options:
+        - {value: normal, label: Normal}
+        - {value: extended, label: Extended}
+      default: normal
+      profiles:
+        normal: []
+        extended: [extended]
+`
+	compose := `services:
+  web:
+    image: example.org/web:1.0
+    environment:
+      MODE: ${MODE:-normal}
+    labels:
+      traefik.http.routers.profiledapp.rule: Host(` + "`profiledapp.${PORTCULLIS_DOMAIN:-portcullis.local}`" + `)
+      traefik.http.routers.profiledapp.entrypoints: websecure
+  setup:
+    image: example.org/setup:1.0
+    profiles: [extended]
+`
+	writeFile(t, f.src+"/profiledapp/manifest.yaml", manifest)
+	writeFile(t, f.src+"/profiledapp/compose.yml", compose)
+	f.h.Discover()
+	f.h.Enable("profiledapp")
+
+	// Only web container exists; setup job has profiles and never ran.
+	web := container("w1", "portcullis-profiledapp", "web", "running")
+	// Get correct labels (no exposure drift).
+	tmpl := f.h.Template("profiledapp")
+	if tmpl == nil {
+		t.Fatal("profiledapp template not found after Discover")
+	}
+	f.h.mu.RLock()
+	want, err := f.h.desiredRouteLabelsLocked(tmpl)
+	f.h.mu.RUnlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for k, v := range want["web"] {
+		web.Labels[k] = v
+	}
+	f.engine.containers = []docker.Container{web}
+	f.engine.states = map[string]docker.State{
+		"w1": {Running: true, Status: "running"},
+	}
+
+	// No job_missing drift should be reported (profiled job skipped).
+	rep := f.h.Reconcile(context.Background())
+	for _, d := range rep.Items {
+		if d.ID == "profiledapp" && d.Kind == DriftJobMissing {
+			t.Errorf("unexpected job_missing drift for profiled job: %+v", d)
+		}
+	}
+}
+
+// TestJobDead: a dead job counts as failed (fail closed).
+func TestJobDead(t *testing.T) {
+	f := jobFixture(t)
+	f.h.Enable("jobapp")
+	web := container("w1", "portcullis-jobapp", "web", "running")
+	for k, v := range jobappLabels(t, f, "web") {
+		web.Labels[k] = v
+	}
+	setup := container("s1", "portcullis-jobapp", "setup", "dead")
+	setup.Status = "Dead"
+	f.engine.containers = []docker.Container{web, setup}
+	f.engine.states = map[string]docker.State{
+		"w1": {Running: true, Status: "running"},
+		"s1": {Running: false, Status: "dead", ExitCode: 0},
+	}
+
+	// Dead job → job_failed drift.
+	rep := f.h.Reconcile(context.Background())
+	var drift *Drift
+	for i := range rep.Items {
+		if rep.Items[i].ID == "jobapp" && rep.Items[i].Kind == DriftJobFailed {
+			drift = &rep.Items[i]
+			break
+		}
+	}
+	if drift == nil {
+		t.Fatal("no job_failed drift when job is dead")
+	}
+	if !strings.Contains(drift.Message, "setup") || !strings.Contains(drift.Message, "failed") {
+		t.Errorf("drift message = %q, should mention job setup failed", drift.Message)
 	}
 }
