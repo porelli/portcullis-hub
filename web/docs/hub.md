@@ -82,8 +82,9 @@ then shows a **Missing groups** banner listing each such app and its missing
 groups (checked every minute). **Create missing groups** creates every listed
 `users_<id>` / `admin_<id>` group as you (audited as `group.create`); **Create**
 on a row does it for one app. Groups with other names are listed with "create
-in Users & Groups". The new groups are empty: add the people who should have
-access. The Hub log's warning `group … not found in keycloak` points to the
+on the people page". Every listed name links to its group page on
+`people.<domain>`. The new groups are empty: add the people who should have
+access on their pages. The Hub log's warning `group … not found in keycloak` points to the
 same button. API: `GET /api/instances/missing-groups`,
 `POST /api/instances/missing-groups` with `{}` (all) or `{"ids": ["<id>"]}`.
 
@@ -607,8 +608,9 @@ Under each per-person option, **Who gets what** lists everyone with access
 and the value they would get with the panel as it is now, before you save:
 "10 GiB from office_milan", "2 TiB largest of office_milan (10 GiB),
 it_staff (2 TiB)", "500 GiB everyone else with access". It updates a moment
-after each edit, has a search box and shows 50 people per page. The save bar
-adds "Changes: N people get a new value".
+after each edit, has a search box and shows 50 people per page. Each group
+it names links to the group's page on `people.<domain>`. The save bar adds
+"Changes: N people get a new value".
 
 "With access" means:
 
@@ -1192,7 +1194,7 @@ providers: [AI support → Settings → AI](ai.md#settings-ai)),
 **Shared folders** ([below](#shared-folders)) and **Local networks**
 ([below](#local-networks)).
 
-User administration moved to the [Users & Groups tab](#users-groups-tab).
+People and groups are managed on the people page: see [Users & Groups](#users-groups).
 
 ## Shared folders
 
@@ -1488,40 +1490,139 @@ the app's own listen address and in your router or host firewall. See
 [Security & Hardening](hardening.md#lan-only-ports-and-host-firewalls) for
 why a host firewall such as ufw doesn't help with published ports.
 
-## Users & Groups tab
+## Audit log
 
-Day-to-day user, group and field administration. LLDAP has no single sign-on, so
-its own web UI isn't published: `directory.<domain>` redirects to
-`people.<domain>`, and the LLDAP UI is reachable only from the server
-for recovery ([`portcullis lldap-ui`](cli.md#lldap-ui)). The Hub uses its own LLDAP service account,
-`portcullis-hub`, which core creates and mounts as files (see
+The Hub's **Audit log** tab shows the audit log of the whole Hub: people and
+groups, app settings, instances, folders, the doctor, AI. Every change,
+including refused and failed attempts, is appended to `audit.jsonl` in
+`$HUB_DATA_DIR` (mode 0600). Each entry records the time, actor
+(`X-Forwarded-User`), action, target, optional detail, result (`ok` /
+`refused` / `error`) and optional error. The log never contains passwords,
+tokens or invite links.
+
+The tab shows the newest 100 entries, with **Refresh** and a **Show** filter:
+
+- **all changes**;
+- **changes made via AI**: only those made through the Portcullis MCP
+  (`?via=ai`), each with a "via AI" pill and the AI client;
+- **via AI, with the AI requests (access log)**: those merged with the
+  newest 100 lines of the gate's access log (`?via=ai&include=access`): who,
+  through which client, what (the tool or method), on which resource, and the
+  gate's decision. If the access log can't be read, the tab says so and
+  shows the changes made via AI alone.
+
+The log lives only on the Hub: the people page has no audit view of its
+own. On it, administrators see a group's entries in the group page's
+[History](groups.md#history) and a person's on their
+[page](#a-persons-page). `GET /api/directory/audit` (with `via`, `include`,
+`group` and `user` filters, [contract §9.7](../guides/integration-contracts.md#97-http-api-for-groups-and-users-new-people-groups))
+answers administrators only, on both listeners (403 for everyone else).
+
+## Users & Groups
+
+People and groups live in **one place**: the people page,
+`https://people.<domain>/`. The Hub's **Users & Groups** tab is a link there
+(it opens in the same tab). Administrators get every admin operation on the
+people page (see [Access levels](#access-levels)); the Hub itself keeps only
+the [Audit log](#audit-log) tab, which covers the whole Hub.
+
+LLDAP has no single sign-on, so its own web UI isn't published:
+`directory.<domain>` redirects to `people.<domain>`, and the LLDAP UI is
+reachable only from the server for recovery
+([`portcullis lldap-ui`](cli.md#lldap-ui)). The Hub uses its own LLDAP service
+account, `portcullis-hub`, which core creates and mounts as files (see
 [Integration Contracts §9](../guides/integration-contracts.md#9-hub-lldap-users-groups)).
-If core doesn't provide it, the tab says user management is disabled and
-everything else keeps working.
+If core doesn't provide it, the people page says user management is disabled
+and everything else keeps working.
 
-The tab has four sections: **People**, **Groups**, **Org chart** and **Setup** (admins only). On `people.<domain>` a fifth, **My apps**, shows each person their own app settings (see [My apps](#my-apps)).
+The people page has the tabs **People**, **Groups**, **Org chart**, **My
+apps** (each person's own app settings, see [My apps](#my-apps)) and
+**Setup** (admins only). Its views are links you can bookmark and share:
+
+| Link | Opens |
+|------|-------|
+| `people.<domain>/#groups` | the groups list |
+| `people.<domain>/#groups/<group>` | a [group's page](groups.md#group-pages), the only place membership changes |
+| `people.<domain>/#people/<name>` | a [person's page](#a-persons-page) (any spelling of the username: `#people/Carol` opens `carol`) |
+| `people.<domain>/#invite?username=&email=&display_name=&groups=` | the invite form, pre-filled (`groups` ticks only plain groups, and only for an admin) |
+
+**Old Hub links keep working.** `hub.<domain>` sends them to the people page
+(same tab, replacing the Hub's entry in the history):
+
+| Old link on `hub.<domain>` | Lands on `people.<domain>` |
+|----------------------------|----------------------------|
+| `#users` | the People list |
+| `#users/<name>` | `#people/<name>`, the person's page |
+| `#users/<name>?password`, `#users/<name>?invite` | the person's page, then the password fallback's or the invite's prompt |
+| `#users?create&<query>` | `#invite?<query>`, the invite form pre-filled |
+| `#groups`, `#groups/<group>`, `#people/<name>` | the same view |
+
+The Portcullis MCP's person forms (`create_person`, `send_invite`,
+`set_password`, the invite note of `remove_passkeys`) link to the people page
+in the same forms.
+
+### Group names link to their pages
+
+Every group name the Hub shows links to that group's page on the people
+page (same tab): the access and admin group of an instance (Overview, the
+Sign-in section, the Delete summary), the rows of
+[Who gets what](#who-gets-what) ("from office_milan", "largest of …",
+"combined from …") and its "N members of office_milan have no access"
+warnings, a privileged option's refused groups, a model provider's **Used
+by** (Settings → AI) and the names in the App Catalog's
+[Missing groups](#missing-groups) banner. On the people page, every group a
+person page or the Used by panel names links to its page too, including each
+group of a combined value's "from".
 
 ### Access levels
 
-- **Admins** (`hub.<domain>`, members of `lldap_admin`) see and can change everything.
-- **Everyone else** (`people.<domain>`, any signed-in user) can view all people, groups, fields and the org chart, with three **delegated permissions** (granted per group by admins):
+- **Admins** (members of `lldap_admin`) see and can change everything.
+- **Everyone else** (any signed-in user) can view all people, groups, fields and the org chart, with three **delegated permissions** (granted per group by admins):
     - **edit details**: edit custom field values of non-protected accounts (single edits and CSV import)
     - **invite**: create new accounts with no groups (invite links only)
     - **remove**: delete accounts
 
-Administrators signed in on `people.<domain>` get the same admin operations there as on `hub.<domain>`: core lets any signed-in user reach `people.<domain>`, and the Hub's own `lldap_admin` check (re-checked on every change) is the gate for admin operations on that listener.
+Core lets any signed-in user reach `people.<domain>`; the Hub's own `lldap_admin` check (re-checked on every change) is the gate for admin operations there.
 
-Delegates cannot target themselves, administrators, the protected accounts (`admin`, `portcullis-hub`), or members of any permission group. Delegates cannot touch manual groups, exceptions or expiries; they can fill in fields that make people match rule-based groups. See [Delegated permissions](#delegated-permissions).
+Delegates cannot target themselves, administrators, the protected accounts (`admin`, `portcullis-hub`), or members of any permission group. Delegates cannot touch manual groups, added-by-hand or kept-out entries, or end dates; they can fill in fields that make people match rule-based groups. They see group members read-only, without the entries' reasons, the Used by panel or History. See [Delegated permissions](#delegated-permissions).
 
 ### People
 
-The **People** table shows every LLDAP user, with the custom field columns, groups (⚡ marks membership via a rule), Keycloak status (passkey count, required actions; admins only) and a search box. Clicking a row opens a dialog with details, groups (how membership was granted, expiries, exceptions), keys (admins only) and actions.
+The **People** table shows every LLDAP user, with the custom field columns, groups (⚡ = matches the rule, ✱ = added by hand, ⏳ = the membership ends), Keycloak status (passkey count, required actions; admins only) and a search box. Clicking a row opens the person's page.
 
-**Invite** (admins and delegates with the `invite` permission): creates a new user. Username (lowercase letters, digits, `.`, `_`, `-`; at least 2 characters), email, display name and groups (admins only). The user gets a **one-time invite link** (shown once, expires in 72 h): they register their passkey and are signed in, no password. A delegate's new account has no groups; filling in fields can make it match rule-based groups. Administrators get no invite links; the Hub shows `./portcullis invite <user>` (server only). Under **Advanced**, admins can use a password fallback instead (generated or typed; 12 to 256 characters).
+**Invite** (admins and delegates with the `invite` permission): creates a new user. Username (lowercase letters, digits, `.`, `_`, `-`; at least 2 characters), email, display name and groups (admins only). The user gets a **one-time invite link** (shown once, expires in 72 h): they register their passkey and are signed in, no password. Administrators get no invite links; the Hub shows `./portcullis invite <user>` (server only). Under **Advanced**, admins can use a password fallback instead (generated or typed; 12 to 256 characters).
+
+The groups pick lists rule-based groups too. A ticked rule-based group shows its rule and either "they match the rule: nothing else needed" or, when the new person won't match it, a required **Reason**: they join it as [added by hand](groups.md#added-by-hand-and-kept-out). After the invite the new person's page opens; if the groups couldn't be applied yet (LLDAP down), it says "saved, not applied yet: …". A delegate's new account has no groups; filling in fields can make it match rule-based groups.
 
 **Import CSV** (admins and delegates with any permission): see [CSV import](#csv-import).
 
-#### Per-person actions (in the dialog)
+### A person's page
+
+`#people/<name>`: everything about one person, for everyone who can see
+people (admins see all of it; others the parts their permissions allow).
+
+- **Header**: display name, username, email, custom fields (a person field
+  links to that person's page), "since … · account created by …", and
+  **Edit details** (admins; delegates with `edit_details` for the accounts
+  they may edit).
+- **Groups**: one row per group, linking to the group's page, with how they
+  are in it: matches the rule, added by hand · until … · "reason", kept out ·
+  "reason", member · until. **Add to group…** (admins) picks a group (rule-based
+  ones too) and opens that group's page with the person already picked in
+  **Add people**, where the end and the reason are set. Membership is never
+  changed on the person's page itself.
+- **Apps** (admins): the apps they reach and through which groups (with
+  "until …" when that membership ends), each app linking to its settings on
+  the Hub and each group to its page.
+- **Values** (admins): their value of each app's per-person settings, with
+  where it comes from ("from office_milan", a combined value's groups,
+  "default", "fail-closed", "own entry"), each linking to the setting on the
+  Hub.
+- **Sign-in**: passkeys and invite status, and the actions below.
+- **History** (admins): the audit entries for this person, newest first, in
+  words ("office_milan: kept carol out — "on leave"", "created the account").
+
+#### Per-person actions
 
 | Action | Who | What it does |
 |--------|-----|--------------|
@@ -1531,9 +1632,9 @@ The **People** table shows every LLDAP user, with the custom field columns, grou
 | Clear pending | Admins | Removes pending required actions |
 | Reset passkeys | Admins | Deletes all passkeys, signs the user out, then creates a new invite (or shows `./portcullis invite <user>` for an administrator). Type the username to confirm |
 | Password… | Admins | Fallback: set or generate a password; signs the user out |
-| Remove | Admins, delegates with `remove` | Deletes the user from LLDAP and Keycloak. Type the username to confirm |
+| Delete | Admins, delegates with `remove` | Deletes the user from LLDAP and Keycloak. Type the username to confirm |
 
-**Remove** deletes the user from LLDAP first (saved as a tombstone to prevent re-creation of names still in exceptions/expiries), then deletes the Keycloak copy. The audit entry records what happened to the copy: `keycloak_copy=removed`, `none` (never imported) or `FAILED`. Delegates can remove only non-protected, non-administrator accounts not in any permission group. If the Keycloak removal fails, the copy is listed under **Stale Keycloak records** (admins only), where it can be removed by id. (Keycloak sometimes answers HTTP 500 after it has removed a federated user's copy; the Hub then looks the user up again and treats "not found" as removed.) The result also warns when other people's person fields (e.g. `manager`) or a rule's `reports to` still name the deleted user — update those.
+**Delete** deletes the user from LLDAP first (saved as a tombstone to prevent re-creation of names still in entries or end dates), then deletes the Keycloak copy. The audit entry records what happened to the copy: `keycloak_copy=removed`, `none` (never imported) or `FAILED`. Delegates can delete only non-protected, non-administrator accounts not in any permission group. If the Keycloak removal fails, the copy is listed under **Stale Keycloak records** (admins only), where it can be removed by id. (Keycloak sometimes answers HTTP 500 after it has removed a federated user's copy; the Hub then looks the user up again and treats "not found" as removed.) The result also warns when other people's person fields (e.g. `manager`) or a rule's `reports to` still name the deleted user — update those. Afterwards the page goes back to the People list.
 
 #### Keycloak status (admins only)
 
@@ -1560,32 +1661,34 @@ The cleanup is **fail safe**: before each run the Hub checks that LLDAP answers,
 
 ### Groups
 
-Lists every LLDAP group with its member count, rule status (manual or rule-based), exceptions, expiries and the apps that use it. Clicking a group expands its details: members (with how they got in: manual, rule, or exception), the rule editor (for rule-based groups), exceptions and expiries, and the apps.
+The **Groups** tab is a table of every LLDAP group: name, kind (rule-based,
+manual or built-in), number of people and what it gives access to (app
+links), with a search box. Every row opens the group's page:
+**[Group pages](groups.md#group-pages)** describes the page (People with how
+each is in, Add people, Keep out…, Change end, Used by, History).
 
-**Create** (admins): enter a group name (`[A-Za-z0-9][A-Za-z0-9_.-]{0,127}`, not starting with `lldap_`; case-insensitively unique). New groups are manual and start clean: if the Hub still has a rule, exceptions, expiries or a permission grant for that name (a group deleted in LLDAP's own UI), they are removed first and a warning lists them.
+**New group** (admins): enter a group name (`[A-Za-z0-9][A-Za-z0-9_.-]{0,127}`, not starting with `lldap_`; case-insensitively unique); its page opens. New groups are manual and start clean: if the Hub still has a rule, entries, end dates or a permission grant for that name (a group deleted in LLDAP's own UI), they are removed first and a warning lists them.
 
-**Delete** (admins): type the name to confirm. Built-in groups (`lldap_admin`, `lldap_password_manager`, core-subdomain groups) can't be deleted. The group is deleted in LLDAP first (if that fails, nothing changes); then its rule, exceptions, expiries and any delegated permission granted to it are removed, so a group created later with the same name inherits nothing. Its former members are signed out of Keycloak.
+**Delete group…** (admins, in the group page's Used by panel): the page states what goes (memberships — the members are signed out —, the rule and its entries, the app setting rows that name it, the permissions it holds, the apps that lose access through it); type the name to confirm. Built-in groups (`lldap_admin`, `lldap_password_manager`, core-subdomain groups) can't be deleted. The group is deleted in LLDAP first (if that fails, nothing changes); then its rule, entries, end dates and any delegated permission granted to it are removed, so a group created later with the same name inherits nothing. Its former members are signed out of Keycloak.
 
-**Add / Remove member** (admins): for manual groups only. Adding someone to an administrator group asks for confirmation. Removing yourself from `lldap_admin` is refused, and the last human member of `lldap_admin` stays. Removing a member also drops their expiry in that group (a later re-add starts without one) and signs them out of Keycloak; if the sign-out fails, the removal stands and a warning says so.
+**Add / Remove** (admins, on the group page): adding someone to an administrator group asks for confirmation. Removing yourself from `lldap_admin` is refused, and the last human member of `lldap_admin` stays. Removing a member also drops their end date in that group (a later re-add starts without one) and signs them out of Keycloak; if the sign-out fails, the removal stands and a warning says so.
 
-**Set expiry** (admins): for manual groups only. Pick a date/time (browser local time, converted to UTC); the membership is removed automatically when it expires. Clear it with **No end**. Refused for `lldap_admin` and for rule-based groups (use an exception instead).
+**End dates** (admins): pick a date/time (browser local time, converted to UTC); the membership is removed automatically when it ends. Clear it with **No end**. Refused for `lldap_admin`. On a rule-based group the end belongs to an added-by-hand or kept-out entry ([End dates](groups.md#end-dates)).
 
-**Missing groups** lists the `access_group` / `admin_group` (e.g. `users_<app>`, `admin_<app>`) of enabled apps that don't exist in LLDAP yet — until they do, nobody can use the app (or administer it). Each has a one-click **Create**. Templates not enabled add nothing here.
+Groups an enabled app needs but that don't exist yet are listed (with one-click **Create**) only in the App Catalog's [Missing groups](#missing-groups) banner.
 
 #### Rule-based groups
 
-Admins can turn a group **rule-based**: membership is computed from custom fields. The rule is edited two ways that stay in sync:
+Admins can turn a group **rule-based** (**Make rule-based…** on its page): membership is computed from custom fields. The rule is edited (**Edit rule…**) two ways that stay in sync:
 
 1. **Blocks** (default): point-and-click all/any blocks, nestable, with conditions `is`, `is not`, `is one of` (list fields), `is empty`, and for person fields `reports to (directly or indirectly)`.
 2. **Text rule**: a typed expression with autocomplete (field names, list values) and inline errors. A toggle switches between them; a parse error refuses the toggle.
 
-A **preview** shows who matches (count and names, live-updated). The Hub evaluates rules at least every 60 seconds, and on every detail change, rule change, exception change and import that affects membership.
+A **preview** shows who matches (count and names, live-updated). The Hub evaluates rules at least every 60 seconds, and about a second after every detail change, rule change, entry change and import that affects membership. **Make manual** turns it back into a manual group.
 
-**Convert a manual group to rule-based** (admins): opens a review. Current members who don't match are pre-ticked to stay as "added" exceptions (reason: "member before the rule (set by X on date)"); untick whoever should leave. Nothing changes until confirmed. The review compares itself with a fresh preview inside the Hub's lock and refuses with 409 if they differ (someone was added/removed in between) — convert again.
+**Convert a manual group to rule-based** (admins): opens a review. Current members who don't match are pre-ticked to stay as added by hand (reason: "member before the rule (set by X on date)"); untick whoever should leave. Nothing changes until confirmed. The review compares itself with a fresh preview inside the Hub's lock and refuses with 409 if they differ (someone was added/removed in between) — convert again.
 
-**Exceptions** (admins, rule-based groups only): **add** someone although the rule doesn't match them (they stay even if the rule changes), or **keep out** someone although the rule matches (the evaluator skips them). Each exception needs a written **reason** (≤ 500 characters, shown to everyone) and may have an **expiry** (date/time; they're removed automatically). The reason is required; without it the save fails.
-
-**Expiries on exceptions**: an expired exception is kept (still denying for "kept out", doing nothing for "added" once the person left) until the person's membership changes (removed, re-added by an admin, another exception, rule add) or an admin deletes the exception.
+**Added by hand and kept out** (admins, rule-based groups only): **Add people** adds someone whatever the rule says (an *added by hand* entry); **Keep out…** keeps someone the rule matches out of the group (a *kept out* entry). Each needs a written **reason** (≤ 500 characters, shown to administrators only) and may have an end. See [Added by hand and kept out](groups.md#added-by-hand-and-kept-out).
 
 #### Protected groups
 
@@ -1599,13 +1702,13 @@ Built-in groups (`lldap_admin`, `lldap_password_manager`, core-subdomain groups)
 
 #### The evaluator
 
-- Runs at least every 60 seconds, and immediately on detail/rule/exception/import changes.
+- Runs at least every 60 seconds, and about a second after every detail/rule/entry/import change.
 - Computes membership of every rule-based group (skips admin/built-in groups).
 - **The Hub owns rule-group membership.** A manual change made in LLDAP to a rule-based group (e.g. in `portcullis lldap-ui`) is reverted at the next evaluation and audited as such.
 - Handles cycles in the manager field (the `reports to` condition stops at the first repeat).
-- Removes expired memberships (manual and exceptions) from LLDAP after their expiry time. Expired entries are kept in the policy file's `expiring` array (plus a 10-minute grace period) so enforcement is strict even while the Hub is down. When group-gate withholds an expired membership for a request, it also withholds `Authorization` and `X-Forwarded-Access-Token`.
-- On every removal, the Hub revokes the user's Keycloak sessions, so OIDC apps lose access at their next token refresh (oauth2-proxy cookie refresh is 1 minute, so removals take effect within ~1 minute). The same happens for an admin's **Remove member**, a group **Delete** (all former members) and a **password** change; deleting a user deletes their Keycloak copy. Keycloak's LDAP federation caches no users, so group and field changes are read from LLDAP at that refresh.
-- An "added" exception with an end date is not published as expiring while the person is a member and matches the rule anyway (they stay by rule after the end); manual expiries and the 10-minute grace entries are always published.
+- Removes ended memberships (manual groups and added-by-hand entries) from LLDAP after their end. Ended entries are kept in the policy file's `expiring` array (plus a 10-minute grace period) so enforcement is strict even while the Hub is down. When group-gate withholds an ended membership for a request, it also withholds `Authorization` and `X-Forwarded-Access-Token`.
+- On every removal, the Hub revokes the user's Keycloak sessions, so OIDC apps lose access at their next token refresh (oauth2-proxy cookie refresh is 1 minute, so removals take effect within ~1 minute). The same happens for an admin's **Remove**, a group **Delete** (all former members) and a **password** change; deleting a user deletes their Keycloak copy. Keycloak's LDAP federation caches no users, so group and field changes are read from LLDAP at that refresh.
+- An added-by-hand entry with an end date is not published as expiring while the person is a member and matches the rule anyway (they stay by rule after the end); manual end dates and the 10-minute grace entries are always published.
 
 ### Org chart
 
@@ -1695,7 +1798,7 @@ routes ([contracts §5.1](../guides/integration-contracts.md#51-people-subdomain
 
 ### Setup (admins only)
 
-Define custom fields and assign delegated permissions.
+Define custom fields and assign delegated permissions. (The audit log is the Hub's [Audit log](#audit-log) tab.)
 
 #### Custom fields
 
@@ -1776,10 +1879,6 @@ This is the same set core's invite API uses. An invite hands the account to whoe
 - The last human member of `lldap_admin` (every member except `portcullis-hub`) can't be deleted or removed from it.
 - Email addresses are unique (case-insensitive).
 - Every change goes through the same proxy-secret and CSRF checks as the rest of the Hub and needs a signed-in user (`X-Forwarded-User`).
-
-### Audit log
-
-Every change, including refused and failed attempts, is appended to `audit.jsonl` in `$HUB_DATA_DIR` (mode 0600). Each entry records the time, actor (`X-Forwarded-User`), action, target, optional detail, result (`ok` / `refused` / `error`) and optional error. The log never contains passwords, tokens or invite links. The tab (admins only on `hub.<domain>`) shows the last 100 entries. On `people.<domain>`, `GET /api/directory/audit` is 403.
 
 ### How passwords are set
 

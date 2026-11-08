@@ -64,7 +64,7 @@ Both apps also have:
 ### 5. Add People
 
 Add the people who should use the instance to its access group,
-`users_<id>` (e.g. `users_samba-office`), in [Users & Groups](hub.md#users-groups-tab).
+`users_<id>` (e.g. `users_samba-office`), in [Users & Groups](hub.md#users-groups).
 Only members of that group see the instance on My apps and can create a
 password. On Samba, put people in the reader and writer groups of the
 shares they should open too. To share a folder with everyone who has
@@ -133,7 +133,7 @@ Windows then shows the share in This PC → Network Locations.
 
 ## Managing People
 
-**People should be managed through the Hub's [Users & Groups](hub.md#users-groups-tab), not directly in LLDAP.** Here's why:
+**People should be managed through the Hub's [Users & Groups](hub.md#users-groups), not directly in LLDAP.** Here's why:
 
 - **Hub-made changes** (removing a member, deleting a user or group) revoke file-share passwords **at once**, with no delay.
 - **LLDAP-direct changes** (e.g. removing a user from a group in LLDAP's web UI) are caught by the evaluator's 60-second tick. The worst case is **about 60 seconds plus the revocation hook**; measured: 3.4–51.8 seconds. A changed LLDAP password doesn't touch the file-share password: they are separate.
