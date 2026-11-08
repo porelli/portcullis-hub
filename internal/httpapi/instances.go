@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"regexp"
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/hub"
@@ -449,11 +450,16 @@ func (s *Server) handleInstanceOp(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, rec)
 }
 
+// stopOpIDRe is an operation id (hub.newOpID: 16 lowercase hex digits).
+var stopOpIDRe = regexp.MustCompile(`^[0-9a-f]{16}$`)
+
 // handleStopOp stops the instance's operation and undoes what it did
-// (contract §11.7 "Stop"; body {}): 202 with the record (stopping); 409
-// with the record when nothing runs, past the point of no return or
-// already stopping; 404 for an unknown instance or no record. Audited
-// <op>.stop by the Hub.
+// (contract §11.7 "Stop"; body {"op_id": "<16 hex>"} — only that
+// operation, another one now is 409 "the operation changed" with the
+// current record, nothing stopped; {} — whatever runs, for API callers):
+// 202 with the record (stopping); 409 with the record when nothing
+// runs, past the point of no return or already stopping; 404 for an
+// unknown instance or no record. Audited <op>.stop by the Hub.
 func (s *Server) handleStopOp(w http.ResponseWriter, r *http.Request) {
 	if !s.adminOnly(w, r) {
 		return
@@ -462,11 +468,22 @@ func (s *Server) handleStopOp(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var b struct{}
-	if !decodeStrict(w, r, &b, `{}`) {
+	var b struct {
+		OpID *string `json:"op_id"`
+	}
+	const usage = `{} or {"op_id": "<16 hex>"}`
+	if !decodeStrict(w, r, &b, usage) {
 		return
 	}
-	rec, err := s.stopOp(requestActor(r), id, "")
+	expected := ""
+	if b.OpID != nil {
+		if !stopOpIDRe.MatchString(*b.OpID) {
+			http.Error(w, "body must be "+usage, http.StatusBadRequest)
+			return
+		}
+		expected = *b.OpID
+	}
+	rec, err := s.stopOp(requestActor(r), id, expected)
 	noStore(w)
 	if err != nil {
 		writeErr(w, err, http.StatusInternalServerError)

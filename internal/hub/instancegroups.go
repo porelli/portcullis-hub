@@ -62,7 +62,7 @@ type EnableResult struct {
 // a *BusyError carrying the running record.
 func (h *Hub) EnableAs(id string, actor directory.Actor) (*EnableResult, error) {
 	res := &EnableResult{}
-	_, _, err := h.runOpSync(id, OpEnable, actor, h.enablePlan(id), func(ctx context.Context, ready func()) (map[string]string, []string, error) {
+	_, _, err := h.runOpSync(id, OpEnable, actor, []Step{}, func(ctx context.Context, ready func()) (map[string]string, []string, error) {
 		r, err := h.runEnable(ctx, id, actor, ready)
 		res = r
 		return nil, r.Warnings, err

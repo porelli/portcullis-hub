@@ -213,7 +213,8 @@ func (h *Hub) deleteRun(ctx context.Context, p *Progress, id string, actor direc
 		if isStopErr(err) && p.Stopping() {
 			return err // stopped before the point of no return: undoDelete
 		}
-		return h.finishOp(id, OpDelete, withSecrets(fmt.Errorf("delete of %s stopped part-way (it stays \"deleting\"; delete again to continue, the backup %s is kept): %w", id, res.Backup, err), extra), false)
+		err = withSecrets(fmt.Errorf("delete of %s stopped part-way (it stays \"deleting\"; delete again to continue, the backup %s is kept): %w", id, res.Backup, err), extra)
+		return &OpError{Record: h.opRecordOf(id, OpDelete, err, false), Err: err}
 	}
 	log.Printf("instance %s deleted (backup %s)", id, res.Backup)
 	return nil

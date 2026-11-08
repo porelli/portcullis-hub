@@ -826,3 +826,59 @@ func TestStopOpExpect(t *testing.T) {
 		t.Fatalf("record %+v", r)
 	}
 }
+
+// TestStopFailedEnableGate: a failed enable (compose up fails) closes
+// its Stop gate too. A Stop accepted after the failure but before the
+// gate runs the undo (the record ends stopped, never "undo failed");
+// without one, the gate closes: the record is the failure, not
+// stoppable, and a later Stop is refused.
+func TestStopFailedEnableGate(t *testing.T) {
+	for _, stop := range []bool{true, false} {
+		t.Run(map[bool]string{true: "stop", false: "nostop"}[stop], func(t *testing.T) {
+			f := stopFixture(t)
+			f.runner.mu.Lock()
+			f.runner.upErr = errors.New("up failed")
+			f.runner.mu.Unlock()
+			reached, release := make(chan struct{}), make(chan struct{})
+			var once sync.Once
+			f.h.testHookCommit = func(id, s string) {
+				if s == "enable_failed" {
+					once.Do(func() { close(reached); <-release })
+				}
+			}
+			t.Cleanup(func() {
+				select {
+				case <-release:
+				default:
+					close(release)
+				}
+			})
+			a, err := f.h.StartEnable("other", directory.Human("alice"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			<-reached
+			if stop {
+				rec, err := f.h.StopOp("other", directory.Human("bob"))
+				if err != nil || !rec.Stopping {
+					t.Fatalf("stop after the failure, before the gate: %+v %v", rec, err)
+				}
+			}
+			close(release)
+			r := waitOp(t, f.h, "other", a.OpID)
+			if stop {
+				if !r.Stopped() || r.Error != "" || r.Stoppable || r.StoppedBy != "bob" {
+					t.Fatalf("record: %+v", r)
+				}
+				f.nothingLeft(t, r, "bob")
+				return
+			}
+			if r.OK || r.Stopping || r.StoppedBy != "" || r.Stoppable || !strings.Contains(r.Error, "up failed") || r.OpID != a.OpID {
+				t.Fatalf("record: %+v", r)
+			}
+			if rec, err := f.h.StopOp("other", directory.Human("bob")); statusOf(err) != 409 || rec == nil || rec.Stopping {
+				t.Fatalf("stop after the failed enable: %+v %v", rec, err)
+			}
+		})
+	}
+}

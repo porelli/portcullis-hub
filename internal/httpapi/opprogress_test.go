@@ -166,7 +166,7 @@ func TestBusyAndStopRoutes(t *testing.T) {
 		}
 	}
 	// The Stop route: strict body, admins only, Hub listener only.
-	for _, body := range []string{``, `{"x":1}`, `{} {}`} {
+	for _, body := range []string{``, `{"x":1}`, `{} {}`, `{"op_id":""}`, `{"op_id":"XYZ"}`, `{"op_id":"0123456789ABCDEF"}`, `{"op_id":1}`, `{"op_id":"` + acc.OpID + `","x":1}`} {
 		if code, b := e.do(t, "root", "POST", "/api/instances/grafana-a/op/stop", body); code != 400 {
 			t.Errorf("stop body %q = %d %s, want 400", body, code, b)
 		}
@@ -198,9 +198,21 @@ func TestBusyAndStopRoutes(t *testing.T) {
 	if !e.s.Hub.LastOp("grafana-a").Running || e.s.Hub.LastOp("grafana-a").Stopping {
 		t.Fatal("a refused Stop stopped the enable")
 	}
-	// Stop: 202 with the stopping record.
-	r, body := doAs(t, e.hub, "root", "POST", "/api/instances/grafana-a/op/stop", `{}`)
+	// Another operation's id (the one the admin saw ended, this one
+	// started in the poll gap): 409 "the operation changed" with the
+	// current record, nothing stopped.
+	r, body := doAs(t, e.hub, "root", "POST", "/api/instances/grafana-a/op/stop", `{"op_id":"0123456789abcdef"}`)
 	var rec hub.OpRecord
+	if r.StatusCode != 409 || !strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") ||
+		json.Unmarshal([]byte(body), &rec) != nil || rec.OpID != acc.OpID || !rec.Running {
+		t.Fatalf("stop of another op id = %d %s", r.StatusCode, body)
+	}
+	if cur := e.s.Hub.LastOp("grafana-a"); !cur.Running || cur.Stopping {
+		t.Fatalf("a Stop of another op id stopped the enable: %+v", cur)
+	}
+	// Stop of the running op id: 202 with the stopping record.
+	r, body = doAs(t, e.hub, "root", "POST", "/api/instances/grafana-a/op/stop", `{"op_id":"`+acc.OpID+`"}`)
+	rec = hub.OpRecord{}
 	if r.StatusCode != 202 || json.Unmarshal([]byte(body), &rec) != nil || !rec.Stopping || rec.StoppedBy != "root" || rec.OpID != acc.OpID {
 		t.Fatalf("stop = %d %s", r.StatusCode, body)
 	}
@@ -225,9 +237,9 @@ func TestBusyAndStopRoutes(t *testing.T) {
 	if code, b := e.do(t, "root", "POST", "/api/instances/home/op/stop", `{}`); code != 404 {
 		t.Errorf("stop without a record = %d %s", code, b)
 	}
-	// Audited enable.stop (ok, then refused) by root.
+	// Audited enable.stop (refused: changed; ok; refused) by root.
 	got := strings.Join(e.auditActions(t, "enable.stop"), ",")
-	if got != "enable.stop:ok:root:grafana-a,enable.stop:refused:root:grafana-a" {
+	if got != "enable.stop:refused:root:grafana-a,enable.stop:ok:root:grafana-a,enable.stop:refused:root:grafana-a" {
 		t.Errorf("stop audit = %s", got)
 	}
 }

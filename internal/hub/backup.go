@@ -536,7 +536,12 @@ func (h *Hub) backupCtx(ctx context.Context, id, reason string, keepStopped bool
 					err = fmt.Errorf("%w — and starting %s again failed: %v", err, id, rerr)
 				}
 				p.Fail(StepStart, rerr)
-				return entry, h.finishOp(id, OpRestart, err, false)
+				// The operation's own outcome (every caller runs inside
+				// one: a manual backup, a delete's or restore's
+				// pre-backup): never a separate record over its running
+				// one. An OpError, so a written archive stays the
+				// result.
+				return entry, &OpError{Record: h.opRecordOf(id, OpBackup, err, false), Err: err}
 			}
 			p.Done(StepStart)
 		}

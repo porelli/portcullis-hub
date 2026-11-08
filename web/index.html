@@ -954,6 +954,7 @@
     // A detail may hold several lines (newlines, or "; " between images).
     function oppLines(d) { return String(d || '').split(/\n|; /).map(x => x.trim()).filter(Boolean); }
     function oppPhase(r) {
+      if (r.replaced_by) return 'replaced';
       if (r.running) return r.stopping ? 'stopping' : 'running';
       if (r.ok) return 'ok';
       if (r.stopped_at && !r.error) return 'stopped';
@@ -978,6 +979,7 @@
         case 'stopped': return r.op === 'ai' ? 'AI support for ' + app + ' was not switched' : app + ' was not ' + w.ed;
         case 'undo_failed': return 'Stopping ' + app + ' — the undo failed';
         case 'interrupted': return w.ing + ' ' + app + ' was interrupted';
+        case 'replaced': return w.ing + ' ' + app + ' ended';
       }
       return w.ing + ' ' + app + ' failed';
     }
@@ -1054,6 +1056,11 @@
       if (phase === 'interrupted') {
         h += '<div class="opp-note warn">interrupted: the Hub stopped while this ran.' +
           (r.stoppable ? ' Stop undoes what it did.' : ' It can\'t be stopped from here.') + '</div>';
+      }
+      if (phase === 'replaced') {
+        const b = r.replaced_by, bw = opWords(b.op);
+        h += '<div class="opp-note warn">It ended before its outcome could be read: a newer record (' + escapeHtml(lcFirst(bw.short)) + ': ' +
+          escapeHtml(b.ok ? 'ok' : (b.error || 'failed')) + ') replaced it. Check the app to see where it stands.</div>';
       }
       if (opp.notice) h += '<div class="opp-note bad" role="status">' + escapeHtml(opp.notice) + '</div>';
       const steps = r.steps || [];
@@ -1143,35 +1150,45 @@
     function oppOpen() { return document.getElementById('op-panel').open; }
 
     // Stop: 202 with the record (stopping), or 409 with the record and
-    // why (nothing to stop, past the point of no return, finishing).
+    // why (nothing to stop, past the point of no return, finishing, or
+    // another operation is the instance's now). It names the operation
+    // shown (op_id): a newer one that started in the poll gap is never
+    // the one stopped.
     async function oppStop() {
       const id = opp.id, tr = opTracks[id];
       if (!tr || !tr.rec) return;
+      const sent = tr.rec.op_id || '';
       opp.confirm = false;
       opp.sending = true;
       opp.notice = '';
-      opp.stopSent[tr.rec.op_id] = true;
+      opp.stopSent[sent] = true;
       renderOpPanel();
       let rec = null, status = 0;
       const seq = opBegin(id);
       try {
-        const res = await fetch('/api/instances/' + encodeURIComponent(id) + '/op/stop', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+        const res = await fetch('/api/instances/' + encodeURIComponent(id) + '/op/stop', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(sent ? { op_id: sent } : {}) });
         status = res.status;
         if ((res.headers.get('Content-Type') || '').includes('application/json')) rec = await res.json();
         else opp.notice = 'Stop failed: ' + ((await res.text()).trim() || 'HTTP ' + status);
       } catch (e) { opp.notice = 'Stop failed: ' + (e.message || e); }
       opp.sending = false;
       if (rec && rec.op && status === 202) opEnded.delete(id + '/' + rec.op_id); // resumed: its undo runs
-      if (rec && rec.op && opFresh(id, seq) && !opSeenEnded(id, rec)) {
+      const changed = !!(rec && rec.op && sent && rec.op_id !== sent);
+      if (changed) {
+        // Another operation's record: the poller decides what it means
+        // for the one shown (followed when it runs, else "replaced").
+        if (opTracks[id] === tr && !tr.ended) scheduleTrack(tr, 0);
+      } else if (rec && rec.op && opFresh(id, seq) && !opSeenEnded(id, rec)) {
         setTrackRec(tr, rec);
         if (rec.running) { tr.ended = false; scheduleTrack(tr, 1000); }
         else if (!tr.ended) endTrack(tr);
       }
-      if (status === 409) opp.notice = 'Stop refused: ' + oppStopRefusal(rec);
+      if (status === 409) opp.notice = 'Stop refused: ' + oppStopRefusal(rec, changed);
       if (opp.id === id) renderOpPanel();
     }
-    function oppStopRefusal(r) {
+    function oppStopRefusal(r, changed) {
       if (!r || !r.op) return 'the Hub refused it';
+      if (changed) return 'the operation changed — ' + (r.running ? 'another one runs now (' + lcFirst(opWords(r.op).short) + '), nothing was stopped' : 'the one shown already ended, nothing was stopped');
       if (!r.running) return r.ok ? 'it finished before Stop took effect' : 'nothing to stop, the operation already ended';
       if (r.point_of_no_return) return 'past the point of no return — finishing';
       if (r.stopping) return 'it is already stopping';
@@ -1235,11 +1252,21 @@
       // A newer answer was applied meanwhile (it scheduled what follows).
       if (rec && !opFresh(tr.id, seq)) return;
       if (opSeenEnded(tr.id, rec)) rec = null;
-      if (rec && rec.op_id && tr.opId && rec.op_id !== tr.opId) {
-        // A newer operation replaced the record: ours ended unseen.
-        tr.waiters.splice(0).forEach(w => w(null));
-        tr.opId = rec.op_id;
-        tr.ended = false;
+      if (rec && rec.op && tr.opId && rec.op_id !== tr.opId) {
+        if (rec.running) {
+          // A newer operation runs: ours ended unseen, the panel follows
+          // the new one.
+          tr.waiters.splice(0).forEach(w => w(null));
+          tr.opId = rec.op_id;
+          tr.ended = false;
+        } else {
+          // An ended record that isn't ours (a newer operation's, or one
+          // written after ours ended): never shown as ours. Ours ended
+          // unseen: it ends as "replaced", its last steps kept.
+          const by = { op: rec.op, ok: !!rec.ok, error: rec.error || '' };
+          const last = tr.rec && tr.rec.op_id === tr.opId ? tr.rec : { op: (tr.rec && tr.rec.op) || rec.op, steps: [] };
+          rec = Object.assign({}, last, { op_id: tr.opId, running: false, stoppable: false, stopping: false, replaced_by: by });
+        }
       }
       if (rec && rec.op) setTrackRec(tr, rec);
       if (tr.rec && tr.rec.op && !tr.rec.running && !tr.err) endTrack(tr);
@@ -1266,7 +1293,7 @@
         const ph = oppPhase(r);
         showToast(oppTitle(r, opAppName(tr.id)), ph === 'ok' || ph === 'stopped' ? 'success' : 'error');
       }
-      ws.forEach(w => w(r));
+      ws.forEach(w => w(r && r.replaced_by ? null : r));
       if (openDetailId === tr.id) loadOpBanner(tr.id);
     }
     // A reload (server-rendered cards) once no dialog is open.

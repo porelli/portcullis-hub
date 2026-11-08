@@ -435,7 +435,8 @@ type Hub struct {
 	// (op, step key), without any lock held (tests block a step there).
 	testHookStepStart func(op, key string)
 	// testHookCommit, if set, runs right before ("before") and right
-	// after ("after") an enable's commit gate, no lock held.
+	// after ("after") an enable's commit gate, and ("enable_failed")
+	// before a failed enable closes its gate, no lock held.
 	testHookCommit func(id, stage string)
 	// testHookResume, if set, runs in resumeStop before it takes the
 	// instance's lock (tests interleave a second request there).

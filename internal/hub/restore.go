@@ -291,7 +291,7 @@ func (h *Hub) restoreSteps(ctx context.Context, p *Progress, id, archive string,
 	p.Start(StepVerify)
 	if e.State == state.InstanceRestoring {
 		// An interrupted restore: put its pre-restore backup back first.
-		if err := h.recoverRestoreLocked(id, view, e.Backup); err != nil {
+		if err := h.recoverRestoreLocked(id, view, e.Backup, p); err != nil {
 			return err
 		}
 		if view, e, err = h.restoreTarget(id); err != nil {
@@ -410,17 +410,17 @@ func (h *Hub) restoreSteps(ctx context.Context, p *Progress, id, archive string,
 		return nil
 	}
 	// Put the previous data back.
-	rerr := h.stagedRollback(id, view, pre.Archive, wasEnabled)
+	rerr := h.stagedRollback(id, view, pre.Archive, wasEnabled, p)
 	if rerr != nil {
-		applyErr = fmt.Errorf("restore from %s failed: %w — putting the pre-restore backup %s back failed too: %v (it stays \"restoring\": restore again once the cause is fixed, the pre-restore backup is put back first)", archive, applyErr, pre.Archive, rerr)
-		return h.finishOp(id, OpRestore, withSecrets(applyErr, extra), false)
+		applyErr = withSecrets(fmt.Errorf("restore from %s failed: %w — putting the pre-restore backup %s back failed too: %v (it stays \"restoring\": restore again once the cause is fixed, the pre-restore backup is put back first)", archive, applyErr, pre.Archive, rerr), extra)
+		return &OpError{Record: h.opRecordOf(id, OpRestore, applyErr, false), Err: applyErr}
 	}
 	if cerr := h.clearRestoring(id, keep); cerr != nil {
 		res.Warnings = append(res.Warnings, cerr.Error())
 	}
 	h.writePolicyLogged()
-	applyErr = fmt.Errorf("restore from %s failed: %w — the previous data was put back (pre-restore backup %s)", archive, applyErr, pre.Archive)
-	return h.finishOp(id, OpRestore, withSecrets(applyErr, extra), true)
+	applyErr = withSecrets(fmt.Errorf("restore from %s failed: %w — the previous data was put back (pre-restore backup %s)", archive, applyErr, pre.Archive), extra)
+	return &OpError{Record: h.opRecordOf(id, OpRestore, applyErr, true), Err: applyErr}
 }
 
 // recordAfterOp records op's failure err on id after the running
@@ -536,14 +536,21 @@ func (h *Hub) clearRestoring(id, keep string) error {
 // pre-restore backup (its directory and manifest name id, its template
 // is the instance's, its reason is restore) and verify; anything else is
 // refused (409) and nothing is touched. Caller holds the app lock.
-func (h *Hub) recoverRestoreLocked(id string, view *templates.Template, preArchive string) error {
+// p: the restore operation it runs in (its outcome folded into that
+// operation's: the failure returned, the rollback a warning), nil at
+// start-up (RecoverRestores: recorded as the instance's restore record).
+func (h *Hub) recoverRestoreLocked(id string, view *templates.Template, preArchive string, p *Progress) error {
 	pre, err := h.stagePreRestore(id, view, preArchive)
 	if err != nil {
 		return err
 	}
 	defer pre.cleanup()
-	if err := h.rollbackStaged(id, view, pre, pre.cfg.Enabled); err != nil {
-		return h.finishOp(id, OpRestore, fmt.Errorf("rolling back the unfinished restore of %s from %s failed (it stays \"restoring\"): %w", id, preArchive, err), false)
+	if err := h.rollbackStaged(id, view, pre, pre.cfg.Enabled, p); err != nil {
+		err = fmt.Errorf("rolling back the unfinished restore of %s from %s failed (it stays \"restoring\"): %w", id, preArchive, err)
+		if p != nil {
+			return err
+		}
+		return h.finishOp(id, OpRestore, err, false)
 	}
 	keep := ""
 	if pre.cfg.State == state.InstanceCreated {
@@ -555,7 +562,12 @@ func (h *Hub) recoverRestoreLocked(id string, view *templates.Template, preArchi
 	log.Printf("instance %s: unfinished restore rolled back from %s", id, preArchive)
 	// Recorded (the ops record says what happened), not returned: the
 	// instance is consistent again.
-	_ = h.finishOp(id, OpRestore, fmt.Errorf("an unfinished restore of %s was rolled back from its pre-restore backup %s", id, preArchive), true)
+	msg := fmt.Sprintf("an unfinished restore of %s was rolled back from its pre-restore backup %s", id, preArchive)
+	if p != nil {
+		p.Warn(msg)
+		return nil
+	}
+	_ = h.finishOp(id, OpRestore, errors.New(msg), true)
 	return nil
 }
 
@@ -606,7 +618,7 @@ func (h *Hub) RecoverRestores() {
 			}
 			view, e, err := h.restoreTarget(id)
 			if err == nil && e.State == state.InstanceRestoring {
-				err = h.recoverRestoreLocked(id, view, e.Backup)
+				err = h.recoverRestoreLocked(id, view, e.Backup, nil)
 			}
 			if err != nil {
 				log.Printf("instance %s: unfinished restore: %v", id, err)
@@ -888,18 +900,21 @@ type aiRestore struct {
 
 // stagedRollback puts the pre-restore backup preArchive back after a
 // failed restore (verified as id's own first).
-func (h *Hub) stagedRollback(id string, view *templates.Template, preArchive string, wasEnabled bool) error {
+func (h *Hub) stagedRollback(id string, view *templates.Template, preArchive string, wasEnabled bool, p *Progress) error {
 	pre, err := h.stagePreRestore(id, view, preArchive)
 	if err != nil {
 		return err
 	}
 	defer pre.cleanup()
-	return h.rollbackStaged(id, view, pre, wasEnabled)
+	return h.rollbackStaged(id, view, pre, wasEnabled, p)
 }
 
 // rollbackStaged puts a staged pre-restore backup back: its volumes,
 // files and settings; the project's volumes it doesn't have are emptied.
-func (h *Hub) rollbackStaged(id string, view *templates.Template, pre *staged, wasEnabled bool) error {
+// A companion whose revoke_all failed is off (§11.6): within operation p
+// a warning of it (the operation failed or was stopped: its own record
+// is the instance's), without one (start-up) the instance's ai record.
+func (h *Hub) rollbackStaged(id string, view *templates.Template, pre *staged, wasEnabled bool, p *Progress) error {
 	// A failed enable already rolled its compose up back; make sure.
 	if err := h.stopProject(&target{id: id, view: view}); err != nil {
 		return fmt.Errorf("compose down: %w", err)
@@ -913,7 +928,11 @@ func (h *Hub) rollbackStaged(id string, view *templates.Template, pre *staged, w
 		log.Printf("instance %s: rollback: %s", id, w)
 	}
 	if err == nil && air.err != nil {
-		h.finishOp(id, OpAI, air.err, false)
+		if p != nil {
+			p.Warn("AI support: " + h.opRecordOf(id, OpAI, air.err, false).Error)
+		} else {
+			h.finishOp(id, OpAI, air.err, false)
+		}
 	}
 	return err
 }

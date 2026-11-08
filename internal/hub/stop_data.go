@@ -125,7 +125,7 @@ func (h *Hub) undoRestore(id string, p *Progress) error {
 			if view == nil {
 				return statusErr(409, "the template of %s is gone: the pre-restore backup %s can't be put back", id, pre)
 			}
-			if err := h.stagedRollback(id, view, pre, wasEnabled); err != nil {
+			if err := h.stagedRollback(id, view, pre, wasEnabled, p); err != nil {
 				return err
 			}
 			if cerr := h.clearRestoring(id, keep); cerr != nil {

@@ -2,10 +2,12 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -675,5 +677,65 @@ func TestStopBackupNotRunningStartsNothing(t *testing.T) {
 	}
 	if calls := f.runner.Calls()[n:]; len(calls) != 0 || grafanaRunning(f) {
 		t.Errorf("started: %v", calls)
+	}
+}
+
+// TestBackupRestartFailsKeepsRecord: a backup whose start-again fails
+// ends with its own record — op backup, its op id, its steps (start
+// failed), the archive as its result — and the restart's failure as its
+// error; no separate restart record replaces it.
+func TestBackupRestartFailsKeepsRecord(t *testing.T) {
+	f, _, _ := grafanaB(t)
+	f.runner.mu.Lock()
+	f.runner.upErr = errors.New("up failed")
+	f.runner.mu.Unlock()
+	// Every record written while it runs is the backup's (the start
+	// step's Start is the last one before the failure).
+	var foreign []string
+	var mu sync.Mutex
+	f.h.testHookStepStart = func(op, key string) {
+		if key != StepStart {
+			return
+		}
+		go func() {
+			for i := 0; i < 2000; i++ {
+				if lo := f.h.LastOp("grafana-b"); lo != nil && lo.Op != OpBackup {
+					mu.Lock()
+					foreign = append(foreign, lo.Op+":"+lo.OpID)
+					mu.Unlock()
+					return
+				}
+				time.Sleep(50 * time.Microsecond)
+			}
+		}()
+	}
+	a, err := f.h.StartBackup("grafana-b", directory.Human("alice"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := waitOp(t, f.h, "grafana-b", a.OpID)
+	time.Sleep(150 * time.Millisecond)
+	mu.Lock()
+	if len(foreign) > 0 {
+		t.Errorf("another record replaced the running backup's: %v", foreign)
+	}
+	mu.Unlock()
+	if r.Op != OpBackup || r.OpID != a.OpID || r.OK || r.Running || r.Actor != "alice" {
+		t.Fatalf("record %+v", r)
+	}
+	if !strings.Contains(r.Error, "was written, but starting grafana-b again failed") || !strings.Contains(r.Error, "up failed") {
+		t.Errorf("error %q", r.Error)
+	}
+	if got := stepKeys(r); !slices.Equal(got, []string{StepStop, "volume:grafana-data", StepArchive, StepStart}) {
+		t.Fatalf("steps %v", got)
+	}
+	if s := stepOf(r, StepStart); s.State != StepFailed {
+		t.Errorf("start step %+v", s)
+	}
+	if stepOf(r, StepArchive).State != StepDone || r.Result["archive"] == "" {
+		t.Errorf("archive step %+v, result %v", stepOf(r, StepArchive), r.Result)
+	}
+	if lo := f.h.LastOp("grafana-b"); lo == nil || lo.OpID != a.OpID || lo.Op != OpBackup {
+		t.Errorf("last op %+v", lo)
 	}
 }

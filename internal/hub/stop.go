@@ -63,7 +63,10 @@ const (
 
 // enablePlan is id's enable steps: groups when the instance has any,
 // keycloak when Keycloak is wired, then the start's. An instance enabled
-// already only checks its groups.
+// already only checks its groups. runEnable plans them under id's lock,
+// before the enable is accepted (a disable that ends in between can't
+// leave a plan without create / start: its volumes would not be in the
+// ledger, its undo would skip the down).
 func (h *Hub) enablePlan(id string) []Step {
 	h.mu.RLock()
 	var groups bool
@@ -102,7 +105,7 @@ func (h *Hub) enablePlan(id string) []Step {
 // (detail groups_created=…) with the outcome — a refusal at once, else
 // when the operation ended (a Stop: refused).
 func (h *Hub) StartEnable(id string, actor directory.Actor) (*AsyncOp, error) {
-	return h.startAsync(id, OpEnable, actor, h.enablePlan(id), func(ctx context.Context, ready func()) (map[string]string, []string, error) {
+	return h.startAsync(id, OpEnable, actor, []Step{}, func(ctx context.Context, ready func()) (map[string]string, []string, error) {
 		res, err := h.runEnable(ctx, id, actor, ready)
 		var result map[string]string
 		detail := ""
@@ -132,26 +135,33 @@ func (h *Hub) runEnable(ctx context.Context, id string, actor directory.Actor, r
 	if err != nil {
 		return res, err
 	}
-	ready()
 	p := progressFrom(ctx)
+	// The plan, under the lock: what the instance is now (enabled or
+	// not) decides it.
+	for _, s := range h.enablePlan(id) {
+		p.AddStep(s.Key, s.Label)
+	}
+	ready()
 	rolledBack, err := h.enableSteps(ctx, p, id, actor, todo, res)
-	// An enable that commits closed stopping at its gate (enableInner);
-	// one with nothing to commit (enabled already) closes it here: a Stop
-	// accepted before is undone, none is accepted after.
-	if err == nil && p.CloseStop() {
-		return res, nil
+	if err != nil && h.testHookCommit != nil {
+		h.testHookCommit(id, "enable_failed")
 	}
-	if p.Stopping() {
-		if uerr := h.undoEnable(id, p); uerr != nil {
-			return res, uerr
+	// The commit gate. An enable that commits closed it there
+	// (enableInner); one with nothing to commit (enabled already) or one
+	// that failed closes it here: a Stop accepted before is undone (a
+	// failure's included: never an undo-failed record for a Stop that
+	// came after the failure), none is accepted after.
+	if p.CloseStop() {
+		var oe *OpError
+		if err == nil || errors.As(err, &oe) {
+			return res, err
 		}
-		return res, ErrStopped
+		return res, &OpError{Record: h.opRecordOf(id, OpEnable, err, rolledBack), Err: err}
 	}
-	var oe *OpError
-	if errors.As(err, &oe) {
-		return res, err
+	if uerr := h.undoEnable(id, p); uerr != nil {
+		return res, uerr
 	}
-	return res, &OpError{Record: h.opRecordOf(id, OpEnable, err, rolledBack), Err: err}
+	return res, ErrStopped
 }
 
 // enablePrecheck is the enable's refusals before it is accepted: the
@@ -514,11 +524,9 @@ const (
 // undoDisable turns the app back on (contract §11.7 "Disable"), from p's
 // record: its extra-domain sign-in callbacks added back when the
 // callbacks step ran (what an enable adds), then — the stop step ran —
-// the project brought up with its current files while the instance is
-// still enabled (a disable stopped before its commit), or the instance
-// enabled again exactly like an enable (enableInner: a disable the Hub
-// stopped after its commit). Nothing new is created. Caller holds id's
-// lock.
+// the project brought up with its current files (the instance is still
+// enabled: a disable is only stoppable before its commit). Nothing new
+// is created. Caller holds id's lock.
 func (h *Hub) undoDisable(id string, p *Progress) error {
 	ctx := context.Background()
 	rec := p.snapshot()
@@ -552,9 +560,12 @@ func (h *Hub) undoDisable(id string, p *Progress) error {
 			if tmpl == nil {
 				return statusErr(409, "the template of %s is gone: it can't be started again", id)
 			}
+			// A committed disable is never stoppable: its commit gate
+			// (CloseStop) writes stoppable false before the state is
+			// saved, and an interrupted record keeps it. Disabled here
+			// can't happen; refused, never enabled from the undo.
 			if !h.IsEnabled(id) {
-				_, err := h.enableInner(ctx, id, false)
-				return err
+				return statusErr(409, "%s is disabled already: a committed disable can't be undone", id)
 			}
 			if err := h.composeUp(ctx, tmpl); err != nil {
 				if composeFailed(err) {
