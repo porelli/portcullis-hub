@@ -145,13 +145,21 @@ func validateSetup(m *Manifest, compose []byte, routes *Routes) error {
 			return fmt.Errorf("jobs: %s is not a compose service", j)
 		case listed[j]:
 			return fmt.Errorf("jobs: %s is listed twice", j)
-		case routes != nil && len(routes.Routers[j]) > 0:
-			return fmt.Errorf("jobs: %s has a Traefik router: a one-off job serves nothing", j)
 		}
 		listed[j] = true
 	}
+	// Every job, listed or found through depends_on, serves nothing.
+	jobs := JobServices(m, compose)
+	for _, j := range keysOf(jobs) {
+		if routes != nil && len(routes.Routers[j]) > 0 {
+			return fmt.Errorf("jobs: %s has a Traefik router: a one-off job serves nothing", j)
+		}
+	}
 	profiled, err := ServiceProfiles(compose)
 	if err != nil {
+		return err
+	}
+	if err := unprofiledDependents(compose, profiled); err != nil {
 		return err
 	}
 	known := map[string]bool{}
@@ -169,12 +177,7 @@ func validateSetup(m *Manifest, compose []byte, routes *Routes) error {
 			}
 		}
 	}
-	names := make([]string, 0, len(profiled))
-	for s := range profiled {
-		names = append(names, s)
-	}
-	sort.Strings(names)
-	for _, s := range names {
+	for _, s := range keysOf(profiled) {
 		ok := false
 		for _, p := range profiled[s] {
 			ok = ok || started[p]
@@ -197,7 +200,7 @@ func setupOption(o *Option, known, started map[string]bool) error {
 	if o.FixedAfterStart && !o.Setup {
 		return fmt.Errorf("fixed_after_start needs setup: true")
 	}
-	if o.Profiles == nil {
+	if o.Profiles == nil && !o.profilesNull {
 		return nil
 	}
 	if !o.Setup || o.Type != TypeEnum || !instance {
@@ -231,6 +234,62 @@ func setupOption(o *Option, known, started map[string]bool) error {
 				return fmt.Errorf("profiles.%s: profile %s is on no compose service", k, p)
 			}
 			started[p] = true
+		}
+	}
+	return nil
+}
+
+func keysOf[V any](m map[string]V) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// unprofiledDependents refuses a service without profiles that names a
+// profiled service in depends_on, network_mode: service:<x> or
+// volumes_from: compose can't start it for a setup choice that leaves
+// that service off (§13.18).
+func unprofiledDependents(compose []byte, profiled map[string][]string) error {
+	svcs, err := composeServices(compose)
+	if err != nil {
+		return err
+	}
+	for _, name := range keysOf(svcs) {
+		if _, ok := profiled[name]; ok {
+			continue
+		}
+		s := svcs[name]
+		refs := map[string]string{} // named service → the field naming it
+		switch deps := s["depends_on"].(type) {
+		case []any:
+			for _, d := range deps {
+				if ds, ok := d.(string); ok {
+					refs[ds] = "depends_on"
+				}
+			}
+		case map[string]any:
+			for d := range deps {
+				refs[d] = "depends_on"
+			}
+		}
+		if nm, _ := s["network_mode"].(string); strings.HasPrefix(nm, "service:") {
+			refs[strings.TrimPrefix(nm, "service:")] = "network_mode"
+		}
+		if vf, ok := s["volumes_from"].([]any); ok {
+			for _, v := range vf {
+				vs, _ := v.(string)
+				if src, _, _ := strings.Cut(vs, ":"); src != "" && src != "container" {
+					refs[src] = "volumes_from"
+				}
+			}
+		}
+		for _, ref := range keysOf(refs) {
+			if _, ok := profiled[ref]; ok {
+				return fmt.Errorf("service %s: %s names profiled service %s: give %s the same profiles, or compose can't start it when a setup choice leaves %s off", name, refs[ref], ref, name, ref)
+			}
 		}
 	}
 	return nil

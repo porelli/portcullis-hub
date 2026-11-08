@@ -140,3 +140,53 @@ func TestProfilesFor(t *testing.T) {
 		t.Errorf("decoded option = %+v", o)
 	}
 }
+
+// TestJobsFoundRefusedWithRouter: a job found through depends_on gets the
+// same router refusal as a listed one.
+func TestJobsFoundRefusedWithRouter(t *testing.T) {
+	compose := hdrCompose + "  late:\n    image: x\n    depends_on:\n      web: {condition: service_completed_successfully}\n"
+	runSettingsCases(t, []settingsCase{
+		{"routed dependency", hdrHead, compose, "", "jobs: web has a Traefik router: a one-off job serves nothing"},
+		{"unrouted dependency", hdrHead, hdrCompose + "  late:\n    image: x\n    depends_on:\n      init: {condition: service_completed_successfully}\n", "", ""},
+	})
+}
+
+// TestSetupYAMLAnchors: anchors and merge keys in depends_on and
+// profiles: are read as compose reads them.
+func TestSetupYAMLAnchors(t *testing.T) {
+	compose := "x-wait: &wait\n  init: {condition: service_completed_successfully}\nx-p: &p [db-mysql]\n" + setupCompose +
+		"  late:\n    image: x\n    depends_on:\n      <<: *wait\n      other: {condition: service_started}\n" +
+		"  other:\n    image: x\n    depends_on: *wait\n" +
+		"  db-mysql:\n    image: x\n    profiles: *p\n" +
+		"  db-postgres:\n    image: x\n    profiles: [db-postgres]\n"
+	if got, want := JobServices(&Manifest{}, []byte(compose)), map[string]bool{"init": true}; !reflect.DeepEqual(got, want) {
+		t.Errorf("JobServices = %v, want %v", got, want)
+	}
+	runSettingsCases(t, []settingsCase{
+		{"anchored profiles", hdrHead + opts(dbOpt("profiles: {mysql: [db-mysql], postgres: [db-postgres]}")), compose, "", ""},
+		{"anchored profiles uncovered", hdrHead + opts(dbOpt("profiles: {mysql: [], postgres: [db-postgres]}")), compose, "", "service db-mysql: no setup option's profiles start it"},
+		{"merged dependency on a routed service", hdrHead, "x-wait: &wait\n  web: {condition: service_completed_successfully}\n" + hdrCompose +
+			"  late:\n    image: x\n    depends_on:\n      <<: *wait\n", "", "jobs: web has a Traefik router"},
+	})
+}
+
+func TestNullProfilesRefused(t *testing.T) {
+	runSettingsCases(t, []settingsCase{
+		{"null profiles", hdrHead + opts(dbOpt("profiles: ~")), setupCompose, "database", "profiles: value mysql has no entry"},
+		{"null profiles on a string", hdrHead + opts("{key: theme, label: T, type: string, default: dark, profiles: null}"), hdrCompose, "theme", "profiles is for setup enum options of scope instance"},
+	})
+}
+
+// TestUnprofiledDependsOnProfiled: a service without profiles may not
+// need a profiled one (depends_on, network_mode, volumes_from).
+func TestUnprofiledDependsOnProfiled(t *testing.T) {
+	m := hdrHead + opts(dbOpt("profiles: {mysql: [db-mysql], postgres: [db-postgres]}"))
+	runSettingsCases(t, []settingsCase{
+		{"depends_on list", m, dbCompose + "  app:\n    image: x\n    depends_on: [db-mysql]\n", "", "service app: depends_on names profiled service db-mysql"},
+		{"depends_on map", m, dbCompose + "  app:\n    image: x\n    depends_on:\n      db-postgres: {condition: service_healthy}\n", "", "service app: depends_on names profiled service db-postgres"},
+		{"network_mode", m, dbCompose + "  app:\n    image: x\n    network_mode: service:db-mysql\n", "", "service app: network_mode names profiled service db-mysql"},
+		{"volumes_from", m, dbCompose + "  app:\n    image: x\n    volumes_from: [\"db-mysql:ro\"]\n", "", "service app: volumes_from names profiled service db-mysql"},
+		{"profiled may depend on profiled", m, dbCompose + "  admin:\n    image: x\n    profiles: [db-mysql]\n    depends_on: [db-mysql]\n", "", ""},
+		{"unprofiled dependency ok", m, dbCompose + "  app:\n    image: x\n    depends_on: [init]\n", "", ""},
+	})
+}

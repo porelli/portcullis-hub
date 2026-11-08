@@ -84,6 +84,9 @@ type Option struct {
 	Setup           bool                `yaml:"setup" json:"setup,omitempty"`
 	FixedAfterStart bool                `yaml:"fixed_after_start" json:"fixed_after_start,omitempty"`
 	Profiles        map[string][]string `yaml:"profiles" json:"profiles,omitempty"`
+	// profilesNull: the option wrote profiles: with a null value (Profiles
+	// stays nil); validateSetup refuses it like any bad mapping.
+	profilesNull bool
 
 	// Shared folders (§13.15): a path option's folder block (it replaces
 	// mode, needs and writes_as) and the option's doctor checks.
@@ -678,7 +681,51 @@ func (s *SettingsSpec) UnmarshalYAML(n *yaml.Node) error {
 		return fmt.Errorf("line %d: settings: a list of settings is template contract v2; contract v3 declares settings: {sections, options} (integration contracts §13)", n.Line)
 	}
 	type plain SettingsSpec
-	return strictDecode(n, (*plain)(s))
+	if err := strictDecode(n, (*plain)(s)); err != nil {
+		return err
+	}
+	markNullProfiles(n, s.Options)
+	return nil
+}
+
+// markNullProfiles sets profilesNull on the options whose node has a
+// profiles: key with a null value (yaml.v3 decodes it as an absent map).
+func markNullProfiles(n *yaml.Node, opts []Option) {
+	for n != nil && n.Kind == yaml.AliasNode {
+		n = n.Alias
+	}
+	if n == nil || n.Kind != yaml.MappingNode {
+		return
+	}
+	var list *yaml.Node
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		if n.Content[i].Value == "options" {
+			list = n.Content[i+1]
+		}
+	}
+	for list != nil && list.Kind == yaml.AliasNode {
+		list = list.Alias
+	}
+	if list == nil || list.Kind != yaml.SequenceNode || len(list.Content) != len(opts) {
+		return
+	}
+	for i, on := range list.Content {
+		for on != nil && on.Kind == yaml.AliasNode {
+			on = on.Alias
+		}
+		if on == nil || on.Kind != yaml.MappingNode {
+			continue
+		}
+		for j := 0; j+1 < len(on.Content); j += 2 {
+			v := on.Content[j+1]
+			for v.Kind == yaml.AliasNode && v.Alias != nil {
+				v = v.Alias
+			}
+			if on.Content[j].Value == "profiles" && v.Kind == yaml.ScalarNode && v.ShortTag() == "!!null" {
+				opts[i].profilesNull = true
+			}
+		}
+	}
 }
 
 // strictDecode decodes n into v refusing unknown keys (yaml.v3's
