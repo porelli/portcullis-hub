@@ -279,7 +279,7 @@ var admin20 = []string{
 
 // admin18 are the users and groups tools of T18.
 var admin18 = []string{
-	"directory_overview", "get_person", "preview_rule", "convert_group_preview", "import_review", "audit_recent",
+	"directory_overview", "get_person", "preview_rule", "convert_group_preview", "import_review", "audit_recent", "get_person_apps", "get_group_uses",
 	"create_person", "update_person", "set_details", "require_passkey", "remove_passkeys", "set_password", "send_invite",
 	"clear_actions", "delete_person", "create_group", "delete_group", "add_member", "remove_member", "set_member_expiry",
 	"set_group_rule", "convert_group", "add_exception", "remove_exception", "set_permission",

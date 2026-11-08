@@ -647,6 +647,8 @@ var adminToolFixtures = []struct {
 	{"import_review", map[string]any{"header": []string{"username", "display_name"}, "rows": [][]string{{"erin", "Erin X"}, {"hana", "Hana"}}}},
 	{"import_apply", map[string]any{"rows": []any{map[string]any{"user": "erin", "display_name": "Erin Z"}}}},
 	{"audit_recent", map[string]any{"limit": 200}},
+	{"get_person_apps", map[string]any{"username": "dana"}},
+	{"get_group_uses", map[string]any{"group": "helpers"}},
 	{"delete_group", map[string]any{"group": "eng"}},
 	{"delete_field", map[string]any{"name": "dept"}},
 	{"delete_person", map[string]any{"username": "erin"}},
@@ -829,6 +831,8 @@ func testToolsNotEchoed(t *testing.T) {
 		"set_model_provider_secret", "delete_model_provider", "get_op", "wait_for_op", "get_logs", "disable_instance",
 		// Task 18: the invite paths ran.
 		"create_person", "send_invite", "remove_passkeys", "import_apply", "directory_overview", "set_password", "audit_recent",
+		// People & groups Task 4.
+		"get_person_apps", "get_group_uses",
 		// Task 20.
 		"doctor_findings", "doctor_scan", "doctor_preview_fix", "list_folders", "check_folder_path", "create_folder", "update_folder",
 		"folder_preview", "folder_recheck_preview", "delete_folder"} {

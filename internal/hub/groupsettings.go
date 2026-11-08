@@ -592,8 +592,15 @@ func (h *Hub) reseedPlaceholderRows(id string, created []string) {
 	}
 }
 
-// purged is one audited purge (after mu is released).
-type purged struct{ target, detail string }
+// purged is one dropped row (audited after mu is released): its audit target and detail, and what
+// GroupUses shows of it (the option, scope, resolved group name and the
+// row's value; an instance value's is the group name).
+type purged struct {
+	target, detail string
+	key, scope     string
+	group          string
+	value          any
+}
 
 // dropRowsLocked removes the rows and records of instance t (nil: no
 // view — placeholders are kept as they can't be resolved) for which
@@ -603,6 +610,17 @@ func (h *Hub) dropRowsLocked(id string, t *templates.Template, drop func(key, na
 	if !ok {
 		return nil
 	}
+	s, out := dropRows(s, id, t, drop)
+	if len(out) > 0 {
+		h.st.Settings[id] = s
+	}
+	return out
+}
+
+// dropRows is dropRowsLocked on a copy of s: the copy without the rows
+// drop says why for, and those rows. s itself is never changed (GroupUses
+// lists what a purge would drop this way).
+func dropRows(s state.InstanceSettings, id string, t *templates.Template, drop func(key, name string, r state.GroupValue) string) (state.InstanceSettings, []purged) {
 	s = s.Clone()
 	var out []purged
 	filter := func(key, scope string, rows []state.GroupValue) []state.GroupValue {
@@ -617,7 +635,8 @@ func (h *Hub) dropRowsLocked(id string, t *templates.Template, drop func(key, na
 				name = placeholderGroup(t, r.Group)
 			}
 			if why := drop(key, name, r); why != "" {
-				out = append(out, purged{target: id + "/" + key, detail: fmt.Sprintf("scope=%s group=%s id=%d: %s", scope, name, r.GroupID, why)})
+				out = append(out, purged{target: id + "/" + key, detail: fmt.Sprintf("scope=%s group=%s id=%d: %s", scope, name, r.GroupID, why),
+					key: key, scope: scope, group: name, value: r.Value})
 				continue
 			}
 			kept = append(kept, r)
@@ -653,7 +672,8 @@ func (h *Hub) dropRowsLocked(id string, t *templates.Template, drop func(key, na
 				name = placeholderGroup(t, n)
 			}
 			if why := drop(k, name, state.GroupValue{Group: n, GroupID: ids[n]}); why != "" {
-				out = append(out, purged{target: id + "/" + k, detail: fmt.Sprintf("scope=%s group=%s id=%d: %s", templates.ScopeInstance, name, ids[n], why)})
+				out = append(out, purged{target: id + "/" + k, detail: fmt.Sprintf("scope=%s group=%s id=%d: %s", templates.ScopeInstance, name, ids[n], why),
+					key: k, scope: templates.ScopeInstance, group: name, value: name})
 				removed = append(removed, n)
 				delete(ids, n)
 			}
@@ -668,10 +688,7 @@ func (h *Hub) dropRowsLocked(id string, t *templates.Template, drop func(key, na
 	if len(s.GroupIDs) == 0 {
 		s.GroupIDs = nil
 	}
-	if len(out) > 0 {
-		h.st.Settings[id] = s
-	}
-	return out
+	return s, out
 }
 
 // withoutGroups is values with the names removed from key's group value:
@@ -704,6 +721,16 @@ func withoutGroups(values map[string]any, key string, removed []string) map[stri
 	return values
 }
 
+// namesGroup is whether a row (its resolved group name g) names group
+// name of LLDAP id id: the exact name; another case only when bound to
+// this id (two LLDAP groups may differ in case only). PurgeGroupSettings
+// drops these rows; GroupUses lists them.
+func namesGroup(name string, id int) func(g string, r state.GroupValue) bool {
+	return func(g string, r state.GroupValue) bool {
+		return g == name || strings.EqualFold(g, name) && r.GroupID == id
+	}
+}
+
 // PurgeGroupSettings removes every per-group row and group record that
 // names group name (exactly, or in another case when bound to id) in
 // every instance, after the directory
@@ -717,10 +744,9 @@ func (h *Hub) PurgeGroupSettings(ctx context.Context, actor directory.Actor, nam
 	var all []purged
 	affected := map[string]bool{}
 	for _, inst := range slices.Sorted(maps.Keys(h.st.Settings)) {
+		names := namesGroup(name, id)
 		ps := h.dropRowsLocked(inst, h.findLocked(inst), func(_, g string, r state.GroupValue) string {
-			// The exact name; another case only when bound to this id
-			// (two LLDAP groups may differ in case only).
-			if g == name || strings.EqualFold(g, name) && r.GroupID == id {
+			if names(g, r) {
 				return fmt.Sprintf("group deleted (id %d)", id)
 			}
 			return ""

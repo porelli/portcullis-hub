@@ -603,6 +603,8 @@ type (
 		Limit  int    `json:"limit,omitempty" jsonschema:"entries per page, 1-200 (default 50)"`
 		Offset int    `json:"offset,omitempty" jsonschema:"entries to skip, newest first (next_offset of the previous page)"`
 		Via    string `json:"via,omitempty" jsonschema:"ai: only entries made through the Portcullis MCP"`
+		Group  string `json:"group,omitempty" jsonschema:"only entries for this group (target the group, or <group>:<member>)"`
+		User   string `json:"user,omitempty" jsonschema:"only entries for this person (target the person or <group>:<person>, or user=<person> in the detail)"`
 	}
 )
 
@@ -652,6 +654,19 @@ func plainGroups(m *directory.Membership, gs []string) []string {
 		}
 	}
 	return out
+}
+
+// adminReads is adminRead's checks for the two read tools: 403 for a
+// non-admin, 503 without the Hub.
+func (s *Server) adminReads(c *directory.Caller) (peopleReads, error) {
+	if c == nil || !c.Admin {
+		return nil, &directory.Error{Status: http.StatusForbidden, Msg: "not allowed: admins only"}
+	}
+	reads := s.peopleReads()
+	if reads == nil {
+		return nil, &hub.StatusError{Status: http.StatusServiceUnavailable, Err: errors.New("the Hub is not available")}
+	}
+	return reads, nil
 }
 
 // registerDirectoryTools registers the users and groups tools.
@@ -717,9 +732,25 @@ func (s *Server) registerDirectoryTools() {
 				}
 				return map[string]any{"header": header, "rows": rows, "review": rev}, nil
 			}),
-		dirTool(s, "audit_recent", "The Users & Groups audit log (every change, refusals too), newest first, at most 200 per call: page with offset / next_offset. Entries made through the Portcullis MCP carry via \"ai\" and the AI client; via=ai shows only those.",
+		dirTool(s, "audit_recent", "The Users & Groups audit log (every change, refusals too), newest first, at most 200 per call: page with offset / next_offset. Entries made through the Portcullis MCP carry via \"ai\" and the AI client; via=ai shows only those; group / user show only the entries for that group or person (combinable).",
 			ClassRead, "GET /api/directory/audit", "", func(_ context.Context, _ *directory.Caller, in auditArgs) (any, error) {
 				return s.auditRecent(in)
+			}),
+		dirTool(s, "get_person_apps", "One person's apps (the groups that let them in, and when each membership ends) and their resolved per-person values for each app, with where each value comes from (a group, the default, their own entry). No credentials.",
+			ClassRead, "GET /api/directory/users/{username}/apps", "", func(ctx context.Context, c *directory.Caller, in personArgs) (any, error) {
+				reads, err := s.adminReads(c)
+				if err != nil {
+					return nil, err
+				}
+				return personApps(ctx, reads, in.Username)
+			}),
+		dirTool(s, "get_group_uses", "What uses a group: the apps whose access or admin group it is (or whose privileged values name it), every app setting row that names it (what deleting it would drop), and the delegated permissions it holds.",
+			ClassRead, "GET /api/directory/groups/{group}/uses", "", func(ctx context.Context, c *directory.Caller, in groupRefArgs) (any, error) {
+				reads, err := s.adminReads(c)
+				if err != nil {
+					return nil, err
+				}
+				return reads.GroupUses(ctx, in.Group)
 			}),
 		// ── People ──
 		// create_person is U (fix round 1 ruling): the Service has no
@@ -1163,8 +1194,8 @@ func (s *Server) importConsequences(ctx context.Context, args json.RawMessage) [
 	return lines
 }
 
-// auditRecent is audit_recent: the route's Service.Recent, filtered by
-// via, one page of at most maxAuditPage entries, newest first.
+// auditRecent is audit_recent: the route's Service.RecentMatching with
+// its filters (auditFilter: via, group, user), one page of at most maxAuditPage entries, newest first.
 func (s *Server) auditRecent(in auditArgs) (any, error) {
 	limit := in.Limit
 	if limit == 0 {
@@ -1178,12 +1209,13 @@ func (s *Server) auditRecent(in auditArgs) (any, error) {
 	case in.Via != "" && in.Via != directory.ViaAI:
 		return nil, badArg(`via must be "ai" or absent`)
 	}
-	all, err := s.Directory.Recent(maxAuditScan)
+	keep, err := auditFilter(in.Via, in.Group, in.User, in.Group != "", in.User != "")
+	if err != nil {
+		return nil, badArg(err.Error())
+	}
+	all, err := s.Directory.RecentMatching(maxAuditScan, directory.AuditScan, keep)
 	if err != nil {
 		return nil, &hub.StatusError{Status: http.StatusInternalServerError, Err: errors.New("read audit log: " + err.Error())}
-	}
-	if in.Via != "" {
-		all = slices.DeleteFunc(all, func(e directory.AuditEntry) bool { return e.Via != in.Via })
 	}
 	out := map[string]any{"offset": in.Offset, "entries": []directory.AuditEntry{}}
 	if in.Offset < len(all) {

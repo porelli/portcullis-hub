@@ -639,6 +639,8 @@ var peopleNoToolRoutes = func() map[string]string {
 		"DELETE /api/me/apps/{instance}/values/{key}":      "a person-entered value: cleared on the page",
 		"DELETE /api/me/apps/{instance}/credentials/{key}": "a credential revoke: the person does it on the page (credentials never go through the AI)",
 		"GET /api/directory/audit":                         "the delegate audit view: on the page only",
+		"GET /api/directory/users/{username}/apps":         "an admin-only read (403 here for everyone else): the admin MCP has get_person_apps",
+		"GET /api/directory/groups/{group}/uses":           "an admin-only read (403 here for everyone else): the admin MCP has get_group_uses",
 	}
 	for _, r := range []string{
 		"POST /api/directory/users/{username}/password", "POST /api/directory/users/{username}/invite",

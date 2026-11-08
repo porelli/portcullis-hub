@@ -451,7 +451,20 @@ func TestAuditRecentPaginated(t *testing.T) {
 	if len(ai.Entries) != 1 || ai.Entries[0].Target != "viaai" || ai.NextOffset != nil {
 		t.Errorf("via ai = %+v", ai)
 	}
-	for _, bad := range []map[string]any{{"limit": 201}, {"limit": -1}, {"offset": -1}, {"via": "human"}} {
+	// group / user (people & groups Task 4): the route's filters.
+	if g := page(map[string]any{"group": "gb"}); len(g.Entries) != 1 || g.Entries[0].Target != "gb" {
+		t.Errorf("group gb = %+v", g)
+	}
+	if g := page(map[string]any{"group": "viaai", "via": "ai"}); len(g.Entries) != 1 || g.Entries[0].Target != "viaai" {
+		t.Errorf("group viaai, via ai = %+v", g)
+	}
+	if g := page(map[string]any{"group": "gb", "via": "ai"}); len(g.Entries) != 0 {
+		t.Errorf("group gb, via ai = %+v", g)
+	}
+	if u := page(map[string]any{"user": "nobody"}); len(u.Entries) != 0 {
+		t.Errorf("user nobody = %+v", u)
+	}
+	for _, bad := range []map[string]any{{"limit": 201}, {"limit": -1}, {"offset": -1}, {"via": "human"}, {"group": "bad name"}, {"user": "-x"}} {
 		if txt, isErr, _ := e.tool(t, "audit_recent", bad); !isErr || !strings.HasPrefix(txt, "400: ") {
 			t.Errorf("audit_recent %v = %q %v", bad, txt, isErr)
 		}

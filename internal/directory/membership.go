@@ -77,6 +77,9 @@ type Membership struct {
 	// RuleFields: field → every group whose rule uses it (sorted): setting
 	// it can change who is in them, guarding or not.
 	RuleFields map[string][]string
+	// Permissions: delegated permission → the group directory.yaml
+	// grants it to (§9.6; only the set ones).
+	Permissions map[string]string
 }
 
 // Membership reads LLDAP and directory.yaml. LLDAP unavailable: 503;
@@ -157,6 +160,12 @@ func (s *Service) membershipOf(cfg *Config, sn *snapshot, now time.Time) *Member
 	}
 	m.Staged = s.stagedMembers(cfg, sn, now)
 	m.RuleFields = ruleFields(cfg)
+	m.Permissions = map[string]string{}
+	for p, g := range cfg.Permissions {
+		if g != "" {
+			m.Permissions[p] = g
+		}
+	}
 	return m
 }
 

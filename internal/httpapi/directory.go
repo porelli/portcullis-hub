@@ -6,10 +6,12 @@ import (
 	"log"
 	"net/http"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/hub"
+	"github.com/portcullis/hub/internal/lldap"
 	"github.com/portcullis/hub/internal/rules"
 )
 
@@ -20,6 +22,8 @@ import (
 func (s *Server) registerDirectory(mux routeMux) {
 	mux.HandleFunc("GET /api/directory", s.handleDirectory)
 	mux.HandleFunc("GET /api/directory/audit", s.handleAudit)
+	mux.HandleFunc("GET /api/directory/users/{username}/apps", s.handlePersonApps)
+	mux.HandleFunc("GET /api/directory/groups/{group}/uses", s.handleGroupUses)
 	mux.HandleFunc("POST /api/directory/users", s.handleCreateUser)
 	mux.HandleFunc("PUT /api/directory/users/{username}", s.handleUpdateUser)
 	mux.HandleFunc("DELETE /api/directory/users/{username}", s.handleDeleteUser)
@@ -162,8 +166,10 @@ type auditItem struct {
 	Line   *hub.AccessLine       `json:"line,omitempty"`
 }
 
-// handleAudit: administrators only. The last 100 entries; ?via=ai only
-// those made through the Portcullis MCP (§9.5); with &include=access
+// handleAudit: administrators only. The last 100 entries (of the last
+// 8 MiB); ?via=ai only those made through the Portcullis MCP (§9.5),
+// ?group=<g> / ?user=<u> only those for that group / person (§9.7,
+// auditFilter; combinable, malformed = 400); with &include=access
 // merged with the gate's access-log lines, newest first, as auditItems
 // (at most 100 of each).
 func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
@@ -191,18 +197,15 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "include=access needs via=ai", http.StatusBadRequest)
 		return
 	}
-	n := auditShown
-	if via != "" {
-		n = maxAuditScan // filtered below to the last 100 AI entries
+	keep, err := auditFilter(via, q.Get("group"), q.Get("user"), q.Has("group"), q.Has("user"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
 	}
-	entries, err := s.Directory.Recent(n)
+	entries, err := s.Directory.RecentMatching(auditShown, directory.AuditScan, keep)
 	if err != nil {
 		http.Error(w, "read audit log: "+err.Error(), http.StatusInternalServerError)
 		return
-	}
-	if via != "" {
-		entries = slices.DeleteFunc(entries, func(e directory.AuditEntry) bool { return e.Via != via })
-		entries = entries[:min(len(entries), auditShown)]
 	}
 	if include == "" {
 		noStore(w)
@@ -226,6 +229,124 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 	slices.SortStableFunc(items, func(a, b auditItem) int { return b.Time.Compare(a.Time) })
 	noStore(w)
 	writeJSON(w, items)
+}
+
+// auditFilter is the entries an audit view keeps (nil: all): via (""
+// or "ai", checked by the caller), and group / user when given (has*):
+// directory.ForGroup / ForUser, all of them at once. A malformed group
+// name or username is an error (400).
+func auditFilter(via, group, user string, hasGroup, hasUser bool) (func(directory.AuditEntry) bool, error) {
+	var keeps []func(directory.AuditEntry) bool
+	if via != "" {
+		keeps = append(keeps, func(e directory.AuditEntry) bool { return e.Via == via })
+	}
+	if hasGroup {
+		if !lldap.ValidGroupName(group) {
+			return nil, errors.New("group is not a valid group name")
+		}
+		keeps = append(keeps, directory.ForGroup(group))
+	}
+	if hasUser {
+		if !lldap.ValidUsername(strings.ToLower(user)) {
+			return nil, errors.New("user is not a valid username")
+		}
+		keeps = append(keeps, directory.ForUser(user))
+	}
+	if len(keeps) == 0 {
+		return nil, nil
+	}
+	return func(e directory.AuditEntry) bool {
+		for _, k := range keeps {
+			if !k(e) {
+				return false
+			}
+		}
+		return true
+	}, nil
+}
+
+// peopleReads is what the two admin reads of the people & groups pages
+// need from the Hub (contract §9.7).
+type peopleReads interface {
+	PersonApps(ctx context.Context, user string) (*hub.PersonAppsView, error)
+	GroupUses(ctx context.Context, group string) (*hub.GroupUsesView, error)
+}
+
+// peopleReads is the Hub's (nil: no Hub, the routes answer 503).
+func (s *Server) peopleReads() peopleReads {
+	if s.Hub == nil {
+		return nil
+	}
+	return s.Hub
+}
+
+// adminRead resolves the caller of an admin-only read: 403 for anyone
+// but an administrator (delegates included), 503 while the directory or
+// the Hub is unavailable; on false it has written the answer.
+func (s *Server) adminRead(w http.ResponseWriter, r *http.Request) (*directory.Caller, peopleReads, bool) {
+	if !s.dirReady(w) {
+		return nil, nil, false
+	}
+	c, err := s.Directory.CallerAs(r.Context(), requestActor(r))
+	if err != nil {
+		var de *directory.Error
+		if errors.As(err, &de) && de.Status < 500 {
+			http.Error(w, de.Msg, de.Status)
+			return nil, nil, false
+		}
+		log.Printf("directory: resolve caller: %v", err)
+		http.Error(w, directory.GenericUnavailable, http.StatusServiceUnavailable)
+		return nil, nil, false
+	}
+	if !c.Admin {
+		http.Error(w, "not allowed: admins only", http.StatusForbidden)
+		return nil, nil, false
+	}
+	reads := s.peopleReads()
+	if reads == nil {
+		http.Error(w, "the Hub is not available", http.StatusServiceUnavailable)
+		return nil, nil, false
+	}
+	return c, reads, true
+}
+
+// personApps is GET /api/directory/users/{u}/apps' work (and
+// get_person_apps'): the username checked (400), then Hub.PersonApps.
+func personApps(ctx context.Context, reads peopleReads, user string) (*hub.PersonAppsView, error) {
+	if u := strings.ToLower(user); !lldap.ValidUsername(u) {
+		return nil, &hub.StatusError{Status: http.StatusBadRequest, Err: errors.New("not a valid username")}
+	}
+	return reads.PersonApps(ctx, user)
+}
+
+// handlePersonApps: administrators only (contract §9.7).
+func (s *Server) handlePersonApps(w http.ResponseWriter, r *http.Request) {
+	_, reads, ok := s.adminRead(w, r)
+	if !ok {
+		return
+	}
+	v, err := personApps(r.Context(), reads, r.PathValue("username"))
+	if err != nil {
+		writeAPIErr(w, err)
+		return
+	}
+	noStore(w)
+	writeJSON(w, v)
+}
+
+// handleGroupUses: administrators only (contract §9.7).
+func (s *Server) handleGroupUses(w http.ResponseWriter, r *http.Request) {
+	_, reads, ok := s.adminRead(w, r)
+	if !ok {
+		return
+	}
+	v, err := reads.GroupUses(r.Context(), r.PathValue("group"))
+	if err != nil {
+		writeAPIErr(w, err)
+		return
+	}
+	noStore(w)
+	writeJSON(w, v)
 }
 
 func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
