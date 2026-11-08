@@ -146,10 +146,12 @@ followed by a new enable resumes the download where it left off.
 Stop always names the operation the panel shows. If that one has ended and
 another admin's operation started in the meantime, the Stop is refused ("Stop
 refused: the operation changed — another one runs now (…), nothing was
-stopped") and the panel follows the new operation: press Stop again to stop
-that one. If the record of the operation shown was replaced by a newer one
-that already ended, the panel says so ("… ended — it ended before its outcome
-could be read") instead of showing the other operation's result as its own.
+stopped"). The panel always follows its own operation to its own outcome
+(the Hub keeps each operation's final record by its id, the last 20 per app).
+When a newer operation has started since (the Hub's queued restart, a start
+hook that failed after an enable, another admin's operation), the panel adds a
+short note under its outcome, "then: Restarting (running)", with a **show**
+link that opens the newer operation; press Stop there to stop that one.
 
 #### Failed undo and "Stop again"
 
@@ -169,7 +171,9 @@ removed, at the next Hub start on their own (the Stop is automatic).
 
 #### AI support and stop_op
 
-The Portcullis MCP sees the same progress (`get_op`, `wait_for_op`) and can
+The Portcullis MCP sees the same progress (`get_op`, `wait_for_op`, both
+with an optional `op_id` that names the operation to show or wait for;
+`list_ops` for every app's current operation) and can
 stop an operation with `stop_op`. When the undo re-enables or switches
 something on (a disable, a delete of an enabled app, a same-instance restore,
 an AI switch-off), `stop_op` needs a **confirmation** that names the
@@ -178,7 +182,9 @@ lock. A stopped enable or an AI switch that went back on are audited
 `refused` for the lifecycle action (`instance.enable`, `ai.enable`) and `ok`
 for the Stop (`enable.stop`, `ai.stop`).
 
-API: `GET /api/instances/<id>/op`, `POST /api/instances/<id>/op/stop`
+API: `GET /api/instances/<id>/op` (`?op_id=<op_id>`: that operation's
+record), `GET /api/instances/ops` (every app's current operation, in short),
+`POST /api/instances/<id>/op/stop`
 ([contract §11.7](../guides/integration-contracts.md#117-hub-api-and-audit)).
 
 ### When an operation fails
@@ -1015,8 +1021,8 @@ instance on an enrolled domain:
 
 **Admin-only.** The Hub can back up any instance on demand or before a restore /
 delete. Backups, restores and deletes run in the background: the API answers
-`202` with an operation id, and the UI polls the instance's op record
-(`GET /api/instances/<id>/op`) until it is done
+`202` with an operation id, and the UI polls that operation's record
+(`GET /api/instances/<id>/op?op_id=<op_id>`) until it is done
 ([contract §11.7](../guides/integration-contracts.md#117-hub-api-and-audit)). A backup archives:
 
 - the instance's **Docker volumes** (using helper containers, never starting
