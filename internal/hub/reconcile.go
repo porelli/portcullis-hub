@@ -155,6 +155,15 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 		rep.Error = err.Error()
 		return h.storeDrift(rep)
 	}
+	// Build a map of jobs per instance ID (contract §3 "One-off jobs"):
+	// a done job (exited 0) counts as running.
+	h.mu.RLock()
+	jobs := map[string]map[string]bool{} // instance id → service name → is job
+	for i := range h.instances {
+		t := &h.instances[i]
+		jobs[t.ID] = templates.JobServices(&t.Manifest, t.ReadCompose())
+	}
+	h.mu.RUnlock()
 	counts := map[string]projectCount{}
 	routed := map[string]map[string]bool{}
 	havePublic := map[string]bool{}
@@ -193,7 +202,19 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 		}
 		pc := counts[id]
 		pc.total++
-		if c.State == "running" || c.State == "restarting" {
+		service := c.Labels[docker.LabelService]
+		isJob := jobs[id][service]
+		isRunning := c.State == "running" || c.State == "restarting"
+		// A done job (exited 0) counts as running (contract §11.9 "Fine").
+		isDoneJob := false
+		if isJob && c.State == "exited" {
+			// Check exit code via ContainerState.
+			if st, err := h.engine.ContainerState(ctx, c.ID); err == nil && st.Status == "exited" && st.ExitCode == 0 {
+				isDoneJob = true
+				isRunning = true
+			}
+		}
+		if isRunning {
 			pc.running++
 			if _, ok := c.Labels["traefik.http.routers."+PublicRouterName(id)+".rule"]; ok {
 				havePublic[id] = true
@@ -204,7 +225,10 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 					aliases = append(aliases, strings.ToLower(n))
 				}
 			}
-			live = append(live, running{id, c.Labels[docker.LabelService], c.Labels, aliases})
+			// A done job is not "live" for exposure drift (it serves nothing).
+			if !isDoneJob {
+				live = append(live, running{id, service, c.Labels, aliases})
+			}
 		}
 		counts[id] = pc
 	}

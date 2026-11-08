@@ -12,10 +12,29 @@ import (
 
 // ContainerStatus is one container of an app.
 type ContainerStatus struct {
-	Name    string `json:"name"`
-	Service string `json:"service"`
-	State   string `json:"state"`
-	Status  string `json:"status"`
+	Name     string `json:"name"`
+	Service  string `json:"service"`
+	State    string `json:"state"`
+	Status   string `json:"status"`
+	Job      bool   `json:"job,omitempty"`       // true for one-off jobs (§3)
+	JobState string `json:"job_state,omitempty"` // done | failed | running | pending
+}
+
+// jobState computes a job's state (contract §11.9): done (exited 0),
+// failed (exited non-zero), running (running or restarting) or pending
+// (created, never started).
+func jobState(st docker.State) string {
+	if st.Running || st.Status == "restarting" {
+		return "running"
+	}
+	if st.Status == "exited" {
+		if st.ExitCode == 0 {
+			return "done"
+		}
+		return "failed"
+	}
+	// Created but never started, or any other state.
+	return "pending"
 }
 
 // appContainers lists the app's project containers that belong to services
@@ -57,9 +76,19 @@ func (h *Hub) Status(ctx context.Context, id string) ([]ContainerStatus, error) 
 	if err != nil {
 		return nil, statusErr(502, "docker: %v", err)
 	}
+	jobs := templates.JobServices(&t.Manifest, t.ReadCompose())
 	out := make([]ContainerStatus, 0, len(cs))
 	for _, c := range cs {
-		out = append(out, ContainerStatus{Name: c.Name(), Service: c.Service(), State: c.State, Status: c.Status})
+		status := ContainerStatus{Name: c.Name(), Service: c.Service(), State: c.State, Status: c.Status}
+		if jobs[c.Service()] {
+			status.Job = true
+			// Get detailed state to determine JobState.
+			st, err := h.engine.ContainerState(ctx, c.ID)
+			if err == nil {
+				status.JobState = jobState(st)
+			}
+		}
+		out = append(out, status)
 	}
 	return out, nil
 }
