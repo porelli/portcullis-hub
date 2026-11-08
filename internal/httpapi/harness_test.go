@@ -218,6 +218,8 @@ func TestHarness(t *testing.T) {
 	// The Hub page's people links (Users & Groups, group names, the old
 	// #users… deep links) go to this people listener.
 	e.s.PeopleURL = "http://" + paddr + "/"
+	// The shared navigation's Hub link goes to this Hub listener.
+	e.s.HubURL = "http://" + addr + "/"
 	h := e.s.Hub
 	for _, id := range append(slices.Clone(harnessFixtures), "photos", "samba", "smbfixture", "aiapp", "homeauto", "ai-chat", "plain", "gitea") {
 		if h.Template(id) == nil {

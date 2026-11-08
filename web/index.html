@@ -479,6 +479,9 @@
 </head>
 <body>
   <div class="container">
+    <!-- The shared top navigation (directory.js PortcullisNav, also on
+         people.<domain>): Portal · Hub · People. -->
+    <div class="pn-bar" id="site-nav"></div>
     <header>
       <h1><span>&#9906;</span> {{.PortalName}} Hub</h1>
       {{if .User}}
@@ -490,15 +493,14 @@
 
     <div class="tabs">
       <div class="tab active" data-tab="catalog">App Catalog</div>
-      <a class="tab" id="people-tab" href="#" title="People and groups live on the people page">Users &amp; Groups</a>
       <div class="tab" data-tab="sources">Template Sources</div>
       <div class="tab" data-tab="doctor" id="doctor-tab">Doctor <span class="tab-badge" hidden></span></div>
       <div class="tab" data-tab="audit">Audit log</div>
       <div class="tab" data-tab="settings">Settings</div>
     </div>
     <script>
-      // People and groups live on people.<domain> only (the Users &
-      // Groups tab is a link there; old #users… deep links redirect).
+      // People and groups live on people.<domain> only (the shared
+      // navigation's People link; old #users… deep links redirect).
       // PortcullisPeople.base: https://people.<main domain>/ — the
       // configured domain, never the browser's host; the server's
       // PeopleURL overrides it (the harness only, whose people listener
@@ -518,7 +520,6 @@
             ' title="' + esc('Open ' + g + '\'s page' + (newTab ? ' (new tab)' : '')) + '">' + t + '</a>';
         }
         window.PortcullisPeople = { base, href, groupHref, groupLink };
-        document.getElementById('people-tab').href = base;
       })();
     </script>
 
@@ -766,6 +767,10 @@
   <dialog class="opp" id="op-panel" aria-labelledby="opp-title"></dialog>
 
   <script src="/static/directory.js"></script>
+  <script>
+    // The shared navigation: this listener serves administrators only.
+    PortcullisNav.render(document.getElementById('site-nav'), { domain: {{.Domain}}, hubURL: {{.HubURL}}, peopleURL: PortcullisPeople.base, current: 'hub', admin: true });
+  </script>
   <script src="/static/folders.js"></script>
   <script src="/static/doctor.js"></script>
   <script>

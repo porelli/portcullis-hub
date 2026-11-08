@@ -71,8 +71,8 @@ func jsonString(s string) string {
 
 // TestHubPeopleBase: https://people.<main domain>/ from the configured
 // domain whatever the browser's host (never its port or another domain),
-// the injected URL (the harness) when set; the Users & Groups tab links
-// there.
+// the injected URL (the harness) when set (the shared navigation's
+// People link is this base).
 func TestHubPeopleBase(t *testing.T) {
 	for _, c := range []struct{ inject, host, want string }{
 		{"", "hub.example.org", "https://people.example.org/"},
@@ -82,9 +82,9 @@ func TestHubPeopleBase(t *testing.T) {
 		{"", "10.0.0.5:8080", "https://people.example.org/"},
 		{"http://127.0.0.1:18889/", "127.0.0.1:18888", "http://127.0.0.1:18889/"},
 	} {
-		got := peopleJS(t, c.inject, c.host, "[PortcullisPeople.base, tab.href]")
-		if l, ok := got.([]any); !ok || len(l) != 2 || l[0] != c.want || l[1] != c.want {
-			t.Errorf("host %q inject %q: base, tab = %v, want %s", c.host, c.inject, got, c.want)
+		got := peopleJS(t, c.inject, c.host, "[PortcullisPeople.base]")
+		if l, ok := got.([]any); !ok || len(l) != 1 || l[0] != c.want {
+			t.Errorf("host %q inject %q: base = %v, want %s", c.host, c.inject, got, c.want)
 		}
 	}
 }
@@ -171,5 +171,49 @@ func TestPeoplePageDomain(t *testing.T) {
 	}
 	if strings.Contains(webAsset(t, "index.html"), "location.host") {
 		t.Error("index.html: the people URL must come from the configured domain, never location.host")
+	}
+}
+
+// TestSharedNav: directory.js's PortcullisNav (the bar both pages render):
+// every URL from the configured domain (never the browser's host), the
+// harness overrides when given, the Hub link only for administrators,
+// the current site marked, everything escaped.
+func TestSharedNav(t *testing.T) {
+	js := webAsset(t, "directory.js")
+	i := strings.Index(js, "  const PortcullisNav = (function () {")
+	j := strings.Index(js[max(i, 0):], "\n  })();\n")
+	if i < 0 || j < 0 {
+		t.Fatal("directory.js lacks PortcullisNav")
+	}
+	block := js[i : i+j+len("\n  })();\n")]
+	script := "global.location = { host: 'evil.example:9999' };\n" +
+		"const esc = s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\"/g, '&quot;').replace(/'/g, '&#39;');\n" +
+		block + "console.log(JSON.stringify([" +
+		"PortcullisNav.html({domain: 'example.org', current: 'people', admin: false})," +
+		"PortcullisNav.html({domain: 'example.org', current: 'people', admin: true})," +
+		"PortcullisNav.html({domain: 'example.org', hubURL: 'http://127.0.0.1:18888/', peopleURL: 'http://127.0.0.1:18889/', current: 'hub', admin: true})," +
+		"PortcullisNav.html({domain: 'a\"<b>', current: 'x', admin: true})]));"
+	var got []string
+	if err := json.Unmarshal([]byte(runNode(t, script)), &got); err != nil || len(got) != 4 {
+		t.Fatalf("nav = %v (%v)", got, err)
+	}
+	if strings.Contains(got[0], "Hub") || !strings.Contains(got[0], `href="https://example.org/"`) ||
+		!strings.Contains(got[0], `data-site="people" href="https://people.example.org/" aria-current="page"`) {
+		t.Errorf("non-admin nav = %s", got[0])
+	}
+	if !strings.Contains(got[1], `data-site="hub" href="https://hub.example.org/">Hub</a>`) {
+		t.Errorf("admin nav = %s", got[1])
+	}
+	if !strings.Contains(got[2], `data-site="hub" href="http://127.0.0.1:18888/" aria-current="page"`) ||
+		!strings.Contains(got[2], `href="http://127.0.0.1:18889/"`) || !strings.Contains(got[2], `href="https://example.org/"`) {
+		t.Errorf("harness nav = %s", got[2])
+	}
+	for _, g := range got {
+		if strings.Contains(g, "evil.example") {
+			t.Errorf("nav uses the browser's host: %s", g)
+		}
+	}
+	if strings.Contains(got[3], `<b>`) || strings.Contains(got[3], `a"`) || strings.Contains(got[3], "aria-current") {
+		t.Errorf("unescaped or wrongly current nav = %s", got[3])
 	}
 }

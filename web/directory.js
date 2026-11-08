@@ -399,6 +399,38 @@
     return { attach, bind, overview };
   })();
 
+  // ── shared top navigation (window.PortcullisNav) ────────
+  // One bar on the Hub page and on people.<domain>: Portal
+  // (https://<domain>/), Hub (https://hub.<domain>/, administrators only)
+  // and People (https://people.<domain>/), the current site marked. Every
+  // URL comes from the configured main domain, never the browser's host;
+  // hubURL / peopleURL override the Hub's and People's (the harness's
+  // listeners only).
+  const PortcullisNav = (function () {
+    function urls(o) {
+      const d = String((o && o.domain) || '');
+      return {
+        portal: 'https://' + d + '/',
+        hub: (o && o.hubURL) || 'https://hub.' + d + '/',
+        people: (o && o.peopleURL) || 'https://people.' + d + '/',
+      };
+    }
+    // html: the bar (opts: domain, hubURL, peopleURL, current hub|people,
+    // admin — the Hub link only for administrators).
+    function html(o) {
+      const u = urls(o);
+      const links = [['portal', 'Portal', u.portal]];
+      if (o && o.admin) links.push(['hub', 'Hub', u.hub]);
+      links.push(['people', 'People', u.people]);
+      return '<nav class="pn-nav" aria-label="Portcullis sites">' + links.map(([k, label, href]) => {
+        const cur = o && o.current === k;
+        return '<a class="pn-link' + (cur ? ' pn-current' : '') + '" data-site="' + esc(k) + '" href="' + esc(href) + '"' + (cur ? ' aria-current="page"' : '') + '>' + esc(label) + '</a>';
+      }).join('') + '</nav>';
+    }
+    function render(el, o) { if (el) el.innerHTML = html(o); }
+    return { urls, html, render };
+  })();
+
   // ── state ───────────────────────────────────────────────
   let root = null;           // mount element
   let options = {};
@@ -568,7 +600,7 @@
     if (!me) me = { user: dir.me, admin: dir.admin, perms: dir.perms || [] };
     off.hidden = true;
     main.hidden = false;
-    if (options.onUser) options.onUser(me.user);
+    if (options.onUser) options.onUser(me.user, isAdmin());
     if (personPage) personPage = canonPerson(personPage);
     renderAll();
     if ((tab === 'groups' && groupPage) || (tab === 'people' && personPage)) refreshExtras();
@@ -2971,7 +3003,7 @@
     '</div>';
 
   // mount renders the shell into el once; show() (re)loads the data.
-  // opts: domain (the main domain: links into the Hub), onUser(name),
+  // opts: domain (the main domain: links into the Hub), onUser(name, admin),
   // extraTabs [{id, label, render(panel)}] (people.html: My apps).
   function mount(el, opts) {
     if (root) return;
@@ -3078,5 +3110,6 @@
 
   window.PortcullisDirectory = { show, openAt, openGroup, csvCell, renderAudit };
   window.PortcullisPicker = PortcullisPicker;
+  window.PortcullisNav = PortcullisNav;
   window.PortcullisAI = { decision: aiDecision };
 })();

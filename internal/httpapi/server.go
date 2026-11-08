@@ -36,7 +36,11 @@ type Server struct {
 	// browser's host). Only the harness sets it (its people listener's
 	// http://127.0.0.1:<port>/).
 	PeopleURL string
-	Secret    string // HUB_PROXY_SECRET
+	// HubURL overrides the Hub's URL in the shared navigation of both
+	// pages: "" = https://hub.<main domain>/. Only the harness sets it
+	// (its Hub listener's http://127.0.0.1:<port>/).
+	HubURL string
+	Secret string // HUB_PROXY_SECRET
 	// MCPSecret is HUB_MCP_GATE_SECRET (the MCP listener, MCPHandler;
 	// "" = no MCP listener).
 	MCPSecret string
@@ -341,6 +345,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	if err := s.index.Execute(w, map[string]interface{}{
 		"Domain":     s.Hub.Domain(),
 		"PeopleURL":  s.PeopleURL,
+		"HubURL":     s.HubURL,
 		"PortalName": name,
 		"Templates":  ts,
 		"Categories": categories,
@@ -352,8 +357,9 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handlePeoplePage serves people.html with only the main domain injected
-// (its links into the Hub: https://hub.<domain>/); the page asks the API
+// handlePeoplePage serves people.html with the main domain injected (its
+// links into the Hub: https://hub.<domain>/, and the shared navigation)
+// and the harness's HubURL / PeopleURL overrides; the page asks the API
 // who the caller is.
 func (s *Server) handlePeoplePage(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
@@ -370,7 +376,7 @@ func (s *Server) handlePeoplePage(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
-	if err := s.people.Execute(w, map[string]any{"Domain": domain}); err != nil {
+	if err := s.people.Execute(w, map[string]any{"Domain": domain, "HubURL": s.HubURL, "PeopleURL": s.PeopleURL}); err != nil {
 		log.Printf("render people page: %v", err)
 	}
 }

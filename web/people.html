@@ -29,6 +29,9 @@
      No app or catalog UI here; the API decides what
      each signed-in user may see and do. -->
 <div class="container">
+  <!-- The shared top navigation (directory.js PortcullisNav, also on the
+       Hub page): Portal · People, and Hub for administrators. -->
+  <div class="pn-bar" id="site-nav"></div>
   <header>
     <h1><span>&#9906;</span> People</h1>
     <div class="user-badge" id="who" hidden>Signed in as <strong id="who-name"></strong></div>
@@ -49,14 +52,21 @@
     // Hub's old #users?create&… links): the invite dialog, pre-filled;
     // the person is created here, where the one-time link is shown.
     const inv = /^#invite(?:\?(.*))?$/.exec(location.hash);
+    // The configured main domain (injected); HubURL / PeopleURL override
+    // the Hub's and this page's URLs (the harness only).
+    const navOpts = { domain: {{.Domain}}, hubURL: {{.HubURL}}, peopleURL: {{.PeopleURL}}, current: 'people', admin: false };
+    PortcullisNav.render(document.getElementById('site-nav'), navOpts);
     PortcullisDirectory.show(document.getElementById('people'), {
       // The configured main domain (the server injects it): links into
       // the Hub go to https://hub.<domain>/, never the browser's host.
       domain: {{.Domain}},
       extraTabs: [{ id: 'myapps', label: 'My apps', render: PortcullisMyApps.render }],
-      onUser: function (name) {
+      onUser: function (name, admin) {
         document.getElementById('who-name').textContent = name;
         document.getElementById('who').hidden = !name;
+        // The Hub link for administrators only (the overview says so).
+        navOpts.admin = !!admin;
+        PortcullisNav.render(document.getElementById('site-nav'), navOpts);
       },
     });
     if (inv) {
