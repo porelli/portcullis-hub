@@ -57,7 +57,7 @@ func serverInviteText(user string) string {
 // inviteNote is what replaces an invite link.
 func (s *Server) inviteNote(user string) string {
 	return "the one-time invite link is never shown to the AI; to hand one to " + user + ", open " +
-		s.mcpScope(ScopeAdmin).home + "#users/" + url.PathEscape(user) + "?invite (a new link replaces this one)"
+		s.peopleHome() + "#users/" + url.PathEscape(user) + "?invite (a new link replaces this one)"
 }
 
 // safeInvite is an invite as the AI sees it: created, and when it expires.
@@ -400,9 +400,11 @@ func (s *Server) prestagedLines(ctx context.Context, t *templates.Template, id s
 	return lines
 }
 
-// inviteForm is the Hub page that issues (and shows) user's invite.
+// inviteForm is the people page that issues (and shows) user's invite
+// (its old-link route #users/<name>?invite: the person's page, then the
+// invite's prompt).
 func (s *Server) inviteForm(user string) string {
-	return s.mcpScope(ScopeAdmin).home + "#users/" + url.PathEscape(user) + "?invite"
+	return s.peopleHome() + "#users/" + url.PathEscape(user) + "?invite"
 }
 
 // inviteTTL is core's invite lifetime (§9.4).
@@ -627,7 +629,8 @@ func (r importRow) apply() directory.ApplyRow {
 
 var usernameOf = argReader("username")
 
-// createForm is the Hub's new-person form, pre-filled (create_person).
+// createForm is the people page's invite form, pre-filled (create_person;
+// people.html's #invite?…, groups included).
 // Only plain groups are pre-ticked (final review I2): an administrator,
 // permission or other guarding group — or one the directory can't judge
 // (unknown, directory down) — is left out of the link, so one click on a
@@ -641,7 +644,7 @@ func (s *Server) createForm(a createPersonArgs) string {
 	if gs := plainGroups(s.loadGuards(), a.Groups); len(gs) > 0 {
 		q.Set("groups", strings.Join(gs, ","))
 	}
-	return s.mcpScope(ScopeAdmin).home + "#users?create&" + q.Encode()
+	return s.peopleHome() + "#invite?" + q.Encode()
 }
 
 // plainGroups: the groups of gs that are known and guard nothing
@@ -755,10 +758,10 @@ func (s *Server) registerDirectoryTools() {
 		// ── People ──
 		// create_person is U (fix round 1 ruling): the Service has no
 		// onboarding without an invite or a password, and both are
-		// secrets the AI never sees — the person is created on the Hub's
-		// pre-filled form, where the admin reviews it (groups included)
+		// secrets the AI never sees — the person is created on the people
+		// page's pre-filled form, where the admin reviews it (groups included)
 		// and the invite link is shown.
-		{Name: "create_person", Description: "Create a person: the Hub's new-person form opens pre-filled with these details (and groups that grant no rights: administrator, permission and other guarding groups are never pre-ticked — add them with add_member afterwards); you review it and create them there, where their one-time invite link is shown (administrators: ./portcullis invite <user> on the server). Afterwards this reports whether they exist.",
+		{Name: "create_person", Description: "Create a person: the people page's invite form opens pre-filled with these details (and groups that grant no rights: administrator, permission and other guarding groups are never pre-ticked — add them with add_member afterwards); you review it and create them there, where their one-time invite link is shown (administrators: ./portcullis invite <user> on the server). Afterwards this reports whether they exist.",
 			Class: ClassSecret, Scope: ScopeAdmin, Twin: "POST /api/directory/users", In: createPersonArgs{},
 			SecretForm: func(args json.RawMessage) string {
 				a, _ := decode[createPersonArgs](args)
@@ -798,7 +801,7 @@ func (s *Server) registerDirectoryTools() {
 				}
 				return map[string]string{"status": "saved"}, nil
 			}), usernameOf, s.personConsequences("Makes %s register a new passkey at their next sign-in.")),
-		dirD(dirTool(s, "remove_passkeys", "Remove all of a person's passkeys and sign them out everywhere. Needs your confirmation in the browser. A new invite is given on the Hub's page (invite_form; administrators from the server).",
+		dirD(dirTool(s, "remove_passkeys", "Remove all of a person's passkeys and sign them out everywhere. Needs your confirmation in the browser. A new invite is given on the people page (invite_form; administrators from the server).",
 			ClassWrite, "POST /api/directory/users/{username}/remove-passkeys", "user.remove_passkeys", func(ctx context.Context, c *directory.Caller, in personArgs) (any, error) {
 				// The typed check (the name) was the confirmation page's;
 				// never an invite here (fix round 1 ruling).
@@ -814,10 +817,10 @@ func (s *Server) registerDirectoryTools() {
 				}
 				return out, nil
 			}), usernameOf, s.personConsequences("Removes every passkey of %s and signs them out everywhere.")),
-		{Name: "set_password", Description: "Set a person's fallback password: it is typed (or generated and shown once) on the Hub's page, never in the chat. After you did it there, this reports the last password change the audit log records.",
+		{Name: "set_password", Description: "Set a person's fallback password: it is typed (or generated and shown once) on the people page, never in the chat. After you did it there, this reports the last password change the audit log records.",
 			Class: ClassSecret, Scope: ScopeAdmin, Twin: "POST /api/directory/users/{username}/password", In: personArgs{},
 			SecretForm: func(args json.RawMessage) string {
-				return s.mcpScope(ScopeAdmin).home + "#users/" + url.PathEscape(usernameOf(args)) + "?password"
+				return s.peopleHome() + "#users/" + url.PathEscape(usernameOf(args)) + "?password"
 			},
 			Run: func(_ context.Context, _ *directory.Caller, args json.RawMessage) (any, error) {
 				// The accept is the client's word: what the audit log says.
@@ -833,9 +836,9 @@ func (s *Server) registerDirectoryTools() {
 				return out, nil
 			}},
 		// send_invite is U (fix round 1 ruling): the link is a secret, so
-		// the admin issues it on the Hub's page, where it is shown; Run
+		// the admin issues it on the people page, where it is shown; Run
 		// only reports what the Hub knows.
-		{Name: "send_invite", Description: "Give a person a new one-time invite: it is issued on the Hub's page, where the link is shown (earlier unused ones stop working; administrators are invited from the server). Afterwards this reports whether an invite is pending.",
+		{Name: "send_invite", Description: "Give a person a new one-time invite: it is issued on the people page, where the link is shown (earlier unused ones stop working; administrators are invited from the server). Afterwards this reports whether an invite is pending.",
 			Class: ClassSecret, Scope: ScopeAdmin, Twin: "POST /api/directory/users/{username}/invite", In: personArgs{},
 			SecretForm: func(args json.RawMessage) string { return s.inviteForm(usernameOf(args)) },
 			Run: func(ctx context.Context, c *directory.Caller, args json.RawMessage) (any, error) {
@@ -1053,13 +1056,13 @@ func (s *Server) registerDirectoryTools() {
 			return []string{"Deletes field " + nameOf(args) + " and every person's value of it."}
 		}),
 		// ── Import ──
-		perCallCtx(dirTool(s, "import_apply", "Apply reviewed import rows (import_review): change details or delete people. New people are created with create_person (their invites are given on the Hub's page). Deleting people, or setting a field a guarding group's rule uses, needs your confirmation in the browser.",
+		perCallCtx(dirTool(s, "import_apply", "Apply reviewed import rows (import_review): change details or delete people. New people are created with create_person (their invites are given on the people page). Deleting people, or setting a field a guarding group's rule uses, needs your confirmation in the browser.",
 			ClassWrite, "POST /api/directory/import/apply", "user.update", func(ctx context.Context, c *directory.Caller, in importApplyArgs) (any, error) {
 				req := directory.ApplyRequest{Rows: make([]directory.ApplyRow, len(in.Rows))}
 				for i, r := range in.Rows {
 					if r.Create {
 						// Fix round 1: no invite through the AI (a dead link).
-						return nil, badArg("row " + r.User + ": people are created with create_person (the Hub's form gives their invite), not through the AI's import")
+						return nil, badArg("row " + r.User + ": people are created with create_person (the people page's form gives their invite), not through the AI's import")
 					}
 					req.Rows[i] = r.apply()
 				}

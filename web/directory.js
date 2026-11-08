@@ -278,6 +278,7 @@
     off.hidden = true;
     main.hidden = false;
     if (options.onUser) options.onUser(me.user);
+    if (personPage) personPage = canonPerson(personPage);
     renderAll();
     if ((tab === 'groups' && groupPage) || (tab === 'people' && personPage)) refreshExtras();
   }
@@ -314,7 +315,6 @@
       if (on && focus) b.focus();
     });
     root.querySelectorAll('.pd-panel').forEach(p => { p.hidden = p.dataset.panel !== name; });
-    if (name === 'setup' && isAdmin()) loadAudit();
     const x = extraTabs.find(t => t.id === name);
     if (x) {
       const panel = root.querySelector('[data-panel="' + x.id + '"]');
@@ -648,9 +648,13 @@
     if (!vals.length) return '<p class="pd-muted">No per-person values.</p>';
     let h = '<table class="pd-table pd-pp-values-tbl"><tbody>';
     for (const v of vals) {
+      // from: a group, a combined value's groups (", "-joined), or a
+      // word (default, fail-closed, own entry, set by …).
       const from = String(v.from || '');
+      const parts = from.split(', ');
+      const fromHtml = parts.some(x => groupByName(x)) ? 'from ' + parts.map(x => groupByName(x) ? groupRef(x) : esc(x)).join(', ') : esc(from);
       h += '<tr><td>' + esc(v.app || v.instance) + ' <span class="pd-muted">·</span> ' + esc(v.label || v.key) + '</td><td>' + hubLink(appFrag(v.instance, v.key), String(v.value)) +
-        '</td><td class="pd-muted">' + (groupByName(from) ? 'from ' + groupRef(from) : esc(from)) + '</td></tr>';
+        '</td><td class="pd-muted">' + fromHtml + '</td></tr>';
     }
     return h + '</tbody></table>';
   }
@@ -1259,6 +1263,7 @@
   // only the state is set: load renders it).
   function applyRoute(r) {
     const hadGroup = !!groupPage, hadPerson = !!personPage;
+    if (r.person) r = { person: canonPerson(r.person) };
     if (r.person) {
       if (personNote && personNote.user !== r.person) personNote = null;
       groupPage = null;
@@ -1274,6 +1279,17 @@
     if (!r.person || hadGroup) renderGroups();
     selectTab(tab, false);
     if (groupPage || personPage) refreshExtras();
+  }
+  // canonPerson: the directory's own spelling of a username typed in a
+  // link (#people/Carol → carol), the hash replaced with it. Before the
+  // first load (no directory yet) the name is kept: load resolves it.
+  function canonPerson(name) {
+    if (!dir) return name;
+    const want = String(name).toLowerCase();
+    const u = users().find(x => x.username === name) || users().find(x => String(x.username).toLowerCase() === want);
+    if (!u || u.username === name) return name;
+    if (parseRoute(location.hash) && parseRoute(location.hash).person === name) setHash(personHash(u.username), false);
+    return u.username;
   }
   // clearRoutes leaves a group's or a person's page (their tabs show
   // their lists again).
@@ -1299,6 +1315,7 @@
     if (old) { setHash(personHash(old.name), false); openAt(old.name, old.action); return; }
     const r = parseRoute(location.hash);
     if (r) {
+      if (r.person) r = { person: canonPerson(r.person) };
       if (r.person ? r.person !== personPage || tab !== 'people' : r.group !== groupPage || tab !== 'groups' || personPage) applyRoute(r);
       return;
     }
@@ -2061,9 +2078,6 @@
         '<td><button type="button" class="pd-btn secondary xs" data-act="perm-save" data-perm="' + perm + '">Save</button></td></tr>';
     }
     h += '</tbody></table></section>';
-    h += '<section class="pd-sec" aria-labelledby="pd-audit-h"><div class="pd-head"><h3 class="pd-h3" id="pd-audit-h">Audit log (last 100 changes)</h3><div class="pd-inline"><label for="pd-audit-filter">Show</label><select id="pd-audit-filter" data-on="audit-filter">' +
-      [['', 'all changes'], ['ai', 'changes made via AI'], ['access', 'via AI, with the AI requests (access log)']].map(([v, l]) => '<option value="' + v + '"' + (auditFilter === v ? ' selected' : '') + '>' + esc(l) + '</option>').join('') +
-      '</select><button type="button" class="pd-btn secondary xs" data-act="audit-reload">Refresh</button></div></div><div class="pd-audit"><p class="pd-muted">Loading…</p></div></section>';
     box.innerHTML = h;
     syncNewFieldForm();
   }
@@ -2075,10 +2089,31 @@
     form.multi.disabled = kind === 'person';
     if (kind === 'person') form.multi.checked = false;
   }
+  // ── the audit log (the Hub's Audit log tab: renderAudit) ──
   // The audit view's filter (contract §9.5, §15.11): '' every change,
   // 'ai' only those made through the Portcullis MCP (?via=ai), 'access'
   // those merged with the gate's access-log lines (&include=access).
+  // It lives on the Hub only (index.html's Audit log tab), apart from
+  // the directory UI: renderAudit(el) mounts it into any element.
   let auditFilter = '';
+  let auditEl = null;
+  function renderAudit(el) {
+    if (!el) return Promise.resolve();
+    if (auditEl !== el) {
+      auditEl = el;
+      el.classList.add('pd');
+      el.addEventListener('change', ev => {
+        if (ev.target.closest('[data-on="audit-filter"]')) { auditFilter = ev.target.value; loadAudit(); }
+      });
+      el.addEventListener('click', ev => {
+        if (ev.target.closest('[data-act="audit-reload"]')) loadAudit();
+      });
+      el.innerHTML = '<section class="pd-sec" aria-labelledby="pd-audit-h"><div class="pd-head"><h3 class="pd-h3" id="pd-audit-h">Audit log (last 100 changes)</h3><div class="pd-inline"><label for="pd-audit-filter">Show</label><select id="pd-audit-filter" data-on="audit-filter">' +
+        [['', 'all changes'], ['ai', 'changes made via AI'], ['access', 'via AI, with the AI requests (access log)']].map(([v, l]) => '<option value="' + v + '"' + (auditFilter === v ? ' selected' : '') + '>' + esc(l) + '</option>').join('') +
+        '</select><button type="button" class="pd-btn secondary xs" data-act="audit-reload">Refresh</button></div></div><div class="pd-audit"><p class="pd-muted">Loading…</p></div></section>';
+    }
+    return loadAudit();
+  }
   function auditEntryRow(e) {
     const cls = e.result === 'ok' ? 'ok' : (e.result === 'refused' ? 'warn' : 'bad');
     return '<tr><td class="pd-muted pd-nowrap">' + esc(fmtTime(e.time)) + '</td><td>' + esc(e.actor) +
@@ -2096,10 +2131,10 @@
       '<td>' + aiDecision(l.decision, 'pd-pill') + (l.upstream_status ? '<div class="pd-muted">app answered ' + esc(l.upstream_status) + '</div>' : '') + '</td></tr>';
   }
   async function loadAudit() {
-    const box = root.querySelector('.pd-audit');
+    const box = auditEl && auditEl.querySelector('.pd-audit');
     if (!box) return;
     const url = '/api/directory/audit' + (auditFilter === 'ai' ? '?via=ai' : auditFilter === 'access' ? '?via=ai&include=access' : '');
-    const head = root.querySelector('#pd-audit-h');
+    const head = auditEl.querySelector('#pd-audit-h');
     if (head) {
       head.textContent = auditFilter === 'access' ? 'Audit log via AI and AI requests (last 100 of each)'
         : auditFilter === 'ai' ? 'Audit log: changes made via AI (last 100)' : 'Audit log (last 100 changes)';
@@ -2525,7 +2560,6 @@
         const sel = document.getElementById('pd-perm-' + perm);
         return act(() => api('PUT', '/api/directory/permissions/' + enc(perm), { group: sel.value }), 'Permission saved');
       }
-      case 'audit-reload': return loadAudit();
       case 'import-pick': { const fi = root.querySelector('.pd-import-file'); fi.value = ''; fi.click(); return; }
       case 'imp-keep': {
         const i = +b.dataset.r, j = +b.dataset.c;
@@ -2587,7 +2621,6 @@
     const on = t.dataset && t.dataset.on;
     if (on === 'inv-group') { syncInviteRules(); return; }
     if (on === 'org-field') { orgField = t.value; renderOrg(); return; }
-    if (on === 'audit-filter') { auditFilter = t.value; loadAudit(); return; }
     if (!imp) return;
     if (on === 'imp-show') { imp.show[t.value] = t.checked; renderImport(); }
     else if (on === 'imp-tick') {
@@ -2717,6 +2750,7 @@
       if (can('invite')) openInvite(action);
       return;
     }
+    name = canonPerson(name);
     if (!userByName(name)) return;
     setHash(personHash(name), false);
     applyRoute({ person: name });
@@ -2751,6 +2785,6 @@
     if (dir) selectTab('people', false);
   }
 
-  window.PortcullisDirectory = { show, openAt, openGroup, route, csvCell };
+  window.PortcullisDirectory = { show, openAt, openGroup, route, csvCell, renderAudit };
   window.PortcullisAI = { decision: aiDecision };
 })();

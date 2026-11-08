@@ -1,0 +1,143 @@
+package httpapi
+
+import (
+	"encoding/json"
+	"os"
+	"os/exec"
+	"strings"
+	"testing"
+)
+
+// People & groups Task 7: people and groups live on people.<domain>. The
+// Hub page's PortcullisPeople (the people base URL and group links) and
+// its peopleRedirect (the old #users… deep links) run under node against
+// the served index (skipped when node isn't installed; CI has it). The
+// harness checks the same in a browser.
+
+// hubIndexScripts answers the served Hub index's PortcullisPeople block
+// and peopleRedirect function.
+func hubIndexScripts(t *testing.T, peopleURL string) (people, redirect string) {
+	t.Helper()
+	e := newPeopleEnv(t)
+	e.s.PeopleURL = peopleURL
+	_, b := doAs(t, e.hub, "root", "GET", "/", "")
+	i := strings.Index(b, "      (function () {\n        const injected")
+	j := strings.Index(b[max(i, 0):], "      })();\n")
+	k := strings.Index(b, "    function peopleRedirect(t) {")
+	l := strings.Index(b[max(k, 0):], "\n    }\n")
+	if i < 0 || j < 0 || k < 0 || l < 0 {
+		t.Fatal("the hub index lacks PortcullisPeople or peopleRedirect")
+	}
+	return b[i : i+j+len("      })();\n")], b[k : k+l+len("\n    }\n")]
+}
+
+func runNode(t *testing.T, script string) string {
+	t.Helper()
+	node, err := exec.LookPath("node")
+	if err != nil {
+		if os.Getenv("CI") != "" {
+			t.Fatal("node is required in CI for the people link tests")
+		}
+		t.Skip("node not installed")
+	}
+	cmd := exec.Command(node, "-")
+	cmd.Stdin = strings.NewReader(script)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("node: %v", err)
+	}
+	return string(out)
+}
+
+// peopleJS runs the block with location.host = host and answers what
+// expr (JSON) gives.
+func peopleJS(t *testing.T, peopleURL, host, expr string) any {
+	t.Helper()
+	ppl, redir := hubIndexScripts(t, peopleURL)
+	script := "global.window = {};\nglobal.location = { host: " + jsonString(host) + " };\n" +
+		"const tab = {};\nglobal.document = { getElementById: () => tab };\n" + ppl + redir +
+		"const PortcullisPeople = window.PortcullisPeople;\nprocess.stdout.write(JSON.stringify(" + expr + "));\n"
+	var v any
+	if err := json.Unmarshal([]byte(runNode(t, script)), &v); err != nil {
+		t.Fatal(err)
+	}
+	return v
+}
+
+func jsonString(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
+}
+
+// TestHubPeopleBase: https://people.<domain>/ from the Hub's host (hub.
+// swapped, the port kept), the main domain for any other host, the
+// injected URL when set; the Users & Groups tab links there.
+func TestHubPeopleBase(t *testing.T) {
+	for _, c := range []struct{ inject, host, want string }{
+		{"", "hub.example.org", "https://people.example.org/"},
+		{"", "hub.example.org:8443", "https://people.example.org:8443/"},
+		{"", "HUB.example.org", "https://people.example.org/"},
+		{"", "10.0.0.5:8080", "https://people.example.org/"},
+		{"http://127.0.0.1:18889/", "127.0.0.1:18888", "http://127.0.0.1:18889/"},
+	} {
+		got := peopleJS(t, c.inject, c.host, "[PortcullisPeople.base, tab.href]")
+		if l, ok := got.([]any); !ok || len(l) != 2 || l[0] != c.want || l[1] != c.want {
+			t.Errorf("host %q inject %q: base, tab = %v, want %s", c.host, c.inject, got, c.want)
+		}
+	}
+}
+
+// TestHubPeopleRedirects: each old Hub deep link → its people page.
+func TestHubPeopleRedirects(t *testing.T) {
+	cases := map[string]any{
+		"users":                "",
+		"users/carol":          "#people/carol",
+		"users/Carol":          "#people/Carol", // the people page resolves the case
+		"users/carol?password": "#users/carol?password",
+		"users/carol?invite":   "#users/carol?invite",
+		"users/a%20b":          "#people/a%20b",
+		"users/%E0":            "",
+		"users?create":         "#invite",
+		"users?create&username=erin&email=erin%40example.org&groups=a,b": "#invite?username=erin&email=erin%40example.org&groups=a,b",
+		"groups":               "#groups",
+		"groups/office_milan":  "#groups/office_milan",
+		"people/carol":         "#people/carol",
+		"settings":             nil,
+		"app/grafana/settings": nil,
+		"usersx":               nil,
+		"audit":                nil,
+	}
+	keys := make([]string, 0, len(cases))
+	for k := range cases {
+		keys = append(keys, k)
+	}
+	b, _ := json.Marshal(keys)
+	got := peopleJS(t, "", "hub.example.org", string(b)+".map(peopleRedirect)")
+	l, ok := got.([]any)
+	if !ok || len(l) != len(keys) {
+		t.Fatalf("redirects = %v", got)
+	}
+	for i, k := range keys {
+		if l[i] != cases[k] {
+			t.Errorf("#%s → %v, want %v", k, l[i], cases[k])
+		}
+	}
+}
+
+// TestHubGroupLink: a group name links to its page, escaped, same tab.
+func TestHubGroupLink(t *testing.T) {
+	got := peopleJS(t, "", "hub.example.org", `[PortcullisPeople.groupLink("a<b>&\"c'"), PortcullisPeople.groupLink("office_milan", true)]`)
+	l, ok := got.([]any)
+	if !ok || len(l) != 2 {
+		t.Fatalf("links = %v", got)
+	}
+	if l[0] != `<a class="group-link" href="https://people.example.org/#groups/a%3Cb%3E%26%22c&#39;" title="Open a&lt;b&gt;&amp;&quot;c&#39;&#39;s page">a&lt;b&gt;&amp;&quot;c&#39;</a>` {
+		t.Errorf("escaped link = %s", l[0])
+	}
+	if l[1] != `<a class="group-link" href="https://people.example.org/#groups/office_milan" title="Open office_milan&#39;s page"><code>office_milan</code></a>` {
+		t.Errorf("code link = %s", l[1])
+	}
+	if strings.Contains(l[0].(string), "target=") {
+		t.Error("group links open in the same tab")
+	}
+}

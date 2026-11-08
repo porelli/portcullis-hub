@@ -25,6 +25,9 @@
     .tab { padding: 0.75rem 1.5rem; cursor: pointer; color: #94a3b8; font-size: 0.875rem; font-weight: 500; border-bottom: 2px solid transparent; margin-bottom: -2px; transition: all 0.2s; }
     .tab:hover { color: #e2e8f0; }
     .tab.active { color: #3b82f6; border-bottom-color: #3b82f6; }
+    a.tab { text-decoration: none; }
+    a.group-link { color: inherit; text-decoration: none; border-bottom: 1px dotted #64748b; }
+    a.group-link:hover, a.group-link:focus-visible { color: #93c5fd; border-bottom-color: #93c5fd; }
     .tab-content { display: none; }
     .tab-content.active { display: block; }
 
@@ -478,11 +481,36 @@
 
     <div class="tabs">
       <div class="tab active" data-tab="catalog">App Catalog</div>
-      <div class="tab" data-tab="users">Users &amp; Groups</div>
+      <a class="tab" id="people-tab" href="#" title="People and groups live on the people page">Users &amp; Groups</a>
       <div class="tab" data-tab="sources">Template Sources</div>
       <div class="tab" data-tab="doctor" id="doctor-tab">Doctor <span class="tab-badge" hidden></span></div>
+      <div class="tab" data-tab="audit">Audit log</div>
       <div class="tab" data-tab="settings">Settings</div>
     </div>
+    <script>
+      // People and groups live on people.<domain> only (the Users &
+      // Groups tab is a link there; old #users… deep links redirect).
+      // PortcullisPeople.base: https://people.<main domain>[:port]/ —
+      // the Hub's own host with hub. swapped for people. (the port
+      // kept), else the main domain; PEOPLE_URL overrides it (the
+      // harness, whose people listener is another port).
+      (function () {
+        const injected = {{.PeopleURL}};
+        const host = location.host;
+        const base = injected || ('https://people.' + (/^hub\./i.test(host) ? host.slice(4) : {{.Domain}}) + '/');
+        const href = frag => base + (frag || '');
+        const groupHref = g => href('#groups/' + encodeURIComponent(String(g)));
+        const esc = v => String(v == null ? '' : v).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+        // groupLink: a group name linking to its page (same tab); code
+        // wraps the name in <code>.
+        function groupLink(g, code) {
+          const t = code ? '<code>' + esc(g) + '</code>' : esc(g);
+          return '<a class="group-link" href="' + esc(groupHref(g)) + '" title="' + esc('Open ' + g + '\'s page') + '">' + t + '</a>';
+        }
+        window.PortcullisPeople = { base, href, groupHref, groupLink };
+        document.getElementById('people-tab').href = base;
+      })();
+    </script>
 
     <!-- Catalog Tab -->
     <div class="tab-content active" id="tab-catalog">
@@ -601,9 +629,13 @@
       <div id="doctor-root"></div>
     </div>
 
-    <!-- Users & Groups Tab (web/directory.js) -->
-    <div class="tab-content" id="tab-users">
-      <div id="directory-root"></div>
+    <!-- Audit log Tab (web/directory.js: PortcullisDirectory.renderAudit) -->
+    <div class="tab-content" id="tab-audit">
+      <p class="settings-empty" style="margin-bottom:1rem">
+        Every change made on the Hub and on the people page (people, groups, app settings, AI), newest first.
+        Pick "via AI" to see only the changes made through the Portcullis MCP, or add the AI requests from the access log.
+      </p>
+      <div id="audit-root"></div>
     </div>
 
     <!-- The settings panel (loadSettings) -->
@@ -728,9 +760,9 @@
   <script src="/static/doctor.js"></script>
   <script>
     // ── Tab switching ─────────────────────────────────────
-    document.querySelectorAll('.tab').forEach(tab => {
+    document.querySelectorAll('.tab[data-tab]').forEach(tab => {
       tab.addEventListener('click', () => {
-        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('.tab[data-tab]').forEach(t => t.classList.remove('active'));
         document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
         tab.classList.add('active');
         document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
@@ -740,53 +772,49 @@
           PortcullisFolders.renderLocalNetworks(document.getElementById('localnets-root'));
         }
         if (tab.dataset.tab === 'doctor') PortcullisDoctor.render(document.getElementById('doctor-root'));
-        if (tab.dataset.tab === 'users') PortcullisDirectory.show(document.getElementById('directory-root'), { listener: 'hub' });
+        if (tab.dataset.tab === 'audit') PortcullisDirectory.renderAudit(document.getElementById('audit-root'));
         history.replaceState(null, '', tab.dataset.tab === 'catalog' ? location.pathname : '#' + tab.dataset.tab);
-        // The directory's view follows the hash (#users: not a group route).
-        if (tab.dataset.tab === 'users') PortcullisDirectory.route();
       });
     });
-    // Deep links: hub.<domain>/#users (directory.<domain> redirects there);
-    // #app/<id>/settings[/<option>] opens an instance's settings at an
+    // Deep links: #audit the Audit log tab; #app/<id>/settings[/<option>] opens an instance's settings at an
     // option (the Portcullis MCP's set_secret_setting form);
     // #settings/domains?enroll=<name>[&provider=<p>] and ?token=<name> open
     // the Domains forms (enroll_domain, replace_domain_token);
     // #settings/ai?provider=<name>&field=<field> a provider secret's form
-    // (set_model_provider_secret); #users/<name>[?password|?invite] a
-    // person, with the password fallback's or the invite's own prompt
-    // (set_password, send_invite); #users?create&username=&email=&
-    // display_name=&groups=a,b the new-person form pre-filled
-    // (create_person); #app/<id>/ai an instance's AI support tab. Secrets
-    // are typed here, never passed in. Routed at load and on a hash change
-    // (the AI tab links to #app/<id>/settings).
+    // (set_model_provider_secret); #app/<id>/ai an instance's AI support
+    // tab. Secrets are typed here, never passed in. Routed at load and on
+    // a hash change (the AI tab links to #app/<id>/settings).
     window.addEventListener('load', routeHash);
     window.addEventListener('hashchange', routeHash);
+    // peopleRedirect: the old Users & Groups deep links, now on
+    // people.<domain> (same tab, the Hub's entry replaced):
+    //   #users                         → people.<domain>/
+    //   #users/<name>                  → #people/<name>
+    //   #users/<name>?password|invite  → #users/<name>?… (the people
+    //       page's own old-link route: the person's page, then the
+    //       password fallback's or the invite's prompt)
+    //   #users?create&<query>          → #invite?<query> (the invite
+    //       form, pre-filled: username, email, display_name, groups)
+    //   #groups[/<g>], #people/<name>  → the same hash there.
+    // null: not one of them.
+    function peopleRedirect(t) {
+      if (t === 'users') return '';
+      const nu = /^users\?create(?:&(.*))?$/.exec(t);
+      if (nu) return '#invite' + (nu[1] ? '?' + nu[1] : '');
+      const usr = /^users\/([^?]+)(?:\?(password|invite))?$/.exec(t);
+      if (usr) {
+        let name;
+        try { name = decodeURIComponent(usr[1]); } catch (_) { return ''; }
+        if (!name) return '';
+        return usr[2] ? '#users/' + encodeURIComponent(name) + '?' + usr[2] : '#people/' + encodeURIComponent(name);
+      }
+      if (/^groups(?:\/|$)|^people\//.test(t)) return '#' + t;
+      return null;
+    }
     function routeHash() {
       const t = location.hash.slice(1);
-      const usr = /^users\/([a-z0-9][a-z0-9._-]{0,63})(?:\?(password|invite))?$/.exec(t);
-      if (usr) {
-        document.querySelector('.tab[data-tab="users"]').click();
-        PortcullisDirectory.openAt(usr[1], usr[2] || '');
-        return;
-      }
-      // #groups, #groups/<name> and #people/<name>: the Users & Groups
-      // tab's groups list, a group's page and a person's page
-      // (directory.js routes them once it is shown).
-      if (/^groups(?:\/|$)|^people\//.test(t)) {
-        const ut = document.querySelector('.tab[data-tab="users"]');
-        if (!ut.classList.contains('active')) {
-          ut.click();
-          history.replaceState(null, '', '#' + t);
-          PortcullisDirectory.route();
-        }
-        return;
-      }
-      const nu = /^users\?create(?:&(.*))?$/.exec(t);
-      if (nu) {
-        document.querySelector('.tab[data-tab="users"]').click();
-        PortcullisDirectory.openAt('', new URLSearchParams(nu[1] || ''));
-        return;
-      }
+      const ppl = peopleRedirect(t);
+      if (ppl !== null) { location.replace(PortcullisPeople.href(ppl)); return; }
       const app = /^app\/([a-z0-9-]+)\/settings(?:\/([A-Za-z0-9_.-]+))?$/.exec(t);
       if (app) { openSettingAt(app[1], app[2] || ''); return; }
       const aiTab = /^app\/([a-z0-9-]+)\/ai$/.exec(t);
@@ -1649,7 +1677,7 @@
       let html = '<div class="policy-section">';
       html += '<div class="policy-title">Sign-in</div>';
       html += '<label class="policy-factor"><input type="radio" name="__signin" value="gateway"' + (native ? '' : ' checked') + ' onchange="toggleSignIn(this)"> Portcullis sign-in, then the app\'s own login</label>';
-      html += '<small>' + (si.access_group ? 'Members of <code>' + escapeHtml(si.access_group) + '</code> only' : 'Any signed-in user') + ' reach the app\'s login page; the access policy below applies on every request.</small>';
+      html += '<small>' + (si.access_group ? 'Members of ' + PortcullisPeople.groupLink(si.access_group, true) + ' only' : 'Any signed-in user') + ' reach the app\'s login page; the access policy below applies on every request.</small>';
       html += '<label class="policy-factor' + (si.allow_without_gateway ? '' : ' disabled') + '"><input type="radio" name="__signin" value="native"' + (native ? ' checked' : '') + (si.allow_without_gateway ? '' : ' disabled') + ' onchange="toggleSignIn(this)"> App\'s own login only (no Portcullis)' + (si.allow_without_gateway ? '' : ' <em>— not allowed by this template</em>') + '</label>';
       if (si.note) html += '<small>' + escapeHtml(si.note) + '</small>';
       html += '<div class="public-danger signin-warn"' + (native ? '' : ' hidden') + '>No Portcullis in front of this app: no forward-auth, no group-gate, no hardware key. Anyone on the internet reaches the app\'s own login page (TLS tier <code>public@file</code>); only the app\'s own accounts protect it.</div>';
@@ -2117,7 +2145,7 @@
         for (const p of list) {
           const models = p.models || {};
           const ml = (models.fetch ? ['fetched from the provider'] : []).concat((models.list || []).map(m => '<code>' + escapeHtml(m) + '</code>'));
-          const used = (p.used_by || []).map(u => '<div><code>' + escapeHtml(u.instance) + '</code> (' + escapeHtml(u.group || 'no access group') + ', ' +
+          const used = (p.used_by || []).map(u => '<div><code>' + escapeHtml(u.instance) + '</code> (' + (u.group ? PortcullisPeople.groupLink(u.group) : 'no access group') + ', ' +
             (u.people == null ? 'people unknown' : escapeHtml(u.people) + ' people') + (u.restarts ? ', running: a change restarts it' : '') + ')</div>').join('') || '<span class="settings-empty">no AI page</span>';
           const secrets = Object.keys(p.secrets || {}).map(f => '<div><code>' + escapeHtml(f) + '</code> ' + aiSecretStatus(p.secrets[f]) + '</div>').join('') || '—';
           h += '<tr data-ai-provider="' + escapeHtml(p.name) + '"><td><b>' + escapeHtml(p.label || p.name) + '</b> <code>' + escapeHtml(p.name) + '</code>' +
@@ -2449,7 +2477,7 @@
         h += '<table class="inst-table"><thead><tr><th>Time</th><th>Person</th><th>Client</th><th>What</th><th>Decision</th></tr></thead><tbody>' +
           act.lines.map(l => '<tr><td style="white-space:nowrap">' + escapeHtml(fmtTime(l.time)) + '</td><td>' + escapeHtml(l.user || '(no valid token)') + '</td><td><code>' + escapeHtml(l.client) + '</code></td>' +
             '<td><code>' + escapeHtml(l.tool ? id + '__' + l.tool : l.method) + '</code>' + aiNote(escapeHtml(l.companion) + ' · ' + escapeHtml(l.via)) + '</td><td>' + aiDecision(l.decision) + '</td></tr>').join('') +
-          '</tbody></table>' + aiNote('The newest 20 requests from the gate\'s access log (never the arguments or results). All of them: Users &amp; Groups → Setup → Audit log, "via AI".');
+          '</tbody></table>' + aiNote('The newest 20 requests from the gate\'s access log (never the arguments or results). All of them: the <a href="#audit">Audit log</a> tab, "via AI".');
       }
       h += '</div>';
       return h;
@@ -2660,9 +2688,9 @@
     }
     window.openAppTab = openAppTab;
 
-    // ── Users & groups (contract §9): web/directory.js ────
-    // The tab is the directory UI (People | Groups | Org chart | Setup),
-    // shared with the people listener; it escapes everything itself.
+    // ── Users & groups (contract §9) ──────────────────────
+    // On people.<domain> only (PortcullisPeople above); the Hub keeps the
+    // Audit log tab (directory.js's renderAudit).
     function fmtTime(s) {
       const d = new Date(s);
       return isNaN(d) ? String(s || '') : d.toLocaleString();
@@ -2774,8 +2802,9 @@
     // ── Missing instance groups (users_<id> / admin_<id>) ──
     // Enabled apps whose access / admin group isn't in LLDAP: nobody can
     // sign in until it exists. One click creates the instance's own
-    // groups as the signed-in admin (audited in Users & Groups); other
-    // names (shared groups) are only listed.
+    // groups as the signed-in admin (audited: the Audit log tab); other
+    // names (shared groups) are only listed. Each name links to its
+    // group page on people.<domain>.
     function renderMissingGroups(rep) {
       const box = document.getElementById('missing-groups');
       const items = (rep && rep.instances) || [];
@@ -2785,8 +2814,9 @@
         (creatable ? '<button class="btn btn-primary btn-sm" data-create-groups="">Create missing groups</button>' : '') + '</div>';
       for (const m of items) {
         html += '<div class="drift-item"><span class="drift-id">' + escapeHtml(m.instance) + '</span><span class="drift-msg">';
-        if ((m.creatable || []).length) html += 'missing: ' + escapeHtml(m.creatable.join(', '));
-        if ((m.other || []).length) html += ((m.creatable || []).length ? ' &middot; ' : '') + 'missing (create in Users &amp; Groups): ' + escapeHtml(m.other.join(', '));
+        const gl = gs => gs.map(g => PortcullisPeople.groupLink(g)).join(', ');
+        if ((m.creatable || []).length) html += 'missing: ' + gl(m.creatable);
+        if ((m.other || []).length) html += ((m.creatable || []).length ? ' &middot; ' : '') + 'missing (create on the <a class="group-link" href="' + escapeHtml(PortcullisPeople.href('#groups')) + '">people page</a>): ' + gl(m.other);
         html += '</span>';
         if ((m.creatable || []).length) html += '<button class="btn btn-secondary btn-sm" data-create-groups="' + escapeHtml(m.instance) + '">Create</button>';
         html += '</div>';
@@ -3637,8 +3667,8 @@
       let h = '<div class="inst-section"><h4>Instance</h4><dl class="inst-facts">' +
         '<dt>Template</dt><dd>' + escapeHtml(templateLabel(inst.template)) + ' <code>' + escapeHtml(inst.template) + '</code></dd>' +
         '<dt>Compose project</dt><dd><code>' + escapeHtml(inst.project || '') + '</code></dd>' +
-        (inst.access_group ? '<dt>Access group</dt><dd><code>' + escapeHtml(inst.access_group) + '</code></dd>' : '') +
-        (inst.admin_group ? '<dt>Admin group</dt><dd><code>' + escapeHtml(inst.admin_group) + '</code></dd>' : '') +
+        (inst.access_group ? '<dt>Access group</dt><dd>' + PortcullisPeople.groupLink(inst.access_group, true) + '</dd>' : '') +
+        (inst.admin_group ? '<dt>Admin group</dt><dd>' + PortcullisPeople.groupLink(inst.admin_group, true) + '</dd>' : '') +
         ((inst.keycloak_clients || []).length ? '<dt>Keycloak clients</dt><dd>' + inst.keycloak_clients.map(c => '<code>' + escapeHtml(c) + '</code>').join(', ') + '</dd>' : '') +
         '</dl>';
       if (inst.error) h += '<div class="op-msg">' + escapeHtml(inst.error) + '</div>';
@@ -3746,8 +3776,8 @@
       if (inst.state === 'deleting') h += '<div class="public-warn">A previous delete stopped part-way: deleting again continues where it stopped (the first backup is kept).</div>';
       h += '<p>Deleting <code>' + escapeHtml(id) + '</code> is permanent. The Hub first takes a backup (kept under Backups, restorable into a new instance), then removes:</p>' +
         '<ul class="policy-notes" style="margin-bottom:0.75rem"><li>its containers and volumes (all its data)</li><li>its Keycloak clients and access role</li>' +
-        '<li>its generated secrets, settings, policies and share links</li><li>its groups' + (inst.access_group ? ' <code>' + escapeHtml(inst.access_group) + '</code>' : '') +
-        (inst.admin_group ? ' <code>' + escapeHtml(inst.admin_group) + '</code>' : '') + ' (kept, with a warning, if anything else uses them)</li></ul>' +
+        '<li>its generated secrets, settings, policies and share links</li><li>its groups' + (inst.access_group ? ' ' + PortcullisPeople.groupLink(inst.access_group, true) : '') +
+        (inst.admin_group ? ' ' + PortcullisPeople.groupLink(inst.admin_group, true) : '') + ' (kept, with a warning, if anything else uses them)</li></ul>' +
         (inst.default ? '<p class="settings-empty">This is the template\'s default instance: the template stays in the catalog, and enabling it again starts a fresh one.</p>' : '') +
         '<div class="inst-form" style="margin-top:0.75rem"><label class="block" for="inst-del-confirm">Type <code>' + escapeHtml(id) + '</code> to confirm</label>' +
         '<input type="text" id="inst-del-confirm" spellcheck="false" autocomplete="off" placeholder="' + escapeHtml(id) + '"></div>' +

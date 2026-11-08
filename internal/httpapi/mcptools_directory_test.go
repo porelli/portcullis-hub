@@ -112,8 +112,8 @@ func TestDirectoryToolsGuardrails(t *testing.T) {
 
 // TestCreatePersonNoInviteLink (G39, fix round 1 ruling 3): no tool
 // issues an invite or a password. create_person and send_invite are U —
-// they answer the Hub's pre-filled forms (#users?create&…,
-// #users/<name>?invite), core is never asked, nobody is created; accepted,
+// they answer the people page's pre-filled forms (#invite?…,
+// #users/<name>?invite: Task 7 of people & groups moved them off the Hub), core is never asked, nobody is created; accepted,
 // they report the server-side state (exists, the newest invite in the
 // audit log, pending while no passkey and younger than 72 h), never the
 // client's word and never a link. remove_passkeys takes no invite
@@ -126,7 +126,7 @@ func TestCreatePersonNoInviteLink(t *testing.T) {
 	txt, isErr := resultText(e.call(t, "/mcp/admin", "root", "2025-11-25", "create_person", args, nil))
 	// lldap_admin (an administrator group) is never pre-ticked (final
 	// review I2: TestCreatePersonFormOnlyPlainGroups).
-	want := "https://hub.example.org/#users?create&display_name=Erin&email=erin%40example.org&groups=helpers&username=erin"
+	want := "https://people.example.org/#invite?display_name=Erin&email=erin%40example.org&groups=helpers&username=erin"
 	if !isErr || !strings.Contains(txt, want) {
 		t.Errorf("create_person = %q, want the form %s", txt, want)
 	}
@@ -134,7 +134,7 @@ func TestCreatePersonNoInviteLink(t *testing.T) {
 	txt, isErr = e.accept(t, "create_person", args)
 	noInviteLink(t, "create_person (accepted)", txt)
 	if isErr || !strings.Contains(txt, `"exists":false`) || !strings.Contains(txt, `"last_invite":null`) ||
-		!strings.Contains(txt, `"invite_form":"https://hub.example.org/#users/erin?invite"`) {
+		!strings.Contains(txt, `"invite_form":"https://people.example.org/#users/erin?invite"`) {
 		t.Errorf("accepted create_person = %q %v", txt, isErr)
 	}
 	if len(inv.users) != 0 || e.ll.HasUser("erin") {
@@ -150,7 +150,7 @@ func TestCreatePersonNoInviteLink(t *testing.T) {
 	// send_invite: the form; accepted, the state; never an invite.
 	n := len(inv.users)
 	txt, isErr = resultText(e.call(t, "/mcp/admin", "root", "2025-11-25", "send_invite", map[string]any{"username": "erin"}, nil))
-	if !isErr || !strings.Contains(txt, "https://hub.example.org/#users/erin?invite") {
+	if !isErr || !strings.Contains(txt, "https://people.example.org/#users/erin?invite") {
 		t.Errorf("send_invite = %q", txt)
 	}
 	txt, isErr = e.accept(t, "send_invite", map[string]any{"username": "erin"})
@@ -170,7 +170,7 @@ func TestCreatePersonNoInviteLink(t *testing.T) {
 	}
 	txt, isErr, _ = e.tool(t, "remove_passkeys", map[string]any{"username": "erin"})
 	noInviteLink(t, "remove_passkeys", txt)
-	if isErr || !strings.Contains(txt, `"invite_form":"https://hub.example.org/#users/erin?invite"`) || len(inv.users) != n {
+	if isErr || !strings.Contains(txt, `"invite_form":"https://people.example.org/#users/erin?invite"`) || len(inv.users) != n {
 		t.Errorf("remove_passkeys = %q %v (invites %v)", txt, isErr, inv.users)
 	}
 	txt, isErr, _ = e.tool(t, "remove_passkeys", map[string]any{"username": "olga"})
@@ -392,18 +392,19 @@ func TestDirectoryToolClassPerCall(t *testing.T) {
 }
 
 // TestSetPasswordForm (U, ruling 4): set_password takes no password, its
-// call answers the Hub's form https://hub.<d>/#users/<name>?password;
+// call answers the people page's form
+// https://people.<d>/#users/<name>?password;
 // accepted, it reports the newest user.password audit entry (server-side
 // evidence, never the client's accept) and never a password.
 func TestSetPasswordForm(t *testing.T) {
 	e, _ := directoryToolEnv(t)
 	txt, isErr := resultText(e.call(t, "/mcp/admin", "root", "2025-11-25", "set_password", map[string]any{"username": "dana"}, nil))
-	if !isErr || !strings.Contains(txt, "https://hub.example.org/#users/dana?password") {
+	if !isErr || !strings.Contains(txt, "https://people.example.org/#users/dana?password") {
 		t.Errorf("set_password = %q", txt)
 	}
 	const marker = "PWMARKER-0123456789"
 	txt, isErr = resultText(e.call(t, "/mcp/admin", "root", "2025-11-25", "set_password", map[string]any{"username": "dana", "password": marker}, nil))
-	if !isErr || !strings.HasPrefix(txt, textSecretArgs+"https://hub.example.org/#users/dana?password") {
+	if !isErr || !strings.HasPrefix(txt, textSecretArgs+"https://people.example.org/#users/dana?password") {
 		t.Errorf("set_password with a password = %q", txt)
 	}
 	txt, isErr = e.accept(t, "set_password", map[string]any{"username": "dana"})
@@ -707,7 +708,7 @@ func TestCreatePersonFormOnlyPlainGroups(t *testing.T) {
 	args := map[string]any{"username": "erin", "email": "erin@example.org", "display_name": "Erin",
 		"groups": []string{"lldap_admin", "hr_edit", "admin_grafana", "no-such-group", "helpers"}}
 	txt, isErr := resultText(e.call(t, "/mcp/admin", "root", "2025-11-25", "create_person", args, nil))
-	want := "https://hub.example.org/#users?create&display_name=Erin&email=erin%40example.org&groups=helpers&username=erin"
+	want := "https://people.example.org/#invite?display_name=Erin&email=erin%40example.org&groups=helpers&username=erin"
 	if !isErr || !strings.Contains(txt, want) {
 		t.Errorf("create_person = %q, want the form %s", txt, want)
 	}
@@ -843,5 +844,30 @@ func TestCheckNameArgsSchemaPathsOnly(t *testing.T) {
 	}
 	if err := e.s.checkNameArgs(ctx, "convert_group", convertArgs{}, json.RawMessage(`{"group":"g","rule":"x = \"y\"","preview":{"matching":[],"kept_as_exception":[],"joining":["not a user"],"expiry_dropped":[]}}`)); err == nil {
 		t.Error("the preview's joining not judged")
+	}
+}
+
+// TestDirectoryDeepLinksOnPeople (people & groups Task 7): people and
+// groups live on people.<domain> only, so every person form the admin
+// MCP answers — invite, password, the new-person form and the note that
+// replaces an invite link — opens there, in the forms the people page
+// routes (its old-link #users/<name>?invite|password and #invite?…),
+// never on the Hub.
+func TestDirectoryDeepLinksOnPeople(t *testing.T) {
+	e, _ := directoryToolEnv(t)
+	for name, got := range map[string]string{
+		"inviteForm": e.s.inviteForm("Erin.b"),
+		"inviteNote": e.s.inviteNote("erin"),
+		"createForm": e.s.createForm(createPersonArgs{Username: "erin", Email: "erin@example.org"}),
+	} {
+		if !strings.Contains(got, "https://people.example.org/#") || strings.Contains(got, "hub.example.org") {
+			t.Errorf("%s = %q, want a people.example.org link", name, got)
+		}
+	}
+	if got := e.s.inviteForm("Erin.b"); got != "https://people.example.org/#users/Erin.b?invite" {
+		t.Errorf("inviteForm = %q", got)
+	}
+	if got := e.s.createForm(createPersonArgs{Username: "erin", Email: "erin@example.org"}); got != "https://people.example.org/#invite?display_name=&email=erin%40example.org&username=erin" {
+		t.Errorf("createForm = %q", got)
 	}
 }

@@ -44,9 +44,10 @@
     // The popup handed its result to My apps; close() may be refused.
     document.getElementById('people').textContent = 'Signed in. You can close this window.';
   } else {
-    // #invite?username=…&email=…&display_name=… (the Portcullis MCP's
-    // invite_person form): the invite dialog, pre-filled; the delegate
-    // creates the person here, where the one-time link is shown.
+    // #invite?username=…&email=…&display_name=…[&groups=a,b] (the
+    // Portcullis MCP's invite_person and create_person forms, and the
+    // Hub's old #users?create&… links): the invite dialog, pre-filled;
+    // the person is created here, where the one-time link is shown.
     const inv = /^#invite(?:\?(.*))?$/.exec(location.hash);
     PortcullisDirectory.show(document.getElementById('people'), {
       listener: 'people',
@@ -58,10 +59,12 @@
       },
     });
     if (inv) {
-      // Only these three keys: a delegate's invite has no groups, and no
-      // other key of the link is ever pre-filled.
+      // Only these keys, nothing else of the link is ever pre-filled.
+      // groups ticks plain groups only, and only for an admin (a
+      // delegate's form has no groups; directory.js never ticks an
+      // administrator or permission group from a link).
       const given = new URLSearchParams(inv[1] || ''), pre = new URLSearchParams();
-      for (const k of ['username', 'email', 'display_name']) if (given.has(k)) pre.set(k, given.get(k));
+      for (const k of ['username', 'email', 'display_name', 'groups']) if (given.has(k)) pre.set(k, given.get(k));
       PortcullisDirectory.openAt('', pre);
     }
   }

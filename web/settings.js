@@ -750,7 +750,7 @@
     h += rowsHtml(st, o, p.rows, priority);
     const refused = (o.group_choices || []).filter(c => c.disabled);
     if (o.privileged && refused.length) {
-      h += '<div class="ps-refused"><span>Can\'t grant a privileged value:</span><ul>' + refused.map(c => '<li data-refused-group="' + esc(c.name) + '"><span class="ps-user">' + esc(c.name) + '</span> — ' + esc(c.reason || 'refused') + '</li>').join('') + '</ul></div>';
+      h += '<div class="ps-refused"><span>Can\'t grant a privileged value:</span><ul>' + refused.map(c => '<li data-refused-group="' + esc(c.name) + '"><span class="ps-user">' + groupLink(c.name) + '</span> — ' + esc(c.reason || 'refused') + '</li>').join('') + '</ul></div>';
     }
     h += '<div class="ps-row ps-row-default"><span class="ps-row-label">Everyone else with access</span>' + editorHtml(st, o, p.default, 'default', '', { label: (o.label || o.key) + ' for everyone else with access' }) + '</div>';
     const choices = [o.resolve, ...(o.resolve_choices || [])].filter((x, i, a) => x && a.indexOf(x) === i);
@@ -905,20 +905,30 @@
       '<input type="search" class="ps-search" data-who-search data-key="' + esc(o.key) + '" value="' + esc(w.q) + '" placeholder="search…" aria-label="Search people"></div>';
   }
 
-  function reasonText(o, p) {
+  // reasonText: why a person gets their value, as text (the search) or,
+  // with html, as HTML whose group names link to the group's page on
+  // people.<domain> (groupLink; everything escaped).
+  function reasonText(o, p, html) {
     const r = p.reason || {};
+    const t = html ? esc : (x => x);
+    const g = html ? groupLink : (x => x);
     switch (r.source) {
       case 'group':
         if ((r.others || []).length) {
-          const all = [r.group + ' (' + p.display + ')', ...r.others.map(c => c.group + ' (' + display(o, c.value) + ')')];
-          return (RULE_OF[r.rule] || r.rule + ' of') + ' ' + all.join(', ');
+          const all = [g(r.group) + t(' (' + p.display + ')'), ...r.others.map(c => g(c.group) + t(' (' + display(o, c.value) + ')'))];
+          return t((RULE_OF[r.rule] || r.rule + ' of') + ' ') + all.join(t(', '));
         }
-        return 'from ' + r.group;
-      case 'default': return 'everyone else with access';
-      case 'combined': return 'combined from ' + (r.groups || []).join(', ');
-      case 'fail-closed': return 'fail-closed: the rows could not be resolved safely' + ((r.others || []).length ? ' (' + r.others.map(c => c.group).join(', ') + ')' : '');
+        return t('from ') + g(r.group);
+      case 'default': return t('everyone else with access');
+      case 'combined': return t('combined from ') + (r.groups || []).map(g).join(t(', '));
+      case 'fail-closed': return t('fail-closed: the rows could not be resolved safely') + ((r.others || []).length ? t(' (') + r.others.map(c => g(c.group)).join(t(', ')) + t(')') : '');
     }
     return '';
+  }
+  // groupLink: a group name linking to its page on people.<domain>
+  // (index.html's PortcullisPeople), same tab.
+  function groupLink(name) {
+    return window.PortcullisPeople ? window.PortcullisPeople.groupLink(name) : esc(name);
   }
 
   function personValue(p) {
@@ -942,7 +952,7 @@
     else {
       h += '<ul class="ps-who-rows">';
       for (const p of people.slice(w.page * PAGE, (w.page + 1) * PAGE)) {
-        h += '<li><span class="ps-user">' + esc(p.user) + '</span><span class="ps-val' + (p.display === UNRESOLVED ? ' ps-unresolved' : '') + '">' + esc(personValue(p)) + '</span><span class="ps-why">' + esc(reasonText(o, p)) + '</span></li>';
+        h += '<li><span class="ps-user">' + esc(p.user) + '</span><span class="ps-val' + (p.display === UNRESOLVED ? ' ps-unresolved' : '') + '">' + esc(personValue(p)) + '</span><span class="ps-why">' + reasonText(o, p, true) + '</span></li>';
       }
       h += '</ul>';
     }
@@ -953,7 +963,7 @@
     }
     const name = st.panel.name || st.id;
     for (const [g, n] of Object.entries(op.no_access || {})) {
-      if (n > 0) h += '<div class="ps-warn">⚠ ' + esc(plural(n, 'member', 'members') + ' of ' + g + ' ' + (n === 1 ? 'has' : 'have') + ' no access to ' + name + ' and ' + (n === 1 ? 'gets' : 'get') + ' nothing.') + '</div>';
+      if (n > 0) h += '<div class="ps-warn">⚠ ' + esc(plural(n, 'member', 'members') + ' of ') + groupLink(g) + esc(' ' + (n === 1 ? 'has' : 'have') + ' no access to ' + name + ' and ' + (n === 1 ? 'gets' : 'get') + ' nothing.') + '</div>';
     }
     return h;
   }

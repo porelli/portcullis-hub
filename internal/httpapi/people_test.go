@@ -573,8 +573,10 @@ func TestCoreSubdomainsHasPeople(t *testing.T) {
 }
 
 // TestDirectoryAssetsServed: both listeners serve the directory UI's
-// embedded assets, and both pages load them (the Hub's Users & Groups tab
-// no longer carries its own copy of the code).
+// embedded assets, and both pages load them (the Hub's for its Audit log
+// tab only: people and groups live on people.<domain>, Task 7 — its
+// Users & Groups tab is a link there and the old #users… deep links
+// redirect).
 func TestDirectoryAssetsServed(t *testing.T) {
 	e := newPeopleEnv(t)
 	for _, srv := range []*httptest.Server{e.hub, e.people} {
@@ -598,8 +600,31 @@ func TestDirectoryAssetsServed(t *testing.T) {
 	if strings.Contains(b, "function renderUsers") || strings.Contains(b, "dir-users") {
 		t.Error("the hub index still carries the old inline Users & Groups code")
 	}
-	if !strings.Contains(b, `data-tab="users"`) {
-		t.Error("the hub index lost its Users & Groups tab (#users deep link)")
+	if strings.Contains(b, `data-tab="users"`) || strings.Contains(b, "directory-root") || strings.Contains(b, "PortcullisDirectory.show") ||
+		strings.Contains(b, "PortcullisDirectory.openAt") || strings.Contains(b, "PortcullisDirectory.route") {
+		t.Error("the hub index still embeds the directory (people and groups live on people.<domain>)")
+	}
+	for _, want := range []string{`id="people-tab"`, "function peopleRedirect(", "location.replace(PortcullisPeople.href(ppl))",
+		`data-tab="audit"`, `id="audit-root"`, "PortcullisDirectory.renderAudit(", "window.PortcullisPeople = "} {
+		if !strings.Contains(b, want) {
+			t.Errorf("the hub index lacks %q", want)
+		}
+	}
+	// The people base URL: derived in the browser unless the server
+	// injects one (the harness's people listener).
+	if !strings.Contains(b, `const injected = "";`) {
+		t.Error("the hub index injects a people URL nobody set")
+	}
+	e.s.PeopleURL = "http://127.0.0.1:18889/"
+	_, b = doAs(t, e.hub, "root", "GET", "/", "")
+	if !strings.Contains(b, `const injected = "http://127.0.0.1:18889/";`) {
+		t.Error("the hub index doesn't carry the injected people URL")
+	}
+	// The audit view is exported, and the directory UI's Setup no longer
+	// carries it (the Hub's Audit log tab only).
+	js := webAsset(t, "directory.js")
+	if !strings.Contains(js, "renderAudit };") || strings.Contains(js, "isAdmin()) loadAudit") || strings.Contains(js, "data-act=\"audit-reload\"") != strings.Contains(js, "function renderAudit(") {
+		t.Error("directory.js: renderAudit not exported, or Setup still loads the audit log")
 	}
 }
 

@@ -30,7 +30,12 @@ type Server struct {
 	// app sign-in mode changes and custom override saves go here too.
 	Audit      *directory.AuditLog
 	PortalName string
-	Secret     string // HUB_PROXY_SECRET
+	// PeopleURL overrides the people page's base URL the Hub page links
+	// to (Users & Groups, group names, the old #users deep links): ""
+	// = https://people.<domain>/ derived in the browser from the Hub's
+	// host (the harness sets its people listener's http://… here).
+	PeopleURL string
+	Secret    string // HUB_PROXY_SECRET
 	// MCPSecret is HUB_MCP_GATE_SECRET (the MCP listener, MCPHandler;
 	// "" = no MCP listener).
 	MCPSecret string
@@ -329,6 +334,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := s.index.Execute(w, map[string]interface{}{
 		"Domain":     s.Hub.Domain(),
+		"PeopleURL":  s.PeopleURL,
 		"PortalName": name,
 		"Templates":  ts,
 		"Categories": categories,
