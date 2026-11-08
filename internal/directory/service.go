@@ -320,11 +320,11 @@ type RuleView struct {
 // ExceptionView is one exception of a rule group.
 type ExceptionView struct {
 	User    string     `json:"user"`
-	Reason  string     `json:"reason"`
-	By      string     `json:"by"`
-	Include bool       `json:"include"` // true: added; false: kept out
-	Until   *time.Time `json:"until"`   // nil: permanent
-	At      time.Time  `json:"at"`
+	Reason  string     `json:"reason,omitempty"` // administrators only
+	By      string     `json:"by,omitempty"`     // administrators only
+	Include bool       `json:"include"`          // true: added; false: kept out
+	Until   *time.Time `json:"until"`            // nil: permanent
+	At      time.Time  `json:"at,omitzero"`      // administrators only
 	Expired bool       `json:"expired,omitempty"`
 }
 
@@ -413,8 +413,9 @@ func (s *Service) Overview(ctx context.Context, me string) (*Overview, error) {
 }
 
 // OverviewFor is GET /api/directory for c: administrators get everything
-// (Overview); anyone else gets people, groups, fields, rules, exceptions,
-// permissions and the org chart's cycles, but no Keycloak or passkey
+// (Overview); anyone else gets people, groups, fields, rules, exceptions
+// (without their reasons, authors and times), permissions and the org
+// chart's cycles, but no Keycloak or passkey
 // state, no stale Keycloak records, no invite internals and no setup
 // suggestions (contract §9.6: everyone signed in sees everyone's fields).
 func (s *Service) OverviewFor(ctx context.Context, c *Caller) (*Overview, error) {
@@ -616,7 +617,8 @@ func (s *Service) overview(ctx context.Context, me string, c *Caller) (*Overview
 // addGroupConfig adds what directory.yaml says about groups to ov: each
 // group's rule, exceptions and expiries, every user's memberships with
 // how they hold them, and the manager cycles of the org chart. full (the
-// administrator's view) adds each rule group's Matches.
+// administrator's view) adds each rule group's Matches and the entries'
+// reasons, authors and times (Reason, By, At; a membership's Reason).
 func (s *Service) addGroupConfig(ov *Overview, cfg *Config, sn *snapshot, admins map[string]bool, now time.Time, full bool) {
 	d := ruleDirectory(cfg, sn)
 	if cy := rules.Cycles(d); cy != nil {
@@ -650,8 +652,14 @@ func (s *Service) addGroupConfig(ov *Overview, cfg *Config, sn *snapshot, admins
 			}
 		}
 		for _, ex := range gc.Exceptions {
-			gv.Exceptions = append(gv.Exceptions, ExceptionView{User: ex.User, Reason: ex.Reason, By: ex.By, Include: ex.Include, Until: ex.Until, At: ex.At,
-				Expired: ex.Until != nil && expired(*ex.Until, now)})
+			v := ExceptionView{User: ex.User, Include: ex.Include, Until: ex.Until, Expired: ex.Until != nil && expired(*ex.Until, now)}
+			if full {
+				// Reasons may be sensitive (spec "What non-admins see"):
+				// only administrators get them, with who set the entry
+				// and when.
+				v.Reason, v.By, v.At = ex.Reason, ex.By, ex.At
+			}
+			gv.Exceptions = append(gv.Exceptions, v)
 		}
 		for u, at := range gc.Expiry {
 			gv.Expiry[u] = at.UTC()
@@ -668,7 +676,10 @@ func (s *Service) addGroupConfig(ov *Overview, cfg *Config, sn *snapshot, admins
 					m.How = HowException
 					for _, ex := range ge.kept {
 						if ex.Include && strings.EqualFold(ex.User, id) {
-							m.Reason, m.Until = ex.Reason, ex.Until
+							m.Until = ex.Until
+							if full {
+								m.Reason = ex.Reason
+							}
 						}
 					}
 				case ge.matched[id]:

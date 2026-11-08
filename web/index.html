@@ -742,6 +742,8 @@
         if (tab.dataset.tab === 'doctor') PortcullisDoctor.render(document.getElementById('doctor-root'));
         if (tab.dataset.tab === 'users') PortcullisDirectory.show(document.getElementById('directory-root'), { listener: 'hub' });
         history.replaceState(null, '', tab.dataset.tab === 'catalog' ? location.pathname : '#' + tab.dataset.tab);
+        // The directory's view follows the hash (#users: not a group route).
+        if (tab.dataset.tab === 'users') PortcullisDirectory.route();
       });
     });
     // Deep links: hub.<domain>/#users (directory.<domain> redirects there);

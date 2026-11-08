@@ -1237,7 +1237,8 @@ func seedAI(h *hub.Hub) {
 //     field): alice matches; bob matches and is added by hand too ("also
 //     matches the rule"); dave is added by hand with an end; carol
 //     matches and is kept out; erin, put back by hand in LLDAP after the
-//     rule ran, is "not explained by the rule".
+//     rule ran, is "not explained by the rule"; user03's added-by-hand
+//     and gina's kept-out entries ended a moment after they were made.
 //   - it_staff (manual) has user07 with an end, and holds the "remove"
 //     permission (bob is a delegate: the read-only view).
 //
@@ -1249,7 +1250,8 @@ func seedGroupPages(t *testing.T, e *instEnv) *harnessFlaky {
 	t.Helper()
 	p := e.ppl
 	mustDo(t, p, "root", "POST", "/api/directory/fields", `{"name":"office","label":"Office","kind":"list","values":["Milan","Turin"]}`, 200)
-	for u, office := range map[string]string{"alice": "Milan", "bob": "Milan", "carol": "Milan", "dave": "Turin", "erin": "Turin"} {
+	e.ll.AddUser("gina", "gina@example.org", "Gina", "")
+	for u, office := range map[string]string{"alice": "Milan", "bob": "Milan", "carol": "Milan", "dave": "Turin", "erin": "Turin", "gina": "Milan"} {
 		mustDo(t, p, "root", "PUT", "/api/directory/users/"+u+"/details", `{"attrs":{"office":["`+office+`"]}}`, 200)
 	}
 	rule := `office = "Milan"`
@@ -1270,7 +1272,14 @@ func seedGroupPages(t *testing.T, e *instEnv) *harnessFlaky {
 	end := time.Now().UTC().Add(10 * 24 * time.Hour).Format(time.RFC3339)
 	mustDo(t, p, "root", "PUT", "/api/directory/groups/it_staff/members/user07/expiry", `{"until":"`+end+`"}`, 200)
 	mustDo(t, p, "root", "PUT", "/api/directory/permissions/remove", `{"group":"it_staff"}`, 200)
-	// Last: no later change may evaluate erin out again.
+	// Two entries that end in a moment (an end must be in the future):
+	// user03 added by hand (then "not explained by the rule") and gina
+	// kept out (then "matches the rule", joining at the next sync).
+	soon := time.Now().UTC().Add(3 * time.Second).Format(time.RFC3339)
+	mustDo(t, p, "root", "POST", "/api/directory/groups/office_milan/members", `{"username":"user03","reason":"covering in October","until":"`+soon+`"}`, 200)
+	mustDo(t, p, "root", "POST", "/api/directory/groups/office_milan/exceptions", `{"user":"gina","include":false,"reason":"sabbatical","until":"`+soon+`"}`, 200)
+	time.Sleep(4 * time.Second)
+	// Last: no later change may evaluate erin (or the two above) out again.
 	e.ll.AddMember("office_milan", "erin")
 	return &harnessFlaky{cred: filepath.Join(e.s.Directory.LLDAP.(*lldap.Client).CredentialsDir, "password"), s: e.s}
 }

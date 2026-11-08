@@ -240,7 +240,8 @@ func TestPeopleListenerReadForEveryone(t *testing.T) {
 	if len(bob.Memberships) != 1 || bob.Memberships[0].Group != "eng" || bob.Memberships[0].How != directory.HowRule {
 		t.Errorf("bob memberships = %+v", bob.Memberships)
 	}
-	if carl == nil || len(carl.Memberships) != 1 || carl.Memberships[0].How != directory.HowException || !strings.Contains(carl.Memberships[0].Reason, "member before the rule") {
+	// How carl is in, never why (reasons are for administrators only).
+	if carl == nil || len(carl.Memberships) != 1 || carl.Memberships[0].How != directory.HowException || carl.Memberships[0].Reason != "" || strings.Contains(b, "member before the rule") {
 		t.Errorf("carl = %+v", carl)
 	}
 	var eng *directory.GroupView
@@ -859,5 +860,84 @@ func TestDisconnectAI(t *testing.T) {
 	}
 	if r, _ := doAs(t, e.ppl, "bob", "DELETE", "/api/me/ai/connections/portcullis-ai-claude-code", ""); r.StatusCode != 204 {
 		t.Errorf("bob = %d, want 204", r.StatusCode)
+	}
+}
+
+// TestEntryReasonsAdminOnly: an entry's reason, author and time (and a
+// membership's reason) reach administrators only (spec "What non-admins
+// see": reasons can be sensitive); a delegate's and a plain user's
+// overview carry the entry without them, on both listeners.
+func TestEntryReasonsAdminOnly(t *testing.T) {
+	e := newPeopleEnv(t)
+	e.setup(t)
+	e.ll.AddUser("dave", "dave@example.org", "Dave", "")
+	e.ll.AddUser("dina", "dina@example.org", "Dina", "")
+	e.ll.AddGroup("helpers", "dina")
+	mustDo(t, e.people, "root", "PUT", "/api/directory/permissions/invite", `{"group":"helpers"}`, 200)
+	const secret = "medical leave until March"
+	mustDo(t, e.people, "root", "POST", "/api/directory/groups/eng/members", `{"username":"dave","reason":"`+secret+`"}`, 200)
+	mustDo(t, e.people, "root", "POST", "/api/directory/groups/eng/exceptions", `{"user":"bob","include":false,"reason":"`+secret+` too"}`, 200)
+
+	type ov struct {
+		Groups []struct {
+			Name       string                   `json:"name"`
+			Exceptions []map[string]interface{} `json:"exceptions"`
+		} `json:"groups"`
+		Users []struct {
+			Username    string                   `json:"username"`
+			Memberships []map[string]interface{} `json:"memberships"`
+		} `json:"users"`
+	}
+	read := func(srv *httptest.Server, user string) (string, ov) {
+		b := mustDo(t, srv, user, "GET", "/api/directory", "", 200)
+		var o ov
+		if err := json.Unmarshal([]byte(b), &o); err != nil {
+			t.Fatal(err)
+		}
+		return b, o
+	}
+	b, o := read(e.people, "root")
+	if !strings.Contains(b, secret) {
+		t.Fatalf("the admin's overview lacks the reason: %s", b)
+	}
+	for _, g := range o.Groups {
+		if g.Name == "eng" && (len(g.Exceptions) == 0 || g.Exceptions[0]["by"] != "root" || g.Exceptions[0]["at"] == nil) {
+			t.Errorf("admin: eng's entries = %v, want by and at", g.Exceptions)
+		}
+	}
+	for _, srv := range []*httptest.Server{e.people, e.hub} {
+		for _, user := range []string{"dina", "carl"} {
+			if srv == e.hub && user == "carl" {
+				continue // the Hub listener's /api/directory is the same view
+			}
+			b, o := read(srv, user)
+			if strings.Contains(b, "medical") {
+				t.Errorf("%s's overview carries a reason: %s", user, b)
+			}
+			found := false
+			for _, g := range o.Groups {
+				if g.Name != "eng" {
+					continue
+				}
+				for _, ex := range g.Exceptions {
+					found = true
+					for _, k := range []string{"reason", "by", "at"} {
+						if _, ok := ex[k]; ok {
+							t.Errorf("%s: eng entry %v carries %q", user, ex, k)
+						}
+					}
+				}
+			}
+			if !found {
+				t.Errorf("%s: eng's entries are missing (want them without reasons)", user)
+			}
+			for _, u := range o.Users {
+				for _, m := range u.Memberships {
+					if _, ok := m["reason"]; ok {
+						t.Errorf("%s: %s's membership %v carries a reason", user, u.Username, m)
+					}
+				}
+			}
+		}
 	}
 }

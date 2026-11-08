@@ -1172,45 +1172,55 @@
   // ── a group's page ──────────────────────────────────────
   // People rows. Rule group (admins): from members, matches and the
   // entries; manual group: members with their ends; anyone else: names.
+  // Usernames compare lowercased (LLDAP ids are; stored entries may not be).
+  const lc = s => String(s == null ? '' : s).toLowerCase();
   function ruleRows(g) {
-    const members = g.members || [];
-    const matches = g.matches || [];
-    const ex = g.exceptions || [];
-    const names = Array.from(new Set(members.concat(matches, ex.map(e => e.user)))).sort();
-    return names.map(u => {
-      const e = ex.find(x => x.user === u);
-      const inLL = members.includes(u), match = matches.includes(u);
-      const acct = userByName(u);
+    const members = new Map((g.members || []).map(u => [lc(u), u]));
+    const matches = new Set((g.matches || []).map(lc));
+    const ex = new Map((g.exceptions || []).map(e => [lc(e.user), e]));
+    const names = Array.from(new Set(Array.from(members.keys()).concat(Array.from(matches), Array.from(ex.keys())))).sort();
+    return names.map(k => {
+      const e = ex.get(k);
+      const inLL = members.has(k), match = matches.has(k);
+      const u = members.get(k) || (e && e.user) || k;
+      const acct = userByName(u) || users().find(x => lc(x.username) === k);
       const r = { user: u, state: '', tags: '', note: '', acts: [] };
-      if (e && e.include) {
+      const live = e && !e.expired; // an ended entry: the rule decides alone
+      if (live && e.include) {
         r.tags = '<span class="pd-pill warn">added by hand</span>' + (match ? '<span class="pd-pill info">also matches the rule</span>' : '');
-        r.state = (e.until ? (e.expired ? 'ended ' : 'until ') + esc(fmtDate(e.until)) + ' · ' : '') + '“' + esc(e.reason) + '”';
+        r.state = (e.until ? 'until ' + esc(fmtDate(e.until)) + ' · ' : '') + '“' + esc(e.reason) + '”';
         if (match) r.note = '⚠ keeps access if they stop matching';
-        if (!e.expired && !inLL) r.note = (r.note ? r.note + ' · ' : '') + 'not in the group yet';
+        if (!inLL) r.note = (r.note ? r.note + ' · ' : '') + 'not in the group yet';
         r.acts = [['gp-end', 'Change end'], ['gp-remove', 'Remove']];
-      } else if (e) {
+      } else if (live) {
         r.tags = '<span class="pd-pill bad">kept out</span>';
-        r.state = (e.until ? (e.expired ? 'ended ' : 'until ') + esc(fmtDate(e.until)) + ' · ' : '') + '“' + esc(e.reason) + '”';
-        if (inLL && !e.expired) r.note = 'still in until the next sync';
+        r.state = (e.until ? 'until ' + esc(fmtDate(e.until)) + ' · ' : '') + '“' + esc(e.reason) + '”';
+        if (inLL) r.note = 'still in until the next sync';
         r.acts = [['gp-letin', 'Let back in']];
       } else if (match) {
         r.tags = '<span class="pd-pill info">matches the rule</span>';
         if (!inLL) r.note = 'joins at the next sync';
         r.acts = [['gp-keepout', 'Keep out…']];
-      } else if (acct && acct.protected) {
+      } else if (acct && acct.protected && inLL) {
         r.tags = '<span class="pd-pill">protected account</span>';
         r.note = 'the rules leave it as it is';
-      } else {
+      } else if (inLL) {
         r.tags = '<span class="pd-pill warn">not explained by the rule</span>';
         r.note = 'leaves at the next sync';
+      } else {
+        r.tags = '<span class="pd-pill">not in the group</span>';
+      }
+      if (e && e.expired) {
+        const ended = (e.include ? 'added-by-hand' : 'kept-out') + ' entry ended' + (e.until ? ' ' + fmtDate(e.until) : '');
+        r.note = r.note ? ended + ' · ' + r.note : ended;
       }
       return r;
     });
   }
   function manualRows(g) {
-    const expiry = g.expiry || {};
+    const expiry = new Map(Object.entries(g.expiry || {}).map(([u, t]) => [lc(u), t]));
     return (g.members || []).map(u => {
-      const until = expiry[u];
+      const until = expiry.get(lc(u));
       const r = { user: u, tags: '<span class="pd-pill ok">member</span>', state: until ? 'until ' + esc(fmtDate(until)) : '', note: '', acts: [] };
       if (!memberLocked(g, u)) r.acts = (g.name === 'lldap_admin' ? [] : [['gp-end', 'Change end']]).concat([['gp-remove', 'Remove']]);
       return r;
@@ -1241,7 +1251,7 @@
     if (pageNote && pageNote.group === g.name) h += '<div class="pd-warn" role="status">' + esc(pageNote.text) + '</div>';
 
     // People
-    const rows = !admin ? (g.members || []).map(u => ({ user: u, tags: '', state: !g.rule && (g.expiry || {})[u] ? 'until ' + esc(fmtDate(g.expiry[u])) : '', note: '', acts: [] }))
+    const rows = !admin ? (g.rule ? (g.members || []).map(u => ({ user: u, tags: '', state: '', note: '', acts: [] })) : manualRows(g).map(r => Object.assign(r, { tags: '', acts: [] })))
       : g.rule ? ruleRows(g) : manualRows(g);
     h += '<section class="pd-sec" aria-labelledby="pd-gp-people"><h3 class="pd-h3" id="pd-gp-people">People (' + esc((g.members || []).length) + ')</h3>';
     if (!rows.length) h += '<p class="pd-muted">' + (g.rule ? 'Nobody matches yet.' : 'No members.') + '</p>';
@@ -1271,8 +1281,8 @@
   // Add people: a multi-pick (chips), an optional end, a reason on rule
   // groups. pick keeps the form across redraws.
   function pickCandidates(g) {
-    const has = g.rule ? new Set((g.exceptions || []).filter(e => e.include).map(e => e.user)) : new Set(g.members || []);
-    return users().filter(u => !u.protected && !has.has(u.username));
+    const has = g.rule ? new Set((g.exceptions || []).filter(e => e.include && !e.expired).map(e => lc(e.user))) : new Set((g.members || []).map(lc));
+    return users().filter(u => !u.protected && !has.has(lc(u.username)));
   }
   function addPeopleHtml(g) {
     if (pick.group !== g.name) pick = { group: g.name, users: [], reason: '', until: '' };
@@ -1291,9 +1301,9 @@
     return h + '</div>';
   }
   function pickChips(g) {
-    const matches = g.matches || [];
+    const matches = new Set((g.matches || []).map(lc));
     return pick.users.map(u => '<span class="pd-pick"><span class="pd-mono">' + esc(u) + '</span>' +
-      (g.rule ? (matches.includes(u) ? ' <span class="pd-muted">already matches the rule</span>' : ' <span class="pd-muted">doesn\'t match the rule</span>') : '') +
+      (g.rule ? (matches.has(lc(u)) ? ' <span class="pd-muted">already matches the rule</span>' : ' <span class="pd-muted">doesn\'t match the rule</span>') : '') +
       '<button type="button" class="pd-pick-x" data-act="pick-remove" data-user="' + esc(u) + '" aria-label="Don\'t add ' + esc(u) + '">✕</button></span>').join('');
   }
   function redrawPicks() {
@@ -1328,7 +1338,7 @@
     try { until = fromLocalInput(pick.until); } catch (err) { toast(errText(err), 'error'); return; }
     if (g.admin && !confirm('Make ' + pick.users.join(', ') + ' administrators (' + name + ')? Administrators can no longer be invited from the Hub; they are recovered from the server.')) return;
     const who = pick.users.slice();
-    const failed = [], notes = [];
+    const failed = [], notes = [], warns = [];
     for (const u of who) {
       const body = { username: u };
       if (until) body.until = until;
@@ -1336,6 +1346,7 @@
       try {
         const res = await api('POST', '/api/directory/groups/' + enc(name) + '/members', body);
         if (res && res.applied === false) notes.push(res.why || '');
+        if (res && res.warnings) warns.push(...res.warnings);
         pick.users = pick.users.filter(x => x !== u);
       } catch (err) {
         failed.push(u + ': ' + errText(err));
@@ -1346,6 +1357,7 @@
     settled(name, notes);
     if (failed.length) toast((done ? 'Added ' + done + ' of ' + who.length + '. ' : '') + failed.join(' · '), 'error');
     else if (!notes.length) toast('Added ' + who.join(', ') + ' to ' + name, 'success');
+    warnings({ warnings: warns });
     await load();
   }
 
@@ -1399,8 +1411,8 @@
   function openEnd(group, user) {
     const g = groupByName(group);
     if (!g) return;
-    const e = g.rule ? (g.exceptions || []).find(x => x.user === user && x.include) : null;
-    const cur = g.rule ? (e && e.until) : (g.expiry || {})[user];
+    const e = g.rule ? (g.exceptions || []).find(x => lc(x.user) === lc(user) && x.include) : null;
+    const cur = g.rule ? (e && e.until) : (Object.entries(g.expiry || {}).find(([u]) => lc(u) === lc(user)) || [])[1];
     openDialog('End of ' + user + ' in ' + group,
       '<p class="pd-note">' + (g.rule ? 'When ' + esc(user) + '\'s added-by-hand entry ends; after it the rule decides alone.' : 'When ' + esc(user) + '\'s membership ends.') +
       ' Now: ' + (cur ? esc(fmtTime(cur)) : 'no end') + '.</p>' +
@@ -2455,10 +2467,16 @@
   }
 
   // route applies the current #groups[/<name>] hash (the Hub page calls
-  // it after switching to its Users tab).
+  // it each time its Users tab opens, so the view follows the hash).
+  // Any other hash (the Hub's #users) leaves a group route: People.
   function route() {
+    if (!root) return;
     const r = parseRoute(location.hash);
-    if (r && root) applyRoute(r);
+    if (r) { applyRoute(r); return; }
+    if (tab !== 'groups' && !groupPage) return;
+    groupPage = null;
+    tab = 'people';
+    if (dir) { renderGroups(); selectTab('people', false); }
   }
 
   window.PortcullisDirectory = { show, openAt, openGroup, route, csvCell };
