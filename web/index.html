@@ -2589,7 +2589,7 @@
       // identity_headers companions hold no app-side AI credential: nothing
       // to revoke.
       if (c.identity_mode !== 'identity_headers') {
-        h += '<div class="inst-row"><input type="text" data-ai-revoke-user placeholder="username (empty: everyone)" aria-label="Revoke for" spellcheck="false">' +
+        h += '<div class="inst-row"><input type="text" data-ai-revoke-user data-pick="person" placeholder="username (empty: everyone)" aria-label="Revoke for" spellcheck="false" autocomplete="off">' +
           '<button type="button" class="btn btn-danger btn-sm" data-ai-revoke>Revoke AI credentials now</button></div>' +
           aiNote(c.identity_mode === 'app_oauth' ? 'Revoking ends their AI access through the app\'s own sign-in; they sign in again in the app.'
             : 'Revoking ends the app-side AI credentials at once (the app\'s revoke hook); people\'s assistants get new ones on their next request while AI support is on.');
