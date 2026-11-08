@@ -130,7 +130,7 @@ func TestRemoveMemberLogsOutAndDropsExpiry(t *testing.T) {
 	if c, _ := store.Load(); c.Groups["office"] != nil {
 		t.Errorf("expiry kept after removal: %+v", c.Groups["office"])
 	}
-	if err := e.svc.AddMember(ctx, asRoot, "office", "bob"); err != nil {
+	if err := e.svc.AddMember(ctx, asRoot, "office", directory.MemberAdd{Username: "bob"}); err != nil {
 		t.Fatal(err)
 	}
 	evaluate(t, e, until.Add(time.Minute))

@@ -477,17 +477,21 @@ func (s *Server) handleAddMember(w http.ResponseWriter, r *http.Request) {
 	if !s.dirReady(w) {
 		return
 	}
+	// Strict (§9.7): a rule group's reason or an end misspelt must not
+	// be dropped silently.
 	var req struct {
-		Username string `json:"username"`
+		Username string     `json:"username"`
+		Reason   string     `json:"reason"`
+		Until    *time.Time `json:"until"`
 	}
-	if !decodeJSON(w, r, &req) {
+	if !decodeStrict(w, r, &req, `{"username": "<user>", "reason"?: "<text>", "until"?: "<RFC 3339>"}`) {
 		return
 	}
 	c, ok := s.caller(w, r)
 	if !ok {
 		return
 	}
-	if err := s.addMember(r.Context(), c, r.PathValue("group"), req.Username); err != nil {
+	if err := s.addMember(r.Context(), c, r.PathValue("group"), directory.MemberAdd{Username: req.Username, Reason: req.Reason, Until: req.Until}); err != nil {
 		dirErr(w, err)
 		return
 	}
@@ -528,7 +532,7 @@ func (s *Server) handlePortalApps(w http.ResponseWriter, r *http.Request) {
 // its own), reported to rec for the parity test — never a password.
 
 func (s *Server) createUser(ctx context.Context, c *directory.Caller, req directory.CreateRequest) (*directory.Result, error) {
-	s.rec("CreateUser", req.Username, req.Email, req.DisplayName, req.Groups, req.Onboarding, req.Generate, req.RequirePasskey)
+	s.rec("CreateUser", req.Username, req.Email, req.DisplayName, req.Groups, req.Reasons, req.Onboarding, req.Generate, req.RequirePasskey)
 	return s.Directory.CreateUser(ctx, c, req)
 }
 
@@ -572,9 +576,9 @@ func (s *Server) deleteGroup(ctx context.Context, c *directory.Caller, name, con
 	return s.Directory.DeleteGroup(ctx, c, name, confirm)
 }
 
-func (s *Server) addMember(ctx context.Context, c *directory.Caller, group, username string) error {
-	s.rec("AddMember", group, username)
-	return s.Directory.AddMember(ctx, c, group, username)
+func (s *Server) addMember(ctx context.Context, c *directory.Caller, group string, m directory.MemberAdd) error {
+	s.rec("AddMember", group, m)
+	return s.Directory.AddMember(ctx, c, group, m)
 }
 
 func (s *Server) removeMember(ctx context.Context, c *directory.Caller, group, username string) (*directory.Result, error) {

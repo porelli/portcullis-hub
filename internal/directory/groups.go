@@ -463,58 +463,72 @@ func (s *Service) SetGroupRule(ctx context.Context, c *Caller, group string, rul
 func (s *Service) AddException(ctx context.Context, c *Caller, group string, e Exception) error {
 	e.User = strings.TrimSpace(e.User)
 	e.Reason = strings.TrimSpace(e.Reason)
-	detail := fmt.Sprintf("add user=%s include=%v until=%s reason=%s", e.User, e.Include, formatUntil(e.Until), e.Reason)
+	detail := exceptionDetail(e)
 	return s.run(ctx, c, permAdmin, "group.exception", group, &detail, func() error {
-		if err := s.checkTarget(e.User); err != nil {
-			return err
-		}
-		if e.Reason == "" {
-			return invalid("a reason is required")
-		}
-		if utf8.RuneCountInString(e.Reason) > maxReasonRunes {
-			return invalid("the reason must be at most %d characters", maxReasonRunes)
-		}
-		now := time.Now().UTC()
-		if e.Until != nil {
-			if !e.Until.After(now) {
-				return invalid("the end of the exception must be in the future")
-			}
-			until := e.Until.UTC()
-			e.Until = &until
-		}
-		cfg, err := s.loadConfig()
-		if err != nil {
-			return err
-		}
-		sn, err := s.load(ctx)
-		if err != nil {
-			return err
-		}
-		if _, err := sn.group(group); err != nil {
-			return err
-		}
-		u, err := sn.user(e.User)
-		if err != nil {
-			return err
-		}
-		if !ruleBased(cfg, group) || !s.ruleGroupAllowed(group, s.adminGroups()) {
-			return refuse("%s is not a rule group: exceptions apply only to rule groups (use membership and expiry instead)", group)
-		}
-		e.User, e.By, e.At = u.ID, c.User, now
-		detail = fmt.Sprintf("add user=%s include=%v until=%s reason=%s", e.User, e.Include, formatUntil(e.Until), e.Reason)
-		gc := cfg.Groups[group]
-		exs := []Exception{}
-		for _, ex := range gc.Exceptions {
-			if !strings.EqualFold(ex.User, u.ID) {
-				exs = append(exs, ex)
-			}
-		}
-		gc.Exceptions = append(exs, e)
-		if e.Include {
-			cfg.clearGrace(group, u.ID) // granted again
-		}
-		return s.saveConfig(cfg)
+		return s.addException(ctx, c, group, e, &detail)
 	})
+}
+
+// exceptionDetail is the audit detail of adding e.
+func exceptionDetail(e Exception) string {
+	return fmt.Sprintf("add user=%s include=%v until=%s reason=%s", strings.TrimSpace(e.User), e.Include, formatUntil(e.Until), strings.TrimSpace(e.Reason))
+}
+
+// addException is AddException's work (and AddMember's on a rule
+// group): checks, then e stored for group; detail gets the resolved
+// user. Caller holds s.mu (inside run).
+func (s *Service) addException(ctx context.Context, c *Caller, group string, e Exception, detail *string) error {
+	e.User = strings.TrimSpace(e.User)
+	e.Reason = strings.TrimSpace(e.Reason)
+	if err := s.checkTarget(e.User); err != nil {
+		return err
+	}
+	if e.Reason == "" {
+		return invalid("a reason is required")
+	}
+	if utf8.RuneCountInString(e.Reason) > maxReasonRunes {
+		return invalid("the reason must be at most %d characters", maxReasonRunes)
+	}
+	now := time.Now().UTC()
+	if e.Until != nil {
+		if !e.Until.After(now) {
+			return invalid("the end of the exception must be in the future")
+		}
+		until := e.Until.UTC()
+		e.Until = &until
+	}
+	cfg, err := s.loadConfig()
+	if err != nil {
+		return err
+	}
+	sn, err := s.load(ctx)
+	if err != nil {
+		return err
+	}
+	if _, err := sn.group(group); err != nil {
+		return err
+	}
+	u, err := sn.user(e.User)
+	if err != nil {
+		return err
+	}
+	if !s.handAdded(cfg, group) {
+		return refuse("%s is not a rule group: exceptions apply only to rule groups (use membership and expiry instead)", group)
+	}
+	e.User, e.By, e.At = u.ID, c.User, now
+	*detail = exceptionDetail(e)
+	gc := cfg.Groups[group]
+	exs := []Exception{}
+	for _, ex := range gc.Exceptions {
+		if !strings.EqualFold(ex.User, u.ID) {
+			exs = append(exs, ex)
+		}
+	}
+	gc.Exceptions = append(exs, e)
+	if e.Include {
+		cfg.clearGrace(group, u.ID) // granted again
+	}
+	return s.saveConfig(cfg)
 }
 
 // RemoveException removes user's exception from group (404 if none).
@@ -554,64 +568,105 @@ func (s *Service) RemoveException(ctx context.Context, c *Caller, group, user st
 }
 
 // SetMemberExpiry sets (or with nil, removes) when user's membership of
-// the manual group ends. Not on lldap_admin (the evaluator would bypass
-// the last-admin guardrail). Admins only.
+// the manual group ends; on a rule group, when their "added by hand"
+// entry ends (409 without one: someone in by the rule alone gets no
+// end). Not on lldap_admin (the evaluator would bypass the last-admin
+// guardrail). Admins only.
 func (s *Service) SetMemberExpiry(ctx context.Context, c *Caller, group, user string, until *time.Time) error {
 	user = strings.TrimSpace(user)
 	detail := fmt.Sprintf("user=%s until=%s", user, formatUntil(until))
 	return s.run(ctx, c, permAdmin, "group.expiry", group, &detail, func() error {
-		if err := s.checkTarget(user); err != nil {
-			return err
-		}
-		if group == lldap.AdminGroup {
-			return refuse("membership of %s can't expire; remove administrators explicitly", lldap.AdminGroup)
-		}
-		if until != nil && !until.After(time.Now()) {
-			return invalid("the expiry must be in the future")
-		}
-		cfg, err := s.loadConfig()
-		if err != nil {
-			return err
-		}
-		sn, err := s.load(ctx)
-		if err != nil {
-			return err
-		}
-		g, err := sn.group(group)
-		if err != nil {
-			return err
-		}
-		u, err := sn.user(user)
-		if err != nil {
-			return err
-		}
-		detail = fmt.Sprintf("user=%s until=%s", u.ID, formatUntil(until))
-		if ruleBased(cfg, group) {
-			return refuse("%s is a rule group: use an exception with an end date instead", group)
-		}
-		if !memberOf(g, u.ID) {
-			return refuse("%s is not a member of %s", u.ID, group)
-		}
-		gc := cfg.Groups[group]
-		if gc == nil {
-			gc = &GroupConfig{}
-			cfg.Groups[group] = gc
-		}
-		for k := range gc.Expiry {
-			if strings.EqualFold(k, u.ID) {
-				delete(gc.Expiry, k)
-			}
-		}
-		if until != nil {
-			if gc.Expiry == nil {
-				gc.Expiry = map[string]time.Time{}
-			}
-			gc.Expiry[u.ID] = until.UTC()
-		}
-		cfg.clearGrace(group, u.ID) // a current member: any grace is stale
-		tidy(cfg, group)
-		return s.saveConfig(cfg)
+		return s.setMemberExpiry(ctx, group, user, until, &detail)
 	})
+}
+
+// checkExpiry: an end may be set on group (not lldap_admin) and is in
+// the future (nil: none).
+func checkExpiry(group string, until *time.Time) error {
+	if group == lldap.AdminGroup {
+		return refuse("membership of %s can't expire; remove administrators explicitly", lldap.AdminGroup)
+	}
+	if until != nil && !until.After(time.Now()) {
+		return invalid("the expiry must be in the future")
+	}
+	return nil
+}
+
+// setMemberExpiry is SetMemberExpiry's work (and AddMember's with an
+// end on a manual group). Caller holds s.mu (inside run).
+func (s *Service) setMemberExpiry(ctx context.Context, group, user string, until *time.Time, detail *string) error {
+	if err := s.checkTarget(user); err != nil {
+		return err
+	}
+	if err := checkExpiry(group, until); err != nil {
+		return err
+	}
+	cfg, err := s.loadConfig()
+	if err != nil {
+		return err
+	}
+	sn, err := s.load(ctx)
+	if err != nil {
+		return err
+	}
+	g, err := sn.group(group)
+	if err != nil {
+		return err
+	}
+	u, err := sn.user(user)
+	if err != nil {
+		return err
+	}
+	*detail = fmt.Sprintf("user=%s until=%s", u.ID, formatUntil(until))
+	if ruleBased(cfg, group) {
+		return s.setEntryEnd(cfg, group, u.ID, until, detail)
+	}
+	if !memberOf(g, u.ID) {
+		return refuse("%s is not a member of %s", u.ID, group)
+	}
+	gc := cfg.Groups[group]
+	if gc == nil {
+		gc = &GroupConfig{}
+		cfg.Groups[group] = gc
+	}
+	for k := range gc.Expiry {
+		if strings.EqualFold(k, u.ID) {
+			delete(gc.Expiry, k)
+		}
+	}
+	if until != nil {
+		if gc.Expiry == nil {
+			gc.Expiry = map[string]time.Time{}
+		}
+		gc.Expiry[u.ID] = until.UTC()
+	}
+	cfg.clearGrace(group, u.ID) // a current member: any grace is stale
+	tidy(cfg, group)
+	return s.saveConfig(cfg)
+}
+
+// setEntryEnd sets (nil: clears) the end of user's include ("added by
+// hand") entry of the rule group; 409 when they have none.
+func (s *Service) setEntryEnd(cfg *Config, group, user string, until *time.Time, detail *string) error {
+	gc := cfg.Groups[group]
+	if s.handAdded(cfg, group) {
+		for i := range gc.Exceptions {
+			ex := &gc.Exceptions[i]
+			if !ex.Include || !strings.EqualFold(ex.User, user) {
+				continue
+			}
+			*detail += " entry=added was=" + formatUntil(ex.Until)
+			if until == nil {
+				ex.Until = nil
+			} else {
+				t := until.UTC()
+				ex.Until = &t
+			}
+			cfg.clearGrace(group, user) // granted again
+			return s.saveConfig(cfg)
+		}
+	}
+	return refuse("%s has no \"added by hand\" entry in the rule group %s: only those have an end (keep them out with an end instead)", user, group)
 }
 
 // SetPermission grants perm to group; "" grants it to nobody. Not to

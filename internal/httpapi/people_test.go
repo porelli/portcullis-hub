@@ -430,7 +430,10 @@ func TestConvertRefusesStaleReview(t *testing.T) {
 	mustDo(t, p, "root", "DELETE", "/api/directory/groups/sales/exceptions/carl", `{}`, 404)
 	e.ll.AddGroup("temps", "bob")
 	mustDo(t, p, "root", "PUT", "/api/directory/groups/temps/members/bob/expiry", `{"until":"`+until+`"}`, 200)
-	mustDo(t, p, "root", "PUT", "/api/directory/groups/sales/members/bob/expiry", `{"until":"`+until+`"}`, 409) // rule group
+	// Rule group: bob stayed as an "added by hand" entry (convert keep),
+	// so his entry gets the end; carl is in by the rule alone: 409.
+	mustDo(t, p, "root", "PUT", "/api/directory/groups/sales/members/bob/expiry", `{"until":"`+until+`"}`, 200)
+	mustDo(t, p, "root", "PUT", "/api/directory/groups/sales/members/carl/expiry", `{"until":"`+until+`"}`, 409)
 	b = mustDo(t, p, "bob", "GET", "/api/directory", "", 200)
 	if !strings.Contains(b, `"expiry":{"bob":"`+until+`"}`) {
 		t.Errorf("expiry not shown: %s", b)

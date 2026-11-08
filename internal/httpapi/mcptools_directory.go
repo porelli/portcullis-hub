@@ -532,6 +532,12 @@ type (
 		Group    string `json:"group" jsonschema:"the group's name"`
 		Username string `json:"username" jsonschema:"the person's username"`
 	}
+	addMemberArgs struct {
+		Group    string  `json:"group" jsonschema:"the group's name"`
+		Username string  `json:"username" jsonschema:"the person's username"`
+		Reason   string  `json:"reason,omitempty" jsonschema:"why (required on a rule group: they are added by hand, shown and audited; ignored on a manual group)"`
+		Until    *string `json:"until,omitempty" jsonschema:"RFC 3339 end of the membership or of the added-by-hand entry (absent = no end)"`
+	}
 	expiryArgs struct {
 		Group    string  `json:"group" jsonschema:"the manual group's name"`
 		Username string  `json:"username" jsonschema:"the member's username"`
@@ -846,14 +852,22 @@ func (s *Server) registerDirectoryTools() {
 			g := argField(args, "group")
 			return []string{"Deletes group " + g + ": its members (" + peopleList(membersOf(s.guards(ctx), g)) + ") lose what it gives, and its rule, exceptions, expiries, permission grants and app setting rows are removed."}
 		}),
-		perCallCtx(dirTool(s, "add_member", "Add a person to a manual group. Into an administrator, permission or other guarding group it needs your confirmation in the browser.",
-			ClassWrite, "POST /api/directory/groups/{group}/members", "group.add_member", func(ctx context.Context, c *directory.Caller, in memberArgs) (any, error) {
-				if err := s.addMember(ctx, c, in.Group, in.Username); err != nil {
+		perCallCtx(dirTool(s, "add_member", "Add a person to a group, optionally until a date. On a rule group they are added by hand (an include exception, kept whether or not the rule matches them) and a reason is required. Into an administrator, permission or other guarding group it needs your confirmation in the browser.",
+			ClassWrite, "POST /api/directory/groups/{group}/members", "group.add_member", func(ctx context.Context, c *directory.Caller, in addMemberArgs) (any, error) {
+				until, err := parseUntil(in.Until)
+				if err != nil {
+					return nil, err
+				}
+				if err := s.addMember(ctx, c, in.Group, directory.MemberAdd{Username: in.Username, Reason: in.Reason, Until: until}); err != nil {
 					return nil, err
 				}
 				return map[string]string{"status": "added"}, nil
 			}), s.groupClass, argReader("group"), func(ctx context.Context, args json.RawMessage) []string {
-			return s.groupConsequences(ctx, args, "Adds "+argField(args, "username")+" to "+argField(args, "group")+".", "")
+			line := "Adds " + argField(args, "username") + " to " + argField(args, "group")
+			if u := argField(args, "until"); u != "" {
+				line += " until " + q(u)
+			}
+			return s.groupConsequences(ctx, args, line+".", "")
 		}),
 		// remove_member is D from a guarding group (fix round 1 ruling).
 		perCallCtx(dirTool(s, "remove_member", "Remove a person from a group (they are signed out of Keycloak). From an administrator, permission or other guarding group it needs your confirmation in the browser.",

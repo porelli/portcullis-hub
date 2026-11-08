@@ -213,7 +213,7 @@ func TestRegrantClearsGrace(t *testing.T) {
 		e, store := evalEnv(t)
 		e.ll.AddGroup("temps")
 		seedGrace(t, store, "dave", "temps")
-		if err := e.svc.AddMember(ctx, asRoot, "temps", "dave"); err != nil {
+		if err := e.svc.AddMember(ctx, asRoot, "temps", directory.MemberAdd{Username: "dave"}); err != nil {
 			t.Fatal(err)
 		}
 		wantGraceOnlyOther(t, store, "AddMember")
@@ -352,14 +352,14 @@ func TestSkippedRuleGroupExpiredExceptions(t *testing.T) {
 		if err := store.Save(cfg); err != nil {
 			t.Fatal(err)
 		}
-		if err := e.svc.AddMember(ctx, asRoot, "milan", "dave"); err != nil {
+		if err := e.svc.AddMember(ctx, asRoot, "milan", directory.MemberAdd{Username: "dave"}); err != nil {
 			t.Fatal(err)
 		}
 		if got := exceptionsOf(t, store); strings.Contains(got, "dave") || !memberIn(e, "milan", "dave") {
 			t.Errorf("after re-add: exceptions %s, member %v", got, memberIn(e, "milan", "dave"))
 		}
 		// Nothing left to confirm: a second re-add is "already a member".
-		if err := e.svc.AddMember(ctx, asRoot, "milan", "dave"); status(err) != 409 {
+		if err := e.svc.AddMember(ctx, asRoot, "milan", directory.MemberAdd{Username: "dave"}); status(err) != 409 {
 			t.Errorf("second re-add: %v", err)
 		}
 		// Not a member, expired exception: AddMember adds and drops it.
@@ -369,7 +369,7 @@ func TestSkippedRuleGroupExpiredExceptions(t *testing.T) {
 		if err := store.Save(cfg); err != nil {
 			t.Fatal(err)
 		}
-		if err := e.svc.AddMember(ctx, asRoot, "milan", "alice"); err != nil {
+		if err := e.svc.AddMember(ctx, asRoot, "milan", directory.MemberAdd{Username: "alice"}); err != nil {
 			t.Fatal(err)
 		}
 		if got := exceptionsOf(t, store); strings.Contains(got, "alice") || !memberIn(e, "milan", "alice") {

@@ -148,6 +148,10 @@ func TestDirectoryAPI(t *testing.T) {
 		{"root", "POST", "/api/directory/users/portcullis-hub/password", `{"generate":true}`, 409},
 		{"root", "DELETE", "/api/directory/groups/lldap_admin/members/root", `{}`, 409},
 		{"root", "DELETE", "/api/directory/users/root", `{"confirm":"root"}`, 409},
+		// Strict body: an unknown or misspelt key is refused, nothing added.
+		{"root", "POST", "/api/directory/groups/users_demo/members", `{"username":"root","reasn":"x"}`, 400},
+		{"root", "POST", "/api/directory/groups/users_demo/members", `{"username":"root"} {}`, 400},
+		{"root", "POST", "/api/directory/groups/users_demo/members", `{"username":"root","until":"tomorrow"}`, 400},
 		{"root", "POST", "/api/directory/groups/users_demo/members", `{"username":"root"}`, 200},
 		{"root", "DELETE", "/api/directory/groups/users_demo/members/root", `{}`, 200},
 		{"root", "DELETE", "/api/directory/users/kim", `{"confirm":"kim"}`, 200},

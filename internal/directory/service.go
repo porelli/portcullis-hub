@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/portcullis/hub/internal/invite"
 	"github.com/portcullis/hub/internal/keycloak"
@@ -336,6 +337,10 @@ type GroupView struct {
 	// AddsBlocked: why the evaluator adds nobody to this guarding group
 	// ("" if it does), see addsBlocked.
 	AddsBlocked string `json:"adds_blocked,omitempty"`
+	// Matches: who the rule matches right now (the evaluator's own
+	// matching, protected accounts left out), sorted; admins only, nil
+	// for manual groups and in every other view.
+	Matches []string `json:"matches,omitzero"`
 }
 
 // Suggestion is a group of an ENABLED app that doesn't exist yet.
@@ -574,7 +579,7 @@ func (s *Service) overview(ctx context.Context, me string, c *Caller) (*Overview
 	}
 	sort.Slice(ov.Groups, func(i, j int) bool { return ov.Groups[i].Name < ov.Groups[j].Name })
 	if cfg != nil {
-		s.addGroupConfig(ov, cfg, sn, admins, time.Now().UTC())
+		s.addGroupConfig(ov, cfg, sn, admins, time.Now().UTC(), full)
 	}
 	if !full {
 		return ov, nil
@@ -602,8 +607,9 @@ func (s *Service) overview(ctx context.Context, me string, c *Caller) (*Overview
 
 // addGroupConfig adds what directory.yaml says about groups to ov: each
 // group's rule, exceptions and expiries, every user's memberships with
-// how they hold them, and the manager cycles of the org chart.
-func (s *Service) addGroupConfig(ov *Overview, cfg *Config, sn *snapshot, admins map[string]bool, now time.Time) {
+// how they hold them, and the manager cycles of the org chart. full (the
+// administrator's view) adds each rule group's Matches.
+func (s *Service) addGroupConfig(ov *Overview, cfg *Config, sn *snapshot, admins map[string]bool, now time.Time, full bool) {
 	d := ruleDirectory(cfg, sn)
 	if cy := rules.Cycles(d); cy != nil {
 		for _, c := range cy {
@@ -630,6 +636,9 @@ func (s *Service) addGroupConfig(ov *Overview, cfg *Config, sn *snapshot, admins
 			gv.AddsBlocked = s.addsBlocked(cfg, guarding, gv.Name, gc)
 			if s.ruleGroupAllowed(gv.Name, admins) {
 				evals[gv.Name] = s.evalGroup(gc, d, sn, now)
+				if full {
+					gv.Matches = idsOf(sn, evals[gv.Name].matched)
+				}
 			}
 		}
 		for _, ex := range gc.Exceptions {
@@ -864,6 +873,12 @@ func clipN(s string, n int) string {
 // caller's permission perm on target (gate; "admin" = admins only), and
 // writes the audit entry — refusals included.
 func (s *Service) run(ctx context.Context, c *Caller, perm, action, target string, detail *string, fn func() error) error {
+	return s.runAs(ctx, c, perm, &action, target, detail, fn)
+}
+
+// runAs is run with the audited action read once fn is done: fn may set
+// it (AddMember on a rule group is audited as group.exception).
+func (s *Service) runAs(ctx context.Context, c *Caller, perm string, action *string, target string, detail *string, fn func() error) error {
 	if c == nil || strings.TrimSpace(c.User) == "" {
 		return errNoActor()
 	}
@@ -884,7 +899,7 @@ func (s *Service) run(ctx context.Context, c *Caller, perm, action, target strin
 		done = err == nil
 	}
 	if s.Audit != nil {
-		e := AuditEntry{Actor: clip(c.User), Action: action, Target: clip(target), Result: "ok", Via: clip(c.Via), Client: clip(c.Client)}
+		e := AuditEntry{Actor: clip(c.User), Action: *action, Target: clip(target), Result: "ok", Via: clip(c.Via), Client: clip(c.Client)}
 		if detail != nil {
 			e.Detail = clipN(*detail, maxAuditDetail)
 		}
@@ -898,7 +913,7 @@ func (s *Service) run(ctx context.Context, c *Caller, perm, action, target strin
 		}
 		if aerr := s.Audit.Append(e); aerr != nil && err == nil {
 			// The change happened; say the audit write failed.
-			return fmt.Errorf("%s done, but writing the audit log failed: %v", action, aerr)
+			return fmt.Errorf("%s done, but writing the audit log failed: %v", *action, aerr)
 		}
 	}
 	return err
@@ -951,10 +966,11 @@ const (
 
 // CreateRequest is POST /api/directory/users.
 type CreateRequest struct {
-	Username    string   `json:"username"`
-	Email       string   `json:"email"`
-	DisplayName string   `json:"display_name"`
-	Groups      []string `json:"groups"`
+	Username    string            `json:"username"`
+	Email       string            `json:"email"`
+	DisplayName string            `json:"display_name"`
+	Groups      []string          `json:"groups"`
+	Reasons     map[string]string `json:"reasons"`
 	// Onboarding is "invite" (default) or "password". The password fields
 	// apply only to "password".
 	Onboarding     string `json:"onboarding"`
@@ -1101,16 +1117,43 @@ func (s *Service) CreateUser(ctx context.Context, c *Caller, req CreateRequest) 
 				return err
 			}
 		}
+		// Manual groups: added in LLDAP below. Rule groups: nothing if the
+		// new person will match the rule, else an "added by hand" entry
+		// (reason required), stored in this run; the evaluator adds them.
 		var groupIDs []int
+		var groupNames, handNames []string
+		var handAdds []Exception
 		admin := false
 		admins := s.adminGroups()
+		newUser := lldap.User{ID: req.Username, Email: req.Email, DisplayName: req.DisplayName, Attributes: attrs}
 		for _, name := range req.Groups {
 			g, err := sn.group(name)
 			if err != nil {
 				return invalid("no such group %q", name)
 			}
-			groupIDs = append(groupIDs, g.ID)
 			admin = admin || admins[name]
+			if s.Store != nil && cfg == nil {
+				return &Error{Status: http.StatusServiceUnavailable, Msg: "directory.yaml couldn't be read: groups can't be set now (rule groups can't be told apart)"}
+			}
+			if !s.handAdded(cfg, name) {
+				groupIDs = append(groupIDs, g.ID)
+				groupNames = append(groupNames, name)
+				continue
+			}
+			if s.wouldMatch(cfg, sn, newUser, cfg.Groups[name].Rule) {
+				detail += " matches=" + name
+				continue
+			}
+			reason := strings.TrimSpace(req.Reasons[name])
+			if reason == "" {
+				return invalid("a reason is required: %s is rule-based", name)
+			}
+			if utf8.RuneCountInString(reason) > maxReasonRunes {
+				return invalid("the reason for %s must be at most %d characters", name, maxReasonRunes)
+			}
+			handNames = append(handNames, name)
+			handAdds = append(handAdds, Exception{User: req.Username, Reason: reason, By: c.User, Include: true, At: time.Now().UTC()})
+			detail += fmt.Sprintf(" added_by_hand=%s reason=%s", name, reason)
 		}
 		if req.Onboarding == OnboardInvite && !admin {
 			if err := s.invitesAvailable(); err != nil {
@@ -1129,6 +1172,26 @@ func (s *Service) CreateUser(ctx context.Context, c *Caller, req CreateRequest) 
 				return fmt.Errorf("setting the details failed, user not created: %v", err)
 			}
 			detail += changeDetail(nil, attrs)
+		}
+		if len(handAdds) > 0 {
+			for i, name := range handNames {
+				gc := cfg.Groups[name]
+				exs := []Exception{}
+				for _, ex := range gc.Exceptions {
+					if !strings.EqualFold(ex.User, req.Username) {
+						exs = append(exs, ex)
+					}
+				}
+				gc.Exceptions = append(exs, handAdds[i])
+				cfg.clearGrace(name, req.Username)
+			}
+			if err := s.saveConfig(cfg); err != nil {
+				// As with the details: no account without its entries.
+				if derr := s.LLDAP.DeleteUser(ctx, req.Username); derr != nil {
+					return fmt.Errorf("storing the \"added by hand\" entries failed (%v) and removing the new user failed too (%v): delete %s in LLDAP", err, derr, req.Username)
+				}
+				return fmt.Errorf("storing the \"added by hand\" entries failed, user not created: %w", err)
+			}
 		}
 		if cfg != nil {
 			changed := false
@@ -1159,8 +1222,8 @@ func (s *Service) CreateUser(ctx context.Context, c *Caller, req CreateRequest) 
 		graceCleared := false
 		for i, id := range groupIDs {
 			if err := s.LLDAP.AddUserToGroup(ctx, req.Username, id); err != nil {
-				res.Warnings = append(res.Warnings, fmt.Sprintf("adding to %s failed: %v", req.Groups[i], err))
-			} else if cfg != nil && cfg.clearGrace(req.Groups[i], req.Username) {
+				res.Warnings = append(res.Warnings, fmt.Sprintf("adding to %s failed: %v", groupNames[i], err))
+			} else if cfg != nil && cfg.clearGrace(groupNames[i], req.Username) {
 				graceCleared = true // granted again
 			}
 		}
@@ -1207,6 +1270,20 @@ func (s *Service) CreateUser(ctx context.Context, c *Caller, req CreateRequest) 
 		return nil
 	})
 	return res, err
+}
+
+// wouldMatch reports whether rule matches u once created: the
+// evaluator's own matching over sn with u added (an invite has only its
+// username, email and display name — rules read custom fields — plus any
+// Attrs the same run writes).
+func (s *Service) wouldMatch(cfg *Config, sn *snapshot, u lldap.User, rule *rules.Expr) bool {
+	users := make(map[string]lldap.User, len(sn.users)+1)
+	for k, v := range sn.users {
+		users[k] = v
+	}
+	id := strings.ToLower(u.ID)
+	users[id] = u
+	return s.matching(cfg, &snapshot{users: users, groups: sn.groups}, rule)[id]
 }
 
 // createAttrs validates a new account's custom field values (CreateUser
@@ -1784,11 +1861,61 @@ func (s *Service) DeleteGroup(ctx context.Context, c *Caller, name, confirm stri
 	return res, nil
 }
 
-// AddMember adds username to group.
-func (s *Service) AddMember(ctx context.Context, c *Caller, group, username string) error {
-	return s.run(ctx, c, permAdmin, "group.add_member", group, &username, func() error {
+// MemberAdd is one add (POST /api/directory/groups/{g}/members). Reason
+// is required on a rule group and ignored on a manual one; Until, if
+// set, is when the membership (manual) or the "added by hand" entry
+// (rule group) ends.
+type MemberAdd struct {
+	Username string
+	Reason   string
+	Until    *time.Time
+}
+
+// handAdded reports whether group is a rule group an add goes to as an
+// include exception (cfg nil: no store, every group is manual).
+func (s *Service) handAdded(cfg *Config, group string) bool {
+	return cfg != nil && ruleBased(cfg, group) && s.ruleGroupAllowed(group, s.adminGroups())
+}
+
+// AddMember adds m.Username to group. On a rule group it stores an
+// "added by hand" entry instead (AddException's include, audited as
+// group.exception), whether or not they already match: m.Reason is
+// required. On a manual group it adds the membership and, with m.Until,
+// its expiry (SetMemberExpiry's rules), in the same run. Admins only.
+func (s *Service) AddMember(ctx context.Context, c *Caller, group string, m MemberAdd) error {
+	username := strings.TrimSpace(m.Username)
+	action := "group.add_member"
+	detail := username
+	if m.Until != nil {
+		detail = fmt.Sprintf("user=%s until=%s", username, formatUntil(m.Until))
+	}
+	return s.runAs(ctx, c, permAdmin, &action, group, &detail, func() error {
+		var cfg *Config
+		if s.Store != nil {
+			var err error
+			if cfg, err = s.loadConfig(); err != nil {
+				return err
+			}
+		}
+		if s.handAdded(cfg, group) {
+			action = "group.exception"
+			e := Exception{User: username, Reason: m.Reason, Include: true, Until: m.Until}
+			detail = exceptionDetail(e)
+			if strings.TrimSpace(m.Reason) == "" {
+				return invalid("a reason is required: %s is rule-based", group)
+			}
+			return s.addException(ctx, c, group, e, &detail)
+		}
 		if err := s.checkTarget(username); err != nil {
 			return err
+		}
+		if m.Until != nil {
+			if err := checkExpiry(group, m.Until); err != nil {
+				return err
+			}
+			if s.Store == nil {
+				return errNoStore()
+			}
 		}
 		sn, err := s.load(ctx)
 		if err != nil {
@@ -1802,6 +1929,12 @@ func (s *Service) AddMember(ctx context.Context, c *Caller, group, username stri
 		if err != nil {
 			return err
 		}
+		if m.Until != nil {
+			detail = fmt.Sprintf("user=%s until=%s", u.ID, formatUntil(m.Until))
+		} else {
+			detail = u.ID
+		}
+		added := false
 		if memberOf(g, u.ID) {
 			// Re-adding a member whose temporary access expired (in a group
 			// the evaluator doesn't manage) confirms the membership.
@@ -1812,13 +1945,30 @@ func (s *Service) AddMember(ctx context.Context, c *Caller, group, username stri
 			if !changed {
 				return refuse("%s is already a member of %s", u.ID, group)
 			}
+		} else {
+			if err := s.LLDAP.AddUserToGroup(ctx, u.ID, g.ID); err != nil {
+				return err
+			}
+			added = true
+			if _, err := s.regranted(group, u.ID, time.Now()); err != nil {
+				return err
+			}
+		}
+		if m.Until == nil {
 			return nil
 		}
-		if err := s.LLDAP.AddUserToGroup(ctx, u.ID, g.ID); err != nil {
-			return err
+		var scratch string
+		if err := s.setMemberExpiry(ctx, group, u.ID, m.Until, &scratch); err != nil {
+			if !added {
+				return err
+			}
+			// Don't leave a membership without the end it was given.
+			if rerr := s.LLDAP.RemoveUserFromGroup(ctx, u.ID, g.ID); rerr != nil {
+				return fmt.Errorf("%s was added to %s but setting the end failed (%v) and removing them failed too (%v): remove them by hand", u.ID, group, err, rerr)
+			}
+			return fmt.Errorf("setting the end failed, %s not added to %s: %w", u.ID, group, err)
 		}
-		_, err = s.regranted(group, u.ID, time.Now())
-		return err
+		return nil
 	})
 }
 

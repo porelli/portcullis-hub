@@ -525,6 +525,11 @@ func TestAdminToolsSameAsHTTP(t *testing.T) {
 			method: "DELETE", path: "/api/directory/groups/eng/exceptions/dana", body: `{}`},
 		{tool: "remove_exception", args: map[string]any{"group": "admin_secretapp", "username": "dana"},
 			method: "DELETE", path: "/api/directory/groups/admin_secretapp/exceptions/dana", body: `{}`},
+		// People & groups: on a rule group the add is an "added by hand" entry.
+		{tool: "add_member", args: map[string]any{"group": "eng", "username": "dana", "reason": "helps out", "until": "2099-01-01T00:00:00Z"},
+			method: "POST", path: "/api/directory/groups/eng/members", body: `{"username":"dana","reason":"helps out","until":"2099-01-01T00:00:00Z"}`},
+		{tool: "add_member", args: map[string]any{"group": "eng", "username": "erin"},
+			method: "POST", path: "/api/directory/groups/eng/members", body: `{"username":"erin"}`},
 		{tool: "add_member", args: map[string]any{"group": "helpers", "username": "bob2"},
 			method: "POST", path: "/api/directory/groups/helpers/members", body: `{"username":"bob2"}`},
 		{tool: "set_permission", args: map[string]any{"perm": "edit_details", "group": "hr_edit"},
