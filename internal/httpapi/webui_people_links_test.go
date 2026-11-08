@@ -69,14 +69,16 @@ func jsonString(s string) string {
 	return string(b)
 }
 
-// TestHubPeopleBase: https://people.<domain>/ from the Hub's host (hub.
-// swapped, the port kept), the main domain for any other host, the
-// injected URL when set; the Users & Groups tab links there.
+// TestHubPeopleBase: https://people.<main domain>/ from the configured
+// domain whatever the browser's host (never its port or another domain),
+// the injected URL (the harness) when set; the Users & Groups tab links
+// there.
 func TestHubPeopleBase(t *testing.T) {
 	for _, c := range []struct{ inject, host, want string }{
 		{"", "hub.example.org", "https://people.example.org/"},
-		{"", "hub.example.org:8443", "https://people.example.org:8443/"},
+		{"", "hub.example.org:8443", "https://people.example.org/"},
 		{"", "HUB.example.org", "https://people.example.org/"},
+		{"", "hub.evil.example", "https://people.example.org/"},
 		{"", "10.0.0.5:8080", "https://people.example.org/"},
 		{"http://127.0.0.1:18889/", "127.0.0.1:18888", "http://127.0.0.1:18889/"},
 	} {
@@ -124,11 +126,13 @@ func TestHubPeopleRedirects(t *testing.T) {
 	}
 }
 
-// TestHubGroupLink: a group name links to its page, escaped, same tab.
+// TestHubGroupLink: a group name links to its page, escaped, same tab —
+// a new tab when asked (the settings panel's links always ask: an unsaved
+// draft must survive following one).
 func TestHubGroupLink(t *testing.T) {
-	got := peopleJS(t, "", "hub.example.org", `[PortcullisPeople.groupLink("a<b>&\"c'"), PortcullisPeople.groupLink("office_milan", true)]`)
+	got := peopleJS(t, "", "hub.example.org", `[PortcullisPeople.groupLink("a<b>&\"c'"), PortcullisPeople.groupLink("office_milan", true), PortcullisPeople.groupLink("ops", false, true)]`)
 	l, ok := got.([]any)
-	if !ok || len(l) != 2 {
+	if !ok || len(l) != 3 {
 		t.Fatalf("links = %v", got)
 	}
 	if l[0] != `<a class="group-link" href="https://people.example.org/#groups/a%3Cb%3E%26%22c&#39;" title="Open a&lt;b&gt;&amp;&quot;c&#39;&#39;s page">a&lt;b&gt;&amp;&quot;c&#39;</a>` {
@@ -139,5 +143,33 @@ func TestHubGroupLink(t *testing.T) {
 	}
 	if strings.Contains(l[0].(string), "target=") {
 		t.Error("group links open in the same tab")
+	}
+	if l[2] != `<a class="group-link" href="https://people.example.org/#groups/ops" target="_blank" rel="noopener" title="Open ops&#39;s page (new tab)">ops</a>` {
+		t.Errorf("new-tab link = %s", l[2])
+	}
+	if js := webAsset(t, "settings.js"); !strings.Contains(js, "window.PortcullisPeople.groupLink(name, false, true)") {
+		t.Error("settings.js: the settings panel's group links must open in a new tab")
+	}
+}
+
+// TestPeoplePageDomain: people.html is served with the configured main
+// domain injected (directory.js's links into the Hub:
+// https://hub.<domain>/), whatever host the browser used; directory.js
+// never derives it from location.host.
+func TestPeoplePageDomain(t *testing.T) {
+	e := newPeopleEnv(t)
+	_, b := doAs(t, e.people, "root", "GET", "/", "")
+	if !strings.Contains(b, `domain: "`+e.s.Hub.Domain()+`",`) || e.s.Hub.Domain() == "" {
+		t.Errorf("people page lacks the injected domain %q", e.s.Hub.Domain())
+	}
+	if strings.Contains(b, "{{") {
+		t.Error("people page left a template action unrendered")
+	}
+	js := webAsset(t, "directory.js")
+	if strings.Contains(js, "location.host") || !strings.Contains(js, "'https://hub.' + String(options.domain || '') + '/'") {
+		t.Error("directory.js: hubLink must build the Hub URL from options.domain, never location.host")
+	}
+	if strings.Contains(webAsset(t, "index.html"), "location.host") {
+		t.Error("index.html: the people URL must come from the configured domain, never location.host")
 	}
 }

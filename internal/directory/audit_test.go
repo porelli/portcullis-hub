@@ -77,8 +77,22 @@ func TestAuditFilters(t *testing.T) {
 		{"eng", "user=dave", true}, {"eng", "add user=Dave include=true", true}, {"eng", "user=davey", false},
 		{"eng", "xuser=dave", false}, {"eng", "user=dave,x", false}, {"eng", "user=davey user=dave", true},
 	} {
-		if u(AuditEntry{Target: c.target, Detail: c.detail}) != c.want {
+		if u(AuditEntry{Action: "group.exception", Target: c.target, Detail: c.detail}) != c.want {
 			t.Errorf("ForUser(Dave) %q %q = %v", c.target, c.detail, !c.want)
+		}
+	}
+	// A manual group's add / remove: target the group, detail the bare
+	// username first (other actions don't match on a first field).
+	for _, c := range []struct {
+		action, detail string
+		want           bool
+	}{
+		{"group.add_member", "dave", true}, {"group.add_member", "Dave", true}, {"group.remove_member", "dave expiry_dropped=true", true},
+		{"group.remove_member", "dave; confirmation remove dave", true}, {"group.add_member", "davey", false},
+		{"group.add_member", "", false}, {"group.delete", "dave", false}, {"group.rule", "dave", false},
+	} {
+		if u(AuditEntry{Action: c.action, Target: "ops", Detail: c.detail}) != c.want {
+			t.Errorf("ForUser(Dave) %s %q = %v", c.action, c.detail, !c.want)
 		}
 	}
 }

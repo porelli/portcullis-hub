@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -448,5 +449,72 @@ func TestMembershipGuarding(t *testing.T) {
 	}
 	if !m.Administrators["root"] || !m.Administrators["ops"] || m.Administrators["alice"] || m.Administrators["portcullis-hub"] {
 		t.Errorf("administrators = %v", m.Administrators)
+	}
+}
+
+// TestGroupViewGuarding: an administrator's GroupView says whether the
+// group guards (guardingGroups: administrator, permission, app admin and
+// privileged-value groups) — true or false, always present; no other
+// view carries it, and an unreadable directory.yaml leaves it absent.
+func TestGroupViewGuarding(t *testing.T) {
+	e, store := privEnv(t)
+	for _, g := range []string{"admin_immich", "users_immich", "office_milan", "hr", "plain"} {
+		e.ll.AddGroup(g)
+	}
+	if err := e.svc.SetPermission(ctx, asRoot, "edit_details", "hr"); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]bool{"lldap_admin": true, "admin_immich": true, "office_milan": true, "hr": true, "users_immich": false, "plain": false}
+	check := func(name string, ov *directory.Overview) {
+		t.Helper()
+		for _, g := range ov.Groups {
+			w, ok := want[g.Name]
+			if !ok {
+				continue
+			}
+			if g.Guarding == nil || *g.Guarding != w {
+				t.Errorf("%s: %s guarding = %v, want %v", name, g.Name, g.Guarding, w)
+			}
+		}
+	}
+	ov, err := e.svc.Overview(ctx, "root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	check("Overview", ov)
+	if ov, err = e.svc.OverviewFor(ctx, asRoot); err != nil {
+		t.Fatal(err)
+	}
+	check("OverviewFor admin", ov)
+	b, _ := json.Marshal(ov)
+	if !strings.Contains(string(b), `"name":"plain"`) || !strings.Contains(string(b), `"guarding":false`) {
+		t.Errorf("admin JSON lacks guarding:false: %s", b)
+	}
+	// Non-admins: never.
+	ov, err = e.svc.OverviewFor(ctx, callerFor(t, e, "alice"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := json.Marshal(ov); strings.Contains(string(b), `"guarding"`) {
+		t.Errorf("non-admin view carries guarding: %s", b)
+	}
+	pv, err := e.svc.PeopleOverview(ctx, asRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := json.Marshal(pv); strings.Contains(string(b), `"guarding"`) {
+		t.Errorf("people view carries guarding: %s", b)
+	}
+	// directory.yaml unreadable: permissions unknown, so no flag.
+	if err := os.WriteFile(store.Path, []byte("fields: [\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if ov, err = e.svc.Overview(ctx, "root"); err != nil {
+		t.Fatal(err)
+	}
+	for _, g := range ov.Groups {
+		if g.Guarding != nil {
+			t.Errorf("unreadable directory.yaml: %s guarding = %v", g.Name, *g.Guarding)
+		}
 	}
 }

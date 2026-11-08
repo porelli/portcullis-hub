@@ -80,6 +80,10 @@ type Membership struct {
 	// Permissions: delegated permission → the group directory.yaml
 	// grants it to (§9.6; only the set ones).
 	Permissions map[string]string
+	// RuleBased: the groups with a rule in directory.yaml (exact names,
+	// as AddMember looks them up): an add there is an "added by hand"
+	// entry, so the Portcullis MCP classes add_member like add_exception.
+	RuleBased map[string]bool
 }
 
 // Membership reads LLDAP and directory.yaml. LLDAP unavailable: 503;
@@ -160,6 +164,12 @@ func (s *Service) membershipOf(cfg *Config, sn *snapshot, now time.Time) *Member
 	}
 	m.Staged = s.stagedMembers(cfg, sn, now)
 	m.RuleFields = ruleFields(cfg)
+	m.RuleBased = map[string]bool{}
+	for g, gc := range cfg.Groups {
+		if gc != nil && gc.Rule != nil {
+			m.RuleBased[g] = true
+		}
+	}
 	m.Permissions = map[string]string{}
 	for p, g := range cfg.Permissions {
 		if g != "" {

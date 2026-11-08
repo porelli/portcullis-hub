@@ -752,6 +752,12 @@ const (
 // errors of groups is applied with them, joined, as why. Clipped to
 // settleWhyMax runes.
 //
+// Concurrent Settles share runs (joinSettle): with none in flight a
+// Settle starts one; one arriving while a run is in flight waits for the
+// single run queued after it (that run starts after this Settle was
+// called, so it sees the caller's change), which every other Settle
+// arriving meanwhile shares — N parallel Settles evaluate at most twice.
+//
 // The evaluation itself runs to its end (settleEvalBound) on a detached
 // context whatever the wait does. The background loop may evaluate at
 // the same time: both go through evaluateLocked, which holds s.mu, so the
@@ -760,30 +766,11 @@ const (
 // logout is retried by every later run (logoutUsers). The kick the
 // mutation's run sent still follows (RunEvaluator unchanged).
 func (s *Service) Settle(ctx context.Context, groups ...string) (applied bool, why string) {
-	type result struct {
-		rep *EvalReport
-		err error
-	}
-	done := make(chan result, 1)
-	evalCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), settleEvalBound)
-	go func() {
-		defer cancel()
-		rep, err := s.Evaluate(evalCtx, time.Now().UTC())
-		if err != nil && !errors.Is(err, context.DeadlineExceeded) {
-			var de *Error
-			if !errors.As(err, &de) || de.Status != http.StatusServiceUnavailable {
-				log.Printf("rules: evaluation failed: %v", err)
-			}
-		} else if err == nil && (len(rep.Changes) > 0 || len(rep.Errors) > 0) {
-			log.Printf("rules: %d membership change(s), %d error(s)%s", len(rep.Changes), len(rep.Errors), firstErr(rep.Errors))
-		}
-		done <- result{rep, err}
-	}()
+	r := s.joinSettle(ctx)
 	wait := time.NewTimer(settleTimeout)
 	defer wait.Stop()
-	var r result
 	select {
-	case r = <-done:
+	case <-r.done:
 	case <-wait.C:
 		why = fmt.Sprintf("stored, but applying it took over %s: it goes on in the background (timed out waiting)", settleTimeout)
 		log.Printf("rules: settle: %s", why)
@@ -807,6 +794,62 @@ func (s *Service) Settle(ctx context.Context, groups ...string) (applied bool, w
 		return true, clipRunes(strings.Join(errs, "; "), settleWhyMax)
 	}
 	return true, ""
+}
+
+// settleRun is one evaluation Settles share: done is closed once rep and
+// err are set.
+type settleRun struct {
+	done chan struct{}
+	rep  *EvalReport
+	err  error
+}
+
+// joinSettle answers the run a Settle called now waits for: a new one
+// started at once when none is in flight, else the run queued after the
+// in-flight one (created by the first Settle to need it; it starts when
+// the in-flight run ends). ctx's values only (WithoutCancel) reach the
+// run it starts.
+func (s *Service) joinSettle(ctx context.Context) *settleRun {
+	s.settleMu.Lock()
+	defer s.settleMu.Unlock()
+	if s.settleCur == nil {
+		s.settleCur = &settleRun{done: make(chan struct{})}
+		go s.runSettle(context.WithoutCancel(ctx), s.settleCur)
+		return s.settleCur
+	}
+	if s.settleNext == nil {
+		s.settleNext = &settleRun{done: make(chan struct{})}
+		s.settleNextCtx = context.WithoutCancel(ctx)
+	}
+	return s.settleNext
+}
+
+// runSettle evaluates for r (bounded by settleEvalBound, never by a
+// waiter), then starts the queued run, if any.
+func (s *Service) runSettle(ctx context.Context, r *settleRun) {
+	for r != nil {
+		evalCtx, cancel := context.WithTimeout(ctx, settleEvalBound)
+		eval := s.Evaluate
+		if s.settleEval != nil {
+			eval = s.settleEval
+		}
+		rep, err := eval(evalCtx, time.Now().UTC())
+		cancel()
+		if err != nil && !errors.Is(err, context.DeadlineExceeded) {
+			var de *Error
+			if !errors.As(err, &de) || de.Status != http.StatusServiceUnavailable {
+				log.Printf("rules: evaluation failed: %v", err)
+			}
+		} else if err == nil && (len(rep.Changes) > 0 || len(rep.Errors) > 0) {
+			log.Printf("rules: %d membership change(s), %d error(s)%s", len(rep.Changes), len(rep.Errors), firstErr(rep.Errors))
+		}
+		r.rep, r.err = rep, err
+		close(r.done)
+		s.settleMu.Lock()
+		r, ctx = s.settleNext, s.settleNextCtx
+		s.settleCur, s.settleNext, s.settleNextCtx = r, nil, nil
+		s.settleMu.Unlock()
+	}
 }
 
 // logoutUsers signs users and every still-pending earlier logout out of

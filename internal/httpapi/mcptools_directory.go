@@ -387,6 +387,17 @@ func (s *Server) ruleClass(ctx context.Context, args json.RawMessage) ToolClass 
 	return s.groupClass(ctx, args)
 }
 
+// addMemberClass: add_member on a rule-based group stores an "added by
+// hand" entry (AddMember's include exception), so it is classed as
+// add_exception is (ruleClass); on a manual group, groupClass. The
+// directory unreadable: ruleClass (never lower than either).
+func (s *Server) addMemberClass(ctx context.Context, args json.RawMessage) ToolClass {
+	if m := s.guards(ctx); m != nil && !m.RuleBased[argField(args, "group")] {
+		return s.groupClass(ctx, args)
+	}
+	return s.ruleClass(ctx, args)
+}
+
 // prestagedLines are prestaged's consequences.
 func (s *Server) prestagedLines(ctx context.Context, t *templates.Template, id string) []string {
 	pre, ok := s.prestaged(ctx, t, id)
@@ -897,7 +908,7 @@ func (s *Server) registerDirectoryTools() {
 					return nil, err
 				}
 				return st.with(map[string]any{"status": "added"}), nil
-			}), s.groupClass, argReader("group"), func(ctx context.Context, args json.RawMessage) []string {
+			}), s.addMemberClass, argReader("group"), func(ctx context.Context, args json.RawMessage) []string {
 			line := "Adds " + argField(args, "username") + " to " + argField(args, "group")
 			if u := argField(args, "until"); u != "" {
 				line += " until " + q(u)

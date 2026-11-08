@@ -23,12 +23,12 @@ func auditFixture(t *testing.T, l *directory.AuditLog) {
 		{Action: "group.exception", Target: "eng", Detail: "add user=dave include=true until=never reason=helps"},
 		{Action: "group.sync", Target: "eng:dave", Detail: "+ rule"},
 		{Action: "group.rule", Target: "engineering"},
-		{Action: "group.add_member", Target: "ops:dave"},
+		{Action: "group.add_member", Target: "ops", Detail: "dave"}, // a manual group's shape
 		{Action: "user.update", Target: "DAVE"},
 		{Action: "group.exception", Target: "ops", Detail: "remove user=dave"},
 		{Action: "group.exception", Target: "ops", Detail: "remove user=davey"},
 		{Action: "group.exception", Target: "ops", Detail: "remove xuser=dave"},
-		{Action: "group.add_member", Target: "eng:dave", Via: directory.ViaAI, Client: "portcullis-ai-claude"},
+		{Action: "group.add_member", Target: "eng", Detail: "dave", Via: directory.ViaAI, Client: "portcullis-ai-claude"},
 	} {
 		e.Time, e.Actor, e.Result = at.Add(time.Duration(i)*time.Minute), "root", "ok"
 		if err := l.Append(e); err != nil {
@@ -61,17 +61,17 @@ func TestAuditGroupFilter(t *testing.T) {
 	auditFixture(t, l)
 	for _, srv := range []*httptest.Server{e.hub, e.people} {
 		got := auditKeys(t, mustDo(t, srv, "root", "GET", "/api/directory/audit?group=eng", "", 200))
-		want := "group.add_member@eng:dave group.sync@eng:dave group.exception@eng group.rule@eng"
+		want := "group.add_member@eng group.sync@eng:dave group.exception@eng group.rule@eng"
 		if !strings.HasPrefix(got, want) {
 			t.Errorf("group=eng = %s, want it to start with %s", got, want)
 		}
 		if strings.Contains(got, "engineering") || strings.Contains(got, "ops") {
 			t.Errorf("group=eng has another group's entries: %s", got)
 		}
-		if got := auditKeys(t, mustDo(t, srv, "root", "GET", "/api/directory/audit?via=ai&group=eng", "", 200)); got != "group.add_member@eng:dave" {
+		if got := auditKeys(t, mustDo(t, srv, "root", "GET", "/api/directory/audit?via=ai&group=eng", "", 200)); got != "group.add_member@eng" {
 			t.Errorf("via=ai&group=eng = %s", got)
 		}
-		if got := auditKeys(t, mustDo(t, srv, "root", "GET", "/api/directory/audit?group=ops", "", 200)); got != "group.exception@ops group.exception@ops group.exception@ops group.add_member@ops:dave" {
+		if got := auditKeys(t, mustDo(t, srv, "root", "GET", "/api/directory/audit?group=ops", "", 200)); got != "group.exception@ops group.exception@ops group.exception@ops group.add_member@ops" {
 			t.Errorf("group=ops = %s", got)
 		}
 		for _, q := range []string{"?group=", "?group=bad%20name", "?group=-x", "?via=ai&group=a/b"} {
@@ -85,24 +85,25 @@ func TestAuditGroupFilter(t *testing.T) {
 	mustDo(t, e.people, "carl", "GET", "/api/directory/audit?user=carl", "", 403)
 }
 
-// TestAuditUserFilter: ?user=<u> keeps target u, <group>:<u> and a detail
-// token user=<u> (followed by a space or the end), lowercased; never
-// davey's or xuser=; combines with via and group.
+// TestAuditUserFilter: ?user=<u> keeps target u, <group>:<u>, a detail
+// token user=<u> (followed by a space or the end) and a manual group's
+// add / remove naming u first, lowercased; never davey's or xuser=;
+// combines with via and group.
 func TestAuditUserFilter(t *testing.T) {
 	e := newPeopleEnv(t)
 	auditFixture(t, e.s.Directory.Audit)
 	got := auditKeys(t, mustDo(t, e.hub, "root", "GET", "/api/directory/audit?user=Dave", "", 200))
-	want := "group.add_member@eng:dave group.exception@ops user.update@DAVE group.add_member@ops:dave group.sync@eng:dave group.exception@eng"
+	want := "group.add_member@eng group.exception@ops user.update@DAVE group.add_member@ops group.sync@eng:dave group.exception@eng"
 	if got != want {
 		t.Errorf("user=Dave = %s\nwant %s", got, want)
 	}
 	if got := auditKeys(t, mustDo(t, e.people, "root", "GET", "/api/directory/audit?user=davey", "", 200)); got != "group.exception@ops" {
 		t.Errorf("user=davey = %s", got)
 	}
-	if got := auditKeys(t, mustDo(t, e.hub, "root", "GET", "/api/directory/audit?user=dave&via=ai", "", 200)); got != "group.add_member@eng:dave" {
+	if got := auditKeys(t, mustDo(t, e.hub, "root", "GET", "/api/directory/audit?user=dave&via=ai", "", 200)); got != "group.add_member@eng" {
 		t.Errorf("user=dave&via=ai = %s", got)
 	}
-	if got := auditKeys(t, mustDo(t, e.hub, "root", "GET", "/api/directory/audit?user=dave&group=ops", "", 200)); got != "group.exception@ops group.add_member@ops:dave" {
+	if got := auditKeys(t, mustDo(t, e.hub, "root", "GET", "/api/directory/audit?user=dave&group=ops", "", 200)); got != "group.exception@ops group.add_member@ops" {
 		t.Errorf("user=dave&group=ops = %s", got)
 	}
 	for _, q := range []string{"?user=", "?user=a%20b", "?user=-x", "?user=dave&via=human"} {
@@ -110,6 +111,76 @@ func TestAuditUserFilter(t *testing.T) {
 	}
 	e.ll.AddUser("bob", "bob@example.org", "Bob", "")
 	mustDo(t, e.people, "bob", "GET", "/api/directory/audit?user=bob", "", 403)
+}
+
+// TestAuditUserFilterManualMembers: AddMember (no end) and RemoveMember
+// on a manual group, run through the Service, audit target=<group>,
+// detail=<username> — and ?user= finds both (and the timed add, a
+// user= token), never davey's.
+func TestAuditUserFilterManualMembers(t *testing.T) {
+	e := newPeopleEnv(t)
+	ctx := context.Background()
+	d := e.s.Directory
+	e.ll.AddUser("dave", "dave@example.org", "Dave", "")
+	e.ll.AddUser("davey", "davey@example.org", "Davey", "")
+	e.ll.AddGroup("ops")
+	c, err := d.CallerFor(ctx, "root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.AddMember(ctx, c, "ops", directory.MemberAdd{Username: "Dave"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.AddMember(ctx, c, "ops", directory.MemberAdd{Username: "davey"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.RemoveMember(ctx, c, "ops", "dave"); err != nil {
+		t.Fatal(err)
+	}
+	end := time.Now().Add(48 * time.Hour)
+	if err := d.AddMember(ctx, c, "ops", directory.MemberAdd{Username: "dave", Until: &end}); err != nil {
+		t.Fatal(err)
+	}
+	b := mustDo(t, e.people, "root", "GET", "/api/directory/audit?user=DAVE", "", 200)
+	if got := auditKeys(t, b); got != "group.add_member@ops group.remove_member@ops group.add_member@ops" {
+		t.Errorf("user=DAVE = %s", got)
+	}
+	var es []directory.AuditEntry
+	json.Unmarshal([]byte(b), &es)
+	if len(es) == 3 && (es[1].Detail != "dave" || es[2].Detail != "dave") {
+		t.Errorf("details = %q %q, want the bare username", es[1].Detail, es[2].Detail)
+	}
+	if got := auditKeys(t, mustDo(t, e.people, "root", "GET", "/api/directory/audit?user=davey", "", 200)); got != "group.add_member@ops" {
+		t.Errorf("user=davey = %s", got)
+	}
+}
+
+// TestDirectoryGuardingFlag: GET /api/directory gives administrators each
+// group's guarding (lldap_admin true, a plain group false) on both
+// listeners; anyone else never sees the key.
+func TestDirectoryGuardingFlag(t *testing.T) {
+	e := newPeopleEnv(t)
+	e.ll.AddUser("bob", "bob@example.org", "Bob", "")
+	e.ll.AddGroup("ops", "bob")
+	for _, srv := range []*httptest.Server{e.hub, e.people} {
+		var ov directory.Overview
+		if err := json.Unmarshal([]byte(mustDo(t, srv, "root", "GET", "/api/directory", "", 200)), &ov); err != nil {
+			t.Fatal(err)
+		}
+		got := map[string]string{}
+		for _, g := range ov.Groups {
+			got[g.Name] = "absent"
+			if g.Guarding != nil {
+				got[g.Name] = map[bool]string{true: "true", false: "false"}[*g.Guarding]
+			}
+		}
+		if got["lldap_admin"] != "true" || got["ops"] != "false" {
+			t.Errorf("admin guarding = %v", got)
+		}
+	}
+	if b := mustDo(t, e.people, "bob", "GET", "/api/directory", "", 200); strings.Contains(b, `"guarding"`) {
+		t.Errorf("non-admin sees guarding: %s", b)
+	}
 }
 
 // teamsManifest: a per-person value people don't see themselves

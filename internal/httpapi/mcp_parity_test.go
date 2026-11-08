@@ -96,7 +96,7 @@ var accessWidening = map[string]string{
 	"create_instance":   "D when one of its groups already exists with members, or the template / directory can't be read (T18 fix round 1)",
 	"remove_member":     "D from an administrator, permission or guarding group (T18 fix round 1 ruling)",
 	"update_field":      "D on a guarded field when it changes kind, values, multi or turns admin-only off (T18 fix round 1)",
-	"add_member":        "D into an administrator, permission or guarding group (or one the directory can't place)",
+	"add_member":        "D into an administrator, permission or guarding group (or one the directory can't place); on a rule-based group classed as add_exception{include:true} (ruleClass: D on an instance's access or admin group too)",
 	"set_member_expiry": "D on an administrator, permission or guarding group",
 	"set_group_rule":    "D on a guarding group",
 	"convert_group":     "D on a guarding group",

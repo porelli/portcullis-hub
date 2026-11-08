@@ -686,8 +686,21 @@ func TestPrestagedRuleAndExceptionsNeedConfirmation(t *testing.T) {
 			t.Errorf("%s on an instance's access group = %s", c.tool, cl)
 		}
 	}
+	// add_member on the still-manual access group: a membership, the
+	// groupClass (W: it guards nothing).
+	if cl := byName["add_member"].ClassFor(context.Background(), json.RawMessage(`{"group":"users_grafana-q","username":"dana"}`)); cl != ClassWrite {
+		t.Errorf("add_member on a manual instance access group = %s, want W", cl)
+	}
 	// set_details on a field the rule of an instance's group uses: D.
 	mustDo(t, e.hub, "root", "POST", "/api/directory/groups/users_grafana-q/convert", `{"rule":"clearance = \"q\"","preview":{"matching":[],"kept_as_exception":[],"joining":[],"expiry_dropped":[]}}`, 200)
+	// Final review M1: add_member on a rule-based group stores an "added
+	// by hand" entry, so it is classed as add_exception{include:true}
+	// (ruleClass: D on an instance's access group).
+	add := byName["add_member"].ClassFor(context.Background(), json.RawMessage(`{"group":"users_grafana-q","username":"dana","reason":"x"}`))
+	exc := byName["add_exception"].ClassFor(context.Background(), json.RawMessage(`{"group":"users_grafana-q","user":"dana","include":true,"reason":"x"}`))
+	if add != ClassDestructive || add != exc {
+		t.Errorf("add_member on a rule-based instance access group = %s, add_exception = %s, want both D", add, exc)
+	}
 	if cl := byName["set_details"].ClassFor(context.Background(), json.RawMessage(`{"username":"dana","attrs":{"clearance":["q"]}}`)); cl != ClassDestructive {
 		t.Errorf("set_details on a field an instance group's rule uses = %s", cl)
 	}

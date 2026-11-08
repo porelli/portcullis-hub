@@ -146,7 +146,10 @@ func ForGroup(g string) func(AuditEntry) bool {
 // ForUser keeps the entries for user u (contract §9.7 ?user=), compared
 // lowercased: target exactly u, or "<group>:<u>" (the part after the
 // last ':'; group.sync's targets carry the LLDAP user id, the username),
-// or a detail holding the token user=<u> followed by a space or the end.
+// or a detail holding the token user=<u> followed by a space or the end;
+// group.add_member / group.remove_member on a manual group (target the
+// group, detail the bare username first) also when the detail's first
+// field is u.
 func ForUser(u string) func(AuditEntry) bool {
 	u = strings.ToLower(u)
 	return func(e AuditEntry) bool {
@@ -154,8 +157,21 @@ func ForUser(u string) func(AuditEntry) bool {
 		if t == u || t[strings.LastIndex(t, ":")+1:] == u {
 			return true
 		}
-		return hasUserToken(strings.ToLower(e.Detail), u)
+		d := strings.ToLower(e.Detail)
+		if (e.Action == "group.add_member" || e.Action == "group.remove_member") && firstField(d) == u {
+			return true
+		}
+		return hasUserToken(d, u)
 	}
+}
+
+// firstField is d's first space-separated field, without the ';' an
+// appended confirmation ("<detail>; confirmation …") leaves on it.
+func firstField(d string) string {
+	if f := strings.Fields(d); len(f) > 0 {
+		return strings.TrimSuffix(f[0], ";")
+	}
+	return ""
 }
 
 // hasUserToken: d (lowercase) holds "user=<u>" starting the text or after

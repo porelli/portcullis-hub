@@ -1,7 +1,8 @@
 // Portcullis Hub: Users & Groups (People | Groups | Org chart | Setup).
 //
-// Served on hub.<domain> (the Users & Groups tab, admins) and on
-// people.<domain> (every signed-in user). Vanilla JS, no build step.
+// Served on people.<domain> (every signed-in user; people.html). The Hub
+// page (index.html) loads it only for its Audit log tab (renderAudit).
+// Vanilla JS, no build step.
 //
 // Rules of this file:
 //   - every server string goes through esc() (or textContent) before it
@@ -268,11 +269,7 @@
       return showOff('Failed to load people: ' + errText(err));
     }
     if (!dir.available) {
-      return showOff(options.listener === 'hub'
-        ? '<b>User management is disabled.</b> The Hub has no LLDAP service account: core mounts its credentials as ' +
-          '<code>username</code> and <code>password</code> files (default <code>/run/portcullis/lldap/</code>). Run <code>./portcullis up</code> ' +
-          'on a core version that provides them. The LLDAP web UI still works.<br><span class="pd-muted">' + esc(dir.reason) + '</span>'
-        : 'The directory is temporarily unavailable. <span class="pd-muted">' + esc(dir.reason) + '</span>', true);
+      return showOff('The directory is temporarily unavailable. <span class="pd-muted">' + esc(dir.reason) + '</span>', true);
     }
     if (!me) me = { user: dir.me, admin: dir.admin, perms: dir.perms || [] };
     off.hidden = true;
@@ -337,7 +334,9 @@
         title = u.created_by ? 'via rule, account created by ' + u.created_by : 'member through a rule';
       } else if (m.how === 'exception') {
         mark = ' <span class="pd-star" aria-hidden="true">✱</span>';
-        title = 'exception: ' + (m.reason || '') + (m.until ? ' (until ' + fmtTime(m.until) + ')' : '');
+        // An include entry (a kept-out person is no member): the group
+        // page's words, the reason for administrators only.
+        title = 'added by hand' + (m.reason ? ': ' + m.reason : '') + (m.until ? ' (until ' + fmtTime(m.until) + ')' : '');
       } else if (m.until) {
         mark = ' <span aria-hidden="true">⏳</span>';
         title = 'until ' + fmtTime(m.until);
@@ -498,7 +497,7 @@
     if (!name) return;
     const h = personHash(name);
     if (location.hash === h) { if (root) applyRoute({ person: name }); return; }
-    location.hash = h; // hashchange routes it (the Hub page into its Users tab)
+    location.hash = h; // hashchange routes it
   }
   function fieldValueHtml(f, vals) {
     return (vals || []).map(v => f.kind === 'person' && userByName(v)
@@ -722,13 +721,14 @@
       b.querySelector('#nu-username').value = pre.get('username') || '';
       b.querySelector('#nu-email').value = pre.get('email') || '';
       b.querySelector('#nu-display').value = pre.get('display_name') || '';
-      // Only plain groups (the Hub's link already leaves out guarding
-      // ones): never an administrator or permission group from a link.
+      // A link ticks only groups the server says don't guard (guarding
+      // === false, GroupView's admin-only flag): never an administrator,
+      // permission, app admin or privileged-value group. A missing flag
+      // counts as guarding.
       const want = (pre.get('groups') || '').split(',').filter(Boolean);
-      const perm = new Set(Object.values((dir && dir.permissions) || {}).map(g => String(g).toLowerCase()));
-      const adminG = new Set(groups().filter(g => g.admin).map(g => g.name));
+      const safe = new Set(groups().filter(g => g.guarding === false).map(g => g.name));
       b.querySelectorAll('input[name="nu-group"]').forEach(i => {
-        i.checked = want.includes(i.value) && !adminG.has(i.value) && !perm.has(i.value.toLowerCase());
+        i.checked = want.includes(i.value) && safe.has(i.value);
       });
       syncInviteRules();
     }
@@ -1302,9 +1302,8 @@
     if (hadGroup) renderGroups();
   }
   // legacyUser: an old person link, #users/<name>[?password|?invite]
-  // (people.<domain> only: on the Hub, index.html routes it to openAt).
+  // (the Hub page redirects its own here, peopleRedirect).
   function legacyUser(h) {
-    if (options.listener !== 'people') return null;
     const m = /^#users\/([^?]+)(?:\?(password|invite))?$/.exec(h || '');
     if (!m) return null;
     try { return { name: decodeURIComponent(m[1]), action: m[2] || '' }; } catch (_) { return null; }
@@ -1320,13 +1319,8 @@
       return;
     }
     if (!dir) return;
-    if (options.hashTabs) {
-      const t = location.hash.slice(1) || 'people';
-      if (BUILTIN_TABS.includes(t) || extraTabs.some(x => x.id === t)) { clearRoutes(); selectTab(t, false); }
-    } else if (location.hash === '#users' && (tab === 'groups' || personPage)) {
-      clearRoutes();
-      selectTab('people', false);
-    }
+    const t = location.hash.slice(1) || 'people';
+    if (BUILTIN_TABS.includes(t) || extraTabs.some(x => x.id === t)) { clearRoutes(); selectTab(t, false); }
   }
   // userSelectTab: a tab picked by the user. Groups always opens the
   // list; leaving a group route pushes a history entry so Back returns.
@@ -1341,11 +1335,10 @@
     }
     clearRoutes();
     selectTab(name, focus);
-    if (options.hashTabs) setHash(name === 'people' ? '' : '#' + name, fromGroups);
-    else if (fromGroups) setHash('#users', true);
+    setHash(name === 'people' ? '' : '#' + name, fromGroups);
   }
-  // openGroup (the person page's Add to group…, Task 7): the group's page, with people already
-  // picked in its Add people form.
+  // openGroup (the person page's Add to group…): the group's page, with
+  // people already picked in its Add people form.
   function openGroup(name, opts) {
     name = String(name || '');
     if (!name) return;
@@ -1353,15 +1346,15 @@
     pick = { group: name, users: pre, reason: '', until: '' };
     const h = groupHash(name);
     if (location.hash === h) { if (root) applyRoute({ group: name }); return; }
-    location.hash = h; // hashchange routes it (the Hub page into its Users tab)
+    location.hash = h; // hashchange routes it
   }
 
   // Links into the Hub's app settings (admins only). people.<domain> has
-  // no app pages: its links go to hub.<domain>, in a new tab.
+  // no app pages: its links go to https://hub.<main domain>/ (options.
+  // domain, the configured domain people.html is served with — never
+  // the browser's host), in a new tab.
   function hubLink(frag, text, title) {
-    if (options.listener === 'hub') return '<a class="pd-a" href="' + esc(frag) + '"' + (title ? ' title="' + esc(title) + '"' : '') + '>' + esc(text) + '</a>';
-    const domain = location.host.split('.').slice(1).join('.');
-    return '<a class="pd-a" href="' + esc('https://hub.' + domain + '/' + frag) + '" target="_blank" rel="noopener noreferrer" title="' +
+    return '<a class="pd-a" href="' + esc('https://hub.' + String(options.domain || '') + '/' + frag) + '" target="_blank" rel="noopener noreferrer" title="' +
       esc((title ? title + ' · ' : '') + 'opens the Hub') + '">' + esc(text) + ' <span aria-hidden="true">↗</span></a>';
   }
   const appFrag = (id, key) => '#app/' + enc(id) + '/settings' + (key ? '/' + enc(key) : '');
@@ -2687,8 +2680,8 @@
     '</div>';
 
   // mount renders the shell into el once; show() (re)loads the data.
-  // opts: listener ('hub' | 'people'), hashTabs, onUser(name), extraTabs
-  // [{id, label, render(panel)}] (people.html: My apps).
+  // opts: domain (the main domain: links into the Hub), onUser(name),
+  // extraTabs [{id, label, render(panel)}] (people.html: My apps).
   function mount(el, opts) {
     if (root) return;
     root = el;
@@ -2709,7 +2702,7 @@
     const r = parseRoute(location.hash);
     if (r && r.person) { tab = 'people'; personPage = r.person; }
     else if (r) { tab = 'groups'; groupPage = r.group; }
-    else if (options.hashTabs) {
+    else {
       const h = location.hash.slice(1);
       if (BUILTIN_TABS.includes(h) || extraTabs.some(t => t.id === h)) tab = h;
     }
@@ -2771,20 +2764,6 @@
     return '<span class="' + cls + '">' + esc(d) + '</span>';
   }
 
-  // route applies the current #groups[/<name>] or #people/<name> hash
-  // (the Hub page calls it each time its Users tab opens, so the view
-  // follows the hash). Any other hash (the Hub's #users) leaves a route:
-  // People.
-  function route() {
-    if (!root) return;
-    const r = parseRoute(location.hash);
-    if (r) { applyRoute(r); return; }
-    if (tab !== 'groups' && !groupPage && !personPage) return;
-    clearRoutes();
-    tab = 'people';
-    if (dir) selectTab('people', false);
-  }
-
-  window.PortcullisDirectory = { show, openAt, openGroup, route, csvCell, renderAudit };
+  window.PortcullisDirectory = { show, openAt, openGroup, csvCell, renderAudit };
   window.PortcullisAI = { decision: aiDecision };
 })();

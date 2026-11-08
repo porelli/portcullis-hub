@@ -50,8 +50,9 @@
     // the person is created here, where the one-time link is shown.
     const inv = /^#invite(?:\?(.*))?$/.exec(location.hash);
     PortcullisDirectory.show(document.getElementById('people'), {
-      listener: 'people',
-      hashTabs: true,
+      // The configured main domain (the server injects it): links into
+      // the Hub go to https://hub.<domain>/, never the browser's host.
+      domain: {{.Domain}},
       extraTabs: [{ id: 'myapps', label: 'My apps', render: PortcullisMyApps.render }],
       onUser: function (name) {
         document.getElementById('who-name').textContent = name;
@@ -60,9 +61,10 @@
     });
     if (inv) {
       // Only these keys, nothing else of the link is ever pre-filled.
-      // groups ticks plain groups only, and only for an admin (a
-      // delegate's form has no groups; directory.js never ticks an
-      // administrator or permission group from a link).
+      // groups ticks only groups the server says don't guard
+      // (guarding === false, administrators only: a delegate's form has
+      // no groups), never an administrator, permission, app admin or
+      // privileged-value group.
       const given = new URLSearchParams(inv[1] || ''), pre = new URLSearchParams();
       for (const k of ['username', 'email', 'display_name', 'groups']) if (given.has(k)) pre.set(k, given.get(k));
       PortcullisDirectory.openAt('', pre);

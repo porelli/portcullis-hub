@@ -279,10 +279,13 @@ func (h *Hub) GroupUses(ctx context.Context, group string) (*GroupUsesView, erro
 			// (nor judged secret-free): never shown raw.
 			gs := GroupSetting{Instance: inst, App: inst, Key: r.key, Label: r.key, Scope: r.scope, Value: "(template missing)"}
 			if t != nil {
-				gs.Value = fmt.Sprint(r.value)
 				gs.App = instanceName(t)
+				// A key the template no longer declares: its type (secret
+				// or not) is unknown, so the stored value is never shown.
+				gs.Value = "(option removed)"
 				if o := optionByKey(t, r.key); o != nil {
 					gs.Label = o.Label
+					gs.Value = fmt.Sprint(r.value)
 					if r.scope != templates.ScopeInstance {
 						gs.Value = h.rowDisplay(o, r.value)
 					}

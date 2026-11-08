@@ -624,6 +624,85 @@ func TestSettleLogoutOutlivesTimeout(t *testing.T) {
 	}
 }
 
+// Final review M6: concurrent Settles share runs. N Settles arriving
+// while one run is in flight all wait for the single run queued after it
+// (which sees every change made before them): Evaluate runs at most
+// twice, everyone gets applied, and a removal the shared run makes is
+// signed out once.
+func TestSettleCoalesces(t *testing.T) {
+	e, store := evalEnv(t)
+	setRule(t, store, "milan", `city = "Milan"`)
+	if _, err := e.svc.Evaluate(ctx, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	kc := &logoutKC{Keycloak: e.svc.KC}
+	e.svc.KC = kc
+	var mu sync.Mutex
+	runs := 0
+	release := make(chan struct{})
+	directory.SetSettleEvalForTest(e.svc, func(c context.Context, now time.Time, eval func(context.Context, time.Time) (*directory.EvalReport, error)) (*directory.EvalReport, error) {
+		mu.Lock()
+		runs++
+		first := runs == 1
+		mu.Unlock()
+		rep, err := eval(c, now)
+		if first {
+			<-release // in flight (already evaluated) while the others arrive
+		}
+		return rep, err
+	})
+	// The first Settle starts the run that blocks.
+	firstDone := make(chan bool)
+	go func() {
+		applied, _ := e.svc.Settle(ctx, "milan")
+		firstDone <- applied
+	}()
+	for {
+		mu.Lock()
+		n := runs
+		mu.Unlock()
+		if n == 1 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	// A change made while that run is in flight, then N parallel Settles.
+	setRule(t, store, "milan", `city = "Rome"`) // bob and carol leave, dave joins
+	const n = 8
+	var wg sync.WaitGroup
+	results := make(chan bool, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			applied, why := e.svc.Settle(ctx, "milan")
+			results <- applied && why == ""
+		}()
+	}
+	time.Sleep(100 * time.Millisecond) // let them all join
+	close(release)
+	wg.Wait()
+	close(results)
+	if !<-firstDone {
+		t.Error("the first Settle was not applied")
+	}
+	for ok := range results {
+		if !ok {
+			t.Error("a coalesced Settle was not applied")
+		}
+	}
+	mu.Lock()
+	got := runs
+	mu.Unlock()
+	if got > 2 {
+		t.Errorf("%d evaluations for %d parallel Settles, want at most 2", got, n+1)
+	}
+	if got := strings.Join(kc.called(), ","); got != "bob,carol" {
+		t.Errorf("logged out %q, want bob,carol once", got)
+	}
+	wantMembers(t, e, "milan", "dave") // the queued run saw the change
+}
+
 // A failed logout is retried by the next evaluation until it succeeds.
 func TestFailedLogoutRetried(t *testing.T) {
 	e, store := evalEnv(t)

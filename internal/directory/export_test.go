@@ -24,3 +24,11 @@ func SetSettleTimeoutForTest(d time.Duration) func() {
 	settleTimeout = d
 	return func() { settleTimeout = old }
 }
+
+// SetSettleEvalForTest makes s's Settle runs call f instead of Evaluate
+// (f gets Evaluate to call through).
+// A function, not a method: the protected-account parity test lists
+// every Service method.
+func SetSettleEvalForTest(s *Service, f func(ctx context.Context, now time.Time, eval func(context.Context, time.Time) (*EvalReport, error)) (*EvalReport, error)) {
+	s.settleEval = func(ctx context.Context, now time.Time) (*EvalReport, error) { return f(ctx, now, s.Evaluate) }
+}

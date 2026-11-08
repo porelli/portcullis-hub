@@ -926,9 +926,11 @@
     return '';
   }
   // groupLink: a group name linking to its page on people.<domain>
-  // (index.html's PortcullisPeople), same tab.
+  // (index.html's PortcullisPeople), always in a new tab: following it
+  // must never drop an unsaved settings draft (the Hub's other group
+  // links stay same-tab).
   function groupLink(name) {
-    return window.PortcullisPeople ? window.PortcullisPeople.groupLink(name) : esc(name);
+    return window.PortcullisPeople ? window.PortcullisPeople.groupLink(name, false, true) : esc(name);
   }
 
   function personValue(p) {

@@ -210,6 +210,14 @@ type Service struct {
 	// across a call.
 	logoutMu      sync.Mutex
 	pendingLogout map[string]int
+	// Settle's shared runs (joinSettle): settleCur in flight, settleNext
+	// queued after it (with the context its runner gets). A leaf lock.
+	settleMu      sync.Mutex
+	settleCur     *settleRun
+	settleNext    *settleRun
+	settleNextCtx context.Context
+	// settleEval replaces Evaluate in Settle's runs (tests; nil = Evaluate).
+	settleEval func(context.Context, time.Time) (*EvalReport, error)
 	// The snapshot PreviewRule shares for previewTTL (previewSnapshot).
 	previewMu sync.Mutex
 	previewSn *snapshot
@@ -349,6 +357,12 @@ type GroupView struct {
 	// matching, protected accounts left out), sorted; admins only, nil
 	// for manual groups and in every other view.
 	Matches []string `json:"matches,omitzero"`
+	// Guarding: whether changing who is in the group can widen access
+	// (guardingGroups — administrator, permission, app admin and
+	// privileged-value groups: the Portcullis MCP's groupGuard).
+	// Administrators only; nil (absent) in every other view and when
+	// directory.yaml can't be read — absent counts as guarding.
+	Guarding *bool `json:"guarding,omitempty"`
 }
 
 // Suggestion is a group of an ENABLED app that doesn't exist yet.
@@ -593,6 +607,12 @@ func (s *Service) overview(ctx context.Context, me string, c *Caller) (*Overview
 	if !full {
 		return ov, nil
 	}
+	if gcfg := cfg; gcfg != nil || s.Store == nil {
+		if gcfg == nil {
+			gcfg = &Config{} // no store: no permissions to guard
+		}
+		markGuarding(ov.Groups, s.guardingGroups(gcfg))
+	}
 	// Suggest only groups of apps that are enabled: templates you don't use
 	// have no business in the directory.
 	seen := map[string]bool{}
@@ -612,6 +632,19 @@ func (s *Service) overview(ctx context.Context, me string, c *Caller) (*Overview
 		return ov.Suggestions[i].Group < ov.Suggestions[j].Group
 	})
 	return ov, nil
+}
+
+// markGuarding sets each group's Guarding from guarding (group names
+// compared case-insensitively, as groupGuard does).
+func markGuarding(groups []GroupView, guarding map[string]string) {
+	lower := map[string]bool{}
+	for g := range guarding {
+		lower[strings.ToLower(g)] = true
+	}
+	for i := range groups {
+		g := lower[strings.ToLower(groups[i].Name)]
+		groups[i].Guarding = &g
+	}
 }
 
 // addGroupConfig adds what directory.yaml says about groups to ov: each

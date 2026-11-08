@@ -490,22 +490,23 @@
     <script>
       // People and groups live on people.<domain> only (the Users &
       // Groups tab is a link there; old #users… deep links redirect).
-      // PortcullisPeople.base: https://people.<main domain>[:port]/ —
-      // the Hub's own host with hub. swapped for people. (the port
-      // kept), else the main domain; PEOPLE_URL overrides it (the
-      // harness, whose people listener is another port).
+      // PortcullisPeople.base: https://people.<main domain>/ — the
+      // configured domain, never the browser's host; the server's
+      // PeopleURL overrides it (the harness only, whose people listener
+      // is another port).
       (function () {
         const injected = {{.PeopleURL}};
-        const host = location.host;
-        const base = injected || ('https://people.' + (/^hub\./i.test(host) ? host.slice(4) : {{.Domain}}) + '/');
+        const base = injected || ('https://people.' + {{.Domain}} + '/');
         const href = frag => base + (frag || '');
         const groupHref = g => href('#groups/' + encodeURIComponent(String(g)));
         const esc = v => String(v == null ? '' : v).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
         // groupLink: a group name linking to its page (same tab); code
-        // wraps the name in <code>.
-        function groupLink(g, code) {
+        // wraps the name in <code>; newTab opens it in a new tab (the
+        // settings panel's links: leaving would drop an unsaved draft).
+        function groupLink(g, code, newTab) {
           const t = code ? '<code>' + esc(g) + '</code>' : esc(g);
-          return '<a class="group-link" href="' + esc(groupHref(g)) + '" title="' + esc('Open ' + g + '\'s page') + '">' + t + '</a>';
+          return '<a class="group-link" href="' + esc(groupHref(g)) + '"' + (newTab ? ' target="_blank" rel="noopener"' : '') +
+            ' title="' + esc('Open ' + g + '\'s page' + (newTab ? ' (new tab)' : '')) + '">' + t + '</a>';
         }
         window.PortcullisPeople = { base, href, groupHref, groupLink };
         document.getElementById('people-tab').href = base;

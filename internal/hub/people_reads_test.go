@@ -168,3 +168,34 @@ func TestPersonAppsEntryOnlyVia(t *testing.T) {
 		t.Errorf("values = %+v", v.Values)
 	}
 }
+
+// TestGroupUsesOptionRemoved (final review M2): a row whose key the
+// template no longer declares is listed as "(option removed)", never its
+// stored value (its type, secret or not, is unknown).
+func TestGroupUsesOptionRemoved(t *testing.T) {
+	f, _, people := privFixture(t)
+	f.h.mu.Lock()
+	ps := f.h.st.Settings["privapp"]
+	if ps.Person == nil {
+		ps.Person = map[string]state.PersonSetting{}
+	}
+	ps.Person["gone_key"] = state.PersonSetting{Default: "x", Rows: []state.GroupValue{{Group: "office_milan", GroupID: people.id("office_milan"), Value: "s3cr3t-looking"}}}
+	f.h.st.Settings["privapp"] = ps
+	f.h.mu.Unlock()
+	v, err := f.h.GroupUses(context.Background(), "office_milan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got *GroupSetting
+	for i := range v.Settings {
+		if v.Settings[i].Key == "gone_key" {
+			got = &v.Settings[i]
+		}
+		if strings.Contains(v.Settings[i].Value, "s3cr3t") {
+			t.Errorf("stored value shown: %+v", v.Settings[i])
+		}
+	}
+	if got == nil || got.Value != "(option removed)" || got.Label != "gone_key" {
+		t.Errorf("removed option = %+v (settings %+v)", got, v.Settings)
+	}
+}
