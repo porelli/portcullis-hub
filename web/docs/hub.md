@@ -143,6 +143,14 @@ an app that has already started is taken down and undone. **Images already
 downloaded are kept** (they don't carry instance data), so a stopped enable
 followed by a new enable resumes the download where it left off.
 
+Stop always names the operation the panel shows. If that one has ended and
+another admin's operation started in the meantime, the Stop is refused ("Stop
+refused: the operation changed — another one runs now (…), nothing was
+stopped") and the panel follows the new operation: press Stop again to stop
+that one. If the record of the operation shown was replaced by a newer one
+that already ended, the panel says so ("… ended — it ended before its outcome
+could be read") instead of showing the other operation's result as its own.
+
 #### Failed undo and "Stop again"
 
 If the undo itself fails, the panel shows the error, what is left to undo
