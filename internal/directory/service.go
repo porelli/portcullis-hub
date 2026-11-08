@@ -9,7 +9,10 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"log"
+	"maps"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -899,11 +902,11 @@ func (s *Service) runAs(ctx context.Context, c *Caller, perm string, action *str
 		done = err == nil
 	}
 	if s.Audit != nil {
-		e := AuditEntry{Actor: clip(c.User), Action: *action, Target: clip(target), Result: "ok", Via: clip(c.Via), Client: clip(c.Client)}
+		d := ""
 		if detail != nil {
-			e.Detail = clipN(*detail, maxAuditDetail)
+			d = *detail
 		}
-		e.Detail = c.Actor().AuditDetail(e.Detail)
+		e := auditEntryOf(c, *action, target, d)
 		var de *Error
 		switch {
 		case errors.As(err, &de) && de.Status < 500:
@@ -917,6 +920,26 @@ func (s *Service) runAs(ctx context.Context, c *Caller, perm string, action *str
 		}
 	}
 	return err
+}
+
+// auditEntryOf is the ok audit entry of c's action on target (run's
+// shape: clipped, the actor's confirmation appended).
+func auditEntryOf(c *Caller, action, target, detail string) AuditEntry {
+	e := AuditEntry{Actor: clip(c.User), Action: action, Target: clip(target), Result: "ok", Via: clip(c.Via), Client: clip(c.Client)}
+	e.Detail = c.Actor().AuditDetail(clipN(detail, maxAuditDetail))
+	return e
+}
+
+// auditAlso writes a further ok entry inside a run (e.g. an invite's
+// "added by hand" entries, audited group.exception besides user.create).
+// A failed write is logged; the run's own entry still follows.
+func (s *Service) auditAlso(c *Caller, action, target, detail string) {
+	if s.Audit == nil {
+		return
+	}
+	if err := s.Audit.Append(auditEntryOf(c, action, target, detail)); err != nil {
+		log.Printf("directory: audit %s %s: %v", action, target, err)
+	}
 }
 
 // regranted records an admin's explicit (re-)add of user to group: its
@@ -1125,6 +1148,7 @@ func (s *Service) CreateUser(ctx context.Context, c *Caller, req CreateRequest) 
 		var handAdds []Exception
 		admin := false
 		admins := s.adminGroups()
+		ruleGroups := map[string]bool{}
 		newUser := lldap.User{ID: req.Username, Email: req.Email, DisplayName: req.DisplayName, Attributes: attrs}
 		for _, name := range req.Groups {
 			g, err := sn.group(name)
@@ -1140,6 +1164,10 @@ func (s *Service) CreateUser(ctx context.Context, c *Caller, req CreateRequest) 
 				groupNames = append(groupNames, name)
 				continue
 			}
+			ruleGroups[name] = true
+			if why := s.addsBlocked(cfg, s.guardingGroups(cfg), name, cfg.Groups[name]); why != "" {
+				res.Warnings = append(res.Warnings, req.Username+" won't be added to "+name+" for now: "+why)
+			}
 			if s.wouldMatch(cfg, sn, newUser, cfg.Groups[name].Rule) {
 				detail += " matches=" + name
 				continue
@@ -1154,6 +1182,11 @@ func (s *Service) CreateUser(ctx context.Context, c *Caller, req CreateRequest) 
 			handNames = append(handNames, name)
 			handAdds = append(handAdds, Exception{User: req.Username, Reason: reason, By: c.User, Include: true, At: time.Now().UTC()})
 			detail += fmt.Sprintf(" added_by_hand=%s reason=%s", name, reason)
+		}
+		for _, k := range slices.Sorted(maps.Keys(req.Reasons)) {
+			if !ruleGroups[k] {
+				return invalid("a reason was given for %q, which is not a rule group in groups", k)
+			}
 		}
 		if req.Onboarding == OnboardInvite && !admin {
 			if err := s.invitesAvailable(); err != nil {
@@ -1172,26 +1205,6 @@ func (s *Service) CreateUser(ctx context.Context, c *Caller, req CreateRequest) 
 				return fmt.Errorf("setting the details failed, user not created: %v", err)
 			}
 			detail += changeDetail(nil, attrs)
-		}
-		if len(handAdds) > 0 {
-			for i, name := range handNames {
-				gc := cfg.Groups[name]
-				exs := []Exception{}
-				for _, ex := range gc.Exceptions {
-					if !strings.EqualFold(ex.User, req.Username) {
-						exs = append(exs, ex)
-					}
-				}
-				gc.Exceptions = append(exs, handAdds[i])
-				cfg.clearGrace(name, req.Username)
-			}
-			if err := s.saveConfig(cfg); err != nil {
-				// As with the details: no account without its entries.
-				if derr := s.LLDAP.DeleteUser(ctx, req.Username); derr != nil {
-					return fmt.Errorf("storing the \"added by hand\" entries failed (%v) and removing the new user failed too (%v): delete %s in LLDAP", err, derr, req.Username)
-				}
-				return fmt.Errorf("storing the \"added by hand\" entries failed, user not created: %w", err)
-			}
 		}
 		if cfg != nil {
 			changed := false
@@ -1217,6 +1230,23 @@ func (s *Service) CreateUser(ctx context.Context, c *Caller, req CreateRequest) 
 					return fmt.Errorf("setting the password failed (%v) and removing the new user failed too (%v): delete %s in LLDAP", err, derr, req.Username)
 				}
 				return fmt.Errorf("setting the password failed, user not created: %v", err)
+			}
+		}
+		// The "added by hand" entries: after every step that can still
+		// delete the new user (details, password), before the group adds.
+		if len(handAdds) > 0 {
+			for i, name := range handNames {
+				storeInclude(cfg, name, handAdds[i])
+			}
+			if err := s.saveConfig(cfg); err != nil {
+				// As with the details: no account without its entries.
+				if derr := s.LLDAP.DeleteUser(ctx, req.Username); derr != nil {
+					return fmt.Errorf("storing the \"added by hand\" entries failed (%v) and removing the new user failed too (%v): delete %s in LLDAP", err, derr, req.Username)
+				}
+				return fmt.Errorf("storing the \"added by hand\" entries failed, user not created: %w", err)
+			}
+			for i, name := range handNames {
+				s.auditAlso(c, "group.exception", name, exceptionDetail(handAdds[i]))
 			}
 		}
 		graceCleared := false

@@ -517,18 +517,25 @@ func (s *Service) addException(ctx context.Context, c *Caller, group string, e E
 	}
 	e.User, e.By, e.At = u.ID, c.User, now
 	*detail = exceptionDetail(e)
+	storeInclude(cfg, group, e)
+	return s.saveConfig(cfg)
+}
+
+// storeInclude puts e into the rule group's exceptions in cfg, replacing
+// the person's existing one; an include ends their grace there (granted
+// again). Nothing is saved. Despite the name it stores either kind.
+func storeInclude(cfg *Config, group string, e Exception) {
 	gc := cfg.Groups[group]
 	exs := []Exception{}
 	for _, ex := range gc.Exceptions {
-		if !strings.EqualFold(ex.User, u.ID) {
+		if !strings.EqualFold(ex.User, e.User) {
 			exs = append(exs, ex)
 		}
 	}
 	gc.Exceptions = append(exs, e)
 	if e.Include {
-		cfg.clearGrace(group, u.ID) // granted again
+		cfg.clearGrace(group, e.User)
 	}
-	return s.saveConfig(cfg)
 }
 
 // RemoveException removes user's exception from group (404 if none).

@@ -867,6 +867,9 @@ func (s *Server) registerDirectoryTools() {
 			if u := argField(args, "until"); u != "" {
 				line += " until " + q(u)
 			}
+			if r := argField(args, "reason"); r != "" {
+				line += ", reason " + q(r)
+			}
 			return s.groupConsequences(ctx, args, line+".", "")
 		}),
 		// remove_member is D from a guarding group (fix round 1 ruling).

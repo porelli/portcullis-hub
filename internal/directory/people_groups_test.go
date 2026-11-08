@@ -3,6 +3,8 @@ package directory_test
 import (
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -99,6 +101,10 @@ func TestAddMemberRuleGroupAlreadyMatching(t *testing.T) {
 	if !memberIn(e, "milan", "alice") {
 		t.Fatal("setup: alice doesn't match")
 	}
+	// Control: bob also matches, has no entry, and goes once he stops.
+	if !memberIn(e, "milan", "bob") {
+		t.Fatal("setup: bob doesn't match")
+	}
 	if err := e.svc.AddMember(ctx, asRoot, "milan", directory.MemberAdd{Username: "alice", Reason: "keeps access"}); err != nil {
 		t.Fatal(err)
 	}
@@ -106,9 +112,13 @@ func TestAddMemberRuleGroupAlreadyMatching(t *testing.T) {
 		t.Fatal("entry not stored")
 	}
 	setCity(t, e, "alice", "Rome")
+	setCity(t, e, "bob", "Rome")
 	evaluate(t, e, time.Now())
 	if !memberIn(e, "milan", "alice") {
 		t.Error("alice removed although added by hand")
+	}
+	if memberIn(e, "milan", "bob") {
+		t.Error("control: bob kept without an entry")
 	}
 	evaluate(t, e, time.Now())
 	if !memberIn(e, "milan", "alice") || includeOf(t, store, "milan", "alice") == nil {
@@ -290,5 +300,100 @@ func TestCreateUserRuleGroups(t *testing.T) {
 	// Unknown group: still 400.
 	if _, err := e.svc.CreateUser(ctx, asRoot, req("xia", []string{"nope"}, nil)); status(err) != 400 {
 		t.Errorf("unknown group = %v", err)
+	}
+}
+
+// The invite's entries are saved after every step that can still delete
+// the new user: a failed password leaves none behind.
+func TestCreateUserRuleGroupPasswordFails(t *testing.T) {
+	e, store := evalEnv(t)
+	setRule(t, store, "milan", `city = "Milan"`)
+	e.ll.FailPassword = 53
+	_, err := e.svc.CreateUser(ctx, asRoot, directory.CreateRequest{Username: "zed", Email: "zed@example.org", Groups: []string{"milan"},
+		Reasons: map[string]string{"milan": "new hire"}, Onboarding: directory.OnboardPassword, Password: "a-good-password-1"})
+	if err == nil || e.ll.HasUser("zed") {
+		t.Fatalf("err = %v, zed exists %v", err, e.ll.HasUser("zed"))
+	}
+	if ex := includeOf(t, store, "milan", "zed"); ex != nil {
+		t.Errorf("entry left behind: %+v", ex)
+	}
+}
+
+// Saving the entries fails: the new user is deleted.
+func TestCreateUserRuleGroupSaveFails(t *testing.T) {
+	e, store := evalEnv(t)
+	setRule(t, store, "milan", `city = "Milan"`)
+	dir := filepath.Dir(store.Path)
+	if err := os.Chmod(dir, 0500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0700) })
+	_, err := e.svc.CreateUser(ctx, asRoot, directory.CreateRequest{Username: "zed", Email: "zed@example.org", Groups: []string{"milan"},
+		Reasons: map[string]string{"milan": "new hire"}, Onboarding: directory.OnboardPassword, Generate: true})
+	os.Chmod(dir, 0700)
+	if err == nil || e.ll.HasUser("zed") {
+		t.Fatalf("err = %v, zed exists %v", err, e.ll.HasUser("zed"))
+	}
+	if ex := includeOf(t, store, "milan", "zed"); ex != nil {
+		t.Errorf("entry stored: %+v", ex)
+	}
+}
+
+// Each invite entry is audited as group.exception too; a reason for a
+// group that isn't a rule group in groups is refused, named.
+func TestCreateUserRuleGroupAuditAndReasons(t *testing.T) {
+	e, store := evalEnv(t)
+	setRule(t, store, "milan", `city = "Milan"`)
+	e.ll.AddGroup("temps")
+	req := func(user string, groups []string, reasons map[string]string) directory.CreateRequest {
+		return directory.CreateRequest{Username: user, Email: user + "@example.org", Groups: groups, Reasons: reasons,
+			Onboarding: directory.OnboardPassword, Generate: true}
+	}
+	for _, c := range []struct {
+		reasons map[string]string
+		name    string
+	}{
+		{map[string]string{"milan": "x", "temps": "y"}, "temps"}, // manual group
+		{map[string]string{"milan": "x", "rome": "y"}, "rome"},   // not in groups
+	} {
+		_, err := e.svc.CreateUser(ctx, asRoot, req("zed", []string{"milan", "temps"}, c.reasons))
+		if status(err) != 400 || !strings.Contains(errMsg(err), `"`+c.name+`"`) {
+			t.Errorf("reasons %v = %v", c.reasons, err)
+		}
+		if e.ll.HasUser("zed") {
+			t.Fatal("refused create created zed")
+		}
+	}
+	if _, err := e.svc.CreateUser(ctx, asRoot, req("zed", []string{"milan", "temps"}, map[string]string{"milan": "new hire"})); err != nil {
+		t.Fatal(err)
+	}
+	ex := includeOf(t, store, "milan", "zed")
+	a := newestAudit(t, e, "group.exception")
+	if ex == nil || a.Result != "ok" || a.Target != "milan" || a.Actor != "root" || a.Detail != "add user=zed include=true until=never reason=new hire" {
+		t.Errorf("entry %+v, audit %+v", ex, a)
+	}
+	if a := newestAudit(t, e, "user.create"); a.Result != "ok" || !strings.Contains(a.Detail, "added_by_hand=milan reason=new hire") {
+		t.Errorf("user.create audit = %+v", a)
+	}
+}
+
+// An invitee who matches a rule group whose adds are blocked is told so.
+func TestCreateUserBlockedRuleGroupWarns(t *testing.T) {
+	e, store := evalEnv(t)
+	e.ll.AddGroup("fresh")
+	setRule(t, store, "fresh", `city is empty`)
+	cfg, _ := store.Load()
+	cfg.Permissions[directory.PermInvite] = "fresh" // a guarding group on a field delegates edit
+	if err := store.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	res, err := e.svc.CreateUser(ctx, asRoot, directory.CreateRequest{Username: "yan", Email: "yan@example.org", Groups: []string{"fresh"},
+		Onboarding: directory.OnboardPassword, Generate: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := strings.Join(res.Warnings, "\n")
+	if !strings.Contains(w, "yan won't be added to fresh for now: fresh is the invite permission group") {
+		t.Errorf("warnings = %q", w)
 	}
 }
