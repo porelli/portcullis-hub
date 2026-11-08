@@ -36,6 +36,7 @@ import (
 	"github.com/portcullis/hub/internal/freshauth"
 	"github.com/portcullis/hub/internal/hub"
 	"github.com/portcullis/hub/internal/keycloak"
+	"github.com/portcullis/hub/internal/lldap"
 	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/state"
 
@@ -123,7 +124,10 @@ import (
 //
 // The directory: root (admin), dana, alice, bob, carol, dave, erin and
 // user01-user55; groups office_milan (alice, bob, erin), it_staff (bob,
-// user07), helpers, and the fixtures' access and admin groups.
+// user07), helpers, and the fixtures' access and admin groups. The group
+// pages (seedGroupPages): office_milan rule-based with every row state,
+// it_staff with an end date and the remove permission (bob a delegate);
+// POST /harness/lldap/flaky fails the next change's apply.
 func TestHarness(t *testing.T) {
 	addr := os.Getenv("HUB_HARNESS_ADDR")
 	if addr == "" {
@@ -244,13 +248,18 @@ func TestHarness(t *testing.T) {
 	seedFolders(t, h, disk)
 	fa := seedFileSharing(t, h, paddr)
 	hfa := seedConfirmations(t, h, addr, paddr)
+	flaky := seedGroupPages(t, e)
 
 	d, err := time.ParseDuration(os.Getenv("HUB_HARNESS_FOR"))
 	if err != nil {
 		d = 30 * time.Minute
 	}
-	handler := harnessDelayed(e.hub.Config.Handler)
+	handler := flaky.wrap(harnessDelayed(e.hub.Config.Handler))
 	mux := http.NewServeMux()
+	mux.HandleFunc("POST /harness/lldap/flaky", func(w http.ResponseWriter, r *http.Request) {
+		flaky.next.Store(true)
+		fmt.Fprintln(w, "LLDAP is down while the next directory change is applied")
+	})
 	mux.HandleFunc("POST /harness/hook/fix", func(w http.ResponseWriter, r *http.Request) {
 		eng.hookOK.Store(true)
 		fmt.Fprintln(w, "hook apply now exits 0")
@@ -277,7 +286,7 @@ func TestHarness(t *testing.T) {
 	if puser == "" {
 		puser = "alice"
 	}
-	people := e.ppl.Config.Handler
+	people := flaky.wrap(e.ppl.Config.Handler)
 	psrv := &http.Server{Addr: paddr, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/harness/authorize" {
 			fa.authorizePage(w, r)
@@ -1220,4 +1229,82 @@ func seedAI(h *hub.Hub) {
 		"bob": {{Client: keycloak.AIClientIDs.Claude, Consented: at(-time.Hour), LastUsed: at(-time.Hour), Expires: at(29 * 24 * time.Hour)}},
 	}})
 	h.SetAIClientHealth(map[string]bool{keycloak.AIClientIDs.Claude: true, keycloak.AIClientIDs.ClaudeCode: true, keycloak.AIClientIDs.Generic: true})
+}
+
+// seedGroupPages sets up the group pages (people & groups Task 5):
+//
+//   - office_milan becomes rule-based (office = "Milan", office a list
+//     field): alice matches; bob matches and is added by hand too ("also
+//     matches the rule"); dave is added by hand with an end; carol
+//     matches and is kept out; erin, put back by hand in LLDAP after the
+//     rule ran, is "not explained by the rule".
+//   - it_staff (manual) has user07 with an end, and holds the "remove"
+//     permission (bob is a delegate: the read-only view).
+//
+// The background evaluator doesn't run here: the rule group is evaluated
+// once after its conversion. POST /harness/lldap/flaky makes LLDAP
+// unreachable while the next directory change is applied (its answer:
+// applied false), and back right after.
+func seedGroupPages(t *testing.T, e *instEnv) *harnessFlaky {
+	t.Helper()
+	p := e.ppl
+	mustDo(t, p, "root", "POST", "/api/directory/fields", `{"name":"office","label":"Office","kind":"list","values":["Milan","Turin"]}`, 200)
+	for u, office := range map[string]string{"alice": "Milan", "bob": "Milan", "carol": "Milan", "dave": "Turin", "erin": "Turin"} {
+		mustDo(t, p, "root", "PUT", "/api/directory/users/"+u+"/details", `{"attrs":{"office":["`+office+`"]}}`, 200)
+	}
+	rule := `office = "Milan"`
+	b := mustDo(t, p, "root", "POST", "/api/directory/groups/office_milan/convert-preview", `{"rule":`+strconvQuote(rule)+`}`, 200)
+	var prev directory.ConvertPreview
+	if err := json.Unmarshal([]byte(b), &prev); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(map[string]any{"rule": rule, "keep": []string{}, "preview": prev})
+	mustDo(t, p, "root", "POST", "/api/directory/groups/office_milan/convert", string(body), 200)
+	if _, err := e.s.Directory.Evaluate(context.Background(), time.Now().UTC()); err != nil {
+		t.Fatalf("evaluating the rule groups: %v", err)
+	}
+	until := time.Now().UTC().Add(21 * 24 * time.Hour).Format(time.RFC3339)
+	mustDo(t, p, "root", "POST", "/api/directory/groups/office_milan/members", `{"username":"bob","reason":"moving to Turin in December"}`, 200)
+	mustDo(t, p, "root", "POST", "/api/directory/groups/office_milan/members", `{"username":"dave","reason":"contractor on the Milan project","until":"`+until+`"}`, 200)
+	mustDo(t, p, "root", "POST", "/api/directory/groups/office_milan/exceptions", `{"user":"carol","include":false,"reason":"on leave"}`, 200)
+	end := time.Now().UTC().Add(10 * 24 * time.Hour).Format(time.RFC3339)
+	mustDo(t, p, "root", "PUT", "/api/directory/groups/it_staff/members/user07/expiry", `{"until":"`+end+`"}`, 200)
+	mustDo(t, p, "root", "PUT", "/api/directory/permissions/remove", `{"group":"it_staff"}`, 200)
+	// Last: no later change may evaluate erin out again.
+	e.ll.AddMember("office_milan", "erin")
+	return &harnessFlaky{cred: filepath.Join(e.s.Directory.LLDAP.(*lldap.Client).CredentialsDir, "password"), s: e.s}
+}
+
+func strconvQuote(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
+}
+
+// harnessFlaky takes LLDAP away (its service password file renamed)
+// while the next directory change settles, and gives it back once that
+// request is answered.
+type harnessFlaky struct {
+	cred string
+	s    *Server
+	next atomic.Bool // the next Settle runs with LLDAP down
+	down atomic.Bool
+	once sync.Once
+}
+
+func (f *harnessFlaky) wrap(h http.Handler) http.Handler {
+	f.once.Do(func() {
+		f.s.callHook = func(method string, _ ...any) {
+			if method == "Settle" && f.next.CompareAndSwap(true, false) {
+				if err := os.Rename(f.cred, f.cred+".off"); err == nil {
+					f.down.Store(true)
+				}
+			}
+		}
+	})
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h.ServeHTTP(w, r)
+		if f.down.CompareAndSwap(true, false) {
+			_ = os.Rename(f.cred+".off", f.cred)
+		}
+	})
 }

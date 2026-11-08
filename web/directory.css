@@ -106,24 +106,32 @@
 .pd-memberships { list-style: none; padding: 0; margin: 0 0 0.5rem; }
 .pd-memberships li { padding: 0.25rem 0; border-bottom: 1px dashed #334155; }
 
-/* groups */
-.pd-newgroup { margin-bottom: 1rem; }
-.pd-newgroup input { width: 22rem; }
-.pd-missing { border-color: #f59e0b55; }
-.pd-suggestion { display: flex; align-items: center; gap: 0.75rem; padding: 0.375rem 0; border-top: 1px dashed #334155; }
-.pd-suggestion:first-of-type { border-top: none; }
-.pd-suggestion .pd-muted { flex: 1; }
-.pd-group { background: #1e293b; border: 1px solid transparent; border-radius: 0.5rem; margin-bottom: 0.5rem; }
-.pd-group.open { border-color: #334155; }
-.pd-group-head { width: 100%; display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; background: none; border: none; color: inherit; font: inherit; text-align: left; padding: 0.75rem 1rem; cursor: pointer; border-radius: 0.5rem; }
-.pd-group-head:hover { background: #26334a; }
-.pd-caret { color: #64748b; width: 0.75rem; }
-.pd-gname { font-weight: 600; }
-.pd-rulebadge { color: #facc15; font-size: 0.8125rem; max-width: 32rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.pd-group-body { padding: 0 1rem 1rem 2.5rem; }
-.pd-rule-text code { white-space: pre-wrap; }
-.pd-expired td { opacity: 0.6; }
-.pd-exform .pd-grid { margin-bottom: 0.5rem; }
+/* groups: the list and a group's page */
+.pd-a { color: #60a5fa; text-decoration: none; }
+.pd-a:hover { text-decoration: underline; }
+a.pd-link { text-decoration: none; }
+.pd-right { text-align: right; }
+.pd-crumb { font-size: 0.75rem; color: #64748b; margin-bottom: 0.5rem; }
+.pd-gp-head { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.pd-gp-head .pd-pill { margin: 0; }
+.pd-gp-name { font-size: 1.125rem; font-weight: 600; margin: 0; color: #f1f5f9; }
+.pd-gp-sub { color: #94a3b8; font-size: 0.8125rem; margin: 0.25rem 0 0.5rem; }
+.pd-gp-rule { display: flex; align-items: center; gap: 0.375rem; flex-wrap: wrap; margin-bottom: 1rem; }
+.pd-gp-rule code { white-space: pre-wrap; }
+.pd-gp-people td { vertical-align: middle; }
+.pd-gp-people td .pd-btn + .pd-btn { margin-left: 0.375rem; }
+.pd-gp-state { color: #cbd5e1; font-size: 0.8125rem; margin-left: 0.25rem; }
+.pd-gp-add { background: #1e293b; border: 1px solid #334155; border-radius: 0.5rem; padding: 0.5rem 0.875rem 0.75rem; margin-top: 0.75rem; }
+.pd-gp-add .pd-h4 { margin-top: 0.25rem; }
+.pd-gp-picks { display: flex; flex-wrap: wrap; gap: 0.375rem; margin-bottom: 0.375rem; }
+.pd-gp-picks:empty { display: none; }
+.pd-pick { display: inline-flex; align-items: center; gap: 0.25rem; background: #0f172a; border: 1px solid #334155; border-radius: 9999px; padding: 0.0625rem 0.25rem 0.0625rem 0.625rem; font-size: 0.75rem; }
+.pd-pick-x { background: none; border: none; color: #94a3b8; cursor: pointer; font: inherit; padding: 0 0.25rem; border-radius: 9999px; }
+.pd-pick-x:hover { color: #fff; background: #334155; }
+.pd-uses, .pd-hist { list-style: none; margin: 0 0 0.75rem; padding: 0; }
+.pd-uses li, .pd-hist li { padding: 0.3125rem 0; border-top: 1px solid #1e293b; }
+.pd-uses li:first-child, .pd-hist li:first-child { border-top: none; }
+.pd-hist .pd-pill { margin: 0 0 0 0.25rem; }
 
 /* rule editor */
 .pd-re { background: #0f172a; border: 1px solid #334155; border-radius: 0.5rem; padding: 0.75rem; }

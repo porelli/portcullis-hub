@@ -187,6 +187,18 @@ func (s *Server) RemoveMember(group, user string) {
 	}
 }
 
+// AddMember adds user to group behind the Hub's back (as the LLDAP UI
+// would).
+func (s *Server) AddMember(group, user string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, g := range s.Groups {
+		if g.Name == group {
+			g.Members[user] = true
+		}
+	}
+}
+
 // HasGroup reports whether a group exists.
 func (s *Server) HasGroup(name string) bool { return s.GroupMembers(name) != nil }
 

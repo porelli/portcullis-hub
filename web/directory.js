@@ -112,8 +112,13 @@
   let tab = 'people';
   let search = '';
   let orgField = '';
-  const openGroups = new Set();
-  let imp = null;            // import review state
+  let groupPage = null;      // the group whose page is shown (#groups/<name>), or null: the list
+  let gsearch = '';          // the groups list's search
+  let pick = { group: null, users: [], reason: '', until: '' }; // a group page's Add people form
+  let pageNote = null;       // {group, text}: the last save there wasn't applied yet
+  let extras = { group: null }; // the page's Used by and History (admins)
+  let extrasSeq = 0;
+  let imp = null;           // import review state
   let dialogClose = null;    // cleanup of the open dialog
   let extraTabs = [];        // options.extraTabs that passed the checks
   const BUILTIN_TABS = ['people', 'groups', 'org', 'setup'];
@@ -271,6 +276,7 @@
     main.hidden = false;
     if (options.onUser) options.onUser(me.user);
     renderAll();
+    if (tab === 'groups' && groupPage) refreshExtras();
   }
   function showOff(html, trusted) {
     const off = root.querySelector('.pd-off');
@@ -305,7 +311,6 @@
       if (on && focus) b.focus();
     });
     root.querySelectorAll('.pd-panel').forEach(p => { p.hidden = p.dataset.panel !== name; });
-    if (options.hashTabs) history.replaceState(null, '', name === 'people' ? location.pathname : '#' + name);
     if (name === 'setup' && isAdmin()) loadAudit();
     const x = extraTabs.find(t => t.id === name);
     if (x) {
@@ -1045,136 +1050,506 @@
   };
 
   // ── Groups ──────────────────────────────────────────────
+  // Two views on one tab, both hash routes on both listeners: #groups (the
+  // list) and #groups/<name> (a group's page, the only place membership
+  // changes). Back and forward move between them (hashchange → onHash).
+  function parseRoute(h) {
+    const m = /^#groups(?:\/(.+))?$/.exec(h || '');
+    if (!m) return null;
+    if (!m[1]) return { group: null };
+    try { return { group: decodeURIComponent(m[1]) }; } catch (_) { return { group: null }; }
+  }
+  const groupHash = name => name ? '#groups/' + enc(name) : '#groups';
+  function setHash(h, push) {
+    if (location.hash === h || (!h && !location.hash)) return;
+    const url = h || location.pathname + location.search;
+    if (push) history.pushState(null, '', url); else history.replaceState(null, '', url);
+  }
+  // applyRoute shows the list or a group's page (before the first load
+  // only the state is set: load renders it).
+  function applyRoute(r) {
+    groupPage = r.group;
+    tab = 'groups';
+    if (!dir) return;
+    renderGroups();
+    selectTab('groups', false);
+    if (groupPage) refreshExtras();
+  }
+  function onHash() {
+    if (!root) return;
+    const r = parseRoute(location.hash);
+    if (r) {
+      if (r.group !== groupPage || tab !== 'groups') applyRoute(r);
+      return;
+    }
+    if (!dir) return;
+    if (options.hashTabs) {
+      const t = location.hash.slice(1) || 'people';
+      if (BUILTIN_TABS.includes(t) || extraTabs.some(x => x.id === t)) { groupPage = null; selectTab(t, false); }
+    } else if (location.hash === '#users' && tab === 'groups') {
+      groupPage = null;
+      selectTab('people', false);
+    }
+  }
+  // userSelectTab: a tab picked by the user. Groups always opens the
+  // list; leaving a group route pushes a history entry so Back returns.
+  function userSelectTab(name, focus) {
+    const fromGroups = !!parseRoute(location.hash);
+    if (name === 'groups') {
+      groupPage = null;
+      renderGroups();
+      selectTab('groups', focus);
+      setHash('#groups', true);
+      return;
+    }
+    selectTab(name, focus);
+    if (options.hashTabs) setHash(name === 'people' ? '' : '#' + name, fromGroups);
+    else if (fromGroups) setHash('#users', true);
+  }
+  // openGroup (Tasks 6 and 7): the group's page, with people already
+  // picked in its Add people form.
+  function openGroup(name, opts) {
+    name = String(name || '');
+    if (!name) return;
+    const pre = opts && Array.isArray(opts.preselect) ? opts.preselect.map(String) : [];
+    pick = { group: name, users: pre, reason: '', until: '' };
+    const h = groupHash(name);
+    if (location.hash === h) { if (root) applyRoute({ group: name }); return; }
+    location.hash = h; // hashchange routes it (the Hub page into its Users tab)
+  }
+
+  // Links into the Hub's app settings (admins only). people.<domain> has
+  // no app pages: its links go to hub.<domain>, in a new tab.
+  function hubLink(frag, text, title) {
+    if (options.listener === 'hub') return '<a class="pd-a" href="' + esc(frag) + '"' + (title ? ' title="' + esc(title) + '"' : '') + '>' + esc(text) + '</a>';
+    const domain = location.host.split('.').slice(1).join('.');
+    return '<a class="pd-a" href="' + esc('https://hub.' + domain + '/' + frag) + '" target="_blank" rel="noopener noreferrer" title="' +
+      esc((title ? title + ' · ' : '') + 'opens the Hub') + '">' + esc(text) + ' <span aria-hidden="true">↗</span></a>';
+  }
+  const appFrag = (id, key) => '#app/' + enc(id) + '/settings' + (key ? '/' + enc(key) : '');
+
+  function groupKind(g) { return g.builtin ? 'built-in' : g.rule ? 'rule-based' : 'manual'; }
+  function kindPill(g) {
+    const k = groupKind(g);
+    return '<span class="pd-pill ' + (k === 'rule-based' ? 'info' : k === 'manual' ? 'ok' : '') + '">' + esc(k) + '</span>';
+  }
+  function givesAccess(g, links) {
+    if (g.name === 'lldap_admin') return 'everything (administrators)';
+    const apps = (g.used_by || []).map(id => links ? hubLink(appFrag(id), id) : esc(id));
+    if (g.admin && !apps.length) return 'administrators';
+    return apps.length ? apps.join(', ') : '<span class="pd-muted">—</span>';
+  }
+
   function renderGroups() {
+    const box = root.querySelector('.pd-groups');
+    if (groupPage) { box.innerHTML = groupPageHtml(groupPage); renderExtras(); return; }
+    let h = '<div class="pd-toolbar"><label class="pd-sr" for="pd-gsearch">Search groups</label>' +
+      '<input type="search" id="pd-gsearch" placeholder="search groups…" autocomplete="off" value="' + esc(gsearch) + '"><span class="pd-gcount pd-muted"></span><span class="pd-spacer"></span>';
+    if (isAdmin()) {
+      h += '<form class="pd-inline" data-form="new-group"><label for="pd-ng-name" class="pd-sr">New group name</label>' +
+        '<input type="text" id="pd-ng-name" placeholder="e.g. users_myapp" autocomplete="off"><button type="submit" class="pd-btn primary sm">New group</button></form>';
+    }
+    box.innerHTML = h + '</div><div class="pd-scroll pd-glist"></div>';
+    renderGroupTable();
+  }
+  function renderGroupTable() {
+    const box = root.querySelector('.pd-glist');
+    if (!box) return;
+    const q = gsearch.trim().toLowerCase();
+    const all = groups();
+    const list = all.filter(g => !q || g.name.toLowerCase().includes(q) || (g.used_by || []).some(a => a.toLowerCase().includes(q)));
     const admin = isAdmin();
-    let h = '';
-    const sugg = (admin && dir.suggestions) || [];
-    if (sugg.length) {
-      h += '<div class="pd-card pd-missing"><h3 class="pd-h3">Missing groups</h3><p class="pd-muted">Apps you enabled grant access through a group that doesn\'t exist yet, so nobody can use them until you create it and add members.</p>';
-      for (const g of sugg) {
-        const app = esc(g.app_name || g.app);
-        h += '<div class="pd-suggestion"><code>' + esc(g.group) + '</code><span class="pd-muted">' +
-          (g.kind === 'admin' ? 'Members become ' + app + ' administrators' : 'Members can sign in to ' + app) + '</span>' +
-          '<button type="button" class="pd-btn primary sm" data-act="create-group" data-group="' + esc(g.group) + '">Create</button></div>';
-      }
-      h += '</div>';
+    let h = '<table class="pd-table"><thead><tr><th scope="col">Group</th><th scope="col">Kind</th><th scope="col">People</th><th scope="col">Gives access to</th></tr></thead><tbody>';
+    for (const g of list) {
+      h += '<tr class="pd-row pd-grow" data-group="' + esc(g.name) + '"><td><a class="pd-link pd-mono" href="' + esc(groupHash(g.name)) + '">' + esc(g.name) + '</a></td>' +
+        '<td>' + kindPill(g) + '</td><td>' + esc((g.members || []).length) + '</td><td>' + givesAccess(g, admin) + '</td></tr>';
     }
-    if (admin) {
-      h += '<form class="pd-inline pd-newgroup" data-form="new-group"><label for="pd-ng-name" class="pd-sr">New group name</label>' +
-        '<input type="text" id="pd-ng-name" placeholder="New group, e.g. users_myapp" autocomplete="off"><button type="submit" class="pd-btn primary sm">Create group</button></form>';
-    }
-    for (const g of groups()) h += groupCard(g, admin);
-    if (!groups().length) h += '<p class="pd-muted">No groups yet.</p>';
-    root.querySelector('.pd-groups').innerHTML = h;
+    if (!list.length) h += '<tr><td colspan="4" class="pd-muted">' + (q ? 'No group matches.' : 'No groups yet.') + '</td></tr>';
+    box.innerHTML = h + '</tbody></table>';
+    root.querySelector('.pd-gcount').textContent = q ? list.length + ' of ' + all.length : plural(all.length, 'group');
   }
 
-  function groupCard(g, admin) {
-    const open = openGroups.has(g.name);
+  // ── a group's page ──────────────────────────────────────
+  // People rows. Rule group (admins): from members, matches and the
+  // entries; manual group: members with their ends; anyone else: names.
+  function ruleRows(g) {
     const members = g.members || [];
-    const bodyId = uid('pd-g-');
-    let h = '<div class="pd-group' + (open ? ' open' : '') + '"><button type="button" class="pd-group-head" data-act="toggle-group" data-group="' + esc(g.name) + '" aria-expanded="' + (open ? 'true' : 'false') + '" aria-controls="' + esc(bodyId) + '">' +
-      '<span class="pd-caret" aria-hidden="true">' + (open ? '▾' : '▸') + '</span><span class="pd-mono pd-gname">' + esc(g.name) + '</span>';
-    h += g.rule ? '<span class="pd-rulebadge" title="Rule-based: membership is computed">⚡ <code>' + esc(g.rule.text) + '</code></span>' : '<span class="pd-pill">Manual</span>';
-    h += '<span class="pd-muted">' + esc(plural(members.length, 'member')) + (g.builtin ? ' · built-in' : '') + (g.admin ? ' · administrator group' : '') +
-      ((g.used_by || []).length ? ' · grants ' + g.used_by.map(esc).join(', ') : '') + '</span></button>';
-    if (!open) return h + '</div>';
-    h += '<div class="pd-group-body" id="' + esc(bodyId) + '">';
-    if (g.adds_blocked) h += '<div class="pd-warn">' + esc(g.adds_blocked) + '</div>';
-    if (g.rule) h += ruleGroupBody(g, admin);
-    else h += manualGroupBody(g, admin);
-    if (admin) {
-      h += '<div class="pd-actions">';
-      if (!g.rule && g.rule_allowed) h += '<button type="button" class="pd-btn secondary sm" data-act="convert-open" data-group="' + esc(g.name) + '">Make rule-based…</button>';
-      if (g.rule) {
-        h += '<button type="button" class="pd-btn secondary sm" data-act="rule-open" data-group="' + esc(g.name) + '">Edit rule…</button>';
-        h += '<button type="button" class="pd-btn secondary sm" data-act="make-manual" data-group="' + esc(g.name) + '">Make manual</button>';
+    const matches = g.matches || [];
+    const ex = g.exceptions || [];
+    const names = Array.from(new Set(members.concat(matches, ex.map(e => e.user)))).sort();
+    return names.map(u => {
+      const e = ex.find(x => x.user === u);
+      const inLL = members.includes(u), match = matches.includes(u);
+      const acct = userByName(u);
+      const r = { user: u, state: '', tags: '', note: '', acts: [] };
+      if (e && e.include) {
+        r.tags = '<span class="pd-pill warn">added by hand</span>' + (match ? '<span class="pd-pill info">also matches the rule</span>' : '');
+        r.state = (e.until ? (e.expired ? 'ended ' : 'until ') + esc(fmtDate(e.until)) + ' · ' : '') + '“' + esc(e.reason) + '”';
+        if (match) r.note = '⚠ keeps access if they stop matching';
+        if (!e.expired && !inLL) r.note = (r.note ? r.note + ' · ' : '') + 'not in the group yet';
+        r.acts = [['gp-end', 'Change end'], ['gp-remove', 'Remove']];
+      } else if (e) {
+        r.tags = '<span class="pd-pill bad">kept out</span>';
+        r.state = (e.until ? (e.expired ? 'ended ' : 'until ') + esc(fmtDate(e.until)) + ' · ' : '') + '“' + esc(e.reason) + '”';
+        if (inLL && !e.expired) r.note = 'still in until the next sync';
+        r.acts = [['gp-letin', 'Let back in']];
+      } else if (match) {
+        r.tags = '<span class="pd-pill info">matches the rule</span>';
+        if (!inLL) r.note = 'joins at the next sync';
+        r.acts = [['gp-keepout', 'Keep out…']];
+      } else if (acct && acct.protected) {
+        r.tags = '<span class="pd-pill">protected account</span>';
+        r.note = 'the rules leave it as it is';
+      } else {
+        r.tags = '<span class="pd-pill warn">not explained by the rule</span>';
+        r.note = 'leaves at the next sync';
       }
-      if (!g.builtin) h += '<button type="button" class="pd-btn danger sm" data-act="delete-group" data-group="' + esc(g.name) + '">Delete group</button>';
-      h += '</div>';
-    }
-    return h + '</div></div>';
+      return r;
+    });
   }
-
-  function manualGroupBody(g, admin) {
-    const members = g.members || [];
+  function manualRows(g) {
     const expiry = g.expiry || {};
-    let h = '';
-    if (!members.length) h += '<p class="pd-muted">No members.</p>';
+    return (g.members || []).map(u => {
+      const until = expiry[u];
+      const r = { user: u, tags: '<span class="pd-pill ok">member</span>', state: until ? 'until ' + esc(fmtDate(until)) : '', note: '', acts: [] };
+      if (!memberLocked(g, u)) r.acts = (g.name === 'lldap_admin' ? [] : [['gp-end', 'Change end']]).concat([['gp-remove', 'Remove']]);
+      return r;
+    });
+  }
+  function personCell(u) {
+    const p = userByName(u);
+    return '<button type="button" class="pd-link pd-mono" data-act="open-user" data-user="' + esc(u) + '">' + esc(u) + '</button>' +
+      (p && p.display_name ? ' <span class="pd-muted">' + esc(p.display_name) + '</span>' : '');
+  }
+
+  function groupPageHtml(name) {
+    const g = groupByName(name);
+    let h = '<nav class="pd-crumb" aria-label="Breadcrumb"><a class="pd-a" href="#groups">Groups</a> › <span class="pd-mono">' + esc(name) + '</span></nav>';
+    if (!g) return h + '<p class="pd-muted">There is no group named <span class="pd-mono">' + esc(name) + '</span>.</p>';
+    const admin = isAdmin();
+    h += '<div class="pd-gp-head"><h2 class="pd-gp-name pd-mono">' + esc(g.name) + '</h2>' + kindPill(g) + (g.admin ? '<span class="pd-pill info">administrator group</span>' : '') + '</div>';
+    h += '<p class="pd-gp-sub">Gives access to ' + givesAccess(g, admin) + '</p>';
+    if (g.rule) {
+      h += '<div class="pd-gp-rule"><span class="pd-muted">Rule:</span> <code>' + esc(g.rule.text) + '</code>';
+      if (admin) h += ' <button type="button" class="pd-btn secondary xs" data-act="rule-open" data-group="' + esc(g.name) + '">Edit rule…</button>' +
+        '<button type="button" class="pd-btn ghost xs" data-act="make-manual" data-group="' + esc(g.name) + '">Make manual</button>';
+      h += '</div>';
+    } else if (admin && g.rule_allowed) {
+      h += '<div class="pd-gp-rule"><span class="pd-muted">Manual: people are added and removed here.</span> <button type="button" class="pd-btn secondary xs" data-act="convert-open" data-group="' + esc(g.name) + '">Make rule-based…</button></div>';
+    }
+    if (g.adds_blocked) h += '<div class="pd-warn">' + esc(g.adds_blocked) + '</div>';
+    if (pageNote && pageNote.group === g.name) h += '<div class="pd-warn" role="status">' + esc(pageNote.text) + '</div>';
+
+    // People
+    const rows = !admin ? (g.members || []).map(u => ({ user: u, tags: '', state: !g.rule && (g.expiry || {})[u] ? 'until ' + esc(fmtDate(g.expiry[u])) : '', note: '', acts: [] }))
+      : g.rule ? ruleRows(g) : manualRows(g);
+    h += '<section class="pd-sec" aria-labelledby="pd-gp-people"><h3 class="pd-h3" id="pd-gp-people">People (' + esc((g.members || []).length) + ')</h3>';
+    if (!rows.length) h += '<p class="pd-muted">' + (g.rule ? 'Nobody matches yet.' : 'No members.') + '</p>';
     else {
-      h += '<table class="pd-table"><thead><tr><th scope="col">Member</th><th scope="col">Until</th>' + (admin ? '<th scope="col"><span class="pd-sr">Actions</span></th>' : '') + '</tr></thead><tbody>';
-      for (const m of members) {
-        const locked = memberLocked(g, m);
-        const until = expiry[m];
-        h += '<tr><td class="pd-mono">' + esc(m) + '</td><td>' + (until ? esc(fmtTime(until)) : '<span class="pd-muted">no end</span>') + '</td>';
+      h += '<table class="pd-table pd-gp-people"><tbody>';
+      for (const r of rows) {
+        h += '<tr data-user="' + esc(r.user) + '"><td class="pd-nowrap">' + personCell(r.user) + '</td><td>' + r.tags + (r.state ? '<span class="pd-gp-state">' + r.state + '</span>' : '') +
+          (r.note ? '<div class="pd-muted pd-small">' + esc(r.note) + '</div>' : '') + '</td>';
         if (admin) {
-          h += '<td>';
-          if (!locked && g.name !== 'lldap_admin') {
-            const id = uid('pd-exp-');
-            h += '<span class="pd-inline"><label for="' + id + '" class="pd-sr">Membership of ' + esc(m) + ' ends at (local time)</label><input type="datetime-local" id="' + id + '" value="' + esc(toLocalInput(until)) + '">' +
-              '<button type="button" class="pd-btn ghost xs" data-act="set-expiry" data-group="' + esc(g.name) + '" data-user="' + esc(m) + '" data-input="' + id + '">Set end</button>' +
-              (until ? '<button type="button" class="pd-btn ghost xs" data-act="clear-expiry" data-group="' + esc(g.name) + '" data-user="' + esc(m) + '">No end</button>' : '') + '</span>';
-          }
-          if (!locked) h += '<button type="button" class="pd-btn danger xs" data-act="remove-member" data-group="' + esc(g.name) + '" data-user="' + esc(m) + '">Remove</button>';
-          h += '</td>';
+          h += '<td class="pd-nowrap pd-right">' + r.acts.map(([a, l]) => '<button type="button" class="pd-btn ' + (a === 'gp-remove' ? 'danger' : 'ghost') + ' xs" data-act="' + a +
+            '" data-group="' + esc(g.name) + '" data-user="' + esc(r.user) + '">' + esc(l) + '</button>').join('') + '</td>';
         }
         h += '</tr>';
       }
       h += '</tbody></table>';
     }
+    if (admin) h += addPeopleHtml(g);
+    h += '</section>';
     if (admin) {
-      const cand = users().filter(u => !u.protected && !members.includes(u.username));
-      if (cand.length) {
-        const sid = uid('pd-add-'), eid = uid('pd-addexp-');
-        h += '<div class="pd-inline"><label for="' + sid + '" class="pd-sr">Person to add</label><select id="' + sid + '">' + cand.map(u => '<option value="' + esc(u.username) + '">' + esc(u.username) +
-          (u.display_name ? ' (' + esc(u.display_name) + ')' : '') + '</option>').join('') + '</select>' +
-          (g.name !== 'lldap_admin' ? '<label for="' + eid + '">until (optional)</label><input type="datetime-local" id="' + eid + '">' : '') +
-          '<button type="button" class="pd-btn secondary sm" data-act="add-member" data-group="' + esc(g.name) + '" data-select="' + sid + '" data-input="' + eid + '">Add member</button></div>';
-      }
+      h += '<section class="pd-sec" aria-labelledby="pd-gp-uses-h"><h3 class="pd-h3" id="pd-gp-uses-h">Used by</h3><div class="pd-gp-uses"><p class="pd-muted">Loading…</p></div></section>';
+      h += '<section class="pd-sec" aria-labelledby="pd-gp-hist-h"><div class="pd-head"><h3 class="pd-h3" id="pd-gp-hist-h">History</h3>' +
+        '<button type="button" class="pd-btn ghost xs" data-act="gp-hist-reload">Refresh</button></div><div class="pd-gp-hist"><p class="pd-muted">Loading…</p></div></section>';
     }
     return h;
   }
 
-  function ruleGroupBody(g, admin) {
-    const members = g.members || [];
-    const ex = g.exceptions || [];
-    let h = '<p class="pd-rule-text"><span class="pd-muted">Rule:</span> <code>' + esc(g.rule.text) + '</code></p>';
-    h += '<h4 class="pd-h4">Members (' + members.length + ')</h4>';
-    h += members.length ? '<div>' + members.map(m => {
-      const u = userByName(m);
-      const ms = ((u && u.memberships) || []).find(x => x.group === g.name);
-      const how = ms ? ms.how : '';
-      if (how === 'exception') {
-        return '<span class="pd-pill" title="' + esc('exception: ' + (ms.reason || '') + (ms.until ? ' (until ' + fmtTime(ms.until) + ')' : '')) + '">' + esc(m) + ' ✱</span>';
+  // Add people: a multi-pick (chips), an optional end, a reason on rule
+  // groups. pick keeps the form across redraws.
+  function pickCandidates(g) {
+    const has = g.rule ? new Set((g.exceptions || []).filter(e => e.include).map(e => e.user)) : new Set(g.members || []);
+    return users().filter(u => !u.protected && !has.has(u.username));
+  }
+  function addPeopleHtml(g) {
+    if (pick.group !== g.name) pick = { group: g.name, users: [], reason: '', until: '' };
+    const cand = pickCandidates(g);
+    const ok = new Set(cand.map(u => u.username));
+    pick.users = pick.users.filter(u => ok.has(u));
+    let h = '<div class="pd-gp-add" role="group" aria-labelledby="pd-gp-add-h"><h4 class="pd-h4" id="pd-gp-add-h">Add people</h4>';
+    h += '<datalist id="pd-gp-dl">' + cand.filter(u => !pick.users.includes(u.username)).map(u => '<option value="' + esc(u.username) + '">' + esc(u.display_name || '') + '</option>').join('') + '</datalist>';
+    h += '<div class="pd-gp-picks">' + pickChips(g) + '</div>';
+    h += '<div class="pd-inline"><label for="pd-gp-pick" class="pd-sr">Person to add</label><input type="text" id="pd-gp-pick" list="pd-gp-dl" placeholder="username" autocomplete="off" data-on="pick-input">' +
+      '<button type="button" class="pd-btn ghost xs" data-act="pick-add">+ person</button>';
+    if (g.name !== 'lldap_admin') h += '<label for="pd-gp-until">until (optional, local time)</label><input type="datetime-local" id="pd-gp-until" data-on="pick-until" value="' + esc(pick.until) + '">';
+    if (g.rule) h += '<label for="pd-gp-reason">reason (required)</label><input type="text" id="pd-gp-reason" maxlength="500" placeholder="why?" data-on="pick-reason" value="' + esc(pick.reason) + '">';
+    h += '<button type="button" class="pd-btn primary sm" data-act="pick-submit" data-group="' + esc(g.name) + '">Add</button></div>';
+    if (g.rule) h += '<p class="pd-muted pd-small">People added here stay in whether or not they match the rule, until the entry ends or is removed.</p>';
+    return h + '</div>';
+  }
+  function pickChips(g) {
+    const matches = g.matches || [];
+    return pick.users.map(u => '<span class="pd-pick"><span class="pd-mono">' + esc(u) + '</span>' +
+      (g.rule ? (matches.includes(u) ? ' <span class="pd-muted">already matches the rule</span>' : ' <span class="pd-muted">doesn\'t match the rule</span>') : '') +
+      '<button type="button" class="pd-pick-x" data-act="pick-remove" data-user="' + esc(u) + '" aria-label="Don\'t add ' + esc(u) + '">✕</button></span>').join('');
+  }
+  function redrawPicks() {
+    const g = groupByName(pick.group);
+    const box = root.querySelector('.pd-gp-picks');
+    if (!g || !box) return;
+    box.innerHTML = pickChips(g);
+    const cand = pickCandidates(g).filter(u => !pick.users.includes(u.username));
+    root.querySelector('#pd-gp-dl').innerHTML = cand.map(u => '<option value="' + esc(u.username) + '">' + esc(u.display_name || '') + '</option>').join('');
+  }
+  function pickAdd() {
+    const g = groupByName(pick.group);
+    const el = root.querySelector('#pd-gp-pick');
+    if (!g || !el) return;
+    const v = el.value.trim();
+    if (!v) return;
+    if (!pickCandidates(g).some(u => u.username === v)) { toast(v + ' can\'t be added here (unknown, protected or already added)', 'error'); return; }
+    if (!pick.users.includes(v)) pick.users.push(v);
+    el.value = '';
+    redrawPicks();
+    el.focus();
+  }
+  async function pickSubmit(name) {
+    const g = groupByName(name);
+    if (!g) return;
+    const typedName = root.querySelector('#pd-gp-pick');
+    if (typedName && typedName.value.trim()) pickAdd();
+    if (!pick.users.length) { toast('Pick at least one person', 'error'); return; }
+    const reason = pick.reason.trim();
+    if (g.rule && !reason) { toast(name + ' is rule-based: adding by hand needs a reason', 'error'); root.querySelector('#pd-gp-reason').focus(); return; }
+    let until = null;
+    try { until = fromLocalInput(pick.until); } catch (err) { toast(errText(err), 'error'); return; }
+    if (g.admin && !confirm('Make ' + pick.users.join(', ') + ' administrators (' + name + ')? Administrators can no longer be invited from the Hub; they are recovered from the server.')) return;
+    const who = pick.users.slice();
+    const failed = [], notes = [];
+    for (const u of who) {
+      const body = { username: u };
+      if (until) body.until = until;
+      if (g.rule) body.reason = reason;
+      try {
+        const res = await api('POST', '/api/directory/groups/' + enc(name) + '/members', body);
+        if (res && res.applied === false) notes.push(res.why || '');
+        pick.users = pick.users.filter(x => x !== u);
+      } catch (err) {
+        failed.push(u + ': ' + errText(err));
       }
-      if (how === 'rule') return '<span class="pd-pill" title="member through the rule">' + esc(m) + ' ⚡</span>';
-      // In LLDAP but neither the rule nor an exception explains it.
-      return '<span class="pd-pill warn" title="The rule doesn\'t match: the next evaluation removes them">' + esc(m) + ' (leaving)</span>';
-    }).join('') + '</div>' : '<p class="pd-muted">Nobody matches yet.</p>';
-    h += '<h4 class="pd-h4">Exceptions</h4>';
-    if (!ex.length) h += '<p class="pd-muted">None.</p>';
-    else {
-      h += '<table class="pd-table"><thead><tr><th scope="col">Person</th><th scope="col">Exception</th><th scope="col">Reason</th><th scope="col">Until</th><th scope="col">Set by</th>' +
-        (admin ? '<th scope="col"><span class="pd-sr">Actions</span></th>' : '') + '</tr></thead><tbody>';
-      for (const e of ex) {
-        h += '<tr' + (e.expired ? ' class="pd-expired"' : '') + '><td class="pd-mono">' + esc(e.user) + '</td><td>' + (e.include ? '<span class="pd-pill ok">added ✱</span>' : '<span class="pd-pill warn">kept out ✱</span>') +
-          (e.expired ? '<span class="pd-pill bad">expired</span>' : '') + '</td><td>' + esc(e.reason) + '</td><td>' + (e.until ? esc(fmtTime(e.until)) : '<span class="pd-muted">no end</span>') +
-          '</td><td class="pd-muted">' + esc(e.by) + (e.at ? '<br>' + esc(fmtDate(e.at)) : '') + '</td>';
-        if (admin) h += '<td><button type="button" class="pd-btn danger xs" data-act="remove-exception" data-group="' + esc(g.name) + '" data-user="' + esc(e.user) + '">Remove</button></td>';
-        h += '</tr>';
-      }
-      h += '</tbody></table>';
     }
-    if (admin) {
-      const p = uid('pd-ex-');
-      const cand = users().filter(u => !u.protected);
-      h += '<form class="pd-exform" data-form="add-exception" data-group="' + esc(g.name) + '"><fieldset class="pd-fieldset"><legend>Add an exception</legend><div class="pd-grid">' +
-        '<div><label for="' + p + 'u">Person</label><select id="' + p + 'u" name="user">' + cand.map(u => '<option value="' + esc(u.username) + '">' + esc(u.username) + '</option>').join('') + '</select></div>' +
-        '<div><label for="' + p + 'k">Exception</label><select id="' + p + 'k" name="include"><option value="true">add them (although they don\'t match)</option><option value="false">keep them out (although they match)</option></select></div>' +
-        '<div><label for="' + p + 'r">Reason (required)</label><input type="text" id="' + p + 'r" name="reason" maxlength="500" required placeholder="why?"></div>' +
-        '<div><label for="' + p + 't">Until (optional, local time)</label><input type="datetime-local" id="' + p + 't" name="until"></div></div>' +
-        '<button type="submit" class="pd-btn secondary sm">Add exception</button></fieldset></form>';
+    const done = who.length - failed.length;
+    if (!pick.users.length) { pick.reason = ''; pick.until = ''; }
+    settled(name, notes);
+    if (failed.length) toast((done ? 'Added ' + done + ' of ' + who.length + '. ' : '') + failed.join(' · '), 'error');
+    else if (!notes.length) toast('Added ' + who.join(', ') + ' to ' + name, 'success');
+    await load();
+  }
+
+  // settled records a save's applied/why for the group's page: "saved,
+  // not applied yet: <why>" until the next save there.
+  function notApplied(why) {
+    why = String(why || '').trim().replace(/^stored, but not applied:\s*/i, '');
+    return /^saved, not applied yet/i.test(why) ? why : 'saved, not applied yet' + (why ? ': ' + why : '');
+  }
+  function settled(group, whys) {
+    whys = whys.filter((w, i) => whys.indexOf(w) === i);
+    if (!whys.length) { if (pageNote && pageNote.group === group) pageNote = null; return; }
+    pageNote = { group, text: whys.map(notApplied).join(' · ') };
+    toast(pageNote.text, 'error');
+  }
+  // groupAct: a membership change on a group's page; the page is redrawn
+  // from the server afterwards.
+  async function groupAct(group, fn, okMsg) {
+    let res;
+    try {
+      res = await fn();
+    } catch (err) {
+      toast(errText(err), 'error');
+      return null;
+    }
+    if (res && res.applied === false) settled(group, [res.why || '']);
+    else { settled(group, []); if (okMsg) toast(okMsg, 'success'); }
+    warnings(res);
+    await load();
+    return res || {};
+  }
+
+  function openKeepOut(group, user) {
+    openDialog('Keep ' + user + ' out of ' + group,
+      '<p class="pd-note">' + esc(user) + ' matches the rule of ' + esc(group) + '. Kept out, they leave the group and stay out while the entry lasts; after its end they\'re back in if they still match.</p>' +
+      '<div class="pd-grid"><div><label for="pk-reason">Reason (required)</label><input type="text" id="pk-reason" maxlength="500" placeholder="why?"></div>' +
+      '<div><label for="pk-until">Until (optional, local time)</label><input type="datetime-local" id="pk-until"></div></div>' +
+      '<div class="pd-actions"><button type="button" class="pd-btn primary sm" data-act="keepout-save" data-group="' + esc(group) + '" data-user="' + esc(user) + '">Keep out</button>' +
+      '<button type="button" class="pd-btn secondary sm" data-act="dialog-close">Cancel</button></div>');
+    dialogBody().querySelector('#pk-reason').focus();
+  }
+  async function keepOutSave(group, user) {
+    const b = dialogBody();
+    const reason = b.querySelector('#pk-reason').value.trim();
+    if (!reason) { toast('Keeping someone out needs a reason', 'error'); b.querySelector('#pk-reason').focus(); return; }
+    let until;
+    try { until = fromLocalInput(b.querySelector('#pk-until').value); } catch (err) { toast(errText(err), 'error'); return; }
+    closeDialog();
+    await groupAct(group, () => api('POST', '/api/directory/groups/' + enc(group) + '/exceptions', { user, include: false, reason, until }), user + ' is kept out of ' + group);
+  }
+  function openEnd(group, user) {
+    const g = groupByName(group);
+    if (!g) return;
+    const e = g.rule ? (g.exceptions || []).find(x => x.user === user && x.include) : null;
+    const cur = g.rule ? (e && e.until) : (g.expiry || {})[user];
+    openDialog('End of ' + user + ' in ' + group,
+      '<p class="pd-note">' + (g.rule ? 'When ' + esc(user) + '\'s added-by-hand entry ends; after it the rule decides alone.' : 'When ' + esc(user) + '\'s membership ends.') +
+      ' Now: ' + (cur ? esc(fmtTime(cur)) : 'no end') + '.</p>' +
+      '<div class="pd-inline"><label for="pe-until">Ends at (local time)</label><input type="datetime-local" id="pe-until" value="' + esc(toLocalInput(cur)) + '"></div>' +
+      '<div class="pd-actions"><button type="button" class="pd-btn primary sm" data-act="end-save" data-group="' + esc(group) + '" data-user="' + esc(user) + '">Set end</button>' +
+      (cur ? '<button type="button" class="pd-btn secondary sm" data-act="end-clear" data-group="' + esc(group) + '" data-user="' + esc(user) + '">No end</button>' : '') +
+      '<button type="button" class="pd-btn secondary sm" data-act="dialog-close">Cancel</button></div>');
+    dialogBody().querySelector('#pe-until').focus();
+  }
+  async function endSave(group, user, clear) {
+    let until = null;
+    if (!clear) {
+      try { until = fromLocalInput(dialogBody().querySelector('#pe-until').value); } catch (err) { toast(errText(err), 'error'); return; }
+      if (!until) { toast('Pick a date and time first', 'error'); return; }
+    }
+    closeDialog();
+    await groupAct(group, () => api('PUT', '/api/directory/groups/' + enc(group) + '/members/' + enc(user) + '/expiry', { until }),
+      until ? user + ' stays in ' + group + ' until ' + fmtTime(until) : user + ' has no end in ' + group);
+  }
+
+  // Used by (admins, GET …/uses) and History (admins, audit?group=),
+  // fetched when the page opens and after every save.
+  async function refreshExtras() {
+    if (!isAdmin() || !groupPage || !groupByName(groupPage)) return;
+    const name = groupPage;
+    const seq = ++extrasSeq;
+    const [u, a] = await Promise.allSettled([
+      api('GET', '/api/directory/groups/' + enc(name) + '/uses'),
+      api('GET', '/api/directory/audit?group=' + enc(name)),
+    ]);
+    if (seq !== extrasSeq || groupPage !== name) return;
+    extras = {
+      group: name,
+      uses: u.status === 'fulfilled' ? u.value : null, usesErr: u.status === 'rejected' ? errText(u.reason) : '',
+      audit: a.status === 'fulfilled' ? a.value : null, auditErr: a.status === 'rejected' ? errText(a.reason) : '',
+    };
+    renderExtras();
+  }
+  function renderExtras() {
+    if (!groupPage || extras.group !== groupPage) return;
+    const ub = root.querySelector('.pd-gp-uses'), hb = root.querySelector('.pd-gp-hist');
+    if (ub) ub.innerHTML = usesHtml(groupByName(groupPage), extras.uses, extras.usesErr);
+    if (hb) hb.innerHTML = historyHtml(extras.audit, extras.auditErr);
+  }
+  const ROLE_TEXT = { access: 'access group', admin: 'admin group', privileged: 'privileged values' };
+  const SCOPE_TEXT = { person: 'per-person row', group: 'group record', instance: 'app setting' };
+  function usesHtml(g, u, err) {
+    if (!g) return '';
+    let h = '';
+    if (err) h += '<p class="pd-muted">Can\'t load what uses ' + esc(g.name) + ': ' + esc(err) + '</p>';
+    const apps = (u && u.apps) || [], sets = (u && u.settings) || [], perms = (u && u.permissions) || [];
+    if (u) {
+      if (!apps.length && !sets.length && !perms.length) h += '<p class="pd-muted">Nothing uses this group.</p>';
+      else {
+        h += '<ul class="pd-uses">';
+        for (const a of apps) h += '<li>' + hubLink(appFrag(a.instance), a.name || a.instance) + ' <span class="pd-muted">' + esc(ROLE_TEXT[a.role] || a.role) + '</span></li>';
+        for (const s of sets) {
+          h += '<li>' + hubLink(appFrag(s.instance, s.key), (s.app || s.instance) + ' › ' + (s.label || s.key)) + ': ' + esc(s.value) +
+            ' <span class="pd-muted">' + esc(SCOPE_TEXT[s.scope] || s.scope) + '</span></li>';
+        }
+        for (const p of perms) {
+          const def = PERMS.find(x => x[0] === p);
+          h += '<li><button type="button" class="pd-link pd-a" data-act="goto-setup">' + esc(def ? def[1] : p) + '</button> <span class="pd-muted">delegated permission</span></li>';
+        }
+        h += '</ul>';
+      }
+    }
+    if (!g.builtin) {
+      h += '<p class="pd-muted pd-small">' + esc(deleteWhat(g, u)) + '</p>' +
+        '<button type="button" class="pd-btn danger sm" data-act="gp-delete" data-group="' + esc(g.name) + '">Delete group…</button>';
     }
     return h;
+  }
+  // deleteWhat: what deleting g removes, in words (the confirmation's
+  // text too). u: its uses (null when they couldn't be read).
+  function deleteWhat(g, u) {
+    const parts = [plural((g.members || []).length, 'membership') + ' (they are signed out)'];
+    if (g.rule) parts.push('the rule and its ' + plural((g.exceptions || []).length, 'entry', 'entries'));
+    if (u) {
+      if (u.settings.length) parts.push(plural(u.settings.length, 'app setting row') + ' naming it');
+      if (u.permissions.length) parts.push('the ' + u.permissions.map(p => (PERMS.find(x => x[0] === p) || [p, p])[1]).join(', ') + ' permission' + (u.permissions.length > 1 ? 's' : '') + ' (nobody holds it then)');
+      if (u.apps.length) parts.push('access through it to ' + Array.from(new Set(u.apps.map(a => a.name || a.instance))).join(', '));
+    } else {
+      parts.push('every app setting row and permission naming it');
+    }
+    return 'Deleting ' + g.name + ' removes ' + parts.join('; ') + '.';
+  }
+
+  // History in plain words. The raw detail stays in the title.
+  function untilWords(s) { return !s || s === 'never' ? '' : ' until ' + fmtDate(s); }
+  function syncWords(user, d) {
+    const add = d.charAt(0) === '+', cause = d.slice(1);
+    switch (cause) {
+      case 'rule': return add ? user + ' joined — matches the rule' : user + ' left — no longer matches the rule';
+      case 'exception': return add ? user + ' joined — added by hand' : user + ' left — kept out';
+      case 'exception expired': return add ? user + ' joined — their kept-out entry ended' : user + ' left — their added-by-hand entry ended';
+      case 'membership expired': return user + (add ? ' joined' : ' left') + ' — their membership ended';
+      case 'reverted: outside change': return add ? user + ' joined again — undoing a change made outside the Hub' : user + ' left — undoing a change made outside the Hub';
+      default: return user + (add ? ' joined' : ' left');
+    }
+  }
+  function historyWords(e, group) {
+    const d = e.detail || '';
+    const target = e.target || '';
+    const tu = target.startsWith(group + ':') ? target.slice(group.length + 1) : '';
+    let m;
+    switch (e.action) {
+      case 'group.sync': return syncWords(tu || 'someone', d);
+      case 'group.exception':
+        if ((m = /^add user=(\S*) include=(true|false) until=(\S+) reason=([\s\S]*)$/.exec(d))) {
+          return (m[2] === 'true' ? 'added ' + m[1] + ' by hand' : 'kept ' + m[1] + ' out') + untilWords(m[3]) + (m[4] ? ' — “' + m[4] + '”' : '');
+        }
+        if ((m = /^remove user=(\S+)/.exec(d))) return 'removed the entry of ' + m[1];
+        return 'changed an entry';
+      case 'group.rule':
+        if (d === 'manual') return 'made the group manual';
+        if ((m = /^convert rule=([\s\S]*?)(?: keep=\S*)?(?: \(stale review\))?$/.exec(d))) return 'made the group rule-based: ' + m[1];
+        if ((m = /^rule=([\s\S]*)$/.exec(d))) return 'changed the rule to ' + m[1];
+        return 'changed the rule';
+      case 'group.add_member':
+        if ((m = /^user=(\S+) until=(\S+)/.exec(d))) return 'added ' + m[1] + untilWords(m[2]);
+        return 'added ' + (d || 'someone');
+      case 'group.remove_member': return 'removed ' + (d || 'someone');
+      case 'group.expiry':
+        if ((m = /^user=(\S+) until=(\S+)/.exec(d))) return m[2] === 'never' ? 'removed the end of ' + m[1] : 'set the end of ' + m[1] + ' to ' + fmtDate(m[2]);
+        return 'changed an end';
+      case 'group.create': return 'created the group';
+      case 'group.delete': return 'deleted the group';
+      default: return e.action + (tu ? ' ' + tu : '');
+    }
+  }
+  function actorWords(e) {
+    const a = e.actor === 'portcullis-hub (rules)' ? 'the rules' : (e.actor || '');
+    return a + (e.via === 'ai' ? ' via AI' + (e.client ? ' (' + e.client + ')' : '') : '');
+  }
+  function historyHtml(items, err) {
+    if (err) return '<p class="pd-muted">Can\'t load the history: ' + esc(err) + '</p>';
+    if (!items) return '';
+    if (!items.length) return '<p class="pd-muted">Nothing yet.</p>';
+    items = items.filter(e => e.action !== 'group.convert_preview'); // a look, not a change
+    if (!items.length) return '<p class="pd-muted">Nothing yet.</p>';
+    let h = '<ol class="pd-hist">';
+    for (const e of items) {
+      const raw = e.action + ' ' + (e.target || '') + (e.detail ? ' · ' + e.detail : '') + (e.error ? ' · ' + e.error : '');
+      const res = e.result === 'ok' ? '' : '<span class="pd-pill ' + (e.result === 'refused' ? 'warn' : 'bad') + '">' + esc(e.result) + '</span>';
+      h += '<li title="' + esc(raw) + '"><span class="pd-muted pd-nowrap">' + esc(fmtTime(e.time)) + '</span> <span>' + esc(historyWords(e, groupPage)) + '</span> ' + res +
+        ' <span class="pd-muted">· ' + esc(actorWords(e)) + '</span>' + (e.error ? '<div class="pd-muted pd-small">' + esc(e.error) + '</div>' : '') + '</li>';
+    }
+    return h + '</ol>';
   }
 
   // Rule editing (rule groups): PUT the rule.
@@ -1191,15 +1566,17 @@
     if (!ed) return;
     const gap = ed.problem();
     if (gap) { toast('Incomplete rule: ' + gap, 'error'); return; }
+    let res;
     try {
-      await api('PUT', '/api/directory/groups/' + enc(name) + '/rule', ed.body());
+      res = await api('PUT', '/api/directory/groups/' + enc(name) + '/rule', ed.body());
     } catch (err) {
       ed.setStatus(errText(err), '', err.column);
       toast(errText(err), 'error');
       return;
     }
     closeDialog();
-    toast('Rule of ' + name + ' saved', 'success');
+    if (res && res.applied === false) settled(name, [res.why || '']);
+    else { settled(name, []); toast('Rule of ' + name + ' saved', 'success'); }
     await load();
   }
 
@@ -1255,8 +1632,9 @@
     if (!body.preview) return;
     const keep = Array.from(body.querySelectorAll('input[name="cv-keep"]:checked')).map(i => i.value);
     const req = Object.assign({}, body.reviewedBody, { keep, preview: body.preview });
+    let res;
     try {
-      await api('POST', '/api/directory/groups/' + enc(body.group) + '/convert', req);
+      res = await api('POST', '/api/directory/groups/' + enc(body.group) + '/convert', req);
     } catch (err) {
       if (err.status === 409) {
         await convertReview('The group or the people changed since you reviewed it: review again.');
@@ -1267,8 +1645,8 @@
     }
     const name = body.group;
     closeDialog();
-    openGroups.add(name);
-    toast(name + ' is now rule-based', 'success');
+    if (res && res.applied === false) settled(name, [res.why || '']);
+    else { settled(name, []); toast(name + ' is now rule-based', 'success'); }
     await load();
   }
 
@@ -1781,12 +2159,14 @@
   // ── events ──────────────────────────────────────────────
   async function onClick(e) {
     const tabBtn = e.target.closest('[data-pdtab]');
-    if (tabBtn && root.contains(tabBtn)) { selectTab(tabBtn.dataset.pdtab, false); return; }
+    if (tabBtn && root.contains(tabBtn)) { userSelectTab(tabBtn.dataset.pdtab, false); return; }
     const b = e.target.closest('[data-act]');
     if (!b) {
       // A click anywhere on a person's row opens them.
       const tr = e.target.closest('tr.pd-row');
-      if (tr && !e.target.closest('a, button, input, select, textarea, label')) openUser(tr.dataset.user);
+      if (!tr || e.target.closest('a, button, input, select, textarea, label')) return;
+      if (tr.classList.contains('pd-grow')) location.hash = groupHash(tr.dataset.group); // a group's row opens its page
+      else openUser(tr.dataset.user);
       return;
     }
     const a = b.dataset.act, user = b.dataset.user || '', group = b.dataset.group || '';
@@ -1814,34 +2194,14 @@
         if (res) openUser(user);
         return;
       }
-      case 'toggle-group':
-        if (openGroups.has(group)) openGroups.delete(group); else openGroups.add(group);
-        renderGroups();
-        { const again = root.querySelector('.pd-groups [data-act="toggle-group"][data-group="' + CSS.escape(group) + '"]'); if (again) again.focus(); }
-        return;
-      case 'create-group': {
-        const res = await act(() => api('POST', '/api/directory/groups', { name: group }), 'Group ' + group + ' created');
-        if (res) openGroups.add(group);
-        return;
-      }
-      case 'delete-group':
-        if (!typed('Delete group ' + group + '. Members lose whatever access it grants.', group)) return;
-        openGroups.delete(group);
-        return act(() => api('DELETE', gpath, { confirm: group }), 'Deleted ' + group);
-      case 'add-member': {
-        const sel = document.getElementById(b.dataset.select);
-        const exp = document.getElementById(b.dataset.input);
-        const who = sel ? sel.value : '';
-        if (!who) return;
-        let until = null;
-        try { until = exp ? fromLocalInput(exp.value) : null; } catch (err) { toast(errText(err), 'error'); return; }
+      case 'gp-delete': {
         const g = groupByName(group);
-        if (g && g.admin && !confirm('Make ' + who + ' an administrator (' + group + ')? Administrators can no longer be invited from the Hub; they are recovered from the server.')) return;
-        return act(async () => {
-          await api('POST', gpath + '/members', { username: who });
-          if (until) await api('PUT', gpath + '/members/' + enc(who) + '/expiry', { until });
-          return {};
-        }, who + ' added to ' + group + (until ? ' until ' + fmtTime(until) : ''));
+        if (!g) return;
+        const u = extras.group === group ? extras.uses : null;
+        if (!typed(deleteWhat(g, u) + ' This cannot be undone.', group)) return;
+        const res = await act(() => api('DELETE', gpath, { confirm: group }), 'Deleted ' + group);
+        if (res && groupPage === group) { groupPage = null; setHash('#groups', false); renderGroups(); }
+        return;
       }
       case 'remove-member': {
         if (!confirm('Remove ' + user + ' from ' + group + '?')) return;
@@ -1849,19 +2209,27 @@
         if (res && root.querySelector('.pd-dialog').open) openUser(user);
         return;
       }
-      case 'set-expiry': case 'clear-expiry': {
-        let until = null;
-        if (a === 'set-expiry') {
-          const el = document.getElementById(b.dataset.input);
-          try { until = fromLocalInput(el && el.value); } catch (err) { toast(errText(err), 'error'); return; }
-          if (!until) { toast('Pick a date and time first', 'error'); return; }
-        }
-        return act(() => api('PUT', gpath + '/members/' + enc(user) + '/expiry', { until }),
-          until ? user + ' stays in ' + group + ' until ' + fmtTime(until) : user + '\'s membership of ' + group + ' has no end');
+      case 'gp-remove': {
+        const g = groupByName(group);
+        const q = g && g.rule
+          ? 'Remove ' + user + '\'s added-by-hand entry from ' + group + '? ' + user + ' stays only while they match the rule.'
+          : 'Remove ' + user + ' from ' + group + '?';
+        if (!confirm(q)) return;
+        return groupAct(group, () => api('DELETE', gpath + '/members/' + enc(user), {}), g && g.rule ? user + '\'s entry removed' : user + ' removed from ' + group);
       }
-      case 'remove-exception':
-        if (!confirm('Remove the exception for ' + user + ' in ' + group + '? The rule alone decides again.')) return;
-        return act(() => api('DELETE', gpath + '/exceptions/' + enc(user), {}), 'Exception removed');
+      case 'gp-letin':
+        if (!confirm('Let ' + user + ' back into ' + group + '? The kept-out entry goes and the rule decides again.')) return;
+        return groupAct(group, () => api('DELETE', gpath + '/exceptions/' + enc(user), {}), user + ' is no longer kept out');
+      case 'gp-keepout': return openKeepOut(group, user);
+      case 'keepout-save': return keepOutSave(group, user);
+      case 'gp-end': return openEnd(group, user);
+      case 'end-save': return endSave(group, user, false);
+      case 'end-clear': return endSave(group, user, true);
+      case 'pick-add': return pickAdd();
+      case 'pick-remove': pick.users = pick.users.filter(x => x !== user); redrawPicks(); { const el = root.querySelector('#pd-gp-pick'); if (el) el.focus(); } return;
+      case 'pick-submit': return pickSubmit(group);
+      case 'gp-hist-reload': return refreshExtras();
+      case 'goto-setup': return userSelectTab('setup', true);
       case 'rule-open': return openRuleEditor(group);
       case 'rule-save': return saveRule(group);
       case 'convert-open': return openConvert(group);
@@ -1869,7 +2237,7 @@
       case 'convert-apply': return convertApply();
       case 'make-manual':
         if (!confirm('Make ' + group + ' manual? Its current members stay as they are; the rule and its exceptions are dropped and nobody is added or removed automatically any more.')) return;
-        return act(() => api('PUT', gpath + '/rule', { manual: true }), group + ' is now manual');
+        return groupAct(group, () => api('PUT', gpath + '/rule', { manual: true }), group + ' is now manual');
       case 'field-save': return saveField(b.dataset.field);
       case 'field-delete': {
         const name = b.dataset.field;
@@ -1917,7 +2285,16 @@
   function onInput(e) {
     const t = e.target;
     if (t.id === 'pd-search') { search = t.value; renderPeopleTable(); return; }
+    if (t.id === 'pd-gsearch') { gsearch = t.value; renderGroupTable(); return; }
     const on = t.dataset && t.dataset.on;
+    if (on === 'pick-reason') { pick.reason = t.value; return; }
+    if (on === 'pick-until') { pick.until = t.value; return; }
+    if (on === 'pick-input') {
+      // A person chosen from the list joins the picks at once.
+      const g = groupByName(pick.group);
+      if (g && e.inputType !== 'insertText' && e.inputType !== 'deleteContentBackward' && pickCandidates(g).some(u => u.username === t.value.trim())) pickAdd();
+      return;
+    }
     if (!on || !imp) return;
     if (on === 'imp-cell') {
       imp.rows[+t.dataset.r][+t.dataset.c] = t.value;
@@ -1951,15 +2328,7 @@
       const name = f.querySelector('input').value.trim();
       if (!name) return;
       const res = await act(() => api('POST', '/api/directory/groups', { name }), 'Group ' + name + ' created');
-      if (res) openGroups.add(name);
-    } else if (kind === 'add-exception') {
-      const group = f.dataset.group;
-      const reason = f.reason.value.trim();
-      if (!reason) { toast('An exception needs a reason', 'error'); f.reason.focus(); return; }
-      let until;
-      try { until = fromLocalInput(f.until.value); } catch (err) { toast(errText(err), 'error'); return; }
-      await act(() => api('POST', '/api/directory/groups/' + enc(group) + '/exceptions',
-        { user: f.user.value, reason, include: f.include.value === 'true', until }), 'Exception saved');
+      if (res) location.hash = groupHash(name);
     } else if (kind === 'new-field') {
       await createField(f);
     }
@@ -1967,11 +2336,12 @@
   function onKeydown(e) {
     // Arrow keys move between the tabs (WAI-ARIA tabs pattern).
     const t = e.target;
+    if (e.key === 'Enter' && t.id === 'pd-gp-pick') { e.preventDefault(); pickAdd(); return; }
     if (!t.dataset || !t.dataset.pdtab || (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft')) return;
     const tabs = Array.from(root.querySelectorAll('[data-pdtab]')).filter(x => !x.hidden);
     const i = tabs.indexOf(t);
     const n = tabs[(i + (e.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length];
-    selectTab(n.dataset.pdtab, true);
+    userSelectTab(n.dataset.pdtab, true);
     e.preventDefault();
   }
 
@@ -2024,10 +2394,13 @@
       root.querySelector('.pd-panel[data-panel="setup"]').insertAdjacentHTML('beforebegin',
         '<section class="pd-panel" data-panel="' + esc(t.id) + '" id="pd-panel-' + esc(t.id) + '" role="tabpanel" aria-labelledby="pd-tab-' + esc(t.id) + '" hidden></section>');
     }
-    if (options.hashTabs) {
+    const r = parseRoute(location.hash);
+    if (r) { tab = 'groups'; groupPage = r.group; }
+    else if (options.hashTabs) {
       const h = location.hash.slice(1);
       if (BUILTIN_TABS.includes(h) || extraTabs.some(t => t.id === h)) tab = h;
     }
+    window.addEventListener('hashchange', onHash);
     el.addEventListener('click', onClick);
     el.addEventListener('input', onInput);
     el.addEventListener('change', onChange);
@@ -2081,6 +2454,13 @@
     return '<span class="' + cls + '">' + esc(d) + '</span>';
   }
 
-  window.PortcullisDirectory = { show, openAt, csvCell };
+  // route applies the current #groups[/<name>] hash (the Hub page calls
+  // it after switching to its Users tab).
+  function route() {
+    const r = parseRoute(location.hash);
+    if (r && root) applyRoute(r);
+  }
+
+  window.PortcullisDirectory = { show, openAt, openGroup, route, csvCell };
   window.PortcullisAI = { decision: aiDecision };
 })();
