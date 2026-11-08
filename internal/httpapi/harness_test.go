@@ -127,7 +127,9 @@ import (
 // user07), helpers, and the fixtures' access and admin groups. The group
 // pages (seedGroupPages): office_milan rule-based with every row state,
 // it_staff with an end date and the remove permission (bob a delegate);
-// POST /harness/lldap/flaky fails the next change's apply.
+// POST /harness/lldap/flaky fails the next change's apply. The person
+// pages (seedPersonPages): carol in a group of each state; turin_desk and
+// all_offices are rule groups.
 func TestHarness(t *testing.T) {
 	addr := os.Getenv("HUB_HARNESS_ADDR")
 	if addr == "" {
@@ -1254,14 +1256,7 @@ func seedGroupPages(t *testing.T, e *instEnv) *harnessFlaky {
 	for u, office := range map[string]string{"alice": "Milan", "bob": "Milan", "carol": "Milan", "dave": "Turin", "erin": "Turin", "gina": "Milan"} {
 		mustDo(t, p, "root", "PUT", "/api/directory/users/"+u+"/details", `{"attrs":{"office":["`+office+`"]}}`, 200)
 	}
-	rule := `office = "Milan"`
-	b := mustDo(t, p, "root", "POST", "/api/directory/groups/office_milan/convert-preview", `{"rule":`+strconvQuote(rule)+`}`, 200)
-	var prev directory.ConvertPreview
-	if err := json.Unmarshal([]byte(b), &prev); err != nil {
-		t.Fatal(err)
-	}
-	body, _ := json.Marshal(map[string]any{"rule": rule, "keep": []string{}, "preview": prev})
-	mustDo(t, p, "root", "POST", "/api/directory/groups/office_milan/convert", string(body), 200)
+	convertToRule(t, e, "office_milan", `office = "Milan"`)
 	if _, err := e.s.Directory.Evaluate(context.Background(), time.Now().UTC()); err != nil {
 		t.Fatalf("evaluating the rule groups: %v", err)
 	}
@@ -1272,6 +1267,7 @@ func seedGroupPages(t *testing.T, e *instEnv) *harnessFlaky {
 	end := time.Now().UTC().Add(10 * 24 * time.Hour).Format(time.RFC3339)
 	mustDo(t, p, "root", "PUT", "/api/directory/groups/it_staff/members/user07/expiry", `{"until":"`+end+`"}`, 200)
 	mustDo(t, p, "root", "PUT", "/api/directory/permissions/remove", `{"group":"it_staff"}`, 200)
+	seedPersonPages(t, e)
 	// Two entries that end in a moment (an end must be in the future):
 	// user03 added by hand (then "not explained by the rule") and gina
 	// kept out (then "matches the rule", joining at the next sync).
@@ -1282,6 +1278,43 @@ func seedGroupPages(t *testing.T, e *instEnv) *harnessFlaky {
 	// Last: no later change may evaluate erin (or the two above) out again.
 	e.ll.AddMember("office_milan", "erin")
 	return &harnessFlaky{cred: filepath.Join(e.s.Directory.LLDAP.(*lldap.Client).CredentialsDir, "password"), s: e.s}
+}
+
+// convertToRule makes the manual group rule-based (nobody kept).
+func convertToRule(t *testing.T, e *instEnv, group, rule string) {
+	t.Helper()
+	p := e.ppl
+	b := mustDo(t, p, "root", "POST", "/api/directory/groups/"+group+"/convert-preview", `{"rule":`+strconvQuote(rule)+`}`, 200)
+	var prev directory.ConvertPreview
+	if err := json.Unmarshal([]byte(b), &prev); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(map[string]any{"rule": rule, "keep": []string{}, "preview": prev})
+	mustDo(t, p, "root", "POST", "/api/directory/groups/"+group+"/convert", string(body), 200)
+}
+
+// seedPersonPages sets up carol's page (people & groups Task 6) with a
+// group in each state: kept out of office_milan (seedGroupPages), added
+// by hand to turin_desk (office = "Turin") until 30 days from now,
+// matching all_offices, a member of the fixtures' users_* groups, and of
+// book_club (manual) until 45 days from now. turin_desk and all_offices
+// are also the rule groups the invite form offers.
+func seedPersonPages(t *testing.T, e *instEnv) {
+	t.Helper()
+	p := e.ppl
+	for _, g := range []struct{ name, rule string }{{"turin_desk", `office = "Turin"`}, {"all_offices", `office in ("Milan", "Turin")`}, {"book_club", ""}} {
+		mustDo(t, p, "root", "POST", "/api/directory/groups", `{"name":"`+g.name+`"}`, 200)
+		if g.rule != "" {
+			convertToRule(t, e, g.name, g.rule)
+		}
+	}
+	if _, err := e.s.Directory.Evaluate(context.Background(), time.Now().UTC()); err != nil {
+		t.Fatalf("evaluating the rule groups: %v", err)
+	}
+	in30 := time.Now().UTC().Add(30 * 24 * time.Hour).Format(time.RFC3339)
+	in45 := time.Now().UTC().Add(45 * 24 * time.Hour).Format(time.RFC3339)
+	mustDo(t, p, "root", "POST", "/api/directory/groups/turin_desk/members", `{"username":"carol","reason":"covering the Turin desk","until":"`+in30+`"}`, 200)
+	mustDo(t, p, "root", "POST", "/api/directory/groups/book_club/members", `{"username":"carol","until":"`+in45+`"}`, 200)
 }
 
 func strconvQuote(s string) string {

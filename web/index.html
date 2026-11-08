@@ -769,9 +769,10 @@
         PortcullisDirectory.openAt(usr[1], usr[2] || '');
         return;
       }
-      // #groups and #groups/<name>: the Users & Groups tab's groups list
-      // and a group's page (directory.js routes them once it is shown).
-      if (/^groups(?:\/|$)/.test(t)) {
+      // #groups, #groups/<name> and #people/<name>: the Users & Groups
+      // tab's groups list, a group's page and a person's page
+      // (directory.js routes them once it is shown).
+      if (/^groups(?:\/|$)|^people\//.test(t)) {
         const ut = document.querySelector('.tab[data-tab="users"]');
         if (!ut.classList.contains('active')) {
           ut.click();

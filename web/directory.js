@@ -113,10 +113,13 @@
   let search = '';
   let orgField = '';
   let groupPage = null;      // the group whose page is shown (#groups/<name>), or null: the list
+  let personPage = null;     // the person whose page is shown (#people/<name>), or null: the People list
+  let personNote = null;     // {user, text}: what the invite that created them answered (not applied, warnings)
+  let pendingOpen = null;    // {name, action}: an old #users/<name>[?…] link on people.<domain>, opened after the load
   let gsearch = '';          // the groups list's search
   let pick = { group: null, users: [], reason: '', until: '' }; // a group page's Add people form
   let pageNote = null;       // {group, text}: the last save there wasn't applied yet
-  let extras = { group: null }; // the page's Used by and History (admins)
+  let extras = { group: null }; // a group page's Used by and History, or a person page's apps and History (admins)
   let extrasSeq = 0;
   let imp = null;           // import review state
   let dialogClose = null;    // cleanup of the open dialog
@@ -276,7 +279,7 @@
     main.hidden = false;
     if (options.onUser) options.onUser(me.user);
     renderAll();
-    if (tab === 'groups' && groupPage) refreshExtras();
+    if ((tab === 'groups' && groupPage) || (tab === 'people' && personPage)) refreshExtras();
   }
   function showOff(html, trusted) {
     const off = root.querySelector('.pd-off');
@@ -379,9 +382,10 @@
     actions.innerHTML = a;
     renderStale();
     renderPeopleTable();
-    root.querySelector('.pd-people-main').hidden = !!imp;
-    root.querySelector('.pd-import').hidden = !imp;
+    root.querySelector('.pd-people-main').hidden = !!imp || !!personPage;
+    root.querySelector('.pd-import').hidden = !imp || !!personPage;
     if (imp) renderImport();
+    renderPersonPage();
   }
 
   function renderPeopleTable() {
@@ -423,7 +427,7 @@
     box.innerHTML = h + '</tbody></table></div>';
   }
 
-  // ── person dialog ───────────────────────────────────────
+  // ── details form ────────────────────────────────────────
   function fieldInput(f, vals, id, editable) {
     vals = vals || [];
     const dis = editable ? '' : ' disabled';
@@ -456,23 +460,11 @@
     return v ? [v] : [];
   }
 
-  function openUser(name) {
-    const u = userByName(name);
-    if (!u) { closeDialog(); return; }
+  // The details form (Edit details): email, display name and the custom
+  // fields, each disabled where the caller may not change it.
+  function detailsFormHtml(u, editable) {
     const admin = isAdmin();
-    const editable = canEdit(u);
-    let h = '<div class="pd-person" data-user="' + esc(u.username) + '">';
-    h += '<div class="pd-person-head"><div><div class="pd-person-name">' + esc(u.display_name || u.username) + '</div><div class="pd-muted">' +
-      esc(u.username) + (u.email ? ' · ' + esc(u.email) : '') + (u.created ? ' · since ' + esc(fmtDate(u.created)) : '') + '</div></div><div>';
-    if (u.self) h += '<span class="pd-pill info">you</span>';
-    if (u.protected === 'service') h += '<span class="pd-pill" title="The Hub\'s own LLDAP account (read-only here)">Hub service account</span>';
-    if (u.protected === 'core-admin') h += '<span class="pd-pill" title="Bootstrap LLDAP admin: Keycloak and enroll bind as it. Managed from the server only (./portcullis invite admin)">bootstrap admin (server-managed)</span>';
-    if (u.admin && u.protected !== 'service') h += '<span class="pd-pill info" title="Member of an administrator group: no invites from the Hub">administrator</span>';
-    h += '</div></div>';
-    if (u.created_by) h += '<p class="pd-muted">Account created by ' + esc(u.created_by) + '.</p>';
-
-    // details
-    h += '<section class="pd-sec" aria-label="Details"><h3 class="pd-h3">Details</h3><div class="pd-grid">';
+    let h = '<div class="pd-grid">';
     h += '<div><label for="pu-email">Email</label><input type="email" id="pu-email" value="' + esc(u.email) + '"' + (editable ? '' : ' disabled') + '></div>';
     h += '<div><label for="pu-display">Display name</label><input type="text" id="pu-display" value="' + esc(u.display_name) + '"' + (editable ? '' : ' disabled') + '></div>';
     for (const f of fields()) {
@@ -482,63 +474,185 @@
         (f.admin_only ? ' <span class="pd-muted" title="Only admins can change it">(admin-only)</span>' : '') + '</label>' + fieldInput(f, (u.attrs || {})[f.name], id, fe) + '</div>';
     }
     h += '</div>';
-    if (editable) h += '<button type="button" class="pd-btn primary sm" data-act="save-user" data-user="' + esc(u.username) + '">Save details</button>';
-    else if (can('edit_details') && !u.protected) h += '<p class="pd-muted">Only an admin can change ' + esc(u.username) + '.</p>';
-    h += '</section>';
-
-    // groups
-    h += '<section class="pd-sec" aria-label="Groups"><h3 class="pd-h3">Groups</h3>';
-    const ms = u.memberships || [];
-    if (!ms.length) h += '<p class="pd-muted">No groups.</p>';
-    else {
-      h += '<ul class="pd-memberships">';
-      for (const m of ms) {
-        const g = groupByName(m.group);
-        let how = m.how === 'rule' ? '⚡ via rule' + (u.created_by ? ', account created by ' + esc(u.created_by) : '')
-          : m.how === 'exception' ? '✱ exception: ' + esc(m.reason || '') : 'manual';
-        if (m.until) how += ' · until ' + esc(fmtTime(m.until));
-        h += '<li><span class="pd-mono">' + esc(m.group) + '</span> <span class="pd-muted">' + how + '</span>';
-        if (admin && g && !g.rule && !memberLocked(g, u.username)) {
-          h += ' <button type="button" class="pd-btn ghost xs" data-act="remove-member" data-group="' + esc(g.name) + '" data-user="' + esc(u.username) + '">Remove</button>';
-        }
-        h += '</li>';
-      }
-      h += '</ul>';
+    if (editable) {
+      h += '<div class="pd-actions"><button type="button" class="pd-btn primary sm" data-act="save-user" data-user="' + esc(u.username) + '">Save details</button>' +
+        '<button type="button" class="pd-btn secondary sm" data-act="dialog-close">Cancel</button></div>';
     }
-    if (admin && !u.protected) {
-      const cand = groups().filter(g => !g.rule && !(g.members || []).includes(u.username));
-      if (cand.length) {
-        h += '<div class="pd-inline"><label for="pu-addgroup" class="pd-sr">Add to group</label><select id="pu-addgroup">' +
-          cand.map(g => '<option value="' + esc(g.name) + '">' + esc(g.name) + '</option>').join('') +
-          '</select><button type="button" class="pd-btn secondary sm" data-act="user-add-group" data-user="' + esc(u.username) + '">Add to group</button></div>';
-      }
-    }
-    h += '</section>';
+    return h;
+  }
+  function openDetails(name) {
+    const u = userByName(name);
+    if (!u || !canEdit(u)) return;
+    openDialog('Edit details of ' + u.username, detailsFormHtml(u, true));
+    dialogBody().querySelector('#pu-email').focus();
+  }
 
-    // keys & account actions
-    const keyActions = [];
-    if (admin && !u.protected) {
+  // ── a person's page (#people/<name>) ────────────────────
+  // Header (details, Edit details), Groups (each with the group page's
+  // row state, linking to it; Add to group… opens a group's page with
+  // them picked), Apps and Values (admins), Sign-in (the key actions)
+  // and History (admins). Membership changes only on group pages.
+  const personHash = name => '#people/' + enc(name);
+  function openPerson(name) {
+    name = String(name || '');
+    if (!name) return;
+    const h = personHash(name);
+    if (location.hash === h) { if (root) applyRoute({ person: name }); return; }
+    location.hash = h; // hashchange routes it (the Hub page into its Users tab)
+  }
+  function fieldValueHtml(f, vals) {
+    return (vals || []).map(v => f.kind === 'person' && userByName(v)
+      ? '<a class="pd-a" href="' + esc(personHash(v)) + '">' + esc(v) + '</a>' : esc(v)).join(', ');
+  }
+  // The key and account actions the caller may use on u (as the old
+  // dialog offered them; the API re-checks).
+  function personKeyActions(u) {
+    const out = [];
+    if (isAdmin() && !u.protected) {
       const kc = u.keycloak;
-      if (!u.admin) keyActions.push(['invite', 'Send new invite', 'primary']);
-      if (!kc || !(kc.required_actions || []).includes('webauthn-register-passwordless')) keyActions.push(['require-passkey', 'Require passkey', 'secondary']);
-      if (kc && (kc.required_actions || []).length) keyActions.push(['clear-actions', 'Clear pending', 'secondary']);
-      keyActions.push(['reset-passkeys', 'Reset passkeys', 'danger']);
-      keyActions.push(['password', 'Password…', 'danger']);
-    } else if (!admin && can('invite') && u.created_by && u.created_by === (me && me.user)) {
-      keyActions.push(['invite', 'Send new invite', 'primary']);
+      if (!u.admin) out.push(['invite', 'Send new invite', 'primary']);
+      if (!kc || !(kc.required_actions || []).includes('webauthn-register-passwordless')) out.push(['require-passkey', 'Require passkey', 'secondary']);
+      if (kc && (kc.required_actions || []).length) out.push(['clear-actions', 'Clear pending', 'secondary']);
+      out.push(['reset-passkeys', 'Reset passkeys', 'danger']);
+      out.push(['password', 'Password…', 'danger']);
+    } else if (!isAdmin() && can('invite') && u.created_by && u.created_by === (me && me.user)) {
+      out.push(['invite', 'Send new invite', 'primary']);
     }
-    if (canRemove(u)) keyActions.push(['delete-user', 'Delete', 'danger']);
-    if (admin || keyActions.length) {
-      h += '<section class="pd-sec" aria-label="Keys and account"><h3 class="pd-h3">' + (admin ? 'Keys' : 'Account') + '</h3>';
+    if (canRemove(u)) out.push(['delete-user', 'Delete', 'danger']);
+    return out;
+  }
+  // The groups u has a row in, with the group page's row (state, tags).
+  function personGroupRows(u) {
+    const admin = isAdmin(), k = lc(u.username), out = [];
+    for (const g of groups()) {
+      const r = peopleRows(g, admin).find(x => lc(x.user) === k);
+      if (r) out.push({ g, r });
+    }
+    return out;
+  }
+  function addToGroupCandidates(u) {
+    if (!isAdmin() || !u || u.protected) return [];
+    return groups().filter(g => pickCandidates(g).some(x => x.username === u.username));
+  }
+
+  function personPageHtml(name) {
+    let h = '<nav class="pd-crumb" aria-label="Breadcrumb"><button type="button" class="pd-link pd-a" data-act="people-list">People</button> › <span class="pd-mono">' + esc(name) + '</span></nav>';
+    const u = userByName(name) || users().find(x => lc(x.username) === lc(name));
+    if (!u) return h + '<p class="pd-muted">There is nobody named <span class="pd-mono">' + esc(name) + '</span>.</p>';
+    const admin = isAdmin();
+    h += '<div class="pd-gp-head"><h2 class="pd-gp-name">' + esc(u.display_name || u.username) + '</h2><span class="pd-muted">' +
+      esc(u.username) + (u.email ? ' · ' + esc(u.email) : '') + '</span>';
+    if (u.self) h += '<span class="pd-pill info">you</span>';
+    if (u.protected === 'service') h += '<span class="pd-pill" title="The Hub\'s own LLDAP account (read-only here)">Hub service account</span>';
+    if (u.protected === 'core-admin') h += '<span class="pd-pill" title="Bootstrap LLDAP admin: Keycloak and enroll bind as it. Managed from the server only (./portcullis invite admin)">bootstrap admin (server-managed)</span>';
+    if (u.admin && u.protected !== 'service') h += '<span class="pd-pill info" title="Member of an administrator group: no invites from the Hub">administrator</span>';
+    h += '</div>';
+    // Custom fields, then Edit details.
+    const fs = fields().filter(f => ((u.attrs || {})[f.name] || []).length);
+    h += '<div class="pd-gp-sub pd-pp-sub">' + (fs.length ? fs.map(f => '<span class="pd-pp-field"><span class="pd-muted">' + esc(f.label || f.name) + '</span> ' +
+      fieldValueHtml(f, u.attrs[f.name]) + '</span>').join('') : '<span class="pd-muted">No details yet.</span>');
+    if (canEdit(u)) h += ' <button type="button" class="pd-btn secondary xs" data-act="edit-details" data-user="' + esc(u.username) + '">Edit details</button>';
+    else if (can('edit_details') && !u.protected) h += ' <span class="pd-muted pd-small">Only an admin can change ' + esc(u.username) + '.</span>';
+    h += '</div>';
+    if (u.created) h += '<p class="pd-muted pd-small">Since ' + esc(fmtDate(u.created)) + (u.created_by ? ' · account created by ' + esc(u.created_by) : '') + '</p>';
+    if (personNote && personNote.user === u.username) h += '<div class="pd-warn" role="status">' + esc(personNote.text) + '</div>';
+
+    h += '<div class="pd-pp-two">';
+    // Groups
+    const rows = personGroupRows(u);
+    h += '<section class="pd-card pd-pp-card" aria-labelledby="pd-pp-groups-h"><h3 class="pd-h3" id="pd-pp-groups-h">Groups</h3>';
+    if (!rows.length) h += '<p class="pd-muted">No groups.</p>';
+    else {
+      h += '<table class="pd-table pd-gp-people pd-pp-groups"><tbody>';
+      for (const { g, r } of rows) {
+        h += '<tr data-group="' + esc(g.name) + '"><td class="pd-nowrap"><a class="pd-a pd-mono" href="' + esc(groupHash(g.name)) + '">' + esc(g.name) + '</a></td><td>' +
+          (r.tags || kindPill(g)) + (r.state ? '<span class="pd-gp-state">' + r.state + '</span>' : '') +
+          (r.note ? '<div class="pd-muted pd-small">' + esc(r.note) + '</div>' : '') + '</td></tr>';
+      }
+      h += '</tbody></table>';
+    }
+    if (addToGroupCandidates(u).length) {
+      h += '<div class="pd-actions"><button type="button" class="pd-btn secondary sm" data-act="add-to-group" data-user="' + esc(u.username) + '">Add to group…</button></div>';
+    }
+    h += '</section>';
+    // Apps and Values (admins; filled by refreshExtras)
+    if (admin) {
+      h += '<section class="pd-card pd-pp-card" aria-labelledby="pd-pp-apps-h"><h3 class="pd-h3" id="pd-pp-apps-h">Apps</h3><div class="pd-pp-apps"><p class="pd-muted">Loading…</p></div>' +
+        '<h3 class="pd-h3 pd-pp-h-next" id="pd-pp-values-h">Values</h3><div class="pd-pp-values"><p class="pd-muted">Loading…</p></div></section>';
+    }
+    h += '</div>';
+    // Sign-in
+    const acts = personKeyActions(u);
+    if (admin || acts.length) {
+      h += '<section class="pd-card pd-pp-card" aria-labelledby="pd-pp-sign-h"><h3 class="pd-h3" id="pd-pp-sign-h">Sign-in</h3>';
       if (admin) {
         h += '<div>' + keyStatus(u) + '</div>';
         if (u.server_invite && !u.protected) h += '<div class="pd-muted" title="Administrators are invited and recovered from the server">recover on the server: <code>' + esc(u.server_invite) + '</code></div>';
       }
-      h += '<div class="pd-actions">' + keyActions.map(([a, label, cls]) =>
+      h += '<div class="pd-actions">' + acts.map(([a, label, cls]) =>
         '<button type="button" class="pd-btn ' + cls + ' sm" data-act="' + a + '" data-user="' + esc(u.username) + '">' + esc(label) + '</button>').join('') + '</div></section>';
     }
-    h += '</div>';
-    openDialog(u.display_name ? u.display_name + ' (' + u.username + ')' : u.username, h);
+    // History (admins)
+    if (admin) {
+      h += '<section class="pd-sec" aria-labelledby="pd-pp-hist-h"><div class="pd-head"><h3 class="pd-h3" id="pd-pp-hist-h">History</h3>' +
+        '<button type="button" class="pd-btn ghost xs" data-act="gp-hist-reload">Refresh</button></div><div class="pd-pp-hist"><p class="pd-muted">Loading…</p></div></section>';
+    }
+    return h;
+  }
+  // Add to group…: pick a group (rule-based ones too); its page opens
+  // with the person picked in Add people (end, reason and save there).
+  function openAddToGroup(name) {
+    const u = userByName(name);
+    const cand = addToGroupCandidates(u);
+    if (!cand.length) return;
+    const opt = g => {
+      let k = g.rule ? 'rule-based' + ((g.matches || []).map(lc).includes(lc(name)) ? ', matches the rule' : '') : g.builtin ? 'built-in' : '';
+      if (g.admin) k += (k ? ', ' : '') + 'administrators';
+      return '<option value="' + esc(g.name) + '">' + esc(g.name) + (k ? ' (' + esc(k) + ')' : '') + '</option>';
+    };
+    openDialog('Add ' + name + ' to a group',
+      '<p class="pd-note">Pick a group: its page opens with ' + esc(name) + ' already picked in Add people. Set the end there (and, on a rule-based group, the reason), then Add.</p>' +
+      '<div class="pd-inline"><label for="pa-group">Group</label><select id="pa-group">' + cand.map(opt).join('') + '</select></div>' +
+      '<div class="pd-actions"><button type="button" class="pd-btn primary sm" data-act="add-to-group-go" data-user="' + esc(name) + '">Open the group\'s page</button>' +
+      '<button type="button" class="pd-btn secondary sm" data-act="dialog-close">Cancel</button></div>');
+    dialogBody().querySelector('#pa-group').focus();
+  }
+  function renderPersonPage() {
+    const box = root.querySelector('.pd-person-page');
+    box.hidden = !personPage;
+    box.innerHTML = personPage ? personPageHtml(personPage) : '';
+    if (personPage) renderExtras();
+  }
+
+  // Apps (via which group, until when) and Values (app · label · value ·
+  // from), from GET …/users/{u}/apps. Each app and value links to the
+  // Hub, each group to its page.
+  function groupRef(name) {
+    return groupByName(name) ? '<a class="pd-a pd-mono" href="' + esc(groupHash(name)) + '">' + esc(name) + '</a>' : '<span class="pd-mono">' + esc(name) + '</span>';
+  }
+  function personAppsHtml(p, err) {
+    if (err) return '<p class="pd-muted">Can\'t load the apps: ' + esc(err) + '</p>';
+    if (!p) return '';
+    const apps = p.apps || [];
+    if (!apps.length) return '<p class="pd-muted">No apps.</p>';
+    let h = '<ul class="pd-uses">';
+    for (const a of apps) {
+      const via = (a.via || []).map(v => groupRef(v.group) + (v.until ? ' <span class="pd-muted">(until ' + esc(fmtDate(v.until)) + ')</span>' : ''));
+      h += '<li>' + hubLink(appFrag(a.instance), a.name || a.instance) + ' <span class="pd-muted">' + (via.length ? 'via</span> ' + via.join(', ') : 'everyone signed in</span>') + '</li>';
+    }
+    return h + '</ul>';
+  }
+  function personValuesHtml(p, err) {
+    if (err || !p) return '';
+    const vals = p.values || [];
+    if (!vals.length) return '<p class="pd-muted">No per-person values.</p>';
+    let h = '<table class="pd-table pd-pp-values-tbl"><tbody>';
+    for (const v of vals) {
+      const from = String(v.from || '');
+      h += '<tr><td>' + esc(v.app || v.instance) + ' <span class="pd-muted">·</span> ' + esc(v.label || v.key) + '</td><td>' + hubLink(appFrag(v.instance, v.key), String(v.value)) +
+        '</td><td class="pd-muted">' + (groupByName(from) ? 'from ' + groupRef(from) : esc(from)) + '</td></tr>';
+    }
+    return h + '</tbody></table>';
   }
 
   function memberLocked(g, m) {
@@ -564,7 +678,7 @@
     if (Object.keys(attrs).length) tasks.push(() => api('PUT', '/api/directory/users/' + enc(name) + '/details', { attrs }));
     if (!tasks.length) { toast('Nothing changed'); return; }
     const res = await act(async () => { for (const t of tasks) await t(); return {}; }, 'Saved ' + name);
-    if (res) openUser(name);
+    if (res) closeDialog();
   }
 
   // ── invite dialog ───────────────────────────────────────
@@ -578,12 +692,14 @@
       '<div><label for="nu-email">Email</label><input type="email" id="nu-email" autocomplete="off" required></div>' +
       '<div><label for="nu-display">Display name</label><input type="text" id="nu-display" autocomplete="off"></div></div>';
     if (admin) {
-      const gs = groups().filter(g => !g.rule && (!g.builtin || g.name === 'lldap_admin'));
+      const gs = groups().filter(g => !g.builtin || g.name === 'lldap_admin');
       h += '<fieldset class="pd-fieldset"><legend>Groups</legend><div class="pd-checks">' + (gs.length ? gs.map(g =>
         '<label' + (g.admin ? ' title="Administrator group: the user is onboarded from the server (./portcullis invite), not with an invite link"' : '') +
-        '><input type="checkbox" name="nu-group" value="' + esc(g.name) + '"> ' + esc(g.name) + (g.admin ? ' <span class="pd-pill info">admin</span>' : '') + '</label>').join('')
-        : '<span class="pd-muted">No manual groups yet.</span>') + '</div></fieldset>';
-      h += '<p class="pd-note">The new person gets a one-time invite link: they open it, register their security key, and they\'re signed in. No password. Rule-based groups add them once their details match.</p>';
+        '><input type="checkbox" name="nu-group" value="' + esc(g.name) + '" data-on="inv-group"' + (g.rule ? ' data-rule="1"' : '') + '> ' + esc(g.name) +
+        (g.admin ? ' <span class="pd-pill info">admin</span>' : '') + (g.rule ? ' <span class="pd-pill info">rule-based</span>' : '') + '</label>').join('')
+        : '<span class="pd-muted">No groups yet.</span>') + '</div>' + gs.filter(g => g.rule).map(inviteRuleHtml).join('') + '</fieldset>';
+      h += '<p class="pd-note">The new person gets a one-time invite link: they open it, register their security key, and they\'re signed in. No password. ' +
+        'A rule-based group you tick takes them in through its rule when they match it, else as added by hand, with your reason. Rule-based groups you don\'t tick add them once their details match.</p>';
       h += '<details class="pd-adv"><summary>Advanced: use a password instead of an invite</summary><div class="pd-checks">' +
         '<label><input type="checkbox" id="nu-use-password"> Onboard with a password</label></div><div class="pd-checks">' +
         '<label><input type="radio" name="nu-pwmode" value="generate" checked> Generate a strong password (shown once)</label>' +
@@ -610,6 +726,7 @@
       b.querySelectorAll('input[name="nu-group"]').forEach(i => {
         i.checked = want.includes(i.value) && !adminG.has(i.value) && !perm.has(i.value.toLowerCase());
       });
+      syncInviteRules();
     }
     b.querySelector('#nu-username').focus();
   }
@@ -618,13 +735,25 @@
     const b = dialogBody();
     const username = b.querySelector('#nu-username').value.trim();
     if (!username) { toast('A username is required', 'error'); return; }
+    const picked = Array.from(b.querySelectorAll('input[name="nu-group"]:checked'));
     const body = {
       username,
       email: b.querySelector('#nu-email').value.trim(),
       display_name: b.querySelector('#nu-display').value.trim(),
-      groups: Array.from(b.querySelectorAll('input[name="nu-group"]:checked')).map(i => i.value),
+      groups: picked.map(i => i.value),
       onboarding: 'invite',
     };
+    // A picked rule group they won't match needs a reason (an "added by
+    // hand" entry, stored with the new person).
+    const reasons = {};
+    for (const i of picked) {
+      const r = i.dataset.rule && b.querySelector('[data-reason-for="' + CSS.escape(i.value) + '"]');
+      if (!r) continue;
+      const v = r.value.trim();
+      if (!v) { toast(i.value + ' is rule-based and ' + username + ' won\'t match its rule: adding them by hand needs a reason', 'error'); r.focus(); return; }
+      reasons[i.value] = v;
+    }
+    if (Object.keys(reasons).length) body.reasons = reasons;
     const usePw = b.querySelector('#nu-use-password');
     if (usePw && usePw.checked) {
       body.onboarding = 'password';
@@ -633,10 +762,70 @@
       body.require_passkey = b.querySelector('#nu-require-passkey').checked;
     }
     const res = await act(() => api('POST', '/api/directory/users', body), username + ' created');
-    if (res) { closeDialog(); showSecret(res, username); }
+    if (!res) return;
+    closeDialog();
+    // The answer's applied / why / warnings stay on the new person's page.
+    const notes = (res.applied === false ? [notApplied(res.why)] : []).concat(res.warnings || []);
+    personNote = notes.length ? { user: username, text: notes.join(' · ') } : null;
+    if (notes.length) toast(notes.join(' · '), 'error');
+    if (userByName(username)) openPerson(username);
+    showSecret(res, username);
   }
 
-  // ── account actions (shared by the dialog) ──────────────
+  // inviteRuleHtml: under the groups pick, what a ticked rule group
+  // needs. The rule is evaluated here exactly as the server's wouldMatch
+  // does for an invite: rules read only custom fields, and a new account
+  // has none (username, email and display name are no rule input).
+  function inviteRuleHtml(g) {
+    const id = uid('nu-r-');
+    let h = '<div class="pd-inv-rule" data-rg="' + esc(g.name) + '" hidden><span class="pd-mono">' + esc(g.name) + '</span> <code>' + esc(g.rule.text) + '</code> ';
+    if (matchesNewPerson(g.rule.expr)) {
+      h += '<span class="pd-muted">they match the rule: nothing else needed.</span>';
+    } else {
+      h += '<span class="pd-muted">they won\'t match the rule (a new account has no details yet), so they are added by hand.</span>' +
+        '<div class="pd-inline"><label for="' + id + '">Reason (required)</label><input type="text" id="' + id + '" maxlength="500" placeholder="why?" data-reason-for="' + esc(g.name) + '"></div>';
+    }
+    if (g.adds_blocked) h += '<div class="pd-muted pd-small">⚠ ' + esc(g.adds_blocked) + '</div>';
+    return h + '</div>';
+  }
+  function syncInviteRules() {
+    const b = dialogBody();
+    b.querySelectorAll('input[name="nu-group"][data-rule]').forEach(i => {
+      const box = b.querySelector('.pd-inv-rule[data-rg="' + CSS.escape(i.value) + '"]');
+      if (box) box.hidden = !i.checked;
+    });
+  }
+  // matchesNewPerson mirrors rules.Eval for a person with no field values
+  // (and so no manager): an invalid tree matches nobody (fail closed, as
+  // Eval validates first); not negates a node after its own result.
+  function matchesNewPerson(e) {
+    return validRule(e, 0, { n: 0 }) && evalNew(e);
+  }
+  function validRule(e, depth, count) {
+    if (!e || depth > 16 || ++count.n > 256) return false;
+    const vals = e.values || [], items = e.items || [];
+    const field = /^[a-z][a-z0-9_]{0,30}$/.test(e.field || '');
+    switch (e.op) {
+      case 'all': case 'any':
+        return items.length > 0 && !e.field && !vals.length && items.every(i => validRule(i, depth + 1, count));
+      case 'is': case 'is_not': case 'reports_to': return !items.length && field && vals.length === 1;
+      case 'in': return !items.length && field && vals.length >= 1;
+      case 'empty': return !items.length && field && !vals.length;
+      default: return false;
+    }
+  }
+  function evalNew(e) {
+    let r;
+    switch (e.op) {
+      case 'all': r = e.items.every(evalNew); break;
+      case 'any': r = e.items.some(evalNew); break;
+      case 'is_not': case 'empty': r = true; break; // no values at all
+      default: r = false; // is, in, reports_to: nothing to match
+    }
+    return e.not ? !r : r;
+  }
+
+  // ── account actions (the person page's Sign-in) ─────────
   async function userAction(a, user) {
     const u = userByName(user);
     const path = '/api/directory/users/' + enc(user);
@@ -649,13 +838,11 @@
         return;
       }
       case 'require-passkey': {
-        const res = await act(() => api('POST', path + '/require-passkey', {}), user + ' will be asked to register a passkey at next sign-in');
-        if (res) openUser(user);
+        await act(() => api('POST', path + '/require-passkey', {}), user + ' will be asked to register a passkey at next sign-in');
         return;
       }
       case 'clear-actions': {
-        const res = await act(() => api('POST', path + '/clear-actions', {}), 'Cleared pending actions');
-        if (res) openUser(user);
+        await act(() => api('POST', path + '/clear-actions', {}), 'Cleared pending actions');
         return;
       }
       case 'reset-passkeys': {
@@ -689,7 +876,7 @@
       case 'delete-user': {
         if (!typed('Delete ' + user + ' from LLDAP and Keycloak. This cannot be undone.', user)) return;
         const res = await act(() => api('DELETE', path, { confirm: user }), 'Deleted ' + user);
-        if (res) closeDialog();
+        if (res && personPage && lc(personPage) === lc(user)) userSelectTab('people', false);
         return;
       }
     }
@@ -1053,7 +1240,10 @@
   // Two views on one tab, both hash routes on both listeners: #groups (the
   // list) and #groups/<name> (a group's page, the only place membership
   // changes). Back and forward move between them (hashchange → onHash).
+  // #people/<name> (a person's page) is a route too.
   function parseRoute(h) {
+    const p = /^#people\/(.+)$/.exec(h || '');
+    if (p) { try { const n = decodeURIComponent(p[1]); return n ? { person: n } : null; } catch (_) { return null; } }
     const m = /^#groups(?:\/(.+))?$/.exec(h || '');
     if (!m) return null;
     if (!m[1]) return { group: null };
@@ -1068,26 +1258,56 @@
   // applyRoute shows the list or a group's page (before the first load
   // only the state is set: load renders it).
   function applyRoute(r) {
-    groupPage = r.group;
-    tab = 'groups';
+    const hadGroup = !!groupPage, hadPerson = !!personPage;
+    if (r.person) {
+      if (personNote && personNote.user !== r.person) personNote = null;
+      groupPage = null;
+      personPage = r.person;
+      tab = 'people';
+    } else {
+      personPage = null;
+      groupPage = r.group;
+      tab = 'groups';
+    }
     if (!dir) return;
-    renderGroups();
-    selectTab('groups', false);
-    if (groupPage) refreshExtras();
+    if (r.person || hadPerson) renderPeople();
+    if (!r.person || hadGroup) renderGroups();
+    selectTab(tab, false);
+    if (groupPage || personPage) refreshExtras();
+  }
+  // clearRoutes leaves a group's or a person's page (their tabs show
+  // their lists again).
+  function clearRoutes() {
+    const hadGroup = !!groupPage, hadPerson = !!personPage;
+    groupPage = null;
+    personPage = null;
+    if (!dir) return;
+    if (hadPerson) renderPeople();
+    if (hadGroup) renderGroups();
+  }
+  // legacyUser: an old person link, #users/<name>[?password|?invite]
+  // (people.<domain> only: on the Hub, index.html routes it to openAt).
+  function legacyUser(h) {
+    if (options.listener !== 'people') return null;
+    const m = /^#users\/([^?]+)(?:\?(password|invite))?$/.exec(h || '');
+    if (!m) return null;
+    try { return { name: decodeURIComponent(m[1]), action: m[2] || '' }; } catch (_) { return null; }
   }
   function onHash() {
     if (!root) return;
+    const old = legacyUser(location.hash);
+    if (old) { setHash(personHash(old.name), false); openAt(old.name, old.action); return; }
     const r = parseRoute(location.hash);
     if (r) {
-      if (r.group !== groupPage || tab !== 'groups') applyRoute(r);
+      if (r.person ? r.person !== personPage || tab !== 'people' : r.group !== groupPage || tab !== 'groups' || personPage) applyRoute(r);
       return;
     }
     if (!dir) return;
     if (options.hashTabs) {
       const t = location.hash.slice(1) || 'people';
-      if (BUILTIN_TABS.includes(t) || extraTabs.some(x => x.id === t)) { groupPage = null; selectTab(t, false); }
-    } else if (location.hash === '#users' && tab === 'groups') {
-      groupPage = null;
+      if (BUILTIN_TABS.includes(t) || extraTabs.some(x => x.id === t)) { clearRoutes(); selectTab(t, false); }
+    } else if (location.hash === '#users' && (tab === 'groups' || personPage)) {
+      clearRoutes();
       selectTab('people', false);
     }
   }
@@ -1096,17 +1316,18 @@
   function userSelectTab(name, focus) {
     const fromGroups = !!parseRoute(location.hash);
     if (name === 'groups') {
-      groupPage = null;
+      clearRoutes();
       renderGroups();
       selectTab('groups', focus);
       setHash('#groups', true);
       return;
     }
+    clearRoutes();
     selectTab(name, focus);
     if (options.hashTabs) setHash(name === 'people' ? '' : '#' + name, fromGroups);
     else if (fromGroups) setHash('#users', true);
   }
-  // openGroup (Tasks 6 and 7): the group's page, with people already
+  // openGroup (the person page's Add to group…, Task 7): the group's page, with people already
   // picked in its Add people form.
   function openGroup(name, opts) {
     name = String(name || '');
@@ -1226,6 +1447,13 @@
       return r;
     });
   }
+  // peopleRows: a group's rows as the caller may see them (the group
+  // page and the person page share them).
+  function peopleRows(g, admin) {
+    if (admin) return g.rule ? ruleRows(g) : manualRows(g);
+    return g.rule ? (g.members || []).map(u => ({ user: u, tags: '', state: '', note: '', acts: [] }))
+      : manualRows(g).map(r => Object.assign(r, { tags: '', acts: [] }));
+  }
   function personCell(u) {
     const p = userByName(u);
     return '<button type="button" class="pd-link pd-mono" data-act="open-user" data-user="' + esc(u) + '">' + esc(u) + '</button>' +
@@ -1251,8 +1479,7 @@
     if (pageNote && pageNote.group === g.name) h += '<div class="pd-warn" role="status">' + esc(pageNote.text) + '</div>';
 
     // People
-    const rows = !admin ? (g.rule ? (g.members || []).map(u => ({ user: u, tags: '', state: '', note: '', acts: [] })) : manualRows(g).map(r => Object.assign(r, { tags: '', acts: [] })))
-      : g.rule ? ruleRows(g) : manualRows(g);
+    const rows = peopleRows(g, admin);
     h += '<section class="pd-sec" aria-labelledby="pd-gp-people"><h3 class="pd-h3" id="pd-gp-people">People (' + esc((g.members || []).length) + ')</h3>';
     if (!rows.length) h += '<p class="pd-muted">' + (g.rule ? 'Nobody matches yet.' : 'No members.') + '</p>';
     else {
@@ -1434,9 +1661,28 @@
   }
 
   // Used by (admins, GET …/uses) and History (admins, audit?group=),
-  // fetched when the page opens and after every save.
+  // fetched when the page opens and after every save. A person's page:
+  // their apps and values (GET …/users/{u}/apps) and audit?user=.
   async function refreshExtras() {
-    if (!isAdmin() || !groupPage || !groupByName(groupPage)) return;
+    if (!isAdmin()) return;
+    if (personPage) {
+      const who = personPage;
+      if (!userByName(who)) return;
+      const seq = ++extrasSeq;
+      const [p, a] = await Promise.allSettled([
+        api('GET', '/api/directory/users/' + enc(who) + '/apps'),
+        api('GET', '/api/directory/audit?user=' + enc(who)),
+      ]);
+      if (seq !== extrasSeq || personPage !== who) return;
+      extras = {
+        person: who,
+        apps: p.status === 'fulfilled' ? p.value : null, appsErr: p.status === 'rejected' ? errText(p.reason) : '',
+        audit: a.status === 'fulfilled' ? a.value : null, auditErr: a.status === 'rejected' ? errText(a.reason) : '',
+      };
+      renderExtras();
+      return;
+    }
+    if (!groupPage || !groupByName(groupPage)) return;
     const name = groupPage;
     const seq = ++extrasSeq;
     const [u, a] = await Promise.allSettled([
@@ -1452,10 +1698,18 @@
     renderExtras();
   }
   function renderExtras() {
+    if (personPage) {
+      if (extras.person !== personPage) return;
+      const ab = root.querySelector('.pd-pp-apps'), vb = root.querySelector('.pd-pp-values'), hb = root.querySelector('.pd-pp-hist');
+      if (ab) ab.innerHTML = personAppsHtml(extras.apps, extras.appsErr);
+      if (vb) vb.innerHTML = personValuesHtml(extras.apps, extras.appsErr);
+      if (hb) hb.innerHTML = historyHtml(extras.audit, extras.auditErr, e => personHistoryWords(e));
+      return;
+    }
     if (!groupPage || extras.group !== groupPage) return;
     const ub = root.querySelector('.pd-gp-uses'), hb = root.querySelector('.pd-gp-hist');
     if (ub) ub.innerHTML = usesHtml(groupByName(groupPage), extras.uses, extras.usesErr);
-    if (hb) hb.innerHTML = historyHtml(extras.audit, extras.auditErr);
+    if (hb) hb.innerHTML = historyHtml(extras.audit, extras.auditErr, e => historyWords(e, groupPage));
   }
   const ROLE_TEXT = { access: 'access group', admin: 'admin group', privileged: 'privileged values' };
   const SCOPE_TEXT = { person: 'per-person row', group: 'group record', instance: 'app setting' };
@@ -1544,11 +1798,27 @@
       default: return e.action + (tu ? ' ' + tu : '');
     }
   }
+  // A person's history: group entries name their group first (the
+  // group page's words), account entries in words of their own.
+  const USER_WORDS = {
+    'user.create': 'created the account', 'user.update': 'changed the email or display name', 'user.details': 'changed the details',
+    'user.invite': 'sent a new invite', 'user.password': 'set a password', 'user.remove_passkeys': 'reset the passkeys',
+    'user.require_passkey': 'asked for a passkey at the next sign-in', 'user.clear_actions': 'cleared the pending sign-in actions',
+    'user.delete': 'deleted the account',
+  };
+  function personHistoryWords(e) {
+    const a = e.action || '', t = e.target || '';
+    if (a.startsWith('group.')) {
+      const g = t.includes(':') ? t.slice(0, t.lastIndexOf(':')) : t;
+      return (g ? g + ': ' : '') + historyWords(e, g);
+    }
+    return USER_WORDS[a] || a + (t ? ' ' + t : '');
+  }
   function actorWords(e) {
     const a = e.actor === 'portcullis-hub (rules)' ? 'the rules' : (e.actor || '');
     return a + (e.via === 'ai' ? ' via AI' + (e.client ? ' (' + e.client + ')' : '') : '');
   }
-  function historyHtml(items, err) {
+  function historyHtml(items, err, words) {
     if (err) return '<p class="pd-muted">Can\'t load the history: ' + esc(err) + '</p>';
     if (!items) return '';
     if (!items.length) return '<p class="pd-muted">Nothing yet.</p>';
@@ -1558,7 +1828,7 @@
     for (const e of items) {
       const raw = e.action + ' ' + (e.target || '') + (e.detail ? ' · ' + e.detail : '') + (e.error ? ' · ' + e.error : '');
       const res = e.result === 'ok' ? '' : '<span class="pd-pill ' + (e.result === 'refused' ? 'warn' : 'bad') + '">' + esc(e.result) + '</span>';
-      h += '<li title="' + esc(raw) + '"><span class="pd-muted pd-nowrap">' + esc(fmtTime(e.time)) + '</span> <span>' + esc(historyWords(e, groupPage)) + '</span> ' + res +
+      h += '<li title="' + esc(raw) + '"><span class="pd-muted pd-nowrap">' + esc(fmtTime(e.time)) + '</span> <span>' + esc(words(e)) + '</span> ' + res +
         ' <span class="pd-muted">· ' + esc(actorWords(e)) + '</span>' + (e.error ? '<div class="pd-muted pd-small">' + esc(e.error) + '</div>' : '') + '</li>';
     }
     return h + '</ol>';
@@ -2178,7 +2448,7 @@
       const tr = e.target.closest('tr.pd-row');
       if (!tr || e.target.closest('a, button, input, select, textarea, label')) return;
       if (tr.classList.contains('pd-grow')) location.hash = groupHash(tr.dataset.group); // a group's row opens its page
-      else openUser(tr.dataset.user);
+      else openPerson(tr.dataset.user);
       return;
     }
     const a = b.dataset.act, user = b.dataset.user || '', group = b.dataset.group || '';
@@ -2188,7 +2458,16 @@
       case 'copy-secret': return copyText(root.querySelector('.pd-secret input').value);
       case 'hide-secret': return hideSecret();
       case 'copy-input': { const el = document.getElementById(b.dataset.input); if (el) copyText(el.value); return; }
-      case 'open-user': return openUser(user);
+      case 'open-user': return openPerson(user);
+      case 'people-list': return userSelectTab('people', true);
+      case 'edit-details': return openDetails(user);
+      case 'add-to-group': return openAddToGroup(user);
+      case 'add-to-group-go': {
+        const sel = dialogBody().querySelector('#pa-group');
+        if (!sel || !sel.value) return;
+        closeDialog();
+        return openGroup(sel.value, { preselect: [user] });
+      }
       case 'save-user': return saveUser(user);
       case 'invite-open': return openInvite(null);
       case 'invite-create': return createUser();
@@ -2197,15 +2476,6 @@
       case 'remove-stale':
         if (!typed('Remove the stale Keycloak copy of ' + user + ' (LLDAP no longer has this user). This only deletes it from Keycloak.', user)) return;
         return act(() => api('DELETE', '/api/directory/keycloak-stale/' + enc(user), { confirm: user }), 'Removed the Keycloak copy of ' + user);
-      case 'user-add-group': {
-        const sel = dialogBody().querySelector('#pu-addgroup');
-        if (!sel || !sel.value) return;
-        const g = groupByName(sel.value);
-        if (g && g.admin && !confirm('Make ' + user + ' an administrator (' + g.name + ')? Administrators can no longer be invited from the Hub; they are recovered from the server.')) return;
-        const res = await act(() => api('POST', '/api/directory/groups/' + enc(sel.value) + '/members', { username: user }), user + ' added to ' + sel.value);
-        if (res) openUser(user);
-        return;
-      }
       case 'gp-delete': {
         const g = groupByName(group);
         if (!g) return;
@@ -2213,12 +2483,6 @@
         if (!typed(deleteWhat(g, u) + ' This cannot be undone.', group)) return;
         const res = await act(() => api('DELETE', gpath, { confirm: group }), 'Deleted ' + group);
         if (res && groupPage === group) { groupPage = null; setHash('#groups', false); renderGroups(); }
-        return;
-      }
-      case 'remove-member': {
-        if (!confirm('Remove ' + user + ' from ' + group + '?')) return;
-        const res = await act(() => api('DELETE', gpath + '/members/' + enc(user), {}), user + ' removed from ' + group);
-        if (res && root.querySelector('.pd-dialog').open) openUser(user);
         return;
       }
       case 'gp-remove': {
@@ -2321,6 +2585,7 @@
     if (t.classList.contains('pd-import-file')) { importUpload(t.files && t.files[0]); return; }
     if (t.name === 'kind' && t.form && t.form.dataset.form === 'new-field') { syncNewFieldForm(); return; }
     const on = t.dataset && t.dataset.on;
+    if (on === 'inv-group') { syncInviteRules(); return; }
     if (on === 'org-field') { orgField = t.value; renderOrg(); return; }
     if (on === 'audit-filter') { auditFilter = t.value; loadAudit(); return; }
     if (!imp) return;
@@ -2376,8 +2641,8 @@
     '<input type="search" id="pd-search" placeholder="search people…" autocomplete="off"><span class="pd-people-count pd-muted"></span><span class="pd-spacer"></span>' +
     '<span class="pd-people-actions"></span><input type="file" class="pd-import-file" accept=".csv,text/csv" hidden aria-label="CSV file to import"></div>' +
     '<div class="pd-stale"></div><div class="pd-scroll pd-people-table"></div>' +
-    '<p class="pd-legend pd-muted">⚡ = member through a rule · ✱ = exception (hover for the reason) · ⏳ = membership ends · click a row for details</p></div>' +
-    '<div class="pd-import" hidden></div><div class="pd-imp-dls"></div></section>' +
+    '<p class="pd-legend pd-muted">⚡ = matches the rule · ✱ = added by hand · ⏳ = membership ends · click a person to open their page</p></div>' +
+    '<div class="pd-import" hidden></div><div class="pd-imp-dls"></div><div class="pd-person-page" hidden></div></section>' +
     '<section class="pd-panel pd-groups" data-panel="groups" id="pd-panel-groups" role="tabpanel" aria-labelledby="pd-tab-groups" hidden></section>' +
     '<section class="pd-panel pd-org" data-panel="org" id="pd-panel-org" role="tabpanel" aria-labelledby="pd-tab-org" hidden></section>' +
     '<section class="pd-panel pd-setup" data-panel="setup" id="pd-panel-setup" role="tabpanel" aria-labelledby="pd-tab-setup" hidden></section>' +
@@ -2406,8 +2671,11 @@
       root.querySelector('.pd-panel[data-panel="setup"]').insertAdjacentHTML('beforebegin',
         '<section class="pd-panel" data-panel="' + esc(t.id) + '" id="pd-panel-' + esc(t.id) + '" role="tabpanel" aria-labelledby="pd-tab-' + esc(t.id) + '" hidden></section>');
     }
+    const old = legacyUser(location.hash);
+    if (old) { setHash(personHash(old.name), false); pendingOpen = old; }
     const r = parseRoute(location.hash);
-    if (r) { tab = 'groups'; groupPage = r.group; }
+    if (r && r.person) { tab = 'people'; personPage = r.person; }
+    else if (r) { tab = 'groups'; groupPage = r.group; }
     else if (options.hashTabs) {
       const h = location.hash.slice(1);
       if (BUILTIN_TABS.includes(h) || extraTabs.some(t => t.id === h)) tab = h;
@@ -2432,14 +2700,16 @@
   function show(el, opts) {
     mount(el, opts);
     loading = load();
+    if (pendingOpen) { const p = pendingOpen; pendingOpen = null; openAt(p.name, p.action); }
     return loading;
   }
 
   // openAt opens a person (deep link #users/<name>[?password|?invite],
   // the Portcullis MCP's set_password / send_invite forms): after the
-  // current load, the person's dialog, then the action's own prompt — the
-  // secret is typed (or the link shown) here, never passed through the
-  // AI. With URLSearchParams (#users?create&…): the new-person form.
+  // current load, the person's page (#people/<name>), then the action's
+  // own prompt — the secret is typed (or the link shown) here, never
+  // passed through the AI. With URLSearchParams (#users?create&…): the
+  // new-person form.
   async function openAt(name, action) {
     if (loading) await loading;
     if (action instanceof URLSearchParams) {
@@ -2448,7 +2718,8 @@
       return;
     }
     if (!userByName(name)) return;
-    openUser(name);
+    setHash(personHash(name), false);
+    applyRoute({ person: name });
     if (action === 'password' || action === 'invite') userAction(action, name);
   }
 
@@ -2466,17 +2737,18 @@
     return '<span class="' + cls + '">' + esc(d) + '</span>';
   }
 
-  // route applies the current #groups[/<name>] hash (the Hub page calls
-  // it each time its Users tab opens, so the view follows the hash).
-  // Any other hash (the Hub's #users) leaves a group route: People.
+  // route applies the current #groups[/<name>] or #people/<name> hash
+  // (the Hub page calls it each time its Users tab opens, so the view
+  // follows the hash). Any other hash (the Hub's #users) leaves a route:
+  // People.
   function route() {
     if (!root) return;
     const r = parseRoute(location.hash);
     if (r) { applyRoute(r); return; }
-    if (tab !== 'groups' && !groupPage) return;
-    groupPage = null;
+    if (tab !== 'groups' && !groupPage && !personPage) return;
+    clearRoutes();
     tab = 'people';
-    if (dir) { renderGroups(); selectTab('people', false); }
+    if (dir) selectTab('people', false);
   }
 
   window.PortcullisDirectory = { show, openAt, openGroup, route, csvCell };
