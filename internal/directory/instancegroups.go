@@ -65,14 +65,18 @@ func (s *Service) ResolveActor(ctx context.Context, actor Actor) error {
 
 // DeleteInstanceGroup deletes group name for an instance delete, as
 // actor. Missing = nothing to do (retries). A protected or permission
-// group is kept, with a warning. Users & Groups not configured (no LLDAP
-// credentials) is a warning too: the group stays in LLDAP.
+// group is kept, with a warning: decided, nothing to retry. Users &
+// Groups not configured or not answering (no LLDAP credentials, LLDAP
+// down) keeps the group too, but undecided: a *KeptUnavailableError
+// (errors.Is ErrKeptUnavailable), whose text is the warning for people —
+// a delete shows it as one, an enable's Stop fails its undo step (Stop
+// again retries).
 func (s *Service) DeleteInstanceGroup(ctx context.Context, actor Actor, name string) (warnings []string, err error) {
 	if name == "" {
 		return nil, nil
 	}
 	if aerr := s.LLDAP.Available(); aerr != nil {
-		return []string{fmt.Sprintf("group %s was kept: %s (%v) — delete it on the Users & Groups page", name, keptUnavailable, aerr)}, nil
+		return nil, &KeptUnavailableError{Group: name, Cause: aerr}
 	}
 	why, err := s.keptGroupReason(name)
 	if err != nil {
@@ -96,17 +100,28 @@ func (s *Service) DeleteInstanceGroup(ctx context.Context, actor Actor, name str
 	return warnings, err
 }
 
-// keptUnavailable is the reason in DeleteInstanceGroup's warning when
-// Users & Groups didn't answer (KeptUnavailable).
-const keptUnavailable = "users & groups is not available"
+// ErrKeptUnavailable: DeleteInstanceGroup kept the group only because
+// Users & Groups didn't answer — nothing was decided (an enable's Stop
+// retries it), unlike a group kept because it is protected or shared (a
+// warning). Matched with errors.Is on a *KeptUnavailableError.
+var ErrKeptUnavailable = errors.New("users & groups is not available")
 
-// KeptUnavailable: w is DeleteInstanceGroup's warning that it kept the
-// group only because Users & Groups didn't answer — nothing was decided
-// (an enable's Stop retries it), unlike a group kept because it is
-// protected or shared.
-func KeptUnavailable(w string) bool {
-	return strings.Contains(w, " was kept: "+keptUnavailable)
+// KeptUnavailableError is DeleteInstanceGroup's answer when Users &
+// Groups didn't answer: Group was kept, Cause is why. Its text is the
+// warning shown to people.
+type KeptUnavailableError struct {
+	Group string
+	Cause error
 }
+
+func (e *KeptUnavailableError) Error() string {
+	return fmt.Sprintf("group %s was kept: %s (%v) — delete it on the Users & Groups page", e.Group, ErrKeptUnavailable, e.Cause)
+}
+
+// Is: errors.Is(err, ErrKeptUnavailable).
+func (e *KeptUnavailableError) Is(target error) bool { return target == ErrKeptUnavailable }
+
+func (e *KeptUnavailableError) Unwrap() error { return e.Cause }
 
 // CreateInstanceGroup creates an instance's (empty, manual) group as
 // actor. An existing group is kept as it is, with a warning (its members

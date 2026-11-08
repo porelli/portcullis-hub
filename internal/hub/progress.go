@@ -671,6 +671,17 @@ func (p *Progress) finish(r OpRecord, err error) {
 	}
 }
 
+// liveRecord is the record as written (recordLocked) while the
+// operation is accepted and not ended; false otherwise.
+func (p *Progress) liveRecord() (OpRecord, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.live || p.closed {
+		return OpRecord{}, false
+	}
+	return p.recordLocked(), true
+}
+
 // stopAccepted: a Stop of this operation was accepted.
 func (p *Progress) stopAccepted() bool {
 	p.mu.Lock()

@@ -214,14 +214,18 @@ func (h *Hub) recordOpLocked(id string, r OpRecord) {
 		}
 	}
 	h.ops[id] = r
+	h.keepHistoryLocked(id, r)
 }
 
 // recordOpUnlessOther is recordOp, except over a running record of
-// another operation (another op id), which it leaves in place: false.
+// another operation (another op id), which it leaves in place: false. An
+// ended r is still kept in the op history then (its own outcome stays
+// readable by op id).
 func (h *Hub) recordOpUnlessOther(id string, r OpRecord) bool {
 	h.opsMu.Lock()
 	defer h.opsMu.Unlock()
 	if cur, ok := h.ops[id]; ok && cur.Running && cur.OpID != r.OpID {
+		h.keepHistoryLocked(id, r)
 		return false
 	}
 	h.recordOpLocked(id, r)

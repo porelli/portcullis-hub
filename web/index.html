@@ -864,7 +864,7 @@
       return new Promise((resolve, reject) => {
         const tr = trackOp(id, opId, { op, op_id: opId, running: true, steps: [] });
         tr.waiters.push(rec => {
-          if (!rec) { reject(Object.assign(new Error(op + ': its record was replaced by a newer operation'), { shown: true })); return; }
+          if (!rec) { reject(Object.assign(new Error(op + ': the panel moved to another operation'), { shown: true })); return; }
           if (rec.ok) { resolve({ result: rec.result || {}, warnings: rec.warnings || [], rec }); return; }
           const stopped = oppPhase(rec) === 'stopped';
           const err = new Error(stopped ? op + ' stopped' : (rec.error || (op + ' failed')));
@@ -909,8 +909,9 @@
       stopped: ['■', 'stop', 'stopped'], failed: ['✗', 'bad', 'failed'], undone: ['↺', 'undone', 'undone'],
     };
     const OPP_RESULT = { archive: 'Archive', backup: 'Automatic backup', pre_restore_backup: 'Pre-restore backup', instance: 'Instance', groups_created: 'Groups created' };
+    const OPP_THEN_STATE = { running: 'running', stopping: 'stopping', ok: 'ok', stopped: 'stopped', undo_failed: 'undo failed', interrupted: 'interrupted', failed: 'failed' };
     const OPP_UNDO_NOTE = { enable: 'Only what this enable created is undone. Images already downloaded are kept.' };
-    const opTracks = {};  // instance id → { id, opId, rec, waiters, timer, ended }
+    const opTracks = {};  // instance id → { id, opId, rec, waiters, timer, ended, then }
     const opRunning = {}; // instance id → its running record (cards, chips, tables)
     const opp = { id: null, confirm: false, notice: '', stopSent: {}, sending: false, reloadOnClose: false, sig: {} };
     let oppReturnFocus = null;
@@ -954,7 +955,6 @@
     // A detail may hold several lines (newlines, or "; " between images).
     function oppLines(d) { return String(d || '').split(/\n|; /).map(x => x.trim()).filter(Boolean); }
     function oppPhase(r) {
-      if (r.replaced_by) return 'replaced';
       if (r.running) return r.stopping ? 'stopping' : 'running';
       if (r.ok) return 'ok';
       if (r.stopped_at && !r.error) return 'stopped';
@@ -979,7 +979,6 @@
         case 'stopped': return r.op === 'ai' ? 'AI support for ' + app + ' was not switched' : app + ' was not ' + w.ed;
         case 'undo_failed': return 'Stopping ' + app + ' — the undo failed';
         case 'interrupted': return w.ing + ' ' + app + ' was interrupted';
-        case 'replaced': return w.ing + ' ' + app + ' ended';
       }
       return w.ing + ' ' + app + ' failed';
     }
@@ -1057,11 +1056,6 @@
         h += '<div class="opp-note warn">interrupted: the Hub stopped while this ran.' +
           (r.stoppable ? ' Stop undoes what it did.' : ' It can\'t be stopped from here.') + '</div>';
       }
-      if (phase === 'replaced') {
-        const b = r.replaced_by, bw = opWords(b.op);
-        h += '<div class="opp-note warn">It ended before its outcome could be read: a newer record (' + escapeHtml(lcFirst(bw.short)) + ': ' +
-          escapeHtml(b.ok ? 'ok' : (b.error || 'failed')) + ') replaced it. Check the app to see where it stands.</div>';
-      }
       if (opp.notice) h += '<div class="opp-note bad" role="status">' + escapeHtml(opp.notice) + '</div>';
       const steps = r.steps || [];
       const fwd = steps.filter(s => !String(s.key).startsWith('undo:')), undo = steps.filter(s => String(s.key).startsWith('undo:'));
@@ -1079,8 +1073,15 @@
         if (keys.length) h += '<div class="opp-result">' + keys.map(k => escapeHtml(OPP_RESULT[k] || k) + ': <code>' + escapeHtml(res[k]) + '</code>').join('<br>') + '</div>';
       }
       if ((phase === 'ok' || phase === 'stopped') && (r.warnings || []).length) h += '<h4 class="opp-sep">Warnings</h4>' + warningsList(r.warnings);
+      // A newer operation became the app's since this one (the panel
+      // keeps this one's own outcome): "then: Restarting (running) show".
+      const nx = !r.running && tr.then;
+      if (nx) {
+        h += '<div class="opp-note opp-then">then: ' + escapeHtml(opWords(nx.op).short) + ' (' + escapeHtml(OPP_THEN_STATE[oppPhase(nx)] || 'ended') + ') ' +
+          '<button type="button" class="opp-link" data-opp-then>show</button></div>';
+      }
       // Re-rendered only when it changed (an open <details> stays open).
-      const sigBody = JSON.stringify(r) + '|' + opp.notice + '|' + app;
+      const sigBody = JSON.stringify(r) + '|' + opp.notice + '|' + app + '|' + (nx ? nx.op_id + oppPhase(nx) : '');
       if (opp.sig.body !== sigBody) { body.innerHTML = h; opp.sig.body = sigBody; }
 
       const canStop = !!r.stoppable && !r.stopping;
@@ -1117,7 +1118,8 @@
       }
       renderOpPanel();
       dlg.querySelector('#opp-title').focus();
-      scheduleTrack(opTracks[id], 0);
+      const tr = opTracks[id];
+      if (tr.ended) opThen(tr); else scheduleTrack(tr, 0);
     }
     function closeOpPanel() {
       const dlg = document.getElementById('op-panel');
@@ -1130,6 +1132,11 @@
       dlg.innerHTML = '';
       if (oppReturnFocus && document.contains(oppReturnFocus)) oppReturnFocus.focus();
       oppReturnFocus = null;
+      // A newer operation the panel named ("then: …") and that runs: its
+      // card state follows it now.
+      Object.values(opTracks).forEach(tr => {
+        if (tr.ended && tr.then && tr.then.running && opTracks[tr.id] === tr) trackOp(tr.id, tr.then.op_id, tr.then);
+      });
       if (opp.reloadOnClose || pageReloadOwed) { opp.reloadOnClose = false; reloadWhenIdle(); }
     });
     // Esc closes the panel, or leaves the Stop confirm step first.
@@ -1146,6 +1153,10 @@
       if (t.closest('[data-opp-stop]')) { opp.confirm = true; opp.notice = ''; renderOpPanel(); return; }
       if (t.closest('[data-opp-stop-cancel]')) { opp.confirm = false; renderOpPanel(); document.querySelector('#op-panel [data-opp-stop]')?.focus(); return; }
       if (t.closest('[data-opp-stop-go]')) oppStop();
+      if (t.closest('[data-opp-then]')) {
+        const tr = opTracks[opp.id];
+        if (tr && tr.then) openOpPanel(opp.id, tr.then);
+      }
     });
     function oppOpen() { return document.getElementById('op-panel').open; }
 
@@ -1175,9 +1186,11 @@
       if (rec && rec.op && status === 202) opEnded.delete(id + '/' + rec.op_id); // resumed: its undo runs
       const changed = !!(rec && rec.op && sent && rec.op_id !== sent);
       if (changed) {
-        // Another operation's record: the poller decides what it means
-        // for the one shown (followed when it runs, else "replaced").
+        // Another operation's record: the one shown keeps its own
+        // outcome (its poller asks by op id); the newer one is its
+        // "then:" note.
         if (opTracks[id] === tr && !tr.ended) scheduleTrack(tr, 0);
+        else if (opTracks[id] === tr) opThen(tr);
       } else if (rec && rec.op && opFresh(id, seq) && !opSeenEnded(id, rec)) {
         setTrackRec(tr, rec);
         if (rec.running) { tr.ended = false; scheduleTrack(tr, 1000); }
@@ -1247,27 +1260,15 @@
       if (opTracks[tr.id] !== tr) return;
       let rec = null;
       const seq = opBegin(tr.id);
-      try { rec = await apiGet('/api/instances/' + encodeURIComponent(tr.id) + '/op'); tr.err = null; } catch (e) { tr.err = e; }
+      // By op id (contract §11.7 "Op history"): always this operation's
+      // own record, running or ended, whatever became the app's since.
+      const url = '/api/instances/' + encodeURIComponent(tr.id) + '/op' + (tr.opId ? '?op_id=' + encodeURIComponent(tr.opId) : '');
+      try { rec = await apiGet(url); tr.err = null; } catch (e) { tr.err = e; }
       if (opTracks[tr.id] !== tr) return;
       // A newer answer was applied meanwhile (it scheduled what follows).
       if (rec && !opFresh(tr.id, seq)) return;
       if (opSeenEnded(tr.id, rec)) rec = null;
-      if (rec && rec.op && tr.opId && rec.op_id !== tr.opId) {
-        if (rec.running) {
-          // A newer operation runs: ours ended unseen, the panel follows
-          // the new one.
-          tr.waiters.splice(0).forEach(w => w(null));
-          tr.opId = rec.op_id;
-          tr.ended = false;
-        } else {
-          // An ended record that isn't ours (a newer operation's, or one
-          // written after ours ended): never shown as ours. Ours ended
-          // unseen: it ends as "replaced", its last steps kept.
-          const by = { op: rec.op, ok: !!rec.ok, error: rec.error || '' };
-          const last = tr.rec && tr.rec.op_id === tr.opId ? tr.rec : { op: (tr.rec && tr.rec.op) || rec.op, steps: [] };
-          rec = Object.assign({}, last, { op_id: tr.opId, running: false, stoppable: false, stopping: false, replaced_by: by });
-        }
-      }
+      if (rec && rec.op && tr.opId && rec.op_id !== tr.opId) rec = null; // never another operation's
       if (rec && rec.op) setTrackRec(tr, rec);
       if (tr.rec && tr.rec.op && !tr.rec.running && !tr.err) endTrack(tr);
       else if (!tr.ended) scheduleTrack(tr);
@@ -1293,8 +1294,27 @@
         const ph = oppPhase(r);
         showToast(oppTitle(r, opAppName(tr.id)), ph === 'ok' || ph === 'stopped' ? 'success' : 'error');
       }
-      ws.forEach(w => w(r && r.replaced_by ? null : r));
+      ws.forEach(w => w(r));
       if (openDetailId === tr.id) loadOpBanner(tr.id);
+      opThen(tr);
+    }
+    // While the panel shows an ended operation: the app's current record,
+    // when it is a newer operation's, is the panel's "then:" note (every
+    // 2 s while it shows it).
+    async function opThen(tr) {
+      clearTimeout(tr.thenTimer);
+      if (!(opp.id === tr.id && oppOpen()) || opTracks[tr.id] !== tr || !tr.ended) return;
+      let cur = null;
+      try { cur = await apiGet('/api/instances/' + encodeURIComponent(tr.id) + '/op'); } catch (e) { cur = null; }
+      if (opTracks[tr.id] !== tr) return;
+      const next = cur && cur.op && cur.op_id && cur.op_id !== tr.opId ? cur : null;
+      if (next || !cur || cur.op_id === tr.opId) tr.then = next;
+      if (next) {
+        if (next.running) opRunning[tr.id] = next; else delete opRunning[tr.id];
+        opCardState(tr.id);
+      }
+      if (opp.id === tr.id) renderOpPanel();
+      if (opp.id === tr.id && oppOpen()) tr.thenTimer = setTimeout(() => opThen(tr), 2000);
     }
     // A reload (server-rendered cards) once no dialog is open.
     function reloadWhenIdle() {
@@ -1340,17 +1360,25 @@
       return r ? '<button type="button" class="' + cls + ' op-card-progress" data-op-show="' + escapeHtml(id) + '">' + escapeHtml(opCardText(r)) + '</button>' : '';
     }
     // On page load and each refresh of the app list: every app whose
-    // operation runs gets its card state (and a slow poller).
+    // operation runs gets its card state (and a slow poller) — one
+    // request for all (GET /api/instances/ops, the current records in
+    // short).
     async function scanOps() {
       const ids = new Set();
       document.querySelectorAll('.app-card[data-id]').forEach(c => ids.add(c.dataset.id));
       instancesCache.forEach(i => ids.add(i.id));
-      await Promise.all([...ids].map(async id => {
-        let r = null;
-        const seq = opBegin(id);
-        try { r = await apiGet('/api/templates/lastop/' + encodeURIComponent(id)); } catch (e) { return; }
-        if (r && r.running) trackOp(id, r.op_id, r, seq);
-      }));
+      const seqs = {};
+      ids.forEach(id => { seqs[id] = opBegin(id); });
+      let all = null;
+      try { all = await apiGet('/api/instances/ops'); } catch (e) { return; }
+      ids.forEach(id => {
+        const r = all && all[id];
+        if (!r || !r.running) return;
+        const tr = opTracks[id];
+        if (tr && tr.opId === r.op_id && !tr.ended) return; // already followed (its poller has the steps)
+        if (tr && tr.ended && opp.id === id && oppOpen()) return; // the panel's "then:" note shows it
+        trackOp(id, r.op_id, Object.assign({ steps: [] }, r), seqs[id]);
+      });
     }
     // Opening an app (its detail or instance dialog) while its operation
     // runs opens the panel.

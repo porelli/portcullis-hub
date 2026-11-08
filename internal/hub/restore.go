@@ -354,7 +354,7 @@ func (h *Hub) restoreSteps(ctx context.Context, p *Progress, id, archive string,
 		if cerr := ctx.Err(); cerr != nil {
 			return fmt.Errorf("%v: %w", err, cerr)
 		}
-		return fmt.Errorf("the backup before the restore failed — nothing was restored: %w", err)
+		return prefixOpError(OpRestore, "the backup before the restore failed — nothing was restored: ", err)
 	}
 	res.PreRestoreBackup = pre.Archive
 	p.Before(beforePreRestore, pre.Archive)
@@ -1164,7 +1164,9 @@ func (h *Hub) restoreAsSteps(ctx context.Context, p *Progress, archive, newID st
 			}
 		}
 		for _, g := range createdGroups {
-			if _, err := groupsAPI.DeleteInstanceGroup(ctx, actor, g); err != nil {
+			// Kept because Users & Groups didn't answer: left as before
+			// (the group stays in LLDAP), not a failed removal.
+			if _, err := groupsAPI.DeleteInstanceGroup(ctx, actor, g); err != nil && !errors.Is(err, directory.ErrKeptUnavailable) {
 				errs = append(errs, err)
 			}
 		}

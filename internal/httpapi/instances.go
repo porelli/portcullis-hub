@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"regexp"
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/hub"
@@ -29,6 +28,7 @@ func (s *Server) registerInstances(mux routeMux) {
 	mux.HandleFunc("POST /api/instances/{id}/backups", s.handleBackupInstance)
 	mux.HandleFunc("POST /api/instances/{id}/restore", s.handleRestoreInstance)
 	mux.HandleFunc("POST /api/instances/restore", s.handleRestoreAs)
+	mux.HandleFunc("GET /api/instances/ops", s.handleInstanceOps)
 	mux.HandleFunc("GET /api/instances/{id}/op", s.handleInstanceOp)
 	mux.HandleFunc("POST /api/instances/{id}/op/stop", s.handleStopOp)
 	mux.HandleFunc("GET /api/instances/missing-groups", s.handleMissingGroups)
@@ -425,14 +425,22 @@ func writeAccepted(w http.ResponseWriter, op *hub.AsyncOp) {
 }
 
 // acceptedBody is a long operation's 202 body (the Portcullis MCP's
-// OpStarted too).
+// OpStarted too): poll names the operation (contract §11.7 "Op history").
 func acceptedBody(op *hub.AsyncOp) OpStarted {
-	return OpStarted{OpID: op.OpID, Op: op.Op, Instance: op.Instance, Poll: "/api/instances/" + op.Instance + "/op"}
+	return OpStarted{OpID: op.OpID, Op: op.Op, Instance: op.Instance, Poll: instanceOpPoll(op)}
+}
+
+// instanceOpPoll is where an instance operation's record is polled: the
+// instance's op route with its op id.
+func instanceOpPoll(op *hub.AsyncOp) string {
+	return "/api/instances/" + op.Instance + "/op?op_id=" + op.OpID
 }
 
 // handleInstanceOp is an instance's op record (also of a deleted
-// instance, or of a new id a restore creates): poll it until running is
-// false and op_id is the request's.
+// instance, or of a new id a restore creates). ?op_id=<16 hex>: that
+// operation's record, running or ended (the op history, contract §11.7):
+// 404 unknown or pruned, 400 malformed — poll it until running is false.
+// Without it: the instance's current record.
 func (s *Server) handleInstanceOp(w http.ResponseWriter, r *http.Request) {
 	if !s.adminOnly(w, r) {
 		return
@@ -442,6 +450,19 @@ func (s *Server) handleInstanceOp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	noStore(w)
+	if q, asked := r.URL.Query()["op_id"]; asked {
+		if len(q) != 1 || !stopOpIDRe.MatchString(q[0]) {
+			http.Error(w, "op_id must be 16 lowercase hex digits, once", http.StatusBadRequest)
+			return
+		}
+		rec := s.Hub.OpByID(id, q[0])
+		if rec == nil {
+			http.Error(w, "no operation "+q[0]+" recorded for "+id, http.StatusNotFound)
+			return
+		}
+		writeJSON(w, rec)
+		return
+	}
 	rec := s.Hub.LastOp(id)
 	if rec == nil {
 		http.Error(w, "no operation recorded for "+id, http.StatusNotFound)
@@ -450,8 +471,18 @@ func (s *Server) handleInstanceOp(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, rec)
 }
 
+// handleInstanceOps is every instance's current record in short (the
+// UI's card states in one request; contract §11.7).
+func (s *Server) handleInstanceOps(w http.ResponseWriter, r *http.Request) {
+	if !s.adminOnly(w, r) {
+		return
+	}
+	noStore(w)
+	writeJSON(w, s.Hub.OpSummaries())
+}
+
 // stopOpIDRe is an operation id (hub.newOpID: 16 lowercase hex digits).
-var stopOpIDRe = regexp.MustCompile(`^[0-9a-f]{16}$`)
+var stopOpIDRe = hub.OpIDRe
 
 // handleStopOp stops the instance's operation and undoes what it did
 // (contract §11.7 "Stop"; body {"op_id": "<16 hex>"} — only that
@@ -468,8 +499,10 @@ func (s *Server) handleStopOp(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// RawMessage: a present "op_id" is seen whatever its value, so
+	// {"op_id": null} is a 400, never read as {}.
 	var b struct {
-		OpID *string `json:"op_id"`
+		OpID json.RawMessage `json:"op_id"`
 	}
 	const usage = `{} or {"op_id": "<16 hex>"}`
 	if !decodeStrict(w, r, &b, usage) {
@@ -477,11 +510,12 @@ func (s *Server) handleStopOp(w http.ResponseWriter, r *http.Request) {
 	}
 	expected := ""
 	if b.OpID != nil {
-		if !stopOpIDRe.MatchString(*b.OpID) {
+		var id string
+		if len(b.OpID) == 0 || b.OpID[0] != '"' || json.Unmarshal(b.OpID, &id) != nil || !stopOpIDRe.MatchString(id) {
 			http.Error(w, "body must be "+usage, http.StatusBadRequest)
 			return
 		}
-		expected = *b.OpID
+		expected = id
 	}
 	rec, err := s.stopOp(requestActor(r), id, expected)
 	noStore(w)
@@ -493,9 +527,10 @@ func (s *Server) handleStopOp(w http.ResponseWriter, r *http.Request) {
 }
 
 // stopOp is the Stop's work (route and stop_op): expectedOpID "" stops
-// whatever runs (the route), else only that operation (stop_op: the one
-// its class and confirmation were for; another is 409 "the operation
-// changed", judged by the Hub under the operation's lock). A 409 refusal
+// whatever runs (a {} body: API callers), else only that operation (the
+// route's {"op_id"} — the browser always sends the shown record's —, or
+// stop_op: the one its class and confirmation were for); another is 409
+// "the operation changed", judged by the Hub under the operation's lock. A 409 refusal
 // carries the current record (recordError: the body / the tool error's
 // JSON).
 func (s *Server) stopOp(a directory.Actor, id, expectedOpID string) (*hub.OpRecord, error) {

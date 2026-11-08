@@ -137,7 +137,7 @@ func TestDoctorFixRoutes(t *testing.T) {
 	var acc map[string]string
 	json.Unmarshal([]byte(b), &acc)
 	// A rebind is the instance's own op record.
-	if r.StatusCode != 202 || acc["op"] != hub.OpRebind || acc["instance"] != "photos" || acc["poll"] != "/api/instances/photos/op" || acc["op_id"] == "" {
+	if r.StatusCode != 202 || acc["op"] != hub.OpRebind || acc["instance"] != "photos" || acc["poll"] != "/api/instances/photos/op?op_id="+acc["op_id"] || acc["op_id"] == "" {
 		t.Fatalf("apply = %d %s", r.StatusCode, b)
 	}
 	waitOp(t, e, acc["poll"], acc["op_id"])

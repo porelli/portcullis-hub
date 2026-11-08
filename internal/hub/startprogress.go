@@ -246,14 +246,34 @@ func containerReady(st docker.State) bool {
 	return st.Status == "exited" && st.ExitCode == 0
 }
 
-// countContainers is, over t's project containers (appContainers), how
-// many ok says yes to, of how many, and the services of the others.
-func (h *Hub) countContainers(ctx context.Context, t *templates.Template, ok func(docker.State) bool) (n, m int, others []string, err error) {
+// renderedServices are the services of t's project as the Hub renders it
+// (loadRendered, every profile); nil when it doesn't load.
+func (h *Hub) renderedServices(ctx context.Context, t *templates.Template) map[string]bool {
+	proj, err := loadRendered(ctx, h.project(t), h.cfg.ProjectDir)
+	if err != nil {
+		return nil
+	}
+	out := make(map[string]bool, len(proj.Services))
+	for name := range proj.Services {
+		out[name] = true
+	}
+	return out
+}
+
+// countContainers is, over t's project containers (appContainers) whose
+// compose service is one of services (the rendered project's,
+// renderedServices: an orphan of a service the project no longer has is
+// never counted; nil = every one appContainers lists), how many ok says
+// yes to, of how many, and the services of the others.
+func (h *Hub) countContainers(ctx context.Context, t *templates.Template, services map[string]bool, ok func(docker.State) bool) (n, m int, others []string, err error) {
 	cs, _, err := h.appContainers(ctx, t)
 	if err != nil {
 		return 0, 0, nil, err
 	}
 	for _, c := range cs {
+		if services != nil && !services[c.Service()] {
+			continue
+		}
 		st, err := h.engine.ContainerState(ctx, c.ID)
 		if err != nil {
 			return 0, 0, nil, err
@@ -281,8 +301,9 @@ func percentOf(n, m int) int {
 // services (n of m)" every aiReadyPoll (h.sleep) until ctx ends (the
 // caller cancels it once compose up returned).
 func (h *Hub) watchStart(ctx context.Context, p *startSteps, t *templates.Template) {
+	services := h.renderedServices(ctx, t)
 	for {
-		if n, m, _, err := h.countContainers(ctx, t, containerStarted); err == nil && ctx.Err() == nil {
+		if n, m, _, err := h.countContainers(ctx, t, services, containerStarted); err == nil && ctx.Err() == nil {
 			p.Percent(StepStart, percentOf(n, m), fmt.Sprintf("Starting services (%d of %d)", n, m))
 		}
 		// ctx checked too: a sleep that returns at once (a test clock)
@@ -295,7 +316,7 @@ func (h *Hub) watchStart(ctx context.Context, p *startSteps, t *templates.Templa
 
 // startStepDone ends the start step once compose up returned.
 func (h *Hub) startStepDone(ctx context.Context, p *startSteps, t *templates.Template) {
-	if n, m, _, err := h.countContainers(ctx, t, containerStarted); err == nil {
+	if n, m, _, err := h.countContainers(ctx, t, h.renderedServices(ctx, t), containerStarted); err == nil {
 		p.Percent(StepStart, percentOf(n, m), fmt.Sprintf("Starting services (%d of %d)", n, m))
 	}
 	p.Done(StepStart)
@@ -312,8 +333,9 @@ func (h *Hub) waitHealthy(ctx context.Context, p *startSteps, t *templates.Templ
 	p.Start(StepHealthy)
 	var slept time.Duration
 	begin := time.Now()
+	services := h.renderedServices(ctx, t)
 	for {
-		n, m, others, err := h.countContainers(ctx, t, containerReady)
+		n, m, others, err := h.countContainers(ctx, t, services, containerReady)
 		if err == nil {
 			p.Percent(StepHealthy, percentOf(n, m), fmt.Sprintf("Waiting until healthy (%d of %d)", n, m))
 			if n == m {

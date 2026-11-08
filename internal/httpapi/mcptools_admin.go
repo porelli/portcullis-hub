@@ -225,7 +225,11 @@ type (
 	}
 	waitArgs struct {
 		ID   string `json:"id" jsonschema:"the instance id"`
-		OpID string `json:"op_id,omitempty" jsonschema:"the operation to wait for (default: whatever runs now)"`
+		OpID string `json:"op_id,omitempty" jsonschema:"the operation to wait for: the op_id its start answered (default: the instance's current operation)"`
+	}
+	opArgs struct {
+		ID   string `json:"id" jsonschema:"the instance id"`
+		OpID string `json:"op_id,omitempty" jsonschema:"the operation to show: the op_id its start answered (default: the instance's current record)"`
 	}
 	settingsArgs struct {
 		ID            string                           `json:"id" jsonschema:"the instance id"`
@@ -365,11 +369,15 @@ func (s *Server) registerAdminTools() {
 				}
 				return s.setHosts(a, in.ID, in.Hosts)
 			}),
-		admin("get_op", "An instance's last operation record: its steps (state, percent, detail, times), what it created, whether it can be stopped, then ok / error with the result and warnings.",
-			ClassRead, "GET /api/instances/{id}/op", "", func(_ context.Context, _ directory.Actor, in idArgs) (any, error) {
-				return s.getOp(in.ID)
+		admin("get_op", "An instance's operation record — with op_id that operation's (kept for its last 20), else the instance's current one: its steps (state, percent, detail, times), what it created, whether it can be stopped, then ok / error with the result and warnings.",
+			ClassRead, "GET /api/instances/{id}/op", "", func(_ context.Context, _ directory.Actor, in opArgs) (any, error) {
+				return s.getOp(in.ID, in.OpID)
 			}),
-		admin("wait_for_op", "Wait (polling every 2 s, at most 60 s) until an instance's operation is done; answers {done, record} (the record with its steps and what it created).",
+		admin("list_ops", "Every instance's current operation in short: {<instance>: {op, op_id, running, stopping, stoppable, ok, at}}.",
+			ClassRead, "GET /api/instances/ops", "", func(context.Context, directory.Actor, noArgs) (any, error) {
+				return s.Hub.OpSummaries(), nil
+			}),
+		admin("wait_for_op", "Wait (polling every 2 s, at most 60 s) until an instance's operation is done — with op_id that operation, whatever ran after it; answers {done, record} (the record with its steps and what it created).",
 			ClassRead, "GET /api/instances/{id}/op", "", func(ctx context.Context, _ directory.Actor, in waitArgs) (any, error) {
 				return s.waitForOp(ctx, in.ID, in.OpID)
 			}),
@@ -1241,9 +1249,12 @@ func started(op *hub.AsyncOp, err error) (any, error) {
 }
 
 // getOp is GET /api/instances/{id}/op's answer.
-func (s *Server) getOp(id string) (*hub.OpRecord, error) {
+func (s *Server) getOp(id, opID string) (*hub.OpRecord, error) {
 	if err := instanceIDOK(id); err != nil {
 		return nil, err
+	}
+	if opID != "" {
+		return s.opByID(id, opID)
 	}
 	rec := s.Hub.LastOp(id)
 	if rec == nil {
@@ -1252,16 +1263,38 @@ func (s *Server) getOp(id string) (*hub.OpRecord, error) {
 	return rec, nil
 }
 
-// waitForOp polls id's op record every waitOpEvery until it isn't
-// running (and is opID's, when given) or waitOpMax passed.
+// opByID is the ?op_id= route's answer: 400 malformed, 404 unknown or
+// pruned.
+func (s *Server) opByID(id, opID string) (*hub.OpRecord, error) {
+	if !hub.OpIDRe.MatchString(opID) {
+		return nil, badArg("op_id must be 16 lowercase hex digits")
+	}
+	rec := s.Hub.OpByID(id, opID)
+	if rec == nil {
+		return nil, &hub.StatusError{Status: http.StatusNotFound, Err: errors.New("no operation " + opID + " recorded for " + id)}
+	}
+	return rec, nil
+}
+
+// waitForOp polls every waitOpEvery until the operation isn't running or
+// waitOpMax passed: opID's record when given (the op history: it ends on
+// that operation's own outcome), else id's current record.
 func (s *Server) waitForOp(ctx context.Context, id, opID string) (any, error) {
 	if err := instanceIDOK(id); err != nil {
 		return nil, err
 	}
 	deadline := time.Now().Add(waitOpMax)
 	for {
-		rec := s.Hub.LastOp(id)
-		done := rec != nil && !rec.Running && (opID == "" || rec.OpID == opID)
+		var rec *hub.OpRecord
+		if opID != "" {
+			var err error
+			if rec, err = s.opByID(id, opID); err != nil {
+				return nil, err
+			}
+		} else {
+			rec = s.Hub.LastOp(id)
+		}
+		done := rec != nil && !rec.Running
 		if done || !time.Now().Before(deadline) {
 			if rec == nil {
 				return nil, &hub.StatusError{Status: http.StatusNotFound, Err: errors.New("no operation recorded for " + id)}

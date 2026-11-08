@@ -681,15 +681,14 @@ func TestStopKillsCreate(t *testing.T) {
 func TestStopGroupKeptUnavailable(t *testing.T) {
 	f := stopFixture(t)
 	f.groups.set(func(g *fakeGroups) {
-		g.delWarn = func(name string) string {
-			return "group " + name + " was kept: users & groups is not available (down) — delete it on the Users & Groups page"
-		}
+		g.delErr = &directory.KeptUnavailableError{Group: "users_other", Cause: errors.New("down")}
 	})
 	r := f.enableStopped(t, "images")
 	if !r.Stoppable || r.Stopped() || stepOf(r, "undo:groups").State != StepFailed || !strings.Contains(r.Error, "not available") {
 		t.Fatalf("unavailable: %+v", r)
 	}
 	f.groups.set(func(g *fakeGroups) {
+		g.delErr = nil
 		g.delWarn = func(name string) string { return "group " + name + " was kept: a built-in group" }
 	})
 	if _, err := f.h.StopOp("other", directory.Human("bob")); err != nil {

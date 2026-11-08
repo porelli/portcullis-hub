@@ -182,7 +182,7 @@ func TestDoctorToolsMirror(t *testing.T) {
 	}
 	fix["plan_hash"] = planHashOf(t, txt, isErr)
 	txt, isErr, conf = e.tool(t, "doctor_apply_fix", fix)
-	if isErr || conf != "" || !strings.Contains(txt, `"poll":"/api/instances/photos/op"`) {
+	if isErr || conf != "" || !strings.Contains(txt, `"poll":"/api/instances/photos/op?op_id=`) {
 		t.Fatalf("config-only fix = %s %v confirmation %q", txt, isErr, conf)
 	}
 	waitIdle(t, e.s.Hub, "photos")

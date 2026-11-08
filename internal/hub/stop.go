@@ -431,16 +431,16 @@ func (h *Hub) undoGroups(ctx context.Context, p *Progress, groupsAPI Groups, sto
 			continue // gone already (a retry)
 		}
 		w, err := groupsAPI.DeleteInstanceGroup(ctx, stopper, g)
+		// Kept because Users & Groups didn't answer: not done (Stop again
+		// retries); kept because it is protected or shared: done, with
+		// the warning.
+		if errors.Is(err, directory.ErrKeptUnavailable) {
+			return statusErr(503, "%s", err.Error())
+		}
 		if err != nil {
 			return fmt.Errorf("deleting group %s as %s: %w", g, stopper.User, err)
 		}
 		for _, x := range w {
-			// Kept because Users & Groups didn't answer: not done (Stop
-			// again retries); kept because it is protected or shared:
-			// done, with the warning.
-			if directory.KeptUnavailable(x) {
-				return statusErr(503, "%s", x)
-			}
 			p.Warn(x)
 		}
 	}
@@ -837,7 +837,8 @@ func (h *Hub) StopOp(id string, actor directory.Actor) (*OpRecord, error) {
 var ErrOpChanged = statusErr(409, "the operation changed, ask again")
 
 // StopOpExpect is StopOp of operation expectedOpID only ("" = whatever
-// runs: the HTTP route): the instance's record must be that operation's —
+// runs: the HTTP route's {} body, for API callers; the browser sends the
+// shown record's op_id): the instance's record must be that operation's —
 // checked first, again under the running operation's p.mu before it is
 // cancelled (cancelOpExpect) and under the instance's lock before an undo
 // starts from the record (resumeStop) — else 409 ErrOpChanged with the

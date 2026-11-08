@@ -167,7 +167,7 @@ func (h *Hub) deleteRun(ctx context.Context, p *Progress, id string, actor direc
 			if cerr := ctx.Err(); cerr != nil {
 				return fmt.Errorf("%v: %w", berr, cerr) // the Stop's undo starts it again
 			}
-			return fmt.Errorf("the backup before the delete failed — nothing was deleted: %w", berr)
+			return prefixOpError(OpDelete, "the backup before the delete failed — nothing was deleted: ", berr)
 		}
 		res.Backup = entry.Archive
 		if h.testHookDeleteBackedUp != nil {
@@ -510,6 +510,11 @@ func (h *Hub) deleteSteps(stopCtx context.Context, p *Progress, id string, actor
 		default:
 			w, err := groupsAPI.DeleteInstanceGroup(ctx, actor, g)
 			res.Warnings = append(res.Warnings, w...)
+			if errors.Is(err, directory.ErrKeptUnavailable) {
+				// Kept: the delete goes on, the group stays in LLDAP.
+				res.Warnings = append(res.Warnings, err.Error())
+				continue
+			}
 			if err != nil {
 				return fmt.Errorf("deleting group %s: %w", g, err)
 			}
@@ -524,6 +529,14 @@ func (h *Hub) deleteSteps(stopCtx context.Context, p *Progress, id string, actor
 		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("removing %s: %w", p, err)
 		}
+	}
+	// The op history goes with the record (the delete's own final record
+	// is kept there again when it ends).
+	h.opsMu.Lock()
+	herr := os.RemoveAll(h.opHistoryDir(id))
+	h.opsMu.Unlock()
+	if herr != nil {
+		return fmt.Errorf("removing %s: %w", h.opHistoryDir(id), herr)
 	}
 	// Its settings data files (<appfiles>/<id>/) and delivery record,
 	// under the delivery lock, before the settings store: a run that

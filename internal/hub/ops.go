@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -113,6 +114,148 @@ func (h *Hub) opPath(id string) string { return filepath.Join(h.opsDir(), id+".j
 // hostname change that SetHosts re-applies.
 func (h *Hub) hostsOpPath(id string) string { return filepath.Join(h.opsDir(), id+".hosts.json") }
 
+// opHistoryKept is how many ended records the op history keeps per
+// instance (contract §11.7 "Op history"): the oldest goes when the 21st is
+// written.
+const opHistoryKept = 20
+
+// OpIDRe is an operation id (newOpID: 16 lowercase hex digits).
+var OpIDRe = regexp.MustCompile(`^[0-9a-f]{16}$`)
+
+// opHistoryDir holds id's ended records by op id (<id>.d/<op_id>.json).
+func (h *Hub) opHistoryDir(id string) string { return filepath.Join(h.opsDir(), id+".d") }
+
+// keepHistoryLocked keeps r, an ended record with an op id of instance
+// id, in the op history and prunes it to opHistoryKept (the caller holds
+// opsMu). Running records, records without an op id (finishOp's: hook,
+// hosts, reload, credentials, drift) and non-instance keys (_folder.<id>,
+// _doctor) are never kept.
+func (h *Hub) keepHistoryLocked(id string, r OpRecord) {
+	if r.Running || !OpIDRe.MatchString(r.OpID) || !templates.ValidID(id) {
+		return
+	}
+	data, err := json.MarshalIndent(r, "", "  ")
+	if err != nil {
+		return
+	}
+	dir := h.opHistoryDir(id)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		log.Printf("ops: cannot keep %s %s (%s): %v", r.Op, id, r.OpID, err)
+		return
+	}
+	if err := fsutil.WriteFileAtomic(filepath.Join(dir, r.OpID+".json"), data, 0600); err != nil {
+		log.Printf("ops: cannot keep %s %s (%s): %v", r.Op, id, r.OpID, err)
+		return
+	}
+	h.pruneHistory(dir)
+}
+
+// pruneHistory removes the oldest kept records (by at, the end; then by
+// name) beyond opHistoryKept.
+func (h *Hub) pruneHistory(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	type kept struct {
+		name string
+		at   time.Time
+	}
+	var all []kept
+	for _, e := range entries {
+		id, ok := strings.CutSuffix(e.Name(), ".json")
+		if !ok || !OpIDRe.MatchString(id) || !e.Type().IsRegular() {
+			continue
+		}
+		all = append(all, kept{name: e.Name()})
+	}
+	if len(all) <= opHistoryKept {
+		return
+	}
+	for i := range all {
+		var r OpRecord
+		if data, err := os.ReadFile(filepath.Join(dir, all[i].name)); err == nil && json.Unmarshal(data, &r) == nil {
+			all[i].at = r.At
+		}
+	}
+	sort.Slice(all, func(i, j int) bool {
+		if !all[i].at.Equal(all[j].at) {
+			return all[i].at.After(all[j].at)
+		}
+		return all[i].name > all[j].name
+	})
+	for _, k := range all[opHistoryKept:] {
+		if err := os.Remove(filepath.Join(dir, k.name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			log.Printf("ops: cannot prune %s: %v", filepath.Join(dir, k.name), err)
+		}
+	}
+}
+
+// OpByID is instance id's record of operation opID (contract §11.7 "Op
+// history"): the current record when it is that operation's, the running
+// operation's when it is the one asked for, else its kept final record;
+// nil when the instance has none (unknown, or pruned).
+func (h *Hub) OpByID(id, opID string) *OpRecord {
+	if !OpIDRe.MatchString(opID) || !templates.ValidID(id) {
+		return nil
+	}
+	h.opsMu.Lock()
+	if r, ok := h.ops[id]; ok && r.OpID == opID {
+		h.opsMu.Unlock()
+		return &r
+	}
+	h.opsMu.Unlock()
+	h.opRunsMu.Lock()
+	run := h.opRuns[id]
+	h.opRunsMu.Unlock()
+	if run != nil && run.opID == opID {
+		if r, ok := run.p.liveRecord(); ok {
+			return &r
+		}
+	}
+	h.opsMu.Lock()
+	defer h.opsMu.Unlock()
+	if r, ok := h.ops[id]; ok && r.OpID == opID {
+		return &r // it ended meanwhile and is still the instance's
+	}
+	data, err := os.ReadFile(filepath.Join(h.opHistoryDir(id), opID+".json"))
+	if err != nil {
+		return nil
+	}
+	var r OpRecord
+	if json.Unmarshal(data, &r) != nil || r.OpID != opID {
+		return nil
+	}
+	return &r
+}
+
+// OpSummary is an instance's current record in short (GET
+// /api/instances/ops: the UI's card states).
+type OpSummary struct {
+	Op        string    `json:"op"`
+	OpID      string    `json:"op_id"`
+	Running   bool      `json:"running"`
+	Stopping  bool      `json:"stopping"`
+	Stoppable bool      `json:"stoppable"`
+	OK        bool      `json:"ok"`
+	At        time.Time `json:"at"`
+}
+
+// OpSummaries maps every instance id with a record (deleted instances'
+// included; no _folder / _doctor key) to its current record in short.
+func (h *Hub) OpSummaries() map[string]OpSummary {
+	h.opsMu.Lock()
+	defer h.opsMu.Unlock()
+	out := make(map[string]OpSummary, len(h.ops))
+	for id, r := range h.ops {
+		if !templates.ValidID(id) {
+			continue
+		}
+		out[id] = OpSummary{Op: r.Op, OpID: r.OpID, Running: r.Running, Stopping: r.Stopping, Stoppable: r.Stoppable, OK: r.OK, At: r.At}
+	}
+	return out
+}
+
 // loadOps reads the stored records (unreadable ones are skipped).
 func (h *Hub) loadOps() {
 	h.ops = map[string]OpRecord{}
@@ -147,6 +290,9 @@ func (h *Hub) loadOps() {
 					log.Printf("ops: cannot mark %s %s interrupted: %v", r.Op, id, err)
 				}
 			}
+			// Its kept record says interrupted too (?op_id= answers it
+			// once a newer operation replaced the instance's record).
+			h.keepHistoryLocked(id, r)
 			log.Printf("ops: %s %s was interrupted by a Hub stop", r.Op, id)
 		}
 		h.ops[id] = r
@@ -303,6 +449,27 @@ func (h *Hub) finishOpGuarded(id, op string, err error, rolledBack, keepRunning 
 	}
 	log.Printf("%s %s failed: %s", op, id, r.Error)
 	return &OpError{Record: r, Err: err}
+}
+
+// prefixOpError is err (nil stays nil) with prefix before its text, as
+// operation op's own outcome: an *OpError inside err (a backup's failed
+// start-again, the pre-backup of a delete or restore) becomes op's record
+// with prefix before its error — output, hint and rolled_back kept —,
+// so finishAsync's errors.As finds this one, never the inner record
+// without the prefix. The chain (statuses, secretsOf) is err's.
+func prefixOpError(op, prefix string, err error) error {
+	if err == nil {
+		return nil
+	}
+	wrapped := fmt.Errorf("%s%w", prefix, err)
+	var oe *OpError
+	if !errors.As(err, &oe) {
+		return wrapped
+	}
+	rec := oe.Record
+	rec.Op = op
+	rec.Error = clipRunes(prefix+oe.Record.Error, 600)
+	return &OpError{Record: rec, Err: wrapped}
 }
 
 // opRecordOf is op's record for err on id (nil = ok): the redacted, then

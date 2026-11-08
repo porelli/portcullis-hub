@@ -166,7 +166,7 @@ func TestBusyAndStopRoutes(t *testing.T) {
 		}
 	}
 	// The Stop route: strict body, admins only, Hub listener only.
-	for _, body := range []string{``, `{"x":1}`, `{} {}`, `{"op_id":""}`, `{"op_id":"XYZ"}`, `{"op_id":"0123456789ABCDEF"}`, `{"op_id":1}`, `{"op_id":"` + acc.OpID + `","x":1}`} {
+	for _, body := range []string{``, `{"x":1}`, `{} {}`, `{"op_id":""}`, `{"op_id":"XYZ"}`, `{"op_id":"0123456789ABCDEF"}`, `{"op_id":1}`, `{"op_id":null}`, `{"op_id":["` + acc.OpID + `"]}`, `{"op_id":"` + acc.OpID + `","x":1}`} {
 		if code, b := e.do(t, "root", "POST", "/api/instances/grafana-a/op/stop", body); code != 400 {
 			t.Errorf("stop body %q = %d %s, want 400", body, code, b)
 		}
@@ -266,7 +266,7 @@ func TestStopOpTool(t *testing.T) {
 	}
 	txt, isErr, conf := e.tool(t, "enable_instance", map[string]any{"id": "x"})
 	var op OpStarted
-	if isErr || conf != "" || json.Unmarshal([]byte(txt), &op) != nil || op.Op != "enable" || op.Instance != "x" || op.Poll != "/api/instances/x/op" || op.OpID == "" {
+	if isErr || conf != "" || json.Unmarshal([]byte(txt), &op) != nil || op.Op != "enable" || op.Instance != "x" || op.Poll != "/api/instances/x/op?op_id="+op.OpID || op.OpID == "" {
 		t.Fatalf("enable_instance = %s %v %q", txt, isErr, conf)
 	}
 	select {
@@ -324,7 +324,7 @@ func opDone(t *testing.T, srv *httptest.Server, user, method, path, body string)
 	t.Helper()
 	r, b := doAs(t, srv, user, method, path, body)
 	var acc OpStarted
-	if r.StatusCode != http.StatusAccepted || json.Unmarshal([]byte(b), &acc) != nil || acc.OpID == "" || acc.Poll != "/api/instances/"+acc.Instance+"/op" {
+	if r.StatusCode != http.StatusAccepted || json.Unmarshal([]byte(b), &acc) != nil || acc.OpID == "" || acc.Poll != "/api/instances/"+acc.Instance+"/op?op_id="+acc.OpID {
 		t.Fatalf("%s %s = %d %s, want 202 + op id", method, path, r.StatusCode, b)
 	}
 	deadline := time.Now().Add(20 * time.Second)

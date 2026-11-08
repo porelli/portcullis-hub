@@ -45,6 +45,10 @@ import (
 //   - POST /harness/op/delay-lastop?id=<id>&ms=<n>: the next GET
 //     /api/templates/lastop/<id> is answered n ms after the Hub read the
 //     record (a late, stale answer: the panel's ordering check).
+//   - POST /harness/op/queue-restart?id=<id>: queues the Hub's own
+//     restart of id (Hub.Restart: it waits for a running operation's
+//     lock, then takes the instance's record — the op history check: the
+//     panel ends on its own operation, with a "then:" note).
 
 // harnessProgress is the engine side of the fixtures.
 type harnessProgress struct {
@@ -245,6 +249,15 @@ func seedProgress(t *testing.T, e *instEnv, mux *http.ServeMux) {
 		harnessLastopDelay.path, harnessLastopDelay.d = "/api/templates/lastop/"+id, time.Duration(ms)*time.Millisecond
 		harnessLastopDelay.Unlock()
 		fmt.Fprintf(w, "the next lastop answer of %s comes %d ms late\n", id, ms)
+	})
+	mux.HandleFunc("POST /harness/op/queue-restart", func(w http.ResponseWriter, r *http.Request) {
+		t := h.Template(r.URL.Query().Get("id"))
+		if t == nil {
+			http.Error(w, "want ?id=<instance>", http.StatusBadRequest)
+			return
+		}
+		go h.Restart(*t)
+		fmt.Fprintf(w, "a Hub restart of %s is queued: it runs once the instance's lock is free\n", t.ID)
 	})
 	mux.HandleFunc("POST /harness/op/fix-undo", func(w http.ResponseWriter, r *http.Request) {
 		broken.Store(false)

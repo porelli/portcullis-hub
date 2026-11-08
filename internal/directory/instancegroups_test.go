@@ -1,6 +1,7 @@
 package directory_test
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -87,20 +88,23 @@ func TestMissingInstanceGroups(t *testing.T) {
 	}
 }
 
-// TestDeleteInstanceGroupKeptUnavailable: the warning DeleteInstanceGroup
-// gives while Users & Groups doesn't answer is the one KeptUnavailable
-// recognises (an enable's Stop retries it); a protected group's isn't.
+// TestDeleteInstanceGroupKeptUnavailable: while Users & Groups doesn't
+// answer DeleteInstanceGroup answers a *KeptUnavailableError (errors.Is
+// ErrKeptUnavailable: an enable's Stop retries it), its text the warning
+// for people; a protected group's is a plain warning.
 func TestDeleteInstanceGroupKeptUnavailable(t *testing.T) {
 	e := newEnv(t)
 	e.ll.AddGroup("lldap_admin")
 	w, err := e.svc.DeleteInstanceGroup(ctx, directory.Human("root"), "lldap_admin")
-	if err != nil || len(w) != 1 || directory.KeptUnavailable(w[0]) {
+	if err != nil || len(w) != 1 || errors.Is(err, directory.ErrKeptUnavailable) {
 		t.Fatalf("protected: %v %v", w, err)
 	}
 	e.ll.AddGroup("users_x")
 	e.svc.LLDAP = brokenDir{e.svc.LLDAP}
 	w, err = e.svc.DeleteInstanceGroup(ctx, directory.Human("root"), "users_x")
-	if err != nil || len(w) != 1 || !directory.KeptUnavailable(w[0]) {
+	var kept *directory.KeptUnavailableError
+	if !errors.Is(err, directory.ErrKeptUnavailable) || !errors.As(err, &kept) || kept.Group != "users_x" || len(w) != 0 ||
+		!strings.Contains(err.Error(), "group users_x was kept: users & groups is not available") {
 		t.Fatalf("unavailable: %v %v", w, err)
 	}
 }

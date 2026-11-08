@@ -109,7 +109,8 @@ func writeAPIErr(w http.ResponseWriter, err error) {
 // (contract §14.8, §11.7): 202 {op_id, op, instance, poll} — instance is
 // the op key; a folder's (_folder.<id>) also names the folder and is
 // polled at /api/folders/<id>/op, the doctor's (_doctor) at
-// /api/doctor/op, anything else (a rebind) at the instance's record.
+// /api/doctor/op, anything else (a rebind) at the instance's record of
+// that operation (?op_id=).
 func writeOpAccepted(w http.ResponseWriter, op *hub.AsyncOp) {
 	noStore(w)
 	writeJSONStatus(w, http.StatusAccepted, opAcceptedBody(op))
@@ -126,7 +127,7 @@ func opAcceptedBody(op *hub.AsyncOp) map[string]string {
 	case op.Instance == "_doctor":
 		body["poll"] = "/api/doctor/op"
 	default:
-		body["poll"] = "/api/instances/" + op.Instance + "/op"
+		body["poll"] = instanceOpPoll(op)
 	}
 	return body
 }

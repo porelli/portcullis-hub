@@ -691,7 +691,7 @@ func TestDeleteInstanceTool(t *testing.T) {
 	res = e.call(t, "/mcp/admin", "root", "2026-07-28", "delete_instance", map[string]any{"id": "x"}, urlElicit)
 	txt, isErr := resultText(res)
 	var op OpStarted
-	if isErr || json.Unmarshal([]byte(txt), &op) != nil || op.OpID == "" || op.Op != "delete" || op.Instance != "x" || op.Poll != "/api/instances/x/op" {
+	if isErr || json.Unmarshal([]byte(txt), &op) != nil || op.OpID == "" || op.Op != "delete" || op.Instance != "x" || op.Poll != "/api/instances/x/op?op_id="+op.OpID {
 		t.Fatalf("approved retry = %q %v", txt, isErr)
 	}
 	// wait_for_op shows the outcome.

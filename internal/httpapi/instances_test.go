@@ -825,7 +825,7 @@ func (e *instEnv) runOp(t *testing.T, method, path, body string) hub.OpRecord {
 		Instance *string `json:"instance"`
 		Poll     *string `json:"poll"`
 	}{&acc.OpID, &acc.Op, &acc.Instance, &acc.Poll})
-	if code != 202 || acc.OpID == "" || acc.Poll != "/api/instances/"+acc.Instance+"/op" {
+	if code != 202 || acc.OpID == "" || acc.Poll != "/api/instances/"+acc.Instance+"/op?op_id="+acc.OpID {
 		t.Fatalf("%s %s = %d %s, want 202 + op id", method, path, code, b)
 	}
 	deadline := time.Now().Add(20 * time.Second)

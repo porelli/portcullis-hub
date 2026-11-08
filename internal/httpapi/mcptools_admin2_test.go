@@ -672,6 +672,7 @@ var adminToolFixtures = []struct {
 	{"delete_folder", map[string]any{"id": "docs"}},
 	// At the end, over what the operations above left (fix round 1).
 	{"get_op", map[string]any{"id": "secretapp"}},
+	{"list_ops", nil},
 	{"wait_for_op", map[string]any{"id": "secretapp"}},
 	{"get_logs", map[string]any{"id": "smbfixture"}},
 }
