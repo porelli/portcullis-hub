@@ -2352,7 +2352,11 @@
   // ── Setup (admins) ──────────────────────────────────────
   function renderSetup() {
     const box = root.querySelector('.pd-setup');
-    let h = '<section class="pd-sec" aria-labelledby="pd-fields-h"><h3 class="pd-h3" id="pd-fields-h">Fields</h3>' +
+    // The Hub's own LLDAP account: never listed among people (the
+    // overview leaves it out), named here once.
+    let h = dir.service_user ? '<p class="pd-note pd-service-account">Service account: <span class="pd-mono">' + esc(dir.service_user) +
+      '</span> — used by the Hub to manage users and groups; it can\'t sign in.</p>' : '';
+    h += '<section class="pd-sec" aria-labelledby="pd-fields-h"><h3 class="pd-h3" id="pd-fields-h">Fields</h3>' +
       '<p class="pd-muted">Fields describe people. Everyone signed in can see them; <b>admin-only</b> fields can only be changed by admins (the rules of administrator and permission groups may only use those). <b>Share with apps</b> sends the value as an OIDC claim (<code>attr_&lt;field&gt;</code>) and as the <code>X-Forwarded-Attr-&lt;Field&gt;</code> header.</p>';
     h += '<table class="pd-table pd-fields"><thead><tr><th scope="col">Name</th><th scope="col">Label</th><th scope="col">Kind</th><th scope="col">Values</th><th scope="col">Several values</th><th scope="col">Share with apps</th><th scope="col">Admin-only</th><th scope="col"><span class="pd-sr">Actions</span></th></tr></thead><tbody>';
     for (const f of fields()) {
