@@ -2708,11 +2708,30 @@
         }
         let html = '<div class="status-list">';
         for (const s of statuses) {
-          const color = s.state === 'running' ? '#22c55e' : s.state === 'restarting' ? '#f59e0b' : '#ef4444';
+          // C3: Job-aware status display.
+          let color, displayStatus;
+          if (s.job) {
+            if (s.job_state === 'done') {
+              color = '#22c55e'; // green
+              displayStatus = 'setup job done';
+            } else if (s.job_state === 'failed') {
+              color = '#ef4444'; // red
+              displayStatus = 'setup job failed';
+            } else if (s.job_state === 'running') {
+              color = '#f59e0b'; // amber
+              displayStatus = 'setup job running';
+            } else {
+              color = '#94a3b8'; // gray
+              displayStatus = 'setup job pending';
+            }
+          } else {
+            color = s.state === 'running' ? '#22c55e' : s.state === 'restarting' ? '#f59e0b' : '#ef4444';
+            displayStatus = s.status;
+          }
           html += '<div class="status-row">';
-          html += '<span class="status-dot" style="background:' + color + '"></span>';
+          html += '<span class="status-dot" style="background:' + escapeHtml(color) + '"></span>';
           html += '<span class="status-name">' + escapeHtml(s.name) + '</span>';
-          html += '<span class="status-state">' + escapeHtml(s.status) + '</span>';
+          html += '<span class="status-state">' + escapeHtml(displayStatus) + '</span>';
           html += '</div>';
         }
         html += '</div>';
@@ -2730,15 +2749,23 @@
           const statuses = await apiGet('/api/templates/status/' + id);
           if (!statuses || statuses.length === 0) {
             dot.className = 'status-dot';
-          } else if (statuses.every(s => s.state === 'running')) {
-            dot.className = 'status-dot running';
-            dot.title = 'All containers running';
-          } else if (statuses.some(s => s.state === 'running')) {
-            dot.className = 'status-dot partial';
-            dot.title = 'Some containers not running';
           } else {
-            dot.className = 'status-dot stopped';
-            dot.title = 'Containers stopped';
+            // C3: A done job counts as "up"; failed/pending/running jobs are not up.
+            const isUp = (s) => {
+              if (s.job && s.job_state === 'done') return true;
+              if (s.job) return false; // job but not done
+              return s.state === 'running';
+            };
+            if (statuses.every(isUp)) {
+              dot.className = 'status-dot running';
+              dot.title = 'All containers running';
+            } else if (statuses.some(isUp)) {
+              dot.className = 'status-dot partial';
+              dot.title = 'Some containers not running';
+            } else {
+              dot.className = 'status-dot stopped';
+              dot.title = 'Containers stopped';
+            }
           }
         } catch (e) { /* ignore */ }
       }

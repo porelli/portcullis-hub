@@ -21,20 +21,24 @@ type ContainerStatus struct {
 }
 
 // jobState computes a job's state (contract §11.9): done (exited 0),
-// failed (exited non-zero), running (running or restarting) or pending
-// (created, never started).
+// failed (exited non-zero or dead), running (running, restarting, paused,
+// or removing) or pending (created only).
 func jobState(st docker.State) string {
-	if st.Running || st.Status == "restarting" {
+	if st.Running || st.Status == "restarting" || st.Status == "paused" || st.Status == "removing" {
 		return "running"
 	}
-	if st.Status == "exited" {
-		if st.ExitCode == 0 {
+	if st.Status == "exited" || st.Status == "dead" {
+		if st.Status == "exited" && st.ExitCode == 0 {
 			return "done"
 		}
 		return "failed"
 	}
-	// Created but never started, or any other state.
-	return "pending"
+	// Created but never started.
+	if st.Status == "created" {
+		return "pending"
+	}
+	// Unknown state: treat as running.
+	return "running"
 }
 
 // appContainers lists the app's project containers that belong to services
@@ -76,16 +80,30 @@ func (h *Hub) Status(ctx context.Context, id string) ([]ContainerStatus, error) 
 	if err != nil {
 		return nil, statusErr(502, "docker: %v", err)
 	}
-	jobs := templates.JobServices(&t.Manifest, t.ReadCompose())
 	out := make([]ContainerStatus, 0, len(cs))
 	for _, c := range cs {
 		status := ContainerStatus{Name: c.Name(), Service: c.Service(), State: c.State, Status: c.Status}
-		if jobs[c.Service()] {
+		if t.Jobs[c.Service()] {
 			status.Job = true
-			// Get detailed state to determine JobState.
+			// Get detailed state to determine JobState (I1: never omit it).
 			st, err := h.engine.ContainerState(ctx, c.ID)
 			if err == nil {
 				status.JobState = jobState(st)
+			} else {
+				// Fallback to the list's state/status.
+				status.JobState = jobState(docker.State{
+					Running:  c.State == "running",
+					Status:   c.State,
+					ExitCode: 0, // unknown, but Status parsing below handles it
+				})
+				// Parse exit code from Status for exited containers.
+				if c.State == "exited" {
+					if strings.Contains(c.Status, "(0)") {
+						status.JobState = "done"
+					} else {
+						status.JobState = "failed"
+					}
+				}
 			}
 		}
 		out = append(out, status)

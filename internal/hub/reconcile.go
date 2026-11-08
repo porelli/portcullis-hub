@@ -30,6 +30,10 @@ const (
 	// DriftPublicAccess: the running containers' public-exception router
 	// (paths, or its presence) differs from what the Hub's settings want.
 	DriftPublicAccess DriftKind = "public_access_mismatch"
+	// DriftJobFailed: a one-off job exited non-zero.
+	DriftJobFailed DriftKind = "job_failed"
+	// DriftJobMissing: a one-off job never ran (no container).
+	DriftJobMissing DriftKind = "job_missing"
 )
 
 // Drift actions accepted by ResolveDrift.
@@ -59,7 +63,12 @@ type DriftReport struct {
 	Items     []Drift   `json:"items"`
 }
 
-type projectCount struct{ running, total int }
+type projectCount struct {
+	running, total  int
+	failedJobs      int      // jobs that exited non-zero
+	missingJobs     []string // jobs with no container
+	missingJobCount int      // len(missingJobs), for drift message
+}
 
 // computeDrift compares enabled apps with project container counts.
 // exposureDiff describes, per app, how the running containers' exposure
@@ -130,6 +139,22 @@ func computeDrift(enabled, known, snapshot map[string]bool, counts map[string]pr
 			d.Kind = DriftPublicAccess
 			d.Message = blockedPublic[id] + " (in the app's settings)"
 			d.Actions = []string{}
+		case enabled[id] && c.failedJobs > 0:
+			d.Kind = DriftJobFailed
+			if c.failedJobs == 1 {
+				d.Message = "1 job failed"
+			} else {
+				d.Message = fmt.Sprintf("%d jobs failed", c.failedJobs)
+			}
+			d.Actions = []string{ActionStart, ActionDisable}
+		case enabled[id] && c.missingJobCount > 0:
+			d.Kind = DriftJobMissing
+			if c.missingJobCount == 1 {
+				d.Message = fmt.Sprintf("job %s never ran", c.missingJobs[0])
+			} else {
+				d.Message = fmt.Sprintf("%d jobs never ran: %s", c.missingJobCount, strings.Join(c.missingJobs, ", "))
+			}
+			d.Actions = []string{ActionStart, ActionDisable}
 		default:
 			continue
 		}
@@ -155,16 +180,23 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 		rep.Error = err.Error()
 		return h.storeDrift(rep)
 	}
-	// Build a map of jobs per instance ID (contract §3 "One-off jobs"):
-	// a done job (exited 0) counts as running.
+	// Build maps of jobs and services per instance ID (contract §3 "One-off jobs"):
+	// a done job (exited 0) counts as running; failed/missing jobs are drift.
 	h.mu.RLock()
-	jobs := map[string]map[string]bool{} // instance id → service name → is job
+	jobs := map[string]map[string]bool{}        // instance id → service name → is job
+	allServices := map[string]map[string]bool{} // instance id → service name → in compose
 	for i := range h.instances {
 		t := &h.instances[i]
-		jobs[t.ID] = templates.JobServices(&t.Manifest, t.ReadCompose())
+		jobs[t.ID] = t.Jobs
+		svcs := make(map[string]bool, len(t.Services))
+		for _, s := range t.Services {
+			svcs[s] = true
+		}
+		allServices[t.ID] = svcs
 	}
 	h.mu.RUnlock()
 	counts := map[string]projectCount{}
+	servicesSeen := map[string]map[string]bool{} // instance id → service name → seen
 	routed := map[string]map[string]bool{}
 	havePublic := map[string]bool{}
 	type running struct {
@@ -203,21 +235,32 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 		pc := counts[id]
 		pc.total++
 		service := c.Labels[docker.LabelService]
+		if servicesSeen[id] == nil {
+			servicesSeen[id] = make(map[string]bool)
+		}
+		servicesSeen[id][service] = true
 		isJob := jobs[id][service]
 		isRunning := c.State == "running" || c.State == "restarting"
-		// A done job (exited 0) counts as running (contract §11.9 "Fine").
+		// A done job (exited 0) counts as running; a failed job (exit non-zero) is drift.
 		isDoneJob := false
 		if isJob && c.State == "exited" {
 			// Check exit code via ContainerState.
-			if st, err := h.engine.ContainerState(ctx, c.ID); err == nil && st.Status == "exited" && st.ExitCode == 0 {
-				isDoneJob = true
-				isRunning = true
+			if st, err := h.engine.ContainerState(ctx, c.ID); err == nil && st.Status == "exited" {
+				if st.ExitCode == 0 {
+					isDoneJob = true
+					isRunning = true
+				} else {
+					pc.failedJobs++
+				}
 			}
 		}
 		if isRunning {
 			pc.running++
-			if _, ok := c.Labels["traefik.http.routers."+PublicRouterName(id)+".rule"]; ok {
-				havePublic[id] = true
+			// M1: Don't set havePublic for a done job.
+			if !isDoneJob {
+				if _, ok := c.Labels["traefik.http.routers."+PublicRouterName(id)+".rule"]; ok {
+					havePublic[id] = true
+				}
 			}
 			var aliases []string
 			for _, n := range c.Networks[aiProxyNetwork] {
@@ -229,6 +272,27 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 			if !isDoneJob {
 				live = append(live, running{id, service, c.Labels, aliases})
 			}
+		}
+		counts[id] = pc
+	}
+	// C2: Detect missing jobs (jobs that never ran, no container).
+	// Skip profiled services (not active until Task 4).
+	for id, jobSet := range jobs {
+		if len(jobSet) == 0 {
+			continue
+		}
+		pc := counts[id]
+		seen := servicesSeen[id]
+		for jobSvc := range jobSet {
+			// Skip profiled services (treat any profiled service as not active).
+			if allServices[id][jobSvc] && !seen[jobSvc] {
+				// Job service exists in compose but has no container.
+				pc.missingJobs = append(pc.missingJobs, jobSvc)
+				pc.missingJobCount++
+			}
+		}
+		if pc.missingJobCount > 0 {
+			sort.Strings(pc.missingJobs)
 		}
 		counts[id] = pc
 	}

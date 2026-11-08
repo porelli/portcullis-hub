@@ -306,6 +306,10 @@ type Template struct {
 	// every view of the template).
 	GIDRefs     map[string]string `json:"-"`
 	GIDEnvLeaks map[string]string `json:"-"`
+	// Jobs are the template's one-off jobs (contract §3): the manifest's
+	// jobs plus services with depends_on condition service_completed_successfully;
+	// computed once at discovery (shared, read-only).
+	Jobs map[string]bool `json:"-"`
 	// UsesLocalNetworks: compose.yml reads ${PORTCULLIS_LOCAL_NETWORKS}
 	// (found at discovery): saving Local networks restarts its enabled
 	// instances (F35).

@@ -233,17 +233,23 @@ func (h *Hub) pullImages(ctx context.Context, p *startSteps, t *templates.Templa
 }
 
 // containerStarted: compose started it (it runs, or it ran and ended).
-func containerStarted(st docker.State) bool {
+func containerStarted(st docker.State, isJob bool) bool {
+	// Jobs and non-jobs both: started means not "created".
 	return st.Running || (st.Status != "" && st.Status != "created")
 }
 
-// containerReady: it runs and its healthcheck (if any) says healthy, or
-// it is a one-shot that finished (exited 0).
-func containerReady(st docker.State) bool {
+// containerReady: a non-job is ready when running and healthy (or no
+// healthcheck); a job is ready only when exited 0 (I2).
+func containerReady(st docker.State, isJob bool) bool {
+	if isJob {
+		// Job ready only when exited 0.
+		return st.Status == "exited" && st.ExitCode == 0
+	}
+	// Non-job: must be running and healthy (exited-0 non-job is not ready).
 	if st.Running {
 		return st.Status != "restarting" && (st.Health == "" || st.Health == "healthy")
 	}
-	return st.Status == "exited" && st.ExitCode == 0
+	return false
 }
 
 // renderedServices are the services of t's project as the Hub renders it
@@ -263,9 +269,42 @@ func (h *Hub) renderedServices(ctx context.Context, t *templates.Template) map[s
 // countContainers is, over t's project containers (appContainers) whose
 // compose service is one of services (the rendered project's,
 // renderedServices: an orphan of a service the project no longer has is
-// never counted; nil = every one appContainers lists), how many ok says
-// yes to, of how many, and the services of the others.
-func (h *Hub) countContainers(ctx context.Context, t *templates.Template, services map[string]bool, ok func(docker.State) bool) (n, m int, others []string, err error) {
+// never counted; nil = every one appContainers lists), how many are ready,
+// of how many, the services of the others, and failed job services.
+func (h *Hub) countContainers(ctx context.Context, t *templates.Template, services map[string]bool) (n, m int, others, failedJobs []string, err error) {
+	cs, _, err := h.appContainers(ctx, t)
+	if err != nil {
+		return 0, 0, nil, nil, err
+	}
+	for _, c := range cs {
+		if services != nil && !services[c.Service()] {
+			continue
+		}
+		st, err := h.engine.ContainerState(ctx, c.ID)
+		if err != nil {
+			return 0, 0, nil, nil, err
+		}
+		m++
+		isJob := t.Jobs[c.Service()]
+		if containerReady(st, isJob) {
+			n++
+			continue
+		}
+		// Check for failed job (exited non-zero).
+		if isJob && st.Status == "exited" && st.ExitCode != 0 {
+			if !slices.Contains(failedJobs, c.Service()) {
+				failedJobs = append(failedJobs, c.Service())
+			}
+		}
+		if !slices.Contains(others, c.Service()) {
+			others = append(others, c.Service())
+		}
+	}
+	return n, m, others, failedJobs, nil
+}
+
+// countStarted counts how many containers are started (not created).
+func (h *Hub) countStarted(ctx context.Context, t *templates.Template, services map[string]bool) (n, m int, others []string, err error) {
 	cs, _, err := h.appContainers(ctx, t)
 	if err != nil {
 		return 0, 0, nil, err
@@ -279,7 +318,8 @@ func (h *Hub) countContainers(ctx context.Context, t *templates.Template, servic
 			return 0, 0, nil, err
 		}
 		m++
-		if ok(st) {
+		isJob := t.Jobs[c.Service()]
+		if containerStarted(st, isJob) {
 			n++
 			continue
 		}
@@ -303,7 +343,7 @@ func percentOf(n, m int) int {
 func (h *Hub) watchStart(ctx context.Context, p *startSteps, t *templates.Template) {
 	services := h.renderedServices(ctx, t)
 	for {
-		if n, m, _, err := h.countContainers(ctx, t, services, containerStarted); err == nil && ctx.Err() == nil {
+		if n, m, _, err := h.countStarted(ctx, t, services); err == nil && ctx.Err() == nil {
 			p.Percent(StepStart, percentOf(n, m), fmt.Sprintf("Starting services (%d of %d)", n, m))
 		}
 		// ctx checked too: a sleep that returns at once (a test clock)
@@ -316,7 +356,7 @@ func (h *Hub) watchStart(ctx context.Context, p *startSteps, t *templates.Templa
 
 // startStepDone ends the start step once compose up returned.
 func (h *Hub) startStepDone(ctx context.Context, p *startSteps, t *templates.Template) {
-	if n, m, _, err := h.countContainers(ctx, t, h.renderedServices(ctx, t), containerStarted); err == nil {
+	if n, m, _, err := h.countStarted(ctx, t, h.renderedServices(ctx, t)); err == nil {
 		p.Percent(StepStart, percentOf(n, m), fmt.Sprintf("Starting services (%d of %d)", n, m))
 	}
 	p.Done(StepStart)
@@ -325,19 +365,34 @@ func (h *Hub) startStepDone(ctx context.Context, p *startSteps, t *templates.Tem
 // waitHealthy is the healthy step: "Waiting until healthy (n of m)",
 // polled with ContainerState every aiReadyPoll for at most aiReadyWait —
 // the readiness bounds the AI hooks after an up use (ai_ready.go). Every
-// container ready (containerReady) = done; the wait spent = done too,
-// its detail "not ready after <wait>: web starting, …" and the same text
-// an operation warning (Progress.Warn), and the start goes on (a start
-// never failed on health). Cancelling ctx returns its error.
+// container ready (containerReady) = done; a failed job ends the wait early
+// with warning (I2); the wait spent = done too, its detail "not ready after
+// <wait>: web starting, …" and the same text an operation warning (Progress.Warn),
+// and the start goes on (a start never failed on health). Cancelling ctx returns
+// its error.
 func (h *Hub) waitHealthy(ctx context.Context, p *startSteps, t *templates.Template) error {
 	p.Start(StepHealthy)
 	var slept time.Duration
 	begin := time.Now()
 	services := h.renderedServices(ctx, t)
 	for {
-		n, m, others, err := h.countContainers(ctx, t, services, containerReady)
+		n, m, others, failedJobs, err := h.countContainers(ctx, t, services)
 		if err == nil {
 			p.Percent(StepHealthy, percentOf(n, m), fmt.Sprintf("Waiting until healthy (%d of %d)", n, m))
+			// I2: A failed job ends the wait early with warning.
+			if len(failedJobs) > 0 {
+				var why string
+				if len(failedJobs) == 1 {
+					why = fmt.Sprintf("job %s failed", failedJobs[0])
+				} else {
+					why = fmt.Sprintf("jobs failed: %s", strings.Join(failedJobs, ", "))
+				}
+				log.Printf("instance %s: %s", t.ID, why)
+				p.Percent(StepHealthy, percentOf(n, m), why)
+				p.Done(StepHealthy)
+				p.p.Warn(why)
+				return nil
+			}
 			if n == m {
 				p.Done(StepHealthy)
 				return nil
