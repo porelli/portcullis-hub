@@ -190,6 +190,8 @@
     .badge-community { color: #a855f7; }
 
     /* Status toast */
+    .admin-hint { background: #3b82f611; border: 1px solid #3b82f655; color: #cbd5e1; border-radius: 0.5rem; padding: 0.625rem 0.875rem; font-size: 0.8125rem; margin-bottom: 1rem; }
+    .admin-hint a { color: #60a5fa; }
     .toast { position: fixed; bottom: 2rem; right: 2rem; background: #1e293b; border: 1px solid #334155; border-radius: 0.5rem; padding: 1rem 1.5rem; font-size: 0.875rem; opacity: 0; transform: translateY(1rem); transition: all 0.3s; z-index: 100; }
     .toast.show { opacity: 1; transform: translateY(0); }
     .toast.success { border-color: #22c55e; }
@@ -522,9 +524,28 @@
         window.PortcullisPeople = { base, href, groupHref, groupLink };
       })();
     </script>
+    <script>
+      // BOOTSTRAP_ADMIN: the signed-in user is the built-in (bootstrap)
+      // admin, which no group can hold: the Hub knows the protected
+      // account (directory.CoreAdmin), the page never matches the name.
+      window.BOOTSTRAP_ADMIN = {{.BootstrapAdmin}};
+      if (window.BOOTSTRAP_ADMIN) {
+        document.addEventListener('DOMContentLoaded', function () {
+          const box = document.getElementById('admin-hint');
+          if (!box) return;
+          box.textContent = 'You\u2019re signed in as the built-in admin, which can\u2019t use apps. ';
+          const a = document.createElement('a');
+          a.href = PortcullisPeople.href('#invite');
+          a.textContent = 'Invite yourself as a person to use them.';
+          box.appendChild(a);
+          box.hidden = false;
+        });
+      }
+    </script>
 
     <!-- Catalog Tab -->
     <div class="tab-content active" id="tab-catalog">
+      <div class="admin-hint" id="admin-hint" role="note" hidden></div>
       <div class="drift" id="drift"></div>
       <div class="drift" id="missing-groups"></div>
       <div class="drift" id="user-sweep"></div>
@@ -1034,7 +1055,8 @@
       switch (oppPhase(r)) {
         case 'running': return w.ing + ' ' + app;
         case 'stopping': return 'Stopping ' + app + ' — undoing';
-        case 'ok': return r.op === 'ai' ? 'AI support for ' + app + ' is switched' : app + ' is ' + w.ed;
+        case 'ok': return r.op === 'ai' ? 'AI support for ' + app + ' is switched' : app + ' is ' + w.ed +
+          (r.op === 'enable' && window.BOOTSTRAP_ADMIN ? ' (admin can\'t open it — invite yourself to use it)' : '');
         case 'stopped': return r.op === 'ai' ? 'AI support for ' + app + ' was not switched' : app + ' was not ' + w.ed;
         case 'undo_failed': return 'Stopping ' + app + ' — the undo failed';
         case 'interrupted': return w.ing + ' ' + app + ' was interrupted';

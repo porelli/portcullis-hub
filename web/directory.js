@@ -854,11 +854,16 @@
     return groups().filter(g => pickCandidates(g).some(x => x.username === u.username));
   }
 
+  const CORE_ADMIN_NOTE = 'This is the built-in administrator. It manages Portcullis (apps, people, settings) but can\'t be added to groups, so it can\'t use your apps. ' +
+    'To use apps, invite yourself as a regular person and add that account to the apps\' groups.';
   function personPageHtml(name) {
     let h = '<nav class="pd-crumb" aria-label="Breadcrumb"><button type="button" class="pd-link pd-a" data-act="people-list">People</button> › <span class="pd-mono">' + esc(name) + '</span></nav>';
     const u = userByName(name) || users().find(x => lc(x.username) === lc(name));
     if (!u) return h + '<p class="pd-muted">There is nobody named <span class="pd-mono">' + esc(name) + '</span>.</p>';
     const admin = isAdmin();
+    // The bootstrap admin (the overview marks it protected core-admin):
+    // every group refuses it, so it can't use any app.
+    if (u.protected === 'core-admin') h += '<div class="pd-warn pd-core-admin" role="note">' + esc(CORE_ADMIN_NOTE) + '</div>';
     h += '<div class="pd-gp-head"><h2 class="pd-gp-name">' + esc(u.display_name || u.username) + '</h2><span class="pd-muted">' +
       esc(u.username) + (u.email ? ' · ' + esc(u.email) : '') + '</span>';
     if (u.self) h += '<span class="pd-pill info">you</span>';
@@ -892,6 +897,9 @@
     }
     if (addToGroupCandidates(u).length) {
       h += '<div class="pd-actions"><button type="button" class="pd-btn secondary sm" data-act="add-to-group" data-user="' + esc(u.username) + '">Add to group…</button></div>';
+    } else if (admin && u.protected === 'core-admin') {
+      h += '<div class="pd-actions"><button type="button" class="pd-btn secondary sm" disabled aria-describedby="pd-core-admin-why">Add to group…</button>' +
+        '<span class="pd-muted pd-small" id="pd-core-admin-why">The built-in administrator can\'t be added to groups.</span></div>';
     }
     h += '</section>';
     // Apps and Values (admins; filled by refreshExtras)
@@ -1635,7 +1643,7 @@
     if (!root) return;
     const old = legacyUser(location.hash);
     if (old) { setHash(personHash(old.name), false); openAt(old.name, old.action); return; }
-    const r = parseRoute(location.hash);
+    let r = parseRoute(location.hash);
     if (r) {
       if (r.person) r = { person: canonPerson(r.person) };
       if (r.person ? r.person !== personPage || tab !== 'people' : r.group !== groupPage || tab !== 'groups' || personPage) applyRoute(r);
