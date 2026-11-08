@@ -218,7 +218,7 @@ func TestPreBackupRestartFailureKeepsPrefix(t *testing.T) {
 	// The synchronous form says the same.
 	var oe *OpError
 	if err := prefixOpError(OpDelete, "p: ", &OpError{Record: OpRecord{Op: OpBackup, Error: "x", Hint: "h"}, Err: statusErr(409, "x")}); !errors.As(err, &oe) ||
-		oe.Record.Op != OpDelete || oe.Record.Error != "p: x" || oe.Record.Hint != "h" || errStatus(err) != 409 {
+		oe.Record.Op != OpDelete || oe.Record.Error != "p: x" || oe.Record.Hint != "h" || errStatus(err) != 409 || time.Since(oe.Record.At) > time.Minute {
 		t.Fatalf("prefixOpError = %#v", err)
 	}
 	if err := prefixOpError(OpDelete, "p: ", statusErr(409, "x")); errors.As(err, &oe) && oe.Record.Op == OpDelete || err.Error() != "p: x" || errStatus(err) != 409 {

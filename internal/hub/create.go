@@ -144,8 +144,18 @@ func (h *Hub) createSteps(ctx context.Context, p *Progress, templateID, id strin
 			return fmt.Errorf("%v: %w", cause, context.Canceled)
 		}
 		var errs []error
+		var kept []string
 		for _, g := range created {
-			if _, err := groupsAPI.DeleteInstanceGroup(context.Background(), actor, g); err != nil {
+			_, err := groupsAPI.DeleteInstanceGroup(context.Background(), actor, g)
+			// Kept because Users & Groups didn't answer: the group stays
+			// in LLDAP (a warning, as restore-as's undo treats it), not a
+			// failed removal of the instance.
+			if errors.Is(err, directory.ErrKeptUnavailable) {
+				kept = append(kept, err.Error())
+				res.Warnings = append(res.Warnings, err.Error())
+				continue
+			}
+			if err != nil {
 				errs = append(errs, err)
 			}
 		}
@@ -154,6 +164,9 @@ func (h *Hub) createSteps(ctx context.Context, p *Progress, templateID, id strin
 		}
 		if err := errors.Join(errs...); err != nil {
 			return fmt.Errorf("%w — removing the new instance %s again failed too: %v", cause, id, err)
+		}
+		if len(kept) > 0 {
+			return fmt.Errorf("%w — the new instance %s was removed again (%s)", cause, id, strings.Join(kept, "; "))
 		}
 		return fmt.Errorf("%w — the new instance %s was removed again", cause, id)
 	}

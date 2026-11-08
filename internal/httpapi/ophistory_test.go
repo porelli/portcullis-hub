@@ -46,13 +46,27 @@ func TestOpHistoryRoutes(t *testing.T) {
 		}
 	}
 	if got, b := e.do(t, "root", "GET", "/api/instances/nosuch/op?op_id="+enable.OpID, ""); got != 404 {
-		t.Errorf("another instance's op id = %d %s", got, b)
+		t.Errorf("an unknown instance with grafana-a's op id = %d %s", got, b)
+	}
+	// Another real instance's op id is never answered for grafana-a.
+	other := e.runOp(t, "POST", "/api/instances", `{"template":"grafana","id":"grafana-b"}`)
+	if got, b := e.do(t, "root", "GET", "/api/instances/grafana-a/op?op_id="+other.OpID, ""); got != 404 {
+		t.Errorf("grafana-b's op id on grafana-a = %d %s", got, b)
+	}
+	if got, b := e.do(t, "root", "GET", "/api/instances/grafana-b/op?op_id="+enable.OpID, ""); got != 404 {
+		t.Errorf("grafana-a's op id on grafana-b = %d %s", got, b)
+	}
+	if got, _ := e.do(t, "root", "GET", "/api/instances/grafana-b/op?op_id="+other.OpID, ""); got != 200 {
+		t.Errorf("grafana-b's own op id = %d", got)
 	}
 	// The summary route.
 	var sum map[string]hub.OpSummary
 	code, b := e.do(t, "root", "GET", "/api/instances/ops", "")
 	if code != 200 || json.Unmarshal([]byte(b), &sum) != nil {
 		t.Fatalf("ops = %d %s", code, b)
+	}
+	if s := sum["grafana-b"]; s.Op != "create" || s.OpID != other.OpID {
+		t.Fatalf("ops[grafana-b] = %+v", s)
 	}
 	if s := sum["grafana-a"]; s.Op != "restart" || s.OpID != restart.OpID || s.Running || !s.OK || s.At.IsZero() {
 		t.Fatalf("ops[grafana-a] = %+v (%s)", s, b)

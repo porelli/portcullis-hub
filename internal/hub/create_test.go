@@ -68,6 +68,25 @@ func TestCreateInstanceAsGroups(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Users & Groups down while the undo deletes the created group: the
+	// group is kept (a warning), the instance is still removed again.
+	g.createErr = func(name string) error {
+		if strings.HasPrefix(name, "admin_") {
+			return errors.New("lldap down")
+		}
+		return nil
+	}
+	g.delErr = &directory.KeptUnavailableError{Group: "users_grafana-e", Cause: errors.New("down")}
+	_, err = f.h.CreateInstanceAs("grafana", "grafana-e", nil, directory.Human("alice"))
+	if err == nil || !strings.Contains(err.Error(), "was removed again (group users_grafana-e was kept: users & groups is not available") ||
+		strings.Contains(err.Error(), "failed too") {
+		t.Fatalf("kept group = %v", err)
+	}
+	if _, ok := f.h.InstanceView("grafana-e"); ok {
+		t.Error("instance kept after a kept group")
+	}
+	g.createErr, g.delErr = nil, nil
+
 	// No actor, a single template: refused.
 	if _, err := f.h.CreateInstanceAs("grafana", "grafana-d", nil, directory.Human("")); statusOf(err) != 400 {
 		t.Errorf("no actor = %v", err)

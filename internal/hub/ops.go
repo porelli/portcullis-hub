@@ -467,7 +467,7 @@ func prefixOpError(op, prefix string, err error) error {
 		return wrapped
 	}
 	rec := oe.Record
-	rec.Op = op
+	rec.Op, rec.At = op, time.Now().UTC() // op's own end (the history orders by it)
 	rec.Error = clipRunes(prefix+oe.Record.Error, 600)
 	return &OpError{Record: rec, Err: wrapped}
 }

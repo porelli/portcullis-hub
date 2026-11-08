@@ -1240,7 +1240,11 @@
       if (rec && (!opFresh(id, seq != null ? seq : opBegin(id)) || opSeenEnded(id, rec))) { rec = null; opId = ''; }
       let tr = opTracks[id];
       if (!tr || (opId && tr.opId && tr.opId !== opId)) {
-        if (tr) { clearTimeout(tr.timer); tr.waiters.splice(0).forEach(w => w(null)); }
+        // A track of another operation that hasn't ended goes on in the
+        // background (opDetached): its op_id poller still ends it on its
+        // own outcome (its waiters, its toast); an ended one is done.
+        if (tr && !tr.ended) opDetached.add(tr);
+        else if (tr) clearTimeout(tr.timer);
         tr = opTracks[id] = { id, opId: opId || '', rec: null, waiters: [], timer: null, ended: false };
       }
       if (rec && rec.op && (!tr.rec || !tr.rec.op_id || rec.op_id === tr.rec.op_id)) {
@@ -1253,18 +1257,25 @@
     }
     function scheduleTrack(tr, ms) {
       clearTimeout(tr.timer);
-      tr.timer = setTimeout(() => pollTrack(tr), ms != null ? ms : (opp.id === tr.id && oppOpen() ? 1000 : 15000));
+      tr.timer = setTimeout(() => pollTrack(tr), ms != null ? ms : (opDetached.has(tr) ? 2000 : opp.id === tr.id && oppOpen() ? 1000 : 15000));
     }
     async function pollTrack(tr) {
       tr.timer = null;
-      if (opTracks[tr.id] !== tr) return;
+      if (!opLive(tr)) return;
       let rec = null;
       const seq = opBegin(tr.id);
       // By op id (contract §11.7 "Op history"): always this operation's
       // own record, running or ended, whatever became the app's since.
       const url = '/api/instances/' + encodeURIComponent(tr.id) + '/op' + (tr.opId ? '?op_id=' + encodeURIComponent(tr.opId) : '');
       try { rec = await apiGet(url); tr.err = null; } catch (e) { tr.err = e; }
-      if (opTracks[tr.id] !== tr) return;
+      if (!opLive(tr)) return;
+      if (opDetached.has(tr)) {
+        // Background: only its own record matters, never the shared
+        // ordering or the card state (the current track has those).
+        if (rec && rec.op && rec.op_id === tr.opId) { tr.rec = rec; if (rec.running) tr.seenRunning = true; }
+        if (tr.rec && tr.rec.op && !tr.rec.running && !tr.err) endTrack(tr); else scheduleTrack(tr);
+        return;
+      }
       // A newer answer was applied meanwhile (it scheduled what follows).
       if (rec && !opFresh(tr.id, seq)) return;
       if (opSeenEnded(tr.id, rec)) rec = null;
@@ -1274,6 +1285,11 @@
       else if (!tr.ended) scheduleTrack(tr);
       if (opp.id === tr.id) renderOpPanel();
     }
+    // opDetached: tracks of operations no longer the instance's track
+    // that haven't ended (a newer operation took the panel or the card):
+    // polled until they end, so their waiters get their own outcome.
+    const opDetached = new Set();
+    function opLive(tr) { return opTracks[tr.id] === tr || opDetached.has(tr); }
     function setTrackRec(tr, rec) {
       tr.rec = rec;
       if (!tr.opId) tr.opId = rec.op_id || '';
@@ -1290,11 +1306,13 @@
       tr.timer = null;
       const r = tr.rec;
       const ws = tr.waiters.splice(0);
-      if (!(opp.id === tr.id && oppOpen()) && tr.seenRunning) {
+      const detached = opDetached.delete(tr);
+      if (!(!detached && opp.id === tr.id && oppOpen()) && tr.seenRunning) {
         const ph = oppPhase(r);
         showToast(oppTitle(r, opAppName(tr.id)), ph === 'ok' || ph === 'stopped' ? 'success' : 'error');
       }
       ws.forEach(w => w(r));
+      if (detached) return;
       if (openDetailId === tr.id) loadOpBanner(tr.id);
       opThen(tr);
     }
@@ -1310,8 +1328,10 @@
       const next = cur && cur.op && cur.op_id && cur.op_id !== tr.opId ? cur : null;
       if (next || !cur || cur.op_id === tr.opId) tr.then = next;
       if (next) {
+        const was = !!opRunning[tr.id];
         if (next.running) opRunning[tr.id] = next; else delete opRunning[tr.id];
         opCardState(tr.id);
+        if (was !== !!next.running) renderInstanceLists();
       }
       if (opp.id === tr.id) renderOpPanel();
       if (opp.id === tr.id && oppOpen()) tr.thenTimer = setTimeout(() => opThen(tr), 2000);
@@ -1375,7 +1395,10 @@
         const r = all && all[id];
         if (!r || !r.running) return;
         const tr = opTracks[id];
-        if (tr && tr.opId === r.op_id && !tr.ended) return; // already followed (its poller has the steps)
+        // A track that hasn't ended (this op's or an older one's) is left
+        // to its op_id poller: it ends on its own outcome; opThen or the
+        // next scan picks up the newer op then.
+        if (tr && !tr.ended) return;
         if (tr && tr.ended && opp.id === id && oppOpen()) return; // the panel's "then:" note shows it
         trackOp(id, r.op_id, Object.assign({ steps: [] }, r), seqs[id]);
       });
