@@ -865,6 +865,7 @@
         const tr = trackOp(id, opId, { op, op_id: opId, running: true, steps: [] });
         tr.waiters.push(rec => {
           if (!rec) { reject(Object.assign(new Error(op + ': the panel moved to another operation'), { shown: true })); return; }
+          if (rec.gone) { reject(Object.assign(new Error(oppTitle(rec, opAppName(id))), { status: 404, op: rec.op, gone: true, shown: true, rec })); return; }
           if (rec.ok) { resolve({ result: rec.result || {}, warnings: rec.warnings || [], rec }); return; }
           const stopped = oppPhase(rec) === 'stopped';
           const err = new Error(stopped ? op + ' stopped' : (rec.error || (op + ' failed')));
@@ -955,6 +956,7 @@
     // A detail may hold several lines (newlines, or "; " between images).
     function oppLines(d) { return String(d || '').split(/\n|; /).map(x => x.trim()).filter(Boolean); }
     function oppPhase(r) {
+      if (r.gone) return 'gone';
       if (r.running) return r.stopping ? 'stopping' : 'running';
       if (r.ok) return 'ok';
       if (r.stopped_at && !r.error) return 'stopped';
@@ -979,6 +981,7 @@
         case 'stopped': return r.op === 'ai' ? 'AI support for ' + app + ' was not switched' : app + ' was not ' + w.ed;
         case 'undo_failed': return 'Stopping ' + app + ' — the undo failed';
         case 'interrupted': return w.ing + ' ' + app + ' was interrupted';
+        case 'gone': return w.ing + ' ' + app + ' — its record is no longer kept';
       }
       return w.ing + ' ' + app + ' failed';
     }
@@ -1042,6 +1045,7 @@
         case 'stopped': subText = oppStoppedBy(r) + ' · ' + (w.stopped || 'everything is back as before'); break;
         case 'undo_failed': subText = oppStoppedBy(r); break;
         case 'interrupted': subText = oppStarted(r); break;
+        case 'gone': subText = oppStarted(r); break;
         default: subText = oppStarted(r) + (r.at ? ' · ended at ' + oppClock(r.at) : '');
       }
       sub.textContent = subText;
@@ -1056,6 +1060,7 @@
         h += '<div class="opp-note warn">interrupted: the Hub stopped while this ran.' +
           (r.stoppable ? ' Stop undoes what it did.' : ' It can\'t be stopped from here.') + '</div>';
       }
+      if (phase === 'gone') h += '<div class="opp-note warn">The Hub no longer keeps this operation\'s record (it keeps the last 20 per app): its outcome can\'t be read. Check the app to see where it stands.</div>';
       if (opp.notice) h += '<div class="opp-note bad" role="status">' + escapeHtml(opp.notice) + '</div>';
       const steps = r.steps || [];
       const fwd = steps.filter(s => !String(s.key).startsWith('undo:')), undo = steps.filter(s => String(s.key).startsWith('undo:'));
@@ -1269,6 +1274,14 @@
       const url = '/api/instances/' + encodeURIComponent(tr.id) + '/op' + (tr.opId ? '?op_id=' + encodeURIComponent(tr.opId) : '');
       try { rec = await apiGet(url); tr.err = null; } catch (e) { tr.err = e; }
       if (!opLive(tr)) return;
+      // 404 by op id: the Hub keeps no record of it any more (pruned from
+      // the op history, or unknown) — the track ends there, never polled
+      // again.
+      if (!rec && tr.opId && tr.err && tr.err.status === 404) {
+        const last = tr.rec && tr.rec.op_id === tr.opId ? tr.rec : { op: tr.rec && tr.rec.op, steps: [] };
+        rec = Object.assign({}, last, { op_id: tr.opId, running: false, stopping: false, stoppable: false, ok: false, gone: true });
+        tr.err = null;
+      }
       if (opDetached.has(tr)) {
         // Background: only its own record matters, never the shared
         // ordering or the card state (the current track has those).
