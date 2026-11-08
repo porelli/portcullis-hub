@@ -169,25 +169,31 @@
       }
       return { value: x.name, kind: groupKind(x), disabled: !!x.disabled, reason: x.reason || '' };
     }
-    function excluded(st) {
-      const ex = typeof st.opts.exclude === 'function' ? st.opts.exclude() : st.opts.exclude;
+    // excludedSet (pure): the lowercased names left out — exclude (a
+    // list, a Set or a function of one) plus, for a textarea (multi),
+    // every other line of value than the caret's.
+    function excludedSet(exclude, value, caret, multi) {
+      const ex = typeof exclude === 'function' ? exclude() : exclude;
       const out = new Set();
       for (const v of ex || []) out.add(lower(v));
-      if (st.multi) {
-        const { start, end } = lineAt(st.input);
-        const v = st.input.value;
-        (v.slice(0, start) + '\n' + v.slice(end)).split('\n').forEach(l => { if (l.trim()) out.add(lower(l.trim())); });
+      if (multi) {
+        const { start, end } = lineOf(value, caret);
+        (value.slice(0, start) + '\n' + value.slice(end)).split('\n').forEach(l => { if (l.trim()) out.add(lower(l.trim())); });
       }
       return out;
     }
-    // lineAt: the caret's line of a textarea ({start, end} offsets).
-    function lineAt(el) {
-      const v = el.value, c = el.selectionStart == null ? v.length : el.selectionStart;
+    function excluded(st) {
+      return excludedSet(st.opts.exclude, st.input.value, caretOf(st.input), st.multi);
+    }
+    function caretOf(el) { return el.selectionStart == null ? el.value.length : el.selectionStart; }
+    // lineOf (pure): the {start, end} offsets of the line holding caret.
+    function lineOf(v, c) {
       const start = v.lastIndexOf('\n', c - 1) + 1;
       let end = v.indexOf('\n', c);
       if (end < 0) end = v.length;
       return { start, end };
     }
+    function lineAt(el) { return lineOf(el.value, caretOf(el)); }
     function query(st) {
       if (!st.multi) return st.input.value.trim();
       const { start, end } = lineAt(st.input);
@@ -202,12 +208,17 @@
       return -1;
     }
     function matches(st, items) {
-      const q = lower(query(st));
-      const ex = excluded(st);
+      return matchItems(st.opts.kind, items, query(st), excluded(st));
+    }
+    // matchItems (pure): the normalized items of kind matching q (a
+    // case-insensitive substring), none in ex (lowercased names), best
+    // first (username prefix, another prefix, substring), at most PICK_MAX.
+    function matchItems(kind, items, q, ex) {
+      q = lower(q);
       const out = [];
-      items.forEach((x, i) => {
+      (items || []).forEach((x, i) => {
         if (x == null) return;
-        const it = normalize(st.opts.kind, x);
+        const it = normalize(kind, x);
         if (!it.value || ex.has(lower(it.value))) return;
         const s = score(it, q);
         if (s >= 0) out.push({ it, s, i });
@@ -261,14 +272,24 @@
       if (!q && !force) { close(st); return; }
       const ask = ++st.ask;
       const src = typeof st.opts.source === 'function' ? st.opts.source() : st.opts.source;
-      // A list of bare group names gets its kinds from the overview.
-      const kinds = st.opts.kind === 'group' && !dir ? overview() : null;
-      Promise.all([src, kinds]).then(([items]) => {
+      Promise.resolve(src).then(items => {
         if (ask !== st.ask || document.activeElement !== st.input) return;
-        st.items = matches(st, Array.isArray(items) ? items : []);
+        items = Array.isArray(items) ? items : [];
+        st.items = matches(st, items);
         if (!st.items.length) { close(st); return; }
         st.active = -1;
         show(st);
+        // Bare group names are listed at once; their kinds follow when
+        // the overview arrives (the Hub page; the active option kept).
+        if (st.opts.kind === 'group' && !dir && !fetched) {
+          overview().then(() => {
+            if (ask !== st.ask || open !== st) return;
+            const active = st.active;
+            st.items = matches(st, items);
+            show(st);
+            if (active >= 0 && active < st.items.length) setActive(st, active);
+          });
+        }
       });
     }
     function show(st) {
@@ -276,17 +297,33 @@
       open = st;
       const lb = st.list = listboxFor(st.input);
       st.input.setAttribute('aria-controls', lb.id);
-      lb.innerHTML = st.items.map((it, i) => {
-        const sub = st.opts.kind === 'person' ? [it.display, it.email].filter(Boolean).join(' · ') : it.kind;
-        return '<li role="option" id="' + lb.id + '-o' + i + '" data-i="' + i + '" aria-selected="false"' + (it.disabled ? ' aria-disabled="true"' : '') + '>' +
-          '<span class="pp-name">' + esc(it.value) + '</span>' + (sub ? ' <span class="pp-sub">' + esc(sub) + '</span>' : '') +
-          (it.disabled && it.reason ? '<span class="pp-why">' + esc(it.reason) + '</span>' : '') + '</li>';
-      }).join('');
+      lb.innerHTML = optionsHtml(st.opts.kind, st.items, lb.id);
       lb.setAttribute('aria-label', st.input.getAttribute('aria-label') || (st.opts.kind === 'person' ? 'People' : 'Groups'));
       lb.hidden = false;
       place(st);
       st.input.setAttribute('aria-expanded', 'true');
       st.input.removeAttribute('aria-activedescendant');
+    }
+    // optionsHtml (pure): the listbox's options for matched items (ids
+    // <listId>-o<i>), every value escaped.
+    function optionsHtml(kind, items, listId) {
+      return items.map((it, i) => {
+        const sub = kind === 'person' ? [it.display, it.email].filter(Boolean).join(' · ') : it.kind;
+        return '<li role="option" id="' + esc(listId) + '-o' + i + '" data-i="' + i + '" aria-selected="false"' + (it.disabled ? ' aria-disabled="true"' : '') + '>' +
+          '<span class="pp-name">' + esc(it.value) + '</span>' + (sub ? ' <span class="pp-sub">' + esc(sub) + '</span>' : '') +
+          (it.disabled && it.reason ? '<span class="pp-why">' + esc(it.reason) + '</span>' : '') + '</li>';
+      }).join('');
+    }
+    // nextActive (pure): the option ↓ (down) or ↑ moves to from active,
+    // skipping refused ones; active when none is choosable.
+    function nextActive(items, active, down) {
+      const n = items.length;
+      let i = active;
+      for (let k = 0; k < n; k++) {
+        i = down ? (i + 1) % n : (i <= 0 ? n - 1 : i - 1);
+        if (!items[i].disabled) return i;
+      }
+      return active;
     }
     function place(st) {
       const r = st.input.getBoundingClientRect();
@@ -340,12 +377,8 @@
         }
         e.preventDefault();
         // Move to the next choosable match (refused ones are only shown).
-        const n = st.items.length;
-        let i = st.active;
-        for (let k = 0; k < n; k++) {
-          i = e.key === 'ArrowDown' ? (i + 1) % n : (i <= 0 ? n - 1 : i - 1);
-          if (!st.items[i].disabled) { setActive(st, i); break; }
-        }
+        const i = nextActive(st.items, st.active, e.key === 'ArrowDown');
+        if (i !== st.active) setActive(st, i);
       } else if (e.key === 'Enter' && shown && st.active >= 0) {
         e.preventDefault();
         e.stopPropagation();
@@ -396,7 +429,7 @@
     window.addEventListener('resize', follow);
     document.addEventListener('scroll', follow, true);
 
-    return { attach, bind, overview };
+    return { attach, bind, overview, matchItems, optionsHtml, nextActive, excludedSet };
   })();
 
   // ── shared top navigation (window.PortcullisNav) ────────
@@ -585,6 +618,9 @@
     const main = root.querySelector('.pd-main');
     try {
       me = await api('GET', '/api/directory/me');
+      // Who the caller is, before the overview: the shared navigation
+      // keeps an administrator's Hub link while /api/directory fails.
+      if (options.onUser && me) options.onUser(me.user, !!me.admin);
     } catch (err) {
       me = null;
       if (err.status !== 503) return showOff('Failed to load: ' + errText(err));
@@ -668,6 +704,8 @@
   }
 
   function keyStatus(u) {
+    // Defence in depth: the overview never lists the service account
+    // (directory hideServiceAccount); kept should one ever reach the page.
     if (u.protected === 'service') return '<span class="pd-muted">service account (not in Keycloak)</span>';
     const kc = u.keycloak;
     if (!kc) return '<span class="pd-pill">Keycloak unknown</span>';
@@ -720,6 +758,7 @@
       h += '<tr class="pd-row" data-user="' + esc(u.username) + '"><td><button type="button" class="pd-link" data-act="open-user" data-user="' + esc(u.username) + '">' +
         esc(u.username) + '</button>';
       if (u.self) h += ' <span class="pd-pill info">you</span>';
+      // (protected 'service': defence in depth, the overview leaves it out)
       if (u.admin && u.protected !== 'service') h += ' <span class="pd-pill info" title="Member of an administrator group">admin</span>';
       if (u.display_name) h += '<div class="pd-muted">' + esc(u.display_name) + '</div>';
       h += '</td>';
@@ -867,6 +906,8 @@
     h += '<div class="pd-gp-head"><h2 class="pd-gp-name">' + esc(u.display_name || u.username) + '</h2><span class="pd-muted">' +
       esc(u.username) + (u.email ? ' · ' + esc(u.email) : '') + '</span>';
     if (u.self) h += '<span class="pd-pill info">you</span>';
+    // Defence in depth: the overview never lists the service account
+    // (directory hideServiceAccount); kept should one ever reach the page.
     if (u.protected === 'service') h += '<span class="pd-pill" title="The Hub\'s own LLDAP account (read-only here)">Hub service account</span>';
     if (u.protected === 'core-admin') h += '<span class="pd-pill" title="Bootstrap LLDAP admin: Keycloak and enroll bind as it. Managed from the server only (./portcullis invite admin)">bootstrap admin (server-managed)</span>';
     if (u.admin && u.protected !== 'service') h += '<span class="pd-pill info" title="Member of an administrator group: no invites from the Hub">administrator</span>';
@@ -937,6 +978,14 @@
       '<div class="pd-actions"><button type="button" class="pd-btn primary sm" data-act="add-to-group-go" data-user="' + esc(name) + '">Open the group\'s page</button>' +
       '<button type="button" class="pd-btn secondary sm" data-act="dialog-close">Cancel</button></div>');
     dialogBody().querySelector('#pa-group').focus();
+  }
+  // addToGroupPick (pure): the group typed in Add to group… among cands
+  // (any case) → {group}; nothing typed → {}; else {error}.
+  function addToGroupPick(cands, typed, user) {
+    const v = String(typed || '').trim();
+    if (!v) return {};
+    const g = (cands || []).find(x => String(x.name).toLowerCase() === v.toLowerCase());
+    return g ? { group: g.name } : { error: v + ' isn\'t a group ' + user + ' can be added to' };
   }
   // addToGroupItems: the Add to group… picker's groups, each with its kind
   // (and whether the person already matches its rule).
@@ -2824,12 +2873,11 @@
       case 'add-to-group': return openAddToGroup(user);
       case 'add-to-group-go': {
         const el = dialogBody().querySelector('#pa-group');
-        const v = el ? el.value.trim() : '';
-        if (!v) return;
-        const g = addToGroupCandidates(userByName(user)).find(x => lc(x.name) === lc(v));
-        if (!g) { toast(v + ' isn\'t a group ' + user + ' can be added to', 'error'); return; }
+        const pickd = addToGroupPick(addToGroupCandidates(userByName(user)), el ? el.value : '', user);
+        if (pickd.error) { toast(pickd.error, 'error'); return; }
+        if (!pickd.group) return;
         closeDialog();
-        return openGroup(g.name, { preselect: [user] });
+        return openGroup(pickd.group, { preselect: [user] });
       }
       case 'save-user': return saveUser(user);
       case 'invite-open': return openInvite(null);
@@ -3114,10 +3162,19 @@
   // Fields outside the directory UI (the Hub page: the AI tab's Revoke
   // for, settings.js's users lists) name the kind with data-pick; the
   // overview is read once when one is first used.
+  // data-pick-population: the field names a member of an app's
+  // population (Revoke for, settings users lists), which a protected
+  // account (the bootstrap admin: every group refuses it) never is.
   PortcullisPicker.bind(document, t => {
     const k = t.dataset && t.dataset.pick;
     if (k !== 'person' && k !== 'group') return null;
-    return { kind: k, source: () => PortcullisPicker.overview().then(d => (k === 'person' ? d.users : d.groups) || []) };
+    const population = k === 'person' && 'pickPopulation' in t.dataset;
+    return {
+      kind: k, source: () => PortcullisPicker.overview().then(d => {
+        const l = (k === 'person' ? d.users : d.groups) || [];
+        return population ? l.filter(u => !u.protected) : l;
+      }),
+    };
   });
 
   window.PortcullisDirectory = { show, openAt, openGroup, csvCell, renderAudit };

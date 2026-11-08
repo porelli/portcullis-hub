@@ -490,7 +490,7 @@
         break;
       }
       case 'list': case 'groups': case 'users':
-        h += '<textarea data-part="lines" rows="3" placeholder="one per line"' + (o.type === 'list' ? '' : ' data-pick="' + (o.type === 'groups' ? 'group' : 'person') + '" spellcheck="false"') + lbl + '>' + esc((v || []).join('\n')) + '</textarea>';
+        h += '<textarea data-part="lines" rows="3" placeholder="one per line"' + (o.type === 'list' ? '' : (o.type === 'groups' ? ' data-pick="group"' : ' data-pick="person" data-pick-population') + ' spellcheck="false"') + lbl + '>' + esc((v || []).join('\n')) + '</textarea>';
         break;
       case 'table':
         h += '<textarea data-part="json" rows="4" placeholder="[{&quot;column&quot;: &quot;value&quot;}]"' + lbl + '>' + esc(v === null || v === undefined ? '' : JSON.stringify(v, null, 1)) + '</textarea>';
@@ -710,13 +710,18 @@
       (r.group ? 'group' : 'choose a group…') + '" aria-label="Group" autocomplete="off" spellcheck="false">';
   }
 
-  // rowGroupError: why a typed row group can't be used, or null.
-  function rowGroupError(st, o, uid, v) {
+  // rowGroupError: why a row's group can't be used, or null (a name in
+  // another case is the directory's group). stored: the row's group as
+  // saved (it may have gone from the directory since).
+  function rowGroupError(st, o, uid, v, stored) {
     if (!v) return 'choose a group';
     const choices = groupChoices(st, o, uid);
-    if (!choices.length) return null;
+    if (!choices.length) return null; // the directory's groups unknown: the server decides
     const c = choices.find(x => x.name.toLowerCase() === v.toLowerCase());
-    if (!c) return o.privileged ? 'not one of the groups that can get this value' : 'not in the directory';
+    if (!c) {
+      if (stored) return 'group ' + v + ' is no longer in the directory: choose another or remove the row';
+      return o.privileged ? 'not one of the groups that can get this value' : 'no group of that name in the directory';
+    }
     return c.disabled ? c.reason : null;
   }
 
@@ -735,7 +740,14 @@
         h += '<button type="button" class="btn-icon ps-move" data-action="row-down" data-key="' + esc(o.key) + '" data-uid="' + esc(r.uid) + '"' + (i === rows.length - 1 ? ' disabled' : '') + ' aria-label="Move ' + esc(r.group || 'row') + ' down" title="Move down">▼</button>';
       }
       h += '<button type="button" class="btn-icon" data-action="row-remove" data-key="' + esc(o.key) + '" data-uid="' + esc(r.uid) + '" aria-label="Remove the row for ' + esc(r.group || 'the new group') + '" title="Remove">✕</button>';
-      const err = st.rowErrors[o.key + '\u0000' + r.uid];
+      // A saved row whose group has gone (or became refused) shows why
+      // at once, not only after an edit.
+      const ek = o.key + '\u0000' + r.uid;
+      if (!st.rowErrors[ek] && r.group && r.group === r.group0) {
+        const why = rowGroupError(st, o, r.uid, r.group, true);
+        if (why) st.rowErrors[ek] = new String(why);
+      }
+      const err = st.rowErrors[ek];
       if (err) h += '<div class="ps-err ps-row-err">' + esc(err) + '</div>';
       h += '</li>';
     });
@@ -1371,15 +1383,19 @@
         const same = o ? groupChoices(st, o, uid).find(c => c.name.toLowerCase() === v.toLowerCase()) : null;
         if (same && e.type === 'change') v = same.name;
         if (row) row.group = v;
-        const msg = o ? rowGroupError(st, o, uid, v) : null;
+        const msg = o ? rowGroupError(st, o, uid, v, row && v === row.group0) : null;
         if (e.type === 'change' && e.detail && e.detail.picked && !msg) {
           // A group chosen from the list: the row's labels follow (the
           // field keeps the focus).
           delete st.rowErrors[key + '\u0000' + uid];
           redrawOption(st, key);
           refocus(st, '[data-row-group][data-uid="' + CSS.escape(uid) + '"]');
-        } else {
+        } else if (e.type === 'change') {
+          // Judged once the name is complete (change / blur), never on
+          // every keystroke.
           setRowError(st, key, uid, msg ? new String(msg) : null);
+        } else {
+          setRowError(st, key, uid, null); // typing only clears
         }
         schedulePreview(st);
         return;
