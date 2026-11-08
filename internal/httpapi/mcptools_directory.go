@@ -858,10 +858,11 @@ func (s *Server) registerDirectoryTools() {
 				if err != nil {
 					return nil, err
 				}
-				if err := s.addMember(ctx, c, in.Group, directory.MemberAdd{Username: in.Username, Reason: in.Reason, Until: until}); err != nil {
+				st, err := s.addMember(ctx, c, in.Group, directory.MemberAdd{Username: in.Username, Reason: in.Reason, Until: until})
+				if err != nil {
 					return nil, err
 				}
-				return map[string]string{"status": "added"}, nil
+				return st.with(map[string]any{"status": "added"}), nil
 			}), s.groupClass, argReader("group"), func(ctx context.Context, args json.RawMessage) []string {
 			line := "Adds " + argField(args, "username") + " to " + argField(args, "group")
 			if u := argField(args, "until"); u != "" {
@@ -875,11 +876,11 @@ func (s *Server) registerDirectoryTools() {
 		// remove_member is D from a guarding group (fix round 1 ruling).
 		perCallCtx(dirTool(s, "remove_member", "Remove a person from a group (they are signed out of Keycloak). From an administrator, permission or other guarding group it needs your confirmation in the browser.",
 			ClassWrite, "DELETE /api/directory/groups/{group}/members/{username}", "group.remove_member", func(ctx context.Context, c *directory.Caller, in memberArgs) (any, error) {
-				res, err := s.removeMember(ctx, c, in.Group, in.Username)
+				res, st, err := s.removeMember(ctx, c, in.Group, in.Username)
 				if err != nil {
 					return nil, err
 				}
-				return map[string]any{"status": "removed", "warnings": res.Warnings}, nil
+				return st.with(map[string]any{"status": "removed", "warnings": res.Warnings}), nil
 			}), s.groupClass, argReader("group"), func(ctx context.Context, args json.RawMessage) []string {
 			return s.groupConsequences(ctx, args, "Removes "+argField(args, "username")+" from "+argField(args, "group")+" and signs them out of Keycloak.", "")
 		}),
@@ -889,10 +890,11 @@ func (s *Server) registerDirectoryTools() {
 				if err != nil {
 					return nil, err
 				}
-				if err := s.setMemberExpiry(ctx, c, in.Group, in.Username, until); err != nil {
+				st, err := s.setMemberExpiry(ctx, c, in.Group, in.Username, until)
+				if err != nil {
 					return nil, err
 				}
-				return map[string]string{"status": "saved"}, nil
+				return st.with(map[string]any{"status": "saved"}), nil
 			}), s.groupClass, argReader("group"), func(ctx context.Context, args json.RawMessage) []string {
 			until := "no end"
 			if u := argField(args, "until"); u != "" {
@@ -913,15 +915,16 @@ func (s *Server) registerDirectoryTools() {
 						return nil, err
 					}
 				}
-				if err := s.setGroupRule(ctx, c, in.Group, rule); err != nil {
+				st, err := s.setGroupRule(ctx, c, in.Group, rule)
+				if err != nil {
 					return nil, err
 				}
 				if rule == nil {
-					return map[string]any{"status": "saved", "text": "", "expr": nil}, nil
+					return st.with(map[string]any{"status": "saved", "text": "", "expr": nil}), nil
 				}
 				out := ruleJSON(rule)
 				out["status"] = "saved"
-				return out, nil
+				return st.with(out), nil
 			}), s.ruleClass, argReader("group"), func(ctx context.Context, args json.RawMessage) []string {
 			r := argField(args, "rule")
 			line := "Sets the rule of " + argField(args, "group") + " to " + q(r) + ": whoever it matches joins."
@@ -936,12 +939,13 @@ func (s *Server) registerDirectoryTools() {
 				if err != nil {
 					return nil, err
 				}
-				if err := s.convertGroup(ctx, c, in.Group, rule, in.Keep, &in.Preview); err != nil {
+				st, err := s.convertGroup(ctx, c, in.Group, rule, in.Keep, &in.Preview)
+				if err != nil {
 					return nil, err
 				}
 				out := ruleJSON(rule)
 				out["status"] = "saved"
-				return out, nil
+				return st.with(out), nil
 			}), s.ruleClass, argReader("group"), func(ctx context.Context, args json.RawMessage) []string {
 			a, _ := decode[convertArgs](args)
 			return s.groupConsequences(ctx, args, "Makes "+a.Group+" a rule group ("+q(a.Rule)+"): joining "+peopleList(a.Preview.Joining)+".", a.Rule)
@@ -952,19 +956,21 @@ func (s *Server) registerDirectoryTools() {
 				if err != nil {
 					return nil, err
 				}
-				if err := s.addException(ctx, c, in.Group, directory.Exception{User: in.User, Reason: in.Reason, Include: in.Include, Until: until}); err != nil {
+				st, err := s.addException(ctx, c, in.Group, directory.Exception{User: in.User, Reason: in.Reason, Include: in.Include, Until: until})
+				if err != nil {
 					return nil, err
 				}
-				return map[string]string{"status": "saved"}, nil
+				return st.with(map[string]any{"status": "saved"}), nil
 			}), s.ruleClass, argReader("group"), func(ctx context.Context, args json.RawMessage) []string {
 			return s.groupConsequences(ctx, args, "Adds an exception for "+argField(args, "user")+" to "+argField(args, "group")+".", "")
 		}),
 		perCallCtx(dirTool(s, "remove_exception", "Remove a person's exception from a rule group (a kept-out person the rule matches joins). On a guarding group it needs your confirmation in the browser.",
 			ClassWrite, "DELETE /api/directory/groups/{group}/exceptions/{username}", "group.exception", func(ctx context.Context, c *directory.Caller, in memberArgs) (any, error) {
-				if err := s.removeException(ctx, c, in.Group, in.Username); err != nil {
+				st, err := s.removeException(ctx, c, in.Group, in.Username)
+				if err != nil {
 					return nil, err
 				}
-				return map[string]string{"status": "removed"}, nil
+				return st.with(map[string]any{"status": "removed"}), nil
 			}), s.ruleClass, argReader("group"), func(ctx context.Context, args json.RawMessage) []string {
 			return s.groupConsequences(ctx, args, "Removes "+argField(args, "username")+"'s exception from "+argField(args, "group")+" (kept out: they join if the rule matches).", "")
 		}),

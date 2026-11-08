@@ -494,17 +494,18 @@ func (s *Server) handleSetGroupRule(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.setGroupRule(r.Context(), c, r.PathValue("group"), rule); err != nil {
+	st, err := s.setGroupRule(r.Context(), c, r.PathValue("group"), rule)
+	if err != nil {
 		dirErr(w, err)
 		return
 	}
 	if rule == nil {
-		writeJSON(w, map[string]interface{}{"status": "saved", "text": "", "expr": nil})
+		writeJSON(w, st.with(map[string]any{"status": "saved", "text": "", "expr": nil}))
 		return
 	}
 	out := ruleJSON(rule)
 	out["status"] = "saved"
-	writeJSON(w, out)
+	writeJSON(w, st.with(out))
 }
 
 func (s *Server) handleConvertPreview(w http.ResponseWriter, r *http.Request) {
@@ -557,13 +558,14 @@ func (s *Server) handleConvert(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.convertGroup(r.Context(), c, r.PathValue("group"), rule, req.Keep, req.Preview); err != nil {
+	st, err := s.convertGroup(r.Context(), c, r.PathValue("group"), rule, req.Keep, req.Preview)
+	if err != nil {
 		dirErr(w, err)
 		return
 	}
 	out := ruleJSON(rule)
 	out["status"] = "saved"
-	writeJSON(w, out)
+	writeJSON(w, st.with(out))
 }
 
 // ── exceptions, expiry, permissions ─────────────────────
@@ -586,11 +588,12 @@ func (s *Server) handleAddException(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ex := directory.Exception{User: req.User, Reason: req.Reason, Include: req.Include, Until: req.Until}
-	if err := s.addException(r.Context(), c, r.PathValue("group"), ex); err != nil {
+	st, err := s.addException(r.Context(), c, r.PathValue("group"), ex)
+	if err != nil {
 		dirErr(w, err)
 		return
 	}
-	statusJSON(w, "saved")
+	writeJSON(w, st.with(map[string]any{"status": "saved"}))
 }
 
 func (s *Server) handleRemoveException(w http.ResponseWriter, r *http.Request) {
@@ -605,11 +608,12 @@ func (s *Server) handleRemoveException(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.removeException(r.Context(), c, r.PathValue("group"), r.PathValue("username")); err != nil {
+	st, err := s.removeException(r.Context(), c, r.PathValue("group"), r.PathValue("username"))
+	if err != nil {
 		dirErr(w, err)
 		return
 	}
-	statusJSON(w, "removed")
+	writeJSON(w, st.with(map[string]any{"status": "removed"}))
 }
 
 func (s *Server) handleSetExpiry(w http.ResponseWriter, r *http.Request) {
@@ -626,11 +630,12 @@ func (s *Server) handleSetExpiry(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.setMemberExpiry(r.Context(), c, r.PathValue("group"), r.PathValue("username"), req.Until); err != nil {
+	st, err := s.setMemberExpiry(r.Context(), c, r.PathValue("group"), r.PathValue("username"), req.Until)
+	if err != nil {
 		dirErr(w, err)
 		return
 	}
-	statusJSON(w, "saved")
+	writeJSON(w, st.with(map[string]any{"status": "saved"}))
 }
 
 func (s *Server) handleSetPermission(w http.ResponseWriter, r *http.Request) {

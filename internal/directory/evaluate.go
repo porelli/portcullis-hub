@@ -677,6 +677,82 @@ func (s *Service) kick() {
 	}
 }
 
+// settleTimeout bounds Settle's evaluation (contract §9.7: ≤ 5 s); a
+// var so tests can shorten it.
+var settleTimeout = 5 * time.Second
+
+// settleWhyMax: Settle's why is clipped to this many runes.
+const settleWhyMax = 200
+
+// Settle runs the evaluator once, synchronously, so a membership,
+// exception, rule, convert or expiry change the caller just made is in
+// LLDAP when its answer goes back (contract §9.7 applied / why). Call it
+// only after the mutation's run returned (s.mu released) and only when
+// it succeeded. applied = Evaluate returned without error within
+// settleTimeout; why is a short reason when it didn't (LLDAP or the
+// store unavailable, an error, the timeout) or when the run reported
+// per-change errors. why carries only the evaluator's own error texts,
+// which never hold a secret, clipped to settleWhyMax runes.
+//
+// The background loop may evaluate at the same time: both go through
+// evaluateLocked, which holds s.mu, so the runs are serialised and the
+// second sees the first's changes — a removal (and its Keycloak logout)
+// is made by one run only; LogoutUser is idempotent anyway. The kick the
+// mutation's run sent still follows (RunEvaluator unchanged).
+func (s *Service) Settle(ctx context.Context) (applied bool, why string) {
+	ctx, cancel := context.WithTimeout(ctx, settleTimeout)
+	defer cancel()
+	type result struct {
+		rep *EvalReport
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		rep, err := s.Evaluate(ctx, time.Now().UTC())
+		done <- result{rep, err}
+	}()
+	var r result
+	select {
+	case r = <-done:
+	case <-ctx.Done():
+		r.err = ctx.Err()
+	}
+	switch {
+	case errors.Is(r.err, context.DeadlineExceeded):
+		why = fmt.Sprintf("stored, but applying it timed out after %s: it is applied at the next evaluation", settleTimeout)
+		log.Printf("rules: %s", why)
+		return false, why
+	case r.err != nil:
+		var de *Error
+		if !errors.As(r.err, &de) || de.Status != http.StatusServiceUnavailable {
+			log.Printf("rules: evaluation failed: %v", r.err)
+		}
+		return false, clipRunes("stored, but not applied: "+r.err.Error(), settleWhyMax)
+	}
+	if len(r.rep.Changes) > 0 || len(r.rep.Errors) > 0 {
+		log.Printf("rules: %d membership change(s), %d error(s)%s", len(r.rep.Changes), len(r.rep.Errors), firstErr(r.rep.Errors))
+	}
+	if len(r.rep.Errors) > 0 {
+		return true, clipRunes(strings.Join(r.rep.Errors, "; "), settleWhyMax)
+	}
+	return true, ""
+}
+
+// clipRunes keeps the first n runes of s (control characters dropped),
+// "…" when cut.
+func clipRunes(s string, n int) string {
+	r := []rune(strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, s))
+	if len(r) <= n {
+		return string(r)
+	}
+	return string(r[:n-1]) + "…"
+}
+
 // evaluatorDebounce coalesces bursts of mutations into one evaluation.
 const evaluatorDebounce = time.Second
 

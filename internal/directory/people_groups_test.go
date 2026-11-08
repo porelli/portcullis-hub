@@ -321,6 +321,9 @@ func TestCreateUserRuleGroupPasswordFails(t *testing.T) {
 
 // Saving the entries fails: the new user is deleted.
 func TestCreateUserRuleGroupSaveFails(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
 	e, store := evalEnv(t)
 	setRule(t, store, "milan", `city = "Milan"`)
 	dir := filepath.Dir(store.Path)

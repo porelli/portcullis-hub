@@ -609,15 +609,20 @@ func TestPrestagedRuleAndExceptionsNeedConfirmation(t *testing.T) {
 	for _, g := range []string{"admin_grafana-r", "admin_grafana-x"} {
 		mustDo(t, e.hub, "root", "POST", "/api/directory/groups/"+g+"/convert", `{"rule":"clearance = \"x\"","preview":{"matching":[],"kept_as_exception":[],"joining":[],"expiry_dropped":[]}}`, 200)
 	}
-	// Rule match: set_details is W (nothing guarding uses the field yet).
-	if txt, isErr, conf := e.tool(t, "set_details", map[string]any{"username": "dana", "attrs": map[string]any{"clearance": []string{"x"}}}); isErr || conf != "" {
-		t.Fatalf("set_details = %q %v (confirmation %q)", txt, isErr, conf)
-	}
-	// Include exception: a rule group whose rule matches nobody.
+	// Include exception: a rule group whose rule matches nobody. Every
+	// convert settles (Task 3: the evaluator runs at once), so they all
+	// come before the staged rule match and exception below.
 	e.ll.AddGroup("admin_grafana-y")
 	mustDo(t, e.hub, "root", "POST", "/api/directory/groups/admin_grafana-y/convert", `{"rule":"clearance = \"never\"","preview":{"matching":[],"kept_as_exception":[],"joining":[],"expiry_dropped":[]}}`, 200)
-	if txt, isErr, conf := e.tool(t, "add_exception", map[string]any{"group": "admin_grafana-y", "user": "dana", "include": true, "reason": "test"}); isErr || conf != "" {
-		t.Fatalf("add_exception = %q %v (confirmation %q)", txt, isErr, conf)
+	// Staged through the Service: add_exception settles too.
+	if err := e.s.Directory.AddException(context.Background(), &directory.Caller{User: "root", Admin: true}, "admin_grafana-y",
+		directory.Exception{User: "dana", Include: true, Reason: "test"}); err != nil {
+		t.Fatalf("add exception: %v", err)
+	}
+	// Rule match: set_details is W (nothing guarding uses the field yet)
+	// and doesn't settle.
+	if txt, isErr, conf := e.tool(t, "set_details", map[string]any{"username": "dana", "attrs": map[string]any{"clearance": []string{"x"}}}); isErr || conf != "" {
+		t.Fatalf("set_details = %q %v (confirmation %q)", txt, isErr, conf)
 	}
 	if got := membersOf(e.s.loadGuards(), "admin_grafana-r"); len(got) != 0 {
 		t.Fatalf("the evaluator ran: members %v", got)

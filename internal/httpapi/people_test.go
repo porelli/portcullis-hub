@@ -32,8 +32,18 @@ type peopleEnv struct {
 
 func newPeopleEnv(t *testing.T) *peopleEnv {
 	t.Helper()
+	return newPeopleEnvWith(t, nil)
+}
+
+// newPeopleEnvWith lets the caller adjust the directory service (after
+// the store is set).
+func newPeopleEnvWith(t *testing.T, adjust func(*directory.Service)) *peopleEnv {
+	t.Helper()
 	s, ll, _ := newDirFixture(t, func(d *directory.Service) {
 		d.Store = &directory.Store{Path: filepath.Join(t.TempDir(), "directory.yaml")}
+		if adjust != nil {
+			adjust(d)
+		}
 	})
 	h, err := s.Handler()
 	if err != nil {

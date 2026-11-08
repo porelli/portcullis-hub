@@ -517,3 +517,36 @@ func TestOnEvaluated(t *testing.T) {
 		run(t, e.svc)
 	})
 }
+
+// Settle and the background loop evaluate at the same time: both hold
+// s.mu in evaluateLocked, so the runs are serialised — each change is
+// made once (run with -race).
+func TestSettleConcurrentWithLoop(t *testing.T) {
+	e, store := evalEnv(t)
+	setRule(t, store, "milan", `city = "Milan"`)
+	loopCtx, stop := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		e.svc.RunEvaluator(loopCtx, time.Millisecond)
+	}()
+	for range 20 {
+		if applied, why := e.svc.Settle(ctx); !applied || why != "" {
+			t.Fatalf("Settle = %v %q", applied, why)
+		}
+	}
+	stop()
+	<-done
+	if got := strings.Join(e.ll.GroupMembers("milan"), ","); got != "bob,carol" {
+		t.Errorf("milan = %s", got)
+	}
+	n := 0
+	for _, m := range e.ll.Mutations {
+		if strings.Contains(m, "addUserToGroup") {
+			n++
+		}
+	}
+	if n != 2 {
+		t.Errorf("%d additions, want 2 (one per person): %v", n, e.ll.Mutations)
+	}
+}

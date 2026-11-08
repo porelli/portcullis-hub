@@ -491,11 +491,12 @@ func (s *Server) handleAddMember(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.addMember(r.Context(), c, r.PathValue("group"), directory.MemberAdd{Username: req.Username, Reason: req.Reason, Until: req.Until}); err != nil {
+	st, err := s.addMember(r.Context(), c, r.PathValue("group"), directory.MemberAdd{Username: req.Username, Reason: req.Reason, Until: req.Until})
+	if err != nil {
 		dirErr(w, err)
 		return
 	}
-	writeJSON(w, map[string]string{"status": "added"})
+	writeJSON(w, st.with(map[string]any{"status": "added"}))
 }
 
 func (s *Server) handleRemoveMember(w http.ResponseWriter, r *http.Request) {
@@ -510,12 +511,12 @@ func (s *Server) handleRemoveMember(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	res, err := s.removeMember(r.Context(), c, r.PathValue("group"), r.PathValue("username"))
+	res, st, err := s.removeMember(r.Context(), c, r.PathValue("group"), r.PathValue("username"))
 	if err != nil {
 		dirErr(w, err)
 		return
 	}
-	writeJSON(w, map[string]interface{}{"status": "removed", "warnings": res.Warnings})
+	writeJSON(w, st.with(map[string]any{"status": "removed", "warnings": res.Warnings}))
 }
 
 // handlePortalApps serves the landing portal's app list (contract §10),
@@ -531,9 +532,49 @@ func (s *Server) handlePortalApps(w http.ResponseWriter, r *http.Request) {
 // Service method with the same arguments (no HTTP loopback, no logic of
 // its own), reported to rec for the parity test — never a password.
 
-func (s *Server) createUser(ctx context.Context, c *directory.Caller, req directory.CreateRequest) (*directory.Result, error) {
+// settled is what Settle reports (contract §9.7): merged into the
+// answer of every membership, exception, rule, convert and expiry
+// mutation, and of a create with groups.
+type settled struct {
+	Applied bool   `json:"applied"`
+	Why     string `json:"why,omitempty"`
+}
+
+// settle runs the evaluator after a successful mutation (never after a
+// refused one: callers return before it).
+func (s *Server) settle(ctx context.Context) *settled {
+	s.rec("Settle")
+	applied, why := s.Directory.Settle(ctx)
+	return &settled{Applied: applied, Why: why}
+}
+
+// with merges st's applied / why into an answer.
+func (st *settled) with(m map[string]any) map[string]any {
+	m["applied"] = st.Applied
+	if st.Why != "" {
+		m["why"] = st.Why
+	}
+	return m
+}
+
+// createdUser is CreateUser's answer, applied / why added when the
+// person was put in groups.
+type createdUser struct {
+	*directory.Result
+	*settled
+}
+
+func (s *Server) createUser(ctx context.Context, c *directory.Caller, req directory.CreateRequest) (createdUser, error) {
 	s.rec("CreateUser", req.Username, req.Email, req.DisplayName, req.Groups, req.Reasons, req.Onboarding, req.Generate, req.RequirePasskey)
-	return s.Directory.CreateUser(ctx, c, req)
+	res, err := s.Directory.CreateUser(ctx, c, req)
+	if err != nil {
+		return createdUser{}, err
+	}
+	out := createdUser{Result: res}
+	if len(req.Groups) > 0 {
+		out.settled = s.settle(ctx)
+	}
+	return out, nil
 }
 
 func (s *Server) updateUser(ctx context.Context, c *directory.Caller, username string, email, displayName *string) error {
@@ -576,14 +617,21 @@ func (s *Server) deleteGroup(ctx context.Context, c *directory.Caller, name, con
 	return s.Directory.DeleteGroup(ctx, c, name, confirm)
 }
 
-func (s *Server) addMember(ctx context.Context, c *directory.Caller, group string, m directory.MemberAdd) error {
+func (s *Server) addMember(ctx context.Context, c *directory.Caller, group string, m directory.MemberAdd) (*settled, error) {
 	s.rec("AddMember", group, m)
-	return s.Directory.AddMember(ctx, c, group, m)
+	if err := s.Directory.AddMember(ctx, c, group, m); err != nil {
+		return nil, err
+	}
+	return s.settle(ctx), nil
 }
 
-func (s *Server) removeMember(ctx context.Context, c *directory.Caller, group, username string) (*directory.Result, error) {
+func (s *Server) removeMember(ctx context.Context, c *directory.Caller, group, username string) (*directory.Result, *settled, error) {
 	s.rec("RemoveMember", group, username)
-	return s.Directory.RemoveMember(ctx, c, group, username)
+	res, err := s.Directory.RemoveMember(ctx, c, group, username)
+	if err != nil {
+		return nil, nil, err
+	}
+	return res, s.settle(ctx), nil
 }
 
 func (s *Server) createField(ctx context.Context, c *directory.Caller, f directory.Field) error {
@@ -606,29 +654,44 @@ func (s *Server) setDetails(ctx context.Context, c *directory.Caller, username s
 	return s.Directory.SetDetails(ctx, c, username, attrs)
 }
 
-func (s *Server) setGroupRule(ctx context.Context, c *directory.Caller, group string, rule *rules.Expr) error {
+func (s *Server) setGroupRule(ctx context.Context, c *directory.Caller, group string, rule *rules.Expr) (*settled, error) {
 	s.rec("SetGroupRule", group, rule)
-	return s.Directory.SetGroupRule(ctx, c, group, rule)
+	if err := s.Directory.SetGroupRule(ctx, c, group, rule); err != nil {
+		return nil, err
+	}
+	return s.settle(ctx), nil
 }
 
-func (s *Server) convertGroup(ctx context.Context, c *directory.Caller, group string, rule *rules.Expr, keep []string, reviewed *directory.ConvertPreview) error {
+func (s *Server) convertGroup(ctx context.Context, c *directory.Caller, group string, rule *rules.Expr, keep []string, reviewed *directory.ConvertPreview) (*settled, error) {
 	s.rec("ConvertApplyReviewed", group, rule, keep, reviewed)
-	return s.Directory.ConvertApplyReviewed(ctx, c, group, rule, keep, reviewed)
+	if err := s.Directory.ConvertApplyReviewed(ctx, c, group, rule, keep, reviewed); err != nil {
+		return nil, err
+	}
+	return s.settle(ctx), nil
 }
 
-func (s *Server) addException(ctx context.Context, c *directory.Caller, group string, ex directory.Exception) error {
+func (s *Server) addException(ctx context.Context, c *directory.Caller, group string, ex directory.Exception) (*settled, error) {
 	s.rec("AddException", group, ex)
-	return s.Directory.AddException(ctx, c, group, ex)
+	if err := s.Directory.AddException(ctx, c, group, ex); err != nil {
+		return nil, err
+	}
+	return s.settle(ctx), nil
 }
 
-func (s *Server) removeException(ctx context.Context, c *directory.Caller, group, username string) error {
+func (s *Server) removeException(ctx context.Context, c *directory.Caller, group, username string) (*settled, error) {
 	s.rec("RemoveException", group, username)
-	return s.Directory.RemoveException(ctx, c, group, username)
+	if err := s.Directory.RemoveException(ctx, c, group, username); err != nil {
+		return nil, err
+	}
+	return s.settle(ctx), nil
 }
 
-func (s *Server) setMemberExpiry(ctx context.Context, c *directory.Caller, group, username string, until *time.Time) error {
+func (s *Server) setMemberExpiry(ctx context.Context, c *directory.Caller, group, username string, until *time.Time) (*settled, error) {
 	s.rec("SetMemberExpiry", group, username, until)
-	return s.Directory.SetMemberExpiry(ctx, c, group, username, until)
+	if err := s.Directory.SetMemberExpiry(ctx, c, group, username, until); err != nil {
+		return nil, err
+	}
+	return s.settle(ctx), nil
 }
 
 func (s *Server) setPermission(ctx context.Context, c *directory.Caller, perm, group string) error {
