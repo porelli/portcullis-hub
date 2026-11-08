@@ -16,3 +16,11 @@ func (s *Service) DesiredFromLLDAP(ctx context.Context, cfg *Config, now time.Ti
 
 // ValidFieldName exposes validFieldName (tests).
 func ValidFieldName(name string) bool { return validFieldName(name) }
+
+// SetSettleTimeoutForTest shortens Settle's wait; the returned func puts
+// it back.
+func SetSettleTimeoutForTest(d time.Duration) func() {
+	old := settleTimeout
+	settleTimeout = d
+	return func() { settleTimeout = old }
+}

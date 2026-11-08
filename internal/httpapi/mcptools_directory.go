@@ -874,7 +874,7 @@ func (s *Server) registerDirectoryTools() {
 			return s.groupConsequences(ctx, args, line+".", "")
 		}),
 		// remove_member is D from a guarding group (fix round 1 ruling).
-		perCallCtx(dirTool(s, "remove_member", "Remove a person from a group (they are signed out of Keycloak). From an administrator, permission or other guarding group it needs your confirmation in the browser.",
+		perCallCtx(dirTool(s, "remove_member", "Remove a person from a group (they are signed out of Keycloak). On a rule group it removes their \"added by hand\" entry; someone in by the rule alone is refused (keep them out with add_exception instead). From an administrator, permission or other guarding group it needs your confirmation in the browser.",
 			ClassWrite, "DELETE /api/directory/groups/{group}/members/{username}", "group.remove_member", func(ctx context.Context, c *directory.Caller, in memberArgs) (any, error) {
 				res, st, err := s.removeMember(ctx, c, in.Group, in.Username)
 				if err != nil {

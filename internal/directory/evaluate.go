@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -39,6 +40,28 @@ type EvalReport struct {
 	Cycles  [][]string // manager cycles (for the UI to flag)
 	Errors  []string   // per-group / per-change problems; the run continued
 	pruned  bool       // expired entries were dropped from directory.yaml
+	// groupErrs: the Errors that concern one group (lowercase name), for
+	// Settle's why — never another group's.
+	groupErrs map[string][]string
+}
+
+// addErr reports a problem of group (also in Errors).
+func (r *EvalReport) addErr(group, msg string) {
+	r.Errors = append(r.Errors, msg)
+	if r.groupErrs == nil {
+		r.groupErrs = map[string][]string{}
+	}
+	g := strings.ToLower(group)
+	r.groupErrs[g] = append(r.groupErrs[g], msg)
+}
+
+// ErrorsOf: the reported problems of the given groups.
+func (r *EvalReport) ErrorsOf(groups ...string) []string {
+	var out []string
+	for _, g := range groups {
+		out = append(out, r.groupErrs[strings.ToLower(g)]...)
+	}
+	return out
 }
 
 // Expiring is a membership that ends at At (manual-group expiry or an
@@ -213,7 +236,7 @@ func dropDelegateCreated(rep *EvalReport, cfg *Config, sn *snapshot, name, why s
 	kept := adds[:0:0]
 	for _, u := range adds {
 		if createdByDelegate(cfg, u) {
-			rep.Errors = append(rep.Errors, fmt.Sprintf("%s is %s: %s was created by a delegate and isn't added until an admin acts on the account (password, invite, passkeys)", name, why, sn.users[u].ID))
+			rep.addErr(name, fmt.Sprintf("%s is %s: %s was created by a delegate and isn't added until an admin acts on the account (password, invite, passkeys)", name, why, sn.users[u].ID))
 			continue
 		}
 		kept = append(kept, u)
@@ -284,12 +307,29 @@ func (s *Service) Evaluate(ctx context.Context, now time.Time) (*EvalReport, err
 	if len(rep.Changes) > 0 || rep.pruned {
 		s.changed()
 	}
-	// Keycloak only after releasing s.mu.
-	if s.KC != nil {
-		for _, u := range removed {
-			if err := s.KC.LogoutUser(ctx, u); err != nil {
-				rep.Errors = append(rep.Errors, fmt.Sprintf("log out %s: %v", u, err))
+	// Keycloak only after releasing s.mu. A failed logout stays pending
+	// and every evaluation retries it (LLDAP is already consistent, so no
+	// later run would see the removal again).
+	failed := s.logoutUsers(ctx, removed)
+	names := make([]string, 0, len(failed))
+	for u := range failed {
+		names = append(names, u)
+	}
+	sort.Strings(names)
+	for _, u := range names {
+		err := failed[u]
+		msg := fmt.Sprintf("log out %s: %v", u, err)
+		groups := []string{}
+		for _, c := range rep.Changes {
+			if !c.Add && strings.EqualFold(c.User, u) && !slices.Contains(groups, c.Group) {
+				groups = append(groups, c.Group)
 			}
+		}
+		if len(groups) == 0 {
+			rep.Errors = append(rep.Errors, msg) // a retried earlier removal
+		}
+		for _, g := range groups {
+			rep.addErr(g, msg)
 		}
 	}
 	return rep, nil
@@ -338,11 +378,11 @@ func (s *Service) evaluateLocked(ctx context.Context, now time.Time) (*EvalRepor
 		e := AuditEntry{Actor: RulesActor, Action: "group.sync", Target: clip(group + ":" + id), Detail: sign + cause, Result: "ok"}
 		if err != nil {
 			e.Result, e.Error = "error", clip(err.Error())
-			rep.Errors = append(rep.Errors, fmt.Sprintf("%s %s %s: %v", group, sign, id, err))
+			rep.addErr(group, fmt.Sprintf("%s %s %s: %v", group, sign, id, err))
 		}
 		if s.Audit != nil {
 			if aerr := s.Audit.Append(e); aerr != nil {
-				rep.Errors = append(rep.Errors, fmt.Sprintf("audit %s:%s: %v", group, id, aerr))
+				rep.addErr(group, fmt.Sprintf("audit %s:%s: %v", group, id, aerr))
 			}
 		}
 		if err != nil {
@@ -397,14 +437,14 @@ func (s *Service) evaluateLocked(ctx context.Context, now time.Time) (*EvalRepor
 		}
 
 		if !s.ruleGroupAllowed(name, admin) {
-			rep.Errors = append(rep.Errors, fmt.Sprintf("%s is a built-in or administrator group and can't be rule-based; rule ignored", name))
+			rep.addErr(name, fmt.Sprintf("%s is a built-in or administrator group and can't be rule-based; rule ignored", name))
 			if pruneSkipped(rep, name, gc, now, g, exists) {
 				dirty = true
 			}
 			continue
 		}
 		if !exists {
-			rep.Errors = append(rep.Errors, fmt.Sprintf("rule group %s does not exist in LLDAP; create it first", name))
+			rep.addErr(name, fmt.Sprintf("rule group %s does not exist in LLDAP; create it first", name))
 			if pruneSkipped(rep, name, gc, now, g, exists) {
 				dirty = true
 			}
@@ -430,7 +470,7 @@ func (s *Service) evaluateLocked(ctx context.Context, now time.Time) (*EvalRepor
 			}
 		}
 		if why := s.addsBlocked(cfg, guarding, name, gc); why != "" {
-			rep.Errors = append(rep.Errors, why)
+			rep.addErr(name, why)
 			adds = nil
 		}
 		if why, ok := guarding[name]; ok {
@@ -527,7 +567,7 @@ func pruneSkipped(rep *EvalReport, name string, gc *GroupConfig, now time.Time, 
 			continue
 		}
 		if ex.Include && exists && memberOf(g, ex.User) {
-			rep.Errors = append(rep.Errors, fmt.Sprintf("%s: %s's temporary access expired but the evaluator doesn't manage this group; remove them or re-add them explicitly", name, ex.User))
+			rep.addErr(name, fmt.Sprintf("%s: %s's temporary access expired but the evaluator doesn't manage this group; remove them or re-add them explicitly", name, ex.User))
 			kept = append(kept, ex)
 		}
 	}
@@ -677,65 +717,156 @@ func (s *Service) kick() {
 	}
 }
 
-// settleTimeout bounds Settle's evaluation (contract §9.7: ≤ 5 s); a
-// var so tests can shorten it.
+// settleTimeout bounds how long Settle waits for its evaluation
+// (contract §9.7: ≤ 5 s); a var so tests can shorten it.
 var settleTimeout = 5 * time.Second
+
+// settleEvalBound bounds the evaluation Settle starts. It runs on a
+// context detached from the caller's (context.WithoutCancel): a timed-out
+// wait or a client that went away never cuts it between an LLDAP removal
+// and its Keycloak logout.
+var settleEvalBound = 2 * time.Minute
 
 // settleWhyMax: Settle's why is clipped to this many runes.
 const settleWhyMax = 200
+
+// Fixed whys (never a path, a URL or another group's problem).
+const (
+	whyLLDAPDown = "stored, but not applied: Users & Groups (LLDAP) is unavailable; it applies at the next evaluation"
+	whyNoStore   = "stored, but not applied: the directory store (directory.yaml) isn't configured"
+	whyEvalError = "stored, but not applied: the evaluation failed (see the Hub log); it applies at the next evaluation"
+	whyGone      = "stored; the request ended before it was applied: it applies in the background"
+)
 
 // Settle runs the evaluator once, synchronously, so a membership,
 // exception, rule, convert or expiry change the caller just made is in
 // LLDAP when its answer goes back (contract §9.7 applied / why). Call it
 // only after the mutation's run returned (s.mu released) and only when
-// it succeeded. applied = Evaluate returned without error within
-// settleTimeout; why is a short reason when it didn't (LLDAP or the
-// store unavailable, an error, the timeout) or when the run reported
-// per-change errors. why carries only the evaluator's own error texts,
-// which never hold a secret, clipped to settleWhyMax runes.
+// it succeeded. groups are the groups the change concerns: only their
+// report errors reach why.
 //
-// The background loop may evaluate at the same time: both go through
-// evaluateLocked, which holds s.mu, so the runs are serialised and the
-// second sees the first's changes — a removal (and its Keycloak logout)
-// is made by one run only; LogoutUser is idempotent anyway. The kick the
+// applied = the evaluation returned without error within settleTimeout.
+// Otherwise why is a fixed text (LLDAP unavailable, store not
+// configured, a failed evaluation — logged in full —, the timeout, the
+// request gone) or a refusal's own message (*Error below 500). A run with
+// errors of groups is applied with them, joined, as why. Clipped to
+// settleWhyMax runes.
+//
+// The evaluation itself runs to its end (settleEvalBound) on a detached
+// context whatever the wait does. The background loop may evaluate at
+// the same time: both go through evaluateLocked, which holds s.mu, so the
+// runs are serialised and the second sees the first's changes — a
+// removal (and its Keycloak logout) is made by one run only; a failed
+// logout is retried by every later run (logoutUsers). The kick the
 // mutation's run sent still follows (RunEvaluator unchanged).
-func (s *Service) Settle(ctx context.Context) (applied bool, why string) {
-	ctx, cancel := context.WithTimeout(ctx, settleTimeout)
-	defer cancel()
+func (s *Service) Settle(ctx context.Context, groups ...string) (applied bool, why string) {
 	type result struct {
 		rep *EvalReport
 		err error
 	}
 	done := make(chan result, 1)
+	evalCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), settleEvalBound)
 	go func() {
-		rep, err := s.Evaluate(ctx, time.Now().UTC())
+		defer cancel()
+		rep, err := s.Evaluate(evalCtx, time.Now().UTC())
+		if err != nil && !errors.Is(err, context.DeadlineExceeded) {
+			var de *Error
+			if !errors.As(err, &de) || de.Status != http.StatusServiceUnavailable {
+				log.Printf("rules: evaluation failed: %v", err)
+			}
+		} else if err == nil && (len(rep.Changes) > 0 || len(rep.Errors) > 0) {
+			log.Printf("rules: %d membership change(s), %d error(s)%s", len(rep.Changes), len(rep.Errors), firstErr(rep.Errors))
+		}
 		done <- result{rep, err}
 	}()
+	wait := time.NewTimer(settleTimeout)
+	defer wait.Stop()
 	var r result
 	select {
 	case r = <-done:
-	case <-ctx.Done():
-		r.err = ctx.Err()
-	}
-	switch {
-	case errors.Is(r.err, context.DeadlineExceeded):
-		why = fmt.Sprintf("stored, but applying it timed out after %s: it is applied at the next evaluation", settleTimeout)
-		log.Printf("rules: %s", why)
+	case <-wait.C:
+		why = fmt.Sprintf("stored, but applying it took over %s: it goes on in the background (timed out waiting)", settleTimeout)
+		log.Printf("rules: settle: %s", why)
 		return false, why
-	case r.err != nil:
+	case <-ctx.Done():
+		return false, whyGone
+	}
+	if r.err != nil {
 		var de *Error
-		if !errors.As(r.err, &de) || de.Status != http.StatusServiceUnavailable {
-			log.Printf("rules: evaluation failed: %v", r.err)
+		switch {
+		case errors.As(r.err, &de) && de.Status == http.StatusServiceUnavailable && s.Store == nil:
+			return false, whyNoStore
+		case errors.As(r.err, &de) && de.Status == http.StatusServiceUnavailable:
+			return false, whyLLDAPDown
+		case errors.As(r.err, &de) && de.Status < 500:
+			return false, clipRunes("stored, but not applied: "+de.Msg, settleWhyMax)
 		}
-		return false, clipRunes("stored, but not applied: "+r.err.Error(), settleWhyMax)
+		return false, whyEvalError
 	}
-	if len(r.rep.Changes) > 0 || len(r.rep.Errors) > 0 {
-		log.Printf("rules: %d membership change(s), %d error(s)%s", len(r.rep.Changes), len(r.rep.Errors), firstErr(r.rep.Errors))
-	}
-	if len(r.rep.Errors) > 0 {
-		return true, clipRunes(strings.Join(r.rep.Errors, "; "), settleWhyMax)
+	if errs := r.rep.ErrorsOf(groups...); len(errs) > 0 {
+		return true, clipRunes(strings.Join(errs, "; "), settleWhyMax)
 	}
 	return true, ""
+}
+
+// logoutUsers signs users and every still-pending earlier logout out of
+// Keycloak (outside s.mu), returning the failures. A failure stays in
+// pendingLogout (deduplicated by lowercase user, its attempts counted and
+// logged) until a later call succeeds; a missing Keycloak user is a
+// success (LogoutUser). Without Keycloak nothing is kept.
+func (s *Service) logoutUsers(ctx context.Context, users []string) map[string]error {
+	if s.KC == nil {
+		return nil
+	}
+	s.logoutMu.Lock()
+	todo := map[string]string{} // lowercase -> name to log out
+	for u := range s.pendingLogout {
+		todo[u] = u
+	}
+	s.logoutMu.Unlock()
+	for _, u := range users {
+		todo[strings.ToLower(u)] = u
+	}
+	keys := make([]string, 0, len(todo))
+	for k := range todo {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var failed map[string]error
+	for _, k := range keys {
+		err := s.KC.LogoutUser(ctx, todo[k])
+		s.logoutMu.Lock()
+		if err == nil {
+			delete(s.pendingLogout, k)
+			s.logoutMu.Unlock()
+			continue
+		}
+		if s.pendingLogout == nil {
+			s.pendingLogout = map[string]int{}
+		}
+		s.pendingLogout[k]++
+		n := s.pendingLogout[k]
+		s.logoutMu.Unlock()
+		log.Printf("directory: signing %s out of Keycloak failed (attempt %d; retried at the next evaluation): %v", todo[k], n, err)
+		if failed == nil {
+			failed = map[string]error{}
+		}
+		failed[todo[k]] = err
+	}
+	return failed
+}
+
+// PendingLogouts: the users whose Keycloak logout failed and is retried
+// (lowercase, sorted).
+func (s *Service) PendingLogouts() []string {
+	s.logoutMu.Lock()
+	defer s.logoutMu.Unlock()
+	out := make([]string, 0, len(s.pendingLogout))
+	for u := range s.pendingLogout {
+		out = append(out, u)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // clipRunes keeps the first n runes of s (control characters dropped),

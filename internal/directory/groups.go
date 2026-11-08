@@ -551,27 +551,38 @@ func (s *Service) RemoveException(ctx context.Context, c *Caller, group, user st
 		if err != nil {
 			return err
 		}
-		gc := cfg.Groups[group]
-		if gc == nil {
-			return notFound("%s has no exception for %s", group, user)
+		found, err := s.removeEntry(cfg, group, user, func(Exception) bool { return true }, &detail)
+		if err == nil && !found {
+			err = notFound("%s has no exception for %s", group, user)
 		}
-		exs := []Exception{}
-		found := false
-		for _, ex := range gc.Exceptions {
-			if strings.EqualFold(ex.User, user) {
-				found = true
-				detail += fmt.Sprintf(" include=%v until=%s", ex.Include, formatUntil(ex.Until))
-			} else {
-				exs = append(exs, ex)
-			}
-		}
-		if !found {
-			return notFound("%s has no exception for %s", group, user)
-		}
-		gc.Exceptions = exs
-		tidy(cfg, group)
-		return s.saveConfig(cfg)
+		return err
 	})
+}
+
+// removeEntry drops user's entry of group that match accepts from cfg
+// and saves it (RemoveException, and RemoveMember of an "added by hand"
+// entry); detail gets the removed entry. Caller holds s.mu (inside run).
+func (s *Service) removeEntry(cfg *Config, group, user string, match func(Exception) bool, detail *string) (bool, error) {
+	gc := cfg.Groups[group]
+	if gc == nil {
+		return false, nil
+	}
+	exs := []Exception{}
+	found := false
+	for _, ex := range gc.Exceptions {
+		if strings.EqualFold(ex.User, user) && match(ex) {
+			found = true
+			*detail += fmt.Sprintf(" include=%v until=%s", ex.Include, formatUntil(ex.Until))
+		} else {
+			exs = append(exs, ex)
+		}
+	}
+	if !found {
+		return false, nil
+	}
+	gc.Exceptions = exs
+	tidy(cfg, group)
+	return true, s.saveConfig(cfg)
 }
 
 // SetMemberExpiry sets (or with nil, removes) when user's membership of

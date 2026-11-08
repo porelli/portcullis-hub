@@ -90,7 +90,7 @@ func TestSettleAppliesAtOnce(t *testing.T) {
 	until := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
 	b = mustDo(t, p, "root", "PUT", "/api/directory/groups/eng/members/dave/expiry", `{"until":"`+until+`"}`, 200)
 	wantApplied(t, "expiry", b)
-	b = mustDo(t, p, "root", "DELETE", "/api/directory/groups/eng/exceptions/dave", `{}`, 200)
+	b = mustDo(t, p, "root", "DELETE", "/api/directory/groups/eng/members/dave", `{}`, 200)
 	wantApplied(t, "remove by hand", b)
 	if slices.Contains(e.ll.GroupMembers("eng"), "dave") {
 		t.Fatalf("dave still in eng: %v", e.ll.GroupMembers("eng"))
@@ -143,7 +143,7 @@ func TestSettleLLDAPDown(t *testing.T) {
 	if applied == nil || *applied || !strings.Contains(why, "LLDAP") {
 		t.Fatalf("answer = %s, want applied:false naming LLDAP", b)
 	}
-	if strings.Contains(why, "svc-password") {
+	if strings.Contains(why, "svc-password") || strings.Contains(why, "/") {
 		t.Fatalf("why leaks the password: %q", why)
 	}
 	if !hasEntry(t, e.s.Directory, "eng", "dave") {
@@ -279,5 +279,93 @@ func TestSettleNotOnRefusal(t *testing.T) {
 		if strings.HasPrefix(call, "Settle") {
 			t.Errorf("a refused tool call settled: %q", call)
 		}
+	}
+}
+
+// DELETE members on a rule group removes the "added by hand" entry
+// (audited group.exception) and the person leaves at once; someone in by
+// the rule alone is refused 409. The MCP remove_member alike.
+func TestRemoveMemberRuleGroup(t *testing.T) {
+	e := newPeopleEnv(t)
+	e.setup(t)
+	e.ll.AddUser("dave", "dave@example.org", "Dave", "")
+	p := e.people
+	mustDo(t, p, "root", "POST", "/api/directory/groups/eng/members", `{"username":"dave","reason":"helps out"}`, 200)
+	if !slices.Contains(e.ll.GroupMembers("eng"), "dave") {
+		t.Fatal("dave not added")
+	}
+	b := mustDo(t, p, "root", "DELETE", "/api/directory/groups/eng/members/dave", `{}`, 200)
+	wantApplied(t, "remove by hand", b)
+	if slices.Contains(e.ll.GroupMembers("eng"), "dave") || hasEntry(t, e.s.Directory, "eng", "dave") {
+		t.Fatalf("dave still in eng (%v) or entry kept", e.ll.GroupMembers("eng"))
+	}
+	found := false
+	for _, a := range readAudit(t, e.s.Directory.Audit.Path) {
+		if a.Action == "group.exception" && a.Target == "eng" && a.Actor == "root" && strings.HasPrefix(a.Detail, "remove user=dave include=true") {
+			found = true
+		}
+		if a.Action == "group.remove_member" && a.Target == "eng" {
+			t.Errorf("audited as a membership removal: %+v", a)
+		}
+	}
+	if !found {
+		t.Error("no group.exception remove entry for dave")
+	}
+	// bob is in by the rule only.
+	r, body := doAs(t, p, "root", "DELETE", "/api/directory/groups/eng/members/bob", `{}`)
+	if r.StatusCode != 409 || !strings.Contains(body, "bob matches the rule of eng: keep them out instead") || strings.Contains(body, "applied") {
+		t.Fatalf("remove bob = %d %s", r.StatusCode, body)
+	}
+	if !slices.Contains(e.ll.GroupMembers("eng"), "bob") {
+		t.Fatal("bob removed")
+	}
+}
+
+func TestMCPRemoveMemberRuleGroup(t *testing.T) {
+	e, _ := directoryToolEnv(t)
+	mustDo(t, e.hub, "root", "POST", "/api/directory/fields", `{"name":"team","label":"Team","kind":"text"}`, 200)
+	e.ll.AddGroup("crew")
+	e.ll.AddUser("gus", "gus@example.org", "Gus", "")
+	e.ll.AddUser("hal", "hal@example.org", "Hal", "")
+	mustDo(t, e.hub, "root", "PUT", "/api/directory/users/hal/details", `{"attrs":{"team":["x"]}}`, 200)
+	mustDo(t, e.hub, "root", "POST", "/api/directory/groups/crew/convert", `{"rule":"team = \"x\"","preview":{"matching":["hal"],"kept_as_exception":[],"joining":["hal"],"expiry_dropped":[]}}`, 200)
+	// add_exception on an unguarded rule group is W: no confirmation.
+	txt, isErr, conf := e.tool(t, "add_exception", map[string]any{"group": "crew", "user": "gus", "include": true, "reason": "visiting"})
+	if isErr || conf != "" {
+		t.Fatalf("add_exception = %q %v (confirmation %q), want class W", txt, isErr, conf)
+	}
+	wantApplied(t, "add_exception", txt)
+	if !slices.Contains(e.ll.GroupMembers("crew"), "gus") {
+		t.Fatal("gus not in crew")
+	}
+	txt, isErr, _ = e.tool(t, "remove_member", map[string]any{"group": "crew", "username": "gus"})
+	if isErr {
+		t.Fatalf("remove_member gus = %s", txt)
+	}
+	wantApplied(t, "remove_member", txt)
+	if slices.Contains(e.ll.GroupMembers("crew"), "gus") {
+		t.Fatal("gus still in crew")
+	}
+	txt, isErr, _ = e.tool(t, "remove_member", map[string]any{"group": "crew", "username": "hal"})
+	if !isErr || !strings.Contains(txt, "hal matches the rule of crew: keep them out instead") {
+		t.Fatalf("remove_member hal = %q %v", txt, isErr)
+	}
+}
+
+// Only admins see the evaluator's reasons.
+func TestSettledForNonAdmin(t *testing.T) {
+	admin := &directory.Caller{User: "root", Admin: true}
+	delegate := &directory.Caller{User: "bob", Perms: map[string]bool{"invite": true}}
+	if st := settledFor(admin, false, "stored, but not applied: x"); st.Why != "stored, but not applied: x" {
+		t.Errorf("admin why = %q", st.Why)
+	}
+	if st := settledFor(delegate, false, "stored, but not applied: x"); st.Why != whyNotAdmin || st.Applied {
+		t.Errorf("delegate = %+v", st)
+	}
+	if st := settledFor(delegate, true, ""); st.Why != "" || !st.Applied {
+		t.Errorf("delegate ok = %+v", st)
+	}
+	if whyNotAdmin != "saved, not applied yet: it applies at the next directory sync" {
+		t.Error(whyNotAdmin)
 	}
 }

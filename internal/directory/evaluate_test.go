@@ -2,16 +2,19 @@ package directory_test
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/keycloak/kctest"
+	"github.com/portcullis/hub/internal/lldap"
 	"github.com/portcullis/hub/internal/rules"
 )
 
@@ -548,5 +551,142 @@ func TestSettleConcurrentWithLoop(t *testing.T) {
 	}
 	if n != 2 {
 		t.Errorf("%d additions, want 2 (one per person): %v", n, e.ll.Mutations)
+	}
+}
+
+// logoutKC wraps a Keycloak: LogoutUser waits on block (when set),
+// fails while fail[user] > 0 (counting down) and records each call with
+// whether its context was still live.
+type logoutKC struct {
+	directory.Keycloak
+	mu    sync.Mutex
+	block chan struct{}
+	fail  map[string]int
+	calls []string
+	dead  []string // calls made on a cancelled context
+}
+
+func (k *logoutKC) LogoutUser(ctx context.Context, user string) error {
+	k.mu.Lock()
+	b := k.block
+	k.mu.Unlock()
+	if b != nil {
+		<-b
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.calls = append(k.calls, user)
+	if ctx.Err() != nil {
+		k.dead = append(k.dead, user)
+	}
+	if k.fail[user] > 0 {
+		k.fail[user]--
+		return errors.New("keycloak down")
+	}
+	return nil
+}
+
+func (k *logoutKC) called() []string {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return append([]string(nil), k.calls...)
+}
+
+// A removal whose logout outlasts Settle's wait (and the caller's
+// context) is still signed out: the evaluation runs on a detached
+// context.
+func TestSettleLogoutOutlivesTimeout(t *testing.T) {
+	e, store := evalEnv(t)
+	setRule(t, store, "milan", `city = "Milan"`)
+	if applied, why := e.svc.Settle(ctx, "milan"); !applied || why != "" {
+		t.Fatalf("Settle = %v %q", applied, why)
+	}
+	kc := &logoutKC{Keycloak: e.svc.KC, block: make(chan struct{})}
+	e.svc.KC = kc
+	defer directory.SetSettleTimeoutForTest(50 * time.Millisecond)()
+	setRule(t, store, "milan", `city = "Rome"`) // bob and carol leave
+	reqCtx, cancel := context.WithCancel(ctx)
+	applied, why := e.svc.Settle(reqCtx, "milan")
+	cancel()
+	if applied || !strings.Contains(why, "timed out") {
+		t.Fatalf("Settle = %v %q, want the timeout", applied, why)
+	}
+	close(kc.block)
+	deadline := time.Now().Add(5 * time.Second)
+	for len(kc.called()) < 2 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := strings.Join(kc.called(), ","); got != "bob,carol" {
+		t.Fatalf("logged out %q, want bob,carol", got)
+	}
+	if len(kc.dead) > 0 {
+		t.Errorf("logouts on a cancelled context: %v", kc.dead)
+	}
+}
+
+// A failed logout is retried by the next evaluation until it succeeds.
+func TestFailedLogoutRetried(t *testing.T) {
+	e, store := evalEnv(t)
+	setRule(t, store, "milan", `city = "Milan"`)
+	if _, err := e.svc.Evaluate(ctx, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	kc := &logoutKC{Keycloak: e.svc.KC, fail: map[string]int{"bob": 1}}
+	e.svc.KC = kc
+	setRule(t, store, "milan", `city = "Nowhere"`)
+	rep, err := e.svc.Evaluate(ctx, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(rep.ErrorsOf("milan"), ";"), "log out bob") {
+		t.Errorf("milan errors = %v", rep.ErrorsOf("milan"))
+	}
+	if got := e.svc.PendingLogouts(); strings.Join(got, ",") != "bob" {
+		t.Fatalf("pending = %v", got)
+	}
+	// No membership change: only the pending logout runs, and succeeds.
+	if _, err := e.svc.Evaluate(ctx, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(kc.called(), ","); got != "bob,carol,bob" {
+		t.Errorf("logout calls = %q", got)
+	}
+	if got := e.svc.PendingLogouts(); len(got) != 0 {
+		t.Errorf("still pending: %v", got)
+	}
+	if _, err := e.svc.Evaluate(ctx, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(kc.called()); n != 3 {
+		t.Errorf("%d logout calls after the retry succeeded, want 3", n)
+	}
+}
+
+// Settle's why names only the given groups' problems.
+func TestSettleWhyOnlyThatGroup(t *testing.T) {
+	e, store := evalEnv(t)
+	setRule(t, store, "milan", `city = "Milan"`)
+	setRule(t, store, "ghost", `city = "Rome"`) // no such LLDAP group
+	if applied, why := e.svc.Settle(ctx, "milan"); !applied || why != "" {
+		t.Errorf("Settle(milan) = %v %q", applied, why)
+	}
+	if applied, why := e.svc.Settle(ctx, "ghost"); !applied || !strings.Contains(why, "ghost does not exist") {
+		t.Errorf("Settle(ghost) = %v %q", applied, why)
+	}
+	if applied, why := e.svc.Settle(ctx); !applied || why != "" {
+		t.Errorf("Settle() = %v %q", applied, why)
+	}
+}
+
+// LLDAP unavailable: a fixed why, no credentials path.
+func TestSettleLLDAPDownFixedWhy(t *testing.T) {
+	e, _ := evalEnv(t)
+	cred := e.svc.LLDAP.(*lldap.Client).CredentialsDir
+	if err := os.Rename(filepath.Join(cred, "password"), filepath.Join(cred, "password.off")); err != nil {
+		t.Fatal(err)
+	}
+	applied, why := e.svc.Settle(ctx, "milan")
+	if applied || !strings.Contains(why, "LLDAP") || strings.Contains(why, cred) || strings.Contains(why, "/") {
+		t.Errorf("Settle = %v %q", applied, why)
 	}
 }

@@ -205,6 +205,11 @@ type Service struct {
 	ruleState map[string]map[string]bool
 	kickOnce  sync.Once
 	kickCh    chan struct{}
+	// pendingLogout: lowercase user → failed Keycloak logout attempts,
+	// retried by every evaluation (logoutUsers). A leaf lock, never held
+	// across a call.
+	logoutMu      sync.Mutex
+	pendingLogout map[string]int
 	// The snapshot PreviewRule shares for previewTTL (previewSnapshot).
 	previewMu sync.Mutex
 	previewSn *snapshot
@@ -1773,10 +1778,13 @@ func (s *Service) logoutAll(ctx context.Context, users []string, res *Result) {
 		}
 		return
 	}
+	failed := s.logoutUsers(ctx, users) // earlier pending logouts retried too
 	for _, u := range users {
-		if err := s.KC.LogoutUser(ctx, u); err != nil {
-			res.Warnings = append(res.Warnings, fmt.Sprintf("signing %s out of Keycloak failed (their current sessions keep the old groups until they end): %v", u, err))
+		err, ok := failed[u]
+		if !ok {
+			continue
 		}
+		res.Warnings = append(res.Warnings, fmt.Sprintf("signing %s out of Keycloak failed (retried at the next evaluation; until then their current sessions keep the old groups): %v", u, err))
 	}
 }
 
@@ -2007,11 +2015,31 @@ func (s *Service) AddMember(ctx context.Context, c *Caller, group string, m Memb
 // Keycloak so the removal takes effect at the next token refresh.
 func (s *Service) RemoveMember(ctx context.Context, c *Caller, group, username string) (*Result, error) {
 	res := newResult()
+	username = strings.TrimSpace(username)
+	action := "group.remove_member"
 	detail := username
 	var removed string
-	err := s.run(ctx, c, permAdmin, "group.remove_member", group, &detail, func() error {
+	err := s.runAs(ctx, c, permAdmin, &action, group, &detail, func() error {
 		if err := s.checkTarget(username); err != nil {
 			return err
+		}
+		var cfg *Config
+		if s.Store != nil {
+			var err error
+			if cfg, err = s.loadConfig(); err != nil {
+				return err
+			}
+		}
+		if s.handAdded(cfg, group) {
+			// Contract §9.7: on a rule group this removes the person's
+			// "added by hand" entry (RemoveException's audit); the
+			// evaluator (Settle) takes them out and signs them out.
+			edetail := "remove user=" + username
+			found, err := s.removeEntry(cfg, group, username, func(ex Exception) bool { return ex.Include }, &edetail)
+			if err != nil || found {
+				action, detail = "group.exception", edetail
+				return err
+			}
 		}
 		sn, err := s.load(ctx)
 		if err != nil {
@@ -2024,6 +2052,12 @@ func (s *Service) RemoveMember(ctx context.Context, c *Caller, group, username s
 		u, err := sn.user(username)
 		if err != nil {
 			return err
+		}
+		if s.handAdded(cfg, group) {
+			ge := s.evalGroup(cfg.Groups[group], ruleDirectory(cfg, sn), sn, time.Now())
+			if ge.matched[strings.ToLower(u.ID)] && !ge.exclude[strings.ToLower(u.ID)] {
+				return refuse("%s matches the rule of %s: keep them out instead", u.ID, group)
+			}
 		}
 		if !memberOf(g, u.ID) {
 			return notFound("%s is not a member of %s", u.ID, group)

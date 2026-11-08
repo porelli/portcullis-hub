@@ -540,11 +540,24 @@ type settled struct {
 	Why     string `json:"why,omitempty"`
 }
 
-// settle runs the evaluator after a successful mutation (never after a
-// refused one: callers return before it).
-func (s *Server) settle(ctx context.Context) *settled {
-	s.rec("Settle")
-	applied, why := s.Directory.Settle(ctx)
+// whyNotAdmin is the only why a non-admin caller (a delegate creating a
+// person into groups) is given: the evaluator's reasons may name other
+// people, groups or the setup.
+const whyNotAdmin = "saved, not applied yet: it applies at the next directory sync"
+
+// settle runs the evaluator after a successful mutation of groups (never
+// after a refused one: callers return before it); only those groups'
+// problems reach why, and only an admin sees them.
+func (s *Server) settle(ctx context.Context, c *directory.Caller, groups ...string) *settled {
+	s.rec("Settle", groups)
+	applied, why := s.Directory.Settle(ctx, groups...)
+	return settledFor(c, applied, why)
+}
+
+func settledFor(c *directory.Caller, applied bool, why string) *settled {
+	if why != "" && (c == nil || !c.Admin) {
+		why = whyNotAdmin
+	}
 	return &settled{Applied: applied, Why: why}
 }
 
@@ -572,7 +585,7 @@ func (s *Server) createUser(ctx context.Context, c *directory.Caller, req direct
 	}
 	out := createdUser{Result: res}
 	if len(req.Groups) > 0 {
-		out.settled = s.settle(ctx)
+		out.settled = s.settle(ctx, c, req.Groups...)
 	}
 	return out, nil
 }
@@ -622,7 +635,7 @@ func (s *Server) addMember(ctx context.Context, c *directory.Caller, group strin
 	if err := s.Directory.AddMember(ctx, c, group, m); err != nil {
 		return nil, err
 	}
-	return s.settle(ctx), nil
+	return s.settle(ctx, c, group), nil
 }
 
 func (s *Server) removeMember(ctx context.Context, c *directory.Caller, group, username string) (*directory.Result, *settled, error) {
@@ -631,7 +644,7 @@ func (s *Server) removeMember(ctx context.Context, c *directory.Caller, group, u
 	if err != nil {
 		return nil, nil, err
 	}
-	return res, s.settle(ctx), nil
+	return res, s.settle(ctx, c, group), nil
 }
 
 func (s *Server) createField(ctx context.Context, c *directory.Caller, f directory.Field) error {
@@ -659,7 +672,7 @@ func (s *Server) setGroupRule(ctx context.Context, c *directory.Caller, group st
 	if err := s.Directory.SetGroupRule(ctx, c, group, rule); err != nil {
 		return nil, err
 	}
-	return s.settle(ctx), nil
+	return s.settle(ctx, c, group), nil
 }
 
 func (s *Server) convertGroup(ctx context.Context, c *directory.Caller, group string, rule *rules.Expr, keep []string, reviewed *directory.ConvertPreview) (*settled, error) {
@@ -667,7 +680,7 @@ func (s *Server) convertGroup(ctx context.Context, c *directory.Caller, group st
 	if err := s.Directory.ConvertApplyReviewed(ctx, c, group, rule, keep, reviewed); err != nil {
 		return nil, err
 	}
-	return s.settle(ctx), nil
+	return s.settle(ctx, c, group), nil
 }
 
 func (s *Server) addException(ctx context.Context, c *directory.Caller, group string, ex directory.Exception) (*settled, error) {
@@ -675,7 +688,7 @@ func (s *Server) addException(ctx context.Context, c *directory.Caller, group st
 	if err := s.Directory.AddException(ctx, c, group, ex); err != nil {
 		return nil, err
 	}
-	return s.settle(ctx), nil
+	return s.settle(ctx, c, group), nil
 }
 
 func (s *Server) removeException(ctx context.Context, c *directory.Caller, group, username string) (*settled, error) {
@@ -683,7 +696,7 @@ func (s *Server) removeException(ctx context.Context, c *directory.Caller, group
 	if err := s.Directory.RemoveException(ctx, c, group, username); err != nil {
 		return nil, err
 	}
-	return s.settle(ctx), nil
+	return s.settle(ctx, c, group), nil
 }
 
 func (s *Server) setMemberExpiry(ctx context.Context, c *directory.Caller, group, username string, until *time.Time) (*settled, error) {
@@ -691,7 +704,7 @@ func (s *Server) setMemberExpiry(ctx context.Context, c *directory.Caller, group
 	if err := s.Directory.SetMemberExpiry(ctx, c, group, username, until); err != nil {
 		return nil, err
 	}
-	return s.settle(ctx), nil
+	return s.settle(ctx, c, group), nil
 }
 
 func (s *Server) setPermission(ctx context.Context, c *directory.Caller, perm, group string) error {
