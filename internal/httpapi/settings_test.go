@@ -405,7 +405,9 @@ func TestInstanceEnvRoutes(t *testing.T) {
 	if code, b := e.do(t, "root", "DELETE", "/api/instances/vault/env/MY_VAR", ""); code != 200 || !strings.Contains(b, `"row":null`) {
 		t.Errorf("reset = %d %s", code, b)
 	}
-	if code, _ := e.do(t, "root", "PUT", "/api/templates/env/vault", `{"MY_VAR":"1"}`); code == 200 {
-		t.Error("the whole-file env route still answers")
+	for _, m := range []string{"GET", "PUT"} {
+		if code, b := e.do(t, "root", m, "/api/templates/env/vault", `{"MY_VAR":"1"}`); code != 404 {
+			t.Errorf("the whole-file env route %s = %d %s, want 404", m, code, b)
+		}
 	}
 }

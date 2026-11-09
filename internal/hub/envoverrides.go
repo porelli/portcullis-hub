@@ -95,7 +95,15 @@ type envRules struct {
 	owners      map[string]string // option-set variable → setting key
 	secretNames map[string]bool
 	masked      func(name, value string) bool
+	// mountVars: compose reads them where they choose what the app
+	// mounts or shares (Template.MountVars).
+	mountVars map[string]bool
 }
+
+// envSecretMinLen is the shortest value judged a secret's by value (as
+// the redactor's envSecrets): a short one like "true" is never refused
+// for equalling some secret.
+const envSecretMinLen = 6
 
 // envRulesFor are t's rules. It reads the instance's and the model
 // providers' secrets stores (no lock needed; callers may hold mu): an
@@ -117,14 +125,22 @@ func (h *Hub) envRulesFor(t *templates.Template) (*envRules, error) {
 			owners[o.Folder.RunsAs.GIDEnv] = o.Key
 		}
 	}
-	return &envRules{t: t, owners: owners, secretNames: SecretEnvNames(t), masked: masked}, nil
+	mv := t.MountVars
+	if mv == nil {
+		// A view built without Discover: computed here (fail closed: a
+		// compose file that doesn't parse leaves nothing overridable).
+		if mv, err = templates.ComposeMountVars(t.ReadCompose()); err != nil {
+			return nil, fmt.Errorf("%s: %v", t.ID, err)
+		}
+	}
+	return &envRules{t: t, owners: owners, secretNames: SecretEnvNames(t), masked: masked, mountVars: mv}, nil
 }
 
 // hubSet: the Hub sets name (every PORTCULLIS_* and COMPOSE_* variable,
 // the instance variables — COMPOSE_PROFILES among them —, the AI and
 // model provider variables).
 func (r *envRules) hubSet(name string) bool {
-	if strings.HasPrefix(name, "PORTCULLIS_") || strings.HasPrefix(name, "COMPOSE_") ||
+	if strings.HasPrefix(name, "PORTCULLIS_") || strings.HasPrefix(name, "COMPOSE_") || strings.HasPrefix(name, "DOCKER_") ||
 		templates.ReservedVar(name) || HubPublicVar(name) {
 		return true
 	}
@@ -152,6 +168,9 @@ func (r *envRules) nameRefusal(name string) string {
 	if key, ok := r.owners[name]; ok {
 		return name + " is set by setting " + key + ": change it under Settings"
 	}
+	if r.mountVars[name] {
+		return name + " chooses what the app mounts or shares; set it through Settings or the custom compose override"
+	}
 	return ""
 }
 
@@ -169,7 +188,7 @@ func (r *envRules) valueRefusal(name, value string) string {
 		return "the value of " + name + ` can't hold ', \, a line break or another control character (it is written single-quoted)`
 	case isEnvMask(value):
 		return "the value of " + name + " is a mask ([set], [secret]), not a value"
-	case r.masked(name, value):
+	case len(value) >= envSecretMinLen && r.masked(name, value):
 		return name + ": " + errSecretsNotOverridden
 	}
 	return ""
@@ -436,8 +455,10 @@ func envRowsOf(rules *envRules, file, ov map[string]string) []EnvRow {
 		default:
 			r.Source = EnvSourceCustom
 		}
-		r.Secret = rules.secret(n) || strings.HasPrefix(n, ProviderVarPrefix) || rules.masked(n, fv)
 		v, stored := ov[n]
+		// A stored override that equals a secret now (a secret set since)
+		// is masked too: a row never carries a secret's value.
+		r.Secret = rules.secret(n) || strings.HasPrefix(n, ProviderVarPrefix) || rules.masked(n, fv) || stored && rules.masked(n, v)
 		r.Overridden = stored
 		switch {
 		case r.Secret:
@@ -448,7 +469,7 @@ func envRowsOf(rules *envRules, file, ov map[string]string) []EnvRow {
 		default:
 			r.Default, r.Value = def, v
 		}
-		r.HubSet = r.Secret || r.Source == EnvSourceHub || r.Source == EnvSourceOption
+		r.HubSet = r.Secret || r.Source == EnvSourceHub || r.Source == EnvSourceOption || rules.mountVars[n] || strings.HasPrefix(n, "DOCKER_")
 		rows = append(rows, r)
 	}
 	return rows
@@ -518,12 +539,7 @@ func (h *Hub) changeEnvOverride(id, name string, value *string, actor directory.
 		return nil, statusErr(500, "reading the instance's secrets failed: %v", err)
 	}
 	if value != nil {
-		why := rules.refusal(name, *value)
-		if why == "" && rules.masked(name, readEnvFile(h.envPath(id))[name]) {
-			// The variable holds a secret now (its row is masked).
-			why = name + ": " + errSecretsNotOverridden
-		}
-		if why != "" {
+		if why := h.setRefusal(rules, id, name, *value); why != "" {
 			return nil, statusErr(400, "%s", why)
 		}
 	} else if !envOverrideNameRe.MatchString(name) {
@@ -565,7 +581,7 @@ func (h *Hub) changeEnvOverride(id, name string, value *string, actor directory.
 			h.mu.Unlock()
 			return nil, statusErr(500, "reading the instance's secrets failed: %v", lerr)
 		}
-		if why := lr.refusal(name, *value); why != "" {
+		if why := h.setRefusal(lr, id, name, *value); why != "" {
 			h.mu.Unlock()
 			return nil, statusErr(400, "%s", why)
 		}
@@ -600,7 +616,14 @@ func (h *Hub) changeEnvOverride(id, name string, value *string, actor directory.
 		next = nil
 	}
 	e.EnvOverrides = next
-	h.st.Instances[id] = e
+	if len(next) == 0 && entryHoldsNothing(e) {
+		// The last override of an entry that holds nothing else (a
+		// default instance's): the entry goes, so it never blocks a later
+		// first-instance create (§11.9 "First instance").
+		delete(h.st.Instances, id)
+	} else {
+		h.st.Instances[id] = e
+	}
 	if serr := h.st.Save(h.statePath()); serr != nil {
 		if had {
 			h.st.Instances[id] = prev
@@ -626,6 +649,25 @@ func (h *Hub) changeEnvOverride(id, name string, value *string, actor directory.
 		h.queueDelivery(id, TriggerSave, effect, 0)
 	}
 	return h.envChangeResult(id, name, effect)
+}
+
+// setRefusal is why value can't be stored as id's override of name
+// (rules.refusal), or the variable holds a secret now (its current .env
+// value is masked: its row is a secret's).
+func (h *Hub) setRefusal(rules *envRules, id, name, value string) string {
+	if why := rules.refusal(name, value); why != "" {
+		return why
+	}
+	if rules.masked(name, readEnvFile(h.envPath(id))[name]) {
+		return name + ": " + errSecretsNotOverridden
+	}
+	return ""
+}
+
+// entryHoldsNothing: e is a default instance's entry that stores nothing
+// (no hostnames, lifecycle state, backup, label, binding or override).
+func entryHoldsNothing(e state.Instance) bool {
+	return e.ID == e.Template && len(e.Hosts) == 0 && e.State == "" && e.Backup == "" && e.RestoreAs == "" && !e.HoldsIdentity()
 }
 
 // envNameHasRowLocked: name is one of t's variables without the admin's

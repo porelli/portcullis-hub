@@ -910,10 +910,16 @@ func TestExpertEnvRoundTripWithSecretValues(t *testing.T) {
 	if vars["PORTCULLIS_ACCESS_GROUP"] != group {
 		t.Errorf("PORTCULLIS_ACCESS_GROUP shown as %q, want %q (declared: not masked)", vars["PORTCULLIS_ACCESS_GROUP"], group)
 	}
-	// Overriding with a stored secret's value is refused; the file
-	// keeps both lines as they are.
-	if err := envOverrideErr(f.h, id, "OTHER_COPY", "1000"); statusOf(err) != 400 {
-		t.Errorf("an override holding a secret's value = %v, want 400", err)
+	// A short value (under six bytes, as the redactor's) is never judged
+	// a secret's by value; its row is still masked (fail closed). The
+	// file keeps both lines as they are.
+	f.h.Wait()
+	waitIdle(t, f, id)
+	if err := envOverrideErr(f.h, id, "OTHER_COPY", "1000"); err != nil {
+		t.Errorf("a short override equal to a secret = %v", err)
+	}
+	if rows, err := f.h.EnvRows(id); err != nil || envRowOf(rows, "OTHER_COPY") == nil || !envRowOf(rows, "OTHER_COPY").Secret {
+		t.Errorf("OTHER_COPY's row isn't masked (%v)", err)
 	}
 	got := composeReads(t, f.h.envPath(id))
 	if got["MY_COPY"] != "1000" || got["PORTCULLIS_ACCESS_GROUP"] != group {

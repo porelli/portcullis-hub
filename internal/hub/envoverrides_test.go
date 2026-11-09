@@ -12,6 +12,7 @@ import (
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/settings"
+	"github.com/portcullis/hub/internal/state"
 )
 
 // envAppManifest has a variable of every source (§11.9): manifest env
@@ -20,6 +21,7 @@ import (
 // (OPT_VALUE) and compose defaults (PHP_MEMORY_LIMIT, UPLOAD_MAX).
 const envAppManifest = `name: Env App
 category: misc
+instances: multi
 ai: {unsupported: "test fixture"}
 auth:
   method: native-oidc
@@ -29,7 +31,7 @@ auth:
 keycloak_clients:
   - client_id: envapp
     secret_env: CLIENT_VALUE
-    redirect_uri: https://envapp.{{DOMAIN}}/cb
+    redirect_uri: https://{{HOST_ENVAPP}}/cb
 env:
   - key: GEN_VALUE
     generate: random
@@ -52,7 +54,7 @@ settings:
 
 const envAppCompose = "services:\n  web:\n    image: x\n    environment:\n      C: ${CLIENT_VALUE}\n      G: ${GEN_VALUE}\n      O: ${OPT_VALUE}\n" +
 	"      T: ${TRASH_DAYS}\n      L: ${LOG_LEVEL}\n      P: ${PHP_MEMORY_LIMIT:-512M}\n      U: ${UPLOAD_MAX-10M}\n" +
-	"    labels:\n      traefik.http.routers.envapp.rule: Host(`envapp.${PORTCULLIS_DOMAIN}`)\n"
+	"    labels:\n      traefik.enable: \"true\"\n      traefik.http.routers.envapp.rule: Host(`${PORTCULLIS_HOST_ENVAPP:-envapp.portcullis.local}`)\n      traefik.http.services.envapp.loadbalancer.server.port: \"80\"\n"
 
 // envFixture: envapp enabled (compose simulated), audits recorded.
 func envFixture(t *testing.T) (*fixture, *fakeAudit) {
@@ -550,5 +552,231 @@ func TestEnvOverridesTravelWithBackups(t *testing.T) {
 	}
 	if r := rowOf(t, f, "grafana-b", "GF_LOG_LEVEL"); r == nil || r.Value != "debug" {
 		t.Errorf("same-instance restore row %+v", r)
+	}
+}
+
+// Fix round 1, item 1: an override whose value later equals a set
+// secret is never shown (its row is a secret's) and no longer written.
+func TestEnvRowsNeverShowSecretOverride(t *testing.T) {
+	f, _ := envFixture(t)
+	const val = "opt-VALUE-0123456789"
+	if _, err := f.h.SetEnvOverride("envapp", "MY_COPY", val, envAdmin); err != nil {
+		t.Fatal(err)
+	}
+	f.h.Wait()
+	saveSecret(t, f, "envapp", "api_key", setSecret(val))
+	f.h.Wait()
+	rows, err := f.h.EnvRows("envapp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := envRowOf(rows, "MY_COPY")
+	if r == nil || !r.Secret || r.Value != "" || !r.HubSet || !r.Overridden {
+		t.Errorf("MY_COPY = %+v", r)
+	}
+	for _, r := range rows {
+		if r.Value == val || r.Default == val {
+			t.Errorf("row %s carries the secret", r.Name)
+		}
+	}
+	if raw := readFile(t, f.h.envPath("envapp")); strings.Contains(raw, "MY_COPY='") {
+		t.Errorf("the override equal to a secret is still written:\n%s", raw)
+	}
+}
+
+// Fix round 1, item 1: a restore-as archive whose override equals one of
+// its secrets: checked after the secrets are copied, so it is dropped.
+func TestEnvRestoreAsDropsSecretOverride(t *testing.T) {
+	f, _ := envFixture(t)
+	const val = "opt-VALUE-0123456789"
+	saveSecret(t, f, "envapp", "api_key", setSecret(val))
+	f.h.Wait()
+	waitIdle(t, f, "envapp")
+	if _, err := f.h.SetEnvOverride("envapp", "MY_FLAG", "on", envAdmin); err != nil {
+		t.Fatal(err)
+	}
+	f.h.Wait()
+	waitIdle(t, f, "envapp")
+	entry, err := f.h.BackupInstance("envapp", envAdmin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := archivePath(f, entry.Archive)
+	_, data, _ := readArchive(t, p)
+	cfg := strings.Replace(string(data["config/instance.yaml"]), "env_overrides:\n", "env_overrides:\n    MY_COPY: "+val+"\n", 1)
+	if cfg == string(data["config/instance.yaml"]) {
+		t.Fatalf("instance.yaml has no env_overrides:\n%s", cfg)
+	}
+	rewriteMember(t, p, "config/instance.yaml", []byte(cfg))
+	res, err := f.h.RestoreInstanceAs(entry.Archive, "envapp-c", envAdmin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(res.Warnings, func(w string) bool { return strings.HasPrefix(w, "env override MY_COPY dropped: ") }) {
+		t.Errorf("warnings %v", res.Warnings)
+	}
+	f.h.mu.RLock()
+	ov := f.h.st.Instances["envapp-c"].EnvOverrides
+	f.h.mu.RUnlock()
+	if _, kept := ov["MY_COPY"]; kept || ov["MY_FLAG"] != "on" {
+		t.Errorf("restored overrides %v", ov)
+	}
+	if raw := readFile(t, f.h.envPath("envapp-c")); strings.Contains(raw, "MY_COPY") {
+		t.Errorf("the copy's .env holds it:\n%s", raw)
+	}
+}
+
+// Fix round 1, item 2: a short value is never judged a secret's by
+// value (as the redactor's), so it is no oracle and not refused.
+func TestEnvShortValueNotJudgedSecret(t *testing.T) {
+	f, _ := envFixture(t)
+	saveSecret(t, f, "envapp", "api_key", setSecret("true"))
+	f.h.Wait()
+	waitIdle(t, f, "envapp")
+	if _, err := f.h.SetEnvOverride("envapp", "MY_FLAG", "true", envAdmin); err != nil {
+		t.Errorf("a short value equal to a secret = %v", err)
+	}
+	saveSecret(t, f, "envapp", "api_key", setSecret("sixsix"))
+	f.h.Wait()
+	waitIdle(t, f, "envapp")
+	if _, err := f.h.SetEnvOverride("envapp", "MY_OTHER", "sixsix", envAdmin); statusOf(err) != 400 {
+		t.Errorf("a six-byte secret's value = %v, want 400", err)
+	}
+}
+
+// Fix round 1, item 4: resetting the last override of a default
+// instance's entry that holds nothing else removes the entry.
+func TestEnvResetDropsEmptyEntry(t *testing.T) {
+	f, _ := envFixture(t)
+	f.h.mu.RLock()
+	_, had := f.h.st.Instances["envapp"]
+	f.h.mu.RUnlock()
+	if had {
+		t.Skip("the enabled default instance already has an entry")
+	}
+	if _, err := f.h.SetEnvOverride("envapp", "MY_FLAG", "on", envAdmin); err != nil {
+		t.Fatal(err)
+	}
+	f.h.mu.RLock()
+	_, has := f.h.st.Instances["envapp"]
+	f.h.mu.RUnlock()
+	if !has {
+		t.Fatal("no entry holds the override")
+	}
+	if _, err := f.h.ClearEnvOverride("envapp", "MY_FLAG", envAdmin); err != nil {
+		t.Fatal(err)
+	}
+	f.h.mu.RLock()
+	e, still := f.h.st.Instances["envapp"]
+	f.h.mu.RUnlock()
+	if still {
+		t.Errorf("the empty entry stays: %+v", e)
+	}
+	// A labelled entry is kept.
+	f.h.mu.Lock()
+	f.h.st.Instances["envapp"] = state.Instance{ID: "envapp", Template: "envapp", Label: "Mine"}
+	f.h.mu.Unlock()
+	if _, err := f.h.SetEnvOverride("envapp", "MY_FLAG", "on", envAdmin); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.h.ClearEnvOverride("envapp", "MY_FLAG", envAdmin); err != nil {
+		t.Fatal(err)
+	}
+	f.h.mu.RLock()
+	e, still = f.h.st.Instances["envapp"]
+	f.h.mu.RUnlock()
+	if !still || e.Label != "Mine" || e.EnvOverrides != nil {
+		t.Errorf("the labelled entry = %+v %v", e, still)
+	}
+}
+
+// mountAppCompose reads variables where they choose what the app mounts
+// or shares.
+const mountAppCompose = "services:\n  web:\n    image: x\n    volumes:\n      - ${DATA_DIR:-./data}:/data\n      - {type: bind, source: \"${CONF_DIR:-./conf}\", target: /conf}\n" +
+	"    environment:\n      L: ${LOG_LEVEL}\n" +
+	"    labels:\n      traefik.http.routers.mountapp.rule: Host(`mountapp.${PORTCULLIS_DOMAIN}`)\n"
+
+const mountAppManifest = `name: Mount App
+category: misc
+ai: {unsupported: "test fixture"}
+auth:
+  method: native-oidc
+  sso: false
+  group_access: false
+  access_group: users_mountapp
+env:
+  - key: LOG_LEVEL
+`
+
+// Fix round 1, items 5 and 6: DOCKER_* and every variable compose reads
+// in a mount source are refused; the rows say so (hub_set).
+func TestEnvOverrideMountAndDockerRefused(t *testing.T) {
+	f := newInstanceFixtureExtra(t, nil, nil, map[string][2]string{"mountapp": {mountAppManifest, mountAppCompose}})
+	tpl := f.h.Template("mountapp")
+	if tpl == nil {
+		t.Fatal("mountapp not loaded (see the log)")
+	}
+	if !tpl.MountVars["DATA_DIR"] || !tpl.MountVars["CONF_DIR"] || tpl.MountVars["LOG_LEVEL"] {
+		t.Errorf("MountVars = %v", tpl.MountVars)
+	}
+	for name, want := range map[string]string{
+		"DATA_DIR":    "chooses what the app mounts or shares; set it through Settings or the custom compose override",
+		"CONF_DIR":    "chooses what the app mounts or shares",
+		"DOCKER_HOST": "is set by the Hub",
+	} {
+		if err := envOverrideErr(f.h, "mountapp", name, "/srv/x"); statusOf(err) != 400 || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s = %v", name, err)
+		}
+	}
+	rows, err := f.h.EnvRows("mountapp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := envRowOf(rows, "DATA_DIR"); r == nil || !r.HubSet || r.Default != "./data" {
+		t.Errorf("DATA_DIR row %+v", r)
+	}
+	if r := envRowOf(rows, "LOG_LEVEL"); r == nil || r.HubSet {
+		t.Errorf("LOG_LEVEL row %+v", r)
+	}
+}
+
+// Fix round 1, item 7: ports, <KEY>_BIND, a gid_env join variable, a
+// person-entered and a group-scope env delivery are refused.
+func TestEnvOverrideOwnedVariablesRefused(t *testing.T) {
+	check := func(h *Hub, id, name, want string) {
+		t.Helper()
+		if err := envOverrideErr(h, id, name, "1"); statusOf(err) != 400 || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s/%s = %v, want 400 %q", id, name, err, want)
+		}
+	}
+	smb := smbFixture(t)
+	check(smb.h, smbID, "SMB", "is set by setting SMB: change it under Settings")
+	check(smb.h, smbID, "SMB_BIND", "is set by setting SMB: change it under Settings")
+	jf, _ := jellyfinFixture(t)
+	check(jf.h, "jellyfin", "PGID", "is set by setting library: change it under Settings")
+	pf, _, _ := privFixture(t)
+	check(pf.h, "privapp", "PRIVAPP_LIBRARIES", "is set by setting")
+	ef, _, _, _ := entryFixture(t)
+	check(ef.h, entryEnv, "EXT_IDS", "is set by setting ext_id: change it under Settings")
+}
+
+// Fix round 1, item 7: a skipped override lands in the running
+// operation's record (a restart's).
+func TestEnvOverrideDropInOpRecord(t *testing.T) {
+	f, _ := envFixture(t)
+	if _, err := f.h.SetEnvOverride("envapp", "SITE_NAME", "Team A", envAdmin); err != nil {
+		t.Fatal(err)
+	}
+	f.h.Wait()
+	waitIdle(t, f, "envapp")
+	m := strings.Replace(envAppManifest, "  - key: LOG_LEVEL\n", "  - key: LOG_LEVEL\n  - key: SITE_NAME\n    generate: random\n", 1)
+	writeFile(t, f.src+"/envapp/manifest.yaml", m)
+	f.h.Discover()
+	if err := f.h.RestartApp("envapp"); err != nil {
+		t.Fatal(err)
+	}
+	r := f.h.LastOp("envapp")
+	if r == nil || !slices.ContainsFunc(r.Warnings, func(w string) bool { return strings.HasPrefix(w, "env override SITE_NAME dropped: ") }) {
+		t.Errorf("op record %+v", r)
 	}
 }

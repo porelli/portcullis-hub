@@ -828,10 +828,6 @@ func (h *Hub) applyRestore(ctx context.Context, id string, sb *staged, plan []vo
 	h.mu.Lock()
 	h.applyConfigLocked(id, sb.cfg)
 	h.rebuildLocked()
-	// The archive's env overrides, checked against the template (§11.9).
-	if v := h.findLocked(id); v != nil {
-		air.warnings = append(air.warnings, h.restoredEnvOverridesLocked(v)...)
-	}
 	// The archive's AI state, judged against the restored policy.
 	if v := h.findLocked(id); v != nil {
 		next, has, w := h.restoredAILocked(v, sb.ai, sb.aiErr, false, h.st.AIInstances[id])
@@ -857,6 +853,12 @@ func (h *Hub) applyRestore(ctx context.Context, id string, sb *staged, plan []vo
 		secretsErr = h.restoreSecretsLocked(v, sb.secrets, false)
 	} else {
 		secretsErr = h.writeArchivedSecrets(id, sb.secrets)
+	}
+	// The archive's env overrides, checked against the template and the
+	// restored secrets (§11.9): after the store, so a value equal to a
+	// restored secret is dropped.
+	if v := h.findLocked(id); v != nil {
+		air.warnings = append(air.warnings, h.restoredEnvOverridesLocked(v)...)
 	}
 	if v := h.findLocked(id); v != nil {
 		h.seedSettingsLocked(v)
@@ -1224,10 +1226,6 @@ func (h *Hub) restoreAsSteps(ctx context.Context, p *Progress, archive, newID st
 	h.mu.Lock()
 	h.applyConfigLocked(newID, sb.cfg)
 	h.rebuildLocked()
-	// The archive's env overrides, copied and checked (§11.9).
-	if v := h.findLocked(newID); v != nil {
-		res.Warnings = append(res.Warnings, h.restoredEnvOverridesLocked(v)...)
-	}
 	// Every companion off, modes and providers kept (§11.6); switching
 	// one on runs revoke_all first (G34). A copy is never listed before a
 	// revoke_all either way.
@@ -1243,10 +1241,15 @@ func (h *Hub) restoreAsSteps(ctx context.Context, p *Progress, archive, newID st
 	var envErr error
 	if v := h.findLocked(newID); v == nil {
 		envErr = fmt.Errorf("instance %s does not resolve", newID)
-	} else if envErr = h.restoreSecretsLocked(v, sb.secrets, true); envErr == nil && sb.env != nil {
-		// Secrets copied, generate-declared ones regenerated (as client
-		// secret_envs are), before the env is written from them.
-		envErr = h.generateAppEnvLocked(v, members)
+	} else if envErr = h.restoreSecretsLocked(v, sb.secrets, true); envErr == nil {
+		// The archive's env overrides, copied and checked against the
+		// template and the copied secrets (§11.9).
+		res.Warnings = append(res.Warnings, h.restoredEnvOverridesLocked(v)...)
+		if sb.env != nil {
+			// Secrets copied, generate-declared ones regenerated (as client
+			// secret_envs are), before the env is written from them.
+			envErr = h.generateAppEnvLocked(v, members)
+		}
 	}
 	saveErr := h.st.Save(h.statePath())
 	h.mu.Unlock()
