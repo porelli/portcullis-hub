@@ -315,8 +315,6 @@
     h += optionsHtml(st);
     h += portsHtml(st);
     h += '<div class="ps-bar" data-ps-bar>' + barHtml() + '</div>';
-    // One group list per panel, for the free-text group editors.
-    if ((p.directory_groups || []).length) h += '<datalist id="ps-groups-' + esc(st.id) + '">' + p.directory_groups.map(g => '<option value="' + esc(g) + '">').join('') + '</datalist>';
     h += '</form>';
     st.el.innerHTML = h;
     st.accessBase = accessParts(st);
@@ -492,7 +490,7 @@
         break;
       }
       case 'list': case 'groups': case 'users':
-        h += '<textarea data-part="lines" rows="3" placeholder="one per line"' + lbl + '>' + esc((v || []).join('\n')) + '</textarea>';
+        h += '<textarea data-part="lines" rows="3" placeholder="one per line"' + (o.type === 'list' ? '' : (o.type === 'groups' ? ' data-pick="group"' : ' data-pick="person" data-pick-population') + ' spellcheck="false"') + lbl + '>' + esc((v || []).join('\n')) + '</textarea>';
         break;
       case 'table':
         h += '<textarea data-part="json" rows="4" placeholder="[{&quot;column&quot;: &quot;value&quot;}]"' + lbl + '>' + esc(v === null || v === undefined ? '' : JSON.stringify(v, null, 1)) + '</textarea>';
@@ -500,8 +498,8 @@
       default: {
         const ph = extra && extra.placeholder ? ' placeholder="' + esc(extra.placeholder) + '"' : '';
         const ml = typeof o.max_len === 'number' ? ' maxlength="' + esc(o.max_len) + '"' : '';
-        const list = o.type === 'group' && (st.panel.directory_groups || []).length ? ' list="ps-groups-' + esc(st.id) + '"' : '';
-        h += '<input type="text" data-part="text" spellcheck="false" value="' + esc(v === null || v === undefined ? '' : v) + '"' + ph + ml + list + lbl + '>';
+        const pick = o.type === 'group' ? ' data-pick="group" autocomplete="off"' : '';
+        h += '<input type="text" data-part="text" spellcheck="false" value="' + esc(v === null || v === undefined ? '' : v) + '"' + ph + ml + pick + lbl + '>';
       }
     }
     return h + '</span>';
@@ -694,27 +692,37 @@
 
   // ── per-person and group-scope rows ────────────────────────────────
 
-  function groupPicker(st, o, rows, r) {
-    const used = new Set(rows.filter(x => x !== r).map(x => x.group.toLowerCase()));
-    const choices = o.privileged ? (o.group_choices || []).map(c => ({ name: c.name, disabled: c.disabled, reason: c.reason }))
+  // groupChoices: the groups a row of option o may name (a privileged
+  // option's group_choices, with the refused ones and why; else every
+  // directory group), those other rows use marked "already has a row".
+  function groupChoices(st, o, uid) {
+    const rows = rowList(st, o.key);
+    const used = new Set(rows.filter(x => x.uid !== uid).map(x => x.group.toLowerCase()));
+    const choices = o.privileged ? (o.group_choices || []).map(c => ({ name: c.name, disabled: !!c.disabled, reason: c.disabled ? "can't grant a privileged value: " + (c.reason || 'refused') : '' }))
       : (st.panel.directory_groups || []).map(g => ({ name: g }));
-    const lbl = ' aria-label="Group"';
-    if (!choices.length) {
-      return '<input type="text" class="ps-group" data-row-group data-key="' + esc(o.key) + '" data-uid="' + esc(r.uid) + '" value="' + esc(r.group) + '" placeholder="group"' + lbl + '>';
+    return choices.map(c => used.has(c.name.toLowerCase()) && !c.disabled ? Object.assign({}, c, { disabled: true, reason: 'already has a row' }) : c);
+  }
+
+  // groupPicker: a row's group, typed or chosen (PortcullisPicker, bound
+  // in render with groupChoices).
+  function groupPicker(st, o, rows, r) {
+    return '<input type="text" class="ps-group" data-row-group data-pick="group" data-key="' + esc(o.key) + '" data-uid="' + esc(r.uid) + '" value="' + esc(r.group) + '" placeholder="' +
+      (r.group ? 'group' : 'choose a group…') + '" aria-label="Group" autocomplete="off" spellcheck="false">';
+  }
+
+  // rowGroupError: why a row's group can't be used, or null (a name in
+  // another case is the directory's group). stored: the row's group as
+  // saved (it may have gone from the directory since).
+  function rowGroupError(st, o, uid, v, stored) {
+    if (!v) return 'choose a group';
+    const choices = groupChoices(st, o, uid);
+    if (!choices.length) return null; // the directory's groups unknown: the server decides
+    const c = choices.find(x => x.name.toLowerCase() === v.toLowerCase());
+    if (!c) {
+      if (stored) return 'group ' + v + ' is no longer in the directory: choose another or remove the row';
+      return o.privileged ? 'not one of the groups that can get this value' : 'no group of that name in the directory';
     }
-    let h = '<select class="ps-group" data-row-group data-key="' + esc(o.key) + '" data-uid="' + esc(r.uid) + '"' + lbl + '>';
-    if (!r.group) h += '<option value="" selected disabled>choose a group…</option>';
-    let found = false;
-    for (const c of choices) {
-      const sel = c.name === r.group;
-      found = found || sel;
-      let label = c.name, dis = false;
-      if (c.disabled) { label += " — can't grant a privileged value: " + (c.reason || 'refused'); dis = true; }
-      else if (used.has(c.name.toLowerCase())) { label += ' — already has a row'; dis = true; }
-      h += '<option value="' + esc(c.name) + '"' + (sel ? ' selected' : '') + (dis && !sel ? ' disabled' : '') + (c.reason ? ' title="' + esc(c.reason) + '"' : '') + '>' + esc(label) + '</option>';
-    }
-    if (r.group && !found) h += '<option value="' + esc(r.group) + '" selected>' + esc(r.group) + ' — not in the directory</option>';
-    return h + '</select>';
+    return c.disabled ? c.reason : null;
   }
 
   function rowsHtml(st, o, rows, priority) {
@@ -732,7 +740,14 @@
         h += '<button type="button" class="btn-icon ps-move" data-action="row-down" data-key="' + esc(o.key) + '" data-uid="' + esc(r.uid) + '"' + (i === rows.length - 1 ? ' disabled' : '') + ' aria-label="Move ' + esc(r.group || 'row') + ' down" title="Move down">▼</button>';
       }
       h += '<button type="button" class="btn-icon" data-action="row-remove" data-key="' + esc(o.key) + '" data-uid="' + esc(r.uid) + '" aria-label="Remove the row for ' + esc(r.group || 'the new group') + '" title="Remove">✕</button>';
-      const err = st.rowErrors[o.key + '\u0000' + r.uid];
+      // A saved row whose group has gone (or became refused) shows why
+      // at once, not only after an edit.
+      const ek = o.key + '\u0000' + r.uid;
+      if (!st.rowErrors[ek] && r.group && r.group === r.group0) {
+        const why = rowGroupError(st, o, r.uid, r.group, true);
+        if (why) st.rowErrors[ek] = new String(why);
+      }
+      const err = st.rowErrors[ek];
       if (err) h += '<div class="ps-err ps-row-err">' + esc(err) + '</div>';
       h += '</li>';
     });
@@ -1360,16 +1375,27 @@
         return;
       }
       if (t.matches('[data-row-group]')) {
-        if (e.type !== 'change' && t.tagName === 'SELECT') return;
         const key = t.dataset.key, uid = t.dataset.uid;
+        const o = st.opts[key];
         const row = rowList(st, key).find(r => r.uid === uid);
-        if (row) row.group = t.value.trim();
-        if (t.tagName === 'SELECT') {
+        let v = t.value.trim();
+        // A typed name in another case is the directory's name.
+        const same = o ? groupChoices(st, o, uid).find(c => c.name.toLowerCase() === v.toLowerCase()) : null;
+        if (same && e.type === 'change') v = same.name;
+        if (row) row.group = v;
+        const msg = o ? rowGroupError(st, o, uid, v, row && v === row.group0) : null;
+        if (e.type === 'change' && e.detail && e.detail.picked && !msg) {
+          // A group chosen from the list: the row's labels follow (the
+          // field keeps the focus).
           delete st.rowErrors[key + '\u0000' + uid];
           redrawOption(st, key);
           refocus(st, '[data-row-group][data-uid="' + CSS.escape(uid) + '"]');
+        } else if (e.type === 'change') {
+          // Judged once the name is complete (change / blur), never on
+          // every keystroke.
+          setRowError(st, key, uid, msg ? new String(msg) : null);
         } else {
-          setRowError(st, key, uid, t.value.trim() === '' ? new String('choose a group') : null);
+          setRowError(st, key, uid, null); // typing only clears
         }
         schedulePreview(st);
         return;
@@ -1393,6 +1419,19 @@
     };
     el.addEventListener('input', onInput);
     el.addEventListener('change', onInput);
+    // Group fields pick from the panel's own lists (directory_groups,
+    // group_choices); users fields from the overview (directory.js).
+    if (window.PortcullisPicker) {
+      window.PortcullisPicker.bind(el, t => {
+        const st = stOf();
+        if (!st || t.dataset.pick !== 'group') return null;
+        if (t.matches('[data-row-group]')) {
+          const o = st.opts[t.dataset.key];
+          return o ? { kind: 'group', source: () => groupChoices(st, o, t.dataset.uid) } : null;
+        }
+        return { kind: 'group', source: () => st.panel.directory_groups || [] };
+      });
+    }
 
     el.addEventListener('keydown', e => {
       if (e.key === 'Enter' && e.target.matches('[data-who-search], [data-entry-search]')) e.preventDefault();

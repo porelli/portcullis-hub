@@ -137,8 +137,8 @@ func TestOverview(t *testing.T) {
 	if r := byName["root"]; !r.Self || r.Keycloak.Imported {
 		t.Errorf("root = %+v", r)
 	}
-	if byName["portcullis-hub"].Protected != "service" || byName["admin"].Protected != "core-admin" {
-		t.Error("protection flags")
+	if _, listed := byName["portcullis-hub"]; listed || byName["admin"].Protected != "core-admin" {
+		t.Error("protection flags (or the service account listed)")
 	}
 	// users_app exists; only admin_app is suggested: "other" isn't enabled,
 	// so its group users_other must not be.
@@ -981,5 +981,66 @@ func TestReservedPortcullisNames(t *testing.T) {
 	}
 	if _, err := e.svc.DeleteUser(ctx, asRoot, "portcullis-hooks", "portcullis-hooks"); err != nil || e.ll.HasUser("portcullis-hooks") {
 		t.Errorf("DeleteUser = %v", err)
+	}
+}
+
+// TestOverviewHidesServiceAccount: the Hub's service account is never
+// listed — not in users, group members, rule matches, entries or ends —
+// for an administrator, a delegate or anyone else (ServiceUser still
+// names it), and the API refusals for it are unchanged.
+func TestOverviewHidesServiceAccount(t *testing.T) {
+	e := newEnv(t)
+	e.ll.AddGroup("office", "alice", "portcullis-hub")
+	check := func(who string, ov *directory.Overview) {
+		t.Helper()
+		if ov.ServiceUser != "portcullis-hub" {
+			t.Errorf("%s: service_user = %q", who, ov.ServiceUser)
+		}
+		for _, u := range ov.Users {
+			if strings.EqualFold(u.Username, "portcullis-hub") {
+				t.Errorf("%s: users list the service account", who)
+			}
+		}
+		found := false
+		for _, g := range ov.Groups {
+			if g.Name == "office" {
+				found = true
+				if len(g.Members) != 1 || g.Members[0] != "alice" {
+					t.Errorf("%s: office members = %v", who, g.Members)
+				}
+			}
+			for _, m := range append(append([]string{}, g.Members...), g.Matches...) {
+				if strings.EqualFold(m, "portcullis-hub") {
+					t.Errorf("%s: %s lists the service account", who, g.Name)
+				}
+			}
+		}
+		if !found {
+			t.Errorf("%s: office missing", who)
+		}
+	}
+	ov, err := e.svc.Overview(ctx, "root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	check("admin", ov)
+	ov, err = e.svc.OverviewFor(ctx, &directory.Caller{User: "alice"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	check("alice", ov)
+	pv, err := e.svc.PeopleOverview(ctx, &directory.Caller{User: "alice"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, u := range pv.Users {
+		if u.Username == "portcullis-hub" {
+			t.Error("people view lists the service account")
+		}
+	}
+	// checkTarget still protects it.
+	wantStatus(t, "add the service account", e.svc.AddMember(ctx, asRoot, "office", directory.MemberAdd{Username: "portcullis-hub"}), 409)
+	if _, err := e.svc.SetPassword(ctx, asRoot, "portcullis-hub", "", true, ""); status(err) != 409 {
+		t.Errorf("SetPassword(service) = %v, want 409", err)
 	}
 }

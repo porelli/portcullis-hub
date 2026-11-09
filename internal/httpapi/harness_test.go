@@ -52,7 +52,8 @@ import (
 // request in as "root" (an LLDAP admin) with the proxy secret, serves the
 // people listener on HUB_HARNESS_PEOPLE_ADDR (default 127.0.0.1:18889)
 // signed in as HUB_HARNESS_PEOPLE_USER (default alice; a request's
-// X-Harness-User overrides it), and runs until HUB_HARNESS_FOR (a
+// X-Harness-User overrides it; on the Hub listener a harness_user=admin
+// cookie signs in as the bootstrap admin), and runs until HUB_HARNESS_FOR (a
 // duration, default 30m) has passed.
 //
 // Settings panel fixtures (the Hub's internal/hub/testdata/settings
@@ -218,6 +219,8 @@ func TestHarness(t *testing.T) {
 	// The Hub page's people links (Users & Groups, group names, the old
 	// #users… deep links) go to this people listener.
 	e.s.PeopleURL = "http://" + paddr + "/"
+	// The shared navigation's Hub link goes to this Hub listener.
+	e.s.HubURL = "http://" + addr + "/"
 	h := e.s.Hub
 	for _, id := range append(slices.Clone(harnessFixtures), "photos", "samba", "smbfixture", "aiapp", "homeauto", "ai-chat", "plain", "gitea") {
 		if h.Template(id) == nil {
@@ -278,7 +281,13 @@ func TestHarness(t *testing.T) {
 	mux.HandleFunc("GET /harness/authorize", hfa.authorizePage)
 	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		r.Header.Set(ProxySecretHeader, testSecret)
-		r.Header.Set("X-Forwarded-User", "root")
+		// A harness_user=admin cookie signs the Hub page in as the
+		// bootstrap admin (its "can't use apps" hint); anything else root.
+		u := "root"
+		if c, err := r.Cookie("harness_user"); err == nil && c.Value == "admin" {
+			u = "admin"
+		}
+		r.Header.Set("X-Forwarded-User", u)
 		handler.ServeHTTP(w, r)
 	}))
 	srv := &http.Server{Addr: addr, Handler: mux}

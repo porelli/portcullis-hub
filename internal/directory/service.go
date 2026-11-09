@@ -409,6 +409,46 @@ func (s *Service) serviceUser() string {
 	return DefaultServiceUser
 }
 
+// isServiceAccount: user is the Hub's own LLDAP account (the configured
+// one or the default name, as checkTarget refuses both).
+func (s *Service) isServiceAccount(user string) bool {
+	return strings.EqualFold(user, s.serviceUser()) || strings.EqualFold(user, DefaultServiceUser)
+}
+
+// hideServiceAccount leaves the Hub's service account out of every
+// group's members, rule matches, entries and ends: the overview never
+// lists it, for any caller (only ServiceUser names it).
+func (s *Service) hideServiceAccount(ov *Overview) {
+	keep := func(l []string) []string {
+		out := make([]string, 0, len(l))
+		for _, u := range l {
+			if !s.isServiceAccount(u) {
+				out = append(out, u)
+			}
+		}
+		return out
+	}
+	for i := range ov.Groups {
+		g := &ov.Groups[i]
+		g.Members = keep(g.Members)
+		if g.Matches != nil {
+			g.Matches = keep(g.Matches)
+		}
+		ex := make([]ExceptionView, 0, len(g.Exceptions))
+		for _, e := range g.Exceptions {
+			if !s.isServiceAccount(e.User) {
+				ex = append(ex, e)
+			}
+		}
+		g.Exceptions = ex
+		for u := range g.Expiry {
+			if s.isServiceAccount(u) {
+				delete(g.Expiry, u)
+			}
+		}
+	}
+}
+
 func (s *Service) protection(user string) string {
 	switch strings.ToLower(user) {
 	case s.serviceUser():
@@ -533,6 +573,9 @@ func (s *Service) overview(ctx context.Context, me string, c *Caller) (*Overview
 	inLLDAP := map[string]bool{}
 	for _, u := range users {
 		inLLDAP[strings.ToLower(u.ID)] = true
+		if s.isServiceAccount(u.ID) {
+			continue // nobody can use it: never listed (ServiceUser names it)
+		}
 		v := UserView{Username: u.ID, Email: u.Email, DisplayName: u.DisplayName, Created: u.CreationDate, Groups: []string{},
 			Protected: s.protection(u.ID), Self: me != "" && strings.EqualFold(me, u.ID), Attrs: map[string][]string{}, Memberships: []UserMembership{}}
 		for _, g := range u.Groups {
@@ -604,6 +647,7 @@ func (s *Service) overview(ctx context.Context, me string, c *Caller) (*Overview
 	if cfg != nil {
 		s.addGroupConfig(ov, cfg, sn, admins, time.Now().UTC(), full)
 	}
+	s.hideServiceAccount(ov)
 	if !full {
 		return ov, nil
 	}

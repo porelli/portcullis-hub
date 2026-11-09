@@ -595,7 +595,23 @@ func TestDirectoryAssetsServed(t *testing.T) {
 		if !strings.Contains(b, `src="/static/directory.js"`) || !strings.Contains(b, `href="/static/directory.css"`) {
 			t.Errorf("%s does not load directory.js/css", c.page)
 		}
+		// The shared navigation, from the configured domain.
+		if !strings.Contains(b, `id="site-nav"`) || !strings.Contains(b, "PortcullisNav.render(") || !strings.Contains(b, `domain: "example.org"`) {
+			t.Errorf("%s lacks the shared navigation", c.page)
+		}
 	}
+	// The people page's overrides: "" unless the server sets them (the
+	// harness's listeners).
+	_, pb := doAs(t, e.people, "root", "GET", "/", "")
+	if !strings.Contains(pb, `hubURL: "", peopleURL: ""`) {
+		t.Error("the people page injects navigation URLs nobody set")
+	}
+	e.s.HubURL, e.s.PeopleURL = "http://127.0.0.1:18888/", "http://127.0.0.1:18889/"
+	_, pb = doAs(t, e.people, "root", "GET", "/", "")
+	if !strings.Contains(pb, `hubURL: "http://127.0.0.1:18888/", peopleURL: "http://127.0.0.1:18889/"`) {
+		t.Error("the people page doesn't carry the injected navigation URLs")
+	}
+	e.s.HubURL, e.s.PeopleURL = "", ""
 	_, b := doAs(t, e.hub, "root", "GET", "/", "")
 	if strings.Contains(b, "function renderUsers") || strings.Contains(b, "dir-users") {
 		t.Error("the hub index still carries the old inline Users & Groups code")
@@ -604,7 +620,10 @@ func TestDirectoryAssetsServed(t *testing.T) {
 		strings.Contains(b, "PortcullisDirectory.openAt") || strings.Contains(b, "PortcullisDirectory.route") {
 		t.Error("the hub index still embeds the directory (people and groups live on people.<domain>)")
 	}
-	for _, want := range []string{`id="people-tab"`, "function peopleRedirect(", "location.replace(PortcullisPeople.href(ppl))",
+	if strings.Contains(b, `id="people-tab"`) || strings.Contains(b, "Users &amp; Groups</a>") {
+		t.Error("the hub index still has the Users & Groups tab (the shared navigation's People link replaces it)")
+	}
+	for _, want := range []string{`id="site-nav"`, "PortcullisNav.render(", "function peopleRedirect(", "location.replace(PortcullisPeople.href(ppl))",
 		`data-tab="audit"`, `id="audit-root"`, "PortcullisDirectory.renderAudit(", "window.PortcullisPeople = "} {
 		if !strings.Contains(b, want) {
 			t.Errorf("the hub index lacks %q", want)
@@ -963,6 +982,22 @@ func TestEntryReasonsAdminOnly(t *testing.T) {
 					}
 				}
 			}
+		}
+	}
+}
+
+// TestHubBootstrapAdminHint: the Hub page flags the bootstrap admin from
+// the protected account it knows (directory.CoreAdmin, any case), so the
+// App Catalog hint and the enable message show for it only.
+func TestHubBootstrapAdminHint(t *testing.T) {
+	e := newPeopleEnv(t)
+	for user, want := range map[string]string{"admin": "true", "Admin": "true", "root": "false", "administrator": "false"} {
+		_, b := doAs(t, e.hub, user, "GET", "/", "")
+		if !strings.Contains(strings.Join(strings.Fields(b), " "), "window.BOOTSTRAP_ADMIN = "+want+" ;") && !strings.Contains(b, "window.BOOTSTRAP_ADMIN = "+want+";") {
+			t.Errorf("%s: BOOTSTRAP_ADMIN not %s", user, want)
+		}
+		if !strings.Contains(b, `id="admin-hint"`) {
+			t.Errorf("%s: no admin hint box", user)
 		}
 	}
 }

@@ -54,6 +54,14 @@ const (
 // SweepResumeConfirm must be typed to resume a paused sweep.
 const SweepResumeConfirm = "resume"
 
+// sweepRetry: retry interval after an unreachable skip (test-settable).
+var sweepRetry = time.Minute
+
+// SweepRetryInterval returns the retry interval for the scheduler.
+func SweepRetryInterval() time.Duration {
+	return sweepRetry
+}
+
 // UserSweepStatus is <data>/user-sweep.json and GET /api/keycloak/user-sweep.
 type UserSweepStatus struct {
 	// Paused: an account or count check failed; only ResumeUserSweep
@@ -63,7 +71,8 @@ type UserSweepStatus struct {
 	PausedAt time.Time `json:"paused_at,omitempty"`
 	// Skipped: the last run didn't sweep for a passing reason (LLDAP or
 	// Keycloak unreachable); cleared by the next successful run.
-	Skipped string `json:"skipped,omitempty"`
+	Skipped      string    `json:"skipped,omitempty"`
+	SkippedSince time.Time `json:"skipped_since,omitempty"`
 	// LastOKCount / LastOKAt: LLDAP's user count at the last successful
 	// sweep (the drop baseline; 0 = none yet).
 	LastOKCount int       `json:"last_ok_count"`
@@ -167,22 +176,30 @@ func (h *Hub) RunUserSweep(ctx context.Context) bool {
 	n, problem, transient := s.checkLDAP(ctx, st.LastOKCount)
 	if problem != "" {
 		if transient {
+			// A new skip: set SkippedSince. An ongoing skip: keep it.
+			if st.Skipped == "" {
+				st.SkippedSince = time.Now().UTC()
+			}
 			st.Skipped = problem
 			log.Printf("keycloak: WARNING: stale-record cleanup skipped: %s", problem)
 		} else {
-			st.Paused, st.Reason, st.PausedAt, st.Skipped = true, problem, time.Now().UTC(), ""
+			st.Paused, st.Reason, st.PausedAt, st.Skipped, st.SkippedSince = true, problem, time.Now().UTC(), "", time.Time{}
 			log.Printf("keycloak: ERROR: LLDAP looks wrong — stale-record cleanup PAUSED: %s. Keycloak keeps every user until an admin checks LLDAP and resumes the cleanup in the Hub", problem)
 		}
 		s.save(st)
 		return false
 	}
 	if _, err := s.kc.RevalidateUsers(ctx); err != nil {
+		// A new skip: set SkippedSince. An ongoing skip: keep it.
+		if st.Skipped == "" {
+			st.SkippedSince = time.Now().UTC()
+		}
 		st.Skipped = fmt.Sprintf("Keycloak: %v", err)
 		log.Printf("keycloak: WARNING: stale-record cleanup failed: %v", err)
 		s.save(st)
 		return false
 	}
-	st.Skipped, st.LastOKCount, st.LastOKAt = "", n, time.Now().UTC()
+	st.Skipped, st.SkippedSince, st.LastOKCount, st.LastOKAt = "", time.Time{}, n, time.Now().UTC()
 	s.save(st)
 	return true
 }
