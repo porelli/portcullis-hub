@@ -243,7 +243,7 @@ func TestSavePersonRows(t *testing.T) {
 
 func TestPlaceholderRowsBound(t *testing.T) {
 	f, _, people := privFixture(t)
-	res, err := f.h.CreateInstanceAs("privapp", "privapp2", nil, directory.Human("root"))
+	res, err := f.h.CreateInstanceAs(CreateRequest{Template: "privapp", ID: "privapp2", Label: "Test"}, directory.Human("root"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -372,7 +372,7 @@ func TestPurgeOnHubDelete(t *testing.T) {
 	f, audit, _ := privFixture(t)
 	dir, ll := hubDirectory(t, f)
 	ll.AddGroup("office_milan", "alice")
-	if _, err := f.h.CreateInstanceAs("privapp", "privapp2", nil, directory.Human("root")); err != nil {
+	if _, err := f.h.CreateInstanceAs(CreateRequest{Template: "privapp", ID: "privapp2", Label: "Test"}, directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	for _, id := range []string{"privapp", "privapp2"} {
@@ -434,7 +434,7 @@ func TestPurgeOnHubDelete(t *testing.T) {
 
 func TestRestoreDropsMismatchedRows(t *testing.T) {
 	f, _, people := privFixture(t)
-	if _, err := f.h.CreateInstanceAs("privapp", "privapp2", nil, directory.Human("root")); err != nil {
+	if _, err := f.h.CreateInstanceAs(CreateRequest{Template: "privapp", ID: "privapp2", Label: "Test"}, directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := f.h.SaveSettings("privapp2", SettingsUpdate{Person: map[string]PersonChange{"tier": {Default: raw("basic"), Rows: rows("office_milan", "pro", "users_privapp", "pro")}}}, directory.Human("root")); err != nil {

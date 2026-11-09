@@ -231,7 +231,7 @@ func TestHarness(t *testing.T) {
 	// Seed: two extra instances, one enabled, with data; backups, one of
 	// a deleted instance.
 	for _, c := range []struct{ tmpl, id string }{{"grafana", "grafana-team-a"}, {"home", "home-b"}, {"grafana", "grafana-old"}} {
-		if _, err := h.CreateInstanceAs(c.tmpl, c.id, nil, directory.Human("root")); err != nil {
+		if _, err := h.CreateInstanceAs(hub.CreateRequest{Template: c.tmpl, ID: c.id, Label: "Test"}, directory.Human("root")); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -586,7 +586,7 @@ func seedFolders(t *testing.T, h *hub.Hub, disk *harnessDisk) {
 	}
 	// samba-office: a second (disabled) writer, free for the browser's
 	// assignment.
-	if _, err := h.CreateInstanceAs("samba", "samba-office", nil, directory.Human("root")); err != nil {
+	if _, err := h.CreateInstanceAs(hub.CreateRequest{Template: "samba", ID: "samba-office", Label: "Test"}, directory.Human("root")); err != nil {
 		t.Fatalf("creating samba-office: %v", err)
 	}
 	for _, p := range []string{"/srv/media", "/srv/scans", "/srv/photos", "/srv/projects"} {
@@ -1199,7 +1199,7 @@ func seedAIAdmin(t *testing.T, h *hub.Hub) {
 		t.Fatal(err)
 	}
 	for _, id := range []string{"aiapp-off", "aiapp-mtls"} {
-		if _, err := h.CreateInstanceAs("aiapp", id, nil, root); err != nil {
+		if _, err := h.CreateInstanceAs(hub.CreateRequest{Template: "aiapp", ID: id, Label: "Test"}, root); err != nil {
 			t.Fatal(err)
 		}
 	}

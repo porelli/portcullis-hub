@@ -303,7 +303,7 @@ var admin17b = []string{
 var admin17a = []string{
 	"hub_status", "explain_policy",
 	"list_instances", "get_instance", "instance_defaults", "create_instance", "enable_instance", "disable_instance",
-	"restart_instance", "set_hosts", "get_op", "list_ops", "wait_for_op", "stop_op", "delete_instance",
+	"restart_instance", "set_hosts", "set_instance_label", "get_op", "list_ops", "wait_for_op", "stop_op", "delete_instance",
 	"get_settings", "preview_settings", "save_settings", "set_secret_setting", "set_policy", "set_sign_in_mode", "set_public_access",
 	"get_logs", "get_status", "exec", "get_compose", "get_env", "save_env", "get_custom_override", "save_custom_override",
 	"list_drift", "resolve_drift",

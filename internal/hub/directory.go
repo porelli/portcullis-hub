@@ -305,8 +305,9 @@ func (h *Hub) DirectoryApps() []directory.App {
 	out := make([]directory.App, 0, len(h.instances))
 	for i := range h.instances {
 		t := &h.instances[i]
+		users, admins := h.instanceGroupsLocked(t)
 		out = append(out, directory.App{ID: t.ID, Name: instanceName(t), Enabled: t.Enabled,
-			AccessGroup: t.Manifest.Auth.AccessGroup, AdminGroup: t.Manifest.Auth.AdminGroup,
+			AccessGroup: users, AdminGroup: admins,
 			PrivilegedGroups: h.privilegedGroupsLocked(t)})
 	}
 	return out

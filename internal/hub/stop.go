@@ -71,7 +71,7 @@ func (h *Hub) enablePlan(id string) []Step {
 	h.mu.RLock()
 	var groups bool
 	if t := h.findLocked(id); t != nil {
-		groups = len(instanceGroups(t)) > 0
+		groups = len(h.instanceGroupsListLocked(t)) > 0
 	}
 	enabled := h.st.IsEnabled(id)
 	idp := h.idp != nil
@@ -176,6 +176,7 @@ func (h *Hub) enablePrecheck(ctx context.Context, id string, actor directory.Act
 		return nil, nil, statusErr(404, "app instance not found: %s", id)
 	}
 	tmpl := *t
+	groups := h.instanceGroupsListLocked(t)
 	err = h.pendingLocked(id)
 	if err == nil && !h.st.IsEnabled(id) {
 		if err = h.checkPortCollisionsLocked(&tmpl); err == nil {
@@ -186,7 +187,7 @@ func (h *Hub) enablePrecheck(ctx context.Context, id string, actor directory.Act
 	if err != nil {
 		return nil, nil, err
 	}
-	if groups := instanceGroups(&tmpl); len(groups) > 0 {
+	if len(groups) > 0 {
 		return h.planGroups(ctx, id, groups, actor)
 	}
 	return nil, nil, nil
@@ -223,7 +224,7 @@ func (h *Hub) instanceGroupNames(id string) []string {
 	defer h.mu.RUnlock()
 	var out []string
 	if t := h.findLocked(id); t != nil {
-		for _, g := range instanceGroups(t) {
+		for _, g := range h.instanceGroupsListLocked(t) {
 			out = append(out, g.Name)
 		}
 	}

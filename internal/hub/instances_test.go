@@ -346,8 +346,8 @@ func TestTwoInstancesSeparate(t *testing.T) {
 	// Portal: one entry per instance.
 	portal := f.h.Portal()
 	if len(portal.Apps) != 2 || portal.Apps[1].ID != "grafana-team-a" || portal.Apps[1].Template != "grafana" ||
-		portal.Apps[1].Name != "Grafana (grafana-team-a)" || portal.Apps[1].URLs[0].URL != "https://grafana-team-a.example.org" ||
-		portal.Apps[0].Name != "Grafana" {
+		portal.Apps[1].Name != "Grafana · grafana-team-a" || portal.Apps[1].URLs[0].URL != "https://grafana-team-a.example.org" ||
+		portal.Apps[0].Name != "Grafana · Grafana" {
 		t.Errorf("portal = %+v", portal.Apps)
 	}
 	// Catalog: one template with both instance ids.

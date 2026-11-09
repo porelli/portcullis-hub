@@ -301,6 +301,9 @@ type Template struct {
 	InstanceEnv map[string]string `json:"-"`
 	// Instances lists the template's instance ids (catalog only).
 	Instances []string `json:"instances"`
+	// Label is an instance view's stored label (contract §11.9; "" =
+	// none stored: the Hub shows its default). Display only.
+	Label string `json:"-"`
 	// GIDRefs (GIDRefs) and GIDEnvLeaks (GIDEnvLeaks), computed once at
 	// discovery from the manifest and compose.yml (shared, read-only, by
 	// every view of the template).

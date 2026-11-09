@@ -15,7 +15,7 @@ func TestCreateInstanceAsGroups(t *testing.T) {
 	g := &fakeGroups{}
 	f.h.SetGroups(g)
 
-	res, err := f.h.CreateInstanceAs("grafana", "grafana-team-a", nil, directory.Human("alice"))
+	res, err := f.h.CreateInstanceAs(CreateRequest{Template: "grafana", ID: "grafana-team-a", Label: "Test"}, directory.Human("alice"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,7 +32,7 @@ func TestCreateInstanceAsGroups(t *testing.T) {
 
 	// The actor must resolve first: nothing is created.
 	g.actorErr = errors.New("not an administrator")
-	if _, err := f.h.CreateInstanceAs("grafana", "grafana-b", nil, directory.Human("dana")); err == nil || !strings.Contains(err.Error(), "nothing was created") {
+	if _, err := f.h.CreateInstanceAs(CreateRequest{Template: "grafana", ID: "grafana-b", Label: "Test"}, directory.Human("dana")); err == nil || !strings.Contains(err.Error(), "nothing was created") {
 		t.Fatalf("actor = %v", err)
 	}
 	if _, ok := f.h.InstanceView("grafana-b"); ok {
@@ -52,7 +52,7 @@ func TestCreateInstanceAsGroups(t *testing.T) {
 		}
 		return nil
 	}
-	_, err = f.h.CreateInstanceAs("grafana", "grafana-c", nil, directory.Human("alice"))
+	_, err = f.h.CreateInstanceAs(CreateRequest{Template: "grafana", ID: "grafana-c", Label: "Test"}, directory.Human("alice"))
 	if err == nil || !strings.Contains(err.Error(), "removed again") {
 		t.Fatalf("group failure = %v", err)
 	}
@@ -64,7 +64,7 @@ func TestCreateInstanceAsGroups(t *testing.T) {
 	}
 	// The id is free again.
 	g.createErr, g.createWarn = nil, nil
-	if _, err := f.h.CreateInstanceAs("grafana", "grafana-c", nil, directory.Human("alice")); err != nil {
+	if _, err := f.h.CreateInstanceAs(CreateRequest{Template: "grafana", ID: "grafana-c", Label: "Test"}, directory.Human("alice")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -77,7 +77,7 @@ func TestCreateInstanceAsGroups(t *testing.T) {
 		return nil
 	}
 	g.delErr = &directory.KeptUnavailableError{Group: "users_grafana-e", Cause: errors.New("down")}
-	_, err = f.h.CreateInstanceAs("grafana", "grafana-e", nil, directory.Human("alice"))
+	_, err = f.h.CreateInstanceAs(CreateRequest{Template: "grafana", ID: "grafana-e", Label: "Test"}, directory.Human("alice"))
 	if err == nil || !strings.Contains(err.Error(), "was removed again (group users_grafana-e was kept: users & groups is not available") ||
 		strings.Contains(err.Error(), "failed too") {
 		t.Fatalf("kept group = %v", err)
@@ -88,15 +88,15 @@ func TestCreateInstanceAsGroups(t *testing.T) {
 	g.createErr, g.delErr = nil, nil
 
 	// No actor, a single template: refused.
-	if _, err := f.h.CreateInstanceAs("grafana", "grafana-d", nil, directory.Human("")); statusOf(err) != 400 {
+	if _, err := f.h.CreateInstanceAs(CreateRequest{Template: "grafana", ID: "grafana-d", Label: "Test"}, directory.Human("")); statusOf(err) != 400 {
 		t.Errorf("no actor = %v", err)
 	}
-	if _, err := f.h.CreateInstanceAs("disks", "disks-b", nil, directory.Human("alice")); statusOf(err) != 409 {
+	if _, err := f.h.CreateInstanceAs(CreateRequest{Template: "disks", ID: "disks-b", Label: "Test"}, directory.Human("alice")); statusOf(err) != 409 {
 		t.Errorf("single = %v", err)
 	}
 	// Ids whose automatic Traefik names could equal another instance's.
 	for _, id := range []string{"grafana-portcullis-b", "grafana--b", "grafana-"} {
-		if _, err := f.h.CreateInstanceAs("grafana", id, nil, directory.Human("alice")); statusOf(err) != 400 || !strings.Contains(err.Error(), "instance id") {
+		if _, err := f.h.CreateInstanceAs(CreateRequest{Template: "grafana", ID: id, Label: "Test"}, directory.Human("alice")); statusOf(err) != 400 || !strings.Contains(err.Error(), "instance id") {
 			t.Errorf("%s = %v", id, err)
 		}
 	}

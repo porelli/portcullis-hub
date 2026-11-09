@@ -1203,6 +1203,9 @@ type fakeGroups struct {
 	// are added); missingErr fails the check.
 	existing   map[string]bool
 	missingErr error
+	// privileged: administrator / permission groups CheckBindGroups
+	// refuses as a users group.
+	privileged map[string]bool
 	// people, if set, gets the groups created and deleted here.
 	people *fakePeople
 	// delWarn, if set and answering a warning, keeps the group (deletes
@@ -1224,6 +1227,27 @@ func (g *fakeGroups) MissingInstanceGroups(ctx context.Context, names []string) 
 	}
 	return out, nil
 }
+
+// CheckBindGroups: each must be in existing (exact name); the users
+// group may not be one of LLDAP's built-ins or in privileged.
+func (g *fakeGroups) CheckBindGroups(ctx context.Context, users, admins string) (string, string, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.missingErr != nil {
+		return "", "", &StatusError{Status: 503, Err: g.missingErr}
+	}
+	for _, n := range []string{users, admins} {
+		if n != "" && !g.existing[n] && !fakeBuiltin[n] {
+			return "", "", &StatusError{Status: 400, Err: errors.New("unknown group " + n)}
+		}
+	}
+	if fakeBuiltin[users] || g.privileged[users] {
+		return "", "", &StatusError{Status: 400, Err: errors.New("the users group can't be a built-in or administrator group")}
+	}
+	return users, admins, nil
+}
+
+var fakeBuiltin = map[string]bool{"lldap_admin": true, "lldap_password_manager": true, "lldap_strict_readonly": true}
 
 func (g *fakeGroups) ResolveActor(ctx context.Context, actor directory.Actor) error {
 	g.mu.Lock()

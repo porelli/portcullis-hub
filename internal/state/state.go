@@ -77,10 +77,13 @@ type KnownDomain struct {
 	State        string     `json:"state" yaml:"state"`
 }
 
-// Instance is an app instance other than a template's implicit default
-// one (contract §11): its template and hostnames (host router → full
-// hostname). Every other per-instance map of AppState (Enabled, Settings,
-// AuthPolicies, Published, Public*, SignIn) is keyed by its ID.
+// Instance is an app instance (contract §11): its template and hostnames
+// (host router → full hostname), its label and group binding (§11.9). A
+// template's default instance (ID = template id) has an entry only when
+// something of this is stored (pinned or edited hosts, a label, a
+// binding, a lifecycle state). Every other per-instance map of AppState
+// (Enabled, Settings, AuthPolicies, Published, Public*, SignIn) is keyed
+// by its ID.
 type Instance struct {
 	ID       string            `json:"id" yaml:"id"`
 	Template string            `json:"template" yaml:"template"`
@@ -98,7 +101,26 @@ type Instance struct {
 	// it from (state InstanceRestoring, no pre-restore backup): an
 	// interrupted one is removed again at the next start.
 	RestoreAs string `json:"restore_as,omitempty" yaml:"restore_as,omitempty"`
+	// Label is the instance's display label (§11.9; "" = never set: the
+	// manifest's name for a default instance, the id otherwise). Display
+	// only: nothing keys on it.
+	Label string `json:"label,omitempty" yaml:"label,omitempty"`
+	// UsersGroup / AdminsGroup bind the instance to existing groups
+	// (§11.9 groups mode "existing"; "" = the derived names). Fixed after
+	// create.
+	UsersGroup  string `json:"users_group,omitempty" yaml:"users_group,omitempty"`
+	AdminsGroup string `json:"admins_group,omitempty" yaml:"admins_group,omitempty"`
 }
+
+// HoldsIdentity reports whether the entry stores a label or a group
+// binding: a default instance's entry that does is never dropped as
+// "needs no entry".
+func (e Instance) HoldsIdentity() bool {
+	return e.Label != "" || e.UsersGroup != "" || e.AdminsGroup != ""
+}
+
+// Bound reports whether the instance is bound to existing groups.
+func (e Instance) Bound() bool { return e.UsersGroup != "" || e.AdminsGroup != "" }
 
 // Persisted instance states (Instance.State).
 const (
@@ -112,9 +134,10 @@ type AppState struct {
 	// Enabled lists the enabled instance ids (a template id names its
 	// default instance).
 	Enabled []string `json:"enabled" yaml:"enabled"`
-	// Instances are the instances other than the implicit default ones,
-	// by id. The default instance of a template (id = template id) needs
-	// no entry: it uses the template's hostnames on the main domain.
+	// Instances are the instances by id. The default instance of a
+	// template (id = template id) needs no entry unless it stores hosts,
+	// a label, a binding or a state: else it uses the template's
+	// hostnames on the main domain.
 	Instances map[string]Instance `json:"instances,omitempty" yaml:"instances,omitempty"`
 	Sources   []Source            `json:"sources" yaml:"sources"`
 	// Settings are each instance's settings (contract §13), by id.

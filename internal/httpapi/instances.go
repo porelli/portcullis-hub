@@ -22,6 +22,7 @@ func (s *Server) registerInstances(mux routeMux) {
 	mux.HandleFunc("POST /api/instances", s.handleCreateInstance)
 	mux.HandleFunc("GET /api/instances/defaults", s.handleInstanceDefaults)
 	mux.HandleFunc("PUT /api/instances/{id}/hosts", s.handleInstanceHosts)
+	mux.HandleFunc("PUT /api/instances/{id}/label", s.handleInstanceLabel)
 	mux.HandleFunc("DELETE /api/instances/{id}", s.handleDeleteInstance)
 	mux.HandleFunc("GET /api/backups", s.handleBackups)
 	mux.HandleFunc("GET /api/instances/{id}/backups", s.handleBackups)
@@ -150,15 +151,11 @@ func (s *Server) handleCreateInstance(w http.ResponseWriter, r *http.Request) {
 	if !s.adminOnly(w, r) {
 		return
 	}
-	var b struct {
-		Template string            `json:"template"`
-		ID       string            `json:"id"`
-		Hosts    map[string]string `json:"hosts"`
-	}
-	if !decodeStrict(w, r, &b, `{"template": "<template>", "id": "<instance-id>", "hosts": {"<host router>": "<hostname>", ...}}`) {
+	var b instanceCreateBody
+	if !decodeStrict(w, r, &b, `{"template": "<template>", "id": "<instance-id>", "label": "<label>", "hosts": {"<host router>": "<hostname>", ...}, "groups": {"mode": "new"} or {"mode": "existing", "users": "<group>", "admins": "<group>"}}`) {
 		return
 	}
-	op, err := s.createInstance(requestActor(r), b.Template, b.ID, b.Hosts)
+	op, err := s.createInstance(requestActor(r), b.request())
 	noStore(w)
 	if err != nil {
 		writeErr(w, err, http.StatusBadGateway)
@@ -167,19 +164,48 @@ func (s *Server) handleCreateInstance(w http.ResponseWriter, r *http.Request) {
 	writeAccepted(w, op)
 }
 
+// instanceCreateBody is POST /api/instances's body (contract §11.9 "Create
+// body"); create_instance takes the same fields.
+type instanceCreateBody struct {
+	Template string            `json:"template"`
+	ID       string            `json:"id"`
+	Label    string            `json:"label"`
+	Hosts    map[string]string `json:"hosts"`
+	Groups   *groupsBody       `json:"groups"`
+}
+
+// groupsBody is the create body's groups (§11.9).
+type groupsBody struct {
+	Mode   string `json:"mode" jsonschema:"new (create empty users_<id> / admin_<id>) or existing (bind to existing groups)"`
+	Users  string `json:"users,omitempty" jsonschema:"existing: the group whose people may use the app"`
+	Admins string `json:"admins,omitempty" jsonschema:"existing: the group whose people administer it (lldap_admin allowed)"`
+}
+
+func (b instanceCreateBody) request() hub.CreateRequest {
+	req := hub.CreateRequest{Template: b.Template, ID: b.ID, Label: b.Label, Hosts: b.Hosts}
+	if b.Groups != nil {
+		req.Groups = hub.GroupChoice{Mode: b.Groups.Mode, Users: b.Groups.Users, Admins: b.Groups.Admins}
+		if req.Groups.Mode == "" {
+			// An explicit groups object names its mode.
+			req.Groups.Mode = "-"
+		}
+	}
+	return req
+}
+
 // createInstance is the create's work (route and create_instance), in
 // the background (202, op create, the new id's record; its result
 // "instance", the warnings the record's); audited instance.create by the
 // Hub.
-func (s *Server) createInstance(a directory.Actor, template, id string, hosts map[string]string) (*hub.AsyncOp, error) {
-	if !templates.ValidID(template) {
+func (s *Server) createInstance(a directory.Actor, req hub.CreateRequest) (*hub.AsyncOp, error) {
+	if !templates.ValidID(req.Template) {
 		return nil, &hub.StatusError{Status: http.StatusBadRequest, Err: errors.New("invalid template id")}
 	}
-	if len(hosts) == 0 {
-		hosts = nil // the defaults on the main domain
+	if len(req.Hosts) == 0 {
+		req.Hosts = nil // the defaults on the main domain
 	}
-	s.rec("StartCreate", template, id, hosts)
-	op, err := s.Hub.StartCreate(template, id, hosts, a)
+	s.rec("StartCreate", req.Template, req.ID, req.Label, req.Hosts, req.Groups)
+	op, err := s.Hub.StartCreate(req, a)
 	return op, defaultStatus(err, http.StatusBadGateway)
 }
 
@@ -266,6 +292,43 @@ func (s *Server) setHosts(a directory.Actor, id string, hosts map[string]string)
 	v, ok := s.Hub.InstanceView(id)
 	if !ok {
 		return nil, &hub.StatusError{Status: http.StatusConflict, Err: errors.New("hostnames changed, but instance " + id + " can no longer be listed")}
+	}
+	return &v, nil
+}
+
+func (s *Server) handleInstanceLabel(w http.ResponseWriter, r *http.Request) {
+	if !s.adminOnly(w, r) {
+		return
+	}
+	id, ok := instanceID(w, r)
+	if !ok {
+		return
+	}
+	var b struct {
+		Label string `json:"label"`
+	}
+	if !decodeStrict(w, r, &b, `{"label": "<label>"}`) {
+		return
+	}
+	v, err := s.setLabel(r.Context(), requestActor(r), id, b.Label)
+	noStore(w)
+	if err != nil {
+		writeErr(w, err, http.StatusBadGateway)
+		return
+	}
+	writeJSON(w, v)
+}
+
+// setLabel is the label change's work (route and set_instance_label,
+// contract §11.9); audited instance.update by the Hub.
+func (s *Server) setLabel(ctx context.Context, a directory.Actor, id, label string) (*hub.InstanceView, error) {
+	s.rec("SetLabel", id, label)
+	if err := s.Hub.SetLabel(ctx, id, label, a); err != nil {
+		return nil, defaultStatus(err, http.StatusBadGateway)
+	}
+	v, ok := s.Hub.InstanceView(id)
+	if !ok {
+		return nil, &hub.StatusError{Status: http.StatusConflict, Err: errors.New("label changed, but instance " + id + " can no longer be listed")}
 	}
 	return &v, nil
 }
@@ -382,11 +445,12 @@ func (s *Server) handleRestoreAs(w http.ResponseWriter, r *http.Request) {
 		Archive string            `json:"archive"`
 		ID      string            `json:"id"`
 		Hosts   map[string]string `json:"hosts"`
+		Label   string            `json:"label"`
 	}
-	if !decodeStrict(w, r, &b, `{"archive": "<instance-id>/<YYYYMMDDTHHMMSSZ>.tar", "id": "<new instance-id>", "hosts": {"<host router>": "<hostname>"} (optional)}`) {
+	if !decodeStrict(w, r, &b, `{"archive": "<instance-id>/<YYYYMMDDTHHMMSSZ>.tar", "id": "<new instance-id>", "hosts": {"<host router>": "<hostname>"} (optional), "label": "<label>" (optional)}`) {
 		return
 	}
-	op, err := s.startRestoreAs(requestActor(r), b.Archive, b.ID, b.Hosts)
+	op, err := s.startRestoreAs(requestActor(r), b.Archive, b.ID, b.Hosts, b.Label)
 	noStore(w)
 	if err != nil {
 		writeErr(w, err, http.StatusInternalServerError)
@@ -410,9 +474,9 @@ func (s *Server) startRestore(a directory.Actor, id, archive string) (*hub.Async
 	return op, defaultStatus(err, http.StatusInternalServerError)
 }
 
-func (s *Server) startRestoreAs(a directory.Actor, archive, id string, hosts map[string]string) (*hub.AsyncOp, error) {
-	s.rec("StartRestoreAs", archive, id, hosts)
-	op, err := s.Hub.StartRestoreAs(archive, id, a, hosts)
+func (s *Server) startRestoreAs(a directory.Actor, archive, id string, hosts map[string]string, label string) (*hub.AsyncOp, error) {
+	s.rec("StartRestoreAs", archive, id, hosts, label)
+	op, err := s.Hub.StartRestoreAs(archive, id, a, hosts, label)
 	return op, defaultStatus(err, http.StatusInternalServerError)
 }
 

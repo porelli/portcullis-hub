@@ -108,3 +108,50 @@ func TestDeleteInstanceGroupKeptUnavailable(t *testing.T) {
 		t.Fatalf("unavailable: %v %v", w, err)
 	}
 }
+
+// TestCheckBindGroups (apps, contract §11.9): the groups an instance is
+// bound to must exist (matched case-insensitively, answered as LLDAP
+// names them); the users group may not be a built-in, administrator or
+// permission group, the admins group may (lldap_admin included); Users &
+// Groups down is 503.
+func TestCheckBindGroups(t *testing.T) {
+	e, store := evalEnv(t)
+	cfg, _ := store.Load()
+	cfg.Permissions[directory.PermInvite] = "inviters"
+	if err := store.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	for _, g := range []string{"Team", "inviters", "lldap_admin", "lldap_password_manager", "lldap_strict_readonly", "extra_admins", "milan"} {
+		e.ll.AddGroup(g)
+	}
+	setRule(t, store, "milan", `city = "Milan"`)
+	status := func(err error) int {
+		var de *directory.Error
+		if errors.As(err, &de) {
+			return de.Status
+		}
+		return 0
+	}
+	if u, a, err := e.svc.CheckBindGroups(ctx, "team", "lldap_admin"); err != nil || u != "Team" || a != "lldap_admin" {
+		t.Errorf("ok = %q %q %v", u, a, err)
+	}
+	// A rule group is a fine users group (its rule decides who uses it).
+	if u, _, err := e.svc.CheckBindGroups(ctx, "milan", "Team"); err != nil || u != "milan" {
+		t.Errorf("rule group = %q %v", u, err)
+	}
+	for _, g := range []string{"lldap_admin", "LLDAP_ADMIN", "lldap_password_manager", "lldap_strict_readonly", "extra_admins", "inviters"} {
+		if _, _, err := e.svc.CheckBindGroups(ctx, g, "Team"); status(err) != 400 || !strings.Contains(err.Error(), "the users group can't be a built-in or administrator group") {
+			t.Errorf("users %s = %v", g, err)
+		}
+	}
+	if _, _, err := e.svc.CheckBindGroups(ctx, "nope", "Team"); status(err) != 400 || !strings.Contains(err.Error(), "unknown group nope") {
+		t.Errorf("unknown users = %v", err)
+	}
+	if _, _, err := e.svc.CheckBindGroups(ctx, "Team", "gone"); status(err) != 400 || !strings.Contains(err.Error(), "unknown group gone") {
+		t.Errorf("unknown admins = %v", err)
+	}
+	e.svc.LLDAP = brokenDir{e.svc.LLDAP}
+	if _, _, err := e.svc.CheckBindGroups(ctx, "Team", "Team"); status(err) != 503 {
+		t.Errorf("down = %v", err)
+	}
+}

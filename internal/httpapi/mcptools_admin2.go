@@ -58,6 +58,7 @@ type (
 		Archive string            `json:"archive" jsonschema:"the archive, <instance-id>/<YYYYMMDDTHHMMSSZ>.tar (list_backups_all)"`
 		ID      string            `json:"id" jsonschema:"the new instance id"`
 		Hosts   map[string]string `json:"hosts,omitempty" jsonschema:"host router → hostname (default: the new id's hostnames)"`
+		Label   string            `json:"label,omitempty" jsonschema:"the new instance's label (default: the archive's)"`
 	}
 	enrollArgs struct {
 		Name     string `json:"name" jsonschema:"the domain or subdomain to enroll"`
@@ -285,7 +286,7 @@ func (s *Server) registerAdminTools2() {
 				if len(hosts) == 0 {
 					hosts = nil
 				}
-				op, err := s.startRestoreAs(toolActor(ctx, c), a.Archive, a.ID, hosts)
+				op, err := s.startRestoreAs(toolActor(ctx, c), a.Archive, a.ID, hosts, a.Label)
 				if err != nil {
 					return nil, err
 				}

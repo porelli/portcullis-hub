@@ -253,10 +253,10 @@ func TestPersonAppsRoute(t *testing.T) {
 			t.Errorf("notes = %+v", notes)
 		}
 		end := time.Date(2099, 1, 2, 3, 4, 5, 0, time.UTC)
-		if len(vault.Via) != 1 || vault.Via[0].Group != "users_vault" || vault.Via[0].Until == nil || !vault.Via[0].Until.Equal(end) || vault.Until == nil || !vault.Until.Equal(end) || vault.Name != "Vault" {
+		if len(vault.Via) != 1 || vault.Via[0].Group != "users_vault" || vault.Via[0].Until == nil || !vault.Via[0].Until.Equal(end) || vault.Until == nil || !vault.Until.Equal(end) || vault.Name != "Vault · Vault" {
 			t.Errorf("vault = %+v", vault)
 		}
-		if len(v.Values) != 1 || v.Values[0] != (hub.PersonValue{Instance: "vault", App: "Vault", Key: "storage_quota", Label: "Storage quota", Value: "1 TiB", From: "office_milan"}) {
+		if len(v.Values) != 1 || v.Values[0] != (hub.PersonValue{Instance: "vault", App: "Vault · Vault", Key: "storage_quota", Label: "Storage quota", Value: "1 TiB", From: "office_milan"}) {
 			t.Errorf("values = %+v", v.Values)
 		}
 		// root: the default.
@@ -266,7 +266,7 @@ func TestPersonAppsRoute(t *testing.T) {
 		}
 		// dana (users_teams): the self_visible: false value an admin
 		// sees, which her own My apps never shows.
-		if b := strings.TrimSpace(mustDo(t, srv, "root", "GET", "/api/directory/users/dana/apps", "", 200)); b != `{"apps":[{"instance":"teams","name":"Teams","via":[{"group":"users_teams","until":null}],"until":null}],"values":[{"instance":"teams","app":"Teams","key":"cost_center","label":"Cost center","value":"CC-1","from":"default"}]}` {
+		if b := strings.TrimSpace(mustDo(t, srv, "root", "GET", "/api/directory/users/dana/apps", "", 200)); b != `{"apps":[{"instance":"teams","name":"Teams · Teams","via":[{"group":"users_teams","until":null}],"until":null}],"values":[{"instance":"teams","app":"Teams · Teams","key":"cost_center","label":"Cost center","value":"CC-1","from":"default"}]}` {
 			t.Errorf("dana's apps = %s", b)
 		}
 		// erin, in no group: empty lists (never null).
@@ -334,7 +334,7 @@ func TestGroupUsesRoute(t *testing.T) {
 		return v
 	}
 	for _, srv := range []*httptest.Server{e.hub, e.ppl} {
-		if v := uses(srv, "users_vault"); len(v.Apps) != 1 || v.Apps[0] != (hub.GroupApp{Instance: "vault", Name: "Vault", Role: "access"}) || len(v.Settings) != 0 || len(v.Permissions) != 0 {
+		if v := uses(srv, "users_vault"); len(v.Apps) != 1 || v.Apps[0] != (hub.GroupApp{Instance: "vault", Name: "Vault · Vault", Role: "access"}) || len(v.Settings) != 0 || len(v.Permissions) != 0 {
 			t.Errorf("users_vault = %+v", v)
 		}
 		if v := uses(srv, "admin_vault"); len(v.Apps) != 1 || v.Apps[0].Role != "admin" {
@@ -344,7 +344,7 @@ func TestGroupUsesRoute(t *testing.T) {
 			t.Errorf("helpers = %+v", v)
 		}
 		v := uses(srv, "office_milan")
-		want := hub.GroupSetting{Instance: "vault", App: "Vault", Key: "storage_quota", Label: "Storage quota", Scope: "person", Value: "1 TiB"}
+		want := hub.GroupSetting{Instance: "vault", App: "Vault · Vault", Key: "storage_quota", Label: "Storage quota", Scope: "person", Value: "1 TiB"}
 		if len(v.Apps) != 0 || len(v.Settings) != 1 || v.Settings[0] != want || len(v.Permissions) != 0 {
 			t.Errorf("office_milan = %+v", v)
 		}

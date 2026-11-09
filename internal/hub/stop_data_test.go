@@ -266,7 +266,7 @@ func TestStopRestoreAs(t *testing.T) {
 		t.Fatal(err)
 	}
 	reached, release := blockStep(t, f.h, StepConfig)
-	a, err := f.h.StartRestoreAs(entry.Archive, "grafana-c", directory.Human("alice"), nil)
+	a, err := f.h.StartRestoreAs(entry.Archive, "grafana-c", directory.Human("alice"), nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -334,7 +334,7 @@ func TestSyncWrappersKeepResult(t *testing.T) {
 	if r := f.h.LastOp("grafana-c"); r.Result["instance"] != "grafana-c" || r.Result["archive"] != e.Archive {
 		t.Errorf("restore-as record %+v", r)
 	}
-	if _, err := f.h.CreateInstanceAs("grafana", "grafana-d", nil, directory.Human("root")); err != nil {
+	if _, err := f.h.CreateInstanceAs(CreateRequest{Template: "grafana", ID: "grafana-d", Label: "Test"}, directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	if r := f.h.LastOp("grafana-d"); r.Result["instance"] != "grafana-d" {
@@ -353,7 +353,7 @@ func TestCreateSteps(t *testing.T) {
 	f := newInstanceFixture(t, nil)
 	g := &fakeGroups{}
 	f.h.SetGroups(g)
-	a, err := f.h.StartCreate("grafana", "grafana-b", nil, directory.Human("alice"))
+	a, err := f.h.StartCreate(CreateRequest{Template: "grafana", ID: "grafana-b", Label: "Test"}, directory.Human("alice"))
 	if err != nil || a.Op != OpCreate || a.Instance != "grafana-b" {
 		t.Fatalf("%+v %v", a, err)
 	}
@@ -369,10 +369,10 @@ func TestCreateSteps(t *testing.T) {
 		t.Errorf("created %+v", r.Created)
 	}
 	// Refusals stay synchronous, nothing recorded.
-	if _, err := f.h.StartCreate("grafana", "grafana-b", nil, directory.Human("alice")); statusOf(err) != 409 {
+	if _, err := f.h.StartCreate(CreateRequest{Template: "grafana", ID: "grafana-b", Label: "Test"}, directory.Human("alice")); statusOf(err) != 409 {
 		t.Errorf("exists: %v", err)
 	}
-	if _, err := f.h.StartCreate("grafana", "Bad", nil, directory.Human("alice")); statusOf(err) != 400 {
+	if _, err := f.h.StartCreate(CreateRequest{Template: "grafana", ID: "Bad", Label: "Test"}, directory.Human("alice")); statusOf(err) != 400 {
 		t.Errorf("bad id: %v", err)
 	}
 }
@@ -385,7 +385,7 @@ func TestStopCreate(t *testing.T) {
 	f.h.SetAudit(audit)
 	g := &blockingGroups{fakeGroups: &fakeGroups{}, name: "admin_grafana-b", reached: make(chan struct{}), release: make(chan struct{})}
 	f.h.SetGroups(g)
-	a, err := f.h.StartCreate("grafana", "grafana-b", nil, directory.Human("alice"))
+	a, err := f.h.StartCreate(CreateRequest{Template: "grafana", ID: "grafana-b", Label: "Test"}, directory.Human("alice"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -640,7 +640,7 @@ func TestInterruptedNotStoppable(t *testing.T) {
 func TestCommittedCreateNotStoppableAfterRestart(t *testing.T) {
 	f := newInstanceFixture(t, nil)
 	f.h.SetGroups(&fakeGroups{})
-	a, err := f.h.StartCreate("grafana", "grafana-b", nil, directory.Human("alice"))
+	a, err := f.h.StartCreate(CreateRequest{Template: "grafana", ID: "grafana-b", Label: "Test"}, directory.Human("alice"))
 	if err != nil {
 		t.Fatal(err)
 	}

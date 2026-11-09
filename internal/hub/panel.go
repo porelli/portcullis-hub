@@ -43,14 +43,14 @@ const (
 // with the directory's reason.
 type OptionView struct {
 	templates.Option
-	DefaultDisplay string        `json:"default_display"`
-	Effect         string        `json:"effect"`
-	Warnings       []string      `json:"warnings,omitempty"`
-	GroupChoices   []GroupChoice `json:"group_choices,omitempty"`
+	DefaultDisplay string                  `json:"default_display"`
+	Effect         string                  `json:"effect"`
+	Warnings       []string                `json:"warnings,omitempty"`
+	GroupChoices   []PrivilegedGroupChoice `json:"group_choices,omitempty"`
 }
 
-// GroupChoice is one group a privileged option's row may name.
-type GroupChoice struct {
+// PrivilegedGroupChoice is one group a privileged option's row may name.
+type PrivilegedGroupChoice struct {
 	Name     string `json:"name"`
 	Disabled bool   `json:"disabled"`
 	Reason   string `json:"reason,omitempty"`
@@ -395,7 +395,7 @@ func (h *Hub) optionViewLocked(t *templates.Template, o *templates.Option, m *di
 	if o.Privileged && m != nil {
 		for _, g := range slices.Sorted(maps.Keys(m.Groups)) {
 			reason := m.Privilege[g]
-			v.GroupChoices = append(v.GroupChoices, GroupChoice{Name: g, Disabled: reason != "", Reason: reason})
+			v.GroupChoices = append(v.GroupChoices, PrivilegedGroupChoice{Name: g, Disabled: reason != "", Reason: reason})
 		}
 	}
 	return v

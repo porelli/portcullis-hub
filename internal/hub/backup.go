@@ -132,6 +132,10 @@ type instanceConfig struct {
 	// instance; a restore keeps it).
 	State     string              `yaml:"state,omitempty"`
 	Published *state.PublishedApp `yaml:"published,omitempty"`
+	// Label is the instance's stored label (§11.9; "" = none stored). A
+	// same-instance restore keeps the current one; a restore into a new
+	// id takes it unless the request names one.
+	Label string `yaml:"label,omitempty"`
 }
 
 func (h *Hub) backupsDir() string { return filepath.Join(h.cfg.DataDir, "backups") }
@@ -166,7 +170,7 @@ func (h *Hub) targetLocked(id string) (*target, bool) {
 // instanceConfigLocked is config/instance.yaml of tg. Caller must hold mu.
 func (h *Hub) instanceConfigLocked(tg *target) instanceConfig {
 	id := tg.id
-	c := instanceConfig{ID: id, Template: tg.templateID, Default: id == tg.templateID, Enabled: tg.enabled}
+	c := instanceConfig{ID: id, Template: tg.templateID, Default: id == tg.templateID, Enabled: tg.enabled, Label: tg.entry.Label}
 	switch {
 	case tg.view != nil:
 		c.Hosts = copyMap(tg.view.Hosts)

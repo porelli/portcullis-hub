@@ -231,6 +231,9 @@ type deleteTargets struct {
 	clients []string
 	groups  []string
 	shared  map[string]string // group → who else uses it
+	// bound are the groups the instance is bound to (§11.9): never
+	// deleted, whatever their name.
+	bound map[string]bool
 }
 
 // deleteTargetsLocked computes id's deleteTargets. Caller holds mu (read).
@@ -257,7 +260,8 @@ func (h *Hub) deleteTargetsLocked(id string) deleteTargets {
 	case tg.view != nil:
 		n := tg.view.NamesFor(id)
 		clients = n.Clients
-		groups = []string{n.AccessGroup, n.AdminGroup}
+		users, admins := h.instanceGroupsLocked(tg.view)
+		groups = []string{users, admins}
 	case hasSnap:
 		clients = snap.Clients
 		groups = []string{snap.AccessGroup, snap.AdminGroup}
@@ -276,7 +280,13 @@ func (h *Hub) deleteTargetsLocked(id string) deleteTargets {
 			}
 		}
 	}
-	d.hosts, d.clients, d.groups, d.shared = hosts, clients, groups, shared
+	bound := map[string]bool{}
+	for _, g := range []string{tg.entry.UsersGroup, tg.entry.AdminsGroup} {
+		if g != "" {
+			bound[strings.ToLower(g)] = true
+		}
+	}
+	d.hosts, d.clients, d.groups, d.shared, d.bound = hosts, clients, groups, shared, bound
 	return d
 }
 
@@ -306,6 +316,8 @@ func (h *Hub) DeletePlan(id string) ([]string, error) {
 	for _, g := range d.groups {
 		switch {
 		case g == "":
+		case d.bound[strings.ToLower(g)]:
+			kept = append(kept, fmt.Sprintf("Keeps group %s: the instance is bound to it.", g))
 		case g != "users_"+id && g != "admin_"+id:
 			kept = append(kept, fmt.Sprintf("Keeps group %s: it isn't named users_%s / admin_%s.", g, id, id))
 		case d.shared[g] != "":
@@ -499,6 +511,10 @@ func (h *Hub) deleteSteps(stopCtx context.Context, p *Progress, id string, actor
 	for _, g := range groups {
 		switch {
 		case g == "":
+		case dt.bound[strings.ToLower(g)]:
+			// A group the instance is bound to (§11.9) is someone's on
+			// purpose: never deleted, whatever its name.
+			res.Warnings = append(res.Warnings, fmt.Sprintf("group %s was kept: the instance is bound to it", g))
 		case g != "users_"+id && g != "admin_"+id:
 			// Only the instance's own names (§11.2): a manifest group
 			// with another name is someone's on purpose.
@@ -599,7 +615,7 @@ func (h *Hub) groupUserLocked(g, id string) string {
 		if v.ID == id {
 			continue
 		}
-		if n := v.NamesFor(v.ID); same(n.AccessGroup) || same(n.AdminGroup) {
+		if users, admins := h.instanceGroupsLocked(v); same(users) || same(admins) {
 			return "instance " + v.ID
 		}
 	}
@@ -619,6 +635,10 @@ func (h *Hub) groupUserLocked(g, id string) string {
 	}
 	for oid, e := range h.st.Instances {
 		if oid != id && oid != e.Template && (same("users_"+oid) || same("admin_"+oid)) {
+			return "instance " + oid
+		}
+		// Bound (§11.9), its template missing included.
+		if oid != id && (same(e.UsersGroup) || same(e.AdminsGroup)) {
 			return "instance " + oid
 		}
 	}

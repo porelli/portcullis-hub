@@ -211,8 +211,14 @@ type (
 	}
 	createArgs struct {
 		Template string            `json:"template" jsonschema:"the template id"`
-		ID       string            `json:"id" jsonschema:"the new instance id"`
+		ID       string            `json:"id" jsonschema:"the new instance id (the template id for its first instance)"`
+		Label    string            `json:"label" jsonschema:"the instance's label: the portal shows it as <App> · <label> (1–64 characters, one line)"`
 		Hosts    map[string]string `json:"hosts,omitempty" jsonschema:"host router → hostname (default: the instance's hostnames on the main domain)"`
+		Groups   *groupsBody       `json:"groups,omitempty" jsonschema:"who can use it: {mode: new} (default: empty users_<id> / admin_<id> are created) or {mode: existing, users, admins} (bound to existing groups)"`
+	}
+	labelArgs struct {
+		ID    string `json:"id" jsonschema:"the instance id"`
+		Label string `json:"label" jsonschema:"the new label (1–64 characters, one line)"`
 	}
 	hostsArgs struct {
 		ID    string            `json:"id" jsonschema:"the instance id"`
@@ -343,9 +349,9 @@ func (s *Server) registerAdminTools() {
 			ClassRead, "GET /api/instances/defaults", "", func(_ context.Context, _ directory.Actor, in defaultsArgs) (any, error) {
 				return s.instanceDefaults(in.Template, in.ID, in.Domain)
 			}),
-		perCallCtx(admin("create_instance", "Create an instance of a multi-instance template (created stopped: review its settings, then enable it). Its users_<id> / admin_<id> groups are created. If one of them already exists with members, it needs your confirmation in the browser. Runs in the background: answers {op_id, op, instance, poll}; see wait_for_op.",
+		perCallCtx(admin("create_instance", "Create an instance of a template with a label (created stopped: review its settings, then enable it); the template's first instance takes the template id. Its users_<id> / admin_<id> groups are created, or with groups {mode: existing, users, admins} it is bound to existing groups. If one of its groups already exists with people, it needs your confirmation in the browser. Runs in the background: answers {op_id, op, instance, poll}; see wait_for_op.",
 			ClassWrite, "POST /api/instances", "instance.create", func(_ context.Context, a directory.Actor, in createArgs) (any, error) {
-				return started(s.createInstance(a, in.Template, in.ID, in.Hosts))
+				return started(s.createInstance(a, in.request()))
 			}), s.createClass, idOf, s.createConsequences),
 		perCallCtx(admin("enable_instance", "Enable (start) an instance; its missing groups are created first. Starting one whose public access is on, whose sign-in is the app's own login, or whose access / admin group already has members needs your confirmation in the browser. Runs in the background: answers {op_id, op, instance, poll}; see wait_for_op.",
 			ClassWrite, "/api/templates/enable", "instance.enable", func(_ context.Context, a directory.Actor, in idArgs) (any, error) {
@@ -361,6 +367,13 @@ func (s *Server) registerAdminTools() {
 					return nil, err
 				}
 				return started(s.restartInstance(a, in.ID))
+			}),
+		admin("set_instance_label", "Change an instance's label (display only: the portal and My apps show <App> · <label>). Answers the instance.",
+			ClassWrite, "PUT /api/instances/{id}/label", "instance.update", func(ctx context.Context, a directory.Actor, in labelArgs) (any, error) {
+				if err := instanceIDOK(in.ID); err != nil {
+					return nil, err
+				}
+				return s.setLabel(ctx, a, in.ID, in.Label)
 			}),
 		admin("set_hosts", "Change an instance's hostnames (every host router; immutable ones can't change).",
 			ClassWrite, "PUT /api/instances/{id}/hosts", "instance.update", func(_ context.Context, a directory.Actor, in hostsArgs) (any, error) {
@@ -916,7 +929,7 @@ func (s *Server) enableClass(ctx context.Context, args json.RawMessage) ToolClas
 	if (v.PublicAccess != nil && (v.PublicAccess.Enabled || v.PublicAccess.Active)) || s.Hub.SignInMode(id) == hub.SignInNative {
 		return ClassDestructive
 	}
-	if pre, ok := s.prestaged(ctx, s.Hub.Template(id), id); !ok || len(pre) > 0 {
+	if pre, ok := s.prestaged(ctx, s.instanceGroupList(id)); !ok || len(pre) > 0 {
 		return ClassDestructive
 	}
 	return ClassWrite
@@ -931,7 +944,7 @@ func (s *Server) enableConsequences(ctx context.Context, args json.RawMessage) [
 	if s.Hub.SignInMode(id) == hub.SignInNative {
 		lines = append(lines, "Starts "+id+" with only the app's own login in front of it: no Portcullis sign-in.")
 	}
-	lines = append(lines, s.prestagedLines(ctx, s.Hub.Template(id), id)...)
+	lines = append(lines, s.prestagedLines(ctx, s.instanceGroupList(id), id)...)
 	if len(lines) == 0 {
 		lines = append(lines, "Starts "+id+" (its access settings couldn't be read).")
 	}
@@ -946,16 +959,35 @@ func (s *Server) createClass(ctx context.Context, args json.RawMessage) ToolClas
 	if err != nil {
 		return ClassDestructive
 	}
-	if pre, ok := s.prestaged(ctx, s.Hub.Template(a.Template), a.ID); !ok || len(pre) > 0 {
+	if pre, ok := s.prestaged(ctx, s.plannedGroups(a)); !ok || len(pre) > 0 {
 		return ClassDestructive
 	}
 	return ClassWrite
 }
 
+// plannedGroups are the groups the create would use (bound ones for
+// mode existing, §11.9); nil: unknown template (fail closed).
+func (s *Server) plannedGroups(a createArgs) []string {
+	req := a.request()
+	users, admins, ok := s.Hub.PlannedGroups(req.Template, req.ID, req.Groups)
+	if !ok {
+		return nil
+	}
+	return []string{users, admins}
+}
+
+// request is the create the arguments stand for (the route's body).
+func (a createArgs) request() hub.CreateRequest {
+	return instanceCreateBody{Template: a.Template, ID: a.ID, Label: a.Label, Hosts: a.Hosts, Groups: a.Groups}.request()
+}
+
 func (s *Server) createConsequences(ctx context.Context, args json.RawMessage) []string {
 	a, _ := decode[createArgs](args)
-	lines := []string{"Creates instance " + a.ID + " of " + a.Template + "."}
-	return append(lines, s.prestagedLines(ctx, s.Hub.Template(a.Template), a.ID)...)
+	lines := []string{"Creates instance " + a.ID + " of " + a.Template + " (label " + q(a.Label) + ")."}
+	if a.Groups != nil && a.Groups.Mode == hub.GroupsExisting {
+		lines = append(lines, "Binds it to the existing groups "+q(a.Groups.Users)+" (users) and "+q(a.Groups.Admins)+" (admins): their people get it at once.")
+	}
+	return append(lines, s.prestagedLines(ctx, s.plannedGroups(a), a.ID)...)
 }
 
 // update is the SettingsUpdate the arguments stand for (no secrets, no

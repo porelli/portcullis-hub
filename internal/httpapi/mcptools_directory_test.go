@@ -365,8 +365,8 @@ func TestDirectoryToolClassPerCall(t *testing.T) {
 		{"update_field", map[string]any{"name": "clearance", "kind": "list"}, ClassDestructive},
 		{"update_field", map[string]any{"name": "clearance", "values": []string{"top"}}, ClassDestructive},
 		{"update_field", map[string]any{"name": "clearance", "multi": false}, ClassDestructive},
-		{"create_instance", map[string]any{"template": "grafana", "id": "grafana-x"}, ClassWrite},
-		{"create_instance", map[string]any{"template": "nope", "id": "nope-x"}, ClassDestructive},
+		{"create_instance", map[string]any{"template": "grafana", "id": "grafana-x", "label": "Test"}, ClassWrite},
+		{"create_instance", map[string]any{"template": "nope", "id": "nope-x", "label": "Test"}, ClassDestructive},
 		{"set_details", map[string]any{"username": "dana", "attrs": map[string]any{"dept": []string{"Eng"}}}, ClassWrite},
 		{"set_details", map[string]any{"username": "dana", "attrs": map[string]any{"clearance": []string{"top"}}}, ClassDestructive},
 		{"import_apply", map[string]any{"rows": []any{map[string]any{"user": "dana", "display_name": "D", "attrs": map[string]any{"dept": []string{"Eng"}}}}}, ClassWrite},
@@ -490,7 +490,7 @@ func TestPrestagedGroupsNeedConfirmation(t *testing.T) {
 			t.Fatalf("%s = %q %v (confirmation %q)", c.tool, txt, isErr, conf)
 		}
 	}
-	txt, isErr := resultText(e.call(t, "/mcp/admin", "root", "2025-11-25", "create_instance", map[string]any{"template": "grafana", "id": "grafana-p"}, nil))
+	txt, isErr := resultText(e.call(t, "/mcp/admin", "root", "2025-11-25", "create_instance", map[string]any{"template": "grafana", "id": "grafana-p", "label": "Test"}, nil))
 	m := confirmTextRe.FindStringSubmatch(txt)
 	if !isErr || m == nil {
 		t.Fatalf("create_instance over a pre-staged admin group = %q, want a confirmation", txt)
@@ -506,7 +506,7 @@ func TestPrestagedGroupsNeedConfirmation(t *testing.T) {
 		t.Errorf("the instance was created before the confirmation")
 	}
 	e.decide(t, m[1], v.Typed, true)
-	if txt, isErr := resultText(e.call(t, "/mcp/admin", "root", "2025-11-25", "create_instance", map[string]any{"template": "grafana", "id": "grafana-p"}, nil)); isErr {
+	if txt, isErr := resultText(e.call(t, "/mcp/admin", "root", "2025-11-25", "create_instance", map[string]any{"template": "grafana", "id": "grafana-p", "label": "Test"}, nil)); isErr {
 		t.Fatalf("approved create_instance = %q", txt)
 	}
 	// Enabling it: D too (its admin group has members).
@@ -642,7 +642,7 @@ func TestPrestagedRuleAndExceptionsNeedConfirmation(t *testing.T) {
 		t.Fatalf("the evaluator ran: members %v", got)
 	}
 	for _, id := range []string{"grafana-r", "grafana-y"} {
-		txt, isErr := resultText(e.call(t, "/mcp/admin", "root", "2025-11-25", "create_instance", map[string]any{"template": "grafana", "id": id}, nil))
+		txt, isErr := resultText(e.call(t, "/mcp/admin", "root", "2025-11-25", "create_instance", map[string]any{"template": "grafana", "id": id, "label": "Test"}, nil))
 		m := confirmTextRe.FindStringSubmatch(txt)
 		if !isErr || m == nil {
 			t.Fatalf("create_instance %s over a staged admin group = %q, want a confirmation", id, txt)
@@ -662,11 +662,24 @@ func TestPrestagedRuleAndExceptionsNeedConfirmation(t *testing.T) {
 	for _, tl := range e.s.tools(ScopeAdmin) {
 		byName[tl.Name] = tl
 	}
-	if c := byName["create_instance"].ClassFor(context.Background(), json.RawMessage(`{"template":"grafana","id":"grafana-z"}`)); c != ClassDestructive {
+	if c := byName["create_instance"].ClassFor(context.Background(), json.RawMessage(`{"template":"grafana","id":"grafana-z","label":"Z"}`)); c != ClassDestructive {
 		t.Errorf("create over a rule group = %s", c)
 	}
-	if c := byName["create_instance"].ClassFor(context.Background(), json.RawMessage(`{"template":"grafana","id":"grafana-q"}`)); c != ClassWrite {
+	if c := byName["create_instance"].ClassFor(context.Background(), json.RawMessage(`{"template":"grafana","id":"grafana-q","label":"Q"}`)); c != ClassWrite {
 		t.Errorf("create with no groups = %s", c)
+	}
+	// Binding an existing group with people is D (§11.9); an empty one
+	// stays W.
+	e.ll.AddGroup("bindteam", "dana")
+	e.ll.AddGroup("bindempty")
+	if c := byName["create_instance"].ClassFor(context.Background(), json.RawMessage(`{"template":"grafana","id":"grafana-w","label":"W","groups":{"mode":"existing","users":"bindteam","admins":"bindempty"}}`)); c != ClassDestructive {
+		t.Errorf("binding a group with people = %s", c)
+	}
+	if c := byName["create_instance"].ClassFor(context.Background(), json.RawMessage(`{"template":"grafana","id":"grafana-w","label":"W","groups":{"mode":"existing","users":"bindempty","admins":"bindempty"}}`)); c != ClassWrite {
+		t.Errorf("binding empty groups = %s", c)
+	}
+	if c := byName["create_instance"].ClassFor(context.Background(), json.RawMessage(`{"template":"nope","id":"nope-w","label":"W","groups":{"mode":"existing","users":"bindempty","admins":"bindempty"}}`)); c != ClassDestructive {
+		t.Errorf("unknown template = %s", c)
 	}
 	// An existing instance's access group: rule and exception changes are D.
 	if err := e.s.Hub.CreateInstance("grafana", "grafana-q", nil); err != nil {

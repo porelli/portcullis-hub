@@ -280,9 +280,9 @@ func (h *Hub) StartRestore(id, archive string, actor directory.Actor) (*AsyncOp,
 // background (its op record is newID's); the result holds "instance".
 // Steps verify, instance, groups, volumes, config; a Stop removes the new
 // instance completely.
-func (h *Hub) StartRestoreAs(archive, newID string, actor directory.Actor, hosts map[string]string) (*AsyncOp, error) {
+func (h *Hub) StartRestoreAs(archive, newID string, actor directory.Actor, hosts map[string]string, label string) (*AsyncOp, error) {
 	return h.startAsync(newID, OpRestore, actor, []Step{}, func(ctx context.Context, ready func()) (map[string]string, []string, error) {
-		res, err := h.restoreInstanceAs(ctx, archive, newID, actor, hosts, ready)
+		res, err := h.restoreInstanceAs(ctx, archive, newID, actor, hosts, label, ready)
 		return restoreResult(res, archive, newID), restoreWarnings(res), err
 	})
 }

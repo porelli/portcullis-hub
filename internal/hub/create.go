@@ -36,12 +36,12 @@ const OpCreate = "create"
 // per-instance lock; audited as instance.create. StartCreate's operation
 // run to its end (runOpSync: the same lock, record, steps and Stop; the
 // record is id's).
-func (h *Hub) CreateInstanceAs(templateID, id string, hosts map[string]string, actor directory.Actor) (res *CreateResult, err error) {
+func (h *Hub) CreateInstanceAs(req CreateRequest, actor directory.Actor) (res *CreateResult, err error) {
 	res = &CreateResult{}
-	_, _, err = h.runOpSync(id, OpCreate, actor, []Step{}, func(ctx context.Context, ready func()) (map[string]string, []string, error) {
+	_, _, err = h.runOpSync(req.ID, OpCreate, actor, []Step{}, func(ctx context.Context, ready func()) (map[string]string, []string, error) {
 		var cerr error
-		res, cerr = h.createInstance(ctx, templateID, id, hosts, actor, ready)
-		return createResult(res, id, cerr)
+		res, cerr = h.createInstance(ctx, req, actor, ready)
+		return createResult(res, req.ID, cerr)
 	})
 	return res, err
 }
@@ -50,10 +50,10 @@ func (h *Hub) CreateInstanceAs(templateID, id string, hosts map[string]string, a
 // the record is id's): every refusal before the instance exists — a bad
 // or taken id, its collisions, the actor — is answered at once, nothing
 // recorded. The result holds "instance", the warnings are the record's.
-func (h *Hub) StartCreate(templateID, id string, hosts map[string]string, actor directory.Actor) (*AsyncOp, error) {
-	return h.startAsync(id, OpCreate, actor, []Step{}, func(ctx context.Context, ready func()) (map[string]string, []string, error) {
-		res, err := h.createInstance(ctx, templateID, id, hosts, actor, ready)
-		return createResult(res, id, err)
+func (h *Hub) StartCreate(req CreateRequest, actor directory.Actor) (*AsyncOp, error) {
+	return h.startAsync(req.ID, OpCreate, actor, []Step{}, func(ctx context.Context, ready func()) (map[string]string, []string, error) {
+		res, err := h.createInstance(ctx, req, actor, ready)
+		return createResult(res, req.ID, err)
 	})
 }
 
@@ -67,17 +67,25 @@ func createResult(res *CreateResult, id string, err error) (map[string]string, [
 }
 
 // createInstance is the create CreateInstanceAs and StartCreate run: the
-// instance step (CreateInstance) before ready — its refusals are the
-// synchronous answer —, then the groups step, each group created written
-// into the record's Created ledger. A Stop accepted before the commit
-// (the groups done) removes the instance and exactly those groups
-// (settleOp → undoCreate).
-func (h *Hub) createInstance(ctx context.Context, templateID, id string, hosts map[string]string, actor directory.Actor, ready func()) (res *CreateResult, err error) {
+// request checked (label §11.9, groups choice, an "existing" binding
+// against LLDAP), the instance step (createEntry) before ready — its
+// refusals are the synchronous answer —, then the groups step: for mode
+// "new" the derived groups created (each into the record's Created
+// ledger; a default instance's manifest group with another name is only
+// a warning), for "existing" nothing created ("bound to <users>,
+// <admins>"). A Stop accepted before the commit (the groups done)
+// removes the instance and exactly the groups created (settleOp →
+// undoCreate).
+func (h *Hub) createInstance(ctx context.Context, req CreateRequest, actor directory.Actor, ready func()) (res *CreateResult, err error) {
+	templateID, id := req.Template, req.ID
 	res = &CreateResult{}
 	defer func() {
 		detail := "template=" + templateID
 		if len(res.Hosts) > 0 {
 			detail += " hosts=" + hostList(res.Hosts)
+		}
+		if req.Groups.Mode == GroupsExisting {
+			detail += " groups=existing"
 		}
 		if len(res.Warnings) > 0 {
 			detail += fmt.Sprintf(" warnings=%d", len(res.Warnings))
@@ -87,11 +95,16 @@ func (h *Hub) createInstance(ctx context.Context, templateID, id string, hosts m
 	if strings.TrimSpace(actor.User) == "" {
 		return res, statusErr(400, "no signed-in user to audit the change as")
 	}
-	if !templates.InstanceIDRe.MatchString(id) {
-		return res, statusErr(400, "instance id %q must match %s", id, templates.InstanceIDRe)
+	if id != templateID {
+		if !templates.InstanceIDRe.MatchString(id) {
+			return res, statusErr(400, "instance id %q must match %s", id, templates.InstanceIDRe)
+		}
+		if err := templates.CheckIDShape(id); err != nil {
+			return res, statusErr(400, "instance %v", err)
+		}
 	}
-	if err := templates.CheckIDShape(id); err != nil {
-		return res, statusErr(400, "instance %v", err)
+	if err := CheckLabel(req.Label); err != nil {
+		return res, err
 	}
 	unlock, err := h.lockApp(id)
 	if err != nil {
@@ -102,36 +115,74 @@ func (h *Hub) createInstance(ctx context.Context, templateID, id string, hosts m
 	h.mu.RLock()
 	groupsAPI := h.groups
 	var names templates.InstanceNames
-	if t := h.catalogLocked(templateID); t != nil {
+	t := h.catalogLocked(templateID)
+	var choiceErr error
+	if t != nil {
 		names = t.NamesFor(id)
+		choiceErr = checkGroupChoice(t, req.Groups)
 	}
 	h.mu.RUnlock()
+	if t == nil {
+		return res, statusErr(404, "template not found: %s", templateID)
+	}
+	if choiceErr != nil {
+		return res, choiceErr
+	}
+	bound := req.Groups.Mode == GroupsExisting
+	var users, admins string
 	groups := []string{}
-	for _, g := range []string{names.AccessGroup, names.AdminGroup} {
-		if g != "" {
-			groups = append(groups, g)
+	if bound {
+		if users, admins, err = h.bindGroups(context.Background(), req.Groups); err != nil {
+			return res, err
+		}
+	} else {
+		for _, g := range []string{names.AccessGroup, names.AdminGroup} {
+			switch {
+			case g == "":
+			case g == "users_"+id || g == "admin_"+id:
+				groups = append(groups, g)
+			default:
+				// A default instance's manifest group with another name
+				// (§11.2): someone's on purpose, never created here.
+				res.Warnings = append(res.Warnings, fmt.Sprintf("group %s was not created: it isn't named users_%s / admin_%s (create it in Users & Groups if it is missing)", g, id, id))
+			}
 		}
 	}
-	if groupsAPI != nil && len(groups) > 0 {
+	if groupsAPI != nil && (len(groups) > 0 || bound) {
 		if err := groupsAPI.ResolveActor(context.Background(), actor); err != nil {
 			return res, fmt.Errorf("the acting admin %q can't create the instance's groups — nothing was created: %w", actor.User, err)
 		}
 	}
 	p := progressFrom(ctx)
 	p.AddStep(StepInstance, "Creating the instance")
-	if len(groups) > 0 {
+	if len(groups) > 0 || bound {
 		p.AddStep(StepGroups, "Groups")
 	}
 	// The instance step before the operation is accepted: its refusals
 	// (an id taken, its collisions) are the synchronous answer.
 	p.Start(StepInstance)
-	if err := h.CreateInstance(templateID, id, hosts); err != nil {
+	if err := h.createEntry(req, users, admins); err != nil {
 		return res, err
 	}
 	p.Done(StepInstance)
 	ready()
+	if bound {
+		p.Start(StepGroups)
+		p.Detail(StepGroups, "bound to "+boundList(users, admins))
+	}
 	err = h.createSteps(ctx, p, templateID, id, groups, groupsAPI, actor, res)
 	return res, h.settleOp(id, OpCreate, p, err)
+}
+
+// boundList is "<users>, <admins>" (the ones there are).
+func boundList(users, admins string) string {
+	var out []string
+	for _, g := range []string{users, admins} {
+		if g != "" {
+			out = append(out, g)
+		}
+	}
+	return strings.Join(out, ", ")
 }
 
 // createSteps is a create's groups step and commit (caller holds id's
@@ -200,7 +251,7 @@ func (h *Hub) createSteps(ctx context.Context, p *Progress, templateID, id strin
 	if !p.CloseStop() {
 		return context.Canceled
 	}
-	if len(groups) > 0 {
+	if p.Has(StepGroups) {
 		p.Done(StepGroups)
 	}
 	// The template's starting rows (seeded by CreateInstance), bound to
@@ -228,13 +279,12 @@ func (h *Hub) InstanceView(id string) (InstanceView, bool) {
 	if t == nil {
 		return InstanceView{}, false
 	}
-	n := t.NamesFor(t.ID)
-	st := StateDisabled
+	v := h.instanceViewLocked(t)
+	v.State = StateDisabled
 	if t.Enabled {
-		st = StateEnabled
+		v.State = StateEnabled
 	}
-	return InstanceView{ID: t.ID, Template: t.TemplateID, Default: t.IsDefault(), State: st, Hosts: copyMap(t.Hosts),
-		AccessGroup: n.AccessGroup, AdminGroup: n.AdminGroup, KeycloakClients: append([]string{}, n.Clients...), Project: n.Project}, true
+	return v, true
 }
 
 // hostList renders hosts for the audit log: "router=host,…", sorted.

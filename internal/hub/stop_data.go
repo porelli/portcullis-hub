@@ -226,7 +226,7 @@ func (h *Hub) undoDelete(id string, p *Progress) error {
 				return nil
 			}
 			prev := e
-			if b[beforeHadEntry] == "false" && len(e.Hosts) == 0 {
+			if b[beforeHadEntry] == "false" && len(e.Hosts) == 0 && !e.HoldsIdentity() {
 				delete(h.st.Instances, id)
 			} else {
 				e.State, e.Backup, e.RestoreAs = b[beforeState], b[beforeStateBackup], b[beforeRestoreAs]

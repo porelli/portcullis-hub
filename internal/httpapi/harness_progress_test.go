@@ -229,7 +229,7 @@ func seedProgress(t *testing.T, e *instEnv, mux *http.ServeMux) {
 	broken := &atomic.Bool{}
 	h.SetGroups(harnessGroups{Service: e.s.Directory, broken: broken})
 	for _, c := range []struct{ tmpl, id string }{{"gitea", "gitea-warn"}, {"grafana", "grafana-scratch"}} {
-		if _, err := h.CreateInstanceAs(c.tmpl, c.id, nil, directory.Human("root")); err != nil {
+		if _, err := h.CreateInstanceAs(hub.CreateRequest{Template: c.tmpl, ID: c.id, Label: "Test"}, directory.Human("root")); err != nil {
 			t.Fatal(err)
 		}
 	}

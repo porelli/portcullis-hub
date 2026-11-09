@@ -678,8 +678,12 @@ func (h *Hub) enableInner(ctx context.Context, id string, restoring bool) (rolle
 	// A default instance's hosts.immutable hostnames are pinned once it
 	// first runs: a later main-domain change keeps them (its data is bound
 	// to them) instead of moving it to <sub>.<new domain>.
-	if _, ok := h.st.Instances[id]; !ok && tmpl.IsDefault() && hasImmutableHosts(&tmpl) {
-		h.st.Instances[id] = state.Instance{ID: id, Template: id, Hosts: copyMap(tmpl.Hosts)}
+	if e, ok := h.st.Instances[id]; len(e.Hosts) == 0 && tmpl.IsDefault() && hasImmutableHosts(&tmpl) {
+		if !ok {
+			e = state.Instance{ID: id, Template: id}
+		}
+		e.Hosts = copyMap(tmpl.Hosts)
+		h.st.Instances[id] = e
 	}
 	h.rebuildLocked()
 	h.refreshPublishedLocked()

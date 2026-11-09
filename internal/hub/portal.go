@@ -59,7 +59,9 @@ func (h *Hub) portalLocked() PortalDocument {
 		}
 		m := t.Manifest
 		a := PortalApp{ID: t.ID, Template: t.TemplateID, Name: instanceName(t), Description: m.Description, Icon: m.Icon, Category: m.Category,
-			AuthMethod: m.Auth.Method, AdminGroup: m.Auth.AdminGroup}
+			AuthMethod: m.Auth.Method}
+		users, admins := h.instanceGroupsLocked(t)
+		a.AdminGroup = admins
 		// Router-less instances (contract §3, §10): URLs empty, note present.
 		if m.Routerless() {
 			a.URLs = []templates.AppURL{}
@@ -68,7 +70,7 @@ func (h *Hub) portalLocked() PortalDocument {
 			a.URLs = append([]templates.AppURL{}, m.URLs...)
 		}
 		if h.accessLocked(t).groupAccess(t) {
-			a.AccessGroup = m.Auth.AccessGroup
+			a.AccessGroup = users
 		}
 		doc.Apps = append(doc.Apps, a)
 		// Track which enrolled domains have hosts in use (contract §10).
@@ -101,15 +103,6 @@ func writePortal(path string, doc PortalDocument) error {
 		return err
 	}
 	return fsutil.WriteFileAtomic(path, append(b, '\n'), 0644)
-}
-
-// instanceName is the template's name, followed by " (<instance-id>)" for
-// instances other than the default one (contract §10).
-func instanceName(t *templates.Template) string {
-	if t.IsDefault() {
-		return t.Manifest.Name
-	}
-	return t.Manifest.Name + " (" + t.ID + ")"
 }
 
 // portalNoteMax caps a router-less entry's note (runes).

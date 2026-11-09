@@ -482,6 +482,8 @@ var nonUserOps = map[string]bool{"Overview": true, "Membership": true, "Privileg
 	"Publish": true, "SharedFields": true,
 	// App instance groups: CreateGroup / DeleteGroup as the actor, never a user.
 	"CreateInstanceGroup": true, "DeleteInstanceGroup": true, "ResolveActor": true, "MissingInstanceGroups": true,
+	// Read only: the groups an instance is bound to (§11.9), never a user.
+	"CheckBindGroups": true,
 	// Read only: gate's decision for a delegate before a Portcullis MCP
 	// confirmation (checked in TestProtectedAccountsParity); it changes nothing.
 	"CheckDelegate": true}

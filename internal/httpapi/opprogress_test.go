@@ -75,7 +75,7 @@ func stepKeys(r hub.OpRecord) []string {
 func TestLifecycleRoutesAnswer202(t *testing.T) {
 	e := newInstEnv(t)
 	// Create: 202 (op create, the new id's record), result instance.
-	rec := e.runOp(t, "POST", "/api/instances", `{"template":"grafana","id":"grafana-a"}`)
+	rec := e.runOp(t, "POST", "/api/instances", `{"template":"grafana","id":"grafana-a","label":"Test"}`)
 	if !rec.OK || rec.Op != "create" || rec.Result["instance"] != "grafana-a" || len(rec.Steps) == 0 || rec.Created == nil {
 		t.Fatalf("create record = %+v", rec)
 	}
@@ -115,7 +115,7 @@ func TestLifecycleRoutesAnswer202(t *testing.T) {
 		{"POST", "/api/templates/disable", `{"id":"grafana-a"}`, 400}, // not enabled
 		{"POST", "/api/templates/restart/grafana-a", ``, 400},         // not enabled
 		{"POST", "/api/templates/restart/nosuch", ``, 404},
-		{"POST", "/api/instances", `{"template":"grafana","id":"grafana-a"}`, 409},
+		{"POST", "/api/instances", `{"template":"grafana","id":"grafana-a","label":"Test"}`, 409},
 	} {
 		if code, b := e.do(t, "root", c.method, c.path, c.body); code != c.code {
 			t.Errorf("%s %s %s = %d %s, want %d", c.method, c.path, c.body, code, b, c.code)
@@ -138,7 +138,7 @@ func TestLifecycleRoutesAnswer202(t *testing.T) {
 // record polls to stopped, a second Stop is 409 with the record.
 func TestBusyAndStopRoutes(t *testing.T) {
 	e, bp := newBlockingEnv(t)
-	mustDo(t, e.hub, "root", "POST", "/api/instances", `{"template":"grafana","id":"grafana-a"}`, 202)
+	mustDo(t, e.hub, "root", "POST", "/api/instances", `{"template":"grafana","id":"grafana-a","label":"Test"}`, 202)
 	waitIdle(t, e.s.Hub, "grafana-a")
 	code, b := e.do(t, "root", "POST", "/api/templates/enable", `{"id":"grafana-a"}`)
 	if code != 202 {
@@ -261,7 +261,7 @@ func TestStopOpTool(t *testing.T) {
 			close(bp.release)
 		}
 	}()
-	if _, err := e.s.Hub.CreateInstanceAs("notes", "x", nil, directory.Human("root")); err != nil {
+	if _, err := e.s.Hub.CreateInstanceAs(hub.CreateRequest{Template: "notes", ID: "x", Label: "Test"}, directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	txt, isErr, conf := e.tool(t, "enable_instance", map[string]any{"id": "x"})

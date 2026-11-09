@@ -539,9 +539,10 @@ func TestInstanceRoutesAdminOnly(t *testing.T) {
 	mustDo(t, e.hub, "root", "PUT", "/api/directory/permissions/invite", `{"group":"helpers"}`, 200)
 	routes := []struct{ method, path, body string }{
 		{"GET", "/api/instances", ""},
-		{"POST", "/api/instances", `{"template":"grafana","id":"grafana-x"}`},
+		{"POST", "/api/instances", `{"template":"grafana","id":"grafana-x","label":"Test"}`},
 		{"GET", "/api/instances/defaults?template=grafana&id=grafana-x", ""},
 		{"PUT", "/api/instances/grafana/hosts", `{"hosts":{"grafana":"g2.example.org"}}`},
+		{"PUT", "/api/instances/grafana/label", `{"label":"Home"}`},
 		{"DELETE", "/api/instances/grafana", `{"confirm":"grafana"}`},
 		{"GET", "/api/backups", ""},
 		{"GET", "/api/instances/grafana/backups", ""},
@@ -607,7 +608,7 @@ func TestCreateInstanceRoute(t *testing.T) {
 
 	// Create with explicit hosts on the enrolled domain.
 	// In the background (202, op create, §11.7): the result names it.
-	rec := e.runOp(t, "POST", "/api/instances", `{"template":"grafana","id":"grafana-team-a","hosts":{"grafana":"grafana.team-b.example.net"}}`)
+	rec := e.runOp(t, "POST", "/api/instances", `{"template":"grafana","id":"grafana-team-a","label":"Test","hosts":{"grafana":"grafana.team-b.example.net"}}`)
 	if !rec.OK || rec.Op != "create" || rec.Result["instance"] != "grafana-team-a" {
 		t.Fatalf("create = %+v", rec)
 	}
@@ -622,7 +623,7 @@ func TestCreateInstanceRoute(t *testing.T) {
 		}
 	}
 	// Hosts omitted = the defaults on the main domain.
-	e.runOp(t, "POST", "/api/instances", `{"template":"grafana","id":"grafana-lab"}`)
+	e.runOp(t, "POST", "/api/instances", `{"template":"grafana","id":"grafana-lab","label":"Test"}`)
 	if v, _ := e.s.Hub.InstanceView("grafana-lab"); v.Hosts["grafana"] != "grafana-lab.example.org" {
 		t.Fatalf("default hosts = %+v", v)
 	}
@@ -633,11 +634,16 @@ func TestCreateInstanceRoute(t *testing.T) {
 		msg  string
 	}{
 		{`{"template":"grafana","id":"Bad_ID"}`, 400, "must match"},
-		{`{"template":"grafana","id":"grafana-lab"}`, 409, "instance grafana-lab already exists\n"},
-		{`{"template":"grafana","id":"grafana-x","hosts":{"grafana":"a.b.example.org"}}`, 400, "deeper names need an enrolled domain"},
-		{`{"template":"grafana","id":"grafana-x","hosts":{"grafana":"a.b.team-b.example.net"}}`, 400, "covers one label"},
-		{`{"template":"grafana","id":"grafana-x","hosts":{"grafana":"g.pending.example.net"}}`, 409, "not assignable"},
+		{`{"template":"grafana","id":"grafana-lab","label":"L"}`, 409, "instance grafana-lab already exists\n"},
+		{`{"template":"grafana","id":"grafana-x","label":"X","hosts":{"grafana":"a.b.example.org"}}`, 400, "deeper names need an enrolled domain"},
+		{`{"template":"grafana","id":"grafana-x","label":"X","hosts":{"grafana":"a.b.team-b.example.net"}}`, 400, "covers one label"},
+		{`{"template":"grafana","id":"grafana-x","label":"X","hosts":{"grafana":"g.pending.example.net"}}`, 409, "not assignable"},
 		{`{"template":"grafana","id":"grafana-x","extra":1}`, 400, "body must be"},
+		{`{"template":"grafana","id":"grafana-x"}`, 400, "a label is required"},
+		{`{"template":"grafana","id":"grafana-x","label":"x\u200b"}`, 400, "visible text"},
+		{`{"template":"grafana","id":"grafana-x","label":"X","groups":{}}`, 400, "mode must be"},
+		{`{"template":"grafana","id":"grafana-x","label":"X","groups":{"mode":"existing","users":"lldap_admin","admins":"lldap_admin"}}`, 400, "the users group can't be a built-in or administrator group"},
+		{`{"template":"grafana","id":"grafana-x","label":"X","groups":{"mode":"existing","users":"nope","admins":"lldap_admin"}}`, 400, "unknown group nope"},
 	} {
 		if code, b := e.do(t, "root", "POST", "/api/instances", c.body); code != c.code || !strings.Contains(b, c.msg) || (strings.HasSuffix(c.msg, "\n") && b != c.msg) {
 			t.Errorf("%s = %d %s, want %d %q", c.body, code, b, c.code, c.msg)
@@ -658,7 +664,7 @@ func TestCreateInstanceRoute(t *testing.T) {
 
 func TestUpdateHostsRoute(t *testing.T) {
 	e := newInstEnv(t)
-	e.runOp(t, "POST", "/api/instances", `{"template":"home","id":"home-b","hosts":{"home":"matrix-b.example.org","media":"media-b.example.org"}}`)
+	e.runOp(t, "POST", "/api/instances", `{"template":"home","id":"home-b","label":"Test","hosts":{"home":"matrix-b.example.org","media":"media-b.example.org"}}`)
 	// A mutable host moves; the answer is the instance.
 	code, b := e.do(t, "root", "PUT", "/api/instances/home-b/hosts", `{"hosts":{"home":"matrix-b.example.org","media":"media.team-b.example.net"}}`)
 	if code != 200 || !strings.Contains(b, `"media":"media.team-b.example.net"`) {
@@ -688,7 +694,7 @@ func TestUpdateHostsRoute(t *testing.T) {
 
 func TestDeleteNeedsTypedID(t *testing.T) {
 	e := newInstEnv(t)
-	e.runOp(t, "POST", "/api/instances", `{"template":"grafana","id":"grafana-team-a"}`)
+	e.runOp(t, "POST", "/api/instances", `{"template":"grafana","id":"grafana-team-a","label":"Test"}`)
 	e.engine.addVolume("portcullis_grafana-team-a-grafana-data", "portcullis-grafana-team-a", "grafana-data", map[string]string{"grafana.db": "rows"})
 	for _, body := range []string{`{}`, `{"confirm":""}`, `{"confirm":"grafana"}`, `{"confirm":"GRAFANA-TEAM-A"}`, `{"confirm":" grafana-team-a "}`, `{"confirm":"grafana-team-a\n"}`} {
 		if code, b := e.do(t, "root", "DELETE", "/api/instances/grafana-team-a", body); code != 400 || !strings.Contains(b, "type the instance id") {
@@ -736,7 +742,7 @@ func TestDeleteNeedsTypedID(t *testing.T) {
 
 func TestBackupRestoreRoutes(t *testing.T) {
 	e := newInstEnv(t)
-	e.runOp(t, "POST", "/api/instances", `{"template":"grafana","id":"grafana-team-a"}`)
+	e.runOp(t, "POST", "/api/instances", `{"template":"grafana","id":"grafana-team-a","label":"Test"}`)
 	vol := "portcullis_grafana-team-a-grafana-data"
 	e.engine.addVolume(vol, "portcullis-grafana-team-a", "grafana-data", map[string]string{"grafana.db": "v1"})
 	rec := e.runOp(t, "POST", "/api/instances/grafana-team-a/backups", "")
@@ -839,4 +845,36 @@ func (e *instEnv) runOp(t *testing.T, method, path, body string) hub.OpRecord {
 	}
 	t.Fatalf("%s %s: op %s did not finish", method, path, acc.OpID)
 	return hub.OpRecord{}
+}
+
+// TestInstanceLabelRoute (apps, §11.9): PUT /api/instances/{id}/label
+// answers the instance; a create bound to existing groups uses them.
+func TestInstanceLabelRoute(t *testing.T) {
+	e := newInstEnv(t)
+	e.ll.AddGroup("team", "alice")
+	rec := e.runOp(t, "POST", "/api/instances", `{"template":"grafana","id":"grafana-t","label":"Team","groups":{"mode":"existing","users":"team","admins":"lldap_admin"}}`)
+	if !rec.OK {
+		t.Fatalf("create = %+v", rec)
+	}
+	if e.ll.HasGroup("users_grafana-t") || e.ll.HasGroup("admin_grafana-t") {
+		t.Error("a bound create created groups")
+	}
+	code, b := e.do(t, "root", "PUT", "/api/instances/grafana-t/label", `{"label":"Team B"}`)
+	var v hub.InstanceView
+	if code != 200 || json.Unmarshal([]byte(b), &v) != nil || v.Label != "Team B" || v.Name != "Grafana · Team B" ||
+		v.GroupsMode != "existing" || v.AccessGroup != "team" || v.AdminGroup != "lldap_admin" {
+		t.Fatalf("label = %d %s", code, b)
+	}
+	for _, c := range []struct {
+		path, body string
+		code       int
+	}{
+		{"/api/instances/grafana-t/label", `{"label":""}`, 400},
+		{"/api/instances/grafana-t/label", `{"label":"x","more":1}`, 400},
+		{"/api/instances/nope-x/label", `{"label":"X"}`, 404},
+	} {
+		if code, b := e.do(t, "root", "PUT", c.path, c.body); code != c.code {
+			t.Errorf("%s %s = %d %s, want %d", c.path, c.body, code, b, c.code)
+		}
+	}
 }

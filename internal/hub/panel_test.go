@@ -214,7 +214,7 @@ func TestPrivilegedGroupChoices(t *testing.T) {
 	if len(tier.GroupChoices) != 0 {
 		t.Errorf("a non-privileged option has group choices: %+v", tier.GroupChoices)
 	}
-	choices := map[string]GroupChoice{}
+	choices := map[string]PrivilegedGroupChoice{}
 	for _, c := range role.GroupChoices {
 		choices[c.Name] = c
 	}

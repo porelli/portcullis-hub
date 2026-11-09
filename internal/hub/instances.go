@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"log"
+	"reflect"
 	"sort"
 	"strings"
 
@@ -43,6 +44,12 @@ type InstanceView struct {
 	AdminGroup      string            `json:"admin_group"`
 	KeycloakClients []string          `json:"keycloak_clients"`
 	Project         string            `json:"project"`
+	// Label and Name (`<App> · <label>`) name the instance to people;
+	// GroupsMode is "existing" for an instance bound to existing groups,
+	// else "new" (contract §11.7, §11.9).
+	Label      string `json:"label"`
+	Name       string `json:"name"`
+	GroupsMode string `json:"groups_mode"`
 	// Error says why an instance can't be resolved (state "error"): its
 	// template is missing or no longer fits its hostnames.
 	Error string `json:"error,omitempty"`
@@ -69,6 +76,7 @@ func (h *Hub) rebuildLocked() {
 			continue
 		}
 		v.Enabled = h.st.IsEnabled(t.ID)
+		h.stampInstanceLocked(&v)
 		out = append(out, v)
 	}
 	ids := make([]string, 0, len(h.st.Instances))
@@ -96,6 +104,7 @@ func (h *Hub) rebuildLocked() {
 			continue
 		}
 		v.Enabled = h.st.IsEnabled(id)
+		h.stampInstanceLocked(&v)
 		out = append(out, v)
 	}
 	for i := range h.templates {
@@ -186,9 +195,7 @@ func (h *Hub) Instances() []InstanceView {
 		if t.IsDefault() && !t.Enabled && !hasOp && !inState {
 			continue
 		}
-		n := t.NamesFor(t.ID)
-		v := InstanceView{ID: t.ID, Template: t.TemplateID, Default: t.IsDefault(), Hosts: copyMap(t.Hosts),
-			AccessGroup: n.AccessGroup, AdminGroup: n.AdminGroup, KeycloakClients: append([]string{}, n.Clients...), Project: n.Project}
+		v := h.instanceViewLocked(t)
 		op, hasOp := ops[t.ID]
 		switch {
 		case e.State == state.InstanceDeleting:
@@ -219,11 +226,27 @@ func (h *Hub) Instances() []InstanceView {
 		case state.InstanceRestoring:
 			st = StateRestoring
 		}
+		label := e.Label
+		if label == "" {
+			label = id
+		}
 		out = append(out, InstanceView{ID: id, Template: tid, Default: id == tid, State: st, Error: reason,
-			Hosts: copyMap(e.Hosts), KeycloakClients: []string{}, Project: projectName(id)})
+			Hosts: copyMap(e.Hosts), KeycloakClients: []string{}, Project: projectName(id),
+			AccessGroup: e.UsersGroup, AdminGroup: e.AdminsGroup,
+			Label: label, Name: tid + " · " + label, GroupsMode: groupsMode(e)})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
+}
+
+// instanceViewLocked is instance t's view without its state: groups
+// from instanceGroupsLocked, label and name. Caller holds mu.
+func (h *Hub) instanceViewLocked(t *templates.Template) InstanceView {
+	n := t.NamesFor(t.ID)
+	users, admins := h.instanceGroupsLocked(t)
+	return InstanceView{ID: t.ID, Template: t.TemplateID, Default: t.IsDefault(), Hosts: copyMap(t.Hosts),
+		AccessGroup: users, AdminGroup: admins, KeycloakClients: append([]string{}, n.Clients...), Project: n.Project,
+		Label: instanceLabel(t), Name: instanceName(t), GroupsMode: groupsMode(h.st.Instances[t.ID])}
 }
 
 func copyMap(m map[string]string) map[string]string {
@@ -235,22 +258,40 @@ func copyMap(m map[string]string) map[string]string {
 }
 
 // CreateInstance creates instance id of a template without enabling it
-// (state "created", contract §11.1–11.3). hosts (host router → full
-// hostname) nil means the defaults on the main domain. Refused before
-// anything is created: a bad id (400), a single template (409), and any
-// derived-name or hostname collision (409).
+// (state "created", contract §11.1–11.3), with no label stored (it shows
+// its default, §11.9) and its derived groups: createEntry with only
+// those. The API path (createInstance) requires a label.
 func (h *Hub) CreateInstance(templateID, id string, hosts map[string]string) error {
-	if !templates.InstanceIDRe.MatchString(id) {
-		return statusErr(400, "instance id %q must match %s", id, templates.InstanceIDRe)
-	}
-	if strings.HasPrefix(id, templates.ReservedInstancePrefix) {
-		return statusErr(400, "instance id %q: ids starting with %q are reserved", id, templates.ReservedInstancePrefix)
+	return h.createEntry(CreateRequest{Template: templateID, ID: id, Hosts: hosts}, "", "")
+}
+
+// createEntry creates instance req.ID of req.Template without enabling
+// it (state "created", contract §11.1–11.3), storing req.Label and the
+// binding users / admins ("" = the derived names, §11.9). Hosts nil
+// means the defaults on the main domain. id = the template id creates
+// the template's first instance, its default instance (§11.9 "First
+// instance"): accepted while it has no state entry and isn't enabled.
+// Refused before anything is created: a bad id (400), a single
+// template (409), and any derived-name or hostname collision (409).
+func (h *Hub) createEntry(req CreateRequest, users, admins string) error {
+	templateID, id, hosts := req.Template, req.ID, req.Hosts
+	def := id == templateID
+	if !def {
+		if !templates.InstanceIDRe.MatchString(id) {
+			return statusErr(400, "instance id %q must match %s", id, templates.InstanceIDRe)
+		}
+		if strings.HasPrefix(id, templates.ReservedInstancePrefix) {
+			return statusErr(400, "instance id %q: ids starting with %q are reserved", id, templates.ReservedInstancePrefix)
+		}
+	} else if !templates.ValidID(id) {
+		return statusErr(400, "invalid template id %q", id)
 	}
 	if err := templates.CheckIDShape(id); err != nil {
 		return statusErr(400, "instance %v", err)
 	}
 	h.mu.RLock()
 	_, exists := h.st.Instances[id]
+	exists = exists || (def && h.st.IsEnabled(id))
 	h.mu.RUnlock()
 	if exists {
 		return statusErr(409, "instance %s already exists", id)
@@ -268,8 +309,12 @@ func (h *Hub) CreateInstance(templateID, id string, hosts map[string]string) err
 				return statusErr(409, "compose project %s already exists (stop and remove it first)", projectName(id))
 			}
 		}
-		// Nor may it adopt an existing volume: a deleted instance's
-		// leftover, or anything else's (§11.1).
+	}
+	// Nor may it adopt an existing volume: a deleted instance's leftover,
+	// or anything else's (§11.1). The default instance's volume names are
+	// its own (it exists implicitly, §11.1: a disabled one keeps its
+	// data), so its first create doesn't check them.
+	if h.engine != nil && !def {
 		h.mu.RLock()
 		var want map[string]string
 		if t := h.catalogLocked(templateID); t != nil {
@@ -298,19 +343,26 @@ func (h *Hub) CreateInstance(templateID, id string, hosts map[string]string) err
 	if t == nil {
 		return statusErr(404, "template not found: %s", templateID)
 	}
-	if !t.Manifest.Multi() {
-		return statusErr(409, "template %s is instances: single — it runs only as its default instance%s", templateID, singleReason(t))
+	if _, ok := h.st.Instances[id]; ok || (def && h.st.IsEnabled(id)) {
+		return statusErr(409, "instance %s already exists", id)
 	}
-	if err := h.checkInstanceNamesLocked(t, id); err != nil {
-		return err
+	if !def {
+		if !t.Manifest.Multi() {
+			return statusErr(409, "template %s is instances: single — it runs only as its default instance%s", templateID, singleReason(t))
+		}
+		if err := h.checkInstanceNamesLocked(t, id); err != nil {
+			return err
+		}
+		if c := templates.CoreContainerClash(id, t.Services); c != "" {
+			return statusErr(409, "instance id %s: its container %s would be a core service's container name", id, c)
+		}
+		if err := aliasesFitInstance(t, id); err != nil {
+			return err
+		}
 	}
-	if c := templates.CoreContainerClash(id, t.Services); c != "" {
-		return statusErr(409, "instance id %s: its container %s would be a core service's container name", id, c)
-	}
-	if err := aliasesFitInstance(t, id); err != nil {
-		return err
-	}
-	if hosts == nil {
+	if hosts == nil && def {
+		hosts = t.DefaultHosts(h.cfg.Domain)
+	} else if hosts == nil {
 		var err error
 		if hosts, err = defaultHostsFor(t, id, h.cfg.Domain); err != nil {
 			return err
@@ -323,7 +375,14 @@ func (h *Hub) CreateInstance(templateID, id string, hosts map[string]string) err
 	if err := h.checkInstanceHostsLocked(&view, runtime); err != nil {
 		return err
 	}
-	h.st.Instances[id] = state.Instance{ID: id, Template: templateID, Hosts: view.Hosts, State: state.InstanceCreated}
+	e := state.Instance{ID: id, Template: templateID, Hosts: view.Hosts, State: state.InstanceCreated,
+		Label: req.Label, UsersGroup: users, AdminsGroup: admins}
+	if def && !hasImmutableHosts(t) && reflect.DeepEqual(view.Hosts, t.DefaultHosts(h.cfg.Domain)) {
+		// The default instance on its default hostnames stores none: a
+		// main-domain change moves them (§11.3).
+		e.Hosts = nil
+	}
+	h.st.Instances[id] = e
 	h.rebuildLocked()
 	if v := h.findLocked(id); v != nil {
 		h.seedSettingsLocked(v)

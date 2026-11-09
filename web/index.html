@@ -3591,6 +3591,9 @@
         '<input type="text" id="inst-new-id" value="' + escapeHtml(tid + '-') + '" spellcheck="false" maxlength="31">' +
         '<small>Lowercase letters, digits and “-”, starting with a letter, at most 31 characters (e.g. ' + escapeHtml(tid) + '-team-a). ' +
         'It names the compose project, the Keycloak client and the groups <code>users_&lt;id&gt;</code> / <code>admin_&lt;id&gt;</code>.</small>' +
+        '<label class="block" for="inst-new-label">Label</label>' +
+        '<input type="text" id="inst-new-label" value="" spellcheck="false" maxlength="64">' +
+        '<small>What people see: the portal shows it as “' + escapeHtml(templateLabel(tid)) + ' · &lt;label&gt;”. One line, at most 64 characters (e.g. Team A).</small>' +
         '<label class="block" for="inst-new-domain">Domain</label><select id="inst-new-domain"></select>' +
         '<small>The main domain or an enrolled domain that is ready (Settings → Domains). Changing it re-fills the hostnames you haven\'t edited.</small></div>' +
         '<div class="inst-section"><h4>Hostnames</h4><div id="inst-new-hosts"><p class="settings-empty">Loading…</p></div>' +
@@ -3631,6 +3634,8 @@
       const out = document.getElementById('inst-create-result');
       const id = document.getElementById('inst-new-id').value.trim();
       if (!INSTANCE_ID_RE.test(id)) { out.innerHTML = errorBox(new Error('the instance id must match ' + INSTANCE_ID_RE.source)); return; }
+      const label = document.getElementById('inst-new-label').value.trim();
+      if (!label) { out.innerHTML = errorBox(new Error('give the instance a label')); return; }
       const hosts = collectHosts(document.getElementById('inst-new-hosts'));
       const problems = Object.keys(hosts).sort().map(r => hostProblem(r, hosts[r], ctx.domains || [], false)).filter(Boolean);
       if (problems.length) { out.innerHTML = '<div class="op-msg inst-error">' + problems.map(escapeHtml).join('<br>') + '</div>'; return; }
@@ -3638,7 +3643,7 @@
       const go = out.closest('form').querySelector('[type="submit"]');
       go.disabled = true;
       try {
-        const res = await runInstanceOp('/api/instances', 'POST', { template: ctx.tid, id, hosts }, id);
+        const res = await runInstanceOp('/api/instances', 'POST', { template: ctx.tid, id, label, hosts }, id);
         await refreshInstances();
         openInstance(id, { notice: 'Created. It is stopped: review its settings, then enable it.', warnings: res.warnings });
       } catch (err) {

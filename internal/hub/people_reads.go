@@ -130,7 +130,7 @@ func (h *Hub) PersonApps(ctx context.Context, user string) (*PersonAppsView, err
 		// entry population (entryPopulationLocked).
 		g := accessGroupOf(t)
 		if groups == nil {
-			g = t.NamesFor(t.ID).AccessGroup
+			g, _ = h.instanceGroupsLocked(t)
 		}
 		if _, member := m.Users[user][g]; g != "" && member && !m.Expired[user][g] {
 			via := PersonVia{Group: g}
@@ -256,10 +256,11 @@ func (h *Hub) GroupUses(ctx context.Context, group string) (*GroupUsesView, erro
 	for i := range h.instances {
 		t := &h.instances[i]
 		name := instanceName(t)
-		if t.Manifest.Auth.AccessGroup == group {
+		users, admins := h.instanceGroupsLocked(t)
+		if users == group {
 			v.Apps = append(v.Apps, GroupApp{Instance: t.ID, Name: name, Role: "access"})
 		}
-		if t.Manifest.Auth.AdminGroup == group {
+		if admins == group {
 			v.Apps = append(v.Apps, GroupApp{Instance: t.ID, Name: name, Role: "admin"})
 		}
 		if slices.Contains(h.privilegedGroupsLocked(t), group) {

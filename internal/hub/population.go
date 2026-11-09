@@ -67,13 +67,15 @@ func populationWhy(t *templates.Template, native bool) string {
 }
 
 // accessGroupOf is the group that gates t's signed-in routes ("" =
-// none: group access off and no access role).
+// none: group access off and no access role). t is an instance view:
+// its Manifest.Auth carries instanceGroupsLocked's answer
+// (stampInstanceLocked), the bound group included (§11.9).
 func accessGroupOf(t *templates.Template) string {
 	a := &t.Manifest.Auth
 	if a.AccessGroup == "" || !(a.GroupAccess || t.Manifest.AccessRoleEnforced()) {
 		return ""
 	}
-	return t.NamesFor(t.ID).AccessGroup
+	return a.AccessGroup
 }
 
 // personOf is user's Person from m, without expired memberships.
@@ -168,14 +170,15 @@ func (h *Hub) InPopulation(ctx context.Context, instance, user string) (bool, er
 }
 
 // placeholderGroup is the group a {{ACCESS_GROUP}} / {{ADMIN_GROUP}}
-// row of t names ("" = none); any other name is itself.
+// row of instance view t names ("" = none); any other name is itself.
+// The view's Manifest.Auth carries instanceGroupsLocked's answer
+// (stampInstanceLocked): a bound instance's rows name its bound groups.
 func placeholderGroup(t *templates.Template, g string) string {
-	n := t.NamesFor(t.ID)
 	switch g {
 	case templates.PlaceholderAccessGroup:
-		return n.AccessGroup
+		return t.Manifest.Auth.AccessGroup
 	case templates.PlaceholderAdminGroup:
-		return n.AdminGroup
+		return t.Manifest.Auth.AdminGroup
 	}
 	return g
 }

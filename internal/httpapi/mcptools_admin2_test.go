@@ -553,11 +553,12 @@ var adminToolFixtures = []struct {
 	{"list_instances", nil},
 	{"get_instance", map[string]any{"id": "talk-a"}},
 	{"instance_defaults", map[string]any{"template": "grafana", "id": "grafana-z"}},
-	{"create_instance", map[string]any{"template": "grafana", "id": "grafana-q"}},
+	{"create_instance", map[string]any{"template": "grafana", "id": "grafana-q", "label": "Test"}},
 	{"enable_instance", map[string]any{"id": "secretapp"}},
 	{"restart_instance", map[string]any{"id": "secretapp"}},
 	{"stop_op", map[string]any{"id": "secretapp"}}, // nothing runs: 409 with the record
 	{"set_hosts", map[string]any{"id": "grafana-q", "hosts": map[string]string{"grafana": "grafana-r.example.org"}}},
+	{"set_instance_label", map[string]any{"id": "grafana-q", "label": "Team Q"}},
 	{"get_settings", map[string]any{"id": "secretapp"}},
 	{"preview_settings", map[string]any{"id": "secretapp", "values": map[string]any{"api_url": "https://a.example.org"}}},
 	{"save_settings", map[string]any{"id": "secretapp", "values": map[string]any{"api_url": "https://a.example.org"}, "plan_hash": strings.Repeat("0", 64)}},
@@ -740,7 +741,7 @@ func testToolsNotEchoed(t *testing.T) {
 		t.Fatalf("hash file %q %v", hash, err)
 	}
 	// A Keycloak client secret (generated into the instance's env).
-	if _, err := e.s.Hub.CreateInstanceAs("talk", "talk-a", nil, directory.Human("root")); err != nil {
+	if _, err := e.s.Hub.CreateInstanceAs(hub.CreateRequest{Template: "talk", ID: "talk-a", Label: "Test"}, directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	if err := e.s.Hub.Enable("talk-a"); err != nil {
@@ -826,7 +827,7 @@ func testToolsNotEchoed(t *testing.T) {
 		}
 	}
 	// The success paths ran (fix round 1: real targets).
-	for _, n := range []string{"create_instance", "set_hosts", "backup_instance", "restore_instance", "restore_as", "delete_instance",
+	for _, n := range []string{"create_instance", "set_hosts", "set_instance_label", "backup_instance", "restore_instance", "restore_as", "delete_instance",
 		"list_credentials", "admin_revoke_credential", "delete_domain", "enroll_domain", "replace_domain_token", "get_env", "get_instance",
 		"set_model_provider_secret", "delete_model_provider", "get_op", "wait_for_op", "get_logs", "disable_instance",
 		// Task 18: the invite paths ran.

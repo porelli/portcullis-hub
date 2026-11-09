@@ -19,6 +19,29 @@ import (
 // it may go): built-in LLDAP groups, administrator groups (§9.4) and
 // delegated-permission groups. Caller holds no lock.
 func (s *Service) keptGroupReason(name string) (string, error) {
+	why, err := s.privilegedGroupReason(name)
+	if why != "" || err != nil {
+		return why, err
+	}
+	if s.Store != nil {
+		cfg, err := s.loadConfig()
+		if err != nil {
+			return "", err
+		}
+		for g, gc := range cfg.Groups {
+			if gc != nil && gc.Rule != nil && strings.EqualFold(g, name) {
+				return "it is a rule group (its members come from a rule an admin set)", nil
+			}
+		}
+	}
+	return "", nil
+}
+
+// privilegedGroupReason says why name is a privileged group ("" = it
+// isn't): a built-in LLDAP group, an administrator group (§9.4) or a
+// delegated-permission group (§9.6). The one classification behind
+// keptGroupReason and CheckBindGroups. Caller holds no lock.
+func (s *Service) privilegedGroupReason(name string) (string, error) {
 	if builtinGroups[name] {
 		return "it is a built-in LLDAP group", nil
 	}
@@ -37,13 +60,63 @@ func (s *Service) keptGroupReason(name string) (string, error) {
 				return "it is the " + p + " permission group", nil
 			}
 		}
-		for g, gc := range cfg.Groups {
-			if gc != nil && gc.Rule != nil && strings.EqualFold(g, name) {
-				return "it is a rule group (its members come from a rule an admin set)", nil
-			}
-		}
 	}
 	return "", nil
+}
+
+// CheckBindGroups checks the groups an instance is bound to (contract
+// §11.9 groups mode "existing"; "" = none of that kind) and answers
+// them as LLDAP names them (matched case-insensitively): an unknown
+// group is 400 "unknown group <name>"; the users group may not be a
+// built-in, administrator or permission group (privilegedGroupReason,
+// built-ins matched case-insensitively too) — 400; the admins group may
+// be any existing group, lldap_admin included. Users & Groups not
+// configured or not answering, or directory.yaml unreadable, is 503.
+// Read-only.
+func (s *Service) CheckBindGroups(ctx context.Context, users, admins string) (string, string, error) {
+	if err := s.LLDAP.Available(); err != nil {
+		return "", "", &Error{Status: http.StatusServiceUnavailable, Msg: "users & groups is not available: " + err.Error()}
+	}
+	groups, err := s.LLDAP.ListGroups(ctx)
+	if err != nil {
+		return "", "", &Error{Status: http.StatusServiceUnavailable, Msg: "listing LLDAP groups: " + err.Error()}
+	}
+	byName := map[string]string{}
+	for _, g := range groups {
+		byName[strings.ToLower(g.DisplayName)] = g.DisplayName
+	}
+	resolve := func(n string) (string, error) {
+		if n == "" {
+			return "", nil
+		}
+		if g, ok := byName[strings.ToLower(n)]; ok {
+			return g, nil
+		}
+		return "", invalid("unknown group %s", n)
+	}
+	u, err := resolve(users)
+	if err != nil {
+		return "", "", err
+	}
+	a, err := resolve(admins)
+	if err != nil {
+		return "", "", err
+	}
+	if u != "" {
+		why, err := s.privilegedGroupReason(u)
+		if err != nil {
+			return "", "", &Error{Status: http.StatusServiceUnavailable, Msg: "reading directory.yaml: " + err.Error()}
+		}
+		for b := range builtinGroups {
+			if strings.EqualFold(b, u) {
+				why = "it is a built-in LLDAP group"
+			}
+		}
+		if why != "" {
+			return "", "", invalid("the users group can't be a built-in or administrator group (%s: %s)", u, why)
+		}
+	}
+	return u, a, nil
 }
 
 // ResolveActor checks that actor can run the instance group operations:

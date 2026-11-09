@@ -517,7 +517,7 @@ func (h *Hub) clearRestoring(id, keep string) error {
 		return nil
 	}
 	e.State, e.Backup = keep, ""
-	if e.Template == id && len(e.Hosts) == 0 && keep == "" {
+	if e.Template == id && len(e.Hosts) == 0 && keep == "" && !e.HoldsIdentity() {
 		delete(h.st.Instances, id)
 	} else {
 		h.st.Instances[id] = e
@@ -661,8 +661,8 @@ func (h *Hub) removeUnfinishedRestoreAs(id, archive string) {
 	h.mu.Lock()
 	var groups []string
 	if v := h.findLocked(id); v != nil {
-		n := v.NamesFor(id)
-		for _, g := range []string{n.AccessGroup, n.AdminGroup} {
+		users, admins := h.instanceGroupsLocked(v)
+		for _, g := range []string{users, admins} {
 			if g != "" {
 				groups = append(groups, g)
 			}
@@ -963,7 +963,7 @@ func (h *Hub) RestoreInstanceAsWith(archive, newID string, actor directory.Actor
 	res = &RestoreResult{}
 	_, _, err = h.runOpSync(newID, OpRestore, actor, []Step{}, func(ctx context.Context, ready func()) (map[string]string, []string, error) {
 		var rerr error
-		res, rerr = h.restoreInstanceAs(ctx, archive, newID, actor, hosts, ready)
+		res, rerr = h.restoreInstanceAs(ctx, archive, newID, actor, hosts, "", ready)
 		return restoreResult(res, archive, newID), restoreWarnings(res), rerr
 	})
 	return res, err
@@ -978,7 +978,10 @@ func (h *Hub) RestoreInstanceAsWith(archive, newID string, actor directory.Actor
 // record's Created ledger, written as they exist. A Stop accepted before
 // the commit (the instance marked complete) removes the new instance
 // completely (settleOp → undoRestoreAs).
-func (h *Hub) restoreInstanceAs(ctx context.Context, archive, newID string, actor directory.Actor, hosts map[string]string, ready func()) (res *RestoreResult, err error) {
+//
+// label "" = the archive's (config/instance.yaml), else checked like any
+// label (§11.9: 400).
+func (h *Hub) restoreInstanceAs(ctx context.Context, archive, newID string, actor directory.Actor, hosts map[string]string, label string, ready func()) (res *RestoreResult, err error) {
 	res = &RestoreResult{}
 	defer func() {
 		h.auditOp(actor, "instance.restore", newID, "archive="+archive+" new_instance=true", err)
@@ -991,6 +994,11 @@ func (h *Hub) restoreInstanceAs(ctx context.Context, archive, newID string, acto
 	}
 	if err := templates.CheckIDShape(newID); err != nil {
 		return res, statusErr(400, "instance %v", err)
+	}
+	if label != "" {
+		if err := CheckLabel(label); err != nil {
+			return res, err
+		}
 	}
 	unlock, err := h.lockApp(newID)
 	if err != nil {
@@ -1022,7 +1030,7 @@ func (h *Hub) restoreInstanceAs(ctx context.Context, archive, newID string, acto
 	p.AddStep(StepConfig, "Restoring the settings")
 	p.Before(beforeNewID, "true")
 	ready()
-	err = h.restoreAsSteps(ctx, p, archive, newID, actor, hosts, res)
+	err = h.restoreAsSteps(ctx, p, archive, newID, actor, hosts, label, res)
 	return res, h.settleOp(newID, OpRestore, p, err)
 }
 
@@ -1030,7 +1038,7 @@ func (h *Hub) restoreInstanceAs(ctx context.Context, archive, newID string, acto
 // lock). A failure after the create removes what it created (its own
 // undo, below) unless a Stop was accepted first: then it returns ctx's
 // error and the Stop's undo removes it from the record.
-func (h *Hub) restoreAsSteps(ctx context.Context, p *Progress, archive, newID string, actor directory.Actor, hosts map[string]string, res *RestoreResult) (err error) {
+func (h *Hub) restoreAsSteps(ctx context.Context, p *Progress, archive, newID string, actor directory.Actor, hosts map[string]string, label string, res *RestoreResult) (err error) {
 	p.Start(StepVerify)
 	if err := h.checkFree(archivePathOf(h, archive), "staging the archive"); err != nil {
 		return err
@@ -1124,7 +1132,16 @@ func (h *Hub) restoreAsSteps(ctx context.Context, p *Progress, archive, newID st
 	// router's archived hostname that is taken or no longer placeable is
 	// refused here (nothing created).
 	p.Start(StepInstance)
-	if err := h.CreateInstance(tmpl.ID, newID, want); err != nil {
+	// The request's label, else the archive's (§11.9); a binding is never
+	// restored into a new id: it gets new derived groups (§11.6).
+	if label == "" && sb.cfg.Label != "" {
+		if lerr := CheckLabel(sb.cfg.Label); lerr != nil {
+			res.Warnings = append(res.Warnings, "the archive's label was dropped: "+lerr.Error())
+		} else {
+			label = sb.cfg.Label
+		}
+	}
+	if err := h.createEntry(CreateRequest{Template: tmpl.ID, ID: newID, Label: label, Hosts: want}, "", ""); err != nil {
 		return err
 	}
 	// Marked "restoring" (restore_as) until complete: an interrupted one

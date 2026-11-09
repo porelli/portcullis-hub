@@ -97,7 +97,7 @@ func (h *Hub) entryPopulationLocked(t *templates.Template, m *directory.Membersh
 	if h.populationWhyLocked(t) == "" {
 		return h.populationLocked(t, m)
 	}
-	g := t.NamesFor(t.ID).AccessGroup
+	g, _ := h.instanceGroupsLocked(t)
 	if g == "" {
 		// The validator refuses this (fail closed: nobody).
 		return Population{Why: WhyNoIdentity}

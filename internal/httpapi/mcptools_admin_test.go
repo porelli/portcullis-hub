@@ -362,10 +362,14 @@ func TestAdminToolsSameAsHTTP(t *testing.T) {
 		{tool: "delete_folder", args: map[string]any{"id": "docs"},
 			method: "DELETE", path: "/api/folders/docs", body: ``},
 		// ── Task 17a ──
-		{tool: "create_instance", args: map[string]any{"template": "grafana", "id": "grafana-a"},
-			method: "POST", path: "/api/instances", body: `{"template":"grafana","id":"grafana-a"}`, instance: "grafana-a"},
-		{tool: "create_instance", args: map[string]any{"template": "nope", "id": "nope-a"},
-			method: "POST", path: "/api/instances", body: `{"template":"nope","id":"nope-a"}`},
+		{tool: "create_instance", args: map[string]any{"template": "grafana", "id": "grafana-a", "label": "Test"},
+			method: "POST", path: "/api/instances", body: `{"template":"grafana","id":"grafana-a","label":"Test"}`, instance: "grafana-a"},
+		{tool: "create_instance", args: map[string]any{"template": "nope", "id": "nope-a", "label": "Test"},
+			method: "POST", path: "/api/instances", body: `{"template":"nope","id":"nope-a","label":"Test"}`},
+		{tool: "set_instance_label", args: map[string]any{"id": "grafana-a", "label": "Team A"},
+			method: "PUT", path: "/api/instances/grafana-a/label", body: `{"label":"Team A"}`},
+		{tool: "set_instance_label", args: map[string]any{"id": "grafana-a", "label": " bad"},
+			method: "PUT", path: "/api/instances/grafana-a/label", body: `{"label":" bad"}`},
 		{tool: "set_hosts", args: map[string]any{"id": "grafana-a", "hosts": map[string]string{"grafana": "grafana-b.example.org"}},
 			method: "PUT", path: "/api/instances/grafana-a/hosts", body: `{"hosts":{"grafana":"grafana-b.example.org"}}`},
 		{tool: "save_settings", args: map[string]any{"id": "secretapp", "values": map[string]any{"api_url": "https://api.example.org"}},
@@ -669,7 +673,7 @@ func TestAdminToolsSameAsHTTP(t *testing.T) {
 // instance.delete via ai, the client and the consumed confirmation.
 func TestDeleteInstanceTool(t *testing.T) {
 	e := newToolEnv(t, nil, nil)
-	if _, err := e.s.Hub.CreateInstanceAs("notes", "x", nil, directory.Human("root")); err != nil {
+	if _, err := e.s.Hub.CreateInstanceAs(hub.CreateRequest{Template: "notes", ID: "x", Label: "Test"}, directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	if !e.ll.HasGroup("users_x") || !e.ll.HasGroup("admin_x") {

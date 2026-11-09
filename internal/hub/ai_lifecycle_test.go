@@ -68,7 +68,7 @@ func (a *instAIFixture) wantScope(t *testing.T, name, audience, host string) {
 		t.Errorf("scope %s missing", name)
 		return
 	}
-	if s.Audience != audience || s.ConsentText != "Use AI App ("+host+") as you" {
+	if s.Audience != audience || s.ConsentText != "Use AI App · AI App ("+host+") as you" {
 		t.Errorf("scope %s = %+v, want audience %s and the consent text naming %s", name, s, audience, host)
 	}
 }

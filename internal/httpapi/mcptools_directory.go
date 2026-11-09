@@ -311,26 +311,26 @@ func (s *Server) personConsequences(what string) func(context.Context, json.RawM
 	}
 }
 
-// prestaged: the groups instance id of t would use (its access / admin
-// group: users_<id> / admin_<id>, or a default instance's manifest
-// groups) that already have people → those people (T18 fix round 1: an
-// AI that pre-staged admin_foo and then creates foo hands them the app's
-// admin rights). People = current members ∪ who directory.yaml puts in
-// it before the evaluator runs (Membership.Staged: rule matches, include
-// exceptions — final review I1); a group with a rule counts as staged
-// even when it matches nobody yet. ok false = can't say (no template, the
-// directory unreadable): fail closed.
-func (s *Server) prestaged(ctx context.Context, t *templates.Template, id string) (map[string][]string, bool) {
-	if t == nil {
+// prestaged: those of groups (an instance's access / admin group:
+// users_<id> / admin_<id>, a default instance's manifest groups, or the
+// groups it is or would be bound to, §11.9) that already have people →
+// those people (T18 fix round 1: an AI that pre-staged admin_foo and
+// then creates foo hands them the app's admin rights). People = current
+// members ∪ who directory.yaml puts in it before the evaluator runs
+// (Membership.Staged: rule matches, include exceptions — final review
+// I1); a group with a rule counts as staged even when it matches nobody
+// yet. ok false = can't say (groups nil: no template; the directory
+// unreadable): fail closed.
+func (s *Server) prestaged(ctx context.Context, groups []string) (map[string][]string, bool) {
+	if groups == nil {
 		return nil, false
 	}
 	m := s.guards(ctx)
 	if m == nil {
 		return nil, false
 	}
-	n := t.NamesFor(id)
 	out := map[string][]string{}
-	for _, g := range []string{n.AccessGroup, n.AdminGroup} {
+	for _, g := range groups {
 		if g == "" {
 			continue
 		}
@@ -344,6 +344,16 @@ func (s *Server) prestaged(ctx context.Context, t *templates.Template, id string
 		}
 	}
 	return out, true
+}
+
+// instanceGroupList is instance id's access and admin group
+// (Hub.InstanceGroups, the one answer); nil: unknown instance.
+func (s *Server) instanceGroupList(id string) []string {
+	users, admins, ok := s.Hub.InstanceGroups(id)
+	if !ok {
+		return nil
+	}
+	return []string{users, admins}
 }
 
 // stagedOf is Membership.Staged for group (case-insensitive); has: the
@@ -399,8 +409,8 @@ func (s *Server) addMemberClass(ctx context.Context, args json.RawMessage) ToolC
 }
 
 // prestagedLines are prestaged's consequences.
-func (s *Server) prestagedLines(ctx context.Context, t *templates.Template, id string) []string {
-	pre, ok := s.prestaged(ctx, t, id)
+func (s *Server) prestagedLines(ctx context.Context, groups []string, id string) []string {
+	pre, ok := s.prestaged(ctx, groups)
 	if !ok {
 		return []string{"Who is already in " + id + "'s groups couldn't be read: treat them as holding its access and admin rights."}
 	}

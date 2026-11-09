@@ -293,6 +293,7 @@ func (h *Hub) resolveHostsLocked(t *templates.Template, id string, hosts, curren
 	if err != nil {
 		return templates.Template{}, statusErr(400, "%v", err)
 	}
+	h.stampInstanceLocked(&view)
 	// Hostnames the routing can't serve (a router mixing main- and
 	// extra-domain hosts, a chain reaching portcullis-auth on an extra
 	// domain) are refused now, not at the next enable.
@@ -907,7 +908,7 @@ func (h *Hub) commitHostsLocked(ch *hostsChange, runtime map[string][]string) (v
 		e = state.Instance{ID: ch.id, Template: t.ID}
 	}
 	e.Hosts = copyMap(view.Hosts)
-	if ch.id == t.ID && e.State == "" && !hasImmutableHosts(t) && reflect.DeepEqual(e.Hosts, t.DefaultHosts(h.cfg.Domain)) {
+	if ch.id == t.ID && e.State == "" && !e.HoldsIdentity() && !hasImmutableHosts(t) && reflect.DeepEqual(e.Hosts, t.DefaultHosts(h.cfg.Domain)) {
 		delete(h.st.Instances, ch.id) // the default instance needs no entry
 	} else {
 		h.st.Instances[ch.id] = e

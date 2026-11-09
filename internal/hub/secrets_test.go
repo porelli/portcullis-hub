@@ -444,7 +444,7 @@ func TestSecretRedactedInFailedRestoreAs(t *testing.T) {
 		regenerated = vals["token"]
 		return errors.New("disk full writing " + key + " / " + regenerated)
 	}
-	op, err := f.h.StartRestoreAs(entry.Archive, "secretapp-c", directory.Human("root"), nil)
+	op, err := f.h.StartRestoreAs(entry.Archive, "secretapp-c", directory.Human("root"), nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}

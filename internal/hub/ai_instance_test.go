@@ -397,7 +397,7 @@ func TestSetAISupportOn(t *testing.T) {
 	}
 	// The scope (§8) and the three clients' exact optional scopes.
 	sc, ok := a.kc.scope("mcp:aiapp.tok")
-	if !ok || sc.Audience != "https://aiapp.example.com/mcp" || sc.ConsentText != "Use AI App (aiapp.example.com) as you" {
+	if !ok || sc.Audience != "https://aiapp.example.com/mcp" || sc.ConsentText != "Use AI App · AI App (aiapp.example.com) as you" {
 		t.Errorf("scope = %+v %v", sc, ok)
 	}
 	for _, s := range []string{"mcp:all", "mcp:portcullis.people", "mcp:portcullis.admin"} {

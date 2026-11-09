@@ -182,6 +182,12 @@ type Groups interface {
 	// (read-only; an error: unknown, nothing is created).
 	MissingInstanceGroups(ctx context.Context, names []string) ([]string, error)
 	DeleteInstanceGroup(ctx context.Context, actor directory.Actor, name string) ([]string, error)
+	// CheckBindGroups checks the groups an instance is bound to (contract
+	// §11.9 groups mode "existing"; "" = none of that kind): each must
+	// exist (400 "unknown group <name>"), the users group may not be a
+	// built-in, administrator or permission group (400); Users & Groups
+	// down is 503. It answers the names as LLDAP has them.
+	CheckBindGroups(ctx context.Context, users, admins string) (string, string, error)
 }
 
 // People is the directory as per-person and per-group settings read it
@@ -928,12 +934,13 @@ func (h *Hub) claimTierLocked(id string) int {
 func (h *Hub) snapshot(t *templates.Template) state.PublishedApp {
 	a := t.Manifest.Auth
 	acc := h.accessLocked(t)
+	users, admins := h.instanceGroupsLocked(t)
 	p := state.PublishedApp{
 		Hosts:           slices.Sorted(maps.Values(t.Hosts)),
 		GroupAccess:     acc.groupAccess(t),
 		NativeLoginOnly: acc.SignIn == SignInNative,
-		AccessGroup:     a.AccessGroup,
-		AdminGroup:      a.AdminGroup,
+		AccessGroup:     users,
+		AdminGroup:      admins,
 		AdminPaths:      append([]string(nil), a.AdminPaths...),
 	}
 	n := t.NamesFor(t.ID)
@@ -1090,13 +1097,14 @@ func (h *Hub) writePolicy() (attrsWritten bool, retErr error) {
 		if t.Manifest.Routerless() {
 			continue
 		}
+		users, admins := h.instanceGroupsLocked(t)
 		app := policy.App{
 			ID:          t.ID,
 			Enabled:     true,
 			Hosts:       hostSet(slices.Collect(maps.Values(t.Hosts)), coreHosts),
 			GroupAccess: h.accessLocked(t).groupAccess(t),
-			AccessGroup: t.Manifest.Auth.AccessGroup,
-			AdminGroup:  t.Manifest.Auth.AdminGroup,
+			AccessGroup: users,
+			AdminGroup:  admins,
 			AdminPaths:  t.Manifest.Auth.AdminPaths,
 		}
 		if pub := h.publicLocked(t, t.Public); pub.Active() {

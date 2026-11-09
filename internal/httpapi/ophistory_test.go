@@ -16,7 +16,7 @@ import (
 // (admins only, Hub listener only).
 func TestOpHistoryRoutes(t *testing.T) {
 	e := newInstEnv(t)
-	create := e.runOp(t, "POST", "/api/instances", `{"template":"grafana","id":"grafana-a"}`)
+	create := e.runOp(t, "POST", "/api/instances", `{"template":"grafana","id":"grafana-a","label":"Test"}`)
 	enable := e.runOp(t, "POST", "/api/templates/enable", `{"id":"grafana-a"}`)
 	// The restart takes the instance's record after the ok enable.
 	restart := e.runOp(t, "POST", "/api/templates/restart/grafana-a", ``)
@@ -49,7 +49,7 @@ func TestOpHistoryRoutes(t *testing.T) {
 		t.Errorf("an unknown instance with grafana-a's op id = %d %s", got, b)
 	}
 	// Another real instance's op id is never answered for grafana-a.
-	other := e.runOp(t, "POST", "/api/instances", `{"template":"grafana","id":"grafana-b"}`)
+	other := e.runOp(t, "POST", "/api/instances", `{"template":"grafana","id":"grafana-b","label":"Test"}`)
 	if got, b := e.do(t, "root", "GET", "/api/instances/grafana-a/op?op_id="+other.OpID, ""); got != 404 {
 		t.Errorf("grafana-b's op id on grafana-a = %d %s", got, b)
 	}
@@ -93,7 +93,7 @@ func TestOpHistoryRoutes(t *testing.T) {
 // unknown one 404; list_ops is the summary route's answer.
 func TestOpHistoryMCP(t *testing.T) {
 	e := newToolEnv(t, nil, nil)
-	if _, err := e.s.Hub.CreateInstanceAs("notes", "x", nil, directory.Human("root")); err != nil {
+	if _, err := e.s.Hub.CreateInstanceAs(hub.CreateRequest{Template: "notes", ID: "x", Label: "Test"}, directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	start := func(tool string) OpStarted {

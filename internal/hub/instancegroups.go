@@ -31,15 +31,18 @@ type instanceGroup struct {
 	Derived bool
 }
 
-// instanceGroups lists t's access and admin groups.
-func instanceGroups(t *templates.Template) []instanceGroup {
-	n := t.NamesFor(t.ID)
+// instanceGroupsListLocked lists t's access and admin groups
+// (instanceGroupsLocked). A bound group (§11.9) is never Derived: the
+// Hub never creates it, whatever its name. Caller holds mu.
+func (h *Hub) instanceGroupsListLocked(t *templates.Template) []instanceGroup {
+	users, admins := h.instanceGroupsLocked(t)
+	bound := h.instanceBoundLocked(t.ID)
 	var out []instanceGroup
-	if n.AccessGroup != "" {
-		out = append(out, instanceGroup{Name: n.AccessGroup, Derived: n.AccessGroup == "users_"+t.ID})
+	if users != "" {
+		out = append(out, instanceGroup{Name: users, Derived: !bound && users == "users_"+t.ID})
 	}
-	if n.AdminGroup != "" && n.AdminGroup != n.AccessGroup {
-		out = append(out, instanceGroup{Name: n.AdminGroup, Derived: n.AdminGroup == "admin_"+t.ID})
+	if admins != "" && admins != users {
+		out = append(out, instanceGroup{Name: admins, Derived: !bound && admins == "admin_"+t.ID})
 	}
 	return out
 }
@@ -193,7 +196,7 @@ func (h *Hub) enabledGroups() (map[string][]instanceGroup, Groups) {
 	out := map[string][]instanceGroup{}
 	for _, id := range h.st.Enabled {
 		if t := h.findLocked(id); t != nil {
-			if gs := instanceGroups(t); len(gs) > 0 {
+			if gs := h.instanceGroupsListLocked(t); len(gs) > 0 {
 				out[id] = gs
 			}
 		}
@@ -293,7 +296,7 @@ func (h *Hub) CreateMissingGroups(ctx context.Context, ids []string, actor direc
 		var gs []instanceGroup
 		enabled := h.st.IsEnabled(id)
 		if t := h.findLocked(id); t != nil && enabled {
-			gs = instanceGroups(t)
+			gs = h.instanceGroupsListLocked(t)
 		}
 		h.mu.RUnlock()
 		if !enabled {

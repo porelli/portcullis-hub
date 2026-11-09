@@ -409,7 +409,7 @@ func (h *Hub) ConfirmationPage(listener, id, user string) (*ConfirmationView, er
 // than U+0020, variation selectors and the other default-ignorable code
 // points; a backslash stays as it is. Invalid UTF-8 shows as U+FFFD.
 func VisibleText(s string) string {
-	if !needsEscape(s) {
+	if !hasHiddenText(s) {
 		return s
 	}
 	var b strings.Builder
@@ -427,7 +427,10 @@ func VisibleText(s string) string {
 	return b.String()
 }
 
-func needsEscape(s string) bool {
+// hasHiddenText reports whether s holds a character VisibleText escapes
+// (hiddenRune) or is not valid UTF-8: the one predicate behind the
+// confirmation page's escaping and the instance label's rules (§11.9).
+func hasHiddenText(s string) bool {
 	if !utf8.ValidString(s) {
 		return true
 	}
