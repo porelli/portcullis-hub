@@ -215,12 +215,12 @@ An admin can sign in as another person and act in their apps.
    Keycloak can enforce the template exactly (per-client flow), it does;
    otherwise the Hub asks for a **stricter** level, never a weaker one, and
    lists who that locks out.
-8. **No admin lock-out**: the Hub refuses a save (template edit, method
+7. **No admin lock-out**: the Hub refuses a save (template edit, method
    switch, Hub/People template change) that would leave no `lldap_admin`
    member able to meet the Hub's template; the admin setup link offers a
    security key first; a CLI recovery (`./portcullis signin reset-core`,
    name the builder's) puts the Hub and people.<domain> back on Standard.
-9. **Build in three parts**: (1) methods, templates, scores, default/per app,
+8. **Build in three parts**: (1) methods, templates, scores, default/per app,
    warnings, password; (2) Sign-in methods page, browser certificates,
    history, enroll retired, clear names; (3) impersonation.
 
