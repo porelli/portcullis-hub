@@ -64,6 +64,15 @@ func ComposeVars(compose []byte) *ComposeVarUse {
 		u.Err = "compose.yml holds more than one YAML document"
 		return u
 	}
+	// An alias as a mapping key (`*environment : […]`) is classified by
+	// what it resolves to, not by its anchor's name: never walked (fail
+	// closed).
+	for _, d := range docs {
+		if aliasKey(d, 0) {
+			u.Err = "compose.yml uses an alias as a mapping key"
+			return u
+		}
+	}
 	w := &varWalk{outside: u.Outside, env: map[string]bool{}}
 	for _, d := range docs {
 		w.document(d)
@@ -152,7 +161,14 @@ func (w *varWalk) environment(n *yaml.Node, depth int) {
 	case e.Kind == yaml.MappingNode:
 		for i := 0; i+1 < len(e.Content); i += 2 {
 			k, v := e.Content[i], e.Content[i+1]
-			if k.Value == "<<" {
+			if k.Kind == yaml.ScalarNode && k.Value == "<<" && !isMergeKey(k) {
+				// A quoted "<<": an ordinary key, never a merge; walked as
+				// outside (fail closed).
+				w.node(k, false, depth+1)
+				w.node(v, false, depth+1)
+				continue
+			}
+			if isMergeKey(k) {
 				// A merge key: the merged map (or each of a list of them)
 				// is an environment map too.
 				if mv := w.deref(v, depth+1); mv != nil && mv.Kind == yaml.SequenceNode {
@@ -194,12 +210,45 @@ func (w *varWalk) envItem(n *yaml.Node, depth int) {
 		return
 	}
 	name, value, hasValue := strings.Cut(it.Value, "=")
-	w.refs(name, false)
+	if strings.Contains(name, "$") {
+		// The name part interpolates: the "=" may sit inside a ${…}, so
+		// nothing in the item is judged environment.
+		w.refs(it.Value, false)
+		return
+	}
 	if hasValue {
 		w.refs(value, true)
 		return
 	}
 	w.bareName(name, true)
+}
+
+// isMergeKey: k is a YAML merge key as yaml.v3 reads it (plain <<,
+// tag !!merge); a quoted "<<" is an ordinary key.
+func isMergeKey(k *yaml.Node) bool {
+	return k.Kind == yaml.ScalarNode && k.Value == "<<" && k.Tag == "!!merge" &&
+		k.Style&(yaml.DoubleQuotedStyle|yaml.SingleQuotedStyle|yaml.LiteralStyle|yaml.FoldedStyle) == 0
+}
+
+// aliasKey: some mapping under n (anchors' definitions included; aliases
+// not followed) has an alias as a key.
+func aliasKey(n *yaml.Node, depth int) bool {
+	if n == nil || depth > composeVarDepth {
+		return depth > composeVarDepth
+	}
+	if n.Kind == yaml.MappingNode {
+		for i := 0; i < len(n.Content); i += 2 {
+			if n.Content[i].Kind == yaml.AliasNode {
+				return true
+			}
+		}
+	}
+	for _, c := range n.Content {
+		if aliasKey(c, depth+1) {
+			return true
+		}
+	}
+	return false
 }
 
 // buildArgs: a build arg without a value (list "BASE", map "BASE:")

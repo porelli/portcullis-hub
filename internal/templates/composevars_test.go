@@ -99,6 +99,22 @@ func TestComposeVarsForms(t *testing.T) {
 			}
 		}
 	}
+	// Walker fixes: an alias as a mapping key fails closed; an "=" inside
+	// a ${…} of the name part never splits the item; a quoted "<<" is an
+	// ordinary key.
+	if u := ComposeVars([]byte("x-k: &environment security_opt\nservices:\n  s:\n    image: x\n    *environment : [\"seccomp=${X}\"]\n")); u.Err == "" || u.EnvOnly["X"] {
+		t.Errorf("an alias mapping key = %+v", u)
+	}
+	for _, item := range []string{"${Y-a=}${X}", "${Y:-a=b}${X}=v"} {
+		u := ComposeVars([]byte("services:\n  a:\n    environment:\n      - \"" + item + "\"\n"))
+		if u.Err != "" || !u.Outside["X"] || !u.Outside["Y"] || u.EnvOnly["X"] {
+			t.Errorf("item %q = %+v", item, u)
+		}
+	}
+	u := ComposeVars([]byte("x-a: &a {A: \"${A1}\"}\nservices:\n  s:\n    environment:\n      \"<<\": \"${Q}\"\n      <<: *a\n      B: ${B1}\n"))
+	if u.Err != "" || !u.Outside["Q"] || u.EnvOnly["Q"] || !u.EnvOnly["B1"] {
+		t.Errorf("quoted << = %+v", u)
+	}
 	if u := ComposeVars([]byte("services: {}\n---\nservices: {}\n")); u.Err == "" {
 		t.Error("two YAML documents accepted")
 	}
