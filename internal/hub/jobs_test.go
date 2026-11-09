@@ -317,12 +317,13 @@ func TestJobNeverRan(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Status: %v", err)
 	}
-	// Only web should be in the status (setup never ran, no container).
-	if len(st) != 1 {
-		t.Errorf("status count = %d, want 1 (only web, setup never ran)", len(st))
+	// web's container, then a missing row for the job that never ran
+	// (§11.9: state missing, job_state missing, no name).
+	if len(st) != 2 || st[0].Service != "web" {
+		t.Fatalf("status = %+v, want web then setup (missing)", st)
 	}
-	if st[0].Service != "web" {
-		t.Errorf("status service = %q, want %q", st[0].Service, "web")
+	if m := st[1]; m.Service != "setup" || m.Name != "" || m.State != StateMissing || m.Status != "no container" || !m.Job || m.JobState != StateMissing {
+		t.Errorf("missing job row = %+v", m)
 	}
 
 	// C2: Missing job drift should be reported.

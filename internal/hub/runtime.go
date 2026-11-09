@@ -72,16 +72,34 @@ func (h *Hub) appContainers(ctx context.Context, t *templates.Template) ([]docke
 
 // Status returns the app's containers: those of the services the
 // instance's setup choices select (a leftover container of a compose
-// profile they leave off is not listed, §13.18).
+// profile they leave off is not listed, §13.18), then one row per such
+// service with no container at all (§11.9 "One-off jobs": state
+// "missing", status "no container"; a job's job_state "missing"). A
+// companion service scaled to 0 (its AI support off) expects none.
 func (h *Hub) Status(ctx context.Context, id string) ([]ContainerStatus, error) {
 	t := h.Template(id)
 	if t == nil {
 		return nil, ErrNotFound
 	}
-	inactive := h.inactiveServices(t)
-	cs, _, err := h.appContainers(ctx, t)
+	inactive, scaledOff := h.statusSkips(t)
+	cs, services, err := h.appContainers(ctx, t)
 	if err != nil {
 		return nil, statusErr(502, "docker: %v", err)
+	}
+	seen := map[string]bool{}
+	for _, c := range cs {
+		seen[c.Service()] = true
+	}
+	missing := []ContainerStatus{}
+	for _, svc := range services {
+		if seen[svc] || inactive[svc] || scaledOff[svc] {
+			continue
+		}
+		row := ContainerStatus{Service: svc, State: StateMissing, Status: "no container"}
+		if t.Jobs[svc] {
+			row.Job, row.JobState = true, StateMissing
+		}
+		missing = append(missing, row)
 	}
 	out := make([]ContainerStatus, 0, len(cs))
 	for _, c := range cs {
@@ -114,7 +132,26 @@ func (h *Hub) Status(ctx context.Context, id string) ([]ContainerStatus, error) 
 		}
 		out = append(out, status)
 	}
-	return out, nil
+	return append(out, missing...), nil
+}
+
+// StateMissing is a status row's state (and a job's job_state) for an
+// active service with no container (§11.9).
+const StateMissing = "missing"
+
+// statusSkips: the services Status expects no container of — those of
+// a compose profile the setup choices leave off, and companion
+// services scaled to 0.
+func (h *Hub) statusSkips(t *templates.Template) (inactive, scaledOff map[string]bool) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	scaledOff = map[string]bool{}
+	for svc, cs := range h.companionServicesLocked(t) {
+		if cs.scale != nil && *cs.scale == 0 {
+			scaledOff[svc] = true
+		}
+	}
+	return h.inactiveServicesLocked(t), scaledOff
 }
 
 // Logs returns the last lines of the app's containers (optionally one

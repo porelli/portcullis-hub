@@ -351,7 +351,7 @@ func TestSetLabelDefaultInstanceKeepsEntry(t *testing.T) {
 	f := newInstanceFixture(t, nil)
 	f.h.SetAudit(&fakeAudit{})
 	simulateCompose(f, 0)
-	if v, _ := f.h.InstanceView("grafana"); v.Label != "Grafana" || v.Name != "Grafana · Grafana" {
+	if v, _ := f.h.InstanceView("grafana"); v.Label != "Grafana" || v.Name != "Grafana" {
 		t.Errorf("default = %+v", v)
 	}
 	if err := f.h.SetLabel(context.Background(), "grafana", "Home", root); statusOf(err) != 404 || !strings.Contains(err.Error(), "create the instance first") {
@@ -560,12 +560,31 @@ func TestInstanceNameEverywhere(t *testing.T) {
 	tv := *f.h.findLocked("grafana-a")
 	f.h.mu.RUnlock()
 	check("instanceName", instanceName(&tv))
-	// The default instance without a stored label: the manifest's name.
+	// The default instance without a stored label: the manifest's name,
+	// once (ruling: a label equal to the app's name is just "<App>").
 	f.h.mu.RLock()
 	dv := *f.h.findLocked("grafana")
 	f.h.mu.RUnlock()
-	if n := instanceName(&dv); n != "Grafana · Grafana" {
+	if n := instanceName(&dv); n != "Grafana" {
 		t.Errorf("default = %q", n)
+	}
+	// A stored label equal to the app's name: "<App>" everywhere, the
+	// portal included; any other label "<App> · <label>".
+	if err := f.h.SetLabel(context.Background(), "grafana-a", "Grafana", root); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := f.h.InstanceView("grafana-a"); v.Name != "Grafana" || v.Label != "Grafana" {
+		t.Errorf("label = app name: view %+v", v)
+	}
+	for _, a := range f.h.Portal().Apps {
+		if a.ID == "grafana-a" && a.Name != "Grafana" {
+			t.Errorf("portal name = %q, want Grafana", a.Name)
+		}
+	}
+	for _, a := range f.h.DirectoryApps() {
+		if a.ID == "grafana-a" && a.Name != "Grafana" {
+			t.Errorf("directory apps name = %q, want Grafana", a.Name)
+		}
 	}
 }
 

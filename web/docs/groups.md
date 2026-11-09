@@ -5,9 +5,15 @@ Portcullis uses LLDAP groups to control which users can access which apps. Group
 ## Where things live
 
 People and groups are managed in one place, the people page
-`https://people.<your-domain>/` (the Hub's **Users & Groups** tab links
-there). Whatever you start from, you end on the same view: a group's page is
-the only place membership changes.
+`https://people.<your-domain>/` (**People** in the top navigation the Hub and
+the people page share). Whatever you start from, you end on the same view: a
+group's page is the only place membership changes.
+
+Two accounts are special. The Hub's own service account (`portcullis-hub`) is
+never listed: not among people, in group members or in suggestions (Setup
+names it). The built-in `admin` can't be added to any group, so it can't use
+apps: invite yourself as a regular person for that (see
+[Users & Groups](hub.md#users-groups)).
 
 | You want to… | Go to |
 |--------------|-------|

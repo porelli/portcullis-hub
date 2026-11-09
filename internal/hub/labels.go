@@ -99,9 +99,14 @@ func instanceLabel(t *templates.Template) string {
 
 // instanceName is how the Hub names instance t to people (§10 name,
 // §11.9 "Where it shows"): `<App> · <label>`, the default instance
-// included.
+// included — just `<App>` when the label is the app's name (ruling: a
+// default instance without a stored label is "Gitea", never "Gitea ·
+// Gitea").
 func instanceName(t *templates.Template) string {
-	return t.Manifest.Name + " · " + instanceLabel(t)
+	if l := instanceLabel(t); l != t.Manifest.Name {
+		return t.Manifest.Name + " · " + l
+	}
+	return t.Manifest.Name
 }
 
 // instanceGroupsLocked is the one answer to instance t's access (users)

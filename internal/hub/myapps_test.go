@@ -163,7 +163,7 @@ func TestMyAppsOnlyCallersApps(t *testing.T) {
 		t.Fatalf("alice's apps = %+v, want immich only", apps)
 	}
 	a := apps[0]
-	if a.Name != "Immich Claims Fixture · Immich Claims Fixture" {
+	if a.Name != "Immich Claims Fixture" {
 		t.Errorf("name = %q", a.Name)
 	}
 	q := myValue(&a, "storage_quota")

@@ -391,6 +391,25 @@ func TestStatusFollowsProfiles(t *testing.T) {
 	if !slices.Equal(svcs, []string{"app", "db-postgres"}) {
 		t.Errorf("status services = %v", svcs)
 	}
+	// An active service with no container gets a missing row; the
+	// inactive profile's service (db-mysql) never does, container or not.
+	f.engine.mu.Lock()
+	f.engine.containers = []docker.Container{app, leftover}
+	f.engine.mu.Unlock()
+	st, err = f.h.Status(context.Background(), "cloud-t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rows []string
+	for _, c := range st {
+		rows = append(rows, c.Service+"="+c.State)
+	}
+	if !slices.Equal(rows, []string{"app=running", "db-postgres=missing"}) {
+		t.Errorf("status rows = %v, want app running and db-postgres missing (db-mysql inactive: not listed)", rows)
+	}
+	f.engine.mu.Lock()
+	f.engine.containers = []docker.Container{app, pg, leftover}
+	f.engine.mu.Unlock()
 	n, m, others, _, err := f.h.countContainers(context.Background(), tm, f.h.renderedServices(context.Background(), tm))
 	if err != nil || n != 2 || m != 2 || len(others) != 0 {
 		t.Errorf("readiness = %d of %d, others %v, %v", n, m, others, err)

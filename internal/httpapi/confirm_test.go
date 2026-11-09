@@ -173,7 +173,7 @@ func TestInternalConfirmations(t *testing.T) {
 	if code, b := e.post(t, "/internal/confirmations/consume", consumeBody("alice", "delete_repo", args)); code != 409 || b != `{"state":"pending"}` {
 		t.Errorf("consume pending = %d %s", code, b)
 	}
-	if r, b := doAs(t, e.ppl, "alice", "POST", "/api/me/confirmations/"+a.ID, decision("approve", "AI App · AI App", "good-code")); r.StatusCode != 200 || strings.TrimSpace(b) != `{"state":"approved"}` {
+	if r, b := doAs(t, e.ppl, "alice", "POST", "/api/me/confirmations/"+a.ID, decision("approve", "AI App", "good-code")); r.StatusCode != 200 || strings.TrimSpace(b) != `{"state":"approved"}` {
 		t.Fatalf("approve = %d %s", r.StatusCode, b)
 	}
 	// Another person, tool or argument never consumes it.
@@ -329,9 +329,9 @@ func TestConfirmPage(t *testing.T) {
 			t.Fatalf("alice GET = %d %v", r.StatusCode, r.Header)
 		}
 		framingHeaders(t, "people page", r.Header)
-		for _, want := range []string{"delete_repo", "Tokens on AI App · AI App (aiapp.example.org)", "Runs delete_repo once on AI App · AI App (aiapp.example.org) as you",
+		for _, want := range []string{"delete_repo", "Tokens on AI App (aiapp.example.org)", "Runs delete_repo once on AI App (aiapp.example.org) as you",
 			"AI App asks you to confirm every call of delete_repo.", "&lt;script&gt;alert(1)&lt;/script&gt;", strings.Repeat("x", 3000),
-			`data-typed="AI App · AI App"`, `data-authorize-url="https://auth.example.org/realms/portcullis/protocol/openid-connect/auth"`,
+			`data-typed="AI App"`, `data-authorize-url="https://auth.example.org/realms/portcullis/protocol/openid-connect/auth"`,
 			`data-redirect-uri="https://people.example.org/"`, `data-client-id="portcullis-fresh-auth"`, `data-id="` + id + `"`,
 			"portcullis-ai-claude", `src="/static/confirm.js"`} {
 			if !strings.Contains(b, want) {
@@ -384,8 +384,8 @@ func TestConfirmApprove(t *testing.T) {
 		return r.StatusCode, strings.TrimSpace(b)
 	}
 	// G75: the typed check is the instance label, not the companion's.
-	for _, typed := range []string{"", "Tokens", "AI App", "ai app", "aiapp"} {
-		if code, b := post(id, decision("approve", typed, "good-code")); code != 409 || b != "type AI App · AI App to confirm" {
+	for _, typed := range []string{"", "Tokens", "AI App · AI App", "ai app", "aiapp"} {
+		if code, b := post(id, decision("approve", typed, "good-code")); code != 409 || b != "type AI App to confirm" {
 			t.Errorf("typed %q = %d %s", typed, code, b)
 		}
 	}
@@ -413,7 +413,7 @@ func TestConfirmApprove(t *testing.T) {
 		{"verifier error", time.Time{}, nil, &freshauth.Error{Reason: "nonce mismatch"}, "good-code"},
 	} {
 		e.people.set(c.at, c.amr, c.err)
-		if code, b := post(id, decision("approve", "AI App · AI App", c.code)); code != 403 || b != freshauth.Message {
+		if code, b := post(id, decision("approve", "AI App", c.code)); code != 403 || b != freshauth.Message {
 			t.Errorf("%s = %d %s", c.name, code, b)
 		}
 	}
@@ -430,7 +430,7 @@ func TestConfirmApprove(t *testing.T) {
 	nextMinute()
 	e.people.set(time.Now().Add(-10*time.Second), []string{"hwk"}, nil)
 	hubCalls := e.hubFA.n()
-	if code, b := post(id, decision("approve", " AI App · AI App ", "good-code")); code != 200 || b != `{"state":"approved"}` {
+	if code, b := post(id, decision("approve", " AI App ", "good-code")); code != 200 || b != `{"state":"approved"}` {
 		t.Fatalf("approve = %d %s", code, b)
 	}
 	if e.hubFA.n() != hubCalls {
@@ -447,13 +447,13 @@ func TestConfirmApprove(t *testing.T) {
 			t.Errorf("audit holds the arguments: %+v", a)
 		}
 	}
-	if code, b := post(id, decision("approve", "AI App · AI App", "good-code")); code != 409 || b != `{"state":"approved"}` {
+	if code, b := post(id, decision("approve", "AI App", "good-code")); code != 409 || b != `{"state":"approved"}` {
 		t.Errorf("again = %d %s", code, b)
 	}
 	// A sign-in 59 s before the request is still fine.
 	id2 := e.create(t, "alice", "delete_tag", args)
 	e.people.set(time.Now().Add(-59*time.Second), nil, nil)
-	if code, b := post(id2, decision("approve", "AI App · AI App", "good-code")); code != 200 {
+	if code, b := post(id2, decision("approve", "AI App", "good-code")); code != 200 {
 		t.Errorf("59 s before = %d %s", code, b)
 	}
 	// Decline: no passkey, no typed check.
@@ -488,7 +488,7 @@ func TestConfirmApprove(t *testing.T) {
 	// Proofs can't be checked (the client not in place): 503, generic.
 	id4 := e.create(t, "alice", "delete_note", args)
 	e.s.Hub.SetFreshAuthReadyForTest(false)
-	if code, b := post(id4, decision("approve", "AI App · AI App", "good-code")); code != 503 || strings.Contains(b, "in place") {
+	if code, b := post(id4, decision("approve", "AI App", "good-code")); code != 503 || strings.Contains(b, "in place") {
 		t.Errorf("not ready = %d %s", code, b)
 	}
 	e.s.Hub.SetFreshAuthReadyForTest(true)
@@ -538,7 +538,7 @@ func TestConfirmRefusalLimit(t *testing.T) {
 			t.Fatalf("attempt %d = %d", i, r.StatusCode)
 		}
 	}
-	if r, _ := doAs(t, e.ppl, "alice", "POST", "/api/me/confirmations/"+id, decision("approve", "AI App · AI App", "good-code")); r.StatusCode != 429 {
+	if r, _ := doAs(t, e.ppl, "alice", "POST", "/api/me/confirmations/"+id, decision("approve", "AI App", "good-code")); r.StatusCode != 429 {
 		t.Errorf("11th = %d, want 429", r.StatusCode)
 	}
 	// Admins on the Hub listener count refused approvals too.
