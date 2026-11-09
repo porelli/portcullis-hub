@@ -90,6 +90,8 @@ func TestScoreSpecExamples(t *testing.T) {
 		{"family example", anyOf(all(leaves("password", "family:passkey")...), leaf("security_key")), withPassword, "2.9 / 5"},
 		{"nested", nestedRule(), defaultOn(), "4.4 / 5"},
 		{"nested, browser cert on", nestedRule(), withCert, "4.3 / 5"},
+		{"basic, password off: its alternative doesn't count", builtin(t, "basic"), defaultOn(), "2.5 / 5"},
+		{"no way in", all(leaf("password")), defaultOn(), "0.0 / 5"},
 	}
 	for _, c := range cases {
 		if got := ScoreOf(c.rule, c.on).String(); got != c.want {
@@ -187,9 +189,29 @@ func TestCompileRefusesSwitchedOffLeaf(t *testing.T) {
 	if !errors.Is(err, ErrUnmeetable) {
 		t.Errorf("all[password] with password off: %v, want ErrUnmeetable", err)
 	}
-	_, err = Compile(anyOf(leaf("password"), leaf("security_key")), defaultOn())
+	// An "any" group drops the switched-off alternative and stays meetable.
+	c := mustCompile(t, anyOf(leaf("password"), leaf("security_key")), defaultOn())
+	if js(c) != `{"op":"any","items":["security_key"]}` {
+		t.Errorf("any[password, security_key] with password off compiled to %s", js(c))
+	}
+	if Satisfied(c, onSet(Password)) {
+		t.Error("a dropped password alternative still met")
+	}
+	// An "all" group with a part that can't be met can't be met, and inside
+	// an "any" it is dropped as a whole.
+	if _, err := Compile(all(leaf("security_key"), leaf("password")), defaultOn()); !errors.Is(err, ErrUnmeetable) {
+		t.Errorf("all[security_key, password] with password off: %v, want ErrUnmeetable", err)
+	}
+	c = mustCompile(t, anyOf(all(leaves("password", "security_key")...), leaf("yubikey_cert")), defaultOn())
+	if js(c) != `{"op":"any","items":["yubikey_cert"]}` {
+		t.Errorf("unmeetable all inside any compiled to %s", js(c))
+	}
+	if Satisfied(c, onSet(SecurityKey)) {
+		t.Error("the dropped all group's other part met the rule alone")
+	}
+	_, err = Compile(anyOf(leaf("password"), leaf("family:certificate")), onSet(PasskeySynced))
 	if !errors.Is(err, ErrUnmeetable) {
-		t.Errorf("any[password, security_key] with password off: %v, want ErrUnmeetable", err)
+		t.Errorf("any with no alternative left: %v, want ErrUnmeetable", err)
 	}
 	_, err = Compile(anyOf(leaf("family:passkey")), onSet(YubiKeyCert))
 	if !errors.Is(err, ErrUnmeetable) {
@@ -197,6 +219,59 @@ func TestCompileRefusesSwitchedOffLeaf(t *testing.T) {
 	}
 	if _, err := Compile(anyOf(leaf("webauthn")), defaultOn()); err == nil || errors.Is(err, ErrUnmeetable) {
 		t.Errorf("unknown leaf: %v, want a validation error", err)
+	}
+	// Whatever the switches, a compiled rule names only switched-on methods.
+	for _, rule := range []Node{builtin(t, "basic"), builtin(t, "standard"), builtin(t, "strong"),
+		builtin(t, "yubikey-and-certificate"), nestedRule()} {
+		for mask := 0; mask < 1<<len(Methods); mask++ {
+			on := maskOn(mask)
+			c, err := Compile(rule, on)
+			if err != nil {
+				if !errors.Is(err, ErrUnmeetable) {
+					t.Fatalf("%s: %v", js(rule), err)
+				}
+				continue
+			}
+			for _, l := range compiledLeaves(c) {
+				if !on[Method(l)] {
+					t.Fatalf("%s with %v compiled to %s", js(rule), on, js(c))
+				}
+			}
+		}
+	}
+}
+
+func maskOn(mask int) map[Method]bool {
+	on := map[Method]bool{}
+	for i, m := range Methods {
+		if mask&(1<<i) != 0 {
+			on[m] = true
+		}
+	}
+	return on
+}
+
+func TestUnusable(t *testing.T) {
+	on := defaultOn()
+	if got := Unusable(builtin(t, "standard"), on); got != nil {
+		t.Errorf("standard: %v, want nil", got)
+	}
+	if got := Unusable(builtin(t, "basic"), on); len(got) != 1 || !slices.Equal(got[0], Path{2}) {
+		t.Errorf("basic, password off: %v, want [[2]]", got)
+	}
+	// The nested rule with password off: the all[password, security_key]
+	// alternative, listed once (its items are not).
+	if got := Unusable(nestedRule(), on); len(got) != 1 || !slices.Equal(got[0], Path{0, 0}) {
+		t.Errorf("nested, password off: %v, want [[0 0]]", got)
+	}
+	// A rule with no way in lists the top group's parts that block it.
+	got := Unusable(all(leaf("security_key"), leaf("family:certificate")), onSet(SecurityKey))
+	if len(got) != 1 || !slices.Equal(got[0], Path{1}) {
+		t.Errorf("all with an unmeetable part: %v, want [[1]]", got)
+	}
+	u, err := Usable(builtin(t, "basic"), on)
+	if err != nil || Sentence(u) != "a passkey or a certificate" {
+		t.Errorf("Usable(basic) sentence %q, %v", Sentence(u), err)
 	}
 }
 
@@ -267,19 +342,31 @@ func TestImpliesAndNeeds(t *testing.T) {
 	if Implies(standard, strong) {
 		t.Error("Implies(standard, strong) true")
 	}
-	// Contract §8.1 "Needs": the only switched-on member of a family it names
-	// is needed. With browser_cert off, yubikey_cert is family:certificate's
-	// only member: switching it off would leave Standard unmeetable (D2).
-	if got := Needs(builtin(t, "standard"), on); !slices.Equal(got, []Method{YubiKeyCert}) {
-		t.Errorf("Needs(standard, browser_cert off) = %v, want [yubikey_cert]", got)
+	// Needs = the methods whose switch-off would leave the rule with no way
+	// in. Standard with browser_cert off: passkeys still let people in.
+	if got := Needs(builtin(t, "standard"), on); len(got) != 0 {
+		t.Errorf("Needs(standard, browser_cert off) = %v, want []", got)
 	}
 	withCert := defaultOn()
 	withCert[BrowserCert] = true
 	if got := Needs(builtin(t, "standard"), withCert); len(got) != 0 {
 		t.Errorf("Needs(standard, browser_cert on) = %v, want []", got)
 	}
-	if got := Needs(builtin(t, "strong"), on); !slices.Equal(got, []Method{SecurityKey, YubiKeyCert}) {
-		t.Errorf("Needs(strong) = %v", got)
+	// Strong keeps a way in when either of its two methods goes.
+	if got := Needs(builtin(t, "strong"), on); len(got) != 0 {
+		t.Errorf("Needs(strong) = %v, want []", got)
+	}
+	if got := Needs(builtin(t, "yubikey-and-certificate"), on); !slices.Equal(got, []Method{SecurityKey, YubiKeyCert}) {
+		t.Errorf("Needs(yubikey-and-certificate) = %v", got)
+	}
+	if got := Needs(anyOf(leaf("family:certificate")), on); !slices.Equal(got, []Method{YubiKeyCert}) {
+		t.Errorf("Needs(any[family:certificate]) = %v, want [yubikey_cert]", got)
+	}
+	if got := Needs(nestedRule(), on); !slices.Equal(got, []Method{YubiKeyCert}) {
+		t.Errorf("Needs(nested, password off) = %v, want [yubikey_cert]", got)
+	}
+	if got := Needs(all(leaf("password")), on); len(got) != 0 {
+		t.Errorf("Needs of a rule that can't be met now = %v, want []", got)
 	}
 }
 
@@ -369,8 +456,9 @@ func TestBuiltins(t *testing.T) {
 	if !slices.Equal(ids, []string{"basic", "standard", "strong", "yubikey-and-certificate"}) {
 		t.Errorf("ids %v", ids)
 	}
-	if _, err := Compile(builtin(t, "basic"), defaultOn()); !errors.Is(err, ErrUnmeetable) {
-		t.Errorf("basic with password off: %v", err)
+	// Basic with password off drops its password alternative.
+	if c := mustCompile(t, builtin(t, "basic"), defaultOn()); js(c) != js(mustCompile(t, builtin(t, "standard"), defaultOn())) {
+		t.Errorf("basic with password off compiled to %s", js(c))
 	}
 	// Builtins hands out copies.
 	b[1].Rule.Items[0].Leaf = "password"

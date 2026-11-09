@@ -1,6 +1,9 @@
 package signin
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
 // Score is a rule's strength out of 5, in tenths, with a one-line reason.
 type Score struct {
@@ -19,11 +22,19 @@ const (
 	perExtraAll = 4  // + 0.4 per extra part of an "all" group
 )
 
-// ScoreOf scores source rule n against the switched-on methods (D4): a
-// method scores its strength, a family its weakest switched-on member (0
-// when none is on), an "any" group its weakest item, an "all" group its
-// strongest item + 0.4 per extra item, capped at 5.
+// ScoreOf scores source rule n against the switched-on methods (D4), over
+// the rule as compiled (Usable: parts the switches make unmeetable don't
+// count): a method scores its strength, a family its weakest switched-on
+// member, an "any" group its weakest item, an "all" group its strongest item
+// + 0.4 per extra item, capped at 5. A rule with no way in scores 0.
 func ScoreOf(n Node, on map[Method]bool) Score {
+	n, err := Usable(n, on)
+	if errors.Is(err, ErrUnmeetable) {
+		return Score{Reason: "it can't be met with the sign-in methods that are switched on"}
+	}
+	if err != nil {
+		return Score{Reason: "the rule isn't valid: " + err.Error()}
+	}
 	t := scoreTenths(n, on)
 	if n.isLeaf() || len(n.Items) == 0 {
 		return Score{Tenths: t}

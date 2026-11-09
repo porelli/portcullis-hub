@@ -10,8 +10,8 @@ type Template struct {
 }
 
 // Builtins returns fresh copies of the four built-in templates (D12), in
-// order: Basic and YubiKey + certificate start disabled (Basic names
-// password, which starts off), Standard (the default) and Strong enabled.
+// order: Basic and YubiKey + certificate start disabled, Standard (the
+// default) and Strong enabled.
 func Builtins() []Template {
 	g := func(op string, leaves ...string) Node {
 		n := Node{Op: op, Items: make([]Node, 0, len(leaves))}

@@ -6,7 +6,8 @@ import "strings"
 // phrase; "all" joins its items with " and "; "any" with " or ", or with
 // ", or " when one of its items is a group of several items; an "any" of
 // several items inside an "all" is wrapped in parentheses. A group of one
-// item reads as that item.
+// item reads as that item. For the rule as the switches leave it, pass
+// Usable's result.
 func Sentence(n Node) string {
 	if n.isLeaf() {
 		return phrase(n.Leaf)

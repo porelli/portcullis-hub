@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"slices"
 )
 
@@ -203,48 +204,110 @@ func Validate(n Node) error {
 	return nil
 }
 
-// ErrUnmeetable is Compile's error for a rule naming a switched-off method,
-// or a family with no switched-on member.
-var ErrUnmeetable = errors.New("the rule names a sign-in method that is switched off")
+// ErrUnmeetable is the error for a rule no one can meet with the methods
+// that are switched on.
+var ErrUnmeetable = errors.New("the rule can't be met with the sign-in methods that are switched on")
 
-// Compile validates n and turns each family into an "any" group of its
-// switched-on members, in the family's order. A direct method that is off,
-// or a family with no member on, fails with ErrUnmeetable (wrapped, naming
-// it). The result has no families and only switched-on leaves.
-func Compile(n Node, on map[Method]bool) (Node, error) {
+// A part of a rule can't be met when it is a method that is switched off, a
+// family with no member switched on, an "any" group none of whose items can
+// be met, or an "all" group one of whose items can't be met. An "any" group
+// drops the items that can't be met and stays meetable while one is left.
+
+// usable is n with the items that can't be met dropped from its "any"
+// groups (families kept as leaves), and whether n can be met at all.
+func usable(n Node, on map[Method]bool) (Node, bool) {
+	if n.isLeaf() {
+		if f, ok := families[n.Leaf]; ok {
+			return Node{Leaf: n.Leaf}, len(f.onMembers(on)) > 0
+		}
+		m := Method(n.Leaf)
+		return Node{Leaf: n.Leaf}, rank(m) >= 0 && on[m]
+	}
+	out := Node{Op: n.Op, Items: make([]Node, 0, len(n.Items))}
+	for _, it := range n.Items {
+		u, ok := usable(it, on)
+		switch {
+		case ok:
+			out.Items = append(out.Items, u)
+		case n.Op == OpAll:
+			return Node{}, false
+		}
+	}
+	return out, len(out.Items) > 0 && (n.Op == OpAll || n.Op == OpAny)
+}
+
+// Usable validates source rule n and returns it with every item the
+// switches make unmeetable dropped from its "any" groups; families stay
+// families. It is what Sentence and ScoreOf describe. A rule left with no way
+// in fails with ErrUnmeetable.
+func Usable(n Node, on map[Method]bool) (Node, error) {
 	if err := Validate(n); err != nil {
 		return Node{}, err
 	}
-	return compile(n, on)
+	u, ok := usable(n, on)
+	if !ok {
+		return Node{}, ErrUnmeetable
+	}
+	return u, nil
 }
 
-func compile(n Node, on map[Method]bool) (Node, error) {
+// Path locates a node in a rule: the item index at each level from the top
+// group (an empty Path is the whole rule).
+type Path []int
+
+// Unusable lists the parts of source rule n that can't be met with the
+// switched-on methods, outermost first: a part is listed, and its own items
+// are not. These are the items Compile drops from "any" groups and, when the
+// whole rule can't be met, the top group's items that make it so (the top
+// group itself is never listed, unless it is a bare leaf: [[]]). nil when
+// every part can be met.
+func Unusable(n Node, on map[Method]bool) []Path {
+	var out []Path
+	var walk func(n Node, at Path)
+	walk = func(n Node, at Path) {
+		if _, ok := usable(n, on); !ok && (len(at) > 0 || n.isLeaf()) {
+			out = append(out, slices.Clone(at))
+			return
+		}
+		for i, it := range n.Items {
+			walk(it, append(slices.Clone(at), i))
+		}
+	}
+	walk(n, Path{})
+	return out
+}
+
+// Compile validates n, drops the items the switches make unmeetable from its
+// "any" groups (see Usable) and turns each family into an "any" group of its
+// switched-on members, in the family's order. A rule left with no way in
+// fails with ErrUnmeetable. The result has no families and only switched-on
+// leaves.
+func Compile(n Node, on map[Method]bool) (Node, error) {
+	u, err := Usable(n, on)
+	if err != nil {
+		return Node{}, err
+	}
+	return expand(u, on), nil
+}
+
+// expand turns the families of a usable rule into "any" groups.
+func expand(n Node, on map[Method]bool) Node {
 	if n.isLeaf() {
 		if f, ok := families[n.Leaf]; ok {
 			ms := f.onMembers(on)
-			if len(ms) == 0 {
-				return Node{}, fmt.Errorf("%w: %s has no method switched on", ErrUnmeetable, n.Leaf)
-			}
 			g := Node{Op: OpAny, Items: make([]Node, 0, len(ms))}
 			for _, m := range ms {
 				g.Items = append(g.Items, Node{Leaf: string(m)})
 			}
-			return g, nil
+			return g
 		}
-		if !on[Method(n.Leaf)] {
-			return Node{}, fmt.Errorf("%w: %s", ErrUnmeetable, n.Leaf)
-		}
-		return Node{Leaf: n.Leaf}, nil
+		return Node{Leaf: n.Leaf}
 	}
 	out := Node{Op: n.Op, Items: make([]Node, 0, len(n.Items))}
 	for _, it := range n.Items {
-		c, err := compile(it, on)
-		if err != nil {
-			return Node{}, err
-		}
-		out.Items = append(out.Items, c)
+		out.Items = append(out.Items, expand(it, on))
 	}
-	return out, nil
+	return out
 }
 
 // Satisfied reports whether the methods in have meet a compiled rule: a leaf
@@ -412,33 +475,21 @@ func NeedsCertificate(compiled Node) bool {
 	return true
 }
 
-// Needs lists, in canonical order, the methods source rule n can't do
-// without (D3): each direct method leaf, and the only switched-on member of
-// a family it names.
+// Needs lists, in canonical order, the switched-on methods whose
+// switch-off would leave source rule n with no way in (D3). A rule that
+// can't be met now needs nothing.
 func Needs(n Node, on map[Method]bool) []Method {
-	need := map[Method]bool{}
-	var walk func(n Node)
-	walk = func(n Node) {
-		if n.isLeaf() {
-			if f, ok := families[n.Leaf]; ok {
-				if ms := f.onMembers(on); len(ms) == 1 {
-					need[ms[0]] = true
-				}
-				return
-			}
-			if rank(Method(n.Leaf)) >= 0 {
-				need[Method(n.Leaf)] = true
-			}
-			return
-		}
-		for _, it := range n.Items {
-			walk(it)
-		}
-	}
-	walk(n)
 	out := []Method{}
+	if _, err := Compile(n, on); err != nil {
+		return out
+	}
 	for _, m := range Methods {
-		if need[m] {
+		if !on[m] {
+			continue
+		}
+		without := maps.Clone(on)
+		delete(without, m)
+		if _, err := Compile(n, without); errors.Is(err, ErrUnmeetable) {
 			out = append(out, m)
 		}
 	}
