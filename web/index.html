@@ -2777,6 +2777,7 @@
     const DRIFT_ACTIONS = {
       start:   { label: 'Start', cls: 'btn-primary', confirm: null },
       apply:   { label: 'Apply settings', cls: 'btn-primary', confirm: 'Regenerate the override of %s and recreate its containers?' },
+      restart: { label: 'Restart', cls: 'btn-primary', confirm: 'Restart %s (every container stops, the selected ones start again)?' },
       disable: { label: 'Disable', cls: 'btn-danger', confirm: 'Disable %s and remove its containers?' },
       stop:    { label: 'Stop & remove', cls: 'btn-danger', confirm: 'Stop and remove the containers of %s?' },
       adopt:   { label: 'Enable', cls: 'btn-secondary', confirm: 'Mark %s as enabled (runs compose up)?' },

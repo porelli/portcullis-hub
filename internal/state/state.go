@@ -243,6 +243,11 @@ type InstanceSettings struct {
 	// §13.18; nil = never started). Its fixed_after_start setup choices
 	// can't change once it is set. Kept by backups and both restores.
 	FirstStartedAt *time.Time `json:"first_started_at,omitempty" yaml:"first_started_at,omitempty"`
+	// FixedKeys: the fixed_after_start setup options locked at the first
+	// start (their values stored then), sorted. A template update never
+	// drops them: an instance whose fixed choice no longer fits its
+	// template is refused at start instead (§13.18).
+	FixedKeys []string `json:"fixed_keys,omitempty" yaml:"fixed_keys,omitempty"`
 }
 
 // PersonSetting is a per-person option's configuration: the default
@@ -279,7 +284,7 @@ type EnteredValue struct {
 }
 
 // instanceSettingsKeys are InstanceSettings' YAML keys.
-var instanceSettingsKeys = map[string]bool{"ports": true, "values": true, "types": true, "person": true, "groups": true, "secrets": true, "entered": true, "group_ids": true, "first_started_at": true}
+var instanceSettingsKeys = map[string]bool{"ports": true, "values": true, "types": true, "person": true, "groups": true, "secrets": true, "entered": true, "group_ids": true, "first_started_at": true, "fixed_keys": true}
 
 // IsLegacySettings reports whether n (one instance's settings) is not the
 // InstanceSettings form: the old flat KEY: value map (contract v2), or
@@ -313,7 +318,7 @@ func (s *InstanceSettings) UnmarshalYAML(n *yaml.Node) error {
 
 // IsZero reports whether s holds nothing.
 func (s InstanceSettings) IsZero() bool {
-	return len(s.Ports)+len(s.Values)+len(s.Types)+len(s.Person)+len(s.Groups)+len(s.Secrets)+len(s.Entered)+len(s.GroupIDs) == 0 && s.FirstStartedAt == nil
+	return len(s.Ports)+len(s.Values)+len(s.Types)+len(s.Person)+len(s.Groups)+len(s.Secrets)+len(s.Entered)+len(s.GroupIDs)+len(s.FixedKeys) == 0 && s.FirstStartedAt == nil
 }
 
 // Clone is a deep copy of s (values are copied structurally: lists and
@@ -380,6 +385,9 @@ func (s InstanceSettings) Clone() InstanceSettings {
 	if s.FirstStartedAt != nil {
 		at := *s.FirstStartedAt
 		c.FirstStartedAt = &at
+	}
+	if s.FixedKeys != nil {
+		c.FixedKeys = append([]string(nil), s.FixedKeys...)
 	}
 	return c
 }

@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/portcullis/hub/internal/docker"
+	"github.com/portcullis/hub/internal/templates"
 )
 
 // A Nextcloud-shaped template (contract §13.18): the database is a setup
@@ -250,6 +252,9 @@ func TestRestoreKeepsChoiceAndLock(t *testing.T) {
 	if inst := string(members["config/instance.yaml"]); !strings.Contains(inst, "first_started_at:") || !strings.Contains(inst, "database: postgres") {
 		t.Errorf("config/instance.yaml = %s", inst)
 	}
+	f.h.mu.RLock()
+	archived := *f.h.st.Settings["cloud-r"].FirstStartedAt
+	f.h.mu.RUnlock()
 	// Even an instance whose lock was lost meanwhile gets the archive's.
 	f.h.mu.Lock()
 	s := f.h.st.Settings["cloud-r"].Clone()
@@ -265,6 +270,12 @@ func TestRestoreKeepsChoiceAndLock(t *testing.T) {
 	}
 	if !locked(t, f, "cloud-r") {
 		t.Error("restore lost the lock")
+	}
+	f.h.mu.RLock()
+	got := f.h.st.Settings["cloud-r"].FirstStartedAt
+	f.h.mu.RUnlock()
+	if got == nil || !got.Equal(archived) {
+		t.Errorf("first_started_at after the restore = %v, want the archived %v", got, archived)
 	}
 	if _, err := f.h.SaveSettings("cloud-r", SettingsUpdate{Values: setupOf("database", `"mysql"`)}, root); statusOf(err) != 409 {
 		t.Errorf("change after the restore = %v", err)
@@ -476,5 +487,187 @@ func forgetFirstStart(f *fixture, id string) {
 		delete(f.h.st.Settings, id)
 	} else {
 		f.h.st.Settings[id] = s
+	}
+}
+
+// TestFolderAssignRefusesFixedChoice: a folder assignment that would
+// change a fixed_after_start path choice of a started instance is 409
+// (preview and start share the computation); before the first start it
+// is planned like any other.
+func TestFolderAssignRefusesFixedChoice(t *testing.T) {
+	tmpls := maps.Clone(assignTemplates)
+	tmpls["strongbox"] = folderApp("Strongbox", "strongbox", `    - key: data
+      label: Data store
+      type: path
+      setup: true
+      fixed_after_start: true
+      target: {service: box, mount: /data}
+      folder: {access: read, runs_as: {uid: 0, gid: 0}}
+      applies: restart
+`, "  box:\n    image: box\n", "")
+	f := newInstanceFixtureExtra(t, nil, nil, tmpls)
+	if f.h.Template("strongbox") == nil {
+		t.Fatal("strongbox not loaded (see the log)")
+	}
+	fx := f.engine.fx()
+	fx.inspect = map[string]docker.ContainerInfo{testSelfID: {ID: testSelfID, Image: testSelfImage, Labels: selfLabels}}
+	f.h.mountinfo = func() ([]byte, error) { return []byte(testMountinfo), nil }
+	d := &assignDisk{fakeDisk: &fakeDisk{paths: map[string]*diskPath{}, symlinks: map[string]bool{}}, acl: true}
+	fx.run = d.run
+	addFolder(t, f, d.fakeDisk, "media", "Family media", "/srv/media", 60001)
+	req := AssignRequest{Uses: []FolderUse{{Instance: "strongbox", Key: "data"}}}
+	if _, err := f.h.PreviewAssign(context.Background(), "media", req); err != nil {
+		t.Fatalf("before the first start: %v", err)
+	}
+	f.h.mu.Lock()
+	f.h.stampFirstStartLocked("strongbox")
+	f.h.mu.Unlock()
+	_, err := f.h.PreviewAssign(context.Background(), "media", req)
+	if statusOf(err) != 409 || !strings.Contains(err.Error(), "Data store is fixed after the first start") {
+		t.Fatalf("after the first start: %v", err)
+	}
+	if _, err := f.h.StartAssign("media", req, strings.Repeat("0", 64), root); statusOf(err) != 409 || !strings.Contains(err.Error(), "fixed after the first start") {
+		t.Errorf("start after the first start: %v", err)
+	}
+}
+
+// TestCreateStoresSetupValues: every setup option's effective value is
+// stored at create, with or without setup in the body, so a later
+// template default change can't move it (§11.9 I1).
+func TestCreateStoresSetupValues(t *testing.T) {
+	f := setupCloudFixture(t)
+	createCloud(t, f, "cloud-d", nil)
+	if v := storedSetting(f, "cloud-d", "database"); v != "mysql" {
+		t.Fatalf("stored database = %v, want mysql", v)
+	}
+	if v := storedSetting(f, "cloud-d", "trash_days"); v != nil {
+		t.Errorf("a non-setup option was stored: %v", v)
+	}
+	writeFile(t, f.src+"/cloud/manifest.yaml", strings.Replace(setupCloudManifest, "      default: mysql\n", "      default: postgres\n", 1))
+	f.h.Discover()
+	f.h.mu.RLock()
+	tm := f.h.findLocked("cloud-d")
+	o := optionByKey(tm, "database")
+	v, _ := f.h.effectiveValue(tm, o, f.h.st.Settings["cloud-d"])
+	def := o.Default
+	f.h.mu.RUnlock()
+	if def != "postgres" || v != "mysql" {
+		t.Errorf("after the default change: default %v, effective %v (want mysql)", def, v)
+	}
+}
+
+// TestFixedChoiceTemplateUpdate (ruling I3): a template update never
+// drops a started instance's fixed choice; one that no longer fits is
+// listed by SettingsIncompatibilities and refuses the start (409); a
+// changed profiles entry for the stored value is listed too.
+func TestFixedChoiceTemplateUpdate(t *testing.T) {
+	f := setupCloudFixture(t)
+	createCloud(t, f, "cloud-u", setupOf("database", `"postgres"`))
+	if err := f.h.Enable("cloud-u"); err != nil {
+		t.Fatal(err)
+	}
+	f.h.mu.RLock()
+	s := f.h.st.Settings["cloud-u"].Clone()
+	old := *f.h.findLocked("cloud-u")
+	f.h.mu.RUnlock()
+	if !slices.Equal(s.FixedKeys, []string{"database"}) {
+		t.Fatalf("fixed keys = %v", s.FixedKeys)
+	}
+	// The listing: postgres refused by the new template; then a new
+	// profiles entry for postgres.
+	edit := func(fn func(o *templates.Option)) *templates.Template {
+		nt := old
+		m := *old.Manifest.Settings
+		m.Options = slices.Clone(m.Options)
+		for i := range m.Options {
+			if m.Options[i].Key == "database" {
+				fn(&m.Options[i])
+			}
+		}
+		nt.Manifest.Settings = &m
+		return &nt
+	}
+	gone := edit(func(o *templates.Option) {
+		o.Choices = []templates.EnumOption{{Value: "mysql", Label: "MySQL"}}
+		o.Profiles = map[string][]string{"mysql": {"db-mysql"}}
+	})
+	if got := strings.Join(SettingsIncompatibilities(&old, gone, s), "\n"); !strings.Contains(got, "setup choice database is fixed after the first start and no longer fits") || strings.Contains(got, "dropped") {
+		t.Errorf("incompatibilities (value refused) = %q", got)
+	}
+	moved := edit(func(o *templates.Option) {
+		o.Profiles = map[string][]string{"mysql": {"db-mysql"}, "postgres": {"db-postgres", "db-extra"}}
+	})
+	if got := strings.Join(SettingsIncompatibilities(&old, moved, s), "\n"); !strings.Contains(got, "would start compose profiles [db-extra, db-postgres] instead of [db-postgres]") {
+		t.Errorf("incompatibilities (profiles) = %q", got)
+	}
+	if got := SettingsIncompatibilities(&old, &old, s); len(got) != 0 {
+		t.Errorf("unchanged template = %v", got)
+	}
+
+	// The update itself: postgres is no longer a value. The prune keeps
+	// it; the start is refused.
+	m := strings.Replace(setupCloudManifest, "        - {value: postgres, label: PostgreSQL}\n", "        - {value: mariadb, label: MariaDB}\n", 1)
+	m = strings.Replace(m, "        postgres: [db-postgres]\n", "        mariadb: [db-postgres]\n", 1)
+	writeFile(t, f.src+"/cloud/manifest.yaml", m)
+	f.h.Discover()
+	if f.h.Template("cloud-u") == nil {
+		t.Fatal("updated template refused")
+	}
+	f.h.pruneSettings()
+	if v := storedSetting(f, "cloud-u", "database"); v != "postgres" {
+		t.Fatalf("the prune dropped the fixed choice: %v", v)
+	}
+	err := f.h.RestartApp("cloud-u")
+	if statusOf(err) != 409 || !strings.Contains(err.Error(), "setup choice database no longer fits the template") {
+		t.Fatalf("restart = %v", err)
+	}
+	if err := f.h.Disable("cloud-u"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.h.Enable("cloud-u"); statusOf(err) != 409 || !strings.Contains(err.Error(), "setup choice database no longer fits") {
+		t.Errorf("enable = %v", err)
+	}
+}
+
+// TestInactiveServiceRunningDrift: on an enabled instance a RUNNING
+// container of a service outside the selected profiles is drift (fail
+// closed); an exited one stays hidden.
+func TestInactiveServiceRunningDrift(t *testing.T) {
+	f := setupCloudFixture(t)
+	createCloud(t, f, "cloud-v", setupOf("database", `"postgres"`))
+	if err := f.h.Enable("cloud-v"); err != nil {
+		t.Fatal(err)
+	}
+	f.h.mu.RLock()
+	want, err := f.h.desiredRouteLabelsLocked(f.h.findLocked("cloud-v"))
+	f.h.mu.RUnlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := container("a1", "portcullis-cloud-v", "app", "running")
+	for k, v := range want["app"] {
+		app.Labels[k] = v
+	}
+	set := func(mysql string) {
+		f.engine.mu.Lock()
+		f.engine.containers = []docker.Container{app, container("p1", "portcullis-cloud-v", "db-postgres", "running"), container("m1", "portcullis-cloud-v", "db-mysql", mysql)}
+		f.engine.states = map[string]docker.State{"a1": {Running: true, Status: "running"}, "p1": {Running: true, Status: "running"}, "m1": {Status: mysql}}
+		f.engine.mu.Unlock()
+	}
+	set("running")
+	var got []Drift
+	for _, d := range f.h.Reconcile(context.Background()).Items {
+		if d.ID == "cloud-v" {
+			got = append(got, d)
+		}
+	}
+	if len(got) != 1 || got[0].Kind != DriftInactiveRunning || got[0].Message != "service db-mysql runs although the instance's setup choices leave it off" || !slices.Contains(got[0].Actions, ActionRestart) {
+		t.Fatalf("drift = %+v", got)
+	}
+	set("exited")
+	for _, d := range f.h.Reconcile(context.Background()).Items {
+		if d.ID == "cloud-v" {
+			t.Errorf("exited leftover drift: %+v", d)
+		}
 	}
 }

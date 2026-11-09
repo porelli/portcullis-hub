@@ -386,14 +386,28 @@ func (h *Hub) createEntry(req CreateRequest, users, admins string) error {
 	// instance's earlier settings: a fixed choice stays locked once it
 	// started) and the required / requires rules: refused before
 	// anything is created.
-	var setupNext *state.InstanceSettings
-	if req.setup != nil {
-		next, _, _, _, err := h.nextSettingsLocked(t, h.st.Settings[id], req.setup)
-		if err != nil {
+	// Parsed again against the catalog's template as it is now (a source
+	// sync may have landed since parseSetup), then every setup option's
+	// effective value is stored (pinSetupValuesLocked): a later default
+	// change can't move a choice.
+	next := h.st.Settings[id].Clone()
+	if len(req.Setup) > 0 {
+		if err := checkSetupKeys(t, req.Setup); err != nil {
 			return err
 		}
-		setupNext = &next
+		parsed, problems := configCheck(t, h.kinds, h.folderSourceLocked(), SettingsUpdate{Values: req.Setup}, false)
+		if len(problems) > 0 {
+			return problems[0]
+		}
+		if err := gidRangeSaveCheck(t, parsed); err != nil {
+			return err
+		}
+		if next, _, _, _, err = h.nextSettingsLocked(t, next, parsed); err != nil {
+			return err
+		}
 	}
+	next = h.pinSetupValuesLocked(t, next, false)
+	setupNext := &next
 	e := state.Instance{ID: id, Template: templateID, Hosts: view.Hosts, State: state.InstanceCreated,
 		Label: req.Label, UsersGroup: users, AdminsGroup: admins}
 	if def && !hasImmutableHosts(t) && reflect.DeepEqual(view.Hosts, t.DefaultHosts(h.cfg.Domain)) {

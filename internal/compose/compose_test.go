@@ -56,7 +56,9 @@ func TestCLI(t *testing.T) {
 	for _, want := range []string{
 		"compose -p portcullis-app -f /c.yml up --no-start --no-deps",
 		"compose -p portcullis-app -f /c.yml up -d --no-deps --pull never",
-		"compose -p portcullis-app -f /c.yml down --remove-orphans",
+		// Every profile is taken down (an unselected one's containers
+		// are never orphans to compose).
+		"compose -p portcullis-app -f /c.yml --profile * down --remove-orphans",
 		"compose -p portcullis-app down --remove-orphans",
 		"DOCKER_HOST=tcp://socket-proxy-hub:2375 ORPHANS=true",
 	} {
@@ -108,9 +110,10 @@ func TestCLIErrorCarriesOutput(t *testing.T) {
 
 func TestCheckVersion(t *testing.T) {
 	for v, ok := range map[string]bool{
-		// volume subpath (per-person secrets, contract §6) since 2.26.0.
-		"2.26.0": true, "v2.29.1": true, "5.6.1": true, "2.26.0-desktop.1": true,
-		"2.25.0": false, "2.24.4": false, "2.24.3": false, "2.20.0": false, "1.29.2": false, "": false, "garbage": false,
+		// volume subpath (per-person secrets, contract §6) since 2.26.0,
+		// COMPOSE_PROFILES from the env file (§13.18) since 2.27.2.
+		"2.27.2": true, "v2.29.1": true, "5.6.1": true, "2.27.2-desktop.1": true,
+		"2.27.1": false, "2.26.0": false, "2.25.0": false, "2.24.4": false, "2.24.3": false, "2.20.0": false, "1.29.2": false, "": false, "garbage": false,
 	} {
 		if err := CheckVersion(v); (err == nil) != ok {
 			t.Errorf("CheckVersion(%q) = %v", v, err)

@@ -510,6 +510,18 @@ func (h *Hub) planAssignLocked(id string, req AssignRequest, pending *state.Fold
 		c.plan.Uses = append(c.plan.Uses, UsePlan{FolderUse: FolderUse{Instance: u.Instance, Key: u.Key, Subpath: u.Subpath},
 			Label: u.Label, Access: u.Access, ReadOnly: u.ReadOnly, Declared: u.Declared, JoinsGroup: templates.JoinGroupAdd, Change: "remove"})
 	}
+	// A fixed setup choice can't change once its instance has started
+	// (§13.18), through an assignment either (preview and start).
+	for _, e := range c.edits {
+		if h.st.Settings[e.Instance].FirstStartedAt == nil {
+			continue
+		}
+		if t := h.findLocked(e.Instance); t != nil {
+			if o := optionByKey(t, e.Key); o != nil && o.FixedAfterStart {
+				return nil, fixedAfterStartErr(o)
+			}
+		}
+	}
 	sort.SliceStable(c.plan.Uses, func(i, j int) bool {
 		a, b := c.plan.Uses[i], c.plan.Uses[j]
 		if a.Instance != b.Instance {

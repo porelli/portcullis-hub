@@ -133,9 +133,10 @@ func (h *Hub) createInstance(ctx context.Context, req CreateRequest, actor direc
 	if choiceErr != nil {
 		return res, choiceErr
 	}
-	// The setup choices (§11.9, §13.18): parsed like a settings save's
-	// values before anything is created; stored by createEntry.
-	if req.setup, err = h.parseSetup(context.Background(), t, req.Setup); err != nil {
+	// The setup choices (§11.9, §13.18): checked like a settings save's
+	// values before anything is created; createEntry parses them again
+	// under mu and stores them.
+	if _, err = h.parseSetup(context.Background(), t, req.Setup); err != nil {
 		return res, err
 	}
 	bound := req.Groups.Mode == GroupsExisting

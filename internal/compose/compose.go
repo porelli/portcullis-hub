@@ -216,13 +216,20 @@ func (c *CLI) Up(ctx context.Context, p Project) error {
 	return c.run(ctx, c.UpTimeout, "up", Args(p, "up", "-d", "--no-deps", "--pull", "never"))
 }
 
-// Down runs `down --remove-orphans` (volumes are kept): containers of
-// services no longer in the files (e.g. a dropped custom override) go too.
+// Down runs `--profile '*' down --remove-orphans` (volumes are kept):
+// containers of services no longer in the files (e.g. a dropped custom
+// override) go too, and so do those of every compose profile — compose
+// never counts a service of an unselected profile as an orphan, so a
+// setup choice's old profile would otherwise keep running (contract
+// §13.18). Only take-downs select every profile; Create and Up follow the
+// env file's COMPOSE_PROFILES.
 func (c *CLI) Down(ctx context.Context, p Project) error {
-	return c.run(ctx, c.DownTimeout, "down", Args(p, "down", "--remove-orphans"))
+	return c.run(ctx, c.DownTimeout, "down", Args(p, "--profile", "*", "down", "--remove-orphans"))
 }
 
-// DownByName runs `compose -p <name> down --remove-orphans`.
+// DownByName runs `compose -p <name> down --remove-orphans`: with no
+// compose files compose takes the project's containers by its label, so
+// every profile's go (no --profile needed).
 func (c *CLI) DownByName(ctx context.Context, name string) error {
 	return c.run(ctx, c.DownTimeout, "down", []string{"compose", "-p", name, "down", "--remove-orphans"})
 }
@@ -232,8 +239,12 @@ func (c *CLI) DownByName(ctx context.Context, name string) error {
 // (contract §3.1, compose 2.24.4) and mounts the per-person secrets as a
 // volume subpath (`volume.subpath`, contract §6), which compose passes to
 // the Engine since 2.26.0 (docker/compose 39504607, "Add support for
-// volume Subpath option").
-const MinVersion = "2.26.0"
+// volume Subpath option"), and reads COMPOSE_PROFILES from the env file
+// (the setup choices' profiles, contract §13.18) since 2.27.2
+// (docker/compose#11861, "Fix COMPOSE_PROFILES can be set by .env
+// file"). Down's `--profile '*'` (every profile) is older: compose-go's
+// "*" (e0ed5cd7) ships since compose 2.0.0.
+const MinVersion = "2.27.2"
 
 // Version returns `docker compose version --short` (e.g. "2.29.1").
 func (c *CLI) Version(ctx context.Context) (string, error) {
@@ -263,7 +274,7 @@ func CheckVersion(v string) error {
 		return fmt.Errorf("cannot read the docker compose version %q (need %s or newer)", v, MinVersion)
 	}
 	if semver.Compare(sv, "v"+MinVersion) < 0 {
-		return fmt.Errorf("docker compose %s is too old: the Hub needs %s or newer (its overrides use the !override tag and volume subpath mounts)", v, MinVersion)
+		return fmt.Errorf("docker compose %s is too old: the Hub needs %s or newer (its overrides use the !override tag and volume subpath mounts, and instances' compose profiles come from their env files)", v, MinVersion)
 	}
 	return nil
 }

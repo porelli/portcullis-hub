@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -34,6 +35,10 @@ const (
 	DriftJobFailed DriftKind = "job_failed"
 	// DriftJobMissing: a one-off job never ran (no container).
 	DriftJobMissing DriftKind = "job_missing"
+	// DriftInactiveRunning: an enabled instance runs a container of a
+	// service its setup choices leave off (a compose profile not
+	// selected, contract §13.18); a restart takes it down.
+	DriftInactiveRunning DriftKind = "inactive_service_running"
 )
 
 // Drift actions accepted by ResolveDrift.
@@ -43,6 +48,7 @@ const (
 	ActionStop    = "stop"    // compose down a project that is not enabled
 	ActionAdopt   = "adopt"   // enable an app whose containers already run
 	ActionApply   = "apply"   // regenerate the override and compose up
+	ActionRestart = "restart" // compose down (every profile) and up again
 )
 
 // Drift is one mismatch.
@@ -70,6 +76,8 @@ type projectCount struct {
 	failedJobCodes  map[string]int // job service → exit code (0 if unknown)
 	missingJobs     []string       // jobs with no container
 	missingJobCount int            // len(missingJobs), for drift message
+	// inactiveRunning: running services outside the selected profiles.
+	inactiveRunning []string
 }
 
 // computeDrift compares enabled apps with project container counts.
@@ -141,6 +149,15 @@ func computeDrift(enabled, known, snapshot map[string]bool, counts map[string]pr
 			d.Kind = DriftPublicAccess
 			d.Message = blockedPublic[id] + " (in the app's settings)"
 			d.Actions = []string{}
+		case enabled[id] && len(c.inactiveRunning) > 0:
+			// Fail closed (§13.18): nothing of an unselected profile runs.
+			d.Kind = DriftInactiveRunning
+			var msgs []string
+			for _, svc := range c.inactiveRunning {
+				msgs = append(msgs, fmt.Sprintf("service %s runs although the instance's setup choices leave it off", svc))
+			}
+			d.Message = strings.Join(msgs, "; ")
+			d.Actions = []string{ActionRestart, ActionDisable}
 		case enabled[id] && c.failedJobCount > 0:
 			d.Kind = DriftJobFailed
 			var msgs []string
@@ -311,6 +328,14 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 		}
 		if !uncounted {
 			counts[id] = pc
+		} else if c.State == "running" || c.State == "restarting" {
+			// Exited leftovers stay hidden; a running one is drift.
+			ic := counts[id]
+			if !slices.Contains(ic.inactiveRunning, service) {
+				ic.inactiveRunning = append(ic.inactiveRunning, service)
+				slices.Sort(ic.inactiveRunning)
+			}
+			counts[id] = ic
 		}
 	}
 	// C2: Detect missing jobs (jobs that never ran, no container). A job
@@ -607,6 +632,11 @@ func (h *Hub) ResolveDrift(id, action string) error {
 			err = statusErr500Wrap("compose up failed", err)
 		}
 		return h.finishOp(id, op, err, false)
+	case ActionRestart:
+		if !h.IsEnabled(id) {
+			return statusErr(400, "%s is not enabled", id)
+		}
+		return h.RestartApp(id)
 	case ActionStop:
 		unlock, err := h.lockApp(id)
 		if err != nil {

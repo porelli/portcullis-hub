@@ -972,6 +972,7 @@ func staleKey(t *templates.Template, key, want, storedType string) string {
 // sync or Init (P9): a rolled-back update drops nothing. Returns the
 // audits to write once mu is released. Caller holds mu (write).
 func (h *Hub) pruneSettingsLocked() (audits []func()) {
+	pinned := false
 	for _, id := range slices.Sorted(maps.Keys(h.st.Settings)) {
 		t := h.findLocked(id)
 		if t == nil {
@@ -987,7 +988,23 @@ func (h *Hub) pruneSettingsLocked() (audits []func()) {
 			target, detail := id+"/"+key, why
 			audits = append(audits, func() { h.auditOp(directory.Human(purgeActor), "settings.purge", target, detail, nil) })
 		}
+		started := s.FirstStartedAt != nil
+		if started {
+			// A fixed choice the template added since the first start is
+			// pinned and locked too (its default must not move it later).
+			if p := h.pinFixedLocked(t, s); !reflect.DeepEqual(p.FixedKeys, s.FixedKeys) {
+				s, changed, pinned = p, true, true
+			}
+		}
 		for _, k := range slices.Sorted(maps.Keys(s.Values)) {
+			if started && slices.Contains(s.FixedKeys, k) {
+				// Never dropped (§13.18): a choice that no longer fits
+				// refuses the instance's start instead.
+				if why := fixedChoiceMisfit(h.kinds, t, k, s); why != "" {
+					log.Printf("settings: %s: setup choice %s kept although it no longer fits the template (%s): the instance won't start until it does", id, k, why)
+				}
+				continue
+			}
 			o := optionByKey(t, k)
 			why := staleKey(t, k, templates.ScopeInstance, s.Types[k])
 			if why == "" && o.Type == templates.TypeSecret {
@@ -1070,7 +1087,7 @@ func (h *Hub) pruneSettingsLocked() (audits []func()) {
 			h.st.Settings[id] = s
 		}
 	}
-	if len(audits) > 0 {
+	if len(audits) > 0 || pinned {
 		h.saveLocked()
 	}
 	return audits
@@ -1139,7 +1156,44 @@ func (h *Hub) pruneSettings() {
 // drops such rows).
 func SettingsIncompatibilities(old, new *templates.Template, s state.InstanceSettings) []string {
 	var out []string
+	// A started instance's fixed choices (§13.18) are never dropped: one
+	// that no longer fits refuses the instance's start, and one whose
+	// value would start other compose profiles is listed too.
+	fixed := map[string]bool{}
+	if s.FirstStartedAt != nil {
+		for _, k := range s.FixedKeys {
+			fixed[k] = true
+		}
+		if old != nil && old.Manifest.Settings != nil {
+			for _, o := range old.Manifest.Settings.Options {
+				if _, stored := s.Values[o.Key]; o.Setup && o.FixedAfterStart && stored {
+					fixed[o.Key] = true
+				}
+			}
+		}
+	}
+	kinds := settings.NewRegistry()
+	for _, k := range slices.Sorted(maps.Keys(fixed)) {
+		if why := fixedChoiceMisfit(kinds, new, k, s); why != "" {
+			out = append(out, fmt.Sprintf("setup choice %s is fixed after the first start and no longer fits: %s: it is kept, and the instance won't start until the template fits it again", k, why))
+			continue
+		}
+		v, _ := s.Values[k].(string)
+		var before, after []string
+		if o := optionByKey(old, k); o != nil {
+			before = o.Profiles[v]
+		}
+		if o := optionByKey(new, k); o != nil {
+			after = o.Profiles[v]
+		}
+		if !slices.Equal(sortedCopy(before), sortedCopy(after)) {
+			out = append(out, fmt.Sprintf("setup choice %s (%s) is fixed after the first start and would start compose profiles [%s] instead of [%s]", k, v, strings.Join(sortedCopy(after), ", "), strings.Join(sortedCopy(before), ", ")))
+		}
+	}
 	check := func(key, scope string) {
+		if fixed[key] {
+			return // listed above
+		}
 		o := optionByKey(new, key)
 		prev := optionByKey(old, key)
 		typ := s.Types[key]
@@ -1200,5 +1254,12 @@ func (h *Hub) privilegedGroupsLocked(t *templates.Template) []string {
 		out = append(out, g)
 	}
 	sort.Strings(out)
+	return out
+}
+
+// sortedCopy is a sorted copy of list (nil stays nil).
+func sortedCopy(list []string) []string {
+	out := slices.Clone(list)
+	slices.Sort(out)
 	return out
 }

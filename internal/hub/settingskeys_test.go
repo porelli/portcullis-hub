@@ -26,6 +26,7 @@ func fullInstanceSettings(t *testing.T) state.InstanceSettings {
 		Entered:        map[string]map[string]state.EnteredValue{"ext_id": {"alice": {Value: "a1", UUID: "u-1", UpdatedAt: at}}},
 		GroupIDs:       map[string]map[string]int{"share1_writers": {"users_smb": 12}},
 		FirstStartedAt: &at,
+		FixedKeys:      []string{"database"},
 	}
 	v := reflect.ValueOf(s)
 	for i := 0; i < v.NumField(); i++ {

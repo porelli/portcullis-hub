@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -88,5 +89,10 @@ func TestCreateSetupRouteAndTool(t *testing.T) {
 	}
 	if v, ok := e.s.Hub.InstanceView("dbapp-b"); !ok || v.Setup.Locked {
 		t.Errorf("view = %+v", v)
+	}
+	// The confirmation's consequences show the choices decoded.
+	got := strings.Join(e.s.createConsequences(context.Background(), json.RawMessage(`{"template":"dbapp","id":"dbapp-c","label":"C","setup":{"database":"postgres"}}`)), " ")
+	if !strings.Contains(got, "Setup choices: database = postgres.") {
+		t.Errorf("consequences = %q", got)
 	}
 }

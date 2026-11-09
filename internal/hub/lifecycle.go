@@ -105,6 +105,11 @@ func (h *Hub) prepareUp(t *templates.Template) (*templates.Template, error) {
 	// refused, 503).
 	err := h.ensureSecretDirsLocked(live)
 	if err == nil {
+		// A locked setup choice the template no longer fits: never
+		// started on other data (§13.18).
+		err = h.fixedChoicesErrLocked(live)
+	}
+	if err == nil {
 		err = h.generateOverrideLocked(live, h.st.Settings[t.ID])
 	}
 	if err == nil {
@@ -548,6 +553,10 @@ func (h *Hub) enableInner(ctx context.Context, id string, restoring bool) (rolle
 		return false, err
 	}
 	if err := h.checkSubdomainCollisionsLocked(&tmpl); err != nil {
+		h.mu.Unlock()
+		return false, err
+	}
+	if err := h.fixedChoicesErrLocked(&tmpl); err != nil {
 		h.mu.Unlock()
 		return false, err
 	}

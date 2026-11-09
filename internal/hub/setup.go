@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"maps"
 	"net/http"
 	"slices"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/compose-spec/compose-go/v2/types"
 
+	"github.com/portcullis/hub/internal/settings"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
 )
@@ -34,18 +36,116 @@ func (h *Hub) setupViewLocked(id string) SetupView {
 }
 
 // stampFirstStartLocked records instance id's first successful start
-// (InstanceSettings.FirstStartedAt, §13.18) unless one is recorded;
-// reports whether it did (the caller saves). Caller holds mu (write).
+// (InstanceSettings.FirstStartedAt, §13.18) unless one is recorded, and
+// stores the effective value of every fixed_after_start option that has
+// none (an instance created before setup values were stored at create:
+// a later default change can't move its choice); reports whether it
+// changed anything (the caller saves). Caller holds mu (write).
 func (h *Hub) stampFirstStartLocked(id string) bool {
 	s := h.st.Settings[id]
 	if s.FirstStartedAt != nil {
 		return false
 	}
 	s = s.Clone()
+	if v := h.findLocked(id); v != nil {
+		s = h.pinFixedLocked(v, s)
+	}
 	now := time.Now().UTC()
 	s.FirstStartedAt = &now
 	h.st.Settings[id] = s
 	return true
+}
+
+// pinFixedLocked is s with every fixed_after_start setup option of t
+// pinned (pinSetupValuesLocked) and recorded in FixedKeys (those with a
+// stored value; sorted, once each). Caller holds mu.
+func (h *Hub) pinFixedLocked(t *templates.Template, s state.InstanceSettings) state.InstanceSettings {
+	s = h.pinSetupValuesLocked(t, s, true)
+	keys := slices.Clone(s.FixedKeys)
+	opts := t.Manifest.Options()
+	for i := range opts {
+		o := &opts[i]
+		if !o.Setup || !o.FixedAfterStart {
+			continue
+		}
+		if _, stored := s.Values[o.Key]; stored && !slices.Contains(keys, o.Key) {
+			keys = append(keys, o.Key)
+		}
+	}
+	slices.Sort(keys)
+	if len(keys) > 0 {
+		s.FixedKeys = keys
+	}
+	return s
+}
+
+// fixedChoiceMisfit says why stored fixed choice key of s no longer fits
+// template t ("" = it fits): the option removed, rescoped or retyped, or
+// its stored value refused by the option's type now. kinds parses.
+func fixedChoiceMisfit(kinds *settings.Registry, t *templates.Template, key string, s state.InstanceSettings) string {
+	if why := staleKey(t, key, templates.ScopeInstance, s.Types[key]); why != "" {
+		return why
+	}
+	o := optionByKey(t, key)
+	if o.Type == templates.TypeSecret {
+		return "the option is now a secret"
+	}
+	raw, ok := s.Values[key]
+	if !ok || raw == nil {
+		return "its stored value is missing"
+	}
+	if _, err := kinds.Parse(o, raw); err != nil {
+		return fmt.Sprintf("its stored value %v is no longer valid (%v)", raw, err)
+	}
+	return ""
+}
+
+// fixedChoicesErrLocked refuses (409, fail closed) to start instance t
+// while one of its locked choices (FixedKeys) no longer fits its
+// template: it would start on other data (§13.18). Caller holds mu.
+func (h *Hub) fixedChoicesErrLocked(t *templates.Template) error {
+	s := h.st.Settings[t.ID]
+	if s.FirstStartedAt == nil {
+		return nil
+	}
+	for _, k := range s.FixedKeys {
+		if why := fixedChoiceMisfit(h.kinds, t, k, s); why != "" {
+			return statusErr(http.StatusConflict, "setup choice %s no longer fits the template: %s (it was fixed at the first start; restore the template version that fits it, or create a new instance and restore a backup into it)", k, why)
+		}
+	}
+	return nil
+}
+
+// pinSetupValuesLocked is s with the effective value (the template's
+// default) stored for every setup option of t without a stored one —
+// only the fixed_after_start ones when onlyFixed. An option with no
+// effective value stores nothing. Caller holds mu.
+func (h *Hub) pinSetupValuesLocked(t *templates.Template, s state.InstanceSettings, onlyFixed bool) state.InstanceSettings {
+	if t.Manifest.Settings == nil {
+		return s
+	}
+	for i := range t.Manifest.Settings.Options {
+		o := &t.Manifest.Settings.Options[i]
+		if !o.Setup || (onlyFixed && !o.FixedAfterStart) || o.EffectiveScope() != templates.ScopeInstance || o.Type == templates.TypeSecret {
+			continue
+		}
+		if _, stored := s.Values[o.Key]; stored {
+			continue
+		}
+		v, ok := h.effectiveValue(t, o, s)
+		if !ok || v == nil {
+			continue
+		}
+		if s.Values == nil {
+			s.Values = map[string]any{}
+		}
+		if s.Types == nil {
+			s.Types = map[string]string{}
+		}
+		s.Values[o.Key] = storedValue(v)
+		s.Types[o.Key] = o.Type
+	}
+	return s
 }
 
 // profilesLocked are instance t's compose profiles (templates.ProfilesFor

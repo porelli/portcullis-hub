@@ -292,7 +292,7 @@ type (
 	}
 	resolveArgs struct {
 		ID     string `json:"id" jsonschema:"the instance or project id"`
-		Action string `json:"action" jsonschema:"one of the drift's actions: start, apply, adopt, disable"`
+		Action string `json:"action" jsonschema:"one of the drift's actions: start, apply, restart, adopt, disable"`
 	}
 	entryArgs struct {
 		ID    string          `json:"id" jsonschema:"the instance id"`
@@ -666,7 +666,7 @@ func (s *Server) registerAdminTools() {
 				}
 				return s.Hub.Drift(), nil
 			}),
-		{Name: "resolve_drift", Description: "Resolve a drift item with one of its actions: start or apply (compose up with the Hub's configuration), adopt (enable running containers), disable (stop and disable). Needs your confirmation in the browser.",
+		{Name: "resolve_drift", Description: "Resolve a drift item with one of its actions: start or apply (compose up with the Hub's configuration), restart (compose down with every profile, then up), adopt (enable running containers), disable (stop and disable). Needs your confirmation in the browser.",
 			Class: ClassDestructive, Scope: ScopeAdmin, Twin: "/api/drift/resolve", Audit: "drift.resolve", In: resolveArgs{},
 			Typed: idOf,
 			Consequences: func(_ context.Context, args json.RawMessage) []string {
@@ -676,6 +676,8 @@ func (s *Server) registerAdminTools() {
 					return []string{"Stops " + a.ID + "'s project and marks it disabled."}
 				case hub.ActionAdopt:
 					return []string{"Enables " + a.ID + ", adopting the containers that run."}
+				case hub.ActionRestart:
+					return []string{"Restarts " + a.ID + ": every container of its project is stopped, then the ones its setup choices select are started."}
 				default:
 					return []string{"Runs compose up for " + a.ID + " with the Hub's configuration (action " + q(a.Action) + "): containers may be recreated."}
 				}
@@ -992,7 +994,13 @@ func (s *Server) createConsequences(ctx context.Context, args json.RawMessage) [
 	if len(a.Setup) > 0 {
 		var parts []string
 		for _, k := range slices.Sorted(maps.Keys(a.Setup)) {
-			parts = append(parts, q(k)+" = "+q(string(a.Setup[k])))
+			// Decoded: a string choice shows bare (no JSON quotes).
+			v := string(a.Setup[k])
+			var str string
+			if json.Unmarshal(a.Setup[k], &str) == nil {
+				v = str
+			}
+			parts = append(parts, hub.VisibleText(k)+" = "+hub.VisibleText(v))
 		}
 		lines = append(lines, "Setup choices: "+strings.Join(parts, ", ")+".")
 	}
