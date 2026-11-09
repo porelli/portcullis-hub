@@ -51,17 +51,23 @@ for a client certificate at all follows the switches (no certificate method on
 
 ### Templates
 
-- A template is a named rule: **any one of several "ways in"**; each way in is
-  one or more methods that are **all** required. (E.g. "Family" = password
-  AND passkey, OR YubiKey touch.) No deeper nesting.
+- A template is a named rule: a tree of groups, each **"all of"** or **"any
+  of"**, holding methods and other groups — any combination, e.g.
+  ((password AND YubiKey touch) OR (YubiKey AND passkey)) AND a certificate.
+  Groups nest up to 3 levels. The editor shows the rule as nested boxes and
+  as one plain-English sentence, both updated live (mockup
+  `signin-nested-rule.html`). A method entry may itself be a family
+  ("YubiKey (touch or certificate)", "Certificate (YubiKey or browser)",
+  "Passkey (any kind)") = an "any of" of those methods.
 - Built-in templates ship (Basic, Standard, Strong, YubiKey + certificate);
   admins can edit them and add their own ("+ New template").
 - Each template can be switched on or off; only enabled ones appear in the
   drop-downs. A template in use (by the default or any app) can't be switched
   off.
 - **Score**, per template, shown everywhere as "2.9 / 5" with a one-line
-  reason: a way in scores its strongest method + 0.4 per extra method (max
-  5); a template scores its **weakest** way in. Updated live in the editor.
+  reason, computed over the tree: an "all of" group scores its strongest part
+  + 0.4 per extra part (max 5); an "any of" group scores its **weakest** part;
+  a method scores its strength. Updated live in the editor.
 - The editor shows who it would affect ("2 people can't sign in to
   Nextcloud · family with it: bob (password only), dave (no method yet)").
 
@@ -182,7 +188,6 @@ An admin can sign in as another person and act in their apps.
 - Writing a certificate to a YubiKey from the browser (browsers can't write
   PIV; the CLI stays for that, plus the admin CSR action).
 - An impersonation banner inside apps.
-- Nested rules beyond "any of (all of …)".
 - Migration of existing policies or certificates (no installs).
 
 ## Anti-goals
@@ -198,14 +203,15 @@ An admin can sign in as another person and act in their apps.
 
 ## Calls I made (check these)
 
-1. **Scoring weights** as in the table; template = weakest way in; +0.4 per
-   extra method in a way in; max 5. One table in the Hub and the docs.
+1. **Scoring weights** as in the table; "any of" = weakest part, "all of" =
+   strongest part + 0.4 per extra part, max 5. One table in the Hub and the
+   docs.
 2. **Built-in templates**: Basic (any method), Standard (any passkey or any
    certificate — default), Strong (YubiKey touch or YubiKey certificate),
    YubiKey + certificate (both, off until switched on). Editable. Core pages
    (Hub, people.<domain>) start on **Strong**, not the server default: they
    control everything else.
-3. **Rule shape** = OR of AND groups only.
+3. **Rule depth**: groups nest up to 3 levels (any rule a person can still read at a glance).
 4. **Synced vs hardware passkey** decided at registration by attestation /
    AAGUID; unknown = synced (fail toward weaker).
 5. **Impersonated sessions** meet a template only if the admin's own current
