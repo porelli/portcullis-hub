@@ -13,7 +13,7 @@
 ## Global Constraints
 
 Process and checks (rules, verbatim):
-- Branch `signin` in every repo touched (docs, keycloak, hub, templates, core), mainlined at the end, no PRs. The new repo `porelli/portcullis-keycloak` (local checkout `/Volumes/workspace/portcullis/portcullis-keycloak`) starts with `main` holding only the scaffolding, then `signin` on top of it. Docs: the main checkout is dirty with someone else's work, so work in a worktree: `git -C /Volumes/workspace/portcullis/portcullis-docs worktree add ../wt-docs-signin -b signin origin/main`. Core's local `main` is behind; branch from `origin/main`.
+- Branch `signin` in every repo touched (docs, keycloak, hub, templates, core), mainlined at the end, no PRs. The worktrees already exist, all on branch `signin`: `/Volumes/workspace/portcullis/wt-signin/portcullis-docs`, `/Volumes/workspace/portcullis/wt-signin/portcullis-hub`, `/Volumes/workspace/portcullis/wt-signin/portcullis-templates` and `/Volumes/workspace/portcullis/wt-signin/portcullis` (core). Every task works in its repo's worktree; no `worktree add` step. The new repo `porelli/portcullis-keycloak` (local checkout `/Volumes/workspace/portcullis/portcullis-keycloak`) is created in Task 10 and starts with `main` holding only the scaffolding, then `signin` on top of it.
 - No migration / back-compat code. There are no installs: policy file v5, gate file v1, `AuthPolicy` and `factors` disappear without readers for the old shapes.
 - Contract first: Task 1 changes `docs/guides/integration-contracts.md` before any code.
 - Never weaken access control, fail closed. An unknown method, rule shape or file version, or an unreadable file, denies. A method or template that is switched off is never accepted.
@@ -55,7 +55,7 @@ Decisions (made here; the spec leaves them to the builder):
 - **D5 Keycloak 26.8.1 can't do this stock, so the extension repo ships one.** Stock Keycloak has three gaps: (a) a token doesn't say which passkey signed in; (b) registration stores only the attestation *format*, accepts `none`/self attestation for any AAGUID, and the realm truststore would reject FIDO attestation chains; (c) LoA levels are cumulative, so one specific method can't be asked for. The extension lives in `porelli/portcullis-keycloak` (Gradle, dependency verification) and is published as `ghcr.io/porelli/portcullis-keycloak` (FROM the pinned Keycloak, plus the jar). Its theme template `portcullis-needs-stronger.ftl` ships inside the jar (`theme-resources/templates/`), so core's mounted `portcullis` theme needs no copy. Its provider ids:
   - `webauthn-register-passwordless`: overrides the stock required action, so enroll, the account console and the Hub's "Require passkey" keep working. It uses a `NullCertPathTrustworthinessValidator` (the realm truststore would reject FIDO chains), then classifies the new credential (D14), stores the attestation in the extension's table and the credential under the type of its kind. It refuses a stronger kind from a weaker session while add-stronger is off.
   - `portcullis-security-key`, `portcullis-device-passkey`: WebAuthn credential providers with their own types and account-console metadata.
-  - `portcullis-passkey-store`: a `JpaEntityProvider` with a Liquibase changelog for the table `PORTCULLIS_PASSKEY` (credential id PK, realm id, user id, AAGUID, attestation format, attestation statement as base64url CBOR, x5c chain, backup-eligible flag, current kind, MDS serial it was classified against, classified at). The stored statement, its AAGUID and the authData flags are kept for the credential's whole life and deleted with it (a `CredentialModel` removal listener plus a sweep for orphans).
+  - `portcullis-passkey-store`: a `JpaEntityProvider` with a Liquibase changelog for two tables. `PORTCULLIS_PASSKEY` holds the credential id (PK), realm id, user id, AAGUID, attestation format, attestation statement as base64url CBOR, `authenticator_data` (base64url), x5c chain, backup-eligible flag, current kind, `capped_at` (the add-stronger cap, D14; null = none), the MDS serial it was classified against and when. `PORTCULLIS_SIGNIN_STATE` (realm id PK) holds the last applied MDS serial. The stored statement, its AAGUID and the authenticator data are kept for the credential's whole life and deleted with it (a `CredentialModel` removal listener plus a sweep for orphans).
   - `portcullis-reclassify`: a scheduled task (Keycloak `TimerProvider`, every 5 min) that runs when `signin-keycloak.json`'s `mds.serial` is newer than the last serial it applied (D14 rules).
   - `portcullis-passkey`: a passkey login that accepts all three types and puts the kind used in the auth note `portcullis.passkey.kind`.
   - `portcullis-condition-passkey-kind` (config `kind`).
@@ -70,20 +70,21 @@ Decisions (made here; the spec leaves them to the builder):
   - Every reference execution has `default.reference.maxAge` 36000, so the amr mapper keeps a method for 10 h.
   - The invite post-broker flow keeps its shape, with its amr config value renamed `inv`.
   - Realm `bruteForceProtected: true` (failureFactor 10, waitIncrementSeconds 60, maxFailureWaitSeconds 900, permanentLockout false). The passwordless WebAuthn policy is attestation `direct`, no attachment restriction, resident key and UV required.
-- **D7 Step-up asks for one method.** group-gate's step-up URL is `…/oauth2/start?pc_method=<method id or "passkey">&rd=…`. oauth2-proxy's `loginURLParameters` drops `acr_values` and allows `pc_method` with exactly the six ids plus `passkey`; `kc_idp_hint` and `prompt` are unchanged. Keycloak keeps an unknown authorize parameter as the client note `client_request_param_pc_method`, which the extension reads. Task 15 pins this with a live test.
+- **D7 Step-up asks for one method.** group-gate's step-up URL is `…/oauth2/start?pc_method=<method id or "passkey">&rd=…`. oauth2-proxy's `loginURLParameters` drops `acr_values` and allows `pc_method` with exactly the six ids plus `passkey`; `kc_idp_hint` and `prompt` are unchanged. Keycloak keeps an unknown authorize parameter as the client note `client_request_param_pc_method`, which the extension reads. Task 18 (`pc_method_reaches_keycloak`) pins this with a live test.
 - **D8 Session methods.** The session's methods are the stock amr (Keycloak's completed executions within max age) mapped through D1 and kept only while the method is on. group-gate counts `yubikey_cert` only when the current request presents a non-revoked certificate whose CN is the session user (today's mTLS binding, generalised). mcp-gate never counts `yubikey_cert` or `browser_cert`, because MCP clients present no certificate (stricter).
-- **D9 Native-OIDC: exact, never weaker.** `signin-keycloak.json` maps the client id of every Keycloak client of an enabled `native-oidc` instance (not `ai_client`s) to its template. `portcullis-template` at the end of the realm browser flow, and of the Hub's access-flow copies, enforces it at every login. A missing or invalid file denies every listed client. The Hub stops pushing `default.acr.values`: `UpdateClientACR`, `ClientSpec.ACR` and `AIDefaultACR` go. The TLS tier follows D18.
+- **D9 Native-OIDC: exact, never weaker.** `signin-keycloak.json` maps the client id of every Keycloak client of an enabled `native-oidc` instance (not `ai_client`s) to its template. `portcullis-template` at the end of the realm browser flow, and of the Hub's access-flow copies, enforces it at every login. A missing or invalid file (`DENY_ALL`) makes `portcullis-template` fail for every client; an unlisted client (with a valid file) is left to group-gate. The Hub stops pushing `default.acr.values`: `UpdateClientACR`, `ClientSpec.ACR` and `AIDefaultACR` go. The TLS tier follows D18.
 - **D10 Policy file v6** (contract §4) replaces `default` / `policies` with:
   - `methods`: the switched-on ids, sorted;
   - `templates`: id → compiled rule, enabled templates only;
   - `default`: a template id;
   - `hosts`: app hostname → template id, only for instances with their own pick;
   - `core`: core hostname → template id, for every gated core host;
-  - `people`: lowercase user → ids of the switched-on methods they have set up (page text only, never an access decision).
+  - `people`: lowercase user → ids of the switched-on methods they have set up (page text only, never an access decision);
+  - `add_stronger`: bool, the Settings switch (page text only: "Set up …" vs "ask your admin").
 
   `groups`, `path_groups`, `public_paths`, `expiring` and `extra_domains` are unchanged. On a hostname collision the Hub publishes the stricter template, or, when neither implies the other, a synthetic template `collision.<n>` = all of both (never weaker).
 - **D11 Core pages.** `state.SignIn.Core` maps a core subdomain key (`portal` = the apex, `hub`, `people`, `directory`, `enroll`, `metrics`, `traefik`) to a template id; `""` means the default. It starts with `hub` and `people` on `strong` and the rest on the default. `auth` and `mcp` are not gated by group-gate and take no template.
-- **D12 Hub storage.** `state.yaml` gets `sign_in` (methods, templates, default, core, add_stronger, passwords) and `instances.<id>.sign_in_template` (`""` = default). Built-ins `basic` (any of `family:passkey`, `family:certificate`, `password`), `standard` (any of `family:passkey`, `family:certificate`; the default), `strong` (any of `security_key`, `yubikey_cert`) and `yubikey-and-certificate` (all of `yubikey_cert`, `security_key`; disabled) can be edited and disabled, never deleted. Template ids match `^[a-z][a-z0-9-]{0,31}$` and names are 1–48 visible runes. Changes are admin only, audited (`signin.method`, `signin.template`, `signin.template_enabled`, `signin.template_delete`, `signin.default`, `signin.core`, `signin.add_stronger`, `signin.reset_core`; the per-app pick is `settings.change` with scope `sign_in_template`; refusals `refused`). MCP twins have classes (Task 6).
+- **D12 Hub storage.** `state.yaml` gets `sign_in` (methods, templates, default, core, add_stronger, passwords) and `instances.<id>.sign_in_template` (`""` = default). Built-ins `basic` (any of `family:passkey`, `family:certificate`, `password`), `standard` (any of `family:passkey`, `family:certificate`; the default), `strong` (any of `security_key`, `yubikey_cert`) and `yubikey-and-certificate` (all of `yubikey_cert`, `security_key`; disabled). `basic` also starts **disabled**: it names `password`, which starts off, so it can't compile (D2). All four built-ins can be edited and disabled, never deleted. Template ids match `^[a-z][a-z0-9-]{0,31}$` and names are 1–48 visible runes. Changes are admin only, audited (`signin.method`, `signin.template`, `signin.template_enabled`, `signin.template_delete`, `signin.default`, `signin.core`, `signin.add_stronger`, `signin.reset_core`; the per-app pick is `settings.change` with scope `sign_in_template`; refusals `refused`). MCP twins have classes (Task 6).
 - **D13 Passwords.** The sign-in password *is* the LLDAP password (one password). Keycloak checks it by LDAP bind (federation stays READ_ONLY). The Hub records `sign_in.passwords.<user> = {set_at, set_by}` whenever it sets one (People page, password onboarding), and only Hub-recorded passwords count in the counts, warnings and the lockout guard. Hub-set passwords must be 12–128 characters, not the username, and not in the embedded common-password list (SecLists 10k, MIT, `internal/signin/common-passwords.txt`). Setting a password is allowed while the method is off (LDAP-bind apps use it); password *onboarding* is refused (409) while it is off. Password sign-in is always refused for the bootstrap `admin` and for `portcullis-hub` (D5's `portcullis-password-form`); the Hub never counts a password for them in counts, warnings or the lockout guard, and its password view for them says "Password sign-in isn't available for this account".
 - **D14 Passkey kinds** are decided by the extension at registration, from the attestation it keeps (D5's table). It uses `webauthn4j`'s parsed `AttestationObject` and its `TrustAnchorCertPathTrustworthinessValidator` over a trust-anchor repository built from the published roots of that one AAGUID.
   - **security_key** = a packed / tpm / android-key / fido-u2f attestation whose x5c chains to that AAGUID's roots, the leaf's AAGUID extension (1.3.6.1.4.1.45724.1.1.4) equal to the authData AAGUID when present, backup-eligible flag 0, and the published entry `{kind: security_key, status: certified}`.
@@ -120,7 +121,7 @@ Decisions (made here; the spec leaves them to the builder):
 2. **A synced or device-bound passkey passing a security-key rule**, e.g. a software authenticator claiming a YubiKey AAGUID with `none` attestation, or a backup-eligible key. Expected: the credential is synced. Pinned by `PasskeyClassifierTest` (Task 11) and `TestSecurityKeyRuleRefusesDeviceBound` (Task 2).
 3. **A password satisfying a template that doesn't list it**, through a family, a collision merge or a setup-link session. Expected: no `passkey` / `yubikey` / `certificate` family ever contains password, and `inv` meets nothing. Pinned by `TestFamiliesNeverContainPassword` and the shared vectors (Task 2), and `test_inv_session_meets_nothing` (Task 15).
 4. **An admin locking everyone out of the Hub** by switching off the method all admins use, editing Strong, or moving the Hub to a template no admin meets. Expected: 409 naming who. Recovery is the CLI. Pinned by `TestSignInLockoutGuard` (Task 5) and `TestSignInResetCore` (Task 5).
-5. **A native-OIDC app enforcing less than its template**: its client missing from `signin-keycloak.json`, or a stale file. Expected: every native-oidc client is listed with its exact template, and an unlisted, missing or invalid file denies. Pinned by `TestSignInKeycloakFileListsEveryNativeClient` (Task 4) and `TemplateAuthenticatorTest.deniesWhenConfigInvalid` (Task 12).
+5. **A native-OIDC app enforcing less than its template**: its client missing from `signin-keycloak.json`, or a stale file. Expected: every native-oidc client is listed with its exact template; a missing or invalid file denies; an unlisted client is left to group-gate. Pinned by `TestSignInKeycloakFileListsEveryNativeClient` (Task 4) and `TemplateAuthenticatorTest.deniesWhenConfigInvalid` (Task 12).
 
 ---
 
@@ -147,12 +148,12 @@ Decisions (made here; the spec leaves them to the builder):
    "templates": {"standard": {"op":"any","items":[{"op":"any","items":["passkey_synced","passkey_device","security_key"]},{"op":"any","items":["yubikey_cert"]}]}},
    "default": "standard", "hosts": {"git.example.com": "strong"},
    "core": {"hub.example.com": "strong", "people.example.com": "strong", "example.com": "standard"},
-   "people": {"alice": ["passkey_synced","security_key"]},
+   "people": {"alice": ["passkey_synced","security_key"]}, "add_stronger": false,
    "extra_domains": [], "groups": {}, "path_groups": {}, "public_paths": {}, "expiring": []}
   ```
   Gate file v2 resource: `"rule": {…compiled…}` instead of `"min_loa"`, plus top-level `"methods": […]`, with no `acr_loa`. Also the `signin-keycloak.json` schema of D20.
 
-- [ ] **Step 1:** In the worktree `/Volumes/workspace/portcullis/wt-docs-signin` (branch `signin`), write the sections above. Every value is copied from D1–D20, and the score example is `all[any[all[password, security_key], all[family:yubikey, family:passkey]], family:certificate]` = 4.4 / 5 with browser_cert off. Say in the operator page and in §9.4:
+- [ ] **Step 1:** In the worktree `/Volumes/workspace/portcullis/wt-signin/portcullis-docs` (branch `signin`), write the sections above. Every value is copied from D1–D20, and the score example is `all[any[all[password, security_key], all[family:yubikey, family:passkey]], family:certificate]` = 4.4 / 5 with browser_cert off. Say in the operator page and in §9.4:
   - after a setup link the person touches their new passkey once more to open apps, because a setup-link session (`inv`) meets no template;
   - fresh auth accepts any passkey kind or a YubiKey certificate, never a password, a browser certificate or a setup link;
   - password sign-in is never available for `admin` and `portcullis-hub`;
@@ -208,6 +209,8 @@ Sentence: leaf → Phrase; all → items joined " and "; any → joined ", or " 
           group, else " or "; a multi-item any inside an all is wrapped in "( … )".
 Phrases: "a password","a synced passkey","a browser certificate","a device-bound passkey","a YubiKey touch",
          "a YubiKey certificate"; family:passkey "a passkey", family:yubikey "a YubiKey", family:certificate "a certificate".
+Shorts (Info.Short, for Blocked.Why): "password", "synced passkey", "browser certificate", "device-bound passkey",
+         "security key", "YubiKey certificate".
 Satisfied: leaf → have[m]; any → some item; all → every item.
 ```
 
@@ -218,7 +221,7 @@ Satisfied: leaf → have[m]; any → some item; all → every item.
   //  family example any[all[password, family:passkey], security_key] (password on) == "2.9 / 5",
   //    Reason == "its weakest way in: a password and a passkey"
   //  nested all[any[all[password,security_key], all[family:yubikey,family:passkey]], family:certificate]
-  //    == "4.4 / 5" (browser_cert off), "4.3 / 5" with browser_cert on; all of 9 leaves capped: Tenths == 50
+  //    == "4.4 / 5" (browser_cert off), "4.3 / 5" with browser_cert on; all of 8 leaves capped: Tenths == 50 (4.0 + 0.4×7 = 6.8 → 5)
   func TestSentenceNested(t *testing.T) // the nested rule above ==
   //  "(a password and a YubiKey touch, or a YubiKey and a passkey) and a certificate"
   func TestValidateLimits(t *testing.T)        // depth 4 error; 9 items error; 17 leaves error; unknown leaf error; leaf top error
@@ -232,7 +235,7 @@ Satisfied: leaf → have[m]; any → some item; all → every item.
   func TestCheckPassword(t *testing.T)    // "short" error; username error; "password1234" (listed) error; 12 random OK
   func TestSharedVectors(t *testing.T)    // every case in testdata/vectors.json: Compile, Satisfied, Alternatives match
   ```
-  `vectors.json` = `{"version":1,"cases":[{"name","rule","on","have","satisfied","alternatives"}…]}`, with at least 25 cases, including every Review Focus line 1–3 input and `"have": ["inv"]`, which `MethodForAMR` drops.
+  `vectors.json` = `{"version":1,"cases":[{"name","rule","on","compiled","error","have","satisfied","alternatives"}…]}`, with at least 25 cases, including every Review Focus line 1–3 input and `"have": ["inv"]`. `rule` is the source rule (families allowed); `compiled` is the Hub's `Compile` output, or absent with `"error": "unmeetable"`. The readers (Java, Python, mcp-gate) use `compiled` only. `have` holds **amr values**, which each reader maps through its D1 table (so `inv` and unknown values drop out). `alternatives` (method ids) are compared as a set of sets; order is not significant.
 - [ ] **Step 2: Run them to see them fail.** Run `go test ./internal/signin/...`. Expected: FAIL (package doesn't exist).
 - [ ] **Step 3: Implement** the files with the interfaces above. `common-passwords.txt` is SecLists' 10k most common passwords (MIT), embedded with `//go:embed`.
 - [ ] **Step 4: Run them to see them pass.** Run `go test -race ./internal/signin/...`. Expected: `ok`.
@@ -243,7 +246,7 @@ Satisfied: leaf → have[m]; any → some item; all → every item.
 ### Task 3: State, built-ins and the sign-in service (hub)
 
 **Files:**
-- Modify: `internal/state/state.go`: add `SignIn` and `Instance.SignInTemplate`; remove `AuthPolicies`, `DefaultPolicy`, `ResolvePolicy`, `Default`, `SetDefault`, `Instance.Policy`.
+- Modify: `internal/state/state.go`: add `SignIn` and `Instance.SignInTemplate` **alongside** the old policy fields. Task 4 removes `AuthPolicies`, `DefaultPolicy`, `ResolvePolicy`, `Default`, `SetDefault` and `Instance.Policy` together with their callers, so Task 3 builds and passes on its own.
 - Create: `internal/hub/signin.go`, `internal/hub/signin_audit.go`
 - Test: `internal/state/state_test.go`, `internal/hub/signin_test.go`
 
@@ -278,7 +281,8 @@ Satisfied: leaf → have[m]; any → some item; all → every item.
   type TemplateInput struct{ Name string; Rule signin.Node }
   type SignInChange struct{ View *SignInView; Restarts []string; Warnings []string }
   type TemplatePreview struct{ Sentence string; Score signin.Score; Affected []AffectedApp; Problem string }
-  type AffectedApp struct{ Instance, Name string; Blocked []Blocked } // Blocked from Task 5
+  type AffectedApp struct{ Instance, Name string; Blocked []Blocked }
+  type Blocked struct{ User, Why string } // declared here (signin.go); Task 5 fills it
   type UseRef struct{ Kind string /* default|core|instance */; ID, Name string }
   ```
   `SignInView` holds methods `[{id,label,tenths,on,available,people}]` (`people` from Task 5, -1 while unknown), templates `[{id,name,rule,sentence,score,enabled,built_in,used_by []UseRef}]`, `default`, `core` (key → id), `add_stronger` and `mds` (Task 8).
@@ -291,23 +295,22 @@ Refusals:
 - `SetDefaultTemplate` / `SetCoreTemplate`: 404 unknown, 409 disabled; `SetCoreTemplate` 400 for an unknown key.
 - Every save then runs the lockout guard (Task 5).
 
-Effects: one `saveStateLocked`, then `WritePolicy` (Task 4). Instances whose TLS tier changed restart in the background (as `SetDefaultPolicyAs` does today), listed in `Restarts`. Every change is audited after `mu` (D12).
+Effects: one `saveStateLocked`, then `WritePolicy` (the existing writer; Task 4 makes it write v6 and adds the TLS-tier restarts that fill `Restarts`). Every change is audited after `mu` (D12).
 
 - [ ] **Step 1: Write the failing tests**
   ```go
   func TestEnsureSignInDefaults(t *testing.T) // methods per D1; 4 built-ins; Default "standard"; Core hub/people "strong";
-  //  yubikey-and-certificate disabled
+  //  yubikey-and-certificate and basic disabled
   func TestSetMethodRefusals(t *testing.T) // browser_cert on → 409; security_key off while strong enabled → 409 whose
   //  text names "Strong" and "Hub"; password on → OK, audit signin.method "password" "off -> on"
-  func TestTemplateEnableDisableInUse(t *testing.T) // disable standard (default) → 409; disable unused basic → OK;
-  //  enable a template needing password while password off → 409
+  func TestTemplateEnableDisableInUse(t *testing.T) // disable standard (default) → 409; a custom template, unused,
+  //  disable → OK; enable basic (needs password) while password off → 409
   func TestDeleteTemplate(t *testing.T) // built-in → 409; custom unused → OK, audited; custom picked by an instance → 409
   func TestSaveTemplateValidates(t *testing.T) // depth 4 → 400; id "Bad" → 400; create existing → 409
   func TestPreviewTemplateStoresNothing(t *testing.T) // state.yaml bytes unchanged; Sentence/Score as Task 2
-  func TestSignInChangeRewritesPolicy(t *testing.T) // SetDefaultTemplate("strong") → policy file "default" == "strong"
   ```
-- [ ] **Step 2: Run them to see them fail.** Run `go test ./internal/hub/ -run 'SignIn|Template|SetMethod'`. Expected: FAIL (undefined).
-- [ ] **Step 3: Implement** the state types, `EnsureSignIn` (called by `Init`) and the service, with the refusals and effects above. Delete the `AuthPolicy` state fields and every caller (the compiler lists them; Task 4 replaces the policy package).
+- [ ] **Step 2: Run them to see them fail.** Run `go test ./internal/state/ ./internal/hub/ -run 'SignIn|Template|SetMethod'`. Expected: FAIL (undefined).
+- [ ] **Step 3: Implement** the state types, `EnsureSignIn` (called by `Init`) and the service, with the refusals and effects above. Leave the old policy fields and their callers alone (Task 4).
 - [ ] **Step 4: Run them to see them pass.** Same command. Expected: `ok`.
 - [ ] **Step 5: Commit and push.** `git commit -am "hub: sign-in state, built-in templates, method and template service" && git push`.
 
@@ -317,9 +320,10 @@ Effects: one `saveStateLocked`, then `WritePolicy` (Task 4). Instances whose TLS
 
 **Files:**
 - Rewrite: `internal/policy/policy.go`, `capability.go`, `file.go` (remove `AuthPolicy`, `Factors`, `LoA`, `ACR`, `Normalize`, `SafetyScore`, `Stricter`)
-- Create: `internal/hub/signin_publish.go` (`signin-keycloak.json` writer)
+- Create: `internal/hub/signin_publish.go` (`signin-keycloak.json` writer; the `peopleMethodsLocked` stub returning nil, which Task 5 removes), `internal/fidomds/trust.go` (only the type `AuthenticatorTrust`; Task 8 adds the rest of the package)
 - Modify: `internal/hub/access.go`, `override.go`, `settings.go` (`SettingsUpdate.SignInTemplate *string` replaces `Policy` / `Inherit`; preview, effects, audit `settings.change` scope `sign_in_template`), `lifecycle.go` / `keycloak/keycloak.go` (drop `ACR`, `UpdateClientACR`), `keycloak/ai.go` (drop `AIDefaultACR`), `hub.go` (`writePolicy`), `backup.go` / `restore.go` (archive `sign_in_template`), `httpapi/settings.go` (`sign_in_template` in the body)
-- Test: `internal/policy/file_test.go` (rewritten), `internal/hub/signin_publish_test.go`, `internal/hub/settings_test.go`, `internal/hub/override_test.go` (golden overrides updated: `testdata/golden/*.override.yml`)
+- Modify (Task 4 owns **every** `policy.*` caller, so it builds alone): `internal/state/state.go` (remove `AuthPolicies`, `DefaultPolicy`, `ResolvePolicy`, `Default`, `SetDefault`, `Instance.Policy`); the AI files `ai_gatefile.go`, `ai_instance.go` (`aiRefusalLocked`: `policy.LoA == 3` → `signin.NeedsCertificate`; `SetDefaultPolicyAs` → the template path), `ai_revoke.go` (`aiOffForLoA3` → `aiOffForCertOnly`), `ai_people.go`, `ai_clients.go`, `ai_credentials.go`, `doctor_ai.go`; `public.go`, `deliver.go`; `internal/httpapi/ai.go`, `server.go` (remove `default_auth_policy` from `/api/settings` and `setDefaultPolicy`), `mcptools_admin.go` / `mcptools_admin2.go` (remove `set_policy`, `set_default_policy`, `preview_default_policy`), `mcp_parity_test.go` (drop their rows). Gate file v1's `min_loa` keeps its shape here, computed from the template (2 unless certificate-only); Task 7 replaces it with `rule`.
+- Test: `internal/policy/file_test.go` (rewritten), `internal/hub/signin_publish_test.go`, `internal/hub/settings_test.go`, `internal/hub/override_test.go` (golden overrides updated: `testdata/golden/*.override.yml`), `internal/hub/ai_instance_test.go`
 
 **Interfaces:**
 - Consumes: Task 3's `compiledLocked`, `templateForInstanceLocked`, Task 5's `peopleMethodsLocked() map[string][]signin.Method` (Task 4 ships a stub returning nil; Task 5 fills it).
@@ -332,15 +336,18 @@ Effects: one `saveStateLocked`, then `WritePolicy` (Task 4). Instances whose TLS
   func Tier(rule *signin.Node, on map[signin.Method]bool, publicExceptions bool) string // D18; nil rule = "public@file"
   type App struct{ /* existing fields */ Template string }     // "" = default
   type Document struct{ Version int; Methods []string; Templates map[string]signin.Node; Default string;
-    Hosts, Core map[string]string; People map[string][]string; ExtraDomains []string; Groups map[string]string;
-    PathGroups map[string][]PathGroup; PublicPaths map[string]PublicEntry; Expiring []Expiring }
+    Hosts, Core map[string]string; People map[string][]string; AddStronger bool `json:"add_stronger"`; ExtraDomains []string;
+    Groups map[string]string; PathGroups map[string][]PathGroup; PublicPaths map[string]PublicEntry; Expiring []Expiring }
   type BuildInput struct{ Apps []App; Default string; Core map[string]string; Templates map[string]signin.Node;
-    Methods []signin.Method; People map[string][]signin.Method; MainDomain string; ExtraDomains []string }
+    Methods []signin.Method; People map[string][]signin.Method; AddStronger bool; MainDomain string; ExtraDomains []string }
   func Build(in BuildInput) Document // D10, collisions per D10
   // hub
   type KeycloakSignIn struct{ Version int; Methods []string; AddStronger bool; Templates map[string]signin.Node;
-    Clients map[string]KeycloakClientTemplate; Authenticators map[string]AuthenticatorTrust } // JSON per D20
+    Clients map[string]KeycloakClientTemplate; Authenticators map[string]fidomds.AuthenticatorTrust;
+    MDS KeycloakMDS `json:"mds"` } // JSON per D20; Task 8 fills Authenticators and MDS
+  type KeycloakMDS struct{ Serial int `json:"serial"`; NextUpdate time.Time `json:"next_update"` }
   type KeycloakClientTemplate struct{ Template, Name string }
+  // fidomds (trust.go):
   type AuthenticatorTrust struct{ Kind, Status string; Roots [][]byte } // DER, JSON base64; Status certified|revoked
   func (h *Hub) keycloakSignInLocked() KeycloakSignIn
   func (h *Hub) tierChangesLocked(before, after state.SignIn) []string // enabled instances whose Tier moves (restart)
@@ -354,21 +361,27 @@ Effects: one `saveStateLocked`, then `WritePolicy` (Task 4). Instances whose TLS
   func TestBuildCollisionNeverWeaker(t *testing.T) // two apps on one host with basic + strong → Hosts[host]=="strong";
   //  incomparable templates → synthetic "collision.1" == all of both
   func TestTier(t *testing.T) // all[yubikey_cert,security_key] "protected@file"; strong "authaware@file";
-  //  protected + publicExceptions "authaware@file"; nil "public@file"; standard with yubikey_cert and
-  //  browser_cert off "public@file" (no certificate method switched on)
+  //  protected + publicExceptions "authaware@file"; nil "public@file";
+  //  compiled any[any[passkey_synced,passkey_device,security_key]] "public@file" (no certificate method)
   func TestSignInKeycloakFileListsEveryNativeClient(t *testing.T) // every keycloak_clients entry of every enabled
   //  native-oidc instance (not ai_client) in Clients with the instance's exact template; a disabled instance absent;
   //  a forward-auth instance absent
-  func TestTierFollowsCertificateSwitch(t *testing.T) // instance on standard: SetMethod(yubikey_cert, off) → its
-  //  override's routers carry tls.options public@file and Restarts lists it; on again → authaware@file, restart;
-  //  an instance on basic with password off and no cert method on → public@file; the Hub writes nothing under
+  func TestTierFollowsCertificateSwitch(t *testing.T) // instance on standard (authaware@file). First save Standard as
+  //  any[family:passkey] → its override carries public@file, Restarts lists it; save it back with family:certificate
+  //  → authaware@file. Then move hub/people to standard, disable strong, save Standard as any[family:passkey] and
+  //  SetMethod(yubikey_cert, off) → allowed (nothing needs it); switching it on again changes no tier. An instance on
+  //  basic (enabled with password on) with no certificate method on → public@file. The Hub writes nothing under
   //  /project/traefik
   func TestSaveSettingsSignInTemplate(t *testing.T) // "" inherits; "basic" disabled → 409; tier change → restart effect;
   //  audit settings.change "scope=sign_in_template: standard -> strong"; app with method public → 400
   func TestNoACRPushed(t *testing.T) // RegisterClient spec carries no default.acr.values
+  func TestSignInChangeRewritesPolicy(t *testing.T) // SetDefaultTemplate("strong") → policy file "default" == "strong",
+  //  "version" == 6, "add_stronger" == false; signin-keycloak.json has "mds" {serial 0}
+  func TestAIRefusedCertificateOnly(t *testing.T) // enable yubikey-and-certificate, put the instance on it:
+  //  SetAISupport → 409 "needs a client certificate on every sign-in"
   ```
-- [ ] **Step 2: Run them to see them fail.** Run `go test ./internal/policy/ ./internal/hub/ -run 'BuildV6|Collision|Tier|SignInKeycloak|SignInTemplate|NoACR'`. Expected: FAIL.
-- [ ] **Step 3: Implement.** The policy rewrite, publishing and settings wiring. Every former `policy.*` caller listed by `grep -rn 'policy\.\(AuthPolicy\|LoA\|ACR\|Normalize\|Resolve\|SafetyScore\|Stricter\)'` moves to templates; `describePolicy` / `policyNotes` become `signin.Sentence` + score lines.
+- [ ] **Step 2: Run them to see them fail.** Run `go test ./internal/policy/ ./internal/hub/ -run 'BuildV6|Collision|Tier|SignInKeycloak|SignInTemplate|NoACR|RewritesPolicy|CertificateOnly'`. Expected: FAIL.
+- [ ] **Step 3: Implement.** The policy rewrite, publishing and settings wiring. Every former `policy.*` caller listed by `grep -rn 'policy\.\(AuthPolicy\|LoA\|ACR\|Normalize\|Resolve\|SafetyScore\|Stricter\)'` (the files above, httpapi and AI included) moves to templates, so the grep is empty after this task; `describePolicy` / `policyNotes` become `signin.Sentence` + score lines.
 - [ ] **Step 4: Run them to see them pass.** Run the same tests, then the full Go checks. Expected: `ok`.
 - [ ] **Step 5: Commit and push.** `git commit -am "hub: policy file v6, template-driven TLS tier, signin-keycloak.json, no acr push" && git push`.
 
@@ -378,7 +391,7 @@ Effects: one `saveStateLocked`, then `WritePolicy` (Task 4). Instances whose TLS
 
 **Files:**
 - Create: `internal/hub/signin_people.go`, `internal/hub/signin_guard.go`, `internal/signinreset/reset.go`
-- Modify: `internal/keycloak/keycloak.go` (`passkeyTypes` += `portcullis-security-key`, `portcullis-device-passkey`; new `SignInCredentials`), `internal/invite/invite.go` (`Certificates`), `internal/directory/service.go` (`SetPassword` and password onboarding: `signin.CheckPassword`, record via hook, onboarding 409 while password is off), `internal/hub/directory.go` (refresh after sync), `cmd/hub/main.go` (dispatch `signin reset-core` before env, like `folderfix`)
+- Modify: `internal/keycloak/keycloak.go` (`passkeyTypes` += `portcullis-security-key`, `portcullis-device-passkey`; new `SignInCredentials`), `internal/invite/invite.go` (`Certificates`), `internal/directory/service.go` (`SetPassword` and password onboarding: `signin.CheckPassword`, record via hook, onboarding 409 while password is off), `internal/hub/directory.go` (refresh after sync), `internal/hub/signin_publish.go` (remove the `peopleMethodsLocked` stub), `cmd/hub/main.go` (dispatch `signin reset-core` before env, like `folderfix`)
 - Test: `internal/hub/signin_people_test.go`, `internal/hub/signin_guard_test.go`, `internal/signinreset/reset_test.go`, `internal/keycloak/users_test.go`, `internal/directory/service_test.go`
 
 **Interfaces:**
@@ -396,7 +409,7 @@ Effects: one `saveStateLocked`, then `WritePolicy` (Task 4). Instances whose TLS
   type PersonMethods struct{ User string; Methods []signin.Method; CertsKnown bool }
   type Inventory struct{ At time.Time; People map[string]PersonMethods }
   func (h *Hub) SignInInventory(ctx context.Context, fresh bool) (*Inventory, error) // fresh: ≤ 1 refresh / 30 s
-  type Blocked struct{ User, Why string } // Why: "no method yet" | "<Short> + <Short> only"
+  // Blocked (declared in Task 3): Why is "no method yet" | "<Short> + <Short> only"
   func blockedFor(inv *Inventory, users []string, compiled signin.Node, on map[signin.Method]bool) []Blocked
   func (h *Hub) InstanceSignIn(ctx context.Context, id string) (*InstanceSignInView, error) // template, inherits, choices, blocked
   func (h *Hub) peopleMethodsLocked() map[string][]signin.Method
@@ -415,9 +428,13 @@ Effects: one `saveStateLocked`, then `WritePolicy` (Task 4). Instances whose TLS
   func TestBlockedWhy(t *testing.T) // strong vs bob{password} "password only"; dave{} "no method yet";
   //  carol{passkey_synced,password} "password + synced passkey only"
   func TestCertsUnknownNeverCount(t *testing.T) // Certificates → ErrNoCertAPI: a ykc-only admin is Blocked
-  func TestSignInLockoutGuard(t *testing.T) // 1 admin with only security_key: SetMethod(security_key,off) 409;
-  //  SaveTemplate("strong", all[yubikey_cert]) 409; SetCoreTemplate("hub","yubikey-and-certificate") 409;
-  //  each 409 text names the admin; with 0 admins able before: allowed + warning; Keycloak down: 503
+  func TestSignInLockoutGuard(t *testing.T) // 1 admin with only security_key.
+  //  SaveTemplate("strong", all[yubikey_cert]) → 409 naming the admin.
+  //  Method case: put hub/people on standard, disable strong (now no enabled template needs security_key directly:
+  //  Standard reaches it through family:passkey with other members on), SetMethod(security_key, off) → the guard's
+  //  409 naming the admin, not a D3 refusal.
+  //  Core case: enable yubikey-and-certificate, SetCoreTemplate("hub","yubikey-and-certificate") → 409 naming the admin.
+  //  With 0 admins able before: allowed + warning; Keycloak down: 503
   func TestPasswordRules(t *testing.T) // SetPassword "password1234" 400; good one → state.sign_in.passwords[user].SetBy ==
   //  actor; never in audit detail; onboarding=password while password off → 409; a recorded password for
   //  "admin" or "portcullis-hub" never appears in PersonMethods (counts, warnings, lockout guard)
@@ -436,7 +453,7 @@ Effects: one `saveStateLocked`, then `WritePolicy` (Task 4). Instances whose TLS
 
 **Files:**
 - Create: `internal/httpapi/signin.go`, `internal/httpapi/mcptools_signin.go`
-- Modify: `internal/httpapi/server.go` (routes; remove `default_auth_policy` from `/api/settings` and `setDefaultPolicy`), `mcptools_admin.go` / `mcptools_admin2.go` (remove `set_policy`, `set_default_policy`, `preview_default_policy`), `mcp_parity_test.go` (tables)
+- Modify: `internal/httpapi/server.go` (routes), `mcp_parity_test.go` (the new tools' rows). The old policy routes and tools are already gone (Task 4).
 - Test: `internal/httpapi/signin_test.go`, `internal/httpapi/mcptools_signin_test.go`, `mcp_parity_test.go`
 
 **Interfaces:**
@@ -486,7 +503,7 @@ Effects: one `saveStateLocked`, then `WritePolicy` (Task 4). Instances whose TLS
 
 **Files:**
 - Modify: `internal/aigate/files.go`, `validate.go`, `testdata/mcp-gate.json` (v2: `rule`, `methods`, no `acr_loa` / `min_loa`)
-- Modify: `internal/hub/ai_gatefile.go`, `ai_instance.go` (`aiRefusalLocked`: `NeedsCertificate`), `ai_revoke.go` (`aiOffForLoA3` → `aiOffForCertOnly`), `settings.go` / `signin.go` (switch companions off before a change that makes an instance's rule certificate-only, as G43 does today), `doctor_ai.go`
+- Modify: `internal/hub/ai_gatefile.go` (v2: `rule`, `methods`), `signin.go` (switch companions off before a sign-in change that makes an instance's rule certificate-only, as G43 does today; Task 4 already did the `LoA` → `NeedsCertificate` swap)
 - Modify: `internal/freshauth/freshauth.go` (`Config.Accepted func() []string`), `internal/hub/credentials.go` / `confirm.go` callers, `web/freshauth.js` (no `acr_values`)
 - Test: `internal/aigate/aigate_test.go`, `internal/hub/ai_gatefile_test.go`, `internal/freshauth/freshauth_test.go`
 
@@ -499,13 +516,13 @@ Effects: one `saveStateLocked`, then `WritePolicy` (Task 4). Instances whose TLS
   func TestGateFileV2Vector(t *testing.T) // testdata/mcp-gate.json decodes strictly; re-encode is byte-identical
   func TestGateRulePerResource(t *testing.T) // companion rule == instance's compiled template; people == core "people";
   //  admin/aggregate == core "hub"
-  func TestAIRefusedCertificateOnly(t *testing.T) // instance on yubikey-and-certificate: SetAISupport → 409
-  //  "needs a client certificate on every sign-in"
+  func TestSignInChangeSwitchesAIOff(t *testing.T) // enable yubikey-and-certificate; companion on; SetDefaultTemplate
+  //  to it (instance inherits) → companion off first, audited ai.disable "sign-in needs a certificate"
   func TestFreshAuthRefusesSwitchedOffSecurityKey(t *testing.T) // amr [hwk] with security_key off → refused;
   //  amr [spk], [dpk], [hwk], [mtls] each accepted while its method is on; [pwd] refused; [inv] refused;
   //  [mtls,file] refused; [spk] with passkey_synced off → refused
   ```
-- [ ] **Step 2: Run them to see them fail.** Run `go test ./internal/aigate/ ./internal/freshauth/ ./internal/hub/ -run 'GateFileV2|GateRule|CertificateOnly|FreshAuth'`. Expected: FAIL.
+- [ ] **Step 2: Run them to see them fail.** Run `go test ./internal/aigate/ ./internal/freshauth/ ./internal/hub/ -run 'GateFileV2|GateRule|SwitchesAIOff|FreshAuth'`. Expected: FAIL.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run them to see them pass.** Run the same tests, then the full Go checks. Expected: `ok`.
 - [ ] **Step 5: Commit and push.** `git commit -am "ai: gate file v2 with sign-in rules; fresh auth follows the method switches" && git push`.
@@ -515,9 +532,9 @@ Effects: one `saveStateLocked`, then `WritePolicy` (Task 4). Instances whose TLS
 ### Task 8: FIDO MDS fetch and the authenticator trust list (hub)
 
 **Files:**
-- Create: `internal/fidomds/fidomds.go`, `internal/fidomds/trust.go`
-- Modify: `go.mod` / `go.sum` (`github.com/go-webauthn/webauthn` latest stable), `internal/hub/signin_publish.go` (`Authenticators` from the cache), `cmd/hub/main.go` (`HUB_FIDO_MDS_URL`; `HUB_SIGNIN_EXTRA_AUTHENTICATORS` only with `HUB_DEV=1`, else the Hub refuses to start; `go h.RunMDS(ctx, 24*time.Hour)`)
-- Test: `internal/fidomds/fidomds_test.go` (synthetic BLOB signed by a test root built in the test)
+- Create: `internal/fidomds/fidomds.go`, `internal/hub/signin_mds.go` (`RunMDS`, the extra-authenticators merge)
+- Modify: `internal/fidomds/trust.go` (Task 4's type, plus `Trust`), `go.mod` / `go.sum` (`github.com/go-webauthn/webauthn` latest stable), `internal/hub/signin_publish.go` (`Authenticators` and `MDS` from the cache), `cmd/hub/main.go` (`HUB_FIDO_MDS_URL`; `HUB_SIGNIN_EXTRA_AUTHENTICATORS` only with `HUB_DEV=1`, else the Hub refuses to start; `go h.RunMDS(ctx, 24*time.Hour)`)
+- Test: `internal/fidomds/fidomds_test.go` (synthetic BLOB signed by a test root built in the test), `internal/hub/signin_mds_test.go`, `cmd/hub/main_test.go`
 
 **Interfaces:**
 - Produces:
@@ -526,9 +543,11 @@ Effects: one `saveStateLocked`, then `WritePolicy` (Task 4). Instances whose TLS
   func (f *Fetcher) Refresh(ctx context.Context) (*Status, error) // fetch, verify, cache; failure keeps the cache
   func (f *Fetcher) Load() (*metadata.Metadata, *Status, error)   // from the cache
   type Status struct{ Serial int; NextUpdate, FetchedAt time.Time; Stale bool; Err string }
-  func Trust(m *metadata.Metadata, now time.Time) map[string]AuthenticatorTrust // D15
+  func Trust(m *metadata.Metadata, now time.Time) (trust map[string]AuthenticatorTrust, stale bool) // D15
   func (h *Hub) RunMDS(ctx context.Context, every time.Duration)
+  func readExtraAuthenticators(path string) (map[string]fidomds.AuthenticatorTrust, int64, error) // HUB_DEV only
   ```
+  `HUB_SIGNIN_EXTRA_AUTHENTICATORS` is a **file path** to JSON `{"<aaguid>": {"kind", "status", "roots": [base64 DER]}}` (strict). It is read on every publish and merged over the MDS trust list. With `HUB_DEV=1` the published `mds.serial` = the BLOB's `no` + the file's mtime generation (a counter the Hub bumps each time it sees a new mtime), so touching the file triggers the extension's reclassification.
   `SignInView.MDS` is the `Status`; `Stale` shows "The FIDO list is out of date: new passkeys count as synced until it refreshes".
 
 - [ ] **Step 1: Write the failing tests**
@@ -538,10 +557,12 @@ Effects: one `saveStateLocked`, then `WritePolicy` (Task 4). Instances whose TLS
   func TestTrustKinds(t *testing.T) // external+secure_element → security_key; internal+tee → passkey_device;
   //  external+software → absent; status REVOKED / USER_KEY_PHYSICAL_COMPROMISE → present with Status "revoked" and
   //  its kind and roots; not certified → absent
-  func TestTrustStaleIsEmpty(t *testing.T) // now = NextUpdate + 31 days → empty map, Status.Stale
-  func TestExtraAuthenticatorsNeedDev(t *testing.T) // cmd/hub: env set without HUB_DEV=1 → exit with error
+  func TestTrustStaleIsEmpty(t *testing.T) // now = NextUpdate + 31 days → Trust returns an empty map and stale ==
+  //  true; Load's Status.Stale == true
+  func TestExtraAuthenticatorsMerge(t *testing.T) // hub: the file's entry overrides MDS; a new mtime bumps mds.serial
+  func TestExtraAuthenticatorsNeedDev(t *testing.T) // cmd/hub/main_test.go: env set without HUB_DEV=1 → exit with error
   ```
-- [ ] **Step 2: Run them to see them fail.** Run `go test ./internal/fidomds/ ./cmd/hub/`. Expected: FAIL.
+- [ ] **Step 2: Run them to see them fail.** Run `go test ./internal/fidomds/ ./internal/hub/ ./cmd/hub/ -run 'Refresh|Trust|ExtraAuthenticators'`. Expected: FAIL.
 - [ ] **Step 3: Implement** with `go-webauthn/webauthn/metadata` (its decoder verifies the JWS x5c chain to `Roots` and the CRLs). The cache is 0600 in a 0700 dir.
 - [ ] **Step 4: Run them to see them pass.** Run the same tests, then the full Go checks. Expected: `ok`.
 - [ ] **Step 5: Commit and push.** `git commit -am "fidomds: fetch, verify and cache FIDO MDS; publish the authenticator trust list" && git push`.
@@ -586,7 +607,7 @@ Effects: one `saveStateLocked`, then `WritePolicy` (Task 4). Instances whose TLS
 - `src/test/java/eu/portcullis/signin/{SigninConfigTest.java, RuleTest.java}`, `src/test/resources/signin_vectors.json` (byte copy of the Hub's `internal/signin/testdata/vectors.json`, Task 2)
 - `.github/workflows/build.yml`, modelled on the Hub's:
   - test job: `docker buildx build --target test .`;
-  - vectors job: `cmp src/test/resources/signin_vectors.json` against `porelli/portcullis-hub`'s same-named branch, else main. When the Hub ref has no such file yet (Hub main before the merge), the job prints a notice and passes;
+  - vectors job: `cmp src/test/resources/signin_vectors.json` against `porelli/portcullis-hub`'s same-named branch, else main. When the Hub ref has no such file yet (Hub main before the merge), or this repo's own copy is absent (the scaffolding-only `main`), the job prints a notice and passes;
   - image job: buildx build, then a smoke run of the image (`start-dev`, admin API `GET /admin/serverinfo` lists every provider id of D5 that exists so far);
   - publish to `ghcr.io/porelli/portcullis-keycloak`: `edge` on main pushes, semver on `v*` tags;
   - actions pinned by full SHA with `# vX.Y.Z`.
@@ -627,7 +648,7 @@ Effects: one `saveStateLocked`, then `WritePolicy` (Task 4). Instances whose TLS
 
 **Files:**
 - Create in `src/main/java/eu/portcullis/signin/`: `PasskeyClassifier.java`, `PasskeyCredentialProviders.java`, `PasskeyRegister.java`, `PasskeyRegisterFactory.java`, `store/PasskeyEntity.java`, `store/PasskeyStore.java`, `store/PasskeyStoreProviderFactory.java` (`JpaEntityProvider`), `Reclassify.java` (the scheduled task).
-- Create: `src/main/resources/META-INF/portcullis-passkey-changelog.xml` (Liquibase), `META-INF/services/*` entries.
+- Create: `src/main/resources/META-INF/portcullis-passkey-changelog.xml` (Liquibase: both D5 tables, `PORTCULLIS_PASSKEY` with `authenticator_data` and `capped_at`, and `PORTCULLIS_SIGNIN_STATE`), `META-INF/services/*` entries.
 - Test: `src/test/java/eu/portcullis/signin/{PasskeyClassifierTest, ReclassifyTest, PasskeyStoreTest, PasskeyRegisterTest}.java`
 
 **Interfaces:**
@@ -676,8 +697,10 @@ Effects: one `saveStateLocked`, then `WritePolicy` (Task 4). Instances whose TLS
   //  removing the credential removes the row
   @Test void PasskeyRegisterTest.strongerFromWeakerRefusedWhenOff()    // session {spk}, new kind security_key, addStronger false → error
   @Test void PasskeyRegisterTest.setupLinkSessionMayAddStronger()      // session {inv} → allowed, cappedAt null
-  @Test void PasskeyRegisterTest.adminsGetSecurityKeyFirstHints()      // lldap_admin member → hints ["security-key","client-device","hybrid"]
+  @Test void PasskeyRegisterTest.adminsGetSecurityKeyFirstHints()      // lldap_admin member → form attribute
+  //  portcullisHints == the JSON array ["security-key","client-device","hybrid"]; others → ["client-device","hybrid","security-key"]
   ```
+  `PasskeyRegister` sets the form attribute `portcullisHints` (a JSON array string), which core's `webauthnRegister.js` reads (Task 14).
 - [ ] **Step 2: Run them to see them fail.** Run `docker build --target test .`. Expected: FAIL.
 - [ ] **Step 3: Implement.** Attestation objects for the tests come from `webauthn4j-test`'s emulators with test CAs; the store tests use an in-memory H2 `EntityManager` with the Liquibase changelog applied. The register action reads the raw `attestationObject` after Keycloak's own validation. It keeps `fmt`, the attStmt CBOR, the authenticator data and the BE flag, classifies them, and creates the credential through the provider of the classified type. It then writes the store row in the same transaction.
 - [ ] **Step 4: Run them to see them pass.** Run the same command. Expected: `BUILD SUCCESSFUL`. The image smoke run lists `webauthn-register-passwordless`, `portcullis-security-key`, `portcullis-device-passkey`.
@@ -689,7 +712,7 @@ Effects: one `saveStateLocked`, then `WritePolicy` (Task 4). Instances whose TLS
 
 **Files:**
 - Create in `src/main/java/eu/portcullis/signin/`: `CookieAuthenticator*.java` (id `auth-cookie`, override), `PasskeyAuthenticator*.java`, `PasskeyKindCondition*.java`, `MethodAuthenticator*.java`, `PasswordForm*.java`, `X509Authenticator*.java`, `TemplateAuthenticator*.java`, `PcMethod.java`
-- Create: `src/main/resources/theme-resources/templates/portcullis-needs-stronger.ftl` (Task 15's page copy, every value `?html`), `theme-resources/messages/messages_en.properties`
+- Create: `src/main/resources/theme-resources/templates/portcullis-needs-stronger.ftl` (the copy of mockup `signin-people.html` section 2, which Task 15's page also matches; values rely on Keycloak FreeMarker's HTML auto-escaping, never `?no_esc` on a value and no `?html`), `theme-resources/messages/messages_en.properties`
 - Test: `src/test/java/eu/portcullis/signin/*Test.java`
 
 **Interfaces:**
@@ -709,7 +732,7 @@ Effects: one `saveStateLocked`, then `WritePolicy` (Task 4). Instances whose TLS
   @Test void PcMethodTest.ignoresUnknownValues()                       // "webauthn", "" → empty
   @Test void TemplateAuthenticatorTest.unlistedClientPasses()
   @Test void TemplateAuthenticatorTest.listedClientUnmetShowsNeedsStronger() // challenge form portcullis-needs-stronger.ftl
-  @Test void TemplateAuthenticatorTest.deniesWhenConfigInvalid()       // DENY_ALL + a client that would be listed → failure
+  @Test void TemplateAuthenticatorTest.deniesWhenConfigInvalid()       // DENY_ALL + any client → failure
   @Test void NeedsStrongerTemplateTest.escapesValues()                 // client name "<b>" rendered as &lt;b&gt;
   ```
 - [ ] **Step 2: Run them to see them fail.** Run `docker build --target test .`. Expected: FAIL.
@@ -722,13 +745,13 @@ Effects: one `saveStateLocked`, then `WritePolicy` (Task 4). Instances whose TLS
 ### Task 13: Templates e2e on policy v6 (templates repo)
 
 **Files:**
-- Modify: `tests/e2e/app_signin.py` (`policy_doc()` writes v6 per D10 with built-in `standard` compiled; the sign-in walk handles the setup-link session's step-up page: click `#stepup-continue`, touch the virtual authenticator)
+- Modify: `tests/e2e/app_signin.py`. Keep `policy_version()` (reads core's `POLICY_VERSION`). Factor out a pure `policy_doc(ver) -> dict`, which `write_policy()` calls: with `ver >= 6` it builds v6 per D10 (the built-in `standard` compiled, `add_stronger` false), else today's v5 doc. Run the setup-link step-up walk (click `#stepup-continue`, touch the virtual authenticator) only when `ver >= 6`, so templates main keeps passing against core main (v5) until core merges. Playwright imports move inside the functions that use them, so the module imports without it.
 
 **Interfaces:**
 - Consumes: Task 1's v6 shape; core's group-gate page ids `#stepup-continue` and `#needs-stronger` (Task 15).
 
-- [ ] **Step 1:** Change `policy_doc()` and the sign-in walk. A unit check (`python3 -c "import tests.e2e.app_signin as a; a.selftest()"`, with the new `selftest()` asserting `policy_doc()["version"] == 6` and `"standard" in templates`) fails first.
-- [ ] **Step 2: Run it to see it fail.** Expected: AssertionError.
+- [ ] **Step 1:** Add `selftest()`: `policy_doc(6)["version"] == 6`, `"standard" in policy_doc(6)["templates"]`, `policy_doc(5)` equals today's doc.
+- [ ] **Step 2: Run it to see it fail.** Run `python3 -c "import tests.e2e.app_signin as a; a.selftest()"` in the templates worktree. Expected: AttributeError (`policy_doc` doesn't exist yet).
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run it to see it pass.** Run the same command. Expected: exit 0. Then push; `test-apps.yml` runs against core's `signin` branch once Task 18 exists (same-named branch).
 - [ ] **Step 5: Commit and push.** `git commit -am "e2e: policy file v6 and the setup-link step-up" && git push -u origin signin`.
@@ -783,7 +806,7 @@ Effects: one `saveStateLocked`, then `WritePolicy` (Task 4). Instances whose TLS
   def alternatives(node) -> List[FrozenSet[str]]
   def choose_stepup(node, have: set, set_up: Optional[set]) -> Optional[str] # a method id, "passkey", or None
   def stepup_url(host: str, method: str, extra: bool) -> str
-  def render_needs_page(app: str, have: set, node, set_up: Optional[set], domain: str) -> bytes
+  def render_needs_page(app: str, have: set, node, set_up: Optional[set], add_stronger: bool, domain: str) -> bytes
   ```
   Behaviour on an unmet rule (no auto-redirect, 403):
   - **Step-up page.** When one missing method is completable (the method is in `set_up`, or `set_up` is unknown, or the session is `inv` and the method is a passkey kind, in which case it asks for `passkey`), the page reads "<App> needs <phrase>" with `#stepup-continue` → `stepup_url`.
@@ -796,7 +819,10 @@ Effects: one `saveStateLocked`, then `WritePolicy` (Task 4). Instances whose TLS
   def test_v6_only(self)                          # version 5 → deny; missing "methods" → deny
   def test_unknown_leaf_denies(self)              # leaf "webauthn" → policy_error deny
   def test_shared_vectors(self)                   # every tests/signin_vectors.json case
-  def test_switched_off_method_amr_ignored(self)  # amr [pwd], methods without password, basic → stepup/needs, not allow
+  def test_switched_off_method_amr_ignored(self)  # compiled standard, methods without password, amr [pwd] → not
+  #                                                 allowed; step-up or needs-stronger page
+  def test_leaf_outside_methods_denies(self)      # a compiled rule with a password leaf, password not in methods →
+  #                                                 policy_error deny
   def test_inv_session_meets_nothing(self)        # amr [inv] on basic → not allowed, step-up asks pc_method=passkey
   def test_yubikey_cert_needs_bound_cert(self)    # strong, amr [mtls], no cert header → not allowed; CN=user → allow
   def test_core_host_uses_core_map(self)          # hub.<d> with core strong, default basic → strong applies
@@ -870,7 +896,7 @@ Effects: one `saveStateLocked`, then `WritePolicy` (Task 4). Instances whose TLS
 ### Task 18: Core CI and browser e2e (core)
 
 **Files:**
-- Modify: `.github/workflows/ci.yml`. A new step "Shared sign-in vectors match the Hub": `cmp` core's two copies (`tests/signin_vectors.json`, `mcp-gate/internal/authz/testdata/signin_vectors.json`) against the checked-out Hub branch's `internal/signin/testdata/vectors.json`. The e2e jobs start the Hub with `HUB_DEV=1` and `HUB_SIGNIN_EXTRA_AUTHENTICATORS=tests/e2e/fixtures/virtual-authenticators.json`.
+- Modify: `.github/workflows/ci.yml`. A new step "Shared sign-in vectors match the Hub": `cmp` core's two copies (`tests/signin_vectors.json`, `mcp-gate/internal/authz/testdata/signin_vectors.json`) against the checked-out Hub branch's `internal/signin/testdata/vectors.json`. The e2e jobs start the Hub with `HUB_DEV=1` and `HUB_SIGNIN_EXTRA_AUTHENTICATORS=/run/portcullis/signin/extra-authenticators.json`. A CI-only compose override mounts `tests/e2e/fixtures/virtual-authenticators.json` read-only at that path in the hub service.
 - Create: `tests/e2e/fixtures/virtual-authenticators.json` (Chromium's virtual CTAP2 AAGUID → `security_key` with its attestation root; a second virtual authenticator without attestation = synced)
 - Modify: `tests/e2e/e2e_login.py` (cases below), `tests/e2e/e2e_ai.py` / `e2e_filesharing.py` (sign in with a virtual passkey; fresh auth accepts any passkey kind)
 
@@ -883,12 +909,12 @@ Effects: one `saveStateLocked`, then `WritePolicy` (Task 4). Instances whose TLS
   - `security_key_on_strong`: allowed.
   - `amr_accumulates`: after a step-up the token amr has both `spk` and `hwk`.
   - `pc_method_reaches_keycloak`: the step-up shows the passkey prompt only.
-  - `reclassify_updates_type`: register with the fixture's security-key entry missing (→ synced); publish it (Hub API dev hook bumps `mds.serial`); within 6 min Keycloak's credential type is `portcullis-security-key`.
+  - `reclassify_updates_type`: register with the fixture's security-key entry missing (→ synced). Then write the entry into the mounted fixture's host file and touch it: the Hub sees a new mtime, bumps `mds.serial` (Task 8) and republishes. Within 6 min Keycloak's credential type is `portcullis-security-key`.
   - `password_off_not_offered`: no password field.
   - `password_on_basic_app`: with password on via the Hub API and an app on basic, a password sign-in opens it, and `hub.<d>` then shows `#needs-stronger`.
   - `admin_password_refused`: with password on, `admin` + `LLDAP_ADMIN_PASSWORD` shows "Password sign-in isn't available for this account".
   - `native_oidc_template_enforced`: a native-oidc app on strong with a synced session gets Keycloak's needs-stronger page.
-  - `tls_follows_switch`: an app on standard. With yubikey_cert on, `openssl s_client -servername <app host>` shows "Acceptable client certificate CA names". After switching it off, the Hub restarts the app with `public@file` and the list is gone. `auth.<d>` still shows it either way (core routers stay on `authaware`).
+  - `tls_follows_switch`: an app on standard. With yubikey_cert on, `openssl s_client -servername <app host>` shows "Acceptable client certificate CA names". Then save Standard as `any[family:passkey]`, move hub/people off Strong (to standard) and disable Strong, and switch yubikey_cert off. The Hub restarts the app with `public@file` and the list is gone. `auth.<d>` still shows it either way (core routers stay on `authaware`).
   - `reset_core`: after `./portcullis signin reset-core --yes`, `/api/signin` core hub == standard.
 - [ ] **Step 2: Run to see it fail.** Push and let CI run (or run locally with the stack): `python3 tests/e2e/e2e_login.py`. Expected: the new cases FAIL before the CI wiring.
 - [ ] **Step 3: Implement** the CI wiring and the fixture.
@@ -899,11 +925,11 @@ Effects: one `saveStateLocked`, then `WritePolicy` (Task 4). Instances whose TLS
 
 ### Task 19: Mainline (all repos)
 
-- [ ] **Step 1:** Merge docs `signin` → main, push, delete the branch and the worktree `wt-docs-signin`.
+- [ ] **Step 1:** Merge docs `signin` → main and push.
 - [ ] **Step 2:** Merge portcullis-keycloak `signin` → main and push. Wait for `build.yml` to publish `ghcr.io/porelli/portcullis-keycloak:edge` (`gh run list -R porelli/portcullis-keycloak --branch main --workflow build.yml` shows success). Its vectors job passes with a notice until the Hub merges, and is re-run after Step 3.
 - [ ] **Step 3:** Merge hub `signin` → main and push. Wait for `ghcr.io/porelli/portcullis-hub:edge` (`gh run list --branch main --workflow build.yml` shows success). Re-run the keycloak repo's vectors job: it passes with no notice.
 - [ ] **Step 4:** Merge templates `signin` → main and push; check `test-apps.yml` is green.
-- [ ] **Step 5:** Merge core `signin` → main and push; check CI is green on main. Delete every `signin` branch (local and remote, all five repos) and any worktree.
+- [ ] **Step 5:** Merge core `signin` → main and push; check CI is green on main. Delete every `signin` branch (local and remote, all five repos) and the worktrees under `/Volumes/workspace/portcullis/wt-signin/`.
 - [ ] **Step 6:** Deploy only with the user's OK. On the test server: `ACME_STAGING=true`, `./portcullis config apply && ./portcullis up`.
 
 ---
@@ -928,11 +954,12 @@ Effects: one `saveStateLocked`, then `WritePolicy` (Task 4). Instances whose TLS
    - `pwd` naming: D1/D6; `pwd` now means password and the LoA map is gone.
    - People password fallback: Tasks 5, 9.
    - Out of scope (part 2/3): browser `.p12`, `pki_file`, history, the people Sign-in page, retiring enroll, the naming sweep, impersonation. The "always reachable" Sign-in page is part 2; part 1's needs-stronger page is rendered by group-gate and the extension, so it is always reachable.
-2. **Step scan.** Each step names its files, signatures, test names with assertions and commands. Bodies appear only for the score, sentence, evaluation and reclassification rules.
+2. **Step scan.** Each step names its files, signatures, test names with assertions and commands. The 24 pre-flight findings are applied: each Hub task builds alone (Task 3 adds state alongside the old; Task 4 owns every `policy.*` caller); test fixtures avoid D3 refusals (basic starts disabled; the certificate-switch and lockout tests first move hub/people off Strong); the vectors carry `compiled` and amr `have`; the worktrees are the existing `wt-signin/*`. Bodies appear only for the score, sentence, evaluation and reclassification rules.
 3. **Type consistency.** These names match across tasks:
    - `signin.Node` / `Compile` / `Satisfied` / `Implies` / `NeedsCertificate` (Tasks 2, 4, 6, 7);
-   - `compiledLocked` / `templateForInstanceLocked` (3 → 4); `peopleMethodsLocked` (stub 4, real 5); `Blocked` (5 → 3's `AffectedApp`, 9);
-   - `AuthenticatorTrust{Kind, Status, Roots}` (4, 8) ↔ Java `Trust(kind, status, roots)` (10, 11);
+   - `compiledLocked` / `templateForInstanceLocked` (3 → 4);
+   - `fidomds.AuthenticatorTrust{Kind, Status, Roots}` (declared 4, filled 8; no hub ↔ fidomds cycle) ↔ Java `Trust(kind, status, roots)` (10, 11); `KeycloakSignIn.MDS` (4, 8) ↔ `SigninConfig.mdsSerial()` (10);
+   - `Blocked` (declared 3, filled 5); `peopleMethodsLocked` (stub in `signin_publish.go` 4, replaced 5); policy v6 `add_stronger` (1, 4) ↔ `render_needs_page(…, add_stronger, …)` (15); `portcullisHints` (11 → 14);
    - the credential types (5, 11);
    - `pc_method` (12, 14, 15, alpha.yaml);
    - page ids `#stepup-continue` / `#needs-stronger` (13, 15, 18);
