@@ -145,11 +145,13 @@ func (h *Hub) envRulesFor(t *templates.Template) (*envRules, error) {
 	return &envRules{t: t, owners: owners, secretNames: SecretEnvNames(t), masked: masked, composeVars: cv}, nil
 }
 
-// hubSet: the Hub sets name (every PORTCULLIS_* and COMPOSE_* variable,
+// hubSet: the Hub sets name, or the compose CLI reads it (every
+// PORTCULLIS_*, COMPOSE_*, DOCKER_*, BUILDKIT_* and BUILDX_* variable,
 // the instance variables — COMPOSE_PROFILES among them —, the AI and
 // model provider variables).
 func (r *envRules) hubSet(name string) bool {
 	if strings.HasPrefix(name, "PORTCULLIS_") || strings.HasPrefix(name, "COMPOSE_") || strings.HasPrefix(name, "DOCKER_") ||
+		strings.HasPrefix(name, "BUILDKIT_") || strings.HasPrefix(name, "BUILDX_") ||
 		templates.ReservedVar(name) || HubPublicVar(name) {
 		return true
 	}
@@ -487,7 +489,7 @@ func envRowsOf(rules *envRules, file, ov map[string]string) []EnvRow {
 		default:
 			r.Default, r.Value = def, v
 		}
-		r.HubSet = r.Secret || r.Source == EnvSourceHub || r.Source == EnvSourceOption || rules.outsideEnv(n) || strings.HasPrefix(n, "DOCKER_")
+		r.HubSet = r.Secret || r.Source == EnvSourceHub || r.Source == EnvSourceOption || rules.outsideEnv(n) || rules.hubSet(n)
 		rows = append(rows, r)
 	}
 	return rows

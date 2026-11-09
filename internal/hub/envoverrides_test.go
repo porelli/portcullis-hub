@@ -728,12 +728,15 @@ func TestEnvOverrideOutsideEnvironmentRefused(t *testing.T) {
 	}
 	const outside = "is used outside environment: in the template's compose file; change it through Settings or the custom compose override"
 	for name, want := range map[string]string{
-		"NOTE_LABEL":  outside,
-		"IMAGE_TAG":   outside,
-		"PRIV":        outside,
-		"DATA_DIR":    outside,
-		"BOTH_VAR":    outside,
-		"DOCKER_HOST": "is set by the Hub",
+		"NOTE_LABEL":        outside,
+		"IMAGE_TAG":         outside,
+		"PRIV":              outside,
+		"DATA_DIR":          outside,
+		"BOTH_VAR":          outside,
+		"DOCKER_HOST":       "is set by the Hub",
+		"BUILDKIT_PROGRESS": "is set by the Hub",
+		"BUILDX_BUILDER":    "is set by the Hub",
+		"COMPOSE_FILE":      "is set by the Hub",
 	} {
 		if err := envOverrideErr(f.h, "mountapp", name, "x"); statusOf(err) != 400 || !strings.Contains(err.Error(), want) {
 			t.Errorf("%s = %v", name, err)
@@ -812,5 +815,37 @@ func TestEnvOverrideDropInOpRecord(t *testing.T) {
 	r := f.h.LastOp("envapp")
 	if r == nil || !slices.ContainsFunc(r.Warnings, func(w string) bool { return strings.HasPrefix(w, "env override SITE_NAME dropped: ") }) {
 		t.Errorf("op record %+v", r)
+	}
+}
+
+// Allowlist fixes: a stored override whose variable a template update
+// now uses outside environment: is skipped at the next .env write.
+func TestEnvOverrideDroppedWhenMovedOutsideEnvironment(t *testing.T) {
+	f, _ := envFixture(t)
+	if _, err := f.h.SetEnvOverride("envapp", "LOG_LEVEL", "debug", envAdmin); err != nil {
+		t.Fatal(err)
+	}
+	f.h.Wait()
+	waitIdle(t, f, "envapp")
+	if !strings.Contains(readFile(t, f.h.envPath("envapp")), "LOG_LEVEL='debug'") {
+		t.Fatal("the override isn't written")
+	}
+	c := strings.Replace(envAppCompose, "    image: x\n", "    image: \"x:${LOG_LEVEL:-1}\"\n", 1)
+	writeFile(t, f.src+"/envapp/compose.yml", c)
+	f.h.Discover()
+	if tpl := f.h.Template("envapp"); tpl == nil || !tpl.ComposeVars.Outside["LOG_LEVEL"] {
+		t.Fatal("the update isn't loaded")
+	}
+	f.h.mu.Lock()
+	err := f.h.writeOptionEnvLocked(f.h.findLocked("envapp"), nil)
+	f.h.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if raw := readFile(t, f.h.envPath("envapp")); strings.Contains(raw, "LOG_LEVEL='debug'") {
+		t.Errorf("the override is still written:\n%s", raw)
+	}
+	if d := f.h.envOverrideDrops("envapp"); len(d) != 1 || !strings.Contains(d[0], "env override LOG_LEVEL dropped: LOG_LEVEL is used outside environment:") {
+		t.Errorf("drops %v", d)
 	}
 }
