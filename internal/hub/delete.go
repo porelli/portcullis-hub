@@ -265,6 +265,10 @@ func (h *Hub) deleteTargetsLocked(id string) deleteTargets {
 	case hasSnap:
 		clients = snap.Clients
 		groups = []string{snap.AccessGroup, snap.AdminGroup}
+	case tg.entry.Bound():
+		// Bound to existing groups (§11.9) with no view or snapshot to
+		// say which: the derived names are not its groups — none is
+		// deleted.
 	case id != tg.templateID:
 		groups = []string{"users_" + id, "admin_" + id}
 	}

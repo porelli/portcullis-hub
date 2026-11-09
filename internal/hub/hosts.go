@@ -289,11 +289,10 @@ func (h *Hub) resolveHostsLocked(t *templates.Template, id string, hosts, curren
 		}
 		norm[r] = host
 	}
-	view, err := t.InstanceOn(id, norm, h.cfg.Domain, extraFunc(enrolled))
+	view, err := h.newViewLocked(t, id, norm, extraFunc(enrolled))
 	if err != nil {
 		return templates.Template{}, statusErr(400, "%v", err)
 	}
-	h.stampInstanceLocked(&view)
 	// Hostnames the routing can't serve (a router mixing main- and
 	// extra-domain hosts, a chain reaching portcullis-auth on an extra
 	// domain) are refused now, not at the next enable.

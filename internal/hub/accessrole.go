@@ -30,8 +30,14 @@ func instanceHosts(t *templates.Template) []string {
 	return hosts
 }
 
-func accessSpec(t *templates.Template, c templates.KeycloakClient) keycloak.AccessSpec {
-	return keycloak.AccessSpec{ClientID: c.ClientID, TemplateID: t.ID, AllowedHosts: instanceHosts(t), Group: t.Manifest.Auth.AccessGroup}
+// accessSpec is c's access role restricted to t's access group. An
+// unstamped view (its groups unknown, §11.9) is an error: never a role
+// with a guessed or empty group.
+func accessSpec(t *templates.Template, c templates.KeycloakClient) (keycloak.AccessSpec, error) {
+	if !t.Stamped {
+		return keycloak.AccessSpec{}, fmt.Errorf("instance %s: its groups are not resolved — not restricting client %s to a guessed group", t.ID, c.ClientID)
+	}
+	return keycloak.AccessSpec{ClientID: c.ClientID, TemplateID: t.ID, AllowedHosts: instanceHosts(t), Group: t.Manifest.Auth.AccessGroup}, nil
 }
 
 // ensureAccess sets up the access role of every client of t, if t's
@@ -43,7 +49,11 @@ func (h *Hub) ensureAccess(ctx context.Context, t *templates.Template) error {
 		return nil
 	}
 	for _, c := range t.Manifest.Clients {
-		err := h.idp.EnsureClientAccess(ctx, accessSpec(t, c))
+		spec, err := accessSpec(t, c)
+		if err != nil {
+			return &StatusError{Status: 500, Err: err}
+		}
+		err = h.idp.EnsureClientAccess(ctx, spec)
 		var conflict *keycloak.ConflictError
 		switch {
 		case err == nil:
@@ -134,7 +144,10 @@ func (h *Hub) SyncClientAccess(ctx context.Context) error {
 			for _, c := range t.Manifest.Clients {
 				var err error
 				if t.Manifest.AccessRoleEnforced() {
-					err = h.idp.EnsureClientAccess(ctx, accessSpec(t, c))
+					var spec keycloak.AccessSpec
+					if spec, err = accessSpec(t, c); err == nil {
+						err = h.idp.EnsureClientAccess(ctx, spec)
+					}
 				} else {
 					err = h.idp.RemoveClientAccess(ctx, c.ClientID, t.ID, instanceHosts(t))
 				}

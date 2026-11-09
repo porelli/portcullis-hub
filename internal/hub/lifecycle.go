@@ -507,6 +507,14 @@ func (h *Hub) enableInner(ctx context.Context, id string, restoring bool) (rolle
 	// Phase 1 (under mu): validate and write local files — fast filesystem
 	// work that needs a consistent view of state. The directory snapshot
 	// for group records first (network: outside mu).
+	// A bound users group that became privileged since the create is
+	// never started on (§11.9, fail closed). Only when not enabled yet:
+	// an enabled instance has nothing to start.
+	if !h.IsEnabled(id) {
+		if err := h.checkBoundUsersGroup(ctx, id); err != nil {
+			return false, err
+		}
+	}
 	members := h.groupSnapshot(id)
 	h.mu.Lock()
 	t := h.findLocked(id)

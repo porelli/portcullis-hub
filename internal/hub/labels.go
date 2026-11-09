@@ -51,6 +51,9 @@ type CreateRequest struct {
 	Label    string
 	Hosts    map[string]string
 	Groups   GroupChoice
+	// recheck, if set, runs right before the create commits (outside
+	// mu): an "existing" binding checked again against the directory.
+	recheck func() error
 }
 
 // CheckLabel refuses (400) a label §11.9 doesn't allow: 1–64 runes, one
@@ -122,8 +125,8 @@ func (h *Hub) instanceBoundLocked(id string) bool {
 // stampInstanceLocked writes instance view v's label and groups
 // (instanceGroupsLocked) onto it: Label, Manifest.Auth's access / admin
 // group and the PORTCULLIS_ACCESS_GROUP / _ADMIN_GROUP instance
-// variables. Every view the Hub builds (rebuildLocked, resolveHostsLocked)
-// goes through it. Caller holds mu.
+// variables, and marks it Stamped. Every view the Hub builds goes
+// through it (newViewLocked). Caller holds mu.
 func (h *Hub) stampInstanceLocked(v *templates.Template) {
 	if e, ok := h.st.Instances[v.ID]; ok && e.Template == templateIDOf(v) {
 		v.Label = e.Label
@@ -134,6 +137,21 @@ func (h *Hub) stampInstanceLocked(v *templates.Template) {
 		v.InstanceEnv[templates.VarAccessGroup] = users
 		v.InstanceEnv[templates.VarAdminGroup] = admins
 	}
+	v.Stamped = true
+}
+
+// newViewLocked is THE way the Hub builds an instance view: t's view for
+// instance id on hosts (InstanceOn on the main domain, the enrolled
+// domains' hosts as extra), stamped with its label and groups
+// (stampInstanceLocked). TestInstanceViewsStamped allows InstanceOn
+// nowhere else. Caller holds mu.
+func (h *Hub) newViewLocked(t *templates.Template, id string, hosts map[string]string, extra func(string) bool) (templates.Template, error) {
+	v, err := t.InstanceOn(id, hosts, h.cfg.Domain, extra)
+	if err != nil {
+		return v, err
+	}
+	h.stampInstanceLocked(&v)
+	return v, nil
 }
 
 // groupsMode is GroupsExisting for a bound instance, else GroupsNew.
@@ -197,27 +215,76 @@ func (h *Hub) bindGroups(ctx context.Context, gc GroupChoice) (users, admins str
 	}
 	users, admins, err = groupsAPI.CheckBindGroups(ctx, strings.TrimSpace(gc.Users), strings.TrimSpace(gc.Admins))
 	var de *directory.Error
-	if errors.As(err, &de) {
+	switch {
+	case errors.As(err, &de):
 		return "", "", &StatusError{Status: de.Status, Err: err}
+	case errors.Is(err, directory.ErrUnknownGroup):
+		return "", "", &StatusError{Status: 400, Err: err}
 	}
 	return users, admins, err
 }
 
+// checkBoundUsersGroup refuses (409) to start instance id while the
+// users group it is bound to has become a built-in, administrator or
+// permission group since its create (§11.9, fail closed); a bound group
+// that is gone only denies (missing-groups lists it). Users & Groups
+// not available is 503: the binding can't be checked. Unbound: nil.
+// Never under mu.
+func (h *Hub) checkBoundUsersGroup(ctx context.Context, id string) error {
+	h.mu.RLock()
+	e := h.st.Instances[id]
+	groupsAPI := h.groups
+	h.mu.RUnlock()
+	if e.UsersGroup == "" {
+		return nil
+	}
+	if groupsAPI == nil {
+		return statusErr(503, "instance %s is bound to group %s, which can't be checked: users & groups is not available", id, e.UsersGroup)
+	}
+	_, _, err := groupsAPI.CheckBindGroups(ctx, e.UsersGroup, "")
+	var de *directory.Error
+	switch {
+	case err == nil, errors.Is(err, directory.ErrUnknownGroup):
+		return nil
+	case errors.As(err, &de) && de.Status == 400:
+		return statusErr(409, "instance %s can't start: %v", id, err)
+	case errors.As(err, &de):
+		return &StatusError{Status: de.Status, Err: err}
+	}
+	var se *StatusError
+	if errors.As(err, &se) && se.Status == 400 {
+		return statusErr(409, "instance %s can't start: %v", id, err)
+	}
+	return err
+}
+
 // PlannedGroups is the access and admin group instance id of templateID
 // would use when created with gc (the Portcullis MCP's create_instance
-// class): the bound names for "existing", else the derived ones. ok
-// false: unknown template.
-func (h *Hub) PlannedGroups(templateID, id string, gc GroupChoice) (users, admins string, ok bool) {
+// class): for "existing" the names exactly as the create would bind
+// them (bindGroups: the directory's resolution, §11.9), else the derived
+// ones. ok false: unknown template, or a binding the create would refuse
+// or can't check (ambiguous, unknown, privileged, directory down) — the
+// caller fails closed.
+func (h *Hub) PlannedGroups(ctx context.Context, templateID, id string, gc GroupChoice) (users, admins string, ok bool) {
 	h.mu.RLock()
-	defer h.mu.RUnlock()
 	t := h.catalogLocked(templateID)
-	if t == nil {
+	var n templates.InstanceNames
+	var choiceErr error
+	if t != nil {
+		n = t.NamesFor(id)
+		choiceErr = checkGroupChoice(t, gc)
+	}
+	h.mu.RUnlock()
+	if t == nil || choiceErr != nil {
 		return "", "", false
 	}
 	if gc.Mode == GroupsExisting {
-		return strings.TrimSpace(gc.Users), strings.TrimSpace(gc.Admins), true
+		users, admins, err := h.bindGroups(ctx, gc)
+		if err != nil {
+			return "", "", false
+		}
+		return users, admins, true
 	}
-	n := t.NamesFor(id)
 	return n.AccessGroup, n.AdminGroup, true
 }
 
@@ -245,9 +312,17 @@ func (h *Hub) InstanceGroups(id string) (users, admins string, ok bool) {
 // audited; a change is audited instance.update "label <a> -> <b>".
 func (h *Hub) SetLabel(ctx context.Context, id, label string, actor directory.Actor) (err error) {
 	detail := ""
+	var deliveryErr error // committed, but portal-apps.json not written
 	defer func() {
 		var busy ErrBusy
 		if detail != "" && !errors.As(err, &busy) {
+			if deliveryErr != nil {
+				// As a settings save: the change ok, then one delivery
+				// entry carrying the failure.
+				h.auditOp(actor, "instance.update", id, detail, nil)
+				h.auditOp(actor, "instance.update", id, "delivery", deliveryErr)
+				return
+			}
 			h.auditOp(actor, "instance.update", id, detail, err)
 		}
 	}()
@@ -278,6 +353,13 @@ func (h *Hub) SetLabel(ctx context.Context, id, label string, actor directory.Ac
 	if err := h.pendingLocked(id); err != nil {
 		h.mu.Unlock()
 		return err
+	}
+	if _, has := h.st.Instances[id]; !has && !h.st.IsEnabled(id) {
+		// An implicit default instance (never created, not running): a
+		// label would store an entry that blocks its first create
+		// (§11.9 "First instance").
+		h.mu.Unlock()
+		return statusErr(404, "instance %s doesn't exist yet: create the instance first", id)
 	}
 	before := instanceLabel(cur)
 	if before == label {
@@ -333,7 +415,8 @@ func (h *Hub) SetLabel(ctx context.Context, id, label string, actor directory.Ac
 	scopeUnlock()
 	log.Printf("instance %s: %s", id, detail)
 	if perr := h.WritePolicy(); perr != nil {
-		return statusErr(500, "the label was saved, but writing portal-apps.json failed (retry the change): %v", perr)
+		deliveryErr = statusErr(500, "the label was saved, but writing portal-apps.json failed (the next policy write retries it): %v", perr)
+		return deliveryErr
 	}
 	return nil
 }

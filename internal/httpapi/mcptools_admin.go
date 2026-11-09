@@ -959,7 +959,7 @@ func (s *Server) createClass(ctx context.Context, args json.RawMessage) ToolClas
 	if err != nil {
 		return ClassDestructive
 	}
-	if pre, ok := s.prestaged(ctx, s.plannedGroups(a)); !ok || len(pre) > 0 {
+	if pre, ok := s.prestaged(ctx, s.plannedGroups(ctx, a)); !ok || len(pre) > 0 {
 		return ClassDestructive
 	}
 	return ClassWrite
@@ -967,9 +967,9 @@ func (s *Server) createClass(ctx context.Context, args json.RawMessage) ToolClas
 
 // plannedGroups are the groups the create would use (bound ones for
 // mode existing, §11.9); nil: unknown template (fail closed).
-func (s *Server) plannedGroups(a createArgs) []string {
+func (s *Server) plannedGroups(ctx context.Context, a createArgs) []string {
 	req := a.request()
-	users, admins, ok := s.Hub.PlannedGroups(req.Template, req.ID, req.Groups)
+	users, admins, ok := s.Hub.PlannedGroups(ctx, req.Template, req.ID, req.Groups)
 	if !ok {
 		return nil
 	}
@@ -987,7 +987,7 @@ func (s *Server) createConsequences(ctx context.Context, args json.RawMessage) [
 	if a.Groups != nil && a.Groups.Mode == hub.GroupsExisting {
 		lines = append(lines, "Binds it to the existing groups "+q(a.Groups.Users)+" (users) and "+q(a.Groups.Admins)+" (admins): their people get it at once.")
 	}
-	return append(lines, s.prestagedLines(ctx, s.plannedGroups(a), a.ID)...)
+	return append(lines, s.prestagedLines(ctx, s.plannedGroups(ctx, a), a.ID)...)
 }
 
 // update is the SettingsUpdate the arguments stand for (no secrets, no

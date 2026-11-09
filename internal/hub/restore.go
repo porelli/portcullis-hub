@@ -1366,6 +1366,9 @@ func (h *Hub) restoreAsSteps(ctx context.Context, p *Progress, archive, newID st
 // and state entry — never one that runs or completed (state "restoring"
 // or, for a create, "created", or no entry: done). Caller holds id's
 // lock.
+//
+// A default instance's first create (id = template id) removes only its
+// state entry: everything else the default instance had stays.
 func (h *Hub) removeNewInstance(id string) error {
 	h.mu.RLock()
 	e, ok := h.st.Instances[id]
@@ -1373,6 +1376,20 @@ func (h *Hub) removeNewInstance(id string) error {
 	h.mu.RUnlock()
 	if ok && (enabled || (e.State != state.InstanceRestoring && e.State != state.InstanceCreated)) {
 		return statusErr(409, "instance %s is no longer new (state %q, enabled %v): it was not removed", id, e.State, enabled)
+	}
+	if ok && e.Template == id {
+		// A template's first instance is its default instance (§11.9):
+		// the create added only the state entry (label, binding,
+		// state "created"). Whatever the default instance had before —
+		// its .env, overrides, settings and secrets, policy, public and
+		// sign-in choices, AI state — is its own and stays.
+		h.mu.Lock()
+		delete(h.st.Instances, id)
+		h.rebuildLocked()
+		saveErr := h.st.Save(h.statePath())
+		h.mu.Unlock()
+		h.writePolicyLogged()
+		return saveErr
 	}
 	var errs []error
 	for _, p := range []string{h.envPath(id), h.overridePath(id), h.userOverridePath(id)} {

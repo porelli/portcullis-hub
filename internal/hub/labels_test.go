@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
 )
@@ -236,6 +237,8 @@ func TestSetLabelChangesOnlyNames(t *testing.T) {
 	f, audit, _ := grafanaB(t)
 	before, _ := f.h.InstanceView("grafana-b")
 	envBefore := readFile(t, f.h.envPath("grafana-b"))
+	policyPath := filepath.Join(f.data, "group-gate-policy.json")
+	policyBefore := readFile(t, policyPath)
 	if before.Label != "grafana-b" || before.Name != "Grafana · grafana-b" {
 		t.Fatalf("default label = %+v", before)
 	}
@@ -253,6 +256,22 @@ func TestSetLabelChangesOnlyNames(t *testing.T) {
 	}
 	if readFile(t, f.h.envPath("grafana-b")) != envBefore {
 		t.Error("the label changed the .env")
+	}
+	if readFile(t, policyPath) != policyBefore {
+		t.Error("the label changed the policy file")
+	}
+	// Disable and enable again after the relabel: the same instance.
+	if err := f.h.Disable("grafana-b"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.h.Enable("grafana-b"); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := f.h.InstanceView("grafana-b"); v.Label != "Team B" || v.State != StateEnabled || v.Project != before.Project || v.AccessGroup != before.AccessGroup {
+		t.Errorf("re-enabled = %+v", v)
+	}
+	if readFile(t, policyPath) != policyBefore || readFile(t, f.h.envPath("grafana-b")) != envBefore {
+		t.Error("re-enabling after the relabel changed the policy file or .env")
 	}
 	var portal PortalDocument
 	if err := json.Unmarshal([]byte(readFile(t, filepath.Join(f.data, "portal-apps.json"))), &portal); err != nil {
@@ -324,25 +343,65 @@ func TestSetLabelChangesOnlyNames(t *testing.T) {
 	}
 }
 
-// TestSetLabelDefaultInstanceKeepsEntry: a default instance's label is
-// stored on a state entry that a later hostname reset doesn't drop.
+// TestSetLabelDefaultInstanceKeepsEntry: a label on an implicit default
+// instance (no entry, not running) is 404 — it would block the first
+// create; a running default instance's label is stored on an entry that
+// a later hostname reset doesn't drop.
 func TestSetLabelDefaultInstanceKeepsEntry(t *testing.T) {
 	f := newInstanceFixture(t, nil)
 	f.h.SetAudit(&fakeAudit{})
+	simulateCompose(f, 0)
 	if v, _ := f.h.InstanceView("grafana"); v.Label != "Grafana" || v.Name != "Grafana · Grafana" {
 		t.Errorf("default = %+v", v)
 	}
-	if err := f.h.SetLabel(context.Background(), "grafana", "Home", root); err != nil {
+	if err := f.h.SetLabel(context.Background(), "grafana", "Home", root); statusOf(err) != 404 || !strings.Contains(err.Error(), "create the instance first") {
+		t.Fatalf("implicit default = %v", err)
+	}
+	if _, err := f.h.CreateInstanceAs(createReq("grafana", "grafana", "Home"), root); err != nil {
+		t.Fatalf("first create after the refused label = %v", err)
+	}
+	// An enabled default instance enabled without a create (no entry).
+	if err := f.h.Enable("chat"); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.h.SetHosts("grafana", map[string]string{"grafana": "dash.example.org"}, root); err != nil {
+	if err := f.h.SetLabel(context.Background(), "chat", "Talk", root); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.h.SetHosts("grafana", map[string]string{"grafana": "grafana.example.org"}, root); err != nil {
+	if err := f.h.SetHosts("chat", map[string]string{"chat": "talk.example.org"}, root); err != nil {
 		t.Fatal(err)
 	}
-	if v, _ := f.h.InstanceView("grafana"); v.Label != "Home" || v.Hosts["grafana"] != "grafana.example.org" {
+	if err := f.h.SetHosts("chat", map[string]string{"chat": "chat.example.org"}, root); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := f.h.InstanceView("chat"); v.Label != "Talk" || v.Hosts["chat"] != "chat.example.org" {
 		t.Errorf("after hosts back = %+v", v)
+	}
+}
+
+// TestSetLabelPortalFailureAudit (fix round 1, item 7): a committed label
+// whose portal-apps.json write failed is audited ok plus one delivery
+// entry with the failure.
+func TestSetLabelPortalFailureAudit(t *testing.T) {
+	f, audit, _ := grafanaB(t)
+	// portal-apps.json can't be replaced: a directory in its place.
+	os.Remove(f.h.portalPath())
+	if err := os.MkdirAll(filepath.Join(f.h.portalPath(), "x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	err := f.h.SetLabel(context.Background(), "grafana-b", "Team B", root)
+	if statusOf(err) != 500 || !strings.Contains(err.Error(), "the label was saved") {
+		t.Fatalf("portal failure = %v", err)
+	}
+	if v, _ := f.h.InstanceView("grafana-b"); v.Label != "Team B" {
+		t.Errorf("label = %q", v.Label)
+	}
+	n := len(audit.entries)
+	if n < 2 {
+		t.Fatalf("audit = %+v", audit.entries)
+	}
+	if a, b := audit.entries[n-2], audit.entries[n-1]; a.Detail != "label grafana-b -> Team B" || a.Result != "ok" ||
+		b.Detail != "delivery" || b.Result != "error" || !strings.Contains(b.Error, "portal-apps.json") {
+		t.Errorf("audit = %+v / %+v", a, b)
 	}
 }
 
@@ -517,4 +576,244 @@ func stepDetail(r *OpRecord, key string) string {
 		}
 	}
 	return ""
+}
+
+// TestFirstInstanceUndoKeepsDefaultData (fix round 1, item 1): undoing a
+// first-instance create — a failing group, a Stop — removes only its
+// state entry; a previously used default instance keeps its .env,
+// settings, policy and the rest.
+func TestFirstInstanceUndoKeepsDefaultData(t *testing.T) {
+	f := newInstanceFixture(t, nil)
+	f.h.SetAudit(&fakeAudit{})
+	g := &fakeGroups{}
+	f.h.SetGroups(g)
+	simulateCompose(f, 0)
+	if err := f.h.Enable("grafana"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.h.Disable("grafana"); err != nil {
+		t.Fatal(err)
+	}
+	strict := policy.AuthPolicy{Factors: []string{"webauthn"}, Op: "any"}
+	if _, err := f.h.SaveSettings("grafana", SettingsUpdate{Policy: &strict, Ports: map[string]string{"GRAFANA_PORT": "3301"}}, root); err != nil {
+		t.Fatal(err)
+	}
+	envBefore := readFile(t, f.h.envPath("grafana"))
+	ovBefore := readFile(t, f.h.overridePath("grafana"))
+	snapshot := func() (state.InstanceSettings, policy.AuthPolicy, bool) {
+		f.h.mu.RLock()
+		defer f.h.mu.RUnlock()
+		p, ok := f.h.st.AuthPolicies["grafana"]
+		return f.h.st.Settings["grafana"].Clone(), p, ok
+	}
+	setBefore, polBefore, _ := snapshot()
+	check := func(phase string) {
+		t.Helper()
+		if got := readFile(t, f.h.envPath("grafana")); got != envBefore {
+			t.Errorf("%s: .env changed", phase)
+		}
+		if got := readFile(t, f.h.overridePath("grafana")); got != ovBefore {
+			t.Errorf("%s: override changed", phase)
+		}
+		s, p, ok := snapshot()
+		if s.Ports["GRAFANA_PORT"] != setBefore.Ports["GRAFANA_PORT"] || s.Ports["GRAFANA_PORT"] != "3301" {
+			t.Errorf("%s: settings = %+v", phase, s)
+		}
+		if !ok || strings.Join(p.Factors, ",") != strings.Join(polBefore.Factors, ",") {
+			t.Errorf("%s: policy = %+v %v", phase, p, ok)
+		}
+		f.h.mu.RLock()
+		_, entry := f.h.st.Instances["grafana"]
+		f.h.mu.RUnlock()
+		if entry {
+			t.Errorf("%s: the create's state entry is still there", phase)
+		}
+	}
+
+	// A failing group: the create is undone.
+	g.createErr = func(name string) error {
+		if strings.HasPrefix(name, "admin_") {
+			return errors.New("lldap down")
+		}
+		return nil
+	}
+	if _, err := f.h.CreateInstanceAs(createReq("grafana", "grafana", "Home"), root); err == nil || !strings.Contains(err.Error(), "removed again") {
+		t.Fatalf("group failure = %v", err)
+	}
+	check("group failure")
+	g.createErr = nil
+
+	// A Stop: the same.
+	bg := &blockingGroups{fakeGroups: &fakeGroups{}, name: "admin_grafana", reached: make(chan struct{}), release: make(chan struct{})}
+	f.h.SetGroups(bg)
+	a, err := f.h.StartCreate(createReq("grafana", "grafana", "Home"), directory.Human("alice"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := stopAndWait(t, f.h, "grafana", a.OpID, bg.reached, bg.release); !r.Stopped() {
+		t.Fatalf("record %+v", r)
+	}
+	check("stop")
+	// It can be created afterwards.
+	f.h.SetGroups(&fakeGroups{})
+	if _, err := f.h.CreateInstanceAs(createReq("grafana", "grafana", "Home"), root); err != nil {
+		t.Fatal(err)
+	}
+	if s, _, _ := snapshot(); s.Ports["GRAFANA_PORT"] != "3301" {
+		t.Errorf("settings after the create = %+v", s)
+	}
+}
+
+// TestBindingRecheckedAtCommitAndEnable (fix round 1, item 4): a users
+// group that becomes privileged before the commit refuses the create; one
+// that becomes privileged after it refuses the enable (409).
+func TestBindingRecheckedAtCommitAndEnable(t *testing.T) {
+	f := newInstanceFixture(t, nil)
+	g := &fakeGroups{existing: map[string]bool{"team": true, "ops": true}}
+	f.h.SetGroups(g)
+	simulateCompose(f, 0)
+	g.checkHook = func(n int) {
+		if n == 2 { // the re-check right before the commit
+			g.privileged = map[string]bool{"team": true}
+		}
+	}
+	req := CreateRequest{Template: "grafana", ID: "grafana-t", Label: "T", Groups: GroupChoice{Mode: GroupsExisting, Users: "team", Admins: "ops"}}
+	if _, err := f.h.CreateInstanceAs(req, root); statusOf(err) != 400 || !strings.Contains(err.Error(), "can't be a built-in or administrator group") {
+		t.Fatalf("commit re-check = %v", err)
+	}
+	if _, ok := f.h.InstanceView("grafana-t"); ok {
+		t.Error("created despite the re-check")
+	}
+	g.mu.Lock()
+	g.checkHook, g.privileged = nil, nil
+	g.mu.Unlock()
+	if _, err := f.h.CreateInstanceAs(req, root); err != nil {
+		t.Fatal(err)
+	}
+	g.mu.Lock()
+	g.privileged = map[string]bool{"team": true}
+	g.mu.Unlock()
+	if err := f.h.Enable("grafana-t"); statusOf(err) != 409 || !strings.Contains(err.Error(), "can't start") {
+		t.Fatalf("enable = %v", err)
+	}
+	if f.h.IsEnabled("grafana-t") {
+		t.Error("enabled on a privileged users group")
+	}
+	// A bound group that is gone only denies: the enable goes on.
+	g.mu.Lock()
+	g.privileged = nil
+	delete(g.existing, "team")
+	g.mu.Unlock()
+	if err := f.h.Enable("grafana-t"); err != nil {
+		t.Errorf("enable with the group gone = %v", err)
+	}
+	// Without Users & Groups the binding can't be checked: 503.
+	if err := f.h.Disable("grafana-t"); err != nil {
+		t.Fatal(err)
+	}
+	f.h.SetGroups(nil)
+	if err := f.h.Enable("grafana-t"); statusOf(err) != 503 {
+		t.Errorf("enable without users & groups = %v", err)
+	}
+}
+
+// TestDeleteBoundEntryWithoutView (fix round 1, item 5): a bound
+// instance whose template is missing and that has no snapshot deletes no
+// group (never the derived names).
+func TestDeleteBoundEntryWithoutView(t *testing.T) {
+	f := newInstanceFixture(t, func(st *state.AppState) {
+		st.Instances["gone-x"] = state.Instance{ID: "gone-x", Template: "gone", State: state.InstanceCreated, Label: "X", UsersGroup: "team", AdminsGroup: "ops"}
+	})
+	g := &fakeGroups{existing: map[string]bool{"team": true, "ops": true, "users_gone-x": true, "admin_gone-x": true}}
+	f.h.SetGroups(g)
+	if _, err := f.h.DeleteInstance("gone-x", "gone-x", root); err != nil {
+		t.Fatal(err)
+	}
+	if c := g.Calls(); len(c) != 0 {
+		t.Errorf("group calls = %v", c)
+	}
+}
+
+// TestInstanceViewsStamped (fix round 1, item 3): InstanceOn is called
+// only by newViewLocked, and the group readers deny on an unstamped view.
+func TestInstanceViewsStamped(t *testing.T) {
+	files, _ := filepath.Glob("*.go")
+	for _, p := range files {
+		if strings.HasSuffix(p, "_test.go") {
+			continue
+		}
+		b, _ := os.ReadFile(p)
+		n := strings.Count(string(b), ".InstanceOn(") + strings.Count(string(b), ".Instance(")
+		if want := map[bool]int{true: 1, false: 0}[p == "labels.go"]; n != want {
+			t.Errorf("%s builds %d instance views directly, want %d (use newViewLocked)", p, n, want)
+		}
+	}
+	f := newInstanceFixture(t, nil)
+	f.h.mu.RLock()
+	stamped := *f.h.findLocked("grafana")
+	cat := *f.h.catalogLocked("chat")
+	f.h.mu.RUnlock()
+	if !stamped.Stamped || accessGroupOf(&stamped) != "users_grafana" {
+		t.Errorf("stamped view = %v %q", stamped.Stamped, accessGroupOf(&stamped))
+	}
+	raw, err := cat.Instance("chat-x", nil, "example.org")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if raw.Stamped || accessGroupOf(&raw) != unstampedGroup || placeholderGroup(&raw, templates.PlaceholderAccessGroup) != "" {
+		t.Errorf("unstamped view = %q %q", accessGroupOf(&raw), placeholderGroup(&raw, templates.PlaceholderAccessGroup))
+	}
+	if _, err := accessSpec(&raw, raw.Manifest.Clients[0]); err == nil {
+		t.Error("access role built on an unstamped view")
+	}
+}
+
+// TestSetLabelKeepsKeycloakClients (fix round 1, item 8): a relabel and
+// a disable / enable after it leave the instance's Keycloak clients (ids,
+// redirect URIs) and its access role as they were.
+func TestSetLabelKeepsKeycloakClients(t *testing.T) {
+	f := newInstanceFixture(t, nil)
+	f.h.SetAudit(&fakeAudit{})
+	f.h.SetGroups(&fakeGroups{})
+	simulateCompose(f, 0)
+	if _, err := f.h.CreateInstanceAs(createReq("chat", "chat-b", "Team"), root); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.h.Enable("chat-b"); err != nil {
+		t.Fatal(err)
+	}
+	clients := func() (specs []string, access []string) {
+		f.idp.mu.Lock()
+		defer f.idp.mu.Unlock()
+		for _, s := range f.idp.specs {
+			specs = append(specs, s.ClientID+" "+s.TemplateID+" "+strings.Join(s.RedirectURIs, ","))
+		}
+		return specs, append([]string(nil), f.idp.access...)
+	}
+	specs0, access0 := clients()
+	if len(specs0) == 0 {
+		t.Fatal("no client registered")
+	}
+	if err := f.h.SetLabel(context.Background(), "chat-b", "Team B", root); err != nil {
+		t.Fatal(err)
+	}
+	if specs, access := clients(); strings.Join(specs, ";") != strings.Join(specs0, ";") || strings.Join(access, ";") != strings.Join(access0, ";") {
+		t.Errorf("the relabel touched Keycloak: %v %v", specs, access)
+	}
+	if err := f.h.Disable("chat-b"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.h.Enable("chat-b"); err != nil {
+		t.Fatal(err)
+	}
+	specs, access := clients()
+	// The re-enable registers the same clients again, with the same access group.
+	if len(specs) != 2*len(specs0) || strings.Join(specs[len(specs0):], ";") != strings.Join(specs0, ";") {
+		t.Errorf("clients after re-enable = %v, want %v again", specs, specs0)
+	}
+	for _, a := range access {
+		if strings.HasPrefix(a, "+") && !strings.HasSuffix(a, ":users_chat-b") {
+			t.Errorf("access role = %s", a)
+		}
+	}
 }

@@ -144,11 +144,29 @@ func TestCheckBindGroups(t *testing.T) {
 			t.Errorf("users %s = %v", g, err)
 		}
 	}
-	if _, _, err := e.svc.CheckBindGroups(ctx, "nope", "Team"); status(err) != 400 || !strings.Contains(err.Error(), "unknown group nope") {
+	if _, _, err := e.svc.CheckBindGroups(ctx, "nope", "Team"); err == nil || err.Error() != "unknown group nope" {
 		t.Errorf("unknown users = %v", err)
 	}
-	if _, _, err := e.svc.CheckBindGroups(ctx, "Team", "gone"); status(err) != 400 || !strings.Contains(err.Error(), "unknown group gone") {
+	if _, _, err := e.svc.CheckBindGroups(ctx, "Team", "gone"); err == nil || err.Error() != "unknown group gone" {
 		t.Errorf("unknown admins = %v", err)
+	}
+	// Case-only twins (fix round 1): the exact name wins; a name matching
+	// two of them only by case is ambiguous (400); a unique folded match
+	// is used as LLDAP spells it.
+	e.ll.AddGroup("Ops")
+	e.ll.AddGroup("OPS")
+	if u, a, err := e.svc.CheckBindGroups(ctx, "Ops", "OPS"); err != nil || u != "Ops" || a != "OPS" {
+		t.Errorf("exact twins = %q %q %v", u, a, err)
+	}
+	if _, _, err := e.svc.CheckBindGroups(ctx, "ops", "Team"); status(err) != 400 ||
+		err.Error() != "group ops is ambiguous: OPS and Ops differ only in case; use the exact name" {
+		t.Errorf("ambiguous users = %v", err)
+	}
+	if _, _, err := e.svc.CheckBindGroups(ctx, "Team", "oPs"); status(err) != 400 || !strings.Contains(err.Error(), "ambiguous") {
+		t.Errorf("ambiguous admins = %v", err)
+	}
+	if _, _, err := e.svc.CheckBindGroups(ctx, "nope", "Team"); !errors.Is(err, directory.ErrUnknownGroup) {
+		t.Errorf("unknown is not ErrUnknownGroup: %v", err)
 	}
 	e.svc.LLDAP = brokenDir{e.svc.LLDAP}
 	if _, _, err := e.svc.CheckBindGroups(ctx, "Team", "Team"); status(err) != 503 {

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
+	"sort"
 	"strings"
 )
 
@@ -64,9 +66,48 @@ func (s *Service) privilegedGroupReason(name string) (string, error) {
 	return "", nil
 }
 
+// ErrUnknownGroup: errors.Is for a binding naming no LLDAP group
+// (UnknownGroupError, a 400).
+var ErrUnknownGroup = errors.New("unknown group")
+
+// UnknownGroupError is ResolveGroupName's "unknown group <name>" (400).
+type UnknownGroupError struct{ Name string }
+
+func (e *UnknownGroupError) Error() string { return "unknown group " + e.Name }
+
+// Is: errors.Is(err, ErrUnknownGroup).
+func (e *UnknownGroupError) Is(target error) bool { return target == ErrUnknownGroup }
+
+// ResolveGroupName is want as one of the directory's group names (§11.9):
+// the exact name when there is one, else the one name equal to it but
+// for case; two or more such names are 400 "group <want> is ambiguous:
+// <A> and <B> differ only in case; use the exact name", none is 400
+// "unknown group <want>". The one rule for a name an admin types for a
+// binding (CheckBindGroups and the Portcullis MCP's create_instance class).
+func ResolveGroupName(names []string, want string) (string, error) {
+	var folded []string
+	for _, n := range names {
+		if n == want {
+			return n, nil
+		}
+		if strings.EqualFold(n, want) && !slices.Contains(folded, n) {
+			folded = append(folded, n)
+		}
+	}
+	switch len(folded) {
+	case 0:
+		return "", &UnknownGroupError{Name: want}
+	case 1:
+		return folded[0], nil
+	}
+	sort.Strings(folded)
+	return "", invalid("group %s is ambiguous: %s differ only in case; use the exact name", want, strings.Join(folded, " and "))
+}
+
 // CheckBindGroups checks the groups an instance is bound to (contract
 // §11.9 groups mode "existing"; "" = none of that kind) and answers
-// them as LLDAP names them (matched case-insensitively): an unknown
+// them as LLDAP names them (ResolveGroupName: exact, else a unique
+// case-insensitive match): an unknown
 // group is 400 "unknown group <name>"; the users group may not be a
 // built-in, administrator or permission group (privilegedGroupReason,
 // built-ins matched case-insensitively too) — 400; the admins group may
@@ -81,18 +122,15 @@ func (s *Service) CheckBindGroups(ctx context.Context, users, admins string) (st
 	if err != nil {
 		return "", "", &Error{Status: http.StatusServiceUnavailable, Msg: "listing LLDAP groups: " + err.Error()}
 	}
-	byName := map[string]string{}
+	names := make([]string, 0, len(groups))
 	for _, g := range groups {
-		byName[strings.ToLower(g.DisplayName)] = g.DisplayName
+		names = append(names, g.DisplayName)
 	}
 	resolve := func(n string) (string, error) {
 		if n == "" {
 			return "", nil
 		}
-		if g, ok := byName[strings.ToLower(n)]; ok {
-			return g, nil
-		}
-		return "", invalid("unknown group %s", n)
+		return ResolveGroupName(names, n)
 	}
 	u, err := resolve(users)
 	if err != nil {

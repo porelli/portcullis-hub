@@ -681,6 +681,19 @@ func TestPrestagedRuleAndExceptionsNeedConfirmation(t *testing.T) {
 	if c := byName["create_instance"].ClassFor(context.Background(), json.RawMessage(`{"template":"nope","id":"nope-w","label":"W","groups":{"mode":"existing","users":"bindempty","admins":"bindempty"}}`)); c != ClassDestructive {
 		t.Errorf("unknown template = %s", c)
 	}
+	// Case-only twins (fix round 1): the class judges the group the
+	// create would bind — the exact name — and an ambiguous one is D.
+	e.ll.AddGroup("Crew", "dana")
+	e.ll.AddGroup("CREW")
+	if c := byName["create_instance"].ClassFor(context.Background(), json.RawMessage(`{"template":"grafana","id":"grafana-w","label":"W","groups":{"mode":"existing","users":"CREW","admins":"bindempty"}}`)); c != ClassWrite {
+		t.Errorf("binding the empty exact twin = %s", c)
+	}
+	if c := byName["create_instance"].ClassFor(context.Background(), json.RawMessage(`{"template":"grafana","id":"grafana-w","label":"W","groups":{"mode":"existing","users":"crew","admins":"bindempty"}}`)); c != ClassDestructive {
+		t.Errorf("binding an ambiguous name = %s", c)
+	}
+	if r, b := doAs(t, e.hub, "root", "POST", "/api/instances", `{"template":"grafana","id":"grafana-w","label":"W","groups":{"mode":"existing","users":"crew","admins":"bindempty"}}`); r.StatusCode != 400 || !strings.Contains(b, "is ambiguous: CREW and Crew differ only in case") {
+		t.Errorf("route with an ambiguous name = %d %s", r.StatusCode, b)
+	}
 	// An existing instance's access group: rule and exception changes are D.
 	if err := e.s.Hub.CreateInstance("grafana", "grafana-q", nil); err != nil {
 		t.Fatal(err)

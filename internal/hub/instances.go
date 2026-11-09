@@ -69,14 +69,13 @@ func (h *Hub) rebuildLocked() {
 		if e, ok := h.st.Instances[t.ID]; ok && e.Template == t.ID && len(e.Hosts) > 0 {
 			hosts = e.Hosts
 		}
-		v, err := t.InstanceOn(t.ID, hosts, h.cfg.Domain, extra)
+		v, err := h.newViewLocked(t, t.ID, hosts, extra)
 		if err != nil {
 			log.Printf("instance %s: %v", t.ID, err)
 			broken[t.ID] = err.Error()
 			continue
 		}
 		v.Enabled = h.st.IsEnabled(t.ID)
-		h.stampInstanceLocked(&v)
 		out = append(out, v)
 	}
 	ids := make([]string, 0, len(h.st.Instances))
@@ -95,7 +94,7 @@ func (h *Hub) rebuildLocked() {
 			broken[id] = "template " + e.Template + " is missing"
 			continue
 		}
-		v, err := t.InstanceOn(id, e.Hosts, h.cfg.Domain, extra)
+		v, err := h.newViewLocked(t, id, e.Hosts, extra)
 		if err != nil {
 			// Kept (listed as error, enforced from its published snapshot)
 			// rather than dropped: its containers may still run.
@@ -104,7 +103,6 @@ func (h *Hub) rebuildLocked() {
 			continue
 		}
 		v.Enabled = h.st.IsEnabled(id)
-		h.stampInstanceLocked(&v)
 		out = append(out, v)
 	}
 	for i := range h.templates {
@@ -336,6 +334,13 @@ func (h *Hub) createEntry(req CreateRequest, users, admins string) error {
 		}
 	}
 
+	// The binding checked once more right before the commit (§11.9): a
+	// users group that became privileged meanwhile is refused.
+	if req.recheck != nil {
+		if err := req.recheck(); err != nil {
+			return err
+		}
+	}
 	runtime := h.runtimeCopy() // driftMu before mu
 	h.mu.Lock()
 	defer h.mu.Unlock()

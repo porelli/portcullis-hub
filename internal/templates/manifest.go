@@ -304,6 +304,10 @@ type Template struct {
 	// Label is an instance view's stored label (contract §11.9; "" =
 	// none stored: the Hub shows its default). Display only.
 	Label string `json:"-"`
+	// Stamped: the Hub wrote the instance's label and groups onto this
+	// view (its groups answer, §11.9). Group readers deny on a view
+	// without it (fail closed).
+	Stamped bool `json:"-"`
 	// GIDRefs (GIDRefs) and GIDEnvLeaks (GIDEnvLeaks), computed once at
 	// discovery from the manifest and compose.yml (shared, read-only, by
 	// every view of the template).

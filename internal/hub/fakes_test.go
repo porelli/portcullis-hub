@@ -1206,6 +1206,10 @@ type fakeGroups struct {
 	// privileged: administrator / permission groups CheckBindGroups
 	// refuses as a users group.
 	privileged map[string]bool
+	// checkHook, if set, runs (under g.mu) at the start of every
+	// CheckBindGroups with its call number (1, 2, …).
+	checkHook  func(n int)
+	checkCalls int
 	// people, if set, gets the groups created and deleted here.
 	people *fakePeople
 	// delWarn, if set and answering a warning, keeps the group (deletes
@@ -1233,12 +1237,16 @@ func (g *fakeGroups) MissingInstanceGroups(ctx context.Context, names []string) 
 func (g *fakeGroups) CheckBindGroups(ctx context.Context, users, admins string) (string, string, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.checkCalls++
+	if g.checkHook != nil {
+		g.checkHook(g.checkCalls)
+	}
 	if g.missingErr != nil {
 		return "", "", &StatusError{Status: 503, Err: g.missingErr}
 	}
 	for _, n := range []string{users, admins} {
 		if n != "" && !g.existing[n] && !fakeBuiltin[n] {
-			return "", "", &StatusError{Status: 400, Err: errors.New("unknown group " + n)}
+			return "", "", &directory.UnknownGroupError{Name: n}
 		}
 	}
 	if fakeBuiltin[users] || g.privileged[users] {

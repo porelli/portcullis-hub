@@ -70,13 +70,24 @@ func populationWhy(t *templates.Template, native bool) string {
 // none: group access off and no access role). t is an instance view:
 // its Manifest.Auth carries instanceGroupsLocked's answer
 // (stampInstanceLocked), the bound group included (§11.9).
+//
+// An unstamped view (built without newViewLocked) has no known group:
+// it answers unstampedGroup, a name no LLDAP group can have, so the
+// population is nobody (fail closed) — never "" (no gate: everybody).
 func accessGroupOf(t *templates.Template) string {
 	a := &t.Manifest.Auth
 	if a.AccessGroup == "" || !(a.GroupAccess || t.Manifest.AccessRoleEnforced()) {
 		return ""
 	}
+	if !t.Stamped {
+		return unstampedGroup
+	}
 	return a.AccessGroup
 }
+
+// unstampedGroup is the group of an unstamped view: a name LLDAP group
+// names can't take (spaces and brackets), so it matches nobody.
+const unstampedGroup = "[unresolved instance groups]"
 
 // personOf is user's Person from m, without expired memberships.
 func personOf(m *directory.Membership, user string) settings.Person {
@@ -174,6 +185,9 @@ func (h *Hub) InPopulation(ctx context.Context, instance, user string) (bool, er
 // The view's Manifest.Auth carries instanceGroupsLocked's answer
 // (stampInstanceLocked): a bound instance's rows name its bound groups.
 func placeholderGroup(t *templates.Template, g string) string {
+	if !t.Stamped && (g == templates.PlaceholderAccessGroup || g == templates.PlaceholderAdminGroup) {
+		return "" // fail closed: an unstamped view's row names nobody
+	}
 	switch g {
 	case templates.PlaceholderAccessGroup:
 		return t.Manifest.Auth.AccessGroup

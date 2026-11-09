@@ -161,6 +161,15 @@ func (h *Hub) createInstance(ctx context.Context, req CreateRequest, actor direc
 	// The instance step before the operation is accepted: its refusals
 	// (an id taken, its collisions) are the synchronous answer.
 	p.Start(StepInstance)
+	if bound {
+		req.recheck = func() error {
+			u, a, err := h.bindGroups(context.Background(), req.Groups)
+			if err == nil && (u != users || a != admins) {
+				err = statusErr(409, "the groups to bind changed meanwhile (%s, %s): retry", u, a)
+			}
+			return err
+		}
+	}
 	if err := h.createEntry(req, users, admins); err != nil {
 		return res, err
 	}

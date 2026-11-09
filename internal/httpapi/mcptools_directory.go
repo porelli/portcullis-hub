@@ -187,17 +187,25 @@ func groupGuard(m *directory.Membership, group string) (why string, ok bool) {
 	return "", known
 }
 
-// membersOf is group's current members (case-insensitive name).
+// membersOf is group's current members: the group of that exact name,
+// else every group equal to it but for case together (two names that
+// differ only in case can't be told apart here: fail closed, the most
+// people).
 func membersOf(m *directory.Membership, group string) []string {
 	if m == nil {
 		return nil
 	}
+	if mg, ok := m.Groups[group]; ok {
+		return mg.Members
+	}
+	var out []string
 	for g, mg := range m.Groups {
 		if strings.EqualFold(g, group) {
-			return mg.Members
+			out = append(out, mg.Members...)
 		}
 	}
-	return nil
+	slices.Sort(out)
+	return slices.Compact(out)
 }
 
 // groupClass: W for a known group that guards nothing, else D (G37).
