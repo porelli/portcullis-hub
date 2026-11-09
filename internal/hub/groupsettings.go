@@ -1000,7 +1000,7 @@ func (h *Hub) pruneSettingsLocked() (audits []func()) {
 			if started && slices.Contains(s.FixedKeys, k) {
 				// Never dropped (§13.18): a choice that no longer fits
 				// refuses the instance's start instead.
-				if why := fixedChoiceMisfit(h.kinds, t, k, s); why != "" {
+				if why := fixedChoiceMisfit(h.kinds, h.folderSourceLocked(), t, k, s); why != "" {
 					log.Printf("settings: %s: setup choice %s kept although it no longer fits the template (%s): the instance won't start until it does", id, k, why)
 				}
 				continue
@@ -1174,7 +1174,7 @@ func SettingsIncompatibilities(old, new *templates.Template, s state.InstanceSet
 	}
 	kinds := settings.NewRegistry()
 	for _, k := range slices.Sorted(maps.Keys(fixed)) {
-		if why := fixedChoiceMisfit(kinds, new, k, s); why != "" {
+		if why := fixedChoiceMisfit(kinds, nil, new, k, s); why != "" {
 			out = append(out, fmt.Sprintf("setup choice %s is fixed after the first start and no longer fits: %s: it is kept, and the instance won't start until the template fits it again", k, why))
 			continue
 		}

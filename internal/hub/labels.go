@@ -58,6 +58,13 @@ type CreateRequest struct {
 	// recheck, if set, runs right before the create commits (outside
 	// mu): an "existing" binding checked again against the directory.
 	recheck func() error
+	// setup is Setup as parseSetup checked it against the catalog of
+	// generation setupGen; createEntry stores exactly it, refusing (409)
+	// when the catalog changed since (never re-parsed under mu: one set
+	// of checks, all of them, decides).
+	setup    *parsedSettings
+	setupGen uint64
+	checked  bool
 }
 
 // CheckLabel refuses (400) a label §11.9 doesn't allow: 1–64 runes, one

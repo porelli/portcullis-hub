@@ -495,26 +495,7 @@ func forgetFirstStart(f *fixture, id string) {
 // (preview and start share the computation); before the first start it
 // is planned like any other.
 func TestFolderAssignRefusesFixedChoice(t *testing.T) {
-	tmpls := maps.Clone(assignTemplates)
-	tmpls["strongbox"] = folderApp("Strongbox", "strongbox", `    - key: data
-      label: Data store
-      type: path
-      setup: true
-      fixed_after_start: true
-      target: {service: box, mount: /data}
-      folder: {access: read, runs_as: {uid: 0, gid: 0}}
-      applies: restart
-`, "  box:\n    image: box\n", "")
-	f := newInstanceFixtureExtra(t, nil, nil, tmpls)
-	if f.h.Template("strongbox") == nil {
-		t.Fatal("strongbox not loaded (see the log)")
-	}
-	fx := f.engine.fx()
-	fx.inspect = map[string]docker.ContainerInfo{testSelfID: {ID: testSelfID, Image: testSelfImage, Labels: selfLabels}}
-	f.h.mountinfo = func() ([]byte, error) { return []byte(testMountinfo), nil }
-	d := &assignDisk{fakeDisk: &fakeDisk{paths: map[string]*diskPath{}, symlinks: map[string]bool{}}, acl: true}
-	fx.run = d.run
-	addFolder(t, f, d.fakeDisk, "media", "Family media", "/srv/media", 60001)
+	f := strongboxFixture(t)
 	req := AssignRequest{Uses: []FolderUse{{Instance: "strongbox", Key: "data"}}}
 	if _, err := f.h.PreviewAssign(context.Background(), "media", req); err != nil {
 		t.Fatalf("before the first start: %v", err)
@@ -669,5 +650,131 @@ func TestInactiveServiceRunningDrift(t *testing.T) {
 		if d.ID == "cloud-v" {
 			t.Errorf("exited leftover drift: %+v", d)
 		}
+	}
+}
+
+// TestCreateSetupCatalogChanged: the setup values are checked once
+// (parseSetup) and stored only against that catalog: a source sync in
+// between is a 409 "try again", nothing created; unchecked values never
+// reach the store.
+func TestCreateSetupCatalogChanged(t *testing.T) {
+	f := setupCloudFixture(t)
+	req := CreateRequest{Template: "cloud", ID: "cloud-race", Label: "Race", Setup: setupOf("database", `"postgres"`)}
+	req.recheck = func() error { f.h.Discover(); return nil }
+	_, err := f.h.CreateInstanceAs(req, root)
+	if statusOf(err) != 409 || !strings.Contains(err.Error(), "the template changed while creating: try again") {
+		t.Fatalf("create across a catalog change = %v", err)
+	}
+	if _, ok := f.h.InstanceView("cloud-race"); ok {
+		t.Error("created anyway")
+	}
+	if err := f.h.createEntry(CreateRequest{Template: "cloud", ID: "cloud-raw", Setup: setupOf("database", `"postgres"`)}, "", ""); statusOf(err) != 500 {
+		t.Errorf("unchecked setup = %v", err)
+	}
+	// Without a change in between: created with the checked value.
+	createCloud(t, f, "cloud-race", setupOf("database", `"postgres"`))
+	if v := storedSetting(f, "cloud-race", "database"); v != "postgres" {
+		t.Errorf("database = %v", v)
+	}
+}
+
+// strongboxFixture is the assignment fixture plus "strongbox", whose
+// fixed setup choice is a mounted path option.
+func strongboxFixture(t *testing.T) *fixture {
+	t.Helper()
+	tmpls := maps.Clone(assignTemplates)
+	tmpls["strongbox"] = folderApp("Strongbox", "strongbox", `    - key: data
+      label: Data store
+      type: path
+      setup: true
+      fixed_after_start: true
+      target: {service: box, mount: /data}
+      folder: {access: read, runs_as: {uid: 0, gid: 0}}
+      applies: restart
+`, "  box:\n    image: box\n", "")
+	f := newInstanceFixtureExtra(t, nil, nil, tmpls)
+	if f.h.Template("strongbox") == nil {
+		t.Fatal("strongbox not loaded (see the log)")
+	}
+	fx := f.engine.fx()
+	fx.inspect = map[string]docker.ContainerInfo{testSelfID: {ID: testSelfID, Image: testSelfImage, Labels: selfLabels}}
+	f.h.mountinfo = func() ([]byte, error) { return []byte(testMountinfo), nil }
+	d := &assignDisk{fakeDisk: &fakeDisk{paths: map[string]*diskPath{}, symlinks: map[string]bool{}}, acl: true}
+	fx.run = d.run
+	addFolder(t, f, d.fakeDisk, "media", "Family media", "/srv/media", 60001)
+	simulateCompose(f, 0)
+	return f
+}
+
+// TestFixedFolderChoiceRestarts: a shared folder assigned to a fixed path
+// choice before the first start is recorded as fixed at the start and
+// still fits afterwards: the restart (and a disable + enable) start it
+// again — the folder value is checked like a restore's (configCheck with
+// the folder source), never refused by the bare kind.
+func TestFixedFolderChoiceRestarts(t *testing.T) {
+	f := strongboxFixture(t)
+	req := AssignRequest{Uses: []FolderUse{{Instance: "strongbox", Key: "data"}}}
+	if _, rec := assign(t, f, "media", req); !rec.OK {
+		t.Fatalf("assign = %+v", rec)
+	}
+	if v := storedSetting(f, "strongbox", "data"); v != "folder:media" {
+		t.Fatalf("data = %v", v)
+	}
+	if err := f.h.Enable("strongbox"); err != nil {
+		t.Fatal(err)
+	}
+	f.h.mu.RLock()
+	s := f.h.st.Settings["strongbox"].Clone()
+	f.h.mu.RUnlock()
+	if s.FirstStartedAt == nil || !slices.Equal(s.FixedKeys, []string{"data"}) {
+		t.Fatalf("not locked: %+v", s)
+	}
+	if err := f.h.RestartApp("strongbox"); err != nil {
+		t.Fatalf("restart of a fixed folder choice = %v", err)
+	}
+	if err := f.h.Disable("strongbox"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.h.Enable("strongbox"); err != nil {
+		t.Fatalf("enable again = %v", err)
+	}
+	f.h.pruneSettings()
+	if v := storedSetting(f, "strongbox", "data"); v != "folder:media" {
+		t.Errorf("after the prune: %v", v)
+	}
+	f.h.mu.RLock()
+	old := *f.h.findLocked("strongbox")
+	f.h.mu.RUnlock()
+	if got := SettingsIncompatibilities(&old, &old, s); len(got) != 0 {
+		t.Errorf("incompatibilities = %v", got)
+	}
+}
+
+// TestFirstStartBackfillsFixedChoice: an instance with no stored fixed
+// value (created before values were stored at create) gets its
+// effective value stored and locked at its first start.
+func TestFirstStartBackfillsFixedChoice(t *testing.T) {
+	f := setupCloudFixture(t)
+	createCloud(t, f, "cloud-b", nil)
+	f.h.mu.Lock()
+	s := f.h.st.Settings["cloud-b"].Clone()
+	delete(s.Values, "database")
+	delete(s.Types, "database")
+	f.h.st.Settings["cloud-b"] = s
+	f.h.mu.Unlock()
+	if v := storedSetting(f, "cloud-b", "database"); v != nil {
+		t.Fatalf("precondition: %v", v)
+	}
+	if err := f.h.Enable("cloud-b"); err != nil {
+		t.Fatal(err)
+	}
+	f.h.mu.RLock()
+	s = f.h.st.Settings["cloud-b"].Clone()
+	f.h.mu.RUnlock()
+	if s.Values["database"] != "mysql" || s.Types["database"] != "enum" || !slices.Equal(s.FixedKeys, []string{"database"}) || s.FirstStartedAt == nil {
+		t.Fatalf("after the first start: %+v", s)
+	}
+	if _, err := f.h.SaveSettings("cloud-b", SettingsUpdate{Values: setupOf("database", `"postgres"`)}, root); statusOf(err) != 409 {
+		t.Errorf("change after the backfill = %v", err)
 	}
 }

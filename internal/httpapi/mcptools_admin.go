@@ -992,19 +992,46 @@ func (s *Server) createConsequences(ctx context.Context, args json.RawMessage) [
 		lines = append(lines, "Binds it to the existing groups "+q(a.Groups.Users)+" (users) and "+q(a.Groups.Admins)+" (admins): their people get it at once.")
 	}
 	if len(a.Setup) > 0 {
-		var parts []string
-		for _, k := range slices.Sorted(maps.Keys(a.Setup)) {
-			// Decoded: a string choice shows bare (no JSON quotes).
-			v := string(a.Setup[k])
-			var str string
-			if json.Unmarshal(a.Setup[k], &str) == nil {
-				v = str
-			}
-			parts = append(parts, hub.VisibleText(k)+" = "+hub.VisibleText(v))
-		}
-		lines = append(lines, "Setup choices: "+strings.Join(parts, ", ")+".")
+		lines = append(lines, "Setup choices: "+s.setupChoicesText(a.Template, a.Setup)+".")
 	}
 	return append(lines, s.prestagedLines(ctx, s.plannedGroups(ctx, a), a.ID)...)
+}
+
+// setupChoicesText is a create's setup values for its confirmation:
+// every key and value quoted once (q: strconv.Quote, then VisibleText),
+// so no key or value can read as another choice; a key that isn't one of
+// the template's setup options is named as refused; a value that
+// decodes to a JSON string shows that string quoted, another scalar its
+// JSON text, anything else the raw JSON — each quoted.
+func (s *Server) setupChoicesText(templateID string, setup map[string]json.RawMessage) string {
+	isSetup := map[string]bool{}
+	if t := s.Hub.Template(templateID); t != nil && t.Manifest.Settings != nil {
+		for _, o := range t.Manifest.Settings.Options {
+			if o.Setup {
+				isSetup[o.Key] = true
+			}
+		}
+	}
+	var parts []string
+	for _, k := range slices.Sorted(maps.Keys(setup)) {
+		if !isSetup[k] {
+			parts = append(parts, q(k)+" (not a setup option of the template: refused)")
+			continue
+		}
+		raw := setup[k]
+		val := q(string(raw))
+		var v any
+		if json.Unmarshal(raw, &v) == nil {
+			switch x := v.(type) {
+			case string:
+				val = q(x)
+			case float64, bool, nil:
+				val = q(strings.TrimSpace(string(raw)))
+			}
+		}
+		parts = append(parts, q(k)+" = "+val)
+	}
+	return strings.Join(parts, ", ")
 }
 
 // update is the SettingsUpdate the arguments stand for (no secrets, no

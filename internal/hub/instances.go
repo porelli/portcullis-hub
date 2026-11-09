@@ -386,24 +386,23 @@ func (h *Hub) createEntry(req CreateRequest, users, admins string) error {
 	// instance's earlier settings: a fixed choice stays locked once it
 	// started) and the required / requires rules: refused before
 	// anything is created.
-	// Parsed again against the catalog's template as it is now (a source
-	// sync may have landed since parseSetup), then every setup option's
-	// effective value is stored (pinSetupValuesLocked): a later default
-	// change can't move a choice.
+	// The values parseSetup checked (every save check), only against the
+	// catalog they were checked against: a source sync since is a 409,
+	// never a second, partial parse. Then every setup option's effective
+	// value is stored (pinSetupValuesLocked): a later default change
+	// can't move a choice.
 	next := h.st.Settings[id].Clone()
 	if len(req.Setup) > 0 {
-		if err := checkSetupKeys(t, req.Setup); err != nil {
-			return err
+		if !req.checked {
+			return statusErr(500, "instance %s: setup values reached the create unchecked", id)
 		}
-		parsed, problems := configCheck(t, h.kinds, h.folderSourceLocked(), SettingsUpdate{Values: req.Setup}, false)
-		if len(problems) > 0 {
-			return problems[0]
+		if h.catalogGen != req.setupGen {
+			return statusErr(409, "the template changed while creating: try again")
 		}
-		if err := gidRangeSaveCheck(t, parsed); err != nil {
-			return err
-		}
-		if next, _, _, _, err = h.nextSettingsLocked(t, next, parsed); err != nil {
-			return err
+		if req.setup != nil {
+			if next, _, _, _, err = h.nextSettingsLocked(t, next, req.setup); err != nil {
+				return err
+			}
 		}
 	}
 	next = h.pinSetupValuesLocked(t, next, false)

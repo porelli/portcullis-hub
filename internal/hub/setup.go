@@ -81,8 +81,12 @@ func (h *Hub) pinFixedLocked(t *templates.Template, s state.InstanceSettings) st
 
 // fixedChoiceMisfit says why stored fixed choice key of s no longer fits
 // template t ("" = it fits): the option removed, rescoped or retyped, or
-// its stored value refused by the option's type now. kinds parses.
-func fixedChoiceMisfit(kinds *settings.Registry, t *templates.Template, key string, s state.InstanceSettings) string {
+// its stored value refused — checked as configProblem checks an archived
+// value (configCheck, a path's folder:… value through folders). folders
+// nil (the app-updates preview, no Hub state): a shared-folder value of
+// a path option fits — which folder it names isn't the template's to
+// decide.
+func fixedChoiceMisfit(kinds *settings.Registry, folders FolderSource, t *templates.Template, key string, s state.InstanceSettings) string {
 	if why := staleKey(t, key, templates.ScopeInstance, s.Types[key]); why != "" {
 		return why
 	}
@@ -94,8 +98,15 @@ func fixedChoiceMisfit(kinds *settings.Registry, t *templates.Template, key stri
 	if !ok || raw == nil {
 		return "its stored value is missing"
 	}
-	if _, err := kinds.Parse(o, raw); err != nil {
-		return fmt.Sprintf("its stored value %v is no longer valid (%v)", raw, err)
+	if str, isStr := raw.(string); isStr && folders == nil && o.Type == templates.TypePath && strings.HasPrefix(str, folderPrefix) {
+		return ""
+	}
+	b, err := json.Marshal(raw)
+	if err != nil {
+		return fmt.Sprintf("its stored value can't be read (%v)", err)
+	}
+	if _, problems := configCheck(t, kinds, folders, SettingsUpdate{Values: map[string]json.RawMessage{key: b}}, false); len(problems) > 0 {
+		return fmt.Sprintf("its stored value %v is no longer valid (%v)", raw, problems[0])
 	}
 	return ""
 }
@@ -109,7 +120,7 @@ func (h *Hub) fixedChoicesErrLocked(t *templates.Template) error {
 		return nil
 	}
 	for _, k := range s.FixedKeys {
-		if why := fixedChoiceMisfit(h.kinds, t, k, s); why != "" {
+		if why := fixedChoiceMisfit(h.kinds, h.folderSourceLocked(), t, k, s); why != "" {
 			return statusErr(http.StatusConflict, "setup choice %s no longer fits the template: %s (it was fixed at the first start; restore the template version that fits it, or create a new instance and restore a backup into it)", k, why)
 		}
 	}

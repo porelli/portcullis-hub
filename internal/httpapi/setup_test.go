@@ -92,7 +92,30 @@ func TestCreateSetupRouteAndTool(t *testing.T) {
 	}
 	// The confirmation's consequences show the choices decoded.
 	got := strings.Join(e.s.createConsequences(context.Background(), json.RawMessage(`{"template":"dbapp","id":"dbapp-c","label":"C","setup":{"database":"postgres"}}`)), " ")
-	if !strings.Contains(got, "Setup choices: database = postgres.") {
+	if !strings.Contains(got, `Setup choices: "database" = "postgres".`) {
 		t.Errorf("consequences = %q", got)
+	}
+	// A crafted value (or key) can't read as another choice: each is
+	// quoted once, a newline escaped; an unknown key is named refused.
+	crafted := json.RawMessage(`{"template":"dbapp","id":"dbapp-c","label":"C","setup":{"database":"x = y, admin = z\nmore","admin = z":"1","trash_days":[1,2]}}`)
+	got = strings.Join(e.s.createConsequences(context.Background(), crafted), " ")
+	for _, want := range []string{
+		`"database" = "x = y, admin = z\nmore"`,
+		`"admin = z" (not a setup option of the template: refused)`,
+		`"trash_days" (not a setup option of the template: refused)`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("consequences %q lack %q", got, want)
+		}
+	}
+	if strings.ContainsRune(got, '\n') {
+		t.Errorf("a raw newline reached the consequences: %q", got)
+	}
+	// Scalars and structures: quoted JSON text.
+	if got := e.s.setupChoicesText("dbapp", map[string]json.RawMessage{"database": json.RawMessage(`{"a": 1}`)}); got != `"database" = "{\"a\": 1}"` {
+		t.Errorf("structured value = %q", got)
+	}
+	if got := e.s.setupChoicesText("dbapp", map[string]json.RawMessage{"database": json.RawMessage(` 7 `)}); got != `"database" = "7"` {
+		t.Errorf("number = %q", got)
 	}
 }

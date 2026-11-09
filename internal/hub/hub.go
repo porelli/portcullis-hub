@@ -342,6 +342,9 @@ type Hub struct {
 	mu        sync.RWMutex
 	st        *state.AppState
 	templates []templates.Template // the catalog, by template id
+	// catalogGen counts catalog replacements (Discover): a create's setup
+	// values checked against one catalog commit only against it.
+	catalogGen uint64
 	// instances are the instance views (instances.go): the default
 	// instance of every catalog template plus state's instances.
 	instances []templates.Template
@@ -894,6 +897,7 @@ func (h *Hub) Discover() {
 	uniq = kept
 	templates.Sort(uniq)
 	h.templates = uniq
+	h.catalogGen++
 	h.rebuildLocked()
 	for _, id := range h.st.Enabled {
 		if h.findLocked(id) == nil {

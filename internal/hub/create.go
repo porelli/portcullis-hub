@@ -121,6 +121,7 @@ func (h *Hub) createInstance(ctx context.Context, req CreateRequest, actor direc
 	groupsAPI := h.groups
 	var names templates.InstanceNames
 	t := h.catalogLocked(templateID)
+	req.setupGen = h.catalogGen
 	var choiceErr error
 	if t != nil {
 		names = t.NamesFor(id)
@@ -134,11 +135,12 @@ func (h *Hub) createInstance(ctx context.Context, req CreateRequest, actor direc
 		return res, choiceErr
 	}
 	// The setup choices (§11.9, §13.18): checked like a settings save's
-	// values before anything is created; createEntry parses them again
-	// under mu and stores them.
-	if _, err = h.parseSetup(context.Background(), t, req.Setup); err != nil {
+	// values before anything is created, against the catalog read above;
+	// createEntry stores exactly this result (409 if the catalog changed).
+	if req.setup, err = h.parseSetup(context.Background(), t, req.Setup); err != nil {
 		return res, err
 	}
+	req.checked = true
 	bound := req.Groups.Mode == GroupsExisting
 	var users, admins string
 	groups := []string{}
