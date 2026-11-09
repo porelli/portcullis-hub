@@ -344,6 +344,18 @@ func (h *Hub) startUp(opCtx context.Context, live *templates.Template) error {
 	// The claims (LLDAP and Keycloak) in the background: a start never
 	// waits for them.
 	h.deliverClaimsAfterStart(live.ID)
+	// The first successful start locks the fixed_after_start setup
+	// choices (§13.18), saved at once — never on a failed start (every
+	// failure above returned first). An operation that planned the
+	// create (an enable: its Stop removes the volumes it made) stamps it
+	// at its commit instead, in the commit's state save.
+	if p == nil || !p.keys[StepCreate] {
+		h.mu.Lock()
+		if h.stampFirstStartLocked(live.ID) {
+			h.saveLocked()
+		}
+		h.mu.Unlock()
+	}
 	return nil
 }
 
@@ -693,6 +705,8 @@ func (h *Hub) enableInner(ctx context.Context, id string, restoring bool) (rolle
 		e.Hosts = copyMap(tmpl.Hosts)
 		h.st.Instances[id] = e
 	}
+	// Its first start succeeded and can no longer be undone (§13.18).
+	h.stampFirstStartLocked(id)
 	h.rebuildLocked()
 	h.refreshPublishedLocked()
 	h.saveLocked()

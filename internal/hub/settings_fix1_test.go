@@ -234,6 +234,9 @@ func TestSeedOnRestoreAndMissingGroups(t *testing.T) {
 // refused, naming the instance.
 func TestRestoreRefusesLegacyFlatSettings(t *testing.T) {
 	f, _, _ := grafanaB(t)
+	// An archive without settings (the first start's stamp dropped):
+	// the test adds its own settings block.
+	forgetFirstStart(f, "grafana-b")
 	entry, err := f.h.BackupInstance("grafana-b", directory.Human("root"))
 	if err != nil {
 		t.Fatal(err)

@@ -35,11 +35,19 @@ const MinSubpathAPI = "1.45"
 // project as the up will (TestRealTemplatesInstances loads every real
 // template through it).
 func loadRendered(ctx context.Context, p compose.Project, workDir string) (*types.Project, error) {
+	return loadRenderedWith(ctx, p, workDir, []string{"*"})
+}
+
+// loadRenderedWith is loadRendered with exactly profiles active ("*" =
+// every one; none = only the services without compose profiles:). The
+// safety checks always pass "*" (loadRendered); only the runtime views
+// pass the instance's selected profiles (loadRuntime, contract §13.18).
+func loadRenderedWith(ctx context.Context, p compose.Project, workDir string, profiles []string) (*types.Project, error) {
 	opts := []cli.ProjectOptionsFn{
 		cli.WithName(p.Name),
 		cli.WithWorkingDirectory(workDir),
 		cli.WithOsEnv,
-		cli.WithProfiles([]string{"*"}),
+		cli.WithProfiles(profiles),
 		cli.WithConsistency(false),
 		cli.WithResolvedPaths(false),
 		cli.WithoutEnvironmentResolution,

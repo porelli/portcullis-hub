@@ -40,15 +40,16 @@ const (
 )
 
 // pullRefs are the images compose would pull for t's project, as the
-// Hub renders it (loadRendered: the template, the Hub's override, the
-// custom override and the instance's .env — never `docker compose
-// config`), sorted, once each. Left out — compose's create pulls them as
-// before — is anything not known statically: a service with a profile
-// (whether compose activates it depends on its env), one that builds,
-// one with pull_policy never / build, a platform, or a reference still
-// holding a "$". A project that doesn't load gives none.
+// Hub renders it for the instance's setup choices (loadRuntime: the
+// template, the Hub's override, the custom override and the instance's
+// .env, only the selected compose profiles' services plus the ones
+// without profiles — never `docker compose config`, contract §13.18),
+// sorted, once each. Left out — compose's create pulls them as before —
+// is anything not known statically: one that builds, one with
+// pull_policy never / build, a platform, or a reference still holding a
+// "$". A project that doesn't load gives none.
 func (h *Hub) pullRefs(ctx context.Context, t *templates.Template) []string {
-	proj, err := loadRendered(ctx, h.project(t), h.cfg.ProjectDir)
+	proj, err := h.loadRuntime(ctx, t)
 	if err != nil {
 		return nil
 	}
@@ -65,7 +66,7 @@ func (h *Hub) pullRefs(ctx context.Context, t *templates.Template) []string {
 
 func pullable(s types.ServiceConfig) bool {
 	switch {
-	case s.Image == "", s.Build != nil, len(s.Profiles) > 0, s.Platform != "", strings.Contains(s.Image, "$"):
+	case s.Image == "", s.Build != nil, s.Platform != "", strings.Contains(s.Image, "$"):
 		return false
 	case s.PullPolicy == types.PullPolicyNever, s.PullPolicy == types.PullPolicyBuild:
 		return false
@@ -254,9 +255,10 @@ func containerReady(st docker.State, isJob bool) bool {
 }
 
 // renderedServices are the services of t's project as the Hub renders it
-// (loadRendered, every profile); nil when it doesn't load.
+// for the instance's setup choices (loadRuntime: an unselected profile's
+// services are not among them, §13.18); nil when it doesn't load.
 func (h *Hub) renderedServices(ctx context.Context, t *templates.Template) map[string]bool {
-	proj, err := loadRendered(ctx, h.project(t), h.cfg.ProjectDir)
+	proj, err := h.loadRuntime(ctx, t)
 	if err != nil {
 		return nil
 	}

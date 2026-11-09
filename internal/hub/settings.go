@@ -1194,10 +1194,17 @@ func (h *Hub) nextSettingsLocked(t *templates.Template, cur state.InstanceSettin
 		if okA == okB && reflect.DeepEqual(after, before) {
 			continue
 		}
+		// A fixed setup choice can't change once the instance has started
+		// (§13.18): save, preview and the MCP's save_settings alike.
+		if o.FixedAfterStart && cur.FirstStartedAt != nil {
+			return next, nil, nil, nil, fixedAfterStartErr(o)
+		}
 		changes = append(changes, settingChange{key: k, scope: templates.ScopeInstance, before: h.showValue(o, before, okB), after: h.showValue(o, after, okA)})
 		e := settings.EffectOf(o.EffectiveApplies())
 		own = append(own, e)
-		if o.Type == templates.TypePath || len(envDeliveries(o)) > 0 {
+		// A choice selecting compose profiles changes COMPOSE_PROFILES: a
+		// restart (§13.18), whatever its own deliveries.
+		if o.Type == templates.TypePath || len(envDeliveries(o)) > 0 || o.Profiles != nil {
 			e = settings.EffectRestart
 		}
 		effects = append(effects, e)

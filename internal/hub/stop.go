@@ -265,18 +265,21 @@ func (h *Hub) volumeSet(ctx context.Context, id string) (map[string]bool, error)
 }
 
 // recordExpectedVolumes writes into p's ledger, before compose create,
-// every named volume of t's rendered project (loadRendered: not
-// external, not the Hub's secrets volume) that isn't in before and
+// every named volume of t's rendered project for the instance's setup
+// choices (loadRuntime, only the volumes the selected services use —
+// compose makes no other, §13.18; not external, not the Hub's secrets
+// volume) that isn't in before and
 // doesn't exist yet (one that does, without the project's label, is
 // someone else's: never in the ledger). A project that doesn't load is
 // logged: the after-listing
 // (recordCreatedVolumes) still records what the create made.
 func (h *Hub) recordExpectedVolumes(ctx context.Context, p *Progress, t *templates.Template, before map[string]bool) {
-	proj, err := loadRendered(ctx, h.project(t), h.cfg.ProjectDir)
+	proj, err := h.loadRuntime(ctx, t)
 	if err != nil {
 		log.Printf("instance %s: the project's volumes could not be read before the create (%v): only the ones listed after it are recorded", t.ID, clip(h.secretRedactor(t.ID)(err.Error()), 300))
 		return
 	}
+	proj = proj.WithoutUnnecessaryResources()
 	var names []string
 	for key, v := range proj.Volumes {
 		if bool(v.External) {

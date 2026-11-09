@@ -92,6 +92,7 @@ func init() {
 	// secret-looking variables on the tool path.
 	for k, why := range map[string]string{
 		"create_instance.hosts":            "host router → hostname (the routers the template declares)",
+		"create_instance.setup":            "setup option key → its JSON value (setup options are never secrets)",
 		"set_hosts.hosts":                  "host router → hostname (the routers the template declares)",
 		"preview_settings.values":          "option key → its JSON value (a secret option's value is refused by the Hub)",
 		"save_settings.values":             "option key → its JSON value (a secret option's value is refused by the Hub)",
@@ -210,11 +211,12 @@ type (
 		ID string `json:"id" jsonschema:"the instance id (a template id names its default instance)"`
 	}
 	createArgs struct {
-		Template string            `json:"template" jsonschema:"the template id"`
-		ID       string            `json:"id" jsonschema:"the new instance id (the template id for its first instance)"`
-		Label    string            `json:"label" jsonschema:"the instance's label: the portal shows it as <App> · <label> (1–64 characters, one line)"`
-		Hosts    map[string]string `json:"hosts,omitempty" jsonschema:"host router → hostname (default: the instance's hostnames on the main domain)"`
-		Groups   *groupsBody       `json:"groups,omitempty" jsonschema:"who can use it: {mode: new} (default: empty users_<id> / admin_<id> are created) or {mode: existing, users, admins} (bound to existing groups)"`
+		Template string                     `json:"template" jsonschema:"the template id"`
+		ID       string                     `json:"id" jsonschema:"the new instance id (the template id for its first instance)"`
+		Label    string                     `json:"label" jsonschema:"the instance's label: the portal shows it as <App> · <label> (1–64 characters, one line)"`
+		Hosts    map[string]string          `json:"hosts,omitempty" jsonschema:"host router → hostname (default: the instance's hostnames on the main domain)"`
+		Groups   *groupsBody                `json:"groups,omitempty" jsonschema:"who can use it: {mode: new} (default: empty users_<id> / admin_<id> are created) or {mode: existing, users, admins} (bound to existing groups)"`
+		Setup    map[string]json.RawMessage `json:"setup,omitempty" jsonschema:"the template's setup choices: setup option key → its JSON value (an omitted one takes its default; a fixed_after_start choice can't change once the instance has started)"`
 	}
 	labelArgs struct {
 		ID    string `json:"id" jsonschema:"the instance id"`
@@ -978,7 +980,7 @@ func (s *Server) plannedGroups(ctx context.Context, a createArgs) []string {
 
 // request is the create the arguments stand for (the route's body).
 func (a createArgs) request() hub.CreateRequest {
-	return instanceCreateBody{Template: a.Template, ID: a.ID, Label: a.Label, Hosts: a.Hosts, Groups: a.Groups}.request()
+	return instanceCreateBody{Template: a.Template, ID: a.ID, Label: a.Label, Hosts: a.Hosts, Groups: a.Groups, Setup: a.Setup}.request()
 }
 
 func (s *Server) createConsequences(ctx context.Context, args json.RawMessage) []string {
@@ -986,6 +988,13 @@ func (s *Server) createConsequences(ctx context.Context, args json.RawMessage) [
 	lines := []string{"Creates instance " + a.ID + " of " + a.Template + " (label " + q(a.Label) + ")."}
 	if a.Groups != nil && a.Groups.Mode == hub.GroupsExisting {
 		lines = append(lines, "Binds it to the existing groups "+q(a.Groups.Users)+" (users) and "+q(a.Groups.Admins)+" (admins): their people get it at once.")
+	}
+	if len(a.Setup) > 0 {
+		var parts []string
+		for _, k := range slices.Sorted(maps.Keys(a.Setup)) {
+			parts = append(parts, q(k)+" = "+q(string(a.Setup[k])))
+		}
+		lines = append(lines, "Setup choices: "+strings.Join(parts, ", ")+".")
 	}
 	return append(lines, s.prestagedLines(ctx, s.plannedGroups(ctx, a), a.ID)...)
 }

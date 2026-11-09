@@ -50,6 +50,8 @@ type InstanceView struct {
 	Label      string `json:"label"`
 	Name       string `json:"name"`
 	GroupsMode string `json:"groups_mode"`
+	// Setup: locked once the first start succeeded (§11.7, §13.18).
+	Setup SetupView `json:"setup"`
 	// Error says why an instance can't be resolved (state "error"): its
 	// template is missing or no longer fits its hostnames.
 	Error string `json:"error,omitempty"`
@@ -231,7 +233,7 @@ func (h *Hub) Instances() []InstanceView {
 		out = append(out, InstanceView{ID: id, Template: tid, Default: id == tid, State: st, Error: reason,
 			Hosts: copyMap(e.Hosts), KeycloakClients: []string{}, Project: projectName(id),
 			AccessGroup: e.UsersGroup, AdminGroup: e.AdminsGroup,
-			Label: label, Name: tid + " · " + label, GroupsMode: groupsMode(e)})
+			Label: label, Name: tid + " · " + label, GroupsMode: groupsMode(e), Setup: h.setupViewLocked(id)})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
@@ -244,7 +246,7 @@ func (h *Hub) instanceViewLocked(t *templates.Template) InstanceView {
 	users, admins := h.instanceGroupsLocked(t)
 	return InstanceView{ID: t.ID, Template: t.TemplateID, Default: t.IsDefault(), Hosts: copyMap(t.Hosts),
 		AccessGroup: users, AdminGroup: admins, KeycloakClients: append([]string{}, n.Clients...), Project: n.Project,
-		Label: instanceLabel(t), Name: instanceName(t), GroupsMode: groupsMode(h.st.Instances[t.ID])}
+		Label: instanceLabel(t), Name: instanceName(t), GroupsMode: groupsMode(h.st.Instances[t.ID]), Setup: h.setupViewLocked(t.ID)}
 }
 
 func copyMap(m map[string]string) map[string]string {
@@ -380,6 +382,18 @@ func (h *Hub) createEntry(req CreateRequest, users, admins string) error {
 	if err := h.checkInstanceHostsLocked(&view, runtime); err != nil {
 		return err
 	}
+	// The setup choices (§11.9) against what is stored (a default
+	// instance's earlier settings: a fixed choice stays locked once it
+	// started) and the required / requires rules: refused before
+	// anything is created.
+	var setupNext *state.InstanceSettings
+	if req.setup != nil {
+		next, _, _, _, err := h.nextSettingsLocked(t, h.st.Settings[id], req.setup)
+		if err != nil {
+			return err
+		}
+		setupNext = &next
+	}
 	e := state.Instance{ID: id, Template: templateID, Hosts: view.Hosts, State: state.InstanceCreated,
 		Label: req.Label, UsersGroup: users, AdminsGroup: admins}
 	if def && !hasImmutableHosts(t) && reflect.DeepEqual(view.Hosts, t.DefaultHosts(h.cfg.Domain)) {
@@ -388,6 +402,14 @@ func (h *Hub) createEntry(req CreateRequest, users, admins string) error {
 		e.Hosts = nil
 	}
 	h.st.Instances[id] = e
+	if setupNext != nil {
+		// Stored as the instance's values before anything starts.
+		if setupNext.IsZero() {
+			delete(h.st.Settings, id)
+		} else {
+			h.st.Settings[id] = *setupNext
+		}
+	}
 	h.rebuildLocked()
 	if v := h.findLocked(id); v != nil {
 		h.seedSettingsLocked(v)

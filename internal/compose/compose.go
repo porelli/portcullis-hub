@@ -165,7 +165,10 @@ func (c *CLI) run(ctx context.Context, timeout time.Duration, sub string, args [
 	cmd := exec.CommandContext(ctx, bin, args...)
 	// WaitDelay makes Wait return even if a killed child left pipes open.
 	cmd.WaitDelay = 5 * time.Second
-	cmd.Env = append(os.Environ(), "COMPOSE_IGNORE_ORPHANS=true")
+	// COMPOSE_PROFILES comes only from the instance's env file (the
+	// Hub writes it from the setup choices, contract §13.18): the Hub's
+	// own environment never selects a profile.
+	cmd.Env = append(withoutEnv(os.Environ(), "COMPOSE_PROFILES"), "COMPOSE_IGNORE_ORPHANS=true")
 	if c.DockerHost != "" {
 		cmd.Env = append(cmd.Env, "DOCKER_HOST="+c.DockerHost)
 	}
@@ -180,6 +183,17 @@ func (c *CLI) run(ctx context.Context, timeout time.Duration, sub string, args [
 		return &Error{Command: sub, Err: err, Output: out.String()}
 	}
 	return nil
+}
+
+// withoutEnv is env without name's entries.
+func withoutEnv(env []string, name string) []string {
+	out := make([]string, 0, len(env))
+	for _, e := range env {
+		if !strings.HasPrefix(e, name+"=") {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 func orDiscard(w io.Writer) io.Writer {

@@ -70,18 +70,24 @@ func (h *Hub) appContainers(ctx context.Context, t *templates.Template) ([]docke
 	return out, services, nil
 }
 
-// Status returns the app's containers.
+// Status returns the app's containers: those of the services the
+// instance's setup choices select (a leftover container of a compose
+// profile they leave off is not listed, §13.18).
 func (h *Hub) Status(ctx context.Context, id string) ([]ContainerStatus, error) {
 	t := h.Template(id)
 	if t == nil {
 		return nil, ErrNotFound
 	}
+	inactive := h.inactiveServices(t)
 	cs, _, err := h.appContainers(ctx, t)
 	if err != nil {
 		return nil, statusErr(502, "docker: %v", err)
 	}
 	out := make([]ContainerStatus, 0, len(cs))
 	for _, c := range cs {
+		if inactive[c.Service()] {
+			continue
+		}
 		status := ContainerStatus{Name: c.Name(), Service: c.Service(), State: c.State, Status: c.Status}
 		if t.Jobs[c.Service()] {
 			status.Job = true

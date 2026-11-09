@@ -152,7 +152,7 @@ func (s *Server) handleCreateInstance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var b instanceCreateBody
-	if !decodeStrict(w, r, &b, `{"template": "<template>", "id": "<instance-id>", "label": "<label>", "hosts": {"<host router>": "<hostname>", ...}, "groups": {"mode": "new"} or {"mode": "existing", "users": "<group>", "admins": "<group>"}}`) {
+	if !decodeStrict(w, r, &b, `{"template": "<template>", "id": "<instance-id>", "label": "<label>", "hosts": {"<host router>": "<hostname>", ...}, "groups": {"mode": "new"} or {"mode": "existing", "users": "<group>", "admins": "<group>"}, "setup": {"<setup option>": <value>, ...}}`) {
 		return
 	}
 	op, err := s.createInstance(requestActor(r), b.request())
@@ -172,6 +172,9 @@ type instanceCreateBody struct {
 	Label    string            `json:"label"`
 	Hosts    map[string]string `json:"hosts"`
 	Groups   *groupsBody       `json:"groups"`
+	// Setup: the template's setup options (option key → JSON value,
+	// §11.9, §13.18).
+	Setup map[string]json.RawMessage `json:"setup"`
 }
 
 // groupsBody is the create body's groups (§11.9).
@@ -182,7 +185,7 @@ type groupsBody struct {
 }
 
 func (b instanceCreateBody) request() hub.CreateRequest {
-	req := hub.CreateRequest{Template: b.Template, ID: b.ID, Label: b.Label, Hosts: b.Hosts}
+	req := hub.CreateRequest{Template: b.Template, ID: b.ID, Label: b.Label, Hosts: b.Hosts, Setup: b.Setup}
 	if b.Groups != nil {
 		req.Groups = hub.GroupChoice{Mode: b.Groups.Mode, Users: b.Groups.Users, Admins: b.Groups.Admins}
 		if req.Groups.Mode == "" {

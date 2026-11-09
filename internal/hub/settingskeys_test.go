@@ -17,14 +17,15 @@ func fullInstanceSettings(t *testing.T) state.InstanceSettings {
 	t.Helper()
 	at := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
 	s := state.InstanceSettings{
-		Ports:    map[string]string{"GRAFANA_PORT": "3301"},
-		Values:   map[string]any{"share1_writers": []any{"users_smb"}},
-		Types:    map[string]string{"share1_writers": "groups"},
-		Person:   map[string]state.PersonSetting{"quota": {Default: "1GiB", Rows: []state.GroupValue{{Group: "office", GroupID: 7, Value: "2GiB"}}}},
-		Groups:   map[string][]state.GroupValue{"seats": {{Group: "office", GroupID: 7, Value: 3}}},
-		Secrets:  map[string]state.SecretMeta{"api_key": {UpdatedAt: at, Generated: true}},
-		Entered:  map[string]map[string]state.EnteredValue{"ext_id": {"alice": {Value: "a1", UUID: "u-1", UpdatedAt: at}}},
-		GroupIDs: map[string]map[string]int{"share1_writers": {"users_smb": 12}},
+		Ports:          map[string]string{"GRAFANA_PORT": "3301"},
+		Values:         map[string]any{"share1_writers": []any{"users_smb"}},
+		Types:          map[string]string{"share1_writers": "groups"},
+		Person:         map[string]state.PersonSetting{"quota": {Default: "1GiB", Rows: []state.GroupValue{{Group: "office", GroupID: 7, Value: "2GiB"}}}},
+		Groups:         map[string][]state.GroupValue{"seats": {{Group: "office", GroupID: 7, Value: 3}}},
+		Secrets:        map[string]state.SecretMeta{"api_key": {UpdatedAt: at, Generated: true}},
+		Entered:        map[string]map[string]state.EnteredValue{"ext_id": {"alice": {Value: "a1", UUID: "u-1", UpdatedAt: at}}},
+		GroupIDs:       map[string]map[string]int{"share1_writers": {"users_smb": 12}},
+		FirstStartedAt: &at,
 	}
 	v := reflect.ValueOf(s)
 	for i := 0; i < v.NumField(); i++ {

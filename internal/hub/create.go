@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
+	"slices"
 	"sort"
 	"strings"
 
@@ -87,6 +89,9 @@ func (h *Hub) createInstance(ctx context.Context, req CreateRequest, actor direc
 		if req.Groups.Mode == GroupsExisting {
 			detail += " groups=existing"
 		}
+		if len(req.Setup) > 0 {
+			detail += " setup=" + strings.Join(slices.Sorted(maps.Keys(req.Setup)), ",")
+		}
 		if len(res.Warnings) > 0 {
 			detail += fmt.Sprintf(" warnings=%d", len(res.Warnings))
 		}
@@ -127,6 +132,11 @@ func (h *Hub) createInstance(ctx context.Context, req CreateRequest, actor direc
 	}
 	if choiceErr != nil {
 		return res, choiceErr
+	}
+	// The setup choices (§11.9, §13.18): parsed like a settings save's
+	// values before anything is created; stored by createEntry.
+	if req.setup, err = h.parseSetup(context.Background(), t, req.Setup); err != nil {
+		return res, err
 	}
 	bound := req.Groups.Mode == GroupsExisting
 	var users, admins string

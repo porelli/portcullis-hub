@@ -193,7 +193,9 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 	h.mu.RLock()
 	jobs := map[string]map[string]bool{}        // instance id → service name → is job
 	allServices := map[string]map[string]bool{} // instance id → service name → in compose
-	profiled := map[string]map[string]bool{}    // instance id → service name → has profiles
+	// instance id → service name → in a compose profile the instance's
+	// setup choices leave off (§13.18): not counted, never missing.
+	inactive := map[string]map[string]bool{}
 	for i := range h.instances {
 		t := &h.instances[i]
 		jobs[t.ID] = t.Jobs
@@ -202,12 +204,11 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 			svcs[s] = true
 		}
 		allServices[t.ID] = svcs
-		// Mark profiled services (missing-job detection skips them).
-		prof := make(map[string]bool)
-		for s := range t.ProfiledServices {
-			prof[s] = true
+		if h.st.IsEnabled(t.ID) {
+			// Only an enabled instance's: a disabled one's containers
+			// all count (none should run).
+			inactive[t.ID] = h.inactiveServicesLocked(t)
 		}
-		profiled[t.ID] = prof
 	}
 	h.mu.RUnlock()
 	counts := map[string]projectCount{}
@@ -247,9 +248,14 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 				log.Printf("reconcile: %s: %s: cannot derive hostnames from %v — denying only the hosts found (%v)", id, k, unparsed, hosts)
 			}
 		}
+		service := c.Labels[docker.LabelService]
+		// A leftover of a profile the setup choices leave off is not one
+		// of the instance's services (§13.18): never counted (running,
+		// stopped, failed job). Its routes (above) and labels (live,
+		// exposure drift) are still checked: fail closed.
+		uncounted := inactive[id][service]
 		pc := counts[id]
 		pc.total++
-		service := c.Labels[docker.LabelService]
 		if servicesSeen[id] == nil {
 			servicesSeen[id] = make(map[string]bool)
 		}
@@ -303,10 +309,13 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 				live = append(live, running{id, service, c.Labels, aliases})
 			}
 		}
-		counts[id] = pc
+		if !uncounted {
+			counts[id] = pc
+		}
 	}
-	// C2: Detect missing jobs (jobs that never ran, no container).
-	// Skip profiled services (not active until Task 4).
+	// C2: Detect missing jobs (jobs that never ran, no container). A job
+	// in a profile the setup choices leave off is never missing; an
+	// active profiled one is (§11.9, §13.18).
 	for id, jobSet := range jobs {
 		if len(jobSet) == 0 {
 			continue
@@ -314,8 +323,7 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 		pc := counts[id]
 		seen := servicesSeen[id]
 		for jobSvc := range jobSet {
-			// Skip profiled services (treat any profiled service as not active).
-			if profiled[id][jobSvc] {
+			if inactive[id][jobSvc] {
 				continue
 			}
 			if allServices[id][jobSvc] && !seen[jobSvc] {

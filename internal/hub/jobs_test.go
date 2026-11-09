@@ -345,12 +345,7 @@ func TestJobNeverRan(t *testing.T) {
 	}
 }
 
-// TestProfiledJobMissing: a profiled job with no container does not trigger
-// job_missing drift (profiled services are skipped until Task 4).
-func TestProfiledJobMissing(t *testing.T) {
-	// Create a template with a profiled job.
-	f := newFixture(t)
-	manifest := `name: Profiled Job App
+const profiledJobManifest = `name: Profiled Job App
 auth:
   method: forward-auth
   group_access: true
@@ -376,7 +371,7 @@ settings:
         normal: []
         extended: [extended]
 `
-	compose := `services:
+const profiledJobCompose = `services:
   web:
     image: example.org/web:1.0
     environment:
@@ -388,8 +383,16 @@ settings:
     image: example.org/setup:1.0
     profiles: [extended]
 `
-	writeFile(t, f.src+"/profiledapp/manifest.yaml", manifest)
-	writeFile(t, f.src+"/profiledapp/compose.yml", compose)
+
+// TestProfiledJobMissing: a job in a profile the setup choices leave off
+// (mode normal, the default) with no container does not trigger
+// job_missing drift (§11.9, §13.18; TestProfiledJobFollowsChoice: an
+// active one does).
+func TestProfiledJobMissing(t *testing.T) {
+	// Create a template with a profiled job.
+	f := newFixture(t)
+	writeFile(t, f.src+"/profiledapp/manifest.yaml", profiledJobManifest)
+	writeFile(t, f.src+"/profiledapp/compose.yml", profiledJobCompose)
 	f.h.Discover()
 	f.h.Enable("profiledapp")
 

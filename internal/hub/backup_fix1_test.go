@@ -37,6 +37,9 @@ func rewriteMember(t *testing.T, p, name string, content []byte) {
 // rules; refused (409, every problem listed) before anything changes.
 func TestRestoreRefusesInvalidConfig(t *testing.T) {
 	f, _, groups := grafanaB(t)
+	// An archive without settings (the first start's stamp dropped):
+	// the test adds its own settings block.
+	forgetFirstStart(f, "grafana-b")
 	entry, err := f.h.BackupInstance("grafana-b", directory.Human("root"))
 	if err != nil {
 		t.Fatal(err)

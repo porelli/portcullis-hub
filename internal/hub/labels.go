@@ -2,6 +2,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -44,16 +45,21 @@ type GroupChoice struct {
 
 // CreateRequest is POST /api/instances's body (§11.9 "Create body"):
 // Template, ID and Label are required; Hosts nil = the defaults on the
-// main domain.
+// main domain; Setup the template's setup options' values (option key →
+// JSON value, parsed like a settings save's values; an omitted one takes
+// its default).
 type CreateRequest struct {
 	Template string
 	ID       string
 	Label    string
 	Hosts    map[string]string
 	Groups   GroupChoice
+	Setup    map[string]json.RawMessage
 	// recheck, if set, runs right before the create commits (outside
 	// mu): an "existing" binding checked again against the directory.
 	recheck func() error
+	// setup is Setup parsed (parseSetup), stored by createEntry.
+	setup *parsedSettings
 }
 
 // CheckLabel refuses (400) a label §11.9 doesn't allow: 1–64 runes, one

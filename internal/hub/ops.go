@@ -644,7 +644,8 @@ func SecretOptionEnvNames(t *templates.Template) map[string]bool {
 // hubPublicVars / hubPublicPrefixes are the instance variables the Hub
 // writes into every instance's .env (contract §3.1) whose values are
 // never secrets: hostnames, ids, group names, client ids, the local
-// networks and the AI switches. Templates may not declare them (reserved
+// networks, the AI switches and COMPOSE_PROFILES (the setup choices'
+// compose profiles, §13.18). Templates may not declare them (reserved
 // names), so a name matching secretKeyRe here (PORTCULLIS_HOST_SECRETAPP,
 // PORTCULLIS_INSTANCE of an id with "token" in it) is still not a
 // secret's variable. PORTCULLIS_AI_PROVIDER_* are secrets and stay out.
@@ -652,7 +653,7 @@ var (
 	hubPublicVars = map[string]bool{
 		"PORTCULLIS_DOMAIN": true, "PORTCULLIS_INSTANCE": true, "PORTCULLIS_OIDC_CLIENT_ID": true,
 		"PORTCULLIS_ACCESS_GROUP": true, "PORTCULLIS_ADMIN_GROUP": true, "PORTCULLIS_LOCAL_NETWORKS": true,
-		"PORTCULLIS_AI_ENABLED": true,
+		"PORTCULLIS_AI_ENABLED": true, templates.VarComposeProfiles: true,
 	}
 	hubPublicPrefixes = []string{"PORTCULLIS_HOST_", "PORTCULLIS_OIDC_CLIENT_ID_", "PORTCULLIS_AI_READONLY_"}
 )

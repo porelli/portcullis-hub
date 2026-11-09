@@ -254,6 +254,13 @@ func (h *Hub) optionEnvIn(rv renderView, t *templates.Template, m *directory.Mem
 	// The Local networks (F35, §3.1): every .env write carries them, the
 	// canonical prefixes comma-joined ('' = saved empty: loopback only).
 	out[templates.VarLocalNetworks] = h.localNetworksEnvLocked()
+	// The setup choices' compose profiles (§13.18): Hub-set, every .env
+	// write of a template with profiled services carries them ('' =
+	// none). A template without any has nothing a profile could start:
+	// its .env stays as it was (a manifest can't declare the variable).
+	if len(t.ProfiledServices) > 0 {
+		out[templates.VarComposeProfiles] = h.composeProfilesEnv(t, s)
+	}
 	return out, problems, nil
 }
 
