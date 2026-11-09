@@ -47,7 +47,7 @@ neither offered nor accepted. A method an enabled template needs can't be
 switched off (the dialog lists the templates and apps; change them first),
 the same rule as for templates in use. Whether browsers are asked
 for a client certificate at all follows the switches (no certificate method on
-→ no certificate request); today's `.env`-only `MTLS_ENABLED` goes away.
+→ no certificate request); today's `.env`-only `MTLS_ENABLED` goes away. Core pages (auth, hub, people, the portal) always ask for a certificate as an *option* (a browser without one shows nothing); app hosts ask only when their template uses a certificate method that is on.
 
 ### Templates
 
