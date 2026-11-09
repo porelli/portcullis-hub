@@ -21,7 +21,7 @@ apps: invite yourself as a regular person for that (see
 | Add someone to a group starting from the person | their page, `people.<domain>/#people/<name>` → **Add to group…** (opens the group's page with them picked) |
 | See who has an app and why | the app's access group, linked from the Hub (instance Overview, Who gets what, Missing groups): its page |
 | Create a group | people page → **Groups** → **New group** |
-| Create the groups an enabled app is missing | the Hub's App Catalog banner, [Missing groups](hub.md#missing-groups) |
+| Create the groups an enabled instance is missing | the Hub's Apps page banner, [Missing groups](hub.md#missing-groups) |
 | Change a rule | the group's page → **Edit rule…** |
 | See who changed what | the group's or the person's **History** (admins); everything: the Hub's [Audit log](hub.md#audit-log) tab |
 | Define fields and delegated permissions | people page → **Setup** (admins) |
@@ -423,7 +423,7 @@ read-only). Enter the group name (e.g. `users_grafana`); its page opens. New
 groups are manual.
 
 Groups an enabled app needs but that don't exist yet are listed in the Hub's
-App Catalog [Missing groups](hub.md#missing-groups) banner, each with a
+Apps page [Missing groups](hub.md#missing-groups) banner, each with a
 one-click **Create**.
 
 `https://directory.<your-domain>` redirects to `https://people.<your-domain>`. LLDAP has no single sign-on, so its own web UI isn't published; for recovery, open it from the server with [`portcullis lldap-ui`](cli.md#lldap-ui).
@@ -480,7 +480,7 @@ Values people enter for themselves work the same way with accounts: each remembe
 
 To give user `alice` access to Grafana:
 
-1. Enabling Grafana in the Hub creates the `users_grafana` and `admin_grafana` groups if they are missing (or use the App Catalog banner, see [Missing groups](hub.md#missing-groups))
+1. Enabling Grafana in the Hub creates the `users_grafana` and `admin_grafana` groups if they are missing (or use the Apps page banner, see [Missing groups](hub.md#missing-groups))
 2. Open `users_grafana`'s page (the Hub's Grafana Overview links to it) and add `alice` with **Add people**
 3. `alice` can now access `https://grafana.<your-domain>` (Keycloak reads groups from LLDAP at her next sign-in or token refresh)
 

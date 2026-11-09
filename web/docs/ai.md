@@ -94,8 +94,8 @@ Hub's log when a client is missing from people's cards.
 
 ## Switching an app on
 
-Each app's detail panel has an **AI support** tab (deep link
-`#app/<id>/ai`):
+Each instance page has an **AI** tab (deep link
+`#apps/<id>/ai`):
 
 ![The AI support tab](../assets/ai/ai-support-tab.png)
 

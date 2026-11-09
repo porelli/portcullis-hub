@@ -60,7 +60,7 @@ The **Marketplace** page shows every template from every [template source](#temp
     - For installed apps: **"in use · N instances"**, **Show in Apps** (filters the Apps page to that app), and **+ Add instance** (for multi templates)
     - For not-yet-installed apps: **Install…**
 
-Below the cards, the **Template sources** section (moved from the old Template Sources tab) shows each configured source with its URL, update interval, and management buttons.
+Below the cards, the **Template sources** section (moved from the old Template sources section (at the bottom of the Marketplace)) shows each configured source with its URL, update interval, and management buttons.
 
 ## Setup before the first start
 
@@ -179,10 +179,10 @@ images, starting services (n of m), waiting until healthy (n of m), and
 applying settings (start hooks, data files).
 
 **You can close the panel at any time**; the operation keeps going. The
-app's card shows "Enabling… show progress" while it runs, and clicking that
-or the app's name reopens the panel. Refreshing the page, opening a second
-tab, or another admin opening the app shows the same running operation with
-its progress. Only one operation runs per app at a time: a second Enable (or
+instance row shows "Enabling… show progress" while it runs, and clicking that
+or the instance name reopens the panel. Refreshing the page, opening a second
+tab, or another admin opening the instance shows the same running operation with
+its progress. Only one operation runs per instance at a time: a second Enable (or
 any other operation) while one runs answers HTTP 409 with the running
 operation, and the UI opens its panel instead.
 
@@ -277,9 +277,9 @@ up in [Drift detection](#drift-detection) (**Stop & remove**).
 Every operation's progress and outcome is stored per app in
 `${HUB_DATA_DIR}/ops/<app>.json` (operation, who started it, time, steps,
 what it created, ok/failed, error, hint, output tail; mode 0600), and kept
-until the next operation on that app. A card whose last operation failed shows
-"last enable failed" (or restart, …); its detail panel shows a banner, and the
-**Logs** tab, also for an app that is not enabled, shows the record above the
+until the next operation on that instance. An instance row whose last operation failed shows
+"last enable failed" (or restart, …); its instance page shows a banner, and the
+**Logs** tab, also for an instance that is not enabled, shows the record above the
 container logs. The API:
 
 ```text
@@ -292,11 +292,11 @@ record above (fields:
 A failed `/api/drift/resolve` answers with its HTTP status and a JSON body
 `{error, op, output, hint, rolled_back}`; other errors stay plain text.
 
-### Disabling an app
+### Disabling an instance
 
-Click **Disable** in the app's detail panel. The Hub runs
-`docker compose down` for the project. The app is marked disabled only once
-that succeeds. If stopping fails, the app stays enabled and the error is shown,
+Click **Disable** on the instance row or its instance page. The Hub runs
+`docker compose down` for the project. The instance is marked disabled only once
+that succeeds. If stopping fails, the instance stays enabled and the error is shown,
 so you can retry instead of being left with orphaned containers. If the
 template is gone or its compose file is broken, the Hub falls back to
 `docker compose -p portcullis-<id> down`.
@@ -1269,7 +1269,7 @@ The operation is audited as `instance.delete`. If any step fails after the
 backup, the instance stays in `state: deleting` and the error is shown; a retry
 continues from where it left off (it does not take another backup).
 
-The automatic backup is listed in the **App Catalog → Backups** dialog with a
+The automatic backup is listed in the **All backups** list (Apps → All backups) with a
 `reason: delete` label. The Hub shows the backup path and warnings (e.g., if
 some groups were kept because they're shared, or if no IdP is configured so
 client deletion was skipped).
@@ -1538,7 +1538,7 @@ The doctor's file-sharing findings
 The **Doctor** tab checks the whole setup, including folders and paths you
 set up by hand, and lists findings as **Problems** (broken or unsafe now),
 **Warnings** (likely to break, or weaker than intended) and **Info**. The
-tab's badge counts Problems and Warnings, and each app's detail panel shows
+tab's badge counts Problems and Warnings, and each instance page shows
 a "Doctor: 1 problem, 2 warnings" line linking to the tab.
 
 Each finding says what is wrong, why it matters, which apps, folders and
@@ -1659,13 +1659,13 @@ is disabled and everything else keeps working.
 **The built-in `admin` account** (LLDAP's bootstrap admin) manages Portcullis
 (apps, people, settings) but can't be added to any group, so it can't use the
 apps it installs. Its person page says so and its **Add to group…** is
-disabled; it is never suggested where an app's people are picked (**Revoke
+disabled; it is never suggested where an instance's people are picked (**Revoke
 for**, the settings panel's people lists). Signed in to the Hub as `admin`, the
-App Catalog shows "You're signed in as the built-in admin, which can't use
+Apps page shows "You're signed in as the built-in admin, which can't use
 apps. Invite yourself as a person to use them." (linking to the invite form on
-the people page), and enabling an app adds "admin can't open it — invite
+the people page), and enabling an instance adds "admin can't open it — invite
 yourself to use it". To use apps, invite yourself as a regular person and add
-that account to the apps' groups.
+that account to the instances' groups.
 
 The people page has the tabs **People**, **Groups**, **Org chart**, **My
 apps** (each person's own app settings, see [My apps](#my-apps)) and
@@ -1699,7 +1699,7 @@ Every group name the Hub shows links to that group's page on the people
 page (`https://people.<main domain>/`, from the configured domain whatever
 address the Hub was opened at): the access and admin group of an instance
 (Overview, the Sign-in section, the Delete summary), a model provider's
-**Used by** (Settings → AI) and the names in the App Catalog's
+**Used by** (Settings → AI) and the names in the Apps page's
 [Missing groups](#missing-groups) banner open in the same tab; the settings
 panel's — the rows of [Who gets what](#who-gets-what) ("from office_milan",
 "largest of …", "combined from …"), its "N members of office_milan have no
@@ -1789,7 +1789,7 @@ Users Keycloak has (federation link = LDAP provider) but LLDAP no longer has (de
 
 They rarely appear any more: Keycloak removes its copy of such a user by itself the next time the user is looked up (core sets `removeInvalidUsersEnabled` on the LDAP federation), and the Hub lists every Keycloak user every 15 minutes so each one is looked up (the **stale-record cleanup**). Keycloak decides per user by asking LLDAP; while LLDAP is unreachable nothing is removed.
 
-The cleanup is **fail safe**: before each run the Hub checks that LLDAP answers, that the bootstrap `admin` and the Hub's service account exist, and that LLDAP's user count hasn't dropped by more than 20 % *and* more than 2 accounts since the last successful run (kept in `<data>/user-sweep.json`). LLDAP unreachable **skips** that run and retries every minute until LLDAP answers or a real problem pauses it. A skipped run (unreachable) shows no catalog banner for the first \~5 minutes; after that: **"Removing people deleted in LLDAP is waiting: \<reason\>. It retries every minute."** A failed account or count check **pauses** the cleanup: the Hub log says so loudly at every run and the App Catalog shows **"LLDAP looks wrong — stale-record cleanup paused"** with the reason. Check LLDAP — restore it from a backup if it lost users — then type `resume` in the banner and click **Resume cleanup** (admins; audited as `keycloak.sweep_resume`; LLDAP's current user count becomes the new baseline; the account checks still apply). API: `GET /api/keycloak/user-sweep`, `POST /api/keycloak/user-sweep/resume` with `{"confirm": "resume"}`. The pause covers only the Hub's cleanup: Keycloak still checks a user against LLDAP when that user tries to sign in, so restoring LLDAP before starting the stack is still required ([Backups](backups.md#restore)). Groups deleted in LLDAP leave Keycloak at its next LDAP sync (hourly). A record that still shows here (e.g. Keycloak answered with an error) can be removed by hand:
+The cleanup is **fail safe**: before each run the Hub checks that LLDAP answers, that the bootstrap `admin` and the Hub's service account exist, and that LLDAP's user count hasn't dropped by more than 20 % *and* more than 2 accounts since the last successful run (kept in `<data>/user-sweep.json`). LLDAP unreachable **skips** that run and retries every minute until LLDAP answers or a real problem pauses it. A skipped run (unreachable) shows no Apps page banner for the first \~5 minutes; after that: **"Removing people deleted in LLDAP is waiting: \<reason\>. It retries every minute."** A failed account or count check **pauses** the cleanup: the Hub log says so loudly at every run and the Apps page shows **"LLDAP looks wrong — stale-record cleanup paused"** with the reason. Check LLDAP — restore it from a backup if it lost users — then type `resume` in the banner and click **Resume cleanup** (admins; audited as `keycloak.sweep_resume`; LLDAP's current user count becomes the new baseline; the account checks still apply). API: `GET /api/keycloak/user-sweep`, `POST /api/keycloak/user-sweep/resume` with `{"confirm": "resume"}`. The pause covers only the Hub's cleanup: Keycloak still checks a user against LLDAP when that user tries to sign in, so restoring LLDAP before starting the stack is still required ([Backups](backups.md#restore)). Groups deleted in LLDAP leave Keycloak at its next LDAP sync (hourly). A record that still shows here (e.g. Keycloak answered with an error) can be removed by hand:
 
 **Remove** deletes only the Keycloak copy (type the username to confirm). The federation is read-only, so LLDAP isn't touched. Logged as `keycloak.remove_stale` with the id. Refused for `admin`, `portcullis-hub`, any username LLDAP has, and Keycloak users not linked to the LDAP federation.
 
@@ -1809,7 +1809,7 @@ each is in, Add people, Keep out…, Change end, Used by, History).
 
 **End dates** (admins): pick a date/time (browser local time, converted to UTC); the membership is removed automatically when it ends. Clear it with **No end**. Refused for `lldap_admin`. On a rule-based group the end belongs to an added-by-hand or kept-out entry ([End dates](groups.md#end-dates)).
 
-Groups an enabled app needs but that don't exist yet are listed (with one-click **Create**) only in the App Catalog's [Missing groups](#missing-groups) banner.
+Groups an enabled app needs but that don't exist yet are listed (with one-click **Create**) only in the Apps page's [Missing groups](#missing-groups) banner.
 
 #### Rule-based groups
 
@@ -2208,7 +2208,7 @@ Each source is a git repository with one directory per app (`manifest.yaml` +
       kept". A sync never opens anything: an enabled app whose template is
       missing or rejected stays **denied** (fail closed) until a template it
       accepts is there.
-    - **Status.** The Template Sources tab shows the last sync (start-up, upgrade
+    - **Status.** The Template sources section (at the bottom of the Marketplace) shows the last sync (start-up, upgrade
       or button): each source up to date / updated to `<commit>` / not updated
       and why, and enabled apps still without a valid template. Also
       `GET /api/sources/sync` and `<data>/source-sync.json`.

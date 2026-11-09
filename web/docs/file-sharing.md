@@ -83,7 +83,7 @@ Ports on `0.0.0.0` or `::` bypass host firewalls like ufw, so rebind to a LAN ad
 
 Once the app is enabled, people visit [My apps](hub.md#my-apps) (`https://people.<domain>`) and:
 
-1. Click [Create password] on the app's card.
+1. Click [Create password] on the instance page's File sharing tab.
 2. A popup asks them to touch their passkey (a **fresh** sign-in, even if they signed in seconds ago).
 3. The password is shown **once** as 6 groups of 4 characters joined by `-` (29 characters total, e.g. `a2bC-d3eF-g4hJ-…`). The dashes are part of the password.
 4. After "I've saved it", the password disappears from the DOM. It is never shown again and never logged.
