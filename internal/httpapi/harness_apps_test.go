@@ -73,7 +73,9 @@ func seedApps(t *testing.T, e *instEnv, eng *harnessEngine) {
 			t.Fatalf("creating %s: %v", c.ID, err)
 		}
 	}
-	e.ll.AddGroup("users_guacamole-lab", "alice", "user01", "user02")
+	for _, u := range []string{"alice", "user01", "user02"} {
+		e.ll.AddMember("users_guacamole-lab", u) // the create made the group
+	}
 	for _, id := range []string{"guacamole", "guacamole-lab"} {
 		if err := h.Enable(id); err != nil {
 			t.Fatalf("enabling %s: %v", id, err)

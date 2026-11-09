@@ -320,7 +320,7 @@
     .grp-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr)); gap: 1rem; }
     .grp-card { background: #0f172a; border: 1px solid #1e293b; border-radius: 0.5rem; padding: 0.875rem 1rem; font-size: 0.875rem; }
     .grp-card h4 { font-size: 0.9375rem; font-weight: 600; margin-bottom: 0.375rem; display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
-    .grp-card h4 code { font-family: 'SF Mono', 'Fira Code', monospace; color: #93c5fd; font-weight: 500; }
+    .grp-card h4 code { font-family: 'SF Mono', 'Fira Code', monospace; color: #e2e8f0; font-weight: 500; }
     .grp-card p { color: #94a3b8; margin-bottom: 0.375rem; }
     .grp-card .inst-row a.btn { text-decoration: none; }
     .env-tag { display: inline-block; font-size: 0.6875rem; padding: 0 0.4375rem; border-radius: 9999px; background: #1e293b; color: #94a3b8; border: 1px solid #334155; margin-left: 0.375rem; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; white-space: nowrap; }
@@ -332,6 +332,7 @@
     .env-add { display: flex; gap: 0.5rem; align-items: center; margin-top: 0.5rem; flex-wrap: wrap; }
     .env-add[hidden] { display: none; }
     .env-table .ro { color: #64748b; font-size: 0.75rem; }
+    .env-table td.env-fixed { white-space: nowrap; }
     .env-add input { background: #0f172a; border: 1px solid #334155; border-radius: 0.25rem; padding: 0.375rem 0.5rem; color: #e2e8f0; font-family: 'SF Mono', monospace; font-size: 0.75rem; }
     .env-add input[data-env-new-name] { width: 14rem; }
     .env-add input[data-env-new-value] { flex: 1; min-width: 10rem; }
@@ -789,7 +790,10 @@
     // showTab(name): one of the top tabs (apps, marketplace, audit,
     // doctor, settings) or "instance" (an instance's page: the Apps tab
     // stays highlighted). The tab's content loads on every selection.
-    function showTab(name) {
+    // Leaving an instance page with unsaved work asks first: false = the
+    // admin stayed (the page's hash is put back).
+    function showTab(name, asked) {
+      if (name !== 'instance' && pageCtx && !asked && !leavePageOK()) { history.replaceState(null, '', pageHash()); return false; }
       const top = name === 'instance' ? 'apps' : name;
       document.querySelectorAll('.tab[data-tab]').forEach(t => t.classList.toggle('active', t.dataset.tab === top));
       document.querySelectorAll('.tab-content').forEach(t => t.classList.toggle('active', t.id === 'tab-' + name));
@@ -804,10 +808,11 @@
       if (name === 'marketplace') fillMarketplace();
       // Leaving an instance's page drops it (its drafts too).
       if (name !== 'instance' && pageCtx) { pageCtx = null; document.getElementById('instance-page').innerHTML = ''; }
+      return true;
     }
     document.querySelectorAll('.tab[data-tab]').forEach(tab => {
       tab.addEventListener('click', () => {
-        showTab(tab.dataset.tab);
+        if (!showTab(tab.dataset.tab)) return;
         history.replaceState(null, '', tab.dataset.tab === 'apps' ? location.pathname : '#' + tab.dataset.tab);
       });
     });
@@ -1603,7 +1608,7 @@
       html += opRadios(id, shown.op || 'any', !inherits);
       html += '<label class="policy-inherit"><input type="checkbox" name="' + id + '-inherit"' + (inherits ? ' checked' : '') +
         ' data-eff-factors="' + escapeHtml((eff.factors || []).join(',')) + '" data-eff-op="' + escapeHtml(eff.op || 'any') + '"' +
-        ' onchange="togglePolicyInherit(this, \'' + id + '\')"> Inherit global default (' + escapeHtml(policyDescription(d.default_policy)) + ')</label>';
+        ' data-policy-inherit="' + escapeHtml(id) + '"> Inherit global default (' + escapeHtml(policyDescription(d.default_policy)) + ')</label>';
       html += '<div class="policy-effective">Effective: <strong>' + escapeHtml(policyDescription(eff)) + '</strong> · TLS tier <code>' + escapeHtml(d.tier || '') + '</code></div>';
       html += policyNotes(d.policy_notes);
       html += '</div>';
@@ -1634,9 +1639,9 @@
       const native = si.mode === 'native';
       let html = '<div class="policy-section">';
       html += '<div class="policy-title">Sign-in</div>';
-      html += '<label class="policy-factor"><input type="radio" name="__signin" value="gateway"' + (native ? '' : ' checked') + ' onchange="toggleSignIn(this)"> Portcullis sign-in, then the app\'s own login</label>';
+      html += '<label class="policy-factor"><input type="radio" name="__signin" value="gateway"' + (native ? '' : ' checked') + ' data-signin-toggle> Portcullis sign-in, then the app\'s own login</label>';
       html += '<small>' + (si.access_group ? 'Members of ' + PortcullisPeople.groupLink(si.access_group, true) + ' only' : 'Any signed-in user') + ' reach the app\'s login page; the access policy below applies on every request.</small>';
-      html += '<label class="policy-factor' + (si.allow_without_gateway ? '' : ' disabled') + '"><input type="radio" name="__signin" value="native"' + (native ? ' checked' : '') + (si.allow_without_gateway ? '' : ' disabled') + ' onchange="toggleSignIn(this)"> App\'s own login only (no Portcullis)' + (si.allow_without_gateway ? '' : ' <em>— not allowed by this template</em>') + '</label>';
+      html += '<label class="policy-factor' + (si.allow_without_gateway ? '' : ' disabled') + '"><input type="radio" name="__signin" value="native"' + (native ? ' checked' : '') + (si.allow_without_gateway ? '' : ' disabled') + ' data-signin-toggle> App\'s own login only (no Portcullis)' + (si.allow_without_gateway ? '' : ' <em>— not allowed by this template</em>') + '</label>';
       if (si.note) html += '<small>' + escapeHtml(si.note) + '</small>';
       html += '<div class="public-danger signin-warn"' + (native ? '' : ' hidden') + '>No Portcullis in front of this app: no forward-auth, no group-gate, no hardware key. Anyone on the internet reaches the app\'s own login page (TLS tier <code>public@file</code>); only the app\'s own accounts protect it.</div>';
       html += '<div class="public-warn signin-pending" hidden>Save to apply: the access policy below follows the sign-in mode after saving.</div>';
@@ -1703,7 +1708,7 @@
         html += '</div>';
         html += '<div>Listed shares (' + (pa.tokens || []).length + '/' + pa.max_tokens + '):</div>';
         for (const tok of (pa.tokens || [])) {
-          html += '<div class="public-token"><code>' + escapeHtml(tok) + '</code><input type="hidden" name="__pub_token" value="' + escapeHtml(tok) + '"><button type="button" class="btn btn-sm btn-danger" onclick="this.parentElement.remove()">Remove</button></div>';
+          html += '<div class="public-token"><code>' + escapeHtml(tok) + '</code><input type="hidden" name="__pub_token" value="' + escapeHtml(tok) + '"><button type="button" class="btn btn-sm btn-danger" data-pub-token-remove>Remove</button></div>';
         }
         html += '<textarea name="__pub_new" placeholder="Paste share URLs or tokens, one per line"></textarea>';
         html += '<small>Tokens must match <code>' + escapeHtml(pa.token_pattern || '') + '</code>. With no listed share nothing is opened.</small>';
@@ -1747,7 +1752,7 @@
       try {
         const data = await apiGet('/api/settings');
         const dp = data.default_auth_policy || { factors: [], op: '' };
-        let html = '<form class="settings-form" onsubmit="saveGlobalSettings(event)">';
+        let html = '<form class="settings-form" data-global-settings-form>';
         html += '<div class="policy-section"><div class="policy-title">Access policy' + scoreBadge(data.default_safety_score) + '</div>';
         html += factorBoxes('global', new Set(dp.factors || []), true, null);
         html += opRadios('global', dp.op || 'any', true);
@@ -2646,25 +2651,39 @@
     // one-off job's container, job / job_state), polled every 15 s for
     // instances that run (or failed).
     const statusCache = {};
-    // The rows' summary (§11.9 "Fine"): n of m containers fine — a job
-    // counts when done —, and the jobs' word: setup job done / failed /
+    // The rows' summary (§11.9 "Fine"), by service: m = the services of
+    // the rows (a service with no container has a "missing" row), n = the
+    // services all of whose rows are fine — running, or a done job —, and
+    // the jobs' word: setup job failed / missing (never ran) / done /
     // running / pending.
     function statusSummary(rows) {
       const fine = r => r.job ? r.job_state === 'done' : r.state === 'running';
+      const services = new Map();
+      for (const r of rows) {
+        const k = r.service || r.name;
+        if (!services.has(k)) services.set(k, []);
+        services.get(k).push(r);
+      }
+      let n = 0;
+      services.forEach(rs => { if (rs.every(fine)) n++; });
       const jobs = rows.filter(r => r.job);
       let job = '';
       if (jobs.some(r => r.job_state === 'failed')) job = 'failed';
+      else if (jobs.some(r => r.job_state === 'missing')) job = 'missing';
       else if (jobs.length && jobs.every(r => r.job_state === 'done')) job = 'done';
       else if (jobs.some(r => r.job_state === 'running')) job = 'running';
       else if (jobs.length) job = 'pending';
-      return { n: rows.filter(fine).length, m: rows.length, job };
+      return { n, m: services.size, job };
     }
-    // A container row's colour and words.
+    const JOB_WORDS = { done: 'setup job done', failed: 'setup job failed', missing: 'setup job never ran', running: 'setup job running', pending: 'setup job pending' };
+    // A container row's colour and words; a service with no container
+    // (state "missing") says so.
     function containerState(s) {
       if (s.job) {
-        return { done: ['running', 'setup job done'], failed: ['stopped', 'setup job failed'], running: ['partial', 'setup job running'] }[s.job_state] ||
-          ['', 'setup job pending'];
+        return { done: ['running', JOB_WORDS.done], failed: ['stopped', JOB_WORDS.failed], missing: ['stopped', JOB_WORDS.missing], running: ['partial', JOB_WORDS.running] }[s.job_state] ||
+          ['', JOB_WORDS.pending];
       }
+      if (s.state === 'missing') return ['stopped', 'no container'];
       return [s.state === 'running' ? 'running' : s.state === 'restarting' ? 'partial' : 'stopped', s.status];
     }
     function containersHtml(rows) {
@@ -2672,7 +2691,7 @@
       return '<div class="status-list">' + rows.map(s => {
         const [cls, text] = containerState(s);
         return '<div class="status-row"><span class="status-dot ' + cls + '"></span>' +
-          '<span class="status-name">' + escapeHtml(s.name) + '</span>' +
+          '<span class="status-name">' + (s.name ? escapeHtml(s.name) : '<span class="muted">(none)</span>') + '</span>' +
           '<span class="status-state">' + escapeHtml(s.service || '') + ' · ' + escapeHtml(text) + '</span></div>';
       }).join('') + '</div>';
     }
@@ -2699,7 +2718,7 @@
       const items = (report && report.items) || [];
       if (!items.length && !(report && report.error)) { box.classList.remove('visible'); box.innerHTML = ''; return; }
       let html = '<div class="drift-title"><span>State drift</span>' +
-        '<button class="btn btn-secondary btn-sm" onclick="checkDrift()">Re-check</button></div>';
+        '<button type="button" class="btn btn-secondary btn-sm" data-drift-recheck>Re-check</button></div>';
       if (report.error) html += '<div class="drift-error">Docker unreachable: ' + escapeHtml(report.error) + '</div>';
       for (const d of items) {
         html += '<div class="drift-item"><a class="drift-id group-link" href="#apps/' + encodeURIComponent(d.id) + '">' + escapeHtml(d.id) + '</a>';
@@ -2713,7 +2732,6 @@
       }
       box.innerHTML = html;
       box.classList.add('visible');
-      box.querySelectorAll('[data-drift-action]').forEach(btn => btn.addEventListener('click', () => resolveDrift(btn)));
     }
 
     async function loadDrift() {
@@ -2754,7 +2772,7 @@
       let html = '<div class="drift-title"><span>Missing groups &middot; nobody can sign in to these apps</span>' +
         (creatable ? '<button class="btn btn-primary btn-sm" data-create-groups="">Create missing groups</button>' : '') + '</div>';
       for (const m of items) {
-        html += '<div class="drift-item"><span class="drift-id">' + escapeHtml(m.instance) + '</span><span class="drift-msg">';
+        html += '<div class="drift-item"><a class="drift-id group-link" href="#apps/' + encodeURIComponent(m.instance) + '">' + escapeHtml(m.instance) + '</a><span class="drift-msg">';
         const gl = gs => gs.map(g => PortcullisPeople.groupLink(g)).join(', ');
         if ((m.creatable || []).length) html += 'missing: ' + gl(m.creatable);
         if ((m.other || []).length) html += ((m.creatable || []).length ? ' &middot; ' : '') + 'missing (create on the <a class="group-link" href="' + escapeHtml(PortcullisPeople.href('#groups')) + '">people page</a>): ' + gl(m.other);
@@ -2764,13 +2782,12 @@
       }
       box.innerHTML = html;
       box.classList.add('visible');
-      box.querySelectorAll('[data-create-groups]').forEach(btn => btn.addEventListener('click', () => createMissingGroups(btn)));
     }
     async function loadMissingGroups() {
       try { renderMissingGroups(await apiGet('/api/instances/missing-groups')); } catch (e) { /* ignore */ }
     }
-    async function createMissingGroups(btn) {
-      const id = btn.dataset.createGroups;
+    // createMissingGroups: id's missing groups ("" = every instance's).
+    async function createMissingGroups(btn, id) {
       btn.classList.add('loading');
       try {
         const res = await apiPost('/api/instances/missing-groups', id ? { ids: [id] } : {});
@@ -2823,15 +2840,12 @@
       }
       box.innerHTML = html;
       box.classList.add('visible');
-      const btn = box.querySelector('[data-user-sweep-resume]');
-      if (btn) btn.addEventListener('click', resumeUserSweep);
     }
     async function loadUserSweep() {
       if (document.getElementById('user-sweep-confirm') === document.activeElement) return;
       try { renderUserSweep(await apiGet('/api/keycloak/user-sweep')); } catch (e) { /* ignore */ }
     }
-    async function resumeUserSweep(ev) {
-      const btn = ev.currentTarget;
+    async function resumeUserSweep(btn) {
       const confirmText = (document.getElementById('user-sweep-confirm').value || '').trim();
       btn.classList.add('loading');
       try {
@@ -3051,7 +3065,7 @@
         else html += r.default === '' ? '<span class="ro">(empty)</span>' : '<span class="env-val">' + escapeHtml(r.default) + '</span>';
         html += '<span class="env-tag">' + escapeHtml(ENV_SOURCE[r.source] || r.source) + '</span>' + (r.secret ? '<span class="env-tag">secret</span>' : '') + '</td>';
         if (r.hub_set) {
-          html += '<td class="ro">' + (r.secret ? 'set by the Hub — can\'t be overridden (secrets are set under Settings)' :
+          html += '<td class="ro env-fixed">' + (r.secret ? 'set by the Hub — can\'t be overridden' :
             r.source === 'option' ? 'set by a setting — change it under Settings' : 'set by the Hub — can\'t be overridden') + '</td><td>';
           if (r.overridden) html += '<button type="button" class="btn btn-secondary btn-sm" data-env-reset>Reset to default</button>';
           html += '</td></tr>';
@@ -3518,10 +3532,12 @@
           if (!rows) return { dot: '', text: 'enabled · checking…', cls: 'info' };
           const s = statusSummary(rows);
           if (!s.m) return { dot: 'stopped', text: 'not running · no containers', cls: 'bad' };
-          const job = s.job ? ' · setup job ' + s.job : '';
+          const job = s.job ? ' · ' + JOB_WORDS[s.job] : '';
           const fine = s.n === s.m;
-          return { dot: fine ? 'running' : s.n ? 'partial' : 'stopped', text: (s.n ? 'running · ' : 'not running · ') + s.n + ' of ' + s.m + job,
-            cls: fine ? 'ok' : s.job === 'failed' || !s.n ? 'bad' : 'warn' };
+          // A failed or missing setup job is a failure: red, like its pill.
+          const jobBad = s.job === 'failed' || s.job === 'missing';
+          return { dot: fine ? 'running' : jobBad || !s.n ? 'stopped' : 'partial', text: (s.n ? 'running · ' : 'not running · ') + s.n + ' of ' + s.m + job,
+            cls: fine ? 'ok' : jobBad || !s.n ? 'bad' : 'warn' };
         }
         case 'created': return { dot: '', text: 'not started yet', cls: 'info' };
         case 'disabled': return { dot: '', text: 'stopped', cls: '' };
@@ -3551,10 +3567,12 @@
       if (grp === null) return ' <span class="pill bad">missing</span>';
       return ' (' + (grp.members || []).length + ')';
     }
-    function instLineHtml(i) {
+    function instLineHtml(i, dup) {
       const st = instStatus(i);
       const hosts = Object.keys(i.hosts || {}).sort().map(r => i.hosts[r]);
       const sub = [hosts.length ? escapeHtml(hosts[0]) + (hosts.length > 1 ? ' +' + (hosts.length - 1) : '') : 'no web page'];
+      // Two instances of one app with the same name: their ids tell them apart.
+      if (dup) sub.unshift('<code class="muted">' + escapeHtml(i.id) + '</code>');
       if (i.access_group) sub.push(PortcullisPeople.groupLink(i.access_group) + memberCountHtml(i.access_group));
       return '<div class="inst-line" data-inst-line="' + escapeHtml(i.id) + '"><span class="status-dot ' + st.dot + '" aria-hidden="true"></span>' +
         '<span class="inst-line-name"><a href="#apps/' + encodeURIComponent(i.id) + '">' + escapeHtml(instName(i)) + '</a>' +
@@ -3593,7 +3611,7 @@
           '<span class="app-icon" aria-hidden="true">' + escapeHtml(t ? t.manifest.icon || '' : '') + '</span><h3>' + escapeHtml(appName(tid)) + '</h3>' +
           '<span class="settings-empty">' + list.length + (list.length === 1 ? ' instance' : ' instances') + '</span>' +
           (multi ? '<button type="button" class="btn btn-secondary btn-sm" data-add-instance="' + escapeHtml(tid) + '" title="Run another, fully separate copy of this app">+ Add instance</button>' : '') +
-          '</div>' + list.map(instLineHtml).join('') + '</section>';
+          '</div>' + list.map(i => instLineHtml(i, list.some(o => o !== i && instName(o) === instName(i)))).join('') + '</section>';
       }
       if (h !== appsHtml || !box.querySelector('.apps-head')) { box.innerHTML = h; appsHtml = h; }
     }
@@ -3612,8 +3630,9 @@
 
     // goTab: a top tab, with a history entry (the page's links).
     function goTab(name) {
+      if (pageCtx && !leavePageOK()) return;
       history.pushState(null, '', name === 'apps' ? location.pathname : '#' + name);
-      showTab(name);
+      showTab(name, true);
     }
     // navInstance: instance id's page at tab (option: a setting to scroll
     // to); the hash routes it.
@@ -3631,6 +3650,7 @@
       return PAGE_TABS.filter(([k]) => k !== 'filesharing' || templateHasPersonSecret(inst.template));
     }
     async function openInstancePage(id, tab, opt) {
+      if (pageCtx && pageCtx.id !== id && !leavePageOK()) { history.replaceState(null, '', pageHash()); return; }
       showTab('instance');
       const box = document.getElementById('instance-page');
       if (!(pageCtx && pageCtx.id === id && box.querySelector('[data-ipane]'))) {
@@ -3699,23 +3719,54 @@
       loadPane(k, box.querySelector('[data-ipane="' + k + '"]'), opt || '');
     }
     // Settings and Expert load once per page (a draft survives switching
-    // tabs); the others are read again each time they are shown.
+    // tabs) — kept only once they loaded (a failure is read again at the
+    // next visit); the others are read again each time they are shown.
     async function loadPane(k, pane, opt) {
-      const id = pageCtx.id;
-      if ((k === 'settings' || k === 'expert') && pageCtx.loaded[k]) { if (opt) flashOption(opt); return; }
-      pageCtx.loaded[k] = true;
+      const ctx = pageCtx, id = ctx.id;
+      if ((k === 'settings' || k === 'expert') && (ctx.loaded[k] || ctx.loading === k)) { if (opt && ctx.loaded[k]) flashOption(opt); return; }
       switch (k) {
         case 'overview': renderOverview(id, pane); break;
-        case 'settings': try { await loadSettings(id, pane); } catch (e) { /* the panel says why */ } if (opt) flashOption(opt); break;
+        case 'settings':
+          ctx.loading = k;
+          try { await loadSettings(id, pane); } catch (e) { /* the panel says why */ }
+          ctx.loading = '';
+          ctx.loaded[k] = !!pane.querySelector('[data-ps-form]');
+          if (opt) flashOption(opt);
+          break;
         case 'groups': renderGroupsTab(id, pane); break;
         case 'filesharing': loadFileSharing(id, pane); break;
         case 'logs': loadLogs(id, pane); break;
         case 'backups': loadBackups(pane, id); break;
         case 'ai': loadAITab(id, pane); break;
-        case 'expert': loadExpert(id, pane); break;
+        case 'expert':
+          ctx.loading = k;
+          await loadExpert(id, pane);
+          ctx.loading = '';
+          ctx.loaded[k] = !!pane.querySelector('[data-env-box]');
+          break;
         case 'delete': renderInstDelete(pane); break;
       }
     }
+    // pageDirty: the instance page holds unsaved work — a settings draft
+    // (its save bar's Discard enabled) or an env row being edited.
+    function pageDirty() {
+      const box = document.getElementById('instance-page');
+      if (!pageCtx || !box) return false;
+      if (box.querySelector('[data-ipane="settings"] [data-action="discard"]:not([disabled])')) return true;
+      const add = box.querySelector('[data-env-add-form]:not([hidden]) [data-env-new-name]');
+      return !!(box.querySelector('[data-ipane="expert"] [data-env-cancel]') || (add && add.value.trim()));
+    }
+    // leavePageOK: leaving the instance page (another tab, another page)
+    // asks first when it holds unsaved work.
+    function leavePageOK() {
+      if (!pageDirty()) return true;
+      const inst = pageCtx.inst;
+      return confirm('Leave ' + (inst ? instName(inst) : pageCtx.id) + '? Its unsaved changes are lost.');
+    }
+    function pageHash() {
+      return '#apps/' + encodeURIComponent(pageCtx.id) + (pageCtx.tab && pageCtx.tab !== 'overview' ? '/' + pageCtx.tab : '');
+    }
+    window.addEventListener('beforeunload', e => { if (pageDirty()) e.preventDefault(); });
     async function flashOption(key) {
       const el = await waitFor('#instance-page [data-ipane="settings"] [data-opt="' + CSS.escape(key) + '"]');
       if (el) flash(el);
@@ -3739,14 +3790,14 @@
         '<div class="inst-form"><label class="block" for="pg-label">Label</label>' +
         '<div class="inst-row" style="margin-top:0"><input type="text" id="pg-label" data-pg-label value="' + escapeHtml(inst.label || '') + '" maxlength="64" spellcheck="false" style="flex:1;width:auto">' +
         '<button type="button" class="btn btn-primary btn-sm" data-pg-label-save>Save label</button></div>' +
-        '<small>Shown everywhere as “' + escapeHtml(appName(inst.template)) + ' · &lt;label&gt;”: the portal, My apps, the AI consent. Change it any time; nothing depends on it.</small>' +
+        '<small>Shown everywhere as “' + escapeHtml(appName(inst.template)) + ' · &lt;label&gt;” (just “' + escapeHtml(appName(inst.template)) + '” when the label is the app\'s name): the portal, My apps, the AI consent. Change it any time; nothing depends on it.</small>' +
         '<div data-pg-label-result></div></div>' +
         '<dl class="inst-facts">' +
         '<dt>App</dt><dd>' + escapeHtml(templateLabel(inst.template)) + ' <code>' + escapeHtml(inst.template) + '</code></dd>' +
         '<dt>Instance id</dt><dd><code>' + escapeHtml(inst.id) + '</code></dd>' +
         '<dt>Compose project</dt><dd><code>' + escapeHtml(inst.project || '') + '</code></dd>' +
-        (inst.access_group ? '<dt>Users group</dt><dd>' + PortcullisPeople.groupLink(inst.access_group, true) + (bound ? ' <span class="pill info">existing group</span>' : '') + ' <button type="button" class="opp-link" data-page-tab-go="groups">who is in it</button></dd>' : '') +
-        (inst.admin_group ? '<dt>Admins group</dt><dd>' + PortcullisPeople.groupLink(inst.admin_group, true) + (bound ? ' <span class="pill info">existing group</span>' : '') + '</dd>' : '') +
+        (inst.access_group ? '<dt>Users group</dt><dd>' + PortcullisPeople.groupLink(inst.access_group, true, true) + (bound ? ' <span class="pill info">existing group</span>' : '') + ' <button type="button" class="opp-link" data-page-tab-go="groups">who is in it</button></dd>' : '') +
+        (inst.admin_group ? '<dt>Admins group</dt><dd>' + PortcullisPeople.groupLink(inst.admin_group, true, true) + (bound ? ' <span class="pill info">existing group</span>' : '') + '</dd>' : '') +
         ((inst.keycloak_clients || []).length ? '<dt>Keycloak clients</dt><dd>' + inst.keycloak_clients.map(c => '<code>' + escapeHtml(c) + '</code>').join(', ') + '</dd>' : '') +
         (setupOpts ? '<dt>Setup choices</dt><dd>' + (inst.setup && inst.setup.locked ? 'fixed since the first start (🔒 the locked ones say why under Settings)' : 'not started yet: every choice can still change under Settings') + '</dd>' : '') +
         '</dl></div>';
@@ -4009,10 +4060,10 @@
       h += '<p>Deleting <code>' + escapeHtml(id) + '</code> (' + escapeHtml(instName(inst)) + ') is permanent. The Hub first takes a backup (kept under Backups, restorable into a new instance), then removes:</p>' +
         '<ul class="policy-notes" style="margin-bottom:0.75rem"><li>its containers and volumes (all its data)</li><li>its Keycloak clients and access role</li>' +
         '<li>its generated secrets, settings, policies and share links</li>' +
-        (bound ? '<li>not its groups' + (inst.access_group ? ' ' + PortcullisPeople.groupLink(inst.access_group, true) : '') +
-          (inst.admin_group ? ' ' + PortcullisPeople.groupLink(inst.admin_group, true) : '') + ': existing groups are never deleted</li>'
-          : '<li>its groups' + (inst.access_group ? ' ' + PortcullisPeople.groupLink(inst.access_group, true) : '') +
-          (inst.admin_group ? ' ' + PortcullisPeople.groupLink(inst.admin_group, true) : '') + ' (kept, with a warning, if anything else uses them)</li>') + '</ul>' +
+        (bound ? '<li>not its groups' + (inst.access_group ? ' ' + PortcullisPeople.groupLink(inst.access_group, true, true) : '') +
+          (inst.admin_group ? ' ' + PortcullisPeople.groupLink(inst.admin_group, true, true) : '') + ': existing groups are never deleted</li>'
+          : '<li>its groups' + (inst.access_group ? ' ' + PortcullisPeople.groupLink(inst.access_group, true, true) : '') +
+          (inst.admin_group ? ' ' + PortcullisPeople.groupLink(inst.admin_group, true, true) : '') + ' (kept, with a warning, if anything else uses them)</li>') + '</ul>' +
         (inst.default ? '<p class="settings-empty">Its app stays in the Marketplace; installing it again starts a fresh instance.</p>' : '') +
         '<div class="inst-form" style="margin-top:0.75rem"><label class="block" for="inst-del-confirm">Type <code>' + escapeHtml(id) + '</code> to confirm</label>' +
         '<input type="text" id="inst-del-confirm" spellcheck="false" autocomplete="off" placeholder="' + escapeHtml(id) + '"></div>' +
@@ -4190,6 +4241,12 @@
       if ((el = t.closest('[data-goto-tab]'))) { e.preventDefault(); goTab(el.dataset.gotoTab); return; }
       if ((el = t.closest('[data-open-ports]'))) { openAppSettings(el.dataset.openPorts); return; }
       if (t.id === 'op-modal' || t.closest('[data-op-error-close]')) { closeOpError(); return; }
+      // The banners above Apps, and the policy block's listed shares.
+      if (t.closest('[data-drift-recheck]')) { checkDrift(); return; }
+      if ((el = t.closest('#drift [data-drift-action]'))) { resolveDrift(el); return; }
+      if ((el = t.closest('#missing-groups [data-create-groups]'))) { createMissingGroups(el, el.dataset.createGroups); return; }
+      if ((el = t.closest('#user-sweep [data-user-sweep-resume]'))) { resumeUserSweep(el); return; }
+      if ((el = t.closest('[data-pub-token-remove]'))) { el.parentElement.remove(); return; }
       if ((el = t.closest('[data-src-remove]'))) { removeSource(el.dataset.srcRemove); return; }
       if (t.closest('[data-src-add]')) { addSource(); return; }
       if (t.closest('[data-src-sync]')) { syncSources(); return; }
@@ -4222,8 +4279,7 @@
       if ((el = t.closest('[data-inst-delete]'))) { deleteInstance(el); return; }
       if (t.closest('[data-pg-containers-reload]')) { loadContainers(id, pane); return; }
       if ((el = t.closest('[data-pg-create-groups]'))) {
-        el.dataset.createGroups = el.dataset.pgCreateGroups;
-        createMissingGroups(el).then(() => { if (pageCtx && pageCtx.id === id) renderGroupsTab(id, pane); });
+        createMissingGroups(el, el.dataset.pgCreateGroups).then(() => { if (pageCtx && pageCtx.id === id) renderGroupsTab(id, pane); });
         return;
       }
       if (t.closest('[data-log-reload]')) { loadLogs(id, pane); return; }
@@ -4248,6 +4304,8 @@
     document.addEventListener('change', e => {
       const t = e.target;
       if (t.id === 'inst-new-domain') { refreshCreateDefaults(); return; }
+      if (t.matches('[data-policy-inherit]')) { togglePolicyInherit(t, t.dataset.policyInherit); return; }
+      if (t.matches('[data-signin-toggle]')) { toggleSignIn(t); return; }
       const pane = t.closest('#instance-page [data-ipane="logs"]');
       if (pane && pageCtx && (t.matches('[data-log-service-pick]') || t.matches('[data-log-lines-pick]'))) {
         if (t.matches('[data-log-service-pick]')) pane.dataset.logService = t.value;
@@ -4257,6 +4315,7 @@
     });
     document.addEventListener('submit', e => {
       if (e.target.id === 'inst-create-form') { e.preventDefault(); submitCreateInstance(); }
+      if (e.target.matches('[data-global-settings-form]')) saveGlobalSettings(e);
     });
     document.addEventListener('keydown', e => {
       const t = e.target;

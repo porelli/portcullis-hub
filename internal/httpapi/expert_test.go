@@ -29,6 +29,13 @@ func (failRunner) Up(context.Context, compose.Project) error {
 
 func newExpertServer(t *testing.T, runner compose.Runner) (http.Handler, *directory.AuditLog) {
 	t.Helper()
+	h, audit, _ := newExpertServerHub(t, runner)
+	return h, audit
+}
+
+// newExpertServerHub is newExpertServer with the Hub it serves.
+func newExpertServerHub(t *testing.T, runner compose.Runner) (http.Handler, *directory.AuditLog, *hub.Hub) {
+	t.Helper()
 	root := t.TempDir()
 	src := filepath.Join(root, "src", "demo")
 	os.MkdirAll(src, 0755)
@@ -52,7 +59,7 @@ func newExpertServer(t *testing.T, runner compose.Runner) (http.Handler, *direct
 	if err != nil {
 		t.Fatal(err)
 	}
-	return handler, audit
+	return handler, audit, h
 }
 
 func call(h http.Handler, method, path, body string) *httptest.ResponseRecorder {
@@ -70,7 +77,7 @@ func call(h http.Handler, method, path, body string) *httptest.ResponseRecorder 
 // A failed enable answers with compose's output and a hint (JSON), and
 // the record stays readable afterwards — the app is not enabled.
 func TestEnableErrorCarriesOutput(t *testing.T) {
-	h, _ := newExpertServer(t, failRunner{})
+	h, _, hb := newExpertServerHub(t, failRunner{})
 	if r := call(h, "GET", "/api/templates/lastop/demo", ""); r.Code != 200 || strings.TrimSpace(r.Body.String()) != "null" {
 		t.Errorf("lastop before = %d %s", r.Code, r.Body)
 	}
@@ -90,6 +97,18 @@ func TestEnableErrorCarriesOutput(t *testing.T) {
 	// Apps shows the failure ("last enable failed": the instance's state
 	// error — the record above — and its op summary's op) and the
 	// instance page offers its Logs tab.
+	// The data the rows read: /api/instances/ops (OpSummaries) has demo's
+	// failed enable, /api/instances (Instances) its state error.
+	if o, ok := hb.OpSummaries()["demo"]; !ok || o.Op != "enable" || o.OK || o.Running {
+		t.Errorf("op summary = %+v", o)
+	}
+	failed := false
+	for _, v := range hb.Instances() {
+		failed = failed || (v.ID == "demo" && v.State == hub.StateError)
+	}
+	if !failed {
+		t.Errorf("instances = %+v, want demo in state error", hb.Instances())
+	}
 	page := call(h, "GET", "/", "").Body.String()
 	if !strings.Contains(page, `text: 'last ' + ((op && op.op) || 'operation') + ' failed'`) || !strings.Contains(page, `['logs', 'Logs']`) {
 		t.Error("Apps lacks the failed-op badge, or the instance page its Logs tab")
