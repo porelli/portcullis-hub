@@ -170,6 +170,8 @@ func TestHarness(t *testing.T) {
 	extra["ai-chat"], extra["plain"] = harnessAIPageFixtures(t)
 	// The progress panel (operation progress Task 8).
 	extra["gitea"] = [2]string{harnessGiteaManifest, harnessGiteaCompose}
+	// Apps and the instance page (apps Task 6): a one-off setup job.
+	extra["guacamole"] = [2]string{harnessGuacManifest, harnessGuacCompose}
 	hrun := &harnessRunner{}
 	aiDir := t.TempDir()
 	aiRecipient, aiGateData := harnessAIFiles(t, aiDir)
@@ -188,7 +190,7 @@ func TestHarness(t *testing.T) {
 		runner: hrun,
 		data:   func(dir string) { seedInterruptedOp(t, dir) },
 		engine: func(f *fakeEngine) hub.Engine {
-			eng = &harnessEngine{fakeEngine: f, disk: disk, prog: newHarnessProgress(),
+			eng = &harnessEngine{fakeEngine: f, disk: disk, prog: newHarnessProgress(), jobs: map[string]map[string]int{},
 				running: map[string][]string{"hookapp": {"app"}, "entryapp": {"app"}, "photos": {"server"}, "samba": {"samba"}, "smbfixture": {"smb"},
 					// aiapp's hooks run in its app service (the tok-mcp
 					// companion isn't running: the doctor's AI finding).
@@ -222,7 +224,7 @@ func TestHarness(t *testing.T) {
 	// The shared navigation's Hub link goes to this Hub listener.
 	e.s.HubURL = "http://" + addr + "/"
 	h := e.s.Hub
-	for _, id := range append(slices.Clone(harnessFixtures), "photos", "samba", "smbfixture", "aiapp", "homeauto", "ai-chat", "plain", "gitea") {
+	for _, id := range append(slices.Clone(harnessFixtures), "photos", "samba", "smbfixture", "aiapp", "homeauto", "ai-chat", "plain", "gitea", "guacamole") {
 		if h.Template(id) == nil {
 			t.Fatalf("fixture %s not loaded (see the log)", id)
 		}
@@ -257,6 +259,7 @@ func TestHarness(t *testing.T) {
 	fa := seedFileSharing(t, h, paddr)
 	hfa := seedConfirmations(t, h, addr, paddr)
 	flaky := seedGroupPages(t, e)
+	seedApps(t, e, eng)
 
 	d, err := time.ParseDuration(os.Getenv("HUB_HARNESS_FOR"))
 	if err != nil {
@@ -456,8 +459,11 @@ type harnessEngine struct {
 	*fakeEngine
 	runMu   sync.Mutex
 	running map[string][]string // instance id → services (runMu)
-	hookOK  atomic.Bool
-	disk    *harnessDisk
+	// jobs: a running instance's one-off jobs, exited with their code
+	// (harness_apps_test.go; runMu).
+	jobs   map[string]map[string]int
+	hookOK atomic.Bool
+	disk   *harnessDisk
 	// The progress panel's fixtures (harness_progress_test.go): image
 	// pulls and volume removals that take a while, and instances whose
 	// containers never get healthy.
@@ -491,6 +497,15 @@ func (e *harnessEngine) ListContainers(ctx context.Context, f docker.Filters) ([
 				out = append(out, c)
 			}
 		}
+		for svc, exit := range e.jobContainers(id) {
+			c := docker.Container{
+				ID: project + "-" + svc, Names: []string{"/" + project + "-" + svc + "-1"}, State: "exited", Status: fmt.Sprintf("Exited (%d) 2 hours ago", exit),
+				Labels: map[string]string{docker.LabelProject: project, docker.LabelService: svc, docker.LabelNumber: "1"},
+			}
+			if matchLabels(c.Labels, f) {
+				out = append(out, c)
+			}
+		}
 	}
 	return out, nil
 }
@@ -505,6 +520,11 @@ func (e *harnessEngine) ContainerState(ctx context.Context, id string) (docker.S
 					return docker.State{Running: true, Status: "running", Health: "starting"}, nil
 				}
 				return docker.State{Running: true}, nil
+			}
+		}
+		for svc, exit := range e.jobContainers(inst) {
+			if id == hub.ProjectPrefix+inst+"-"+svc {
+				return docker.State{Status: "exited", ExitCode: exit}, nil
 			}
 		}
 	}

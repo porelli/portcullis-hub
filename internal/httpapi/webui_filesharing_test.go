@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"encoding/json"
 	"io/fs"
 	"regexp"
 	"strings"
@@ -133,19 +134,41 @@ func TestDoctorFindingsFor(t *testing.T) {
 	}
 }
 
-// TestIndexFileSharingTab: an app whose template has a person_secret
-// option gets the File sharing detail tab and "No web page" (router-less);
-// others don't. The tab's script reads the admin credentials API, revokes
-// with DELETE, and the enable path asks to confirm lan_only ports on
-// 0.0.0.0.
+// TestIndexFileSharingTab: an instance whose template has a person_secret
+// option gets the File sharing tab on its page and its Marketplace card
+// "No web page" (router-less); others don't. The tab's script reads the
+// admin credentials API, revokes with DELETE, and the enable path asks
+// to confirm lan_only ports on 0.0.0.0.
 func TestIndexFileSharingTab(t *testing.T) {
 	e := newCredEnv(t)
 	_, b := doAs(t, e.hub, "root", "GET", "/", "")
-	if !strings.Contains(b, `data-dtab="filesharing" data-app="smbfixture"`) || !strings.Contains(b, `id="detail-filesharing-smbfixture"`) {
-		t.Error("smbfixture has no File sharing tab")
+	// The page's tabs: File sharing only for a person_secret template
+	// (the catalog's settings options, as the tab's own loader reads).
+	if !strings.Contains(b, `return PAGE_TABS.filter(([k]) => k !== 'filesharing' || templateHasPersonSecret(inst.template));`) ||
+		!strings.Contains(b, `['filesharing', 'File sharing']`) || !strings.Contains(b, `return opts.some(o => o.type === 'person_secret');`) ||
+		!strings.Contains(b, `case 'filesharing': loadFileSharing(id, pane); break;`) {
+		t.Error("the instance page has no File sharing tab for person_secret templates")
 	}
-	if strings.Contains(b, `data-dtab="filesharing" data-app="grafana"`) {
-		t.Error("grafana (no person_secret) has a File sharing tab")
+	var cat []map[string]any
+	if r, body := doAs(t, e.hub, "root", "GET", "/api/templates", ""); r.StatusCode != 200 || json.Unmarshal([]byte(body), &cat) != nil {
+		t.Fatalf("templates = %d", r.StatusCode)
+	}
+	secret := map[string]bool{}
+	for _, c := range cat {
+		m, _ := c["manifest"].(map[string]any)
+		st, _ := m["settings"].(map[string]any)
+		opts, _ := st["options"].([]any)
+		for _, o := range opts {
+			if om, _ := o.(map[string]any); om["type"] == "person_secret" {
+				secret[c["id"].(string)] = true
+			}
+		}
+	}
+	if !secret["smbfixture"] {
+		t.Error("smbfixture (person_secret) gets no File sharing tab")
+	}
+	if secret["grafana"] {
+		t.Error("grafana (no person_secret) gets a File sharing tab")
 	}
 	if !strings.Contains(b, `data-no-web-page="smbfixture"`) {
 		t.Error("router-less smbfixture lacks the No web page badge")

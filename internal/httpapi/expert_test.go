@@ -87,10 +87,12 @@ func TestEnableErrorCarriesOutput(t *testing.T) {
 	if r := call(h, "GET", "/api/templates/lastop/missing", ""); r.Code != 404 {
 		t.Errorf("lastop unknown = %d", r.Code)
 	}
-	// The catalog shows the failure and offers its Logs tab.
+	// Apps shows the failure ("last enable failed": the instance's state
+	// error — the record above — and its op summary's op) and the
+	// instance page offers its Logs tab.
 	page := call(h, "GET", "/", "").Body.String()
-	if !strings.Contains(page, `data-dtab="logs" data-app="demo"`) || !strings.Contains(page, "last enable failed") {
-		t.Error("index lacks the failed-op badge / Logs tab")
+	if !strings.Contains(page, `text: 'last ' + ((op && op.op) || 'operation') + ' failed'`) || !strings.Contains(page, `['logs', 'Logs']`) {
+		t.Error("Apps lacks the failed-op badge, or the instance page its Logs tab")
 	}
 	// Restart of a not-enabled app: plain 400.
 	if r := call(h, "POST", "/api/templates/restart/demo", "{}"); r.Code != 400 {

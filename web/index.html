@@ -35,12 +35,9 @@
     .category { margin-bottom: 2rem; }
     .category-title { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.1em; color: #64748b; margin-bottom: 1rem; }
 
-    /* App cards */
+    /* Marketplace cards */
     .apps { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 1rem; }
-    .app-card { background: #1e293b; border-radius: 0.75rem; padding: 1.5rem; position: relative; transition: transform 0.2s, border-color 0.2s; cursor: pointer; border: 1px solid transparent; }
-    .app-card:hover { transform: translateY(-1px); border-color: #334155; }
-    .app-card.enabled { border-color: #22c55e33; }
-    .app-card.expanded { border-color: #3b82f6; }
+    .app-card { background: #1e293b; border-radius: 0.75rem; padding: 1.5rem; position: relative; border: 1px solid transparent; display: flex; flex-direction: column; }
     .app-header { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.75rem; }
     .app-icon { font-size: 1.75rem; }
     .app-name { font-size: 1.125rem; font-weight: 600; }
@@ -63,10 +60,7 @@
 
     .app-tags { display: flex; flex-wrap: wrap; gap: 0.375rem; margin-bottom: 1rem; }
     .tag { font-size: 0.6875rem; padding: 0.125rem 0.5rem; border-radius: 9999px; background: #0f172a; color: #64748b; }
-    .app-urls { margin-bottom: 1rem; }
-    .app-url { font-size: 0.8125rem; color: #3b82f6; text-decoration: none; display: block; margin-bottom: 0.25rem; }
-    .app-url:hover { text-decoration: underline; }
-    .app-footer { display: flex; justify-content: space-between; align-items: center; }
+    .app-footer { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; margin-top: auto; }
 
     /* Toggle button */
     .toggle { padding: 0.5rem 1.25rem; border: none; border-radius: 0.375rem; font-size: 0.875rem; font-weight: 500; cursor: pointer; transition: all 0.2s; }
@@ -77,11 +71,7 @@
     .toggle:disabled { opacity: 0.5; cursor: not-allowed; }
     .toggle.loading { opacity: 0.7; pointer-events: none; }
 
-    /* Detail panel */
-    .app-detail { grid-column: 1 / -1; background: #1a2332; border-radius: 0.75rem; padding: 1.5rem; border: 1px solid #334155; display: none; }
-    .app-detail.visible { display: block; }
-    .detail-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; }
-    .detail-title { font-size: 1rem; font-weight: 600; }
+    /* Dialog close buttons; the instance page's tabs */
     .detail-close { background: none; border: none; color: #64748b; font-size: 1.25rem; cursor: pointer; padding: 0.25rem 0.5rem; }
     .detail-close:hover { color: #e2e8f0; }
     .detail-tabs { display: flex; gap: 1rem; margin-bottom: 1rem; border-bottom: 1px solid #334155; padding-bottom: 0.5rem; }
@@ -237,7 +227,6 @@
     .override-rules ul { margin: 0.375rem 0 0 1.25rem; }
 
     /* Lifecycle failures (compose output) */
-    .auth-badge.op-failed { background: #ef444422; color: #ef4444; border: 1px solid #ef444444; }
     .op-banner { display: none; background: #ef444411; border: 1px solid #ef444455; border-radius: 0.5rem; padding: 0.625rem 0.875rem; margin-bottom: 0.75rem; font-size: 0.8125rem; color: #fca5a5; }
     .op-banner.visible { display: block; }
     .op-banner a { color: #93c5fd; cursor: pointer; }
@@ -301,12 +290,51 @@
     }
     .op-banner.running { background: #3b82f611; border-color: #3b82f655; color: #93c5fd; }
 
-    /* App instances (contract §11) */
-    .app-instances { display: flex; flex-wrap: wrap; gap: 0.375rem; align-items: center; margin-bottom: 0.75rem; font-size: 0.75rem; }
-    .app-instances:empty { display: none; }
-    .inst-chip { background: #0f172a; border: 1px solid #334155; color: #e2e8f0; border-radius: 9999px; padding: 0.0625rem 0.25rem 0.0625rem 0.625rem; font-size: 0.75rem; cursor: pointer; font-family: 'SF Mono', 'Fira Code', monospace; }
-    .inst-chip:hover { border-color: #3b82f6; }
-    .inst-chip .pill { margin: 0 0 0 0.25rem; }
+    /* Apps: installed apps and their instances (contract §11, §11.9) */
+    .apps-head { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; margin-bottom: 1rem; }
+    .apps-head .category-title { margin: 0; flex: 1; }
+    .apps-chip { display: inline-flex; align-items: center; gap: 0.375rem; background: #3b82f622; color: #93c5fd; border: 1px solid #3b82f655; border-radius: 9999px; padding: 0.125rem 0.25rem 0.125rem 0.75rem; font-size: 0.8125rem; }
+    .apps-chip button { background: none; border: none; color: inherit; cursor: pointer; font-size: 1rem; line-height: 1; padding: 0 0.375rem; }
+    .apps-chip button:hover { color: #fff; }
+    .app-block { background: #1e293b; border-radius: 0.75rem; padding: 0.875rem 1.125rem; margin-bottom: 0.875rem; }
+    .app-block-head { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.25rem; }
+    .app-block-head h3 { font-size: 1.0625rem; font-weight: 600; flex: 1; }
+    .app-block-head .app-icon { font-size: 1.375rem; }
+    .inst-line { display: flex; align-items: center; gap: 0.75rem; padding: 0.5rem 0; border-top: 1px solid #2a3343; font-size: 0.875rem; flex-wrap: wrap; }
+    .inst-line-name { flex: 1; min-width: 14rem; }
+    .inst-line-name > a { color: #93c5fd; text-decoration: none; font-weight: 500; }
+    .inst-line-name > a:hover, .inst-line-name > a:focus-visible { text-decoration: underline; }
+    .inst-line-sub { color: #94a3b8; font-size: 0.8125rem; margin-left: 0.5rem; }
+    .inst-line-act { display: flex; gap: 0.5rem; align-items: center; }
+    .toggle.toggle-sm { padding: 0.25rem 0.75rem; font-size: 0.8125rem; }
+    .muted { color: #64748b; }
+    /* The instance page (one per instance, the default one included) */
+    .page-crumbs { color: #64748b; font-size: 0.8125rem; margin-bottom: 0.25rem; }
+    .page-crumbs a { color: #94a3b8; text-decoration: none; }
+    .page-crumbs a:hover { color: #e2e8f0; text-decoration: underline; }
+    .page-head { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; margin-bottom: 0.75rem; }
+    .page-head h2 { font-size: 1.375rem; font-weight: 600; color: #f1f5f9; }
+    .page-head .page-act { margin-left: auto; display: flex; gap: 0.5rem; align-items: center; }
+    .page-tabs { flex-wrap: wrap; }
+    .page-tabs .detail-tab { background: none; border-top: none; border-left: none; border-right: none; font: inherit; font-size: 0.875rem; }
+    .grp-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr)); gap: 1rem; }
+    .grp-card { background: #0f172a; border: 1px solid #1e293b; border-radius: 0.5rem; padding: 0.875rem 1rem; font-size: 0.875rem; }
+    .grp-card h4 { font-size: 0.9375rem; font-weight: 600; margin-bottom: 0.375rem; display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+    .grp-card h4 code { font-family: 'SF Mono', 'Fira Code', monospace; color: #93c5fd; font-weight: 500; }
+    .grp-card p { color: #94a3b8; margin-bottom: 0.375rem; }
+    .grp-card .inst-row a.btn { text-decoration: none; }
+    .env-tag { display: inline-block; font-size: 0.6875rem; padding: 0 0.4375rem; border-radius: 9999px; background: #1e293b; color: #94a3b8; border: 1px solid #334155; margin-left: 0.375rem; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; white-space: nowrap; }
+    .env-tag.ok { background: #22c55e22; color: #86efac; border-color: #22c55e44; }
+    .env-tag.warn { background: #f59e0b22; color: #fcd77f; border-color: #f59e0b44; }
+    .env-val { font-family: 'SF Mono', monospace; font-size: 0.75rem; overflow-wrap: anywhere; }
+    .env-table td { vertical-align: middle; border-top: 1px solid #1e293b; }
+    .env-edit { display: flex; gap: 0.375rem; align-items: center; }
+    .env-add { display: flex; gap: 0.5rem; align-items: center; margin-top: 0.5rem; flex-wrap: wrap; }
+    .env-add[hidden] { display: none; }
+    .env-table .ro { color: #64748b; font-size: 0.75rem; }
+    .env-add input { background: #0f172a; border: 1px solid #334155; border-radius: 0.25rem; padding: 0.375rem 0.5rem; color: #e2e8f0; font-family: 'SF Mono', monospace; font-size: 0.75rem; }
+    .env-add input[data-env-new-name] { width: 14rem; }
+    .env-add input[data-env-new-value] { flex: 1; min-width: 10rem; }
     .inst-modal-box { border-color: #334155; width: min(960px, 100%); }
     .inst-modal-head { display: flex; justify-content: space-between; align-items: center; gap: 0.75rem; margin-bottom: 0.75rem; }
     .inst-modal-title { font-weight: 600; font-size: 1.0625rem; }
@@ -493,12 +521,16 @@
       {{end}}
     </header>
 
+    <!-- Apps (what runs here) · Marketplace (what can be added, and the
+         template sources it comes from) · Audit log · Doctor · Settings ·
+         People ↗ (people.<domain>, href set below from PortcullisPeople). -->
     <div class="tabs">
-      <div class="tab active" data-tab="catalog">App Catalog</div>
-      <div class="tab" data-tab="sources">Template Sources</div>
-      <div class="tab" data-tab="doctor" id="doctor-tab">Doctor <span class="tab-badge" hidden></span></div>
+      <div class="tab active" data-tab="apps">Apps</div>
+      <div class="tab" data-tab="marketplace">Marketplace</div>
       <div class="tab" data-tab="audit">Audit log</div>
+      <div class="tab" data-tab="doctor" id="doctor-tab">Doctor <span class="tab-badge" hidden></span></div>
       <div class="tab" data-tab="settings">Settings</div>
+      <a class="tab" data-people-link href="#">People &#8599;</a>
     </div>
     <script>
       // People and groups live on people.<domain> only (the shared
@@ -543,27 +575,32 @@
       }
     </script>
 
-    <!-- Catalog Tab -->
-    <div class="tab-content active" id="tab-catalog">
+    <!-- Apps: the installed apps and their instances (renderApps) -->
+    <div class="tab-content active" id="tab-apps">
       <div class="admin-hint" id="admin-hint" role="note" hidden></div>
       <div class="drift" id="drift"></div>
       <div class="drift" id="missing-groups"></div>
       <div class="drift" id="user-sweep"></div>
-      <div id="instances-overview"></div>
+      <div id="apps-root"><p class="settings-empty">Loading…</p></div>
+    </div>
+
+    <!-- One page per instance, the default one included (#apps/<id>[/<tab>], renderInstancePage) -->
+    <div class="tab-content" id="tab-instance"><div id="instance-page"></div></div>
+
+    <!-- Marketplace: every template; in use or Install… (fillMarketplace) -->
+    <div class="tab-content" id="tab-marketplace">
       {{range $category, $apps := .Categories}}
       <div class="category">
         <div class="category-title">{{$category}}</div>
         <div class="apps">
           {{range $apps}}
-          <div class="app-card {{if .Enabled}}enabled{{end}}" data-id="{{.ID}}" onclick="toggleDetail('{{.ID}}', event)">
+          <div class="app-card" data-id="{{.ID}}">
             <div class="app-header">
-              {{if .Enabled}}<span class="status-dot" data-status-id="{{.ID}}" title="Checking..."></span>{{end}}
               <span class="app-icon">{{.Manifest.Icon}}</span>
               <span class="app-name">{{.Manifest.Name}}</span>
               <span class="app-source {{if eq .Source "portcullis"}}badge-builtin{{else}}badge-community{{end}}">{{.Source}}</span>
             </div>
             <div class="app-desc">{{.Manifest.Description}}</div>
-            {{with index $.Failed .ID}}<div class="app-auth"><span class="auth-badge op-failed" title="Open the app for the error and compose output">last {{.}} failed</span></div>{{end}}
             <div class="app-auth">
               {{if .Manifest.Auth.Method}}
                 {{if eq (printf "%v" .Manifest.Auth.SSO) "true"}}
@@ -590,56 +627,7 @@
             <div class="app-tags">
               {{range .Manifest.Tags}}<span class="tag">{{.}}</span>{{end}}
             </div>
-            {{if and .Enabled (gt (len .Manifest.URLs) 0)}}
-            <div class="app-urls">
-              {{range .Manifest.URLs}}
-              <a class="app-url" href="{{.URL}}" target="_blank" onclick="event.stopPropagation()">{{.Label}} &#8599;</a>
-              {{end}}
-            </div>
-            {{end}}
-            {{if eq .Manifest.Instances "multi"}}<div class="app-instances" data-instances-of="{{.ID}}"></div>{{end}}
-            <div class="app-footer">
-              {{if eq .Manifest.Instances "multi"}}<button type="button" class="btn btn-secondary btn-sm" data-add-instance="{{.ID}}" title="Run another, fully separate copy of this app">+ Add instance</button>{{else}}<span></span>{{end}}
-              {{if .Enabled}}
-              <button class="toggle disable" onclick="toggleApp('{{.ID}}', false, event)">Disable</button>
-              {{else}}
-              <button class="toggle enable" onclick="toggleApp('{{.ID}}', true, event)">Enable</button>
-              {{end}}
-            </div>
-          </div>
-          <!-- Detail panel placeholder for {{.ID}} -->
-          <div class="app-detail" id="detail-{{.ID}}">
-            <div class="detail-header">
-              <span class="detail-title">{{.Manifest.Icon}} {{.Manifest.Name}}</span>
-              <button class="detail-close" onclick="closeDetail(event)">&times;</button>
-            </div>
-            {{if .Manifest.Auth.Notes}}
-            <div class="auth-notes">{{.Manifest.Auth.Notes}}</div>
-            {{end}}
-            <div class="op-banner" id="op-banner-{{.ID}}"></div>
-            <div class="doctor-line-box" id="doctor-line-{{.ID}}"></div>
-            <div class="detail-tabs">
-              <span class="detail-tab active" data-dtab="settings" data-app="{{.ID}}">Settings</span>
-              {{if .Enabled}}
-              <span class="detail-tab" data-dtab="status" data-app="{{.ID}}">Status</span>
-              {{end}}
-              {{if or .Enabled (index $.Failed .ID)}}
-              <span class="detail-tab" data-dtab="logs" data-app="{{.ID}}">Logs</span>
-              {{end}}
-              {{if .Manifest.HasPersonSecret}}
-              <span class="detail-tab" data-dtab="filesharing" data-app="{{.ID}}">File sharing</span>
-              {{end}}
-              <span class="detail-tab" data-dtab="ai" data-app="{{.ID}}">AI support</span>
-              <span class="detail-tab" data-dtab="expert" data-app="{{.ID}}">Expert</span>
-              <span class="detail-tab" data-dtab="instances" data-app="{{.ID}}">Instances</span>
-            </div>
-            <div class="detail-content active" id="detail-settings-{{.ID}}"></div>
-            <div class="detail-content" id="detail-status-{{.ID}}"></div>
-            <div class="detail-content" id="detail-logs-{{.ID}}"></div>
-            {{if .Manifest.HasPersonSecret}}<div class="detail-content" id="detail-filesharing-{{.ID}}"></div>{{end}}
-            <div class="detail-content" id="detail-ai-{{.ID}}"></div>
-            <div class="detail-content" id="detail-expert-{{.ID}}"></div>
-            <div class="detail-content" id="detail-instances-{{.ID}}"></div>
+            <div class="app-footer" data-mkt-use="{{.ID}}" data-mkt-multi="{{if eq .Manifest.Instances "multi"}}1{{end}}"></div>
           </div>
           {{end}}
         </div>
@@ -647,8 +635,52 @@
       {{end}}
 
       {{if not .Templates}}
-      <div class="empty">No templates found. Add a template source or check the templates/ directory.</div>
+      <div class="empty">No templates found. Add a template source below or check the templates/ directory.</div>
       {{end}}
+
+      <!-- Template sources: where the Marketplace's templates come from -->
+      <div class="category" id="mkt-sources" style="margin-top: 2.5rem;">
+        <div class="category-title">Template sources</div>
+        <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
+          The git repositories the Marketplace's templates come from.
+        </p>
+        <div class="sources-list" id="sources-list">
+          {{range .Sources}}
+          <div class="source-item" data-name="{{.Name}}">
+            <div class="source-info">
+              <div class="source-name">{{.Name}}{{if eq .Name "portcullis"}} <span style="font-size: 0.6875rem; color: #3b82f6; margin-left: 0.5rem;">default</span>{{end}}</div>
+              <div class="source-url">{{.URL}}</div>
+            </div>
+            <div class="source-actions">
+              {{if ne .Name "portcullis"}}
+              <button type="button" class="btn btn-danger" data-src-remove="{{.Name}}">Remove</button>
+              {{end}}
+            </div>
+          </div>
+          {{end}}
+          {{if not .Sources}}
+          <div class="empty" id="no-sources">No template sources configured.</div>
+          {{end}}
+        </div>
+
+        <div style="margin-top: 1.5rem;">
+          <div class="category-title">Add Template Repository</div>
+          <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
+            Add a git repository containing template directories. Each template needs a <code style="background: #0f172a; padding: 0.125rem 0.375rem; border-radius: 0.25rem;">manifest.yaml</code> and <code style="background: #0f172a; padding: 0.125rem 0.375rem; border-radius: 0.25rem;">compose.yml</code>.
+          </p>
+          <div class="form-row">
+            <input type="text" id="source-name" placeholder="Name (e.g., my-templates)">
+            <input type="text" id="source-url" placeholder="Git URL (e.g., https://github.com/user/portcullis-templates.git)">
+            <button type="button" class="btn btn-primary" data-src-add>Add</button>
+          </div>
+        </div>
+
+        <div style="margin-top: 2rem;">
+          <button type="button" class="btn btn-secondary" data-src-sync>Sync All Sources</button>
+          <span style="color: #64748b; font-size: 0.8125rem; margin-left: 0.75rem;">Pull latest from all repositories (the Hub also syncs at every start and on <code>./portcullis upgrade</code>)</span>
+          <div id="source-sync-status" style="margin-top: 0.75rem; font-size: 0.8125rem; color: #94a3b8;"></div>
+        </div>
+      </div>
     </div>
 
     <!-- Doctor Tab (web/doctor.js) -->
@@ -672,48 +704,6 @@
 
     <!-- The settings panel (loadSettings) -->
     <script src="/static/settings.js"></script>
-
-    <!-- Sources Tab -->
-    <div class="tab-content" id="tab-sources">
-      <div class="category-title" style="margin-bottom: 1rem;">Template Repositories</div>
-
-      <div class="sources-list" id="sources-list">
-        {{range .Sources}}
-        <div class="source-item" data-name="{{.Name}}">
-          <div class="source-info">
-            <div class="source-name">{{.Name}}{{if eq .Name "portcullis"}} <span style="font-size: 0.6875rem; color: #3b82f6; margin-left: 0.5rem;">default</span>{{end}}</div>
-            <div class="source-url">{{.URL}}</div>
-          </div>
-          <div class="source-actions">
-            {{if ne .Name "portcullis"}}
-            <button class="btn btn-danger" onclick="removeSource('{{.Name}}')">Remove</button>
-            {{end}}
-          </div>
-        </div>
-        {{end}}
-        {{if not .Sources}}
-        <div class="empty" id="no-sources">No template sources configured.</div>
-        {{end}}
-      </div>
-
-      <div style="margin-top: 1.5rem;">
-        <div class="category-title">Add Template Repository</div>
-        <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
-          Add a git repository containing template directories. Each template needs a <code style="background: #0f172a; padding: 0.125rem 0.375rem; border-radius: 0.25rem;">manifest.yaml</code> and <code style="background: #0f172a; padding: 0.125rem 0.375rem; border-radius: 0.25rem;">compose.yml</code>.
-        </p>
-        <div class="form-row">
-          <input type="text" id="source-name" placeholder="Name (e.g., my-templates)">
-          <input type="text" id="source-url" placeholder="Git URL (e.g., https://github.com/user/portcullis-templates.git)">
-          <button class="btn btn-primary" onclick="addSource()">Add</button>
-        </div>
-      </div>
-
-      <div style="margin-top: 2rem;">
-        <button class="btn btn-secondary" onclick="syncSources()">Sync All Sources</button>
-        <span style="color: #64748b; font-size: 0.8125rem; margin-left: 0.75rem;">Pull latest from all repositories (the Hub also syncs at every start and on <code>./portcullis upgrade</code>)</span>
-        <div id="source-sync-status" style="margin-top: 0.75rem; font-size: 0.8125rem; color: #94a3b8;"></div>
-      </div>
-    </div>
 
     <!-- Settings Tab -->
     <div class="tab-content" id="tab-settings">
@@ -765,7 +755,7 @@
   <div class="toast" id="toast"></div>
 
   <!-- Failed lifecycle operation: message, hint, compose output -->
-  <div class="op-modal" id="op-modal" onclick="if (event.target === this) closeOpError()">
+  <div class="op-modal" id="op-modal">
     <div class="op-modal-box">
       <div class="op-modal-title" id="op-modal-title"></div>
       <div id="op-modal-body"></div>
@@ -773,7 +763,7 @@
     </div>
   </div>
 
-  <!-- App instances: create, detail (hostnames, backups, delete) -->
+  <!-- Dialogs: add an instance (Install… / + Add instance), all backups -->
   <div class="op-modal" id="inst-modal">
     <div class="op-modal-box inst-modal-box" id="inst-modal-box"></div>
   </div>
@@ -796,30 +786,43 @@
   <script src="/static/doctor.js"></script>
   <script>
     // ── Tab switching ─────────────────────────────────────
+    // showTab(name): one of the top tabs (apps, marketplace, audit,
+    // doctor, settings) or "instance" (an instance's page: the Apps tab
+    // stays highlighted). The tab's content loads on every selection.
+    function showTab(name) {
+      const top = name === 'instance' ? 'apps' : name;
+      document.querySelectorAll('.tab[data-tab]').forEach(t => t.classList.toggle('active', t.dataset.tab === top));
+      document.querySelectorAll('.tab-content').forEach(t => t.classList.toggle('active', t.id === 'tab-' + name));
+      if (name === 'settings') {
+        loadGlobalSettings(); loadDomains(); loadAISettings();
+        PortcullisFolders.render(document.getElementById('folders-root'));
+        PortcullisFolders.renderLocalNetworks(document.getElementById('localnets-root'));
+      }
+      if (name === 'doctor') PortcullisDoctor.render(document.getElementById('doctor-root'));
+      if (name === 'audit') PortcullisDirectory.renderAudit(document.getElementById('audit-root'));
+      if (name === 'apps') renderApps();
+      if (name === 'marketplace') fillMarketplace();
+      // Leaving an instance's page drops it (its drafts too).
+      if (name !== 'instance' && pageCtx) { pageCtx = null; document.getElementById('instance-page').innerHTML = ''; }
+    }
     document.querySelectorAll('.tab[data-tab]').forEach(tab => {
       tab.addEventListener('click', () => {
-        document.querySelectorAll('.tab[data-tab]').forEach(t => t.classList.remove('active'));
-        document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
-        tab.classList.add('active');
-        document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
-        if (tab.dataset.tab === 'settings') {
-          loadGlobalSettings(); loadDomains(); loadAISettings();
-          PortcullisFolders.render(document.getElementById('folders-root'));
-          PortcullisFolders.renderLocalNetworks(document.getElementById('localnets-root'));
-        }
-        if (tab.dataset.tab === 'doctor') PortcullisDoctor.render(document.getElementById('doctor-root'));
-        if (tab.dataset.tab === 'audit') PortcullisDirectory.renderAudit(document.getElementById('audit-root'));
-        history.replaceState(null, '', tab.dataset.tab === 'catalog' ? location.pathname : '#' + tab.dataset.tab);
+        showTab(tab.dataset.tab);
+        history.replaceState(null, '', tab.dataset.tab === 'apps' ? location.pathname : '#' + tab.dataset.tab);
       });
     });
-    // Deep links: #audit the Audit log tab; #app/<id>/settings[/<option>] opens an instance's settings at an
-    // option (the Portcullis MCP's set_secret_setting form);
-    // #settings/domains?enroll=<name>[&provider=<p>] and ?token=<name> open
-    // the Domains forms (enroll_domain, replace_domain_token);
+    document.querySelector('[data-people-link]').href = PortcullisPeople.base;
+    // Deep links: #apps/<id>[/<tab>] an instance's page at a tab
+    // (#apps/<id>/settings/<option> scrolled to an option); the old
+    // #app/<id>/settings[/<option>] (the Portcullis MCP's
+    // set_secret_setting form, the people page's Used by) and
+    // #app/<id>/ai are replaced by those; #sources is the Marketplace's
+    // template sources; #audit the Audit log tab;
+    // #settings/domains?enroll=<name>[&provider=<p>] and ?token=<name>
+    // open the Domains forms (enroll_domain, replace_domain_token);
     // #settings/ai?provider=<name>&field=<field> a provider secret's form
-    // (set_model_provider_secret); #app/<id>/ai an instance's AI support
-    // tab. Secrets are typed here, never passed in. Routed at load and on
-    // a hash change (the AI tab links to #app/<id>/settings).
+    // (set_model_provider_secret). Secrets are typed here, never passed
+    // in. Routed at load and on a hash change.
     window.addEventListener('load', routeHash);
     window.addEventListener('hashchange', routeHash);
     // peopleRedirect: the old Users & Groups deep links, now on
@@ -847,39 +850,34 @@
       if (/^groups(?:\/|$)|^people\//.test(t)) return '#' + t;
       return null;
     }
+    // oldAppLink: an old #app/… deep link's #apps/… replacement, or null.
+    function oldAppLink(t) {
+      const set = /^app\/([a-z0-9-]+)\/settings(?:\/([A-Za-z0-9_.-]+))?$/.exec(t);
+      if (set) return '#apps/' + set[1] + '/settings' + (set[2] ? '/' + set[2] : '');
+      const ai = /^app\/([a-z0-9-]+)\/ai$/.exec(t);
+      return ai ? '#apps/' + ai[1] + '/ai' : null;
+    }
     function routeHash() {
-      const t = location.hash.slice(1);
+      let t = location.hash.slice(1);
       const ppl = peopleRedirect(t);
       if (ppl !== null) { location.replace(PortcullisPeople.href(ppl)); return; }
-      const app = /^app\/([a-z0-9-]+)\/settings(?:\/([A-Za-z0-9_.-]+))?$/.exec(t);
-      if (app) { openSettingAt(app[1], app[2] || ''); return; }
-      const aiTab = /^app\/([a-z0-9-]+)\/ai$/.exec(t);
-      if (aiTab) { openAppTab(aiTab[1], 'ai'); return; }
+      const moved = oldAppLink(t);
+      if (moved) { history.replaceState(null, '', moved); t = moved.slice(1); }
+      const page = /^apps\/([a-z0-9-]+)(?:\/([a-z]+)(?:\/([A-Za-z0-9_.-]+))?)?$/.exec(t);
+      if (page) { openInstancePage(page[1], page[2] || 'overview', page[3] || ''); return; }
+      if (t === 'sources') {
+        history.replaceState(null, '', '#marketplace');
+        showTab('marketplace');
+        const box = document.getElementById('mkt-sources');
+        if (box) flash(box);
+        return;
+      }
       const sec = /^settings\/(domains|ai)\?(.*)$/.exec(t);
       if (sec) { openSettingsForm(sec[1], new URLSearchParams(sec[2])); return; }
       const tab = t && document.querySelector('.tab[data-tab="' + CSS.escape(t) + '"]');
-      if (tab) tab.click();
+      if (tab) { showTab(t); return; }
+      if (!t || t === 'apps') showTab('apps');
     }
-
-    // Detail tab switching
-    document.querySelectorAll('.detail-tab').forEach(tab => {
-      tab.addEventListener('click', (e) => {
-        e.stopPropagation();
-        const appId = tab.dataset.app;
-        const panel = document.getElementById('detail-' + appId);
-        panel.querySelectorAll('.detail-tab').forEach(t => t.classList.remove('active'));
-        panel.querySelectorAll('.detail-content').forEach(t => t.classList.remove('active'));
-        tab.classList.add('active');
-        document.getElementById('detail-' + tab.dataset.dtab + '-' + appId).classList.add('active');
-        // Load content on tab switch
-        if (tab.dataset.dtab === 'status') loadStatus(appId);
-        if (tab.dataset.dtab === 'logs') loadLogs(appId);
-        if (tab.dataset.dtab === 'expert') loadExpert(appId);
-        if (tab.dataset.dtab === 'instances') loadTemplateInstances(appId);
-        if (tab.dataset.dtab === 'filesharing') loadFileSharing(appId, document.getElementById('detail-filesharing-' + appId));
-        if (tab.dataset.dtab === 'ai') loadAITab(appId, document.getElementById('detail-ai-' + appId));
-      });
-    });
 
     // ── Toast ─────────────────────────────────────────────
     function showToast(msg, type) {
@@ -992,23 +990,21 @@
     const OPP_UNDO_NOTE = { enable: 'Only what this enable created is undone. Images already downloaded are kept.' };
     const opTracks = {};  // instance id → { id, opId, rec, waiters, timer, ended, then }
     const opRunning = {}; // instance id → its running record (cards, chips, tables)
-    const opp = { id: null, confirm: false, notice: '', stopSent: {}, sending: false, reloadOnClose: false, sig: {} };
+    const opp = { id: null, confirm: false, notice: '', stopSent: {}, sending: false, sig: {} };
     let oppReturnFocus = null;
-    let pageReloadOwed = false;
 
     function opWords(op) {
       return OP_WORDS[op] || { ing: 'Running ' + (op || 'an operation') + ' on', ed: 'done', short: 'Working' };
     }
     function lcFirst(s) { return s.charAt(0).toLowerCase() + s.slice(1); }
-    // The app's name ("Gitea"; "Grafana (grafana-team-a)" for an extra
-    // instance).
+    // The instance's name, as everywhere: "<App> · <label>" (the default
+    // instance too); an id the list doesn't know yet (a create's first
+    // poll) by its app's name and id.
     function opAppName(id) {
       const inst = instancesCache.find(i => i.id === id);
-      const tid = inst ? inst.template : id;
-      const t = catalogCache && catalogCache[tid];
-      const card = document.querySelector('.app-card[data-id="' + CSS.escape(tid) + '"] .app-name');
-      const name = t ? (t.manifest.name || tid) : (card ? card.textContent.trim() : tid);
-      return id === tid ? name : name + ' (' + id + ')';
+      if (inst) return instName(inst);
+      const name = appName(id);
+      return name === id ? id : name + ' (' + id + ')';
     }
     function oppClock(s) {
       const d = new Date(s);
@@ -1221,7 +1217,6 @@
       Object.values(opTracks).forEach(tr => {
         if (tr.ended && tr.then && tr.then.running && opTracks[tr.id] === tr) trackOp(tr.id, tr.then.op_id, tr.then);
       });
-      if (opp.reloadOnClose || pageReloadOwed) { opp.reloadOnClose = false; reloadWhenIdle(); }
     });
     // Esc closes the panel, or leaves the Stop confirm step first.
     document.getElementById('op-panel').addEventListener('cancel', e => {
@@ -1388,7 +1383,7 @@
       const was = !!opRunning[tr.id];
       if (rec.running) { opRunning[tr.id] = rec; tr.seenRunning = true; } else delete opRunning[tr.id];
       opCardState(tr.id);
-      if (was !== !!rec.running) renderInstanceLists();
+      if (was !== !!rec.running) renderInstanceViews();
     }
     function endTrack(tr) {
       if (tr.ended) return;
@@ -1405,7 +1400,9 @@
       }
       ws.forEach(w => w(r));
       if (detached) return;
-      if (openDetailId === tr.id) loadOpBanner(tr.id);
+      // The instance's state, status and lists follow the outcome.
+      refreshInstances();
+      if (pageCtx && pageCtx.id === tr.id) loadOpBanner(tr.id);
       opThen(tr);
     }
     // While the panel shows an ended operation: the app's current record,
@@ -1423,66 +1420,38 @@
         const was = !!opRunning[tr.id];
         if (next.running) opRunning[tr.id] = next; else delete opRunning[tr.id];
         opCardState(tr.id);
-        if (was !== !!next.running) renderInstanceLists();
+        if (was !== !!next.running) renderInstanceViews();
       }
       if (opp.id === tr.id) renderOpPanel();
       if (opp.id === tr.id && oppOpen()) tr.thenTimer = setTimeout(() => opThen(tr), 2000);
     }
-    // A reload (server-rendered cards) once no dialog is open.
-    function reloadWhenIdle() {
-      const busy = oppOpen() || document.getElementById('inst-modal').classList.contains('visible') ||
-        document.getElementById('ai-modal').classList.contains('visible') || document.querySelector('dialog[open]');
-      if (busy) { pageReloadOwed = true; return; }
-      location.reload();
-    }
-    // An operation that changes a card (enable / disable of a default
-    // instance, a failed enable's badge) reloads the page when it ends:
-    // once the panel is closed if it shows it.
-    function opReloadAfter(id) {
-      if (opp.id === id && oppOpen()) opp.reloadOnClose = true;
-      else reloadWhenIdle();
-    }
-
-    // ── the card / chip / table state: "Enabling… show progress" ──
+    // ── the Apps row / page state: "Enabling… show progress" ──
     function opCardText(r) { return (r.stopping ? 'Stopping…' : opWords(r.op).short + '…') + ' show progress'; }
+    // opCardState: the instance's actions (its Apps row and its page's
+    // header) follow its running operation: "Enabling… show progress"
+    // instead of Enable / Disable while it runs.
     function opCardState(id) {
-      const card = document.querySelector('.app-card[data-id="' + CSS.escape(id) + '"]');
-      const foot = card && card.querySelector('.app-footer');
-      if (!foot) return;
-      const tog = foot.querySelector('.toggle');
-      let b = foot.querySelector('[data-op-show]');
-      const r = opRunning[id];
-      if (r) {
-        if (!b) {
-          b = document.createElement('button');
-          b.type = 'button';
-          b.className = 'btn btn-secondary btn-sm op-card-progress';
-          b.dataset.opShow = id;
-          if (tog) tog.before(b); else foot.appendChild(b);
-        }
-        b.textContent = opCardText(r);
-        if (tog) tog.style.display = 'none';
-      } else {
-        if (b) b.remove();
-        if (tog) tog.style.display = '';
-      }
+      document.querySelectorAll('[data-inst-act]').forEach(el => {
+        if (el.dataset.instAct === id) el.innerHTML = instActionsHtml(id);
+      });
     }
     function opShowButton(id, cls) {
       const r = opRunning[id];
       return r ? '<button type="button" class="' + cls + ' op-card-progress" data-op-show="' + escapeHtml(id) + '">' + escapeHtml(opCardText(r)) + '</button>' : '';
     }
-    // On page load and each refresh of the app list: every app whose
-    // operation runs gets its card state (and a slow poller) — one
+    // On page load and each refresh of the instance list: every instance
+    // whose operation runs gets its row state (and a slow poller) — one
     // request for all (GET /api/instances/ops, the current records in
-    // short).
+    // short; kept in opSummaries for the rows' "last <op> failed").
+    let opSummaries = {};
     async function scanOps() {
       const ids = new Set();
-      document.querySelectorAll('.app-card[data-id]').forEach(c => ids.add(c.dataset.id));
       instancesCache.forEach(i => ids.add(i.id));
       const seqs = {};
       ids.forEach(id => { seqs[id] = opBegin(id); });
       let all = null;
       try { all = await apiGet('/api/instances/ops'); } catch (e) { return; }
+      opSummaries = all || {};
       ids.forEach(id => {
         const r = all && all[id];
         if (!r || !r.running) return;
@@ -1495,8 +1464,8 @@
         trackOp(id, r.op_id, Object.assign({ steps: [] }, r), seqs[id]);
       });
     }
-    // Opening an app (its detail or instance dialog) while its operation
-    // runs opens the panel.
+    // Opening an instance's page while its operation runs opens the
+    // panel.
     async function opAutoOpen(id) {
       if (opRunning[id]) { openOpPanel(id); return; }
       let r = null;
@@ -1505,33 +1474,8 @@
       if (r && r.running && !opSeenEnded(id, r)) openOpPanel(id, r, seq);
     }
 
-    // ── Detail panel ──────────────────────────────────────
-    let openDetailId = null;
-
-    function toggleDetail(id, e) {
-      if (e.target.closest('.toggle, .app-url, .detail-close, [data-add-instance], [data-open-instance], [data-op-show]')) return;
-      const panel = document.getElementById('detail-' + id);
-      const card = document.querySelector(`.app-card[data-id="${id}"]`);
-
-      if (openDetailId === id) {
-        closeDetail(e);
-        return;
-      }
-      // Close any open panel
-      if (openDetailId) {
-        document.getElementById('detail-' + openDetailId).classList.remove('visible');
-        document.querySelector(`.app-card[data-id="${openDetailId}"]`)?.classList.remove('expanded');
-      }
-      openDetailId = id;
-      card.classList.add('expanded');
-      panel.classList.add('visible');
-      loadSettings(id);
-      loadOpBanner(id);
-      loadDoctorLine(id);
-      opAutoOpen(id);
-    }
-
-    // The app detail's "Doctor: 1 warning" line (web/doctor.js), linking
+    // ── Page helpers ──────────────────────────────────────
+    // The instance page's "Doctor: 1 warning" line (web/doctor.js), linking
     // to the Doctor tab; nothing when the doctor found nothing.
     async function loadDoctorLine(id) {
       const el = document.getElementById('doctor-line-' + id);
@@ -1584,32 +1528,9 @@
       if (kind === 'ai' && q.get('provider') && q.get('field')) openProviderSecretAt(q.get('provider'), q.get('field'));
     }
 
-    // Opens instance id's settings panel scrolled to option key (the
-    // doctor's "Open setting"): the app's card for a default instance,
-    // the instance dialog otherwise.
-    async function openSettingAt(id, key) {
-      const card = document.querySelector('.app-card[data-id="' + CSS.escape(id) + '"]');
-      let paneSel;
-      if (card) {
-        document.querySelector('.tab[data-tab="catalog"]').click();
-        openAppSettings(id, false);
-        paneSel = '#detail-settings-' + CSS.escape(id);
-      } else {
-        await openInstance(id, { tab: 'settings' });
-        paneSel = '#inst-modal-box [data-ipane="settings"]';
-      }
-      const el = await waitFor(key ? paneSel + ' [data-opt="' + CSS.escape(key) + '"]' : paneSel);
-      if (el) flash(el);
-    }
-
-    function closeDetail(e) {
-      e.stopPropagation();
-      if (openDetailId) {
-        document.getElementById('detail-' + openDetailId).classList.remove('visible');
-        document.querySelector(`.app-card[data-id="${openDetailId}"]`)?.classList.remove('expanded');
-        openDetailId = null;
-      }
-    }
+    // openSettingAt: instance id's page at Settings, scrolled to option
+    // key (the doctor's "Open setting"; window.openSettingAt).
+    function openSettingAt(id, key) { navInstance(id, 'settings', key || ''); }
 
     // ── Settings ──────────────────────────────────────────
     // Password sign-in no longer exists (passkey or client certificate
@@ -1813,11 +1734,12 @@
       }
     }
 
-    async function loadSettings(id) {
-      // The settings panel (web/settings.js): options, per-person and
-      // group values, secrets, ports, and the policy / sign-in / public
-      // blocks above (rendered and collected by the functions here).
-      window.PortcullisSettings.render(document.getElementById('detail-settings-' + id), id);
+    // The settings panel (web/settings.js), mounted in the instance
+    // page's Settings tab: options, per-person and group values, secrets,
+    // ports, and the policy / sign-in / public blocks above (rendered and
+    // collected by the functions here). The promise settles once drawn.
+    function loadSettings(id, pane) {
+      return window.PortcullisSettings.render(pane, id);
     }
 
     async function loadGlobalSettings() {
@@ -2483,7 +2405,8 @@
     }
 
     function aiTabHtml(id, v, act) {
-      const chat = catalogCache && catalogCache[id] ? (catalogCache[id].manifest.ai || {}).chat : null;
+      const t = catalogCache && catalogCache[templateOf(id)];
+      const chat = t ? (t.manifest.ai || {}).chat : null;
       let h = '';
       if (v.unsupported) {
         h += '<div class="inst-section" data-ai-unsupported><h4>AI support</h4><p>Not available for this app: ' + escapeHtml(v.unsupported) + '</p>';
@@ -2705,24 +2628,9 @@
       if (t.closest('[data-ai-revoke]')) revokeAICompanion(box, sec);
     });
 
-    // openAppTab(id, tab): the app's tab — the card's for a default
-    // instance, the instance dialog's otherwise (the doctor's "Open AI
-    // tab", #app/<id>/ai). Any tab but "ai" opens the app's settings.
-    async function openAppTab(id, tab) {
-      if (tab !== 'ai') { openSettingAt(id, ''); return; }
-      const card = document.querySelector('.app-card[data-id="' + CSS.escape(id) + '"]');
-      let pane;
-      if (card) {
-        document.querySelector('.tab[data-tab="catalog"]').click();
-        if (openDetailId !== id) card.click();
-        document.querySelector('.detail-tab[data-dtab="ai"][data-app="' + CSS.escape(id) + '"]')?.click();
-        pane = await waitFor('#detail-ai-' + CSS.escape(id) + ' [data-ai-tab]');
-      } else {
-        await openInstance(id, { tab: 'ai' });
-        pane = await waitFor('#inst-modal-box [data-ipane="ai"] [data-ai-tab]');
-      }
-      if (pane) flash(pane);
-    }
+    // openAppTab(id, tab): the instance page's tab (the doctor's "Open AI
+    // tab", #app/<id>/ai); any tab but "ai" opens its Settings.
+    function openAppTab(id, tab) { navInstance(id, tab === 'ai' ? 'ai' : 'settings', ''); }
     window.openAppTab = openAppTab;
 
     // ── Users & groups (contract §9) ──────────────────────
@@ -2732,82 +2640,49 @@
       const d = new Date(s);
       return isNaN(d) ? String(s || '') : d.toLocaleString();
     }
-    // ── Container status ──────────────────────────────────
+    // ── Container status (contract §11.9 "One-off jobs") ──
+    // statusCache: instance id → its status rows (GET
+    // /api/templates/status/{id}: {name, service, state, status} and, for a
+    // one-off job's container, job / job_state), polled every 15 s for
+    // instances that run (or failed).
+    const statusCache = {};
+    // The rows' summary (§11.9 "Fine"): n of m containers fine — a job
+    // counts when done —, and the jobs' word: setup job done / failed /
+    // running / pending.
+    function statusSummary(rows) {
+      const fine = r => r.job ? r.job_state === 'done' : r.state === 'running';
+      const jobs = rows.filter(r => r.job);
+      let job = '';
+      if (jobs.some(r => r.job_state === 'failed')) job = 'failed';
+      else if (jobs.length && jobs.every(r => r.job_state === 'done')) job = 'done';
+      else if (jobs.some(r => r.job_state === 'running')) job = 'running';
+      else if (jobs.length) job = 'pending';
+      return { n: rows.filter(fine).length, m: rows.length, job };
+    }
+    // A container row's colour and words.
+    function containerState(s) {
+      if (s.job) {
+        return { done: ['running', 'setup job done'], failed: ['stopped', 'setup job failed'], running: ['partial', 'setup job running'] }[s.job_state] ||
+          ['', 'setup job pending'];
+      }
+      return [s.state === 'running' ? 'running' : s.state === 'restarting' ? 'partial' : 'stopped', s.status];
+    }
+    function containersHtml(rows) {
+      if (!rows.length) return '<p class="settings-empty">No containers found: the app isn\'t running.</p>';
+      return '<div class="status-list">' + rows.map(s => {
+        const [cls, text] = containerState(s);
+        return '<div class="status-row"><span class="status-dot ' + cls + '"></span>' +
+          '<span class="status-name">' + escapeHtml(s.name) + '</span>' +
+          '<span class="status-state">' + escapeHtml(s.service || '') + ' · ' + escapeHtml(text) + '</span></div>';
+      }).join('') + '</div>';
+    }
     async function loadStatus(id) {
-      const container = document.getElementById('detail-status-' + id);
-      container.innerHTML = '<p class="settings-empty">Loading...</p>';
-      try {
-        const statuses = await apiGet('/api/templates/status/' + id);
-        if (!statuses || statuses.length === 0) {
-          container.innerHTML = '<p class="settings-empty">No containers found. App may not be running.</p>';
-          return;
-        }
-        let html = '<div class="status-list">';
-        for (const s of statuses) {
-          // C3: Job-aware status display.
-          let color, displayStatus;
-          if (s.job) {
-            if (s.job_state === 'done') {
-              color = '#22c55e'; // green
-              displayStatus = 'setup job done';
-            } else if (s.job_state === 'failed') {
-              color = '#ef4444'; // red
-              displayStatus = 'setup job failed';
-            } else if (s.job_state === 'running') {
-              color = '#f59e0b'; // amber
-              displayStatus = 'setup job running';
-            } else {
-              color = '#94a3b8'; // gray
-              displayStatus = 'setup job pending';
-            }
-          } else {
-            color = s.state === 'running' ? '#22c55e' : s.state === 'restarting' ? '#f59e0b' : '#ef4444';
-            displayStatus = s.status;
-          }
-          html += '<div class="status-row">';
-          html += '<span class="status-dot" style="background:' + escapeHtml(color) + '"></span>';
-          html += '<span class="status-name">' + escapeHtml(s.name) + '</span>';
-          html += '<span class="status-state">' + escapeHtml(displayStatus) + '</span>';
-          html += '</div>';
-        }
-        html += '</div>';
-        container.innerHTML = html;
-      } catch (e) {
-        container.innerHTML = '<p class="settings-empty">Failed to load status.</p>';
-      }
+      const rows = await apiGet('/api/templates/status/' + encodeURIComponent(id));
+      statusCache[id] = rows || [];
+      return statusCache[id];
     }
-
-    async function pollStatuses() {
-      const dots = document.querySelectorAll('[data-status-id]');
-      for (const dot of dots) {
-        const id = dot.dataset.statusId;
-        try {
-          const statuses = await apiGet('/api/templates/status/' + id);
-          if (!statuses || statuses.length === 0) {
-            dot.className = 'status-dot';
-          } else {
-            // C3: A done job counts as "up"; failed/pending/running jobs are not up.
-            const isUp = (s) => {
-              if (s.job && s.job_state === 'done') return true;
-              if (s.job) return false; // job but not done
-              return s.state === 'running';
-            };
-            if (statuses.every(isUp)) {
-              dot.className = 'status-dot running';
-              dot.title = 'All containers running';
-            } else if (statuses.some(isUp)) {
-              dot.className = 'status-dot partial';
-              dot.title = 'Some containers not running';
-            } else {
-              dot.className = 'status-dot stopped';
-              dot.title = 'Containers stopped';
-            }
-          }
-        } catch (e) { /* ignore */ }
-      }
-    }
-    pollStatuses();
-    setInterval(pollStatuses, 15000);
+    // pollsStatus: an instance whose containers are polled (refreshInstances).
+    function pollsStatus(i) { return i.state === 'enabled' || i.state === 'error'; }
 
     // ── Drift (enabled apps vs. running containers) ───────
     const DRIFT_ACTIONS = {
@@ -2827,7 +2702,7 @@
         '<button class="btn btn-secondary btn-sm" onclick="checkDrift()">Re-check</button></div>';
       if (report.error) html += '<div class="drift-error">Docker unreachable: ' + escapeHtml(report.error) + '</div>';
       for (const d of items) {
-        html += '<div class="drift-item"><span class="drift-id">' + escapeHtml(d.id) + '</span>';
+        html += '<div class="drift-item"><a class="drift-id group-link" href="#apps/' + encodeURIComponent(d.id) + '">' + escapeHtml(d.id) + '</a>';
         html += '<span class="drift-msg">' + escapeHtml(d.message) + ' &middot; ' + d.running + '/' + d.total + ' running</span>';
         for (const a of (d.actions || [])) {
           const meta = DRIFT_ACTIONS[a];
@@ -2855,7 +2730,8 @@
       try {
         await apiPost('/api/drift/resolve', { id, action });
         showToast(id + ': ' + meta.label.toLowerCase() + ' done', 'success');
-        setTimeout(() => location.reload(), 500);
+        loadDrift();
+        refreshInstances();
       } catch (e) {
         reportError(id, e);
         btn.classList.remove('loading');
@@ -2983,7 +2859,7 @@
       if (r.error) h += '<div class="op-msg">' + escapeHtml(r.error) + '</div>';
       if (r.hint) {
         h += '<div class="op-hint">' + escapeHtml(r.hint) +
-          ' <button class="btn btn-secondary btn-sm" onclick="event.stopPropagation(); openAppSettings(\'' + escapeHtml(id) + '\', true)">Open Settings</button></div>';
+          ' <button type="button" class="btn btn-secondary btn-sm" data-open-ports="' + escapeHtml(id) + '">Open Settings</button></div>';
       }
       if (r.output) h += '<pre class="log-viewer op-output">' + escapeHtml(r.output) + '</pre>';
       return h + '</div>';
@@ -2995,16 +2871,13 @@
         op: err.op, ok: false, error: err.message, hint: err.hint, output: err.output, rolled_back: err.rolled_back,
       }, false);
       document.getElementById('op-modal-actions').innerHTML =
-        '<button class="btn btn-secondary btn-sm" onclick="closeOpError()">Close</button>';
+        '<button type="button" class="btn btn-secondary btn-sm" data-op-error-close>Close</button>';
       const out = document.querySelector('#op-modal .op-output');
       if (out) out.scrollTop = out.scrollHeight;
-      opModalReload = err.op === 'enable'; // the card gains its failure badge / Logs tab
       document.getElementById('op-modal').classList.add('visible');
     }
-    let opModalReload = false;
     function closeOpError() {
       document.getElementById('op-modal').classList.remove('visible');
-      if (opModalReload) location.reload();
     }
 
     // Errors with compose output or a hint get the dialog, others a toast.
@@ -3013,20 +2886,13 @@
       else showToast((prefix || '') + (err && err.message || err), 'error');
     }
 
-    // Opens an app's Settings (e.g. from a port hint), scrolled to its ports.
-    function openAppSettings(id, ports) {
-      document.getElementById('op-modal').classList.remove('visible');
-      opModalReload = false;
-      if (openDetailId !== id) {
-        document.querySelector('.app-card[data-id="' + CSS.escape(id) + '"]')?.click();
-      }
-      document.querySelector('.detail-tab[data-dtab="settings"][data-app="' + CSS.escape(id) + '"]')?.click();
-      if (ports) {
-        setTimeout(() => {
-          const el = document.querySelector('#detail-settings-' + CSS.escape(id) + ' .ports-section') || document.getElementById('detail-' + id);
-          el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        }, 400);
-      }
+    // Opens an instance's Settings (a port hint's "Open Settings"),
+    // scrolled to its ports.
+    async function openAppSettings(id) {
+      closeOpError();
+      navInstance(id, 'settings', '');
+      const el = await waitFor('#instance-page [data-ipane="settings"] .ports-section');
+      if (el) flash(el);
     }
 
     async function loadOpBanner(id) {
@@ -3041,7 +2907,7 @@
           el.classList.add('visible');
         } else if (r && !r.ok && ph !== 'stopped') {
           el.innerHTML = 'Last ' + escapeHtml(r.op) + ' failed (' + escapeHtml(fmtTime(r.at)) + '): ' + escapeHtml(r.error) +
-            ' <a onclick="event.stopPropagation(); showLogsTab(\'' + escapeHtml(id) + '\')">Details</a>' +
+            ' <a href="#apps/' + encodeURIComponent(id) + '/logs">Details</a>' +
             ((r.steps || []).length ? ' · <button type="button" class="opp-link" data-op-show="' + escapeHtml(id) + '">' + (r.stoppable ? 'show steps and Stop' : 'show steps') + '</button>' : '');
           el.classList.add('visible');
         } else {
@@ -3049,45 +2915,60 @@
         }
       } catch (e) { el.classList.remove('visible'); }
     }
-    function showLogsTab(id) {
-      document.querySelector('.detail-tab[data-dtab="logs"][data-app="' + CSS.escape(id) + '"]')?.click();
-    }
-
-    // ── Logs ──────────────────────────────────────────────
-    async function loadLogs(id, lines) {
-      const container = document.getElementById('detail-logs-' + id);
-      lines = lines || '200';
-      container.innerHTML = '<p class="settings-empty">Loading logs...</p>';
-      const [op, logs] = await Promise.all([
-        apiGet('/api/templates/lastop/' + id).catch(() => null),
-        fetch('/api/templates/logs/' + id + '?lines=' + lines).then(async r => ({ ok: r.ok, text: await r.text() })).catch(e => ({ ok: false, text: e.message })),
+    // ── Logs (contract §11.9 "Logs per container") ─────────
+    // All containers, or one: the services of the instance's status rows
+    // (data-log-service, data-log-lines; Refresh data-log-reload).
+    async function loadLogs(id, pane) {
+      const service = pane.dataset.logService || '', lines = pane.dataset.logLines || '200';
+      pane.innerHTML = '<p class="settings-empty">Loading logs…</p>';
+      const q = '?lines=' + encodeURIComponent(lines) + (service ? '&service=' + encodeURIComponent(service) : '');
+      const [op, rows, logs] = await Promise.all([
+        apiGet('/api/templates/lastop/' + encodeURIComponent(id)).catch(() => null),
+        loadStatus(id).catch(() => statusCache[id] || []),
+        fetch('/api/templates/logs/' + encodeURIComponent(id) + q).then(async r => ({ ok: r.ok, text: await r.text() })).catch(e => ({ ok: false, text: e.message })),
       ]);
-      container.innerHTML =
+      if (!pane.isConnected) return;
+      const services = [...new Set(rows.map(r => r.service).filter(Boolean))].sort();
+      if (service && !services.includes(service)) services.push(service);
+      pane.innerHTML =
         renderOpRecord(id, op) +
         '<div class="log-controls">' +
-          '<button class="btn btn-secondary btn-sm" onclick="event.stopPropagation(); loadLogs(\'' + id + '\')">Refresh</button>' +
-          '<select onchange="event.stopPropagation(); loadLogs(\'' + id + '\', this.value)">' +
-            '<option value="100"' + (lines==='100'?' selected':'') + '>100 lines</option>' +
-            '<option value="200"' + (lines==='200'?' selected':'') + '>200 lines</option>' +
-            '<option value="500"' + (lines==='500'?' selected':'') + '>500 lines</option>' +
+          '<label class="settings-empty" for="log-service">Show</label>' +
+          '<select id="log-service" data-log-service-pick>' +
+            '<option value=""' + (service ? '' : ' selected') + '>All containers</option>' +
+            services.map(v => '<option value="' + escapeHtml(v) + '"' + (v === service ? ' selected' : '') + '>' + escapeHtml(v) + '</option>').join('') +
           '</select>' +
+          '<select data-log-lines-pick aria-label="Lines">' +
+            ['100', '200', '500'].map(n => '<option value="' + n + '"' + (lines === n ? ' selected' : '') + '>' + n + ' lines</option>').join('') +
+          '</select>' +
+          '<button type="button" class="btn btn-secondary btn-sm" data-log-reload>Refresh</button>' +
         '</div>' +
         (logs.ok ? '<pre class="log-viewer container-logs">' + escapeHtml(logs.text || 'No container logs (the app has no containers).') + '</pre>'
                  : '<p class="settings-empty">Failed to load container logs: ' + escapeHtml(logs.text) + '</p>');
-      container.querySelectorAll('.log-viewer').forEach(v => { v.scrollTop = v.scrollHeight; });
+      pane.querySelectorAll('.log-viewer').forEach(v => { v.scrollTop = v.scrollHeight; });
     }
 
     // ── Expert mode ────────────────────────────────────────
-    async function loadExpert(id) {
-      const container = document.getElementById('detail-expert-' + id);
-      container.innerHTML = '<p class="settings-empty">Loading...</p>';
+    // The compose layers (template and Hub override read-only, the
+    // custom override editable), the environment variables (contract
+    // §11.9 "Environment overrides") and the container shell. Everything
+    // escaped; data-* attributes and the page's delegated listeners.
+    async function loadExpert(id, pane) {
+      pane.innerHTML = '<p class="settings-empty">Loading…</p>';
       try {
         const [composeData, envData] = await Promise.all([
-          apiGet('/api/templates/compose/' + id),
+          apiGet('/api/templates/compose/' + encodeURIComponent(id)),
           apiGet('/api/instances/' + encodeURIComponent(id) + '/env'),
         ]);
         const services = composeData.services || [];
         let html = '';
+
+        // Env vars (§11.9): one row per variable — its default and where
+        // it comes from, your value and its state.
+        html += '<div class="expert-section">';
+        html += '<div class="expert-section-title">Environment variables <span class="ro">your values are written after every template, Hub and Settings value; an enabled app restarts</span></div>';
+        html += '<div data-env-box>' + renderEnvRows(envData.rows || []) + '</div>';
+        html += '</div>';
 
         // Three layers, passed to compose in this order (later wins).
         html += '<div class="expert-section"><div class="settings-empty">docker compose ' +
@@ -3110,62 +2991,36 @@
         html += '<div class="expert-section-title">3. Custom override <span class="warn">yours — applied last, kept across template updates; restart to apply</span></div>';
         html += '<details class="override-rules"><summary>What a custom override may contain</summary><ul>' +
           (composeData.rules || []).map(r => '<li>' + escapeHtml(r) + '</li>').join('') + '</ul></details>';
-        html += '<textarea class="code-editor" id="expert-user-override-' + id + '" spellcheck="false" placeholder="services:\n  ' +
+        html += '<textarea class="code-editor" data-x-override spellcheck="false" aria-label="Custom override" placeholder="services:\n  ' +
           escapeHtml(services[0] || 'app') + ':\n    environment:\n      LOG_LEVEL: debug">' + escapeHtml(composeData.user_override || '') + '</textarea>';
         html += '<div class="expert-actions">';
-        html += '<button class="btn btn-primary btn-sm" onclick="event.stopPropagation(); saveUserOverride(\'' + id + '\')">Save override</button>';
-        if (composeData.enabled) {
-          html += '<button class="btn btn-secondary btn-sm" id="restart-btn-' + id + '" onclick="event.stopPropagation(); restartApp(\'' + id + '\', this)">Restart app</button>';
-        }
-        html += '<span class="saved-msg" id="override-saved-' + id + '"></span>';
+        html += '<button type="button" class="btn btn-primary btn-sm" data-x-save-override>Save override</button>';
+        if (composeData.enabled) html += '<button type="button" class="btn btn-secondary btn-sm" data-x-restart>Restart app</button>';
+        html += '<span class="saved-msg" data-x-override-msg></span>';
         html += '</div></div>';
-
-        // Env vars (contract §11.9): one row per variable, overridden one
-        // at a time.
-        html += '<div class="expert-section">';
-        html += '<div class="expert-section-title">Environment Variables <span class="ro">your overrides are written after every template, Hub and Settings value; an enabled app restarts</span></div>';
-        html += '<div id="expert-env-' + escapeHtml(id) + '">' + renderEnvRows(id, envData.rows || []) + '</div>';
-        html += '</div>';
 
         // Shell
         html += '<div class="expert-section">';
         html += '<div class="expert-section-title">Container Shell</div>';
-        html += '<div class="terminal" id="terminal-' + id + '">';
-        html += '<div class="terminal-output" id="term-output-' + id + '"></div>';
+        html += '<div class="terminal">';
+        html += '<div class="terminal-output" data-x-term-out></div>';
         html += '<div class="terminal-input">';
-        html += '<select id="term-svc-' + id + '">';
-        for (const svc of services) {
-          html += '<option value="' + escapeHtml(svc) + '">' + escapeHtml(svc) + '</option>';
-        }
-        html += '</select>';
+        html += '<select data-x-term-svc aria-label="Service">' + services.map(v => '<option value="' + escapeHtml(v) + '">' + escapeHtml(v) + '</option>').join('') + '</select>';
         html += '<span class="terminal-prompt">$</span> ';
-        html += '<input type="text" id="term-cmd-' + id + '" placeholder="command..." onkeydown="if(event.key===\'Enter\'){event.stopPropagation();execCmd(\'' + id + '\')}">';
+        html += '<input type="text" data-x-term-cmd placeholder="command..." aria-label="Command">';
         html += '</div></div></div>';
 
-        container.innerHTML = html;
-        bindEnvRows(container);
-
-        // Handle tab key in code editors
-        container.querySelectorAll('.code-editor').forEach(el => {
-          el.addEventListener('keydown', (e) => {
-            if (e.key === 'Tab') {
-              e.preventDefault();
-              const start = el.selectionStart;
-              el.value = el.value.substring(0, start) + '  ' + el.value.substring(el.selectionEnd);
-              el.selectionStart = el.selectionEnd = start + 2;
-            }
-          });
-        });
+        pane.innerHTML = html;
       } catch (e) {
-        container.innerHTML = '<p class="settings-empty">Failed to load expert data: ' + escapeHtml(e.message) + '</p>';
+        pane.innerHTML = '<p class="settings-empty">Failed to load expert data: ' + escapeHtml(e.message) + '</p>';
       }
     }
 
-    async function saveUserOverride(id) {
-      const user_override = document.getElementById('expert-user-override-' + id).value;
-      const msg = document.getElementById('override-saved-' + id);
+    async function saveUserOverride(id, pane) {
+      const user_override = pane.querySelector('[data-x-override]').value;
+      const msg = pane.querySelector('[data-x-override-msg]');
       try {
-        const r = await apiPut('/api/templates/compose/' + id, { user_override });
+        const r = await apiPut('/api/templates/compose/' + encodeURIComponent(id), { user_override });
         msg.style.color = '';
         msg.textContent = (r.status === 'removed' ? 'Removed' : 'Saved') + (r.restart_required ? ' — restart to apply' : ' — applies when the app is enabled');
         msg.classList.add('show');
@@ -3177,75 +3032,96 @@
       }
     }
 
-    // The env rows' table (§11.9): name, default, source, your override
-    // and its Override / Reset; Hub-set rows (Hub, a setting, a secret)
-    // can't be overridden (a stored override the template now refuses
-    // can still be reset). Everything escaped; data-* attributes and one
-    // delegated listener per Expert tab (bindEnvRows).
-    function renderEnvRows(id, rows) {
-      const eid = escapeHtml(id);
-      const srcText = { template: 'template', hub: 'Hub', option: 'Settings', custom: 'yours' };
-      let html = '<table class="env-table"><thead><tr><th>Key</th><th>Default</th><th>Source</th><th>Your value</th><th></th></tr></thead><tbody>';
+    // The env table (§11.9): variable; its default and where it comes from
+    // (template, set by the Hub, a setting, yours); your value and its
+    // state (default, overridden, added) with Reset to default / Remove /
+    // Override…; Hub-set rows (the Hub, a setting, every secret) can't be
+    // overridden and a secret's default stays masked (a stored override
+    // the template now refuses can still be reset). "+ Add your own
+    // variable" adds a custom one.
+    const ENV_SOURCE = { template: 'template', hub: 'set by the Hub', option: 'Settings', custom: 'yours' };
+    function renderEnvRows(rows) {
+      let html = '<table class="env-table"><thead><tr><th>Variable</th><th>Default (template / Hub)</th><th>Your value</th><th></th></tr></thead><tbody>';
       for (const r of rows) {
         const n = escapeHtml(r.name);
-        html += '<tr><td class="env-key">' + n + '</td>';
-        html += '<td class="env-key">' + (r.default === '' ? '<span class="ro">(empty)</span>' : escapeHtml(r.default)) + '</td>';
-        html += '<td>' + escapeHtml(srcText[r.source] || r.source) + (r.secret ? ' <span class="ro">secret</span>' : '') + '</td>';
+        const custom = r.source === 'custom';
+        html += '<tr data-env-row="' + n + '"><td class="env-key">' + n + '</td><td>';
+        if (r.secret) html += '<span class="ro">' + (r.default ? 'set (hidden)' : 'not set') + '</span>';
+        else if (custom) html += '<span class="ro">—</span>';
+        else html += r.default === '' ? '<span class="ro">(empty)</span>' : '<span class="env-val">' + escapeHtml(r.default) + '</span>';
+        html += '<span class="env-tag">' + escapeHtml(ENV_SOURCE[r.source] || r.source) + '</span>' + (r.secret ? '<span class="env-tag">secret</span>' : '') + '</td>';
         if (r.hub_set) {
-          html += '<td><span class="ro">' + (r.secret ? 'secrets are set under Settings' : r.source === 'option' ? 'change it under Settings' : 'set by the Hub') + '</span></td><td>';
-          if (r.overridden) html += '<button class="btn btn-secondary btn-sm" data-env-reset data-env-id="' + eid + '" data-env-name="' + n + '">Reset</button>';
+          html += '<td class="ro">' + (r.secret ? 'set by the Hub — can\'t be overridden (secrets are set under Settings)' :
+            r.source === 'option' ? 'set by a setting — change it under Settings' : 'set by the Hub — can\'t be overridden') + '</td><td>';
+          if (r.overridden) html += '<button type="button" class="btn btn-secondary btn-sm" data-env-reset>Reset to default</button>';
           html += '</td></tr>';
           continue;
         }
-        html += '<td><input type="text" data-env-input data-env-name="' + n + '" value="' + escapeHtml(r.overridden ? r.value : '') + '" placeholder="' + (r.overridden ? '' : 'default') + '"></td><td style="white-space:nowrap">';
-        html += '<button class="btn btn-primary btn-sm" data-env-set data-env-id="' + eid + '" data-env-name="' + n + '">Override</button> ';
-        if (r.overridden) html += '<button class="btn btn-secondary btn-sm" data-env-reset data-env-id="' + eid + '" data-env-name="' + n + '">' + (r.source === 'custom' ? 'Remove' : 'Reset') + '</button>';
-        html += '</td></tr>';
+        if (r.overridden) {
+          html += '<td><div class="env-edit"><input type="text" data-env-input value="' + escapeHtml(r.value) + '" aria-label="' + n + '">' +
+            '<span class="env-tag ' + (custom ? 'ok' : 'warn') + '">' + (custom ? 'added' : 'overridden') + '</span></div></td>' +
+            '<td style="white-space:nowrap"><button type="button" class="btn btn-primary btn-sm" data-env-set>Save</button> ' +
+            '<button type="button" class="btn btn-secondary btn-sm" data-env-reset>' + (custom ? 'Remove' : 'Reset to default') + '</button></td></tr>';
+          continue;
+        }
+        html += '<td data-env-cell><span class="ro">default</span></td>' +
+          '<td style="white-space:nowrap"><button type="button" class="btn btn-secondary btn-sm" data-env-override>Override…</button></td></tr>';
       }
       html += '</tbody></table>';
-      html += '<div class="expert-actions" style="margin-top:0.5rem; gap:0.5rem">';
-      html += '<input type="text" data-env-new-name placeholder="MY_VARIABLE" style="width:200px;background:#0f172a;border:1px solid #334155;border-radius:0.25rem;padding:0.375rem 0.5rem;color:#e2e8f0;font-family:SF Mono,monospace;font-size:0.75rem">';
-      html += '<input type="text" data-env-new-value placeholder="value" style="flex:1;background:#0f172a;border:1px solid #334155;border-radius:0.25rem;padding:0.375rem 0.5rem;color:#e2e8f0;font-family:SF Mono,monospace;font-size:0.75rem">';
-      html += '<button class="btn btn-secondary btn-sm" data-env-add data-env-id="' + eid + '">+ Add your own variable</button>';
-      html += '<span class="saved-msg" data-env-msg></span>';
-      html += '</div>';
+      html += '<div class="env-add" data-env-add-form hidden>' +
+        '<input type="text" data-env-new-name placeholder="MY_VARIABLE" aria-label="Variable name" spellcheck="false">' +
+        '<input type="text" data-env-new-value placeholder="value" aria-label="Value" spellcheck="false">' +
+        '<button type="button" class="btn btn-primary btn-sm" data-env-add>Add</button>' +
+        '<button type="button" class="btn btn-secondary btn-sm" data-env-add-cancel>Cancel</button></div>';
+      html += '<div class="expert-actions"><button type="button" class="btn btn-secondary btn-sm" data-env-add-open>+ Add your own variable</button>' +
+        '<span class="saved-msg" data-env-msg></span></div>';
       return html;
     }
 
-    // bindEnvRows: the env table's one click listener on the Expert
-    // container (kept across re-renders: bound once).
-    function bindEnvRows(container) {
-      if (container.dataset.envBound) return;
-      container.dataset.envBound = '1';
-      container.addEventListener('click', e => {
-        const b = e.target.closest('[data-env-set], [data-env-reset], [data-env-add]');
-        if (!b || !container.contains(b)) return;
-        e.stopPropagation();
-        const id = b.dataset.envId;
-        const box = b.closest('[id^="expert-env-"]');
-        if (!id || !box) return;
-        if (b.hasAttribute('data-env-add')) {
-          const name = (box.querySelector('[data-env-new-name]').value || '').trim();
-          if (!name) { showToast('Variable name required', 'error'); return; }
-          changeEnv(id, box, name, box.querySelector('[data-env-new-value]').value);
-          return;
-        }
-        const name = b.dataset.envName;
-        if (b.hasAttribute('data-env-reset')) { changeEnv(id, box, name, null); return; }
-        const input = [...box.querySelectorAll('[data-env-input]')].find(i => i.dataset.envName === name);
+    // envClick: the env table's buttons (the page's delegated listener).
+    function envClick(id, box, b) {
+      const row = b.closest('[data-env-row]');
+      const name = row ? row.dataset.envRow : '';
+      if (b.hasAttribute('data-env-add-open')) {
+        const f = box.querySelector('[data-env-add-form]');
+        f.hidden = false;
+        f.querySelector('[data-env-new-name]').focus();
+        return;
+      }
+      if (b.hasAttribute('data-env-add-cancel')) { box.querySelector('[data-env-add-form]').hidden = true; return; }
+      if (b.hasAttribute('data-env-add')) {
+        const n = (box.querySelector('[data-env-new-name]').value || '').trim();
+        if (!n) { showToast('Variable name required', 'error'); return; }
+        changeEnv(id, box, n, box.querySelector('[data-env-new-value]').value);
+        return;
+      }
+      if (b.hasAttribute('data-env-override')) {
+        const cell = row.querySelector('[data-env-cell]');
+        cell.innerHTML = '<div class="env-edit"><input type="text" data-env-input aria-label="' + escapeHtml(name) + '"></div>';
+        b.outerHTML = '<button type="button" class="btn btn-primary btn-sm" data-env-set>Save</button> <button type="button" class="btn btn-secondary btn-sm" data-env-cancel>Cancel</button>';
+        cell.querySelector('[data-env-input]').focus();
+        return;
+      }
+      if (b.hasAttribute('data-env-cancel')) { reloadEnv(id, box); return; }
+      if (b.hasAttribute('data-env-reset')) { changeEnv(id, box, name, null); return; }
+      if (b.hasAttribute('data-env-set')) {
+        const input = row.querySelector('[data-env-input]');
         changeEnv(id, box, name, input ? input.value : '');
-      });
+      }
     }
 
-    // changeEnv overrides (value) or resets (null) one variable, then
-    // shows the rows again.
+    async function reloadEnv(id, box) {
+      const data = await apiGet('/api/instances/' + encodeURIComponent(id) + '/env');
+      box.innerHTML = renderEnvRows(data.rows || []);
+    }
+
+    // changeEnv overrides or adds (value) or resets (null) one variable,
+    // then shows the rows again.
     async function changeEnv(id, box, name, value) {
       const url = '/api/instances/' + encodeURIComponent(id) + '/env/' + encodeURIComponent(name);
       try {
-        const res = value === null ? (await apiCall(url, 'DELETE')).json() : apiPut(url, { value });
-        const r = await res;
-        const data = await apiGet('/api/instances/' + encodeURIComponent(id) + '/env');
-        box.innerHTML = renderEnvRows(id, data.rows || []);
+        const r = await (value === null ? (await apiCall(url, 'DELETE')).json() : apiPut(url, { value }));
+        await reloadEnv(id, box);
         const msg = box.querySelector('[data-env-msg]');
         if (msg) {
           msg.textContent = (value === null ? 'Reset ' : 'Saved ') + name + (r && r.effect === 'restart' ? ' — the app restarts' : ' — applies at the next start');
@@ -3268,16 +3144,16 @@
       }
     }
 
-    async function execCmd(id) {
-      const svc = document.getElementById('term-svc-' + id).value;
-      const cmdInput = document.getElementById('term-cmd-' + id);
-      const output = document.getElementById('term-output-' + id);
+    async function execCmd(id, pane) {
+      const svc = pane.querySelector('[data-x-term-svc]').value;
+      const cmdInput = pane.querySelector('[data-x-term-cmd]');
+      const output = pane.querySelector('[data-x-term-out]');
       const cmd = cmdInput.value.trim();
       if (!cmd) return;
       cmdInput.value = '';
       output.textContent += '$ ' + cmd + '\n';
       try {
-        const res = await fetch('/api/templates/exec/' + id, {
+        const res = await fetch('/api/templates/exec/' + encodeURIComponent(id), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ service: svc, command: cmd }),
@@ -3293,10 +3169,11 @@
     }
 
     // ── Enable / Disable ──────────────────────────────────
-    async function toggleApp(id, enable, e) {
-      e.stopPropagation();
-      const card = document.querySelector(`[data-id="${id}"]`);
-      const btn = card.querySelector('.toggle');
+    // An instance's Enable / Disable (its Apps row, its page's header).
+    // The progress panel shows the operation; the row and the header show
+    // "Enabling… show progress" while it runs (opCardState); the lists
+    // follow its outcome (endTrack).
+    async function toggleInstance(id, enable, btn) {
       if (btn.disabled) return;
       if (enable) {
         // Disabled while the confirmation loads: a double click opens one dialog.
@@ -3305,16 +3182,12 @@
         btn.disabled = false;
         if (!go) return;
       }
-      // The progress panel shows the operation; the card shows
-      // "Enabling… show progress" while it runs (opCardState).
       btn.disabled = true;
       try {
         await runInstanceOp(enable ? '/api/templates/enable' : '/api/templates/disable', 'POST', { id }, id);
-        opReloadAfter(id);
       } catch (err) {
         btn.disabled = false;
         if (!err.shown) reportError(id, err);
-        else if (!err.stopped && err.rec) opReloadAfter(id); // the card gains its failure badge
       }
     }
 
@@ -3483,10 +3356,9 @@
     // below (no inline handlers with data).
     const INSTANCE_ID_RE = /^[a-z][a-z0-9-]{0,30}$/;
     const HOST_LABEL_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
-    const STATE_PILL = { enabled: 'ok', created: 'info', disabled: '', deleting: 'warn', restoring: 'warn', error: 'bad' };
     let instancesCache = [];
     let catalogCache = null;
-    let instCtx = null; // the open dialog: { kind: 'create'|'instance'|'backups', … }
+    let instCtx = null; // the open dialog: { kind: 'create'|'backups', … }
 
     async function loadCatalogInfo() {
       if (!catalogCache) {
@@ -3499,9 +3371,6 @@
     function templateLabel(tid) {
       const t = catalogCache && catalogCache[tid];
       return t ? ((t.manifest.icon ? t.manifest.icon + ' ' : '') + (t.manifest.name || tid)) : tid;
-    }
-    function statePill(s) {
-      return '<span class="pill ' + (STATE_PILL[s] || '') + '">' + escapeHtml(s) + '</span>';
     }
     function fmtSize(n) {
       if (!(n >= 0)) return '';
@@ -3578,233 +3447,324 @@
       return out;
     }
 
-    // ── catalog: chips on cards, overview, per-template tab ──
+    // ── Apps, Marketplace and the instance page (contract §11, §11.9) ──
+    // Apps lists the installed apps — those with at least one instance
+    // GET /api/instances lists (a state entry, enabled, or an op record) —
+    // each with its instances as "<App> · <label>": status, address,
+    // users group and its member count, Enable / Disable. The Marketplace
+    // fills each template card with "in use · N instances" (Show in Apps,
+    // + Add instance) or Install…. Every instance, the default one
+    // included, has one page: #apps/<id>[/<tab>].
+    let instancesLoaded = false;
+    let appsFilter = '';   // Marketplace "Show in Apps": one template's instances (the chip's × clears it)
+    let pageCtx = null;    // the instance page shown: { id, inst, tab, loaded }
+    let pageFlash = null;  // { id, notice, warnings }: said once on that instance's page
+    // GET /api/directory (admins: every group with its members and rule,
+    // every person's display name), re-read at most every 30 s: the
+    // users groups' counts and the Groups tab.
+    let dirCache = null, dirAt = 0, dirErr = null;
+
     async function refreshInstances() {
-      try { instancesCache = await apiGet('/api/instances'); } catch (e) { instancesCache = []; }
-      renderInstanceLists();
-      scanOps();
+      try { instancesCache = await apiGet('/api/instances'); instancesLoaded = true; } catch (e) { /* keep the last list */ }
+      await Promise.all([loadCatalogInfo().catch(() => null), loadDirectory(false),
+        ...instancesCache.filter(pollsStatus).map(i => loadStatus(i.id).catch(() => null))]);
+      await scanOps();
+      renderInstanceViews();
     }
-    function renderInstanceLists() {
-      document.querySelectorAll('[data-instances-of]').forEach(el => {
-        const mine = instancesCache.filter(i => i.template === el.dataset.instancesOf && !i.default);
-        el.innerHTML = mine.length ? '<span class="settings-empty">Instances</span>' + mine.map(i =>
-          '<button type="button" class="inst-chip" data-open-instance="' + escapeHtml(i.id) + '">' + escapeHtml(i.id) + statePill(i.state) + '</button>' +
-          opShowButton(i.id, 'inst-chip')).join('') : '';
+    function renderInstanceViews() {
+      if (document.getElementById('tab-apps').classList.contains('active')) renderApps();
+      if (document.getElementById('tab-marketplace').classList.contains('active')) fillMarketplace();
+      if (pageCtx) renderPageHead();
+    }
+    async function loadDirectory(force) {
+      if (!force && dirAt && Date.now() - dirAt < 30000) return dirCache;
+      dirAt = Date.now();
+      try { dirCache = await apiGet('/api/directory'); dirErr = null; } catch (e) { dirErr = e; }
+      return dirCache;
+    }
+    // dirGroup: group name's directory view; null = no such group;
+    // undefined = the directory can't be read.
+    function dirGroup(name) {
+      if (!dirCache || dirCache.available === false || dirErr) return undefined;
+      return (dirCache.groups || []).find(g => g.name === name) || null;
+    }
+    function groupKind(g) { return g.builtin ? 'built-in' : g.rule ? 'rule-based' : 'manual'; }
+    // Members by first name (the display name's first word, else the
+    // username), sorted; more than max: "a, b, … +N".
+    function namesLine(members, max) {
+      const users = new Map(((dirCache && dirCache.users) || []).map(u => [u.username, u]));
+      const names = members.map(m => {
+        const u = users.get(m);
+        return (u && String(u.display_name || '').trim().split(/\s+/)[0]) || m;
+      }).sort((a, b) => a.localeCompare(b));
+      return names.length <= max ? names.join(', ') : names.slice(0, max).join(', ') + ', … +' + (names.length - max);
+    }
+    function templateOf(id) {
+      const i = instancesCache.find(x => x.id === id);
+      return i ? i.template : id;
+    }
+    function appName(tid) {
+      const t = catalogCache && catalogCache[tid];
+      return t ? (t.manifest.name || tid) : tid;
+    }
+    function instName(i) { return i.name || (appName(i.template) + ' · ' + (i.label || i.id)); }
+
+    // An instance's status: its dot, words and pill (§11.9 "Fine":
+    // "running · n of m", "· setup job done" / "failed").
+    function instStatus(i) {
+      switch (i.state) {
+        case 'enabled': {
+          const rows = statusCache[i.id];
+          if (!rows) return { dot: '', text: 'enabled · checking…', cls: 'info' };
+          const s = statusSummary(rows);
+          if (!s.m) return { dot: 'stopped', text: 'not running · no containers', cls: 'bad' };
+          const job = s.job ? ' · setup job ' + s.job : '';
+          const fine = s.n === s.m;
+          return { dot: fine ? 'running' : s.n ? 'partial' : 'stopped', text: (s.n ? 'running · ' : 'not running · ') + s.n + ' of ' + s.m + job,
+            cls: fine ? 'ok' : s.job === 'failed' || !s.n ? 'bad' : 'warn' };
+        }
+        case 'created': return { dot: '', text: 'not started yet', cls: 'info' };
+        case 'disabled': return { dot: '', text: 'stopped', cls: '' };
+        case 'deleting': return { dot: 'partial', text: 'delete not finished', cls: 'warn' };
+        case 'restoring': return { dot: 'partial', text: 'restore not finished', cls: 'warn' };
+        case 'error': {
+          if (i.error) return { dot: 'stopped', text: 'can\'t run: ' + i.error, cls: 'bad' };
+          const op = opSummaries[i.id];
+          return { dot: 'stopped', text: 'last ' + ((op && op.op) || 'operation') + ' failed', cls: 'bad' };
+        }
+      }
+      return { dot: '', text: i.state || '', cls: '' };
+    }
+    // An instance's actions: Enable / Disable, or "Enabling… show
+    // progress" while an operation runs (opCardState redraws them).
+    function instActionsHtml(id) {
+      if (opRunning[id]) return opShowButton(id, 'btn btn-secondary btn-sm');
+      const i = instancesCache.find(x => x.id === id);
+      if (!i || i.state === 'deleting' || i.state === 'restoring') return '';
+      const on = i.state === 'enabled';
+      return '<button type="button" class="toggle toggle-sm ' + (on ? 'disable' : 'enable') + '" data-inst-toggle="' + escapeHtml(id) + '" data-enable="' + (on ? '0' : '1') + '">' +
+        (on ? 'Disable' : 'Enable') + '</button>';
+    }
+    function memberCountHtml(g) {
+      const grp = dirGroup(g);
+      if (grp === undefined) return '';
+      if (grp === null) return ' <span class="pill bad">missing</span>';
+      return ' (' + (grp.members || []).length + ')';
+    }
+    function instLineHtml(i) {
+      const st = instStatus(i);
+      const hosts = Object.keys(i.hosts || {}).sort().map(r => i.hosts[r]);
+      const sub = [hosts.length ? escapeHtml(hosts[0]) + (hosts.length > 1 ? ' +' + (hosts.length - 1) : '') : 'no web page'];
+      if (i.access_group) sub.push(PortcullisPeople.groupLink(i.access_group) + memberCountHtml(i.access_group));
+      return '<div class="inst-line" data-inst-line="' + escapeHtml(i.id) + '"><span class="status-dot ' + st.dot + '" aria-hidden="true"></span>' +
+        '<span class="inst-line-name"><a href="#apps/' + encodeURIComponent(i.id) + '">' + escapeHtml(instName(i)) + '</a>' +
+        '<span class="inst-line-sub">' + sub.join(' · ') + '</span></span>' +
+        '<span class="pill ' + st.cls + '">' + escapeHtml(st.text) + '</span>' +
+        '<span class="inst-line-act" data-inst-act="' + escapeHtml(i.id) + '">' + instActionsHtml(i.id) + '</span></div>';
+    }
+
+    let appsHtml = '';
+    function renderApps() {
+      const box = document.getElementById('apps-root');
+      if (!box || !instancesLoaded) return;
+      const byT = new Map();
+      for (const i of instancesCache) {
+        if (!byT.has(i.template)) byT.set(i.template, []);
+        byT.get(i.template).push(i);
+      }
+      let tids = [...byT.keys()].sort((a, b) => appName(a).localeCompare(appName(b)) || a.localeCompare(b));
+      if (appsFilter) tids = tids.filter(t => t === appsFilter);
+      let h = '<div class="apps-head"><div class="category-title">Installed apps</div>';
+      if (appsFilter) {
+        h += '<span class="apps-chip" data-apps-chip>Showing ' + escapeHtml(appName(appsFilter)) + ' only' +
+          '<button type="button" data-apps-filter-clear aria-label="Show every app" title="Show every app">&times;</button></span>';
+      }
+      h += '<button type="button" class="btn btn-secondary btn-sm" data-all-backups>All backups</button>' +
+        '<button type="button" class="btn btn-primary btn-sm" data-goto-tab="marketplace">+ Add an app</button></div>';
+      if (!tids.length) {
+        h += '<p class="settings-empty">' + (appsFilter ? escapeHtml(appName(appsFilter)) + ' has no instances any more.'
+          : 'No apps installed yet. “+ Add an app” opens the Marketplace.') + '</p>';
+      }
+      for (const tid of tids) {
+        const list = byT.get(tid).slice().sort((a, b) => instName(a).localeCompare(instName(b)) || a.id.localeCompare(b.id));
+        const t = catalogCache && catalogCache[tid];
+        const multi = t && t.manifest.instances === 'multi';
+        h += '<section class="app-block" data-app-block="' + escapeHtml(tid) + '"><div class="app-block-head">' +
+          '<span class="app-icon" aria-hidden="true">' + escapeHtml(t ? t.manifest.icon || '' : '') + '</span><h3>' + escapeHtml(appName(tid)) + '</h3>' +
+          '<span class="settings-empty">' + list.length + (list.length === 1 ? ' instance' : ' instances') + '</span>' +
+          (multi ? '<button type="button" class="btn btn-secondary btn-sm" data-add-instance="' + escapeHtml(tid) + '" title="Run another, fully separate copy of this app">+ Add instance</button>' : '') +
+          '</div>' + list.map(instLineHtml).join('') + '</section>';
+      }
+      if (h !== appsHtml || !box.querySelector('.apps-head')) { box.innerHTML = h; appsHtml = h; }
+    }
+
+    function fillMarketplace() {
+      document.querySelectorAll('[data-mkt-use]').forEach(el => {
+        const tid = el.dataset.mktUse;
+        const n = instancesCache.filter(i => i.template === tid).length;
+        const add = el.dataset.mktMulti === '1' ? '<button type="button" class="btn btn-secondary btn-sm" data-add-instance="' + escapeHtml(tid) + '">+ Add instance</button>' : '';
+        el.innerHTML = n
+          ? '<span class="pill ok">in use · ' + n + (n === 1 ? ' instance' : ' instances') + '</span>' +
+            '<button type="button" class="btn btn-secondary btn-sm" data-apps-filter="' + escapeHtml(tid) + '">Show in Apps</button>' + add
+          : '<button type="button" class="btn btn-primary btn-sm" data-install="' + escapeHtml(tid) + '">Install…</button>';
       });
-      renderInstancesOverview();
-      if (openDetailId) {
-        const c = document.getElementById('detail-instances-' + openDetailId);
-        if (c && c.classList.contains('active')) loadTemplateInstances(openDetailId);
-      }
     }
 
-    function instanceTable(list, withTemplate) {
-      let h = '<table class="inst-table"><thead><tr><th>Instance</th>' + (withTemplate ? '<th>Template</th>' : '') + '<th>State</th><th>Hostnames</th><th></th></tr></thead><tbody>';
-      for (const i of list) {
-        h += '<tr><td><code>' + escapeHtml(i.id) + '</code>' + (i.default ? ' <span class="settings-empty">default</span>' : '') + '</td>' +
-          (withTemplate ? '<td>' + escapeHtml(templateLabel(i.template)) + '</td>' : '') +
-          '<td>' + statePill(i.state) + (i.error ? ' <span class="settings-empty">' + escapeHtml(i.error) + '</span>' : '') + ' ' + opShowButton(i.id, 'btn btn-secondary btn-sm') + '</td>' +
-          '<td>' + Object.keys(i.hosts || {}).sort().map(r => '<code>' + escapeHtml(i.hosts[r]) + '</code>').join('<br>') + '</td>' +
-          '<td style="text-align:right"><button type="button" class="btn btn-secondary btn-sm" data-open-instance="' + escapeHtml(i.id) + '">Open</button></td></tr>';
-      }
-      return h + '</tbody></table>';
+    // goTab: a top tab, with a history entry (the page's links).
+    function goTab(name) {
+      history.pushState(null, '', name === 'apps' ? location.pathname : '#' + name);
+      showTab(name);
+    }
+    // navInstance: instance id's page at tab (option: a setting to scroll
+    // to); the hash routes it.
+    function navInstance(id, tab, opt) {
+      tab = tab || 'overview';
+      const h = '#apps/' + encodeURIComponent(id) + (tab !== 'overview' || opt ? '/' + tab + (opt ? '/' + encodeURIComponent(opt) : '') : '');
+      if (location.hash === h) openInstancePage(id, tab, opt || '');
+      else location.hash = h;
     }
 
-    function renderInstancesOverview() {
-      const box = document.getElementById('instances-overview');
-      const extra = instancesCache.filter(i => !i.default || i.state === 'deleting' || i.state === 'restoring' || i.state === 'error');
-      let h = '<div class="category"><div class="category-title" style="display:flex;justify-content:space-between;align-items:center">' +
-        '<span>Instances</span><button type="button" class="btn btn-secondary btn-sm" data-all-backups="1">Backups</button></div>';
-      h += extra.length ? instanceTable(extra, true)
-        : '<p class="settings-empty">No extra instances. Use “+ Add instance” on an app to run another, fully separate copy of it.</p>';
-      box.innerHTML = h + '</div>';
+    // ── the instance page ────────────────────────────────
+    const PAGE_TABS = [['overview', 'Overview'], ['settings', 'Settings'], ['groups', 'Groups'], ['filesharing', 'File sharing'], ['logs', 'Logs'],
+      ['backups', 'Backups'], ['ai', 'AI'], ['expert', 'Expert'], ['delete', 'Delete']];
+    function pageTabs(inst) {
+      return PAGE_TABS.filter(([k]) => k !== 'filesharing' || templateHasPersonSecret(inst.template));
     }
-
-    async function loadTemplateInstances(tid) {
-      const box = document.getElementById('detail-instances-' + tid);
-      if (!box) return;
-      await loadCatalogInfo();
-      const t = catalogCache[tid];
-      const list = instancesCache.filter(i => i.template === tid);
-      if (!list.some(i => i.id === tid) && t) list.unshift(defaultInstanceView(t));
-      let h = instanceTable(list, false);
-      if (t && t.manifest.instances === 'multi') {
-        h += '<div class="inst-row"><button type="button" class="btn btn-primary btn-sm" data-add-instance="' + escapeHtml(tid) + '">+ Add instance</button>' +
-          '<span class="settings-empty">Each instance has its own containers, data, settings, Keycloak client and groups.</span></div>';
-      } else {
-        h += '<p class="settings-empty" style="margin-top:0.5rem">This template runs only as its default instance (instances: single).</p>';
+    async function openInstancePage(id, tab, opt) {
+      showTab('instance');
+      const box = document.getElementById('instance-page');
+      if (!(pageCtx && pageCtx.id === id && box.querySelector('[data-ipane]'))) {
+        const ctx = pageCtx = { id, inst: null, tab: '', loaded: {} };
+        box.innerHTML = '<p class="settings-empty">Loading…</p>';
+        await loadCatalogInfo().catch(() => null);
+        try { instancesCache = await apiGet('/api/instances'); instancesLoaded = true; } catch (e) { /* keep */ }
+        if (pageCtx !== ctx) return;
+        const inst = instancesCache.find(i => i.id === id);
+        if (!inst) { renderMissingPage(box, id); return; }
+        ctx.inst = inst;
+        renderPageFrame(box, inst);
+        loadOpBanner(id);
+        loadDoctorLine(id);
+        opAutoOpen(id);
+        if (pollsStatus(inst)) loadStatus(id).then(renderPageHead).catch(() => {});
+        loadDirectory(false).then(renderPageHead);
       }
+      if (!pageCtx.inst) return;
+      showPageTab(pageTabs(pageCtx.inst).some(([k]) => k === tab) ? tab : 'overview', opt);
+    }
+    // No such instance: a template that isn't installed offers Install….
+    function renderMissingPage(box, id) {
+      const t = catalogCache && catalogCache[id];
+      box.innerHTML = '<div class="page-crumbs"><a href="#apps" data-goto-tab="apps">Apps</a> ›</div>' +
+        (t ? '<div class="inst-section"><h4>' + escapeHtml(appName(id)) + '</h4><p>' + escapeHtml(appName(id)) + ' isn\'t installed.</p>' +
+          '<div class="inst-row"><button type="button" class="btn btn-primary btn-sm" data-install="' + escapeHtml(id) + '">Install…</button></div></div>'
+          : '<div class="inst-section"><p>There is no instance <code>' + escapeHtml(id) + '</code>.</p>' +
+          '<div class="inst-row"><button type="button" class="btn btn-secondary btn-sm" data-goto-tab="apps">Back to Apps</button></div></div>');
+    }
+    function renderPageFrame(box, inst) {
+      const id = inst.id, tabs = pageTabs(inst);
+      let h = '<div class="page-crumbs"><a href="#apps" data-goto-tab="apps">Apps</a> › ' +
+        '<a href="#apps" data-apps-filter="' + escapeHtml(inst.template) + '">' + escapeHtml(appName(inst.template)) + '</a> ›</div>' +
+        '<div class="page-head" data-page-head></div>';
+      if (pageFlash && pageFlash.id === id) {
+        h += '<div class="inst-ok">' + escapeHtml(pageFlash.notice) + '</div>' + warningsList(pageFlash.warnings);
+        pageFlash = null;
+      }
+      h += '<div class="op-banner" id="op-banner-' + escapeHtml(id) + '"></div><div class="doctor-line-box" id="doctor-line-' + escapeHtml(id) + '"></div>' +
+        '<div class="detail-tabs page-tabs" role="tablist" aria-label="' + escapeHtml(instName(inst)) + '">' +
+        tabs.map(([k, l]) => '<button type="button" class="detail-tab" role="tab" data-ptab="' + k + '">' + escapeHtml(l) + '</button>').join('') + '</div>' +
+        tabs.map(([k]) => '<div class="detail-content" role="tabpanel" data-ipane="' + k + '"></div>').join('');
       box.innerHTML = h;
+      renderPageHead();
     }
-
-    // The default instance of a template not listed by the API yet (never
-    // enabled, no state): the catalog entry is its view.
-    function defaultInstanceView(t) {
-      return { id: t.id, template: t.id, default: true, state: t.enabled ? 'enabled' : 'disabled', hosts: t.hosts || {},
-        access_group: t.manifest.auth && t.manifest.auth.access_group || '', admin_group: t.manifest.auth && t.manifest.auth.admin_group || '',
-        keycloak_clients: (t.manifest.keycloak_clients || []).map(c => c.client_id), project: 'portcullis-' + t.id };
+    // The header: "<App> · <label>", its status and Enable / Disable.
+    function renderPageHead() {
+      const el = document.querySelector('#instance-page [data-page-head]');
+      if (!el || !pageCtx || !pageCtx.inst) return;
+      const inst = pageCtx.inst = instancesCache.find(i => i.id === pageCtx.id) || pageCtx.inst;
+      const st = instStatus(inst);
+      const h = '<span class="status-dot ' + st.dot + '" aria-hidden="true"></span><h2>' + escapeHtml(instName(inst)) + '</h2>' +
+        '<span class="pill ' + st.cls + '">' + escapeHtml(st.text) + '</span>' +
+        '<span class="page-act" data-inst-act="' + escapeHtml(inst.id) + '">' + instActionsHtml(inst.id) + '</span>';
+      if (el.dataset.sig !== h) { el.innerHTML = h; el.dataset.sig = h; }
     }
-
-    // ── dialog ───────────────────────────────────────────
-    function openInstModal(html) {
-      document.getElementById('inst-modal-box').innerHTML = html;
-      document.getElementById('inst-modal').classList.add('visible');
-    }
-    function closeInstModal() {
-      document.getElementById('inst-modal').classList.remove('visible');
-      document.getElementById('inst-modal-box').innerHTML = '';
-      instCtx = null;
-      refreshInstances();
-      if (pageReloadOwed) reloadWhenIdle();
-    }
-    function modalHead(title) {
-      return '<div class="inst-modal-head"><div class="inst-modal-title">' + title + '</div>' +
-        '<button type="button" class="detail-close" data-inst-close="1" title="Close" aria-label="Close">&times;</button></div>';
-    }
-
-    // ── create ───────────────────────────────────────────
-    async function openCreateInstance(tid) {
-      await loadCatalogInfo();
-      instCtx = { kind: 'create', tid, edited: {} };
-      openInstModal(modalHead('Add an instance of ' + escapeHtml(templateLabel(tid))) +
-        '<form class="inst-form" id="inst-create-form" autocomplete="off">' +
-        '<div class="inst-section"><h4>Name</h4>' +
-        '<label class="block" for="inst-new-id">Instance id</label>' +
-        '<input type="text" id="inst-new-id" value="' + escapeHtml(tid + '-') + '" spellcheck="false" maxlength="31">' +
-        '<small>Lowercase letters, digits and “-”, starting with a letter, at most 31 characters (e.g. ' + escapeHtml(tid) + '-team-a). ' +
-        'It names the compose project, the Keycloak client and the groups <code>users_&lt;id&gt;</code> / <code>admin_&lt;id&gt;</code>.</small>' +
-        '<label class="block" for="inst-new-label">Label</label>' +
-        '<input type="text" id="inst-new-label" value="" spellcheck="false" maxlength="64">' +
-        '<small>What people see: the portal shows it as “' + escapeHtml(templateLabel(tid)) + ' · &lt;label&gt;”. One line, at most 64 characters (e.g. Team A).</small>' +
-        '<label class="block" for="inst-new-domain">Domain</label><select id="inst-new-domain"></select>' +
-        '<small>The main domain or an enrolled domain that is ready (Settings → Domains). Changing it re-fills the hostnames you haven\'t edited.</small></div>' +
-        '<div class="inst-section"><h4>Hostnames</h4><div id="inst-new-hosts"><p class="settings-empty">Loading…</p></div>' +
-        '<small>Pre-filled from the instance id and domain; each one is editable. One label under the domain: <code>&lt;label&gt;.&lt;domain&gt;</code> (or an enrolled domain itself).</small></div>' +
-        '<p class="settings-empty">The instance is created stopped (state <code>created</code>) with its own empty groups: review its settings, add members, then enable it.</p>' +
-        '<div id="inst-create-result"></div>' +
-        '<div class="op-modal-actions"><button type="button" class="btn btn-secondary btn-sm" data-inst-close="1">Cancel</button>' +
-        '<button type="submit" class="btn btn-primary btn-sm">Create instance</button></div></form>');
-      document.getElementById('inst-new-id').focus();
-      await refreshCreateDefaults();
-    }
-
-    let createTimer = null;
-    async function refreshCreateDefaults() {
-      if (!instCtx || instCtx.kind !== 'create') return;
-      const ctx = instCtx;
-      const id = document.getElementById('inst-new-id').value.trim();
-      const sel = document.getElementById('inst-new-domain');
-      const domain = sel.value || '';
-      try {
-        const d = await instanceDefaults(ctx.tid, INSTANCE_ID_RE.test(id) ? id : '', domain);
-        if (instCtx !== ctx) return;
-        ctx.domains = d.domains;
-        ctx.routers = d.routers || [];
-        if (!sel.options.length) sel.innerHTML = domainOptions(d.domains, d.domains[0] && d.domains[0].name);
-        const box = document.getElementById('inst-new-hosts');
-        const current = collectHosts(box);
-        const hosts = {};
-        for (const r of ctx.routers) hosts[r.router] = ctx.edited[r.router] ? current[r.router] : ((d.hosts || {})[r.router] || '');
-        box.innerHTML = ctx.routers.length ? hostRows(ctx.routers, hosts, false, ctx.tid) : '<p class="settings-empty">No web page: this template serves no hostnames.</p>';
-      } catch (err) {
-        document.getElementById('inst-new-hosts').innerHTML = errorBox(err);
-      }
-    }
-
-    async function submitCreateInstance() {
-      const ctx = instCtx;
-      const out = document.getElementById('inst-create-result');
-      const id = document.getElementById('inst-new-id').value.trim();
-      if (!INSTANCE_ID_RE.test(id)) { out.innerHTML = errorBox(new Error('the instance id must match ' + INSTANCE_ID_RE.source)); return; }
-      const label = document.getElementById('inst-new-label').value.trim();
-      if (!label) { out.innerHTML = errorBox(new Error('give the instance a label')); return; }
-      const hosts = collectHosts(document.getElementById('inst-new-hosts'));
-      const problems = Object.keys(hosts).sort().map(r => hostProblem(r, hosts[r], ctx.domains || [], false)).filter(Boolean);
-      if (problems.length) { out.innerHTML = '<div class="op-msg inst-error">' + problems.map(escapeHtml).join('<br>') + '</div>'; return; }
-      out.innerHTML = '';
-      const go = out.closest('form').querySelector('[type="submit"]');
-      go.disabled = true;
-      try {
-        const res = await runInstanceOp('/api/instances', 'POST', { template: ctx.tid, id, label, hosts }, id);
-        await refreshInstances();
-        openInstance(id, { notice: 'Created. It is stopped: review its settings, then enable it.', warnings: res.warnings });
-      } catch (err) {
-        go.disabled = false;
-        if (!err.shown) out.innerHTML = errorBox(err);
-      }
-    }
-
-    // ── instance detail ──────────────────────────────────
-    async function openInstance(id, opts) {
-      await loadCatalogInfo();
-      try { instancesCache = await apiGet('/api/instances'); renderInstanceLists(); } catch (e) { /* keep */ }
-      let inst = instancesCache.find(i => i.id === id);
-      if (!inst && catalogCache[id]) inst = defaultInstanceView(catalogCache[id]);
-      if (!inst) { showToast('Instance ' + id + ' not found', 'error'); return; }
-      const tabs = [['overview', 'Overview']];
-      if (!inst.default) tabs.push(['settings', 'Settings'], ['logs', 'Logs'], ['expert', 'Expert']);
-      if (!inst.default && templateHasPersonSecret(inst.template)) tabs.push(['filesharing', 'File sharing']);
-      if (!inst.default) tabs.push(['ai', 'AI support']);
-      tabs.push(['backups', 'Backups'], ['delete', 'Delete']);
-      instCtx = { kind: 'instance', id, inst, tab: (opts && opts.tab) || 'overview' };
-      let h = modalHead(escapeHtml(templateLabel(inst.template)) + ' · <code>' + escapeHtml(id) + '</code> ' + statePill(inst.state));
-      if (opts && opts.notice) h += '<div class="inst-ok">' + escapeHtml(opts.notice) + '</div>';
-      h += warningsList(opts && opts.warnings);
-      h += '<div class="detail-tabs">' + tabs.map(([k, l]) => '<span class="detail-tab" data-itab="' + k + '">' + escapeHtml(l) + '</span>').join('') + '</div>';
-      for (const [k] of tabs) {
-        const domId = (k === 'settings' || k === 'logs' || k === 'expert') ? ' id="detail-' + k + '-' + escapeHtml(id) + '"' : '';
-        h += '<div class="detail-content" data-ipane="' + k + '"' + domId + '></div>';
-      }
-      openInstModal(h);
-      showInstTab(instCtx.tab);
-      opAutoOpen(id);
-    }
-
-    function showInstTab(k) {
-      const box = document.getElementById('inst-modal-box');
-      box.querySelectorAll('[data-itab]').forEach(t => t.classList.toggle('active', t.dataset.itab === k));
+    function showPageTab(k, opt) {
+      const box = document.getElementById('instance-page');
+      box.querySelectorAll('[data-ptab]').forEach(t => {
+        t.classList.toggle('active', t.dataset.ptab === k);
+        t.setAttribute('aria-selected', String(t.dataset.ptab === k));
+      });
       box.querySelectorAll('[data-ipane]').forEach(p => p.classList.toggle('active', p.dataset.ipane === k));
-      const pane = box.querySelector('[data-ipane="' + k + '"]');
-      const id = instCtx.id;
-      instCtx.tab = k;
-      if (k === 'overview') renderInstOverview(pane);
-      if (k === 'settings') loadSettings(id);
-      if (k === 'logs') loadLogs(id);
-      if (k === 'expert') loadExpert(id);
-      if (k === 'backups') loadBackups(pane, id);
-      if (k === 'filesharing') loadFileSharing(id, pane);
-      if (k === 'ai') loadAITab(id, pane);
-      if (k === 'delete') renderInstDelete(pane);
+      pageCtx.tab = k;
+      loadPane(k, box.querySelector('[data-ipane="' + k + '"]'), opt || '');
     }
-
-    async function renderInstOverview(pane) {
-      const inst = instCtx.inst;
-      let h = '<div class="inst-section"><h4>Instance</h4><dl class="inst-facts">' +
-        '<dt>Template</dt><dd>' + escapeHtml(templateLabel(inst.template)) + ' <code>' + escapeHtml(inst.template) + '</code></dd>' +
-        '<dt>Compose project</dt><dd><code>' + escapeHtml(inst.project || '') + '</code></dd>' +
-        (inst.access_group ? '<dt>Access group</dt><dd>' + PortcullisPeople.groupLink(inst.access_group, true) + '</dd>' : '') +
-        (inst.admin_group ? '<dt>Admin group</dt><dd>' + PortcullisPeople.groupLink(inst.admin_group, true) + '</dd>' : '') +
-        ((inst.keycloak_clients || []).length ? '<dt>Keycloak clients</dt><dd>' + inst.keycloak_clients.map(c => '<code>' + escapeHtml(c) + '</code>').join(', ') + '</dd>' : '') +
-        '</dl>';
-      if (inst.error) h += '<div class="op-msg">' + escapeHtml(inst.error) + '</div>';
-      if (inst.state === 'deleting') h += '<div class="public-warn">A delete stopped part-way: open Delete to finish it (the first backup is kept).</div>';
-      if (inst.state === 'restoring') h += '<div class="public-warn">A restore didn\'t finish: restore it again from Backups (its pre-restore backup is put back first).</div>';
-      if (!inst.default && inst.state !== 'deleting' && inst.state !== 'restoring') {
-        const on = inst.state === 'enabled';
-        h += '<div class="inst-row"><button type="button" class="toggle ' + (on ? 'disable' : 'enable') + '" data-inst-enable="' + (on ? '0' : '1') + '">' + (on ? 'Disable' : 'Enable') + '</button>' +
-          '<span class="settings-empty">' + (on ? 'Disabling stops it and keeps everything.' : 'Enabling creates its Keycloak client and starts it.') + '</span></div>';
-      } else if (inst.default) {
-        h += '<p class="settings-empty" style="margin-top:0.5rem">The default instance: its settings, logs and expert mode are in the app\'s card.</p>';
+    // Settings and Expert load once per page (a draft survives switching
+    // tabs); the others are read again each time they are shown.
+    async function loadPane(k, pane, opt) {
+      const id = pageCtx.id;
+      if ((k === 'settings' || k === 'expert') && pageCtx.loaded[k]) { if (opt) flashOption(opt); return; }
+      pageCtx.loaded[k] = true;
+      switch (k) {
+        case 'overview': renderOverview(id, pane); break;
+        case 'settings': try { await loadSettings(id, pane); } catch (e) { /* the panel says why */ } if (opt) flashOption(opt); break;
+        case 'groups': renderGroupsTab(id, pane); break;
+        case 'filesharing': loadFileSharing(id, pane); break;
+        case 'logs': loadLogs(id, pane); break;
+        case 'backups': loadBackups(pane, id); break;
+        case 'ai': loadAITab(id, pane); break;
+        case 'expert': loadExpert(id, pane); break;
+        case 'delete': renderInstDelete(pane); break;
       }
-      h += '</div><div class="inst-section"><h4>Last operation</h4><div id="inst-lastop"><p class="settings-empty">Loading…</p></div></div>';
-      h += '<div class="inst-section"><h4>Hostnames</h4><div id="inst-hosts-editor"><p class="settings-empty">Loading…</p></div></div>';
+    }
+    async function flashOption(key) {
+      const el = await waitFor('#instance-page [data-ipane="settings"] [data-opt="' + CSS.escape(key) + '"]');
+      if (el) flash(el);
+    }
+    function pagePane(k) { return document.querySelector('#instance-page [data-ipane="' + k + '"]'); }
+
+    // ── Overview: label, facts, addresses (the hostname editor),
+    // containers with their job state, the last operation ──
+    async function renderOverview(id, pane) {
+      const inst = pageCtx.inst;
+      const t = catalogCache && catalogCache[inst.template];
+      const notes = t && t.manifest.auth && t.manifest.auth.notes;
+      const bound = inst.groups_mode === 'existing';
+      let h = '';
+      if (inst.error) h += '<div class="op-msg inst-error">' + escapeHtml(inst.error) + '</div>';
+      if (inst.state === 'deleting') h += '<div class="public-warn">A delete stopped part-way: <button type="button" class="opp-link" data-page-tab-go="delete">open Delete</button> to finish it (the first backup is kept).</div>';
+      if (inst.state === 'restoring') h += '<div class="public-warn">A restore didn\'t finish: restore it again from <button type="button" class="opp-link" data-page-tab-go="backups">Backups</button> (its pre-restore backup is put back first).</div>';
+      if (notes) h += '<div class="auth-notes">' + escapeHtml(notes) + '</div>';
+      const setupOpts = ((t && t.manifest.settings && t.manifest.settings.options) || []).some(o => o.setup);
+      h += '<div class="inst-section"><h4>Instance</h4>' +
+        '<div class="inst-form"><label class="block" for="pg-label">Label</label>' +
+        '<div class="inst-row" style="margin-top:0"><input type="text" id="pg-label" data-pg-label value="' + escapeHtml(inst.label || '') + '" maxlength="64" spellcheck="false" style="flex:1;width:auto">' +
+        '<button type="button" class="btn btn-primary btn-sm" data-pg-label-save>Save label</button></div>' +
+        '<small>Shown everywhere as “' + escapeHtml(appName(inst.template)) + ' · &lt;label&gt;”: the portal, My apps, the AI consent. Change it any time; nothing depends on it.</small>' +
+        '<div data-pg-label-result></div></div>' +
+        '<dl class="inst-facts">' +
+        '<dt>App</dt><dd>' + escapeHtml(templateLabel(inst.template)) + ' <code>' + escapeHtml(inst.template) + '</code></dd>' +
+        '<dt>Instance id</dt><dd><code>' + escapeHtml(inst.id) + '</code></dd>' +
+        '<dt>Compose project</dt><dd><code>' + escapeHtml(inst.project || '') + '</code></dd>' +
+        (inst.access_group ? '<dt>Users group</dt><dd>' + PortcullisPeople.groupLink(inst.access_group, true) + (bound ? ' <span class="pill info">existing group</span>' : '') + ' <button type="button" class="opp-link" data-page-tab-go="groups">who is in it</button></dd>' : '') +
+        (inst.admin_group ? '<dt>Admins group</dt><dd>' + PortcullisPeople.groupLink(inst.admin_group, true) + (bound ? ' <span class="pill info">existing group</span>' : '') + '</dd>' : '') +
+        ((inst.keycloak_clients || []).length ? '<dt>Keycloak clients</dt><dd>' + inst.keycloak_clients.map(c => '<code>' + escapeHtml(c) + '</code>').join(', ') + '</dd>' : '') +
+        (setupOpts ? '<dt>Setup choices</dt><dd>' + (inst.setup && inst.setup.locked ? 'fixed since the first start (🔒 the locked ones say why under Settings)' : 'not started yet: every choice can still change under Settings') + '</dd>' : '') +
+        '</dl></div>';
+      const hosts = Object.keys(inst.hosts || {}).sort();
+      h += '<div class="inst-section"><h4>Addresses</h4>' +
+        (hosts.length ? '<p>' + hosts.map(r => '<a class="group-link" href="https://' + escapeHtml(inst.hosts[r]) + '/" target="_blank" rel="noopener noreferrer">' + escapeHtml(inst.hosts[r]) + ' &#8599;</a>').join(' · ') + '</p>' : '') +
+        '<div id="inst-hosts-editor"><p class="settings-empty">Loading…</p></div></div>';
+      h += '<div class="inst-section"><h4>Containers</h4><div data-pg-containers><p class="settings-empty">Loading…</p></div>' +
+        '<div class="inst-row"><button type="button" class="btn btn-secondary btn-sm" data-pg-containers-reload>Refresh</button></div></div>';
+      h += '<div class="inst-section"><h4>Last operation</h4><div id="inst-lastop"><p class="settings-empty">Loading…</p></div></div>';
       pane.innerHTML = h;
+      loadContainers(id, pane);
       loadInstLastOp(pane.querySelector('#inst-lastop'), inst.id);
       const ed = pane.querySelector('#inst-hosts-editor');
       try {
         const d = await instanceDefaults(inst.template, inst.id, '');
-        instCtx.domains = d.domains;
-        instCtx.routers = d.routers;
+        pageCtx.domains = d.domains;
+        pageCtx.routers = d.routers;
         if (d.legacy) { ed.innerHTML = '<p class="settings-empty">This template still uses ${PORTCULLIS_DOMAIN} rules: its hostnames are fixed.</p>' + hostRowsReadOnly(inst.hosts); return; }
         if (!(d.routers || []).length) { ed.innerHTML = '<p class="settings-empty">No web page: this app serves no hostnames (people use it with its own client).</p>'; return; }
         const pending = inst.state === 'deleting' || inst.state === 'restoring';
@@ -3816,6 +3776,16 @@
           '<div id="inst-hosts-result"></div>' +
           '<div class="inst-row"><button type="button" class="btn btn-primary btn-sm" data-inst-save-hosts="1"' + (pending ? ' disabled' : '') + '>Save hostnames</button></div>';
       } catch (err) { ed.innerHTML = errorBox(err); }
+    }
+    async function loadContainers(id, pane) {
+      const box = pane.querySelector('[data-pg-containers]');
+      if (!box) return;
+      const inst = pageCtx && pageCtx.inst;
+      if (inst && !pollsStatus(inst)) { box.innerHTML = '<p class="settings-empty">Not running: ' + escapeHtml(instStatus(inst).text) + '.</p>'; return; }
+      try {
+        box.innerHTML = containersHtml(await loadStatus(id));
+        renderPageHead();
+      } catch (e) { box.innerHTML = errorBox(e); }
     }
     // The last lifecycle record (restore, delete, hosts, enable, …) and the
     // newest backup: a long backup / restore / delete whose request was
@@ -3839,7 +3809,7 @@
     async function fillHostsForDomain() {
       const domain = document.getElementById('inst-move-domain').value;
       try {
-        const d = await instanceDefaults(instCtx.inst.template, instCtx.id, domain);
+        const d = await instanceDefaults(pageCtx.inst.template, pageCtx.id, domain);
         document.querySelectorAll('#inst-hosts-editor [data-host-router]').forEach(i => {
           if (!i.dataset.immutable && d.hosts[i.dataset.hostRouter]) i.value = d.hosts[i.dataset.hostRouter];
         });
@@ -3847,53 +3817,203 @@
     }
 
     async function saveInstanceHosts(btn) {
+      const id = pageCtx.id;
       const out = document.getElementById('inst-hosts-result');
       const hosts = collectHosts(document.getElementById('inst-hosts-editor'));
-      const cur = instCtx.inst.hosts || {};
-      const problems = Object.keys(hosts).sort().map(r => hostProblem(r, hosts[r], instCtx.domains || [], normHost(cur[r]) === hosts[r])).filter(Boolean);
+      const cur = pageCtx.inst.hosts || {};
+      const problems = Object.keys(hosts).sort().map(r => hostProblem(r, hosts[r], pageCtx.domains || [], normHost(cur[r]) === hosts[r])).filter(Boolean);
       if (problems.length) { out.innerHTML = '<div class="op-msg inst-error">' + problems.map(escapeHtml).join('<br>') + '</div>'; return; }
       btn.classList.add('loading');
       out.innerHTML = '<p class="settings-empty">Applying…</p>';
       try {
-        const v = await apiPut('/api/instances/' + encodeURIComponent(instCtx.id) + '/hosts', { hosts });
-        instCtx.inst = v && v.id ? v : instCtx.inst;
-        showToast('Hostnames of ' + instCtx.id + ' saved', 'success');
-        openInstance(instCtx.id, { notice: 'Hostnames saved and applied.' });
+        await apiPut('/api/instances/' + encodeURIComponent(id) + '/hosts', { hosts });
+        showToast('Hostnames of ' + id + ' saved', 'success');
+        await refreshInstances();
+        if (pageCtx && pageCtx.id === id) {
+          renderPageHead();
+          await renderOverview(id, pagePane('overview'));
+          const res = document.getElementById('inst-hosts-result');
+          if (res) res.innerHTML = '<div class="inst-ok">Hostnames saved and applied.</div>';
+        }
       } catch (err) { out.innerHTML = errorBox(err); btn.classList.remove('loading'); }
     }
 
-    async function toggleInstance(btn) {
-      const id = instCtx.id, enable = btn.dataset.instEnable === '1';
-      if (btn.disabled) return;
-      if (enable) {
-        btn.disabled = true;
-        const go = await confirmLanOnly(id);
-        btn.disabled = false;
-        if (!go) return;
-      }
-      // The progress panel shows it (over this dialog); the dialog is
-      // refreshed when it ends.
+    // The label (§11.9): PUT /api/instances/{id}/label; display only.
+    async function saveLabel(btn) {
+      const id = pageCtx.id;
+      const pane = btn.closest('[data-ipane]');
+      const out = pane.querySelector('[data-pg-label-result]');
+      const label = pane.querySelector('[data-pg-label]').value.trim();
+      if (!label) { out.innerHTML = errorBox(new Error('give the instance a label')); return; }
       btn.disabled = true;
+      out.innerHTML = '';
       try {
-        await runInstanceOp(enable ? '/api/templates/enable' : '/api/templates/disable', 'POST', { id }, id);
-        if (instCtx && instCtx.id === id) openInstance(id);
+        const v = await apiPut('/api/instances/' + encodeURIComponent(id) + '/label', { label });
+        const k = instancesCache.findIndex(i => i.id === id);
+        if (k >= 0 && v && v.id === id) instancesCache[k] = v;
+        renderPageHead();
+        out.innerHTML = '<div class="inst-ok">Saved: people now see “' + escapeHtml(v && v.name || label) + '”.</div>';
+        refreshInstances();
       } catch (err) {
-        if (err.shown) { if (instCtx && instCtx.id === id && !err.record) openInstance(id); else btn.disabled = false; return; }
-        btn.disabled = false;
-        btn.closest('.inst-section').insertAdjacentHTML('beforeend', errorBox(err));
+        if (!opBusy(id, err)) out.innerHTML = errorBox(err);
+      }
+      btn.disabled = false;
+    }
+
+    // ── Groups: the instance's users and admins groups, who is in them,
+    // and a link to each group's page on people.<domain> ──
+    async function renderGroupsTab(id, pane) {
+      if (!pane.innerHTML) pane.innerHTML = '<p class="settings-empty">Loading…</p>';
+      await loadDirectory(true);
+      if (!pageCtx || pageCtx.id !== id || !pane.isConnected) return;
+      const inst = pageCtx.inst;
+      const bound = inst.groups_mode === 'existing';
+      let h = '';
+      if (dirGroup('') === undefined) {
+        h += '<div class="public-warn">The people directory can\'t be read right now' +
+          (dirErr ? ': ' + escapeHtml(dirErr.message) : dirCache && dirCache.reason ? ': ' + escapeHtml(dirCache.reason) : '') + '. Who is in the groups isn\'t shown.</div>';
+      }
+      const cards = [['Users', 'users', inst.access_group, 'Who can use it'], ['Admins', 'admins', inst.admin_group, 'Who administers it']]
+        .filter(r => r[2]).map(r => groupCardHtml(inst, ...r));
+      h += cards.length ? '<div class="grp-cards">' + cards.join('') + '</div>'
+        : '<p class="settings-empty">This app has no users or admins group: Portcullis lets anyone signed in reach it.</p>';
+      h += '<p class="settings-empty" style="margin-top:0.75rem">' + (bound
+        ? 'This instance uses existing groups, chosen when it was created. That can\'t change: create a new instance and restore a backup into it. Deleting the instance never deletes them.'
+        : 'These groups were created for this instance; deleting it deletes them too (kept, with a warning, if anything else uses them).') +
+        ' People and groups are managed on People.</p>';
+      pane.innerHTML = h;
+    }
+    function groupCardHtml(inst, title, role, g, what) {
+      const grp = dirGroup(g);
+      const bound = inst.groups_mode === 'existing';
+      let h = '<div class="grp-card" data-grp-card="' + role + '"><h4>' + title + ' · <code>' + escapeHtml(g) + '</code>' +
+        (grp ? '<span class="pill">' + escapeHtml(groupKind(grp)) + '</span>' : '') +
+        (bound ? '<span class="pill info">existing group</span>' : '') + '</h4>';
+      if (grp === undefined) h += '<p>' + what + '.</p>';
+      else if (grp === null) {
+        h += '<p class="public-danger">This group doesn\'t exist' + (role === 'users' ? ': nobody can sign in to this app.' : '.') + '</p>';
+        h += bound ? '<p>The Hub never re-creates a group an instance was bound to: create it again on People.</p>'
+          : '<div class="inst-row"><button type="button" class="btn btn-primary btn-sm" data-pg-create-groups="' + escapeHtml(inst.id) + '">Create missing groups</button></div>';
+      } else {
+        const m = grp.members || [];
+        h += '<p>' + what + ' · ' + m.length + (m.length === 1 ? ' person' : ' people') + (grp.rule ? ' · rule: <code>' + escapeHtml(grp.rule.text) + '</code>' : '') + '</p>' +
+          '<div>' + (m.length ? escapeHtml(namesLine(m, 5)) : '<span class="settings-empty">Nobody yet.</span>') + '</div>';
+      }
+      return h + '<div class="inst-row"><a class="btn btn-secondary btn-sm" href="' + escapeHtml(PortcullisPeople.groupHref(g)) + '" target="_blank" rel="noopener">Manage on People &#8599;</a></div></div>';
+    }
+
+    // ── dialogs: add an instance, all backups ────────────
+    function openInstModal(html) {
+      document.getElementById('inst-modal-box').innerHTML = html;
+      document.getElementById('inst-modal').classList.add('visible');
+    }
+    function closeInstModal() {
+      document.getElementById('inst-modal').classList.remove('visible');
+      document.getElementById('inst-modal-box').innerHTML = '';
+      instCtx = null;
+      refreshInstances();
+    }
+    function modalHead(title) {
+      return '<div class="inst-modal-head"><div class="inst-modal-title">' + title + '</div>' +
+        '<button type="button" class="detail-close" data-inst-close="1" title="Close" aria-label="Close">&times;</button></div>';
+    }
+
+    // ── create (Install… and + Add instance) ─────────────
+    // install: the template's first instance (Install…): its id is the
+    // template id, the default instance (§11.9 "First instance"); a single
+    // template takes only that id. The label is required.
+    async function openCreateInstance(tid, install) {
+      await loadCatalogInfo();
+      const t = catalogCache[tid];
+      const single = !!(t && t.manifest.instances !== 'multi');
+      const first = install || single;
+      instCtx = { kind: 'create', tid, edited: {} };
+      openInstModal(modalHead((first ? 'Install ' : 'Add an instance of ') + escapeHtml(templateLabel(tid))) +
+        '<form class="inst-form" id="inst-create-form" autocomplete="off">' +
+        '<div class="inst-section"><h4>Name</h4>' +
+        '<label class="block" for="inst-new-label">Label</label>' +
+        '<input type="text" id="inst-new-label" value="" spellcheck="false" maxlength="64" required>' +
+        '<small>Required. What people see: the portal and My apps show it as “' + escapeHtml(appName(tid)) + ' · &lt;label&gt;”. One line, at most 64 characters (e.g. Team A); it can change later.</small>' +
+        '<label class="block" for="inst-new-id">Instance id</label>' +
+        '<input type="text" id="inst-new-id" value="' + escapeHtml(first ? tid : tid + '-') + '" spellcheck="false" maxlength="31"' + (single ? ' readonly' : '') + '>' +
+        '<small>' + (single ? 'This app runs one instance only: its id is the app\'s.' :
+          'Lowercase letters, digits and “-”, starting with a letter, at most 31 characters (e.g. ' + escapeHtml(tid) + '-team-a)' +
+          (first ? '; the first instance usually keeps the app\'s id' : '') + '.') +
+        ' It names the compose project, the Keycloak client and the groups; it can\'t change later.</small>' +
+        '<label class="block" for="inst-new-domain">Domain</label><select id="inst-new-domain"></select>' +
+        '<small>The main domain or an enrolled domain that is ready (Settings → Domains). Changing it re-fills the hostnames you haven\'t edited.</small></div>' +
+        '<div class="inst-section"><h4>Hostnames</h4><div id="inst-new-hosts"><p class="settings-empty">Loading…</p></div>' +
+        '<small>Pre-filled from the instance id and domain; each one is editable. One label under the domain: <code>&lt;label&gt;.&lt;domain&gt;</code> (or an enrolled domain itself).</small></div>' +
+        '<p class="settings-empty">The instance is created stopped (state <code>created</code>) with its own groups: review its settings, add members, then enable it on its page.</p>' +
+        '<div id="inst-create-result"></div>' +
+        '<div class="op-modal-actions"><button type="button" class="btn btn-secondary btn-sm" data-inst-close="1">Cancel</button>' +
+        '<button type="submit" class="btn btn-primary btn-sm">Create instance</button></div></form>');
+      document.getElementById('inst-new-label').focus();
+      await refreshCreateDefaults();
+    }
+    function validNewID(ctx, id) { return id === ctx.tid || INSTANCE_ID_RE.test(id); }
+
+    let createTimer = null;
+    async function refreshCreateDefaults() {
+      if (!instCtx || instCtx.kind !== 'create') return;
+      const ctx = instCtx;
+      const id = document.getElementById('inst-new-id').value.trim();
+      const sel = document.getElementById('inst-new-domain');
+      const domain = sel.value || '';
+      try {
+        const d = await instanceDefaults(ctx.tid, validNewID(ctx, id) ? id : '', domain);
+        if (instCtx !== ctx) return;
+        ctx.domains = d.domains;
+        ctx.routers = d.routers || [];
+        if (!sel.options.length) sel.innerHTML = domainOptions(d.domains, d.domains[0] && d.domains[0].name);
+        const box = document.getElementById('inst-new-hosts');
+        const current = collectHosts(box);
+        const hosts = {};
+        for (const r of ctx.routers) hosts[r.router] = ctx.edited[r.router] ? current[r.router] : ((d.hosts || {})[r.router] || '');
+        box.innerHTML = ctx.routers.length ? hostRows(ctx.routers, hosts, false, ctx.tid) : '<p class="settings-empty">No web page: this template serves no hostnames.</p>';
+      } catch (err) {
+        document.getElementById('inst-new-hosts').innerHTML = errorBox(err);
+      }
+    }
+
+    async function submitCreateInstance() {
+      const ctx = instCtx;
+      const out = document.getElementById('inst-create-result');
+      const id = document.getElementById('inst-new-id').value.trim();
+      if (!validNewID(ctx, id)) { out.innerHTML = errorBox(new Error('the instance id must match ' + INSTANCE_ID_RE.source)); return; }
+      const label = document.getElementById('inst-new-label').value.trim();
+      if (!label) { out.innerHTML = errorBox(new Error('give the instance a label')); return; }
+      const hosts = collectHosts(document.getElementById('inst-new-hosts'));
+      const problems = Object.keys(hosts).sort().map(r => hostProblem(r, hosts[r], ctx.domains || [], false)).filter(Boolean);
+      if (problems.length) { out.innerHTML = '<div class="op-msg inst-error">' + problems.map(escapeHtml).join('<br>') + '</div>'; return; }
+      out.innerHTML = '';
+      const go = out.closest('form').querySelector('[type="submit"]');
+      go.disabled = true;
+      try {
+        const res = await runInstanceOp('/api/instances', 'POST', { template: ctx.tid, id, label, hosts }, id);
+        pageFlash = { id, notice: 'Created. It is stopped: review its settings, then enable it.', warnings: res.warnings };
+        if (instCtx === ctx) closeInstModal();
+        navInstance(id, 'overview', '');
+      } catch (err) {
+        go.disabled = false;
+        if (!err.shown) out.innerHTML = errorBox(err);
       }
     }
 
     // ── delete (typed id, §11.4) ─────────────────────────
     function renderInstDelete(pane) {
-      const inst = instCtx.inst, id = inst.id;
+      const inst = pageCtx.inst, id = inst.id;
+      const bound = inst.groups_mode === 'existing';
       let h = '<div class="inst-section inst-danger"><h4>Delete this instance</h4>';
       if (inst.state === 'deleting') h += '<div class="public-warn">A previous delete stopped part-way: deleting again continues where it stopped (the first backup is kept).</div>';
-      h += '<p>Deleting <code>' + escapeHtml(id) + '</code> is permanent. The Hub first takes a backup (kept under Backups, restorable into a new instance), then removes:</p>' +
+      h += '<p>Deleting <code>' + escapeHtml(id) + '</code> (' + escapeHtml(instName(inst)) + ') is permanent. The Hub first takes a backup (kept under Backups, restorable into a new instance), then removes:</p>' +
         '<ul class="policy-notes" style="margin-bottom:0.75rem"><li>its containers and volumes (all its data)</li><li>its Keycloak clients and access role</li>' +
-        '<li>its generated secrets, settings, policies and share links</li><li>its groups' + (inst.access_group ? ' ' + PortcullisPeople.groupLink(inst.access_group, true) : '') +
-        (inst.admin_group ? ' ' + PortcullisPeople.groupLink(inst.admin_group, true) : '') + ' (kept, with a warning, if anything else uses them)</li></ul>' +
-        (inst.default ? '<p class="settings-empty">This is the template\'s default instance: the template stays in the catalog, and enabling it again starts a fresh one.</p>' : '') +
+        '<li>its generated secrets, settings, policies and share links</li>' +
+        (bound ? '<li>not its groups' + (inst.access_group ? ' ' + PortcullisPeople.groupLink(inst.access_group, true) : '') +
+          (inst.admin_group ? ' ' + PortcullisPeople.groupLink(inst.admin_group, true) : '') + ': existing groups are never deleted</li>'
+          : '<li>its groups' + (inst.access_group ? ' ' + PortcullisPeople.groupLink(inst.access_group, true) : '') +
+          (inst.admin_group ? ' ' + PortcullisPeople.groupLink(inst.admin_group, true) : '') + ' (kept, with a warning, if anything else uses them)</li>') + '</ul>' +
+        (inst.default ? '<p class="settings-empty">Its app stays in the Marketplace; installing it again starts a fresh instance.</p>' : '') +
         '<div class="inst-form" style="margin-top:0.75rem"><label class="block" for="inst-del-confirm">Type <code>' + escapeHtml(id) + '</code> to confirm</label>' +
         '<input type="text" id="inst-del-confirm" spellcheck="false" autocomplete="off" placeholder="' + escapeHtml(id) + '"></div>' +
         '<div id="inst-del-result"></div>' +
@@ -3902,7 +4022,7 @@
     }
 
     async function deleteInstance(btn) {
-      const id = instCtx.id;
+      const id = pageCtx.id, inst = pageCtx.inst;
       const confirmVal = document.getElementById('inst-del-confirm').value.trim();
       const out = document.getElementById('inst-del-result');
       if (confirmVal !== id) { out.innerHTML = errorBox(new Error('type the instance id (' + id + ') to confirm')); return; }
@@ -3910,14 +4030,15 @@
       out.innerHTML = '';
       try {
         const op = await runInstanceOp('/api/instances/' + encodeURIComponent(id), 'DELETE', { confirm: confirmVal }, id);
-        const res = { backup: op.result.backup, warnings: op.warnings };
-        const inst = instCtx.inst;
-        instCtx = { kind: 'deleted', id };
-        document.getElementById('inst-modal-box').innerHTML = modalHead(escapeHtml(templateLabel(inst.template)) + ' · <code>' + escapeHtml(id) + '</code>') + '<div class="inst-section"><div class="inst-ok">Deleted <code>' + escapeHtml(id) + '</code>.</div>' +
-          '<p>Automatic backup: <code>' + escapeHtml(res.backup || '') + '</code> — listed under Backups; it can be restored into a new instance.</p>' +
-          (res.warnings && res.warnings.length ? '<h4 style="margin-top:0.75rem">Warnings</h4>' + warningsList(res.warnings) : '') +
-          '<div class="op-modal-actions"><button type="button" class="btn btn-secondary btn-sm" data-inst-close="1">Close</button></div></div>';
         showToast(id + ' deleted', 'success');
+        if (pageCtx && pageCtx.id === id) {
+          pageCtx.inst = null;
+          document.getElementById('instance-page').innerHTML = '<div class="page-crumbs"><a href="#apps" data-goto-tab="apps">Apps</a> ›</div>' +
+            '<div class="inst-section"><div class="inst-ok">Deleted ' + escapeHtml(instName(inst)) + ' (<code>' + escapeHtml(id) + '</code>).</div>' +
+            '<p>Automatic backup: <code>' + escapeHtml(op.result.backup || '') + '</code> — listed under All backups on Apps; it can be restored into a new instance.</p>' +
+            ((op.warnings || []).length ? '<h4 style="margin-top:0.75rem">Warnings</h4>' + warningsList(op.warnings) : '') +
+            '<div class="inst-row"><button type="button" class="btn btn-secondary btn-sm" data-goto-tab="apps">Back to Apps</button></div></div>';
+        }
         refreshInstances();
       } catch (err) {
         if (!err.shown) out.innerHTML = errorBox(err);
@@ -3925,7 +4046,8 @@
       }
     }
 
-    // ── backups and restore (§11.5, §11.6) ───────────────
+    // ── backups and restore (§11.5, §11.6): the page's Backups tab and
+    // the all-backups dialog (Apps → All backups) ──
     function openAllBackups() {
       instCtx = { kind: 'backups', id: '' };
       openInstModal(modalHead('Instance backups') +
@@ -3940,10 +4062,11 @@
       try { list = await apiGet(id ? '/api/instances/' + encodeURIComponent(id) + '/backups' : '/api/backups'); } catch (err) { problem = err; }
       let h = '';
       if (id) {
-        h += '<div class="inst-row" style="margin:0 0 0.75rem"><button type="button" class="btn btn-primary btn-sm" data-bk-now="1">Back up now</button>' +
-          '<span class="settings-empty">A running instance is stopped while its volumes are copied (databases at rest), then started again.</span></div>';
+        h += '<div class="inst-row" style="margin:0 0 0.75rem"><button type="button" class="btn btn-primary btn-sm" data-bk-now="' + escapeHtml(id) + '">Back up now</button>' +
+          '<span class="settings-empty">A running instance is stopped while its volumes are copied (databases at rest), then started again.</span>' +
+          '<button type="button" class="btn btn-secondary btn-sm" data-all-backups style="margin-left:auto">All backups</button></div>';
       }
-      h += '<div id="inst-bk-result"></div>';
+      h += '<div data-bk-result></div>';
       if (problem) h += errorBox(problem);
       else if (!list.length) h += '<p class="settings-empty">No backups yet.</p>';
       else {
@@ -3965,7 +4088,7 @@
     function restorePanel(btn, asNew) {
       const archive = asNew ? btn.dataset.bkRestoreAs : btn.dataset.bkRestore;
       const row = btn.closest('tbody').querySelector('[data-bk-panel="' + CSS.escape(archive) + '"]');
-      document.querySelectorAll('#inst-modal-box [data-bk-panel]').forEach(r => { if (r !== row) { r.hidden = true; r.firstElementChild.innerHTML = ''; } });
+      btn.closest('tbody').querySelectorAll('[data-bk-panel]').forEach(r => { if (r !== row) { r.hidden = true; r.firstElementChild.innerHTML = ''; } });
       if (!row.hidden && row.dataset.mode === (asNew ? 'new' : 'same')) { row.hidden = true; row.firstElementChild.innerHTML = ''; return; }
       row.dataset.mode = asNew ? 'new' : 'same';
       let h = '<div class="inst-panel inst-form">';
@@ -3984,7 +4107,7 @@
         const inst = btn.dataset.bkInstance;
         h += '<strong>Restore <code>' + escapeHtml(archive) + '</code> into <code>' + escapeHtml(inst) + '</code>?</strong>' +
           '<ul><li>Its volumes, env, custom override, settings and policies are replaced by the backup\'s (volumes the backup lacks are emptied).</li>' +
-          '<li>Its current hostnames are kept.</li>' +
+          '<li>Its current hostnames and label are kept.</li>' +
           '<li>A pre-restore backup is taken first (the instance is stopped); if any step fails it is put back.</li>' +
           '<li>An enabled instance is started again afterwards.</li></ul>' +
           '<div class="inst-row"><button type="button" class="btn btn-primary btn-sm" data-bk-go-same="' + escapeHtml(archive) + '" data-bk-instance="' + escapeHtml(inst) + '">Replace the data of ' + escapeHtml(inst) + '</button>' +
@@ -4029,18 +4152,18 @@
     }
 
     async function backupNow(btn) {
-      const id = instCtx.id;
-      const out = document.getElementById('inst-bk-result');
+      const id = btn.dataset.bkNow;
+      const pane = btn.closest('[data-ipane]');
+      const out = pane.querySelector('[data-bk-result]');
       btn.disabled = true;
       try {
         const op = await runInstanceOp('/api/instances/' + encodeURIComponent(id) + '/backups', 'POST', undefined, id);
         const archive = op.result.archive || '';
         showToast('Backup ' + archive + ' written', 'success');
-        const pane = btn.closest('[data-ipane]');
-        if (pane) await loadBackups(pane, id);
+        await loadBackups(pane, id);
         const list = await apiGet('/api/instances/' + encodeURIComponent(id) + '/backups').catch(() => []);
         const entry = list.find(b => b.archive === archive);
-        const res = document.getElementById('inst-bk-result');
+        const res = pane.querySelector('[data-bk-result]');
         if (res) res.innerHTML = '<div class="inst-ok">Backup <code>' + escapeHtml(archive) + '</code> written' + (entry ? ' (' + escapeHtml(fmtSize(entry.size)) + ')' : '') + '.</div>';
       } catch (err) {
         if (!err.shown) out.innerHTML = errorBox(err);
@@ -4053,28 +4176,68 @@
       const t = e.target;
       let el;
       if ((el = t.closest('[data-op-show]'))) { e.stopPropagation(); openOpPanel(el.dataset.opShow); return; }
-      if ((el = t.closest('[data-add-instance]'))) { e.stopPropagation(); openCreateInstance(el.dataset.addInstance); return; }
-      if ((el = t.closest('[data-open-instance]'))) { e.stopPropagation(); openInstance(el.dataset.openInstance); return; }
+      if ((el = t.closest('[data-install]'))) { openCreateInstance(el.dataset.install, true); return; }
+      if ((el = t.closest('[data-add-instance]'))) { openCreateInstance(el.dataset.addInstance, false); return; }
+      if ((el = t.closest('[data-open-instance]'))) {
+        if (instCtx) closeInstModal();
+        navInstance(el.dataset.openInstance, 'overview', '');
+        return;
+      }
       if (t.closest('[data-all-backups]')) { openAllBackups(); return; }
-      if (!t.closest('#inst-modal')) return;
-      if (t.id === 'inst-modal' || t.closest('[data-inst-close]')) { closeInstModal(); return; }
-      if ((el = t.closest('[data-itab]'))) { showInstTab(el.dataset.itab); return; }
-      if ((el = t.closest('[data-inst-enable]'))) { toggleInstance(el); return; }
-      if (t.closest('[data-inst-fill]')) { fillHostsForDomain(); return; }
-      if ((el = t.closest('[data-inst-save-hosts]'))) { saveInstanceHosts(el); return; }
-      if ((el = t.closest('[data-inst-delete]'))) { deleteInstance(el); return; }
+      if ((el = t.closest('[data-inst-toggle]'))) { toggleInstance(el.dataset.instToggle, el.dataset.enable === '1', el); return; }
+      if ((el = t.closest('[data-apps-filter]'))) { e.preventDefault(); appsFilter = el.dataset.appsFilter; goTab('apps'); return; }
+      if (t.closest('[data-apps-filter-clear]')) { appsFilter = ''; renderApps(); return; }
+      if ((el = t.closest('[data-goto-tab]'))) { e.preventDefault(); goTab(el.dataset.gotoTab); return; }
+      if ((el = t.closest('[data-open-ports]'))) { openAppSettings(el.dataset.openPorts); return; }
+      if (t.id === 'op-modal' || t.closest('[data-op-error-close]')) { closeOpError(); return; }
+      if ((el = t.closest('[data-src-remove]'))) { removeSource(el.dataset.srcRemove); return; }
+      if (t.closest('[data-src-add]')) { addSource(); return; }
+      if (t.closest('[data-src-sync]')) { syncSources(); return; }
+      // Backups: the page's tab and the all-backups dialog.
       if ((el = t.closest('[data-bk-now]'))) { backupNow(el); return; }
       if ((el = t.closest('[data-bk-restore]'))) { restorePanel(el, false); return; }
       if ((el = t.closest('[data-bk-restore-as]'))) { restorePanel(el, true); return; }
       if ((el = t.closest('[data-bk-go-same]'))) { runRestore(el, false); return; }
       if ((el = t.closest('[data-bk-go-new]'))) { runRestore(el, true); return; }
-      if ((el = t.closest('[data-bk-cancel]'))) { const row = el.closest('[data-bk-panel]'); row.hidden = true; row.firstElementChild.innerHTML = ''; }
+      if ((el = t.closest('[data-bk-cancel]'))) { const row = el.closest('[data-bk-panel]'); row.hidden = true; row.firstElementChild.innerHTML = ''; return; }
+      if (t.closest('#instance-page')) { pageClick(t); return; }
+      if (!t.closest('#inst-modal')) return;
+      if (t.id === 'inst-modal' || t.closest('[data-inst-close]')) closeInstModal();
     });
+    // The instance page's own buttons.
+    function pageClick(t) {
+      if (!pageCtx) return;
+      const id = pageCtx.id;
+      const pane = t.closest('[data-ipane]');
+      let el;
+      if ((el = t.closest('[data-ptab]'))) {
+        showPageTab(el.dataset.ptab, '');
+        history.replaceState(null, '', '#apps/' + encodeURIComponent(id) + (el.dataset.ptab === 'overview' ? '' : '/' + el.dataset.ptab));
+        return;
+      }
+      if ((el = t.closest('[data-page-tab-go]'))) { navInstance(id, el.dataset.pageTabGo, ''); return; }
+      if ((el = t.closest('[data-pg-label-save]'))) { saveLabel(el); return; }
+      if (t.closest('[data-inst-fill]')) { fillHostsForDomain(); return; }
+      if ((el = t.closest('[data-inst-save-hosts]'))) { saveInstanceHosts(el); return; }
+      if ((el = t.closest('[data-inst-delete]'))) { deleteInstance(el); return; }
+      if (t.closest('[data-pg-containers-reload]')) { loadContainers(id, pane); return; }
+      if ((el = t.closest('[data-pg-create-groups]'))) {
+        el.dataset.createGroups = el.dataset.pgCreateGroups;
+        createMissingGroups(el).then(() => { if (pageCtx && pageCtx.id === id) renderGroupsTab(id, pane); });
+        return;
+      }
+      if (t.closest('[data-log-reload]')) { loadLogs(id, pane); return; }
+      if (t.closest('[data-x-save-override]')) { saveUserOverride(id, pane); return; }
+      if ((el = t.closest('[data-x-restart]'))) { restartApp(id, el); return; }
+      if ((el = t.closest('[data-env-set], [data-env-reset], [data-env-add], [data-env-add-open], [data-env-add-cancel], [data-env-override], [data-env-cancel]'))) {
+        envClick(id, el.closest('[data-env-box]'), el);
+      }
+    }
     document.addEventListener('input', e => {
       const t = e.target;
       if (t.id === 'inst-del-confirm') {
-        const btn = document.querySelector('#inst-modal-box [data-inst-delete]');
-        if (btn) btn.disabled = t.value.trim() !== instCtx.id;
+        const btn = document.querySelector('#instance-page [data-inst-delete]');
+        if (btn && pageCtx) btn.disabled = t.value.trim() !== pageCtx.id;
         return;
       }
       if (instCtx && instCtx.kind === 'create') {
@@ -4083,13 +4246,31 @@
       }
     });
     document.addEventListener('change', e => {
-      if (e.target.id === 'inst-new-domain') refreshCreateDefaults();
+      const t = e.target;
+      if (t.id === 'inst-new-domain') { refreshCreateDefaults(); return; }
+      const pane = t.closest('#instance-page [data-ipane="logs"]');
+      if (pane && pageCtx && (t.matches('[data-log-service-pick]') || t.matches('[data-log-lines-pick]'))) {
+        if (t.matches('[data-log-service-pick]')) pane.dataset.logService = t.value;
+        else pane.dataset.logLines = t.value;
+        loadLogs(pageCtx.id, pane);
+      }
     });
     document.addEventListener('submit', e => {
       if (e.target.id === 'inst-create-form') { e.preventDefault(); submitCreateInstance(); }
     });
     document.addEventListener('keydown', e => {
-      if (e.key === 'Escape' && !oppOpen() && document.getElementById('inst-modal').classList.contains('visible')) closeInstModal();
+      const t = e.target;
+      if (e.key === 'Escape' && !oppOpen() && document.getElementById('inst-modal').classList.contains('visible')) { closeInstModal(); return; }
+      if (!pageCtx || !t.closest || !t.closest('#instance-page')) return;
+      // Expert: Enter runs the shell command; Tab indents the override.
+      if (e.key === 'Enter' && t.matches('[data-x-term-cmd]')) { e.preventDefault(); execCmd(pageCtx.id, t.closest('[data-ipane]')); return; }
+      if (e.key === 'Enter' && t.matches('[data-pg-label]')) { e.preventDefault(); t.closest('[data-ipane]').querySelector('[data-pg-label-save]').click(); return; }
+      if (e.key === 'Tab' && t.matches('[data-x-override]')) {
+        e.preventDefault();
+        const start = t.selectionStart;
+        t.value = t.value.substring(0, start) + '  ' + t.value.substring(t.selectionEnd);
+        t.selectionStart = t.selectionEnd = start + 2;
+      }
     });
     loadCatalogInfo().catch(() => {});
     refreshInstances();

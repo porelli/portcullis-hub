@@ -349,7 +349,6 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		"Templates":  ts,
 		"Categories": categories,
 		"Sources":    s.Hub.Sources(),
-		"Failed":     s.Hub.FailedOps(), // app ID → op, last operation failed
 		"User":       user,
 		// The signed-in user is LLDAP's bootstrap admin (checkTarget
 		// refuses it in every group: it can't use the apps it installs).
