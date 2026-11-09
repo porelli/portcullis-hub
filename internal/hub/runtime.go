@@ -20,25 +20,31 @@ type ContainerStatus struct {
 	JobState string `json:"job_state,omitempty"` // done | failed | running | pending
 }
 
-// jobState computes a job's state (contract §11.9): done (exited 0),
-// failed (exited non-zero or dead), running (running, restarting, paused,
-// or removing) or pending (created only).
+// Job states (contract §11.9 "One-off jobs").
+const (
+	jobDone    = "done"
+	jobFailed  = "failed"
+	jobRunning = "running"
+	jobPending = "pending"
+)
+
+// jobState is a job container's state (contract §11.9), the one
+// implementation (status rows, drift, readiness): running (running or
+// restarting), pending (created, never started), done (exited 0), and
+// failed for everything else — exited non-zero, dead, and any other
+// state (paused, removing, unknown): fail closed, never done.
 func jobState(st docker.State) string {
-	if st.Running || st.Status == "restarting" || st.Status == "paused" || st.Status == "removing" {
-		return "running"
-	}
-	if st.Status == "exited" || st.Status == "dead" {
-		if st.Status == "exited" && st.ExitCode == 0 {
-			return "done"
+	switch st.Status {
+	case "running", "restarting":
+		return jobRunning
+	case "created":
+		return jobPending
+	case "exited":
+		if st.ExitCode == 0 {
+			return jobDone
 		}
-		return "failed"
 	}
-	// Created but never started.
-	if st.Status == "created" {
-		return "pending"
-	}
-	// Unknown state: treat as running.
-	return "running"
+	return jobFailed
 }
 
 // appContainers lists the app's project containers that belong to services

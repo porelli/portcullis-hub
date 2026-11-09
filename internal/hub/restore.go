@@ -1147,9 +1147,11 @@ func (h *Hub) restoreAsSteps(ctx context.Context, p *Progress, archive, newID st
 			label = sb.cfg.Label
 		}
 	}
-	if err := h.createEntry(CreateRequest{Template: tmpl.ID, ID: newID, Label: label, Hosts: want}, "", ""); err != nil {
+	prior, err := h.createEntry(CreateRequest{Template: tmpl.ID, ID: newID, Label: label, Hosts: want}, "", "")
+	if err != nil {
 		return err
 	}
+	p.setPriorSettings(prior)
 	// Marked "restoring" (restore_as) until complete: an interrupted one
 	// is removed at the next start (RecoverRestores).
 	h.mu.Lock()
@@ -1193,7 +1195,7 @@ func (h *Hub) restoreAsSteps(ctx context.Context, p *Progress, archive, newID st
 				errs = append(errs, err)
 			}
 		}
-		if err := h.removeNewInstance(newID); err != nil {
+		if err := h.removeNewInstance(newID, prior); err != nil {
 			errs = append(errs, err)
 		}
 		if err := errors.Join(errs...); err != nil {
@@ -1379,8 +1381,10 @@ func (h *Hub) restoreAsSteps(ctx context.Context, p *Progress, archive, newID st
 // lock.
 //
 // A default instance's first create (id = template id) removes only its
-// state entry: everything else the default instance had stays.
-func (h *Hub) removeNewInstance(id string) error {
+// state entry and puts its settings entry back exactly as prior holds it
+// (the setup values the create stored go; nil: left as is): everything
+// else the default instance had stays.
+func (h *Hub) removeNewInstance(id string, prior *priorSettings) error {
 	h.mu.RLock()
 	e, ok := h.st.Instances[id]
 	enabled := h.st.IsEnabled(id)
@@ -1398,11 +1402,18 @@ func (h *Hub) removeNewInstance(id string) error {
 	if isTemplate {
 		// A template's first instance is its default instance (§11.9):
 		// the create added only the state entry (label, binding,
-		// state "created"). Whatever the default instance had before —
+		// state "created") and its setup values. Whatever the default instance had before —
 		// its .env, overrides, settings and secrets, policy, public and
 		// sign-in choices, AI state — is its own and stays.
 		h.mu.Lock()
 		delete(h.st.Instances, id)
+		switch {
+		case prior == nil:
+		case prior.had:
+			h.st.Settings[id] = prior.s.Clone()
+		default:
+			delete(h.st.Settings, id)
+		}
 		h.rebuildLocked()
 		saveErr := h.st.Save(h.statePath())
 		h.mu.Unlock()

@@ -362,6 +362,33 @@ func TestConfirmPage(t *testing.T) {
 	}
 }
 
+// TestConfirmTypedIsLabel (ruling I4, §15.6): with a label of its own
+// the instance is shown by its name (AI App · Office) and the typed check
+// is its label (Office) — never the name with its middle dot.
+func TestConfirmTypedIsLabel(t *testing.T) {
+	e := newConfirmEnv(t)
+	if err := e.s.Hub.SetLabel(context.Background(), "aiapp", "Office", directory.Human("root")); err != nil {
+		t.Fatal(err)
+	}
+	args := `{"name":"r"}`
+	id := e.create(t, "alice", "delete_repo", args)
+	_, b := doAs(t, e.ppl, "alice", "GET", "/confirm/"+id, "")
+	for _, want := range []string{`data-typed="Office"`, "Tokens on AI App · Office (aiapp.example.org)", "Runs delete_repo once on AI App · Office (aiapp.example.org) as you"} {
+		if !strings.Contains(b, want) {
+			t.Errorf("page lacks %q", want)
+		}
+	}
+	for _, typed := range []string{"", "AI App · Office", "AI App", "office", "aiapp"} {
+		r, b := doAs(t, e.ppl, "alice", "POST", "/api/me/confirmations/"+id, decision("approve", typed, "good-code"))
+		if r.StatusCode != 409 || strings.TrimSpace(b) != "type Office to confirm" {
+			t.Errorf("typed %q = %d %s", typed, r.StatusCode, b)
+		}
+	}
+	if e.people.n() != 0 {
+		t.Error("a proof was checked before the typed check")
+	}
+}
+
 // TestConfirmApprove (§15.6, §5.1, G11, G75): a wrong typed check → 409
 // "type AI App to confirm", nothing recorded, no proof checked; a fresh
 // proof (auth_time now − 10 s, amr hwk) → approved, audited ai.confirm

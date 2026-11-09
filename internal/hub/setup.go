@@ -228,7 +228,7 @@ func (h *Hub) loadRuntime(ctx context.Context, t *templates.Template) (*types.Pr
 	if profiles == nil {
 		profiles = []string{}
 	}
-	return loadRenderedWith(ctx, h.project(t), h.cfg.ProjectDir, profiles)
+	return h.loadRenderedWith(ctx, t, profiles)
 }
 
 // checkSetupKeys refuses (400, naming it) a create body setup key that

@@ -950,7 +950,7 @@ func (s *Server) createConsequences(ctx context.Context, args json.RawMessage) [
 	a, _ := decode[createArgs](args)
 	lines := []string{"Creates instance " + a.ID + " of " + a.Template + " (label " + q(a.Label) + ")."}
 	if a.Groups != nil && a.Groups.Mode == hub.GroupsExisting {
-		lines = append(lines, "Binds it to the existing groups "+q(a.Groups.Users)+" (users) and "+q(a.Groups.Admins)+" (admins): their people get it at once.")
+		lines = append(lines, "Binds it to the existing groups "+q(a.Groups.Users)+" (users) and "+q(a.Groups.Admins)+" (admins): their people get access when it is enabled.")
 	}
 	if len(a.Setup) > 0 {
 		lines = append(lines, "Setup choices: "+s.setupChoicesText(a.Template, a.Setup)+".")

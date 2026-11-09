@@ -681,6 +681,43 @@ func TestFirstInstanceUndoKeepsDefaultData(t *testing.T) {
 	if s, _, _ := snapshot(); s.Ports["GRAFANA_PORT"] != "3301" {
 		t.Errorf("settings after the create = %+v", s)
 	}
+
+	// Final fix I2: the setup values the stopped create stored go too.
+	// The cloud template (default database mysql) with a derived users
+	// group, so a Stop can land in the groups step: postgres chosen,
+	// stopped → no stored database value (the entry is put back as it
+	// was: none); a later create without setup gets the default.
+	cm := strings.Replace(setupCloudManifest, "  method: forward-auth\n", "  method: forward-auth\n  group_access: true\n  access_group: users_cloud\n", 1)
+	cf := newInstanceFixtureExtra(t, nil, nil, map[string][2]string{"cloud": {cm, setupCloudCompose}})
+	if cf.h.Template("cloud") == nil {
+		t.Fatal("cloud template refused")
+	}
+	cf.h.SetAudit(&fakeAudit{})
+	simulateCompose(cf, 999)
+	cf.h.mu.RLock()
+	_, hadSettings := cf.h.st.Settings["cloud"]
+	cf.h.mu.RUnlock()
+	cbg := &blockingGroups{fakeGroups: &fakeGroups{}, name: "users_cloud", reached: make(chan struct{}), release: make(chan struct{})}
+	cf.h.SetGroups(cbg)
+	ca, err := cf.h.StartCreate(CreateRequest{Template: "cloud", ID: "cloud", Label: "Home", Setup: setupOf("database", `"postgres"`)}, directory.Human("alice"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := stopAndWait(t, cf.h, "cloud", ca.OpID, cbg.reached, cbg.release); !r.Stopped() {
+		t.Fatalf("record %+v", r)
+	}
+	cf.h.mu.RLock()
+	cs, hasSettings := cf.h.st.Settings["cloud"]
+	_, entry := cf.h.st.Instances["cloud"]
+	cf.h.mu.RUnlock()
+	if entry || hasSettings != hadSettings || cs.Values["database"] != nil {
+		t.Errorf("after the stop: entry %v, settings %v (before %v) %+v", entry, hasSettings, hadSettings, cs)
+	}
+	cf.h.SetGroups(&fakeGroups{})
+	createCloud(t, cf, "cloud", nil)
+	if v := storedSetting(cf, "cloud", "database"); v != "mysql" {
+		t.Errorf("a create without setup after the stop stores %v, want the default mysql", v)
+	}
 }
 
 // TestBindingRecheckedAtCommitAndEnable (fix round 1, item 4): a users
@@ -861,7 +898,7 @@ func TestRemoveNewInstanceDefaultWithoutEntry(t *testing.T) {
 		t.Fatal(err)
 	}
 	env, ov := readFile(t, f.h.envPath("grafana")), readFile(t, f.h.overridePath("grafana"))
-	if err := f.h.removeNewInstance("grafana"); err != nil {
+	if err := f.h.removeNewInstance("grafana", nil); err != nil {
 		t.Fatal(err)
 	}
 	if readFile(t, f.h.envPath("grafana")) != env || readFile(t, f.h.overridePath("grafana")) != ov {
@@ -874,5 +911,36 @@ func TestRemoveNewInstanceDefaultWithoutEntry(t *testing.T) {
 	}
 	if p, ok := f.h.st.AuthPolicies["grafana"]; !ok || strings.Join(p.Factors, ",") != "webauthn" {
 		t.Errorf("policy = %+v %v", p, ok)
+	}
+}
+
+// Final fix M1: an instance that can't be resolved is named like a
+// resolved one — the manifest's name when its template is known (the
+// label==name rule too), else the template id.
+func TestUnresolvedInstanceName(t *testing.T) {
+	f := newInstanceFixture(t, nil)
+	f.h.mu.Lock()
+	f.h.st.Instances["grafana-x"] = state.Instance{ID: "grafana-x", Template: "grafana", Label: "Team X"}
+	f.h.st.Instances["grafana-y"] = state.Instance{ID: "grafana-y", Template: "grafana"}
+	f.h.st.Instances["gone-z"] = state.Instance{ID: "gone-z", Template: "gone", Label: "Zed"}
+	f.h.brokenInstances = map[string]string{"grafana-x": "x", "grafana-y": "y", "gone-z": "z", "grafana": "d"}
+	f.h.mu.Unlock()
+	want := map[string][2]string{
+		"grafana-x": {"Team X", "Grafana · Team X"},
+		"grafana-y": {"grafana-y", "Grafana · grafana-y"},
+		"gone-z":    {"Zed", "gone · Zed"},
+		"grafana":   {"Grafana", "Grafana"}, // a default instance without a label: just the app
+	}
+	seen := 0
+	for _, v := range f.h.Instances() {
+		if w, ok := want[v.ID]; ok && v.State == StateError {
+			seen++
+			if v.Label != w[0] || v.Name != w[1] {
+				t.Errorf("%s: label %q name %q, want %q %q", v.ID, v.Label, v.Name, w[0], w[1])
+			}
+		}
+	}
+	if seen != len(want) {
+		t.Errorf("listed %d of %d unresolved instances", seen, len(want))
 	}
 }

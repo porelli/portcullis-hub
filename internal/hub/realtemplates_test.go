@@ -109,7 +109,7 @@ func TestRealTemplatesInstances(t *testing.T) {
 			n++
 			// The pre-up check's loader (compose-go, F15) must read every
 			// real template with its Hub override as compose does.
-			if _, err := loadRendered(t.Context(), h.project(&c), h.cfg.ProjectDir); err != nil {
+			if _, err := h.loadRendered(t.Context(), &c); err != nil {
 				t.Errorf("%s: compose-go loader: %v", id, err)
 			}
 			if haveCompose {

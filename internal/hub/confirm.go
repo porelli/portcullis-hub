@@ -294,9 +294,11 @@ func (h *Hub) CreateCompanionConfirmation(ctx context.Context, q CompanionConfir
 	}
 	h.mu.RLock()
 	t := h.findLocked(r.Instance)
-	label := ""
+	label, typed := "", ""
 	if t != nil {
-		label = instanceName(t)
+		// Shown: the instance's name; typed: its label — what the
+		// admin chose, never a middle dot to type (ruling I4).
+		label, typed = instanceName(t), instanceLabel(t)
 	}
 	h.mu.RUnlock()
 	if t == nil {
@@ -311,7 +313,7 @@ func (h *Hub) CreateCompanionConfirmation(ctx context.Context, q CompanionConfir
 		Listener: ListenerPeople,
 		// Every shown string made visible where the request is built
 		// (and again on display).
-		Typed: VisibleText(label),
+		Typed: VisibleText(typed),
 		Label: VisibleText(r.Label + " on " + label + " (" + r.Host + ")"),
 		Consequences: []string{
 			VisibleText("Runs " + q.Tool + " once on " + label + " (" + r.Host + ") as you, with exactly the arguments below."),

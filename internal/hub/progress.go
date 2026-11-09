@@ -114,6 +114,29 @@ type Progress struct {
 	// (secretsOf: a restore's archive secrets), redacted from every
 	// detail together with the instance's set.
 	extra []string
+	// prior: a default instance's settings before its first create
+	// (createEntry), for the create's undo; never written.
+	prior *priorSettings
+}
+
+// setPriorSettings keeps what createEntry answered for the undo.
+func (p *Progress) setPriorSettings(prior *priorSettings) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.prior = prior
+}
+
+// priorSettings is what setPriorSettings kept (nil: none).
+func (p *Progress) priorSettings() *priorSettings {
+	if p == nil {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.prior
 }
 
 // newProgress is the reporter for op on id with its planned steps (each

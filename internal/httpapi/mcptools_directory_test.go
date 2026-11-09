@@ -675,6 +675,10 @@ func TestPrestagedRuleAndExceptionsNeedConfirmation(t *testing.T) {
 	if c := byName["create_instance"].ClassFor(context.Background(), json.RawMessage(`{"template":"grafana","id":"grafana-w","label":"W","groups":{"mode":"existing","users":"bindteam","admins":"bindempty"}}`)); c != ClassDestructive {
 		t.Errorf("binding a group with people = %s", c)
 	}
+	// Final fix M4: a create never enables: access comes with the enable.
+	if c := strings.Join(byName["create_instance"].Consequences(context.Background(), json.RawMessage(`{"template":"grafana","id":"grafana-w","label":"W","groups":{"mode":"existing","users":"bindteam","admins":"bindempty"}}`)), " "); !strings.Contains(c, "(admins): their people get access when it is enabled.") {
+		t.Errorf("create consequences = %q", c)
+	}
 	if c := byName["create_instance"].ClassFor(context.Background(), json.RawMessage(`{"template":"grafana","id":"grafana-w","label":"W","groups":{"mode":"existing","users":"bindempty","admins":"bindempty"}}`)); c != ClassWrite {
 		t.Errorf("binding empty groups = %s", c)
 	}

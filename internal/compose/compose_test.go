@@ -68,6 +68,44 @@ func TestCLI(t *testing.T) {
 	}
 }
 
+// Final fix C1: compose gets PassedEnv of the Hub's environment, the
+// Hub's two variables and nothing else — no Hub secret, no profile.
+func TestCLIEnvAllowlist(t *testing.T) {
+	t.Setenv("HUB_SECRET_TEST", "leaked")
+	t.Setenv("KEYCLOAK_ADMIN_PASSWORD", "leaked")
+	t.Setenv("COMPOSE_PROFILES", "evil")
+	t.Setenv("DOCKER_CONTEXT", "other")
+	t.Setenv("HOME", "/home/hub")
+	dump := filepath.Join(t.TempDir(), "env")
+	c, log := stub(t, "env > "+dump+"\nexit 0\n")
+	if err := c.Up(context.Background(), Project{Name: "x", EnvFile: "/d/x.env"}); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(dump)
+	got := map[string]string{}
+	for _, l := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		k, v, _ := strings.Cut(l, "=")
+		got[k] = v
+	}
+	// /bin/sh adds its own (PWD, SHLVL, _, OLDPWD).
+	shell := map[string]bool{"PWD": true, "SHLVL": true, "_": true, "OLDPWD": true}
+	for k := range got {
+		if !shell[k] && k != "HOME" && k != "PATH" && k != "COMPOSE_IGNORE_ORPHANS" && k != "DOCKER_HOST" {
+			t.Errorf("compose's environment has %s", k)
+		}
+	}
+	if got["HOME"] != "/home/hub" || got["PATH"] != os.Getenv("PATH") || got["DOCKER_HOST"] != "tcp://socket-proxy-hub:2375" || got["COMPOSE_IGNORE_ORPHANS"] != "true" {
+		t.Errorf("environment = %v", got)
+	}
+	// The argv carries no environment either: only the env file's path.
+	if a, _ := os.ReadFile(log); strings.Contains(string(a), "leaked") || strings.Contains(string(a), "evil") || !strings.Contains(string(a), "--env-file /d/x.env") {
+		t.Errorf("argv = %s", a)
+	}
+	if env := c.Env(); len(env) != 4 {
+		t.Errorf("Env() = %v", env)
+	}
+}
+
 func TestCLIErrorsAndTimeout(t *testing.T) {
 	c, _ := stub(t, "exit 3\n")
 	if err := c.Up(context.Background(), Project{Name: "x"}); err == nil {

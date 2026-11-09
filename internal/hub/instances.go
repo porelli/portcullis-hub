@@ -226,14 +226,25 @@ func (h *Hub) Instances() []InstanceView {
 		case state.InstanceRestoring:
 			st = StateRestoring
 		}
+		// Named like a resolved one (instanceName, instanceLabel's
+		// default) with what is known: the manifest's name when its
+		// template is in the catalog, else the template id.
+		app := tid
+		if ct := h.catalogLocked(tid); ct != nil {
+			app = ct.Manifest.Name
+		}
 		label := e.Label
-		if label == "" {
+		switch {
+		case label != "":
+		case id == tid:
+			label = app
+		default:
 			label = id
 		}
 		out = append(out, InstanceView{ID: id, Template: tid, Default: id == tid, State: st, Error: reason,
 			Hosts: copyMap(e.Hosts), KeycloakClients: []string{}, Project: projectName(id),
 			AccessGroup: e.UsersGroup, AdminGroup: e.AdminsGroup,
-			Label: label, Name: tid + " · " + label, GroupsMode: groupsMode(e), Setup: h.setupViewLocked(id)})
+			Label: label, Name: displayName(app, label), GroupsMode: groupsMode(e), Setup: h.setupViewLocked(id)})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
@@ -262,7 +273,17 @@ func copyMap(m map[string]string) map[string]string {
 // its default, §11.9) and its derived groups: createEntry with only
 // those. The API path (createInstance) requires a label.
 func (h *Hub) CreateInstance(templateID, id string, hosts map[string]string) error {
-	return h.createEntry(CreateRequest{Template: templateID, ID: id, Hosts: hosts}, "", "")
+	_, err := h.createEntry(CreateRequest{Template: templateID, ID: id, Hosts: hosts}, "", "")
+	return err
+}
+
+// priorSettings is a default instance's settings entry (exists or not)
+// right before its first create stored the setup values in it (§11.9):
+// what undoing that create puts back exactly (removeNewInstance). In
+// memory only (on the operation's Progress), never in a record.
+type priorSettings struct {
+	had bool
+	s   state.InstanceSettings
 }
 
 // createEntry creates instance req.ID of req.Template without enabling
@@ -273,28 +294,30 @@ func (h *Hub) CreateInstance(templateID, id string, hosts map[string]string) err
 // instance"): accepted while it has no state entry and isn't enabled.
 // Refused before anything is created: a bad id (400), a single
 // template (409), and any derived-name or hostname collision (409).
-func (h *Hub) createEntry(req CreateRequest, users, admins string) error {
+// A default instance's create answers its settings entry as it was
+// before (priorSettings; nil for any other instance).
+func (h *Hub) createEntry(req CreateRequest, users, admins string) (*priorSettings, error) {
 	templateID, id, hosts := req.Template, req.ID, req.Hosts
 	def := id == templateID
 	if !def {
 		if !templates.InstanceIDRe.MatchString(id) {
-			return statusErr(400, "instance id %q must match %s", id, templates.InstanceIDRe)
+			return nil, statusErr(400, "instance id %q must match %s", id, templates.InstanceIDRe)
 		}
 		if strings.HasPrefix(id, templates.ReservedInstancePrefix) {
-			return statusErr(400, "instance id %q: ids starting with %q are reserved", id, templates.ReservedInstancePrefix)
+			return nil, statusErr(400, "instance id %q: ids starting with %q are reserved", id, templates.ReservedInstancePrefix)
 		}
 	} else if !templates.ValidID(id) {
-		return statusErr(400, "invalid template id %q", id)
+		return nil, statusErr(400, "invalid template id %q", id)
 	}
 	if err := templates.CheckIDShape(id); err != nil {
-		return statusErr(400, "instance %v", err)
+		return nil, statusErr(400, "instance %v", err)
 	}
 	h.mu.RLock()
 	_, exists := h.st.Instances[id]
 	exists = exists || (def && h.st.IsEnabled(id))
 	h.mu.RUnlock()
 	if exists {
-		return statusErr(409, "instance %s already exists", id)
+		return nil, statusErr(409, "instance %s already exists", id)
 	}
 	// A leftover project of that name (e.g. a deleted instance whose
 	// containers survived) is someone else's: refuse. Docker first, never
@@ -302,11 +325,11 @@ func (h *Hub) createEntry(req CreateRequest, users, admins string) error {
 	if h.engine != nil {
 		cs, err := h.engine.ListContainers(context.Background(), docker.ProjectFilter(projectName(id)))
 		if err != nil {
-			return statusErr(503, "cannot check for an existing compose project %s: %v", projectName(id), err)
+			return nil, statusErr(503, "cannot check for an existing compose project %s: %v", projectName(id), err)
 		}
 		for _, c := range cs {
 			if c.Project() == projectName(id) {
-				return statusErr(409, "compose project %s already exists (stop and remove it first)", projectName(id))
+				return nil, statusErr(409, "compose project %s already exists (stop and remove it first)", projectName(id))
 			}
 		}
 	}
@@ -323,7 +346,7 @@ func (h *Hub) createEntry(req CreateRequest, users, admins string) error {
 		h.mu.RUnlock()
 		vs, err := h.engine.ListVolumes(context.Background(), nil)
 		if err != nil {
-			return statusErr(503, "cannot check for existing volumes: %v", err)
+			return nil, statusErr(503, "cannot check for existing volumes: %v", err)
 		}
 		mine := map[string]bool{}
 		for _, n := range want {
@@ -331,7 +354,7 @@ func (h *Hub) createEntry(req CreateRequest, users, admins string) error {
 		}
 		for _, v := range vs {
 			if mine[strings.ToLower(v.Name)] || v.Labels[docker.LabelProject] == projectName(id) {
-				return statusErr(409, "volume %s already exists (a leftover of a deleted instance or someone else's): remove it, or choose another instance id", v.Name)
+				return nil, statusErr(409, "volume %s already exists (a leftover of a deleted instance or someone else's): remove it, or choose another instance id", v.Name)
 			}
 		}
 	}
@@ -340,7 +363,7 @@ func (h *Hub) createEntry(req CreateRequest, users, admins string) error {
 	// users group that became privileged meanwhile is refused.
 	if req.recheck != nil {
 		if err := req.recheck(); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	runtime := h.runtimeCopy() // driftMu before mu
@@ -348,23 +371,23 @@ func (h *Hub) createEntry(req CreateRequest, users, admins string) error {
 	defer h.mu.Unlock()
 	t := h.catalogLocked(templateID)
 	if t == nil {
-		return statusErr(404, "template not found: %s", templateID)
+		return nil, statusErr(404, "template not found: %s", templateID)
 	}
 	if _, ok := h.st.Instances[id]; ok || (def && h.st.IsEnabled(id)) {
-		return statusErr(409, "instance %s already exists", id)
+		return nil, statusErr(409, "instance %s already exists", id)
 	}
 	if !def {
 		if !t.Manifest.Multi() {
-			return statusErr(409, "template %s is instances: single — it runs only as its default instance%s", templateID, singleReason(t))
+			return nil, statusErr(409, "template %s is instances: single — it runs only as its default instance%s", templateID, singleReason(t))
 		}
 		if err := h.checkInstanceNamesLocked(t, id); err != nil {
-			return err
+			return nil, err
 		}
 		if c := templates.CoreContainerClash(id, t.Services); c != "" {
-			return statusErr(409, "instance id %s: its container %s would be a core service's container name", id, c)
+			return nil, statusErr(409, "instance id %s: its container %s would be a core service's container name", id, c)
 		}
 		if err := aliasesFitInstance(t, id); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	if hosts == nil && def {
@@ -372,15 +395,15 @@ func (h *Hub) createEntry(req CreateRequest, users, admins string) error {
 	} else if hosts == nil {
 		var err error
 		if hosts, err = defaultHostsFor(t, id, h.cfg.Domain); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	view, err := h.resolveHostsLocked(t, id, hosts, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := h.checkInstanceHostsLocked(&view, runtime); err != nil {
-		return err
+		return nil, err
 	}
 	// The setup choices (§11.9) against what is stored (a default
 	// instance's earlier settings: a fixed choice stays locked once it
@@ -391,17 +414,22 @@ func (h *Hub) createEntry(req CreateRequest, users, admins string) error {
 	// never a second, partial parse. Then every setup option's effective
 	// value is stored (pinSetupValuesLocked): a later default change
 	// can't move a choice.
+	var prior *priorSettings
+	if def {
+		s, had := h.st.Settings[id]
+		prior = &priorSettings{had: had, s: s.Clone()}
+	}
 	next := h.st.Settings[id].Clone()
 	if len(req.Setup) > 0 {
 		if !req.checked {
-			return statusErr(500, "instance %s: setup values reached the create unchecked", id)
+			return nil, statusErr(500, "instance %s: setup values reached the create unchecked", id)
 		}
 		if h.catalogGen != req.setupGen {
-			return statusErr(409, "the template changed while creating: try again")
+			return nil, statusErr(409, "the template changed while creating: try again")
 		}
 		if req.setup != nil {
 			if next, _, _, _, err = h.nextSettingsLocked(t, next, req.setup); err != nil {
-				return err
+				return nil, err
 			}
 		}
 	}
@@ -430,7 +458,7 @@ func (h *Hub) createEntry(req CreateRequest, users, admins string) error {
 	}
 	h.saveLocked()
 	log.Printf("instance %s of %s created (hosts %v)", id, templateID, view.Hosts)
-	return nil
+	return prior, nil
 }
 
 // singleReason points at the template's notes for why it is single.

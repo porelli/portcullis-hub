@@ -95,8 +95,9 @@ gives you a link (or your client opens it):
    exactly. Values taken from the request are shown in quotes, and hidden
    characters (invisible or text-reversing ones) appear as `\u…` codes:
    decline if you see any you didn't expect.
-2. Type the check the page asks for (the app's name, or for administrators
-   the instance id or the person's name).
+2. Type the check the page asks for (the app's label, such as `Office`
+   for *Nextcloud · Office*, or for administrators the instance id or the
+   person's name).
 3. Approve with your passkey, then ask the AI to try again.
 
 A confirmation is valid for 10 minutes and works once; Decline needs no

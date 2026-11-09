@@ -229,7 +229,7 @@ func TestHealthyStepJobDone(t *testing.T) {
 		"w1": {Running: true, Status: "running", Health: "healthy"},
 		"s1": {Running: false, Status: "exited", ExitCode: 0},
 	}
-	n, m, others, failedJobs, err := f.h.countContainers(context.Background(), t1, services)
+	n, m, others, failedJobs, err := f.h.countContainers(context.Background(), t1, services, containerReady)
 	if err != nil {
 		t.Fatalf("countContainers (done job): %v", err)
 	}
@@ -259,7 +259,7 @@ func TestHealthyStepJobDone(t *testing.T) {
 		"w2": {Running: true, Status: "running", Health: "healthy"},
 		"s2": {Running: false, Status: "exited", ExitCode: 1},
 	}
-	n, m, others, failedJobs, err = f.h.countContainers(context.Background(), t1, services)
+	n, m, others, failedJobs, err = f.h.countContainers(context.Background(), t1, services, containerReady)
 	if err != nil {
 		t.Fatalf("countContainers (failed job): %v", err)
 	}
@@ -281,7 +281,7 @@ func TestHealthyStepJobDone(t *testing.T) {
 	f.engine.states = map[string]docker.State{
 		"w3": {Running: true, Status: "running", Health: "healthy"},
 	}
-	n, m, others, failedJobs, err = f.h.countContainers(context.Background(), t1, services)
+	n, m, others, failedJobs, err = f.h.countContainers(context.Background(), t1, services, containerReady)
 	if err != nil {
 		t.Fatalf("countContainers (missing job): %v", err)
 	}
@@ -457,5 +457,61 @@ func TestJobDead(t *testing.T) {
 	}
 	if !strings.Contains(drift.Message, "setup") || !strings.Contains(drift.Message, "failed") {
 		t.Errorf("drift message = %q, should mention job setup failed", drift.Message)
+	}
+}
+
+// Final fix I1: a finished job never hides that no service runs — web
+// exited(1) + job exited(0) is enabled_not_running.
+func TestDriftDoneJobDoesNotHideStoppedService(t *testing.T) {
+	f := jobFixture(t)
+	f.h.Enable("jobapp")
+	web := container("w1", "portcullis-jobapp", "web", "exited")
+	web.Status = "Exited (1) 1 minute ago"
+	for k, v := range jobappLabels(t, f, "web") {
+		web.Labels[k] = v
+	}
+	setup := container("s1", "portcullis-jobapp", "setup", "exited")
+	setup.Status = "Exited (0) 5 minutes ago"
+	f.engine.containers = []docker.Container{web, setup}
+	f.engine.states = map[string]docker.State{
+		"w1": {Status: "exited", ExitCode: 1},
+		"s1": {Status: "exited", ExitCode: 0},
+	}
+	rep := f.h.Reconcile(context.Background())
+	var got []DriftKind
+	for _, d := range rep.Items {
+		if d.ID == "jobapp" {
+			got = append(got, d.Kind)
+		}
+	}
+	if len(got) != 1 || got[0] != DriftNotRunning {
+		t.Errorf("drift = %v, want [%s]", got, DriftNotRunning)
+	}
+}
+
+// Final fix M2: jobState per contract §11.9, fail closed — only exited 0
+// is done; anything not running, restarting or created is failed.
+func TestJobStateFailClosed(t *testing.T) {
+	for _, c := range []struct {
+		st   docker.State
+		want string
+	}{
+		{docker.State{Running: true, Status: "running"}, jobRunning},
+		{docker.State{Running: true, Status: "restarting"}, jobRunning},
+		{docker.State{Status: "created"}, jobPending},
+		{docker.State{Status: "exited"}, jobDone},
+		{docker.State{Status: "exited", ExitCode: 2}, jobFailed},
+		{docker.State{Status: "dead"}, jobFailed},
+		{docker.State{Running: true, Status: "paused"}, jobFailed},
+		{docker.State{Status: "removing"}, jobFailed},
+		{docker.State{Status: ""}, jobFailed},
+		{docker.State{Status: "weird"}, jobFailed},
+	} {
+		if got := jobState(c.st); got != c.want {
+			t.Errorf("jobState(%+v) = %s, want %s", c.st, got, c.want)
+		}
+		if ready := containerReady(c.st, true); ready != (c.want == jobDone) {
+			t.Errorf("containerReady(%+v, job) = %v", c.st, ready)
+		}
 	}
 }

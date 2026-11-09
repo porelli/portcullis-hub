@@ -340,7 +340,7 @@ func TestPullRefsFollowProfiles(t *testing.T) {
 		t.Errorf("pullRefs = %v, want %v", got, want)
 	}
 	// The safety checks' loader still reads every profile.
-	proj, err := loadRendered(context.Background(), f.h.project(f.h.Template("cloud-p")), f.h.cfg.ProjectDir)
+	proj, err := f.h.loadRendered(context.Background(), f.h.Template("cloud-p"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -410,7 +410,7 @@ func TestStatusFollowsProfiles(t *testing.T) {
 	f.engine.mu.Lock()
 	f.engine.containers = []docker.Container{app, pg, leftover}
 	f.engine.mu.Unlock()
-	n, m, others, _, err := f.h.countContainers(context.Background(), tm, f.h.renderedServices(context.Background(), tm))
+	n, m, others, _, err := f.h.countContainers(context.Background(), tm, f.h.renderedServices(context.Background(), tm), containerReady)
 	if err != nil || n != 2 || m != 2 || len(others) != 0 {
 		t.Errorf("readiness = %d of %d, others %v, %v", n, m, others, err)
 	}
@@ -687,7 +687,7 @@ func TestCreateSetupCatalogChanged(t *testing.T) {
 	if _, ok := f.h.InstanceView("cloud-race"); ok {
 		t.Error("created anyway")
 	}
-	if err := f.h.createEntry(CreateRequest{Template: "cloud", ID: "cloud-raw", Setup: setupOf("database", `"postgres"`)}, "", ""); statusOf(err) != 500 {
+	if _, err := f.h.createEntry(CreateRequest{Template: "cloud", ID: "cloud-raw", Setup: setupOf("database", `"postgres"`)}, "", ""); statusOf(err) != 500 {
 		t.Errorf("unchecked setup = %v", err)
 	}
 	// Without a change in between: created with the checked value.

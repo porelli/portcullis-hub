@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -10,7 +11,9 @@ import (
 	"time"
 
 	"github.com/compose-spec/compose-go/v2/dotenv"
+	"github.com/compose-spec/compose-go/v2/types"
 
+	"github.com/portcullis/hub/internal/compose"
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/settings"
 	"github.com/portcullis/hub/internal/state"
@@ -737,6 +740,10 @@ func TestEnvOverrideOutsideEnvironmentRefused(t *testing.T) {
 		"BUILDKIT_PROGRESS": "is set by the Hub",
 		"BUILDX_BUILDER":    "is set by the Hub",
 		"COMPOSE_FILE":      "is set by the Hub",
+		// compose's own environment (compose.PassedEnv) beats the env
+		// file: an override couldn't apply.
+		"HOME": "is set by the Hub",
+		"PATH": "is set by the Hub",
 	} {
 		if err := envOverrideErr(f.h, "mountapp", name, "x"); statusOf(err) != 400 || !strings.Contains(err.Error(), want) {
 			t.Errorf("%s = %v", name, err)
@@ -774,6 +781,51 @@ func TestEnvOverrideOutsideEnvironmentRefused(t *testing.T) {
 	}
 	if why := fr.nameRefusal("MY_OWN_VAR"); !strings.Contains(why, "can't be checked") {
 		t.Errorf("unreadable compose = %q", why)
+	}
+}
+
+// Final fix C1: compose runs with compose.Environ only, and the Hub
+// interpolates from exactly it. A secret of the Hub's environment never
+// reaches a template, and an override of a name in the Hub's
+// environment (TZ) applies — the Hub's value would beat the env file.
+func TestComposeEnvNotTheHubs(t *testing.T) {
+	t.Setenv("HUB_SECRET_TEST", "leaked")
+	t.Setenv("TZ", "Hub/Zone")
+	const composeYML = "services:\n  web:\n    image: x\n    environment:\n      S: ${HUB_SECRET_TEST}\n      Z: ${TZ:-UTC}\n" +
+		"    labels:\n      traefik.http.routers.isoapp.rule: Host(`isoapp.${PORTCULLIS_DOMAIN}`)\n"
+	f := newInstanceFixtureExtra(t, nil, nil, map[string][2]string{"isoapp": {strings.ReplaceAll(mountAppManifest, "mountapp", "isoapp"), composeYML}})
+	if f.h.Template("isoapp") == nil {
+		t.Fatal("isoapp not loaded (see the log)")
+	}
+	f.h.SetGroups(&fakeGroups{})
+	simulateCompose(f, 0)
+	if err := f.h.Enable("isoapp"); err != nil {
+		t.Fatal(err)
+	}
+	f.h.Wait()
+	web := func() types.MappingWithEquals {
+		t.Helper()
+		proj, err := f.h.loadRendered(context.Background(), f.h.Template("isoapp"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return proj.Services["web"].Environment
+	}
+	if env := web(); env["S"] == nil || *env["S"] != "" || env["Z"] == nil || *env["Z"] != "UTC" {
+		t.Errorf("the Hub's environment reached the template: %v", env)
+	}
+	if _, err := f.h.SetEnvOverride("isoapp", "TZ", "Europe/Rome", envAdmin); err != nil {
+		t.Fatal(err)
+	}
+	f.h.Wait()
+	if env := web(); env["Z"] == nil || *env["Z"] != "Europe/Rome" || *env["S"] != "" {
+		t.Errorf("the override didn't apply: %v", env)
+	}
+	// The runner's environment is the allowlist and nothing else.
+	for _, kv := range f.h.compose.Env() {
+		if name, _, _ := strings.Cut(kv, "="); !slices.Contains(compose.PassedEnv, name) && name != "COMPOSE_IGNORE_ORPHANS" && name != "DOCKER_HOST" {
+			t.Errorf("compose gets %s", name)
+		}
 	}
 }
 

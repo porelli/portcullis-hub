@@ -78,6 +78,12 @@ type projectCount struct {
 	missingJobCount int            // len(missingJobs), for drift message
 	// inactiveRunning: running services outside the selected profiles.
 	inactiveRunning []string
+	// servicesRunning: running containers of services that aren't jobs.
+	// A done job counts in running, never here (final fix I1).
+	servicesRunning int
+	// wantsServices: the instance has an active service that isn't a
+	// job (not of an unselected profile, not a companion scaled to 0).
+	wantsServices bool
 }
 
 // computeDrift compares enabled apps with project container counts.
@@ -115,7 +121,8 @@ func computeDrift(enabled, known, snapshot map[string]bool, counts map[string]pr
 				d.Message = "template missing and no known config — access to its hostnames is denied"
 			}
 			d.Actions = []string{ActionDisable}
-		case enabled[id] && c.running == 0:
+		case enabled[id] && (c.running == 0 || c.wantsServices && c.servicesRunning == 0):
+			// A finished job never hides that no service runs.
 			d.Kind = DriftNotRunning
 			d.Message = "enabled but not running"
 			if c.total > 0 {
@@ -213,6 +220,7 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 	// instance id → service name → in a compose profile the instance's
 	// setup choices leave off (§13.18): not counted, never missing.
 	inactive := map[string]map[string]bool{}
+	wantsServices := map[string]bool{}
 	for i := range h.instances {
 		t := &h.instances[i]
 		jobs[t.ID] = t.Jobs
@@ -225,6 +233,14 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 			// Only an enabled instance's: a disabled one's containers
 			// all count (none should run).
 			inactive[t.ID] = h.inactiveServicesLocked(t)
+			companions := h.companionServicesLocked(t)
+			for _, s := range t.Services {
+				if cs, ok := companions[s]; t.Jobs[s] || inactive[t.ID][s] || ok && cs.scale != nil && *cs.scale == 0 {
+					continue
+				}
+				wantsServices[t.ID] = true
+				break
+			}
 		}
 	}
 	h.mu.RUnlock()
@@ -279,33 +295,40 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 		servicesSeen[id][service] = true
 		isJob := jobs[id][service]
 		isRunning := c.State == "running" || c.State == "restarting"
-		// A done job (exited 0) counts as running; a failed job (exit non-zero, dead,
-		// or ContainerState error) is drift (fail closed).
+		// A done job (exited 0) counts as running; a failed job (jobState:
+		// exited non-zero, dead, paused, removing, ContainerState error)
+		// is drift (fail closed).
 		isDoneJob := false
-		if isJob && (c.State == "exited" || c.State == "dead") {
-			// Check exit code via ContainerState (fail closed: error or dead → failed).
-			st, err := h.engine.ContainerState(ctx, c.ID)
-			if err != nil || st.Status == "dead" {
-				// ContainerState error or dead: count as failed (fail closed).
+		if isJob {
+			st := docker.State{Running: isRunning, Status: c.State}
+			if !isRunning && c.State != "created" {
+				// The list has no exit code: inspected.
+				st = docker.State{Status: "dead"} // can't tell: failed
+				if s, ierr := h.engine.ContainerState(ctx, c.ID); ierr == nil {
+					st = s
+				}
+			}
+			switch jobState(st) {
+			case jobRunning:
+				isRunning = true
+			case jobDone:
+				isDoneJob, isRunning = true, true
+			case jobFailed:
 				if pc.failedJobCodes == nil {
 					pc.failedJobCodes = make(map[string]int)
 				}
 				pc.failedJobs = append(pc.failedJobs, service)
 				pc.failedJobCodes[service] = 0 // unknown exit code
-				pc.failedJobCount++
-			} else if st.Status == "exited" {
-				if st.ExitCode == 0 {
-					isDoneJob = true
-					isRunning = true
-				} else {
-					if pc.failedJobCodes == nil {
-						pc.failedJobCodes = make(map[string]int)
-					}
-					pc.failedJobs = append(pc.failedJobs, service)
+				if st.Status == "exited" {
 					pc.failedJobCodes[service] = st.ExitCode
-					pc.failedJobCount++
 				}
+				pc.failedJobCount++
+			default: // pending: created, never started
+				isRunning = false
 			}
+		}
+		if isRunning && !isJob {
+			pc.servicesRunning++
 		}
 		if isRunning {
 			pc.running++
@@ -360,6 +383,11 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 		if pc.missingJobCount > 0 {
 			sort.Strings(pc.missingJobs)
 		}
+		counts[id] = pc
+	}
+	for id := range wantsServices {
+		pc := counts[id]
+		pc.wantsServices = true
 		counts[id] = pc
 	}
 	h.mu.RLock()

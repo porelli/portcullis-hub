@@ -195,7 +195,7 @@ func (h *Hub) undoNewInstance(id string, p *Progress, rec OpRecord, instanceStep
 			if set, err := h.redactionSetErr(id); err == nil {
 				p.Redact(set)
 			}
-			return h.removeNewInstance(id)
+			return h.removeNewInstance(id, p.priorSettings())
 		}})
 	}
 	defer h.TriggerReconcile()

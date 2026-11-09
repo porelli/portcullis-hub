@@ -242,12 +242,12 @@ func TestHealthyCountsOnlyRenderedServices(t *testing.T) {
 	if !services["web"] || !services["db"] || !services["init"] || services["old"] {
 		t.Fatalf("rendered services %v", services)
 	}
-	n, m, others, err := f.h.countStarted(context.Background(), tm, services)
+	n, m, others, _, err := f.h.countContainers(context.Background(), tm, services, anyStarted)
 	if err != nil || n != 2 || m != 2 || len(others) != 0 {
 		t.Fatalf("counted %d of %d (%v) %v", n, m, others, err)
 	}
 	// A service set without db: its container isn't counted either.
-	n, m, _, err = f.h.countStarted(context.Background(), tm, map[string]bool{"web": true})
+	n, m, _, _, err = f.h.countContainers(context.Background(), tm, map[string]bool{"web": true}, anyStarted)
 	if err != nil || n != 1 || m != 1 {
 		t.Fatalf("counted %d of %d %v", n, m, err)
 	}

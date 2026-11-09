@@ -116,6 +116,45 @@ type Runner interface {
 	// DownByName stops a project using only its name — works even when the
 	// template's compose file is gone or broken.
 	DownByName(ctx context.Context, name string) error
+	// Env is the whole environment compose runs with (Environ): the Hub
+	// interpolates the project from exactly it plus the env file, so its
+	// checks read what compose will run.
+	Env() []string
+}
+
+// PassedEnv are the only variables of the Hub's own environment compose
+// gets. The docker CLI reads HOME (its config dir ~/.docker: config.json,
+// contexts, cli-plugins, buildx state) and PATH (credential helpers
+// docker-credential-*, which compose runs for image pulls); neither
+// needs anything else of it to reach the daemon. Everything else of
+// the Hub's environment holds Hub configuration and secrets
+// (KEYCLOAK_ADMIN_PASSWORD, HUB_PROXY_SECRET, …): a template's ${NAME}
+// must never read them, and a name set there would beat the instance's
+// --env-file. Deliberately not passed: DOCKER_CONTEXT, DOCKER_CONFIG,
+// DOCKER_CERT_PATH, DOCKER_TLS_VERIFY, DOCKER_API_VERSION, HTTP(S)_PROXY —
+// compose reaches the same daemon the Hub's Engine client does, with
+// DOCKER_HOST only (tcp:// or unix://, no TLS, no proxy: docker.New); the
+// Hub's image sets none of them. TMPDIR isn't set in the image either
+// (/tmp is a tmpfs, the default).
+var PassedEnv = []string{"HOME", "PATH"}
+
+// Environ is the environment of every compose invocation: PassedEnv's
+// entries of the Hub's environment, COMPOSE_IGNORE_ORPHANS=true and
+// DOCKER_HOST=dockerHost (when set). Every instance variable — profiles
+// (COMPOSE_PROFILES, contract §13.18) included — comes only from the
+// instance's --env-file.
+func Environ(dockerHost string) []string {
+	var env []string
+	for _, name := range PassedEnv {
+		if v, ok := os.LookupEnv(name); ok {
+			env = append(env, name+"="+v)
+		}
+	}
+	env = append(env, "COMPOSE_IGNORE_ORPHANS=true")
+	if dockerHost != "" {
+		env = append(env, "DOCKER_HOST="+dockerHost)
+	}
+	return env
 }
 
 // CLI runs the docker compose plugin.
@@ -165,13 +204,7 @@ func (c *CLI) run(ctx context.Context, timeout time.Duration, sub string, args [
 	cmd := exec.CommandContext(ctx, bin, args...)
 	// WaitDelay makes Wait return even if a killed child left pipes open.
 	cmd.WaitDelay = 5 * time.Second
-	// COMPOSE_PROFILES comes only from the instance's env file (the
-	// Hub writes it from the setup choices, contract §13.18): the Hub's
-	// own environment never selects a profile.
-	cmd.Env = append(withoutEnv(os.Environ(), "COMPOSE_PROFILES"), "COMPOSE_IGNORE_ORPHANS=true")
-	if c.DockerHost != "" {
-		cmd.Env = append(cmd.Env, "DOCKER_HOST="+c.DockerHost)
-	}
+	cmd.Env = c.Env()
 	// The Hub's own log keeps the full output; the tail goes into the error.
 	out := &tail{max: OutputTail}
 	cmd.Stdout = io.MultiWriter(orDiscard(c.Stdout), out)
@@ -185,16 +218,8 @@ func (c *CLI) run(ctx context.Context, timeout time.Duration, sub string, args [
 	return nil
 }
 
-// withoutEnv is env without name's entries.
-func withoutEnv(env []string, name string) []string {
-	out := make([]string, 0, len(env))
-	for _, e := range env {
-		if !strings.HasPrefix(e, name+"=") {
-			out = append(out, e)
-		}
-	}
-	return out
-}
+// Env is Environ(c.DockerHost).
+func (c *CLI) Env() []string { return Environ(c.DockerHost) }
 
 func orDiscard(w io.Writer) io.Writer {
 	if w == nil {
@@ -255,6 +280,7 @@ func (c *CLI) Version(ctx context.Context) (string, error) {
 		bin = "docker"
 	}
 	cmd := exec.CommandContext(ctx, bin, "compose", "version", "--short")
+	cmd.Env = c.Env()
 	cmd.WaitDelay = 5 * time.Second
 	out, err := cmd.Output()
 	if err != nil {

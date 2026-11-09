@@ -183,9 +183,11 @@ func (h *Hub) createInstance(ctx context.Context, req CreateRequest, actor direc
 			return err
 		}
 	}
-	if err := h.createEntry(req, users, admins); err != nil {
+	prior, err := h.createEntry(req, users, admins)
+	if err != nil {
 		return res, err
 	}
+	p.setPriorSettings(prior)
 	p.Done(StepInstance)
 	ready()
 	if bound {
@@ -232,7 +234,7 @@ func (h *Hub) createSteps(ctx context.Context, p *Progress, templateID, id strin
 				errs = append(errs, err)
 			}
 		}
-		if err := h.removeNewInstance(id); err != nil {
+		if err := h.removeNewInstance(id, p.priorSettings()); err != nil {
 			errs = append(errs, err)
 		}
 		if err := errors.Join(errs...); err != nil {

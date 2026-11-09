@@ -3160,7 +3160,10 @@
           msg.classList.add('show');
         }
       } catch (e) {
-        showToast((value === null ? 'Reset' : 'Override') + ' of ' + name + ' failed: ' + e.message, 'error');
+        // A busy 409 (the restart a change queued is still running, with
+        // or without its record): nothing was stored — say so plainly.
+        const busy = e.status === 409 && (e.record || /is in progress/.test(e.message || ''));
+        showToast((value === null ? 'Reset' : 'Override') + ' of ' + name + (busy ? ': the app is restarting — try again in a moment' : ' failed: ' + e.message), 'error');
       }
     }
 

@@ -16,7 +16,6 @@ import (
 	"github.com/compose-spec/compose-go/v2/types"
 	"golang.org/x/mod/semver"
 
-	"github.com/portcullis/hub/internal/compose"
 	"github.com/portcullis/hub/internal/templates"
 )
 
@@ -25,28 +24,31 @@ import (
 // ignore the subpath and mount the whole secrets volume: refused.
 const MinSubpathAPI = "1.45"
 
-// loadRendered loads p as compose will run it (template, Hub override,
-// custom override merged; interpolated from the Hub's environment and
-// the instance's env file; every profile), with compose's own library.
+// loadRendered loads t's project as compose will run it (template, Hub
+// override, custom override merged; interpolated from exactly compose's
+// environment — compose.Runner.Env, never the Hub's own — and the
+// instance's env file; every profile), with compose's own library.
 // compose-go is what the docker compose CLI is built on: keep its version
 // within the compose-go line the image's docker-cli-compose (alpine,
 // compose ≥ compose.MinVersion) vendors — .github/dependabot.yml groups it
 // on its own so a bump is reviewed against that — so the check reads the
 // project as the up will (TestRealTemplatesInstances loads every real
 // template through it).
-func loadRendered(ctx context.Context, p compose.Project, workDir string) (*types.Project, error) {
-	return loadRenderedWith(ctx, p, workDir, []string{"*"})
+func (h *Hub) loadRendered(ctx context.Context, t *templates.Template) (*types.Project, error) {
+	return h.loadRenderedWith(ctx, t, []string{"*"})
 }
 
 // loadRenderedWith is loadRendered with exactly profiles active ("*" =
 // every one; none = only the services without compose profiles:). The
 // safety checks always pass "*" (loadRendered); only the runtime views
 // pass the instance's selected profiles (loadRuntime, contract §13.18).
-func loadRenderedWith(ctx context.Context, p compose.Project, workDir string, profiles []string) (*types.Project, error) {
+func (h *Hub) loadRenderedWith(ctx context.Context, t *templates.Template, profiles []string) (*types.Project, error) {
+	p := h.project(t)
 	opts := []cli.ProjectOptionsFn{
 		cli.WithName(p.Name),
-		cli.WithWorkingDirectory(workDir),
-		cli.WithOsEnv,
+		cli.WithWorkingDirectory(h.cfg.ProjectDir),
+		// compose's environment wins over the env file, as in the CLI.
+		cli.WithEnv(h.compose.Env()),
 		cli.WithProfiles(profiles),
 		cli.WithConsistency(false),
 		cli.WithResolvedPaths(false),
@@ -133,7 +135,7 @@ func (h *Hub) dockerRootMounts(ctx context.Context, t *templates.Template, proj 
 // mounts. Anything else refuses the up (409; 503 when the daemon can't
 // be asked). Outside mu (it reads files and asks the daemon).
 func (h *Hub) checkSecretsMounts(ctx context.Context, t *templates.Template) error {
-	proj, err := loadRendered(ctx, h.project(t), h.cfg.ProjectDir)
+	proj, err := h.loadRendered(ctx, t)
 	if err != nil {
 		// The loader's text may quote the env file or the overrides:
 		// logged redacted, then clipped; never answered.

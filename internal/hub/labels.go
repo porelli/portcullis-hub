@@ -103,10 +103,17 @@ func instanceLabel(t *templates.Template) string {
 // default instance without a stored label is "Gitea", never "Gitea ·
 // Gitea").
 func instanceName(t *templates.Template) string {
-	if l := instanceLabel(t); l != t.Manifest.Name {
-		return t.Manifest.Name + " · " + l
+	return displayName(t.Manifest.Name, instanceLabel(t))
+}
+
+// displayName is `<app> · <label>`, just `<app>` when the label is the
+// app's name: instanceName's rule, also for an instance that can't be
+// resolved (InstancesList).
+func displayName(app, label string) string {
+	if label != app {
+		return app + " · " + label
 	}
-	return t.Manifest.Name
+	return app
 }
 
 // instanceGroupsLocked is the one answer to instance t's access (users)

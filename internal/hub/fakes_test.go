@@ -135,6 +135,8 @@ func (f *fakeRunner) Down(ctx context.Context, p compose.Project) error {
 	return f.downErr
 }
 
+func (f *fakeRunner) Env() []string { return compose.Environ("") }
+
 func (f *fakeRunner) DownByName(ctx context.Context, name string) error {
 	f.begin("downbyname", name, compose.Project{Name: name})
 	defer f.end(name)

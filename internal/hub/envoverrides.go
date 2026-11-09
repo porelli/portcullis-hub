@@ -13,6 +13,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/portcullis/hub/internal/compose"
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/settings"
@@ -147,11 +148,13 @@ func (h *Hub) envRulesFor(t *templates.Template) (*envRules, error) {
 
 // hubSet: the Hub sets name, or the compose CLI reads it (every
 // PORTCULLIS_*, COMPOSE_*, DOCKER_*, BUILDKIT_* and BUILDX_* variable,
-// the instance variables — COMPOSE_PROFILES among them —, the AI and
-// model provider variables).
+// compose's own environment — compose.PassedEnv: HOME, PATH, which beat
+// the env file —, the instance variables — COMPOSE_PROFILES among them
+// —, the AI and model provider variables).
 func (r *envRules) hubSet(name string) bool {
 	if strings.HasPrefix(name, "PORTCULLIS_") || strings.HasPrefix(name, "COMPOSE_") || strings.HasPrefix(name, "DOCKER_") ||
 		strings.HasPrefix(name, "BUILDKIT_") || strings.HasPrefix(name, "BUILDX_") ||
+		slices.Contains(compose.PassedEnv, name) ||
 		templates.ReservedVar(name) || HubPublicVar(name) {
 		return true
 	}
