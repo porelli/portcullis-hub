@@ -885,7 +885,8 @@ func TestRetryNeverBlocksOnDeliveryLock(t *testing.T) {
 // Residual I1: a variable masked by value: an undeclared copy of a
 // secret (MY_COPY=1000) is shown masked and stays as it is; a Hub-set
 // variable whose value collides with a secret is not masked (declared);
-// an override holding a secret's value is refused.
+// a short override (under six bytes) equal to a secret is accepted, its
+// row masked.
 func TestExpertEnvRoundTripWithSecretValues(t *testing.T) {
 	f, _ := secretFixture(t)
 	const id = "secretapp"

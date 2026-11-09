@@ -3,6 +3,7 @@ package hub
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -13,6 +14,7 @@ import (
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/settings"
 	"github.com/portcullis/hub/internal/state"
+	"github.com/portcullis/hub/internal/templates"
 )
 
 // envAppManifest has a variable of every source (§11.9): manifest env
@@ -690,11 +692,15 @@ func TestEnvResetDropsEmptyEntry(t *testing.T) {
 	}
 }
 
-// mountAppCompose reads variables where they choose what the app mounts
-// or shares.
-const mountAppCompose = "services:\n  web:\n    image: x\n    volumes:\n      - ${DATA_DIR:-./data}:/data\n      - {type: bind, source: \"${CONF_DIR:-./conf}\", target: /conf}\n" +
-	"    environment:\n      L: ${LOG_LEVEL}\n" +
-	"    labels:\n      traefik.http.routers.mountapp.rule: Host(`mountapp.${PORTCULLIS_DOMAIN}`)\n"
+// mountAppCompose references variables in environment: only
+// (LOG_LEVEL), in environment: and volumes (BOTH_VAR) and outside it
+// (labels, image, privileged, a volume source; user: and a top-level
+// secrets: block — whose variables Discover limits anyway — are
+// TestComposeVars').
+const mountAppCompose = "services:\n  web:\n    image: \"x:${IMAGE_TAG:-1}\"\n    privileged: ${PRIV:-false}\n" +
+	"    volumes:\n      - ${DATA_DIR:-./data}:/data\n      - \"${BOTH_VAR:-./both}:/both\"\n" +
+	"    environment:\n      L: ${LOG_LEVEL}\n      B: ${BOTH_VAR}\n" +
+	"    labels:\n      com.example.note: \"${NOTE_LABEL:-x}\"\n      traefik.http.routers.mountapp.rule: Host(`mountapp.${PORTCULLIS_DOMAIN}`)\n"
 
 const mountAppManifest = `name: Mount App
 category: misc
@@ -708,24 +714,36 @@ env:
   - key: LOG_LEVEL
 `
 
-// Fix round 1, items 5 and 6: DOCKER_* and every variable compose reads
-// in a mount source are refused; the rows say so (hub_set).
-func TestEnvOverrideMountAndDockerRefused(t *testing.T) {
+// Security fix (allowlist): only a variable compose references nowhere
+// but in environment: values, or not at all, may be overridden;
+// DOCKER_* is Hub-set. The rows say so (hub_set).
+func TestEnvOverrideOutsideEnvironmentRefused(t *testing.T) {
 	f := newInstanceFixtureExtra(t, nil, nil, map[string][2]string{"mountapp": {mountAppManifest, mountAppCompose}})
 	tpl := f.h.Template("mountapp")
 	if tpl == nil {
 		t.Fatal("mountapp not loaded (see the log)")
 	}
-	if !tpl.MountVars["DATA_DIR"] || !tpl.MountVars["CONF_DIR"] || tpl.MountVars["LOG_LEVEL"] {
-		t.Errorf("MountVars = %v", tpl.MountVars)
+	if cv := tpl.ComposeVars; cv == nil || !cv.EnvOnly["LOG_LEVEL"] || cv.EnvOnly["BOTH_VAR"] || !cv.Outside["BOTH_VAR"] {
+		t.Errorf("ComposeVars = %+v", cv)
 	}
+	const outside = "is used outside environment: in the template's compose file; change it through Settings or the custom compose override"
 	for name, want := range map[string]string{
-		"DATA_DIR":    "chooses what the app mounts or shares; set it through Settings or the custom compose override",
-		"CONF_DIR":    "chooses what the app mounts or shares",
+		"NOTE_LABEL":  outside,
+		"IMAGE_TAG":   outside,
+		"PRIV":        outside,
+		"DATA_DIR":    outside,
+		"BOTH_VAR":    outside,
 		"DOCKER_HOST": "is set by the Hub",
 	} {
-		if err := envOverrideErr(f.h, "mountapp", name, "/srv/x"); statusOf(err) != 400 || !strings.Contains(err.Error(), want) {
+		if err := envOverrideErr(f.h, "mountapp", name, "x"); statusOf(err) != 400 || !strings.Contains(err.Error(), want) {
 			t.Errorf("%s = %v", name, err)
+		}
+	}
+	// Environment-only and unreferenced variables pass the rules (the
+	// instance itself was never started: 404 after the checks).
+	for _, name := range []string{"LOG_LEVEL", "MY_OWN_VAR"} {
+		if err := envOverrideErr(f.h, "mountapp", name, "x"); statusOf(err) != 404 {
+			t.Errorf("%s = %v, want the rules passed (404: not created)", name, err)
 		}
 	}
 	rows, err := f.h.EnvRows("mountapp")
@@ -737,6 +755,22 @@ func TestEnvOverrideMountAndDockerRefused(t *testing.T) {
 	}
 	if r := envRowOf(rows, "LOG_LEVEL"); r == nil || r.HubSet {
 		t.Errorf("LOG_LEVEL row %+v", r)
+	}
+	// A view whose compose can't be checked refuses every override.
+	rules := &envRules{t: tpl, composeVars: &templates.ComposeVarUse{Err: "compose.yml: broken"}, masked: func(string, string) bool { return false }}
+	if why := rules.nameRefusal("MY_OWN_VAR"); !strings.Contains(why, "can't be checked") {
+		t.Errorf("unparsable compose = %q", why)
+	}
+	// A view without discovery data whose compose.yml can't be read:
+	// every override refused too.
+	c := *tpl
+	c.ComposeVars, c.Path = nil, filepath.Join(t.TempDir(), "gone")
+	fr, err := f.h.envRulesFor(&c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if why := fr.nameRefusal("MY_OWN_VAR"); !strings.Contains(why, "can't be checked") {
+		t.Errorf("unreadable compose = %q", why)
 	}
 }
 

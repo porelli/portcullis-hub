@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"log"
@@ -95,9 +96,10 @@ type envRules struct {
 	owners      map[string]string // option-set variable → setting key
 	secretNames map[string]bool
 	masked      func(name, value string) bool
-	// mountVars: compose reads them where they choose what the app
-	// mounts or shares (Template.MountVars).
-	mountVars map[string]bool
+	// composeVars: where compose.yml references each variable
+	// (Template.ComposeVars): only one referenced nowhere but in
+	// services' environment: values may be overridden (§11.9).
+	composeVars *templates.ComposeVarUse
 }
 
 // envSecretMinLen is the shortest value judged a secret's by value (as
@@ -125,15 +127,22 @@ func (h *Hub) envRulesFor(t *templates.Template) (*envRules, error) {
 			owners[o.Folder.RunsAs.GIDEnv] = o.Key
 		}
 	}
-	mv := t.MountVars
-	if mv == nil {
-		// A view built without Discover: computed here (fail closed: a
-		// compose file that doesn't parse leaves nothing overridable).
-		if mv, err = templates.ComposeMountVars(t.ReadCompose()); err != nil {
-			return nil, fmt.Errorf("%s: %v", t.ID, err)
+	cv := t.ComposeVars
+	if cv == nil {
+		// A view built without Discover: computed here. A compose file
+		// that can't be read, is empty or doesn't parse leaves nothing
+		// overridable (Err: fail closed).
+		data, rerr := os.ReadFile(t.ComposePath())
+		switch {
+		case rerr != nil:
+			cv = &templates.ComposeVarUse{Err: "compose.yml can't be read"}
+		case len(bytes.TrimSpace(data)) == 0:
+			cv = &templates.ComposeVarUse{Err: "compose.yml is empty"}
+		default:
+			cv = templates.ComposeVars(data)
 		}
 	}
-	return &envRules{t: t, owners: owners, secretNames: SecretEnvNames(t), masked: masked, mountVars: mv}, nil
+	return &envRules{t: t, owners: owners, secretNames: SecretEnvNames(t), masked: masked, composeVars: cv}, nil
 }
 
 // hubSet: the Hub sets name (every PORTCULLIS_* and COMPOSE_* variable,
@@ -168,10 +177,19 @@ func (r *envRules) nameRefusal(name string) string {
 	if key, ok := r.owners[name]; ok {
 		return name + " is set by setting " + key + ": change it under Settings"
 	}
-	if r.mountVars[name] {
-		return name + " chooses what the app mounts or shares; set it through Settings or the custom compose override"
+	if r.outsideEnv(name) {
+		if r.composeVars.Err != "" {
+			return name + ": the template's compose file can't be checked (" + r.composeVars.Err + "): no variable can be overridden"
+		}
+		return name + " is used outside environment: in the template's compose file; change it through Settings or the custom compose override"
 	}
 	return ""
+}
+
+// outsideEnv: compose.yml references name outside services'
+// environment: values, or can't be checked (fail closed).
+func (r *envRules) outsideEnv(name string) bool {
+	return r.composeVars == nil || r.composeVars.Err != "" || r.composeVars.Outside[name]
 }
 
 // valueRefusal is why value can't be name's override ("" = it can): too
@@ -469,7 +487,7 @@ func envRowsOf(rules *envRules, file, ov map[string]string) []EnvRow {
 		default:
 			r.Default, r.Value = def, v
 		}
-		r.HubSet = r.Secret || r.Source == EnvSourceHub || r.Source == EnvSourceOption || rules.mountVars[n] || strings.HasPrefix(n, "DOCKER_")
+		r.HubSet = r.Secret || r.Source == EnvSourceHub || r.Source == EnvSourceOption || rules.outsideEnv(n) || strings.HasPrefix(n, "DOCKER_")
 		rows = append(rows, r)
 	}
 	return rows

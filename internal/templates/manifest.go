@@ -324,10 +324,11 @@ type Template struct {
 	// (found at discovery): saving Local networks restarts its enabled
 	// instances (F35).
 	UsesLocalNetworks bool `json:"-"`
-	// MountVars are the variables compose.yml reads where they choose
-	// what the app mounts or shares (ComposeMountVars, found at
-	// discovery; shared, read-only): never env-overridden (§11.9).
-	MountVars map[string]bool `json:"-"`
+	// ComposeVars is where compose.yml references each variable
+	// (ComposeVars, found at discovery; shared, read-only): only a
+	// variable it references nowhere but in environment: values may be
+	// env-overridden (§11.9).
+	ComposeVars *ComposeVarUse `json:"-"`
 	// raw is the manifest as written ({{HOST_*}} unexpanded); nil = Manifest.
 	raw *Manifest
 }
