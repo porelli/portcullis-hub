@@ -1622,5 +1622,17 @@
     });
   }
 
-  window.PortcullisSettings = { render };
+  // setupEditorHtml / readSetupEditor: one setup option's editor in the
+  // Hub's setup form (contract §13.18), with the manifest's default (a
+  // size or duration default written as "10GiB" / "30d" shown in its
+  // unit); read back as {value} / {value: null, empty} / {error}.
+  function setupDefault(o) {
+    const d = o.default;
+    if (o.type === 'size' && typeof d === 'string' && d !== 'unlimited') { const n = sizeBytes(d); return typeof n === 'number' ? n : null; }
+    if (o.type === 'duration' && typeof d === 'string') { const n = durSeconds(d); return typeof n === 'number' ? n : null; }
+    return d === undefined ? null : d;
+  }
+  function setupEditorHtml(o, v) { return editorHtml(null, o, v === undefined ? setupDefault(o) : v, 'setup', '', null); }
+
+  window.PortcullisSettings = { render, setupEditorHtml, readSetupEditor: readEditor };
 })();

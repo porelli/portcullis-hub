@@ -353,6 +353,20 @@
     .inst-form label.block { display: block; font-size: 0.8125rem; font-weight: 500; margin-bottom: 0.25rem; }
     .inst-form input[type="text"], .inst-form input[type="password"], .inst-form select { width: 100%; padding: 0.5rem 0.75rem; background: #1e293b; border: 1px solid #334155; border-radius: 0.375rem; color: #e2e8f0; font-size: 0.875rem; font-family: inherit; margin-bottom: 0.25rem; }
     .inst-form small { display: block; color: #64748b; font-size: 0.75rem; margin-bottom: 0.75rem; }
+    .setup-form .setup-err { color: #fca5a5; font-size: 0.75rem; margin: 0 0 0.5rem; }
+    .setup-form .setup-err .inst-error { color: #e2e8f0; }
+    .setup-form [aria-invalid="true"] { border-color: #ef4444 !important; }
+    .setup-form .ps-check { display: block; margin-bottom: 0.25rem; font-size: 0.8125rem; }
+    .setup-addr { display: flex; align-items: center; gap: 0.375rem; }
+    .setup-addr input { flex: 1; min-width: 6rem; }
+    .setup-domain-name { font-family: 'SF Mono', 'Fira Code', monospace; color: #94a3b8; white-space: nowrap; }
+    .setup-form input[readonly] { background: #0b1220; color: #94a3b8; border-style: dashed; cursor: not-allowed; }
+    .setup-opt { margin-bottom: 0.5rem; }
+    .setup-form .ps-ed { display: flex; }
+    .setup-form .ps-ed select { width: auto; min-width: 12rem; }
+    .setup-form .ps-ed input[type="number"] { width: 8rem; padding: 0.5rem 0.75rem; background: #1e293b; border: 1px solid #334155; border-radius: 0.375rem; color: #e2e8f0; font-size: 0.875rem; }
+    .setup-opt-label { font-size: 0.8125rem; font-weight: 500; margin-bottom: 0.25rem; }
+    .setup-lock { display: block; color: #fcd77f; font-size: 0.75rem; margin: 0.25rem 0 0.75rem; }
     .inst-row { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; margin-top: 0.5rem; }
     .inst-table { width: 100%; border-collapse: collapse; font-size: 0.8125rem; }
     .inst-table th { text-align: left; color: #64748b; font-weight: 500; padding: 0.375rem 0.5rem; border-bottom: 1px solid #334155; }
@@ -764,7 +778,7 @@
     </div>
   </div>
 
-  <!-- Dialogs: add an instance (Install… / + Add instance), all backups -->
+  <!-- Dialogs: setup before the first start (Install… / + Add instance), all backups -->
   <div class="op-modal" id="inst-modal">
     <div class="op-modal-box inst-modal-box" id="inst-modal-box"></div>
   </div>
@@ -1211,6 +1225,9 @@
       if (dlg.open) dlg.close();
     }
     document.getElementById('op-panel').addEventListener('close', () => {
+      // A close event delivered late (a tab not rendering) after the
+      // panel was opened again leaves the new panel alone.
+      if (document.getElementById('op-panel').open) return;
       opp.id = null;
       opp.confirm = false;
       const dlg = document.getElementById('op-panel');
@@ -3372,7 +3389,7 @@
     const HOST_LABEL_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
     let instancesCache = [];
     let catalogCache = null;
-    let instCtx = null; // the open dialog: { kind: 'create'|'backups', … }
+    let instCtx = null; // the open dialog: { kind: 'setup'|'backups', … }
 
     async function loadCatalogInfo() {
       if (!catalogCache) {
@@ -3472,7 +3489,7 @@
     let instancesLoaded = false;
     let appsFilter = '';   // Marketplace "Show in Apps": one template's instances (the chip's × clears it)
     let pageCtx = null;    // the instance page shown: { id, inst, tab, loaded }
-    let pageFlash = null;  // { id, notice, warnings }: said once on that instance's page
+    let pageFlash = null;  // { id, notice, warnings, error }: said once on that instance's page
     // GET /api/directory (admins: every group with its members and rule,
     // every person's display name), re-read at most every 30 s: the
     // users groups' counts and the Groups tab.
@@ -3686,16 +3703,25 @@
       let h = '<div class="page-crumbs"><a href="#apps" data-goto-tab="apps">Apps</a> › ' +
         '<a href="#apps" data-apps-filter="' + escapeHtml(inst.template) + '">' + escapeHtml(appName(inst.template)) + '</a> ›</div>' +
         '<div class="page-head" data-page-head></div>';
-      if (pageFlash && pageFlash.id === id) {
-        h += '<div class="inst-ok">' + escapeHtml(pageFlash.notice) + '</div>' + warningsList(pageFlash.warnings);
-        pageFlash = null;
-      }
+      h += '<div data-page-flash>' + (pageFlash && pageFlash.id === id ? pageFlashHtml(pageFlash) : '') + '</div>';
+      if (pageFlash && pageFlash.id === id) pageFlash = null;
       h += '<div class="op-banner" id="op-banner-' + escapeHtml(id) + '"></div><div class="doctor-line-box" id="doctor-line-' + escapeHtml(id) + '"></div>' +
         '<div class="detail-tabs page-tabs" role="tablist" aria-label="' + escapeHtml(instName(inst)) + '">' +
         tabs.map(([k, l]) => '<button type="button" class="detail-tab" role="tab" data-ptab="' + k + '">' + escapeHtml(l) + '</button>').join('') + '</div>' +
         tabs.map(([k]) => '<div class="detail-content" role="tabpanel" data-ipane="' + k + '"></div>').join('');
       box.innerHTML = h;
       renderPageHead();
+    }
+    // pageFlashHtml: a notice said once on an instance's page (its
+    // warnings, and the error of a Start whose enable failed).
+    function pageFlashHtml(f) {
+      return '<div class="inst-ok">' + escapeHtml(f.notice) + '</div>' + warningsList(f.warnings) + (f.error ? errorBox(f.error) : '');
+    }
+    // pageNotice: f on instance id's page now when it shows, else when it
+    // opens next.
+    function pageNotice(id, f) {
+      const slot = pageCtx && pageCtx.id === id && document.querySelector('#instance-page [data-page-flash]');
+      if (slot) { slot.innerHTML = pageFlashHtml(f); pageFlash = null; } else pageFlash = Object.assign({ id }, f);
     }
     // The header: "<App> · <label>", its status and Enable / Disable.
     function renderPageHead() {
@@ -3969,86 +3995,352 @@
         '<button type="button" class="detail-close" data-inst-close="1" title="Close" aria-label="Close">&times;</button></div>';
     }
 
-    // ── create (Install… and + Add instance) ─────────────
-    // install: the template's first instance (Install…): its id is the
-    // template id, the default instance (§11.9 "First instance"); a single
-    // template takes only that id. The label is required.
-    async function openCreateInstance(tid, install) {
+    // ── setup before the first start (Install… and + Add instance, §11.9) ──
+    // The form asks for the label, the instance id (derived from the label
+    // by CheckIDShape's rules, editable until it is created; the first
+    // instance keeps the template id), the address (a subdomain per host
+    // router on one domain: the main domain or an enrolled one that is
+    // ready), who can use it (new groups from the id, or existing groups:
+    // never a built-in, administrator or permission group as the users
+    // group — the Hub refuses them too) and the template's setup options
+    // with their defaults. Start = create, then enable, both in the
+    // progress panel; Save without starting = create only; Cancel creates
+    // nothing. Every refusal is shown next to its field (setupErrorField)
+    // and nothing typed is lost.
+    async function openSetup(tid, install) {
       await loadCatalogInfo();
       const t = catalogCache[tid];
-      const single = !!(t && t.manifest.instances !== 'multi');
-      const first = install || single;
-      instCtx = { kind: 'create', tid, edited: {} };
-      openInstModal(modalHead((first ? 'Install ' : 'Add an instance of ') + escapeHtml(templateLabel(tid))) +
-        '<form class="inst-form" id="inst-create-form" autocomplete="off">' +
+      if (!t) { showToast('template ' + tid + ' not found', 'error'); return; }
+      const m = t.manifest || {};
+      const auth = m.auth || {};
+      const first = install || m.instances !== 'multi';
+      instCtx = {
+        kind: 'setup', tid, first, idEdited: false, edited: {}, domains: [], routers: [], busy: false,
+        access: !!auth.access_group, admin: !!auth.admin_group, accessName: auth.access_group || '', adminName: auth.admin_group || '',
+        setup: ((m.settings && m.settings.options) || []).filter(o => o.setup),
+      };
+      openInstModal(setupFormHtml(instCtx));
+      document.getElementById('setup-label').focus();
+      await refreshSetupDefaults();
+    }
+
+    // deriveInstanceId: the id a further instance of template tid gets
+    // from its label — "<tid>-<words of the label>", lowercase ASCII
+    // letters and digits joined by single "-" (CheckIDShape:
+    // [a-z0-9]+(-[a-z0-9]+)*, no "portcullis" segment), at most 31
+    // characters; a label starting with the app's own words doesn't repeat
+    // them ("Nextcloud family" → nextcloud-family). "" when the label
+    // gives nothing to add.
+    function deriveInstanceId(tid, label) {
+      const words = String(label || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
+        .split(/[^a-z0-9]+/).filter(w => w && w !== 'portcullis');
+      const base = String(tid).split('-');
+      let k = 0;
+      while (k < base.length && words[k] === base[k]) k++;
+      const rest = words.slice(k === base.length ? k : 0);
+      if (!rest.length) return '';
+      let id = [tid].concat(rest).join('-');
+      if (id.length > 31) id = id.slice(0, 31).replace(/-+$/, '');
+      return id === tid ? '' : id;
+    }
+
+    // idShapeProblem: why the Hub would refuse instance id ("" = none;
+    // the template id itself is the first instance's).
+    function idShapeProblem(id, tid) {
+      if (!id) return 'give the instance an id';
+      if (id === tid) return '';
+      if (!/^[a-z]/.test(id)) return 'the id starts with a lowercase letter';
+      if (id.length > 31) return 'the id has at most 31 characters';
+      if (!/^[a-z0-9]+(-[a-z0-9]+)*$/.test(id)) return 'lowercase letters and digits joined by single “-” (no “_”, “--” or “-” at the end)';
+      if (id.split('-').includes('portcullis')) return '“portcullis” can\'t be a part of the id';
+      return '';
+    }
+
+    // setupGroupNames: the groups "New groups from the label" creates.
+    function setupGroupNames(ctx, id) {
+      if (ctx.first) return { users: ctx.accessName, admins: ctx.adminName };
+      return { users: ctx.access ? 'users_' + (id || '<id>') : '', admins: ctx.admin ? 'admin_' + (id || '<id>') : '' };
+    }
+
+    // setupHost: the hostname of a subdomain on domain ("" = the domain
+    // itself, enrolled domains only).
+    function setupHost(sub, domain) {
+      sub = normHost(sub);
+      return sub ? sub + '.' + domain : normHost(domain);
+    }
+
+    function setupFormHtml(ctx) {
+      const app = appName(ctx.tid);
+      const err = k => '<div class="setup-err" data-setup-err="' + escapeHtml(k) + '" role="alert" hidden></div>';
+      let h = modalHead('Set up ' + escapeHtml(templateLabel(ctx.tid))) +
+        '<p class="settings-empty" style="margin-bottom:0.75rem">Nothing starts until you press Start.</p>' +
+        '<form class="inst-form setup-form" id="setup-form" autocomplete="off" novalidate>' +
         '<div class="inst-section"><h4>Name</h4>' +
-        '<label class="block" for="inst-new-label">Label</label>' +
-        '<input type="text" id="inst-new-label" value="" spellcheck="false" maxlength="64" required>' +
-        '<small>Required. What people see: the portal and My apps show it as “' + escapeHtml(appName(tid)) + ' · &lt;label&gt;”. One line, at most 64 characters (e.g. Team A); it can change later.</small>' +
-        '<label class="block" for="inst-new-id">Instance id</label>' +
-        '<input type="text" id="inst-new-id" value="' + escapeHtml(first ? tid : tid + '-') + '" spellcheck="false" maxlength="31"' + (single ? ' readonly' : '') + '>' +
-        '<small>' + (single ? 'This app runs one instance only: its id is the app\'s.' :
-          'Lowercase letters, digits and “-”, starting with a letter, at most 31 characters (e.g. ' + escapeHtml(tid) + '-team-a)' +
-          (first ? '; the first instance usually keeps the app\'s id' : '') + '.') +
-        ' It names the compose project, the Keycloak client and the groups; it can\'t change later.</small>' +
-        '<label class="block" for="inst-new-domain">Domain</label><select id="inst-new-domain"></select>' +
-        '<small>The main domain or an enrolled domain that is ready (Settings → Domains). Changing it re-fills the hostnames you haven\'t edited.</small></div>' +
-        '<div class="inst-section"><h4>Hostnames</h4><div id="inst-new-hosts"><p class="settings-empty">Loading…</p></div>' +
-        '<small>Pre-filled from the instance id and domain; each one is editable. One label under the domain: <code>&lt;label&gt;.&lt;domain&gt;</code> (or an enrolled domain itself).</small></div>' +
-        '<p class="settings-empty">The instance is created stopped (state <code>created</code>) with its own groups: review its settings, add members, then enable it on its page.</p>' +
-        '<div id="inst-create-result"></div>' +
-        '<div class="op-modal-actions"><button type="button" class="btn btn-secondary btn-sm" data-inst-close="1">Cancel</button>' +
-        '<button type="submit" class="btn btn-primary btn-sm">Create instance</button></div></form>');
-      document.getElementById('inst-new-label').focus();
-      await refreshCreateDefaults();
+        '<label class="block" for="setup-label">Label</label>' +
+        '<input type="text" id="setup-label" data-setup-label value="" spellcheck="false" maxlength="64" placeholder="e.g. Family" aria-required="true">' + err('label') +
+        '<small>Required. People see it as “' + escapeHtml(app) + ' · &lt;label&gt;” in the portal and My apps; change it any time.</small>' +
+        '<label class="block" for="setup-id">Instance id</label>' +
+        '<input type="text" id="setup-id" data-setup-id value="' + escapeHtml(ctx.first ? ctx.tid : '') + '" spellcheck="false" maxlength="31"' +
+        (ctx.first ? ' readonly' : ' placeholder="' + escapeHtml(ctx.tid) + '-…"') + '>' + err('id') +
+        '<small>' + (ctx.first ? '🔒 The first instance of ' + escapeHtml(app) + ' keeps the app\'s id.'
+          : 'Derived from the label; edit it now if you like: it can\'t change once the instance exists (it names the compose project, the volumes and the Keycloak client).') + '</small></div>' +
+        '<div class="inst-section"><h4>Address</h4><div data-setup-hosts><p class="settings-empty">Loading…</p></div>' + err('hosts') + '</div>';
+      if (ctx.access || ctx.admin) {
+        const g = setupGroupNames(ctx, ctx.first ? ctx.tid : '');
+        h += '<div class="inst-section setup-groups"><h4>Who can use it</h4>' +
+          '<label class="ps-check"><input type="radio" name="setup-groups" value="new" data-setup-groups-mode checked> New groups from the label</label>' +
+          '<small data-setup-derived>' + setupDerivedText(g) + '</small>' +
+          '<label class="ps-check"><input type="radio" name="setup-groups" value="existing" data-setup-groups-mode> Existing groups</label>' +
+          '<div data-setup-existing hidden>' +
+          (ctx.access ? '<label class="block" for="setup-users">Users</label>' +
+            '<input type="text" id="setup-users" data-setup-group="users" spellcheck="false" autocomplete="off" placeholder="a group">' + err('users') +
+            '<small>Its people can use ' + escapeHtml(app) + '. Not a built-in, administrator or permission group.</small>' : '') +
+          (ctx.admin ? '<label class="block" for="setup-admins">Admins</label>' +
+            '<input type="text" id="setup-admins" data-setup-group="admins" spellcheck="false" autocomplete="off" placeholder="a group, e.g. lldap_admin">' + err('admins') +
+            '<small>Its people administer ' + escapeHtml(app) + '. Any existing group (e.g. lldap_admin).</small>' : '') +
+          '<small>Chosen once: it can\'t change later, and deleting the instance never deletes these groups.</small></div>' + err('groups') + '</div>';
+      }
+      if (ctx.setup.length) {
+        h += '<div class="inst-section"><h4>Setup choices</h4>';
+        for (const o of ctx.setup) {
+          h += '<div class="setup-opt" data-setup-opt="' + escapeHtml(o.key) + '"><div class="setup-opt-label">' + escapeHtml(o.label || o.key) + '</div>' +
+            PortcullisSettings.setupEditorHtml(o) +
+            (o.fixed_after_start ? '<span class="setup-lock">🔒 fixed after the first start (changing it would mean moving the data)</span>'
+              : '<small>Change it any time in Settings.</small>') +
+            (o.description ? '<small>' + escapeHtml(o.description) + '</small>' : '') + err('setup:' + o.key) + '</div>';
+        }
+        h += '</div>';
+      }
+      return h + err('general') +
+        '<div class="op-modal-actions"><button type="button" class="btn btn-primary btn-sm" data-setup-go="start">Start</button>' +
+        '<button type="button" class="btn btn-secondary btn-sm" data-setup-go="save">Save without starting</button>' +
+        '<button type="button" class="btn btn-secondary btn-sm" data-inst-close="1">Cancel</button></div></form>';
     }
-    function validNewID(ctx, id) { return id === ctx.tid || INSTANCE_ID_RE.test(id); }
+    // usersGroupChoices: the directory's groups a users group may be.
+    function usersGroupChoices(d) {
+      const perms = new Set(Object.values((d && d.permissions) || {}));
+      return ((d && d.groups) || []).filter(g => !g.builtin && !g.admin && !perms.has(g.name));
+    }
+    function setupDerivedText(g) {
+      return [g.users ? 'users: <code>' + escapeHtml(g.users) + '</code>' : '', g.admins ? 'admins: <code>' + escapeHtml(g.admins) + '</code>' : '']
+        .filter(Boolean).join(' · ') + ' — created empty; add people on People.';
+    }
 
-    let createTimer = null;
-    async function refreshCreateDefaults() {
-      if (!instCtx || instCtx.kind !== 'create') return;
+    // The address rows: one domain for the instance, a subdomain per
+    // host router; re-filled from GET /api/instances/defaults for the id
+    // and domain, except the subdomains the admin edited.
+    let setupTimer = null;
+    async function refreshSetupDefaults() {
       const ctx = instCtx;
-      const id = document.getElementById('inst-new-id').value.trim();
-      const sel = document.getElementById('inst-new-domain');
-      const domain = sel.value || '';
+      if (!ctx || ctx.kind !== 'setup') return;
+      const form = document.getElementById('setup-form');
+      const box = form.querySelector('[data-setup-hosts]');
+      const sel = form.querySelector('[data-setup-domain]');
+      const id = form.querySelector('[data-setup-id]').value.trim();
+      let d;
       try {
-        const d = await instanceDefaults(ctx.tid, validNewID(ctx, id) ? id : '', domain);
+        d = await instanceDefaults(ctx.tid, idShapeProblem(id, ctx.tid) ? '' : id, sel ? sel.value : '');
+      } catch (err) {
+        if (instCtx === ctx && !box.dataset.drawn) box.innerHTML = errorBox(err);
+        return;
+      }
+      if (instCtx !== ctx) return;
+      ctx.domains = d.domains || [];
+      ctx.routers = d.routers || [];
+      if (!box.dataset.drawn) {
+        box.dataset.drawn = '1';
+        if (!ctx.routers.length) { box.innerHTML = '<p class="settings-empty">No web page: ' + escapeHtml(appName(ctx.tid)) + ' serves no hostnames.</p>'; return; }
+        const main = ctx.domains.find(x => x.main) || ctx.domains[0];
+        box.innerHTML = '<div class="host-row"><label for="setup-domain">domain</label>' +
+          '<select id="setup-domain" data-setup-domain>' + domainOptions(ctx.domains, main && main.name) + '</select>' +
+          '<small>The main domain or an enrolled domain that is ready (Settings → Domains).</small></div>' +
+          ctx.routers.map(r => '<div class="host-row"><label for="setup-sub-' + escapeHtml(r.router) + '">' + escapeHtml(r.router) + (r.immutable ? ' 🔒' : '') + '</label>' +
+            '<span class="setup-addr"><input type="text" id="setup-sub-' + escapeHtml(r.router) + '" data-setup-sub="' + escapeHtml(r.router) + '" spellcheck="false" autocomplete="off" placeholder="' + escapeHtml(r.subdomain) + '">' +
+            '<span class="setup-domain-name" data-setup-domain-name></span></span>' +
+            (r.immutable ? '<small>Choose carefully: ' + escapeHtml(appName(ctx.tid)) + ' binds its data to this hostname; it can\'t change after creation.</small>' : '') + '</div>').join('');
+      }
+      const domain = (form.querySelector('[data-setup-domain]') || {}).value || '';
+      form.querySelectorAll('[data-setup-domain-name]').forEach(s => { s.textContent = '.' + domain; });
+      for (const r of ctx.routers) {
+        const inp = form.querySelector('[data-setup-sub="' + CSS.escape(r.router) + '"]');
+        if (!inp || ctx.edited[r.router]) continue;
+        const host = normHost((d.hosts || {})[r.router] || '');
+        if (host === domain) inp.value = '';
+        else if (host.endsWith('.' + domain)) inp.value = host.slice(0, -domain.length - 1);
+      }
+    }
+
+    // A typed label re-derives the id (until the admin edits the id) and
+    // the new groups' names.
+    function setupInput(t) {
+      const ctx = instCtx;
+      const form = document.getElementById('setup-form');
+      if (!ctx || !form) return;
+      clearSetupErrorOf(form, t);
+      const idIn = form.querySelector('[data-setup-id]');
+      if (t.matches('[data-setup-sub]')) { ctx.edited[t.dataset.setupSub] = true; return; }
+      if (t.matches('[data-setup-id]')) ctx.idEdited = t.value.trim() !== '';
+      else if (t.matches('[data-setup-label]') && !ctx.first && !ctx.idEdited) idIn.value = deriveInstanceId(ctx.tid, t.value);
+      else return;
+      const der = form.querySelector('[data-setup-derived]');
+      if (der) der.innerHTML = setupDerivedText(setupGroupNames(ctx, idIn.value.trim()));
+      clearTimeout(setupTimer);
+      setupTimer = setTimeout(refreshSetupDefaults, 250);
+    }
+
+    // readSetupForm: what the form holds; bad: the editors' own errors.
+    function readSetupForm(ctx, form) {
+      const q = s => form.querySelector(s);
+      const v = { label: q('[data-setup-label]').value.trim(), id: q('[data-setup-id]').value.trim(), domain: '', subs: {}, mode: 'new', users: '', admins: '', setup: {}, bad: {} };
+      const sel = q('[data-setup-domain]');
+      if (sel) v.domain = sel.value;
+      form.querySelectorAll('[data-setup-sub]').forEach(i => { v.subs[i.dataset.setupSub] = i.value; });
+      const mode = q('[data-setup-groups-mode]:checked');
+      if (mode) v.mode = mode.value;
+      const u = q('[data-setup-group="users"]'), a = q('[data-setup-group="admins"]');
+      if (u) v.users = u.value.trim();
+      if (a) v.admins = a.value.trim();
+      for (const o of ctx.setup) {
+        const ed = q('[data-setup-opt="' + CSS.escape(o.key) + '"] [data-ed]');
+        if (!ed) continue;
+        const r = PortcullisSettings.readSetupEditor(o, ed);
+        if (r.error) v.bad['setup:' + o.key] = r.error;
+        else if (!r.empty) v.setup[o.key] = r.value;
+      }
+      return v;
+    }
+
+    // setupProblems: what the Hub would refuse, said before sending
+    // (field → message); the Hub checks everything again.
+    function setupProblems(ctx, v) {
+      const p = Object.assign({}, v.bad);
+      if (!v.label) p.label = 'give the instance a label';
+      else if ([...v.label].length > 64) p.label = 'the label has at most 64 characters';
+      const idp = ctx.first ? '' : idShapeProblem(v.id, ctx.tid);
+      if (idp) p.id = idp;
+      const hp = ctx.routers.map(r => hostProblem(r.router, setupHost(v.subs[r.router], v.domain), ctx.domains, false)).filter(Boolean);
+      if (hp.length) p.hosts = hp.join('; ');
+      if (v.mode === 'existing') {
+        if (ctx.access && !v.users) p.users = 'choose the group whose people can use it';
+        if (ctx.admin && !v.admins) p.admins = 'choose the group whose people administer it';
+      }
+      return p;
+    }
+
+    // setupRequestBody: POST /api/instances's body (§11.9 "Create body").
+    function setupRequestBody(ctx, v) {
+      const body = { template: ctx.tid, id: v.id, label: v.label };
+      const routers = Object.keys(v.subs).sort();
+      if (routers.length) {
+        body.hosts = {};
+        for (const r of routers) body.hosts[r] = setupHost(v.subs[r], v.domain);
+      }
+      if (ctx.access || ctx.admin) {
+        body.groups = { mode: v.mode === 'existing' ? 'existing' : 'new' };
+        if (body.groups.mode === 'existing') {
+          if (ctx.access) body.groups.users = v.users;
+          if (ctx.admin) body.groups.admins = v.admins;
+        }
+      }
+      if (Object.keys(v.setup).length) body.setup = Object.assign({}, v.setup);
+      return body;
+    }
+
+    // setupErrorField: the field a Hub refusal is about — label, id,
+    // hosts, users, admins, groups, setup:<key> — else general.
+    function setupErrorField(msg, ctx, v) {
+      const s = String(msg || '');
+      let m;
+      if ((m = /^setup: (\S+) is not a setup option/.exec(s))) return 'setup:' + m[1];
+      for (const o of ctx.setup || []) {
+        if (s.includes('setting ' + o.key + ':') || s.startsWith(o.key + ':') || s.startsWith((o.label || o.key) + ' is fixed after the first start') ||
+          s.startsWith('setup choice ' + o.key + ' ')) return 'setup:' + o.key;
+      }
+      if (/\bhostnames?\b|\bhost routers?\b/.test(s)) return 'hosts';
+      if (/\blabel\b/.test(s)) return 'label';
+      if (/^groups: users\b|^the users group\b/.test(s)) return 'users';
+      if (/^groups: admins\b/.test(s)) return 'admins';
+      if ((m = /^(?:unknown group|group) (\S+)/.exec(s))) {
+        const g = m[1].toLowerCase();
+        if (v && v.users && v.users.toLowerCase() === g) return 'users';
+        if (v && v.admins && v.admins.toLowerCase() === g) return 'admins';
+        return 'groups';
+      }
+      if (/^groups:/.test(s)) return 'groups';
+      if (/^instance id\b|^instance .* already exists|^compose project\b|^volume \S+ already exists|^invalid template id|^instance \S+ id\b|^template \S+ is instances: single/.test(s)) return 'id';
+      return 'general';
+    }
+
+    // clearSetupErrorOf: editing a field clears the refusal shown for it.
+    function clearSetupErrorOf(form, t) {
+      const opt = t.closest('[data-setup-opt]');
+      const key = opt ? 'setup:' + opt.dataset.setupOpt : t.matches('[data-setup-label]') ? 'label' : t.matches('[data-setup-id]') ? 'id'
+        : t.matches('[data-setup-sub], [data-setup-domain]') ? 'hosts' : t.dataset.setupGroup || (t.matches('[data-setup-groups-mode]') ? 'groups' : '');
+      if (!key) return;
+      const slot = form.querySelector('[data-setup-err="' + CSS.escape(key) + '"]');
+      if (slot) { slot.hidden = true; slot.textContent = ''; }
+      t.removeAttribute('aria-invalid');
+    }
+    function clearSetupErrors(form) {
+      form.querySelectorAll('[data-setup-err]').forEach(e => { e.hidden = true; e.textContent = ''; });
+      form.querySelectorAll('[aria-invalid]').forEach(e => e.removeAttribute('aria-invalid'));
+    }
+    // showSetupError: msg next to field key (the general slot when the
+    // form has no such field); err: the Hub's refusal (status, output…).
+    function showSetupError(form, key, msg, err) {
+      let slot = form.querySelector('[data-setup-err="' + CSS.escape(key) + '"]');
+      if (!slot) { slot = form.querySelector('[data-setup-err="general"]'); key = 'general'; }
+      if (key === 'general' && err) slot.innerHTML = errorBox(err);
+      else slot.textContent = msg;
+      slot.hidden = false;
+      const near = key === 'hosts' ? form.querySelector('[data-setup-sub]') : key.startsWith('setup:') ? slot.parentElement.querySelector('[data-ed] input, [data-ed] select, [data-ed] textarea')
+        : slot.previousElementSibling;
+      if (near && near.matches('input, select, textarea')) near.setAttribute('aria-invalid', 'true');
+      (near || slot).scrollIntoView({ block: 'nearest' });
+    }
+
+    async function submitSetup(start) {
+      const ctx = instCtx;
+      const form = document.getElementById('setup-form');
+      if (!ctx || ctx.kind !== 'setup' || ctx.busy || !form) return;
+      clearSetupErrors(form);
+      const v = readSetupForm(ctx, form);
+      const problems = setupProblems(ctx, v);
+      const keys = Object.keys(problems);
+      if (keys.length) { keys.forEach(k => showSetupError(form, k, problems[k])); return; }
+      ctx.busy = true;
+      form.querySelectorAll('[data-setup-go]').forEach(b => { b.disabled = true; });
+      let created;
+      try {
+        created = await runInstanceOp('/api/instances', 'POST', setupRequestBody(ctx, v), v.id);
+      } catch (err) {
+        ctx.busy = false;
         if (instCtx !== ctx) return;
-        ctx.domains = d.domains;
-        ctx.routers = d.routers || [];
-        if (!sel.options.length) sel.innerHTML = domainOptions(d.domains, d.domains[0] && d.domains[0].name);
-        const box = document.getElementById('inst-new-hosts');
-        const current = collectHosts(box);
-        const hosts = {};
-        for (const r of ctx.routers) hosts[r.router] = ctx.edited[r.router] ? current[r.router] : ((d.hosts || {})[r.router] || '');
-        box.innerHTML = ctx.routers.length ? hostRows(ctx.routers, hosts, false, ctx.tid) : '<p class="settings-empty">No web page: this template serves no hostnames.</p>';
-      } catch (err) {
-        document.getElementById('inst-new-hosts').innerHTML = errorBox(err);
+        form.querySelectorAll('[data-setup-go]').forEach(b => { b.disabled = false; });
+        const key = setupErrorField(err.message, ctx, v);
+        showSetupError(form, key, err.message, err);
+        return;
       }
-    }
-
-    async function submitCreateInstance() {
-      const ctx = instCtx;
-      const out = document.getElementById('inst-create-result');
-      const id = document.getElementById('inst-new-id').value.trim();
-      if (!validNewID(ctx, id)) { out.innerHTML = errorBox(new Error('the instance id must match ' + INSTANCE_ID_RE.source)); return; }
-      const label = document.getElementById('inst-new-label').value.trim();
-      if (!label) { out.innerHTML = errorBox(new Error('give the instance a label')); return; }
-      const hosts = collectHosts(document.getElementById('inst-new-hosts'));
-      const problems = Object.keys(hosts).sort().map(r => hostProblem(r, hosts[r], ctx.domains || [], false)).filter(Boolean);
-      if (problems.length) { out.innerHTML = '<div class="op-msg inst-error">' + problems.map(escapeHtml).join('<br>') + '</div>'; return; }
-      out.innerHTML = '';
-      const go = out.closest('form').querySelector('[type="submit"]');
-      go.disabled = true;
-      try {
-        const res = await runInstanceOp('/api/instances', 'POST', { template: ctx.tid, id, label, hosts }, id);
-        pageFlash = { id, notice: 'Created. It is stopped: review its settings, then enable it.', warnings: res.warnings };
-        if (instCtx === ctx) closeInstModal();
+      const id = v.id, warnings = created.warnings || [];
+      if (instCtx === ctx) closeInstModal();
+      if (!start) {
+        pageFlash = { id, notice: 'Created. Nothing runs yet: review its settings and groups, then press Enable.', warnings };
         navInstance(id, 'overview', '');
-      } catch (err) {
-        go.disabled = false;
-        if (!err.shown) out.innerHTML = errorBox(err);
+        return;
       }
+      pageFlash = { id, notice: 'Created. Starting it…', warnings };
+      navInstance(id, 'overview', '');
+      if (!(await confirmLanOnly(id))) {
+        pageNotice(id, { notice: 'Created, not started: press Enable once its ports are blocked from the internet.', warnings });
+        return;
+      }
+      try {
+        const res = await runInstanceOp('/api/templates/enable', 'POST', { id }, id);
+        pageNotice(id, { notice: 'Started.', warnings: warnings.concat(res.warnings || []) });
+      } catch (err) {
+        pageNotice(id, { notice: 'Created, but it didn\'t start: the instance stays created and stopped.', warnings, error: err });
+      }
+      refreshInstances();
     }
 
     // ── delete (typed id, §11.4) ─────────────────────────
@@ -4227,8 +4519,8 @@
       const t = e.target;
       let el;
       if ((el = t.closest('[data-op-show]'))) { e.stopPropagation(); openOpPanel(el.dataset.opShow); return; }
-      if ((el = t.closest('[data-install]'))) { openCreateInstance(el.dataset.install, true); return; }
-      if ((el = t.closest('[data-add-instance]'))) { openCreateInstance(el.dataset.addInstance, false); return; }
+      if ((el = t.closest('[data-install]'))) { openSetup(el.dataset.install, true); return; }
+      if ((el = t.closest('[data-add-instance]'))) { openSetup(el.dataset.addInstance, false); return; }
       if ((el = t.closest('[data-open-instance]'))) {
         if (instCtx) closeInstModal();
         navInstance(el.dataset.openInstance, 'overview', '');
@@ -4259,6 +4551,10 @@
       if ((el = t.closest('[data-bk-cancel]'))) { const row = el.closest('[data-bk-panel]'); row.hidden = true; row.firstElementChild.innerHTML = ''; return; }
       if (t.closest('#instance-page')) { pageClick(t); return; }
       if (!t.closest('#inst-modal')) return;
+      if ((el = t.closest('#setup-form [data-setup-go]'))) { submitSetup(el.dataset.setupGo === 'start'); return; }
+      // The setup form closes only by Cancel / × (a stray click outside
+      // keeps what was typed).
+      if (t.id === 'inst-modal' && instCtx && instCtx.kind === 'setup') return;
       if (t.id === 'inst-modal' || t.closest('[data-inst-close]')) closeInstModal();
     });
     // The instance page's own buttons.
@@ -4296,14 +4592,17 @@
         if (btn && pageCtx) btn.disabled = t.value.trim() !== pageCtx.id;
         return;
       }
-      if (instCtx && instCtx.kind === 'create') {
-        if (t.dataset && t.dataset.hostRouter) { instCtx.edited[t.dataset.hostRouter] = true; return; }
-        if (t.id === 'inst-new-id') { clearTimeout(createTimer); createTimer = setTimeout(refreshCreateDefaults, 250); }
-      }
+      if (instCtx && instCtx.kind === 'setup' && t.closest('#setup-form')) setupInput(t);
     });
     document.addEventListener('change', e => {
       const t = e.target;
-      if (t.id === 'inst-new-domain') { refreshCreateDefaults(); return; }
+      if (t.closest && t.closest('#setup-form')) clearSetupErrorOf(document.getElementById('setup-form'), t);
+      if (t.matches('#setup-form [data-setup-domain]')) { refreshSetupDefaults(); return; }
+      if (t.matches('#setup-form [data-setup-groups-mode]')) {
+        document.querySelector('#setup-form [data-setup-existing]').hidden = t.value !== 'existing';
+        return;
+      }
+      if (t.matches('#setup-form [data-part="bool"]')) { t.parentElement.lastChild.textContent = t.checked ? ' on' : ' off'; return; }
       if (t.matches('[data-policy-inherit]')) { togglePolicyInherit(t, t.dataset.policyInherit); return; }
       if (t.matches('[data-signin-toggle]')) { toggleSignIn(t); return; }
       const pane = t.closest('#instance-page [data-ipane="logs"]');
@@ -4314,12 +4613,12 @@
       }
     });
     document.addEventListener('submit', e => {
-      if (e.target.id === 'inst-create-form') { e.preventDefault(); submitCreateInstance(); }
+      if (e.target.id === 'setup-form') e.preventDefault(); // Enter starts nothing: Start, Save without starting
       if (e.target.matches('[data-global-settings-form]')) saveGlobalSettings(e);
     });
     document.addEventListener('keydown', e => {
       const t = e.target;
-      if (e.key === 'Escape' && !oppOpen() && document.getElementById('inst-modal').classList.contains('visible')) { closeInstModal(); return; }
+      if (e.key === 'Escape' && !oppOpen() && document.getElementById('inst-modal').classList.contains('visible') && !(instCtx && instCtx.kind === 'setup')) { closeInstModal(); return; }
       if (!pageCtx || !t.closest || !t.closest('#instance-page')) return;
       // Expert: Enter runs the shell command; Tab indents the override.
       if (e.key === 'Enter' && t.matches('[data-x-term-cmd]')) { e.preventDefault(); execCmd(pageCtx.id, t.closest('[data-ipane]')); return; }
@@ -4330,6 +4629,14 @@
         t.value = t.value.substring(0, start) + '  ' + t.value.substring(t.selectionEnd);
         t.selectionStart = t.selectionEnd = start + 2;
       }
+    });
+    // The setup form's group pickers: the users field leaves out the
+    // built-in, administrator and permission groups (the Hub refuses
+    // them: it stays the authority); admins may be any group.
+    PortcullisPicker.bind(document.getElementById('inst-modal-box'), t => {
+      const role = t.dataset && t.dataset.setupGroup;
+      if (!role) return null;
+      return { kind: 'group', source: () => PortcullisPicker.overview().then(d => role === 'users' ? usersGroupChoices(d) : ((d && d.groups) || [])) };
     });
     loadCatalogInfo().catch(() => {});
     refreshInstances();

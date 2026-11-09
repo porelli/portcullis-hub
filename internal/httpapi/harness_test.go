@@ -172,6 +172,8 @@ func TestHarness(t *testing.T) {
 	extra["gitea"] = [2]string{harnessGiteaManifest, harnessGiteaCompose}
 	// Apps and the instance page (apps Task 6): a one-off setup job.
 	extra["guacamole"] = [2]string{harnessGuacManifest, harnessGuacCompose}
+	// The setup form (apps Task 7): a database choice.
+	extra["nextcloud"] = [2]string{harnessNextcloudManifest, harnessNextcloudCompose}
 	hrun := &harnessRunner{}
 	aiDir := t.TempDir()
 	aiRecipient, aiGateData := harnessAIFiles(t, aiDir)
@@ -224,7 +226,7 @@ func TestHarness(t *testing.T) {
 	// The shared navigation's Hub link goes to this Hub listener.
 	e.s.HubURL = "http://" + addr + "/"
 	h := e.s.Hub
-	for _, id := range append(slices.Clone(harnessFixtures), "photos", "samba", "smbfixture", "aiapp", "homeauto", "ai-chat", "plain", "gitea", "guacamole") {
+	for _, id := range append(slices.Clone(harnessFixtures), "photos", "samba", "smbfixture", "aiapp", "homeauto", "ai-chat", "plain", "gitea", "guacamole", "nextcloud") {
 		if h.Template(id) == nil {
 			t.Fatalf("fixture %s not loaded (see the log)", id)
 		}

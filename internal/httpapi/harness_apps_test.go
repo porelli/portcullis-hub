@@ -91,3 +91,55 @@ func (e *harnessEngine) jobContainers(id string) map[string]int {
 	}
 	return e.jobs[id]
 }
+
+// The setup form (apps & instances Task 7): a Nextcloud-shaped template
+// with a database choice (setup, fixed after the first start, compose
+// profiles), a storage quota asked at setup (changeable later) and a
+// setting that isn't asked (trash days). Nothing of it is installed: the
+// Marketplace offers Install….
+const harnessNextcloudManifest = `name: Nextcloud
+category: storage
+icon: "☁️"
+description: "Files and calendars (the setup form fixture: a database choice)"
+instances: multi
+ai: {unsupported: "test fixture"}
+auth:
+  method: header-auth
+  group_access: true
+  access_group: users_nextcloud
+  admin_group: admin_nextcloud
+settings:
+  options:
+    - key: database
+      label: Database
+      type: enum
+      options:
+        - {value: mysql, label: MySQL / MariaDB}
+        - {value: postgres, label: PostgreSQL}
+      default: postgres
+      setup: true
+      fixed_after_start: true
+      profiles:
+        mysql: [db-mysql]
+        postgres: [db-postgres]
+    - key: default_quota
+      label: Default storage quota
+      type: int
+      unit: GiB
+      min: 1
+      default: 10
+      setup: true
+    - key: trash_days
+      label: Trash days
+      type: int
+      default: 30
+`
+
+const harnessNextcloudCompose = "services:\n" +
+	"  app:\n    image: nextcloud:31\n    environment:\n      DB_TYPE: ${DATABASE:-postgres}\n      QUOTA_GB: ${DEFAULT_QUOTA:-10}\n      TRASH_DAYS: ${TRASH_DAYS:-30}\n" +
+	"    labels:\n" +
+	"      traefik.enable: \"true\"\n" +
+	"      traefik.http.routers.nextcloud.rule: Host(`${PORTCULLIS_HOST_NEXTCLOUD:-cloud.portcullis.local}`)\n" +
+	"      traefik.http.services.nextcloud.loadbalancer.server.port: \"80\"\n" +
+	"  db-mysql:\n    image: mariadb:11.8\n    profiles: [db-mysql]\n" +
+	"  db-postgres:\n    image: postgres:17\n    profiles: [db-postgres]\n"
