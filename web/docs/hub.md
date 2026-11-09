@@ -8,9 +8,41 @@ the core `docker-compose.yml` (`HUB_IMAGE`). There is nothing to build.
 Open it at `https://hub.<your-domain>`. It requires a Keycloak login and
 membership of `lldap_admin`.
 
-## App Catalog
+## Navigation
 
-The main view lists every template from every [template source](#template-sources) as a card:
+The Hub has six main tabs under the shared navigation (Portal · Hub · People):
+
+- **Apps** — installed apps and their instances (one per app, showing all its instances)
+- **Marketplace** — all available templates from every [template source](#template-sources), with installation and template source management
+- **Audit log** — [operation and access audit](#audit-log)
+- **Doctor** — [system health checks and fixes](#doctor)
+- **Settings** — [global server settings](#settings-tab-global) (shared folders, local networks, domains)
+- **People ↗** — opens the People subdomain (`people.<domain>`) in the same tab
+
+## Apps
+
+The **Apps** page lists every installed app (an app with at least one instance: a state entry, an enabled instance, or an operation record). The page shows:
+
+- **Drift / missing-groups / LLDAP-sweep banners** at the top (see [Drift detection](#drift-detection), [Missing groups](#missing-groups))
+- **"Installed apps"** heading with:
+    - **All backups** — list of every instance's backups across all apps
+    - **+ Add an app** — opens the Marketplace
+- One **app block** per installed app, containing:
+    - App icon, name, and "N instances" count
+    - **+ Add instance** button (for `instances: multi` templates) — opens the [setup form](#setup-before-the-first-start)
+    - One **instance row** per instance, showing:
+        - Status dot (green = all running, amber = partially running, red = stopped, gray = not started)
+        - Name as **`<App> · <label>`** (or just **`<App>`** when the label equals the app name), linking to the [instance page](#instance-page)
+        - First hostname (or "no web page" for router-less apps)
+        - Users group name (linking to `people.<domain>`) and member count in parentheses, or "missing" in red when the group doesn't exist
+        - Status pill: "running · n of m", "not started yet", "last \<operation\> failed", or the current operation ("Enabling… show progress")
+        - **Enable** / **Disable** button
+
+For an instance with duplicate names (two instances of the same app with identical labels), the row shows its id first in muted text to distinguish them.
+
+## Marketplace
+
+The **Marketplace** page shows every template from every [template source](#template-sources) as a card, whether installed or not:
 
 - icon, name and one-line description
 - auth badges:
@@ -21,50 +53,83 @@ The main view lists every template from every [template source](#template-source
 | **Group Access** | group-gate restricts the instance's hostnames to its access group (`users_<app>` for the default instance; `auth.group_access`) |
 | **Group Admin** | The app maps the `admin_<app>` group to its admin role (`auth.group_admin`) |
 | **Method** | `forward-auth`, `native-oidc`, `header-auth`, `mtls`, `custom` or `public` |
+| **No web page** | The template has no host routers (e.g., a background service) |
 
-- whether the app is enabled and running
-- **+ Add instance** button (for `instances: multi` templates): create additional
-  independent deployments with their own data and settings. See [App instances](#app-instances).
+- tags (e.g., `productivity`, `media`)
+- footer showing:
+    - For installed apps: **"in use · N instances"**, **Show in Apps** (filters the Apps page to that app), and **+ Add instance** (for multi templates)
+    - For not-yet-installed apps: **Install…**
 
-### Enabling an app
+Below the cards, the **Template sources** section (moved from the old Template Sources tab) shows each configured source with its URL, update interval, and management buttons.
 
-1. Open the app card and review the details.
-2. Fill in its settings (media folders, ports, options) and, if needed, its
-   [access policy](auth-policies.md).
+## Setup before the first start
+
+Clicking **Install…** (Marketplace) or **+ Add instance** (Apps, for multi templates) opens the **setup form**. Nothing starts until you press **Start**.
+
+The form has these sections:
+
+### Name
+
+- **Label** (required, 1–64 characters): shown everywhere as **`<App> · <label>`** in the portal, Hub, My apps, and People. The Hub derives the instance id from the label as you type (lowercase, accents folded, punctuation removed, no `portcullis` segments, max 31 characters). For example, "Team Zürich" → `nextcloud-team-zurich`.
+- **Instance id**: editable before creation, immutable afterward. The first instance (Install…, or a single template) shows the template id with 🔒 (read-only).
+
+### Address
+
+- **Domain picker**: choose the main domain or an enrolled extra domain (domains not yet `ready` are disabled)
+- **Subdomain per host router**: shown as `[subdomain].<domain>`. An empty subdomain means the enrolled domain itself. Pre-filled from defaults; edits are kept.
+- Templates with no web page show "No web page".
+
+### Who can use it
+
+Only shown when the manifest declares an `access_group` or `admin_group`. Two choices:
+
+- **New groups from the label**: creates `users_<id>` / `admin_<id>` (or the manifest's group names for the first instance). For the first instance, groups with other names aren't created (only a warning) and must exist on People.
+- **Existing groups**: pick any existing group. The Users field excludes built-in, administrator, and permission groups; Admins may be any group.
+
+### Setup choices
+
+The template's `setup: true` options with their defaults. Each shows whether it can change later in Settings or is **🔒 fixed after the first start** (changing it would mean moving the data). Examples: database engine (fixed), trash retention days (changeable).
+
+### Buttons
+
+- **Start**: creates the instance, then enables it (opens the instance page and shows the progress panel; a LAN-only confirmation may appear first)
+- **Save without starting**: creates the instance but leaves it disabled (opens the instance page with "Created. Nothing runs yet")
+- **Cancel**: creates nothing
+
+Inline errors show refused values (label, id shape, hostname collisions, unknown groups, bad setup values) under their fields. The Hub is the authority: typing a built-in group in the Users field is sent and refused inline.
 
 !!! warning "LAN-only ports (file sharing and other apps)"
     Apps with `lan_only` ports (Samba port 445, Time Machine port 445, Pi-hole DNS port 53, NetBird's STUN/TURN ports) publish those ports directly on the host, **bypassing Docker's network isolation and any firewall rules like ufw**. Anyone on your network (or the internet, if the port is exposed through your router) can reach the port. See [LAN-only ports](hardening.md#lan-only-ports-and-host-firewalls) in the hardening guide.
 
     File-sharing apps (Samba, Time Machine) also require [Local networks](file-sharing.md#2-configure-local-networks) to be configured: an empty Local networks list **keeps the app from starting** (its container exits at boot, and the doctor reports `local_networks_empty`). Set Local networks before enabling a file-sharing app.
 
-3. Click **Enable**.
+### What happens when you enable
 
 Before anything starts, the Hub refuses to enable the app if:
 
+Before anything starts, the Hub refuses to enable an instance if:
+
 - one of its host ports (from Settings or its [custom override](#custom-override))
-  overlaps a host port of another enabled app (HTTP 409, "port
+  overlaps a host port of another enabled instance (HTTP 409, "port
   0.0.0.0:3300/tcp already claimed by enabled app …"), or
 - one of its hostnames is already used by another instance, enabled or not, or
   is still routed by one (HTTP 409). Every hostname has exactly one owner,
   because group-gate keys groups and policies by full hostname (policy v5).
+- a bound group (one chosen at setup as "Existing groups") that was a valid users group at creation is now built-in, administrator, or a permission group (HTTP 409, "can't start")
 
-It then creates the app's **missing access and admin groups** in LLDAP, as you
+When groups mode is "new", it creates the instance's **missing access and admin groups** in LLDAP, as you
 (the enabling admin, through the same audited Users & Groups operation as
-creating a group): `users_<id>` / `admin_<id>` for an instance, and for the
-default instance the manifest's `access_group` / `admin_group` when they are
-exactly `users_<template>` / `admin_<template>`. Existing groups are left
-alone. A group with any other name (a group the template shares with other
-apps) is never created for you: the enable answers a warning and you create it
-in Users & Groups. If creating a group fails, the app isn't enabled; a group
-created before a later failure stays (empty — the app needs it anyway). The
+creating a group): `users_<id>` / `admin_<id>` for every group the manifest declares.
+Existing groups are left alone. If creating a group fails, the instance isn't enabled; a group
+created before a later failure stays (empty — the instance needs it anyway). The
 progress panel's groups step lists the groups it created and the ones that
-already existed.
+already existed. When groups mode is "existing", no groups are created; the step shows "bound to \<users\>, \<admins\>".
 
-It then generates the per-app `.env` and compose override, copies the template
-directory to `<core>/templates/<app-id>/`, registers the template's Keycloak
+The Hub then generates the instance's `.env` and compose override, copies the template
+directory to `<core>/templates/<app-id>/` (shared by all instances), registers the instance's Keycloak
 clients (a client ID owned by another template or by nobody provable aborts
 the enable with HTTP 409, see [Keycloak clients](#keycloak-clients)) and runs
-`docker compose up`. The app is recorded as enabled only after
+`docker compose up`. The instance is recorded as enabled only after
 `compose up` succeeds. Then the Hub publishes its group, admin paths and policy
 to group-gate.
 
@@ -73,20 +138,22 @@ service on the host, e.g. `systemd-resolved` on `127.0.0.53:53`), so those
 conflicts surface as a `compose up` failure. See
 [When an operation fails](#when-an-operation-fails).
 
-### Missing groups
+## Missing groups
 
-An enabled app whose access or admin group isn't in LLDAP (deleted in LLDAP's
-own UI, or the app was enabled before the Hub created groups on enable) lets
-**nobody** sign in: Keycloak and group-gate find no member. The App Catalog
-then shows a **Missing groups** banner listing each such app and its missing
+An enabled instance whose access or admin group isn't in LLDAP (deleted in LLDAP's
+own UI, or the instance was enabled before the Hub created groups on enable) lets
+**nobody** sign in: Keycloak and group-gate find no member. The **Apps** page
+then shows a **Missing groups** banner listing each such instance (by id, linking to its page) and its missing
 groups (checked every minute). **Create missing groups** creates every listed
 `users_<id>` / `admin_<id>` group as you (audited as `group.create`); **Create**
-on a row does it for one app. Groups with other names are listed with "create
-on the people page". Every listed name links to its group page on
+on a row does it for one instance. Groups with other names (including bound groups) are listed with "create
+on the people page". Every listed group name links to its group page on
 `people.<domain>`. The new groups are empty: add the people who should have
 access on their pages. The Hub log's warning `group … not found in keycloak` points to the
 same button. API: `GET /api/instances/missing-groups`,
 `POST /api/instances/missing-groups` with `{}` (all) or `{"ids": ["<id>"]}`.
+
+An instance's **Groups** tab also shows a "doesn't exist" message with a **Create missing groups** button when a group is gone.
 
 ### Progress and Stop
 
@@ -241,21 +308,19 @@ time. A second request while one is in progress answers HTTP 409 with the
 running operation, whose progress panel the UI shows
 ([Progress and Stop](#progress-and-stop)).
 
-## App detail panel
+## Instance page
 
-Each enabled app has four tabs: **Settings**, **Status**, **Logs** and **Expert**.
-An app that is not enabled has **Settings** and **Expert**, plus **Logs** when
-its last operation failed.
+Each instance has its own page (`#apps/<id>`, or `#apps/<id>/<tab>` for a specific tab). The page shows:
 
-When the [doctor](#doctor) has findings about the app, the panel shows a
-"Doctor: …" line that opens the Doctor tab.
+- **Breadcrumbs**: Apps › \<App\> ›
+- **Header**: **`<App> · <label>`** (or just **`<App>`** when the label equals the app name), status pill, **Enable** / **Disable** button
+- **Operation banner** (when an operation is running or failed): shows progress or error, with a **Details** link to the progress panel
+- **Doctor line** (when the [doctor](#doctor) has findings): "Doctor: …" with a link to the Doctor tab
+- **Tabs**: Overview · Settings · Groups · (File sharing) · Logs · Backups · AI · Expert · Delete
 
-Every app also has an **AI support** tab (deep link `#app/<id>/ai`): whether
-the AI can act in the app, its companions, the switch and mode, the people
-who can use it, a revoke button and the recent AI activity; for an AI page,
-its model providers. Templates without AI support show the reason and, when
-the template names one, an alternative "not vetted by Portcullis". See
-[AI support](ai.md#switching-an-app-on).
+The File sharing tab appears only for templates with `person_secret` credentials (Samba, Time Machine).
+
+Every instance, including the default instance, gets the same page structure. Deep links from the old `#app/<id>/<tab>` format redirect to `#apps/<id>/<tab>`.
 
 ### Settings
 
@@ -316,21 +381,62 @@ Input validation:
   written to the app's `.env` may not contain `'` or `\` either: they are
   single-quoted there.
 
-### Status
+### Overview
 
-Lists each container of the app's compose project with its state:
+The **Overview** tab shows:
 
-- **All containers running**
-- **Some containers not running**
-- **Containers stopped**
+- **Auth notes** (how the app enforces auth, from the template)
+- **Addresses**: each hostname as a link, editable (see [Changing hostnames](#changing-hostnames) below)
+- **Containers**: one row per service with its name, state, and status. One-off jobs show as "setup job done" (green), "setup job failed" (red), "setup job running" (amber), or "setup job pending" (gray). Services with no container show "(none) · \<svc\> · no container" in red.
+- **Instance**: label (editable inline), instance id, template, compose project name
+- **Last operation**: most recent operation (enable, restart, backup, etc.) with its status and timestamp
 
-The information comes from the Docker Engine API through the Hub's socket proxy.
+**Editing the label**: click the label to edit it inline. The change is saved with **Save** and updates the instance's name everywhere (portal, My apps, People, consent texts).
+
+### Groups
+
+The **Groups** tab shows the instance's access and admin groups:
+
+- Group name (linking to `people.<domain>` in a new tab)
+- Kind: "New group (manual)" for groups created at setup, or "Existing group" for bound groups, plus rule details ("rule-based: \<rule\>" or "built-in LLDAP group")
+- Member count and first names of up to 3 members, with "+N" for the rest
+- **Manage on People ↗** button (opens the group page in a new tab)
+
+When a group doesn't exist, the tab shows "doesn't exist" in red with a **Create missing groups** button.
 
 ### Logs
 
-Shows the app's [last operation](#when-an-operation-fails) (with compose's
-output if it failed), then the last 100, 200 or 500 log lines of the app's
-containers. Use **Refresh** to reload.
+The **Logs** tab shows:
+
+- The instance's [last operation](#when-an-operation-fails) (with compose's output if it failed)
+- A container picker: **All containers** or one specific container (only the instance's services)
+- Log lines (last 100, 200, or 500 lines)
+- **Refresh** button to reload
+
+### Backups
+
+The **Backups** tab shows:
+
+- List of this instance's backups (name, size, timestamp)
+- **Back up now** button
+- **Restore here** (same-instance restore) for each backup
+- **Restore as new** (restore into a new instance id, with an optional label)
+- **All backups** button (shows backups across all instances)
+
+See [Instance backups](#instance-backups) and [Restoring an instance](#restoring-an-instance).
+
+### AI
+
+The **AI** tab (deep link `#apps/<id>/ai`) shows:
+
+- Whether the AI can act in this instance
+- Its companions (services the AI can call)
+- The switch and mode (proactive, request-only, or off)
+- The people who can use it (based on the instance's groups)
+- A **Revoke** button to revoke all AI tokens for this instance
+- Recent AI activity (last N AI actions)
+
+For AI pages (`ai-chat`), the tab also shows the configured model providers. Templates without AI support show the reason and, when the template names one, an alternative "not vetted by Portcullis". See [AI support](ai.md#switching-an-app-on).
 
 ### Expert
 
@@ -338,10 +444,10 @@ Advanced tools with direct access to the compose configuration and the
 containers. Compose runs with three files, later ones winning:
 
 ```text
-docker compose -p portcullis-<app> \
+docker compose -p portcullis-<id> \
   -f <template>/compose.yml \
-  -f ${HUB_DATA_DIR}/overrides/<app>.override.yml \
-  -f ${HUB_DATA_DIR}/overrides/<app>.user.yml
+  -f ${HUB_DATA_DIR}/overrides/<id>.override.yml \
+  -f ${HUB_DATA_DIR}/overrides/<id>.user.yml
 ```
 
 1. **compose.yml** (read-only). The template's file as it comes from the
@@ -350,35 +456,61 @@ docker compose -p portcullis-<app> \
    the template in its source (see [Template sources](#template-sources)).
 2. **Hub override** (read-only). Generated from Settings and regenerated
    before every `compose up`: bind mounts, host ports, each router's
-   `tls.options` derived from the access policy, router middlewares for apps
+   `tls.options` derived from the access policy, router middlewares for instances
    with their own login, and the public-exception router with its strip
    middleware when on. Never hand-edited.
 3. **Custom override** (editable). Your own additions, stored by the Hub per
-   app, outside the template clone, so template syncs and updates keep it.
+   instance, outside the template clone, so template syncs and updates keep it.
    See [Custom override](#custom-override).
 
-- **Environment variables.** One row per variable of the instance's `.env`
-  with its default (what the template, the Hub or a setting writes; a
-  secret's only as `[set]`), its source and your value. **Override** sets one
-  variable, **Reset** puts it back to its default, and **+ Add your own
-  variable** adds a new one (Remove takes it away again). Your values are
-  written single-quoted after everything else in the `.env`, so they win; a
-  value may not contain `'`, `\`, a line break or another control character.
-  Variables the Hub or a setting sets, secrets, and any variable the
-  template's compose file uses outside a service's `environment:` (an
-  image tag, a label, a volume source, …) can't be overridden: change those
-  through Settings or the custom compose override. An
-  enabled app restarts after each change; a disabled one gets the value at
-  its next start. If a template update makes one of your variables
-  Hub-set or a secret, it is no longer written (the Deliveries strip's
-  Environment values unit names it) and the next sync removes it.
-- **Container shell.** Runs one command with `/bin/sh -c` in a chosen container
+#### Environment variables
+
+One table with rows for every variable in the instance's `.env`:
+
+| Column | Content |
+|--------|---------|
+| **Key** | Variable name |
+| **Default** | What the template, the Hub, or a setting writes (shown as `[set]` for secrets) |
+| **Source** | `template`, `hub`, `option` (from a setting), or `custom` (your own variable) |
+| **Your value** | Your override (empty = using the default) |
+| **Actions** | **Override** / **Reset** (or **Remove** for custom variables) |
+
+Variables you can override:
+
+- Any variable the template uses only in `environment:` blocks (map values or list items)
+- Variables you add yourself with **+ Add your own variable**
+
+Variables you **cannot** override (shown with "set by the Hub — can't be overridden"):
+
+- Hub-set variables: `PORTCULLIS_*`, `COMPOSE_*`, `DOCKER_*`, `BUILDKIT_*`, `BUILDX_*`
+- Secrets (names in the template's `secret_env` or secret-looking names)
+- Variables set by a setting (e.g., a port's `<PORT>` and `<PORT>_BIND`)
+- Variables the template uses outside `environment:` (in image tags, labels, volume sources, command, etc.)
+
+Your overrides are written single-quoted at the end of the `.env`, so they win. A value may not contain `'`, `\`, line breaks, or control characters. An enabled instance restarts after each change; a disabled one gets the value at its next start.
+
+If a template update makes one of your variables refuse (moved outside `environment:`, became Hub-set, or became a secret), it is no longer written and shows in the Deliveries panel's "Environment values" unit. The next prune removes it.
+
+#### Other Expert tools
+
+- **Container shell**: Runs one command with `/bin/sh -c` in a chosen container
   through the Engine API and shows its output. The Hub stops waiting after
   15 minutes, or when the browser request is cancelled. A process that keeps
   running inside the container is not killed.
-- **Restart app** (enabled apps). A full `down` + `up` of the project, so
+- **Restart app** (enabled instances): A full `down` + `up` of the project, so
   override and env changes take effect. It waits for the result and, if it
   fails, shows compose's output like a failed enable.
+
+### Delete
+
+The **Delete** tab shows:
+
+- A warning about what will be deleted (volumes, groups, Keycloak clients)
+- For bound instances (groups mode "existing"), a note that the groups won't be deleted
+- A typed confirmation field (type the instance id to confirm)
+- **Delete** button
+
+See [Deleting an instance](#deleting-an-instance).
 
 #### Custom override
 
@@ -799,15 +931,15 @@ Every change, refusal, deletion and purge is audited as
 A template can run as multiple fully independent **instances**. Each instance has its own:
 
 - compose project, containers and volumes (data is never shared)
+- label (shown as **`<App> · <label>`** everywhere)
 - settings, environment variables and generated secrets
 - Keycloak clients (one per manifest `keycloak_clients` entry)
-- access and admin groups (`users_<id>`, `admin_<id>`; the default instance
-  keeps the manifest's groups)
+- access and admin groups (`users_<id>`, `admin_<id>`, or bound existing groups)
 - auth policy, public exceptions and sign-in mode
 - drift tracking and last-operation record
 
 Templates declare `instances: multi` or `instances: single` in their manifest.
-**Multi** templates show **+ Add instance** on their card and can be instantiated
+**Multi** templates show **+ Add instance** in Apps and Marketplace and can be instantiated
 as many times as needed. **Single** templates run only as their default instance
 (e.g., templates that bind fixed hardware).
 
@@ -816,78 +948,39 @@ as many times as needed. **Single** templates run only as their default instance
 Every template has a **default instance** whose id is the template id itself. For
 existing enabled apps, nothing changes: they are their template's default
 instance, with today's project name, hostnames, groups and volumes. No migration
-is needed.
+is needed. The default instance gets the same [instance page](#instance-page) as any other instance.
 
 ### Creating an instance
 
-On a multi-instance template card, click **+ Add instance**. A dialog shows:
+See [Setup before the first start](#setup-before-the-first-start) for the complete setup form flow.
 
-- **Instance ID** (required): a DNS label (`^[a-z][a-z0-9-]{0,30}$`), pre-filled
-  as `<template>-<suffix>` (e.g. `grafana-team-a`). It may not start with
-  `portcullis` or duplicate any template id or instance id.
+When you create an instance (Install… or + Add instance), the Hub:
 
-- **Domain**: select the main domain or an enrolled extra domain (see
-  [Enrolling extra domains](#enrolling-extra-domains)).
-
-- **Hostnames**: one per host router the template serves (e.g. `grafana`,
-  `grafana-api`). Pre-filled from the instance name and domain as
-  `<subdomain>-<suffix>.<domain>` (truncated to 63 characters). Each hostname
-  is individually editable.
-
-The Hub refuses:
-
-- an instance id that is already a template id (from any source), another
-  instance's id, or a running compose project name `portcullis-<id>`
-- derived names (project, volumes, groups, Keycloak clients) that collide with
-  another instance's or template's default instance, case-insensitively
-- hostnames that collide with core subdomains (`auth`, `hub`, `people`, …), the
-  apex `<domain>`, `<core sub>.<domain>`, another instance's hostnames, or
-  enrolled domain names themselves
-- hostnames on an enrolled domain that is not in state `ready` (records not OK
-  or certificate expired)
-- an instance of a single-only template (409, "This template runs only as one instance")
-
-After validation, the Hub **creates the instance without enabling it**:
-
-1. Creates the access and admin groups (`users_<id>`, `admin_<id>`, only for
+1. Validates the label, instance id, hostnames, and groups
+2. When groups mode is "new": creates the access and admin groups (`users_<id>`, `admin_<id>`, only for
    groups the manifest declares) as empty manual LLDAP groups, through the
    Users & Groups guardrails as the acting administrator (who must be an LLDAP
-   administrator). An existing group of that name is kept, with a warning: its
-   members get access
-2. Generates fresh values for every `generate: random` secret and records the
-   instance as `state: created`, with its hostnames
+   administrator). For the first instance, groups with names other than `users_<template>` / `admin_<template>` aren't created (only a warning) and must exist on People.
+3. When groups mode is "existing": stores the bound group names, creates nothing
+4. Generates fresh values for every `generate: random` secret
+5. Stores the instance's setup choice values
+6. Records the instance as `state: created`, with its label, hostnames, groups mode, and binding
 
-Nothing starts yet, and no Keycloak client is registered. **Enable** the
-instance (like any app) to generate its `.env` and compose override, register
-its Keycloak clients (redirect URIs for its hostnames), run
-`docker compose up` and publish its policy to group-gate. The `.env` carries
-the instance variables:
+If you chose **Save without starting**, the instance stays created but not enabled. If you chose **Start**, the Hub then enables it (see [What happens when you enable](#what-happens-when-you-enable)).
+
+The `.env` carries the instance variables:
 
 - `PORTCULLIS_INSTANCE=<id>`
 - `PORTCULLIS_HOST_<ROUTER>=<hostname>` (one per host router)
 - `PORTCULLIS_OIDC_CLIENT_ID[_<KEY>]=<id>[-<client id>]` (per Keycloak client)
-- `PORTCULLIS_ACCESS_GROUP=users_<id>`
-- `PORTCULLIS_ADMIN_GROUP=admin_<id>`
+- `PORTCULLIS_ACCESS_GROUP=<users group>` (derived or bound)
+- `PORTCULLIS_ADMIN_GROUP=<admins group>` (derived or bound)
+- `COMPOSE_PROFILES=<profile1>,<profile2>` (for templates with profiled services, from the instance's setup choices)
 
 The override names the volumes `portcullis_<id>-<key>` and renames the
 template's routers, services and middlewares to `<id>_<name>`.
 
-The instance is listed in the template card's **Instances** section and in the
-**App Catalog → Instances** table.
-
-### Instance detail
-
-Click an instance chip or row to open its detail panel. Non-default instances
-have tabs:
-
-- **Overview**: id, template, hostnames (see [Changing hostnames](#changing-hostnames)),
-  state, groups, last operation
-- **Settings**, **Logs**, **Expert**: same as the default instance (see
-  [App detail panel](#app-detail-panel)), but instance-scoped
-- **Backups**: see [Instance backups](#instance-backups)
-- **Delete**: see [Deleting an instance](#deleting-an-instance)
-
-The default instance's detail is the template detail, as before.
+The instance appears in Apps under its app block and on its own [instance page](#instance-page).
 
 ### Changing hostnames
 
@@ -1940,13 +2033,13 @@ running/total container count, and buttons for the allowed actions:
 | Kind (`kind` in the API) | Meaning | Actions |
 |--------------------------|---------|---------|
 | `enabled_not_running` | Enabled, but no container of the project runs (stopped, or none) | **Start** (`start`: compose up), **Disable** (`disable`) |
-| `running_not_enabled` | Containers of `portcullis-<id>` run, but the app is not enabled (the message adds "its public-exception router bypasses forward-auth" if they carry one) | **Stop & remove** (`stop`: compose down). **Enable** (`adopt`: mark it enabled and compose up) when a template with that ID exists |
-| `stopped_not_enabled` | Stopped containers left behind by an app that is not enabled | **Stop & remove** (`stop`) |
+| `running_not_enabled` | Containers of `portcullis-<id>` run, but the instance is not enabled (the message adds "its public-exception router bypasses forward-auth" if they carry one) | **Stop & remove** (`stop`: compose down). **Enable** (`adopt`: mark it enabled and compose up) when a template with that ID exists |
+| `stopped_not_enabled` | Stopped containers left behind by an instance that is not enabled | **Stop & remove** (`stop`) |
 | `template_missing` | Enabled, but no valid template provides it any more (source removed, template deleted or now invalid) | **Disable** (`disable`) |
-| `public_access_mismatch` | An exposure label of a running container (any router's `tls.options`, any label of the public router or its strip middleware, and for apps with [their own login](auth-policies.md#apps-with-their-own-login) every router's `middlewares`, e.g. after switching the Sign-in mode without a restart) differs from what the Hub renders now — a widened rule, a missing guard or other middleware, a stale or missing public router (e.g. after a failed restart or a template change) — or a stored public choice can't be applied ("confirm a mode") | **Apply settings** (`apply`: regenerate the override and compose up), **Disable** (`disable`); none for "confirm a mode" (fix it in Settings) |
-| `job_failed` — NEW (apps) | A one-off job (§3 of the [integration contracts](../guides/integration-contracts.md)) exited non-zero, is dead, or ContainerState errored (fail closed). Message: "job \<svc\> failed (exit \<code\>)" or "job \<svc\> failed" (unknown code); multiple: joined with "; " | **Start** (`start`), **Disable** (`disable`) |
-| `job_missing` — NEW (apps) | A one-off job never ran (no container). A job in a compose profile the instance's setup choices leave off is never missing; one of a selected profile is. Message: "job \<svc\> never ran"; multiple: "N jobs never ran: \<list\>" | **Start** (`start`), **Disable** (`disable`) |
-| `inactive_service_running` — NEW (apps) | An enabled instance runs a container of a service in a compose profile its setup choices leave off (e.g. the old database after a choice changed). Exited leftovers stay hidden. Message: "service \<svc\> runs although the instance's setup choices leave it off"; several: joined with "; " | **Restart** (`restart`: compose down with every profile, then up), **Disable** (`disable`) |
+| `public_access_mismatch` | An exposure label of a running container (any router's `tls.options`, any label of the public router or its strip middleware, and for instances with [their own login](auth-policies.md#apps-with-their-own-login) every router's `middlewares`, e.g. after switching the Sign-in mode without a restart) differs from what the Hub renders now — a widened rule, a missing guard or other middleware, a stale or missing public router (e.g. after a failed restart or a template change) — or a stored public choice can't be applied ("confirm a mode") | **Apply settings** (`apply`: regenerate the override and compose up), **Disable** (`disable`); none for "confirm a mode" (fix it in Settings) |
+| `job_failed` | A one-off job (§3 of the [integration contracts](../guides/integration-contracts.md)) exited non-zero, is dead, or ContainerState errored (fail closed). Message: "job \<svc\> failed (exit \<code\>)" or "job \<svc\> failed" (unknown code); multiple: joined with "; " | **Start** (`start`), **Disable** (`disable`) |
+| `job_missing` | A one-off job never ran (no container). A job in a compose profile the instance's setup choices leave off is never missing; one of a selected profile is. Message: "job \<svc\> never ran"; multiple: "N jobs never ran: \<list\>" | **Start** (`start`), **Disable** (`disable`) |
+| `inactive_service_running` | An enabled instance runs a container of a service in a compose profile its setup choices leave off (e.g. the old database after a choice changed). Exited leftovers stay hidden. Message: "service \<svc\> runs although the instance's setup choices leave it off"; several: joined with "; " | **Restart** (`restart`: compose down with every profile, then up), **Disable** (`disable`) |
 
 Destructive actions ask for confirmation. **Re-check** runs a reconcile
 immediately. Apps that are in the middle of an operation are skipped.
