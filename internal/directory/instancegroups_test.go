@@ -144,10 +144,10 @@ func TestCheckBindGroups(t *testing.T) {
 			t.Errorf("users %s = %v", g, err)
 		}
 	}
-	if _, _, err := e.svc.CheckBindGroups(ctx, "nope", "Team"); err == nil || err.Error() != "unknown group nope" {
+	if _, _, err := e.svc.CheckBindGroups(ctx, "nope", "Team"); status(err) != 400 || err.Error() != "unknown group nope" {
 		t.Errorf("unknown users = %v", err)
 	}
-	if _, _, err := e.svc.CheckBindGroups(ctx, "Team", "gone"); err == nil || err.Error() != "unknown group gone" {
+	if _, _, err := e.svc.CheckBindGroups(ctx, "Team", "gone"); status(err) != 400 || err.Error() != "unknown group gone" {
 		t.Errorf("unknown admins = %v", err)
 	}
 	// Case-only twins (fix round 1): the exact name wins; a name matching

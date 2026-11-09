@@ -1373,11 +1373,18 @@ func (h *Hub) removeNewInstance(id string) error {
 	h.mu.RLock()
 	e, ok := h.st.Instances[id]
 	enabled := h.st.IsEnabled(id)
+	// Keyed on the id being a template id, not on the entry: an undo
+	// retried after its first save failed (entry already gone) must not
+	// fall through to the wipe below.
+	isTemplate := h.catalogLocked(id) != nil || (ok && e.Template == id)
 	h.mu.RUnlock()
 	if ok && (enabled || (e.State != state.InstanceRestoring && e.State != state.InstanceCreated)) {
 		return statusErr(409, "instance %s is no longer new (state %q, enabled %v): it was not removed", id, e.State, enabled)
 	}
-	if ok && e.Template == id {
+	if isTemplate && !ok {
+		return nil // a default instance with no entry: nothing the create added is left
+	}
+	if isTemplate {
 		// A template's first instance is its default instance (§11.9):
 		// the create added only the state entry (label, binding,
 		// state "created"). Whatever the default instance had before —

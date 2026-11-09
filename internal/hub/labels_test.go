@@ -772,14 +772,18 @@ func TestInstanceViewsStamped(t *testing.T) {
 // a disable / enable after it leave the instance's Keycloak clients (ids,
 // redirect URIs) and its access role as they were.
 func TestSetLabelKeepsKeycloakClients(t *testing.T) {
-	f := newInstanceFixture(t, nil)
+	// chat with its access role enforced in Keycloak (§8), as "roled".
+	roled := strings.NewReplacer("chat", "roled", "Chat", "Roled", "CHAT", "ROLED").Replace(v2ChatManifest)
+	roled = strings.Replace(roled, "  group_access: true\n", "  group_access: true\n  keycloak_access_role: true\n", 1)
+	roledCompose := strings.NewReplacer("chat", "roled", "CHAT", "ROLED").Replace(v2ChatCompose)
+	f := newInstanceFixtureExtra(t, nil, nil, map[string][2]string{"roled": {roled, roledCompose}})
 	f.h.SetAudit(&fakeAudit{})
 	f.h.SetGroups(&fakeGroups{})
 	simulateCompose(f, 0)
-	if _, err := f.h.CreateInstanceAs(createReq("chat", "chat-b", "Team"), root); err != nil {
+	if _, err := f.h.CreateInstanceAs(createReq("roled", "roled-b", "Team"), root); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.h.Enable("chat-b"); err != nil {
+	if err := f.h.Enable("roled-b"); err != nil {
 		t.Fatal(err)
 	}
 	clients := func() (specs []string, access []string) {
@@ -794,26 +798,62 @@ func TestSetLabelKeepsKeycloakClients(t *testing.T) {
 	if len(specs0) == 0 {
 		t.Fatal("no client registered")
 	}
-	if err := f.h.SetLabel(context.Background(), "chat-b", "Team B", root); err != nil {
+	if err := f.h.SetLabel(context.Background(), "roled-b", "Team B", root); err != nil {
 		t.Fatal(err)
 	}
 	if specs, access := clients(); strings.Join(specs, ";") != strings.Join(specs0, ";") || strings.Join(access, ";") != strings.Join(access0, ";") {
 		t.Errorf("the relabel touched Keycloak: %v %v", specs, access)
 	}
-	if err := f.h.Disable("chat-b"); err != nil {
+	if err := f.h.Disable("roled-b"); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.h.Enable("chat-b"); err != nil {
+	if err := f.h.Enable("roled-b"); err != nil {
 		t.Fatal(err)
 	}
 	specs, access := clients()
+	if len(access) == 0 || len(access0) == 0 {
+		t.Fatalf("no access role recorded (before %v, after %v)", access0, access)
+	}
 	// The re-enable registers the same clients again, with the same access group.
 	if len(specs) != 2*len(specs0) || strings.Join(specs[len(specs0):], ";") != strings.Join(specs0, ";") {
 		t.Errorf("clients after re-enable = %v, want %v again", specs, specs0)
 	}
 	for _, a := range access {
-		if strings.HasPrefix(a, "+") && !strings.HasSuffix(a, ":users_chat-b") {
+		if strings.HasPrefix(a, "+") && !strings.HasSuffix(a, ":users_roled-b") {
 			t.Errorf("access role = %s", a)
 		}
+	}
+}
+
+// TestRemoveNewInstanceDefaultWithoutEntry (fix round 2): removing a
+// template's default instance with no state entry — an undo retried
+// after its first save failed — wipes nothing.
+func TestRemoveNewInstanceDefaultWithoutEntry(t *testing.T) {
+	f := newInstanceFixture(t, nil)
+	simulateCompose(f, 0)
+	if err := f.h.Enable("grafana"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.h.Disable("grafana"); err != nil {
+		t.Fatal(err)
+	}
+	strict := policy.AuthPolicy{Factors: []string{"webauthn"}, Op: "any"}
+	if _, err := f.h.SaveSettings("grafana", SettingsUpdate{Policy: &strict, Ports: map[string]string{"GRAFANA_PORT": "3301"}}, root); err != nil {
+		t.Fatal(err)
+	}
+	env, ov := readFile(t, f.h.envPath("grafana")), readFile(t, f.h.overridePath("grafana"))
+	if err := f.h.removeNewInstance("grafana"); err != nil {
+		t.Fatal(err)
+	}
+	if readFile(t, f.h.envPath("grafana")) != env || readFile(t, f.h.overridePath("grafana")) != ov {
+		t.Error(".env or override changed")
+	}
+	f.h.mu.RLock()
+	defer f.h.mu.RUnlock()
+	if f.h.st.Settings["grafana"].Ports["GRAFANA_PORT"] != "3301" {
+		t.Errorf("settings = %+v", f.h.st.Settings["grafana"])
+	}
+	if p, ok := f.h.st.AuthPolicies["grafana"]; !ok || strings.Join(p.Factors, ",") != "webauthn" {
+		t.Errorf("policy = %+v %v", p, ok)
 	}
 }

@@ -78,6 +78,16 @@ func (e *UnknownGroupError) Error() string { return "unknown group " + e.Name }
 // Is: errors.Is(err, ErrUnknownGroup).
 func (e *UnknownGroupError) Is(target error) bool { return target == ErrUnknownGroup }
 
+// As: errors.As(err, **Error) gives the directory's 400 for it, so it
+// maps to HTTP like every other directory refusal.
+func (e *UnknownGroupError) As(target any) bool {
+	if p, ok := target.(**Error); ok {
+		*p = &Error{Status: http.StatusBadRequest, Msg: e.Error()}
+		return true
+	}
+	return false
+}
+
 // ResolveGroupName is want as one of the directory's group names (§11.9):
 // the exact name when there is one, else the one name equal to it but
 // for case; two or more such names are 400 "group <want> is ambiguous:
