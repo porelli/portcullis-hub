@@ -110,13 +110,17 @@ type Instance struct {
 	// create.
 	UsersGroup  string `json:"users_group,omitempty" yaml:"users_group,omitempty"`
 	AdminsGroup string `json:"admins_group,omitempty" yaml:"admins_group,omitempty"`
+	// EnvOverrides are the admin's per-variable environment overrides
+	// (§11.9 "Env overrides": name → value, never a secret), written
+	// single-quoted after every other value of the instance's .env.
+	EnvOverrides map[string]string `json:"env_overrides,omitempty" yaml:"env_overrides,omitempty"`
 }
 
-// HoldsIdentity reports whether the entry stores a label or a group
-// binding: a default instance's entry that does is never dropped as
-// "needs no entry".
+// HoldsIdentity reports whether the entry stores a label, a group
+// binding or env overrides: a default instance's entry that does is
+// never dropped as "needs no entry".
 func (e Instance) HoldsIdentity() bool {
-	return e.Label != "" || e.UsersGroup != "" || e.AdminsGroup != ""
+	return e.Label != "" || e.UsersGroup != "" || e.AdminsGroup != "" || len(e.EnvOverrides) > 0
 }
 
 // Bound reports whether the instance is bound to existing groups.

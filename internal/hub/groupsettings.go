@@ -1087,7 +1087,11 @@ func (h *Hub) pruneSettingsLocked() (audits []func()) {
 			h.st.Settings[id] = s
 		}
 	}
-	if len(audits) > 0 || pinned {
+	// Env overrides the templates now refuse (§11.9): removed, audited
+	// settings.env dropped.
+	envChanged, envAudits := h.pruneEnvOverridesLocked()
+	audits = append(audits, envAudits...)
+	if len(audits) > 0 || pinned || envChanged {
 		h.saveLocked()
 	}
 	return audits

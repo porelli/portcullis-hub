@@ -364,38 +364,25 @@ func TestRetryAudited(t *testing.T) {
 	}
 }
 
-// Expert Save Env: the UI posts every variable. Owned and instance
-// variables are skipped when unchanged; a changed one is still refused.
-func TestSaveEnvSkipsUnchangedOwned(t *testing.T) {
+// The env rows of an option's variables: source option, Hub-set (an
+// override is refused naming the setting); a secret option's is masked.
+func TestEnvRowsOptionsHubSet(t *testing.T) {
 	f, _, _ := panelFixture(t)
 	if _, err := f.h.SaveSettings("panelapp", SettingsUpdate{Values: vals("trash_days", 14), Secrets: map[string]SecretChange{"api_key": {Value: strp("s3cr3t-panel-value")}}}, directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
-	vars, _, err := f.h.Env("panelapp")
+	rows, err := f.h.EnvRows("panelapp")
 	if err != nil {
 		t.Fatal(err)
 	}
-	vars["FREE_VAR"] = "x"
-	if err := f.h.SaveEnv("panelapp", vars); err != nil {
-		t.Fatalf("posting everything back = %v", err)
+	if r := envRowOf(rows, "PANELAPP_TRASH_DAYS"); r == nil || r.Source != EnvSourceOption || !r.HubSet || r.Default != "14" {
+		t.Errorf("PANELAPP_TRASH_DAYS = %+v", r)
 	}
-	got := readEnvFile(f.h.envPath("panelapp"))
-	if got["FREE_VAR"] != "x" || got["PANELAPP_API_KEY"] != "s3cr3t-panel-value" || got["PANELAPP_TRASH_DAYS"] != "14" {
-		t.Errorf("env = %v", got)
+	if r := envRowOf(rows, "PANELAPP_API_KEY"); r == nil || !r.Secret || r.Default != "[set]" {
+		t.Errorf("PANELAPP_API_KEY = %+v", r)
 	}
-	vars["PANELAPP_TRASH_DAYS"] = "3"
-	if err := f.h.SaveEnv("panelapp", vars); statusOf(err) != 400 || !strings.Contains(err.Error(), "trash_days") {
-		t.Errorf("a changed owned variable = %v, want 400", err)
-	}
-	vars["PANELAPP_TRASH_DAYS"] = "14"
-	for k := range vars {
-		if strings.HasPrefix(k, "PORTCULLIS_") {
-			vars[k] += "x"
-			if err := f.h.SaveEnv("panelapp", vars); statusOf(err) != 400 {
-				t.Errorf("a changed %s = %v, want 400", k, err)
-			}
-			break
-		}
+	if err := envOverrideErr(f.h, "panelapp", "PANELAPP_TRASH_DAYS", "3"); statusOf(err) != 400 || !strings.Contains(err.Error(), "trash_days") {
+		t.Errorf("an owned variable = %v, want 400", err)
 	}
 }
 

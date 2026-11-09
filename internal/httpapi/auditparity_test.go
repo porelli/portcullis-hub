@@ -128,12 +128,15 @@ func TestUnauditedMutationsNowAudited(t *testing.T) {
 		{"exec", ai, "POST", "/api/templates/exec/grafana", `{"service":"web","command":"` + secretCmd + `"}`, 200, "instance.exec", "grafana", "service=web exit=0"},
 		{"exec non-zero exit", ai, "POST", "/api/templates/exec/grafana", `{"service":"web","command":"` + secretCmd + ` exit3"}`, 200, "instance.exec", "grafana", "service=web exit=3"},
 		{"exec bad service", ai, "POST", "/api/templates/exec/grafana", `{"service":"db","command":"` + secretCmd + `"}`, 400, "instance.exec", "grafana", "service=db"},
-		{"env save", ai, "PUT", "/api/templates/env/grafana", `{"MY_VAR":"` + secretVal + `"}`, 200, "app.env", "grafana", "MY_VAR"},
-		{"env save Hub-set", ai, "PUT", "/api/templates/env/grafana", `{"PORTCULLIS_DOMAIN":"` + secretVal + `"}`, 400, "app.env", "grafana", ""},
 		{"drift resolve", ai, "POST", "/api/drift/resolve", `{"id":"grafana","action":"apply"}`, 200, "drift.resolve", "grafana", "apply"},
 		{"drift resolve bogus", ai, "POST", "/api/drift/resolve", `{"id":"grafana","action":"bogus"}`, 400, "drift.resolve", "grafana", "bogus"},
 		{"disable", ai, "POST", "/api/templates/disable", `{"id":"grafana"}`, 202, "instance.disable", "grafana", ""},
 		{"disable again", ai, "POST", "/api/templates/disable", `{"id":"grafana"}`, 400, "instance.disable", "grafana", ""},
+		// Env overrides (§11.9) of the disabled instance: audited by the
+		// Hub, never with the value.
+		{"env override", ai, "PUT", "/api/instances/grafana/env/MY_VAR", `{"value":"` + secretVal + `"}`, 200, "settings.env", "grafana/MY_VAR", "added"},
+		{"env override Hub-set", ai, "PUT", "/api/instances/grafana/env/PORTCULLIS_DOMAIN", `{"value":"` + secretVal + `"}`, 400, "settings.env", "grafana/PORTCULLIS_DOMAIN", "refused"},
+		{"env reset", ai, "DELETE", "/api/instances/grafana/env/MY_VAR", ``, 200, "settings.env", "grafana/MY_VAR", "reset"},
 		{"source add", ai, "POST", "/api/sources/add", `{"name":"extra","url":"` + url + `"}`, 200, "source.add", "extra", url},
 		{"source add bad url", ai, "POST", "/api/sources/add", `{"name":"other","url":"file:///etc"}`, 400, "source.add", "other", ""},
 		{"source add with credentials", ai, "POST", "/api/sources/add", `{"name":"tok","url":"https://` + urlToken + `@git.example.invalid/x.git"}`, 400, "source.add", "tok", "https://git.example.invalid/x.git"},

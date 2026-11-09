@@ -23,6 +23,9 @@ func (s *Server) registerInstances(mux routeMux) {
 	mux.HandleFunc("GET /api/instances/defaults", s.handleInstanceDefaults)
 	mux.HandleFunc("PUT /api/instances/{id}/hosts", s.handleInstanceHosts)
 	mux.HandleFunc("PUT /api/instances/{id}/label", s.handleInstanceLabel)
+	mux.HandleFunc("GET /api/instances/{id}/env", s.handleInstanceEnv)
+	mux.HandleFunc("PUT /api/instances/{id}/env/{name}", s.handleSetEnvOverride)
+	mux.HandleFunc("DELETE /api/instances/{id}/env/{name}", s.handleClearEnvOverride)
 	mux.HandleFunc("DELETE /api/instances/{id}", s.handleDeleteInstance)
 	mux.HandleFunc("GET /api/backups", s.handleBackups)
 	mux.HandleFunc("GET /api/instances/{id}/backups", s.handleBackups)
@@ -334,6 +337,102 @@ func (s *Server) setLabel(ctx context.Context, a directory.Actor, id, label stri
 		return nil, &hub.StatusError{Status: http.StatusConflict, Err: errors.New("label changed, but instance " + id + " can no longer be listed")}
 	}
 	return &v, nil
+}
+
+// handleInstanceEnv: the instance's environment rows (§11.9).
+func (s *Server) handleInstanceEnv(w http.ResponseWriter, r *http.Request) {
+	if !s.adminOnly(w, r) {
+		return
+	}
+	id, ok := instanceID(w, r)
+	if !ok {
+		return
+	}
+	rows, err := s.envRows(id)
+	noStore(w)
+	if err != nil {
+		writeErr(w, err, http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, rows)
+}
+
+// envRows is the env rows' read (route and get_env): {"rows": […]}.
+// Secret rows never carry a value.
+func (s *Server) envRows(id string) (map[string][]hub.EnvRow, error) {
+	rows, err := s.Hub.EnvRows(id)
+	if err != nil {
+		return nil, defaultStatus(err, http.StatusInternalServerError)
+	}
+	return map[string][]hub.EnvRow{"rows": rows}, nil
+}
+
+// handleSetEnvOverride overrides a variable or adds one ({"value"}).
+func (s *Server) handleSetEnvOverride(w http.ResponseWriter, r *http.Request) {
+	if !s.adminOnly(w, r) {
+		return
+	}
+	id, ok := instanceID(w, r)
+	if !ok {
+		return
+	}
+	var b struct {
+		Value *string `json:"value"`
+	}
+	if !decodeStrict(w, r, &b, `{"value": "<text>"}`) {
+		return
+	}
+	if b.Value == nil {
+		http.Error(w, `"value" is required`, http.StatusBadRequest)
+		return
+	}
+	res, err := s.setEnvOverride(requestActor(r), id, r.PathValue("name"), *b.Value)
+	noStore(w)
+	if err != nil {
+		writeErr(w, err, http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, res)
+}
+
+// handleClearEnvOverride resets a variable to its default (an added one
+// is removed).
+func (s *Server) handleClearEnvOverride(w http.ResponseWriter, r *http.Request) {
+	if !s.adminOnly(w, r) {
+		return
+	}
+	id, ok := instanceID(w, r)
+	if !ok {
+		return
+	}
+	res, err := s.clearEnvOverride(requestActor(r), id, r.PathValue("name"))
+	noStore(w)
+	if err != nil {
+		writeErr(w, err, http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, res)
+}
+
+// setEnvOverride is the override's work (route and set_env_override);
+// audited settings.env by the Hub, never with the value.
+func (s *Server) setEnvOverride(a directory.Actor, id, name, value string) (*hub.EnvChange, error) {
+	s.rec("SetEnvOverride", id, name, value)
+	res, err := s.Hub.SetEnvOverride(id, name, value, a)
+	if err != nil {
+		return nil, defaultStatus(err, http.StatusInternalServerError)
+	}
+	return res, nil
+}
+
+// clearEnvOverride is the reset's work (route and clear_env_override).
+func (s *Server) clearEnvOverride(a directory.Actor, id, name string) (*hub.EnvChange, error) {
+	s.rec("ClearEnvOverride", id, name)
+	res, err := s.Hub.ClearEnvOverride(id, name, a)
+	if err != nil {
+		return nil, defaultStatus(err, http.StatusInternalServerError)
+	}
+	return res, nil
 }
 
 func (s *Server) handleDeleteInstance(w http.ResponseWriter, r *http.Request) {

@@ -78,9 +78,7 @@ func TestEnvForeignLinesKeptRaw(t *testing.T) {
 	writeFile(t, filepath.Join(f.project, ".env"), "CORE_VAR=core-value\nCORE_NOTE=bar  # note\n")
 	raw := []string{"FOO=bar  # note", "X=$$2y$$10x", `Y="a$b"`, "Z=${OTHER}"}
 	writeFile(t, f.h.envPath("immich"), "# kept\n"+strings.Join(raw, "\n")+"\n")
-	if err := f.h.SaveEnv("immich", map[string]string{"W": "${OTHER}"}); err != nil {
-		t.Fatal(err)
-	}
+	plantEnv(t, f.h, "immich", map[string]string{"W": "${OTHER}"})
 	if err := f.h.save("immich", SettingsUpdate{Values: vals("trash_days", 30)}); err != nil {
 		t.Fatal(err)
 	}

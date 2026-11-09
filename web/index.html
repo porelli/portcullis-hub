@@ -3029,9 +3029,9 @@
       try {
         const [composeData, envData] = await Promise.all([
           apiGet('/api/templates/compose/' + id),
-          apiGet('/api/templates/env/' + id),
+          apiGet('/api/instances/' + encodeURIComponent(id) + '/env'),
         ]);
-        const services = envData.services || [];
+        const services = composeData.services || [];
         let html = '';
 
         // Three layers, passed to compose in this order (later wins).
@@ -3065,28 +3065,11 @@
         html += '<span class="saved-msg" id="override-saved-' + id + '"></span>';
         html += '</div></div>';
 
-        // Env vars
+        // Env vars (contract §11.9): one row per variable, overridden one
+        // at a time.
         html += '<div class="expert-section">';
-        html += '<div class="expert-section-title">Environment Variables</div>';
-        const vars = envData.variables || {};
-        const keys = Object.keys(vars).sort();
-        if (keys.length > 0) {
-          html += '<table class="env-table"><thead><tr><th>Key</th><th>Value</th></tr></thead><tbody>';
-          for (const k of keys) {
-            html += '<tr><td class="env-key">' + escapeHtml(k) + '</td>';
-            html += '<td><input type="text" data-env-key="' + escapeHtml(k) + '" value="' + escapeHtml(vars[k]) + '"></td></tr>';
-          }
-          html += '</tbody></table>';
-        }
-        html += '<div class="expert-actions" style="margin-top:0.5rem; gap:0.5rem">';
-        html += '<input type="text" id="new-env-key-' + id + '" placeholder="NEW_VAR_NAME" style="width:200px;background:#0f172a;border:1px solid #334155;border-radius:0.25rem;padding:0.375rem 0.5rem;color:#e2e8f0;font-family:SF Mono,monospace;font-size:0.75rem">';
-        html += '<input type="text" id="new-env-val-' + id + '" placeholder="value" style="flex:1;background:#0f172a;border:1px solid #334155;border-radius:0.25rem;padding:0.375rem 0.5rem;color:#e2e8f0;font-family:SF Mono,monospace;font-size:0.75rem">';
-        html += '<button class="btn btn-secondary btn-sm" onclick="event.stopPropagation(); addEnvVar(\'' + id + '\')">Add</button>';
-        html += '</div>';
-        html += '<div class="expert-actions" style="margin-top:0.5rem">';
-        html += '<button class="btn btn-primary btn-sm" onclick="event.stopPropagation(); saveEnvVars(\'' + id + '\')">Save Env Vars</button>';
-        html += '<span class="saved-msg" id="env-saved-' + id + '">Saved</span>';
-        html += '</div>';
+        html += '<div class="expert-section-title">Environment Variables <span class="ro">your overrides are written after every template, Hub and Settings value; an enabled app restarts</span></div>';
+        html += '<div id="expert-env-' + escapeHtml(id) + '">' + renderEnvRows(id, envData.rows || []) + '</div>';
         html += '</div>';
 
         // Shell
@@ -3105,6 +3088,7 @@
         html += '</div></div></div>';
 
         container.innerHTML = html;
+        bindEnvRows(container);
 
         // Handle tab key in code editors
         container.querySelectorAll('.code-editor').forEach(el => {
@@ -3138,41 +3122,83 @@
       }
     }
 
-    async function saveEnvVars(id) {
-      const inputs = document.querySelectorAll('#detail-expert-' + id + ' [data-env-key]');
-      const values = {};
-      inputs.forEach(input => { values[input.dataset.envKey] = input.value; });
-      try {
-        await apiPut('/api/templates/env/' + id, values);
-        const msg = document.getElementById('env-saved-' + id);
-        msg.classList.add('show');
-        setTimeout(() => msg.classList.remove('show'), 2000);
-      } catch (e) {
-        showToast('Save failed: ' + e.message, 'error');
+    // The env rows' table (§11.9): name, default, source, your override
+    // and its Override / Reset; Hub-set rows (Hub, a setting, a secret)
+    // can't be overridden (a stored override the template now refuses
+    // can still be reset). Everything escaped; data-* attributes and one
+    // delegated listener per Expert tab (bindEnvRows).
+    function renderEnvRows(id, rows) {
+      const eid = escapeHtml(id);
+      const srcText = { template: 'template', hub: 'Hub', option: 'Settings', custom: 'yours' };
+      let html = '<table class="env-table"><thead><tr><th>Key</th><th>Default</th><th>Source</th><th>Your value</th><th></th></tr></thead><tbody>';
+      for (const r of rows) {
+        const n = escapeHtml(r.name);
+        html += '<tr><td class="env-key">' + n + '</td>';
+        html += '<td class="env-key">' + (r.default === '' ? '<span class="ro">(empty)</span>' : escapeHtml(r.default)) + '</td>';
+        html += '<td>' + escapeHtml(srcText[r.source] || r.source) + (r.secret ? ' <span class="ro">secret</span>' : '') + '</td>';
+        if (r.hub_set) {
+          html += '<td><span class="ro">' + (r.secret ? 'secrets are set under Settings' : r.source === 'option' ? 'change it under Settings' : 'set by the Hub') + '</span></td><td>';
+          if (r.overridden) html += '<button class="btn btn-secondary btn-sm" data-env-reset data-env-id="' + eid + '" data-env-name="' + n + '">Reset</button>';
+          html += '</td></tr>';
+          continue;
+        }
+        html += '<td><input type="text" data-env-input data-env-name="' + n + '" value="' + escapeHtml(r.overridden ? r.value : '') + '" placeholder="' + (r.overridden ? '' : 'default') + '"></td><td style="white-space:nowrap">';
+        html += '<button class="btn btn-primary btn-sm" data-env-set data-env-id="' + eid + '" data-env-name="' + n + '">Override</button> ';
+        if (r.overridden) html += '<button class="btn btn-secondary btn-sm" data-env-reset data-env-id="' + eid + '" data-env-name="' + n + '">' + (r.source === 'custom' ? 'Remove' : 'Reset') + '</button>';
+        html += '</td></tr>';
       }
+      html += '</tbody></table>';
+      html += '<div class="expert-actions" style="margin-top:0.5rem; gap:0.5rem">';
+      html += '<input type="text" data-env-new-name placeholder="MY_VARIABLE" style="width:200px;background:#0f172a;border:1px solid #334155;border-radius:0.25rem;padding:0.375rem 0.5rem;color:#e2e8f0;font-family:SF Mono,monospace;font-size:0.75rem">';
+      html += '<input type="text" data-env-new-value placeholder="value" style="flex:1;background:#0f172a;border:1px solid #334155;border-radius:0.25rem;padding:0.375rem 0.5rem;color:#e2e8f0;font-family:SF Mono,monospace;font-size:0.75rem">';
+      html += '<button class="btn btn-secondary btn-sm" data-env-add data-env-id="' + eid + '">+ Add your own variable</button>';
+      html += '<span class="saved-msg" data-env-msg></span>';
+      html += '</div>';
+      return html;
     }
 
-    function addEnvVar(id) {
-      const keyInput = document.getElementById('new-env-key-' + id);
-      const valInput = document.getElementById('new-env-val-' + id);
-      const key = keyInput.value.trim().toUpperCase().replace(/[^A-Z0-9_]/g, '_');
-      const val = valInput.value;
-      if (!key) { showToast('Variable name required', 'error'); return; }
-      // Add a row to the table (or create table if none)
-      const container = document.getElementById('detail-expert-' + id);
-      let table = container.querySelector('.env-table tbody');
-      if (!table) {
-        const section = keyInput.closest('.expert-section');
-        const tableHtml = '<table class="env-table"><thead><tr><th>Key</th><th>Value</th></tr></thead><tbody></tbody></table>';
-        section.insertAdjacentHTML('afterbegin', '<div class="expert-section-title">Environment Variables</div>' + tableHtml);
-        table = section.querySelector('.env-table tbody');
+    // bindEnvRows: the env table's one click listener on the Expert
+    // container (kept across re-renders: bound once).
+    function bindEnvRows(container) {
+      if (container.dataset.envBound) return;
+      container.dataset.envBound = '1';
+      container.addEventListener('click', e => {
+        const b = e.target.closest('[data-env-set], [data-env-reset], [data-env-add]');
+        if (!b || !container.contains(b)) return;
+        e.stopPropagation();
+        const id = b.dataset.envId;
+        const box = b.closest('[id^="expert-env-"]');
+        if (!id || !box) return;
+        if (b.hasAttribute('data-env-add')) {
+          const name = (box.querySelector('[data-env-new-name]').value || '').trim();
+          if (!name) { showToast('Variable name required', 'error'); return; }
+          changeEnv(id, box, name, box.querySelector('[data-env-new-value]').value);
+          return;
+        }
+        const name = b.dataset.envName;
+        if (b.hasAttribute('data-env-reset')) { changeEnv(id, box, name, null); return; }
+        const input = [...box.querySelectorAll('[data-env-input]')].find(i => i.dataset.envName === name);
+        changeEnv(id, box, name, input ? input.value : '');
+      });
+    }
+
+    // changeEnv overrides (value) or resets (null) one variable, then
+    // shows the rows again.
+    async function changeEnv(id, box, name, value) {
+      const url = '/api/instances/' + encodeURIComponent(id) + '/env/' + encodeURIComponent(name);
+      try {
+        const res = value === null ? (await apiCall(url, 'DELETE')).json() : apiPut(url, { value });
+        const r = await res;
+        const data = await apiGet('/api/instances/' + encodeURIComponent(id) + '/env');
+        box.innerHTML = renderEnvRows(id, data.rows || []);
+        const msg = box.querySelector('[data-env-msg]');
+        if (msg) {
+          msg.textContent = (value === null ? 'Reset ' : 'Saved ') + name + (r && r.effect === 'restart' ? ' — the app restarts' : ' — applies at the next start');
+          msg.classList.add('show');
+        }
+      } catch (e) {
+        showToast((value === null ? 'Reset' : 'Override') + ' of ' + name + ' failed: ' + e.message, 'error');
       }
-      const row = document.createElement('tr');
-      row.innerHTML = '<td class="env-key">' + escapeHtml(key) + '</td><td><input type="text" data-env-key="' + escapeHtml(key) + '" value="' + escapeHtml(val) + '"></td>';
-      table.appendChild(row);
-      keyInput.value = '';
-      valInput.value = '';
-      showToast('Added ' + key + '. Click "Save Env Vars" to persist.', 'success');
     }
 
     async function restartApp(id, btn) {

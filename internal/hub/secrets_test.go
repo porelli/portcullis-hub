@@ -272,29 +272,26 @@ func TestEnvValueQuotingRoundTrip(t *testing.T) {
 	}
 }
 
-// P18: the Expert env view masks secret variables; SaveEnv refuses any
-// option's variable.
+// P18: the env rows mask secret variables; an override of any option's
+// variable is refused.
 func TestSecretExpertEnv(t *testing.T) {
 	f, _ := secretFixture(t)
 	saveSecret(t, f, "secretapp", "api_key", setSecret("s3cr3t"))
-	vars, _, err := f.h.Env("secretapp")
+	vars, err := envView(f.h, "secretapp")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if vars["HEADSCALE_API_KEY"] != "[set]" {
 		t.Errorf("Env shows %q", vars["HEADSCALE_API_KEY"])
 	}
-	err = f.h.SaveEnv("secretapp", map[string]string{"HEADSCALE_API_KEY": "other"})
-	if statusOf(err) != 400 || !strings.Contains(err.Error(), "set it under Settings") {
-		t.Errorf("SaveEnv of a secret variable = %v", err)
+	err = envOverrideErr(f.h, "secretapp", "HEADSCALE_API_KEY", "other")
+	if statusOf(err) != 400 || !strings.Contains(err.Error(), "use Settings") {
+		t.Errorf("override of a secret variable = %v", err)
 	}
 	f2, _ := immichFixture(t)
-	err = f2.h.SaveEnv("immich", map[string]string{"IMMICH_TRASH_DAYS": "3"})
-	if statusOf(err) != 400 || !strings.Contains(err.Error(), "set it under Settings") || !strings.Contains(err.Error(), "trash_days") {
-		t.Errorf("SaveEnv of an option variable = %v", err)
-	}
-	if err := f2.h.SaveEnv("immich", map[string]string{"FREE_VAR": "x"}); err != nil {
-		t.Errorf("SaveEnv of a free variable = %v", err)
+	err = envOverrideErr(f2.h, "immich", "IMMICH_TRASH_DAYS", "3")
+	if statusOf(err) != 400 || !strings.Contains(err.Error(), "change it under Settings") || !strings.Contains(err.Error(), "trash_days") {
+		t.Errorf("override of an option variable = %v", err)
 	}
 	if s := storedSecrets(t, f, "secretapp")["api_key"]; s != "s3cr3t" {
 		t.Errorf("store changed: %q", s)

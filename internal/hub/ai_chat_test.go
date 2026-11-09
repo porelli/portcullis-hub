@@ -250,13 +250,13 @@ func TestProviderSecretsNeverEchoed(t *testing.T) {
 	if !strings.Contains(a.envOf(t, "ai-chat"), "'"+chatMarker+"-2'") {
 		t.Error("the replaced key didn't reach the env file")
 	}
-	// The env file shown in Expert Env: [set].
-	vars, _, err := a.h.Env("ai-chat")
+	// The env rows show it as [set]; it can't be overridden.
+	vars, err := envView(a.h, "ai-chat")
 	if err != nil || vars[ollamaVar] != "[set]" {
-		t.Errorf("Expert Env shows %q (%v)", vars[ollamaVar], err)
+		t.Errorf("the env rows show %q (%v)", vars[ollamaVar], err)
 	}
-	if err := a.h.SaveEnv("ai-chat", map[string]string{ollamaVar: "sk-other"}); statusOf(err) != 400 {
-		t.Errorf("SaveEnv of a provider variable = %v, want 400", err)
+	if _, err := a.h.SetEnvOverride("ai-chat", ollamaVar, "sk-other", aiAdmin); statusOf(err) != 400 {
+		t.Errorf("overriding a provider variable = %v, want 400", err)
 	}
 }
 

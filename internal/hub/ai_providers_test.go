@@ -354,9 +354,9 @@ func TestProviderSecretStore(t *testing.T) {
 	}
 }
 
-// TestProviderSecretsMaskedAndRedacted (G30(a)/(c)): Expert Env shows
+// TestProviderSecretsMaskedAndRedacted (G30(a)/(c)): the env rows show
 // PORTCULLIS_AI_PROVIDER_* (and any copy of a provider secret) as [set],
-// SaveEnv takes [set] back unchanged and refuses a change, every
+// an override of either is refused, every
 // instance's redaction set holds the provider secrets, and an unreadable
 // store hides messages.
 func TestProviderSecretsMaskedAndRedacted(t *testing.T) {
@@ -368,19 +368,17 @@ func TestProviderSecretsMaskedAndRedacted(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeFile(t, f.h.envPath("grafana-b"), "PORTCULLIS_AI_PROVIDER_OLLAMA_KEY='sk-MARKER-123'\nCOPY=sk-MARKER-123\nPLAIN=hello\n")
-	vars, _, err := f.h.Env("grafana-b")
+	vars, err := envView(f.h, "grafana-b")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if vars["PORTCULLIS_AI_PROVIDER_OLLAMA_KEY"] != "[set]" || vars["COPY"] != "[set]" || vars["PLAIN"] != "hello" {
 		t.Errorf("Env = %v", vars)
 	}
-	if err := f.h.SaveEnv("grafana-b", vars); err != nil {
-		t.Errorf("SaveEnv of the masked values = %v", err)
-	}
-	vars["PORTCULLIS_AI_PROVIDER_OLLAMA_KEY"] = "sk-other"
-	if err := f.h.SaveEnv("grafana-b", vars); statusOf(err) != 400 {
-		t.Errorf("SaveEnv changing a provider variable = %v, want 400", err)
+	for k, v := range map[string]string{"PORTCULLIS_AI_PROVIDER_OLLAMA_KEY": "sk-other", "COPY": "x", "PLAIN": "sk-MARKER-123", "OTHER": "sk-MARKER-123"} {
+		if _, err := f.h.SetEnvOverride("grafana-b", k, v, aiAdmin); statusOf(err) != 400 {
+			t.Errorf("overriding %s = %v, want 400", k, err)
+		}
 	}
 	if !strings.Contains(readFile(t, f.h.envPath("grafana-b")), "PORTCULLIS_AI_PROVIDER_OLLAMA_KEY='sk-MARKER-123'") {
 		t.Error("the provider variable was rewritten")
@@ -394,7 +392,7 @@ func TestProviderSecretsMaskedAndRedacted(t *testing.T) {
 	if got := f.h.secretRedactor("grafana-b")("boom"); !strings.Contains(got, "hidden") {
 		t.Errorf("unreadable store: redactor = %q, want the message hidden", got)
 	}
-	if _, _, err := f.h.Env("grafana-b"); err == nil {
+	if _, err := f.h.EnvRows("grafana-b"); err == nil {
 		t.Error("Env with an unreadable provider store must fail closed")
 	}
 }
@@ -478,7 +476,7 @@ func TestProviderSecretMasksDeclaredVariable(t *testing.T) {
 		t.Fatal("GF_SECRET is not declared by the fixture")
 	}
 	writeFile(t, f.h.envPath("grafana-b"), "GF_SECRET=sk-MARKER-123\nPLAIN=hello\n")
-	vars, _, err := f.h.Env("grafana-b")
+	vars, err := envView(f.h, "grafana-b")
 	if err != nil {
 		t.Fatal(err)
 	}

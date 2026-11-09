@@ -495,14 +495,17 @@ func TestReadTools17bAnswer(t *testing.T) {
 		t.Errorf("get_template secretapp = %q %v", txt, isErr)
 	}
 	// get_env hides generated / secret-looking values from the AI (and
-	// save_env refuses the mask written back); public instance variables show.
+	// set_env_override refuses the mask written back); public instance
+	// variables show.
 	sec := readEnvValue(t, filepath.Join(e.data, "env", "aiapp.env"), "HDR_SECRET")
-	if txt, _, _ := e.tool(t, "get_env", map[string]any{"id": "aiapp"}); !strings.Contains(txt, `"HDR_SECRET":"[secret]"`) ||
-		strings.Contains(txt, sec) || !strings.Contains(txt, `"PORTCULLIS_INSTANCE":"aiapp"`) {
+	if txt, _, _ := e.tool(t, "get_env", map[string]any{"id": "aiapp"}); !strings.Contains(txt, `"name":"HDR_SECRET","default":"[set]"`) ||
+		strings.Contains(txt, sec) || !strings.Contains(txt, `"name":"PORTCULLIS_INSTANCE","default":"aiapp"`) {
 		t.Errorf("get_env = %s", txt)
 	}
-	if txt, isErr, _ := e.tool(t, "save_env", map[string]any{"id": "aiapp", "variables": map[string]string{"HDR_SECRET": "[secret]"}}); !isErr || !strings.HasPrefix(txt, "400: ") {
-		t.Errorf("save_env [secret] = %q %v", txt, isErr)
+	for _, args := range []map[string]any{{"id": "aiapp", "name": "HDR_SECRET", "value": "[secret]"}, {"id": "aiapp", "name": "MY_VAR", "value": "[set]"}} {
+		if txt, isErr, _ := e.tool(t, "set_env_override", args); !isErr || !strings.HasPrefix(txt, "400: ") {
+			t.Errorf("set_env_override %v = %q %v", args, txt, isErr)
+		}
 	}
 	// get_template leaves secret defaults out; an unknown template is 404.
 	if txt, isErr, _ := e.tool(t, "get_template", map[string]any{"id": "nope"}); !isErr || !strings.HasPrefix(txt, "404: ") {
@@ -570,7 +573,8 @@ var adminToolFixtures = []struct {
 	{"exec", map[string]any{"id": "smbfixture", "service": "smb", "command": "env"}},
 	{"get_compose", map[string]any{"id": "talk-a"}},
 	{"get_env", map[string]any{"id": "talk-a"}},
-	{"save_env", map[string]any{"id": "secretapp", "variables": map[string]string{"FOO": "bar"}}},
+	{"set_env_override", map[string]any{"id": "secretapp", "name": "FOO", "value": "bar"}},
+	{"clear_env_override", map[string]any{"id": "secretapp", "name": "FOO"}},
 	{"get_custom_override", map[string]any{"id": "secretapp"}},
 	{"save_custom_override", map[string]any{"id": "secretapp", "content": ""}},
 	{"list_drift", map[string]any{"recheck": true}},
@@ -871,8 +875,8 @@ const keeperCompose = "services:\n  web:\n    image: x\n    environment:\n      
 // TestClientSecretEnvAlwaysSecret (fix round 1, security review): a
 // Keycloak client's secret_env, a secret option's env name and a
 // generated entry are secrets whatever their name — get_env masks them,
-// save_env refuses them on the tool path (even "[set]", which would be
-// written literally), and the redaction set holds the value.
+// set_env_override refuses them (even "[set]", which would be written
+// literally), and the redaction set holds the value.
 func TestClientSecretEnvAlwaysSecret(t *testing.T) {
 	e := newToolEnv(t, map[string][2]string{"keeper": {keeperManifest, keeperCompose}}, nil)
 	e.ll.AddGroup("users_keeper")
@@ -880,17 +884,15 @@ func TestClientSecretEnvAlwaysSecret(t *testing.T) {
 		t.Fatal(err)
 	}
 	const val = "client-VALUE-0123456789"
-	if err := e.s.Hub.SaveEnv("keeper", map[string]string{"OIDC_CLIENT_VALUE": val}); err != nil {
-		t.Fatal(err)
-	}
+	setEnvLine(t, filepath.Join(e.data, "env", "keeper.env"), "OIDC_CLIENT_VALUE", val)
 	txt, isErr, _ := e.tool(t, "get_env", map[string]any{"id": "keeper"})
-	if isErr || !strings.Contains(txt, `"OIDC_CLIENT_VALUE":"[secret]"`) || strings.Contains(txt, val) {
+	if isErr || !strings.Contains(txt, `"name":"OIDC_CLIENT_VALUE","default":"[set]"`) || strings.Contains(txt, val) {
 		t.Errorf("get_env = %q %v", txt, isErr)
 	}
 	for _, v := range []string{"other-value-1", "[set]", "[secret]"} {
-		txt, isErr, _ := e.tool(t, "save_env", map[string]any{"id": "keeper", "variables": map[string]string{"OIDC_CLIENT_VALUE": v}})
+		txt, isErr, _ := e.tool(t, "set_env_override", map[string]any{"id": "keeper", "name": "OIDC_CLIENT_VALUE", "value": v})
 		if !isErr || !strings.HasPrefix(txt, "400: ") {
-			t.Errorf("save_env %q = %q %v", v, txt, isErr)
+			t.Errorf("set_env_override %q = %q %v", v, txt, isErr)
 		}
 	}
 	if got := readEnvValue(t, filepath.Join(e.data, "env", "keeper.env"), "OIDC_CLIENT_VALUE"); got != val {
@@ -906,7 +908,7 @@ func TestClientSecretEnvAlwaysSecret(t *testing.T) {
 	if err := e.s.Hub.Enable("secretapp"); err != nil {
 		t.Fatal(err)
 	}
-	if txt, isErr, _ := e.tool(t, "save_env", map[string]any{"id": "secretapp", "variables": map[string]string{"HEADSCALE_API_KEY": "[set]"}}); isErr {
+	if txt, isErr, _ := e.tool(t, "set_env_override", map[string]any{"id": "secretapp", "name": "HEADSCALE_API_KEY", "value": "[set]"}); !isErr || !strings.HasPrefix(txt, "400: ") {
 		t.Errorf("secret option [set] = %q", txt)
 	}
 	// In the redaction set: a result quoting it is redacted.
@@ -935,9 +937,7 @@ func TestRedactionKeyFollowsSecretEnvNames(t *testing.T) {
 	plain := strings.Replace(keeperManifest, "    secret_env: OIDC_CLIENT_VALUE\n", "", 1)
 	e := newToolEnv(t, map[string][2]string{"keeper": {plain, keeperCompose}}, nil)
 	const val = "client-VALUE-0123456789"
-	if err := e.s.Hub.SaveEnv("keeper", map[string]string{"OIDC_CLIENT_VALUE": val}); err != nil {
-		t.Fatal(err)
-	}
+	setEnvLine(t, filepath.Join(e.data, "env", "keeper.env"), "OIDC_CLIENT_VALUE", val)
 	redact, err := e.s.toolRedactor()
 	if err != nil || !strings.Contains(redact(val), val) {
 		t.Fatalf("before: a plain variable is redacted (%v)", err)

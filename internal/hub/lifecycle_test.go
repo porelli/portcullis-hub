@@ -638,18 +638,26 @@ func TestDefaultPolicy(t *testing.T) {
 }
 
 func TestExpertFiles(t *testing.T) {
-	f := newFixture(t)
-	if err := f.h.SaveEnv("grafana", map[string]string{"A": "1\nB=2"}); statusOf(err) != 400 {
-		t.Errorf("newline in env accepted: %v", err)
-	}
-	if err := f.h.SaveEnv("grafana", map[string]string{"A B": "1"}); statusOf(err) != 400 {
-		t.Errorf("bad key accepted: %v", err)
-	}
-	if err := f.h.SaveEnv("grafana", map[string]string{"FOO": "bar"}); err != nil {
+	f := newInstanceFixture(t, nil)
+	if err := f.h.Enable("grafana"); err != nil {
 		t.Fatal(err)
 	}
-	vars, services, err := f.h.Env("grafana")
-	if err != nil || vars["FOO"] != "bar" || fmt.Sprint(services) != "[web]" {
-		t.Errorf("env = %v %v %v", vars, services, err)
+	f.h.Wait()
+	if err := envOverrideErr(f.h, "grafana", "A", "1\nB=2"); statusOf(err) != 400 {
+		t.Errorf("newline in env accepted: %v", err)
+	}
+	if err := envOverrideErr(f.h, "grafana", "A B", "1"); statusOf(err) != 400 {
+		t.Errorf("bad key accepted: %v", err)
+	}
+	if err := envOverrideErr(f.h, "grafana", "FOO", "bar"); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := f.h.EnvRows("grafana")
+	if r := envRowOf(rows, "FOO"); err != nil || r == nil || r.Value != "bar" || r.Source != EnvSourceCustom {
+		t.Errorf("rows = %v %v", rows, err)
+	}
+	cv, err := f.h.ComposeFiles("grafana")
+	if err != nil || fmt.Sprint(cv.Services) != "[web]" {
+		t.Errorf("services = %v %v", cv, err)
 	}
 }

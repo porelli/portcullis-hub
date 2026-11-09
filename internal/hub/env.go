@@ -110,13 +110,20 @@ func (h *Hub) generateAppEnvLocked(t *templates.Template, m *directory.Membershi
 		_, prov := provEnv[k]
 		lines = append(lines, envLine(k, vars[k], quoted || prov))
 	}
+	// The admin's env overrides last (§11.9): they win.
+	block, err := h.envOverrideBlockLocked(t)
+	if err != nil {
+		return err
+	}
+	lines = append(lines, block...)
 	// 0600: contains generated secrets.
 	return fsutil.WriteFileAtomic(envFile, []byte(strings.Join(lines, "\n")+"\n"), 0600)
 }
 
 // writeOptionEnvLocked updates the option variables (optionEnvLocked,
 // single-quoted) and the port variables (portEnvLocked) in id's .env,
-// keeping every other line. Caller must hold mu.
+// keeping every other line, then the env overrides (re-checked). Caller
+// must hold mu.
 func (h *Hub) writeOptionEnvLocked(t *templates.Template, m *directory.Membership) error {
 	vars, err := h.optionEnvLocked(t, m)
 	if err != nil {
@@ -125,7 +132,10 @@ func (h *Hub) writeOptionEnvLocked(t *templates.Template, m *directory.Membershi
 	if err := setEnvVars(h.envPath(t.ID), h.portEnvLocked(t), false); err != nil {
 		return err
 	}
-	return setEnvVars(h.envPath(t.ID), vars, true)
+	if err := setEnvVars(h.envPath(t.ID), vars, true); err != nil {
+		return err
+	}
+	return h.writeEnvOverridesLocked(t)
 }
 
 // portEnvLocked are t's port settings as env variables: the stored port
@@ -328,11 +338,13 @@ func (h *Hub) setEnvProblems(id string, problems []string) {
 }
 
 // envProblemsUnit is the env:values unit the panel shows while some
-// option env value is written empty (ok: there is one).
+// option env value is written empty or a stored env override is skipped
+// (ok: there is one).
 func (h *Hub) envProblemsUnit(id string) (UnitResult, bool) {
 	h.envProblemsMu.Lock()
 	defer h.envProblemsMu.Unlock()
-	p := h.envProblems[id]
+	// The skipped env overrides (§11.9) show here too.
+	p := append(slices.Clone(h.envProblems[id]), h.envDrops[id]...)
 	if len(p) == 0 {
 		return UnitResult{}, false
 	}
@@ -484,11 +496,17 @@ func parseEnv(data []byte) map[string]string {
 	return out
 }
 
-// parseEnvRaw parses KEY=VALUE lines, values as written.
+// parseEnvRaw parses KEY=VALUE lines, values as written. The env
+// overrides' block (envOverrideMarker and every line after it) is not
+// read: every reader sees the values without the admin's overrides (the
+// defaults, §11.9), and every writer writes the block again from state.
 func parseEnvRaw(data []byte) map[string]string {
 	result := make(map[string]string)
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
+		if line == envOverrideMarker {
+			break
+		}
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
@@ -536,6 +554,9 @@ func setEnvVars(envFile string, vars map[string]string, quote bool) error {
 	if len(data) > 0 {
 		lines = strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
 	}
+	// The env overrides' block stays last, untouched (its writer is
+	// writeEnvOverridesLocked).
+	lines, block := splitEnvOverrides(lines)
 	done := map[string]bool{}
 	for i, line := range lines {
 		k, _, ok := strings.Cut(strings.TrimSpace(line), "=")
@@ -558,6 +579,7 @@ func setEnvVars(envFile string, vars map[string]string, quote bool) error {
 	for _, k := range keys {
 		lines = append(lines, envLine(k, vars[k], quote))
 	}
+	lines = append(lines, block...)
 	return fsutil.WriteFileAtomic(envFile, []byte(strings.Join(lines, "\n")+"\n"), 0600)
 }
 

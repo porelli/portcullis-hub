@@ -155,13 +155,13 @@ func TestSecretEnvLineAfterTemplateUpdate(t *testing.T) {
 	f.h.pruneSettings()
 	checkEnv := func(when string) {
 		t.Helper()
-		vars, _, err := f.h.Env("secretapp")
+		vars, err := envView(f.h, "secretapp")
 		if err != nil {
 			t.Fatal(err)
 		}
 		for k, v := range vars {
 			if strings.Contains(v, val) {
-				t.Errorf("%s: Expert Env shows %s=%q", when, k, v)
+				t.Errorf("%s: the env rows show %s=%q", when, k, v)
 			}
 		}
 		entry, err := f.h.BackupInstance("secretapp", directory.Human("root"))
@@ -596,17 +596,21 @@ func TestStoredEntryCommaNeverInHeader(t *testing.T) {
 
 // ── H17 (delivery engine minors) ──
 
-// H17: SaveEnv's read-modify-write of the .env holds mu (every other
-// .env writer does).
-func TestSaveEnvHoldsMu(t *testing.T) {
+// H17: an env override's state change and .env write hold mu (every
+// other .env writer does).
+func TestSetEnvOverrideHoldsMu(t *testing.T) {
 	f, _ := immichFixture(t)
-	f.h.mu.RLock() // a reader: SaveEnv's write must wait for it
+	if err := f.h.Enable("immich"); err != nil {
+		t.Fatal(err)
+	}
+	f.h.Wait()
+	f.h.mu.RLock() // a reader: the override's write must wait for it
 	done := make(chan error, 1)
-	go func() { done <- f.h.SaveEnv("immich", map[string]string{"FREE_VAR": "x"}) }()
+	go func() { done <- envOverrideErr(f.h, "immich", "FREE_VAR", "x") }()
 	select {
 	case err := <-done:
 		f.h.mu.RUnlock()
-		t.Fatalf("SaveEnv finished (%v) while mu was held", err)
+		t.Fatalf("SetEnvOverride finished (%v) while mu was held", err)
 	case <-time.After(100 * time.Millisecond):
 	}
 	f.h.mu.RUnlock()
@@ -667,9 +671,7 @@ func TestBackupBlanksByValueOnlyOrphans(t *testing.T) {
 	cp := filepath.Join(f.src, "secretapp", "compose.yml")
 	writeFile(t, cp, strings.Replace(string(mustRead(t, cp)), "      API_KEY: ${HEADSCALE_API_KEY}\n", "      API_KEY: ${HEADSCALE_API_KEY}\n      PUID: ${PUID:-1000}\n", 1))
 	f.h.Discover()
-	if err := f.h.SaveEnv(id, map[string]string{"PUID": "1000", "OLD_KEY": "1000"}); err != nil {
-		t.Fatal(err)
-	}
+	plantEnv(t, f.h, id, map[string]string{"PUID": "1000", "OLD_KEY": "1000"})
 	entry, err := f.h.BackupInstance(id, directory.Human("root"))
 	if err != nil {
 		t.Fatal(err)
@@ -880,10 +882,10 @@ func TestRetryNeverBlocksOnDeliveryLock(t *testing.T) {
 
 // ── Residual pass ──
 
-// Residual I1: the Expert round trip of a variable masked by value: an
-// undeclared copy of a secret (MY_COPY=1000) posted back as [set] stays
-// as it is; a Hub-set variable whose value collides with a secret is not
-// masked (declared), so posting it back is no 400.
+// Residual I1: a variable masked by value: an undeclared copy of a
+// secret (MY_COPY=1000) is shown masked and stays as it is; a Hub-set
+// variable whose value collides with a secret is not masked (declared);
+// an override holding a secret's value is refused.
 func TestExpertEnvRoundTripWithSecretValues(t *testing.T) {
 	f, _ := secretFixture(t)
 	const id = "secretapp"
@@ -897,10 +899,8 @@ func TestExpertEnvRoundTripWithSecretValues(t *testing.T) {
 	}
 	saveSecret(t, f, id, "api_key", setSecret("1000"))
 	saveSecret(t, f, id, "token", setSecret(group))
-	if err := f.h.SaveEnv(id, map[string]string{"MY_COPY": "1000"}); err != nil {
-		t.Fatal(err)
-	}
-	vars, _, err := f.h.Env(id)
+	plantEnv(t, f.h, id, map[string]string{"MY_COPY": "1000"})
+	vars, err := envView(f.h, id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -910,9 +910,10 @@ func TestExpertEnvRoundTripWithSecretValues(t *testing.T) {
 	if vars["PORTCULLIS_ACCESS_GROUP"] != group {
 		t.Errorf("PORTCULLIS_ACCESS_GROUP shown as %q, want %q (declared: not masked)", vars["PORTCULLIS_ACCESS_GROUP"], group)
 	}
-	// The UI posts every variable back.
-	if err := f.h.SaveEnv(id, vars); err != nil {
-		t.Fatalf("posting Env back = %v", err)
+	// Overriding with a stored secret's value is refused; the file
+	// keeps both lines as they are.
+	if err := envOverrideErr(f.h, id, "OTHER_COPY", "1000"); statusOf(err) != 400 {
+		t.Errorf("an override holding a secret's value = %v, want 400", err)
 	}
 	got := composeReads(t, f.h.envPath(id))
 	if got["MY_COPY"] != "1000" || got["PORTCULLIS_ACCESS_GROUP"] != group {
@@ -1025,9 +1026,7 @@ func TestPruneLeavesDroppedSecretInNoEnvLine(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.h.Wait()
-	if err := f.h.SaveEnv(id, map[string]string{"COPY_KEY": val, "MY_COPY": val}); err != nil {
-		t.Fatal(err)
-	}
+	plantEnv(t, f.h, id, map[string]string{"COPY_KEY": val, "MY_COPY": val})
 	manifest := filepath.Join(f.src, "secretapp", "manifest.yaml")
 	m := strings.Replace(string(mustRead(t, manifest)), "    - key: api_key\n      label: API key\n      type: secret\n      applies: restart\n      delivery: [{env: HEADSCALE_API_KEY}]\n", "", 1)
 	writeFile(t, manifest, strings.Replace(m, "      requires: [api_key]\n", "", 1))

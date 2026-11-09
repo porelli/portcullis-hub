@@ -1264,6 +1264,10 @@ func (h *Hub) refreshEngineEnv(t *templates.Template, gen string, m *directory.M
 		if err := setEnvVars(h.envPath(t.ID), h.entryEnvLocked(live, m), true); err != nil {
 			return false, false, err
 		}
+		// Every .env write re-checks the env overrides (§11.9).
+		if err := h.writeEnvOverridesLocked(live); err != nil {
+			return false, false, err
+		}
 	}
 	after, _ := os.ReadFile(h.envPath(t.ID))
 	return string(before) != string(after), false, nil

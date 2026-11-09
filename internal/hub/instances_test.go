@@ -668,8 +668,8 @@ func TestInstanceEnvIsTheHubs(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, k := range []string{"PORTCULLIS_HOST_GRAFANA", "PORTCULLIS_INSTANCE", "PORTCULLIS_DOMAIN", "PORTCULLIS_OIDC_CLIENT_ID_X"} {
-		if err := f.h.SaveEnv("grafana", map[string]string{k: "evil.example.com"}); statusOf(err) != 400 {
-			t.Errorf("SaveEnv %s: %v", k, err)
+		if err := envOverrideErr(f.h, "grafana", k, "evil.example.com"); statusOf(err) != 400 {
+			t.Errorf("env override %s: %v", k, err)
 		}
 	}
 	// A hand-edited file is put right before the next compose up.

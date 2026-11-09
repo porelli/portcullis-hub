@@ -735,6 +735,9 @@ type ComposeView struct {
 	Rules        []string `json:"rules"`
 	// Files is the compose -f order.
 	Files []string `json:"files"`
+	// Services are compose.yml's service names (the Expert shell's
+	// picker; the env route that carried them is gone, §11.9).
+	Services []string `json:"services"`
 }
 
 // ComposeFiles returns an app's compose layers.
@@ -747,7 +750,7 @@ func (h *Hub) ComposeFiles(id string) (*ComposeView, error) {
 	if err != nil {
 		return nil, statusErr(404, "compose.yml not found")
 	}
-	v := &ComposeView{Compose: string(data), Enabled: t.Enabled, Rules: OverrideRules,
+	v := &ComposeView{Compose: string(data), Enabled: t.Enabled, Rules: OverrideRules, Services: templates.Services(data),
 		Files: []string{"compose.yml (template)", "compose.hub-override.yml (generated)", "compose.custom-override.yml (yours)"}}
 	h.mu.RLock()
 	v.HubOverride, err = h.renderOverrideLocked(t, h.st.Settings[id])

@@ -828,6 +828,10 @@ func (h *Hub) applyRestore(ctx context.Context, id string, sb *staged, plan []vo
 	h.mu.Lock()
 	h.applyConfigLocked(id, sb.cfg)
 	h.rebuildLocked()
+	// The archive's env overrides, checked against the template (§11.9).
+	if v := h.findLocked(id); v != nil {
+		air.warnings = append(air.warnings, h.restoredEnvOverridesLocked(v)...)
+	}
 	// The archive's AI state, judged against the restored policy.
 	if v := h.findLocked(id); v != nil {
 		next, has, w := h.restoredAILocked(v, sb.ai, sb.aiErr, false, h.st.AIInstances[id])
@@ -1220,6 +1224,10 @@ func (h *Hub) restoreAsSteps(ctx context.Context, p *Progress, archive, newID st
 	h.mu.Lock()
 	h.applyConfigLocked(newID, sb.cfg)
 	h.rebuildLocked()
+	// The archive's env overrides, copied and checked (§11.9).
+	if v := h.findLocked(newID); v != nil {
+		res.Warnings = append(res.Warnings, h.restoredEnvOverridesLocked(v)...)
+	}
 	// Every companion off, modes and providers kept (§11.6); switching
 	// one on runs revoke_all first (G34). A copy is never listed before a
 	// revoke_all either way.

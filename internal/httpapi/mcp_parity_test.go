@@ -49,7 +49,8 @@ var pendingToolRoutes = map[string]string{}
 var destructiveTwins = map[string]string{
 	"DELETE /api/instances/{id}":                          "deletes the instance (typed id)",
 	"/api/templates/exec/":                                "runs a command in a container",
-	"/api/templates/env/":                                 "writes the env the app's code reads (save_env)",
+	"PUT /api/instances/{id}/env/{name}":                  "writes a variable the app's code reads (set_env_override)",
+	"DELETE /api/instances/{id}/env/{name}":               "switches an app's variable back to its default (clear_env_override)",
 	"/api/templates/compose/":                             "writes the compose override that decides what runs (save_custom_override)",
 	"/api/drift/resolve":                                  "stops, adopts or recreates a project",
 	"DELETE /api/instances/{id}/credentials/{key}/{user}": "revokes a person's credential",
@@ -210,7 +211,7 @@ func TestToolParity(t *testing.T) {
 			t.Errorf("D tool %s: twin %s neither deletes, restores, revokes, runs code nor has a typed check", tl.Name, tl.Twin)
 		}
 	}
-	for _, n := range []string{"exec", "save_env", "save_custom_override", "resolve_drift", "delete_instance", "admin_revoke_credential",
+	for _, n := range []string{"exec", "set_env_override", "clear_env_override", "save_custom_override", "resolve_drift", "delete_instance", "admin_revoke_credential",
 		"set_policy", "set_sign_in_mode", "set_public_access", "save_settings", "set_local_networks", "enable_instance",
 		// Task 17b (§15.10's D list, G37 and its rulings).
 		"add_source", "remove_source", "restore_instance", "restore_as", "delete_domain", "revoke_ai_access", "dismiss_ai_revoke_problem",
@@ -305,7 +306,7 @@ var admin17a = []string{
 	"list_instances", "get_instance", "instance_defaults", "create_instance", "enable_instance", "disable_instance",
 	"restart_instance", "set_hosts", "set_instance_label", "get_op", "list_ops", "wait_for_op", "stop_op", "delete_instance",
 	"get_settings", "preview_settings", "save_settings", "set_secret_setting", "set_policy", "set_sign_in_mode", "set_public_access",
-	"get_logs", "get_status", "exec", "get_compose", "get_env", "save_env", "get_custom_override", "save_custom_override",
+	"get_logs", "get_status", "exec", "get_compose", "get_env", "set_env_override", "clear_env_override", "get_custom_override", "save_custom_override",
 	"list_drift", "resolve_drift",
 	"set_person_value", "clear_person_value", "retry_deliveries", "missing_groups", "create_missing_groups",
 	"list_credentials", "admin_revoke_credential", "get_local_networks", "set_local_networks",

@@ -1615,11 +1615,8 @@ func (h *Hub) applyDefaultPolicy() {
 
 // ── Expert mode (compose layers: useroverride.go) ─────────
 
-// Env returns an app's .env variables and compose service names. The
-// variables of secret options are shown as [set] (write-only: set them
-// under Settings).
-// secretMask is the predicate Expert Env masks a variable by (and SaveEnv
-// takes [set] back as unchanged by): a non-empty value of a secret
+// secretMask is the predicate the env rows mask a variable by (EnvRows;
+// an override holding such a value is refused): a non-empty value of a secret
 // option's env name, or of a variable the template doesn't declare
 // (declaredEnvNames, Hub-set names included) holding a stored secret's
 // value — a line a template update left behind (an env variable renamed,
@@ -1657,92 +1654,13 @@ func (h *Hub) secretMask(t *templates.Template) (func(name, value string) bool, 
 	}, nil
 }
 
-func (h *Hub) Env(id string) (map[string]string, []string, error) {
-	t := h.Template(id)
-	if t == nil {
-		return nil, nil, ErrNotFound
-	}
-	vars := readEnvFile(h.envPath(id))
-	masked, err := h.secretMask(t)
-	if err != nil {
-		return nil, nil, err
-	}
-	for n, v := range vars {
-		if masked(n, v) {
-			vars[n] = settings.SecretShown
-		}
-	}
-	return vars, templates.Services(t.ReadCompose()), nil
-}
-
-// EnvSecretMask is get_env's mask of a secret value on the Portcullis
-// MCP's tool path (settings.SecretShown, "[set]", is Expert Env's).
+// EnvSecretMask is the Portcullis MCP's mask of a secret value
+// (settings.SecretShown, "[set]", is the env rows'); never an override.
 const EnvSecretMask = "[secret]"
 
-// isEnvMask: v is one of the masks Env or get_env show instead of a
-// value, never a value to write.
+// isEnvMask: v is one of the masks shown instead of a value, never a
+// value to write.
 func isEnvMask(v string) bool { return v == settings.SecretShown || v == EnvSecretMask }
-
-// SaveEnv sets variables in an app's .env. The Expert UI posts every
-// variable back: a variable an option owns (its env delivery) or the Hub
-// sets (instance variables, PORTCULLIS_*) is skipped when its value is
-// unchanged (a set secret's [set] counts as unchanged) and refused (400)
-// when it was changed — options are set under Settings, which writes
-// them. A mask ([set] or [secret]) posted for a variable that always
-// holds a secret (SecretEnvNames: a Keycloak client's secret_env, a
-// generated entry, a secret option) counts as unchanged too: it is never
-// written literally over the secret.
-func (h *Hub) SaveEnv(id string, vars map[string]string) error {
-	_, err := h.SaveEnvChanged(id, vars)
-	return err
-}
-
-// SaveEnvChanged is SaveEnv, also returning the names of the variables it
-// wrote (sorted; never their values): the API's audit detail.
-func (h *Hub) SaveEnvChanged(id string, vars map[string]string) ([]string, error) {
-	t := h.Template(id)
-	if t == nil {
-		return nil, ErrNotFound
-	}
-	owners := optionEnvOwners(t)
-	secretNames := SecretEnvNames(t)
-	masked, err := h.secretMask(t)
-	if err != nil {
-		return nil, err
-	}
-	// The read-modify-write under mu, as every other .env writer's.
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if err := h.pendingLocked(id); err != nil {
-		return nil, err
-	}
-	cur := readEnvFile(h.envPath(id))
-	write := map[string]string{}
-	for _, k := range slices.Sorted(maps.Keys(vars)) {
-		v := vars[k]
-		if !templates.EnvKeyRe.MatchString(k) || templates.HasControlChars(v) {
-			return nil, statusErr(400, "invalid variable %q (keys: [A-Za-z_][A-Za-z0-9_]*, values: no newlines)", k)
-		}
-		if v == cur[k] || (v == settings.SecretShown && masked(k, cur[k])) || (secretNames[k] && isEnvMask(v)) {
-			continue // posted back unchanged (a masked value as Env showed it)
-		}
-		o, owned := owners[k]
-		hubSet := templates.ReservedVar(k) || k == "PORTCULLIS_DOMAIN"
-		if !owned && !hubSet {
-			write[k] = v
-			continue
-		}
-		// Routing, hostnames and names come from the Hub, never the env.
-		if hubSet {
-			return nil, statusErr(400, "%s is set by the Hub", k)
-		}
-		return nil, statusErr(400, "%s belongs to the setting %s: set it under Settings", k, o)
-	}
-	if err := setEnvVars(h.envPath(id), write, false); err != nil {
-		return nil, statusErr(500, "failed to write env: %v", err)
-	}
-	return slices.Sorted(maps.Keys(write)), nil
-}
 
 // seedPlaceholders are the group_values placeholders in the order their
 // rows are seeded: the admin group first (under priority the more

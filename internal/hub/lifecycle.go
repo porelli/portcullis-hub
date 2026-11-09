@@ -116,6 +116,9 @@ func (h *Hub) prepareUp(t *templates.Template) (*templates.Template, error) {
 		err = h.refreshInstanceEnvLocked(live, members)
 	}
 	h.mu.Unlock()
+	// A stored env override the template now refuses was skipped: the
+	// running operation's record says so (§11.9).
+	h.warnEnvOverrideDrops(t.ID)
 	if err != nil {
 		var se *StatusError
 		if errors.As(err, &se) {

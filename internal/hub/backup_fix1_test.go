@@ -103,7 +103,7 @@ func TestInterruptedRestoreRolledBack(t *testing.T) {
 	for name, err := range map[string]error{
 		"enable":   f.h.Enable("grafana-b"),
 		"settings": f.h.save("grafana-b", SettingsUpdate{}),
-		"env":      f.h.SaveEnv("grafana-b", map[string]string{"X": "y"}),
+		"env":      envOverrideErr(f.h, "grafana-b", "X", "y"),
 		"hosts":    f.h.SetHosts("grafana-b", map[string]string{"grafana": "g2.example.org"}, directory.Human("root")),
 	} {
 		if statusOf(err) != 409 {
@@ -388,7 +388,7 @@ func TestDeletingIsDisabled(t *testing.T) {
 	if err := f.h.save("grafana-b", SettingsUpdate{}); statusOf(err) != 409 {
 		t.Errorf("settings while deleting = %v", err)
 	}
-	if err := f.h.SaveEnv("grafana-b", map[string]string{"X": "y"}); statusOf(err) != 409 {
+	if err := envOverrideErr(f.h, "grafana-b", "X", "y"); statusOf(err) != 409 {
 		t.Errorf("env while deleting = %v", err)
 	}
 	if _, _, err := f.h.SaveUserOverride("grafana-b", ""); statusOf(err) != 409 {

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
@@ -136,6 +137,9 @@ type instanceConfig struct {
 	// same-instance restore keeps the current one; a restore into a new
 	// id takes it unless the request names one.
 	Label string `yaml:"label,omitempty"`
+	// EnvOverrides are the instance's env overrides (§11.9, never a
+	// secret); both restores check each against the restored template.
+	EnvOverrides map[string]string `yaml:"env_overrides,omitempty"`
 }
 
 func (h *Hub) backupsDir() string { return filepath.Join(h.cfg.DataDir, "backups") }
@@ -170,7 +174,8 @@ func (h *Hub) targetLocked(id string) (*target, bool) {
 // instanceConfigLocked is config/instance.yaml of tg. Caller must hold mu.
 func (h *Hub) instanceConfigLocked(tg *target) instanceConfig {
 	id := tg.id
-	c := instanceConfig{ID: id, Template: tg.templateID, Default: id == tg.templateID, Enabled: tg.enabled, Label: tg.entry.Label}
+	c := instanceConfig{ID: id, Template: tg.templateID, Default: id == tg.templateID, Enabled: tg.enabled, Label: tg.entry.Label,
+		EnvOverrides: maps.Clone(tg.entry.EnvOverrides)}
 	switch {
 	case tg.view != nil:
 		c.Hosts = copyMap(tg.view.Hosts)
@@ -238,6 +243,23 @@ func (h *Hub) applyConfigLocked(id string, c instanceConfig) {
 		h.st.SignIn[id] = c.SignIn
 	} else {
 		delete(h.st.SignIn, id)
+	}
+	// The env overrides (§11.9; the restores check them against the
+	// restored template: restoredEnvOverridesLocked).
+	e, had := h.st.Instances[id]
+	switch {
+	case len(c.EnvOverrides) > 0:
+		if !had {
+			e = state.Instance{ID: id, Template: c.Template}
+			if e.Template == "" {
+				e.Template = id
+			}
+		}
+		e.EnvOverrides = maps.Clone(c.EnvOverrides)
+		h.st.Instances[id] = e
+	case had && e.EnvOverrides != nil:
+		e.EnvOverrides = nil
+		h.st.Instances[id] = e
 	}
 }
 

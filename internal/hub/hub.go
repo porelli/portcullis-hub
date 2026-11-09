@@ -398,6 +398,10 @@ type Hub struct {
 	owed          map[string]string
 	owedSeq       map[string]int64
 
+	// envDrops: per instance, the stored env overrides the last .env
+	// write skipped (envOverrideBlockLocked; under envProblemsMu).
+	envDrops map[string][]string
+
 	// bg tracks background lifecycle work (queued restarts, default-policy
 	// propagation) so callers can wait for it.
 	bg sync.WaitGroup

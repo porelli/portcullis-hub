@@ -381,29 +381,31 @@ func TestRetryAudited(t *testing.T) {
 	}
 }
 
-// Expert Save Env: posting every variable back is fine; a changed
-// option-owned value is still a 400.
-func TestExpertEnvPostsEverything(t *testing.T) {
+// The env rows and overrides over HTTP (§11.9): GET masks the secret,
+// PUT refuses an option-owned variable (400) and adds one of your own,
+// DELETE removes it again; the old whole-file route is gone.
+func TestInstanceEnvRoutes(t *testing.T) {
 	e := newSetEnv(t)
 	if code, b := e.do(t, "root", "PUT", "/api/instances/vault/settings", `{"values":{"trash_days":9},"secrets":{"api_key":{"value":"`+secretValue+`"}}}`); code != 200 {
 		t.Fatalf("save = %d %s", code, b)
 	}
-	code, b := e.do(t, "root", "GET", "/api/templates/env/vault", "")
-	if code != 200 || strings.Contains(b, secretValue) {
+	code, b := e.do(t, "root", "GET", "/api/instances/vault/env", "")
+	if code != 200 || strings.Contains(b, secretValue) || !strings.Contains(b, `"rows"`) {
 		t.Fatalf("env = %d %s", code, b)
 	}
-	var env struct {
-		Variables map[string]string `json:"variables"`
+	if code, b := e.do(t, "root", "PUT", "/api/instances/vault/env/VAULT_TRASH_DAYS", `{"value":"3"}`); code != 400 || !strings.Contains(b, "trash_days") {
+		t.Errorf("owned variable = %d %s", code, b)
 	}
-	json.Unmarshal([]byte(b), &env)
-	env.Variables["MY_VAR"] = "1"
-	body, _ := json.Marshal(env.Variables)
-	if code, b := e.do(t, "root", "PUT", "/api/templates/env/vault", string(body)); code != 200 {
-		t.Fatalf("post everything back = %d %s", code, b)
+	if code, b := e.do(t, "root", "PUT", "/api/instances/vault/env/MY_VAR", `{"value":"1"}`); code != 200 || !strings.Contains(b, `"source":"custom"`) || !strings.Contains(b, `"effect"`) {
+		t.Errorf("add = %d %s", code, b)
 	}
-	env.Variables["VAULT_TRASH_DAYS"] = "3"
-	body, _ = json.Marshal(env.Variables)
-	if code, b := e.do(t, "root", "PUT", "/api/templates/env/vault", string(body)); code != 400 || !strings.Contains(b, "trash_days") {
-		t.Errorf("changed owned variable = %d %s", code, b)
+	if code, b := e.do(t, "root", "PUT", "/api/instances/vault/env/MY_VAR", `{}`); code != 400 {
+		t.Errorf("no value = %d %s", code, b)
+	}
+	if code, b := e.do(t, "root", "DELETE", "/api/instances/vault/env/MY_VAR", ""); code != 200 || !strings.Contains(b, `"row":null`) {
+		t.Errorf("reset = %d %s", code, b)
+	}
+	if code, _ := e.do(t, "root", "PUT", "/api/templates/env/vault", `{"MY_VAR":"1"}`); code == 200 {
+		t.Error("the whole-file env route still answers")
 	}
 }

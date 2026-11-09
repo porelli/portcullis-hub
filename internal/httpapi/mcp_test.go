@@ -806,6 +806,29 @@ func readEnvValue(t *testing.T, path, key string) string {
 	return ""
 }
 
+// setEnvLine sets key=value (raw) in an instance's .env, keeping every
+// other line (a value a template or an old Expert save left there).
+func setEnvLine(t *testing.T, path, key, value string) {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, l := range strings.Split(strings.TrimSuffix(string(b), "\n"), "\n") {
+		if l != "" && !strings.HasPrefix(l, key+"=") {
+			out = append(out, l)
+		}
+	}
+	out = append([]string{key + "=" + value}, out...)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(out, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestMCPProtocolVersions (§15.3): exactly the three versions, from the
 // header or initialize's body; anything else 400; a 2026-07-28 header
 // that doesn't match the body is -32020.

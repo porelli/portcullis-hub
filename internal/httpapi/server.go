@@ -97,7 +97,6 @@ func (s *Server) hubMux() *recordingMux {
 	mux.HandleFunc("/api/templates/status/", s.handleTemplateStatus)
 	mux.HandleFunc("/api/templates/logs/", s.handleTemplateLogs)
 	mux.HandleFunc("/api/templates/compose/", s.handleTemplateCompose)
-	mux.HandleFunc("/api/templates/env/", s.handleTemplateEnv)
 	mux.HandleFunc("/api/templates/exec/", s.handleTemplateExec)
 	mux.HandleFunc("/api/templates/restart/", s.handleTemplateRestart)
 	mux.HandleFunc("/api/templates/lastop/", s.handleTemplateLastOp)
@@ -939,35 +938,6 @@ func (s *Server) handleTemplateCompose(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) handleTemplateEnv(w http.ResponseWriter, r *http.Request) {
-	id, ok := appID(w, r, "/api/templates/env/")
-	if !ok {
-		return
-	}
-	switch r.Method {
-	case http.MethodGet:
-		vars, services, err := s.Hub.Env(id)
-		if err != nil {
-			writeErr(w, err, http.StatusInternalServerError)
-			return
-		}
-		writeJSON(w, map[string]interface{}{"variables": vars, "services": services})
-	case http.MethodPut:
-		var req map[string]string
-		if !decodeJSON(w, r, &req) {
-			return
-		}
-		res, err := s.saveEnv(requestActor(r), id, req)
-		if err != nil {
-			writeErr(w, err, http.StatusInternalServerError)
-			return
-		}
-		writeJSON(w, res)
-	default:
-		http.Error(w, "GET or PUT only", http.StatusMethodNotAllowed)
-	}
-}
-
 // saveUserOverride is the custom override save's work (route and
 // save_custom_override); audited app.compose_override, never with the
 // content (it may hold env values).
@@ -985,20 +955,6 @@ func (s *Server) saveUserOverride(a directory.Actor, id, content string) (map[st
 		status = "removed"
 	}
 	return map[string]any{"status": status, "restart_required": restart}, nil
-}
-
-// saveEnv is the Expert env save's work (route and save_env); audited
-// app.env with the variable names only, never values.
-func (s *Server) saveEnv(a directory.Actor, id string, vars map[string]string) (map[string]string, error) {
-	s.rec("SaveEnvChanged", id, vars)
-	keys, err := s.Hub.SaveEnvChanged(id, vars)
-	if !errors.Is(err, hub.ErrNotFound) {
-		s.auditOpAs(a, id, directory.AuditEntry{Action: "app.env", Target: id, Detail: clipMessage(strings.Join(keys, ","), 600)}, err, http.StatusInternalServerError)
-	}
-	if err != nil {
-		return nil, err
-	}
-	return map[string]string{"status": "saved"}, nil
 }
 
 // defaultStatus gives a plain error (no StatusError, no ErrBusy, no

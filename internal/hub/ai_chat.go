@@ -459,7 +459,10 @@ func (h *Hub) syncProviderEnvLocked(t *templates.Template) error {
 	if err != nil {
 		return err
 	}
-	return rewriteEnvPrefix(h.envPath(t.ID), ProviderVarPrefix, want)
+	if err := rewriteEnvPrefix(h.envPath(t.ID), ProviderVarPrefix, want); err != nil {
+		return err
+	}
+	return h.writeEnvOverridesLocked(t)
 }
 
 // rewriteEnvPrefix sets the variables of envFile that start with prefix
@@ -477,7 +480,9 @@ func rewriteEnvPrefix(envFile, prefix string, want map[string]string) error {
 	if len(data) > 0 {
 		lines = strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
 	}
-	out := make([]string, 0, len(lines)+len(want))
+	// The env overrides' block stays last (writeEnvOverridesLocked).
+	lines, block := splitEnvOverrides(lines)
+	out := make([]string, 0, len(lines)+len(want)+len(block))
 	done := map[string]bool{}
 	for _, line := range lines {
 		k, _, ok := strings.Cut(strings.TrimSpace(line), "=")
@@ -495,6 +500,7 @@ func rewriteEnvPrefix(envFile, prefix string, want map[string]string) error {
 			out = append(out, envLine(k, want[k], true))
 		}
 	}
+	out = append(out, block...)
 	next := strings.Join(out, "\n") + "\n"
 	if next == string(data) {
 		return nil
