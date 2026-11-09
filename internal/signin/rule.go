@@ -155,8 +155,10 @@ func decodeNode(dec *json.Decoder, depth int) (Node, error) {
 }
 
 // Validate checks a source rule (families allowed) against D2: the top is a
-// group; groups are "all" / "any" with 1–8 items, nested at most 3 levels;
-// at most 16 leaves, each a method id or a family.
+// group; groups are "all" / "any" with 1–8 items, nested at most 3 levels,
+// no item listed twice in one group (the same leaf or an identical group);
+// at most 16 leaves, each a method id or a family. Overlap through a family
+// (all[family:passkey, passkey_synced]) is allowed.
 func Validate(n Node) error {
 	if n.isLeaf() {
 		return errors.New("a rule must be an all-of or any-of group")
@@ -188,6 +190,79 @@ func Validate(n Node) error {
 		if len(n.Items) < 1 || len(n.Items) > MaxItems {
 			return fmt.Errorf("a group holds 1–%d items", MaxItems)
 		}
+		seen := map[string]bool{}
+		for _, it := range n.Items {
+			if err := walk(it, depth+1); err != nil {
+				return err
+			}
+			key := nodeKey(it)
+			if seen[key] {
+				what := it.Leaf
+				if !it.isLeaf() {
+					what = "“" + Sentence(it) + "”"
+				}
+				return fmt.Errorf("%s is listed twice in one group", what)
+			}
+			seen[key] = true
+		}
+		return nil
+	}
+	if err := walk(n, 1); err != nil {
+		return err
+	}
+	if leaves > MaxLeaves {
+		return fmt.Errorf("a rule has at most %d methods", MaxLeaves)
+	}
+	return nil
+}
+
+// nodeKey identifies a node by its exact shape (op, items in order, leaf).
+func nodeKey(n Node) string {
+	if n.isLeaf() {
+		return "\x00" + n.Leaf
+	}
+	var b bytes.Buffer
+	b.WriteString(n.Op + "[")
+	for _, it := range n.Items {
+		b.WriteString(nodeKey(it) + ",")
+	}
+	b.WriteString("]")
+	return b.String()
+}
+
+// Compiled-rule limits (contract §8.1): what readers accept.
+const (
+	MaxCompiledDepth  = 4
+	MaxCompiledLeaves = 48
+)
+
+// ValidateCompiled is the readers' check of a compiled rule: the top is a
+// group; every group is "all" / "any" with at least one item; groups nest at
+// most 4 levels; at most 48 leaves, each a method id (no families). It
+// doesn't look at the switches.
+func ValidateCompiled(n Node) error {
+	if n.isLeaf() {
+		return errors.New("a compiled rule must be a group")
+	}
+	leaves := 0
+	var walk func(n Node, depth int) error
+	walk = func(n Node, depth int) error {
+		if n.isLeaf() {
+			if n.Items != nil || rank(Method(n.Leaf)) < 0 {
+				return fmt.Errorf("compiled rule: unknown method %q", n.Leaf)
+			}
+			leaves++
+			return nil
+		}
+		if n.Op != OpAll && n.Op != OpAny || n.Leaf != "" {
+			return fmt.Errorf("compiled rule: unknown group kind %q", n.Op)
+		}
+		if depth > MaxCompiledDepth {
+			return fmt.Errorf("compiled rule: groups nest at most %d levels", MaxCompiledDepth)
+		}
+		if len(n.Items) == 0 {
+			return errors.New("compiled rule: empty group")
+		}
 		for _, it := range n.Items {
 			if err := walk(it, depth+1); err != nil {
 				return err
@@ -198,8 +273,8 @@ func Validate(n Node) error {
 	if err := walk(n, 1); err != nil {
 		return err
 	}
-	if leaves > MaxLeaves {
-		return fmt.Errorf("a rule has at most %d methods", MaxLeaves)
+	if leaves > MaxCompiledLeaves {
+		return fmt.Errorf("compiled rule: more than %d methods", MaxCompiledLeaves)
 	}
 	return nil
 }
@@ -220,8 +295,7 @@ func usable(n Node, on map[Method]bool) (Node, bool) {
 		if f, ok := families[n.Leaf]; ok {
 			return Node{Leaf: n.Leaf}, len(f.onMembers(on)) > 0
 		}
-		m := Method(n.Leaf)
-		return Node{Leaf: n.Leaf}, rank(m) >= 0 && on[m]
+		return Node{Leaf: n.Leaf}, isOn(on, Method(n.Leaf))
 	}
 	out := Node{Op: n.Op, Items: make([]Node, 0, len(n.Items))}
 	for _, it := range n.Items {
@@ -484,7 +558,7 @@ func Needs(n Node, on map[Method]bool) []Method {
 		return out
 	}
 	for _, m := range Methods {
-		if !on[m] {
+		if !isOn(on, m) {
 			continue
 		}
 		without := maps.Clone(on)

@@ -6,8 +6,10 @@ import "strings"
 // phrase; "all" joins its items with " and "; "any" with " or ", or with
 // ", or " when one of its items is a group of several items; an "any" of
 // several items inside an "all" is wrapped in parentheses. A group of one
-// item reads as that item. For the rule as the switches leave it, pass
-// Usable's result.
+// item reads as that item, and is looked through when choosing brackets and
+// joiners, so the sentence never hides how the parts combine. A leaf
+// outside the table reads "an unknown method". For the rule as the switches
+// leave it, pass Usable's result.
 func Sentence(n Node) string {
 	if n.isLeaf() {
 		return phrase(n.Leaf)
@@ -18,6 +20,9 @@ func Sentence(n Node) string {
 	parts := make([]string, len(n.Items))
 	multi := false
 	for i, it := range n.Items {
+		for !it.isLeaf() && len(it.Items) == 1 {
+			it = it.Items[0]
+		}
 		parts[i] = Sentence(it)
 		if !it.isLeaf() && len(it.Items) > 1 {
 			multi = true
@@ -42,5 +47,5 @@ func phrase(leaf string) string {
 	if i, ok := methodInfo[Method(leaf)]; ok {
 		return i.Phrase
 	}
-	return leaf
+	return "an unknown method"
 }

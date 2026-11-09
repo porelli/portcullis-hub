@@ -15,18 +15,20 @@ import (
 // count as nothing); "alternatives" compare as a set of sets.
 type vectorFile struct {
 	Version int          `json:"version"`
+	Note    string       `json:"note"`
 	Cases   []vectorCase `json:"cases"`
 }
 
 type vectorCase struct {
 	Name         string     `json:"name"`
-	Rule         Node       `json:"rule"`
+	Rule         *Node      `json:"rule,omitempty"`
 	On           []Method   `json:"on"`
 	Compiled     *Node      `json:"compiled,omitempty"`
 	Error        string     `json:"error,omitempty"`
 	Have         *[]string  `json:"have,omitempty"`
 	Satisfied    *bool      `json:"satisfied,omitempty"`
 	Alternatives [][]Method `json:"alternatives,omitempty"`
+	Reject       bool       `json:"reject,omitempty"`
 }
 
 func TestSharedVectors(t *testing.T) {
@@ -40,14 +42,15 @@ func TestSharedVectors(t *testing.T) {
 	if err := dec.Decode(&f); err != nil {
 		t.Fatal(err)
 	}
-	if f.Version != 1 {
-		t.Fatalf("version %d", f.Version)
+	if f.Version != 1 || f.Note == "" {
+		t.Fatalf("version %d, note %q", f.Version, f.Note)
 	}
 	if len(f.Cases) < 25 {
 		t.Fatalf("%d cases, want at least 25", len(f.Cases))
 	}
 	names := map[string]bool{}
 	sawInv := false
+	rejects := 0
 	for _, c := range f.Cases {
 		if names[c.Name] {
 			t.Errorf("duplicate case name %q", c.Name)
@@ -56,11 +59,26 @@ func TestSharedVectors(t *testing.T) {
 		if c.Have != nil && slices.Contains(*c.Have, "inv") {
 			sawInv = true
 		}
+		if c.Reject {
+			if c.Compiled == nil || c.Rule != nil || c.On != nil || c.Error != "" || c.Have != nil || c.Satisfied != nil || c.Alternatives != nil {
+				t.Errorf("%s: a reject case carries only name, compiled and reject", c.Name)
+				continue
+			}
+			rejects++
+			if err := ValidateCompiled(*c.Compiled); err == nil {
+				t.Errorf("%s: ValidateCompiled accepted %s", c.Name, js(*c.Compiled))
+			}
+			continue
+		}
+		if c.Rule == nil {
+			t.Errorf("%s: rule missing", c.Name)
+			continue
+		}
 		if !slices.IsSortedFunc(c.On, func(a, b Method) int { return rank(a) - rank(b) }) {
 			t.Errorf("%s: on not in canonical order", c.Name)
 		}
 		on := onSet(c.On...)
-		got, err := Compile(c.Rule, on)
+		got, err := Compile(*c.Rule, on)
 		if c.Error != "" {
 			if c.Error != "unmeetable" || c.Compiled != nil || c.Have != nil || c.Satisfied != nil || c.Alternatives != nil {
 				t.Errorf("%s: an error case carries only error \"unmeetable\"", c.Name)
@@ -81,7 +99,7 @@ func TestSharedVectors(t *testing.T) {
 		if js(got) != js(*c.Compiled) {
 			t.Errorf("%s: compiled %s, file has %s", c.Name, js(got), js(*c.Compiled))
 		}
-		if err := checkCompiledShape(*c.Compiled); err != nil {
+		if err := ValidateCompiled(*c.Compiled); err != nil {
 			t.Errorf("%s: %v", c.Name, err)
 		}
 		have := map[Method]bool{}
@@ -112,40 +130,12 @@ func TestSharedVectors(t *testing.T) {
 			t.Errorf("%s: alternatives say met=%v", c.Name, met)
 		}
 	}
+	if rejects < 5 {
+		t.Errorf("%d reject cases, want at least 5", rejects)
+	}
 	if !sawInv {
 		t.Error(`no case with "have": ["inv"]`)
 	}
-}
-
-// checkCompiledShape is the readers' check: no families, depth ≤ 4, ≤ 48 leaves.
-func checkCompiledShape(n Node) error {
-	leaves := 0
-	var walk func(n Node, depth int) error
-	walk = func(n Node, depth int) error {
-		if n.Op == "" {
-			if _, ok := InfoOf(Method(n.Leaf)); !ok {
-				return errors.New("compiled leaf " + n.Leaf)
-			}
-			leaves++
-			return nil
-		}
-		if depth > 4 {
-			return errors.New("compiled depth over 4")
-		}
-		for _, it := range n.Items {
-			if err := walk(it, depth+1); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-	if err := walk(n, 1); err != nil {
-		return err
-	}
-	if leaves > 48 {
-		return errors.New("over 48 compiled leaves")
-	}
-	return nil
 }
 
 func sameSetOfSets(a, b [][]Method) bool {

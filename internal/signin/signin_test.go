@@ -89,7 +89,9 @@ func TestScoreSpecExamples(t *testing.T) {
 		{"yubikey-and-certificate", builtin(t, "yubikey-and-certificate"), defaultOn(), "4.4 / 5"},
 		{"family example", anyOf(all(leaves("password", "family:passkey")...), leaf("security_key")), withPassword, "2.9 / 5"},
 		{"nested", nestedRule(), defaultOn(), "4.4 / 5"},
-		{"nested, browser cert on", nestedRule(), withCert, "4.3 / 5"},
+		// browser_cert isn't available yet: switched on, it still counts as off.
+		{"nested, browser cert on but not available", nestedRule(), withCert, "4.4 / 5"},
+		{"family scores its weakest member", all(leaves("security_key", "family:passkey")...), defaultOn(), "3.9 / 5"},
 		{"basic, password off: its alternative doesn't count", builtin(t, "basic"), defaultOn(), "2.5 / 5"},
 		{"no way in", all(leaf("password")), defaultOn(), "0.0 / 5"},
 	}
@@ -105,8 +107,8 @@ func TestScoreSpecExamples(t *testing.T) {
 	}
 
 	eight := all(leaves("yubikey_cert", "security_key", "passkey_device", "passkey_synced",
-		"family:passkey", "family:yubikey", "family:certificate", "yubikey_cert")...)
-	s := ScoreOf(eight, defaultOn())
+		"password", "family:passkey", "family:yubikey", "family:certificate")...)
+	s := ScoreOf(eight, withPassword)
 	if s.Tenths != 50 {
 		t.Errorf("8 leaves: tenths %d, want 50 (4.0 + 0.4×7 capped)", s.Tenths)
 	}
@@ -115,6 +117,38 @@ func TestScoreSpecExamples(t *testing.T) {
 	}
 	if s.String() != "5.0 / 5" {
 		t.Errorf("8 leaves string %q", s.String())
+	}
+
+	reasons := []struct {
+		name string
+		rule Node
+		want string
+	}{
+		{"two-item all", builtin(t, "yubikey-and-certificate"), "its strongest part (a YubiKey certificate) + 0.4 for 1 more part"},
+		{"three-item all", all(leaves("yubikey_cert", "security_key", "passkey_device")...), "its strongest part (a YubiKey certificate) + 0.4 for each of 2 more"},
+		{"one-item all of a group", all(anyOf(leaves("security_key", "yubikey_cert")...)), "its weakest way in: a YubiKey touch"},
+		{"one-item all of a leaf", all(leaf("security_key")), "its only way in: a YubiKey touch"},
+		{"one-item any of an all", anyOf(all(leaves("security_key", "yubikey_cert")...)), "its strongest part (a YubiKey certificate) + 0.4 for 1 more part"},
+	}
+	for _, c := range reasons {
+		if got := ScoreOf(c.rule, defaultOn()).Reason; got != c.want {
+			t.Errorf("%s: reason %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+func TestBrowserCertUnavailable(t *testing.T) {
+	on := defaultOn()
+	on[BrowserCert] = true
+	if _, err := Compile(anyOf(leaf("browser_cert")), on); !errors.Is(err, ErrUnmeetable) {
+		t.Errorf("browser_cert switched on but unavailable compiled: %v", err)
+	}
+	c := mustCompile(t, anyOf(leaf("family:certificate")), on)
+	if js(c) != `{"op":"any","items":[{"op":"any","items":["yubikey_cert"]}]}` {
+		t.Errorf("certificate family with browser_cert unavailable: %s", js(c))
+	}
+	if got := Needs(builtin(t, "standard"), on); len(got) != 0 {
+		t.Errorf("Needs(standard) = %v", got)
 	}
 }
 
@@ -126,17 +160,37 @@ func TestSentenceNested(t *testing.T) {
 	if got := Sentence(builtin(t, "strong")); got != "a YubiKey touch or a YubiKey certificate" {
 		t.Errorf("strong sentence %q", got)
 	}
+	// Single-item groups are looked through: the brackets still show that
+	// the passkeys are alternatives of each other, not of the certificate.
+	u, err := Usable(all(leaf("family:certificate"), anyOf(anyOf(leaves("passkey_synced", "passkey_device")...), leaf("password"))), defaultOn())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := Sentence(u), "a certificate and (a synced passkey or a device-bound passkey)"; got != want {
+		t.Errorf("password off: %q, want %q", got, want)
+	}
+	if got, want := Sentence(all(leaf("security_key"), all(anyOf(leaves("passkey_synced", "passkey_device")...)))), "a YubiKey touch and (a synced passkey or a device-bound passkey)"; got != want {
+		t.Errorf("all[sk, all[any[spk,dpk]]]: %q, want %q", got, want)
+	}
+	if got, want := Sentence(anyOf(all(leaves("password", "security_key")...), anyOf(all(leaves("yubikey_cert", "passkey_device")...)))), "a password and a YubiKey touch, or a YubiKey certificate and a device-bound passkey"; got != want {
+		t.Errorf("any with a wrapped all: %q, want %q", got, want)
+	}
+	if got := Sentence(anyOf(leaf("webauthn"), leaf("security_key"))); got != "an unknown method or a YubiKey touch" {
+		t.Errorf("unknown leaf: %q", got)
+	}
 }
 
 func TestValidateLimits(t *testing.T) {
+	nine := []string{"password", "passkey_synced", "browser_cert", "passkey_device", "security_key",
+		"yubikey_cert", "family:passkey", "family:yubikey", "family:certificate"}
 	ok := anyOf(all(anyOf(leaves("password")...)))
 	if err := Validate(ok); err != nil {
 		t.Errorf("depth 3: %v", err)
 	}
 	cases := map[string]Node{
 		"depth 4":    anyOf(all(anyOf(all(leaves("password")...)))),
-		"9 items":    anyOf(leaves("password", "password", "password", "password", "password", "password", "password", "password", "password")...),
-		"17 leaves":  anyOf(all(leaves(strings.Split(strings.Repeat("security_key,", 8), ",")[:8]...)...), all(leaves(strings.Split(strings.Repeat("security_key,", 8), ",")[:8]...)...), leaf("yubikey_cert")),
+		"9 items":    anyOf(leaves(nine...)...),
+		"17 leaves":  anyOf(all(leaves(nine[:8]...)...), all(leaves(nine[1:]...)...), leaf("yubikey_cert")),
 		"unknown":    anyOf(leaf("webauthn")),
 		"leaf top":   leaf("security_key"),
 		"no items":   anyOf(),
@@ -149,9 +203,55 @@ func TestValidateLimits(t *testing.T) {
 		}
 	}
 	// 16 leaves is the limit, not an error.
-	sixteen := anyOf(all(leaves(strings.Split(strings.Repeat("security_key,", 8), ",")[:8]...)...), all(leaves(strings.Split(strings.Repeat("security_key,", 8), ",")[:8]...)...))
+	sixteen := anyOf(all(leaves(nine[:8]...)...), all(leaves(nine[1:]...)...))
 	if err := Validate(sixteen); err != nil {
 		t.Errorf("16 leaves: %v", err)
+	}
+}
+
+func TestValidateDuplicateSiblings(t *testing.T) {
+	err := Validate(all(leaves("security_key", "yubikey_cert", "security_key")...))
+	if err == nil || err.Error() != "security_key is listed twice in one group" {
+		t.Errorf("duplicate leaf: %v", err)
+	}
+	g := anyOf(leaves("passkey_synced", "passkey_device")...)
+	if err := Validate(all(g, leaf("security_key"), g)); err == nil || !strings.HasSuffix(err.Error(), " is listed twice in one group") {
+		t.Errorf("duplicate group: %v", err)
+	}
+	// Not duplicates: the same leaf in two groups, a reordered group, and
+	// overlap through a family (a known limit of the score formula).
+	for _, n := range []Node{
+		anyOf(all(leaves("security_key", "yubikey_cert")...), all(leaves("security_key", "passkey_device")...)),
+		anyOf(all(leaves("security_key", "yubikey_cert")...), all(leaves("yubikey_cert", "security_key")...)),
+		all(leaves("family:passkey", "passkey_synced")...),
+	} {
+		if err := Validate(n); err != nil {
+			t.Errorf("%s: %v", js(n), err)
+		}
+	}
+}
+
+func TestValidateCompiled(t *testing.T) {
+	for _, b := range Builtins() {
+		if c, err := Compile(b.Rule, onSet(Methods...)); err == nil {
+			if err := ValidateCompiled(c); err != nil {
+				t.Errorf("%s: %v", b.ID, err)
+			}
+		}
+	}
+	if err := ValidateCompiled(mustCompile(t, nestedRule(), defaultOn())); err != nil {
+		t.Errorf("nested (depth 4): %v", err)
+	}
+	for name, n := range map[string]Node{
+		"family":   anyOf(leaf("family:passkey")),
+		"unknown":  anyOf(leaf("webauthn")),
+		"depth 5":  anyOf(all(anyOf(all(anyOf(leaf("security_key")))))),
+		"empty":    anyOf(leaf("security_key"), all()),
+		"leaf top": leaf("security_key"),
+	} {
+		if ValidateCompiled(n) == nil {
+			t.Errorf("%s accepted", name)
+		}
 	}
 }
 

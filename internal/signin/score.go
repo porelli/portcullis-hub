@@ -27,6 +27,10 @@ const (
 // count): a method scores its strength, a family its weakest switched-on
 // member, an "any" group its weakest item, an "all" group its strongest item
 // + 0.4 per extra item, capped at 5. A rule with no way in scores 0.
+//
+// Known limit: the formula counts parts, not distinct methods, so a part
+// that overlaps another through a family (all[family:passkey,
+// passkey_synced]) still adds 0.4. Validate refuses only exact duplicates.
 func ScoreOf(n Node, on map[Method]bool) Score {
 	n, err := Usable(n, on)
 	if errors.Is(err, ErrUnmeetable) {
@@ -36,8 +40,12 @@ func ScoreOf(n Node, on map[Method]bool) Score {
 		return Score{Reason: "the rule isn't valid: " + err.Error()}
 	}
 	t := scoreTenths(n, on)
-	if n.isLeaf() || len(n.Items) == 0 {
-		return Score{Tenths: t}
+	// A group of one item scores, and is explained, as that item.
+	for !n.isLeaf() && len(n.Items) == 1 {
+		n = n.Items[0]
+	}
+	if n.isLeaf() {
+		return Score{Tenths: t, Reason: "its only way in: " + Sentence(n)}
 	}
 	scores := make([]int, len(n.Items))
 	for i, it := range n.Items {
@@ -58,7 +66,11 @@ func ScoreOf(n Node, on map[Method]bool) Score {
 			b = i
 		}
 	}
-	reason := fmt.Sprintf("its strongest part (%s) + 0.4 for each of %d more", Sentence(n.Items[b]), len(n.Items)-1)
+	more := fmt.Sprintf("for each of %d more", len(n.Items)-1)
+	if len(n.Items) == 2 {
+		more = "for 1 more part"
+	}
+	reason := fmt.Sprintf("its strongest part (%s) + 0.4 %s", Sentence(n.Items[b]), more)
 	if scores[b]+perExtraAll*(len(n.Items)-1) > maxTenths {
 		reason += ", capped at 5"
 	}

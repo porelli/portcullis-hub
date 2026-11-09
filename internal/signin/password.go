@@ -9,7 +9,8 @@ import (
 
 // commonPasswords is SecLists' Passwords/Common-Credentials/Pwdb_top-10000.txt
 // (github.com/danielmiessler/SecLists at a1a06ab, byte for byte),
-// Copyright (c) 2018 Daniel Miessler, MIT License.
+// Copyright (c) 2018 Daniel Miessler, under the MIT License whose full text
+// is in common-passwords.LICENSE next to it.
 //
 //go:embed common-passwords.txt
 var commonPasswords string

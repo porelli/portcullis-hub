@@ -83,11 +83,18 @@ var families = map[string]family{
 	"family:certificate": {[]Method{YubiKeyCert, BrowserCert}, "a certificate"},
 }
 
+// isOn reports whether m counts as switched on: on says so and the method
+// is available (a method that can't be switched on yet is off whatever on
+// says).
+func isOn(on map[Method]bool, m Method) bool {
+	return on[m] && methodInfo[m].Available
+}
+
 // onMembers is f's switched-on members, in the family's order.
 func (f family) onMembers(on map[Method]bool) []Method {
 	var out []Method
 	for _, m := range f.members {
-		if on[m] {
+		if isOn(on, m) {
 			out = append(out, m)
 		}
 	}
