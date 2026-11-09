@@ -25,17 +25,25 @@ func setupJS(t *testing.T, expr string) any {
 	src.WriteString(`let catalogCache = {nextcloud: {manifest: {name: "Nextcloud", icon: "☁️", instances: "multi"}}};
 const PortcullisSettings = { setupEditorHtml: o => '<span data-ed data-key="' + escapeHtml(o.key) + '"></span>' };
 `)
+	for _, c := range []string{"    const SLUG_FOLD = "} {
+		j := strings.Index(page, c)
+		if j < 0 {
+			t.Fatalf("the hub index lacks %s", strings.TrimSpace(c))
+		}
+		src.WriteString(page[j : j+strings.Index(page[j:], "\n")+1])
+	}
 	i := strings.Index(page, "    const HOST_LABEL_RE = ")
 	if i < 0 {
 		t.Fatal("the hub index lacks HOST_LABEL_RE")
 	}
 	src.WriteString(page[i : i+strings.Index(page[i:], "\n")+1])
 	for _, fn := range []string{"escapeHtml", "normHost", "hostProblem", "appName", "templateLabel", "modalHead", "deriveInstanceId", "idShapeProblem",
-		"setupGroupNames", "setupHost", "setupFormHtml", "usersGroupChoices", "setupDerivedText", "setupProblems", "setupRequestBody", "setupErrorField"} {
+		"setupGroupNames", "setupHost", "setupFormHtml", "usersGroupChoices", "setupDerivedText", "setupProblems", "setupRequestBody", "setupErrorField",
+		"setupIdTaken", "setupEmptyAllowed", "setupAfterCreate", "setupEnableNotice", "setupFlow"} {
 		src.WriteString(hubFunc(t, page, fn))
 	}
 	var v any
-	out := runNode(t, src.String()+"\nprocess.stdout.write(JSON.stringify("+expr+"));\n")
+	out := runNode(t, src.String()+"\nPromise.resolve("+expr+").then(v => process.stdout.write(JSON.stringify(v)));\n")
 	if err := json.Unmarshal([]byte(out), &v); err != nil {
 		t.Fatalf("%v: %s", err, out)
 	}
@@ -63,6 +71,13 @@ func TestHubSetupDeriveID(t *testing.T) {
 		"Team-":                                 "nextcloud-team",
 		"x portcullisx":                         "nextcloud-x-portcullisx",
 		"Cloud <script>":                        "nextcloud-cloud-script",
+		"Straße":                                "nextcloud-strasse",
+		"Øresund":                               "nextcloud-oresund",
+		"Æble":                                  "nextcloud-aeble",
+		"Łódź":                                  "nextcloud-lodz",
+		"Œuvre":                                 "nextcloud-oeuvre",
+		"Đà Nẵng":                               "nextcloud-da-nang",
+		"Þór":                                   "nextcloud-thor",
 	}
 	labels := make([]string, 0, len(cases))
 	for k := range cases {
@@ -184,6 +199,7 @@ func TestHubSetupErrorPlacement(t *testing.T) {
 		{`{"template":"grafana","id":"grafana-x","label":"X","groups":{"mode":"existing","users":"lldap_password_manager","admins":"lldap_admin"}}`, "users"},
 		{`{"template":"grafana","id":"grafana-x","label":"X","groups":{"mode":"existing","users":"nope","admins":"lldap_admin"}}`, "users"},
 		{`{"template":"grafana","id":"grafana-x","label":"X","groups":{"mode":"existing","users":"family","admins":"nope"}}`, "admins"},
+		{`{"template":"grafana","id":"grafana-x","label":"X","groups":{"mode":"existing","users":"nope","admins":"nope"}}`, "users,admins"},
 		{`{"template":"grafana","id":"grafana-x","label":"X","groups":{"mode":"existing","admins":"lldap_admin"}}`, "users"},
 		{`{"template":"grafana","id":"grafana-x","label":"X","groups":{"mode":"existing","users":"family"}}`, "admins"},
 		{`{"template":"dbapp","id":"dbapp-x","label":"X","setup":{"database":"oracle"}}`, "setup:database"},
@@ -258,5 +274,120 @@ func TestHubSetupErrorPlacement(t *testing.T) {
 	// Users choices: no built-in, administrator or permission group.
 	if g := setupJS(t, `usersGroupChoices({groups: [{name: "family"}, {name: "lldap_admin", builtin: true}, {name: "it", admin: true}, {name: "inviters"}, {name: "team"}], permissions: {invite: "inviters"}}).map(g => g.name)`); fmt.Sprint(g) != "[family team]" {
 		t.Errorf("users choices = %v", g)
+	}
+}
+
+// TestHubSetupFirstGroupsWording: a first instance's "New groups" says
+// that only users_<template> / admin_<template> are created; another
+// manifest group is only a warning (§11.9 "First instance").
+func TestHubSetupFirstGroupsWording(t *testing.T) {
+	got := setupJS(t, `[
+	  setupDerivedText({users: "users_nextcloud", admins: "admin_nextcloud", tid: "nextcloud"}),
+	  setupDerivedText({users: "family", admins: "admin_nextcloud", tid: "nextcloud"}),
+	  setupDerivedText({users: "family", admins: "it", tid: "nextcloud"}),
+	  setupDerivedText({users: "users_nextcloud-x", admins: ""})]`).([]any)
+	want := [][]string{
+		{"users_nextcloud / admin_nextcloud are created empty if missing", "add people on People."},
+		{"users_nextcloud / admin_nextcloud are created empty if missing", "the Hub doesn't create <code>family</code> (only a warning)", "make sure it exists"},
+		{"the Hub doesn't create <code>family</code> or <code>it</code> (only a warning)", "make sure they exist"},
+		{"users: <code>users_nextcloud-x</code> — created empty"},
+	}
+	for i, w := range want {
+		for _, part := range w {
+			if !strings.Contains(got[i].(string), part) {
+				t.Errorf("%d: %q lacks %q", i, got[i], part)
+			}
+		}
+	}
+	if strings.Contains(got[2].(string), "are created empty") {
+		t.Errorf("no conventional group, yet: %q", got[2])
+	}
+}
+
+// TestHubSetupSmallRules: an id an instance already has is said early;
+// an optional size / duration left empty is sent as nothing, a required
+// one, one with a default or a filled one isn't.
+func TestHubSetupSmallRules(t *testing.T) {
+	got := setupJS(t, `(() => {
+	  const ed = (num, unl) => ({querySelector: s => s === '[data-part="num"]' ? {value: num} : s === '[data-part="unl"]' ? (unl === undefined ? null : {checked: unl}) : null});
+	  const list = [{id: "nextcloud"}, {id: "nextcloud-family"}];
+	  return [setupIdTaken("nextcloud-family", list), setupIdTaken("nextcloud-team", list), setupIdTaken("", list),
+	    setupEmptyAllowed({type: "size"}, ed("")), setupEmptyAllowed({type: "duration"}, ed(" ")), setupEmptyAllowed({type: "size", required: true}, ed("")),
+	    setupEmptyAllowed({type: "size", default: "1GiB"}, ed("")), setupEmptyAllowed({type: "size"}, ed("", true)), setupEmptyAllowed({type: "size"}, ed("3")),
+	    setupEmptyAllowed({type: "int"}, ed(""))];
+	})()`)
+	if fmt.Sprint(got) != "[true false false true true false false false false false]" {
+		t.Errorf("rules = %v", got)
+	}
+}
+
+// TestHubSetupStartFlow: the decisions after Start / Save without
+// starting — a form cancelled or replaced while the create ran starts
+// nothing (no LAN check, no enable) and the page says "Created. Not
+// started."; an enable that fails lands on the page with its notice and
+// error; a refused create opens nothing; Save without starting never
+// enables; a declined LAN check doesn't enable.
+func TestHubSetupStartFlow(t *testing.T) {
+	got := setupJS(t, `(async () => {
+	  const run = async (start, o) => {
+	    const log = [];
+	    const d = {
+	      create: async () => { log.push("create"); if (o.refuse) throw new Error("refused"); return {warnings: ["w1"]}; },
+	      refused: e => log.push("refused:" + e.message),
+	      isOpen: () => !o.cancelled,
+	      close: () => log.push("close"),
+	      page: (n, w) => log.push("page:" + n + ":" + w.join(",")),
+	      confirmLan: async () => { log.push("lan"); return !o.declined; },
+	      enable: async () => { log.push("enable"); if (o.fail) throw Object.assign(new Error("compose up failed"), {status: 500}); return {warnings: ["w2"]}; },
+	      notice: f => log.push("notice:" + f.notice + ":" + f.warnings.join(",") + (f.error ? ":error=" + f.error.message : "")),
+	    };
+	    const out = await setupFlow(start, d);
+	    return out + " | " + log.join(" | ");
+	  };
+	  return [await run(true, {cancelled: true}), await run(true, {fail: true}), await run(true, {}), await run(false, {}),
+	    await run(true, {refuse: true}), await run(true, {declined: true}), await run(false, {cancelled: true})];
+	})()`)
+	want := []string{
+		"created | create | close | page:Created. Not started.:w1",
+		"enable failed | create | close | page:Created. Starting it…:w1 | lan | enable | notice:Created, but it didn't start: the instance stays created and stopped.:w1:error=compose up failed",
+		"started | create | close | page:Created. Starting it…:w1 | lan | enable | notice:Started.:w1,w2",
+		"created | create | close | page:Created. Nothing runs yet: review its settings and groups, then press Enable.:w1",
+		"refused | create | refused:refused",
+		"not started | create | close | page:Created. Starting it…:w1 | lan | notice:Created, not started: press Enable once its ports are blocked from the internet.:w1",
+		"created | create | close | page:Created. Not started.:w1",
+	}
+	l, ok := got.([]any)
+	if !ok || len(l) != len(want) {
+		t.Fatalf("flows = %v", got)
+	}
+	for i, w := range want {
+		if l[i] != w {
+			t.Errorf("flow %d:\n got %v\nwant %s", i, l[i], w)
+		}
+	}
+}
+
+// TestSettingsSetupEditors: settings.js's setup editors — a group /
+// groups option carries the picker (data-pick="group"), a size default
+// written "10GiB" shows in its unit.
+func TestSettingsSetupEditors(t *testing.T) {
+	src := webAsset(t, "settings.js")
+	got := runNode(t, `const window = {escapeHtml: s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;')};
+`+src+`
+const S = window.PortcullisSettings;
+process.stdout.write(JSON.stringify([S.setupEditorHtml({key: "team", type: "group"}), S.setupEditorHtml({key: "teams", type: "groups"}),
+  S.setupEditorHtml({key: "quota", type: "size", default: "10GiB"})]));
+`)
+	var l []string
+	if err := json.Unmarshal([]byte(got), &l); err != nil || len(l) != 3 {
+		t.Fatalf("editors = %s (%v)", got, err)
+	}
+	for i := 0; i < 2; i++ {
+		if !strings.Contains(l[i], `data-pick="group"`) {
+			t.Errorf("group editor %d lacks the picker: %s", i, l[i])
+		}
+	}
+	if !strings.Contains(l[2], `value="10"`) || !strings.Contains(l[2], `<option value="GiB" selected>`) {
+		t.Errorf("size editor = %s", l[2])
 	}
 }

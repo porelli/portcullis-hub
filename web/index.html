@@ -356,6 +356,7 @@
     .setup-form .setup-err { color: #fca5a5; font-size: 0.75rem; margin: 0 0 0.5rem; }
     .setup-form .setup-err .inst-error { color: #e2e8f0; }
     .setup-form [aria-invalid="true"] { border-color: #ef4444 !important; }
+    .setup-form .setup-warn { color: #fcd77f; }
     .setup-form .ps-check { display: block; margin-bottom: 0.25rem; font-size: 0.8125rem; }
     .setup-addr { display: flex; align-items: center; gap: 0.375rem; }
     .setup-addr input { flex: 1; min-width: 6rem; }
@@ -4031,8 +4032,9 @@
     // characters; a label starting with the app's own words doesn't repeat
     // them ("Nextcloud family" → nextcloud-family). "" when the label
     // gives nothing to add.
+    const SLUG_FOLD = { 'ß': 'ss', 'ø': 'o', 'æ': 'ae', 'ł': 'l', 'œ': 'oe', 'đ': 'd', 'þ': 'th', 'ð': 'd' };
     function deriveInstanceId(tid, label) {
-      const words = String(label || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
+      const words = String(label || '').toLowerCase().replace(/[ßøæłœđþð]/g, c => SLUG_FOLD[c]).normalize('NFKD').replace(/[\u0300-\u036f]/g, '')
         .split(/[^a-z0-9]+/).filter(w => w && w !== 'portcullis');
       const base = String(tid).split('-');
       let k = 0;
@@ -4058,7 +4060,7 @@
 
     // setupGroupNames: the groups "New groups from the label" creates.
     function setupGroupNames(ctx, id) {
-      if (ctx.first) return { users: ctx.accessName, admins: ctx.adminName };
+      if (ctx.first) return { users: ctx.accessName, admins: ctx.adminName, tid: ctx.tid };
       return { users: ctx.access ? 'users_' + (id || '<id>') : '', admins: ctx.admin ? 'admin_' + (id || '<id>') : '' };
     }
 
@@ -4082,6 +4084,7 @@
         '<label class="block" for="setup-id">Instance id</label>' +
         '<input type="text" id="setup-id" data-setup-id value="' + escapeHtml(ctx.first ? ctx.tid : '') + '" spellcheck="false" maxlength="31"' +
         (ctx.first ? ' readonly' : ' placeholder="' + escapeHtml(ctx.tid) + '-…"') + '>' + err('id') +
+        '<div class="setup-err setup-warn" data-setup-warn="id" role="status" hidden></div>' +
         '<small>' + (ctx.first ? '🔒 The first instance of ' + escapeHtml(app) + ' keeps the app\'s id.'
           : 'Derived from the label; edit it now if you like: it can\'t change once the instance exists (it names the compose project, the volumes and the Keycloak client).') + '</small></div>' +
         '<div class="inst-section"><h4>Address</h4><div data-setup-hosts><p class="settings-empty">Loading…</p></div>' + err('hosts') + '</div>';
@@ -4121,9 +4124,15 @@
       const perms = new Set(Object.values((d && d.permissions) || {}));
       return ((d && d.groups) || []).filter(g => !g.builtin && !g.admin && !perms.has(g.name));
     }
+    // A first instance (g.tid) uses the manifest's groups, but the Hub
+    // creates only users_<template> / admin_<template> (§11.9 "First
+    // instance"); any other manifest group is just a warning.
     function setupDerivedText(g) {
-      return [g.users ? 'users: <code>' + escapeHtml(g.users) + '</code>' : '', g.admins ? 'admins: <code>' + escapeHtml(g.admins) + '</code>' : '']
-        .filter(Boolean).join(' · ') + ' — created empty; add people on People.';
+      const names = [g.users ? 'users: <code>' + escapeHtml(g.users) + '</code>' : '', g.admins ? 'admins: <code>' + escapeHtml(g.admins) + '</code>' : ''].filter(Boolean).join(' · ');
+      if (!g.tid) return names + ' — created empty; add people on People.';
+      const other = [g.users && g.users !== 'users_' + g.tid ? g.users : '', g.admins && g.admins !== 'admin_' + g.tid ? g.admins : ''].filter(Boolean);
+      return names + ' — ' + (other.length < [g.users, g.admins].filter(Boolean).length ? 'users_' + escapeHtml(g.tid) + ' / admin_' + escapeHtml(g.tid) + ' are created empty if missing; ' : '') +
+        (other.length ? 'the Hub doesn\'t create ' + other.map(n => '<code>' + escapeHtml(n) + '</code>').join(' or ') + ' (only a warning): make sure ' + (other.length > 1 ? 'they exist' : 'it exists') + ' on People.' : 'add people on People.');
     }
 
     // The address rows: one domain for the instance, a subdomain per
@@ -4133,6 +4142,7 @@
     async function refreshSetupDefaults() {
       const ctx = instCtx;
       if (!ctx || ctx.kind !== 'setup') return;
+      const seq = ctx.defaultsSeq = (ctx.defaultsSeq || 0) + 1; // only the newest answer counts
       const form = document.getElementById('setup-form');
       const box = form.querySelector('[data-setup-hosts]');
       const sel = form.querySelector('[data-setup-domain]');
@@ -4141,10 +4151,10 @@
       try {
         d = await instanceDefaults(ctx.tid, idShapeProblem(id, ctx.tid) ? '' : id, sel ? sel.value : '');
       } catch (err) {
-        if (instCtx === ctx && !box.dataset.drawn) box.innerHTML = errorBox(err);
+        if (instCtx === ctx && ctx.defaultsSeq === seq && !box.dataset.drawn) box.innerHTML = errorBox(err);
         return;
       }
-      if (instCtx !== ctx) return;
+      if (instCtx !== ctx || ctx.defaultsSeq !== seq) return;
       ctx.domains = d.domains || [];
       ctx.routers = d.routers || [];
       if (!box.dataset.drawn) {
@@ -4179,13 +4189,30 @@
       clearSetupErrorOf(form, t);
       const idIn = form.querySelector('[data-setup-id]');
       if (t.matches('[data-setup-sub]')) { ctx.edited[t.dataset.setupSub] = true; return; }
-      if (t.matches('[data-setup-id]')) ctx.idEdited = t.value.trim() !== '';
-      else if (t.matches('[data-setup-label]') && !ctx.first && !ctx.idEdited) idIn.value = deriveInstanceId(ctx.tid, t.value);
+      if (t.matches('[data-setup-id]')) {
+        ctx.idEdited = t.value.trim() !== '';
+        // Cleared: derived from the label again at once.
+        if (!ctx.idEdited) idIn.value = deriveInstanceId(ctx.tid, form.querySelector('[data-setup-label]').value);
+      } else if (t.matches('[data-setup-label]') && !ctx.first && !ctx.idEdited) idIn.value = deriveInstanceId(ctx.tid, t.value);
       else return;
+      showIdTaken(form, ctx, idIn.value.trim());
       const der = form.querySelector('[data-setup-derived]');
       if (der) der.innerHTML = setupDerivedText(setupGroupNames(ctx, idIn.value.trim()));
       clearTimeout(setupTimer);
       setupTimer = setTimeout(refreshSetupDefaults, 250);
+    }
+
+    // setupIdTaken: an instance the Apps list already has uses id (said
+    // early; the Hub's 409 stays the authority).
+    function setupIdTaken(id, list) {
+      return !!id && (list || []).some(i => i.id === id);
+    }
+    function showIdTaken(form, ctx, id) {
+      const w = form.querySelector('[data-setup-warn="id"]');
+      if (!w) return;
+      const taken = !ctx.first && setupIdTaken(id, instancesCache);
+      w.hidden = !taken;
+      w.textContent = taken ? 'An instance ' + id + ' already exists: give this one another id (or another label).' : '';
     }
 
     // readSetupForm: what the form holds; bad: the editors' own errors.
@@ -4204,10 +4231,19 @@
         const ed = q('[data-setup-opt="' + CSS.escape(o.key) + '"] [data-ed]');
         if (!ed) continue;
         const r = PortcullisSettings.readSetupEditor(o, ed);
+        if (r.error && setupEmptyAllowed(o, ed)) continue; // an optional size / duration left empty
         if (r.error) v.bad['setup:' + o.key] = r.error;
         else if (!r.empty) v.setup[o.key] = r.value;
       }
       return v;
+    }
+
+    // setupEmptyAllowed: a size / duration editor left empty for an
+    // option that has no default and isn't required (sent as nothing).
+    function setupEmptyAllowed(o, ed) {
+      if ((o.type !== 'size' && o.type !== 'duration') || o.required || (o.default !== undefined && o.default !== null)) return false;
+      const num = ed.querySelector('[data-part="num"]'), unl = ed.querySelector('[data-part="unl"]');
+      return !!num && num.value.trim() === '' && !(unl && unl.checked);
     }
 
     // setupProblems: what the Hub would refuse, said before sending
@@ -4262,6 +4298,7 @@
       if (/^groups: admins\b/.test(s)) return 'admins';
       if ((m = /^(?:unknown group|group) (\S+)/.exec(s))) {
         const g = m[1].toLowerCase();
+        if (v && v.users && v.admins && v.users.toLowerCase() === g && v.admins.toLowerCase() === g) return 'users,admins';
         if (v && v.users && v.users.toLowerCase() === g) return 'users';
         if (v && v.admins && v.admins.toLowerCase() === g) return 'admins';
         return 'groups';
@@ -4288,9 +4325,11 @@
     // showSetupError: msg next to field key (the general slot when the
     // form has no such field); err: the Hub's refusal (status, output…).
     function showSetupError(form, key, msg, err) {
+      if (key.includes(',')) { key.split(',').forEach(k => showSetupError(form, k, msg, err)); return; }
       let slot = form.querySelector('[data-setup-err="' + CSS.escape(key) + '"]');
       if (!slot) { slot = form.querySelector('[data-setup-err="general"]'); key = 'general'; }
-      if (key === 'general' && err) slot.innerHTML = errorBox(err);
+      // The Hub's refusal with its hint and output; a form check as text.
+      if (err) slot.innerHTML = errorBox(err);
       else slot.textContent = msg;
       slot.hidden = false;
       const near = key === 'hosts' ? form.querySelector('[data-setup-sub]') : key.startsWith('setup:') ? slot.parentElement.querySelector('[data-ed] input, [data-ed] select, [data-ed] textarea')
@@ -4299,47 +4338,76 @@
       (near || slot).scrollIntoView({ block: 'nearest' });
     }
 
+    // setupAfterCreate: what follows a create that succeeded. Start with
+    // the form still open enables; Save without starting, or a form
+    // cancelled / replaced while the create ran, starts nothing.
+    function setupAfterCreate(start, open) {
+      if (!open) return { enable: false, notice: 'Created. Not started.' };
+      if (!start) return { enable: false, notice: 'Created. Nothing runs yet: review its settings and groups, then press Enable.' };
+      return { enable: true, notice: 'Created. Starting it…' };
+    }
+    // setupEnableNotice: the page's notice once Start's enable ended (res)
+    // or failed (err), or the LAN-only check was declined.
+    function setupEnableNotice(warnings, res, err, declined) {
+      if (declined) return { notice: 'Created, not started: press Enable once its ports are blocked from the internet.', warnings };
+      if (err) return { notice: 'Created, but it didn\'t start: the instance stays created and stopped.', warnings, error: err };
+      return { notice: 'Started.', warnings: warnings.concat((res && res.warnings) || []) };
+    }
+    // setupFlow: Start / Save without starting after the form's checks —
+    // d: create, refused(err), isOpen, close, page(notice, warnings) (the
+    // instance page with a notice), confirmLan, enable, notice(f). Its
+    // answer names what happened.
+    async function setupFlow(start, d) {
+      let created;
+      try { created = await d.create(); } catch (err) { d.refused(err); return 'refused'; }
+      const warnings = (created && created.warnings) || [];
+      const next = setupAfterCreate(start, d.isOpen());
+      d.close();
+      d.page(next.notice, warnings);
+      if (!next.enable) return 'created';
+      if (!(await d.confirmLan())) { d.notice(setupEnableNotice(warnings, null, null, true)); return 'not started'; }
+      let res = null, failed = null;
+      try { res = await d.enable(); } catch (err) { failed = err; }
+      d.notice(setupEnableNotice(warnings, res, failed, false));
+      return failed ? 'enable failed' : 'started';
+    }
+
     async function submitSetup(start) {
       const ctx = instCtx;
       const form = document.getElementById('setup-form');
       if (!ctx || ctx.kind !== 'setup' || ctx.busy || !form) return;
+      const box = document.getElementById('inst-modal-box');
+      const lock = on => {
+        ctx.busy = on;
+        // Cancel and × too: the create can't be taken back once sent.
+        box.querySelectorAll('[data-setup-go], [data-inst-close]').forEach(b => { b.disabled = on; });
+      };
+      lock(true);
+      // The address as the Hub derives it for the id now (a pending
+      // re-fill would otherwise answer after the read).
+      clearTimeout(setupTimer);
+      await refreshSetupDefaults();
+      if (instCtx !== ctx) return;
       clearSetupErrors(form);
       const v = readSetupForm(ctx, form);
       const problems = setupProblems(ctx, v);
       const keys = Object.keys(problems);
-      if (keys.length) { keys.forEach(k => showSetupError(form, k, problems[k])); return; }
-      ctx.busy = true;
-      form.querySelectorAll('[data-setup-go]').forEach(b => { b.disabled = true; });
-      let created;
-      try {
-        created = await runInstanceOp('/api/instances', 'POST', setupRequestBody(ctx, v), v.id);
-      } catch (err) {
-        ctx.busy = false;
-        if (instCtx !== ctx) return;
-        form.querySelectorAll('[data-setup-go]').forEach(b => { b.disabled = false; });
-        const key = setupErrorField(err.message, ctx, v);
-        showSetupError(form, key, err.message, err);
-        return;
-      }
-      const id = v.id, warnings = created.warnings || [];
-      if (instCtx === ctx) closeInstModal();
-      if (!start) {
-        pageFlash = { id, notice: 'Created. Nothing runs yet: review its settings and groups, then press Enable.', warnings };
-        navInstance(id, 'overview', '');
-        return;
-      }
-      pageFlash = { id, notice: 'Created. Starting it…', warnings };
-      navInstance(id, 'overview', '');
-      if (!(await confirmLanOnly(id))) {
-        pageNotice(id, { notice: 'Created, not started: press Enable once its ports are blocked from the internet.', warnings });
-        return;
-      }
-      try {
-        const res = await runInstanceOp('/api/templates/enable', 'POST', { id }, id);
-        pageNotice(id, { notice: 'Started.', warnings: warnings.concat(res.warnings || []) });
-      } catch (err) {
-        pageNotice(id, { notice: 'Created, but it didn\'t start: the instance stays created and stopped.', warnings, error: err });
-      }
+      if (keys.length) { lock(false); keys.forEach(k => showSetupError(form, k, problems[k])); return; }
+      const id = v.id;
+      await setupFlow(start, {
+        create: () => runInstanceOp('/api/instances', 'POST', setupRequestBody(ctx, v), id),
+        refused: err => {
+          if (instCtx === ctx) { lock(false); showSetupError(form, setupErrorField(err.message, ctx, v), err.message, err); return; }
+          ctx.busy = false;
+          if (!err.shown) showToast('Not created: ' + err.message, 'error');
+        },
+        isOpen: () => instCtx === ctx,
+        close: () => { ctx.busy = false; if (instCtx === ctx) closeInstModal(); },
+        page: (notice, warnings) => { pageFlash = { id, notice, warnings }; navInstance(id, 'overview', ''); },
+        confirmLan: () => confirmLanOnly(id),
+        enable: () => runInstanceOp('/api/templates/enable', 'POST', { id }, id),
+        notice: f => pageNotice(id, f),
+      });
       refreshInstances();
     }
 
@@ -4635,6 +4703,10 @@
     // them: it stays the authority); admins may be any group.
     PortcullisPicker.bind(document.getElementById('inst-modal-box'), t => {
       const role = t.dataset && t.dataset.setupGroup;
+      // A group / groups setup option: any group (settings.js marks it).
+      if (!role && t.dataset && t.dataset.pick === 'group' && t.closest('#setup-form')) {
+        return { kind: 'group', source: () => PortcullisPicker.overview().then(d => (d && d.groups) || []) };
+      }
       if (!role) return null;
       return { kind: 'group', source: () => PortcullisPicker.overview().then(d => role === 'users' ? usersGroupChoices(d) : ((d && d.groups) || [])) };
     });
