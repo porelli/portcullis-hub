@@ -37,6 +37,10 @@ func (s *fakeSignInSrc) passkeys(ctx context.Context) (map[string][]keycloak.Pas
 	}
 	out := map[string][]keycloak.PasskeyCredential{}
 	for u, ms := range s.keys {
+		if ms == nil {
+			out[u] = nil // disabled in Keycloak
+			continue
+		}
 		out[u] = []keycloak.PasskeyCredential{}
 		for i, m := range ms {
 			out[u] = append(out[u], keycloak.PasskeyCredential{ID: u + string(rune('a'+i)), Type: string(m)})
@@ -91,13 +95,17 @@ func allOn() map[signin.Method]bool {
 func TestBlockedWhy(t *testing.T) {
 	on := allOn()
 	inv := &Inventory{People: map[string]PersonMethods{
-		"alice": {User: "alice", Methods: []signin.Method{signin.SecurityKey}},
-		"bob":   {User: "bob", Methods: []signin.Method{signin.Password}},
-		"carol": {User: "carol", Methods: []signin.Method{signin.Password, signin.PasskeySynced}},
-		"erin":  {User: "erin", Methods: []signin.Method{}},
+		"alice": {User: "alice", Methods: []signin.Method{signin.SecurityKey}, CertsKnown: true},
+		"bob":   {User: "bob", Methods: []signin.Method{signin.Password}, CertsKnown: true},
+		"carol": {User: "carol", Methods: []signin.Method{signin.Password, signin.PasskeySynced}, CertsKnown: true},
+		"dave":  {User: "dave", Methods: []signin.Method{}, CertsKnown: true},
+		"fay":   {User: "fay", Methods: []signin.Method{}},
+		"gil":   {User: "gil", Methods: []signin.Method{signin.PasskeySynced}},
+		"hal":   {User: "hal", Methods: []signin.Method{}, CertsKnown: true, Disabled: true},
 	}}
-	got := blockedFor(inv, []string{"dave", "carol", "bob", "alice", "erin", "Bob"}, compiledStrong(t, on), on)
-	want := []Blocked{{"bob", "password only"}, {"carol", "password + synced passkey only"}, {"dave", "no method yet"}, {"erin", "no method yet"}}
+	got := blockedFor(inv, []string{"dave", "carol", "bob", "alice", "erin", "Bob", "fay", "gil", "hal"}, compiledStrong(t, on), on)
+	want := []Blocked{{"bob", "password only"}, {"carol", "password + synced passkey only"}, {"dave", "no method yet"},
+		{"erin", "methods unknown"}, {"fay", "certificates unknown"}, {"gil", "synced passkey only; certificates unknown"}, {"hal", "account disabled"}}
 	if !slices.Equal(got, want) {
 		t.Errorf("blocked = %+v", got)
 	}
@@ -109,8 +117,12 @@ func TestBlockedWhy(t *testing.T) {
 		t.Errorf("switched-off method = %+v", b)
 	}
 	// No inventory: nobody's methods are known, nobody counts.
-	if b := blockedFor(nil, []string{"alice"}, compiledStrong(t, on), on); len(b) != 1 || b[0].Why != "no method yet" {
+	if b := blockedFor(nil, []string{"alice"}, compiledStrong(t, on), on); len(b) != 1 || b[0].Why != "methods unknown" {
 		t.Errorf("nil inventory = %+v", b)
+	}
+	// ableAdmins counts each distinct admin once.
+	if n := ableAdmins(inv, []string{"alice", "Alice", "alice", "bob"}, compiledStrong(t, on), true, on); n != 1 {
+		t.Errorf("ableAdmins = %d, want 1", n)
 	}
 }
 
@@ -158,7 +170,7 @@ func TestCertsUnknownNeverCount(t *testing.T) {
 		if a := inv.People["ann"]; len(a.Methods) != 0 || a.CertsKnown {
 			t.Errorf("%v: ann = %+v", cerr, a)
 		}
-		if b := blockedFor(inv, []string{"ann"}, compiledStrong(t, on), on); len(b) != 1 || b[0] != (Blocked{"ann", "no method yet"}) {
+		if b := blockedFor(inv, []string{"ann"}, compiledStrong(t, on), on); len(b) != 1 || b[0] != (Blocked{"ann", "methods unknown"}) {
 			t.Errorf("%v: a YubiKey-certificate-only admin isn't blocked: %+v", cerr, b)
 		}
 		v, _ := f.h.SignInView(ctx)
@@ -218,22 +230,43 @@ func TestInventoryRefreshAtMostEvery30s(t *testing.T) {
 	if _, err := f.h.SignInInventory(ctx, true); err == nil || src.calls != 2 {
 		t.Errorf("after 30 s: %d calls, %v", src.calls, err)
 	}
-	// A failed refresh is the answer for 30 s too (no hammering), and
-	// the cached inventory stays for the non-fresh readers.
+	// A failed refresh is the answer for 30 s (no hammering), to the
+	// non-fresh readers too: stale data is never served as known.
 	if _, err := f.h.SignInInventory(ctx, true); err == nil || src.calls != 2 {
 		t.Errorf("failed, within 30 s: %d calls, %v", src.calls, err)
 	}
-	if inv, err := f.h.SignInInventory(ctx, false); err != nil || len(inv.People["bea"].Methods) != 1 {
-		t.Errorf("non-fresh after a failure = %+v, %v", inv, err)
+	if inv, err := f.h.SignInInventory(ctx, false); err == nil || src.calls != 2 {
+		t.Errorf("non-fresh after a failure = %+v, %v (%d calls)", inv, err, src.calls)
+	}
+	v, _ := f.h.SignInView(ctx)
+	f.h.mu.RLock()
+	pm := f.h.peopleMethodsLocked()
+	f.h.mu.RUnlock()
+	if n := methodRow(v, signin.SecurityKey).People; n != -1 || pm != nil || f.h.cachedInventory() != nil {
+		t.Errorf("after a failed refresh: security_key people %d, policy people %v", n, pm)
+	}
+	// Once 30 s old, a non-fresh reader retries.
+	now = now.Add(31 * time.Second)
+	src.set(func(s *fakeSignInSrc) { s.down = false })
+	if inv, err := f.h.SignInInventory(ctx, false); err != nil || src.calls != 3 || len(inv.People["bea"].Methods) != 1 {
+		t.Errorf("retry = %+v, %v (%d calls)", inv, err, src.calls)
+	}
+	// Marked stale (the directory changed): the next fresh read refreshes.
+	f.h.MarkInventoryStale()
+	if _, err := f.h.SignInInventory(ctx, true); err != nil || src.calls != 4 {
+		t.Errorf("after MarkInventoryStale: %d calls, %v", src.calls, err)
+	}
+	if _, err := f.h.SignInInventory(ctx, false); err != nil || src.calls != 4 {
+		t.Errorf("non-fresh after the refresh: %d calls, %v", src.calls, err)
 	}
 }
 
 func TestPasswordRules(t *testing.T) {
 	f, _ := signInFixture(t)
 	ctx := context.Background()
-	p := newFakePeople()
-	p.addGroup(lldap.AdminGroup, "ann")
-	src := &fakeSignInSrc{keys: map[string][]signin.Method{}}
+	p := newFakePeople("bob")
+	p.addGroup(lldap.AdminGroup, "admin", "ann")
+	src := &fakeSignInSrc{keys: map[string][]signin.Method{"ann": {signin.SecurityKey}, "bob": {}}}
 	wireSignIn(f.h, p, src)
 	if f.h.PasswordMethodOn() {
 		t.Error("password starts off")
@@ -246,18 +279,24 @@ func TestPasswordRules(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// An account the directory doesn't know: no record (it would never
+	// count), an error the directory turns into a warning.
+	if err := f.h.RecordPassword("ghost", "root"); err == nil {
+		t.Error("ghost: want an error")
+	}
 	h2 := reopen(t, f)
 	h2.mu.RLock()
 	rec, ok := h2.st.SignIn.Passwords["bob"]
 	_, admin := h2.st.SignIn.Passwords["admin"]
+	_, ghost := h2.st.SignIn.Passwords["ghost"]
 	h2.mu.RUnlock()
-	if !ok || rec.SetBy != "root" || rec.SetAt.IsZero() || admin {
-		t.Errorf("records = %+v %v, admin %v", rec, ok, admin)
+	if !ok || rec.SetBy != "root" || rec.SetAt.IsZero() || rec.UUID != p.uuidOf("bob") || admin || ghost {
+		t.Errorf("records = %+v %v, admin %v, ghost %v", rec, ok, admin, ghost)
 	}
-	// A record state.yaml holds for the two accounts never counts.
+	// Records state.yaml holds for the two accounts never count.
 	f.h.mu.Lock()
-	f.h.st.SignIn.Passwords["admin"] = state.PasswordRecord{SetBy: "root"}
-	f.h.st.SignIn.Passwords["portcullis-hub"] = state.PasswordRecord{SetBy: "root"}
+	f.h.st.SignIn.Passwords["admin"] = state.PasswordRecord{SetBy: "root", UUID: p.uuidOf("admin")}
+	f.h.st.SignIn.Passwords["portcullis-hub"] = state.PasswordRecord{SetBy: "root", UUID: "uuid-portcullis-hub"}
 	f.h.mu.Unlock()
 	if _, err := f.h.SetMethod(ctx, signin.Password, true, siAdmin); err != nil {
 		t.Fatal(err)
@@ -281,17 +320,46 @@ func TestPasswordRules(t *testing.T) {
 	if _, ok := pm["admin"]; ok || !slices.Equal(pm["bob"], []signin.Method{signin.Password}) {
 		t.Errorf("policy people = %v", pm)
 	}
-	if counts[signin.Password] != 2 { // bob and the fixture's root
+	if counts[signin.Password] != 1 {
 		t.Errorf("password count = %d", counts[signin.Password])
 	}
-	// The lockout guard: an admin whose only way in is a password the
-	// Hub didn't count (admin) is no administrator who can meet Basic.
-	p.addGroup(lldap.AdminGroup, "admin")
-	f.h.mu.Lock()
-	adminCan := len(blockedFor(composeInventory(&invBase{passkeys: map[string][]signin.Method{}, certs: map[string]bool{}}, f.h.st.SignIn.Passwords), []string{"admin"}, signin.Node{Op: "any", Items: []signin.Node{{Leaf: "password"}}}, allOn())) == 0
-	f.h.mu.Unlock()
-	if adminCan {
-		t.Error("admin's password counted")
+
+	// The lockout guard, driven by real saves: the Hub on a password-only
+	// template would leave ann (security key only) out, and admin's
+	// password never counts: refused.
+	if _, err := f.h.SaveTemplate(ctx, "pw", TemplateInput{Name: "Password", Rule: siLeaves("any", "password")}, true, siAdmin); err != nil {
+		t.Fatal(err)
+	}
+	_, err = f.h.SetCoreTemplate(ctx, "hub", "pw", siAdmin)
+	if statusOf(err) != 409 || !strings.Contains(err.Error(), "admin (methods unknown)") || !strings.Contains(err.Error(), "ann (security key only)") {
+		t.Errorf("hub on passwords = %v, want the guard's 409 (admin's password not counted)", err)
+	}
+	// A password the Hub set for ann counts.
+	if err := f.h.RecordPassword("ann", "root"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.h.SetCoreTemplate(ctx, "hub", "pw", siAdmin); err != nil {
+		t.Fatalf("hub on passwords with ann's password: %v", err)
+	}
+	// Switching password off now would leave nobody: refused (D3 lets it,
+	// the guard doesn't: pw needs password, so it's a D3 refusal first —
+	// change pw to also take a security key, then the switch is the
+	// guard's alone).
+	if _, err := f.h.SaveTemplate(ctx, "pw", TemplateInput{Name: "Password", Rule: siLeaves("any", "password", "passkey_device")}, false, siAdmin); err != nil {
+		t.Fatal(err)
+	}
+	_, err = f.h.SetMethod(ctx, signin.Password, false, siAdmin)
+	if statusOf(err) != 409 || !strings.Contains(err.Error(), "no administrator") {
+		t.Errorf("password off = %v, want the guard's 409", err)
+	}
+	// ann's account re-created: the record is for the old one, so nobody
+	// can meet the Hub's template any more — the next guarded save says so.
+	p.recreate("ann")
+	p.addGroup(lldap.AdminGroup, "ann")
+	f.h.MarkInventoryStale()
+	ch, err := f.h.SaveTemplate(ctx, "pw", TemplateInput{Name: "Password", Rule: siLeaves("any", "password")}, false, siAdmin)
+	if err != nil || !slices.ContainsFunc(ch.Warnings, func(w string) bool { return strings.Contains(w, noAdminWarning) }) {
+		t.Errorf("after ann was re-created = %+v, %v; want the no-administrator warning (old account's password)", ch, err)
 	}
 	// The record is never the password, and a deleted account's record
 	// goes with it.

@@ -33,7 +33,9 @@ func hubTemplateIn(si state.SignIn) string {
 // lockoutCheck is the guard for a change from section before to after
 // (never under mu: it reads Keycloak, enroll and LLDAP). When whoever
 // meets the Hub's template before still meets it after (signin.Implies),
-// nobody can lose the Hub and nothing is read. Otherwise the inventory
+// nobody can lose the Hub: the save goes through, and only the cached
+// inventory (no refresh) and the membership are read for the "already 0"
+// warning — either unreadable = no warning. Otherwise the inventory
 // (fresh, at most 30 s old) and the membership are read: unreadable =
 // 503; unknown methods never count.
 func (h *Hub) lockoutCheck(ctx context.Context, before, after state.SignIn) (warning string, err error) {
@@ -41,6 +43,17 @@ func (h *Hub) lockoutCheck(ctx context.Context, before, after state.SignIn) (war
 	bRule, bOK := compiledIn(before, bID)
 	aRule, aOK := compiledIn(after, aID)
 	if bOK && aOK && signin.Implies(bRule, aRule) {
+		inv := h.cachedInventory()
+		if inv == nil {
+			return "", nil
+		}
+		m, err := h.membership(ctx)
+		if err != nil {
+			return "", nil
+		}
+		if ableAdmins(inv, unexpiredMembers(m, lldap.AdminGroup), aRule, aOK, after.MethodsOn()) == 0 {
+			return noAdminWarning, nil
+		}
 		return "", nil
 	}
 	inv, err := h.SignInInventory(ctx, true)
@@ -52,15 +65,8 @@ func (h *Hub) lockoutCheck(ctx context.Context, before, after state.SignIn) (war
 		return "", statusErr(http.StatusServiceUnavailable, "the change can't be checked: the administrators can't be read from Users & Groups (%v); try again", err)
 	}
 	admins := unexpiredMembers(m, lldap.AdminGroup)
-	able := func(si state.SignIn, rule signin.Node, ok bool) (int, []Blocked) {
-		if !ok {
-			return 0, blockedFor(inv, admins, signin.Node{}, si.MethodsOn())
-		}
-		blocked := blockedFor(inv, admins, rule, si.MethodsOn())
-		return len(admins) - len(blocked), blocked
-	}
-	nBefore, _ := able(before, bRule, bOK)
-	nAfter, blocked := able(after, aRule, aOK)
+	nBefore := ableAdmins(inv, admins, bRule, bOK, before.MethodsOn())
+	nAfter := ableAdmins(inv, admins, aRule, aOK, after.MethodsOn())
 	switch {
 	case nAfter > 0:
 		return "", nil
@@ -71,11 +77,36 @@ func (h *Hub) lockoutCheck(ctx context.Context, before, after state.SignIn) (war
 	if t, ok := after.Templates[aID]; ok {
 		name = t.Name
 	}
+	if !aOK {
+		aRule = signin.Node{}
+	}
+	blocked := blockedFor(inv, admins, aRule, after.MethodsOn())
 	who := make([]string, len(blocked))
 	for i, b := range blocked {
 		who[i] = b.User + " (" + b.Why + ")"
 	}
 	return "", statusErr(http.StatusConflict, "this change would leave no administrator able to sign in to the Hub: none of them can meet %q afterwards — %s; set up a method it accepts first (recovery: ./portcullis signin reset-core)", name, strings.Join(who, ", "))
+}
+
+// ableAdmins counts the distinct admins (lowercased) whose known,
+// switched-on methods meet rule; ok false (no publishable rule) = none.
+func ableAdmins(inv *Inventory, admins []string, rule signin.Node, ok bool, on map[signin.Method]bool) int {
+	if !ok || inv == nil {
+		return 0
+	}
+	seen := map[string]bool{}
+	n := 0
+	for _, a := range admins {
+		a = strings.ToLower(a)
+		if seen[a] {
+			continue
+		}
+		seen[a] = true
+		if pm, known := inv.People[a]; known && meets(pm, rule, on) {
+			n++
+		}
+	}
+	return n
 }
 
 // lockoutWarnings is a guard warning as a SignInChange warning list entry.

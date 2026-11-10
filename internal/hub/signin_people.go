@@ -10,6 +10,7 @@ package hub
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"maps"
 	"net/http"
@@ -29,11 +30,13 @@ import (
 
 // PersonMethods is one person's set-up sign-in methods, canonical order.
 // CertsKnown false: their YubiKey certificates couldn't be read (none
-// counted).
+// counted). Disabled: the account is disabled in Keycloak (no method at
+// all).
 type PersonMethods struct {
 	User       string          `json:"user"`
 	Methods    []signin.Method `json:"methods"`
 	CertsKnown bool            `json:"certs_known"`
+	Disabled   bool            `json:"disabled,omitempty"`
 }
 
 // Inventory is everyone's set-up methods as of At (the last good
@@ -89,9 +92,13 @@ type inventoryCache struct {
 // counts at once).
 type invBase struct {
 	at         time.Time
-	passkeys   map[string][]signin.Method // every user Keycloak listed with readable credentials
+	passkeys   map[string][]signin.Method // every enabled user Keycloak listed with readable credentials
+	disabled   map[string]bool            // users disabled in Keycloak: no method at all
 	certs      map[string]bool            // users with an unexpired, unrevoked YubiKey certificate
 	certsKnown bool
+	// uuids: lowercase user → LLDAP account uuid at the refresh (nil: the
+	// directory couldn't be read — no password counts).
+	uuids map[string]string
 }
 
 func (c *inventoryCache) clock() time.Time {
@@ -110,8 +117,10 @@ var errInventoryUnknown = errors.New("Keycloak isn't configured")
 
 // SignInInventory is everyone's set-up methods. fresh: refreshed unless
 // the last refresh ran less than 30 s ago (its result, or its error, is
-// returned then); else the cached inventory, refreshed only when there is
-// none yet. An error means Keycloak couldn't be read: nothing is known.
+// returned then); else the cached inventory — refreshed when there is none
+// yet, and while the last refresh failed its error (retried once it is
+// 30 s old): stale data is never served as known. An error means Keycloak
+// couldn't be read: nothing is known.
 func (h *Hub) SignInInventory(ctx context.Context, fresh bool) (*Inventory, error) {
 	base, err := h.inventoryBase(ctx, fresh)
 	if err != nil {
@@ -133,18 +142,12 @@ func (h *Hub) inventoryBase(ctx context.Context, fresh bool) (*invBase, error) {
 	now := c.clock()
 	recent := !tried.IsZero() && now.Sub(tried) < inventoryMinAge
 	switch {
-	case fresh && recent, !fresh && base != nil:
-		if err != nil && fresh {
-			return nil, err
-		}
-		if base == nil {
-			return nil, err
-		}
-		return base, nil
-	case !fresh && recent:
+	case recent && err != nil:
 		return nil, err
+	case recent, !fresh && err == nil && base != nil:
+		return base, nil
 	}
-	base, err = loadInventory(ctx, src, now)
+	base, err = h.loadInventory(ctx, src, now)
 	c.mu.Lock()
 	c.tried, c.err = now, err
 	if err == nil {
@@ -158,8 +161,45 @@ func (h *Hub) inventoryBase(ctx context.Context, fresh bool) (*invBase, error) {
 	return base, nil
 }
 
-// loadInventory reads both sources (no lock held).
-func loadInventory(ctx context.Context, src SignInSources, now time.Time) (*invBase, error) {
+// cachedInventory is the cached inventory without any refresh: nil while
+// there is none or the last refresh failed.
+func (h *Hub) cachedInventory() *Inventory {
+	c := &h.signInInv
+	c.mu.Lock()
+	base, err := c.base, c.err
+	c.mu.Unlock()
+	if base == nil || err != nil {
+		return nil
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return composeInventory(base, h.st.SignIn.Passwords)
+}
+
+// currentBase is the cached base, nil while there is none or the
+// last refresh failed. Takes the inventory's leaf lock.
+func (c *inventoryCache) currentBase() *invBase {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.err != nil {
+		return nil
+	}
+	return c.base
+}
+
+// MarkInventoryStale makes the next fresh read refresh at once (the
+// directory changed: a passkey removed, an account created or deleted).
+// Non-blocking; the cached inventory stays for the non-fresh readers.
+func (h *Hub) MarkInventoryStale() {
+	c := &h.signInInv
+	c.mu.Lock()
+	c.tried = time.Time{}
+	c.mu.Unlock()
+}
+
+// loadInventory reads both sources and the directory's account uuids (no
+// lock held but refreshMu).
+func (h *Hub) loadInventory(ctx context.Context, src SignInSources, now time.Time) (*invBase, error) {
 	if src.Passkeys == nil {
 		return nil, errInventoryUnknown
 	}
@@ -169,8 +209,12 @@ func loadInventory(ctx context.Context, src SignInSources, now time.Time) (*invB
 	if err != nil {
 		return nil, err
 	}
-	b := &invBase{at: now.UTC(), passkeys: map[string][]signin.Method{}, certs: map[string]bool{}}
+	b := &invBase{at: now.UTC(), passkeys: map[string][]signin.Method{}, disabled: map[string]bool{}, certs: map[string]bool{}}
 	for u, list := range keys {
+		if list == nil {
+			b.disabled[strings.ToLower(u)] = true
+			continue
+		}
 		ms := []signin.Method{}
 		for _, pk := range list {
 			m := signin.Method(pk.Type)
@@ -179,6 +223,12 @@ func loadInventory(ctx context.Context, src SignInSources, now time.Time) (*invB
 			}
 		}
 		b.passkeys[strings.ToLower(u)] = ms
+	}
+	// Password records count only for the account they were set for.
+	if m, merr := h.membership(ctx); merr != nil {
+		log.Printf("signin: the directory can't be read: no password counts until it can: %v", merr)
+	} else {
+		b.uuids = maps.Clone(m.UUIDs)
 	}
 	if src.Certificates != nil {
 		certs, cerr := src.Certificates(ctx)
@@ -199,8 +249,9 @@ func loadInventory(ctx context.Context, src SignInSources, now time.Time) (*invB
 	return b, nil
 }
 
-// composeInventory is base plus the Hub's password records (never for
-// noPasswordAccounts).
+// composeInventory is base plus the Hub's password records: only those
+// set for the person's current LLDAP account (uuid), never for
+// noPasswordAccounts. A disabled account has no method at all.
 func composeInventory(b *invBase, passwords map[string]state.PasswordRecord) *Inventory {
 	inv := &Inventory{At: b.at, People: map[string]PersonMethods{}}
 	have := map[string]map[signin.Method]bool{}
@@ -221,13 +272,18 @@ func composeInventory(b *invBase, passwords map[string]state.PasswordRecord) *In
 	for u := range b.certs {
 		add(u, signin.YubiKeyCert)
 	}
-	for u := range passwords {
-		if lu := strings.ToLower(u); !noPasswordAccounts[lu] {
-			add(lu, signin.Password)
+	for u, rec := range passwords {
+		lu := strings.ToLower(u)
+		if noPasswordAccounts[lu] || rec.UUID == "" || b.uuids[lu] != rec.UUID {
+			continue
 		}
+		add(lu, signin.Password)
+	}
+	for u := range b.disabled {
+		have[u] = map[signin.Method]bool{}
 	}
 	for u, set := range have {
-		pm := PersonMethods{User: u, Methods: []signin.Method{}, CertsKnown: b.certsKnown}
+		pm := PersonMethods{User: u, Methods: []signin.Method{}, CertsKnown: b.certsKnown, Disabled: b.disabled[u]}
 		for _, m := range signin.Methods {
 			if set[m] {
 				pm.Methods = append(pm.Methods, m)
@@ -242,10 +298,7 @@ func composeInventory(b *invBase, passwords map[string]state.PasswordRecord) *In
 // (the policy file's people, page text only); nil = not known, nobody
 // listed. Caller holds mu (takes the inventory's leaf lock).
 func (h *Hub) peopleMethodsLocked() map[string][]signin.Method {
-	c := &h.signInInv
-	c.mu.Lock()
-	base := c.base
-	c.mu.Unlock()
+	base := h.signInInv.currentBase()
 	if base == nil {
 		return nil
 	}
@@ -264,14 +317,11 @@ func (h *Hub) peopleMethodsLocked() map[string][]signin.Method {
 }
 
 // methodPeopleLocked is how many known people have each method set up:
-// -1 while unknown (no inventory; yubikey_cert while certificates are
-// unknown). Caller holds mu.
+// -1 while unknown (no inventory, the last refresh failed; yubikey_cert
+// while certificates are unknown). Caller holds mu.
 func (h *Hub) methodPeopleLocked() map[signin.Method]int {
 	out := map[signin.Method]int{}
-	c := &h.signInInv
-	c.mu.Lock()
-	base := c.base
-	c.mu.Unlock()
+	base := h.signInInv.currentBase()
 	for _, m := range signin.Methods {
 		out[m] = -1
 	}
@@ -296,18 +346,32 @@ func (h *Hub) methodPeopleLocked() map[signin.Method]int {
 
 // ── warnings ─────────────────────────────────────────────
 
-// blockedWhy says what a blocked person has: "no method yet", or their
-// methods' short names, "password + synced passkey only".
-func blockedWhy(ms []signin.Method) string {
-	if len(ms) == 0 {
+// blockedWhy says what a blocked person has: "methods unknown" (not in
+// the inventory), "account disabled", "no method yet", or their methods'
+// short names, "password + synced passkey only"; while their certificates
+// are unknown, "certificates unknown" instead of "no method yet", else
+// "; certificates unknown" after the methods.
+func blockedWhy(pm PersonMethods, known bool) string {
+	switch {
+	case !known:
+		return "methods unknown"
+	case pm.Disabled:
+		return "account disabled"
+	case len(pm.Methods) == 0 && !pm.CertsKnown:
+		return "certificates unknown"
+	case len(pm.Methods) == 0:
 		return "no method yet"
 	}
-	names := make([]string, 0, len(ms))
-	for _, m := range ms {
+	names := make([]string, 0, len(pm.Methods))
+	for _, m := range pm.Methods {
 		info, _ := signin.InfoOf(m)
 		names = append(names, info.Short)
 	}
-	return strings.Join(names, " + ") + " only"
+	why := strings.Join(names, " + ") + " only"
+	if !pm.CertsKnown {
+		why += "; certificates unknown"
+	}
+	return why
 }
 
 // blockedFor lists, sorted, the users who can't meet compiled with the
@@ -323,21 +387,26 @@ func blockedFor(inv *Inventory, users []string, compiled signin.Node, on map[sig
 			continue
 		}
 		seen[u] = true
-		var ms []signin.Method
+		pm, known := PersonMethods{}, false
 		if inv != nil {
-			ms = inv.People[u].Methods
+			pm, known = inv.People[u]
 		}
-		have := map[signin.Method]bool{}
-		for _, m := range ms {
-			if on[m] {
-				have[m] = true
-			}
-		}
-		if !signin.Satisfied(compiled, have) {
-			out = append(out, Blocked{User: u, Why: blockedWhy(ms)})
+		if !meets(pm, compiled, on) {
+			out = append(out, Blocked{User: u, Why: blockedWhy(pm, known)})
 		}
 	}
 	return out
+}
+
+// meets reports whether pm's switched-on methods meet compiled.
+func meets(pm PersonMethods, compiled signin.Node, on map[signin.Method]bool) bool {
+	have := map[signin.Method]bool{}
+	for _, m := range pm.Methods {
+		if on[m] {
+			have[m] = true
+		}
+	}
+	return signin.Satisfied(compiled, have)
 }
 
 // unexpiredMembers is group g's members in m without expired memberships.
@@ -500,21 +569,32 @@ func (h *Hub) affectedLocked(si state.SignIn, id string, compiled signin.Node, m
 // ── password records ─────────────────────────────────────
 
 // RecordPassword records that actor set user's LLDAP password through the
-// Hub (directory.Service.PasswordSet; D13: only these count). The
-// bootstrap admin and the service account are never recorded (password
-// sign-in is refused for them). Never given the password.
+// Hub (directory.Service.PasswordSet, called outside the directory's lock;
+// D13: only these count), bound to the account's LLDAP uuid (read here:
+// unreadable = an error and no record, so it never counts). The bootstrap
+// admin and the service account are never recorded (password sign-in is
+// refused for them). Never given the password.
 func (h *Hub) RecordPassword(user, actor string) error {
 	u := strings.ToLower(strings.TrimSpace(user))
 	if u == "" || noPasswordAccounts[u] {
 		return nil
 	}
+	m, err := h.membership(context.Background())
+	if err != nil {
+		return fmt.Errorf("the account can't be read from Users & Groups: %w", err)
+	}
+	uuid := m.UUIDs[u]
+	if uuid == "" {
+		return fmt.Errorf("Users & Groups gave no account id for %s", u)
+	}
+	h.MarkInventoryStale()
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	prev, had := h.st.SignIn.Passwords[u]
 	if h.st.SignIn.Passwords == nil {
 		h.st.SignIn.Passwords = map[string]state.PasswordRecord{}
 	}
-	h.st.SignIn.Passwords[u] = state.PasswordRecord{SetAt: h.signInInv.clock().UTC(), SetBy: actor}
+	h.st.SignIn.Passwords[u] = state.PasswordRecord{SetAt: h.signInInv.clock().UTC(), SetBy: actor, UUID: uuid}
 	if err := h.saveStateLocked(); err != nil {
 		if had {
 			h.st.SignIn.Passwords[u] = prev

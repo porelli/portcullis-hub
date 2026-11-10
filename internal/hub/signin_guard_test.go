@@ -169,3 +169,52 @@ func ableAdmin(h *Hub) {
 	h.st.SignIn.Passwords["root"] = state.PasswordRecord{SetBy: "root"}
 	h.mu.Unlock()
 }
+
+// The Implies shortcut reads nothing that can fail the save, but still
+// warns from the cached inventory when no administrator can get in.
+func TestLockoutShortcutWarning(t *testing.T) {
+	f, _ := signInFixture(t)
+	ctx := context.Background()
+	p := newFakePeople()
+	p.addGroup(lldap.AdminGroup, "ann")
+	// ann is disabled in Keycloak: no method at all.
+	src := &fakeSignInSrc{keys: map[string][]signin.Method{"ann": nil}}
+	wireSignIn(f.h, p, src)
+	// No cached inventory yet: allowed, silently.
+	ch, err := f.h.SetCoreTemplate(ctx, "hub", "standard", siAdmin)
+	if err != nil || len(ch.Warnings) != 0 {
+		t.Fatalf("weaker, no cache: %+v, %v", ch, err)
+	}
+	inv, err := f.h.SignInInventory(ctx, true)
+	if err != nil || !inv.People["ann"].Disabled || len(inv.People["ann"].Methods) != 0 {
+		t.Fatalf("ann = %+v, %v", inv.People["ann"], err)
+	}
+	// Unchanged Hub rule, cached inventory: the warning.
+	ch2, err := f.h.SetCoreTemplate(ctx, "people", "standard", siAdmin)
+	if err != nil || !slices.ContainsFunc(ch2.Warnings, func(w string) bool { return strings.Contains(w, noAdminWarning) }) {
+		t.Errorf("shortcut with nobody able: %+v, %v", ch2, err)
+	}
+	// The directory down: no warning, still allowed.
+	p.set(func(p *fakePeople) { p.err = errors.New("lldap down") })
+	if ch3, err := f.h.SetCoreTemplate(ctx, "people", "strong", siAdmin); err != nil || len(ch3.Warnings) != 0 {
+		t.Errorf("directory down: %+v, %v", ch3, err)
+	}
+	p.set(func(p *fakePeople) { p.err = nil })
+	// The last refresh failed: nothing cached counts, no warning.
+	src.set(func(s *fakeSignInSrc) { s.down = true })
+	f.h.MarkInventoryStale()
+	if _, err := f.h.SignInInventory(ctx, true); err == nil {
+		t.Fatal("want the refresh to fail")
+	}
+	if ch4, err := f.h.SetCoreTemplate(ctx, "people", "standard", siAdmin); err != nil || len(ch4.Warnings) != 0 {
+		t.Errorf("failed refresh: %+v, %v", ch4, err)
+	}
+	// Blocked lists say why.
+	src.set(func(s *fakeSignInSrc) { s.down = false })
+	f.h.MarkInventoryStale()
+	inv, _ = f.h.SignInInventory(ctx, true)
+	on := allOn()
+	if b := blockedFor(inv, []string{"ann"}, compiledStrong(t, on), on); len(b) != 1 || b[0].Why != "account disabled" {
+		t.Errorf("disabled = %+v", b)
+	}
+}
