@@ -45,6 +45,11 @@ type PublishedApp struct {
 	// SignInTemplate is the instance's own sign-in template pick at publish
 	// time; "" means it inherits the (current) default.
 	SignInTemplate string `json:"sign_in_template,omitempty" yaml:"sign_in_template,omitempty"`
+	// SignInClients are, for a native-OIDC instance, its Keycloak client
+	// ids (not ai_client) at publish time: an enabled instance whose
+	// template disappears keeps them in signin-keycloak.json with
+	// SignInTemplate, so Keycloak never lets an unlisted client through.
+	SignInClients []string `json:"sign_in_clients,omitempty" yaml:"sign_in_clients,omitempty"`
 	// NativeLoginOnly: the instance ran with its own login only (no Portcullis
 	// sign-in on its routers, so GroupAccess is false) at publish time.
 	NativeLoginOnly bool `json:"native_login_only,omitempty" yaml:"native_login_only,omitempty"`
@@ -117,6 +122,11 @@ type Instance struct {
 	// SignInTemplate is the instance's sign-in template pick (§8.1 "Per
 	// app"; "" = the default template).
 	SignInTemplate string `json:"sign_in_template,omitempty" yaml:"sign_in_template,omitempty"`
+	// SignInClients are, for a native-OIDC instance, its Keycloak client
+	// ids (not ai_client) at publish time: an enabled instance whose
+	// template disappears keeps them in signin-keycloak.json with
+	// SignInTemplate, so Keycloak never lets an unlisted client through.
+	SignInClients []string `json:"sign_in_clients,omitempty" yaml:"sign_in_clients,omitempty"`
 }
 
 // HoldsIdentity reports whether the entry stores a label, a group

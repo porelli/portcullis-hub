@@ -93,6 +93,56 @@ func TestMissingTemplateEnforcesSnapshot(t *testing.T) {
 	}
 }
 
+// A native-OIDC instance whose template disappears keeps its Keycloak
+// clients in signin-keycloak.json, with its pick (never unlisted: an
+// unlisted client passes the extension's template check) — across a
+// restart too; on the default when it has no pick.
+func TestMissingTemplateKeepsKeycloakClients(t *testing.T) {
+	f := newFixture(t)
+	if err := f.h.save("other", SettingsUpdate{SignInTemplate: pickTemplate("strong")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.h.Enable("other"); err != nil {
+		t.Fatal(err)
+	}
+	st, _ := state.Load(filepath.Join(f.data, "state.yaml"))
+	if snap := st.Published["other"]; snap.SignInTemplate != "strong" || !reflect.DeepEqual(snap.SignInClients, []string{"other"}) {
+		t.Fatalf("snapshot = %+v", snap)
+	}
+	if err := os.RemoveAll(filepath.Join(f.src, "other")); err != nil {
+		t.Fatal(err)
+	}
+	f.h.Discover()
+	if err := f.h.WritePolicy(); err != nil {
+		t.Fatal(err)
+	}
+	check := func(label, tmpl string) {
+		t.Helper()
+		if c := readKeycloakSignIn(t, f).Clients["other"]; c.Template != tmpl || c.Name != "other" {
+			t.Errorf("%s: clients[other] = %+v, want %s", label, c, tmpl)
+		}
+	}
+	check("after discover", "strong")
+	h2, err := New(f.h.cfg, f.runner, f.engine, f.idp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(h2.Wait)
+	h2.Init()
+	f.h = h2
+	check("after restart", "strong")
+	// No pick: the default.
+	f.h.mu.Lock()
+	snap := f.h.st.Published["other"]
+	snap.SignInTemplate = ""
+	f.h.st.Published["other"] = snap
+	f.h.mu.Unlock()
+	if err := f.h.WritePolicy(); err != nil {
+		t.Fatal(err)
+	}
+	check("on the default", "standard")
+}
+
 // Snapshots follow the live template while it loads.
 func TestSnapshotTracksLiveTemplate(t *testing.T) {
 	f := newFixture(t)

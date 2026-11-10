@@ -967,6 +967,9 @@ func (h *Hub) snapshot(t *templates.Template) state.PublishedApp {
 	if acc.Capability.Templates {
 		p.SignInTemplate = h.st.Instances[t.ID].SignInTemplate
 	}
+	if acc.Capability.Enforcement == policy.EnforceAtLogin {
+		p.SignInClients = signInClientIDs(t)
+	}
 	if pub := h.publicLocked(t, t.Public); pub.Active() {
 		p.PublicHosts = slices.Sorted(slices.Values(t.Public.Hosts))
 		p.Public = publicEntry(&t.Manifest, pub.Published)

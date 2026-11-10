@@ -17,6 +17,7 @@ import (
 	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/signin"
 	"github.com/portcullis/hub/internal/state"
+	"github.com/portcullis/hub/internal/templates"
 )
 
 // SignInKeycloakFile is the Keycloak extension's file in the Hub's data
@@ -89,12 +90,33 @@ func (h *Hub) peopleMethodsLocked() map[string][]signin.Method {
 	return nil
 }
 
+// signInClientIDs are t's Keycloak client ids signin-keycloak.json lists
+// (every keycloak_clients entry but ai_client: mcp-gate checks those,
+// §15.2).
+func signInClientIDs(t *templates.Template) []string {
+	var out []string
+	for _, c := range t.Manifest.Clients {
+		if !c.AIClient {
+			out = append(out, c.ClientID)
+		}
+	}
+	return out
+}
+
+// unpublishedTemplate is the template id a client gets when two
+// instances declare it with templates neither of which implies the other:
+// it is never a template, so the Keycloak extension refuses the whole file
+// (fail closed: neither instance's template is let go weaker).
+const unpublishedTemplate = "__unpublished__"
+
 // keycloakSignInLocked builds signin-keycloak.json from state: clients
 // maps the client id of every Keycloak client (not ai_client) of every
 // enabled native-OIDC instance to the instance's template — a template
 // that can't be published is still named (the extension then refuses the
 // whole file and nobody signs in: fail closed, never an unlisted client
-// let through). Caller holds mu.
+// let through). An enabled instance whose template is missing keeps its
+// published snapshot's clients (SignInClients) with its pick or the
+// default, named by its id. Caller holds mu.
 func (h *Hub) keycloakSignInLocked() KeycloakSignIn {
 	doc := KeycloakSignIn{
 		Version:        KeycloakSignInVersion,
@@ -108,27 +130,60 @@ func (h *Hub) keycloakSignInLocked() KeycloakSignIn {
 		doc.Methods = append(doc.Methods, string(m))
 	}
 	slices.Sort(doc.Methods)
+	add := func(id, client, tmpl, name string) {
+		if _, ok := doc.Templates[tmpl]; !ok {
+			log.Printf("signin: %s: template %q can't be published — signin-keycloak.json names it anyway, so the Keycloak extension refuses every sign-in until it is fixed", id, tmpl)
+		}
+		prev, dup := doc.Clients[client]
+		if !dup || prev.Template == tmpl {
+			if !dup {
+				doc.Clients[client] = KeycloakClientTemplate{Template: tmpl, Name: name}
+			}
+			return
+		}
+		// Declared twice (state edited by hand): never weaker.
+		a, aok := doc.Templates[prev.Template]
+		b, bok := doc.Templates[tmpl]
+		switch {
+		case !aok:
+			// prev already fails closed.
+		case !bok:
+			doc.Clients[client] = KeycloakClientTemplate{Template: tmpl, Name: prev.Name}
+		case signin.Implies(a, b):
+		case signin.Implies(b, a):
+			doc.Clients[client] = KeycloakClientTemplate{Template: tmpl, Name: prev.Name}
+		default:
+			log.Printf("signin: Keycloak client %s is declared by several instances with templates %q and %q, neither stricter — signin-keycloak.json names no template for it, so the Keycloak extension refuses every sign-in until it is fixed", client, prev.Template, tmpl)
+			doc.Clients[client] = KeycloakClientTemplate{Template: unpublishedTemplate, Name: prev.Name}
+		}
+	}
+	ids := map[string]bool{}
 	for i := range h.instances {
 		t := &h.instances[i]
 		if !t.Enabled {
 			continue
 		}
+		ids[t.ID] = true
 		acc := h.accessLocked(t)
 		if acc.Capability.Enforcement != policy.EnforceAtLogin {
 			continue
 		}
-		if _, ok := doc.Templates[acc.Template]; !ok {
-			log.Printf("signin: %s: template %q can't be published — signin-keycloak.json names it anyway, so the Keycloak extension refuses every sign-in until it is fixed", t.ID, acc.Template)
+		for _, c := range signInClientIDs(t) {
+			add(t.ID, c, acc.Template, instanceName(t))
 		}
-		for _, c := range t.Manifest.Clients {
-			if c.AIClient {
-				continue // mcp-gate checks it (§15.2)
-			}
-			if prev, dup := doc.Clients[c.ClientID]; dup && prev.Template != acc.Template {
-				log.Printf("signin: Keycloak client %s is declared by several instances — keeping %s's template", c.ClientID, prev.Name)
-				continue
-			}
-			doc.Clients[c.ClientID] = KeycloakClientTemplate{Template: acc.Template, Name: instanceName(t)}
+	}
+	// Enabled instances without a view (template missing): the snapshot.
+	for _, id := range h.st.Enabled {
+		snap, ok := h.st.Published[id]
+		if ids[id] || !ok {
+			continue
+		}
+		tmpl := snap.SignInTemplate
+		if tmpl == "" {
+			tmpl = h.st.SignIn.Default
+		}
+		for _, c := range snap.SignInClients {
+			add(id, c, tmpl, id)
 		}
 	}
 	return doc
