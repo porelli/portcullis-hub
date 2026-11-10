@@ -201,10 +201,12 @@ type Service struct {
 	UserDeleted func(ctx context.Context, actor Actor, name string) []string
 	// PasswordSet, if set, is called after the Hub set a person's LLDAP
 	// password (SetPassword, password onboarding) with their lowercase
-	// username and the acting admin: the Hub records it (contract §8.1
-	// "Passwords": only Hub-set passwords count). Never given the
-	// password. Its error becomes a warning: the password is set.
-	PasswordSet func(user, actor string) error
+	// username, the LLDAP uuid of the account that was changed (read in
+	// the same mutation; "" when it couldn't be) and the acting admin:
+	// the Hub records it (contract §8.1 "Passwords": only Hub-set
+	// passwords of that account count). Never given the password. Its
+	// error becomes a warning: the password is set.
+	PasswordSet func(user, uuid, actor string) error
 	// PasswordMethodOn, if set, reports whether the password sign-in
 	// method is switched on: password onboarding is refused (409) while
 	// it is off. Setting a password is allowed either way (LDAP-binding
@@ -1168,11 +1170,11 @@ func checkHubPassword(user, pw string) error {
 // recordPassword hands a password the Hub just set to PasswordSet, after
 // the mutation ran and released s.mu (never for a change that failed or
 // was rolled back); a failure is a warning on res.
-func (s *Service) recordPassword(res *Result, user, actor string) {
+func (s *Service) recordPassword(res *Result, user, uuid, actor string) {
 	if s.PasswordSet == nil {
 		return
 	}
-	if err := s.PasswordSet(strings.ToLower(user), actor); err != nil {
+	if err := s.PasswordSet(strings.ToLower(user), uuid, actor); err != nil {
 		res.Warnings = append(res.Warnings, "the password was set, but recording it for Settings → Sign-in failed (it won't count until it is set again): "+err.Error())
 	}
 }
@@ -1194,7 +1196,7 @@ func (s *Service) CreateUser(ctx context.Context, c *Caller, req CreateRequest) 
 	}
 	// Read outside s.mu (the Hub's lock is never taken under it).
 	passwordOff := req.Onboarding == OnboardPassword && s.PasswordMethodOn != nil && !s.PasswordMethodOn()
-	passwordSet := false
+	passwordSet, passwordUUID := false, ""
 	err := s.run(ctx, c, PermInvite, "user.create", req.Username, &detail, func() error {
 		switch {
 		case !lldap.ValidUsername(req.Username):
@@ -1376,6 +1378,15 @@ func (s *Service) CreateUser(ctx context.Context, c *Caller, req CreateRequest) 
 				return fmt.Errorf("setting the password failed, user not created: %v", err)
 			}
 			passwordSet = true
+			// The new account's uuid, for the record (the password is
+			// bound to this account, never to a later one of the name).
+			if users, err := s.LLDAP.ListUsers(ctx); err == nil {
+				for _, lu := range users {
+					if strings.EqualFold(lu.ID, req.Username) {
+						passwordUUID = lu.UUID
+					}
+				}
+			}
 		}
 		// The "added by hand" entries: after every step that can still
 		// delete the new user (details, password), before the group adds.
@@ -1447,7 +1458,7 @@ func (s *Service) CreateUser(ctx context.Context, c *Caller, req CreateRequest) 
 	// Only once the account is committed: a rolled-back create (its
 	// user deleted again) or any failure records nothing.
 	if err == nil && passwordSet {
-		s.recordPassword(res, req.Username, c.User)
+		s.recordPassword(res, req.Username, passwordUUID, c.User)
 	}
 	return res, err
 }
@@ -1680,7 +1691,7 @@ func (s *Service) RemoveStaleKeycloakUser(ctx context.Context, c *Caller, userna
 func (s *Service) SetPassword(ctx context.Context, c *Caller, username, password string, generate bool, confirm string) (*Result, error) {
 	res := newResult()
 	detail := fmt.Sprintf("generated=%v", generate)
-	setFor := ""
+	setFor, setUUID := "", ""
 	err := s.run(ctx, c, permAdmin, "user.password", username, &detail, func() error {
 		if err := s.checkTarget(username); err != nil {
 			return err
@@ -1716,7 +1727,7 @@ func (s *Service) SetPassword(ctx context.Context, c *Caller, username, password
 		if err := s.LLDAP.SetPassword(ctx, u.ID, password); err != nil {
 			return err
 		}
-		setFor = u.ID
+		setFor, setUUID = u.ID, u.UUID
 		if s.KC != nil {
 			if err := s.KC.LogoutUser(ctx, u.ID); err != nil {
 				res.Warnings = append(res.Warnings, fmt.Sprintf("signing the user out of Keycloak failed: %v", err))
@@ -1728,7 +1739,7 @@ func (s *Service) SetPassword(ctx context.Context, c *Caller, username, password
 		return nil
 	})
 	if err == nil && setFor != "" {
-		s.recordPassword(res, setFor, c.User)
+		s.recordPassword(res, setFor, setUUID, c.User)
 	}
 	return res, err
 }

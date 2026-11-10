@@ -1047,7 +1047,7 @@ func TestOverviewHidesServiceAccount(t *testing.T) {
 
 func TestPasswordRules(t *testing.T) {
 	e := newEnv(t)
-	type rec struct{ user, actor string }
+	type rec struct{ user, uuid, actor string }
 	var recorded []rec
 	on := false
 	// Both hooks run outside s.mu: another mutation from inside them
@@ -1064,9 +1064,9 @@ func TestPasswordRules(t *testing.T) {
 			t.Fatalf("%s runs under the service lock", what)
 		}
 	}
-	e.svc.PasswordSet = func(user, actor string) error {
+	e.svc.PasswordSet = func(user, uuid, actor string) error {
 		outsideLock("PasswordSet")
-		recorded = append(recorded, rec{user, actor})
+		recorded = append(recorded, rec{user, uuid, actor})
 		return nil
 	}
 	e.svc.PasswordMethodOn = func() bool { outsideLock("PasswordMethodOn"); return on }
@@ -1091,7 +1091,7 @@ func TestPasswordRules(t *testing.T) {
 	if _, err := e.svc.SetPassword(ctx, asRoot, "alice", "", true, ""); err != nil {
 		t.Fatal(err)
 	}
-	if len(recorded) != 2 || recorded[0] != (rec{"alice", "root"}) {
+	if len(recorded) != 2 || recorded[0] != (rec{"alice", e.ll.UUIDOf("alice"), "root"}) || recorded[0].uuid == "" {
 		t.Errorf("recorded = %+v", recorded)
 	}
 	// Setting a password is allowed while the method is off; onboarding
@@ -1107,11 +1107,11 @@ func TestPasswordRules(t *testing.T) {
 	if _, err := e.svc.CreateUser(ctx, asRoot, directory.CreateRequest{Username: "pia", Email: "pia@example.org", Onboarding: directory.OnboardPassword, Password: "a-good-password-1"}); err != nil {
 		t.Fatal(err)
 	}
-	if len(recorded) != 3 || recorded[2] != (rec{"pia", "root"}) {
+	if len(recorded) != 3 || recorded[2] != (rec{"pia", e.ll.UUIDOf("pia"), "root"}) || recorded[2].uuid == "" {
 		t.Errorf("recorded = %+v", recorded)
 	}
 	// A recording failure is a warning: the password is set.
-	e.svc.PasswordSet = func(string, string) error { return errors.New("disk full") }
+	e.svc.PasswordSet = func(string, string, string) error { return errors.New("disk full") }
 	res, err := e.svc.SetPassword(ctx, asRoot, "alice", "another-good-one-7", false, "")
 	if err != nil || len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], "disk full") || e.ll.Password("alice") != "another-good-one-7" {
 		t.Errorf("record failure = %+v, %v", res, err)

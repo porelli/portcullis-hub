@@ -271,17 +271,17 @@ func TestPasswordRules(t *testing.T) {
 	if f.h.PasswordMethodOn() {
 		t.Error("password starts off")
 	}
-	if err := f.h.RecordPassword("Bob", "root"); err != nil {
+	if err := f.h.RecordPassword("Bob", p.uuidOf("bob"), "root"); err != nil {
 		t.Fatal(err)
 	}
 	for _, u := range []string{"admin", "portcullis-hub", "ADMIN"} {
-		if err := f.h.RecordPassword(u, "root"); err != nil {
+		if err := f.h.RecordPassword(u, p.uuidOf(u), "root"); err != nil {
 			t.Fatal(err)
 		}
 	}
-	// An account the directory doesn't know: no record (it would never
-	// count), an error the directory turns into a warning.
-	if err := f.h.RecordPassword("ghost", "root"); err == nil {
+	// No account id from the directory: no record (it would never count),
+	// an error the directory turns into a warning.
+	if err := f.h.RecordPassword("ghost", "", "root"); err == nil {
 		t.Error("ghost: want an error")
 	}
 	h2 := reopen(t, f)
@@ -335,7 +335,7 @@ func TestPasswordRules(t *testing.T) {
 		t.Errorf("hub on passwords = %v, want the guard's 409 (admin's password not counted)", err)
 	}
 	// A password the Hub set for ann counts.
-	if err := f.h.RecordPassword("ann", "root"); err != nil {
+	if err := f.h.RecordPassword("ann", p.uuidOf("ann"), "root"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := f.h.SetCoreTemplate(ctx, "hub", "pw", siAdmin); err != nil {
@@ -463,5 +463,58 @@ func TestInventorySyncPublishesPeople(t *testing.T) {
 			t.Fatalf("policy file people not published:\n%s", b)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// A MarkInventoryStale while a refresh is loading is never lost: that
+// refresh's data may predate the change, so the next fresh read loads
+// again (round 2, the guard must not serve data from before a passkey
+// was removed).
+func TestInventoryStaleDuringRefresh(t *testing.T) {
+	f, _ := signInFixture(t)
+	ctx := context.Background()
+	entered, release := make(chan struct{}), make(chan struct{})
+	var mu sync.Mutex
+	calls, block := 0, true
+	f.h.SetSignInSources(SignInSources{Passkeys: func(ctx context.Context) (map[string][]keycloak.PasskeyCredential, error) {
+		mu.Lock()
+		calls++
+		b := block
+		block = false
+		mu.Unlock()
+		if b {
+			close(entered)
+			<-release
+		}
+		return map[string][]keycloak.PasskeyCredential{"bea": {}}, nil
+	}})
+	now := time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)
+	f.h.signInInv.now = func() time.Time { return now } // never 30 s later
+	done := make(chan error, 1)
+	go func() { _, err := f.h.SignInInventory(ctx, true); done <- err }()
+	<-entered
+	f.h.MarkInventoryStale() // a passkey removed while the refresh loads
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.h.SignInInventory(ctx, true); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	n := calls
+	mu.Unlock()
+	if n != 2 {
+		t.Errorf("source calls = %d, want 2: the mark during the first refresh was lost", n)
+	}
+	// That second refresh saw no mark: the next one within 30 s is cached.
+	if _, err := f.h.SignInInventory(ctx, true); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	n = calls
+	mu.Unlock()
+	if n != 2 {
+		t.Errorf("source calls = %d, want 2 (cached)", n)
 	}
 }

@@ -66,6 +66,7 @@ func (h *Hub) SetSignInSources(src SignInSources) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.src, c.base, c.err, c.tried = src, nil, nil, time.Time{}
+	c.gen++
 }
 
 // inventoryMinAge: an on-demand refresh runs at most once per 30 s (D16).
@@ -83,8 +84,12 @@ type inventoryCache struct {
 	src       SignInSources
 	base      *invBase
 	err       error     // the last refresh's error (nil: it worked)
-	tried     time.Time // when the last refresh ran
-	now       func() time.Time
+	tried     time.Time // when the last refresh ran (zero: stale, refresh on the next fresh read)
+	// gen counts MarkInventoryStale / SetSignInSources calls: a refresh
+	// that saw it move while it loaded leaves tried zero (its data may
+	// predate the change), so a mark is never lost.
+	gen uint64
+	now func() time.Time
 }
 
 // invBase is a refresh's result without the passwords (those are read
@@ -137,7 +142,7 @@ func (h *Hub) inventoryBase(ctx context.Context, fresh bool) (*invBase, error) {
 	c.refreshMu.Lock()
 	defer c.refreshMu.Unlock()
 	c.mu.Lock()
-	base, err, tried, src := c.base, c.err, c.tried, c.src
+	base, err, tried, src, gen := c.base, c.err, c.tried, c.src, c.gen
 	c.mu.Unlock()
 	now := c.clock()
 	recent := !tried.IsZero() && now.Sub(tried) < inventoryMinAge
@@ -149,9 +154,16 @@ func (h *Hub) inventoryBase(ctx context.Context, fresh bool) (*invBase, error) {
 	}
 	base, err = h.loadInventory(ctx, src, now)
 	c.mu.Lock()
-	c.tried, c.err = now, err
+	c.err = err
 	if err == nil {
 		c.base = base
+	}
+	if c.gen == gen {
+		c.tried = now
+	} else {
+		// Marked stale while loading: this result may predate the
+		// change; the next fresh read loads again.
+		c.tried = time.Time{}
 	}
 	c.mu.Unlock()
 	if err != nil {
@@ -194,6 +206,7 @@ func (h *Hub) MarkInventoryStale() {
 	c := &h.signInInv
 	c.mu.Lock()
 	c.tried = time.Time{}
+	c.gen++
 	c.mu.Unlock()
 }
 
@@ -570,20 +583,16 @@ func (h *Hub) affectedLocked(si state.SignIn, id string, compiled signin.Node, m
 
 // RecordPassword records that actor set user's LLDAP password through the
 // Hub (directory.Service.PasswordSet, called outside the directory's lock;
-// D13: only these count), bound to the account's LLDAP uuid (read here:
-// unreadable = an error and no record, so it never counts). The bootstrap
-// admin and the service account are never recorded (password sign-in is
-// refused for them). Never given the password.
-func (h *Hub) RecordPassword(user, actor string) error {
+// D13: only these count), bound to uuid — the LLDAP account the directory
+// changed, read in that same mutation (empty = an error and no record, so
+// it never counts). The bootstrap admin and the service account are never
+// recorded (password sign-in is refused for them). Never given the
+// password.
+func (h *Hub) RecordPassword(user, uuid, actor string) error {
 	u := strings.ToLower(strings.TrimSpace(user))
 	if u == "" || noPasswordAccounts[u] {
 		return nil
 	}
-	m, err := h.membership(context.Background())
-	if err != nil {
-		return fmt.Errorf("the account can't be read from Users & Groups: %w", err)
-	}
-	uuid := m.UUIDs[u]
 	if uuid == "" {
 		return fmt.Errorf("Users & Groups gave no account id for %s", u)
 	}
