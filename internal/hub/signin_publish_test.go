@@ -130,6 +130,7 @@ func TestSignInKeycloakFileListsEveryNativeClient(t *testing.T) {
 func TestTierFollowsCertificateSwitch(t *testing.T) {
 	f := newInstanceFixture(t, nil)
 	ctx := context.Background()
+	ableAdmin(f.h)
 	simulateCompose(f, 0)
 	if err := f.h.Enable("grafana"); err != nil {
 		t.Fatal(err)

@@ -502,7 +502,7 @@ func TestInstanceNameEverywhere(t *testing.T) {
 		"instances.go": 1,
 		// Settings → Sign-in: a template's uses (sign-in Task 3), and the
 		// needs-stronger page's app name in signin-keycloak.json (Task 4).
-		"signin.go": 1, "signin_publish.go": 1}
+		"signin.go": 1, "signin_publish.go": 1, "signin_people.go": 2}
 	files, _ := filepath.Glob("*.go")
 	got := map[string]int{}
 	for _, p := range files {
@@ -526,8 +526,8 @@ func TestInstanceNameEverywhere(t *testing.T) {
 			t.Errorf("%s calls instanceName: add it here", p)
 		}
 	}
-	if total != 13 {
-		t.Errorf("%d call sites, want the 10 of §11.9 plus the instance views, the sign-in uses and signin-keycloak.json", total)
+	if total != 15 {
+		t.Errorf("%d call sites, want the 10 of §11.9 plus the instance views, the sign-in uses, signin-keycloak.json and the sign-in warnings", total)
 	}
 
 	f := newInstanceFixture(t, nil)

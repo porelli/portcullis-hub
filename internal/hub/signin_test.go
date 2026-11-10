@@ -18,6 +18,9 @@ func signInFixture(t *testing.T) (*fixture, *fakeAudit) {
 	f := newInstanceFixture(t, nil)
 	audit := &fakeAudit{}
 	f.h.SetAudit(audit)
+	// The lockout guard sees an administrator who can meet anything
+	// (signin_guard_test.go tests the guard itself).
+	ableAdmin(f.h)
 	return f, audit
 }
 

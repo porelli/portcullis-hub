@@ -83,13 +83,6 @@ func (h *Hub) publishedTemplatesLocked() map[string]signin.Node {
 	return out
 }
 
-// peopleMethodsLocked is each person's set-up methods (the policy file's
-// people, page text only). Task 5 fills it from the inventory; nil = not
-// known, nobody listed. Caller holds mu.
-func (h *Hub) peopleMethodsLocked() map[string][]signin.Method {
-	return nil
-}
-
 // signInClientIDs are t's Keycloak client ids signin-keycloak.json lists
 // (every keycloak_clients entry but ai_client: mcp-gate checks those,
 // §15.2).

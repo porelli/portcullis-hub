@@ -409,6 +409,9 @@ type Hub struct {
 	// signInMu serialises Settings → Sign-in writers (signin.go), from
 	// their plan to their commit; taken before mu.
 	signInMu sync.Mutex
+	// signInInv: who has which sign-in method (signin_people.go; its own
+	// leaf locks, never held across mu).
+	signInInv inventoryCache
 
 	driftMu sync.Mutex
 	drift   DriftReport
@@ -465,6 +468,8 @@ type Hub struct {
 	freshAuthEnsure func(ctx context.Context) error
 	lastExpiring    []policy.Expiring
 	dirKick         chan struct{}
+	// invKick asks runInventorySync for a sign-in inventory refresh.
+	invKick chan struct{}
 
 	// Person-id pools (personids.go, contract §13.16): idRanges = pool →
 	// its inclusive id range (templates.PersonIDPools; tests narrow it);
@@ -631,6 +636,7 @@ func New(cfg Config, runner compose.Runner, engine Engine, idp IdP) (*Hub, error
 		lifecycleDeliverWait: lifecycleDeliverWaitDefault,
 		kick:                 make(chan struct{}, 1),
 		dirKick:              make(chan struct{}, 1),
+		invKick:              make(chan struct{}, 1),
 		aiReconKick:          make(chan struct{}, 1),
 		credKick:             make(chan struct{}, 1),
 		driftKey:             map[string]string{},

@@ -2418,5 +2418,5 @@ func (h *Hub) ForgetDeletedPerson(ctx context.Context, actor directory.Actor, us
 // PersonDeleted is the directory's UserDeleted: the person's entered
 // values (PurgePersonValues), then their AI records (ForgetDeletedPerson).
 func (h *Hub) PersonDeleted(ctx context.Context, actor directory.Actor, user string) []string {
-	return append(h.PurgePersonValues(ctx, actor, user), h.ForgetDeletedPerson(ctx, actor, user)...)
+	return append(append(h.PurgePersonValues(ctx, actor, user), h.ForgetDeletedPerson(ctx, actor, user)...), h.forgetPassword(user)...)
 }

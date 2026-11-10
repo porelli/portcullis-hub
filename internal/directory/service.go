@@ -24,6 +24,7 @@ import (
 	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/lldap"
 	"github.com/portcullis/hub/internal/rules"
+	"github.com/portcullis/hub/internal/signin"
 )
 
 // CoreAdmin is LLDAP's bootstrap admin (core sets LLDAP_LDAP_USER_DN=admin).
@@ -198,6 +199,17 @@ type Service struct {
 	// call 32). It must not block on the directory. Its warnings are
 	// added to the delete's.
 	UserDeleted func(ctx context.Context, actor Actor, name string) []string
+	// PasswordSet, if set, is called after the Hub set a person's LLDAP
+	// password (SetPassword, password onboarding) with their lowercase
+	// username and the acting admin: the Hub records it (contract §8.1
+	// "Passwords": only Hub-set passwords count). Never given the
+	// password. Its error becomes a warning: the password is set.
+	PasswordSet func(user, actor string) error
+	// PasswordMethodOn, if set, reports whether the password sign-in
+	// method is switched on: password onboarding is refused (409) while
+	// it is off. Setting a password is allowed either way (LDAP-binding
+	// apps use it).
+	PasswordMethodOn func() bool
 
 	mu sync.Mutex
 	// ruleState: each rule group's membership (lowercase) after the last
@@ -1140,6 +1152,30 @@ func (s *Service) newInvite(ctx context.Context, username string) (*invite.Invit
 
 func newResult() *Result { return &Result{Warnings: []string{}} }
 
+// checkHubPassword is the rule for a password the Hub sets (contract §8.1
+// "Passwords": LLDAP's characters, then 12–128 characters, not the
+// username, not a common password). The error never quotes it.
+func checkHubPassword(user, pw string) error {
+	if !lldap.ValidPassword(pw) {
+		return invalid("password must be %d-%d characters without control characters", signin.MinPasswordLen, signin.MaxPasswordLen)
+	}
+	if err := signin.CheckPassword(user, pw); err != nil {
+		return invalid("%s", err.Error())
+	}
+	return nil
+}
+
+// recordPassword hands a password the Hub just set to PasswordSet; a
+// failure is a warning on res.
+func (s *Service) recordPassword(res *Result, user, actor string) {
+	if s.PasswordSet == nil {
+		return
+	}
+	if err := s.PasswordSet(strings.ToLower(user), actor); err != nil {
+		res.Warnings = append(res.Warnings, "the password was set, but recording it for Settings → Sign-in failed (it won't count until it is set again): "+err.Error())
+	}
+}
+
 // CreateUser creates a user and onboards them: by default with a one-time
 // invite link (no password at all), or — fallback — with a password and
 // optionally the passkey registration action.
@@ -1180,11 +1216,14 @@ func (s *Service) CreateUser(ctx context.Context, c *Caller, req CreateRequest) 
 		switch req.Onboarding {
 		case OnboardInvite: // availability checked below, once the groups are known
 		case OnboardPassword:
+			if s.PasswordMethodOn != nil && !s.PasswordMethodOn() {
+				return refuse("password sign-in is switched off (Settings → Sign-in): onboard with an invite link, or switch the password method on first")
+			}
 			pw = req.Password
 			if req.Generate {
 				pw = GeneratePassword()
-			} else if !lldap.ValidPassword(pw) {
-				return invalid("password must be %d-%d characters without control characters", lldap.MinPasswordLen, lldap.MaxPasswordLen)
+			} else if err := checkHubPassword(req.Username, pw); err != nil {
+				return err
 			}
 		default:
 			return invalid("onboarding must be %q or %q", OnboardInvite, OnboardPassword)
@@ -1332,6 +1371,7 @@ func (s *Service) CreateUser(ctx context.Context, c *Caller, req CreateRequest) 
 				}
 				return fmt.Errorf("setting the password failed, user not created: %v", err)
 			}
+			s.recordPassword(res, req.Username, c.User)
 		}
 		// The "added by hand" entries: after every step that can still
 		// delete the new user (details, password), before the group adds.
@@ -1638,8 +1678,10 @@ func (s *Service) SetPassword(ctx context.Context, c *Caller, username, password
 		if s.reservedName(username) {
 			return refuse("%s", reservedMsg(username))
 		}
-		if !generate && !lldap.ValidPassword(password) {
-			return invalid("password must be %d-%d characters without control characters", lldap.MinPasswordLen, lldap.MaxPasswordLen)
+		if !generate {
+			if err := checkHubPassword(username, password); err != nil {
+				return err
+			}
 		}
 		sn, err := s.load(ctx)
 		if err != nil {
@@ -1664,6 +1706,7 @@ func (s *Service) SetPassword(ctx context.Context, c *Caller, username, password
 		if err := s.LLDAP.SetPassword(ctx, u.ID, password); err != nil {
 			return err
 		}
+		s.recordPassword(res, u.ID, c.User)
 		if s.KC != nil {
 			if err := s.KC.LogoutUser(ctx, u.ID); err != nil {
 				res.Warnings = append(res.Warnings, fmt.Sprintf("signing the user out of Keycloak failed: %v", err))

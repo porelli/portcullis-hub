@@ -181,3 +181,77 @@ func TestImportUserLink(t *testing.T) {
 		t.Errorf("ImportUserLink(nobody) = %v", err)
 	}
 }
+
+func TestSignInCredentialsTypes(t *testing.T) {
+	f := kctest.New(t)
+	f.Import("alice",
+		kctest.Credential{ID: "p1", Type: "password"},
+		kctest.Credential{ID: "w1", Type: "webauthn-passwordless", UserLabel: "Phone", CreatedDate: 1794260205000},
+		kctest.Credential{ID: "w2", Type: "portcullis-device-passkey", UserLabel: "Laptop"},
+		kctest.Credential{ID: "w3", Type: "portcullis-security-key", UserLabel: "YubiKey 5"},
+		kctest.Credential{ID: "w4", Type: "webauthn"},
+		kctest.Credential{ID: "o1", Type: "otp"})
+	f.Import("Bob")
+	f.Import("broken", kctest.Credential{ID: "w5", Type: "portcullis-security-key"})
+	f.Update("broken", func(u *kctest.User) { u.CredentialsStatus = 500 })
+	c := keycloak.New(f.HTTP.URL, "admin", "admin")
+	ctx := context.Background()
+
+	got, err := c.SignInCredentials(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"w1": "passkey_synced", "w2": "passkey_device", "w3": "security_key", "w4": "passkey_synced"}
+	if len(got["alice"]) != len(want) {
+		t.Fatalf("alice = %+v", got["alice"])
+	}
+	for _, pk := range got["alice"] {
+		if want[pk.ID] != pk.Type {
+			t.Errorf("%s: type %q, want %q", pk.ID, pk.Type, want[pk.ID])
+		}
+		if pk.ID == "w1" && (pk.Label != "Phone" || pk.Created.UnixMilli() != 1794260205000) {
+			t.Errorf("w1 = %+v", pk)
+		}
+	}
+	// Known, none set up; unreadable: left out (unknown).
+	if b, ok := got["bob"]; !ok || len(b) != 0 {
+		t.Errorf("bob = %+v, %v", b, ok)
+	}
+	if _, ok := got["broken"]; ok {
+		t.Error("a user whose credentials can't be read must be unknown")
+	}
+	for typ, m := range map[string]string{"webauthn-passwordless": "passkey_synced", "webauthn": "passkey_synced", "portcullis-device-passkey": "passkey_device", "portcullis-security-key": "security_key"} {
+		if k, ok := keycloak.PasskeyKind(typ); !ok || string(k) != m {
+			t.Errorf("PasskeyKind(%s) = %s, %v", typ, k, ok)
+		}
+	}
+	if _, ok := keycloak.PasskeyKind("password"); ok {
+		t.Error("password is not a passkey")
+	}
+	f.SetDown(true)
+	if _, err := c.SignInCredentials(ctx); err == nil {
+		t.Error("Keycloak down: want an error")
+	}
+}
+
+func TestRemovePasskeysRemovesEveryKind(t *testing.T) {
+	f := kctest.New(t)
+	f.Import("alice",
+		kctest.Credential{ID: "p1", Type: "password"},
+		kctest.Credential{ID: "w1", Type: "webauthn-passwordless"},
+		kctest.Credential{ID: "w2", Type: "portcullis-device-passkey"},
+		kctest.Credential{ID: "w3", Type: "portcullis-security-key"},
+		kctest.Credential{ID: "w4", Type: "webauthn"})
+	c := keycloak.New(f.HTTP.URL, "admin", "admin")
+	ctx := context.Background()
+	if st, err := c.UserStatuses(ctx); err != nil || st["alice"].Passkeys != 4 {
+		t.Errorf("statuses = %+v, %v", st, err)
+	}
+	n, err := c.RemovePasskeys(ctx, "alice", false)
+	if err != nil || n != 4 {
+		t.Fatalf("RemovePasskeys = %d, %v", n, err)
+	}
+	if a := f.Get("alice"); len(a.Credentials) != 1 || a.Credentials[0].Type != "password" {
+		t.Errorf("alice after = %+v", a.Credentials)
+	}
+}

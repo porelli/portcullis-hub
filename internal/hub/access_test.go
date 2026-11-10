@@ -124,6 +124,7 @@ func TestSignInPerMethod(t *testing.T) {
 func TestMTLSAppAlwaysProtected(t *testing.T) {
 	f := newAccessFixture(t)
 	ctx := context.Background()
+	ableAdmin(f.h)
 	if err := f.h.Enable("vault"); err != nil {
 		t.Fatal(err)
 	}

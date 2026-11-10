@@ -1044,3 +1044,60 @@ func TestOverviewHidesServiceAccount(t *testing.T) {
 		t.Errorf("SetPassword(service) = %v, want 409", err)
 	}
 }
+
+func TestPasswordRules(t *testing.T) {
+	e := newEnv(t)
+	type rec struct{ user, actor string }
+	var recorded []rec
+	on := false
+	e.svc.PasswordSet = func(user, actor string) error {
+		recorded = append(recorded, rec{user, actor})
+		return nil
+	}
+	e.svc.PasswordMethodOn = func() bool { return on }
+
+	for _, bad := range []string{"password1234", "alice-alice", "Alice", "short-one", strings.Repeat("x", 129) + "Q1"} {
+		if _, err := e.svc.SetPassword(ctx, asRoot, "alice", bad, false, ""); status(err) != 400 {
+			t.Errorf("SetPassword(%q) = %v, want 400", bad, err)
+		} else if strings.Contains(err.Error(), bad) {
+			t.Errorf("the refusal quotes the password: %v", err)
+		}
+	}
+	if _, err := e.svc.SetPassword(ctx, asRoot, "alice", "alicepass-12345", false, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.SetPassword(ctx, asRoot, "alice", "", true, ""); err != nil {
+		t.Fatal(err)
+	}
+	if len(recorded) != 2 || recorded[0] != (rec{"alice", "root"}) {
+		t.Errorf("recorded = %+v", recorded)
+	}
+	// Setting a password is allowed while the method is off; onboarding
+	// with one isn't.
+	_, err := e.svc.CreateUser(ctx, asRoot, directory.CreateRequest{Username: "pia", Email: "pia@example.org", Onboarding: directory.OnboardPassword, Password: "a-good-password-1"})
+	if status(err) != 409 || !strings.Contains(err.Error(), "switched off") || e.ll.HasUser("pia") {
+		t.Errorf("onboarding while password is off = %v", err)
+	}
+	on = true
+	if _, err := e.svc.CreateUser(ctx, asRoot, directory.CreateRequest{Username: "pia", Email: "pia@example.org", Onboarding: directory.OnboardPassword, Password: "password1234"}); status(err) != 400 {
+		t.Errorf("onboarding with a common password = %v", err)
+	}
+	if _, err := e.svc.CreateUser(ctx, asRoot, directory.CreateRequest{Username: "pia", Email: "pia@example.org", Onboarding: directory.OnboardPassword, Password: "a-good-password-1"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(recorded) != 3 || recorded[2] != (rec{"pia", "root"}) {
+		t.Errorf("recorded = %+v", recorded)
+	}
+	// A recording failure is a warning: the password is set.
+	e.svc.PasswordSet = func(string, string) error { return errors.New("disk full") }
+	res, err := e.svc.SetPassword(ctx, asRoot, "alice", "another-good-one-7", false, "")
+	if err != nil || len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], "disk full") || e.ll.Password("alice") != "another-good-one-7" {
+		t.Errorf("record failure = %+v, %v", res, err)
+	}
+	b, _ := os.ReadFile(e.audit)
+	for _, pw := range []string{"alicepass-12345", "a-good-password-1", "another-good-one-7", "password1234"} {
+		if strings.Contains(string(b), pw) {
+			t.Errorf("audit holds a password: %s", pw)
+		}
+	}
+}

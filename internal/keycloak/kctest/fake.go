@@ -20,8 +20,10 @@ import (
 
 // Credential is a fake credential.
 type Credential struct {
-	ID   string `json:"id"`
-	Type string `json:"type"`
+	ID          string `json:"id"`
+	Type        string `json:"type"`
+	UserLabel   string `json:"userLabel,omitempty"`
+	CreatedDate int64  `json:"createdDate,omitempty"`
 }
 
 // User is a fake Keycloak user.

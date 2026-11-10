@@ -24,6 +24,7 @@ import (
 	"github.com/go-resty/resty/v2"
 
 	"github.com/portcullis/hub/internal/freshauth"
+	"github.com/portcullis/hub/internal/signin"
 )
 
 // Realm is the Portcullis realm the Hub manages.
@@ -682,8 +683,101 @@ func (c *Client) UpdateForwardAuthCallbacks(ctx context.Context, add, remove []s
 // PasskeyAction is the required action that makes a user register a passkey.
 const PasskeyAction = "webauthn-register-passwordless"
 
-// passkeyTypes are the WebAuthn credential types (2FA and passwordless).
-var passkeyTypes = map[string]bool{"webauthn": true, "webauthn-passwordless": true}
+// passkeyKinds maps every WebAuthn credential type (2FA, passwordless and
+// the Portcullis extension's kinds, contract §8.1) to its sign-in method:
+// the stock types count as a synced passkey.
+var passkeyKinds = map[string]signin.Method{
+	"webauthn":                  signin.PasskeySynced,
+	"webauthn-passwordless":     signin.PasskeySynced,
+	"portcullis-device-passkey": signin.PasskeyDevice,
+	"portcullis-security-key":   signin.SecurityKey,
+}
+
+// passkeyTypes are the WebAuthn credential types (every passkeyKinds key):
+// counted, listed and removed as passkeys.
+var passkeyTypes = func() map[string]bool {
+	out := map[string]bool{}
+	for t := range passkeyKinds {
+		out[t] = true
+	}
+	return out
+}()
+
+// PasskeyKind is the sign-in method of Keycloak credential type t (false:
+// not a passkey type).
+func PasskeyKind(t string) (signin.Method, bool) {
+	m, ok := passkeyKinds[t]
+	return m, ok
+}
+
+// PasskeyCredential is one passkey of a person: its Keycloak credential
+// id, its kind (Type: the sign-in method id, PasskeyKind), its label and
+// when it was registered (zero: unknown).
+type PasskeyCredential struct {
+	ID      string    `json:"id"`
+	Type    string    `json:"type"`
+	Label   string    `json:"label"`
+	Created time.Time `json:"created"`
+}
+
+// SignInCredentials lists every Keycloak user's passkeys (contract §8.1
+// "Inventory"), keyed by lowercase username; a user whose credentials
+// can't be read is left out (their methods stay unknown, which never
+// counts), and so is any user Keycloak hasn't imported yet (none set
+// up). The error is realm-level only (auth, the user list: Keycloak is
+// unreachable). At most StatusConcurrency lookups at once.
+func (c *Client) SignInCredentials(ctx context.Context) (map[string][]PasskeyCredential, error) {
+	tok, err := c.token(ctx)
+	if err != nil {
+		return nil, err
+	}
+	users, err := c.listUsers(ctx, tok)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string][]PasskeyCredential, len(users))
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, StatusConcurrency)
+	for _, u := range users {
+		if !ValidUserID(u.ID) {
+			continue
+		}
+		wg.Add(1)
+		go func(u User) {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
+			creds, err := c.credentials(ctx, tok, u.ID)
+			<-sem
+			if err != nil {
+				log.Printf("keycloak: sign-in methods of %s unknown: %v", u.Username, err)
+				return
+			}
+			keys := []PasskeyCredential{}
+			for _, cr := range creds {
+				if kind, ok := passkeyKinds[cr.Type]; ok {
+					pk := PasskeyCredential{ID: cr.ID, Type: string(kind), Label: cr.Label}
+					if cr.Created > 0 {
+						pk.Created = time.UnixMilli(cr.Created).UTC()
+					}
+					keys = append(keys, pk)
+				}
+			}
+			mu.Lock()
+			out[strings.ToLower(u.Username)] = keys
+			mu.Unlock()
+		}(u)
+	}
+	wg.Wait()
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("list credentials: %w", err)
+	}
+	return out, nil
+}
 
 // UserStatus is a user's Keycloak-side state.
 type UserStatus struct {
@@ -703,8 +797,10 @@ type UserStatus struct {
 }
 
 type credential struct {
-	ID   string
-	Type string
+	ID      string
+	Type    string
+	Label   string
+	Created int64 // ms since the epoch; 0 = unknown
 }
 
 func (c *Client) credentials(ctx context.Context, tok, userID string) ([]credential, error) {
@@ -715,7 +811,11 @@ func (c *Client) credentials(ctx context.Context, tok, userID string) ([]credent
 	out := make([]credential, 0, len(creds))
 	for _, cr := range creds {
 		if cr != nil {
-			out = append(out, credential{ID: str(cr.ID), Type: str(cr.Type)})
+			cd := credential{ID: str(cr.ID), Type: str(cr.Type), Label: str(cr.UserLabel)}
+			if cr.CreatedDate != nil {
+				cd.Created = *cr.CreatedDate
+			}
+			out = append(out, cd)
 		}
 	}
 	return out, nil

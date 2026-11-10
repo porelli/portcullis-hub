@@ -198,9 +198,17 @@ func (h *Hub) RunDirectorySync(ctx context.Context) {
 		defer close(done)
 		h.runAttrSync(ctx, attrKick)
 	}()
-	defer func() { <-done }()
+	invDone := make(chan struct{})
+	go func() {
+		defer close(invDone)
+		h.runInventorySync(ctx)
+	}()
+	defer func() { <-done; <-invDone }()
 	for {
 		h.writePolicyLogged()
+		// Who has which sign-in method follows the directory (D16; its
+		// own loop: a slow Keycloak never delays a policy write).
+		h.TriggerInventoryRefresh()
 		// Leavers' AI credentials and connections (Task 13b; its own loop).
 		h.TriggerAIReconcile()
 		// Membership may have changed: per-person, per-group and

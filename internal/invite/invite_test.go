@@ -58,3 +58,46 @@ func TestCreate(t *testing.T) {
 		t.Errorf("missing secret: %v", err)
 	}
 }
+
+func TestCertificates(t *testing.T) {
+	secret := strings.Repeat("k", 40)
+	status, reply := 200, `{"certificates":[{"user":"Alice","serial":"0a","not_after":"2027-01-01T00:00:00Z","revoked":false},{"user":"bob","serial":"0b","not_after":"2025-01-01T00:00:00Z","revoked":true},{"user":"","serial":"0c","not_after":"2027-01-01T00:00:00Z"}]}`
+	path := ""
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path = r.URL.Path
+		if r.Method != http.MethodGet || r.Header.Get("Authorization") != "Bearer "+secret {
+			w.WriteHeader(401)
+			return
+		}
+		w.WriteHeader(status)
+		w.Write([]byte(reply))
+	}))
+	defer srv.Close()
+	file := filepath.Join(t.TempDir(), "secret")
+	os.WriteFile(file, []byte(secret), 0600)
+	c := New(srv.URL+"/internal/invites", file)
+	ctx := context.Background()
+	certs, err := c.Certificates(ctx)
+	if err != nil || path != "/internal/certificates" {
+		t.Fatalf("Certificates = %+v, %v (path %s)", certs, err, path)
+	}
+	if len(certs) != 2 || certs[0].User != "alice" || certs[0].Serial != "0a" || certs[0].NotAfter.Year() != 2027 || !certs[1].Revoked {
+		t.Errorf("certs = %+v", certs)
+	}
+	status = 404
+	if _, err := c.Certificates(ctx); !errors.Is(err, ErrNoCertAPI) {
+		t.Errorf("404 = %v", err)
+	}
+	for _, bad := range []struct {
+		status int
+		body   string
+	}{{500, `{}`}, {200, `{}`}, {200, `not json`}, {401, ``}} {
+		status, reply = bad.status, bad.body
+		if _, err := c.Certificates(ctx); err == nil || errors.Is(err, ErrNoCertAPI) || strings.Contains(err.Error(), secret) {
+			t.Errorf("%d %q = %v", bad.status, bad.body, err)
+		}
+	}
+	if _, err := New(srv.URL, filepath.Join(t.TempDir(), "x")).Certificates(ctx); !errors.Is(err, ErrNotConfigured) {
+		t.Errorf("no secret = %v", err)
+	}
+}

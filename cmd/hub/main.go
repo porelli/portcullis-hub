@@ -27,6 +27,7 @@ import (
 	"github.com/portcullis/hub/internal/invite"
 	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/lldap"
+	"github.com/portcullis/hub/internal/signinreset"
 	"github.com/portcullis/hub/web"
 )
 
@@ -104,6 +105,12 @@ func main() {
 	// container (contract §6). First, before any Hub configuration is read.
 	if len(os.Args) > 1 && os.Args[1] == "folderfix" {
 		os.Exit(folderfix.Main(os.Args[2:], os.Stdout, os.Stderr))
+	}
+	// `hub signin reset-core`: the CLI's lockout recovery (contract §8.1),
+	// run against the data directory while the Hub is stopped. Before the
+	// Hub's configuration is read: only the data directory is needed.
+	if len(os.Args) > 1 && os.Args[1] == "signin" {
+		os.Exit(signinreset.Main(os.Args[2:], env("HUB_DATA_DIR", filepath.Join(env("PROJECT_DIR", "/project"), ".hub")), os.Stdout))
 	}
 	// SIGHUP = sync the template sources. Registered first: a SIGHUP that
 	// arrives during start-up waits (Go's default would end the process).
@@ -244,6 +251,13 @@ func main() {
 	// the claim units say "Users & Groups not configured".
 	h.SetAttrStore(ll)
 	dir.GroupDeleted = h.PurgeGroupSettings
+	// Passwords the Hub sets are recorded (only those count, contract
+	// §8.1); password onboarding follows the password method's switch.
+	dir.PasswordSet = h.RecordPassword
+	dir.PasswordMethodOn = h.PasswordMethodOn
+	// Who has which sign-in method: Keycloak's passkeys, enroll's
+	// YubiKey certificates (§8.1 "Inventory", §9.4).
+	h.SetSignInSources(hub.SignInSources{Passkeys: kc.SignInCredentials, Certificates: invites.Certificates})
 	dir.UserDeleted = h.PersonDeleted
 	// The policy file's expiring list and user-attributes.json come from
 	// the directory (contract §4, §4.1); shared fields become Keycloak

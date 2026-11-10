@@ -26,7 +26,8 @@ import (
 	"github.com/portcullis/hub/internal/templates"
 )
 
-// Blocked is a person who can't meet a template, and why (Task 5 fills it).
+// Blocked is a person who can't meet a template, and why: "no method yet"
+// or "<Short> + <Short> only" (blockedFor).
 type Blocked struct {
 	User string `json:"user"`
 	Why  string `json:"why"`
@@ -54,7 +55,8 @@ type SignInMethodView struct {
 	Tenths    int           `json:"tenths"`
 	On        bool          `json:"on"`
 	Available bool          `json:"available"`
-	// People who have it set up (Task 5); -1 while unknown.
+	// People who have it set up (the inventory, signin_people.go); -1
+	// while unknown.
 	People int `json:"people"`
 }
 
@@ -98,16 +100,23 @@ type SignInChange struct {
 }
 
 // TemplatePreview is a template draft's sentence, score and who it would
-// affect (Task 5); nothing is stored.
+// affect (the people of the apps and core pages using it who can't meet
+// the draft, signin_people.go); nothing is stored.
 type TemplatePreview struct {
 	Sentence string        `json:"sentence"`
 	Score    signin.Score  `json:"score"`
 	Affected []AffectedApp `json:"affected"`
 	Problem  string        `json:"problem,omitempty"`
+	// PeopleUnknown says why Affected couldn't be worked out ("" = it
+	// was).
+	PeopleUnknown string `json:"people_unknown,omitempty"`
 }
 
-// AffectedApp is an app whose people can't all meet a template.
+// AffectedApp is an app (Kind UseInstance, Instance its id) or a core
+// page (Kind UseCore, Instance its key) whose people can't all meet a
+// template.
 type AffectedApp struct {
+	Kind     string    `json:"kind"`
 	Instance string    `json:"instance"`
 	Name     string    `json:"name"`
 	Blocked  []Blocked `json:"blocked"`
@@ -123,6 +132,9 @@ var coreSignInLabels = map[string]string{
 
 // SignInView is Settings → Sign-in.
 func (h *Hub) SignInView(ctx context.Context) (*SignInView, error) {
+	// The people counts: the cached inventory (read once if there is
+	// none yet); unknown stays -1.
+	_, _ = h.inventoryBase(ctx, false)
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	return h.signInViewLocked(), nil
@@ -160,10 +172,11 @@ func (h *Hub) templateForInstanceLocked(t *templates.Template) string {
 func (h *Hub) signInViewLocked() *SignInView {
 	si := h.st.SignIn
 	on := si.MethodsOn()
+	people := h.methodPeopleLocked()
 	v := &SignInView{Default: si.Default, Core: maps.Clone(si.Core), AddStronger: si.AddStronger}
 	for _, m := range signin.Methods {
 		info, _ := signin.InfoOf(m)
-		v.Methods = append(v.Methods, SignInMethodView{ID: m, Label: info.Label, Tenths: info.Tenths, On: on[m], Available: info.Available, People: -1})
+		v.Methods = append(v.Methods, SignInMethodView{ID: m, Label: info.Label, Tenths: info.Tenths, On: on[m], Available: info.Available, People: people[m]})
 	}
 	for _, id := range templateOrder(si) {
 		t := si.Templates[id]
@@ -276,19 +289,28 @@ func (h *Hub) changeSignIn(actor directory.Actor, action, target, attempt string
 		return &SignInChange{View: v, Restarts: []string{}, Warnings: []string{}}, nil
 	}
 	var aiOff map[string][]string
+	var cur state.SignIn
 	if err == nil {
 		aiOff = h.signInAIOffLocked(p.next)
+		cur = h.st.SignIn.Clone()
 	}
 	h.mu.RUnlock()
 	if err != nil {
 		return nil, err
 	}
-	// Task 5: the lockout guard runs here, outside mu, on the current
-	// section and p.next.
+	// The lockout guard (D17), outside mu, before anything changes: a
+	// refusal leaves AI support as it is and commits nothing.
+	lockWarn, err := h.lockoutCheck(context.Background(), cur, p.next)
+	if err != nil {
+		return nil, err
+	}
 	// AI support goes off first where the change makes an instance's
 	// template certificate-only (contract §8.1, G43; audited ai.disable):
 	// a switch-off that fails refuses the change, nothing saved.
-	warnings := []string{}
+	warnings := lockoutWarnings(lockWarn)
+	if warnings == nil {
+		warnings = []string{}
+	}
 	for _, id := range slices.Sorted(maps.Keys(aiOff)) {
 		if err := h.switchAIOff(context.Background(), id, aiOff[id], actor, aiCertOffDetail); err != nil {
 			var oe *OpError
@@ -306,6 +328,13 @@ func (h *Hub) changeSignIn(actor directory.Actor, action, target, attempt string
 		h.mu.Unlock()
 		return nil, err
 	}
+	// Password records change outside signInMu (RecordPassword): the
+	// commit keeps the current ones, whatever the plan copied.
+	p.next.Passwords = maps.Clone(h.st.SignIn.Passwords)
+	if p.next.Passwords == nil {
+		p.next.Passwords = map[string]state.PasswordRecord{}
+	}
+	again.next.Passwords = p.next.Passwords
 	if !reflect.DeepEqual(again, p) {
 		h.mu.Unlock()
 		return nil, statusErr(http.StatusConflict, "the sign-in settings changed meanwhile: try again")
@@ -624,11 +653,33 @@ func (h *Hub) PreviewTemplate(ctx context.Context, id string, in TemplateInput) 
 	if err := signin.Validate(in.Rule); err != nil {
 		return nil, statusErr(http.StatusBadRequest, "rule: %v", err)
 	}
+	// Who it affects: the uses of template id (none for a new one),
+	// judged against the draft as the switches compile it.
+	var m *directory.Membership
+	var inv *Inventory
+	why := ""
+	if id != "" {
+		m, inv, why = h.signInPeople(ctx)
+	}
 	h.mu.RLock()
-	on := h.st.SignIn.MethodsOn()
-	h.mu.RUnlock()
+	defer h.mu.RUnlock()
+	si := h.st.SignIn
+	on := si.MethodsOn()
 	sentence, score, problem := describeRule(in.Rule, on)
-	return &TemplatePreview{Sentence: sentence, Score: score, Affected: []AffectedApp{}, Problem: problem}, nil
+	p := &TemplatePreview{Sentence: sentence, Score: score, Affected: []AffectedApp{}, Problem: problem}
+	if _, exists := si.Templates[id]; id == "" || !exists {
+		return p, nil
+	}
+	if why != "" {
+		p.PeopleUnknown = why
+		return p, nil
+	}
+	compiled, err := signin.Compile(in.Rule, on)
+	if err != nil {
+		compiled = signin.Node{} // no way in: everybody is blocked
+	}
+	p.Affected = h.affectedLocked(si, id, compiled, m, inv)
+	return p, nil
 }
 
 // ensureSignIn fills a state's missing sign-in defaults (Init) and saves
