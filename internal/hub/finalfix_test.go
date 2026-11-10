@@ -166,7 +166,7 @@ func TestSignInModeMovesCallbacks(t *testing.T) {
 		t.Fatalf("gateway with Keycloak down: %v", err)
 	}
 	f.h.mu.RLock()
-	mode := f.h.st.SignIn["plex-b"]
+	mode := f.h.st.SignInMode["plex-b"]
 	f.h.mu.RUnlock()
 	if mode != SignInNative {
 		t.Fatalf("mode after a failed callback change = %q", mode)

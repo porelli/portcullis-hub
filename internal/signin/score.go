@@ -7,8 +7,8 @@ import (
 
 // Score is a rule's strength out of 5, in tenths, with a one-line reason.
 type Score struct {
-	Tenths int
-	Reason string
+	Tenths int    `json:"tenths"`
+	Reason string `json:"reason"`
 }
 
 // String formats the score as "2.9 / 5".

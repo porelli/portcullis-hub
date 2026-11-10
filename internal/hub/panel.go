@@ -433,7 +433,7 @@ func (in planInputs) digest() string {
 
 // planInputsLocked reads id's planInputs. Caller holds mu.
 func (h *Hub) planInputsLocked(id string) planInputs {
-	return planInputs{h.st.Settings[id].Clone(), h.st.SignIn[id], h.accessAuditLocked(id)}
+	return planInputs{h.st.Settings[id].Clone(), h.st.SignInMode[id], h.accessAuditLocked(id)}
 }
 
 // previewPlanned is PreviewSettings, also returning the stored inputs it
@@ -459,7 +459,7 @@ func (h *Hub) previewSettings(ctx context.Context, id string, u SettingsUpdate, 
 	h.mu.RLock()
 	// A restore, delete or shared-folder apply in progress (ruling 6).
 	pendErr := h.pendingLocked(id)
-	native := h.st.SignIn[id] == state.SignInNative
+	native := h.st.SignInMode[id] == state.SignInNative
 	folders := h.folderSourceLocked()
 	defs := maps.Clone(h.st.Folders)
 	stored := h.st.Settings[id].Clone()

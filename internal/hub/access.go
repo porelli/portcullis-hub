@@ -52,7 +52,7 @@ func (h *Hub) accessLocked(t *templates.Template) access {
 	a := access{Method: auth.Method}
 	if auth.HasNativeLogin() {
 		a.SignIn, a.Method = SignInGateway, "forward-auth"
-		if h.st.SignIn[t.ID] == state.SignInNative {
+		if h.st.SignInMode[t.ID] == state.SignInNative {
 			if auth.NativeLogin.AllowWithoutGateway {
 				a.SignIn, a.Method = SignInNative, auth.Method
 			} else {

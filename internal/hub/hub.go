@@ -408,6 +408,9 @@ type Hub struct {
 
 	policyWriteMu   sync.Mutex
 	defaultPolicyMu sync.Mutex
+	// signInMu serialises Settings → Sign-in writers (signin.go), from
+	// their plan to their commit; taken before mu.
+	signInMu sync.Mutex
 
 	driftMu sync.Mutex
 	drift   DriftReport
@@ -671,6 +674,9 @@ func New(cfg Config, runner compose.Runner, engine Engine, idp IdP) (*Hub, error
 // interrupted restores in the background (RecoverRestores) and seeds the
 // group-gate policy file.
 func (h *Hub) Init() {
+	// The sign-in defaults (D1 / D11 / D12) of a state that lacks them,
+	// before anything reads them.
+	h.ensureSignIn()
 	// Before anything can start a backup or restore.
 	h.SweepBackupLeftovers()
 	// The secrets epoch (§11.6) before anything can start or deliver: a
@@ -926,7 +932,7 @@ func (h *Hub) claimTierLocked(id string) int {
 	_, d := h.st.PublicAccess[id]
 	_, e := h.st.PublicMode[id]
 	_, f := h.st.PublicTokens[id]
-	_, g := h.st.SignIn[id]
+	_, g := h.st.SignInMode[id]
 	_, i := h.st.Instances[id]
 	h.opsMu.Lock()
 	_, o := h.ops[id]

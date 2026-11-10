@@ -496,11 +496,13 @@ func TestInstanceNameEverywhere(t *testing.T) {
 	// The call sites: every place the Hub names an instance to people
 	// goes through instanceName (portal, My apps, directory apps, the
 	// people reads, consent text, confirmations, entries' refusal, AI
-	// activity).
+	// activity, a sign-in template's uses).
 	want := map[string]int{"portal.go": 1, "myapps.go": 1, "directory.go": 1, "people_reads.go": 3,
 		"ai_instance.go": 1, "confirm.go": 1, "entries.go": 1, "ai_accesslog.go": 1,
 		// The instance views' name (§11.7), new with labels.
-		"instances.go": 1}
+		"instances.go": 1,
+		// Settings → Sign-in: a template's uses (sign-in Task 3).
+		"signin.go": 1}
 	files, _ := filepath.Glob("*.go")
 	got := map[string]int{}
 	for _, p := range files {
@@ -524,8 +526,8 @@ func TestInstanceNameEverywhere(t *testing.T) {
 			t.Errorf("%s calls instanceName: add it here", p)
 		}
 	}
-	if total != 11 {
-		t.Errorf("%d call sites, want the 10 of §11.9 plus the instance views", total)
+	if total != 12 {
+		t.Errorf("%d call sites, want the 10 of §11.9 plus the instance views and the sign-in uses", total)
 	}
 
 	f := newInstanceFixture(t, nil)

@@ -121,7 +121,7 @@ func TestPopulationRules(t *testing.T) {
 		return &v
 	}
 	f.h.mu.Lock()
-	f.h.st.SignIn["nat"] = state.SignInNative
+	f.h.st.SignInMode["nat"] = state.SignInNative
 	f.h.mu.Unlock()
 	cases := []struct {
 		name string

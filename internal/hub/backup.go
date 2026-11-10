@@ -195,7 +195,7 @@ func (h *Hub) instanceConfigLocked(tg *target) instanceConfig {
 	}
 	c.PublicMode = h.st.PublicMode[id]
 	c.PublicTokens = append([]string(nil), h.st.PublicTokens[id]...)
-	c.SignIn = h.st.SignIn[id]
+	c.SignIn = h.st.SignInMode[id]
 	if tg.entry.State == state.InstanceCreated {
 		c.State = state.InstanceCreated
 	}
@@ -240,9 +240,9 @@ func (h *Hub) applyConfigLocked(id string, c instanceConfig) {
 		delete(h.st.PublicTokens, id)
 	}
 	if c.SignIn != "" {
-		h.st.SignIn[id] = c.SignIn
+		h.st.SignInMode[id] = c.SignIn
 	} else {
-		delete(h.st.SignIn, id)
+		delete(h.st.SignInMode, id)
 	}
 	// The env overrides (§11.9; the restores check them against the
 	// restored template: restoredEnvOverridesLocked).

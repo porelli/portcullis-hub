@@ -701,7 +701,7 @@ func (h *Hub) deliveryGenLocked(t *templates.Template) string {
 		PublicMode  any
 		Auth        templates.Auth
 		AIProviders []byte
-	}{h.st.Settings[t.ID], h.st.IsEnabled(t.ID), h.st.SignIn[t.ID], t.Manifest.Files, t.Manifest.Options(), t.Manifest.Reload, t.Manifest.Hooks,
+	}{h.st.Settings[t.ID], h.st.IsEnabled(t.ID), h.st.SignInMode[t.ID], t.Manifest.Files, t.Manifest.Options(), t.Manifest.Reload, t.Manifest.Hooks,
 		acc.groupAccess(t), acc, policyOrNil(pol, hasPol), t.Public, h.st.PublicMode[t.ID], t.Manifest.Auth, providers})
 	if err != nil {
 		// Never equal: the run can't prove it is current.

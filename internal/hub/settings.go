@@ -47,7 +47,7 @@ type AppSettingsView struct {
 	PolicyNotes []string          `json:"policy_notes"`
 	Tier        string            `json:"tier"`
 	// SignIn is set for apps with their own login (auth.native_login).
-	SignIn *SignInView `json:"sign_in,omitempty"`
+	SignIn *SignInModeView `json:"sign_in,omitempty"`
 	// PublicAccess is set when the manifest declares auth.public_access.
 	PublicAccess *PublicAccessView `json:"public_access,omitempty"`
 	// Secrets: every secret option, set or not (write-only: never a
@@ -55,8 +55,8 @@ type AppSettingsView struct {
 	Secrets map[string]SecretView `json:"secrets"`
 }
 
-// SignInView is the "Sign-in" setting of an app with its own login.
-type SignInView struct {
+// SignInModeView is the "Sign-in" setting of an app with its own login.
+type SignInModeView struct {
 	Mode                string `json:"mode"` // SignInGateway or SignInNative
 	AllowWithoutGateway bool   `json:"allow_without_gateway"`
 	Note                string `json:"note,omitempty"`
@@ -95,7 +95,7 @@ func (h *Hub) AppSettings(id string) (*AppSettingsView, error) {
 	}
 	if acc.SignIn != "" {
 		nl := t.Manifest.Auth.NativeLogin
-		v.SignIn = &SignInView{Mode: acc.SignIn, AllowWithoutGateway: nl.AllowWithoutGateway, Note: nl.Note, Blocked: acc.Blocked}
+		v.SignIn = &SignInModeView{Mode: acc.SignIn, AllowWithoutGateway: nl.AllowWithoutGateway, Note: nl.Note, Blocked: acc.Blocked}
 		if t.Manifest.Auth.GroupAccess {
 			v.SignIn.AccessGroup = t.Manifest.Auth.AccessGroup
 		}
@@ -846,7 +846,7 @@ func (h *Hub) SaveSettings(id string, u SettingsUpdate, actor directory.Actor) (
 	}
 	h.mu.RLock()
 	pendErr := h.pendingLocked(id)
-	native := h.st.SignIn[id] == state.SignInNative
+	native := h.st.SignInMode[id] == state.SignInNative
 	// Resolved outside mu: copies (the folders' paths and definitions).
 	folders := h.folderSourceLocked()
 	defs := maps.Clone(h.st.Folders)
@@ -1000,13 +1000,13 @@ func (h *Hub) saveSettings(t *templates.Template, u SettingsUpdate, parsed *pars
 		h.mu.Unlock()
 		return res, false, err
 	}
-	prevSignIn, hadSignIn := h.st.SignIn[id]
+	prevSignIn, hadSignIn := h.st.SignInMode[id]
 	prev, hadPrev := h.st.Settings[id]
 	undo := func() {
 		if hadSignIn {
-			h.st.SignIn[id] = prevSignIn
+			h.st.SignInMode[id] = prevSignIn
 		} else {
-			delete(h.st.SignIn, id)
+			delete(h.st.SignInMode, id)
 		}
 		if hadPrev {
 			h.st.Settings[id] = prev
@@ -1018,9 +1018,9 @@ func (h *Hub) saveSettings(t *templates.Template, u SettingsUpdate, parsed *pars
 	if u.SignIn != nil {
 		before := h.accessLocked(t).SignIn
 		if *u.SignIn == SignInNative {
-			h.st.SignIn[id] = state.SignInNative
+			h.st.SignInMode[id] = state.SignInNative
 		} else {
-			delete(h.st.SignIn, id)
+			delete(h.st.SignInMode, id)
 		}
 		signInChanged = h.accessLocked(t).SignIn != before
 	}
@@ -1502,17 +1502,17 @@ func (h *Hub) signInCallbackChange(t *templates.Template, mode *string) (add, re
 		return nil, nil
 	}
 	before := callbackURIs(h.signInExtraHostsLocked(t))
-	prev, had := h.st.SignIn[t.ID]
+	prev, had := h.st.SignInMode[t.ID]
 	if *mode == SignInNative {
-		h.st.SignIn[t.ID] = state.SignInNative
+		h.st.SignInMode[t.ID] = state.SignInNative
 	} else {
-		delete(h.st.SignIn, t.ID)
+		delete(h.st.SignInMode, t.ID)
 	}
 	after := callbackURIs(h.signInExtraHostsLocked(t))
 	if had {
-		h.st.SignIn[t.ID] = prev
+		h.st.SignInMode[t.ID] = prev
 	} else {
-		delete(h.st.SignIn, t.ID)
+		delete(h.st.SignInMode, t.ID)
 	}
 	return minus(after, before), minus(before, after)
 }

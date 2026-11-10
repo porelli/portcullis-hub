@@ -82,7 +82,7 @@ type KnownDomain struct {
 // template's default instance (ID = template id) has an entry only when
 // something of this is stored (pinned or edited hosts, a label, a
 // binding, a lifecycle state). Every other per-instance map of AppState
-// (Enabled, Settings, AuthPolicies, Published, Public*, SignIn) is keyed
+// (Enabled, Settings, AuthPolicies, Published, Public*, SignInMode) is keyed
 // by its ID.
 type Instance struct {
 	ID       string            `json:"id" yaml:"id"`
@@ -114,13 +114,16 @@ type Instance struct {
 	// (§11.9 "Env overrides": name → value, never a secret), written
 	// single-quoted after every other value of the instance's .env.
 	EnvOverrides map[string]string `json:"env_overrides,omitempty" yaml:"env_overrides,omitempty"`
+	// SignInTemplate is the instance's sign-in template pick (§8.1 "Per
+	// app"; "" = the default template).
+	SignInTemplate string `json:"sign_in_template,omitempty" yaml:"sign_in_template,omitempty"`
 }
 
 // HoldsIdentity reports whether the entry stores a label, a group
-// binding or env overrides: a default instance's entry that does is
-// never dropped as "needs no entry".
+// binding, env overrides or a sign-in template pick: a default
+// instance's entry that does is never dropped as "needs no entry".
 func (e Instance) HoldsIdentity() bool {
-	return e.Label != "" || e.UsersGroup != "" || e.AdminsGroup != "" || len(e.EnvOverrides) > 0
+	return e.Label != "" || e.UsersGroup != "" || e.AdminsGroup != "" || len(e.EnvOverrides) > 0 || e.SignInTemplate != ""
 }
 
 // Bound reports whether the instance is bound to existing groups.
@@ -163,11 +166,16 @@ type AppState struct {
 	// PublicTokens are the share tokens opened in listed mode (secrets:
 	// state.yaml is 0600; the policy file only shows {token}).
 	PublicTokens map[string][]string `json:"public_tokens,omitempty" yaml:"public_tokens,omitempty"`
-	// SignIn is the admin's sign-in choice for apps with their own login
-	// (auth.native_login): SignInNative = the app's own login only, no
-	// Portcullis in front. No entry = Portcullis sign-in, then the app's
-	// own login.
-	SignIn map[string]string `json:"sign_in,omitempty" yaml:"sign_in,omitempty"`
+	// SignInMode is the admin's sign-in choice for apps with their own
+	// login (auth.native_login): SignInNative = the app's own login only,
+	// no Portcullis in front. No entry = Portcullis sign-in, then the
+	// app's own login.
+	SignInMode map[string]string `json:"sign_in_mode,omitempty" yaml:"sign_in_mode,omitempty"`
+	// SignIn is Settings → Sign-in (contract §8.1, D12): the methods, the
+	// templates, the default, the core pages' picks, the add-stronger
+	// switch and the Hub-set password records. EnsureSignIn fills a fresh
+	// state's defaults.
+	SignIn SignIn `json:"sign_in" yaml:"sign_in"`
 	// Domains is the last known list of enrolled domains (contract §12.3)
 	// with their provider and status — NEVER credentials. It keeps feeding
 	// extra_domains and the portal while the domains service is down.
@@ -582,6 +590,7 @@ const SignInNative = "native"
 func New() *AppState {
 	s := &AppState{AI: DefaultAISettings()}
 	s.init()
+	s.EnsureSignIn()
 	return s
 }
 
@@ -607,8 +616,8 @@ func (s *AppState) init() {
 	if s.PublicTokens == nil {
 		s.PublicTokens = make(map[string][]string)
 	}
-	if s.SignIn == nil {
-		s.SignIn = make(map[string]string)
+	if s.SignInMode == nil {
+		s.SignInMode = make(map[string]string)
 	}
 	if s.LegacyPassword == nil {
 		s.LegacyPassword = make(map[string]bool)
@@ -699,6 +708,10 @@ func Load(path string) (*AppState, error) {
 	}
 	s.init()
 	s.normalizeLegacy()
+	s.EnsureSignIn()
+	if err := s.checkSignIn(); err != nil {
+		return nil, fmt.Errorf("corrupt %s (sign_in: %v) — fix or move it aside, then restart", path, err)
+	}
 	return s, nil
 }
 

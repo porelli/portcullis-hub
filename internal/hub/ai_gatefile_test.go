@@ -179,7 +179,7 @@ func newGateFixture(t *testing.T, seed func(*state.AppState)) *gateFixture {
 		st.AI.Enabled = true
 		st.AI.Clients.Claude.Admin = true
 		st.AI.Clients.ClaudeCode.Admin = true
-		st.SignIn = map[string]string{"native": state.SignInNative}
+		st.SignInMode = map[string]string{"native": state.SignInNative}
 		st.AIInstances = map[string]state.AIInstance{
 			"gitea":  {Companions: map[string]state.AICompanion{"gitea": {Enabled: true, Mode: "read_write"}, "oauth": {Enabled: true, Mode: "read_write"}}},
 			"wiki":   {Companions: map[string]state.AICompanion{"wiki": {Enabled: true, Mode: "read_only"}}},
@@ -1171,7 +1171,7 @@ func TestGateRulesMatchHub(t *testing.T) {
 // empties the population — nothing is carried over for an instance whose
 // routes now give nobody Portcullis identity.
 func TestGateFileDirectoryDownNativeSignIn(t *testing.T) {
-	g := newGateFixture(t, func(st *state.AppState) { st.SignIn = map[string]string{} })
+	g := newGateFixture(t, func(st *state.AppState) { st.SignInMode = map[string]string{} })
 	if err := g.h.WritePolicy(); err != nil {
 		t.Fatal(err)
 	}
@@ -1187,7 +1187,7 @@ func TestGateFileDirectoryDownNativeSignIn(t *testing.T) {
 	}
 	g.people.set(func(p *fakePeople) { p.err = &directory.Error{Status: 502, Msg: "unreachable"} })
 	g.h.mu.Lock()
-	g.h.st.SignIn = map[string]string{"native": state.SignInNative}
+	g.h.st.SignInMode = map[string]string{"native": state.SignInNative}
 	g.h.mu.Unlock()
 	if err := g.h.WritePolicy(); err == nil {
 		t.Error("the directory error was hidden")
