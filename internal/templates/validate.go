@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 var (
@@ -39,6 +40,28 @@ func IsControlRune(r rune) bool {
 // characters (IsControlRune) — such values would inject extra lines into
 // .env / YAML files.
 func HasControlChars(s string) bool { return strings.ContainsFunc(s, IsControlRune) }
+
+// HiddenRune reports whether r is a character a person can't see as
+// written: every Unicode Cc, Cf, Zl, Zp, non-ASCII Zs, variation
+// selector, default-ignorable, private-use or surrogate code point, and
+// every IsControlRune.
+func HiddenRune(r rune) bool {
+	switch {
+	case r == ' ':
+		return false
+	case unicode.Is(unicode.Cc, r), unicode.Is(unicode.Cf, r), unicode.Is(unicode.Zl, r), unicode.Is(unicode.Zp, r), unicode.Is(unicode.Zs, r),
+		unicode.Is(unicode.Variation_Selector, r), unicode.Is(unicode.Other_Default_Ignorable_Code_Point, r),
+		unicode.Is(unicode.Co, r), unicode.Is(unicode.Cs, r):
+		return true
+	}
+	return IsControlRune(r)
+}
+
+// HasHiddenText reports whether s holds a HiddenRune or is not valid
+// UTF-8.
+func HasHiddenText(s string) bool {
+	return !utf8.ValidString(s) || strings.ContainsFunc(s, HiddenRune)
+}
 
 // ValidateManifest rejects manifests whose keys/values would be unsafe to
 // splice into .env files, compose overrides, the group-gate policy file or

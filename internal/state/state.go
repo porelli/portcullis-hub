@@ -217,6 +217,11 @@ type AppState struct {
 	// AIInstances: instance id → its AI state (§15.11 ai_instances).
 	AIInstances map[string]AIInstance `json:"ai_instances,omitempty" yaml:"ai_instances,omitempty"`
 
+	// signInMissing: the file Load read has no sign_in section (or there
+	// was no file): the defaults EnsureSignIn filled are in memory only
+	// until the next Save.
+	signInMissing bool
+
 	// LegacyPassword lists, after Load, the policies that named the removed
 	// "password" factor and were normalised ("" = the global default). Not
 	// persisted: the next save writes the normalised policies.
@@ -588,11 +593,16 @@ const SignInNative = "native"
 
 // New returns an empty state with initialised maps.
 func New() *AppState {
-	s := &AppState{AI: DefaultAISettings()}
+	s := &AppState{AI: DefaultAISettings(), signInMissing: true}
 	s.init()
 	s.EnsureSignIn()
 	return s
 }
+
+// SignInMissing reports whether the sign-in section is in memory only:
+// the loaded file had none (or there was none) and nothing has been saved
+// since.
+func (s *AppState) SignInMissing() bool { return s.signInMissing }
 
 func (s *AppState) init() {
 	if s.Instances == nil {
@@ -672,8 +682,11 @@ func Load(path string) (*AppState, error) {
 	}
 	var probe struct {
 		Settings map[string]yaml.Node `yaml:"settings"`
+		SignIn   *yaml.Node           `yaml:"sign_in"`
 	}
+	signInMissing := true
 	if err := yaml.Unmarshal(data, &probe); err == nil {
+		signInMissing = probe.SignIn == nil
 		var legacy []string
 		for id, n := range probe.Settings {
 			if IsLegacySettings(&n) {
@@ -708,6 +721,7 @@ func Load(path string) (*AppState, error) {
 	}
 	s.init()
 	s.normalizeLegacy()
+	s.signInMissing = signInMissing
 	s.EnsureSignIn()
 	if err := s.checkSignIn(); err != nil {
 		return nil, fmt.Errorf("corrupt %s (sign_in: %v) — fix or move it aside, then restart", path, err)
@@ -762,7 +776,11 @@ func (s *AppState) Save(path string) error {
 	if err != nil {
 		return fmt.Errorf("marshal state: %w", err)
 	}
-	return fsutil.WriteFileAtomic(path, data, 0600)
+	if err := fsutil.WriteFileAtomic(path, data, 0600); err != nil {
+		return err
+	}
+	s.signInMissing = false
+	return nil
 }
 
 // IsEnabled reports whether id is in the enabled list.

@@ -309,7 +309,13 @@ func onOff(b bool) string {
 // unknown method, 409 for browser_cert (not available yet) and while an
 // enabled template needs m (D3; the refusal lists them and their uses).
 func (h *Hub) SetMethod(ctx context.Context, m signin.Method, on bool, actor directory.Actor) (*SignInChange, error) {
-	return h.changeSignIn(actor, "signin.method", clip(string(m), 64), onOff(!on)+" -> "+onOff(on), func() (signInPlan, error) {
+	// A refusal is audited as the switch it would have made; an unknown
+	// method has no state to come from: only the attempted one.
+	attempt := onOff(!on) + " -> " + onOff(on)
+	if _, ok := signin.InfoOf(m); !ok {
+		attempt = onOff(on)
+	}
+	return h.changeSignIn(actor, "signin.method", clip(string(m), 64), attempt, func() (signInPlan, error) {
 		info, ok := signin.InfoOf(m)
 		if !ok {
 			return signInPlan{}, statusErr(http.StatusNotFound, "unknown sign-in method %q", clip(string(m), 64))
@@ -346,19 +352,11 @@ func (h *Hub) SetMethod(ctx context.Context, m signin.Method, on bool, actor dir
 	})
 }
 
-// checkTemplateName is the template name rule (D12): 1–48 visible
-// characters, no white space at either end.
+// checkTemplateName is the template name rule (D12, state.CheckSignInName:
+// the one Load applies too).
 func checkTemplateName(name string) error {
 	if why := state.CheckSignInName(name); why != "" {
-		return statusErr(http.StatusBadRequest, "template name: %s", why)
-	}
-	switch {
-	case hasHiddenText(name):
-		return statusErr(http.StatusBadRequest, "template name: one line of visible text: no invisible or format characters (%s)", VisibleText(name))
-	case strings.TrimSpace(name) == "":
-		return statusErr(http.StatusBadRequest, "template name: a name is required")
-	case strings.TrimSpace(name) != name:
-		return statusErr(http.StatusBadRequest, "template name: no white space at either end")
+		return statusErr(http.StatusBadRequest, "template name: %s (%s)", why, VisibleText(clipRunes(name, 64)))
 	}
 	return nil
 }
@@ -585,13 +583,14 @@ func (h *Hub) PreviewTemplate(ctx context.Context, id string, in TemplateInput) 
 }
 
 // ensureSignIn fills a state's missing sign-in defaults (Init) and saves
-// them when anything was missing.
+// them when anything was missing, or when state.yaml has no sign_in
+// section yet (the seeded built-ins are persisted).
 func (h *Hub) ensureSignIn() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	before := h.st.SignIn.Clone()
 	h.st.EnsureSignIn()
-	if !reflect.DeepEqual(before, h.st.SignIn) {
+	if h.st.SignInMissing() || !reflect.DeepEqual(before, h.st.SignIn) {
 		if err := h.saveStateLocked(); err != nil {
 			log.Printf("signin: %v", err)
 		}

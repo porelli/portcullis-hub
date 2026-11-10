@@ -43,6 +43,9 @@ func TestSetMethodRefusals(t *testing.T) {
 	if _, err := f.h.SetMethod(ctx, "sms", true, siAdmin); statusOf(err) != 404 {
 		t.Errorf("unknown: %v", err)
 	}
+	if e := audit.last(); e.Action != "signin.method" || e.Result != "refused" || e.Target != "sms" || e.Detail != "on" {
+		t.Errorf("unknown audit = %+v", e)
+	}
 	if _, err := f.h.SetMethod(ctx, signin.Password, true, directory.Human("")); statusOf(err) != 401 {
 		t.Errorf("no actor: %v", err)
 	}
@@ -336,5 +339,18 @@ func TestSignInHelpers(t *testing.T) {
 	f.h.mu.Unlock()
 	if pick != "mine" {
 		t.Errorf("pick = %q", pick)
+	}
+}
+
+func TestInitPersistsSeededSignIn(t *testing.T) {
+	f, _ := signInFixture(t)
+	path := filepath.Join(f.data, "state.yaml")
+	os.WriteFile(path, []byte("sources:\n  - {name: local, path: "+f.src+"}\n"), 0600)
+	h2 := reopen(t, f)
+	t.Cleanup(h2.Wait)
+	h2.Init()
+	b, _ := os.ReadFile(path)
+	if !strings.Contains(string(b), "sign_in:") || !strings.Contains(string(b), "yubikey-and-certificate") {
+		t.Errorf("state.yaml after Init:\n%s", b)
 	}
 }

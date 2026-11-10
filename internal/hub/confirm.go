@@ -14,7 +14,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-	"unicode"
 	"unicode/utf8"
 
 	"github.com/portcullis/hub/internal/aigate"
@@ -431,30 +430,11 @@ func VisibleText(s string) string {
 
 // hasHiddenText reports whether s holds a character VisibleText escapes
 // (hiddenRune) or is not valid UTF-8: the one predicate behind the
-// confirmation page's escaping and the instance label's rules (§11.9).
-func hasHiddenText(s string) bool {
-	if !utf8.ValidString(s) {
-		return true
-	}
-	for _, r := range s {
-		if hiddenRune(r) {
-			return true
-		}
-	}
-	return false
-}
+// confirmation page's escaping, the instance label's rules (§11.9) and
+// sign-in template names (templates.HasHiddenText).
+func hasHiddenText(s string) bool { return templates.HasHiddenText(s) }
 
-func hiddenRune(r rune) bool {
-	switch {
-	case r == ' ':
-		return false
-	case unicode.Is(unicode.Cc, r), unicode.Is(unicode.Cf, r), unicode.Is(unicode.Zl, r), unicode.Is(unicode.Zp, r), unicode.Is(unicode.Zs, r),
-		unicode.Is(unicode.Variation_Selector, r), unicode.Is(unicode.Other_Default_Ignorable_Code_Point, r),
-		unicode.Is(unicode.Co, r), unicode.Is(unicode.Cs, r):
-		return true
-	}
-	return templates.IsControlRune(r)
-}
+func hiddenRune(r rune) bool { return templates.HiddenRune(r) }
 
 // Decision is POST /api/me/confirmations/{id}'s body, decoded.
 type Decision struct {

@@ -8,6 +8,7 @@ import (
 
 	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/signin"
+	"gopkg.in/yaml.v3"
 )
 
 func TestLoadMissing(t *testing.T) {
@@ -164,11 +165,20 @@ sign_in_mode: {plex: native}
 	if err := s.Save(p); err != nil {
 		t.Fatal(err)
 	}
-	// The saved policies no longer name the factor (the sign_in section
-	// names the password method and is not a legacy policy).
-	if l, err := Load(p); err != nil || len(l.LegacyPassword) != 0 {
-		b, _ := os.ReadFile(p)
-		t.Errorf("saved state still names password (%v):\n%s", err, b)
+	// Nothing but the sign_in section (which names the password method,
+	// not a policy factor) names password.
+	b, _ := os.ReadFile(p)
+	var doc map[string]any
+	if err := yaml.Unmarshal(b, &doc); err != nil {
+		t.Fatal(err)
+	}
+	delete(doc, "sign_in")
+	rest, err := yaml.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(rest), "password") {
+		t.Errorf("saved state still names password:\n%s", rest)
 	}
 }
 
@@ -288,19 +298,64 @@ func TestEnsureSignInDefaults(t *testing.T) {
 		t.Errorf("instance pick = %+v", l.Instances["grafana"])
 	}
 
-	// A section that doesn't hold together never loads.
-	for name, bad := range map[string]string{
-		"unknown method":  "sign_in: {methods: {sms: true}}\n",
-		"bad rule":        "sign_in: {templates: {x: {name: X, rule: {op: some, items: [password]}}}}\n",
-		"bad id":          "sign_in: {templates: {Bad: {name: X, rule: {op: any, items: [password]}}}}\n",
-		"unknown default": "sign_in: {default: nope}\n",
-		"unknown core":    "sign_in: {core: {auth: standard}}\n",
-		"core template":   "sign_in: {core: {hub: nope}}\n",
-		"instance pick":   "instances: {a: {id: a, template: a, sign_in_template: nope}}\n",
+	// A section that doesn't hold together never loads, each for its own
+	// reason (the D1 switches stored, so only the case's flaw is wrong).
+	const on = "methods: {password: false, passkey_synced: true, browser_cert: false, passkey_device: true, security_key: true, yubikey_cert: true}, "
+	for name, c := range map[string][2]string{
+		"unknown method":     {"sign_in: {methods: {sms: true}}\n", `unknown method "sms"`},
+		"bad rule":           {"sign_in: {" + on + "templates: {x: {name: X, rule: {op: some, items: [password]}}}}\n", `"op" must be`},
+		"bad id":             {"sign_in: {" + on + "templates: {Bad: {name: X, rule: {op: any, items: [password]}}}}\n", `template id "Bad"`},
+		"unknown default":    {"sign_in: {" + on + "default: nope}\n", `default: "nope" is not a template`},
+		"unknown core":       {"sign_in: {" + on + "core: {auth: standard}}\n", `unknown core page "auth"`},
+		"core template":      {"sign_in: {" + on + "core: {hub: nope}}\n", `core page hub: "nope" is not a template`},
+		"instance pick":      {"sign_in: {" + on + "default: standard}\ninstances: {a: {id: a, template: a, sign_in_template: nope}}\n", `instance a: "nope" is not a template`},
+		"default disabled":   {"sign_in: {" + on + "default: basic}\n", `default: template "basic" is disabled`},
+		"core disabled":      {"sign_in: {" + on + "core: {portal: yubikey-and-certificate}}\n", `core page portal: template "yubikey-and-certificate" is disabled`},
+		"instance disabled":  {"sign_in: {" + on + "default: standard}\ninstances: {a: {id: a, template: a, sign_in_template: basic}}\n", `instance a: template "basic" is disabled`},
+		"enabled unmeetable": {"sign_in: {" + on + "templates: {pw: {name: PW, rule: {op: all, items: [password]}, enabled: true}}}\n", "template pw is enabled but"},
+		"no methods":         {"sign_in: {default: standard}\n", "template standard is enabled but"},
+		"hidden name":        {"sign_in: {" + on + "templates: {x: {name: \"a\\u200bb\", rule: {op: any, items: [password]}}}}\n", "template x: the name must be one line of visible text"},
+		"padded name":        {"sign_in: {" + on + "templates: {x: {name: \" X\", rule: {op: any, items: [password]}}}}\n", "template x: the name may not start or end"},
 	} {
-		os.WriteFile(p, []byte(bad), 0600)
-		if _, err := Load(p); err == nil || !strings.Contains(err.Error(), "corrupt") {
-			t.Errorf("%s: err = %v", name, err)
+		os.WriteFile(p, []byte(c[0]), 0600)
+		if _, err := Load(p); err == nil || !strings.Contains(err.Error(), "corrupt") || !strings.Contains(err.Error(), c[1]) {
+			t.Errorf("%s: err = %v, want %q", name, err, c[1])
 		}
+	}
+}
+
+// A stored section is fresh only when it is wholly empty: without methods
+// every method is off (fail closed). A file without sign_in is reported,
+// until the next save, so the Hub persists the seeded defaults.
+func TestEnsureSignInStoredWithoutMethods(t *testing.T) {
+	s := &AppState{SignIn: SignIn{Default: "strong"}}
+	s.init()
+	s.EnsureSignIn()
+	for m, on := range s.SignIn.Methods {
+		if on {
+			t.Errorf("%s on in a stored section without methods", m)
+		}
+	}
+	if s.SignIn.Default != "strong" || len(s.SignIn.Templates) != 4 {
+		t.Errorf("section = %+v", s.SignIn)
+	}
+
+	p := filepath.Join(t.TempDir(), "state.yaml")
+	os.WriteFile(p, []byte("enabled: []\n"), 0600)
+	l, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !l.SignInMissing() || !l.SignIn.Methods["security_key"] {
+		t.Errorf("missing %v, methods %v", l.SignInMissing(), l.SignIn.Methods)
+	}
+	if err := l.Save(p); err != nil {
+		t.Fatal(err)
+	}
+	if l.SignInMissing() {
+		t.Error("still missing after save")
+	}
+	if l2, err := Load(p); err != nil || l2.SignInMissing() {
+		t.Errorf("reloaded: %v, missing %v", err, l2 != nil && l2.SignInMissing())
 	}
 }

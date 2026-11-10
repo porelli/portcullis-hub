@@ -6,6 +6,7 @@ import (
 	"maps"
 	"regexp"
 	"slices"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -76,16 +77,18 @@ func defaultCore(key string) string {
 }
 
 // EnsureSignIn fills the sign-in defaults (D1, D11, D12) a state lacks: a
-// fresh state gets the D1 switches, the four built-ins, Default
-// "standard" and the D11 core picks. On a stored state it only completes:
-// a method without an entry is off (fail closed), browser_cert is forced
+// fresh state (no methods, templates, default or core picks at all) gets
+// the D1 switches, the four built-ins, Default "standard" and the D11
+// core picks. On a stored state it only completes: a method without an
+// entry is off (fail closed: a stored section without methods has every
+// method off), browser_cert is forced
 // off, a missing built-in comes back as it ships (built-ins are never
 // deleted), only the built-in ids are BuiltIn, an empty default is
 // "standard" and a missing core key gets its D11 pick.
 func (s *AppState) EnsureSignIn() {
 	si := &s.SignIn
-	fresh := si.Methods == nil
-	if fresh {
+	fresh := len(si.Methods) == 0 && len(si.Templates) == 0 && si.Default == "" && len(si.Core) == 0
+	if si.Methods == nil {
 		si.Methods = make(map[string]bool, len(signin.Methods))
 	}
 	for _, m := range signin.Methods {
@@ -167,14 +170,18 @@ func CloneNode(n signin.Node) signin.Node {
 	return out
 }
 
-// CheckSignInName is the template name rule (D12): 1–48 runes of one
-// line, no control characters, no white space at either end. "" = fine.
+// CheckSignInName is the template name rule (D12), shared by Load and the
+// API: 1–48 runes of one line of visible text (no control, invisible or
+// format characters: templates.HasHiddenText), no white space at either
+// end. "" = fine.
 func CheckSignInName(name string) string {
 	switch {
-	case name == "":
+	case strings.TrimSpace(name) == "" && !templates.HasHiddenText(name):
 		return "a name is required"
-	case !utf8.ValidString(name) || templates.HasControlChars(name):
-		return "the name must be one line of text without control characters"
+	case templates.HasControlChars(name) || templates.HasHiddenText(name):
+		return "the name must be one line of visible text: no control, invisible or format characters"
+	case strings.TrimSpace(name) != name:
+		return "the name may not start or end with white space"
 	case utf8.RuneCountInString(name) > SignInNameMaxRunes:
 		return fmt.Sprintf("the name is longer than %d characters", SignInNameMaxRunes)
 	}
@@ -183,10 +190,23 @@ func CheckSignInName(name string) string {
 
 // checkSignIn refuses a stored sign-in section that doesn't hold
 // together (after EnsureSignIn): unknown methods or core keys, a template
-// with a bad id, name or rule, a default, core or instance pick naming no
-// template. A corrupt section never loads (fail closed).
+// with a bad id, name or rule, an enabled template that can't be met with
+// the stored switches, a default, core or instance pick naming no
+// template or a disabled one. A corrupt section never loads (fail
+// closed): the Hub's writers never leave one.
 func (s *AppState) checkSignIn() error {
 	si := s.SignIn
+	on := si.MethodsOn()
+	pick := func(what, id string) error {
+		t, ok := si.Templates[id]
+		switch {
+		case !ok:
+			return fmt.Errorf("%s: %q is not a template", what, id)
+		case !t.Enabled:
+			return fmt.Errorf("%s: template %q is disabled", what, id)
+		}
+		return nil
+	}
 	for m := range si.Methods {
 		if !slices.Contains(signin.Methods, signin.Method(m)) {
 			return fmt.Errorf("unknown method %q", m)
@@ -203,21 +223,28 @@ func (s *AppState) checkSignIn() error {
 		if err := signin.Validate(t.Rule); err != nil {
 			return fmt.Errorf("template %s: %v", id, err)
 		}
+		if _, err := signin.Compile(t.Rule, on); t.Enabled && err != nil {
+			return fmt.Errorf("template %s is enabled but %v", id, err)
+		}
 	}
-	if _, ok := si.Templates[si.Default]; !ok {
-		return fmt.Errorf("default %q is not a template", si.Default)
+	if err := pick("default", si.Default); err != nil {
+		return err
 	}
 	for k, id := range si.Core {
 		if !slices.Contains(CoreSignInKeys, k) {
 			return fmt.Errorf("unknown core page %q", k)
 		}
-		if _, ok := si.Templates[id]; id != "" && !ok {
-			return fmt.Errorf("core page %s: %q is not a template", k, id)
+		if id != "" {
+			if err := pick("core page "+k, id); err != nil {
+				return err
+			}
 		}
 	}
 	for id, e := range s.Instances {
-		if _, ok := si.Templates[e.SignInTemplate]; e.SignInTemplate != "" && !ok {
-			return fmt.Errorf("instance %s: %q is not a template", id, e.SignInTemplate)
+		if e.SignInTemplate != "" {
+			if err := pick("instance "+id, e.SignInTemplate); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
