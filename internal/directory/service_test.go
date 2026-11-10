@@ -1050,13 +1050,35 @@ func TestPasswordRules(t *testing.T) {
 	type rec struct{ user, actor string }
 	var recorded []rec
 	on := false
+	// Both hooks run outside s.mu: another mutation from inside them
+	// would deadlock otherwise.
+	outsideLock := func(what string) {
+		done := make(chan error, 1)
+		go func() { done <- e.svc.UpdateUser(ctx, asRoot, "root", nil, strptr("Root")) }()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("%s: mutation from the hook: %v", what, err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s runs under the service lock", what)
+		}
+	}
 	e.svc.PasswordSet = func(user, actor string) error {
+		outsideLock("PasswordSet")
 		recorded = append(recorded, rec{user, actor})
 		return nil
 	}
-	e.svc.PasswordMethodOn = func() bool { return on }
+	e.svc.PasswordMethodOn = func() bool { outsideLock("PasswordMethodOn"); return on }
+	e.ll.AddUser("longusername1", "long@example.org", "Long", "longpass-123456")
 
-	for _, bad := range []string{"password1234", "alice-alice", "Alice", "short-one", strings.Repeat("x", 129) + "Q1"} {
+	if _, err := e.svc.SetPassword(ctx, asRoot, "longusername1", "LongUserName1", false, ""); status(err) != 400 || !strings.Contains(err.Error(), "username") {
+		t.Errorf("the username as password = %v", err)
+	}
+	if _, err := e.svc.SetPassword(ctx, asRoot, "alice", "a-fine-pass\x01word", false, ""); status(err) != 400 || !strings.Contains(err.Error(), "control") {
+		t.Errorf("control character = %v", err)
+	}
+	for _, bad := range []string{"password1234", "short-one", strings.Repeat("x", 129) + "Q1"} {
 		if _, err := e.svc.SetPassword(ctx, asRoot, "alice", bad, false, ""); status(err) != 400 {
 			t.Errorf("SetPassword(%q) = %v, want 400", bad, err)
 		} else if strings.Contains(err.Error(), bad) {

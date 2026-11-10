@@ -1156,17 +1156,18 @@ func newResult() *Result { return &Result{Warnings: []string{}} }
 // "Passwords": LLDAP's characters, then 12–128 characters, not the
 // username, not a common password). The error never quotes it.
 func checkHubPassword(user, pw string) error {
-	if !lldap.ValidPassword(pw) {
-		return invalid("password must be %d-%d characters without control characters", signin.MinPasswordLen, signin.MaxPasswordLen)
-	}
 	if err := signin.CheckPassword(user, pw); err != nil {
 		return invalid("%s", err.Error())
+	}
+	if !lldap.ValidPassword(pw) {
+		return invalid("the password can't hold control characters")
 	}
 	return nil
 }
 
-// recordPassword hands a password the Hub just set to PasswordSet; a
-// failure is a warning on res.
+// recordPassword hands a password the Hub just set to PasswordSet, after
+// the mutation ran and released s.mu (never for a change that failed or
+// was rolled back); a failure is a warning on res.
 func (s *Service) recordPassword(res *Result, user, actor string) {
 	if s.PasswordSet == nil {
 		return
@@ -1191,6 +1192,9 @@ func (s *Service) CreateUser(ctx context.Context, c *Caller, req CreateRequest) 
 	if req.Onboarding == OnboardPassword {
 		detail += fmt.Sprintf(" require_passkey=%v generated_password=%v", req.RequirePasskey, req.Generate)
 	}
+	// Read outside s.mu (the Hub's lock is never taken under it).
+	passwordOff := req.Onboarding == OnboardPassword && s.PasswordMethodOn != nil && !s.PasswordMethodOn()
+	passwordSet := false
 	err := s.run(ctx, c, PermInvite, "user.create", req.Username, &detail, func() error {
 		switch {
 		case !lldap.ValidUsername(req.Username):
@@ -1216,7 +1220,7 @@ func (s *Service) CreateUser(ctx context.Context, c *Caller, req CreateRequest) 
 		switch req.Onboarding {
 		case OnboardInvite: // availability checked below, once the groups are known
 		case OnboardPassword:
-			if s.PasswordMethodOn != nil && !s.PasswordMethodOn() {
+			if passwordOff {
 				return refuse("password sign-in is switched off (Settings → Sign-in): onboard with an invite link, or switch the password method on first")
 			}
 			pw = req.Password
@@ -1371,7 +1375,7 @@ func (s *Service) CreateUser(ctx context.Context, c *Caller, req CreateRequest) 
 				}
 				return fmt.Errorf("setting the password failed, user not created: %v", err)
 			}
-			s.recordPassword(res, req.Username, c.User)
+			passwordSet = true
 		}
 		// The "added by hand" entries: after every step that can still
 		// delete the new user (details, password), before the group adds.
@@ -1440,6 +1444,11 @@ func (s *Service) CreateUser(ctx context.Context, c *Caller, req CreateRequest) 
 		}
 		return nil
 	})
+	// Only once the account is committed: a rolled-back create (its
+	// user deleted again) or any failure records nothing.
+	if err == nil && passwordSet {
+		s.recordPassword(res, req.Username, c.User)
+	}
 	return res, err
 }
 
@@ -1671,6 +1680,7 @@ func (s *Service) RemoveStaleKeycloakUser(ctx context.Context, c *Caller, userna
 func (s *Service) SetPassword(ctx context.Context, c *Caller, username, password string, generate bool, confirm string) (*Result, error) {
 	res := newResult()
 	detail := fmt.Sprintf("generated=%v", generate)
+	setFor := ""
 	err := s.run(ctx, c, permAdmin, "user.password", username, &detail, func() error {
 		if err := s.checkTarget(username); err != nil {
 			return err
@@ -1706,7 +1716,7 @@ func (s *Service) SetPassword(ctx context.Context, c *Caller, username, password
 		if err := s.LLDAP.SetPassword(ctx, u.ID, password); err != nil {
 			return err
 		}
-		s.recordPassword(res, u.ID, c.User)
+		setFor = u.ID
 		if s.KC != nil {
 			if err := s.KC.LogoutUser(ctx, u.ID); err != nil {
 				res.Warnings = append(res.Warnings, fmt.Sprintf("signing the user out of Keycloak failed: %v", err))
@@ -1717,6 +1727,9 @@ func (s *Service) SetPassword(ctx context.Context, c *Caller, username, password
 		}
 		return nil
 	})
+	if err == nil && setFor != "" {
+		s.recordPassword(res, setFor, c.User)
+	}
 	return res, err
 }
 
