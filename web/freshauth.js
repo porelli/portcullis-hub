@@ -5,7 +5,8 @@
 // window.PortcullisFreshAuth.start(fa, h) opens Keycloak's authorize URL
 // (fa = {authorize_url, client_id, redirect_uri}: the listener's
 // fresh-auth client) in a popup with response_type code, scope openid,
-// prompt login, max_age 0, acr_values hwk, a random state and nonce and
+// prompt login, max_age 0 (no ACR request: which methods count as fresh is
+// the Hub's proof rule, pc_fresh), a random state and nonce and
 // the S256 challenge of a random PKCE verifier. Call it from the click
 // itself: the popup is opened before any await, so pop-up blockers allow
 // it. {state, nonce, verifier, ctx} wait in sessionStorage only while the
@@ -105,7 +106,6 @@
       ['scope', 'openid'],
       ['prompt', 'login'],
       ['max_age', '0'],
-      ['acr_values', 'hwk'],
       ['state', state],
       ['nonce', nonce],
       ['code_challenge', challenge],

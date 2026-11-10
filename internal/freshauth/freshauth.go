@@ -1,5 +1,6 @@
-// Package freshauth verifies a proof that a person signed in with their
-// hardware key just now (contract §8 "Fresh-auth client", §5.1): the
+// Package freshauth verifies a proof that a person signed in with a
+// passkey or a YubiKey certificate just now (contract §8 "Fresh-auth
+// client", §5.1, §8.1 "Session methods"): the
 // browser runs an OIDC authorization-code flow with PKCE on the Hub-owned
 // public Keycloak client ClientID in a popup and posts the code, its PKCE
 // verifier and the nonce; the Hub exchanges the code itself (Keycloak's
@@ -43,14 +44,22 @@ const clockSkew = 60 * time.Second
 // Message is the one text every refusal answers (403).
 const Message = "a fresh passkey sign-in is required"
 
-// AcceptedAMR are the amr values that prove a hardware sign-in: hwk (a
-// passkey) and mtls. mtls is accepted only because of the invariant in
-// contract §8 ("The mtls amr invariant"): core's flows emit amr mtls ONLY
-// for a hardware (pki_int) certificate login, and a file-certificate login
-// emits "file" in amr and acr (refused below). The certificates project
-// adds file certificates together with a test of that invariant; if it
-// ever breaks, drop "mtls" here. Never "file".
-var AcceptedAMR = []string{"hwk", "mtls"}
+// FreshMethods are the only sign-in methods (contract §8.1) whose
+// pc_fresh proves a fresh sign-in: any passkey kind or a YubiKey
+// certificate — each only while Config.Accepted lists it (switched on).
+// Never a password, a browser certificate or a setup link (none of them
+// sets pc_fresh; any of them named there is refused whatever Accepted
+// returns).
+//
+// The claim pc_fresh is set by the Keycloak extension's portcullis-fresh
+// mapper on the fresh-auth client, from this authentication's notes only:
+// the authenticator that actually ran in this sign-in. amr is never read —
+// Keycloak accumulates it over the SSO session (10 h), so a fresh password
+// sign-in could still carry an older hwk.
+var FreshMethods = []string{"passkey_synced", "passkey_device", "security_key", "yubikey_cert"}
+
+// ClaimFresh is the ID token claim naming this authentication's method.
+const ClaimFresh = "pc_fresh"
 
 // supportedAlgs are the only ID token signature algorithms accepted.
 var supportedAlgs = []string{oidc.RS256, oidc.ES256}
@@ -73,6 +82,10 @@ type Config struct {
 	RedirectURI  string // https://people.<domain>/
 	HTTP         *http.Client
 	Now          func() time.Time
+	// Accepted returns the fresh methods (FreshMethods) switched on right
+	// now; read on every proof. nil, or a method missing from its answer,
+	// refuses (fail closed).
+	Accepted func() []string
 }
 
 // Proof is what the browser posts.
@@ -82,7 +95,8 @@ type Proof struct{ Code, CodeVerifier, Nonce string }
 type Result struct {
 	User     string // lowercase
 	AuthTime time.Time
-	AMR      []string
+	// Method is pc_fresh: one of FreshMethods, switched on at Verify.
+	Method string
 }
 
 // ReasonUnreachable: the token endpoint or the realm's keys (JWKS)
@@ -155,7 +169,7 @@ type claims struct {
 	AZP      *string         `json:"azp"`
 	AuthTime *int64          `json:"auth_time"`
 	IssuedAt *int64          `json:"iat"`
-	AMR      json.RawMessage `json:"amr"`
+	Fresh    json.RawMessage `json:"pc_fresh"`
 	ACR      json.RawMessage `json:"acr"`
 	Username *string         `json:"preferred_username"`
 }
@@ -233,18 +247,12 @@ func (v *Verifier) Verify(ctx context.Context, p Proof, user string) (*Result, e
 	if authTime.After(now.Add(clockSkew)) {
 		return nil, refuse("auth_time in the future")
 	}
-	amr, ok := stringList(c.AMR)
-	if !ok || len(amr) == 0 {
-		return nil, refuse("missing or empty amr")
-	}
-	if slices.ContainsFunc(amr, isFile) {
-		return nil, refuse("amr contains file")
+	method, reason := v.freshMethod(c.Fresh)
+	if reason != "" {
+		return nil, refuse(reason)
 	}
 	if slices.ContainsFunc(acrValues(c.ACR), isFile) {
 		return nil, refuse("acr contains file")
-	}
-	if !slices.ContainsFunc(amr, func(m string) bool { return slices.Contains(AcceptedAMR, m) }) {
-		return nil, refuse("amr has no hardware method (hwk or mtls)")
 	}
 	if idt.Subject == "" {
 		return nil, refuse("missing sub")
@@ -255,7 +263,23 @@ func (v *Verifier) Verify(ctx context.Context, p Proof, user string) (*Result, e
 	if strings.ToLower(*c.Username) != user {
 		return nil, refuse("signed in as another person")
 	}
-	return &Result{User: user, AuthTime: authTime, AMR: amr}, nil
+	return &Result{User: user, AuthTime: authTime, Method: method}, nil
+}
+
+// freshMethod checks pc_fresh (raw): a JSON string, one of FreshMethods
+// (exact), and among Accepted's answer. Anything else is a refusal reason.
+func (v *Verifier) freshMethod(raw json.RawMessage) (string, string) {
+	var m string
+	if len(raw) == 0 || json.Unmarshal(raw, &m) != nil || m == "" {
+		return "", "missing " + ClaimFresh
+	}
+	if !slices.Contains(FreshMethods, m) {
+		return "", ClaimFresh + " is not a passkey or a YubiKey certificate"
+	}
+	if v.cfg.Accepted == nil || !slices.Contains(v.cfg.Accepted(), m) {
+		return "", ClaimFresh + " names a method that is switched off"
+	}
+	return m, ""
 }
 
 func isFile(s string) bool { return strings.EqualFold(s, "file") }

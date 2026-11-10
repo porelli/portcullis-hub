@@ -39,7 +39,7 @@ func (f *fakeFreshAuth) Verify(_ context.Context, p freshauth.Proof, user string
 		}
 		verifiedUser = f.user
 	}
-	return &freshauth.Result{User: verifiedUser, AuthTime: time.Now(), AMR: []string{"hwk"}}, nil
+	return &freshauth.Result{User: verifiedUser, AuthTime: time.Now(), Method: "security_key"}, nil
 }
 
 func (f *fakeFreshAuth) Info() freshauth.AuthorizeInfo {

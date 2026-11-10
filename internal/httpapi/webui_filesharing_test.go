@@ -41,7 +41,6 @@ func TestMyAppsFreshAuthOpener(t *testing.T) {
 		"['scope', 'openid']",
 		"['prompt', 'login']",
 		"['max_age', '0']",
-		"['acr_values', 'hwk']",
 		"['code_challenge_method', 'S256']",
 		"['code_challenge', challenge]",
 		"['client_id', fa.client_id]",
@@ -76,7 +75,9 @@ func TestMyAppsFreshAuthOpener(t *testing.T) {
 	if n := strings.Count(fa, "sessionStorage.setItem("); n != 1 {
 		t.Errorf("freshauth.js: sessionStorage.setItem used %d times, want exactly once (the PKCE state)", n)
 	}
-	for _, bad := range []string{"localStorage", "innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval("} {
+	// Sign-in methods (contract §5.1): no acr_values — which methods count
+	// as fresh is the proof's rule (pc_fresh, §8).
+	for _, bad := range []string{"localStorage", "innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval(", "acr_values"} {
 		if strings.Contains(fa, bad) {
 			t.Errorf("freshauth.js uses %s", bad)
 		}

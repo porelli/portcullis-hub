@@ -132,15 +132,6 @@ func (a access) certOnly() bool {
 	return signin.NeedsCertificate(*a.Rule)
 }
 
-// gateLoALocked is gate file v1's min_loa of t's resources until gate file
-// v2 (Task 7): 3 when t is certificate-only, else 2. Caller holds mu.
-func (h *Hub) gateLoALocked(t *templates.Template) int {
-	if h.certOnlyLocked(t) {
-		return 3
-	}
-	return 2
-}
-
 // gatewayRouterMiddlewares is a router's middleware chain behind
 // Portcullis sign-in: the gateway pair first, then the template's own.
 func gatewayRouterMiddlewares(own []string) string {

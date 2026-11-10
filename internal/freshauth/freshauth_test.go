@@ -103,7 +103,15 @@ func (p *idp) serveToken(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(out)
 }
 
+// allFresh are the four fresh methods, all switched on.
+var allFresh = []string{"passkey_synced", "passkey_device", "security_key", "yubikey_cert"}
+
 func (p *idp) verifier() *freshauth.Verifier {
+	return p.verifierWith(func() []string { return allFresh })
+}
+
+// verifierWith is a verifier whose switched-on fresh methods are accepted().
+func (p *idp) verifierWith(accepted func() []string) *freshauth.Verifier {
 	base := p.srv.URL + "/realms/portcullis/protocol/openid-connect"
 	return freshauth.New(freshauth.Config{
 		Issuer:       issuer,
@@ -113,6 +121,7 @@ func (p *idp) verifier() *freshauth.Verifier {
 		RedirectURI:  redirect,
 		HTTP:         p.srv.Client(),
 		Now:          func() time.Time { return now },
+		Accepted:     accepted,
 	})
 }
 
@@ -129,6 +138,7 @@ func claims() map[string]any {
 		"nonce":              nonce,
 		"amr":                []string{"hwk"},
 		"acr":                "1",
+		"pc_fresh":           "security_key",
 		"preferred_username": "alice",
 	}
 }
@@ -159,26 +169,29 @@ func proof() freshauth.Proof {
 
 func TestFreshAuthAccepts(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		amr   []string
-		user  string
-		ec    bool
-		edit  func(map[string]any)
-		wantU string
+		name   string
+		method string
+		user   string
+		ec     bool
+		edit   func(map[string]any)
 	}{
-		{name: "hwk", amr: []string{"hwk"}, user: "alice"},
-		{name: "mtls", amr: []string{"mtls"}, user: "alice"},
-		{name: "hwk and others", amr: []string{"pwd", "hwk"}, user: "alice"},
-		{name: "case-folded username", amr: []string{"hwk"}, user: "alice", edit: func(c map[string]any) { c["preferred_username"] = "ALICE" }},
-		{name: "caller case-folded", amr: []string{"hwk"}, user: "Alice"},
-		{name: "ES256", amr: []string{"hwk"}, user: "alice", ec: true},
-		{name: "aud list with azp", amr: []string{"hwk"}, user: "alice", edit: func(c map[string]any) { c["aud"] = []string{freshauth.ClientID, "account"} }},
-		{name: "no azp, single aud", amr: []string{"hwk"}, user: "alice", edit: func(c map[string]any) { delete(c, "azp") }},
+		{name: "security_key", method: "security_key", user: "alice"},
+		{name: "passkey_synced", method: "passkey_synced", user: "alice"},
+		{name: "passkey_device", method: "passkey_device", user: "alice"},
+		{name: "yubikey_cert", method: "yubikey_cert", user: "alice"},
+		// amr is never read: whatever the session accumulated.
+		{name: "amr pwd only", method: "security_key", user: "alice", edit: func(c map[string]any) { c["amr"] = []string{"pwd"} }},
+		{name: "no amr", method: "passkey_synced", user: "alice", edit: func(c map[string]any) { delete(c, "amr") }},
+		{name: "case-folded username", method: "security_key", user: "alice", edit: func(c map[string]any) { c["preferred_username"] = "ALICE" }},
+		{name: "caller case-folded", method: "security_key", user: "Alice"},
+		{name: "ES256", method: "security_key", user: "alice", ec: true},
+		{name: "aud list with azp", method: "security_key", user: "alice", edit: func(c map[string]any) { c["aud"] = []string{freshauth.ClientID, "account"} }},
+		{name: "no azp, single aud", method: "security_key", user: "alice", edit: func(c map[string]any) { delete(c, "azp") }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := newIDP(t)
 			c := claims()
-			c["amr"] = tc.amr
+			c["pc_fresh"] = tc.method
 			if tc.edit != nil {
 				tc.edit(c)
 			}
@@ -191,7 +204,7 @@ func TestFreshAuthAccepts(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Verify: %v (%#v)", err, err)
 			}
-			if res.User != "alice" || !res.AuthTime.Equal(now.Add(-10*time.Second)) || strings.Join(res.AMR, ",") != strings.Join(tc.amr, ",") {
+			if res.User != "alice" || !res.AuthTime.Equal(now.Add(-10*time.Second)) || res.Method != tc.method {
 				t.Errorf("result = %+v", res)
 			}
 			// PKCE: the verifier went to the token endpoint with the code.
@@ -207,6 +220,86 @@ func TestFreshAuthAccepts(t *testing.T) {
 	}
 }
 
+// TestFreshAuthRefusesSwitchedOffSecurityKey (D19, controller ruling):
+// fresh auth reads only pc_fresh — the method of the authenticator that
+// ran in this authentication — and only while that method is on; amr
+// (accumulated over the SSO session) is never used.
+func TestFreshAuthRefusesSwitchedOffSecurityKey(t *testing.T) {
+	without := func(m string) func() []string {
+		return func() []string {
+			var out []string
+			for _, x := range allFresh {
+				if x != m {
+					out = append(out, x)
+				}
+			}
+			return out
+		}
+	}
+	for _, tc := range []struct {
+		name     string
+		edit     func(map[string]any)
+		accepted func() []string
+		ok       bool
+		reason   string
+	}{
+		{name: "security_key off", edit: func(c map[string]any) { c["pc_fresh"] = "security_key" }, accepted: without("security_key"), reason: "pc_fresh names a method that is switched off"},
+		{name: "passkey_synced off", edit: func(c map[string]any) { c["pc_fresh"] = "passkey_synced" }, accepted: without("passkey_synced"), reason: "pc_fresh names a method that is switched off"},
+		{name: "passkey_device off", edit: func(c map[string]any) { c["pc_fresh"] = "passkey_device" }, accepted: without("passkey_device"), reason: "pc_fresh names a method that is switched off"},
+		{name: "yubikey_cert off", edit: func(c map[string]any) { c["pc_fresh"] = "yubikey_cert" }, accepted: without("yubikey_cert"), reason: "pc_fresh names a method that is switched off"},
+		{name: "security_key on", edit: func(c map[string]any) { c["pc_fresh"] = "security_key" }, accepted: func() []string { return []string{"security_key"} }, ok: true},
+		{name: "passkey_synced on", edit: func(c map[string]any) { c["pc_fresh"] = "passkey_synced" }, accepted: func() []string { return []string{"passkey_synced"} }, ok: true},
+		{name: "passkey_device on", edit: func(c map[string]any) { c["pc_fresh"] = "passkey_device" }, accepted: func() []string { return []string{"passkey_device"} }, ok: true},
+		{name: "yubikey_cert on", edit: func(c map[string]any) { c["pc_fresh"] = "yubikey_cert" }, accepted: func() []string { return []string{"yubikey_cert"} }, ok: true},
+		{name: "missing pc_fresh", edit: func(c map[string]any) { delete(c, "pc_fresh") }, accepted: allFreshF, reason: "missing pc_fresh"},
+		{name: "missing pc_fresh, amr hwk", edit: func(c map[string]any) { delete(c, "pc_fresh"); c["amr"] = []string{"hwk"} }, accepted: allFreshF, reason: "missing pc_fresh"},
+		{name: "null pc_fresh", edit: func(c map[string]any) { c["pc_fresh"] = nil }, accepted: allFreshF, reason: "missing pc_fresh"},
+		{name: "empty pc_fresh", edit: func(c map[string]any) { c["pc_fresh"] = "" }, accepted: allFreshF, reason: "missing pc_fresh"},
+		{name: "pc_fresh a list", edit: func(c map[string]any) { c["pc_fresh"] = []string{"security_key"} }, accepted: allFreshF, reason: "missing pc_fresh"},
+		{name: "pc_fresh a number", edit: func(c map[string]any) { c["pc_fresh"] = 3 }, accepted: allFreshF, reason: "missing pc_fresh"},
+		{name: "pc_fresh password", edit: func(c map[string]any) { c["pc_fresh"] = "password" }, accepted: allFreshF, reason: "pc_fresh is not a passkey or a YubiKey certificate"},
+		{name: "pc_fresh browser_cert", edit: func(c map[string]any) { c["pc_fresh"] = "browser_cert" }, accepted: allFreshF, reason: "pc_fresh is not a passkey or a YubiKey certificate"},
+		{name: "pc_fresh inv", edit: func(c map[string]any) { c["pc_fresh"] = "inv" }, accepted: allFreshF, reason: "pc_fresh is not a passkey or a YubiKey certificate"},
+		{name: "pc_fresh unknown", edit: func(c map[string]any) { c["pc_fresh"] = "retina" }, accepted: allFreshF, reason: "pc_fresh is not a passkey or a YubiKey certificate"},
+		{name: "pc_fresh an amr value", edit: func(c map[string]any) { c["pc_fresh"] = "hwk" }, accepted: allFreshF, reason: "pc_fresh is not a passkey or a YubiKey certificate"},
+		{name: "pc_fresh case variant", edit: func(c map[string]any) { c["pc_fresh"] = "Security_Key" }, accepted: allFreshF, reason: "pc_fresh is not a passkey or a YubiKey certificate"},
+		// The session's amr carries an older hwk; this sign-in was a password.
+		{name: "amr hwk, pc_fresh password", edit: func(c map[string]any) { c["amr"] = []string{"hwk", "pwd"}; c["pc_fresh"] = "password" }, accepted: allFreshF, reason: "pc_fresh is not a passkey or a YubiKey certificate"},
+		{name: "amr mtls, pc_fresh missing", edit: func(c map[string]any) { c["amr"] = []string{"mtls"}; delete(c, "pc_fresh") }, accepted: allFreshF, reason: "missing pc_fresh"},
+		// Whatever Accepted returns: never a password, a browser
+		// certificate or a setup link.
+		{name: "password accepted by mistake", edit: func(c map[string]any) { c["pc_fresh"] = "password" }, accepted: func() []string { return []string{"password", "browser_cert", "inv"} }, reason: "pc_fresh is not a passkey or a YubiKey certificate"},
+		{name: "browser_cert accepted by mistake", edit: func(c map[string]any) { c["pc_fresh"] = "browser_cert" }, accepted: func() []string { return []string{"browser_cert"} }, reason: "pc_fresh is not a passkey or a YubiKey certificate"},
+		{name: "nothing on", accepted: func() []string { return nil }, reason: "pc_fresh names a method that is switched off"},
+		{name: "no Accepted", accepted: nil, reason: "pc_fresh names a method that is switched off"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newIDP(t)
+			c := claims()
+			if tc.edit != nil {
+				tc.edit(c)
+			}
+			p.token = p.rs256(c)
+			res, err := p.verifierWith(tc.accepted).Verify(context.Background(), proof(), "alice")
+			if tc.ok {
+				if err != nil || res == nil || res.Method != c["pc_fresh"] {
+					t.Fatalf("Verify = %+v, %v; want accepted", res, err)
+				}
+				return
+			}
+			var fe *freshauth.Error
+			if !errors.As(err, &fe) || res != nil {
+				t.Fatalf("Verify = %+v, %v; want *freshauth.Error", res, err)
+			}
+			if fe.Reason != tc.reason || err.Error() != freshauth.Message {
+				t.Errorf("reason %q (%q), want %q", fe.Reason, err.Error(), tc.reason)
+			}
+		})
+	}
+}
+
+func allFreshF() []string { return allFresh }
+
 func TestFreshAuthRefusals(t *testing.T) {
 	type tcase struct {
 		name  string
@@ -221,14 +314,7 @@ func TestFreshAuthRefusals(t *testing.T) {
 		{name: "stale auth_time", edit: func(c map[string]any) { c["auth_time"] = now.Add(-301 * time.Second).Unix() }},
 		{name: "missing auth_time", edit: func(c map[string]any) { delete(c, "auth_time") }},
 		{name: "future auth_time", edit: func(c map[string]any) { c["auth_time"] = now.Add(2 * time.Minute).Unix() }},
-		{name: "amr file", edit: func(c map[string]any) { c["amr"] = []string{"file"} }},
-		{name: "amr hwk and file", edit: func(c map[string]any) { c["amr"] = []string{"hwk", "file"} }},
-		{name: "amr mtls and FILE", edit: func(c map[string]any) { c["amr"] = []string{"mtls", "FILE"} }},
 		{name: "acr file", edit: func(c map[string]any) { c["acr"] = "file" }},
-		{name: "missing amr", edit: func(c map[string]any) { delete(c, "amr") }},
-		{name: "empty amr", edit: func(c map[string]any) { c["amr"] = []string{} }},
-		{name: "amr a string", edit: func(c map[string]any) { c["amr"] = "hwk" }},
-		{name: "amr without hwk or mtls", edit: func(c map[string]any) { c["amr"] = []string{"pwd", "otp"} }},
 		{name: "wrong nonce", edit: func(c map[string]any) { c["nonce"] = "nonce-other" }},
 		{name: "missing nonce in token", edit: func(c map[string]any) { delete(c, "nonce") }},
 		{name: "missing nonce in proof", edit: func(c map[string]any) { c["nonce"] = "" }, proof: func(p freshauth.Proof) freshauth.Proof { p.Nonce = ""; return p }},
@@ -286,14 +372,7 @@ func TestFreshAuthRefusals(t *testing.T) {
 		"stale auth_time":                "sign-in older than 5 minutes",
 		"missing auth_time":              "missing auth_time",
 		"future auth_time":               "auth_time in the future",
-		"amr file":                       "amr contains file",
-		"amr hwk and file":               "amr contains file",
-		"amr mtls and FILE":              "amr contains file",
 		"acr file":                       "acr contains file",
-		"missing amr":                    "missing or empty amr",
-		"empty amr":                      "missing or empty amr",
-		"amr a string":                   "missing or empty amr",
-		"amr without hwk or mtls":        "amr has no hardware method (hwk or mtls)",
 		"wrong nonce":                    "nonce mismatch",
 		"missing nonce in token":         "missing nonce in the id token",
 		"missing nonce in proof":         "missing or oversized nonce",
@@ -423,8 +502,8 @@ func TestFreshAuthInfo(t *testing.T) {
 	if string(b) != want {
 		t.Errorf("Info = %s", b)
 	}
-	if freshauth.MaxAge != 5*time.Minute || strings.Join(freshauth.AcceptedAMR, ",") != "hwk,mtls" {
-		t.Errorf("MaxAge %v AcceptedAMR %v", freshauth.MaxAge, freshauth.AcceptedAMR)
+	if freshauth.MaxAge != 5*time.Minute || strings.Join(freshauth.FreshMethods, ",") != "passkey_synced,passkey_device,security_key,yubikey_cert" {
+		t.Errorf("MaxAge %v FreshMethods %v", freshauth.MaxAge, freshauth.FreshMethods)
 	}
 }
 

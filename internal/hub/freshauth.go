@@ -3,11 +3,13 @@ package hub
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/portcullis/hub/internal/confirm"
 	"github.com/portcullis/hub/internal/freshauth"
+	"github.com/portcullis/hub/internal/signin"
 )
 
 // The Hub's two browser listeners (contract §5.1, §8): each has its own
@@ -89,6 +91,27 @@ func (h *Hub) FreshAuthInfoFor(listener string) *freshauth.AuthorizeInfo {
 	return &info
 }
 
+// freshAuthAccepted are the fresh-auth methods switched on right now, in
+// order: passkey_synced, passkey_device, security_key, yubikey_cert (each
+// while its method is on; D19 and the controller ruling: the proof's
+// pc_fresh must be one of them; amr is never used). Takes mu (read).
+func (h *Hub) freshAuthAccepted() []string {
+	h.mu.RLock()
+	on := h.st.SignIn.MethodsOn()
+	h.mu.RUnlock()
+	out := []string{}
+	for _, m := range freshauth.FreshMethods {
+		if on[signin.Method(m)] {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// FreshAuthAccepted is freshAuthAccepted for the verifiers'
+// freshauth.Config.Accepted (cmd/hub wires it).
+func (h *Hub) FreshAuthAccepted() []string { return h.freshAuthAccepted() }
+
 // errFreshAuth is the one answer to every fresh-auth failure (contract
 // §5.1: 403 "a fresh passkey sign-in is required").
 var errFreshAuth = &StatusError{Status: 403, Err: errors.New(freshauth.Message)}
@@ -122,6 +145,12 @@ func (h *Hub) checkFreshAuthOn(ctx context.Context, listener string, p freshauth
 	}
 	res, err = f.Verify(ctx, p, strings.ToLower(user))
 	if err == nil && res != nil {
+		// The verifier's method rule, checked again on its result against
+		// the switches as they are now (a method switched off during
+		// the exchange never counts).
+		if !slices.Contains(h.freshAuthAccepted(), res.Method) {
+			return nil, "pc_fresh names a method that is switched off", errFreshAuth
+		}
 		return res, "", nil
 	}
 	var fe *freshauth.Error

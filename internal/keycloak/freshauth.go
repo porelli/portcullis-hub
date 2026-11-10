@@ -21,10 +21,32 @@ import (
 // passkey); no optional scopes.
 var FreshAuthScopes = []string{"basic", "acr"}
 
-// FreshAuthUsernameMapper is the fresh-auth client's one protocol mapper:
+// FreshAuthUsernameMapper is the fresh-auth client's username mapper:
 // preferred_username in the ID token. The profile scope, which normally
 // carries it, would add name/email claims nobody needs.
 const FreshAuthUsernameMapper = "portcullis-fresh-auth-username"
+
+// FreshAuthMethodMapper is the fresh-auth client's other mapper (contract
+// §8, §8.1): the portcullis-keycloak extension's portcullis-fresh, the
+// claim pc_fresh in the ID token only — the method id of the
+// authenticator that ran in this authentication (never a user-session
+// note). It is the only input of the Hub's fresh-auth method check
+// (freshauth.FreshMethods); amr is never used. Name and provider id are
+// the same.
+const FreshAuthMethodMapper = "portcullis-fresh"
+
+func freshAuthMethodMapper() gocloak.ProtocolMapperRepresentation {
+	return gocloak.ProtocolMapperRepresentation{
+		Name:           gocloak.StringP(FreshAuthMethodMapper),
+		Protocol:       gocloak.StringP(oidcProtocol),
+		ProtocolMapper: gocloak.StringP(FreshAuthMethodMapper),
+		Config: map[string]string{
+			"id.token.claim":       "true",
+			"access.token.claim":   "false",
+			"userinfo.token.claim": "false",
+		},
+	}
+}
 
 // freshAuthAttrs are the client attributes the Hub asserts.
 var freshAuthAttrs = map[string]string{
@@ -112,8 +134,9 @@ func withFreshAuthSettings(rep *gocloak.Client, redirectURIs, webOrigins []strin
 // exactly redirectURIs, web origins exactly webOrigins (the Hub passes
 // [https://people.<d>/, https://hub.<d>/] and their origins: one
 // verifier per listener, contract §8 / G11); default scopes
-// exactly FreshAuthScopes, no optional scopes; exactly one protocol mapper
-// (FreshAuthUsernameMapper); no flow overrides. An existing client of that
+// exactly FreshAuthScopes, no optional scopes; exactly two protocol
+// mappers (FreshAuthUsernameMapper, FreshAuthMethodMapper); no flow
+// overrides. An existing client of that
 // id without the tag (or tagged by anyone else) is a *ConflictError and
 // left alone: fresh auth then fails closed. A realm without one of the
 // scopes is an error (without acr there is no amr: every proof refused).
@@ -130,7 +153,7 @@ func (c *Client) EnsureFreshAuthClient(ctx context.Context, redirectURIs, webOri
 	existing, err := c.findClient(ctx, tok, id)
 	if errors.Is(err, ErrClientNotFound) {
 		rep := gocloak.Client{ClientID: gocloak.StringP(id), DefaultClientScopes: append([]string{}, FreshAuthScopes...),
-			ProtocolMappers: []gocloak.ProtocolMapperRepresentation{freshAuthMapper()}}
+			ProtocolMappers: []gocloak.ProtocolMapperRepresentation{freshAuthMapper(), freshAuthMethodMapper()}}
 		withFreshAuthSettings(&rep, redirectURIs, webOrigins)
 		rep.AuthenticationFlowBindingOverrides = nil
 		_, err = g.CreateClient(ctx, tok, Realm, rep)
@@ -158,9 +181,9 @@ func (c *Client) EnsureFreshAuthClient(ctx context.Context, redirectURIs, webOri
 	if err := c.ensureFreshAuthScopes(ctx, tok, existing); err != nil {
 		return err
 	}
-	// Any other client mapper (a hardcoded amr claim would forge a
-	// proof) is deleted.
-	return c.ensureOnlyClientMapper(ctx, tok, existing, freshAuthMapper())
+	// Any other client mapper (a hardcoded amr or pc_fresh claim would
+	// forge a proof) is deleted.
+	return c.ensureOnlyClientMapper(ctx, tok, existing, freshAuthMapper(), freshAuthMethodMapper())
 }
 
 // ensureFreshAuthScopes makes the client's default scopes exactly

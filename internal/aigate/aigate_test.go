@@ -2,6 +2,7 @@ package aigate
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
@@ -20,6 +21,41 @@ func vector(t *testing.T, name string) []byte {
 		t.Fatal(err)
 	}
 	return b
+}
+
+// TestGateFileV2Vector (contract §15.4, gate file v2): the shared vector
+// decodes strictly as version 2 with methods and a compiled rule per
+// resource (no acr_loa / min_loa), and re-encodes byte for byte.
+func TestGateFileV2Vector(t *testing.T) {
+	gate := vector(t, "mcp-gate.json")
+	f, err := DecodeFile(gate)
+	if err != nil {
+		t.Fatalf("mcp-gate.json: %v", err)
+	}
+	if f.Version != 2 || strings.Join(f.Methods, ",") != "passkey_device,passkey_synced,security_key,yubikey_cert" {
+		t.Errorf("version %d methods %v", f.Version, f.Methods)
+	}
+	for _, r := range f.Resources {
+		want := `{"op":"any","items":["security_key","yubikey_cert"]}`
+		if r.Kind == KindCompanion {
+			want = `{"op":"any","items":[{"op":"any","items":["passkey_synced","passkey_device","security_key"]},{"op":"any","items":["yubikey_cert"]}]}`
+		}
+		if b, _ := json.Marshal(r.Rule); string(b) != want {
+			t.Errorf("%s rule = %s, want %s", r.URL, b, want)
+		}
+	}
+	for _, gone := range []string{`"acr_loa"`, `"min_loa"`} {
+		if bytes.Contains(gate, []byte(gone)) {
+			t.Errorf("the v2 vector carries %s", gone)
+		}
+	}
+	out, err := f.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(out, gate) {
+		t.Errorf("mcp-gate.json re-encoded differs:\n%s", out)
+	}
 }
 
 // G47 / contract §15.4: the shared vector (the same bytes as core's
@@ -57,42 +93,63 @@ func TestVectorRoundTrip(t *testing.T) {
 func TestStrictDecodeRefuses(t *testing.T) {
 	gate := string(vector(t, "mcp-gate.json"))
 	for name, mut := range map[string][2]string{
-		"unknown field":            {`"version": 1,`, `"version": 1, "extra": true,`},
-		"case-variant key":         {`"version": 1,`, `"Version": 1,`},
-		"duplicate key":            {`"version": 1,`, `"version": 1, "version": 1,`},
-		"missing field":            {`"main_domain": "example.com",`, ``},
-		"missing resource field":   {`"label": "Gitea",`, ``},
-		"null list":                {`"allowed_origins": [],`, `"allowed_origins": null,`},
-		"other version":            {`"version": 1,`, `"version": 2,`},
-		"issuer not auth.<d>":      {`"issuer": "https://auth.example.com/realms/portcullis"`, `"issuer": "https://evil.example/realms/portcullis"`},
-		"forward-auth client":      {"\"portcullis-ai-generic\"\n  ],", "\"portcullis-ai-generic\", \"portcullis-forward-auth\"\n  ],"},
-		"client not top-level":     {`"clients": [` + "\n        \"portcullis-ai-claude\",", `"clients": [` + "\n        \"gitea\", \"portcullis-ai-claude\","},
-		"companion on a core host": {"    \"example.com\",\n", "    \"example.com\",\n    \"gitea.example.com\",\n"},
-		"companion hosts core":     {"\"hosts\": [\n        \"gitea.example.com\"\n      ]", "\"hosts\": [\n        \"gitea.example.com\", \"hub.example.com\"\n      ]"},
-		"bad upstream":             {`"upstream": "http://portcullis-mcp-gitea--gitea:8080/mcp"`, `"upstream": "http://169.254.169.254/latest"`},
-		"fanout 5":                 {`"fanout": 4,`, `"fanout": 5,`},
-		"min_loa 3":                {`"min_loa": 2,` + "\n      \"upstream\": \"http://portcullis-mcp-gitea", `"min_loa": 3,` + "\n      \"upstream\": \"http://portcullis-mcp-gitea"},
-		"aggregate min_loa 1":      {`"min_loa": 2,` + "\n      \"upstream\": \"\",\n      \"protocol\": [],\n      \"mode\": \"\",\n      \"identity\": {\n        \"mode\": \"none\",\n        \"header\": \"\",\n        \"format\": \"\",\n        \"basic_user\": \"\",\n        \"secret_ref\": \"\"\n      },\n      \"tools\": {\n        \"writes\": [],\n        \"confirm\": [],\n        \"never\": []\n      },\n      \"aggregate\": false,\n      \"population\": [\n        \"alice\",\n        \"bob\",", `"min_loa": 1,` + "\n      \"upstream\": \"\",\n      \"protocol\": [],\n      \"mode\": \"\",\n      \"identity\": {\n        \"mode\": \"none\",\n        \"header\": \"\",\n        \"format\": \"\",\n        \"basic_user\": \"\",\n        \"secret_ref\": \"\"\n      },\n      \"tools\": {\n        \"writes\": [],\n        \"confirm\": [],\n        \"never\": []\n      },\n      \"aggregate\": false,\n      \"population\": [\n        \"alice\",\n        \"bob\","},
-		"bad scope":                {`"scope": "mcp:gitea.gitea",`, `"scope": "mcp:all",`},
-		"unsupported protocol":     {"\"2026-07-28\",\n        \"2025-11-25\"", "\"2026-07-28\",\n        \"2025-03-26\""},
-		"unsorted population":      {"\"population\": [\n        \"alice\",\n        \"bob\"\n      ],", "\"population\": [\n        \"bob\",\n        \"alice\"\n      ],"},
-		"uppercase user":           {"\"population\": [\n        \"alice\",\n        \"bob\"\n      ],", "\"population\": [\n        \"Alice\",\n        \"bob\"\n      ],"},
-		"Kelvin sign user":         {"\"population\": [\n        \"alice\"\n      ],\n      \"expiring\": {},\n      \"people\"", "\"population\": [\n        \"alice\",\n        \"\u212aim\"\n      ],\n      \"expiring\": {},\n      \"people\""},
-		"non-ASCII user":           {"\"population\": [\n        \"alice\"\n      ],\n      \"expiring\": {},\n      \"people\"", "\"population\": [\n        \"alice\",\n        \"b\u00f6b\"\n      ],\n      \"expiring\": {},\n      \"people\""},
-		"user with @":              {"\"population\": [\n        \"alice\"\n      ],\n      \"expiring\": {},\n      \"people\"", "\"population\": [\n        \"alice\",\n        \"b@b\"\n      ],\n      \"expiring\": {},\n      \"people\""},
-		"user with +":              {"\"population\": [\n        \"alice\"\n      ],\n      \"expiring\": {},\n      \"people\"", "\"population\": [\n        \"alice\",\n        \"b+b\"\n      ],\n      \"expiring\": {},\n      \"people\""},
-		"user leading .":           {"\"population\": [\n        \"alice\"\n      ],\n      \"expiring\": {},\n      \"people\"", "\"population\": [\n        \"alice\",\n        \".bob\"\n      ],\n      \"expiring\": {},\n      \"people\""},
-		"user leading -":           {"\"population\": [\n        \"alice\"\n      ],\n      \"expiring\": {},\n      \"people\"", "\"population\": [\n        \"alice\",\n        \"-bob\"\n      ],\n      \"expiring\": {},\n      \"people\""},
-		"user 65 chars":            {"\"population\": [\n        \"alice\"\n      ],\n      \"expiring\": {},\n      \"people\"", "\"population\": [\n        \"alice\",\n        \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"\n      ],\n      \"expiring\": {},\n      \"people\""},
-		"expiring not UTC":         {`"bob": "2027-03-31T23:59:59Z"`, `"bob": "2027-03-31T23:59:59+02:00"`},
-		"expiring outside pop":     {`"bob": "2027-03-31T23:59:59Z"`, `"zed": "2027-03-31T23:59:59Z"`},
-		"people on app_token":      {`"expiring": {` + "\n        \"bob\"", `"people": {}, "expiring": {` + "\n        \"bob\""},
-		"identity header cookie":   {`"header": "Authorization",` + "\n        \"format\": \"token {credential}\"", `"header": "Cookie",` + "\n        \"format\": \"token {credential}\""},
-		"secret_ref other":         {`"secret_ref": "grafana/grafana"`, `"secret_ref": "gitea/gitea"`},
-		"fixed limit changed":      {`"upstream_timeout_s": 120`, `"upstream_timeout_s": 600`},
-		"zero limit":               {`"resource_rpm": 120,`, `"resource_rpm": 0,`},
-		"origin not https":         {`"allowed_origins": [],`, `"allowed_origins": ["http://claude.ai"],`},
-		"trailing data":            {"\n}\n", "\n}\n{}\n"},
+		"unknown field":              {`"version": 2,`, `"version": 2, "extra": true,`},
+		"case-variant key":           {`"version": 2,`, `"Version": 2,`},
+		"duplicate key":              {`"version": 2,`, `"version": 2, "version": 2,`},
+		"missing field":              {`"main_domain": "example.com",`, ``},
+		"missing resource field":     {`"label": "Gitea",`, ``},
+		"null list":                  {`"allowed_origins": [],`, `"allowed_origins": null,`},
+		"version 1":                  {`"version": 2,`, `"version": 1,`},
+		"version 3":                  {`"version": 2,`, `"version": 3,`},
+		"acr_loa kept":               {`"methods": [`, `"acr_loa": {"hwk": 2}, "methods": [`},
+		"min_loa kept":               {`"rule": {`, `"min_loa": 2, "rule": {`},
+		"missing methods":            {"\"methods\": [\n    \"passkey_device\",\n    \"passkey_synced\",\n    \"security_key\",\n    \"yubikey_cert\"\n  ],", ``},
+		"null methods":               {"\"methods\": [\n    \"passkey_device\",\n    \"passkey_synced\",\n    \"security_key\",\n    \"yubikey_cert\"\n  ],", `"methods": null,`},
+		"methods unsorted":           {"\"passkey_device\",\n    \"passkey_synced\",", "\"passkey_synced\",\n    \"passkey_device\","},
+		"methods twice":              {"\"passkey_device\",\n    \"passkey_synced\",", "\"passkey_device\",\n    \"passkey_device\",\n    \"passkey_synced\","},
+		"methods unknown":            {"\"passkey_device\",\n    \"passkey_synced\",", "\"inv\",\n    \"passkey_device\",\n    \"passkey_synced\","},
+		"methods a family":           {"\"passkey_device\",\n    \"passkey_synced\",", "\"family:passkey\",\n    \"passkey_device\",\n    \"passkey_synced\","},
+		"rule leaf switched off":     {"\"methods\": [\n    \"passkey_device\",\n", "\"methods\": [\n"},
+		"rule leaf not in methods":   {"\"op\": \"any\",\n        \"items\": [\n          \"security_key\",", "\"op\": \"any\",\n        \"items\": [\n          \"password\",\n          \"security_key\","},
+		"rule leaf unknown":          {"\"op\": \"any\",\n        \"items\": [\n          \"security_key\",", "\"op\": \"any\",\n        \"items\": [\n          \"hwk\",\n          \"security_key\","},
+		"rule leaf a family":         {"\"op\": \"any\",\n        \"items\": [\n          \"security_key\",", "\"op\": \"any\",\n        \"items\": [\n          \"family:yubikey\",\n          \"security_key\","},
+		"rule a leaf":                {"\"rule\": {\n        \"op\": \"any\",\n        \"items\": [\n          \"security_key\",\n          \"yubikey_cert\"\n        ]\n      },", "\"rule\": \"security_key\","},
+		"rule null":                  {"\"rule\": {\n        \"op\": \"any\",\n        \"items\": [\n          \"security_key\",\n          \"yubikey_cert\"\n        ]\n      },", "\"rule\": null,"},
+		"rule empty group":           {"\"rule\": {\n        \"op\": \"any\",\n        \"items\": [\n          \"security_key\",\n          \"yubikey_cert\"\n        ]\n      },", "\"rule\": {\"op\": \"any\", \"items\": []},"},
+		"rule unknown op":            {"\"rule\": {\n        \"op\": \"any\",", "\"rule\": {\n        \"op\": \"none\","},
+		"rule extra key":             {"\"rule\": {\n        \"op\": \"any\",", "\"rule\": {\n        \"min\": 1, \"op\": \"any\","},
+		"rule duplicate op":          {"\"rule\": {\n        \"op\": \"any\",", "\"rule\": {\n        \"op\": \"all\", \"op\": \"any\","},
+		"rule 9 items":               {"\"rule\": {\n        \"op\": \"any\",\n        \"items\": [\n          \"security_key\",\n          \"yubikey_cert\"\n        ]\n      },", "\"rule\": {\"op\": \"any\", \"items\": [\"security_key\", \"security_key\", \"security_key\", \"security_key\", \"security_key\", \"security_key\", \"security_key\", \"security_key\", \"yubikey_cert\"]},"},
+		"rule depth 5":               {"\"rule\": {\n        \"op\": \"any\",\n        \"items\": [\n          \"security_key\",\n          \"yubikey_cert\"\n        ]\n      },", "\"rule\": {\"op\": \"any\", \"items\": [{\"op\": \"any\", \"items\": [{\"op\": \"any\", \"items\": [{\"op\": \"any\", \"items\": [{\"op\": \"any\", \"items\": [\"security_key\"]}]}]}]}]},"},
+		"companion certificate-only": {"\"rule\": {\n        \"op\": \"any\",\n        \"items\": [\n          {\n            \"op\": \"any\",\n            \"items\": [\n              \"passkey_synced\",\n              \"passkey_device\",\n              \"security_key\"\n            ]\n          },", "\"rule\": {\n        \"op\": \"all\",\n        \"items\": [\n          {\n            \"op\": \"any\",\n            \"items\": [\n              \"passkey_synced\",\n              \"passkey_device\",\n              \"security_key\"\n            ]\n          },"},
+		"missing rule":               {"\"rule\": {\n        \"op\": \"any\",\n        \"items\": [\n          \"security_key\",\n          \"yubikey_cert\"\n        ]\n      },", ``},
+		"issuer not auth.<d>":        {`"issuer": "https://auth.example.com/realms/portcullis"`, `"issuer": "https://evil.example/realms/portcullis"`},
+		"forward-auth client":        {"\"portcullis-ai-generic\"\n  ],", "\"portcullis-ai-generic\", \"portcullis-forward-auth\"\n  ],"},
+		"client not top-level":       {`"clients": [` + "\n        \"portcullis-ai-claude\",", `"clients": [` + "\n        \"gitea\", \"portcullis-ai-claude\","},
+		"companion on a core host":   {"    \"example.com\",\n", "    \"example.com\",\n    \"gitea.example.com\",\n"},
+		"companion hosts core":       {"\"hosts\": [\n        \"gitea.example.com\"\n      ]", "\"hosts\": [\n        \"gitea.example.com\", \"hub.example.com\"\n      ]"},
+		"bad upstream":               {`"upstream": "http://portcullis-mcp-gitea--gitea:8080/mcp"`, `"upstream": "http://169.254.169.254/latest"`},
+		"fanout 5":                   {`"fanout": 4,`, `"fanout": 5,`},
+		"bad scope":                  {`"scope": "mcp:gitea.gitea",`, `"scope": "mcp:all",`},
+		"unsupported protocol":       {"\"2026-07-28\",\n        \"2025-11-25\"", "\"2026-07-28\",\n        \"2025-03-26\""},
+		"unsorted population":        {"\"population\": [\n        \"alice\",\n        \"bob\"\n      ],", "\"population\": [\n        \"bob\",\n        \"alice\"\n      ],"},
+		"uppercase user":             {"\"population\": [\n        \"alice\",\n        \"bob\"\n      ],", "\"population\": [\n        \"Alice\",\n        \"bob\"\n      ],"},
+		"Kelvin sign user":           {"\"population\": [\n        \"alice\"\n      ],\n      \"expiring\": {},\n      \"people\"", "\"population\": [\n        \"alice\",\n        \"\u212aim\"\n      ],\n      \"expiring\": {},\n      \"people\""},
+		"non-ASCII user":             {"\"population\": [\n        \"alice\"\n      ],\n      \"expiring\": {},\n      \"people\"", "\"population\": [\n        \"alice\",\n        \"b\u00f6b\"\n      ],\n      \"expiring\": {},\n      \"people\""},
+		"user with @":                {"\"population\": [\n        \"alice\"\n      ],\n      \"expiring\": {},\n      \"people\"", "\"population\": [\n        \"alice\",\n        \"b@b\"\n      ],\n      \"expiring\": {},\n      \"people\""},
+		"user with +":                {"\"population\": [\n        \"alice\"\n      ],\n      \"expiring\": {},\n      \"people\"", "\"population\": [\n        \"alice\",\n        \"b+b\"\n      ],\n      \"expiring\": {},\n      \"people\""},
+		"user leading .":             {"\"population\": [\n        \"alice\"\n      ],\n      \"expiring\": {},\n      \"people\"", "\"population\": [\n        \"alice\",\n        \".bob\"\n      ],\n      \"expiring\": {},\n      \"people\""},
+		"user leading -":             {"\"population\": [\n        \"alice\"\n      ],\n      \"expiring\": {},\n      \"people\"", "\"population\": [\n        \"alice\",\n        \"-bob\"\n      ],\n      \"expiring\": {},\n      \"people\""},
+		"user 65 chars":              {"\"population\": [\n        \"alice\"\n      ],\n      \"expiring\": {},\n      \"people\"", "\"population\": [\n        \"alice\",\n        \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"\n      ],\n      \"expiring\": {},\n      \"people\""},
+		"expiring not UTC":           {`"bob": "2027-03-31T23:59:59Z"`, `"bob": "2027-03-31T23:59:59+02:00"`},
+		"expiring outside pop":       {`"bob": "2027-03-31T23:59:59Z"`, `"zed": "2027-03-31T23:59:59Z"`},
+		"people on app_token":        {`"expiring": {` + "\n        \"bob\"", `"people": {}, "expiring": {` + "\n        \"bob\""},
+		"identity header cookie":     {`"header": "Authorization",` + "\n        \"format\": \"token {credential}\"", `"header": "Cookie",` + "\n        \"format\": \"token {credential}\""},
+		"secret_ref other":           {`"secret_ref": "grafana/grafana"`, `"secret_ref": "gitea/gitea"`},
+		"fixed limit changed":        {`"upstream_timeout_s": 120`, `"upstream_timeout_s": 600`},
+		"zero limit":                 {`"resource_rpm": 120,`, `"resource_rpm": 0,`},
+		"origin not https":           {`"allowed_origins": [],`, `"allowed_origins": ["http://claude.ai"],`},
+		"trailing data":              {"\n}\n", "\n}\n{}\n"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if !strings.Contains(gate, mut[0]) {

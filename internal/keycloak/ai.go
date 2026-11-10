@@ -509,33 +509,36 @@ func onlyMapper(ms []gocloak.ProtocolMapperRepresentation, want gocloak.Protocol
 	return len(ms) == 1 && str(ms[0].Name) == str(want.Name) && sameMapper(ms[0], want)
 }
 
-// ensureOnlyClientMapper leaves exactly want on the client: any other
-// client mapper (a hardcoded claim, a group mapper) is deleted.
-func (c *Client) ensureOnlyClientMapper(ctx context.Context, tok string, cl *gocloak.Client, want gocloak.ProtocolMapperRepresentation) error {
+// ensureOnlyClientMapper leaves exactly want on the client (one mapper
+// each, by name, type and config): any other client mapper (a hardcoded
+// claim, a group mapper, a second copy) is deleted.
+func (c *Client) ensureOnlyClientMapper(ctx context.Context, tok string, cl *gocloak.Client, want ...gocloak.ProtocolMapperRepresentation) error {
 	g := c.api()
 	cid := url.PathEscape(str(cl.ID))
 	have, err := c.clientMappers(ctx, tok, cl)
 	if err != nil {
 		return err
 	}
-	if onlyMapper(have, want) {
-		return nil
-	}
-	kept := false
+	kept := make([]bool, len(want))
 	for _, m := range have {
-		if !kept && str(m.Name) == str(want.Name) && sameMapper(m, want) {
-			kept = true
+		i := slices.IndexFunc(want, func(w gocloak.ProtocolMapperRepresentation) bool {
+			return str(m.Name) == str(w.Name) && sameMapper(m, w)
+		})
+		if i >= 0 && !kept[i] {
+			kept[i] = true
 			continue
 		}
 		if err := g.DeleteClientProtocolMapper(ctx, tok, Realm, cid, url.PathEscape(str(m.ID))); err != nil && statusCode(err) != http.StatusNotFound {
 			return opErr("delete protocol mapper "+str(m.Name)+" of client "+str(cl.ClientID), err)
 		}
 	}
-	if kept {
-		return nil
-	}
-	if _, err := g.CreateClientProtocolMapper(ctx, tok, Realm, cid, want); err != nil {
-		return opErr("create protocol mapper "+str(want.Name), err)
+	for i, w := range want {
+		if kept[i] {
+			continue
+		}
+		if _, err := g.CreateClientProtocolMapper(ctx, tok, Realm, cid, w); err != nil {
+			return opErr("create protocol mapper "+str(w.Name), err)
+		}
 	}
 	return nil
 }

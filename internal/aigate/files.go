@@ -11,7 +11,7 @@
 // contract's example vector (testdata/) and re-encode it byte for byte.
 //
 // No Hub import: the package knows nothing about state or templates
-// beyond the T8 name helpers.
+// beyond the T8 name helpers; rules are internal/signin's (pure).
 package aigate
 
 import (
@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/portcullis/hub/internal/fsutil"
+	"github.com/portcullis/hub/internal/signin"
 )
 
 // Names of the files in the Hub's data directory (next to the policy
@@ -77,21 +78,22 @@ const (
 	MaxFanout = 4
 )
 
-// ACRLoA is the realm's acr → LoA map (core realm acr.loa.map, §15.2).
-func ACRLoA() map[string]int { return map[string]int{"public": 0, "pwd": 1, "hwk": 2, "mtls": 3} }
+// FileVersion is mcp-gate.json's version (sign-in methods: gate file v2,
+// each resource's compiled sign-in rule; no acr_loa / min_loa).
+const FileVersion = 2
 
 // File is mcp-gate.json (§15.4). Field order is the file's key order.
 type File struct {
-	Version        int            `json:"version"`
-	Enabled        bool           `json:"enabled"`
-	Issuer         string         `json:"issuer"`
-	MainDomain     string         `json:"main_domain"`
-	Clients        []string       `json:"clients"`
-	AllowedOrigins []string       `json:"allowed_origins"`
-	ACRLoA         map[string]int `json:"acr_loa"`
-	Limits         Limits         `json:"limits"`
-	CoreHosts      []string       `json:"core_hosts"`
-	Resources      []Resource     `json:"resources"`
+	Version        int        `json:"version"`
+	Enabled        bool       `json:"enabled"`
+	Issuer         string     `json:"issuer"`
+	MainDomain     string     `json:"main_domain"`
+	Clients        []string   `json:"clients"`
+	AllowedOrigins []string   `json:"allowed_origins"`
+	Methods        []string   `json:"methods"` // switched-on method ids, sorted
+	Limits         Limits     `json:"limits"`
+	CoreHosts      []string   `json:"core_hosts"`
+	Resources      []Resource `json:"resources"`
 }
 
 // Limits (§15.9). All positive.
@@ -120,7 +122,7 @@ type Resource struct {
 	Host       string            `json:"host"`
 	Hosts      []string          `json:"hosts"`
 	AppURL     string            `json:"app_url"`
-	MinLoA     int               `json:"min_loa"`
+	Rule       signin.Node       `json:"rule"` // compiled sign-in rule (§8.1)
 	Upstream   string            `json:"upstream"`
 	Protocol   []string          `json:"protocol"`
 	Mode       string            `json:"mode"`

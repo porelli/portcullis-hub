@@ -489,8 +489,6 @@ func (h *Hub) decideConfirmation(ctx context.Context, listener, id, user string,
 			return refuse("username mismatch", errFreshAuth)
 		case res.AuthTime.Before(now.Add(-freshauth.MaxAge)):
 			return refuse("sign-in too old", errFreshAuth)
-		case !hardwareAMR(res.AMR):
-			return refuse("no hardware sign-in", errFreshAuth)
 		case res.AuthTime.Before(c.Created.Add(-confirmAuthSlack)):
 			return refuse("sign-in from before the request", errFreshAuth)
 		}
@@ -509,21 +507,6 @@ func (h *Hub) decideConfirmation(ctx context.Context, listener, id, user string,
 	}
 	h.auditConfirm(actor, what, c.Resource, c.Tool, c.ArgsSHA256, c.ID, "")
 	return what, nil
-}
-
-// hardwareAMR: a non-empty amr with hwk or mtls and never file (the
-// verifier's rule, checked again on its result).
-func hardwareAMR(amr []string) bool {
-	ok := false
-	for _, m := range amr {
-		switch strings.ToLower(m) {
-		case "file":
-			return false
-		case "hwk", "mtls":
-			ok = true
-		}
-	}
-	return ok
 }
 
 // SweepConfirmations records every confirmation past its TTL as expired,

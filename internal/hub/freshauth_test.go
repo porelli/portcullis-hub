@@ -24,7 +24,7 @@ func (f *fakeFreshAuth) Verify(_ context.Context, p freshauth.Proof, user string
 	if f.err != nil {
 		return nil, f.err
 	}
-	return &freshauth.Result{User: user, AuthTime: time.Now(), AMR: []string{"hwk"}}, nil
+	return &freshauth.Result{User: user, AuthTime: time.Now(), Method: "security_key"}, nil
 }
 
 func (f *fakeFreshAuth) Info() freshauth.AuthorizeInfo {
@@ -68,6 +68,60 @@ func TestCheckFreshAuth(t *testing.T) {
 		if reason == "" {
 			t.Error("no reason")
 		}
+	}
+}
+
+// methodFreshAuth accepts every proof with pc_fresh method.
+type methodFreshAuth struct {
+	fakeFreshAuth
+	method string
+}
+
+func (f *methodFreshAuth) Verify(_ context.Context, p freshauth.Proof, user string) (*freshauth.Result, error) {
+	return &freshauth.Result{User: user, AuthTime: time.Now(), Method: f.method}, nil
+}
+
+// TestFreshAuthFollowsMethodSwitches (D19, controller ruling):
+// freshAuthAccepted lists the switched-on fresh methods in order, and the
+// Hub checks a verifier's pc_fresh against them again — a switched-off
+// method, a password, a browser certificate or an empty method refuses.
+func TestFreshAuthFollowsMethodSwitches(t *testing.T) {
+	f := newFixture(t)
+	f.h.freshAuthReady.Store(true)
+	setOn := func(m string, on bool) {
+		f.h.mu.Lock()
+		f.h.st.SignIn.Methods[m] = on
+		f.h.mu.Unlock()
+	}
+	if got := strings.Join(f.h.freshAuthAccepted(), ","); got != "passkey_synced,passkey_device,security_key,yubikey_cert" {
+		t.Errorf("starting state: freshAuthAccepted = %s", got)
+	}
+	setOn("password", true) // never a fresh method
+	setOn("security_key", false)
+	if got := strings.Join(f.h.FreshAuthAccepted(), ","); got != "passkey_synced,passkey_device,yubikey_cert" {
+		t.Errorf("security_key off: freshAuthAccepted = %s", got)
+	}
+	for _, c := range []struct {
+		method string
+		ok     bool
+	}{
+		{"security_key", false}, {"passkey_synced", true}, {"passkey_device", true}, {"yubikey_cert", true},
+		{"password", false}, {"browser_cert", false}, {"inv", false}, {"", false},
+	} {
+		f.h.SetFreshAuth(ListenerPeople, &methodFreshAuth{method: c.method})
+		res, reason, err := f.h.checkFreshAuth(context.Background(), testProof, "alice")
+		if c.ok != (err == nil) {
+			t.Errorf("pc_fresh %q: %+v, %q, %v; want ok %v", c.method, res, reason, err, c.ok)
+		}
+		if !c.ok && (statusOf(err) != 403 || err.Error() != freshauth.Message || reason != "pc_fresh names a method that is switched off") {
+			t.Errorf("pc_fresh %q: %d %v (%q)", c.method, statusOf(err), err, reason)
+		}
+	}
+	for _, m := range []string{"passkey_synced", "passkey_device", "yubikey_cert"} {
+		setOn(m, false)
+	}
+	if got := f.h.freshAuthAccepted(); len(got) != 0 {
+		t.Errorf("all off: freshAuthAccepted = %v", got)
 	}
 }
 

@@ -12,6 +12,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/portcullis/hub/internal/signin"
 )
 
 var (
@@ -108,8 +110,8 @@ func forbiddenHeader(h string) bool {
 
 // Validate applies the gate's rules (core config.go File.validate).
 func (f *File) Validate() error {
-	if f.Version != 1 {
-		return fmt.Errorf("version: not 1")
+	if f.Version != FileVersion {
+		return fmt.Errorf("version: not %d", FileVersion)
 	}
 	if !ValidHostname(f.MainDomain) {
 		return fmt.Errorf("main_domain: invalid")
@@ -131,10 +133,8 @@ func (f *File) Validate() error {
 	}); err != nil {
 		return err
 	}
-	for k, v := range f.ACRLoA {
-		if !nonEmpty(k) || v < 0 || v > 3 {
-			return fmt.Errorf("acr_loa: invalid entry")
-		}
+	if err := sortedUnique(f.Methods, "methods", knownMethod); err != nil {
+		return err
 	}
 	l := f.Limits
 	for name, v := range map[string]int64{
@@ -200,6 +200,9 @@ func (r *Resource) validate(f *File) error {
 	if !nonEmpty(r.Label) {
 		return fmt.Errorf("label: empty")
 	}
+	if err := validRule(r.Rule, f.Methods); err != nil {
+		return fmt.Errorf("rule: %w", err)
+	}
 	if err := sortedUnique(r.Clients, "clients", func(c string) bool { return slices.Contains(f.Clients, c) }); err != nil {
 		return fmt.Errorf("%w (each client must be in the top-level clients)", err)
 	}
@@ -257,9 +260,6 @@ func (r *Resource) validate(f *File) error {
 	if strconv.FormatBool(r.Aggregate) != w[2] {
 		return fmt.Errorf("aggregate: must be %s", w[2])
 	}
-	if r.MinLoA != 2 {
-		return fmt.Errorf("min_loa: must be 2")
-	}
 	if r.Instance != "" || r.Companion != "" || r.AppURL != "" || r.Upstream != "" || r.Mode != "" ||
 		len(r.Hosts) != 0 || len(r.Protocol) != 0 || r.Identity != (Identity{Mode: "none"}) ||
 		len(r.Tools.Writes)+len(r.Tools.Confirm)+len(r.Tools.Never) != 0 {
@@ -307,8 +307,10 @@ func (r *Resource) validateCompanion(f *File) error {
 	if r.Mode != "read_only" && r.Mode != "read_write" {
 		return fmt.Errorf("mode: not read_only or read_write")
 	}
-	if r.MinLoA < 0 || r.MinLoA > 2 {
-		return fmt.Errorf("min_loa: outside 0..2 (LoA 3 can't get AI support)")
+	if signin.NeedsCertificate(r.Rule) {
+		// §15.2: no MCP client presents a certificate; such an instance
+		// can't get AI support (the Hub never lists it).
+		return fmt.Errorf("rule: needs a client certificate on every alternative")
 	}
 	id := r.Identity
 	if !headerTok.MatchString(id.Header) || forbiddenHeader(id.Header) {
@@ -332,6 +334,39 @@ func (r *Resource) validateCompanion(f *File) error {
 		return fmt.Errorf("identity.mode: not app_token or identity_headers")
 	}
 	return nil
+}
+
+// knownMethod: one of the six sign-in method ids (§8.1; no family, no amr
+// value).
+func knownMethod(s string) bool { return slices.Contains(signin.Methods, signin.Method(s)) }
+
+// validRule is §15.4's rule check: a compiled rule (signin.ValidateCompiled:
+// a group at the top, op all / any, no empty group, depth ≤ 4, ≤ 48 leaves,
+// every leaf a method id), groups of at most 8 items, and every leaf among
+// methods (the switched-on ones). Errors never quote values.
+func validRule(n signin.Node, methods []string) error {
+	if err := signin.ValidateCompiled(n); err != nil {
+		return fmt.Errorf("not a compiled rule")
+	}
+	var walk func(n signin.Node) error
+	walk = func(n signin.Node) error {
+		if n.Op == "" {
+			if !slices.Contains(methods, n.Leaf) {
+				return fmt.Errorf("a method that isn't in methods")
+			}
+			return nil
+		}
+		if len(n.Items) > signin.MaxItems {
+			return fmt.Errorf("a group of more than %d items", signin.MaxItems)
+		}
+		for _, it := range n.Items {
+			if err := walk(it); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	return walk(n)
 }
 
 // Validate applies the gate's rules (core config.go CredFile.validate).

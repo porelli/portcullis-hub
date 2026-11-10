@@ -298,6 +298,8 @@ func main() {
 			AuthorizeURL: fa.AuthorizeURL, RedirectURI: redirect,
 			// The token endpoint never redirects; a redirect is refused.
 			HTTP: faHTTP,
+			// pc_fresh must be a fresh method switched on now (§8.1).
+			Accepted: h.FreshAuthAccepted,
 		}))
 	}
 	// Per-instance AI support (contract §8): the mcp:* scopes.

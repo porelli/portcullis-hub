@@ -26,6 +26,7 @@ import (
 	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/lldap"
 	"github.com/portcullis/hub/internal/policy"
+	"github.com/portcullis/hub/internal/signin"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
 )
@@ -250,6 +251,147 @@ func urls(f *aigate.File) []string {
 	return out
 }
 
+// ruleJSON is n as the gate file carries it.
+func ruleJSON(t *testing.T, n signin.Node) string {
+	t.Helper()
+	b, err := n.MarshalJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// TestGateRulePerResource (gate file v2, §15.4 / §8.1 "AI support"): a
+// companion's rule is its instance's compiled template, the people
+// resource's the "people" core page's, the admin and aggregate
+// resources' the "hub" core page's; methods are the switched-on ones,
+// sorted. A pick, a core-page change and a method switch all follow.
+func TestGateRulePerResource(t *testing.T) {
+	g := newGateFixture(t, nil)
+	compiled := func(id string) string {
+		t.Helper()
+		g.h.mu.RLock()
+		defer g.h.mu.RUnlock()
+		c, ok := g.h.compiledLocked(id)
+		if !ok {
+			t.Fatalf("template %s doesn't compile", id)
+		}
+		return ruleJSON(t, c)
+	}
+	check := func(label, companion, people, hub string, methods []string) {
+		t.Helper()
+		f := g.build(t)
+		if f.Version != 2 || !slices.Equal(f.Methods, methods) {
+			t.Errorf("%s: version %d methods %v, want %v", label, f.Version, f.Methods, methods)
+		}
+		for url, want := range map[string]string{
+			"https://gitea.example.com/mcp":  companion,
+			"https://people.example.com/mcp": people,
+			"https://hub.example.com/mcp":    hub,
+			"https://mcp.example.com/mcp":    hub,
+		} {
+			r := resourceByURL(f, url)
+			if r == nil {
+				t.Errorf("%s: %s not listed: %v", label, url, urls(f))
+				continue
+			}
+			if got := ruleJSON(t, r.Rule); got != want {
+				t.Errorf("%s: %s rule = %s, want %s", label, url, got, want)
+			}
+		}
+	}
+	// The starting picks: apps on the default (Standard), hub and people
+	// on Strong.
+	all4 := []string{"passkey_device", "passkey_synced", "security_key", "yubikey_cert"}
+	std, strong := compiled("standard"), compiled("strong")
+	if std != `{"op":"any","items":[{"op":"any","items":["passkey_synced","passkey_device","security_key"]},{"op":"any","items":["yubikey_cert"]}]}` ||
+		strong != `{"op":"any","items":["security_key","yubikey_cert"]}` {
+		t.Fatalf("built-ins compiled: standard %s strong %s", std, strong)
+	}
+	check("start", std, strong, strong, all4)
+
+	// The instance's own pick; the people core page on the default.
+	g.h.mu.Lock()
+	setPickLocked(g.h, "gitea", "strong")
+	g.h.st.SignIn.Core["people"] = ""
+	g.h.mu.Unlock()
+	check("picks", strong, std, strong, all4)
+
+	// A method switched off: every rule recompiles, methods follow.
+	g.h.mu.Lock()
+	g.h.st.SignIn.Methods["passkey_synced"] = false
+	g.h.st.SignIn.Core["hub"] = "standard"
+	g.h.mu.Unlock()
+	std2 := compiled("standard")
+	if strings.Contains(std2, "passkey_synced") {
+		t.Fatalf("standard with passkey_synced off = %s", std2)
+	}
+	check("passkey_synced off", strong, std2, std2, []string{"passkey_device", "security_key", "yubikey_cert"})
+
+	// A core page whose template can't be published: its resources are
+	// left out (fail closed), the others stay.
+	g.h.mu.Lock()
+	g.h.st.SignIn.Core["hub"] = "gone"
+	g.h.mu.Unlock()
+	f := g.build(t)
+	if resourceByURL(f, "https://hub.example.com/mcp") != nil || resourceByURL(f, "https://mcp.example.com/mcp") != nil {
+		t.Errorf("hub core template unpublishable: admin / aggregate still listed: %v", urls(f))
+	}
+	if resourceByURL(f, "https://people.example.com/mcp") == nil || resourceByURL(f, "https://gitea.example.com/mcp") == nil {
+		t.Errorf("people / gitea left out with them: %v", urls(f))
+	}
+}
+
+// TestSignInChangeSwitchesAIOff (G43, §8.1 "AI support"): a sign-in
+// change that makes an inheriting instance's rule certificate-only — the
+// default set to YubiKey + certificate — switches its companion off
+// first, audited ai.disable "sign-in needs a client certificate"; the
+// gate file then no longer lists it.
+func TestSignInChangeSwitchesAIOff(t *testing.T) {
+	a := newInstAIFixture(t, nil)
+	a.enable(t, "aiapp")
+	ctx := context.Background()
+	if err := a.h.SetAISupport(ctx, "aiapp", "tok", true, root); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.h.SetTemplateEnabled(ctx, certOnlyTemplate, true, root); err != nil {
+		t.Fatal(err)
+	}
+	if c := a.companion("aiapp", "tok"); !c.Enabled {
+		t.Fatal("companion not on")
+	}
+	a.h.mu.RLock()
+	inherits := a.h.st.Instances["aiapp"].SignInTemplate == ""
+	a.h.mu.RUnlock()
+	if !inherits {
+		t.Fatal("aiapp doesn't inherit the default")
+	}
+	ch, err := a.h.SetDefaultTemplate(ctx, certOnlyTemplate, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := a.companion("aiapp", "tok"); c.Enabled {
+		t.Errorf("AI still on after the default became certificate-only: %+v", c)
+	}
+	if !slices.ContainsFunc(ch.Warnings, func(w string) bool { return strings.Contains(w, "aiapp") }) {
+		t.Errorf("warnings = %v", ch.Warnings)
+	}
+	if e := a.audits("ai.disable"); len(e) != 1 || e[0].Detail != aiCertOffDetail || aiCertOffDetail != "sign-in needs a client certificate" {
+		t.Errorf("audit = %+v", e)
+	}
+	a.h.mu.RLock()
+	certOnly := a.h.certOnlyLocked(a.h.findLocked("aiapp"))
+	a.h.mu.RUnlock()
+	if !certOnly {
+		t.Error("aiapp isn't certificate-only after the change")
+	}
+	// Switching it on again is refused (409).
+	if err := a.h.SetAISupport(ctx, "aiapp", "tok", true, root); statusOf(err) != 409 {
+		t.Errorf("AI on under a certificate-only default = %v, want 409", err)
+	}
+	a.h.Wait()
+}
+
 func TestGateFileResources(t *testing.T) {
 	g := newGateFixture(t, nil)
 	f := g.build(t)
@@ -260,13 +402,10 @@ func TestGateFileResources(t *testing.T) {
 	if r == nil {
 		t.Fatalf("no gitea resource: %v", urls(f))
 	}
-	g.h.mu.RLock()
-	wantLoA := g.h.gateLoALocked(g.h.findLocked("gitea"))
-	g.h.mu.RUnlock()
 	if r.Scope != "mcp:gitea.gitea" || r.Kind != aigate.KindCompanion || r.Instance != "gitea" || r.Companion != "gitea" ||
 		r.Label != "Gitea" || r.Host != "gitea.example.com" || !slices.Equal(r.Hosts, []string{"gitea.example.com"}) ||
 		r.AppURL != "https://gitea.example.com" || r.Upstream != "http://portcullis-mcp-gitea--gitea:8080/mcp" ||
-		r.MinLoA != wantLoA || r.Mode != "read_write" || !r.Aggregate ||
+		r.Mode != "read_write" || !r.Aggregate ||
 		!slices.Equal(r.Protocol, []string{"2026-07-28", "2025-11-25"}) {
 		t.Errorf("gitea resource = %+v", *r)
 	}
@@ -286,11 +425,11 @@ func TestGateFileResources(t *testing.T) {
 		t.Errorf("aggregate = %+v", all)
 	}
 	adm := resourceByURL(f, "https://hub.example.com/mcp")
-	if adm == nil || adm.Scope != "mcp:portcullis.admin" || adm.Kind != aigate.KindAdmin || !slices.Equal(adm.Population, []string{"root"}) || adm.MinLoA != 2 {
+	if adm == nil || adm.Scope != "mcp:portcullis.admin" || adm.Kind != aigate.KindAdmin || !slices.Equal(adm.Population, []string{"root"}) {
 		t.Errorf("admin = %+v", adm)
 	}
 	ppl := resourceByURL(f, "https://people.example.com/mcp")
-	if ppl == nil || ppl.Scope != "mcp:portcullis.people" || ppl.Kind != aigate.KindPeople || !ppl.Aggregate || ppl.MinLoA != 2 ||
+	if ppl == nil || ppl.Scope != "mcp:portcullis.people" || ppl.Kind != aigate.KindPeople || !ppl.Aggregate ||
 		!slices.Equal(ppl.Population, all.Population) {
 		t.Errorf("people = %+v", ppl)
 	}
@@ -505,8 +644,8 @@ func TestGateFileFollowsSettings(t *testing.T) {
 	if !slices.Equal(f.AllowedOrigins, []string{"https://a.example.org", "https://b.example.org:8443"}) {
 		t.Errorf("origins = %v", f.AllowedOrigins)
 	}
-	if f.ACRLoA["public"] != 0 || f.ACRLoA["pwd"] != 1 || f.ACRLoA["hwk"] != 2 || f.ACRLoA["mtls"] != 3 || len(f.ACRLoA) != 4 {
-		t.Errorf("acr_loa = %v", f.ACRLoA)
+	if f.Version != 2 || !slices.Equal(f.Methods, []string{"passkey_device", "passkey_synced", "security_key", "yubikey_cert"}) {
+		t.Errorf("version %d methods = %v", f.Version, f.Methods)
 	}
 	if !slices.Contains(f.CoreHosts, "mcp.example.com") || !slices.Contains(f.CoreHosts, "example.com") {
 		t.Errorf("core hosts = %v", f.CoreHosts)

@@ -103,7 +103,7 @@ func (h *Hub) myAppAILocked(t *templates.Template) *MyAppAI {
 	if len(switches) == 0 {
 		return nil
 	}
-	loa := h.gateLoALocked(t)
+	certOnly := h.certOnlyLocked(t)
 	var out []MyCompanion
 	for i := range t.Manifest.AI.MCP {
 		c := &t.Manifest.AI.MCP[i]
@@ -111,7 +111,7 @@ func (h *Hub) myAppAILocked(t *templates.Template) *MyAppAI {
 		if !ok || !sw.Enabled {
 			continue
 		}
-		host, why := companionUsable(t, c, sw, loa)
+		host, why := companionUsable(t, c, sw, certOnly)
 		if why != "" {
 			continue
 		}

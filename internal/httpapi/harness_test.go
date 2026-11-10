@@ -1031,7 +1031,7 @@ func (f *harnessFreshAuth) Verify(_ context.Context, p freshauth.Proof, user str
 	case c.user != user:
 		return nil, &freshauth.Error{Reason: "username mismatch"}
 	}
-	return &freshauth.Result{User: user, AuthTime: time.Now(), AMR: []string{"hwk"}}, nil
+	return &freshauth.Result{User: user, AuthTime: time.Now(), Method: "security_key"}, nil
 }
 
 // authorizePage is the fake Keycloak authorize endpoint: every parameter
@@ -1043,8 +1043,12 @@ func (f *harnessFreshAuth) authorizePage(w http.ResponseWriter, r *http.Request)
 	q := r.URL.Query()
 	info := f.Info()
 	want := map[string]string{"response_type": "code", "client_id": info.ClientID, "redirect_uri": info.RedirectURI, "scope": "openid",
-		"prompt": "login", "max_age": "0", "acr_values": "hwk", "code_challenge_method": "S256"}
+		"prompt": "login", "max_age": "0", "code_challenge_method": "S256"}
 	var bad []string
+	// Sign-in methods (contract §5.1): the popup sends no acr_values.
+	if q.Has("acr_values") {
+		bad = append(bad, "acr_values present (want none)")
+	}
 	for _, k := range slices.Sorted(maps.Keys(want)) {
 		if q.Get(k) != want[k] {
 			bad = append(bad, fmt.Sprintf("%s=%q (want %q)", k, q.Get(k), want[k]))
@@ -1088,7 +1092,7 @@ func (f *harnessFreshAuth) authorizePage(w http.ResponseWriter, r *http.Request)
 	fmt.Fprintf(w, `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Fake sign-in</title>
 %s</head>
 <body style="font-family:sans-serif;background:#0f172a;color:#e2e8f0;padding:2rem">
-<h1>Fake Keycloak (harness)</h1><p>prompt=login · max_age=0 · acr_values=hwk · PKCE S256 · signing in as <b>%s</b></p>
+<h1>Fake Keycloak (harness)</h1><p>prompt=login · max_age=0 · PKCE S256 · signing in as <b>%s</b></p>
 <p><a id="approve" style="color:#60a5fa" href="%s">Touch your passkey (fake)</a> · <a id="deny" style="color:#94a3b8" href="%s">Cancel</a></p>
 <p>Continuing by itself in 2 seconds (unless the harness_hold cookie is 1).</p></body></html>`,
 		refresh, html.EscapeString(user), html.EscapeString(back), html.EscapeString(cancel))

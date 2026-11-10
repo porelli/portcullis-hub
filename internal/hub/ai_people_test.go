@@ -277,13 +277,13 @@ func TestMyAppsAIAggregateFlag(t *testing.T) {
 // TestCompanionUsable: the gate's per-companion check, shared with My
 // apps — an identity_headers companion without a caller secret, an
 // unknown identity, an owed revoke_all, a pruned one, a mode outside its
-// modes, LoA 3 and a missing host are all left out.
+// modes, a certificate-only rule and a missing host are all left out.
 func TestCompanionUsable(t *testing.T) {
 	a := newMyAIFixture(t, nil)
 	tm := a.h.Template("aiapp")
 	ok := state.AICompanion{Enabled: true, Mode: "read_only"}
 	hdr := *companionOf(tm, "hdr")
-	if host, why := companionUsable(tm, &hdr, ok, 2); why != "" || host != "aiapp.example.com" {
+	if host, why := companionUsable(tm, &hdr, ok, false); why != "" || host != "aiapp.example.com" {
 		t.Fatalf("hdr = %q %q", host, why)
 	}
 	noSecret := hdr
@@ -294,24 +294,24 @@ func TestCompanionUsable(t *testing.T) {
 		name string
 		c    *templates.Companion
 		sw   state.AICompanion
-		loa  int
+		cert bool
 		want string
 	}{
-		{"no caller secret", &noSecret, ok, 2, "no caller secret"},
-		{"unknown identity", &unknown, ok, 2, "unknown identity mode"},
-		{"revoke pending", &hdr, state.AICompanion{Enabled: true, Mode: "read_only", RevokePending: true}, 2, "revoke_all"},
-		{"pruned", &hdr, state.AICompanion{Enabled: true, Mode: "read_only", Pruned: true}, 2, "template update"},
-		{"mode", &hdr, state.AICompanion{Enabled: true, Mode: "read_write"}, 2, "not one of its modes"},
-		{"certificate-only", &hdr, ok, 3, "needs a client certificate on every sign-in"},
+		{"no caller secret", &noSecret, ok, false, "no caller secret"},
+		{"unknown identity", &unknown, ok, false, "unknown identity mode"},
+		{"revoke pending", &hdr, state.AICompanion{Enabled: true, Mode: "read_only", RevokePending: true}, false, "revoke_all"},
+		{"pruned", &hdr, state.AICompanion{Enabled: true, Mode: "read_only", Pruned: true}, false, "template update"},
+		{"mode", &hdr, state.AICompanion{Enabled: true, Mode: "read_write"}, false, "not one of its modes"},
+		{"certificate-only", &hdr, ok, true, "needs a client certificate on every sign-in"},
 	}
 	for _, c := range cases {
-		if _, why := companionUsable(tm, c.c, c.sw, c.loa); !strings.Contains(why, c.want) {
+		if _, why := companionUsable(tm, c.c, c.sw, c.cert); !strings.Contains(why, c.want) {
 			t.Errorf("%s: why = %q, want %q", c.name, why, c.want)
 		}
 	}
 	noHost := hdr
 	noHost.Router = "nope"
-	if _, why := companionUsable(tm, &noHost, ok, 2); why != "its router has no hostname" {
+	if _, why := companionUsable(tm, &noHost, ok, false); why != "its router has no hostname" {
 		t.Errorf("no host: %q", why)
 	}
 }

@@ -27,7 +27,7 @@ type confirmFA struct {
 	mu       sync.Mutex
 	base     string
 	authTime time.Time // zero: now − 10 s
-	amr      []string  // nil: hwk
+	method   string    // "": security_key (pc_fresh)
 	err      error
 	calls    int
 }
@@ -46,19 +46,19 @@ func (f *confirmFA) Verify(_ context.Context, p freshauth.Proof, user string) (*
 	if p.Code != "good-code" {
 		return nil, &freshauth.Error{Reason: "code exchange failed"}
 	}
-	at, amr := f.authTime, f.amr
+	at, method := f.authTime, f.method
 	if at.IsZero() {
 		at = time.Now().Add(-10 * time.Second)
 	}
-	if amr == nil {
-		amr = []string{"hwk"}
+	if method == "" {
+		method = "security_key"
 	}
-	return &freshauth.Result{User: user, AuthTime: at, AMR: amr}, nil
+	return &freshauth.Result{User: user, AuthTime: at, Method: method}, nil
 }
 
-func (f *confirmFA) set(at time.Time, amr []string, err error) {
+func (f *confirmFA) set(at time.Time, method string, err error) {
 	f.mu.Lock()
-	f.authTime, f.amr, f.err = at, amr, err
+	f.authTime, f.method, f.err = at, method, err
 	f.mu.Unlock()
 }
 
@@ -391,9 +391,9 @@ func TestConfirmTypedIsLabel(t *testing.T) {
 
 // TestConfirmApprove (§15.6, §5.1, G11, G75): a wrong typed check → 409
 // "type AI App to confirm", nothing recorded, no proof checked; a fresh
-// proof (auth_time now − 10 s, amr hwk) → approved, audited ai.confirm
+// proof (auth_time now − 10 s, pc_fresh security_key) → approved, audited ai.confirm
 // approved with the digest, never the arguments; auth_time 301 s ago,
-// amr file, a refused proof or a sign-in from more than 60 s before the
+// a pc_fresh method that is switched off or not a passkey, a refused proof or a sign-in from more than 60 s before the
 // request → 403 "a fresh passkey sign-in is required" (audited
 // refused); a decline needs no passkey; a decided one → 409 {state};
 // expiry audited expired by the sweeper.
@@ -427,19 +427,19 @@ func TestConfirmApprove(t *testing.T) {
 	for _, c := range []struct {
 		name string
 		at   time.Time
-		amr  []string
+		meth string
 		err  error
 		code string
 	}{
-		{"301 s ago", time.Now().Add(-301 * time.Second), nil, nil, "good-code"},
-		{"amr file", time.Time{}, []string{"file"}, nil, "good-code"},
-		{"amr hwk+file", time.Time{}, []string{"hwk", "file"}, nil, "good-code"},
-		{"amr pwd", time.Time{}, []string{"pwd"}, nil, "good-code"},
-		{"before the request", time.Now().Add(-61 * time.Second), nil, nil, "good-code"},
-		{"refused proof", time.Time{}, nil, nil, "bad-code"},
-		{"verifier error", time.Time{}, nil, &freshauth.Error{Reason: "nonce mismatch"}, "good-code"},
+		{"301 s ago", time.Now().Add(-301 * time.Second), "", nil, "good-code"},
+		{"pc_fresh password", time.Time{}, "password", nil, "good-code"},
+		{"pc_fresh browser_cert", time.Time{}, "browser_cert", nil, "good-code"},
+		{"pc_fresh inv", time.Time{}, "inv", nil, "good-code"},
+		{"before the request", time.Now().Add(-61 * time.Second), "", nil, "good-code"},
+		{"refused proof", time.Time{}, "", nil, "bad-code"},
+		{"verifier error", time.Time{}, "", &freshauth.Error{Reason: "nonce mismatch"}, "good-code"},
 	} {
-		e.people.set(c.at, c.amr, c.err)
+		e.people.set(c.at, c.meth, c.err)
 		if code, b := post(id, decision("approve", "AI App", c.code)); code != 403 || b != freshauth.Message {
 			t.Errorf("%s = %d %s", c.name, code, b)
 		}
@@ -455,7 +455,7 @@ func TestConfirmApprove(t *testing.T) {
 	}
 	// Fresh: approved (the Hub listener's verifier is never asked).
 	nextMinute()
-	e.people.set(time.Now().Add(-10*time.Second), []string{"hwk"}, nil)
+	e.people.set(time.Now().Add(-10*time.Second), "security_key", nil)
 	hubCalls := e.hubFA.n()
 	if code, b := post(id, decision("approve", " AI App ", "good-code")); code != 200 || b != `{"state":"approved"}` {
 		t.Fatalf("approve = %d %s", code, b)
@@ -479,7 +479,7 @@ func TestConfirmApprove(t *testing.T) {
 	}
 	// A sign-in 59 s before the request is still fine.
 	id2 := e.create(t, "alice", "delete_tag", args)
-	e.people.set(time.Now().Add(-59*time.Second), nil, nil)
+	e.people.set(time.Now().Add(-59*time.Second), "", nil)
 	if code, b := post(id2, decision("approve", "AI App", "good-code")); code != 200 {
 		t.Errorf("59 s before = %d %s", code, b)
 	}

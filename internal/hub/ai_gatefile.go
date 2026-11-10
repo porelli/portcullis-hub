@@ -23,6 +23,7 @@ import (
 	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/lldap"
 	"github.com/portcullis/hub/internal/policy"
+	"github.com/portcullis/hub/internal/signin"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
 )
@@ -178,8 +179,8 @@ func (h *Hub) gateFile(m *directory.Membership, healthy map[string]bool, prev ma
 	}
 	ai := h.st.AI
 	f := &aigate.File{
-		Version: 1, Issuer: aigate.Issuer(domain), MainDomain: domain,
-		Clients: []string{}, AllowedOrigins: []string{}, ACRLoA: aigate.ACRLoA(),
+		Version: aigate.FileVersion, Issuer: aigate.Issuer(domain), MainDomain: domain,
+		Clients: []string{}, AllowedOrigins: []string{}, Methods: h.gateMethodsLocked(),
 		Limits: aigate.Limits{
 			ResourceRPM: ai.Limits.ResourceRPM, ResourceBurst: ai.Limits.ResourceBurst, PersonRPM: ai.Limits.PersonRPM,
 			ToolCallsRPM: ai.Limits.ToolCallsRPM, ConfirmationsPerHour: ai.Limits.ConfirmationsPerHour,
@@ -241,8 +242,17 @@ func (h *Hub) gateFile(m *directory.Membership, healthy map[string]bool, prev ma
 		}
 	}
 	// The fixed resources: everyone (the service account is never in a
-	// Membership), lldap_admin members for the admin resource.
-	fixed := func(r aigate.Resource, group string) {
+	// Membership), lldap_admin members for the admin resource. Their rule
+	// is a core page's template (§8.1): people for the people resource,
+	// hub for the admin and aggregate ones; one that can't be published
+	// leaves the resource out (fail closed).
+	fixed := func(r aigate.Resource, group, page string) {
+		rule, ok := h.coreRuleLocked(page)
+		if !ok {
+			log.Printf("mcp-gate: %s left out of mcp-gate.json: the %s core page's sign-in template can't be published", r.URL, page)
+			return
+		}
+		r.Rule = rule
 		if m == nil {
 			if !gp.kept(&r) {
 				log.Printf("mcp-gate: %s left out of mcp-gate.json: the directory is unavailable and the last file doesn't list it", r.URL)
@@ -256,15 +266,37 @@ func (h *Hub) gateFile(m *directory.Membership, healthy map[string]bool, prev ma
 		}
 		f.Resources = append(f.Resources, r)
 	}
-	fixed(fixedResource(aigate.KindAggregate, aigate.AggregateURL(domain), aigate.ScopeAll, aigate.LabelAggregate, "mcp."+domain, people, false), "")
+	fixed(fixedResource(aigate.KindAggregate, aigate.AggregateURL(domain), aigate.ScopeAll, aigate.LabelAggregate, "mcp."+domain, people, false), "", "hub")
 	if ai.PortcullisAdmin && len(admin) > 0 {
-		fixed(fixedResource(aigate.KindAdmin, aigate.AdminURL(domain), aigate.ScopeAdmin, aigate.LabelAdmin, "hub."+domain, admin, false), lldap.AdminGroup)
+		fixed(fixedResource(aigate.KindAdmin, aigate.AdminURL(domain), aigate.ScopeAdmin, aigate.LabelAdmin, "hub."+domain, admin, false), lldap.AdminGroup, "hub")
 	}
 	if ai.PortcullisPeople {
-		fixed(fixedResource(aigate.KindPeople, aigate.PeopleURL(domain), aigate.ScopePeople, aigate.LabelPeople, "people."+domain, people, true), "")
+		fixed(fixedResource(aigate.KindPeople, aigate.PeopleURL(domain), aigate.ScopePeople, aigate.LabelPeople, "people."+domain, people, true), "", "people")
 	}
 	sort.Slice(f.Resources, func(i, j int) bool { return f.Resources[i].URL < f.Resources[j].URL })
 	return f, secrets, nil
+}
+
+// gateMethodsLocked is mcp-gate.json's methods: the switched-on method
+// ids, sorted (§15.4). Caller holds mu.
+func (h *Hub) gateMethodsLocked() []string {
+	out := []string{}
+	for _, m := range h.methodsOnLocked() {
+		out = append(out, string(m))
+	}
+	sort.Strings(out)
+	return out
+}
+
+// coreRuleLocked is core page key's compiled rule (its pick, "" = the
+// default; §8.1 "Core pages"); false when that template can't be
+// published (disabled, gone or unmeetable). Caller holds mu.
+func (h *Hub) coreRuleLocked(key string) (signin.Node, bool) {
+	id := h.st.SignIn.Core[key]
+	if id == "" {
+		id = h.st.SignIn.Default
+	}
+	return h.compiledLocked(id)
 }
 
 // instanceBusyLocked: the instance is being deleted or restored (never
@@ -296,9 +328,10 @@ func (h *Hub) companionResourcesLocked(t *templates.Template, gp gatePeople, f *
 	skip := func(c string, why string) {
 		log.Printf("mcp-gate: companion %s/%s left out of mcp-gate.json: %s", t.ID, c, why)
 	}
-	// Gate file v1's min_loa (Task 7's v2 publishes the compiled rule):
-	// 2, or 3 for a certificate-only template — never published (below).
-	loa := h.gateLoALocked(t)
+	// Gate file v2: the instance's compiled template (§8.1 "AI support");
+	// certificate-only or unpublishable — never published (below).
+	acc := h.accessLocked(t)
+	certOnly := acc.certOnly()
 	var hosts []string
 	for _, hst := range t.Hosts {
 		if n := NormalizeHost(hst); n != "" {
@@ -322,6 +355,15 @@ func (h *Hub) companionResourcesLocked(t *templates.Template, gp gatePeople, f *
 		population = validUsers(users)
 	}
 	group := accessGroupOf(t)
+	rule := acc.Rule
+	if rule == nil && !certOnly && why != "" {
+		// No Portcullis sign-in (sign_in native, no identity): listed
+		// with nobody, under the default's rule (no one can meet a
+		// population that is empty).
+		if c, ok := h.compiledLocked(h.st.SignIn.Default); ok {
+			rule = &c
+		}
+	}
 	var out []aigate.Resource
 	for i := range t.Manifest.AI.MCP {
 		c := &t.Manifest.AI.MCP[i]
@@ -329,7 +371,10 @@ func (h *Hub) companionResourcesLocked(t *templates.Template, gp gatePeople, f *
 		if !on || !sw.Enabled || c.Identity.Mode == templates.IdentityAppOAuth {
 			continue
 		}
-		host, unusable := companionUsable(t, c, sw, loa)
+		host, unusable := companionUsable(t, c, sw, certOnly)
+		if unusable == "" && rule == nil {
+			unusable = "no sign-in rule can be published for it"
+		}
 		if unusable != "" {
 			skip(c.Name, unusable)
 			continue
@@ -337,7 +382,7 @@ func (h *Hub) companionResourcesLocked(t *templates.Template, gp gatePeople, f *
 		r := aigate.Resource{
 			URL: aigate.CompanionURL(host, c.EffectivePublicPath()), Scope: aigate.CompanionScope(t.ID, c.Name),
 			Clients: append([]string{}, clients...), Kind: aigate.KindCompanion, Instance: t.ID, Companion: c.Name,
-			Label: c.Label, Host: host, Hosts: append([]string{}, hosts...), AppURL: "https://" + host, MinLoA: loa,
+			Label: c.Label, Host: host, Hosts: append([]string{}, hosts...), AppURL: "https://" + host, Rule: *rule,
 			Upstream: aigate.Upstream(t.ID, c.Name, c.Port, c.EffectivePath()),
 			Protocol: append([]string{}, c.Protocol...), Mode: sw.Mode,
 			Tools: aigate.Tools{
@@ -397,8 +442,8 @@ func (h *Hub) companionResourcesLocked(t *templates.Template, gp gatePeople, f *
 }
 
 // companionUsable is the per-companion check of a switched-on companion
-// c of t (switch sw, the instance's gate LoA loa, gateLoALocked: 3 =
-// its sign-in template is certificate-only) shared by the gate
+// c of t (switch sw; certOnly: the instance's sign-in rule needs a
+// certificate on every alternative, access.certOnly) shared by the gate
 // file and My apps (Task 21): its router's host, or why it is left out —
 // a revoke_all still owed, pruned, a mode outside its modes, a
 // certificate-only sign-in template (AI clients present no certificate),
@@ -406,7 +451,7 @@ func (h *Hub) companionResourcesLocked(t *templates.Template, gp gatePeople, f *
 // hostname, or an identity the gate can't apply (identity_headers
 // without a caller secret, an unknown mode). app_oauth companions pass
 // with their host (the gate isn't in their path; never in the file).
-func companionUsable(t *templates.Template, c *templates.Companion, sw state.AICompanion, loa int) (host, why string) {
+func companionUsable(t *templates.Template, c *templates.Companion, sw state.AICompanion, certOnly bool) (host, why string) {
 	switch {
 	case sw.RevokePending:
 		return "", "its app-side credentials still need a revoke_all"
@@ -417,7 +462,7 @@ func companionUsable(t *templates.Template, c *templates.Companion, sw state.AIC
 		return "", "its identity mode changed since it was switched on"
 	case !slices.Contains(c.Modes, sw.Mode):
 		return "", fmt.Sprintf("mode %q is not one of its modes", sw.Mode)
-	case loa < 0 || loa > 2:
+	case certOnly:
 		return "", "the instance's sign-in template " + certRefusal
 	}
 	switch c.Identity.Mode {
@@ -450,7 +495,7 @@ func orDefault(s, d string) string {
 func fixedResource(kind, url, scope, label, host string, clients []string, aggregate bool) aigate.Resource {
 	return aigate.Resource{
 		URL: url, Scope: scope, Clients: append([]string{}, clients...), Kind: kind, Label: label, Host: host,
-		Hosts: []string{}, MinLoA: 2, Protocol: []string{}, Identity: aigate.Identity{Mode: aigate.IdentityNone},
+		Hosts: []string{}, Protocol: []string{}, Identity: aigate.Identity{Mode: aigate.IdentityNone},
 		Tools:     aigate.Tools{Writes: []string{}, Confirm: []string{}, Never: []string{}},
 		Aggregate: aggregate, Population: []string{}, Expiring: map[string]aigate.Time{},
 	}

@@ -1566,7 +1566,7 @@ func TestAISwitchOnRacesPrune(t *testing.T) {
 	if c.Identity.Mode == "identity_headers" {
 		sw.IdentityMode = "app_token"
 	}
-	if _, why := companionUsable(tpl, c, sw, 0); why == "" {
+	if _, why := companionUsable(tpl, c, sw, false); why == "" {
 		t.Error("companion stamped with another identity mode is usable")
 	}
 }

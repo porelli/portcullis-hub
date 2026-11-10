@@ -73,16 +73,23 @@ func checkFreshClient(t *testing.T, kc *kctest.Server) {
 	if len(got.AuthenticationFlowBindingOverrides) != 0 {
 		t.Errorf("flow overrides %v, want none", got.AuthenticationFlowBindingOverrides)
 	}
-	// Exactly one client mapper: preferred_username in the ID token (the
-	// profile scope, which normally carries it, is not attached).
+	// Exactly two client mappers (contract §8): preferred_username in the
+	// ID token (the profile scope, which normally carries it, is not
+	// attached) and the extension's portcullis-fresh (claim pc_fresh, ID
+	// token only: the method of this authentication, §8.1).
 	ms := kc.ClientMappers(got.ID)
 	m, ok := ms[keycloak.FreshAuthUsernameMapper]
-	if len(ms) != 1 || !ok {
-		t.Fatalf("client mappers %v, want only %s", ms, keycloak.FreshAuthUsernameMapper)
+	pf, okF := ms[keycloak.FreshAuthMethodMapper]
+	if len(ms) != 2 || !ok || !okF {
+		t.Fatalf("client mappers %v, want only %s and %s", ms, keycloak.FreshAuthUsernameMapper, keycloak.FreshAuthMethodMapper)
 	}
 	if m.ProtocolMapper != "oidc-usermodel-attribute-mapper" || m.Config["user.attribute"] != "username" ||
 		m.Config["claim.name"] != "preferred_username" || m.Config["id.token.claim"] != "true" {
 		t.Errorf("username mapper %+v", m)
+	}
+	if keycloak.FreshAuthMethodMapper != "portcullis-fresh" || pf.ProtocolMapper != "portcullis-fresh" ||
+		pf.Config["id.token.claim"] != "true" || pf.Config["access.token.claim"] != "false" || pf.Config["userinfo.token.claim"] != "false" {
+		t.Errorf("portcullis-fresh mapper %+v", pf)
 	}
 }
 
@@ -121,6 +128,20 @@ func TestEnsureFreshAuthClient(t *testing.T) {
 		cl.AuthenticationFlowBindingOverrides = map[string]string{"browser": "weak-flow"}
 	})
 	kc.AddClientMapper(id, "amr-forged", "oidc-hardcoded-claim-mapper", map[string]string{"claim.name": "amr", "claim.value": "hwk"})
+	kc.AddClientMapper(id, "fresh-forged", "oidc-hardcoded-claim-mapper", map[string]string{"claim.name": "pc_fresh", "claim.value": "security_key"})
+	// The portcullis-fresh mapper's name on a hardcoded claim: replaced.
+	for _, m := range kc.ClientMappers(id) {
+		if m.Name == keycloak.FreshAuthMethodMapper {
+			kc.UpdateClient(id, func(cl *kctest.Client) {
+				for i := range cl.ProtocolMappers {
+					if cl.ProtocolMappers[i].Name == keycloak.FreshAuthMethodMapper {
+						cl.ProtocolMappers[i].ProtocolMapper = "oidc-hardcoded-claim-mapper"
+						cl.ProtocolMappers[i].Config = map[string]string{"claim.name": "pc_fresh", "claim.value": "security_key", "id.token.claim": "true", "access.token.claim": "false", "userinfo.token.claim": "false"}
+					}
+				}
+			})
+		}
+	}
 	if err := c.EnsureFreshAuthClient(ctx, faRedirects, faOrigins); err != nil {
 		t.Fatal(err)
 	}
