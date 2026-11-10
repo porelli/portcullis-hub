@@ -25,6 +25,7 @@ func init() {
 	for k, why := range map[string]string{
 		"save_sign_in_template.rule":    "the sign-in rule (recursive JSON: groups nest, each containing method ids or more groups)",
 		"preview_sign_in_template.rule": "the sign-in rule (recursive JSON: groups nest, each containing method ids or more groups)",
+		"sign_in_impact.rule":           "the sign-in rule (recursive JSON: groups nest, each containing method ids or more groups)",
 	} {
 		mcpFreeFormAllow[k] = why
 	}
@@ -120,6 +121,31 @@ func (s *Server) registerSignInTools() {
 					return nil, badArg("invalid rule")
 				}
 				return s.previewTemplate(ctx, in.ID, hub.TemplateInput{Name: in.Name, Rule: rule})
+			},
+		},
+
+		{
+			Name:        "sign_in_impact",
+			Description: "Who a planned sign-in change would newly block, before it is made: a method switch, a template save, the default, a core page's or an app's pick (exactly one). Nothing changes.",
+			Class:       ClassRead,
+			Scope:       ScopeAdmin,
+			Twin:        "POST /api/signin/impact",
+			In:          &signInImpactArgs{},
+			Run: func(ctx context.Context, c *directory.Caller, args json.RawMessage) (any, error) {
+				in, err := decode[signInImpactArgs](args)
+				if err != nil {
+					return nil, badArg("invalid arguments")
+				}
+				d := hub.SignInDraft{Method: signin.Method(in.Method), On: in.On, Template: in.Template, Name: in.Name, Create: in.Create,
+					Default: in.Default, CoreKey: in.CoreKey, Core: in.Core, Instance: in.Instance, Pick: in.Pick}
+				if len(in.Rule) > 0 {
+					var rule signin.Node
+					if err := json.Unmarshal(in.Rule, &rule); err != nil {
+						return nil, badArg("invalid rule")
+					}
+					d.Rule = &rule
+				}
+				return s.signInImpact(ctx, d)
 			},
 		},
 
@@ -254,6 +280,19 @@ type (
 		ID   string          `json:"id,omitempty" jsonschema:"the template id (for an existing template; shows what it affects)"`
 		Name string          `json:"name" jsonschema:"the template's name"`
 		Rule json.RawMessage `json:"rule" jsonschema:"the sign-in rule"`
+	}
+	signInImpactArgs struct {
+		Method   string          `json:"method,omitempty" jsonschema:"a method switch: the method id (with on)"`
+		On       bool            `json:"on,omitempty" jsonschema:"a method switch: true = on, false = off"`
+		Template string          `json:"template,omitempty" jsonschema:"a template save: its id (with name and rule)"`
+		Name     string          `json:"name,omitempty" jsonschema:"a template save: its name"`
+		Rule     json.RawMessage `json:"rule,omitempty" jsonschema:"a template save: its rule"`
+		Create   bool            `json:"create,omitempty" jsonschema:"a template save: true for a new template"`
+		Default  *string         `json:"default,omitempty" jsonschema:"the default: the template id"`
+		CoreKey  string          `json:"core_page,omitempty" jsonschema:"a core page's pick: the page (portal, hub, people, directory, enroll, metrics, traefik; with core)"`
+		Core     *string         `json:"core,omitempty" jsonschema:"a core page's pick: the template id, empty = the default"`
+		Instance string          `json:"instance,omitempty" jsonschema:"an app's pick: the instance id (with pick)"`
+		Pick     *string         `json:"pick,omitempty" jsonschema:"an app's pick: the template id, empty = the default"`
 	}
 	signInDefaultArgs struct {
 		Template string `json:"template" jsonschema:"the template id to set as default"`

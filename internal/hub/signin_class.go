@@ -28,18 +28,19 @@ func (h *Hub) SignInState() *SignInView {
 // switch (Method, On), a template save (Template, Name, Rule, Create), the
 // default (Default), a core page's pick (CoreKey, Core: "" = the default)
 // or an instance's pick (Instance, Pick: "" = the default).
+// It is also the body of POST /api/signin/impact.
 type SignInDraft struct {
-	Method   signin.Method
-	On       bool
-	Template string
-	Name     string
-	Rule     *signin.Node
-	Create   bool
-	Default  *string
-	CoreKey  string
-	Core     *string
-	Instance string
-	Pick     *string
+	Method   signin.Method `json:"method,omitempty"`
+	On       bool          `json:"on,omitempty"`
+	Template string        `json:"template,omitempty"`
+	Name     string        `json:"name,omitempty"`
+	Rule     *signin.Node  `json:"rule,omitempty"`
+	Create   bool          `json:"create,omitempty"`
+	Default  *string       `json:"default,omitempty"`
+	CoreKey  string        `json:"core_page,omitempty"`
+	Core     *string       `json:"core,omitempty"`
+	Instance string        `json:"instance,omitempty"`
+	Pick     *string       `json:"pick,omitempty"`
 }
 
 // SignInImpact is who a draft newly blocks: people its uses apply to who
@@ -48,8 +49,8 @@ type SignInDraft struct {
 // worked out ("" = it was): Users & Groups or the inventory unreadable, or
 // people whose methods the inventory doesn't have.
 type SignInImpact struct {
-	Affected []AffectedApp
-	Unknown  string
+	Affected []AffectedApp `json:"affected"`
+	Unknown  string        `json:"unknown"`
 }
 
 // PrecheckSignIn refuses a draft its twin route would refuse for its

@@ -677,6 +677,7 @@ var adminToolFixtures = []struct {
 	{"set_sign_in_template_enabled", map[string]any{"id": "test", "on": false}},
 	{"delete_sign_in_template", map[string]any{"id": "test"}},
 	{"preview_sign_in_template", map[string]any{"name": "Preview", "rule": map[string]any{"op": "any", "items": []string{"security_key"}}}},
+	{"sign_in_impact", map[string]any{"default": "strong"}},
 	{"set_default_template", map[string]any{"template": "standard"}},
 	{"set_core_template", map[string]any{"key": "hub", "template": "standard"}},
 	{"set_add_stronger", map[string]any{"on": false}},

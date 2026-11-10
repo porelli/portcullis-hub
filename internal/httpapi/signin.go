@@ -22,6 +22,7 @@ func (s *Server) registerSignIn(mux routeMux) {
 	mux.HandleFunc("PUT /api/signin/templates/{id}/enabled", s.handleSetTemplateEnabled)
 	mux.HandleFunc("DELETE /api/signin/templates/{id}", s.handleDeleteTemplate)
 	mux.HandleFunc("POST /api/signin/templates/preview", s.handlePreviewTemplate)
+	mux.HandleFunc("POST /api/signin/impact", s.handleSignInImpact)
 	mux.HandleFunc("PUT /api/signin/default", s.handleSetDefault)
 	mux.HandleFunc("PUT /api/signin/core/{key}", s.handleSetCore)
 	mux.HandleFunc("PUT /api/signin/add-stronger", s.handleSetAddStronger)
@@ -185,6 +186,28 @@ func (s *Server) handlePreviewTemplate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, preview)
 }
 
+// handleSignInImpact: POST /api/signin/impact SignInDraft → SignInImpact,
+// who the change would newly block (hub.NewlyBlocked) before it is made.
+// Read-only; a draft its twin route would refuse is refused alike
+// (PrecheckSignIn), so the answer never describes a change that can't be
+// made.
+func (s *Server) handleSignInImpact(w http.ResponseWriter, r *http.Request) {
+	if !s.signInAdmin(w, r) {
+		return
+	}
+	var d hub.SignInDraft
+	if !decodeStrict(w, r, &d, signInUsage) {
+		return
+	}
+	imp, err := s.signInImpact(r.Context(), d)
+	if err != nil {
+		writeErr(w, err, http.StatusInternalServerError)
+		return
+	}
+	noStore(w)
+	writeJSON(w, imp)
+}
+
 // handleSetDefault: PUT /api/signin/default {template} → SignInChange.
 func (s *Server) handleSetDefault(w http.ResponseWriter, r *http.Request) {
 	if !s.signInAdmin(w, r) {
@@ -295,6 +318,16 @@ func (s *Server) deleteTemplate(ctx context.Context, a directory.Actor, id strin
 func (s *Server) previewTemplate(ctx context.Context, id string, in hub.TemplateInput) (*hub.TemplatePreview, error) {
 	s.rec("PreviewTemplate", id, in)
 	return s.Hub.PreviewTemplate(ctx, id, in)
+}
+
+// signInImpact: the draft's refusals first, then who it newly blocks
+// (route and sign_in_impact).
+func (s *Server) signInImpact(ctx context.Context, d hub.SignInDraft) (*hub.SignInImpact, error) {
+	s.rec("NewlyBlocked", d)
+	if err := s.Hub.PrecheckSignIn(d); err != nil {
+		return nil, err
+	}
+	return s.Hub.NewlyBlocked(ctx, d), nil
 }
 
 // setDefaultTemplate is the default template save (route and set_default_template).

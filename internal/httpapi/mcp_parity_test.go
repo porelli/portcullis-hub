@@ -278,7 +278,7 @@ func TestToolParity(t *testing.T) {
 		}
 	}
 	// R (sign-in Task 6).
-	for _, n := range []string{"get_sign_in", "get_instance_sign_in", "preview_sign_in_template"} {
+	for _, n := range []string{"get_sign_in", "get_instance_sign_in", "preview_sign_in_template", "sign_in_impact"} {
 		if byName[n].Class != ClassRead {
 			t.Errorf("tool %s: class %q, want R", n, byName[n].Class)
 		}
@@ -295,7 +295,7 @@ func TestToolParity(t *testing.T) {
 var adminSignIn = []string{
 	"get_sign_in", "get_instance_sign_in", "preview_sign_in_template", "set_sign_in_method", "save_sign_in_template",
 	"set_sign_in_template_enabled", "delete_sign_in_template", "set_default_template", "set_core_template",
-	"set_sign_in_template", "set_add_stronger",
+	"set_sign_in_template", "set_add_stronger", "sign_in_impact",
 }
 
 // admin20 are the doctor and shared-folder tools of T20.
