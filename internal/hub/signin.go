@@ -205,7 +205,8 @@ func templateOrder(si state.SignIn) []string {
 }
 
 // usesLocked lists what uses template id under si: the default, core pages
-// that pick it, and every instance (enabled or not) whose own pick it is.
+// that pick it, and every instance (enabled or not) whose own pick it is —
+// or whose pre-restore pick it is while a restore runs.
 func (h *Hub) usesLocked(si state.SignIn, id string) []UseRef {
 	out := []UseRef{}
 	if si.Default == id {
@@ -217,7 +218,10 @@ func (h *Hub) usesLocked(si state.SignIn, id string) []UseRef {
 		}
 	}
 	for _, iid := range slices.Sorted(maps.Keys(h.st.Instances)) {
-		if h.st.Instances[iid].SignInTemplate != id {
+		e := h.st.Instances[iid]
+		// A restoring instance's pre-restore pick too: its rollback puts
+		// it back.
+		if e.SignInTemplate != id && !(e.State == state.InstanceRestoring && e.PreRestorePick == id) {
 			continue
 		}
 		name := iid

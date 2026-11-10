@@ -484,7 +484,9 @@ func (h *Hub) markRestoring(id, preArchive string) error {
 	}
 	prev, had := h.st.Instances[id]
 	enabled := h.st.IsEnabled(id)
-	e.State, e.Backup = state.InstanceRestoring, preArchive
+	// The pick the rollback would put back stays in use until the
+	// restore ends (usesLocked): its template can't be disabled meanwhile.
+	e.State, e.Backup, e.PreRestorePick = state.InstanceRestoring, preArchive, e.SignInTemplate
 	h.st.Instances[id] = e
 	h.st.SetEnabled(id, false)
 	err := h.st.Save(h.statePath())
@@ -517,7 +519,7 @@ func (h *Hub) clearRestoring(id, keep string) error {
 	if !ok || e.State != state.InstanceRestoring {
 		return nil
 	}
-	e.State, e.Backup = keep, ""
+	e.State, e.Backup, e.PreRestorePick = keep, "", ""
 	if e.Template == id && len(e.Hosts) == 0 && keep == "" && !e.HoldsIdentity() {
 		delete(h.st.Instances, id)
 	} else {
@@ -884,6 +886,11 @@ func (h *Hub) applyRestore(ctx context.Context, id string, sb *staged, plan []vo
 	h.markOAuthReplay(oauthRefs)
 	if err := errors.Join(secretsErr, envErr, saveErr, voidErr); err != nil {
 		return air, err
+	}
+	if h.testHookApplyRestore != nil {
+		if err := h.testHookApplyRestore("applied"); err != nil {
+			return air, err
+		}
 	}
 	rep.Done(StepConfig)
 	if err := ctx.Err(); err != nil {

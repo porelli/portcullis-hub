@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -526,6 +527,69 @@ func TestRestorePickDisabledMidRestore(t *testing.T) {
 	f.h.mu.RUnlock()
 	if had || f.h.Template("grafana-c") != nil {
 		t.Error("restore-as not undone")
+	}
+}
+
+// Fix round 2: while a same-instance restore runs, the pre-restore pick
+// stays in use. A late failure after the archive's pick was stored rolls
+// back to the old pick; disabling its template mid-restore is refused
+// (409, in use), so the rollback can store it again.
+func TestRestoreKeepsPreRestorePickInUse(t *testing.T) {
+	f := newInstanceFixture(t, nil)
+	simulateCompose(f, 0)
+	f.h.mu.Lock()
+	addTemplateLocked(f.h, "old", siLeaves("any", "security_key"))
+	f.h.mu.Unlock()
+	if err := f.h.CreateInstance("grafana", "grafana-b", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.h.Enable("grafana-b"); err != nil {
+		t.Fatal(err)
+	}
+	entry, err := f.h.BackupInstance("grafana-b", directory.Human("root"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The archive is on the default; the instance now picks "old".
+	if _, err := f.h.SaveSettings("grafana-b", SettingsUpdate{SignInTemplate: pickTemplate("old")}, siAdmin); err != nil {
+		t.Fatal(err)
+	}
+	f.h.Wait()
+	var disableErr error
+	fired := false
+	f.h.testHookApplyRestore = func(stage string) error {
+		if stage != "applied" || fired {
+			return nil
+		}
+		fired = true
+		f.h.mu.RLock()
+		cur := f.h.st.Instances["grafana-b"].SignInTemplate
+		f.h.mu.RUnlock()
+		if cur != "" {
+			t.Errorf("the archive's pick isn't stored yet: %q", cur)
+		}
+		_, disableErr = f.h.SetTemplateEnabled(context.Background(), "old", false, siAdmin)
+		return errors.New("injected late failure")
+	}
+	if _, err := f.h.RestoreInstance("grafana-b", entry.Archive, directory.Human("root")); err == nil {
+		t.Fatal("the restore didn't fail")
+	}
+	f.h.Wait()
+	if statusOf(disableErr) != 409 || !strings.Contains(disableErr.Error(), "in use") {
+		t.Errorf("disabling the pre-restore pick's template mid-restore = %v", disableErr)
+	}
+	f.h.mu.RLock()
+	e := f.h.st.Instances["grafana-b"]
+	f.h.mu.RUnlock()
+	if e.SignInTemplate != "old" || e.State != "" || e.PreRestorePick != "" || !f.h.IsEnabled("grafana-b") {
+		t.Errorf("after the rollback: %+v enabled %v", e, f.h.IsEnabled("grafana-b"))
+	}
+	// Out of the restore, "old" is used by the pick only.
+	if _, err := f.h.SaveSettings("grafana-b", SettingsUpdate{SignInTemplate: pickTemplate("")}, siAdmin); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.h.SetTemplateEnabled(context.Background(), "old", false, siAdmin); err != nil {
+		t.Errorf("disable after the restore: %v", err)
 	}
 }
 

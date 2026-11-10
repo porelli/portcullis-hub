@@ -106,6 +106,10 @@ type Instance struct {
 	// it from (state InstanceRestoring, no pre-restore backup): an
 	// interrupted one is removed again at the next start.
 	RestoreAs string `json:"restore_as,omitempty" yaml:"restore_as,omitempty"`
+	// PreRestorePick is the sign-in template pick before a same-instance
+	// restore (InstanceRestoring): a rollback puts it back, so it counts
+	// as a use of its template until the restore ends.
+	PreRestorePick string `json:"pre_restore_sign_in_template,omitempty" yaml:"pre_restore_sign_in_template,omitempty"`
 	// Label is the instance's display label (§11.9; "" = never set: the
 	// manifest's name for a default instance, the id otherwise). Display
 	// only: nothing keys on it.
