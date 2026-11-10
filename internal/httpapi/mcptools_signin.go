@@ -71,15 +71,15 @@ func (s *Server) registerSignInTools() {
 					if !t.Enabled || len(t.UsedBy) == 0 {
 						continue
 					}
-					without, err := signin.Compile(t.Rule, withoutMethod)
-					if err != nil {
+					without, withoutErr := signin.Compile(t.Rule, withoutMethod)
+					with, withErr := signin.Compile(t.Rule, withMethod)
+					if withErr != nil {
+						// Can't compile with the method: skip this template
 						continue
 					}
-					with, err := signin.Compile(t.Rule, withMethod)
-					if err != nil {
-						continue
-					}
-					if !signin.Implies(with, without) {
+					// If we can't compile without but can with, switching on widens (nobody → someone)
+					// If we can compile both and with doesn't imply without, switching on widens
+					if withoutErr != nil || !signin.Implies(with, without) {
 						// This template is widened
 						uses := make([]string, 0, len(t.UsedBy))
 						for _, u := range t.UsedBy {
@@ -350,14 +350,15 @@ func (s *Server) setSignInMethodClass(ctx context.Context, args json.RawMessage)
 		}
 
 		// Compile this template without and with the method
-		without, err := signin.Compile(t.Rule, withoutMethod)
-		if err != nil {
-			// Can't compile without: treat as not widening this one
-			continue
-		}
-		with, err := signin.Compile(t.Rule, withMethod)
-		if err != nil {
+		without, withoutErr := signin.Compile(t.Rule, withoutMethod)
+		with, withErr := signin.Compile(t.Rule, withMethod)
+		if withErr != nil {
 			// Can't compile with: fail closed
+			return ClassDestructive
+		}
+
+		// If we couldn't compile without but can compile with, switching on widens (nobody → someone)
+		if withoutErr != nil {
 			return ClassDestructive
 		}
 

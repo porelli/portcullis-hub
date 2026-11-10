@@ -670,6 +670,16 @@ var adminToolFixtures = []struct {
 	{"list_ops", nil},
 	{"wait_for_op", map[string]any{"id": "secretapp"}},
 	{"get_logs", map[string]any{"id": "smbfixture"}},
+	// Task 6: sign-in methods and templates.
+	{"get_sign_in", nil},
+	{"set_sign_in_method", map[string]any{"method": "password", "on": true}},
+	{"save_sign_in_template", map[string]any{"id": "test", "name": "Test", "rule": map[string]any{"op": "any", "items": []string{"security_key"}}, "create": true}},
+	{"set_sign_in_template_enabled", map[string]any{"id": "test", "on": false}},
+	{"delete_sign_in_template", map[string]any{"id": "test"}},
+	{"preview_sign_in_template", map[string]any{"name": "Preview", "rule": map[string]any{"op": "any", "items": []string{"security_key"}}}},
+	{"set_default_template", map[string]any{"template": "standard"}},
+	{"set_core_template", map[string]any{"key": "hub", "template": "standard"}},
+	{"set_add_stronger", map[string]any{"on": false}},
 }
 
 // redactedAllowed are the admin tools whose results may show

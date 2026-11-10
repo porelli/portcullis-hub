@@ -561,6 +561,52 @@ func TestAdminToolsSameAsHTTP(t *testing.T) {
 			method: "DELETE", path: "/api/directory/groups/eng", body: `{"confirm":"eng"}`},
 		{tool: "delete_field", args: map[string]any{"name": "dept"},
 			method: "DELETE", path: "/api/directory/fields/dept", body: `{"confirm":"dept"}`},
+		// Task 6: sign-in methods and templates.
+		// First, create a test template with password while password is on
+		{tool: "save_sign_in_template", args: map[string]any{"id": "test", "name": "Test", "rule": map[string]any{"op": "any", "items": []string{"password", "security_key"}}, "create": true},
+			method: "POST", path: "/api/signin/templates", body: `{"id":"test","name":"Test","rule":{"op":"any","items":["password","security_key"]}}`},
+		// Set it as default to make it "in use"
+		{tool: "set_default_template", args: map[string]any{"template": "test"},
+			method: "PUT", path: "/api/signin/default", body: `{"template":"test"}`},
+		// Turn password off (W - disabling doesn't need confirmation)
+		{tool: "set_sign_in_method", args: map[string]any{"method": "password", "on": false},
+			method: "PUT", path: "/api/signin/methods/password", body: `{"on":false}`},
+		// Turn password back on (D - widens the in-use template)
+		{tool: "set_sign_in_method", args: map[string]any{"method": "password", "on": true},
+			method: "PUT", path: "/api/signin/methods/password", body: `{"on":true}`},
+		// Update test template to be more restrictive (W - narrowing doesn't need confirmation)
+		{tool: "save_sign_in_template", args: map[string]any{"id": "test", "name": "Test Strict", "rule": map[string]any{"op": "all", "items": []string{"password", "security_key"}}},
+			method: "PUT", path: "/api/signin/templates/test", body: `{"name":"Test Strict","rule":{"op":"all","items":["password","security_key"]}}`},
+		// Update test template to be more permissive (D - widening needs confirmation)
+		{tool: "save_sign_in_template", args: map[string]any{"id": "test", "name": "Test Permissive", "rule": map[string]any{"op": "any", "items": []string{"password"}}},
+			method: "PUT", path: "/api/signin/templates/test", body: `{"name":"Test Permissive","rule":{"op":"any","items":["password"]}}`},
+		// Create a restrictive template
+		{tool: "save_sign_in_template", args: map[string]any{"id": "strict", "name": "Strict", "rule": map[string]any{"op": "all", "items": []string{"security_key", "passkey_synced"}}, "create": true},
+			method: "POST", path: "/api/signin/templates", body: `{"id":"strict","name":"Strict","rule":{"op":"all","items":["security_key","passkey_synced"]}}`},
+		// Set test (permissive) as default (W - going back to permissive)
+		{tool: "set_default_template", args: map[string]any{"template": "test"},
+			method: "PUT", path: "/api/signin/default", body: `{"template":"test"}`},
+		// Set core template to strict while default is test (D - narrower than default)
+		{tool: "set_core_template", args: map[string]any{"key": "hub", "template": "strict"},
+			method: "PUT", path: "/api/signin/core/hub", body: `{"template":"strict"}`},
+		// Set core template back to default (W - clearing uses default)
+		{tool: "set_core_template", args: map[string]any{"key": "hub", "template": ""},
+			method: "PUT", path: "/api/signin/core/hub", body: `{"template":""}`},
+		// Set strict as default (D - narrower than current)
+		{tool: "set_default_template", args: map[string]any{"template": "strict"},
+			method: "PUT", path: "/api/signin/default", body: `{"template":"strict"}`},
+		// Disable test template
+		{tool: "set_sign_in_template_enabled", args: map[string]any{"id": "test", "on": false},
+			method: "PUT", path: "/api/signin/templates/test/enabled", body: `{"on":false}`},
+		// Delete test template
+		{tool: "delete_sign_in_template", args: map[string]any{"id": "test"},
+			method: "DELETE", path: "/api/signin/templates/test", body: ``},
+		// set_add_stronger off (W)
+		{tool: "set_add_stronger", args: map[string]any{"on": false},
+			method: "PUT", path: "/api/signin/add-stronger", body: `{"on":false}`},
+		// set_add_stronger on (D - allows adding stronger methods)
+		{tool: "set_add_stronger", args: map[string]any{"on": true},
+			method: "PUT", path: "/api/signin/add-stronger", body: `{"on":true}`},
 	}
 	covered := map[string]bool{}
 	for _, c := range cases {

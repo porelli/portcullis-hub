@@ -18,12 +18,14 @@ import (
 // noToolRoutes are the Hub-listener routes no tool mirrors (exactly G15's
 // list), each with why.
 var noToolRoutes = map[string]string{
-	"/":                     "the Hub's page: a browser UI, not an operation",
-	"/static/":              "the page's scripts and styles",
-	"/healthz":              "the liveness probe",
-	"GET /api/portal/apps":  "core's portal page list (what list_instances / get_instance already show the admin)",
-	"GET /api/directory/me": "the people page's who-am-I: a tool's caller is the token's person",
-	importReviewPath:        "the multipart CSV upload; import_review takes the CSV as JSON instead",
+	"/":                                "the Hub's page: a browser UI, not an operation",
+	"/static/":                         "the page's scripts and styles",
+	"/healthz":                         "the liveness probe",
+	"GET /api/portal/apps":             "core's portal page list (what list_instances / get_instance already show the admin)",
+	"GET /api/directory/me":            "the people page's who-am-I: a tool's caller is the token's person",
+	importReviewPath:                   "the multipart CSV upload; import_review takes the CSV as JSON instead",
+	"PUT /api/signin/templates/{id}":   "save_sign_in_template handles both POST (create) and PUT (update) via create argument",
+	"GET /api/instances/{id}/signin":   "instance sign-in view: get_instance shows the template; get_sign_in shows methods",
 }
 
 // confirmationRoutes are the Hub listener's confirmation page and its
@@ -165,10 +167,12 @@ func TestToolParity(t *testing.T) {
 	if len(pendingToolRoutes) != 0 {
 		t.Errorf("pendingToolRoutes = %v, want empty", pendingToolRoutes)
 	}
-	// noToolRoutes is exactly G15's list, each with a reason.
+	// noToolRoutes is exactly G15's list, each with a reason, plus Task 6's sign-in routes.
 	g15 := []string{"/", "/static/", "/healthz", "GET /api/portal/apps", "GET /api/directory/me", importReviewPath}
-	if len(noToolRoutes) != len(g15) {
-		t.Errorf("noToolRoutes has %d entries, G15 lists %d", len(noToolRoutes), len(g15))
+	task6 := []string{"PUT /api/signin/templates/{id}", "GET /api/instances/{id}/signin"}
+	expectedCount := len(g15) + len(task6)
+	if len(noToolRoutes) != expectedCount {
+		t.Errorf("noToolRoutes has %d entries, want %d (G15: %d, Task 6: %d)", len(noToolRoutes), expectedCount, len(g15), len(task6))
 	}
 	for _, r := range g15 {
 		if strings.TrimSpace(noToolRoutes[r]) == "" {
