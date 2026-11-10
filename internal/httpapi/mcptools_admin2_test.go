@@ -680,6 +680,8 @@ var adminToolFixtures = []struct {
 	{"set_default_template", map[string]any{"template": "standard"}},
 	{"set_core_template", map[string]any{"key": "hub", "template": "standard"}},
 	{"set_add_stronger", map[string]any{"on": false}},
+	{"get_instance_sign_in", map[string]any{"id": "secretapp"}},
+	{"set_sign_in_template", map[string]any{"id": "secretapp", "template": "strong"}},
 }
 
 // redactedAllowed are the admin tools whose results may show

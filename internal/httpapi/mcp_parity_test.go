@@ -18,14 +18,12 @@ import (
 // noToolRoutes are the Hub-listener routes no tool mirrors (exactly G15's
 // list), each with why.
 var noToolRoutes = map[string]string{
-	"/":                                "the Hub's page: a browser UI, not an operation",
-	"/static/":                         "the page's scripts and styles",
-	"/healthz":                         "the liveness probe",
-	"GET /api/portal/apps":             "core's portal page list (what list_instances / get_instance already show the admin)",
-	"GET /api/directory/me":            "the people page's who-am-I: a tool's caller is the token's person",
-	importReviewPath:                   "the multipart CSV upload; import_review takes the CSV as JSON instead",
-	"PUT /api/signin/templates/{id}":   "save_sign_in_template handles both POST (create) and PUT (update) via create argument",
-	"GET /api/instances/{id}/signin":   "instance sign-in view: get_instance shows the template; get_sign_in shows methods",
+	"/":                     "the Hub's page: a browser UI, not an operation",
+	"/static/":              "the page's scripts and styles",
+	"/healthz":              "the liveness probe",
+	"GET /api/portal/apps":  "core's portal page list (what list_instances / get_instance already show the admin)",
+	"GET /api/directory/me": "the people page's who-am-I: a tool's caller is the token's person",
+	importReviewPath:        "the multipart CSV upload; import_review takes the CSV as JSON instead",
 }
 
 // confirmationRoutes are the Hub listener's confirmation page and its
@@ -94,10 +92,11 @@ var accessWidening = map[string]string{
 	"save_model_provider": "D when it changes where model traffic goes (base_url, instance, instance_name, region) or names no stored provider",
 	"save_hub_settings":   "D when it turns AI or the people MCP on, changes clients or origins, or raises a limit or connection length",
 	// Sign-in methods (Task 6).
-	"set_sign_in_method":    "D when on, W when off",
-	"save_sign_in_template": "D unless creating, or the new compiled rule Implies the old",
-	"set_default_template":  "D unless the new template Implies the current one",
-	"set_core_template":     "D unless the new template Implies the current one",
+	"set_sign_in_method":    "D when on; off W only when nobody is newly blocked and nobody is unknown (item-9 ruling)",
+	"save_sign_in_template": "D unless creating, or the new rule Implies the old (switched-on and all available methods) and nobody is newly blocked or unknown",
+	"set_default_template":  "D unless the new template Implies the current one (both switch states) and nobody is newly blocked or unknown",
+	"set_core_template":     "D unless the new template Implies the current one (both switch states) and nobody is newly blocked or unknown",
+	"set_sign_in_template":  "D unless the app's new template Implies its current one (both switch states) and nobody is newly blocked or unknown",
 	"set_add_stronger":      "D when on, W when off",
 	// Task 18 (G37 ruling 2; the directory's Membership.Guarding).
 	"create_instance":   "D when one of its groups already exists with members, or the template / directory can't be read (T18 fix round 1)",
@@ -141,7 +140,10 @@ func TestToolParity(t *testing.T) {
 	tools := e.s.tools(ScopeAdmin)
 	twins := map[string][]string{}
 	for _, tl := range tools {
-		twins[tl.Twin] = append(twins[tl.Twin], tl.Name)
+		// Every twin a tool mirrors (save_sign_in_template: two).
+		for _, r := range append([]string{tl.Twin}, tl.AlsoTwins...) {
+			twins[r] = append(twins[r], tl.Name)
+		}
 	}
 	// Every route: a twin, no tool (with a reason), or pending.
 	for _, r := range routes {
@@ -167,12 +169,10 @@ func TestToolParity(t *testing.T) {
 	if len(pendingToolRoutes) != 0 {
 		t.Errorf("pendingToolRoutes = %v, want empty", pendingToolRoutes)
 	}
-	// noToolRoutes is exactly G15's list, each with a reason, plus Task 6's sign-in routes.
+	// noToolRoutes is exactly G15's list, each with a reason.
 	g15 := []string{"/", "/static/", "/healthz", "GET /api/portal/apps", "GET /api/directory/me", importReviewPath}
-	task6 := []string{"PUT /api/signin/templates/{id}", "GET /api/instances/{id}/signin"}
-	expectedCount := len(g15) + len(task6)
-	if len(noToolRoutes) != expectedCount {
-		t.Errorf("noToolRoutes has %d entries, want %d (G15: %d, Task 6: %d)", len(noToolRoutes), expectedCount, len(g15), len(task6))
+	if len(noToolRoutes) != len(g15) {
+		t.Errorf("noToolRoutes has %d entries, G15 lists %d", len(noToolRoutes), len(g15))
 	}
 	for _, r := range g15 {
 		if strings.TrimSpace(noToolRoutes[r]) == "" {
@@ -193,8 +193,10 @@ func TestToolParity(t *testing.T) {
 	}
 	// Every admin tool's twin is a route.
 	for _, tl := range tools {
-		if !routeSet[tl.Twin] {
-			t.Errorf("tool %s: twin %q is no Hub-listener route", tl.Name, tl.Twin)
+		for _, r := range append([]string{tl.Twin}, tl.AlsoTwins...) {
+			if !routeSet[r] {
+				t.Errorf("tool %s: twin %q is no Hub-listener route", tl.Name, r)
+			}
 		}
 	}
 	// Class D: a destructive twin, or an access-widening call with ClassFor.
@@ -236,7 +238,7 @@ func TestToolParity(t *testing.T) {
 		// Task 7 security review.
 		"stop_op",
 		// Sign-in methods (Task 6).
-		"set_sign_in_method", "save_sign_in_template", "set_default_template", "set_core_template", "set_add_stronger"} {
+		"set_sign_in_method", "save_sign_in_template", "set_default_template", "set_core_template", "set_sign_in_template", "set_add_stronger"} {
 		if byName[n].Class != ClassDestructive {
 			t.Errorf("tool %s: class %q, want D", n, byName[n].Class)
 		}
@@ -275,12 +277,25 @@ func TestToolParity(t *testing.T) {
 			t.Errorf("tool %s: class %q, want R", n, byName[n].Class)
 		}
 	}
+	// R (sign-in Task 6).
+	for _, n := range []string{"get_sign_in", "get_instance_sign_in", "preview_sign_in_template"} {
+		if byName[n].Class != ClassRead {
+			t.Errorf("tool %s: class %q, want R", n, byName[n].Class)
+		}
+	}
 	// The tools of every part are all there.
-	for _, n := range append(append(append(slices.Clone(admin17a), admin17b...), admin18...), admin20...) {
+	for _, n := range append(append(append(append(slices.Clone(admin17a), admin17b...), admin18...), admin20...), adminSignIn...) {
 		if _, ok := byName[n]; !ok {
 			t.Errorf("tool %s is not registered", n)
 		}
 	}
+}
+
+// adminSignIn are the sign-in tools (sign-in Task 6, §15.10).
+var adminSignIn = []string{
+	"get_sign_in", "get_instance_sign_in", "preview_sign_in_template", "set_sign_in_method", "save_sign_in_template",
+	"set_sign_in_template_enabled", "delete_sign_in_template", "set_default_template", "set_core_template",
+	"set_sign_in_template", "set_add_stronger",
 }
 
 // admin20 are the doctor and shared-folder tools of T20.

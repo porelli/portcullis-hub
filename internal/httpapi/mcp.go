@@ -69,6 +69,9 @@ type Tool struct {
 	// Twin is the HTTP route it mirrors, exactly as registered
 	// ("DELETE /api/directory/users/{username}", "/api/templates/enable").
 	Twin string
+	// AlsoTwins are further routes it mirrors (save_sign_in_template:
+	// the create and the update route); the parity tests index each.
+	AlsoTwins []string
 	// Perm: people tools only, "" or a directory.Perm* the caller must
 	// hold (hidden from callers without it, refused if called anyway).
 	Perm string

@@ -95,6 +95,7 @@ func (s *Server) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err, http.StatusInternalServerError)
 		return
 	}
+	noStore(w)
 	writeJSONStatus(w, http.StatusCreated, ch)
 }
 
@@ -314,7 +315,7 @@ func (s *Server) setAddStronger(ctx context.Context, a directory.Actor, on bool)
 	return s.Hub.SetAddStronger(on, a)
 }
 
-// instanceSignIn is the instance sign-in view (route).
+// instanceSignIn is the instance sign-in view (route and get_instance_sign_in).
 func (s *Server) instanceSignIn(ctx context.Context, id string) (*hub.InstanceSignInView, error) {
 	s.rec("InstanceSignIn", id)
 	return s.Hub.InstanceSignIn(ctx, id)

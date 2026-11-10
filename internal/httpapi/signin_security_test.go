@@ -43,7 +43,7 @@ func TestDormantPasswordTemplate(t *testing.T) {
 	newRule := signin.Node{
 		Op: "any",
 		Items: []signin.Node{
-			standardRule,      // existing rule
+			standardRule,       // existing rule
 			{Leaf: "password"}, // + password (dormant)
 		},
 	}
@@ -133,7 +133,8 @@ func TestPasswordSwitchOnWidening(t *testing.T) {
 	}
 }
 
-// TestPasswordSwitchOnNoWidening tests that switching password on is W when it doesn't widen anything.
+// TestPasswordSwitchOnNoWidening: switching a method on is always D (§15.10),
+// even when no template in use names it.
 func TestPasswordSwitchOnNoWidening(t *testing.T) {
 	e := newToolEnv(t, nil, nil)
 
@@ -159,9 +160,9 @@ func TestPasswordSwitchOnNoWidening(t *testing.T) {
 	tool := toolMap["set_sign_in_method"]
 	cl := tool.ClassFor(context.Background(), argsBytes)
 
-	// Should be W because no in-use template needs it
-	if cl != ClassWrite {
-		t.Errorf("password switch-on with no widening: got class %s, want W", cl)
+	// D: switching on is always D, whatever it widens.
+	if cl != ClassDestructive {
+		t.Errorf("password switch-on with no widening: got class %s, want D", cl)
 	}
 }
 
