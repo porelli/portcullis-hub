@@ -10,16 +10,19 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"math/big"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/go-webauthn/webauthn/metadata"
 
 	"github.com/portcullis/hub/internal/fidomds"
+	"github.com/portcullis/hub/internal/fidomds/fidomdstest"
 )
 
 func testRootDER(t *testing.T, cn string) []byte {
@@ -100,6 +103,7 @@ func TestExtraAuthenticatorsMerge(t *testing.T) {
 
 	path := filepath.Join(t.TempDir(), "extra.json")
 	f.h.cfg.ExtraAuthenticators = path
+	f.h.cfg.Dev = true
 	r64 := base64.StdEncoding.EncodeToString(extraRoot)
 	body := `{"` + mdsKeyAAGUID + `": {"kind": "passkey_device", "status": "revoked", "roots": ["` + r64 + `"]},
 	          "` + extraNewAAGUID + `": {"kind": "security_key", "status": "certified", "roots": ["` + r64 + `"]}}`
@@ -214,5 +218,142 @@ func TestMDSNextWait(t *testing.T) {
 		if got := mdsNextWait(c.st, day, now); got != c.want {
 			t.Errorf("%s: %v, want %v", name, got, c.want)
 		}
+	}
+}
+
+// Without Config.Dev the extra file is never read (defence in depth:
+// main refuses it without HUB_DEV=1 anyway).
+func TestExtraAuthenticatorsIgnoredWithoutDev(t *testing.T) {
+	f := newFixture(t)
+	next := time.Now().AddDate(0, 0, 10).UTC().Truncate(24 * time.Hour)
+	f.h.setMDS(mdsWith(t, 5, next, mdsKeyAAGUID, testRootDER(t, "mds")), &fidomds.Status{Serial: 5, NextUpdate: next})
+	r64 := base64.StdEncoding.EncodeToString(testRootDER(t, "extra"))
+	f.h.cfg.ExtraAuthenticators = writeTemp(t, `{"`+extraNewAAGUID+`": {"kind": "security_key", "status": "certified", "roots": ["`+r64+`"]}}`)
+	if err := f.h.WritePolicy(); err != nil {
+		t.Fatal(err)
+	}
+	doc := readKeycloakSignIn(t, f)
+	if _, ok := doc.Authenticators[extraNewAAGUID]; ok || len(doc.Authenticators) != 1 || doc.MDS.Serial != 5 {
+		t.Errorf("without Dev: %+v %+v", doc.Authenticators, doc.MDS)
+	}
+}
+
+// The development serial never goes back across a restart (the
+// generation counter starts again from 0), and a new BLOB raises it.
+func TestDevSerialMonotonicAcrossRestart(t *testing.T) {
+	f := newFixture(t)
+	next := time.Now().AddDate(0, 0, 10).UTC().Truncate(24 * time.Hour)
+	root := testRootDER(t, "mds")
+	f.h.setMDS(mdsWith(t, 87, next, mdsKeyAAGUID, root), &fidomds.Status{Serial: 87, NextUpdate: next})
+	f.h.cfg.Dev = true
+	r64 := base64.StdEncoding.EncodeToString(testRootDER(t, "extra"))
+	path := filepath.Join(t.TempDir(), "extra.json")
+	body := `{"` + extraNewAAGUID + `": {"kind": "security_key", "status": "certified", "roots": ["` + r64 + `"]}}`
+	t0 := time.Now().Add(-time.Hour).Truncate(time.Second)
+	writeExtra(t, path, body, t0)
+	f.h.cfg.ExtraAuthenticators = path
+	serial := func() int {
+		t.Helper()
+		if err := f.h.WritePolicy(); err != nil {
+			t.Fatal(err)
+		}
+		return readKeycloakSignIn(t, f).MDS.Serial
+	}
+	serial() // generation 1
+	writeExtra(t, path, body, t0.Add(time.Minute))
+	before := serial() // 87 + 2
+	if before != 89 {
+		t.Fatalf("serial = %d, want 89", before)
+	}
+	// A restart: the in-memory generation is gone.
+	f.h.mds.mu.Lock()
+	f.h.mds.extraGen, f.h.mds.extraMtime, f.h.mds.pubLoaded, f.h.mds.pubSerial = 0, 0, false, 0
+	f.h.mds.mu.Unlock()
+	after := serial()
+	if after <= before {
+		t.Errorf("after a restart serial = %d, want > %d", after, before)
+	}
+	if again := serial(); again != after {
+		t.Errorf("unchanged: %d, want %d", again, after)
+	}
+	// A new BLOB raises it even though no + gen is below it.
+	f.h.setMDS(mdsWith(t, 88, next, mdsKeyAAGUID, root), &fidomds.Status{Serial: 88, NextUpdate: next})
+	if s := serial(); s <= after {
+		t.Errorf("new BLOB: serial = %d, want > %d", s, after)
+	}
+}
+
+// RunMDS with a failing fetch and a clock past nextUpdate + 30 days
+// republishes signin-keycloak.json with "authenticators": {}.
+func TestRunMDSPublishesStaleEmpty(t *testing.T) {
+	f := newFixture(t)
+	root := fidomdstest.NewCert(t, "MDS test root", nil, true)
+	leaf := fidomdstest.NewCert(t, "MDS test signer", root, false)
+	srv := &fidomdstest.Server{}
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+	pool := x509.NewCertPool()
+	pool.AddCert(root.Cert)
+	start := time.Now().UTC()
+	var clock atomic.Int64
+	clock.Store(start.UnixNano())
+	now := func() time.Time { return time.Unix(0, clock.Load()).UTC() }
+	next := start.AddDate(0, 0, 20)
+	entry := fidomdstest.Entry(mdsKeyAAGUID, []string{"external"}, []string{"secure_element"}, fidomdstest.B64(root.Cert), fidomdstest.Reports("FIDO_CERTIFIED"))
+	srv.Serve(fidomdstest.SignBlob(t, leaf, []*x509.Certificate{leaf.Cert, root.Cert}, fidomdstest.Payload(42, next, entry)))
+	f.h.mds.fetcher = &fidomds.Fetcher{URL: ts.URL, CacheFile: filepath.Join(f.data, filepath.FromSlash(MDSCacheFile)), Roots: pool, HTTP: ts.Client(), Now: now}
+	f.h.mds.now = now
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { f.h.RunMDS(ctx, 20*time.Millisecond); close(done) }()
+	t.Cleanup(func() { cancel(); <-done })
+
+	published := func() (KeycloakSignIn, string) {
+		b, err := os.ReadFile(filepath.Join(f.data, SignInKeycloakFile))
+		if err != nil {
+			return KeycloakSignIn{}, ""
+		}
+		var doc KeycloakSignIn
+		json.Unmarshal(b, &doc)
+		return doc, string(b)
+	}
+	waitUntil(t, "the FIDO list published", func() bool {
+		doc, _ := published()
+		return doc.MDS.Serial == 42 && len(doc.Authenticators) == 1
+	})
+	srv.Fail(500)
+	clock.Store(next.Add(31 * 24 * time.Hour).UnixNano())
+	waitUntil(t, "the stale list published empty", func() bool {
+		doc, raw := published()
+		return doc.MDS.Serial == 42 && strings.Contains(raw, `"authenticators": {}`)
+	})
+	v, _ := f.h.SignInView(context.Background())
+	if !v.MDS.Stale || v.MDSWarning == "" || v.MDS.Err == "" {
+		t.Errorf("view = %+v %q", v.MDS, v.MDSWarning)
+	}
+}
+
+func waitUntil(t *testing.T, what string, ok func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for !ok() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestCapStale(t *testing.T) {
+	now := time.Date(2026, 11, 9, 0, 0, 0, 0, time.UTC)
+	st := fidomds.Status{NextUpdate: now.Add(-fidomds.StaleAfter + time.Hour)}
+	if got := capStale(24*time.Hour, st, now); got != time.Hour+time.Second {
+		t.Errorf("capStale = %v, want 1h1s", got)
+	}
+	if got := capStale(time.Minute, st, now); got != time.Minute {
+		t.Errorf("shorter wait kept: %v", got)
+	}
+	if got := capStale(time.Minute, fidomds.Status{NextUpdate: now.Add(-40 * 24 * time.Hour)}, now); got != time.Minute {
+		t.Errorf("already stale: %v", got)
 	}
 }

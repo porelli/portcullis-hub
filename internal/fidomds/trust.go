@@ -1,6 +1,9 @@
 // Package fidomds derives the passkey trust list the Keycloak extension
 // classifies new passkeys against (plan D15, contract §8.1 "FIDO
-// metadata"): AAGUID → kind, status and attestation roots.
+// metadata"): AAGUID → kind, status and attestation roots, from the FIDO
+// MDS BLOB (fidomds.go: fetched, verified and cached). The BLOB's chain
+// revocation is checked by go-webauthn; a CRL or OCSP responder that
+// can't be reached counts as not revoked (accepted, contract §8.1).
 package fidomds
 
 import (
@@ -31,7 +34,7 @@ type AuthenticatorTrust struct {
 }
 
 // revokedStatuses are the MDS statuses that publish an entry as revoked
-// (contract §8.1): anywhere in its status reports.
+// (contract §8.1): any in-effect status report.
 var revokedStatuses = map[metadata.AuthenticatorStatus]bool{
 	metadata.Revoked:                   true,
 	metadata.UserVerificationBypass:    true,
@@ -40,17 +43,33 @@ var revokedStatuses = map[metadata.AuthenticatorStatus]bool{
 	metadata.UserKeyPhysicalCompromise: true,
 }
 
+// isCertified: FIDO_CERTIFIED or FIDO_CERTIFIED_L*.
+func isCertified(s metadata.AuthenticatorStatus) bool {
+	return s == metadata.FidoCertified || strings.HasPrefix(string(s), "FIDO_CERTIFIED_L")
+}
+
+// isCertification: the statuses that say whether the model is FIDO
+// certified (ruling R1); UPDATE_AVAILABLE, FIPS140_CERTIFIED_* and the
+// revocation statuses aren't.
+func isCertification(s metadata.AuthenticatorStatus) bool {
+	return isCertified(s) || s == metadata.NotFidoCertified || s == metadata.SelfAssertionSubmitted || s == metadata.Retired
+}
+
 // Trust is the authenticator trust list of BLOB m at now (D15, contract
-// §8.1): AAGUID (lowercase, hyphenated) → kind, status, roots.
-//   - kind security_key: attachmentHint has external and keyProtection
-//     secure_element; passkey_device: attachmentHint has internal and
-//     keyProtection hardware, tee or secure_element; anything else is left
-//     out (it registers as synced);
-//   - status revoked: any status report REVOKED, USER_VERIFICATION_BYPASS,
+// §8.1): AAGUID (lowercase, hyphenated) → kind, status, roots. Only the
+// status reports in effect at now count (metadata.EffectiveStatusReports).
+//   - kind security_key: attachmentHint has external and not internal,
+//     keyProtection secure_element and not software; passkey_device:
+//     attachmentHint has internal, keyProtection hardware, tee or
+//     secure_element and not software; anything else is left out (it
+//     registers as synced);
+//   - status revoked: any report REVOKED, USER_VERIFICATION_BYPASS,
 //     ATTESTATION_KEY_COMPROMISE, USER_KEY_REMOTE_COMPROMISE or
 //     USER_KEY_PHYSICAL_COMPROMISE (kind and roots still listed);
-//     certified: else, the latest report (by effective date, then order)
-//     is FIDO_CERTIFIED*; anything else is left out;
+//     certified: else, the latest certification status (isCertification;
+//     dates when both reports have one, else document order, ties to the
+//     later — the library's current-report rule) is FIDO_CERTIFIED*;
+//     anything else is left out;
 //   - entries without an AAGUID or without attestation roots are left out.
 //
 // A nil m, or one more than StaleAfter past its nextUpdate (stale true),
@@ -68,7 +87,7 @@ func Trust(m *metadata.Metadata, now time.Time) (trust map[string]AuthenticatorT
 			continue
 		}
 		kind := kindOf(e.MetadataStatement)
-		status := statusOf(e.StatusReports)
+		status := statusOf(metadata.EffectiveStatusReports(e.StatusReports, now))
 		if kind == "" || status == "" || len(e.MetadataStatement.AttestationRootCertificates) == 0 {
 			continue
 		}
@@ -82,34 +101,36 @@ func Trust(m *metadata.Metadata, now time.Time) (trust map[string]AuthenticatorT
 }
 
 func kindOf(s metadata.Statement) string {
+	has := func(l []string, v string) bool { return slices.Contains(l, v) }
+	if has(s.KeyProtection, "software") {
+		return ""
+	}
 	switch {
-	case slices.Contains(s.AttachmentHint, "external") && slices.Contains(s.KeyProtection, "secure_element"):
+	case has(s.AttachmentHint, "external") && !has(s.AttachmentHint, "internal") && has(s.KeyProtection, "secure_element"):
 		return KindSecurityKey
-	case slices.Contains(s.AttachmentHint, "internal") && slices.ContainsFunc(s.KeyProtection, func(p string) bool {
-		return p == "hardware" || p == "tee" || p == "secure_element"
-	}):
+	case has(s.AttachmentHint, "internal") && (has(s.KeyProtection, "hardware") || has(s.KeyProtection, "tee") || has(s.KeyProtection, "secure_element")):
 		return KindPasskeyDevice
 	}
 	return ""
 }
 
-func statusOf(reports []metadata.StatusReport) string {
-	var latest *metadata.StatusReport
-	var latestAt time.Time
-	for i := range reports {
-		r := &reports[i]
+// statusOf judges the reports in effect: revoked, certified or "".
+func statusOf(effective []metadata.StatusReport) string {
+	var current *metadata.StatusReport
+	for i := range effective {
+		r := &effective[i]
 		if revokedStatuses[r.Status] {
 			return StatusRevoked
 		}
-		var at time.Time
-		if r.EffectiveDate != nil {
-			at = *r.EffectiveDate
+		if !isCertification(r.Status) {
+			continue
 		}
-		if latest == nil || !at.Before(latestAt) {
-			latest, latestAt = r, at
+		// metadata's currentStatusReport rule, over certification reports.
+		if current == nil || current.EffectiveDate == nil || r.EffectiveDate == nil || !r.EffectiveDate.Before(*current.EffectiveDate) {
+			current = r
 		}
 	}
-	if latest != nil && (latest.Status == metadata.FidoCertified || strings.HasPrefix(string(latest.Status), "FIDO_CERTIFIED_")) {
+	if current != nil && isCertified(current.Status) {
 		return StatusCertified
 	}
 	return ""

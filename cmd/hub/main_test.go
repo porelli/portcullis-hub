@@ -115,6 +115,7 @@ func TestExtraAuthenticatorsNeedDev(t *testing.T) {
 		{"http://mds.test:8080/blob", "", "", "http://mds.test:8080/blob", true},
 		{"ftp://mds.test/", "", "", "", false},
 		{"not a url", "", "", "", false},
+		{"off", "", "", "", true},
 	} {
 		u, extra, err := signInMDSFromEnv(func(k string) string {
 			return map[string]string{"HUB_FIDO_MDS_URL": c.url, "HUB_SIGNIN_EXTRA_AUTHENTICATORS": c.extra, "HUB_DEV": c.dev}[k]

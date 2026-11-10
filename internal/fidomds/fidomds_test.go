@@ -3,90 +3,18 @@ package fidomds
 import (
 	"bytes"
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
-	"crypto/sha256"
 	"crypto/x509"
-	"crypto/x509/pkix"
-	"encoding/base64"
 	"encoding/json"
-	"math/big"
-	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/go-webauthn/webauthn/metadata"
+
+	"github.com/portcullis/hub/internal/fidomds/fidomdstest"
 )
-
-// testCA is a certificate and its key, built in the test.
-type testCA struct {
-	cert *x509.Certificate
-	key  *ecdsa.PrivateKey
-}
-
-var serialN atomic.Int64
-
-func newCert(t *testing.T, cn string, parent *testCA, isCA bool) *testCA {
-	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tmpl := &x509.Certificate{
-		SerialNumber:          big.NewInt(serialN.Add(1)),
-		Subject:               pkix.Name{CommonName: cn},
-		NotBefore:             time.Now().Add(-time.Hour),
-		NotAfter:              time.Now().Add(24 * time.Hour),
-		BasicConstraintsValid: true,
-		IsCA:                  isCA,
-		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
-	}
-	signer, signerKey := tmpl, key
-	if parent != nil {
-		signer, signerKey = parent.cert, parent.key
-	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, signer, &key.PublicKey, signerKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	c, err := x509.ParseCertificate(der)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return &testCA{cert: c, key: key}
-}
-
-func b64(c *x509.Certificate) string { return base64.StdEncoding.EncodeToString(c.Raw) }
-
-// signBlob is an MDS3 BLOB: an ES256 JWS over payload, x5c = chain.
-func signBlob(t *testing.T, signer *testCA, chain []*x509.Certificate, payload any) []byte {
-	t.Helper()
-	x5c := []string{}
-	for _, c := range chain {
-		x5c = append(x5c, b64(c))
-	}
-	hdr, _ := json.Marshal(map[string]any{"alg": "ES256", "typ": "JWT", "x5c": x5c})
-	body, err := json.Marshal(payload)
-	if err != nil {
-		t.Fatal(err)
-	}
-	enc := base64.RawURLEncoding
-	signing := enc.EncodeToString(hdr) + "." + enc.EncodeToString(body)
-	sum := sha256.Sum256([]byte(signing))
-	r, s, err := ecdsa.Sign(rand.Reader, signer.key, sum[:])
-	if err != nil {
-		t.Fatal(err)
-	}
-	sig := make([]byte, 64)
-	r.FillBytes(sig[:32])
-	s.FillBytes(sig[32:])
-	return []byte(signing + "." + enc.EncodeToString(sig))
-}
 
 const (
 	aaguidKey    = "cb69481e-8ff7-4039-93ec-0a2729a154a8"
@@ -95,71 +23,40 @@ const (
 	aaguidRevKey = "22222222-3333-4444-8555-666666666666"
 	aaguidComp   = "33333333-4444-4555-8666-777777777777"
 	aaguidNotCrt = "44444444-5555-4666-8777-888888888888"
+	aaguidUpd    = "55555555-6666-4777-8888-999999999999"
+	aaguidLateNC = "66666666-7777-4888-8999-aaaaaaaaaaaa"
+	aaguidHWOnly = "77777777-8888-4999-8aaa-bbbbbbbbbbbb"
+	aaguidNoRoot = "88888888-9999-4aaa-8bbb-cccccccccccc"
+	aaguidOOO    = "99999999-aaaa-4bbb-8ccc-dddddddddddd"
+	aaguidBoth   = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+	aaguidSWSE   = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"
+	aaguidFuture = "cccccccc-dddd-4eee-8fff-000000000000"
+	aaguidNoDate = "dddddddd-eeee-4fff-8000-111111111111"
 )
 
-func entry(aaguid string, attach, keyProt []string, root string, statuses ...string) map[string]any {
-	var reports []map[string]any
-	for i, s := range statuses {
-		reports = append(reports, map[string]any{"status": s, "effectiveDate": time.Date(2025, 1, 1+i, 0, 0, 0, 0, time.UTC).Format(time.DateOnly)})
-	}
-	return map[string]any{
-		"aaguid": aaguid,
-		"metadataStatement": map[string]any{
-			"aaguid":                      aaguid,
-			"description":                 "test " + aaguid,
-			"protocolFamily":              "fido2",
-			"schema":                      3,
-			"attachmentHint":              attach,
-			"keyProtection":               keyProt,
-			"attestationRootCertificates": []string{root},
-		},
-		"statusReports":          reports,
-		"timeOfLastStatusChange": "2025-01-01",
-	}
-}
+var (
+	ext = []string{"external"}
+	se  = []string{"secure_element"}
+)
 
-func payload(no int, next time.Time, entries ...map[string]any) map[string]any {
-	if entries == nil {
-		entries = []map[string]any{}
-	}
-	return map[string]any{
-		"legalHeader": "test",
-		"no":          no,
-		"nextUpdate":  next.Format(time.DateOnly),
-		"entries":     entries,
-	}
-}
-
-// mdsServer serves *blob, or status code *code when it isn't 0.
-type mdsServer struct {
-	blob atomic.Pointer[[]byte]
-	code atomic.Int32
-}
-
-func (s *mdsServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if c := s.code.Load(); c != 0 {
-		http.Error(w, "down", int(c))
-		return
-	}
-	w.Write(*s.blob.Load())
-}
+func rep(s ...string) []fidomdstest.Report { return fidomdstest.Reports(s...) }
 
 type fixture struct {
-	root, leaf *testCA
-	srv        *mdsServer
+	root, leaf *fidomdstest.CA
+	srv        *fidomdstest.Server
 	f          *Fetcher
 	now        time.Time
 }
 
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
-	root := newCert(t, "MDS test root", nil, true)
-	leaf := newCert(t, "MDS test signer", root, false)
-	srv := &mdsServer{}
+	root := fidomdstest.NewCert(t, "MDS test root", nil, true)
+	leaf := fidomdstest.NewCert(t, "MDS test signer", root, false)
+	srv := &fidomdstest.Server{}
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
 	pool := x509.NewCertPool()
-	pool.AddCert(root.cert)
+	pool.AddCert(root.Cert)
 	fx := &fixture{root: root, leaf: leaf, srv: srv, now: time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)}
 	fx.f = &Fetcher{
 		URL:       ts.URL,
@@ -176,10 +73,18 @@ func (fx *fixture) fresh() *Fetcher {
 	return &Fetcher{URL: fx.f.URL, CacheFile: fx.f.CacheFile, Roots: fx.f.Roots, HTTP: fx.f.HTTP, Now: fx.f.Now}
 }
 
+func (fx *fixture) blob(t *testing.T, no int, entries ...map[string]any) []byte {
+	return fidomdstest.SignBlob(t, fx.leaf, []*x509.Certificate{fx.leaf.Cert, fx.root.Cert}, fidomdstest.Payload(no, fx.now.AddDate(0, 0, 20), entries...))
+}
+
 func (fx *fixture) serve(t *testing.T, no int, entries ...map[string]any) []byte {
-	b := signBlob(t, fx.leaf, []*x509.Certificate{fx.leaf.cert, fx.root.cert}, payload(no, fx.now.AddDate(0, 0, 20), entries...))
-	fx.srv.blob.Store(&b)
+	b := fx.blob(t, no, entries...)
+	fx.srv.Serve(b)
 	return b
+}
+
+func (fx *fixture) keyEntry() map[string]any {
+	return fidomdstest.Entry(aaguidKey, ext, se, fidomdstest.B64(fx.root.Cert), rep("FIDO_CERTIFIED"))
 }
 
 func TestRefreshCachesVerifiedBlob(t *testing.T) {
@@ -196,40 +101,44 @@ func TestRefreshCachesVerifiedBlob(t *testing.T) {
 	if err != nil || !bytes.Equal(got, blob) {
 		t.Fatalf("cache = %q, %v", got, err)
 	}
-	for path, want := range map[string]os.FileMode{fx.f.CacheFile: 0600, filepath.Dir(fx.f.CacheFile): 0700} {
+	hw := filepath.Join(filepath.Dir(fx.f.CacheFile), "mds.serial")
+	if b, err := os.ReadFile(hw); err != nil || string(b) != "87\n" {
+		t.Errorf("high-water = %q, %v", b, err)
+	}
+	for path, want := range map[string]os.FileMode{fx.f.CacheFile: 0600, hw: 0600, filepath.Dir(fx.f.CacheFile): 0700} {
 		if fi, err := os.Stat(path); err != nil || fi.Mode().Perm() != want {
 			t.Errorf("%s mode = %v, %v; want %v", path, fi.Mode().Perm(), err, want)
 		}
 	}
 	// A new Fetcher reads (and verifies) the cache.
-	f2 := fx.fresh()
-	m, st, err := f2.Load()
+	m, st, err := fx.fresh().Load()
 	if err != nil || m.Parsed.Number != 87 || st.Serial != 87 {
 		t.Fatalf("Load = %v %+v %v", m, st, err)
 	}
 }
 
 // TestRefreshVerifiesSignature: a BLOB signed by another key (or chained
-// to another root) is refused and the cache is untouched.
+// to another root, or tampered with) is refused and the cache is
+// untouched.
 func TestRefreshVerifiesSignature(t *testing.T) {
 	fx := newFixture(t)
 	good := fx.serve(t, 10)
 	if _, err := fx.f.Refresh(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	other := newCert(t, "other root", nil, true)
-	otherLeaf := newCert(t, "other signer", other, false)
-	p := payload(11, fx.now.AddDate(0, 0, 20), entry(aaguidKey, []string{"external"}, []string{"secure_element"}, b64(fx.root.cert), "FIDO_CERTIFIED"))
+	other := fidomdstest.NewCert(t, "other root", nil, true)
+	otherLeaf := fidomdstest.NewCert(t, "other signer", other, false)
+	p := fidomdstest.Payload(11, fx.now.AddDate(0, 0, 20), fx.keyEntry())
+	tampered := fidomdstest.SignBlob(t, fx.leaf, []*x509.Certificate{fx.leaf.Cert, fx.root.Cert}, p)
+	tampered[bytes.IndexByte(tampered, '.')+5] ^= 0x01 // a payload byte
 	for name, blob := range map[string][]byte{
-		// Right chain, signed by another key.
-		"wrong key": signBlob(t, otherLeaf, []*x509.Certificate{fx.leaf.cert, fx.root.cert}, p),
-		// Another root's chain.
-		"wrong root": signBlob(t, otherLeaf, []*x509.Certificate{otherLeaf.cert, other.cert}, p),
-		// No x5c chain to the roots at all.
-		"leaf only": signBlob(t, fx.leaf, []*x509.Certificate{fx.leaf.cert}, p),
-		"garbage":   []byte("not.a.jwt"),
+		"wrong key":  fidomdstest.SignBlob(t, otherLeaf, []*x509.Certificate{fx.leaf.Cert, fx.root.Cert}, p),
+		"wrong root": fidomdstest.SignBlob(t, otherLeaf, []*x509.Certificate{otherLeaf.Cert, other.Cert}, p),
+		"leaf only":  fidomdstest.SignBlob(t, fx.leaf, []*x509.Certificate{fx.leaf.Cert}, p),
+		"tampered":   tampered,
+		"garbage":    []byte("not.a.jwt"),
 	} {
-		fx.srv.blob.Store(&blob)
+		fx.srv.Serve(blob)
 		st, err := fx.f.Refresh(context.Background())
 		if err == nil {
 			t.Errorf("%s: Refresh accepted it", name)
@@ -247,15 +156,29 @@ func TestRefreshVerifiesSignature(t *testing.T) {
 	}
 }
 
+// Roots nil = the FIDO production root: a BLOB signed under the test
+// root is refused.
+func TestNilRootsIsProductionRoot(t *testing.T) {
+	fx := newFixture(t)
+	fx.serve(t, 1, fx.keyEntry())
+	fx.f.Roots = nil
+	if _, err := fx.f.Refresh(context.Background()); err == nil {
+		t.Fatal("a test-root BLOB verified against the FIDO production root")
+	}
+	if _, err := os.Stat(fx.f.CacheFile); !os.IsNotExist(err) {
+		t.Errorf("cache written: %v", err)
+	}
+}
+
 // TestRefreshKeepsLastGood: server 500 → Load returns the previous BLOB;
 // an older serial or an expired BLOB never replaces it either.
 func TestRefreshKeepsLastGood(t *testing.T) {
 	fx := newFixture(t)
-	fx.serve(t, 5, entry(aaguidKey, []string{"external"}, []string{"secure_element"}, b64(fx.root.cert), "FIDO_CERTIFIED"))
+	fx.serve(t, 5, fx.keyEntry())
 	if _, err := fx.f.Refresh(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	fx.srv.code.Store(500)
+	fx.srv.Fail(500)
 	st, err := fx.f.Refresh(context.Background())
 	if err == nil || st.Serial != 5 || st.Err == "" {
 		t.Fatalf("Refresh on 500 = %+v, %v", st, err)
@@ -267,19 +190,17 @@ func TestRefreshKeepsLastGood(t *testing.T) {
 	if tr, _ := Trust(m, fx.now); len(tr) != 1 {
 		t.Errorf("trust after 500 = %v", tr)
 	}
-	// Also from a fresh Fetcher (the file, not the memory).
-	f2 := fx.fresh()
-	if m, _, err := f2.Load(); err != nil || m.Parsed.Number != 5 {
+	if m, _, err := fx.fresh().Load(); err != nil || m.Parsed.Number != 5 {
 		t.Fatalf("Load from file = %v, %v", m, err)
 	}
 
-	fx.srv.code.Store(0)
+	fx.srv.Fail(0)
 	fx.serve(t, 4) // a replayed older BLOB
 	if _, err := fx.f.Refresh(context.Background()); err == nil {
 		t.Error("older serial accepted")
 	}
-	exp := signBlob(t, fx.leaf, []*x509.Certificate{fx.leaf.cert, fx.root.cert}, payload(6, fx.now.AddDate(0, 0, -31)))
-	fx.srv.blob.Store(&exp)
+	exp := fidomdstest.SignBlob(t, fx.leaf, []*x509.Certificate{fx.leaf.Cert, fx.root.Cert}, fidomdstest.Payload(6, fx.now.AddDate(0, 0, -31)))
+	fx.srv.Serve(exp)
 	if _, err := fx.f.Refresh(context.Background()); err == nil {
 		t.Error("expired BLOB accepted")
 	}
@@ -288,9 +209,56 @@ func TestRefreshKeepsLastGood(t *testing.T) {
 	}
 }
 
+// The high-water serial survives the cache: with the cache deleted, a
+// lower serial is still refused; an equal or higher one is taken; a
+// cache below it is never loaded; an unreadable one refuses everything.
+func TestHighWaterSerial(t *testing.T) {
+	fx := newFixture(t)
+	fx.serve(t, 20, fx.keyEntry())
+	if _, err := fx.f.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	low := fx.blob(t, 19, fx.keyEntry())
+	os.Remove(fx.f.CacheFile)
+	f2 := fx.fresh()
+	fx.srv.Serve(low)
+	if _, err := f2.Refresh(context.Background()); err == nil {
+		t.Fatal("serial 19 accepted below the high-water 20 with no cache")
+	}
+	if _, err := os.Stat(fx.f.CacheFile); !os.IsNotExist(err) {
+		t.Errorf("cache written: %v", err)
+	}
+	// A cache put back below the high-water is refused.
+	os.WriteFile(fx.f.CacheFile, low, 0600)
+	if m, _, err := fx.fresh().Load(); err == nil || m != nil {
+		t.Errorf("Load of a cache below the high-water = %v, %v", m, err)
+	}
+	os.Remove(fx.f.CacheFile)
+	fx.serve(t, 20, fx.keyEntry())
+	if st, err := fx.fresh().Refresh(context.Background()); err != nil || st.Serial != 20 {
+		t.Fatalf("equal serial = %+v, %v", st, err)
+	}
+	fx.serve(t, 25)
+	if _, err := fx.fresh().Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	hw := filepath.Join(filepath.Dir(fx.f.CacheFile), "mds.serial")
+	if b, _ := os.ReadFile(hw); string(b) != "25\n" {
+		t.Errorf("high-water = %q", b)
+	}
+	os.WriteFile(hw, []byte("junk"), 0600)
+	fx.serve(t, 30)
+	if _, err := fx.fresh().Refresh(context.Background()); err == nil {
+		t.Error("an unreadable high-water serial let a BLOB in")
+	}
+	if _, _, err := fx.fresh().Load(); err == nil {
+		t.Error("an unreadable high-water serial let the cache load")
+	}
+}
+
 func parsed(t *testing.T, next time.Time, entries ...map[string]any) *metadata.Metadata {
 	t.Helper()
-	b, _ := json.Marshal(payload(1, next, entries...))
+	b, _ := json.Marshal(fidomdstest.Payload(1, next, entries...))
 	var p metadata.PayloadJSON
 	if err := json.Unmarshal(b, &p); err != nil {
 		t.Fatal(err)
@@ -306,41 +274,64 @@ func parsed(t *testing.T, next time.Time, entries ...map[string]any) *metadata.M
 	return m
 }
 
-// TestTrustKinds: external+secure_element → security_key;
-// internal+tee → passkey_device; external+software → absent; REVOKED /
-// USER_KEY_PHYSICAL_COMPROMISE → present with Status "revoked" and its
-// kind and roots; not certified → absent.
+// TestTrustKinds: kinds and statuses (contract §8.1, ruling R1).
 func TestTrustKinds(t *testing.T) {
-	root := newCert(t, "attestation root", nil, true)
-	r := b64(root.cert)
+	root := fidomdstest.NewCert(t, "attestation root", nil, true)
+	r := fidomdstest.B64(root.Cert)
 	now := time.Date(2026, 11, 9, 0, 0, 0, 0, time.UTC)
+	E := fidomdstest.Entry
 	m := parsed(t, now.AddDate(0, 0, 10),
-		entry(aaguidKey, []string{"external", "wired"}, []string{"hardware", "secure_element"}, r, "FIDO_CERTIFIED", "FIDO_CERTIFIED_L2"),
-		entry(aaguidDevice, []string{"internal"}, []string{"hardware", "tee"}, r, "FIDO_CERTIFIED_L1"),
-		entry(aaguidSoft, []string{"external"}, []string{"software"}, r, "FIDO_CERTIFIED"),
-		entry(aaguidRevKey, []string{"external"}, []string{"secure_element"}, r, "FIDO_CERTIFIED", "REVOKED"),
-		entry(aaguidComp, []string{"internal"}, []string{"tee"}, r, "FIDO_CERTIFIED_L1", "USER_KEY_PHYSICAL_COMPROMISE", "FIDO_CERTIFIED_L1"),
-		entry(aaguidNotCrt, []string{"external"}, []string{"secure_element"}, r, "NOT_FIDO_CERTIFIED"),
+		E(aaguidKey, []string{"external", "wired"}, []string{"hardware", "secure_element"}, r, rep("FIDO_CERTIFIED", "FIDO_CERTIFIED_L2")),
+		E(aaguidDevice, []string{"internal"}, []string{"hardware", "tee"}, r, rep("FIDO_CERTIFIED_L1")),
+		E(aaguidSoft, ext, []string{"software"}, r, rep("FIDO_CERTIFIED")),
+		E(aaguidRevKey, ext, se, r, rep("FIDO_CERTIFIED", "REVOKED")),
+		// A compromise anywhere, even before a later certification.
+		E(aaguidComp, []string{"internal"}, []string{"tee"}, r, rep("FIDO_CERTIFIED_L1", "USER_KEY_PHYSICAL_COMPROMISE", "FIDO_CERTIFIED_L1")),
+		E(aaguidNotCrt, ext, se, r, rep("NOT_FIDO_CERTIFIED")),
+		// R1: UPDATE_AVAILABLE isn't a certification status.
+		E(aaguidUpd, ext, se, r, rep("FIDO_CERTIFIED_L1", "UPDATE_AVAILABLE")),
+		E(aaguidLateNC, ext, se, r, rep("FIDO_CERTIFIED_L1", "NOT_FIDO_CERTIFIED", "UPDATE_AVAILABLE")),
+		E(aaguidHWOnly, ext, []string{"hardware"}, r, rep("FIDO_CERTIFIED")),
+		E(aaguidNoRoot, ext, se, "", rep("FIDO_CERTIFIED")),
+		E("", ext, se, r, rep("FIDO_CERTIFIED")),
+		// Out of order: the later date wins, not the later position.
+		E(aaguidOOO, ext, se, r, []fidomdstest.Report{fidomdstest.R("FIDO_CERTIFIED_L1", "2025-03-01"), fidomdstest.R("NOT_FIDO_CERTIFIED", "2025-01-01")}),
+		E(aaguidBoth, []string{"external", "internal"}, se, r, rep("FIDO_CERTIFIED")),
+		E(aaguidSWSE, ext, []string{"software", "secure_element"}, r, rep("FIDO_CERTIFIED")),
+		// A report not in effect yet doesn't count.
+		E(aaguidFuture, ext, se, r, []fidomdstest.Report{fidomdstest.R("FIDO_CERTIFIED", "2025-01-01"), fidomdstest.R("REVOKED", "2027-01-01")}),
+		// No effective date: in effect.
+		E(aaguidNoDate, ext, se, r, []fidomdstest.Report{fidomdstest.R("FIDO_CERTIFIED", "2025-01-01"), fidomdstest.R("NOT_FIDO_CERTIFIED", "")}),
 	)
 	got, stale := Trust(m, now)
 	if stale {
 		t.Fatal("stale")
 	}
-	roots := [][]byte{root.cert.Raw}
+	roots := [][]byte{root.Cert.Raw}
 	want := map[string]AuthenticatorTrust{
 		aaguidKey:    {Kind: KindSecurityKey, Status: StatusCertified, Roots: roots},
 		aaguidDevice: {Kind: KindPasskeyDevice, Status: StatusCertified, Roots: roots},
 		aaguidRevKey: {Kind: KindSecurityKey, Status: StatusRevoked, Roots: roots},
 		aaguidComp:   {Kind: KindPasskeyDevice, Status: StatusRevoked, Roots: roots},
+		aaguidUpd:    {Kind: KindSecurityKey, Status: StatusCertified, Roots: roots},
+		aaguidOOO:    {Kind: KindSecurityKey, Status: StatusCertified, Roots: roots},
+		aaguidBoth:   {Kind: KindPasskeyDevice, Status: StatusCertified, Roots: roots},
+		aaguidFuture: {Kind: KindSecurityKey, Status: StatusCertified, Roots: roots},
 	}
 	if len(got) != len(want) {
-		t.Errorf("trust has %d entries, want %d: %+v", len(got), len(want), got)
+		t.Errorf("trust has %d entries, want %d: %v", len(got), len(want), keys(got))
 	}
 	for k, w := range want {
 		g, ok := got[k]
 		if !ok || g.Kind != w.Kind || g.Status != w.Status || len(g.Roots) != 1 || !bytes.Equal(g.Roots[0], w.Roots[0]) {
 			t.Errorf("%s = %+v (%t), want %+v", k, g, ok, w)
 		}
+	}
+	// The future REVOKED takes effect once its date has come.
+	later := parsed(t, time.Date(2027, 2, 1, 0, 0, 0, 0, time.UTC),
+		E(aaguidFuture, ext, se, r, []fidomdstest.Report{fidomdstest.R("FIDO_CERTIFIED", "2025-01-01"), fidomdstest.R("REVOKED", "2027-01-01")}))
+	if g := mustTrust(t, later, time.Date(2027, 1, 2, 0, 0, 0, 0, time.UTC))[aaguidFuture]; g.Status != StatusRevoked {
+		t.Errorf("after its date: %+v", g)
 	}
 	// The JSON shape: roots in standard base64.
 	b, _ := json.Marshal(got[aaguidKey])
@@ -349,11 +340,28 @@ func TestTrustKinds(t *testing.T) {
 	}
 }
 
+func mustTrust(t *testing.T, m *metadata.Metadata, now time.Time) map[string]AuthenticatorTrust {
+	t.Helper()
+	tr, stale := Trust(m, now)
+	if stale {
+		t.Fatalf("stale at %s", now)
+	}
+	return tr
+}
+
+func keys(m map[string]AuthenticatorTrust) []string {
+	var out []string
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
 // TestTrustStaleIsEmpty: now = NextUpdate + 31 days → Trust returns an
 // empty map and stale == true; Load's Status.Stale == true.
 func TestTrustStaleIsEmpty(t *testing.T) {
 	fx := newFixture(t)
-	fx.serve(t, 3, entry(aaguidKey, []string{"external"}, []string{"secure_element"}, b64(fx.root.cert), "FIDO_CERTIFIED"))
+	fx.serve(t, 3, fx.keyEntry())
 	if _, err := fx.f.Refresh(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -376,15 +384,12 @@ func TestTrustStaleIsEmpty(t *testing.T) {
 	if _, st, err := fx.f.Load(); err != nil || !st.Stale {
 		t.Errorf("Load status = %+v, %v; want Stale", st, err)
 	}
-	// Refresh failing while stale reports Stale too.
-	fx.srv.code.Store(503)
+	fx.srv.Fail(503)
 	if st, err := fx.f.Refresh(context.Background()); err == nil || !st.Stale {
 		t.Errorf("Refresh status = %+v, %v; want Stale", st, err)
 	}
-	if Trust(nil, fx.now); true {
-		if tr, stale := Trust(nil, fx.now); len(tr) != 0 || stale {
-			t.Errorf("Trust(nil) = %v, %t", tr, stale)
-		}
+	if tr, stale := Trust(nil, fx.now); tr == nil || len(tr) != 0 || stale {
+		t.Errorf("Trust(nil) = %v, %t", tr, stale)
 	}
 }
 
@@ -393,10 +398,13 @@ func TestLoadWithoutCache(t *testing.T) {
 	if m, st, err := fx.f.Load(); err == nil || m != nil || st == nil || st.Serial != 0 {
 		t.Errorf("Load without cache = %v %+v %v", m, st, err)
 	}
-	// A tampered cache is refused (never trusted unverified).
+	// A tampered cache (one byte of a real signed BLOB flipped) is
+	// refused: never trusted unverified.
+	b := fx.blob(t, 7, fx.keyEntry())
+	b[len(b)-3] ^= 0x01 // a signature byte
 	os.MkdirAll(filepath.Dir(fx.f.CacheFile), 0700)
-	os.WriteFile(fx.f.CacheFile, []byte("a.b.c"), 0600)
-	if m, _, err := fx.f.Load(); err == nil || m != nil {
-		t.Errorf("Load of a bad cache = %v, %v", m, err)
+	os.WriteFile(fx.f.CacheFile, b, 0600)
+	if m, _, err := fx.fresh().Load(); err == nil || m != nil {
+		t.Errorf("Load of a tampered cache = %v, %v", m, err)
 	}
 }

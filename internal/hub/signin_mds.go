@@ -53,6 +53,21 @@ type mdsState struct {
 	extraGen   int
 	// staleLogged: the stale BLOB has been logged once.
 	staleLogged bool
+	// The development serial (extra file on, signInDevSerial): the last
+	// published serial (read once from signin-keycloak.json), and the
+	// BLOB serial and generation it was published for.
+	pubLoaded       bool
+	pubSerial       int
+	lastNo, lastGen int
+	// now is the clock (nil = time.Now; tests set it before RunMDS).
+	now func() time.Time
+}
+
+func (h *Hub) mdsNow() time.Time {
+	if h.mds.now != nil {
+		return h.mds.now()
+	}
+	return time.Now()
 }
 
 func newMDSFetcher(cfg Config) *fidomds.Fetcher {
@@ -79,19 +94,20 @@ func (h *Hub) mdsStatus() fidomds.Status {
 	h.mds.mu.Lock()
 	defer h.mds.mu.Unlock()
 	st := h.mds.status
-	st.Stale = h.mds.meta != nil && fidomds.IsStale(st.NextUpdate, time.Now())
+	st.Stale = h.mds.meta != nil && fidomds.IsStale(st.NextUpdate, h.mdsNow())
 	return st
 }
 
 // signInTrust is signin-keycloak.json's authenticators and mds: the MDS
-// trust list now (empty while stale or before a good BLOB), then the
-// extra-authenticators file's entries over it (HUB_DEV; a file that
-// doesn't read or decode adds nothing, logged), the serial = the BLOB's
-// no + the file's mtime generation. Reads the file: never under mu.
+// trust list now (empty while stale or before a good BLOB) and the BLOB's
+// serial; in development only (Config.Dev and Config.ExtraAuthenticators,
+// both checked here too) the extra-authenticators file's entries merged
+// over it (a file that doesn't read or decode adds nothing, logged) and
+// the development serial (signInDevSerial). Reads files: never under mu.
 // Caller holds policyWriteMu.
 func (h *Hub) signInTrust() (map[string]fidomds.AuthenticatorTrust, KeycloakMDS) {
 	h.mds.mu.Lock()
-	trust, stale := fidomds.Trust(h.mds.meta, time.Now())
+	trust, stale := fidomds.Trust(h.mds.meta, h.mdsNow())
 	if stale && !h.mds.staleLogged {
 		log.Printf("signin: the FIDO list (BLOB %d) is more than 30 days past its next update: no authenticators published until it refreshes", h.mds.status.Serial)
 	}
@@ -100,23 +116,67 @@ func (h *Hub) signInTrust() (map[string]fidomds.AuthenticatorTrust, KeycloakMDS)
 	h.mds.mu.Unlock()
 
 	path := h.cfg.ExtraAuthenticators
-	if path == "" {
+	if path == "" || !h.cfg.Dev {
 		return trust, doc
 	}
 	extra, mtime, err := readExtraAuthenticators(path)
+	var last int
+	loadLast := false
+	h.mds.mu.Lock()
+	loadLast = !h.mds.pubLoaded
+	h.mds.mu.Unlock()
+	if loadLast {
+		last = lastPublishedSerial(h.signInKeycloakPath())
+	}
 	h.mds.mu.Lock()
 	defer h.mds.mu.Unlock()
+	if loadLast && !h.mds.pubLoaded {
+		h.mds.pubLoaded, h.mds.pubSerial, h.mds.lastNo, h.mds.lastGen = true, last, -1, -1
+	}
 	if err == nil && mtime != h.mds.extraMtime {
 		h.mds.extraMtime = mtime
 		h.mds.extraGen++
 	}
-	doc.Serial += h.mds.extraGen
+	doc.Serial = h.signInDevSerialLocked(doc.Serial)
 	if err != nil {
 		log.Printf("signin: HUB_SIGNIN_EXTRA_AUTHENTICATORS %s refused, no extra authenticators: %v", path, err)
 		return trust, doc
 	}
 	maps.Copy(trust, extra)
 	return trust, doc
+}
+
+// signInDevSerialLocked is the development mds.serial for BLOB serial no:
+// no + the extra file's generation, never below the last published one
+// (across restarts: signin-keycloak.json's), and above it whenever no or
+// the generation changed (the extension reclassifies only when it grows).
+// Caller holds mds.mu.
+func (h *Hub) signInDevSerialLocked(no int) int {
+	gen := h.mds.extraGen
+	s := max(no+gen, h.mds.pubSerial)
+	if no != h.mds.lastNo || gen != h.mds.lastGen {
+		s = max(no+gen, h.mds.pubSerial+1)
+	}
+	h.mds.pubSerial, h.mds.lastNo, h.mds.lastGen = s, no, gen
+	return s
+}
+
+// lastPublishedSerial is mds.serial of the signin-keycloak.json at path
+// (0 when there is none or it doesn't read).
+func lastPublishedSerial(path string) int {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	var doc struct {
+		MDS struct {
+			Serial int `json:"serial"`
+		} `json:"mds"`
+	}
+	if json.Unmarshal(b, &doc) != nil || doc.MDS.Serial < 0 {
+		return 0
+	}
+	return doc.MDS.Serial
 }
 
 var aaguidRe = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
@@ -216,7 +276,7 @@ func (h *Hub) RunMDS(ctx context.Context, every time.Duration) {
 	}
 	wait := time.Duration(0)
 	if err == nil {
-		wait = mdsNextWait(*st, every, time.Now())
+		wait = h.mdsWait(*st, every)
 	}
 	t := time.NewTimer(wait)
 	defer t.Stop()
@@ -230,20 +290,45 @@ func (h *Hub) RunMDS(ctx context.Context, every time.Duration) {
 		if err != nil {
 			log.Printf("signin: FIDO metadata refresh failed (keeping BLOB %d): %v", st.Serial, err)
 			h.setMDS(nil, st)
-			t.Reset(min(every, mdsRetry))
+			// Republish: the kept BLOB may have gone stale meanwhile
+			// (it then publishes no authenticators).
+			h.writePolicyLogged()
+			t.Reset(capStale(min(every, mdsRetry), *st, h.mdsNow()))
 			continue
 		}
 		m, st2, err := f.Load()
 		if err != nil {
 			log.Printf("signin: FIDO metadata: %v", err)
+			h.writePolicyLogged()
 			t.Reset(min(every, mdsRetry))
 			continue
 		}
 		h.setMDS(m, st2)
 		log.Printf("signin: FIDO metadata BLOB %d (next update %s)", st2.Serial, st2.NextUpdate.Format(time.DateOnly))
 		h.writePolicyLogged()
-		t.Reset(mdsNextWait(*st2, every, time.Now()))
+		t.Reset(h.mdsWait(*st2, every))
 	}
+}
+
+// mdsWait is RunMDS's next wait: mdsNextWait, but never past the moment
+// the BLOB goes stale (capStale: a run then, even a failing one,
+// republishes the empty list).
+func (h *Hub) mdsWait(st fidomds.Status, every time.Duration) time.Duration {
+	now := h.mdsNow()
+	return capStale(mdsNextWait(st, every, now), st, now)
+}
+
+// capStale caps wait at the moment st's BLOB goes stale (just past
+// nextUpdate + fidomds.StaleAfter), when that is still ahead.
+func capStale(wait time.Duration, st fidomds.Status, now time.Time) time.Duration {
+	if st.NextUpdate.IsZero() {
+		return wait
+	}
+	staleAt := st.NextUpdate.Add(fidomds.StaleAfter + time.Second)
+	if d := staleAt.Sub(now); d > 0 && d < wait {
+		return d
+	}
+	return wait
 }
 
 // mdsNextWait is when to refresh next: `every` after the fetch, sooner

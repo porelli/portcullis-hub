@@ -4,9 +4,13 @@ package fidomds
 // (contract §8.1 "FIDO metadata (Hub)", plan D15). go-webauthn's metadata
 // decoder verifies the JWS: its x5c chain to the trust anchor (the FIDO
 // production root unless Fetcher.Roots says otherwise), the chain
-// certificates' revocation and the signature. Never fail open: a BLOB that
-// doesn't verify, is older than the cached one or already stale is never
-// cached, and a failed fetch keeps the last good BLOB.
+// certificates' revocation and the signature. A CRL or OCSP responder that
+// can't be reached counts as not revoked (the library's behaviour,
+// accepted by the contract: the chain and signature are still verified).
+// Never fail open otherwise: a BLOB that doesn't verify, is already stale
+// or whose serial is below the high-water serial (the highest ever
+// cached, <cache dir>/mds.serial) is never cached, and a failed fetch
+// keeps the last good BLOB.
 
 import (
 	"context"
@@ -19,6 +23,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -43,7 +48,9 @@ const maxBlobBytes = 64 << 20
 func init() {
 	// The decoder checks the chain's revocation (CRL / OCSP) through this
 	// package-level client, http.DefaultClient (no timeout) unless set:
-	// never let it hang the MDS loop. Set once, before any use.
+	// never let it hang the MDS loop. Set once, before any use. A
+	// responder that can't be reached (or times out) counts as not
+	// revoked: go-webauthn/x/revoke's behaviour, accepted (contract §8.1).
 	revoke.HTTPClient = &http.Client{Timeout: 30 * time.Second}
 }
 
@@ -115,6 +122,13 @@ func (f *Fetcher) loadLocked() (*metadata.Metadata, error) {
 	if err != nil {
 		return nil, fmt.Errorf("fido mds: cached BLOB refused: %w", err)
 	}
+	hw, err := f.highWater()
+	if err != nil {
+		return nil, err
+	}
+	if m.Parsed.Number < hw {
+		return nil, fmt.Errorf("fido mds: cached BLOB %d is below the high-water serial %d", m.Parsed.Number, hw)
+	}
 	var at time.Time
 	if fi, err := os.Stat(f.CacheFile); err == nil {
 		at = fi.ModTime().UTC()
@@ -143,15 +157,25 @@ func (f *Fetcher) Refresh(ctx context.Context) (*Status, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	prev, _ := f.loadLocked() // the cached BLOB, if any (for the serial check)
+	var hw int
+	if err == nil {
+		hw, err = f.highWater()
+	}
 	if err == nil {
 		switch {
 		case IsStale(m.Parsed.NextUpdate, f.now()):
 			err = fmt.Errorf("fido mds: BLOB %d is expired (next update %s)", m.Parsed.Number, m.Parsed.NextUpdate.Format(time.DateOnly))
 		case prev != nil && m.Parsed.Number < prev.Parsed.Number:
 			err = fmt.Errorf("fido mds: BLOB %d is older than the cached %d", m.Parsed.Number, prev.Parsed.Number)
+		case m.Parsed.Number < hw:
+			err = fmt.Errorf("fido mds: BLOB %d is below the high-water serial %d", m.Parsed.Number, hw)
 		default:
 			err = f.writeCache(raw)
 		}
+	}
+	if err == nil && m.Parsed.Number > hw {
+		// Only after the verified BLOB is cached.
+		err = f.writeHighWater(m.Parsed.Number)
 	}
 	if err != nil {
 		f.st.Err = err.Error()
@@ -202,6 +226,34 @@ func (f *Fetcher) writeCache(raw []byte) error {
 	}
 	t := f.now()
 	_ = os.Chtimes(f.CacheFile, t, t)
+	return nil
+}
+
+// serialFile is the high-water serial's file, next to the cache.
+func (f *Fetcher) serialFile() string { return filepath.Join(filepath.Dir(f.CacheFile), "mds.serial") }
+
+// highWater is the highest serial ever cached (0 = none recorded); a file
+// that doesn't hold one number is an error (fail closed: nothing is
+// cached or loaded until it is fixed or removed).
+func (f *Fetcher) highWater() (int, error) {
+	b, err := os.ReadFile(f.serialFile())
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("fido mds: high-water serial: %w", err)
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil || n < 0 {
+		return 0, fmt.Errorf("fido mds: high-water serial %s is not a number", f.serialFile())
+	}
+	return n, nil
+}
+
+func (f *Fetcher) writeHighWater(n int) error {
+	if err := fsutil.WriteFileAtomic(f.serialFile(), []byte(strconv.Itoa(n)+"\n"), 0600); err != nil {
+		return fmt.Errorf("fido mds: high-water serial: %w", err)
+	}
 	return nil
 }
 

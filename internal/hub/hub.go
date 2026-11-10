@@ -101,6 +101,9 @@ type Config struct {
 	// trust-list entries merged over the FIDO list on every publish
 	// (signin_mds.go).
 	ExtraAuthenticators string
+	// Dev is HUB_DEV=1: the extra authenticators are used only with it
+	// (defence in depth: main refuses the file without it).
+	Dev bool
 }
 
 // Engine is the part of the Docker Engine API the Hub uses.

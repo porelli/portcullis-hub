@@ -69,17 +69,20 @@ func fixerImageFromEnv(getenv func(string) string) (string, error) {
 }
 
 // signInMDSFromEnv is HUB_FIDO_MDS_URL (default the FIDO Alliance MDS3
-// endpoint; an http(s) URL, contract §8.1) and
+// endpoint; an http(s) URL, or "off" = no fetching, contract §8.1) and
 // HUB_SIGNIN_EXTRA_AUTHENTICATORS, a file of extra passkey trust-list
 // entries for CI's virtual authenticator: honoured only with HUB_DEV=1,
 // else the Hub refuses to start (it would let any model count as a
 // security key).
 func signInMDSFromEnv(getenv func(string) string) (mdsURL, extra string, err error) {
 	mdsURL = getenv("HUB_FIDO_MDS_URL")
-	if mdsURL == "" {
+	switch mdsURL {
+	case "":
 		mdsURL = fidomds.DefaultURL
+	case "off":
+		mdsURL = "" // no fetching: RunMDS logs it once
 	}
-	if u, perr := url.Parse(mdsURL); perr != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
+	if u, perr := url.Parse(mdsURL); mdsURL != "" && (perr != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "") {
 		return "", "", fmt.Errorf("HUB_FIDO_MDS_URL must be an http(s) URL, got %q", mdsURL)
 	}
 	extra = getenv("HUB_SIGNIN_EXTRA_AUTHENTICATORS")
@@ -188,6 +191,7 @@ func main() {
 		log.Fatalf("refusing to start: %v", err)
 	}
 	cfg.FixerImage = fixerImage
+	cfg.Dev = os.Getenv("HUB_DEV") == "1"
 	cfg.FIDOMDSURL, cfg.ExtraAuthenticators, err = signInMDSFromEnv(os.Getenv)
 	if err != nil {
 		log.Fatalf("refusing to start: %v", err)
