@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"strings"
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/hub"
@@ -48,10 +49,49 @@ func (s *Server) registerSignInTools() {
 				if json.Unmarshal(args, &a) != nil {
 					return nil
 				}
-				if a.On {
+				if !a.On {
+					return []string{q(string(a.Method)) + " will no longer be offered"}
+				}
+				// Switching ON: check which templates this widens
+				view, err := s.Hub.SignInView(ctx)
+				if err != nil {
 					return []string{q(string(a.Method)) + " will be offered at sign-in"}
 				}
-				return []string{q(string(a.Method)) + " will no longer be offered"}
+				withoutMethod := make(map[signin.Method]bool)
+				withMethod := make(map[signin.Method]bool)
+				for _, m := range view.Methods {
+					if m.On {
+						withoutMethod[m.ID] = true
+						withMethod[m.ID] = true
+					}
+				}
+				withMethod[a.Method] = true
+				var widened []string
+				for _, t := range view.Templates {
+					if !t.Enabled || len(t.UsedBy) == 0 {
+						continue
+					}
+					without, err := signin.Compile(t.Rule, withoutMethod)
+					if err != nil {
+						continue
+					}
+					with, err := signin.Compile(t.Rule, withMethod)
+					if err != nil {
+						continue
+					}
+					if !signin.Implies(with, without) {
+						// This template is widened
+						uses := make([]string, 0, len(t.UsedBy))
+						for _, u := range t.UsedBy {
+							uses = append(uses, q(u.Name))
+						}
+						widened = append(widened, q(t.Name)+" (used by "+strings.Join(uses, ", ")+")")
+					}
+				}
+				if len(widened) > 0 {
+					return append([]string{q(string(a.Method)) + " will be offered, widening: " + strings.Join(widened, "; ")}, widened...)
+				}
+				return []string{q(string(a.Method)) + " will be offered at sign-in"}
 			},
 			Run: func(ctx context.Context, c *directory.Caller, args json.RawMessage) (any, error) {
 				in, err := decode[signInMethodArgs](args)
@@ -271,19 +311,67 @@ type (
 
 // ── ClassFor functions (per-call access control) ──
 
-// setSignInMethodClass: D when on, W when off.
+// setSignInMethodClass: D when on AND widening any in-use template, W when off.
 func (s *Server) setSignInMethodClass(ctx context.Context, args json.RawMessage) ToolClass {
 	var a signInMethodArgs
 	if json.Unmarshal(args, &a) != nil {
 		return ClassDestructive // fail closed
 	}
-	if a.On {
-		return ClassDestructive
+	if !a.On {
+		// Switching off: W
+		return ClassWrite
 	}
+
+	// Switching ON: check if this widens any enabled template in use
+	view, err := s.Hub.SignInView(ctx)
+	if err != nil {
+		return ClassDestructive // fail closed
+	}
+
+	// Build method sets: without and with this method
+	withoutMethod := make(map[signin.Method]bool)
+	withMethod := make(map[signin.Method]bool)
+	for _, m := range view.Methods {
+		if m.On {
+			withoutMethod[m.ID] = true
+			withMethod[m.ID] = true
+		}
+	}
+	withMethod[a.Method] = true
+
+	// Check each enabled template that's in use
+	for _, t := range view.Templates {
+		if !t.Enabled {
+			continue
+		}
+		// Check if it's in use
+		if len(t.UsedBy) == 0 {
+			continue // not in use
+		}
+
+		// Compile this template without and with the method
+		without, err := signin.Compile(t.Rule, withoutMethod)
+		if err != nil {
+			// Can't compile without: treat as not widening this one
+			continue
+		}
+		with, err := signin.Compile(t.Rule, withMethod)
+		if err != nil {
+			// Can't compile with: fail closed
+			return ClassDestructive
+		}
+
+		// If with doesn't imply without, this method switch-on widens this template
+		if !signin.Implies(with, without) {
+			return ClassDestructive
+		}
+	}
+
+	// No template widened
 	return ClassWrite
 }
 
-// saveSignInTemplateClass: D unless creating, or new Implies old.
+// saveSignInTemplateClass: D unless creating, or new Implies old under BOTH current switches and all available methods.
 func (s *Server) saveSignInTemplateClass(ctx context.Context, args json.RawMessage) ToolClass {
 	var a signInTemplateArgs
 	if json.Unmarshal(args, &a) != nil {
@@ -314,26 +402,47 @@ func (s *Server) saveSignInTemplateClass(ctx context.Context, args json.RawMessa
 	if oldRule == nil {
 		return ClassDestructive // unknown template, fail closed
 	}
-	// Compile both rules with current methods
-	on := make(map[signin.Method]bool)
+
+	// Check 1: Compile with current switches
+	currentOn := make(map[signin.Method]bool)
 	for _, m := range view.Methods {
 		if m.On {
-			on[m.ID] = true
+			currentOn[m.ID] = true
 		}
 	}
-	newCompiled, err := signin.Compile(newRule, on)
+	newCurrent, err := signin.Compile(newRule, currentOn)
 	if err != nil {
 		return ClassDestructive // can't compile new rule
 	}
-	oldCompiled, err := signin.Compile(*oldRule, on)
+	oldCurrent, err := signin.Compile(*oldRule, currentOn)
 	if err != nil {
-		return ClassDestructive // can't compile old rule (shouldn't happen)
+		return ClassDestructive // can't compile old rule
 	}
-	// If new implies old, it's not destructive
-	if signin.Implies(newCompiled, oldCompiled) {
-		return ClassWrite
+	if !signin.Implies(newCurrent, oldCurrent) {
+		return ClassDestructive // widens under current switches
 	}
-	return ClassDestructive
+
+	// Check 2: Compile with all available methods on
+	allOn := make(map[signin.Method]bool)
+	for _, m := range view.Methods {
+		if m.Available { // all available methods, not just switched on
+			allOn[m.ID] = true
+		}
+	}
+	newAll, err := signin.Compile(newRule, allOn)
+	if err != nil {
+		return ClassDestructive // can't compile with all on
+	}
+	oldAll, err := signin.Compile(*oldRule, allOn)
+	if err != nil {
+		return ClassDestructive // can't compile old with all on
+	}
+	if !signin.Implies(newAll, oldAll) {
+		return ClassDestructive // would widen if methods switched on
+	}
+
+	// Both checks passed: new implies old in both scenarios
+	return ClassWrite
 }
 
 // setDefaultTemplateClass: D unless new Implies current.
