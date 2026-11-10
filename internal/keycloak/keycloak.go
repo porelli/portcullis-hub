@@ -721,7 +721,9 @@ type PasskeyCredential struct {
 }
 
 // SignInCredentials lists every Keycloak user's passkeys (contract §8.1
-// "Inventory"), keyed by lowercase username; a user whose credentials
+// "Inventory"), keyed by lowercase username; a user disabled in Keycloak
+// maps to nil (they can't sign in with any method, not even a password;
+// an enabled user without passkeys has an empty, non-nil list); a user whose credentials
 // can't be read is left out (their methods stay unknown, which never
 // counts), and so is any user Keycloak hasn't imported yet (none set
 // up). The error is realm-level only (auth, the user list: Keycloak is
@@ -741,6 +743,13 @@ func (c *Client) SignInCredentials(ctx context.Context) (map[string][]PasskeyCre
 	sem := make(chan struct{}, StatusConcurrency)
 	for _, u := range users {
 		if !ValidUserID(u.ID) {
+			continue
+		}
+		if !u.Enabled {
+			// Disabled: no way to sign in at all (nil, not []).
+			mu.Lock()
+			out[strings.ToLower(u.Username)] = nil
+			mu.Unlock()
 			continue
 		}
 		wg.Add(1)

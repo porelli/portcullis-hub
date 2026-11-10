@@ -192,6 +192,8 @@ func TestSignInCredentialsTypes(t *testing.T) {
 		kctest.Credential{ID: "w4", Type: "webauthn"},
 		kctest.Credential{ID: "o1", Type: "otp"})
 	f.Import("Bob")
+	f.Import("off", kctest.Credential{ID: "w6", Type: "portcullis-security-key"})
+	f.Update("off", func(u *kctest.User) { u.Enabled = false })
 	f.Import("broken", kctest.Credential{ID: "w5", Type: "portcullis-security-key"})
 	f.Update("broken", func(u *kctest.User) { u.CredentialsStatus = 500 })
 	c := keycloak.New(f.HTTP.URL, "admin", "admin")
@@ -216,6 +218,9 @@ func TestSignInCredentialsTypes(t *testing.T) {
 	// Known, none set up; unreadable: left out (unknown).
 	if b, ok := got["bob"]; !ok || len(b) != 0 {
 		t.Errorf("bob = %+v, %v", b, ok)
+	}
+	if o, ok := got["off"]; !ok || o != nil {
+		t.Errorf("a disabled user = %+v, %v; want nil (no methods at all)", o, ok)
 	}
 	if _, ok := got["broken"]; ok {
 		t.Error("a user whose credentials can't be read must be unknown")
