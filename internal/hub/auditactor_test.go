@@ -7,7 +7,6 @@ import (
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/doctor"
-	"github.com/portcullis/hub/internal/policy"
 )
 
 // TestHubAuditCarriesActor (Task 7c): an instance delete by a via-AI
@@ -137,27 +136,27 @@ func TestAccessChangesAudited(t *testing.T) {
 		t.Errorf("%s: no entry for %s in %+v", what, target, got)
 	}
 
-	got, err := saveAs(SettingsUpdate{Policy: &policy.AuthPolicy{Factors: []string{"webauthn"}}})
+	got, err := saveAs(SettingsUpdate{SignInTemplate: pickTemplate("strong")})
 	if err != nil {
 		t.Fatal(err)
 	}
-	want("policy set", got, "cloud/auth_policy", "scope=policy: inherited -> webauthn", "ok")
+	want("template set", got, "cloud/sign_in_template", "scope=sign_in_template: default -> strong", "ok")
 
-	if got, err = saveAs(SettingsUpdate{Policy: &policy.AuthPolicy{Factors: []string{"webauthn"}}}); err != nil || len(got) != 0 {
-		t.Errorf("unchanged policy: %v, entries %+v", err, got)
+	if got, err = saveAs(SettingsUpdate{SignInTemplate: pickTemplate("strong")}); err != nil || len(got) != 0 {
+		t.Errorf("unchanged template: %v, entries %+v", err, got)
 	}
 
-	got, err = saveAs(SettingsUpdate{Policy: &policy.AuthPolicy{Factors: []string{"password"}}})
-	if errStatus(err) != 400 {
-		t.Fatalf("password policy = %v, want 400", err)
+	got, err = saveAs(SettingsUpdate{SignInTemplate: pickTemplate("basic")})
+	if errStatus(err) != 409 {
+		t.Fatalf("disabled template = %v, want 409", err)
 	}
-	want("policy refused", got, "cloud/auth_policy", "", "refused")
+	want("template refused", got, "cloud/sign_in_template", "", "refused")
 
-	got, err = saveAs(SettingsUpdate{Inherit: true})
+	got, err = saveAs(SettingsUpdate{SignInTemplate: pickTemplate("")})
 	if err != nil {
 		t.Fatal(err)
 	}
-	want("policy inherit", got, "cloud/auth_policy", "scope=policy: webauthn -> inherited", "ok")
+	want("template inherit", got, "cloud/sign_in_template", "scope=sign_in_template: strong -> default", "ok")
 
 	got, err = saveAs(SettingsUpdate{PublicAccess: boolp(false)})
 	if err != nil {

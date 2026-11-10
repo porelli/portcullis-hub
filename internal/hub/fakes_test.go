@@ -430,7 +430,6 @@ type fakeIdP struct {
 	registerErr error
 	mu          sync.Mutex
 	registered  []string
-	updated     []string
 	specs       []keycloak.ClientSpec
 	hostUpdates []string // "<client>:<old uris> -> <new uris>"
 	callbacks   []string // "+add -remove"
@@ -718,7 +717,7 @@ func (f *fakeIdP) RegisterClient(ctx context.Context, s keycloak.ClientSpec) (bo
 		return false, f.registerErr
 	}
 	f.specs = append(f.specs, s)
-	f.registered = append(f.registered, fmt.Sprintf("%s:%s:%s:%s:%s", s.ClientID, s.TemplateID, s.ACR, s.Secret, strings.Join(s.AllowedHosts, ",")))
+	f.registered = append(f.registered, fmt.Sprintf("%s:%s:%s:%s", s.ClientID, s.TemplateID, s.Secret, strings.Join(s.AllowedHosts, ",")))
 	if f.clients == nil {
 		f.clients = map[string]bool{}
 	}
@@ -730,13 +729,6 @@ func (f *fakeIdP) RegisterClient(ctx context.Context, s keycloak.ClientSpec) (bo
 		f.mu.Lock()
 	}
 	return created, nil
-}
-
-func (f *fakeIdP) UpdateClientACR(ctx context.Context, s keycloak.ClientSpec) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.updated = append(f.updated, s.ClientID+":"+s.ACR)
-	return nil
 }
 
 func (f *fakeIdP) UpdateClientHosts(ctx context.Context, s keycloak.ClientSpec, oldURIs []string, hostMap map[string]string) error {

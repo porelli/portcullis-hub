@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	"github.com/portcullis/hub/internal/directory"
-	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
 )
@@ -501,8 +500,9 @@ func TestInstanceNameEverywhere(t *testing.T) {
 		"ai_instance.go": 1, "confirm.go": 1, "entries.go": 1, "ai_accesslog.go": 1,
 		// The instance views' name (§11.7), new with labels.
 		"instances.go": 1,
-		// Settings → Sign-in: a template's uses (sign-in Task 3).
-		"signin.go": 1}
+		// Settings → Sign-in: a template's uses (sign-in Task 3), and the
+		// needs-stronger page's app name in signin-keycloak.json (Task 4).
+		"signin.go": 1, "signin_publish.go": 1}
 	files, _ := filepath.Glob("*.go")
 	got := map[string]int{}
 	for _, p := range files {
@@ -526,8 +526,8 @@ func TestInstanceNameEverywhere(t *testing.T) {
 			t.Errorf("%s calls instanceName: add it here", p)
 		}
 	}
-	if total != 12 {
-		t.Errorf("%d call sites, want the 10 of §11.9 plus the instance views and the sign-in uses", total)
+	if total != 13 {
+		t.Errorf("%d call sites, want the 10 of §11.9 plus the instance views, the sign-in uses and signin-keycloak.json", total)
 	}
 
 	f := newInstanceFixture(t, nil)
@@ -615,19 +615,17 @@ func TestFirstInstanceUndoKeepsDefaultData(t *testing.T) {
 	if err := f.h.Disable("grafana"); err != nil {
 		t.Fatal(err)
 	}
-	strict := policy.AuthPolicy{Factors: []string{"webauthn"}, Op: "any"}
-	if _, err := f.h.SaveSettings("grafana", SettingsUpdate{Policy: &strict, Ports: map[string]string{"GRAFANA_PORT": "3301"}}, root); err != nil {
+	if _, err := f.h.SaveSettings("grafana", SettingsUpdate{Ports: map[string]string{"GRAFANA_PORT": "3301"}}, root); err != nil {
 		t.Fatal(err)
 	}
 	envBefore := readFile(t, f.h.envPath("grafana"))
 	ovBefore := readFile(t, f.h.overridePath("grafana"))
-	snapshot := func() (state.InstanceSettings, policy.AuthPolicy, bool) {
+	snapshot := func() state.InstanceSettings {
 		f.h.mu.RLock()
 		defer f.h.mu.RUnlock()
-		p, ok := f.h.st.AuthPolicies["grafana"]
-		return f.h.st.Settings["grafana"].Clone(), p, ok
+		return f.h.st.Settings["grafana"].Clone()
 	}
-	setBefore, polBefore, _ := snapshot()
+	setBefore := snapshot()
 	check := func(phase string) {
 		t.Helper()
 		if got := readFile(t, f.h.envPath("grafana")); got != envBefore {
@@ -636,12 +634,9 @@ func TestFirstInstanceUndoKeepsDefaultData(t *testing.T) {
 		if got := readFile(t, f.h.overridePath("grafana")); got != ovBefore {
 			t.Errorf("%s: override changed", phase)
 		}
-		s, p, ok := snapshot()
+		s := snapshot()
 		if s.Ports["GRAFANA_PORT"] != setBefore.Ports["GRAFANA_PORT"] || s.Ports["GRAFANA_PORT"] != "3301" {
 			t.Errorf("%s: settings = %+v", phase, s)
-		}
-		if !ok || strings.Join(p.Factors, ",") != strings.Join(polBefore.Factors, ",") {
-			t.Errorf("%s: policy = %+v %v", phase, p, ok)
 		}
 		f.h.mu.RLock()
 		_, entry := f.h.st.Instances["grafana"]
@@ -680,7 +675,7 @@ func TestFirstInstanceUndoKeepsDefaultData(t *testing.T) {
 	if _, err := f.h.CreateInstanceAs(createReq("grafana", "grafana", "Home"), root); err != nil {
 		t.Fatal(err)
 	}
-	if s, _, _ := snapshot(); s.Ports["GRAFANA_PORT"] != "3301" {
+	if s := snapshot(); s.Ports["GRAFANA_PORT"] != "3301" {
 		t.Errorf("settings after the create = %+v", s)
 	}
 
@@ -895,8 +890,7 @@ func TestRemoveNewInstanceDefaultWithoutEntry(t *testing.T) {
 	if err := f.h.Disable("grafana"); err != nil {
 		t.Fatal(err)
 	}
-	strict := policy.AuthPolicy{Factors: []string{"webauthn"}, Op: "any"}
-	if _, err := f.h.SaveSettings("grafana", SettingsUpdate{Policy: &strict, Ports: map[string]string{"GRAFANA_PORT": "3301"}}, root); err != nil {
+	if _, err := f.h.SaveSettings("grafana", SettingsUpdate{Ports: map[string]string{"GRAFANA_PORT": "3301"}}, root); err != nil {
 		t.Fatal(err)
 	}
 	env, ov := readFile(t, f.h.envPath("grafana")), readFile(t, f.h.overridePath("grafana"))
@@ -910,9 +904,6 @@ func TestRemoveNewInstanceDefaultWithoutEntry(t *testing.T) {
 	defer f.h.mu.RUnlock()
 	if f.h.st.Settings["grafana"].Ports["GRAFANA_PORT"] != "3301" {
 		t.Errorf("settings = %+v", f.h.st.Settings["grafana"])
-	}
-	if p, ok := f.h.st.AuthPolicies["grafana"]; !ok || strings.Join(p.Factors, ",") != "webauthn" {
-		t.Errorf("policy = %+v %v", p, ok)
 	}
 }
 

@@ -172,7 +172,7 @@ func TestUserOverridePorts(t *testing.T) {
 	if _, _, err := f.h.SaveUserOverride("other", "services:\n  web:\n    ports: [\"9000:80\"]\n"); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.h.save("other", SettingsUpdate{Ports: map[string]string{"OTHER_PORT": "3301"}, Inherit: true}); err != nil {
+	if err := f.h.save("other", SettingsUpdate{Ports: map[string]string{"OTHER_PORT": "3301"}, SignInTemplate: pickTemplate("")}); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.h.Enable("other"); err != nil {

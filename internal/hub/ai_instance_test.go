@@ -25,7 +25,6 @@ import (
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/keycloak"
-	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/settings"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
@@ -608,18 +607,21 @@ func TestAIRefusals(t *testing.T) {
 		delete(a.h.st.Instances, "aiapp")
 		a.h.mu.Unlock()
 	}
-	// LoA 3.
-	for _, p := range []policy.AuthPolicy{{Factors: []string{"mtls"}, Op: "any"}, {Factors: []string{"mtls", "webauthn"}, Op: "all"}} {
+	// A certificate-only sign-in template (signin.NeedsCertificate).
+	a.h.mu.Lock()
+	addTemplateLocked(a.h, "certs", siLeaves("any", "yubikey_cert"))
+	a.h.mu.Unlock()
+	for _, p := range []string{"certs", certOnlyTemplate} {
 		a.h.mu.Lock()
-		a.h.st.AuthPolicies["aiapp"] = p
+		setPickLocked(a.h, "aiapp", p)
 		a.h.mu.Unlock()
 		err := on("aiapp", "tok")
-		if status(err) != 409 || !strings.Contains(err.Error(), "needs a client certificate on every request; AI clients can't present one") {
+		if status(err) != 409 || !strings.Contains(err.Error(), "needs a client certificate on every sign-in; AI clients can't present one") {
 			t.Errorf("%v: %v", p, err)
 		}
 	}
 	a.h.mu.Lock()
-	delete(a.h.st.AuthPolicies, "aiapp")
+	setPickLocked(a.h, "aiapp", "")
 	a.h.mu.Unlock()
 	// unsupported template, unknown companion, a mode outside modes.
 	if err := a.h.SetAISupport(context.Background(), "grafana", "x", true, root); status(err) != 409 {
@@ -665,14 +667,41 @@ func TestAliasLengthRefused(t *testing.T) {
 	}
 }
 
-func TestPolicySaveTurnsAIOff(t *testing.T) {
+// TestAIRefusedCertificateOnly: an instance put on the certificate-only
+// built-in through the API can't get AI support (D19).
+func TestAIRefusedCertificateOnly(t *testing.T) {
 	a := newInstAIFixture(t, nil)
 	a.enable(t, "aiapp")
-	if err := a.h.SetAISupport(context.Background(), "aiapp", "tok", true, root); err != nil {
+	ctx := context.Background()
+	if _, err := a.h.SetTemplateEnabled(ctx, certOnlyTemplate, true, root); err != nil {
 		t.Fatal(err)
 	}
-	mtls := &policy.AuthPolicy{Factors: []string{"mtls"}, Op: "any"}
-	pv, err := a.h.PreviewSettings(context.Background(), "aiapp", SettingsUpdate{Policy: mtls})
+	pick := certOnlyTemplate
+	if _, err := a.h.SaveSettings("aiapp", SettingsUpdate{SignInTemplate: &pick}, root); err != nil {
+		t.Fatal(err)
+	}
+	a.h.Wait()
+	err := a.h.SetAISupport(ctx, "aiapp", "tok", true, root)
+	if statusOf(err) != 409 || !strings.Contains(err.Error(), "needs a client certificate on every sign-in") {
+		t.Errorf("SetAISupport = %v", err)
+	}
+	if c := a.companion("aiapp", "tok"); c.Enabled {
+		t.Errorf("switched on: %+v", c)
+	}
+}
+
+func TestSignInSaveTurnsAIOff(t *testing.T) {
+	a := newInstAIFixture(t, nil)
+	a.enable(t, "aiapp")
+	ctx := context.Background()
+	if err := a.h.SetAISupport(ctx, "aiapp", "tok", true, root); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.h.SetTemplateEnabled(ctx, certOnlyTemplate, true, root); err != nil {
+		t.Fatal(err)
+	}
+	certOnly := &SettingsUpdate{SignInTemplate: pickTemplate(certOnlyTemplate)}
+	pv, err := a.h.PreviewSettings(ctx, "aiapp", *certOnly)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -682,7 +711,7 @@ func TestPolicySaveTurnsAIOff(t *testing.T) {
 	if c := a.companion("aiapp", "tok"); !c.Enabled {
 		t.Fatal("the preview switched AI off")
 	}
-	res, err := a.h.SaveSettings("aiapp", SettingsUpdate{Policy: mtls}, root)
+	res, err := a.h.SaveSettings("aiapp", *certOnly, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -692,30 +721,30 @@ func TestPolicySaveTurnsAIOff(t *testing.T) {
 	if !slices.ContainsFunc(res.Warnings, func(w string) bool { return strings.Contains(w, "AI support") }) {
 		t.Errorf("save warnings = %v", res.Warnings)
 	}
-	if e := a.audits("ai.disable"); len(e) != 1 || e[0].Detail != "policy needs mTLS" {
+	if e := a.audits("ai.disable"); len(e) != 1 || e[0].Detail != aiCertOffDetail {
 		t.Errorf("audit = %+v", e)
 	}
-	// The Hub default (G43): every inheriting instance reaching LoA 3.
+	// A sign-in change (G43, contract §8.1): the default made
+	// certificate-only switches every inheriting instance's AI off first.
 	a.h.Wait() // the save's background restart
-	a.h.mu.Lock()
-	delete(a.h.st.AuthPolicies, "aiapp")
-	a.h.mu.Unlock()
-	if err := a.h.SetAISupport(context.Background(), "aiapp", "tok", true, root); err != nil {
+	if _, err := a.h.SaveSettings("aiapp", SettingsUpdate{SignInTemplate: pickTemplate("")}, root); err != nil {
 		t.Fatal(err)
 	}
-	if w := a.h.DefaultPolicyAIWarnings(*mtls); len(w) != 1 || !strings.Contains(w[0], "aiapp") {
-		t.Errorf("default preview = %v", w)
+	a.h.Wait()
+	if err := a.h.SetAISupport(ctx, "aiapp", "tok", true, root); err != nil {
+		t.Fatal(err)
 	}
-	_, warnings, err := a.h.SetDefaultPolicyAs(*mtls, root)
+	ch, err := a.h.SaveTemplate(ctx, "standard", TemplateInput{Name: "Standard", Rule: siLeaves("all", "yubikey_cert", "security_key")}, false, root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c := a.companion("aiapp", "tok"); c.Enabled || len(warnings) != 1 {
-		t.Errorf("default save: AI %+v, warnings %v", c, warnings)
+	if c := a.companion("aiapp", "tok"); c.Enabled || !slices.ContainsFunc(ch.Warnings, func(w string) bool { return strings.Contains(w, "aiapp") }) {
+		t.Errorf("sign-in change: AI %+v, warnings %v", c, ch.Warnings)
 	}
-	if e := a.audits("ai.disable"); len(e) != 2 || e[1].Detail != "policy needs mTLS" {
+	if e := a.audits("ai.disable"); len(e) != 2 || e[1].Detail != aiCertOffDetail {
 		t.Errorf("audit = %+v", e)
 	}
+	a.h.Wait()
 }
 
 func TestMCPRouterIsExposureLabel(t *testing.T) {
@@ -1089,28 +1118,28 @@ func TestRevokePendingEnvIsOff(t *testing.T) {
 	}
 }
 
-// R1-2a: a policy reaching LoA 3 saved while a switch-on is planned:
+// R1-2a: a certificate-only template picked while a switch-on is planned:
 // the switch-on's commit re-checks under mu and refuses (409).
-func TestAISwitchOnRacesPolicySave(t *testing.T) {
+func TestAISwitchOnRacesSignInSave(t *testing.T) {
 	a := newInstAIFixture(t, nil)
 	a.enable(t, "aiapp")
 	a.h.testHookAIBeforeSave = func() {
 		a.h.mu.Lock()
-		a.h.st.AuthPolicies["aiapp"] = policy.AuthPolicy{Factors: []string{"mtls"}, Op: "any"}
+		setCertOnlyLocked(a.h, "aiapp")
 		a.h.mu.Unlock()
 	}
 	err := a.h.SetAISupport(context.Background(), "aiapp", "tok", true, root)
 	var se *StatusError
-	if !errors.As(err, &se) || se.Status != 409 || !strings.Contains(err.Error(), mtlsRefusal) {
+	if !errors.As(err, &se) || se.Status != 409 || !strings.Contains(err.Error(), certRefusal) {
 		t.Errorf("err = %v", err)
 	}
 	if c := a.companion("aiapp", "tok"); c.Enabled {
-		t.Errorf("AI switched on at LoA 3: %+v", c)
+		t.Errorf("AI switched on with a certificate-only template: %+v", c)
 	}
 	// The master switch turned off meanwhile.
 	a.h.testHookAIBeforeSave = func() {
 		a.h.mu.Lock()
-		delete(a.h.st.AuthPolicies, "aiapp")
+		setPickLocked(a.h, "aiapp", "")
 		a.h.st.AI.Enabled = false
 		a.h.mu.Unlock()
 	}
@@ -1119,9 +1148,9 @@ func TestAISwitchOnRacesPolicySave(t *testing.T) {
 	}
 }
 
-// R1-2b: a switch-on between SaveSettings' switch-off and its commit,
-// and a default policy saved while an inheriting companion is on: 409.
-func TestPolicySaveRacesSwitchOn(t *testing.T) {
+// R1-2b: a switch-on between SaveSettings' switch-off and its commit:
+// 409, the certificate-only pick never committed.
+func TestSignInSaveRacesSwitchOn(t *testing.T) {
 	a := newInstAIFixture(t, nil)
 	a.enable(t, "aiapp")
 	if err := a.h.SetAISupport(context.Background(), "aiapp", "tok", true, root); err != nil {
@@ -1135,26 +1164,22 @@ func TestPolicySaveRacesSwitchOn(t *testing.T) {
 		a.h.st.AIInstances["aiapp"] = ai
 		a.h.mu.Unlock()
 	}
+	if _, err := a.h.SetTemplateEnabled(context.Background(), certOnlyTemplate, true, root); err != nil {
+		t.Fatal(err)
+	}
 	a.h.testHookSave = on
-	mtls := &policy.AuthPolicy{Factors: []string{"mtls"}, Op: "any"}
-	_, err := a.h.SaveSettings("aiapp", SettingsUpdate{Policy: mtls}, root)
+	_, err := a.h.SaveSettings("aiapp", SettingsUpdate{SignInTemplate: pickTemplate(certOnlyTemplate)}, root)
 	var se *StatusError
 	if !errors.As(err, &se) || se.Status != 409 {
 		t.Errorf("save = %v", err)
 	}
 	a.h.mu.RLock()
-	_, saved := a.h.st.AuthPolicies["aiapp"]
+	saved := a.h.st.Instances["aiapp"].SignInTemplate
 	a.h.mu.RUnlock()
-	if saved {
-		t.Error("the LoA 3 policy was committed with AI on")
+	if saved != "" {
+		t.Error("the certificate-only pick was committed with AI on")
 	}
 	a.h.testHookSave = nil
-	if _, err := a.h.SetDefaultPolicy(*mtls); !errors.As(err, &se) || se.Status != 409 {
-		t.Errorf("default = %v", err)
-	}
-	if p := a.h.DefaultPolicy(); policy.LoA(p) == 3 {
-		t.Error("the default was saved")
-	}
 }
 
 // R1-3: a start that can't get the AI lock within aiPendingWait records

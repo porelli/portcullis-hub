@@ -137,7 +137,7 @@ type OptionPreview struct {
 
 // Preview is what saving a draft would do: its effect and the person
 // options' values. The effect covers the option values, secrets and
-// ports; a policy, public-access or sign-in change restarts an enabled
+// ports; a sign-in template, public-access or sign-in change restarts an enabled
 // instance on top (its override changes).
 //
 // Population is who per-person values reach under the draft: a draft
@@ -148,7 +148,7 @@ type Preview struct {
 	Options    map[string]OptionPreview `json:"options"`
 	Population PopulationView           `json:"population"`
 	// Warnings: what the save does first (AI support switched off by a
-	// policy needing mTLS, G43).
+	// sign-in template needing a client certificate, G43).
 	Warnings []string `json:"warnings"`
 	// PlanHash (G46) is doctor.Digest of the update (secret values never:
 	// only which secret changes how), this preview and the instance's
@@ -191,7 +191,7 @@ func settingsPlanHash(u SettingsUpdate, p *Preview, stored state.InstanceSetting
 		Stored  state.InstanceSettings
 		SignIn  string
 		Access  []any
-	}{pu, cp, stored, signIn, []any{acc.policy, acc.access, acc.mode, acc.tokens}})
+	}{pu, cp, stored, signIn, []any{acc.template, acc.access, acc.mode, acc.tokens}})
 }
 
 // withPlaceholders maps rows the panel sent with the instance's group
@@ -428,7 +428,7 @@ type planInputs struct {
 }
 
 func (in planInputs) digest() string {
-	return doctor.Digest([]any{in.stored, in.signIn, in.acc.policy, in.acc.access, in.acc.mode, in.acc.tokens})
+	return doctor.Digest([]any{in.stored, in.signIn, in.acc.template, in.acc.access, in.acc.mode, in.acc.tokens})
 }
 
 // planInputsLocked reads id's planInputs. Caller holds mu.

@@ -17,7 +17,6 @@ import (
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
-	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
 )
@@ -42,8 +41,9 @@ type volumePlan struct {
 
 // configProblem refuses (409, listing every problem) an archive whose
 // per-instance configuration doesn't fit template t by SaveSettings'
-// rules (configProblems): settings, sign-in mode, policy override, public
-// exceptions. Archived per-person and per-group rows must be valid too
+// rules (configProblems): settings, sign-in mode, sign-in template pick
+// (it must name an enabled template here: 409 otherwise, never the
+// default instead), public exceptions. Archived per-person and per-group rows must be valid too
 // (their group ids are kept). When it fits, c.Settings is made canonical
 // for t (values parsed again, types recorded) — what applyConfigLocked
 // stores.
@@ -65,11 +65,9 @@ func (h *Hub) configProblem(t *templates.Template, c *instanceConfig, archive st
 		}
 		u.Values[k] = b
 	}
-	if c.AuthPolicy != nil {
-		// As state.yaml loads it (a legacy factor rewritten, never weaker)
-		// and as applyConfigLocked stores it.
-		n := policy.Normalize(*c.AuthPolicy)
-		u.Policy = &n
+	if c.SignInTemplate != "" {
+		pick := c.SignInTemplate
+		u.SignInTemplate = &pick
 	}
 	if c.SignIn != "" {
 		si := c.SignIn
@@ -85,6 +83,9 @@ func (h *Hub) configProblem(t *templates.Template, c *instanceConfig, archive st
 	}
 	h.mu.RLock()
 	folders := h.folderSourceLocked()
+	if err := pickableLocked(h.st.SignIn, u.SignInTemplate); err != nil {
+		problems = append(problems, statusErr(409, "sign-in template: %v", err))
+	}
 	h.mu.RUnlock()
 	parsed, more := configCheck(t, h.kinds, folders, u, c.SignIn == state.SignInNative)
 	problems = append(problems, more...)

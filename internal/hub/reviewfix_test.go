@@ -805,10 +805,10 @@ func TestDeliveryGenCoversPopulationInputs(t *testing.T) {
 	}
 	before := gen()
 	f.h.mu.Lock()
-	f.h.st.AuthPolicies[headerID] = policy.AuthPolicy{Factors: []string{"passkey"}}
+	setPickLocked(f.h, headerID, "strong")
 	f.h.mu.Unlock()
 	if gen() == before {
-		t.Error("the generation ignores the instance's policy")
+		t.Error("the generation ignores the instance's sign-in template")
 	}
 }
 

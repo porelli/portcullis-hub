@@ -1,9 +1,11 @@
 package hub
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/portcullis/hub/internal/policy"
+	"github.com/portcullis/hub/internal/signin"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
 )
@@ -33,11 +35,16 @@ type access struct {
 	// Portcullis sign-in is forward-auth.
 	Method     string
 	Capability policy.Capability
-	// Configured is the override or the global default; Inherits says
-	// which. Resolved is what applies (Configured ∩ Capability).
-	Configured policy.AuthPolicy
-	Inherits   bool
-	Resolved   policy.Resolution
+	// Template is the instance's sign-in template (its own pick, else the
+	// default; "" for an app that takes none); Inherits: from the default.
+	Template string
+	Inherits bool
+	// Rule is Template's compiled rule; nil for an app that takes none,
+	// or when Template can't be published (Unusable: disabled, gone or
+	// unmeetable — fail closed: the strictest tier, certificate-only for
+	// AI support).
+	Rule     *signin.Node
+	Unusable bool
 }
 
 // GroupAccess reports whether group-gate restricts the app to its access
@@ -48,11 +55,18 @@ func (a access) groupAccess(t *templates.Template) bool {
 
 // accessLocked computes an app's access. Caller must hold mu (read).
 func (h *Hub) accessLocked(t *templates.Template) access {
+	return h.accessWith(t, h.st.SignIn, h.st.Instances[t.ID].SignInTemplate, h.st.SignInMode[t.ID])
+}
+
+// accessWith is t's access under sign-in section si, with the instance's
+// template pick ("" = the default) and sign-in mode (state.SignInNative or
+// ""): what a save or a sign-in change would make it. Caller holds mu.
+func (h *Hub) accessWith(t *templates.Template, si state.SignIn, pick, mode string) access {
 	auth := &t.Manifest.Auth
 	a := access{Method: auth.Method}
 	if auth.HasNativeLogin() {
 		a.SignIn, a.Method = SignInGateway, "forward-auth"
-		if h.st.SignInMode[t.ID] == state.SignInNative {
+		if mode == state.SignInNative {
 			if auth.NativeLogin.AllowWithoutGateway {
 				a.SignIn, a.Method = SignInNative, auth.Method
 			} else {
@@ -61,19 +75,70 @@ func (h *Hub) accessLocked(t *templates.Template) access {
 		}
 	}
 	a.Capability = policy.CapabilityFor(a.Method)
-	p, override := h.st.AuthPolicies[t.ID]
-	if !override {
-		p = h.st.Default()
+	if !a.Capability.Templates {
+		return a
 	}
-	a.Configured, a.Inherits = p, !override
-	a.Resolved = policy.Resolve(p, a.Capability)
+	a.Template, a.Inherits = pick, pick == ""
+	if pick == "" {
+		a.Template = si.Default
+	}
+	if c, ok := compiledIn(si, a.Template); ok {
+		a.Rule = &c
+	} else {
+		a.Unusable = true
+	}
 	return a
 }
 
-// effectivePolicyLocked is the policy that applies to an app (TLS tier,
-// Keycloak acr). Caller must hold mu (read).
-func (h *Hub) effectivePolicyLocked(t *templates.Template) policy.AuthPolicy {
-	return h.accessLocked(t).Resolved.Policy
+// tierLocked is the TLS option of every router of t (contract §5 "TLS
+// tier per host", D18): an mtls app protected@file (the certificate is
+// its authentication); an app without Portcullis sign-in public@file; a
+// template that can't be published protected@file (fail closed); else
+// policy.Tier of its compiled rule, with publicActive's downgrade. Caller
+// holds mu.
+func (h *Hub) tierLocked(t *templates.Template, publicActive bool) string {
+	return h.accessLocked(t).tier(h.st.SignIn.MethodsOn(), publicActive)
+}
+
+func (a access) tier(on map[signin.Method]bool, publicActive bool) string {
+	switch {
+	case a.Capability.Enforcement == policy.EnforceTLS:
+		return policy.TierProtected
+	case !a.Capability.Templates:
+		return policy.TierPublic
+	case a.Unusable:
+		return policy.TierProtected
+	}
+	return policy.Tier(a.Rule, on, publicActive)
+}
+
+// certOnlyLocked: every way into t needs a client certificate
+// (signin.NeedsCertificate of its compiled rule; an mtls app; a template
+// that can't be published counts too, fail closed). AI clients present
+// none, so AI support is refused (D19). Caller holds mu.
+func (h *Hub) certOnlyLocked(t *templates.Template) bool {
+	return h.accessLocked(t).certOnly()
+}
+
+func (a access) certOnly() bool {
+	switch {
+	case a.Capability.Enforcement == policy.EnforceTLS:
+		return true
+	case !a.Capability.Templates:
+		return false
+	case a.Unusable:
+		return true
+	}
+	return signin.NeedsCertificate(*a.Rule)
+}
+
+// gateLoALocked is gate file v1's min_loa of t's resources until gate file
+// v2 (Task 7): 3 when t is certificate-only, else 2. Caller holds mu.
+func (h *Hub) gateLoALocked(t *templates.Template) int {
+	if h.certOnlyLocked(t) {
+		return 3
+	}
+	return 2
 }
 
 // gatewayRouterMiddlewares is a router's middleware chain behind
@@ -100,66 +165,38 @@ func nativeRouterMiddlewares(own []string) string {
 	return strings.Join(out, ",")
 }
 
-var factorLabel = map[string]string{"mtls": "mTLS (client certificate)", "webauthn": "WebAuthn (passkey)"}
-
-// describePolicy renders a policy for notes: "mTLS or WebAuthn".
-func describePolicy(p policy.AuthPolicy) string {
-	if len(p.Factors) == 0 {
-		return "no sign-in factor (public)"
+// signInNotes explains an app's sign-in for the settings view: its
+// template (sentence and score, signin.Sentence / ScoreOf) and where
+// Portcullis enforces it. Caller holds mu.
+func (h *Hub) signInNotes(a access) []string {
+	switch a.Capability.Enforcement {
+	case policy.EnforceNone:
+		return []string{"This app handles its own sign-in: Portcullis doesn't sign users in for it, so no sign-in template applies."}
+	case policy.EnforceTLS:
+		return []string{"mTLS-only app: the client certificate is required at the TLS handshake (protected TLS tier); it takes no sign-in template."}
 	}
-	names := make([]string, len(p.Factors))
-	for i, f := range p.Factors {
-		names[i] = strings.SplitN(factorLabel[f], " ", 2)[0]
-		if names[i] == "" {
-			names[i] = f
-		}
-	}
-	sep := " or "
-	if p.Op == "all" {
-		sep = " and "
-	}
-	return strings.Join(names, sep)
-}
-
-// policyNotes explains how the configured policy maps onto what the app
-// can enforce, for the settings view.
-func policyNotes(a access, legacyPassword bool) []string {
 	var notes []string
-	src := "this app's override"
+	src := "this app's own pick"
 	if a.Inherits {
-		src = "the global default"
+		src = "the default"
 	}
-	r := a.Resolved
-	if a.Capability.Enforcement == policy.EnforceNone {
-		return append(notes, "This app handles its own sign-in: Portcullis doesn't sign users in for it, so no access policy applies.")
+	tmpl, ok := h.st.SignIn.Templates[a.Template]
+	name := a.Template
+	if ok {
+		name = tmpl.Name
 	}
-	if legacyPassword {
-		save := "Saving this app's policy stores it."
-		if a.Inherits {
-			save = "Saving the default (Settings tab) stores it."
-		}
-		notes = append(notes, capFirst(src)+" named \"password\", which is no longer a sign-in method; it was normalised to "+describePolicy(a.Configured)+". "+save)
+	if a.Unusable || !ok {
+		notes = append(notes, fmt.Sprintf("Sign-in template %q (%s) is disabled, missing or can't be met with the sign-in methods that are switched on: nobody is let in until it is fixed.", name, src))
+	} else {
+		sentence, score, _ := describeRule(tmpl.Rule, h.st.SignIn.MethodsOn())
+		notes = append(notes, fmt.Sprintf("Sign-in template %q (%s): %s", name, src, sentence),
+			fmt.Sprintf("Score %s: %s.", score, score.Reason))
 	}
 	switch a.Capability.Enforcement {
-	case policy.EnforceTLS:
-		notes = append(notes, "mTLS-only app: the client certificate is required at the TLS handshake (protected TLS tier).")
 	case policy.EnforceAtLogin:
-		notes = append(notes, "Native OIDC: Keycloak enforces the policy when the user signs in to the app (acr "+policy.ACR(r.Policy)+"), not on every request.")
-		if policy.Tier(r.Policy) == "protected@file" {
-			notes = append(notes, "mTLS is also checked on every connection (protected TLS tier).")
-		} else if a.Capability.Supports("mtls") {
-			notes = append(notes, "mTLS is checked at login only; per-connection mTLS needs an mTLS-only (or mTLS and WebAuthn) policy, which selects the protected TLS tier.")
-		}
+		notes = append(notes, "Native OIDC: Keycloak checks the template when someone signs in to the app, not on every request.")
 	case policy.EnforcePerRequest:
-		notes = append(notes, "group-gate enforces the policy on every request; a client certificate is bound to the signed-in user.")
-	}
-	switch {
-	case r.Fallback && len(a.Configured.Factors) == 0:
-		notes = append(notes, capFirst(src)+" is public, which this app can't be: "+describePolicy(r.Policy)+" applies.")
-	case r.Fallback:
-		notes = append(notes, capFirst(src)+" requires "+describePolicy(a.Configured)+", which this app can't enforce: "+describePolicy(r.Policy)+" applies instead.")
-	case len(r.Unsupported) > 0:
-		notes = append(notes, capFirst(src)+" allows "+describePolicy(a.Configured)+"; this app can't enforce "+describePolicy(policy.AuthPolicy{Factors: r.Unsupported, Op: "any"})+", so it enforces "+describePolicy(r.Policy)+".")
+		notes = append(notes, "group-gate checks the template on every request; a YubiKey certificate counts only when the request presents it.")
 	}
 	return notes
 }

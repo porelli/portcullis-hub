@@ -30,7 +30,7 @@ func driftFor(rep DriftReport, id string) *Drift {
 // snapshot persisted in state.yaml — across restarts too.
 func TestMissingTemplateEnforcesSnapshot(t *testing.T) {
 	f := newFixture(t)
-	if err := f.h.save("grafana", SettingsUpdate{Policy: &policy.AuthPolicy{Factors: []string{"mtls"}}}); err != nil {
+	if err := f.h.save("grafana", SettingsUpdate{SignInTemplate: pickTemplate("strong")}); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.h.Enable("grafana"); err != nil {
@@ -39,7 +39,7 @@ func TestMissingTemplateEnforcesSnapshot(t *testing.T) {
 	st, _ := state.Load(filepath.Join(f.data, "state.yaml"))
 	snap, ok := st.Published["grafana"]
 	if !ok || strings.Join(snap.Hosts, ",") != "grafana.example.org" || snap.AccessGroup != "users_grafana" ||
-		snap.AdminGroup != "admin_grafana" || len(snap.AdminPaths) != 2 || snap.Policy == nil || snap.Policy.Factors[0] != "mtls" {
+		snap.AdminGroup != "admin_grafana" || len(snap.AdminPaths) != 2 || snap.SignInTemplate != "strong" {
 		t.Fatalf("snapshot = %+v", snap)
 	}
 
@@ -56,7 +56,7 @@ func TestMissingTemplateEnforcesSnapshot(t *testing.T) {
 		t.Helper()
 		doc := readPolicy(t, f)
 		if doc.Groups["grafana.example.org"] != "users_grafana" || len(doc.PathGroups["grafana.example.org"]) != 2 ||
-			strings.Join(doc.Policies["grafana.example.org"].Factors, ",") != "mtls" {
+			doc.Hosts["grafana.example.org"] != "strong" {
 			t.Errorf("%s: policy file lost the app: %+v", label, doc)
 		}
 	}
@@ -88,7 +88,7 @@ func TestMissingTemplateEnforcesSnapshot(t *testing.T) {
 	}
 	f.engine.containers = nil
 	f.h.Reconcile(context.Background())
-	if doc := readPolicy(t, f); doc.Groups["grafana.example.org"] != "" || len(doc.Policies) != 0 {
+	if doc := readPolicy(t, f); doc.Groups["grafana.example.org"] != "" || len(doc.Hosts) != 0 {
 		t.Errorf("entries kept after disable: %+v", doc)
 	}
 }
@@ -103,10 +103,15 @@ func TestSnapshotTracksLiveTemplate(t *testing.T) {
 	if s := st.Published["grafana"].Hosts; strings.Join(s, ",") != "dash.example.org" {
 		t.Errorf("snapshot hosts = %v", s)
 	}
-	f.h.save("grafana", SettingsUpdate{Inherit: true})
+	f.h.save("grafana", SettingsUpdate{SignInTemplate: pickTemplate("strong")})
 	st, _ = state.Load(filepath.Join(f.data, "state.yaml"))
-	if st.Published["grafana"].Policy != nil {
-		t.Error("snapshot still has the dropped override")
+	if st.Published["grafana"].SignInTemplate != "strong" {
+		t.Error("snapshot lacks the pick")
+	}
+	f.h.save("grafana", SettingsUpdate{SignInTemplate: pickTemplate("")})
+	st, _ = state.Load(filepath.Join(f.data, "state.yaml"))
+	if st.Published["grafana"].SignInTemplate != "" {
+		t.Error("snapshot still has the dropped pick")
 	}
 }
 

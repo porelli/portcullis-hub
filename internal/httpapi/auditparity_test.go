@@ -143,8 +143,8 @@ func TestUnauditedMutationsNowAudited(t *testing.T) {
 		{"source sync", ai, "POST", "/api/sources/sync", ``, 200, "source.sync", "sources", ""},
 		{"source remove", ai, "POST", "/api/sources/remove", `{"name":"extra"}`, 200, "source.remove", "extra", ""},
 		{"source remove unknown", ai, "POST", "/api/sources/remove", `{"name":"extra"}`, 400, "source.remove", "extra", ""},
-		{"default policy", ai, "PUT", "/api/settings", `{"default_auth_policy":{"factors":["webauthn"]}}`, 200, "settings.default_policy", "default", ""},
-		{"default policy refused", ai, "PUT", "/api/settings", `{"default_auth_policy":{"factors":["password","mtls"]}}`, 400, "settings.default_policy", "default", ""},
+		{"sign-in template", ai, "PUT", "/api/instances/grafana/settings", `{"sign_in_template":"strong"}`, 200, "settings.change", "grafana/sign_in_template", "scope=sign_in_template: default -> strong"},
+		{"sign-in template refused", ai, "PUT", "/api/instances/grafana/settings", `{"sign_in_template":"basic"}`, 409, "settings.change", "grafana/sign_in_template", ""},
 	}
 	for _, s := range steps {
 		before := len(readAudit(t, e.audit))
@@ -190,14 +190,15 @@ func TestUnauditedMutationsNowAudited(t *testing.T) {
 	}
 }
 
-// The default policy saved unchanged changes nothing and writes no entry.
-func TestDefaultPolicyUnchangedNotAudited(t *testing.T) {
+// A sign-in template pick saved unchanged changes nothing and writes no
+// entry.
+func TestSignInTemplateUnchangedNotAudited(t *testing.T) {
 	e := newInstEnv(t)
-	body := `{"default_auth_policy":{"factors":["webauthn"]}}`
-	mustDo(t, e.hub, "root", http.MethodPut, "/api/settings", body, 200)
-	n := len(e.auditActions(t, "settings.default_policy"))
-	mustDo(t, e.hub, "root", http.MethodPut, "/api/settings", body, 200)
-	if got := e.auditActions(t, "settings.default_policy"); len(got) != n {
+	body := `{"sign_in_template":"strong"}`
+	mustDo(t, e.hub, "root", http.MethodPut, "/api/instances/grafana/settings", body, 200)
+	n := len(e.auditActions(t, "settings.change"))
+	mustDo(t, e.hub, "root", http.MethodPut, "/api/instances/grafana/settings", body, 200)
+	if got := e.auditActions(t, "settings.change"); len(got) != n {
 		t.Errorf("unchanged save audited: %q", got)
 	}
 }

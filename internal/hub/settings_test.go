@@ -592,3 +592,65 @@ func TestEnvQuoteHelpers(t *testing.T) {
 		t.Errorf("empty option value: %s", l)
 	}
 }
+
+// TestSaveSettingsSignInTemplate: the per-app pick (contract §8.1): ""
+// inherits, a disabled template is 409, an unknown one 404, an app that
+// takes none 400; a pick that moves the TLS option restarts; audited
+// settings.change scope sign_in_template.
+func TestSaveSettingsSignInTemplate(t *testing.T) {
+	f := newAccessFixture(t)
+	audit := &fakeAudit{}
+	f.h.SetAudit(audit)
+	if err := f.h.Enable("grafana"); err != nil {
+		t.Fatal(err)
+	}
+	save := func(pick string) (*SaveResult, error) {
+		res, err := f.h.SaveSettings("grafana", SettingsUpdate{SignInTemplate: &pick}, siAdmin)
+		f.h.Wait()
+		return res, err
+	}
+	if _, err := save("basic"); statusOf(err) != 409 {
+		t.Errorf("disabled: %v", err)
+	}
+	if e := audit.lastOf("settings.change"); e.Target != "grafana/sign_in_template" || e.Result != "refused" {
+		t.Errorf("refusal audit = %+v", e)
+	}
+	if _, err := save("nope"); statusOf(err) != 404 {
+		t.Errorf("unknown: %v", err)
+	}
+	if _, err := save("Bad Id"); statusOf(err) != 400 {
+		t.Errorf("bad id: %v", err)
+	}
+	if _, err := f.h.SaveSettings("docs", SettingsUpdate{SignInTemplate: pickTemplate("strong")}, siAdmin); statusOf(err) != 400 {
+		t.Errorf("public app: %v", err)
+	}
+	if res, err := save("standard"); err != nil || res.Effect != settings.EffectNone {
+		t.Fatalf("standard (the default's own tier): %+v %v", res, err)
+	}
+	res, err := save("strong")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e := audit.lastOf("settings.change"); e.Target != "grafana/sign_in_template" || e.Detail != "scope=sign_in_template: standard -> strong" || e.Result != "ok" {
+		t.Errorf("audit = %+v", e)
+	}
+	if res.Effect != settings.EffectNone {
+		t.Errorf("strong keeps authaware: effect %s", res.Effect)
+	}
+	enableTemplate(t, f, certOnlyTemplate)
+	if res, err = save(certOnlyTemplate); err != nil || res.Effect != settings.EffectRestart {
+		t.Errorf("certificate-only (tier moves): %+v %v", res, err)
+	}
+	if ov := readOverride(t, f, "grafana"); !strings.Contains(ov, "tls.options: protected@file") {
+		t.Errorf("override:\n%s", ov)
+	}
+	if _, err := save(""); err != nil {
+		t.Fatal(err)
+	}
+	if v := view(t, f, "grafana"); v.SignInTemplate != "" || v.Template != "standard" || v.Tier != "authaware@file" {
+		t.Errorf("inherit: %+v", v)
+	}
+	if e := audit.lastOf("settings.change"); e.Detail != "scope=sign_in_template: "+certOnlyTemplate+" -> default" {
+		t.Errorf("inherit audit = %+v", e)
+	}
+}

@@ -37,7 +37,6 @@ import (
 	"github.com/portcullis/hub/internal/hub"
 	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/lldap"
-	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/state"
 
 	"filippo.io/age"
@@ -1237,7 +1236,11 @@ func seedAIAdmin(t *testing.T, h *hub.Hub) {
 	if err := h.Enable("aiapp-off"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.SaveSettings("aiapp-mtls", hub.SettingsUpdate{Policy: &policy.AuthPolicy{Factors: []string{"mtls"}, Op: "any"}}, root); err != nil {
+	if _, err := h.SetTemplateEnabled(context.Background(), "yubikey-and-certificate", true, root); err != nil {
+		t.Fatal(err)
+	}
+	certOnly := "yubikey-and-certificate"
+	if _, err := h.SaveSettings("aiapp-mtls", hub.SettingsUpdate{SignInTemplate: &certOnly}, root); err != nil {
 		t.Fatal(err)
 	}
 	viaAI := directory.Actor{User: "root", Via: directory.ViaAI, Client: keycloak.AIClientIDs.ClaudeCode}

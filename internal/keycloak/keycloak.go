@@ -209,12 +209,15 @@ func (c *Client) findClient(ctx context.Context, token, clientID string) (*goclo
 // ErrClientNotFound: no client with that clientId exists.
 var ErrClientNotFound = errors.New("client not found in keycloak")
 
-// withACR sets default.acr.values on a client representation.
-func withACR(client *gocloak.Client, acrValue string) {
-	if client.Attributes == nil {
-		client.Attributes = map[string]string{}
-	}
-	client.Attributes["default.acr.values"] = acrValue
+// attrDefaultACR is Keycloak's default.acr.values client attribute. The
+// Hub pushes none (contract §8.1: the Keycloak extension enforces a
+// native-OIDC client's template, mcp-gate an AI client's rule) and drops
+// one it finds on a client it reconciles.
+const attrDefaultACR = "default.acr.values"
+
+// withoutACR removes default.acr.values from a client representation.
+func withoutACR(client *gocloak.Client) {
+	delete(client.Attributes, attrDefaultACR)
 }
 
 // ensureDefaultScopes attaches DefaultScopes and the spec's email scope to
@@ -307,30 +310,6 @@ func (c *Client) putClient(ctx context.Context, token string, client *gocloak.Cl
 	return nil
 }
 
-// UpdateClientACR pushes a new default.acr.values to a client so its own
-// authorize requests trigger step-up when the session's LoA is too low.
-// Only clients the template may reconcile (see MayReconcile) are touched;
-// s.Secret and s.Name are ignored.
-func (c *Client) UpdateClientACR(ctx context.Context, s ClientSpec) error {
-	tok, err := c.token(ctx)
-	if err != nil {
-		return err
-	}
-	existing, err := c.findClient(ctx, tok, s.ClientID)
-	if err != nil {
-		return err
-	}
-	// An ai_client is EnsureAIClient's (its ACR is hwk, its scopes exact).
-	if !mayReconcile(existing, s.TemplateID, s.AllowedHosts) || existing.Attributes[AIClientAttr] == "true" {
-		return &ConflictError{ClientID: s.ClientID, TemplateID: s.TemplateID, Owner: existing.Attributes[OwnerAttr]}
-	}
-	withACR(existing, s.ACR)
-	if err := c.putClient(ctx, tok, existing); err != nil {
-		return err
-	}
-	return c.ensureDefaultScopes(ctx, tok, existing, s)
-}
-
 // MayReconcile decides whether an existing client may be updated for
 // template id. Tagged clients must carry this template's tag. Untagged
 // clients are adopted only if they demonstrably belong to the template:
@@ -419,7 +398,6 @@ type ClientSpec struct {
 	Secret       string
 	RedirectURIs []string
 	TemplateID   string
-	ACR          string
 	// AllowedHosts are the template's own hosts (<sub>.<domain>); an
 	// untagged existing client is only adopted if it points solely there.
 	AllowedHosts []string
@@ -477,8 +455,7 @@ func (c *Client) RegisterClient(ctx context.Context, s ClientSpec) (created bool
 		StandardFlowEnabled:       gocloak.BoolP(true),
 		DirectAccessGrantsEnabled: gocloak.BoolP(false),
 		Attributes: map[string]string{
-			"default.acr.values": s.ACR,
-			OwnerAttr:            s.TemplateID,
+			OwnerAttr: s.TemplateID,
 		},
 		DefaultClientScopes: append([]string{"openid", "profile", wantEmail}, DefaultScopes...),
 	}
@@ -494,8 +471,8 @@ func (c *Client) RegisterClient(ctx context.Context, s ClientSpec) (created bool
 		}
 		return true, c.ensureDefaultScopes(ctx, tok, made, s)
 	case code == http.StatusConflict:
-		// Already exists: reconcile secret, redirect URIs and ACR so the
-		// app's .env and Keycloak agree.
+		// Already exists: reconcile secret and redirect URIs so the app's
+		// .env and Keycloak agree (and drop a default ACR).
 		existing, err := c.findClient(ctx, tok, s.ClientID)
 		if err != nil {
 			return false, err
@@ -513,7 +490,7 @@ func (c *Client) RegisterClient(ctx context.Context, s ClientSpec) (created bool
 		if len(s.RedirectURIs) > 0 {
 			existing.RedirectURIs = s.RedirectURIs
 		}
-		withACR(existing, s.ACR)
+		withoutACR(existing)
 		withBackchannel(existing, s)
 		if err := c.putClient(ctx, tok, existing); err != nil {
 			return false, err

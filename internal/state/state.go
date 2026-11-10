@@ -35,16 +35,16 @@ type Source struct {
 // instance, as published to group-gate. If the instance's template later stops
 // loading (source removed, sync broke it, validation tightened) while its
 // containers keep running, the Hub keeps enforcing this snapshot instead of
-// silently dropping the instance's entries (which would fail open). Policy v5.
+// silently dropping the instance's entries (which would fail open). Policy v6.
 type PublishedApp struct {
 	Hosts       []string `json:"hosts" yaml:"hosts"`
 	GroupAccess bool     `json:"group_access" yaml:"group_access"`
 	AccessGroup string   `json:"access_group,omitempty" yaml:"access_group,omitempty"`
 	AdminGroup  string   `json:"admin_group,omitempty" yaml:"admin_group,omitempty"`
 	AdminPaths  []string `json:"admin_paths,omitempty" yaml:"admin_paths,omitempty"`
-	// Policy is the instance's own policy override at publish time; nil means it
-	// inherits the (current) global default.
-	Policy *policy.AuthPolicy `json:"policy,omitempty" yaml:"policy,omitempty"`
+	// SignInTemplate is the instance's own sign-in template pick at publish
+	// time; "" means it inherits the (current) default.
+	SignInTemplate string `json:"sign_in_template,omitempty" yaml:"sign_in_template,omitempty"`
 	// NativeLoginOnly: the instance ran with its own login only (no Portcullis
 	// sign-in on its routers, so GroupAccess is false) at publish time.
 	NativeLoginOnly bool `json:"native_login_only,omitempty" yaml:"native_login_only,omitempty"`
@@ -82,7 +82,7 @@ type KnownDomain struct {
 // template's default instance (ID = template id) has an entry only when
 // something of this is stored (pinned or edited hosts, a label, a
 // binding, a lifecycle state). Every other per-instance map of AppState
-// (Enabled, Settings, AuthPolicies, Published, Public*, SignInMode) is keyed
+// (Enabled, Settings, Published, Public*, SignInMode) is keyed
 // by its ID.
 type Instance struct {
 	ID       string            `json:"id" yaml:"id"`
@@ -148,12 +148,7 @@ type AppState struct {
 	Instances map[string]Instance `json:"instances,omitempty" yaml:"instances,omitempty"`
 	Sources   []Source            `json:"sources" yaml:"sources"`
 	// Settings are each instance's settings (contract §13), by id.
-	Settings     map[string]InstanceSettings  `json:"settings" yaml:"settings"`
-	AuthPolicies map[string]policy.AuthPolicy `json:"auth_policies" yaml:"auth_policies"`
-	// DefaultPolicy is the admin-chosen global default; nil = never set,
-	// which means policy.InitialDefault. An explicitly saved empty policy
-	// (public) is a non-nil pointer and is honoured.
-	DefaultPolicy *policy.AuthPolicy `json:"default_auth_policy,omitempty" yaml:"default_auth_policy,omitempty"`
+	Settings map[string]InstanceSettings `json:"settings" yaml:"settings"`
 	// Published holds the last known group-gate config per enabled app.
 	Published map[string]PublishedApp `json:"published" yaml:"published"`
 	// PublicAccess is the admin's explicit choice for an app's public
@@ -221,11 +216,6 @@ type AppState struct {
 	// was no file): the defaults EnsureSignIn filled are in memory only
 	// until the next Save.
 	signInMissing bool
-
-	// LegacyPassword lists, after Load, the policies that named the removed
-	// "password" factor and were normalised ("" = the global default). Not
-	// persisted: the next save writes the normalised policies.
-	LegacyPassword map[string]bool `json:"-" yaml:"-"`
 }
 
 // InstanceSettings are one instance's settings (contract §13). Values
@@ -611,9 +601,6 @@ func (s *AppState) init() {
 	if s.Settings == nil {
 		s.Settings = make(map[string]InstanceSettings)
 	}
-	if s.AuthPolicies == nil {
-		s.AuthPolicies = make(map[string]policy.AuthPolicy)
-	}
 	if s.Published == nil {
 		s.Published = make(map[string]PublishedApp)
 	}
@@ -629,9 +616,6 @@ func (s *AppState) init() {
 	if s.SignInMode == nil {
 		s.SignInMode = make(map[string]string)
 	}
-	if s.LegacyPassword == nil {
-		s.LegacyPassword = make(map[string]bool)
-	}
 	if s.PersonIDs == nil {
 		s.PersonIDs = make(map[string]PersonIDPool)
 	}
@@ -640,29 +624,6 @@ func (s *AppState) init() {
 	}
 	if s.AI.AllowedOrigins == nil {
 		s.AI.AllowedOrigins = []string{}
-	}
-}
-
-// normalizeLegacy rewrites stored policies that name the removed
-// "password" factor (policy.Normalize: never weaker) and remembers which.
-func (s *AppState) normalizeLegacy() {
-	if s.DefaultPolicy != nil && policy.LegacyPassword(*s.DefaultPolicy) {
-		p := policy.Normalize(*s.DefaultPolicy)
-		s.DefaultPolicy = &p
-		s.LegacyPassword[""] = true
-	}
-	for id, p := range s.AuthPolicies {
-		if policy.LegacyPassword(p) {
-			s.AuthPolicies[id] = policy.Normalize(p)
-			s.LegacyPassword[id] = true
-		}
-	}
-	for id, snap := range s.Published {
-		if snap.Policy != nil && policy.LegacyPassword(*snap.Policy) {
-			p := policy.Normalize(*snap.Policy)
-			snap.Policy = &p
-			s.Published[id] = snap
-		}
 	}
 }
 
@@ -720,7 +681,6 @@ func Load(path string) (*AppState, error) {
 		return nil, fmt.Errorf("corrupt %s (ai: %v) — fix or move it aside, then restart", path, err)
 	}
 	s.init()
-	s.normalizeLegacy()
 	s.signInMissing = signInMissing
 	s.EnsureSignIn()
 	if err := s.checkSignIn(); err != nil {
@@ -808,29 +768,4 @@ func (s *AppState) SetEnabled(id string, on bool) {
 		}
 	}
 	s.Enabled = out
-}
-
-// ResolvePolicy returns the per-app override if set, else the global default.
-func (s *AppState) ResolvePolicy(appID string) policy.AuthPolicy {
-	if p, ok := s.AuthPolicies[appID]; ok {
-		return p
-	}
-	return s.Default()
-}
-
-// Default returns the effective global default policy.
-func (s *AppState) Default() policy.AuthPolicy {
-	if s.DefaultPolicy == nil {
-		return policy.InitialDefault()
-	}
-	p := *s.DefaultPolicy
-	if p.Factors == nil {
-		p.Factors = []string{} // explicit public: publish [] (public), not null
-	}
-	return p
-}
-
-// SetDefault stores an explicit global default (may be public).
-func (s *AppState) SetDefault(p policy.AuthPolicy) {
-	s.DefaultPolicy = &p
 }

@@ -15,7 +15,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"reflect"
 	"regexp"
 	"sort"
 	"strconv"
@@ -28,7 +27,6 @@ import (
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/fsutil"
-	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
 )
@@ -123,12 +121,14 @@ type instanceConfig struct {
 	Enabled  bool              `yaml:"enabled"`
 	// Settings: ports and option values (canonical), per-person and
 	// per-group rows, secret metadata — never secret values.
-	Settings     *state.InstanceSettings `yaml:"settings,omitempty"`
-	AuthPolicy   *policy.AuthPolicy      `yaml:"auth_policy,omitempty"`
-	PublicAccess *bool                   `yaml:"public_access,omitempty"`
-	PublicMode   string                  `yaml:"public_mode,omitempty"`
-	PublicTokens []string                `yaml:"public_tokens,omitempty"`
-	SignIn       string                  `yaml:"sign_in,omitempty"`
+	Settings *state.InstanceSettings `yaml:"settings,omitempty"`
+	// SignInTemplate is the instance's sign-in template pick ("" = the
+	// default).
+	SignInTemplate string   `yaml:"sign_in_template,omitempty"`
+	PublicAccess   *bool    `yaml:"public_access,omitempty"`
+	PublicMode     string   `yaml:"public_mode,omitempty"`
+	PublicTokens   []string `yaml:"public_tokens,omitempty"`
+	SignIn         string   `yaml:"sign_in,omitempty"`
 	// State is the state entry's state ("created" for a never-enabled
 	// instance; a restore keeps it).
 	State     string              `yaml:"state,omitempty"`
@@ -186,10 +186,7 @@ func (h *Hub) instanceConfigLocked(tg *target) instanceConfig {
 		cs := s.Clone()
 		c.Settings = &cs
 	}
-	if p, ok := h.st.AuthPolicies[id]; ok {
-		p.Factors = append([]string(nil), p.Factors...)
-		c.AuthPolicy = &p
-	}
+	c.SignInTemplate = tg.entry.SignInTemplate
 	if v, ok := h.st.PublicAccess[id]; ok {
 		c.PublicAccess = &v
 	}
@@ -214,16 +211,6 @@ func (h *Hub) applyConfigLocked(id string, c instanceConfig) {
 	} else {
 		delete(h.st.Settings, id)
 	}
-	old, had := h.st.AuthPolicies[id]
-	if c.AuthPolicy != nil {
-		// Stored like SaveSettings stores it (never weaker).
-		h.st.AuthPolicies[id] = policy.Normalize(*c.AuthPolicy)
-	} else {
-		delete(h.st.AuthPolicies, id)
-	}
-	if now, has := h.st.AuthPolicies[id]; had != has || !reflect.DeepEqual(old, now) {
-		delete(h.st.LegacyPassword, id)
-	}
 	if c.PublicAccess != nil {
 		h.st.PublicAccess[id] = *c.PublicAccess
 	} else {
@@ -245,8 +232,21 @@ func (h *Hub) applyConfigLocked(id string, c instanceConfig) {
 		delete(h.st.SignInMode, id)
 	}
 	// The env overrides (§11.9; the restores check them against the
-	// restored template: restoredEnvOverridesLocked).
+	// restored template: restoredEnvOverridesLocked) and the sign-in
+	// template pick (configProblem checked it; one disabled since is
+	// published as a denied host, never the default).
 	e, had := h.st.Instances[id]
+	if c.SignInTemplate != "" || had && e.SignInTemplate != "" {
+		if !had {
+			e = state.Instance{ID: id, Template: c.Template}
+			if e.Template == "" {
+				e.Template = id
+			}
+			had = true
+		}
+		e.SignInTemplate = c.SignInTemplate
+		h.st.Instances[id] = e
+	}
 	switch {
 	case len(c.EnvOverrides) > 0:
 		if !had {

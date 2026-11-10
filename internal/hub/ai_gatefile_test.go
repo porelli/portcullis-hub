@@ -261,7 +261,7 @@ func TestGateFileResources(t *testing.T) {
 		t.Fatalf("no gitea resource: %v", urls(f))
 	}
 	g.h.mu.RLock()
-	wantLoA := policy.LoA(g.h.effectivePolicyLocked(g.h.findLocked("gitea")))
+	wantLoA := g.h.gateLoALocked(g.h.findLocked("gitea"))
 	g.h.mu.RUnlock()
 	if r.Scope != "mcp:gitea.gitea" || r.Kind != aigate.KindCompanion || r.Instance != "gitea" || r.Companion != "gitea" ||
 		r.Label != "Gitea" || r.Host != "gitea.example.com" || !slices.Equal(r.Hosts, []string{"gitea.example.com"}) ||
@@ -326,12 +326,12 @@ func TestGateFileResources(t *testing.T) {
 	if f := g.build(t); resourceByURL(f, "https://people.example.com/mcp") != nil {
 		t.Error("people resource with Portcullis MCP for people off")
 	}
-	// An instance policy reaching LoA 3 (mTLS): the companion is excluded.
+	// A certificate-only sign-in template: the companion is excluded.
 	g.h.mu.Lock()
-	g.h.st.AuthPolicies = map[string]policy.AuthPolicy{"gitea": {Factors: []string{"mtls"}}}
+	setCertOnlyLocked(g.h, "gitea")
 	g.h.mu.Unlock()
 	if f := g.build(t); resourceByURL(f, "https://gitea.example.com/mcp") != nil {
-		t.Error("LoA 3 companion listed")
+		t.Error("certificate-only companion listed")
 	}
 	// The master switch off: enabled false, nothing listed.
 	g.h.mu.Lock()
@@ -876,6 +876,7 @@ func TestDataDirGroupReadable(t *testing.T) {
 		"group-gate-policy.json":   {0o644, 0o644},
 		"portal-apps.json":         {0o644, 0o644},
 		"user-attributes.json":     {0o644, 0o644},
+		"signin-keycloak.json":     {0o644, 0o644},
 		"mcp-gate.json":            {0o644, 0o640},
 		"mcp-credentials.json":     {0o600, 0o640},
 		"overrides/mcp-gate.json":  {0o644, 0o600}, // a gate file's name elsewhere

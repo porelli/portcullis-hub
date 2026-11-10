@@ -15,7 +15,6 @@ import (
 	"github.com/portcullis/hub/internal/aigate"
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/keycloak"
-	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/state"
 )
 
@@ -639,9 +638,9 @@ func TestOAuthNoLeavingByPolicy(t *testing.T) {
 		name   string
 		change func(a *instAIFixture)
 	}{
-		{"loa3", func(a *instAIFixture) {
+		{"certificate-only", func(a *instAIFixture) {
 			a.h.mu.Lock()
-			a.h.st.AuthPolicies["oauthapp"] = policy.AuthPolicy{Factors: []string{"mtls"}, Op: "any"}
+			setCertOnlyLocked(a.h, "oauthapp")
 			a.h.mu.Unlock()
 		}},
 		{"no identity", func(a *instAIFixture) {
@@ -1570,19 +1569,19 @@ func TestRevokeProblemsListOAuthLeftovers(t *testing.T) {
 	}
 }
 
-// 12b carry: a policy that reached LoA 3 without a policy save (a restore,
-// a template update) switches AI off at the next reconcile.
-func TestLoA3SwitchOffAtReconcile(t *testing.T) {
+// 12b carry: a template that became certificate-only without a save (a
+// restore, a template update) switches AI off at the next reconcile.
+func TestCertOnlySwitchOffAtReconcile(t *testing.T) {
 	a := newMintFixture(t)
 	a.h.mu.Lock()
-	a.h.st.AuthPolicies["aiapp"] = policy.AuthPolicy{Factors: []string{"mtls"}, Op: "any"}
+	setCertOnlyLocked(a.h, "aiapp")
 	a.h.mu.Unlock()
 	a.reconcile()
 	a.h.Wait()
 	if s := a.companion("aiapp", "tok"); s.Enabled {
 		t.Errorf("tok = %+v, want off", s)
 	}
-	if got := a.auditsOf("ai.disable", "aiapp/tok"); len(got) != 1 || got[0].Detail != aiPolicyOffDetail || got[0].Actor != "hub" {
+	if got := a.auditsOf("ai.disable", "aiapp/tok"); len(got) != 1 || got[0].Detail != aiCertOffDetail || got[0].Actor != "hub" {
 		t.Errorf("audit = %+v", got)
 	}
 }

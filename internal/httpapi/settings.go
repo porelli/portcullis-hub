@@ -9,7 +9,6 @@ import (
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/hub"
-	"github.com/portcullis/hub/internal/policy"
 )
 
 // Instance settings (contract §13, Task 13): Hub listener only (never
@@ -81,18 +80,19 @@ func (s *Server) clearEntry(ctx context.Context, a directory.Actor, id, key, use
 
 // settingsBody is the PUT / preview body.
 type settingsBody struct {
-	Values       map[string]json.RawMessage       `json:"values"`
-	ValueIDs     map[string]map[string]int        `json:"value_group_ids"`
-	Person       map[string]hub.PersonChange      `json:"person"`
-	Groups       map[string][]hub.GroupValueInput `json:"groups"`
-	Secrets      map[string]secretBody            `json:"secrets"`
-	Ports        map[string]string                `json:"ports"`
-	Policy       *policy.AuthPolicy               `json:"auth_policy"`
-	Inherit      bool                             `json:"auth_policy_inherit"`
-	PublicAccess *json.RawMessage                 `json:"public_access"` // true | false | "default"
-	PublicMode   *string                          `json:"public_mode"`
-	PublicTokens *[]string                        `json:"public_tokens"`
-	SignIn       *string                          `json:"sign_in"`
+	Values   map[string]json.RawMessage       `json:"values"`
+	ValueIDs map[string]map[string]int        `json:"value_group_ids"`
+	Person   map[string]hub.PersonChange      `json:"person"`
+	Groups   map[string][]hub.GroupValueInput `json:"groups"`
+	Secrets  map[string]secretBody            `json:"secrets"`
+	Ports    map[string]string                `json:"ports"`
+	// SignInTemplate: the instance's sign-in template pick ("" = the
+	// default; absent = unchanged).
+	SignInTemplate *string          `json:"sign_in_template"`
+	PublicAccess   *json.RawMessage `json:"public_access"` // true | false | "default"
+	PublicMode     *string          `json:"public_mode"`
+	PublicTokens   *[]string        `json:"public_tokens"`
+	SignIn         *string          `json:"sign_in"`
 }
 
 // secretBody is one secret change: exactly one of value, generate, clear
@@ -106,7 +106,7 @@ type secretBody struct {
 // settingsUsage is the fixed message of a body that doesn't decode.
 const settingsUsage = `body must be {"values": {"<key>": <value>}, "value_group_ids": {"<key>": {"<group>": <id>}}, "person": {"<key>": {"default", "resolve", "rows": [{"group", "value", "group_id"}]}}, ` +
 	`"groups": {"<key>": [{"group", "value", "group_id"}]}, "secrets": {"<key>": {"value" | "generate": true | "clear": true}}, ` +
-	`"ports": {"<KEY>": "<port>"}, "auth_policy", "auth_policy_inherit", "public_access": true | false | "default", "public_mode", "public_tokens", "sign_in"}`
+	`"ports": {"<KEY>": "<port>"}, "sign_in_template": "<template id>" | "", "public_access": true | false | "default", "public_mode", "public_tokens", "sign_in"}`
 
 // settingsAdmin: a signed-in admin (no user 401; see adminOnly).
 func (s *Server) settingsAdmin(w http.ResponseWriter, r *http.Request) (string, bool) {
@@ -131,16 +131,15 @@ func readSettingsBody(w http.ResponseWriter, r *http.Request) (hub.SettingsUpdat
 		return hub.SettingsUpdate{}, false
 	}
 	u := hub.SettingsUpdate{
-		Values:        b.Values,
-		ValueGroupIDs: b.ValueIDs,
-		Person:        b.Person,
-		Groups:        b.Groups,
-		Ports:         b.Ports,
-		Policy:        b.Policy,
-		Inherit:       b.Inherit,
-		PublicMode:    b.PublicMode,
-		PublicTokens:  b.PublicTokens,
-		SignIn:        b.SignIn,
+		Values:         b.Values,
+		ValueGroupIDs:  b.ValueIDs,
+		Person:         b.Person,
+		Groups:         b.Groups,
+		Ports:          b.Ports,
+		SignInTemplate: b.SignInTemplate,
+		PublicMode:     b.PublicMode,
+		PublicTokens:   b.PublicTokens,
+		SignIn:         b.SignIn,
 	}
 	if len(b.Secrets) > 0 {
 		u.Secrets = make(map[string]hub.SecretChange, len(b.Secrets))

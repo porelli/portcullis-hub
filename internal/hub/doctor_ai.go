@@ -9,7 +9,6 @@ import (
 
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/doctor"
-	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/templates"
 )
 
@@ -29,7 +28,7 @@ type aiCompanionIn struct {
 // aiDoctorInputs are the AI checks' inputs: every companion with AI
 // support on now (master on, instance enabled and not busy, switched on,
 // no owed revoke_all) with its service's container state and image, its
-// instance's effective policy and the template's pinned digest, merged
+// instance's sign-in template and the template's pinned digest, merged
 // with AIRevokeProblems (any instance state: a revocation owed by a
 // disabled instance is still owed).
 func (h *Hub) aiDoctorInputs(ctx context.Context) []doctor.AIIn {
@@ -43,7 +42,11 @@ func (h *Hub) aiDoctorInputs(ctx context.Context) []doctor.AIIn {
 			continue
 		}
 		app := appName(t)
-		eff := h.effectivePolicyLocked(t)
+		acc := h.accessLocked(t)
+		words := ""
+		if tmpl, ok := h.st.SignIn.Templates[acc.Template]; ok && acc.Capability.Templates {
+			words, _, _ = describeRule(tmpl.Rule, h.st.SignIn.MethodsOn())
+		}
 		images := templates.ServiceImages(t.ReadCompose())
 		live := h.st.AI.Enabled && h.st.IsEnabled(id) && h.pendingLocked(id) == nil && t.HasAIMCP()
 		for i := range t.Manifest.AI.MCP {
@@ -54,7 +57,7 @@ func (h *Hub) aiDoctorInputs(ctx context.Context) []doctor.AIIn {
 				continue
 			}
 			ai := doctor.AIIn{Instance: id, Companion: c.Name, Label: app, CompanionLabel: c.Label, On: true,
-				Policy: policyWords(eff), LoA: policy.LoA(eff)}
+				Template: words, CertOnly: acc.certOnly()}
 			sidecar := c.Kind == templates.CompanionKind
 			if sidecar {
 				ai.ImagePinned = templates.ImageDigest(images[c.Service])
@@ -133,17 +136,4 @@ func (h *Hub) aiDoctorInputs(ctx context.Context) []doctor.AIIn {
 		out = append(out, *byKey[k])
 	}
 	return out
-}
-
-// policyWords is a policy as the doctor's text shows it ("mtls and
-// webauthn", "password or webauthn", "none").
-func policyWords(p policy.AuthPolicy) string {
-	if len(p.Factors) == 0 {
-		return "none"
-	}
-	sep := " or "
-	if p.Op == "all" {
-		sep = " and "
-	}
-	return strings.Join(p.Factors, sep)
 }

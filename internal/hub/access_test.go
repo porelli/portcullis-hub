@@ -9,7 +9,7 @@ import (
 
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/policy"
-	"github.com/portcullis/hub/internal/state"
+	"github.com/portcullis/hub/internal/signin"
 )
 
 const plexManifest = `name: Plex
@@ -65,30 +65,42 @@ func view(t *testing.T, f *fixture, id string) *AppSettingsView {
 	return v
 }
 
-func factors(p policy.AuthPolicy) string { return strings.Join(p.Factors, ",") + "/" + p.Op }
+// enableTemplate enables built-in or stored template id (test helper).
+func enableTemplate(t *testing.T, f *fixture, id string) {
+	t.Helper()
+	if _, err := f.h.SetTemplateEnabled(context.Background(), id, true, siAdmin); err != nil {
+		t.Fatal(err)
+	}
+	f.h.Wait()
+}
 
-// Every app inherits by default and shows the EFFECTIVE policy: the global
-// default intersected with what its auth method can enforce.
-func TestEffectivePolicyPerMethod(t *testing.T) {
+func pickTemplate(id string) *string { return &id }
+
+// Every app inherits by default and shows the template that applies and
+// what its auth method makes of it: the TLS tier and the notes.
+func TestSignInPerMethod(t *testing.T) {
 	f := newAccessFixture(t)
 	cases := []struct {
-		id, method, enforcement, effective, tier, note string
+		id, method, enforcement, template, tier, note string
 	}{
-		{"grafana", "header-auth", policy.EnforcePerRequest, "mtls,webauthn/any", "authaware@file", "every request"},
-		{"other", "native-oidc", policy.EnforceAtLogin, "mtls,webauthn/any", "authaware@file", "mTLS is checked at login only"},
-		{"vault", "mtls", policy.EnforceTLS, "mtls/", "protected@file", "can't enforce WebAuthn, so it enforces mTLS"},
-		{"docs", "public", policy.EnforceNone, "/", "public@file", "handles its own sign-in"},
-		{"plex", "forward-auth", policy.EnforcePerRequest, "mtls,webauthn/any", "authaware@file", "every request"},
+		{"grafana", "header-auth", policy.EnforcePerRequest, "standard", "authaware@file", "every request"},
+		{"other", "native-oidc", policy.EnforceAtLogin, "standard", "authaware@file", "Keycloak checks the template"},
+		{"vault", "mtls", policy.EnforceTLS, "", "protected@file", "takes no sign-in template"},
+		{"docs", "public", policy.EnforceNone, "", "public@file", "handles its own sign-in"},
+		{"plex", "forward-auth", policy.EnforcePerRequest, "standard", "authaware@file", "every request"},
 	}
 	for _, c := range cases {
 		v := view(t, f, c.id)
-		if v.AuthPolicy != nil || v.Method != c.method || v.Capability.Enforcement != c.enforcement ||
-			factors(v.EffectivePolicy) != c.effective || v.Tier != c.tier || !strings.Contains(strings.Join(v.PolicyNotes, " "), c.note) {
-			t.Errorf("%s: method=%s cap=%+v effective=%s tier=%s notes=%q", c.id, v.Method, v.Capability, factors(v.EffectivePolicy), v.Tier, v.PolicyNotes)
+		if v.SignInTemplate != "" || v.Method != c.method || v.Capability.Enforcement != c.enforcement ||
+			v.Template != c.template || v.Tier != c.tier || !strings.Contains(strings.Join(v.SignInNotes, " "), c.note) {
+			t.Errorf("%s: method=%s cap=%+v template=%s tier=%s notes=%q", c.id, v.Method, v.Capability, v.Template, v.Tier, v.SignInNotes)
+		}
+		if c.template != "" && (v.Sentence == "" || v.Score.Tenths == 0) {
+			t.Errorf("%s: sentence %q score %+v", c.id, v.Sentence, v.Score)
 		}
 	}
-	// The overrides follow the effective policy, not the raw default: the
-	// mTLS-only app keeps the protected tier, the public app public@file.
+	// The overrides follow the template: the mTLS-only app keeps the
+	// protected tier, the public app public@file.
 	for id, tier := range map[string]string{"vault": "protected@file", "docs": "public@file", "grafana": "authaware@file"} {
 		if err := f.h.Enable(id); err != nil {
 			t.Fatal(err)
@@ -97,107 +109,51 @@ func TestEffectivePolicyPerMethod(t *testing.T) {
 			t.Errorf("%s override:\n%s", id, ov)
 		}
 	}
+	// Native OIDC on a certificate-only template: per connection too.
+	enableTemplate(t, f, "yubikey-and-certificate")
+	if err := saveApp(t, f, "other", SettingsUpdate{SignInTemplate: pickTemplate("yubikey-and-certificate")}); err != nil {
+		t.Fatal(err)
+	}
+	if v := view(t, f, "other"); v.Tier != "protected@file" || v.SignInTemplate != "yubikey-and-certificate" {
+		t.Errorf("other on yubikey-and-certificate: %s %q", v.Tier, v.SignInTemplate)
+	}
+}
 
-	// A default the mTLS app can't enforce at all: say so, keep the cert.
-	if _, err := f.h.SetDefaultPolicy(policy.AuthPolicy{Factors: []string{"webauthn"}}); err != nil {
+// Controller ruling: an mtls app takes no template and is always on
+// protected@file, whatever the switches and the default.
+func TestMTLSAppAlwaysProtected(t *testing.T) {
+	f := newAccessFixture(t)
+	ctx := context.Background()
+	if err := f.h.Enable("vault"); err != nil {
+		t.Fatal(err)
+	}
+	// Default on passkeys only, the certificate method off: still protected.
+	if _, err := f.h.SaveTemplate(ctx, "standard", TemplateInput{Name: "Standard", Rule: siLeaves("any", "family:passkey")}, false, siAdmin); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"hub", "people"} {
+		if _, err := f.h.SetCoreTemplate(ctx, k, "standard", siAdmin); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := f.h.SetTemplateEnabled(ctx, "strong", false, siAdmin); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.h.SetMethod(ctx, signin.YubiKeyCert, false, siAdmin); err != nil {
 		t.Fatal(err)
 	}
 	f.h.Wait()
-	v := view(t, f, "vault")
-	if factors(v.EffectivePolicy) != "mtls/" || !v.Resolution.Fallback || !strings.Contains(strings.Join(v.PolicyNotes, " "), "which this app can't enforce: mTLS applies instead") {
-		t.Errorf("vault under webauthn default: %+v %q", v.EffectivePolicy, v.PolicyNotes)
+	if v := view(t, f, "vault"); v.Tier != "protected@file" || v.Template != "" {
+		t.Errorf("vault: %s %q", v.Tier, v.Template)
 	}
-	if ov := readOverride(t, f, "vault"); !strings.Contains(ov, "protected@file") {
-		t.Errorf("vault lost its protected tier:\n%s", ov)
+	if ov := readOverride(t, f, "vault"); !strings.Contains(ov, "tls.options: protected@file") {
+		t.Errorf("vault override:\n%s", ov)
 	}
-	// Native OIDC with an mTLS-only policy: per connection too.
-	if err := saveApp(t, f, "other", SettingsUpdate{Policy: &policy.AuthPolicy{Factors: []string{"mtls"}}}); err != nil {
-		t.Fatal(err)
+	if err := saveApp(t, f, "vault", SettingsUpdate{SignInTemplate: pickTemplate("standard")}); statusOf(err) != 400 || !strings.Contains(err.Error(), "takes none") {
+		t.Errorf("mtls pick: %v", err)
 	}
-	if v := view(t, f, "other"); v.Tier != "protected@file" || !strings.Contains(strings.Join(v.PolicyNotes, " "), "every connection") {
-		t.Errorf("other mtls override: %s %q", v.Tier, v.PolicyNotes)
-	}
-}
-
-// Overrides may only name factors the app can enforce.
-func TestOverrideValidation(t *testing.T) {
-	f := newAccessFixture(t)
-	bad := []struct {
-		id   string
-		p    policy.AuthPolicy
-		want string
-	}{
-		{"vault", policy.AuthPolicy{Factors: []string{"mtls", "webauthn"}, Op: "any"}, `can't enforce "webauthn"`},
-		{"vault", policy.AuthPolicy{}, "can't be public"},
-		{"docs", policy.AuthPolicy{Factors: []string{"mtls"}}, "handles its own sign-in"},
-		{"grafana", policy.AuthPolicy{Factors: []string{"password"}}, "not a sign-in method"},
-		{"grafana", policy.AuthPolicy{Factors: []string{"sms"}}, "unknown factor"},
-	}
-	for _, c := range bad {
-		err := saveApp(t, f, c.id, SettingsUpdate{Policy: &c.p})
-		if statusOf(err) != 400 || !strings.Contains(err.Error(), c.want) {
-			t.Errorf("%s %+v: err = %v", c.id, c.p, err)
-		}
-		if v := view(t, f, c.id); v.AuthPolicy != nil {
-			t.Errorf("%s: rejected override stored: %+v", c.id, v.AuthPolicy)
-		}
-	}
-	// Refused before anything is stored, settings included.
-	if err := saveApp(t, f, "grafana", SettingsUpdate{Values: vals("gf_theme", "light"), Policy: &policy.AuthPolicy{Factors: []string{"password"}}}); statusOf(err) != 400 {
-		t.Fatal(err)
-	}
-	if v := storedSettings(f, "grafana").Values; v["gf_theme"] != nil {
-		t.Errorf("settings stored despite a refused policy: %v", v)
-	}
-	for id, p := range map[string]policy.AuthPolicy{
-		"vault":   {Factors: []string{"mtls"}},
-		"grafana": {Factors: []string{"mtls", "webauthn"}, Op: "all"},
-		"plex":    {Factors: []string{"webauthn"}},
-	} {
-		if err := saveApp(t, f, id, SettingsUpdate{Policy: &p}); err != nil {
-			t.Errorf("%s: %v", id, err)
-		}
-	}
-	// Inheriting is always allowed, also for apps without a policy.
-	if err := saveApp(t, f, "docs", SettingsUpdate{Inherit: true}); err != nil {
-		t.Error(err)
-	}
-}
-
-// A stored policy naming "password" is normalised and the view says so.
-func TestLegacyPasswordNote(t *testing.T) {
-	f := newAccessFixture(t)
-	st, _ := state.Load(filepath.Join(f.data, "state.yaml"))
-	st.AuthPolicies["grafana"] = policy.AuthPolicy{Factors: []string{"password", "webauthn"}, Op: "all"}
-	st.DefaultPolicy = &policy.AuthPolicy{Factors: []string{"password"}}
-	if err := st.Save(filepath.Join(f.data, "state.yaml")); err != nil {
-		t.Fatal(err)
-	}
-	h, err := New(f.h.cfg, f.runner, f.engine, f.idp)
-	if err != nil {
-		t.Fatal(err)
-	}
-	h.Init()
-	f.h = h
-	v := view(t, f, "grafana")
-	if factors(*v.AuthPolicy) != "webauthn/" || !strings.Contains(strings.Join(v.PolicyNotes, " "), `named "password"`) {
-		t.Errorf("grafana: %+v %q", v.AuthPolicy, v.PolicyNotes)
-	}
-	if v := view(t, f, "vault"); !strings.Contains(strings.Join(v.PolicyNotes, " "), `global default named "password"`) || !h.DefaultPolicyLegacy() {
-		t.Errorf("vault (inherits): %q", v.PolicyNotes)
-	}
-	if d := readPolicy(t, f).Default; factors(d) != "mtls,webauthn/any" {
-		t.Errorf("published default = %+v", d)
-	}
-	raw, _ := os.ReadFile(filepath.Join(f.data, "group-gate-policy.json"))
-	if strings.Contains(string(raw), "password") {
-		t.Errorf("policy file names password:\n%s", raw)
-	}
-	if err := saveApp(t, f, "grafana", SettingsUpdate{Policy: &policy.AuthPolicy{Factors: []string{"webauthn"}}}); err != nil {
-		t.Fatal(err)
-	}
-	if v := view(t, f, "grafana"); strings.Contains(strings.Join(v.PolicyNotes, " "), "password") {
-		t.Errorf("note survives a save: %q", v.PolicyNotes)
+	if _, ok := readPolicy(t, f).Hosts["vault.example.org"]; ok {
+		t.Error("mtls app published a template")
 	}
 }
 
@@ -273,19 +229,20 @@ func TestNativeLoginSignIn(t *testing.T) {
 	if d == nil || d.Kind != DriftPublicAccess || !strings.Contains(d.Message, "changed routers.plex.middlewares") || !strings.Contains(d.Message, "own login only") {
 		t.Errorf("drift after switching = %+v", d)
 	}
-	// An override naming a factor is refused while nothing is enforced.
-	if err := saveApp(t, f, "plex", SettingsUpdate{Policy: &policy.AuthPolicy{Factors: []string{"mtls"}}}); statusOf(err) != 400 {
-		t.Errorf("override on native-only app: %v", err)
+	// A template pick is refused while nothing is enforced.
+	enableTemplate(t, f, "yubikey-and-certificate")
+	if err := saveApp(t, f, "plex", SettingsUpdate{SignInTemplate: pickTemplate("yubikey-and-certificate")}); statusOf(err) != 400 {
+		t.Errorf("template on native-only app: %v", err)
 	}
 	// ...but accepted when switching back in the same request.
-	if err := saveApp(t, f, "plex", SettingsUpdate{SignIn: strp(SignInGateway), Policy: &policy.AuthPolicy{Factors: []string{"mtls"}}}); err != nil {
+	if err := saveApp(t, f, "plex", SettingsUpdate{SignIn: strp(SignInGateway), SignInTemplate: pickTemplate("yubikey-and-certificate")}); err != nil {
 		t.Fatal(err)
 	}
 	if ov := readOverride(t, f, "plex"); !strings.Contains(ov, mw+": portcullis-auth@docker,portcullis-groups@docker,security-headers@file") || !strings.Contains(ov, tls+": protected@file") {
 		t.Errorf("back to gateway:\n%s", ov)
 	}
-	if p := readPolicy(t, f).Policies["plex.example.org"]; factors(p) != "mtls/" {
-		t.Errorf("published policy = %+v", p)
+	if p := readPolicy(t, f).Hosts["plex.example.org"]; p != "yubikey-and-certificate" {
+		t.Errorf("published template = %q", p)
 	}
 	if d := driftFor(f.h.Reconcile(context.Background()), "plex"); d == nil || !strings.Contains(d.Message, "tls.options") {
 		t.Errorf("tier drift = %+v", d)

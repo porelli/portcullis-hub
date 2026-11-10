@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -121,7 +123,7 @@ func TestEnableRegistersClients(t *testing.T) {
 		t.Fatal(err)
 	}
 	secret := readEnvFile(filepath.Join(f.data, "env", "other.env"))["OTHER_SECRET"]
-	if len(f.idp.registered) != 1 || f.idp.registered[0] != "other:other:hwk:"+secret+":other.example.org" || secret == "" {
+	if len(f.idp.registered) != 1 || f.idp.registered[0] != "other:other:"+secret+":other.example.org" || secret == "" {
 		t.Errorf("registered = %v (secret %q)", f.idp.registered, secret)
 	}
 	// email_verified_claim: false reaches Keycloak as OmitEmailVerified.
@@ -448,17 +450,20 @@ func TestSaveSettingsValidation(t *testing.T) {
 		t.Errorf("unknown app: %v", err)
 	}
 
+	if _, err := f.h.SetTemplateEnabled(context.Background(), "yubikey-and-certificate", true, siAdmin); err != nil {
+		t.Fatal(err)
+	}
 	err := f.h.save("grafana", SettingsUpdate{
-		Values: vals("gf_theme", "light", "media", "/mnt/My Media"),
-		Ports:  map[string]string{"GRAFANA_PORT": ""},
-		Policy: &policy.AuthPolicy{Factors: []string{"WEBAUTHN", "mtls"}, Op: "all"},
+		Values:         vals("gf_theme", "light", "media", "/mnt/My Media"),
+		Ports:          map[string]string{"GRAFANA_PORT": ""},
+		SignInTemplate: pickTemplate("yubikey-and-certificate"),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	v, _ := f.h.AppSettings("grafana")
-	if v.AuthPolicy == nil || strings.Join(v.AuthPolicy.Factors, ",") != "mtls,webauthn" || v.AuthPolicy.Op != "all" || v.SafetyScore != 3.5 {
-		t.Errorf("policy = %+v score %v", v.AuthPolicy, v.SafetyScore)
+	if v.SignInTemplate != "yubikey-and-certificate" || v.Template != "yubikey-and-certificate" || v.Score.Tenths != 44 {
+		t.Errorf("template = %q %q score %+v", v.SignInTemplate, v.Template, v.Score)
 	}
 	if env := readEnvFile(filepath.Join(f.data, "env", "grafana.env")); env["GF_THEME"] != "light" {
 		t.Errorf("select setting not written to env: %v", env)
@@ -468,26 +473,26 @@ func TestSaveSettingsValidation(t *testing.T) {
 		!strings.Contains(string(ov), "tls.options: protected@file") {
 		t.Errorf("override =\n%s", ov)
 	}
-	// Not enabled: nothing is published (group-gate keys by subdomain).
-	if doc := readPolicy(t, f); len(doc.Policies) != 0 {
-		t.Errorf("policy file = %+v", doc.Policies)
+	// Not enabled: nothing is published (group-gate keys by hostname).
+	if doc := readPolicy(t, f); len(doc.Hosts) != 0 {
+		t.Errorf("policy file = %+v", doc.Hosts)
 	}
 	if err := f.h.Enable("grafana"); err != nil {
 		t.Fatal(err)
 	}
 	doc := readPolicy(t, f)
-	if p := doc.Policies["grafana.example.org"]; p.Op != "all" || len(doc.Policies) != 1 {
-		t.Errorf("policy file = %+v", doc.Policies)
+	if p := doc.Hosts["grafana.example.org"]; p != "yubikey-and-certificate" || len(doc.Hosts) != 1 {
+		t.Errorf("policy file = %+v", doc.Hosts)
 	}
-	// Inherit drops the override.
-	if err := f.h.save("grafana", SettingsUpdate{Inherit: true}); err != nil {
+	// "" drops the pick: the default applies.
+	if err := f.h.save("grafana", SettingsUpdate{SignInTemplate: pickTemplate("")}); err != nil {
 		t.Fatal(err)
 	}
-	if v, _ := f.h.AppSettings("grafana"); v.AuthPolicy != nil {
-		t.Errorf("override not dropped: %+v", v.AuthPolicy)
+	if v, _ := f.h.AppSettings("grafana"); v.SignInTemplate != "" || v.Template != "standard" {
+		t.Errorf("pick not dropped: %+v", v.SignInTemplate)
 	}
-	if _, ok := readPolicy(t, f).Policies["grafana.example.org"]; ok {
-		t.Error("policy file still has the override")
+	if _, ok := readPolicy(t, f).Hosts["grafana.example.org"]; ok {
+		t.Error("policy file still has the pick")
 	}
 }
 
@@ -544,96 +549,107 @@ func TestRoutingValidation(t *testing.T) {
 	}
 }
 
-// Fresh installs default to a YubiKey by either method (client cert or
-// passkey); an explicitly chosen public default is honoured (and differs
-// from "never set").
-func TestInitialDefaultPolicy(t *testing.T) {
+// Fresh installs default to the built-in Standard (any passkey or a
+// YubiKey certificate): apps inheriting it get the optional certificate.
+func TestInitialDefaultTemplate(t *testing.T) {
 	f := newFixture(t)
 	doc := readPolicy(t, f)
-	if strings.Join(doc.Default.Factors, ",") != "mtls,webauthn" || doc.Default.Op != "any" {
-		t.Errorf("fresh default = %+v", doc.Default)
+	if doc.Version != 6 || doc.Default != "standard" || doc.Core["hub.example.org"] != "strong" || doc.Core["example.org"] != "standard" {
+		t.Errorf("fresh file = version %d default %q core %v", doc.Version, doc.Default, doc.Core)
 	}
-	if d := f.h.DefaultPolicy(); strings.Join(d.Factors, ",") != "mtls,webauthn" || d.Op != "any" {
-		t.Errorf("DefaultPolicy() = %+v", d)
-	}
-	// Apps that inherit it: cert optional at the handshake, Keycloak
-	// steps up to hwk (the lower of the two LoAs).
 	if err := f.h.Enable("other"); err != nil {
 		t.Fatal(err)
 	}
 	if ov, _ := os.ReadFile(filepath.Join(f.data, "overrides", "other.override.yml")); !strings.Contains(string(ov), "tls.options: authaware@file") {
 		t.Errorf("inherited default tier:\n%s", ov)
 	}
+}
+
+// TestNoACRPushed: the Hub pushes no default.acr.values (D9): the client
+// spec has no ACR, and nothing ACR-like reaches RegisterClient.
+func TestNoACRPushed(t *testing.T) {
+	f := newFixture(t)
+	if err := f.h.Enable("other"); err != nil {
+		t.Fatal(err)
+	}
 	f.idp.mu.Lock()
-	acr := f.idp.specs[len(f.idp.specs)-1].ACR
+	specs := slices.Clone(f.idp.specs)
 	f.idp.mu.Unlock()
-	if acr != "hwk" {
-		t.Errorf("inherited default acr = %q, want hwk", acr)
+	if len(specs) == 0 {
+		t.Fatal("no client registered")
 	}
-	if err := f.h.Disable("other"); err != nil {
-		t.Fatal(err)
-	}
-	if ch, err := f.h.SetDefaultPolicy(policy.AuthPolicy{}); err != nil || !ch {
-		t.Fatal("public default not detected as a change")
-	}
-	f.h.Wait()
-	raw, _ := os.ReadFile(filepath.Join(f.data, "group-gate-policy.json"))
-	if !strings.Contains(string(raw), `"factors": []`) {
-		t.Errorf("explicit public default not published as []:\n%s", raw)
-	}
-	if err := f.h.Enable("grafana"); err != nil {
-		t.Fatal(err)
-	}
-	ov, _ := os.ReadFile(filepath.Join(f.data, "overrides", "grafana.override.yml"))
-	if !strings.Contains(string(ov), "tls.options: public@file") {
-		t.Errorf("explicit public default not applied:\n%s", ov)
-	}
-	// Survives a restart.
-	h2, err := New(f.h.cfg, f.runner, f.engine, f.idp)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if d := h2.DefaultPolicy(); len(d.Factors) != 0 {
-		t.Errorf("after restart default = %+v", d)
+	for _, s := range specs {
+		b, err := json.Marshal(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if l := strings.ToLower(string(b)); strings.Contains(l, "acr") {
+			t.Errorf("client spec carries an ACR: %s", b)
+		}
 	}
 }
 
-func TestDefaultPolicy(t *testing.T) {
+// TestSignInChangeRewritesPolicy: a sign-in change rewrites the policy
+// file and signin-keycloak.json; one that moves an enabled instance's TLS
+// option re-renders its override and restarts it.
+func TestSignInChangeRewritesPolicy(t *testing.T) {
 	f := newFixture(t)
-	f.h.Enable("other")
-	if ch, err := f.h.SetDefaultPolicy(policy.AuthPolicy{Factors: []string{"mtls"}}); err != nil || !ch {
-		t.Fatal("change not detected", err)
+	ctx := context.Background()
+	if err := f.h.Enable("other"); err != nil {
+		t.Fatal(err)
 	}
-	if ch, _ := f.h.SetDefaultPolicy(policy.AuthPolicy{Factors: []string{" MTLS "}}); ch {
-		t.Error("same policy reported as changed")
+	ch, err := f.h.SetDefaultTemplate(ctx, "strong", siAdmin)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, bad := range [][]string{{"password"}, {"mtls", "sms"}} {
-		if _, err := f.h.SetDefaultPolicy(policy.AuthPolicy{Factors: bad}); statusOf(err) != 400 {
-			t.Errorf("default %v: err = %v", bad, err)
-		}
+	if len(ch.Restarts) != 0 {
+		t.Errorf("strong keeps authaware: restarts %v", ch.Restarts)
 	}
-	if d := readPolicy(t, f).Default; strings.Join(d.Factors, ",") != "mtls" {
-		t.Errorf("default = %+v", d)
+	raw, _ := os.ReadFile(filepath.Join(f.data, "group-gate-policy.json"))
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
 	}
-	// Propagation runs in the background: wait for the restart.
+	if doc["default"] != "strong" || doc["version"] != float64(6) || doc["add_stronger"] != false {
+		t.Errorf("policy file: default %v version %v add_stronger %v", doc["default"], doc["version"], doc["add_stronger"])
+	}
+	kc, err := os.ReadFile(filepath.Join(f.data, SignInKeycloakFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var k map[string]any
+	if err := json.Unmarshal(kc, &k); err != nil {
+		t.Fatal(err)
+	}
+	if mds, _ := k["mds"].(map[string]any); mds == nil || mds["serial"] != float64(0) || mds["next_update"] != "0001-01-01T00:00:00Z" {
+		t.Errorf("signin-keycloak.json mds = %v", k["mds"])
+	}
+	if fi, _ := os.Stat(filepath.Join(f.data, SignInKeycloakFile)); fi == nil || fi.Mode().Perm() != 0644 {
+		t.Errorf("signin-keycloak.json mode = %v", fi)
+	}
+	// The default made certificate-only: other's routers require the
+	// certificate at the handshake, and it restarts.
+	if _, err := f.h.SetTemplateEnabled(ctx, "yubikey-and-certificate", true, siAdmin); err != nil {
+		t.Fatal(err)
+	}
+	before := len(f.runner.Calls())
+	ch, err = f.h.SetDefaultTemplate(ctx, "yubikey-and-certificate", siAdmin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(ch.Restarts, []string{"other"}) {
+		t.Errorf("restarts = %v", ch.Restarts)
+	}
+	if ov := readOverride(t, f, "other"); !strings.Contains(ov, "tls.options: protected@file") {
+		t.Errorf("override not regenerated:\n%s", ov)
+	}
 	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		f.idp.mu.Lock()
-		n := len(f.idp.updated)
-		f.idp.mu.Unlock()
-		if n > 0 && len(f.runner.Calls()) >= 3 {
-			break
-		}
+	for time.Now().Before(deadline) && len(f.runner.Calls()) <= before {
 		time.Sleep(10 * time.Millisecond)
 	}
-	f.idp.mu.Lock()
-	defer f.idp.mu.Unlock()
-	if len(f.idp.updated) == 0 || f.idp.updated[0] != "other:mtls" {
-		t.Errorf("acr not pushed: %v", f.idp.updated)
-	}
-	ov, _ := os.ReadFile(filepath.Join(f.data, "overrides", "other.override.yml"))
-	if !strings.Contains(string(ov), "protected@file") {
-		t.Errorf("override not regenerated:\n%s", ov)
+	f.h.Wait()
+	if len(f.runner.Calls()) <= before {
+		t.Error("other was not restarted")
 	}
 }
 

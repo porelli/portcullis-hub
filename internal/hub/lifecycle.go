@@ -18,7 +18,6 @@ import (
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/keycloak"
-	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/settings"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
@@ -471,7 +470,7 @@ func (h *Hub) redirectURIs(c templates.KeycloakClient) []string {
 	return out
 }
 
-func (h *Hub) clientSpec(t *templates.Template, c templates.KeycloakClient, acr string) keycloak.ClientSpec {
+func (h *Hub) clientSpec(t *templates.Template, c templates.KeycloakClient) keycloak.ClientSpec {
 	bcl := strings.ReplaceAll(c.BackchannelLogoutURL, "{{DOMAIN}}", h.cfg.Domain)
 	// Secret: per-app .env first, then core .env.
 	secret := h.clientSecret(t, c)
@@ -487,7 +486,6 @@ func (h *Hub) clientSpec(t *templates.Template, c templates.KeycloakClient, acr 
 		Secret:       secret,
 		RedirectURIs: h.redirectURIs(c),
 		TemplateID:   t.ID, // the owner tag: the instance id (§11.2)
-		ACR:          acr,
 		// Most apps get the realm's email scope; email_verified_claim: false
 		// swaps it for email-unverified.
 		OmitEmailVerified:    !c.SendsEmailVerified(),
@@ -585,7 +583,6 @@ func (h *Hub) enableInner(ctx context.Context, id string, restoring bool) (rolle
 		}
 		return false, statusErr(500, "override write failed: %v", err)
 	}
-	acr := policy.ACR(h.effectivePolicyLocked(&tmpl))
 	callbacks := callbackURIs(h.signInExtraHostsLocked(&tmpl))
 	h.mu.Unlock()
 
@@ -623,7 +620,7 @@ func (h *Hub) enableInner(ctx context.Context, id string, restoring bool) (rolle
 				}
 			} else {
 				var created bool
-				created, err = h.idp.RegisterClient(context.Background(), h.clientSpec(&tmpl, c, acr))
+				created, err = h.idp.RegisterClient(context.Background(), h.clientSpec(&tmpl, c))
 				if created {
 					// Written at once: a Stop — also after a Hub restart —
 					// deletes exactly the clients this enable made.

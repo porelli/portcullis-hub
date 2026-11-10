@@ -735,7 +735,7 @@ func TestPolicyAIOffNotStoppable(t *testing.T) {
 	reached, release := blockStep(t, a.h, StepRestart)
 	done := make(chan error, 1)
 	go func() {
-		done <- a.h.switchAIOff(context.Background(), "aiapp", []string{"tok"}, aiHubActor, aiPolicyOffDetail)
+		done <- a.h.switchAIOff(context.Background(), "aiapp", []string{"tok"}, aiHubActor, aiCertOffDetail)
 	}()
 	<-reached
 	rec, err := a.h.StopOp("aiapp", directory.Human("bob"))

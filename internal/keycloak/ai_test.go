@@ -65,7 +65,6 @@ func checkAIClient(t *testing.T, kc *kctest.Server, id string, public bool, owne
 	}
 	for k, want := range map[string]string{
 		"pkce.code.challenge.method":                "S256",
-		"default.acr.values":                        "hwk",
 		"client.offline.session.idle.timeout":       "604800",
 		"client.offline.session.max.lifespan":       "2592000",
 		"oauth2.device.authorization.grant.enabled": "false",
@@ -77,6 +76,9 @@ func checkAIClient(t *testing.T, kc *kctest.Server, id string, public bool, owne
 		if got.Attributes[k] != want {
 			t.Errorf("%s: attribute %s = %q, want %q", id, k, got.Attributes[k], want)
 		}
+	}
+	if acr, ok := got.Attributes["default.acr.values"]; ok {
+		t.Errorf("%s: default.acr.values = %q, want none (contract §8.1)", id, acr)
 	}
 	if !slices.Equal(got.RedirectURIs, redirects) || len(got.WebOrigins) != 0 {
 		t.Errorf("%s: redirect URIs %v web origins %v, want %v and none", id, got.RedirectURIs, got.WebOrigins, redirects)
@@ -236,15 +238,12 @@ func TestEnsureAIClientAppClient(t *testing.T) {
 	if err := c.SetOptionalScopes(ctx, "librechat-mcp", []string{"mcp:portcullis.admin"}); err == nil {
 		t.Error("admin scope on an ai_client accepted")
 	}
-	// RegisterClient / UpdateClientACR never take it over (they would
+	// RegisterClient never takes it over (it would
 	// attach profile, email, groups and the attributes scope).
 	var ce *keycloak.ConflictError
-	app := keycloak.ClientSpec{ClientID: "librechat-mcp", TemplateID: "librechat", Secret: "s3cret", RedirectURIs: spec.RedirectURIs, ACR: "pwd"}
+	app := keycloak.ClientSpec{ClientID: "librechat-mcp", TemplateID: "librechat", Secret: "s3cret", RedirectURIs: spec.RedirectURIs}
 	if _, err := c.RegisterClient(ctx, app); !errors.As(err, &ce) {
 		t.Errorf("RegisterClient(ai_client) = %v, want *ConflictError", err)
-	}
-	if err := c.UpdateClientACR(ctx, app); !errors.As(err, &ce) {
-		t.Errorf("UpdateClientACR(ai_client) = %v, want *ConflictError", err)
 	}
 	// Nor do the setting claims (G9: no claim but the username; a
 	// claim mapper would be deleted again by every ensure).

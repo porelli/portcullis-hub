@@ -20,6 +20,7 @@ import (
 	"strings"
 
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/settings"
 	"github.com/portcullis/hub/internal/signin"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
@@ -87,8 +88,9 @@ type TemplateInput struct {
 	Rule signin.Node `json:"rule"`
 }
 
-// SignInChange is a committed sign-in change: the new view, the instances
-// it restarts (Task 4) and warnings.
+// SignInChange is a committed sign-in change: the new view, the enabled
+// instances whose TLS option moved (tierChangesLocked: their override is
+// rendered again and they restart) and warnings.
 type SignInChange struct {
 	View     *SignInView `json:"view"`
 	Restarts []string    `json:"restarts"`
@@ -130,11 +132,16 @@ func (h *Hub) SignInView(ctx context.Context) (*SignInView, error) {
 // can be met with the switched-on methods; every writer of a published
 // rule goes through it (fail closed: anything else is no rule).
 func (h *Hub) compiledLocked(id string) (signin.Node, bool) {
-	t, ok := h.st.SignIn.Templates[id]
+	return compiledIn(h.st.SignIn, id)
+}
+
+// compiledIn is compiledLocked under sign-in section si.
+func compiledIn(si state.SignIn, id string) (signin.Node, bool) {
+	t, ok := si.Templates[id]
 	if !ok || !t.Enabled {
 		return signin.Node{}, false
 	}
-	c, err := signin.Compile(t.Rule, h.st.SignIn.MethodsOn())
+	c, err := signin.Compile(t.Rule, si.MethodsOn())
 	if err != nil {
 		return signin.Node{}, false
 	}
@@ -264,12 +271,31 @@ func (h *Hub) changeSignIn(actor directory.Actor, action, target, attempt string
 		h.mu.RUnlock()
 		return &SignInChange{View: v, Restarts: []string{}, Warnings: []string{}}, nil
 	}
+	var aiOff map[string][]string
+	if err == nil {
+		aiOff = h.signInAIOffLocked(p.next)
+	}
 	h.mu.RUnlock()
 	if err != nil {
 		return nil, err
 	}
 	// Task 5: the lockout guard runs here, outside mu, on the current
 	// section and p.next.
+	// AI support goes off first where the change makes an instance's
+	// template certificate-only (contract §8.1, G43; audited ai.disable):
+	// a switch-off that fails refuses the change, nothing saved.
+	warnings := []string{}
+	for _, id := range slices.Sorted(maps.Keys(aiOff)) {
+		if err := h.switchAIOff(context.Background(), id, aiOff[id], actor, aiCertOffDetail); err != nil {
+			var oe *OpError
+			if !errors.As(err, &oe) {
+				return nil, fmt.Errorf("the sign-in settings were not changed: switching AI support off on %s first failed: %w", id, err)
+			}
+			// Off in state and in the gate already; the rest is recorded.
+			warnings = append(warnings, fmt.Sprintf("%s: switching AI support off: %s", id, h.redactUnitError(id, err)))
+		}
+		warnings = append(warnings, aiOffWarning(id, aiOff[id]))
+	}
 	h.mu.Lock()
 	again, err := plan()
 	if err != nil {
@@ -280,20 +306,39 @@ func (h *Hub) changeSignIn(actor directory.Actor, action, target, attempt string
 		h.mu.Unlock()
 		return nil, statusErr(http.StatusConflict, "the sign-in settings changed meanwhile: try again")
 	}
+	// Never commit a certificate-only template with a companion on.
+	if on := h.signInAIOffLocked(p.next); len(on) > 0 {
+		h.mu.Unlock()
+		return nil, statusErr(http.StatusConflict, "AI support was switched on meanwhile for %s, whose sign-in template the change would make certificate-only: try again", strings.Join(slices.Sorted(maps.Keys(on)), ", "))
+	}
 	prev := h.st.SignIn
+	restarts := h.tierChangesLocked(prev, p.next)
 	h.st.SignIn = p.next
 	if err := h.saveStateLocked(); err != nil {
 		h.st.SignIn = prev
 		h.mu.Unlock()
 		return nil, err
 	}
+	// The TLS option moved (D18): the override now, the restart through
+	// the delivery engine (owed, background).
+	for _, id := range restarts {
+		if t := h.findLocked(id); t != nil {
+			if err := h.generateOverrideLocked(t, h.st.Settings[id]); err != nil {
+				log.Printf("signin: %s: override: %v", id, err)
+				warnings = append(warnings, fmt.Sprintf("%s: the override couldn't be written: %s", id, h.redactUnitError(id, err)))
+			}
+		}
+	}
 	v := h.signInViewLocked()
 	h.mu.Unlock()
 	detail = p.detail
-	ch = &SignInChange{View: v, Restarts: []string{}, Warnings: []string{}}
+	ch = &SignInChange{View: v, Restarts: restarts, Warnings: warnings}
 	if werr := h.WritePolicy(); werr != nil {
 		log.Printf("signin: %s: policy file: %v", action, werr)
 		ch.Warnings = append(ch.Warnings, "the policy file couldn't be written: "+werr.Error())
+	}
+	for _, id := range restarts {
+		h.queueDelivery(id, TriggerSave, settings.EffectRestart, 0)
 	}
 	return ch, nil
 }

@@ -20,7 +20,6 @@ import (
 	"github.com/portcullis/hub/internal/aigate"
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/keycloak"
-	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/state"
 )
 
@@ -519,8 +518,8 @@ func TestRestoreAIStateRefusals(t *testing.T) {
 	}
 	a.h.mu.Lock()
 	a.h.st.AI.Enabled = true
-	// LoA 3 in the archive's policy (set behind the save path).
-	a.h.st.AuthPolicies["aiapp"] = policy.AuthPolicy{Factors: []string{"mtls"}, Op: "any"}
+	// A certificate-only template in the archive (set behind the save path).
+	setCertOnlyLocked(a.h, "aiapp")
 	ai = a.h.st.AIInstances["aiapp"]
 	ai.Companions = map[string]state.AICompanion{"hdr": {Enabled: true, Mode: "read_only"}}
 	a.h.st.AIInstances["aiapp"] = ai
@@ -534,9 +533,9 @@ func TestRestoreAIStateRefusals(t *testing.T) {
 		t.Fatal(err)
 	}
 	if s := a.companion("aiapp", "hdr"); s.Enabled {
-		t.Errorf("hdr at LoA 3 = %+v", s)
+		t.Errorf("hdr with a certificate-only template = %+v", s)
 	}
-	if !slices.ContainsFunc(res.Warnings, func(s string) bool { return strings.Contains(s, "hdr") && strings.Contains(s, mtlsRefusal) }) {
+	if !slices.ContainsFunc(res.Warnings, func(s string) bool { return strings.Contains(s, "hdr") && strings.Contains(s, certRefusal) }) {
 		t.Errorf("warnings = %q", res.Warnings)
 	}
 }

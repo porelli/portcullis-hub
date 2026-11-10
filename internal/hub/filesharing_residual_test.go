@@ -14,7 +14,6 @@ import (
 	"github.com/portcullis/hub/internal/credentials"
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
-	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/templates"
 )
 
@@ -142,7 +141,7 @@ func TestSupersededForcedHookFailsNotRecorded(t *testing.T) {
 		}
 		once.Do(func() {
 			c.f.h.mu.Lock()
-			c.f.h.st.AuthPolicies[smbID] = policy.AuthPolicy{}
+			c.f.h.st.SignInMode[smbID] = "x-generation"
 			c.f.h.mu.Unlock()
 		})
 	}

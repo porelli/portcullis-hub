@@ -144,7 +144,6 @@ type IdP interface {
 	// RegisterClient creates or reconciles a client; created: this call
 	// created it (an enable's Stop deletes only those).
 	RegisterClient(ctx context.Context, s keycloak.ClientSpec) (created bool, err error)
-	UpdateClientACR(ctx context.Context, s keycloak.ClientSpec) error
 	// UpdateClientHosts moves an instance client's redirect URIs and web
 	// origins to new hostnames (keycloak.Client.UpdateClientHosts).
 	UpdateClientHosts(ctx context.Context, s keycloak.ClientSpec, oldURIs []string, hostMap map[string]string) error
@@ -402,12 +401,11 @@ type Hub struct {
 	// write skipped (envOverrideBlockLocked; under envProblemsMu).
 	envDrops map[string][]string
 
-	// bg tracks background lifecycle work (queued restarts, default-policy
-	// propagation) so callers can wait for it.
+	// bg tracks background lifecycle work (queued restarts) so callers
+	// can wait for it.
 	bg sync.WaitGroup
 
-	policyWriteMu   sync.Mutex
-	defaultPolicyMu sync.Mutex
+	policyWriteMu sync.Mutex
 	// signInMu serialises Settings → Sign-in writers (signin.go), from
 	// their plan to their commit; taken before mu.
 	signInMu sync.Mutex
@@ -927,7 +925,6 @@ func (h *Hub) claimTierLocked(id string) int {
 		return 2
 	}
 	_, a := h.st.Settings[id]
-	_, b := h.st.AuthPolicies[id]
 	_, c := h.st.Published[id]
 	_, d := h.st.PublicAccess[id]
 	_, e := h.st.PublicMode[id]
@@ -937,13 +934,13 @@ func (h *Hub) claimTierLocked(id string) int {
 	h.opsMu.Lock()
 	_, o := h.ops[id]
 	h.opsMu.Unlock()
-	if a || b || c || d || e || f || g || i || o {
+	if a || c || d || e || f || g || i || o {
 		return 1
 	}
 	return 0
 }
 
-// snapshot captures what an enabled instance publishes to group-gate (v5).
+// snapshot captures what an enabled instance publishes to group-gate (v6).
 // Caller must hold mu.
 func (h *Hub) snapshot(t *templates.Template) state.PublishedApp {
 	a := t.Manifest.Auth
@@ -967,9 +964,8 @@ func (h *Hub) snapshot(t *templates.Template) state.PublishedApp {
 		}
 	}
 	slices.Sort(p.HeaderSuffixes)
-	if ov, ok := h.st.AuthPolicies[t.ID]; ok {
-		ov.Factors = append([]string(nil), ov.Factors...)
-		p.Policy = &ov
+	if acc.Capability.Templates {
+		p.SignInTemplate = h.st.Instances[t.ID].SignInTemplate
 	}
 	if pub := h.publicLocked(t, t.Public); pub.Active() {
 		p.PublicHosts = slices.Sorted(slices.Values(t.Public.Hosts))
@@ -1057,10 +1053,11 @@ func (h *Hub) IsEnabled(id string) bool {
 
 // ── group-gate policy file ───────────────────────────────
 
-// WritePolicy regenerates group-gate-policy.json from current state, and
-// in the same pass mcp-gate.json and the caller secrets of
-// mcp-credentials.json (ai_gatefile.go). Takes mu itself — callers must
-// NOT hold it.
+// WritePolicy regenerates, in this order, signin-keycloak.json
+// (signin_publish.go), group-gate-policy.json, user-attributes.json and
+// portal-apps.json from current state, and in the same pass mcp-gate.json
+// and the caller secrets of mcp-credentials.json (ai_gatefile.go). Takes
+// mu itself — callers must NOT hold it.
 func (h *Hub) WritePolicy() error {
 	_, err := h.writePolicy()
 	return err
@@ -1093,10 +1090,6 @@ func (h *Hub) writePolicy() (attrsWritten bool, retErr error) {
 	for _, d := range enrolled {
 		extraDomains = append(extraDomains, d.Name)
 	}
-	perApp := make(map[string]policy.AuthPolicy, len(h.st.AuthPolicies))
-	for k, v := range h.st.AuthPolicies {
-		perApp[k] = v
-	}
 	apps := make([]policy.App, 0, len(h.instances))
 	covered := map[string]bool{}
 	for i := range h.instances {
@@ -1106,20 +1099,24 @@ func (h *Hub) writePolicy() (attrsWritten bool, retErr error) {
 		}
 		covered[t.ID] = true
 		// Router-less instances (contract §3, §4): publish no hosts, groups
-		// or policy. They have no routers, so no hostnames, and get no
+		// or template. They have no routers, so no hostnames, and get no
 		// Keycloak client or access role.
 		if t.Manifest.Routerless() {
 			continue
 		}
 		users, admins := h.instanceGroupsLocked(t)
+		acc := h.accessLocked(t)
 		app := policy.App{
 			ID:          t.ID,
 			Enabled:     true,
 			Hosts:       hostSet(slices.Collect(maps.Values(t.Hosts)), coreHosts),
-			GroupAccess: h.accessLocked(t).groupAccess(t),
+			GroupAccess: acc.groupAccess(t),
 			AccessGroup: users,
 			AdminGroup:  admins,
 			AdminPaths:  t.Manifest.Auth.AdminPaths,
+		}
+		if acc.Capability.Templates {
+			app.Template = h.st.Instances[t.ID].SignInTemplate
 		}
 		if pub := h.publicLocked(t, t.Public); pub.Active() {
 			app.PublicHosts, app.Public = hostSet(t.Public.Hosts, coreHosts), publicEntry(&t.Manifest, pub.Published)
@@ -1141,9 +1138,6 @@ func (h *Hub) writePolicy() (attrsWritten bool, retErr error) {
 		}
 		if len(snapHosts) > 0 {
 			log.Printf("auth-policy: WARNING: template for enabled app %s is missing — still enforcing its last known config (hosts %v)", id, snap.Hosts)
-			if _, ok := perApp[id]; !ok && snap.Policy != nil {
-				perApp[id] = *snap.Policy
-			}
 			apps = append(apps, policy.App{
 				ID:          id,
 				Enabled:     true,
@@ -1156,6 +1150,7 @@ func (h *Hub) writePolicy() (attrsWritten bool, retErr error) {
 				// with: keep showing it.
 				PublicHosts: hostSet(snap.PublicHosts, coreHosts),
 				Public:      snap.Public,
+				Template:    snap.SignInTemplate,
 			})
 			continue
 		} else if ok {
@@ -1176,13 +1171,24 @@ func (h *Hub) writePolicy() (attrsWritten bool, retErr error) {
 			apps = append(apps, policy.App{ID: id, Enabled: true, Deny: true, Hosts: hosts})
 		}
 	}
-	doc := policy.Build(apps, perApp, h.st.Default(), mainDomain, extraDomains)
+	doc := policy.Build(policy.BuildInput{
+		Apps: apps, Default: h.st.SignIn.Default, Core: maps.Clone(h.st.SignIn.Core),
+		Templates: h.publishedTemplatesLocked(), Methods: h.methodsOnLocked(),
+		People: h.peopleMethodsLocked(), AddStronger: h.st.SignIn.AddStronger,
+		MainDomain: mainDomain, ExtraDomains: extraDomains,
+	})
 	doc.Expiring = expiring
+	kcSignIn := h.keycloakSignInLocked()
 	portal := h.portalLocked()
 	// The header deliveries (§4.1 hosts): enabled instances with a view,
 	// on the hosts their routers gate now.
 	hosts, suppress := h.publishedHostHeadersLocked()
 	h.mu.RUnlock()
+	// The Keycloak extension's file first (contract §8.1): a sign-in
+	// change reaches the native-OIDC logins before group-gate's file.
+	if err := writeKeycloakSignIn(h.signInKeycloakPath(), kcSignIn); err != nil {
+		return false, err
+	}
 	if err := policy.Write(h.policyPath(), doc); err != nil {
 		return false, err
 	}

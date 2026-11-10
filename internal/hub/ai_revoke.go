@@ -22,7 +22,6 @@ import (
 	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/lldap"
-	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
 )
@@ -36,9 +35,9 @@ import (
 // own loop, so a slow hook never delays a policy write), serialised by
 // aiReconMu:
 //
-//  1. an instance whose effective policy now reaches LoA 3 (a restore, a
-//     template update) gets AI support switched off (ai.disable, "policy
-//     needs mTLS");
+//  1. an instance whose sign-in template is now certificate-only (a
+//     restore, a template update) gets AI support switched off
+//     (ai.disable, "sign-in needs a client certificate");
 //  2. companions a template update switched off (Pruned) get their owed
 //     revoke_all, with the hook they were switched on with;
 //  3. app_token entries of people no longer in their companion's
@@ -101,7 +100,7 @@ func (h *Hub) runAIReconcile(ctx context.Context) {
 func (h *Hub) ReconcileAICredentials(ctx context.Context) {
 	h.aiReconMu.Lock()
 	defer h.aiReconMu.Unlock()
-	h.aiOffForLoA3(ctx)
+	h.aiOffForCertOnly(ctx)
 	h.revokePruned(ctx)
 	mctx, cancel := context.WithTimeout(ctx, directoryStateTimeout)
 	m, err := h.membership(mctx)
@@ -120,7 +119,8 @@ func (h *Hub) ReconcileAICredentials(ctx context.Context) {
 // aiHoldersLocked: the people who may hold c's app-side credentials now
 // (known false: can't tell — the directory is unreadable, the master
 // switch is off, or a revoke_all is owed anyway). An instance that is
-// disabled, a companion that is off, a policy at LoA 3 or a population
+// disabled, a companion that is off, a certificate-only sign-in
+// template or a population
 // emptied by state (sign_in native, …) = nobody. Members whose expiry has
 // passed are left out (the gate's expiring rule). Caller holds mu.
 func (h *Hub) aiHoldersLocked(t *templates.Template, c *templates.Companion, s state.AICompanion, m *directory.Membership, now time.Time) (map[string]bool, bool) {
@@ -131,7 +131,7 @@ func (h *Hub) aiHoldersLocked(t *templates.Template, c *templates.Companion, s s
 	if !t.Enabled || !s.Enabled || !slices.Contains(c.Modes, s.Mode) {
 		return nobody, true
 	}
-	if loa := policy.LoA(h.effectivePolicyLocked(t)); loa < 0 || loa > 2 {
+	if h.certOnlyLocked(t) {
 		return nobody, true
 	}
 	if h.populationWhyLocked(t) != "" {
@@ -418,18 +418,19 @@ func (h *Hub) RevokeAICredentials(ctx context.Context, instance, companion, user
 	return nil
 }
 
-// ── 1. LoA 3 (12b carry) ──────────────────────────────────
+// ── 1. certificate-only (12b carry) ───────────────────────
 
-// aiOffForLoA3 switches AI support off on every instance whose effective
-// policy reaches LoA 3 while a companion is on (a restore or a template
-// update landed it there; policy saves do it themselves), audited
-// ai.disable "policy needs mTLS". A busy instance is retried next pass.
-func (h *Hub) aiOffForLoA3(ctx context.Context) {
+// aiOffForCertOnly switches AI support off on every instance whose
+// sign-in template is certificate-only while a companion is on (a restore
+// or a template update landed it there; settings saves and sign-in
+// changes do it themselves), audited ai.disable "sign-in needs a client
+// certificate". A busy instance is retried next pass.
+func (h *Hub) aiOffForCertOnly(ctx context.Context) {
 	h.mu.RLock()
 	off := map[string][]string{}
 	for i := range h.instances {
 		t := &h.instances[i]
-		if h.instanceBusyLocked(t.ID) || !t.HasAIMCP() || policy.LoA(h.effectivePolicyLocked(t)) != 3 {
+		if h.instanceBusyLocked(t.ID) || !t.HasAIMCP() || !h.certOnlyLocked(t) {
 			continue
 		}
 		var on []string
@@ -444,8 +445,8 @@ func (h *Hub) aiOffForLoA3(ctx context.Context) {
 	}
 	h.mu.RUnlock()
 	for _, id := range slices.Sorted(maps.Keys(off)) {
-		if err := h.switchAIOff(ctx, id, off[id], aiHubActor, aiPolicyOffDetail); err != nil {
-			log.Printf("ai: %s: switching AI support off (its policy needs mTLS) failed (retried at the next reconcile): %v", id, err)
+		if err := h.switchAIOff(ctx, id, off[id], aiHubActor, aiCertOffDetail); err != nil {
+			log.Printf("ai: %s: switching AI support off (its sign-in needs a client certificate) failed (retried at the next reconcile): %v", id, err)
 		}
 	}
 }

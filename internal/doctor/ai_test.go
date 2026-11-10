@@ -12,7 +12,7 @@ const pinTok = "sha256:" + "aa" + "0123456789abcdef0123456789abcdef0123456789abc
 // aiOn is a healthy switched-on companion of aiapp.
 func aiOn() AIIn {
 	return AIIn{Instance: "aiapp", Label: "AI App", Companion: "tok", CompanionLabel: "Tokens", On: true, Status: "running",
-		Policy: "passkey", LoA: 2, ImagePinned: pinTok, ImageRunning: pinTok}
+		Template: "a passkey", CertOnly: false, ImagePinned: pinTok, ImageRunning: pinTok}
 }
 
 // aiLinkOK: the finding opens aiapp's AI tab (never a settings option).
@@ -56,15 +56,15 @@ func TestAIDoctorChecks(t *testing.T) {
 
 	t.Run("mtls", func(t *testing.T) {
 		a := aiOn()
-		a.LoA, a.Policy = 3, "client certificate and passkey"
+		a.CertOnly, a.Template = true, "a YubiKey certificate and a YubiKey touch"
 		got := of(t, KindAIPolicyNeedsMTLS, &Inputs{AI: []AIIn{a}})
 		if len(got) != 1 || got[0].Severity != Problem || !strings.Contains(got[0].Why, "client certificate") {
-			t.Fatalf("LoA 3 = %+v", got)
+			t.Fatalf("certificate-only = %+v", got)
 		}
 		aiLinkOK(t, got[0])
 		a.On = false
 		if got := of(t, KindAIPolicyNeedsMTLS, &Inputs{AI: []AIIn{a}}); len(got) != 0 {
-			t.Errorf("AI off at LoA 3 = %+v", got)
+			t.Errorf("AI off, certificate-only = %+v", got)
 		}
 	})
 

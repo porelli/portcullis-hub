@@ -14,7 +14,6 @@ import (
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/domains"
 	"github.com/portcullis/hub/internal/hub"
-	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/state"
 )
 
@@ -115,9 +114,6 @@ type (
 	providerFieldArgs struct {
 		Name  string `json:"name" jsonschema:"the provider's name"`
 		Field string `json:"field" jsonschema:"the secret field (list_model_providers shows each provider's)"`
-	}
-	defaultPolicyArgs struct {
-		Policy policy.AuthPolicy `json:"policy" jsonschema:"the Hub default sign-in policy {factors, op}"`
 	}
 	// hubSettingsArgs is hub.AISettingsUpdate's schema (every field
 	// optional: only what changes); Run decodes the arguments into
@@ -467,9 +463,9 @@ func (s *Server) registerAdminTools2() {
 				return map[string]string{"status": "deleted", "name": nameOf(args)}, nil
 			}},
 		// ── Hub settings ──
-		admin("get_hub_settings", "The Hub's settings: Settings → AI (master switch, gate, AI clients, Portcullis MCPs, connection length, limits, allowed origins) and the default sign-in policy.",
+		admin("get_hub_settings", "The Hub's settings: Settings → AI (master switch, gate, AI clients, Portcullis MCPs, connection length, limits, allowed origins).",
 			ClassRead, "GET /api/ai/settings", "", func(context.Context, directory.Actor, noArgs) (any, error) {
-				return map[string]any{"ai": s.Hub.AISettings(), "default_policy": s.defaultPolicyView()}, nil
+				return map[string]any{"ai": s.Hub.AISettings()}, nil
 			}),
 		perCall(Tool{Name: "save_hub_settings", Description: "Save Settings → AI (only what changes). It may turn the Portcullis admin MCP off, never on (on the Hub's page only). Turning AI or the people MCP on, changing the AI clients or the allowed origins, or raising a limit or the connection length needs your confirmation in the browser.",
 			Class: ClassWrite, Scope: ScopeAdmin, Twin: "PUT /api/ai/settings", Audit: "settings.ai", In: hubSettingsArgs{},
@@ -496,17 +492,6 @@ func (s *Server) registerAdminTools2() {
 				}
 				return nil
 			}}, s.hubSettingsClass, func(json.RawMessage) string { return "settings" }, hubSettingsConsequences),
-		perCall(admin("set_default_policy", "Set the Hub default sign-in policy ({factors, op}) every instance without its own uses. One that isn't stricter than the current default needs your confirmation in the browser. Inheriting instances the new default puts at mTLS only get AI support switched off first.",
-			ClassWrite, "/api/settings", "settings.default_policy", func(_ context.Context, a directory.Actor, in defaultPolicyArgs) (any, error) {
-				return s.setDefaultPolicy(a, in.Policy)
-			}), s.defaultPolicyClass, func(json.RawMessage) string { return "default-policy" }, func(args json.RawMessage) []string {
-			a, _ := decode[defaultPolicyArgs](args)
-			return []string{"Sets the Hub default sign-in policy to " + hub.ShowPolicy(policy.Normalize(a.Policy)) + ", which isn't stricter than the current one: every instance without its own policy follows it."}
-		}),
-		admin("preview_default_policy", "What saving this default sign-in policy would switch off first (AI support of inheriting instances it puts at mTLS only); nothing is stored.",
-			ClassRead, "POST /api/settings/preview", "", func(_ context.Context, _ directory.Actor, in defaultPolicyArgs) (any, error) {
-				return map[string]any{"warnings": append([]string{}, s.Hub.DefaultPolicyAIWarnings(in.Policy)...)}, nil
-			}),
 		// ── G15: the Keycloak user sweep ──
 		admin("user_sweep_status", "The guarded clean-up of Keycloak records of people deleted in LLDAP: paused (and why), skipped, the last successful run and its user count.",
 			ClassRead, "GET /api/keycloak/user-sweep", "", func(context.Context, directory.Actor, noArgs) (any, error) {
@@ -893,19 +878,6 @@ func hubSettingsConsequences(args json.RawMessage) []string {
 		lines = append(lines, "Changes the connection length or the limits (see the arguments below): a higher value lets AI clients stay connected longer or do more.")
 	}
 	return append(lines, "The arguments below are saved as shown.")
-}
-
-// defaultPolicyClass is set_default_policy's class (G37, like set_policy):
-// W only for a policy policy.Stricter than the current default.
-func (s *Server) defaultPolicyClass(args json.RawMessage) ToolClass {
-	a, err := decode[defaultPolicyArgs](args)
-	if err != nil {
-		return ClassDestructive
-	}
-	if policy.Stricter(policy.Normalize(a.Policy), policy.Normalize(s.Hub.DefaultPolicy())) {
-		return ClassWrite
-	}
-	return ClassDestructive
 }
 
 // adminMCPOnRefusal: the Portcullis admin MCP is turned on only on the

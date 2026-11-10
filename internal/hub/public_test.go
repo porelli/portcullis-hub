@@ -78,7 +78,8 @@ var priorityRe = regexp.MustCompile(`portcullis-public-cloud\.priority: "(\d+)"`
 
 func TestPublicListedNoTokensNoRouter(t *testing.T) {
 	f := newCloudFixture(t)
-	save(t, f, SettingsUpdate{Policy: &policy.AuthPolicy{Factors: []string{"mtls"}}})
+	enableTemplate(t, f, certOnlyTemplate)
+	save(t, f, SettingsUpdate{SignInTemplate: pickTemplate(certOnlyTemplate)})
 	if err := f.h.Enable("cloud"); err != nil {
 		t.Fatal(err)
 	}
@@ -102,9 +103,10 @@ func TestPublicListedTokens(t *testing.T) {
 	if err := f.h.Enable("cloud"); err != nil {
 		t.Fatal(err)
 	}
+	enableTemplate(t, f, certOnlyTemplate)
 	save(t, f, SettingsUpdate{
-		Policy:       &policy.AuthPolicy{Factors: []string{"mtls"}},
-		PublicTokens: listp("https://cloud.example.org/s/AbC123/download", "AbC123", "Zz9", " "),
+		SignInTemplate: pickTemplate(certOnlyTemplate),
+		PublicTokens:   listp("https://cloud.example.org/s/AbC123/download", "AbC123", "Zz9", " "),
 	})
 	ov := readOverride(t, f, "cloud")
 	for _, want := range []string{

@@ -16,7 +16,6 @@ import (
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/hub"
-	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/templates"
 )
 
@@ -212,11 +211,6 @@ type (
 		ID     string `json:"id" jsonschema:"the instance id"`
 		Option string `json:"option" jsonschema:"the secret option's key"`
 	}
-	policyArgs struct {
-		ID      string             `json:"id" jsonschema:"the instance id"`
-		Policy  *policy.AuthPolicy `json:"policy,omitempty" jsonschema:"the instance's own policy {factors, op}"`
-		Inherit bool               `json:"inherit,omitempty" jsonschema:"drop the instance's own policy: the Hub default applies"`
-	}
 	signInArgs struct {
 		ID   string `json:"id" jsonschema:"the instance id"`
 		Mode string `json:"mode" jsonschema:"gateway (Portcullis sign-in) or native (the app's own login only)"`
@@ -289,7 +283,7 @@ func (s *Server) registerAdminTools() {
 			ClassRead, "/api/status", "", func(ctx context.Context, _ directory.Actor, in statusArgs) (any, error) {
 				return s.hubStatus(ctx, in.IncludeDoctor), nil
 			}),
-		admin("explain_policy", "An instance's sign-in policy: what applies (its own or the Hub default, intersected with what the app can enforce), the safety score and level, why (notes), the TLS tier, the sign-in mode and public access.",
+		admin("explain_policy", "An instance's sign-in: the sign-in template that applies (its own pick or the Hub default), its sentence and score out of 5, what the app can enforce of it and why (notes), the TLS tier, the sign-in mode and public access.",
 			ClassRead, "GET /api/instances/{id}/settings", "", func(ctx context.Context, _ directory.Actor, in idArgs) (any, error) {
 				if err := instanceIDOK(in.ID); err != nil {
 					return nil, err
@@ -445,30 +439,6 @@ func (s *Server) registerAdminTools() {
 				}
 				return map[string]any{"instance": a.ID, "option": a.Option, "secret": sv,
 					"note": "what the Hub stores now; it doesn't show who set it or whether it was just now"}, nil
-			}},
-		{Name: "set_policy", Description: "Set an instance's sign-in policy ({factors, op}), or inherit the Hub default. A policy that isn't stricter than the current one needs your confirmation in the browser.",
-			Class: ClassDestructive, Scope: ScopeAdmin, Twin: "PUT /api/instances/{id}/settings", Audit: "settings.change", In: policyArgs{},
-			ClassFor: noCtxClass(s.policyClass), Typed: idOf,
-			Consequences: func(_ context.Context, args json.RawMessage) []string {
-				a, _ := decode[policyArgs](args)
-				if a.Inherit {
-					return []string{"Drops " + a.ID + "'s own sign-in policy: the Hub default applies, which isn't stricter."}
-				}
-				p := "?"
-				if a.Policy != nil {
-					p = hub.ShowPolicy(policy.Normalize(*a.Policy))
-				}
-				return []string{"Sets " + a.ID + "'s sign-in policy to " + p + ", which isn't stricter than the current one."}
-			},
-			Run: func(ctx context.Context, c *directory.Caller, args json.RawMessage) (any, error) {
-				a, _ := decode[policyArgs](args)
-				if err := instanceIDOK(a.ID); err != nil {
-					return nil, err
-				}
-				if (a.Policy == nil) == !a.Inherit {
-					return nil, badArg("give exactly one of policy and inherit: true")
-				}
-				return s.saveSettings(toolActor(ctx, c), a.ID, hub.SettingsUpdate{Policy: a.Policy, Inherit: a.Inherit})
 			}},
 		{Name: "set_sign_in_mode", Description: "Set the sign-in mode of an app with its own login: gateway (Portcullis sign-in in front) or native (the app's own login only, needs your confirmation in the browser).",
 			Class: ClassDestructive, Scope: ScopeAdmin, Twin: "PUT /api/instances/{id}/settings", Audit: "app.sign_in", In: signInArgs{},
@@ -1022,13 +992,13 @@ func (s *Server) hubStatus(ctx context.Context, withDoctor bool) map[string]any 
 	return out
 }
 
-// policyPart is explain_policy's answer: the policy part of the settings
-// panel.
+// policyPart is explain_policy's answer: the sign-in part of the
+// settings panel (the template that applies, its sentence and score).
 func policyPart(id string, v hub.AppSettingsView) map[string]any {
 	return map[string]any{
-		"instance": id, "effective_policy": v.EffectivePolicy, "default_policy": v.DefaultPolicy, "own_policy": v.AuthPolicy,
-		"inherits": v.AuthPolicy == nil, "safety_score": v.SafetyScore, "level": policy.LoA(v.EffectivePolicy),
-		"method": v.Method, "capability": v.Capability, "resolution": v.Resolution, "notes": v.PolicyNotes, "tier": v.Tier,
+		"instance": id, "sign_in_template": v.SignInTemplate, "template": v.Template, "inherits": v.SignInTemplate == "",
+		"sentence": v.Sentence, "score": v.Score,
+		"method": v.Method, "capability": v.Capability, "notes": v.SignInNotes, "tier": v.Tier,
 		"sign_in": v.SignIn, "public_access": maskPublic(v.PublicAccess),
 	}
 }
@@ -1397,29 +1367,6 @@ func (s *Server) secretSettingForm(id, option string) string {
 		u += "/" + option
 	}
 	return u
-}
-
-// policyClass is set_policy's class (G37): W only for a policy
-// policy.Stricter than the instance's current one (its own, else the
-// default); anything else — inherit, an equal or weaker policy, an
-// instance that can't be read — D.
-func (s *Server) policyClass(args json.RawMessage) ToolClass {
-	a, err := decode[policyArgs](args)
-	if err != nil || a.Inherit || a.Policy == nil {
-		return ClassDestructive
-	}
-	v, err := s.Hub.AppSettings(a.ID)
-	if err != nil {
-		return ClassDestructive
-	}
-	cur := v.DefaultPolicy
-	if v.AuthPolicy != nil {
-		cur = *v.AuthPolicy
-	}
-	if policy.Stricter(policy.Normalize(*a.Policy), policy.Normalize(cur)) {
-		return ClassWrite
-	}
-	return ClassDestructive
 }
 
 // publicClass is set_public_access's class (G37, fix round 1: fail

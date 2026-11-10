@@ -9,7 +9,7 @@ import (
 
 // AI checks (contract §14.5 "AI support (NEW)", plan 4 Task 20). They
 // judge what the Hub gathers per companion (Inputs.AI): its service's run
-// state, the instance's effective policy, the revocations the Hub owes
+// state, the instance's sign-in template, the revocations the Hub owes
 // (Hub.AIRevokeProblems) and the running image against the template's
 // pin. Every finding of an instance links to its AI tab (Link.Tab "ai");
 // the doctor never switches AI support itself.
@@ -22,9 +22,11 @@ type AIIn struct {
 	// it: "running", "unhealthy", "exited", "missing", … ("" = unknown or
 	// not read: not judged).
 	Status string
-	// Policy is the effective policy in words, LoA its level (§15.11).
-	Policy string
-	LoA    int
+	// Template is the instance's sign-in template in words (its
+	// sentence); CertOnly: every way in needs a client certificate
+	// (signin.NeedsCertificate, §8.1 / §15.11).
+	Template string
+	CertOnly bool
 	// Revoking: credential entries stuck in revoking.
 	Revoking int
 	// ImagePinned is the template's pinned digest of the companion's
@@ -36,7 +38,7 @@ type AIIn struct {
 	Label, CompanionLabel string
 	// On: AI support is on for the companion now (master switch on, the
 	// instance enabled, the companion switched on): only then are its
-	// health, policy and image judged.
+	// health, sign-in template and image judged.
 	On bool
 	// Pruned, NoHook, Recorded, Reason: Hub.AIRevokeProblems (Task 13b):
 	// switched off by a template update with its revoke_all owed; the
@@ -151,22 +153,22 @@ func (aiMTLSCheck) Kind() string { return KindAIPolicyNeedsMTLS }
 func (aiMTLSCheck) Run(in *Inputs) []Finding {
 	var out []Finding
 	for _, a := range sortedAI(in) {
-		if !a.On || a.LoA < 3 {
+		if !a.On || !a.CertOnly {
 			continue
 		}
-		policy := a.Policy
-		if policy == "" {
-			policy = "its sign-in policy"
+		tmpl := a.Template
+		if tmpl == "" {
+			tmpl = "its sign-in template"
 		}
 		out = append(out, Finding{
 			FP: AIFP(KindAIPolicyNeedsMTLS, a.Instance, a.Companion), Kind: KindAIPolicyNeedsMTLS, Severity: Problem,
-			Title: fmt.Sprintf("%s has AI support on, but its sign-in policy needs a client certificate.", a.app()),
-			Why: fmt.Sprintf("%s's effective policy (%s) reaches LoA 3: every request needs a client certificate, which AI clients can't present. A policy save switches AI support off first, so this should never happen: AI support on %s must be switched off.",
-				a.app(), policy, a.companion()),
-			Fix:   "Open the app's AI tab and switch the companion off, or choose a policy without a client certificate.",
+			Title: fmt.Sprintf("%s has AI support on, but its sign-in template needs a client certificate.", a.app()),
+			Why: fmt.Sprintf("%s's sign-in template (%s) needs a client certificate on every sign-in, which AI clients can't present. A sign-in change switches AI support off first, so this should never happen: AI support on %s must be switched off.",
+				a.app(), tmpl, a.companion()),
+			Fix:   "Open the app's AI tab and switch the companion off, or choose a sign-in template with a way in without a client certificate.",
 			Class: FixLink, Link: aiLink(a),
 			Instances: []string{a.Instance},
-			Inputs:    Digest([]any{a.Instance, a.Companion, a.LoA}),
+			Inputs:    Digest([]any{a.Instance, a.Companion, a.CertOnly}),
 		})
 	}
 	return out

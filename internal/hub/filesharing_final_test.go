@@ -15,7 +15,6 @@ import (
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/freshauth"
-	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/settings"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
@@ -239,7 +238,7 @@ func TestSupersededAfterHookFileForcesHooks(t *testing.T) {
 		once.Do(func() {
 			// A commit that changes the generation, not the file.
 			c.f.h.mu.Lock()
-			c.f.h.st.AuthPolicies[smbID] = policy.AuthPolicy{}
+			c.f.h.st.SignInMode[smbID] = "x-generation"
 			c.f.h.mu.Unlock()
 		})
 	}

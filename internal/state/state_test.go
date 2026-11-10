@@ -6,9 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/signin"
-	"gopkg.in/yaml.v3"
 )
 
 func TestLoadMissing(t *testing.T) {
@@ -16,7 +14,7 @@ func TestLoadMissing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.Settings == nil || s.AuthPolicies == nil || len(s.Enabled) != 0 {
+	if s.Settings == nil || len(s.Enabled) != 0 {
 		t.Errorf("bad empty state: %+v", s)
 	}
 }
@@ -61,8 +59,7 @@ func TestSaveRoundTrip(t *testing.T) {
 	s.SetEnabled("b", false)
 	s.Sources = []Source{{Name: "portcullis", URL: "https://x", Path: "/data/repos/portcullis"}}
 	s.Settings["a"] = InstanceSettings{Ports: map[string]string{"K": "v"}, Values: map[string]any{"n": 30}, Person: map[string]PersonSetting{"q": {Default: "x", Rows: []GroupValue{{Group: "g", GroupID: 3, Value: "y"}}}}}
-	s.AuthPolicies["a"] = policy.AuthPolicy{Factors: []string{"mtls"}}
-	s.SetDefault(policy.AuthPolicy{Factors: []string{"webauthn"}})
+	s.Published["a"] = PublishedApp{Hosts: []string{"a.example.com"}, SignInTemplate: "strong"}
 	if err := s.Save(p); err != nil {
 		t.Fatal(err)
 	}
@@ -80,105 +77,12 @@ func TestSaveRoundTrip(t *testing.T) {
 	if got.Settings["a"].Ports["K"] != "v" || got.Settings["a"].Values["n"] != 30 || got.Settings["a"].Person["q"].Rows[0].GroupID != 3 || got.Sources[0].Path != "/data/repos/portcullis" {
 		t.Errorf("round trip lost data: %+v", got)
 	}
-	if p := got.ResolvePolicy("a"); p.Factors[0] != "mtls" {
-		t.Errorf("per-app policy = %+v", p)
-	}
-	if p := got.ResolvePolicy("other"); p.Factors[0] != "webauthn" {
-		t.Errorf("default policy = %+v", p)
+	if got.Published["a"].SignInTemplate != "strong" {
+		t.Errorf("published pick = %+v", got.Published["a"])
 	}
 	entries, _ := os.ReadDir(dir)
 	if len(entries) != 1 {
 		t.Errorf("temp files left: %d", len(entries))
-	}
-}
-
-func TestDefaultPolicyUnsetVsPublic(t *testing.T) {
-	dir := t.TempDir()
-	p := filepath.Join(dir, "state.yaml")
-
-	// Fresh install: a YubiKey by either method (client cert or passkey).
-	s, _ := Load(p)
-	if d := s.Default(); strings.Join(d.Factors, ",") != "mtls,webauthn" || d.Op != "any" {
-		t.Errorf("fresh default = %+v", d)
-	}
-	// A file that never set a default behaves the same.
-	os.WriteFile(p, []byte("enabled: []\n"), 0600)
-	s, _ = Load(p)
-	if d := s.Default(); strings.Join(d.Factors, ",") != "mtls,webauthn" || d.Op != "any" {
-		t.Errorf("unset default = %+v", d)
-	}
-	if err := s.Save(p); err != nil {
-		t.Fatal(err)
-	}
-	if b, _ := os.ReadFile(p); strings.Contains(string(b), "default_auth_policy") {
-		t.Errorf("unset default persisted:\n%s", b)
-	}
-
-	// An explicitly saved public default survives a round trip.
-	s.SetDefault(policy.AuthPolicy{})
-	if err := s.Save(p); err != nil {
-		t.Fatal(err)
-	}
-	s, err := Load(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if s.DefaultPolicy == nil {
-		t.Fatal("explicit public default lost")
-	}
-	if d := s.Default(); d.Factors == nil || len(d.Factors) != 0 || s.ResolvePolicy("x").Factors == nil {
-		t.Errorf("explicit public default = %+v", d)
-	}
-}
-
-// Stored policies naming the removed "password" factor are normalised on
-// load (never into something weaker) and flagged for the UI.
-func TestLoadLegacyPassword(t *testing.T) {
-	p := filepath.Join(t.TempDir(), "state.yaml")
-	os.WriteFile(p, []byte(`default_auth_policy: {factors: [password], op: ""}
-auth_policies:
-  a: {factors: [password, webauthn], op: all}
-  b: {factors: [mtls], op: ""}
-published:
-  a: {subdomains: [a], group_access: false, policy: {factors: [password, mtls], op: any}}
-sign_in_mode: {plex: native}
-`), 0600)
-	s, err := Load(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if d := s.Default(); strings.Join(d.Factors, ",") != "mtls,webauthn" || d.Op != "any" {
-		t.Errorf("default = %+v", d)
-	}
-	if a := s.AuthPolicies["a"]; strings.Join(a.Factors, ",") != "webauthn" {
-		t.Errorf("a = %+v", a)
-	}
-	if pp := s.Published["a"].Policy; pp == nil || strings.Join(pp.Factors, ",") != "mtls,webauthn" || pp.Op != "any" {
-		t.Errorf("published a = %+v", pp)
-	}
-	if !s.LegacyPassword[""] || !s.LegacyPassword["a"] || s.LegacyPassword["b"] {
-		t.Errorf("flags = %v", s.LegacyPassword)
-	}
-	if s.SignInMode["plex"] != SignInNative {
-		t.Errorf("sign_in = %v", s.SignInMode)
-	}
-	if err := s.Save(p); err != nil {
-		t.Fatal(err)
-	}
-	// Nothing but the sign_in section (which names the password method,
-	// not a policy factor) names password.
-	b, _ := os.ReadFile(p)
-	var doc map[string]any
-	if err := yaml.Unmarshal(b, &doc); err != nil {
-		t.Fatal(err)
-	}
-	delete(doc, "sign_in")
-	rest, err := yaml.Marshal(doc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(rest), "password") {
-		t.Errorf("saved state still names password:\n%s", rest)
 	}
 }
 

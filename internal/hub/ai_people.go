@@ -7,7 +7,6 @@ import (
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/lldap"
-	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
 )
@@ -91,7 +90,8 @@ func (h *Hub) myAIOnLocked(gate bool) bool {
 // myAppAILocked is t's AI part for a caller in its population (nil: no
 // companion to show). A companion is shown only while it is on and
 // passes the gate's own per-companion check (companionUsable: no owed
-// revoke_all, not pruned, a mode of its modes, LoA ≤ 2, an alias that
+// revoke_all, not pruned, a mode of its modes, a sign-in template with a
+// way in without a client certificate, an alias that
 // fits, a usable identity, a router hostname); the instance must be
 // enabled, routed and not deleting or restoring — any doubt leaves it
 // out, as the gate file does. Caller holds mu.
@@ -103,7 +103,7 @@ func (h *Hub) myAppAILocked(t *templates.Template) *MyAppAI {
 	if len(switches) == 0 {
 		return nil
 	}
-	loa := policy.LoA(h.effectivePolicyLocked(t))
+	loa := h.gateLoALocked(t)
 	var out []MyCompanion
 	for i := range t.Manifest.AI.MCP {
 		c := &t.Manifest.AI.MCP[i]

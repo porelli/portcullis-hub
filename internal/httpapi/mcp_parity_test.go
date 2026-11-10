@@ -79,7 +79,6 @@ var destructiveTwins = map[string]string{
 // accessWidening are the tools that are D only for some arguments (G37,
 // ClassFor): their twin is a plain save.
 var accessWidening = map[string]string{
-	"set_policy":         "D unless the new policy is policy.Stricter than the current one",
 	"set_sign_in_mode":   "D for native (the app's own login, no Portcullis sign-in)",
 	"set_public_access":  "D when it turns public access on (or widens it to all)",
 	"save_settings":      "D when it sets ports (host ports published, <KEY>_BIND changed)",
@@ -92,7 +91,6 @@ var accessWidening = map[string]string{
 	"set_ai_providers":    "D when it adds a model provider to an AI page (people's data goes to it)",
 	"save_model_provider": "D when it changes where model traffic goes (base_url, instance, instance_name, region) or names no stored provider",
 	"save_hub_settings":   "D when it turns AI or the people MCP on, changes clients or origins, or raises a limit or connection length",
-	"set_default_policy":  "D unless the new default is policy.Stricter than the current one",
 	// Task 18 (G37 ruling 2; the directory's Membership.Guarding).
 	"create_instance":   "D when one of its groups already exists with members, or the template / directory can't be read (T18 fix round 1)",
 	"remove_member":     "D from an administrator, permission or guarding group (T18 fix round 1 ruling)",
@@ -212,11 +210,11 @@ func TestToolParity(t *testing.T) {
 		}
 	}
 	for _, n := range []string{"exec", "set_env_override", "clear_env_override", "save_custom_override", "resolve_drift", "delete_instance", "admin_revoke_credential",
-		"set_policy", "set_sign_in_mode", "set_public_access", "save_settings", "set_local_networks", "enable_instance",
+		"set_sign_in_mode", "set_public_access", "save_settings", "set_local_networks", "enable_instance",
 		// Task 17b (§15.10's D list, G37 and its rulings).
 		"add_source", "remove_source", "restore_instance", "restore_as", "delete_domain", "revoke_ai_access", "dismiss_ai_revoke_problem",
 		"add_model_provider", "delete_model_provider", "resume_user_sweep", "remove_stale_keycloak_user",
-		"set_ai_support", "set_ai_mode", "save_model_provider", "save_hub_settings", "set_default_policy",
+		"set_ai_support", "set_ai_mode", "save_model_provider", "save_hub_settings",
 		// Task 23.
 		"set_ai_providers",
 		// Task 18 (§15.10, G37).
@@ -295,7 +293,7 @@ var admin17b = []string{
 	"list_domains", "enroll_domain", "replace_domain_token", "delete_domain",
 	"ai_status", "set_ai_support", "set_ai_mode", "set_ai_providers", "revoke_ai_access", "dismiss_ai_revoke_problem", "ai_activity",
 	"list_model_providers", "add_model_provider", "save_model_provider", "set_model_provider_secret", "delete_model_provider",
-	"get_hub_settings", "save_hub_settings", "set_default_policy", "preview_default_policy",
+	"get_hub_settings", "save_hub_settings",
 	"user_sweep_status", "resume_user_sweep", "remove_stale_keycloak_user",
 }
 
@@ -305,7 +303,7 @@ var admin17a = []string{
 	"hub_status", "explain_policy",
 	"list_instances", "get_instance", "instance_defaults", "create_instance", "enable_instance", "disable_instance",
 	"restart_instance", "set_hosts", "set_instance_label", "get_op", "list_ops", "wait_for_op", "stop_op", "delete_instance",
-	"get_settings", "preview_settings", "save_settings", "set_secret_setting", "set_policy", "set_sign_in_mode", "set_public_access",
+	"get_settings", "preview_settings", "save_settings", "set_secret_setting", "set_sign_in_mode", "set_public_access",
 	"get_logs", "get_status", "exec", "get_compose", "get_env", "set_env_override", "clear_env_override", "get_custom_override", "save_custom_override",
 	"list_drift", "resolve_drift",
 	"set_person_value", "clear_person_value", "retry_deliveries", "missing_groups", "create_missing_groups",

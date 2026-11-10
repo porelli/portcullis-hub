@@ -12,7 +12,6 @@ import (
 
 	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/keycloak/kctest"
-	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/state"
 )
 
@@ -368,11 +367,11 @@ func TestAIEnvOffAtLoA3(t *testing.T) {
 		t.Fatal(err)
 	}
 	a.h.mu.Lock()
-	a.h.st.AuthPolicies["aiapp"] = policy.AuthPolicy{Factors: []string{"mtls"}, Op: "any"}
+	setCertOnlyLocked(a.h, "aiapp")
 	env := a.h.aiEnvLocked(a.h.findLocked("aiapp"))
 	a.h.mu.Unlock()
 	if env["PORTCULLIS_AI_ENABLED"] != "false" || env["PORTCULLIS_AI_READONLY_TOK"] != "true" {
-		t.Errorf("env at LoA 3 = %v", env)
+		t.Errorf("env with a certificate-only template = %v", env)
 	}
 }
 

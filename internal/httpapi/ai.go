@@ -11,7 +11,6 @@ import (
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/hub"
-	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/state"
 )
 
@@ -46,7 +45,6 @@ func (s *Server) registerAI(mux routeMux) {
 	// The gate's access log (§15.8, §15.11; Task 17b: ai_activity's twin).
 	mux.HandleFunc("GET /api/ai/activity", s.handleAIActivity)
 	// What saving a Hub default policy would switch off first (G43).
-	mux.HandleFunc("POST /api/settings/preview", s.handleDefaultPolicyPreview)
 }
 
 const (
@@ -68,26 +66,6 @@ const (
 	maxActivity = 200
 	defActivity = 50
 )
-
-// handleDefaultPolicyPreview: {"default_auth_policy"} → {"warnings"}
-// (nothing stored).
-func (s *Server) handleDefaultPolicyPreview(w http.ResponseWriter, r *http.Request) {
-	if !s.folderAdmin(w, r) {
-		return
-	}
-	var b struct {
-		DefaultAuthPolicy *policy.AuthPolicy `json:"default_auth_policy"`
-	}
-	if !decodeAPI(w, r, &b, `{"default_auth_policy": {"factors": [...], "op": "any"|"all"}}`) {
-		return
-	}
-	if b.DefaultAuthPolicy == nil {
-		writeJSONError(w, http.StatusBadRequest, "body must be {\"default_auth_policy\": {...}}")
-		return
-	}
-	noStore(w)
-	writeJSON(w, map[string]any{"warnings": append([]string{}, s.Hub.DefaultPolicyAIWarnings(*b.DefaultAuthPolicy)...)})
-}
 
 // handleInstanceAI is the instance's AI tab.
 func (s *Server) handleInstanceAI(w http.ResponseWriter, r *http.Request) {

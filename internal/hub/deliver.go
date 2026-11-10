@@ -15,7 +15,6 @@ import (
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/fsutil"
-	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/settings"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
@@ -677,10 +676,9 @@ func (h *Hub) requeueOwed() {
 // Caller holds mu.
 func (h *Hub) deliveryGenLocked(t *templates.Template) string {
 	// The population's inputs too (group access, the access role, the
-	// policy, public mode): a run built before a policy save never
+	// sign-in template, public mode): a run built before such a save never
 	// writes the old population after it.
 	acc := h.accessLocked(t)
-	pol, hasPol := h.st.AuthPolicies[t.ID]
 	// An AI page's ai-providers.json (Task 23; errors make it differ).
 	providers, perr := h.providersFileBytesLocked(t)
 	if perr != nil {
@@ -696,13 +694,13 @@ func (h *Hub) deliveryGenLocked(t *templates.Template) string {
 		Hooks       []templates.Hook
 		GroupAccess bool
 		Access      any
-		Policy      *policy.AuthPolicy
+		Pick        string
 		Public      any
 		PublicMode  any
 		Auth        templates.Auth
 		AIProviders []byte
 	}{h.st.Settings[t.ID], h.st.IsEnabled(t.ID), h.st.SignInMode[t.ID], t.Manifest.Files, t.Manifest.Options(), t.Manifest.Reload, t.Manifest.Hooks,
-		acc.groupAccess(t), acc, policyOrNil(pol, hasPol), t.Public, h.st.PublicMode[t.ID], t.Manifest.Auth, providers})
+		acc.groupAccess(t), acc, h.st.Instances[t.ID].SignInTemplate, t.Public, h.st.PublicMode[t.ID], t.Manifest.Auth, providers})
 	if err != nil {
 		// Never equal: the run can't prove it is current.
 		return "unmarshalable:" + err.Error() + time.Now().String()
@@ -735,13 +733,6 @@ func (h *Hub) redeliverChanged(before map[string]string) {
 			h.queueDelivery(id, TriggerRetry, settings.EffectNone, 0)
 		}
 	}
-}
-
-func policyOrNil(p policy.AuthPolicy, ok bool) *policy.AuthPolicy {
-	if !ok {
-		return nil
-	}
-	return &p
 }
 
 // redactUnitError is err as a unit shows it: redacted, then clipped.

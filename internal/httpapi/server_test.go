@@ -130,9 +130,8 @@ func TestServerRoutes(t *testing.T) {
 		{"GET", "/api/templates/status/demo", "", 502}, // no docker engine in this test
 		{"POST", "/api/drift/resolve", `{"id":"demo","action":"bogus"}`, 400},
 		{"GET", "/api/drift", "", 200},
-		{"PUT", "/api/settings", `{}`, 400},
-		{"PUT", "/api/settings", `{"default_auth_policy":{"factors":["webauthn"]}}`, 200},
-		{"PUT", "/api/settings", `{"default_auth_policy":{"factors":["password","mtls"]}}`, 400},
+		// Gone with the old policy model (sign-in Task 4).
+		{"PUT", "/api/settings", `{"default_auth_policy":{"factors":["webauthn"]}}`, 404},
 		{"GET", "/api/directory", "", 503}, // no directory service in this test
 		{"POST", "/api/directory/users", `{}`, 503},
 		{"GET", "/api/directory/users", "", 404}, // wrong method falls through to "/"

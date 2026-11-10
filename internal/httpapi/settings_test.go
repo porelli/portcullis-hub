@@ -349,7 +349,7 @@ func TestPutAnswersSaveResult(t *testing.T) {
 	if c := put(`{"sign_in":"native"}`); c != 200 { // unchanged: not audited
 		t.Fatalf("native again = %d", c)
 	}
-	if c := put(`{"sign_in":"gateway","auth_policy":{"factors":["password"]}}`); c != 400 {
+	if c := put(`{"sign_in":"gateway","sign_in_template":"Bad Id"}`); c != 400 {
 		t.Fatalf("refused = %d", c)
 	}
 	var signIn []directory.AuditEntry

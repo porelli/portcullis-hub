@@ -13,7 +13,6 @@ import (
 	"strings"
 
 	"github.com/portcullis/hub/internal/fsutil"
-	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/settings"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
@@ -497,7 +496,7 @@ func (h *Hub) routeLabelsLocked(t *templates.Template) (*routeLabels, error) {
 	}
 	pub := h.publicLocked(t, plan)
 	acc := h.accessLocked(t)
-	rl := &routeLabels{routes: routes, plan: plan, tier: policy.HostTier(acc.Resolved.Policy, pub.Active())}
+	rl := &routeLabels{routes: routes, plan: plan, tier: acc.tier(h.st.SignIn.MethodsOn(), pub.Active())}
 	if acc.SignIn != "" {
 		rl.middlewares = map[string]string{}
 		for name, ri := range routes.Info {
@@ -752,7 +751,8 @@ func exposureLabel(id, k string, mw bool) bool {
 
 // companionRenderedLocked: companion c of t is switched on and gets its
 // alias and router (no revoke_all owed, app_token / identity_headers only, the alias one DNS
-// label, the router's host known, the policy below LoA 3 — any doubt
+// label, the router's host known, a sign-in template with a way in
+// without a client certificate — any doubt
 // renders nothing, fail closed). Caller holds mu.
 func (h *Hub) companionRenderedLocked(t *templates.Template, c *templates.Companion) bool {
 	if sw := h.st.AIInstances[t.ID].Companions[c.Name]; !t.HasAIMCP() || !sw.Enabled || sw.RevokePending || sw.Pruned ||
@@ -762,7 +762,7 @@ func (h *Hub) companionRenderedLocked(t *templates.Template, c *templates.Compan
 	if host := NormalizeHost(t.Hosts[c.Router]); host == "" || !templates.ValidHostname(host) {
 		return false
 	}
-	return policy.LoA(h.effectivePolicyLocked(t)) <= 2
+	return !h.certOnlyLocked(t)
 }
 
 // mcpRoutersLocked renders one router per rendered companion (contract

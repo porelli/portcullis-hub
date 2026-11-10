@@ -34,7 +34,7 @@ var AIClientIDs = struct{ Claude, ClaudeCode, Generic string }{"portcullis-ai-cl
 // the Hub's three and every ai_client entry (manifest
 // keycloak_clients[].ai_client, tagged with its instance id). It is what
 // marks an ai_client for the other syncs: attachAttributesScope skips it,
-// RegisterClient / UpdateClientACR refuse it, SetOptionalScopes accepts
+// RegisterClient refuses it, SetOptionalScopes accepts
 // it. The Hub sets it only through EnsureAIClient.
 const AIClientAttr = "portcullis.hub.ai_client"
 
@@ -60,9 +60,6 @@ const OfflineAccessScope = "offline_access"
 // basic (sub, auth_time) and acr (acr, core's amr mapper). No profile,
 // email, roles, groups, web-origins or attributes scope.
 var AIDefaultScopes = []string{"basic", "acr"}
-
-// AIDefaultACR is every AI client's default.acr.values.
-const AIDefaultACR = "hwk"
 
 // Redirect URIs of the Hub's AI clients (contract §8).
 var (
@@ -291,11 +288,11 @@ func withAISettings(rep *gocloak.Client, s AIClientSpec) {
 	if rep.Attributes == nil {
 		rep.Attributes = map[string]string{}
 	}
+	delete(rep.Attributes, attrDefaultACR)
 	maps.Copy(rep.Attributes, map[string]string{
 		OwnerAttr:                    s.Owner,
 		AIClientAttr:                 "true",
 		"pkce.code.challenge.method": "S256",
-		"default.acr.values":         AIDefaultACR,
 		attrOfflineIdle:              strconv.FormatInt(int64(s.OfflineIdle/time.Second), 10),
 		attrOfflineMax:               strconv.FormatInt(int64(s.OfflineMax/time.Second), 10),
 		"oauth2.device.authorization.grant.enabled": "false",
@@ -328,7 +325,7 @@ func (c *Client) putClientExact(ctx context.Context, tok string, cl *gocloak.Cli
 
 // EnsureAIClient creates or re-asserts an AI client (contract §8):
 // public (the Hub's three) or confidential (an ai_client), standard flow
-// only, PKCE S256, consent required, default ACR hwk, fullScopeAllowed
+// only, PKCE S256, consent required, no default ACR, fullScopeAllowed
 // off, no direct grants / implicit / service accounts / device / CIBA /
 // token exchange, the offline session idle and max in seconds, redirect
 // URIs exactly s.RedirectURIs, no web origins, AIClientAttr set; default

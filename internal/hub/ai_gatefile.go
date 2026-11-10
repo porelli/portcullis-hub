@@ -36,7 +36,7 @@ import (
 // recipient the file says enabled: false; a directory that can't be read
 // keeps the last file's populations, while every state change still
 // reaches the gate (and the sync loop retries); every input doubt —
-// an unknown LoA, a mode the companion doesn't offer, a missing host, a
+// a certificate-only sign-in template, a mode the companion doesn't offer, a missing host, a
 // client whose Keycloak ensure failed, a username the gate wouldn't take —
 // leaves the resource, the person or the client out, never in.
 
@@ -296,7 +296,9 @@ func (h *Hub) companionResourcesLocked(t *templates.Template, gp gatePeople, f *
 	skip := func(c string, why string) {
 		log.Printf("mcp-gate: companion %s/%s left out of mcp-gate.json: %s", t.ID, c, why)
 	}
-	loa := policy.LoA(h.effectivePolicyLocked(t))
+	// Gate file v1's min_loa (Task 7's v2 publishes the compiled rule):
+	// 2, or 3 for a certificate-only template — never published (below).
+	loa := h.gateLoALocked(t)
 	var hosts []string
 	for _, hst := range t.Hosts {
 		if n := NormalizeHost(hst); n != "" {
@@ -395,10 +397,12 @@ func (h *Hub) companionResourcesLocked(t *templates.Template, gp gatePeople, f *
 }
 
 // companionUsable is the per-companion check of a switched-on companion
-// c of t (switch sw, the instance's policy LoA loa) shared by the gate
+// c of t (switch sw, the instance's gate LoA loa, gateLoALocked: 3 =
+// its sign-in template is certificate-only) shared by the gate
 // file and My apps (Task 21): its router's host, or why it is left out —
-// a revoke_all still owed, pruned, a mode outside its modes, an LoA AI
-// can't get, an alias longer than one DNS label (gate-fronted modes), no
+// a revoke_all still owed, pruned, a mode outside its modes, a
+// certificate-only sign-in template (AI clients present no certificate),
+// an alias longer than one DNS label (gate-fronted modes), no
 // hostname, or an identity the gate can't apply (identity_headers
 // without a caller secret, an unknown mode). app_oauth companions pass
 // with their host (the gate isn't in their path; never in the file).
@@ -414,7 +418,7 @@ func companionUsable(t *templates.Template, c *templates.Companion, sw state.AIC
 	case !slices.Contains(c.Modes, sw.Mode):
 		return "", fmt.Sprintf("mode %q is not one of its modes", sw.Mode)
 	case loa < 0 || loa > 2:
-		return "", fmt.Sprintf("the instance's policy LoA %d can't get AI support", loa)
+		return "", "the instance's sign-in template " + certRefusal
 	}
 	switch c.Identity.Mode {
 	case templates.IdentityAppOAuth:
@@ -668,12 +672,14 @@ func envValueBytes(path, key string) []byte {
 // ── G74: group-readable files in the data directory ──────
 
 // dataDirReadable are the only files in HUB_DATA_DIR another container
-// may read: group-gate (world-readable, uid 10003) the first three, the
-// gate (group 10001) the last three. The gate files are 0640.
+// may read: group-gate (world-readable, uid 10003) the first three,
+// Keycloak (world-readable) signin-keycloak.json, the gate (group 10001)
+// the last two. The gate files are 0640.
 var dataDirReadable = map[string]os.FileMode{
 	"group-gate-policy.json":  0,
 	"portal-apps.json":        0,
 	policy.UserAttributesFile: 0,
+	SignInKeycloakFile:        0,
 	aigate.GateFileName:       aigate.FileMode,
 	aigate.CredsFileName:      aigate.FileMode,
 }

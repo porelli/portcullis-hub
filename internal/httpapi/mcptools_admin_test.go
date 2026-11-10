@@ -398,12 +398,6 @@ func TestAdminToolsSameAsHTTP(t *testing.T) {
 			vars: func(_ *testing.T, e *toolEnv) map[string]string {
 				return map[string]string{"op": e.s.Hub.LastOp("cloud").OpID}
 			}},
-		{tool: "set_policy", args: map[string]any{"id": "secretapp", "policy": map[string]any{"factors": []string{"webauthn"}, "op": "any"}},
-			method: "PUT", path: "/api/instances/secretapp/settings", body: `{"auth_policy":{"factors":["webauthn"],"op":"any"}}`},
-		{tool: "set_policy", args: map[string]any{"id": "secretapp", "policy": map[string]any{"factors": []string{"password"}, "op": "any"}},
-			method: "PUT", path: "/api/instances/secretapp/settings", body: `{"auth_policy":{"factors":["password"],"op":"any"}}`},
-		{tool: "set_policy", args: map[string]any{"id": "secretapp", "inherit": true},
-			method: "PUT", path: "/api/instances/secretapp/settings", body: `{"auth_policy_inherit":true}`},
 		{tool: "set_sign_in_mode", args: map[string]any{"id": "nativeapp", "mode": "native"},
 			method: "PUT", path: "/api/instances/nativeapp/settings", body: `{"sign_in":"native"}`},
 		{tool: "set_sign_in_mode", args: map[string]any{"id": "nativeapp", "mode": "gateway"},
@@ -491,11 +485,6 @@ func TestAdminToolsSameAsHTTP(t *testing.T) {
 			method: "POST", path: "/api/keycloak/user-sweep/resume", body: `{"confirm":"resume"}`},
 		{tool: "remove_stale_keycloak_user", args: map[string]any{"username": "ghost"},
 			method: "DELETE", path: "/api/directory/keycloak-stale/ghost", body: `{"confirm":"ghost"}`},
-		// Last of the AI cases: an mTLS default switches aiapp's companions off (G43).
-		{tool: "set_default_policy", args: map[string]any{"policy": map[string]any{"factors": []string{"mtls", "webauthn"}, "op": "all"}},
-			method: "PUT", path: "/api/settings", body: `{"default_auth_policy":{"factors":["mtls","webauthn"],"op":"all"}}`, instance: "secretapp"},
-		{tool: "set_default_policy", args: map[string]any{"policy": map[string]any{"factors": []string{"webauthn", "mtls"}, "op": "any"}},
-			method: "PUT", path: "/api/settings", body: `{"default_auth_policy":{"factors":["webauthn","mtls"],"op":"any"}}`, instance: "secretapp"},
 		{tool: "disable_instance", args: map[string]any{"id": "secretapp"},
 			method: "POST", path: "/api/templates/disable", body: `{"id":"secretapp"}`, instance: "secretapp"},
 		{tool: "delete_instance", args: map[string]any{"id": "grafana-a"},
@@ -783,7 +772,7 @@ func TestBusyIsToolError(t *testing.T) {
 	waitIdle(t, e.s.Hub, "grafana")
 }
 
-// TestToolClassPerCall (G37): set_policy, set_sign_in_mode and
+// TestToolClassPerCall (G37): set_sign_in_mode and
 // set_public_access are D (confirmation) only for the access-widening
 // arguments, W otherwise; their annotations say destructive.
 func TestToolClassPerCall(t *testing.T) {
@@ -800,9 +789,6 @@ func TestToolClassPerCall(t *testing.T) {
 		{"enable_instance", map[string]any{"id": "secretapp"}, false},
 		{"enable_instance", map[string]any{"id": "cloud"}, true},
 		{"enable_instance", map[string]any{"id": "nope"}, true},
-		// The default is hwk-or-mtls (any); webauthn+mtls (all) is stricter.
-		{"set_policy", map[string]any{"id": "secretapp", "policy": map[string]any{"factors": []string{"mtls", "webauthn"}, "op": "all"}}, false},
-		{"set_policy", map[string]any{"id": "secretapp", "inherit": true}, true},
 		{"set_sign_in_mode", map[string]any{"id": "nativeapp", "mode": "gateway"}, false},
 		{"set_sign_in_mode", map[string]any{"id": "nativeapp", "mode": "native"}, true},
 		{"set_public_access", map[string]any{"id": "cloud", "access": "off"}, false},
@@ -890,7 +876,7 @@ func TestToolClassPerCall(t *testing.T) {
 		tl := x.(map[string]any)
 		ann, _ := tl["annotations"].(map[string]any)
 		switch tl["name"] {
-		case "set_policy", "set_sign_in_mode", "set_public_access", "save_settings", "set_local_networks", "delete_instance", "exec":
+		case "set_sign_in_mode", "set_public_access", "save_settings", "set_local_networks", "delete_instance", "exec":
 			seen++
 			if ann["destructiveHint"] != true {
 				t.Errorf("%s annotations %v", tl["name"], ann)
@@ -901,7 +887,7 @@ func TestToolClassPerCall(t *testing.T) {
 			}
 		}
 	}
-	if seen != 7 {
+	if seen != 6 {
 		t.Errorf("listed %d of the D tools", seen)
 	}
 }
@@ -1019,7 +1005,7 @@ func TestReadToolsAnswer(t *testing.T) {
 	}{
 		{"hub_status", nil, `"enabled"`},
 		{"hub_status", map[string]any{"include_doctor": true}, `"doctor"`},
-		{"explain_policy", map[string]any{"id": "secretapp"}, `"effective_policy"`},
+		{"explain_policy", map[string]any{"id": "secretapp"}, `"sign_in_template"`},
 		{"list_instances", nil, `"aiapp"`},
 		{"get_instance", map[string]any{"id": "aiapp"}, `"state"`},
 		{"instance_defaults", map[string]any{"template": "grafana", "id": "grafana-z"}, `grafana-z.example.org`},

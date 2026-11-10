@@ -218,10 +218,6 @@ func TestToolClassPerCall17b(t *testing.T) {
 		{"save_hub_settings", map[string]any{"limits": map[string]any{"person_rpm": 300}, "offline_idle_days": 3}, false},
 		{"save_hub_settings", map[string]any{"portcullis_people": false}, false},
 		{"save_hub_settings", map[string]any{"enabled": false}, false},
-		// Default policy: stricter W, equal or weaker D.
-		{"set_default_policy", map[string]any{"policy": map[string]any{"factors": []string{"webauthn", "mtls"}, "op": "any"}}, true},
-		{"set_default_policy", map[string]any{"policy": map[string]any{"factors": []string{"mtls", "webauthn"}, "op": "all"}}, false},
-		{"set_default_policy", map[string]any{"policy": map[string]any{"factors": []string{"webauthn"}, "op": "any"}}, true},
 		// Always D / always W.
 		{"add_source", map[string]any{"name": "more", "url": "https://example.org/more.git"}, true},
 		{"backup_instance", map[string]any{"id": "nope"}, false},
@@ -248,7 +244,7 @@ func TestToolClassPerCall17b(t *testing.T) {
 	res, _ := a["result"].(map[string]any)
 	ts, _ := res["tools"].([]any)
 	want := map[string]bool{"set_ai_support": true, "set_ai_mode": true, "save_model_provider": true, "save_hub_settings": true,
-		"set_default_policy": true, "add_source": true, "add_model_provider": true, "restore_as": true, "revoke_ai_access": true, "set_ai_providers": true,
+		"add_source": true, "add_model_provider": true, "restore_as": true, "revoke_ai_access": true, "set_ai_providers": true,
 		"backup_instance": false, "sync_sources": false, "enroll_domain": false}
 	for _, x := range ts {
 		tl := x.(map[string]any)
@@ -473,8 +469,7 @@ func TestReadTools17bAnswer(t *testing.T) {
 		{"ai_status", map[string]any{"id": "aiapp"}, `"companions"`},
 		{"ai_activity", nil, ""}, // no gate data dir here: 503 (TestAIRevokeAndActivityRoutes reads lines)
 		{"list_model_providers", nil, `"providers"`},
-		{"get_hub_settings", nil, `"default_policy"`},
-		{"preview_default_policy", map[string]any{"policy": map[string]any{"factors": []string{"mtls"}, "op": "any"}}, `"warnings"`},
+		{"get_hub_settings", nil, `"ai"`},
 		{"user_sweep_status", nil, `"paused"`},
 	} {
 		txt, isErr, _ := e.tool(t, c.tool, c.args)
@@ -510,10 +505,6 @@ func TestReadTools17bAnswer(t *testing.T) {
 	// get_template leaves secret defaults out; an unknown template is 404.
 	if txt, isErr, _ := e.tool(t, "get_template", map[string]any{"id": "nope"}); !isErr || !strings.HasPrefix(txt, "404: ") {
 		t.Errorf("unknown template = %q %v", txt, isErr)
-	}
-	// preview_default_policy at mTLS lists aiapp's switch-off (G43).
-	if txt, _, _ := e.tool(t, "preview_default_policy", map[string]any{"policy": map[string]any{"factors": []string{"mtls"}, "op": "any"}}); !strings.Contains(txt, "aiapp") {
-		t.Errorf("preview = %s", txt)
 	}
 }
 
@@ -566,7 +557,6 @@ var adminToolFixtures = []struct {
 	{"preview_settings", map[string]any{"id": "secretapp", "values": map[string]any{"api_url": "https://a.example.org"}}},
 	{"save_settings", map[string]any{"id": "secretapp", "values": map[string]any{"api_url": "https://a.example.org"}, "plan_hash": strings.Repeat("0", 64)}},
 	{"set_secret_setting", map[string]any{"id": "secretapp", "option": "api_key"}},
-	{"set_policy", map[string]any{"id": "secretapp", "policy": map[string]any{"factors": []string{"webauthn"}, "op": "any"}}},
 	{"set_sign_in_mode", map[string]any{"id": "nativeapp", "mode": "gateway"}},
 	{"set_public_access", map[string]any{"id": "cloud", "access": "off"}},
 	{"get_status", map[string]any{"id": "smbfixture"}},
@@ -616,8 +606,6 @@ var adminToolFixtures = []struct {
 	{"delete_model_provider", map[string]any{"name": "other"}},
 	{"get_hub_settings", nil},
 	{"save_hub_settings", map[string]any{"limits": map[string]any{"resource_rpm": 100}}},
-	{"set_default_policy", map[string]any{"policy": map[string]any{"factors": []string{"webauthn", "mtls"}, "op": "any"}}},
-	{"preview_default_policy", map[string]any{"policy": map[string]any{"factors": []string{"mtls"}, "op": "any"}}},
 	{"user_sweep_status", nil},
 	{"resume_user_sweep", nil},
 	{"remove_stale_keycloak_user", map[string]any{"username": "ghost"}},

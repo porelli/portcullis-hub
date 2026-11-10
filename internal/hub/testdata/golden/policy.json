@@ -1,14 +1,53 @@
 {
-  "version": 5,
-  "default": {
-    "factors": [
-      "mtls",
-      "webauthn"
-    ],
-    "op": "any"
+  "version": 6,
+  "methods": [
+    "passkey_device",
+    "passkey_synced",
+    "security_key",
+    "yubikey_cert"
+  ],
+  "templates": {
+    "standard": {
+      "op": "any",
+      "items": [
+        {
+          "op": "any",
+          "items": [
+            "passkey_synced",
+            "passkey_device",
+            "security_key"
+          ]
+        },
+        {
+          "op": "any",
+          "items": [
+            "yubikey_cert"
+          ]
+        }
+      ]
+    },
+    "strong": {
+      "op": "any",
+      "items": [
+        "security_key",
+        "yubikey_cert"
+      ]
+    }
   },
+  "default": "standard",
+  "hosts": {},
+  "core": {
+    "directory.example.org": "standard",
+    "enroll.example.org": "standard",
+    "example.org": "standard",
+    "hub.example.org": "strong",
+    "metrics.example.org": "standard",
+    "people.example.org": "strong",
+    "traefik.example.org": "standard"
+  },
+  "people": {},
+  "add_stronger": false,
   "extra_domains": [],
-  "policies": {},
   "groups": {
     "grafana.example.org": "users_grafana"
   },

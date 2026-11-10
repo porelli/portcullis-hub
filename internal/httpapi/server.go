@@ -16,7 +16,6 @@ import (
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/hub"
-	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/templates"
 )
 
@@ -111,7 +110,6 @@ func (s *Server) hubMux() *recordingMux {
 	mux.HandleFunc("/api/status", s.handleStatus)
 	mux.HandleFunc("/api/drift", s.handleDrift)
 	mux.HandleFunc("/api/drift/resolve", s.handleDriftResolve)
-	mux.HandleFunc("/api/settings", s.handleSettings)
 	mux.HandleFunc("GET /api/portal/apps", s.handlePortalApps)
 	s.registerDirectory(mux)
 	// Hub listener only (never people, contract §11.7).
@@ -759,72 +757,6 @@ func (s *Server) appendAudit(a directory.Actor, e directory.AuditEntry, status i
 	}
 }
 
-func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
-		writeJSON(w, s.defaultPolicyView())
-	case http.MethodPut:
-		var req struct {
-			DefaultAuthPolicy *policy.AuthPolicy `json:"default_auth_policy"`
-		}
-		if !decodeJSON(w, r, &req) {
-			return
-		}
-		if req.DefaultAuthPolicy == nil {
-			http.Error(w, "expected {default_auth_policy: {factors, op}}", http.StatusBadRequest)
-			return
-		}
-		res, err := s.setDefaultPolicy(requestActor(r), *req.DefaultAuthPolicy)
-		if err != nil {
-			writeErr(w, err, http.StatusInternalServerError)
-			return
-		}
-		writeJSON(w, res)
-	default:
-		http.Error(w, "GET or PUT only", http.StatusMethodNotAllowed)
-	}
-}
-
-// defaultPolicyView is GET /api/settings (and get_hub_settings' policy
-// part).
-func (s *Server) defaultPolicyView() map[string]any {
-	dp := s.Hub.DefaultPolicy()
-	return map[string]any{
-		"default_auth_policy":  dp,
-		"default_safety_score": policy.SafetyScore(dp),
-		"factors":              policy.Factors,
-		// The stored default named the removed "password" factor and
-		// was normalised (shown as a note until saved).
-		"legacy_password": s.Hub.DefaultPolicyLegacy(),
-	}
-}
-
-// setDefaultPolicy is the default policy's save (route and
-// set_default_policy): inheriting instances the new default puts at LoA 3
-// get AI support switched off first (G43; listed in the answer); audited
-// settings.default_policy when it changed (or failed).
-func (s *Server) setDefaultPolicy(a directory.Actor, p policy.AuthPolicy) (map[string]any, error) {
-	before := s.Hub.DefaultPolicy()
-	s.rec("SetDefaultPolicyAs", p)
-	changed, warnings, err := s.Hub.SetDefaultPolicyAs(p, a)
-	after := p
-	if err == nil {
-		after = policy.Normalize(after)
-	}
-	if changed || err != nil {
-		s.auditOpAs(a, "", directory.AuditEntry{Action: "settings.default_policy", Target: "default",
-			Detail: policyDetail(before) + " -> " + policyDetail(after)}, err, http.StatusInternalServerError)
-	}
-	if err != nil {
-		return nil, defaultStatus(err, http.StatusInternalServerError)
-	}
-	status := "saved"
-	if !changed {
-		status = "unchanged"
-	}
-	return map[string]any{"status": status, "warnings": warnings}, nil
-}
-
 // ── runtime (Engine API) ─────────────────────────────────
 
 func (s *Server) handleTemplateStatus(w http.ResponseWriter, r *http.Request) {
@@ -998,7 +930,3 @@ func sourceURLDetail(raw string) string {
 	clean := url.URL{Scheme: u.Scheme, Host: u.Host, Path: u.Path}
 	return clipMessage(clean.String(), 300)
 }
-
-// policyDetail is an auth policy as an audit detail ("f1,f2 (op)"), as
-// the instance policy's settings.change shows it.
-func policyDetail(p policy.AuthPolicy) string { return hub.ShowPolicy(p) }

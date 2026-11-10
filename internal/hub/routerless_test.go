@@ -70,9 +70,9 @@ func TestRouterlessEnableNoPolicyHosts(t *testing.T) {
 		t.Fatalf("Unmarshal policy: %v", err)
 	}
 
-	// Check that no policy, group or public host is published for smbfixture.
-	for host := range doc.Policies {
-		t.Errorf("policy published host %q for router-less instance", host)
+	// Check that no template, group or public host is published for smbfixture.
+	for host := range doc.Hosts {
+		t.Errorf("template published host %q for router-less instance", host)
 	}
 	for host := range doc.Groups {
 		t.Errorf("groups published host %q for router-less instance", host)

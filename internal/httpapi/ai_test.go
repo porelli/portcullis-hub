@@ -357,7 +357,6 @@ func TestInstanceAIAPI(t *testing.T) {
 	checkAdminOnly(t, e, []route{
 		{"GET", "/api/instances/aiapp/ai", ""},
 		{"PUT", "/api/instances/aiapp/ai", `{"companions":{"tok":{"enabled":true}}}`},
-		{"POST", "/api/settings/preview", `{"default_auth_policy":{"factors":["mtls"],"op":"any"}}`},
 	})
 	if a := e.auditActions(t, "ai."); len(a) != 0 {
 		t.Fatalf("refused requests reached the Hub: %v", a)
@@ -366,10 +365,14 @@ func TestInstanceAIAPI(t *testing.T) {
 	for _, p := range e.s.hubMux().patterns {
 		n[p]++
 	}
-	for _, p := range []string{"GET /api/instances/{id}/ai", "PUT /api/instances/{id}/ai", "POST /api/settings/preview"} {
+	for _, p := range []string{"GET /api/instances/{id}/ai", "PUT /api/instances/{id}/ai"} {
 		if n[p] != 1 {
 			t.Errorf("hub listener registers %q %d times", p, n[p])
 		}
+	}
+	// The default-policy routes are gone (sign-in Task 4).
+	if n["POST /api/settings/preview"]+n["/api/settings"] != 0 {
+		t.Error("the default-policy routes are still registered")
 	}
 	var v struct {
 		MasterOff  bool `json:"master_off"`
@@ -402,11 +405,6 @@ func TestInstanceAIAPI(t *testing.T) {
 	got := strings.Join(e.auditActions(t, "ai."), " ")
 	if !strings.Contains(got, "ai.enable:ok:root:aiapp/tok") || !strings.Contains(got, "ai.enable:refused:root:aiapp/nope") {
 		t.Errorf("audit = %s", got)
-	}
-	// The default-policy preview lists the instance (G43).
-	b := mustDo(t, e.hub, "root", "POST", "/api/settings/preview", `{"default_auth_policy":{"factors":["mtls"],"op":"any"}}`, 200)
-	if !strings.Contains(b, "aiapp: AI support for tok") {
-		t.Errorf("preview = %s", b)
 	}
 }
 

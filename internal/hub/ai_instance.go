@@ -19,7 +19,6 @@ import (
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/keycloak"
-	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
 )
@@ -116,12 +115,15 @@ func (h *Hub) aiTryLock(id string, d time.Duration) (unlock func(), ok bool) {
 	}
 }
 
-// mtlsRefusal is the switch-on refusal of an instance whose effective
-// policy reaches LoA 3 (contract §15.11).
-const mtlsRefusal = "needs a client certificate on every request; AI clients can't present one"
+// certRefusal is the switch-on refusal of an instance whose sign-in
+// template needs a client certificate on every sign-in
+// (signin.NeedsCertificate, contract §8.1 / §15.11).
+const certRefusal = "needs a client certificate on every sign-in; AI clients can't present one"
 
-// aiPolicyOffDetail is the ai.disable detail of a policy save's switch-off.
-const aiPolicyOffDetail = "policy needs mTLS"
+// aiCertOffDetail is the ai.disable detail of the Hub's switch-off for a
+// sign-in that needs a client certificate (a settings save, a sign-in
+// change, the reconcile).
+const aiCertOffDetail = "sign-in needs a client certificate"
 
 // aiProxyNetwork is the network the companion aliases live on.
 const aiProxyNetwork = "portcullis-proxy"
@@ -502,9 +504,10 @@ func (h *Hub) aiSwitch(ctx context.Context, id string, u InstanceAIUpdate, actor
 			prog.Before(aiBeforeKey+ch.c.Name, aiBeforeValue(ch.before))
 		}
 		run.ready()
-		if offDetail == aiPolicyOffDetail {
-			// The Hub's own switch-off for a policy that needs mTLS (a
-			// policy save, the LoA-3 reconcile) is never stopped: undone,
+		if offDetail == aiCertOffDetail {
+			// The Hub's own switch-off for a sign-in that needs a client
+			// certificate (a settings save, a sign-in change, the
+			// reconcile) is never stopped: undone,
 			// it would switch the companion back on where that is refused.
 			prog.CloseStop()
 		}
@@ -819,7 +822,7 @@ func defaultMode(c *templates.Companion) string {
 
 // aiRefusalLocked is why t can't get AI support switched on now ("" =
 // it can): deleting / restoring / a folder apply (pendingLocked),
-// ai.unsupported, or an effective policy at LoA 3. Caller holds mu.
+// ai.unsupported, or a certificate-only sign-in template. Caller holds mu.
 func (h *Hub) aiRefusalLocked(t *templates.Template) (int, string) {
 	if err := h.pendingLocked(t.ID); err != nil {
 		return http.StatusConflict, err.Error()
@@ -831,8 +834,8 @@ func (h *Hub) aiRefusalLocked(t *templates.Template) (int, string) {
 }
 
 // aiTemplateRefusalLocked is the refusal switching on and restoring
-// share ("" = none): ai.unsupported, or an effective policy at LoA 3.
-// Caller holds mu.
+// share ("" = none): ai.unsupported, or a sign-in template that needs a
+// client certificate on every sign-in (certOnlyLocked). Caller holds mu.
 func (h *Hub) aiTemplateRefusalLocked(t *templates.Template) string {
 	if !t.HasAIMCP() {
 		unsupported := ""
@@ -841,8 +844,8 @@ func (h *Hub) aiTemplateRefusalLocked(t *templates.Template) string {
 		}
 		return fmt.Sprintf("%s has no AI support: %s", t.ID, unsupported)
 	}
-	if policy.LoA(h.effectivePolicyLocked(t)) == 3 {
-		return fmt.Sprintf("%s's sign-in policy %s", t.ID, mtlsRefusal)
+	if h.certOnlyLocked(t) {
+		return fmt.Sprintf("%s's sign-in template %s", t.ID, certRefusal)
 	}
 	return ""
 }
@@ -1656,51 +1659,56 @@ func (h *Hub) enabledCompanionsLocked(id string) []string {
 	return out
 }
 
-// loaWithLocked is t's effective LoA were it configured with p (and,
-// signIn non-nil, that sign-in mode). Caller holds mu.
-func (h *Hub) loaWithLocked(t *templates.Template, p policy.AuthPolicy, signIn *string) int {
-	capab := h.accessLocked(t).Capability
-	if auth := &t.Manifest.Auth; signIn != nil && auth.HasNativeLogin() {
-		method := "forward-auth"
-		if *signIn == SignInNative && auth.NativeLogin.AllowWithoutGateway {
-			method = auth.Method
-		}
-		capab = policy.CapabilityFor(method)
-	}
-	return policy.LoA(policy.Resolve(policy.Normalize(p), capab).Policy)
-}
-
 // aiOffForSaveLocked: the companions a settings save u switches off
-// first (its policy reaches LoA 3). Caller holds mu.
+// first (its template pick or sign-in mode makes t certificate-only).
+// Caller holds mu.
 func (h *Hub) aiOffForSaveLocked(t *templates.Template, u SettingsUpdate) []string {
-	if u.Policy == nil && !u.Inherit && u.SignIn == nil {
+	if u.SignInTemplate == nil && u.SignIn == nil {
 		return nil
 	}
 	on := h.enabledCompanionsLocked(t.ID)
 	if len(on) == 0 {
 		return nil
 	}
-	p := h.accessLocked(t).Configured
-	switch {
-	case u.Inherit:
-		p = h.st.Default()
-	case u.Policy != nil:
-		p = *u.Policy
+	pick, mode := h.st.Instances[t.ID].SignInTemplate, h.st.SignInMode[t.ID]
+	if u.SignInTemplate != nil {
+		pick = *u.SignInTemplate
 	}
-	if h.loaWithLocked(t, p, u.SignIn) != 3 {
+	if u.SignIn != nil {
+		mode = ""
+		if *u.SignIn == SignInNative {
+			mode = state.SignInNative
+		}
+	}
+	if !h.accessWith(t, h.st.SignIn, pick, mode).certOnly() {
 		return nil
 	}
 	return on
 }
 
+// signInAIOffLocked: instance id → its switched-on companions that sign-in
+// section next would make certificate-only (a Settings → Sign-in change).
+// Caller holds mu.
+func (h *Hub) signInAIOffLocked(next state.SignIn) map[string][]string {
+	out := map[string][]string{}
+	for i := range h.instances {
+		t := &h.instances[i]
+		on := h.enabledCompanionsLocked(t.ID)
+		if len(on) > 0 && h.accessWith(t, next, h.st.Instances[t.ID].SignInTemplate, h.st.SignInMode[t.ID]).certOnly() {
+			out[t.ID] = on
+		}
+	}
+	return out
+}
+
 // aiOffWarning is the preview / save warning for companions switched off
-// by a policy needing mTLS.
+// by a sign-in that needs a client certificate.
 func aiOffWarning(id string, companions []string) string {
-	return fmt.Sprintf("%s: AI support for %s is switched off first: the policy %s", id, strings.Join(companions, ", "), mtlsRefusal)
+	return fmt.Sprintf("%s: AI support for %s is switched off first: the sign-in template %s", id, strings.Join(companions, ", "), certRefusal)
 }
 
 // switchAIOff switches companions of id off (audited ai.disable with
-// detail). Used by policy saves before they commit.
+// detail). Used by sign-in saves before they commit.
 func (h *Hub) switchAIOff(ctx context.Context, id string, companions []string, actor directory.Actor, detail string) error {
 	u := InstanceAIUpdate{Companions: map[string]CompanionUpdate{}}
 	off := false
@@ -1709,62 +1717,4 @@ func (h *Hub) switchAIOff(ctx context.Context, id string, companions []string, a
 	}
 	_, err := h.updateInstanceAI(ctx, id, u, actor, detail)
 	return err
-}
-
-// defaultPolicyAIOffLocked: instance id → its switched-on companions that
-// a new Hub default p would put at LoA 3 (inheriting instances only).
-// Caller holds mu.
-func (h *Hub) defaultPolicyAIOffLocked(p policy.AuthPolicy) map[string][]string {
-	out := map[string][]string{}
-	for i := range h.instances {
-		t := &h.instances[i]
-		if _, own := h.st.AuthPolicies[t.ID]; own {
-			continue
-		}
-		on := h.enabledCompanionsLocked(t.ID)
-		if len(on) > 0 && h.loaWithLocked(t, p, nil) == 3 {
-			out[t.ID] = on
-		}
-	}
-	return out
-}
-
-// DefaultPolicyAIWarnings lists what saving p as the Hub default would
-// switch off first (the preview, G43).
-func (h *Hub) DefaultPolicyAIWarnings(p policy.AuthPolicy) []string {
-	h.mu.RLock()
-	off := h.defaultPolicyAIOffLocked(p)
-	h.mu.RUnlock()
-	var out []string
-	for _, id := range slices.Sorted(maps.Keys(off)) {
-		out = append(out, aiOffWarning(id, off[id]))
-	}
-	return out
-}
-
-// SetDefaultPolicyAs is SetDefaultPolicy for an actor: every inheriting
-// instance the new default puts at LoA 3 gets AI support switched off
-// first (audited ai.disable "policy needs mTLS"); a switch-off that fails
-// refuses the save (nothing saved). Returns the warnings.
-func (h *Hub) SetDefaultPolicyAs(p policy.AuthPolicy, actor directory.Actor) (bool, []string, error) {
-	if msg := policy.CapabilityFor("forward-auth").Check(p); msg != "" {
-		return false, nil, statusErr(400, "default policy: %s", msg)
-	}
-	h.mu.RLock()
-	off := h.defaultPolicyAIOffLocked(policy.Normalize(p))
-	h.mu.RUnlock()
-	warnings := []string{}
-	for _, id := range slices.Sorted(maps.Keys(off)) {
-		if err := h.switchAIOff(context.Background(), id, off[id], actor, aiPolicyOffDetail); err != nil {
-			var oe *OpError
-			if !errors.As(err, &oe) {
-				return false, warnings, fmt.Errorf("the default policy was not saved: switching AI support off on %s first failed: %w", id, err)
-			}
-			// Off in state and in the gate already; the rest is recorded.
-			warnings = append(warnings, fmt.Sprintf("%s: switching AI support off: %s", id, err.Error()))
-		}
-		warnings = append(warnings, aiOffWarning(id, off[id]))
-	}
-	changed, err := h.SetDefaultPolicy(p)
-	return changed, warnings, err
 }

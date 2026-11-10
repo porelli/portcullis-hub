@@ -315,10 +315,9 @@ func TestLiveClientAccess(t *testing.T) {
 //     same plus at_hash and nonce, minus scope); aud = the requested
 //     resources' URLs only; no email / name / groups / roles /
 //     attribute claims. Access tokens live 300 s (realm default);
-//   - acr: a password sign-in with default.acr.values=hwk on Keycloak's
-//     built-in browser flow gets acr "pwd": the default ACR alone does
-//     not force a passkey — core's LoA-conditional browser flow does the
-//     step-up, and the gate's min_loa check refuses a lower acr;
+//   - amr: a password sign-in on Keycloak's built-in browser flow gets
+//     acr / amr "pwd" (the client has no default ACR, contract §8.1: the
+//     gate checks the resource's sign-in rule);
 //   - offline: the offline refresh token (typ Offline) lives exactly the
 //     client's idle attribute (7 days = 168 h); refreshing twice with the
 //     same refresh token works (no rotation: realm revokeRefreshToken
@@ -331,9 +330,9 @@ func TestLiveClientAccess(t *testing.T) {
 //   - Keycloak 26.8.1 lists a consent's grantedClientScopes as names; a
 //     deleted mcp:* scope disappears from the consents that named it.
 //
-// The hwk acr/amr after a passkey sign-in needs a WebAuthn authenticator
-// and is skipped here (T32's manual checklist); default.acr.values=hwk
-// is asserted on the client.
+// The hwk amr after a passkey sign-in needs a WebAuthn authenticator and
+// is skipped here (T32's manual checklist); the client is asserted to
+// carry no default.acr.values.
 func TestLiveAIObjects(t *testing.T) {
 	ctx := context.Background()
 	e, c := liveSetup(t)
@@ -401,7 +400,7 @@ func TestLiveAIObjects(t *testing.T) {
 	at, id := jwtClaims(t, tok["access_token"]), jwtClaims(t, tok["id_token"])
 	t.Logf("access token claims: %v", keys(at))
 	t.Logf("ID token claims: %v", keys(id))
-	t.Logf("acr after a password sign-in with default ACR hwk: %v (amr %v)", at["acr"], at["amr"])
+	t.Logf("acr after a password sign-in: %v (amr %v)", at["acr"], at["amr"])
 	if at["preferred_username"] != "alice" || id["preferred_username"] != "alice" {
 		t.Errorf("preferred_username access %v id %v", at["preferred_username"], id["preferred_username"])
 	}
@@ -523,7 +522,7 @@ func TestLiveAIObjects(t *testing.T) {
 	}
 
 	t.Run("passkey sign-in gives acr/amr hwk", func(t *testing.T) {
-		t.Skip("needs a WebAuthn authenticator (no headless virtual authenticator here): T32 manual checklist; default.acr.values=hwk is asserted on the client")
+		t.Skip("needs a WebAuthn authenticator (no headless virtual authenticator here): T32 manual checklist; the client is asserted to carry no default.acr.values")
 	})
 }
 
@@ -568,12 +567,15 @@ func (e *liveEnv) checkLiveAIClient(t *testing.T, clientID string, optional []st
 		t.Errorf("%s: flags public %v consent %v standard %v direct %v implicit %v sa %v fullScope %v", clientID, *cl.PublicClient, *cl.ConsentRequired,
 			*cl.StandardFlowEnabled, *cl.DirectAccessGrantsEnabled, *cl.ImplicitFlowEnabled, *cl.ServiceAccountsEnabled, *cl.FullScopeAllowed)
 	}
-	for k, want := range map[string]string{"pkce.code.challenge.method": "S256", "default.acr.values": "hwk", "client.offline.session.idle.timeout": "604800",
+	for k, want := range map[string]string{"pkce.code.challenge.method": "S256", "client.offline.session.idle.timeout": "604800",
 		"client.offline.session.max.lifespan": "2592000", "oauth2.device.authorization.grant.enabled": "false", "oidc.ciba.grant.enabled": "false",
 		"standard.token.exchange.enabled": "false", keycloak.OwnerAttr: keycloak.AIOwner} {
 		if cl.Attributes[k] != want {
 			t.Errorf("%s: %s = %q, want %q", clientID, k, cl.Attributes[k], want)
 		}
+	}
+	if acr, ok := cl.Attributes["default.acr.values"]; ok {
+		t.Errorf("%s: default.acr.values = %q, want none", clientID, acr)
 	}
 	if !slices.Equal(sorted(cl.RedirectURIs), sorted(keycloak.AIRedirectURIs(clientID))) || len(cl.WebOrigins) != 0 {
 		t.Errorf("%s: redirects %v origins %v", clientID, cl.RedirectURIs, cl.WebOrigins)

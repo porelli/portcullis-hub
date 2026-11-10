@@ -139,7 +139,7 @@ func TestRegisterClient(t *testing.T) {
 	defer srv.Close()
 	c := New(srv.URL, "admin", "pw")
 	ctx := context.Background()
-	spec := ClientSpec{ClientID: "app", Secret: "s3cret", RedirectURIs: []string{"https://app.example.org/cb"}, TemplateID: "app", ACR: "hwk", AllowedHosts: []string{"app.example.org"}}
+	spec := ClientSpec{ClientID: "app", Secret: "s3cret", RedirectURIs: []string{"https://app.example.org/cb"}, TemplateID: "app", AllowedHosts: []string{"app.example.org"}}
 
 	if created, err := c.RegisterClient(ctx, spec); err != nil || fk.posts != 1 || !created {
 		t.Fatalf("create: %v %v (posts %d)", created, err, fk.posts)
@@ -158,36 +158,31 @@ func TestRegisterClient(t *testing.T) {
 	if _, err := c.RegisterClient(ctx, spec); !errors.As(err, &ce) || ce.Owner != "other" || len(fk.puts) != 0 {
 		t.Errorf("foreign client: err %v, puts %v", err, fk.puts)
 	}
-	if err := c.UpdateClientACR(ctx, spec); !errors.As(err, &ce) || len(fk.puts) != 0 {
-		t.Errorf("UpdateClientACR on foreign client: %v", err)
-	}
 	fk.existing = map[string]interface{}{"id": "u0", "clientId": "app", "redirectUris": []interface{}{"https://evil.example.com/cb"}}
 	if _, err := c.RegisterClient(ctx, spec); !errors.As(err, &ce) || ce.Owner != "" || !strings.Contains(err.Error(), "not tagged") || len(fk.puts) != 0 {
 		t.Errorf("untagged foreign client: %v", err)
 	}
 
-	// Exists and owned: secret, URIs, acr reconciled; tag kept; missing
+	// Exists and owned: secret, URIs reconciled, a stale default ACR
+	// dropped (the Hub pushes none, contract §8.1); tag kept; missing
 	// default scopes attached through the sub-resource (a client PUT
 	// ignores defaultClientScopes).
 	fk.scopes = map[string]string{"acr": "s-acr", "groups": "s-groups", "profile": "s-profile"}
-	fk.existing = map[string]interface{}{"id": "u1", "clientId": "app", "attributes": map[string]interface{}{OwnerAttr: "app"}, "defaultClientScopes": []interface{}{"openid", "acr"}}
+	fk.existing = map[string]interface{}{"id": "u1", "clientId": "app", "attributes": map[string]interface{}{OwnerAttr: "app", "default.acr.values": "mtls"}, "defaultClientScopes": []interface{}{"openid", "acr"}}
 	if created, err := c.RegisterClient(ctx, spec); err != nil || len(fk.puts) != 1 || created {
 		t.Fatalf("reconcile: %v %v %v", created, err, fk.puts)
 	}
 	p := fk.puts[0]
 	attrs := p["attributes"].(map[string]interface{})
-	if p["secret"] != "s3cret" || attrs["default.acr.values"] != "hwk" || attrs[OwnerAttr] != "app" {
+	if _, acr := attrs["default.acr.values"]; p["secret"] != "s3cret" || acr || attrs[OwnerAttr] != "app" {
 		t.Errorf("put = %v", p)
 	}
 	if fmt.Sprint(fk.attached) != "[u1/s-groups]" {
 		t.Errorf("attached = %v, want only the missing groups scope", fk.attached)
 	}
-	fk.attached = nil
-	if err := c.UpdateClientACR(ctx, spec); err != nil || fmt.Sprint(fk.attached) != "[u1/s-groups]" {
-		t.Errorf("UpdateClientACR: %v, attached %v", err, fk.attached)
-	}
 
 	// Fresh create with the scope present in the realm: nothing to attach.
+	// TestNoACRPushed (hub): a new client carries no default.acr.values.
 	fk.existing, fk.attached = nil, nil
 	if _, err := c.RegisterClient(ctx, spec); err != nil || len(fk.attached) != 0 {
 		t.Errorf("create with groups scope: %v, attached %v", err, fk.attached)
@@ -211,7 +206,7 @@ func TestRegisterClientEmailUnverified(t *testing.T) {
 	defer srv.Close()
 	c := New(srv.URL, "admin", "pw")
 	ctx := context.Background()
-	spec := ClientSpec{ClientID: "vw", Secret: "s", RedirectURIs: []string{"https://vw.example.org/cb"}, TemplateID: "vw", ACR: "pwd",
+	spec := ClientSpec{ClientID: "vw", Secret: "s", RedirectURIs: []string{"https://vw.example.org/cb"}, TemplateID: "vw",
 		AllowedHosts: []string{"vw.example.org"}, OmitEmailVerified: true}
 	all := map[string]string{"acr": "s-acr", "groups": "s-groups", "email": "s-email", EmailUnverifiedScope: "s-eu"}
 
@@ -236,12 +231,6 @@ func TestRegisterClientEmailUnverified(t *testing.T) {
 	}
 	if fmt.Sprint(fk.attached) != "[u1/s-eu]" || len(fk.detached) != 2 || !strings.Contains(fmt.Sprint(fk.detached), "u1/default/s-email") || !strings.Contains(fmt.Sprint(fk.detached), "u1/optional/s-email") {
 		t.Errorf("reconcile: attached %v, detached %v", fk.attached, fk.detached)
-	}
-
-	// The ACR push reconciles scopes too.
-	fk.attached, fk.detached = nil, nil
-	if err := c.UpdateClientACR(ctx, spec); err != nil || fmt.Sprint(fk.attached) != "[u1/s-eu]" || len(fk.detached) != 2 {
-		t.Errorf("UpdateClientACR: %v, attached %v, detached %v", err, fk.attached, fk.detached)
 	}
 
 	// Already right: no scope calls.
@@ -275,8 +264,5 @@ func TestRegisterClientEmailUnverified(t *testing.T) {
 	var ce *ConflictError
 	if _, err := c.RegisterClient(ctx, spec); !errors.As(err, &ce) || len(fk.attached)+len(fk.detached)+len(fk.puts) != 0 {
 		t.Errorf("foreign client: %v, attached %v, detached %v", err, fk.attached, fk.detached)
-	}
-	if err := c.UpdateClientACR(ctx, spec); !errors.As(err, &ce) || len(fk.attached)+len(fk.detached) != 0 {
-		t.Errorf("UpdateClientACR foreign: %v", err)
 	}
 }

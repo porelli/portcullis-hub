@@ -22,6 +22,7 @@ import (
 	"github.com/portcullis/hub/internal/lldap"
 	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/settings"
+	"github.com/portcullis/hub/internal/signin"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
 )
@@ -32,19 +33,18 @@ type AppSettingsView struct {
 	// PortDefinitions are the template's declared ports (the stored
 	// values are SettingsPanel.Ports).
 	PortDefinitions []templates.Port `json:"port_definitions"`
-	// EffectivePolicy is what applies: the configured policy (override or
-	// global default) intersected with what the app can enforce.
-	EffectivePolicy policy.AuthPolicy `json:"effective_policy"`
-	DefaultPolicy   policy.AuthPolicy `json:"default_policy"`
-	SafetyScore     float64           `json:"safety_score"`
-	// AuthPolicy is the app's override (nil: it inherits the default).
-	AuthPolicy *policy.AuthPolicy `json:"auth_policy,omitempty"`
+	// SignInTemplate is the instance's own template pick ("" = the
+	// default); Template the one that applies ("" for an app that takes
+	// none: Capability.Templates false), with its sentence and score.
+	SignInTemplate string       `json:"sign_in_template"`
+	Template       string       `json:"template"`
+	Sentence       string       `json:"sentence,omitempty"`
+	Score          signin.Score `json:"score"`
 	// Method is the auth method as deployed (a custom app behind
 	// Portcullis sign-in is forward-auth); Capability what it can enforce.
 	Method      string            `json:"method"`
 	Capability  policy.Capability `json:"capability"`
-	Resolution  policy.Resolution `json:"resolution"`
-	PolicyNotes []string          `json:"policy_notes"`
+	SignInNotes []string          `json:"sign_in_notes"`
 	Tier        string            `json:"tier"`
 	// SignIn is set for apps with their own login (auth.native_login).
 	SignIn *SignInModeView `json:"sign_in,omitempty"`
@@ -73,25 +73,19 @@ func (h *Hub) AppSettings(id string) (*AppSettingsView, error) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	acc := h.accessLocked(t)
-	eff := acc.Resolved.Policy
-	legacy := h.st.LegacyPassword[id]
-	if acc.Inherits {
-		legacy = h.st.LegacyPassword[""]
-	}
 	pub := h.publicLocked(t, t.Public)
+	on := h.st.SignIn.MethodsOn()
 	v := &AppSettingsView{
 		PortDefinitions: t.Manifest.Ports,
-		EffectivePolicy: eff,
-		DefaultPolicy:   h.st.Default(),
-		SafetyScore:     policy.SafetyScore(eff),
+		SignInTemplate:  h.st.Instances[id].SignInTemplate,
+		Template:        acc.Template,
 		Method:          acc.Method,
 		Capability:      acc.Capability,
-		Resolution:      acc.Resolved,
-		PolicyNotes:     policyNotes(acc, legacy),
-		Tier:            policy.HostTier(eff, pub.Active()),
+		SignInNotes:     h.signInNotes(acc),
+		Tier:            acc.tier(on, pub.Active()),
 	}
-	if p, ok := h.st.AuthPolicies[id]; ok {
-		v.AuthPolicy = &p
+	if tmpl, ok := h.st.SignIn.Templates[acc.Template]; ok && acc.Capability.Templates {
+		v.Sentence, v.Score, _ = describeRule(tmpl.Rule, on)
 	}
 	if acc.SignIn != "" {
 		nl := t.Manifest.Auth.NativeLogin
@@ -100,7 +94,7 @@ func (h *Hub) AppSettings(id string) (*AppSettingsView, error) {
 			v.SignIn.AccessGroup = t.Manifest.Auth.AccessGroup
 		}
 	}
-	v.PublicAccess = h.publicViewLocked(t, eff)
+	v.PublicAccess = h.publicViewLocked(t, acc)
 	v.Secrets = h.secretViewsLocked(t)
 	return v, nil
 }
@@ -634,9 +628,12 @@ func configCheck(t *templates.Template, kinds *settings.Registry, folders Folder
 			out = append(out, statusErr(400, "sign-in must be %q or %q", SignInGateway, SignInNative))
 		}
 	}
-	if !u.Inherit && u.Policy != nil {
-		if msg := configCapability(t, native).Check(*u.Policy); msg != "" {
-			out = append(out, statusErr(400, "access policy: %s", msg))
+	if u.SignInTemplate != nil && *u.SignInTemplate != "" {
+		switch {
+		case !configCapability(t, native).Templates:
+			out = append(out, statusErr(400, "sign-in template: this app takes none (auth method %s: Portcullis doesn't sign people in to it, or its client certificate is its sign-in)", configCapability(t, native).Enforcement))
+		case !state.SignInTemplateIDRe.MatchString(*u.SignInTemplate):
+			out = append(out, statusErr(400, "sign-in template %q: not a template id", clip(*u.SignInTemplate, 64)))
 		}
 	}
 	if _, err := validatePublic(t, u); err != nil {
@@ -648,8 +645,8 @@ func configCheck(t *templates.Template, kinds *settings.Registry, folders Folder
 // configProblems lists every reason (400 StatusErrors, in a fixed order)
 // why the per-instance configuration in u doesn't fit template t:
 // settings (ValidateSettings, with shared folders through folders), the
-// sign-in mode, the policy override against what the app enforces in its
-// resulting sign-in mode (native), and the public exceptions
+// sign-in mode, the sign-in template pick against what the app enforces
+// in its resulting sign-in mode (native), and the public exceptions
 // (validatePublic). Shared by SaveSettings and restore, so a restored
 // archive meets the same rules as a save.
 func configProblems(t *templates.Template, kinds *settings.Registry, folders FolderSource, u SettingsUpdate, native bool) []error {
@@ -658,7 +655,7 @@ func configProblems(t *templates.Template, kinds *settings.Registry, folders Fol
 }
 
 // SettingsUpdate is a settings save (PUT): the settings part plus the
-// policy, public exceptions and sign-in mode.
+// sign-in template, public exceptions and sign-in mode.
 type SettingsUpdate struct {
 	// Ports: nil = unchanged; otherwise the instance's whole port
 	// configuration (port keys and <KEY>_BIND; an absent key = the
@@ -678,8 +675,9 @@ type SettingsUpdate struct {
 	// Secrets: secret options (Task 7).
 	Secrets map[string]SecretChange
 
-	Policy  *policy.AuthPolicy // nil = unchanged; normalised by SaveSettings
-	Inherit bool               // drop the per-app policy override
+	// SignInTemplate is the instance's sign-in template pick: nil =
+	// unchanged, "" = the default, else an enabled template's id.
+	SignInTemplate *string
 	// Public exceptions (auth.public_access); nil = unchanged.
 	PublicAccess        *bool     // the admin's on/off choice
 	PublicAccessDefault bool      // forget the choice: template default applies
@@ -846,6 +844,9 @@ func (h *Hub) SaveSettings(id string, u SettingsUpdate, actor directory.Actor) (
 	}
 	h.mu.RLock()
 	pendErr := h.pendingLocked(id)
+	if pendErr == nil {
+		pendErr = pickableLocked(h.st.SignIn, u.SignInTemplate)
+	}
 	native := h.st.SignInMode[id] == state.SignInNative
 	// Resolved outside mu: copies (the folders' paths and definitions).
 	folders := h.folderSourceLocked()
@@ -880,14 +881,15 @@ func (h *Hub) SaveSettings(id string, u SettingsUpdate, actor directory.Actor) (
 	if err != nil {
 		return nil, err
 	}
-	// A policy reaching LoA 3 switches AI support off first (G43,
-	// contract §15.11; audited ai.disable "policy needs mTLS").
+	// A sign-in template needing a client certificate on every sign-in
+	// switches AI support off first (G43, contract §8.1 / §15.11; audited
+	// ai.disable "sign-in needs a client certificate").
 	aiWarnings := []string{}
 	h.mu.RLock()
 	aiOff := h.aiOffForSaveLocked(t, u)
 	h.mu.RUnlock()
 	if len(aiOff) > 0 {
-		if err := h.switchAIOff(context.Background(), id, aiOff, actor, aiPolicyOffDetail); err != nil {
+		if err := h.switchAIOff(context.Background(), id, aiOff, actor, aiCertOffDetail); err != nil {
 			var oe *OpError
 			if !errors.As(err, &oe) {
 				return nil, err
@@ -991,10 +993,15 @@ func (h *Hub) saveSettings(t *templates.Template, u SettingsUpdate, parsed *pars
 		}
 	}
 	// AI support switched on since SaveSettings switched it off (G43):
-	// never commit a policy reaching LoA 3 with a companion on.
+	// never commit a certificate-only template with a companion on.
 	if on := h.aiOffForSaveLocked(t, u); len(on) > 0 {
 		h.mu.Unlock()
-		return res, false, statusErr(409, "%s: AI support for %s was switched on meanwhile and the policy %s: save again", id, strings.Join(on, ", "), mtlsRefusal)
+		return res, false, statusErr(409, "%s: AI support for %s was switched on meanwhile and the sign-in template %s: save again", id, strings.Join(on, ", "), certRefusal)
+	}
+	// The template disabled or deleted since SaveSettings checked.
+	if err := pickableLocked(h.st.SignIn, u.SignInTemplate); err != nil {
+		h.mu.Unlock()
+		return res, false, err
 	}
 	if err := folderSaveCheck(t, h.st.Settings[id], h.st.Folders, u); err != nil {
 		h.mu.Unlock()
@@ -1060,18 +1067,19 @@ func (h *Hub) saveSettings(t *templates.Template, u SettingsUpdate, parsed *pars
 		h.mu.Unlock()
 		return res, false, err
 	}
-	policyChanged := false
-	if u.Inherit {
-		if _, had := h.st.AuthPolicies[id]; had {
-			delete(h.st.AuthPolicies, id)
-			policyChanged = true
+	pickChanged := false
+	if u.SignInTemplate != nil && h.st.Instances[id].SignInTemplate != *u.SignInTemplate {
+		e, had := h.st.Instances[id]
+		if !had {
+			e = state.Instance{ID: id, Template: t.TemplateID}
 		}
-	} else if u.Policy != nil {
-		h.st.AuthPolicies[id] = policy.Normalize(*u.Policy)
-		policyChanged = true
-	}
-	if policyChanged {
-		delete(h.st.LegacyPassword, id)
+		e.SignInTemplate = *u.SignInTemplate
+		if entryHoldsNothing(e) {
+			delete(h.st.Instances, id)
+		} else {
+			h.st.Instances[id] = e
+		}
+		pickChanged = true
 	}
 	accChanges := accessChanges(accBefore, h.accessAuditLocked(id))
 	if signInChanged {
@@ -1083,8 +1091,8 @@ func (h *Hub) saveSettings(t *templates.Template, u SettingsUpdate, parsed *pars
 	}
 	h.refreshPublishedLocked()
 	h.saveLocked()
-	effective := h.effectivePolicyLocked(t)
-	// The override reads state (policy → TLS tier): render under the lock.
+	// The override reads state (sign-in template → TLS tier): render under
+	// the lock; a moved tier is a restart.
 	before, _ := os.ReadFile(h.overridePath(id))
 	overrideErr := h.generateOverrideLocked(t, next)
 	after, _ := os.ReadFile(h.overridePath(id))
@@ -1121,21 +1129,23 @@ func (h *Hub) saveSettings(t *templates.Template, u SettingsUpdate, parsed *pars
 		res.writeErrs = append(res.writeErrs, statusErr(500, "settings saved but the env file write failed: %v", envErr))
 	}
 
-	if policyChanged || publicChanged || signInChanged {
+	if pickChanged || publicChanged || signInChanged {
 		h.writePolicyLogged()
 	}
-	if policyChanged && h.idp != nil {
-		acr := policy.ACR(effective)
-		for _, c := range t.Manifest.Clients {
-			if c.AIClient {
-				continue // EnsureAIClient's: its ACR is always hwk (G10)
-			}
-			if err := h.idp.UpdateClientACR(context.Background(), h.clientSpec(t, c, acr)); err != nil {
-				log.Printf("auth-policy: keycloak client %s update failed: %v", c.ClientID, err)
-			}
-		}
-	}
 	return res, enabled, nil
+}
+
+// pickableLocked refuses a template pick that can't be saved: nil or ""
+// (the default) always can; else 400 not a template id, 404 unknown, 409
+// disabled (pickable).
+func pickableLocked(si state.SignIn, pick *string) error {
+	if pick == nil || *pick == "" {
+		return nil
+	}
+	if !state.SignInTemplateIDRe.MatchString(*pick) {
+		return statusErr(400, "sign-in template %q: not a template id", clip(*pick, 64))
+	}
+	return pickable(si, *pick)
 }
 
 // nextSettingsLocked applies parsed to cur: the new settings, the effect
@@ -1369,8 +1379,8 @@ func (h *Hub) auditSettings(id string, actor directory.Actor, u SettingsUpdate, 
 	}
 	if err != nil {
 		var keys []string
-		if u.Policy != nil || u.Inherit {
-			keys = append(keys, "auth_policy")
+		if u.SignInTemplate != nil {
+			keys = append(keys, "sign_in_template")
 		}
 		if u.PublicAccess != nil || u.PublicAccessDefault {
 			keys = append(keys, "public_access")
@@ -1406,20 +1416,17 @@ func (h *Hub) auditSettings(id string, actor directory.Actor, u SettingsUpdate, 
 	}
 }
 
-// accessAudit is an instance's policy and public exceptions as the audit
-// shows them (G37): never a token, only how many.
+// accessAudit is an instance's sign-in template pick and public
+// exceptions as the audit shows them (G37): never a token, only how many.
 type accessAudit struct {
-	policy, access, mode string
-	tokens               []string
+	template, access, mode string
+	tokens                 []string
 }
 
-// accessAuditLocked reads id's stored policy and public choices. Caller
-// holds mu.
+// accessAuditLocked reads id's stored template pick ("default" when it
+// inherits) and public choices. Caller holds mu.
 func (h *Hub) accessAuditLocked(id string) accessAudit {
-	a := accessAudit{policy: "inherited", access: "default", mode: "default"}
-	if p, ok := h.st.AuthPolicies[id]; ok {
-		a.policy = showPolicy(p)
-	}
+	a := accessAudit{template: coreName(h.st.Instances[id].SignInTemplate), access: "default", mode: "default"}
 	if on, ok := h.st.PublicAccess[id]; ok {
 		a.access = "off"
 		if on {
@@ -1433,26 +1440,12 @@ func (h *Hub) accessAuditLocked(id string) accessAudit {
 	return a
 }
 
-// ShowPolicy is an auth policy as the audit shows it ("f1,f2 (op)").
-func ShowPolicy(p policy.AuthPolicy) string { return showPolicy(p) }
-
-func showPolicy(p policy.AuthPolicy) string {
-	d := strings.Join(p.Factors, ",")
-	if d == "" {
-		d = "none"
-	}
-	if p.Op != "" {
-		d += " (" + p.Op + ")"
-	}
-	return clip(d, 200)
-}
-
-// accessChanges: the settings.change entries (scope policy / public)
-// between two accessAudits.
+// accessChanges: the settings.change entries (scope sign_in_template /
+// public) between two accessAudits.
 func accessChanges(a, b accessAudit) []settingChange {
 	var out []settingChange
-	if a.policy != b.policy {
-		out = append(out, settingChange{key: "auth_policy", scope: "policy", before: a.policy, after: b.policy})
+	if a.template != b.template {
+		out = append(out, settingChange{key: "sign_in_template", scope: "sign_in_template", before: a.template, after: b.template})
 	}
 	if a.access != b.access {
 		out = append(out, settingChange{key: "public_access", scope: "public", before: a.access, after: b.access})
@@ -1515,102 +1508,6 @@ func (h *Hub) signInCallbackChange(t *templates.Template, mode *string) (add, re
 		delete(h.st.SignInMode, t.ID)
 	}
 	return minus(after, before), minus(before, after)
-}
-
-// DefaultPolicy returns the global default policy.
-func (h *Hub) DefaultPolicy() policy.AuthPolicy {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	return h.st.Default()
-}
-
-// DefaultPolicyLegacy reports whether the stored global default named the
-// removed "password" factor and was normalised on load.
-func (h *Hub) DefaultPolicyLegacy() bool {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	return h.st.LegacyPassword[""]
-}
-
-// SetDefaultPolicy validates and stores a new global default and, if it
-// changed, propagates it in the background. Returns whether it changed.
-// The default may name any factor (each app enforces what it can of it),
-// but not the removed "password" or unknown ones.
-func (h *Hub) SetDefaultPolicy(p policy.AuthPolicy) (bool, error) {
-	if msg := policy.CapabilityFor("forward-auth").Check(p); msg != "" {
-		return false, statusErr(400, "default policy: %s", msg)
-	}
-	norm := policy.Normalize(p)
-	h.mu.Lock()
-	// Inheriting instances must have AI support off first (G43:
-	// SetDefaultPolicyAs switches it off; a racing switch-on is refused).
-	if on := h.defaultPolicyAIOffLocked(norm); len(on) > 0 {
-		h.mu.Unlock()
-		ids := slices.Sorted(maps.Keys(on))
-		return false, statusErr(409, "AI support is on for %s, whose policy the new default %s: switch it off first (or save the default again)", strings.Join(ids, ", "), mtlsRefusal)
-	}
-	changed := !policy.Same(h.st.Default(), norm)
-	h.st.SetDefault(norm)
-	delete(h.st.LegacyPassword, "")
-	h.saveLocked()
-	h.mu.Unlock()
-	if !changed {
-		return false, nil
-	}
-	h.writePolicyLogged()
-	h.goBackground(h.applyDefaultPolicy)
-	return true, nil
-}
-
-// applyDefaultPolicy propagates a changed default to every enabled app that
-// inherits it: regenerate overrides (TLS tier), push the Keycloak acr, and
-// recreate containers whose labels changed.
-func (h *Hub) applyDefaultPolicy() {
-	h.defaultPolicyMu.Lock()
-	defer h.defaultPolicyMu.Unlock()
-	type job struct {
-		t       templates.Template
-		restart bool
-		acr     string
-	}
-	var jobs []job
-	h.mu.Lock()
-	for _, id := range h.st.Enabled {
-		if _, override := h.st.AuthPolicies[id]; override {
-			continue
-		}
-		t := h.findLocked(id)
-		if t == nil {
-			continue
-		}
-		before, _ := os.ReadFile(h.overridePath(id))
-		if err := h.generateOverrideLocked(t, h.st.Settings[id]); err != nil {
-			log.Printf("default-policy: override for %s failed: %v", id, err)
-			continue
-		}
-		after, _ := os.ReadFile(h.overridePath(id))
-		changed := !bytes.Equal(before, after)
-		if changed || len(t.Manifest.Clients) > 0 {
-			jobs = append(jobs, job{t: *t, restart: changed, acr: policy.ACR(h.effectivePolicyLocked(t))})
-		}
-	}
-	h.mu.Unlock()
-
-	for _, j := range jobs {
-		if h.idp != nil {
-			for _, c := range j.t.Manifest.Clients {
-				if c.AIClient {
-					continue // EnsureAIClient's: its ACR is always hwk (G10)
-				}
-				if err := h.idp.UpdateClientACR(context.Background(), h.clientSpec(&j.t, c, j.acr)); err != nil {
-					log.Printf("default-policy: keycloak client %s update failed: %v", c.ClientID, err)
-				}
-			}
-		}
-		if j.restart {
-			h.Restart(j.t)
-		}
-	}
 }
 
 // ── Expert mode (compose layers: useroverride.go) ─────────

@@ -302,7 +302,7 @@ func TestCompanionUsable(t *testing.T) {
 		{"revoke pending", &hdr, state.AICompanion{Enabled: true, Mode: "read_only", RevokePending: true}, 2, "revoke_all"},
 		{"pruned", &hdr, state.AICompanion{Enabled: true, Mode: "read_only", Pruned: true}, 2, "template update"},
 		{"mode", &hdr, state.AICompanion{Enabled: true, Mode: "read_write"}, 2, "not one of its modes"},
-		{"loa 3", &hdr, ok, 3, "LoA 3"},
+		{"certificate-only", &hdr, ok, 3, "needs a client certificate on every sign-in"},
 	}
 	for _, c := range cases {
 		if _, why := companionUsable(tm, c.c, c.sw, c.loa); !strings.Contains(why, c.want) {

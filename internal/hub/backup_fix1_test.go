@@ -463,10 +463,11 @@ func TestRecoverRefusesForeignArchive(t *testing.T) {
 	}
 }
 
-// Re-review N2 + N4: a restored policy is stored normalised (the legacy
-// flag cleared when it changes), and a never-enabled instance stays
+// Re-review N2 + N4 (sign-in Task 4): a restored sign-in template pick
+// is stored when it names an enabled template here (a disabled one is
+// refused, never the default instead), and a never-enabled instance stays
 // "created".
-func TestRestoreNormalisesPolicyKeepsCreated(t *testing.T) {
+func TestRestoreSignInTemplateKeepsCreated(t *testing.T) {
 	f := newInstanceFixture(t, nil)
 	simulateCompose(f, 0)
 	if err := f.h.CreateInstance("grafana", "grafana-b", nil); err != nil {
@@ -482,20 +483,19 @@ func TestRestoreNormalisesPolicyKeepsCreated(t *testing.T) {
 	if !strings.Contains(cfg, "state: created") {
 		t.Fatalf("instance.yaml lacks the created state:\n%s", cfg)
 	}
-	rewriteMember(t, p, "config/instance.yaml", []byte(cfg+"auth_policy:\n  factors: [password, webauthn]\n"))
-	f.h.mu.Lock()
-	f.h.st.LegacyPassword["grafana-b"] = true
-	f.h.mu.Unlock()
+	rewriteMember(t, p, "config/instance.yaml", []byte(cfg+"sign_in_template: basic\n"))
+	if _, err := f.h.RestoreInstance("grafana-b", entry.Archive, directory.Human("root")); statusOf(err) != 409 || !strings.Contains(err.Error(), "disabled") {
+		t.Fatalf("disabled template restored: %v", err)
+	}
+	rewriteMember(t, p, "config/instance.yaml", []byte(cfg+"sign_in_template: strong\n"))
 	if _, err := f.h.RestoreInstance("grafana-b", entry.Archive, directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	f.h.mu.RLock()
-	pol := f.h.st.AuthPolicies["grafana-b"]
-	legacy := f.h.st.LegacyPassword["grafana-b"]
 	e := f.h.st.Instances["grafana-b"]
 	f.h.mu.RUnlock()
-	if strings.Contains(strings.Join(pol.Factors, ","), "password") || legacy {
-		t.Errorf("policy %+v legacy %v", pol, legacy)
+	if e.SignInTemplate != "strong" {
+		t.Errorf("pick = %q", e.SignInTemplate)
 	}
 	if e.State != state.InstanceCreated {
 		t.Errorf("state after restore = %q", e.State)

@@ -16,7 +16,6 @@ import (
 	"github.com/portcullis/hub/internal/aigate"
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/keycloak"
-	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
 )
@@ -452,7 +451,7 @@ func TestAIClientSemantics(t *testing.T) {
 	secret := readEnvFile(a.h.envPath("ai-chat"))["CHAT_MCP_SECRET"]
 	if cl.PublicClient == nil || *cl.PublicClient || cl.ConsentRequired == nil || !*cl.ConsentRequired || cl.Secret != secret || secret == "" ||
 		cl.Attributes[keycloak.OwnerAttr] != "ai-chat" || cl.Attributes[keycloak.AIClientAttr] != "true" ||
-		cl.Attributes["default.acr.values"] != "hwk" || !slices.Equal(cl.RedirectURIs, []string{"https://" + a.h.Template("ai-chat").Hosts["ai-chat"] + "/api/mcp/callback"}) {
+		cl.Attributes["default.acr.values"] != "" || !slices.Equal(cl.RedirectURIs, []string{"https://" + a.h.Template("ai-chat").Hosts["ai-chat"] + "/api/mcp/callback"}) {
 		t.Errorf("ai_client = %+v", cl)
 	}
 	if got := kc.ClientScopes(cl.ID); !slices.Equal(slices.Sorted(slices.Values(got)), []string{"acr", "basic"}) {
@@ -474,17 +473,6 @@ func TestAIClientSemantics(t *testing.T) {
 	for _, r := range g.Resources {
 		if want := r.Kind != aigate.KindAdmin; slices.Contains(r.Clients, chatMCPID) != want {
 			t.Errorf("resource %s clients = %v (want ai_client listed: %v)", r.URL, r.Clients, want)
-		}
-	}
-
-	// The ACR push of a policy save skips it (UpdateClientACR refuses it).
-	acrBefore := len(a.idp.updated)
-	if _, err := a.h.SaveSettings("ai-chat", SettingsUpdate{Policy: &policy.AuthPolicy{Factors: []string{"webauthn"}, Op: "any"}}, root); err != nil {
-		t.Fatal(err)
-	}
-	for _, u := range a.idp.updated[acrBefore:] {
-		if strings.HasPrefix(u, chatMCPID) {
-			t.Errorf("UpdateClientACR on the ai_client: %s", u)
 		}
 	}
 

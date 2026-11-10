@@ -211,7 +211,7 @@ type PublicAccessView struct {
 	Published         []string               `json:"published"`
 	Method            string                 `json:"method"`
 	Subdomains        []string               `json:"subdomains"`
-	// PolicyTier is the TLS tier the policy alone gives; TierWhenActive
+	// PolicyTier is the TLS tier the sign-in template alone gives; TierWhenActive
 	// what all of the app's routers get while the public router exists.
 	PolicyTier     string `json:"policy_tier"`
 	TierWhenActive string `json:"tier_when_active"`
@@ -224,7 +224,7 @@ type PublicAccessView struct {
 }
 
 // publicViewLocked builds the settings view. Caller must hold mu.
-func (h *Hub) publicViewLocked(t *templates.Template, eff policy.AuthPolicy) *PublicAccessView {
+func (h *Hub) publicViewLocked(t *templates.Template, acc access) *PublicAccessView {
 	pa := t.Manifest.Auth.PublicAccess
 	if pa == nil {
 		return nil
@@ -235,7 +235,7 @@ func (h *Hub) publicViewLocked(t *templates.Template, eff policy.AuthPolicy) *Pu
 		DefaultMode: pa.Mode(), TokenPattern: pa.TokenPattern, CredentialCookies: pa.CredentialCookies, CredentialQuery: pa.CredentialQuery, ListedPossible: pa.HasTokenPaths(),
 		MaxTokens: templates.MaxPublicTokens, Enabled: ps.Enabled, Explicit: ps.Explicit, Mode: ps.Mode,
 		Tokens: ps.Tokens, Active: ps.Active(), Published: ps.Published, Method: t.Manifest.Auth.Method,
-		PolicyTier: policy.Tier(eff), TierWhenActive: policy.HostTier(eff, true),
+		PolicyTier: acc.tier(h.st.SignIn.MethodsOn(), false), TierWhenActive: acc.tier(h.st.SignIn.MethodsOn(), true),
 		UngatedRouters: []string{}, InvalidTokens: ps.InvalidTokens, Blocked: ps.Blocked,
 	}
 	if v.Tokens == nil {

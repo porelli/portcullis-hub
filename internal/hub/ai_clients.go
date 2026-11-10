@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/portcullis/hub/internal/keycloak"
-	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/settings"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
@@ -213,10 +212,11 @@ func (h *Hub) mergeAIClientHealth(upd map[string]bool) bool {
 }
 
 // aiOnLocked: AI support may be on in t's app: the master switch is on
-// and t's effective policy is below LoA 3 (a restore or template change
-// can land LoA 3 with a companion on). Caller holds mu.
+// and t's sign-in template has a way in without a client certificate (a
+// restore, a template or sign-in change can make it certificate-only with
+// a companion on). Caller holds mu.
 func (h *Hub) aiOnLocked(t *templates.Template) bool {
-	return h.st.AI.Enabled && policy.LoA(h.effectivePolicyLocked(t)) != 3
+	return h.st.AI.Enabled && !h.certOnlyLocked(t)
 }
 
 // masterToggleLocked is the master switch's app side, in the Settings →

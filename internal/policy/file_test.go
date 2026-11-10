@@ -7,131 +7,145 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/portcullis/hub/internal/signin"
 )
 
-func TestBuild(t *testing.T) {
+// defaultOn are the methods switched on at the start (D1).
+func defaultOn() map[signin.Method]bool {
+	return map[signin.Method]bool{signin.PasskeySynced: true, signin.PasskeyDevice: true, signin.SecurityKey: true, signin.YubiKeyCert: true}
+}
+
+func onList(on map[signin.Method]bool) []signin.Method {
+	var out []signin.Method
+	for _, m := range signin.Methods {
+		if on[m] {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// compiledBuiltins are the built-ins that compile with on, by id.
+func compiledBuiltins(t *testing.T, on map[signin.Method]bool) map[string]signin.Node {
+	t.Helper()
+	out := map[string]signin.Node{}
+	for _, b := range signin.Builtins() {
+		if c, err := signin.Compile(b.Rule, on); err == nil {
+			out[b.ID] = c
+		}
+	}
+	return out
+}
+
+func input(t *testing.T, apps []App) BuildInput {
+	on := defaultOn()
+	return BuildInput{Apps: apps, Default: "standard", Core: map[string]string{"hub": "strong", "people": "strong"},
+		Templates: compiledBuiltins(t, on), Methods: onList(on), MainDomain: "portcullis.local", ExtraDomains: []string{}}
+}
+
+func host(h string) map[string]string { return map[string]string{h: h} }
+
+func TestBuildV6(t *testing.T) {
 	domain := "portcullis.local"
-	webauthn := AuthPolicy{Factors: []string{"webauthn"}}
-	mtls := AuthPolicy{Factors: []string{"mtls"}}
 	apps := []App{
 		{ID: "gitlab", Enabled: true,
 			Hosts:       map[string]string{"git." + domain: "git." + domain, "registry." + domain: "registry." + domain},
 			GroupAccess: true, AccessGroup: "users_gitlab",
-			AdminGroup: "admin_gitlab", AdminPaths: []string{"/admin", "/-/admin"}},
-		{ID: "grafana", Enabled: true,
-			Hosts:       map[string]string{"grafana." + domain: "grafana." + domain},
-			GroupAccess: false, AccessGroup: "users_grafana"},
+			AdminGroup: "admin_gitlab", AdminPaths: []string{"/admin", "/-/admin"}, Template: "strong"},
+		// Inherits: no hosts entry.
+		{ID: "grafana", Enabled: true, Hosts: host("grafana." + domain), AccessGroup: "users_grafana"},
 		// Disabled: publishes nothing at all.
-		{ID: "jellyfin", Enabled: false,
-			Hosts:       map[string]string{"media." + domain: "media." + domain},
-			GroupAccess: true, AccessGroup: "users_jellyfin",
-			AdminGroup: "admin_jellyfin", AdminPaths: []string{"/admin"}},
+		{ID: "jellyfin", Enabled: false, Hosts: host("media." + domain), GroupAccess: true, AccessGroup: "users_jellyfin", Template: "strong"},
 		// Tries to claim core hostnames: skipped.
 		{ID: "evil", Enabled: true,
 			Hosts:       map[string]string{"auth." + domain: "auth." + domain, "hub." + domain: "hub." + domain, "evil." + domain: "evil." + domain},
-			GroupAccess: true, AccessGroup: "users_evil",
-			AdminGroup: "admin_evil", AdminPaths: []string{"/"}},
+			GroupAccess: true, AccessGroup: "users_evil", AdminGroup: "admin_evil", AdminPaths: []string{"/"}, Template: "strong"},
 		// Admin paths without admin group publish nothing.
-		{ID: "nogroup", Enabled: true,
-			Hosts:      map[string]string{"nogroup." + domain: "nogroup." + domain},
-			AdminPaths: []string{"/admin"}},
+		{ID: "nogroup", Enabled: true, Hosts: host("nogroup." + domain), AdminPaths: []string{"/admin"}},
 	}
-	perApp := map[string]AuthPolicy{
-		"gitlab":   mtls,
-		"jellyfin": webauthn,
-		"evil":     {},
-		"hub":      {},
+	in := input(t, apps)
+	in.People = map[string][]signin.Method{"Alice": {signin.SecurityKey, signin.PasskeySynced, signin.Password}, "bob": {}}
+	doc := Build(in)
+	if doc.Version != 6 || doc.Default != "standard" || doc.AddStronger {
+		t.Errorf("version %d default %q add_stronger %v", doc.Version, doc.Default, doc.AddStronger)
 	}
-	doc := Build(apps, perApp, webauthn, domain, []string{})
-
-	if doc.Version != 5 {
-		t.Errorf("version = %d, want 5", doc.Version)
+	if want := []string{"passkey_device", "passkey_synced", "security_key", "yubikey_cert"}; !reflect.DeepEqual(doc.Methods, want) {
+		t.Errorf("methods = %v", doc.Methods)
 	}
-	if !reflect.DeepEqual(doc.Default, webauthn) {
-		t.Errorf("default = %+v", doc.Default)
+	if _, ok := doc.Templates["basic"]; !ok {
+		t.Error("compiled basic (password off: like standard) not published")
 	}
-	// Hostname keys of enabled apps with an override only — no instance-ID
-	// keys, nothing for disabled apps, nothing for core hosts.
-	wantPolicies := map[string]AuthPolicy{
-		"git." + domain:      mtls,
-		"registry." + domain: mtls,
-		"evil." + domain:     {},
+	if _, ok := doc.Templates["yubikey-and-certificate"]; !ok {
+		t.Error("input templates not all published")
 	}
-	if !reflect.DeepEqual(doc.Policies, wantPolicies) {
-		t.Errorf("policies = %+v\nwant %+v", doc.Policies, wantPolicies)
+	wantHosts := map[string]string{"git." + domain: "strong", "registry." + domain: "strong", "evil." + domain: "strong"}
+	if !reflect.DeepEqual(doc.Hosts, wantHosts) {
+		t.Errorf("hosts = %v\nwant %v", doc.Hosts, wantHosts)
 	}
-	wantGroups := map[string]string{
-		"git." + domain:      "users_gitlab",
-		"registry." + domain: "users_gitlab",
-		"evil." + domain:     "users_evil",
+	wantCore := map[string]string{
+		domain: "standard", "hub." + domain: "strong", "people." + domain: "strong", "directory." + domain: "standard",
+		"enroll." + domain: "standard", "metrics." + domain: "standard", "traefik." + domain: "standard",
 	}
+	if !reflect.DeepEqual(doc.Core, wantCore) {
+		t.Errorf("core = %v\nwant %v", doc.Core, wantCore)
+	}
+	for _, k := range []string{"auth." + domain, "mcp." + domain} {
+		if _, ok := doc.Core[k]; ok {
+			t.Errorf("core lists %s", k)
+		}
+	}
+	if want := map[string][]string{"alice": {"passkey_synced", "security_key"}, "bob": {}}; !reflect.DeepEqual(doc.People, want) {
+		t.Errorf("people = %v (switched-off password must not be listed)", doc.People)
+	}
+	wantGroups := map[string]string{"git." + domain: "users_gitlab", "registry." + domain: "users_gitlab", "evil." + domain: "users_evil"}
 	if !reflect.DeepEqual(doc.Groups, wantGroups) {
 		t.Errorf("groups = %v, want %v", doc.Groups, wantGroups)
 	}
 	gl := []PathGroup{{"/-/admin", "admin_gitlab"}, {"/admin", "admin_gitlab"}}
-	wantPG := map[string][]PathGroup{
-		"git." + domain:      gl,
-		"registry." + domain: gl,
-		"evil." + domain:     {{"/", "admin_evil"}},
-	}
+	wantPG := map[string][]PathGroup{"git." + domain: gl, "registry." + domain: gl, "evil." + domain: {{"/", "admin_evil"}}}
 	if !reflect.DeepEqual(doc.PathGroups, wantPG) {
 		t.Errorf("path_groups = %+v, want %+v", doc.PathGroups, wantPG)
 	}
 	for core := range CoreHosts(domain) {
-		if _, ok := doc.Policies[core]; ok {
-			t.Errorf("core host %s in policies", core)
+		if _, ok := doc.Hosts[core]; ok {
+			t.Errorf("core host %s in hosts", core)
 		}
 		if _, ok := doc.Groups[core]; ok {
 			t.Errorf("core host %s in groups", core)
 		}
-		if _, ok := doc.PathGroups[core]; ok {
-			t.Errorf("core host %s in path_groups", core)
+	}
+	raw, _ := json.Marshal(doc)
+	for _, k := range []string{`"policies"`, `"factors"`} {
+		if strings.Contains(string(raw), k) {
+			t.Errorf("v6 document carries %s: %s", k, raw)
 		}
 	}
 }
 
-// An instance whose ID equals another app's hostname must not be able to
-// publish its (weaker) policy for that hostname (v5: policy keys are
-// hostnames, never instance IDs).
-func TestBuildIDIsNotAKey(t *testing.T) {
-	domain := "portcullis.local"
-	apps := []App{
-		{ID: "vaultwarden", Enabled: true,
-			Hosts: map[string]string{"passwords." + domain: "passwords." + domain}},
-		{ID: "passwords", Enabled: true,
-			Hosts: map[string]string{"pw-other." + domain: "pw-other." + domain}},
+// A picked template that isn't published (disabled meanwhile, can't be
+// met) denies the host instead of naming an unknown template.
+func TestBuildUnknownTemplateDenies(t *testing.T) {
+	in := input(t, []App{{ID: "a", Enabled: true, Hosts: host("a.portcullis.local"), Template: "gone"}})
+	in.Core["traefik"] = "gone"
+	doc := Build(in)
+	if doc.Groups["a.portcullis.local"] != DenyGroup || doc.Hosts["a.portcullis.local"] != "" {
+		t.Errorf("groups %v hosts %v", doc.Groups, doc.Hosts)
 	}
-	doc := Build(apps, map[string]AuthPolicy{
-		"vaultwarden": {Factors: []string{"mtls"}},
-		"passwords":   {}, // public
-	}, AuthPolicy{Factors: []string{"webauthn"}}, domain, []string{})
-	if p := doc.Policies["passwords."+domain]; strings.Join(p.Factors, ",") != "mtls" {
-		t.Errorf("passwords.%s = %+v, want vaultwarden's mtls policy", domain, p)
-	}
-	if p, ok := doc.Policies["pw-other."+domain]; !ok || len(p.Factors) != 0 {
-		t.Errorf("pw-other.%s = %+v, %v", domain, p, ok)
-	}
-	if _, ok := doc.Policies["vaultwarden"]; ok {
-		t.Error("instance ID published as a key")
+	if _, ok := doc.Core["traefik.portcullis.local"]; ok {
+		t.Error("a core page on an unpublished template must be left out (group-gate denies it)")
 	}
 }
 
-func TestBuildCollisions(t *testing.T) {
-	domain := "portcullis.local"
-	shared := "shared." + domain
-	webauthn := AuthPolicy{Factors: []string{"webauthn"}}
-	a := App{ID: "a", Enabled: true,
-		Hosts:       map[string]string{shared: shared},
-		GroupAccess: true, AccessGroup: "ga", AdminGroup: "aa", AdminPaths: []string{"/admin", "/x"}}
-	b := App{ID: "b", Enabled: true,
-		Hosts:       map[string]string{shared: shared},
-		GroupAccess: true, AccessGroup: "gb", AdminGroup: "ab", AdminPaths: []string{"/admin", "/y"}}
-	for _, order := range [][]App{{a, b}, {b, a}} {
-		// a is public by override, b inherits the webauthn default: the
-		// stricter (inherited) policy is published.
-		doc := Build(order, map[string]AuthPolicy{"a": {}}, webauthn, "portcullis.local", []string{})
-		if p := doc.Policies[shared]; strings.Join(p.Factors, ",") != "webauthn" {
-			t.Errorf("policy = %+v", p)
+func TestBuildCollisionNeverWeaker(t *testing.T) {
+	shared := "shared.portcullis.local"
+	a := App{ID: "a", Enabled: true, Hosts: host(shared), GroupAccess: true, AccessGroup: "ga", AdminGroup: "aa", AdminPaths: []string{"/admin", "/x"}}
+	b := App{ID: "b", Enabled: true, Hosts: host(shared), GroupAccess: true, AccessGroup: "gb", AdminGroup: "ab", AdminPaths: []string{"/admin", "/y"}}
+	for _, order := range [][2]string{{"basic", "strong"}, {"strong", "basic"}} {
+		a.Template, b.Template = order[0], order[1]
+		doc := Build(input(t, []App{a, b}))
+		if doc.Hosts[shared] != "strong" {
+			t.Errorf("%v: hosts = %v, want strong", order, doc.Hosts)
 		}
 		if doc.Groups[shared] != "ga" {
 			t.Errorf("group = %q (lowest ID must win)", doc.Groups[shared])
@@ -141,34 +155,56 @@ func TestBuildCollisions(t *testing.T) {
 			t.Errorf("path groups = %+v", doc.PathGroups[shared])
 		}
 	}
-	// Two overrides: all-of beats any-of at the same LoA, higher LoA wins.
-	anyOf := AuthPolicy{Factors: []string{"mtls", "webauthn"}, Op: "any"}
-	allOf := AuthPolicy{Factors: []string{"password", "webauthn"}, Op: "all"}
-	doc := Build([]App{a, b}, map[string]AuthPolicy{"a": anyOf, "b": allOf}, AuthPolicy{}, "portcullis.local", []string{})
-	if p := doc.Policies[shared]; p.Op != "all" {
-		t.Errorf("policy = %+v, want all-of", p)
+	// One inherits the (weaker) default: the stricter pick wins.
+	a.Template, b.Template = "", "strong"
+	if doc := Build(input(t, []App{a, b})); doc.Hosts[shared] != "strong" {
+		t.Errorf("default + strong: hosts = %v", doc.Hosts)
 	}
-	doc = Build([]App{a, b}, map[string]AuthPolicy{"a": {Factors: []string{"mtls"}}, "b": allOf}, AuthPolicy{}, "portcullis.local", []string{})
-	if p := doc.Policies[shared]; strings.Join(p.Factors, ",") != "mtls" {
-		t.Errorf("policy = %+v, want mtls", p)
+	// Incomparable: all of both.
+	in := input(t, nil)
+	in.Templates["passkeys"] = signin.Node{Op: signin.OpAny, Items: []signin.Node{{Leaf: "passkey_synced"}, {Leaf: "passkey_device"}}}
+	in.Templates["certs"] = signin.Node{Op: signin.OpAny, Items: []signin.Node{{Leaf: "yubikey_cert"}}}
+	a.Template, b.Template = "passkeys", "certs"
+	in.Apps = []App{a, b}
+	doc := Build(in)
+	if doc.Hosts[shared] != "collision.1" {
+		t.Fatalf("hosts = %v, want collision.1", doc.Hosts)
+	}
+	want := signin.Node{Op: signin.OpAll, Items: []signin.Node{in.Templates["passkeys"], in.Templates["certs"]}}
+	if !reflect.DeepEqual(doc.Templates["collision.1"], want) {
+		t.Errorf("collision.1 = %+v", doc.Templates["collision.1"])
+	}
+	if err := signin.ValidateCompiled(doc.Templates["collision.1"]); err != nil {
+		t.Error(err)
+	}
+	for _, r := range []string{"passkeys", "certs"} {
+		if !signin.Implies(doc.Templates["collision.1"], doc.Templates[r]) {
+			t.Errorf("collision.1 is weaker than %s", r)
+		}
 	}
 }
 
-func TestStricter(t *testing.T) {
-	pub := AuthPolicy{}
-	hwk := AuthPolicy{Factors: []string{"webauthn"}}
-	cert := AuthPolicy{Factors: []string{"mtls"}}
-	any2 := AuthPolicy{Factors: []string{"mtls", "webauthn"}, Op: "any"}
-	all2 := AuthPolicy{Factors: []string{"mtls", "webauthn"}, Op: "all"}
+func TestTier(t *testing.T) {
+	on := defaultOn()
+	g := func(op string, items ...signin.Node) *signin.Node { return &signin.Node{Op: op, Items: items} }
+	l := func(m string) signin.Node { return signin.Node{Leaf: m} }
 	for _, c := range []struct {
-		a, b AuthPolicy
-		want bool
+		name   string
+		rule   *signin.Node
+		on     map[signin.Method]bool
+		public bool
+		want   string
 	}{
-		{hwk, pub, true}, {pub, hwk, false}, {cert, hwk, true}, {all2, cert, true}, {cert, all2, false},
-		{all2, any2, true}, {any2, hwk, false}, {hwk, any2, true}, {hwk, hwk, false}, {pub, pub, false},
+		{"all cert+key", g("all", l("yubikey_cert"), l("security_key")), on, false, TierProtected},
+		{"strong", g("any", l("security_key"), l("yubikey_cert")), on, false, TierAuthAware},
+		{"protected + public", g("all", l("yubikey_cert"), l("security_key")), on, true, TierAuthAware},
+		{"nil", nil, on, false, TierPublic},
+		{"passkeys only", g("any", *g("any", l("passkey_synced"), l("passkey_device"), l("security_key"))), on, false, TierPublic},
+		{"cert switched off", g("any", l("yubikey_cert")), map[signin.Method]bool{}, false, TierPublic},
+		{"not compiled", g("any", l("family:passkey")), on, false, TierProtected},
 	} {
-		if got := Stricter(c.a, c.b); got != c.want {
-			t.Errorf("Stricter(%+v, %+v) = %v", c.a, c.b, got)
+		if got := Tier(c.rule, c.on, c.public); got != c.want {
+			t.Errorf("%s: Tier = %s, want %s", c.name, got, c.want)
 		}
 	}
 }
@@ -176,7 +212,7 @@ func TestStricter(t *testing.T) {
 func TestWrite(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "group-gate-policy.json")
-	doc := Build(nil, nil, AuthPolicy{}, "portcullis.local", []string{})
+	doc := Build(input(t, nil))
 	if err := Write(path, doc); err != nil {
 		t.Fatal(err)
 	}
@@ -192,10 +228,10 @@ func TestWrite(t *testing.T) {
 	if err := json.Unmarshal(data, &raw); err != nil {
 		t.Fatal(err)
 	}
-	if raw["version"] != float64(5) {
-		t.Errorf("version = %v, want 5", raw["version"])
+	if raw["version"] != float64(6) {
+		t.Errorf("version = %v, want 6", raw["version"])
 	}
-	for _, k := range []string{"policies", "groups", "path_groups", "public_paths"} {
+	for _, k := range []string{"templates", "hosts", "core", "people", "groups", "path_groups", "public_paths"} {
 		if _, ok := raw[k].(map[string]interface{}); !ok {
 			t.Errorf("%s must be an object, got %T", k, raw[k])
 		}
@@ -203,11 +239,8 @@ func TestWrite(t *testing.T) {
 	if _, ok := raw["extra_domains"].([]interface{}); !ok {
 		t.Errorf("extra_domains must be an array, got %T", raw["extra_domains"])
 	}
-	// An unset default keeps "factors": null — group-gate treats that as
-	// "no default policy", which differs from [] (public).
-	def := raw["default"].(map[string]interface{})
-	if f, ok := def["factors"]; !ok || f != nil {
-		t.Errorf("default factors = %v, want null", f)
+	if _, ok := raw["methods"].([]interface{}); !ok || raw["default"] != "standard" || raw["add_stronger"] != false {
+		t.Errorf("methods %T default %v add_stronger %v", raw["methods"], raw["default"], raw["add_stronger"])
 	}
 	entries, _ := os.ReadDir(dir)
 	if len(entries) != 1 {
@@ -226,7 +259,7 @@ func TestBuildDeny(t *testing.T) {
 		{ID: "ghost", Enabled: true, Deny: true,
 			Hosts: map[string]string{shared: shared, ghostHost: ghostHost, hubHost: hubHost}},
 	}
-	doc := Build(apps, nil, AuthPolicy{}, "portcullis.local", []string{})
+	doc := Build(input(t, apps))
 	if doc.Groups[ghostHost] != DenyGroup {
 		t.Errorf("ghost host = %q, want %q", doc.Groups[ghostHost], DenyGroup)
 	}
@@ -266,27 +299,27 @@ func TestBuildPublicPaths(t *testing.T) {
 			Hosts:       map[string]string{"wide." + domain: "wide." + domain},
 			PublicHosts: map[string]string{"wide-admin." + domain: "wide-admin." + domain}, Public: cloud},
 	}
-	doc := Build(apps, nil, InitialDefault(), "portcullis.local", []string{})
-	if doc.Version != 5 || len(doc.PublicPaths) != 1 || !reflect.DeepEqual(doc.PublicPaths[cloudHost], *cloud) {
+	doc := Build(input(t, apps))
+	if doc.Version != 6 || len(doc.PublicPaths) != 1 || !reflect.DeepEqual(doc.PublicPaths[cloudHost], *cloud) {
 		t.Errorf("public_paths = %+v (version %d)", doc.PublicPaths, doc.Version)
 	}
 	if doc.Groups[goneHost] != DenyGroup {
 		t.Errorf("deny app lost its deny group: %v", doc.Groups)
 	}
 	raw, _ := json.Marshal(doc)
-	for _, want := range []string{`"version":5`, `"paths":[{"path":"/s/{token}","match":"prefix"},{"path":"/dist","match":"static"}]`,
+	for _, want := range []string{`"version":6`, `"paths":[{"path":"/s/{token}","match":"prefix"},{"path":"/dist","match":"static"}]`,
 		`"credential_cookies":["nc_token"]`, `"credential_query":[]`} {
 		if !strings.Contains(string(raw), want) {
 			t.Errorf("policy file lacks %s: %s", want, raw)
 		}
 	}
-	raw, _ = json.Marshal(Build(nil, nil, InitialDefault(), "portcullis.local", []string{}))
+	raw, _ = json.Marshal(Build(input(t, nil)))
 	if !strings.Contains(string(raw), `"public_paths":{}`) {
 		t.Errorf("empty public_paths not published as {}: %s", raw)
 	}
 }
 
-func TestPolicyFileV5Expiring(t *testing.T) {
+func TestPolicyFileExpiring(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "policy.json")
 
@@ -295,9 +328,8 @@ func TestPolicyFileV5Expiring(t *testing.T) {
 
 	doc := Document{
 		Version:      FileVersion,
-		Default:      AuthPolicy{Factors: []string{"webauthn"}},
+		Default:      "standard",
 		ExtraDomains: []string{},
-		Policies:     map[string]AuthPolicy{},
 		Groups:       map[string]string{"app.portcullis.local": "users"},
 		PathGroups:   map[string][]PathGroup{},
 		PublicPaths:  map[string]PublicEntry{},
@@ -318,8 +350,8 @@ func TestPolicyFileV5Expiring(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if parsed["version"] != float64(5) {
-		t.Errorf("version = %v, want 5", parsed["version"])
+	if parsed["version"] != float64(6) {
+		t.Errorf("version = %v, want 6", parsed["version"])
 	}
 
 	expiring, ok := parsed["expiring"].([]interface{})
