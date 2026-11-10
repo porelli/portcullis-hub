@@ -20,6 +20,7 @@ import (
 	"strings"
 
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/fidomds"
 	"github.com/portcullis/hub/internal/settings"
 	"github.com/portcullis/hub/internal/signin"
 	"github.com/portcullis/hub/internal/state"
@@ -82,6 +83,9 @@ type SignInView struct {
 	Default     string               `json:"default"`
 	Core        map[string]string    `json:"core"`
 	AddStronger bool                 `json:"add_stronger"`
+	// MDS is the FIDO list's status; MDSWarning is set while it is stale.
+	MDS        fidomds.Status `json:"mds"`
+	MDSWarning string         `json:"mds_warning,omitempty"`
 }
 
 // TemplateInput is a template save or preview: its name and source rule.
@@ -173,7 +177,10 @@ func (h *Hub) signInViewLocked() *SignInView {
 	si := h.st.SignIn
 	on := si.MethodsOn()
 	people := h.methodPeopleLocked()
-	v := &SignInView{Default: si.Default, Core: maps.Clone(si.Core), AddStronger: si.AddStronger}
+	v := &SignInView{Default: si.Default, Core: maps.Clone(si.Core), AddStronger: si.AddStronger, MDS: h.mdsStatus()}
+	if v.MDS.Stale {
+		v.MDSWarning = mdsStaleWarning
+	}
 	for _, m := range signin.Methods {
 		info, _ := signin.InfoOf(m)
 		v.Methods = append(v.Methods, SignInMethodView{ID: m, Label: info.Label, Tenths: info.Tenths, On: on[m], Available: info.Available, People: people[m]})

@@ -92,6 +92,15 @@ type Config struct {
 	// read-only at /mcp-gate-data): the gate's access.jsonl (§15.8) is
 	// read there ("" = no access log: MyAI / AccessLog answer 503).
 	MCPGateDataDir string
+	// FIDOMDSURL is HUB_FIDO_MDS_URL, the FIDO Alliance MDS BLOB (contract
+	// §8.1; "" = no fetching: no authenticators, passkeys register as
+	// synced). Cached at <DataDir>/signin/mds.jwt.
+	FIDOMDSURL string
+	// ExtraAuthenticators is HUB_SIGNIN_EXTRA_AUTHENTICATORS (development
+	// only: main honours it only with HUB_DEV=1), a JSON file of extra
+	// trust-list entries merged over the FIDO list on every publish
+	// (signin_mds.go).
+	ExtraAuthenticators string
 }
 
 // Engine is the part of the Docker Engine API the Hub uses.
@@ -406,6 +415,9 @@ type Hub struct {
 	bg sync.WaitGroup
 
 	policyWriteMu sync.Mutex
+	// mds: the FIDO list signin-keycloak.json's authenticators come from
+	// (signin_mds.go; its own leaf lock).
+	mds mdsState
 	// signInMu serialises Settings → Sign-in writers (signin.go), from
 	// their plan to their commit; taken before mu.
 	signInMu sync.Mutex
@@ -646,6 +658,7 @@ func New(cfg Config, runner compose.Runner, engine Engine, idp IdP) (*Hub, error
 		lookupIP:             defaultLookupIP,
 		idRanges:             templates.PersonIDPools,
 	}
+	h.mds.fetcher = newMDSFetcher(cfg)
 	// A create's holder re-check (F30) is the trigger RunCredentialChecks
 	// serves.
 	h.credentialCheck = h.TriggerCredentialCheck
@@ -1084,6 +1097,8 @@ func (h *Hub) writePolicy() (attrsWritten bool, retErr error) {
 	// gate file are built from the same snapshot.
 	dr := h.directoryState()
 	expiring, attrs, keepAttrs := dr.expiring, dr.attrs, dr.keepAttrs
+	// The passkey trust list (reads the extra-authenticators file: before mu).
+	trust, mdsDoc := h.signInTrust()
 	h.driftMu.Lock()
 	runtime := make(map[string][]string, len(h.runtimeHosts))
 	for id, hosts := range h.runtimeHosts {
@@ -1188,6 +1203,7 @@ func (h *Hub) writePolicy() (attrsWritten bool, retErr error) {
 	})
 	doc.Expiring = expiring
 	kcSignIn := h.keycloakSignInLocked()
+	kcSignIn.Authenticators, kcSignIn.MDS = trust, mdsDoc
 	portal := h.portalLocked()
 	// The header deliveries (§4.1 hosts): enabled instances with a view,
 	// on the hosts their routers gate now.

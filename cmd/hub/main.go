@@ -20,6 +20,7 @@ import (
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/domains"
+	"github.com/portcullis/hub/internal/fidomds"
 	"github.com/portcullis/hub/internal/folderfix"
 	"github.com/portcullis/hub/internal/freshauth"
 	"github.com/portcullis/hub/internal/fsutil"
@@ -65,6 +66,27 @@ func fixerImageFromEnv(getenv func(string) string) (string, error) {
 		return "", fmt.Errorf("HUB_FIXER_IMAGE is for development only: set HUB_DEV=1 or unset it")
 	}
 	return v, nil
+}
+
+// signInMDSFromEnv is HUB_FIDO_MDS_URL (default the FIDO Alliance MDS3
+// endpoint; an http(s) URL, contract §8.1) and
+// HUB_SIGNIN_EXTRA_AUTHENTICATORS, a file of extra passkey trust-list
+// entries for CI's virtual authenticator: honoured only with HUB_DEV=1,
+// else the Hub refuses to start (it would let any model count as a
+// security key).
+func signInMDSFromEnv(getenv func(string) string) (mdsURL, extra string, err error) {
+	mdsURL = getenv("HUB_FIDO_MDS_URL")
+	if mdsURL == "" {
+		mdsURL = fidomds.DefaultURL
+	}
+	if u, perr := url.Parse(mdsURL); perr != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
+		return "", "", fmt.Errorf("HUB_FIDO_MDS_URL must be an http(s) URL, got %q", mdsURL)
+	}
+	extra = getenv("HUB_SIGNIN_EXTRA_AUTHENTICATORS")
+	if extra != "" && getenv("HUB_DEV") != "1" {
+		return "", "", fmt.Errorf("HUB_SIGNIN_EXTRA_AUTHENTICATORS is for development only: set HUB_DEV=1 or unset it")
+	}
+	return mdsURL, extra, nil
 }
 
 // freshAuthSetup is the fresh-auth wiring (contract §8): the issuer and
@@ -166,6 +188,10 @@ func main() {
 		log.Fatalf("refusing to start: %v", err)
 	}
 	cfg.FixerImage = fixerImage
+	cfg.FIDOMDSURL, cfg.ExtraAuthenticators, err = signInMDSFromEnv(os.Getenv)
+	if err != nil {
+		log.Fatalf("refusing to start: %v", err)
+	}
 	if v := os.Getenv("HUB_RECONCILE_INTERVAL"); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil || d < 5*time.Second {
@@ -342,6 +368,9 @@ func main() {
 	// The doctor's disk checks: daily (and on demand, after every folder
 	// apply); cached in <data>/doctor/scans.json.
 	go h.RunDoctorScans(ctx, 24*time.Hour)
+	// The FIDO metadata (contract §8.1): the cached BLOB, then a daily
+	// refresh (and at its nextUpdate) into signin-keycloak.json.
+	go h.RunMDS(ctx, 24*time.Hour)
 	// Keycloak drops its copy of a user deleted straight in LLDAP only when
 	// the user is looked up (removeInvalidUsersEnabled; its periodic LDAP
 	// sync never removes users): list them all periodically. Keycloak

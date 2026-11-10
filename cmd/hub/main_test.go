@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/fidomds"
 )
 
 // The spec: a corrupt directory.yaml refuses to start; a missing one is
@@ -94,6 +95,32 @@ func TestFixerImageFromEnv(t *testing.T) {
 		})
 		if (err == nil) != c.ok || got != c.want {
 			t.Errorf("image %q dev %q: %q, %v", c.img, c.dev, got, err)
+		}
+	}
+}
+
+// TestExtraAuthenticatorsNeedDev: HUB_SIGNIN_EXTRA_AUTHENTICATORS without
+// HUB_DEV=1 refuses the start; HUB_FIDO_MDS_URL defaults to FIDO's MDS3.
+func TestExtraAuthenticatorsNeedDev(t *testing.T) {
+	for _, c := range []struct {
+		url, extra, dev string
+		wantURL         string
+		ok              bool
+	}{
+		{"", "", "", fidomds.DefaultURL, true},
+		{"", "/x/extra.json", "1", fidomds.DefaultURL, true},
+		{"", "/x/extra.json", "", "", false},
+		{"", "/x/extra.json", "true", "", false},
+		{"", "/x/extra.json", "0", "", false},
+		{"http://mds.test:8080/blob", "", "", "http://mds.test:8080/blob", true},
+		{"ftp://mds.test/", "", "", "", false},
+		{"not a url", "", "", "", false},
+	} {
+		u, extra, err := signInMDSFromEnv(func(k string) string {
+			return map[string]string{"HUB_FIDO_MDS_URL": c.url, "HUB_SIGNIN_EXTRA_AUTHENTICATORS": c.extra, "HUB_DEV": c.dev}[k]
+		})
+		if (err == nil) != c.ok || u != c.wantURL || (c.ok && extra != c.extra) {
+			t.Errorf("url %q extra %q dev %q: %q %q %v", c.url, c.extra, c.dev, u, extra, err)
 		}
 	}
 }

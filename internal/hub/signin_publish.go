@@ -30,7 +30,8 @@ const KeycloakSignInVersion = 1
 // KeycloakSignIn is signin-keycloak.json (D20): the switched-on methods,
 // the add-stronger switch, every enabled template's compiled rule, the
 // native-OIDC clients' templates, the passkey trust list and the FIDO
-// list it came from (Task 8 fills Authenticators and MDS).
+// list it came from (writePolicy fills Authenticators and MDS from
+// signInTrust, signin_mds.go).
 type KeycloakSignIn struct {
 	Version        int                                   `json:"version"`
 	Methods        []string                              `json:"methods"`
