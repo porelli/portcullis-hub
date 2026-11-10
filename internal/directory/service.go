@@ -406,6 +406,10 @@ type Overview struct {
 	InvitesError string `json:"invites_error,omitempty"`
 	// InvitesAvailable: invite links can be created.
 	InvitesAvailable bool `json:"invites_available"`
+	// PasswordOn: the password sign-in method is switched on
+	// (PasswordMethodOn; unset = on), so password onboarding is offered
+	// (admins only).
+	PasswordOn bool `json:"password_on"`
 	// Admin and Perms describe the caller (Me): admins hold every
 	// delegated permission.
 	Admin bool     `json:"admin"`
@@ -511,6 +515,9 @@ func (s *Service) overview(ctx context.Context, me string, c *Caller) (*Overview
 		}
 	} else {
 		ov.InvitesAvailable = true
+	}
+	if full {
+		ov.PasswordOn = s.PasswordMethodOn == nil || s.PasswordMethodOn()
 	}
 
 	// Load fields from Store if available

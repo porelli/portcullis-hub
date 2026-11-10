@@ -331,15 +331,16 @@ func (h *Hub) peopleMethodsLocked() map[string][]signin.Method {
 
 // methodPeopleLocked is how many known people have each method set up:
 // -1 while unknown (no inventory, the last refresh failed; yubikey_cert
-// while certificates are unknown). Caller holds mu.
-func (h *Hub) methodPeopleLocked() map[signin.Method]int {
+// while certificates are unknown), and how many people the inventory
+// knows (-1 while there is none). Caller holds mu.
+func (h *Hub) methodPeopleLocked() (map[signin.Method]int, int) {
 	out := map[signin.Method]int{}
 	base := h.signInInv.currentBase()
 	for _, m := range signin.Methods {
 		out[m] = -1
 	}
 	if base == nil {
-		return out
+		return out, -1
 	}
 	for _, m := range signin.Methods {
 		out[m] = 0
@@ -347,14 +348,15 @@ func (h *Hub) methodPeopleLocked() map[signin.Method]int {
 	if !base.certsKnown {
 		out[signin.YubiKeyCert] = -1
 	}
-	for _, pm := range composeInventory(base, h.st.SignIn.Passwords).People {
+	people := composeInventory(base, h.st.SignIn.Passwords).People
+	for _, pm := range people {
 		for _, m := range pm.Methods {
 			if out[m] >= 0 {
 				out[m]++
 			}
 		}
 	}
-	return out
+	return out, len(people)
 }
 
 // ── warnings ─────────────────────────────────────────────

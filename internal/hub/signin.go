@@ -78,7 +78,10 @@ type SignInTemplateView struct {
 
 // SignInView is Settings → Sign-in (GET /api/signin).
 type SignInView struct {
-	Methods     []SignInMethodView   `json:"methods"`
+	Methods []SignInMethodView `json:"methods"`
+	// PeopleTotal is how many people the inventory knows (a method's
+	// People is out of it); -1 while unknown.
+	PeopleTotal int                  `json:"people_total"`
 	Templates   []SignInTemplateView `json:"templates"`
 	Default     string               `json:"default"`
 	Core        map[string]string    `json:"core"`
@@ -115,6 +118,36 @@ type TemplatePreview struct {
 	// PeopleUnknown says why Affected couldn't be worked out ("" = it
 	// was).
 	PeopleUnknown string `json:"people_unknown,omitempty"`
+	// Unusable are the parts of the draft the switches make unmeetable
+	// (signin.Unusable: the editor greys them out); Groups every group's
+	// score, top group first, depth first (the editor's per-group
+	// scores; a group that can't be met scores 0).
+	Unusable []signin.Path `json:"unusable"`
+	Groups   []GroupScore  `json:"groups"`
+}
+
+// GroupScore is the score of the draft's group at Path (signin.Path:
+// item indexes from the top group; [] is the top group).
+type GroupScore struct {
+	Path   signin.Path `json:"path"`
+	Tenths int         `json:"tenths"`
+}
+
+// groupScores scores every group of a valid source rule n under on.
+func groupScores(n signin.Node, on map[signin.Method]bool) []GroupScore {
+	out := []GroupScore{}
+	var walk func(n signin.Node, at signin.Path)
+	walk = func(n signin.Node, at signin.Path) {
+		if n.Op == "" {
+			return
+		}
+		out = append(out, GroupScore{Path: slices.Clone(at), Tenths: signin.ScoreOf(n, on).Tenths})
+		for i, it := range n.Items {
+			walk(it, append(slices.Clone(at), i))
+		}
+	}
+	walk(n, signin.Path{})
+	return out
 }
 
 // AffectedApp is an app (Kind UseInstance, Instance its id) or a core
@@ -177,8 +210,8 @@ func (h *Hub) templateForInstanceLocked(t *templates.Template) string {
 func (h *Hub) signInViewLocked() *SignInView {
 	si := h.st.SignIn
 	on := si.MethodsOn()
-	people := h.methodPeopleLocked()
-	v := &SignInView{Default: si.Default, Core: maps.Clone(si.Core), AddStronger: si.AddStronger, MDS: h.mdsStatus()}
+	people, total := h.methodPeopleLocked()
+	v := &SignInView{Default: si.Default, Core: maps.Clone(si.Core), AddStronger: si.AddStronger, MDS: h.mdsStatus(), PeopleTotal: total}
 	v.MDSWarning = h.mdsWarning(v.MDS)
 	for _, m := range signin.Methods {
 		info, _ := signin.InfoOf(m)
@@ -672,7 +705,11 @@ func (h *Hub) PreviewTemplate(ctx context.Context, id string, in TemplateInput) 
 	si := h.st.SignIn
 	on := si.MethodsOn()
 	sentence, score, problem := describeRule(in.Rule, on)
-	p := &TemplatePreview{Sentence: sentence, Score: score, Affected: []AffectedApp{}, Problem: problem}
+	unusable := signin.Unusable(in.Rule, on)
+	if unusable == nil {
+		unusable = []signin.Path{}
+	}
+	p := &TemplatePreview{Sentence: sentence, Score: score, Affected: []AffectedApp{}, Problem: problem, Unusable: unusable, Groups: groupScores(in.Rule, on)}
 	if _, exists := si.Templates[id]; id == "" || !exists {
 		return p, nil
 	}

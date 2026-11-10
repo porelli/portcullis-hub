@@ -117,6 +117,8 @@ import (
 // entries via AI (Claude Code): aiapp-off's mode change and the
 // refused switch-on of aiapp-mtls.
 //
+// Settings → Sign-in (sign-in Task 9): harness_signin_test.go.
+//
 // The progress panel (operation progress Task 8): gitea, gitea-warn,
 // grafana-scratch and nativeapp's interrupted enable, with POST
 // /harness/op/break-undo and /harness/op/fix-undo
@@ -173,6 +175,8 @@ func TestHarness(t *testing.T) {
 	extra["guacamole"] = [2]string{harnessGuacManifest, harnessGuacCompose}
 	// The setup form (apps Task 7): a database choice.
 	extra["nextcloud"] = [2]string{harnessNextcloudManifest, harnessNextcloudCompose}
+	// Settings → Sign-in (sign-in Task 9): an mtls app.
+	extra["vault"] = [2]string{harnessVaultManifest, harnessVaultCompose}
 	hrun := &harnessRunner{}
 	aiDir := t.TempDir()
 	aiRecipient, aiGateData := harnessAIFiles(t, aiDir)
@@ -204,6 +208,7 @@ func TestHarness(t *testing.T) {
 			c.MCPGateRecipientFile = aiRecipient
 			c.MCPGateDataDir = aiGateData
 			c.MCPListener = true
+			c.FIDOMDSURL = harnessMDSURL
 		},
 		seed: func(st *state.AppState) {
 			seedAIState(st)
@@ -225,7 +230,7 @@ func TestHarness(t *testing.T) {
 	// The shared navigation's Hub link goes to this Hub listener.
 	e.s.HubURL = "http://" + addr + "/"
 	h := e.s.Hub
-	for _, id := range append(slices.Clone(harnessFixtures), "photos", "samba", "smbfixture", "aiapp", "homeauto", "ai-chat", "plain", "gitea", "guacamole", "nextcloud") {
+	for _, id := range append(slices.Clone(harnessFixtures), "photos", "samba", "smbfixture", "aiapp", "homeauto", "ai-chat", "plain", "gitea", "guacamole", "nextcloud", "vault") {
 		if h.Template(id) == nil {
 			t.Fatalf("fixture %s not loaded (see the log)", id)
 		}
@@ -261,6 +266,7 @@ func TestHarness(t *testing.T) {
 	hfa := seedConfirmations(t, h, addr, paddr)
 	flaky := seedGroupPages(t, e)
 	seedApps(t, e, eng)
+	seedSignIn(t, e)
 
 	d, err := time.ParseDuration(os.Getenv("HUB_HARNESS_FOR"))
 	if err != nil {

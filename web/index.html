@@ -110,10 +110,9 @@
     .port-hint { display: block; margin-top: 0.25rem; color: #64748b; font-size: 0.7rem; }
     .auth-notes { color: #94a3b8; font-size: 0.8125rem; background: #0f172a; padding: 0.75rem 1rem; border-radius: 0.5rem; margin-bottom: 1rem; border-left: 3px solid #3b82f6; }
 
-    /* Access policy */
+    /* Sign-in / public / AI blocks */
     .policy-section { padding: 0.875rem 1rem; background: #0f172a; border: 1px solid #1e293b; border-radius: 0.5rem; margin-bottom: 1rem; }
     .policy-title { display: flex; align-items: center; justify-content: space-between; font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: #64748b; margin-bottom: 0.5rem; }
-    .policy-score { font-size: 0.6875rem; font-weight: 600; color: #22c55e; background: #22c55e22; border: 1px solid #22c55e44; padding: 0.125rem 0.5rem; border-radius: 9999px; text-transform: none; letter-spacing: 0; }
     .policy-factor { display: flex; align-items: center; gap: 0.5rem; font-size: 0.875rem; padding: 0.25rem 0; cursor: pointer; }
     .policy-factor input[type="checkbox"] { accent-color: #3b82f6; }
     .policy-op { display: flex; gap: 1rem; margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px dashed #1e293b; font-size: 0.8125rem; }
@@ -130,11 +129,61 @@
     .policy-section .public-danger, .policy-section .public-warn { font-size: 0.8125rem; }
     .policy-factor em { color: #64748b; font-size: 0.75rem; }
     .policy-own { font-size: 0.875rem; color: #e2e8f0; margin-bottom: 0.25rem; }
-    .policy-effective { margin-top: 0.5rem; font-size: 0.8125rem; color: #94a3b8; }
-    .policy-effective code, .policy-section small code { font-family: 'SF Mono', 'Fira Code', monospace; color: #e2e8f0; }
+    .policy-section small code { font-family: 'SF Mono', 'Fira Code', monospace; color: #e2e8f0; }
     .policy-notes { margin: 0.375rem 0 0 1.25rem; font-size: 0.75rem; color: #94a3b8; }
     .policy-section small { display: block; font-size: 0.75rem; color: #64748b; margin: 0 0 0.25rem 1.5rem; }
     .policy-inherit { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px dashed #1e293b; font-size: 0.8125rem; color: #94a3b8; cursor: pointer; }
+
+    /* Settings → Sign-in and the instance pick (web/signin.js) */
+    .si-block { font-size: 0.8125rem; }
+    .si-sub { color: #94a3b8; font-size: 0.75rem; }
+    .si-t { width: 100%; border-collapse: collapse; margin: 0.25rem 0 0.5rem; }
+    .si-t th, .si-t td { text-align: left; padding: 0.375rem 0.5rem; border-top: 1px solid #1e293b; vertical-align: top; }
+    .si-t th { color: #94a3b8; font-weight: 500; }
+    .si-nowrap { white-space: nowrap; }
+    .si-score { font-weight: 600; }
+    .si-bar { display: inline-block; width: 64px; height: 6px; border-radius: 3px; background: #1e293b; vertical-align: middle; margin-left: 0.375rem; overflow: hidden; }
+    .si-bar i { display: block; height: 100%; }
+    .si-tag { white-space: nowrap; font-size: 0.6875rem; padding: 0.0625rem 0.4375rem; border-radius: 9999px; background: #1e293b; color: #cbd5e1; }
+    .si-tag.ok { background: #14532d; color: #86efac; }
+    .si-tag.warn { background: #422006; color: #fcd34d; display: inline-block; margin: 0.125rem 0; }
+    .si-warn-text { color: #f59e0b; font-size: 0.75rem; }
+    .si-err { color: #f87171; font-size: 0.75rem; white-space: normal; min-width: 14rem; max-width: 24rem; }
+    .si-err:empty { display: none; }
+    .si-note { font-size: 0.8125rem; }
+    .si-row { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; margin-top: 0.5rem; }
+    .si-row select, .si-t select, .si-ed select, .si-pick select { padding: 0.25rem 0.5rem; background: #1e293b; border: 1px solid #334155; border-radius: 0.375rem; color: #e2e8f0; font-size: 0.8125rem; font-family: inherit; }
+    .si-switch-wrap { position: relative; display: inline-block; width: 30px; height: 16px; vertical-align: middle; }
+    .si-switch { position: absolute; inset: 0; opacity: 0; margin: 0; cursor: pointer; z-index: 1; }
+    .si-switch:disabled { cursor: not-allowed; }
+    .si-switch-ui { position: absolute; inset: 0; border-radius: 9px; background: #334155; transition: background 0.15s; }
+    .si-switch-ui::after { content: ''; position: absolute; top: 2px; left: 2px; width: 12px; height: 12px; border-radius: 50%; background: #e2e8f0; transition: left 0.15s; }
+    .si-switch:checked + .si-switch-ui { background: #16a34a; }
+    .si-switch:checked + .si-switch-ui::after { left: 16px; }
+    .si-switch:disabled + .si-switch-ui { opacity: 0.55; }
+    .si-switch:focus-visible + .si-switch-ui { outline: 2px solid #3b82f6; outline-offset: 2px; }
+    .si-ed { padding: 0.875rem 1rem; background: #0f172a; border: 1px solid #3b82f655; border-radius: 0.5rem; margin-bottom: 1rem; font-size: 0.8125rem; }
+    .si-two { display: grid; grid-template-columns: 1.4fr 1fr; gap: 1.25rem; }
+    .si-field { display: block; color: #94a3b8; font-size: 0.75rem; margin-bottom: 0.5rem; }
+    .si-field input { display: block; width: 100%; max-width: 20rem; margin-top: 0.25rem; padding: 0.375rem 0.5rem; background: #1e293b; border: 1px solid #334155; border-radius: 0.375rem; color: #e2e8f0; font-size: 0.875rem; font-family: inherit; }
+    .si-g { border: 1px solid #334155; border-left: 3px solid #3b82f6; border-radius: 0.5rem; padding: 0.5rem 0.625rem; margin: 0.375rem 0; }
+    .si-g.si-any { border-left-color: #f59e0b; }
+    .si-hd { display: flex; gap: 0.5rem; align-items: center; margin-bottom: 0.25rem; font-size: 0.75rem; color: #94a3b8; }
+    .si-gs { margin-left: auto; color: #e2e8f0; font-weight: 600; }
+    .si-chip { display: inline-flex; align-items: center; gap: 0.25rem; background: #1e3a5f; color: #bfdbfe; border-radius: 0.375rem; padding: 0.125rem 0.375rem 0.125rem 0.5rem; margin: 0.125rem 0.25rem 0.125rem 0; font-size: 0.75rem; }
+    .si-x { background: none; border: none; color: inherit; cursor: pointer; font-size: 0.875rem; line-height: 1; padding: 0 0.125rem; }
+    .si-add { display: flex; gap: 0.375rem; align-items: center; margin-top: 0.25rem; }
+    .si-add select { width: auto; }
+    .si-unusable { opacity: 0.45; }
+    .si-chip.si-unusable { text-decoration: line-through; }
+    .si-why { color: #fca5a5; font-size: 0.6875rem; text-decoration: none; display: inline-block; }
+    .si-big { font-size: 1.625rem; font-weight: 700; }
+    .si-big small { font-size: 0.875rem; color: #94a3b8; font-weight: 500; }
+    .si-eng { background: #1e293b; border-radius: 0.5rem; padding: 0.5rem 0.75rem; margin-top: 0.5rem; }
+    .si-gap { margin-top: 0.625rem; }
+    .si-affect { margin-bottom: 0.375rem; }
+    .si-pick select { display: block; width: auto; margin-bottom: 0.25rem; min-width: 16rem; }
+    .si-pick [hidden] { display: none; }
 
     /* Pills (op records) */
     .pill { display: inline-block; font-size: 0.6875rem; padding: 0.0625rem 0.5rem; border-radius: 9999px; background: #0f172a; color: #94a3b8; border: 1px solid #334155; margin: 0 0.25rem 0.25rem 0; white-space: nowrap; }
@@ -720,18 +769,18 @@
 
     <!-- The settings panel (loadSettings) -->
     <script src="/static/settings.js"></script>
+    <!-- Settings → Sign-in and the instance sign-in pick -->
+    <script src="/static/signin.js"></script>
 
     <!-- Settings Tab -->
     <div class="tab-content" id="tab-settings">
-      <div class="category-title" style="margin-bottom: 1rem;">Default access policy</div>
+      <div class="category-title" style="margin-bottom: 1rem;">Sign-in</div>
       <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
-        Applies to every app that hasn't set its own policy. Each app enforces what its auth method can:
-        forward-auth and header-auth apps on every request (<code style="background: #0f172a; padding: 0.125rem 0.375rem; border-radius: 0.25rem;">group-gate</code>
-        reads the <code style="background: #0f172a; padding: 0.125rem 0.375rem; border-radius: 0.25rem;">acr</code> / <code style="background: #0f172a; padding: 0.125rem 0.375rem; border-radius: 0.25rem;">amr</code> claims and binds the client certificate),
-        native-OIDC apps at login (Keycloak acr), mTLS-only apps at the TLS handshake. Apps that handle their own sign-in have no policy.
-        An app's settings show its effective policy.
+        Which sign-in methods people may use on this server, and templates: named rules over those methods, each with a score out of 5.
+        One template is the default; each app picks the default or another enabled template in its Settings tab, and Portcullis's own pages are set below.
+        Wherever a template applies, the people who can't meet it yet are listed.
       </p>
-      <div id="global-policy-form"></div>
+      <div id="signin-root"></div>
 
       <div class="category-title" style="margin: 2rem 0 1rem;">AI support</div>
       <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
@@ -813,7 +862,7 @@
       document.querySelectorAll('.tab[data-tab]').forEach(t => t.classList.toggle('active', t.dataset.tab === top));
       document.querySelectorAll('.tab-content').forEach(t => t.classList.toggle('active', t.id === 'tab-' + name));
       if (name === 'settings') {
-        loadGlobalSettings(); loadDomains(); loadAISettings();
+        PortcullisSignIn.mount(document.getElementById('signin-root')); loadDomains(); loadAISettings();
         PortcullisFolders.render(document.getElementById('folders-root'));
         PortcullisFolders.renderLocalNetworks(document.getElementById('localnets-root'));
       }
@@ -1556,113 +1605,18 @@
     function openSettingAt(id, key) { navInstance(id, 'settings', key || ''); }
 
     // ── Settings ──────────────────────────────────────────
-    // Password sign-in no longer exists (passkey or client certificate
-    // only): it is never offered.
-    const POLICY_FACTORS = [
-      { key: 'mtls', label: 'mTLS (client certificate)' },
-      { key: 'webauthn', label: 'WebAuthn (passkey / hardware key)' }
-    ];
-    const FACTOR_SHORT = { mtls: 'mTLS', webauthn: 'WebAuthn' };
-
-    function policyDescription(p) {
-      if (!p || !p.factors || p.factors.length === 0) return 'public (no sign-in factor)';
-      const names = p.factors.map(f => FACTOR_SHORT[f] || f);
-      if (names.length === 1) return names[0];
-      return names.join(p.op === 'all' ? ' and ' : ' or ');
-    }
-
-    function scoreBadge(score) {
-      if (score === undefined) return '';
-      return '<span class="policy-score" title="Safety score (0 public · 2 passkey · 3 client certificate · +0.5 per extra required factor)">score ' + Number(score).toFixed(1) + '</span>';
-    }
-
-    function factorBoxes(idPrefix, selected, enabled, supported) {
-      let html = '';
-      for (const f of POLICY_FACTORS) {
-        const sup = !supported || supported.has(f.key);
-        const on = enabled && sup;
-        html += '<label class="policy-factor' + (on ? '' : ' disabled') + '"><input type="checkbox" name="' + idPrefix + '-factor" value="' + f.key + '"' +
-          (selected.has(f.key) ? ' checked' : '') + (on ? '' : ' disabled') + (sup ? '' : ' data-unsupported="1"') + '> ' + escapeHtml(f.label) +
-          (sup ? '' : ' <em>— this app can\'t enforce it</em>') + '</label>';
-      }
-      return html;
-    }
-
-    // While inheriting, the radios are hidden: disabled radios render the
-    // same checked or not, and the "Effective:" line already states any/all.
-    function opRadios(idPrefix, op, enabled) {
-      const dis = enabled ? '' : ' disabled';
-      let html = '<div class="policy-op" data-prefix="' + idPrefix + '"' + (enabled ? '' : ' hidden') + '>';
-      html += '<label><input type="radio" name="' + idPrefix + '-op" value="all"' + (op === 'all' ? ' checked' : '') + dis + '> Require all checked</label>';
-      html += '<label><input type="radio" name="' + idPrefix + '-op" value="any"' + (op !== 'all' ? ' checked' : '') + dis + '> Any of checked</label>';
-      html += '</div>';
-      return html;
-    }
-
-    function policyNotes(notes) {
-      if (!notes || !notes.length) return '';
-      return '<ul class="policy-notes">' + notes.map(n => '<li>' + escapeHtml(n) + '</li>').join('') + '</ul>';
-    }
-
-    // Per-app access policy, capability-aware: only factors the app's auth
-    // method can enforce are selectable; while inheriting, the boxes show
-    // the EFFECTIVE policy (global default ∩ supported) and are disabled.
-    function renderAppPolicy(id, d) {
-      const cap = d.capability || { factors: [], enforcement: 'none' };
-      let html = '<div class="policy-section" data-policy-id="' + escapeHtml(id) + '">';
-      html += '<div class="policy-title">Access policy' + scoreBadge(cap.enforcement === 'none' ? undefined : d.safety_score) + '</div>';
-      if (cap.enforcement === 'none') {
-        html += '<div class="policy-own">This app handles its own sign-in.</div>';
-        html += '<small>Portcullis doesn\'t sign users in for it, so no access policy applies and none can be set.</small>';
-        html += factorBoxes(id, new Set(), false, null);
-        html += '<input type="hidden" name="' + id + '-none" value="1"></div>';
-        return html;
-      }
-      const supported = new Set(cap.factors || []);
-      const inherits = !d.auth_policy;
-      const eff = d.effective_policy || { factors: [], op: '' };
-      const shown = inherits ? eff : d.auth_policy;
-      html += factorBoxes(id, new Set(shown.factors || []), !inherits, supported);
-      html += opRadios(id, shown.op || 'any', !inherits);
-      html += '<label class="policy-inherit"><input type="checkbox" name="' + id + '-inherit"' + (inherits ? ' checked' : '') +
-        ' data-eff-factors="' + escapeHtml((eff.factors || []).join(',')) + '" data-eff-op="' + escapeHtml(eff.op || 'any') + '"' +
-        ' data-policy-inherit="' + escapeHtml(id) + '"> Inherit global default (' + escapeHtml(policyDescription(d.default_policy)) + ')</label>';
-      html += '<div class="policy-effective">Effective: <strong>' + escapeHtml(policyDescription(eff)) + '</strong> · TLS tier <code>' + escapeHtml(d.tier || '') + '</code></div>';
-      html += policyNotes(d.policy_notes);
-      html += '</div>';
-      return html;
-    }
-
-    function togglePolicyInherit(el, id) {
-      const box = el.closest('.policy-section');
-      const inherit = el.checked;
-      const eff = new Set((el.dataset.effFactors || '').split(',').filter(Boolean));
-      box.querySelectorAll('input[name="' + id + '-factor"]').forEach(cb => {
-        const sup = !cb.dataset.unsupported;
-        if (inherit) cb.checked = eff.has(cb.value);
-        cb.disabled = inherit || !sup;
-        cb.closest('label').classList.toggle('disabled', cb.disabled);
-      });
-      box.querySelectorAll('input[name="' + id + '-op"]').forEach(r => {
-        if (inherit) r.checked = r.value === (el.dataset.effOp === 'all' ? 'all' : 'any');
-        r.disabled = inherit;
-      });
-      const opBox = box.querySelector('.policy-op[data-prefix="' + id + '"]');
-      if (opBox) opBox.hidden = inherit;
-    }
-
     // Sign-in of apps with their own login (auth.native_login).
     function renderSignIn(id, si) {
       if (!si) return '';
       const native = si.mode === 'native';
       let html = '<div class="policy-section">';
-      html += '<div class="policy-title">Sign-in</div>';
+      html += '<div class="policy-title">Sign-in mode</div>';
       html += '<label class="policy-factor"><input type="radio" name="__signin" value="gateway"' + (native ? '' : ' checked') + ' data-signin-toggle> Portcullis sign-in, then the app\'s own login</label>';
-      html += '<small>' + (si.access_group ? 'Members of ' + PortcullisPeople.groupLink(si.access_group, true) + ' only' : 'Any signed-in user') + ' reach the app\'s login page; the access policy below applies on every request.</small>';
+      html += '<small>' + (si.access_group ? 'Members of ' + PortcullisPeople.groupLink(si.access_group, true) + ' only' : 'Any signed-in user') + ' reach the app\'s login page; the sign-in template below applies on every request.</small>';
       html += '<label class="policy-factor' + (si.allow_without_gateway ? '' : ' disabled') + '"><input type="radio" name="__signin" value="native"' + (native ? ' checked' : '') + (si.allow_without_gateway ? '' : ' disabled') + ' data-signin-toggle> App\'s own login only (no Portcullis)' + (si.allow_without_gateway ? '' : ' <em>— not allowed by this template</em>') + '</label>';
       if (si.note) html += '<small>' + escapeHtml(si.note) + '</small>';
       html += '<div class="public-danger signin-warn"' + (native ? '' : ' hidden') + '>No Portcullis in front of this app: no forward-auth, no group-gate, no hardware key. Anyone on the internet reaches the app\'s own login page (TLS tier <code>public@file</code>); only the app\'s own accounts protect it.</div>';
-      html += '<div class="public-warn signin-pending" hidden>Save to apply: the access policy below follows the sign-in mode after saving.</div>';
+      html += '<div class="public-warn signin-pending" hidden>Save to apply: the sign-in template below follows the sign-in mode after saving.</div>';
       if (si.blocked) html += '<div class="public-warn">' + escapeHtml(si.blocked) + '</div>';
       html += '</div>';
       return html;
@@ -1672,21 +1626,6 @@
       const box = el.closest('.policy-section');
       box.querySelector('.signin-warn').hidden = el.value !== 'native';
       box.querySelector('.signin-pending').hidden = false;
-    }
-
-    // Returns { skip } (no policy to send), { inherit: true } or
-    // { inherit: false, policy: {factors, op} }.
-    function collectPolicy(form, idPrefix) {
-      if (form.querySelector('input[name="' + idPrefix + '-none"]')) return { skip: true };
-      const signIn = form.querySelector('input[name="__signin"]:checked');
-      if (signIn && signIn.value === 'native') return { skip: true };
-      const inheritEl = form.querySelector('input[name="' + idPrefix + '-inherit"]');
-      if (inheritEl && inheritEl.checked) return { inherit: true, policy: null };
-      const factors = [];
-      form.querySelectorAll('input[name="' + idPrefix + '-factor"]:checked').forEach(el => { if (!el.dataset.unsupported) factors.push(el.value); });
-      const opEl = form.querySelector('input[name="' + idPrefix + '-op"]:checked');
-      const op = opEl ? opEl.value : 'any';
-      return { inherit: false, policy: { factors, op: factors.length > 1 ? op : '' } };
     }
 
     // ── Public exceptions (auth.public_access) ────────────
@@ -1759,28 +1698,11 @@
 
     // The settings panel (web/settings.js), mounted in the instance
     // page's Settings tab: options, per-person and group values, secrets,
-    // ports, and the policy / sign-in / public blocks above (rendered and
-    // collected by the functions here). The promise settles once drawn.
+    // ports, the sign-in mode and public blocks above (rendered and
+    // collected by the functions here) and the sign-in template pick
+    // (web/signin.js). The promise settles once drawn.
     function loadSettings(id, pane) {
       return window.PortcullisSettings.render(pane, id);
-    }
-
-    async function loadGlobalSettings() {
-      const container = document.getElementById('global-policy-form');
-      try {
-        const data = await apiGet('/api/settings');
-        const dp = data.default_auth_policy || { factors: [], op: '' };
-        let html = '<form class="settings-form" data-global-settings-form>';
-        html += '<div class="policy-section"><div class="policy-title">Access policy' + scoreBadge(data.default_safety_score) + '</div>';
-        html += factorBoxes('global', new Set(dp.factors || []), true, null);
-        html += opRadios('global', dp.op || 'any', true);
-        if (data.legacy_password) html += '<div class="public-warn">The stored default named "password", which is no longer a sign-in method; it was normalised to ' + escapeHtml(policyDescription(dp)) + '. Save to store it.</div>';
-        html += '</div>';
-        html += '<button type="submit" class="btn btn-primary btn-sm">Save default</button></form>';
-        container.innerHTML = html;
-      } catch (err) {
-        container.innerHTML = '<p class="settings-empty">Failed to load settings.</p>';
-      }
     }
 
     // ── Domains (contract §12) ────────────────────────────
@@ -1919,25 +1841,6 @@
         } catch (err) { showToast(err.message || 'Removing failed', 'error'); }
       }
     });
-
-    async function saveGlobalSettings(e) {
-      e.preventDefault();
-      const form = e.target;
-      const { policy } = collectPolicy(form, 'global');
-      try {
-        // G43: what this default would switch off first (AI support on
-        // inheriting instances whose policy then needs mTLS).
-        const pre = await apiPost('/api/settings/preview', { default_auth_policy: policy });
-        if ((pre.warnings || []).length && !confirm('Saving this default policy:\n\n' + pre.warnings.join('\n') + '\n\nSave anyway?')) return;
-        const res = await apiPut('/api/settings', { default_auth_policy: policy });
-        await loadGlobalSettings();
-        const ws = (res && res.warnings) || [];
-        if (ws.length) document.getElementById('global-policy-form').insertAdjacentHTML('beforeend', warningsList(ws));
-        showToast('Default policy saved.', 'success');
-      } catch (err) {
-        showToast(err.message || 'Failed to save default', 'error');
-      }
-    }
 
     // ── Settings → AI (contract §15.11–15.12, plan 4 Task 22) ──
     // Only the existing audited routes: GET / PUT /api/ai/settings (PUT
@@ -4674,7 +4577,6 @@
         return;
       }
       if (t.matches('#setup-form [data-part="bool"]')) { t.parentElement.lastChild.textContent = t.checked ? ' on' : ' off'; return; }
-      if (t.matches('[data-policy-inherit]')) { togglePolicyInherit(t, t.dataset.policyInherit); return; }
       if (t.matches('[data-signin-toggle]')) { toggleSignIn(t); return; }
       const pane = t.closest('#instance-page [data-ipane="logs"]');
       if (pane && pageCtx && (t.matches('[data-log-service-pick]') || t.matches('[data-log-lines-pick]'))) {
@@ -4685,7 +4587,6 @@
     });
     document.addEventListener('submit', e => {
       if (e.target.id === 'setup-form') e.preventDefault(); // Enter starts nothing: Start, Save without starting
-      if (e.target.matches('[data-global-settings-form]')) saveGlobalSettings(e);
     });
     document.addEventListener('keydown', e => {
       const t = e.target;

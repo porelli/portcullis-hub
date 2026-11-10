@@ -11,9 +11,10 @@
 // attributes and delegated listeners only; secret values are never put
 // into the DOM (password inputs keep what the admin types, and the panel
 // is rebuilt from the server after a save, so they are emptied). The
-// access policy, sign-in and public-exception blocks are index.html's
-// renderers (renderAppPolicy, renderSignIn, renderPublicBlock and their
-// collectors) and are posted in the same body.
+// sign-in mode and public-exception blocks are index.html's renderers
+// (renderSignIn, renderPublicBlock and their collectors), the sign-in
+// template pick is signin.js's (PortcullisSignIn.instanceHtml, with GET
+// /api/instances/{id}/signin); all are posted in the same body.
 (function () {
   'use strict';
 
@@ -211,16 +212,16 @@
     return Object.keys(st.groups).filter(k => JSON.stringify(rowsBody(st.groups[k])) !== st.base.groups[k]);
   }
 
-  // accessParts is the policy / sign-in / public part of the form, as
-  // index.html's collectors read it.
+  // accessParts is the sign-in template / sign-in mode / public part of
+  // the form, as index.html's collectors and the pick read it.
   function accessParts(st) {
     const form = st.el.querySelector('form[data-ps-form]');
     const out = {};
     if (!form) return out;
     const si = form.querySelector('input[name="__signin"]:checked');
     if (si) out.sign_in = si.value;
-    const pol = window.collectPolicy(form, st.id);
-    if (!pol.skip) out.policy = pol.inherit ? { inherit: true } : { policy: pol.policy };
+    const pick = form.querySelector('[data-signin-pick]');
+    if (pick) out.sign_in_template = pick.value;
     const pub = {};
     window.collectPublic(form, pub);
     if ('_public_access' in pub) out.pub = { public_access: pub._public_access, public_mode: pub._public_mode, public_tokens: pub._public_tokens };
@@ -231,7 +232,7 @@
     const now = accessParts(st), base = st.accessBase || {};
     const out = {};
     if (now.sign_in !== undefined && now.sign_in !== base.sign_in) out.sign_in = now.sign_in;
-    if (now.policy && !jsonEq(now.policy, base.policy)) out.policy = now.policy;
+    if (now.sign_in_template !== undefined) Object.assign(out, window.PortcullisSignIn.pickBody(now.sign_in_template, base.sign_in_template));
     if (now.pub && !jsonEq(now.pub, base.pub)) out.pub = now.pub;
     return out;
   }
@@ -264,9 +265,7 @@
     if (JSON.stringify(st.ports) !== st.base.ports) b.ports = Object.assign({}, st.ports);
     const a = accessChanges(st);
     if (a.sign_in) b.sign_in = a.sign_in;
-    if (a.policy) {
-      if (a.policy.inherit) b.auth_policy_inherit = true; else b.auth_policy = a.policy.policy;
-    }
+    if (a.sign_in_template !== undefined) b.sign_in_template = a.sign_in_template;
     if (a.pub) {
       b.public_access = a.pub.public_access;
       if (a.pub.public_mode !== undefined) b.public_mode = a.pub.public_mode;
@@ -286,6 +285,9 @@
   function render(el, id) {
     el.innerHTML = '<p class="settings-empty">Loading settings…</p>';
     bind(el);
+    // The sign-in pick's choices and who can't meet the template, read
+    // alongside (a failure shows in its block only).
+    const signin = window.apiGet('/api/instances/' + encodeURIComponent(id) + '/signin').catch(err => ({ error: err.message || String(err) }));
     return window.apiGet('/api/instances/' + encodeURIComponent(id) + '/settings').then(async panel => {
       // The shared folders, for the path options' picker.
       let folders = [];
@@ -295,6 +297,7 @@
       const prev = states.get(el);
       const st = newState(el, id, panel);
       st.folders = folders;
+      st.signin = await signin;
       if (prev && prev.id === id) st.flash = prev.flash;
       states.set(el, st);
       draw(st);
@@ -310,7 +313,7 @@
     h += '<div class="ps-strip" data-ps-strip>' + stripHtml(st) + '</div>';
     if (st.flash) h += '<div class="ps-flash" data-ps-flash>' + st.flash + '</div>';
     h += window.renderSignIn(st.id, p.sign_in);
-    h += window.renderAppPolicy(st.id, p);
+    h += window.PortcullisSignIn.instanceHtml(p, st.signin);
     h += window.renderPublicBlock(st.id, p.public_access);
     h += optionsHtml(st);
     h += portsHtml(st);
@@ -1081,7 +1084,7 @@
     const enabled = !!st.panel.enabled;
     const opts = changedOptions(st);
     const hasOptions = opts.length > 0 || 'ports' in b;
-    const access = 'sign_in' in b || 'auth_policy' in b || 'auth_policy_inherit' in b || 'public_access' in b;
+    const access = 'sign_in' in b || 'sign_in_template' in b || 'public_access' in b;
     let base = '';
     if (hasOptions) {
       const eff = st.preview && st.previewFor === JSON.stringify(b) ? st.preview.effect : '';
@@ -1164,12 +1167,15 @@
         setRowError(st, key, uid, null);
       }
     }
+    const pickErr = st.el.querySelector('[data-signin-pick-err]');
+    if (pickErr) pickErr.textContent = '';
     st.barError = '';
   }
 
   // placeError shows a refusal next to what it concerns: "setting <key>:
   // group <g> …" next to that row, "setting <key>: …" next to the
-  // option, anything else in the save bar. 409s say so.
+  // option, a refused sign-in template pick at its drop-down, anything
+  // else in the save bar. 409s say so.
   function placeError(st, err) {
     const msg = (err.status === 409 ? 'Refused (409): ' : err.status === 400 ? '' : (err.status ? 'Error ' + err.status + ': ' : '')) + (err.message || String(err));
     const m = /^setting ([a-z][a-z0-9_]*):\s*(.*)$/s.exec(err.message || '');
@@ -1182,6 +1188,13 @@
       if (row) setRowError(st, key, row.uid, e);
       else setOptionError(st, key, e);
       st.barError = err.status === 409 ? 'Refused (409): see ' + (st.opts[key].label || key) + '.' : 'See ' + (st.opts[key].label || key) + '.';
+      return;
+    }
+    // A refused sign-in template pick: shown at the drop-down too.
+    const pickErr = st.el.querySelector('[data-signin-pick-err]');
+    if (pickErr && /sign-in template|template /i.test(err.message || '') && 'sign_in_template' in body(st)) {
+      pickErr.textContent = msg;
+      st.barError = (err.status === 409 ? 'Refused (409): ' : '') + 'see Sign-in.';
       return;
     }
     st.barError = msg;
@@ -1414,7 +1427,12 @@
         onEdit(st, ed);
         return;
       }
-      // The access policy, sign-in and public blocks (index.html).
+      // The sign-in pick (signin.js), the sign-in mode and public blocks
+      // (index.html).
+      if (t.matches('[data-signin-pick]')) {
+        if (e.type !== 'change') return;
+        window.PortcullisSignIn.pickChanged(t);
+      }
       if (t.closest('.policy-section, .public-section')) schedulePreview(st);
     };
     el.addEventListener('input', onInput);

@@ -862,6 +862,15 @@
     return (vals || []).map(v => f.kind === 'person' && userByName(v)
       ? '<a class="pd-a" href="' + esc(personHash(v)) + '">' + esc(v) + '</a>' : esc(v)).join(', ');
   }
+  // passwordOn: the Password sign-in method is on (the overview's
+  // password_on; admins only).
+  function passwordOn() { return !!(dir && dir.password_on); }
+  // passwordCopy says what a password set here is (contract §8.1
+  // "Passwords": one password, LLDAP's).
+  function passwordCopy() {
+    return 'Password… sets their LLDAP password. Signs in to Portcullis only while Password is on' +
+      (passwordOn() ? '' : ' (it is off now: Hub → Settings → Sign-in)') + '; apps that check LDAP passwords use it either way.';
+  }
   // The key and account actions the caller may use on u (as the old
   // dialog offered them; the API re-checks).
   function personKeyActions(u) {
@@ -958,7 +967,9 @@
         if (u.server_invite && !u.protected) h += '<div class="pd-muted" title="Administrators are invited and recovered from the server">recover on the server: <code>' + esc(u.server_invite) + '</code></div>';
       }
       h += '<div class="pd-actions">' + acts.map(([a, label, cls]) =>
-        '<button type="button" class="pd-btn ' + cls + ' sm" data-act="' + a + '" data-user="' + esc(u.username) + '">' + esc(label) + '</button>').join('') + '</div></section>';
+        '<button type="button" class="pd-btn ' + cls + ' sm" data-act="' + a + '" data-user="' + esc(u.username) + '">' + esc(label) + '</button>').join('') + '</div>';
+      if (acts.some(([a]) => a === 'password')) h += '<p class="pd-muted pd-small" data-pw-hint>' + esc(passwordCopy()) + '</p>';
+      h += '</section>';
     }
     // History (admins)
     if (admin) {
@@ -1083,12 +1094,18 @@
         : '<span class="pd-muted">No groups yet.</span>') + '</div>' + gs.filter(g => g.rule).map(inviteRuleHtml).join('') + '</fieldset>';
       h += '<p class="pd-note">The new person gets a one-time invite link: they open it, register their security key, and they\'re signed in. No password. ' +
         'A rule-based group you tick takes them in through its rule when they match it, else as added by hand, with your reason. Rule-based groups you don\'t tick add them once their details match.</p>';
-      h += '<details class="pd-adv"><summary>Advanced: use a password instead of an invite</summary><div class="pd-checks">' +
-        '<label><input type="checkbox" id="nu-use-password"> Onboard with a password</label></div><div class="pd-checks">' +
-        '<label><input type="radio" name="nu-pwmode" value="generate" checked> Generate a strong password (shown once)</label>' +
-        '<label><input type="radio" name="nu-pwmode" value="set"> Set one</label></div>' +
-        '<div><label for="nu-password">Password</label><input type="password" id="nu-password" autocomplete="new-password" placeholder="at least 12 characters"></div>' +
-        '<div class="pd-checks"><label><input type="checkbox" id="nu-require-passkey" checked> Require passkey registration at first login</label></div></details>';
+      // Password onboarding only while the Password sign-in method is on
+      // (the Hub refuses it otherwise).
+      if (passwordOn()) {
+        h += '<details class="pd-adv"><summary>Advanced: use a password instead of an invite</summary><div class="pd-checks">' +
+          '<label><input type="checkbox" id="nu-use-password"> Onboard with a password</label></div><div class="pd-checks">' +
+          '<label><input type="radio" name="nu-pwmode" value="generate" checked> Generate a strong password (shown once)</label>' +
+          '<label><input type="radio" name="nu-pwmode" value="set"> Set one</label></div>' +
+          '<div><label for="nu-password">Password</label><input type="password" id="nu-password" autocomplete="new-password" placeholder="at least 12 characters"></div>' +
+          '<div class="pd-checks"><label><input type="checkbox" id="nu-require-passkey" checked> Require passkey registration at first login</label></div></details>';
+      } else {
+        h += '<p class="pd-note pd-muted" data-pw-onboard-off>Onboarding with a password isn\'t offered: the Password sign-in method is off (Hub → Settings → Sign-in).</p>';
+      }
     } else {
       h += '<p class="pd-note">The new person gets a one-time invite link and no groups. Rule-based groups add them once their details match' +
         (can('edit_details') ? ' (fill them in after the invite).' : '.') + '</p>';
@@ -1246,7 +1263,7 @@
         return;
       }
       case 'password': {
-        const choice = prompt('Fallback: set a password for ' + user + ' (signs them out).\n\nLeave empty to generate a strong one, or type the new password (at least 12 characters):', '');
+        const choice = prompt('Set a password for ' + user + ' (signs them out). ' + passwordCopy() + '\n\nLeave empty to generate a strong one, or type the new password (12–128 characters):', '');
         if (choice === null) return;
         const body = choice === '' ? { generate: true } : { password: choice };
         if (otherAdmin) {

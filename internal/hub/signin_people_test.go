@@ -315,13 +315,16 @@ func TestPasswordRules(t *testing.T) {
 	}
 	f.h.mu.RLock()
 	pm := f.h.peopleMethodsLocked()
-	counts := f.h.methodPeopleLocked()
+	counts, total := f.h.methodPeopleLocked()
 	f.h.mu.RUnlock()
 	if _, ok := pm["admin"]; ok || !slices.Equal(pm["bob"], []signin.Method{signin.Password}) {
 		t.Errorf("policy people = %v", pm)
 	}
 	if counts[signin.Password] != 1 {
 		t.Errorf("password count = %d", counts[signin.Password])
+	}
+	if total != len(inv.People) {
+		t.Errorf("people total = %d, want %d (the inventory's)", total, len(inv.People))
 	}
 
 	// The lockout guard, driven by real saves: the Hub on a password-only
