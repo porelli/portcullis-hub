@@ -233,8 +233,8 @@ func (h *Hub) applyConfigLocked(id string, c instanceConfig) {
 	}
 	// The env overrides (§11.9; the restores check them against the
 	// restored template: restoredEnvOverridesLocked) and the sign-in
-	// template pick (configProblem checked it; one disabled since is
-	// published as a denied host, never the default).
+	// template pick (both restores check it with pickableLocked under the
+	// mu that calls this: only an enabled template is ever stored).
 	e, had := h.st.Instances[id]
 	if c.SignInTemplate != "" || had && e.SignInTemplate != "" {
 		if !had {

@@ -827,6 +827,13 @@ func (h *Hub) applyRestore(ctx context.Context, id string, sb *staged, plan []vo
 	}
 	members := h.groupSnapshot(id)
 	h.mu.Lock()
+	// The pick again, under the mu that stores it: a template disabled or
+	// deleted since staging fails the restore (rolled back), never
+	// published as a denied host.
+	if err := pickableLocked(h.st.SignIn, &sb.cfg.SignInTemplate); err != nil {
+		h.mu.Unlock()
+		return air, statusErr(409, "sign-in template: %v", err)
+	}
 	h.applyConfigLocked(id, sb.cfg)
 	h.rebuildLocked()
 	// The archive's AI state, judged against the restored policy.
@@ -1225,8 +1232,18 @@ func (h *Hub) restoreAsSteps(ctx context.Context, p *Progress, archive, newID st
 	if err := writeOrRemove(h.userOverridePath(newID), sb.user); err != nil {
 		return undo(statusErr(500, "custom override: %v", err))
 	}
+	if h.testHookApplyRestore != nil {
+		if err := h.testHookApplyRestore("config"); err != nil {
+			return undo(err)
+		}
+	}
 	members := h.groupSnapshot(newID)
 	h.mu.Lock()
+	// The pick again, under the mu that stores it (see applyRestore).
+	if err := pickableLocked(h.st.SignIn, &sb.cfg.SignInTemplate); err != nil {
+		h.mu.Unlock()
+		return undo(statusErr(409, "sign-in template: %v", err))
+	}
 	h.applyConfigLocked(newID, sb.cfg)
 	h.rebuildLocked()
 	// Every companion off, modes and providers kept (§11.6); switching

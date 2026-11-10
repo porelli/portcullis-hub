@@ -463,6 +463,72 @@ func TestRecoverRefusesForeignArchive(t *testing.T) {
 	}
 }
 
+// Fix round 1: the pick is checked again under the mu that stores it. A
+// template disabled after staging fails the restore: the same-instance
+// restore rolls back (the pick as it was), restore-as is undone.
+func TestRestorePickDisabledMidRestore(t *testing.T) {
+	f := newInstanceFixture(t, nil)
+	simulateCompose(f, 0)
+	f.h.mu.Lock()
+	addTemplateLocked(f.h, "mine", siLeaves("any", "security_key"))
+	f.h.mu.Unlock()
+	if err := f.h.CreateInstance("grafana", "grafana-b", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.h.SaveSettings("grafana-b", SettingsUpdate{SignInTemplate: pickTemplate("mine")}, siAdmin); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.h.Enable("grafana-b"); err != nil {
+		t.Fatal(err)
+	}
+	entry, err := f.h.BackupInstance("grafana-b", directory.Human("root"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	setMine := func(on bool) {
+		f.h.mu.Lock()
+		tm := f.h.st.SignIn.Templates["mine"]
+		tm.Enabled = on
+		f.h.st.SignIn.Templates["mine"] = tm
+		f.h.mu.Unlock()
+	}
+	// Behind the in-use refusal (a race), once: the rollback then puts
+	// the instance back as it was (the template on again).
+	fired := false
+	f.h.testHookApplyRestore = func(stage string) error {
+		switch {
+		case (stage == "volumes" || stage == "config") && !fired:
+			fired = true
+			setMine(false)
+		case stage == "volumes":
+			setMine(true)
+		}
+		return nil
+	}
+	_, err = f.h.RestoreInstance("grafana-b", entry.Archive, directory.Human("root"))
+	if statusOf(err) != 409 || !strings.Contains(err.Error(), "disabled") {
+		t.Fatalf("same-instance restore = %v", err)
+	}
+	f.h.Wait()
+	f.h.mu.RLock()
+	pick := f.h.st.Instances["grafana-b"].SignInTemplate
+	f.h.mu.RUnlock()
+	if pick != "mine" || !f.h.IsEnabled("grafana-b") {
+		t.Errorf("after the rollback: pick %q enabled %v", pick, f.h.IsEnabled("grafana-b"))
+	}
+	setMine(true)
+	fired = false
+	if _, err := f.h.RestoreInstanceAs(entry.Archive, "grafana-c", directory.Human("root")); statusOf(err) != 409 {
+		t.Fatalf("restore-as = %v", err)
+	}
+	f.h.mu.RLock()
+	_, had := f.h.st.Instances["grafana-c"]
+	f.h.mu.RUnlock()
+	if had || f.h.Template("grafana-c") != nil {
+		t.Error("restore-as not undone")
+	}
+}
+
 // Re-review N2 + N4 (sign-in Task 4): a restored sign-in template pick
 // is stored when it names an enabled template here (a disabled one is
 // refused, never the default instead), and a never-enabled instance stays
