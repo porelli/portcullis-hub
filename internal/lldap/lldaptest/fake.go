@@ -8,9 +8,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -128,6 +130,13 @@ func (s *Server) AddUser(id, email, display, password string, groups ...string) 
 			}
 		}
 	}
+}
+
+// UserIDs lists the users' ids, sorted.
+func (s *Server) UserIDs() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Sorted(maps.Keys(s.Users))
 }
 
 // newUUID is a fresh account uuid (a re-created name gets a new one).
