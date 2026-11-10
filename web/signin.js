@@ -75,9 +75,14 @@
   }
   function plural(n, one, many) { return n + ' ' + (n === 1 ? one : many); }
 
-  // blockedHtml: "bob (password only) · dave (no method yet)".
-  function blockedHtml(blocked) {
-    return (blocked || []).map(b => '<b>' + esc(b.user) + '</b> (' + esc(b.why) + ')').join(' · ');
+  // blockedHtml: "bob (password only) · dave (no method yet)"; with max,
+  // at most max names and "and N more".
+  const LIST_MAX = 12;
+  function blockedHtml(blocked, max) {
+    const all = blocked || [];
+    const shown = max && all.length > max ? all.slice(0, max) : all;
+    return shown.map(b => '<b>' + esc(b.user) + '</b> (' + esc(b.why) + ')').join(' · ') +
+      (shown.length < all.length ? ' · and ' + (all.length - shown.length) + ' more' : '');
   }
 
   function usable(t) { return t.enabled && !t.problem; }
@@ -323,7 +328,7 @@
     let h = '<div class="public-warn si-impact" data-signin-impact role="alert">';
     if (imp && imp.unknown) h += '<div>Who this change blocks isn\'t known: ' + esc(imp.unknown) + '</div>';
     for (const a of (imp && imp.affected) || []) {
-      h += '<div class="si-affect">' + esc(plural((a.blocked || []).length, 'person', 'people') + ' would no longer be able to sign in to ' + a.name) + ': ' + blockedHtml(a.blocked) + '</div>';
+      h += '<div class="si-affect">' + esc(plural((a.blocked || []).length, 'person', 'people') + ' would no longer be able to sign in to ' + a.name) + ': ' + blockedHtml(a.blocked, LIST_MAX) + '</div>';
     }
     return h + '<div class="si-row"><button type="button" class="btn btn-danger btn-sm" data-signin-action="impact-apply" data-key="' + esc(errKey) + '">Apply anyway</button>' +
       '<button type="button" class="btn btn-secondary btn-sm" data-signin-action="impact-cancel" data-key="' + esc(errKey) + '">Cancel</button></div></div>';
@@ -766,7 +771,7 @@
     const b = isv.blocked || [];
     if (draft) {
       if (!b.length) return '<small data-signin-blocked-none>Nobody who can use ' + esc(isv.name) + ' is newly blocked by this choice.</small>';
-      return '<div class="public-warn" data-signin-blocked>' + esc(plural(b.length, 'person', 'people') + ' who can use ' + isv.name + ' would no longer be able to sign in to it') + ': ' + blockedHtml(b) +
+      return '<div class="public-warn" data-signin-blocked>' + esc(plural(b.length, 'person', 'people') + ' who can use ' + isv.name + ' would no longer be able to sign in to it') + ': ' + blockedHtml(b, LIST_MAX) +
         ' <span class="si-sub">— if you save this choice</span></div>';
     }
     if (!b.length) return '<small>Everyone who can use ' + esc(isv.name) + ' can meet it.</small>';

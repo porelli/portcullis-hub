@@ -664,3 +664,16 @@ func TestPickRefusalMatchesHub(t *testing.T) {
 		t.Error("settings.js doesn't place pick refusals with PICK_REFUSAL")
 	}
 }
+
+// TestSignInImpactListClipped: a long list of blocked people shows the
+// first 12 and "and N more"; the count is of everyone.
+func TestSignInImpactListClipped(t *testing.T) {
+	h := signInJS(t, `S.impactHtml({affected: [{kind: "core", instance: "portal", name: "Portal",
+  blocked: Array.from({length: 20}, (_, i) => ({user: "user" + i, why: "synced passkey only"}))}], unknown: ""}, "default")`).(string)
+	if !strings.Contains(h, "20 people would no longer be able to sign in to Portal") || !strings.Contains(h, "<b>user11</b> (synced passkey only) · and 8 more") || strings.Contains(h, "user12") {
+		t.Errorf("the clipped list:\n%s", h)
+	}
+	if b := signInJS(t, `S.blockedHtml(Array.from({length: 20}, (_, i) => ({user: "u" + i, why: "x"})))`).(string); !strings.Contains(b, "u19") || strings.Contains(b, "more") {
+		t.Errorf("blockedHtml without max clips: %s", b)
+	}
+}
