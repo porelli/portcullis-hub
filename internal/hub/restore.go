@@ -1426,11 +1426,18 @@ func (h *Hub) removeNewInstance(id string, prior *priorSettings) error {
 		// state "created") and its setup values. Whatever the default instance had before —
 		// its .env, overrides, settings and secrets, policy, public and
 		// sign-in choices, AI state — is its own and stays.
+		// The default instance's sign-in template pick is its own and
+		// stays (never the default instead, which may be weaker): the one
+		// the create recorded, else the created entry's own (prior nil:
+		// restore-as, or a retried undo).
+		pick := e.SignInTemplate
+		if prior != nil && prior.pick != "" {
+			pick = prior.pick
+		}
 		h.mu.Lock()
 		delete(h.st.Instances, id)
-		if prior != nil && prior.pick != "" {
-			// The entry held only the pick before the create: it stays.
-			h.st.Instances[id] = state.Instance{ID: id, Template: id, SignInTemplate: prior.pick}
+		if pick != "" {
+			h.st.Instances[id] = state.Instance{ID: id, Template: id, SignInTemplate: pick}
 		}
 		switch {
 		case prior == nil:

@@ -911,6 +911,34 @@ func TestRemoveNewInstanceDefaultWithoutEntry(t *testing.T) {
 	}
 }
 
+// Fix round 2: an undo with no prior record (restore-as, a retried undo)
+// keeps the default instance's pick from the created entry itself, never
+// falling back to the (maybe weaker) default.
+func TestRemoveNewInstanceKeepsPickWithoutPrior(t *testing.T) {
+	f := newInstanceFixture(t, nil)
+	if _, err := f.h.SaveSettings("grafana", SettingsUpdate{SignInTemplate: pickTemplate("strong")}, root); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.h.CreateInstance("grafana", "grafana", nil); err != nil {
+		t.Fatal(err)
+	}
+	f.h.mu.RLock()
+	created := f.h.st.Instances["grafana"]
+	f.h.mu.RUnlock()
+	if created.State != state.InstanceCreated || created.SignInTemplate != "strong" {
+		t.Fatalf("created entry = %+v", created)
+	}
+	if err := f.h.removeNewInstance("grafana", nil); err != nil {
+		t.Fatal(err)
+	}
+	f.h.mu.RLock()
+	e, ok := f.h.st.Instances["grafana"]
+	f.h.mu.RUnlock()
+	if !ok || !pickOnlyEntry(e, "grafana") || e.SignInTemplate != "strong" {
+		t.Errorf("after the undo: %+v %v, want only the pick strong", e, ok)
+	}
+}
+
 // Final fix M1: an instance that can't be resolved is named like a
 // resolved one — the manifest's name when its template is known (the
 // label==name rule too), else the template id.
