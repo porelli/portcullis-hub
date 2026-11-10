@@ -89,6 +89,8 @@ func (h *Hub) doctorInputs(ctx context.Context) (*doctor.Inputs, error) {
 	// The AI checks' inputs (Task 20): containers through Docker, never
 	// under mu.
 	aiIns := h.aiDoctorInputs(ctx)
+	// The FIDO list's state (its own leaf lock, before mu).
+	mdsIn := h.mdsProblem()
 	addrs, derr := h.domainAddrs(ctx)
 	if derr != nil {
 		log.Printf("doctor: couldn't resolve %s (%v): exposure not checked against its addresses", h.cfg.Domain, derr)
@@ -98,7 +100,7 @@ func (h *Hub) doctorInputs(ctx context.Context) (*doctor.Inputs, error) {
 	defer h.mu.RUnlock()
 	in := &doctor.Inputs{Now: time.Now().UTC(), BindRoots: slices.Clone(h.bindRoots),
 		Domain: h.cfg.Domain, DomainAddrs: addrs, DomainErr: derr != nil,
-		LocalNetworks: h.localNetworksLocked(), Ports: h.portInsLocked(), AI: aiIns}
+		LocalNetworks: h.localNetworksLocked(), Ports: h.portInsLocked(), AI: aiIns, SignInMDS: mdsIn}
 	for _, u := range h.pathUsagesLocked() {
 		in.Paths = append(in.Paths, pathIn(u))
 	}

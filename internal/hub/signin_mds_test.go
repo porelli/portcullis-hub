@@ -21,6 +21,7 @@ import (
 
 	"github.com/go-webauthn/webauthn/metadata"
 
+	"github.com/portcullis/hub/internal/doctor"
 	"github.com/portcullis/hub/internal/fidomds"
 	"github.com/portcullis/hub/internal/fidomds/fidomdstest"
 )
@@ -355,5 +356,134 @@ func TestCapStale(t *testing.T) {
 	}
 	if got := capStale(time.Minute, fidomds.Status{NextUpdate: now.Add(-40 * 24 * time.Hour)}, now); got != time.Minute {
 		t.Errorf("already stale: %v", got)
+	}
+}
+
+// mdsRig is a fake MDS server and a Fetcher on f's data directory.
+type mdsRig struct {
+	root, leaf *fidomdstest.CA
+	srv        *fidomdstest.Server
+}
+
+func startMDS(t *testing.T, f *fixture) *mdsRig {
+	t.Helper()
+	r := &mdsRig{root: fidomdstest.NewCert(t, "MDS test root", nil, true), srv: &fidomdstest.Server{}}
+	r.leaf = fidomdstest.NewCert(t, "MDS test signer", r.root, false)
+	ts := httptest.NewServer(r.srv)
+	t.Cleanup(ts.Close)
+	pool := x509.NewCertPool()
+	pool.AddCert(r.root.Cert)
+	f.h.mds.fetcher = &fidomds.Fetcher{URL: ts.URL, CacheFile: filepath.Join(f.data, filepath.FromSlash(MDSCacheFile)), Roots: pool, HTTP: ts.Client()}
+	return r
+}
+
+func (r *mdsRig) blob(t *testing.T, no int) []byte {
+	entry := fidomdstest.Entry(mdsKeyAAGUID, []string{"external"}, []string{"secure_element"}, fidomdstest.B64(r.root.Cert), fidomdstest.Reports("FIDO_CERTIFIED"))
+	return fidomdstest.SignBlob(t, r.leaf, []*x509.Certificate{r.leaf.Cert, r.root.Cert}, fidomdstest.Payload(no, time.Now().AddDate(0, 0, 20), entry))
+}
+
+func runMDS(t *testing.T, f *fixture) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { f.h.RunMDS(ctx, 20*time.Millisecond); close(done) }()
+	t.Cleanup(func() { cancel(); <-done })
+}
+
+func fidoFinding(t *testing.T, f *fixture) *doctor.Finding {
+	t.Helper()
+	r, err := f.h.Doctor(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, x := range r.Findings {
+		if x.Kind == doctor.KindSignInFIDOUnavailable {
+			return &x
+		}
+	}
+	return nil
+}
+
+func signInWarning(t *testing.T, f *fixture) string {
+	t.Helper()
+	v, err := f.h.SignInView(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return v.MDSWarning
+}
+
+// Every fetch failing since the first start: Settings warns and the
+// doctor reports signin_fido_list_unavailable; a good fetch clears both.
+func TestMDSUnavailableWarnsAndDoctor(t *testing.T) {
+	f, _, _ := doctorFixture(t)
+	if fidoFinding(t, f) != nil {
+		t.Fatal("finding before any failure")
+	}
+	r := startMDS(t, f)
+	r.srv.Fail(500)
+	runMDS(t, f)
+	waitUntil(t, "the unavailable warning", func() bool { return strings.Contains(signInWarning(t, f), "isn't available") })
+	if w := signInWarning(t, f); !strings.Contains(w, "status 500") || strings.Contains(w, "mds.serial") {
+		t.Errorf("warning = %q", w)
+	}
+	x := fidoFinding(t, f)
+	if x == nil || x.Severity != doctor.Warning || !strings.Contains(x.Why, "status 500") {
+		t.Fatalf("finding = %+v", x)
+	}
+	r.srv.Serve(r.blob(t, 3))
+	r.srv.Fail(0)
+	waitUntil(t, "the warning cleared", func() bool { return signInWarning(t, f) == "" })
+	if x := fidoFinding(t, f); x != nil {
+		t.Errorf("finding after a good fetch: %+v", x)
+	}
+}
+
+// An unreadable high-water serial: the warning and the finding name
+// <data>/signin/mds.serial.
+func TestMDSHighWaterUnreadableNamed(t *testing.T) {
+	f, _, _ := doctorFixture(t)
+	r := startMDS(t, f)
+	hw := f.h.mds.fetcher.HighWaterFile()
+	if want := filepath.Join(f.data, "signin", "mds.serial"); hw != want {
+		t.Fatalf("high-water file = %s, want %s", hw, want)
+	}
+	os.MkdirAll(filepath.Dir(hw), 0700)
+	os.WriteFile(hw, []byte("junk"), 0600)
+	r.srv.Serve(r.blob(t, 3))
+	runMDS(t, f)
+	waitUntil(t, "the high-water warning", func() bool { return strings.Contains(signInWarning(t, f), hw) })
+	x := fidoFinding(t, f)
+	if x == nil || !strings.Contains(strings.Join(x.Steps, " "), hw) {
+		t.Fatalf("finding = %+v", x)
+	}
+	doc := readKeycloakSignIn(t, f)
+	if len(doc.Authenticators) != 0 {
+		t.Errorf("published %v with an unreadable high-water serial", doc.Authenticators)
+	}
+}
+
+// Production (no HUB_DEV): a BLOB below the serial signin-keycloak.json
+// last published is refused even with no high-water file.
+func TestMDSPublishedSerialFloor(t *testing.T) {
+	f := newFixture(t)
+	next := time.Now().AddDate(0, 0, 10).UTC().Truncate(24 * time.Hour)
+	f.h.setMDS(mdsWith(t, 50, next, mdsKeyAAGUID, testRootDER(t, "mds")), &fidomds.Status{Serial: 50, NextUpdate: next})
+	if err := f.h.WritePolicy(); err != nil {
+		t.Fatal(err)
+	}
+	// A new process: nothing in memory, no cache, no high-water file.
+	f.h.mds.mu.Lock()
+	f.h.mds.meta, f.h.mds.status = nil, fidomds.Status{}
+	f.h.mds.mu.Unlock()
+	r := startMDS(t, f)
+	r.srv.Serve(r.blob(t, 49))
+	runMDS(t, f)
+	waitUntil(t, "the refusal", func() bool { return strings.Contains(f.h.mdsStatus().Err, "below the serial already seen (50)") })
+	if s := lastPublishedSerial(f.h.signInKeycloakPath()); s != 50 {
+		t.Errorf("published serial = %d, want 50 kept", s)
+	}
+	if _, err := os.Stat(f.h.mds.fetcher.CacheFile); !os.IsNotExist(err) {
+		t.Errorf("BLOB 49 cached: %v", err)
 	}
 }

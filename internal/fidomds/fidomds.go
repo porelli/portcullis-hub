@@ -75,6 +75,10 @@ type Fetcher struct {
 	Roots     *x509.CertPool
 	HTTP      *http.Client
 	Now       func() time.Time
+	// Floor is a second floor besides the high-water serial (the Hub
+	// sets the serial its last signin-keycloak.json published, in
+	// production): a BLOB below max(high-water, Floor) is refused.
+	Floor int
 
 	mu   sync.Mutex
 	meta *metadata.Metadata // the last good BLOB, parsed (nil = not loaded)
@@ -126,8 +130,8 @@ func (f *Fetcher) loadLocked() (*metadata.Metadata, error) {
 	if err != nil {
 		return nil, err
 	}
-	if m.Parsed.Number < hw {
-		return nil, fmt.Errorf("fido mds: cached BLOB %d is below the high-water serial %d", m.Parsed.Number, hw)
+	if floor := max(hw, f.Floor); m.Parsed.Number < floor {
+		return nil, fmt.Errorf("fido mds: cached BLOB %d is below the serial already seen (%d)", m.Parsed.Number, floor)
 	}
 	var at time.Time
 	if fi, err := os.Stat(f.CacheFile); err == nil {
@@ -167,8 +171,8 @@ func (f *Fetcher) Refresh(ctx context.Context) (*Status, error) {
 			err = fmt.Errorf("fido mds: BLOB %d is expired (next update %s)", m.Parsed.Number, m.Parsed.NextUpdate.Format(time.DateOnly))
 		case prev != nil && m.Parsed.Number < prev.Parsed.Number:
 			err = fmt.Errorf("fido mds: BLOB %d is older than the cached %d", m.Parsed.Number, prev.Parsed.Number)
-		case m.Parsed.Number < hw:
-			err = fmt.Errorf("fido mds: BLOB %d is below the high-water serial %d", m.Parsed.Number, hw)
+		case m.Parsed.Number < max(hw, f.Floor):
+			err = fmt.Errorf("fido mds: BLOB %d is below the serial already seen (%d)", m.Parsed.Number, max(hw, f.Floor))
 		default:
 			err = f.writeCache(raw)
 		}
@@ -229,7 +233,13 @@ func (f *Fetcher) writeCache(raw []byte) error {
 	return nil
 }
 
-// serialFile is the high-water serial's file, next to the cache.
+// ErrHighWater: the high-water serial's file can't be read (every
+// errors.Is of a Refresh / Load error caused by it).
+var ErrHighWater = errors.New("fido mds: the high-water serial can't be read")
+
+// HighWaterFile is the high-water serial's file, next to the cache.
+func (f *Fetcher) HighWaterFile() string { return f.serialFile() }
+
 func (f *Fetcher) serialFile() string { return filepath.Join(filepath.Dir(f.CacheFile), "mds.serial") }
 
 // highWater is the highest serial ever cached (0 = none recorded); a file
@@ -241,11 +251,11 @@ func (f *Fetcher) highWater() (int, error) {
 		return 0, nil
 	}
 	if err != nil {
-		return 0, fmt.Errorf("fido mds: high-water serial: %w", err)
+		return 0, fmt.Errorf("%w (%s): %v", ErrHighWater, f.serialFile(), err)
 	}
 	n, err := strconv.Atoi(strings.TrimSpace(string(b)))
 	if err != nil || n < 0 {
-		return 0, fmt.Errorf("fido mds: high-water serial %s is not a number", f.serialFile())
+		return 0, fmt.Errorf("%w: %s is not a number", ErrHighWater, f.serialFile())
 	}
 	return n, nil
 }

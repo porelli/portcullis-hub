@@ -83,7 +83,8 @@ type SignInView struct {
 	Default     string               `json:"default"`
 	Core        map[string]string    `json:"core"`
 	AddStronger bool                 `json:"add_stronger"`
-	// MDS is the FIDO list's status; MDSWarning is set while it is stale.
+	// MDS is the FIDO list's status; MDSWarning is set while it is stale
+	// or unavailable (mdsWarning).
 	MDS        fidomds.Status `json:"mds"`
 	MDSWarning string         `json:"mds_warning,omitempty"`
 }
@@ -178,9 +179,7 @@ func (h *Hub) signInViewLocked() *SignInView {
 	on := si.MethodsOn()
 	people := h.methodPeopleLocked()
 	v := &SignInView{Default: si.Default, Core: maps.Clone(si.Core), AddStronger: si.AddStronger, MDS: h.mdsStatus()}
-	if v.MDS.Stale {
-		v.MDSWarning = mdsStaleWarning
-	}
+	v.MDSWarning = h.mdsWarning(v.MDS)
 	for _, m := range signin.Methods {
 		info, _ := signin.InfoOf(m)
 		v.Methods = append(v.Methods, SignInMethodView{ID: m, Label: info.Label, Tenths: info.Tenths, On: on[m], Available: info.Available, People: people[m]})

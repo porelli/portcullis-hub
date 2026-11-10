@@ -25,6 +25,7 @@ import (
 
 	"github.com/go-webauthn/webauthn/metadata"
 
+	"github.com/portcullis/hub/internal/doctor"
 	"github.com/portcullis/hub/internal/fidomds"
 )
 
@@ -61,6 +62,12 @@ type mdsState struct {
 	lastNo, lastGen int
 	// now is the clock (nil = time.Now; tests set it before RunMDS).
 	now func() time.Time
+	// hwFile: the last failure was the unreadable high-water serial file
+	// (its path; "" = another cause or none).
+	hwFile string
+	// floor: production's second floor (the serial signin-keycloak.json
+	// had published at RunMDS's start); never published below either.
+	floor int
 }
 
 func (h *Hub) mdsNow() time.Time {
@@ -83,10 +90,56 @@ func (h *Hub) setMDS(m *metadata.Metadata, st *fidomds.Status) {
 	defer h.mds.mu.Unlock()
 	if m != nil {
 		h.mds.meta = m
+		h.mds.hwFile = ""
 	}
 	if st != nil {
 		h.mds.status = *st
 	}
+}
+
+// setMDSFailure records a failed load or refresh (st the kept BLOB's
+// status, nil = none): Err set, and whether the high-water serial's file
+// was the cause.
+func (h *Hub) setMDSFailure(st *fidomds.Status, err error, f *fidomds.Fetcher) {
+	h.mds.mu.Lock()
+	defer h.mds.mu.Unlock()
+	if st != nil {
+		h.mds.status = *st
+	}
+	h.mds.status.Err = err.Error()
+	h.mds.hwFile = ""
+	if errors.Is(err, fidomds.ErrHighWater) {
+		h.mds.hwFile = f.HighWaterFile()
+	}
+}
+
+// mdsProblem is the FIDO list's unavailability (no BLOB loaded and the
+// last load or refresh failed; nil = none): the doctor's
+// signin_fido_list_unavailable and Settings → Sign-in's warning.
+func (h *Hub) mdsProblem() *doctor.SignInMDSIn {
+	h.mds.mu.Lock()
+	defer h.mds.mu.Unlock()
+	if h.mds.meta != nil || h.mds.status.Err == "" {
+		return nil
+	}
+	return &doctor.SignInMDSIn{Err: h.mds.status.Err, HighWaterFile: h.mds.hwFile}
+}
+
+// mdsWarning is Settings → Sign-in's FIDO list warning ("" = none): the
+// list is unavailable (naming the high-water file when it is the cause)
+// or stale.
+func (h *Hub) mdsWarning(st fidomds.Status) string {
+	if p := h.mdsProblem(); p != nil {
+		w := "The FIDO list isn't available (" + p.Err + "): new passkeys count as synced until it loads."
+		if p.HighWaterFile != "" {
+			w += " Fix " + p.HighWaterFile + " (it holds the highest FIDO list serial accepted): the Hub refuses every FIDO list until it can read it."
+		}
+		return w
+	}
+	if st.Stale {
+		return mdsStaleWarning
+	}
+	return ""
 }
 
 // mdsStatus is the FIDO list's status now (Stale computed for now).
@@ -112,7 +165,9 @@ func (h *Hub) signInTrust() (map[string]fidomds.AuthenticatorTrust, KeycloakMDS)
 		log.Printf("signin: the FIDO list (BLOB %d) is more than 30 days past its next update: no authenticators published until it refreshes", h.mds.status.Serial)
 	}
 	h.mds.staleLogged = stale
-	doc := KeycloakMDS{Serial: h.mds.status.Serial, NextUpdate: h.mds.status.NextUpdate.UTC()}
+	// Never below the floor: a refused older BLOB (or none yet) must not
+	// lower the published serial the next start floors on.
+	doc := KeycloakMDS{Serial: max(h.mds.status.Serial, h.mds.floor), NextUpdate: h.mds.status.NextUpdate.UTC()}
 	h.mds.mu.Unlock()
 
 	path := h.cfg.ExtraAuthenticators
@@ -269,10 +324,21 @@ func (h *Hub) RunMDS(ctx context.Context, every time.Duration) {
 	if every <= 0 {
 		every = 24 * time.Hour
 	}
+	if !h.cfg.Dev {
+		// The second floor (production: the published serial is the
+		// BLOB's no): no BLOB below what signin-keycloak.json published.
+		f.Floor = lastPublishedSerial(h.signInKeycloakPath())
+		h.mds.mu.Lock()
+		h.mds.floor = f.Floor
+		h.mds.mu.Unlock()
+	}
 	m, st, err := f.Load()
 	if err == nil {
 		h.setMDS(m, st)
 		h.writePolicyLogged()
+	} else if !errors.Is(err, os.ErrNotExist) {
+		log.Printf("signin: FIDO metadata cache: %v", err)
+		h.setMDSFailure(nil, err, f)
 	}
 	wait := time.Duration(0)
 	if err == nil {
@@ -287,9 +353,12 @@ func (h *Hub) RunMDS(ctx context.Context, every time.Duration) {
 		case <-t.C:
 		}
 		st, err := f.Refresh(ctx)
+		if ctx.Err() != nil {
+			return // shutting down: no republish
+		}
 		if err != nil {
 			log.Printf("signin: FIDO metadata refresh failed (keeping BLOB %d): %v", st.Serial, err)
-			h.setMDS(nil, st)
+			h.setMDSFailure(st, err, f)
 			// Republish: the kept BLOB may have gone stale meanwhile
 			// (it then publishes no authenticators).
 			h.writePolicyLogged()
@@ -299,6 +368,7 @@ func (h *Hub) RunMDS(ctx context.Context, every time.Duration) {
 		m, st2, err := f.Load()
 		if err != nil {
 			log.Printf("signin: FIDO metadata: %v", err)
+			h.setMDSFailure(nil, err, f)
 			h.writePolicyLogged()
 			t.Reset(min(every, mdsRetry))
 			continue

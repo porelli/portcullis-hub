@@ -87,11 +87,15 @@ func SignBlob(t testing.TB, signer *CA, chain []*x509.Certificate, payload any) 
 	return []byte(signing + "." + enc.EncodeToString(sig))
 }
 
-// Report is a status report: a status and an effective date ("" = none).
-type Report struct{ Status, Date string }
+// Report is a status report: a status, an effective date and a sunset
+// date ("" = none).
+type Report struct{ Status, Date, Sunset string }
 
 // R is a report with status s effective on date ("" = no date).
 func R(s, date string) Report { return Report{Status: s, Date: date} }
+
+// RS is R with a sunset date.
+func RS(s, date, sunset string) Report { return Report{Status: s, Date: date, Sunset: sunset} }
 
 // Reports are statuses with increasing effective dates from 2025-01-01.
 func Reports(statuses ...string) []Report {
@@ -109,6 +113,9 @@ func Entry(aaguid string, attach, keyProt []string, root string, reports []Repor
 		m := map[string]any{"status": r.Status}
 		if r.Date != "" {
 			m["effectiveDate"] = r.Date
+		}
+		if r.Sunset != "" {
+			m["sunsetDate"] = r.Sunset
 		}
 		rs = append(rs, m)
 	}

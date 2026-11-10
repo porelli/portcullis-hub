@@ -230,6 +230,8 @@ type Inputs struct {
 	FileSharing []FileSharingIn
 	// AI: the companions the AI checks judge (ai.go, plan 4 Task 20).
 	AI []AIIn
+	// SignInMDS: the FIDO list is unavailable (signin.go; nil = fine).
+	SignInMDS *SignInMDSIn
 }
 
 // UnverifiableIn is one active credential the holder check can't verify

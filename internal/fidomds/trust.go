@@ -49,10 +49,10 @@ func isCertified(s metadata.AuthenticatorStatus) bool {
 }
 
 // isCertification: the statuses that say whether the model is FIDO
-// certified (ruling R1); UPDATE_AVAILABLE, FIPS140_CERTIFIED_* and the
-// revocation statuses aren't.
+// certified (ruling R1); UPDATE_AVAILABLE, FIPS140_CERTIFIED_*, RETIRED
+// (sticky: statusOf) and the revocation statuses aren't.
 func isCertification(s metadata.AuthenticatorStatus) bool {
-	return isCertified(s) || s == metadata.NotFidoCertified || s == metadata.SelfAssertionSubmitted || s == metadata.Retired
+	return isCertified(s) || s == metadata.NotFidoCertified || s == metadata.SelfAssertionSubmitted
 }
 
 // Trust is the authenticator trust list of BLOB m at now (D15, contract
@@ -66,6 +66,7 @@ func isCertification(s metadata.AuthenticatorStatus) bool {
 //   - status revoked: any report REVOKED, USER_VERIFICATION_BYPASS,
 //     ATTESTATION_KEY_COMPROMISE, USER_KEY_REMOTE_COMPROMISE or
 //     USER_KEY_PHYSICAL_COMPROMISE (kind and roots still listed);
+//     left out: else, any report RETIRED (sticky, whatever comes after);
 //     certified: else, the latest certification status (isCertification;
 //     dates when both reports have one, else document order, ties to the
 //     later — the library's current-report rule) is FIDO_CERTIFIED*;
@@ -117,10 +118,15 @@ func kindOf(s metadata.Statement) string {
 // statusOf judges the reports in effect: revoked, certified or "".
 func statusOf(effective []metadata.StatusReport) string {
 	var current *metadata.StatusReport
+	retired := false
 	for i := range effective {
 		r := &effective[i]
 		if revokedStatuses[r.Status] {
 			return StatusRevoked
+		}
+		if r.Status == metadata.Retired {
+			retired = true
+			continue
 		}
 		if !isCertification(r.Status) {
 			continue
@@ -130,7 +136,7 @@ func statusOf(effective []metadata.StatusReport) string {
 			current = r
 		}
 	}
-	if current != nil && isCertified(current.Status) {
+	if !retired && current != nil && isCertified(current.Status) {
 		return StatusCertified
 	}
 	return ""

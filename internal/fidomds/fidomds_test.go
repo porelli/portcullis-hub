@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -17,21 +18,25 @@ import (
 )
 
 const (
-	aaguidKey    = "cb69481e-8ff7-4039-93ec-0a2729a154a8"
-	aaguidDevice = "08987058-cadc-4b81-b6e1-30de50dcbe96"
-	aaguidSoft   = "11111111-2222-4333-8444-555555555555"
-	aaguidRevKey = "22222222-3333-4444-8555-666666666666"
-	aaguidComp   = "33333333-4444-4555-8666-777777777777"
-	aaguidNotCrt = "44444444-5555-4666-8777-888888888888"
-	aaguidUpd    = "55555555-6666-4777-8888-999999999999"
-	aaguidLateNC = "66666666-7777-4888-8999-aaaaaaaaaaaa"
-	aaguidHWOnly = "77777777-8888-4999-8aaa-bbbbbbbbbbbb"
-	aaguidNoRoot = "88888888-9999-4aaa-8bbb-cccccccccccc"
-	aaguidOOO    = "99999999-aaaa-4bbb-8ccc-dddddddddddd"
-	aaguidBoth   = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
-	aaguidSWSE   = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"
-	aaguidFuture = "cccccccc-dddd-4eee-8fff-000000000000"
-	aaguidNoDate = "dddddddd-eeee-4fff-8000-111111111111"
+	aaguidKey     = "cb69481e-8ff7-4039-93ec-0a2729a154a8"
+	aaguidDevice  = "08987058-cadc-4b81-b6e1-30de50dcbe96"
+	aaguidSoft    = "11111111-2222-4333-8444-555555555555"
+	aaguidRevKey  = "22222222-3333-4444-8555-666666666666"
+	aaguidComp    = "33333333-4444-4555-8666-777777777777"
+	aaguidNotCrt  = "44444444-5555-4666-8777-888888888888"
+	aaguidUpd     = "55555555-6666-4777-8888-999999999999"
+	aaguidLateNC  = "66666666-7777-4888-8999-aaaaaaaaaaaa"
+	aaguidHWOnly  = "77777777-8888-4999-8aaa-bbbbbbbbbbbb"
+	aaguidNoRoot  = "88888888-9999-4aaa-8bbb-cccccccccccc"
+	aaguidOOO     = "99999999-aaaa-4bbb-8ccc-dddddddddddd"
+	aaguidBoth    = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+	aaguidSWSE    = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"
+	aaguidFuture  = "cccccccc-dddd-4eee-8fff-000000000000"
+	aaguidRetired = "eeeeeeee-ffff-4000-8111-222222222222"
+	aaguidRetOld  = "ffffffff-0000-4111-8222-333333333333"
+	aaguidSunRev  = "01010101-0202-4303-8404-050505050505"
+	aaguidSunCert = "02020202-0303-4404-8505-060606060606"
+	aaguidNoDate  = "dddddddd-eeee-4fff-8000-111111111111"
 )
 
 var (
@@ -300,6 +305,12 @@ func TestTrustKinds(t *testing.T) {
 		E(aaguidSWSE, ext, []string{"software", "secure_element"}, r, rep("FIDO_CERTIFIED")),
 		// A report not in effect yet doesn't count.
 		E(aaguidFuture, ext, se, r, []fidomdstest.Report{fidomdstest.R("FIDO_CERTIFIED", "2025-01-01"), fidomdstest.R("REVOKED", "2027-01-01")}),
+		// RETIRED is sticky: a later certification doesn't bring it back.
+		E(aaguidRetired, ext, se, r, rep("FIDO_CERTIFIED_L1", "RETIRED")),
+		E(aaguidRetOld, ext, se, r, rep("RETIRED", "FIDO_CERTIFIED_L2")),
+		// A report past its sunset date no longer counts.
+		E(aaguidSunRev, ext, se, r, []fidomdstest.Report{fidomdstest.R("FIDO_CERTIFIED", "2025-01-01"), fidomdstest.RS("REVOKED", "2025-02-01", "2026-01-01")}),
+		E(aaguidSunCert, ext, se, r, []fidomdstest.Report{fidomdstest.RS("FIDO_CERTIFIED", "2025-01-01", "2026-01-01")}),
 		// No effective date: in effect.
 		E(aaguidNoDate, ext, se, r, []fidomdstest.Report{fidomdstest.R("FIDO_CERTIFIED", "2025-01-01"), fidomdstest.R("NOT_FIDO_CERTIFIED", "")}),
 	)
@@ -317,6 +328,7 @@ func TestTrustKinds(t *testing.T) {
 		aaguidOOO:    {Kind: KindSecurityKey, Status: StatusCertified, Roots: roots},
 		aaguidBoth:   {Kind: KindPasskeyDevice, Status: StatusCertified, Roots: roots},
 		aaguidFuture: {Kind: KindSecurityKey, Status: StatusCertified, Roots: roots},
+		aaguidSunRev: {Kind: KindSecurityKey, Status: StatusCertified, Roots: roots},
 	}
 	if len(got) != len(want) {
 		t.Errorf("trust has %d entries, want %d: %v", len(got), len(want), keys(got))
@@ -406,5 +418,35 @@ func TestLoadWithoutCache(t *testing.T) {
 	os.WriteFile(fx.f.CacheFile, b, 0600)
 	if m, _, err := fx.fresh().Load(); err == nil || m != nil {
 		t.Errorf("Load of a tampered cache = %v, %v", m, err)
+	}
+}
+
+// Fetcher.Floor (the Hub's last published serial, production): a BLOB
+// below it is refused with no high-water file, and so is a cache.
+func TestFloorRefusesLower(t *testing.T) {
+	fx := newFixture(t)
+	fx.f.Floor = 30
+	fx.serve(t, 29, fx.keyEntry())
+	if _, err := fx.f.Refresh(context.Background()); err == nil {
+		t.Fatal("serial 29 accepted below the floor 30")
+	}
+	fx.serve(t, 30, fx.keyEntry())
+	if st, err := fx.f.Refresh(context.Background()); err != nil || st.Serial != 30 {
+		t.Fatalf("serial 30 = %+v, %v", st, err)
+	}
+	f2 := fx.fresh()
+	f2.Floor = 31
+	if _, _, err := f2.Load(); err == nil {
+		t.Error("a cache below the floor loaded")
+	}
+}
+
+func TestHighWaterErrorIs(t *testing.T) {
+	fx := newFixture(t)
+	os.MkdirAll(filepath.Dir(fx.f.CacheFile), 0700)
+	os.WriteFile(fx.f.HighWaterFile(), []byte("x"), 0600)
+	fx.serve(t, 1)
+	if _, err := fx.f.Refresh(context.Background()); !errors.Is(err, ErrHighWater) {
+		t.Errorf("Refresh = %v, want ErrHighWater", err)
 	}
 }
