@@ -129,10 +129,11 @@ func TestFreshAuthFromEnv(t *testing.T) {
 	}
 }
 
-type fakeDirHub struct{ syncs, checks int }
+type fakeDirHub struct{ syncs, checks, stale int }
 
 func (f *fakeDirHub) TriggerDirectorySync()   { f.syncs++ }
 func (f *fakeDirHub) TriggerCredentialCheck() { f.checks++ }
+func (f *fakeDirHub) MarkInventoryStale()     { f.stale++ }
 
 // Plan 3 Task 9: OnChange triggers the directory sync and the holder
 // check; OnEvaluated (every evaluator run) the holder check only.
@@ -144,11 +145,11 @@ func TestWireDirectoryHooks(t *testing.T) {
 		t.Fatal("hooks not set")
 	}
 	dir.OnChange()
-	if h.syncs != 1 || h.checks != 1 {
-		t.Errorf("OnChange: syncs %d checks %d", h.syncs, h.checks)
+	if h.syncs != 1 || h.checks != 1 || h.stale != 1 {
+		t.Errorf("OnChange: syncs %d checks %d stale %d", h.syncs, h.checks, h.stale)
 	}
 	dir.OnEvaluated()
-	if h.syncs != 1 || h.checks != 2 {
+	if h.syncs != 1 || h.checks != 2 || h.stale != 1 {
 		t.Errorf("OnEvaluated: syncs %d checks %d", h.syncs, h.checks)
 	}
 }

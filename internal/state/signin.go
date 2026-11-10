@@ -43,15 +43,23 @@ type SignInTemplate struct {
 	BuiltIn bool        `json:"built_in" yaml:"built_in"`
 }
 
-// PasswordRecord is when and by whom the Hub set a person's password.
+// PasswordRecord is when and by whom the Hub set a person's password, and
+// the LLDAP account (uuid) it was set for: it counts only while the
+// person's current account has that uuid (a re-created name has none).
 type PasswordRecord struct {
 	SetAt time.Time `json:"set_at" yaml:"set_at"`
 	SetBy string    `json:"set_by" yaml:"set_by"`
+	UUID  string    `json:"uuid" yaml:"uuid"`
 }
 
 // CoreSignInKeys are the core pages that take a template (D11), in
 // display order: portal is the main domain.
 var CoreSignInKeys = []string{"portal", "hub", "people", "directory", "enroll", "metrics", "traefik"}
+
+// LockFile is the advisory lock the running Hub holds in its data
+// directory (fsutil.TryLock): `hub signin reset-core` refuses to touch
+// state.yaml while it is held.
+const LockFile = ".hub.lock"
 
 // DefaultSignInTemplate is the default template of a fresh state.
 const DefaultSignInTemplate = "standard"

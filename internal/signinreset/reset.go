@@ -17,6 +17,7 @@ import (
 	"strings"
 
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/signin"
 	"github.com/portcullis/hub/internal/state"
 )
@@ -68,6 +69,16 @@ func ResetCore(dataDir string) ([]string, error) {
 		}
 		return nil, err
 	}
+	// Never under a running Hub: it would overwrite the reset with its
+	// own state on its next save.
+	release, err := fsutil.TryLock(filepath.Join(dataDir, state.LockFile))
+	if err != nil {
+		if errors.Is(err, fsutil.ErrLocked) {
+			return nil, errors.New("the Hub is running on this data directory: stop it first (./portcullis signin reset-core does)")
+		}
+		return nil, err
+	}
+	defer release()
 	st, err := state.Load(path)
 	if err != nil {
 		return nil, err

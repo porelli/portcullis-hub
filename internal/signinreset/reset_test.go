@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/signin"
 	"github.com/portcullis/hub/internal/state"
 )
@@ -31,6 +32,19 @@ func TestSignInResetCore(t *testing.T) {
 	}
 
 	var out bytes.Buffer
+	// A running Hub holds the data directory's lock: refused, untouched.
+	release, err := fsutil.TryLock(filepath.Join(dir, state.LockFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := Main([]string{"reset-core"}, dir, &out); code != 1 || !strings.Contains(out.String(), "the Hub is running") {
+		t.Errorf("under a running Hub = %d: %s", code, out.String())
+	}
+	if st2, err := state.Load(path); err != nil || st2.SignIn.Core["hub"] != "mine" {
+		t.Errorf("state changed under the lock: %v", err)
+	}
+	release()
+	out.Reset()
 	if code := Main([]string{"reset-core"}, dir, &out); code != 0 {
 		t.Fatalf("Main = %d: %s", code, out.String())
 	}

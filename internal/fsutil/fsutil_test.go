@@ -1,6 +1,7 @@
 package fsutil
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -61,5 +62,26 @@ func TestCopyFile(t *testing.T) {
 	}
 	if err := CopyFile(filepath.Join(dir, "missing"), dst); err == nil {
 		t.Error("expected error")
+	}
+}
+
+func TestTryLock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".hub.lock")
+	release, err := TryLock(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// flock locks belong to the open file: a second open is refused.
+	if _, err := TryLock(path); !errors.Is(err, ErrLocked) {
+		t.Errorf("second lock = %v, want ErrLocked", err)
+	}
+	release()
+	again, err := TryLock(path)
+	if err != nil {
+		t.Fatalf("after release: %v", err)
+	}
+	again()
+	if fi, err := os.Stat(path); err != nil || fi.Mode().Perm() != 0600 {
+		t.Errorf("lock file = %v, %v", fi, err)
 	}
 }

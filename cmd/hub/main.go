@@ -22,12 +22,14 @@ import (
 	"github.com/portcullis/hub/internal/domains"
 	"github.com/portcullis/hub/internal/folderfix"
 	"github.com/portcullis/hub/internal/freshauth"
+	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/httpapi"
 	"github.com/portcullis/hub/internal/hub"
 	"github.com/portcullis/hub/internal/invite"
 	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/lldap"
 	"github.com/portcullis/hub/internal/signinreset"
+	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/web"
 )
 
@@ -190,6 +192,17 @@ func main() {
 	} else if err := compose.CheckVersion(v); err != nil {
 		log.Fatalf("refusing to start: %v", err)
 	}
+	// The data directory's advisory lock, held while the Hub runs: `hub
+	// signin reset-core` refuses to edit state.yaml under a running Hub
+	// (and a second Hub on the same data refuses to start).
+	if err := os.MkdirAll(cfg.DataDir, 0755); err != nil {
+		log.Fatalf("refusing to start: %v", err)
+	}
+	releaseLock, err := fsutil.TryLock(filepath.Join(cfg.DataDir, state.LockFile))
+	if err != nil {
+		log.Fatalf("refusing to start: the data directory is in use (another Hub, or signin reset-core running?): %v", err)
+	}
+	defer releaseLock()
 	h, err := hub.New(cfg, cli, engine, kc)
 	if err != nil {
 		log.Fatalf("refusing to start: %v", err)
@@ -493,6 +506,7 @@ func newHTTPServer(addr string, h http.Handler) *http.Server {
 type directoryHub interface {
 	TriggerDirectorySync()
 	TriggerCredentialCheck()
+	MarkInventoryStale()
 }
 
 // wireDirectoryHooks sets dir's OnChange and OnEvaluated (both
@@ -504,6 +518,10 @@ type directoryHub interface {
 // (F27).
 func wireDirectoryHooks(dir *directory.Service, h directoryHub) {
 	dir.OnChange = func() {
+		// Who has which sign-in method may have changed (a passkey
+		// removed, an account created or deleted): the next guarded save
+		// reads it again.
+		h.MarkInventoryStale()
 		h.TriggerDirectorySync()
 		h.TriggerCredentialCheck()
 	}
