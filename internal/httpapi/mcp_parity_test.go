@@ -91,6 +91,12 @@ var accessWidening = map[string]string{
 	"set_ai_providers":    "D when it adds a model provider to an AI page (people's data goes to it)",
 	"save_model_provider": "D when it changes where model traffic goes (base_url, instance, instance_name, region) or names no stored provider",
 	"save_hub_settings":   "D when it turns AI or the people MCP on, changes clients or origins, or raises a limit or connection length",
+	// Sign-in methods (Task 6).
+	"set_sign_in_method":    "D when on, W when off",
+	"save_sign_in_template": "D unless creating, or the new compiled rule Implies the old",
+	"set_default_template":  "D unless the new template Implies the current one",
+	"set_core_template":     "D unless the new template Implies the current one",
+	"set_add_stronger":      "D when on, W when off",
 	// Task 18 (G37 ruling 2; the directory's Membership.Guarding).
 	"create_instance":   "D when one of its groups already exists with members, or the template / directory can't be read (T18 fix round 1)",
 	"remove_member":     "D from an administrator, permission or guarding group (T18 fix round 1 ruling)",
@@ -224,7 +230,9 @@ func TestToolParity(t *testing.T) {
 		// Task 20 (§15.10, G15, G45).
 		"delete_folder", "folder_undo_apply", "doctor_apply_fix", "folder_apply", "folder_recheck_apply", "doctor_mute",
 		// Task 7 security review.
-		"stop_op"} {
+		"stop_op",
+		// Sign-in methods (Task 6).
+		"set_sign_in_method", "save_sign_in_template", "set_default_template", "set_core_template", "set_add_stronger"} {
 		if byName[n].Class != ClassDestructive {
 			t.Errorf("tool %s: class %q, want D", n, byName[n].Class)
 		}
@@ -243,7 +251,9 @@ func TestToolParity(t *testing.T) {
 		"doctor_scan", "doctor_unmute", "create_folder", "update_folder",
 		// Operation progress (§15.10): a Stop only reverses what the
 		// running operation did; the long operations' tools stay W / per call.
-		"disable_instance", "restart_instance"} {
+		"disable_instance", "restart_instance",
+		// Sign-in methods (Task 6).
+		"set_sign_in_template_enabled", "delete_sign_in_template"} {
 		if byName[n].Class != ClassWrite {
 			t.Errorf("tool %s: class %q, want W", n, byName[n].Class)
 		}

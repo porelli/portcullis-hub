@@ -119,6 +119,7 @@ func (s *Server) hubMux() *recordingMux {
 	s.registerFolders(mux)
 	s.registerDoctor(mux)
 	s.registerAI(mux)
+	s.registerSignIn(mux)
 	// Confirmations of admin tools (contract §15.6, G12): the same two
 	// routes as the people listener's, for this listener's confirmations.
 	s.registerConfirm(mux)
