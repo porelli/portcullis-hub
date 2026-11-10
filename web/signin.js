@@ -8,6 +8,10 @@
 //   window.PortcullisSignIn.blockedHtml(blocked)        "bob (password only) · …"
 //   window.PortcullisSignIn.instanceHtml(panel, isv)    the instance Settings tab's block
 //   window.PortcullisSignIn.pickBody(value, saved)      its part of the settings body
+//   window.PortcullisSignIn.pickChanged(sel)            the drop-down changed: who the new pick blocks
+//   window.PortcullisSignIn.editRule(rule, edit)        one editor change on a rule ({rule, refused})
+//   window.PortcullisSignIn.impactHtml(impact, key)     who a change blocks, with Apply / Cancel
+//   window.PortcullisSignIn.PICK_REFUSAL                the Hub's refusals of a template pick
 //
 // GET  /api/signin                         methods, templates, default, core picks
 // PUT  /api/signin/methods/{m}             {on}
@@ -16,6 +20,7 @@
 // PUT  /api/signin/templates/{id}/enabled  {on}
 // DELETE /api/signin/templates/{id}
 // POST /api/signin/templates/preview       {id?, name, rule}: score, sentence, who it affects
+// POST /api/signin/impact                  SignInDraft: who a change would newly block (nothing changes)
 // PUT  /api/signin/default                 {template}
 // PUT  /api/signin/core/{key}              {template}
 // PUT  /api/signin/add-stronger            {on}
@@ -25,13 +30,20 @@
 // data-signin-action attributes handled by delegated listeners on the
 // mounted container; a refusal is shown next to the control that caused
 // it and the control is put back to what the Hub holds; the editor keeps
-// what the admin typed until Save succeeds or Cancel.
+// what the admin typed until Save succeeds or Cancel. A default or core
+// page pick and a method switch-off ask the Hub who they newly block
+// first: anyone (or people unknown) = the list next to the control with
+// Apply / Cancel, else the change is applied at once.
 (function () {
   'use strict';
 
   const esc = s => window.escapeHtml(s);
   const PREVIEW_MS = 300;
   const MAX_LEVEL = 3;
+  const MAX_ITEMS = 8; // per group (signin.MaxItems)
+  // The Hub's refusals of an instance's template pick (hub pickable /
+  // pickableLocked / configCapability): shown at the drop-down.
+  const PICK_REFUSAL = /^(?:sign-in template\b|no sign-in template |"[^"]*" is disabled: enable it first)/;
 
   // The editor's names for the methods and families (chips and "+ method").
   const METHODS = [
@@ -81,7 +93,11 @@
     return '<label class="si-switch-wrap"><input type="checkbox" class="si-switch" data-signin-action="' + action + '"' + attrs +
       (checked ? ' checked' : '') + (disabled ? ' disabled' : '') + ' aria-label="' + esc(label) + '"><span class="si-switch-ui" aria-hidden="true"></span></label>';
   }
-  function errSlot(key) { return '<div class="si-err" data-signin-err="' + esc(key) + '" role="alert"></div>'; }
+  // errSlot: a control's refusal and, below it, the Apply / Cancel of a
+  // change that blocks people.
+  function errSlot(key) {
+    return '<div class="si-err" data-signin-err="' + esc(key) + '" role="alert"></div><div class="si-confirm" data-signin-confirm="' + esc(key) + '"></div>';
+  }
 
   function methodsHtml(view) {
     const total = view.people_total;
@@ -124,7 +140,7 @@
         '<td><button type="button" class="btn btn-secondary btn-sm" data-signin-action="edit" data-id="' + esc(t.id) + '">Edit</button></td></tr>';
     }
     h += '</tbody></table>';
-    const opts = (view.templates || []).filter(usable).map(t =>
+    const opts = (view.templates || []).filter(t => usable(t) || t.id === view.default).map(t =>
       '<option value="' + esc(t.id) + '"' + (t.id === view.default ? ' selected' : '') + '>' + esc(t.name + ' · ' + scoreText(t.score)) + '</option>').join('');
     h += '<div class="si-row"><button type="button" class="btn btn-primary btn-sm" data-signin-action="new">+ New template</button>' +
       '<label class="si-sub">Default for everything: <select data-signin-action="default">' + opts + '</select></label></div>' + errSlot('default');
@@ -209,30 +225,80 @@
       '<optgroup label="Families">' + FAMILIES.map(([id, l]) => '<option value="' + esc(id) + '">' + esc(l) + '</option>').join('') + '</optgroup></select>';
   }
 
-  function leafHtml(leaf, level, mark) {
+  function leafHtml(leaf, level, mark, path) {
     const m = mark || {};
-    return '<span class="si-chip' + (m.why || m.inside ? ' si-unusable' : '') + '" data-signin-node data-depth="' + level + '" data-leaf="' + esc(leaf) + '">' +
+    return '<span class="si-chip' + (m.why || m.inside ? ' si-unusable' : '') + '" data-signin-node data-depth="' + level + '" data-path="' + esc(pathKey(path)) + '" data-leaf="' + esc(leaf) + '">' +
       esc(leafLabel(leaf)) + ' <button type="button" class="si-x" data-signin-action="remove" aria-label="' + esc('Remove ' + leafLabel(leaf)) + '">×</button>' +
       '<span class="si-why" data-signin-why>' + (m.why ? ' — ' + esc(m.why) : '') + '</span></span>';
   }
 
-  function groupHtml(node, level, marks) {
+  function groupHtml(node, level, marks, path) {
     const m = marks.shift() || {};
     const op = node.op === 'all' ? 'all' : 'any';
-    let h = '<div class="si-g si-' + op + (m.why || m.inside ? ' si-unusable' : '') + '" data-signin-node data-depth="' + level + '" data-op="' + op + '">' +
+    path = path || [];
+    let h = '<div class="si-g si-' + op + (m.why || m.inside ? ' si-unusable' : '') + '" data-signin-node data-depth="' + level + '" data-path="' + esc(pathKey(path)) + '" data-op="' + op + '">' +
       '<div class="si-hd">Require <select data-signin-action="op" aria-label="all of or any of">' +
       '<option value="all"' + (op === 'all' ? ' selected' : '') + '>all of</option><option value="any"' + (op === 'any' ? ' selected' : '') + '>any of</option></select>' +
       '<span class="si-why" data-signin-why>' + (m.why ? ' — ' + esc(m.why) : '') + '</span>' +
       '<span class="si-gs" data-signin-gscore>' + (m.tenths !== undefined ? esc(num(m.tenths)) : '') + '</span>' +
       (level > 1 ? '<button type="button" class="si-x" data-signin-action="remove" aria-label="Remove this group">×</button>' : '') + '</div>' +
       '<div class="si-items" data-signin-items>';
-    for (const it of node.items || []) {
-      if (typeof it === 'string') h += leafHtml(it, level + 1, marks.shift());
-      else h += groupHtml(it, level + 1, marks);
-    }
-    h += '</div><div class="si-add">' + addMethodSelect() +
-      (level < MAX_LEVEL ? '<button type="button" class="btn btn-secondary btn-sm" data-signin-action="add-group">+ group</button>' : '') + '</div></div>';
+    const items = node.items || [];
+    items.forEach((it, i) => {
+      if (typeof it === 'string') h += leafHtml(it, level + 1, marks.shift(), path.concat(i));
+      else h += groupHtml(it, level + 1, marks, path.concat(i));
+    });
+    // A full group (MAX_ITEMS) offers no "+ method" / "+ group".
+    const full = items.length >= MAX_ITEMS;
+    h += '</div><div class="si-add">' + (full ? '<span class="si-sub" data-signin-full>' + MAX_ITEMS + ' items: the most a group holds</span>' : addMethodSelect() +
+      (level < MAX_LEVEL ? '<button type="button" class="btn btn-secondary btn-sm" data-signin-action="add-group">+ group</button>' : '')) +
+      '<span class="si-err" data-signin-gnote role="alert"></span></div></div>';
     return h;
+  }
+
+  // editRule applies one editor change to rule (never changed in place)
+  // and answers {rule} or, refused, {rule (unchanged), refused: why}:
+  //   {kind: 'add-leaf', path, leaf}  a method or family into the group at path
+  //   {kind: 'add-group', path}       an empty "all of" group into it
+  //   {kind: 'remove', path}          the part at path (never the top group)
+  //   {kind: 'op', path, op}          the group's all / any
+  // The Hub's limits: MAX_ITEMS per group, MAX_LEVEL levels, no leaf
+  // twice in one group.
+  function editRule(rule, e) {
+    const top = typeof rule === 'string' ? { op: 'any', items: [rule] } : (rule || { op: 'any', items: [] });
+    const r = JSON.parse(JSON.stringify(top));
+    const path = e.path || [];
+    const at = p => p.reduce((n, i) => (n && typeof n !== 'string' && n.items ? n.items[i] : undefined), r);
+    const g = at(path);
+    const refused = why => ({ rule: top, refused: why });
+    switch (e.kind) {
+      case 'add-leaf':
+      case 'add-group':
+        if (!g || typeof g === 'string') return refused('not a group');
+        g.items = g.items || [];
+        if (g.items.length >= MAX_ITEMS) return refused('A group holds at most ' + MAX_ITEMS + ' items: put some in a group of their own.');
+        if (e.kind === 'add-leaf') {
+          if (!LEAF_LABEL[e.leaf]) return refused('unknown method');
+          if (g.items.includes(e.leaf)) return refused(leafLabel(e.leaf) + ' is already in this group.');
+          g.items.push(e.leaf);
+        } else {
+          if (path.length + 2 > MAX_LEVEL) return refused('Groups nest up to ' + MAX_LEVEL + ' levels.');
+          g.items.push({ op: 'all', items: [] });
+        }
+        return { rule: r };
+      case 'remove': {
+        if (!path.length) return refused('the top group stays');
+        const parent = at(path.slice(0, -1));
+        if (!parent || !parent.items || path[path.length - 1] >= parent.items.length) return refused('no such part');
+        parent.items.splice(path[path.length - 1], 1);
+        return { rule: r };
+      }
+      case 'op':
+        if (!g || typeof g === 'string' || (e.op !== 'all' && e.op !== 'any')) return refused('not a group');
+        g.op = e.op;
+        return { rule: r };
+    }
+    return refused('unknown change');
   }
 
   function treeHtml(rule, preview) {
@@ -250,6 +316,19 @@
     return list.map(a => '<div class="si-affect"><span class="si-tag warn">' + esc(plural((a.blocked || []).length, 'person', 'people') + ' can\'t sign in to ' + a.name + ' with it') + '</span>' +
       '<div class="si-sub">' + blockedHtml(a.blocked) + '</div></div>').join('');
   }
+
+  // impactHtml is who a change newly blocks (POST /api/signin/impact),
+  // with Apply / Cancel for the control errKey.
+  function impactHtml(imp, errKey) {
+    let h = '<div class="public-warn si-impact" data-signin-impact role="alert">';
+    if (imp && imp.unknown) h += '<div>Who this change blocks isn\'t known: ' + esc(imp.unknown) + '</div>';
+    for (const a of (imp && imp.affected) || []) {
+      h += '<div class="si-affect">' + esc(plural((a.blocked || []).length, 'person', 'people') + ' would no longer be able to sign in to ' + a.name) + ': ' + blockedHtml(a.blocked) + '</div>';
+    }
+    return h + '<div class="si-row"><button type="button" class="btn btn-danger btn-sm" data-signin-action="impact-apply" data-key="' + esc(errKey) + '">Apply anyway</button>' +
+      '<button type="button" class="btn btn-secondary btn-sm" data-signin-action="impact-cancel" data-key="' + esc(errKey) + '">Cancel</button></div></div>';
+  }
+  function blocksAnyone(imp) { return !!(imp && (imp.unknown || (imp.affected || []).some(a => (a.blocked || []).length))); }
 
   // editorHtml is the editor for template t ({id, name, rule, built_in};
   // isNew for "+ New template"), with preview's marks when given.
@@ -335,7 +414,7 @@
   function mount(el) {
     let st = states.get(el);
     if (!st) {
-      st = { el, view: null, notes: [], seq: 0, timer: 0 };
+      st = { el, view: null, notes: [], seq: 0, timer: 0, pending: {} };
       states.set(el, st);
       bind(st);
     }
@@ -351,6 +430,9 @@
 
   // draw renders the tables again; an open editor (ed) is kept as it is.
   function draw(st, ed) {
+    // A change waiting for Apply / Cancel is dropped: its control is
+    // drawn again as the Hub holds it.
+    st.pending = {};
     st.el.innerHTML = render(st.view, st.notes);
     if (ed) st.el.querySelector('[data-signin-editor]').replaceWith(wrapEditor(ed));
   }
@@ -365,20 +447,27 @@
     const e = st.el.querySelector('[data-signin-err="' + CSS.escape(key) + '"]');
     if (e) e.textContent = msg || '';
   }
+  function setConfirm(st, key, html) {
+    const e = st.el.querySelector('[data-signin-confirm="' + CSS.escape(key) + '"]');
+    if (e) e.innerHTML = html || '';
+  }
   function refusal(err) {
     return (err.status === 409 ? 'Refused: ' : err.status === 503 ? 'Not possible right now: ' : '') + (err.message || String(err));
   }
 
-  // applied takes a SignInChange (or nothing: the view is read again).
-  async function applied(st, ch) {
+  // applied takes a SignInChange (or nothing: the view is read again);
+  // close drops the open editor, only once the view is read (a failed
+  // read leaves it open with its message).
+  async function applied(st, ch, close) {
     const notes = [];
     if (ch) {
       for (const w of ch.warnings || []) notes.push(w);
       if ((ch.restarts || []).length) notes.push('Restarting to apply the change: ' + ch.restarts.join(', '));
     }
+    const view = ch && ch.view ? ch.view : await window.apiGet('/api/signin');
     st.notes = notes;
-    st.view = ch && ch.view ? ch.view : await window.apiGet('/api/signin');
-    const ed = st.el.querySelector('[data-signin-ed]');
+    st.view = view;
+    const ed = close ? null : st.el.querySelector('[data-signin-ed]');
     draw(st, ed);
     // The switches changed what an open draft can meet: preview it again.
     if (ed) runPreview(st, ed);
@@ -406,6 +495,42 @@
     }
   }
 
+  // guarded runs a change that can block people (a default or core page
+  // pick, a method switched off): the Hub says who it newly blocks
+  // (draft: a SignInDraft); nobody = act at once, else the list next to
+  // the control with Apply / Cancel (pending until then, t disabled). A
+  // draft the Hub refuses is shown like the change's own refusal.
+  async function guarded(st, t, errKey, draft, call, restore) {
+    delete st.pending[errKey];
+    setConfirm(st, errKey, '');
+    setErr(st, errKey, '');
+    t.disabled = true;
+    let imp;
+    try {
+      imp = await window.apiPost('/api/signin/impact', draft);
+    } catch (err) {
+      restore();
+      t.disabled = false;
+      setErr(st, errKey, refusal(err));
+      return;
+    }
+    if (!blocksAnyone(imp)) return act(st, t, errKey, call, restore);
+    st.pending[errKey] = { t, call, restore };
+    setConfirm(st, errKey, impactHtml(imp, errKey));
+  }
+
+  // resolvePending is Apply (apply true) or Cancel of errKey's change.
+  function resolvePending(st, errKey, apply) {
+    const p = st.pending[errKey];
+    if (!p) return Promise.resolve();
+    delete st.pending[errKey];
+    setConfirm(st, errKey, '');
+    if (apply) return act(st, p.t, errKey, p.call, p.restore);
+    p.restore();
+    p.t.disabled = false;
+    return Promise.resolve();
+  }
+
   function openEditor(st, t) {
     const slot = st.el.querySelector('[data-signin-editor]');
     slot.innerHTML = editorHtml(t);
@@ -421,6 +546,7 @@
 
   function schedulePreview(st, ed) {
     clearTimeout(st.timer);
+    st.seq++; // a preview still in flight is for an older draft
     setErr(st, 'save', '');
     st.timer = setTimeout(() => runPreview(st, ed), PREVIEW_MS);
   }
@@ -454,15 +580,29 @@
         const idEl = ed.querySelector('[data-signin-field="id"]');
         const id = idEl.value.trim() || idFromName(b.name);
         ch = await window.apiPost('/api/signin/templates', { id, name: b.name, rule: b.rule });
+        // Saved: a second Save updates it.
+        ed.dataset.new = '';
+        ed.dataset.id = id;
       } else {
         ch = await window.apiPut('/api/signin/templates/' + encodeURIComponent(ed.dataset.id), { name: b.name, rule: b.rule });
       }
-      ed.remove();
-      await applied(st, ch);
-      window.showToast && window.showToast('Template saved', 'success');
     } catch (err) {
       btn.disabled = false;
       setErr(st, 'save', refusal(err));
+      return;
+    }
+    window.showToast && window.showToast('Template saved', 'success');
+    await closeAfter(st, ed, btn, ch, 'Saved');
+  }
+
+  // closeAfter draws the change and closes the editor; a failed re-read
+  // keeps it open saying what happened.
+  async function closeAfter(st, ed, btn, ch, done) {
+    try {
+      await applied(st, ch, true);
+    } catch (err) {
+      btn.disabled = false;
+      setErr(st, 'save', done + ', but the sign-in settings couldn\'t be read again: ' + (err.message || String(err)) + '. Reload the page.');
     }
   }
 
@@ -473,13 +613,37 @@
     btn.disabled = true;
     try {
       await window.apiCall('/api/signin/templates/' + encodeURIComponent(ed.dataset.id), 'DELETE');
-      ed.remove();
-      await applied(st, null);
     } catch (err) {
       btn.disabled = false;
       setErr(st, 'save', refusal(err));
+      return;
     }
+    await closeAfter(st, ed, btn, null, 'Deleted');
   }
+
+  // editTree applies edit to the open editor's tree (editRule), drawn
+  // again from the rule; a refusal is shown at the group's add controls.
+  // focus picks the control focused afterwards in the new tree.
+  function editTree(st, ed, groupEl, edit, focus) {
+    const tree = ed.querySelector('[data-signin-tree]');
+    const res = editRule(ruleFromEditor(tree), edit);
+    if (res.refused) {
+      const note = groupEl && groupEl.querySelector(':scope > .si-add > [data-signin-gnote]');
+      if (note) note.textContent = res.refused;
+      return;
+    }
+    tree.innerHTML = treeHtml(res.rule);
+    if (focus) {
+      const el = tree.querySelector(focus);
+      if (el) el.focus();
+    }
+    schedulePreview(st, ed);
+  }
+  function pathOf(el) {
+    const k = el.dataset.path || '';
+    return k === '' ? [] : k.split('.').map(Number);
+  }
+  function nodeSel(path) { return '[data-signin-node][data-path="' + pathKey(path) + '"]'; }
 
   function bind(st) {
     const el = st.el;
@@ -488,6 +652,7 @@
       if (!t || !el.contains(t) || t.tagName === 'SELECT' || t.tagName === 'INPUT') return;
       const a = t.dataset.signinAction;
       const ed = t.closest('[data-signin-ed]');
+      if (a === 'impact-apply' || a === 'impact-cancel') { resolvePending(st, t.dataset.key, a === 'impact-apply'); return; }
       if (a === 'new') { openEditor(st, { isNew: true, name: '', id: '', rule: { op: 'any', items: ['family:passkey'] } }); return; }
       if (a === 'edit') {
         const tpl = templateById(st.view, t.dataset.id);
@@ -498,13 +663,14 @@
       if (a === 'cancel') { clearTimeout(st.timer); st.seq++; ed.remove(); return; }
       if (a === 'save') { saveEditor(st, ed, t); return; }
       if (a === 'delete') { deleteTemplate(st, ed, t); return; }
-      if (a === 'remove') { t.closest('[data-signin-node]').remove(); schedulePreview(st, ed); return; }
+      if (a === 'remove') {
+        const n = t.closest('[data-signin-node]'), path = pathOf(n);
+        editTree(st, ed, null, { kind: 'remove', path }, nodeSel(path.slice(0, -1)) + ' > .si-add > [data-signin-action="add-method"]');
+        return;
+      }
       if (a === 'add-group') {
-        const g = t.closest('[data-signin-node]');
-        const level = parseInt(g.dataset.depth, 10) + 1;
-        if (level > MAX_LEVEL) return;
-        g.querySelector(':scope > [data-signin-items]').insertAdjacentHTML('beforeend', groupHtml({ op: 'all', items: [] }, level, []));
-        schedulePreview(st, ed);
+        const g = t.closest('[data-signin-node]'), path = pathOf(g);
+        editTree(st, ed, g, { kind: 'add-group', path }, nodeSel(path) + ' > [data-signin-items] > [data-signin-node]:last-child [data-signin-action="add-method"]');
       }
     });
     el.addEventListener('change', e => {
@@ -514,32 +680,30 @@
       const v = st.view;
       if (a === 'method') {
         const m = t.dataset.method, want = t.checked;
-        act(st, t, 'method:' + m, () => window.apiPut('/api/signin/methods/' + encodeURIComponent(m), { on: want }), () => { t.checked = !want; });
+        const call = () => window.apiPut('/api/signin/methods/' + encodeURIComponent(m), { on: want }), restore = () => { t.checked = !want; };
+        if (want) act(st, t, 'method:' + m, call, restore);
+        else guarded(st, t, 'method:' + m, { method: m, on: false }, call, restore);
       } else if (a === 'template-enabled') {
         const id = t.dataset.id, want = t.checked;
         act(st, t, 'template:' + id, () => window.apiPut('/api/signin/templates/' + encodeURIComponent(id) + '/enabled', { on: want }), () => { t.checked = !want; });
       } else if (a === 'default') {
-        const was = v.default;
-        act(st, t, 'default', () => window.apiPut('/api/signin/default', { template: t.value }), () => { t.value = was; });
+        const was = v.default, want = t.value;
+        guarded(st, t, 'default', { default: want }, () => window.apiPut('/api/signin/default', { template: want }), () => { t.value = was; });
       } else if (a === 'core') {
-        const key = t.dataset.key, was = (v.core || {})[key] || '';
-        act(st, t, 'core:' + key, () => window.apiPut('/api/signin/core/' + encodeURIComponent(key), { template: t.value }), () => { t.value = was; });
+        const key = t.dataset.key, was = (v.core || {})[key] || '', want = t.value;
+        guarded(st, t, 'core:' + key, { core_page: key, core: want }, () => window.apiPut('/api/signin/core/' + encodeURIComponent(key), { template: want }), () => { t.value = was; });
       } else if (a === 'add-stronger') {
         const want = t.checked;
         act(st, t, 'add-stronger', async () => { await window.apiCall('/api/signin/add-stronger', 'PUT', { on: want }); return null; }, () => { t.checked = !want; });
       } else if (a === 'op') {
-        const g = t.closest('[data-signin-node]');
-        g.dataset.op = t.value;
-        g.classList.toggle('si-all', t.value === 'all');
-        g.classList.toggle('si-any', t.value === 'any');
-        schedulePreview(st, t.closest('[data-signin-ed]'));
+        const g = t.closest('[data-signin-node]'), path = pathOf(g);
+        editTree(st, t.closest('[data-signin-ed]'), g, { kind: 'op', path, op: t.value }, nodeSel(path) + ' > .si-hd > [data-signin-action="op"]');
       } else if (a === 'add-method') {
         const leaf = t.value;
         if (!leaf) return;
-        const g = t.closest('[data-signin-node]');
-        g.querySelector(':scope > [data-signin-items]').insertAdjacentHTML('beforeend', leafHtml(leaf, parseInt(g.dataset.depth, 10) + 1, {}));
         t.value = '';
-        schedulePreview(st, t.closest('[data-signin-ed]'));
+        const g = t.closest('[data-signin-node]'), path = pathOf(g);
+        editTree(st, t.closest('[data-signin-ed]'), g, { kind: 'add-leaf', path, leaf }, nodeSel(path) + ' > .si-add > [data-signin-action="add-method"]');
       }
     });
     el.addEventListener('input', e => {
@@ -585,29 +749,69 @@
     }
     if (pick && !choices.some(c => c.id === pick)) opts += '<option value="' + esc(pick) + '" selected data-sentence="">' + esc(pick + ' (not available: disabled or gone)') + '</option>';
     const shown = pick === '' ? def : choices.find(c => c.id === pick);
-    h += '<select data-signin-pick data-saved="' + esc(pick) + '" aria-label="Sign-in template">' + opts + '</select>';
+    h += '<select data-signin-pick data-saved="' + esc(pick) + '" data-instance="' + esc(isv.instance || '') + '" data-name="' + esc(isv.name || '') + '" aria-label="Sign-in template">' + opts + '</select>';
     h += '<small data-signin-pick-sentence>' + esc(shown ? shown.sentence : '') + '</small>';
     h += '<div class="ps-err" data-signin-pick-err role="alert"></div>';
-    h += blockedNote(isv);
-    h += '<small data-signin-pick-stale hidden>The list above is for the saved choice: save to see who can\'t meet the new one.</small>';
+    // The saved choice's list; while another is picked, who that one
+    // newly blocks (POST /api/signin/impact) instead.
+    h += '<div data-signin-pick-saved>' + blockedNote(isv) + '</div>';
+    h += '<div data-signin-pick-impact role="status" hidden></div>';
     return h + '</div>';
   }
 
-  function blockedNote(isv) {
-    if (isv.people_unknown) return '<div class="public-warn">Who can\'t meet it isn\'t known: ' + esc(isv.people_unknown) + '</div>';
+  // blockedNote: who can't meet the saved pick (isv), or — draft — who
+  // the picked one newly blocks.
+  function blockedNote(isv, draft) {
+    if (isv.people_unknown) return '<div class="public-warn">Who ' + (draft ? 'this choice blocks' : 'can\'t meet it') + ' isn\'t known: ' + esc(isv.people_unknown) + '</div>';
     const b = isv.blocked || [];
+    if (draft) {
+      if (!b.length) return '<small data-signin-blocked-none>Nobody who can use ' + esc(isv.name) + ' is newly blocked by this choice.</small>';
+      return '<div class="public-warn" data-signin-blocked>' + esc(plural(b.length, 'person', 'people') + ' who can use ' + isv.name + ' would no longer be able to sign in to it') + ': ' + blockedHtml(b) +
+        ' <span class="si-sub">— if you save this choice</span></div>';
+    }
     if (!b.length) return '<small>Everyone who can use ' + esc(isv.name) + ' can meet it.</small>';
     return '<div class="public-warn" data-signin-blocked>' + esc(plural(b.length, 'person', 'people') + ' who can use ' + isv.name + ' can\'t meet it') + ': ' + blockedHtml(b) +
       ' <span class="si-sub">— they\'ll see what\'s missing when they open ' + esc(isv.name) + '</span></div>';
   }
 
-  // pickChanged updates the block after the drop-down changed.
+  // pickChanged updates the block after the drop-down changed: the
+  // sentence at once, who the new pick newly blocks after PREVIEW_MS
+  // (the latest change wins). Answers a promise settled once drawn.
+  const pickStates = new WeakMap();
   function pickChanged(sel) {
     const box = sel.closest('[data-signin-pick-section]');
     const o = sel.selectedOptions[0];
     box.querySelector('[data-signin-pick-sentence]').textContent = o ? o.dataset.sentence || '' : '';
-    box.querySelector('[data-signin-pick-stale]').hidden = sel.value === sel.dataset.saved;
     box.querySelector('[data-signin-pick-err]').textContent = '';
+    const saved = box.querySelector('[data-signin-pick-saved]'), out = box.querySelector('[data-signin-pick-impact]');
+    let ps = pickStates.get(box);
+    if (!ps) { ps = { seq: 0, timer: 0, settle: null }; pickStates.set(box, ps); }
+    // A change still waiting is superseded: its promise settles now.
+    clearTimeout(ps.timer);
+    if (ps.settle) { ps.settle(); ps.settle = null; }
+    const seq = ++ps.seq;
+    const changed = sel.value !== sel.dataset.saved;
+    saved.hidden = changed;
+    out.hidden = !changed;
+    if (!changed) { out.innerHTML = ''; return Promise.resolve(); }
+    out.innerHTML = '<small class="si-sub">Checking who this choice blocks…</small>';
+    const inst = sel.dataset.instance, name = sel.dataset.name, pick = sel.value;
+    return new Promise(resolve => {
+      ps.settle = resolve;
+      ps.timer = setTimeout(async () => {
+        ps.settle = null;
+        let html;
+        try {
+          const imp = await window.apiPost('/api/signin/impact', { instance: inst, pick });
+          const mine = ((imp && imp.affected) || []).find(a => a.kind === 'instance' && a.instance === inst);
+          html = blockedNote({ name, people_unknown: imp && imp.unknown, blocked: mine ? mine.blocked : [] }, true);
+        } catch (err) {
+          html = '<div class="public-warn">' + esc((err.status === 409 ? 'Refused: ' : 'Who this choice blocks couldn\'t be worked out: ') + (err.message || String(err))) + '</div>';
+        }
+        if (seq === ps.seq) out.innerHTML = html;
+        resolve();
+      }, PREVIEW_MS);
+    });
   }
 
   // pickBody is the settings body's sign-in part: {} unchanged, else
@@ -617,5 +821,9 @@
     return { sign_in_template: value };
   }
 
-  window.PortcullisSignIn = { mount, render, editorHtml, ruleFromEditor, blockedHtml, instanceHtml, pickChanged, pickBody, marksFor };
+  window.PortcullisSignIn = {
+    mount, render, editorHtml, ruleFromEditor, blockedHtml, instanceHtml, pickChanged, pickBody, marksFor, editRule, impactHtml, PICK_REFUSAL,
+    // For the node tests: the confirm step over a stub container.
+    _test: { guarded, resolvePending, state: (el, view) => ({ el, view, notes: [], seq: 0, timer: 0, pending: {} }) }
+  };
 })();

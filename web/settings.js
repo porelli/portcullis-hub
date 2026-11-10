@@ -1192,7 +1192,7 @@
     }
     // A refused sign-in template pick: shown at the drop-down too.
     const pickErr = st.el.querySelector('[data-signin-pick-err]');
-    if (pickErr && /sign-in template|template /i.test(err.message || '') && 'sign_in_template' in body(st)) {
+    if (pickErr && window.PortcullisSignIn.PICK_REFUSAL.test(err.message || '') && 'sign_in_template' in body(st)) {
       pickErr.textContent = msg;
       st.barError = (err.status === 409 ? 'Refused (409): ' : '') + 'see Sign-in.';
       return;

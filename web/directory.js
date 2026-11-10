@@ -1080,6 +1080,11 @@
   // the Portcullis MCP's create_person form) pre-fills username, email,
   // display name and ticks groups — the admin reviews and submits it here.
   function openInvite(pre) {
+    openDialog('Invite someone', inviteFormHtml());
+    fillInvite(pre);
+  }
+  // inviteFormHtml is the invite dialog's form.
+  function inviteFormHtml() {
     const admin = isAdmin();
     let h = '<div class="pd-grid">' +
       '<div><label for="nu-username">Username</label><input type="text" id="nu-username" autocomplete="off" placeholder="lowercase, e.g. alice" required></div>' +
@@ -1112,7 +1117,10 @@
     }
     h += '<div class="pd-actions"><button type="button" class="pd-btn primary sm" data-act="invite-create">Create and invite</button>' +
       '<button type="button" class="pd-btn secondary sm" data-act="dialog-close">Cancel</button></div>';
-    openDialog('Invite someone', h);
+    return h;
+  }
+  // fillInvite pre-fills the open invite dialog from pre.
+  function fillInvite(pre) {
     const b = dialogBody();
     if (pre) {
       b.querySelector('#nu-username').value = pre.get('username') || '';
@@ -3195,6 +3203,8 @@
   });
 
   window.PortcullisDirectory = { show, openAt, openGroup, csvCell, renderAudit };
+  // For the node tests: the person page and invite form over an overview (d) and caller (m).
+  window.PortcullisDirectory._test = { setOverview: (d, m) => { dir = d; me = m; }, personPageHtml, inviteFormHtml };
   window.PortcullisPicker = PortcullisPicker;
   window.PortcullisNav = PortcullisNav;
   window.PortcullisAI = { decision: aiDecision };
