@@ -237,7 +237,7 @@ const (
 )
 
 // ValidateCompiled is the readers' check of a compiled rule: the top is a
-// group; every group is "all" / "any" with at least one item; groups nest at
+// group; every group is "all" / "any" with 1–8 items; groups nest at
 // most 4 levels; at most 48 leaves, each a method id (no families). It
 // doesn't look at the switches.
 func ValidateCompiled(n Node) error {
@@ -262,6 +262,9 @@ func ValidateCompiled(n Node) error {
 		}
 		if len(n.Items) == 0 {
 			return errors.New("compiled rule: empty group")
+		}
+		if len(n.Items) > MaxItems {
+			return fmt.Errorf("compiled rule: a group holds at most %d items", MaxItems)
 		}
 		for _, it := range n.Items {
 			if err := walk(it, depth+1); err != nil {

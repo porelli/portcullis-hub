@@ -487,3 +487,34 @@ func TestMDSPublishedSerialFloor(t *testing.T) {
 		t.Errorf("BLOB 49 cached: %v", err)
 	}
 }
+
+// TestPublishableTrustDropsBadRoots: an entry whose roots aren't each one
+// DER X.509 certificate is left out of signin-keycloak.json (the extension
+// would refuse the whole file); the others are kept.
+func TestPublishableTrustDropsBadRoots(t *testing.T) {
+	good := testRootDER(t, "good")
+	in := map[string]fidomds.AuthenticatorTrust{
+		"00000000-0000-0000-0000-000000000001": {Kind: "security_key", Status: "certified", Roots: [][]byte{good}},
+		"00000000-0000-0000-0000-000000000002": {Kind: "security_key", Status: "certified", Roots: [][]byte{good, []byte("not a certificate")}},
+		"00000000-0000-0000-0000-000000000003": {Kind: "passkey_device", Status: "revoked", Roots: [][]byte{append(append([]byte{}, good...), 0)}},
+		"00000000-0000-0000-0000-000000000004": {Kind: "passkey_device", Status: "certified", Roots: nil},
+	}
+	kept, dropped := publishableTrust(in)
+	if len(kept) != 1 || !reflect.DeepEqual(kept["00000000-0000-0000-0000-000000000001"], in["00000000-0000-0000-0000-000000000001"]) {
+		t.Errorf("kept = %v", kept)
+	}
+	var ids []string
+	for _, d := range dropped {
+		ids = append(ids, d.aaguid)
+		if d.why == "" {
+			t.Errorf("%s dropped without a reason", d.aaguid)
+		}
+	}
+	want := []string{"00000000-0000-0000-0000-000000000002", "00000000-0000-0000-0000-000000000003", "00000000-0000-0000-0000-000000000004"}
+	if !reflect.DeepEqual(ids, want) {
+		t.Errorf("dropped = %v, want %v", ids, want)
+	}
+	if !strings.Contains(dropped[0].why, "root 2") {
+		t.Errorf("why = %q", dropped[0].why)
+	}
+}
