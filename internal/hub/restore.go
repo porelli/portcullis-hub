@@ -1411,6 +1411,9 @@ func (h *Hub) removeNewInstance(id string, prior *priorSettings) error {
 	// fall through to the wipe below.
 	isTemplate := h.catalogLocked(id) != nil || (ok && e.Template == id)
 	h.mu.RUnlock()
+	if isTemplate && ok && !enabled && pickOnlyEntry(e, id) {
+		return nil // already undone: only the default instance's own pick is left
+	}
 	if ok && (enabled || (e.State != state.InstanceRestoring && e.State != state.InstanceCreated)) {
 		return statusErr(409, "instance %s is no longer new (state %q, enabled %v): it was not removed", id, e.State, enabled)
 	}
@@ -1425,6 +1428,10 @@ func (h *Hub) removeNewInstance(id string, prior *priorSettings) error {
 		// sign-in choices, AI state — is its own and stays.
 		h.mu.Lock()
 		delete(h.st.Instances, id)
+		if prior != nil && prior.pick != "" {
+			// The entry held only the pick before the create: it stays.
+			h.st.Instances[id] = state.Instance{ID: id, Template: id, SignInTemplate: prior.pick}
+		}
 		switch {
 		case prior == nil:
 		case prior.had:

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/portcullis/hub/internal/settings"
 	"github.com/portcullis/hub/internal/signin"
 )
 
@@ -77,6 +78,45 @@ func TestSignInKeycloakFileListsEveryNativeClient(t *testing.T) {
 	if doc.Authenticators == nil || len(doc.Authenticators) != 0 || doc.MDS.Serial != 0 || !doc.MDS.NextUpdate.IsZero() {
 		t.Errorf("authenticators %v mds %+v", doc.Authenticators, doc.MDS)
 	}
+	// A pick that can't be published (disabled behind the in-use
+	// refusal) is still named: the extension refuses the whole file, never
+	// an unlisted client let through.
+	f.h.mu.Lock()
+	tm := f.h.st.SignIn.Templates["strong"]
+	tm.Enabled = false
+	f.h.st.SignIn.Templates["strong"] = tm
+	f.h.mu.Unlock()
+	if err := f.h.WritePolicy(); err != nil {
+		t.Fatal(err)
+	}
+	doc = readKeycloakSignIn(t, f)
+	if _, ok := doc.Templates["strong"]; ok || doc.Clients["chat-b"].Template != "strong" {
+		t.Errorf("unpublishable pick: templates %v clients %+v", doc.Templates, doc.Clients)
+	}
+	f.h.mu.Lock()
+	tm.Enabled = true
+	f.h.st.SignIn.Templates["strong"] = tm
+	f.h.mu.Unlock()
+	// Two instances declaring one client (state edited by hand): the
+	// stricter template, or none when neither implies the other.
+	f.h.mu.Lock()
+	addTemplateLocked(f.h, "certs", siLeaves("any", "yubikey_cert"))
+	addTemplateLocked(f.h, "keys", siLeaves("any", "security_key"))
+	f.h.mu.Unlock()
+	f.h.mu.RLock()
+	tmpls := f.h.publishedTemplatesLocked()
+	f.h.mu.RUnlock()
+	for _, c := range []struct{ a, b, want string }{
+		{"standard", "strong", "strong"}, {"strong", "standard", "strong"}, {"certs", "keys", unpublishedTemplate},
+		{"strong", "gone", "gone"}, {"gone", "strong", "gone"},
+	} {
+		d := KeycloakSignIn{Templates: tmpls, Clients: map[string]KeycloakClientTemplate{}}
+		d.addClient("x", "dup", c.a, "X")
+		d.addClient("y", "dup", c.b, "Y")
+		if got := d.Clients["dup"]; got.Template != c.want || got.Name != "X" {
+			t.Errorf("%s + %s = %+v, want %s", c.a, c.b, got, c.want)
+		}
+	}
 	// Written before the policy file, in the same pass.
 	if err := f.h.Disable("chat-b"); err != nil {
 		t.Fatal(err)
@@ -98,12 +138,21 @@ func TestTierFollowsCertificateSwitch(t *testing.T) {
 		t.Fatalf("grafana on standard:\n%s", ov)
 	}
 	passkeys := TemplateInput{Name: "Standard", Rule: siLeaves("any", "family:passkey")}
+	calls := len(f.runner.Calls())
 	ch, err := f.h.SaveTemplate(ctx, "standard", passkeys, false, siAdmin)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !slices.Equal(ch.Restarts, []string{"grafana"}) {
 		t.Errorf("restarts = %v", ch.Restarts)
+	}
+	// The restart is owed (delivered.json) or has already run.
+	f.h.owedMu.Lock()
+	owed := f.h.owedLocked("grafana")
+	f.h.owedMu.Unlock()
+	f.h.Wait()
+	if owed != settings.EffectRestart && len(f.runner.Calls()) == calls {
+		t.Errorf("no restart queued: owed %q, runner calls unchanged", owed)
 	}
 	if ov := readOverride(t, f, "grafana"); !strings.Contains(ov, "tls.options: public@file") || strings.Contains(ov, "authaware") {
 		t.Errorf("grafana on passkeys only:\n%s", ov)

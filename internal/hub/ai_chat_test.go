@@ -441,6 +441,13 @@ func TestAIClientSemantics(t *testing.T) {
 	if !slices.ContainsFunc(a.idp.registered, func(r string) bool { return strings.HasPrefix(r, "ai-chat:ai-chat:") }) {
 		t.Errorf("the ordinary client wasn't registered: %v", a.idp.registered)
 	}
+	// signin-keycloak.json lists the ordinary client, never the ai_client
+	// (mcp-gate checks it, §15.2).
+	if doc := readKeycloakSignIn(t, a.fixture); doc.Clients["ai-chat"].Template != "standard" {
+		t.Errorf("signin-keycloak.json clients = %+v", doc.Clients)
+	} else if _, ok := doc.Clients[chatMCPID]; ok {
+		t.Errorf("the ai_client is listed: %+v", doc.Clients)
+	}
 	if !slices.Contains(a.idp.accessCalls(), "+"+chatMCPID+":ai-chat:users_ai-chat") {
 		t.Errorf("the ai_client lost its access role: %v", a.idp.accessCalls())
 	}

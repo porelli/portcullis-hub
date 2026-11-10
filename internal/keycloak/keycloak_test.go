@@ -163,18 +163,17 @@ func TestRegisterClient(t *testing.T) {
 		t.Errorf("untagged foreign client: %v", err)
 	}
 
-	// Exists and owned: secret, URIs reconciled, a stale default ACR
-	// dropped (the Hub pushes none, contract §8.1); tag kept; missing
+	// Exists and owned: secret, URIs reconciled; tag kept; missing
 	// default scopes attached through the sub-resource (a client PUT
 	// ignores defaultClientScopes).
 	fk.scopes = map[string]string{"acr": "s-acr", "groups": "s-groups", "profile": "s-profile"}
-	fk.existing = map[string]interface{}{"id": "u1", "clientId": "app", "attributes": map[string]interface{}{OwnerAttr: "app", "default.acr.values": "mtls"}, "defaultClientScopes": []interface{}{"openid", "acr"}}
+	fk.existing = map[string]interface{}{"id": "u1", "clientId": "app", "attributes": map[string]interface{}{OwnerAttr: "app"}, "defaultClientScopes": []interface{}{"openid", "acr"}}
 	if created, err := c.RegisterClient(ctx, spec); err != nil || len(fk.puts) != 1 || created {
 		t.Fatalf("reconcile: %v %v %v", created, err, fk.puts)
 	}
 	p := fk.puts[0]
 	attrs := p["attributes"].(map[string]interface{})
-	if _, acr := attrs["default.acr.values"]; p["secret"] != "s3cret" || acr || attrs[OwnerAttr] != "app" {
+	if p["secret"] != "s3cret" || attrs[OwnerAttr] != "app" {
 		t.Errorf("put = %v", p)
 	}
 	if fmt.Sprint(fk.attached) != "[u1/s-groups]" {

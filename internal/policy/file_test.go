@@ -202,6 +202,7 @@ func TestTier(t *testing.T) {
 		{"passkeys only", g("any", *g("any", l("passkey_synced"), l("passkey_device"), l("security_key"))), on, false, TierPublic},
 		{"cert switched off", g("any", l("yubikey_cert")), map[signin.Method]bool{}, false, TierPublic},
 		{"not compiled", g("any", l("family:passkey")), on, false, TierProtected},
+		{"empty group", g("any"), on, false, TierProtected},
 	} {
 		if got := Tier(c.rule, c.on, c.public); got != c.want {
 			t.Errorf("%s: Tier = %s, want %s", c.name, got, c.want)
@@ -375,5 +376,113 @@ func TestPolicyFileExpiring(t *testing.T) {
 	data, _ = os.ReadFile(path)
 	if !strings.Contains(string(data), `"expiring": []`) {
 		t.Errorf("empty expiring array not serialized: %s", string(data))
+	}
+}
+
+// The contract §4 example: two Grafana instances, one on the main domain
+// on the default, one on an enrolled domain picked onto Strong, and the
+// default Vaultwarden instance.
+func TestBuildContractExample(t *testing.T) {
+	main := "portcullis.example.com"
+	on := defaultOn()
+	in := BuildInput{
+		Apps: []App{
+			{ID: "grafana-team-a", Enabled: true, Hosts: host("grafana-team-a." + main), GroupAccess: true, AccessGroup: "users_grafana-team-a"},
+			{ID: "grafana-team-b", Enabled: true, Hosts: host("grafana.team-b.example.org"), GroupAccess: true, AccessGroup: "users_grafana-team-b", Template: "strong"},
+			{ID: "vaultwarden", Enabled: true, Hosts: host("passwords." + main), GroupAccess: true, AccessGroup: "users_vaultwarden",
+				AdminGroup: "admin_vaultwarden", AdminPaths: []string{"/admin"}},
+		},
+		Default: "standard", Core: map[string]string{"portal": "", "hub": "strong", "people": "strong", "directory": "", "enroll": "", "metrics": "", "traefik": ""},
+		Templates: compiledBuiltins(t, on), Methods: onList(on),
+		People:     map[string][]signin.Method{"alice": {signin.PasskeySynced, signin.SecurityKey}, "bob": {signin.PasskeySynced}},
+		MainDomain: main, ExtraDomains: []string{"team-b.example.org"},
+	}
+	delete(in.Templates, "basic") // starts disabled (D12)
+	delete(in.Templates, "yubikey-and-certificate")
+	doc := Build(in)
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	json.Unmarshal(raw, &got)
+	want := map[string]any{}
+	if err := json.Unmarshal([]byte(`{
+  "version": 6,
+  "methods": ["passkey_device", "passkey_synced", "security_key", "yubikey_cert"],
+  "templates": {
+    "standard": {"op": "any", "items": [
+      {"op": "any", "items": ["passkey_synced", "passkey_device", "security_key"]},
+      {"op": "any", "items": ["yubikey_cert"]}
+    ]},
+    "strong": {"op": "any", "items": ["security_key", "yubikey_cert"]}
+  },
+  "default": "standard",
+  "hosts": {"grafana.team-b.example.org": "strong"},
+  "core": {
+    "directory.portcullis.example.com": "standard",
+    "enroll.portcullis.example.com": "standard",
+    "hub.portcullis.example.com": "strong",
+    "metrics.portcullis.example.com": "standard",
+    "people.portcullis.example.com": "strong",
+    "portcullis.example.com": "standard",
+    "traefik.portcullis.example.com": "standard"
+  },
+  "people": {"alice": ["passkey_synced", "security_key"], "bob": ["passkey_synced"]},
+  "add_stronger": false,
+  "extra_domains": ["team-b.example.org"],
+  "groups": {
+    "grafana-team-a.portcullis.example.com": "users_grafana-team-a",
+    "grafana.team-b.example.org": "users_grafana-team-b",
+    "passwords.portcullis.example.com": "users_vaultwarden"
+  },
+  "path_groups": {"passwords.portcullis.example.com": [{"prefix": "/admin", "group": "admin_vaultwarden"}]},
+  "public_paths": {},
+  "expiring": []
+}`), &want); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("document =\n%s", raw)
+	}
+}
+
+// CoreHosts is the main domain plus the eight core subdomains (auth and
+// mcp included); none of them is ever published for an app, as a public
+// host or a denied one.
+func TestCoreHostsNeverPublished(t *testing.T) {
+	main := "portcullis.local"
+	core := CoreHosts(main)
+	want := []string{main}
+	for _, sub := range []string{"auth", "traefik", "hub", "directory", "enroll", "metrics", "people", "mcp"} {
+		want = append(want, sub+"."+main)
+	}
+	if len(core) != len(want) {
+		t.Errorf("CoreHosts = %v", core)
+	}
+	for _, h := range want {
+		if !core[h] {
+			t.Errorf("CoreHosts lacks %s", h)
+		}
+	}
+	all := map[string]string{}
+	for h := range core {
+		all[h] = h
+	}
+	pub := &PublicEntry{Paths: []PublicPath{{"/s", "prefix"}}}
+	doc := Build(input(t, []App{
+		{ID: "pub", Enabled: true, Hosts: all, PublicHosts: all, Public: pub, GroupAccess: true, AccessGroup: "g", Template: "strong"},
+		{ID: "ghost", Enabled: true, Deny: true, Hosts: all},
+	}))
+	for h := range core {
+		if _, ok := doc.Hosts[h]; ok {
+			t.Errorf("%s in hosts", h)
+		}
+		if _, ok := doc.Groups[h]; ok {
+			t.Errorf("%s in groups (deny or app)", h)
+		}
+		if _, ok := doc.PublicPaths[h]; ok {
+			t.Errorf("%s in public_paths", h)
+		}
 	}
 }

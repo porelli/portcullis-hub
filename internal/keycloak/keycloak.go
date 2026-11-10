@@ -209,17 +209,6 @@ func (c *Client) findClient(ctx context.Context, token, clientID string) (*goclo
 // ErrClientNotFound: no client with that clientId exists.
 var ErrClientNotFound = errors.New("client not found in keycloak")
 
-// attrDefaultACR is Keycloak's default.acr.values client attribute. The
-// Hub pushes none (contract §8.1: the Keycloak extension enforces a
-// native-OIDC client's template, mcp-gate an AI client's rule) and drops
-// one it finds on a client it reconciles.
-const attrDefaultACR = "default.acr.values"
-
-// withoutACR removes default.acr.values from a client representation.
-func withoutACR(client *gocloak.Client) {
-	delete(client.Attributes, attrDefaultACR)
-}
-
 // ensureDefaultScopes attaches DefaultScopes and the spec's email scope to
 // an existing client and detaches the other email scope (default or
 // optional). Keycloak ignores defaultClientScopes in a client PUT, so scopes
@@ -472,7 +461,8 @@ func (c *Client) RegisterClient(ctx context.Context, s ClientSpec) (created bool
 		return true, c.ensureDefaultScopes(ctx, tok, made, s)
 	case code == http.StatusConflict:
 		// Already exists: reconcile secret and redirect URIs so the app's
-		// .env and Keycloak agree (and drop a default ACR).
+		// .env and Keycloak agree. The Hub sets no default.acr.values
+		// (contract §8.1).
 		existing, err := c.findClient(ctx, tok, s.ClientID)
 		if err != nil {
 			return false, err
@@ -490,7 +480,6 @@ func (c *Client) RegisterClient(ctx context.Context, s ClientSpec) (created bool
 		if len(s.RedirectURIs) > 0 {
 			existing.RedirectURIs = s.RedirectURIs
 		}
-		withoutACR(existing)
 		withBackchannel(existing, s)
 		if err := c.putClient(ctx, tok, existing); err != nil {
 			return false, err

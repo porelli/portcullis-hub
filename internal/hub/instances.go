@@ -284,6 +284,18 @@ func (h *Hub) CreateInstance(templateID, id string, hosts map[string]string) err
 type priorSettings struct {
 	had bool
 	s   state.InstanceSettings
+	// pick: the default instance's sign-in template pick its entry held
+	// before the create (pickOnlyEntry): an undo puts it back.
+	pick string
+}
+
+// pickOnlyEntry: a default instance's state entry that holds nothing but
+// a sign-in template pick (a save on the implicit default instance
+// creates one): it doesn't make the instance exist (§11.9 "First
+// instance").
+func pickOnlyEntry(e state.Instance, id string) bool {
+	e.SignInTemplate = ""
+	return e.Template == id && entryHoldsNothing(e)
 }
 
 // createEntry creates instance req.ID of req.Template without enabling
@@ -313,7 +325,8 @@ func (h *Hub) createEntry(req CreateRequest, users, admins string) (*priorSettin
 		return nil, statusErr(400, "instance %v", err)
 	}
 	h.mu.RLock()
-	_, exists := h.st.Instances[id]
+	cur, exists := h.st.Instances[id]
+	exists = exists && !(def && pickOnlyEntry(cur, id))
 	exists = exists || (def && h.st.IsEnabled(id))
 	h.mu.RUnlock()
 	if exists {
@@ -373,7 +386,8 @@ func (h *Hub) createEntry(req CreateRequest, users, admins string) (*priorSettin
 	if t == nil {
 		return nil, statusErr(404, "template not found: %s", templateID)
 	}
-	if _, ok := h.st.Instances[id]; ok || (def && h.st.IsEnabled(id)) {
+	cur, ok := h.st.Instances[id]
+	if (ok && !(def && pickOnlyEntry(cur, id))) || (def && h.st.IsEnabled(id)) {
 		return nil, statusErr(409, "instance %s already exists", id)
 	}
 	if !def {
@@ -417,7 +431,7 @@ func (h *Hub) createEntry(req CreateRequest, users, admins string) (*priorSettin
 	var prior *priorSettings
 	if def {
 		s, had := h.st.Settings[id]
-		prior = &priorSettings{had: had, s: s.Clone()}
+		prior = &priorSettings{had: had, s: s.Clone(), pick: cur.SignInTemplate}
 	}
 	next := h.st.Settings[id].Clone()
 	if len(req.Setup) > 0 {
@@ -436,7 +450,7 @@ func (h *Hub) createEntry(req CreateRequest, users, admins string) (*priorSettin
 	next = h.pinSetupValuesLocked(t, next, false)
 	setupNext := &next
 	e := state.Instance{ID: id, Template: templateID, Hosts: view.Hosts, State: state.InstanceCreated,
-		Label: req.Label, UsersGroup: users, AdminsGroup: admins}
+		Label: req.Label, UsersGroup: users, AdminsGroup: admins, SignInTemplate: cur.SignInTemplate}
 	if def && !hasImmutableHosts(t) && reflect.DeepEqual(view.Hosts, t.DefaultHosts(h.cfg.Domain)) {
 		// The default instance on its default hostnames stores none: a
 		// main-domain change moves them (§11.3).

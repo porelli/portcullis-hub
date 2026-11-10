@@ -130,33 +130,6 @@ func (h *Hub) keycloakSignInLocked() KeycloakSignIn {
 		doc.Methods = append(doc.Methods, string(m))
 	}
 	slices.Sort(doc.Methods)
-	add := func(id, client, tmpl, name string) {
-		if _, ok := doc.Templates[tmpl]; !ok {
-			log.Printf("signin: %s: template %q can't be published — signin-keycloak.json names it anyway, so the Keycloak extension refuses every sign-in until it is fixed", id, tmpl)
-		}
-		prev, dup := doc.Clients[client]
-		if !dup || prev.Template == tmpl {
-			if !dup {
-				doc.Clients[client] = KeycloakClientTemplate{Template: tmpl, Name: name}
-			}
-			return
-		}
-		// Declared twice (state edited by hand): never weaker.
-		a, aok := doc.Templates[prev.Template]
-		b, bok := doc.Templates[tmpl]
-		switch {
-		case !aok:
-			// prev already fails closed.
-		case !bok:
-			doc.Clients[client] = KeycloakClientTemplate{Template: tmpl, Name: prev.Name}
-		case signin.Implies(a, b):
-		case signin.Implies(b, a):
-			doc.Clients[client] = KeycloakClientTemplate{Template: tmpl, Name: prev.Name}
-		default:
-			log.Printf("signin: Keycloak client %s is declared by several instances with templates %q and %q, neither stricter — signin-keycloak.json names no template for it, so the Keycloak extension refuses every sign-in until it is fixed", client, prev.Template, tmpl)
-			doc.Clients[client] = KeycloakClientTemplate{Template: unpublishedTemplate, Name: prev.Name}
-		}
-	}
 	ids := map[string]bool{}
 	for i := range h.instances {
 		t := &h.instances[i]
@@ -169,7 +142,7 @@ func (h *Hub) keycloakSignInLocked() KeycloakSignIn {
 			continue
 		}
 		for _, c := range signInClientIDs(t) {
-			add(t.ID, c, acc.Template, instanceName(t))
+			doc.addClient(t.ID, c, acc.Template, instanceName(t))
 		}
 	}
 	// Enabled instances without a view (template missing): the snapshot.
@@ -183,10 +156,42 @@ func (h *Hub) keycloakSignInLocked() KeycloakSignIn {
 			tmpl = h.st.SignIn.Default
 		}
 		for _, c := range snap.SignInClients {
-			add(id, c, tmpl, id)
+			doc.addClient(id, c, tmpl, id)
 		}
 	}
 	return doc
+}
+
+// addClient lists client of instance id with template tmpl; a client
+// listed already keeps the template that implies the other — or none
+// (unpublishedTemplate: the extension refuses the file) when neither
+// does; an unpublishable template is kept (it fails closed).
+func (doc *KeycloakSignIn) addClient(id, client, tmpl, name string) {
+	if _, ok := doc.Templates[tmpl]; !ok {
+		log.Printf("signin: %s: template %q can't be published — signin-keycloak.json names it anyway, so the Keycloak extension refuses every sign-in until it is fixed", id, tmpl)
+	}
+	prev, dup := doc.Clients[client]
+	if !dup || prev.Template == tmpl {
+		if !dup {
+			doc.Clients[client] = KeycloakClientTemplate{Template: tmpl, Name: name}
+		}
+		return
+	}
+	// Declared twice (state edited by hand): never weaker.
+	a, aok := doc.Templates[prev.Template]
+	b, bok := doc.Templates[tmpl]
+	switch {
+	case !aok:
+		// prev already fails closed.
+	case !bok:
+		doc.Clients[client] = KeycloakClientTemplate{Template: tmpl, Name: prev.Name}
+	case signin.Implies(a, b):
+	case signin.Implies(b, a):
+		doc.Clients[client] = KeycloakClientTemplate{Template: tmpl, Name: prev.Name}
+	default:
+		log.Printf("signin: Keycloak client %s is declared by several instances with templates %q and %q, neither stricter — signin-keycloak.json names no template for it, so the Keycloak extension refuses every sign-in until it is fixed", client, prev.Template, tmpl)
+		doc.Clients[client] = KeycloakClientTemplate{Template: unpublishedTemplate, Name: prev.Name}
+	}
 }
 
 // writeKeycloakSignIn writes doc atomically, 0644 (Keycloak reads it from

@@ -402,7 +402,7 @@ func (s *Server) registerAdminTools() {
 				}
 				return s.Hub.PreviewSettings(ctx, in.ID, in.update())
 			}),
-		perCall(admin("save_settings", "Save settings previewed with preview_settings (the same arguments and its plan_hash; a change since the preview is refused). Secrets are set with set_secret_setting; policy, sign-in and public access with their own tools. A save with ports needs your confirmation in the browser.",
+		perCall(admin("save_settings", "Save settings previewed with preview_settings (the same arguments and its plan_hash; a change since the preview is refused). Secrets are set with set_secret_setting; the sign-in mode and public access with their own tools; the sign-in template can't be set through the AI yet (the Hub's page only). A save with ports needs your confirmation in the browser.",
 			ClassWrite, "PUT /api/instances/{id}/settings", "settings.change", func(ctx context.Context, a directory.Actor, in saveSettingsArgs) (any, error) {
 				if err := instanceIDOK(in.ID); err != nil {
 					return nil, err

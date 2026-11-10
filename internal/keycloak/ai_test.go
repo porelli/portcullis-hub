@@ -137,7 +137,6 @@ func TestEnsureAIClient(t *testing.T) {
 		cl.DirectAccessGrantsEnabled, cl.ImplicitFlowEnabled, cl.ServiceAccountsEnabled, cl.FullScopeAllowed = &yes, &yes, &yes, &yes
 		cl.ConsentRequired, cl.StandardFlowEnabled, cl.PublicClient = &no, &no, &no
 		cl.Attributes["pkce.code.challenge.method"] = "plain"
-		cl.Attributes["default.acr.values"] = "pwd"
 		cl.Attributes["oidc.ciba.grant.enabled"] = "true"
 		cl.RedirectURIs = append(cl.RedirectURIs, "http://localhost:*")
 		cl.WebOrigins = []string{"*"}

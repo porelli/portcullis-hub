@@ -22,8 +22,9 @@ func certMethod(m signin.Method) bool {
 // every alternative holds a switched-on certificate method →
 // protected@file; some alternative does → authaware@file; none does, or
 // rule is nil (the app has no Portcullis sign-in) → public@file. A rule
-// that isn't compiled gets the strictest answer, protected@file. With
-// public exceptions protected@file becomes authaware@file (anonymous
+// that isn't compiled, or has no alternative at all, gets the strictest
+// answer, protected@file. With public exceptions protected@file becomes
+// authaware@file (anonymous
 // visitors complete the handshake without a certificate; group-gate's
 // mTLS binding still applies per request on gated routers).
 //
@@ -34,7 +35,8 @@ func Tier(rule *signin.Node, on map[signin.Method]bool, publicExceptions bool) s
 		return TierPublic
 	}
 	t := TierProtected
-	if alts, err := signin.Alternatives(*rule); err == nil {
+	// A rule that isn't compiled, or one with no way in, stays protected.
+	if alts, err := signin.Alternatives(*rule); err == nil && len(alts) > 0 {
 		all, some := true, false
 		for _, alt := range alts {
 			has := false
@@ -47,7 +49,7 @@ func Tier(rule *signin.Node, on map[signin.Method]bool, publicExceptions bool) s
 			some = some || has
 		}
 		switch {
-		case len(alts) > 0 && all:
+		case all:
 			t = TierProtected
 		case some:
 			t = TierAuthAware

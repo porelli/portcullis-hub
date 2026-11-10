@@ -615,7 +615,7 @@ func TestFirstInstanceUndoKeepsDefaultData(t *testing.T) {
 	if err := f.h.Disable("grafana"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.h.SaveSettings("grafana", SettingsUpdate{Ports: map[string]string{"GRAFANA_PORT": "3301"}}, root); err != nil {
+	if _, err := f.h.SaveSettings("grafana", SettingsUpdate{SignInTemplate: pickTemplate("strong"), Ports: map[string]string{"GRAFANA_PORT": "3301"}}, root); err != nil {
 		t.Fatal(err)
 	}
 	envBefore := readFile(t, f.h.envPath("grafana"))
@@ -638,11 +638,12 @@ func TestFirstInstanceUndoKeepsDefaultData(t *testing.T) {
 		if s.Ports["GRAFANA_PORT"] != setBefore.Ports["GRAFANA_PORT"] || s.Ports["GRAFANA_PORT"] != "3301" {
 			t.Errorf("%s: settings = %+v", phase, s)
 		}
+		// Only the default instance's own pick is left of its entry.
 		f.h.mu.RLock()
-		_, entry := f.h.st.Instances["grafana"]
+		e, entry := f.h.st.Instances["grafana"]
 		f.h.mu.RUnlock()
-		if entry {
-			t.Errorf("%s: the create's state entry is still there", phase)
+		if !entry || !pickOnlyEntry(e, "grafana") || e.SignInTemplate != "strong" {
+			t.Errorf("%s: entry = %+v %v, want only the pick strong", phase, e, entry)
 		}
 	}
 
@@ -890,7 +891,7 @@ func TestRemoveNewInstanceDefaultWithoutEntry(t *testing.T) {
 	if err := f.h.Disable("grafana"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.h.SaveSettings("grafana", SettingsUpdate{Ports: map[string]string{"GRAFANA_PORT": "3301"}}, root); err != nil {
+	if _, err := f.h.SaveSettings("grafana", SettingsUpdate{SignInTemplate: pickTemplate("strong"), Ports: map[string]string{"GRAFANA_PORT": "3301"}}, root); err != nil {
 		t.Fatal(err)
 	}
 	env, ov := readFile(t, f.h.envPath("grafana")), readFile(t, f.h.overridePath("grafana"))
@@ -904,6 +905,9 @@ func TestRemoveNewInstanceDefaultWithoutEntry(t *testing.T) {
 	defer f.h.mu.RUnlock()
 	if f.h.st.Settings["grafana"].Ports["GRAFANA_PORT"] != "3301" {
 		t.Errorf("settings = %+v", f.h.st.Settings["grafana"])
+	}
+	if e := f.h.st.Instances["grafana"]; e.SignInTemplate != "strong" {
+		t.Errorf("pick = %+v", e)
 	}
 }
 

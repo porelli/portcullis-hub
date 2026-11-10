@@ -288,7 +288,6 @@ func withAISettings(rep *gocloak.Client, s AIClientSpec) {
 	if rep.Attributes == nil {
 		rep.Attributes = map[string]string{}
 	}
-	delete(rep.Attributes, attrDefaultACR)
 	maps.Copy(rep.Attributes, map[string]string{
 		OwnerAttr:                    s.Owner,
 		AIClientAttr:                 "true",
