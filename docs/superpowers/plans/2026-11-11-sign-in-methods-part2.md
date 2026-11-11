@@ -1103,4 +1103,4 @@ The page follows mockup sections 1 and 3:
    - The ownership rule `10003:10001` and the modes 2770 / 0640 are the same in D28 and Tasks 11–12.
    - The redirect `https://people.<d>/signin` is the same in D24 and Tasks 8 and 13.
 4. **Review Focus.** Each of its five lines names a test in its owning task. Max-active races, TTL ceilings and strict bodies are pinned in Task 10 too.
-5. **Proportion.** About 90 KB, against part 1's 102 KB. Its code blocks are signatures and test names.
+5. **Proportion.** About 100 KB, the same as part 1's 102 KB. Its code blocks are signatures and test names.
