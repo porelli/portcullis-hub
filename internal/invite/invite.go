@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -111,10 +112,7 @@ func (c *Client) Create(ctx context.Context, username string) (*Invite, error) {
 		if json.Unmarshal(data, &e) == nil {
 			msg = e.Error
 		}
-		if len(msg) > 200 {
-			msg = msg[:200]
-		}
-		return nil, &APIError{Status: resp.StatusCode, Message: msg}
+		return nil, &APIError{Status: resp.StatusCode, Message: clip(msg, maxMessage)}
 	}
 	var inv Invite
 	if err := json.Unmarshal(data, &inv); err != nil {
@@ -136,12 +134,28 @@ func (c *Client) Create(ctx context.Context, username string) (*Invite, error) {
 // never counts (contract §9.4).
 var ErrNoCertAPI = errors.New("enroll has no certificates API")
 
-// CertRecord is one YubiKey (pki_int) client certificate enroll issued.
+// CertKind is which internal certificate authority issued a record:
+// KindYubiKey (pki_int) or KindBrowser (pki_file). Certificates drops a
+// record of any other kind (logged): it can never count.
+type CertKind string
+
+const (
+	KindYubiKey CertKind = "yubikey"
+	KindBrowser CertKind = "browser"
+)
+
+// Known reports whether k is one of the two kinds.
+func (k CertKind) Known() bool { return k == KindYubiKey || k == KindBrowser }
+
+// CertRecord is one client certificate enroll issued, on either mount.
+// Revoked records are listed too (revoked: true).
 type CertRecord struct {
-	User     string    `json:"user"`
-	Serial   string    `json:"serial"`
-	NotAfter time.Time `json:"not_after"`
-	Revoked  bool      `json:"revoked"`
+	User      string    `json:"user"`
+	Serial    string    `json:"serial"`
+	Kind      CertKind  `json:"kind"`
+	NotBefore time.Time `json:"not_before"`
+	NotAfter  time.Time `json:"not_after"`
+	Revoked   bool      `json:"revoked"`
 }
 
 // maxCertBody bounds the certificates answer.
@@ -157,11 +171,12 @@ func (c *Client) certificatesURL() (string, error) {
 	return u.ResolveReference(&url.URL{Path: "certificates"}).String(), nil
 }
 
-// Certificates lists the YubiKey client certificates enroll issued (GET
-// /internal/certificates, same bearer as invites). 404 = ErrNoCertAPI;
-// any other failure is an error too: the caller treats every certificate
-// as unknown. Users are lowercased; an entry without a user or with a
-// zero expiry is dropped (it can never count).
+// Certificates lists the client certificates enroll issued on both
+// mounts (GET /internal/certificates, same bearer as invites). 404 =
+// ErrNoCertAPI; any other failure is an error too: the caller treats
+// every certificate as unknown. Users are lowercased; an entry without a
+// user, with a zero expiry or of a kind other than yubikey / browser is
+// dropped (it can never count; unknown kinds are logged).
 func (c *Client) Certificates(ctx context.Context) ([]CertRecord, error) {
 	sec, err := c.secret()
 	if err != nil {
@@ -201,12 +216,23 @@ func (c *Client) Certificates(ctx context.Context) ([]CertRecord, error) {
 		return nil, errors.New("certificates API: unexpected answer")
 	}
 	out := make([]CertRecord, 0, len(*doc.Certificates))
+	dropped, example := 0, CertKind("")
 	for _, r := range *doc.Certificates {
 		r.User = strings.ToLower(strings.TrimSpace(r.User))
+		if !r.Kind.Known() {
+			if dropped == 0 {
+				example = r.Kind
+			}
+			dropped++
+			continue
+		}
 		if r.User == "" || r.NotAfter.IsZero() {
 			continue
 		}
 		out = append(out, r)
+	}
+	if dropped > 0 {
+		log.Printf("certificates API: dropped %d record(s) of an unknown kind (e.g. %q): they never count", dropped, clip(string(example), 40))
 	}
 	return out, nil
 }

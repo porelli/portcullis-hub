@@ -288,7 +288,11 @@ func sameMethods(a, b map[signin.Method]bool) bool {
 }
 
 // namesCert reports whether compiled rule n has an alternative with a
-// certificate method (an unreadable rule counts: fail closed).
+// certificate method, yubikey_cert or browser_cert (an unreadable rule
+// counts: fail closed). Both kinds come from one source (enroll's
+// certificate list, invite.Certificates): such a rule is judged only for
+// people whose certificates are known (PersonMethods.CertsKnown); while
+// they are unknown the person is unknown, never counted.
 func namesCert(n signin.Node) bool {
 	if n.Op == "" && n.Leaf == "" {
 		return false

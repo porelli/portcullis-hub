@@ -2,7 +2,8 @@ package hub
 
 // Who has which sign-in method (contract §8.1 "Inventory and warnings",
 // plan D13, D16): passkeys from Keycloak (credential type → kind),
-// YubiKey certificates from enroll, passwords from the Hub's own records.
+// YubiKey and browser certificates from enroll, passwords from the Hub's
+// own records.
 // A source that fails leaves its methods unknown, and unknown never
 // counts: not in the blocked lists, not in the lockout guard. The policy
 // file's `people` (page text only) comes from here too.
@@ -29,9 +30,9 @@ import (
 )
 
 // PersonMethods is one person's set-up sign-in methods, canonical order.
-// CertsKnown false: their YubiKey certificates couldn't be read (none
-// counted). Disabled: the account is disabled in Keycloak (no method at
-// all).
+// CertsKnown false: their certificates (YubiKey and browser, one source)
+// couldn't be read (none counted). Disabled: the account is disabled in
+// Keycloak (no method at all).
 type PersonMethods struct {
 	User       string          `json:"user"`
 	Methods    []signin.Method `json:"methods"`
@@ -99,7 +100,7 @@ type invBase struct {
 	at         time.Time
 	passkeys   map[string][]signin.Method // every enabled user Keycloak listed with readable credentials
 	disabled   map[string]bool            // users disabled in Keycloak: no method at all
-	certs      map[string]bool            // users with an unexpired, unrevoked YubiKey certificate
+	certs      map[string][]signin.Method // users → yubikey_cert / browser_cert for their unexpired, unrevoked certificates
 	certsKnown bool
 	// uuids: lowercase user → LLDAP account uuid at the refresh (nil: the
 	// directory couldn't be read — no password counts).
@@ -222,7 +223,7 @@ func (h *Hub) loadInventory(ctx context.Context, src SignInSources, now time.Tim
 	if err != nil {
 		return nil, err
 	}
-	b := &invBase{at: now.UTC(), passkeys: map[string][]signin.Method{}, disabled: map[string]bool{}, certs: map[string]bool{}}
+	b := &invBase{at: now.UTC(), passkeys: map[string][]signin.Method{}, disabled: map[string]bool{}, certs: map[string][]signin.Method{}}
 	for u, list := range keys {
 		if list == nil {
 			b.disabled[strings.ToLower(u)] = true
@@ -249,17 +250,39 @@ func (h *Hub) loadInventory(ctx context.Context, src SignInSources, now time.Tim
 		case cerr == nil:
 			b.certsKnown = true
 			for _, r := range certs {
-				if !r.Revoked && r.NotAfter.After(now) {
-					b.certs[strings.ToLower(r.User)] = true
+				m, ok := certMethod(r, now)
+				if !ok {
+					continue
+				}
+				u := strings.ToLower(r.User)
+				if !slices.Contains(b.certs[u], m) {
+					b.certs[u] = append(b.certs[u], m)
 				}
 			}
 		case errors.Is(cerr, invite.ErrNoCertAPI):
-			log.Printf("signin: enroll has no certificates API: YubiKey certificates are unknown (they never count)")
+			log.Printf("signin: enroll has no certificates API: certificates are unknown (they never count)")
 		default:
-			log.Printf("signin: YubiKey certificates are unknown (they never count): %v", cerr)
+			log.Printf("signin: certificates are unknown (they never count): %v", cerr)
 		}
 	}
 	return b, nil
+}
+
+// certMethod is the sign-in method record r counts as at now (contract
+// §8.1, D29): kind yubikey → yubikey_cert, browser → browser_cert, only
+// while it is valid (not before NotBefore, before NotAfter) and not
+// revoked. Any other kind, or no user, never counts.
+func certMethod(r invite.CertRecord, now time.Time) (signin.Method, bool) {
+	if r.Revoked || strings.TrimSpace(r.User) == "" || !r.NotAfter.After(now) || r.NotBefore.After(now) {
+		return "", false
+	}
+	switch r.Kind {
+	case invite.KindYubiKey:
+		return signin.YubiKeyCert, true
+	case invite.KindBrowser:
+		return signin.BrowserCert, true
+	}
+	return "", false
 }
 
 // composeInventory is base plus the Hub's password records: only those
@@ -282,8 +305,10 @@ func composeInventory(b *invBase, passwords map[string]state.PasswordRecord) *In
 			add(u, m)
 		}
 	}
-	for u := range b.certs {
-		add(u, signin.YubiKeyCert)
+	for u, ms := range b.certs {
+		for _, m := range ms {
+			add(u, m)
+		}
 	}
 	for u, rec := range passwords {
 		lu := strings.ToLower(u)
@@ -331,7 +356,7 @@ func (h *Hub) peopleMethodsLocked() map[string][]signin.Method {
 
 // methodPeopleLocked is how many known people have each method set up:
 // -1 while unknown (no inventory, the last refresh failed; yubikey_cert
-// while certificates are unknown), and how many people the inventory
+// and browser_cert while certificates are unknown), and how many people the inventory
 // knows (-1 while there is none). Caller holds mu.
 func (h *Hub) methodPeopleLocked() (map[signin.Method]int, int) {
 	out := map[signin.Method]int{}
@@ -347,6 +372,7 @@ func (h *Hub) methodPeopleLocked() (map[signin.Method]int, int) {
 	}
 	if !base.certsKnown {
 		out[signin.YubiKeyCert] = -1
+		out[signin.BrowserCert] = -1
 	}
 	people := composeInventory(base, h.st.SignIn.Passwords).People
 	for _, pm := range people {

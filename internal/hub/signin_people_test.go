@@ -133,9 +133,9 @@ func TestCertsUnknownNeverCount(t *testing.T) {
 	p.addGroup(lldap.AdminGroup, "ann", "bea")
 	src := &fakeSignInSrc{keys: map[string][]signin.Method{"bea": {signin.PasskeySynced, signin.SecurityKey}},
 		certs: []invite.CertRecord{
-			{User: "ann", Serial: "01", NotAfter: time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)},
-			{User: "bea", Serial: "02", NotAfter: time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)},
-			{User: "cid", Serial: "03", NotAfter: time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC), Revoked: true},
+			{User: "ann", Serial: "01", Kind: invite.KindYubiKey, NotAfter: time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)},
+			{User: "bea", Serial: "02", Kind: invite.KindYubiKey, NotAfter: time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)},
+			{User: "cid", Serial: "03", Kind: invite.KindYubiKey, NotAfter: time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC), Revoked: true},
 		}}
 	wireSignIn(f.h, p, src)
 	inv, err := f.h.SignInInventory(ctx, true)
@@ -519,5 +519,112 @@ func TestInventoryStaleDuringRefresh(t *testing.T) {
 	mu.Unlock()
 	if n != 2 {
 		t.Errorf("source calls = %d, want 2 (cached)", n)
+	}
+}
+
+// TestInventoryCertKinds (sign-in part 2, D29): kind yubikey counts as
+// yubikey_cert and browser as browser_cert, only while valid and not
+// revoked; any other kind never counts. Rules naming browser_cert are
+// judged from it (no longer unknown).
+func TestInventoryCertKinds(t *testing.T) {
+	f, _ := signInFixture(t)
+	ctx := context.Background()
+	if _, err := f.h.SetMethod(ctx, signin.BrowserCert, true, siAdmin); err != nil {
+		t.Fatal(err)
+	}
+	p := newFakePeople()
+	p.addGroup(lldap.AdminGroup, "ann")
+	p.addGroup("staff", "bea", "cid", "dan", "eve", "fox", "gil")
+	later, past := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	// cid, dan, eve and fox are in Keycloak with no passkey.
+	src := &fakeSignInSrc{keys: map[string][]signin.Method{"gil": {signin.PasskeySynced}, "admin": {signin.SecurityKey},
+		"cid": {}, "dan": {}, "eve": {}, "fox": {}},
+		certs: []invite.CertRecord{
+			{User: "ann", Serial: "01", Kind: invite.KindYubiKey, NotAfter: later},
+			{User: "bea", Serial: "02", Kind: invite.KindBrowser, NotBefore: past, NotAfter: later},
+			{User: "cid", Serial: "03", Kind: invite.KindBrowser, NotAfter: later, Revoked: true},
+			{User: "dan", Serial: "04", Kind: invite.KindBrowser, NotAfter: past},
+			{User: "eve", Serial: "05", Kind: invite.KindBrowser, NotBefore: later, NotAfter: later},
+			{User: "fox", Serial: "06", Kind: "other", NotAfter: later},
+			{User: "gil", Serial: "07", Kind: invite.KindBrowser, NotAfter: later},
+			{User: "gil", Serial: "08", Kind: invite.KindBrowser, NotAfter: later},
+			{User: "gil", Serial: "09", Kind: invite.KindYubiKey, NotAfter: later, Revoked: true},
+		}}
+	wireSignIn(f.h, p, src)
+	inv, err := f.h.SignInInventory(ctx, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string][]signin.Method{
+		"ann": {signin.YubiKeyCert},
+		"bea": {signin.BrowserCert},
+		"gil": {signin.PasskeySynced, signin.BrowserCert},
+	}
+	for u, ms := range want {
+		if pm := inv.People[u]; !slices.Equal(pm.Methods, ms) || !pm.CertsKnown {
+			t.Errorf("%s = %+v, want %v", u, pm, ms)
+		}
+	}
+	for _, u := range []string{"cid", "dan", "eve", "fox"} {
+		if pm := inv.People[u]; len(pm.Methods) != 0 || !pm.CertsKnown {
+			t.Errorf("%s (no valid certificate) = %+v", u, pm)
+		}
+	}
+	v, _ := f.h.SignInView(ctx)
+	if n := methodRow(v, signin.BrowserCert).People; n != 2 {
+		t.Errorf("browser_cert people = %d, want 2", n)
+	}
+	if n := methodRow(v, signin.YubiKeyCert).People; n != 1 {
+		t.Errorf("yubikey_cert people = %d, want 1", n)
+	}
+	on := f.h.st.SignIn.MethodsOn()
+	browserOnly, err := signin.Compile(siLeaves("any", "browser_cert"), on)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b := blockedFor(inv, []string{"bea", "ann", "cid"}, browserOnly, on); !slices.Equal(b, []Blocked{{"ann", "YubiKey certificate only"}, {"cid", "no method yet"}}) {
+		t.Errorf("browser-only blocked = %+v", b)
+	}
+	// Switching browser_cert off is judged from the inventory: bea (a
+	// browser certificate only) is newly blocked on the portal, and
+	// nobody is unknown.
+	off := false
+	imp := f.h.NewlyBlocked(ctx, SignInDraft{Method: signin.BrowserCert, On: off})
+	if imp.Unknown != "" {
+		t.Errorf("browser_cert off: unknown %q", imp.Unknown)
+	}
+	found := false
+	for _, a := range imp.Affected {
+		for _, b := range a.Blocked {
+			if b.User == "bea" {
+				found = true
+			}
+			if b.User == "gil" || b.User == "ann" {
+				t.Errorf("%s newly blocked in %s", b.User, a.Instance)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("browser_cert off: bea not newly blocked: %+v", imp)
+	}
+	// Certificates unknown: neither certificate method counts, and the
+	// rules naming them are unknown.
+	src.set(func(s *fakeSignInSrc) { s.certErr = errors.New("enroll: 503") })
+	inv, err = f.h.SignInInventory(ctx, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pm := inv.People["gil"]; !slices.Equal(pm.Methods, []signin.Method{signin.PasskeySynced}) || pm.CertsKnown {
+		t.Errorf("unknown: gil = %+v", pm)
+	}
+	if pm, ok := inv.People["bea"]; ok {
+		t.Errorf("unknown: bea counted: %+v", pm)
+	}
+	v, _ = f.h.SignInView(ctx)
+	if n := methodRow(v, signin.BrowserCert).People; n != -1 {
+		t.Errorf("unknown: browser_cert people = %d, want -1", n)
+	}
+	if imp := f.h.NewlyBlocked(ctx, SignInDraft{Method: signin.BrowserCert, On: off}); imp.Unknown == "" {
+		t.Errorf("unknown certificates: impact %+v has no unknown", imp)
 	}
 }

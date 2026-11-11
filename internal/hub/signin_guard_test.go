@@ -164,7 +164,7 @@ func ableAdmin(h *Hub) {
 	p := newFakePeople()
 	p.addGroup(lldap.AdminGroup, "root")
 	wireSignIn(h, p, &fakeSignInSrc{keys: map[string][]signin.Method{"root": {signin.PasskeySynced, signin.PasskeyDevice, signin.SecurityKey}},
-		certs: []invite.CertRecord{{User: "root", Serial: "01", NotAfter: time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC)}}})
+		certs: []invite.CertRecord{{User: "root", Serial: "01", Kind: invite.KindYubiKey, NotAfter: time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC)}}})
 	h.mu.Lock()
 	h.st.SignIn.Passwords["root"] = state.PasswordRecord{SetBy: "root"}
 	h.mu.Unlock()

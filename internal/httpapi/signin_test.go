@@ -197,7 +197,7 @@ func (inv *signInInv) wire() {
 			var out []invite.CertRecord
 			for _, u := range inv.e.ll.UserIDs() {
 				if slices.Contains(inv.methodsOf(u), signin.YubiKeyCert) {
-					out = append(out, invite.CertRecord{User: u, Serial: u, NotAfter: time.Now().Add(24 * time.Hour)})
+					out = append(out, invite.CertRecord{User: u, Serial: u, Kind: invite.KindYubiKey, NotAfter: time.Now().Add(24 * time.Hour)})
 				}
 			}
 			return out, nil
