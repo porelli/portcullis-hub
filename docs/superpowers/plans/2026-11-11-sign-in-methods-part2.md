@@ -99,6 +99,7 @@ Decisions (made here; the spec leaves them to the builder):
   - `pki setup` refuses (exit 1) when the two intermediates' CNs are equal: every reader tells the kinds apart by issuer.
   - It creates `pki_file` when it is missing, even while `pki_int` exists (a missing piece, as today).
   - Whenever `pki_file` is created, or either chain on disk differs from what it should be (`ca-chain.crt` = root + `pki_int` + `pki_file`, `ca-chain-yubikey.crt` = root + `pki_int`), it rewrites both chain files and the truststore and sets `PKI_TRUSTSTORE_CHANGED=true`. That flag is what makes `stack.sh` restart Traefik and Keycloak.
+  - `--force` destroys both CAs.
 
   **TLS options (controller ruling, Task 1 fix round 1).** Core's static `traefik/dynamic/tls.yml` has exactly four options (each `minVersion: VersionTLS12`, `sniStrict: false`; Traefik already mounts `./certs:/certs:ro`):
 
@@ -110,7 +111,6 @@ Decisions (made here; the spec leaves them to the builder):
   | `public@file` | none | — | everything else |
 
   Public exceptions keep turning `protected*` into `authaware` (`policy.HostTier`, today's rule).
-  - `--force` destroys both CAs.
 
   enroll's policy (`vault/policies/enroll.hcl`) adds:
   - `pki_file/sign/browser-cert` (update);
@@ -466,7 +466,7 @@ Decisions (made here; the spec leaves them to the builder):
   - `mcp_parity_test.go`;
   - `internal/signinreset`: `browser_cert` still off on reset;
   - `internal/policy/policy.go`: `Tier` per D21's four TLS options, in this order — an `mtls` app → `protected@file`; every alternative of the compiled rule contains `yubikey_cert` → `protected@file`; every alternative has a switched-on certificate method → `TierProtectedAny = "protected-any@file"`; some alternative has one → `authaware@file`; else `public@file`. `HostTier` turns both `protected*` into `authaware@file` while the public router exists. `internal/hub` (exposure drift, the instance settings preview text) and `web/index.html`'s public warning name both options.
-- Test: `internal/state/state_test.go`, `internal/signin/signin_test.go`, `internal/hub/signin_limits_test.go` (new), `internal/keycloak/events_test.go` (new), `internal/keycloak/access_test.go`, `internal/httpapi/signin_test.go`, `cmd/hub/main_test.go`.
+- Test: `internal/state/state_test.go`, `internal/signin/signin_test.go`, `internal/policy/policy_test.go`, `internal/hub/signin_limits_test.go` (new), `internal/keycloak/events_test.go` (new), `internal/keycloak/access_test.go`, `internal/httpapi/signin_test.go`, `cmd/hub/main_test.go`.
 
 **Interfaces:**
 - Produces:
@@ -506,7 +506,7 @@ Decisions (made here; the spec leaves them to the builder):
   func TestTierFourOptions(t *testing.T)            // internal/policy: any[yubikey_cert] and all[yubikey_cert, security_key] → protected; any[browser_cert], any[yubikey_cert, browser_cert] → protected-any; Standard → authaware; any[family:passkey] → public; mtls app → protected; public exceptions on → authaware for both protected options
   func TestAccessFlowCopiesBothX509Executions(t *testing.T) // internal/keycloak/access_test.go: both portcullis-x509 executions copied with their configs
   ```
-- [ ] **Step 2: Run them to see them fail.** Run `go test ./internal/state/ ./internal/signin/ ./internal/hub/ ./internal/keycloak/ ./internal/httpapi/ ./cmd/hub/ -run 'Limits|BrowserCert|SharedVectors|ScoreOfSet|Events|ClientCertTTL|BothX509'`. Expected: FAIL.
+- [ ] **Step 2: Run them to see them fail.** Run `go test ./internal/state/ ./internal/signin/ ./internal/policy/ ./internal/hub/ ./internal/keycloak/ ./internal/httpapi/ ./cmd/hub/ -run 'Limits|BrowserCert|SharedVectors|ScoreOfSet|Events|ClientCertTTL|BothX509|Tier'`. Expected: FAIL.
 - [ ] **Step 3: Implement** per D27 and D28 (events config), with the interfaces above.
 - [ ] **Step 4: Run them to see them pass.** Run the same command, then the full Go checks. Expected: `ok`.
 - [ ] **Step 5: Commit and push.** `git add -A && git commit -m "signin: browser certificates can be switched on (vector updated); limits; the Hub owns Keycloak's events config; no enroll core page" && git push -u origin signin2`.
@@ -650,7 +650,8 @@ Decisions (made here; the spec leaves them to the builder):
   - `internal/httpapi/server.go`: `peopleMux` gets `GET /signin` and the D25 routes;
   - `people_test.go`: the people listener allowlist;
   - `mcp_parity_test.go`;
-  - `internal/directory/service.go`: `SetOwnPassword`, `RemoveOwnPassword`.
+  - `internal/directory/service.go`: `SetOwnPassword`, `RemoveOwnPassword`;
+  - `cmd/hub/main.go`: `HUB_CERT_EXPIRY_WARN_DAYS` → `Config.CertExpiryWarnDays`.
 - Test: `internal/hub/mysignin_test.go`, `internal/hub/certificates_test.go` (with a `X-Forwarded-Tls-Client-Cert` fixture copied from a real Traefik header), `internal/httpapi/mysignin_test.go`, `internal/httpapi/mcptools_mysignin_test.go`.
 
 **Interfaces:**
@@ -693,7 +694,7 @@ Decisions (made here; the spec leaves them to the builder):
   The rules each piece follows:
   - **Methods:** all six methods are listed in canonical order. A switched-off one has `State: "off"`, which the page shows as "off on this server".
   - **Apps:** every enabled instance whose population includes the user, plus the core pages `people` (everyone) and `hub` (admins). `OK` is nil while the inventory doesn't know the person.
-  - **Certificate status:** `expiring` when fewer than `CERT_EXPIRY_WARN_DAYS` days are left (the Hub reads `HUB_CERT_EXPIRY_WARN_DAYS`, core sets `${CERT_EXPIRY_WARN_DAYS:-7}`; unset → 7; not a positive integer → the Hub refuses to start).
+  - **Certificate status:** `expiring` when fewer than `CERT_EXPIRY_WARN_DAYS` days are left (the Hub reads `HUB_CERT_EXPIRY_WARN_DAYS`, which core passes through as `${CERT_EXPIRY_WARN_DAYS:-7}`, with core's grammar exactly, as in `certs.sh` `cert_warn_seconds`: `^[0-9]+$` is valid, `0` included; anything else, or unset, means 7; the Hub never refuses to start over it).
   - **Own certificates:** administrators create, renew and revoke their own certificates on the Sign-in page like anyone else; `admin`, `portcullis-hub` and `portcullis-*` get 409 (D32, review I3).
   - **Routes under `/api/me/signin/`:** the people listener registers only the D25 routes there; any later route there that adds a method needs D26's proof (group-gate lets any switched-on method reach these paths, D24).
   - **One create at a time:** `CreateBrowserCertificate` takes a per-user lock and passes `Days`, `MaxDays` (= the effective `browser_cert_days`) and `MaxActive` to enroll.
@@ -715,7 +716,7 @@ Decisions (made here; the spec leaves them to the builder):
   func TestRenewUsesPresentedCert(t *testing.T)        // no header → 403 "present your current YubiKey certificate"; enroll gets real PEM;
   //  the caller's browser leaf, or another person's YubiKey leaf → 403, enroll not called (review I1)
   func TestOwnCertificatesProtectedNames(t *testing.T) // admin / portcullis-hub / portcullis-x create, renew or revoke → 409; an lldap_admin member creates a browser cert → 200
-  func TestExpiringFollowsWarnDays(t *testing.T)       // HUB_CERT_EXPIRY_WARN_DAYS 10 → 9 days left is "expiring"; unset → 7
+  func TestExpiringFollowsWarnDays(t *testing.T)       // HUB_CERT_EXPIRY_WARN_DAYS "10" → 10 (9 days left is "expiring"); "0" → 0 (nothing expiring); "abc" → 7; unset → 7
   func TestOwnPasswordRules(t *testing.T)              // method off → 409; CheckPassword failures → 400; admin → 409; record set_by self; sign-out called
   // httpapi
   func TestCreateBrowserCertAnswerNoStore(t *testing.T) // 200 headers Cache-Control no-store, Pragma no-cache; body has p12, password, filename
@@ -1024,7 +1025,7 @@ The page follows mockup sections 1 and 3:
   - `scripts/lib/backup.sh`: `group_gate_data:$CT_UID_GROUP_GATE:$CT_UID_HUB` in `BACKUP_FILE_VOLUMES`;
   - `.github/workflows/ci.yml`: drop the `portcullis-self` assertions (lines 217, 245, 368) and `"enroll."` from the core policy keys (1275, 2617); add a compose check pinning `group_gate_data` to exactly group-gate (rw) and hub (rw), like the `mcp_gate_data` check (352–353); the static TLS check expects exactly the four D21 options (`protected` → `caFiles: [/certs/ca-chain-yubikey.crt]`, `protected-any` and `authaware` → `[/certs/ca-chain.crt]`, `public` none); `build-and-test` checks both chain files (`ca-chain.crt` root + `pki_int` + `pki_file`, `ca-chain-yubikey.crt` root + `pki_int`, no `pki_file`).
   - `traefik/dynamic/tls.yml`: the four options of D21 (`protected` on `/certs/ca-chain-yubikey.crt`, new `protected-any`); the header comment says which uses which. Traefik's existing `./certs:/certs:ro` mount carries both chain files.
-  - `docker-compose.yml` hub: `HUB_CERT_EXPIRY_WARN_DAYS: ${CERT_EXPIRY_WARN_DAYS:-7}`.
+  - `docker-compose.yml` hub: `HUB_CERT_EXPIRY_WARN_DAYS: ${CERT_EXPIRY_WARN_DAYS:-7}` (a plain pass-through; the Hub applies core's `^[0-9]+$` grammar, else 7).
 - Modify, leftover texts (D31 / D34): `.env.example`, `monitoring/prometheus/alerts.yml`, `scripts/lib/status.sh`, `keycloak/themes/portcullis/login/messages/messages_en.properties`, core `docs/*.md`, `README.md`, `CLAUDE.md`.
 - Test: `tests/test_cli.sh`, `tests/test_shell_libs.sh`.
 
@@ -1063,7 +1064,7 @@ The page follows mockup sections 1 and 3:
 **Interfaces:**
 - Consumes: everything above.
 
-- [ ] **Step 1: Write the failing e2e cases** in `e2e_signin.py`:
+- [ ] **Step 1: Write the failing e2e cases** in `e2e_signin.py`. The job also creates, through the Hub's API, the template `e2e-anycert` = any[`yubikey_cert`, `browser_cert`] and the instance `echo-anycert` (from `tests/e2e/apps/echo`) on it, next to the existing CI fixtures (`e2e-cert`, `echo-std`, …):
   - `browser_cert_create_download`:
     - Setup: switch `browser_cert` on (Hub API). Alice does a fresh auth with her virtual security key, then `POST https://people.<d>/api/me/signin/browser-certificates {days: 30}`.
     - Expected: 200 with `no-store`. `pkcs12.load_key_and_certificates(p12, password)` gives an EC key and a leaf with CN `alice`, issuer the browser CA and `not_after` ≈ now + 30 d. The `cert.create` audit entry contains neither the password nor base64.
